@@ -21954,7 +21954,7 @@ index 04c7f35b45eb11fc3e87bd16b5aa657e46501001..09ba02743c2a405b4aa1895da07a9542
      bool m_onLimitExceededMode WTF_GUARDED_BY_LOCK(m_lock) { false };
      Seconds m_releaseUnusedSecondsTolerance WTF_GUARDED_BY_LOCK(m_lock);
 diff --git a/Source/WebCore/platform/graphics/egl/GLContext.cpp b/Source/WebCore/platform/graphics/egl/GLContext.cpp
-index 6b748ca4023885f7ffb540f02da458ed39476ba7..5b7161b3ee95a39a81a256af235ec259b9841422 100644
+index 6b748ca4023885f7ffb540f02da458ed39476ba7..1db269b52d965e45e01c535d03026c301faa4752 100644
 --- a/Source/WebCore/platform/graphics/egl/GLContext.cpp
 +++ b/Source/WebCore/platform/graphics/egl/GLContext.cpp
 @@ -45,6 +45,9 @@ WTF_MAKE_TZONE_ALLOCATED_IMPL(GLContext);
@@ -21982,6 +21982,27 @@ index 6b748ca4023885f7ffb540f02da458ed39476ba7..5b7161b3ee95a39a81a256af235ec259
      if (auto context = createSurfacelessContext(display, target, sharingContext))
          return context;
  
+@@ -487,6 +498,20 @@ EGLContext GLContext::createEGLContext(GLDisplay& display, EGLConfig config, EGL
+         EGL_CONTEXT_CLIENT_VERSION, 2,
+     };
+ 
++#if PLATFORM(HAIKU)
++    // Use the GLES EXT attributes, including for the sharing and Skia
++    // contexts. Mesa may terminate a process whose ordinary context loses
++    // the device; loss-reporting contexts let the renderer retire it instead.
++    // Do not retry without these attributes if an advertised implementation
++    // rejects them: that would silently restore the abort-on-reset behavior.
++    if (isExtensionSupported(eglQueryString(display.eglDisplay(), EGL_EXTENSIONS), "EGL_EXT_create_context_robustness")) {
++        contextAttributes.append(EGL_CONTEXT_OPENGL_RESET_NOTIFICATION_STRATEGY_EXT);
++        contextAttributes.append(EGL_LOSE_CONTEXT_ON_RESET_EXT);
++        contextAttributes.append(EGL_CONTEXT_OPENGL_ROBUST_ACCESS_EXT);
++        contextAttributes.append(EGL_TRUE);
++    }
++#endif
++
+ #if !RELEASE_LOG_DISABLED
+     if (shouldEnableDebugLogging()) {
+         if (display.checkVersion(1, 5)) {
 diff --git a/Source/WebCore/platform/graphics/egl/GLContext.h b/Source/WebCore/platform/graphics/egl/GLContext.h
 index 28829bd1aac3177356f62c6aa30919288ca3f36d..137925cf79133c96182b0df77fdc59fec34fd14b 100644
 --- a/Source/WebCore/platform/graphics/egl/GLContext.h
@@ -29485,10 +29506,10 @@ index 0000000000000000000000000000000000000000..21962ea9d0bd80ba9c260e9ef9ecac36
 +} // namespace SummitMPEGTS
 diff --git a/Source/WebCore/platform/graphics/haiku/MediaDecoderSelectionHaiku.cpp b/Source/WebCore/platform/graphics/haiku/MediaDecoderSelectionHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..9a570950b996e984a540ea33a9340014a85c09c1
+index 0000000000000000000000000000000000000000..7269c6bd4a6a04d31f52fa2ce8db8faaa4df82d5
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/haiku/MediaDecoderSelectionHaiku.cpp
-@@ -0,0 +1,964 @@
+@@ -0,0 +1,975 @@
 +/*
 + * Copyright (C) 2026 Haiku, Inc. All rights reserved.
 + *
@@ -29710,6 +29731,7 @@ index 0000000000000000000000000000000000000000..9a570950b996e984a540ea33a9340014
 +    unsigned maxArea;
 +    bool nativeRGB;
 +    unsigned decoderIndex;
++    bool recoversAfterDeviceReset;
 +    BPrivate::media::DecoderPlugin* plugin { nullptr };
 +    std::atomic<bool> broken { false };
 +    std::atomic<unsigned> closing { 0 };
@@ -29721,10 +29743,10 @@ index 0000000000000000000000000000000000000000..9a570950b996e984a540ea33a9340014
 +    // amduvd validates the complete SPS/PPS and the device before accepting
 +    // the stream. RGB conversion there honours per-picture VUI range/matrix.
 +#if CPU(X86_64)
-+    { "amduvd", ffmpegCodecH264, 4096, 4096, 4096 * 4096, true, 0 },
-+    { "amduvd", ffmpegCodecHEVC, 4096, 4096, 4096 * 4096, true, 1 },
++    { "amduvd", ffmpegCodecH264, 4096, 4096, 4096 * 4096, true, 0, true },
++    { "amduvd", ffmpegCodecHEVC, 4096, 4096, 4096 * 4096, true, 1, true },
 +#endif
-+    { "rpi_mmal", ffmpegCodecH264, 1920, 1920, 1920 * 1088, false, 0 },
++    { "rpi_mmal", ffmpegCodecH264, 1920, 1920, 1920 * 1088, false, 0, false },
 +};
 +
 +// What dynamic_cast<void*> does, which the engine (built without RTTI) cannot:
@@ -29765,6 +29787,12 @@ index 0000000000000000000000000000000000000000..9a570950b996e984a540ea33a9340014
 +{
 +    if (addOn.broken || addOn.closing)
 +        return true;
++    // The AMD kernel keeps lost files permanently unusable, but accepts new
++    // decoders once automatic recovery finishes. An old boot-wide marker
++    // must not suppress those fresh clients. Creation remains bounded and
++    // fails back to software while the device is unavailable.
++    if (addOn.recoversAfterDeviceReset)
++        return false;
 +    FILE* marker = std::fopen(brokenMarker(addOn).c_str(), "r");
 +    if (!marker)
 +        return false;
@@ -29780,6 +29808,10 @@ index 0000000000000000000000000000000000000000..9a570950b996e984a540ea33a9340014
 +
 +void markAddOnBroken(NamedDecoderAddOn& addOn, const char* reason)
 +{
++    if (addOn.recoversAfterDeviceReset) {
++        std::fprintf(stderr, "Summit media: %s: %s; retiring this decoder, fresh sessions may use the recovered device\n", addOn.leafName, reason);
++        return;
++    }
 +    if (addOn.broken.exchange(true))
 +        return;
 +    std::fprintf(stderr, "Summit media: %s: %s; this backend is disabled until the system restarts\n", addOn.leafName, reason);
