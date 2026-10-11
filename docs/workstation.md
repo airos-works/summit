@@ -589,3 +589,51 @@ complete the full OS/application release installation or WX5100 acceleration.
 Exact sources, binaries, trials, screenshots, metadata and terminal diagnostics
 are pinned in
 `/mnt/HaikuWork/x399/evidence/wx5100/mesa-native/summit-canvas-recovery-manifest.json`.
+
+## Retained snapshots after display loss (2026-10-12)
+
+A separate QEMU probe retained an `ImageBitmap` while the shared display was
+recreated, then drew it into a new CPU canvas. The no-loss control passed;
+the loss case crashed twice as Summit restarted its WebProcess. Both reports
+show `GraphicsContextSkia::imageForCurrentThread` calling
+`SkImage::makeRasterImage` on a null result from texture rewrapping. The faulting
+`SkImage::peekPixels` receiver is zero. This establishes execution through the
+texture-backed image path in QEMU; it does not establish native AMD coverage.
+The report-generating Debugger processes also crashed during their own cleanup.
+Those secondary reports are preserved and their cause remains unresolved.
+The harness quit its browser normally, with no owned processes left behind.
+
+Commit `604b80330050c6de913eeb389782b33bd1cb6f84` propagates failed image
+conversion without dereferencing it. Native-image drawing rejects an unavailable
+image before changing the canvas transform or save stack, and native-image
+pattern drawing checks conversion failure too. The private candidate is
+`/boot/home/wx5100/summit-snapshot-safety/bundle`, with engine
+`eb958dd5def91d51e4daad3265dcb4d973225c8f375a4d6516db897b5f43a314`
+and patch `b2b96a722700ff726975b67025f43e0a2d92aa47c100ba462c4cb94e5a087c5c`.
+It has been compiled on the workstation and executed only in isolated QEMU.
+The preceding qualified canvas bundle remains intact.
+
+Twelve QEMU runs cover `createImageBitmap`, `transferToImageBitmap` and
+`CanvasPattern`, each drawn to CPU and GPU destinations, with and without loss.
+All six no-loss controls retain exact green/blue pixels after the live source
+changes to orange. All six loss runs complete their JavaScript reporting and
+shut down without new crashes or owned leftovers. Bitmap `close()` succeeds,
+and the source canvas reports one loss and one restoration in each loss run.
+All twelve screenshots were inspected and their snapshot regions compared
+against exact expected pixels.
+
+Crash prevention and content recovery have different results. After loss,
+both bitmap kinds draw blank on both destinations, and the GPU pattern is
+blank. These five runs correctly report `probe-failed` and a red failure banner
+because their retained-pixel target fails. The CPU pattern retains its pixels
+in this fixture, which first draws every retained object into a CPU control
+canvas before loss; this is not proof for an unread or uncached pattern.
+The JavaScript pattern path uses `PatternSkia`, so these tests do not establish
+coverage of `GraphicsContextSkia::drawPattern`.
+
+This is a QEMU crash-safety checkpoint, not complete snapshot recovery or a
+native qualification of the new candidate. Recoverable immutable snapshot
+backing, wider graphics/media regression checks and actual native loss coverage
+remain pending. Evidence, crash reports, source and binary pins, and all twelve
+run/visual results are recorded in
+`/mnt/HaikuWork/x399/evidence/wx5100/mesa-native/summit-snapshot-safety-manifest.json`.
