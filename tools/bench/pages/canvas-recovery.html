@@ -19,7 +19,8 @@ const expectLoss = options.get('loss') === '1';
 const cancelRestore = options.get('cancel') === '1';
 const offscreen = options.get('offscreen') === '1';
 const handlerMode = options.get('handlers') || 'listener';
-const resizeWhileLost = options.get('resize') === 'zero';
+const resizeMode = options.get('resize') || 'none';
+const resizeWhileLost = resizeMode !== 'none';
 const display = document.querySelector('#canvas');
 const canvas = offscreen ? display.transferControlToOffscreen() : display;
 const context = canvas.getContext('2d');
@@ -61,7 +62,8 @@ function handleContextLost(event) {
         item.drawWhileLostRemainsBlank = equal(pixels(), blank);
         events.push(item);
         if (cancelRestore) event.preventDefault();
-        if (resizeWhileLost) canvas.width = 0;
+        if (resizeMode === 'zero') canvas.width = 0;
+        if (resizeMode === 'small') { canvas.width = 16; canvas.height = 16; }
     } catch (error) { errors.push(describe(error)); }
 }
 function handleContextRestored(event) {
@@ -69,12 +71,13 @@ function handleContextRestored(event) {
         const item = {type: event.type, lost: lost(), cancelable: event.cancelable,
             bubbles: event.bubbles, initiallyBlank: equal(pixels(), blank),
             restoredSize: [canvas.width, canvas.height]};
-        if (resizeWhileLost) canvas.width = 320;
+        if (resizeWhileLost) { canvas.width = 320; canvas.height = 128; }
         paint(); item.pixels = pixels(); events.push(item);
     } catch (error) { errors.push(describe(error)); }
 }
 
 function installHandlers() {
+    if (!['none', 'zero', 'small'].includes(resizeMode)) throw new Error('Unknown resize mode: ' + resizeMode);
     handlerPropertiesExposed = 'oncontextlost' in canvas && 'oncontextrestored' in canvas;
     if (handlerMode === 'listener') {
         canvas.addEventListener('contextlost', handleContextLost);
@@ -111,9 +114,9 @@ async function finish(error) {
             : restoreEvents.length === 1 && restoreEvents[0].lost === false
                 && !restoreEvents[0].cancelable && !restoreEvents[0].bubbles
                 && restoreEvents[0].initiallyBlank && equal(restoreEvents[0].pixels, expected)
-                && (!resizeWhileLost || equal(restoreEvents[0].restoredSize, [0, 128])));
+                && (!resizeWhileLost || equal(restoreEvents[0].restoredSize, resizeMode === 'zero' ? [0, 128] : [16, 16])));
     const report = {kind: 'canvas-recovery', expectLoss, cancelRestore, offscreen,
-        handlerMode, handlerPropertiesExposed, resizeWhileLost,
+        handlerMode, handlerPropertiesExposed, resizeMode, resizeWhileLost,
         initialPixels, finalPixels, videoFrames, events, errors,
         passed: initialPixels && videoFrames >= 30 && !errors.length && lossPass
             && equal(finalPixels, expectLoss && cancelRestore ? blank : expected)};

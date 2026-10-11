@@ -9812,7 +9812,7 @@ index 0000000000000000000000000000000000000000..2c20205753574d55df3541bf00934968
 +
 +#endif // PLATFORM(HAIKU)
 diff --git a/Source/WebCore/bindings/js/WebCoreBuiltinNames.h b/Source/WebCore/bindings/js/WebCoreBuiltinNames.h
-index 6d3962f03ae12aa4f41c8cba628877c5efa76bba..5645f65468b0812a430edf678da69f56028b8bc9 100644
+index 6d3962f03ae12aa4f41c8cba628877c5efa76bba..ba0fd1532acd9e314ba93525b4dfaae305193d83 100644
 --- a/Source/WebCore/bindings/js/WebCoreBuiltinNames.h
 +++ b/Source/WebCore/bindings/js/WebCoreBuiltinNames.h
 @@ -488,6 +488,28 @@ namespace WebCore {
@@ -9844,6 +9844,15 @@ index 6d3962f03ae12aa4f41c8cba628877c5efa76bba..5645f65468b0812a430edf678da69f56
      macro(UndoItem) \
      macro(UndoManager) \
      macro(VideoDecoder) \
+@@ -687,6 +709,8 @@ namespace WebCore {
+     macro(onbackgroundfetchclick) \
+     macro(onbeforematch) \
+     macro(oncommand) \
++    macro(oncontextlost) \
++    macro(oncontextrestored) \
+     macro(oncookiechange) \
+     macro(ondevicemotion) \
+     macro(ondeviceorientation) \
 diff --git a/Source/WebCore/contentextensions/ContentExtension.cpp b/Source/WebCore/contentextensions/ContentExtension.cpp
 index 369fb6f3979e2f42a0a84bb659f3c30789084568..1edc19de057fe7e9a35a498a087377fa8c82f767 100644
 --- a/Source/WebCore/contentextensions/ContentExtension.cpp
@@ -12644,7 +12653,7 @@ index 42d20ed46b377304c49a3981cfc65ab40fcb8a5e..6737763acbc004d3f0edf74b750a97c8
      // Non-standard legacy aliases (CanvasFillStrokeStyles).
      undefined setStrokeColor(DOMString color, optional unrestricted float alpha);
 diff --git a/Source/WebCore/html/canvas/CanvasRenderingContext2DBase.cpp b/Source/WebCore/html/canvas/CanvasRenderingContext2DBase.cpp
-index eaad38378a1ab2fdeb798d2a7d86325254400472..962fac069940ee7603ddfbcf4e655c125e941f2b 100644
+index eaad38378a1ab2fdeb798d2a7d86325254400472..f3a1957fabb855f0e400d9b72cd0d9f04b555629 100644
 --- a/Source/WebCore/html/canvas/CanvasRenderingContext2DBase.cpp
 +++ b/Source/WebCore/html/canvas/CanvasRenderingContext2DBase.cpp
 @@ -32,6 +32,10 @@
@@ -12667,19 +12676,20 @@ index eaad38378a1ab2fdeb798d2a7d86325254400472..962fac069940ee7603ddfbcf4e655c12
  #include "FloatQuad.h"
  #include "FontCascadeFonts.h"
  #include "FontCascadeInlines.h"
-@@ -80,6 +86,11 @@
+@@ -80,6 +86,12 @@
  #include "PixelBufferConversion.h"
  #include "PixelFormat.h"
  #include "PlatformVideoColorSpace.h"
 +#if PLATFORM(HAIKU) && USE(SKIA)
 +#include "PlatformDisplay.h"
 +#include "CanvasGraphicsRecoveryHaiku.h"
++#include "GLContext.h"
 +#include "GLDisplay.h"
 +#endif
  #include "RenderElement.h"
  #include "RenderImage.h"
  #include "RenderLayer.h"
-@@ -293,6 +304,125 @@ bool CanvasRenderingContext2DBase::isAccelerated() const
+@@ -293,6 +305,144 @@ bool CanvasRenderingContext2DBase::isAccelerated() const
      return m_buffer && protect(m_buffer)->context().renderingMode() == RenderingMode::Accelerated;
  }
  
@@ -12711,6 +12721,9 @@ index eaad38378a1ab2fdeb798d2a7d86325254400472..962fac069940ee7603ddfbcf4e655c12
 +        if (!context->m_contextLost && context->isAccelerated())
 +            context->loseGraphicsContextHaiku();
 +    }
++    // Loss notification must not wait for successful display recreation.
++    // Queueing it here is safe: script runs after this retirement call returns.
++    restoreAcceleratedContextsForCurrentThreadHaiku();
 +}
 +
 +void CanvasRenderingContext2DBase::loseGraphicsContextHaiku()
@@ -12751,6 +12764,8 @@ index eaad38378a1ab2fdeb798d2a7d86325254400472..962fac069940ee7603ddfbcf4e655c12
 +    if (!m_contextLost || m_contextLostEventDispatchedHaiku)
 +        return;
 +    m_contextLostEventDispatchedHaiku = true;
++    auto* display = PlatformDisplay::sharedDisplayIfExists();
++    WTFLogAlways("Summit canvas recovery: dispatching contextlost on thread %u displayLost=%d", owningThreadUID(), !display || display->glDisplay().isContextLostHaiku());
 +    Ref event = Event::create(eventNames().contextlostEvent, Event::CanBubble::No, Event::IsCancelable::Yes);
 +    protect(canvasBase())->dispatchEvent(event);
 +    // For Canvas 2D, canceling contextlost prevents restoration (the opposite
@@ -12784,20 +12799,34 @@ index eaad38378a1ab2fdeb798d2a7d86325254400472..962fac069940ee7603ddfbcf4e655c12
 +        scheduleGraphicsContextRestorationHaiku();
 +        return;
 +    }
-+    // No script runs between installing fresh accelerated storage and its
-+    // restoration event. Reject a CPU fallback here so loss cannot silently
-+    // leave a formerly accelerated canvas permanently in software.
++    auto* glContext = display->skiaGLContext();
++    if (!glContext || !glContext->makeContextCurrent()) {
++        // A failed Skia context constructor leaves an empty thread-local
++        // wrapper. Retire that wrapper so the next attempt can create one.
++        if (!glContext)
++            display->clearSkiaGLContext();
++        scheduleGraphicsContextRestorationHaiku();
++        return;
++    }
++    // A loss handler may resize the canvas. Empty canvases need no backing
++    // allocation; small ones may intentionally use the normal CPU policy.
++    // A canvas that still requests acceleration must not silently accept a
++    // software fallback after losing its former GPU storage.
++    RenderingMode expectedMode = !willReadFrequently() && canvasBase().shouldAccelerate() ? RenderingMode::Accelerated : RenderingMode::Unaccelerated;
++    if (auto modeForTesting = renderingModeForTesting())
++        expectedMode = *modeForTesting;
 +    didUpdateCanvasSizeProperties(true);
 +    m_hasInvertibleTransform = true;
 +    m_contextLost = false;
-+    RefPtr restored = buffer();
-+    if (!restored || restored->renderingMode() != RenderingMode::Accelerated) {
++    bool empty = canvasBase().size().isEmpty();
++    RefPtr restored = empty ? nullptr : buffer();
++    if (!empty && (!restored || restored->renderingMode() != expectedMode)) {
 +        m_contextLost = true;
 +        didUpdateCanvasSizeProperties(true);
 +        scheduleGraphicsContextRestorationHaiku();
 +        return;
 +    }
-+    WTFLogAlways("Summit canvas recovery: restored accelerated 2D context on thread %u", owningThreadUID());
++    WTFLogAlways("Summit canvas recovery: restored 2D context on thread %u mode=%s", owningThreadUID(), empty ? "empty" : expectedMode == RenderingMode::Accelerated ? "gpu" : "cpu");
 +    protect(canvasBase())->dispatchEvent(Event::create(eventNames().contextrestoredEvent, Event::CanBubble::No, Event::IsCancelable::No));
 +}
 +#endif
@@ -12805,7 +12834,7 @@ index eaad38378a1ab2fdeb798d2a7d86325254400472..962fac069940ee7603ddfbcf4e655c12
  RefPtr<ImageBuffer> CanvasRenderingContext2DBase::surfaceBufferToImageBuffer(SurfaceBuffer)
  {
      return buffer();
-@@ -313,7 +443,7 @@ bool CanvasRenderingContext2DBase::isSurfaceBufferTransparentBlack(SurfaceBuffer
+@@ -313,7 +463,7 @@ bool CanvasRenderingContext2DBase::isSurfaceBufferTransparentBlack(SurfaceBuffer
  {
      // Before the first draw (or first access to the drawing buffer), the drawing buffer is transparent black.
      // Currently the canvas does not support alpha == false.
@@ -12814,7 +12843,7 @@ index eaad38378a1ab2fdeb798d2a7d86325254400472..962fac069940ee7603ddfbcf4e655c12
  }
  
  #if USE(SKIA)
-@@ -355,6 +485,9 @@ void CanvasRenderingContext2DBase::didUpdateCanvasSizeProperties(bool sizeChange
+@@ -355,6 +505,9 @@ void CanvasRenderingContext2DBase::didUpdateCanvasSizeProperties(bool sizeChange
      for (size_t i = 0; i < restoreCount; ++i)
          restore();
      m_stateStack.first() = State();
@@ -12824,7 +12853,7 @@ index eaad38378a1ab2fdeb798d2a7d86325254400472..962fac069940ee7603ddfbcf4e655c12
      m_path.clear();
      m_bufferNativeImage = nullptr;
      m_cachedContents.emplace<CachedContentsTransparent>();
-@@ -1284,9 +1417,78 @@ void CanvasRenderingContext2DBase::clipInternal(const Path& path, CanvasFillRule
+@@ -1284,9 +1437,78 @@ void CanvasRenderingContext2DBase::clipInternal(const Path& path, CanvasFillRule
          return;
  
      realizeSaves();
@@ -12903,7 +12932,7 @@ index eaad38378a1ab2fdeb798d2a7d86325254400472..962fac069940ee7603ddfbcf4e655c12
  void CanvasRenderingContext2DBase::beginCompositeLayer()
  {
  #if !USE(CAIRO)
-@@ -1396,6 +1598,14 @@ void CanvasRenderingContext2DBase::clearRect(double x, double y, double width, d
+@@ -1396,6 +1618,14 @@ void CanvasRenderingContext2DBase::clearRect(double x, double y, double width, d
          }
          context->setCompositeOperation(CompositeOperator::SourceOver);
      }
@@ -12918,7 +12947,7 @@ index eaad38378a1ab2fdeb798d2a7d86325254400472..962fac069940ee7603ddfbcf4e655c12
      context->clearRect(rect);
      if (saved)
          context->restore();
-@@ -2638,10 +2848,30 @@ void CanvasRenderingContext2DBase::willUpdateContents(std::optional<FloatRect> r
+@@ -2638,10 +2868,30 @@ void CanvasRenderingContext2DBase::willUpdateContents(std::optional<FloatRect> r
          if (context->shouldAntialias())
              dirtyRect.inflate(1);
  #if USE(COORDINATED_GRAPHICS)
@@ -12950,7 +12979,7 @@ index eaad38378a1ab2fdeb798d2a7d86325254400472..962fac069940ee7603ddfbcf4e655c12
  #else
          m_dirtyRect.unite(dirtyRect);
  #endif
-@@ -3552,6 +3782,8 @@ void CanvasRenderingContext2DBase::setWordSpacing(const String& wordSpacing)
+@@ -3552,6 +3802,8 @@ void CanvasRenderingContext2DBase::setWordSpacing(const String& wordSpacing)
  
  ImageBuffer* CanvasRenderingContext2DBase::buffer() const
  {
@@ -161432,20 +161461,21 @@ index 0000000000000000000000000000000000000000..a72ad7445e65c071177074b49499bab7
 +done
 +
 diff --git a/Source/WebCore/platform/graphics/PlatformDisplay.cpp b/Source/WebCore/platform/graphics/PlatformDisplay.cpp
-index 5fdc010a53bd8c75ce61d1aa6254cb4d0eac5b99..65621db8f0b827c1706146876a8e169df11d606b 100644
+index 5fdc010a53bd8c75ce61d1aa6254cb4d0eac5b99..88722f5bd5d494b213551364c210f8ce1ebadab0 100644
 --- a/Source/WebCore/platform/graphics/PlatformDisplay.cpp
 +++ b/Source/WebCore/platform/graphics/PlatformDisplay.cpp
-@@ -25,6 +25,9 @@
+@@ -25,6 +25,10 @@
  
  #include "config.h"
  #include "PlatformDisplay.h"
 +#if PLATFORM(HAIKU) && USE(TEXTURE_MAPPER)
 +#include "PlatformDisplayHaiku.h"
++#include <cstdlib>
 +#endif
  
  #include "GLContext.h"
  #include <wtf/MainThread.h>
-@@ -86,6 +89,23 @@ void PlatformDisplay::destroySharedDisplay()
+@@ -86,6 +90,32 @@ void PlatformDisplay::destroySharedDisplay()
  }
  #endif
  
@@ -161458,6 +161488,15 @@ index 5fdc010a53bd8c75ce61d1aa6254cb4d0eac5b99..65621db8f0b827c1706146876a8e169d
 +    s_sharedDisplay->clearGLContexts();
 +    s_sharedDisplay->terminateEGLDisplay();
 +    eglReleaseThread();
++    static unsigned testFailuresRemaining = [] {
++        const char* enabled = std::getenv("SUMMIT_TEST_FAIL_DISPLAY_RECREATION");
++        return enabled && enabled[0] == '1' && !enabled[1] ? 5U : 0U;
++    }();
++    if (testFailuresRemaining) {
++        --testFailuresRemaining;
++        WTFLogAlways("Summit TEST: injecting shared EGL display recreation failure; remaining=%u", testFailuresRemaining);
++        return false;
++    }
 +    auto replacement = PlatformDisplayHaiku::create();
 +    if (!replacement)
 +        return false;
