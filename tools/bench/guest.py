@@ -137,6 +137,9 @@ def load_report(binary, own_teams=(), interval_ms=2000):
                           'ramBytes': t.get('ramBytes', 0), 'virtualBytes': t.get('virtualBytes', 0),
                           'threads': t['threads'], 'areas': t['areas']} for t in owned],
         'serverCores': round(sum(t['cores'] for t in servers), 3),
+        # Observation only: workers remain unexplained until a benchmark
+        # establishes which client owns their work. Never exempt all kernel CPU.
+        'kernelWorkers': data.get('kernelWorkers', []),
         'unexplainedBusyCores': round(unexplained, 3),
         'compilerTeams': len(compilers), 'compilerCores': round(sum(t['cores'] for t in compilers), 3),
         'topForeign': sorted(({'cores': t['cores'], 'args': t['args'][:80]} for t in others),
