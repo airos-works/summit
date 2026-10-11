@@ -129658,7 +129658,7 @@ index 0000000000000000000000000000000000000000..abc82f6d26d2b1374740dc304282ae75
 +
 +}
 diff --git a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/AcceleratedSurface.cpp b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/AcceleratedSurface.cpp
-index 8177756a0e14111347846c912b8e3851f2559b4a..fd4c3d7b124c21e2c3f457fee9135e2640fa7c9a 100644
+index 8177756a0e14111347846c912b8e3851f2559b4a..8e6c851d519e19601af4e927236247ed810e0756 100644
 --- a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/AcceleratedSurface.cpp
 +++ b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/AcceleratedSurface.cpp
 @@ -26,6 +26,23 @@
@@ -130771,7 +130771,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..fd4c3d7b124c21e2c3f457fee9135e26
  
  #if USE(WPE_RENDERER)
      if (m_swapChain.type() == SwapChain::Type::WPEBackend)
-@@ -1043,13 +1902,16 @@ void AcceleratedSurface::willDestroyCompositingRunLoop()
+@@ -1043,16 +1902,24 @@ void AcceleratedSurface::willDestroyCompositingRunLoop()
              protectedThis->m_releaseUnusedBuffersTimer = nullptr;
          });
      }
@@ -130789,7 +130789,15 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..fd4c3d7b124c21e2c3f457fee9135e26
      m_pendingFrameNotifyTargets.clear();
      m_target = nullptr;
      m_swapChain.reset();
-@@ -1149,18 +2011,105 @@ void AcceleratedSurface::didRenderFrame(TargetContents targetContents)
++#if PLATFORM(HAIKU)
++    // A fresh context starts with an empty viewport. Forget the old logical
++    // size so willRenderFrame() reinstalls it even when the window is unchanged.
++    m_swapChain.resize({ });
++#endif
+ }
+ 
+ uint64_t AcceleratedSurface::window()
+@@ -1149,18 +2016,105 @@ void AcceleratedSurface::didRenderFrame(TargetContents targetContents)
      if (!m_target)
          return;
  
@@ -130895,7 +130903,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..fd4c3d7b124c21e2c3f457fee9135e26
      m_pendingFrameNotifyTargets.insert(0, { m_target, WTF::move(damageRects) });
      m_target = nullptr;
  }
-@@ -1182,13 +2131,17 @@ const std::optional<Damage>& AcceleratedSurface::renderTargetDamage()
+@@ -1182,13 +2136,17 @@ const std::optional<Damage>& AcceleratedSurface::renderTargetDamage()
  }
  #endif
  
@@ -131893,7 +131901,7 @@ index 57163f65873e5a481e5ef5a4ec3beec4b40b7cea..8a444fbabdfafae05a33908e3ee1df9d
      bool m_compositionRequired { false };
  #if ENABLE(SCROLLING_THREAD)
 diff --git a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/ThreadedCompositor.cpp b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/ThreadedCompositor.cpp
-index c238029ad9c99c5028ea7e456520af85d1d85532..f22e3ac90018ca4dbcfa2ba4864a562a465723a1 100644
+index c238029ad9c99c5028ea7e456520af85d1d85532..01b5549fb7bbb87b13d4eb426e7470eab8bbaf01 100644
 --- a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/ThreadedCompositor.cpp
 +++ b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/ThreadedCompositor.cpp
 @@ -26,6 +26,10 @@
@@ -132311,7 +132319,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..f22e3ac90018ca4dbcfa2ba4864a562a
      OptionSet<CompositionReason> reasons;
      bool shouldNotifiyDidComposite = false;
      {
-@@ -580,11 +852,45 @@ void ThreadedCompositor::renderLayerTree()
+@@ -580,11 +852,50 @@ void ThreadedCompositor::renderLayerTree()
  
          ASSERT(m_state.state == State::Scheduled);
          m_state.state = State::InProgress;
@@ -132348,17 +132356,22 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..f22e3ac90018ca4dbcfa2ba4864a562a
 +        auto count = parseInteger<unsigned>(StringView::fromLatin1(value));
 +        return count.value_or(0);
 +    }();
++    static const bool testVideoFramesOnly = [] {
++        const char* value = getenv("SUMMIT_TEST_COMPOSITOR_LOSS_VIDEO_ONLY");
++        return value && !strcmp(value, "1");
++    }();
 +    static std::atomic<unsigned> testFrameCount { 0 };
-+    if (testFramesUntilLoss && ++testFrameCount == testFramesUntilLoss) {
++    if (testFramesUntilLoss && (!testVideoFramesOnly || reasons.contains(CompositionReason::VideoFrame))
++        && ++testFrameCount == testFramesUntilLoss) {
 +        PlatformDisplay::sharedDisplay().glDisplay().markContextLostHaiku();
-+        WTFLogAlways("Summit TEST: retiring compositor display after %u frames (no hardware reset)", testFramesUntilLoss);
++        WTFLogAlways("Summit TEST: retiring compositor display after %u %sframes pid=%d (no hardware reset)", testFramesUntilLoss, testVideoFramesOnly ? "video " : "", getpid());
 +        requestGraphicsRecoveryHaiku();
 +        return;
 +    }
  #endif
  
      // Retrieve the scene attributes in a thread-safe manner.
-@@ -599,24 +905,68 @@ void ThreadedCompositor::renderLayerTree()
+@@ -599,24 +910,68 @@ void ThreadedCompositor::renderLayerTree()
      if (viewportSize.isEmpty())
          return;
  
@@ -132427,7 +132440,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..f22e3ac90018ca4dbcfa2ba4864a562a
      updateFPSCounter();
  
      if (shouldNotifiyDidComposite)
-@@ -631,8 +981,55 @@ void ThreadedCompositor::renderLayerTree()
+@@ -631,8 +986,55 @@ void ThreadedCompositor::renderLayerTree()
      PlatformDisplay::sharedDisplay().skiaGLContext()->swapBuffers();
  #endif
  
@@ -132483,7 +132496,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..f22e3ac90018ca4dbcfa2ba4864a562a
  
      RunLoop::mainSingleton().dispatch([this, protectedThis = Ref { *this }] {
          if (m_layerTreeHost)
-@@ -656,6 +1053,13 @@ void ThreadedCompositor::requestComposition(CompositionReason reason)
+@@ -656,6 +1058,13 @@ void ThreadedCompositor::requestComposition(CompositionReason reason)
  {
      Locker locker { m_state.lock };
      m_state.reasons.add(reason);
@@ -132497,7 +132510,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..f22e3ac90018ca4dbcfa2ba4864a562a
      scheduleUpdateLocked();
  }
  
-@@ -703,6 +1107,10 @@ void ThreadedCompositor::scheduleUpdateLocked()
+@@ -703,6 +1112,10 @@ void ThreadedCompositor::scheduleUpdateLocked()
  void ThreadedCompositor::frameComplete()
  {
      ASSERT(m_workQueue->runLoop().isCurrent());
@@ -132508,7 +132521,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..f22e3ac90018ca4dbcfa2ba4864a562a
  
      Locker locker { m_state.lock };
      WTFEmitSignpost(this, FrameComplete, "reasons: %s, state: %s, waiting for tiles: %s", reasonsToString(m_state.reasons).utf8(), stateToString(m_state.state).characters(), m_state.isWaitingForTiles ? "yes" : "no");
-@@ -726,6 +1134,112 @@ void ThreadedCompositor::frameComplete()
+@@ -726,6 +1139,112 @@ void ThreadedCompositor::frameComplete()
      }
  }
  
