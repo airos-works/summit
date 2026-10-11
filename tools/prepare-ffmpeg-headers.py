@@ -48,6 +48,9 @@ def main():
             urllib.request.urlretrieve(lock['url'], download)
             if digest(download) != lock['sha256']:
                 raise RuntimeError('Downloaded FFmpeg archive checksum mismatch')
+            # NamedTemporaryFile makes it private; a cache shared by build
+            # users (air/OS CI) needs it readable.
+            download.chmod(0o644)
             download.replace(archive_path)
         finally:
             download.unlink(missing_ok=True)
