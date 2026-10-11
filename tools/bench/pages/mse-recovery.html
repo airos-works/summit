@@ -14,6 +14,11 @@ const params = new URLSearchParams(location.search);
 const file = params.get('video') || 'wx-hevc-main10-48.mp4';
 const codec = params.get('codec') || 'hvc1.2.4.L60.90';
 const expected = Number(params.get('frames') || 48);
+// Software and hardware YUV conversion can differ even without a reset.
+// Fault tests may provide independently measured references for each round;
+// otherwise compare the two outputs exactly. Keep PNGs for host inspection.
+const expectedPixelHashes = params.has('firstPixelHash') && params.has('secondPixelHash')
+    ? [Number(params.get('firstPixelHash')), Number(params.get('secondPixelHash'))] : null;
 const video = document.getElementById('video');
 const phase = document.getElementById('phase');
 const result = document.getElementById('result');
@@ -32,23 +37,25 @@ async function post(reason, error = null) {
     posted = true;
     const passed = reason === 'ended' && rounds.length === 2
         && rounds.every(r => r.frames === expected && !r.error && Math.abs(r.time - r.duration) < .06)
-        && rounds[1].dropped === 0 && rounds[0].pixelHash === rounds[1].pixelHash;
+        && rounds[1].dropped === 0
+        && (expectedPixelHashes ? rounds.every((r, i) => r.pixelHash === expectedPixelHashes[i])
+            : rounds[0].pixelHash === rounds[1].pixelHash);
     phase.textContent = passed ? 'REPLAY COMPLETE — second decoder reached the end' : 'RECOVERY CHECK FAILED';
     phase.style.background = passed ? '#16702a' : '#902020';
-    const report = {passed, reason, error, rounds, expected, video:file};
-    result.textContent = JSON.stringify(report, null, 1);
+    const report = {passed, reason, error, rounds, expected, expectedPixelHashes, video:file};
+    result.textContent = JSON.stringify(report, (key, value) => key === 'pixelPNG' ? undefined : value, 1);
     document.title = 'MSE recovery ' + (passed ? 'complete' : 'failed');
     await sleep(350);
     await fetch('/__bench/probe', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(report)});
 }
-function pixelHash() {
-    const canvas = document.createElement('canvas'); canvas.width=128; canvas.height=96;
+function capturePixels() {
+    const canvas = document.createElement('canvas'); canvas.width=320; canvas.height=240;
     const context = canvas.getContext('2d', {willReadFrequently:true});
-    context.drawImage(video, 0, 0, 128, 96);
-    const data = context.getImageData(0, 0, 128, 96).data;
+    context.drawImage(video, 0, 0, 320, 240);
+    const data = context.getImageData(0, 0, 320, 240).data;
     let hash = 2166136261;
     for (let i = 0; i < data.length; ++i) hash = Math.imul(hash ^ data[i], 16777619) >>> 0;
-    return hash;
+    return {pixelHash:hash, ...(params.has('capturePixels') ? {pixelPNG:canvas.toDataURL()} : {})};
 }
 async function playRound(index, data) {
     video.removeAttribute('src'); video.load();
@@ -66,7 +73,7 @@ async function playRound(index, data) {
     await sleep(250);
     const q = video.getVideoPlaybackQuality();
     rounds.push({decoder:index, time:video.currentTime, duration:video.duration,
-        frames:q.totalVideoFrames, dropped:q.droppedVideoFrames, pixelHash:pixelHash(),
+        frames:q.totalVideoFrames, dropped:q.droppedVideoFrames, ...capturePixels(),
         error:video.error && video.error.message});
 }
 (async () => {
