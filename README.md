@@ -9,9 +9,19 @@ a compact toolbar, and a multiprocess engine.
 extension compatibility are still evolving. Feature notes below describe the
 current source. Download packages identify the commit they were built from.
 
-[Download the latest release](https://github.com/jmgasper/summit/releases/tag/latest)
-— choose the Summit and Summit WebKit packages for your architecture from the
-build table below.
+There are two builds of every version:
+
+- **air/OS** (x86_64 and arm64): [the latest release](https://github.com/jmgasper/summit/releases/tag/latest).
+  It uses air/OS's GPU drivers, app_server and video decoders where the
+  machine has them.
+- **Haiku R1/beta6** (x86_64): [the latest Haiku release](https://github.com/jmgasper/summit/releases/tag/latest-haiku),
+  for a stock Haiku installation without air/OS's changes. It has the same
+  browser, but some features are better on air/OS: rendering and WebGL on
+  the GPU, high-density screens, hardware video decoding and Web Bluetooth.
+  See [Summit for air/OS and for Haiku](docs/haiku-build.md).
+
+Choose the Summit and Summit WebKit packages for your system from the build
+tables below, and install both together.
 
 ![Summit running WebKit natively](docs/screenshots/current-webkit.png)
 
@@ -79,9 +89,12 @@ implemented.
 
 ## Build and run
 
-Use matching application and engine packages from the release table. Native
+Use matching application and engine packages from the same build table. Native
 engine builds need the air/OS/Haiku toolchain and private dependencies described
-in the [engine notes](engine/README.md).
+in the [engine notes](engine/README.md). air/OS CI
+([jmgasper/airos-ci](https://github.com/jmgasper/airos-ci)) makes both builds:
+the air/OS one against the air/OS SDK, and the Haiku one against an SDK made
+from the R1/beta6 release itself (`AIROS_TARGET=r1beta6`).
 
 The full multiprocess, extension-enabled development build is:
 
