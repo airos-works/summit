@@ -182,12 +182,25 @@ static int Sample(int argc, char** argv)
         }
         return times;
     };
+    auto kernelTimes = [] {
+        std::map<thread_id, thread_info> threads;
+        int32 cookie = 0; thread_info info;
+        while (get_next_thread_info(B_SYSTEM_TEAM, &cookie, &info) == B_OK) {
+            // Kernel team totals include idle threads. Keep actual workers
+            // separate so driver CPU work is observable without counting idle.
+            if (std::strncmp(info.name, "idle thread ", 12) != 0)
+                threads.emplace(info.thread, info);
+        }
+        return threads;
+    };
     get_cpu_info(0, cpus, before.data());
     const auto first = teamTimes();
+    const auto kernelFirst = kernelTimes();
     const bigtime_t start = system_time();
     snooze(interval);
     get_cpu_info(0, cpus, after.data());
     const auto second = teamTimes();
+    const auto kernelSecond = kernelTimes();
     const double elapsed = double(system_time() - start);
     double busy = 0;
     for (uint32 i = 0; i < cpus; ++i) busy += double(after[i].active_time - before[i].active_time);
@@ -216,6 +229,19 @@ static int Sample(int argc, char** argv)
             std::printf(",\"ramBytes\":%llu,\"virtualBytes\":%llu", ram, size);
         }
         std::printf("}");
+    }
+    std::printf("],\"kernelWorkers\":[");
+    comma = false;
+    for (const auto& [id, info] : kernelSecond) {
+        auto old = kernelFirst.find(id);
+        if (old == kernelFirst.end()) continue;
+        const bigtime_t delta = info.user_time + info.kernel_time
+            - old->second.user_time - old->second.kernel_time;
+        const double cores = double(delta) / elapsed;
+        if (cores < 0.005) continue;
+        std::printf("%s{\"thread\":%ld,\"name\":\"%s\",\"cores\":%.3f}", comma ? "," : "",
+            long(id), Escape(info.name).c_str(), cores);
+        comma = true;
     }
     std::puts("]}");
     return 0;

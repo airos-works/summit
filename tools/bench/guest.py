@@ -108,7 +108,7 @@ def sample(binary, teams=(), interval_ms=1000):
     return data
 
 
-def load_report(binary, own_teams=(), interval_ms=2000):
+def load_report(binary, own_teams=(), interval_ms=2000, owned_kernel_workers=()):
     """Contention snapshot: what else is burning CPU in the VM right now."""
     data = sample(binary, own_teams, interval_ms)
     own = {int(t) for t in own_teams}
@@ -127,7 +127,15 @@ def load_report(binary, own_teams=(), interval_ms=2000):
     own_cores = sum(t['cores'] for t in owned)
     # Teams that start and exit inside the sampling interval (a ninja build spawning short
     # compiles) never appear in both snapshots; they are only visible as unexplained busy time.
-    unexplained = max(0.0, data['busyCores'] - own_cores - foreign_cores - sum(t['cores'] for t in servers))
+    raw_unexplained = max(0.0, data['busyCores'] - own_cores - foreign_cores - sum(t['cores'] for t in servers))
+    # Explicit attribution for an isolated run, not an automatic exemption for
+    # kernel_team. Queued GPU jobs move CPU time out of the browser's team.
+    # Before/after samples with no owned teams never receive this attribution.
+    names = set(owned_kernel_workers) if owned else set()
+    workers = [t for t in data.get('kernelWorkers', []) if t['name'] in names
+               and not t['name'].startswith('idle thread ')]
+    worker_cores = sum(t['cores'] for t in workers)
+    unexplained = max(0.0, raw_unexplained - worker_cores)
     return {
         'at': data['at'], 'cpuCount': data['cpuCount'], 'busyCores': data['busyCores'],
         'foreignCores': round(foreign_cores, 3), 'ownCores': round(own_cores, 3),
@@ -137,6 +145,10 @@ def load_report(binary, own_teams=(), interval_ms=2000):
                           'ramBytes': t.get('ramBytes', 0), 'virtualBytes': t.get('virtualBytes', 0),
                           'threads': t['threads'], 'areas': t['areas']} for t in owned],
         'serverCores': round(sum(t['cores'] for t in servers), 3),
+        'kernelWorkers': data.get('kernelWorkers', []),
+        'ownedKernelWorkers': workers,
+        'ownedKernelCores': round(worker_cores, 3),
+        'rawUnexplainedBusyCores': round(raw_unexplained, 3),
         'unexplainedBusyCores': round(unexplained, 3),
         'compilerTeams': len(compilers), 'compilerCores': round(sum(t['cores'] for t in compilers), 3),
         'topForeign': sorted(({'cores': t['cores'], 'args': t['args'][:80]} for t in others),
@@ -312,7 +324,17 @@ class CrashWatch:
 
     def __init__(self):
         self.reports = set(self._reports())
+        self.debugger_teams = set(self._debugger_teams())
         self.syslog_size = self._syslog_size()
+
+    @staticmethod
+    def _debugger_teams():
+        # A native crash reporter can still be writing symbols after its
+        # target has disappeared from the owned process group. Observe it
+        # before the .report file becomes visible; never signal it here.
+        text = ssh('ps', check=False).stdout
+        return [int(match) for match in re.findall(
+            r'/Debugger --save-report --team (\d+)', text)]
 
     @staticmethod
     def _reports():
@@ -330,7 +352,8 @@ class CrashWatch:
         offset = self.syslog_size if size >= self.syslog_size else 0  # rotated
         text = ssh(f'tail -c +{offset + 1} /var/log/syslog', check=False).stdout if size != self.syslog_size else ''
         events = [line for line in text.splitlines() if self.EVENT.search(line)]
-        return {'newReports': new_reports, 'syslogEvents': events, 'syslogBytes': size - offset}
+        return {'newReports': new_reports, 'syslogEvents': events, 'syslogBytes': size - offset,
+                'debuggerTeams': sorted(set(self._debugger_teams()) - self.debugger_teams)}
 
     def syslog_tail(self, lines=80):
         return ssh(f'tail -n {int(lines)} /var/log/syslog', check=False).stdout

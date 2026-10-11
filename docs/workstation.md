@@ -314,3 +314,63 @@ same script worked, which is why it was not caught. The script now starts
 the launcher as its own team and exits (package 0.1.0~dev2-2), verified by
 clicking through Deskbar > Applications > Summit over VNC.
 
+
+## WX5100 decoder recreation and lost rendering contexts (2026-10-11)
+
+The WX5100 recovery candidate is private at
+`/boot/home/wx5100/summit-recovery/bundle`. It requests GLES reset notification
+through `EGL_EXT_create_context_robustness` for the sharing, compositor and
+Skia contexts. An AMD decoder failure retires that decoder without permanently
+blacklisting the add-on: the asynchronous close gate still excludes a decoder
+while it closes, and a fresh session must pass the recovered kernel's checks.
+Other hardware backends keep their existing failure policy.
+
+The candidate engine is `ce4032cd5ab522cc8eb9ddff4a28637818eb0073716fd746641386318ae75cad`,
+compiled from the two engine changes in `4f2a0a6`, then relocated with the
+existing bundler. Its private `libepoxy` dependency is included. Initial QEMU
+staging failures (missing epoxy, then incorrect absolute RPATHs selecting a
+system JavaScriptCore) are preserved alongside the corrected, passing runs.
+The original bundle and its engine
+`c07b7f15422e6ec13b28042f724c2218dab3aec02ed306d2043a6295fa127c7c`
+remain untouched. The earlier app-recovery manifest recorded an unrelated
+system engine hash; this is the actual original bundle's engine hash.
+
+`tools/bench/pages/mse-recovery.html` opens two independent MSE decoders in one
+document. A test-only add-on injects one real GPU readback timeout after 19
+outputs. The host checks exactly one automatic reset and two AMD decoder
+selections, proving the second decoder runs in the same process. Independent
+no-reset references are necessary: native hardware and software color
+conversion differ. At 320 by 240, the final Main10 software reference hash is
+1164650555 and the hardware reference is 2776130761; recovered output matches
+each reference byte for byte. `capturePixels=1` saves both PNGs in the probe
+report, while `firstPixelHash` and `secondPixelHash` specify the references.
+Without these parameters the two outputs must match each other exactly.
+
+With CPU compositing, both decoders reach 48 frames and EOS; the first recovery
+round reports 20 drops and the recreated hardware decoder reports zero. The
+visible header updates and video reaches frame 47. No crash reporter or owned
+browser helper remains. This qualifies decoder recreation, not uninterrupted
+playback through a reset.
+
+With GPU compositing, both decoder rounds also reach EOS with matching reference
+pixels (19 drops in the first round, zero in the second), but the visible page
+freezes at frame 16. Mesa now reports `GL_CONTEXT_LOST` during playback instead
+of the earlier winsys abort. Shutdown then aborts in libepoxy's lazy
+`glDeleteShader` resolver, called by `TextureMapperShaderProgram` destruction
+inside `ThreadedCompositor::invalidate`. The new delayed-crash observation
+catches both the syslog stack and the in-progress Debugger report. This is a
+failed renderer recovery test even though its JavaScript report passes.
+
+The active renderer is CoordinatedGraphics `ThreadedCompositor` with
+`AcceleratedSurface`; `LayerTreeHostHaiku` is a different path. Further work
+must detect context loss, finish or cancel pending frame callbacks, retire old
+GL resources without resolving functions against a lost context, clear shared
+texture and Skia state, recreate the shared EGL display and compositor contexts,
+and repaint the existing document. Multiple pages and worker contexts must be
+quiesced before replacing shared state. A process restart or permanent software
+fallback does not qualify this recovery path.
+
+Evidence, exact source/binary hashes, commands, unsuccessful trials, PNGs and
+terminal driver state are pinned in
+`/mnt/HaikuWork/x399/evidence/wx5100/mesa-native/summit-recovery-manifest.json`.
+No system Summit default was changed; the production media add-on is restored.
