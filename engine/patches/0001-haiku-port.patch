@@ -20459,7 +20459,7 @@ index b885cbbef48b2d18b96f6157f983bb288f3cf978..1a10ece7769e7c97967cf0c48c161daf
  WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_BEGIN
  #include <skia/core/SkShader.h>
 diff --git a/Source/WebCore/platform/graphics/PlatformDisplay.h b/Source/WebCore/platform/graphics/PlatformDisplay.h
-index e790f78f5144e1ffae6a417b8e64fef1a9513d56..c712c758e63a3963687c4007521258bb7e94b550 100644
+index e790f78f5144e1ffae6a417b8e64fef1a9513d56..3809b9744387504e37c028fd18fb0f8cafe1e0ba 100644
 --- a/Source/WebCore/platform/graphics/PlatformDisplay.h
 +++ b/Source/WebCore/platform/graphics/PlatformDisplay.h
 @@ -72,6 +72,9 @@ public:
@@ -20481,6 +20481,17 @@ index e790f78f5144e1ffae6a417b8e64fef1a9513d56..c712c758e63a3963687c4007521258bb
      EGLContext angleSharingGLContext();
  #endif
  
+@@ -124,6 +127,10 @@ public:
+     unsigned msaaSampleCount() const;
+     size_t maxSkiaResourceCacheBytes() const;
+     void skiaReleaseUnusedResources(WTF::Critical);
++#if PLATFORM(HAIKU)
++    WEBCORE_EXPORT bool hasOtherThreadSkiaContextsHaiku() const;
++    WEBCORE_EXPORT static bool recreateSharedDisplayHaiku();
++#endif
+ #endif
+ 
+ protected:
 diff --git a/Source/WebCore/platform/graphics/PlatformGraphicsContext.h b/Source/WebCore/platform/graphics/PlatformGraphicsContext.h
 index 9b23f5286f8abb8b1aa42e98f2e934778432bd79..8c9b225ebe3d77ef9575ac138c0c40b137f9b101 100644
 --- a/Source/WebCore/platform/graphics/PlatformGraphicsContext.h
@@ -21320,10 +21331,56 @@ index 160ba4f2623722caaf670da2b6eb3f4b1d3f2f5f..ffff803f61bbdb6af0dbc8fd6e0b5c44
      keepRect.unite(coverRect);
      keepRect.inflateX(m_tileSize.width() / 2);
 diff --git a/Source/WebCore/platform/graphics/coordinated/CoordinatedPlatformLayer.cpp b/Source/WebCore/platform/graphics/coordinated/CoordinatedPlatformLayer.cpp
-index 63ec41fac1fe1f6d4b7606555093bc4bed44d365..4153d1204664a89ec985a059cad37555683a0ecf 100644
+index 63ec41fac1fe1f6d4b7606555093bc4bed44d365..1b1188aecf18a9c87936ca6d8dc47626b5dae90e 100644
 --- a/Source/WebCore/platform/graphics/coordinated/CoordinatedPlatformLayer.cpp
 +++ b/Source/WebCore/platform/graphics/coordinated/CoordinatedPlatformLayer.cpp
-@@ -910,6 +910,22 @@ void CoordinatedPlatformLayer::updateBackingStore()
+@@ -166,6 +166,45 @@ void CoordinatedPlatformLayer::invalidateTarget()
+ #endif
+ }
+ 
++#if PLATFORM(HAIKU) && USE(TEXTURE_MAPPER)
++void CoordinatedPlatformLayer::discardGraphicsResourcesHaiku()
++{
++    ASSERT(!isMainThread());
++    Locker locker { m_lock };
++    m_target = nullptr;
++    m_backingStore = nullptr;
++    m_imageBackingStore.committed = nullptr;
++    // Keep the most recent CPU/native picture, including a paused video.
++    if (!m_contentsBuffer.pending)
++        m_contentsBuffer.pending = WTF::move(m_contentsBuffer.committed);
++    m_contentsBuffer.committed = nullptr;
++    m_contentsBuffer.hasCommitted = false;
++    m_pendingChanges = EnumSet<Change>::fromRaw((uint64_t { 1 } << (static_cast<unsigned>(Change::Transform) + 1)) - 1);
++#if ENABLE(DAMAGE_TRACKING)
++    m_damage = Damage { m_size, Damage::Mode::Full };
++#endif
++}
++
++void CoordinatedPlatformLayer::resetBackingStoreHaiku()
++{
++    ASSERT(isMainThread());
++    waitUntilPaintingComplete();
++    {
++        Locker locker { m_lock };
++        if (m_backingStoreProxy) {
++            m_backingStoreProxy->invalidate();
++            m_backingStoreProxy = nullptr;
++        }
++        m_needsTilesUpdate = true;
++        m_pendingTilesCreation = true;
++    }
++    // Also mark the GraphicsLayer ancestry: unchanged DOM still needs every
++    // old tile recreated, not just the layer properties copied to new targets.
++    if (m_owner)
++        m_owner->setNeedsDisplay();
++}
++#endif
++
+ void CoordinatedPlatformLayer::invalidateClient()
+ {
+     ASSERT(isMainThread());
+@@ -910,6 +949,22 @@ void CoordinatedPlatformLayer::updateBackingStore()
          backingStoreProxy = m_backingStoreProxy;
      }
  
@@ -21346,7 +21403,7 @@ index 63ec41fac1fe1f6d4b7606555093bc4bed44d365..4153d1204664a89ec985a059cad37555
      Damage damage(size, Damage::Mode::Rectangles);
      auto updateResult = backingStoreProxy->updateIfNeeded(m_transformedVisibleRect, size, m_visibleRect, contentsScale, contentsOpaque, m_pendingTilesCreation || m_needsTilesUpdate, m_dirtyRegion, damage, *this);
      m_dirtyRegion.clear();
-@@ -1153,6 +1169,8 @@ void CoordinatedPlatformLayer::flushCompositingStateOnTarget(const OptionSet<Com
+@@ -1153,6 +1208,8 @@ void CoordinatedPlatformLayer::flushCompositingStateOnTarget(const OptionSet<Com
          }
  
          if (m_pendingChanges.contains(Change::BackgroundColor)) {
@@ -21355,7 +21412,7 @@ index 63ec41fac1fe1f6d4b7606555093bc4bed44d365..4153d1204664a89ec985a059cad37555
              layer.setBackgroundColor(m_backgroundColor);
              m_pendingChanges.remove(Change::BackgroundColor);
          }
-@@ -1167,7 +1185,9 @@ void CoordinatedPlatformLayer::flushCompositingStateOnTarget(const OptionSet<Com
+@@ -1167,7 +1224,9 @@ void CoordinatedPlatformLayer::flushCompositingStateOnTarget(const OptionSet<Com
                  if (!m_backingStore)
                      m_backingStore = CoordinatedBackingStore::create();
                  layer.setBackingStore(m_backingStore.get());
@@ -21365,7 +21422,7 @@ index 63ec41fac1fe1f6d4b7606555093bc4bed44d365..4153d1204664a89ec985a059cad37555
  
                  if (auto* animatedBackingStoreClient = m_backingStoreProxy->animatedBackingStoreClient())
                      layer.setAnimatedBackingStoreClient(animatedBackingStoreClient);
-@@ -1175,6 +1195,10 @@ void CoordinatedPlatformLayer::flushCompositingStateOnTarget(const OptionSet<Com
+@@ -1175,6 +1234,10 @@ void CoordinatedPlatformLayer::flushCompositingStateOnTarget(const OptionSet<Com
                  layer.setBackingStore(nullptr);
                  layer.setAnimatedBackingStoreClient(nullptr);
                  m_backingStore = nullptr;
@@ -21376,7 +21433,7 @@ index 63ec41fac1fe1f6d4b7606555093bc4bed44d365..4153d1204664a89ec985a059cad37555
              }
              m_pendingChanges.remove(Change::BackingStore);
          }
-@@ -1290,6 +1314,14 @@ void CoordinatedPlatformLayer::flushCompositingStateOnTarget(const OptionSet<Com
+@@ -1290,6 +1353,14 @@ void CoordinatedPlatformLayer::flushCompositingStateOnTarget(const OptionSet<Com
              m_contentsBuffer.committed = WTF::move(m_contentsBuffer.pending);
              m_contentsBuffer.hasCommitted = !!m_contentsBuffer.committed;
              m_pendingChanges.remove(Change::ContentsBuffer);
@@ -21644,7 +21701,7 @@ index 139bcc9a9cbfae7dcf875231044d69c23dab9dca..3d1fb9678a1a59401310b361753d4173
  
      FloatSize pixelAlignmentOffset() const override { return m_pixelAlignmentOffset; }
 diff --git a/Source/WebCore/platform/graphics/egl/BitmapTexture.cpp b/Source/WebCore/platform/graphics/egl/BitmapTexture.cpp
-index 6b3597b50ca897e12bbe8c0de4cf44860c3ab692..9333711a5da646a284140be2e4efd71e0f4bd868 100644
+index 6b3597b50ca897e12bbe8c0de4cf44860c3ab692..d723e3da64e51d56ebda089c4bf85db2c3f1e292 100644
 --- a/Source/WebCore/platform/graphics/egl/BitmapTexture.cpp
 +++ b/Source/WebCore/platform/graphics/egl/BitmapTexture.cpp
 @@ -109,6 +109,10 @@ void BitmapTexture::determineRenderTargetAndBinding()
@@ -21721,7 +21778,18 @@ index 6b3597b50ca897e12bbe8c0de4cf44860c3ab692..9333711a5da646a284140be2e4efd71e
      return CheckedUint32(size.height()) * bytesPerRow;
  }
  
-@@ -328,7 +372,12 @@ void BitmapTexture::updateContents(const void* srcData, const IntRect& targetRec
+@@ -234,6 +278,10 @@ BitmapTexture::BitmapTexture(EGLImage image, const IntSize& size, OptionSet<Flag
+ 
+ BitmapTexture::~BitmapTexture()
+ {
++#if PLATFORM(HAIKU)
++    if (!m_glOwnerHaiku.isValid())
++        return;
++#endif
+     glDeleteTextures(1, &m_id);
+ 
+ #if USE(TEXTURE_MAPPER)
+@@ -328,7 +376,12 @@ void BitmapTexture::updateContents(const void* srcData, const IntRect& targetRec
      }
  #endif
  
@@ -21734,7 +21802,7 @@ index 6b3597b50ca897e12bbe8c0de4cf44860c3ab692..9333711a5da646a284140be2e4efd71e
      auto data = static_cast<const uint8_t*>(srcData);
      Vector<uint8_t> temporaryData;
      IntPoint adjustedSourceOffset = sourceOffset;
-@@ -367,7 +416,16 @@ void BitmapTexture::updateContents(const void* srcData, const IntRect& targetRec
+@@ -367,7 +420,16 @@ void BitmapTexture::updateContents(const void* srcData, const IntRect& targetRec
          glPixelStorei(GL_UNPACK_SKIP_PIXELS, adjustedSourceOffset.x());
      }
  
@@ -21751,7 +21819,7 @@ index 6b3597b50ca897e12bbe8c0de4cf44860c3ab692..9333711a5da646a284140be2e4efd71e
  
      if (supportsUnpackSubimage) {
          glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
-@@ -394,6 +452,57 @@ void BitmapTexture::updateContents(NativeImage* frameImage, const IntRect& targe
+@@ -394,6 +456,57 @@ void BitmapTexture::updateContents(NativeImage* frameImage, const IntRect& targe
      SkPixmap pixmap;
      if (surface->peekPixels(&pixmap))
          updateContents(pixmap.addr(), targetRect, offset, pixmap.rowBytes(), PixelFormat::BGRA8);
@@ -21809,7 +21877,7 @@ index 6b3597b50ca897e12bbe8c0de4cf44860c3ab692..9333711a5da646a284140be2e4efd71e
  #else
      UNUSED_PARAM(targetRect);
      UNUSED_PARAM(offset);
-@@ -503,11 +612,21 @@ void BitmapTexture::initializeStencil()
+@@ -503,11 +616,21 @@ void BitmapTexture::initializeStencil()
  
      glGenRenderbuffers(1, &m_stencilBufferObject);
      glBindRenderbuffer(GL_RENDERBUFFER, m_stencilBufferObject);
@@ -21832,10 +21900,21 @@ index 6b3597b50ca897e12bbe8c0de4cf44860c3ab692..9333711a5da646a284140be2e4efd71e
  
  void BitmapTexture::clearIfNeeded()
 diff --git a/Source/WebCore/platform/graphics/egl/BitmapTexture.h b/Source/WebCore/platform/graphics/egl/BitmapTexture.h
-index 25a33139079a55094a25c97216a9575a59224292..f218183a01f2781651d7af7ad93e6ccf1998a430 100644
+index 25a33139079a55094a25c97216a9575a59224292..ce771a346d8b6ed6dfc4f5e059531ed9bffb99ba 100644
 --- a/Source/WebCore/platform/graphics/egl/BitmapTexture.h
 +++ b/Source/WebCore/platform/graphics/egl/BitmapTexture.h
-@@ -74,6 +74,11 @@ public:
+@@ -26,6 +26,10 @@
+ 
+ #pragma once
+ 
++#if PLATFORM(HAIKU)
++#include "GLDisplay.h"
++#endif
++
+ #include "IntPoint.h"
+ #include "IntRect.h"
+ #include "IntSize.h"
+@@ -74,6 +78,11 @@ public:
          UseBGRALayout = 1 << 4,
          NearestFiltering = 1 << 5,
          ExternalOESRenderTarget = 1 << 6,
@@ -21847,11 +21926,41 @@ index 25a33139079a55094a25c97216a9575a59224292..f218183a01f2781651d7af7ad93e6ccf
      };
  
      static Ref<BitmapTexture> create(const IntSize& size, OptionSet<Flags> flags = { })
+@@ -96,6 +105,9 @@ public:
+     bool isOpaque() const { return !m_flags.contains(Flags::SupportsAlpha); }
+ 
+     uint32_t id() const { return m_id; }
++#if PLATFORM(HAIKU)
++    bool isValidHaiku() const { return m_glOwnerHaiku.isValid(); }
++#endif
+ 
+     void updateContents(const void* srcData, const IntRect& targetRect, const IntPoint& sourceOffset, int bytesPerLine, PixelFormat);
+ 
+@@ -133,6 +145,9 @@ public:
+ #endif
+ 
+ private:
++#if PLATFORM(HAIKU)
++    GLResourceOwnerHaiku m_glOwnerHaiku;
++#endif
+     BitmapTexture(const IntSize&, OptionSet<Flags>);
+ #if USE(GBM) || OS(ANDROID)
+     BitmapTexture(EGLImage, const IntSize&, OptionSet<Flags>);
 diff --git a/Source/WebCore/platform/graphics/egl/BitmapTexturePool.cpp b/Source/WebCore/platform/graphics/egl/BitmapTexturePool.cpp
-index 36206e6f966e88e056cf20705257fddb8b14d601..9c6a1f0f635ecf3299f546d2f3078e20abbfe44f 100644
+index 36206e6f966e88e056cf20705257fddb8b14d601..fc8790fbbe1aadc159217930a1d7f2c6e22169d0 100644
 --- a/Source/WebCore/platform/graphics/egl/BitmapTexturePool.cpp
 +++ b/Source/WebCore/platform/graphics/egl/BitmapTexturePool.cpp
-@@ -80,6 +80,9 @@ Ref<BitmapTexture> BitmapTexturePool::acquireTexture(const IntSize& size, Option
+@@ -73,6 +73,9 @@ Ref<BitmapTexture> BitmapTexturePool::acquireTexture(const IntSize& size, Option
+     Locker locker { m_lock };
+     Entry* selectedEntry = std::find_if(m_textures.begin(), m_textures.end(), [&](Entry& entry) {
+         return entry.texture->refCount() == 1
++#if PLATFORM(HAIKU)
++            && entry.texture->isValidHaiku()
++#endif
+             && entry.texture->size() == size
+ #if USE(GBM)
+             && entry.texture->flags().contains(BitmapTexture::Flags::BackedByDMABuf) == flags.contains(BitmapTexture::Flags::BackedByDMABuf)
+@@ -80,6 +83,9 @@ Ref<BitmapTexture> BitmapTexturePool::acquireTexture(const IntSize& size, Option
              && entry.texture->flags().contains(BitmapTexture::Flags::ForceVivanteSuperTiledBuffer) == flags.contains(BitmapTexture::Flags::ForceVivanteSuperTiledBuffer)
  #endif
              && entry.texture->flags().contains(BitmapTexture::Flags::UseBGRALayout) == flags.contains(BitmapTexture::Flags::UseBGRALayout)
@@ -21861,14 +21970,33 @@ index 36206e6f966e88e056cf20705257fddb8b14d601..9c6a1f0f635ecf3299f546d2f3078e20
              && entry.texture->flags().contains(BitmapTexture::Flags::NearestFiltering) == flags.contains(BitmapTexture::Flags::NearestFiltering);
      });
  
-@@ -115,15 +118,35 @@ Ref<BitmapTexture> BitmapTexturePool::createTextureForImage(EGLImage image, cons
+@@ -112,18 +118,53 @@ Ref<BitmapTexture> BitmapTexturePool::createTextureForImage(EGLImage image, cons
+ }
+ #endif
+ 
++#if PLATFORM(HAIKU)
++void BitmapTexturePool::discardLostTexturesHaiku()
++{
++    ASSERT(RunLoop::isMain());
++    Locker locker { m_lock };
++    m_textures.removeAllMatching([this](const Entry& entry) {
++        if (entry.texture->isValidHaiku())
++            return false;
++        m_poolSizeInBytes -= entry.texture->sizeInBytes();
++        return true;
++    });
++    exitLimitExceededModeIfNeeded();
++}
++#endif
++
  void BitmapTexturePool::scheduleReleaseUnusedTextures()
  {
      assertIsHeld(m_lock);
 -    if (m_releaseUnusedTexturesTimer.isActive())
 +    if (m_releaseTimerActive && !m_releaseTimerImmediate)
-+        return;
-+
+         return;
+ 
+-    m_releaseUnusedTexturesTimer.startOneShot(m_releaseUnusedTexturesTimerInterval);
 +    // A worker may hold m_lock while the timer fires on the main thread. The
 +    // timer's Haiku RunLoop operations take the main BLooper lock, so doing
 +    // them here from that worker deadlocks against the timer callback waiting
@@ -21882,10 +22010,9 @@ index 36206e6f966e88e056cf20705257fddb8b14d601..9c6a1f0f635ecf3299f546d2f3078e20
 +            m_releaseTimerSchedulePending = false;
 +            scheduleReleaseUnusedTextures();
 +        });
-         return;
++        return;
 +    }
- 
--    m_releaseUnusedTexturesTimer.startOneShot(m_releaseUnusedTexturesTimerInterval);
++
 +    bool immediate = m_releaseTimerImmediate;
 +    m_releaseTimerImmediate = false;
 +    m_releaseTimerActive = true;
@@ -21899,7 +22026,7 @@ index 36206e6f966e88e056cf20705257fddb8b14d601..9c6a1f0f635ecf3299f546d2f3078e20
  
      auto hasTextures = [this] -> bool {
          assertIsHeld(m_lock);
-@@ -139,12 +162,28 @@ void BitmapTexturePool::releaseUnusedTexturesTimerFired()
+@@ -139,12 +180,28 @@ void BitmapTexturePool::releaseUnusedTexturesTimerFired()
      if (!hasTextures())
          return;
  
@@ -21930,7 +22057,7 @@ index 36206e6f966e88e056cf20705257fddb8b14d601..9c6a1f0f635ecf3299f546d2f3078e20
              auto matchCount = m_textures.removeAllMatching([this, &minUsedTime](const Entry& entry) {
                  assertIsHeld(m_lock);
                  if (entry.canBeReleased(minUsedTime)) {
-@@ -194,7 +233,7 @@ void BitmapTexturePool::enterLimitExceededModeIfNeeded()
+@@ -194,7 +251,7 @@ void BitmapTexturePool::enterLimitExceededModeIfNeeded()
          m_onLimitExceededMode = true;
          m_releaseUnusedSecondsTolerance = s_releaseUnusedSecondsToleranceOnLimitExceeded;
          m_releaseUnusedTexturesTimerInterval = s_releaseUnusedTexturesTimerIntervalOnLimitExceeded;
@@ -21940,10 +22067,20 @@ index 36206e6f966e88e056cf20705257fddb8b14d601..9c6a1f0f635ecf3299f546d2f3078e20
  }
  
 diff --git a/Source/WebCore/platform/graphics/egl/BitmapTexturePool.h b/Source/WebCore/platform/graphics/egl/BitmapTexturePool.h
-index 04c7f35b45eb11fc3e87bd16b5aa657e46501001..09ba02743c2a405b4aa1895da07a954280a9d83f 100644
+index 04c7f35b45eb11fc3e87bd16b5aa657e46501001..07a8de6dd316f178577dc59eec46a57ea63cf673 100644
 --- a/Source/WebCore/platform/graphics/egl/BitmapTexturePool.h
 +++ b/Source/WebCore/platform/graphics/egl/BitmapTexturePool.h
-@@ -86,6 +86,9 @@ private:
+@@ -49,6 +49,9 @@ class BitmapTexturePool final : public CanMakeThreadSafeCheckedPtr<BitmapTexture
+ public:
+     WEBCORE_EXPORT static BitmapTexturePool& singleton();
+     ~BitmapTexturePool() = default;
++#if PLATFORM(HAIKU)
++    WEBCORE_EXPORT void discardLostTexturesHaiku();
++#endif
+ 
+     WEBCORE_EXPORT Ref<BitmapTexture> acquireTexture(const IntSize&, OptionSet<BitmapTexture::Flags>);
+ #if USE(GBM)
+@@ -86,6 +89,9 @@ private:
      Vector<Ref<BitmapTexture>> m_imageTextures WTF_GUARDED_BY_LOCK(m_lock);
  #endif
      RunLoop::Timer m_releaseUnusedTexturesTimer WTF_GUARDED_BY_LOCK(m_lock);
@@ -21954,7 +22091,7 @@ index 04c7f35b45eb11fc3e87bd16b5aa657e46501001..09ba02743c2a405b4aa1895da07a9542
      bool m_onLimitExceededMode WTF_GUARDED_BY_LOCK(m_lock) { false };
      Seconds m_releaseUnusedSecondsTolerance WTF_GUARDED_BY_LOCK(m_lock);
 diff --git a/Source/WebCore/platform/graphics/egl/GLContext.cpp b/Source/WebCore/platform/graphics/egl/GLContext.cpp
-index 6b748ca4023885f7ffb540f02da458ed39476ba7..1db269b52d965e45e01c535d03026c301faa4752 100644
+index 6b748ca4023885f7ffb540f02da458ed39476ba7..b11ebe86e6a39c5e641d29fdcefa173145f1a858 100644
 --- a/Source/WebCore/platform/graphics/egl/GLContext.cpp
 +++ b/Source/WebCore/platform/graphics/egl/GLContext.cpp
 @@ -45,6 +45,9 @@ WTF_MAKE_TZONE_ALLOCATED_IMPL(GLContext);
@@ -21982,7 +22119,18 @@ index 6b748ca4023885f7ffb540f02da458ed39476ba7..1db269b52d965e45e01c535d03026c30
      if (auto context = createSurfacelessContext(display, target, sharingContext))
          return context;
  
-@@ -487,6 +498,20 @@ EGLContext GLContext::createEGLContext(GLDisplay& display, EGLConfig config, EGL
+@@ -420,6 +431,10 @@ GLContext::GLContext(GLDisplay& display, EGLContext context, EGLSurface surface,
+     , m_config(config)
+ {
+     RELEASE_ASSERT(context != EGL_NO_CONTEXT);
++#if PLATFORM(HAIKU)
++    if (isExtensionSupported(eglQueryString(display.eglDisplay(), EGL_EXTENSIONS), "EGL_EXT_create_context_robustness"))
++        m_resetStatusHaiku = reinterpret_cast<unsigned (*)()>(eglGetProcAddress("glGetGraphicsResetStatusKHR"));
++#endif
+ 
+ #if !RELEASE_LOG_DISABLED
+     if (shouldEnableDebugLogging()) [[unlikely]] {
+@@ -487,6 +502,20 @@ EGLContext GLContext::createEGLContext(GLDisplay& display, EGLConfig config, EGL
          EGL_CONTEXT_CLIENT_VERSION, 2,
      };
  
@@ -22003,8 +22151,59 @@ index 6b748ca4023885f7ffb540f02da458ed39476ba7..1db269b52d965e45e01c535d03026c30
  #if !RELEASE_LOG_DISABLED
      if (shouldEnableDebugLogging()) {
          if (display.checkVersion(1, 5)) {
+@@ -521,10 +550,37 @@ unsigned GLContext::glVersion() const
+     return version();
+ }
+ 
++#if PLATFORM(HAIKU)
++GLResourceOwnerHaiku::GLResourceOwnerHaiku()
++{
++    if (auto* context = GLContext::current())
++        m_display = context->display();
++}
++
++bool GLContext::isContextLostHaiku()
++{
++    RefPtr display = m_display.get();
++    if (!display || !display->eglDisplay() || display->isContextLostHaiku())
++        return true;
++    // Resolve through EGL while the context is created, not through epoxy's
++    // lazy GL resolver after a reset (GL_VERSION is then unavailable).
++    if (isCurrent() && m_resetStatusHaiku && m_resetStatusHaiku() != GL_NO_ERROR) {
++        display->markContextLostHaiku();
++        return true;
++    }
++    return false;
++}
++#endif
++
+ bool GLContext::makeContextCurrent()
+ {
+-    if (isCurrent())
++    if (isCurrent()) {
++#if PLATFORM(HAIKU)
++        return !isContextLostHaiku();
++#else
+         return true;
++#endif
++    }
+ 
+     // ANGLE doesn't know anything about non-ANGLE contexts, and does
+     // nothing in MakeCurrent if what it thinks is current hasn't changed.
+@@ -538,7 +594,11 @@ bool GLContext::makeContextCurrent()
+     auto display = m_display.get();
+     if (display && eglMakeCurrent(display->eglDisplay(), m_surface, m_surface, m_context)) {
+         didMakeContextCurrent();
++#if PLATFORM(HAIKU)
++        return !isContextLostHaiku();
++#else
+         return true;
++#endif
+     }
+ 
+     // If we failed to make the native context current, restore the previous ANGLE one.
 diff --git a/Source/WebCore/platform/graphics/egl/GLContext.h b/Source/WebCore/platform/graphics/egl/GLContext.h
-index 28829bd1aac3177356f62c6aa30919288ca3f36d..137925cf79133c96182b0df77fdc59fec34fd14b 100644
+index 28829bd1aac3177356f62c6aa30919288ca3f36d..1abd24cf980a4ad701467dd4eb903efdb6b292d7 100644
 --- a/Source/WebCore/platform/graphics/egl/GLContext.h
 +++ b/Source/WebCore/platform/graphics/egl/GLContext.h
 @@ -25,8 +25,20 @@
@@ -22029,6 +22228,26 @@ index 28829bd1aac3177356f62c6aa30919288ca3f36d..137925cf79133c96182b0df77fdc59fe
  typedef EGLNativeWindowType GLNativeWindowType;
  #else
  typedef uint64_t GLNativeWindowType;
+@@ -92,6 +104,9 @@ public:
+     EGLConfig config() const { return m_config; }
+ 
+     WEBCORE_EXPORT bool makeContextCurrent();
++#if PLATFORM(HAIKU)
++    WEBCORE_EXPORT bool isContextLostHaiku();
++#endif
+     bool unmakeContextCurrent();
+     WEBCORE_EXPORT void swapBuffers();
+     GCGLContext platformContext() const;
+@@ -177,6 +192,9 @@ private:
+ 
+     ThreadSafeWeakPtr<GLDisplay> m_display;
+     mutable unsigned m_version { 0 };
++#if PLATFORM(HAIKU)
++    unsigned (*m_resetStatusHaiku)() { nullptr };
++#endif
+     EGLContext m_context { nullptr };
+     EGLSurface m_surface { nullptr };
+     EGLConfig m_config { nullptr };
 diff --git a/Source/WebCore/platform/graphics/egl/GraphicsContextGLEGL.cpp b/Source/WebCore/platform/graphics/egl/GraphicsContextGLEGL.cpp
 index 24ac596ad8c9275e9018b351ec61b5fd5037e5ba..f190c9428f85785a7ccbd74822110f97bc039da6 100644
 --- a/Source/WebCore/platform/graphics/egl/GraphicsContextGLEGL.cpp
@@ -41168,7 +41387,7 @@ index d39fe093c43d4f04d6cc8fe3a59c82bb0e2e43f1..df0bd25776d93618df33523a1d357e8b
          auto data = encodeAcceleratedImage(nativeImage, mimeType, quality);
          if (!data)
 diff --git a/Source/WebCore/platform/graphics/skia/PlatformDisplaySkia.cpp b/Source/WebCore/platform/graphics/skia/PlatformDisplaySkia.cpp
-index 776466ea87d3d721d32ac4e52db702bb2b544e46..3d0cf15e7f1c8d7cb8b0d8ad62861f48b2236afc 100644
+index 776466ea87d3d721d32ac4e52db702bb2b544e46..3d879c9b18b0410f4c8400532c509e2eb4183b2a 100644
 --- a/Source/WebCore/platform/graphics/skia/PlatformDisplaySkia.cpp
 +++ b/Source/WebCore/platform/graphics/skia/PlatformDisplaySkia.cpp
 @@ -29,6 +29,7 @@
@@ -41179,7 +41398,20 @@ index 776466ea87d3d721d32ac4e52db702bb2b544e46..3d0cf15e7f1c8d7cb8b0d8ad62861f48
  
  WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_BEGIN
  #include <skia/core/SkColorSpace.h>
-@@ -369,7 +370,15 @@ private:
+@@ -279,6 +280,12 @@ public:
+         // The context of a thread is destroyed when the thread exits, which can happen while the main thread
+         // terminates the display. Once it is terminated, drop the Skia resources without calling into GL.
+         RefPtr display = glContext->display();
++#if PLATFORM(HAIKU)
++        if (display && display->isContextLostHaiku()) {
++            grContext->abandonContext();
++            return;
++        }
++#endif
+         bool didRelease = display && display->runIfNotTerminated([&](EGLDisplay) {
+             glContext->makeContextCurrent();
+             grContext->releaseResourcesAndAbandonContext();
+@@ -369,7 +376,15 @@ private:
  
  GLContext* PlatformDisplay::skiaGLContext()
  {
@@ -41196,6 +41428,25 @@ index 776466ea87d3d721d32ac4e52db702bb2b544e46..3d0cf15e7f1c8d7cb8b0d8ad62861f48
      if (!s_skiaGLContext) {
          s_skiaGLContext = SkiaGLContext::create(*this);
          m_skiaGLContexts.add(*s_skiaGLContext);
+@@ -415,6 +430,18 @@ void PlatformDisplay::skiaReleaseUnusedResources(WTF::Critical critical)
+         s_skiaGLContext->releaseUnusedResources(critical);
+ }
+ 
++#if PLATFORM(HAIKU)
++bool PlatformDisplay::hasOtherThreadSkiaContextsHaiku() const
++{
++    bool found = false;
++    m_skiaGLContexts.forEach([&](auto& context) {
++        if (&context != s_skiaGLContext.get())
++            found = true;
++    });
++    return found;
++}
++#endif
++
+ void PlatformDisplay::clearSkiaGLContext()
+ {
+     s_skiaGLContext = nullptr;
 diff --git a/Source/WebCore/platform/graphics/skia/SkiaPaintingEngine.cpp b/Source/WebCore/platform/graphics/skia/SkiaPaintingEngine.cpp
 index ffcff7e0b02bdf8599d7b8f245f3323f2f2743cd..46a1df7a0cea44c6bb9882a2b8ebb9505e8a515c 100644
 --- a/Source/WebCore/platform/graphics/skia/SkiaPaintingEngine.cpp
@@ -41287,10 +41538,20 @@ index ffcff7e0b02bdf8599d7b8f245f3323f2f2743cd..46a1df7a0cea44c6bb9882a2b8ebb950
          if (const char* envString = getenv("WEBKIT_SKIA_CPU_PAINTING_THREADS")) {
              auto newValue = parseInteger<unsigned>(StringView::fromLatin1(envString));
 diff --git a/Source/WebCore/platform/graphics/texmap/TextureMapper.cpp b/Source/WebCore/platform/graphics/texmap/TextureMapper.cpp
-index 1b88532103dfc26c2a90aedce768e19f2e7059e6..dc823747bb57ee851d6f5863201918ae52809a4f 100644
+index 1b88532103dfc26c2a90aedce768e19f2e7059e6..dbb28d94a7136e8999fc28d0440fd2fe3cfbeb97 100644
 --- a/Source/WebCore/platform/graphics/texmap/TextureMapper.cpp
 +++ b/Source/WebCore/platform/graphics/texmap/TextureMapper.cpp
-@@ -44,6 +44,14 @@
+@@ -31,6 +31,9 @@
+ #include "FloatQuad.h"
+ #include "FloatRoundedRect.h"
+ #include "GLContext.h"
++#if PLATFORM(HAIKU)
++#include "GLDisplay.h"
++#endif
+ #include "GraphicsContext.h"
+ #include "GraphicsTypesGL.h"
+ #include "Image.h"
+@@ -44,6 +47,14 @@
  #include <wtf/SetForScope.h>
  #include <wtf/TZoneMallocInlines.h>
  
@@ -41305,7 +41566,7 @@ index 1b88532103dfc26c2a90aedce768e19f2e7059e6..dc823747bb57ee851d6f5863201918ae
  #if USE(CAIRO)
  #include "CairoUtilities.h"
  #include "RefPtrCairo.h"
-@@ -75,6 +83,12 @@ public:
+@@ -75,6 +86,12 @@ public:
      bool didModifyStencil { false };
      GLint previousScissorState { 0 };
      GLint previousDepthState { 0 };
@@ -41318,7 +41579,28 @@ index 1b88532103dfc26c2a90aedce768e19f2e7059e6..dc823747bb57ee851d6f5863201918ae
      std::array<GLint, 4> viewport { };
      std::array<GLint, 4> previousScissor { };
      double zNear { 0 };
-@@ -174,7 +188,16 @@ Ref<TextureMapperShaderProgram> TextureMapperGLData::getShaderProgram(TextureMap
+@@ -124,6 +141,9 @@ private:
+         int32_t m_maxTextureSize;
+     };
+ 
++#if PLATFORM(HAIKU)
++    GLResourceOwnerHaiku m_glOwnerHaiku;
++#endif
+     const Ref<SharedGLData> m_sharedGLData;
+     HashMap<const void*, GLuint> m_vbos;
+     HashMap<uint64_t, Vector<Ref<TextureMapperGPUBuffer>>> m_buffers;
+@@ -136,6 +156,10 @@ TextureMapperGLData::TextureMapperGLData(void* platformContext)
+ 
+ TextureMapperGLData::~TextureMapperGLData()
+ {
++#if PLATFORM(HAIKU)
++    if (!m_glOwnerHaiku.isValid())
++        return;
++#endif
+     for (auto& entry : m_vbos)
+         glDeleteBuffers(1, &entry.value);
+ 
+@@ -174,7 +198,16 @@ Ref<TextureMapperShaderProgram> TextureMapperGLData::getShaderProgram(TextureMap
  {
      ASSERT(!options.isEmpty());
      auto addResult = m_sharedGLData->m_programs.ensure(options.toRaw(), [options] {
@@ -41336,7 +41618,7 @@ index 1b88532103dfc26c2a90aedce768e19f2e7059e6..dc823747bb57ee851d6f5863201918ae
      });
      return *addResult.iterator->value;
  }
-@@ -232,6 +255,77 @@ ClipStack& TextureMapper::clipStack()
+@@ -232,6 +265,77 @@ ClipStack& TextureMapper::clipStack()
      return data().currentSurface ? data().currentSurface->clipStack() : m_clipStack;
  }
  
@@ -41414,7 +41696,7 @@ index 1b88532103dfc26c2a90aedce768e19f2e7059e6..dc823747bb57ee851d6f5863201918ae
  void TextureMapper::beginPainting(FlipY flipY, BitmapTexture* surface)
  {
      glGetIntegerv(GL_CURRENT_PROGRAM, &data().previousProgram);
-@@ -801,6 +895,10 @@ void TextureMapper::drawTexturePackedYUV(GLuint texture, const std::array<GLfloa
+@@ -801,6 +905,10 @@ void TextureMapper::drawTexturePackedYUV(GLuint texture, const std::array<GLfloa
  
  void TextureMapper::drawSolidColor(const FloatRect& rect, const TransformationMatrix& matrix, const Color& color, bool isBlendingAllowed)
  {
@@ -41425,7 +41707,7 @@ index 1b88532103dfc26c2a90aedce768e19f2e7059e6..dc823747bb57ee851d6f5863201918ae
      OptionSet<TextureMapperFlags> flags;
      TextureMapperShaderProgram::Options options = TextureMapperShaderProgram::SolidColor;
      if (!matrix.mapQuad(rect).isRectilinear()) {
-@@ -817,6 +915,9 @@ void TextureMapper::drawSolidColor(const FloatRect& rect, const TransformationMa
+@@ -817,6 +925,9 @@ void TextureMapper::drawSolidColor(const FloatRect& rect, const TransformationMa
      }
  
      Ref<TextureMapperShaderProgram> program = data().getShaderProgram(options);
@@ -41435,7 +41717,7 @@ index 1b88532103dfc26c2a90aedce768e19f2e7059e6..dc823747bb57ee851d6f5863201918ae
      glUseProgram(program->programID());
  
      if (clipStack().isRoundedRectClipEnabled())
-@@ -828,6 +929,13 @@ void TextureMapper::drawSolidColor(const FloatRect& rect, const TransformationMa
+@@ -828,6 +939,13 @@ void TextureMapper::drawSolidColor(const FloatRect& rect, const TransformationMa
          flags.add(TextureMapperFlags::ShouldBlend);
  
      draw(rect, matrix, program.get(), GL_TRIANGLE_FAN, flags);
@@ -41449,7 +41731,7 @@ index 1b88532103dfc26c2a90aedce768e19f2e7059e6..dc823747bb57ee851d6f5863201918ae
  }
  
  void TextureMapper::clearColor(const Color& color)
-@@ -877,8 +985,38 @@ void TextureMapper::drawUnitRect(TextureMapperShaderProgram& program, GLenum dra
+@@ -877,8 +995,38 @@ void TextureMapper::drawUnitRect(TextureMapperShaderProgram& program, GLenum dra
      glBindBuffer(GL_ARRAY_BUFFER, 0);
  }
  
@@ -41488,7 +41770,7 @@ index 1b88532103dfc26c2a90aedce768e19f2e7059e6..dc823747bb57ee851d6f5863201918ae
      TransformationMatrix matrix(modelViewMatrix);
      matrix.multiply(TransformationMatrix::rectToRect(FloatRect(0, 0, 1, 1), rect));
  
-@@ -987,6 +1125,10 @@ void TextureMapper::drawTextureCopy(const BitmapTexture& sourceTexture, const Fl
+@@ -987,6 +1135,10 @@ void TextureMapper::drawTextureCopy(const BitmapTexture& sourceTexture, const Fl
  
  void TextureMapper::drawBlurred(const BitmapTexture& sourceTexture, const FloatRect& rect, float radius, Direction direction, bool alphaBlur)
  {
@@ -41499,7 +41781,7 @@ index 1b88532103dfc26c2a90aedce768e19f2e7059e6..dc823747bb57ee851d6f5863201918ae
      Ref<TextureMapperShaderProgram> program = data().getShaderProgram({
          alphaBlur ? TextureMapperShaderProgram::AlphaBlur : TextureMapperShaderProgram::BlurFilter,
      });
-@@ -1278,6 +1420,28 @@ RefPtr<BitmapTexture> TextureMapper::applyFilters(RefPtr<BitmapTexture>& sourceT
+@@ -1278,6 +1430,28 @@ RefPtr<BitmapTexture> TextureMapper::applyFilters(RefPtr<BitmapTexture>& sourceT
  
  RefPtr<BitmapTexture> TextureMapper::applyFilter(RefPtr<BitmapTexture>& sourceTexture, const Ref<const FilterOperation>& filter, bool defersLastPass)
  {
@@ -41528,7 +41810,7 @@ index 1b88532103dfc26c2a90aedce768e19f2e7059e6..dc823747bb57ee851d6f5863201918ae
      switch (filter->type()) {
      case FilterOperation::Type::Grayscale:
      case FilterOperation::Type::Sepia:
-@@ -1330,6 +1494,10 @@ void TextureMapper::bindDefaultSurface()
+@@ -1330,6 +1504,10 @@ void TextureMapper::bindDefaultSurface()
  
  void TextureMapper::bindSurface(BitmapTexture *surface)
  {
@@ -129376,7 +129658,7 @@ index 0000000000000000000000000000000000000000..abc82f6d26d2b1374740dc304282ae75
 +
 +}
 diff --git a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/AcceleratedSurface.cpp b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/AcceleratedSurface.cpp
-index 8177756a0e14111347846c912b8e3851f2559b4a..85926862c21cfa0e17d23736fd1dac406818cbe5 100644
+index 8177756a0e14111347846c912b8e3851f2559b4a..fd4c3d7b124c21e2c3f457fee9135e2640fa7c9a 100644
 --- a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/AcceleratedSurface.cpp
 +++ b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/AcceleratedSurface.cpp
 @@ -26,6 +26,23 @@
@@ -129452,7 +129734,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..85926862c21cfa0e17d23736fd1dac40
      , m_hardwareAccelerationEnabled(webPage.corePage()->settings().hardwareAccelerationEnabled())
  #endif
      , m_backgroundColor(webPage.backgroundColor())
-@@ -130,10 +166,305 @@ AcceleratedSurface::AcceleratedSurface(WebPage& webPage, Function<void()>&& fram
+@@ -130,11 +166,306 @@ AcceleratedSurface::AcceleratedSurface(WebPage& webPage, Function<void()>&& fram
      , m_isVisible(webPage.activityState().contains(ActivityState::IsVisible))
      , m_useExplicitSync(usesGL() && useExplicitSync())
  #if ENABLE(DAMAGE_TRACKING)
@@ -129468,9 +129750,9 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..85926862c21cfa0e17d23736fd1dac40
      , m_damageTracker(m_swapChain, !usesGL())
  #endif
 +#endif
-+{
-+}
-+
+ {
+ }
+ 
 +#if PLATFORM(HAIKU)
 +// app_server's copy of the screen, mapped once for the life of the process.
 +// Mesa keeps the pages of the mapping it presents into locked for the GPU,
@@ -129750,14 +130032,15 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..85926862c21cfa0e17d23736fd1dac40
 +}
 +
 +void AcceleratedSurface::redisplayDirect()
- {
++{
 +    if (m_redisplayHandlerHaiku)
 +        m_redisplayHandlerHaiku();
- }
++}
 +#endif
- 
++
  AcceleratedSurface::~AcceleratedSurface() = default;
  
+ WTF_MAKE_TZONE_ALLOCATED_IMPL(AcceleratedSurface::RenderTarget);
 @@ -176,7 +507,7 @@ void AcceleratedSurface::RenderTarget::createSkiaSurfaceForFramebuffer(unsigned
      m_skiaSurface = SkSurfaces::WrapBackendRenderTarget(display.skiaGrContext(), backendRenderTarget, origin, kRGBA_8888_SkColorType, SkColorSpace::MakeSRGB(), &properties);
  }
@@ -129767,7 +130050,28 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..85926862c21cfa0e17d23736fd1dac40
  WTF_MAKE_TZONE_ALLOCATED_IMPL(AcceleratedSurface::RenderTargetShareableBuffer);
  
  AcceleratedSurface::RenderTargetShareableBuffer::RenderTargetShareableBuffer(AcceleratedSurface& surface, const IntSize& size)
-@@ -218,9 +549,36 @@ void AcceleratedSurface::RenderTargetShareableBuffer::initializeColorBuffer(EGLI
+@@ -200,6 +531,9 @@ AcceleratedSurface::RenderTargetShareableBuffer::~RenderTargetShareableBuffer()
+ {
+     m_skiaSurface = nullptr;
+ 
++#if PLATFORM(HAIKU)
++    if (m_glOwnerHaiku.isValid()) {
++#endif
+     if (m_fbo)
+         glDeleteFramebuffers(1, &m_fbo);
+ 
+@@ -209,6 +543,10 @@ AcceleratedSurface::RenderTargetShareableBuffer::~RenderTargetShareableBuffer()
+     if (m_colorBuffer)
+         glDeleteRenderbuffers(1, &m_colorBuffer);
+ 
++#if PLATFORM(HAIKU)
++    }
++#endif
++
+     WebProcess::singleton().parentProcessConnection()->send(Messages::AcceleratedBackingStore::DidDestroyBuffer(m_id), m_surface->surfaceID());
+ }
+ 
+@@ -218,9 +556,36 @@ void AcceleratedSurface::RenderTargetShareableBuffer::initializeColorBuffer(EGLI
      glBindRenderbuffer(GL_RENDERBUFFER, m_colorBuffer);
      if (image)
          glEGLImageTargetRenderbufferStorageOES(GL_RENDERBUFFER, image);
@@ -129805,7 +130109,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..85926862c21cfa0e17d23736fd1dac40
  
      if (m_surface->useSkia())
          createSkiaSurfaceForFramebuffer(m_fbo);
-@@ -228,6 +586,10 @@ void AcceleratedSurface::RenderTargetShareableBuffer::initializeColorBuffer(EGLI
+@@ -228,6 +593,10 @@ void AcceleratedSurface::RenderTargetShareableBuffer::initializeColorBuffer(EGLI
  
  void AcceleratedSurface::RenderTargetShareableBuffer::sendFrame(Vector<WebCore::IntRect, 1>&& damageRects)
  {
@@ -129816,7 +130120,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..85926862c21cfa0e17d23736fd1dac40
      WebProcess::singleton().parentProcessConnection()->send(Messages::AcceleratedBackingStore::Frame(m_id, WTF::move(damageRects), WTF::move(m_renderingFenceFD)), m_surface->surfaceID());
  }
  
-@@ -418,7 +780,14 @@ std::unique_ptr<AcceleratedSurface::RenderTarget> AcceleratedSurface::RenderTarg
+@@ -418,7 +787,14 @@ std::unique_ptr<AcceleratedSurface::RenderTarget> AcceleratedSurface::RenderTarg
          return nullptr;
      }
  
@@ -129831,14 +130135,14 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..85926862c21cfa0e17d23736fd1dac40
      if (!bufferHandle) {
          WTFLogAlways("Failed to create handle for shared memory buffer");
          return nullptr;
-@@ -439,13 +808,454 @@ AcceleratedSurface::RenderTargetSHMImage::RenderTargetSHMImage(AcceleratedSurfac
+@@ -439,13 +815,454 @@ AcceleratedSurface::RenderTargetSHMImage::RenderTargetSHMImage(AcceleratedSurfac
      WebProcess::singleton().parentProcessConnection()->send(Messages::AcceleratedBackingStore::DidCreateSHMBuffer(m_id, WTF::move(bitmapHandle)), m_surface->surfaceID());
  }
  
 +#if PLATFORM(HAIKU)
 +AcceleratedSurface::RenderTargetSHMImage::~RenderTargetSHMImage()
 +{
-+    if (m_pixelBuffer)
++    if (m_pixelBuffer && m_glOwnerHaiku.isValid())
 +        glDeleteBuffers(1, &m_pixelBuffer);
 +}
 +
@@ -130286,7 +130590,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..85926862c21cfa0e17d23736fd1dac40
  
          SkImageInfo info = SkImageInfo::Make(m_bitmap->size().width(), m_bitmap->size().height(), SkColorType::kBGRA_8888_SkColorType, SkAlphaType::kPremul_SkAlphaType);
  
-@@ -457,9 +1267,14 @@ void AcceleratedSurface::RenderTargetSHMImage::didRenderFrame()
+@@ -457,9 +1274,14 @@ void AcceleratedSurface::RenderTargetSHMImage::didRenderFrame()
          return;
      }
  
@@ -130301,7 +130605,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..85926862c21cfa0e17d23736fd1dac40
  std::unique_ptr<AcceleratedSurface::RenderTarget> AcceleratedSurface::RenderTargetTexture::create(AcceleratedSurface& surface, const IntSize& size)
  {
      auto texture = BitmapTexture::create(size);
-@@ -515,8 +1330,9 @@ AcceleratedSurface::RenderTargetTexture::RenderTargetTexture(AcceleratedSurface&
+@@ -515,8 +1337,9 @@ AcceleratedSurface::RenderTargetTexture::RenderTargetTexture(AcceleratedSurface&
  }
  
  AcceleratedSurface::RenderTargetTexture::~RenderTargetTexture() = default;
@@ -130312,7 +130616,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..85926862c21cfa0e17d23736fd1dac40
  
  #if USE(WPE_RENDERER)
  std::unique_ptr<AcceleratedSurface::RenderTarget> AcceleratedSurface::RenderTargetWPEBackend::create(AcceleratedSurface& surface, const IntSize& initialSize, UnixFileDescriptor&& hostFD)
-@@ -594,7 +1410,7 @@ void AcceleratedSurface::RenderTargetWPEBackend::didRenderFrame()
+@@ -594,7 +1417,7 @@ void AcceleratedSurface::RenderTargetWPEBackend::didRenderFrame()
  AcceleratedSurface::SwapChain::SwapChain(AcceleratedSurface& surface)
      : m_surface(surface)
  {
@@ -130321,7 +130625,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..85926862c21cfa0e17d23736fd1dac40
      if (!m_surface->hardwareAccelerationEnabled()) {
          m_type = Type::SharedMemory;
          return;
-@@ -632,7 +1448,7 @@ AcceleratedSurface::SwapChain::SwapChain(AcceleratedSurface& surface)
+@@ -632,7 +1455,7 @@ AcceleratedSurface::SwapChain::SwapChain(AcceleratedSurface& surface)
      case PlatformDisplay::Type::GBM:
  #endif
          break;
@@ -130330,7 +130634,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..85926862c21cfa0e17d23736fd1dac40
  #if USE(WPE_RENDERER)
      case PlatformDisplay::Type::WPE:
          m_type = Type::WPEBackend;
-@@ -646,11 +1462,19 @@ AcceleratedSurface::SwapChain::SwapChain(AcceleratedSurface& surface)
+@@ -646,11 +1469,19 @@ AcceleratedSurface::SwapChain::SwapChain(AcceleratedSurface& surface)
      case PlatformDisplay::Type::Default:
          break;
  #endif // PLATFORM(GTK)
@@ -130351,7 +130655,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..85926862c21cfa0e17d23736fd1dac40
  void AcceleratedSurface::SwapChain::setupBufferFormat()
  {
      if (m_type != Type::EGLImage)
-@@ -749,7 +1573,7 @@ bool AcceleratedSurface::SwapChain::resize(const IntSize& size)
+@@ -749,7 +1580,7 @@ bool AcceleratedSurface::SwapChain::resize(const IntSize& size)
  
  bool AcceleratedSurface::SwapChain::handleBufferFormatChangeIfNeeded()
  {
@@ -130360,7 +130664,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..85926862c21cfa0e17d23736fd1dac40
      if (m_type == Type::EGLImage) {
          Locker locker { m_bufferFormatLock };
          if (m_bufferFormatChanged) {
-@@ -765,7 +1589,7 @@ bool AcceleratedSurface::SwapChain::handleBufferFormatChangeIfNeeded()
+@@ -765,7 +1596,7 @@ bool AcceleratedSurface::SwapChain::handleBufferFormatChangeIfNeeded()
  std::unique_ptr<AcceleratedSurface::RenderTarget> AcceleratedSurface::SwapChain::createTarget() const
  {
      switch (m_type) {
@@ -130369,7 +130673,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..85926862c21cfa0e17d23736fd1dac40
  #if USE(GBM) || OS(ANDROID)
      case Type::EGLImage: {
          Locker locker { m_bufferFormatLock };
-@@ -773,7 +1597,11 @@ std::unique_ptr<AcceleratedSurface::RenderTarget> AcceleratedSurface::SwapChain:
+@@ -773,7 +1604,11 @@ std::unique_ptr<AcceleratedSurface::RenderTarget> AcceleratedSurface::SwapChain:
      }
  #endif
      case Type::Texture:
@@ -130381,7 +130685,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..85926862c21cfa0e17d23736fd1dac40
      case Type::SharedMemory:
          return RenderTargetSHMImage::create(m_surface.get(), m_size);
  #endif
-@@ -812,6 +1640,11 @@ AcceleratedSurface::RenderTarget* AcceleratedSurface::SwapChain::nextTarget()
+@@ -812,6 +1647,11 @@ AcceleratedSurface::RenderTarget* AcceleratedSurface::SwapChain::nextTarget()
              if (auto target = createTarget())
                  m_freeTargets.append(WTF::move(target));
          }
@@ -130393,7 +130697,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..85926862c21cfa0e17d23736fd1dac40
  
  #if ENABLE(WPE_PLATFORM)
          if (m_freeTargets.size() != targetsToCreate)
-@@ -841,6 +1674,12 @@ void AcceleratedSurface::SwapChain::releaseTarget(uint64_t targetID, UnixFileDes
+@@ -841,6 +1681,12 @@ void AcceleratedSurface::SwapChain::releaseTarget(uint64_t targetID, UnixFileDes
          m_freeTargets.insert(0, WTF::move(m_lockedTargets[index]));
          m_lockedTargets.removeAt(index);
      }
@@ -130406,7 +130710,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..85926862c21cfa0e17d23736fd1dac40
  }
  
  void AcceleratedSurface::SwapChain::reset()
-@@ -859,6 +1698,11 @@ void AcceleratedSurface::SwapChain::releaseUnusedBuffers()
+@@ -859,6 +1705,11 @@ void AcceleratedSurface::SwapChain::releaseUnusedBuffers()
  #if USE(WPE_RENDERER)
      ASSERT(m_type != Type::WPEBackend);
  #endif
@@ -130418,7 +130722,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..85926862c21cfa0e17d23736fd1dac40
  
  #if ENABLE(WPE_PLATFORM)
      WebProcess::singleton().parentProcessConnection()->send(Messages::AcceleratedBackingStore::DidChangeBufferConfiguration(m_lockedTargets.size()), m_surface->surfaceID());
-@@ -929,7 +1773,7 @@ bool AcceleratedSurface::shouldPaintMirrored() const
+@@ -929,7 +1780,7 @@ bool AcceleratedSurface::shouldPaintMirrored() const
      switch (m_swapChain.type()) {
      case SwapChain::Type::Invalid:
          return false;
@@ -130427,7 +130731,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..85926862c21cfa0e17d23736fd1dac40
      case SwapChain::Type::Texture:
  #if USE(GBM) || OS(ANDROID)
      case SwapChain::Type::EGLImage:
-@@ -960,6 +1804,10 @@ void AcceleratedSurface::preferredBufferFormatsDidChange()
+@@ -960,6 +1811,10 @@ void AcceleratedSurface::preferredBufferFormatsDidChange()
  
  void AcceleratedSurface::visibilityDidChange(bool isVisible)
  {
@@ -130438,7 +130742,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..85926862c21cfa0e17d23736fd1dac40
      if (m_isVisible == isVisible)
          return;
  
-@@ -1000,7 +1848,7 @@ void AcceleratedSurface::backgroundColorDidChange()
+@@ -1000,7 +1855,7 @@ void AcceleratedSurface::backgroundColorDidChange()
      if (isOpaque == wasOpaque)
          return;
  
@@ -130447,7 +130751,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..85926862c21cfa0e17d23736fd1dac40
      m_swapChain.setupBufferFormat();
  #endif
  }
-@@ -1022,7 +1870,7 @@ void AcceleratedSurface::didCreateCompositingRunLoop(RunLoop& runLoop)
+@@ -1022,7 +1877,7 @@ void AcceleratedSurface::didCreateCompositingRunLoop(RunLoop& runLoop)
  #if USE(GLIB_EVENT_LOOP)
      m_releaseUnusedBuffersTimer->setPriority(RunLoopSourcePriority::ReleaseUnusedResourcesTimer);
  #endif
@@ -130456,7 +130760,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..85926862c21cfa0e17d23736fd1dac40
      WebProcess::singleton().parentProcessConnection()->addMessageReceiver(runLoop, *this, Messages::AcceleratedSurface::messageReceiverName(), m_id);
  #endif
  }
-@@ -1030,6 +1878,10 @@ void AcceleratedSurface::didCreateCompositingRunLoop(RunLoop& runLoop)
+@@ -1030,6 +1885,10 @@ void AcceleratedSurface::didCreateCompositingRunLoop(RunLoop& runLoop)
  void AcceleratedSurface::willDestroyCompositingRunLoop()
  {
      m_frameCompleteHandler = nullptr;
@@ -130467,7 +130771,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..85926862c21cfa0e17d23736fd1dac40
  
  #if USE(WPE_RENDERER)
      if (m_swapChain.type() == SwapChain::Type::WPEBackend)
-@@ -1043,7 +1895,7 @@ void AcceleratedSurface::willDestroyCompositingRunLoop()
+@@ -1043,13 +1902,16 @@ void AcceleratedSurface::willDestroyCompositingRunLoop()
              protectedThis->m_releaseUnusedBuffersTimer = nullptr;
          });
      }
@@ -130476,7 +130780,16 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..85926862c21cfa0e17d23736fd1dac40
      WebProcess::singleton().parentProcessConnection()->removeMessageReceiver(Messages::AcceleratedSurface::messageReceiverName(), m_id);
  #endif
  }
-@@ -1149,18 +2001,105 @@ void AcceleratedSurface::didRenderFrame(TargetContents targetContents)
+ 
+ void AcceleratedSurface::willDestroyGLContext()
+ {
++#if ENABLE(DAMAGE_TRACKING)
++    m_damageTracker.reset();
++#endif
+     m_pendingFrameNotifyTargets.clear();
+     m_target = nullptr;
+     m_swapChain.reset();
+@@ -1149,18 +2011,105 @@ void AcceleratedSurface::didRenderFrame(TargetContents targetContents)
      if (!m_target)
          return;
  
@@ -130582,7 +130895,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..85926862c21cfa0e17d23736fd1dac40
      m_pendingFrameNotifyTargets.insert(0, { m_target, WTF::move(damageRects) });
      m_target = nullptr;
  }
-@@ -1182,13 +2121,17 @@ const std::optional<Damage>& AcceleratedSurface::renderTargetDamage()
+@@ -1182,13 +2131,17 @@ const std::optional<Damage>& AcceleratedSurface::renderTargetDamage()
  }
  #endif
  
@@ -130602,10 +130915,16 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..85926862c21cfa0e17d23736fd1dac40
  #endif
  
 diff --git a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/AcceleratedSurface.h b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/AcceleratedSurface.h
-index 9c24ddab5df0f74f95b87ad7ac594ed2a9c237ab..7e0d4b649aca86a5432f85efa8b5a670b5d4c486 100644
+index 9c24ddab5df0f74f95b87ad7ac594ed2a9c237ab..8e0892046b371ea4ebfbcf1d531fcfa50ac2a82a 100644
 --- a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/AcceleratedSurface.h
 +++ b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/AcceleratedSurface.h
-@@ -27,10 +27,15 @@
+@@ -24,13 +24,21 @@
+  */
+ 
+ #pragma once
++#if PLATFORM(HAIKU)
++#include <WebCore/GLDisplay.h>
++#endif
  
  #if USE(COORDINATED_GRAPHICS)
  
@@ -130621,7 +130940,7 @@ index 9c24ddab5df0f74f95b87ad7ac594ed2a9c237ab..7e0d4b649aca86a5432f85efa8b5a670
  #include <WebCore/Damage.h>
  #include <WebCore/IntSize.h>
  #include <atomic>
-@@ -83,6 +88,9 @@ class AcceleratedSurface;
+@@ -83,6 +91,9 @@ class AcceleratedSurface;
  }
  
  namespace WebKit {
@@ -130631,7 +130950,7 @@ index 9c24ddab5df0f74f95b87ad7ac594ed2a9c237ab..7e0d4b649aca86a5432f85efa8b5a670
  class WebPage;
  
  // Whether the target holds the frame it was meant to hold once rendering ends. A frame that painted
-@@ -94,7 +102,7 @@ enum class TargetContents : bool {
+@@ -94,7 +105,7 @@ enum class TargetContents : bool {
  };
  
  class AcceleratedSurface final : public ThreadSafeRefCountedAndCanMakeThreadSafeWeakPtr<AcceleratedSurface, WTF::DestructionThread::MainRunLoop>, public CanMakeThreadSafeCheckedPtr<AcceleratedSurface>
@@ -130640,7 +130959,7 @@ index 9c24ddab5df0f74f95b87ad7ac594ed2a9c237ab..7e0d4b649aca86a5432f85efa8b5a670
      , public IPC::MessageReceiver
  #endif
  {
-@@ -109,7 +117,7 @@ public:
+@@ -109,7 +120,7 @@ public:
      static Ref<AcceleratedSurface> create(WebPage&, Function<void()>&& frameCompleteHandler, RenderingPurpose);
      ~AcceleratedSurface();
  
@@ -130649,7 +130968,7 @@ index 9c24ddab5df0f74f95b87ad7ac594ed2a9c237ab..7e0d4b649aca86a5432f85efa8b5a670
      void ref() const final { ThreadSafeRefCountedAndCanMakeThreadSafeWeakPtr::ref(); }
      void deref() const final { ThreadSafeRefCountedAndCanMakeThreadSafeWeakPtr::deref(); }
  #endif
-@@ -118,12 +126,13 @@ public:
+@@ -118,12 +129,13 @@ public:
      uint64_t surfaceID() const { return m_id; }
      bool shouldPaintMirrored() const;
  
@@ -130664,7 +130983,7 @@ index 9c24ddab5df0f74f95b87ad7ac594ed2a9c237ab..7e0d4b649aca86a5432f85efa8b5a670
      SkCanvas* canvas();
  
      void willDestroyGLContext();
-@@ -158,22 +167,37 @@ public:
+@@ -158,22 +170,37 @@ public:
      void visibilityDidChange(bool);
      void backgroundColorDidChange();
  
@@ -130704,7 +131023,7 @@ index 9c24ddab5df0f74f95b87ad7ac594ed2a9c237ab..7e0d4b649aca86a5432f85efa8b5a670
  #endif
      void frameDone();
      void releaseUnusedBuffersTimerFired();
-@@ -195,6 +219,16 @@ private:
+@@ -195,6 +222,16 @@ private:
  
          virtual void sync(bool) { }
          virtual void setReleaseFenceFD(UnixFileDescriptor&&) { }
@@ -130721,7 +131040,16 @@ index 9c24ddab5df0f74f95b87ad7ac594ed2a9c237ab..7e0d4b649aca86a5432f85efa8b5a670
  
          SkSurface* skiaSurface() const { return m_skiaSurface.get(); }
  
-@@ -226,7 +260,7 @@ private:
+@@ -220,13 +257,16 @@ private:
+ 
+         void createSkiaSurfaceForFramebuffer(unsigned);
+ 
++#if PLATFORM(HAIKU)
++        WebCore::GLResourceOwnerHaiku m_glOwnerHaiku;
++#endif
+         uint64_t m_id { 0 };
+         const CheckedRef<AcceleratedSurface> m_surface;
+         WebCore::IntSize m_size;
          sk_sp<SkSurface> m_skiaSurface;
      };
  
@@ -130730,7 +131058,7 @@ index 9c24ddab5df0f74f95b87ad7ac594ed2a9c237ab..7e0d4b649aca86a5432f85efa8b5a670
      class RenderTargetShareableBuffer : public RenderTarget {
          WTF_MAKE_TZONE_ALLOCATED(RenderTargetShareableBuffer);
      public:
-@@ -322,10 +356,27 @@ private:
+@@ -322,10 +362,27 @@ private:
      private:
          bool supportsExplicitSync() const override { return false; }
          void didRenderFrame() override;
@@ -130758,7 +131086,7 @@ index 9c24ddab5df0f74f95b87ad7ac594ed2a9c237ab..7e0d4b649aca86a5432f85efa8b5a670
      class RenderTargetTexture final : public RenderTargetShareableBuffer {
      public:
          static std::unique_ptr<RenderTarget> create(AcceleratedSurface&, const WebCore::IntSize&);
-@@ -337,7 +388,8 @@ private:
+@@ -337,7 +394,8 @@ private:
  
          const Ref<WebCore::BitmapTexture> m_texture;
      };
@@ -130768,7 +131096,7 @@ index 9c24ddab5df0f74f95b87ad7ac594ed2a9c237ab..7e0d4b649aca86a5432f85efa8b5a670
  
  #if USE(WPE_RENDERER)
      class RenderTargetWPEBackend final : public RenderTarget {
-@@ -364,7 +416,7 @@ private:
+@@ -364,7 +422,7 @@ private:
  
          enum class Type {
              Invalid,
@@ -130777,7 +131105,7 @@ index 9c24ddab5df0f74f95b87ad7ac594ed2a9c237ab..7e0d4b649aca86a5432f85efa8b5a670
  #if USE(GBM) || OS(ANDROID)
              EGLImage,
  #endif
-@@ -382,6 +434,10 @@ private:
+@@ -382,6 +440,10 @@ private:
          const WebCore::IntSize& size() const LIFETIME_BOUND { return m_size; }
          RenderTarget* nextTarget();
          void releaseTarget(uint64_t, UnixFileDescriptor&& releaseFence);
@@ -130788,7 +131116,7 @@ index 9c24ddab5df0f74f95b87ad7ac594ed2a9c237ab..7e0d4b649aca86a5432f85efa8b5a670
          void reset();
          void releaseUnusedBuffers();
  
-@@ -395,7 +451,7 @@ private:
+@@ -395,7 +457,7 @@ private:
          }
  #endif
  
@@ -130797,7 +131125,7 @@ index 9c24ddab5df0f74f95b87ad7ac594ed2a9c237ab..7e0d4b649aca86a5432f85efa8b5a670
          void setupBufferFormat();
  #endif
  
-@@ -416,7 +472,7 @@ private:
+@@ -416,7 +478,7 @@ private:
          Vector<std::unique_ptr<RenderTarget>, s_maximumBuffers> m_freeTargets;
          Vector<std::unique_ptr<RenderTarget>, s_maximumBuffers> m_lockedTargets;
          bool m_initialTargetsCreated { false };
@@ -130806,7 +131134,7 @@ index 9c24ddab5df0f74f95b87ad7ac594ed2a9c237ab..7e0d4b649aca86a5432f85efa8b5a670
          mutable Lock m_bufferFormatLock;
          BufferFormat m_bufferFormat WTF_GUARDED_BY_LOCK(m_bufferFormatLock);
          bool m_bufferFormatChanged WTF_GUARDED_BY_LOCK(m_bufferFormatLock) { false };
-@@ -478,10 +534,24 @@ private:
+@@ -478,10 +540,24 @@ private:
  
      const WeakRef<WebPage> m_webPage;
      Function<void()> m_frameCompleteHandler;
@@ -130846,7 +131174,7 @@ index 8548e5913f1f4e92a8d5b16288edc50b7ba81c53..4c99b4927eeac580110c1a3fc9000159
 +#endif
  }
 diff --git a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/CoordinatedSceneState.cpp b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/CoordinatedSceneState.cpp
-index 6e297e0ad9e864aff97653036e314fcbf4d7b88c..de077dc5c0f0911e425346ef95a933df909c313a 100644
+index 6e297e0ad9e864aff97653036e314fcbf4d7b88c..ac378a0b2a9b31056f3e7f371bdfb9ed73f0a0ad 100644
 --- a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/CoordinatedSceneState.cpp
 +++ b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/CoordinatedSceneState.cpp
 @@ -31,6 +31,10 @@
@@ -130886,6 +131214,37 @@ index 6e297e0ad9e864aff97653036e314fcbf4d7b88c..de077dc5c0f0911e425346ef95a933df
  
      {
          Locker stateLock { m_stateLock };
+@@ -159,6 +181,30 @@ void CoordinatedSceneState::invalidateCommittedLayers()
+     }
+ }
+ 
++#if PLATFORM(HAIKU) && USE(TEXTURE_MAPPER)
++void CoordinatedSceneState::discardGraphicsResourcesHaiku()
++{
++    ASSERT(!isMainRunLoop());
++    commitPendingLayers();
++    m_rootLayer->discardGraphicsResourcesHaiku();
++    for (auto& layer : m_committedLayers)
++        layer->discardGraphicsResourcesHaiku();
++}
++
++void CoordinatedSceneState::resetBackingStoresHaiku()
++{
++    ASSERT(isMainRunLoop());
++    HashSet<Ref<CoordinatedPlatformLayer>> layers;
++    {
++        Locker locker { m_layersLock };
++        layers = m_layers;
++    }
++    for (auto& layer : layers)
++        layer->resetBackingStoreHaiku();
++    m_didChangeLayers = true;
++}
++#endif
++
+ void CoordinatedSceneState::invalidate()
+ {
+     ASSERT(isMainRunLoop());
 diff --git a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/DrawingAreaCoordinatedGraphics.cpp b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/DrawingAreaCoordinatedGraphics.cpp
 index efd16800da06dcf0fb4248500b730c89d92388fe..1ee9ed77ed614b0c96726c0d36bbb3eaf82616b6 100644
 --- a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/DrawingAreaCoordinatedGraphics.cpp
@@ -131057,7 +131416,7 @@ index f7a92c96dec16106113dc0ee005ebd40f36a7ffb..0c69ec684f8b5d9c492fc67fda9863b4
  };
  
 diff --git a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/LayerTreeHost.cpp b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/LayerTreeHost.cpp
-index 3d6d03115b4e8f2c5868af50c90f83cccc25bcf7..b9f0c54c5eb433e43f7007a237d31a964f4e8f46 100644
+index 3d6d03115b4e8f2c5868af50c90f83cccc25bcf7..3a2ee9d7117941cc60c6bc6eccf0e7484baa3b14 100644
 --- a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/LayerTreeHost.cpp
 +++ b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/LayerTreeHost.cpp
 @@ -28,6 +28,7 @@
@@ -131068,7 +131427,7 @@ index 3d6d03115b4e8f2c5868af50c90f83cccc25bcf7..b9f0c54c5eb433e43f7007a237d31a96
  
  #if USE(COORDINATED_GRAPHICS)
  #include "CoordinatedSceneState.h"
-@@ -53,11 +54,20 @@
+@@ -53,17 +54,40 @@
  #include <WebCore/SkiaPaintingEngine.h>
  #include <WebCore/ThreadedScrollingTree.h>
  #include <WebCore/WindowEventLoop.h>
@@ -131085,11 +131444,31 @@ index 3d6d03115b4e8f2c5868af50c90f83cccc25bcf7..b9f0c54c5eb433e43f7007a237d31a96
 +#include <cstdlib>
 +#include <unistd.h>
 +#include <WebCore/RenderingStallHaiku.h>
++#if USE(TEXTURE_MAPPER)
++#include <WebCore/BitmapTexturePool.h>
++#include <WebCore/GLContext.h>
++#include <wtf/NeverDestroyed.h>
++#endif
 +#endif
  
  namespace WebKit {
  using namespace WebCore;
-@@ -91,7 +101,15 @@ std::unique_ptr<LayerTreeHost> LayerTreeHost::create(WebPage& webPage)
+ 
+ WTF_MAKE_TZONE_ALLOCATED_IMPL(LayerTreeHost);
+ 
++#if PLATFORM(HAIKU) && USE(TEXTURE_MAPPER)
++static HashSet<LayerTreeHost*>& graphicsHostsHaiku()
++{
++    ASSERT(RunLoop::isMain());
++    static NeverDestroyed<HashSet<LayerTreeHost*>> hosts;
++    return hosts;
++}
++#endif
++
+ #if ENABLE(DAMAGE_TRACKING)
+ static bool damageOverlayForcesPropagation()
+ {
+@@ -91,7 +115,18 @@ std::unique_ptr<LayerTreeHost> LayerTreeHost::create(WebPage& webPage)
  LayerTreeHost::LayerTreeHost(WebPage& webPage)
      : m_webPage(webPage)
      , m_sceneState(CoordinatedSceneState::create())
@@ -131101,11 +131480,79 @@ index 3d6d03115b4e8f2c5868af50c90f83cccc25bcf7..b9f0c54c5eb433e43f7007a237d31a96
  {
 +#if PLATFORM(HAIKU)
 +    m_livenessTimerHaiku.startRepeating(1_s);
++#if USE(TEXTURE_MAPPER)
++    graphicsHostsHaiku().add(this);
++#endif
 +#endif
      {
          auto& rootLayer = m_sceneState->rootLayer();
  #if ENABLE(DAMAGE_TRACKING)
-@@ -148,17 +166,129 @@ void LayerTreeHost::scheduleRenderingUpdate()
+@@ -131,6 +166,9 @@ LayerTreeHost::LayerTreeHost(WebPage& webPage)
+ 
+ LayerTreeHost::~LayerTreeHost()
+ {
++#if PLATFORM(HAIKU) && USE(TEXTURE_MAPPER)
++    graphicsHostsHaiku().remove(this);
++#endif
+     m_skiaPaintingEngine = nullptr;
+ 
+     // ThreadedCompositor must be invalidated before invalidating CoordinatedSceneState
+@@ -139,6 +177,54 @@ LayerTreeHost::~LayerTreeHost()
+     m_sceneState->invalidate();
+ }
+ 
++#if PLATFORM(HAIKU) && USE(TEXTURE_MAPPER)
++bool LayerTreeHost::recoverGraphicsContextsHaiku()
++{
++    ASSERT(RunLoop::isMain());
++    auto& display = PlatformDisplay::sharedDisplay();
++    if (!display.glDisplay().isContextLostHaiku())
++        return true; // Another page already recovered this display.
++    if (display.hasOtherThreadSkiaContextsHaiku()) {
++        WTFLogAlways("Summit GPU recovery: waiting for worker Skia contexts to retire");
++        return false;
++    }
++    auto& hosts = graphicsHostsHaiku();
++    for (auto* host : hosts) {
++        if (host->m_isUpdatingRendering)
++            return false;
++    }
++    for (auto* host : hosts) {
++        host->m_graphicsRecoveryHaiku = true;
++        host->invalidateRenderingUpdateRunLoopObserver();
++        host->m_compositor->prepareGraphicsRecoveryHaiku();
++    }
++    for (auto* host : hosts)
++        host->m_sceneState->resetBackingStoresHaiku();
++    BitmapTexturePool::singleton().discardLostTexturesHaiku();
++    if (!PlatformDisplay::recreateSharedDisplayHaiku()) {
++        WTFLogAlways("Summit GPU recovery: fresh EGL display unavailable; retrying");
++        return false;
++    }
++    bool ready = true;
++    for (auto* host : hosts)
++        ready &= host->m_compositor->recreateGraphicsContextHaiku();
++    if (!ready) {
++        PlatformDisplay::sharedDisplay().glDisplay().markContextLostHaiku();
++        WTFLogAlways("Summit GPU recovery: fresh compositor context unavailable; retrying");
++        return false;
++    }
++    for (auto* host : hosts) {
++        host->m_graphicsRecoveryHaiku = false;
++        host->m_isWaitingForRenderer = false;
++        host->m_scheduledWhileWaitingForRenderer = false;
++        host->m_pendingForceRepaint = true;
++        host->updateRenderingWithForcedRepaint();
++    }
++    WTFLogAlways("Summit GPU recovery: recreated shared EGL display and %zu compositor contexts", hosts.size());
++    return true;
++}
++#endif
++
+ uint64_t LayerTreeHost::surfaceID() const
+ {
+     return m_compositor->surfaceID();
+@@ -148,16 +234,128 @@ void LayerTreeHost::scheduleRenderingUpdate()
  {
      WTFEmitSignpost(this, LayerTreeHostScheduleRenderingUpdate, "isWaitingForRenderer %s", m_isWaitingForRenderer ? "yes" : "no");
  
@@ -131128,12 +131575,12 @@ index 3d6d03115b4e8f2c5868af50c90f83cccc25bcf7..b9f0c54c5eb433e43f7007a237d31a96
 +#if PLATFORM(HAIKU)
 +        checkRenderingStallHaiku();
 +#endif
-         return;
-     }
- 
-     scheduleRenderingUpdateRunLoopObserver();
- }
- 
++        return;
++    }
++
++    scheduleRenderingUpdateRunLoopObserver();
++}
++
 +#if PLATFORM(HAIKU)
 +// A page that still runs but has waited seconds for the composition it asked
 +// for has stopped drawing (typing showed only after a tab switch). Asking for
@@ -131160,8 +131607,8 @@ index 3d6d03115b4e8f2c5868af50c90f83cccc25bcf7..b9f0c54c5eb433e43f7007a237d31a96
 +    if (now - *m_stallRecoveryStartedAtHaiku < 2_s) {
 +        m_compositor->recoverFromStallHaiku(waited);
 +        m_stallWatchdogHaiku.startOneShot(1_s);
-+        return;
-+    }
+         return;
+     }
 +    std::fprintf(stderr, "Summit layer tree stall: pid=%d no composition for %.1f s; updating the page without it\n",
 +        static_cast<int>(getpid()), waited.seconds());
 +    m_stallRecoveryStartedAtHaiku = std::nullopt;
@@ -131169,7 +131616,7 @@ index 3d6d03115b4e8f2c5868af50c90f83cccc25bcf7..b9f0c54c5eb433e43f7007a237d31a96
 +    m_scheduledWhileWaitingForRenderer = false;
 +    scheduleRenderingUpdateRunLoopObserver();
 +}
-+
+ 
 +// Once a second: a page in view that something asked to draw but that has had
 +// no rendering update for two seconds has stalled somewhere between WebCore's
 +// refresh timer, this host's update observer and the compositor (typed text
@@ -131228,14 +131675,22 @@ index 3d6d03115b4e8f2c5868af50c90f83cccc25bcf7..b9f0c54c5eb433e43f7007a237d31a96
 +        restartRenderingUpdateSchedulerHaiku(*corePage);
 +    if (m_renderingUpdateRunLoopObserver->isScheduled())
 +        m_renderingUpdateRunLoopObserver->invalidate();
-+    scheduleRenderingUpdateRunLoopObserver();
-+}
+     scheduleRenderingUpdateRunLoopObserver();
+ }
 +#endif
-+
+ 
  void LayerTreeHost::scheduleRenderingUpdateRunLoopObserver()
  {
-     FrameRenderer::scheduleRenderingUpdateRunLoopObserver();
-@@ -174,20 +304,63 @@ bool LayerTreeHost::canUpdateRendering() const
+@@ -169,25 +367,76 @@ void LayerTreeHost::scheduleRenderingUpdateRunLoopObserver()
+ 
+ bool LayerTreeHost::canUpdateRendering() const
+ {
++#if PLATFORM(HAIKU)
++    if (m_graphicsRecoveryHaiku)
++        return false;
++#endif
+     return !m_isWaitingForRenderer;
+ }
  
  void LayerTreeHost::updateRendering()
  {
@@ -131257,6 +131712,10 @@ index 3d6d03115b4e8f2c5868af50c90f83cccc25bcf7..b9f0c54c5eb433e43f7007a237d31a96
 +            m_isWaitingForRenderer, m_scheduledWhileWaitingForRenderer);
 +#endif
      invalidateRenderingUpdateRunLoopObserver();
++#if PLATFORM(HAIKU)
++    if (m_graphicsRecoveryHaiku)
++        return;
++#endif
  
      RELEASE_ASSERT(!m_isUpdatingRendering);
      if (m_layerTreeStateIsFrozen)
@@ -131299,7 +131758,7 @@ index 3d6d03115b4e8f2c5868af50c90f83cccc25bcf7..b9f0c54c5eb433e43f7007a237d31a96
  
      if (m_overlayCompositingLayer)
          m_overlayCompositingLayer->flushCompositingState(visibleContentsRect());
-@@ -200,6 +373,32 @@ void LayerTreeHost::updateRendering()
+@@ -200,6 +449,32 @@ void LayerTreeHost::updateRendering()
      flags.add(FinalizeRenderingUpdateFlags::ApplyScrollingTreeLayerPositions);
  #endif
      page->finalizeRenderingUpdate(flags);
@@ -131332,7 +131791,7 @@ index 3d6d03115b4e8f2c5868af50c90f83cccc25bcf7..b9f0c54c5eb433e43f7007a237d31a96
  
      if (m_pendingResize) {
          m_compositor->setSize(page->size(), page->deviceScaleFactor());
-@@ -219,6 +418,10 @@ void LayerTreeHost::updateRendering()
+@@ -219,6 +494,10 @@ void LayerTreeHost::updateRendering()
          drawingArea->dispatchPendingCallbacksAfterEnsuringDrawing();
  
      bool didChangeSceneState = m_sceneState->flush();
@@ -131343,7 +131802,7 @@ index 3d6d03115b4e8f2c5868af50c90f83cccc25bcf7..b9f0c54c5eb433e43f7007a237d31a96
      if (m_compositionRequired || m_pendingResize || m_forceFrameSync || didChangeSceneState)
          requestCompositionForRenderingUpdate();
  
-@@ -237,6 +440,17 @@ void LayerTreeHost::updateRendering()
+@@ -237,6 +516,17 @@ void LayerTreeHost::updateRendering()
          m_sceneState->waitUntilPaintingComplete();
          m_waitUntilPaintingComplete = false;
      }
@@ -131361,7 +131820,7 @@ index 3d6d03115b4e8f2c5868af50c90f83cccc25bcf7..b9f0c54c5eb433e43f7007a237d31a96
  }
  
  void LayerTreeHost::updateRootLayer()
-@@ -322,6 +536,12 @@ void LayerTreeHost::suspend()
+@@ -322,6 +612,12 @@ void LayerTreeHost::suspend()
  
  void LayerTreeHost::resume()
  {
@@ -131374,7 +131833,7 @@ index 3d6d03115b4e8f2c5868af50c90f83cccc25bcf7..b9f0c54c5eb433e43f7007a237d31a96
      m_compositor->resume();
      FrameRenderer::resume();
  }
-@@ -447,8 +667,24 @@ void LayerTreeHost::didRenderFrame()
+@@ -447,8 +743,24 @@ void LayerTreeHost::didRenderFrame()
  
  void LayerTreeHost::requestCompositionForRenderingUpdate()
  {
@@ -131400,10 +131859,20 @@ index 3d6d03115b4e8f2c5868af50c90f83cccc25bcf7..b9f0c54c5eb433e43f7007a237d31a96
  
          if (!m_pendingForceRepaint && m_forcedRepaintAsyncCallback)
 diff --git a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/LayerTreeHost.h b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/LayerTreeHost.h
-index 57163f65873e5a481e5ef5a4ec3beec4b40b7cea..61b49ac7c362b416cdec1d10c44304d2aabb6534 100644
+index 57163f65873e5a481e5ef5a4ec3beec4b40b7cea..8a444fbabdfafae05a33908e3ee1df9df7a3dd22 100644
 --- a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/LayerTreeHost.h
 +++ b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/LayerTreeHost.h
-@@ -145,6 +145,18 @@ private:
+@@ -75,6 +75,9 @@ public:
+ 
+     void willRenderFrame();
+     void didRenderFrame();
++#if PLATFORM(HAIKU) && USE(TEXTURE_MAPPER)
++    static bool recoverGraphicsContextsHaiku();
++#endif
+ 
+ #if ENABLE(DAMAGE_TRACKING)
+     void notifyFrameDamageForTesting(WebCore::Region&&);
+@@ -145,6 +148,19 @@ private:
      bool m_waitUntilPaintingComplete { false };
      bool m_isWaitingForRenderer { false };
      bool m_scheduledWhileWaitingForRenderer { false };
@@ -131417,13 +131886,14 @@ index 57163f65873e5a481e5ef5a4ec3beec4b40b7cea..61b49ac7c362b416cdec1d10c44304d2
 +    MonotonicTime m_lastRenderingUpdateHaiku;
 +    MonotonicTime m_lastScheduleRequestHaiku;
 +    bool m_reportedLivenessStallHaiku { false };
++    bool m_graphicsRecoveryHaiku { false };
 +    std::optional<MonotonicTime> m_blockedInViewSinceHaiku;
 +#endif
      bool m_forceFrameSync { false };
      bool m_compositionRequired { false };
  #if ENABLE(SCROLLING_THREAD)
 diff --git a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/ThreadedCompositor.cpp b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/ThreadedCompositor.cpp
-index c238029ad9c99c5028ea7e456520af85d1d85532..7acf378411328d3555960b70652361e6c238059a 100644
+index c238029ad9c99c5028ea7e456520af85d1d85532..a7325dce83585b2b2b5b8b8472c27623f7441e8f 100644
 --- a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/ThreadedCompositor.cpp
 +++ b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/ThreadedCompositor.cpp
 @@ -26,6 +26,10 @@
@@ -131532,7 +132002,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..7acf378411328d3555960b70652361e6
  
  #if USE(TEXTURE_MAPPER)
          m_context = WTF::move(context);
-@@ -136,7 +188,61 @@ ThreadedCompositor::ThreadedCompositor(WebPage& webPage, LayerTreeHost& layerTre
+@@ -136,7 +188,64 @@ ThreadedCompositor::ThreadedCompositor(WebPage& webPage, LayerTreeHost& layerTre
          m_threadSafeGrContext = PlatformDisplay::sharedDisplay().skiaGrContext()->threadSafeProxy();
  #endif
      });
@@ -131583,8 +132053,11 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..7acf378411328d3555960b70652361e6
 +            return;
 +        }
 +    }
-+    if (!m_context->makeContextCurrent())
++    if (!m_context->makeContextCurrent()) {
++        if (m_context->isContextLostHaiku())
++            requestGraphicsRecoveryHaiku();
 +        return;
++    }
 +    m_textureMapper->warmShaderProgramsHaiku();
 +    m_workQueue->dispatch([this, protectedThis = Ref { *this }, remaining, waitsForQuiet] {
 +        warmShaderProgramsHaiku(remaining - 1, waitsForQuiet);
@@ -131594,7 +132067,108 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..7acf378411328d3555960b70652361e6
  
  ThreadedCompositor::~ThreadedCompositor() = default;
  
-@@ -216,8 +322,23 @@ void ThreadedCompositor::updateRenderTimer()
+@@ -160,12 +269,18 @@ void ThreadedCompositor::invalidate()
+     m_didCompositeRunLoopObserver->invalidate();
+     m_workQueue->dispatchSync([this] {
+ #if USE(TEXTURE_MAPPER)
+-        if (!m_context || !m_context->makeContextCurrent())
++        bool canFlush = m_context && m_context->makeContextCurrent();
++#if !PLATFORM(HAIKU)
++        if (!canFlush)
+             return;
+ #endif
++#else
++        bool canFlush = true;
++#endif
+ 
+-        // Update the scene at this point ensures the layers state are correctly propagated.
+-        flushCompositingState(CompositionReason::RenderingUpdate);
++        // Lost namespaces are retired without uploading or resolving GL calls.
++        if (canFlush)
++            flushCompositingState(CompositionReason::RenderingUpdate);
+ 
+         m_sceneState->invalidateCommittedLayers();
+ #if USE(TEXTURE_MAPPER)
+@@ -184,6 +299,78 @@ void ThreadedCompositor::invalidate()
+     m_surface = nullptr;
+ }
+ 
++#if PLATFORM(HAIKU) && USE(TEXTURE_MAPPER)
++void ThreadedCompositor::requestGraphicsRecoveryHaiku()
++{
++    ASSERT(m_workQueue->runLoop().isCurrent());
++    // Private qualification switch until workers and WebGL are covered too.
++    const char* enabled = getenv("SUMMIT_GPU_RECOVERY");
++    if (!enabled || strcmp(enabled, "1") || m_graphicsRecoveryPendingHaiku.exchange(true))
++        return;
++    {
++        Locker locker { m_state.lock };
++        stopRenderTimer();
++    }
++    RunLoop::mainSingleton().dispatch([this, protectedThis = Ref { *this }] {
++        if (!m_layerTreeHost)
++            return;
++        if (LayerTreeHost::recoverGraphicsContextsHaiku())
++            return;
++        m_workQueue->dispatchAfter(100_ms, [this, protectedThis = Ref { *this }] {
++            m_graphicsRecoveryPendingHaiku = false;
++            if (m_layerTreeHost)
++                requestGraphicsRecoveryHaiku();
++        });
++    });
++}
++
++void ThreadedCompositor::prepareGraphicsRecoveryHaiku()
++{
++    ASSERT(RunLoop::isMain());
++    {
++        Locker locker { m_state.lock };
++        stopRenderTimer();
++        m_state.state = State::Invalidated;
++        m_state.reasons = { };
++        m_state.didCompositeRenderingUpdateFunction = nullptr;
++        m_state.isWaitingForTiles = false;
++        m_isWaitingForRenderTarget = false;
++    }
++    m_didCompositeRunLoopObserver->invalidate();
++    m_workQueue->dispatchSync([this] {
++        // Do not flush the old layer tree: every GL name belongs to the lost
++        // display. Resource owners keep that display's loss state alive.
++        m_sceneState->discardGraphicsResourcesHaiku();
++        m_textureMapper = nullptr;
++        m_surface->willDestroyGLContext();
++        m_context = nullptr;
++        eglReleaseThread();
++    });
++}
++
++bool ThreadedCompositor::recreateGraphicsContextHaiku()
++{
++    ASSERT(RunLoop::isMain());
++    bool ready = false;
++    m_workQueue->dispatchSync([this, &ready] {
++        auto context = GLContext::create(PlatformDisplay::sharedDisplay(), (GLNativeWindowType)m_surface->window());
++        if (!context || !context->makeContextCurrent())
++            return;
++        glGetIntegerv(GL_MAX_TEXTURE_SIZE, &m_maxTextureSize);
++        m_context = WTF::move(context);
++        m_textureMapper = TextureMapper::create();
++        m_shaderWarmupStartedHaiku = false;
++        m_graphicsRecoveryPendingHaiku = false;
++        {
++            Locker locker { m_state.lock };
++            m_state.state = State::Idle;
++        }
++        ready = true;
++    });
++    return ready;
++}
++#endif
++
+ void ThreadedCompositor::startRenderTimer()
+ {
+     assertIsHeld(m_state.lock);
+@@ -216,8 +403,23 @@ void ThreadedCompositor::updateRenderTimer()
      }
  
      if (m_state.isRenderTimerActive) {
@@ -131620,7 +132194,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..7acf378411328d3555960b70652361e6
      } else
          m_renderTimer.stop();
  }
-@@ -364,6 +485,10 @@ TargetContents ThreadedCompositor::paintToCurrentGLContext(const TransformationM
+@@ -364,6 +566,10 @@ TargetContents ThreadedCompositor::paintToCurrentGLContext(const TransformationM
  #if USE(TEXTURE_MAPPER)
  void ThreadedCompositor::paintToTextureMapper(const TransformationMatrix& matrix, const IntSize& size, const OptionSet<CompositionReason>& reasons)
  {
@@ -131631,7 +132205,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..7acf378411328d3555960b70652361e6
      FloatRect clipRect(FloatPoint { }, size);
      TextureMapperLayer& currentRootLayer = m_sceneState->rootLayer().ensureTarget();
      if (currentRootLayer.transform() != matrix)
-@@ -373,6 +498,9 @@ void ThreadedCompositor::paintToTextureMapper(const TransformationMatrix& matrix
+@@ -373,6 +579,9 @@ void ThreadedCompositor::paintToTextureMapper(const TransformationMatrix& matrix
  
      m_textureMapper->beginPainting(m_flipY ? TextureMapper::FlipY::Yes : TextureMapper::FlipY::No);
      m_textureMapper->beginClip(TransformationMatrix(), FloatRoundedRect(clipRect));
@@ -131641,7 +132215,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..7acf378411328d3555960b70652361e6
  
  #if ENABLE(DAMAGE_TRACKING)
      std::optional<FloatRoundedRect> rectContainingRegionThatActuallyChanged;
-@@ -383,6 +511,10 @@ void ThreadedCompositor::paintToTextureMapper(const TransformationMatrix& matrix
+@@ -383,6 +592,10 @@ void ThreadedCompositor::paintToTextureMapper(const TransformationMatrix& matrix
          WTFBeginSignpost(this, CollectDamage);
          currentRootLayer.collectDamage(*m_textureMapper, frameDamage);
          WTFEndSignpost(this, CollectDamage);
@@ -131652,7 +132226,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..7acf378411328d3555960b70652361e6
  
          recordFrameDamage(WTF::move(frameDamage));
  
-@@ -404,11 +536,20 @@ void ThreadedCompositor::paintToTextureMapper(const TransformationMatrix& matrix
+@@ -404,11 +617,20 @@ void ThreadedCompositor::paintToTextureMapper(const TransformationMatrix& matrix
          m_textureMapper->beginClip(TransformationMatrix(), *rectContainingRegionThatActuallyChanged);
  #endif
  
@@ -131673,7 +132247,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..7acf378411328d3555960b70652361e6
  
  #if ENABLE(DAMAGE_TRACKING)
      if (rectContainingRegionThatActuallyChanged)
-@@ -426,6 +567,16 @@ void ThreadedCompositor::paintToTextureMapper(const TransformationMatrix& matrix
+@@ -426,6 +648,16 @@ void ThreadedCompositor::paintToTextureMapper(const TransformationMatrix& matrix
  
      m_textureMapper->endClip();
      m_textureMapper->endPainting();
@@ -131690,7 +132264,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..7acf378411328d3555960b70652361e6
  
      if (sceneHasRunningAnimations)
          requestComposition(CompositionReason::Animation);
-@@ -556,6 +707,46 @@ void ThreadedCompositor::renderLayerTree()
+@@ -556,6 +788,46 @@ void ThreadedCompositor::renderLayerTree()
      if (m_suspendedCount > 0)
          return;
  
@@ -131737,7 +132311,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..7acf378411328d3555960b70652361e6
      OptionSet<CompositionReason> reasons;
      bool shouldNotifiyDidComposite = false;
      {
-@@ -580,8 +771,18 @@ void ThreadedCompositor::renderLayerTree()
+@@ -580,11 +852,26 @@ void ThreadedCompositor::renderLayerTree()
  
          ASSERT(m_state.state == State::Scheduled);
          m_state.state = State::InProgress;
@@ -131754,9 +132328,18 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..7acf378411328d3555960b70652361e6
 +#endif
 +
  #if USE(TEXTURE_MAPPER)
-     if (!m_context || !m_context->makeContextCurrent())
+-    if (!m_context || !m_context->makeContextCurrent())
++    if (!m_context || !m_context->makeContextCurrent()) {
++#if PLATFORM(HAIKU)
++        if (m_context && m_context->isContextLostHaiku())
++            requestGraphicsRecoveryHaiku();
++#endif
          return;
-@@ -599,23 +800,61 @@ void ThreadedCompositor::renderLayerTree()
++    }
+ #endif
+ 
+     // Retrieve the scene attributes in a thread-safe manner.
+@@ -599,24 +886,68 @@ void ThreadedCompositor::renderLayerTree()
      if (viewportSize.isEmpty())
          return;
  
@@ -131816,9 +132399,16 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..7acf378411328d3555960b70652361e6
 +    const unsigned waitingTiles = WebCore::summitTakeTileHolesHaiku(texturelessTiles);
 +#endif
  
++#if PLATFORM(HAIKU) && USE(TEXTURE_MAPPER)
++    if (m_context->isContextLostHaiku()) {
++        requestGraphicsRecoveryHaiku();
++        return;
++    }
++#endif
      updateFPSCounter();
  
-@@ -631,8 +870,49 @@ void ThreadedCompositor::renderLayerTree()
+     if (shouldNotifiyDidComposite)
+@@ -631,8 +962,55 @@ void ThreadedCompositor::renderLayerTree()
      PlatformDisplay::sharedDisplay().skiaGLContext()->swapBuffers();
  #endif
  
@@ -131828,6 +132418,12 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..7acf378411328d3555960b70652361e6
      m_surface->didRenderFrame(targetContents);
 +#if PLATFORM(HAIKU)
 +    const bigtime_t readAt = traceTiming ? system_time() : 0;
++#endif
++#if PLATFORM(HAIKU) && USE(TEXTURE_MAPPER)
++    if (m_context->isContextLostHaiku()) {
++        requestGraphicsRecoveryHaiku();
++        return;
++    }
 +#endif
      m_surface->sendFrame();
 +#if PLATFORM(HAIKU) && USE(TEXTURE_MAPPER)
@@ -131868,7 +132464,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..7acf378411328d3555960b70652361e6
  
      RunLoop::mainSingleton().dispatch([this, protectedThis = Ref { *this }] {
          if (m_layerTreeHost)
-@@ -656,6 +936,13 @@ void ThreadedCompositor::requestComposition(CompositionReason reason)
+@@ -656,6 +1034,13 @@ void ThreadedCompositor::requestComposition(CompositionReason reason)
  {
      Locker locker { m_state.lock };
      m_state.reasons.add(reason);
@@ -131882,7 +132478,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..7acf378411328d3555960b70652361e6
      scheduleUpdateLocked();
  }
  
-@@ -703,6 +990,10 @@ void ThreadedCompositor::scheduleUpdateLocked()
+@@ -703,6 +1088,10 @@ void ThreadedCompositor::scheduleUpdateLocked()
  void ThreadedCompositor::frameComplete()
  {
      ASSERT(m_workQueue->runLoop().isCurrent());
@@ -131893,7 +132489,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..7acf378411328d3555960b70652361e6
  
      Locker locker { m_state.lock };
      WTFEmitSignpost(this, FrameComplete, "reasons: %s, state: %s, waiting for tiles: %s", reasonsToString(m_state.reasons).utf8(), stateToString(m_state.state).characters(), m_state.isWaitingForTiles ? "yes" : "no");
-@@ -726,6 +1017,112 @@ void ThreadedCompositor::frameComplete()
+@@ -726,6 +1115,112 @@ void ThreadedCompositor::frameComplete()
      }
  }
  
@@ -132007,20 +132603,24 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..7acf378411328d3555960b70652361e6
  {
      return m_surface ? &m_workQueue->runLoop() : nullptr;
 diff --git a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/ThreadedCompositor.h b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/ThreadedCompositor.h
-index 350699338bff55157709efd32e703513e9ce6486..feb59d6b22128828f2e2e72cbe7c79c0f69333ee 100644
+index 350699338bff55157709efd32e703513e9ce6486..6ed50ead05fc5a80db5b4cff18d5c035e526798a 100644
 --- a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/ThreadedCompositor.h
 +++ b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/ThreadedCompositor.h
-@@ -97,6 +97,9 @@ public:
+@@ -97,6 +97,13 @@ public:
      void invalidate();
      void suspend();
      void resume();
 +#if PLATFORM(HAIKU)
 +    void recoverFromStallHaiku(Seconds waited);
++#if USE(TEXTURE_MAPPER)
++    void prepareGraphicsRecoveryHaiku();
++    bool recreateGraphicsContextHaiku();
++#endif
 +#endif
  
      bool isActive() const;
  
-@@ -137,6 +140,9 @@ private:
+@@ -137,6 +144,9 @@ private:
      TargetContents paintToSkiaCanvas(const WebCore::TransformationMatrix&, const WebCore::IntSize&, const OptionSet<WebCore::CompositionReason>&);
  #endif
      void frameComplete();
@@ -132030,7 +132630,7 @@ index 350699338bff55157709efd32e703513e9ce6486..feb59d6b22128828f2e2e72cbe7c79c0
  
      void didCompositeRunLoopObserverFired();
  
-@@ -194,6 +200,26 @@ private:
+@@ -194,6 +204,28 @@ private:
      } m_attributes;
  
      RunLoop::Timer m_renderTimer;
@@ -132051,13 +132651,15 @@ index 350699338bff55157709efd32e703513e9ce6486..feb59d6b22128828f2e2e72cbe7c79c0
 +#if USE(TEXTURE_MAPPER)
 +    void warmShaderProgramsHaiku(unsigned remaining, bool waitsForQuiet);
 +    bool m_shaderWarmupStartedHaiku { false };
++    void requestGraphicsRecoveryHaiku();
++    std::atomic<bool> m_graphicsRecoveryPendingHaiku { false };
 +    MonotonicTime m_lastFrameSentHaiku;
 +#endif
 +#endif
  #if USE(TEXTURE_MAPPER)
      std::unique_ptr<WebCore::TextureMapper> m_textureMapper;
  #endif
-@@ -234,4 +260,3 @@ private:
+@@ -234,4 +266,3 @@ private:
  } // namespace WebKit
  
  #endif // USE(COORDINATED_GRAPHICS)
@@ -160439,3 +161041,340 @@ index 0000000000000000000000000000000000000000..a72ad7445e65c071177074b49499bab7
 +	sleep 60
 +done
 +
+diff --git a/Source/WebCore/platform/graphics/PlatformDisplay.cpp b/Source/WebCore/platform/graphics/PlatformDisplay.cpp
+index 5fdc010a53bd8c75ce61d1aa6254cb4d0eac5b99..65621db8f0b827c1706146876a8e169df11d606b 100644
+--- a/Source/WebCore/platform/graphics/PlatformDisplay.cpp
++++ b/Source/WebCore/platform/graphics/PlatformDisplay.cpp
+@@ -25,6 +25,9 @@
+ 
+ #include "config.h"
+ #include "PlatformDisplay.h"
++#if PLATFORM(HAIKU) && USE(TEXTURE_MAPPER)
++#include "PlatformDisplayHaiku.h"
++#endif
+ 
+ #include "GLContext.h"
+ #include <wtf/MainThread.h>
+@@ -86,6 +89,23 @@ void PlatformDisplay::destroySharedDisplay()
+ }
+ #endif
+ 
++#if PLATFORM(HAIKU) && USE(TEXTURE_MAPPER)
++bool PlatformDisplay::recreateSharedDisplayHaiku()
++{
++    RELEASE_ASSERT(isMainThread());
++    RELEASE_ASSERT(s_sharedDisplay);
++    RELEASE_ASSERT(!s_sharedDisplay->hasOtherThreadSkiaContextsHaiku());
++    s_sharedDisplay->clearGLContexts();
++    s_sharedDisplay->terminateEGLDisplay();
++    eglReleaseThread();
++    auto replacement = PlatformDisplayHaiku::create();
++    if (!replacement)
++        return false;
++    delete std::exchange(s_sharedDisplay, replacement.release());
++    return true;
++}
++#endif
++
+ PlatformDisplay::PlatformDisplay(Ref<GLDisplay>&& glDisplay)
+     : m_eglDisplay(WTF::move(glDisplay))
+ {
+diff --git a/Source/WebCore/platform/graphics/coordinated/CoordinatedPlatformLayer.h b/Source/WebCore/platform/graphics/coordinated/CoordinatedPlatformLayer.h
+index dc4108941486e941ebe3b62eb9a1612941385fa2..9f11cfb0f0caaadd5f4a48ebfac51cdcc436d34d 100644
+--- a/Source/WebCore/platform/graphics/coordinated/CoordinatedPlatformLayer.h
++++ b/Source/WebCore/platform/graphics/coordinated/CoordinatedPlatformLayer.h
+@@ -116,6 +116,10 @@ public:
+     sk_sp<GrContextThreadSafeProxy> threadSafeGrContext() const { return m_threadSafeGrContext; }
+ #endif
+     void invalidateTarget();
++#if PLATFORM(HAIKU) && USE(TEXTURE_MAPPER)
++    void discardGraphicsResourcesHaiku();
++    void resetBackingStoreHaiku();
++#endif
+ 
+ #if ENABLE(DAMAGE_TRACKING)
+     void setDamagePropagationEnabled(bool enabled) { m_damagePropagationEnabled = enabled; }
+diff --git a/Source/WebCore/platform/graphics/egl/GLDisplay.h b/Source/WebCore/platform/graphics/egl/GLDisplay.h
+index 4971d556a60e92f9ed1853fc5b783f30f35aae65..11d1503e1cb3ca8c1f22f5a6cc617550450f9fdd 100644
+--- a/Source/WebCore/platform/graphics/egl/GLDisplay.h
++++ b/Source/WebCore/platform/graphics/egl/GLDisplay.h
+@@ -52,6 +52,10 @@ public:
+     bool isSoftwareRendered() const;
+ #endif
+ 
++#if PLATFORM(HAIKU)
++    bool isContextLostHaiku() const { return m_contextLostHaiku.load(); }
++    void markContextLostHaiku() { m_contextLostHaiku = true; }
++#endif
+     void terminate();
+     bool runIfNotTerminated(NOESCAPE const Function<void(EGLDisplay)>&);
+ 
+@@ -93,6 +97,9 @@ private:
+ 
+     std::atomic<EGLDisplay> m_display { nullptr };
+     Lock m_terminationLock;
++#if PLATFORM(HAIKU)
++    std::atomic<bool> m_contextLostHaiku { false };
++#endif
+     struct {
+         int major { 0 };
+         int minor { 0 };
+@@ -111,4 +118,16 @@ private:
+ #endif
+ };
+ 
++#if PLATFORM(HAIKU)
++// Keep the GL namespace that owns a resource, not whichever context happens
++// to be current when its last reference is released after recovery.
++class GLResourceOwnerHaiku {
++public:
++    WEBCORE_EXPORT GLResourceOwnerHaiku();
++    bool isValid() const { return m_display && m_display->eglDisplay() && !m_display->isContextLostHaiku(); }
++private:
++    RefPtr<GLDisplay> m_display;
++};
++#endif
++
+ } // namespace WebCore
+diff --git a/Source/WebCore/platform/graphics/egl/GLFenceGL.cpp b/Source/WebCore/platform/graphics/egl/GLFenceGL.cpp
+index deea3d3f6a8883465630852d1ccf5393251804b5..8b67a831341f6d422025dd871ce90798199dd0f5 100644
+--- a/Source/WebCore/platform/graphics/egl/GLFenceGL.cpp
++++ b/Source/WebCore/platform/graphics/egl/GLFenceGL.cpp
+@@ -47,16 +47,28 @@ GLFenceGL::GLFenceGL(GLsync sync)
+ 
+ GLFenceGL::~GLFenceGL()
+ {
++#if PLATFORM(HAIKU)
++    if (!m_glOwnerHaiku.isValid())
++        return;
++#endif
+     glDeleteSync(m_sync);
+ }
+ 
+ void GLFenceGL::clientWait()
+ {
++#if PLATFORM(HAIKU)
++    if (!m_glOwnerHaiku.isValid())
++        return;
++#endif
+     glClientWaitSync(m_sync, 0, GL_TIMEOUT_IGNORED);
+ }
+ 
+ void GLFenceGL::serverWait()
+ {
++#if PLATFORM(HAIKU)
++    if (!m_glOwnerHaiku.isValid())
++        return;
++#endif
+     glWaitSync(m_sync, 0, GL_TIMEOUT_IGNORED);
+ }
+ 
+diff --git a/Source/WebCore/platform/graphics/egl/GLFenceGL.h b/Source/WebCore/platform/graphics/egl/GLFenceGL.h
+index f2e9fcbce80505145e2639e1bb61b4662a2b57a8..13398d171cd62ab505f89184c4d454b94baf7363 100644
+--- a/Source/WebCore/platform/graphics/egl/GLFenceGL.h
++++ b/Source/WebCore/platform/graphics/egl/GLFenceGL.h
+@@ -19,6 +19,10 @@
+ 
+ #pragma once
+ 
++#if PLATFORM(HAIKU)
++#include "GLDisplay.h"
++#endif
++
+ #if HAVE(GL_FENCE)
+ 
+ #include "GLFence.h"
+@@ -38,6 +42,9 @@ private:
+     void serverWait() override;
+ 
+     GLsync m_sync { nullptr };
++#if PLATFORM(HAIKU)
++    GLResourceOwnerHaiku m_glOwnerHaiku;
++#endif
+ };
+ 
+ } // namespace WebCore
+diff --git a/Source/WebCore/platform/graphics/texmap/TextureMapperGPUBuffer.cpp b/Source/WebCore/platform/graphics/texmap/TextureMapperGPUBuffer.cpp
+index 6598e73cd1ee67a4e091ddcf5e1213dc5b170925..608fe2561b2035a8f5704e227a274dd8d9bbd77e 100644
+--- a/Source/WebCore/platform/graphics/texmap/TextureMapperGPUBuffer.cpp
++++ b/Source/WebCore/platform/graphics/texmap/TextureMapperGPUBuffer.cpp
+@@ -51,6 +51,10 @@ TextureMapperGPUBuffer::TextureMapperGPUBuffer(size_t size, Type type, Usage usa
+ 
+ TextureMapperGPUBuffer::~TextureMapperGPUBuffer()
+ {
++#if PLATFORM(HAIKU)
++    if (!m_glOwnerHaiku.isValid())
++        return;
++#endif
+     if (m_id) {
+         glDeleteBuffers(1, &m_id);
+         m_id = 0;
+diff --git a/Source/WebCore/platform/graphics/texmap/TextureMapperGPUBuffer.h b/Source/WebCore/platform/graphics/texmap/TextureMapperGPUBuffer.h
+index 57adb06b0d3bf385a76bae2729c5e04dd5e7b268..dd4a187052ee312cbd6f0085348eace78d686afd 100644
+--- a/Source/WebCore/platform/graphics/texmap/TextureMapperGPUBuffer.h
++++ b/Source/WebCore/platform/graphics/texmap/TextureMapperGPUBuffer.h
+@@ -27,6 +27,10 @@
+ 
+ #pragma once
+ 
++#if PLATFORM(HAIKU)
++#include "GLDisplay.h"
++#endif
++
+ #include "TextureMapperGLHeaders.h"
+ #include <wtf/Ref.h>
+ #include <wtf/ThreadSafeRefCounted.h>
+@@ -65,6 +69,9 @@ private:
+     GLenum m_usage;
+ 
+     GLuint m_id { 0 };
++#if PLATFORM(HAIKU)
++    GLResourceOwnerHaiku m_glOwnerHaiku;
++#endif
+ };
+ 
+ } // namespace WebCore
+diff --git a/Source/WebCore/platform/graphics/texmap/TextureMapperShaderProgram.cpp b/Source/WebCore/platform/graphics/texmap/TextureMapperShaderProgram.cpp
+index 9cc95ada9f61a23ec22e73313ea6bb16de4b062d..bfb5ef048d0c6aaefe7b022c16f59170c1ebd9f0 100644
+--- a/Source/WebCore/platform/graphics/texmap/TextureMapperShaderProgram.cpp
++++ b/Source/WebCore/platform/graphics/texmap/TextureMapperShaderProgram.cpp
+@@ -851,6 +851,10 @@ TextureMapperShaderProgram::TextureMapperShaderProgram(const String& vertex, con
+ 
+ TextureMapperShaderProgram::~TextureMapperShaderProgram()
+ {
++#if PLATFORM(HAIKU)
++    if (!m_glOwnerHaiku.isValid())
++        return;
++#endif
+     if (!m_id)
+         return;
+ 
+diff --git a/Source/WebCore/platform/graphics/texmap/TextureMapperShaderProgram.h b/Source/WebCore/platform/graphics/texmap/TextureMapperShaderProgram.h
+index f4510ce2501dd8b7577ceb994e9090da9e649dda..af19d51af6e713f9233f8249ed718f259418514d 100644
+--- a/Source/WebCore/platform/graphics/texmap/TextureMapperShaderProgram.h
++++ b/Source/WebCore/platform/graphics/texmap/TextureMapperShaderProgram.h
+@@ -20,6 +20,10 @@
+ 
+ #pragma once
+ 
++#if PLATFORM(HAIKU)
++#include "GLDisplay.h"
++#endif
++
+ #if USE(TEXTURE_MAPPER)
+ 
+ #include "TextureMapperGLHeaders.h"
+@@ -143,6 +147,9 @@ private:
+     GLuint getLocation(VariableID, ASCIILiteral, VariableType);
+ 
+     GLuint m_id;
++#if PLATFORM(HAIKU)
++    GLResourceOwnerHaiku m_glOwnerHaiku;
++#endif
+     HashMap<VariableID, GLuint, IntHash<VariableID>, WTF::StrongEnumHashTraits<VariableID>> m_variables;
+ };
+ 
+diff --git a/Source/WebCore/platform/graphics/texmap/coordinated/CoordinatedPlatformLayerBufferNativeImage.cpp b/Source/WebCore/platform/graphics/texmap/coordinated/CoordinatedPlatformLayerBufferNativeImage.cpp
+index 2db0cfcf7ac285db237c36a8ce63b5648480c35b..a610988a0777fdd506ee748aa3f46b4f53c41922 100644
+--- a/Source/WebCore/platform/graphics/texmap/coordinated/CoordinatedPlatformLayerBufferNativeImage.cpp
++++ b/Source/WebCore/platform/graphics/texmap/coordinated/CoordinatedPlatformLayerBufferNativeImage.cpp
+@@ -82,6 +82,9 @@ CoordinatedPlatformLayerBufferNativeImage::CoordinatedPlatformLayerBufferNativeI
+     if (!textureID)
+         return;
+ 
++#if PLATFORM(HAIKU)
++    m_bufferOwnerHaiku = GLResourceOwnerHaiku { };
++#endif
+     lazyInitialize(m_buffer, CoordinatedPlatformLayerBufferRGB::create(*textureID, m_image->size(), m_flags, GLFence::create(display.glDisplay())));
+ #endif
+ }
+@@ -102,6 +105,10 @@ CoordinatedPlatformLayerBufferNativeImage::~CoordinatedPlatformLayerBufferNative
+ 
+ bool CoordinatedPlatformLayerBufferNativeImage::tryEnsureBuffer()
+ {
++#if PLATFORM(HAIKU)
++    if (m_buffer && !m_bufferOwnerHaiku.isValid())
++        m_buffer = nullptr;
++#endif
+     if (m_buffer)
+         return true;
+ 
+@@ -134,7 +141,10 @@ bool CoordinatedPlatformLayerBufferNativeImage::tryEnsureBuffer()
+     texture->updateContents(pixmap.addr(), IntRect(IntPoint(), m_size), IntPoint(), image->imageInfo().minRowBytes(), PixelFormat::BGRA8);
+ #endif
+ 
+-    lazyInitialize(m_buffer, CoordinatedPlatformLayerBufferRGB::create(WTF::move(texture), m_flags, nullptr));
++#if PLATFORM(HAIKU)
++    m_bufferOwnerHaiku = GLResourceOwnerHaiku { };
++#endif
++    m_buffer = CoordinatedPlatformLayerBufferRGB::create(WTF::move(texture), m_flags, nullptr);
+     return true;
+ }
+ 
+diff --git a/Source/WebCore/platform/graphics/texmap/coordinated/CoordinatedPlatformLayerBufferNativeImage.h b/Source/WebCore/platform/graphics/texmap/coordinated/CoordinatedPlatformLayerBufferNativeImage.h
+index daf86a92db8bb55812c3c67ab365ea7542d052be..41088d8423b1b4e485526d0ff1be8b97642fa72d 100644
+--- a/Source/WebCore/platform/graphics/texmap/coordinated/CoordinatedPlatformLayerBufferNativeImage.h
++++ b/Source/WebCore/platform/graphics/texmap/coordinated/CoordinatedPlatformLayerBufferNativeImage.h
+@@ -27,6 +27,9 @@
+ 
+ #if USE(COORDINATED_GRAPHICS) && USE(TEXTURE_MAPPER)
+ #include "CoordinatedPlatformLayerBuffer.h"
++#if PLATFORM(HAIKU)
++#include "GLDisplay.h"
++#endif
+ 
+ namespace WebCore {
+ 
+@@ -46,7 +49,10 @@ private:
+     bool tryEnsureBuffer();
+ 
+     RefPtr<NativeImage> m_image;
+-    const std::unique_ptr<CoordinatedPlatformLayerBuffer> m_buffer;
++    std::unique_ptr<CoordinatedPlatformLayerBuffer> m_buffer;
++#if PLATFORM(HAIKU)
++    GLResourceOwnerHaiku m_bufferOwnerHaiku;
++#endif
+ };
+ 
+ } // namespace WebCore
+diff --git a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/CoordinatedSceneState.h b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/CoordinatedSceneState.h
+index 834c2d4e59a8b24d999eb24428995686d730dfeb..58ba1e89495b7f22d96e477014223368a366a65f 100644
+--- a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/CoordinatedSceneState.h
++++ b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/CoordinatedSceneState.h
+@@ -59,6 +59,10 @@ public:
+     void invalidate();
+ 
+     void invalidateCommittedLayers();
++#if PLATFORM(HAIKU) && USE(TEXTURE_MAPPER)
++    void discardGraphicsResourcesHaiku();
++    void resetBackingStoresHaiku();
++#endif
+ 
+     bool layersDidChange() const { return m_didChangeLayers; }
+ 
+diff --git a/Source/WebCore/platform/graphics/egl/GLFenceEGL.cpp b/Source/WebCore/platform/graphics/egl/GLFenceEGL.cpp
+index dee3a440582ce6b1384f94b6d755e9122bc20e68..abeaa7d91deb0b309159c5b6ebc51fadd1e2ebde 100644
+--- a/Source/WebCore/platform/graphics/egl/GLFenceEGL.cpp
++++ b/Source/WebCore/platform/graphics/egl/GLFenceEGL.cpp
+@@ -105,6 +105,10 @@ void GLFenceEGL::clientWait()
+     auto display = m_display.get();
+     if (!display)
+         return;
++#if PLATFORM(HAIKU)
++    if (display->isContextLostHaiku() || !display->eglDisplay())
++        return;
++#endif
+ 
+     if (display->checkVersion(1, 5))
+         eglClientWaitSync(display->eglDisplay(), m_sync, 0, EGL_FOREVER);
+@@ -117,6 +121,10 @@ void GLFenceEGL::serverWait()
+     auto display = m_display.get();
+     if (!display)
+         return;
++#if PLATFORM(HAIKU)
++    if (display->isContextLostHaiku() || !display->eglDisplay())
++        return;
++#endif
+ 
+     if (display->checkVersion(1, 5))
+         eglWaitSync(display->eglDisplay(), m_sync, 0);
