@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
-"""QMP control for Summit's independent Haiku VM. No automatic restarts."""
+"""QMP control for Summit's independent Haiku VM. No automatic restarts.
+
+SUMMIT_VM_QMP names another machine's QMP socket (the stock Haiku machine of
+tools/haiku-vm: .vm/haiku-r1beta6/qmp.sock)."""
 import argparse
 import json
+import os
 import pathlib
 import socket
 import time
@@ -13,7 +17,7 @@ class QMP:
     def __init__(self, path=None):
         self.socket = socket.socket(socket.AF_UNIX)
         self.socket.settimeout(15)
-        self.socket.connect(str(path or ROOT / '.vm/qmp.sock'))
+        self.socket.connect(str(path or os.environ.get('SUMMIT_VM_QMP') or ROOT / '.vm/qmp.sock'))
         self.file = self.socket.makefile('rwb', buffering=0)
         self.read()
         self.command('qmp_capabilities')

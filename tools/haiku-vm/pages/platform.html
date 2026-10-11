@@ -1,0 +1,50 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>running</title>
+<!-- Summit platform check: what this machine gives the engine. The result
+     goes into the title (read it with: hey Summit get Title of Window 0)
+     and the page. -->
+<pre id="out"></pre>
+<canvas id="gl" width="64" height="64"></canvas>
+<video id="video" muted playsinline width="160"></video>
+<script>
+const results = {};
+const out = document.getElementById("out");
+function report() {
+    out.textContent = JSON.stringify(results, null, 1);
+    document.title = Object.entries(results).map(([k, v]) => k + "=" + v).join(" ");
+}
+// WebGL and its renderer
+try {
+    const gl = document.getElementById("gl").getContext("webgl");
+    if (!gl) results.webgl = "none";
+    else {
+        const info = gl.getExtension("WEBGL_debug_renderer_info");
+        results.webgl = info ? gl.getParameter(info.UNMASKED_RENDERER_WEBGL).replace(/\s+/g, "_") : "yes";
+        gl.clearColor(0, 1, 0, 1); gl.clear(gl.COLOR_BUFFER_BIT);
+        const pixel = new Uint8Array(4);
+        gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, pixel);
+        results.webglDraw = pixel[1] === 255 && pixel[0] === 0 ? "ok" : "bad:" + pixel.join(",");
+    }
+} catch (e) { results.webgl = "error:" + e.name; }
+// WebAssembly (the smallest module: no sections)
+WebAssembly.instantiate(new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0]))
+    .then(() => { results.wasm = "ok"; report(); }, e => { results.wasm = "error:" + e.name; report(); });
+// Web Bluetooth availability (no device request: that needs a click)
+if (!navigator.bluetooth) results.bluetooth = "absent";
+else navigator.bluetooth.getAvailability().then(a => { results.bluetooth = a ? "available" : "unavailable"; report(); },
+    e => { results.bluetooth = "error:" + e.name; report(); });
+results.dpr = window.devicePixelRatio;
+results.mse = typeof MediaSource !== "undefined" && MediaSource.isTypeSupported('video/mp4; codecs="avc1.42E01E"') ? "h264" : "no";
+// Video playback through the platform's decoders
+const video = document.getElementById("video");
+const src = new URLSearchParams(location.search).get("video");
+if (src) {
+    video.src = src;
+    results.video = "loading";
+    video.addEventListener("error", () => { results.video = "error:" + (video.error && video.error.code); report(); });
+    video.play().catch(e => { results.video = "play-rejected:" + e.name; report(); });
+    setTimeout(() => { results.video = video.currentTime > 1 ? "played:" + video.currentTime.toFixed(1) + "s" : "stalled:" + video.currentTime.toFixed(2) + "s"; report(); }, 6000);
+}
+report();
+</script>
