@@ -13,6 +13,7 @@
 #include <WebKit/WebKitInspector.h>
 #endif
 #include "core/Address.h"
+#include "core/BuildTarget.h"
 #include "core/InternalPages.h"
 #include "core/Suggest.h"
 #include "core/Zoom.h"
@@ -539,21 +540,31 @@ static BRect DefaultWindowFrame(const BrowserWindowOptions& options)
     return frame;
 }
 
-#if SUMMIT_MODERN_WEBKIT
 #ifndef B_DIRECT_DEVICE_PIXELS
 #define B_DIRECT_DEVICE_PIXELS 0x00000400
 #endif
+#if SUMMIT_MODERN_WEBKIT && SUMMIT_AIROS
 // Pages go straight into the screen where app_server lets a direct window
-// draw in frame buffer pixels (the X399 fork; others ignore the flag).
-// SUMMIT_DIRECT_PRESENT=0 keeps every frame going through app_server.
+// draw in frame buffer pixels (air/OS). SUMMIT_DIRECT_PRESENT=0 keeps every
+// frame going through app_server.
 static uint32 DirectPresentFlags()
 {
     const char* value = std::getenv("SUMMIT_DIRECT_PRESENT");
     return value && !std::strcmp(value, "0") ? 0 : B_DIRECT_DEVICE_PIXELS;
 }
 #else
+// A stock app_server drops the flag from a new window but refuses every
+// later SetFlags() that still has it.
 static uint32 DirectPresentFlags() { return 0; }
 #endif
+
+// SetFlags() as a stock app_server takes it: it refuses a set with a flag it
+// does not know, B_DIRECT_DEVICE_PIXELS of an air/OS build included.
+static void SetWindowFlags(BWindow* window, uint32 flags)
+{
+    if (window->SetFlags(flags) != B_OK && (flags & B_DIRECT_DEVICE_PIXELS))
+        window->SetFlags(flags & ~B_DIRECT_DEVICE_PIXELS);
+}
 
 BrowserWindow::BrowserWindow(std::shared_ptr<SharedProfile> profile, std::string startURL,
     const BrowserWindowOptions& options
@@ -2763,7 +2774,7 @@ bool BrowserWindow::SetPageFullScreen(int64 tab, bool enter)
             }
         }
         SetLook(B_NO_BORDER_WINDOW_LOOK);
-        SetFlags(Flags() | B_NOT_MOVABLE | B_NOT_RESIZABLE);
+        SetWindowFlags(this, Flags() | B_NOT_MOVABLE | B_NOT_RESIZABLE);
         MoveTo(screen.LeftTop());
         ResizeTo(screen.Width(), screen.Height());
         // Show the real URL in native chrome briefly so a page cannot enter
@@ -2779,7 +2790,7 @@ bool BrowserWindow::SetPageFullScreen(int64 tab, bool enter)
         fFullScreenTab = 0;
         fFullScreenNoticeTimer.reset();
         if (!fFullScreenNotice->IsHidden(fFullScreenNotice)) fFullScreenNotice->Hide();
-        SetFlags(fBeforeFullScreenFlags);
+        SetWindowFlags(this, fBeforeFullScreenFlags);
         SetLook(fBeforeFullScreenLook);
         for (auto* view : fFullScreenHidden) view->Show();
         fFullScreenHidden.clear();
@@ -3381,10 +3392,11 @@ void BrowserWindow::MessageReceived(BMessage* message)
 #endif
         case B_ABOUT_REQUESTED: {
 #if SUMMIT_MODERN_WEBKIT
-            std::string info = "Summit — a browser for KunanyiOS\nModern WebKit development build\n\nWebKit "
-                + std::string(BWebKitVersion()) + "\nHaiku port " + BWebKitPortVersion();
+            std::string info = "Summit — a web browser for air/OS and Haiku\nBuilt for " SUMMIT_TARGET_NAME
+                "\n\nWebKit " + std::string(BWebKitVersion()) + "\nHaiku port " + BWebKitPortVersion();
 #else
-            std::string info = "Summit — a browser for KunanyiOS\nDevelopment build\n\nWebKit "
+            std::string info = "Summit — a web browser for air/OS and Haiku\nBuilt for " SUMMIT_TARGET_NAME
+                "\nDevelopment build\n\nWebKit "
                 + std::string(WebKitInfo::WebKitVersion().String()) + "\nHaiku port "
                 + WebKitInfo::HaikuWebKitVersion().String();
 #endif
