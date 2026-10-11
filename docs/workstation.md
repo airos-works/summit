@@ -443,3 +443,73 @@ checkpoint does not enable system defaults or complete the OS/application
 release installation. Exact sources, binaries, failed and passing trials,
 screenshots, source-manifest history and final diagnostics are pinned in
 `/mnt/HaikuWork/x399/evidence/wx5100/mesa-native/summit-compositor-recovery-manifest.json`.
+
+## WX5100 frame acknowledgements across recovery (2026-10-12)
+
+The next private candidate is `/boot/home/wx5100/summit-frame-ack/bundle`,
+compiled from `748f12a5ce0beb42140bed5d365f8512dc4e433a` with patch
+`fd27619606f34f7d424808362c2a3e1a2be502abd5ae4aea0ae82f23bb48583c`.
+Its relocated engine is
+`fb4b02191a842ed2e27ba07ebe7eaf6c8ed1148535bdb9f43df01506b2111a9f`.
+Recovery remains opt-in with `SUMMIT_GPU_RECOVERY=1`.
+
+Haiku frame and completion IPC now carries a nonzero serial. Retiring the GL
+context clears the pending serial but preserves the counter. A completion
+only releases the compositor's wait when it matches the current pending
+frame, so an acknowledgement from before recovery cannot complete a newer
+frame. UI callbacks capture the serial of the frame they presented. Other
+ports retain their existing IPC signatures. The first native build exposed
+the IPC generator's lack of `#else` support; complementary `#if` conditions
+fixed that build failure, whose inputs and logs are preserved.
+
+Test-only `SUMMIT_TEST_REPLAY_FRAME_ACK=1` resends the previous acknowledgement
+before completing a current frame. With `SUMMIT_SWAPCHAIN_TRACE=1`, QEMU
+records 358 rejected stale acknowledgements in ordinary playback and 321 in
+the display-loss case. The loss case recreates the display once and proves
+the serial counter continues across recreation. Baseline, replay and loss
+each complete both decoder rounds at 48 frames and zero drops, with exact
+software pixel references and exact visible video/completion-banner crops.
+All three quit cleanly without crash reports or owned leftovers.
+
+The native Main10 readback test combines acknowledgement replay with one
+actual test-only GPU timeout after 19 pictures. Automatic recovery advances
+generation 27 to 28 and succeeds for the 25th time in 25 attempts. The same
+WebProcess recreates its display once; its last observed pre-recovery pending
+serial is 21 and its first post-recovery pending serial is 22. The log records
+92 stale acknowledgements before recreation and 238 afterwards across the
+browser's processes. The interrupted round completes 48 frames with 20 drops
+and exact software pixels; the fresh hardware decoder completes 48 frames
+with zero drops and exact hardware pixels. Both PNGs match the independently
+qualified references, and visible final video frame 47 exactly matches the
+prior no-reset GPU-composited reference. Shutdown is clean.
+
+Fresh EGL, GLES and window checks add exactly 116 completed/waited GPU jobs,
+514 to 630. Root VRAM and ordinary-user RAM DMA checks pass. Terminal state is
+generation 28, automatic recovery enabled with 25 attempts and 25 successes,
+zero live or quarantined resources, 630 completed/waited fences, 1,260 EOP
+events and 795 interrupts. The ring is empty at `0x4ec0`; all interrupt error
+counters are zero. Production media `3f28945c...` is restored and the desktop
+remains intact. Driver, Mesa and original browser backups remain unchanged.
+
+`GLContext::makeContextCurrent` also records `EGL_CONTEXT_LOST` when binding
+a context fails, instead of relying on a reset-status query that cannot run
+without a current context. This specific EGL error-return branch has not yet
+been exercised; the recovery tests above do not establish its coverage.
+Worker coordination, GPU canvas and WebGL/ANGLE restoration, noncomposited
+GPU rendering, paused YUV contents, multiple pages and repeated losses still
+need work. The prior intermittent QEMU shutdown allocator error remains open.
+A private `debugger()` preload records stack addresses and loaded modules
+before forwarding the original call. Its intentional QEMU double-free test
+captures eight stack entries; both bare and preloaded tests exit 1. The first
+self-test incorrectly expected exit 255; its failed expectation is preserved.
+The helper is for named diagnostic runs only and changes no system defaults.
+Three further QEMU playback/shutdown runs of the previous compositor candidate
+with that recorder complete cleanly. A live module listing confirms it is
+loaded in Summit, WebProcess and NetworkProcess. No allocator failure or stack
+is captured in those browser runs; the original error is not considered fixed.
+
+Exact sources, binaries, unsuccessful and successful trials, screenshots,
+metadata history and terminal diagnostics are pinned in
+`/mnt/HaikuWork/x399/evidence/wx5100/mesa-native/summit-frame-ack-manifest.json`.
+This is a private recovery checkpoint, not the final OS/application release
+or completion of full WX5100 acceleration.
