@@ -374,3 +374,72 @@ Evidence, exact source/binary hashes, commands, unsuccessful trials, PNGs and
 terminal driver state are pinned in
 `/mnt/HaikuWork/x399/evidence/wx5100/mesa-native/summit-recovery-manifest.json`.
 No system Summit default was changed; the production media add-on is restored.
+
+## WX5100 coordinated compositor recreation (2026-10-12)
+
+The private candidate at
+`/boot/home/wx5100/summit-compositor-recovery3/bundle` now recovers the visible
+MSE page after an actual WX5100 timeout. Enable it with `SUMMIT_GPU_RECOVERY=1`.
+The compiled source is `79ab203d765792d7bb20806d807178d3b0f615ba`, patch
+`c9f9253e471bea8329f8653b38dfe0a1bded022641b152f9ab4a4637812f510c`, and relocated
+engine `ec73bc11e0060fd615941b9a958dd5d5c48bd83ca55b8da8a7e0c67d736d1771`.
+This remains a prototype on the `wx5100` branch, with the limits below.
+
+The compositor checks reset status through a function resolved when its GL
+context was created. A lost display stops composition and schedules recovery
+on the main thread. Registered coordinated page hosts stop rendering, drain
+their compositor queues, retire their GL resources and repaint their existing
+layers after the shared EGL display and compositor contexts are recreated.
+Resource owners retain the original GL display's loss state, so destroying an
+old texture, buffer, shader or fence cannot delete a reused name in a new
+namespace or invoke epoxy's lazy resolver against a lost context. Skia abandons
+the lost main-thread context; CPU native images can be uploaded again.
+
+QEMU caught a visible failure in the initial prototype: the JavaScript report
+and decoder pixel captures passed, but the page was black after recreation.
+The swap chain kept its old size, leaving the new context's viewport empty.
+The final change forgets that size when retiring a context so the first new
+frame reinstalls the viewport. The failed binaries, screenshots and logs are
+preserved. Test-only `SUMMIT_TEST_COMPOSITOR_LOSS_AFTER_FRAMES=20` retires an
+EGL display without resetting hardware; add
+`SUMMIT_TEST_COMPOSITOR_LOSS_VIDEO_ONLY=1` to count video compositions and avoid
+also testing the separate home-page process. These switches are absent from
+the native GPU fault cases.
+
+The corrected QEMU loss case records one retirement and one recreation. Both
+decoder rounds reach EOS with 48 frames and zero drops, exact software pixel
+references, a visible green completion banner and final video frame 47.
+The visible video crop equals the no-loss reference byte for byte. One initial
+no-loss run of this candidate logged a shutdown allocator error, `bogus pointer
+(double free?)`, without a usable crash report. Two subsequent no-loss runs and
+the loss case shut down cleanly. The error is retained as unresolved; passing
+repeats do not establish its cause or eliminate it.
+
+Native tests use driver `a4aebce1...`, Mesa `42352938...`, and test-only add-on
+`eb1d8fdb...`. A timeout after 19 decoded Main10 pictures is exercised at both
+readback and clear. Each case produces exactly one automatic kernel reset,
+one shared-display/compositor recreation and two AMD decoder selections in
+the existing document. Readback reports 48/7 frames/drops in the software
+recovery round and 48/0 in the fresh hardware round; clear reports 48/19 and
+48/0. Both rounds reach EOS, with exact independent software/hardware PNG
+references. Both visible final video crops exactly equal a fresh no-reset
+GPU-composited reference. That reference also completes both hardware rounds
+at 48/0. The AMD Mesa backend reopens after loss; the WebProcess is not restarted.
+All three native cases quit normally without crashes or owned leftovers.
+
+Fresh EGL, GLES and window probes add exactly 116 completed GPU jobs after
+the application cases. Root VRAM and ordinary-user RAM DMA pass too. Terminal
+state is generation 27, automatic recovery enabled with 24 attempts and 24
+successes, no pending recovery, no live or quarantined resources, and 628
+completed/waited fences with 1,256 EOP events. The interrupt ring is empty and
+all interrupt error counters are zero. Production media `3f28945c...` is restored.
+
+Recovery remains opt-in. Worker Skia contexts currently defer display replacement
+until they retire; explicit worker quiescing is unfinished. GPU canvas surfaces,
+WebGL/ANGLE, noncomposited GPU rendering, paused YUV layer restoration, multiple
+pages and late frame acknowledgements across recovery still need implementation
+or qualification. The QEMU shutdown allocator error also needs diagnosis. This
+checkpoint does not enable system defaults or complete the OS/application
+release installation. Exact sources, binaries, failed and passing trials,
+screenshots, source-manifest history and final diagnostics are pinned in
+`/mnt/HaikuWork/x399/evidence/wx5100/mesa-native/summit-compositor-recovery-manifest.json`.
