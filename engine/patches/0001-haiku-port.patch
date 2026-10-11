@@ -8691,10 +8691,10 @@ index 0000000000000000000000000000000000000000..48e19a5957df4c1ae60378dd9a84cbe4
 +/* Copyright (C) 2026 Summit contributors. SPDX-License-Identifier: BSD-2-Clause */
 +enum USBTransferStatus { "ok", "stall", "babble" };
 diff --git a/Source/WebCore/PlatformHaiku.cmake b/Source/WebCore/PlatformHaiku.cmake
-index 16a88804a1baa39ccdd9fc2870b6e2524d941298..796466d49a0dcd8736bc096023f465221fef1a06 100644
+index 16a88804a1baa39ccdd9fc2870b6e2524d941298..bf2e19f530699746b94328c2012aa039007d9971 100644
 --- a/Source/WebCore/PlatformHaiku.cmake
 +++ b/Source/WebCore/PlatformHaiku.cmake
-@@ -1,52 +1,365 @@
+@@ -1,52 +1,366 @@
 +include(platform/Haiku.cmake)
  include(platform/ImageDecoders.cmake)
  include(platform/OpenSSL.cmake)
@@ -8762,6 +8762,7 @@ index 16a88804a1baa39ccdd9fc2870b6e2524d941298..796466d49a0dcd8736bc096023f46522
 +endif()
 +
 +list(APPEND WebCore_PRIVATE_FRAMEWORK_HEADERS
++    platform/haiku/CanvasGraphicsRecoveryHaiku.h
 +    platform/haiku/RenderingStallHaiku.h
 +)
 +
@@ -9066,7 +9067,7 @@ index 16a88804a1baa39ccdd9fc2870b6e2524d941298..796466d49a0dcd8736bc096023f46522
    textencoding
    translation
    ${WEBP_LIBRARIES}
-@@ -61,6 +374,236 @@ list(APPEND WebCore_SYSTEM_INCLUDE_DIRECTORIES
+@@ -61,6 +375,236 @@ list(APPEND WebCore_SYSTEM_INCLUDE_DIRECTORIES
    ${SQLITE_INCLUDE_DIR}
    ${WEBP_INCLUDE_DIRS}
    ${ZLIB_INCLUDE_DIRS}
@@ -12643,7 +12644,7 @@ index 42d20ed46b377304c49a3981cfc65ab40fcb8a5e..6737763acbc004d3f0edf74b750a97c8
      // Non-standard legacy aliases (CanvasFillStrokeStyles).
      undefined setStrokeColor(DOMString color, optional unrestricted float alpha);
 diff --git a/Source/WebCore/html/canvas/CanvasRenderingContext2DBase.cpp b/Source/WebCore/html/canvas/CanvasRenderingContext2DBase.cpp
-index eaad38378a1ab2fdeb798d2a7d86325254400472..0ce62596d06842137e8624026c774ab543ed9651 100644
+index eaad38378a1ab2fdeb798d2a7d86325254400472..962fac069940ee7603ddfbcf4e655c125e941f2b 100644
 --- a/Source/WebCore/html/canvas/CanvasRenderingContext2DBase.cpp
 +++ b/Source/WebCore/html/canvas/CanvasRenderingContext2DBase.cpp
 @@ -32,6 +32,10 @@
@@ -12666,22 +12667,33 @@ index eaad38378a1ab2fdeb798d2a7d86325254400472..0ce62596d06842137e8624026c774ab5
  #include "FloatQuad.h"
  #include "FontCascadeFonts.h"
  #include "FontCascadeInlines.h"
-@@ -80,6 +86,10 @@
+@@ -80,6 +86,11 @@
  #include "PixelBufferConversion.h"
  #include "PixelFormat.h"
  #include "PlatformVideoColorSpace.h"
 +#if PLATFORM(HAIKU) && USE(SKIA)
 +#include "PlatformDisplay.h"
++#include "CanvasGraphicsRecoveryHaiku.h"
 +#include "GLDisplay.h"
 +#endif
  #include "RenderElement.h"
  #include "RenderImage.h"
  #include "RenderLayer.h"
-@@ -293,6 +303,115 @@ bool CanvasRenderingContext2DBase::isAccelerated() const
+@@ -293,6 +304,125 @@ bool CanvasRenderingContext2DBase::isAccelerated() const
      return m_buffer && protect(m_buffer)->context().renderingMode() == RenderingMode::Accelerated;
  }
  
 +#if PLATFORM(HAIKU) && USE(SKIA)
++void loseAcceleratedCanvasContextsForCurrentThreadHaiku()
++{
++    CanvasRenderingContext2DBase::loseAcceleratedContextsForCurrentThreadHaiku();
++}
++
++void restoreAcceleratedCanvasContextsForCurrentThreadHaiku()
++{
++    CanvasRenderingContext2DBase::restoreAcceleratedContextsForCurrentThreadHaiku();
++}
++
 +static Vector<Ref<CanvasRenderingContext2DBase>> canvasContextsForCurrentThreadHaiku()
 +{
 +    Vector<Ref<CanvasRenderingContext2DBase>> contexts;
@@ -12793,7 +12805,7 @@ index eaad38378a1ab2fdeb798d2a7d86325254400472..0ce62596d06842137e8624026c774ab5
  RefPtr<ImageBuffer> CanvasRenderingContext2DBase::surfaceBufferToImageBuffer(SurfaceBuffer)
  {
      return buffer();
-@@ -313,7 +432,7 @@ bool CanvasRenderingContext2DBase::isSurfaceBufferTransparentBlack(SurfaceBuffer
+@@ -313,7 +443,7 @@ bool CanvasRenderingContext2DBase::isSurfaceBufferTransparentBlack(SurfaceBuffer
  {
      // Before the first draw (or first access to the drawing buffer), the drawing buffer is transparent black.
      // Currently the canvas does not support alpha == false.
@@ -12802,7 +12814,7 @@ index eaad38378a1ab2fdeb798d2a7d86325254400472..0ce62596d06842137e8624026c774ab5
  }
  
  #if USE(SKIA)
-@@ -355,6 +474,9 @@ void CanvasRenderingContext2DBase::didUpdateCanvasSizeProperties(bool sizeChange
+@@ -355,6 +485,9 @@ void CanvasRenderingContext2DBase::didUpdateCanvasSizeProperties(bool sizeChange
      for (size_t i = 0; i < restoreCount; ++i)
          restore();
      m_stateStack.first() = State();
@@ -12812,7 +12824,7 @@ index eaad38378a1ab2fdeb798d2a7d86325254400472..0ce62596d06842137e8624026c774ab5
      m_path.clear();
      m_bufferNativeImage = nullptr;
      m_cachedContents.emplace<CachedContentsTransparent>();
-@@ -1284,9 +1406,78 @@ void CanvasRenderingContext2DBase::clipInternal(const Path& path, CanvasFillRule
+@@ -1284,9 +1417,78 @@ void CanvasRenderingContext2DBase::clipInternal(const Path& path, CanvasFillRule
          return;
  
      realizeSaves();
@@ -12891,7 +12903,7 @@ index eaad38378a1ab2fdeb798d2a7d86325254400472..0ce62596d06842137e8624026c774ab5
  void CanvasRenderingContext2DBase::beginCompositeLayer()
  {
  #if !USE(CAIRO)
-@@ -1396,6 +1587,14 @@ void CanvasRenderingContext2DBase::clearRect(double x, double y, double width, d
+@@ -1396,6 +1598,14 @@ void CanvasRenderingContext2DBase::clearRect(double x, double y, double width, d
          }
          context->setCompositeOperation(CompositeOperator::SourceOver);
      }
@@ -12906,7 +12918,7 @@ index eaad38378a1ab2fdeb798d2a7d86325254400472..0ce62596d06842137e8624026c774ab5
      context->clearRect(rect);
      if (saved)
          context->restore();
-@@ -2638,10 +2837,30 @@ void CanvasRenderingContext2DBase::willUpdateContents(std::optional<FloatRect> r
+@@ -2638,10 +2848,30 @@ void CanvasRenderingContext2DBase::willUpdateContents(std::optional<FloatRect> r
          if (context->shouldAntialias())
              dirtyRect.inflate(1);
  #if USE(COORDINATED_GRAPHICS)
@@ -12938,7 +12950,7 @@ index eaad38378a1ab2fdeb798d2a7d86325254400472..0ce62596d06842137e8624026c774ab5
  #else
          m_dirtyRect.unite(dirtyRect);
  #endif
-@@ -3552,6 +3771,8 @@ void CanvasRenderingContext2DBase::setWordSpacing(const String& wordSpacing)
+@@ -3552,6 +3782,8 @@ void CanvasRenderingContext2DBase::setWordSpacing(const String& wordSpacing)
  
  ImageBuffer* CanvasRenderingContext2DBase::buffer() const
  {
@@ -131756,7 +131768,7 @@ index f7a92c96dec16106113dc0ee005ebd40f36a7ffb..0c69ec684f8b5d9c492fc67fda9863b4
  };
  
 diff --git a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/LayerTreeHost.cpp b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/LayerTreeHost.cpp
-index 3d6d03115b4e8f2c5868af50c90f83cccc25bcf7..9e5d87108aeb377ca77cda8e4890b1a94c269d1a 100644
+index 3d6d03115b4e8f2c5868af50c90f83cccc25bcf7..394d4b693393989631bccb145dfb1f4df3c63110 100644
 --- a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/LayerTreeHost.cpp
 +++ b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/LayerTreeHost.cpp
 @@ -28,6 +28,7 @@
@@ -131772,7 +131784,7 @@ index 3d6d03115b4e8f2c5868af50c90f83cccc25bcf7..9e5d87108aeb377ca77cda8e4890b1a9
  #include <WebCore/AsyncScrollingCoordinator.h>
  #include <WebCore/Chrome.h>
 +#if PLATFORM(HAIKU)
-+#include <WebCore/CanvasRenderingContext2DBase.h>
++#include <WebCore/CanvasGraphicsRecoveryHaiku.h>
 +#endif
  #include <WebCore/Damage.h>
  #include <WebCore/GraphicsLayerCoordinated.h>
@@ -131873,7 +131885,7 @@ index 3d6d03115b4e8f2c5868af50c90f83cccc25bcf7..9e5d87108aeb377ca77cda8e4890b1a9
 +        host->m_compositor->prepareGraphicsRecoveryHaiku();
 +    }
 +    display.abandonSkiaContextForCurrentThreadHaiku();
-+    CanvasRenderingContext2DBase::loseAcceleratedContextsForCurrentThreadHaiku();
++    loseAcceleratedCanvasContextsForCurrentThreadHaiku();
 +    for (auto* host : hosts)
 +        host->m_sceneState->resetBackingStoresHaiku();
 +    BitmapTexturePool::singleton().discardLostTexturesHaiku();
@@ -131889,7 +131901,7 @@ index 3d6d03115b4e8f2c5868af50c90f83cccc25bcf7..9e5d87108aeb377ca77cda8e4890b1a9
 +        WTFLogAlways("Summit GPU recovery: fresh compositor context unavailable; retrying");
 +        return false;
 +    }
-+    CanvasRenderingContext2DBase::restoreAcceleratedContextsForCurrentThreadHaiku();
++    restoreAcceleratedCanvasContextsForCurrentThreadHaiku();
 +    for (auto* host : hosts) {
 +        host->m_graphicsRecoveryHaiku = false;
 +        host->m_isWaitingForRenderer = false;
@@ -161808,3 +161820,45 @@ index 353d8fcd723588929f7b69be54f68c6c8d31619c..24175bc3eec3e7499babcd0721031865
 +        return;
      m_targetSwitcher->endDrawSourceImage(*m_effectiveDrawingContext, ColorSpace::SRGB());
  }
+diff --git a/Source/WebCore/platform/haiku/CanvasGraphicsRecoveryHaiku.h b/Source/WebCore/platform/haiku/CanvasGraphicsRecoveryHaiku.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..7010916bb6848ca6c84f8b5f0c10b20312c043e5
+--- /dev/null
++++ b/Source/WebCore/platform/haiku/CanvasGraphicsRecoveryHaiku.h
+@@ -0,0 +1,36 @@
++/*
++ * Copyright (C) 2026 KunanyiOS contributors.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions are met:
++ * 1. Redistributions of source code must retain the above copyright notice,
++ *    this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright notice,
++ *    this list of conditions and the following disclaimer in the documentation
++ *    and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
++ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
++ * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
++ * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
++ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
++ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
++ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
++ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
++ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
++ * POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#pragma once
++
++#include "PlatformExportMacros.h"
++
++namespace WebCore {
++
++// Called on the owning thread while the compositor queues are stopped. Keep
++// Canvas 2D implementation details private to WebCore at this boundary.
++WEBCORE_EXPORT void loseAcceleratedCanvasContextsForCurrentThreadHaiku();
++WEBCORE_EXPORT void restoreAcceleratedCanvasContextsForCurrentThreadHaiku();
++
++} // namespace WebCore
