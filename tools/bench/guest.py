@@ -324,7 +324,17 @@ class CrashWatch:
 
     def __init__(self):
         self.reports = set(self._reports())
+        self.debugger_teams = set(self._debugger_teams())
         self.syslog_size = self._syslog_size()
+
+    @staticmethod
+    def _debugger_teams():
+        # A native crash reporter can still be writing symbols after its
+        # target has disappeared from the owned process group. Observe it
+        # before the .report file becomes visible; never signal it here.
+        text = ssh('ps', check=False).stdout
+        return [int(match) for match in re.findall(
+            r'/Debugger --save-report --team (\d+)', text)]
 
     @staticmethod
     def _reports():
@@ -342,7 +352,8 @@ class CrashWatch:
         offset = self.syslog_size if size >= self.syslog_size else 0  # rotated
         text = ssh(f'tail -c +{offset + 1} /var/log/syslog', check=False).stdout if size != self.syslog_size else ''
         events = [line for line in text.splitlines() if self.EVENT.search(line)]
-        return {'newReports': new_reports, 'syslogEvents': events, 'syslogBytes': size - offset}
+        return {'newReports': new_reports, 'syslogEvents': events, 'syslogBytes': size - offset,
+                'debuggerTeams': sorted(set(self._debugger_teams()) - self.debugger_teams)}
 
     def syslog_tail(self, lines=80):
         return ssh(f'tail -n {int(lines)} /var/log/syslog', check=False).stdout

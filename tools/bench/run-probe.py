@@ -127,8 +127,8 @@ def main():
         guest.ssh(f'rm -rf {guest_dir}/profile', check=False, timeout=300)
         server.terminate()
         server.wait(timeout=10)
-    crashes = watch.poll()
     after = guest.load_report(ctl, (), 3000)
+    crashes = watch.poll()
     report = {'id': run_id, 'outcome': outcome, 'browser': args.browser, 'page': args.page,
               'machine': guest.HOST, 'bundle': args.bundle, 'env': args.env,
               'haikuProfile': args.haiku_profile,
@@ -144,7 +144,8 @@ def main():
     (directory / 'run.json').write_text(json.dumps(report, indent=1))
     print(json.dumps(report, indent=1))
     return 0 if (report['outcome'] == 'completed' and not leftovers
-                 and not crashes['newReports'] and not crashes['syslogEvents']) else 1
+                 and not crashes['newReports'] and not crashes['syslogEvents']
+                 and not crashes['debuggerTeams']) else 1
 
 
 if __name__ == '__main__':

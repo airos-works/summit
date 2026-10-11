@@ -1,0 +1,83 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>MSE recovery</title>
+<style>body{font:18px monospace;margin:12px;background:white;color:black}video{display:block;width:480px;height:360px}#phase{background:#204040;color:white;padding:8px}pre{font-size:13px}</style>
+<div id="phase">Opening first decoder</div>
+<video id="video" muted playsinline></video>
+<pre id="result"></pre>
+<script>
+// Two independent MSE decoders in one document. The test-only amduvd hook
+// faults once per process; a new process would arm again and fail the host's
+// exact reset-count check. Inspect the screenshot as well as the JSON: a lost
+// compositor can leave stale pixels while JavaScript still reaches the end.
+const params = new URLSearchParams(location.search);
+const file = params.get('video') || 'wx-hevc-main10-48.mp4';
+const codec = params.get('codec') || 'hvc1.2.4.L60.90';
+const expected = Number(params.get('frames') || 48);
+const video = document.getElementById('video');
+const phase = document.getElementById('phase');
+const result = document.getElementById('result');
+const rounds = [];
+let posted = false;
+let objectURL = null;
+function once(target, name) {
+    return new Promise((resolve, reject) => {
+        target.addEventListener(name, resolve, {once:true});
+        target.addEventListener('error', () => reject(new Error(name + ' failed')), {once:true});
+    });
+}
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+async function post(reason, error = null) {
+    if (posted) return;
+    posted = true;
+    const passed = reason === 'ended' && rounds.length === 2
+        && rounds.every(r => r.frames === expected && !r.error && Math.abs(r.time - r.duration) < .06)
+        && rounds[1].dropped === 0 && rounds[0].pixelHash === rounds[1].pixelHash;
+    phase.textContent = passed ? 'REPLAY COMPLETE — second decoder reached the end' : 'RECOVERY CHECK FAILED';
+    phase.style.background = passed ? '#16702a' : '#902020';
+    const report = {passed, reason, error, rounds, expected, video:file};
+    result.textContent = JSON.stringify(report, null, 1);
+    document.title = 'MSE recovery ' + (passed ? 'complete' : 'failed');
+    await sleep(350);
+    await fetch('/__bench/probe', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(report)});
+}
+function pixelHash() {
+    const canvas = document.createElement('canvas'); canvas.width=128; canvas.height=96;
+    const context = canvas.getContext('2d', {willReadFrequently:true});
+    context.drawImage(video, 0, 0, 128, 96);
+    const data = context.getImageData(0, 0, 128, 96).data;
+    let hash = 2166136261;
+    for (let i = 0; i < data.length; ++i) hash = Math.imul(hash ^ data[i], 16777619) >>> 0;
+    return hash;
+}
+async function playRound(index, data) {
+    video.removeAttribute('src'); video.load();
+    if (objectURL) URL.revokeObjectURL(objectURL);
+    await sleep(400); // Allow the old decoder's asynchronous close to complete.
+    const source = new MediaSource();
+    const opened = once(source, 'sourceopen');
+    objectURL = URL.createObjectURL(source); video.src=objectURL;
+    await opened;
+    const buffer = source.addSourceBuffer('video/mp4; codecs="' + codec + '"');
+    const appended = once(buffer, 'updateend'); buffer.appendBuffer(data); await appended;
+    source.endOfStream();
+    phase.textContent = 'Playing decoder ' + index + ' of 2';
+    const ended = once(video, 'ended'); await video.play(); await ended;
+    await sleep(250);
+    const q = video.getVideoPlaybackQuality();
+    rounds.push({decoder:index, time:video.currentTime, duration:video.duration,
+        frames:q.totalVideoFrames, dropped:q.droppedVideoFrames, pixelHash:pixelHash(),
+        error:video.error && video.error.message});
+}
+(async () => {
+    try {
+        const response = await fetch('mse-media/' + file);
+        if (!response.ok) throw new Error('fixture HTTP ' + response.status);
+        const data = await response.arrayBuffer();
+        await playRound(1, data);
+        await playRound(2, data);
+        await post('ended');
+    } catch (error) { await post('error', String(error)); }
+})();
+setTimeout(() => post('timeout'), 30000);
+</script>
