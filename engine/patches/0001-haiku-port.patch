@@ -131893,7 +131893,7 @@ index 57163f65873e5a481e5ef5a4ec3beec4b40b7cea..8a444fbabdfafae05a33908e3ee1df9d
      bool m_compositionRequired { false };
  #if ENABLE(SCROLLING_THREAD)
 diff --git a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/ThreadedCompositor.cpp b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/ThreadedCompositor.cpp
-index c238029ad9c99c5028ea7e456520af85d1d85532..a7325dce83585b2b2b5b8b8472c27623f7441e8f 100644
+index c238029ad9c99c5028ea7e456520af85d1d85532..f22e3ac90018ca4dbcfa2ba4864a562a465723a1 100644
 --- a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/ThreadedCompositor.cpp
 +++ b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/ThreadedCompositor.cpp
 @@ -26,6 +26,10 @@
@@ -132311,7 +132311,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..a7325dce83585b2b2b5b8b8472c27623
      OptionSet<CompositionReason> reasons;
      bool shouldNotifiyDidComposite = false;
      {
-@@ -580,11 +852,26 @@ void ThreadedCompositor::renderLayerTree()
+@@ -580,11 +852,45 @@ void ThreadedCompositor::renderLayerTree()
  
          ASSERT(m_state.state == State::Scheduled);
          m_state.state = State::InProgress;
@@ -132336,10 +132336,29 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..a7325dce83585b2b2b5b8b8472c27623
 +#endif
          return;
 +    }
++#endif
++
++#if PLATFORM(HAIKU) && USE(TEXTURE_MAPPER)
++    // Exercise display/namespace retirement in the isolated software-rendered
++    // VM too. This does not reset hardware and is never enabled by defaults.
++    static unsigned testFramesUntilLoss = [] {
++        const char* value = getenv("SUMMIT_TEST_COMPOSITOR_LOSS_AFTER_FRAMES");
++        if (!value)
++            return 0u;
++        auto count = parseInteger<unsigned>(StringView::fromLatin1(value));
++        return count.value_or(0);
++    }();
++    static std::atomic<unsigned> testFrameCount { 0 };
++    if (testFramesUntilLoss && ++testFrameCount == testFramesUntilLoss) {
++        PlatformDisplay::sharedDisplay().glDisplay().markContextLostHaiku();
++        WTFLogAlways("Summit TEST: retiring compositor display after %u frames (no hardware reset)", testFramesUntilLoss);
++        requestGraphicsRecoveryHaiku();
++        return;
++    }
  #endif
  
      // Retrieve the scene attributes in a thread-safe manner.
-@@ -599,24 +886,68 @@ void ThreadedCompositor::renderLayerTree()
+@@ -599,24 +905,68 @@ void ThreadedCompositor::renderLayerTree()
      if (viewportSize.isEmpty())
          return;
  
@@ -132408,7 +132427,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..a7325dce83585b2b2b5b8b8472c27623
      updateFPSCounter();
  
      if (shouldNotifiyDidComposite)
-@@ -631,8 +962,55 @@ void ThreadedCompositor::renderLayerTree()
+@@ -631,8 +981,55 @@ void ThreadedCompositor::renderLayerTree()
      PlatformDisplay::sharedDisplay().skiaGLContext()->swapBuffers();
  #endif
  
@@ -132464,7 +132483,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..a7325dce83585b2b2b5b8b8472c27623
  
      RunLoop::mainSingleton().dispatch([this, protectedThis = Ref { *this }] {
          if (m_layerTreeHost)
-@@ -656,6 +1034,13 @@ void ThreadedCompositor::requestComposition(CompositionReason reason)
+@@ -656,6 +1053,13 @@ void ThreadedCompositor::requestComposition(CompositionReason reason)
  {
      Locker locker { m_state.lock };
      m_state.reasons.add(reason);
@@ -132478,7 +132497,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..a7325dce83585b2b2b5b8b8472c27623
      scheduleUpdateLocked();
  }
  
-@@ -703,6 +1088,10 @@ void ThreadedCompositor::scheduleUpdateLocked()
+@@ -703,6 +1107,10 @@ void ThreadedCompositor::scheduleUpdateLocked()
  void ThreadedCompositor::frameComplete()
  {
      ASSERT(m_workQueue->runLoop().isCurrent());
@@ -132489,7 +132508,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..a7325dce83585b2b2b5b8b8472c27623
  
      Locker locker { m_state.lock };
      WTFEmitSignpost(this, FrameComplete, "reasons: %s, state: %s, waiting for tiles: %s", reasonsToString(m_state.reasons).utf8(), stateToString(m_state.state).characters(), m_state.isWaitingForTiles ? "yes" : "no");
-@@ -726,6 +1115,112 @@ void ThreadedCompositor::frameComplete()
+@@ -726,6 +1134,112 @@ void ThreadedCompositor::frameComplete()
      }
  }
  
