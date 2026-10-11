@@ -1,0 +1,124 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Canvas recovery: running</title>
+<style>
+body { font: 16px sans-serif; margin: 16px; }
+#status { background: #705500; color: white; padding: 8px; }
+canvas { width: 320px; height: 128px; display: block; margin: 12px 0; }
+video { width: 240px; height: 180px; display: block; }
+pre { font: 12px monospace; white-space: pre-wrap; }
+</style>
+<div id="status">Canvas recovery running</div>
+<canvas id="canvas" width="320" height="128"></canvas>
+<video id="video" muted playsinline loop></video>
+<pre id="details"></pre>
+<script>
+'use strict';
+const options = new URLSearchParams(location.search);
+const expectLoss = options.get('loss') === '1';
+const cancelRestore = options.get('cancel') === '1';
+const offscreen = options.get('offscreen') === '1';
+const display = document.querySelector('#canvas');
+const canvas = offscreen ? display.transferControlToOffscreen() : display;
+const context = canvas.getContext('2d');
+const video = document.querySelector('#video');
+const events = [];
+const errors = [];
+let initialPixels = false;
+let videoFrames = 0;
+let finished = false;
+let mediaSource;
+let mediaURL;
+const describe = error => String(error) + (error && error.stack ? '\n' + error.stack : '');
+
+function pixels() {
+    return [Array.from(context.getImageData(32, 32, 1, 1).data),
+        Array.from(context.getImageData(240, 32, 1, 1).data)];
+}
+function equal(actual, expected) {
+    return JSON.stringify(actual) === JSON.stringify(expected);
+}
+const expected = [[0, 255, 0, 255], [0, 0, 255, 255]];
+const blank = [[0, 0, 0, 0], [0, 0, 0, 0]];
+function paint() {
+    context.fillStyle = '#00ff00'; context.fillRect(0, 0, 160, 128);
+    context.fillStyle = '#0000ff'; context.fillRect(160, 0, 160, 128);
+}
+function lost() {
+    return typeof context.isContextLost === 'function' ? context.isContextLost() : null;
+}
+canvas.addEventListener('contextlost', event => {
+    try {
+        const transform = context.getTransform();
+        const item = {type: event.type, lost: lost(), cancelable: event.cancelable,
+            bubbles: event.bubbles, pixels: pixels(), stateReset: context.lineWidth === 1
+                && context.globalAlpha === 1 && context.fillStyle === '#000000'
+                && transform.a === 1 && transform.d === 1 && transform.e === 0 && transform.f === 0};
+        paint();
+        item.drawWhileLostRemainsBlank = equal(pixels(), blank);
+        events.push(item);
+        if (cancelRestore) event.preventDefault();
+    } catch (error) { errors.push(describe(error)); }
+});
+canvas.addEventListener('contextrestored', event => {
+    try {
+        const item = {type: event.type, lost: lost(), cancelable: event.cancelable,
+            bubbles: event.bubbles, initiallyBlank: equal(pixels(), blank)};
+        paint(); item.pixels = pixels(); events.push(item);
+    } catch (error) { errors.push(describe(error)); }
+});
+
+async function finish(error) {
+    if (finished) return;
+    finished = true;
+    if (error) errors.push(describe(error));
+    video.pause();
+    videoFrames = video.getVideoPlaybackQuality().totalVideoFrames;
+    let finalPixels = null;
+    try { finalPixels = pixels(); } catch (error) { errors.push(String(error)); }
+    const lossEvents = events.filter(item => item.type === 'contextlost');
+    const restoreEvents = events.filter(item => item.type === 'contextrestored');
+    const lossPass = !expectLoss ? events.length === 0 : lossEvents.length === 1
+        && lossEvents[0].lost === true && lossEvents[0].cancelable && !lossEvents[0].bubbles
+        && lossEvents[0].stateReset && equal(lossEvents[0].pixels, blank)
+        && lossEvents[0].drawWhileLostRemainsBlank
+        && (cancelRestore ? restoreEvents.length === 0 && lost() === true
+            : restoreEvents.length === 1 && restoreEvents[0].lost === false
+                && !restoreEvents[0].cancelable && !restoreEvents[0].bubbles
+                && restoreEvents[0].initiallyBlank && equal(restoreEvents[0].pixels, expected));
+    const report = {kind: 'canvas-recovery', expectLoss, cancelRestore, offscreen,
+        initialPixels, finalPixels, videoFrames, events, errors,
+        passed: initialPixels && videoFrames >= 30 && !errors.length && lossPass
+            && equal(finalPixels, expectLoss && cancelRestore ? blank : expected)};
+    document.querySelector('#status').textContent = report.passed ? 'CANVAS RECOVERY COMPLETE' : 'CANVAS RECOVERY FAILED';
+    document.querySelector('#status').style.background = report.passed ? '#18752a' : '#a51c1c';
+    document.querySelector('#details').textContent = JSON.stringify(report, null, 2);
+    document.title = report.passed ? 'Canvas recovery complete' : 'Canvas recovery failed';
+    await new Promise(resolve => setTimeout(resolve, 250));
+    await fetch('/__bench/probe', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(report)});
+}
+
+(async () => {
+    if (!context) throw new Error('2D canvas context unavailable');
+    paint(); initialPixels = equal(pixels(), expected);
+    // Non-default state must be reset when backing storage is lost.
+    context.lineWidth = 7; context.globalAlpha = 0.75; context.fillStyle = '#abcdef';
+    context.setTransform(1, 0, 0, 1, 7, 5); context.save();
+    mediaSource = new MediaSource(); mediaURL = URL.createObjectURL(mediaSource);
+    video.src = mediaURL;
+    await new Promise(resolve => mediaSource.addEventListener('sourceopen', resolve, {once: true}));
+    const buffer = mediaSource.addSourceBuffer('video/mp4; codecs="hvc1.2.4.L60.90"');
+    const response = await fetch('mse-media/wx-hevc-main10-48.mp4');
+    if (!response.ok) throw new Error('fixture HTTP ' + response.status);
+    const bytes = await response.arrayBuffer();
+    await new Promise((resolve, reject) => {
+        buffer.addEventListener('updateend', resolve, {once: true});
+        buffer.addEventListener('error', () => reject(new Error('MSE append failed')), {once: true});
+        buffer.appendBuffer(bytes);
+    });
+    mediaSource.endOfStream();
+    await video.play();
+    setTimeout(() => finish(), 6000);
+})().catch(finish);
+setTimeout(() => finish(new Error('canvas probe watchdog expired')), 20000);
+</script>
