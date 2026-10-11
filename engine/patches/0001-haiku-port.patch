@@ -41307,7 +41307,7 @@ index 74cfeb60ac3daa537785693be3917358aa26a2b5..7e6a15b9528db5b57a57352b5e8dab62
  
  void FontCache::platformPurgeInactiveFontData()
 diff --git a/Source/WebCore/platform/graphics/skia/GraphicsContextSkia.cpp b/Source/WebCore/platform/graphics/skia/GraphicsContextSkia.cpp
-index a3cb981bd76fc7f7946862f8f7be53fe133bae79..5258439fc800fde2716f5a900f76f46f1c829654 100644
+index a3cb981bd76fc7f7946862f8f7be53fe133bae79..f4663ddc20e7b682898821562a40207876caa022 100644
 --- a/Source/WebCore/platform/graphics/skia/GraphicsContextSkia.cpp
 +++ b/Source/WebCore/platform/graphics/skia/GraphicsContextSkia.cpp
 @@ -50,6 +50,8 @@
@@ -41319,7 +41319,54 @@ index a3cb981bd76fc7f7946862f8f7be53fe133bae79..5258439fc800fde2716f5a900f76f46f
  #include <skia/core/SkPathBuilder.h>
  #include <skia/core/SkPathEffect.h>
  #include <skia/core/SkPathTypes.h>
-@@ -421,7 +423,7 @@ void GraphicsContextSkia::drawSkiaPath(const SkPath& path, SkPaint& paint)
+@@ -261,7 +263,9 @@ sk_sp<SkImage> GraphicsContextSkia::imageForCurrentThread(const sk_sp<SkImage>&
+     // Check if the GPU texture is valid for the current context.
+     // If the image was created in a different thread/context, we need to rewrap it.
+     sk_sp<SkImage> imageInThisThread = image->isValid(grContext->asRecorder()) ? image : SkiaUtilities::rewrapImageForContext(grContext, *image);
+-    if (renderingMode() == RenderingMode::Accelerated)
++    // An abandoned source context cannot export its texture to the replacement
++    // context. Propagate that failure instead of rasterizing a null image.
++    if (!imageInThisThread || renderingMode() == RenderingMode::Accelerated)
+         return imageInThisThread;
+ 
+     // When drawing GPU-backed image on CPU-backed canvas we need to convert image to CPU-backed one.
+@@ -294,6 +298,19 @@ void GraphicsContextSkia::drawNativeImage(const NativeImage& nativeImage, const
+     if (!makeGLContextCurrentIfNeeded())
+         return;
+ 
++    // Resolve the image before changing the canvas transform or save stack.
++    auto imageInThisThread = imageForCurrentThread(image);
++    if (!imageInThisThread)
++        return;
++#if USE(TEXTURE_MAPPER)
++    trackAcceleratedRenderingFenceIfNeeded(imageInThisThread, nativeImage.grContext());
++#else
++    if (m_threadSafeGrContext)
++        imageInThisThread = SkiaUtilities::createPromiseImageIfNeeded(imageInThisThread, m_threadSafeGrContext);
++    if (!imageInThisThread)
++        return;
++#endif
++
+     auto normalizedDestRect = normalizeRect(destRect);
+     if (options.orientation() != ImageOrientation::Orientation::None) {
+         m_canvas.save();
+@@ -316,15 +333,6 @@ void GraphicsContextSkia::drawNativeImage(const NativeImage& nativeImage, const
+     bool inExtraTransparencyLayer = false;
+     auto clampingConstraint = options.strictImageClamping() == StrictImageClamping::Yes ? SkCanvas::kStrict_SrcRectConstraint : SkCanvas::kFast_SrcRectConstraint;
+ 
+-    // 'imageInThisThread' is either the incoming 'image', or a wrapper around the 'image' accessible in the current thread.
+-    auto imageInThisThread = imageForCurrentThread(image);
+-#if USE(TEXTURE_MAPPER)
+-    trackAcceleratedRenderingFenceIfNeeded(imageInThisThread, nativeImage.grContext());
+-#else
+-    if (m_threadSafeGrContext)
+-        imageInThisThread = SkiaUtilities::createPromiseImageIfNeeded(imageInThisThread, m_threadSafeGrContext);
+-#endif
+-
+     // 'imageForDrawing' references the incoming image (or if it's not directly accessible in this thread the 'imageInThisThread' which is).
+     // However, if we have to make a raster copy (see the hasDropShadow() case below), then imageForDrawing will point to the raster copy instead.
+     // This is the image we have to pass on to m_canvas.drawImageRect(...) below.
+@@ -421,7 +429,7 @@ void GraphicsContextSkia::drawSkiaPath(const SkPath& path, SkPaint& paint)
      if (hasDropShadow()) {
          inExtraTransparencyLayer = drawOutsetShadow(paint, [&](const SkPaint& paint) {
              m_canvas.drawPath(path, paint);
@@ -41328,7 +41375,7 @@ index a3cb981bd76fc7f7946862f8f7be53fe133bae79..5258439fc800fde2716f5a900f76f46f
      }
      m_canvas.drawPath(path, paint);
      if (inExtraTransparencyLayer)
-@@ -456,7 +458,11 @@ bool GraphicsContextSkia::drawPathAsSingleElement(const Path& path, SkPaint& pai
+@@ -456,7 +464,11 @@ bool GraphicsContextSkia::drawPathAsSingleElement(const Path& path, SkPaint& pai
              return false;
  
          SkRect oval = { arc.center.x() - arc.radius, arc.center.y() - arc.radius, arc.center.x() + arc.radius, arc.center.y() + arc.radius };
@@ -41341,7 +41388,7 @@ index a3cb981bd76fc7f7946862f8f7be53fe133bae79..5258439fc800fde2716f5a900f76f46f
              m_canvas.drawOval(oval, paint);
          else
              m_canvas.drawArc(oval, startDegrees, sweepDegrees, false, paint);
-@@ -575,15 +581,63 @@ sk_sp<SkImageFilter> GraphicsContextSkia::createDropShadowFilterIfNeeded(ShadowS
+@@ -575,15 +587,63 @@ sk_sp<SkImageFilter> GraphicsContextSkia::createDropShadowFilterIfNeeded(ShadowS
      return nullptr;
  }
  
@@ -41373,7 +41420,10 @@ index a3cb981bd76fc7f7946862f8f7be53fe133bae79..5258439fc800fde2716f5a900f76f46f
 +    const float sigma = shadow->radius / 2.0;
 +    if (sigma > 0)
 +        shadowPaint.setMaskFilter(SkMaskFilter::MakeBlur(kNormal_SkBlurStyle, sigma, !ignoreTransforms));
-+
+ 
+-    paint.setImageFilter(shadow);
+-    drawFunction(paint);
+-    paint.setImageFilter(nullptr);
 +    m_canvas.save();
 +    if (ignoreTransforms) {
 +        // Offset and blur are in device space whatever the transform (canvas
@@ -41399,10 +41449,7 @@ index a3cb981bd76fc7f7946862f8f7be53fe133bae79..5258439fc800fde2716f5a900f76f46f
 +        auto shadow = createDropShadowFilterIfNeeded(ShadowStyle::Outset);
 +        if (!shadow)
 +            return false;
- 
--    paint.setImageFilter(shadow);
--    drawFunction(paint);
--    paint.setImageFilter(nullptr);
++
 +        paint.setImageFilter(shadow);
 +        drawFunction(paint);
 +        paint.setImageFilter(nullptr);
@@ -41410,7 +41457,7 @@ index a3cb981bd76fc7f7946862f8f7be53fe133bae79..5258439fc800fde2716f5a900f76f46f
  
      auto reversed = m_skiaStateStack | std::views::reverse;
      auto it = std::ranges::find(reversed, true, &SkiaState::isLayer);
-@@ -650,7 +704,7 @@ void GraphicsContextSkia::drawSkiaRect(const SkRect& boundaries, SkPaint& paint)
+@@ -650,7 +710,7 @@ void GraphicsContextSkia::drawSkiaRect(const SkRect& boundaries, SkPaint& paint)
      if (hasDropShadow()) {
          inExtraTransparencyLayer = drawOutsetShadow(paint, [&](const SkPaint& paint) {
              m_canvas.drawRect(boundaries, paint);
@@ -41419,7 +41466,7 @@ index a3cb981bd76fc7f7946862f8f7be53fe133bae79..5258439fc800fde2716f5a900f76f46f
      }
      m_canvas.drawRect(boundaries, paint);
      if (inExtraTransparencyLayer)
-@@ -1092,7 +1146,7 @@ void GraphicsContextSkia::fillRoundedRectImpl(const FloatRoundedRect& rect, cons
+@@ -1092,7 +1152,7 @@ void GraphicsContextSkia::fillRoundedRectImpl(const FloatRoundedRect& rect, cons
      if (hasDropShadow()) {
          inExtraTransparencyLayer = drawOutsetShadow(paint, [&](const SkPaint& paint) {
              m_canvas.drawRRect(rect, paint);
@@ -41428,7 +41475,16 @@ index a3cb981bd76fc7f7946862f8f7be53fe133bae79..5258439fc800fde2716f5a900f76f46f
      }
      m_canvas.drawRRect(rect, paint);
      if (inExtraTransparencyLayer)
-@@ -1359,7 +1413,7 @@ void GraphicsContextSkia::drawSkiaText(const sk_sp<SkTextBlob>& blob, SkScalar x
+@@ -1145,6 +1205,8 @@ void GraphicsContextSkia::drawPattern(const NativeImage& nativeImage, const Floa
+         return;
+ 
+     image = imageForCurrentThread(image);
++    if (!image)
++        return;
+ 
+     FloatPoint phaseOffset(tileRect.location());
+     phaseOffset.scale(patternTransform.a(), patternTransform.d());
+@@ -1359,7 +1421,7 @@ void GraphicsContextSkia::drawSkiaText(const sk_sp<SkTextBlob>& blob, SkScalar x
          if (hasDropShadow()) {
              inExtraTransparencyLayer = drawOutsetShadow(paint, [&](const SkPaint& paint) {
                  m_canvas.drawTextBlob(blob, x, y, paint);
