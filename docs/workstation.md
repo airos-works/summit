@@ -637,3 +637,44 @@ backing, wider graphics/media regression checks and actual native loss coverage
 remain pending. Evidence, crash reports, source and binary pins, and all twelve
 run/visual results are recorded in
 `/mnt/HaikuWork/x399/evidence/wx5100/mesa-native/summit-snapshot-safety-manifest.json`.
+
+## Immutable ImageBitmap recovery candidate (2026-10-12, qualification pending)
+
+The independent `canvas-bitmap-preservation.html` fixture defaults to no
+JavaScript readback before display loss. With the preceding snapshot-safety
+engine `eb958dd5...`, its CPU-destination control retains exact green/blue
+pixels, but the loss case returns transparent black. Both runs quit without
+new crashes or owned leftovers. Their screenshots show the orange live source
+and, respectively, the correct retained bitmap or a blank destination with a
+red failure banner. Exact pixel checks and manual review are recorded in
+`/mnt/HaikuWork/x399/evidence/wx5100/mesa-native/summit-bitmap-preservation-before-comparison.json`.
+The older snapshot fixture and its preread behavior remain unchanged.
+
+Commit `4a2f327225f4c1c8520d6bb820d3b36e7344c5f3` adds private main-thread
+`ImageBitmap` recovery under `SUMMIT_GPU_RECOVERY=1`. For actual texture-backed
+storage it captures an immutable raster copy while the owning display is
+healthy. The ordinary bitmap buffer remains accelerated. After that display
+is lost, accessing the buffer attempts to rebuild accelerated storage from
+the raster. If display recreation is pending, a temporary CPU buffer retains
+the pixels and a later access retries GPU allocation. `close()` releases both
+copies directly without reconstructing a lost buffer; taking the buffer
+recovers it before releasing the backup. The additional raster bytes are
+included in the bitmap's atomic memory cost, with overflow checking.
+
+This adds a readback and retained memory for each eligible bitmap. Backup or
+allocation failure can still prevent pixel preservation. Workers are excluded
+from this main-thread ownership policy, and `CanvasPattern` recovery is still
+separate work. Capture, GPU restoration, CPU deferral and backup release have
+private traces so testing can distinguish actual storage behavior from an
+allocation request. No runtime success is claimed for the new implementation.
+
+The two source files pass a native syntax check using the actual WebCore
+compiler flags and fresh headers. The subsequent full engine build is in
+progress. Its source commit and 49 source hashes are pinned separately from
+the native source metadata, which still describes the earlier qualified canvas
+checkpoint. The new candidate has not been executed natively or qualified in
+QEMU. The build continuation will stage identical bundles and run only the
+first unread QEMU control before visual review. Prepared cases cover both
+bitmap constructors, CPU/GPU destinations, preread controls, closing without
+drawing, translucent pixels and access while display recreation is delayed.
+These are pending tests, not qualification results.
