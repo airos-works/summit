@@ -36,6 +36,8 @@ def main():
     parser.add_argument('--label', default='')
     parser.add_argument('--sample-interval', type=float, default=0, metavar='SECONDS',
                         help='sample owned memory and CPU during the probe (0 disables)')
+    parser.add_argument('--owned-kernel-worker', action='append', default=[], metavar='NAME',
+                        help='exact worker name reserved for this isolated run; attributed only during owned Summit samples')
     args = parser.parse_args()
     if args.haiku_profile and guest.HOST == 'workstation':
         parser.error('--haiku-profile is disabled on the workstation because Haiku profile shutdown can hang the machine')
@@ -43,6 +45,10 @@ def main():
         parser.error('--sample-interval must be 0 or at least 1 second')
     if args.sample_interval and args.browser != 'summit':
         parser.error('--sample-interval requires an owned Summit process group')
+    if args.owned_kernel_worker and (not args.sample_interval or args.browser != 'summit'):
+        parser.error('--owned-kernel-worker requires owned Summit CPU sampling')
+    if any(not name or name.startswith('idle thread ') for name in args.owned_kernel_worker):
+        parser.error('--owned-kernel-worker requires a non-idle worker name')
 
     run_id = (time.strftime('probe-%Y%m%d-%H%M%S') + f'-{args.browser}'
               + (f'-{args.label}' if args.label else ''))
@@ -94,7 +100,8 @@ def main():
                 next_wake = time.monotonic() + 30
             if args.sample_interval and time.monotonic() >= next_sample:
                 members = guest.members(ctl, group)
-                samples.append(guest.load_report(ctl, [pid for pid, _ in members], 1000))
+                samples.append(guest.load_report(ctl, [pid for pid, _ in members], 1000,
+                                                 args.owned_kernel_worker))
                 (directory / 'samples.json').write_text(json.dumps(samples, indent=1))
                 next_sample = time.monotonic() + args.sample_interval
             if (directory / 'probe.json').exists():
@@ -126,6 +133,7 @@ def main():
               'machine': guest.HOST, 'bundle': args.bundle, 'env': args.env,
               'haikuProfile': args.haiku_profile,
               'sampleInterval': args.sample_interval,
+              'ownedKernelWorkerNames': args.owned_kernel_worker,
               'shutdown': shutdown, 'leftovers': leftovers, 'crashes': crashes,
               'load': {'before': before, 'during': samples, 'after': after},
               'contended': before['contended'] or after['contended'] or any(s['contended'] for s in samples)}

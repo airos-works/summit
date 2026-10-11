@@ -108,7 +108,7 @@ def sample(binary, teams=(), interval_ms=1000):
     return data
 
 
-def load_report(binary, own_teams=(), interval_ms=2000):
+def load_report(binary, own_teams=(), interval_ms=2000, owned_kernel_workers=()):
     """Contention snapshot: what else is burning CPU in the VM right now."""
     data = sample(binary, own_teams, interval_ms)
     own = {int(t) for t in own_teams}
@@ -127,7 +127,15 @@ def load_report(binary, own_teams=(), interval_ms=2000):
     own_cores = sum(t['cores'] for t in owned)
     # Teams that start and exit inside the sampling interval (a ninja build spawning short
     # compiles) never appear in both snapshots; they are only visible as unexplained busy time.
-    unexplained = max(0.0, data['busyCores'] - own_cores - foreign_cores - sum(t['cores'] for t in servers))
+    raw_unexplained = max(0.0, data['busyCores'] - own_cores - foreign_cores - sum(t['cores'] for t in servers))
+    # Explicit attribution for an isolated run, not an automatic exemption for
+    # kernel_team. Queued GPU jobs move CPU time out of the browser's team.
+    # Before/after samples with no owned teams never receive this attribution.
+    names = set(owned_kernel_workers) if owned else set()
+    workers = [t for t in data.get('kernelWorkers', []) if t['name'] in names
+               and not t['name'].startswith('idle thread ')]
+    worker_cores = sum(t['cores'] for t in workers)
+    unexplained = max(0.0, raw_unexplained - worker_cores)
     return {
         'at': data['at'], 'cpuCount': data['cpuCount'], 'busyCores': data['busyCores'],
         'foreignCores': round(foreign_cores, 3), 'ownCores': round(own_cores, 3),
@@ -137,9 +145,10 @@ def load_report(binary, own_teams=(), interval_ms=2000):
                           'ramBytes': t.get('ramBytes', 0), 'virtualBytes': t.get('virtualBytes', 0),
                           'threads': t['threads'], 'areas': t['areas']} for t in owned],
         'serverCores': round(sum(t['cores'] for t in servers), 3),
-        # Observation only: workers remain unexplained until a benchmark
-        # establishes which client owns their work. Never exempt all kernel CPU.
         'kernelWorkers': data.get('kernelWorkers', []),
+        'ownedKernelWorkers': workers,
+        'ownedKernelCores': round(worker_cores, 3),
+        'rawUnexplainedBusyCores': round(raw_unexplained, 3),
         'unexplainedBusyCores': round(unexplained, 3),
         'compilerTeams': len(compilers), 'compilerCores': round(sum(t['cores'] for t in compilers), 3),
         'topForeign': sorted(({'cores': t['cores'], 'args': t['args'][:80]} for t in others),
