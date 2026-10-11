@@ -12,7 +12,7 @@ steps from its own paths, building the libraries from jmgasper's forks.
 | `build-deps.sh` | cross-builds curl, OpenSSL, nghttp2, ICU, libxml2 and the other engine libraries into `deps/` |
 | `dependency-sources.txt` | the source tarballs `build-deps.sh` used (versions and URLs) |
 | `patches/deps-haiku-arm64.patch` | OpenSSL armcap SIGBUS fix and Haiku OS header; curl `SOCK_NONBLOCK` |
-| `patches/webkit-arm64-haiku.patch` | the four arm64 changes on top of `engine/patches/0001-haiku-port.patch` (ARM64Assembler.h, offlineasm/arm64.rb, MachineContext.h, WebExtensionContextAPITabsHaiku.cpp) |
+| `patches/webkit-arm64-haiku.patch` | the arm64 change still on top of `engine/patches/0001-haiku-port.patch`: WebExtensionContextAPITabsHaiku.cpp without Skia (the JavaScriptCore changes for ARM64Assembler.h, offlineasm/arm64.rb and MachineContext.h moved into the main patch on 8 October) |
 | `execinfo/` | the small `backtrace()` library WebKit links on Haiku arm64 |
 | `haiku-arm64.cmake` | CMake toolchain file for the cross build |
 | `build-engine.sh`, `run-engine-build.sh` | memory-capped ninja runs of the engine build |
