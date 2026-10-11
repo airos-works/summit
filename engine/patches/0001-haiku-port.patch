@@ -161980,3 +161980,249 @@ index 69cdf33473f25d81d415289b8390791f03279282..7d24be997a3051b0f473f848e0f20743
  oncopy
  oncuechange
  oncut
+diff --git a/Source/WebCore/html/ImageBitmap.cpp b/Source/WebCore/html/ImageBitmap.cpp
+index ff530b8d139d0e59c6dccb663100c4edce9bc049..a70159ee976612e84c7515ccf92e90974bb9d3cd 100644
+--- a/Source/WebCore/html/ImageBitmap.cpp
++++ b/Source/WebCore/html/ImageBitmap.cpp
+@@ -70,12 +70,140 @@
+ #include <wtf/StdLibExtras.h>
+ #include <wtf/TZoneMallocInlines.h>
+ 
++#if PLATFORM(HAIKU) && USE(SKIA)
++#include "GLContext.h"
++#include "GLDisplay.h"
++#include "PlatformDisplay.h"
++#include <cstdlib>
++#include <cstring>
++#include <limits>
++#include <wtf/MainThread.h>
++WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_BEGIN
++#include <skia/core/SkImage.h>
++WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_END
++#endif
++
+ #if ENABLE(OFFSCREEN_CANVAS)
+ #include "OffscreenCanvas.h"
+ #endif
+ 
+ namespace WebCore {
+ 
++#if PLATFORM(HAIKU) && USE(SKIA)
++// The ordinary buffer stays accelerated. Retain an immutable raster copy so
++// losing its GL display does not also lose the ImageBitmap's only pixel data.
++class ImageBitmapRecoveryHaiku {
++    WTF_MAKE_TZONE_ALLOCATED_INLINE(ImageBitmapRecoveryHaiku);
++public:
++    static std::unique_ptr<ImageBitmapRecoveryHaiku> create(ImageBuffer& buffer)
++    {
++        static const bool enabled = [] {
++            const char* value = getenv("SUMMIT_GPU_RECOVERY");
++            return value && !strcmp(value, "1");
++        }();
++        // Worker GPU ownership is not coordinated by the main-thread recovery
++        // path. Existing worker buffers are created under their CPU policy.
++        if (!enabled || !isMainThread() || buffer.renderingMode() != RenderingMode::Accelerated)
++            return nullptr;
++        auto* display = PlatformDisplay::sharedDisplayIfExists();
++        if (!display || display->glDisplay().isContextLostHaiku())
++            return nullptr;
++        auto* context = display->skiaGLContext();
++        if (!context || !context->makeContextCurrent())
++            return nullptr;
++        auto nativeImage = buffer.copyNativeImage();
++        auto image = nativeImage ? nativeImage->platformImage() : nullptr;
++        if (!image || !image->isTextureBacked())
++            return nullptr;
++        // Read while the source context is healthy, independently of any
++        // subsequent JavaScript readback or Skia bitmap-cache entry.
++        auto raster = image->makeRasterImage(nativeImage->grContext(), SkImage::kDisallow_CachingHint);
++        if (!raster || raster->isTextureBacked()) {
++            if (traceEnabled())
++                WTFLogAlways("Summit snapshot recovery: ImageBitmap raster backup unavailable");
++            return nullptr;
++        }
++        size_t bytes = raster->imageInfo().computeMinByteSize();
++        if (SkImageInfo::ByteSizeOverflowed(bytes))
++            return nullptr;
++        auto backup = NativeImage::create(WTF::move(raster));
++        if (!backup)
++            return nullptr;
++        if (traceEnabled())
++            WTFLogAlways("Summit snapshot recovery: captured ImageBitmap texture=1 raster=1 bytes=%zu", bytes);
++        return makeUnique<ImageBitmapRecoveryHaiku>(backup.releaseNonNull(), display->glDisplay(), bytes);
++    }
++
++    ImageBitmapRecoveryHaiku(Ref<NativeImage>&& image, GLDisplay& display, size_t bytes)
++        : m_image(WTF::move(image))
++        , m_display(display)
++        , m_bytes(bytes)
++    {
++    }
++
++    ~ImageBitmapRecoveryHaiku()
++    {
++        if (traceEnabled())
++            WTFLogAlways("Summit snapshot recovery: released ImageBitmap raster bytes=%zu", m_bytes);
++    }
++
++    bool needsRecovery() const { return !m_display->eglDisplay() || m_display->isContextLostHaiku(); }
++    size_t memoryCost() const { return m_bytes; }
++
++    RefPtr<ImageBuffer> restore(const ImageBuffer& previous)
++    {
++        ASSERT(isMainThread());
++        auto* display = PlatformDisplay::sharedDisplayIfExists();
++        if (display && !display->glDisplay().isContextLostHaiku()) {
++            auto* context = display->skiaGLContext();
++            if (context && context->makeContextCurrent()) {
++                if (auto restored = copyToBuffer(previous.parameters(), RenderingMode::Accelerated)) {
++                    m_display = Ref { display->glDisplay() };
++                    if (traceEnabled())
++                        WTFLogAlways("Summit snapshot recovery: restored ImageBitmap mode=gpu bytes=%zu", m_bytes);
++                    return restored;
++                }
++            }
++        }
++        // A caller can consume the bitmap while display recreation is still
++        // pending. Keep its pixels usable, and retain the lost display token
++        // so the next access retries GPU allocation instead of staying CPU.
++        if (previous.renderingMode() == RenderingMode::Unaccelerated)
++            return nullptr;
++        auto fallback = copyToBuffer(previous.parameters(), RenderingMode::Unaccelerated);
++        if (fallback && traceEnabled())
++            WTFLogAlways("Summit snapshot recovery: deferred ImageBitmap mode=cpu bytes=%zu", m_bytes);
++        return fallback;
++    }
++
++private:
++    static bool traceEnabled()
++    {
++        static const bool enabled = [] {
++            const char* value = getenv("SUMMIT_CANVAS_TRACE");
++            return value && !strcmp(value, "1");
++        }();
++        return enabled;
++    }
++
++    RefPtr<ImageBuffer> copyToBuffer(const ImageBufferParameters& parameters, RenderingMode mode)
++    {
++        auto result = ImageBuffer::create(parameters.logicalSize, mode, parameters.purpose,
++            parameters.resolutionScale, parameters.colorSpace, parameters.bufferFormat);
++        if (!result || result->renderingMode() != mode)
++            return nullptr;
++        result->context().drawNativeImage(m_image.get(), FloatRect { { }, parameters.logicalSize },
++            FloatRect { { }, m_image->size() }, { CompositeOperator::Copy });
++        result->flushDrawingContext();
++        return result;
++    }
++
++    Ref<NativeImage> m_image;
++    Ref<GLDisplay> m_display;
++    size_t m_bytes;
++};
++#endif
++
+ 
+ DetachedImageBitmap::DetachedImageBitmap(UniqueRef<SerializedImageBuffer> bitmap, bool originClean, bool premultiplyAlpha, bool forciblyPremultiplyAlpha, AlphaPremultiplication bufferAlphaFormat)
+     : m_bitmap(bitmap.moveToUniquePtr())
+@@ -266,6 +394,9 @@ RefPtr<ImageBuffer> ImageBitmap::createImageBuffer(ScriptExecutionContext& scrip
+ 
+ ImageBuffer* ImageBitmap::buffer() const
+ {
++#if PLATFORM(HAIKU) && USE(SKIA)
++    recoverBufferIfNeededHaiku();
++#endif
+     return m_bitmap.get();
+ }
+ 
+@@ -284,7 +415,12 @@ std::optional<DetachedImageBitmap> ImageBitmap::detach()
+ 
+ void ImageBitmap::close()
+ {
+-    takeImageBuffer();
++    // Closing must release storage without recreating a lost GPU buffer.
++    m_bitmap = nullptr;
++#if PLATFORM(HAIKU) && USE(SKIA)
++    m_recoveryHaiku = nullptr;
++#endif
++    m_memoryCost.store(0, std::memory_order_relaxed);
+ }
+ 
+ void ImageBitmap::createPromise(ScriptExecutionContext& scriptExecutionContext, ImageBitmap::Source&& source, ImageBitmapOptions&& options, int sx, int sy, int sw, int sh, ImageBitmap::Promise&& promise)
+@@ -1207,12 +1343,38 @@ ImageBitmap::ImageBitmap(Ref<ImageBuffer> bitmap, bool originClean, bool premult
+     , m_forciblyPremultiplyAlpha(forciblyPremultiplyAlpha)
+     , m_bufferAlphaFormat(bufferAlphaFormat)
+ {
++#if PLATFORM(HAIKU) && USE(SKIA)
++    m_recoveryHaiku = ImageBitmapRecoveryHaiku::create(*m_bitmap);
++    if (m_recoveryHaiku) {
++        CheckedSize cost = m_bitmap->memoryCost();
++        cost += m_recoveryHaiku->memoryCost();
++        m_memoryCost.store(cost.hasOverflowed() ? std::numeric_limits<size_t>::max() : cost.value(), std::memory_order_relaxed);
++    }
++#endif
+ }
+ 
+ ImageBitmap::~ImageBitmap() = default;
+ 
++#if PLATFORM(HAIKU) && USE(SKIA)
++void ImageBitmap::recoverBufferIfNeededHaiku() const
++{
++    if (!m_bitmap || !m_recoveryHaiku || !m_recoveryHaiku->needsRecovery())
++        return;
++    if (auto restored = m_recoveryHaiku->restore(*m_bitmap)) {
++        m_bitmap = WTF::move(restored);
++        CheckedSize cost = m_bitmap->memoryCost();
++        cost += m_recoveryHaiku->memoryCost();
++        m_memoryCost.store(cost.hasOverflowed() ? std::numeric_limits<size_t>::max() : cost.value(), std::memory_order_relaxed);
++    }
++}
++#endif
++
+ RefPtr<ImageBuffer> ImageBitmap::takeImageBuffer()
+ {
++#if PLATFORM(HAIKU) && USE(SKIA)
++    recoverBufferIfNeededHaiku();
++    m_recoveryHaiku = nullptr;
++#endif
+     m_memoryCost.store(0, std::memory_order_relaxed);
+     return std::exchange(m_bitmap, nullptr);
+ }
+diff --git a/Source/WebCore/html/ImageBitmap.h b/Source/WebCore/html/ImageBitmap.h
+index 77bf1ad5cad8b6149ba8db7d912c7e8737761af3..a3cfaf2611fc03b68da0e18f9c93786c8d8c8ffa 100644
+--- a/Source/WebCore/html/ImageBitmap.h
++++ b/Source/WebCore/html/ImageBitmap.h
+@@ -33,6 +33,7 @@
+ #include <WebCore/PixelFormat.h>
+ #include <WebCore/ScriptWrappable.h>
+ #include <atomic>
++#include <memory>
+ #include <wtf/RefCounted.h>
+ #include <wtf/UniqueRef.h>
+ 
+@@ -53,6 +54,9 @@ class HTMLCanvasElement;
+ class HTMLImageElement;
+ class HTMLVideoElement;
+ class ImageBitmapImageObserver;
++#if PLATFORM(HAIKU) && USE(SKIA)
++class ImageBitmapRecoveryHaiku;
++#endif
+ class ImageData;
+ class ImageBuffer;
+ class IntRect;
+@@ -191,8 +195,15 @@ private:
+     static void createCompletionHandler(ScriptExecutionContext&, Ref<CSSStyleImageValue>&&, ImageBitmapOptions&&, std::optional<IntRect>, ImageBitmapCompletionHandler&&);
+     static void createFromBuffer(ScriptExecutionContext&, Ref<ArrayBuffer>&&, String mimeType, long long expectedContentLength, const URL&, ImageBitmapOptions&&, std::optional<IntRect>, ImageBitmapCompletionHandler&&);
+ 
++#if PLATFORM(HAIKU) && USE(SKIA)
++    void recoverBufferIfNeededHaiku() const;
++    mutable RefPtr<ImageBuffer> m_bitmap;
++    mutable std::atomic<size_t> m_memoryCost { 0 }; // Atomic, accessed from arbitrary thread by GC.
++    std::unique_ptr<ImageBitmapRecoveryHaiku> m_recoveryHaiku;
++#else
+     RefPtr<ImageBuffer> m_bitmap;
+     std::atomic<size_t> m_memoryCost { 0 }; // Atomic, accessed from arbitrary thread by GC.
++#endif
+     const bool m_originClean : 1 { false };
+     const bool m_premultiplyAlpha : 1 { false };
+     const bool m_forciblyPremultiplyAlpha : 1 { false };
