@@ -1,0 +1,158 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>ImageBitmap consumption: running</title>
+<style>
+body { font: 16px sans-serif; margin: 16px; }
+#status { background: #705500; color: white; padding: 8px; }
+#canvases { display: flex; gap: 16px; }
+canvas { width: 320px; height: 128px; display: block; margin: 12px 0; }
+video { width: 240px; height: 180px; display: block; }
+pre { font: 12px monospace; white-space: pre-wrap; }
+</style>
+<div id="status">Retained canvas snapshot running</div>
+<div id="canvases">
+  <div>Live source<canvas id="source" width="320" height="128"></canvas></div>
+  <div>Retained snapshot<canvas id="destination" width="320" height="128"></canvas></div>
+</div>
+<video id="video" muted playsinline loop></video>
+<pre id="details"></pre>
+<script>
+'use strict';
+// No pre-loss readback by default: preservation must not depend on a warmed
+// Skia raster cache. closeOnly tests releasing an unread bitmap after loss.
+// Native traces and process diagnostics are required alongside this report.
+const params = new URLSearchParams(location.search);
+const snapshotKind = params.get('snapshot') || 'bitmap';
+const destinationMode = 'bitmaprenderer';
+const expectLoss = params.get('loss') === '1';
+const preRead = false;
+const closeOnly = false;
+let snapshotSizeBeforeConsume;
+let snapshotSizeAfterConsume;
+const sourceElement = document.querySelector('#source');
+const source = snapshotKind === 'transfer' ? sourceElement.transferControlToOffscreen() : sourceElement;
+const sourceContext = source.getContext('2d');
+const destination = document.querySelector('#destination');
+const video = document.querySelector('#video');
+const expected = [[0, 255, 0, 255], [0, 0, 255, 255]];
+const events = [];
+const errors = [];
+let snapshot;
+let initialPixels;
+let finalPixels;
+let snapshotSizeBeforeClose;
+let snapshotSizeAfterClose;
+let started = false;
+let finished = false;
+let mediaSource;
+let mediaURL;
+const equal = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+const describe = error => String(error) + (error && error.stack ? '\n' + error.stack : '');
+function pixels(context) {
+    return [Array.from(context.getImageData(32, 32, 1, 1).data),
+        Array.from(context.getImageData(240, 32, 1, 1).data)];
+}
+function paintInitial() {
+    sourceContext.fillStyle = '#00ff00'; sourceContext.fillRect(0, 0, 160, 128);
+    sourceContext.fillStyle = '#0000ff'; sourceContext.fillRect(160, 0, 160, 128);
+}
+function paintChanged() {
+    sourceContext.fillStyle = '#ff8000'; sourceContext.fillRect(0, 0, 320, 128);
+}
+function drawSnapshot(context) { context.drawImage(snapshot, 0, 0); }
+source.addEventListener('contextlost', event => {
+    events.push({type: event.type, lost: sourceContext.isContextLost()});
+});
+source.addEventListener('contextrestored', event => {
+    events.push({type: event.type, lost: sourceContext.isContextLost()});
+    paintChanged();
+});
+
+async function finish(error) {
+    if (finished) return;
+    finished = true;
+    if (error) errors.push(describe(error));
+    video.pause();
+    const videoFrames = video.getVideoPlaybackQuality().totalVideoFrames;
+    // Construct the destination after loss: the retained object alone must
+    // cross display generations. The CPU case exercises raster conversion.
+    try {
+        snapshotSizeBeforeConsume = [snapshot.width, snapshot.height];
+        const context = destination.getContext('bitmaprenderer');
+        if (!context) throw new Error('Destination bitmaprenderer unavailable');
+        context.transferFromImageBitmap(snapshot);
+        snapshotSizeAfterConsume = [snapshot.width, snapshot.height];
+        // The bitmaprenderer owns the consumed buffer; sample its rendered
+        // canvas through a separate CPU context, without reading before loss.
+        const check = document.createElement('canvas'); check.width = 320; check.height = 128;
+        const checkContext = check.getContext('2d', {willReadFrequently: true});
+        checkContext.drawImage(destination, 0, 0);
+        finalPixels = pixels(checkContext);
+    } catch (failure) { errors.push(describe(failure)); }
+    try {
+        if (snapshot) {
+            snapshotSizeBeforeClose = [snapshot.width, snapshot.height];
+            snapshot.close();
+            snapshotSizeAfterClose = [snapshot.width, snapshot.height];
+        }
+        snapshot = null;
+    } catch (failure) { errors.push(describe(failure)); }
+    const eventPass = expectLoss
+        ? events.length === 2 && events[0].type === 'contextlost' && events[0].lost === true
+            && events[1].type === 'contextrestored' && events[1].lost === false
+        : events.length === 0;
+    const sourceCopyPreserved = preRead ? equal(initialPixels, expected) : null;
+    const retainedPixelsPreserved = closeOnly ? null : equal(finalPixels, expected);
+    const consumedAndDetached = equal(snapshotSizeBeforeConsume, [320, 128]) && equal(snapshotSizeAfterConsume, [0, 0]);
+    const bitmapClosePassed = equal(snapshotSizeBeforeClose, [0, 0])
+        && equal(snapshotSizeAfterClose, [0, 0]);
+    const report = {kind: 'bitmap-consumption', snapshotKind, destinationMode, preRead, closeOnly,
+        expectLoss, events, initialPixels, finalPixels, videoFrames, errors,
+        snapshotSizeBeforeConsume, snapshotSizeAfterConsume, consumedAndDetached, snapshotSizeBeforeClose, snapshotSizeAfterClose, sourceCopyPreserved,
+        retainedPixelsPreserved, bitmapClosePassed, eventSequencePassed: eventPass,
+        // Pixel preservation after a GPU reset is a recovery quality target.
+        // Keep it separate from source-copy semantics and native crash safety.
+        passed: started && consumedAndDetached && !errors.length && videoFrames >= 30 && eventPass
+            && (!preRead || sourceCopyPreserved) && (closeOnly || retainedPixelsPreserved) && bitmapClosePassed};
+    document.querySelector('#status').textContent = report.passed ? 'BITMAP CONSUMPTION COMPLETE' : 'BITMAP CONSUMPTION FAILED';
+    document.querySelector('#status').style.background = report.passed ? '#18752a' : '#a51c1c';
+    document.querySelector('#details').textContent = JSON.stringify(report, null, 2);
+    document.title = report.passed ? 'Bitmap consumption complete' : 'Bitmap consumption failed';
+    await new Promise(resolve => setTimeout(resolve, 300));
+    await fetch('/__bench/probe', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(report)});
+}
+
+(async () => {
+    if (!['bitmap', 'transfer'].includes(snapshotKind)) throw new Error('Unknown snapshot kind');
+    if (params.has('destination') && params.get('destination') !== 'bitmaprenderer') throw new Error('Destination must be bitmaprenderer');
+    if (!sourceContext) throw new Error('Source 2D context unavailable');
+    paintInitial();
+    snapshot = snapshotKind === 'transfer' ? source.transferToImageBitmap() : await createImageBitmap(source);
+    paintChanged(); // The retained bitmap must remain green/blue after source mutation.
+    if (preRead) {
+        const check = document.createElement('canvas'); check.width = 320; check.height = 128;
+        const checkContext = check.getContext('2d', {willReadFrequently: true});
+        drawSnapshot(checkContext);
+        initialPixels = pixels(checkContext);
+        if (!equal(initialPixels, expected)) throw new Error('Snapshot failed before loss');
+    }
+    started = true;
+    mediaSource = new MediaSource(); mediaURL = URL.createObjectURL(mediaSource);
+    const opened = new Promise(resolve => mediaSource.addEventListener('sourceopen', resolve, {once: true}));
+    video.src = mediaURL;
+    await opened;
+    const buffer = mediaSource.addSourceBuffer('video/mp4; codecs="hvc1.2.4.L60.90"');
+    const response = await fetch('mse-media/wx-hevc-main10-48.mp4');
+    if (!response.ok) throw new Error('fixture HTTP ' + response.status);
+    const bytes = await response.arrayBuffer();
+    await new Promise((resolve, reject) => {
+        buffer.addEventListener('updateend', resolve, {once: true});
+        buffer.addEventListener('error', () => reject(new Error('MSE append failed')), {once: true});
+        buffer.appendBuffer(bytes);
+    });
+    mediaSource.endOfStream();
+    await video.play();
+    setTimeout(() => finish(), 6000);
+})().catch(finish);
+setTimeout(() => finish(new Error('snapshot probe watchdog expired')), 20000);
+</script>
