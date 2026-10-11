@@ -513,3 +513,79 @@ metadata history and terminal diagnostics are pinned in
 `/mnt/HaikuWork/x399/evidence/wx5100/mesa-native/summit-frame-ack-manifest.json`.
 This is a private recovery checkpoint, not the final OS/application release
 or completion of full WX5100 acceleration.
+
+## WX5100 main-thread Canvas 2D recovery (2026-10-12)
+
+The private candidate `/boot/home/wx5100/summit-canvas-recovery/bundle` is
+compiled from `588b5ac50df9a72789ad4f113db2c8c466a0c841`, with patch
+`1183eebc1c4d4cc69a1f818f988c0dbe78c8158e4c661d83e1e3764d1c0cef61` and
+relocated engine
+`5d49c5eb579493b7826628658febfd1bc89bbeff55b3b8f61137d755cb8eaff5`.
+It remains opt-in through `SUMMIT_GPU_RECOVERY=1`; the tests also enable
+`SUMMIT_SKIA_GL_CONTEXT=1` and `SUMMIT_CANVAS_ACCELERATION=1`.
+
+Display retirement now discards accelerated main-thread 2D canvas buffers,
+resets drawing state and exposes context loss to the document. Readback is
+transparent black and drawing has no effect while lost. A cancelable
+`contextlost` event is queued without waiting for display recreation;
+preventing its default prevents restoration. Otherwise restoration retries
+until the display is usable, creates storage under the normal acceleration
+policy and fires `contextrestored`. Empty and small canvases retain their
+normal allocation policy. Failed Skia GL construction can be retried within
+its owning display. Worker coordination remains separate work.
+
+All fifteen isolated QEMU canvas cases pass: baseline, loss and cancellation
+for HTML and main-thread OffscreenCanvas; property handlers for both and HTML
+attribute handlers; resizing to zero or 16-by-16 during loss; and five injected
+display-recreation failures. The delayed cases deliver loss notification while
+the display is unavailable, then restore once. Every successful restoration
+starts blank, permits redraw and produces exact green/blue reference pixels;
+canceled restoration leaves the canvas blank. Three media/frame-ack regressions
+also pass, each with two 48-frame, zero-drop rounds. All eighteen screenshots
+were inspected, and all runs quit without new crash reports or owned leftovers.
+
+Native qualification uses driver `a4aebce1...`, Mesa `42352938...` and the
+previously qualified timeout-only media add-on `eb1d8fdb...`. The no-fault
+canvas baseline completes 134 video frames and adds 878 completed GPU jobs.
+The Main10 media/frame-ack trial injects one actual readback timeout after
+19 pictures, advancing recovery generation 28 to 29. The interrupted decoder
+finishes 48 frames with 20 drops in software; a fresh hardware decoder finishes
+48 frames with zero drops. Both decoded PNGs exactly match their independent
+software/hardware references, and visible frame 47 matches the no-reset GPU
+reference. Pending serials advance from 21 to 22 across recreation; 60 stale
+acknowledgements before and 185 after recreation are rejected. There are 510
+completed GPU jobs after the reset.
+
+The live-canvas native trial injects another actual Main10 readback timeout,
+advancing generation 29 to 30. It observes one loss and one restoration event,
+reset drawing state, blank readback and ineffective drawing while lost, then
+blank restored storage followed by exact green/blue pixels. The trace confirms
+restoration in GPU mode. Video reaches 132 frames and 590 GPU jobs complete
+after reset. Both native fault trials show the native AMD Mesa backend reopening
+between the timeout and successful display recreation. Explicit AMD-device
+selection, pinned Mesa/driver binaries, completed fences and visible pixels
+together establish hardware execution. IRQ rings are empty and all fault,
+privileged, unknown and overflow counters remain zero. All three native app
+screenshots and both decoded PNGs were inspected; shutdown is clean.
+
+Fresh EGL, GLES and window checks add exactly 116 completed/waited jobs,
+590 to 706. Root VRAM and ordinary-user RAM DMA pass. Terminal state is
+generation 30 with automatic recovery enabled, 27 attempts and 27 successes,
+no pending recovery, zero live or quarantined resources, 1,412 EOP events and
+942 interrupts. The ring is empty at `0x5840`. Production media `3f28945c...`
+is restored, the desktop is intact, and existing backups are preserved.
+All 46 native recovery source pins and their incremental metadata history
+are checked before qualification metadata is updated. Earlier compiler failures
+and their fixes remain recorded alongside the successful fifth build.
+
+Retained GPU snapshots, native OffscreenCanvas with actual GPU loss, detached
+canvases, canvases created during loss, workers/WebGL, noncomposited rendering,
+paused YUV, multiple pages and repeated loss still need qualification or work.
+The intermittent QEMU shutdown allocator error remains unresolved; clean runs
+do not establish a fix. Actual `eglMakeCurrent` returning `EGL_CONTEXT_LOST`
+also remains unexercised. Snapshot diagnostics are prepared separately and
+have not yet run. This checkpoint changes no system app defaults and does not
+complete the full OS/application release installation or WX5100 acceleration.
+Exact sources, binaries, trials, screenshots, metadata and terminal diagnostics
+are pinned in
+`/mnt/HaikuWork/x399/evidence/wx5100/mesa-native/summit-canvas-recovery-manifest.json`.
