@@ -83,7 +83,10 @@ the air/OS build.
   EGL. A second copy of a system library would clash in Summit's processes.
   The Media Kit's FFmpeg reader, for example, loads the system's libass,
   which needs the system's newer Fontconfig, and does not load at all next
-  to an older copy.
+  to an older copy. The air/OS x86_64 engine has done the same with the
+  image's own libraries since 12 October 2026. arm64 air/OS images have no
+  HaikuPorts; there the engine carries the same jmgasper builds as the
+  images' `airos_*` packages.
 - **Browser**: compiled with `SUMMIT_AIROS=0` (`src/core/BuildTarget.h`).
   It asks app_server for nothing that only air/OS has. Air/OS's
   `B_DIRECT_DEVICE_PIXELS` window flag is left out, because a stock
@@ -128,6 +131,10 @@ no GPU.
   machine only after Scintilla and Lexilla were installed by hand, and it
   could not open any video. Its own older Fontconfig kept the Media Kit's
   FFmpeg reader from loading (libass needs `FcConfigSetDefaultSubstitute`).
+  The air/OS image of 11 October failed the same way on the same kind of
+  test machine. The air/OS x86_64 packages built since 12 October link the
+  image's libraries. On that image they load the FFmpeg reader, play the VP9
+  test file and leave libbnetapi and libavformat on the system's OpenSSL.
 
 The first page in a new profile waits a few seconds while Fontconfig builds
 its cache, as WebPositive's first start does. Only Latin, Greek, Cyrillic and
