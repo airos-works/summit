@@ -388,5 +388,16 @@ with the RPATH of `Summit` (`/boot/system/lib/summit-webkit/lib`, the
 installed and older summit_webkit) rewritten in place to `$ORIGIN/lib`. It
 selects the AMD decoder for HEVC too: HEVC Main and H.264 file video play on
 UVD through amdgpu_va. The packages' own Mesa (zink) is not used; the
-launcher names the system's. A looping `<video>` stops at its end with
-software decoding as well (not a decoder problem).
+launcher names the system's.
+
+`bundle-ci1612` (the CI packages of be9f736, 13 October) replaces it as the
+workstation's Summit (`Desktop/Summit-current.sh` and `summit/Summit-installed`;
+the previous launcher is kept as `summit/Summit-current.sh.ci0334`). A
+looping `<video>` with a muted audio track used to stop at its end: the end
+waited for the audio, which does not advance without a sound player. The
+video's end now counts when the audio is not playing, and the sound player
+runs on silence past the end instead of being stopped and started again.
+`platform.html?video=...&loop=1` reports `loop=waiting:3.00s` on
+`bundle-ci0334` and `loop=wrapped:4` on `bundle-ci1612` with a 3 s H.264+AAC
+clip; muted and unmuted clips, and a video without audio, looped 15 times in
+45 s, and a clip with sound still ends and plays again from the start.
