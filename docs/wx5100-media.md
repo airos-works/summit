@@ -390,9 +390,11 @@ selects the AMD decoder for HEVC too: HEVC Main and H.264 file video play on
 UVD through amdgpu_va. The packages' own Mesa (zink) is not used; the
 launcher names the system's.
 
-`bundle-ci1612` (the CI packages of be9f736, 13 October) replaces it as the
-workstation's Summit (`Desktop/Summit-current.sh` and `summit/Summit-installed`;
-the previous launcher is kept as `summit/Summit-current.sh.ci0334`). A
+`bundle-ci1612` (the CI packages of be9f736, 13 October) replaced it as the
+workstation's Summit, and `bundle-ci1631` (ce257e0, WebGL again, see
+[webgl.md](webgl.md)) replaces that (`Desktop/Summit-current.sh` and
+`summit/Summit-installed`; the launcher of `bundle-ci0334` is kept as
+`summit/Summit-current.sh.ci0334`). A
 looping `<video>` with a muted audio track used to stop at its end: the end
 waited for the audio, which does not advance without a sound player. The
 video's end now counts when the audio is not playing, and the sound player

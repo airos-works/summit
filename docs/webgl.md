@@ -81,3 +81,24 @@ the issue names, in a 1916x1052 window at 200%: 52 frames/s with 500 fish
 and 28 with 5,000 (its own counter, read without screenshots, which pause
 drawing on this machine). Firefox 155 on the same machine has no WebGL:
 `getContext("webgl")` returns null there and the page shows nothing.
+
+## No context after 4f2a0a6, fixed in ce257e0 (13 October 2026, WX 5100)
+
+4f2a0a6 makes WebKit's compositor contexts on Haiku lose their context on a
+GPU reset wherever `EGL_EXT_create_context_robustness` is offered, and
+ANGLE's native context shares with them. ANGLE asked for the same with EGL
+1.5's `EGL_CONTEXT_OPENGL_RESET_NOTIFICATION_STRATEGY`, which Mesa accepts
+for an OpenGL ES context only from an EGL 1.5 display, and Haiku's EGL
+driver is 1.4 (`EGL_LOG_LEVEL=debug`: "bad context attribute 0x31bd"); its
+fallback without robustness cannot share with a robust context ("share list
+notification strategy mismatch"), so every page got "WebGL: ANGLE made no
+context (EGL error 0x3001)". `DisplayEGL::initializeContext` now uses the
+extension's `EGL_CONTEXT_OPENGL_RESET_NOTIFICATION_STRATEGY_EXT` below EGL
+1.5.
+
+On the X399's WX 5100 (radeonsi, the system Mesa) with `bundle-ci1631`:
+`webgl.html` draws its triangle correctly with WebGL 1 and 2 and runs the
+400 cubes at 57.6 frames/s (median frame 17 ms); WebGL Aquarium shows 60
+frames/s in a 1024x1024 canvas; `platform.html` reports `webgl=Apple_GPU
+webglDraw=ok`.
+
