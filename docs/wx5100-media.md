@@ -360,3 +360,22 @@ quality counters remain unimplemented. Runs `044819`, `044842`, `044904` and
 `044926`; evidence `summit-hevc-{fault19,fault0-seek,file-fault19,old-addon}.log`
 and the two paused capture comparisons. Production addon `3f28945c...` was
 restored and verified after every test. Composition remains CPU Mesa.
+
+## amdgpu_drm, 12 October 2026
+
+The workstation now runs the WX 5100 with amdgpu_drm (Linux 6.18's amdgpu
+on Haiku, air/OS `src/forks/linux-drm`) instead of the native `amdgpu` driver.
+GL is the system's Mesa with radeonsi, installed in `/boot/system/non-packaged`
+(its glvnd vendor file is
+`/boot/system/non-packaged/add-ons/opengl/egl_vendor.d/50_mesa.json`); the
+private zink Mesa cannot start there, having no Vulkan driver for the card,
+and web processes then stop with "no EGL display". `install-on-workstation.sh`
+uses the system Mesa wherever it is installed (`SUMMIT_MESA_PREFIX=system`).
+
+`amduvd` is now the air/OS `amdgpu_va` add-on (`src/add-ons/media/plugins/
+amdgpu_va`), with the same decoder indices (0 H.264, 1 HEVC) and RGB32
+output, decoding through VA-API (libavcodec, Mesa's radeonsi VA driver, UVD).
+`bundle-6mitguy5` plays H.264 file video through it ("video decoded by AMD
+H.264 hardware decoder (VA-API)"); it predates the HEVC selection (efaa9b9),
+so its HEVC is software until a newer engine is installed. Composition reads
+frames back: the system Mesa has no `summit_haiku_present_*` (zink only).

@@ -8,9 +8,12 @@
 #   bash tools/install-on-workstation.sh bundle-XXXXXXXX
 #
 # SUMMIT_MESA_PREFIX names the private Mesa the launcher runs with, a
-# directory of /boot/home/summit-mesa (default: prefix). A new Mesa build is
-# installed beside the old one, so that a browser that is running keeps the
-# libraries it started with.
+# directory of /boot/home/summit-mesa. A new Mesa build is installed beside the
+# old one, so that a browser that is running keeps the libraries it started
+# with. "system" is the system's own Mesa in /boot/system/non-packaged, which
+# the workstation's AMD WX 5100 needs (radeonsi on amdgpu_drm; the private zink
+# Mesa needs a Vulkan driver, which only the NVIDIA card had). The default is
+# "system" where that Mesa is installed, otherwise "prefix".
 set -euo pipefail
 SUMMIT_ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 bundle=${1:?usage: install-on-workstation.sh bundle-NAME}
@@ -18,17 +21,30 @@ if [[ ! $bundle =~ ^bundle-[A-Za-z0-9_]+$ ]]; then
     echo 'The bundle must be named bundle-XXXXXXXX.' >&2
     exit 2
 fi
-mesa=${SUMMIT_MESA_PREFIX:-prefix}
-if [[ ! $mesa =~ ^prefix[A-Za-z0-9_.-]*$ ]]; then
-    echo 'SUMMIT_MESA_PREFIX must name a prefix* directory of /boot/home/summit-mesa.' >&2
+mesa=${SUMMIT_MESA_PREFIX:-}
+if [[ -n $mesa && $mesa != system && ! $mesa =~ ^prefix[A-Za-z0-9_.-]*$ ]]; then
+    echo 'SUMMIT_MESA_PREFIX must be "system" or name a prefix* directory of /boot/home/summit-mesa.' >&2
     exit 2
 fi
 stamp=$(date +%Y%m%d-%H%M)
 bash "$SUMMIT_ROOT/tools/ws.sh" "set -e
 B=/boot/home/summit/build-modern-browser/$bundle
 test -x \$B/Summit && test -x \$B/WebProcess && test -f \$B/lib/libWebKit.so.1
-M=/boot/home/summit-mesa/$mesa
-test -f \$M/lib/libEGL_mesa.so.0 && grep -q \$M/lib/ \$M/data/glvnd/egl_vendor.d/50_mesa.json
+SYSTEM_EGL=/boot/system/non-packaged/add-ons/opengl/egl_vendor.d/50_mesa.json
+mesa=$mesa
+if test -z \"\$mesa\"; then
+    if test -f \$SYSTEM_EGL; then mesa=system; else mesa=prefix; fi
+fi
+if test \$mesa = system; then
+    MESA_LIB=/boot/system/non-packaged/lib
+    MESA_EGL=\$SYSTEM_EGL
+else
+    M=/boot/home/summit-mesa/\$mesa
+    MESA_LIB=\$M/lib
+    MESA_EGL=\$M/data/glvnd/egl_vendor.d/50_mesa.json
+    grep -q \$M/lib/ \$MESA_EGL
+fi
+test -f \$MESA_LIB/libEGL_mesa.so.0 && test -f \$MESA_EGL
 L=/boot/home/Desktop/Summit-current.sh
 mkdir -p /boot/home/summit/launcher-backups
 if test -f \$L; then cp \$L /boot/home/summit/launcher-backups/Summit-current.pre-$stamp.sh; fi
@@ -39,8 +55,8 @@ SUMMIT_BUNDLE=\$B
 export WEBKIT_EXEC_PATH=\"\\\$SUMMIT_BUNDLE\"
 export SUMMIT_SKIA_GL_CONTEXT=\\\${SUMMIT_SKIA_GL_CONTEXT:-1}
 export SUMMIT_SCROLL_REFRESH_TIMER=\\\${SUMMIT_SCROLL_REFRESH_TIMER:-16}
-export LIBRARY_PATH=\"\$M/lib:\\\$SUMMIT_BUNDLE/lib:/boot/system/lib\"
-export __EGL_VENDOR_LIBRARY_FILENAMES=\$M/data/glvnd/egl_vendor.d/50_mesa.json
+export LIBRARY_PATH=\"\$MESA_LIB:\\\$SUMMIT_BUNDLE/lib:/boot/system/lib\"
+export __EGL_VENDOR_LIBRARY_FILENAMES=\$MESA_EGL
 # One line a second while the pointer moves: how late pointer events arrive
 # and gaps in the mouse's own reports (docs/performance.md, 29 September).
 export SUMMIT_INPUT_LAG_TRACE=\\\${SUMMIT_INPUT_LAG_TRACE:-1}
@@ -57,8 +73,8 @@ chmod +x \$L
 cat > \$B/launch.env <<ENV
 # Written by tools/install-on-workstation.sh; see ApplyLaunchEnvironment().
 WEBKIT_EXEC_PATH=\$B
-LIBRARY_PATH^=\$M/lib
-__EGL_VENDOR_LIBRARY_FILENAMES=\$M/data/glvnd/egl_vendor.d/50_mesa.json
+LIBRARY_PATH^=\$MESA_LIB
+__EGL_VENDOR_LIBRARY_FILENAMES=\$MESA_EGL
 SUMMIT_SKIA_GL_CONTEXT=1
 SUMMIT_SCROLL_REFRESH_TIMER=16
 ENV
@@ -71,5 +87,5 @@ if ! test -f \$N; then
     printf '# Created by Summit (tools/install-on-workstation.sh): the same sources libnetwork\n# uses without a file. A file newer than /boot/system/settings stops a racy\n# re-parse in nsswitch_conf_file_path() from opening the directory instead;\n# see Summit docs/kunanyios-platform-issues.md.\nhosts: files dns\n' > \$N
     echo \"created \$N\"
 fi
-echo \"launcher -> \$B\"
+echo \"launcher -> \$B (Mesa: \$mesa)\"
 cat \$L"
