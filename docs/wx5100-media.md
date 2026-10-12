@@ -379,3 +379,14 @@ output, decoding through VA-API (libavcodec, Mesa's radeonsi VA driver, UVD).
 H.264 hardware decoder (VA-API)"); it predates the HEVC selection (efaa9b9),
 so its HEVC is software until a newer engine is installed. Composition reads
 frames back: the system Mesa has no `summit_haiku_present_*` (zink only).
+
+The workstation's Summit is now `bundle-ci0334`, assembled from the air/OS CI
+packages of 803d1c9 (summit and summit_webkit 0.1.0/1.10.1~git20261012.0334)
+rather than installed as packages: `apps/Summit`, `lib/summit-webkit/{WebProcess,
+NetworkProcess,lib}` and `data/Summit/start.html` as `resources/start.html`,
+with the RPATH of `Summit` (`/boot/system/lib/summit-webkit/lib`, the
+installed and older summit_webkit) rewritten in place to `$ORIGIN/lib`. It
+selects the AMD decoder for HEVC too: HEVC Main and H.264 file video play on
+UVD through amdgpu_va. The packages' own Mesa (zink) is not used; the
+launcher names the system's. A looping `<video>` stops at its end with
+software decoding as well (not a decoder problem).
