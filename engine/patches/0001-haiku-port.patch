@@ -8675,10 +8675,10 @@ index 0000000000000000000000000000000000000000..48e19a5957df4c1ae60378dd9a84cbe4
 +/* Copyright (C) 2026 Summit contributors. SPDX-License-Identifier: BSD-2-Clause */
 +enum USBTransferStatus { "ok", "stall", "babble" };
 diff --git a/Source/WebCore/PlatformHaiku.cmake b/Source/WebCore/PlatformHaiku.cmake
-index 16a88804a1baa39ccdd9fc2870b6e2524d941298..796466d49a0dcd8736bc096023f465221fef1a06 100644
+index 16a88804a1baa39ccdd9fc2870b6e2524d941298..bcecdff68141d8fab319c68b2dddc24537ddf4ce 100644
 --- a/Source/WebCore/PlatformHaiku.cmake
 +++ b/Source/WebCore/PlatformHaiku.cmake
-@@ -1,52 +1,365 @@
+@@ -1,52 +1,366 @@
 +include(platform/Haiku.cmake)
  include(platform/ImageDecoders.cmake)
  include(platform/OpenSSL.cmake)
@@ -8849,6 +8849,7 @@ index 16a88804a1baa39ccdd9fc2870b6e2524d941298..796466d49a0dcd8736bc096023f46522
 +  platform/graphics/haiku/CDMProxyHaiku.cpp
 +  platform/graphics/haiku/CencCryptoHaiku.cpp
 +  platform/graphics/haiku/MediaDecoderSelectionHaiku.cpp
++  platform/graphics/haiku/MediaTrackSeekHaiku.cpp
 +  platform/graphics/haiku/MediaPlayerPrivateHaiku.cpp
 +  platform/graphics/haiku/MediaPlayerPrivateHaikuMSE.cpp
 +  platform/graphics/haiku/PlatformMediaEngineConfigurationFactoryHaiku.cpp
@@ -9050,7 +9051,7 @@ index 16a88804a1baa39ccdd9fc2870b6e2524d941298..796466d49a0dcd8736bc096023f46522
    textencoding
    translation
    ${WEBP_LIBRARIES}
-@@ -61,6 +374,236 @@ list(APPEND WebCore_SYSTEM_INCLUDE_DIRECTORIES
+@@ -61,6 +375,242 @@ list(APPEND WebCore_SYSTEM_INCLUDE_DIRECTORIES
    ${SQLITE_INCLUDE_DIR}
    ${WEBP_INCLUDE_DIRS}
    ${ZLIB_INCLUDE_DIRS}
@@ -9267,6 +9268,12 @@ index 16a88804a1baa39ccdd9fc2870b6e2524d941298..796466d49a0dcd8736bc096023f46522
 +        Modules/webusb/USBTransferResultCustom.cpp
 +    )
 +endif ()
++
++# Reads BMediaTrack's private members (its extractor), so MediaTrack.h must be
++# read there first: not through the precompiled header.
++set_source_files_properties(platform/graphics/haiku/MediaTrackSeekHaiku.cpp PROPERTIES
++    SKIP_PRECOMPILE_HEADERS ON
++)
 +
 +# The bounded MPD parser catches its own validation exceptions internally.
 +# Keep exception handling local to this portable parser and outside the PCH.
@@ -29532,10 +29539,10 @@ index 0000000000000000000000000000000000000000..21962ea9d0bd80ba9c260e9ef9ecac36
 +} // namespace SummitMPEGTS
 diff --git a/Source/WebCore/platform/graphics/haiku/MediaDecoderSelectionHaiku.cpp b/Source/WebCore/platform/graphics/haiku/MediaDecoderSelectionHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..7269c6bd4a6a04d31f52fa2ce8db8faaa4df82d5
+index 0000000000000000000000000000000000000000..27cbd5624dea53c85a07cf6f6bf80c19a6843f59
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/haiku/MediaDecoderSelectionHaiku.cpp
-@@ -0,0 +1,975 @@
+@@ -0,0 +1,976 @@
 +/*
 + * Copyright (C) 2026 Haiku, Inc. All rights reserved.
 + *
@@ -29564,6 +29571,7 @@ index 0000000000000000000000000000000000000000..7269c6bd4a6a04d31f52fa2ce8db8faa
 +#include "config.h"
 +#include "MediaDecoderSelectionHaiku.h"
 +
++#include "MediaTrackSeekHaiku.h"
 +#include <FindDirectory.h>
 +#include <MediaFormats.h>
 +#include <Path.h>
@@ -30267,7 +30275,7 @@ index 0000000000000000000000000000000000000000..7269c6bd4a6a04d31f52fa2ce8db8faa
 +    // the last one stopped: start it from the beginning. Callers seek it to
 +    // the time they want afterwards.
 +    bigtime_t start = 0;
-+    track.SeekToTime(&start);
++    seekTrackToTimeHaiku(track, &start);
 +    std::unique_ptr<SubstituteVideoDecoderHaiku> decoder(new SubstituteVideoDecoderHaiku(track, encoded));
 +    if (addOn && decoder->setUpAddOn(decodedFormat)) {
 +        std::fprintf(stderr, "Summit media: video decoded by %s instead of %s\n", decoder->m_addOn->codecInfo().pretty_name, native.pretty_name);
@@ -30277,11 +30285,11 @@ index 0000000000000000000000000000000000000000..7269c6bd4a6a04d31f52fa2ce8db8faa
 +        // The add-on refused the stream after all; the track's own decoder
 +        // starts it again from the beginning.
 +        start = 0;
-+        track.SeekToTime(&start);
++        seekTrackToTimeHaiku(track, &start);
 +        return nullptr;
 +    }
 +    start = 0;
-+    if (track.SeekToTime(&start) != B_OK)
++    if (seekTrackToTimeHaiku(track, &start) != B_OK)
 +        return nullptr;
 +    if (decoder->setUp(decodedFormat) != B_OK) {
 +        std::fprintf(stderr, "Summit media: %s cannot decode this H.264 stream and no other decoder took it\n", native.pretty_name);
@@ -30300,14 +30308,14 @@ index 0000000000000000000000000000000000000000..7269c6bd4a6a04d31f52fa2ce8db8faa
 +    if (track.EncodedFormat(&encoded) != B_OK || encoded.type != B_MEDIA_ENCODED_VIDEO)
 +        return nullptr;
 +    bigtime_t start = 0;
-+    track.SeekToTime(&start);
++    seekTrackToTimeHaiku(track, &start);
 +    std::unique_ptr<SubstituteVideoDecoderHaiku> decoder(new SubstituteVideoDecoderHaiku(track, encoded));
 +    if (decoder->setUpAddOn(decodedFormat)) {
 +        std::fprintf(stderr, "Summit media: the decoder the media kit chose failed; video decoded by %s\n", decoder->m_addOn->codecInfo().pretty_name);
 +        return decoder;
 +    }
 +    start = 0;
-+    track.SeekToTime(&start);
++    seekTrackToTimeHaiku(track, &start);
 +    if (decoder->setUp(decodedFormat) != B_OK) {
 +        std::fprintf(stderr, "Summit media: no decoder add-on takes this video track\n");
 +        return nullptr;
@@ -30422,7 +30430,7 @@ index 0000000000000000000000000000000000000000..7269c6bd4a6a04d31f52fa2ce8db8faa
 +            // the keyframe preceding the next output frame.
 +            int64 resumeFrame = m_firstFrame + m_framesDecoded;
 +            int64 keyFrame = resumeFrame;
-+            status = m_track.SeekToFrame(&keyFrame, B_MEDIA_SEEK_CLOSEST_BACKWARD);
++            status = seekTrackToFrameHaiku(m_track, &keyFrame, B_MEDIA_SEEK_CLOSEST_BACKWARD);
 +            *count = 0;
 +            if (status != B_OK || keyFrame < 0 || keyFrame > resumeFrame) {
 +                m_decodeStatus = status == B_OK ? B_MEDIA_BAD_FORMAT : status;
@@ -30462,7 +30470,7 @@ index 0000000000000000000000000000000000000000..7269c6bd4a6a04d31f52fa2ce8db8faa
 +
 +status_t SubstituteVideoDecoderHaiku::seekToTime(bigtime_t* time)
 +{
-+    status_t status = m_track.SeekToTime(time);
++    status_t status = seekTrackToTimeHaiku(m_track, time);
 +    if (status != B_OK) {
 +        m_decodeStatus = status;
 +        return status;
@@ -30513,10 +30521,10 @@ index 0000000000000000000000000000000000000000..7269c6bd4a6a04d31f52fa2ce8db8faa
 +} // namespace WebCore
 diff --git a/Source/WebCore/platform/graphics/haiku/MediaDecoderSelectionHaiku.h b/Source/WebCore/platform/graphics/haiku/MediaDecoderSelectionHaiku.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..646d534a60dc17f44e8ce243f79dd25ff436e6d1
+index 0000000000000000000000000000000000000000..37c1562658a12277edd7cf69bb4feefd3ad4d6a3
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/haiku/MediaDecoderSelectionHaiku.h
-@@ -0,0 +1,194 @@
+@@ -0,0 +1,196 @@
 +/*
 + * Copyright (C) 2026 Haiku, Inc. All rights reserved.
 + *
@@ -30680,8 +30688,10 @@ index 0000000000000000000000000000000000000000..646d534a60dc17f44e8ce243f79dd25f
 +    // For a track the media kit gave no decoder at all: its chosen add-on
 +    // failed to set up. The air/OS image of the Raspberry Pi 4 carries the
 +    // ROCK 5's Rockchip decoder, which sorts first, takes H.264 and fails
-+    // there, and the media kit does not try the next add-on. Null if no
-+    // other add-on takes the stream either.
++    // there, and the media kit does not try the next add-on (as the x86_64
++    // images' NVDEC add-on does on a machine without a GeForce). The media
++    // kit will not move such a track; it is moved through its extractor
++    // (MediaTrackSeekHaiku.h). Null if no other add-on takes the stream either.
 +    static std::unique_ptr<SubstituteVideoDecoderHaiku> createForTrackWithoutDecoder(BMediaTrack&, const media_format& decodedFormat);
 +
 +    // Returns the decoded format, which asks for what `decodedFormat` asked for.
@@ -36809,6 +36819,139 @@ index 0000000000000000000000000000000000000000..e6b9ce308a2b76bb59854568e81eb2f9
 +} // namespace WebCore
 +
 +#endif // ENABLE(MEDIA_STREAM) && PLATFORM(HAIKU)
+diff --git a/Source/WebCore/platform/graphics/haiku/MediaTrackSeekHaiku.cpp b/Source/WebCore/platform/graphics/haiku/MediaTrackSeekHaiku.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..1adf920915f22d016f14e4ee70b0f24926a43554
+--- /dev/null
++++ b/Source/WebCore/platform/graphics/haiku/MediaTrackSeekHaiku.cpp
+@@ -0,0 +1,75 @@
++/*
++ * Copyright (C) 2026 Haiku, Inc. All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY APPLE INC. AND ITS CONTRIBUTORS ``AS IS''
++ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO,
++ * THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL APPLE INC. OR ITS CONTRIBUTORS
++ * BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
++ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
++ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
++ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
++ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
++ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF
++ * THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include "config.h"
++#include "MediaTrackSeekHaiku.h"
++
++// The track's extractor, stream and position are private to BMediaTrack, and
++// this file alone sees them. It is compiled on its own, outside the unified
++// sources and the precompiled header, so MediaTrack.h is first read here,
++// through the media kit's plugin headers MediaExtractor.h includes. What those
++// include besides each other is read before, as it is.
++#include <MediaFormats.h>
++#include <SupportDefs.h>
++#define private public
++#include <private/media/MediaExtractor.h>
++#include <MediaTrack.h>
++#undef private
++
++namespace WebCore {
++
++// What BMediaTrack's seek does with a decoder, without one: the extractor
++// moves the stream and says where it landed.
++static status_t seekWithoutDecoder(BMediaTrack& track, uint32 seekTo, int64* frame, bigtime_t* time)
++{
++    if (track.fDecoder || !track.fExtractor)
++        return B_NO_INIT;
++    status_t status = track.fExtractor->Seek(track.fStream, seekTo, frame, time);
++    if (status != B_OK)
++        return status;
++    track.fCurrentFrame = *frame;
++    track.fCurrentTime = *time;
++    return B_OK;
++}
++
++status_t seekTrackToTimeHaiku(BMediaTrack& track, bigtime_t* time, int32 flags)
++{
++    status_t status = track.SeekToTime(time, flags);
++    if (status != B_NO_INIT || !time)
++        return status;
++    int64 frame = 0;
++    return seekWithoutDecoder(track, (flags & B_MEDIA_SEEK_DIRECTION_MASK) | B_MEDIA_SEEK_TO_TIME, &frame, time);
++}
++
++status_t seekTrackToFrameHaiku(BMediaTrack& track, int64* frame, int32 flags)
++{
++    status_t status = track.SeekToFrame(frame, flags);
++    if (status != B_NO_INIT || !frame)
++        return status;
++    bigtime_t time = 0;
++    return seekWithoutDecoder(track, (flags & B_MEDIA_SEEK_DIRECTION_MASK) | B_MEDIA_SEEK_TO_FRAME, frame, &time);
++}
++
++} // namespace WebCore
+diff --git a/Source/WebCore/platform/graphics/haiku/MediaTrackSeekHaiku.h b/Source/WebCore/platform/graphics/haiku/MediaTrackSeekHaiku.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..0a5a22ec99a14c17cbaf84daee95ef03f0b16d1b
+--- /dev/null
++++ b/Source/WebCore/platform/graphics/haiku/MediaTrackSeekHaiku.h
+@@ -0,0 +1,46 @@
++/*
++ * Copyright (C) 2026 Haiku, Inc. All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY APPLE INC. AND ITS CONTRIBUTORS ``AS IS''
++ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO,
++ * THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL APPLE INC. OR ITS CONTRIBUTORS
++ * BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
++ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
++ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
++ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
++ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
++ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF
++ * THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#pragma once
++
++#include <MediaDefs.h>
++#include <SupportDefs.h>
++
++class BMediaTrack;
++
++namespace WebCore {
++
++// BMediaTrack::SeekToTime() and SeekToFrame() as they are, except for a track
++// the media kit gave no decoder (its chosen add-on failed to set up, as the
++// air/OS images' NVDEC add-on does for H.264 on a machine without a GeForce):
++// the media kit refuses to move such a track (B_NO_INIT), although it still
++// reads its chunks for SubstituteVideoDecoderHaiku. That track is moved
++// through its extractor, as BMediaTrack's own seek does before it tells the
++// decoder, and keeps its CurrentFrame() and CurrentTime(). `flags` takes the
++// B_MEDIA_SEEK_CLOSEST_* direction.
++status_t seekTrackToTimeHaiku(BMediaTrack&, bigtime_t* time, int32 flags = 0);
++status_t seekTrackToFrameHaiku(BMediaTrack&, int64* frame, int32 flags = 0);
++
++} // namespace WebCore
 diff --git a/Source/WebCore/platform/graphics/haiku/NativeImageHaiku.cpp b/Source/WebCore/platform/graphics/haiku/NativeImageHaiku.cpp
 new file mode 100644
 index 0000000000000000000000000000000000000000..8a9be616e65d18875e79acb1028c271315b81ad9
