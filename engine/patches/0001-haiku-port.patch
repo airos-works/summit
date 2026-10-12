@@ -30723,10 +30723,10 @@ index 0000000000000000000000000000000000000000..37c1562658a12277edd7cf69bb4feefd
 +} // namespace WebCore
 diff --git a/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaiku.cpp b/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..c0f4367e91f828d4b45746eb48d559d2f6bff79e
+index 0000000000000000000000000000000000000000..afbce40b75db49712610961f9bb5622ef5c6840c
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaiku.cpp
-@@ -0,0 +1,1829 @@
+@@ -0,0 +1,1845 @@
 +/*
 + * Copyright (C) 2014-2016 Haiku, Inc.
 + *
@@ -30798,6 +30798,7 @@ index 0000000000000000000000000000000000000000..c0f4367e91f828d4b45746eb48d559d2
 +#include <cmath>
 +#include <cstdio>
 +#include <cstdlib>
++#include <cstring>
 +#include <optional>
 +#include <string>
 +#include <string_view>
@@ -31178,14 +31179,25 @@ index 0000000000000000000000000000000000000000..c0f4367e91f828d4b45746eb48d559d2
 +}
 +
 +void MediaPlayerPrivate::playCallback(void* cookie, void* buffer,
-+    size_t /*size*/, const media_raw_audio_format& /*format*/)
++    size_t size, const media_raw_audio_format& format)
 +{
 +    MediaPlayerPrivate* player = (MediaPlayerPrivate*)cookie;
 +
-+    if (!player->m_mediaLock.Lock())
-+        return;
++    // The sound player keeps running to the end of the track and past it, on
++    // silence: BSoundPlayer::Stop() does not reliably Start() again, which a
++    // looping element needs at every rewind.
++    auto silence = [&] {
++        std::memset(buffer, format.format == media_raw_audio_format::B_AUDIO_UCHAR ? 0x80 : 0, size);
++    };
 +
-+    if (player->m_audioTrack && !player->m_audioAtEnd) {
++    if (!player->m_mediaLock.Lock()) {
++        silence();
++        return;
++    }
++
++    if (!player->m_audioTrack || player->m_audioAtEnd)
++        silence();
++    else {
 +        // The video thread supplies the presentation clock when there is video.
 +        if (!player->m_hasVideo)
 +            player->m_currentTime = audioTrackTime(*player->m_audioTrack, player->m_audioFormat) / 1000000.f;
@@ -31193,10 +31205,9 @@ index 0000000000000000000000000000000000000000..c0f4367e91f828d4b45746eb48d559d2
 +        int64 size64;
 +        if (player->m_audioTrack->ReadFrames(buffer, &size64) != B_OK)
 +        {
++            silence();
 +            if (!player->m_hasVideo)
 +                player->m_currentTime = player->m_audioTrack->Duration() / 1000000.f;
-+            if (player->m_soundPlayer)
-+                player->m_soundPlayer->Stop(false);
 +
 +            player->m_audioAtEnd = true;
 +            if ((!player->m_videoTrack || player->m_videoAtEnd) && !player->m_ended.exchange(true)) {
@@ -31441,7 +31452,10 @@ index 0000000000000000000000000000000000000000..c0f4367e91f828d4b45746eb48d559d2
 +                        std::fprintf(stderr, "Summit media playback: player=%p videoEnd status=%ld frames=%u time=%.2f duration=%.2f\n",
 +                            player, long(decodeStatus), decodedFrames, player->m_currentTime.load(), player->m_duration.load());
 +                    player->m_videoAtEnd = true;
-+                    if ((!player->m_audioTrack || player->m_audioAtEnd) && !player->m_ended.exchange(true)) {
++                    // Audio that is not playing (muted, or no output) does not
++                    // advance and would never end: the video's end is the end.
++                    bool audioDone = !player->m_audioTrack || player->m_audioAtEnd || !player->m_soundPlayer;
++                    if (audioDone && !player->m_ended.exchange(true)) {
 +                        player->m_currentTime = player->m_duration.load();
 +                        callOnMainThread([player = WeakPtr(player)] {
 +                            if (player && player->m_ended) {
@@ -31688,8 +31702,10 @@ index 0000000000000000000000000000000000000000..c0f4367e91f828d4b45746eb48d559d2
 +            return;
 +        }
 +        m_soundPlayer->SetVolume(m_volume);
++        // Started once and left running (Start() on a running player stops
++        // the card asking it for sound); pause() deletes it.
++        m_soundPlayer->Start();
 +    }
-+    m_soundPlayer->Start();
 +}
 +
 +void MediaPlayerPrivate::releaseAudioOutput()
