@@ -32840,10 +32840,10 @@ index 0000000000000000000000000000000000000000..df43f4fc21c17d2cfb904c9eaefa28b1
 +#endif
 diff --git a/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaikuMSE.cpp b/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaikuMSE.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..62f9c4539cfb52140bcf92826b8de1724ad15608
+index 0000000000000000000000000000000000000000..6c04a7afcae9f85e4a67fa3cf1b226a30fb9a3bf
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaikuMSE.cpp
-@@ -0,0 +1,2935 @@
+@@ -0,0 +1,2960 @@
 +/*
 + * Copyright (C) 2026 Summit contributors.
 + *
@@ -34643,6 +34643,29 @@ index 0000000000000000000000000000000000000000..62f9c4539cfb52140bcf92826b8de172
 +    types.add("application/dash+xml"_s);
 +}
 +
++// The ARM boards decode H.264 with their own decoder (rpi_mmal on the
++// Raspberry Pi 4, sunxi_cedar on the Radxa Cubie A7S) or, where there is
++// none, in software for a fraction of what VP9 and AV1 cost, which they
++// only ever decode in software. Offered all three, YouTube took VP9 on the
++// Cubie A7S and stayed at 480p, 30 frames a second, for 1.1 cores; offered
++// H.264 alone, it played 720p at 60 for 0.9. So there VP9 and AV1 (and
++// VP8, WebM's other video codec) are declined to Media Source Extensions
++// (and media capabilities, which ask supportsType()), and sites pick H.264.
++// SUMMIT_MEDIA_PREFER_H264=0 offers them again, =1 declines them elsewhere.
++static bool declinesSoftwareOnlyVideoCodecsHaiku()
++{
++    static const bool declines = [] {
++        if (const char* value = getenv("SUMMIT_MEDIA_PREFER_H264"))
++            return !std::strcmp(value, "1");
++#if CPU(ARM64)
++        return true;
++#else
++        return false;
++#endif
++    }();
++    return declines;
++}
++
 +static bool isSupportedCodec(StringView codec, bool audioOnly)
 +{
 +    // H.264 in 8-bit 4:2:0 is what the NVDEC add-on decodes; High 10, 4:2:2
@@ -34663,6 +34686,8 @@ index 0000000000000000000000000000000000000000..62f9c4539cfb52140bcf92826b8de172
 +    if (isSupportedCodec(codec, audioOnly) || codec == "ac-3"_s || codec == "ec-3"_s)
 +        return true;
 +    if (audioOnly)
++        return false;
++    if (declinesSoftwareOnlyVideoCodecsHaiku() && (codec.startsWith("vp09"_s) || codec.startsWith("av01"_s)))
 +        return false;
 +    if (codec.startsWith("vp09"_s)) {
 +        if (auto vp = parseVPCodecParameters(codec))
@@ -34719,7 +34744,7 @@ index 0000000000000000000000000000000000000000..62f9c4539cfb52140bcf92826b8de172
 +        for (auto& codec : codecs) {
 +            bool audio = codec == "opus"_s || (codec == "vorbis"_s && SummitWebM::Parser::supportsVorbis());
 +            bool video = false;
-+            if (!audioOnly) {
++            if (!audioOnly && !declinesSoftwareOnlyVideoCodecsHaiku()) {
 +                if (auto vp = parseVPCodecParameters(codec)) {
 +                    bool vp8 = vp->codecName == "vp8"_s || vp->codecName == "vp08"_s;
 +                    video = vp8 ? vp->bitDepth == 8 : (vp->profile < 2 ? vp->bitDepth == 8 : vp->bitDepth > 8);
