@@ -22647,10 +22647,10 @@ index 0000000000000000000000000000000000000000..7d495c04b64af928f0525ca51be51686
 +}
 diff --git a/Source/WebCore/platform/graphics/haiku/CoordinatedPlatformLayerBufferPlanesHaiku.h b/Source/WebCore/platform/graphics/haiku/CoordinatedPlatformLayerBufferPlanesHaiku.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..7a1772263392ee4548574dad4f4bc272272f6697
+index 0000000000000000000000000000000000000000..03ad527d51298267785f10de63f6989da0af3c6a
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/haiku/CoordinatedPlatformLayerBufferPlanesHaiku.h
-@@ -0,0 +1,92 @@
+@@ -0,0 +1,99 @@
 +/*
 + * Copyright (C) 2026 Haiku, Inc. All rights reserved.
 + *
@@ -22708,7 +22708,17 @@ index 0000000000000000000000000000000000000000..7a1772263392ee4548574dad4f4bc272
 +    {
 +    }
 +
++    void prepareForPaintingHaiku() final { uploadPlanes(); }
++
 +    void paintToTextureMapper(TextureMapper& textureMapper, const FloatRect& targetRect, const TransformationMatrix& modelViewMatrix, float opacity) final
++    {
++        uploadPlanes();
++        if (m_buffer)
++            m_buffer->paintToTextureMapper(textureMapper, targetRect, modelViewMatrix, opacity);
++    }
++
++private:
++    void uploadPlanes()
 +    {
 +        if (!m_buffer && m_planes) {
 +            auto* bytes = static_cast<const uint8_t*>(m_planes->data());
@@ -22730,11 +22740,8 @@ index 0000000000000000000000000000000000000000..7a1772263392ee4548574dad4f4bc272
 +            // The decoder may use the memory for another picture.
 +            m_planes = nullptr;
 +        }
-+        if (m_buffer)
-+            m_buffer->paintToTextureMapper(textureMapper, targetRect, modelViewMatrix, opacity);
 +    }
 +
-+private:
 +    sk_sp<SkData> m_planes;
 +    AddOnVideoDecoderHaiku::I420Layout m_layout;
 +    std::unique_ptr<CoordinatedPlatformLayerBuffer> m_buffer;
@@ -41969,7 +41976,7 @@ index b478a0e1d88443132d337f514434eeab7c8df464..dfc5a807074dab541c8fd4c254d3391a
  protected:
      WEBCORE_EXPORT static bool allTileEdgesExposed(const FloatRect& totalRect, const FloatRect& tileRect);
 diff --git a/Source/WebCore/platform/graphics/texmap/TextureMapperLayer.cpp b/Source/WebCore/platform/graphics/texmap/TextureMapperLayer.cpp
-index 112d19b1676c297b0168941b1db5b619cd535a29..40d876c69fdcd994bbfeccda0a9fb8a3f1fbb2a0 100644
+index 112d19b1676c297b0168941b1db5b619cd535a29..9cc17d7abe77b6ce5fa1b2ea8d6aa8cc1feeeaa3 100644
 --- a/Source/WebCore/platform/graphics/texmap/TextureMapperLayer.cpp
 +++ b/Source/WebCore/platform/graphics/texmap/TextureMapperLayer.cpp
 @@ -21,6 +21,16 @@
@@ -41989,7 +41996,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..40d876c69fdcd994bbfeccda0a9fb8a3
  #include "BitmapTexturePool.h"
  #include "ClipPath.h"
  #include "FloatQuad.h"
-@@ -32,12 +42,125 @@
+@@ -32,12 +42,144 @@
  #include <wtf/SetForScope.h>
  #include <wtf/TZoneMallocInlines.h>
  
@@ -42039,6 +42046,25 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..40d876c69fdcd994bbfeccda0a9fb8a3
 +        return !value || std::strcmp(value, "0");
 +    }();
 +    return enabled;
++}
++
++// A texture upload in the middle of a composition, after its first draws,
++// waited for the GPU to finish all of them with zink on the Cubie A7S's
++// PowerVR: Reddit's scrollbar, a 21x913 picture painted anew for each
++// scrolled frame and uploaded when it was drawn, held those frames 100-230 ms.
++// Tiles are uploaded before the composition starts; so is this now.
++void TextureMapperLayer::prepareContentsHaiku()
++{
++    if (!isVisible())
++        return;
++    if (m_contentsLayer && m_state.visible && m_state.contentsVisible && !(m_state.solidColor.isValid() && m_state.solidColor.isVisible()))
++        m_contentsLayer->prepareForPaintingHaiku();
++    for (auto* child : m_children)
++        child->prepareContentsHaiku();
++    if (auto* mask = m_state.maskLayer.get())
++        mask->prepareContentsHaiku();
++    if (auto* replica = m_state.replicaLayer.get())
++        replica->prepareContentsHaiku();
 +}
 +
 +bool TextureMapperLayer::isOccludedHaiku(const FloatRect& rect)
@@ -42115,7 +42141,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..40d876c69fdcd994bbfeccda0a9fb8a3
  WTF_MAKE_TZONE_ALLOCATED_IMPL(TextureMapperLayer);
  
  static constexpr auto s_opacityVisibilityThreshold = 0.01;
-@@ -363,14 +486,37 @@ void TextureMapperLayer::prepareForPainting(TextureMapper& textureMapper)
+@@ -363,14 +505,37 @@ void TextureMapperLayer::prepareForPainting(TextureMapper& textureMapper)
  
  void TextureMapperLayer::paint(TextureMapper& textureMapper)
  {
@@ -42153,7 +42179,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..40d876c69fdcd994bbfeccda0a9fb8a3
  }
  
  #if ENABLE(DAMAGE_TRACKING)
-@@ -390,11 +536,35 @@ void TextureMapperLayer::setDamage(Damage&& damage)
+@@ -390,11 +555,35 @@ void TextureMapperLayer::setDamage(Damage&& damage)
          m_damageInLayerCoordinateSpace = WTF::move(damage);
  }
  
@@ -42189,7 +42215,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..40d876c69fdcd994bbfeccda0a9fb8a3
      collectDamageRecursive(options, damage);
  
      // Use the damage information we inferred while performing
-@@ -404,6 +574,27 @@ void TextureMapperLayer::collectDamage(TextureMapper& textureMapper, Damage& dam
+@@ -404,6 +593,27 @@ void TextureMapperLayer::collectDamage(TextureMapper& textureMapper, Damage& dam
      for (const auto& rect : *m_damageInGlobalCoordinateSpace)
          damage.add(intersection(rect, clipBounds));
      *m_damageInGlobalCoordinateSpace = Damage(m_state.size);
@@ -42217,7 +42243,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..40d876c69fdcd994bbfeccda0a9fb8a3
  }
  
  void TextureMapperLayer::collectDamageRecursive(TextureMapperPaintOptions& options, Damage& damage)
-@@ -490,11 +681,26 @@ void TextureMapperLayer::collectDamageSelf(TextureMapperPaintOptions& options, D
+@@ -490,11 +700,26 @@ void TextureMapperLayer::collectDamageSelf(TextureMapperPaintOptions& options, D
          return;
      }
  
@@ -42244,7 +42270,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..40d876c69fdcd994bbfeccda0a9fb8a3
  
      TransformationMatrix transform;
      transform.translate(options.offset.width(), options.offset.height());
-@@ -533,6 +739,23 @@ void TextureMapperLayer::collectDamageSelfChildrenReplicaFilterAndMask(TextureMa
+@@ -533,6 +758,23 @@ void TextureMapperLayer::collectDamageSelfChildrenReplicaFilterAndMask(TextureMa
  
  void TextureMapperLayer::collectDamageSelfChildrenFilterAndMask(TextureMapperPaintOptions& options, Damage& damage)
  {
@@ -42268,7 +42294,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..40d876c69fdcd994bbfeccda0a9fb8a3
      const IntSize maxTextureSize = options.textureMapper.maxTextureSize();
      for (auto& rect : computeConsolidatedOverlapRegionRects(options)) {
          for (int x = rect.x(); x < rect.maxX(); x += maxTextureSize.width()) {
-@@ -545,6 +768,13 @@ void TextureMapperLayer::collectDamageSelfChildrenFilterAndMask(TextureMapperPai
+@@ -545,6 +787,13 @@ void TextureMapperLayer::collectDamageSelfChildrenFilterAndMask(TextureMapperPai
          }
      }
  
@@ -42282,7 +42308,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..40d876c69fdcd994bbfeccda0a9fb8a3
      if (!m_accumulatedOverlapRegionDamage.isEmpty())
          damage.add(m_accumulatedOverlapRegionDamage);
  }
-@@ -578,12 +808,38 @@ void TextureMapperLayer::paintSelf(TextureMapperPaintOptions& options)
+@@ -578,12 +827,38 @@ void TextureMapperLayer::paintSelf(TextureMapperPaintOptions& options)
      auto targetRect = layerRect();
      if (targetRect.isEmpty())
          return;
@@ -42321,7 +42347,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..40d876c69fdcd994bbfeccda0a9fb8a3
  
      if (isFlattened() && !m_flattenedLayer->needsUpdate()) {
          m_flattenedLayer->paintToTextureMapper(options.textureMapper, m_flattenedLayer->layerRect(), transform, options.opacity);
-@@ -592,6 +848,26 @@ void TextureMapperLayer::paintSelf(TextureMapperPaintOptions& options)
+@@ -592,6 +867,26 @@ void TextureMapperLayer::paintSelf(TextureMapperPaintOptions& options)
  
      TextureMapperSolidColorLayer solidColorLayer;
      TextureMapperBackingStore* backingStore = m_backingStore;
@@ -42348,7 +42374,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..40d876c69fdcd994bbfeccda0a9fb8a3
      if (m_state.backgroundColor.isValid()) {
          solidColorLayer.setColor(m_state.backgroundColor);
          backingStore = &solidColorLayer;
-@@ -599,6 +875,10 @@ void TextureMapperLayer::paintSelf(TextureMapperPaintOptions& options)
+@@ -599,6 +894,10 @@ void TextureMapperLayer::paintSelf(TextureMapperPaintOptions& options)
  
      options.textureMapper.setWrapMode(TextureMapper::WrapMode::Stretch);
      options.textureMapper.setPatternTransform(TransformationMatrix());
@@ -42359,7 +42385,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..40d876c69fdcd994bbfeccda0a9fb8a3
  
      if (backingStore) {
          backingStore->paintToTextureMapper(options.textureMapper, targetRect, transform, options.opacity);
-@@ -608,6 +888,10 @@ void TextureMapperLayer::paintSelf(TextureMapperPaintOptions& options)
+@@ -608,6 +907,10 @@ void TextureMapperLayer::paintSelf(TextureMapperPaintOptions& options)
          if (m_state.showRepaintCounter)
              backingStore->drawRepaintCounter(options.textureMapper, m_state.repaintCount, m_state.debugBorderColor, targetRect, transform);
      }
@@ -42370,7 +42396,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..40d876c69fdcd994bbfeccda0a9fb8a3
  
      TextureMapperPlatformLayer* contentsLayer = m_contentsLayer;
      if (m_state.solidColor.isValid() && m_state.solidColor.isVisible()) {
-@@ -638,6 +922,10 @@ void TextureMapperLayer::paintSelf(TextureMapperPaintOptions& options)
+@@ -638,6 +941,10 @@ void TextureMapperLayer::paintSelf(TextureMapperPaintOptions& options)
  
      if (m_state.showDebugBorders)
          contentsLayer->drawBorder(options.textureMapper, m_state.debugBorderColor, m_state.debugBorderWidth, m_state.contentsRect, transform);
@@ -42381,7 +42407,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..40d876c69fdcd994bbfeccda0a9fb8a3
  }
  
  void TextureMapperLayer::paintBackdrop(TextureMapperPaintOptions& options)
-@@ -1079,6 +1367,33 @@ void TextureMapperLayer::applyMask(TextureMapperPaintOptions& options)
+@@ -1079,6 +1386,33 @@ void TextureMapperLayer::applyMask(TextureMapperPaintOptions& options)
      options.textureMapper.setMaskMode(false);
  }
  
@@ -42415,7 +42441,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..40d876c69fdcd994bbfeccda0a9fb8a3
  void TextureMapperLayer::paintIntoSurface(TextureMapperPaintOptions& options)
  {
      options.textureMapper.bindSurface(options.surface.get());
-@@ -1093,7 +1408,11 @@ void TextureMapperLayer::paintIntoSurface(TextureMapperPaintOptions& options)
+@@ -1093,7 +1427,11 @@ void TextureMapperLayer::paintIntoSurface(TextureMapperPaintOptions& options)
      bool hasMask = !!m_state.maskLayer;
      bool hasReplicaMask = options.replicaLayer == this && m_state.replicaLayer->m_state.maskLayer;
      bool defersLastFilterPass = !hasMask && !hasReplicaMask;
@@ -42427,7 +42453,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..40d876c69fdcd994bbfeccda0a9fb8a3
      options.textureMapper.bindSurface(options.surface.get());
      if (hasMask)
          m_state.maskLayer->applyMask(options);
-@@ -1142,6 +1461,16 @@ void TextureMapperLayer::paintSelfAndChildrenWithIntermediateSurface(TextureMapp
+@@ -1142,6 +1480,16 @@ void TextureMapperLayer::paintSelfAndChildrenWithIntermediateSurface(TextureMapp
  
  void TextureMapperLayer::paintSelfChildrenReplicaFilterAndMask(TextureMapperPaintOptions& options)
  {
@@ -42444,7 +42470,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..40d876c69fdcd994bbfeccda0a9fb8a3
      bool hasFilterOrMask = [&] {
          if (hasFilters())
              return true;
-@@ -1167,6 +1496,18 @@ void TextureMapperLayer::paintRecursive(TextureMapperPaintOptions& options)
+@@ -1167,6 +1515,18 @@ void TextureMapperLayer::paintRecursive(TextureMapperPaintOptions& options)
  {
      if (!isVisible())
          return;
@@ -42463,7 +42489,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..40d876c69fdcd994bbfeccda0a9fb8a3
  
      SetForScope scopedOpacity(options.opacity, options.opacity * m_currentOpacity);
  
-@@ -1495,6 +1836,11 @@ void TextureMapperLayer::setBackgroundColor(const Color& color)
+@@ -1495,6 +1855,11 @@ void TextureMapperLayer::setBackgroundColor(const Color& color)
  void TextureMapperLayer::setFilters(const FilterOperations& filters)
  {
      m_state.filters = filters;
@@ -42476,10 +42502,10 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..40d876c69fdcd994bbfeccda0a9fb8a3
  
  void TextureMapperLayer::setContentsLayer(TextureMapperPlatformLayer* platformLayer)
 diff --git a/Source/WebCore/platform/graphics/texmap/TextureMapperLayer.h b/Source/WebCore/platform/graphics/texmap/TextureMapperLayer.h
-index 385b7808e97fada2a7e26a56172004da71b87c1c..077ae9cee3b7c70a0918e356e2cdae7b60fba1be 100644
+index 385b7808e97fada2a7e26a56172004da71b87c1c..a44af869761524388a5883c7d74741db302f6670 100644
 --- a/Source/WebCore/platform/graphics/texmap/TextureMapperLayer.h
 +++ b/Source/WebCore/platform/graphics/texmap/TextureMapperLayer.h
-@@ -127,6 +127,13 @@ public:
+@@ -127,6 +127,16 @@ public:
  
      FloatRect effectiveLayerRect() const;
  
@@ -42488,12 +42514,15 @@ index 385b7808e97fada2a7e26a56172004da71b87c1c..077ae9cee3b7c70a0918e356e2cdae7b
 +    // rect (in the target's pixels) after the layer whose own contents are
 +    // being painted: its tiles there can be left out.
 +    static bool isOccludedHaiku(const FloatRect&);
++    // Has the contents of the layers that paint() will draw upload what they
++    // need before the composition starts drawing.
++    WEBCORE_EXPORT void prepareContentsHaiku();
 +#endif
 +
  private:
      TextureMapperLayer& backdropRootLayer() const
      {
-@@ -186,6 +193,9 @@ private:
+@@ -186,6 +196,9 @@ private:
      void paintBackdrop(TextureMapperPaintOptions&);
      void applyMask(TextureMapperPaintOptions&);
      void collect3DRenderingContextLayers(Vector<TextureMapperLayer*>&);
@@ -42503,7 +42532,7 @@ index 385b7808e97fada2a7e26a56172004da71b87c1c..077ae9cee3b7c70a0918e356e2cdae7b
  
  #if ENABLE(DAMAGE_TRACKING)
      void collectDamageRecursive(TextureMapperPaintOptions&, Damage&);
-@@ -224,6 +234,11 @@ private:
+@@ -224,6 +237,11 @@ private:
      std::unique_ptr<TextureMapperFlattenedLayer> m_flattenedLayer;
      float m_currentOpacity { 1.0 };
      FilterOperations m_currentFilters;
@@ -42516,10 +42545,10 @@ index 385b7808e97fada2a7e26a56172004da71b87c1c..077ae9cee3b7c70a0918e356e2cdae7b
      struct State {
          FloatPoint pos;
 diff --git a/Source/WebCore/platform/graphics/texmap/TextureMapperPlatformLayer.h b/Source/WebCore/platform/graphics/texmap/TextureMapperPlatformLayer.h
-index 271b076b101e307f8e4dc09ec7450da3c7bc898e..93ed704f462dca15d359f16b6b610c3cc8554afc 100644
+index 271b076b101e307f8e4dc09ec7450da3c7bc898e..7b696b335b6f53e67e51d020c063ab3aff976e27 100644
 --- a/Source/WebCore/platform/graphics/texmap/TextureMapperPlatformLayer.h
 +++ b/Source/WebCore/platform/graphics/texmap/TextureMapperPlatformLayer.h
-@@ -42,6 +42,12 @@ public:
+@@ -42,6 +42,15 @@ public:
      virtual void paintToTextureMapper(TextureMapper&, const FloatRect&, const TransformationMatrix& modelViewMatrix = TransformationMatrix(), float opacity = 1.0) = 0;
  
      WEBCORE_EXPORT virtual void drawBorder(TextureMapper&, const Color&, float borderWidth, const FloatRect&, const TransformationMatrix&);
@@ -42528,6 +42557,9 @@ index 271b076b101e307f8e4dc09ec7450da3c7bc898e..93ed704f462dca15d359f16b6b610c3c
 +    // opaque pixels (TextureMapperLayer's occlusion). It may prepare what it
 +    // paints, such as an upload painting would make anyway.
 +    virtual bool coversTargetOpaquelyHaiku() { return false; }
++    // Uploads what paintToTextureMapper() would upload, before a composition
++    // starts drawing (TextureMapperLayer::prepareContentsHaiku()).
++    virtual void prepareForPaintingHaiku() { }
 +#endif
  
      void setClient(TextureMapperPlatformLayer::Client* client) { m_client = client; }
@@ -43051,15 +43083,16 @@ index 2db0cfcf7ac285db237c36a8ce63b5648480c35b..0ede903e0f8e073f608f3d1989154183
  {
      if (m_buffer)
 diff --git a/Source/WebCore/platform/graphics/texmap/coordinated/CoordinatedPlatformLayerBufferNativeImage.h b/Source/WebCore/platform/graphics/texmap/coordinated/CoordinatedPlatformLayerBufferNativeImage.h
-index daf86a92db8bb55812c3c67ab365ea7542d052be..40c8a554e0ddd1c5f719922696db9b328ef8f679 100644
+index daf86a92db8bb55812c3c67ab365ea7542d052be..7703aeff6a7179996927f8a7dfe257f7eb0276e0 100644
 --- a/Source/WebCore/platform/graphics/texmap/coordinated/CoordinatedPlatformLayerBufferNativeImage.h
 +++ b/Source/WebCore/platform/graphics/texmap/coordinated/CoordinatedPlatformLayerBufferNativeImage.h
-@@ -42,6 +42,9 @@ public:
+@@ -42,6 +42,10 @@ public:
  
  private:
      void paintToTextureMapper(TextureMapper&, const FloatRect&, const TransformationMatrix& modelViewMatrix = TransformationMatrix(), float opacity = 1.0) override;
 +#if PLATFORM(HAIKU)
 +    bool coversTargetOpaquelyHaiku() override;
++    void prepareForPaintingHaiku() override { tryEnsureBuffer(); }
 +#endif
  
      bool tryEnsureBuffer();
@@ -132391,7 +132424,7 @@ index 57163f65873e5a481e5ef5a4ec3beec4b40b7cea..61b49ac7c362b416cdec1d10c44304d2
      bool m_compositionRequired { false };
  #if ENABLE(SCROLLING_THREAD)
 diff --git a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/ThreadedCompositor.cpp b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/ThreadedCompositor.cpp
-index c238029ad9c99c5028ea7e456520af85d1d85532..7acf378411328d3555960b70652361e6c238059a 100644
+index c238029ad9c99c5028ea7e456520af85d1d85532..fba90ee6992498bd2f6f9587d016481faf2a61ef 100644
 --- a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/ThreadedCompositor.cpp
 +++ b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/ThreadedCompositor.cpp
 @@ -26,6 +26,10 @@
@@ -132500,7 +132533,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..7acf378411328d3555960b70652361e6
  
  #if USE(TEXTURE_MAPPER)
          m_context = WTF::move(context);
-@@ -136,7 +188,61 @@ ThreadedCompositor::ThreadedCompositor(WebPage& webPage, LayerTreeHost& layerTre
+@@ -136,8 +188,62 @@ ThreadedCompositor::ThreadedCompositor(WebPage& webPage, LayerTreeHost& layerTre
          m_threadSafeGrContext = PlatformDisplay::sharedDisplay().skiaGrContext()->threadSafeProxy();
  #endif
      });
@@ -132514,8 +132547,8 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..7acf378411328d3555960b70652361e6
 +    }
 +#endif
 +
-+}
-+
+ }
+ 
 +#if PLATFORM(HAIKU) && USE(TEXTURE_MAPPER)
 +// Shader programs the page is likely to need soon are compiled one per task
 +// (TextureMapper::warmShaderProgramsHaiku()): the two every first frame draws
@@ -132557,11 +132590,12 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..7acf378411328d3555960b70652361e6
 +    m_workQueue->dispatch([this, protectedThis = Ref { *this }, remaining, waitsForQuiet] {
 +        warmShaderProgramsHaiku(remaining - 1, waitsForQuiet);
 +    });
- }
++}
 +#endif
- 
++
  ThreadedCompositor::~ThreadedCompositor() = default;
  
+ uint64_t ThreadedCompositor::surfaceID() const
 @@ -216,8 +322,23 @@ void ThreadedCompositor::updateRenderTimer()
      }
  
@@ -132599,8 +132633,13 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..7acf378411328d3555960b70652361e6
      FloatRect clipRect(FloatPoint { }, size);
      TextureMapperLayer& currentRootLayer = m_sceneState->rootLayer().ensureTarget();
      if (currentRootLayer.transform() != matrix)
-@@ -373,6 +498,9 @@ void ThreadedCompositor::paintToTextureMapper(const TransformationMatrix& matrix
+@@ -371,8 +496,14 @@ void ThreadedCompositor::paintToTextureMapper(const TransformationMatrix& matrix
  
+     bool sceneHasRunningAnimations = currentRootLayer.applyAnimationsRecursively(MonotonicTime::now());
+ 
++#if PLATFORM(HAIKU)
++    currentRootLayer.prepareContentsHaiku();
++#endif
      m_textureMapper->beginPainting(m_flipY ? TextureMapper::FlipY::Yes : TextureMapper::FlipY::No);
      m_textureMapper->beginClip(TransformationMatrix(), FloatRoundedRect(clipRect));
 +#if PLATFORM(HAIKU)
@@ -132609,7 +132648,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..7acf378411328d3555960b70652361e6
  
  #if ENABLE(DAMAGE_TRACKING)
      std::optional<FloatRoundedRect> rectContainingRegionThatActuallyChanged;
-@@ -383,6 +511,10 @@ void ThreadedCompositor::paintToTextureMapper(const TransformationMatrix& matrix
+@@ -383,6 +514,10 @@ void ThreadedCompositor::paintToTextureMapper(const TransformationMatrix& matrix
          WTFBeginSignpost(this, CollectDamage);
          currentRootLayer.collectDamage(*m_textureMapper, frameDamage);
          WTFEndSignpost(this, CollectDamage);
@@ -132620,7 +132659,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..7acf378411328d3555960b70652361e6
  
          recordFrameDamage(WTF::move(frameDamage));
  
-@@ -404,11 +536,20 @@ void ThreadedCompositor::paintToTextureMapper(const TransformationMatrix& matrix
+@@ -404,11 +539,20 @@ void ThreadedCompositor::paintToTextureMapper(const TransformationMatrix& matrix
          m_textureMapper->beginClip(TransformationMatrix(), *rectContainingRegionThatActuallyChanged);
  #endif
  
@@ -132641,7 +132680,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..7acf378411328d3555960b70652361e6
  
  #if ENABLE(DAMAGE_TRACKING)
      if (rectContainingRegionThatActuallyChanged)
-@@ -426,6 +567,16 @@ void ThreadedCompositor::paintToTextureMapper(const TransformationMatrix& matrix
+@@ -426,6 +570,16 @@ void ThreadedCompositor::paintToTextureMapper(const TransformationMatrix& matrix
  
      m_textureMapper->endClip();
      m_textureMapper->endPainting();
@@ -132658,7 +132697,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..7acf378411328d3555960b70652361e6
  
      if (sceneHasRunningAnimations)
          requestComposition(CompositionReason::Animation);
-@@ -556,6 +707,46 @@ void ThreadedCompositor::renderLayerTree()
+@@ -556,6 +710,46 @@ void ThreadedCompositor::renderLayerTree()
      if (m_suspendedCount > 0)
          return;
  
@@ -132705,7 +132744,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..7acf378411328d3555960b70652361e6
      OptionSet<CompositionReason> reasons;
      bool shouldNotifiyDidComposite = false;
      {
-@@ -580,8 +771,18 @@ void ThreadedCompositor::renderLayerTree()
+@@ -580,8 +774,18 @@ void ThreadedCompositor::renderLayerTree()
  
          ASSERT(m_state.state == State::Scheduled);
          m_state.state = State::InProgress;
@@ -132724,7 +132763,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..7acf378411328d3555960b70652361e6
  #if USE(TEXTURE_MAPPER)
      if (!m_context || !m_context->makeContextCurrent())
          return;
-@@ -599,23 +800,61 @@ void ThreadedCompositor::renderLayerTree()
+@@ -599,23 +803,61 @@ void ThreadedCompositor::renderLayerTree()
      if (viewportSize.isEmpty())
          return;
  
@@ -132786,7 +132825,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..7acf378411328d3555960b70652361e6
  
      updateFPSCounter();
  
-@@ -631,8 +870,49 @@ void ThreadedCompositor::renderLayerTree()
+@@ -631,8 +873,49 @@ void ThreadedCompositor::renderLayerTree()
      PlatformDisplay::sharedDisplay().skiaGLContext()->swapBuffers();
  #endif
  
@@ -132836,7 +132875,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..7acf378411328d3555960b70652361e6
  
      RunLoop::mainSingleton().dispatch([this, protectedThis = Ref { *this }] {
          if (m_layerTreeHost)
-@@ -656,6 +936,13 @@ void ThreadedCompositor::requestComposition(CompositionReason reason)
+@@ -656,6 +939,13 @@ void ThreadedCompositor::requestComposition(CompositionReason reason)
  {
      Locker locker { m_state.lock };
      m_state.reasons.add(reason);
@@ -132850,7 +132889,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..7acf378411328d3555960b70652361e6
      scheduleUpdateLocked();
  }
  
-@@ -703,6 +990,10 @@ void ThreadedCompositor::scheduleUpdateLocked()
+@@ -703,6 +993,10 @@ void ThreadedCompositor::scheduleUpdateLocked()
  void ThreadedCompositor::frameComplete()
  {
      ASSERT(m_workQueue->runLoop().isCurrent());
@@ -132861,7 +132900,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..7acf378411328d3555960b70652361e6
  
      Locker locker { m_state.lock };
      WTFEmitSignpost(this, FrameComplete, "reasons: %s, state: %s, waiting for tiles: %s", reasonsToString(m_state.reasons).utf8(), stateToString(m_state.state).characters(), m_state.isWaitingForTiles ? "yes" : "no");
-@@ -726,6 +1017,112 @@ void ThreadedCompositor::frameComplete()
+@@ -726,6 +1020,112 @@ void ThreadedCompositor::frameComplete()
      }
  }
  
