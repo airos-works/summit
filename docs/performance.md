@@ -16,6 +16,8 @@ packages. Baseline: the CI build of `ce257e0`.
 | Wikipedia, 1920x1056, wheel at 100 Hz | 26-31 fps | 37-41 fps |
 | frames slower than 50 ms per scroll burst | 6 | 0-2 |
 | 1080p H.264 video, maximized window | 22 fps | 30 fps (all) |
+| YouTube watch page (480p VP9), compositor frame | 628 ms | 17-18 ms (30 fps) |
+| scrolling Reddit (r/pics), wheel at 100 Hz | 3-4 fps | 8-16 fps |
 
 What changed:
 
@@ -47,13 +49,54 @@ What changed:
   noted with their place in the paint order, and tiles painted before them
   that they cover are left out. A maximized 1080p video drew 3.26 Mpx in 34
   draws per frame, now 2.10 in 14. `SUMMIT_OCCLUSION=0` turns it off.
+- **Filter layers drawn again only when something reaches them** (`07520b0`).
+  Every layer with a filter or mask was damaged in every composition; the
+  "changed" mode measured as harmless on the X399 is now the default
+  (`SUMMIT_FILTER_LAYER_DAMAGE=always` restores the old one). The same commit
+  stops a page whose frames take over 250 ms from having every other frame
+  read back as "quiet" (only the quiet-page timer's frame goes through
+  app_server now).
+- **Empty filtered layers skipped** (`03b5665`). YouTube's player has an empty
+  blurred layer (its ambient light in the light theme) that went through
+  eight surfaces and two blur passes with each video frame.
+- **The rounded-clip shader only in the corners** (`71610b4`). Under a
+  rounded clip every pixel ran the RoundedRectClip shader (about 100 ns a
+  pixel here); YouTube's player has rounded corners, so its video took
+  ~100 ms of GPU per frame. With one axis-aligned rounded clip a draw is made
+  in parts that tile the clip without overlapping: the plus-shaped middle with
+  the scissor alone, the four corner boxes with the shader. Removing the
+  page's border-radius by script gave the same 116 -> 17 ms.
+- **Layer contents uploaded before drawing starts** (`f754dbd`). A contents
+  picture (scrollbar, video planes) was uploaded mid-composition, and zink
+  then waited for the GPU to finish everything queued: Reddit's 21x913
+  scrollbar held each scrolled frame 100-230 ms in a 0.1 ms upload (a
+  `glFinish()` placed before it took the time instead).
+- **Filter results reused while a layer only moves** (`9df3984`). Reddit
+  shows a dimmed, blurred copy of each picture behind it; every scrolled
+  frame blurred them all again (nine surfaces). The filtered result of a
+  layer of its own is kept and drawn moved by whole pixels while its scale,
+  filters, colors, contents and backing store (now versioned) are the same.
+  `SUMMIT_FILTER_CACHE=0` turns it off.
+- **Network cache** (`ac00e3a`). A record cut short by a power loss (the
+  meta data checksum covers only the meta data) aborted the network process
+  in `readRecordFromData`; it is now discarded.
 
 Tried and dropped: setting libgcc's `__aarch64_have_lse_atomics` so the
 out-of-line atomic helpers use the LSE instructions (libgcc never sets it on
 Haiku, which has no `getauxval`); Speedometer went 2.63 -> 2.39 over two
 alternated 10-iteration runs. Pinning every web-process thread to the two A76
 cores (not measured: the board hung at that launch). Waiting a second instead
-of 250 ms before the settle read-back (no measurable difference).
+of 250 ms before the settle read-back (no measurable difference). A quarantine
+for textures just returned to `BitmapTexturePool` and re-specifying a texture
+on whole updates (neither removed the upload stall; uploading earlier did).
+
+Ways of measuring that held up: `SUMMIT_COMPOSITOR_TIMING_TRACE=1` (per frame:
+draws, drawn and blended Mpx, surfaces, blur passes, paint and GPU-wait time),
+`SUMMIT_LAYER_PAINT_TRACE=1` (layer branches over 10 ms), hiding parts of a
+page through `summitctl devtools-do evaluate` in one session, and local
+fixtures that copy a page's structure (video behind a blurred layer, VP9 MSE
+with `object-fit: cover`). `profile -a` hung the board twice while video
+played, even with direct present off.
 
 Where the time still goes: a scroll frame waits 12-15 ms for the GPU at
 1920x1056; page loads are main-thread work (JS parse and run, style, layout,
@@ -81,6 +124,10 @@ Found on the OS side (not changed here):
 - libgcc's LSE detection is compiled out for Haiku, so every C/C++ atomic on
   arm64 takes the exclusive-loop path through a call.
 - `pvr_drm.c`: "Core count fetching is unimplemented".
+- With zink on this PowerVR, a texture upload after a composition's first
+  draws waits for the GPU to finish all of them, and each intermediate
+  surface is a render pass of its own (a blur costs several).
+- `profile -a` hangs the board while video plays.
 
 ## 9 October 2026: latest ARM64 build installed on the Pi
 
