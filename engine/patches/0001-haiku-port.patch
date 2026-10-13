@@ -41832,7 +41832,7 @@ index b478a0e1d88443132d337f514434eeab7c8df464..dfc5a807074dab541c8fd4c254d3391a
  protected:
      WEBCORE_EXPORT static bool allTileEdgesExposed(const FloatRect& totalRect, const FloatRect& tileRect);
 diff --git a/Source/WebCore/platform/graphics/texmap/TextureMapperLayer.cpp b/Source/WebCore/platform/graphics/texmap/TextureMapperLayer.cpp
-index 112d19b1676c297b0168941b1db5b619cd535a29..658da3d3d1df38fcea16c3aece5a4a41c8428bca 100644
+index 112d19b1676c297b0168941b1db5b619cd535a29..40d876c69fdcd994bbfeccda0a9fb8a3f1fbb2a0 100644
 --- a/Source/WebCore/platform/graphics/texmap/TextureMapperLayer.cpp
 +++ b/Source/WebCore/platform/graphics/texmap/TextureMapperLayer.cpp
 @@ -21,6 +21,16 @@
@@ -42290,7 +42290,24 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..658da3d3d1df38fcea16c3aece5a4a41
      options.textureMapper.bindSurface(options.surface.get());
      if (hasMask)
          m_state.maskLayer->applyMask(options);
-@@ -1167,6 +1486,18 @@ void TextureMapperLayer::paintRecursive(TextureMapperPaintOptions& options)
+@@ -1142,6 +1461,16 @@ void TextureMapperLayer::paintSelfAndChildrenWithIntermediateSurface(TextureMapp
+ 
+ void TextureMapperLayer::paintSelfChildrenReplicaFilterAndMask(TextureMapperPaintOptions& options)
+ {
++#if PLATFORM(HAIKU)
++    // A layer with nothing in it draws nothing, whatever its filters, mask
++    // or replica would do. YouTube's watch page has an empty blurred layer
++    // the size of its player, and on the Cubie A7S each video frame ran it
++    // through eight surfaces and two blur passes.
++    if (m_children.isEmpty() && !m_backingStore && !m_contentsLayer && !hasBackdrop() && !isFlattened()
++        && !(m_state.backgroundColor.isValid() && m_state.backgroundColor.isVisible())
++        && !(m_state.solidColor.isValid() && m_state.solidColor.isVisible()))
++        return;
++#endif
+     bool hasFilterOrMask = [&] {
+         if (hasFilters())
+             return true;
+@@ -1167,6 +1496,18 @@ void TextureMapperLayer::paintRecursive(TextureMapperPaintOptions& options)
  {
      if (!isVisible())
          return;
@@ -42309,7 +42326,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..658da3d3d1df38fcea16c3aece5a4a41
  
      SetForScope scopedOpacity(options.opacity, options.opacity * m_currentOpacity);
  
-@@ -1495,6 +1826,11 @@ void TextureMapperLayer::setBackgroundColor(const Color& color)
+@@ -1495,6 +1836,11 @@ void TextureMapperLayer::setBackgroundColor(const Color& color)
  void TextureMapperLayer::setFilters(const FilterOperations& filters)
  {
      m_state.filters = filters;
