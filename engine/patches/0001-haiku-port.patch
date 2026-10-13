@@ -41491,8 +41491,27 @@ index ffcff7e0b02bdf8599d7b8f245f3323f2f2743cd..46a1df7a0cea44c6bb9882a2b8ebb950
  
          if (const char* envString = getenv("WEBKIT_SKIA_CPU_PAINTING_THREADS")) {
              auto newValue = parseInteger<unsigned>(StringView::fromLatin1(envString));
+diff --git a/Source/WebCore/platform/graphics/texmap/ClipStack.h b/Source/WebCore/platform/graphics/texmap/ClipStack.h
+index 9fd560e16a7e8b8b5cdf0ef54b46ab2dddc32e4f..37b7905e18e26b577ae0ec335352ae63b2423295 100644
+--- a/Source/WebCore/platform/graphics/texmap/ClipStack.h
++++ b/Source/WebCore/platform/graphics/texmap/ClipStack.h
+@@ -56,6 +56,14 @@ public:
+         IntRect scissorBox;
+         int stencilIndex { 1 };
+         unsigned roundedRectCount { 0 };
++#if PLATFORM(HAIKU)
++        // With one rounded rectangle that maps to an axis-aligned one: that
++        // rectangle and its largest corner radii, in the target's pixels.
++        bool roundedRectAxisAlignedHaiku { false };
++        FloatRect roundedRectInTargetHaiku;
++        float roundedRectRadiusXHaiku { 0 };
++        float roundedRectRadiusYHaiku { 0 };
++#endif
+     };
+ 
+     // Y-axis should be inverted only when painting into the window.
 diff --git a/Source/WebCore/platform/graphics/texmap/TextureMapper.cpp b/Source/WebCore/platform/graphics/texmap/TextureMapper.cpp
-index 1b88532103dfc26c2a90aedce768e19f2e7059e6..ace7ca6408619201599b8fc46a4ef0fd4d3602e0 100644
+index 1b88532103dfc26c2a90aedce768e19f2e7059e6..e45a0e8cbbf904544dcc782857aa9a786f11c6e6 100644
 --- a/Source/WebCore/platform/graphics/texmap/TextureMapper.cpp
 +++ b/Source/WebCore/platform/graphics/texmap/TextureMapper.cpp
 @@ -44,6 +44,14 @@
@@ -41623,7 +41642,7 @@ index 1b88532103dfc26c2a90aedce768e19f2e7059e6..ace7ca6408619201599b8fc46a4ef0fd
  void TextureMapper::beginPainting(FlipY flipY, BitmapTexture* surface)
  {
      glGetIntegerv(GL_CURRENT_PROGRAM, &data().previousProgram);
-@@ -472,6 +570,19 @@ static TransformationMatrix colorSpaceMatrixForFlags(OptionSet<TextureMapperFlag
+@@ -472,6 +570,69 @@ static TransformationMatrix colorSpaceMatrixForFlags(OptionSet<TextureMapperFlag
      return matrix;
  }
  
@@ -41640,10 +41659,60 @@ index 1b88532103dfc26c2a90aedce768e19f2e7059e6..ace7ca6408619201599b8fc46a4ef0fd
 +}
 +#endif
 +
++#if PLATFORM(HAIKU)
++// Under one axis-aligned rounded clip, only the pixels in its corners need
++// the rounded-clip shader, which on the Cubie A7S's PowerVR cost about 100 ns
++// a pixel: YouTube's player has rounded corners, and its video took 100 ms of
++// every frame. The draw is made in parts that tile the clip's bounds without
++// overlapping: the plus-shaped middle with the scissor alone, the four corner
++// boxes with the shader. Returns false where that does not apply.
++bool TextureMapper::drawSplittingRoundedClipHaiku(const FloatRect& drawnBounds, const Function<void()>& drawPart)
++{
++    if (m_splittingRoundedClipHaiku)
++        return false;
++    auto& state = clipStack().current();
++    if (state.roundedRectCount != 1 || !state.roundedRectAxisAlignedHaiku)
++        return false;
++    const FloatRect& rect = state.roundedRectInTargetHaiku;
++    int x0 = std::floor(rect.x());
++    int x1 = std::ceil(rect.x() + state.roundedRectRadiusXHaiku);
++    int x2 = std::floor(rect.maxX() - state.roundedRectRadiusXHaiku);
++    int x3 = std::ceil(rect.maxX());
++    int y0 = std::floor(rect.y());
++    int y1 = std::ceil(rect.y() + state.roundedRectRadiusYHaiku);
++    int y2 = std::floor(rect.maxY() - state.roundedRectRadiusYHaiku);
++    int y3 = std::ceil(rect.maxY());
++    if (x1 >= x2 || y1 >= y2)
++        return false;
++    const IntRect middle[] = { { x1, y0, x2 - x1, y3 - y0 }, { x0, y1, x1 - x0, y2 - y1 }, { x2, y1, x3 - x2, y2 - y1 } };
++    const IntRect corners[] = { { x0, y0, x1 - x0, y1 - y0 }, { x2, y0, x3 - x2, y1 - y0 }, { x0, y2, x1 - x0, y3 - y2 }, { x2, y2, x3 - x2, y3 - y2 } };
++    IntRect bounds = enclosingIntRect(drawnBounds);
++    const auto saved = state;
++    SetForScope splitting(m_splittingRoundedClipHaiku, true);
++    auto drawIn = [&](const IntRect& part, unsigned roundedRects) {
++        IntRect scissor = intersection(intersection(saved.scissorBox, part), bounds);
++        if (scissor.isEmpty())
++            return;
++        state = saved;
++        state.scissorBox = scissor;
++        state.roundedRectCount = roundedRects;
++        clipStack().apply();
++        drawPart();
++    };
++    for (auto& part : middle)
++        drawIn(part, 0);
++    for (auto& part : corners)
++        drawIn(part, saved.roundedRectCount);
++    state = saved;
++    clipStack().apply();
++    return true;
++}
++#endif
++
  static void prepareRoundedRectClip(TextureMapperShaderProgram& program, const float* rects, const float* transforms, int nRects)
  {
      glUseProgram(program.programID());
-@@ -532,6 +643,9 @@ void TextureMapper::drawTextureFragment(const BitmapTexture& sourceTexture, cons
+@@ -532,6 +693,9 @@ void TextureMapper::drawTextureFragment(const BitmapTexture& sourceTexture, cons
      TextureMapperShaderProgram::Options options = TextureMapperShaderProgram::TextureRGB;
      if (needsUVClamping) [[unlikely]]
          options.add(TextureMapperShaderProgram::ClampUVBounds);
@@ -41653,7 +41722,20 @@ index 1b88532103dfc26c2a90aedce768e19f2e7059e6..ace7ca6408619201599b8fc46a4ef0fd
  
      Ref<TextureMapperShaderProgram> program = data().getShaderProgram(options);
  
-@@ -607,6 +721,9 @@ void TextureMapper::drawTexture(GLuint texture, OptionSet<TextureMapperFlags> fl
+@@ -574,6 +738,12 @@ void TextureMapper::drawTextureFragment(const BitmapTexture& sourceTexture, cons
+ 
+ void TextureMapper::drawTexture(GLuint texture, OptionSet<TextureMapperFlags> flags, const FloatRect& targetRect, const TransformationMatrix& modelViewMatrix, float opacity, AllEdgesExposed allEdgesExposed)
+ {
++#if PLATFORM(HAIKU)
++    if (clipStack().isRoundedRectClipEnabled() && drawSplittingRoundedClipHaiku(modelViewMatrix.mapRect(targetRect), [&] {
++        drawTexture(texture, flags, targetRect, modelViewMatrix, opacity, allEdgesExposed);
++    }))
++        return;
++#endif
+     bool useAntialiasing = allEdgesExposed == AllEdgesExposed::Yes && !modelViewMatrix.mapQuad(targetRect).isRectilinear();
+ 
+     TextureMapperShaderProgram::Options options;
+@@ -607,6 +777,9 @@ void TextureMapper::drawTexture(GLuint texture, OptionSet<TextureMapperFlags> fl
  
      if (flags.contains(TextureMapperFlags::ShouldPremultiply))
          options.add(TextureMapperShaderProgram::Premultiply);
@@ -41663,18 +41745,35 @@ index 1b88532103dfc26c2a90aedce768e19f2e7059e6..ace7ca6408619201599b8fc46a4ef0fd
  
      Ref<TextureMapperShaderProgram> program = data().getShaderProgram(options);
  
-@@ -801,6 +918,10 @@ void TextureMapper::drawTexturePackedYUV(GLuint texture, const std::array<GLfloa
+@@ -647,6 +820,12 @@ static void prepareTransformationMatrixWithFlags(TransformationMatrix& patternTr
+ 
+ void TextureMapper::drawTexturePlanarYUV(const std::array<GLuint, 3>& textures, const std::array<GLfloat, 16>& yuvToRgbMatrix, OptionSet<TextureMapperFlags> flags, const FloatRect& targetRect, const TransformationMatrix& modelViewMatrix, float opacity, std::optional<GLuint> alphaPlane, TextureMapper::TransferFunction transferFunction, AllEdgesExposed allEdgesExposed)
+ {
++#if PLATFORM(HAIKU)
++    if (clipStack().isRoundedRectClipEnabled() && drawSplittingRoundedClipHaiku(modelViewMatrix.mapRect(targetRect), [&] {
++        drawTexturePlanarYUV(textures, yuvToRgbMatrix, flags, targetRect, modelViewMatrix, opacity, alphaPlane, transferFunction, allEdgesExposed);
++    }))
++        return;
++#endif
+     bool useAntialiasing = allEdgesExposed == AllEdgesExposed::Yes && !modelViewMatrix.mapQuad(targetRect).isRectilinear();
+ 
+     TextureMapperShaderProgram::Options options = alphaPlane ? TextureMapperShaderProgram::TextureYUVA : TextureMapperShaderProgram::TextureYUV;
+@@ -801,6 +980,14 @@ void TextureMapper::drawTexturePackedYUV(GLuint texture, const std::array<GLfloa
  
  void TextureMapper::drawSolidColor(const FloatRect& rect, const TransformationMatrix& matrix, const Color& color, bool isBlendingAllowed)
  {
 +#if PLATFORM(HAIKU)
++    if (clipStack().isRoundedRectClipEnabled() && drawSplittingRoundedClipHaiku(matrix.mapRect(rect), [&] {
++        drawSolidColor(rect, matrix, color, isBlendingAllowed);
++    }))
++        return;
 +    static const bool traceSolidPaint = std::getenv("SUMMIT_LAYER_PAINT_TRACE");
 +    const bigtime_t startedAt = traceSolidPaint ? system_time() : 0;
 +#endif
      OptionSet<TextureMapperFlags> flags;
      TextureMapperShaderProgram::Options options = TextureMapperShaderProgram::SolidColor;
      if (!matrix.mapQuad(rect).isRectilinear()) {
-@@ -817,6 +938,9 @@ void TextureMapper::drawSolidColor(const FloatRect& rect, const TransformationMa
+@@ -817,6 +1004,9 @@ void TextureMapper::drawSolidColor(const FloatRect& rect, const TransformationMa
      }
  
      Ref<TextureMapperShaderProgram> program = data().getShaderProgram(options);
@@ -41684,7 +41783,7 @@ index 1b88532103dfc26c2a90aedce768e19f2e7059e6..ace7ca6408619201599b8fc46a4ef0fd
      glUseProgram(program->programID());
  
      if (clipStack().isRoundedRectClipEnabled())
-@@ -828,6 +952,13 @@ void TextureMapper::drawSolidColor(const FloatRect& rect, const TransformationMa
+@@ -828,6 +1018,13 @@ void TextureMapper::drawSolidColor(const FloatRect& rect, const TransformationMa
          flags.add(TextureMapperFlags::ShouldBlend);
  
      draw(rect, matrix, program.get(), GL_TRIANGLE_FAN, flags);
@@ -41698,7 +41797,7 @@ index 1b88532103dfc26c2a90aedce768e19f2e7059e6..ace7ca6408619201599b8fc46a4ef0fd
  }
  
  void TextureMapper::clearColor(const Color& color)
-@@ -877,8 +1008,38 @@ void TextureMapper::drawUnitRect(TextureMapperShaderProgram& program, GLenum dra
+@@ -877,8 +1074,38 @@ void TextureMapper::drawUnitRect(TextureMapperShaderProgram& program, GLenum dra
      glBindBuffer(GL_ARRAY_BUFFER, 0);
  }
  
@@ -41737,7 +41836,7 @@ index 1b88532103dfc26c2a90aedce768e19f2e7059e6..ace7ca6408619201599b8fc46a4ef0fd
      TransformationMatrix matrix(modelViewMatrix);
      matrix.multiply(TransformationMatrix::rectToRect(FloatRect(0, 0, 1, 1), rect));
  
-@@ -987,6 +1148,10 @@ void TextureMapper::drawTextureCopy(const BitmapTexture& sourceTexture, const Fl
+@@ -987,6 +1214,10 @@ void TextureMapper::drawTextureCopy(const BitmapTexture& sourceTexture, const Fl
  
  void TextureMapper::drawBlurred(const BitmapTexture& sourceTexture, const FloatRect& rect, float radius, Direction direction, bool alphaBlur)
  {
@@ -41748,7 +41847,7 @@ index 1b88532103dfc26c2a90aedce768e19f2e7059e6..ace7ca6408619201599b8fc46a4ef0fd
      Ref<TextureMapperShaderProgram> program = data().getShaderProgram({
          alphaBlur ? TextureMapperShaderProgram::AlphaBlur : TextureMapperShaderProgram::BlurFilter,
      });
-@@ -1278,6 +1443,28 @@ RefPtr<BitmapTexture> TextureMapper::applyFilters(RefPtr<BitmapTexture>& sourceT
+@@ -1278,6 +1509,28 @@ RefPtr<BitmapTexture> TextureMapper::applyFilters(RefPtr<BitmapTexture>& sourceT
  
  RefPtr<BitmapTexture> TextureMapper::applyFilter(RefPtr<BitmapTexture>& sourceTexture, const Ref<const FilterOperation>& filter, bool defersLastPass)
  {
@@ -41777,7 +41876,7 @@ index 1b88532103dfc26c2a90aedce768e19f2e7059e6..ace7ca6408619201599b8fc46a4ef0fd
      switch (filter->type()) {
      case FilterOperation::Type::Grayscale:
      case FilterOperation::Type::Sepia:
-@@ -1330,6 +1517,10 @@ void TextureMapper::bindDefaultSurface()
+@@ -1330,6 +1583,10 @@ void TextureMapper::bindDefaultSurface()
  
  void TextureMapper::bindSurface(BitmapTexture *surface)
  {
@@ -41788,11 +41887,38 @@ index 1b88532103dfc26c2a90aedce768e19f2e7059e6..ace7ca6408619201599b8fc46a4ef0fd
      if (!surface) {
          bindDefaultSurface();
          return;
+@@ -1385,6 +1642,18 @@ bool TextureMapper::beginRoundedRectClip(const TransformationMatrix& modelViewMa
+     FloatQuad quad = modelViewMatrix.projectQuad(targetRect.rect());
+     IntRect rect = quad.enclosingBoundingBox();
+ 
++#if PLATFORM(HAIKU)
++    {
++        auto& state = clipStack().current();
++        state.roundedRectAxisAlignedHaiku = !state.roundedRectCount && modelViewMatrix.isAffine() && !modelViewMatrix.b() && !modelViewMatrix.c();
++        if (state.roundedRectAxisAlignedHaiku) {
++            const auto& radii = targetRect.radii();
++            state.roundedRectInTargetHaiku = modelViewMatrix.mapRect(targetRect.rect());
++            state.roundedRectRadiusXHaiku = std::abs(modelViewMatrix.a()) * std::max({ radii.topLeft().width(), radii.topRight().width(), radii.bottomLeft().width(), radii.bottomRight().width() });
++            state.roundedRectRadiusYHaiku = std::abs(modelViewMatrix.d()) * std::max({ radii.topLeft().height(), radii.topRight().height(), radii.bottomLeft().height(), radii.bottomRight().height() });
++        }
++    }
++#endif
+     clipStack().addRoundedRect(targetRect, modelViewMatrix.inverse().value());
+     clipStack().intersect(rect);
+     clipStack().applyIfNeeded();
 diff --git a/Source/WebCore/platform/graphics/texmap/TextureMapper.h b/Source/WebCore/platform/graphics/texmap/TextureMapper.h
-index fbe7a8f854a5951881368122c9958ca62cf8617b..c3b8f3f2a57b5d33f4afdd63fe300e8f7b11ce73 100644
+index fbe7a8f854a5951881368122c9958ca62cf8617b..593c54e23cb72dc0a91c41fe4334b7a5515a8e50 100644
 --- a/Source/WebCore/platform/graphics/texmap/TextureMapper.h
 +++ b/Source/WebCore/platform/graphics/texmap/TextureMapper.h
-@@ -100,6 +100,22 @@ public:
+@@ -31,6 +31,7 @@
+ #include "TextureMapperGPUBuffer.h"
+ #include "TransformationMatrix.h"
+ #include <array>
++#include <wtf/Function.h>
+ #include <wtf/OptionSet.h>
+ #include <wtf/TZoneMalloc.h>
+ #include <wtf/Vector.h>
+@@ -100,6 +101,22 @@ public:
      void endClip();
      void endClipWithoutApplying();
      IntRect clipBounds();
@@ -41815,6 +41941,17 @@ index fbe7a8f854a5951881368122c9958ca62cf8617b..c3b8f3f2a57b5d33f4afdd63fe300e8f
      IntSize maxTextureSize() const;
      void setDepthRange(double zNear, double zFar);
      std::pair<double, double> depthRange() const;
+@@ -148,6 +165,10 @@ private:
+     void updateProjectionMatrix();
+ 
+     bool m_isMaskMode { false };
++#if PLATFORM(HAIKU)
++    bool drawSplittingRoundedClipHaiku(const FloatRect& drawnBounds, const Function<void()>& drawPart);
++    bool m_splittingRoundedClipHaiku { false };
++#endif
+     TransformationMatrix m_patternTransform;
+     WrapMode m_wrapMode { WrapMode::Stretch };
+     std::optional<FloatSize> m_uvClampMax;
 diff --git a/Source/WebCore/platform/graphics/texmap/TextureMapperBackingStore.h b/Source/WebCore/platform/graphics/texmap/TextureMapperBackingStore.h
 index b478a0e1d88443132d337f514434eeab7c8df464..dfc5a807074dab541c8fd4c254d3391a40d7173f 100644
 --- a/Source/WebCore/platform/graphics/texmap/TextureMapperBackingStore.h
