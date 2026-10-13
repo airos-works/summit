@@ -1,5 +1,87 @@
 # Summit performance: Speedometer 3.1 baseline, where the time goes, stress test
 
+## 13 October 2026: the Radxa Cubie A7S
+
+The Cubie A7S (Allwinner A733: two Cortex-A76 at 2.0 GHz, six Cortex-A55 at
+1.8 GHz, an Imagination BXM-4-64 GPU through zink, 1920x1080, no fan, an SD
+card) runs air/OS with Summit from the image. Measured on the board through
+its MCP service, with engines built in the CI server's own arm64 tree (about
+a minute for a few files) and run from `/boot/home/sw` beside the installed
+packages. Baseline: the CI build of `ce257e0`.
+
+| | before | after |
+|---|---|---|
+| Speedometer 3.1 (3 iterations) | 1.65 | 2.60 |
+| short JS + DOM benchmark (ms) | 97-244 / 145-354 | 85-109 / 145-164 |
+| Wikipedia, 1920x1056, wheel at 100 Hz | 26-31 fps | 37-41 fps |
+| frames slower than 50 ms per scroll burst | 6 | 0-2 |
+| 1080p H.264 video, maximized window | 22 fps | 30 fps (all) |
+
+What changed:
+
+- **Fast cores** (`045ec98`). Haiku's scheduler treats all cores alike, so a
+  page's main thread ran on an A55 most of the time, and the core a launch
+  happened to get decided the speed (2.2 times; 2.6 without the JIT).
+  `PerformanceCoresHaiku.h` gives the web process's main thread and the
+  compositing thread an affinity for the cores whose MIDR is not one of ARM's
+  little designs, where a SoC has both kinds (also the RK3588 of the ROCK 5).
+  `SUMMIT_PERFORMANCE_CORES=0` turns it off. During an 8 s load of the
+  Guardian the main thread used 6.5 s of CPU, the network process 2.4 s over
+  several threads and the browser 0.25 s, so only the web process is pinned.
+- **No periodic read-back while app_server's copy is written** (`7ba7204`,
+  issue #50). With `SUMMIT_DIRECT_PRESENT_BACK=1` (the Cubie image sets it)
+  each direct present also writes app_server's copy, and the frames that went
+  through app_server every 250 ms only refreshed the view's bitmap, each with
+  a 42-100 ms blocking read. One frame still goes through app_server once the
+  page has been quiet for 250 ms.
+- **No page background under the tiles that cover it** (`da79bad`). Haiku's
+  `paintSelf` draws the root layer's background color under its tiles (issue
+  #13); a scroll frame drew 3.8 Mpx for a 1.75 Mpx view. Now 1.71.
+- **Tiles without the per-pixel color matrix** (`dafa2ba`). The TextureRGB
+  shader multiplied every pixel by a 4x4 uniform matrix that is the identity,
+  or swaps red and blue for Skia's BGRA tiles. On this GPU that about doubled
+  a pixel's cost (the GPU team's `pvr_glcomposite`: 27 ns against 12-14 for a
+  plain texture). Two shader options sample plainly or with `.bgra`.
+- **Occlusion** (`cab3d62`). Before a composition is painted, opaque contents
+  that go straight into the target (a video frame, an opaque solid color) are
+  noted with their place in the paint order, and tiles painted before them
+  that they cover are left out. A maximized 1080p video drew 3.26 Mpx in 34
+  draws per frame, now 2.10 in 14. `SUMMIT_OCCLUSION=0` turns it off.
+
+Tried and dropped: setting libgcc's `__aarch64_have_lse_atomics` so the
+out-of-line atomic helpers use the LSE instructions (libgcc never sets it on
+Haiku, which has no `getauxval`); Speedometer went 2.63 -> 2.39 over two
+alternated 10-iteration runs. Pinning every web-process thread to the two A76
+cores (not measured: the board hung at that launch). Waiting a second instead
+of 250 ms before the settle read-back (no measurable difference).
+
+Where the time still goes: a scroll frame waits 12-15 ms for the GPU at
+1920x1056; page loads are main-thread work (JS parse and run, style, layout,
+malloc); about 5 % of the main thread's samples are libgcc's out-of-line
+atomics. The CI build of `dafa2ba` is installed on the board
+(`summit-0.1.0~git20261013.1050`, `summit_webkit-1.10.1~git20261013.1050`;
+the 12 October packages are in `/boot/home/summit-package-backup`) and in
+`/mnt/HaikuWork/cubie/image-packages` for the next image.
+
+Found on the OS side (not changed here):
+
+- The board hung hard (no ping) four times in about 105 Summit launches,
+  each within about a second of a launch. Not CPU load or heat (an 8-core
+  spin stays at 79 C under throttling), not frequency changes
+  (`dvfs_stress`), not direct present (30 launches without it and 30 with
+  it, no hang), not the test driver's polling (20 launches). The serial
+  console has carried garbage since 12 October and the NanoKVM shows no
+  picture, so there is no KDL output yet.
+- The SD card runs at SDR25 (25 MB/s): the first launch after a boot took
+  8.4 s against 1.2 s warm.
+- The little cluster stays at 1794 MHz while idle (the thermal driver reads
+  its load as 45-95 %), and the board idles at 60-77 C with throttling from
+  80 C; during these tests it reached level 2 (big cores 1612 MHz, GPU
+  400 MHz).
+- libgcc's LSE detection is compiled out for Haiku, so every C/C++ atomic on
+  arm64 takes the exclusive-loop path through a call.
+- `pvr_drm.c`: "Core count fetching is unimplemented".
+
 ## 9 October 2026: latest ARM64 build installed on the Pi
 
 At the owner's request, the tested performance candidate from Summit
