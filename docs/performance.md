@@ -118,7 +118,10 @@ on whole updates (neither removed the upload stall; uploading earlier did).
 Four Skia painting threads instead of three (no gain). Drawing only the
 uncovered parts of tiles that opaque contents cover in part (on YouTube 5 %
 fewer pixels without the rounded-clip occluders, 40 % with them, but the
-GPU took longer per frame than with whole tiles).
+GPU took longer per frame than with whole tiles). Reporting 60 frames a second
+above 640x360 as not smooth in media capabilities: YouTube honours it, but a
+video offered at 60 above 480p (Big Buck Bunny) then plays at 480p30 (1.0
+cores against 1.8); left as a choice for later.
 
 Ways of measuring that held up: `SUMMIT_COMPOSITOR_TIMING_TRACE=1` (per frame:
 draws, drawn and blended Mpx, surfaces, blur passes, paint and GPU-wait time),
