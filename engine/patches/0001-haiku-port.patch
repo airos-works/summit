@@ -66617,6 +66617,111 @@ index 0000000000000000000000000000000000000000..b74d082988e7091f1376fc40192116c1
 +}
 +
 +} // namespace WebKit
+diff --git a/Source/WebKit/Platform/haiku/PerformanceCoresHaiku.h b/Source/WebKit/Platform/haiku/PerformanceCoresHaiku.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..4a6b597ccebfcd20f94b48b0ee1755eb5b9d20fc
+--- /dev/null
++++ b/Source/WebKit/Platform/haiku/PerformanceCoresHaiku.h
+@@ -0,0 +1,99 @@
++/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
++
++#pragma once
++
++#include <OS.h>
++#include <cstdint>
++#include <cstdlib>
++#include <cstring>
++#include <dlfcn.h>
++#include <sys/types.h>
++#include <vector>
++
++namespace WebKit {
++
++// Haiku's scheduler treats every core alike. Where an ARM SoC pairs fast and
++// slow cores (the Cubie A7S's two Cortex-A76 and six A55, the RK3588's four
++// A76 and four A55), the threads a page waits on then run on a slow core most
++// of the time: on the Cubie scripts and layout took 2.2 times as long there.
++// preferPerformanceCoresHaiku() keeps a thread on the fast cores. It does
++// nothing where all cores are of one kind, on any CPU that is not ARM's own
++// design, and with SUMMIT_PERFORMANCE_CORES=0.
++class PerformanceCoresHaiku {
++public:
++    static void prefer(thread_id thread = find_thread(nullptr))
++    {
++        auto& cores = singleton();
++        if (cores.m_setAffinity)
++            cores.m_setAffinity(thread, sizeof(cores.m_mask), cores.m_mask);
++    }
++
++private:
++    // As cpuset_t in Haiku's <gnu/sched.h> (CPU_SETSIZE 1024).
++    uint32_t m_mask[1024 / 32] { };
++    int (*m_setAffinity)(pid_t, size_t, const void*) { nullptr };
++
++    static const PerformanceCoresHaiku& singleton()
++    {
++        static const PerformanceCoresHaiku cores;
++        return cores;
++    }
++
++    // ARM's in-order "LITTLE" designs, by MIDR part number; the kernel gives
++    // each core's MIDR as its model.
++    static bool isEfficiencyCore(uint32_t midr)
++    {
++        if ((midr >> 24) != 0x41)
++            return false;
++        switch ((midr >> 4) & 0xfff) {
++        case 0xd01: // Cortex-A32
++        case 0xd02: // Cortex-A34
++        case 0xd03: // Cortex-A53
++        case 0xd04: // Cortex-A35
++        case 0xd05: // Cortex-A55
++        case 0xd46: // Cortex-A510
++        case 0xd80: // Cortex-A520
++            return true;
++        default:
++            return false;
++        }
++    }
++
++    PerformanceCoresHaiku()
++    {
++#if defined(__aarch64__)
++        const char* setting = std::getenv("SUMMIT_PERFORMANCE_CORES");
++        if (setting && !std::strcmp(setting, "0"))
++            return;
++        uint32 count = 0;
++        if (get_cpu_topology_info(nullptr, &count) != B_OK || !count)
++            return;
++        std::vector<cpu_topology_node_info> nodes(count);
++        if (get_cpu_topology_info(nodes.data(), &count) != B_OK)
++            return;
++        // Depth first: each core node comes before the logical CPUs (SMT
++        // nodes, numbered by CPU) that belong to it.
++        uint32_t model = 0;
++        unsigned fast = 0;
++        unsigned slow = 0;
++        for (uint32 i = 0; i < count; i++) {
++            if (nodes[i].type == B_TOPOLOGY_CORE)
++                model = nodes[i].data.core.model;
++            else if (nodes[i].type == B_TOPOLOGY_SMT && nodes[i].id < 1024) {
++                if (isEfficiencyCore(model))
++                    slow++;
++                else {
++                    fast++;
++                    m_mask[nodes[i].id / 32] |= 1u << (nodes[i].id % 32);
++                }
++            }
++        }
++        if (!fast || !slow)
++            return;
++        // libgnu's, looked up so that nothing changes where it is missing.
++        m_setAffinity = reinterpret_cast<int (*)(pid_t, size_t, const void*)>(dlsym(RTLD_DEFAULT, "sched_setaffinity"));
++#endif
++    }
++};
++
++} // namespace WebKit
 diff --git a/Source/WebKit/Platform/haiku/PresentStatsHaiku.h b/Source/WebKit/Platform/haiku/PresentStatsHaiku.h
 new file mode 100644
 index 0000000000000000000000000000000000000000..9d80ad20274f13f8e315dba78444ea9890119281
@@ -131099,6 +131204,34 @@ index 8548e5913f1f4e92a8d5b16288edc50b7ba81c53..4c99b4927eeac580110c1a3fc9000159
 +    RedisplayDirect()
 +#endif
  }
+diff --git a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/CompositingRunLoop.cpp b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/CompositingRunLoop.cpp
+index 5b77f3f39874eae5747464afd0c1e925e78ad2c3..0440871ab5f9f3c1eb73ac3487c58a6ff8c2f05b 100644
+--- a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/CompositingRunLoop.cpp
++++ b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/CompositingRunLoop.cpp
+@@ -34,6 +34,10 @@
+ #include <wtf/Threading.h>
+ #include <wtf/threads/BinarySemaphore.h>
+ 
++#if PLATFORM(HAIKU)
++#include "PerformanceCoresHaiku.h"
++#endif
++
+ namespace WebKit {
+ 
+ WTF_MAKE_TZONE_ALLOCATED_IMPL(CompositingRunLoop);
+@@ -43,6 +47,12 @@ CompositingRunLoop::CompositingRunLoop(Function<void ()>&& updateFunction)
+     , m_updateTimer(m_runLoop.get(), "CompositingRunLoop::UpdateTimer"_s, this, &CompositingRunLoop::updateTimerFired)
+     , m_updateFunction(WTF::move(updateFunction))
+ {
++#if PLATFORM(HAIKU)
++    // Each frame's GL commands are built on this thread.
++    m_runLoop->dispatch([] {
++        PerformanceCoresHaiku::prefer();
++    });
++#endif
+ }
+ 
+ CompositingRunLoop::~CompositingRunLoop()
 diff --git a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/CoordinatedSceneState.cpp b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/CoordinatedSceneState.cpp
 index 6e297e0ad9e864aff97653036e314fcbf4d7b88c..de077dc5c0f0911e425346ef95a933df909c313a 100644
 --- a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/CoordinatedSceneState.cpp
@@ -134832,10 +134965,10 @@ index 0000000000000000000000000000000000000000..35ccf4d96426f1f299de0d7867c69553
 +} // namespace WebKit
 diff --git a/Source/WebKit/WebProcess/haiku/WebProcessMainHaiku.cpp b/Source/WebKit/WebProcess/haiku/WebProcessMainHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..4af8492f6014d42d63f77522b745415fdc1e6431
+index 0000000000000000000000000000000000000000..68129cb7a43abb68ca0e51f19fa1756192eeac10
 --- /dev/null
 +++ b/Source/WebKit/WebProcess/haiku/WebProcessMainHaiku.cpp
-@@ -0,0 +1,89 @@
+@@ -0,0 +1,92 @@
 +/*
 + * Copyright 2014,2019 Haiku, Inc.
 + *
@@ -134865,6 +134998,7 @@ index 0000000000000000000000000000000000000000..4af8492f6014d42d63f77522b745415f
 +#include "WebProcessMain.h"
 +
 +#include "AuxiliaryProcessMain.h"
++#include "PerformanceCoresHaiku.h"
 +#include "StartupTraceHaiku.h"
 +#include "WebProcess.h"
 +#include <wtf/WTFProcess.h>
@@ -134881,6 +135015,8 @@ index 0000000000000000000000000000000000000000..4af8492f6014d42d63f77522b745415f
 +    bool platformInitialize() override
 +    {
 +        SUMMIT_STARTUP_TRACE("web process main");
++        // Scripts, style and layout run on this thread.
++        PerformanceCoresHaiku::prefer();
 +        // The media loaders of this process fetch with libcurl, whose
 +        // resolver threads call getaddrinfo() several at a time. libnetwork
 +        // parses nsswitch.conf on the first lookup and its scanner calls
