@@ -41492,7 +41492,7 @@ index ffcff7e0b02bdf8599d7b8f245f3323f2f2743cd..46a1df7a0cea44c6bb9882a2b8ebb950
          if (const char* envString = getenv("WEBKIT_SKIA_CPU_PAINTING_THREADS")) {
              auto newValue = parseInteger<unsigned>(StringView::fromLatin1(envString));
 diff --git a/Source/WebCore/platform/graphics/texmap/TextureMapper.cpp b/Source/WebCore/platform/graphics/texmap/TextureMapper.cpp
-index 1b88532103dfc26c2a90aedce768e19f2e7059e6..dc823747bb57ee851d6f5863201918ae52809a4f 100644
+index 1b88532103dfc26c2a90aedce768e19f2e7059e6..ace7ca6408619201599b8fc46a4ef0fd4d3602e0 100644
 --- a/Source/WebCore/platform/graphics/texmap/TextureMapper.cpp
 +++ b/Source/WebCore/platform/graphics/texmap/TextureMapper.cpp
 @@ -44,6 +44,14 @@
@@ -41541,7 +41541,7 @@ index 1b88532103dfc26c2a90aedce768e19f2e7059e6..dc823747bb57ee851d6f5863201918ae
      });
      return *addResult.iterator->value;
  }
-@@ -232,6 +255,77 @@ ClipStack& TextureMapper::clipStack()
+@@ -232,6 +255,81 @@ ClipStack& TextureMapper::clipStack()
      return data().currentSurface ? data().currentSurface->clipStack() : m_clipStack;
  }
  
@@ -41569,24 +41569,28 @@ index 1b88532103dfc26c2a90aedce768e19f2e7059e6..dc823747bb57ee851d6f5863201918ae
 +    // compile when first drawn with.
 +    using Program = TextureMapperShaderProgram;
 +    static constexpr unsigned firstFrameProgramCount = 2;
++    // Tiles hold BGRA data (TextureBGRA); WebGL canvases and the layers'
++    // own surfaces, which filters draw from, need no conversion
++    // (TextureRGBIdentity).
 +    static const Program::Options programs[] = {
-+        { Program::TextureRGB },
++        { Program::TextureRGB, Program::TextureBGRA },
 +        { Program::SolidColor },
 +        { Program::SolidColor, Program::RoundedRectClip },
-+        { Program::TextureRGB, Program::Opacity },
-+        { Program::TextureRGB, Program::RoundedRectClip },
-+        { Program::TextureRGB, Program::Opacity, Program::RoundedRectClip },
++        { Program::TextureRGB, Program::TextureBGRA, Program::Opacity },
++        { Program::TextureRGB, Program::TextureBGRA, Program::RoundedRectClip },
++        { Program::TextureRGB, Program::TextureBGRA, Program::Opacity, Program::RoundedRectClip },
++        { Program::TextureRGB, Program::TextureRGBIdentity },
 +        { Program::TextureCopy },
 +        { Program::BlurFilter },
-+        { Program::TextureRGB, Program::Antialiasing },
-+        { Program::TextureRGB, Program::Opacity, Program::Antialiasing },
++        { Program::TextureRGB, Program::TextureBGRA, Program::Antialiasing },
++        { Program::TextureRGB, Program::TextureBGRA, Program::Opacity, Program::Antialiasing },
 +        { Program::SolidColor, Program::Antialiasing },
-+        { Program::TextureRGB, Program::BrightnessFilter },
-+        { Program::TextureRGB, Program::SaturateFilter },
-+        { Program::TextureRGB, Program::OpacityFilter },
-+        { Program::TextureRGB, Program::GrayscaleFilter },
-+        { Program::TextureRGB, Program::ContrastFilter },
-+        { Program::TextureRGB, Program::InvertFilter },
++        { Program::TextureRGB, Program::TextureRGBIdentity, Program::BrightnessFilter },
++        { Program::TextureRGB, Program::TextureRGBIdentity, Program::SaturateFilter },
++        { Program::TextureRGB, Program::TextureRGBIdentity, Program::OpacityFilter },
++        { Program::TextureRGB, Program::TextureRGBIdentity, Program::GrayscaleFilter },
++        { Program::TextureRGB, Program::TextureRGBIdentity, Program::ContrastFilter },
++        { Program::TextureRGB, Program::TextureRGBIdentity, Program::InvertFilter },
 +        { Program::AlphaBlur },
 +    };
 +    static const bigtime_t budget = [] () -> bigtime_t {
@@ -41619,7 +41623,47 @@ index 1b88532103dfc26c2a90aedce768e19f2e7059e6..dc823747bb57ee851d6f5863201918ae
  void TextureMapper::beginPainting(FlipY flipY, BitmapTexture* surface)
  {
      glGetIntegerv(GL_CURRENT_PROGRAM, &data().previousProgram);
-@@ -801,6 +895,10 @@ void TextureMapper::drawTexturePackedYUV(GLuint texture, const std::array<GLfloa
+@@ -472,6 +570,19 @@ static TransformationMatrix colorSpaceMatrixForFlags(OptionSet<TextureMapperFlag
+     return matrix;
+ }
+ 
++#if PLATFORM(HAIKU)
++// The shader that needs no color matrix (TextureMapperShaderProgram.h).
++static void addColorConversionOptionHaiku(TextureMapperShaderProgram::Options& options, OptionSet<TextureMapperFlags> flags)
++{
++    if (!options.contains(TextureMapperShaderProgram::TextureRGB))
++        return;
++    if (flags.contains(TextureMapperFlags::ShouldConvertTextureBGRAToRGBA))
++        options.add(TextureMapperShaderProgram::TextureBGRA);
++    else if (!flags.contains(TextureMapperFlags::ShouldConvertTextureARGBToRGBA))
++        options.add(TextureMapperShaderProgram::TextureRGBIdentity);
++}
++#endif
++
+ static void prepareRoundedRectClip(TextureMapperShaderProgram& program, const float* rects, const float* transforms, int nRects)
+ {
+     glUseProgram(program.programID());
+@@ -532,6 +643,9 @@ void TextureMapper::drawTextureFragment(const BitmapTexture& sourceTexture, cons
+     TextureMapperShaderProgram::Options options = TextureMapperShaderProgram::TextureRGB;
+     if (needsUVClamping) [[unlikely]]
+         options.add(TextureMapperShaderProgram::ClampUVBounds);
++#if PLATFORM(HAIKU)
++    addColorConversionOptionHaiku(options, sourceTexture.colorConvertFlags());
++#endif
+ 
+     Ref<TextureMapperShaderProgram> program = data().getShaderProgram(options);
+ 
+@@ -607,6 +721,9 @@ void TextureMapper::drawTexture(GLuint texture, OptionSet<TextureMapperFlags> fl
+ 
+     if (flags.contains(TextureMapperFlags::ShouldPremultiply))
+         options.add(TextureMapperShaderProgram::Premultiply);
++#if PLATFORM(HAIKU)
++    addColorConversionOptionHaiku(options, flags);
++#endif
+ 
+     Ref<TextureMapperShaderProgram> program = data().getShaderProgram(options);
+ 
+@@ -801,6 +918,10 @@ void TextureMapper::drawTexturePackedYUV(GLuint texture, const std::array<GLfloa
  
  void TextureMapper::drawSolidColor(const FloatRect& rect, const TransformationMatrix& matrix, const Color& color, bool isBlendingAllowed)
  {
@@ -41630,7 +41674,7 @@ index 1b88532103dfc26c2a90aedce768e19f2e7059e6..dc823747bb57ee851d6f5863201918ae
      OptionSet<TextureMapperFlags> flags;
      TextureMapperShaderProgram::Options options = TextureMapperShaderProgram::SolidColor;
      if (!matrix.mapQuad(rect).isRectilinear()) {
-@@ -817,6 +915,9 @@ void TextureMapper::drawSolidColor(const FloatRect& rect, const TransformationMa
+@@ -817,6 +938,9 @@ void TextureMapper::drawSolidColor(const FloatRect& rect, const TransformationMa
      }
  
      Ref<TextureMapperShaderProgram> program = data().getShaderProgram(options);
@@ -41640,7 +41684,7 @@ index 1b88532103dfc26c2a90aedce768e19f2e7059e6..dc823747bb57ee851d6f5863201918ae
      glUseProgram(program->programID());
  
      if (clipStack().isRoundedRectClipEnabled())
-@@ -828,6 +929,13 @@ void TextureMapper::drawSolidColor(const FloatRect& rect, const TransformationMa
+@@ -828,6 +952,13 @@ void TextureMapper::drawSolidColor(const FloatRect& rect, const TransformationMa
          flags.add(TextureMapperFlags::ShouldBlend);
  
      draw(rect, matrix, program.get(), GL_TRIANGLE_FAN, flags);
@@ -41654,7 +41698,7 @@ index 1b88532103dfc26c2a90aedce768e19f2e7059e6..dc823747bb57ee851d6f5863201918ae
  }
  
  void TextureMapper::clearColor(const Color& color)
-@@ -877,8 +985,38 @@ void TextureMapper::drawUnitRect(TextureMapperShaderProgram& program, GLenum dra
+@@ -877,8 +1008,38 @@ void TextureMapper::drawUnitRect(TextureMapperShaderProgram& program, GLenum dra
      glBindBuffer(GL_ARRAY_BUFFER, 0);
  }
  
@@ -41693,7 +41737,7 @@ index 1b88532103dfc26c2a90aedce768e19f2e7059e6..dc823747bb57ee851d6f5863201918ae
      TransformationMatrix matrix(modelViewMatrix);
      matrix.multiply(TransformationMatrix::rectToRect(FloatRect(0, 0, 1, 1), rect));
  
-@@ -987,6 +1125,10 @@ void TextureMapper::drawTextureCopy(const BitmapTexture& sourceTexture, const Fl
+@@ -987,6 +1148,10 @@ void TextureMapper::drawTextureCopy(const BitmapTexture& sourceTexture, const Fl
  
  void TextureMapper::drawBlurred(const BitmapTexture& sourceTexture, const FloatRect& rect, float radius, Direction direction, bool alphaBlur)
  {
@@ -41704,7 +41748,7 @@ index 1b88532103dfc26c2a90aedce768e19f2e7059e6..dc823747bb57ee851d6f5863201918ae
      Ref<TextureMapperShaderProgram> program = data().getShaderProgram({
          alphaBlur ? TextureMapperShaderProgram::AlphaBlur : TextureMapperShaderProgram::BlurFilter,
      });
-@@ -1278,6 +1420,28 @@ RefPtr<BitmapTexture> TextureMapper::applyFilters(RefPtr<BitmapTexture>& sourceT
+@@ -1278,6 +1443,28 @@ RefPtr<BitmapTexture> TextureMapper::applyFilters(RefPtr<BitmapTexture>& sourceT
  
  RefPtr<BitmapTexture> TextureMapper::applyFilter(RefPtr<BitmapTexture>& sourceTexture, const Ref<const FilterOperation>& filter, bool defersLastPass)
  {
@@ -41733,7 +41777,7 @@ index 1b88532103dfc26c2a90aedce768e19f2e7059e6..dc823747bb57ee851d6f5863201918ae
      switch (filter->type()) {
      case FilterOperation::Type::Grayscale:
      case FilterOperation::Type::Sepia:
-@@ -1330,6 +1494,10 @@ void TextureMapper::bindDefaultSurface()
+@@ -1330,6 +1517,10 @@ void TextureMapper::bindDefaultSurface()
  
  void TextureMapper::bindSurface(BitmapTexture *surface)
  {
@@ -42165,6 +42209,54 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..a6ac88182c61f49da9e41aa7674ed9c4
  }
  
  void TextureMapperLayer::setContentsLayer(TextureMapperPlatformLayer* platformLayer)
+diff --git a/Source/WebCore/platform/graphics/texmap/TextureMapperShaderProgram.cpp b/Source/WebCore/platform/graphics/texmap/TextureMapperShaderProgram.cpp
+index 9cc95ada9f61a23ec22e73313ea6bb16de4b062d..fbc115e0222ab4324fa22de2626fc1990291e282 100644
+--- a/Source/WebCore/platform/graphics/texmap/TextureMapperShaderProgram.cpp
++++ b/Source/WebCore/platform/graphics/texmap/TextureMapperShaderProgram.cpp
+@@ -381,6 +381,8 @@ static const char* fragmentTemplateCommon =
+         }
+ 
+         void applyTextureRGB(inout vec4 color, vec2 texCoord) { color = u_textureColorSpaceMatrix * texture2D(s_sampler, texCoord); }
++        void applyTextureRGBIdentity(inout vec4 color, vec2 texCoord) { color = texture2D(s_sampler, texCoord); }
++        void applyTextureBGRA(inout vec4 color, vec2 texCoord) { color = texture2D(s_sampler, texCoord).bgra; }
+ 
+         void applyPremultiply(inout vec4 color) { color = vec4(color.rgb * color.a, color.a); }
+ 
+@@ -697,6 +699,14 @@ Ref<TextureMapperShaderProgram> TextureMapperShaderProgram::create(TextureMapper
+ 
+     StringBuilder optionsApplierBuilder;
+     SET_APPLIER_FROM_OPTIONS(TextureRGB);
++#if PLATFORM(HAIKU)
++    if (options.contains(TextureMapperShaderProgram::TextureRGB)) {
++        if (options.contains(TextureMapperShaderProgram::TextureBGRA))
++            optionsApplierBuilder.append("#undef applyTextureRGBIfNeeded\n#define applyTextureRGBIfNeeded applyTextureBGRA\n"_s);
++        else if (options.contains(TextureMapperShaderProgram::TextureRGBIdentity))
++            optionsApplierBuilder.append("#undef applyTextureRGBIfNeeded\n#define applyTextureRGBIfNeeded applyTextureRGBIdentity\n"_s);
++    }
++#endif
+     SET_APPLIER_FROM_OPTIONS(TextureYUV);
+     SET_APPLIER_FROM_OPTIONS(TextureYUVA);
+     SET_APPLIER_FROM_OPTIONS(TextureNV12);
+diff --git a/Source/WebCore/platform/graphics/texmap/TextureMapperShaderProgram.h b/Source/WebCore/platform/graphics/texmap/TextureMapperShaderProgram.h
+index f4510ce2501dd8b7577ceb994e9090da9e649dda..ba78da56a8a4e5249b4e0c83047186e2fc81275f 100644
+--- a/Source/WebCore/platform/graphics/texmap/TextureMapperShaderProgram.h
++++ b/Source/WebCore/platform/graphics/texmap/TextureMapperShaderProgram.h
+@@ -85,6 +85,15 @@ class TextureMapperShaderProgram : public RefCounted<TextureMapperShaderProgram>
+ public:
+     enum Option {
+         TextureRGB       = 1L << 0,
++#if PLATFORM(HAIKU)
++        // With TextureRGB: the texture needs no color conversion, or only
++        // red and blue swapped (BGRA data in an RGBA texture, as Skia's
++        // tiles are). Without them every pixel is multiplied by a 4x4 color
++        // matrix, which on the Cubie A7S's PowerVR doubled what a pixel of a
++        // tile cost.
++        TextureRGBIdentity = 1L << 1,
++        TextureBGRA      = 1L << 4,
++#endif
+         SolidColor       = 1L << 2,
+         Opacity          = 1L << 3,
+         Antialiasing     = 1L << 5,
 diff --git a/Source/WebCore/platform/graphics/texmap/coordinated/CoordinatedBackingStore.cpp b/Source/WebCore/platform/graphics/texmap/coordinated/CoordinatedBackingStore.cpp
 index 0badc4492a49e10ae2faa80d59da84a9cea259d6..e085ea8ba860728f88030d73d35c6a1eb3e76c25 100644
 --- a/Source/WebCore/platform/graphics/texmap/coordinated/CoordinatedBackingStore.cpp
