@@ -41771,8 +41771,24 @@ index fbe7a8f854a5951881368122c9958ca62cf8617b..c3b8f3f2a57b5d33f4afdd63fe300e8f
      IntSize maxTextureSize() const;
      void setDepthRange(double zNear, double zFar);
      std::pair<double, double> depthRange() const;
+diff --git a/Source/WebCore/platform/graphics/texmap/TextureMapperBackingStore.h b/Source/WebCore/platform/graphics/texmap/TextureMapperBackingStore.h
+index b478a0e1d88443132d337f514434eeab7c8df464..dfc5a807074dab541c8fd4c254d3391a40d7173f 100644
+--- a/Source/WebCore/platform/graphics/texmap/TextureMapperBackingStore.h
++++ b/Source/WebCore/platform/graphics/texmap/TextureMapperBackingStore.h
+@@ -33,6 +33,11 @@ public:
+ 
+     void paintToTextureMapper(TextureMapper&, const FloatRect&, const TransformationMatrix&, float) override = 0;
+     virtual void drawRepaintCounter(TextureMapper&, int, const Color&, const FloatRect&, const TransformationMatrix&) { }
++#if PLATFORM(HAIKU)
++    // Whether paintToTextureMapper() with these arguments covers all of the
++    // layer that the texture mapper's clip shows with opaque pixels.
++    virtual bool coversOpaquelyHaiku(TextureMapper&, const FloatRect&, const TransformationMatrix&, float) const { return false; }
++#endif
+ 
+ protected:
+     WEBCORE_EXPORT static bool allTileEdgesExposed(const FloatRect& totalRect, const FloatRect& tileRect);
 diff --git a/Source/WebCore/platform/graphics/texmap/TextureMapperLayer.cpp b/Source/WebCore/platform/graphics/texmap/TextureMapperLayer.cpp
-index 112d19b1676c297b0168941b1db5b619cd535a29..3b0536d571a008c3abf725581aea886cecf39466 100644
+index 112d19b1676c297b0168941b1db5b619cd535a29..a6ac88182c61f49da9e41aa7674ed9c42ee0b0c9 100644
 --- a/Source/WebCore/platform/graphics/texmap/TextureMapperLayer.cpp
 +++ b/Source/WebCore/platform/graphics/texmap/TextureMapperLayer.cpp
 @@ -21,6 +21,16 @@
@@ -42013,7 +42029,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..3b0536d571a008c3abf725581aea886c
  
      if (isFlattened() && !m_flattenedLayer->needsUpdate()) {
          m_flattenedLayer->paintToTextureMapper(options.textureMapper, m_flattenedLayer->layerRect(), transform, options.opacity);
-@@ -592,6 +738,20 @@ void TextureMapperLayer::paintSelf(TextureMapperPaintOptions& options)
+@@ -592,6 +738,25 @@ void TextureMapperLayer::paintSelf(TextureMapperPaintOptions& options)
  
      TextureMapperSolidColorLayer solidColorLayer;
      TextureMapperBackingStore* backingStore = m_backingStore;
@@ -42023,18 +42039,23 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..3b0536d571a008c3abf725581aea886c
 +    // draws the color alone, which hid pages that set their background after
 +    // the first paint (topcoder.com, GitHub issue #13); tiles alone showed black
 +    // wherever a tile was not painted yet (GitHub's issue list, a window that
-+    // was made wider).
-+    if (m_state.backgroundColor.isValid() && m_backingStore) {
++    // was made wider). Where opaque tiles cover all that the clip shows, the
++    // color would only be drawn over: that doubled what scrolling a page
++    // drew, and on the Cubie A7S's PowerVR a full frame took 40 ms.
++    if (m_state.backgroundColor.isValid() && m_backingStore
++        && !m_backingStore->coversOpaquelyHaiku(options.textureMapper, targetRect, transform, options.opacity)) {
 +        solidColorLayer.setColor(m_state.backgroundColor);
 +        options.textureMapper.setWrapMode(TextureMapper::WrapMode::Stretch);
 +        options.textureMapper.setPatternTransform(TransformationMatrix());
 +        solidColorLayer.paintToTextureMapper(options.textureMapper, targetRect, transform, options.opacity);
++    } else if (m_state.backgroundColor.isValid() && m_backingStore) {
++        // Covered by the tiles.
 +    } else
 +#endif
      if (m_state.backgroundColor.isValid()) {
          solidColorLayer.setColor(m_state.backgroundColor);
          backingStore = &solidColorLayer;
-@@ -599,6 +759,10 @@ void TextureMapperLayer::paintSelf(TextureMapperPaintOptions& options)
+@@ -599,6 +764,10 @@ void TextureMapperLayer::paintSelf(TextureMapperPaintOptions& options)
  
      options.textureMapper.setWrapMode(TextureMapper::WrapMode::Stretch);
      options.textureMapper.setPatternTransform(TransformationMatrix());
@@ -42045,7 +42066,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..3b0536d571a008c3abf725581aea886c
  
      if (backingStore) {
          backingStore->paintToTextureMapper(options.textureMapper, targetRect, transform, options.opacity);
-@@ -608,6 +772,10 @@ void TextureMapperLayer::paintSelf(TextureMapperPaintOptions& options)
+@@ -608,6 +777,10 @@ void TextureMapperLayer::paintSelf(TextureMapperPaintOptions& options)
          if (m_state.showRepaintCounter)
              backingStore->drawRepaintCounter(options.textureMapper, m_state.repaintCount, m_state.debugBorderColor, targetRect, transform);
      }
@@ -42056,7 +42077,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..3b0536d571a008c3abf725581aea886c
  
      TextureMapperPlatformLayer* contentsLayer = m_contentsLayer;
      if (m_state.solidColor.isValid() && m_state.solidColor.isVisible()) {
-@@ -638,6 +806,10 @@ void TextureMapperLayer::paintSelf(TextureMapperPaintOptions& options)
+@@ -638,6 +811,10 @@ void TextureMapperLayer::paintSelf(TextureMapperPaintOptions& options)
  
      if (m_state.showDebugBorders)
          contentsLayer->drawBorder(options.textureMapper, m_state.debugBorderColor, m_state.debugBorderWidth, m_state.contentsRect, transform);
@@ -42067,7 +42088,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..3b0536d571a008c3abf725581aea886c
  }
  
  void TextureMapperLayer::paintBackdrop(TextureMapperPaintOptions& options)
-@@ -1079,6 +1251,33 @@ void TextureMapperLayer::applyMask(TextureMapperPaintOptions& options)
+@@ -1079,6 +1256,33 @@ void TextureMapperLayer::applyMask(TextureMapperPaintOptions& options)
      options.textureMapper.setMaskMode(false);
  }
  
@@ -42101,7 +42122,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..3b0536d571a008c3abf725581aea886c
  void TextureMapperLayer::paintIntoSurface(TextureMapperPaintOptions& options)
  {
      options.textureMapper.bindSurface(options.surface.get());
-@@ -1093,7 +1292,11 @@ void TextureMapperLayer::paintIntoSurface(TextureMapperPaintOptions& options)
+@@ -1093,7 +1297,11 @@ void TextureMapperLayer::paintIntoSurface(TextureMapperPaintOptions& options)
      bool hasMask = !!m_state.maskLayer;
      bool hasReplicaMask = options.replicaLayer == this && m_state.replicaLayer->m_state.maskLayer;
      bool defersLastFilterPass = !hasMask && !hasReplicaMask;
@@ -42113,7 +42134,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..3b0536d571a008c3abf725581aea886c
      options.textureMapper.bindSurface(options.surface.get());
      if (hasMask)
          m_state.maskLayer->applyMask(options);
-@@ -1167,6 +1370,18 @@ void TextureMapperLayer::paintRecursive(TextureMapperPaintOptions& options)
+@@ -1167,6 +1375,18 @@ void TextureMapperLayer::paintRecursive(TextureMapperPaintOptions& options)
  {
      if (!isVisible())
          return;
@@ -42132,7 +42153,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..3b0536d571a008c3abf725581aea886c
  
      SetForScope scopedOpacity(options.opacity, options.opacity * m_currentOpacity);
  
-@@ -1495,6 +1710,11 @@ void TextureMapperLayer::setBackgroundColor(const Color& color)
+@@ -1495,6 +1715,11 @@ void TextureMapperLayer::setBackgroundColor(const Color& color)
  void TextureMapperLayer::setFilters(const FilterOperations& filters)
  {
      m_state.filters = filters;
@@ -42145,10 +42166,15 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..3b0536d571a008c3abf725581aea886c
  
  void TextureMapperLayer::setContentsLayer(TextureMapperPlatformLayer* platformLayer)
 diff --git a/Source/WebCore/platform/graphics/texmap/coordinated/CoordinatedBackingStore.cpp b/Source/WebCore/platform/graphics/texmap/coordinated/CoordinatedBackingStore.cpp
-index 0badc4492a49e10ae2faa80d59da84a9cea259d6..f9182aff3c8d18404a6eeac24ef07ba151b7fbaa 100644
+index 0badc4492a49e10ae2faa80d59da84a9cea259d6..e085ea8ba860728f88030d73d35c6a1eb3e76c25 100644
 --- a/Source/WebCore/platform/graphics/texmap/coordinated/CoordinatedBackingStore.cpp
 +++ b/Source/WebCore/platform/graphics/texmap/coordinated/CoordinatedBackingStore.cpp
-@@ -28,6 +28,13 @@
+@@ -24,10 +24,18 @@
+ #include "BitmapTexture.h"
+ #include "CoordinatedTileBuffer.h"
+ #include "GraphicsLayer.h"
++#include "Region.h"
+ #include "TextureMapper.h"
  #include "TextureMapperFlags.h"
  #include <wtf/SystemTracing.h>
  
@@ -42162,7 +42188,7 @@ index 0badc4492a49e10ae2faa80d59da84a9cea259d6..f9182aff3c8d18404a6eeac24ef07ba1
  namespace WebCore {
  
  void CoordinatedBackingStore::createTile(uint32_t id)
-@@ -49,11 +56,97 @@ void CoordinatedBackingStore::updateTile(uint32_t id, const IntRect& sourceRect,
+@@ -49,11 +57,97 @@ void CoordinatedBackingStore::updateTile(uint32_t id, const IntRect& sourceRect,
      m_hasPendingTileUpdates = true;
  }
  
@@ -42260,7 +42286,7 @@ index 0badc4492a49e10ae2faa80d59da84a9cea259d6..f9182aff3c8d18404a6eeac24ef07ba1
      for (auto& tile : m_tiles.values())
          tile.processPendingUpdates();
  
-@@ -74,6 +167,17 @@ void CoordinatedBackingStore::paintToTextureMapper(TextureMapper& textureMapper,
+@@ -74,6 +168,17 @@ void CoordinatedBackingStore::paintToTextureMapper(TextureMapper& textureMapper,
      ASSERT(!m_size.isZero());
      FloatRect layerRect = { { }, m_size };
      TransformationMatrix adjustedTransform = transform * TransformationMatrix::rectToRect(layerRect, targetRect);
@@ -42278,7 +42304,7 @@ index 0badc4492a49e10ae2faa80d59da84a9cea259d6..f9182aff3c8d18404a6eeac24ef07ba1
  
  #if ENABLE(DAMAGE_TRACKING)
      const auto& frameDamage = textureMapper.damage();
-@@ -86,8 +190,40 @@ void CoordinatedBackingStore::paintToTextureMapper(TextureMapper& textureMapper,
+@@ -86,8 +191,40 @@ void CoordinatedBackingStore::paintToTextureMapper(TextureMapper& textureMapper,
      }();
  #endif
  
@@ -42319,8 +42345,53 @@ index 0badc4492a49e10ae2faa80d59da84a9cea259d6..f9182aff3c8d18404a6eeac24ef07ba1
          const auto allEdgesExposed = allTileEdgesExposed(layerRect, tile.rect()) ? TextureMapper::AllEdgesExposed::Yes : TextureMapper::AllEdgesExposed::No;
  
  #if ENABLE(DAMAGE_TRACKING)
+@@ -105,6 +242,44 @@ void CoordinatedBackingStore::paintToTextureMapper(TextureMapper& textureMapper,
+     }
+ }
+ 
++#if PLATFORM(HAIKU)
++bool CoordinatedBackingStore::coversOpaquelyHaiku(TextureMapper& textureMapper, const FloatRect& targetRect, const TransformationMatrix& transform, float opacity) const
++{
++    if (m_tiles.isEmpty() || m_size.isZero() || opacity < 1)
++        return false;
++    FloatRect layerRect = { { }, m_size };
++    TransformationMatrix adjustedTransform = transform * TransformationMatrix::rectToRect(layerRect, targetRect);
++    // Only where rectangles stay rectangles.
++    if (!adjustedTransform.isAffine() || adjustedTransform.b() || adjustedTransform.c())
++        return false;
++    auto inverse = adjustedTransform.inverse();
++    if (!inverse)
++        return false;
++    // What the clip shows of the layer, in the tiles' coordinates.
++    FloatRect shown = inverse->mapRect(FloatRect(textureMapper.clipBounds()));
++    shown.intersect(layerRect);
++    if (shown.isEmpty())
++        return true;
++    Region uncovered(enclosingIntRect(shown));
++    for (const auto& tile : m_tiles.values()) {
++        if (!tile.canBePainted() || !tile.texture().isOpaque())
++            continue;
++        // The whole pixels inside the tile.
++        const auto& rect = tile.rect();
++        int left = std::ceil(rect.x());
++        int top = std::ceil(rect.y());
++        int right = std::floor(rect.maxX());
++        int bottom = std::floor(rect.maxY());
++        if (right <= left || bottom <= top)
++            continue;
++        uncovered.subtract(IntRect(left, top, right - left, bottom - top));
++        if (uncovered.isEmpty())
++            return true;
++    }
++    return false;
++}
++#endif
++
+ void CoordinatedBackingStore::drawBorder(TextureMapper& textureMapper, const Color& borderColor, float borderWidth, const FloatRect& targetRect, const TransformationMatrix& transform)
+ {
+     ASSERT(!m_size.isZero());
 diff --git a/Source/WebCore/platform/graphics/texmap/coordinated/CoordinatedBackingStore.h b/Source/WebCore/platform/graphics/texmap/coordinated/CoordinatedBackingStore.h
-index 8723b9e2f90788a74d1ddc536a399463921231ec..6433d3ae69bf7a705a5374010c3a182a6de8c50d 100644
+index 8723b9e2f90788a74d1ddc536a399463921231ec..27b00148b53d2aed2071466842e677b233ef43e9 100644
 --- a/Source/WebCore/platform/graphics/texmap/coordinated/CoordinatedBackingStore.h
 +++ b/Source/WebCore/platform/graphics/texmap/coordinated/CoordinatedBackingStore.h
 @@ -22,6 +22,8 @@
@@ -42332,11 +42403,12 @@ index 8723b9e2f90788a74d1ddc536a399463921231ec..6433d3ae69bf7a705a5374010c3a182a
  #include <wtf/HashMap.h>
  #include <wtf/RefCounted.h>
  
-@@ -47,6 +49,25 @@ public:
+@@ -47,6 +49,26 @@ public:
      bool hasPendingUpdates() const { return m_hasPendingTileUpdates; }
      void processPendingUpdates();
  
 +#if PLATFORM(HAIKU)
++    bool coversOpaquelyHaiku(TextureMapper&, const FloatRect&, const TransformationMatrix&, float) const override;
 +    // A composition uploads the tiles it is about to show, and of the others
 +    // (a scroll paints tiles ahead of the viewport, a repaint covers the
 +    // tiles kept around it) as many as fit before this time; the rest wait
@@ -42358,7 +42430,7 @@ index 8723b9e2f90788a74d1ddc536a399463921231ec..6433d3ae69bf7a705a5374010c3a182a
      void paintToTextureMapper(TextureMapper&, const FloatRect&, const TransformationMatrix&, float) override;
      void drawBorder(TextureMapper&, const Color&, float borderWidth, const FloatRect&, const TransformationMatrix&) override;
      void drawRepaintCounter(TextureMapper&, int repaintCount, const Color&, const FloatRect&, const TransformationMatrix&) override;
-@@ -58,6 +79,13 @@ private:
+@@ -58,6 +80,13 @@ private:
      FloatSize m_size;
      float m_scale { 1. };
      bool m_hasPendingTileUpdates { false };
