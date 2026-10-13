@@ -18,6 +18,10 @@ packages. Baseline: the CI build of `ce257e0`.
 | 1080p H.264 video, maximized window | 22 fps | 30 fps (all) |
 | YouTube watch page (480p VP9), compositor frame | 628 ms | 17-18 ms (30 fps) |
 | scrolling Reddit (r/pics), wheel at 100 Hz | 3-4 fps | 8-16 fps |
+| scrolling BBC News, wheel at 100 Hz | 15-18 fps | 25-35 fps |
+| a caret blinking in a focused text field, per blink | 42-48 ms, 1.8 Mpx | 1-2 ms, nothing drawn |
+| YouTube (Big Buck Bunny), what it plays | 480p30 VP9, 1.1 cores | 720p60 H.264, 0.9-1.0 cores |
+| YouTube watch page maximized, drawn per video frame | 2.3-2.45 Mpx | 1.5-1.6 Mpx |
 
 What changed:
 
@@ -80,6 +84,28 @@ What changed:
 - **Network cache** (`ac00e3a`). A record cut short by a power loss (the
   meta data checksum covers only the meta data) aborted the network process
   in `readRecordFromData`; it is now discarded.
+- **A page's last frame through app_server draws and reads only what
+  changed** (`eb296c6`). That frame (sent a quarter of a second after a page
+  stops changing) redrew and read back the whole page even when only a caret
+  had blinked: an empty damage record took `TextureMapper::beginClip` to the
+  stencil, which drew every layer against it, and the shared bitmap, having
+  missed the frames that went straight to the screen, was read in full. A
+  target that is already current is no longer painted; each shared-memory
+  target keeps what changed since its bitmap was last read and reads only
+  that; app_server is told only what the direct frames changed. A build that
+  read the whole frame after each partial read found the bitmap identical in
+  643 reads (direct present on and off).
+- **ARM boards decline VP9 and AV1 to Media Source Extensions** (`29428cd`).
+  The boards decode H.264 with their own decoder (rpi_mmal, sunxi_cedar) or,
+  without one, in software for a fraction of what VP9 and AV1 cost. Offered
+  all three, YouTube took VP9 and stayed at 480p30; offered H.264 it plays
+  720p60 (0.6-8 % of frames dropped). x86_64 is unchanged;
+  `SUMMIT_MEDIA_PREFER_H264=0` offers VP9 and AV1 again, `=1` declines them
+  on x86_64 too.
+- **Rounded clips occlude** (`8b67d98`). Opaque contents under a rounded clip
+  (YouTube's player rounds its corners) hid nothing, so every video frame
+  drew the page under the video too. The cross of a rounded rectangle's
+  middle bands is now an occluder.
 
 Tried and dropped: setting libgcc's `__aarch64_have_lse_atomics` so the
 out-of-line atomic helpers use the LSE instructions (libgcc never sets it on
@@ -89,6 +115,10 @@ cores (not measured: the board hung at that launch). Waiting a second instead
 of 250 ms before the settle read-back (no measurable difference). A quarantine
 for textures just returned to `BitmapTexturePool` and re-specifying a texture
 on whole updates (neither removed the upload stall; uploading earlier did).
+Four Skia painting threads instead of three (no gain). Drawing only the
+uncovered parts of tiles that opaque contents cover in part (on YouTube 5 %
+fewer pixels without the rounded-clip occluders, 40 % with them, but the
+GPU took longer per frame than with whole tiles).
 
 Ways of measuring that held up: `SUMMIT_COMPOSITOR_TIMING_TRACE=1` (per frame:
 draws, drawn and blended Mpx, surfaces, blur passes, paint and GPU-wait time),
@@ -98,12 +128,39 @@ fixtures that copy a page's structure (video behind a blurred layer, VP9 MSE
 with `object-fit: cover`). `profile -a` hung the board twice while video
 played, even with direct present off.
 
-Where the time still goes: a scroll frame waits 12-15 ms for the GPU at
-1920x1056; page loads are main-thread work (JS parse and run, style, layout,
+Where the time still goes: the GPU. A probe drawing into a 1920x1080
+target through the same EGL/zink stack fills about 5 ns a pixel with a solid
+color and 9-10 ns with a texture (12 ns blended), whatever the filtering,
+precision or target, plus 0.03-0.1 ms a draw; the GPU runs at a fixed
+600 MHz. That is about 0.35 pixels a clock where a BXM-4-64 should do 4, so
+one full-window layer costs about 20 ms and 60 frames a second at 1080p is
+out of reach whatever Summit does; Summit can only draw fewer pixels. Reddit
+draws 4-6 Mpx a scrolled frame (the page, a blurred 30 % copy of each
+picture, and three transparent layers stacked over each picture), BBC
+2.1-3.1. Page loads are main-thread work (JS parse and run, style, layout,
 malloc); about 5 % of the main thread's samples are libgcc's out-of-line
-atomics. The CI build of `dafa2ba` is installed on the board
-(`summit-0.1.0~git20261013.1050`, `summit_webkit-1.10.1~git20261013.1050`;
-the 12 October packages are in `/boot/home/summit-package-backup`) and in
+atomics. Idle pages cost nothing (Wikipedia: no frames, 0.002 cores).
+
+YouTube's `getVideoPlaybackQuality()` counts frames decoded, not composited:
+720p60 reported 60 frames a second while the maximized watch page composited
+18-25 (now about 25 at 20 ms of GPU each). The board heat-soaks at 76-78 C
+during tests and its throttling levels change the GPU and CPU clocks, so
+frame times varied two- to threefold between runs of one build; drawn
+megapixels and alternated runs are the comparisons that held.
+
+Intermediate surfaces cost far more than their pixels here: each one seems
+to make the GPU finish the work queued before it. In some YouTube sessions
+(6-25 of the frames in a 30 s run, none in others) five 41-pixel-high
+buttons under the player that carry a CSS filter were filtered again with
+each rendering update for the first 10-20 s: 40 surfaces and 10 blur passes
+for 3.5 Mpx, and 300-900 ms a frame, while the video stood still. The filter
+cache keeps such a layer only while its backing store is complete and
+unchanged; why those buttons kept changing could not be traced before the
+state stopped reproducing.
+
+The CI build of `8b67d98` is installed on the board
+(`summit-0.1.0~git20261013.1516`, `summit_webkit-1.10.1~git20261013.1516`;
+earlier packages are in `/boot/home/summit-package-backup`) and in
 `/mnt/HaikuWork/cubie/image-packages` for the next image.
 
 Found on the OS side (not changed here):
@@ -128,6 +185,13 @@ Found on the OS side (not changed here):
   draws waits for the GPU to finish all of them, and each intermediate
   surface is a render pass of its own (a blur costs several).
 - `profile -a` hangs the board while video plays.
+- The GPU fill rate above (pvr through zink, 600 MHz, the top of
+  `sunxi_thermal`'s table): the largest single cost on this board.
+- The packages are zlib-compressed (`summit_webkit`: 236 MB in 85); zstd
+  decompresses several times faster and the Cubie's packagefs has it, but
+  every image's packagefs would need it before the CI (airos-ci) switches.
+- OpenSSL uses the ARMv8 crypto instructions (AES-GCM 700 MB/s on an A55,
+  1.5 GB/s on an A76), so TLS is not a cost.
 
 ## 9 October 2026: latest ARM64 build installed on the Pi
 
