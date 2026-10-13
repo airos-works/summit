@@ -130483,7 +130483,7 @@ index 0000000000000000000000000000000000000000..abc82f6d26d2b1374740dc304282ae75
 +
 +}
 diff --git a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/AcceleratedSurface.cpp b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/AcceleratedSurface.cpp
-index 8177756a0e14111347846c912b8e3851f2559b4a..0ac0592125053ab8b95b403b6d9d1c6d595e1721 100644
+index 8177756a0e14111347846c912b8e3851f2559b4a..76767f5ebf7e08a5187e882109bdbe94a95a92fc 100644
 --- a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/AcceleratedSurface.cpp
 +++ b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/AcceleratedSurface.cpp
 @@ -26,6 +26,23 @@
@@ -130559,7 +130559,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..0ac0592125053ab8b95b403b6d9d1c6d
      , m_hardwareAccelerationEnabled(webPage.corePage()->settings().hardwareAccelerationEnabled())
  #endif
      , m_backgroundColor(webPage.backgroundColor())
-@@ -130,11 +166,331 @@ AcceleratedSurface::AcceleratedSurface(WebPage& webPage, Function<void()>&& fram
+@@ -130,10 +166,330 @@ AcceleratedSurface::AcceleratedSurface(WebPage& webPage, Function<void()>&& fram
      , m_isVisible(webPage.activityState().contains(ActivityState::IsVisible))
      , m_useExplicitSync(usesGL() && useExplicitSync())
  #if ENABLE(DAMAGE_TRACKING)
@@ -130863,8 +130863,8 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..0ac0592125053ab8b95b403b6d9d1c6d
  {
 +    if (m_redisplayHandlerHaiku)
 +        m_redisplayHandlerHaiku();
- }
- 
++}
++
 +// A page that stops changing gets its last frame through app_server
 +// (didRenderFrame()). Where every direct present writes app_server's copy
 +// too, that waits until the page has really stopped: it is looked at again
@@ -130885,12 +130885,11 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..0ac0592125053ab8b95b403b6d9d1c6d
 +        protectedThis->m_lastFrameThroughAppServerRequestedHaiku = true;
 +        protectedThis->m_redisplayHandlerHaiku();
 +    });
-+}
+ }
 +#endif
-+
+ 
  AcceleratedSurface::~AcceleratedSurface() = default;
  
- WTF_MAKE_TZONE_ALLOCATED_IMPL(AcceleratedSurface::RenderTarget);
 @@ -176,7 +532,7 @@ void AcceleratedSurface::RenderTarget::createSkiaSurfaceForFramebuffer(unsigned
      m_skiaSurface = SkSurfaces::WrapBackendRenderTarget(display.skiaGrContext(), backendRenderTarget, origin, kRGBA_8888_SkColorType, SkColorSpace::MakeSRGB(), &properties);
  }
@@ -130964,7 +130963,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..0ac0592125053ab8b95b403b6d9d1c6d
      if (!bufferHandle) {
          WTFLogAlways("Failed to create handle for shared memory buffer");
          return nullptr;
-@@ -439,13 +833,454 @@ AcceleratedSurface::RenderTargetSHMImage::RenderTargetSHMImage(AcceleratedSurfac
+@@ -439,13 +833,479 @@ AcceleratedSurface::RenderTargetSHMImage::RenderTargetSHMImage(AcceleratedSurfac
      WebProcess::singleton().parentProcessConnection()->send(Messages::AcceleratedBackingStore::DidCreateSHMBuffer(m_id, WTF::move(bitmapHandle)), m_surface->surfaceID());
  }
  
@@ -131227,10 +131226,15 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..0ac0592125053ab8b95b403b6d9d1c6d
 +            }
 +        }
 +    }
-+    if (m_readbackDamage && m_readbackDamage->mode() != Damage::Mode::Full && !m_bitmapStale) {
-+        if (m_readbackDamage->isEmpty())
++    // What the bitmap missed covers what changed in this target since it was
++    // last current, and frames presented directly since the bitmap was read
++    // too: then the target's own record is too little, and that used to mean
++    // the whole frame (a caret's blink read back 1920x913 pixels).
++    const std::optional<Damage>& readbackDamage = m_bitmapDamageHaiku ? m_bitmapDamageHaiku : m_readbackDamage;
++    if (readbackDamage && readbackDamage->mode() != Damage::Mode::Full && (m_bitmapDamageHaiku || !m_bitmapStale)) {
++        if (readbackDamage->isEmpty())
 +            return true;
-+        for (auto rect : m_readbackDamage->rects()) {
++        for (auto rect : readbackDamage->rects()) {
 +            rect.intersect(whole);
 +            if (!rect.isEmpty())
 +                rects.append(rect);
@@ -131359,6 +131363,18 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..0ac0592125053ab8b95b403b6d9d1c6d
 +#endif
 +
 +#if PLATFORM(HAIKU)
++#if ENABLE(DAMAGE_TRACKING)
++void AcceleratedSurface::RenderTargetSHMImage::noteFrameDamageHaiku(const std::optional<Damage>& frameDamage, bool collected)
++{
++    if (!collected) {
++        m_bitmapDamageHaiku = std::nullopt;
++        return;
++    }
++    if (m_bitmapDamageHaiku && frameDamage)
++        m_bitmapDamageHaiku->add(*frameDamage);
++}
++#endif
++
 +bool AcceleratedSurface::RenderTargetSHMImage::presentDirectlyHaiku(DirectPresenterHaiku* presenter, const std::optional<Damage>& damage)
 +{
 +    m_presentedDirectly = false;
@@ -131403,7 +131419,15 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..0ac0592125053ab8b95b403b6d9d1c6d
 +        return;
 +    // Whatever path reads the frame below reads all of it when the bitmap
 +    // missed frames presented directly.
-+    auto fresh = makeScopeExit([this] { m_bitmapStale = false; });
++    auto fresh = makeScopeExit([this] {
++        m_bitmapStale = false;
++#if ENABLE(DAMAGE_TRACKING)
++        if (m_surface->damageCollectedHaiku())
++            m_bitmapDamageHaiku = Damage(m_size, Damage::Mode::Rectangles, Damage::NoMaxRectangles);
++        else
++            m_bitmapDamageHaiku = std::nullopt;
++#endif
++    });
 +    if (PresentStageStatsHaiku::enabled()) {
 +        static std::once_flag once;
 +        std::call_once(once, [this] { std::fprintf(stderr, "Summit readback: %s compositing\n", m_surface->useSkia() ? (m_surface->usesGL() ? "Skia GL" : "Skia CPU") : "TextureMapper GL"); });
@@ -131419,7 +131443,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..0ac0592125053ab8b95b403b6d9d1c6d
  
          SkImageInfo info = SkImageInfo::Make(m_bitmap->size().width(), m_bitmap->size().height(), SkColorType::kBGRA_8888_SkColorType, SkAlphaType::kPremul_SkAlphaType);
  
-@@ -457,9 +1292,14 @@ void AcceleratedSurface::RenderTargetSHMImage::didRenderFrame()
+@@ -457,9 +1317,14 @@ void AcceleratedSurface::RenderTargetSHMImage::didRenderFrame()
          return;
      }
  
@@ -131434,7 +131458,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..0ac0592125053ab8b95b403b6d9d1c6d
  std::unique_ptr<AcceleratedSurface::RenderTarget> AcceleratedSurface::RenderTargetTexture::create(AcceleratedSurface& surface, const IntSize& size)
  {
      auto texture = BitmapTexture::create(size);
-@@ -515,8 +1355,9 @@ AcceleratedSurface::RenderTargetTexture::RenderTargetTexture(AcceleratedSurface&
+@@ -515,8 +1380,9 @@ AcceleratedSurface::RenderTargetTexture::RenderTargetTexture(AcceleratedSurface&
  }
  
  AcceleratedSurface::RenderTargetTexture::~RenderTargetTexture() = default;
@@ -131445,7 +131469,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..0ac0592125053ab8b95b403b6d9d1c6d
  
  #if USE(WPE_RENDERER)
  std::unique_ptr<AcceleratedSurface::RenderTarget> AcceleratedSurface::RenderTargetWPEBackend::create(AcceleratedSurface& surface, const IntSize& initialSize, UnixFileDescriptor&& hostFD)
-@@ -594,7 +1435,7 @@ void AcceleratedSurface::RenderTargetWPEBackend::didRenderFrame()
+@@ -594,7 +1460,7 @@ void AcceleratedSurface::RenderTargetWPEBackend::didRenderFrame()
  AcceleratedSurface::SwapChain::SwapChain(AcceleratedSurface& surface)
      : m_surface(surface)
  {
@@ -131454,7 +131478,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..0ac0592125053ab8b95b403b6d9d1c6d
      if (!m_surface->hardwareAccelerationEnabled()) {
          m_type = Type::SharedMemory;
          return;
-@@ -632,7 +1473,7 @@ AcceleratedSurface::SwapChain::SwapChain(AcceleratedSurface& surface)
+@@ -632,7 +1498,7 @@ AcceleratedSurface::SwapChain::SwapChain(AcceleratedSurface& surface)
      case PlatformDisplay::Type::GBM:
  #endif
          break;
@@ -131463,7 +131487,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..0ac0592125053ab8b95b403b6d9d1c6d
  #if USE(WPE_RENDERER)
      case PlatformDisplay::Type::WPE:
          m_type = Type::WPEBackend;
-@@ -646,11 +1487,19 @@ AcceleratedSurface::SwapChain::SwapChain(AcceleratedSurface& surface)
+@@ -646,11 +1512,19 @@ AcceleratedSurface::SwapChain::SwapChain(AcceleratedSurface& surface)
      case PlatformDisplay::Type::Default:
          break;
  #endif // PLATFORM(GTK)
@@ -131484,7 +131508,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..0ac0592125053ab8b95b403b6d9d1c6d
  void AcceleratedSurface::SwapChain::setupBufferFormat()
  {
      if (m_type != Type::EGLImage)
-@@ -749,7 +1598,7 @@ bool AcceleratedSurface::SwapChain::resize(const IntSize& size)
+@@ -749,7 +1623,7 @@ bool AcceleratedSurface::SwapChain::resize(const IntSize& size)
  
  bool AcceleratedSurface::SwapChain::handleBufferFormatChangeIfNeeded()
  {
@@ -131493,7 +131517,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..0ac0592125053ab8b95b403b6d9d1c6d
      if (m_type == Type::EGLImage) {
          Locker locker { m_bufferFormatLock };
          if (m_bufferFormatChanged) {
-@@ -765,7 +1614,7 @@ bool AcceleratedSurface::SwapChain::handleBufferFormatChangeIfNeeded()
+@@ -765,7 +1639,7 @@ bool AcceleratedSurface::SwapChain::handleBufferFormatChangeIfNeeded()
  std::unique_ptr<AcceleratedSurface::RenderTarget> AcceleratedSurface::SwapChain::createTarget() const
  {
      switch (m_type) {
@@ -131502,7 +131526,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..0ac0592125053ab8b95b403b6d9d1c6d
  #if USE(GBM) || OS(ANDROID)
      case Type::EGLImage: {
          Locker locker { m_bufferFormatLock };
-@@ -773,7 +1622,11 @@ std::unique_ptr<AcceleratedSurface::RenderTarget> AcceleratedSurface::SwapChain:
+@@ -773,7 +1647,11 @@ std::unique_ptr<AcceleratedSurface::RenderTarget> AcceleratedSurface::SwapChain:
      }
  #endif
      case Type::Texture:
@@ -131514,7 +131538,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..0ac0592125053ab8b95b403b6d9d1c6d
      case Type::SharedMemory:
          return RenderTargetSHMImage::create(m_surface.get(), m_size);
  #endif
-@@ -812,6 +1665,11 @@ AcceleratedSurface::RenderTarget* AcceleratedSurface::SwapChain::nextTarget()
+@@ -812,6 +1690,11 @@ AcceleratedSurface::RenderTarget* AcceleratedSurface::SwapChain::nextTarget()
              if (auto target = createTarget())
                  m_freeTargets.append(WTF::move(target));
          }
@@ -131526,7 +131550,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..0ac0592125053ab8b95b403b6d9d1c6d
  
  #if ENABLE(WPE_PLATFORM)
          if (m_freeTargets.size() != targetsToCreate)
-@@ -841,6 +1699,12 @@ void AcceleratedSurface::SwapChain::releaseTarget(uint64_t targetID, UnixFileDes
+@@ -841,6 +1724,12 @@ void AcceleratedSurface::SwapChain::releaseTarget(uint64_t targetID, UnixFileDes
          m_freeTargets.insert(0, WTF::move(m_lockedTargets[index]));
          m_lockedTargets.removeAt(index);
      }
@@ -131539,7 +131563,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..0ac0592125053ab8b95b403b6d9d1c6d
  }
  
  void AcceleratedSurface::SwapChain::reset()
-@@ -859,6 +1723,11 @@ void AcceleratedSurface::SwapChain::releaseUnusedBuffers()
+@@ -859,6 +1748,11 @@ void AcceleratedSurface::SwapChain::releaseUnusedBuffers()
  #if USE(WPE_RENDERER)
      ASSERT(m_type != Type::WPEBackend);
  #endif
@@ -131551,7 +131575,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..0ac0592125053ab8b95b403b6d9d1c6d
  
  #if ENABLE(WPE_PLATFORM)
      WebProcess::singleton().parentProcessConnection()->send(Messages::AcceleratedBackingStore::DidChangeBufferConfiguration(m_lockedTargets.size()), m_surface->surfaceID());
-@@ -929,7 +1798,7 @@ bool AcceleratedSurface::shouldPaintMirrored() const
+@@ -929,7 +1823,7 @@ bool AcceleratedSurface::shouldPaintMirrored() const
      switch (m_swapChain.type()) {
      case SwapChain::Type::Invalid:
          return false;
@@ -131560,7 +131584,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..0ac0592125053ab8b95b403b6d9d1c6d
      case SwapChain::Type::Texture:
  #if USE(GBM) || OS(ANDROID)
      case SwapChain::Type::EGLImage:
-@@ -960,6 +1829,10 @@ void AcceleratedSurface::preferredBufferFormatsDidChange()
+@@ -960,6 +1854,10 @@ void AcceleratedSurface::preferredBufferFormatsDidChange()
  
  void AcceleratedSurface::visibilityDidChange(bool isVisible)
  {
@@ -131571,7 +131595,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..0ac0592125053ab8b95b403b6d9d1c6d
      if (m_isVisible == isVisible)
          return;
  
-@@ -1000,7 +1873,7 @@ void AcceleratedSurface::backgroundColorDidChange()
+@@ -1000,7 +1898,7 @@ void AcceleratedSurface::backgroundColorDidChange()
      if (isOpaque == wasOpaque)
          return;
  
@@ -131580,7 +131604,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..0ac0592125053ab8b95b403b6d9d1c6d
      m_swapChain.setupBufferFormat();
  #endif
  }
-@@ -1022,7 +1895,7 @@ void AcceleratedSurface::didCreateCompositingRunLoop(RunLoop& runLoop)
+@@ -1022,7 +1920,7 @@ void AcceleratedSurface::didCreateCompositingRunLoop(RunLoop& runLoop)
  #if USE(GLIB_EVENT_LOOP)
      m_releaseUnusedBuffersTimer->setPriority(RunLoopSourcePriority::ReleaseUnusedResourcesTimer);
  #endif
@@ -131589,7 +131613,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..0ac0592125053ab8b95b403b6d9d1c6d
      WebProcess::singleton().parentProcessConnection()->addMessageReceiver(runLoop, *this, Messages::AcceleratedSurface::messageReceiverName(), m_id);
  #endif
  }
-@@ -1030,6 +1903,10 @@ void AcceleratedSurface::didCreateCompositingRunLoop(RunLoop& runLoop)
+@@ -1030,6 +1928,10 @@ void AcceleratedSurface::didCreateCompositingRunLoop(RunLoop& runLoop)
  void AcceleratedSurface::willDestroyCompositingRunLoop()
  {
      m_frameCompleteHandler = nullptr;
@@ -131600,7 +131624,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..0ac0592125053ab8b95b403b6d9d1c6d
  
  #if USE(WPE_RENDERER)
      if (m_swapChain.type() == SwapChain::Type::WPEBackend)
-@@ -1043,7 +1920,7 @@ void AcceleratedSurface::willDestroyCompositingRunLoop()
+@@ -1043,7 +1945,7 @@ void AcceleratedSurface::willDestroyCompositingRunLoop()
              protectedThis->m_releaseUnusedBuffersTimer = nullptr;
          });
      }
@@ -131609,7 +131633,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..0ac0592125053ab8b95b403b6d9d1c6d
      WebProcess::singleton().parentProcessConnection()->removeMessageReceiver(Messages::AcceleratedSurface::messageReceiverName(), m_id);
  #endif
  }
-@@ -1149,18 +2026,124 @@ void AcceleratedSurface::didRenderFrame(TargetContents targetContents)
+@@ -1149,18 +2051,133 @@ void AcceleratedSurface::didRenderFrame(TargetContents targetContents)
      if (!m_target)
          return;
  
@@ -131623,6 +131647,9 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..0ac0592125053ab8b95b403b6d9d1c6d
 +#if ENABLE(DAMAGE_TRACKING)
 +    if (m_damageTracker.frameDamage())
 +        targetDamage = m_damageTracker.damageSinceTargetWasLastCurrent(*m_target);
++    m_swapChain.forEachTarget([&](RenderTarget& target) {
++        target.noteFrameDamageHaiku(m_damageTracker.frameDamage(), m_damageCollectedHaiku);
++    });
 +#endif
 +    // Straight into the screen, if the UI process gave the page a place there:
 +    // then there is nothing to wait for and nothing to read back. app_server's
@@ -131691,6 +131718,8 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..0ac0592125053ab8b95b403b6d9d1c6d
      m_damageTracker.didPresent(*m_target, targetContents);
      damageRects = m_damageTracker.takeFrameDamageRects();
 +#if PLATFORM(HAIKU)
++    // A frame that collected its damage and has none changed nothing.
++    bool changedNothing = damageRects.isEmpty() && m_damageCollectedHaiku;
 +    // No rectangles would read as "the whole frame" anyway; say so outright.
 +    if (damageRects.isEmpty())
 +        damageRects.append(IntRect { { }, m_swapChain.size() });
@@ -131705,6 +131734,10 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..0ac0592125053ab8b95b403b6d9d1c6d
 +            for (auto& rect : damageRects)
 +                m_directDamageHaiku.unite(rect);
 +        } else if (!m_directDamageHaiku.isEmpty()) {
++            // The last frame of a page through app_server changes nothing
++            // itself: app_server is told only what the screen got before it.
++            if (changedNothing)
++                damageRects.clear();
 +            for (auto& rect : damageRects)
 +                m_directDamageHaiku.unite(rect);
 +            auto rects = m_directDamageHaiku.rects();
@@ -131734,7 +131767,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..0ac0592125053ab8b95b403b6d9d1c6d
      m_pendingFrameNotifyTargets.insert(0, { m_target, WTF::move(damageRects) });
      m_target = nullptr;
  }
-@@ -1182,13 +2165,17 @@ const std::optional<Damage>& AcceleratedSurface::renderTargetDamage()
+@@ -1182,13 +2199,17 @@ const std::optional<Damage>& AcceleratedSurface::renderTargetDamage()
  }
  #endif
  
@@ -131754,7 +131787,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..0ac0592125053ab8b95b403b6d9d1c6d
  #endif
  
 diff --git a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/AcceleratedSurface.h b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/AcceleratedSurface.h
-index 9c24ddab5df0f74f95b87ad7ac594ed2a9c237ab..552335e4d473fb1ff644908937fe2ef7ff224e93 100644
+index 9c24ddab5df0f74f95b87ad7ac594ed2a9c237ab..152e257c622586ad2d554da4f0dca156d4b24fb4 100644
 --- a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/AcceleratedSurface.h
 +++ b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/AcceleratedSurface.h
 @@ -27,10 +27,15 @@
@@ -131816,7 +131849,20 @@ index 9c24ddab5df0f74f95b87ad7ac594ed2a9c237ab..552335e4d473fb1ff644908937fe2ef7
      SkCanvas* canvas();
  
      void willDestroyGLContext();
-@@ -158,22 +167,38 @@ public:
+@@ -146,6 +155,12 @@ public:
+     void setFrameDamageRectangleThreshold(unsigned threshold) { m_damageTracker.setRectangleThreshold(threshold); }
+     const std::optional<WebCore::Damage>& frameDamage() const LIFETIME_BOUND { return m_damageTracker.frameDamage(); }
+     const std::optional<WebCore::Damage>& renderTargetDamage();
++#if PLATFORM(HAIKU)
++    // Whether the frame being drawn collected its damage: then a frame without
++    // any changed nothing, rather than had nothing recorded.
++    void setDamageCollectedHaiku(bool collected) { m_damageCollectedHaiku = collected; }
++    bool damageCollectedHaiku() const { return m_damageCollectedHaiku; }
++#endif
+ #endif
+ 
+     void didCreateCompositingRunLoop(WTF::RunLoop&);
+@@ -158,22 +173,38 @@ public:
      void visibilityDidChange(bool);
      void backgroundColorDidChange();
  
@@ -131857,7 +131903,7 @@ index 9c24ddab5df0f74f95b87ad7ac594ed2a9c237ab..552335e4d473fb1ff644908937fe2ef7
  #endif
      void frameDone();
      void releaseUnusedBuffersTimerFired();
-@@ -195,6 +220,16 @@ private:
+@@ -195,6 +226,19 @@ private:
  
          virtual void sync(bool) { }
          virtual void setReleaseFenceFD(UnixFileDescriptor&&) { }
@@ -131865,6 +131911,9 @@ index 9c24ddab5df0f74f95b87ad7ac594ed2a9c237ab..552335e4d473fb1ff644908937fe2ef7
 +        // What changed in this target since it was last current: all a target
 +        // read back into shared memory needs to copy (nullopt: everything).
 +        virtual void setReadbackDamage(std::optional<WebCore::Damage>&&) { }
++        // Every frame drawn, into any target, with what it changed (nullopt:
++        // nothing; collected false: not known).
++        virtual void noteFrameDamageHaiku(const std::optional<WebCore::Damage>&, bool /* collected */) { }
 +#endif
 +#if PLATFORM(HAIKU)
 +        // Copies the frame straight into the screen when the UI process has
@@ -131874,7 +131923,7 @@ index 9c24ddab5df0f74f95b87ad7ac594ed2a9c237ab..552335e4d473fb1ff644908937fe2ef7
  
          SkSurface* skiaSurface() const { return m_skiaSurface.get(); }
  
-@@ -226,7 +261,7 @@ private:
+@@ -226,7 +270,7 @@ private:
          sk_sp<SkSurface> m_skiaSurface;
      };
  
@@ -131883,7 +131932,7 @@ index 9c24ddab5df0f74f95b87ad7ac594ed2a9c237ab..552335e4d473fb1ff644908937fe2ef7
      class RenderTargetShareableBuffer : public RenderTarget {
          WTF_MAKE_TZONE_ALLOCATED(RenderTargetShareableBuffer);
      public:
-@@ -322,10 +357,27 @@ private:
+@@ -322,10 +366,32 @@ private:
      private:
          bool supportsExplicitSync() const override { return false; }
          void didRenderFrame() override;
@@ -131898,7 +131947,12 @@ index 9c24ddab5df0f74f95b87ad7ac594ed2a9c237ab..552335e4d473fb1ff644908937fe2ef7
 +        bool m_bitmapStale { false };
 +#if ENABLE(DAMAGE_TRACKING)
 +        void setReadbackDamage(std::optional<WebCore::Damage>&& damage) override { m_readbackDamage = WTF::move(damage); }
++        void noteFrameDamageHaiku(const std::optional<WebCore::Damage>&, bool collected) override;
 +        std::optional<WebCore::Damage> m_readbackDamage;
++        // What changed in the page since m_bitmap was last read, by frames in
++        // any target, presented directly or not (nullopt: not known). Frames
++        // into the screen leave m_bitmap behind; this is all it has missed.
++        std::optional<WebCore::Damage> m_bitmapDamageHaiku;
 +#endif
 +#endif
  
@@ -131911,7 +131965,7 @@ index 9c24ddab5df0f74f95b87ad7ac594ed2a9c237ab..552335e4d473fb1ff644908937fe2ef7
      class RenderTargetTexture final : public RenderTargetShareableBuffer {
      public:
          static std::unique_ptr<RenderTarget> create(AcceleratedSurface&, const WebCore::IntSize&);
-@@ -337,7 +389,8 @@ private:
+@@ -337,7 +403,8 @@ private:
  
          const Ref<WebCore::BitmapTexture> m_texture;
      };
@@ -131921,7 +131975,7 @@ index 9c24ddab5df0f74f95b87ad7ac594ed2a9c237ab..552335e4d473fb1ff644908937fe2ef7
  
  #if USE(WPE_RENDERER)
      class RenderTargetWPEBackend final : public RenderTarget {
-@@ -364,7 +417,7 @@ private:
+@@ -364,7 +431,7 @@ private:
  
          enum class Type {
              Invalid,
@@ -131930,7 +131984,7 @@ index 9c24ddab5df0f74f95b87ad7ac594ed2a9c237ab..552335e4d473fb1ff644908937fe2ef7
  #if USE(GBM) || OS(ANDROID)
              EGLImage,
  #endif
-@@ -382,6 +435,10 @@ private:
+@@ -382,6 +449,10 @@ private:
          const WebCore::IntSize& size() const LIFETIME_BOUND { return m_size; }
          RenderTarget* nextTarget();
          void releaseTarget(uint64_t, UnixFileDescriptor&& releaseFence);
@@ -131941,7 +131995,7 @@ index 9c24ddab5df0f74f95b87ad7ac594ed2a9c237ab..552335e4d473fb1ff644908937fe2ef7
          void reset();
          void releaseUnusedBuffers();
  
-@@ -395,7 +452,7 @@ private:
+@@ -395,7 +466,7 @@ private:
          }
  #endif
  
@@ -131950,7 +132004,7 @@ index 9c24ddab5df0f74f95b87ad7ac594ed2a9c237ab..552335e4d473fb1ff644908937fe2ef7
          void setupBufferFormat();
  #endif
  
-@@ -416,7 +473,7 @@ private:
+@@ -416,7 +487,7 @@ private:
          Vector<std::unique_ptr<RenderTarget>, s_maximumBuffers> m_freeTargets;
          Vector<std::unique_ptr<RenderTarget>, s_maximumBuffers> m_lockedTargets;
          bool m_initialTargetsCreated { false };
@@ -131959,7 +132013,7 @@ index 9c24ddab5df0f74f95b87ad7ac594ed2a9c237ab..552335e4d473fb1ff644908937fe2ef7
          mutable Lock m_bufferFormatLock;
          BufferFormat m_bufferFormat WTF_GUARDED_BY_LOCK(m_bufferFormatLock);
          bool m_bufferFormatChanged WTF_GUARDED_BY_LOCK(m_bufferFormatLock) { false };
-@@ -478,10 +535,29 @@ private:
+@@ -478,10 +549,32 @@ private:
  
      const WeakRef<WebPage> m_webPage;
      Function<void()> m_frameCompleteHandler;
@@ -131981,6 +132035,9 @@ index 9c24ddab5df0f74f95b87ad7ac594ed2a9c237ab..552335e4d473fb1ff644908937fe2ef7
 +    // What frames presented directly have changed since one last went
 +    // through app_server, which that one draws there (didRenderFrame()).
 +    WebCore::Region m_directDamageHaiku;
++#if ENABLE(DAMAGE_TRACKING)
++    bool m_damageCollectedHaiku { false };
++#endif
 +#endif
      bool m_useSkia { false };
      uint64_t m_id { 0 };
@@ -132609,7 +132666,7 @@ index 57163f65873e5a481e5ef5a4ec3beec4b40b7cea..61b49ac7c362b416cdec1d10c44304d2
      bool m_compositionRequired { false };
  #if ENABLE(SCROLLING_THREAD)
 diff --git a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/ThreadedCompositor.cpp b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/ThreadedCompositor.cpp
-index c238029ad9c99c5028ea7e456520af85d1d85532..fba90ee6992498bd2f6f9587d016481faf2a61ef 100644
+index c238029ad9c99c5028ea7e456520af85d1d85532..96a32f248ffa9e46030e61182a10a6d791d35c88 100644
 --- a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/ThreadedCompositor.cpp
 +++ b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/ThreadedCompositor.cpp
 @@ -26,6 +26,10 @@
@@ -132818,7 +132875,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..fba90ee6992498bd2f6f9587d016481f
      FloatRect clipRect(FloatPoint { }, size);
      TextureMapperLayer& currentRootLayer = m_sceneState->rootLayer().ensureTarget();
      if (currentRootLayer.transform() != matrix)
-@@ -371,8 +496,14 @@ void ThreadedCompositor::paintToTextureMapper(const TransformationMatrix& matrix
+@@ -371,11 +496,23 @@ void ThreadedCompositor::paintToTextureMapper(const TransformationMatrix& matrix
  
      bool sceneHasRunningAnimations = currentRootLayer.applyAnimationsRecursively(MonotonicTime::now());
  
@@ -132831,9 +132888,18 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..fba90ee6992498bd2f6f9587d016481f
 +    const bigtime_t clipStartedAt = tracePaint ? system_time() : 0;
 +#endif
  
++#if PLATFORM(HAIKU)
++    bool targetIsCurrentHaiku = false;
++#endif
  #if ENABLE(DAMAGE_TRACKING)
      std::optional<FloatRoundedRect> rectContainingRegionThatActuallyChanged;
-@@ -383,6 +514,10 @@ void ThreadedCompositor::paintToTextureMapper(const TransformationMatrix& matrix
++#if PLATFORM(HAIKU)
++    m_surface->setDamageCollectedHaiku(!!m_damage.flags);
++#endif
+     currentRootLayer.prepareForPainting(*m_textureMapper);
+     if (m_damage.flags) {
+         Damage frameDamage(size, m_damage.flags->contains(DamagePropagationFlags::Unified) ? Damage::Mode::BoundingBox : Damage::Mode::Rectangles);
+@@ -383,6 +520,10 @@ void ThreadedCompositor::paintToTextureMapper(const TransformationMatrix& matrix
          WTFBeginSignpost(this, CollectDamage);
          currentRootLayer.collectDamage(*m_textureMapper, frameDamage);
          WTFEndSignpost(this, CollectDamage);
@@ -132844,12 +132910,39 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..fba90ee6992498bd2f6f9587d016481f
  
          recordFrameDamage(WTF::move(frameDamage));
  
-@@ -404,11 +539,20 @@ void ThreadedCompositor::paintToTextureMapper(const TransformationMatrix& matrix
+@@ -392,6 +533,17 @@ void ThreadedCompositor::paintToTextureMapper(const TransformationMatrix& matrix
+                 m_textureMapper->setDamage(std::nullopt);
+             } else {
+                 const auto& damageSinceLastSurfaceUse = m_surface->renderTargetDamage();
++#if PLATFORM(HAIKU)
++                // Nothing changed since this target was last current, so it
++                // shows this frame already: a composition that only hands the
++                // frame on (a page's last frame through app_server,
++                // AcceleratedSurface::didRenderFrame) has nothing to draw. The
++                // empty clip below would not stop it: TextureMapper::beginClip
++                // takes an empty rectangle to the stencil, and every layer was
++                // drawn against that (1.8 Mpx, about 20 ms of the Cubie A7S's
++                // GPU, a quarter of a second after each blink of a caret).
++                targetIsCurrentHaiku = damageSinceLastSurfaceUse && damageSinceLastSurfaceUse->isEmpty();
++#endif
+                 if (damageSinceLastSurfaceUse && !FloatRect(damageSinceLastSurfaceUse->bounds()).contains(clipRect))
+                     rectContainingRegionThatActuallyChanged = FloatRoundedRect(damageSinceLastSurfaceUse->bounds());
+ 
+@@ -400,15 +552,32 @@ void ThreadedCompositor::paintToTextureMapper(const TransformationMatrix& matrix
+         }
+     }
+ 
++#if PLATFORM(HAIKU)
++    if (targetIsCurrentHaiku)
++        rectContainingRegionThatActuallyChanged = std::nullopt;
++#endif
+     if (rectContainingRegionThatActuallyChanged)
          m_textureMapper->beginClip(TransformationMatrix(), *rectContainingRegionThatActuallyChanged);
  #endif
  
 +#if PLATFORM(HAIKU)
 +    const bigtime_t clearedAt = tracePaint ? system_time() : 0;
++    if (!targetIsCurrentHaiku)
 +#endif
      m_surface->clear(reasons);
 +#if PLATFORM(HAIKU)
@@ -132857,6 +132950,9 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..fba90ee6992498bd2f6f9587d016481f
 +#endif
  
      WTFBeginSignpost(this, PaintTextureMapperLayerTree);
++#if PLATFORM(HAIKU)
++    if (!targetIsCurrentHaiku)
++#endif
      currentRootLayer.paint(*m_textureMapper);
      WTFEndSignpost(this, PaintTextureMapperLayerTree);
 +#if PLATFORM(HAIKU)
@@ -132865,7 +132961,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..fba90ee6992498bd2f6f9587d016481f
  
  #if ENABLE(DAMAGE_TRACKING)
      if (rectContainingRegionThatActuallyChanged)
-@@ -426,6 +570,16 @@ void ThreadedCompositor::paintToTextureMapper(const TransformationMatrix& matrix
+@@ -426,6 +595,16 @@ void ThreadedCompositor::paintToTextureMapper(const TransformationMatrix& matrix
  
      m_textureMapper->endClip();
      m_textureMapper->endPainting();
@@ -132882,7 +132978,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..fba90ee6992498bd2f6f9587d016481f
  
      if (sceneHasRunningAnimations)
          requestComposition(CompositionReason::Animation);
-@@ -556,6 +710,46 @@ void ThreadedCompositor::renderLayerTree()
+@@ -556,6 +735,46 @@ void ThreadedCompositor::renderLayerTree()
      if (m_suspendedCount > 0)
          return;
  
@@ -132929,7 +133025,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..fba90ee6992498bd2f6f9587d016481f
      OptionSet<CompositionReason> reasons;
      bool shouldNotifiyDidComposite = false;
      {
-@@ -580,8 +774,18 @@ void ThreadedCompositor::renderLayerTree()
+@@ -580,8 +799,18 @@ void ThreadedCompositor::renderLayerTree()
  
          ASSERT(m_state.state == State::Scheduled);
          m_state.state = State::InProgress;
@@ -132948,7 +133044,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..fba90ee6992498bd2f6f9587d016481f
  #if USE(TEXTURE_MAPPER)
      if (!m_context || !m_context->makeContextCurrent())
          return;
-@@ -599,23 +803,61 @@ void ThreadedCompositor::renderLayerTree()
+@@ -599,23 +828,61 @@ void ThreadedCompositor::renderLayerTree()
      if (viewportSize.isEmpty())
          return;
  
@@ -133010,7 +133106,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..fba90ee6992498bd2f6f9587d016481f
  
      updateFPSCounter();
  
-@@ -631,8 +873,49 @@ void ThreadedCompositor::renderLayerTree()
+@@ -631,8 +898,49 @@ void ThreadedCompositor::renderLayerTree()
      PlatformDisplay::sharedDisplay().skiaGLContext()->swapBuffers();
  #endif
  
@@ -133060,7 +133156,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..fba90ee6992498bd2f6f9587d016481f
  
      RunLoop::mainSingleton().dispatch([this, protectedThis = Ref { *this }] {
          if (m_layerTreeHost)
-@@ -656,6 +939,13 @@ void ThreadedCompositor::requestComposition(CompositionReason reason)
+@@ -656,6 +964,13 @@ void ThreadedCompositor::requestComposition(CompositionReason reason)
  {
      Locker locker { m_state.lock };
      m_state.reasons.add(reason);
@@ -133074,7 +133170,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..fba90ee6992498bd2f6f9587d016481f
      scheduleUpdateLocked();
  }
  
-@@ -703,6 +993,10 @@ void ThreadedCompositor::scheduleUpdateLocked()
+@@ -703,6 +1018,10 @@ void ThreadedCompositor::scheduleUpdateLocked()
  void ThreadedCompositor::frameComplete()
  {
      ASSERT(m_workQueue->runLoop().isCurrent());
@@ -133085,7 +133181,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..fba90ee6992498bd2f6f9587d016481f
  
      Locker locker { m_state.lock };
      WTFEmitSignpost(this, FrameComplete, "reasons: %s, state: %s, waiting for tiles: %s", reasonsToString(m_state.reasons).utf8(), stateToString(m_state.state).characters(), m_state.isWaitingForTiles ? "yes" : "no");
-@@ -726,6 +1020,112 @@ void ThreadedCompositor::frameComplete()
+@@ -726,6 +1045,112 @@ void ThreadedCompositor::frameComplete()
      }
  }
  
