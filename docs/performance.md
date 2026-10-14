@@ -94,9 +94,15 @@ from 66 C, sampled every 15 s from the launch (playback starts at about
 
 Its compositor drew 47 frames a second in its best 15 s and 23 in its last.
 
-Before the deploy the board went no further than level 2. Runs one after
-another differ two- to threefold because of this; comparisons here are
-alternated runs after cooling to 66-68 C (`cool.sh`), or drawn megapixels.
+The GPU's 800 MHz top clock is not why it goes deeper than the level 2 of
+13 October: an A/B of 800 against 600 MHz (the Cubie WebGL session, logs in
+`cubie/evidence/gpu/webgl2/gpu-throttle-gab{1,2}.log`) reached levels 3-4
+either way, and every run was at level 2 by 15-30 s. Between its 76 C release
+and 80 C trip `sunxi_thermal` only steps up, so each spike above 80 C adds a
+level and two minutes of video ratchet to 3-4; the 13 October runs were
+about 50 s long. Runs one after another differ two- to threefold because of
+this; comparisons here are alternated runs after cooling to 66-68 C
+(`cool.sh`), or drawn megapixels.
 
 Tried and dropped: presenting every other frame of a 60 frames-a-second
 video when the compositor loses more than a fifth of them (an even 30
@@ -146,11 +152,11 @@ changes above).
 ### For the OS (air/OS on the Cubie A7S)
 
 - Heat: a heatsink or fan is the largest single gain for video. In
-  software, the little cluster stays at 1794 MHz while idle (the thermal
-  driver reads its load as 45-97 % with nothing running), which adds heat
-  that the GPU then loses in throttling.
-- The GPU now starts at 800 MHz and throttles to 300 MHz; a sustained clock
-  may give steadier video than 800 falling to 300-400.
+  software, `sunxi_thermal` could step back down while the board stays
+  between its release and trip temperatures, instead of only up.
+- Not a finding after all: the little cluster "at 1794 MHz, load 93-97 %"
+  while idle (here and on 13 October) is the status read itself; sampled in
+  the governor's 20 ms windows the idle cluster sits at 416 MHz.
 - zink: limit the render area of framebuffer-object render passes to the
   damage (as `zink_set_damage_region` does for swap chains), for example
   through Summit's present entry points; about 2.4 ns a pixel of the target
