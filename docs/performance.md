@@ -1,5 +1,165 @@
 # Summit performance: Speedometer 3.1 baseline, where the time goes, stress test
 
+## 14 October 2026: YouTube on the Cubie A7S
+
+Goal: smoother YouTube playback with the board's video engine (sunxi_cedar)
+and a less sluggish YouTube. Measured as on 13 October (engines from the CI
+server's arm64 tree, run from `/boot/home/sw`), with Big Buck Bunny (YouTube
+serves it as 720p60 H.264) in a maximized window. Baseline: the installed
+CI build of `8b67d98`.
+
+| | before | after |
+|---|---|---|
+| YouTube 720p60, drawn per video frame | 1.5 Mpx in 26 draws | 1.1 Mpx in 14 draws |
+| compositor, same driver and clocks | 39.9 frames a second | 45.2 |
+| compositor, cool board, new Mesa (see below) | | 57.9, 0 dropped |
+| frames the compositor never showed, as the page sees them | not counted | counted dropped |
+
+What changed:
+
+- **Cedar through Summit's own decoder path** (`65051ec`). The media kit
+  picked sunxi_cedar for YouTube's H.264, but only after Summit had tried
+  the Raspberry Pi's rpi_mmal add-on by name, which the arm64 packages
+  install on every board and which failed every stream on the Cubie. Named
+  add-ons can now require a device (`/dev/misc/sunxi_ve`), and sunxi_cedar's
+  decoder 1 (the engine without its own software fallback) is the first one.
+  It hands out B_RGB32: see "what a frame costs" for why not planes.
+  `SUMMIT_CEDAR_PLANES=1` sends I420 planes to the compositor instead (0.4
+  cores less, 15 ms more of GPU a frame).
+- **Planes occlude** (`65051ec`). I420 buffers (decoder planes on the Pi,
+  WebRTC frames) now hide the tiles under them as opaque RGB pictures do;
+  without that, planes drew the 24 page tiles under the video each frame.
+- **A video frame damages its picture, not its layer** (`65051ec`). A new
+  contents buffer damaged the whole layer; YouTube's video layer is larger
+  than its picture.
+- **Empty filter layers stay out of the damage** (`65051ec`). The rule that
+  an unchanged filter layer joins the damage where something under it
+  changed also took in layers that draw nothing: YouTube's empty blurred
+  layer behind the player (1475x797) pulled the page tiles and thumbnails
+  around the player into every video frame.
+- **Frames the compositor never showed count as dropped** (`6fda031`).
+  `getVideoPlaybackQuality()` counted every frame handed to the compositor
+  as presented. A layer now notes a contents buffer replaced before any
+  composition showed it (only while compositions take its buffers, so not a
+  hidden tab), and the MSE player counts those dropped, as Chrome does. On
+  a throttled board 25-50 % of a 720p60 video's frames are dropped this way
+  where the page saw 0-3 %. YouTube did not switch streams within two
+  minutes; it may cap the quality of later videos.
+  `SUMMIT_COUNT_UNSHOWN_FRAMES=0` restores the old count.
+- New traces: `SUMMIT_DRAW_TRACE=N` (every draw of every Nth composition:
+  shader options, rectangle, clip, blending), `SUMMIT_DAMAGE_TRACE=1` (frame,
+  target and per-layer damage, filter regions that join) and `=2` (what
+  damage collection walked), `SUMMIT_DIRECT_PRESENT_TRACE` reports slow
+  presents (UI lock or frames in flight), `SUMMIT_PAINT_TRACE_MS`, and the
+  compositor timing line has `drawCpu` and `stencilClips`.
+
+### What a video frame costs the GPU
+
+A probe drawing what the compositor draws (zink on the BXM-4-64 into a
+1920x1080 target, a 1280x720 frame drawn at 1332x749), per frame, before and
+after the 09:01 Mesa and system deploy of another session:
+
+| | before (600 MHz) | after (800 MHz) |
+|---|---|---|
+| a frame that draws one pixel | 7.9 ms (3.1 into 320x240) | 5.9 (2.2) |
+| a 1 Mpx solid quad, more | 6.7 | 4.8 |
+| a 1 Mpx RGBA quad, more | 10.5 | 7.4 |
+| a 1 Mpx I420 quad (three textures), more | 18 | 13.4 |
+| upload a 720p RGBA frame / I420 planes / NV12 | 3.1 / 5.7 / 5.5 | 2.6 / 5.6 / 4.8 |
+| RGBA / NV12 / I420, upload and draw | 25.4 / 33.1 / 36.8 | 19.5 / 24.4 / 27.5 |
+
+The GPU pays per texture read, not per byte: a single-channel luma texture
+costs as much as RGBA, and I420's three reads cost 1.7 times RGBA. So the
+processor's conversion of cedar's NV12 to RGB (NEON, 0.3 of an A55 for
+720p60) is cheaper overall than converting on the GPU. A frame also costs
+loading and storing the whole target (about 2.4 ns a pixel of the target,
+whatever is drawn): zink limits its render area to the damage only for
+swap-chain images (`eglSetDamageRegionKHR`), not for the framebuffer object
+Summit composites into.
+
+### Heat decides
+
+The board has no fan. A 720p60 video starts at about 58 frames a second
+with the GPU at 800 MHz; within a minute the board reaches its 80 C trip
+point and throttles: level 2 (GPU 400 MHz) after 15-60 s, level 4 (300 MHz)
+after 75-135 s, and the compositor falls to 23-30 frames a second. One run
+from 66 C, sampled every 15 s from the launch (playback starts at about
+10 s):
+
+| s | 15 | 30 | 45 | 60 | 75 | 90 | 105 | 120 | 135 |
+|---|---|---|---|---|---|---|---|---|---|
+| C | 79.1 | 74.2 | 79.3 | 77.5 | 78.2 | 77.9 | 77.2 | 77.7 | 76.7 |
+| throttle level | 0 | 1 | 1 | 2 | 2 | 3 | 3 | 3 | 4 |
+| GPU MHz | 800 | 600 | 600 | 400 | 400 | 400 | 400 | 400 | 300 |
+
+Its compositor drew 47 frames a second in its best 15 s and 23 in its last.
+
+Before the deploy the board went no further than level 2. Runs one after
+another differ two- to threefold because of this; comparisons here are
+alternated runs after cooling to 66-68 C (`cool.sh`), or drawn megapixels.
+
+Tried and dropped: presenting every other frame of a 60 frames-a-second
+video when the compositor loses more than a fifth of them (an even 30
+instead of an uneven 35-45). Frame times were more regular while the board
+was warm (standard deviation 5.7 ms against 8.7), but the board heated as
+fast and frames over 40 ms were not fewer. Leaving out layer branches outside
+the clip while painting (subtree bounds kept with the transforms): 0.5 ms
+less of the compositing thread per scrolled frame on YouTube's search
+results, which are bound by the GPU; not worth the risk of missing content.
+
+Still open in playback: 3 % of the intervals between composited frames are
+66 ms or more even on a cool board, spaced irregularly (often about 480 ms
+apart). In each the direct present waited for presents still in flight
+(not the UI process's lock), so the GPU or the helper thread that copies
+into app_server's buffer stalled. The GPU clock changed 92 times during
+these tests; whether a change stalls the GPU is not known.
+
+### Navigating YouTube
+
+The test profile is signed out with no history, so YouTube's home page only
+says "Try searching to get started"; the navigation test (`ytnav.sh`) uses
+search results for "big buck bunny" instead.
+
+| | |
+|---|---|
+| search results, navigate until the tab stops loading | 4.6-6.5 s |
+| wheel at 100 Hz over the results, down / up | 23-29 / 15-34 frames a second |
+| click on a result until its video plays (measured in the page) | 2.2-2.4 s (BBB), 5.8 s (another video) |
+
+After the click the page's main thread was busy 92 % of the next six
+seconds (and JIT compilation 0.37 of a core): YouTube's script, style and
+layout on the A76. Of the 2.2 s, about 1.1-1.6 s pass before YouTube creates
+the watch page's player, 0.37 s before the first media data, and 0.13 s
+from then to the first frame (cedar's setup 40-50 ms). The JIT tiers,
+mimalloc and -O3 are as expected in the arm64 build.
+
+Scrolling the results draws 2.2-3.9 Mpx a frame (the view has 1.75) in
+33-77 draws, and is bound by the GPU (10-20 ms a frame). The compositing
+thread's 7-9 ms a frame is mostly per-layer work on about 600 composited
+layers: transforms and damage 3.6 ms, painting 2.6 ms, the draw calls
+themselves 0.7 ms.
+
+YouTube's masthead is 90 % white with `backdrop-filter: blur(48px)`; Summit
+shows the page under it washed out but not blurred (with and without the
+changes above).
+
+### For the OS (air/OS on the Cubie A7S)
+
+- Heat: a heatsink or fan is the largest single gain for video. In
+  software, the little cluster stays at 1794 MHz while idle (the thermal
+  driver reads its load as 45-97 % with nothing running), which adds heat
+  that the GPU then loses in throttling.
+- The GPU now starts at 800 MHz and throttles to 300 MHz; a sustained clock
+  may give steadier video than 800 falling to 300-400.
+- zink: limit the render area of framebuffer-object render passes to the
+  damage (as `zink_set_damage_region` does for swap chains), for example
+  through Summit's present entry points; about 2.4 ns a pixel of the target
+  each frame.
+- The copy into app_server's buffer (`SUMMIT_DIRECT_PRESENT_BACK=1`) is a
+  GPU copy and a 4 MB processor copy per 720p video frame; doing it only
+  every few frames while a page keeps changing would need app_server to be
+  told which parts of its copy are stale.
+
 ## 13 October 2026: the Radxa Cubie A7S
 
 The Cubie A7S (Allwinner A733: two Cortex-A76 at 2.0 GHz, six Cortex-A55 at
