@@ -132159,7 +132159,7 @@ index 5b77f3f39874eae5747464afd0c1e925e78ad2c3..0440871ab5f9f3c1eb73ac3487c58a6f
  
  CompositingRunLoop::~CompositingRunLoop()
 diff --git a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/CoordinatedSceneState.cpp b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/CoordinatedSceneState.cpp
-index 6e297e0ad9e864aff97653036e314fcbf4d7b88c..de077dc5c0f0911e425346ef95a933df909c313a 100644
+index 6e297e0ad9e864aff97653036e314fcbf4d7b88c..0ae949b360d503dda406017e95d4d6b3afc028ca 100644
 --- a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/CoordinatedSceneState.cpp
 +++ b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/CoordinatedSceneState.cpp
 @@ -31,6 +31,10 @@
@@ -132173,7 +132173,36 @@ index 6e297e0ad9e864aff97653036e314fcbf4d7b88c..de077dc5c0f0911e425346ef95a933df
  namespace WebKit {
  using namespace WebCore;
  
-@@ -127,7 +131,25 @@ void CoordinatedSceneState::commitPendingLayers()
+@@ -107,9 +111,28 @@ bool CoordinatedSceneState::flush()
+ void CoordinatedSceneState::flushPendingState()
+ {
+     Locker stateLock { m_stateLock };
++#if PLATFORM(HAIKU)
++    // Each layer's state is flushed under the layer's own lock, which the
++    // main thread holds while it commits the layer's changes. A commit can
++    // add or remove a layer of the scene (a backdrop for backdrop-filter,
++    // which YouTube's masthead takes once the page scrolls) and so takes
++    // m_layersLock under a layer's lock. Flushing for a scroll, on the
++    // scrolling thread, with m_layersLock held, waited for the layer the
++    // main thread had locked while the main thread waited for m_layersLock:
++    // the page stopped for good. The layers are flushed from a copy of the
++    // set; m_stateLock still keeps invalidate() out until they are done.
++    Vector<Ref<CoordinatedPlatformLayer>> layers;
++    {
++        Locker layersLock { m_layersLock };
++        layers = copyToVector(m_layers);
++    }
++    for (auto& layer : layers)
++        layer->flushPendingState();
++#else
+     Locker layersLock { m_layersLock };
+     for (Ref layer : m_layers)
+         layer->flushPendingState();
++#endif
+ }
+ 
+ void CoordinatedSceneState::commitPendingLayers()
+@@ -127,7 +150,25 @@ void CoordinatedSceneState::commitPendingLayers()
  
  void CoordinatedSceneState::flushCompositingState(const OptionSet<CompositionReason>& reasons)
  {
@@ -132199,6 +132228,31 @@ index 6e297e0ad9e864aff97653036e314fcbf4d7b88c..de077dc5c0f0911e425346ef95a933df
  
      {
          Locker stateLock { m_stateLock };
+@@ -163,13 +204,19 @@ void CoordinatedSceneState::invalidate()
+ {
+     ASSERT(isMainRunLoop());
+     // Root layer doesn't have client nor backing stores to invalidate.
+-    HashSet<Ref<CoordinatedPlatformLayer>> layers;
+     {
+-        Locker locker { m_layersLock };
+-        layers = WTF::move(m_layers);
++#if PLATFORM(HAIKU)
++        // flushPendingState() works on a copy of m_layers, under m_stateLock.
++        Locker stateLock { m_stateLock };
++#endif
++        HashSet<Ref<CoordinatedPlatformLayer>> layers;
++        {
++            Locker locker { m_layersLock };
++            layers = WTF::move(m_layers);
++        }
++        for (Ref layer : layers)
++            layer->invalidateClient();
+     }
+-    for (Ref layer : layers)
+-        layer->invalidateClient();
+ 
+     Locker pendingLayersLock { m_pendingLayersLock };
+     m_pendingLayers = { };
 diff --git a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/DrawingAreaCoordinatedGraphics.cpp b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/DrawingAreaCoordinatedGraphics.cpp
 index efd16800da06dcf0fb4248500b730c89d92388fe..1ee9ed77ed614b0c96726c0d36bbb3eaf82616b6 100644
 --- a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/DrawingAreaCoordinatedGraphics.cpp
