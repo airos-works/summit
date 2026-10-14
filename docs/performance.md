@@ -151,6 +151,17 @@ changes above).
 
 ### For the OS (air/OS on the Cubie A7S)
 
+- **The video engine runs out of memory after some hours.** sunxi_ve's
+  buffers are physically contiguous below 4 GB (the engine's address
+  registers are 32 bits); with about three hours of uptime the 1 MB
+  bitstream buffer no longer fitted (`vm_page_allocate_page_run(): Failed to
+  allocate run of length 256 ... (0 786432)`, 30 times in the syslog), and
+  sunxi_cedar decoded YouTube in software: "no memory for the engine",
+  "in software", 2.2 cores instead of 1.2. The first decoder of a page
+  still got memory, the ones after YouTube's seek and its 480p-to-720p
+  switch did not; no buffers were leaked. The engine's IOMMU, a pool
+  reserved at boot or a cache of freed buffers would avoid it. Summit could
+  keep its decoder across seeks, which would halve its allocations.
 - Heat: a heatsink or fan is the largest single gain for video. In
   software, `sunxi_thermal` could step back down while the board stays
   between its release and trip temperatures, instead of only up.
