@@ -709,6 +709,24 @@ index a1b6948fc9cf7f7aaa69b98a878e71c6fb17a40b..708bfb75ced2ff4490c5584d3b82f1e4
                                           EGL_LOSE_CONTEXT_ON_RESET);
              // crbug.com/547065826 - flickering on Xclipse GPUs with robust buffer access enabled.
              if (!mIsSamsungXclipse)
+diff --git a/Source/ThirdParty/ANGLE/src/libANGLE/renderer/gl/renderergl_utils.cpp b/Source/ThirdParty/ANGLE/src/libANGLE/renderer/gl/renderergl_utils.cpp
+index ce91885218c699a478549014bc68ed5366d9c8e5..16e66019522af1043aac1703d066ed0cc0226460 100644
+--- a/Source/ThirdParty/ANGLE/src/libANGLE/renderer/gl/renderergl_utils.cpp
++++ b/Source/ThirdParty/ANGLE/src/libANGLE/renderer/gl/renderergl_utils.cpp
+@@ -2447,8 +2447,12 @@ void InitializeFeatures(const FunctionsGL *functions, angle::FeaturesGL *feature
+     ANGLE_FEATURE_CONDITION(features, preAddTexelFetchOffsets, IsApple() && isIntel);
+ 
+     // Workaround for the widespread OpenGL ES driver implementaion bug
++    // Mesa reads norm16 buffers as RGBA/UNSIGNED_SHORT itself, and the
++    // workaround refuses RED_INTEGER/UNSIGNED_SHORT, the implementation read
++    // format of R16UI (WebGL 2 read-pixels-from-fbo-test then loses the
++    // context): not on Mesa (zink on air/OS's PowerVR and others).
+     ANGLE_FEATURE_CONDITION(features, readPixelsUsingImplementationColorReadFormatForNorm16,
+-                            !isIntel && functions->standard == STANDARD_GL_ES &&
++                            !isIntel && !isMesa && functions->standard == STANDARD_GL_ES &&
+                                 functions->isAtLeastGLES(gl::Version(3, 1)) &&
+                                 functions->hasGLESExtension("GL_EXT_texture_norm16"));
+ 
 diff --git a/Source/ThirdParty/libwebrtc/CMakeLists.txt b/Source/ThirdParty/libwebrtc/CMakeLists.txt
 index 92c68d0bfdd0c7b3e652445c96c53745195325b9..69a517e236e2b4118678cb48e229602cc5efa8d2 100644
 --- a/Source/ThirdParty/libwebrtc/CMakeLists.txt
@@ -29724,10 +29742,10 @@ index 0000000000000000000000000000000000000000..21962ea9d0bd80ba9c260e9ef9ecac36
 +} // namespace SummitMPEGTS
 diff --git a/Source/WebCore/platform/graphics/haiku/MediaDecoderSelectionHaiku.cpp b/Source/WebCore/platform/graphics/haiku/MediaDecoderSelectionHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..59cc3772e39e08c5ec382afeaafd90652b8fc22e
+index 0000000000000000000000000000000000000000..91b0b71420a2228d95e0a6781469acb556581c81
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/haiku/MediaDecoderSelectionHaiku.cpp
-@@ -0,0 +1,1000 @@
+@@ -0,0 +1,1012 @@
 +/*
 + * Copyright (C) 2026 Haiku, Inc. All rights reserved.
 + *
@@ -29955,6 +29973,9 @@ index 0000000000000000000000000000000000000000..59cc3772e39e08c5ec382afeaafd9065
 +    // A device the add-on needs; where it is missing the add-on is not
 +    // loaded (the arm64 packages carry every board's add-ons).
 +    const char* device;
++    // Its decoders can be kept across seeks (AddOnVideoDecoderHaiku::
++    // keptAcrossSeeks()).
++    bool keptAcrossSeeks;
 +    BPrivate::media::DecoderPlugin* plugin { nullptr };
 +    std::atomic<bool> broken { false };
 +    std::atomic<unsigned> closing { 0 };
@@ -29981,13 +30002,17 @@ index 0000000000000000000000000000000000000000..59cc3772e39e08c5ec382afeaafd9065
 +    // amduvd validates the complete SPS/PPS and the device before accepting
 +    // the stream. RGB conversion there honours per-picture VUI range/matrix.
 +#if CPU(X86_64)
-+    { "amduvd", ffmpegCodecH264, 4096, 4096, 4096 * 4096, true, 0, true, nullptr },
-+    { "amduvd", ffmpegCodecHEVC, 4096, 4096, 4096 * 4096, true, 1, true, nullptr },
++    { "amduvd", ffmpegCodecH264, 4096, 4096, 4096 * 4096, true, 0, true, nullptr, false },
++    { "amduvd", ffmpegCodecHEVC, 4096, 4096, 4096 * 4096, true, 1, true, nullptr, false },
 +#endif
 +#if CPU(ARM64)
-+    { "sunxi_cedar", ffmpegCodecH264, 4096, 4096, 4096 * 2304, !cedarPlanesRequested(), 1, false, "/dev/misc/sunxi_ve" },
++    // Each of its decoders allocates its pictures as physically contiguous
++    // memory below 4 GB, which hours of uptime fragment: kept across seeks,
++    // YouTube's page asks for one set instead of two (it seeks just after
++    // it starts) and keeps the engine where a new set would no longer fit.
++    { "sunxi_cedar", ffmpegCodecH264, 4096, 4096, 4096 * 2304, !cedarPlanesRequested(), 1, false, "/dev/misc/sunxi_ve", true },
 +#endif
-+    { "rpi_mmal", ffmpegCodecH264, 1920, 1920, 1920 * 1088, false, 0, false, nullptr },
++    { "rpi_mmal", ffmpegCodecH264, 1920, 1920, 1920 * 1088, false, 0, false, nullptr, false },
 +};
 +
 +// What dynamic_cast<void*> does, which the engine (built without RTTI) cannot:
@@ -30456,6 +30481,11 @@ index 0000000000000000000000000000000000000000..59cc3772e39e08c5ec382afeaafd9065
 +    }
 +}
 +
++bool AddOnVideoDecoderHaiku::keptAcrossSeeks() const
++{
++    return m_decoder && s_namedAddOns[m_backend].keptAcrossSeeks;
++}
++
 +status_t AddOnVideoDecoderHaiku::seekedTo(int64 frame, bigtime_t time)
 +{
 +    if (!m_decoder)
@@ -30730,10 +30760,10 @@ index 0000000000000000000000000000000000000000..59cc3772e39e08c5ec382afeaafd9065
 +} // namespace WebCore
 diff --git a/Source/WebCore/platform/graphics/haiku/MediaDecoderSelectionHaiku.h b/Source/WebCore/platform/graphics/haiku/MediaDecoderSelectionHaiku.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..37c1562658a12277edd7cf69bb4feefd3ad4d6a3
+index 0000000000000000000000000000000000000000..1a59f5ca77ca81301993268bcdee2f36a4d97113
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/haiku/MediaDecoderSelectionHaiku.h
-@@ -0,0 +1,196 @@
+@@ -0,0 +1,200 @@
 +/*
 + * Copyright (C) 2026 Haiku, Inc. All rights reserved.
 + *
@@ -30867,6 +30897,10 @@ index 0000000000000000000000000000000000000000..37c1562658a12277edd7cf69bb4feefd
 +    static void convertToBGRA(const uint8_t* planes, const I420Layout&, uint8_t* bgra, size_t rowBytes);
 +    // Forgets pictures on their way, after the source was moved.
 +    status_t seekedTo(int64 frame, bigtime_t);
++    // Whether this decoder can be kept across a seek: after seekedTo() it
++    // decodes from the next random access point of a new source.
++    bool keptAcrossSeeks() const;
++    void setChunkSource(ChunkSource&& source) { m_source = WTF::move(source); }
 +
 +private:
 +    status_t decodeNative(void*, int64*, media_header*, media_decode_info*);
@@ -30875,7 +30909,7 @@ index 0000000000000000000000000000000000000000..37c1562658a12277edd7cf69bb4feefd
 +
 +    size_t m_backend { 0 };
 +    bool m_nativeRGB { false };
-+    // The source outlives the decoder, which may read from it until it is gone.
++    // The decoder reads from it until it is gone or given another.
 +    ChunkSource m_source;
 +    std::unique_ptr<BPrivate::media::Decoder> m_decoder;
 +    media_codec_info m_codecInfo { };
@@ -33022,10 +33056,10 @@ index 0000000000000000000000000000000000000000..df43f4fc21c17d2cfb904c9eaefa28b1
 +#endif
 diff --git a/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaikuMSE.cpp b/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaikuMSE.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..d3a5c3d7cd282981657ad1c5b969c3d4c57a396f
+index 0000000000000000000000000000000000000000..d299deba81496c69f573ac0a73eab4af39924560
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaikuMSE.cpp
-@@ -0,0 +1,2978 @@
+@@ -0,0 +1,3019 @@
 +/*
 + * Copyright (C) 2026 Summit contributors.
 + *
@@ -33075,6 +33109,7 @@ index 0000000000000000000000000000000000000000..d3a5c3d7cd282981657ad1c5b969c3d4
 +#include <wtf/Condition.h>
 +#include <wtf/MainThread.h>
 +#include <wtf/NeverDestroyed.h>
++#include <wtf/Scope.h>
 +#include <wtf/Threading.h>
 +#include <wtf/WallTime.h>
 +#include <wtf/text/StringView.h>
@@ -33857,9 +33892,23 @@ index 0000000000000000000000000000000000000000..d3a5c3d7cd282981657ad1c5b969c3d4
 +        };
 +        bigtime_t setupStarted = system_time();
 +
-+        // Explicitly selected AMD or Raspberry Pi decoder first.
++        // Explicitly selected AMD or Raspberry Pi decoder first, or the
++        // Cubie's kept from before a seek of this stream (see below).
 +        std::unique_ptr<AddOnVideoDecoderHaiku> addOn;
-+        if (tryAddOn) {
++        const KeptDecoderKey key { info.codec, info.width, info.height, info.codecConfig };
++        if (auto kept = std::exchange(m_keptAddOn, nullptr)) {
++            if (tryAddOn && m_keptAddOnKey == key) {
++                kept->setChunkSource([&](const void** data, size_t* size, media_header* header) {
++                    return nextChunk(data, size, header);
++                });
++                if (kept->seekedTo(0, 0) == B_OK) {
++                    addOn = WTF::move(kept);
++                    MSE_TRACE("video decoder %s kept across the seek\n", addOn->codecInfo().pretty_name);
++                }
++            }
++            // One that does not fit goes before another is made.
++        }
++        if (tryAddOn && !addOn) {
 +            addOn = AddOnVideoDecoderHaiku::create(format, codecConfig, [&](const void** data, size_t* size, media_header* header) {
 +                return nextChunk(data, size, header);
 +            });
@@ -33871,6 +33920,21 @@ index 0000000000000000000000000000000000000000..d3a5c3d7cd282981657ad1c5b969c3d4
 +                replayed = 0;
 +            }
 +        }
++        // A decoder that stops for a seek (a new generation of this stream)
++        // waits for it, where its add-on allows that: the Cubie's video
++        // engine needs a new set of physically contiguous pictures for each
++        // decoder, which a fragmented memory may no longer have.
++        auto keepAcrossSeek = makeScopeExit([&] {
++            if (!addOn || !addOn->keptAcrossSeeks() || m_queue.aborted() || m_queue.generation() == generation)
++                return;
++            // This call's chunks go away with it.
++            addOn->setChunkSource([](const void**, size_t* size, media_header*) -> status_t {
++                *size = 0;
++                return B_CANCELED;
++            });
++            m_keptAddOnKey = key;
++            m_keptAddOn = WTF::move(addOn);
++        });
 +        if (!addOn && (m_queue.aborted() || m_queue.generation() != generation))
 +            return true;
 +
@@ -34328,6 +34392,17 @@ index 0000000000000000000000000000000000000000..d3a5c3d7cd282981657ad1c5b969c3d4
 +    Deque<DecodedFrame> m_outputFrames WTF_GUARDED_BY_LOCK(m_outputLock);
 +    size_t m_outputBytes WTF_GUARDED_BY_LOCK(m_outputLock) { 0 };
 +    unsigned m_lastGeneration { UINT_MAX };
++    // A named add-on's decoder kept across a seek, and the stream it
++    // decodes (video thread; see decodeWith()).
++    struct KeptDecoderKey {
++        std::string codec;
++        uint32_t width { 0 };
++        uint32_t height { 0 };
++        std::vector<uint8_t> codecConfig;
++        bool operator==(const KeptDecoderKey&) const = default;
++    };
++    std::unique_ptr<AddOnVideoDecoderHaiku> m_keptAddOn;
++    KeptDecoderKey m_keptAddOnKey;
 +    bool m_queuedSinceFlush { false }; // Decoder thread only.
 +    bool m_presentedSinceFlush { false }; // Presentation thread only.
 +    Vector<int64_t> m_nonDisplaying;
@@ -162243,21 +162318,3 @@ index 0000000000000000000000000000000000000000..a72ad7445e65c071177074b49499bab7
 +	sleep 60
 +done
 +
-diff --git a/Source/ThirdParty/ANGLE/src/libANGLE/renderer/gl/renderergl_utils.cpp b/Source/ThirdParty/ANGLE/src/libANGLE/renderer/gl/renderergl_utils.cpp
-index ce91885218c699a478549014bc68ed5366d9c8e5..16e66019522af1043aac1703d066ed0cc0226460 100644
---- a/Source/ThirdParty/ANGLE/src/libANGLE/renderer/gl/renderergl_utils.cpp
-+++ b/Source/ThirdParty/ANGLE/src/libANGLE/renderer/gl/renderergl_utils.cpp
-@@ -2447,8 +2447,12 @@ void InitializeFeatures(const FunctionsGL *functions, angle::FeaturesGL *feature
-     ANGLE_FEATURE_CONDITION(features, preAddTexelFetchOffsets, IsApple() && isIntel);
- 
-     // Workaround for the widespread OpenGL ES driver implementaion bug
-+    // Mesa reads norm16 buffers as RGBA/UNSIGNED_SHORT itself, and the
-+    // workaround refuses RED_INTEGER/UNSIGNED_SHORT, the implementation read
-+    // format of R16UI (WebGL 2 read-pixels-from-fbo-test then loses the
-+    // context): not on Mesa (zink on air/OS's PowerVR and others).
-     ANGLE_FEATURE_CONDITION(features, readPixelsUsingImplementationColorReadFormatForNorm16,
--                            !isIntel && functions->standard == STANDARD_GL_ES &&
-+                            !isIntel && !isMesa && functions->standard == STANDARD_GL_ES &&
-                                 functions->isAtLeastGLES(gl::Version(3, 1)) &&
-                                 functions->hasGLESExtension("GL_EXT_texture_norm16"));
- 
