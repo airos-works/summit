@@ -21373,10 +21373,57 @@ index 160ba4f2623722caaf670da2b6eb3f4b1d3f2f5f..ffff803f61bbdb6af0dbc8fd6e0b5c44
      keepRect.unite(coverRect);
      keepRect.inflateX(m_tileSize.width() / 2);
 diff --git a/Source/WebCore/platform/graphics/coordinated/CoordinatedPlatformLayer.cpp b/Source/WebCore/platform/graphics/coordinated/CoordinatedPlatformLayer.cpp
-index 63ec41fac1fe1f6d4b7606555093bc4bed44d365..4153d1204664a89ec985a059cad37555683a0ecf 100644
+index 63ec41fac1fe1f6d4b7606555093bc4bed44d365..823d1a1ab52b7023d568a19322e817dd43072b59 100644
 --- a/Source/WebCore/platform/graphics/coordinated/CoordinatedPlatformLayer.cpp
 +++ b/Source/WebCore/platform/graphics/coordinated/CoordinatedPlatformLayer.cpp
-@@ -910,6 +910,22 @@ void CoordinatedPlatformLayer::updateBackingStore()
+@@ -533,8 +533,15 @@ void CoordinatedPlatformLayer::setContentsBuffer(std::unique_ptr<CoordinatedPlat
+ #if ENABLE(DAMAGE_TRACKING)
+     if (dirtyRegion)
+         addDamage(WTF::move(*dirtyRegion));
++#if PLATFORM(HAIKU)
++    else if (m_damagePropagationEnabled) {
++        if (auto damage = contentsDamageHaiku())
++            addDamage(WTF::move(*damage));
++    }
++#else
+     else
+         damageWholeLayer();
++#endif
+ #else
+     UNUSED_PARAM(dirtyRegion);
+ #endif
+@@ -652,6 +659,30 @@ void CoordinatedPlatformLayer::addDamage(Damage&& damage)
+ }
+ #endif
+ 
++#if PLATFORM(HAIKU) && ENABLE(DAMAGE_TRACKING)
++// What a new contents buffer changes: where the contents are painted (their
++// rectangle, as TextureMapperLayer::paintSelf clips it), not the whole layer.
++// YouTube's video layer is larger than its picture, and with each video frame
++// the page's tiles and the thumbnails along its edges were drawn again too,
++// 0.4 Mpx a frame on the Cubie A7S. Nothing for an empty layer (an empty
++// Damage rejects everything added to it later).
++std::optional<Damage> CoordinatedPlatformLayer::contentsDamageHaiku() const
++{
++    assertIsHeld(m_lock);
++    if (m_size.isEmpty())
++        return std::nullopt;
++    FloatRect rect = intersection(m_contentsRect, m_contentsClippingRect.rect());
++    if (rect.isEmpty())
++        rect = m_contentsRect;
++    rect.intersect(FloatRect({ }, m_size));
++    if (rect.isEmpty())
++        return Damage { m_size, Damage::Mode::Full };
++    Damage damage(m_size, Damage::Mode::Rectangles);
++    damage.add(rect);
++    return damage;
++}
++#endif
++
+ void CoordinatedPlatformLayer::damageWholeLayer()
+ {
+ #if ENABLE(DAMAGE_TRACKING)
+@@ -910,6 +941,22 @@ void CoordinatedPlatformLayer::updateBackingStore()
          backingStoreProxy = m_backingStoreProxy;
      }
  
@@ -21399,7 +21446,7 @@ index 63ec41fac1fe1f6d4b7606555093bc4bed44d365..4153d1204664a89ec985a059cad37555
      Damage damage(size, Damage::Mode::Rectangles);
      auto updateResult = backingStoreProxy->updateIfNeeded(m_transformedVisibleRect, size, m_visibleRect, contentsScale, contentsOpaque, m_pendingTilesCreation || m_needsTilesUpdate, m_dirtyRegion, damage, *this);
      m_dirtyRegion.clear();
-@@ -1153,6 +1169,8 @@ void CoordinatedPlatformLayer::flushCompositingStateOnTarget(const OptionSet<Com
+@@ -1153,6 +1200,8 @@ void CoordinatedPlatformLayer::flushCompositingStateOnTarget(const OptionSet<Com
          }
  
          if (m_pendingChanges.contains(Change::BackgroundColor)) {
@@ -21408,7 +21455,7 @@ index 63ec41fac1fe1f6d4b7606555093bc4bed44d365..4153d1204664a89ec985a059cad37555
              layer.setBackgroundColor(m_backgroundColor);
              m_pendingChanges.remove(Change::BackgroundColor);
          }
-@@ -1167,7 +1185,9 @@ void CoordinatedPlatformLayer::flushCompositingStateOnTarget(const OptionSet<Com
+@@ -1167,7 +1216,9 @@ void CoordinatedPlatformLayer::flushCompositingStateOnTarget(const OptionSet<Com
                  if (!m_backingStore)
                      m_backingStore = CoordinatedBackingStore::create();
                  layer.setBackingStore(m_backingStore.get());
@@ -21418,7 +21465,7 @@ index 63ec41fac1fe1f6d4b7606555093bc4bed44d365..4153d1204664a89ec985a059cad37555
  
                  if (auto* animatedBackingStoreClient = m_backingStoreProxy->animatedBackingStoreClient())
                      layer.setAnimatedBackingStoreClient(animatedBackingStoreClient);
-@@ -1175,6 +1195,10 @@ void CoordinatedPlatformLayer::flushCompositingStateOnTarget(const OptionSet<Com
+@@ -1175,6 +1226,10 @@ void CoordinatedPlatformLayer::flushCompositingStateOnTarget(const OptionSet<Com
                  layer.setBackingStore(nullptr);
                  layer.setAnimatedBackingStoreClient(nullptr);
                  m_backingStore = nullptr;
@@ -21429,7 +21476,7 @@ index 63ec41fac1fe1f6d4b7606555093bc4bed44d365..4153d1204664a89ec985a059cad37555
              }
              m_pendingChanges.remove(Change::BackingStore);
          }
-@@ -1290,6 +1314,14 @@ void CoordinatedPlatformLayer::flushCompositingStateOnTarget(const OptionSet<Com
+@@ -1290,6 +1345,15 @@ void CoordinatedPlatformLayer::flushCompositingStateOnTarget(const OptionSet<Com
              m_contentsBuffer.committed = WTF::move(m_contentsBuffer.pending);
              m_contentsBuffer.hasCommitted = !!m_contentsBuffer.committed;
              m_pendingChanges.remove(Change::ContentsBuffer);
@@ -21439,11 +21486,26 @@ index 63ec41fac1fe1f6d4b7606555093bc4bed44d365..4153d1204664a89ec985a059cad37555
 +            // comes on its own: without damage of its own the compositor
 +            // drew it and nothing read it back, and the picture on screen
 +            // stood still until the page around it changed.
-+            layer.setDamage(Damage { m_size, Damage::Mode::Full });
++            if (auto damage = contentsDamageHaiku())
++                layer.setDamage(WTF::move(*damage));
 +#endif
          }
  
          if (m_contentsBuffer.committed)
+diff --git a/Source/WebCore/platform/graphics/coordinated/CoordinatedPlatformLayer.h b/Source/WebCore/platform/graphics/coordinated/CoordinatedPlatformLayer.h
+index dc4108941486e941ebe3b62eb9a1612941385fa2..bf9c00e6c9f434734c7085c77635fcbd03d7ea41 100644
+--- a/Source/WebCore/platform/graphics/coordinated/CoordinatedPlatformLayer.h
++++ b/Source/WebCore/platform/graphics/coordinated/CoordinatedPlatformLayer.h
+@@ -241,6 +241,9 @@ private:
+     void addDamage(Damage&&) WTF_REQUIRES_LOCK(m_lock);
+ #endif
+     void damageWholeLayer() WTF_REQUIRES_LOCK(m_lock);
++#if PLATFORM(HAIKU) && ENABLE(DAMAGE_TRACKING)
++    std::optional<Damage> contentsDamageHaiku() const WTF_REQUIRES_LOCK(m_lock);
++#endif
+ 
+ #if USE(TEXTURE_MAPPER)
+     void flushCompositingStateOnTarget(const OptionSet<CompositionReason>&, TextureMapperLayer&);
 diff --git a/Source/WebCore/platform/graphics/coordinated/CoordinatedTileBuffer.cpp b/Source/WebCore/platform/graphics/coordinated/CoordinatedTileBuffer.cpp
 index 97343135c0044a99532b9f29b2928c98b0e0cd7c..0adfd221a96c3c7d6fb8315ea6057dbb8ecd833c 100644
 --- a/Source/WebCore/platform/graphics/coordinated/CoordinatedTileBuffer.cpp
@@ -22647,10 +22709,10 @@ index 0000000000000000000000000000000000000000..7d495c04b64af928f0525ca51be51686
 +}
 diff --git a/Source/WebCore/platform/graphics/haiku/CoordinatedPlatformLayerBufferPlanesHaiku.h b/Source/WebCore/platform/graphics/haiku/CoordinatedPlatformLayerBufferPlanesHaiku.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..03ad527d51298267785f10de63f6989da0af3c6a
+index 0000000000000000000000000000000000000000..c9d2dfa9db20e380902df27d9151847dcb795274
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/haiku/CoordinatedPlatformLayerBufferPlanesHaiku.h
-@@ -0,0 +1,99 @@
+@@ -0,0 +1,103 @@
 +/*
 + * Copyright (C) 2026 Haiku, Inc. All rights reserved.
 + *
@@ -22710,6 +22772,10 @@ index 0000000000000000000000000000000000000000..03ad527d51298267785f10de63f6989d
 +
 +    void prepareForPaintingHaiku() final { uploadPlanes(); }
 +
++    // Planes have no alpha: the picture hides what is under it, as an opaque
++    // RGB picture does (see TextureMapperLayer::collectOccludersHaiku).
++    bool coversTargetOpaquelyHaiku() final { return (m_planes || m_buffer) && !m_flags.contains(TextureMapperFlags::ShouldBlend); }
++
 +    void paintToTextureMapper(TextureMapper& textureMapper, const FloatRect& targetRect, const TransformationMatrix& modelViewMatrix, float opacity) final
 +    {
 +        uploadPlanes();
@@ -22752,10 +22818,10 @@ index 0000000000000000000000000000000000000000..03ad527d51298267785f10de63f6989d
 +#endif // USE(COORDINATED_GRAPHICS) && USE(TEXTURE_MAPPER) && USE(SKIA)
 diff --git a/Source/WebCore/platform/graphics/haiku/CoordinatedPlatformLayerBufferVideoFrameHaiku.h b/Source/WebCore/platform/graphics/haiku/CoordinatedPlatformLayerBufferVideoFrameHaiku.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..bfa97ad5798d23a3e4f5867088bac3dfad66691a
+index 0000000000000000000000000000000000000000..e335b26230d121b17d850055d748f2701410777e
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/haiku/CoordinatedPlatformLayerBufferVideoFrameHaiku.h
-@@ -0,0 +1,78 @@
+@@ -0,0 +1,81 @@
 +/*
 + * Copyright (C) 2026 Summit contributors.
 + *
@@ -22796,6 +22862,9 @@ index 0000000000000000000000000000000000000000..bfa97ad5798d23a3e4f5867088bac3df
 +    {
 +        ASSERT(m_frame->format() == VideoFrameHaiku::Format::I420);
 +    }
++
++    // I420 has no alpha (see CoordinatedPlatformLayerBufferPlanesHaiku).
++    bool coversTargetOpaquelyHaiku() final { return (m_frame || m_buffer) && !m_flags.contains(TextureMapperFlags::ShouldBlend); }
 +
 +    void paintToTextureMapper(TextureMapper& textureMapper, const FloatRect& targetRect, const TransformationMatrix& modelViewMatrix, float opacity) final
 +    {
@@ -29566,10 +29635,10 @@ index 0000000000000000000000000000000000000000..21962ea9d0bd80ba9c260e9ef9ecac36
 +} // namespace SummitMPEGTS
 diff --git a/Source/WebCore/platform/graphics/haiku/MediaDecoderSelectionHaiku.cpp b/Source/WebCore/platform/graphics/haiku/MediaDecoderSelectionHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..27cbd5624dea53c85a07cf6f6bf80c19a6843f59
+index 0000000000000000000000000000000000000000..59cc3772e39e08c5ec382afeaafd90652b8fc22e
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/haiku/MediaDecoderSelectionHaiku.cpp
-@@ -0,0 +1,976 @@
+@@ -0,0 +1,1000 @@
 +/*
 + * Copyright (C) 2026 Haiku, Inc. All rights reserved.
 + *
@@ -29614,6 +29683,7 @@ index 0000000000000000000000000000000000000000..27cbd5624dea53c85a07cf6f6bf80c19
 +#include <set>
 +#include <string>
 +#include <sys/stat.h>
++#include <unistd.h>
 +#include <vector>
 +#include <wtf/Threading.h>
 +
@@ -29793,6 +29863,9 @@ index 0000000000000000000000000000000000000000..27cbd5624dea53c85a07cf6f6bf80c19
 +    bool nativeRGB;
 +    unsigned decoderIndex;
 +    bool recoversAfterDeviceReset;
++    // A device the add-on needs; where it is missing the add-on is not
++    // loaded (the arm64 packages carry every board's add-ons).
++    const char* device;
 +    BPrivate::media::DecoderPlugin* plugin { nullptr };
 +    std::atomic<bool> broken { false };
 +    std::atomic<unsigned> closing { 0 };
@@ -29800,14 +29873,32 @@ index 0000000000000000000000000000000000000000..27cbd5624dea53c85a07cf6f6bf80c19
 +
 +// rpi_mmal of air/OS: the VideoCore firmware's decoder of the Raspberry Pi,
 +// eight-bit 4:2:0 progressive H.264 up to 1920x1088 (either way round).
++// sunxi_cedar: the video engine of the Allwinner A733 (Radxa Cubie A7S), its
++// decoder 1 (the engine alone: Summit falls back to software itself). The
++// media kit would pick it too, but the Raspberry Pi's add-on, installed on
++// every arm64 board and named first, failed each stream there before that.
++// It hands out B_RGB32, converted on the processor (NEON, 0.3 of an A55 for
++// 720p60): on the Cubie's GPU, three texture reads a pixel cost more than
++// that conversion and the larger upload together (a 720p frame drawn from
++// I420 planes took 37 ms of the GPU, from RGB 24; the compositor fell from
++// 40 frames a second to 25). SUMMIT_CEDAR_PLANES=1 sends planes instead.
++static bool cedarPlanesRequested()
++{
++    const char* value = std::getenv("SUMMIT_CEDAR_PLANES");
++    return value && !std::strcmp(value, "1");
++}
++
 +NamedDecoderAddOn s_namedAddOns[] = {
 +    // amduvd validates the complete SPS/PPS and the device before accepting
 +    // the stream. RGB conversion there honours per-picture VUI range/matrix.
 +#if CPU(X86_64)
-+    { "amduvd", ffmpegCodecH264, 4096, 4096, 4096 * 4096, true, 0, true },
-+    { "amduvd", ffmpegCodecHEVC, 4096, 4096, 4096 * 4096, true, 1, true },
++    { "amduvd", ffmpegCodecH264, 4096, 4096, 4096 * 4096, true, 0, true, nullptr },
++    { "amduvd", ffmpegCodecHEVC, 4096, 4096, 4096 * 4096, true, 1, true, nullptr },
 +#endif
-+    { "rpi_mmal", ffmpegCodecH264, 1920, 1920, 1920 * 1088, false, 0, false },
++#if CPU(ARM64)
++    { "sunxi_cedar", ffmpegCodecH264, 4096, 4096, 4096 * 2304, !cedarPlanesRequested(), 1, false, "/dev/misc/sunxi_ve" },
++#endif
++    { "rpi_mmal", ffmpegCodecH264, 1920, 1920, 1920 * 1088, false, 0, false, nullptr },
 +};
 +
 +// What dynamic_cast<void*> does, which the engine (built without RTTI) cannot:
@@ -29930,6 +30021,8 @@ index 0000000000000000000000000000000000000000..27cbd5624dea53c85a07cf6f6bf80c19
 +        if (find_paths(B_FIND_PATH_ADD_ONS_DIRECTORY, "media/plugins", &paths, &count) != B_OK)
 +            return;
 +        for (auto& addOn : s_namedAddOns) {
++            if (addOn.device && access(addOn.device, F_OK))
++                continue;
 +            for (size_t i = 0; i < count && !addOn.plugin; ++i) {
 +                BPath path(paths[i], addOn.leafName);
 +                struct stat info;
@@ -41543,7 +41636,7 @@ index 9fd560e16a7e8b8b5cdf0ef54b46ab2dddc32e4f..37b7905e18e26b577ae0ec335352ae63
  
      // Y-axis should be inverted only when painting into the window.
 diff --git a/Source/WebCore/platform/graphics/texmap/TextureMapper.cpp b/Source/WebCore/platform/graphics/texmap/TextureMapper.cpp
-index 1b88532103dfc26c2a90aedce768e19f2e7059e6..e45a0e8cbbf904544dcc782857aa9a786f11c6e6 100644
+index 1b88532103dfc26c2a90aedce768e19f2e7059e6..bea592422f9c75d2124d5a0a92af2c3c04f5dd87 100644
 --- a/Source/WebCore/platform/graphics/texmap/TextureMapper.cpp
 +++ b/Source/WebCore/platform/graphics/texmap/TextureMapper.cpp
 @@ -44,6 +44,14 @@
@@ -41574,9 +41667,21 @@ index 1b88532103dfc26c2a90aedce768e19f2e7059e6..e45a0e8cbbf904544dcc782857aa9a78
      std::array<GLint, 4> viewport { };
      std::array<GLint, 4> previousScissor { };
      double zNear { 0 };
-@@ -174,7 +188,16 @@ Ref<TextureMapperShaderProgram> TextureMapperGLData::getShaderProgram(TextureMap
+@@ -170,11 +184,28 @@ GLuint TextureMapperGLData::getStaticVBO(GLenum target, GLsizeiptr size, const v
+     return addResult.iterator->value;
+ }
+ 
++#if PLATFORM(HAIKU)
++// The options of the program the next draw uses, for SUMMIT_DRAW_TRACE.
++static thread_local unsigned s_drawProgramOptionsHaiku;
++#endif
++
+ Ref<TextureMapperShaderProgram> TextureMapperGLData::getShaderProgram(TextureMapperShaderProgram::Options options)
  {
      ASSERT(!options.isEmpty());
++#if PLATFORM(HAIKU)
++    s_drawProgramOptionsHaiku = options.toRaw();
++#endif
      auto addResult = m_sharedGLData->m_programs.ensure(options.toRaw(), [options] {
 -        return TextureMapperShaderProgram::create(options);
 +#if PLATFORM(HAIKU)
@@ -41592,7 +41697,7 @@ index 1b88532103dfc26c2a90aedce768e19f2e7059e6..e45a0e8cbbf904544dcc782857aa9a78
      });
      return *addResult.iterator->value;
  }
-@@ -232,6 +255,81 @@ ClipStack& TextureMapper::clipStack()
+@@ -232,6 +263,81 @@ ClipStack& TextureMapper::clipStack()
      return data().currentSurface ? data().currentSurface->clipStack() : m_clipStack;
  }
  
@@ -41674,7 +41779,7 @@ index 1b88532103dfc26c2a90aedce768e19f2e7059e6..e45a0e8cbbf904544dcc782857aa9a78
  void TextureMapper::beginPainting(FlipY flipY, BitmapTexture* surface)
  {
      glGetIntegerv(GL_CURRENT_PROGRAM, &data().previousProgram);
-@@ -472,6 +570,69 @@ static TransformationMatrix colorSpaceMatrixForFlags(OptionSet<TextureMapperFlag
+@@ -472,6 +578,69 @@ static TransformationMatrix colorSpaceMatrixForFlags(OptionSet<TextureMapperFlag
      return matrix;
  }
  
@@ -41744,7 +41849,7 @@ index 1b88532103dfc26c2a90aedce768e19f2e7059e6..e45a0e8cbbf904544dcc782857aa9a78
  static void prepareRoundedRectClip(TextureMapperShaderProgram& program, const float* rects, const float* transforms, int nRects)
  {
      glUseProgram(program.programID());
-@@ -532,6 +693,9 @@ void TextureMapper::drawTextureFragment(const BitmapTexture& sourceTexture, cons
+@@ -532,6 +701,9 @@ void TextureMapper::drawTextureFragment(const BitmapTexture& sourceTexture, cons
      TextureMapperShaderProgram::Options options = TextureMapperShaderProgram::TextureRGB;
      if (needsUVClamping) [[unlikely]]
          options.add(TextureMapperShaderProgram::ClampUVBounds);
@@ -41754,7 +41859,7 @@ index 1b88532103dfc26c2a90aedce768e19f2e7059e6..e45a0e8cbbf904544dcc782857aa9a78
  
      Ref<TextureMapperShaderProgram> program = data().getShaderProgram(options);
  
-@@ -574,6 +738,12 @@ void TextureMapper::drawTextureFragment(const BitmapTexture& sourceTexture, cons
+@@ -574,6 +746,12 @@ void TextureMapper::drawTextureFragment(const BitmapTexture& sourceTexture, cons
  
  void TextureMapper::drawTexture(GLuint texture, OptionSet<TextureMapperFlags> flags, const FloatRect& targetRect, const TransformationMatrix& modelViewMatrix, float opacity, AllEdgesExposed allEdgesExposed)
  {
@@ -41767,7 +41872,7 @@ index 1b88532103dfc26c2a90aedce768e19f2e7059e6..e45a0e8cbbf904544dcc782857aa9a78
      bool useAntialiasing = allEdgesExposed == AllEdgesExposed::Yes && !modelViewMatrix.mapQuad(targetRect).isRectilinear();
  
      TextureMapperShaderProgram::Options options;
-@@ -607,6 +777,9 @@ void TextureMapper::drawTexture(GLuint texture, OptionSet<TextureMapperFlags> fl
+@@ -607,6 +785,9 @@ void TextureMapper::drawTexture(GLuint texture, OptionSet<TextureMapperFlags> fl
  
      if (flags.contains(TextureMapperFlags::ShouldPremultiply))
          options.add(TextureMapperShaderProgram::Premultiply);
@@ -41777,7 +41882,7 @@ index 1b88532103dfc26c2a90aedce768e19f2e7059e6..e45a0e8cbbf904544dcc782857aa9a78
  
      Ref<TextureMapperShaderProgram> program = data().getShaderProgram(options);
  
-@@ -647,6 +820,12 @@ static void prepareTransformationMatrixWithFlags(TransformationMatrix& patternTr
+@@ -647,6 +828,12 @@ static void prepareTransformationMatrixWithFlags(TransformationMatrix& patternTr
  
  void TextureMapper::drawTexturePlanarYUV(const std::array<GLuint, 3>& textures, const std::array<GLfloat, 16>& yuvToRgbMatrix, OptionSet<TextureMapperFlags> flags, const FloatRect& targetRect, const TransformationMatrix& modelViewMatrix, float opacity, std::optional<GLuint> alphaPlane, TextureMapper::TransferFunction transferFunction, AllEdgesExposed allEdgesExposed)
  {
@@ -41790,7 +41895,7 @@ index 1b88532103dfc26c2a90aedce768e19f2e7059e6..e45a0e8cbbf904544dcc782857aa9a78
      bool useAntialiasing = allEdgesExposed == AllEdgesExposed::Yes && !modelViewMatrix.mapQuad(targetRect).isRectilinear();
  
      TextureMapperShaderProgram::Options options = alphaPlane ? TextureMapperShaderProgram::TextureYUVA : TextureMapperShaderProgram::TextureYUV;
-@@ -801,6 +980,14 @@ void TextureMapper::drawTexturePackedYUV(GLuint texture, const std::array<GLfloa
+@@ -801,6 +988,14 @@ void TextureMapper::drawTexturePackedYUV(GLuint texture, const std::array<GLfloa
  
  void TextureMapper::drawSolidColor(const FloatRect& rect, const TransformationMatrix& matrix, const Color& color, bool isBlendingAllowed)
  {
@@ -41805,7 +41910,7 @@ index 1b88532103dfc26c2a90aedce768e19f2e7059e6..e45a0e8cbbf904544dcc782857aa9a78
      OptionSet<TextureMapperFlags> flags;
      TextureMapperShaderProgram::Options options = TextureMapperShaderProgram::SolidColor;
      if (!matrix.mapQuad(rect).isRectilinear()) {
-@@ -817,6 +1004,9 @@ void TextureMapper::drawSolidColor(const FloatRect& rect, const TransformationMa
+@@ -817,6 +1012,9 @@ void TextureMapper::drawSolidColor(const FloatRect& rect, const TransformationMa
      }
  
      Ref<TextureMapperShaderProgram> program = data().getShaderProgram(options);
@@ -41815,7 +41920,7 @@ index 1b88532103dfc26c2a90aedce768e19f2e7059e6..e45a0e8cbbf904544dcc782857aa9a78
      glUseProgram(program->programID());
  
      if (clipStack().isRoundedRectClipEnabled())
-@@ -828,6 +1018,13 @@ void TextureMapper::drawSolidColor(const FloatRect& rect, const TransformationMa
+@@ -828,6 +1026,13 @@ void TextureMapper::drawSolidColor(const FloatRect& rect, const TransformationMa
          flags.add(TextureMapperFlags::ShouldBlend);
  
      draw(rect, matrix, program.get(), GL_TRIANGLE_FAN, flags);
@@ -41829,17 +41934,27 @@ index 1b88532103dfc26c2a90aedce768e19f2e7059e6..e45a0e8cbbf904544dcc782857aa9a78
  }
  
  void TextureMapper::clearColor(const Color& color)
-@@ -877,8 +1074,38 @@ void TextureMapper::drawUnitRect(TextureMapperShaderProgram& program, GLenum dra
+@@ -877,8 +1082,54 @@ void TextureMapper::drawUnitRect(TextureMapperShaderProgram& program, GLenum dra
      glBindBuffer(GL_ARRAY_BUFFER, 0);
  }
  
 +#if PLATFORM(HAIKU)
 +static thread_local bool s_countsDraws;
 +static thread_local TextureMapper::DrawStatsHaiku s_drawStats;
++// SUMMIT_DRAW_TRACE=N: every draw of every Nth counted composition.
++static thread_local bool s_tracesDraws;
++static thread_local unsigned s_countedCompositions;
 +
 +void TextureMapper::setCountsDrawsHaiku(bool counts)
 +{
++    static const unsigned traceEvery = [] {
++        const char* value = std::getenv("SUMMIT_DRAW_TRACE");
++        return value ? static_cast<unsigned>(std::max(0, std::atoi(value))) : 0u;
++    }();
 +    s_countsDraws = counts;
++    s_tracesDraws = counts && traceEvery && !(s_countedCompositions++ % traceEvery);
++    if (s_tracesDraws)
++        std::fprintf(stderr, "Summit draw trace: composition %u\n", s_countedCompositions - 1);
 +}
 +
 +auto TextureMapper::takeDrawStatsHaiku() -> DrawStatsHaiku
@@ -41863,12 +41978,18 @@ index 1b88532103dfc26c2a90aedce768e19f2e7059e6..e45a0e8cbbf904544dcc782857aa9a78
 +        }
 +        if (data().currentSurface)
 +            ++s_drawStats.drawsIntoSurfaces;
++        if (s_tracesDraws) {
++            FloatRect whole = modelViewMatrix.mapRect(rect);
++            std::fprintf(stderr, "Summit draw trace: options=%#x rect=%.0f,%.0f %.0fx%.0f clipped=%.0f,%.0f %.0fx%.0f blend=%d mask=%d surface=%d\n",
++                s_drawProgramOptionsHaiku, whole.x(), whole.y(), whole.width(), whole.height(), drawn.x(), drawn.y(), drawn.width(), drawn.height(),
++                flags.contains(TextureMapperFlags::ShouldBlend), isInMaskMode(), !!data().currentSurface);
++        }
 +    }
 +#endif
      TransformationMatrix matrix(modelViewMatrix);
      matrix.multiply(TransformationMatrix::rectToRect(FloatRect(0, 0, 1, 1), rect));
  
-@@ -987,6 +1214,10 @@ void TextureMapper::drawTextureCopy(const BitmapTexture& sourceTexture, const Fl
+@@ -987,6 +1238,10 @@ void TextureMapper::drawTextureCopy(const BitmapTexture& sourceTexture, const Fl
  
  void TextureMapper::drawBlurred(const BitmapTexture& sourceTexture, const FloatRect& rect, float radius, Direction direction, bool alphaBlur)
  {
@@ -41879,7 +42000,7 @@ index 1b88532103dfc26c2a90aedce768e19f2e7059e6..e45a0e8cbbf904544dcc782857aa9a78
      Ref<TextureMapperShaderProgram> program = data().getShaderProgram({
          alphaBlur ? TextureMapperShaderProgram::AlphaBlur : TextureMapperShaderProgram::BlurFilter,
      });
-@@ -1278,6 +1509,28 @@ RefPtr<BitmapTexture> TextureMapper::applyFilters(RefPtr<BitmapTexture>& sourceT
+@@ -1278,6 +1533,28 @@ RefPtr<BitmapTexture> TextureMapper::applyFilters(RefPtr<BitmapTexture>& sourceT
  
  RefPtr<BitmapTexture> TextureMapper::applyFilter(RefPtr<BitmapTexture>& sourceTexture, const Ref<const FilterOperation>& filter, bool defersLastPass)
  {
@@ -41908,7 +42029,7 @@ index 1b88532103dfc26c2a90aedce768e19f2e7059e6..e45a0e8cbbf904544dcc782857aa9a78
      switch (filter->type()) {
      case FilterOperation::Type::Grayscale:
      case FilterOperation::Type::Sepia:
-@@ -1330,6 +1583,10 @@ void TextureMapper::bindDefaultSurface()
+@@ -1330,6 +1607,10 @@ void TextureMapper::bindDefaultSurface()
  
  void TextureMapper::bindSurface(BitmapTexture *surface)
  {
@@ -41919,7 +42040,7 @@ index 1b88532103dfc26c2a90aedce768e19f2e7059e6..e45a0e8cbbf904544dcc782857aa9a78
      if (!surface) {
          bindDefaultSurface();
          return;
-@@ -1385,6 +1642,18 @@ bool TextureMapper::beginRoundedRectClip(const TransformationMatrix& modelViewMa
+@@ -1385,6 +1666,18 @@ bool TextureMapper::beginRoundedRectClip(const TransformationMatrix& modelViewMa
      FloatQuad quad = modelViewMatrix.projectQuad(targetRect.rect());
      IntRect rect = quad.enclosingBoundingBox();
  
@@ -42006,7 +42127,7 @@ index b478a0e1d88443132d337f514434eeab7c8df464..69dda7202badacf9739212e7891b70ae
  protected:
      WEBCORE_EXPORT static bool allTileEdgesExposed(const FloatRect& totalRect, const FloatRect& tileRect);
 diff --git a/Source/WebCore/platform/graphics/texmap/TextureMapperLayer.cpp b/Source/WebCore/platform/graphics/texmap/TextureMapperLayer.cpp
-index 112d19b1676c297b0168941b1db5b619cd535a29..32b54e74688e5abd3d6d00194fad50b74861946f 100644
+index 112d19b1676c297b0168941b1db5b619cd535a29..77e5512838d735c28799b17cdb544cdca5e40f37 100644
 --- a/Source/WebCore/platform/graphics/texmap/TextureMapperLayer.cpp
 +++ b/Source/WebCore/platform/graphics/texmap/TextureMapperLayer.cpp
 @@ -21,6 +21,16 @@
@@ -42026,7 +42147,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..32b54e74688e5abd3d6d00194fad50b7
  #include "BitmapTexturePool.h"
  #include "ClipPath.h"
  #include "FloatQuad.h"
-@@ -32,12 +42,214 @@
+@@ -32,12 +42,225 @@
  #include <wtf/SetForScope.h>
  #include <wtf/TZoneMallocInlines.h>
  
@@ -42121,6 +42242,17 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..32b54e74688e5abd3d6d00194fad50b7
 +    FloatRect contentsRect;
 +    FloatRoundedRect contentsClippingRect;
 +};
++
++// A layer with nothing in it draws nothing, whatever its filters, mask or
++// replica would do. YouTube's watch page has an empty blurred layer the size
++// of its player, and on the Cubie A7S each video frame ran it through eight
++// surfaces and two blur passes.
++bool TextureMapperLayer::drawsNothingHaiku() const
++{
++    return m_children.isEmpty() && !m_backingStore && !m_contentsLayer && !hasBackdrop() && !isFlattened()
++        && !(m_state.backgroundColor.isValid() && m_state.backgroundColor.isVisible())
++        && !(m_state.solidColor.isValid() && m_state.solidColor.isVisible());
++}
 +
 +bool TextureMapperLayer::isOccludedHaiku(const FloatRect& rect)
 +{
@@ -42241,7 +42373,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..32b54e74688e5abd3d6d00194fad50b7
  WTF_MAKE_TZONE_ALLOCATED_IMPL(TextureMapperLayer);
  
  static constexpr auto s_opacityVisibilityThreshold = 0.01;
-@@ -363,14 +575,37 @@ void TextureMapperLayer::prepareForPainting(TextureMapper& textureMapper)
+@@ -363,14 +586,37 @@ void TextureMapperLayer::prepareForPainting(TextureMapper& textureMapper)
  
  void TextureMapperLayer::paint(TextureMapper& textureMapper)
  {
@@ -42279,7 +42411,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..32b54e74688e5abd3d6d00194fad50b7
  }
  
  #if ENABLE(DAMAGE_TRACKING)
-@@ -390,11 +625,35 @@ void TextureMapperLayer::setDamage(Damage&& damage)
+@@ -390,20 +636,77 @@ void TextureMapperLayer::setDamage(Damage&& damage)
          m_damageInLayerCoordinateSpace = WTF::move(damage);
  }
  
@@ -42315,7 +42447,19 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..32b54e74688e5abd3d6d00194fad50b7
      collectDamageRecursive(options, damage);
  
      // Use the damage information we inferred while performing
-@@ -404,6 +663,27 @@ void TextureMapperLayer::collectDamage(TextureMapper& textureMapper, Damage& dam
+     // layer-level operations such as resizes, transformations, etc.
+     ASSERT(m_damageInGlobalCoordinateSpace);
+     const auto& clipBounds = options.textureMapper.clipBounds();
++#if PLATFORM(HAIKU)
++    static const bool traceDamage = [] {
++        const char* value = getenv("SUMMIT_DAMAGE_TRACE");
++        return value && !strcmp(value, "1");
++    }();
++    if (traceDamage) {
++        for (const auto& rect : *m_damageInGlobalCoordinateSpace)
++            std::fprintf(stderr, "Summit damage trace: global %d,%d %dx%d\n", rect.x(), rect.y(), rect.width(), rect.height());
++    }
++#endif
      for (const auto& rect : *m_damageInGlobalCoordinateSpace)
          damage.add(intersection(rect, clipBounds));
      *m_damageInGlobalCoordinateSpace = Damage(m_state.size);
@@ -42332,6 +42476,8 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..32b54e74688e5abd3d6d00194fad50b7
 +            for (const auto& rect : damage) {
 +                if (!FloatRect(rect).intersects(region))
 +                    continue;
++                if (traceDamage)
++                    std::fprintf(stderr, "Summit damage trace: filter region %.0f,%.0f %.0fx%.0f joins\n", region.x(), region.y(), region.width(), region.height());
 +                damage.add(region);
 +                joined = true;
 +                return true;
@@ -42343,7 +42489,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..32b54e74688e5abd3d6d00194fad50b7
  }
  
  void TextureMapperLayer::collectDamageRecursive(TextureMapperPaintOptions& options, Damage& damage)
-@@ -490,11 +770,26 @@ void TextureMapperLayer::collectDamageSelf(TextureMapperPaintOptions& options, D
+@@ -490,11 +793,26 @@ void TextureMapperLayer::collectDamageSelf(TextureMapperPaintOptions& options, D
          return;
      }
  
@@ -42370,7 +42516,28 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..32b54e74688e5abd3d6d00194fad50b7
  
      TransformationMatrix transform;
      transform.translate(options.offset.width(), options.offset.height());
-@@ -533,6 +828,23 @@ void TextureMapperLayer::collectDamageSelfChildrenReplicaFilterAndMask(TextureMa
+@@ -507,6 +825,20 @@ void TextureMapperLayer::collectDamageSelf(TextureMapperPaintOptions& options, D
+     // layer-level operations such as resizes, transformations, etc.
+     const auto& clipBounds = options.textureMapper.clipBounds();
+     if (m_damageInLayerCoordinateSpace) {
++#if PLATFORM(HAIKU)
++        // SUMMIT_DAMAGE_TRACE=1 (ThreadedCompositor): which layers damage.
++        static const bool traceDamage = [] {
++            const char* value = getenv("SUMMIT_DAMAGE_TRACE");
++            return value && !strcmp(value, "1");
++        }();
++        if (traceDamage && !m_damageInLayerCoordinateSpace->isEmpty()) {
++            auto bounds = transformRectFromLayerToGlobalCoordinateSpace(m_damageInLayerCoordinateSpace->bounds(), transform, options);
++            std::fprintf(stderr, "Summit damage trace: layer id=%u size=%.0fx%.0f contents=%.0f,%.0f %.0fx%.0f contentsLayer=%d backing=%d solid=%d mode=%d rects=%u global=%.0f,%.0f %.0fx%.0f\n",
++                m_id, m_state.size.width(), m_state.size.height(), m_state.contentsRect.x(), m_state.contentsRect.y(), m_state.contentsRect.width(), m_state.contentsRect.height(),
++                !!m_contentsLayer, !!m_backingStore, m_state.solidColor.isValid(), static_cast<int>(m_damageInLayerCoordinateSpace->mode()),
++                static_cast<unsigned>(m_damageInLayerCoordinateSpace->rects().size()), bounds.x(), bounds.y(), bounds.width(), bounds.height());
++        }
++#endif
+         for (const auto& rect : *m_damageInLayerCoordinateSpace)
+             damage.add(intersection(transformRectFromLayerToGlobalCoordinateSpace(rect, transform, options), clipBounds));
+     }
+@@ -533,6 +865,23 @@ void TextureMapperLayer::collectDamageSelfChildrenReplicaFilterAndMask(TextureMa
  
  void TextureMapperLayer::collectDamageSelfChildrenFilterAndMask(TextureMapperPaintOptions& options, Damage& damage)
  {
@@ -42394,21 +42561,40 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..32b54e74688e5abd3d6d00194fad50b7
      const IntSize maxTextureSize = options.textureMapper.maxTextureSize();
      for (auto& rect : computeConsolidatedOverlapRegionRects(options)) {
          for (int x = rect.x(); x < rect.maxX(); x += maxTextureSize.width()) {
-@@ -545,6 +857,13 @@ void TextureMapperLayer::collectDamageSelfChildrenFilterAndMask(TextureMapperPai
+@@ -545,8 +894,31 @@ void TextureMapperLayer::collectDamageSelfChildrenFilterAndMask(TextureMapperPai
          }
      }
  
+-    if (!m_accumulatedOverlapRegionDamage.isEmpty())
 +#if PLATFORM(HAIKU)
 +    if (!changed && m_accumulatedOverlapRegionDamage == regionBefore) {
-+        if (!m_accumulatedOverlapRegionDamage.isEmpty())
++        // One that draws nothing (and drew nothing before, or it would have
++        // changed) shows nothing a change under it could alter. YouTube's
++        // empty blurred layer behind the player joined each video frame's
++        // damage, and the page around the player was drawn again with it.
++        if (!m_accumulatedOverlapRegionDamage.isEmpty() && !drawsNothingHaiku())
 +            s_unchangedFilterRegionsHaiku.append(m_accumulatedOverlapRegionDamage);
 +        return;
 +    }
 +#endif
-     if (!m_accumulatedOverlapRegionDamage.isEmpty())
++    if (!m_accumulatedOverlapRegionDamage.isEmpty()) {
++#if PLATFORM(HAIKU)
++        static const bool traceDamage = [] {
++            const char* value = getenv("SUMMIT_DAMAGE_TRACE");
++            return value && !strcmp(value, "1");
++        }();
++        if (traceDamage) {
++            const auto& r = m_accumulatedOverlapRegionDamage;
++            std::fprintf(stderr, "Summit damage trace: changed filter layer id=%u filters=%d mask=%d region %.0f,%.0f %.0fx%.0f\n",
++                m_id, hasFilters(), !!m_state.maskLayer, r.x(), r.y(), r.width(), r.height());
++        }
++#endif
          damage.add(m_accumulatedOverlapRegionDamage);
++    }
  }
-@@ -578,12 +897,38 @@ void TextureMapperLayer::paintSelf(TextureMapperPaintOptions& options)
+ 
+ void TextureMapperLayer::damageWholeLayer()
+@@ -578,12 +950,38 @@ void TextureMapperLayer::paintSelf(TextureMapperPaintOptions& options)
      auto targetRect = layerRect();
      if (targetRect.isEmpty())
          return;
@@ -42447,7 +42633,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..32b54e74688e5abd3d6d00194fad50b7
  
      if (isFlattened() && !m_flattenedLayer->needsUpdate()) {
          m_flattenedLayer->paintToTextureMapper(options.textureMapper, m_flattenedLayer->layerRect(), transform, options.opacity);
-@@ -592,6 +937,26 @@ void TextureMapperLayer::paintSelf(TextureMapperPaintOptions& options)
+@@ -592,6 +990,26 @@ void TextureMapperLayer::paintSelf(TextureMapperPaintOptions& options)
  
      TextureMapperSolidColorLayer solidColorLayer;
      TextureMapperBackingStore* backingStore = m_backingStore;
@@ -42474,7 +42660,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..32b54e74688e5abd3d6d00194fad50b7
      if (m_state.backgroundColor.isValid()) {
          solidColorLayer.setColor(m_state.backgroundColor);
          backingStore = &solidColorLayer;
-@@ -599,6 +964,10 @@ void TextureMapperLayer::paintSelf(TextureMapperPaintOptions& options)
+@@ -599,6 +1017,10 @@ void TextureMapperLayer::paintSelf(TextureMapperPaintOptions& options)
  
      options.textureMapper.setWrapMode(TextureMapper::WrapMode::Stretch);
      options.textureMapper.setPatternTransform(TransformationMatrix());
@@ -42485,7 +42671,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..32b54e74688e5abd3d6d00194fad50b7
  
      if (backingStore) {
          backingStore->paintToTextureMapper(options.textureMapper, targetRect, transform, options.opacity);
-@@ -608,6 +977,10 @@ void TextureMapperLayer::paintSelf(TextureMapperPaintOptions& options)
+@@ -608,6 +1030,10 @@ void TextureMapperLayer::paintSelf(TextureMapperPaintOptions& options)
          if (m_state.showRepaintCounter)
              backingStore->drawRepaintCounter(options.textureMapper, m_state.repaintCount, m_state.debugBorderColor, targetRect, transform);
      }
@@ -42496,7 +42682,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..32b54e74688e5abd3d6d00194fad50b7
  
      TextureMapperPlatformLayer* contentsLayer = m_contentsLayer;
      if (m_state.solidColor.isValid() && m_state.solidColor.isVisible()) {
-@@ -638,6 +1011,10 @@ void TextureMapperLayer::paintSelf(TextureMapperPaintOptions& options)
+@@ -638,6 +1064,10 @@ void TextureMapperLayer::paintSelf(TextureMapperPaintOptions& options)
  
      if (m_state.showDebugBorders)
          contentsLayer->drawBorder(options.textureMapper, m_state.debugBorderColor, m_state.debugBorderWidth, m_state.contentsRect, transform);
@@ -42507,7 +42693,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..32b54e74688e5abd3d6d00194fad50b7
  }
  
  void TextureMapperLayer::paintBackdrop(TextureMapperPaintOptions& options)
-@@ -1057,8 +1434,99 @@ Vector<IntRect, 1> TextureMapperLayer::computeConsolidatedOverlapRegionRects(Tex
+@@ -1057,8 +1487,99 @@ Vector<IntRect, 1> TextureMapperLayer::computeConsolidatedOverlapRegionRects(Tex
      return rects;
  }
  
@@ -42607,7 +42793,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..32b54e74688e5abd3d6d00194fad50b7
      IntSize maxTextureSize = options.textureMapper.maxTextureSize();
      for (auto& rect : computeConsolidatedOverlapRegionRects(options)) {
          for (int x = rect.x(); x < rect.maxX(); x += maxTextureSize.width()) {
-@@ -1079,6 +1547,33 @@ void TextureMapperLayer::applyMask(TextureMapperPaintOptions& options)
+@@ -1079,6 +1600,33 @@ void TextureMapperLayer::applyMask(TextureMapperPaintOptions& options)
      options.textureMapper.setMaskMode(false);
  }
  
@@ -42641,7 +42827,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..32b54e74688e5abd3d6d00194fad50b7
  void TextureMapperLayer::paintIntoSurface(TextureMapperPaintOptions& options)
  {
      options.textureMapper.bindSurface(options.surface.get());
-@@ -1093,7 +1588,11 @@ void TextureMapperLayer::paintIntoSurface(TextureMapperPaintOptions& options)
+@@ -1093,7 +1641,11 @@ void TextureMapperLayer::paintIntoSurface(TextureMapperPaintOptions& options)
      bool hasMask = !!m_state.maskLayer;
      bool hasReplicaMask = options.replicaLayer == this && m_state.replicaLayer->m_state.maskLayer;
      bool defersLastFilterPass = !hasMask && !hasReplicaMask;
@@ -42653,24 +42839,18 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..32b54e74688e5abd3d6d00194fad50b7
      options.textureMapper.bindSurface(options.surface.get());
      if (hasMask)
          m_state.maskLayer->applyMask(options);
-@@ -1142,6 +1641,16 @@ void TextureMapperLayer::paintSelfAndChildrenWithIntermediateSurface(TextureMapp
+@@ -1142,6 +1694,10 @@ void TextureMapperLayer::paintSelfAndChildrenWithIntermediateSurface(TextureMapp
  
  void TextureMapperLayer::paintSelfChildrenReplicaFilterAndMask(TextureMapperPaintOptions& options)
  {
 +#if PLATFORM(HAIKU)
-+    // A layer with nothing in it draws nothing, whatever its filters, mask
-+    // or replica would do. YouTube's watch page has an empty blurred layer
-+    // the size of its player, and on the Cubie A7S each video frame ran it
-+    // through eight surfaces and two blur passes.
-+    if (m_children.isEmpty() && !m_backingStore && !m_contentsLayer && !hasBackdrop() && !isFlattened()
-+        && !(m_state.backgroundColor.isValid() && m_state.backgroundColor.isVisible())
-+        && !(m_state.solidColor.isValid() && m_state.solidColor.isVisible()))
++    if (drawsNothingHaiku())
 +        return;
 +#endif
      bool hasFilterOrMask = [&] {
          if (hasFilters())
              return true;
-@@ -1167,6 +1676,18 @@ void TextureMapperLayer::paintRecursive(TextureMapperPaintOptions& options)
+@@ -1167,6 +1723,18 @@ void TextureMapperLayer::paintRecursive(TextureMapperPaintOptions& options)
  {
      if (!isVisible())
          return;
@@ -42689,7 +42869,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..32b54e74688e5abd3d6d00194fad50b7
  
      SetForScope scopedOpacity(options.opacity, options.opacity * m_currentOpacity);
  
-@@ -1495,6 +2016,11 @@ void TextureMapperLayer::setBackgroundColor(const Color& color)
+@@ -1495,6 +2063,11 @@ void TextureMapperLayer::setBackgroundColor(const Color& color)
  void TextureMapperLayer::setFilters(const FilterOperations& filters)
  {
      m_state.filters = filters;
@@ -42702,10 +42882,10 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..32b54e74688e5abd3d6d00194fad50b7
  
  void TextureMapperLayer::setContentsLayer(TextureMapperPlatformLayer* platformLayer)
 diff --git a/Source/WebCore/platform/graphics/texmap/TextureMapperLayer.h b/Source/WebCore/platform/graphics/texmap/TextureMapperLayer.h
-index 385b7808e97fada2a7e26a56172004da71b87c1c..6602a0e26276ae3a66a6023832d11e1c49550751 100644
+index 385b7808e97fada2a7e26a56172004da71b87c1c..ef8f1b6857401f73dc1411eabe6863f75be7781e 100644
 --- a/Source/WebCore/platform/graphics/texmap/TextureMapperLayer.h
 +++ b/Source/WebCore/platform/graphics/texmap/TextureMapperLayer.h
-@@ -127,6 +127,16 @@ public:
+@@ -127,6 +127,17 @@ public:
  
      FloatRect effectiveLayerRect() const;
  
@@ -42714,6 +42894,7 @@ index 385b7808e97fada2a7e26a56172004da71b87c1c..6602a0e26276ae3a66a6023832d11e1c
 +    // rect (in the target's pixels) after the layer whose own contents are
 +    // being painted: its tiles there can be left out.
 +    static bool isOccludedHaiku(const FloatRect&);
++    bool drawsNothingHaiku() const;
 +    // Has the contents of the layers that paint() will draw upload what they
 +    // need before the composition starts drawing.
 +    WEBCORE_EXPORT void prepareContentsHaiku();
@@ -42722,7 +42903,7 @@ index 385b7808e97fada2a7e26a56172004da71b87c1c..6602a0e26276ae3a66a6023832d11e1c
  private:
      TextureMapperLayer& backdropRootLayer() const
      {
-@@ -186,6 +196,12 @@ private:
+@@ -186,6 +197,12 @@ private:
      void paintBackdrop(TextureMapperPaintOptions&);
      void applyMask(TextureMapperPaintOptions&);
      void collect3DRenderingContextLayers(Vector<TextureMapperLayer*>&);
@@ -42735,7 +42916,7 @@ index 385b7808e97fada2a7e26a56172004da71b87c1c..6602a0e26276ae3a66a6023832d11e1c
  
  #if ENABLE(DAMAGE_TRACKING)
      void collectDamageRecursive(TextureMapperPaintOptions&, Damage&);
-@@ -224,6 +240,11 @@ private:
+@@ -224,6 +241,11 @@ private:
      std::unique_ptr<TextureMapperFlattenedLayer> m_flattenedLayer;
      float m_currentOpacity { 1.0 };
      FilterOperations m_currentFilters;
@@ -130553,7 +130734,7 @@ index 0000000000000000000000000000000000000000..abc82f6d26d2b1374740dc304282ae75
 +
 +}
 diff --git a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/AcceleratedSurface.cpp b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/AcceleratedSurface.cpp
-index 8177756a0e14111347846c912b8e3851f2559b4a..76767f5ebf7e08a5187e882109bdbe94a95a92fc 100644
+index 8177756a0e14111347846c912b8e3851f2559b4a..52c8841d56557100c08a5e87e5e7d67f7355bde7 100644
 --- a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/AcceleratedSurface.cpp
 +++ b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/AcceleratedSurface.cpp
 @@ -26,6 +26,23 @@
@@ -130629,7 +130810,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..76767f5ebf7e08a5187e882109bdbe94
      , m_hardwareAccelerationEnabled(webPage.corePage()->settings().hardwareAccelerationEnabled())
  #endif
      , m_backgroundColor(webPage.backgroundColor())
-@@ -130,10 +166,330 @@ AcceleratedSurface::AcceleratedSurface(WebPage& webPage, Function<void()>&& fram
+@@ -130,10 +166,337 @@ AcceleratedSurface::AcceleratedSurface(WebPage& webPage, Function<void()>&& fram
      , m_isVisible(webPage.activityState().contains(ActivityState::IsVisible))
      , m_useExplicitSync(usesGL() && useExplicitSync())
  #if ENABLE(DAMAGE_TRACKING)
@@ -130735,8 +130916,10 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..76767f5ebf7e08a5187e882109bdbe94
 +        if (!present || !m_state->enabled)
 +            return false;
 +        // The UI process holds the lock only while it changes the target.
++        const bigtime_t lockStart = system_time();
 +        if (acquire_sem_etc(m_state->lock, 1, B_RELATIVE_TIMEOUT, 20000) != B_OK)
 +            return false;
++        const bigtime_t locked = system_time();
 +        auto release = makeScopeExit([this] { release_sem(m_state->lock); });
 +        if (!m_state->enabled)
 +            return false;
@@ -130796,6 +130979,11 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..76767f5ebf7e08a5187e882109bdbe94
 +        request.cookie = &m_state->inFlight;
 +        m_state->inFlight.fetch_add(1);
 +        int result = present(framebuffer, &request);
++        // SUMMIT_DIRECT_PRESENT_TRACE: where a slow present waited, the
++        // UI process's lock or the presents still in flight.
++        if (directPresentTraceHaiku() && system_time() - lockStart > 15000)
++            std::fprintf(stderr, "Summit direct present: slow, lock %.1f ms, present %.1f ms, %zu rectangles\n",
++                (locked - lockStart) / 1000.0, (system_time() - locked) / 1000.0, m_rects.size());
 +        // -5: what changed is outside the screen; the frame is presented all the same.
 +        if (result == -5) {
 +            m_state->inFlight.fetch_sub(1);
@@ -130960,7 +131148,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..76767f5ebf7e08a5187e882109bdbe94
  
  AcceleratedSurface::~AcceleratedSurface() = default;
  
-@@ -176,7 +532,7 @@ void AcceleratedSurface::RenderTarget::createSkiaSurfaceForFramebuffer(unsigned
+@@ -176,7 +539,7 @@ void AcceleratedSurface::RenderTarget::createSkiaSurfaceForFramebuffer(unsigned
      m_skiaSurface = SkSurfaces::WrapBackendRenderTarget(display.skiaGrContext(), backendRenderTarget, origin, kRGBA_8888_SkColorType, SkColorSpace::MakeSRGB(), &properties);
  }
  
@@ -130969,7 +131157,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..76767f5ebf7e08a5187e882109bdbe94
  WTF_MAKE_TZONE_ALLOCATED_IMPL(AcceleratedSurface::RenderTargetShareableBuffer);
  
  AcceleratedSurface::RenderTargetShareableBuffer::RenderTargetShareableBuffer(AcceleratedSurface& surface, const IntSize& size)
-@@ -218,9 +574,36 @@ void AcceleratedSurface::RenderTargetShareableBuffer::initializeColorBuffer(EGLI
+@@ -218,9 +581,36 @@ void AcceleratedSurface::RenderTargetShareableBuffer::initializeColorBuffer(EGLI
      glBindRenderbuffer(GL_RENDERBUFFER, m_colorBuffer);
      if (image)
          glEGLImageTargetRenderbufferStorageOES(GL_RENDERBUFFER, image);
@@ -131007,7 +131195,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..76767f5ebf7e08a5187e882109bdbe94
  
      if (m_surface->useSkia())
          createSkiaSurfaceForFramebuffer(m_fbo);
-@@ -228,6 +611,10 @@ void AcceleratedSurface::RenderTargetShareableBuffer::initializeColorBuffer(EGLI
+@@ -228,6 +618,10 @@ void AcceleratedSurface::RenderTargetShareableBuffer::initializeColorBuffer(EGLI
  
  void AcceleratedSurface::RenderTargetShareableBuffer::sendFrame(Vector<WebCore::IntRect, 1>&& damageRects)
  {
@@ -131018,7 +131206,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..76767f5ebf7e08a5187e882109bdbe94
      WebProcess::singleton().parentProcessConnection()->send(Messages::AcceleratedBackingStore::Frame(m_id, WTF::move(damageRects), WTF::move(m_renderingFenceFD)), m_surface->surfaceID());
  }
  
-@@ -418,7 +805,14 @@ std::unique_ptr<AcceleratedSurface::RenderTarget> AcceleratedSurface::RenderTarg
+@@ -418,7 +812,14 @@ std::unique_ptr<AcceleratedSurface::RenderTarget> AcceleratedSurface::RenderTarg
          return nullptr;
      }
  
@@ -131033,7 +131221,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..76767f5ebf7e08a5187e882109bdbe94
      if (!bufferHandle) {
          WTFLogAlways("Failed to create handle for shared memory buffer");
          return nullptr;
-@@ -439,13 +833,479 @@ AcceleratedSurface::RenderTargetSHMImage::RenderTargetSHMImage(AcceleratedSurfac
+@@ -439,13 +840,479 @@ AcceleratedSurface::RenderTargetSHMImage::RenderTargetSHMImage(AcceleratedSurfac
      WebProcess::singleton().parentProcessConnection()->send(Messages::AcceleratedBackingStore::DidCreateSHMBuffer(m_id, WTF::move(bitmapHandle)), m_surface->surfaceID());
  }
  
@@ -131513,7 +131701,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..76767f5ebf7e08a5187e882109bdbe94
  
          SkImageInfo info = SkImageInfo::Make(m_bitmap->size().width(), m_bitmap->size().height(), SkColorType::kBGRA_8888_SkColorType, SkAlphaType::kPremul_SkAlphaType);
  
-@@ -457,9 +1317,14 @@ void AcceleratedSurface::RenderTargetSHMImage::didRenderFrame()
+@@ -457,9 +1324,14 @@ void AcceleratedSurface::RenderTargetSHMImage::didRenderFrame()
          return;
      }
  
@@ -131528,7 +131716,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..76767f5ebf7e08a5187e882109bdbe94
  std::unique_ptr<AcceleratedSurface::RenderTarget> AcceleratedSurface::RenderTargetTexture::create(AcceleratedSurface& surface, const IntSize& size)
  {
      auto texture = BitmapTexture::create(size);
-@@ -515,8 +1380,9 @@ AcceleratedSurface::RenderTargetTexture::RenderTargetTexture(AcceleratedSurface&
+@@ -515,8 +1387,9 @@ AcceleratedSurface::RenderTargetTexture::RenderTargetTexture(AcceleratedSurface&
  }
  
  AcceleratedSurface::RenderTargetTexture::~RenderTargetTexture() = default;
@@ -131539,7 +131727,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..76767f5ebf7e08a5187e882109bdbe94
  
  #if USE(WPE_RENDERER)
  std::unique_ptr<AcceleratedSurface::RenderTarget> AcceleratedSurface::RenderTargetWPEBackend::create(AcceleratedSurface& surface, const IntSize& initialSize, UnixFileDescriptor&& hostFD)
-@@ -594,7 +1460,7 @@ void AcceleratedSurface::RenderTargetWPEBackend::didRenderFrame()
+@@ -594,7 +1467,7 @@ void AcceleratedSurface::RenderTargetWPEBackend::didRenderFrame()
  AcceleratedSurface::SwapChain::SwapChain(AcceleratedSurface& surface)
      : m_surface(surface)
  {
@@ -131548,7 +131736,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..76767f5ebf7e08a5187e882109bdbe94
      if (!m_surface->hardwareAccelerationEnabled()) {
          m_type = Type::SharedMemory;
          return;
-@@ -632,7 +1498,7 @@ AcceleratedSurface::SwapChain::SwapChain(AcceleratedSurface& surface)
+@@ -632,7 +1505,7 @@ AcceleratedSurface::SwapChain::SwapChain(AcceleratedSurface& surface)
      case PlatformDisplay::Type::GBM:
  #endif
          break;
@@ -131557,7 +131745,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..76767f5ebf7e08a5187e882109bdbe94
  #if USE(WPE_RENDERER)
      case PlatformDisplay::Type::WPE:
          m_type = Type::WPEBackend;
-@@ -646,11 +1512,19 @@ AcceleratedSurface::SwapChain::SwapChain(AcceleratedSurface& surface)
+@@ -646,11 +1519,19 @@ AcceleratedSurface::SwapChain::SwapChain(AcceleratedSurface& surface)
      case PlatformDisplay::Type::Default:
          break;
  #endif // PLATFORM(GTK)
@@ -131578,7 +131766,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..76767f5ebf7e08a5187e882109bdbe94
  void AcceleratedSurface::SwapChain::setupBufferFormat()
  {
      if (m_type != Type::EGLImage)
-@@ -749,7 +1623,7 @@ bool AcceleratedSurface::SwapChain::resize(const IntSize& size)
+@@ -749,7 +1630,7 @@ bool AcceleratedSurface::SwapChain::resize(const IntSize& size)
  
  bool AcceleratedSurface::SwapChain::handleBufferFormatChangeIfNeeded()
  {
@@ -131587,7 +131775,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..76767f5ebf7e08a5187e882109bdbe94
      if (m_type == Type::EGLImage) {
          Locker locker { m_bufferFormatLock };
          if (m_bufferFormatChanged) {
-@@ -765,7 +1639,7 @@ bool AcceleratedSurface::SwapChain::handleBufferFormatChangeIfNeeded()
+@@ -765,7 +1646,7 @@ bool AcceleratedSurface::SwapChain::handleBufferFormatChangeIfNeeded()
  std::unique_ptr<AcceleratedSurface::RenderTarget> AcceleratedSurface::SwapChain::createTarget() const
  {
      switch (m_type) {
@@ -131596,7 +131784,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..76767f5ebf7e08a5187e882109bdbe94
  #if USE(GBM) || OS(ANDROID)
      case Type::EGLImage: {
          Locker locker { m_bufferFormatLock };
-@@ -773,7 +1647,11 @@ std::unique_ptr<AcceleratedSurface::RenderTarget> AcceleratedSurface::SwapChain:
+@@ -773,7 +1654,11 @@ std::unique_ptr<AcceleratedSurface::RenderTarget> AcceleratedSurface::SwapChain:
      }
  #endif
      case Type::Texture:
@@ -131608,7 +131796,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..76767f5ebf7e08a5187e882109bdbe94
      case Type::SharedMemory:
          return RenderTargetSHMImage::create(m_surface.get(), m_size);
  #endif
-@@ -812,6 +1690,11 @@ AcceleratedSurface::RenderTarget* AcceleratedSurface::SwapChain::nextTarget()
+@@ -812,6 +1697,11 @@ AcceleratedSurface::RenderTarget* AcceleratedSurface::SwapChain::nextTarget()
              if (auto target = createTarget())
                  m_freeTargets.append(WTF::move(target));
          }
@@ -131620,7 +131808,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..76767f5ebf7e08a5187e882109bdbe94
  
  #if ENABLE(WPE_PLATFORM)
          if (m_freeTargets.size() != targetsToCreate)
-@@ -841,6 +1724,12 @@ void AcceleratedSurface::SwapChain::releaseTarget(uint64_t targetID, UnixFileDes
+@@ -841,6 +1731,12 @@ void AcceleratedSurface::SwapChain::releaseTarget(uint64_t targetID, UnixFileDes
          m_freeTargets.insert(0, WTF::move(m_lockedTargets[index]));
          m_lockedTargets.removeAt(index);
      }
@@ -131633,7 +131821,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..76767f5ebf7e08a5187e882109bdbe94
  }
  
  void AcceleratedSurface::SwapChain::reset()
-@@ -859,6 +1748,11 @@ void AcceleratedSurface::SwapChain::releaseUnusedBuffers()
+@@ -859,6 +1755,11 @@ void AcceleratedSurface::SwapChain::releaseUnusedBuffers()
  #if USE(WPE_RENDERER)
      ASSERT(m_type != Type::WPEBackend);
  #endif
@@ -131645,7 +131833,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..76767f5ebf7e08a5187e882109bdbe94
  
  #if ENABLE(WPE_PLATFORM)
      WebProcess::singleton().parentProcessConnection()->send(Messages::AcceleratedBackingStore::DidChangeBufferConfiguration(m_lockedTargets.size()), m_surface->surfaceID());
-@@ -929,7 +1823,7 @@ bool AcceleratedSurface::shouldPaintMirrored() const
+@@ -929,7 +1830,7 @@ bool AcceleratedSurface::shouldPaintMirrored() const
      switch (m_swapChain.type()) {
      case SwapChain::Type::Invalid:
          return false;
@@ -131654,7 +131842,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..76767f5ebf7e08a5187e882109bdbe94
      case SwapChain::Type::Texture:
  #if USE(GBM) || OS(ANDROID)
      case SwapChain::Type::EGLImage:
-@@ -960,6 +1854,10 @@ void AcceleratedSurface::preferredBufferFormatsDidChange()
+@@ -960,6 +1861,10 @@ void AcceleratedSurface::preferredBufferFormatsDidChange()
  
  void AcceleratedSurface::visibilityDidChange(bool isVisible)
  {
@@ -131665,7 +131853,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..76767f5ebf7e08a5187e882109bdbe94
      if (m_isVisible == isVisible)
          return;
  
-@@ -1000,7 +1898,7 @@ void AcceleratedSurface::backgroundColorDidChange()
+@@ -1000,7 +1905,7 @@ void AcceleratedSurface::backgroundColorDidChange()
      if (isOpaque == wasOpaque)
          return;
  
@@ -131674,7 +131862,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..76767f5ebf7e08a5187e882109bdbe94
      m_swapChain.setupBufferFormat();
  #endif
  }
-@@ -1022,7 +1920,7 @@ void AcceleratedSurface::didCreateCompositingRunLoop(RunLoop& runLoop)
+@@ -1022,7 +1927,7 @@ void AcceleratedSurface::didCreateCompositingRunLoop(RunLoop& runLoop)
  #if USE(GLIB_EVENT_LOOP)
      m_releaseUnusedBuffersTimer->setPriority(RunLoopSourcePriority::ReleaseUnusedResourcesTimer);
  #endif
@@ -131683,7 +131871,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..76767f5ebf7e08a5187e882109bdbe94
      WebProcess::singleton().parentProcessConnection()->addMessageReceiver(runLoop, *this, Messages::AcceleratedSurface::messageReceiverName(), m_id);
  #endif
  }
-@@ -1030,6 +1928,10 @@ void AcceleratedSurface::didCreateCompositingRunLoop(RunLoop& runLoop)
+@@ -1030,6 +1935,10 @@ void AcceleratedSurface::didCreateCompositingRunLoop(RunLoop& runLoop)
  void AcceleratedSurface::willDestroyCompositingRunLoop()
  {
      m_frameCompleteHandler = nullptr;
@@ -131694,7 +131882,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..76767f5ebf7e08a5187e882109bdbe94
  
  #if USE(WPE_RENDERER)
      if (m_swapChain.type() == SwapChain::Type::WPEBackend)
-@@ -1043,7 +1945,7 @@ void AcceleratedSurface::willDestroyCompositingRunLoop()
+@@ -1043,7 +1952,7 @@ void AcceleratedSurface::willDestroyCompositingRunLoop()
              protectedThis->m_releaseUnusedBuffersTimer = nullptr;
          });
      }
@@ -131703,7 +131891,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..76767f5ebf7e08a5187e882109bdbe94
      WebProcess::singleton().parentProcessConnection()->removeMessageReceiver(Messages::AcceleratedSurface::messageReceiverName(), m_id);
  #endif
  }
-@@ -1149,18 +2051,133 @@ void AcceleratedSurface::didRenderFrame(TargetContents targetContents)
+@@ -1149,18 +2058,133 @@ void AcceleratedSurface::didRenderFrame(TargetContents targetContents)
      if (!m_target)
          return;
  
@@ -131837,7 +132025,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..76767f5ebf7e08a5187e882109bdbe94
      m_pendingFrameNotifyTargets.insert(0, { m_target, WTF::move(damageRects) });
      m_target = nullptr;
  }
-@@ -1182,13 +2199,17 @@ const std::optional<Damage>& AcceleratedSurface::renderTargetDamage()
+@@ -1182,13 +2206,17 @@ const std::optional<Damage>& AcceleratedSurface::renderTargetDamage()
  }
  #endif
  
@@ -132790,7 +132978,7 @@ index 57163f65873e5a481e5ef5a4ec3beec4b40b7cea..61b49ac7c362b416cdec1d10c44304d2
      bool m_compositionRequired { false };
  #if ENABLE(SCROLLING_THREAD)
 diff --git a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/ThreadedCompositor.cpp b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/ThreadedCompositor.cpp
-index c238029ad9c99c5028ea7e456520af85d1d85532..96a32f248ffa9e46030e61182a10a6d791d35c88 100644
+index c238029ad9c99c5028ea7e456520af85d1d85532..5ce37ca4f6979be6cee7dcd5fe3fb0ca09b9309f 100644
 --- a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/ThreadedCompositor.cpp
 +++ b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/ThreadedCompositor.cpp
 @@ -26,6 +26,10 @@
@@ -132813,8 +133001,11 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..96a32f248ffa9e46030e61182a10a6d7
  #include <WebCore/CoordinatedPlatformLayer.h>
  #include <WebCore/Damage.h>
  #include <WebCore/FontCache.h>
-@@ -53,6 +59,15 @@ WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_END
+@@ -51,8 +57,18 @@ WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_END
+ #include <wtf/SetForScope.h>
+ #include <wtf/SystemTracing.h>
  #include <wtf/TZoneMallocInlines.h>
++#include <wtf/text/StringBuilder.h>
  #include <wtf/text/StringToIntegerConversion.h>
  
 +#if PLATFORM(HAIKU)
@@ -132829,7 +133020,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..96a32f248ffa9e46030e61182a10a6d7
  #if USE(GLIB_EVENT_LOOP)
  #include <wtf/glib/RunLoopSourcePriority.h>
  #endif
-@@ -68,18 +83,40 @@ WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_END
+@@ -68,18 +84,40 @@ WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_END
  #include <GLES2/gl2.h>
  #endif
  
@@ -132870,7 +133061,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..96a32f248ffa9e46030e61182a10a6d7
      , m_layerTreeHost(&layerTreeHost)
      , m_surface(AcceleratedSurface::create(webPage, [this] { frameComplete(); }, AcceleratedSurface::RenderingPurpose::Composited))
      , m_sceneState(&sceneState)
-@@ -90,6 +127,18 @@ ThreadedCompositor::ThreadedCompositor(WebPage& webPage, LayerTreeHost& layerTre
+@@ -90,6 +128,18 @@ ThreadedCompositor::ThreadedCompositor(WebPage& webPage, LayerTreeHost& layerTre
  {
      ASSERT(RunLoop::isMain());
  
@@ -132889,7 +133080,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..96a32f248ffa9e46030e61182a10a6d7
      lazyInitialize(m_didCompositeRunLoopObserver, makeUnique<RunLoopObserver>(RunLoopObserver::WellKnownOrder::GraphicsCommit, [this] {
          this->didCompositeRunLoopObserverFired();
      }));
-@@ -127,6 +176,9 @@ ThreadedCompositor::ThreadedCompositor(WebPage& webPage, LayerTreeHost& layerTre
+@@ -127,6 +177,9 @@ ThreadedCompositor::ThreadedCompositor(WebPage& webPage, LayerTreeHost& layerTre
          }
  
          glGetIntegerv(GL_MAX_TEXTURE_SIZE, &m_maxTextureSize);
@@ -132899,7 +133090,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..96a32f248ffa9e46030e61182a10a6d7
  
  #if USE(TEXTURE_MAPPER)
          m_context = WTF::move(context);
-@@ -136,8 +188,62 @@ ThreadedCompositor::ThreadedCompositor(WebPage& webPage, LayerTreeHost& layerTre
+@@ -136,8 +189,62 @@ ThreadedCompositor::ThreadedCompositor(WebPage& webPage, LayerTreeHost& layerTre
          m_threadSafeGrContext = PlatformDisplay::sharedDisplay().skiaGrContext()->threadSafeProxy();
  #endif
      });
@@ -132962,7 +133153,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..96a32f248ffa9e46030e61182a10a6d7
  ThreadedCompositor::~ThreadedCompositor() = default;
  
  uint64_t ThreadedCompositor::surfaceID() const
-@@ -216,8 +322,23 @@ void ThreadedCompositor::updateRenderTimer()
+@@ -216,8 +323,23 @@ void ThreadedCompositor::updateRenderTimer()
      }
  
      if (m_state.isRenderTimerActive) {
@@ -132988,7 +133179,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..96a32f248ffa9e46030e61182a10a6d7
      } else
          m_renderTimer.stop();
  }
-@@ -364,6 +485,10 @@ TargetContents ThreadedCompositor::paintToCurrentGLContext(const TransformationM
+@@ -364,6 +486,10 @@ TargetContents ThreadedCompositor::paintToCurrentGLContext(const TransformationM
  #if USE(TEXTURE_MAPPER)
  void ThreadedCompositor::paintToTextureMapper(const TransformationMatrix& matrix, const IntSize& size, const OptionSet<CompositionReason>& reasons)
  {
@@ -132999,7 +133190,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..96a32f248ffa9e46030e61182a10a6d7
      FloatRect clipRect(FloatPoint { }, size);
      TextureMapperLayer& currentRootLayer = m_sceneState->rootLayer().ensureTarget();
      if (currentRootLayer.transform() != matrix)
-@@ -371,11 +496,23 @@ void ThreadedCompositor::paintToTextureMapper(const TransformationMatrix& matrix
+@@ -371,11 +497,23 @@ void ThreadedCompositor::paintToTextureMapper(const TransformationMatrix& matrix
  
      bool sceneHasRunningAnimations = currentRootLayer.applyAnimationsRecursively(MonotonicTime::now());
  
@@ -133023,7 +133214,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..96a32f248ffa9e46030e61182a10a6d7
      currentRootLayer.prepareForPainting(*m_textureMapper);
      if (m_damage.flags) {
          Damage frameDamage(size, m_damage.flags->contains(DamagePropagationFlags::Unified) ? Damage::Mode::BoundingBox : Damage::Mode::Rectangles);
-@@ -383,6 +520,10 @@ void ThreadedCompositor::paintToTextureMapper(const TransformationMatrix& matrix
+@@ -383,7 +521,26 @@ void ThreadedCompositor::paintToTextureMapper(const TransformationMatrix& matrix
          WTFBeginSignpost(this, CollectDamage);
          currentRootLayer.collectDamage(*m_textureMapper, frameDamage);
          WTFEndSignpost(this, CollectDamage);
@@ -133032,9 +133223,25 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..96a32f248ffa9e46030e61182a10a6d7
 +            frameDamage = Damage(size, Damage::Mode::Full);
 +#endif
  
++#if PLATFORM(HAIKU)
++        // SUMMIT_DAMAGE_TRACE=1: each composition's damage, and the target's
++        // (what changed since it was last current) that its clip is made of.
++        static const bool traceDamage = [] {
++            const char* value = getenv("SUMMIT_DAMAGE_TRACE");
++            return value && !strcmp(value, "1");
++        }();
++        if (traceDamage) {
++            StringBuilder rects;
++            for (const auto& rect : frameDamage.rects())
++                rects.append(' ', rect.x(), ',', rect.y(), ' ', rect.width(), 'x', rect.height());
++            std::fprintf(stderr, "Summit damage trace: pid=%d at=%lld mode=%d frame%s\n", static_cast<int>(getpid()),
++                static_cast<long long>(system_time()), static_cast<int>(frameDamage.mode()), rects.toString().utf8().data());
++        }
++#endif
          recordFrameDamage(WTF::move(frameDamage));
  
-@@ -392,6 +533,17 @@ void ThreadedCompositor::paintToTextureMapper(const TransformationMatrix& matrix
+         if (m_damage.flags->contains(DamagePropagationFlags::UseForCompositing)) {
+@@ -392,23 +549,62 @@ void ThreadedCompositor::paintToTextureMapper(const TransformationMatrix& matrix
                  m_textureMapper->setDamage(std::nullopt);
              } else {
                  const auto& damageSinceLastSurfaceUse = m_surface->renderTargetDamage();
@@ -133051,8 +133258,20 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..96a32f248ffa9e46030e61182a10a6d7
 +#endif
                  if (damageSinceLastSurfaceUse && !FloatRect(damageSinceLastSurfaceUse->bounds()).contains(clipRect))
                      rectContainingRegionThatActuallyChanged = FloatRoundedRect(damageSinceLastSurfaceUse->bounds());
++#if PLATFORM(HAIKU)
++                if (traceDamage) {
++                    StringBuilder rects;
++                    if (damageSinceLastSurfaceUse) {
++                        for (const auto& rect : damageSinceLastSurfaceUse->rects())
++                            rects.append(' ', rect.x(), ',', rect.y(), ' ', rect.width(), 'x', rect.height());
++                    } else
++                        rects.append(" none (all)"_s);
++                    std::fprintf(stderr, "Summit damage trace: pid=%d target%s\n", static_cast<int>(getpid()), rects.toString().utf8().data());
++                }
++#endif
  
-@@ -400,15 +552,32 @@ void ThreadedCompositor::paintToTextureMapper(const TransformationMatrix& matrix
+                 m_textureMapper->setDamage(damageSinceLastSurfaceUse);
+             }
          }
      }
  
@@ -133085,7 +133304,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..96a32f248ffa9e46030e61182a10a6d7
  
  #if ENABLE(DAMAGE_TRACKING)
      if (rectContainingRegionThatActuallyChanged)
-@@ -426,6 +595,16 @@ void ThreadedCompositor::paintToTextureMapper(const TransformationMatrix& matrix
+@@ -426,6 +622,16 @@ void ThreadedCompositor::paintToTextureMapper(const TransformationMatrix& matrix
  
      m_textureMapper->endClip();
      m_textureMapper->endPainting();
@@ -133102,7 +133321,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..96a32f248ffa9e46030e61182a10a6d7
  
      if (sceneHasRunningAnimations)
          requestComposition(CompositionReason::Animation);
-@@ -556,6 +735,46 @@ void ThreadedCompositor::renderLayerTree()
+@@ -556,6 +762,46 @@ void ThreadedCompositor::renderLayerTree()
      if (m_suspendedCount > 0)
          return;
  
@@ -133149,7 +133368,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..96a32f248ffa9e46030e61182a10a6d7
      OptionSet<CompositionReason> reasons;
      bool shouldNotifiyDidComposite = false;
      {
-@@ -580,8 +799,18 @@ void ThreadedCompositor::renderLayerTree()
+@@ -580,8 +826,18 @@ void ThreadedCompositor::renderLayerTree()
  
          ASSERT(m_state.state == State::Scheduled);
          m_state.state = State::InProgress;
@@ -133168,7 +133387,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..96a32f248ffa9e46030e61182a10a6d7
  #if USE(TEXTURE_MAPPER)
      if (!m_context || !m_context->makeContextCurrent())
          return;
-@@ -599,23 +828,61 @@ void ThreadedCompositor::renderLayerTree()
+@@ -599,23 +855,61 @@ void ThreadedCompositor::renderLayerTree()
      if (viewportSize.isEmpty())
          return;
  
@@ -133230,7 +133449,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..96a32f248ffa9e46030e61182a10a6d7
  
      updateFPSCounter();
  
-@@ -631,8 +898,49 @@ void ThreadedCompositor::renderLayerTree()
+@@ -631,8 +925,49 @@ void ThreadedCompositor::renderLayerTree()
      PlatformDisplay::sharedDisplay().skiaGLContext()->swapBuffers();
  #endif
  
@@ -133280,7 +133499,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..96a32f248ffa9e46030e61182a10a6d7
  
      RunLoop::mainSingleton().dispatch([this, protectedThis = Ref { *this }] {
          if (m_layerTreeHost)
-@@ -656,6 +964,13 @@ void ThreadedCompositor::requestComposition(CompositionReason reason)
+@@ -656,6 +991,13 @@ void ThreadedCompositor::requestComposition(CompositionReason reason)
  {
      Locker locker { m_state.lock };
      m_state.reasons.add(reason);
@@ -133294,7 +133513,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..96a32f248ffa9e46030e61182a10a6d7
      scheduleUpdateLocked();
  }
  
-@@ -703,6 +1018,10 @@ void ThreadedCompositor::scheduleUpdateLocked()
+@@ -703,6 +1045,10 @@ void ThreadedCompositor::scheduleUpdateLocked()
  void ThreadedCompositor::frameComplete()
  {
      ASSERT(m_workQueue->runLoop().isCurrent());
@@ -133305,7 +133524,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..96a32f248ffa9e46030e61182a10a6d7
  
      Locker locker { m_state.lock };
      WTFEmitSignpost(this, FrameComplete, "reasons: %s, state: %s, waiting for tiles: %s", reasonsToString(m_state.reasons).utf8(), stateToString(m_state.state).characters(), m_state.isWaitingForTiles ? "yes" : "no");
-@@ -726,6 +1045,112 @@ void ThreadedCompositor::frameComplete()
+@@ -726,6 +1072,112 @@ void ThreadedCompositor::frameComplete()
      }
  }
  
