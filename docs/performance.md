@@ -160,8 +160,11 @@ changes above).
   "in software", 2.2 cores instead of 1.2. The first decoder of a page
   still got memory, the ones after YouTube's seek and its 480p-to-720p
   switch did not; no buffers were leaked. The engine's IOMMU, a pool
-  reserved at boot or a cache of freed buffers would avoid it. Summit could
-  keep its decoder across seeks, which would halve its allocations.
+  reserved at boot or a cache of freed buffers would avoid it. Summit now
+  keeps a cedar decoder across seeks of the same stream (`cda7c2b`: setup
+  0.1-0.3 ms instead of 15-50, one set of pictures instead of two for each
+  YouTube page), which delays the problem but cannot avoid it: a quality
+  switch still needs a new decoder. A reboot restores the engine.
 - Heat: a heatsink or fan is the largest single gain for video. In
   software, `sunxi_thermal` could step back down while the board stays
   between its release and trip temperatures, instead of only up.
