@@ -149,6 +149,34 @@ YouTube's masthead is 90 % white with `backdrop-filter: blur(48px)`; Summit
 shows the page under it washed out but not blurred (with and without the
 changes above).
 
+### 15 October: the engine pool and the steady release
+
+The Cubie WebGL session's hrev60206+1329 (cubie-a7s `f8a0eca5fd`) gives
+sunxi_ve a 128 MiB pool taken at boot (`c60b137b4c`) and lets
+`sunxi_thermal` step down below its trip while the temperature is not
+rising (`466d67038a`). Summit unchanged (CI `cda7c2b`). Three YouTube runs:
+cedar throughout (1.1-1.5 cores), no "no memory" and no software decoding,
+and the pool back to 0 pages after each run.
+
+The board no longer cooled to 66 C: after the other session's six-minute
+thermal runs it idled (99 % idle) at 70-74 C for over 35 minutes, against
+65-66 C the day before. From there a 720p60 video ends at throttle level
+6-8 (GPU 200 MHz) and the compositor draws 23-25 frames a second. Sampled
+every 2 s from Summit's launch (start 71.9 C):
+
+| s | 0 | 2 | 4 | 6 | 8 | 10 | 12 | 14 | 22 | 26 | 48 | 60 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| C | 71.9 | 75.1 | 81.3 | 81.7 | 82.4 | 81.3 | 81.1 | 81.6 | 79.0 | 79.0 | 77.9 | 80.4 |
+| level | 0 | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 6 | 6 |
+| trend (C) | -0.1 | +2.8 | +4.7 | +1.7 | +1.1 | -0.7 | -0.2 | -0.0 | -0.1 | +0.0 | -0.1 | +0.8 |
+
+The jump to 81 C comes in the first 4 s, before the video: Summit's launch
+and YouTube's page script on the A76 cores at 2 GHz. Above the trip the
+driver adds a level every 2 s unless the temperature is falling, and the
+temperature answers a level change more slowly than that, so levels 4-8
+were added while it held steady (Linux's step_wise adds one only while the
+temperature rises; reported to the session that owns the driver).
+
 ### For the OS (air/OS on the Cubie A7S)
 
 - **The video engine runs out of memory after some hours.** sunxi_ve's
@@ -164,10 +192,13 @@ changes above).
   keeps a cedar decoder across seeks of the same stream (`cda7c2b`: setup
   0.1-0.3 ms instead of 15-50, one set of pictures instead of two for each
   YouTube page), which delays the problem but cannot avoid it: a quality
-  switch still needs a new decoder. A reboot restores the engine.
+  switch still needs a new decoder. A reboot restores the engine. Fixed in
+  the OS on 15 October by a pool taken at boot (see above).
 - Heat: a heatsink or fan is the largest single gain for video. In
   software, `sunxi_thermal` could step back down while the board stays
-  between its release and trip temperatures, instead of only up.
+  between its release and trip temperatures, instead of only up (done on
+  15 October), and add a level above the trip only while the temperature
+  still rises.
 - Not a finding after all: the little cluster "at 1794 MHz, load 93-97 %"
   while idle (here and on 13 October) is the status read itself; sampled in
   the governor's 20 ms windows the idle cluster sits at 416 MHz.
