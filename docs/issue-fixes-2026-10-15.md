@@ -2,9 +2,11 @@
 
 Five issues filed on 15 October, worked on the X399 (air/OS x86_64, two
 displays at 200%) and the laptop (air/OS x86_64, the user's machine). The
-fixes are in c23f184 and the CI build of it (`summit 0.1.0~git20261015.0702`,
-`summit_webkit 1.10.1~git20261015.0702`) is installed on the X399 as
-`summit/build-modern-browser/bundle-ci0702` (the Desktop launcher
+fixes are in c23f184 (#52 to #55) and 4d8425f with a435f41 (#51). The CI
+build of a435f41 (`summit 0.1.0~git20261015.0929`, `summit_webkit
+1.10.1~git20261015.0929`; the 0702 build of c23f184 came first) is
+installed on the X399 as `summit/build-modern-browser/bundle-ci0929` (the
+Desktop launcher
 `Summit-current.sh` and `summit/Summit-installed` point at it; the previous
 launcher is in `summit/launcher-backups/`; assembled by
 `claude-issues/x399-install-ci.sh` as on 13 October) and on the laptop as
@@ -12,7 +14,9 @@ packages (`pkgman install`, the previous state backed up by the package
 daemon). On the X399 YouTube's full-screen button fills the left display
 exactly (window frame 0,0-1919,1079, `document.fullscreenElement` set) and
 Escape restores the window; on the laptop the caret blinks and the generic
-families resolve with the installed build.
+families resolve with the installed build. The passkey notice of #51 shows
+in the status line on the X399's installed build, in a normal window and,
+with the private-window hint, in a private one.
 
 ## #55 YouTube: "Your browser doesn't support full screen"
 
