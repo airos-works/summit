@@ -3326,6 +3326,22 @@ void BrowserWindow::MessageReceived(BMessage* message)
             break;
         }
         case B_WEBKIT_FULLSCREEN_REQUESTED: FullScreenRequested(*message); break;
+        case B_WEBKIT_WEBAUTHN_UNHANDLED: {
+            // The page asked for a passkey and no extension answered: Summit
+            // has no passkey store of its own, so the page saw an error.
+            BMessenger messenger;
+            if (message->FindMessenger("view", &messenger) != B_OK) break;
+            auto* tab = FindTab(messenger);
+            if (!tab || tab->id != fSelected) break;
+            std::string notice = message->GetBool("create", false)
+                ? "This page tried to create a passkey, but no password manager answered."
+                : "This page asked for a passkey, but no password manager answered.";
+            notice += " Summit keeps no passkeys of its own; an extension such as 1Password provides them";
+            notice += fPrivate ? ", and must be allowed in private windows (Extensions)." : ".";
+            fStatus->SetText(notice.c_str());
+            std::fprintf(stderr, "Summit: %s\n", notice.c_str());
+            break;
+        }
         case 'fsnh':
             if (fFullScreenTab && !fFullScreenNotice->IsHidden(fFullScreenNotice))
                 fFullScreenNotice->Hide();

@@ -150,6 +150,17 @@ hard power cycle makes Summit show "The saved profile could not be read"
 (a modal alert that blocks every click into the browser window until it is
 dismissed), and after that the extension toolbar buttons do nothing.
 
+**What changed in Summit.** A passkey request that no extension takes
+reaches Summit's own coordinator, which has no authenticator; the page saw
+a bare `NotAllowedError` and reported a failed passkey, with nothing to say
+why. Now the window's status line says so: "This page asked for a passkey,
+but no password manager answered. Summit keeps no passkeys of its own; an
+extension such as 1Password provides them", and in a private window ", and
+must be allowed in private windows (Extensions)". Conditional-mediation
+requests at page load stay quiet. A failed passkey therefore shows at once
+whether Summit or 1Password answered it
+([webauthn-passkeys.md](webauthn-passkeys.md)).
+
 1Password's own design has a race worth knowing: its page script asks its
 content script whether to handle a request over `window.postMessage` and
 gives up after one second, falling back to the browser's own answer (no

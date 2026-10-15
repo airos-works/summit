@@ -77835,10 +77835,10 @@ index 0000000000000000000000000000000000000000..c513815be2c9593bb9bac943763f49bd
 +}
 diff --git a/Source/WebKit/UIProcess/API/haiku/WebKitView.h b/Source/WebKit/UIProcess/API/haiku/WebKitView.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..7128bfb8c27cab859a77fab8923f9131705b0629
+index 0000000000000000000000000000000000000000..0aaadc3be2b0dbf9a3a48f5fcad36e4f6bf12908
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/API/haiku/WebKitView.h
-@@ -0,0 +1,233 @@
+@@ -0,0 +1,239 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#pragma once
@@ -77875,6 +77875,12 @@ index 0000000000000000000000000000000000000000..7128bfb8c27cab859a77fab8923f9131
 +    // window (page closed, crashed or a host failed to answer). Unanswered
 +    // requests fail after five seconds. Only the active view should be accepted.
 +    B_WEBKIT_FULLSCREEN_REQUESTED = 'wful',
++    // A page's passkey request (navigator.credentials.get or create) reached
++    // the browser's own WebAuthn coordinator, which has no authenticator and
++    // answered NotAllowedError: no extension (1Password...) took it. Not sent
++    // for conditional-mediation requests, which pages make at load.
++    // "view", "create" (bool).
++    B_WEBKIT_WEBAUTHN_UNHANDLED = 'wwau',
 +    // User-initiated external link: "view", "url", "source_url". The load
 +    // was ignored; the browser can offer an approved web or native handler.
 +    B_WEBKIT_SCHEME_OPEN_REQUESTED = 'wsch',
@@ -100402,10 +100408,10 @@ index c224bd2e2b3ff4cd1b8907c4a21342d9573812b2..644d6ce48362f21aaeda47d48e24dfe3
      bool hasVideoDevice() const { return !m_eligibleVideoDevices.isEmpty(); }
 diff --git a/Source/WebKit/UIProcess/WebAuthentication/haiku/WebAuthenticatorCoordinatorProxyHaiku.cpp b/Source/WebKit/UIProcess/WebAuthentication/haiku/WebAuthenticatorCoordinatorProxyHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..75b860c792f1ea4ae0756a0eb424fec3b96a7a7f
+index 0000000000000000000000000000000000000000..282ce8dda3f740c20ac5adb687999718800cfaac
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/WebAuthentication/haiku/WebAuthenticatorCoordinatorProxyHaiku.cpp
-@@ -0,0 +1,129 @@
+@@ -0,0 +1,148 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +// KunanyiOS has no platform authenticator: no Touch ID equivalent, no CTAP
@@ -100423,12 +100429,14 @@ index 0000000000000000000000000000000000000000..75b860c792f1ea4ae0756a0eb424fec3
 +
 +#include "WebAuthenticatorCoordinatorProxyMessages.h"
 +#include "WebPageProxy.h"
++#include "WebViewPrivate.h"
 +#include "WebProcessProxy.h"
 +#include <WebCore/AllAcceptedCredentialsOptions.h>
 +#include <WebCore/AuthenticatorAttachment.h>
 +#include <WebCore/AuthenticatorResponseData.h>
 +#include <WebCore/CurrentUserDetailsOptions.h>
 +#include <WebCore/ExceptionData.h>
++#include <WebCore/MediationRequirement.h>
 +#include <WebCore/PublicKeyCredentialCreationOptions.h>
 +#include <WebCore/PublicKeyCredentialRequestOptions.h>
 +#include <WebCore/SecurityOriginData.h>
@@ -100470,13 +100478,30 @@ index 0000000000000000000000000000000000000000..75b860c792f1ea4ae0756a0eb424fec3
 +    return ExceptionData { ExceptionCode::NotAllowedError, "No authenticator is available on this device."_s };
 +}
 +
-+void WebAuthenticatorCoordinatorProxy::makeCredential(IPC::Connection&, FrameIdentifier, FrameInfoData&&, PublicKeyCredentialCreationOptions&&, MediationRequirement, RequestCompletionHandler&& handler)
++// A request that reaches this coordinator was not taken by an extension (a
++// password manager replaces navigator.credentials in the page), so the page
++// gets an error it shows as a failed passkey. The browser window is told, so
++// that the user learns why instead of a bare failure: no passkey provider in
++// this window, as in a private window the extension is not allowed in.
++// Conditional-mediation requests, which pages make at load for passkey
++// autofill, are not the user's doing and are left quiet.
++static void tellWindow(WebPageProxy* page, MediationRequirement mediation, bool create)
 +{
++    if (!page || mediation == MediationRequirement::Conditional)
++        return;
++    if (auto* view = static_cast<WebView*>(page->pageClient()))
++        view->notifyWebAuthnUnhandled(create);
++}
++
++void WebAuthenticatorCoordinatorProxy::makeCredential(IPC::Connection&, FrameIdentifier, FrameInfoData&&, PublicKeyCredentialCreationOptions&&, MediationRequirement mediation, RequestCompletionHandler&& handler)
++{
++    tellWindow(m_webPageProxy.get(), mediation, true);
 +    handler({ }, AuthenticatorAttachment::Platform, noAuthenticatorAvailable());
 +}
 +
-+void WebAuthenticatorCoordinatorProxy::getAssertion(IPC::Connection&, FrameIdentifier, FrameInfoData&&, PublicKeyCredentialRequestOptions&&, MediationRequirement, IPC::Untrusted<std::optional<SecurityOriginData>>&&, RequestCompletionHandler&& handler)
++void WebAuthenticatorCoordinatorProxy::getAssertion(IPC::Connection&, FrameIdentifier, FrameInfoData&&, PublicKeyCredentialRequestOptions&&, MediationRequirement mediation, IPC::Untrusted<std::optional<SecurityOriginData>>&&, RequestCompletionHandler&& handler)
 +{
++    tellWindow(m_webPageProxy.get(), mediation, false);
 +    handler({ }, AuthenticatorAttachment::Platform, noAuthenticatorAvailable());
 +}
 +
@@ -107612,10 +107637,10 @@ index 0000000000000000000000000000000000000000..c9a119d02f85b7c5ad8fe9153bfc9604
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/WebView.cpp b/Source/WebKit/UIProcess/haiku/WebView.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..f30f510fbe89f2e9d104fe2cccfe30835a979101
+index 0000000000000000000000000000000000000000..7a3bbfdc9e44a91edd726609170007e893dc2ac2
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/WebView.cpp
-@@ -0,0 +1,2463 @@
+@@ -0,0 +1,2471 @@
 +/*
 + * Copyright (C) 2013 Intel Corporation. All rights reserved.
 + *
@@ -110016,6 +110041,14 @@ index 0000000000000000000000000000000000000000..f30f510fbe89f2e9d104fe2cccfe3083
 +        std::exchange(m_presentationCallback, { })();
 +}
 +
++void WebView::notifyWebAuthnUnhandled(bool create)
++{
++    BMessage message(B_WEBKIT_WEBAUTHN_UNHANDLED);
++    message.AddMessenger("view", nativeView());
++    message.AddBool("create", create);
++    m_state->target.SendMessage(&message, static_cast<BHandler*>(nullptr), 0);
++}
++
 +#if ENABLE(FULLSCREEN_API)
 +void WebView::requestFullScreen(bool enter, CompletionHandler<void(bool)>&& completion)
 +{
@@ -110522,10 +110555,10 @@ index 0000000000000000000000000000000000000000..72b20b3d5a964a65bbe8fb34aad9c94a
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/WebViewPrivate.h b/Source/WebKit/UIProcess/haiku/WebViewPrivate.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..de3766585496e053be2426a4e3f11eb3f5c217b0
+index 0000000000000000000000000000000000000000..63372cc3f12bccf01f83f9ed4395aaaec84b14d4
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/WebViewPrivate.h
-@@ -0,0 +1,206 @@
+@@ -0,0 +1,209 @@
 +/*
 +   Copyright (C) 2014 Haiku, inc.
 +
@@ -110585,6 +110618,9 @@ index 0000000000000000000000000000000000000000..de3766585496e053be2426a4e3f11eb3
 +    void close();
 +    void handleMessage(const BMessage&);
 +    WebPageProxy* page() const { return m_page.get(); }
++    // Tells the native window that a passkey request reached the browser's
++    // own coordinator (B_WEBKIT_WEBAUTHN_UNHANDLED).
++    void notifyWebAuthnUnhandled(bool create);
 +    // The attached BWebKitView, or an invalid messenger while it is detached.
 +    BMessenger nativeView() const
 +    {

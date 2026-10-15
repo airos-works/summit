@@ -61,6 +61,23 @@ A passkey therefore works exactly when an extension provides it. The browser
 contributes the API surface, the extension holds the credential, and the user
 unlocks their vault.
 
+## When a request reaches the browser (15 October 2026)
+
+A password manager replaces `navigator.credentials` in the page, so a
+request that reaches Summit's own coordinator was not taken by any
+extension: there is none, it is not allowed in this window (an extension
+installed without private-window access, in a private window), or it fell
+back to the browser. The coordinator answers `NotAllowedError` as before,
+and the page shows a failed passkey; since 15 October it also tells the
+browser window (`B_WEBKIT_WEBAUTHN_UNHANDLED`, with the view and whether
+the request was `create`), and the window's status line explains: "This
+page asked for a passkey, but no password manager answered. Summit keeps no
+passkeys of its own; an extension such as 1Password provides them", with
+", and must be allowed in private windows (Extensions)" in a private
+window. Conditional-mediation requests, which pages make at load for
+passkey autofill, stay quiet. `tests/fixtures/webauthn/request.html` makes
+both kinds of request from buttons.
+
 ## Checking the surface
 
 Open `tests/fixtures/webauthn/support.html`. It lists each entry point and sets
