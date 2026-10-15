@@ -33056,10 +33056,10 @@ index 0000000000000000000000000000000000000000..df43f4fc21c17d2cfb904c9eaefa28b1
 +#endif
 diff --git a/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaikuMSE.cpp b/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaikuMSE.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..d299deba81496c69f573ac0a73eab4af39924560
+index 0000000000000000000000000000000000000000..3ad95d47206b58830feaf39eca60fd56eefd5bda
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaikuMSE.cpp
-@@ -0,0 +1,3019 @@
+@@ -0,0 +1,3042 @@
 +/*
 + * Copyright (C) 2026 Summit contributors.
 + *
@@ -33141,6 +33141,7 @@ index 0000000000000000000000000000000000000000..d299deba81496c69f573ac0a73eab4af
 +#include <cstdio>
 +#include <cstdlib>
 +#include <cstring>
++#include <unistd.h>
 +
 +namespace WebCore {
 +
@@ -34975,9 +34976,31 @@ index 0000000000000000000000000000000000000000..d299deba81496c69f573ac0a73eab4af
 +    return false;
 +}
 +
++// Video types that ask for more frames a second than this are declined
++// (YouTube asks with a "framerate" parameter), so sites pick their lower-rate
++// streams. The Radxa Cubie A7S (its video engine, sunxi_ve) has no fan and
++// throttles within a minute: offered 720p60, YouTube played it at 18-25
++// frames a second and went down to 480p30 by itself; capped, it kept 720p30
++// at 26-30. SUMMIT_MEDIA_MAX_FRAMERATE=N sets the cap, 0 for none.
++static double maxVideoFrameRateHaiku()
++{
++    static const double rate = [] {
++        if (const char* value = getenv("SUMMIT_MEDIA_MAX_FRAMERATE"))
++            return std::atof(value);
++        return access("/dev/misc/sunxi_ve", F_OK) ? 0.0 : 30.0;
++    }();
++    return rate;
++}
++
 +MediaPlayer::SupportsType MediaPlayerPrivateHaikuMSE::supportsType(const MediaEngineSupportParameters& parameters)
 +{
++    MSE_TRACE("supportsType %s\n", parameters.type.raw().utf8().data());
 +    auto container = parameters.type.containerType().convertToASCIILowercase();
++    if (double maxRate = maxVideoFrameRateHaiku(); maxRate > 0 && container.startsWith("video/"_s)) {
++        auto frameRate = parameters.type.parameter("framerate"_s);
++        if (!frameRate.isNull() && frameRate.toDouble() > maxRate)
++            return MediaPlayer::SupportsType::IsNotSupported;
++    }
 +    if (parameters.platformType == PlatformMediaDecodingType::FileOrHLS && container == "application/dash+xml"_s) {
 +        for (auto& codec : parameters.type.codecs()) if (!isSupportedCodec(codec, false))
 +            return MediaPlayer::SupportsType::IsNotSupported;
@@ -38497,10 +38520,10 @@ index 0000000000000000000000000000000000000000..91156c316dfe74d48aaa0ebbd28332a3
 +#endif // PLATFORM(HAIKU) && USE(TEXTURE_MAPPER)
 diff --git a/Source/WebCore/platform/graphics/haiku/PlatformMediaEngineConfigurationFactoryHaiku.cpp b/Source/WebCore/platform/graphics/haiku/PlatformMediaEngineConfigurationFactoryHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..a5c05562d817f48c15b0c1b97f81c3b447e5b7fe
+index 0000000000000000000000000000000000000000..d40f03a11d40d4a814b0bf793e54764822158e94
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/haiku/PlatformMediaEngineConfigurationFactoryHaiku.cpp
-@@ -0,0 +1,71 @@
+@@ -0,0 +1,77 @@
 +/*
 + * Copyright (C) 2026 Summit contributors.
 + *
@@ -38528,6 +38551,7 @@ index 0000000000000000000000000000000000000000..a5c05562d817f48c15b0c1b97f81c3b4
 +#include "PlatformMediaCapabilitiesDecodingInfo.h"
 +#include "PlatformMediaDecodingConfiguration.h"
 +#include <wtf/Function.h>
++#include <wtf/text/MakeString.h>
 +
 +namespace WebCore {
 +
@@ -38544,7 +38568,12 @@ index 0000000000000000000000000000000000000000..a5c05562d817f48c15b0c1b97f81c3b4
 +    bool supported = true;
 +    bool hardware = false;
 +    if (auto& video = configuration.video) {
-+        supported &= engineSupports(configuration.type, video->contentType);
++        // The frame rate as a type parameter, as Media Source Extensions
++        // are asked (SUMMIT_MEDIA_MAX_FRAMERATE).
++        auto contentType = video->contentType;
++        if (video->framerate > 0)
++            contentType = makeString(contentType, "; framerate="_s, video->framerate);
++        supported &= engineSupports(configuration.type, contentType);
 +        // Frames are presented as 8-bit sRGB without alpha.
 +        if (video->alphaChannel.value_or(false) || video->hdrMetadataType
 +            || (video->transferFunction && *video->transferFunction != PlatformMediaCapabilitiesTransferFunction::SRGB))

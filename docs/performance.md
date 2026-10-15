@@ -176,6 +176,38 @@ driver adds a level every 2 s unless the temperature is falling, and the
 temperature answers a level change more slowly than that, so levels 4-8
 were added while it held steady (Linux's step_wise adds one only while the
 temperature rises; reported to the session that owns the driver).
+hrev60206+1330 (cubie-a7s `50da923d93`) adds a level every 2 s only while
+the temperature rises, every 8 s while it holds. From 73.5 C the board
+still reached level 8 in 38 s, and YouTube went to 480p: with the board
+idling 6 C below the trip, 720p60 has no headroom.
+
+**720p30 instead of 720p60 on the Cubie.** Video types that ask for more
+than 30 frames a second are now declined there (YouTube asks
+`isTypeSupported` and media capabilities with a frame rate), so YouTube
+serves 720p30. The cap is the default where `/dev/misc/sunxi_ve` exists;
+`SUMMIT_MEDIA_MAX_FRAMERATE=N` sets it elsewhere, `=0` turns it off.
+110-second runs under the governor, alternated, each from 72 C, measured
+over the last 22 s:
+
+| run | YouTube's stream at the end | frames drawn a second (of 30) | dropped | mean throttle level |
+|---|---|---|---|---|
+| 60 offered | 480p30 | 22.8 | 29 % | 4.70 |
+| capped | 720p30 | 26.8 | 22 % | 4.46 |
+| capped | 720p30 | 26.2 | 12 % | 4.99 |
+| 60 offered | 480p30 | 17.6 | 32 % | 5.01 |
+
+Offered 60 frames a second, YouTube played 720p60 with 30-58 % of the
+frames dropped and then went down to 480p30 by itself (Summit counts frames
+the compositor never showed as dropped since `6fda031`). Capped, it kept
+720p at a steadier rate. The throttle levels were the same: the warm board
+and the page's load set them. One capped run from 69 C drew 29.8 of 30 frames
+a second, 3.5 % dropped, and ended at level 2. The board's plug reads whole
+watts: 5 W idle, 7 W for 720p60, 6 W for 720p30 (that run partly at the
+lowest speeds), too coarse to say more. Holding throttle level 2 with the
+governor off to compare at equal clocks took the warm board to 90.9 C and
+its hot trip in under a minute; don't. A board with a heatsink or fan can
+take the 60 back with
+`SUMMIT_MEDIA_MAX_FRAMERATE=0`.
 
 ### For the OS (air/OS on the Cubie A7S)
 
