@@ -136,6 +136,10 @@ password. On github.com/login with the user's 1Password profile copy:
 
 With the installed 0702 build the toolbar click opens the popup with the
 unlock screen 40 ms after the click (`SUMMIT_EXTENSION_TIMING=1` traces it).
+Clicking into the username field shows 1Password's inline icon with its
+"press the 1Password icon in your browser's toolbar to unlock" hint: the
+field route reaches the unlock step as well.
+
 A failure that leaves no trace in Summit: the laptop profile installed
 1Password without access to private windows (uBlock Origin and SponsorBlock
 have it), so in a private window GitHub gets Summit's own answer, no
