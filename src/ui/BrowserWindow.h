@@ -156,6 +156,10 @@ private:
         bool processExited = false;
         std::string processError;
         std::string loadError { }, loadErrorDescription { }, loadErrorDomain { }, loadErrorURL { };
+        // A notice the status line shows instead of "Ready" until noticeUntil
+        // (system_time), such as a passkey request no extension answered.
+        std::string notice { };
+        bigtime_t noticeUntil = 0;
         std::string loadOutcome { "idle" };
         int32 loadErrorCode = 0;
         bool loadErrorProvisional = false;

@@ -3338,7 +3338,11 @@ void BrowserWindow::MessageReceived(BMessage* message)
                 : "This page asked for a passkey, but no password manager answered.";
             notice += " Summit keeps no passkeys of its own; an extension such as 1Password provides them";
             notice += fPrivate ? ", and must be allowed in private windows (Extensions)." : ".";
-            fStatus->SetText(notice.c_str());
+            // Shown for a while: the page's own reaction (a title or a reload)
+            // would otherwise put "Ready" back at once.
+            tab->notice = notice;
+            tab->noticeUntil = system_time() + 30 * 1000000LL;
+            ShowTabStatus(*tab);
             std::fprintf(stderr, "Summit: %s\n", notice.c_str());
             break;
         }
@@ -4264,12 +4268,14 @@ void BrowserWindow::CertificateDecision(const BMessage& message)
 
 void BrowserWindow::ShowTabStatus(const Tab& tab)
 {
+    const bool noticed = !tab.notice.empty() && system_time() < tab.noticeUntil;
     const char* text = !fHoveredLink.empty() && tab.id == fSelected ? fHoveredLink.c_str()
         : tab.processExited ? tab.processError.c_str()
         : !tab.loadError.empty() ? tab.loadError.c_str()
+        : noticed ? tab.notice.c_str()
         : tab.loading ? "Loading…" : "Ready";
     fStatus->SetText(text);
-    fStatus->SetToolTip(tab.loadError.empty() && !tab.processExited ? nullptr : text);
+    fStatus->SetToolTip(tab.loadError.empty() && !tab.processExited && !noticed ? nullptr : text);
 }
 #else
 void BrowserWindow::NavigationRequested(const BString& url, BWebView* view)
@@ -4301,7 +4307,10 @@ void BrowserWindow::LoadProgress(float progress, BWebView* view)
         tab->progress = std::clamp(progress / 100.0f, 0.0f, 1.0f);
         if (tab->progress >= 1.0f) tab->loading = false;
     }
-    if (progress >= 100 && view == CurrentWebView()) fStatus->SetText("Ready");
+    if (progress >= 100 && view == CurrentWebView()) {
+        if (auto* tab = FindTab(view)) ShowTabStatus(*tab);
+        else fStatus->SetText("Ready");
+    }
     RefreshChrome();
 }
 void BrowserWindow::LoadFailed(const BString&, BWebView* view)
