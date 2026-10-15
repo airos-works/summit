@@ -2756,9 +2756,13 @@ bool BrowserWindow::SetPageFullScreen(int64 tab, bool enter)
     if (enter) {
         if (tab != fSelected || !IsActive() || fClosingWindow) return false;
         if (fFullScreenTab) return fFullScreenTab == tab;
+        // The display the window is on, whatever the desktop's zoom setting
+        // says about spanning displays: a full-screen page, like airTime's
+        // full-screen video, fills one monitor.
         BRect screen;
         if (!BPrivate::get_display_frame
-            || BPrivate::get_display_frame(Frame(), true, screen) != B_OK)
+            || BPrivate::get_display_frame(Frame(), false, screen) != B_OK
+            || !screen.IsValid())
             screen = BScreen(this).Frame();
         if (!screen.IsValid()) return false;
         fBeforeFullScreen = Frame();
