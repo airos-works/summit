@@ -39349,10 +39349,10 @@ index 0000000000000000000000000000000000000000..8e2e8203b85dc24051c27e130fad05c0
 +} // namespace WebCore
 diff --git a/Source/WebCore/platform/graphics/haiku/SystemFontDatabaseHaiku.cpp b/Source/WebCore/platform/graphics/haiku/SystemFontDatabaseHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..418f7610270c840083bc29e86603b5f50a8dac98
+index 0000000000000000000000000000000000000000..8e38ffeb585073ecaca3415df61548827f21ab41
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/haiku/SystemFontDatabaseHaiku.cpp
-@@ -0,0 +1,52 @@
+@@ -0,0 +1,66 @@
 +/*
 + * Copyright (C) 2018 Sony Interactive Entertainment Inc.
 + * Copyright (C) 2022 Apple Inc. All rights reserved.
@@ -39382,8 +39382,9 @@ index 0000000000000000000000000000000000000000..418f7610270c840083bc29e86603b5f5
 +#include "config.h"
 +#include "SystemFontDatabase.h"
 +
-+#include "NotImplemented.h"
 +#include "WebKitFontFamilyNames.h"
++#include <algorithm>
++#include <interface/Font.h>
 +#include <wtf/NeverDestroyed.h>
 +
 +namespace WebCore {
@@ -39394,10 +39395,23 @@ index 0000000000000000000000000000000000000000..418f7610270c840083bc29e86603b5f5
 +    return database.get();
 +}
 +
++// The system font shorthands (caption, menu, -webkit-small-control...) name
++// the system's own font: form controls, which the user agent stylesheet sets
++// in -webkit-small-control, take it when a page gives them no font of its
++// own. This used to answer with the standard family, Times, so every such
++// control came out in a serif font, which looked like a missing font.
 +auto SystemFontDatabase::platformSystemFontShorthandInfo(FontShorthand fontShorthand) -> SystemFontShorthandInfo
 +{
-+    notImplemented();
-+    return { WebKitFontFamilyNames::standardFamily, 16, normalWeightValue() };
++    const BFont* font = fontShorthand == FontShorthand::Caption ? be_bold_font : be_plain_font;
++    font_family family;
++    font_style style;
++    font->GetFamilyAndStyle(&family, &style);
++    // Haiku font sizes are points at 72 dpi, which are CSS pixels; app_server
++    // scales them to the display's density, as the page's scale factor does.
++    float size = std::max(11.0f, be_plain_font->Size());
++    if (fontShorthand == FontShorthand::WebkitMiniControl)
++        size = std::max(9.0f, size - 2);
++    return { AtomString::fromUTF8(family), size, fontShorthand == FontShorthand::Caption ? boldWeightValue() : normalWeightValue() };
 +}
 +
 +void SystemFontDatabase::platformInvalidate()
@@ -41274,7 +41288,7 @@ index 6cc3e9febb8c00ec5829ca476fc21b1b693c81a3..fc5107b6ced726a345ccd053cbc48fca
  } // namespace WebCore
  
 diff --git a/Source/WebCore/platform/graphics/skia/FontCacheSkia.cpp b/Source/WebCore/platform/graphics/skia/FontCacheSkia.cpp
-index 74cfeb60ac3daa537785693be3917358aa26a2b5..7e6a15b9528db5b57a57352b5e8dab624183d49a 100644
+index 74cfeb60ac3daa537785693be3917358aa26a2b5..88ff5686da7145336f8b00b868fb5b61008e0ff5 100644
 --- a/Source/WebCore/platform/graphics/skia/FontCacheSkia.cpp
 +++ b/Source/WebCore/platform/graphics/skia/FontCacheSkia.cpp
 @@ -30,6 +30,7 @@
@@ -41285,7 +41299,18 @@ index 74cfeb60ac3daa537785693be3917358aa26a2b5..7e6a15b9528db5b57a57352b5e8dab62
  #include <wtf/Assertions.h>
  #include <wtf/text/CString.h>
  #include <wtf/text/CharacterProperties.h>
-@@ -111,6 +112,13 @@ static SkFontStyle skiaFontStyle(const FontDescription& fontDescription)
+@@ -39,6 +40,10 @@
+ #include "SystemSettings.h"
+ #endif
+ 
++#if PLATFORM(HAIKU)
++#include <interface/Font.h>
++#endif
++
+ WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_BEGIN
+ #include <skia/ports/SkFontScanner_FreeType.h>
+ 
+@@ -111,6 +116,13 @@ static SkFontStyle skiaFontStyle(const FontDescription& fontDescription)
      return SkFontStyle(skWeight, skWidth, skSlant);
  }
  
@@ -41299,7 +41324,18 @@ index 74cfeb60ac3daa537785693be3917358aa26a2b5..7e6a15b9528db5b57a57352b5e8dab62
  static std::pair<bool, bool> computeSynthesisProperties(const SkTypeface& typeface, const FontDescription& fontDescription, OptionSet<FontLookupOptions> synthesisOptions)
  {
      if (FontPlatformData::skiaTypefaceHasAnySupportedColorTable(typeface))
-@@ -189,13 +197,29 @@ Ref<Font> FontCache::lastResortFallbackFont(const FontDescription& fontDescripti
+@@ -181,6 +193,10 @@ Ref<Font> FontCache::lastResortFallbackFont(const FontDescription& fontDescripti
+ {
+ #if PLATFORM(WIN)
+     const auto defaultFontName = "Times New Roman"_s;
++#elif PLATFORM(HAIKU)
++    // The system's plain font: a serif last resort looks like the wrong font
++    // on every page that reached it.
++    const auto defaultFontName = "sans-serif"_s;
+ #else
+     const auto defaultFontName = "serif"_s;
+ #endif
+@@ -189,13 +205,29 @@ Ref<Font> FontCache::lastResortFallbackFont(const FontDescription& fontDescripti
  
      // Passing nullptr as family name makes Skia use a weak match.
      auto typeface = fontManager().matchFamilyStyle(nullptr, skiaFontStyle(fontDescription));
@@ -41330,19 +41366,97 @@ index 74cfeb60ac3daa537785693be3917358aa26a2b5..7e6a15b9528db5b57a57352b5e8dab62
          fontDescription.orientation(), fontDescription.widthVariant(), fontDescription.textRenderingMode(), computeFeatures(fontDescription, { }));
      return fontForPlatformData(platformData);
  }
-@@ -417,7 +441,10 @@ std::unique_ptr<FontPlatformData> FontCache::createFontPlatformData(const FontDe
+@@ -411,13 +443,88 @@ static bool isUnsupportedFamilyFont(const AtomString& family)
+         || family == "-apple-system-font";
+ }
+ 
++#if PLATFORM(HAIKU)
++static String haikuSystemFontFamily(const BFont* font)
++{
++    font_family family;
++    font_style style;
++    font->GetFamilyAndStyle(&family, &style);
++    return String::fromUTF8(family);
++}
++
++// Families a page names that no installed font carries by that name. The CSS
++// system families (system-ui, ui-monospace, ...) mean the platform's own fonts,
++// which on Haiku are the plain and fixed system fonts. The generic families
++// (serif, monospace, ...) fontconfig resolves only through its alias
++// configuration, and an installation can lack that: the fontconfig 2.18
++// package on air/OS x86_64 links /boot/system/settings/fonts/conf.d to files
++// that are not there, so "monospace" matched nothing, every family of
++// GitHub's comment box failed, and the box fell to the last-resort serif.
++// These lists stand in for the aliases, in the order fontconfig prefers.
++static Vector<String> haikuFamilyCandidates(const String& family)
++{
++    auto sans = [] {
++        return Vector<String> { haikuSystemFontFamily(be_plain_font), "Noto Sans"_s, "DejaVu Sans"_s, "Liberation Sans"_s, "Arial"_s };
++    };
++    auto mono = [] {
++        return Vector<String> { haikuSystemFontFamily(be_fixed_font), "Noto Sans Mono"_s, "DejaVu Sans Mono"_s, "Liberation Mono"_s, "Noto Mono"_s, "Courier New"_s };
++    };
++    auto withSans = [&](Vector<String>&& first) {
++        first.appendVector(sans());
++        return first;
++    };
++    for (auto name : { "sans-serif"_s, "system-ui"_s, "ui-sans-serif"_s, "ui-rounded"_s, "-webkit-system-font"_s, "-webkit-system-ui"_s, "system-font"_s, "cursive"_s, "fantasy"_s }) {
++        if (equalIgnoringASCIICase(family, name))
++            return sans();
++    }
++    if (equalIgnoringASCIICase(family, "monospace"_s) || equalIgnoringASCIICase(family, "ui-monospace"_s))
++        return mono();
++    if (equalIgnoringASCIICase(family, "serif"_s) || equalIgnoringASCIICase(family, "ui-serif"_s))
++        return withSans({ "Noto Serif"_s, "DejaVu Serif"_s, "Liberation Serif"_s, "Times New Roman"_s });
++    if (equalIgnoringASCIICase(family, "math"_s))
++        return withSans({ "Noto Sans Math"_s, "STIX Two Math"_s, "Latin Modern Math"_s });
++    if (equalIgnoringASCIICase(family, "emoji"_s))
++        return withSans({ "Noto Color Emoji"_s, "Noto Emoji"_s, "Twemoji"_s });
++    return { };
++}
++
++static sk_sp<SkTypeface> haikuMatchFamilyStyle(SkFontMgr& manager, const String& family, const SkFontStyle& style)
++{
++    // A system family stands for the system's font, whatever fontconfig says.
++    bool systemFamily = false;
++    for (auto name : { "system-ui"_s, "ui-sans-serif"_s, "ui-rounded"_s, "ui-monospace"_s, "ui-serif"_s, "-webkit-system-font"_s, "-webkit-system-ui"_s, "system-font"_s }) {
++        if (equalIgnoringASCIICase(family, name))
++            systemFamily = true;
++    }
++    if (!systemFamily) {
++        if (auto typeface = manager.matchFamilyStyle(family.utf8().legacyCStringPointer(), style))
++            return typeface;
++    }
++    for (auto& candidate : haikuFamilyCandidates(family)) {
++        if (candidate.isEmpty() || equalIgnoringASCIICase(candidate, family))
++            continue;
++        if (auto typeface = manager.matchFamilyStyle(candidate.utf8().legacyCStringPointer(), style))
++            return typeface;
++    }
++    return nullptr;
++}
++#endif
++
+ std::unique_ptr<FontPlatformData> FontCache::createFontPlatformData(const FontDescription& fontDescription, const AtomString& family, const FontCreationContext& fontCreationContext, OptionSet<FontLookupOptions> options)
+ {
+     if (isUnsupportedFamilyFont(family))
          return nullptr;
      auto familyName = getFamilyNameStringFromFamily(family);
      auto skFontStyle = skiaFontStyle(fontDescription);
 -    auto typeface = fontManager().matchFamilyStyle(familyName.utf8().legacyCStringPointer(), skFontStyle);
 +    auto addResult = m_skiaMatchedTypefaceCache.add({ familyName, skiaFontStyleCacheKey(skFontStyle) }, nullptr);
-+    if (addResult.isNewEntry)
++    if (addResult.isNewEntry) {
++#if PLATFORM(HAIKU)
++        addResult.iterator->value = haikuMatchFamilyStyle(fontManager(), familyName, skFontStyle);
++#else
 +        addResult.iterator->value = fontManager().matchFamilyStyle(familyName.utf8().legacyCStringPointer(), skFontStyle);
++#endif
++    }
 +    auto typeface = addResult.iterator->value;
      if (!typeface)
          return nullptr;
  
-@@ -449,6 +476,7 @@ void FontCache::platformReleaseNoncriticalMemory()
+@@ -449,6 +556,7 @@ void FontCache::platformReleaseNoncriticalMemory()
  
  void FontCache::platformInvalidate()
  {
