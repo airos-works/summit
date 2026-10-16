@@ -430,6 +430,24 @@ index 26e825ace464f1e32e50b5c6a0a4d57d573779b9..fa4b4d7426a4fc3121651814b34db104
          auto result = ([&] -> std::optional<uint32_t> {
              Dl_info info { };
              if (!dladdr(jsFunctionAddr, &info))
+diff --git a/Source/JavaScriptCore/runtime/JSDateMath.cpp b/Source/JavaScriptCore/runtime/JSDateMath.cpp
+index 91c28b033f0e6ef3cdb03e24d6ff4626b960f988..5c7f32ee3c1c5a191c6b61b1c46dc27f8331e309 100644
+--- a/Source/JavaScriptCore/runtime/JSDateMath.cpp
++++ b/Source/JavaScriptCore/runtime/JSDateMath.cpp
+@@ -501,7 +501,13 @@ static TimeZone retrieveTimeZoneInformation()
+         TimeZone canonical;
+         UErrorCode status = U_ZERO_ERROR;
+         if (timeZoneID.isEmpty()) {
++#if PLATFORM(HAIKU)
++            // ICU cannot find Haiku's zone; WTF sets the zone of the locale
++            // settings as ICU's default (wtf/haiku/TimeZoneHaiku.cpp).
++            status = callBufferProducingFunction(ucal_getDefaultTimeZone, timeZoneID);
++#else
+             status = callBufferProducingFunction(ucal_getHostTimeZone, timeZoneID);
++#endif
+             ASSERT_UNUSED(status, U_SUCCESS(status));
+         }
+         if (U_SUCCESS(status)) {
 diff --git a/Source/JavaScriptCore/runtime/MachineContext.h b/Source/JavaScriptCore/runtime/MachineContext.h
 index 2ac8b24f00e624acb564a0e11fd2437b5f02a99c..94578295634cfe05af20ee169477506c530a3c81 100644
 --- a/Source/JavaScriptCore/runtime/MachineContext.h
@@ -3591,18 +3609,19 @@ index 9c73a375b327ba6a86c1454d3a8d7efcbdf92cfe..8f535e07936fff38a590591e1be2c712
  #define ENABLE_SCROLLING_THREAD 0
  #endif
 diff --git a/Source/WTF/wtf/PlatformHaiku.cmake b/Source/WTF/wtf/PlatformHaiku.cmake
-index c466c25cf60489517be9b9bcffe952ae0622261e..4e0a2731024cbf61b72dcfa0a05767a14d1cfda9 100644
+index c466c25cf60489517be9b9bcffe952ae0622261e..106ad25cb7a8b976f488bfdf9d473b346aeb7944 100644
 --- a/Source/WTF/wtf/PlatformHaiku.cmake
 +++ b/Source/WTF/wtf/PlatformHaiku.cmake
-@@ -6,6 +6,7 @@ list(APPEND WTF_SOURCES
+@@ -6,6 +6,8 @@ list(APPEND WTF_SOURCES
      haiku/FileSystemHaiku.cpp
      haiku/LanguageHaiku.cpp
      haiku/MemoryFootprintHaiku.cpp
 +    haiku/RunLoopHaiku.cpp
++    haiku/TimeZoneHaiku.cpp
  
      posix/CPUTimePOSIX.cpp
      posix/FileHandlePOSIX.cpp
-@@ -24,6 +25,9 @@ list(APPEND WTF_SOURCES
+@@ -24,6 +26,9 @@ list(APPEND WTF_SOURCES
  )
  
  list(APPEND WTF_PUBLIC_HEADERS
@@ -3612,7 +3631,7 @@ index c466c25cf60489517be9b9bcffe952ae0622261e..4e0a2731024cbf61b72dcfa0a05767a1
      unix/UnixFileDescriptor.h
  )
  
-@@ -38,4 +42,3 @@ list(APPEND WTF_INCLUDE_DIRECTORIES
+@@ -38,4 +43,3 @@ list(APPEND WTF_INCLUDE_DIRECTORIES
  )
  
  add_definitions(-D_DEFAULT_SOURCE)
@@ -3775,6 +3794,19 @@ index cd2186c7e61118e7eb6da2ea24d9c501700bb0d7..346d7f8cd24069833fe0fa7a4cf3b14d
      GTKWPEPortRange = 20000,
  
      LayerTreeHostRenderingUpdateStart,
+diff --git a/Source/WTF/wtf/TimeZone.cpp b/Source/WTF/wtf/TimeZone.cpp
+index 1b92b5db8941dcf7c670790e9cbeb93f849b4ffd..bdc52634a7a748c58808d94ec357578554f20ff4 100644
+--- a/Source/WTF/wtf/TimeZone.cpp
++++ b/Source/WTF/wtf/TimeZone.cpp
+@@ -44,7 +44,7 @@ void timeZoneDidChange()
+     g_lastTimeZoneID.fetch_add(1, std::memory_order_relaxed);
+ }
+ 
+-#if !USE(TIME_ZONE_CHANGE_NOTIFICATIONS)
++#if !USE(TIME_ZONE_CHANGE_NOTIFICATIONS) && !PLATFORM(HAIKU)
+ void listenForTimeZoneChangeNotifications() { }
+ #endif
+ 
 diff --git a/Source/WTF/wtf/URL.h b/Source/WTF/wtf/URL.h
 index 6909a6db4822c8c26cf845efb8862bf92f69e919..9d378cca5852fe0ebe03dd70e2e13549af3229a3 100644
 --- a/Source/WTF/wtf/URL.h
@@ -4581,6 +4613,102 @@ index 0000000000000000000000000000000000000000..bbc1cc09e2eb2b7673659eaa602a598c
 +} // namespace WTF
 +
 +using WTF::describeTimerHaiku;
+diff --git a/Source/WTF/wtf/haiku/TimeZoneHaiku.cpp b/Source/WTF/wtf/haiku/TimeZoneHaiku.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..8a88f0e1961f6e0d91d26aee628f649b53913cd8
+--- /dev/null
++++ b/Source/WTF/wtf/haiku/TimeZoneHaiku.cpp
+@@ -0,0 +1,90 @@
++/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
++
++#include "config.h"
++#include <wtf/TimeZone.h>
++
++#include <Application.h>
++#include <LocaleRoster.h>
++#include <Message.h>
++#include <MessageFilter.h>
++#include <TimeZone.h>
++#include <mutex>
++#include <unicode/ucal.h>
++#include <wtf/Lock.h>
++#include <wtf/NeverDestroyed.h>
++#include <wtf/Vector.h>
++#include <wtf/text/WTFString.h>
++
++namespace WTF {
++
++// ICU finds the host time zone in TZ or the /etc/localtime link. Haiku has
++// neither: the zone is in the locale settings, and the kernel and libroot get
++// it from there. The engine's own ICU fell back to UTC, so every page showed
++// UTC times (Slack's message times were 11 hours off in Hobart). The zone of
++// the settings becomes ICU's default zone, which JSC reads on Haiku
++// (JSDateMath.cpp), and follows B_LOCALE_CHANGED: the Time preferences
++// broadcast it with the new zone.
++
++static Lock timeZoneLock;
++
++static String& currentTimeZone() WTF_REQUIRES_LOCK(timeZoneLock)
++{
++    static NeverDestroyed<String> timeZone;
++    return timeZone.get();
++}
++
++// True when ICU had another zone.
++static bool applyTimeZone(const char* identifier)
++{
++    if (!identifier || !*identifier)
++        return false;
++    String timeZone = String::fromUTF8(identifier);
++    Locker locker { timeZoneLock };
++    if (timeZone == currentTimeZone())
++        return false;
++    // The identifiers are ASCII; ICU wants them terminated.
++    Vector<char16_t, 32> characters;
++    for (const char* character = identifier; *character; ++character)
++        characters.append(static_cast<unsigned char>(*character));
++    characters.append(0);
++    UErrorCode status = U_ZERO_ERROR;
++    ucal_setDefaultTimeZone(characters.span().data(), &status);
++    if (U_FAILURE(status))
++        return false;
++    currentTimeZone() = WTF::move(timeZone);
++    return true;
++}
++
++static bool applySettingsTimeZone()
++{
++    BLocaleRoster* roster = BLocaleRoster::Default();
++    BTimeZone timeZone;
++    roster->Refresh();
++    return roster->GetDefaultTimeZone(&timeZone) == B_OK && applyTimeZone(timeZone.ID().String());
++}
++
++static filter_result localeDidChange(BMessage* message, BHandler**, BMessageFilter*)
++{
++    // A language change comes without the zone.
++    const char* identifier = nullptr;
++    bool changed = message->FindString("timezone", &identifier) == B_OK
++        ? applyTimeZone(identifier) : applySettingsTimeZone();
++    if (changed)
++        timeZoneDidChange();
++    return B_DISPATCH_MESSAGE;
++}
++
++void listenForTimeZoneChangeNotifications()
++{
++    static std::once_flag once;
++    std::call_once(once, [] {
++        applySettingsTimeZone();
++        // The network process has no BApplication.
++        if (be_app && be_app->Lock()) {
++            be_app->AddCommonFilter(new BMessageFilter(B_LOCALE_CHANGED, localeDidChange));
++            be_app->Unlock();
++        }
++    });
++}
++
++} // namespace WTF
 diff --git a/Source/WTF/wtf/posix/FileHandlePOSIX.cpp b/Source/WTF/wtf/posix/FileHandlePOSIX.cpp
 index ae947fe28021c584967c900b16bf0a364affd9be..e357e409e33dd1f96bbbbefe35c75b08eb7ed632 100644
 --- a/Source/WTF/wtf/posix/FileHandlePOSIX.cpp
