@@ -136,9 +136,12 @@ the GLib files, which are portable).
 - OS-side, seen the same day: `hmulti_audio`'s `MultiAudioNode::Disconnect`
   deletes the output's buffer group without `fBufferLock`, while
   `_OutputThread` may be filling one of its buffers
-  (`Resampler::_CopyInt2Int` crashed the media_addon_server once after
-  about 85 microphone connections and disconnections). The media_server does
-  not relaunch the add-on server; `launch_roster`/Media preferences do.
+  (`Resampler::_CopyInt2Int` in `_FillNextBuffer`, writing into the
+  freed buffer, crashed the media_addon_server twice in about 125
+  microphone connections and disconnections on the laptop, with either
+  engine). The fix belongs in the add-on: take `fBufferLock` in
+  `Disconnect()` and `SetBufferGroup()`. The media_server does not relaunch
+  the add-on server by itself.
 - `SUMMIT_CAPTURE_TRACE=1` traces device lists and connections.
 
 ### Frames and samples
