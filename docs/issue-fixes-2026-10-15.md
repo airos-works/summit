@@ -92,6 +92,17 @@ Sans Symbols and the CJK fonts too. Summit packages no fonts: the engine
 takes the system's fonts through fontconfig, and a glyph no installed font
 has stays a box. That is the image's choice (the `noto` packages).
 
+**Follow-up, 16 October.** The system-font shorthand change crashed a web
+process on the laptop when a worker ended (report WebProcess-13007): the
+worker's font cache teardown (`ThreadGlobalData::destroy` →
+`FontCache::invalidate` → `SystemFontDatabase::invalidate`) reset the
+shorthand cache, which held the main thread's family name as an AtomString,
+and AtomStrings belong to the thread that made them (each thread has its own
+atom table). The Haiku database was one for the process, as GLib's, which
+gets away with it only because its family is a static string. It is now one
+per thread, as on Cocoa (`SystemFontDatabaseHaiku.cpp`, a `ThreadSpecific`),
+and each thread resets its own entries before its atom table goes.
+
 ## #53 The caret in GitHub's issue editor
 
 Reproduced on the laptop, and it is the same fault as #52. With the

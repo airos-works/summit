@@ -39349,10 +39349,10 @@ index 0000000000000000000000000000000000000000..8e2e8203b85dc24051c27e130fad05c0
 +} // namespace WebCore
 diff --git a/Source/WebCore/platform/graphics/haiku/SystemFontDatabaseHaiku.cpp b/Source/WebCore/platform/graphics/haiku/SystemFontDatabaseHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..8e38ffeb585073ecaca3415df61548827f21ab41
+index 0000000000000000000000000000000000000000..aa4c89f512cc4fb315b5d27e57b75d053d7b3042
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/haiku/SystemFontDatabaseHaiku.cpp
-@@ -0,0 +1,66 @@
+@@ -0,0 +1,79 @@
 +/*
 + * Copyright (C) 2018 Sony Interactive Entertainment Inc.
 + * Copyright (C) 2022 Apple Inc. All rights reserved.
@@ -39386,13 +39386,26 @@ index 0000000000000000000000000000000000000000..8e38ffeb585073ecaca3415df6154882
 +#include <algorithm>
 +#include <interface/Font.h>
 +#include <wtf/NeverDestroyed.h>
++#include <wtf/ThreadSpecific.h>
 +
 +namespace WebCore {
 +
++// One database per thread, as the font cache that owns it on Cocoa. The
++// shorthand cache holds AtomStrings, which belong to the thread that made
++// them (each thread has its own atom table): a database shared by the
++// process cached the main thread's family name, and a worker thread
++// resetting that cache when it ended (ThreadGlobalData::destroy ->
++// FontCache::invalidate) died in AtomStringImpl::remove, the string not
++// being in its table (laptop, 16 October 2026). GLib's shared database gets
++// away with it because its family is a static string. The entry is reset
++// before the thread's atom table goes, by that same invalidate().
 +SystemFontDatabase& SystemFontDatabase::singleton()
 +{
-+    static NeverDestroyed<SystemFontDatabase> database = SystemFontDatabase();
-+    return database.get();
++    static NeverDestroyed<ThreadSpecific<std::unique_ptr<SystemFontDatabase>>> databases;
++    auto& database = *databases.get();
++    if (!database)
++        database = std::unique_ptr<SystemFontDatabase>(new SystemFontDatabase);
++    return *database;
 +}
 +
 +// The system font shorthands (caption, menu, -webkit-small-control...) name
