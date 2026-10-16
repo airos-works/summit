@@ -50742,10 +50742,10 @@ index 0000000000000000000000000000000000000000..b59f56027057be21b0b3eeaeb5f9ec3b
 +#endif
 diff --git a/Source/WebCore/platform/mediastream/haiku/HaikuCaptureNode.cpp b/Source/WebCore/platform/mediastream/haiku/HaikuCaptureNode.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..2a39ceb66ecd63eac3a2926ba161eeb4c8a01d67
+index 0000000000000000000000000000000000000000..b7959e4229b502c7a901cd406957985daf37852d
 --- /dev/null
 +++ b/Source/WebCore/platform/mediastream/haiku/HaikuCaptureNode.cpp
-@@ -0,0 +1,405 @@
+@@ -0,0 +1,431 @@
 +/*
 + * Copyright (C) 2026 Summit contributors.
 + *
@@ -50973,6 +50973,25 @@ index 0000000000000000000000000000000000000000..2a39ceb66ecd63eac3a2926ba161eeb4
 +    return std::nullopt;
 +}
 +
++// The process holds a reference to the system clock's time source proxy
++// from the first capture connection on: the proxy objects are shared and
++// counted, and one whose count reaches zero is deleted on the roster's
++// thread while another thread may just have been handed it (see connect()).
++// With a reference that never goes, the count of this one never reaches
++// zero; the capture consumers use no other time source.
++static void keepSystemTimeSource(BMediaRoster& roster)
++{
++    static bool kept = false;
++    if (kept)
++        return;
++    media_node clock;
++    if (roster.GetSystemTimeSource(&clock) != B_OK)
++        return;
++    if (roster.MakeTimeSourceFor(clock))
++        kept = true;
++    roster.ReleaseNode(clock);
++}
++
 +// Outputs still connected to a consumer whose program has ended (it crashed,
 +// or was killed while capturing): the media services do not break those
 +// connections, and the device would stay in use until they restart. A port
@@ -51063,14 +51082,21 @@ index 0000000000000000000000000000000000000000..2a39ceb66ecd63eac3a2926ba161eeb4
 +        liveConnections().add(connection.get());
 +    }
 +
-+    // Follow the producer's clock, as its buffers are stamped with it.
-+    BTimeSource* timeSource = roster->MakeTimeSourceFor(producer);
-+    bigtime_t start = 0;
-+    if (timeSource) {
-+        roster->SetTimeSourceFor(consumer->ID(), timeSource->ID());
-+        start = timeSource->Now() + 20000;
-+        timeSource->Release();
-+    }
++    // The consumer keeps the system clock as its time source, and that
++    // clock's proxy object is held for good (keepSystemTimeSource()). The
++    // Media Kit keeps one proxy object per time source in a process and
++    // counts references to it; when the last one goes the object is deleted
++    // on the roster's thread, and a thread asking for the same time source
++    // meanwhile is handed the object being deleted. Consumers used to take
++    // the producer's time source for each connection and release it when
++    // they went, and a page that opened and closed the microphone again and
++    // again crashed the web process in the new consumer's control thread,
++    // in BTimeSource::GetTime on the freed object (16 October 2026). The
++    // buffers' stamps are not used for scheduling here, and neither a
++    // camera's producer nor a sound card's node waits for the start time
++    // it is given.
++    keepSystemTimeSource(*roster);
++    bigtime_t start = system_time() + 20000;
 +    roster->StartNode(consumer->Node(), start);
 +    // A sound card's input is usually running already (it plays too); a
 +    // camera is started for us.

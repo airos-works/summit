@@ -120,6 +120,25 @@ the GLib files, which are portable).
   again, which announced again, five times a second for as long as a page
   listened for `devicechange` (webcam.org's test page opens and closes the
   camera and microphone in its handler, 16 October 2026).
+- The capture consumer keeps the system clock as its time source, and the
+  process holds that clock's proxy object for good. The Media Kit keeps one
+  proxy object per time source in a process and counts references to it;
+  when the last one goes, the object is deleted on the roster's thread, and
+  a thread asking for the same time source meanwhile is handed the object
+  being deleted (`TimeSourceObjectManager::GetTimeSource` finds it in the
+  map before `ObjectDeleted` removes it). Consumers used to adopt the
+  producer's time source for each connection and release it when they
+  went; a page opening and closing the microphone again and again crashed
+  the web process in the new consumer's control thread, in
+  `BTimeSource::GetTime` on the freed object (laptop, 16 October 2026).
+  Neither a camera's producer nor a sound card's node waits for the start
+  time it is given, and the buffers' stamps are not used for scheduling.
+- OS-side, seen the same day: `hmulti_audio`'s `MultiAudioNode::Disconnect`
+  deletes the output's buffer group without `fBufferLock`, while
+  `_OutputThread` may be filling one of its buffers
+  (`Resampler::_CopyInt2Int` crashed the media_addon_server once after
+  about 85 microphone connections and disconnections). The media_server does
+  not relaunch the add-on server; `launch_roster`/Media preferences do.
 - `SUMMIT_CAPTURE_TRACE=1` traces device lists and connections.
 
 ### Frames and samples
