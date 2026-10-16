@@ -99,7 +99,10 @@ windows answer with the selected tab's site icon and notify when it changes
 (1487b19). Tested by running the built Deskbar in place of the system one on
 the laptop: Wikipedia's and then GitHub's icon on the Summit window's row,
 dimmed while minimized, the generic icon for a page without one. The laptop
-shows them once its air/OS package includes cff7621e4a.
+runs it since haiku.hpkg hrev60206+1458 (built with jam in
+`build/master-x86_64` from cff7621e4a, staged with
+`fw13/tools/install-system-packages.sh`, rebooted at 20:55 after 15 idle
+minutes); there the system Deskbar shows the installed Summit's site icon.
 
 ## The browser's objects in CI
 
