@@ -14,6 +14,7 @@
 #include "ExtensionInstaller.h"
 #include <WebKit/WebKitView.h>
 #include <cstring>
+#include <dlfcn.h>
 #endif
 #include <algorithm>
 #include <atomic>
@@ -99,6 +100,18 @@ static void DrawFlatButton(BView* view, bool pressed, bool focused, const Chrome
     }
 }
 
+// air/OS draws a bitmap given B_DEVICE_PIXEL_BITMAP (the value of air/OS's
+// InterfaceDefs.h) one to one in frame buffer pixels, from the pixel its
+// destination starts on. Releases that can have BScreen::DeviceScale(); Haiku
+// R1/beta6 and older air/OS do not, so it is looked up at run time.
+static constexpr uint32 kDevicePixelBitmap = 0x00001000;
+
+static bool DevicePixelBitmaps()
+{
+    static const bool available = dlsym(RTLD_DEFAULT, "_ZN7BScreen11DeviceScaleEv") != nullptr;
+    return available;
+}
+
 // Font Awesome silhouettes are native vectors, rasterized at the display's
 // density and tinted with the control's current theme/state color. Keep their
 // 20-point canvas: trimming would enlarge narrow glyphs and erase optical sizing.
@@ -162,7 +175,13 @@ void ToolButton::Draw(BRect update)
         const float y = std::floor((Bounds().Height() + 1 - 20) / 2) + (Value() ? 1 : 0);
         SetDrawingMode(B_OP_ALPHA);
         SetBlendingMode(B_PIXEL_ALPHA, B_ALPHA_OVERLAY);
-        DrawBitmap(fBitmap.get(), fBitmap->Bounds(), BRect(x, y, x + 19, y + 19), B_FILTER_BITMAP_BILINEAR);
+        // The icon has the screen's density (20 points are a whole number of
+        // pixels at every air/OS scale): drawn one to one it stays sharp at
+        // 125, 150 and 175 percent, where scaling it to fit blurred it.
+        if (fBitmapSize > 20 && DevicePixelBitmaps())
+            DrawBitmap(fBitmap.get(), fBitmap->Bounds(), BRect(x, y, x + 19, y + 19), kDevicePixelBitmap);
+        else
+            DrawBitmap(fBitmap.get(), fBitmap->Bounds(), BRect(x, y, x + 19, y + 19), B_FILTER_BITMAP_BILINEAR);
         SetDrawingMode(B_OP_COPY);
         return;
     }

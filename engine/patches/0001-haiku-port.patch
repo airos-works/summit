@@ -77118,10 +77118,10 @@ index 0000000000000000000000000000000000000000..d28a6cad6339adf79b155cf974e85bfd
 +
 diff --git a/Source/WebKit/UIProcess/API/haiku/WebKitView.cpp b/Source/WebKit/UIProcess/API/haiku/WebKitView.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..a1cd6dfcbee78c81665361fb114ba65042034a20
+index 0000000000000000000000000000000000000000..ce85bdde2d8807c11191327fa365d81e88fc534d
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/API/haiku/WebKitView.cpp
-@@ -0,0 +1,980 @@
+@@ -0,0 +1,1027 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#include "config.h"
@@ -77144,6 +77144,7 @@ index 0000000000000000000000000000000000000000..a1cd6dfcbee78c81665361fb114ba650
 +#include <MessageRunner.h>
 +#include <OS.h>
 +#include <Region.h>
++#include <Screen.h>
 +#include <Window.h>
 +#include <algorithm>
 +#include <chrono>
@@ -77169,9 +77170,31 @@ index 0000000000000000000000000000000000000000..a1cd6dfcbee78c81665361fb114ba650
 +    return std::isfinite(pixels) && pixels > 0 && pixels <= 8192 ? static_cast<int>(pixels) : 0;
 +}
 +
-+// app_server draws a scaled desktop at the density of its monitors and says so
-+// in the display layout, which only a private libbe call returns. It is looked
-+// up at run time so the engine still loads on a Haiku without it (scale 1).
++// air/OS: BScreen::DeviceScale() says how many frame buffer pixels a coordinate
++// unit is, from memory app_server shares with applications (no round trip), and
++// app_server draws a bitmap given B_DEVICE_PIXEL_BITMAP one to one from the
++// buffer pixel its destination starts on. Haiku R1/beta6 and air/OS releases
++// before October 2026 have neither, so the call is looked up at run time and the
++// flag (its value fixed in air/OS's InterfaceDefs.h) is only passed with it.
++static constexpr uint32 devicePixelBitmapHaiku = 0x00001000;
++
++using DeviceScaleFunctionHaiku = float (*)(BScreen*);
++
++static DeviceScaleFunctionHaiku deviceScaleFunctionHaiku()
++{
++    static const auto function = reinterpret_cast<DeviceScaleFunctionHaiku>(
++        dlsym(RTLD_DEFAULT, "_ZN7BScreen11DeviceScaleEv"));
++    return function;
++}
++
++static bool devicePixelBitmapsHaiku()
++{
++    return deviceScaleFunctionHaiku();
++}
++
++// Older air/OS releases: app_server draws a scaled desktop at the density of its
++// monitors and says so in the display layout, which only a private libbe call
++// returns. Without it the scale is 1.
 +static float queryDisplayScaleFactorHaiku()
 +{
 +    using GetDisplayLayout = status_t (*)(BMessage&);
@@ -77209,6 +77232,11 @@ index 0000000000000000000000000000000000000000..a1cd6dfcbee78c81665361fb114ba650
 +    }();
 +    if (forced)
 +        return forced;
++    if (auto deviceScale = deviceScaleFunctionHaiku()) {
++        BScreen screen;
++        float scale = deviceScale(&screen);
++        return std::isfinite(scale) && scale >= 1 && scale <= 4 ? scale : 1;
++    }
 +    // A geometry update runs on every Draw(); the layout is an app_server round
 +    // trip, so it is asked again at most once a second.
 +    static std::atomic<float> cached { 0 };
@@ -77878,12 +77906,31 @@ index 0000000000000000000000000000000000000000..a1cd6dfcbee78c81665361fb114ba650
 +        BRect visible = update & destination;
 +        if (visible.IsValid()) {
 +            float scale = frame->scale > 0 ? frame->scale : 1;
-+            BRect source(visible.left * scale, visible.top * scale,
-+                (visible.right + 1) * scale - 1, (visible.bottom + 1) * scale - 1);
 +            BRect bounds = frame->image->Bounds();
-+            source = source & bounds;
-+            if (source.IsValid())
-+                DrawBitmap(frame->image.get(), source, visible);
++            if (scale > 1 && devicePixelBitmapsHaiku() && std::fabs(scale - displayScaleFactorHaiku()) < 0.001f) {
++                // The frame's pixels are the screen's: at 125, 150 and 175
++                // percent a logical pixel is one buffer pixel in some places and
++                // two in others, and app_server scaled the frame to fit, softly
++                // and at times a pixel off. They go one to one from the buffer
++                // pixel the update starts on, which app_server finds as
++                // floor(x * scale) in screen coordinates; the page's first pixel
++                // is the view's.
++                BPoint origin = ConvertToScreen(BPoint(0, 0));
++                auto bufferPixel = [scale](float coordinate) { return std::floor(coordinate * scale + 0.001f); };
++                float left = bufferPixel(origin.x), top = bufferPixel(origin.y);
++                BRect source(bufferPixel(origin.x + visible.left) - left, bufferPixel(origin.y + visible.top) - top,
++                    bufferPixel(origin.x + visible.right + 1) - left - 1, bufferPixel(origin.y + visible.bottom + 1) - top - 1);
++                source = source & bounds;
++                if (source.IsValid())
++                    DrawBitmap(frame->image.get(), source, visible, devicePixelBitmapHaiku);
++            } else {
++                // A frame of another scale (the desktop's changed) is scaled.
++                BRect source(visible.left * scale, visible.top * scale,
++                    (visible.right + 1) * scale - 1, (visible.bottom + 1) * scale - 1);
++                source = source & bounds;
++                if (source.IsValid())
++                    DrawBitmap(frame->image.get(), source, visible);
++            }
 +        }
 +    }
 +    PopState();
@@ -133669,7 +133716,7 @@ index 57163f65873e5a481e5ef5a4ec3beec4b40b7cea..61b49ac7c362b416cdec1d10c44304d2
      bool m_compositionRequired { false };
  #if ENABLE(SCROLLING_THREAD)
 diff --git a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/ThreadedCompositor.cpp b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/ThreadedCompositor.cpp
-index c238029ad9c99c5028ea7e456520af85d1d85532..d096ae35f7d9ee843bb29daf683055d013ec212d 100644
+index c238029ad9c99c5028ea7e456520af85d1d85532..625b4b56649d3d1b8d6d3da0393805fb468ba34a 100644
 --- a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/ThreadedCompositor.cpp
 +++ b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/ThreadedCompositor.cpp
 @@ -26,6 +26,10 @@
@@ -133781,7 +133828,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..d096ae35f7d9ee843bb29daf683055d0
  
  #if USE(TEXTURE_MAPPER)
          m_context = WTF::move(context);
-@@ -136,8 +189,62 @@ ThreadedCompositor::ThreadedCompositor(WebPage& webPage, LayerTreeHost& layerTre
+@@ -136,7 +189,61 @@ ThreadedCompositor::ThreadedCompositor(WebPage& webPage, LayerTreeHost& layerTre
          m_threadSafeGrContext = PlatformDisplay::sharedDisplay().skiaGrContext()->threadSafeProxy();
  #endif
      });
@@ -133795,8 +133842,8 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..d096ae35f7d9ee843bb29daf683055d0
 +    }
 +#endif
 +
- }
- 
++}
++
 +#if PLATFORM(HAIKU) && USE(TEXTURE_MAPPER)
 +// Shader programs the page is likely to need soon are compiled one per task
 +// (TextureMapper::warmShaderProgramsHaiku()): the two every first frame draws
@@ -133838,12 +133885,11 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..d096ae35f7d9ee843bb29daf683055d0
 +    m_workQueue->dispatch([this, protectedThis = Ref { *this }, remaining, waitsForQuiet] {
 +        warmShaderProgramsHaiku(remaining - 1, waitsForQuiet);
 +    });
-+}
+ }
 +#endif
-+
+ 
  ThreadedCompositor::~ThreadedCompositor() = default;
  
- uint64_t ThreadedCompositor::surfaceID() const
 @@ -216,8 +323,23 @@ void ThreadedCompositor::updateRenderTimer()
      }
  
@@ -134333,6 +134379,22 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..d096ae35f7d9ee843bb29daf683055d0
  RunLoop* ThreadedCompositor::runLoop()
  {
      return m_surface ? &m_workQueue->runLoop() : nullptr;
+@@ -747,7 +1204,15 @@ void ThreadedCompositor::updateSceneAttributes(const IntSize& size, float device
+ {
+     m_attributes.viewportSize = size;
+     m_attributes.deviceScaleFactor = deviceScaleFactor;
++#if PLATFORM(HAIKU)
++    // At a fractional scale (air/OS: 125 to 250 percent) a view covers the floor
++    // or the ceiling of size * scale frame buffer pixels, depending on where it
++    // lands. Frames have the ceiling, so drawn one to one they cover the view
++    // anywhere (BWebKitView::Draw()).
++    m_attributes.viewportSize = expandedIntSize(FloatSize(size).scaled(deviceScaleFactor));
++#else
+     m_attributes.viewportSize.scale(m_attributes.deviceScaleFactor);
++#endif
+ }
+ 
+ void ThreadedCompositor::initializeFPSCounter()
 diff --git a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/ThreadedCompositor.h b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/ThreadedCompositor.h
 index 350699338bff55157709efd32e703513e9ce6486..feb59d6b22128828f2e2e72cbe7c79c0f69333ee 100644
 --- a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/ThreadedCompositor.h
