@@ -111,6 +111,15 @@ the GLib files, which are portable).
   (`HaikuVoiceProcessing`): libwebrtc's audio processing module (AEC3),
   with what the page plays (streams and Web Audio) as the echo reference.
   `SUMMIT_VOICE_PROCESSING=0` turns it off.
+- The Media Kit sends no notice when a camera is plugged in or taken out:
+  a change shows the next time the device list is computed (a page's
+  `enumerateDevices()`, a `getUserMedia()`), and only a list that differs
+  from the last one is announced as `devicechange`. WebCore's
+  `haveDevicesChanged()` cannot be used for that: it answers "changed" for
+  two equal lists, and announcing on its word made the observers enumerate
+  again, which announced again, five times a second for as long as a page
+  listened for `devicechange` (webcam.org's test page opens and closes the
+  camera and microphone in its handler, 16 October 2026).
 - `SUMMIT_CAPTURE_TRACE=1` traces device lists and connections.
 
 ### Frames and samples

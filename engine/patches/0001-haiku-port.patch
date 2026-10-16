@@ -51248,10 +51248,10 @@ index 0000000000000000000000000000000000000000..45f9b5810dcc89414a8444dfd9a93e62
 +#endif // ENABLE(MEDIA_STREAM) && PLATFORM(HAIKU)
 diff --git a/Source/WebCore/platform/mediastream/haiku/HaikuCaptureSources.cpp b/Source/WebCore/platform/mediastream/haiku/HaikuCaptureSources.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..461574c91a2050788d9897217e2f7200a5f4cceb
+index 0000000000000000000000000000000000000000..d5b9670a0c0656fd1adb9f4529bd51e4b728547f
 --- /dev/null
 +++ b/Source/WebCore/platform/mediastream/haiku/HaikuCaptureSources.cpp
-@@ -0,0 +1,892 @@
+@@ -0,0 +1,917 @@
 +/*
 + * Copyright (C) 2026 Summit contributors.
 + *
@@ -51317,6 +51317,27 @@ index 0000000000000000000000000000000000000000..461574c91a2050788d9897217e2f7200
 +    return manager;
 +}
 +
++// Whether two device lists name the same devices in the same order.
++// WebCore's haveDevicesChanged() answers "changed" for two equal lists (it
++// looks for a device whose enabled state differs and reports a change when
++// there is none), so it cannot decide whether to announce a change: with it,
++// each announcement made the observers enumerate again, which announced
++// again, five times a second for as long as a page listened for
++// devicechange, and that page's handler opened and closed the camera and
++// microphone each time.
++static bool sameDevices(const Vector<CaptureDevice>& a, const Vector<CaptureDevice>& b)
++{
++    if (a.size() != b.size())
++        return false;
++    for (size_t index = 0; index < a.size(); ++index) {
++        auto& x = a[index];
++        auto& y = b[index];
++        if (x.persistentId() != y.persistentId() || x.label() != y.label() || x.enabled() != y.enabled() || x.isDefault() != y.isDefault())
++            return false;
++    }
++    return true;
++}
++
 +void HaikuCaptureDeviceManager::refresh()
 +{
 +    Vector<CaptureDevice> devices;
@@ -51327,11 +51348,15 @@ index 0000000000000000000000000000000000000000..461574c91a2050788d9897217e2f7200
 +        device.setIsDefault(input.isDefault);
 +        devices.append(WTF::move(device));
 +    }
++    // The Media Kit sends no notice when a camera is plugged in or taken
++    // out; a change shows the next time the list is computed, and only a
++    // list that differs from the last one is announced. The first list is
++    // not a change.
++    bool changed = m_computed && !sameDevices(m_devices, devices);
 +    m_computed = true;
-+    if (haveDevicesChanged(m_devices, devices)) {
-+        m_devices = WTF::move(devices);
++    m_devices = WTF::move(devices);
++    if (changed)
 +        deviceChanged();
-+    }
 +}
 +
 +const Vector<CaptureDevice>& HaikuCaptureDeviceManager::captureDevices()
