@@ -92,6 +92,11 @@ public:
     static int32 CountOpenWindows();
     ~BrowserWindow() override;
     void MessageReceived(BMessage* message) override;
+    // The "Icon" property: the site icon of the page shown, which the Deskbar
+    // shows for the window in its window lists (see NoteWindowIcon()).
+    BHandler* ResolveSpecifier(BMessage* message, int32 index, BMessage* specifier, int32 what,
+        const char* property) override;
+    status_t GetSupportedSuites(BMessage* data) override;
     bool QuitRequested() override;
     void MenusBeginning() override;
     void FrameMoved(BPoint where) override;
@@ -330,6 +335,16 @@ private:
     bool fDirectDaemonLostHandled = false;
 #endif
     void RefreshChrome();
+    // The window's icon for the Deskbar: the site icon of the selected tab, as
+    // an archived BBitmap in "result" (no "result" without one).
+    void AddWindowIcon(BMessage& message);
+    // Tells the window's observers (the Deskbar watches it with
+    // BHandler::StartWatching) when that icon changes.
+    void NoteWindowIcon();
+    const BBitmap* fNotedWindowIcon = nullptr;
+    // Site icons were stored or forgotten: a new icon can sit at a freed
+    // icon's address.
+    bool fWindowIconStale = true;
     void AnnouncePointer();
 #if SUMMIT_MODERN_WEBKIT
     void SyncBrowserWindow();

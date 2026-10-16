@@ -37,6 +37,7 @@
 #include <OS.h>
 #include <Path.h>
 #include <PopUpMenu.h>
+#include <PropertyInfo.h>
 #include <Roster.h>
 #include <StatusBar.h>
 #include <StringView.h>
@@ -2304,6 +2305,7 @@ void BrowserWindow::RefreshChrome()
         labels.push_back({tab.id, tab.title, tab.loading, fFavicons->Icon(tab.url),
             tab.capturingCamera || tab.capturingMicrophone || tab.capturingScreen});
     fTabStrip->SetTabs(std::move(labels), fSelected);
+    NoteWindowIcon();
     if (auto* tab = ActiveTab()) {
         fBookmarkButton->SetEnabled(Bookmarkable(tab->url));
         const bool bookmarked = fShared->Read([&](const Profile& profile) {
@@ -2345,12 +2347,14 @@ void BrowserWindow::ProfileChanged(const BMessage& message)
         // Another window stored a new icon; this window's copy is out of date.
         const char* url = nullptr;
         if (sender != BMessenger(this) && message.FindString("icon_url", &url) == B_OK) fFavicons->Forget(url);
+        fWindowIconStale = true;
         PagesChanged();
         RefreshChrome();
         RefreshBookmarks();
     }
     if (changes & SharedProfile::kIconsCleared) {
         fFavicons = std::make_unique<FaviconCache>(fShared->Path().parent_path() / "Favicons", !fPrivate);
+        fWindowIconStale = true;
         PagesChanged();
         RefreshChrome();
         RefreshBookmarks();
@@ -2729,6 +2733,7 @@ void BrowserWindow::IconLoaded(const BMessage& message)
         if (auto* tab = FindTab(sender)) page = tab->url;
 #endif
     if (!fFavicons->Store(page, data, static_cast<size_t>(size))) return;
+    fWindowIconStale = true;
     if (fPrivate) {
         // Kept in this window only.
         RefreshChrome();
@@ -2868,10 +2873,76 @@ bool BrowserWindow::QuitRequested()
     return true;
 #endif
 }
+// The window icon protocol of air/OS's Deskbar: the Deskbar asks each window
+// for its "Icon" property and watches it for kWindowIconChanged notices, which
+// carry the new icon the same way ("result", an archived BBitmap; none when
+// the window has no icon of its own).
+static const char* const kWindowIconProperty = "Icon";
+static constexpr uint32 kWindowIconChanged = 'wicn';
+
+BHandler* BrowserWindow::ResolveSpecifier(BMessage* message, int32 index, BMessage* specifier, int32 what,
+    const char* property)
+{
+    if (what == B_DIRECT_SPECIFIER && property && !std::strcmp(property, kWindowIconProperty))
+        return this;
+    return BrowserWindowBase::ResolveSpecifier(message, index, specifier, what, property);
+}
+
+status_t BrowserWindow::GetSupportedSuites(BMessage* data)
+{
+    static property_info properties[] = {
+        { const_cast<char*>(kWindowIconProperty), { B_GET_PROPERTY, 0 }, { B_DIRECT_SPECIFIER, 0 },
+            const_cast<char*>("The site icon of the page shown, as an archived BBitmap."), 0, { }, { }, { } },
+        { }
+    };
+    data->AddString("suites", "suite/vnd.Kunanyi-Summit-browser-window");
+    BPropertyInfo info(properties);
+    data->AddFlat("messages", &info);
+    return BrowserWindowBase::GetSupportedSuites(data);
+}
+
+void BrowserWindow::AddWindowIcon(BMessage& message)
+{
+    auto* tab = ActiveTab();
+    const BBitmap* icon = tab ? fFavicons->Icon(tab->url) : nullptr;
+    BMessage archive;
+    if (icon && icon->Archive(&archive) == B_OK)
+        message.AddMessage("result", &archive);
+}
+
+void BrowserWindow::NoteWindowIcon()
+{
+    auto* tab = ActiveTab();
+    const BBitmap* icon = tab ? fFavicons->Icon(tab->url) : nullptr;
+    if (icon == fNotedWindowIcon && !fWindowIconStale)
+        return;
+    fNotedWindowIcon = icon;
+    fWindowIconStale = false;
+    BMessage notice;
+    AddWindowIcon(notice);
+    SendNotices(kWindowIconChanged, &notice);
+}
+
 void BrowserWindow::MessageReceived(BMessage* message)
 {
     auto* tab = ActiveTab();
     switch (message->what) {
+        case B_GET_PROPERTY: {
+            int32 index;
+            BMessage specifier;
+            int32 form;
+            const char* property = nullptr;
+            if (message->GetCurrentSpecifier(&index, &specifier, &form, &property) == B_OK && property
+                && !std::strcmp(property, kWindowIconProperty)) {
+                BMessage reply(B_REPLY);
+                AddWindowIcon(reply);
+                reply.AddInt32("error", B_OK);
+                message->SendReply(&reply);
+                return;
+            }
+            BrowserWindowBase::MessageReceived(message);
+            return;
+        }
 #if SUMMIT_MODERN_WEBKIT
         case B_WEBKIT_EXTENSION_ACTIONS_CHANGED: RefreshExtensionActions(); break;
         case B_WEBKIT_BROWSER_COMMAND: case B_WEBKIT_BROWSER_COMMAND_CANCELLED: BrowserCommand(*message); break;
