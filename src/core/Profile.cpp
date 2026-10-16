@@ -80,6 +80,7 @@ Profile Profile::Load(const std::filesystem::path& path, std::string& error)
                 throw std::runtime_error("Invalid home page");
         }
         if (auto bar = j.find("showBookmarksBar"); bar != j.end()) profile.showBookmarksBar = bar->get<bool>();
+        if (auto restore = j.find("restoreSession"); restore != j.end()) profile.restoreSession = restore->get<bool>();
         if (auto style = j.find("interfaceStyle"); style != j.end()) {
             profile.interfaceStyle = style->get<std::string>();
             if (profile.interfaceStyle != "haiku" && profile.interfaceStyle != "safari") profile.interfaceStyle = "haiku";
@@ -232,7 +233,7 @@ bool Profile::Save(const std::filesystem::path& path, std::string& error) const
         std::string data = json{{"version", 1}, {"tabs", Encode(first.tabs)}, {"selected", first.selected},
             {"windows", std::move(sessions)},
             {"bookmarks", Encode(bookmarks)}, {"history", Encode(history)},
-            {"homeURL", homeURL}, {"showBookmarksBar", showBookmarksBar},
+            {"homeURL", homeURL}, {"showBookmarksBar", showBookmarksBar}, {"restoreSession", restoreSession},
             {"interfaceStyle", interfaceStyle}, {"searchEngine", searchEngine},
             {"siteZoom", siteZoom}, {"unpinnedExtensions", unpinnedExtensions},
             {"trustedCertificates", trusted}, {"sitePermissions", sitePermissions},

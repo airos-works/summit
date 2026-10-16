@@ -28,6 +28,7 @@ constexpr uint32 homeEdited = 'phed', useStartPage = 'phsp', bookmarksBarToggled
     searchChosen = 'psrc', clearHistory = 'pchi', clearHistoryConfirmed = 'pchc', clearCache = 'pcca',
     clearSiteData = 'pcsd', clearSiteDataConfirmed = 'pcsc', cacheMeasured = 'pcms',
     forgetCertificates = 'pfce', forgetCertificatesConfirmed = 'pfcc', siteSelected = 'psse', siteAllow = 'pssa',
+    restoreSessionToggled = 'prss',
     siteBlock = 'pssb', siteRemove = 'pssr', protocolSelected = 'ppse', protocolRemove = 'pprm';
 enum SiteColumn { kSiteColumn, kPermissionColumn, kSettingColumn };
 
@@ -74,6 +75,11 @@ PreferencesWindow::PreferencesWindow(BMessenger owner, const PreferencesState& s
     fSearchEngine = new BMenuField("search-engine", "Search engine:", engines);
     auto* searchHint = new BStringView("search-hint", "Used for text typed in the address field that is not an address.");
     searchHint->SetHighUIColor(B_PANEL_TEXT_COLOR, B_DARKEN_2_TINT);
+    fRestoreSession = new BCheckBox("restore-session", "Reopen the windows and tabs from last time when Summit starts",
+        new BMessage(restoreSessionToggled));
+    fRestoreSession->SetValue(state.restoreSession ? B_CONTROL_ON : B_CONTROL_OFF);
+    auto* restoreHint = new BStringView("restore-hint", "Also after the computer was shut down or restarted.");
+    restoreHint->SetHighUIColor(B_PANEL_TEXT_COLOR, B_DARKEN_2_TINT);
     fBookmarksBar = new BCheckBox("show-bookmarks-bar", "Show the bookmarks bar under the toolbar",
         new BMessage(bookmarksBarToggled));
     fBookmarksBar->SetValue(state.showBookmarksBar ? B_CONTROL_ON : B_CONTROL_OFF);
@@ -145,6 +151,9 @@ PreferencesWindow::PreferencesWindow(BMessenger owner, const PreferencesState& s
                 .AddGlue()
             .End()
             .Add(searchHint)
+            .AddStrut(4)
+            .Add(fRestoreSession)
+            .Add(restoreHint)
         .End()
         .AddStrut(6)
         .Add(SectionTitle("bookmarks-title", "Bookmarks"))
@@ -343,6 +352,12 @@ void PreferencesWindow::MessageReceived(BMessage* message)
             fHome->SetText("");
             PostMessage(homeEdited);
             break;
+        case restoreSessionToggled: {
+            BMessage changed(kPreferencesChanged);
+            changed.AddBool("restore_session", fRestoreSession->Value() == B_CONTROL_ON);
+            fOwner.SendMessage(&changed);
+            break;
+        }
         case bookmarksBarToggled: {
             BMessage changed(kPreferencesChanged);
             changed.AddBool("show_bookmarks_bar", fBookmarksBar->Value() == B_CONTROL_ON);
@@ -440,6 +455,9 @@ void PreferencesWindow::MessageReceived(BMessage* message)
             bool bar = false;
             if (message->FindBool("show_bookmarks_bar", &bar) == B_OK)
                 fBookmarksBar->SetValue(bar ? B_CONTROL_ON : B_CONTROL_OFF);
+            bool restore = true;
+            if (message->FindBool("restore_session", &restore) == B_OK)
+                fRestoreSession->SetValue(restore ? B_CONTROL_ON : B_CONTROL_OFF);
             const char* style = nullptr;
             if (message->FindString("interface_style", &style) == B_OK && style)
                 (std::string(style) == "safari" ? fSafariStyle : fHaikuStyle)->SetValue(B_CONTROL_ON);

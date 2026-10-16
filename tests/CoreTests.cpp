@@ -301,6 +301,8 @@ int main()
     profile.declinedProtocolHandlers["web+demo"].insert("https://demo.example/?url=%s");
     profile.homeURL = "https://home.example/";
     profile.showBookmarksBar = false;
+    CHECK(profile.restoreSession);
+    profile.restoreSession = false;
     CHECK(profile.Save(path, error) && error.empty());
     auto loaded = Profile::Load(path, error);
     CHECK(error.empty() && loaded.windows.size() == 2 && loaded.windows[0].tabs.size() == 2 && loaded.windows[0].selected == 1);
@@ -311,7 +313,7 @@ int main()
     CHECK(loaded.history.front().visited == profile.history.front().visited);
     CHECK(loaded.history.front().visits == 2 && loaded.history.back().visits == 0);
     CHECK(loaded.bookmarks.size() == 2 && loaded.bookmarks[1].bar && loaded.bookmarks[1].url == "https://bar.example/");
-    CHECK(loaded.homeURL == "https://home.example/" && !loaded.showBookmarksBar);
+    CHECK(loaded.homeURL == "https://home.example/" && !loaded.showBookmarksBar && !loaded.restoreSession);
     CHECK(loaded.sitePermissions.size() == 4 && loaded.sitePermissions["notifications"].size() == 1
         && loaded.sitePermissions["notifications"]["https://github.com"]
         && !loaded.sitePermissions["geolocation"]["https://maps.example:8443"]

@@ -26,6 +26,7 @@ struct PreferencesState {
     std::filesystem::path webKitDirectory;
     // Certificates the user chose to trust although they failed verification.
     size_t trustedCertificates = 0;
+    bool restoreSession = true;
 };
 // Edit › Preferences…. One window for the application; changes apply to every
 // browser window as they are made and are saved in the profile.
@@ -62,6 +63,7 @@ private:
     BTextControl* fHome;
     BStringView* fHint;
     BMenuField* fSearchEngine;
+    BCheckBox* fRestoreSession;
     BCheckBox* fBookmarksBar;
     BRadioButton* fHaikuStyle;
     BRadioButton* fSafariStyle;

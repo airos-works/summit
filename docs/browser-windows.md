@@ -64,7 +64,11 @@ pages cannot open windows by themselves.
 - New windows cascade from the front window. Closing the last tab of a window
   closes the window when another is open. Closing a window forgets its tabs;
   closing the last one, or File › Quit, quits Summit and keeps every window's
-  tabs and frame for the next start.
+  tabs and frame for the next start. Preferences › General › "Reopen the
+  windows and tabs from last time" (`restoreSession`, on by default) turns
+  that off: Summit then starts with one window.
+- A shutdown or restart of the system quits Summit the same way, without the
+  downloads question, and the next start reopens its windows (#58).
 - Bookmarks, history, the bookmarks bar and the look are shared: a change in
   one window shows in all of them.
 - Downloads are reported in the window whose page started them. Quitting with
@@ -88,6 +92,13 @@ pages cannot open windows by themselves.
   and runs the quit: windows close one at a time so pages can ask about
   unsaved work; if one stays open, the quit stops. A window's close box asks
   the application (`kCloseWindowRequest`), which quits if it is the last.
+- Before a shutdown the registrar sends each application `B_QUIT_REQUESTED`
+  with `_shutdown_` and cancels the shutdown on a reply whose `result` is
+  false; an application that has not quit after 3 s is killed. Summit's own
+  quit answers "not yet" several times (`QuitRequested`), so
+  `DispatchMessage` keeps the registrar's request unanswered, writes the
+  profile at once and starts the quit. Only a page that keeps its window open
+  answers it, with false, which cancels the shutdown as it should.
 - Each window keeps its own `FaviconCache`; when one stores an icon, the
   others drop their copy and reread it from disk.
 - An open `BPopUpMenu` holds its window's close lock. The page, tab and

@@ -33,6 +33,7 @@
 #include <algorithm>
 #include <atomic>
 #include <map>
+#include <memory>
 #include <tuple>
 #include <utility>
 #include <string_view>
@@ -53,6 +54,17 @@ public:
     void DispatchMessage(BMessage* message, BHandler* handler) override
     {
         summit::StallScope scope("app", message ? message->what : 0);
+#if SUMMIT_MODERN_WEBKIT
+        // Before a shutdown or reboot the registrar asks each application to
+        // quit, and a negative answer cancels the shutdown. Summit's quit
+        // takes several turns that each answer "not yet" (QuitRequested), so
+        // the registrar's request is kept, not answered: Summit quits, or
+        // answers no when a page keeps its window open.
+        if (message && message->what == B_QUIT_REQUESTED && message->GetBool("_shutdown_", false)) {
+            QuitForShutdown(DetachCurrentMessage());
+            return;
+        }
+#endif
         BApplication::DispatchMessage(message, handler);
     }
     void ArgvReceived(int32 argc, char** argv) override
@@ -219,9 +231,11 @@ public:
         GiveSitePermissions(*fWebKitContext);
 #endif
         summit::SetSearchEngine(fShared->Read([](const summit::Profile& profile) { return profile.searchEngine; }));
-        // Reopen every window of the last session, unless pages were named.
+        // Reopen every window of the last session, unless pages were named or
+        // Preferences say to start afresh.
         const auto saved = fShared->SavedWindows();
-        if (!fURLs.empty() || saved.empty()) {
+        const bool restore = fShared->Read([](const summit::Profile& profile) { return profile.restoreSession; });
+        if (!fURLs.empty() || saved.empty() || !restore) {
             summit::BrowserWindowOptions options;
             options.urls = fURLs;
             OpenWindow(options);
@@ -421,6 +435,15 @@ public:
         if (message->what == summit::kWindowCloseCancelled) {
             if (!fQuitting) return;
             SUMMIT_QUIT_TRACE("a window stayed open; not quitting");
+            if (fShutdownRequest) {
+                // The page's choice cancels the shutdown, as for any
+                // application that does not quit.
+                BMessage reply(B_REPLY);
+                reply.AddBool("result", false);
+                reply.AddInt32("thread", Thread());
+                fShutdownRequest->SendReply(&reply);
+                fShutdownRequest.reset();
+            }
             // A page kept its window open: Summit keeps running, without the
             // windows that already closed.
             fQuitting = false;
@@ -484,15 +507,17 @@ public:
             const char* home = nullptr;
             const char* style = nullptr;
             const char* engine = nullptr;
-            bool bar = false;
+            bool bar = false, restore = true;
             const bool hasHome = message->FindString("home_url", &home) == B_OK && home;
             const bool hasBar = message->FindBool("show_bookmarks_bar", &bar) == B_OK;
+            const bool hasRestore = message->FindBool("restore_session", &restore) == B_OK;
             const bool hasStyle = message->FindString("interface_style", &style) == B_OK && style;
             const bool hasEngine = message->FindString("search_engine", &engine) == B_OK && engine;
             fShared->Change([&](summit::Profile& profile) -> uint32 {
                 bool changed = false;
                 if (hasHome && profile.homeURL != summit::Trim(home)) { profile.homeURL = summit::Trim(home); changed = true; }
                 if (hasBar && profile.showBookmarksBar != bar) { profile.showBookmarksBar = bar; changed = true; }
+                if (hasRestore && profile.restoreSession != restore) { profile.restoreSession = restore; changed = true; }
                 if (hasStyle && profile.interfaceStyle != style) { profile.interfaceStyle = style; changed = true; }
                 if (hasEngine && profile.searchEngine != engine) {
                     // Set before windows hear of the change, so they see the new engine.
@@ -764,6 +789,18 @@ public:
         SUMMIT_QUIT_TRACE("the application quits");
         return true;
     }
+    void QuitForShutdown(BMessage* request)
+    {
+        SUMMIT_QUIT_TRACE("the system shuts down");
+        fShutdownRequest.reset(request);
+        // The registrar kills an application that has not quit after three
+        // seconds: the windows and tabs are written first.
+        std::string error;
+        if (fShared && !fShared->Save(error)) std::fprintf(stderr, "Summit: could not save the profile: %s\n", error.c_str());
+        // Nobody is there to answer the downloads question.
+        fDownloadQuitApproved = true;
+        PostMessage(B_QUIT_REQUESTED);
+    }
 #endif
     bool WebKitInitialized() const { return fWebKitInitialized; }
     int ExitStatus() const { return fExitStatus; }
@@ -794,6 +831,9 @@ private:
     std::map<uint64, BMessenger> fDownloads;
     bool fDownloadQuitApproved = false;
     bool fDownloadPromptPending = false;
+    // The registrar's quit request of a system shutdown, until Summit quits
+    // or a page keeps its window open.
+    std::unique_ptr<BMessage> fShutdownRequest;
 
     BMessenger FrontWindow() const { return fWindows.empty() ? BMessenger() : fWindows.front().messenger; }
     // The most recently active window that is not private.
@@ -951,7 +991,8 @@ private:
         }
         summit::PreferencesState state = fShared->Read([](const summit::Profile& profile) {
             return summit::PreferencesState { profile.homeURL, profile.showBookmarksBar, profile.interfaceStyle,
-                profile.searchEngine, profile.history.size(), { }, profile.trustedCertificates.size() };
+                profile.searchEngine, profile.history.size(), { }, profile.trustedCertificates.size(),
+                profile.restoreSession };
         });
         state.webKitDirectory = fProfile / "WebKit";
         auto* window = new summit::PreferencesWindow(BMessenger(this), state);
@@ -1000,6 +1041,7 @@ private:
         fShared->Read([&](const summit::Profile& profile) {
             state.AddString("home_url", profile.homeURL.c_str());
             state.AddBool("show_bookmarks_bar", profile.showBookmarksBar);
+            state.AddBool("restore_session", profile.restoreSession);
             state.AddString("interface_style", profile.interfaceStyle.c_str());
             state.AddString("search_engine", profile.searchEngine.c_str());
             state.AddInt32("history_count", static_cast<int32>(profile.history.size()));

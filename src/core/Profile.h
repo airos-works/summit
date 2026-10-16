@@ -48,6 +48,9 @@ struct Profile {
     // Where the Home button goes; empty means the built-in start page.
     std::string homeURL;
     bool showBookmarksBar = true;
+    // Whether Summit starts with the windows and tabs open when it last quit
+    // (or the system shut down), where they were; otherwise with one window.
+    bool restoreSession = true;
     // "haiku" draws the window like other Haiku applications (real buttons and
     // tabs); "safari" is the flat, Safari-like look.
     std::string interfaceStyle = "haiku";
