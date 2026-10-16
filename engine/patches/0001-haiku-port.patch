@@ -63245,7 +63245,7 @@ index 4bf8021fddeb356aa2f416e2b5c07aae6136387b..b7eb58b149a8884fcee4d96a61a8dff6
      if (renderer.hasAppleVisualEffect())
          return true;
 diff --git a/Source/WebCore/rendering/RenderObject.cpp b/Source/WebCore/rendering/RenderObject.cpp
-index 5a90dd68672464ece91671bee69e2598510a2ebb..fce4daff95c2608a1efd285024a8408462104ffb 100644
+index 5a90dd68672464ece91671bee69e2598510a2ebb..c555e47669b32e48bb179d6079378e06eea8d56c 100644
 --- a/Source/WebCore/rendering/RenderObject.cpp
 +++ b/Source/WebCore/rendering/RenderObject.cpp
 @@ -34,6 +34,7 @@
@@ -63322,6 +63322,27 @@ index 5a90dd68672464ece91671bee69e2598510a2ebb..fce4daff95c2608a1efd285024a84084
  
      if (layoutRoot && layoutRoot->isRooted())
          protect(layoutRoot->view().frameView().layoutContext())->scheduleSubtreeLayout(*layoutRoot);
+@@ -602,6 +641,20 @@ RenderElement* RenderObject::markContainingBlocksForLayout(RenderElement* layout
+     CheckedPtr ancestor = container();
+ 
+     bool simplifiedNormalFlowLayout = needsSimplifiedNormalFlowLayout() && !selfNeedsLayout() && !normalChildNeedsLayout();
++#if PLATFORM(HAIKU)
++    // A layout boundary keeps its size whatever its content does (an SVG root, a
++    // box with size and layout containment), so when only its content needs
++    // layout its ancestors just have to reach it, as with a single subtree layout
++    // root. A second, disjoint root turns the subtree layouts into one full
++    // layout: every SVG root with an animated element then had its parent block
++    // laid out again, and that block's line layout repainted the whole line
++    // around the root on every animation frame (a Home Assistant power-flow card:
++    // a few moving dots repainted the card at 60 fps).
++    if (!simplifiedNormalFlowLayout && !selfNeedsLayout()) {
++        if (auto* element = dynamicDowncast<RenderElement>(*this); element && !element->isRenderView() && isLayoutBoundary(*element))
++            simplifiedNormalFlowLayout = true;
++    }
++#endif
+     bool hasOutOfFlowPosition = isOutOfFlowPositioned();
+ 
+     while (ancestor) {
 diff --git a/Source/WebCore/rendering/RenderText.cpp b/Source/WebCore/rendering/RenderText.cpp
 index a52a008e494939c3874a83a8ae10bfc16a5b7025..53c7f1a89a1a416c12c91ddd5ac5c43b83149fc7 100644
 --- a/Source/WebCore/rendering/RenderText.cpp
@@ -77094,10 +77115,10 @@ index 0000000000000000000000000000000000000000..d28a6cad6339adf79b155cf974e85bfd
 +
 diff --git a/Source/WebKit/UIProcess/API/haiku/WebKitView.cpp b/Source/WebKit/UIProcess/API/haiku/WebKitView.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..c513815be2c9593bb9bac943763f49bd69d97fc7
+index 0000000000000000000000000000000000000000..a1cd6dfcbee78c81665361fb114ba65042034a20
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/API/haiku/WebKitView.cpp
-@@ -0,0 +1,927 @@
+@@ -0,0 +1,980 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#include "config.h"
@@ -77116,6 +77137,7 @@ index 0000000000000000000000000000000000000000..c513815be2c9593bb9bac943763f49bd
 +#include "WebExtensionTimingHaiku.h"
 +#include <Application.h>
 +#include <Cursor.h>
++#include <MessageFilter.h>
 +#include <MessageRunner.h>
 +#include <OS.h>
 +#include <Region.h>
@@ -77412,6 +77434,44 @@ index 0000000000000000000000000000000000000000..c513815be2c9593bb9bac943763f49bd
 +    }
 +}
 +
++// A window's own changes of visibility reach no view hook: minimizing and
++// restoring it (B_MINIMIZE) and switching workspaces. The filter sees them
++// before BWindow handles them, so the view looks again afterwards. Without it
++// the pages of a minimized window counted as visible and kept animating and
++// painting: one Home Assistant dashboard went on using a core and a half.
++static constexpr uint32 viewWindowVisibilityHaiku = 'wvwv';
++
++class WindowVisibilityFilterHaiku final : public BMessageFilter {
++public:
++    explicit WindowVisibilityFilterHaiku(BMessenger view)
++        : BMessageFilter(B_ANY_DELIVERY, B_ANY_SOURCE)
++        , m_view(view)
++    {
++    }
++
++    filter_result Filter(BMessage* message, BHandler**) override
++    {
++        switch (message->what) {
++        case B_MINIMIZE:
++        case B_WORKSPACE_ACTIVATED:
++        case B_WORKSPACES_CHANGED:
++            m_view.SendMessage(viewWindowVisibilityHaiku);
++            break;
++        default:
++            break;
++        }
++        return B_DISPATCH_MESSAGE;
++    }
++
++private:
++    BMessenger m_view;
++};
++
++static bool windowOnCurrentWorkspaceHaiku(BWindow& window)
++{
++    return window.Workspaces() & (1u << current_workspace());
++}
++
 +// Window thread: the view's frame and visibility as the direct window needs them.
 +static void noteDirectViewHaiku(BWebKitView& view, const std::shared_ptr<WebKit::WebViewStateHaiku>& state, bool attached)
 +{
@@ -77695,7 +77755,7 @@ index 0000000000000000000000000000000000000000..c513815be2c9593bb9bac943763f49bd
 +            { static_cast<int>(std::round(windowFrame.left)), static_cast<int>(std::round(windowFrame.top)) },
 +            { viewDimensionHaiku(windowFrame.Width()), viewDimensionHaiku(windowFrame.Height()) }
 +        };
-+        current.visible = !IsHidden() && !window->IsHidden();
++        current.visible = !IsHidden() && !window->IsHidden() && !window->IsMinimized() && m_state->onCurrentWorkspace;
 +        current.active = window->IsActive();
 +        messenger = BMessenger(this);
 +    }
@@ -77716,11 +77776,20 @@ index 0000000000000000000000000000000000000000..c513815be2c9593bb9bac943763f49bd
 +void BWebKitView::AttachedToWindow()
 +{
 +    BView::AttachedToWindow();
++    if (!m_state->windowFilter) {
++        m_state->windowFilter = new WindowVisibilityFilterHaiku(BMessenger(this));
++        Window()->AddCommonFilter(m_state->windowFilter);
++    }
++    m_state->onCurrentWorkspace = windowOnCurrentWorkspaceHaiku(*Window());
 +    UpdateGeometry();
 +}
 +
 +void BWebKitView::DetachedFromWindow()
 +{
++    if (auto* filter = std::exchange(m_state->windowFilter, nullptr)) {
++        Window()->RemoveCommonFilter(filter);
++        delete filter;
++    }
 +    noteDirectViewHaiku(*this, m_state, false);
 +    m_state->dialogs->cancelAll();
 +    m_dialogHost.reset();
@@ -77938,6 +78007,11 @@ index 0000000000000000000000000000000000000000..c513815be2c9593bb9bac943763f49bd
 +    switch (message->what) {
 +    case viewRetryCloseHaiku:
 +        RequestClose();
++        return;
++    case viewWindowVisibilityHaiku:
++        if (Window())
++            m_state->onCurrentWorkspace = windowOnCurrentWorkspaceHaiku(*Window());
++        UpdateGeometry();
 +        return;
 +    case javaScriptDialogShowHaiku:
 +        if (!m_dialogHost)
@@ -110962,10 +111036,10 @@ index 0000000000000000000000000000000000000000..63372cc3f12bccf01f83f9ed4395aaae
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/WebViewStateHaiku.h b/Source/WebKit/UIProcess/haiku/WebViewStateHaiku.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..bca84c38c4baa97b3e3b0a32616bbeda33a18336
+index 0000000000000000000000000000000000000000..5f9791a9b7588ef3126171b0265de45c5fe94982
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/WebViewStateHaiku.h
-@@ -0,0 +1,176 @@
+@@ -0,0 +1,183 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#pragma once
@@ -110982,6 +111056,8 @@ index 0000000000000000000000000000000000000000..bca84c38c4baa97b3e3b0a32616bbeda
 +#include <mutex>
 +#include <optional>
 +#include <vector>
++
++class BMessageFilter;
 +#include <wtf/RefPtr.h>
 +#include <wtf/SharedTask.h>
 +#include <wtf/text/WTFString.h>
@@ -111041,6 +111117,11 @@ index 0000000000000000000000000000000000000000..bca84c38c4baa97b3e3b0a32616bbeda
 +    std::atomic<bool> closed { false };
 +    // A file drag from another application is over the view (window thread).
 +    bool dragActive { false };
++    // Window thread: the filter that tells the view when its window is
++    // minimized, restored or moved between workspaces (WebKitView.cpp), and
++    // whether the window is on the workspace shown.
++    BMessageFilter* windowFilter { nullptr };
++    bool onCurrentWorkspace { true };
 +    std::atomic<status_t> status { B_NO_INIT };
 +    std::atomic<uint64_t> findRequestIdentifier { 0 };
 +    const std::shared_ptr<JavaScriptDialogRequestsHaiku> dialogs { std::make_shared<JavaScriptDialogRequestsHaiku>() };
