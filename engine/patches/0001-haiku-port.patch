@@ -22668,7 +22668,7 @@ index 25a33139079a55094a25c97216a9575a59224292..f218183a01f2781651d7af7ad93e6ccf
  
      static Ref<BitmapTexture> create(const IntSize& size, OptionSet<Flags> flags = { })
 diff --git a/Source/WebCore/platform/graphics/egl/BitmapTexturePool.cpp b/Source/WebCore/platform/graphics/egl/BitmapTexturePool.cpp
-index 36206e6f966e88e056cf20705257fddb8b14d601..4cfaaaf262bc63c27ecc4e3c8037de957624f3ec 100644
+index 36206e6f966e88e056cf20705257fddb8b14d601..d039660368dcdd457b5a79914dbbab6dc5d6c0a1 100644
 --- a/Source/WebCore/platform/graphics/egl/BitmapTexturePool.cpp
 +++ b/Source/WebCore/platform/graphics/egl/BitmapTexturePool.cpp
 @@ -27,6 +27,14 @@
@@ -22686,7 +22686,41 @@ index 36206e6f966e88e056cf20705257fddb8b14d601..4cfaaaf262bc63c27ecc4e3c8037de95
  #include "GLContext.h"
  #include "GLContextWrapper.h"
  #include "PlatformDisplay.h"
-@@ -67,6 +75,17 @@ BitmapTexturePool::BitmapTexturePool()
+@@ -47,6 +55,24 @@ static constexpr size_t s_poolSizeLimitInBytes = std::numeric_limits<size_t>::ma
+ #endif
+ 
+ static constexpr Seconds s_releaseUnusedSecondsTolerance { 3_s };
++
++// Each new GPU texture costs milliseconds on the laptop's amdgpu (the
++// allocation ioctl), so on Haiku textures stay in the pool for 15 seconds
++// instead of 3: a page scrolled again after a pause of a few seconds takes
++// its tiles from the pool rather than making them again.
++// SUMMIT_POOL_KEEP_SECONDS sets it.
++static Seconds defaultReleaseUnusedSecondsTolerance()
++{
++#if PLATFORM(HAIKU)
++    static const Seconds tolerance = [] {
++        const char* value = getenv("SUMMIT_POOL_KEEP_SECONDS");
++        return Seconds(value ? std::max(0.1, atof(value)) : 15);
++    }();
++    return tolerance;
++#else
++    return s_releaseUnusedSecondsTolerance;
++#endif
++}
+ static constexpr Seconds s_releaseUnusedTexturesTimerInterval { 500_ms };
+ static constexpr Seconds s_releaseUnusedSecondsToleranceOnLimitExceeded { 50_ms };
+ static constexpr Seconds s_releaseUnusedTexturesTimerIntervalOnLimitExceeded { 200_ms };
+@@ -59,7 +85,7 @@ BitmapTexturePool& BitmapTexturePool::singleton()
+ 
+ BitmapTexturePool::BitmapTexturePool()
+     : m_releaseUnusedTexturesTimer(RunLoop::mainSingleton(), "BitmapTexturePool::ReleaseUnusedTexturesTimer"_s, this, &BitmapTexturePool::releaseUnusedTexturesTimerFired)
+-    , m_releaseUnusedSecondsTolerance(s_releaseUnusedSecondsTolerance)
++    , m_releaseUnusedSecondsTolerance(defaultReleaseUnusedSecondsTolerance())
+     , m_releaseUnusedTexturesTimerInterval(s_releaseUnusedTexturesTimerInterval)
+ {
+ #if USE(GLIB)
+@@ -67,6 +93,17 @@ BitmapTexturePool::BitmapTexturePool()
  #endif
  }
  
@@ -22704,7 +22738,7 @@ index 36206e6f966e88e056cf20705257fddb8b14d601..4cfaaaf262bc63c27ecc4e3c8037de95
  Ref<BitmapTexture> BitmapTexturePool::acquireTexture(const IntSize& size, OptionSet<BitmapTexture::Flags> flags)
  {
      ASSERT(GLContextWrapper::currentContext());
-@@ -80,10 +99,22 @@ Ref<BitmapTexture> BitmapTexturePool::acquireTexture(const IntSize& size, Option
+@@ -80,10 +117,22 @@ Ref<BitmapTexture> BitmapTexturePool::acquireTexture(const IntSize& size, Option
              && entry.texture->flags().contains(BitmapTexture::Flags::ForceVivanteSuperTiledBuffer) == flags.contains(BitmapTexture::Flags::ForceVivanteSuperTiledBuffer)
  #endif
              && entry.texture->flags().contains(BitmapTexture::Flags::UseBGRALayout) == flags.contains(BitmapTexture::Flags::UseBGRALayout)
@@ -22727,15 +22761,14 @@ index 36206e6f966e88e056cf20705257fddb8b14d601..4cfaaaf262bc63c27ecc4e3c8037de95
          m_textures.append(Entry(BitmapTexture::create(size, flags)));
          selectedEntry = &m_textures.last();
          m_poolSizeInBytes += selectedEntry->texture->sizeInBytes();
-@@ -115,15 +146,35 @@ Ref<BitmapTexture> BitmapTexturePool::createTextureForImage(EGLImage image, cons
+@@ -115,15 +164,35 @@ Ref<BitmapTexture> BitmapTexturePool::createTextureForImage(EGLImage image, cons
  void BitmapTexturePool::scheduleReleaseUnusedTextures()
  {
      assertIsHeld(m_lock);
 -    if (m_releaseUnusedTexturesTimer.isActive())
 +    if (m_releaseTimerActive && !m_releaseTimerImmediate)
-         return;
- 
--    m_releaseUnusedTexturesTimer.startOneShot(m_releaseUnusedTexturesTimerInterval);
++        return;
++
 +    // A worker may hold m_lock while the timer fires on the main thread. The
 +    // timer's Haiku RunLoop operations take the main BLooper lock, so doing
 +    // them here from that worker deadlocks against the timer callback waiting
@@ -22749,9 +22782,10 @@ index 36206e6f966e88e056cf20705257fddb8b14d601..4cfaaaf262bc63c27ecc4e3c8037de95
 +            m_releaseTimerSchedulePending = false;
 +            scheduleReleaseUnusedTextures();
 +        });
-+        return;
+         return;
 +    }
-+
+ 
+-    m_releaseUnusedTexturesTimer.startOneShot(m_releaseUnusedTexturesTimerInterval);
 +    bool immediate = m_releaseTimerImmediate;
 +    m_releaseTimerImmediate = false;
 +    m_releaseTimerActive = true;
@@ -22765,7 +22799,7 @@ index 36206e6f966e88e056cf20705257fddb8b14d601..4cfaaaf262bc63c27ecc4e3c8037de95
  
      auto hasTextures = [this] -> bool {
          assertIsHeld(m_lock);
-@@ -139,12 +190,28 @@ void BitmapTexturePool::releaseUnusedTexturesTimerFired()
+@@ -139,12 +208,28 @@ void BitmapTexturePool::releaseUnusedTexturesTimerFired()
      if (!hasTextures())
          return;
  
@@ -22796,7 +22830,7 @@ index 36206e6f966e88e056cf20705257fddb8b14d601..4cfaaaf262bc63c27ecc4e3c8037de95
              auto matchCount = m_textures.removeAllMatching([this, &minUsedTime](const Entry& entry) {
                  assertIsHeld(m_lock);
                  if (entry.canBeReleased(minUsedTime)) {
-@@ -194,7 +261,7 @@ void BitmapTexturePool::enterLimitExceededModeIfNeeded()
+@@ -194,7 +279,7 @@ void BitmapTexturePool::enterLimitExceededModeIfNeeded()
          m_onLimitExceededMode = true;
          m_releaseUnusedSecondsTolerance = s_releaseUnusedSecondsToleranceOnLimitExceeded;
          m_releaseUnusedTexturesTimerInterval = s_releaseUnusedTexturesTimerIntervalOnLimitExceeded;
@@ -22805,6 +22839,15 @@ index 36206e6f966e88e056cf20705257fddb8b14d601..4cfaaaf262bc63c27ecc4e3c8037de95
      }
  }
  
+@@ -208,7 +293,7 @@ void BitmapTexturePool::exitLimitExceededModeIfNeeded()
+     // exit the limit exceeded mode and set the default values for interval and tolerance again.
+     if (m_poolSizeInBytes <= s_poolSizeLimitInBytes) {
+         m_onLimitExceededMode = false;
+-        m_releaseUnusedSecondsTolerance = s_releaseUnusedSecondsTolerance;
++        m_releaseUnusedSecondsTolerance = defaultReleaseUnusedSecondsTolerance();
+         m_releaseUnusedTexturesTimerInterval = s_releaseUnusedTexturesTimerInterval;
+     }
+ }
 diff --git a/Source/WebCore/platform/graphics/egl/BitmapTexturePool.h b/Source/WebCore/platform/graphics/egl/BitmapTexturePool.h
 index 04c7f35b45eb11fc3e87bd16b5aa657e46501001..09ba02743c2a405b4aa1895da07a954280a9d83f 100644
 --- a/Source/WebCore/platform/graphics/egl/BitmapTexturePool.h
