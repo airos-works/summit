@@ -56,6 +56,47 @@ What changed:
 - `SUMMIT_TILE_PAINT_TRACE=1`: when each tile is posted to the painting
   threads, how long it waited and how long it took.
 
+### Fixed layers at 175 %, and transforms that scripts animate
+
+lenis.darkroom.engineering (Lenis, fixed full-screen backgrounds, a sticky
+horizontal showcase) scrolled at 20 frames a second while the compositor ran
+at 60:
+
+| lenis.darkroom.engineering, 40-event wheel burst | before | after |
+|---|---|---|
+| median rAF interval while moving | 46-50 ms | 17 ms |
+| frames in which the page moved | 41-47 | 96 |
+| 95th percentile while moving | 85-220 ms | 44-45 ms |
+| tile painting in 5 s of scrolling | 2390 ms | 586 ms |
+| whole-layer repaints for a new sub-pixel offset | ~1100 | 187 |
+
+- **Layers that stay in the viewport are placed on the screen's pixel grid.**
+  Scroll positions are whole CSS pixels; at a device scale of 1.25, 1.5 or
+  1.75 most of them are not whole device pixels. `RenderLayerBacking` snaps a
+  layer to device pixels in the page and paints its contents with the
+  remainder; when the remainder changes the whole layer is painted again. A
+  fixed layer's remainder changed with three scroll steps of four at 175 %,
+  so the page's fixed 3925x1962 radial gradient was painted in every frame
+  of a scroll (75 % of all painting). For layers under the root, the snapping
+  now uses whichever grid, the page's or the screen's (snapped where the
+  layer is in the viewport, the scroll offset taken off and added back
+  exactly), keeps the remainder the layer was painted with; fixed layers
+  start on the screen's. Fixed, stuck sticky and what moves with them are
+  no longer painted again for a scroll, and a fixed header is now
+  pixel-identical at every scroll position (it re-rendered slightly
+  differently at three of four before). `SUMMIT_FIXED_LAYERS_ON_SCREEN_GRID=0`
+  goes back to the page's grid.
+- **A transform that a script changes in frame after frame composites the
+  layer**, as `will-change: transform` would (Gecko's active layers): three
+  changes no more than 250 ms apart, kept for 3 s after the last, at most 48
+  such layers. A test page sliding eight 420x520 cards with
+  `style.transform` in each animation frame ran at 30 frames a second with
+  both painting threads busy (1.98 cores); now 60 at 0.23 cores.
+  `SUMMIT_SCRIPTED_TRANSFORM_LAYERS=0` turns it off.
+- More painting threads (`WEBKIT_SKIA_CPU_PAINTING_THREADS=4`) took the
+  Lenis page from 47 to 33 ms a frame before these changes, and did nothing
+  for getartcraft.com; Haiku keeps two.
+
 ## 14 October 2026: YouTube on the Cubie A7S
 
 Goal: smoother YouTube playback with the board's video engine (sunxi_cedar)

@@ -63927,10 +63927,22 @@ index e4016aa11263c14ff1ece803b6abdb2d697c2f75..4c4a7d020e2a91fbbe39ab92bc99ae05
      } else if (canCreateIntrinsicLogicalHeightsCacheForRowSizingFirstPass)
          m_intrinsicLogicalHeightsForRowSizingFirstPass.emplace();
 diff --git a/Source/WebCore/rendering/RenderLayerBacking.cpp b/Source/WebCore/rendering/RenderLayerBacking.cpp
-index 95122a10cacc10b498c40d3447599bd2cd4d2795..209679fe3877d6f4feff47b1d92da2adb02bf087 100644
+index 95122a10cacc10b498c40d3447599bd2cd4d2795..22a2dd2c74a265578e74aeeb18d150c4cb164ab3 100644
 --- a/Source/WebCore/rendering/RenderLayerBacking.cpp
 +++ b/Source/WebCore/rendering/RenderLayerBacking.cpp
-@@ -1218,6 +1218,10 @@ void RenderLayerBacking::updateAfterLayout(bool needsClippingUpdate, bool needsF
+@@ -137,6 +137,11 @@
+ #include "ModelContext.h"
+ #endif
+ 
++#if PLATFORM(HAIKU)
++#include <cstdlib>
++#include <cstring>
++#endif
++
+ #if USE(SYSTEM_PREVIEW) && ENABLE(MODEL_PROCESS) && ENABLE(INTERACTION_REGIONS_IN_EVENT_REGION)
+ #include "ARKitBadgeSystemImage.h"
+ #endif
+@@ -1218,6 +1223,10 @@ void RenderLayerBacking::updateAfterLayout(bool needsClippingUpdate, bool needsF
          m_owningLayer.setNeedsCompositingGeometryUpdate();
      }
      
@@ -63941,7 +63953,52 @@ index 95122a10cacc10b498c40d3447599bd2cd4d2795..209679fe3877d6f4feff47b1d92da2ad
      if (needsFullRepaint && canIssueSetNeedsDisplay())
          setContentsNeedDisplay();
  }
-@@ -1935,8 +1939,18 @@ void RenderLayerBacking::updateGeometry(const RenderLayer* compositedAncestor)
+@@ -1581,6 +1590,44 @@ private:
+ LayoutRect RenderLayerBacking::computePrimaryGraphicsLayerRect(const RenderLayer* compositedAncestor, const LayoutRect& parentGraphicsLayerRect) const
+ {
+     ComputedOffsets compositedBoundsOffset(m_owningLayer, compositedAncestor, compositedBounds(), parentGraphicsLayerRect, { });
++#if PLATFORM(HAIKU)
++    // Scroll positions are whole CSS pixels, which at a device scale of 1.25,
++    // 1.5 or 1.75 are not whole device pixels. A layer that stays where it is
++    // in the viewport while the page scrolls (fixed, stuck sticky, and what
++    // moves with those) had a different offset within its device pixels after
++    // most scroll steps on the page's pixel grid, and a new offset paints the
++    // whole layer again: at 175 % lenis.darkroom.engineering painted a fixed
++    // 3925x1962 gradient in every frame of a scroll (75 % of all painting).
++    // Such a layer can be placed on the screen's grid instead, snapped where it
++    // is in the viewport. Whichever grid keeps the offset the layer was painted
++    // with is used, so neither kind of layer is painted again for a scroll.
++    // SUMMIT_FIXED_LAYERS_ON_SCREEN_GRID=0 uses the page's grid only.
++    static const bool onScreenGrid = [] {
++        const char* value = getenv("SUMMIT_FIXED_LAYERS_ON_SCREEN_GRID");
++        return !value || strcmp(value, "0");
++    }();
++    if (onScreenGrid && compositedAncestor && compositedAncestor->isRenderViewLayer()) {
++        auto factor = pixelSnappingScaleFactor();
++        auto offset = compositedBoundsOffset.fromParentGraphicsLayer();
++        auto size = compositedBounds().size();
++        LayoutRect pageGrid(encloseRectToDevicePixels(LayoutRect(toLayoutPoint(offset), size), factor));
++        // Where the viewport is in the page, as fixed boxes are laid out: it
++        // is taken off and added back exactly, so a layer that stays in the
++        // viewport keeps its offset.
++        auto viewportOrigin = toLayoutSize(compositedAncestor->renderer().view().frameView().rectForFixedPositionLayout().location());
++        LayoutRect screenGrid(encloseRectToDevicePixels(LayoutRect(toLayoutPoint(offset - viewportOrigin), size), factor));
++        screenGrid.move(viewportOrigin);
++        auto subpixelOffsetOn = [&](const LayoutRect& primaryGraphicsLayerRect) {
++            ComputedOffsets rendererOffset(m_owningLayer, compositedAncestor, { }, parentGraphicsLayerRect, primaryGraphicsLayerRect);
++            return computeOffsetFromRenderer(-rendererOffset.fromPrimaryGraphicsLayer(), factor).m_subpixelOffset;
++        };
++        if (subpixelOffsetOn(pageGrid) == m_subpixelOffsetFromRenderer)
++            return pageGrid;
++        if (subpixelOffsetOn(screenGrid) == m_subpixelOffsetFromRenderer)
++            return screenGrid;
++        return m_owningLayer.behavesAsFixed() ? screenGrid : pageGrid;
++    }
++#endif
+     return LayoutRect(encloseRectToDevicePixels(LayoutRect(toLayoutPoint(compositedBoundsOffset.fromParentGraphicsLayer()), compositedBounds().size()),
+         pixelSnappingScaleFactor()));
+ }
+@@ -1935,8 +1982,18 @@ void RenderLayerBacking::updateGeometry(const RenderLayer* compositedAncestor)
  
      positionOverflowControlsLayers();
  
@@ -63962,10 +64019,10 @@ index 95122a10cacc10b498c40d3447599bd2cd4d2795..209679fe3877d6f4feff47b1d92da2ad
  #if ENABLE(MODEL_ELEMENT)
      if (is<RenderModel>(renderer()))
 diff --git a/Source/WebCore/rendering/RenderLayerCompositor.cpp b/Source/WebCore/rendering/RenderLayerCompositor.cpp
-index 4bf8021fddeb356aa2f416e2b5c07aae6136387b..b7eb58b149a8884fcee4d96a61a8dff6cbafb092 100644
+index 4bf8021fddeb356aa2f416e2b5c07aae6136387b..2d3bb774ef11e3a05725494bd7c4724911cabffd 100644
 --- a/Source/WebCore/rendering/RenderLayerCompositor.cpp
 +++ b/Source/WebCore/rendering/RenderLayerCompositor.cpp
-@@ -78,6 +78,12 @@
+@@ -78,11 +78,19 @@
  #include "Settings.h"
  #include "StyleComputedStyle+GettersInlines.h"
  #include "StyleOffsetRotate.h"
@@ -63978,7 +64035,121 @@ index 4bf8021fddeb356aa2f416e2b5c07aae6136387b..b7eb58b149a8884fcee4d96a61a8dff6
  #include "TiledBacking.h"
  #include "TransformState.h"
  #include "TranslateTransformOperation.h"
-@@ -4029,11 +4035,56 @@ bool RenderLayerCompositor::requiresCompositingForCanvas(RenderLayerModelObject&
+ #include "ViewTransition.h"
++#include <wtf/HashMap.h>
+ #include <wtf/HexNumber.h>
++#include <wtf/NeverDestroyed.h>
+ #include <wtf/InlineWeakPtr.h>
+ #include <wtf/MemoryPressureHandler.h>
+ #include <wtf/ObjectIdentifier.h>
+@@ -2162,6 +2170,84 @@ static bool styleAffectsLayerGeometry(const Style::ComputedStyle& style)
+         || style.border().hasBorderRadius();
+ }
+ 
++#if PLATFORM(HAIKU)
++// A layer whose transform a script changes in frame after frame (sliders,
++// carousels, parallax and scroll effects driven by requestAnimationFrame)
++// is composited as if it had will-change: transform, so moving it costs a
++// composition instead of repainting what it covers. lenis.darkroom.engineering
++// moves its showcase cards with 2D translates: their 4096x1536 layer was
++// repainted every frame (24 tiles, 58 ms of painting) and the page scrolled
++// at 20 frames a second. Gecko's active layers worked this way.
++// SUMMIT_SCRIPTED_TRANSFORM_LAYERS=0 turns it off.
++struct ScriptedTransformHaiku {
++    const RenderLayerModelObject* renderer { nullptr };
++    MonotonicTime lastChange;
++    unsigned changes { 0 };
++    bool refused { false };
++};
++
++// Changes this far apart count as one animation; it takes this many of them,
++// and the layer stays composited for a while after the last.
++static constexpr Seconds scriptedTransformGapHaiku = 250_ms;
++static constexpr unsigned scriptedTransformChangesHaiku = 3;
++static constexpr Seconds scriptedTransformHoldHaiku = 3_s;
++// Hundreds of small moving things (particles) stay painted.
++static constexpr unsigned maxScriptedTransformLayersHaiku = 48;
++
++static bool scriptedTransformLayersEnabledHaiku()
++{
++    static const bool enabled = [] {
++        const char* value = getenv("SUMMIT_SCRIPTED_TRANSFORM_LAYERS");
++        return !value || strcmp(value, "0");
++    }();
++    return enabled;
++}
++
++static HashMap<const RenderLayer*, ScriptedTransformHaiku>& scriptedTransformsHaiku()
++{
++    static NeverDestroyed<HashMap<const RenderLayer*, ScriptedTransformHaiku>> map;
++    return map;
++}
++
++static bool isActiveScriptedTransformHaiku(const ScriptedTransformHaiku& entry, MonotonicTime now)
++{
++    return !entry.refused && entry.changes >= scriptedTransformChangesHaiku && now - entry.lastChange <= scriptedTransformHoldHaiku;
++}
++
++static void noteTransformChangeHaiku(const RenderLayer& layer)
++{
++    auto& map = scriptedTransformsHaiku();
++    auto now = MonotonicTime::now();
++    if (map.size() >= 256)
++        map.removeIf([&](auto& entry) { return now - entry.value.lastChange > scriptedTransformHoldHaiku; });
++    auto& entry = map.add(&layer, ScriptedTransformHaiku { }).iterator->value;
++    if (entry.renderer != &layer.renderer() || now - entry.lastChange > scriptedTransformGapHaiku)
++        entry = { &layer.renderer(), now, 0, false };
++    entry.lastChange = now;
++    if (++entry.changes != scriptedTransformChangesHaiku)
++        return;
++    unsigned active = 0;
++    for (auto& other : map.values())
++        active += isActiveScriptedTransformHaiku(other, now);
++    entry.refused = active > maxScriptedTransformLayersHaiku;
++}
++
++static bool hasActiveScriptedTransformHaiku(const RenderLayer& layer)
++{
++    auto& map = scriptedTransformsHaiku();
++    auto it = map.find(&layer);
++    return it != map.end() && it->value.renderer == &layer.renderer() && isActiveScriptedTransformHaiku(it->value, MonotonicTime::now());
++}
++
++static bool transformChangedHaiku(const Style::ComputedStyle& oldStyle, const Style::ComputedStyle& newStyle)
++{
++    return oldStyle.transform() != newStyle.transform()
++        || oldStyle.translate() != newStyle.translate()
++        || oldStyle.scale() != newStyle.scale()
++        || oldStyle.rotate() != newStyle.rotate();
++}
++#endif
++
+ static bool recompositeChangeRequiresGeometryUpdate(const Style::ComputedStyle& oldStyle, const Style::ComputedStyle& newStyle)
+ {
+     return oldStyle.transform() != newStyle.transform()
+@@ -2211,6 +2297,11 @@ void RenderLayerCompositor::layerStyleChanged(Style::Difference diff, RenderLaye
+     if (diff == Style::DifferenceResult::Equal)
+         return;
+ 
++#if PLATFORM(HAIKU)
++    if (oldStyle && scriptedTransformLayersEnabledHaiku() && transformChangedHaiku(*oldStyle, layer.renderer().style()))
++        noteTransformChangeHaiku(layer);
++#endif
++
+     // Create or destroy backing here so that code that runs during layout can reliably use isComposited() (though this
+     // is only true for layers composited for direct reasons).
+     // Also, it allows us to avoid a tree walk in updateCompositingLayers() when no layer changed its compositing state.
+@@ -2595,6 +2686,9 @@ void RenderLayerCompositor::repaintInCompositedAncestor(RenderLayer& layer, cons
+ 
+ void RenderLayerCompositor::layerWillBeRemoved(RenderLayer& parent, RenderLayer& child)
+ {
++#if PLATFORM(HAIKU)
++    scriptedTransformsHaiku().remove(&child);
++#endif
+     if (parent.renderer().renderTreeBeingDestroyed())
+         return;
+ 
+@@ -4029,11 +4123,56 @@ bool RenderLayerCompositor::requiresCompositingForCanvas(RenderLayerModelObject&
      return false;
  }
  
@@ -64035,6 +64206,21 @@ index 4bf8021fddeb356aa2f416e2b5c07aae6136387b..b7eb58b149a8884fcee4d96a61a8dff6
  #if HAVE(CORE_MATERIAL)
      if (renderer.hasAppleVisualEffect())
          return true;
+@@ -4047,8 +4186,14 @@ bool RenderLayerCompositor::requiresCompositingForFilters(RenderLayerModelObject
+ 
+ bool RenderLayerCompositor::requiresCompositingForWillChange(RenderLayerModelObject& renderer) const
+ {
++#if PLATFORM(HAIKU)
++    const bool scriptedTransform = is<RenderBox>(renderer) && renderer.layer() && hasActiveScriptedTransformHaiku(*renderer.layer());
++    if (!scriptedTransform && !renderer.style().willChange().canTriggerCompositing())
++        return false;
++#else
+     if (!renderer.style().willChange().canTriggerCompositing())
+         return false;
++#endif
+ 
+ #if ENABLE(FULLSCREEN_API)
+     // FIXME: does this require layout?
 diff --git a/Source/WebCore/rendering/RenderObject.cpp b/Source/WebCore/rendering/RenderObject.cpp
 index 5a90dd68672464ece91671bee69e2598510a2ebb..c555e47669b32e48bb179d6079378e06eea8d56c 100644
 --- a/Source/WebCore/rendering/RenderObject.cpp
