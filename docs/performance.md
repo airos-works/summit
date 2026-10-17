@@ -131,6 +131,18 @@ when the compositor was idle or a period behind): 60.0 frames a second, rAF
 every 16.61-16.67 ms, same jitter (0.7 ms). `SUMMIT_FRAME_GRID=0` restores
 the old timing.
 
+Finished animations no longer restyle their element in every frame. Each
+tick, every relevant animation invalidated its target's style, also one that
+had finished and fills forwards, is paused or waits out its delay, whose
+effect cannot change. linear.app keeps 438 finished entrance animations next
+to 75 running ones: after a scroll through the page its main thread was
+79-91 % busy at rest, style resolution 932-1093 ms in 3 s. An effect whose
+phase and active time are those of its last tick now leaves its target alone:
+43 % busy, 361-370 ms of style. Filled, paused, delayed and script-paused
+animations and later class changes render pixel-identical either way
+(`www/animstate.html` in the session's test kit). `SUMMIT_SKIP_STILL_ANIMATIONS=0`
+invalidates on every tick again.
+
 Found, not fixed: `backdrop-filter` does not blur a composited sibling
 painted before it (a `will-change: transform` card under a blurred box stays
 sharp, in the builds before and after this work).

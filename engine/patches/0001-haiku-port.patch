@@ -9483,6 +9483,87 @@ index 7dba487e979fa82a190a72ba7961e05dfefa20ce..c8fdb87f7bc15a9e495e6772142b6825
  JSCanvasImageData.cpp
  JSCanvasImageSmoothing.cpp
  JSCanvasLineCap.cpp
+diff --git a/Source/WebCore/animation/KeyframeEffect.cpp b/Source/WebCore/animation/KeyframeEffect.cpp
+index 341ea6e69eeb97a36a3894476b45c5c27a089b43..4359d73a59b7dc05270e82684d7d30a1e5acb5f5 100644
+--- a/Source/WebCore/animation/KeyframeEffect.cpp
++++ b/Source/WebCore/animation/KeyframeEffect.cpp
+@@ -97,18 +97,49 @@
+ #include <wtf/TZoneMallocInlines.h>
+ #include <wtf/UUID.h>
+ #include <wtf/text/TextStream.h>
++#if PLATFORM(HAIKU)
++#include <cstdlib>
++#include <cstring>
++#include <wtf/HashMap.h>
++#include <wtf/NeverDestroyed.h>
++#endif
+ 
+ #if ENABLE(THREADED_ANIMATIONS)
+ #include "AcceleratedEffect.h"
+ #endif
+ 
+ namespace WebCore {
++
++#if PLATFORM(HAIKU)
++// The phase and active time the last tick of each effect saw. A tick that sees
++// the same ones cannot change what the effect contributes to its target's
++// style: a finished animation that fills forwards, a paused one, one waiting
++// out its delay. Invalidating the target anyway resolved its style in every
++// frame: linear.app keeps 438 finished entrance animations (fill: forwards)
++// next to 75 running ones, and resolved all 513 elements 60 times a second
++// (two fifths of the main thread with nothing moving on the page but dots).
++// SUMMIT_SKIP_STILL_ANIMATIONS=0 invalidates on every tick.
++struct TickedTimingHaiku {
++    AnimationEffectPhase phase;
++    std::optional<WebAnimationTime> activeTime;
++};
++
++static HashMap<const KeyframeEffect*, TickedTimingHaiku>& tickedTimingsHaiku()
++{
++    static NeverDestroyed<HashMap<const KeyframeEffect*, TickedTimingHaiku>> timings;
++    return timings;
++}
++#endif
++
+ using namespace JSC;
+ 
+ WTF_MAKE_TZONE_ALLOCATED_IMPL(KeyframeEffect);
+ 
+ KeyframeEffect::~KeyframeEffect()
+ {
++#if PLATFORM(HAIKU)
++    tickedTimingsHaiku().remove(this);
++#endif
+     if (m_inTargetEffectStack) {
+         if (auto target = targetStyleable()) {
+             if (auto* keyframeEffectStack = target->keyframeEffectStack())
+@@ -2126,7 +2157,26 @@ void KeyframeEffect::addPendingAcceleratedAction(AcceleratedAction action)
+ 
+ void KeyframeEffect::animationDidTick()
+ {
++#if PLATFORM(HAIKU)
++    static const bool skipsStill = [] {
++        const char* value = getenv("SUMMIT_SKIP_STILL_ANIMATIONS");
++        return !value || strcmp(value, "0");
++    }();
++    bool changed = true;
++    if (skipsStill) {
++        auto timing = getBasicTiming();
++        TickedTimingHaiku ticked { timing.phase, timing.activeTime };
++        auto result = tickedTimingsHaiku().add(this, ticked);
++        if (!result.isNewEntry) {
++            changed = result.iterator->value.phase != ticked.phase || result.iterator->value.activeTime != ticked.activeTime;
++            result.iterator->value = ticked;
++        }
++    }
++    if (changed)
++        invalidate();
++#else
+     invalidate();
++#endif
+     updateAcceleratedActions();
+ 
+ #if ENABLE(THREADED_ANIMATIONS)
 diff --git a/Source/WebCore/bindings/js/CachedScriptSourceProvider.h b/Source/WebCore/bindings/js/CachedScriptSourceProvider.h
 index 6b884b257953dc67da8f86ca346e3b761200754c..f2f875e633370bc3adb81e3e1b51468a5f202381 100644
 --- a/Source/WebCore/bindings/js/CachedScriptSourceProvider.h
