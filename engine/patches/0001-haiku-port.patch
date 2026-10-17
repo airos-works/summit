@@ -63908,6 +63908,55 @@ index 0000000000000000000000000000000000000000..cff799029b188a06ba83de7d16f2747e
 +} // namespace WebCore
 +
 +#endif // RenderThemeHaiku_h
+diff --git a/Source/WebCore/rendering/updating/RenderTreeBuilderList.cpp b/Source/WebCore/rendering/updating/RenderTreeBuilderList.cpp
+index e35e12e8b19d0e6860a928fd325d858402e8e362..e317b971cbf7dbbe7a74378837976afdf850b4a0 100644
+--- a/Source/WebCore/rendering/updating/RenderTreeBuilderList.cpp
++++ b/Source/WebCore/rendering/updating/RenderTreeBuilderList.cpp
+@@ -83,6 +83,24 @@ static void adjustStyleForInlineMarker(Style::ComputedStyle& markerStyle)
+     markerStyle.setDisplay(Style::DisplayType::InlineFlow);
+ }
+ 
++#if PLATFORM(HAIKU)
++// A marker's margins are never the author's (::marker takes none): the marker
++// writes them into its own style once its content is known
++// (RenderListOutsideMarker::updateInlineMargins(), setListMarkerInlineMargins()
++// in RenderListItem::updateMarkerContent()). A marker style made afresh has
++// none, so setting it changed the margins and laid the marker out, with its
++// list item and every ancestor up to a layout boundary, whenever anything in
++// the list item was restyled. A spinner in an item of ChatGPT's task list did
++// that in every frame of the shimmer beside it: the whole conversation column
++// was laid out and what follows the list painted again, 60 times a second.
++// The margins are kept until the content says otherwise.
++static void keepListMarkerInlineMargins(Style::ComputedStyle& newStyle, const Style::ComputedStyle& currentStyle)
++{
++    auto margins = currentStyle.marginBox();
++    newStyle.setMarginBox(WTF::move(margins));
++}
++#endif
++
+ void RenderTreeBuilder::List::updateItemMarker(RenderListItem& listItemRenderer)
+ {
+     auto& style = listItemRenderer.style();
+@@ -124,6 +142,9 @@ void RenderTreeBuilder::List::updateItemMarker(RenderListItem& listItemRenderer)
+         auto contentChanged = inlineMarker->style().content() != newStyle.content();
+         if (shouldBuildInlineMarker && !contentChanged) {
+             adjustStyleForInlineMarker(newStyle);
++#if PLATFORM(HAIKU)
++            keepListMarkerInlineMargins(newStyle, inlineMarker->style());
++#endif
+             inlineMarker->setStyle(WTF::move(newStyle));
+             RenderTreeUpdater::GeneratedContent::updateStyleForContentRenderers(*inlineMarker, inlineMarker->style());
+             m_builder.addListItemNeedingMarkerUpdate(listItemRenderer);
+@@ -138,6 +159,9 @@ void RenderTreeBuilder::List::updateItemMarker(RenderListItem& listItemRenderer)
+     if (auto* markerRenderer = listItemRenderer.markerBox()) {
+         auto contentChanged = markerRenderer->style().content() != newStyle.content() || markerRenderer->style().unicodeBidi() != newStyle.unicodeBidi()
+             || markerRenderer->style().listStyleType() != newStyle.listStyleType() || markerRenderer->style().listStyleImage() != newStyle.listStyleImage();
++#if PLATFORM(HAIKU)
++        keepListMarkerInlineMargins(newStyle, markerRenderer->style());
++#endif
+         markerRenderer->setStyle(WTF::move(newStyle));
+         // list-style-type, the counter style it resolves to and the writing mode all decide the marker's text.
+         m_builder.addListItemNeedingMarkerUpdate(listItemRenderer);
 diff --git a/Source/WebCore/style/RuleSetBuilder.cpp b/Source/WebCore/style/RuleSetBuilder.cpp
 index b37af82d2bcf05a0d43b905a9231510b172ad917..e2f2b9bcddbbbd99e5bcf2068e0b4cbe0003e123 100644
 --- a/Source/WebCore/style/RuleSetBuilder.cpp
@@ -107953,10 +108002,10 @@ index 0000000000000000000000000000000000000000..c9a119d02f85b7c5ad8fe9153bfc9604
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/WebView.cpp b/Source/WebKit/UIProcess/haiku/WebView.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..7a3bbfdc9e44a91edd726609170007e893dc2ac2
+index 0000000000000000000000000000000000000000..0b32aa2e643f59d503a8523e64bae3fda3f36d2b
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/WebView.cpp
-@@ -0,0 +1,2471 @@
+@@ -0,0 +1,2479 @@
 +/*
 + * Copyright (C) 2013 Intel Corporation. All rights reserved.
 + *
@@ -110063,6 +110112,14 @@ index 0000000000000000000000000000000000000000..7a3bbfdc9e44a91edd726609170007e8
 +        for (auto& rect : damage)
 +            std::fprintf(stderr, " [%d,%d %dx%d]", rect.x(), rect.y(), rect.width(), rect.height());
 +        std::fprintf(stderr, "\n");
++    }
++    // One empty rectangle: the frame changed nothing (AcceleratedSurface::
++    // didRenderFrame()). It replaces the previous one, whose buffer goes back
++    // to the web process, but its pixels are on the screen already.
++    if (damage.size() == 1 && damage[0].isEmpty() && !m_presentationNeedsFullRedraw) {
++        if (m_presentationCallback)
++            std::exchange(m_presentationCallback, { })();
++        return;
 +    }
 +    if (!std::exchange(m_presentationNeedsFullRedraw, false) && scale > 0) {
 +        for (auto& rect : damage) {
@@ -131472,7 +131529,7 @@ index 0000000000000000000000000000000000000000..abc82f6d26d2b1374740dc304282ae75
 +
 +}
 diff --git a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/AcceleratedSurface.cpp b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/AcceleratedSurface.cpp
-index 8177756a0e14111347846c912b8e3851f2559b4a..52c8841d56557100c08a5e87e5e7d67f7355bde7 100644
+index 8177756a0e14111347846c912b8e3851f2559b4a..68a243773c2da9e52b183813ec038fcb7b46aa05 100644
 --- a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/AcceleratedSurface.cpp
 +++ b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/AcceleratedSurface.cpp
 @@ -26,6 +26,23 @@
@@ -131548,7 +131605,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..52c8841d56557100c08a5e87e5e7d67f
      , m_hardwareAccelerationEnabled(webPage.corePage()->settings().hardwareAccelerationEnabled())
  #endif
      , m_backgroundColor(webPage.backgroundColor())
-@@ -130,10 +166,337 @@ AcceleratedSurface::AcceleratedSurface(WebPage& webPage, Function<void()>&& fram
+@@ -130,11 +166,338 @@ AcceleratedSurface::AcceleratedSurface(WebPage& webPage, Function<void()>&& fram
      , m_isVisible(webPage.activityState().contains(ActivityState::IsVisible))
      , m_useExplicitSync(usesGL() && useExplicitSync())
  #if ENABLE(DAMAGE_TRACKING)
@@ -131564,9 +131621,9 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..52c8841d56557100c08a5e87e5e7d67f
      , m_damageTracker(m_swapChain, !usesGL())
  #endif
 +#endif
-+{
-+}
-+
+ {
+ }
+ 
 +#if PLATFORM(HAIKU)
 +// app_server's copy of the screen, mapped once for the life of the process.
 +// Mesa keeps the pages of the mapping it presents into locked for the GPU,
@@ -131856,7 +131913,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..52c8841d56557100c08a5e87e5e7d67f
 +}
 +
 +void AcceleratedSurface::redisplayDirect()
- {
++{
 +    if (m_redisplayHandlerHaiku)
 +        m_redisplayHandlerHaiku();
 +}
@@ -131881,11 +131938,12 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..52c8841d56557100c08a5e87e5e7d67f
 +        protectedThis->m_lastFrameThroughAppServerRequestedHaiku = true;
 +        protectedThis->m_redisplayHandlerHaiku();
 +    });
- }
++}
 +#endif
- 
++
  AcceleratedSurface::~AcceleratedSurface() = default;
  
+ WTF_MAKE_TZONE_ALLOCATED_IMPL(AcceleratedSurface::RenderTarget);
 @@ -176,7 +539,7 @@ void AcceleratedSurface::RenderTarget::createSkiaSurfaceForFramebuffer(unsigned
      m_skiaSurface = SkSurfaces::WrapBackendRenderTarget(display.skiaGrContext(), backendRenderTarget, origin, kRGBA_8888_SkColorType, SkColorSpace::MakeSRGB(), &properties);
  }
@@ -132571,7 +132629,25 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..52c8841d56557100c08a5e87e5e7d67f
  
  #if ENABLE(WPE_PLATFORM)
      WebProcess::singleton().parentProcessConnection()->send(Messages::AcceleratedBackingStore::DidChangeBufferConfiguration(m_lockedTargets.size()), m_surface->surfaceID());
-@@ -929,7 +1830,7 @@ bool AcceleratedSurface::shouldPaintMirrored() const
+@@ -901,6 +1802,17 @@ Vector<IntRect, 1> AcceleratedSurface::SwapChainDamageTracker::takeFrameDamageRe
+     if (frameDamage.mode() != Damage::Mode::Rectangles || m_swapChain.size().isEmpty())
+         return frameDamage.rects();
+ 
++#if PLATFORM(HAIKU)
++    // The UI process invalidates each rectangle and app_server unites them
++    // into the window's update region, so their number costs next to nothing,
++    // while their area is copied. The threshold (4) makes four full-height
++    // columns of a wide frame, and changes far apart in one column became the
++    // whole column between them: ChatGPT's spinners, shimmering status line
++    // and text field had most of the window copied in every frame. The frame
++    // damage is bounded by its own grid of 256-pixel cells already.
++    return frameDamage.rectsForPainting();
++#endif
++
+     // The frame damage is fine-grained, because the compositing restriction needs it that way, but the
+     // platform only wants a bounded number of rects. Merge it down to the threshold here, which is the
+     // only thing the threshold bounds.
+@@ -929,7 +1841,7 @@ bool AcceleratedSurface::shouldPaintMirrored() const
      switch (m_swapChain.type()) {
      case SwapChain::Type::Invalid:
          return false;
@@ -132580,7 +132656,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..52c8841d56557100c08a5e87e5e7d67f
      case SwapChain::Type::Texture:
  #if USE(GBM) || OS(ANDROID)
      case SwapChain::Type::EGLImage:
-@@ -960,6 +1861,10 @@ void AcceleratedSurface::preferredBufferFormatsDidChange()
+@@ -960,6 +1872,10 @@ void AcceleratedSurface::preferredBufferFormatsDidChange()
  
  void AcceleratedSurface::visibilityDidChange(bool isVisible)
  {
@@ -132591,7 +132667,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..52c8841d56557100c08a5e87e5e7d67f
      if (m_isVisible == isVisible)
          return;
  
-@@ -1000,7 +1905,7 @@ void AcceleratedSurface::backgroundColorDidChange()
+@@ -1000,7 +1916,7 @@ void AcceleratedSurface::backgroundColorDidChange()
      if (isOpaque == wasOpaque)
          return;
  
@@ -132600,7 +132676,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..52c8841d56557100c08a5e87e5e7d67f
      m_swapChain.setupBufferFormat();
  #endif
  }
-@@ -1022,7 +1927,7 @@ void AcceleratedSurface::didCreateCompositingRunLoop(RunLoop& runLoop)
+@@ -1022,7 +1938,7 @@ void AcceleratedSurface::didCreateCompositingRunLoop(RunLoop& runLoop)
  #if USE(GLIB_EVENT_LOOP)
      m_releaseUnusedBuffersTimer->setPriority(RunLoopSourcePriority::ReleaseUnusedResourcesTimer);
  #endif
@@ -132609,7 +132685,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..52c8841d56557100c08a5e87e5e7d67f
      WebProcess::singleton().parentProcessConnection()->addMessageReceiver(runLoop, *this, Messages::AcceleratedSurface::messageReceiverName(), m_id);
  #endif
  }
-@@ -1030,6 +1935,10 @@ void AcceleratedSurface::didCreateCompositingRunLoop(RunLoop& runLoop)
+@@ -1030,6 +1946,10 @@ void AcceleratedSurface::didCreateCompositingRunLoop(RunLoop& runLoop)
  void AcceleratedSurface::willDestroyCompositingRunLoop()
  {
      m_frameCompleteHandler = nullptr;
@@ -132620,7 +132696,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..52c8841d56557100c08a5e87e5e7d67f
  
  #if USE(WPE_RENDERER)
      if (m_swapChain.type() == SwapChain::Type::WPEBackend)
-@@ -1043,7 +1952,7 @@ void AcceleratedSurface::willDestroyCompositingRunLoop()
+@@ -1043,7 +1963,7 @@ void AcceleratedSurface::willDestroyCompositingRunLoop()
              protectedThis->m_releaseUnusedBuffersTimer = nullptr;
          });
      }
@@ -132629,7 +132705,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..52c8841d56557100c08a5e87e5e7d67f
      WebProcess::singleton().parentProcessConnection()->removeMessageReceiver(Messages::AcceleratedSurface::messageReceiverName(), m_id);
  #endif
  }
-@@ -1149,18 +2058,133 @@ void AcceleratedSurface::didRenderFrame(TargetContents targetContents)
+@@ -1149,18 +2069,142 @@ void AcceleratedSurface::didRenderFrame(TargetContents targetContents)
      if (!m_target)
          return;
  
@@ -132710,14 +132786,15 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..52c8841d56557100c08a5e87e5e7d67f
  #if ENABLE(DAMAGE_TRACKING)
 +#if PLATFORM(HAIKU)
 +    m_target->setReadbackDamage(WTF::move(targetDamage));
++    bool frameDamageRecorded = !!m_damageTracker.frameDamage();
 +#endif
      m_damageTracker.didPresent(*m_target, targetContents);
      damageRects = m_damageTracker.takeFrameDamageRects();
 +#if PLATFORM(HAIKU)
 +    // A frame that collected its damage and has none changed nothing.
-+    bool changedNothing = damageRects.isEmpty() && m_damageCollectedHaiku;
++    bool changedNothing = damageRects.isEmpty() && m_damageCollectedHaiku && frameDamageRecorded;
 +    // No rectangles would read as "the whole frame" anyway; say so outright.
-+    if (damageRects.isEmpty())
++    if (damageRects.isEmpty() && !changedNothing)
 +        damageRects.append(IntRect { { }, m_swapChain.size() });
 +    // app_server's own copy of the screen gets only frames that go through
 +    // it, and each names only what changed since the frame before it. What
@@ -132744,6 +132821,14 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..52c8841d56557100c08a5e87e5e7d67f
 +            m_directDamageHaiku = { };
 +        }
 +    }
++    // A frame that changed nothing still goes to the UI process, which gives
++    // the previous buffer back when it takes this one, but the window has its
++    // pixels already: one empty rectangle says so (none would be the whole
++    // frame). A page whose only animation was out of sight (a shimmering line
++    // scrolled away, a spinner in a collapsed part of ChatGPT's agent log) had
++    // the whole window copied by app_server 60 times a second.
++    if (damageRects.isEmpty())
++        damageRects.append(IntRect { });
 +#endif
  #else
      UNUSED_PARAM(targetContents);
@@ -132763,7 +132848,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..52c8841d56557100c08a5e87e5e7d67f
      m_pendingFrameNotifyTargets.insert(0, { m_target, WTF::move(damageRects) });
      m_target = nullptr;
  }
-@@ -1182,13 +2206,17 @@ const std::optional<Damage>& AcceleratedSurface::renderTargetDamage()
+@@ -1182,13 +2226,17 @@ const std::optional<Damage>& AcceleratedSurface::renderTargetDamage()
  }
  #endif
  
@@ -133716,7 +133801,7 @@ index 57163f65873e5a481e5ef5a4ec3beec4b40b7cea..61b49ac7c362b416cdec1d10c44304d2
      bool m_compositionRequired { false };
  #if ENABLE(SCROLLING_THREAD)
 diff --git a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/ThreadedCompositor.cpp b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/ThreadedCompositor.cpp
-index c238029ad9c99c5028ea7e456520af85d1d85532..625b4b56649d3d1b8d6d3da0393805fb468ba34a 100644
+index c238029ad9c99c5028ea7e456520af85d1d85532..3db07253bf4bd5da5895585bd1c7d6239b4f86a7 100644
 --- a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/ThreadedCompositor.cpp
 +++ b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/ThreadedCompositor.cpp
 @@ -26,6 +26,10 @@
@@ -133828,7 +133913,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..625b4b56649d3d1b8d6d3da0393805fb
  
  #if USE(TEXTURE_MAPPER)
          m_context = WTF::move(context);
-@@ -136,7 +189,61 @@ ThreadedCompositor::ThreadedCompositor(WebPage& webPage, LayerTreeHost& layerTre
+@@ -136,8 +189,62 @@ ThreadedCompositor::ThreadedCompositor(WebPage& webPage, LayerTreeHost& layerTre
          m_threadSafeGrContext = PlatformDisplay::sharedDisplay().skiaGrContext()->threadSafeProxy();
  #endif
      });
@@ -133842,8 +133927,8 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..625b4b56649d3d1b8d6d3da0393805fb
 +    }
 +#endif
 +
-+}
-+
+ }
+ 
 +#if PLATFORM(HAIKU) && USE(TEXTURE_MAPPER)
 +// Shader programs the page is likely to need soon are compiled one per task
 +// (TextureMapper::warmShaderProgramsHaiku()): the two every first frame draws
@@ -133885,11 +133970,12 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..625b4b56649d3d1b8d6d3da0393805fb
 +    m_workQueue->dispatch([this, protectedThis = Ref { *this }, remaining, waitsForQuiet] {
 +        warmShaderProgramsHaiku(remaining - 1, waitsForQuiet);
 +    });
- }
++}
 +#endif
- 
++
  ThreadedCompositor::~ThreadedCompositor() = default;
  
+ uint64_t ThreadedCompositor::surfaceID() const
 @@ -216,8 +323,23 @@ void ThreadedCompositor::updateRenderTimer()
      }
  
@@ -134063,7 +134149,26 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..625b4b56649d3d1b8d6d3da0393805fb
  
      if (sceneHasRunningAnimations)
          requestComposition(CompositionReason::Animation);
-@@ -556,6 +767,46 @@ void ThreadedCompositor::renderLayerTree()
+@@ -525,8 +736,17 @@ void ThreadedCompositor::recordFrameDamage(Damage&& damage)
+ 
+     // Nothing changed this frame: an empty damage contributes nothing to the targets, since Damage::add()
+     // ignores empty damage. Skip it rather than replace the recorded frame damage with an empty one.
+-    if (damage.isEmpty())
++    if (damage.isEmpty()) {
++#if PLATFORM(HAIKU)
++        // Unless there is none: a frame without recorded damage is read back
++        // and drawn whole (AcceleratedSurface::didRenderFrame()), and one
++        // whose only change was out of sight (a spinner scrolled away) had the
++        // whole window read back and copied by app_server in every frame.
++        if (!m_surface->frameDamage())
++            m_surface->setFrameDamage(WTF::move(damage));
++#endif
+         return;
++    }
+ 
+     m_surface->setFrameDamage(WTF::move(damage));
+ }
+@@ -556,6 +776,46 @@ void ThreadedCompositor::renderLayerTree()
      if (m_suspendedCount > 0)
          return;
  
@@ -134110,7 +134215,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..625b4b56649d3d1b8d6d3da0393805fb
      OptionSet<CompositionReason> reasons;
      bool shouldNotifiyDidComposite = false;
      {
-@@ -580,8 +831,18 @@ void ThreadedCompositor::renderLayerTree()
+@@ -580,8 +840,18 @@ void ThreadedCompositor::renderLayerTree()
  
          ASSERT(m_state.state == State::Scheduled);
          m_state.state = State::InProgress;
@@ -134129,7 +134234,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..625b4b56649d3d1b8d6d3da0393805fb
  #if USE(TEXTURE_MAPPER)
      if (!m_context || !m_context->makeContextCurrent())
          return;
-@@ -599,23 +860,61 @@ void ThreadedCompositor::renderLayerTree()
+@@ -599,23 +869,61 @@ void ThreadedCompositor::renderLayerTree()
      if (viewportSize.isEmpty())
          return;
  
@@ -134191,7 +134296,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..625b4b56649d3d1b8d6d3da0393805fb
  
      updateFPSCounter();
  
-@@ -631,8 +930,49 @@ void ThreadedCompositor::renderLayerTree()
+@@ -631,8 +939,49 @@ void ThreadedCompositor::renderLayerTree()
      PlatformDisplay::sharedDisplay().skiaGLContext()->swapBuffers();
  #endif
  
@@ -134241,7 +134346,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..625b4b56649d3d1b8d6d3da0393805fb
  
      RunLoop::mainSingleton().dispatch([this, protectedThis = Ref { *this }] {
          if (m_layerTreeHost)
-@@ -656,6 +996,13 @@ void ThreadedCompositor::requestComposition(CompositionReason reason)
+@@ -656,6 +1005,13 @@ void ThreadedCompositor::requestComposition(CompositionReason reason)
  {
      Locker locker { m_state.lock };
      m_state.reasons.add(reason);
@@ -134255,7 +134360,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..625b4b56649d3d1b8d6d3da0393805fb
      scheduleUpdateLocked();
  }
  
-@@ -703,6 +1050,10 @@ void ThreadedCompositor::scheduleUpdateLocked()
+@@ -703,6 +1059,10 @@ void ThreadedCompositor::scheduleUpdateLocked()
  void ThreadedCompositor::frameComplete()
  {
      ASSERT(m_workQueue->runLoop().isCurrent());
@@ -134266,7 +134371,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..625b4b56649d3d1b8d6d3da0393805fb
  
      Locker locker { m_state.lock };
      WTFEmitSignpost(this, FrameComplete, "reasons: %s, state: %s, waiting for tiles: %s", reasonsToString(m_state.reasons).utf8(), stateToString(m_state.state).characters(), m_state.isWaitingForTiles ? "yes" : "no");
-@@ -726,6 +1077,112 @@ void ThreadedCompositor::frameComplete()
+@@ -726,6 +1086,112 @@ void ThreadedCompositor::frameComplete()
      }
  }
  
@@ -134379,7 +134484,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..625b4b56649d3d1b8d6d3da0393805fb
  RunLoop* ThreadedCompositor::runLoop()
  {
      return m_surface ? &m_workQueue->runLoop() : nullptr;
-@@ -747,7 +1204,15 @@ void ThreadedCompositor::updateSceneAttributes(const IntSize& size, float device
+@@ -747,7 +1213,15 @@ void ThreadedCompositor::updateSceneAttributes(const IntSize& size, float device
  {
      m_attributes.viewportSize = size;
      m_attributes.deviceScaleFactor = deviceScaleFactor;
