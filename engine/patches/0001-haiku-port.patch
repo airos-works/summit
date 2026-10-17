@@ -86064,10 +86064,10 @@ index b9eb05c62a8aade37bb75b1a196fd114b3bfebd7..1759a9c1a598de8bd22c7d09ec631189
  #endif // ENABLE(WK_WEB_EXTENSIONS)
 diff --git a/Source/WebKit/UIProcess/Extensions/haiku/ExtensionActionPopupHaiku.cpp b/Source/WebKit/UIProcess/Extensions/haiku/ExtensionActionPopupHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..e766986b94c99d2792ad9ce57d789ace4a1d2fa0
+index 0000000000000000000000000000000000000000..0bdae19c1422a6db977fc42449b32b5b8d1cd1fc
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/haiku/ExtensionActionPopupHaiku.cpp
-@@ -0,0 +1,543 @@
+@@ -0,0 +1,551 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +#include "config.h"
 +#include "FrameInfoHaiku.h"
@@ -86355,14 +86355,22 @@ index 0000000000000000000000000000000000000000..e766986b94c99d2792ad9ce57d789ace
 +{
 +    if (!isCurrent() || !m_native || reportedSize.width() <= 0 || reportedSize.height() <= 0)
 +        return;
++    // Each way is damped on its own: uBlock Origin's popup reports widths of 1
++    // and 252 in turn while its height is steady, and when both were held its
++    // window kept the first height after the content became shorter, with the
++    // rows below the page left black.
 +    auto size = reportedSize;
-+    if (size == m_previousContentSize && size != m_lastContentSize)
-+        m_contentSizeOnlyGrows = true;
-+    if (m_contentSizeOnlyGrows)
-+        size = size.expandedTo(m_lastContentSize);
++    if (size.width() == m_previousContentSize.width() && size.width() != m_lastContentSize.width())
++        m_contentWidthOnlyGrows = true;
++    if (size.height() == m_previousContentSize.height() && size.height() != m_lastContentSize.height())
++        m_contentHeightOnlyGrows = true;
++    if (m_contentWidthOnlyGrows)
++        size.setWidth(std::max(size.width(), m_lastContentSize.width()));
++    if (m_contentHeightOnlyGrows)
++        size.setHeight(std::max(size.height(), m_lastContentSize.height()));
 +    if (const char* trace = std::getenv("SUMMIT_TRACE_EXTENSION_CONSOLE"); trace && !std::strcmp(trace, "1"))
-+        std::fprintf(stderr, "Summit extension popup: content %dx%d, window %dx%d%s\n", reportedSize.width(), reportedSize.height(),
-+            size.width(), size.height(), m_contentSizeOnlyGrows ? " (grow only)" : "");
++        std::fprintf(stderr, "Summit extension popup: content %dx%d, window %dx%d%s%s\n", reportedSize.width(), reportedSize.height(),
++            size.width(), size.height(), m_contentWidthOnlyGrows ? " (width grows only)" : "", m_contentHeightOnlyGrows ? " (height grows only)" : "");
 +    SUMMIT_EXTENSION_TIMING("popup content %dx%d", reportedSize.width(), reportedSize.height());
 +    if (size == m_lastContentSize)
 +        return;
@@ -86613,10 +86621,10 @@ index 0000000000000000000000000000000000000000..e766986b94c99d2792ad9ce57d789ace
 +#endif
 diff --git a/Source/WebKit/UIProcess/Extensions/haiku/ExtensionActionPopupHaiku.h b/Source/WebKit/UIProcess/Extensions/haiku/ExtensionActionPopupHaiku.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..49f14ffdb70257180ba58662dbc6ad8d85d4fab6
+index 0000000000000000000000000000000000000000..d2a0a6d558df5741fbb93558b05dc7ea414295b1
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/haiku/ExtensionActionPopupHaiku.h
-@@ -0,0 +1,84 @@
+@@ -0,0 +1,85 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +#pragma once
 +#if ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
@@ -86692,10 +86700,11 @@ index 0000000000000000000000000000000000000000..49f14ffdb70257180ba58662dbc6ad8d
 +    bool m_preloaded { false };
 +    bool m_documentLoaded { false };
 +    // Popups that lay out differently at different window sizes can make size-to-content
-+    // oscillate. Once a size repeats, the popup only grows.
++    // oscillate. Once a width or a height repeats, the popup only grows that way.
 +    WebCore::IntSize m_lastContentSize;
 +    WebCore::IntSize m_previousContentSize;
-+    bool m_contentSizeOnlyGrows { false };
++    bool m_contentWidthOnlyGrows { false };
++    bool m_contentHeightOnlyGrows { false };
 +    PresentationCompletionHandler m_presentationCompletion;
 +    String m_presentationError;
 +};
