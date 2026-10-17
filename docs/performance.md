@@ -235,6 +235,16 @@ scroll: 76-83 against 118-132; a blurred-and-clipped test page is
 pixel-identical after scrolling (`SUMMIT_FILTER_SURFACE_GRID=0` for exact
 sizes always). Edge tiles whose width changes by a pixel or two between
 frames, and the other intermediate surfaces, still make new textures.
+The first scroll is also bound by the GPU's fill. Over its 90 compositions
+the compositor thread spent 1052 ms, 432 of them in `didRenderFrame()`, the
+frame copy that waits for the GPU to finish. The 19 compositions that waited
+12-16 ms there drew 14-23 megapixels each (8-12 times the 1.85-megapixel
+screen) with ~13 blur passes and 50-70 surface binds; the 71 others drew
+~12 megapixels with ~3 blur passes and waited 3.5-4.5 ms. Blurs are
+already drawn at reduced size for radii over 5 device pixels, so the cost
+is overdraw: culling what opaque layers hide (done so far only under
+playing video) is the next engine-side step.
+
 Tried and dropped: tile textures allocated on a 64-pixel grid and drawn
 through `drawTextureWithPhysicalSize` (edge tiles of 430-433 pixels sharing
 448-pixel textures): 213-237 new textures against 250-261, but text in some
