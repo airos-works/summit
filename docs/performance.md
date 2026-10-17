@@ -166,6 +166,24 @@ time; pixel-identical on a test of blurred and masked layers in clipped,
 rounded containers. `SUMMIT_CLIPPED_FILTER_SURFACES=1` restores the sizes in
 view. Most textures still created there are new tiles.
 
+A style change that a script forces leaves its compositing update to the
+rendering update. Pages that move things in `requestAnimationFrame` and read
+layout in between (`scrollY`, a box's size) made `Document::resolveStyle`
+update every layer's compositing (`computeCompositingRequirements` over the
+whole tree) at each read, several times a frame, and the rendering update
+did it once more: 17 % of github.com's main thread while it scrolled. Such a
+resolution now records its document and asks for a rendering update, whose
+layout step (`updateLayoutAndStyleIfNeededRecursive`) makes the one
+compositing update. github.com scrolled: 296-335 ms of jank in 1.3 s against
+351-357, ~50 rAF a second against ~48; a test that toggles `will-change`,
+opacity, transforms and z-index in every frame with forced reads in between
+ends pixel-identical. `SUMMIT_DEFER_STYLE_COMPOSITING=0` updates at once.
+
+Measuring on the laptop needs the screen awake: with the screen blanker
+running, every Summit frame comes 105 ms apart (rAF at 9.5 a second), which
+looked like a regression after the OS was updated (the session's
+`keepawake` probe moves the pointer to where it is every 5 s).
+
 Found, not fixed: `backdrop-filter` does not blur a composited sibling
 painted before it (a `will-change: transform` card under a blurred box stays
 sharp, in the builds before and after this work).

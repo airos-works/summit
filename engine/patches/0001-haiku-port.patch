@@ -11242,7 +11242,7 @@ index a7339e182f59f517e27c3c754bb13a0fd9d64576..ad097a0e3795ed69105234fd6470a145
  #elif PLATFORM(GTK) || PLATFORM(WPE)
      // File drag access is disabled until https://webkit.org/b/271957 is resolved for GTK/WPE ports.
 diff --git a/Source/WebCore/dom/Document.cpp b/Source/WebCore/dom/Document.cpp
-index 79f2bcbc106c7c43e8a971816c183dcc00610b83..4f53a516b136f9aaaa75bfda4b8b79c53515cbe5 100644
+index 79f2bcbc106c7c43e8a971816c183dcc00610b83..ad9a1054f6810245d1176e5b260b98229e20bbe1 100644
 --- a/Source/WebCore/dom/Document.cpp
 +++ b/Source/WebCore/dom/Document.cpp
 @@ -384,6 +384,7 @@
@@ -11253,7 +11253,7 @@ index 79f2bcbc106c7c43e8a971816c183dcc00610b83..4f53a516b136f9aaaa75bfda4b8b79c5
  #include <ctime>
  #include <ranges>
  #include <wtf/ASCIICType.h>
-@@ -487,6 +488,13 @@
+@@ -487,6 +488,19 @@
  #define DOCUMENT_RELEASE_LOG(channel, fmt, ...) RELEASE_LOG(channel, "%p - [pageID=%" PRIu64 ", frameID=%" PRIu64 ", isMainFrame=%d] Document::" fmt, this, pageID() ? pageID()->toUInt64() : 0, frameID() ? frameID()->toUInt64() : 0, this->isTopDocument(), ##__VA_ARGS__)
  #define DOCUMENT_RELEASE_LOG_ERROR(channel, fmt, ...) RELEASE_LOG_ERROR(channel, "%p - [pageID=%" PRIu64 ", frameID=%" PRIu64 ", isMainFrame=%d] Document::" fmt, this, pageID() ? pageID()->toUInt64() : 0, frameID() ? frameID()->toUInt64() : 0, this->isTopDocument(), ##__VA_ARGS__)
  
@@ -11261,13 +11261,29 @@ index 79f2bcbc106c7c43e8a971816c183dcc00610b83..4f53a516b136f9aaaa75bfda4b8b79c5
 +namespace WebCore {
 +bool summitInvalidateElementsWithMissingStyleHaiku(Document&);
 +void summitForgetElementsWithMissingStyleHaiku(Document&);
++
++// LocalFrameView.cpp: whether the rendering update's own layout step runs
++// (updateLayoutAndStyleIfNeededRecursive), and the documents whose
++// compositing update after a style change waits for it.
++bool summitInRenderingLayoutHaiku();
++HashSet<const Document*>& summitDeferredStyleCompositingHaiku();
 +}
 +#endif
 +
  namespace WebCore {
  
  WTF_MAKE_TZONE_ALLOCATED_IMPL(Document);
-@@ -2835,6 +2843,17 @@ void Document::updateRenderTree(std::unique_ptr<Style::Update> styleUpdate)
+@@ -818,6 +832,9 @@ Ref<Document> Document::createNonRenderedPlaceholder(LocalFrame& frame, const UR
+ Document::~Document()
+ {
+     ASSERT(activeDOMObjectsAreStopped());
++#if PLATFORM(HAIKU)
++    summitDeferredStyleCompositingHaiku().remove(this);
++#endif
+ 
+     if (m_logger)
+         m_logger->removeObserver(*this);
+@@ -2835,6 +2852,17 @@ void Document::updateRenderTree(std::unique_ptr<Style::Update> styleUpdate)
  
  void Document::resolveStyle(ResolveStyleType type)
  {
@@ -11285,7 +11301,7 @@ index 79f2bcbc106c7c43e8a971816c183dcc00610b83..4f53a516b136f9aaaa75bfda4b8b79c5
      ScriptDisallowedScope::InMainThread scriptDisallowedScope;
  
      ASSERT(!view() || !view()->isPainting());
-@@ -2884,6 +2903,9 @@ void Document::resolveStyle(ResolveStyleType type)
+@@ -2884,6 +2912,9 @@ void Document::resolveStyle(ResolveStyleType type)
          if (type == ResolveStyleType::Rebuild) {
              // This may get set again during style resolve.
              m_hasNodesWithMissingStyle = false;
@@ -11295,7 +11311,7 @@ index 79f2bcbc106c7c43e8a971816c183dcc00610b83..4f53a516b136f9aaaa75bfda4b8b79c5
  
              auto newStyle = Style::resolveForDocument(*this);
  
-@@ -2903,19 +2925,45 @@ void Document::resolveStyle(ResolveStyleType type)
+@@ -2903,19 +2934,45 @@ void Document::resolveStyle(ResolveStyleType type)
  
          {
              Style::TreeResolver resolver(*this, WTF::move(m_pendingRenderTreeUpdate));
@@ -11341,7 +11357,7 @@ index 79f2bcbc106c7c43e8a971816c183dcc00610b83..4f53a516b136f9aaaa75bfda4b8b79c5
              }
  
              m_lastStyleUpdateSizeForTesting = styleUpdate ? styleUpdate->size() : 0;
-@@ -2930,12 +2978,26 @@ void Document::resolveStyle(ResolveStyleType type)
+@@ -2930,12 +2987,48 @@ void Document::resolveStyle(ResolveStyleType type)
                  fontLoader->loadPendingFonts();
  
              if (styleUpdate) {
@@ -11360,7 +11376,29 @@ index 79f2bcbc106c7c43e8a971816c183dcc00610b83..4f53a516b136f9aaaa75bfda4b8b79c5
 +#if PLATFORM(HAIKU)
 +        auto styleCompositingStart = summitStyleTraceEnabled ? MonotonicTime::now() : MonotonicTime { };
 +#endif
++#if PLATFORM(HAIKU)
++        // A style change that a script forced (it read scrollY, a box's size)
++        // leaves its compositing update to the rendering update, which makes
++        // one anyway: pages that move things in requestAnimationFrame and
++        // read layout between, as Lenis and github.com do, updated every
++        // layer's compositing several times a frame (a sixth of the main
++        // thread while they scrolled). SUMMIT_DEFER_STYLE_COMPOSITING=0
++        // updates at once again.
++        static const bool defersCompositing = [] {
++            const char* value = getenv("SUMMIT_DEFER_STYLE_COMPOSITING");
++            return !value || strcmp(value, "0");
++        }();
++        if (defersCompositing && !summitInRenderingLayoutHaiku() && page()) {
++            summitDeferredStyleCompositingHaiku().add(this);
++            protect(page())->scheduleRenderingUpdate(RenderingUpdateStep::LayerFlush);
++            updatedCompositingLayers = false;
++        } else {
++            summitDeferredStyleCompositingHaiku().remove(this);
++            updatedCompositingLayers = frameView->layoutContext().updateCompositingLayersAfterStyleChange();
++        }
++#else
          updatedCompositingLayers = frameView->layoutContext().updateCompositingLayersAfterStyleChange();
++#endif
 +#if PLATFORM(HAIKU)
 +        if (summitStyleTraceEnabled)
 +            styleCompositingDuration += MonotonicTime::now() - styleCompositingStart;
@@ -11368,7 +11406,7 @@ index 79f2bcbc106c7c43e8a971816c183dcc00610b83..4f53a516b136f9aaaa75bfda4b8b79c5
  
          if (m_renderView->needsLayout())
              frameView->layoutContext().scheduleLayout();
-@@ -2962,6 +3024,14 @@ void Document::resolveStyle(ResolveStyleType type)
+@@ -2962,6 +3055,14 @@ void Document::resolveStyle(ResolveStyleType type)
      // Re-evaluate speculation rules after DOM changes that trigger style recalculation.
      // That helps ensure CSS selector matching works correctly.
      considerSpeculationRules();
@@ -11383,7 +11421,7 @@ index 79f2bcbc106c7c43e8a971816c183dcc00610b83..4f53a516b136f9aaaa75bfda4b8b79c5
  }
  
  void Document::updateTextRenderer(Text& text, unsigned offsetOfReplacedText, unsigned lengthOfReplacedText)
-@@ -3072,7 +3142,11 @@ bool Document::updateStyleIfNeededIgnoringPendingStylesheets()
+@@ -3072,7 +3173,11 @@ bool Document::updateStyleIfNeededIgnoringPendingStylesheets()
      bool oldIgnore = m_ignorePendingStylesheets;
      m_ignorePendingStylesheets = true;
      // FIXME: This should just invalidate elements with missing styles.
@@ -11395,7 +11433,7 @@ index 79f2bcbc106c7c43e8a971816c183dcc00610b83..4f53a516b136f9aaaa75bfda4b8b79c5
          scheduleFullStyleRebuild();
  
      updateRelevancyOfContentVisibilityElements();
-@@ -3105,13 +3179,27 @@ static RenderElement* rootForSkippedLayout(RenderElement& rootCandidate)
+@@ -3105,13 +3210,27 @@ static RenderElement* rootForSkippedLayout(RenderElement& rootCandidate)
  
  auto Document::updateLayout(OptionSet<LayoutOptions> layoutOptions, const Element* context) -> UpdateLayoutResult
  {
@@ -11423,7 +11461,7 @@ index 79f2bcbc106c7c43e8a971816c183dcc00610b83..4f53a516b136f9aaaa75bfda4b8b79c5
                  scheduleFullStyleRebuild();
          }
  
-@@ -3142,8 +3230,15 @@ auto Document::updateLayout(OptionSet<LayoutOptions> layoutOptions, const Elemen
+@@ -3142,8 +3261,15 @@ auto Document::updateLayout(OptionSet<LayoutOptions> layoutOptions, const Elemen
                  result = UpdateLayoutResult::ChangesDone;
          }
  
@@ -11439,7 +11477,7 @@ index 79f2bcbc106c7c43e8a971816c183dcc00610b83..4f53a516b136f9aaaa75bfda4b8b79c5
  
          // LBSE: drain queued transform-attribute updates after style recalc so updateLayerTransform
          // sees post-style geometry and re-enqueues from style callbacks land in this pass.
-@@ -3210,6 +3305,9 @@ auto Document::updateLayout(OptionSet<LayoutOptions> layoutOptions, const Elemen
+@@ -3210,6 +3336,9 @@ auto Document::updateLayout(OptionSet<LayoutOptions> layoutOptions, const Elemen
                  return true;
              };
  
@@ -11449,7 +11487,7 @@ index 79f2bcbc106c7c43e8a971816c183dcc00610b83..4f53a516b136f9aaaa75bfda4b8b79c5
              auto didRunLayout = runForcedLayoutOnSkippedContentIfNeeded();
              if (!didRunLayout && layoutContext->needsLayout(layoutOptions)) {
                  layoutContext->layout(layoutOptions.contains(LayoutOptions::CanDeferUpdateLayerPositions));
-@@ -3217,9 +3315,18 @@ auto Document::updateLayout(OptionSet<LayoutOptions> layoutOptions, const Elemen
+@@ -3217,9 +3346,18 @@ auto Document::updateLayout(OptionSet<LayoutOptions> layoutOptions, const Elemen
              }
  
              result = didRunLayout ? UpdateLayoutResult::ChangesDone : result;
@@ -11468,7 +11506,7 @@ index 79f2bcbc106c7c43e8a971816c183dcc00610b83..4f53a516b136f9aaaa75bfda4b8b79c5
          }
      }
  
-@@ -3227,6 +3334,14 @@ auto Document::updateLayout(OptionSet<LayoutOptions> layoutOptions, const Elemen
+@@ -3227,6 +3365,14 @@ auto Document::updateLayout(OptionSet<LayoutOptions> layoutOptions, const Elemen
          protect(view())->flushAnyPendingPostLayoutTasks();
  
      m_ignorePendingStylesheets = oldIgnore;
@@ -11483,7 +11521,7 @@ index 79f2bcbc106c7c43e8a971816c183dcc00610b83..4f53a516b136f9aaaa75bfda4b8b79c5
      return result;
  }
  
-@@ -3518,6 +3633,9 @@ void Document::createRenderTree()
+@@ -3518,6 +3664,9 @@ void Document::createRenderTree()
  
      renderView->setIsInWindow(true);
  
@@ -11493,7 +11531,7 @@ index 79f2bcbc106c7c43e8a971816c183dcc00610b83..4f53a516b136f9aaaa75bfda4b8b79c5
      resolveStyle(ResolveStyleType::Rebuild);
  
  #if PLATFORM(MAC)
-@@ -6029,6 +6147,37 @@ void Document::runScrollSteps()
+@@ -6029,6 +6178,37 @@ void Document::runScrollSteps()
      if (auto page = this->page(); page && page->shouldDeferScrollEvents())
          return;
  
@@ -11531,7 +11569,7 @@ index 79f2bcbc106c7c43e8a971816c183dcc00610b83..4f53a516b136f9aaaa75bfda4b8b79c5
      // Service user scroll animations before scroll event dispatch.
      if (RefPtr frameView = view()) {
          MonotonicTime now = MonotonicTime::now();
-@@ -6050,7 +6199,13 @@ void Document::runScrollSteps()
+@@ -6050,7 +6230,13 @@ void Document::runScrollSteps()
          if (scrollAnimationsInProgress)
              protect(page())->scheduleRenderingUpdate({ RenderingUpdateStep::Scroll });
  
@@ -11545,7 +11583,7 @@ index 79f2bcbc106c7c43e8a971816c183dcc00610b83..4f53a516b136f9aaaa75bfda4b8b79c5
      }
  
      // FIXME: The order of dispatching is not specified: https://github.com/WICG/visual-viewport/issues/66.
-@@ -6058,6 +6213,15 @@ void Document::runScrollSteps()
+@@ -6058,6 +6244,15 @@ void Document::runScrollSteps()
          LOG_WITH_STREAM(Events, stream << "Document " << this << " sending scroll events to pending scroll event targets");
          auto currentTargets = WTF::move(m_pendingScrollEventTargetList->targets);
          for (auto& [target, type] : currentTargets) {
@@ -11561,7 +11599,7 @@ index 79f2bcbc106c7c43e8a971816c183dcc00610b83..4f53a516b136f9aaaa75bfda4b8b79c5
              auto bubbles = target->isDocumentNode() ? Event::CanBubble::Yes : Event::CanBubble::No;
              auto eventName = [&] {
                  switch (type) {
-@@ -6079,13 +6243,31 @@ void Document::runScrollSteps()
+@@ -6079,13 +6274,31 @@ void Document::runScrollSteps()
                  return frameView->scrollableAreaForNode(target.get());
              }();
  
@@ -11593,7 +11631,7 @@ index 79f2bcbc106c7c43e8a971816c183dcc00610b83..4f53a516b136f9aaaa75bfda4b8b79c5
          }
      }
      if (m_needsVisualViewportScrollEvent) {
-@@ -6094,6 +6276,17 @@ void Document::runScrollSteps()
+@@ -6094,6 +6307,17 @@ void Document::runScrollSteps()
          if (RefPtr window = this->window())
              window->visualViewport().dispatchEvent(Event::create(eventNames().scrollEvent, Event::CanBubble::No, Event::IsCancelable::No));
      }
@@ -11611,7 +11649,7 @@ index 79f2bcbc106c7c43e8a971816c183dcc00610b83..4f53a516b136f9aaaa75bfda4b8b79c5
  }
  
  void Document::flushDeferredScrollEvents()
-@@ -10669,21 +10862,54 @@ void Document::removeIntersectionObserver(IntersectionObserver& observer)
+@@ -10669,21 +10893,54 @@ void Document::removeIntersectionObserver(IntersectionObserver& observer)
  static void updateAndNotifyIntersectionObservers(const Vector<WeakPtr<IntersectionObserver>>& intersectionObservers, const Frame& hostFrame)
  {
      Vector<WeakPtr<IntersectionObserver>> intersectionObserversWithPendingNotifications;
@@ -14765,10 +14803,23 @@ index 20fa89dbac43fca28edabb48235e4a35ac61b8f2..a00f1d6eec4065c212769ed0eb94e2a6
      virtual void showContactPicker(ContactsRequestData&&, CompletionHandler<void(std::optional<Vector<ContactInfo>>&&)>&& callback) { callback(std::nullopt); }
  
 diff --git a/Source/WebCore/page/LocalFrameView.cpp b/Source/WebCore/page/LocalFrameView.cpp
-index 2132dee6a2c27be522007bb4df5bc1f5940c1c06..7ade4263a505cba3db3174b392719ff4e7029aa9 100644
+index 2132dee6a2c27be522007bb4df5bc1f5940c1c06..92204f12ac19f0bc5b70ba956ed5857a19114e92 100644
 --- a/Source/WebCore/page/LocalFrameView.cpp
 +++ b/Source/WebCore/page/LocalFrameView.cpp
-@@ -4939,10 +4939,30 @@ void LocalFrameView::flushAnyPendingPostLayoutTasks()
+@@ -167,6 +167,12 @@
+ #define FRAME_ID m_frame->frameID().toUInt64()
+ #define FRAMEVIEW_RELEASE_LOG(channel, fmt, ...) RELEASE_LOG_FORWARDABLE(channel, fmt, PAGE_ID, FRAME_ID, m_frame->isMainFrame(), ##__VA_ARGS__)
+ 
++#if PLATFORM(HAIKU)
++#include <wtf/HashSet.h>
++#include <wtf/NeverDestroyed.h>
++#include <wtf/Scope.h>
++#endif
++
+ namespace WebCore {
+ 
+ using namespace HTMLNames;
+@@ -4939,10 +4945,30 @@ void LocalFrameView::flushAnyPendingPostLayoutTasks()
  void LocalFrameView::performPostLayoutTasks()
  {
      ScriptDisallowedScope::InMainThread scriptDisallowedScope;
@@ -14799,7 +14850,7 @@ index 2132dee6a2c27be522007bb4df5bc1f5940c1c06..7ade4263a505cba3db3174b392719ff4
  
      if (!layoutContext().isLayoutNested() && m_frame->document()->documentElement())
          fireLayoutRelatedMilestonesIfNeeded();
-@@ -4952,6 +4972,10 @@ void LocalFrameView::performPostLayoutTasks()
+@@ -4952,6 +4978,10 @@ void LocalFrameView::performPostLayoutTasks()
          renderView->adjustAXCustomColorModeAfterLayout();
  #endif
  
@@ -14810,7 +14861,7 @@ index 2132dee6a2c27be522007bb4df5bc1f5940c1c06..7ade4263a505cba3db3174b392719ff4
  #if PLATFORM(IOS_FAMILY)
      // Only send layout-related delegate callbacks synchronously for the main frame to
      // avoid re-entering layout for the main frame while delivering a layout-related delegate
-@@ -4965,32 +4989,56 @@ void LocalFrameView::performPostLayoutTasks()
+@@ -4965,32 +4995,56 @@ void LocalFrameView::performPostLayoutTasks()
      // FIXME: We should consider adding DidLayout as a LayoutMilestone. That would let us merge this
      // with didLayout(LayoutMilestones).
      m_frame->loader().client().dispatchDidLayout();
@@ -14867,7 +14918,63 @@ index 2132dee6a2c27be522007bb4df5bc1f5940c1c06..7ade4263a505cba3db3174b392719ff4
  
      protect(m_frame->document())->scheduleDeferredAXObjectCacheUpdate();
  
-@@ -6299,6 +6347,21 @@ void LocalFrameView::checkAndDispatchDidReachVisuallyNonEmptyState()
+@@ -6094,8 +6148,31 @@ void LocalFrameView::paintOverhangAreas(GraphicsContext& context, const IntRect&
+     ScrollView::paintOverhangAreas(context, horizontalOverhangArea, verticalOverhangArea, dirtyRect);
+ }
+ 
++#if PLATFORM(HAIKU)
++// Document::resolveStyle() leaves the compositing update of a style change
++// that happens outside this to the next pass through it.
++static thread_local unsigned s_renderingLayoutDepthHaiku;
++
++bool summitInRenderingLayoutHaiku()
++{
++    return s_renderingLayoutDepthHaiku;
++}
++
++HashSet<const Document*>& summitDeferredStyleCompositingHaiku()
++{
++    static NeverDestroyed<HashSet<const Document*>> documents;
++    return documents;
++}
++#endif
++
+ void LocalFrameView::updateLayoutAndStyleIfNeededRecursive(OptionSet<LayoutOptions> layoutOptions)
+ {
++#if PLATFORM(HAIKU)
++    ++s_renderingLayoutDepthHaiku;
++    auto leaveRenderingLayout = makeScopeExit([] {
++        --s_renderingLayoutDepthHaiku;
++    });
++#endif
+     // Style updating, render tree creation, and layout needs to be done multiple times
+     // for more than one reason. But one reason is that when an <object> element determines
+     // what it needs to load a subframe, a second pass is needed. That requires update
+@@ -6142,6 +6219,23 @@ void LocalFrameView::updateLayoutAndStyleIfNeededRecursive(OptionSet<LayoutOptio
+             break;
+     }
+ 
++#if PLATFORM(HAIKU)
++    // Style changes that scripts forced since the last pass: their documents
++    // are clean now, so nothing above updated their compositing.
++    if (!summitDeferredStyleCompositingHaiku().isEmpty()) {
++        DescendantsDeque deque;
++        while (auto view = nextRenderedDescendant(deque)) {
++            RefPtr document = view->m_frame->document();
++            if (!document || !summitDeferredStyleCompositingHaiku().remove(document.get()))
++                continue;
++            if (view->needsLayout())
++                continue;
++            if (view->layoutContext().updateCompositingLayersAfterStyleChange())
++                view->viewportContentsChanged();
++        }
++    }
++#endif
++
+ #if ASSERT_ENABLED
+     auto needsStyleRecalc = [&] {
+         DescendantsDeque deque;
+@@ -6299,6 +6393,21 @@ void LocalFrameView::checkAndDispatchDidReachVisuallyNonEmptyState()
          return;
  
      m_contentQualifiesAsVisuallyNonEmpty = true;
