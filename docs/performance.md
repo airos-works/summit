@@ -263,6 +263,18 @@ ms against 205-237): what paces them now is the main thread's rendering
 update waiting on the frame before, not the compositor's drawing. Static
 test pages are pixel-identical.
 
+Measured (`SUMMIT_RENDER_UPDATE_PHASE_TRACE`, `SUMMIT_LAYER_UPDATE_TRACE`):
+the rendering updates of that scroll take ~10 ms of the main thread each but
+come 30-240 ms apart, and 50 of 54 were asked for while the page still
+waited for the compositor. The compositor lets the page go once it has drawn
+the composition that took the update (before the frame copy), and drawing
+includes waiting for the update's tiles in view and making new textures (the
+20-36 ms `flush` of the heavy compositions). Letting it go once the
+composition has taken the update's layer state would overlap the page's next
+update with those waits; that splits `flushCompositingState()`, whose lock
+order has deadlocked before (see the 14 October backdrop deadlock), so it is
+left for a session that can watch it.
+
 Tried and dropped: tile textures allocated on a 64-pixel grid and drawn
 through `drawTextureWithPhysicalSize` (edge tiles of 430-433 pixels sharing
 448-pixel textures): 213-237 new textures against 250-261, but text in some
