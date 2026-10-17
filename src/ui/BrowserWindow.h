@@ -11,10 +11,12 @@
 #include <Messenger.h>
 #include <Message.h>
 #include <atomic>
+#include <functional>
 #include <map>
 #include <memory>
 #include <optional>
 #include <set>
+#include <string>
 #include <vector>
 
 class BCardLayout;
@@ -32,6 +34,7 @@ class BWebDownload;
 #endif
 
 namespace summit {
+class FrameHistory;
 class ToolButton;
 class ExtensionActionButton;
 class TabStrip;
@@ -111,6 +114,12 @@ public:
     void CreateTab(const std::string& url, bool select = true, const char* extensionIdentifier = nullptr,
         int32 index = -1, uint64 command = 0, int64 replaces = 0, uint64 newPage = 0);
     void WindowActivated(bool active) override;
+    // The MCP server's requests (BrowserWindowMcp.cpp): JSON text in and out,
+    // with the window locked (a kMcpRequest message, or McpService's lock).
+    std::string McpRequest(const std::string& request);
+    // Runs function with the page view of the tab (with the window locked);
+    // false when the window has no such tab. tab 0: the selected one.
+    bool McpWithView(int64 tab, const std::function<void(BWebKitView&)>& function);
 #if SUMMIT_MODERN_WEBKIT
     void DirectConnected(direct_buffer_info* info) override;
     // Whether app_server killed the window's direct daemon thread, which it
@@ -158,6 +167,12 @@ private:
         std::string zoomKey;
 #if SUMMIT_MODERN_WEBKIT
         BMessenger messenger { };
+        // The engine's web process (team) showing the page and the page's
+        // identifier in it, from the engine's state notifications.
+        int32 processID = 0;
+        uint64 pageIdentifier = 0;
+        // When frames reached the view (FrameHistory.h); the view owns it.
+        FrameHistory* frames = nullptr;
         bool processExited = false;
         std::string processError;
         std::string loadError { }, loadErrorDescription { }, loadErrorDomain { }, loadErrorURL { };
@@ -281,6 +296,8 @@ private:
     int32 BackgroundTabIndex();
     bool fQuittingApp = false;
     uint64 fCloseWindowCommand = 0;
+    // When the window was last activated (the MCP server's "front window").
+    bigtime_t fActivatedAt = 0;
 #endif
     // Benchmark input synthesis: posts a paced burst of mouse wheel or key
     // events to the active page, so scrolling can be measured the way a person

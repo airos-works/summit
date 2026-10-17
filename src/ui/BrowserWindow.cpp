@@ -10,6 +10,8 @@
 #include "SharedProfile.h"
 #if SUMMIT_MODERN_WEBKIT
 #include "DevToolsWindow.h"
+#include "FrameHistory.h"
+#include "McpService.h"
 #include <WebKit/WebKitInspector.h>
 #endif
 #include "core/Address.h"
@@ -591,6 +593,9 @@ BrowserWindow::BrowserWindow(std::shared_ptr<SharedProfile> profile, std::string
         std::lock_guard lock(sWindowListLock);
         sWindowList.push_back({BMessenger(this), fKey, "Summit"});
     }
+#if SUMMIT_MODERN_WEBKIT
+    McpRegisterWindow({BMessenger(this), fKey, fPrivate});
+#endif
     fShared->AddListener(BMessenger(this));
     fProtocolHandlers = std::make_unique<ProtocolHandlers>(fShared, fPrivate,
         [this](int64 id, const std::string& source) {
@@ -851,6 +856,9 @@ BrowserWindow::~BrowserWindow()
     {
         std::lock_guard lock(sWindowListLock);
         std::erase_if(sWindowList, [this](const WindowEntry& entry) { return entry.key == fKey; });
+#if SUMMIT_MODERN_WEBKIT
+        McpUnregisterWindow(fKey);
+#endif
     }
 #if SUMMIT_MODERN_WEBKIT
     if (fExtensionMenuCancelled) *fExtensionMenuCancelled = true;
@@ -910,8 +918,9 @@ status_t BrowserWindow::RunScrollBurst(void* data)
 }
 void BrowserWindow::SimulateScroll(const BMessage& message, BMessage& reply)
 {
+    // The MCP server (BrowserWindowMcp.cpp) may: whoever turned it on allowed it.
     const char* enabled = std::getenv("SUMMIT_ENABLE_INPUT_SYNTHESIS");
-    if (!enabled || std::strcmp(enabled, "1") != 0) {
+    if (!message.GetBool("mcp", false) && (!enabled || std::strcmp(enabled, "1") != 0)) {
         reply.AddString("error", "input synthesis is disabled");
         return;
     }
@@ -1113,6 +1122,8 @@ void BrowserWindow::CreateTab(const std::string& input, bool select, BWebView* a
         : address.url == kBookmarksPage ? "Bookmarks" : "Loading…";
     created.pageRevision = fPagesRevision;
     created.messenger = BMessenger(webView);
+    created.frames = new FrameHistory();
+    webView->AddFilter(created.frames);
     webView->SetURLSchemeHandler("summit-reader", BMessenger(this));
     // As in other browsers, a restored session's tabs wait to be selected
     // before they load: a window of fifteen tabs would otherwise start fifteen
@@ -2267,6 +2278,7 @@ void BrowserWindow::WindowActivated(bool active)
     SyncBrowserWindow();
     if (!active) HideSuggestions();
     if (active) {
+        fActivatedAt = system_time();
         AnnouncePointer();
         // The application sends new tabs and extension requests to the front window.
         BMessage activated(kWindowActivated);
@@ -3506,6 +3518,14 @@ void BrowserWindow::MessageReceived(BMessage* message)
 #endif
             if (CurrentFocus()) PostMessage(message, CurrentFocus());
             break;
+#if SUMMIT_MODERN_WEBKIT
+        case kMcpRequest: {
+            BMessage reply(B_REPLY);
+            reply.AddString("reply", McpRequest(message->GetString("request", "{}")).c_str());
+            message->SendReply(&reply);
+            break;
+        }
+#endif
         case kSimulateScroll: {
             BMessage reply(B_REPLY);
             SimulateScroll(*message, reply);
@@ -3999,6 +4019,8 @@ void BrowserWindow::WebKitStateChanged(const BMessage& message)
         RefreshChrome();
         return;
     }
+    if (int32 process = 0; message.FindInt32("processID", &process) == B_OK) tab->processID = process;
+    if (uint64 page = 0; message.FindUInt64("pageIdentifier", &page) == B_OK) tab->pageIdentifier = page;
     bool closeInvalidated = false;
     if (message.FindBool("closeApprovalInvalidated", &closeInvalidated) == B_OK && closeInvalidated)
         InvalidateWindowClose();

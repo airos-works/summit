@@ -70,6 +70,13 @@ struct Profile {
     std::map<std::string, ProtocolHandler> protocolHandlers;
     // A declined site registration is not prompted again until removed in Preferences.
     std::map<std::string, std::set<std::string>> declinedProtocolHandlers;
+    // Summit's built-in debugging server (MCP) for tools such as Claude Code:
+    // off unless turned on in Preferences › Developer. The token is made when
+    // it is first turned on.
+    bool mcpEnabled = false;
+    int mcpPort = 7790;
+    bool mcpLocalOnly = false;
+    std::string mcpToken;
     bool SetProtocolHandler(const std::string& scheme, const ProtocolHandler&);
     bool RemoveProtocolHandler(const std::string& scheme);
     static Profile Load(const std::filesystem::path& path, std::string& error);

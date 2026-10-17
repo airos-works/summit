@@ -115,6 +115,15 @@ Profile Profile::Load(const std::filesystem::path& path, std::string& error)
                     if (allowed.is_boolean()) profile.SetSitePermission(permission, origin, allowed.get<bool>());
             }
         }
+        if (auto mcp = j.find("mcp"); mcp != j.end() && mcp->is_object()) {
+            // Unusable values keep their defaults rather than failing the profile.
+            if (auto enabled = mcp->find("enabled"); enabled != mcp->end() && enabled->is_boolean()) profile.mcpEnabled = *enabled;
+            if (auto port = mcp->find("port"); port != mcp->end() && port->is_number_integer() && *port > 0 && *port < 65536)
+                profile.mcpPort = *port;
+            if (auto local = mcp->find("localOnly"); local != mcp->end() && local->is_boolean()) profile.mcpLocalOnly = *local;
+            if (auto token = mcp->find("token"); token != mcp->end() && token->is_string() && token->get<std::string>().size() <= 256)
+                profile.mcpToken = *token;
+        }
         if (auto handlers = j.find("protocolHandlers"); handlers != j.end() && handlers->is_object() && handlers->size() <= 1000) {
             for (const auto& [scheme, item] : handlers->items()) {
                 if (!item.is_object()) continue;
@@ -237,7 +246,8 @@ bool Profile::Save(const std::filesystem::path& path, std::string& error) const
             {"interfaceStyle", interfaceStyle}, {"searchEngine", searchEngine},
             {"siteZoom", siteZoom}, {"unpinnedExtensions", unpinnedExtensions},
             {"trustedCertificates", trusted}, {"sitePermissions", sitePermissions},
-            {"protocolHandlers", handlers}, {"declinedProtocolHandlers", declinedProtocolHandlers}}.dump(2);
+            {"protocolHandlers", handlers}, {"declinedProtocolHandlers", declinedProtocolHandlers},
+            {"mcp", {{"enabled", mcpEnabled}, {"port", mcpPort}, {"localOnly", mcpLocalOnly}, {"token", mcpToken}}}}.dump(2);
         if (data.size() > 16 * 1024 * 1024) throw std::runtime_error("Profile is too large");
         temporary = path.string() + ".XXXXXX";
         fd = mkstemp(temporary.data());

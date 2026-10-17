@@ -2,10 +2,12 @@
 #include <Messenger.h>
 #include <Window.h>
 #include <filesystem>
+#include <memory>
 #include <string>
 #include <vector>
 
 class BButton;
+class BMessageRunner;
 class BColumnListView;
 class BTabView;
 class BCheckBox;
@@ -27,6 +29,10 @@ struct PreferencesState {
     // Certificates the user chose to trust although they failed verification.
     size_t trustedCertificates = 0;
     bool restoreSession = true;
+    // Preferences › Developer: the built-in debugging server (McpService.h).
+    bool mcpEnabled = false;
+    int mcpPort = 7790;
+    bool mcpLocalOnly = false;
 };
 // Edit › Preferences…. One window for the application; changes apply to every
 // browser window as they are made and are saved in the profile.
@@ -47,6 +53,16 @@ private:
     };
     void ShowSitePermissions(const std::vector<SiteEntry>&);
     void ShowProtocolHandlers(const std::vector<std::pair<std::string, std::string>>&);
+    void SendMcpPort();
+    BCheckBox* fMcpEnabled;
+    BCheckBox* fMcpLocalOnly;
+    BTextControl* fMcpPort;
+    BStringView* fMcpStatus;
+    BStringView* fMcpEndpoint;
+    BButton* fMcpCopy;
+    BButton* fMcpNewToken;
+    std::string fMcpConfiguration;
+    std::unique_ptr<BMessageRunner> fMcpRefresh;
     BColumnListView* fProtocols;
     BButton* fProtocolRemove;
     std::vector<std::pair<std::string, std::string>> fProtocolEntries;

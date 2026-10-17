@@ -31097,10 +31097,10 @@ index 0000000000000000000000000000000000000000..1a59f5ca77ca81301993268bcdee2f36
 +} // namespace WebCore
 diff --git a/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaiku.cpp b/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..afbce40b75db49712610961f9bb5622ef5c6840c
+index 0000000000000000000000000000000000000000..10363d987572c83cf6ac0cef1c47027e8ede76ce
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaiku.cpp
-@@ -0,0 +1,1845 @@
+@@ -0,0 +1,1891 @@
 +/*
 + * Copyright (C) 2014-2016 Haiku, Inc.
 + *
@@ -31121,6 +31121,7 @@ index 0000000000000000000000000000000000000000..afbce40b75db49712610961f9bb5622e
 + */
 +
 +#include "config.h"
++#include <wtf/JSONValues.h>
 +#if USE(SKIA)
 +#include "NativeImage.h"
 +WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_BEGIN
@@ -32014,6 +32015,19 @@ index 0000000000000000000000000000000000000000..afbce40b75db49712610961f9bb5622e
 +    m_substituteVideo = fallbackVideo ? WTF::move(fallbackVideo) : SubstituteVideoDecoderHaiku::createIfNeeded(*track, format);
 +    if (m_substituteVideo)
 +        format = m_substituteVideo->decodedFormat();
++    {
++        media_codec_info decoder = { };
++        bool known = true;
++        if (m_substituteVideo)
++            m_substituteVideo->codecInfo(&decoder);
++        else
++            known = track->GetCodecInfo(&decoder) == B_OK;
++        if (known)
++            m_videoDecoderHaiku = std::string(decoder.pretty_name) + " (" + decoder.short_name + ")";
++        else
++            m_videoDecoderHaiku = "unknown";
++        m_videoDecoderSubstituteHaiku = !!m_substituteVideo;
++    }
 +    if (!m_frameBuffer || static_cast<uint32>(m_frameBuffer->Bounds().IntegerWidth() + 1) != format.Width()
 +        || static_cast<uint32>(m_frameBuffer->Bounds().IntegerHeight() + 1) != format.Height()) {
 +        delete m_frameBuffer;
@@ -32938,6 +32952,38 @@ index 0000000000000000000000000000000000000000..afbce40b75db49712610961f9bb5622e
 +    return MediaPlayer::SupportsType::IsNotSupported;
 +}
 +
++String MediaPlayerPrivate::engineDescription() const
++{
++    auto object = JSON::Object::create();
++    object->setString("engine"_s, "Haiku Media Kit"_s);
++    object->setBoolean("hasVideo"_s, m_hasVideo);
++    object->setBoolean("paused"_s, m_paused);
++    object->setBoolean("ended"_s, m_ended);
++    object->setDouble("currentTime"_s, m_currentTime);
++    object->setDouble("duration"_s, m_duration);
++    object->setInteger("decodedFrames"_s, m_videoFrameGeneration.load());
++    auto& lock = const_cast<BLocker&>(m_mediaLock);
++    // The loader holds the lock while it reads the file; do not wait for it.
++    if (lock.LockWithTimeout(50000) == B_OK) {
++        object->setString("videoDecoder"_s, String::fromUTF8(m_videoDecoderHaiku.c_str()));
++        object->setBoolean("substituteDecoder"_s, m_videoDecoderSubstituteHaiku);
++        if (m_frameBuffer) {
++            object->setInteger("frameWidth"_s, m_frameBuffer->Bounds().IntegerWidth() + 1);
++            object->setInteger("frameHeight"_s, m_frameBuffer->Bounds().IntegerHeight() + 1);
++        }
++        object->setBoolean("audioOutput"_s, !!m_soundPlayer);
++        if (m_audioFormat.frame_rate > 0) {
++            object->setDouble("audioRate"_s, m_audioFormat.frame_rate);
++            object->setInteger("audioChannels"_s, m_audioFormat.channel_count);
++        }
++        object->setBoolean("streaming"_s, m_downloadFile && !dynamic_cast<BFile*>(m_downloadFile));
++        object->setBoolean("splitAudio"_s, !!m_secondaryMediaFile);
++        lock.Unlock();
++    } else
++        object->setString("state"_s, "the media lock is held (loading or seeking)"_s);
++    return object->toJSONString();
++}
++
 +ColorSpace MediaPlayerPrivate::colorSpace()
 +{
 +    return ColorSpace::SRGB();
@@ -32948,10 +32994,10 @@ index 0000000000000000000000000000000000000000..afbce40b75db49712610961f9bb5622e
 +#endif
 diff --git a/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaiku.h b/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaiku.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..df43f4fc21c17d2cfb904c9eaefa28b1b858c369
+index 0000000000000000000000000000000000000000..4e2607e7bacbd9483209658d7ade547f0184ef04
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaiku.h
-@@ -0,0 +1,233 @@
+@@ -0,0 +1,240 @@
 +/*
 + * Copyright (C) 2014 Haiku, Inc.
 + *
@@ -33074,6 +33120,9 @@ index 0000000000000000000000000000000000000000..df43f4fc21c17d2cfb904c9eaefa28b1
 +        RefPtr<CoordinatedPlatformLayerBufferProxy> platformLayerBufferProxy() const override;
 +#endif
 +        ColorSpace colorSpace() override;
++        // The decoders and the playback state, as JSON, for the browser's
++        // debugging tools (WebProcessDiagnosticsHaiku.cpp).
++        String engineDescription() const override;
 +
 +    constexpr MediaPlayerType mediaPlayerType() const final { return MediaPlayerType::Haiku; }
 +        void setMuted(bool) override;
@@ -33143,6 +33192,10 @@ index 0000000000000000000000000000000000000000..df43f4fc21c17d2cfb904c9eaefa28b1
 +        std::atomic<unsigned> m_frameTraceRepaintQueuedSequence { 0 };
 +        std::atomic<unsigned> m_videoFrameGeneration { 0 };
 +        std::atomic<bool> m_videoRepaintQueued { false };
++        // The video decoder chosen when playback last started, for
++        // engineDescription(); guarded by m_mediaLock.
++        std::string m_videoDecoderHaiku;
++        bool m_videoDecoderSubstituteHaiku { false };
 +#if USE(CURL)
 +        BLocker m_downloadLock;
 +        void* m_activeDownload { nullptr };
@@ -33187,10 +33240,10 @@ index 0000000000000000000000000000000000000000..df43f4fc21c17d2cfb904c9eaefa28b1
 +#endif
 diff --git a/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaikuMSE.cpp b/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaikuMSE.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..3ad95d47206b58830feaf39eca60fd56eefd5bda
+index 0000000000000000000000000000000000000000..f77a9c3236d3478a3c6f22443cd5c6018fb44379
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaikuMSE.cpp
-@@ -0,0 +1,3042 @@
+@@ -0,0 +1,3103 @@
 +/*
 + * Copyright (C) 2026 Summit contributors.
 + *
@@ -33209,6 +33262,7 @@ index 0000000000000000000000000000000000000000..3ad95d47206b58830feaf39eca60fd56
 + */
 +
 +#include "config.h"
++#include <wtf/JSONValues.h>
 +#include "MediaPlayerPrivateHaikuMSE.h"
 +
 +#include "MediaDecoderSelectionHaiku.h"
@@ -33885,6 +33939,23 @@ index 0000000000000000000000000000000000000000..3ad95d47206b58830feaf39eca60fd56
 +    // every frame handed to the compositor as presented, as before.
 +    unsigned presentedFrames() const { return m_presentedFrames - m_unshownFrames; }
 +    unsigned droppedFrames() const { return m_droppedFrames + m_unshownFrames; }
++    // For the browser's debugging tools (engineDescription()): the decoder
++    // the last setup chose and how it went.
++    struct DecoderInfo {
++        std::string name;
++        std::string shortName;
++        bool namedAddOn { false };
++        status_t status { B_NO_INIT };
++        IntSize size;
++        unsigned setups { 0 };
++        double setupMs { 0 };
++    };
++    DecoderInfo decoderInfo()
++    {
++        Locker locker { m_frameLock };
++        return m_decoderInfo;
++    }
++    unsigned unshownFrames() const { return m_unshownFrames; }
 +
 +private:
 +    void run()
@@ -34142,6 +34213,16 @@ index 0000000000000000000000000000000000000000..3ad95d47206b58830feaf39eca60fd56
 +            taken.clear();
 +        MSE_TRACE("video decoder %s %ux%u status=%ld setup=%.1f ms\n", codecInfo.pretty_name, info.width, info.height,
 +            long(status), (system_time() - setupStarted) / 1000.0);
++        {
++            Locker locker { m_frameLock };
++            m_decoderInfo.name = codecInfo.pretty_name;
++            m_decoderInfo.shortName = codecInfo.short_name;
++            m_decoderInfo.namedAddOn = !!addOn;
++            m_decoderInfo.status = status;
++            m_decoderInfo.size = { width, height };
++            m_decoderInfo.setupMs = (system_time() - setupStarted) / 1000.0;
++            ++m_decoderInfo.setups;
++        }
 +        // A flush while the decoder was set up (it reads samples to find the
 +        // picture size) is no reason to drop what the next generation queued.
 +        if (m_queue.aborted() || m_queue.generation() != generation)
@@ -34564,6 +34645,7 @@ index 0000000000000000000000000000000000000000..3ad95d47206b58830feaf39eca60fd56
 +    Vector<uint8_t> m_scratch;
 +#endif
 +    IntSize m_frameSize WTF_GUARDED_BY_LOCK(m_frameLock);
++    DecoderInfo m_decoderInfo WTF_GUARDED_BY_LOCK(m_frameLock);
 +};
 +
 +// #pragma mark - Audio
@@ -35807,6 +35889,38 @@ index 0000000000000000000000000000000000000000..3ad95d47206b58830feaf39eca60fd56
 +    return ColorSpace::SRGB();
 +}
 +
++String MediaPlayerPrivateHaikuMSE::engineDescription() const
++{
++    // JSON for the browser's debugging tools (WebProcessDiagnosticsHaiku.cpp).
++    auto object = JSON::Object::create();
++    object->setString("engine"_s, m_dash ? "Haiku MSE (DASH)"_s : "Haiku MSE"_s);
++    auto size = naturalSize();
++    object->setInteger("naturalWidth"_s, static_cast<int>(size.width()));
++    object->setInteger("naturalHeight"_s, static_cast<int>(size.height()));
++    object->setBoolean("paused"_s, m_paused);
++    object->setBoolean("stalled"_s, m_stalled);
++    if (m_videoRenderer) {
++        auto decoder = m_videoRenderer->decoderInfo();
++        auto video = JSON::Object::create();
++        video->setString("decoder"_s, String::fromUTF8(decoder.name.c_str()));
++        video->setString("decoderShortName"_s, String::fromUTF8(decoder.shortName.c_str()));
++        video->setBoolean("namedAddOn"_s, decoder.namedAddOn);
++        video->setInteger("decoderStatus"_s, decoder.status);
++        video->setInteger("decodedWidth"_s, decoder.size.width());
++        video->setInteger("decodedHeight"_s, decoder.size.height());
++        video->setInteger("decoderSetups"_s, decoder.setups);
++        video->setDouble("lastSetupMs"_s, decoder.setupMs);
++        video->setInteger("presentedFrames"_s, m_videoRenderer->presentedFrames());
++        video->setInteger("droppedFrames"_s, m_videoRenderer->droppedFrames());
++        video->setInteger("unshownFrames"_s, m_videoRenderer->unshownFrames());
++        object->setObject("video"_s, WTF::move(video));
++    }
++    object->setBoolean("audio"_s, !!m_audioRenderer);
++    if (m_dash)
++        object->setDouble("dashSelectedBandwidth"_s, m_dash->selectedBandwidth());
++    return object->toJSONString();
++}
++
 +std::optional<VideoPlaybackQualityMetrics> MediaPlayerPrivateHaikuMSE::videoPlaybackQualityMetrics()
 +{
 +    if (!m_mediaSourcePrivate && !m_dash)
@@ -36235,10 +36349,10 @@ index 0000000000000000000000000000000000000000..3ad95d47206b58830feaf39eca60fd56
 +#endif // ENABLE(MEDIA_SOURCE)
 diff --git a/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaikuMSE.h b/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaikuMSE.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..76d9b945107a58d043c1c86478f31e52f444eaab
+index 0000000000000000000000000000000000000000..4f844a68fae9b11758e364b4c26e1ef19927c4bc
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaikuMSE.h
-@@ -0,0 +1,406 @@
+@@ -0,0 +1,408 @@
 +/*
 + * Copyright (C) 2026 Summit contributors.
 + *
@@ -36505,6 +36619,8 @@ index 0000000000000000000000000000000000000000..76d9b945107a58d043c1c86478f31e52
 +#endif
 +    ColorSpace colorSpace() final;
 +    std::optional<VideoPlaybackQualityMetrics> videoPlaybackQualityMetrics() final;
++    // The decoder and its frames, as JSON, for the browser's debugging tools.
++    String engineDescription() const final;
 +
 +    void setNetworkState(MediaPlayer::NetworkState);
 +    void updatePlaybackState();
@@ -57527,7 +57643,7 @@ index 3b060605bbff32f845804a848610eca23dea834c..e27c50cbf085c611238bd5686662ac6c
  
  } // namespace WebCore
 diff --git a/Source/WebCore/platform/network/curl/CurlRequestScheduler.cpp b/Source/WebCore/platform/network/curl/CurlRequestScheduler.cpp
-index 393535b29c7ea90e6c7cb83d261a93963e09b5d7..1a61d572727579ea03ab5bf6e93dd74e52e2eb0b 100644
+index 393535b29c7ea90e6c7cb83d261a93963e09b5d7..28313a2d32bc2abcb90e565c7d56d23ea6bb01d8 100644
 --- a/Source/WebCore/platform/network/curl/CurlRequestScheduler.cpp
 +++ b/Source/WebCore/platform/network/curl/CurlRequestScheduler.cpp
 @@ -27,8 +27,13 @@
@@ -57544,7 +57660,7 @@ index 393535b29c7ea90e6c7cb83d261a93963e09b5d7..1a61d572727579ea03ab5bf6e93dd74e
  
  #if USE(CURL)
  
-@@ -38,28 +43,60 @@ namespace WebCore {
+@@ -38,28 +43,76 @@ namespace WebCore {
  
  WTF_MAKE_TZONE_ALLOCATED_IMPL(CurlRequestScheduler);
  
@@ -57576,11 +57692,28 @@ index 393535b29c7ea90e6c7cb83d261a93963e09b5d7..1a61d572727579ea03ab5bf6e93dd74e
 +    m_workers.clear();
 +}
 +
++#if PLATFORM(HAIKU)
++Vector<CurlRequestScheduler::WorkerStateHaiku> CurlRequestScheduler::workerStatesHaiku()
++{
++    Vector<WorkerStateHaiku> states;
++    for (auto& worker : m_workers)
++        states.append(worker->stateHaiku());
++    return states;
++}
++
++CurlRequestScheduler::WorkerStateHaiku CurlRequestScheduler::Worker::stateHaiku()
++{
++    Locker locker { m_mutex };
++    return { static_cast<unsigned>(m_activeJobs.size()), static_cast<unsigned>(m_taskQueue.size()), m_runThread };
++}
++#endif
++
 +CurlRequestScheduler::Worker& CurlRequestScheduler::workerForHost(const String& host)
 +{
 +    return *m_workers[host.hash() % m_workers.size()];
-+}
-+
+ }
+ 
+-bool CurlRequestScheduler::add(CurlRequestSchedulerClient* client)
 +CurlRequestScheduler::Worker* CurlRequestScheduler::workerForClient(CurlRequestSchedulerClient* client)
 +{
 +    Locker locker { m_assignmentLock };
@@ -57591,9 +57724,8 @@ index 393535b29c7ea90e6c7cb83d261a93963e09b5d7..1a61d572727579ea03ab5bf6e93dd74e
 +{
 +    Locker locker { m_assignmentLock };
 +    m_assignments.remove(client);
- }
- 
--bool CurlRequestScheduler::add(CurlRequestSchedulerClient* client)
++}
++
 +bool CurlRequestScheduler::add(CurlRequestSchedulerClient* client, const String& host)
  {
      ASSERT(isMainThread());
@@ -57613,7 +57745,7 @@ index 393535b29c7ea90e6c7cb83d261a93963e09b5d7..1a61d572727579ea03ab5bf6e93dd74e
      return true;
  }
  
-@@ -70,10 +107,47 @@ void CurlRequestScheduler::cancel(CurlRequestSchedulerClient* client)
+@@ -70,10 +123,47 @@ void CurlRequestScheduler::cancel(CurlRequestSchedulerClient* client)
      if (!client)
          return;
  
@@ -57662,7 +57794,7 @@ index 393535b29c7ea90e6c7cb83d261a93963e09b5d7..1a61d572727579ea03ab5bf6e93dd74e
  {
      {
          Locker locker { m_mutex };
-@@ -83,7 +157,7 @@ void CurlRequestScheduler::callOnWorkerThread(Function<void()>&& task)
+@@ -83,7 +173,7 @@ void CurlRequestScheduler::callOnWorkerThread(Function<void()>&& task)
      startOrWakeUpThread();
  }
  
@@ -57671,7 +57803,7 @@ index 393535b29c7ea90e6c7cb83d261a93963e09b5d7..1a61d572727579ea03ab5bf6e93dd74e
  {
      ASSERT(isMainThread());
  
-@@ -108,7 +182,7 @@ void CurlRequestScheduler::startOrWakeUpThread()
+@@ -108,7 +198,7 @@ void CurlRequestScheduler::startOrWakeUpThread()
      }, ThreadType::Network);
  }
  
@@ -57680,7 +57812,7 @@ index 393535b29c7ea90e6c7cb83d261a93963e09b5d7..1a61d572727579ea03ab5bf6e93dd74e
  {
      Locker locker { m_multiHandleMutex };
      if (!m_curlMultiHandle)
-@@ -117,7 +191,7 @@ void CurlRequestScheduler::wakeUpThreadIfPossible()
+@@ -117,7 +207,7 @@ void CurlRequestScheduler::wakeUpThreadIfPossible()
      m_curlMultiHandle->wakeUp();
  }
  
@@ -57689,7 +57821,7 @@ index 393535b29c7ea90e6c7cb83d261a93963e09b5d7..1a61d572727579ea03ab5bf6e93dd74e
  {
      ASSERT(!isMainThread());
  
-@@ -128,7 +202,7 @@ void CurlRequestScheduler::stopThreadIfNoMoreJobRunning()
+@@ -128,7 +218,7 @@ void CurlRequestScheduler::stopThreadIfNoMoreJobRunning()
      m_runThread = false;
  }
  
@@ -57698,7 +57830,7 @@ index 393535b29c7ea90e6c7cb83d261a93963e09b5d7..1a61d572727579ea03ab5bf6e93dd74e
  {
      {
          Locker locker { m_mutex };
-@@ -142,7 +216,7 @@ void CurlRequestScheduler::stopThread()
+@@ -142,7 +232,7 @@ void CurlRequestScheduler::stopThread()
      }
  }
  
@@ -57707,7 +57839,7 @@ index 393535b29c7ea90e6c7cb83d261a93963e09b5d7..1a61d572727579ea03ab5bf6e93dd74e
  {
      ASSERT(!isMainThread());
  
-@@ -157,7 +231,7 @@ void CurlRequestScheduler::executeTasks()
+@@ -157,7 +247,7 @@ void CurlRequestScheduler::executeTasks()
          task();
  }
  
@@ -57716,7 +57848,7 @@ index 393535b29c7ea90e6c7cb83d261a93963e09b5d7..1a61d572727579ea03ab5bf6e93dd74e
  {
      ASSERT(!isMainThread());
  
-@@ -169,6 +243,13 @@ void CurlRequestScheduler::workerThread()
+@@ -169,6 +259,13 @@ void CurlRequestScheduler::workerThread()
          m_curlMultiHandle->setMaxHostConnections(m_maxHostConnections);
      }
  
@@ -57730,7 +57862,7 @@ index 393535b29c7ea90e6c7cb83d261a93963e09b5d7..1a61d572727579ea03ab5bf6e93dd74e
      while (true) {
          {
              Locker locker { m_mutex };
-@@ -176,16 +257,26 @@ void CurlRequestScheduler::workerThread()
+@@ -176,16 +273,26 @@ void CurlRequestScheduler::workerThread()
                  break;
          }
  
@@ -57757,7 +57889,7 @@ index 393535b29c7ea90e6c7cb83d261a93963e09b5d7..1a61d572727579ea03ab5bf6e93dd74e
          while (true) {
              int messagesInQueue = 0;
              CURLMsg* msg = m_curlMultiHandle->readInfo(messagesInQueue);
-@@ -193,10 +284,21 @@ void CurlRequestScheduler::workerThread()
+@@ -193,10 +300,21 @@ void CurlRequestScheduler::workerThread()
                  break;
  
              ASSERT(msg->msg == CURLMSG_DONE);
@@ -57779,7 +57911,7 @@ index 393535b29c7ea90e6c7cb83d261a93963e09b5d7..1a61d572727579ea03ab5bf6e93dd74e
  //        stopThreadIfNoMoreJobRunning();
      }
  
-@@ -206,7 +308,7 @@ void CurlRequestScheduler::workerThread()
+@@ -206,7 +324,7 @@ void CurlRequestScheduler::workerThread()
      }
  }
  
@@ -57788,7 +57920,7 @@ index 393535b29c7ea90e6c7cb83d261a93963e09b5d7..1a61d572727579ea03ab5bf6e93dd74e
  {
      client->retain();
  
-@@ -228,44 +330,48 @@ void CurlRequestScheduler::startTransfer(CurlRequestSchedulerClient* client)
+@@ -228,44 +346,48 @@ void CurlRequestScheduler::startTransfer(CurlRequestSchedulerClient* client)
      m_taskQueue.append(WTF::move(task));
  }
  
@@ -57857,7 +57989,7 @@ index 393535b29c7ea90e6c7cb83d261a93963e09b5d7..1a61d572727579ea03ab5bf6e93dd74e
  
  }
 diff --git a/Source/WebCore/platform/network/curl/CurlRequestScheduler.h b/Source/WebCore/platform/network/curl/CurlRequestScheduler.h
-index 8f554b37e49dee04ddd702866d9efd764ed5d2a6..128adba652d48efbac88a68ca1d7efeda8b30455 100644
+index 8f554b37e49dee04ddd702866d9efd764ed5d2a6..fd5ac5f0a9dac78b1c9fff67df905ad367e75d58 100644
 --- a/Source/WebCore/platform/network/curl/CurlRequestScheduler.h
 +++ b/Source/WebCore/platform/network/curl/CurlRequestScheduler.h
 @@ -29,10 +29,13 @@
@@ -57887,7 +58019,7 @@ index 8f554b37e49dee04ddd702866d9efd764ed5d2a6..128adba652d48efbac88a68ca1d7efed
  class CurlRequestScheduler {
      WTF_MAKE_TZONE_ALLOCATED(CurlRequestScheduler);
      WTF_MAKE_NONCOPYABLE(CurlRequestScheduler);
-@@ -50,40 +59,63 @@ public:
+@@ -50,40 +59,77 @@ public:
      CurlRequestScheduler(long maxConnects, long maxTotalConnections, long maxHostConnections);
      ~CurlRequestScheduler();
  
@@ -57899,7 +58031,7 @@ index 8f554b37e49dee04ddd702866d9efd764ed5d2a6..128adba652d48efbac88a68ca1d7efed
 +    // Runs on the thread that owns the client's transfer.
 +    void callOnWorkerThread(CurlRequestSchedulerClient*, Function<void()>&&);
  
- private:
+-private:
 -    void startOrWakeUpThread();
 -    void wakeUpThreadIfPossible();
 -    void stopThreadIfNoMoreJobRunning();
@@ -57913,7 +58045,17 @@ index 8f554b37e49dee04ddd702866d9efd764ed5d2a6..128adba652d48efbac88a68ca1d7efed
 -    void completeTransfer(CurlRequestSchedulerClient*, CURLcode);
 -    void cancelTransfer(CurlRequestSchedulerClient*);
 -    void finalizeTransfer(CurlRequestSchedulerClient*, Function<void()>);
--
++#if PLATFORM(HAIKU)
++    // For the browser's debugging tools (ProcessDiagnosticsHaiku): each
++    // worker's transfers in progress and tasks waiting. Any thread.
++    struct WorkerStateHaiku {
++        unsigned activeTransfers { 0 };
++        unsigned queuedTasks { 0 };
++        bool running { false };
++    };
++    WEBCORE_EXPORT Vector<WorkerStateHaiku> workerStatesHaiku();
++#endif
+ 
 -    Lock m_mutex;
 -    RefPtr<WTF::Thread> m_thread;
 -    bool m_runThread { false };
@@ -57928,6 +58070,7 @@ index 8f554b37e49dee04ddd702866d9efd764ed5d2a6..128adba652d48efbac88a68ca1d7efed
 -    long m_maxConnects;
 -    long m_maxTotalConnections;
 -    long m_maxHostConnections;
++private:
 +    class Worker {
 +        WTF_MAKE_TZONE_ALLOCATED_INLINE(Worker);
 +        WTF_MAKE_NONCOPYABLE(Worker);
@@ -57938,6 +58081,9 @@ index 8f554b37e49dee04ddd702866d9efd764ed5d2a6..128adba652d48efbac88a68ca1d7efed
 +        void add(CurlRequestSchedulerClient*);
 +        void cancel(CurlRequestSchedulerClient*);
 +        void callOnWorkerThread(Function<void()>&&);
++#if PLATFORM(HAIKU)
++        WorkerStateHaiku stateHaiku();
++#endif
 +
 +    private:
 +        void startOrWakeUpThread();
@@ -66179,20 +66325,56 @@ index 34a4d1cd69624e0f86025f8ee86667dffd0646dc..cafb51726fa2e5e5b257bacbfa86e952
      MonotonicTime m_startTime;
      bool m_failsTAOCheck { false };
 diff --git a/Source/WebKit/NetworkProcess/curl/NetworkProcessMainCurl.cpp b/Source/WebKit/NetworkProcess/curl/NetworkProcessMainCurl.cpp
-index 7c9075474552a6beaffbeffe6838dd4e5b24b0d0..63ecf65d7718f6b8e24e27b37f2ea6ea38acc2eb 100644
+index 7c9075474552a6beaffbeffe6838dd4e5b24b0d0..74fe55e1e669a9abf183be97b68e71ef71200aba 100644
 --- a/Source/WebKit/NetworkProcess/curl/NetworkProcessMainCurl.cpp
 +++ b/Source/WebKit/NetworkProcess/curl/NetworkProcessMainCurl.cpp
-@@ -29,6 +29,9 @@
+@@ -29,11 +29,45 @@
  #include "AuxiliaryProcessMain.h"
  #include "NetworkProcess.h"
  #include "NetworkSession.h"
 +#if PLATFORM(HAIKU)
++#include "ProcessDiagnosticsHaiku.h"
++#include <WebCore/CurlContext.h>
++#include <WebCore/CurlRequestScheduler.h>
 +#include <wtf/WTFProcess.h>
 +#endif
  
  namespace WebKit {
  
-@@ -47,7 +50,14 @@ public:
+ class NetworkProcessMainCurl final: public AuxiliaryProcessMainBase<NetworkProcess> {
+ public:
++#if PLATFORM(HAIKU)
++    bool platformInitialize() override
++    {
++        // The browser's debugging tools ask this process about its transfers
++        // (ProcessDiagnosticsHaiku.h); the scheduler's workers are read
++        // under their own locks, so the answer needs no main thread.
++        ProcessDiagnosticsHaiku::addTopic("network", false, [] {
++            auto report = JSON::Object::create();
++            auto workers = JSON::Array::create();
++            unsigned active = 0, queued = 0;
++            for (auto& state : WebCore::CurlContext::singleton().scheduler().workerStatesHaiku()) {
++                auto worker = JSON::Object::create();
++                worker->setInteger("activeTransfers"_s, state.activeTransfers);
++                worker->setInteger("queuedTasks"_s, state.queuedTasks);
++                worker->setBoolean("running"_s, state.running);
++                active += state.activeTransfers;
++                queued += state.queuedTasks;
++                workers->pushObject(WTF::move(worker));
++            }
++            report->setInteger("activeTransfers"_s, active);
++            report->setInteger("queuedTasks"_s, queued);
++            report->setArray("workers"_s, WTF::move(workers));
++            return report;
++        });
++        ProcessDiagnosticsHaiku::start("network");
++        return true;
++    }
++#endif
+     void platformFinalize() override
+     {
+         Vector<PAL::SessionID> sessionIDs;
+@@ -47,7 +81,14 @@ public:
  
  int NetworkProcessMain(int argc, char** argv)
  {
@@ -68723,10 +68905,10 @@ index 0000000000000000000000000000000000000000..abdba4dff009ff314eecd9f825a128aa
 +} // namespace WebKit
 diff --git a/Source/WebKit/PlatformHaiku.cmake b/Source/WebKit/PlatformHaiku.cmake
 new file mode 100644
-index 0000000000000000000000000000000000000000..b08a0657a5efd326e95a79745dbcf46fc41a7f12
+index 0000000000000000000000000000000000000000..d0db0f97e93c6be4fba4e8a2e47fcfb30cf109e1
 --- /dev/null
 +++ b/Source/WebKit/PlatformHaiku.cmake
-@@ -0,0 +1,504 @@
+@@ -0,0 +1,507 @@
 +include(Headers.cmake)
 +include(Platform/Curl.cmake)
 +
@@ -68768,9 +68950,11 @@ index 0000000000000000000000000000000000000000..b08a0657a5efd326e95a79745dbcf46f
 +    Shared/haiku/ProcessExecutablePathHaiku.cpp
 +    Shared/haiku/NativeWebEventsHaiku.cpp
 +    Shared/haiku/WebMemorySamplerHaiku.cpp
++    Shared/haiku/ProcessDiagnosticsHaiku.cpp
 +
 +    UIProcess/DefaultUndoController.cpp
 +    UIProcess/API/haiku/WebKitContext.cpp
++    UIProcess/API/haiku/WebKitDiagnostics.cpp
 +    UIProcess/API/haiku/WebKitInfo.cpp
 +    UIProcess/API/haiku/WebKitInspector.cpp
 +    UIProcess/API/haiku/APIContentRuleListStoreHaiku.cpp
@@ -68868,6 +69052,7 @@ index 0000000000000000000000000000000000000000..b08a0657a5efd326e95a79745dbcf46f
 +    WebProcess/Extensions/Bindings/JSWebExtensionWrapper.cpp
 +    WebProcess/InjectedBundle/haiku/InjectedBundleHaiku.cpp
 +    WebProcess/WebPage/haiku/WebPageHaiku.cpp
++    WebProcess/haiku/WebProcessDiagnosticsHaiku.cpp
 +    WebProcess/haiku/WebProcessHaiku.cpp
 +    WebProcess/haiku/WebProcessMainHaiku.cpp
 +)
@@ -74236,6 +74421,483 @@ index 0000000000000000000000000000000000000000..8f2c1c6acdb7f6d0dbdc3474d2bbe68a
 +}
 +
 +} // namespace WebKit
+diff --git a/Source/WebKit/Shared/haiku/ProcessDiagnosticsHaiku.cpp b/Source/WebKit/Shared/haiku/ProcessDiagnosticsHaiku.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..0f7f33487ae0c3fcd65e4f55adaa73078af451b2
+--- /dev/null
++++ b/Source/WebKit/Shared/haiku/ProcessDiagnosticsHaiku.cpp
+@@ -0,0 +1,421 @@
++/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
++
++#include "config.h"
++#include "ProcessDiagnosticsHaiku.h"
++
++#include <algorithm>
++#include <atomic>
++#include <chrono>
++#include <cstring>
++#include <memory>
++#include <mutex>
++#include <condition_variable>
++#include <string>
++#include <unistd.h>
++#include <vector>
++#include <wtf/RunLoop.h>
++
++namespace WebKit {
++namespace ProcessDiagnosticsHaiku {
++
++namespace {
++
++constexpr const char* portName = "WebKit diagnostics";
++constexpr int32 requestCode = 'wdrq';
++constexpr int32 chunkCode = 'wdrc';
++constexpr int32 endCode = 'wdre';
++constexpr size_t chunkSize = 64 * 1024;
++
++struct Provider {
++    std::string name;
++    bool mainThread { false };
++    Function<Ref<JSON::Object>()> function;
++};
++
++std::mutex providersLock;
++std::vector<std::unique_ptr<Provider>> topics;
++std::vector<std::unique_ptr<Provider>> actions;
++std::string processRole;
++std::atomic<bool> started { false };
++
++std::string jsonText(Ref<JSON::Object>&& object)
++{
++    auto text = object->toJSONString().utf8();
++    return std::string(text.legacyCStringPointer(), text.length());
++}
++
++std::string jsonQuoted(const std::string& text)
++{
++    auto value = JSON::Value::create(String::fromUTF8(text.c_str()));
++    auto json = value->toJSONString().utf8();
++    return std::string(json.legacyCStringPointer(), json.length());
++}
++
++// What the main thread collected for one request. The requesting thread may
++// give up before the main thread gets to it; then the results are dropped.
++struct Collection {
++    std::mutex lock;
++    std::condition_variable condition;
++    bool done { false };
++    bool abandoned { false };
++    bigtime_t queuedAt { 0 };
++    bigtime_t startedAt { 0 };
++    bigtime_t finishedAt { 0 };
++    std::vector<std::pair<std::string, std::string>> results;
++};
++
++Ref<JSON::Object> processReport()
++{
++    auto report = JSON::Object::create();
++    report->setInteger("team"_s, getpid());
++    report->setString("role"_s, String::fromUTF8(processRole.c_str()));
++    team_info team;
++    if (get_team_info(B_CURRENT_TEAM, &team) == B_OK) {
++        report->setInteger("threads"_s, team.thread_count);
++        report->setDouble("uptimeSeconds"_s, (system_time() - team.start_time) / 1e6);
++    }
++    uint64 resident = 0, reserved = 0;
++    int areas = 0;
++    ssize_t cookie = 0;
++    area_info area;
++    while (get_next_area_info(B_CURRENT_TEAM, &cookie, &area) == B_OK) {
++        resident += area.ram_size;
++        reserved += area.size;
++        ++areas;
++    }
++    report->setInteger("areas"_s, areas);
++    report->setDouble("residentMiB"_s, resident / 1048576.0);
++    report->setDouble("reservedMiB"_s, reserved / 1048576.0);
++    return report;
++}
++
++std::vector<std::string> requestedTopics(const RefPtr<JSON::Object>& request)
++{
++    std::vector<std::string> names;
++    String list;
++    if (request && request->getString("topics"_s, list)) {
++        auto text = list.utf8();
++        std::string all(text.legacyCStringPointer(), text.length());
++        size_t start = 0;
++        while (start <= all.size()) {
++            size_t comma = all.find(',', start);
++            if (comma == std::string::npos)
++                comma = all.size();
++            std::string name = all.substr(start, comma - start);
++            name.erase(0, name.find_first_not_of(' '));
++            name.erase(name.find_last_not_of(' ') + 1);
++            if (!name.empty())
++                names.push_back(name);
++            start = comma + 1;
++        }
++    }
++    if (names.empty() || std::find(names.begin(), names.end(), "all") != names.end()) {
++        names.clear();
++        std::lock_guard guard(providersLock);
++        for (auto& topic : topics)
++            names.push_back(topic->name);
++    }
++    return names;
++}
++
++std::string handle(const std::string& requestText)
++{
++    auto parsed = JSON::Value::parseJSON(String::fromUTF8(requestText.c_str()));
++    RefPtr<JSON::Object> request = parsed ? parsed->asObject() : nullptr;
++    int timeoutMs = 2000;
++    if (request) {
++        if (auto value = request->getInteger("timeoutMs"_s))
++            timeoutMs = std::clamp(*value, 50, 120000);
++    }
++    String actionName;
++    const bool isAction = request && request->getString("action"_s, actionName);
++
++    std::vector<std::pair<std::string, std::string>> parts;
++    parts.emplace_back("process", jsonText(processReport()));
++
++    std::vector<Provider*> mainThreadProviders;
++    std::string unknown;
++    if (isAction) {
++        auto name = actionName.utf8();
++        std::lock_guard guard(providersLock);
++        for (auto& action : actions) {
++            if (action->name == name.legacyCStringPointer())
++                mainThreadProviders.push_back(action.get());
++        }
++        if (mainThreadProviders.empty())
++            unknown = name.legacyCStringPointer();
++        if (timeoutMs == 2000)
++            timeoutMs = 30000;
++    } else {
++        for (auto& name : requestedTopics(request)) {
++            Provider* provider = nullptr;
++            {
++                std::lock_guard guard(providersLock);
++                for (auto& topic : topics) {
++                    if (topic->name == name)
++                        provider = topic.get();
++                }
++            }
++            if (!provider) {
++                unknown += (unknown.empty() ? "" : ",") + name;
++                continue;
++            }
++            if (provider->mainThread)
++                mainThreadProviders.push_back(provider);
++            else
++                parts.emplace_back(provider->name, jsonText(provider->function()));
++        }
++    }
++
++    if (!mainThreadProviders.empty()) {
++        auto collection = std::make_shared<Collection>();
++        collection->queuedAt = system_time();
++        RunLoop::mainSingleton().dispatch([collection, mainThreadProviders] {
++            {
++                std::lock_guard guard(collection->lock);
++                if (collection->abandoned)
++                    return;
++                collection->startedAt = system_time();
++            }
++            std::vector<std::pair<std::string, std::string>> results;
++            for (auto* provider : mainThreadProviders)
++                results.emplace_back(provider->name, jsonText(provider->function()));
++            std::lock_guard guard(collection->lock);
++            if (collection->abandoned)
++                return;
++            collection->results = std::move(results);
++            collection->finishedAt = system_time();
++            collection->done = true;
++            collection->condition.notify_all();
++        });
++        std::unique_lock guard(collection->lock);
++        collection->condition.wait_for(guard, std::chrono::milliseconds(timeoutMs), [&] { return collection->done; });
++        std::string mainThread;
++        if (collection->done) {
++            for (auto& result : collection->results)
++                parts.push_back(result);
++            char text[160];
++            snprintf(text, sizeof(text), "{\"responsive\":true,\"queueDelayMs\":%.1f,\"collectMs\":%.1f}",
++                (collection->startedAt - collection->queuedAt) / 1000.0, (collection->finishedAt - collection->startedAt) / 1000.0);
++            mainThread = text;
++        } else {
++            collection->abandoned = true;
++            char text[200];
++            snprintf(text, sizeof(text), "{\"responsive\":false,\"note\":\"the main thread did not run the request within %d ms%s\"}",
++                timeoutMs, collection->startedAt ? " (it started, so it is slow rather than stuck)" : " (busy or hung)");
++            mainThread = text;
++        }
++        parts.emplace_back("mainThread", mainThread);
++    }
++    if (!unknown.empty())
++        parts.emplace_back("unknown", jsonQuoted(unknown));
++
++    std::string answer = "{";
++    for (size_t i = 0; i < parts.size(); ++i) {
++        if (i)
++            answer += ',';
++        answer += jsonQuoted(parts[i].first) + ":" + parts[i].second;
++    }
++    answer += "}";
++    return answer;
++}
++
++status_t serve(void*)
++{
++    const port_id port = create_port(8, portName);
++    if (port < 0)
++        return port;
++    std::vector<char> buffer;
++    while (true) {
++        const ssize_t size = port_buffer_size(port);
++        if (size == B_INTERRUPTED)
++            continue;
++        if (size < 0)
++            break;
++        buffer.resize(std::max<ssize_t>(size, 1));
++        int32 code = 0;
++        const ssize_t got = read_port(port, &code, buffer.data(), buffer.size());
++        if (got < 0) {
++            if (got == B_INTERRUPTED)
++                continue;
++            break;
++        }
++        if (code != requestCode || got < static_cast<ssize_t>(sizeof(port_id)))
++            continue;
++        port_id reply;
++        memcpy(&reply, buffer.data(), sizeof(reply));
++        std::string request(buffer.data() + sizeof(reply), got - sizeof(reply));
++        const std::string answer = handle(request);
++        size_t offset = 0;
++        do {
++            const size_t length = std::min(chunkSize, answer.size() - offset);
++            const bool last = offset + length >= answer.size();
++            if (write_port_etc(reply, last ? endCode : chunkCode, answer.data() + offset, length, B_RELATIVE_TIMEOUT, 2000000) != B_OK)
++                break;
++            offset += length;
++        } while (offset < answer.size());
++    }
++    return B_OK;
++}
++
++// The compositors' counters.
++struct FrameRecord {
++    bigtime_t started { 0 };
++    bigtime_t duration { 0 };
++    bool scrolling { false };
++};
++std::mutex compositorLock;
++std::string glRenderer, glVendor, glVersion;
++std::atomic<int> compositors { 0 };
++std::atomic<uint64_t> framesTotal { 0 };
++std::atomic<uint64_t> framesScrolling { 0 };
++std::atomic<uint64_t> renderMicrosTotal { 0 };
++FrameRecord recentFrames[240];
++
++} // namespace
++
++void start(const char* role)
++{
++    if (started.exchange(true))
++        return;
++    processRole = role;
++    const thread_id thread = spawn_thread(serve, "WebKit diagnostics", B_NORMAL_PRIORITY, nullptr);
++    if (thread >= 0)
++        resume_thread(thread);
++}
++
++void addTopic(const char* name, bool mainThread, Function<Ref<JSON::Object>()>&& function)
++{
++    std::lock_guard guard(providersLock);
++    topics.push_back(std::make_unique<Provider>(Provider { name, mainThread, WTF::move(function) }));
++}
++
++void addAction(const char* name, Function<Ref<JSON::Object>()>&& function)
++{
++    std::lock_guard guard(providersLock);
++    actions.push_back(std::make_unique<Provider>(Provider { name, true, WTF::move(function) }));
++}
++
++String request(team_id team, const String& requestJSON, Seconds timeout)
++{
++    port_id target = -1;
++    int32 cookie = 0;
++    port_info info;
++    while (get_next_port_info(team, &cookie, &info) == B_OK) {
++        if (!strcmp(info.name, portName)) {
++            target = info.port;
++            break;
++        }
++    }
++    if (target < 0)
++        return { };
++    const port_id reply = create_port(4, "WebKit diagnostics reply");
++    if (reply < 0)
++        return { };
++    const bigtime_t deadline = system_time() + static_cast<bigtime_t>(timeout.microseconds());
++    auto text = requestJSON.utf8();
++    std::vector<char> message(sizeof(port_id) + text.length());
++    memcpy(message.data(), &reply, sizeof(reply));
++    memcpy(message.data() + sizeof(reply), text.legacyCStringPointer(), text.length());
++    std::string answer;
++    bool complete = false;
++    if (write_port_etc(target, requestCode, message.data(), message.size(), B_ABSOLUTE_TIMEOUT, deadline) == B_OK) {
++        std::vector<char> buffer;
++        while (true) {
++            const ssize_t size = port_buffer_size_etc(reply, B_ABSOLUTE_TIMEOUT, deadline);
++            if (size == B_INTERRUPTED)
++                continue;
++            if (size < 0)
++                break;
++            buffer.resize(std::max<ssize_t>(size, 1));
++            int32 code = 0;
++            const ssize_t got = read_port_etc(reply, &code, buffer.data(), buffer.size(), B_ABSOLUTE_TIMEOUT, deadline);
++            if (got < 0)
++                break;
++            answer.append(buffer.data(), got);
++            if (code == endCode) {
++                complete = true;
++                break;
++            }
++        }
++    }
++    delete_port(reply);
++    if (!complete)
++        return { };
++    return String::fromUTF8(answer.c_str());
++}
++
++void setGLStrings(const char* renderer, const char* vendor, const char* version)
++{
++    std::lock_guard guard(compositorLock);
++    glRenderer = renderer ? renderer : "";
++    glVendor = vendor ? vendor : "";
++    glVersion = version ? version : "";
++}
++
++void compositorCreated()
++{
++    ++compositors;
++}
++
++void compositorDestroyed()
++{
++    --compositors;
++}
++
++void frameRendered(bigtime_t started, bigtime_t duration, bool scrolling)
++{
++    const uint64_t index = framesTotal++;
++    renderMicrosTotal += duration;
++    if (scrolling)
++        ++framesScrolling;
++    std::lock_guard guard(compositorLock);
++    recentFrames[index % std::size(recentFrames)] = { started, duration, scrolling };
++}
++
++Ref<JSON::Object> compositorReport()
++{
++    auto report = JSON::Object::create();
++    std::vector<FrameRecord> frames;
++    {
++        std::lock_guard guard(compositorLock);
++        report->setString("glRenderer"_s, String::fromUTF8(glRenderer.c_str()));
++        report->setString("glVendor"_s, String::fromUTF8(glVendor.c_str()));
++        report->setString("glVersion"_s, String::fromUTF8(glVersion.c_str()));
++        for (auto& frame : recentFrames) {
++            if (frame.started)
++                frames.push_back(frame);
++        }
++    }
++    report->setInteger("compositors"_s, compositors.load());
++    report->setDouble("framesRendered"_s, static_cast<double>(framesTotal.load()));
++    report->setDouble("framesForScrolling"_s, static_cast<double>(framesScrolling.load()));
++    report->setDouble("renderSecondsTotal"_s, renderMicrosTotal.load() / 1e6);
++    if (frames.empty())
++        return report;
++    std::sort(frames.begin(), frames.end(), [](auto& a, auto& b) { return a.started < b.started; });
++    const bigtime_t now = system_time();
++    report->setDouble("lastFrameAgoMs"_s, (now - frames.back().started) / 1000.0);
++    unsigned lastSecond = 0, lastFive = 0;
++    std::vector<bigtime_t> durations;
++    for (auto& frame : frames) {
++        if (now - frame.started <= 1000000)
++            ++lastSecond;
++        if (now - frame.started <= 5000000)
++            ++lastFive;
++        durations.push_back(frame.duration);
++    }
++    std::sort(durations.begin(), durations.end());
++    report->setInteger("framesLastSecond"_s, lastSecond);
++    report->setDouble("framesPerSecondLast5s"_s, lastFive / 5.0);
++    auto recent = JSON::Object::create();
++    recent->setInteger("frames"_s, static_cast<int>(durations.size()));
++    recent->setDouble("medianMs"_s, durations[durations.size() / 2] / 1000.0);
++    recent->setDouble("p95Ms"_s, durations[std::min(durations.size() - 1, durations.size() * 95 / 100)] / 1000.0);
++    recent->setDouble("longestMs"_s, durations.back() / 1000.0);
++    report->setObject("recentRenderTimes"_s, WTF::move(recent));
++    return report;
++}
++
++} // namespace ProcessDiagnosticsHaiku
++} // namespace WebKit
+diff --git a/Source/WebKit/Shared/haiku/ProcessDiagnosticsHaiku.h b/Source/WebKit/Shared/haiku/ProcessDiagnosticsHaiku.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..f026541e427b8a2e3444783ec5428c67f0e23fb8
+--- /dev/null
++++ b/Source/WebKit/Shared/haiku/ProcessDiagnosticsHaiku.h
+@@ -0,0 +1,44 @@
++/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
++
++#pragma once
++
++#include <OS.h>
++#include <wtf/Function.h>
++#include <wtf/JSONValues.h>
++#include <wtf/Seconds.h>
++#include <wtf/text/WTFString.h>
++
++namespace WebKit {
++
++// What an engine process tells the browser's debugging tools about itself
++// (BWebKitProcessDiagnostics, WebKitDiagnostics.h). A thread of the process
++// waits on a port named "WebKit diagnostics" for a request, a JSON object:
++//   {"topics": "pages,memory,media,graphics,network" or "all", "timeoutMs": 2000}
++//   {"action": "gc" | "release-memory"}
++// Topics that only the main thread can read are collected there, within the
++// time limit; a main thread that does not get to it in time is reported as
++// "unresponsive" and the answer carries what other threads can read. The
++// thread costs nothing while nobody asks.
++namespace ProcessDiagnosticsHaiku {
++
++// Starts the port's thread once; role is "web" or "network".
++void start(const char* role);
++// A topic's provider: on the main run loop when mainThread, else on the
++// diagnostics thread (thread-safe reads only).
++void addTopic(const char* name, bool mainThread, Function<Ref<JSON::Object>()>&&);
++// An action, run on the main run loop.
++void addAction(const char* name, Function<Ref<JSON::Object>()>&&);
++// Asks the process team, waiting at most timeout. A null string: no answer.
++String request(team_id, const String& requestJSON, Seconds timeout);
++
++// The compositors of this process (ThreadedCompositor.cpp reports to it).
++// Any thread.
++void setGLStrings(const char* renderer, const char* vendor, const char* version);
++void compositorCreated();
++void compositorDestroyed();
++void frameRendered(bigtime_t started, bigtime_t duration, bool scrolling);
++Ref<JSON::Object> compositorReport();
++
++} // namespace ProcessDiagnosticsHaiku
++
++} // namespace WebKit
 diff --git a/Source/WebKit/Shared/haiku/ProcessExecutablePathHaiku.cpp b/Source/WebKit/Shared/haiku/ProcessExecutablePathHaiku.cpp
 new file mode 100644
 index 0000000000000000000000000000000000000000..7b3fb7cba806ac1a7415813534d8d12f5c3f5ffb
@@ -76670,6 +77332,274 @@ index 0000000000000000000000000000000000000000..5691b130cd6f3f0cf5e28bf15063d2e0
 +    status_t m_status { B_NO_INIT };
 +    const bool m_private;
 +};
+diff --git a/Source/WebKit/UIProcess/API/haiku/WebKitDiagnostics.cpp b/Source/WebKit/UIProcess/API/haiku/WebKitDiagnostics.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..4155355766961a58d7b6f419c51813602414926c
+--- /dev/null
++++ b/Source/WebKit/UIProcess/API/haiku/WebKitDiagnostics.cpp
+@@ -0,0 +1,222 @@
++/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
++
++#include "config.h"
++#include "WebKitDiagnostics.h"
++
++#include "DirectPresentTargetHaiku.h"
++#include "NetworkProcessProxy.h"
++#include "PageLoadState.h"
++#include "ProcessDiagnosticsHaiku.h"
++#include "WebKitView.h"
++#include "WebPageProxy.h"
++#include "WebProcessProxy.h"
++#include "WebViewPrivate.h"
++#include "WebViewStateHaiku.h"
++#include <Bitmap.h>
++#include <condition_variable>
++#include <cstdlib>
++#include <memory>
++#include <mutex>
++#include <wtf/JSONValues.h>
++#include <wtf/RunLoop.h>
++
++using namespace WebKit;
++
++namespace {
++
++std::string utf8(const String& text)
++{
++    auto data = text.utf8();
++    return std::string(data.legacyCStringPointer(), data.length());
++}
++
++// Runs function on WebKit's main thread and waits at most timeout for its
++// JSON text. The waiting side may give up; the main thread then drops it.
++struct MainThreadResult {
++    std::mutex lock;
++    std::condition_variable condition;
++    bool done { false };
++    bool abandoned { false };
++    std::string text;
++    bigtime_t queuedAt { 0 };
++    bigtime_t startedAt { 0 };
++};
++
++std::string onMainThread(Function<Ref<JSON::Object>()>&& function, bigtime_t timeout, bool& responsive, double& queueDelayMs)
++{
++    if (RunLoop::isMain()) {
++        responsive = true;
++        queueDelayMs = 0;
++        return utf8(function()->toJSONString());
++    }
++    auto result = std::make_shared<MainThreadResult>();
++    result->queuedAt = system_time();
++    RunLoop::mainSingleton().dispatch([result, function = WTF::move(function)]() mutable {
++        {
++            std::lock_guard guard(result->lock);
++            if (result->abandoned)
++                return;
++            result->startedAt = system_time();
++        }
++        auto text = utf8(function()->toJSONString());
++        std::lock_guard guard(result->lock);
++        if (result->abandoned)
++            return;
++        result->text = WTF::move(text);
++        result->done = true;
++        result->condition.notify_all();
++    });
++    std::unique_lock guard(result->lock);
++    result->condition.wait_for(guard, std::chrono::microseconds(timeout), [&] { return result->done; });
++    responsive = result->done;
++    queueDelayMs = result->startedAt ? (result->startedAt - result->queuedAt) / 1000.0 : -1;
++    if (!result->done) {
++        result->abandoned = true;
++        return { };
++    }
++    return result->text;
++}
++
++std::string mainThreadNote(bool responsive, double queueDelayMs, bigtime_t timeout)
++{
++    char text[200];
++    if (responsive)
++        snprintf(text, sizeof(text), "{\"responsive\":true,\"queueDelayMs\":%.1f}", queueDelayMs);
++    else
++        snprintf(text, sizeof(text), "{\"responsive\":false,\"note\":\"WebKit's main thread did not answer within %lld ms\"}",
++            static_cast<long long>(timeout / 1000));
++    return text;
++}
++
++Ref<JSON::Object> processesReport()
++{
++    auto report = JSON::Object::create();
++    auto processes = JSON::Array::create();
++    for (auto& process : WebProcessProxy::allProcesses()) {
++        auto entry = JSON::Object::create();
++        entry->setInteger("team"_s, process->processID());
++        entry->setBoolean("launching"_s, process->isLaunching());
++        entry->setBoolean("prewarmed"_s, process->isPrewarmed());
++        entry->setBoolean("responsive"_s, process->responsivenessTimer().isResponsive());
++        entry->setBoolean("serviceWorkers"_s, process->isRunningServiceWorkers());
++        auto pages = JSON::Array::create();
++        for (auto& page : process->pages()) {
++            auto item = JSON::Object::create();
++            item->setDouble("pageIdentifier"_s, page->webPageIDInMainFrameProcess().toUInt64());
++            item->setDouble("webPageProxyIdentifier"_s, page->identifier().toUInt64());
++            item->setString("url"_s, page->currentURL());
++            item->setBoolean("closed"_s, page->isClosed());
++            pages->pushObject(WTF::move(item));
++        }
++        entry->setArray("pages"_s, WTF::move(pages));
++        processes->pushObject(WTF::move(entry));
++    }
++    report->setArray("webProcesses"_s, WTF::move(processes));
++    auto networks = JSON::Array::create();
++    for (auto& network : NetworkProcessProxy::allNetworkProcesses()) {
++        auto entry = JSON::Object::create();
++        entry->setInteger("team"_s, network->processID());
++        entry->setBoolean("launching"_s, network->isLaunching());
++        networks->pushObject(WTF::move(entry));
++    }
++    report->setArray("networkProcesses"_s, WTF::move(networks));
++    return report;
++}
++
++} // namespace
++
++std::string BWebKitDiagnostics(bigtime_t timeout)
++{
++    bool responsive = false;
++    double queueDelayMs = -1;
++    std::string processes = onMainThread([] { return processesReport(); }, timeout, responsive, queueDelayMs);
++    auto local = JSON::Object::create();
++    local->setDouble("displayScale"_s, displayScaleFactorHaiku());
++    const char* pressure = getenv("SUMMIT_MEMORY_PRESSURE_PERCENT");
++    local->setInteger("memoryPressurePercent"_s, pressure ? atoi(pressure) : 90);
++    local->setBoolean("memoryPressureMonitor"_s, !getenv("WEBKIT_DISABLE_MEMORY_PRESSURE_MONITOR"));
++    std::string answer = "{\"engine\":" + utf8(local->toJSONString());
++    if (responsive)
++        answer += ",\"processes\":" + processes;
++    answer += ",\"mainThread\":" + mainThreadNote(responsive, queueDelayMs, timeout) + "}";
++    return answer;
++}
++
++std::string BWebKitProcessDiagnostics(team_id team, const char* request, bigtime_t timeout)
++{
++    return utf8(ProcessDiagnosticsHaiku::request(team, String::fromUTF8(request ? request : "{}"), Seconds::fromMicroseconds(timeout)));
++}
++
++std::string BWebKitView::Diagnostics(bigtime_t timeout) const
++{
++    auto state = m_state;
++    auto local = JSON::Object::create();
++    {
++        std::lock_guard guard(state->mutex);
++        auto& geometry = state->geometry;
++        local->setInteger("width"_s, geometry.size.width());
++        local->setInteger("height"_s, geometry.size.height());
++        local->setInteger("screenX"_s, geometry.screenOrigin.x());
++        local->setInteger("screenY"_s, geometry.screenOrigin.y());
++        local->setDouble("scale"_s, geometry.scale);
++        local->setBoolean("attached"_s, geometry.attached);
++        local->setBoolean("visible"_s, geometry.visible);
++        local->setBoolean("focused"_s, geometry.focused);
++        local->setBoolean("active"_s, geometry.active);
++        local->setBoolean("directTarget"_s, state->directTarget && state->directTarget->enabled());
++    }
++    local->setBoolean("presentedDirectly"_s, state->presentedDirectly.load());
++    local->setDouble("directFrames"_s, state->directFrames.load());
++    local->setBoolean("closed"_s, state->closed.load());
++    if (auto frame = state->presenter.snapshot()) {
++        auto last = JSON::Object::create();
++        last->setDouble("identifier"_s, frame->identifier);
++        last->setInteger("viewWidth"_s, frame->viewSize.width());
++        last->setInteger("viewHeight"_s, frame->viewSize.height());
++        last->setDouble("scale"_s, frame->scale);
++        if (frame->image) {
++            last->setInteger("pixelWidth"_s, frame->image->Bounds().IntegerWidth() + 1);
++            last->setInteger("pixelHeight"_s, frame->image->Bounds().IntegerHeight() + 1);
++        }
++        local->setObject("lastFrame"_s, WTF::move(last));
++    }
++    bool responsive = false;
++    double queueDelayMs = -1;
++    std::string page = onMainThread([state] {
++        auto report = JSON::Object::create();
++        RefPtr client = state->client;
++        RefPtr page = client ? client->page() : nullptr;
++        if (!page) {
++            report->setBoolean("page"_s, false);
++            return report;
++        }
++        report->setInteger("webProcess"_s, page->legacyMainFrameProcess().processID());
++        report->setBoolean("webProcessResponsive"_s, page->legacyMainFrameProcess().responsivenessTimer().isResponsive());
++        report->setDouble("pageIdentifier"_s, page->webPageIDInMainFrameProcess().toUInt64());
++        report->setDouble("webPageProxyIdentifier"_s, page->identifier().toUInt64());
++        report->setString("url"_s, page->currentURL());
++        report->setDouble("pageZoom"_s, page->pageZoomFactor());
++        report->setBoolean("closed"_s, page->isClosed());
++        report->setBoolean("loading"_s, page->pageLoadState().isLoading());
++        report->setString("loadOutcome"_s, String::fromLatin1(state->load.outcome));
++        return report;
++    }, timeout, responsive, queueDelayMs);
++    std::string answer = "{\"view\":" + utf8(local->toJSONString());
++    if (responsive)
++        answer += ",\"page\":" + page;
++    answer += ",\"mainThread\":" + mainThreadNote(responsive, queueDelayMs, timeout) + "}";
++    return answer;
++}
++
++BBitmap* BWebKitView::CopyPresentedFrame() const
++{
++    auto frame = m_state->presenter.snapshot();
++    if (!frame || !frame->image)
++        return nullptr;
++    auto* copy = new BBitmap(frame->image.get());
++    if (copy->InitCheck() != B_OK) {
++        delete copy;
++        return nullptr;
++    }
++    return copy;
++}
+diff --git a/Source/WebKit/UIProcess/API/haiku/WebKitDiagnostics.h b/Source/WebKit/UIProcess/API/haiku/WebKitDiagnostics.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..a01adc63a79750299cb52a405f82e7e4ef79c1cc
+--- /dev/null
++++ b/Source/WebKit/UIProcess/API/haiku/WebKitDiagnostics.h
+@@ -0,0 +1,34 @@
++/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
++
++#pragma once
++
++#include "WKBase.h"
++#include <OS.h>
++#include <string>
++
++// Engine internals for a host's debugging tools (Summit's MCP server), as
++// JSON text in UTF-8. Views add their own presentation state with
++// BWebKitView::Diagnostics() and their last frame with CopyPresentedFrame().
++
++// This process's side of the engine: its web and network processes (team,
++// pages with their address and identifiers, whether the process answers),
++// the display scale and the memory pressure monitor. WebKit's main thread
++// collects it; when that thread does not within timeout the report says so
++// ("mainThread": {"responsive": false}) with what other threads can read.
++// Any thread.
++WK_EXPORT std::string BWebKitDiagnostics(bigtime_t timeout = 2000000);
++
++// A report from one of the engine's processes (a web or network process, by
++// team). request is a JSON object:
++//   {"topics": "pages,memory,media,graphics,compositor,network" or "all"}
++//       pages: addresses, identifiers, visibility, rendering updates;
++//       memory: JavaScript heap, JIT, memory cache, fonts, pressure;
++//       media: every media element with its player (decoder, frames);
++//       graphics/compositor: GL renderer, frames rendered and their times;
++//       network: the transfers of the network process's workers.
++//   {"action": "gc"} or {"action": "release-memory"}
++// plus "timeoutMs", how long its main thread is given. A thread of that
++// process answers, so the report comes back while its main thread is stuck,
++// saying so. Any thread; waits at most timeout. An empty string: no answer
++// (not an engine process, or one without diagnostics).
++WK_EXPORT std::string BWebKitProcessDiagnostics(team_id, const char* request, bigtime_t timeout = 5000000);
 diff --git a/Source/WebKit/UIProcess/API/haiku/WebKitEmbedding.h b/Source/WebKit/UIProcess/API/haiku/WebKitEmbedding.h
 new file mode 100644
 index 0000000000000000000000000000000000000000..8cde8df9b748e85e2a21e2482d54bc95a41bcbb7
@@ -78207,10 +79137,10 @@ index 0000000000000000000000000000000000000000..9631bd827675ab531436c95f66f77b2b
 +}
 diff --git a/Source/WebKit/UIProcess/API/haiku/WebKitView.h b/Source/WebKit/UIProcess/API/haiku/WebKitView.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..0aaadc3be2b0dbf9a3a48f5fcad36e4f6bf12908
+index 0000000000000000000000000000000000000000..2fbc501e6c58f7054cdcdfbeaf77196b075ad79e
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/API/haiku/WebKitView.h
-@@ -0,0 +1,239 @@
+@@ -0,0 +1,253 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#pragma once
@@ -78222,9 +79152,11 @@ index 0000000000000000000000000000000000000000..0aaadc3be2b0dbf9a3a48f5fcad36e4f
 +#include <Messenger.h>
 +#include <View.h>
 +#include <memory>
++#include <string>
 +#include <vector>
 +
 +namespace WebKit { struct WebViewStateHaiku; class JavaScriptDialogHostHaiku; class ExtensionActionPopupHaiku; }
++class BBitmap;
 +class BCursor;
 +class BWebKitInspectorSession;
 +
@@ -78416,6 +79348,18 @@ index 0000000000000000000000000000000000000000..0aaadc3be2b0dbf9a3a48f5fcad36e4f
 +    // once nothing more lands where the window no longer is. A null info, or
 +    // a window that is not told the screen's density, presents as before.
 +    static void WindowDirectConnected(BWindow* window, const direct_buffer_info* info);
++
++    // For a host's debugging tools (WebKitDiagnostics.h): how the view
++    // presents its page, as JSON: size, screen origin and scale, visibility,
++    // whether frames go straight into the screen, the last frame (identifier,
++    // size in device pixels), the page's web process, identifiers, address
++    // and load state. Any thread; WebKit's main thread is given at most
++    // timeout for its part, and the report says when it did not answer.
++    std::string Diagnostics(bigtime_t timeout = 2000000) const;
++    // A copy of the last frame presented to the view (what Draw() shows, in
++    // device pixels), or null. Frames put straight into the screen are not
++    // kept. The caller owns the bitmap. Any thread.
++    BBitmap* CopyPresentedFrame() const;
 +
 +    void AttachedToWindow() override;
 +    void DetachedFromWindow() override;
@@ -108018,10 +108962,10 @@ index 0000000000000000000000000000000000000000..c9a119d02f85b7c5ad8fe9153bfc9604
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/WebView.cpp b/Source/WebKit/UIProcess/haiku/WebView.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..0b32aa2e643f59d503a8523e64bae3fda3f36d2b
+index 0000000000000000000000000000000000000000..e5d0abaa8c0f9fc9fa04b40e4c3bb6d35e292ba6
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/WebView.cpp
-@@ -0,0 +1,2479 @@
+@@ -0,0 +1,2483 @@
 +/*
 + * Copyright (C) 2013 Intel Corporation. All rights reserved.
 + *
@@ -109706,6 +110650,10 @@ index 0000000000000000000000000000000000000000..0b32aa2e643f59d503a8523e64bae3fd
 +    message.AddUInt64("loadSuccessSequence", load.successSequence);
 +    message.AddString("loadSuccessURL", load.successURL.utf8().legacyCStringPointer());
 +    message.AddString("loadSuccessTitle", load.successTitle.utf8().legacyCStringPointer());
++    // Which web process shows the page, and the page's identifier there,
++    // for the host's debugging tools (BWebKitProcessDiagnostics).
++    message.AddInt32("processID", m_page->legacyMainFrameProcess().processID());
++    message.AddUInt64("pageIdentifier", m_page->webPageIDInMainFrameProcess().toUInt64());
 +    {
 +        std::lock_guard guard(m_state->mutex);
 +        message.AddMessenger("view", m_state->view);
@@ -133817,21 +134765,22 @@ index 57163f65873e5a481e5ef5a4ec3beec4b40b7cea..61b49ac7c362b416cdec1d10c44304d2
      bool m_compositionRequired { false };
  #if ENABLE(SCROLLING_THREAD)
 diff --git a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/ThreadedCompositor.cpp b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/ThreadedCompositor.cpp
-index c238029ad9c99c5028ea7e456520af85d1d85532..3db07253bf4bd5da5895585bd1c7d6239b4f86a7 100644
+index c238029ad9c99c5028ea7e456520af85d1d85532..6db9e13679baf9ae5239de15477f37469a06a6a5 100644
 --- a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/ThreadedCompositor.cpp
 +++ b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/ThreadedCompositor.cpp
-@@ -26,6 +26,10 @@
+@@ -26,6 +26,11 @@
  #include "config.h"
  #include "ThreadedCompositor.h"
  
 +#if PLATFORM(HAIKU)
++#include "ProcessDiagnosticsHaiku.h"
 +#include "StartupTraceHaiku.h"
 +#endif
 +
  #if USE(COORDINATED_GRAPHICS)
  #include "AcceleratedSurface.h"
  #include "CoordinatedSceneState.h"
-@@ -33,6 +37,8 @@
+@@ -33,6 +38,8 @@
  #include "RenderProcessInfo.h"
  #include "WebPage.h"
  #include "WebProcess.h"
@@ -133840,7 +134789,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..3db07253bf4bd5da5895585bd1c7d623
  #include <WebCore/CoordinatedPlatformLayer.h>
  #include <WebCore/Damage.h>
  #include <WebCore/FontCache.h>
-@@ -51,8 +57,18 @@ WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_END
+@@ -51,8 +58,18 @@ WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_END
  #include <wtf/SetForScope.h>
  #include <wtf/SystemTracing.h>
  #include <wtf/TZoneMallocInlines.h>
@@ -133859,7 +134808,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..3db07253bf4bd5da5895585bd1c7d623
  #if USE(GLIB_EVENT_LOOP)
  #include <wtf/glib/RunLoopSourcePriority.h>
  #endif
-@@ -68,18 +84,40 @@ WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_END
+@@ -68,18 +85,40 @@ WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_END
  #include <GLES2/gl2.h>
  #endif
  
@@ -133900,11 +134849,12 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..3db07253bf4bd5da5895585bd1c7d623
      , m_layerTreeHost(&layerTreeHost)
      , m_surface(AcceleratedSurface::create(webPage, [this] { frameComplete(); }, AcceleratedSurface::RenderingPurpose::Composited))
      , m_sceneState(&sceneState)
-@@ -90,6 +128,18 @@ ThreadedCompositor::ThreadedCompositor(WebPage& webPage, LayerTreeHost& layerTre
+@@ -90,6 +129,19 @@ ThreadedCompositor::ThreadedCompositor(WebPage& webPage, LayerTreeHost& layerTre
  {
      ASSERT(RunLoop::isMain());
  
 +#if PLATFORM(HAIKU)
++    ProcessDiagnosticsHaiku::compositorCreated();
 +    unsigned framesPerSecond = webPage.corePage()->displayNominalFramesPerSecond().value_or(60);
 +    if (const char* value = getenv("SUMMIT_COMPOSITOR_MAX_FPS")) {
 +        if (auto override = parseInteger<unsigned>(StringView::fromLatin1(value)); override && (!*override || (*override >= 30 && *override <= 240)))
@@ -133919,17 +134869,19 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..3db07253bf4bd5da5895585bd1c7d623
      lazyInitialize(m_didCompositeRunLoopObserver, makeUnique<RunLoopObserver>(RunLoopObserver::WellKnownOrder::GraphicsCommit, [this] {
          this->didCompositeRunLoopObserverFired();
      }));
-@@ -127,6 +177,9 @@ ThreadedCompositor::ThreadedCompositor(WebPage& webPage, LayerTreeHost& layerTre
+@@ -127,6 +179,11 @@ ThreadedCompositor::ThreadedCompositor(WebPage& webPage, LayerTreeHost& layerTre
          }
  
          glGetIntegerv(GL_MAX_TEXTURE_SIZE, &m_maxTextureSize);
 +#if PLATFORM(HAIKU)
 +        SUMMIT_STARTUP_TRACE("compositor GL context ready");
++        ProcessDiagnosticsHaiku::setGLStrings(reinterpret_cast<const char*>(glGetString(GL_RENDERER)),
++            reinterpret_cast<const char*>(glGetString(GL_VENDOR)), reinterpret_cast<const char*>(glGetString(GL_VERSION)));
 +#endif
  
  #if USE(TEXTURE_MAPPER)
          m_context = WTF::move(context);
-@@ -136,8 +189,62 @@ ThreadedCompositor::ThreadedCompositor(WebPage& webPage, LayerTreeHost& layerTre
+@@ -136,9 +193,70 @@ ThreadedCompositor::ThreadedCompositor(WebPage& webPage, LayerTreeHost& layerTre
          m_threadSafeGrContext = PlatformDisplay::sharedDisplay().skiaGrContext()->threadSafeProxy();
  #endif
      });
@@ -133989,10 +134941,18 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..3db07253bf4bd5da5895585bd1c7d623
 +}
 +#endif
 +
++#if PLATFORM(HAIKU)
++ThreadedCompositor::~ThreadedCompositor()
++{
++    ProcessDiagnosticsHaiku::compositorDestroyed();
++}
++#else
  ThreadedCompositor::~ThreadedCompositor() = default;
++#endif
  
  uint64_t ThreadedCompositor::surfaceID() const
-@@ -216,8 +323,23 @@ void ThreadedCompositor::updateRenderTimer()
+ {
+@@ -216,8 +334,23 @@ void ThreadedCompositor::updateRenderTimer()
      }
  
      if (m_state.isRenderTimerActive) {
@@ -134018,7 +134978,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..3db07253bf4bd5da5895585bd1c7d623
      } else
          m_renderTimer.stop();
  }
-@@ -364,6 +486,10 @@ TargetContents ThreadedCompositor::paintToCurrentGLContext(const TransformationM
+@@ -364,6 +497,10 @@ TargetContents ThreadedCompositor::paintToCurrentGLContext(const TransformationM
  #if USE(TEXTURE_MAPPER)
  void ThreadedCompositor::paintToTextureMapper(const TransformationMatrix& matrix, const IntSize& size, const OptionSet<CompositionReason>& reasons)
  {
@@ -134029,7 +134989,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..3db07253bf4bd5da5895585bd1c7d623
      FloatRect clipRect(FloatPoint { }, size);
      TextureMapperLayer& currentRootLayer = m_sceneState->rootLayer().ensureTarget();
      if (currentRootLayer.transform() != matrix)
-@@ -371,11 +497,23 @@ void ThreadedCompositor::paintToTextureMapper(const TransformationMatrix& matrix
+@@ -371,11 +508,23 @@ void ThreadedCompositor::paintToTextureMapper(const TransformationMatrix& matrix
  
      bool sceneHasRunningAnimations = currentRootLayer.applyAnimationsRecursively(MonotonicTime::now());
  
@@ -134053,7 +135013,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..3db07253bf4bd5da5895585bd1c7d623
      currentRootLayer.prepareForPainting(*m_textureMapper);
      if (m_damage.flags) {
          Damage frameDamage(size, m_damage.flags->contains(DamagePropagationFlags::Unified) ? Damage::Mode::BoundingBox : Damage::Mode::Rectangles);
-@@ -383,7 +521,26 @@ void ThreadedCompositor::paintToTextureMapper(const TransformationMatrix& matrix
+@@ -383,7 +532,26 @@ void ThreadedCompositor::paintToTextureMapper(const TransformationMatrix& matrix
          WTFBeginSignpost(this, CollectDamage);
          currentRootLayer.collectDamage(*m_textureMapper, frameDamage);
          WTFEndSignpost(this, CollectDamage);
@@ -134080,7 +135040,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..3db07253bf4bd5da5895585bd1c7d623
          recordFrameDamage(WTF::move(frameDamage));
  
          if (m_damage.flags->contains(DamagePropagationFlags::UseForCompositing)) {
-@@ -392,23 +549,62 @@ void ThreadedCompositor::paintToTextureMapper(const TransformationMatrix& matrix
+@@ -392,23 +560,62 @@ void ThreadedCompositor::paintToTextureMapper(const TransformationMatrix& matrix
                  m_textureMapper->setDamage(std::nullopt);
              } else {
                  const auto& damageSinceLastSurfaceUse = m_surface->renderTargetDamage();
@@ -134143,7 +135103,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..3db07253bf4bd5da5895585bd1c7d623
  
  #if ENABLE(DAMAGE_TRACKING)
      if (rectContainingRegionThatActuallyChanged)
-@@ -426,6 +622,21 @@ void ThreadedCompositor::paintToTextureMapper(const TransformationMatrix& matrix
+@@ -426,6 +633,21 @@ void ThreadedCompositor::paintToTextureMapper(const TransformationMatrix& matrix
  
      m_textureMapper->endClip();
      m_textureMapper->endPainting();
@@ -134165,7 +135125,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..3db07253bf4bd5da5895585bd1c7d623
  
      if (sceneHasRunningAnimations)
          requestComposition(CompositionReason::Animation);
-@@ -525,8 +736,17 @@ void ThreadedCompositor::recordFrameDamage(Damage&& damage)
+@@ -525,8 +747,17 @@ void ThreadedCompositor::recordFrameDamage(Damage&& damage)
  
      // Nothing changed this frame: an empty damage contributes nothing to the targets, since Damage::add()
      // ignores empty damage. Skip it rather than replace the recorded frame damage with an empty one.
@@ -134184,7 +135144,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..3db07253bf4bd5da5895585bd1c7d623
  
      m_surface->setFrameDamage(WTF::move(damage));
  }
-@@ -556,6 +776,46 @@ void ThreadedCompositor::renderLayerTree()
+@@ -556,6 +787,46 @@ void ThreadedCompositor::renderLayerTree()
      if (m_suspendedCount > 0)
          return;
  
@@ -134231,7 +135191,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..3db07253bf4bd5da5895585bd1c7d623
      OptionSet<CompositionReason> reasons;
      bool shouldNotifiyDidComposite = false;
      {
-@@ -580,8 +840,18 @@ void ThreadedCompositor::renderLayerTree()
+@@ -580,8 +851,20 @@ void ThreadedCompositor::renderLayerTree()
  
          ASSERT(m_state.state == State::Scheduled);
          m_state.state = State::InProgress;
@@ -134245,12 +135205,14 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..3db07253bf4bd5da5895585bd1c7d623
 +#if PLATFORM(HAIKU)
 +    const bool traceTiming = traceCompositorTiming();
 +    const bigtime_t startedAt = traceTiming ? system_time() : 0;
++    // Every frame's time, for the browser's debugging tools.
++    const bigtime_t frameStartedHaiku = system_time();
 +#endif
 +
  #if USE(TEXTURE_MAPPER)
      if (!m_context || !m_context->makeContextCurrent())
          return;
-@@ -599,23 +869,61 @@ void ThreadedCompositor::renderLayerTree()
+@@ -599,23 +882,61 @@ void ThreadedCompositor::renderLayerTree()
      if (viewportSize.isEmpty())
          return;
  
@@ -134312,7 +135274,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..3db07253bf4bd5da5895585bd1c7d623
  
      updateFPSCounter();
  
-@@ -631,8 +939,49 @@ void ThreadedCompositor::renderLayerTree()
+@@ -631,8 +952,51 @@ void ThreadedCompositor::renderLayerTree()
      PlatformDisplay::sharedDisplay().skiaGLContext()->swapBuffers();
  #endif
  
@@ -134358,11 +135320,13 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..3db07253bf4bd5da5895585bd1c7d623
 +    // follow, which this asks for in case nothing else does.
 +    if (deferredUploads)
 +        requestComposition(CompositionReason::Animation);
++    ProcessDiagnosticsHaiku::frameRendered(frameStartedHaiku, system_time() - frameStartedHaiku,
++        reasons.contains(CompositionReason::AsyncScrolling));
 +#endif
  
      RunLoop::mainSingleton().dispatch([this, protectedThis = Ref { *this }] {
          if (m_layerTreeHost)
-@@ -656,6 +1005,13 @@ void ThreadedCompositor::requestComposition(CompositionReason reason)
+@@ -656,6 +1020,13 @@ void ThreadedCompositor::requestComposition(CompositionReason reason)
  {
      Locker locker { m_state.lock };
      m_state.reasons.add(reason);
@@ -134376,7 +135340,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..3db07253bf4bd5da5895585bd1c7d623
      scheduleUpdateLocked();
  }
  
-@@ -703,6 +1059,10 @@ void ThreadedCompositor::scheduleUpdateLocked()
+@@ -703,6 +1074,10 @@ void ThreadedCompositor::scheduleUpdateLocked()
  void ThreadedCompositor::frameComplete()
  {
      ASSERT(m_workQueue->runLoop().isCurrent());
@@ -134387,7 +135351,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..3db07253bf4bd5da5895585bd1c7d623
  
      Locker locker { m_state.lock };
      WTFEmitSignpost(this, FrameComplete, "reasons: %s, state: %s, waiting for tiles: %s", reasonsToString(m_state.reasons).utf8(), stateToString(m_state.state).characters(), m_state.isWaitingForTiles ? "yes" : "no");
-@@ -726,6 +1086,112 @@ void ThreadedCompositor::frameComplete()
+@@ -726,6 +1101,112 @@ void ThreadedCompositor::frameComplete()
      }
  }
  
@@ -134500,7 +135464,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..3db07253bf4bd5da5895585bd1c7d623
  RunLoop* ThreadedCompositor::runLoop()
  {
      return m_surface ? &m_workQueue->runLoop() : nullptr;
-@@ -747,7 +1213,15 @@ void ThreadedCompositor::updateSceneAttributes(const IntSize& size, float device
+@@ -747,7 +1228,15 @@ void ThreadedCompositor::updateSceneAttributes(const IntSize& size, float device
  {
      m_attributes.viewportSize = size;
      m_attributes.deviceScaleFactor = deviceScaleFactor;
@@ -136947,12 +137911,254 @@ index 0000000000000000000000000000000000000000..6549d7f5c9eac54d993817a051d3965d
 @@ -0,0 +1,2 @@
 +resource app_signature "application/x-vnd.haiku-webkit.webprocess";
 +resource app_flags B_MULTIPLE_LAUNCH | B_BACKGROUND_APP;
+diff --git a/Source/WebKit/WebProcess/haiku/WebProcessDiagnosticsHaiku.cpp b/Source/WebKit/WebProcess/haiku/WebProcessDiagnosticsHaiku.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..c636fc375a83e9c5214a69608f19dfe8338dd6ad
+--- /dev/null
++++ b/Source/WebKit/WebProcess/haiku/WebProcessDiagnosticsHaiku.cpp
+@@ -0,0 +1,219 @@
++/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
++
++// What a web process tells the browser's debugging tools about itself
++// (ProcessDiagnosticsHaiku.h): its pages, memory, media players and
++// compositors.
++
++#include "config.h"
++#include "WebProcessDiagnosticsHaiku.h"
++
++#include "ProcessDiagnosticsHaiku.h"
++#include "WebPage.h"
++#include <JavaScriptCore/JSLock.h>
++#include <JavaScriptCore/MemoryStatistics.h>
++#include <JavaScriptCore/VM.h>
++#include <WebCore/BackForwardCache.h>
++#include <WebCore/CommonVM.h>
++#include <WebCore/Document.h>
++#include <WebCore/FontCache.h>
++#include <WebCore/GarbageCollectionController.h>
++#include <WebCore/HTMLMediaElement.h>
++#include <WebCore/LocalFrameView.h>
++#include <WebCore/MediaPlayer.h>
++#include <WebCore/MemoryCache.h>
++#include <WebCore/MemoryRelease.h>
++#include <WebCore/NodeDocument.h>
++#include <WebCore/Page.h>
++#include <WebCore/TimeRanges.h>
++#include <wtf/MemoryPressureHandler.h>
++#include <wtf/text/MakeString.h>
++
++namespace WebKit {
++using namespace WebCore;
++
++namespace {
++
++double megabytes(double bytes)
++{
++    return std::round(bytes / 10485.76) / 100;
++}
++
++Ref<JSON::Object> cacheStatistic(const MemoryCache::TypeStatistic& statistic)
++{
++    auto object = JSON::Object::create();
++    object->setInteger("count"_s, statistic.count);
++    object->setDouble("sizeMiB"_s, megabytes(statistic.size));
++    object->setDouble("liveMiB"_s, megabytes(statistic.liveSize));
++    object->setDouble("decodedMiB"_s, megabytes(statistic.decodedSize));
++    return object;
++}
++
++Ref<JSON::Object> pagesReport()
++{
++    auto report = JSON::Object::create();
++    auto pages = JSON::Array::create();
++    Page::forEachPage([&](Page& page) {
++        auto entry = JSON::Object::create();
++        if (auto* webPage = WebPage::fromCorePage(page)) {
++            entry->setDouble("pageIdentifier"_s, webPage->identifier().toUInt64());
++            entry->setDouble("webPageProxyIdentifier"_s, webPage->webPageProxyIdentifier().toUInt64());
++        }
++        entry->setString("url"_s, page.mainFrameURL().string());
++        entry->setBoolean("visible"_s, page.isVisible());
++        entry->setBoolean("inWindow"_s, page.isInWindow());
++        entry->setInteger("renderingUpdates"_s, page.renderingUpdateCount());
++        unsigned frames = 0;
++        for (RefPtr<Frame> frame = &page.mainFrame(); frame; frame = frame->tree().traverseNext())
++            ++frames;
++        entry->setInteger("frames"_s, frames);
++        pages->pushObject(WTF::move(entry));
++    });
++    report->setArray("pages"_s, WTF::move(pages));
++    report->setInteger("documents"_s, Document::allDocumentsMap().size());
++    return report;
++}
++
++Ref<JSON::Object> memoryReport()
++{
++    auto report = JSON::Object::create();
++    {
++        auto& vm = commonVM();
++        JSC::JSLockHolder lock(vm);
++        auto heap = JSON::Object::create();
++        heap->setDouble("sizeMiB"_s, megabytes(vm.heap.size()));
++        heap->setDouble("capacityMiB"_s, megabytes(vm.heap.capacity()));
++        heap->setDouble("extraMemoryMiB"_s, megabytes(vm.heap.extraMemorySize()));
++        heap->setDouble("objects"_s, vm.heap.objectCount());
++        heap->setDouble("protectedObjects"_s, vm.heap.protectedObjectCount());
++        heap->setDouble("globalObjects"_s, vm.heap.globalObjectCount());
++        heap->setDouble("sizeAfterLastFullCollectionMiB"_s, megabytes(vm.heap.sizeAfterLastFullCollection()));
++        report->setObject("javaScriptHeap"_s, WTF::move(heap));
++    }
++    auto statistics = JSC::globalMemoryStatistics();
++    report->setDouble("jitMiB"_s, megabytes(statistics.JITBytes));
++    report->setDouble("javaScriptStacksMiB"_s, megabytes(statistics.stackBytes));
++    auto cache = MemoryCache::singleton().getStatistics();
++    auto memoryCache = JSON::Object::create();
++    memoryCache->setObject("images"_s, cacheStatistic(cache.images));
++    memoryCache->setObject("styleSheets"_s, cacheStatistic(cache.cssStyleSheets));
++    memoryCache->setObject("scripts"_s, cacheStatistic(cache.scripts));
++    memoryCache->setObject("fonts"_s, cacheStatistic(cache.fonts));
++    report->setObject("memoryCache"_s, WTF::move(memoryCache));
++    report->setInteger("backForwardCachePages"_s, BackForwardCache::singleton().pageCount());
++    auto& fonts = FontCache::forCurrentThread();
++    report->setInteger("fonts"_s, static_cast<int>(fonts.fontCount()));
++    report->setInteger("inactiveFonts"_s, static_cast<int>(fonts.inactiveFontCount()));
++    report->setInteger("documents"_s, Document::allDocumentsMap().size());
++    auto& pressure = MemoryPressureHandler::singleton();
++    report->setString("memoryPressure"_s, pressure.isUnderMemoryPressure() ? "critical"_s : pressure.isUnderMemoryWarning() ? "warning"_s : "normal"_s);
++    return report;
++}
++
++Ref<JSON::Object> mediaReport()
++{
++    auto report = JSON::Object::create();
++    auto elements = JSON::Array::create();
++    for (auto& weakElement : HTMLMediaElement::allMediaElements()) {
++        Ref element = weakElement.get();
++        auto entry = JSON::Object::create();
++        entry->setString("kind"_s, element->isVideo() ? "video"_s : "audio"_s);
++        entry->setString("document"_s, element->document().url().string());
++        entry->setString("src"_s, element->currentSrc().string().left(300));
++        entry->setInteger("readyState"_s, static_cast<int>(element->readyState()));
++        entry->setInteger("networkState"_s, static_cast<int>(element->networkState()));
++        entry->setBoolean("paused"_s, element->paused());
++        entry->setDouble("currentTime"_s, element->currentTime());
++        double duration = element->duration();
++        if (std::isfinite(duration))
++            entry->setDouble("duration"_s, duration);
++        entry->setBoolean("muted"_s, element->muted());
++        entry->setDouble("volume"_s, element->volume());
++        Ref buffered = element->buffered();
++        if (buffered->length())
++            entry->setDouble("bufferedEnd"_s, buffered->ranges().maximumBufferedTime().toDouble());
++        entry->setBoolean("connected"_s, element->isConnected());
++        if (RefPtr player = element->player()) {
++            auto description = player->engineDescription();
++            auto parsed = JSON::Value::parseJSON(description);
++            if (parsed && parsed->asObject())
++                entry->setObject("player"_s, parsed->asObject().releaseNonNull());
++            else
++                entry->setString("player"_s, description);
++            auto size = player->naturalSize();
++            entry->setInteger("naturalWidth"_s, static_cast<int>(size.width()));
++            entry->setInteger("naturalHeight"_s, static_cast<int>(size.height()));
++            if (auto metrics = player->videoPlaybackQualityMetrics()) {
++                auto quality = JSON::Object::create();
++                quality->setInteger("totalVideoFrames"_s, metrics->totalVideoFrames);
++                quality->setInteger("droppedVideoFrames"_s, metrics->droppedVideoFrames);
++                quality->setInteger("corruptedVideoFrames"_s, metrics->corruptedVideoFrames);
++                quality->setInteger("displayCompositedVideoFrames"_s, metrics->displayCompositedVideoFrames);
++                entry->setObject("quality"_s, WTF::move(quality));
++            }
++        } else
++            entry->setString("player"_s, "none"_s);
++        elements->pushObject(WTF::move(entry));
++    }
++    report->setArray("elements"_s, WTF::move(elements));
++    return report;
++}
++
++Ref<JSON::Object> graphicsReport()
++{
++    auto report = ProcessDiagnosticsHaiku::compositorReport();
++    auto pages = JSON::Array::create();
++    Page::forEachPage([&](Page& page) {
++        auto entry = JSON::Object::create();
++        if (auto* webPage = WebPage::fromCorePage(page))
++            entry->setDouble("pageIdentifier"_s, webPage->identifier().toUInt64());
++        entry->setString("url"_s, page.mainFrameURL().string());
++        if (RefPtr view = page.mainFrame().virtualView()) {
++            entry->setInteger("contentsWidth"_s, view->contentsWidth());
++            entry->setInteger("contentsHeight"_s, view->contentsHeight());
++        }
++        entry->setDouble("deviceScaleFactor"_s, page.deviceScaleFactor());
++        entry->setDouble("pageScaleFactor"_s, page.pageScaleFactor());
++        entry->setInteger("renderingUpdates"_s, page.renderingUpdateCount());
++        pages->pushObject(WTF::move(entry));
++    });
++    report->setArray("pages"_s, WTF::move(pages));
++    return report;
++}
++
++} // namespace
++
++void startWebProcessDiagnosticsHaiku()
++{
++    ProcessDiagnosticsHaiku::addTopic("pages", true, pagesReport);
++    ProcessDiagnosticsHaiku::addTopic("memory", true, memoryReport);
++    ProcessDiagnosticsHaiku::addTopic("media", true, mediaReport);
++    ProcessDiagnosticsHaiku::addTopic("graphics", true, graphicsReport);
++    ProcessDiagnosticsHaiku::addTopic("compositor", false, [] { return ProcessDiagnosticsHaiku::compositorReport(); });
++    ProcessDiagnosticsHaiku::addAction("gc", [] {
++        auto report = JSON::Object::create();
++        auto& vm = commonVM();
++        double before;
++        {
++            JSC::JSLockHolder lock(vm);
++            before = vm.heap.size();
++        }
++        auto started = MonotonicTime::now();
++        GarbageCollectionController::singleton().garbageCollectNow();
++        report->setDouble("gcMs"_s, (MonotonicTime::now() - started).milliseconds());
++        JSC::JSLockHolder lock(vm);
++        report->setDouble("heapBeforeMiB"_s, megabytes(before));
++        report->setDouble("heapAfterMiB"_s, megabytes(vm.heap.size()));
++        return report;
++    });
++    ProcessDiagnosticsHaiku::addAction("release-memory", [] {
++        auto report = JSON::Object::create();
++        auto started = MonotonicTime::now();
++        WebCore::releaseMemory(Critical::Yes, Synchronous::Yes);
++        report->setDouble("releaseMs"_s, (MonotonicTime::now() - started).milliseconds());
++        report->setObject("after"_s, memoryReport());
++        return report;
++    });
++    ProcessDiagnosticsHaiku::start("web");
++}
++
++} // namespace WebKit
+diff --git a/Source/WebKit/WebProcess/haiku/WebProcessDiagnosticsHaiku.h b/Source/WebKit/WebProcess/haiku/WebProcessDiagnosticsHaiku.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..a150bd67553ae6f1864c655cd04be6617f6f0e7d
+--- /dev/null
++++ b/Source/WebKit/WebProcess/haiku/WebProcessDiagnosticsHaiku.h
+@@ -0,0 +1,11 @@
++/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
++
++#pragma once
++
++namespace WebKit {
++
++// Registers the web process's diagnostics topics and starts the thread that
++// answers them (ProcessDiagnosticsHaiku.h). Main thread, once.
++void startWebProcessDiagnosticsHaiku();
++
++} // namespace WebKit
 diff --git a/Source/WebKit/WebProcess/haiku/WebProcessHaiku.cpp b/Source/WebKit/WebProcess/haiku/WebProcessHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..35ccf4d96426f1f299de0d7867c69553201bd4f7
+index 0000000000000000000000000000000000000000..ba19a248a66798cdb455d524f14f5c84f8dcfa24
 --- /dev/null
 +++ b/Source/WebKit/WebProcess/haiku/WebProcessHaiku.cpp
-@@ -0,0 +1,133 @@
+@@ -0,0 +1,137 @@
 +/*
 + * Copyright (C) 2014,2019 Haiku, Inc.
 + *
@@ -136982,6 +138188,7 @@ index 0000000000000000000000000000000000000000..35ccf4d96426f1f299de0d7867c69553
 +#include "WebProcess.h"
 +
 +#include "WebProcessCreationParameters.h"
++#include "WebProcessDiagnosticsHaiku.h"
 +#include "WebProcessDataStoreParameters.h"
 +#include <Application.h>
 +#if USE(COORDINATED_GRAPHICS)
@@ -137042,6 +138249,9 @@ index 0000000000000000000000000000000000000000..35ccf4d96426f1f299de0d7867c69553
 +        SUMMIT_STARTUP_TRACE("EGL display ready");
 +    }
 +#endif
++    // The browser's debugging tools (BWebKitProcessDiagnostics) ask a thread
++    // of this process about its pages, memory, media and compositors.
++    startWebProcessDiagnosticsHaiku();
 +}
 +
 +void WebProcess::platformSetWebsiteDataStoreParameters(WebProcessDataStoreParameters&& parameters)

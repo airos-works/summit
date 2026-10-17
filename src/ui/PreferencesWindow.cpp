@@ -1,5 +1,6 @@
 #include "PreferencesWindow.h"
 #include "Messages.h"
+#include "McpService.h"
 #include "core/Address.h"
 #include <Alert.h>
 #include <interface/ColumnListView.h>
@@ -16,8 +17,11 @@
 #include <RadioButton.h>
 #include <StringView.h>
 #include <TextControl.h>
+#include <Clipboard.h>
+#include <MessageRunner.h>
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <tuple>
 #include <thread>
@@ -28,7 +32,8 @@ constexpr uint32 homeEdited = 'phed', useStartPage = 'phsp', bookmarksBarToggled
     searchChosen = 'psrc', clearHistory = 'pchi', clearHistoryConfirmed = 'pchc', clearCache = 'pcca',
     clearSiteData = 'pcsd', clearSiteDataConfirmed = 'pcsc', cacheMeasured = 'pcms',
     forgetCertificates = 'pfce', forgetCertificatesConfirmed = 'pfcc', siteSelected = 'psse', siteAllow = 'pssa',
-    restoreSessionToggled = 'prss',
+    restoreSessionToggled = 'prss', mcpToggled = 'pmcp', mcpLocalToggled = 'pmcl', mcpPortEdited = 'pmpe',
+    mcpCopy = 'pmcc', mcpNewToken = 'pmnt', mcpNewTokenConfirmed = 'pmnc',
     siteBlock = 'pssb', siteRemove = 'pssr', protocolSelected = 'ppse', protocolRemove = 'pprm';
 enum SiteColumn { kSiteColumn, kPermissionColumn, kSettingColumn };
 
@@ -217,11 +222,54 @@ PreferencesWindow::PreferencesWindow(BMessenger owner, const PreferencesState& s
             .Add(new BStringView("link-handlers-hint", "Remove a choice to be asked again."))
             .AddGlue().Add(fProtocolRemove)
         .End();
+    // Developer: Summit's own debugging server.
+    fMcpEnabled = new BCheckBox("mcp-enabled", "Let debugging tools connect to Summit (MCP server)", new BMessage(mcpToggled));
+    fMcpEnabled->SetValue(state.mcpEnabled ? B_CONTROL_ON : B_CONTROL_OFF);
+    auto* mcpHint = new BStringView("mcp-hint", "An MCP client such as Claude Code can then look inside Summit: pages, "
+        "processes, memory, rendering, media and extensions.");
+    mcpHint->SetHighUIColor(B_PANEL_TEXT_COLOR, B_DARKEN_2_TINT);
+    auto* mcpWarning = new BStringView("mcp-warning", "Whoever has the access token can read your pages and act in them.");
+    mcpWarning->SetHighUIColor(B_PANEL_TEXT_COLOR, B_DARKEN_2_TINT);
+    fMcpPort = new BTextControl("mcp-port", "Port:", std::to_string(state.mcpPort).c_str(), new BMessage(mcpPortEdited));
+    fMcpPort->SetExplicitMaxSize(BSize(140, B_SIZE_UNSET));
+    for (int32 c = 0; c < 256; ++c) if (c < '0' || c > '9') fMcpPort->TextView()->DisallowChar(c);
+    fMcpPort->TextView()->SetMaxBytes(5);
+    fMcpLocalOnly = new BCheckBox("mcp-local", "Only from this computer", new BMessage(mcpLocalToggled));
+    fMcpLocalOnly->SetValue(state.mcpLocalOnly ? B_CONTROL_ON : B_CONTROL_OFF);
+    fMcpStatus = new BStringView("mcp-status", "Status: off");
+    fMcpEndpoint = new BStringView("mcp-endpoint", "");
+    fMcpEndpoint->SetHighUIColor(B_PANEL_TEXT_COLOR, B_DARKEN_2_TINT);
+    fMcpCopy = new BButton("mcp-copy", "Copy Client Configuration", new BMessage(mcpCopy));
+    fMcpNewToken = new BButton("mcp-new-token", "New Access Token…", new BMessage(mcpNewToken));
+    auto* developer = new BGroupView("Developer", B_VERTICAL, 8);
+    BLayoutBuilder::Group<>(developer).SetInsets(18)
+        .Add(SectionTitle("mcp-title", "Debugging Server"))
+        .AddGroup(B_VERTICAL, 6).SetInsets(12, 0, 0, 0)
+            .Add(fMcpEnabled)
+            .Add(mcpHint)
+            .Add(mcpWarning)
+            .AddStrut(4)
+            .AddGroup(B_HORIZONTAL, 12)
+                .Add(fMcpPort)
+                .Add(fMcpLocalOnly)
+                .AddGlue()
+            .End()
+            .AddStrut(4)
+            .Add(fMcpStatus)
+            .Add(fMcpEndpoint)
+            .AddGroup(B_HORIZONTAL, 8)
+                .AddGlue()
+                .Add(fMcpNewToken)
+                .Add(fMcpCopy)
+            .End()
+        .End()
+        .AddGlue();
     fTabs = new BTabView("preferences-tabs", B_WIDTH_FROM_LABEL);
     fTabs->AddTab(general);
     fTabs->AddTab(data);
     fTabs->AddTab(sites);
     fTabs->AddTab(protocols);
+    fTabs->AddTab(developer);
     fTabs->SetBorder(B_NO_BORDER);
     BLayoutBuilder::Group<>(this, B_VERTICAL, 0)
         .SetInsets(0, B_USE_SMALL_SPACING, 0, 0)
@@ -229,6 +277,24 @@ PreferencesWindow::PreferencesWindow(BMessenger owner, const PreferencesState& s
     ShowTrustedCertificates(state.trustedCertificates);
     ShowHomeHint();
     MeasureCache();
+    fMcpCopy->SetEnabled(false);
+    fMcpNewToken->SetEnabled(state.mcpEnabled);
+    // The server's status (requests answered, the last client) changes by
+    // itself; ask the application for it now and then.
+    BMessage refresh(kMcpStatus);
+    fMcpRefresh = std::make_unique<BMessageRunner>(fOwner, &refresh, 3000000);
+}
+
+void PreferencesWindow::SendMcpPort()
+{
+    const long port = std::strtol(fMcpPort->Text(), nullptr, 10);
+    if (port <= 0 || port > 65535) {
+        fMcpStatus->SetText("Status: the port must be between 1 and 65535");
+        return;
+    }
+    BMessage changed(kPreferencesChanged);
+    changed.AddInt32("mcp_port", static_cast<int32>(port));
+    fOwner.SendMessage(&changed);
 }
 
 void PreferencesWindow::ShowHomeHint()
@@ -358,6 +424,49 @@ void PreferencesWindow::MessageReceived(BMessage* message)
             fOwner.SendMessage(&changed);
             break;
         }
+        case mcpToggled: {
+            BMessage changed(kPreferencesChanged);
+            changed.AddBool("mcp_enabled", fMcpEnabled->Value() == B_CONTROL_ON);
+            // A port typed but not entered counts.
+            const long port = std::strtol(fMcpPort->Text(), nullptr, 10);
+            if (port > 0 && port <= 65535) changed.AddInt32("mcp_port", static_cast<int32>(port));
+            fOwner.SendMessage(&changed);
+            break;
+        }
+        case mcpLocalToggled: {
+            BMessage changed(kPreferencesChanged);
+            changed.AddBool("mcp_local_only", fMcpLocalOnly->Value() == B_CONTROL_ON);
+            fOwner.SendMessage(&changed);
+            break;
+        }
+        case mcpPortEdited:
+            SendMcpPort();
+            break;
+        case mcpCopy:
+            if (!fMcpConfiguration.empty() && be_clipboard->Lock()) {
+                be_clipboard->Clear();
+                be_clipboard->Data()->AddData("text/plain", B_MIME_TYPE, fMcpConfiguration.data(), fMcpConfiguration.size());
+                be_clipboard->Commit();
+                be_clipboard->Unlock();
+                fMcpEndpoint->SetText("Copied: the server's address and access token, for an MCP client.");
+            }
+            break;
+        case mcpNewToken: {
+            auto* alert = new BAlert("New Access Token", "Make a new access token?\n\nClients that use the old one can "
+                "no longer connect until they are given the new one.", "Cancel", "New Token", nullptr, B_WIDTH_AS_USUAL,
+                B_WARNING_ALERT);
+            alert->SetShortcut(0, B_ESCAPE);
+            alert->Go(new BInvoker(new BMessage(mcpNewTokenConfirmed), this));
+            break;
+        }
+        case mcpNewTokenConfirmed:
+            if (message->GetInt32("which", 0) != 1) break;
+            {
+                BMessage changed(kPreferencesChanged);
+                changed.AddBool("mcp_new_token", true);
+                fOwner.SendMessage(&changed);
+            }
+            break;
         case bookmarksBarToggled: {
             BMessage changed(kPreferencesChanged);
             changed.AddBool("show_bookmarks_bar", fBookmarksBar->Value() == B_CONTROL_ON);
@@ -452,6 +561,25 @@ void PreferencesWindow::MessageReceived(BMessage* message)
                 fHome->SetText(home);
                 ShowHomeHint();
             }
+            bool mcp = false;
+            if (message->FindBool("mcp_enabled", &mcp) == B_OK) {
+                fMcpEnabled->SetValue(mcp ? B_CONTROL_ON : B_CONTROL_OFF);
+                fMcpNewToken->SetEnabled(mcp);
+            }
+            if (message->FindBool("mcp_local_only", &mcp) == B_OK) fMcpLocalOnly->SetValue(mcp ? B_CONTROL_ON : B_CONTROL_OFF);
+            if (int32 port = 0; message->FindInt32("mcp_port", &port) == B_OK && !fMcpPort->TextView()->IsFocus())
+                fMcpPort->SetText(std::to_string(port).c_str());
+            if (const char* status = nullptr; message->FindString("mcp_status", &status) == B_OK) {
+                std::string text = std::string("Status: ") + status;
+                if (message->GetBool("mcp_environment", false)) text += " (set by SUMMIT_MCP in the environment)";
+                fMcpStatus->SetText(text.c_str());
+                const bool running = std::string(status).rfind("Listening", 0) == 0;
+                const char* endpoint = message->GetString("mcp_endpoint", "");
+                if (std::string(fMcpEndpoint->Text()).rfind("Copied", 0) != 0 || !running)
+                    fMcpEndpoint->SetText(running ? (std::string("Clients connect to ") + endpoint).c_str() : "");
+                fMcpConfiguration = running ? message->GetString("mcp_configuration", "") : "";
+                fMcpCopy->SetEnabled(running);
+            }
             bool bar = false;
             if (message->FindBool("show_bookmarks_bar", &bar) == B_OK)
                 fBookmarksBar->SetValue(bar ? B_CONTROL_ON : B_CONTROL_OFF);
@@ -500,8 +628,10 @@ void PreferencesWindow::MessageReceived(BMessage* message)
             break;
         }
         case kShowPreferences:
-            if (const char* tab = nullptr; message->FindString("tab", &tab) == B_OK && tab && !std::strcmp(tab, "sites"))
-                fTabs->Select(2);
+            if (const char* tab = nullptr; message->FindString("tab", &tab) == B_OK && tab) {
+                const std::string name = tab;
+                fTabs->Select(name == "data" ? 1 : name == "sites" ? 2 : name == "links" ? 3 : name == "developer" ? 4 : 0);
+            }
             Activate();
             break;
         case protocolSelected:

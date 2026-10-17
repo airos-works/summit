@@ -67,6 +67,9 @@ For a stock Haiku installation, not air/OS. Install the packages together with `
 - Native [color, date, month, week, time, and local date/time pickers](docs/native-form-pickers.md).
 - [Developer tools](docs/developer-tools.md) for page inspection, JavaScript
   console output, and network requests.
+- A [built-in MCP server](docs/mcp.md) (Preferences › Developer, off by
+  default) that lets debugging tools such as Claude Code inspect tabs, pages,
+  processes, memory, rendering, media and extensions on the machine itself.
 - [Extension installation from Chrome Web Store and Firefox Add-ons](docs/extension-stores.md),
   native permission review, toolbar actions and popups, and restoration of
   approved extensions across restarts. Local CRX3, ZIP/XPI, and folder packages

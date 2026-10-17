@@ -11,7 +11,9 @@
 #include "ui/ExtensionInstaller.h"
 #include "ui/ExtensionManager.h"
 #if SUMMIT_MODERN_WEBKIT
+#include "ui/McpService.h"
 #include "ui/SitePermissions.h"
+#include <nlohmann/json.hpp>
 #endif
 #include "core/Address.h"
 #include <Alert.h>
@@ -160,7 +162,12 @@ public:
             StartupError("Could not open the profile folder:\n" + fProfile.string() + "\n\n" + error.message());
             return;
         }
+        fShared = std::make_shared<summit::SharedProfile>(fProfile / "profile.json");
+        fShared->AddListener(BMessenger(this));
 #if SUMMIT_MODERN_WEBKIT
+        // The debugging server (Preferences › Developer) starts before the
+        // engine, so that its log has the engine processes' output.
+        ApplyMcpSettings();
         status_t initialization = BWebKitInitialize();
         if (initialization != B_OK) {
             StartupError("Could not initialize WebKit: " + std::string(std::strerror(initialization)));
@@ -224,8 +231,6 @@ public:
             std::fprintf(stderr, "Summit: missing start page at %s\n", home.c_str());
         }
         fStartURL = summit::FileURL(home.string());
-        fShared = std::make_shared<summit::SharedProfile>(fProfile / "profile.json");
-        fShared->AddListener(BMessenger(this));
 #if SUMMIT_MODERN_WEBKIT
         TrustSavedCertificates(*fWebKitContext);
         GiveSitePermissions(*fWebKitContext);
@@ -492,7 +497,7 @@ public:
             OpenWindow(options);
             return;
         }
-        if (message->what == summit::kShowPreferences) { ShowPreferences(); return; }
+        if (message->what == summit::kShowPreferences) { ShowPreferences(message->GetString("tab", nullptr)); return; }
         if (message->what == summit::kMakeDefaultBrowser || message->what == summit::kDefaultBrowserState) {
             // From Preferences (or summitctl); kDefaultBrowserState only asks.
             std::string error;
@@ -513,8 +518,22 @@ public:
             const bool hasRestore = message->FindBool("restore_session", &restore) == B_OK;
             const bool hasStyle = message->FindString("interface_style", &style) == B_OK && style;
             const bool hasEngine = message->FindString("search_engine", &engine) == B_OK && engine;
+            bool mcpEnabled = false, mcpLocal = false;
+            int32 mcpPort = 0;
+            const bool hasMcpEnabled = message->FindBool("mcp_enabled", &mcpEnabled) == B_OK;
+            const bool hasMcpLocal = message->FindBool("mcp_local_only", &mcpLocal) == B_OK;
+            const bool hasMcpPort = message->FindInt32("mcp_port", &mcpPort) == B_OK && mcpPort > 0 && mcpPort < 65536;
+            const bool newMcpToken = message->GetBool("mcp_new_token", false);
             fShared->Change([&](summit::Profile& profile) -> uint32 {
                 bool changed = false;
+                if (hasMcpEnabled && profile.mcpEnabled != mcpEnabled) { profile.mcpEnabled = mcpEnabled; changed = true; }
+                if (hasMcpLocal && profile.mcpLocalOnly != mcpLocal) { profile.mcpLocalOnly = mcpLocal; changed = true; }
+                if (hasMcpPort && profile.mcpPort != mcpPort) { profile.mcpPort = mcpPort; changed = true; }
+#if SUMMIT_MODERN_WEBKIT
+                if (newMcpToken) { profile.mcpToken = summit::McpService::NewToken(); changed = true; }
+#else
+                (void)newMcpToken;
+#endif
                 if (hasHome && profile.homeURL != summit::Trim(home)) { profile.homeURL = summit::Trim(home); changed = true; }
                 if (hasBar && profile.showBookmarksBar != bar) { profile.showBookmarksBar = bar; changed = true; }
                 if (hasRestore && profile.restoreSession != restore) { profile.restoreSession = restore; changed = true; }
@@ -623,10 +642,25 @@ public:
             return;
         }
         if (message->what == summit::kProfileChanged) {
+#if SUMMIT_MODERN_WEBKIT
+            if (message->GetUInt32("changes", 0) & summit::SharedProfile::kSettingsChanged) ApplyMcpSettings();
+#endif
             if (message->GetUInt32("changes", 0) & (summit::SharedProfile::kSettingsChanged | summit::SharedProfile::kHistoryChanged))
                 SendPreferencesState();
             return;
         }
+#if SUMMIT_MODERN_WEBKIT
+        if (message->what == summit::kMcpRequest) {
+            McpRequest(message);
+            return;
+        }
+        if (message->what == summit::kMcpStatus) {
+            // The Preferences window's refresh: only the server's status, so
+            // what is being typed in other fields is left alone.
+            SendPreferencesState(true);
+            return;
+        }
+#endif
         if (message->what == summit::kCreateTabOnApp) {
 #if SUMMIT_MODERN_WEBKIT
             // A restored session asks for its extension pages before their
@@ -983,16 +1017,19 @@ private:
         request.AddBool("quitting", true);
         fWindows.front().messenger.SendMessage(&request);
     }
-    void ShowPreferences()
+    // tab: the Preferences tab to show ("sites", "developer"...), or null.
+    void ShowPreferences(const char* tab = nullptr)
     {
+        BMessage show(summit::kShowPreferences);
+        if (tab) show.AddString("tab", tab);
         if (fPreferences.IsValid()) {
-            fPreferences.SendMessage(summit::kShowPreferences);
+            fPreferences.SendMessage(&show);
             return;
         }
         summit::PreferencesState state = fShared->Read([](const summit::Profile& profile) {
             return summit::PreferencesState { profile.homeURL, profile.showBookmarksBar, profile.interfaceStyle,
                 profile.searchEngine, profile.history.size(), { }, profile.trustedCertificates.size(),
-                profile.restoreSession };
+                profile.restoreSession, profile.mcpEnabled, profile.mcpPort, profile.mcpLocalOnly };
         });
         state.webKitDirectory = fProfile / "WebKit";
         auto* window = new summit::PreferencesWindow(BMessenger(this), state);
@@ -1011,6 +1048,7 @@ private:
         }
         fPreferences = BMessenger(window);
         window->Show();
+        if (tab) fPreferences.SendMessage(&show);
         BMessage browser = DefaultBrowserState();
         fPreferences.SendMessage(&browser);
         SendPreferencesState();
@@ -1034,11 +1072,11 @@ private:
                 state.AddBool("site_allowed", allowed);
             }
     }
-    void SendPreferencesState()
+    void SendPreferencesState(bool serverOnly = false)
     {
         if (!fPreferences.IsValid()) return;
         BMessage state(summit::kPreferencesState);
-        fShared->Read([&](const summit::Profile& profile) {
+        if (!serverOnly) fShared->Read([&](const summit::Profile& profile) {
             state.AddString("home_url", profile.homeURL.c_str());
             state.AddBool("show_bookmarks_bar", profile.showBookmarksBar);
             state.AddBool("restore_session", profile.restoreSession);
@@ -1046,6 +1084,9 @@ private:
             state.AddString("search_engine", profile.searchEngine.c_str());
             state.AddInt32("history_count", static_cast<int32>(profile.history.size()));
             state.AddInt32("trusted_certificates", static_cast<int32>(profile.trustedCertificates.size()));
+            state.AddBool("mcp_enabled", profile.mcpEnabled);
+            state.AddInt32("mcp_port", profile.mcpPort);
+            state.AddBool("mcp_local_only", profile.mcpLocalOnly);
             AddSitePermissions(state, profile);
             state.AddBool("has_protocol_handlers", true);
             for (const auto& [scheme, handler] : profile.protocolHandlers) {
@@ -1059,10 +1100,107 @@ private:
             }
             return 0;
         });
+#if SUMMIT_MODERN_WEBKIT
+        // What the server is doing now, and how a client reaches it.
+        if (fMcp) {
+            state.AddString("mcp_status", fMcp->Status().c_str());
+            state.AddString("mcp_endpoint", fMcp->Endpoint().c_str());
+            state.AddString("mcp_configuration", fMcp->ClientConfiguration().c_str());
+            state.AddBool("mcp_environment", std::getenv("SUMMIT_MCP") || std::getenv("SUMMIT_MCP_PORT") || std::getenv("SUMMIT_MCP_TOKEN"));
+        } else state.AddString("mcp_status", "Off");
+#endif
         fPreferences.SendMessage(&state);
     }
 #if SUMMIT_MODERN_WEBKIT
-    // Extension requests go to the window that holds the named tab or window,
+    // The built-in debugging server follows the profile's settings, and the
+    // environment's SUMMIT_MCP* overrides (McpService::Apply). Its token is
+    // made when it is first turned on.
+    void ApplyMcpSettings()
+    {
+        if (!fShared) return;
+        auto settings = fShared->Read([](const summit::Profile& profile) {
+            return summit::McpSettings { profile.mcpEnabled, static_cast<uint16>(profile.mcpPort), profile.mcpLocalOnly, profile.mcpToken };
+        });
+        const char* forced = std::getenv("SUMMIT_MCP");
+        const bool wanted = forced && *forced ? !std::strcmp(forced, "1") : settings.enabled;
+        if (wanted && settings.token.empty() && !std::getenv("SUMMIT_MCP_TOKEN")) {
+            settings.token = summit::McpService::NewToken();
+            const std::string token = settings.token;
+            fShared->Change([&](summit::Profile& profile) -> uint32 {
+                profile.mcpToken = token;
+                return summit::SharedProfile::kSettingsChanged;
+            });
+        }
+        if (!fMcp && !wanted) return;
+        if (!fMcp) fMcp = std::make_unique<summit::McpService>(BMessenger(this), fProfile);
+        fMcp->Apply(settings);
+    }
+    // The MCP server's questions for the application thread (McpService.h).
+    void McpRequest(BMessage* message)
+    {
+        using nlohmann::json;
+        const json request = json::parse(message->GetString("request", "{}"), nullptr, false);
+        const std::string action = request.is_object() ? request.value("action", "") : "";
+        if (action == "state") {
+            json state = {{"quitting", fQuitting}, {"windows", fWindows.size()}, {"privateSession", bool(fPrivateContext)},
+                {"downloads", fDownloads.size()}, {"profile", fProfile.string()},
+                {"extensionsReady", fExtensions && fExtensions->IsReady()}};
+            if (fExtensions && !fExtensions->CatalogError().empty()) state["extensionCatalogError"] = fExtensions->CatalogError();
+            if (fMcp) state["mcp"] = {{"status", fMcp->Status()}, {"endpoint", fMcp->Endpoint()}};
+            summit::McpReply(message, state);
+            return;
+        }
+        if (action == "extensions") {
+            json list = json::array();
+            if (fExtensions) {
+                for (const auto& entry : fExtensions->Entries()) {
+                    json item = {{"identifier", entry.installation.identifier}, {"name", entry.installation.name},
+                        {"version", entry.installation.version}, {"enabled", entry.installation.enabled}, {"loaded", entry.loaded},
+                        {"installed", entry.installed}, {"baseURL", entry.baseURL}, {"privateWindows", entry.installation.allowPrivateBrowsing},
+                        {"fileURLs", entry.installation.allowFileURLs}, {"order", entry.installation.installationOrder}};
+                    if (!entry.error.empty()) item["error"] = entry.error;
+                    if (!entry.notice.empty()) item["notice"] = entry.notice;
+                    if (!entry.newTabURL.empty()) item["newTabPage"] = entry.newTabURL;
+                    item["pinned"] = fShared && fShared->Read([&](const summit::Profile& profile) {
+                        return !profile.unpinnedExtensions.contains(entry.installation.identifier);
+                    });
+                    list.push_back(item);
+                }
+            }
+            summit::McpReply(message, {{"ready", fExtensions && fExtensions->IsReady()}, {"enabled", bool(fExtensions)},
+                {"installerBusy", fInstaller && fInstaller->IsBusy()}, {"extensions", list}});
+            return;
+        }
+        if (action == "extension_enable") {
+            const std::string identifier = request.value("extension", "");
+            if (!fExtensions || !fInstaller) { summit::McpReplyError(message, "extensions are not available in this build"); return; }
+            if (!fExtensions->IsReady() || fInstaller->IsBusy()) { summit::McpReplyError(message, "the extensions are busy (loading or installing)"); return; }
+            const bool done = fExtensions->SetEnabled(identifier, request.value("enabled", true));
+            RefreshExtensions();
+            if (!done) { summit::McpReplyError(message, "no extension " + identifier + " (or it already is that way)"); return; }
+            summit::McpReply(message, {{"extension", identifier}, {"enabled", request.value("enabled", true)}, {"note", "loading or unloading continues in the background"}});
+            return;
+        }
+        if (action == "preferences") {
+            json preferences = fShared->Read([](const summit::Profile& profile) {
+                json sites = json::object();
+                for (const auto& [permission, origins] : profile.sitePermissions)
+                    for (const auto& [origin, allowed] : origins) sites[permission][origin] = allowed;
+                json handlers = json::object();
+                for (const auto& [scheme, handler] : profile.protocolHandlers) handlers[scheme] = handler.target;
+                json certificates = json::array();
+                for (const auto& certificate : profile.trustedCertificates) certificates.push_back(certificate.host);
+                return json{{"homeURL", profile.homeURL}, {"searchEngine", profile.searchEngine}, {"restoreSession", profile.restoreSession},
+                    {"interfaceStyle", profile.interfaceStyle}, {"showBookmarksBar", profile.showBookmarksBar},
+                    {"bookmarks", profile.bookmarks.size()}, {"history", profile.history.size()}, {"siteZoom", profile.siteZoom},
+                    {"sitePermissions", sites}, {"protocolHandlers", handlers}, {"trustedCertificates", certificates},
+                    {"mcp", {{"enabled", profile.mcpEnabled}, {"port", profile.mcpPort}, {"localOnly", profile.mcpLocalOnly}}}};
+            });
+            summit::McpReply(message, preferences);
+            return;
+        }
+        summit::McpReplyError(message, "unknown request \"" + action + "\"");
+    }
     // otherwise to the front window; windows.create() opens a real window.
     void BrowserCommand(BMessage* message)
     {
@@ -1173,6 +1311,7 @@ private:
     std::unique_ptr<summit::SitePermissionService> fPrivateSitePermissions;
     std::unique_ptr<summit::ExtensionController> fExtensions;
     std::unique_ptr<summit::ExtensionInstaller> fInstaller;
+    std::unique_ptr<summit::McpService> fMcp;
     BMessenger fExtensionWindow;
     std::shared_ptr<std::atomic<unsigned>> fExtensionWindows = std::make_shared<std::atomic<unsigned>>(0);
     bool fWaitingForNativeUI = false;
@@ -1297,8 +1436,20 @@ static void PrepareResolver()
         freeaddrinfo(result);
 }
 
-int main()
+#if SUMMIT_MODERN_WEBKIT
+namespace summit { int RunMcpDebugHelper(int argc, char** argv); }
+#endif
+
+int main(int argc, char** argv)
 {
+#if SUMMIT_MODERN_WEBKIT
+    // The MCP server's stacks and profile tools run Summit again as a short
+    // debugger of a team (McpDebugHelper.cpp), never as a second browser.
+    if (argc >= 2 && !std::strcmp(argv[1], "--mcp-debug-helper")) return summit::RunMcpDebugHelper(argc, argv);
+#else
+    (void)argc;
+    (void)argv;
+#endif
     // Started by the system for a web link or a page (Summit is the default
     // browser), not by its launcher: take the launcher's environment.
     summit::ApplyLaunchEnvironment();
