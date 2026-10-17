@@ -225,15 +225,17 @@ second (1.26-1.31 s of jank in a 40-notch burst); its compositor thread is
 main thread a third busy. Of the ~310 textures created in that scroll ~125
 were tiles; ~120 came from blurred layers whose size changes in every frame
 (filter-cache surfaces of 727x513, 722x506, ... 676x454 and their blur
-passes), ~50 from other intermediate surfaces. The filter-cache surfaces now
-come in sizes on a 64-pixel grid when the filters reach outside the layer
-(the margin is transparent, so the padding stays so):
-filter-cache surfaces 15-22 against 50-54, all new textures 241 against 312
-in the final build's run, first-scroll jank 1.11 s against 1.34 s (one run
-each); near a blur's edge a pixel may differ by up to 25/255
-(`SUMMIT_FILTER_SURFACE_GRID=0` for exact sizes). Edge tiles whose width
-changes by a pixel or two between frames, and the other intermediate
-surfaces, still make new textures. Two other things seen: linear.app repaints all of its
+passes), ~50 from other intermediate surfaces. A filter-cache surface whose
+size changed by more than two pixels since it was last painted (a layer
+animated in size; smaller changes are a fractional move's rounding, whose
+two sizes the pool keeps) now comes in a size on a 64-pixel grid when the
+filters reach outside the layer: the margin kept for them is transparent, so
+the padding stays so. 600-1000-pixel-wide filter surfaces created in that
+scroll: 76-83 against 118-132; a blurred-and-clipped test page is
+pixel-identical after scrolling (`SUMMIT_FILTER_SURFACE_GRID=0` for exact
+sizes always). Edge tiles whose width changes by a pixel or two between
+frames, and the other intermediate surfaces, still make new textures. Two
+other things seen: linear.app repaints all of its
 root contents when a script changes an inherited property (a custom
 property) on `html` or `body` (`RenderBox::styleWillChange`), and a picture
 shader still rasterizes a real repeating pattern again for every recording.
