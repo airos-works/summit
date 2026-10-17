@@ -42672,10 +42672,18 @@ index 74cfeb60ac3daa537785693be3917358aa26a2b5..88ff5686da7145336f8b00b868fb5b61
  
  void FontCache::platformPurgeInactiveFontData()
 diff --git a/Source/WebCore/platform/graphics/skia/GraphicsContextSkia.cpp b/Source/WebCore/platform/graphics/skia/GraphicsContextSkia.cpp
-index a3cb981bd76fc7f7946862f8f7be53fe133bae79..5258439fc800fde2716f5a900f76f46f1c829654 100644
+index a3cb981bd76fc7f7946862f8f7be53fe133bae79..9940c85fdebbf9fca0023d37b809d31a24f00e8a 100644
 --- a/Source/WebCore/platform/graphics/skia/GraphicsContextSkia.cpp
 +++ b/Source/WebCore/platform/graphics/skia/GraphicsContextSkia.cpp
-@@ -50,6 +50,8 @@
+@@ -47,9 +47,16 @@
+ #include "SkiaUtilities.h"
+ #include <cmath>
+ #include <ranges>
++#if PLATFORM(HAIKU)
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#endif
  WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_BEGIN
  #include <skia/core/SkColorFilter.h>
  #include <skia/core/SkImage.h>
@@ -42684,7 +42692,7 @@ index a3cb981bd76fc7f7946862f8f7be53fe133bae79..5258439fc800fde2716f5a900f76f46f
  #include <skia/core/SkPathBuilder.h>
  #include <skia/core/SkPathEffect.h>
  #include <skia/core/SkPathTypes.h>
-@@ -421,7 +423,7 @@ void GraphicsContextSkia::drawSkiaPath(const SkPath& path, SkPaint& paint)
+@@ -421,7 +428,7 @@ void GraphicsContextSkia::drawSkiaPath(const SkPath& path, SkPaint& paint)
      if (hasDropShadow()) {
          inExtraTransparencyLayer = drawOutsetShadow(paint, [&](const SkPaint& paint) {
              m_canvas.drawPath(path, paint);
@@ -42693,7 +42701,7 @@ index a3cb981bd76fc7f7946862f8f7be53fe133bae79..5258439fc800fde2716f5a900f76f46f
      }
      m_canvas.drawPath(path, paint);
      if (inExtraTransparencyLayer)
-@@ -456,7 +458,11 @@ bool GraphicsContextSkia::drawPathAsSingleElement(const Path& path, SkPaint& pai
+@@ -456,7 +463,11 @@ bool GraphicsContextSkia::drawPathAsSingleElement(const Path& path, SkPaint& pai
              return false;
  
          SkRect oval = { arc.center.x() - arc.radius, arc.center.y() - arc.radius, arc.center.x() + arc.radius, arc.center.y() + arc.radius };
@@ -42706,7 +42714,7 @@ index a3cb981bd76fc7f7946862f8f7be53fe133bae79..5258439fc800fde2716f5a900f76f46f
              m_canvas.drawOval(oval, paint);
          else
              m_canvas.drawArc(oval, startDegrees, sweepDegrees, false, paint);
-@@ -575,15 +581,63 @@ sk_sp<SkImageFilter> GraphicsContextSkia::createDropShadowFilterIfNeeded(ShadowS
+@@ -575,15 +586,63 @@ sk_sp<SkImageFilter> GraphicsContextSkia::createDropShadowFilterIfNeeded(ShadowS
      return nullptr;
  }
  
@@ -42775,7 +42783,7 @@ index a3cb981bd76fc7f7946862f8f7be53fe133bae79..5258439fc800fde2716f5a900f76f46f
  
      auto reversed = m_skiaStateStack | std::views::reverse;
      auto it = std::ranges::find(reversed, true, &SkiaState::isLayer);
-@@ -650,7 +704,7 @@ void GraphicsContextSkia::drawSkiaRect(const SkRect& boundaries, SkPaint& paint)
+@@ -650,7 +709,7 @@ void GraphicsContextSkia::drawSkiaRect(const SkRect& boundaries, SkPaint& paint)
      if (hasDropShadow()) {
          inExtraTransparencyLayer = drawOutsetShadow(paint, [&](const SkPaint& paint) {
              m_canvas.drawRect(boundaries, paint);
@@ -42784,7 +42792,7 @@ index a3cb981bd76fc7f7946862f8f7be53fe133bae79..5258439fc800fde2716f5a900f76f46f
      }
      m_canvas.drawRect(boundaries, paint);
      if (inExtraTransparencyLayer)
-@@ -1092,7 +1146,7 @@ void GraphicsContextSkia::fillRoundedRectImpl(const FloatRoundedRect& rect, cons
+@@ -1092,7 +1151,7 @@ void GraphicsContextSkia::fillRoundedRectImpl(const FloatRoundedRect& rect, cons
      if (hasDropShadow()) {
          inExtraTransparencyLayer = drawOutsetShadow(paint, [&](const SkPaint& paint) {
              m_canvas.drawRRect(rect, paint);
@@ -42793,7 +42801,59 @@ index a3cb981bd76fc7f7946862f8f7be53fe133bae79..5258439fc800fde2716f5a900f76f46f
      }
      m_canvas.drawRRect(rect, paint);
      if (inExtraTransparencyLayer)
-@@ -1359,7 +1413,7 @@ void GraphicsContextSkia::drawSkiaText(const sk_sp<SkTextBlob>& blob, SkScalar x
+@@ -1180,6 +1239,51 @@ void GraphicsContextSkia::drawPattern(const NativeImage& nativeImage, const Floa
+ #endif
+         paint.setShader(image->makeShader(repeatX ? SkTileMode::kRepeat : SkTileMode::kClamp, repeatY ? SkTileMode::kRepeat : SkTileMode::kClamp, samplingOptions, &shaderMatrix));
+     } else {
++#if PLATFORM(HAIKU)
++        // The tile is the whole image but for rounding (a CSS background or
++        // gradient image at a fractional device scale: 1961.75 of 1962
++        // pixels) and the destination shows only its first copy, give or
++        // take a device pixel: the image is drawn through an image shader.
++        // The picture shader below rasterized the whole tile again for each
++        // recording that drew it, in the first tile painted from it
++        // (stripe.com: a 2000x1600-pixel gradient, about 45 ms per
++        // recording). SUMMIT_SINGLE_TILE_PATTERN=0 keeps the picture shader;
++        // SUMMIT_PATTERN_TRACE=1 prints the patterns that reach it.
++        static const bool singleTilePattern = [] {
++            const char* value = std::getenv("SUMMIT_SINGLE_TILE_PATTERN");
++            return !value || std::strcmp(value, "0");
++        }();
++        static const bool patternTrace = [] {
++            const char* value = std::getenv("SUMMIT_PATTERN_TRACE");
++            return value && *value && std::strcmp(value, "0");
++        }();
++        if (patternTrace) {
++            SkMatrix traceInverse;
++            SkRect traceRect = SkRect::MakeEmpty();
++            if (shaderMatrix.invert(&traceInverse))
++                traceInverse.mapRect(&traceRect, SkRect::MakeXYWH(destRect.x(), destRect.y(), destRect.width(), destRect.height()));
++            fprintf(stderr, "summit-pattern tile=%.2f,%.2f %.2fx%.2f image=%dx%d spacing=%.2fx%.2f dest=%.2f,%.2f %.2fx%.2f pattern=%.2f,%.2f..%.2f,%.2f texture=%d\n", tileRect.x(), tileRect.y(), tileRect.width(), tileRect.height(), size.width(), size.height(), spacing.width(), spacing.height(), destRect.x(), destRect.y(), destRect.width(), destRect.height(), traceRect.left(), traceRect.top(), traceRect.right(), traceRect.bottom(), image->isTextureBacked());
++        }
++        SkMatrix inverse;
++        if (singleTilePattern && !image->isTextureBacked()
++            && std::abs(tileRect.x()) < 1 && std::abs(tileRect.y()) < 1
++            && std::abs(tileRect.maxX() - size.width()) < 1 && std::abs(tileRect.maxY() - size.height()) < 1
++            && shaderMatrix.invert(&inverse)) {
++            SkRect patternRect;
++            inverse.mapRect(&patternRect, SkRect::MakeXYWH(destRect.x(), destRect.y(), destRect.width(), destRect.height()));
++            // Within a device pixel: an image buffer of 901.7 CSS pixels at
++            // 175 % is 1577 pixels tall for a destination of 1577.98, whose
++            // last row the repeating shader filled from the tile's first one.
++            constexpr float tolerance = 1;
++            if (patternRect.left() >= -tolerance && patternRect.top() >= -tolerance
++                && patternRect.right() <= tileRect.width() + tolerance && patternRect.bottom() <= tileRect.height() + tolerance) {
++                auto imageMatrix = SkMatrix::Concat(shaderMatrix, SkMatrix::Translate(-tileRect.x(), -tileRect.y()));
++                paint.setShader(image->makeShader(SkTileMode::kClamp, SkTileMode::kClamp, samplingOptions, &imageMatrix));
++                m_canvas.drawRect(destRect, paint);
++                return;
++            }
++        }
++#endif
+         auto tileFloatRectWithSpacing = FloatRect(0, 0, tileRect.width() + spacing.width() / patternTransform.a(), tileRect.height() + spacing.height() / patternTransform.d());
+         if (image->isTextureBacked()) {
+             auto enclosingTileIntRect = enclosingIntRect(tileRect);
+@@ -1359,7 +1463,7 @@ void GraphicsContextSkia::drawSkiaText(const sk_sp<SkTextBlob>& blob, SkScalar x
          if (hasDropShadow()) {
              inExtraTransparencyLayer = drawOutsetShadow(paint, [&](const SkPaint& paint) {
                  m_canvas.drawTextBlob(blob, x, y, paint);
