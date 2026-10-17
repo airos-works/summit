@@ -64954,7 +64954,7 @@ index 4bf8021fddeb356aa2f416e2b5c07aae6136387b..2d3bb774ef11e3a05725494bd7c47249
  #if ENABLE(FULLSCREEN_API)
      // FIXME: does this require layout?
 diff --git a/Source/WebCore/rendering/RenderObject.cpp b/Source/WebCore/rendering/RenderObject.cpp
-index 5a90dd68672464ece91671bee69e2598510a2ebb..c555e47669b32e48bb179d6079378e06eea8d56c 100644
+index 5a90dd68672464ece91671bee69e2598510a2ebb..fc069a89103a084e9466658ad1806068cc3345a2 100644
 --- a/Source/WebCore/rendering/RenderObject.cpp
 +++ b/Source/WebCore/rendering/RenderObject.cpp
 @@ -34,6 +34,7 @@
@@ -65052,6 +65052,36 @@ index 5a90dd68672464ece91671bee69e2598510a2ebb..c555e47669b32e48bb179d6079378e06
      bool hasOutOfFlowPosition = isOutOfFlowPositioned();
  
      while (ancestor) {
+@@ -1106,6 +1159,29 @@ void RenderObject::repaintSlowRepaintObject() const
+     } else
+         repaintRect = snappedIntRect(clippedOverflowRectForRepaint(repaintContainer.get()));
+ 
++#if PLATFORM(HAIKU)
++    // A fixed background moves against the page at every scroll step, and
++    // scrolling is synchronous while such objects exist, so the step only
++    // has to repaint what is in view: the rest is repainted at the step that
++    // brings it into view. Repainting the whole renderer repainted every tile
++    // kept around the view (tailwindcss.com: two 40 by 11783-pixel striped
++    // columns and a dozen dotted cards, 59 repaints a second of six rows of
++    // tiles while scrolling). SUMMIT_SLOW_REPAINT_IN_VIEW=0 repaints all.
++    static const bool repaintsInViewOnly = [] {
++        const char* value = std::getenv("SUMMIT_SLOW_REPAINT_IN_VIEW");
++        return !value || std::strcmp(value, "0");
++    }();
++    if (repaintsInViewOnly) {
++        Ref frameView = view->frameView();
++        FloatRect visibleRect = frameView->windowToContents(frameView->windowClipRect());
++        if (repaintContainer && !repaintContainer->isRenderView())
++            visibleRect = repaintContainer->absoluteToLocalQuad(FloatQuad { visibleRect }).boundingBox();
++        repaintRect.intersect(enclosingIntRect(visibleRect));
++        if (repaintRect.isEmpty())
++            return;
++    }
++#endif
++
+     repaintUsingContainer(repaintContainer.get(), repaintRect, clipRepaintToLayer);
+ }
+ 
 diff --git a/Source/WebCore/rendering/RenderText.cpp b/Source/WebCore/rendering/RenderText.cpp
 index a52a008e494939c3874a83a8ae10bfc16a5b7025..53c7f1a89a1a416c12c91ddd5ac5c43b83149fc7 100644
 --- a/Source/WebCore/rendering/RenderText.cpp
