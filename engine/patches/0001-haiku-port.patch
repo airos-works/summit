@@ -31131,10 +31131,10 @@ index 0000000000000000000000000000000000000000..1a59f5ca77ca81301993268bcdee2f36
 +} // namespace WebCore
 diff --git a/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaiku.cpp b/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..858efffc0f4f816b93c2badf9c4649a2686a96f4
+index 0000000000000000000000000000000000000000..7ea4e5ea1fb10f07cb453ba2a1929dd63863dd65
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaiku.cpp
-@@ -0,0 +1,1929 @@
+@@ -0,0 +1,1952 @@
 +/*
 + * Copyright (C) 2014-2016 Haiku, Inc.
 + *
@@ -31180,10 +31180,12 @@ index 0000000000000000000000000000000000000000..858efffc0f4f816b93c2badf9c4649a2
 +
 +#include "GraphicsContext.h"
 +#include "NotImplemented.h"
++#include "OriginAccessPatterns.h"
 +#include "PlatformMediaResourceLoader.h"
 +#include "ResourceError.h"
 +#include "ResourceRequest.h"
 +#include "ResourceResponse.h"
++#include "SecurityOrigin.h"
 +#include "SharedBuffer.h"
 +#include "wtf/text/CString.h"
 +#include "wtf/NeverDestroyed.h"
@@ -31446,11 +31448,14 @@ index 0000000000000000000000000000000000000000..858efffc0f4f816b93c2badf9c4649a2
 +    m_userAgent = m_player.userAgent().utf8().legacyCStringPointer();
 +    m_referrer = m_player.referrer().utf8().legacyCStringPointer();
 +    // The element's crossorigin attribute: media fetched with it is checked
-+    // against the page's origin (MediaCORSPolicy).
++    // against the page's origin (MediaRequestContext).
 +    String crossOriginMode = m_player.mediaResourceLoader()->crossOriginMode();
 +    m_corsOrigin = crossOriginMode.isNull() ? std::string() : m_player.documentSecurityOrigin().toString().utf8().legacyCStringPointer();
 +    m_corsWithCredentials = crossOriginMode == "use-credentials"_s;
 +    m_didPassCORSAccessCheck = false;
++#if USE(CURL)
++    m_responseURLs = std::make_shared<MediaResponseURLs>();
++#endif
 +
 +    URL parsedURL { url };
 +    if (!((parsedURL.protocolIsBlob() || parsedURL.protocolIsData()) && startPrefetchHaiku(parsedURL))) {
@@ -32312,6 +32317,26 @@ index 0000000000000000000000000000000000000000..858efffc0f4f816b93c2badf9c4649a2
 +    return m_didPassCORSAccessCheck;
 +}
 +
++std::optional<bool> MediaPlayerPrivate::isCrossOrigin(const SecurityOrigin& origin) const
++{
++#if USE(CURL)
++    // Where the media came from, redirects included, not only the address
++    // the page gave. Nothing yet (blob:, data:, file: media): MediaPlayer
++    // judges by that address.
++    auto urls = m_responseURLs ? m_responseURLs->urls() : std::vector<std::string> { };
++    if (urls.empty())
++        return std::nullopt;
++    for (auto& url : urls) {
++        if (!origin.canRequest(URL { String::fromUTF8(url.c_str()) }, originAccessPatternsForWebProcessOrEmpty()))
++            return true;
++    }
++    return false;
++#else
++    UNUSED_PARAM(origin);
++    return std::nullopt;
++#endif
++}
++
 +void MediaPlayerPrivate::paint(GraphicsContext& context, const FloatRect& r)
 +{
 +    if (context.paintingDisabled())
@@ -32366,7 +32391,7 @@ index 0000000000000000000000000000000000000000..858efffc0f4f816b93c2badf9c4649a2
 +    void*& activeDownload;
 +};
 +
-+static bool downloadMediaFile(const BUrl& url, MediaDownloadCancellation& cancellation, String& path, const MediaCORSPolicy& cors = { })
++static bool downloadMediaFile(const BUrl& url, MediaDownloadCancellation& cancellation, const MediaRequestContext& context, String& path)
 +{
 +    char name[] = "/tmp/summit-media-XXXXXX";
 +    int descriptor = mkstemp(name);
@@ -32382,16 +32407,16 @@ index 0000000000000000000000000000000000000000..858efffc0f4f816b93c2badf9c4649a2
 +    struct Download {
 +        FILE* output;
 +        std::atomic<bool>& abort;
-+        MediaCORSResponses cors;
++        MediaResponseCheck responses;
 +        CURL* request { nullptr };
 +        long status { 0 };
 +        size_t bytes { 0 };
-+    } download { output, cancellation.abort, MediaCORSResponses { cors } };
++    } download { output, cancellation.abort, MediaResponseCheck { context } };
 +
 +    CURL* request = curl_easy_init();
 +    CURLcode result = CURLE_FAILED_INIT;
 +    long response = 0;
-+    curl_slist* headers = mediaCORSRequestHeaders(cors);
++    curl_slist* headers = mediaRequestHeaders(context);
 +    if (request) {
 +        download.request = request;
 +        curl_easy_setopt(request, CURLOPT_URL, url.UrlString().String());
@@ -32402,11 +32427,11 @@ index 0000000000000000000000000000000000000000..858efffc0f4f816b93c2badf9c4649a2
 +            auto& download = *static_cast<Download*>(context);
 +            size_t length = size * count;
 +            std::string_view line(bytes, length);
-+            download.cors.header(line);
++            download.responses.header(line);
 +            if (line.starts_with("HTTP/")) {
 +                auto space = line.find(' ');
 +                download.status = space == std::string_view::npos ? 0 : std::strtol(line.data() + space + 1, nullptr, 10);
-+            } else if ((line == "\r\n" || line == "\n") && !download.cors.passes(download.request, download.status))
++            } else if ((line == "\r\n" || line == "\n") && !download.responses.passes(download.request, download.status))
 +                return 0;
 +            return length;
 +        });
@@ -32539,10 +32564,10 @@ index 0000000000000000000000000000000000000000..858efffc0f4f816b93c2badf9c4649a2
 +    return std::nullopt;
 +}
 +
-+static bool downloadPlaylist(const BUrl& url, MediaDownloadCancellation& cancellation, std::string& playlist)
++static bool downloadPlaylist(const BUrl& url, MediaDownloadCancellation& cancellation, const MediaRequestContext& context, std::string& playlist)
 +{
 +    String path;
-+    if (!downloadMediaFile(url, cancellation, path))
++    if (!downloadMediaFile(url, cancellation, context, path))
 +        return false;
 +
 +    auto pathCString = path.utf8();
@@ -32633,10 +32658,10 @@ index 0000000000000000000000000000000000000000..858efffc0f4f816b93c2badf9c4649a2
 +}
 +
 +static std::optional<BUrl> mediaURLForByteRangePlaylist(const BUrl& playlistURL,
-+    MediaDownloadCancellation& cancellation)
++    MediaDownloadCancellation& cancellation, const MediaRequestContext& context)
 +{
 +    std::string playlist;
-+    if (!downloadPlaylist(playlistURL, cancellation, playlist))
++    if (!downloadPlaylist(playlistURL, cancellation, context, playlist))
 +        return std::nullopt;
 +
 +    auto lines = playlistLines(playlist);
@@ -32686,10 +32711,10 @@ index 0000000000000000000000000000000000000000..858efffc0f4f816b93c2badf9c4649a2
 +}
 +
 +static bool downloadHLSByteRangeMedia(const BUrl& masterURL, MediaDownloadCancellation& cancellation,
-+    String& videoPath, String& audioPath)
++    const MediaRequestContext& context, String& videoPath, String& audioPath)
 +{
 +    std::string masterPlaylist;
-+    if (!downloadPlaylist(masterURL, cancellation, masterPlaylist))
++    if (!downloadPlaylist(masterURL, cancellation, context, masterPlaylist))
 +        return false;
 +    HLSVariant variant;
 +    std::optional<HLSAudioRendition> audioRendition;
@@ -32699,15 +32724,15 @@ index 0000000000000000000000000000000000000000..858efffc0f4f816b93c2badf9c4649a2
 +    auto videoPlaylistURL = resolvePlaylistReference(masterURL, variant.playlist);
 +    if (!videoPlaylistURL)
 +        return false;
-+    auto videoURL = mediaURLForByteRangePlaylist(*videoPlaylistURL, cancellation);
-+    if (!videoURL || !downloadMediaFile(*videoURL, cancellation, videoPath))
++    auto videoURL = mediaURLForByteRangePlaylist(*videoPlaylistURL, cancellation, context);
++    if (!videoURL || !downloadMediaFile(*videoURL, cancellation, context, videoPath))
 +        return false;
 +
 +    if (!audioRendition)
 +        return true;
 +    auto audioPlaylistURL = resolvePlaylistReference(masterURL, audioRendition->playlist);
-+    auto audioURL = audioPlaylistURL ? mediaURLForByteRangePlaylist(*audioPlaylistURL, cancellation) : std::nullopt;
-+    if (!audioURL || !downloadMediaFile(*audioURL, cancellation, audioPath)) {
++    auto audioURL = audioPlaylistURL ? mediaURLForByteRangePlaylist(*audioPlaylistURL, cancellation, context) : std::nullopt;
++    if (!audioURL || !downloadMediaFile(*audioURL, cancellation, context, audioPath)) {
 +        auto videoPathCString = videoPath.utf8();
 +        unlink(videoPathCString.legacyCStringPointer());
 +        videoPath = { };
@@ -32751,19 +32776,17 @@ index 0000000000000000000000000000000000000000..858efffc0f4f816b93c2badf9c4649a2
 +#if USE(CURL)
 +    if (!hasLocalFile && (mediaURL.Protocol() == "http" || mediaURL.Protocol() == "https")) {
 +        MediaDownloadCancellation cancellation { m_abort, m_downloadLock, m_activeDownload };
-+        MediaCORSPolicy cors { m_corsOrigin, m_corsWithCredentials };
++        MediaRequestContext context { m_corsOrigin, m_corsWithCredentials, m_responseURLs };
 +        if (isHLSPlaylistURL(mediaURL)) {
-+            if (!downloadHLSByteRangeMedia(mediaURL, cancellation, m_downloadPath, m_secondaryDownloadPath))
++            if (!downloadHLSByteRangeMedia(mediaURL, cancellation, context, m_downloadPath, m_secondaryDownloadPath))
 +                return;
-+        } else {
-+            if (auto stream = mediaStreamingEnabled() ? StreamingMediaIO::open(mediaURL.UrlString().String(), m_abort, m_userAgent, m_referrer, cors) : nullptr)
-+                m_downloadFile = stream.release();
-+            else if (m_abort || !downloadMediaFile(mediaURL, cancellation, m_downloadPath, cors))
-+                return;
-+            // Every response so far allowed the page, and later ones that
-+            // do not deliver nothing.
-+            m_didPassCORSAccessCheck = cors.required();
-+        }
++        } else if (auto stream = mediaStreamingEnabled() ? StreamingMediaIO::open(mediaURL.UrlString().String(), m_abort, m_userAgent, m_referrer, context) : nullptr)
++            m_downloadFile = stream.release();
++        else if (m_abort || !downloadMediaFile(mediaURL, cancellation, context, m_downloadPath))
++            return;
++        // Every response so far allowed the page, and later ones that do not
++        // deliver nothing.
++        m_didPassCORSAccessCheck = context.corsRequired();
 +        if (!m_downloadFile) {
 +            auto* file = new BFile(m_downloadPath.utf8().legacyCStringPointer(), B_READ_ONLY);
 +            m_downloadFile = file;
@@ -33066,10 +33089,10 @@ index 0000000000000000000000000000000000000000..858efffc0f4f816b93c2badf9c4649a2
 +#endif
 diff --git a/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaiku.h b/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaiku.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..c660a376047c18bcf02b898b298b7e0bb54bc528
+index 0000000000000000000000000000000000000000..f62c80d30a84db0292b4f86920744a7d4adcd87f
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaiku.h
-@@ -0,0 +1,248 @@
+@@ -0,0 +1,254 @@
 +/*
 + * Copyright (C) 2014 Haiku, Inc.
 + *
@@ -33122,6 +33145,7 @@ index 0000000000000000000000000000000000000000..c660a376047c18bcf02b898b298b7e0b
 +
 +class MediaPlayerFactoryHaiku;
 +
++class MediaResponseURLs;
 +class SubstituteVideoDecoderHaiku;
 +class PlatformMediaResource;
 +
@@ -33185,6 +33209,9 @@ index 0000000000000000000000000000000000000000..c660a376047c18bcf02b898b298b7e0b
 +        // True when the element has a crossorigin attribute and its media
 +        // passed the CORS check: WebGL and canvas may then read its frames.
 +        bool didPassCORSAccessCheck() const final;
++        // Whether any response the media came from, redirects included, is
++        // from another origin than origin's.
++        std::optional<bool> isCrossOrigin(const SecurityOrigin&) const final;
 +
 +        void paint(GraphicsContext&, const FloatRect&) override;
 +#if USE(COORDINATED_GRAPHICS) && USE(TEXTURE_MAPPER) && USE(SKIA)
@@ -33301,6 +33328,8 @@ index 0000000000000000000000000000000000000000..c660a376047c18bcf02b898b298b7e0b
 +        std::string m_corsOrigin;
 +        bool m_corsWithCredentials { false };
 +        std::atomic<bool> m_didPassCORSAccessCheck { false };
++        // Where the media's responses came from (isCrossOrigin()).
++        std::shared_ptr<MediaResponseURLs> m_responseURLs;
 +        String m_downloadPath;
 +        String m_secondaryDownloadPath;
 +
@@ -39317,10 +39346,10 @@ index 0000000000000000000000000000000000000000..ca4c2bcb3955d009cccdd88bc4fbcfaa
 +} // namespace WebCore
 diff --git a/Source/WebCore/platform/graphics/haiku/StreamingMediaIOHaiku.h b/Source/WebCore/platform/graphics/haiku/StreamingMediaIOHaiku.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..c4a29412b40d4c006b38e1cc70f70542e3bedcff
+index 0000000000000000000000000000000000000000..342ac91f95b58630b3659f0f8090ff75b3ad38c5
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/haiku/StreamingMediaIOHaiku.h
-@@ -0,0 +1,484 @@
+@@ -0,0 +1,527 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#pragma once
@@ -39347,24 +39376,8 @@ index 0000000000000000000000000000000000000000..c4a29412b40d4c006b38e1cc70f70542
 +
 +namespace WebCore {
 +
-+// A media element with a crossorigin attribute may hand its frames to WebGL
-+// and canvas only when its media passed a CORS check. Media is fetched here
-+// with libcurl, not through WebCore, so nothing checked and every such video
-+// stayed cross-origin: getartcraft.com draws 35 CDN videos into WebGL, each
-+// texImage2D() threw SecurityError and the cells stayed grey. The requests
-+// now carry the page's origin and every response the bytes come through,
-+// each step of a redirect included, must allow it; one that does not ends
-+// the transfer, as it fails the load in other browsers.
-+struct MediaCORSPolicy {
-+    // The page's origin as "scheme://host[:port]"; empty when the element
-+    // has no crossorigin attribute and nothing is checked.
-+    std::string origin;
-+    bool withCredentials { false };
-+
-+    bool required() const { return !origin.empty(); }
-+};
-+
-+// The origin of a URL in the form MediaCORSPolicy::origin has it.
++// The origin of a URL as "scheme://host[:port]", the form
++// MediaRequestContext::corsOrigin has it.
 +inline std::string mediaURLOrigin(const char* url)
 +{
 +    std::string origin;
@@ -39387,13 +39400,66 @@ index 0000000000000000000000000000000000000000..c4a29412b40d4c006b38e1cc70f70542
 +    return origin;
 +}
 +
-+// Follows the responses of one transfer (a redirect chain) for a
-+// MediaCORSPolicy: header() takes each header line as libcurl hands it over,
-+// passes() decides at the blank line that ends a response's headers.
-+class MediaCORSResponses {
++// The addresses a media element's responses came from, one for each origin,
++// every step of every redirect included. MediaPlayer judged whether a page
++// may read the frames (canvas, WebGL) by the address the page gave alone, so
++// a same-origin address that redirected to another site handed that site's
++// video to the page; MediaPlayerPrivate::isCrossOrigin() asks about all of
++// these instead. Filled by the fetching threads, read on the page thread.
++class MediaResponseURLs {
 +public:
-+    explicit MediaCORSResponses(const MediaCORSPolicy& policy)
-+        : m_policy(policy)
++    void add(const char* url)
++    {
++        auto origin = mediaURLOrigin(url);
++        std::lock_guard lock(m_lock);
++        if (std::find(m_origins.begin(), m_origins.end(), origin) != m_origins.end())
++            return;
++        m_origins.push_back(std::move(origin));
++        m_urls.emplace_back(url);
++    }
++
++    std::vector<std::string> urls() const
++    {
++        std::lock_guard lock(m_lock);
++        return m_urls;
++    }
++
++private:
++    mutable std::mutex m_lock;
++    std::vector<std::string> m_origins;
++    std::vector<std::string> m_urls;
++};
++
++// What a media element's requests carry from its page, and where their
++// responses report back to.
++//
++// A media element with a crossorigin attribute may hand its frames to WebGL
++// and canvas only when its media passed a CORS check. Media is fetched here
++// with libcurl, not through WebCore, so nothing checked and every such video
++// stayed cross-origin: getartcraft.com draws 35 CDN videos into WebGL, each
++// texImage2D() threw SecurityError and the cells stayed grey. The requests
++// now carry the page's origin and every response the bytes come through,
++// each step of a redirect included, must allow it; one that does not ends
++// the transfer, as it fails the load in other browsers.
++struct MediaRequestContext {
++    // The page's origin when the element has a crossorigin attribute; empty
++    // when it has none and nothing is checked.
++    std::string corsOrigin;
++    bool corsWithCredentials { false };
++    // Null when nobody asks where the responses came from.
++    std::shared_ptr<MediaResponseURLs> responseURLs;
++
++    bool corsRequired() const { return !corsOrigin.empty(); }
++};
++
++// Follows the responses of one transfer (a redirect chain) for a
++// MediaRequestContext: header() takes each header line as libcurl hands it
++// over, passes() notes where the response came from and decides at the blank
++// line that ends its headers whether the page may have it.
++class MediaResponseCheck {
++public:
++    explicit MediaResponseCheck(const MediaRequestContext& context)
++        : m_context(context)
 +    {
 +    }
 +
@@ -39415,20 +39481,26 @@ index 0000000000000000000000000000000000000000..c4a29412b40d4c006b38e1cc70f70542
 +    bool passes(CURL* request, long status)
 +    {
 +        // An informational response (103 Early Hints) is followed by the real one.
-+        if (!m_policy.required() || status < 200)
++        if (status < 200)
++            return true;
++        char* url = nullptr;
++        if (curl_easy_getinfo(request, CURLINFO_EFFECTIVE_URL, &url) != CURLE_OK)
++            url = nullptr;
++        if (url && m_context.responseURLs)
++            m_context.responseURLs->add(url);
++        if (!m_context.corsRequired())
 +            return true;
 +        // Once a redirect has left the page's origin, every later response
 +        // needs the server's permission, even one back at the page's origin.
-+        char* url = nullptr;
-+        if (!m_crossOrigin && (curl_easy_getinfo(request, CURLINFO_EFFECTIVE_URL, &url) != CURLE_OK || !url || mediaURLOrigin(url) != m_policy.origin))
++        if (!m_crossOrigin && (!url || mediaURLOrigin(url) != m_context.corsOrigin))
 +            m_crossOrigin = true;
 +        if (!m_crossOrigin)
 +            return true;
 +        if (m_allowOriginCount != 1)
 +            return false;
-+        if (m_policy.withCredentials)
-+            return m_allowOrigin == m_policy.origin && m_allowCredentials;
-+        return m_allowOrigin == "*" || m_allowOrigin == m_policy.origin;
++        if (m_context.corsWithCredentials)
++            return m_allowOrigin == m_context.corsOrigin && m_allowCredentials;
++        return m_allowOrigin == "*" || m_allowOrigin == m_context.corsOrigin;
 +    }
 +
 +private:
@@ -39444,19 +39516,19 @@ index 0000000000000000000000000000000000000000..c4a29412b40d4c006b38e1cc70f70542
 +        return value;
 +    }
 +
-+    const MediaCORSPolicy& m_policy;
++    const MediaRequestContext& m_context;
 +    std::string m_allowOrigin;
 +    unsigned m_allowOriginCount { 0 };
 +    bool m_allowCredentials { false };
 +    bool m_crossOrigin { false };
 +};
 +
-+// The Origin header of a request made under a MediaCORSPolicy, or null.
-+inline curl_slist* mediaCORSRequestHeaders(const MediaCORSPolicy& policy)
++// The Origin header of a request made for a MediaRequestContext, or null.
++inline curl_slist* mediaRequestHeaders(const MediaRequestContext& context)
 +{
-+    if (!policy.required())
++    if (!context.corsRequired())
 +        return nullptr;
-+    return curl_slist_append(nullptr, ("Origin: " + policy.origin).c_str());
++    return curl_slist_append(nullptr, ("Origin: " + context.corsOrigin).c_str());
 +}
 +
 +// Media Kit reads a file through BPositionIO. Downloading the whole file
@@ -39474,16 +39546,16 @@ index 0000000000000000000000000000000000000000..c4a29412b40d4c006b38e1cc70f70542
 +    static constexpr off_t reachAhead = 2 * 1024 * 1024;
 +
 +    // Null when the server does not say how large the file is, or refuses
-+    // the page under cors.
++    // the page under context's CORS check.
 +    // Requests carry the page's user agent and referrer: some media hosts
 +    // refuse anything else.
 +    static std::unique_ptr<StreamingMediaIO> open(const char* url, std::atomic<bool>& abort,
-+        const std::string& userAgent = { }, const std::string& referrer = { }, const MediaCORSPolicy& cors = { })
++        const std::string& userAgent = { }, const std::string& referrer = { }, const MediaRequestContext& context = { })
 +    {
 +        std::unique_ptr<StreamingMediaIO> io(new StreamingMediaIO(url, abort));
 +        io->m_userAgent = userAgent;
 +        io->m_referrer = referrer;
-+        io->m_cors = cors;
++        io->m_context = context;
 +        io->m_thread = std::thread([raw = io.get()] { raw->run(); });
 +        std::unique_lock lock(io->m_lock);
 +        while (!io->m_sizeKnown && !io->m_failed && !abort)
@@ -39627,18 +39699,18 @@ index 0000000000000000000000000000000000000000..c4a29412b40d4c006b38e1cc70f70542
 +            off_t start;
 +            off_t offset;
 +            CURL* request { nullptr };
-+            MediaCORSResponses cors;
++            MediaResponseCheck responses;
 +            long status { 0 };
 +            off_t total { -1 };
 +            off_t length { -1 };
 +            bool delivered { false };
-+        } transfer { *this, start, start, nullptr, MediaCORSResponses { m_cors } };
++        } transfer { *this, start, start, nullptr, MediaResponseCheck { m_context } };
 +
 +        CURL* request = curl_easy_init();
 +        if (!request)
 +            return false;
 +        transfer.request = request;
-+        curl_slist* headers = mediaCORSRequestHeaders(m_cors);
++        curl_slist* headers = mediaRequestHeaders(m_context);
 +        if (headers)
 +            curl_easy_setopt(request, CURLOPT_HTTPHEADER, headers);
 +        char range[64];
@@ -39661,7 +39733,7 @@ index 0000000000000000000000000000000000000000..c4a29412b40d4c006b38e1cc70f70542
 +            auto& transfer = *static_cast<Transfer*>(context);
 +            size_t length = size * count;
 +            std::string_view line(bytes, length);
-+            transfer.cors.header(line);
++            transfer.responses.header(line);
 +            // Each response of a redirect chain starts with its status line.
 +            if (line.starts_with("HTTP/")) {
 +                auto space = line.find(' ');
@@ -39674,11 +39746,11 @@ index 0000000000000000000000000000000000000000..c4a29412b40d4c006b38e1cc70f70542
 +            } else if (line.size() > 16 && !strncasecmp(line.data(), "content-length:", 15))
 +                transfer.length = std::strtoll(line.data() + 15, nullptr, 10);
 +            else if (line == "\r\n" || line == "\n") {
-+                if (!transfer.cors.passes(transfer.request, transfer.status)) {
++                if (!transfer.responses.passes(transfer.request, transfer.status)) {
 +                    char* url = nullptr;
 +                    curl_easy_getinfo(transfer.request, CURLINFO_EFFECTIVE_URL, &url);
 +                    std::fprintf(stderr, "Summit media: %s does not allow %s to read it (CORS)\n",
-+                        url ? mediaURLOrigin(url).c_str() : "?", transfer.io.m_cors.origin.c_str());
++                        url ? mediaURLOrigin(url).c_str() : "?", transfer.io.m_context.corsOrigin.c_str());
 +                    return 0;
 +                }
 +                if (transfer.status == 200 || transfer.status == 206)
@@ -39784,7 +39856,7 @@ index 0000000000000000000000000000000000000000..c4a29412b40d4c006b38e1cc70f70542
 +    const std::string m_url;
 +    std::string m_userAgent;
 +    std::string m_referrer;
-+    MediaCORSPolicy m_cors;
++    MediaRequestContext m_context;
 +    std::atomic<bool>& m_abort;
 +    off_t m_position { 0 };
 +    std::thread m_thread;
