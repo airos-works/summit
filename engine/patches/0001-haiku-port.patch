@@ -44924,10 +44924,10 @@ index f4510ce2501dd8b7577ceb994e9090da9e649dda..ba78da56a8a4e5249b4e0c83047186e2
          Opacity          = 1L << 3,
          Antialiasing     = 1L << 5,
 diff --git a/Source/WebCore/platform/graphics/texmap/coordinated/CoordinatedBackingStore.cpp b/Source/WebCore/platform/graphics/texmap/coordinated/CoordinatedBackingStore.cpp
-index 0badc4492a49e10ae2faa80d59da84a9cea259d6..c97d840e5793a9550a73cb1b842adc7537a9258b 100644
+index 0badc4492a49e10ae2faa80d59da84a9cea259d6..0873e0a34af34321956b616c52faf15c75cb930b 100644
 --- a/Source/WebCore/platform/graphics/texmap/coordinated/CoordinatedBackingStore.cpp
 +++ b/Source/WebCore/platform/graphics/texmap/coordinated/CoordinatedBackingStore.cpp
-@@ -24,35 +24,156 @@
+@@ -24,35 +24,157 @@
  #include "BitmapTexture.h"
  #include "CoordinatedTileBuffer.h"
  #include "GraphicsLayer.h"
@@ -44943,6 +44943,7 @@ index 0badc4492a49e10ae2faa80d59da84a9cea259d6..c97d840e5793a9550a73cb1b842adc75
 +#include <OS.h>
 +#include <cstdio>
 +#include <cstdlib>
++#include <cstring>
 +#include <wtf/Scope.h>
 +#endif
 +
@@ -45084,7 +45085,7 @@ index 0badc4492a49e10ae2faa80d59da84a9cea259d6..c97d840e5793a9550a73cb1b842adc75
  
      for (auto& tile : m_tiles.values())
          tile.processPendingUpdates();
-@@ -62,6 +183,9 @@ void CoordinatedBackingStore::processPendingUpdates()
+@@ -62,6 +184,9 @@ void CoordinatedBackingStore::processPendingUpdates()
  
  void CoordinatedBackingStore::resize(const FloatSize& size, float scale)
  {
@@ -45094,7 +45095,7 @@ index 0badc4492a49e10ae2faa80d59da84a9cea259d6..c97d840e5793a9550a73cb1b842adc75
      m_size = size;
      m_scale = scale;
  }
-@@ -74,6 +198,17 @@ void CoordinatedBackingStore::paintToTextureMapper(TextureMapper& textureMapper,
+@@ -74,6 +199,17 @@ void CoordinatedBackingStore::paintToTextureMapper(TextureMapper& textureMapper,
      ASSERT(!m_size.isZero());
      FloatRect layerRect = { { }, m_size };
      TransformationMatrix adjustedTransform = transform * TransformationMatrix::rectToRect(layerRect, targetRect);
@@ -45112,7 +45113,7 @@ index 0badc4492a49e10ae2faa80d59da84a9cea259d6..c97d840e5793a9550a73cb1b842adc75
  
  #if ENABLE(DAMAGE_TRACKING)
      const auto& frameDamage = textureMapper.damage();
-@@ -86,8 +221,43 @@ void CoordinatedBackingStore::paintToTextureMapper(TextureMapper& textureMapper,
+@@ -86,8 +222,43 @@ void CoordinatedBackingStore::paintToTextureMapper(TextureMapper& textureMapper,
      }();
  #endif
  
@@ -45156,7 +45157,7 @@ index 0badc4492a49e10ae2faa80d59da84a9cea259d6..c97d840e5793a9550a73cb1b842adc75
          const auto allEdgesExposed = allTileEdgesExposed(layerRect, tile.rect()) ? TextureMapper::AllEdgesExposed::Yes : TextureMapper::AllEdgesExposed::No;
  
  #if ENABLE(DAMAGE_TRACKING)
-@@ -105,6 +275,55 @@ void CoordinatedBackingStore::paintToTextureMapper(TextureMapper& textureMapper,
+@@ -105,6 +276,93 @@ void CoordinatedBackingStore::paintToTextureMapper(TextureMapper& textureMapper,
      }
  }
  
@@ -45184,6 +45185,44 @@ index 0badc4492a49e10ae2faa80d59da84a9cea259d6..c97d840e5793a9550a73cb1b842adc75
 +    auto inverse = adjustedTransform.inverse();
 +    if (!inverse)
 +        return false;
++
++    // In the target's pixels, each of which a draw covers when it holds the
++    // pixel's center: tiles next to each other share their edge, so rounding
++    // it gives both the same pixel column. In the tiles' own coordinates
++    // (292.57 pixels at 175 %), the whole pixels inside each tile left a
++    // column between every two uncovered, the page's background color was
++    // drawn under its opaque tiles in every frame (1.85 megapixels at the
++    // laptop's full screen). SUMMIT_TILE_COVER_IN_TARGET=0 tests in the tiles'
++    // coordinates.
++    static const bool inTarget = [] {
++        const char* value = getenv("SUMMIT_TILE_COVER_IN_TARGET");
++        return !value || strcmp(value, "0");
++    }();
++    if (inTarget) {
++        auto pixels = [](const FloatRect& rect) {
++            int left = std::round(rect.x());
++            int top = std::round(rect.y());
++            int right = std::round(rect.maxX());
++            int bottom = std::round(rect.maxY());
++            return IntRect(left, top, std::max(0, right - left), std::max(0, bottom - top));
++        };
++        IntRect shownPixels = pixels(intersection(FloatRect(textureMapper.clipBounds()), adjustedTransform.mapRect(layerRect)));
++        if (shownPixels.isEmpty())
++            return true;
++        Region uncoveredPixels(shownPixels);
++        for (const auto& tile : m_tiles.values()) {
++            if (!tile.canBePainted() || !tile.texture().isOpaque())
++                continue;
++            auto tilePixels = pixels(adjustedTransform.mapRect(tile.rect()));
++            if (tilePixels.isEmpty())
++                continue;
++            uncoveredPixels.subtract(tilePixels);
++            if (uncoveredPixels.isEmpty())
++                return true;
++        }
++        return false;
++    }
++
 +    // What the clip shows of the layer, in the tiles' coordinates.
 +    FloatRect shown = inverse->mapRect(FloatRect(textureMapper.clipBounds()));
 +    shown.intersect(layerRect);
