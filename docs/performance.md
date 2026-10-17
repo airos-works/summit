@@ -243,7 +243,10 @@ screen) with ~13 blur passes and 50-70 surface binds; the 71 others drew
 ~12 megapixels with ~3 blur passes and waited 3.5-4.5 ms. Blurs are
 already drawn at reduced size for radii over 5 device pixels, so the cost
 is overdraw: culling what opaque layers hide (done so far only under
-playing video) is the next engine-side step.
+playing video) is the next engine-side step. One such composition
+(`SUMMIT_DRAW_TRACE`) drew 13.7 megapixels in 104 draws: a full-screen
+opaque background fill (1.85), four bands of page tiles (~0.7 each), and a
+dozen intermediate surfaces of 0.2-1 megapixel for blurs and groups.
 
 Tried and dropped: tile textures allocated on a 64-pixel grid and drawn
 through `drawTextureWithPhysicalSize` (edge tiles of 430-433 pixels sharing
