@@ -3135,7 +3135,7 @@ index 20bf4afc44c82cfa659ee14666984f92f9c713ed..aa12afb027199ee11fce7cae96a0d17b
    zx_status_t status = zx_object_set_property(zx_thread_self(), ZX_PROP_NAME,
                                                name, strlen(name));
 diff --git a/Source/ThirdParty/skia/CMakeLists.txt b/Source/ThirdParty/skia/CMakeLists.txt
-index 679b31f339a04bb1a8633f5d8b149701c17b43e5..18d0a78c027dcaf6645ca599edaa1d3d62e03a6a 100644
+index 679b31f339a04bb1a8633f5d8b149701c17b43e5..69cada4c1dfff257dd46b09a01ee04427557abfb 100644
 --- a/Source/ThirdParty/skia/CMakeLists.txt
 +++ b/Source/ThirdParty/skia/CMakeLists.txt
 @@ -177,6 +177,7 @@ add_library(Skia STATIC
@@ -3165,6 +3165,27 @@ index 679b31f339a04bb1a8633f5d8b149701c17b43e5..18d0a78c027dcaf6645ca599edaa1d3d
  if (WIN32)
      target_compile_definitions(Skia PRIVATE SK_TYPEFACE_FACTORY_DIRECTWRITE)
  else ()
+@@ -1134,16 +1147,16 @@ if (WTF_CPU_X86 OR WTF_CPU_X86_64)
+ 
+     WEBKIT_CHECK_COMPILER_FLAGS(CXX Skia_CXX_USE_x86_64_v3 "-march=x86-64-v3")
+     if (Skia_CXX_USE_x86_64_v3)
+-        WEBKIT_ADD_COMPILER_FLAGS(CXX SOURCE src/opts/SkOpts_hsw.cpp "-march=x86-64-v3")
++        WEBKIT_ADD_COMPILER_FLAGS(CXX SOURCE src/opts/SkOpts_ml3.cpp "-march=x86-64-v3")
+     else ()
+-        WEBKIT_ADD_COMPILER_FLAGS(CXX SOURCE src/opts/SkOpts_hsw.cpp "-march=haswell")
++        WEBKIT_ADD_COMPILER_FLAGS(CXX SOURCE src/opts/SkOpts_ml3.cpp "-march=haswell")
+     endif ()
+ 
+     WEBKIT_CHECK_COMPILER_FLAGS(CXX Skia_CXX_USE_x86_64_v4_AND_prefer_vector_width "-march=x86-64-v4" "-mprefer-vector-width=512")
+     if (Skia_CXX_USE_x86_64_v4_AND_prefer_vector_width)
+-        WEBKIT_ADD_COMPILER_FLAGS(CXX SOURCE src/opts/SkOpts_skx.cpp "-march=x86-64-v4" "-mprefer-vector-width=512")
++        WEBKIT_ADD_COMPILER_FLAGS(CXX SOURCE src/opts/SkOpts_ml4.cpp "-march=x86-64-v4" "-mprefer-vector-width=512")
+     else ()
+-        WEBKIT_ADD_COMPILER_FLAGS(CXX SOURCE src/opts/SkOpts_skx.cpp "-march=skylake-avx512")
++        WEBKIT_ADD_COMPILER_FLAGS(CXX SOURCE src/opts/SkOpts_ml4.cpp "-march=skylake-avx512")
+     endif ()
+ endif ()
+ 
 diff --git a/Source/WTF/Scripts/Preferences/UnifiedWebPreferences.yaml b/Source/WTF/Scripts/Preferences/UnifiedWebPreferences.yaml
 index b6d135a1282843e5d5c81d4a56a6e6cd4d46379d..53438028082d386e4138dba515a4896751d2d039 100644
 --- a/Source/WTF/Scripts/Preferences/UnifiedWebPreferences.yaml
@@ -139816,10 +139837,10 @@ index 0000000000000000000000000000000000000000..ba19a248a66798cdb455d524f14f5c84
 +} // namespace WebKit
 diff --git a/Source/WebKit/WebProcess/haiku/WebProcessMainHaiku.cpp b/Source/WebKit/WebProcess/haiku/WebProcessMainHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..68129cb7a43abb68ca0e51f19fa1756192eeac10
+index 0000000000000000000000000000000000000000..cf0cb1265c572f9a4d784598211ec11bf9eb9f3e
 --- /dev/null
 +++ b/Source/WebKit/WebProcess/haiku/WebProcessMainHaiku.cpp
-@@ -0,0 +1,92 @@
+@@ -0,0 +1,110 @@
 +/*
 + * Copyright 2014,2019 Haiku, Inc.
 + *
@@ -139856,8 +139877,15 @@ index 0000000000000000000000000000000000000000..68129cb7a43abb68ca0e51f19fa17561
 +
 +#include <Application.h>
 +#include <cstdio>
++#include <cstdlib>
 +#include <cstring>
 +#include <netdb.h>
++
++#if USE(SKIA)
++WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_BEGIN
++#include <skia/core/SkGraphics.h>
++WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_END
++#endif
 +namespace WebKit {
 +using namespace WebCore;
 +
@@ -139877,6 +139905,17 @@ index 0000000000000000000000000000000000000000..68129cb7a43abb68ca0e51f19fa17561
 +        struct addrinfo* result = nullptr;
 +        if (!getaddrinfo("localhost", nullptr, nullptr, &result) && result)
 +            freeaddrinfo(result);
++
++#if USE(SKIA)
++        // Skia picks its SIMD code (the AVX2 and AVX-512 raster pipelines,
++        // blitters, swizzlers) from the CPU features SkGraphics::Init()
++        // reads, as the GTK and WPE web processes do. Without it every tile
++        // was painted with the SSE2 baseline. SUMMIT_SKIA_CPU_FEATURES=0
++        // leaves Skia on that baseline.
++        const char* skiaCPUFeatures = std::getenv("SUMMIT_SKIA_CPU_FEATURES");
++        if (!skiaCPUFeatures || std::strcmp(skiaCPUFeatures, "0"))
++            SkGraphics::Init();
++#endif
 +
 +        // The one-argument constructor exits with status zero on failure,
 +        // preventing the auxiliary process entry point from reporting it.
