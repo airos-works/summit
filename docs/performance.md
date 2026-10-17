@@ -219,6 +219,25 @@ scrolling: tailwindcss.com (two 40 by 11783-pixel hatched columns, a dozen
 dotted cards) painted 2230 tiles in 2.2-2.5 s during a 60-notch scroll, now
 1100-1150 in 1.3 s (`SUMMIT_SLOW_REPAINT_IN_VIEW=0` repaints all).
 
+Left for later: getartcraft.com's first scroll after load is now ~36 frames a
+second (1.26-1.31 s of jank in a 40-notch burst); its compositor thread is
+46 % busy, two thirds of it in the amdgpu ioctl creating textures, and the
+main thread a third busy. Of the ~310 textures created in that scroll ~125
+were tiles; ~120 came from blurred layers whose size changes in every frame
+(filter-cache surfaces of 727x513, 722x506, ... 676x454 and their blur
+passes), ~50 from other intermediate surfaces. The filter-cache surfaces now
+come in sizes on a 64-pixel grid when the filters reach outside the layer
+(the margin is transparent, so the padding stays so):
+filter-cache surfaces 15-22 against 50-54, all new textures 241 against 312
+in the final build's run, first-scroll jank 1.11 s against 1.34 s (one run
+each); near a blur's edge a pixel may differ by up to 25/255
+(`SUMMIT_FILTER_SURFACE_GRID=0` for exact sizes). Edge tiles whose width
+changes by a pixel or two between frames, and the other intermediate
+surfaces, still make new textures. Two other things seen: linear.app repaints all of its
+root contents when a script changes an inherited property (a custom
+property) on `html` or `body` (`RenderBox::styleWillChange`), and a picture
+shader still rasterizes a real repeating pattern again for every recording.
+
 Skia now reads the CPU's features in the web process (`SkGraphics::Init()`,
 as GTK and WPE do; `SUMMIT_SKIA_CPU_FEATURES=0` skips it), and WebKit's Skia
 build gives the AVX2 and AVX-512 pipelines (`SkOpts_ml3.cpp`,
