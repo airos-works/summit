@@ -1,5 +1,61 @@
 # Summit performance: Speedometer 3.1 baseline, where the time goes, stress test
 
+## 17-18 October 2026 (night): smooth scrolling and animation on the laptop
+
+Goal: pages with heavy animation and scripted scrolling as smooth as Firefox
+on Linux, starting with getartcraft.com. Measured on the Framework 13 laptop
+(Ryzen 7840U, Radeon 760M through zink, 175 %), with test copies of the CI
+packages (`claude-test/swperf` = installed 0656, `swsmooth` = test engines)
+driven through Summit's MCP server (`scroll`, `evaluate`, `profile`,
+`stacks`). The scroll test records every `requestAnimationFrame` time and
+`scrollY` in the page while a 60-event wheel burst runs; "moving" frames are
+those where the page moved.
+
+getartcraft.com is a three.js hero (35 H.264 640x360 videos as textures, six to
+eight playing), Lenis smooth scrolling (every scroll frame is a
+`requestAnimationFrame` on the main thread) and seven VP9 feature videos.
+
+| getartcraft.com | before | after |
+|---|---|---|
+| web process, top of the page | 1.1 cores | 0.33 |
+| main thread, top of the page | 0.54 cores | 0.16-0.26 |
+| video texture uploads | 244/s at 1.8 ms | about 118/s at 0.7 ms |
+| longest rAF gap in the wheel burst | 255-2900 ms | 88-182 ms |
+| median rAF interval while moving | 33-69 ms | 17 ms (3 runs of 4) |
+
+What changed:
+
+- **`requestVideoFrameCallback`** is enabled (`SUMMIT_VIDEO_FRAME_CALLBACK=0`
+  turns it off). Both Haiku players report each new picture
+  (`videoFrameMetadata()`). three.js uploads a video texture only when the
+  callback fires; without it, it uploaded every playing video in every
+  animation frame, twice as often as the videos (24-30 fps) change.
+- **WebGL takes the player's picture** (`nativeImageForCurrentTime()`):
+  `texImage2D(video)` painted the frame into a scratch buffer with Skia
+  (premultiplied), then unpremultiplied every pixel at upload. Now the decoder
+  thread copies each new picture once something reads them (with the alpha
+  bytes set: B_RGB32 leaves them undefined) and WebGL converts BGRA to RGBA
+  only.
+- **Small videos decode in software on AMD** (`SUMMIT_HARDWARE_VIDEO_MIN_PIXELS`,
+  default 1280x720). The amdgpu VA-API add-on reads each picture back through a
+  buffer the driver allocates per picture (`vaGetImage` ->
+  `amdgpu_bo_alloc` ioctl). With six decoders that took 9-23 ms a picture
+  (one 1080p video: 4 ms), and while they ran every other thread of the web
+  process that touched new memory waited: tile paints took 100-270 ms
+  (p99 105 ms, 1358 tiles; 5.6 ms without the decoders), the rendering
+  update waited for them, and Lenis jumped 3600 px after a 2.9 s stall.
+  libavcodec decodes the same pictures for a third of the CPU. The allocation
+  cost is for the OS (driver or Mesa's buffer cache).
+- **Tiles painted ahead of the scroll no longer hold up the rendering
+  update.** Only tiles that intersect the layer's visible rectangle count as
+  pending for the composition of a rendering update; the compositor leaves
+  other tiles that are still being painted for a later composition instead
+  of waiting for them (`SUMMIT_TILES_AHEAD_HOLD_UPDATE=1` restores waiting
+  for all). After a jump, every rendering update created the next ring of
+  off-screen tiles and the following one waited for it.
+- `SUMMIT_TILE_PAINT_TRACE=1`: when each tile is posted to the painting
+  threads, how long it waited and how long it took.
+
 ## 14 October 2026: YouTube on the Cubie A7S
 
 Goal: smoother YouTube playback with the board's video engine (sunxi_cedar)

@@ -13006,6 +13006,27 @@ index 2607faee32402d89b9d9ec461b55d70ad2291ce1..b62e3ea0437528d549401e706acf31ab
      void realizeSaves();
      State& modifiableState() LIFETIME_BOUND { ASSERT(!m_unrealizedSaveCount || m_stateStack.size() >= MaxSaveCount); return m_stateStack.last(); }
  
+diff --git a/Source/WebCore/html/canvas/WebGLRenderingContextBase.cpp b/Source/WebCore/html/canvas/WebGLRenderingContextBase.cpp
+index b97bb426b97dd304a71a440a86935cebec723ec1..fb28702d73ac98d46356446468f6c9d355d654b3 100644
+--- a/Source/WebCore/html/canvas/WebGLRenderingContextBase.cpp
++++ b/Source/WebCore/html/canvas/WebGLRenderingContextBase.cpp
+@@ -4364,6 +4364,16 @@ RefPtr<NativeImage> WebGLRenderingContextBase::drawImageIntoBuffer(const SizedIm
+ 
+ RefPtr<NativeImage> WebGLRenderingContextBase::videoFrameToNativeImage(HTMLVideoElement& video, ASCIILiteral functionName)
+ {
++#if PLATFORM(HAIKU)
++    // The players hand out the frame being shown as an opaque image: painting
++    // it into a buffer first cost a Skia draw, a premultiplied copy and an
++    // unpremultiply per pixel at upload (three.js uploads every playing video
++    // in every frame), 1.8 ms for each 640x360 picture.
++    if (RefPtr nativeImage = video.nativeImageForCurrentTime()) {
++        if (nativeImage->size() == IntSize(video.videoWidth(), video.videoHeight()))
++            return nativeImage;
++    }
++#endif
+     RefPtr<ImageBuffer> imageBuffer;
+     // FIXME: When texImage2D is passed an HTMLVideoElement, implementations
+     // interoperably use the native RGB color values of the video frame (e.g.
 diff --git a/Source/WebCore/inspector/InspectorCanvasArguments.h b/Source/WebCore/inspector/InspectorCanvasArguments.h
 index 18de0e6c6de219c62c0f67c86a43931084a0a9bc..94889a2d4b3dd7f7a1798745cddfb32a864d423a 100644
 --- a/Source/WebCore/inspector/InspectorCanvasArguments.h
@@ -21444,7 +21465,7 @@ index 100e61c99fcc079ca9b363aab12482437ef928c7..b4cffb99d5cf579d95cc54bbc2c6a17c
      }
      LOG(WebGL, "ANGLE initialised Major: %d Minor: %d", majorVersion, minorVersion);
 diff --git a/Source/WebCore/platform/graphics/coordinated/CoordinatedBackingStoreProxy.cpp b/Source/WebCore/platform/graphics/coordinated/CoordinatedBackingStoreProxy.cpp
-index 160ba4f2623722caaf670da2b6eb3f4b1d3f2f5f..ffff803f61bbdb6af0dbc8fd6e0b5c441e4e3cdf 100644
+index 160ba4f2623722caaf670da2b6eb3f4b1d3f2f5f..7aea0867b4ac36a7f4a52ccbe24b102b5e5a5d4e 100644
 --- a/Source/WebCore/platform/graphics/coordinated/CoordinatedBackingStoreProxy.cpp
 +++ b/Source/WebCore/platform/graphics/coordinated/CoordinatedBackingStoreProxy.cpp
 @@ -33,6 +33,10 @@
@@ -21479,7 +21500,29 @@ index 160ba4f2623722caaf670da2b6eb3f4b1d3f2f5f..ffff803f61bbdb6af0dbc8fd6e0b5c44
      // Update the dirty tiles.
      IntRect tileDirtyRectUnion;
      unsigned dirtyTilesCount = 0;
-@@ -407,11 +425,14 @@ IntSize CoordinatedBackingStoreProxy::computeTileSize(const IntSize& viewportSiz
+@@ -173,7 +191,20 @@ OptionSet<CoordinatedBackingStoreProxy::UpdateResult> CoordinatedBackingStorePro
+             WTFBeginSignpost(this, UpdateTile, "%u/%u, id: %d, rect: %ix%i+%i+%i, dirty: %ix%i+%i+%i", ++dirtyTileIndex, dirtyTilesCount, tile.id,
+                 tile.rect.x(), tile.rect.y(), tile.rect.width(), tile.rect.height(), tile.dirtyRect.x(), tile.dirtyRect.y(), tile.dirtyRect.width(), tile.dirtyRect.height());
+ 
+-#if USE(SKIA)
++#if USE(SKIA) && PLATFORM(HAIKU)
++            // Only a tile in view holds up the composition of the page's
++            // rendering update, and with it the next requestAnimationFrame:
++            // pages that scroll themselves (Lenis, GSAP) jumped hundreds of
++            // pixels at once while 50 tiles ahead of the scroll were painted
++            // (getartcraft.com, 250 ms). The compositor takes the others once
++            // they are painted. SUMMIT_TILES_AHEAD_HOLD_UPDATE=1 waits for all.
++            static const bool tilesAheadHoldUpdate = [] {
++                const char* value = getenv("SUMMIT_TILES_AHEAD_HOLD_UPDATE");
++                return value && value[0] == '1' && !value[1];
++            }();
++            auto buffer = paintingEngine.replay(*layer.owner(), recording.copyRef(), tile.rect, tile.dirtyRect,
++                tilesAheadHoldUpdate || tile.rect.intersects(m_visibleRect));
++#elif USE(SKIA)
+             auto buffer = paintingEngine.replay(*layer.owner(), recording.copyRef(), tile.rect, tile.dirtyRect);
+ #else
+             FloatRect scaledDirtyRect(tile.dirtyRect);
+@@ -407,11 +438,14 @@ IntSize CoordinatedBackingStoreProxy::computeTileSize(const IntSize& viewportSiz
          return overridenTileSize;
  
      IntSize tileSize;
@@ -21497,7 +21540,7 @@ index 160ba4f2623722caaf670da2b6eb3f4b1d3f2f5f..ffff803f61bbdb6af0dbc8fd6e0b5c44
          static constexpr int minGPUTileHeight = 256;
  
          auto gpuTileSize = [&](const IntSize& baseSize) -> IntSize {
-@@ -434,9 +455,25 @@ IntSize CoordinatedBackingStoreProxy::computeTileSize(const IntSize& viewportSiz
+@@ -434,9 +468,25 @@ IntSize CoordinatedBackingStoreProxy::computeTileSize(const IntSize& viewportSiz
              tileSize = gpuTileSize(baseSize);
          }
      } else {
@@ -21523,7 +21566,7 @@ index 160ba4f2623722caaf670da2b6eb3f4b1d3f2f5f..ffff803f61bbdb6af0dbc8fd6e0b5c44
          // If the contents width is small, increase tile size vertically.
          if (m_contentsRect.width() < tileSize.width())
              tileSize.setHeight(maxUntiledContentSize);
-@@ -513,6 +550,31 @@ std::pair<IntRect, IntRect> CoordinatedBackingStoreProxy::computeCoverAndKeepRec
+@@ -513,6 +563,31 @@ std::pair<IntRect, IntRect> CoordinatedBackingStoreProxy::computeCoverAndKeepRec
  
      adjustForContentsRect(coverRect);
  
@@ -21779,10 +21822,23 @@ index f3b9edf26fec8bc41686618262ca30910866499f..2a41d70e6cc20c1df7025c5720d6ca91
  #if ENABLE(VIDEO) && USE(GSTREAMER_GL)
      enum class ShouldWait : bool { No, Yes };
 diff --git a/Source/WebCore/platform/graphics/coordinated/CoordinatedTileBuffer.cpp b/Source/WebCore/platform/graphics/coordinated/CoordinatedTileBuffer.cpp
-index 97343135c0044a99532b9f29b2928c98b0e0cd7c..0adfd221a96c3c7d6fb8315ea6057dbb8ecd833c 100644
+index 97343135c0044a99532b9f29b2928c98b0e0cd7c..4d285f58bebca01f42dc425cc057c9309dac08db 100644
 --- a/Source/WebCore/platform/graphics/coordinated/CoordinatedTileBuffer.cpp
 +++ b/Source/WebCore/platform/graphics/coordinated/CoordinatedTileBuffer.cpp
-@@ -107,12 +107,81 @@ Ref<CoordinatedTileBuffer> CoordinatedUnacceleratedTileBuffer::create(const IntS
+@@ -102,17 +102,94 @@ void CoordinatedTileBuffer::waitUntilPaintingComplete()
+     });
+ }
+ 
++#if PLATFORM(HAIKU)
++bool CoordinatedTileBuffer::isPaintingComplete()
++{
++    Locker locker { m_painting.lock };
++    return m_painting.state == PaintingState::Complete;
++}
++#endif
++
+ Ref<CoordinatedTileBuffer> CoordinatedUnacceleratedTileBuffer::create(const IntSize& size, Flags flags)
+ {
      return adoptRef(*new CoordinatedUnacceleratedTileBuffer(size, flags));
  }
  
@@ -21864,7 +21920,7 @@ index 97343135c0044a99532b9f29b2928c98b0e0cd7c..0adfd221a96c3c7d6fb8315ea6057dbb
  
      {
          Locker locker { s_layersMemoryUsageLock };
-@@ -134,6 +203,10 @@ CoordinatedUnacceleratedTileBuffer::~CoordinatedUnacceleratedTileBuffer()
+@@ -134,6 +211,10 @@ CoordinatedUnacceleratedTileBuffer::~CoordinatedUnacceleratedTileBuffer()
  SkCanvas* CoordinatedUnacceleratedTileBuffer::canvas()
  {
      if (!m_surface) {
@@ -21876,10 +21932,20 @@ index 97343135c0044a99532b9f29b2928c98b0e0cd7c..0adfd221a96c3c7d6fb8315ea6057dbb
          auto imageInfo = SkImageInfo::Make(m_size.width(), m_size.height(), kBGRA_8888_SkColorType, alphaType, SkColorSpace::MakeSRGB());
          // FIXME: ref buffer and unref on release proc?
 diff --git a/Source/WebCore/platform/graphics/coordinated/CoordinatedTileBuffer.h b/Source/WebCore/platform/graphics/coordinated/CoordinatedTileBuffer.h
-index 2b1b31403c0b4c1f894c374d576ee2e79ddcd751..8a347a96a7aa1011809586fbed5091681d207dd8 100644
+index 2b1b31403c0b4c1f894c374d576ee2e79ddcd751..da0b36c0555a007ed33f74c6d8a7dacec3dd821d 100644
 --- a/Source/WebCore/platform/graphics/coordinated/CoordinatedTileBuffer.h
 +++ b/Source/WebCore/platform/graphics/coordinated/CoordinatedTileBuffer.h
-@@ -109,12 +109,32 @@ private:
+@@ -72,6 +72,9 @@ public:
+     virtual void beginPainting();
+     virtual void completePainting();
+     void waitUntilPaintingComplete();
++#if PLATFORM(HAIKU)
++    bool isPaintingComplete();
++#endif
+ 
+ #if USE(SKIA)
+     virtual SkCanvas* canvas() = 0;
+@@ -109,12 +112,32 @@ private:
  class CoordinatedUnacceleratedTileBuffer final : public CoordinatedTileBuffer {
  public:
      WEBCORE_EXPORT static Ref<CoordinatedTileBuffer> create(const IntSize&, Flags);
@@ -21912,7 +21978,7 @@ index 2b1b31403c0b4c1f894c374d576ee2e79ddcd751..8a347a96a7aa1011809586fbed509168
  
  private:
      CoordinatedUnacceleratedTileBuffer(const IntSize&, Flags);
-@@ -127,7 +147,19 @@ private:
+@@ -127,7 +150,19 @@ private:
      SkCanvas* canvas() final;
  #endif
  
@@ -29907,10 +29973,10 @@ index 0000000000000000000000000000000000000000..21962ea9d0bd80ba9c260e9ef9ecac36
 +} // namespace SummitMPEGTS
 diff --git a/Source/WebCore/platform/graphics/haiku/MediaDecoderSelectionHaiku.cpp b/Source/WebCore/platform/graphics/haiku/MediaDecoderSelectionHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..91b0b71420a2228d95e0a6781469acb556581c81
+index 0000000000000000000000000000000000000000..2e82573aac195039695186ee0b27488352ce7d10
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/haiku/MediaDecoderSelectionHaiku.cpp
-@@ -0,0 +1,1012 @@
+@@ -0,0 +1,1028 @@
 +/*
 + * Copyright (C) 2026 Haiku, Inc. All rights reserved.
 + *
@@ -30360,6 +30426,22 @@ index 0000000000000000000000000000000000000000..91b0b71420a2228d95e0a6781469acb5
 +    if (!display.line_width || !display.line_count || display.line_width > addOn->maxWidth
 +        || display.line_count > addOn->maxHeight || display.line_width * display.line_count > addOn->maxArea)
 +        return nullptr;
++#if CPU(X86_64)
++    // Each VA-API picture is read back through a buffer the driver allocates
++    // for it, and those allocations take a lock of the whole process: the
++    // six 640x360 videos of getartcraft.com took 9 to 23 ms each per picture
++    // (one 1080p video 4) and held up everything else that touched new memory,
++    // tile painting most (tiles of 100-270 ms, a scrolled page stalled for
++    // seconds). Small pictures cost less to decode in software, which took
++    // the page from 1.1 cores to 0.4. SUMMIT_HARDWARE_VIDEO_MIN_PIXELS=N
++    // (0 for every size).
++    static const unsigned minimumArea = [] {
++        const char* value = std::getenv("SUMMIT_HARDWARE_VIDEO_MIN_PIXELS");
++        return value && *value ? static_cast<unsigned>(std::strtoul(value, nullptr, 10)) : 1280u * 720u;
++    }();
++    if (!std::strcmp(addOn->leafName, "amduvd") && display.line_width * display.line_count < minimumArea)
++        return nullptr;
++#endif
 +    if (*codec == ffmpegCodecH264) {
 +        auto info = h264SequenceInfo(codecConfig);
 +        if (!info || info->chromaFormat != 1 || info->bitDepthLuma != 8 || info->bitDepthChroma != 8 || !info->frameMbsOnly
@@ -31131,10 +31213,10 @@ index 0000000000000000000000000000000000000000..1a59f5ca77ca81301993268bcdee2f36
 +} // namespace WebCore
 diff --git a/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaiku.cpp b/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..7ea4e5ea1fb10f07cb453ba2a1929dd63863dd65
+index 0000000000000000000000000000000000000000..7578b66b805122e22fff9264340351c4205d99da
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaiku.cpp
-@@ -0,0 +1,1952 @@
+@@ -0,0 +1,2040 @@
 +/*
 + * Copyright (C) 2014-2016 Haiku, Inc.
 + *
@@ -31166,6 +31248,7 @@ index 0000000000000000000000000000000000000000..7ea4e5ea1fb10f07cb453ba2a1929dd6
 +#endif
 +#include "ColorSpace.h"
 +#include "MediaPlayerPrivateHaiku.h"
++#include "VideoFrameMetadata.h"
 +
 +#include <mutex>
 +#include <thread>
@@ -31807,6 +31890,7 @@ index 0000000000000000000000000000000000000000..7ea4e5ea1fb10f07cb453ba2a1929dd6
 +                        player, prerollTarget / 1000000.0, player->m_prerollKeyframeTime / 1000000.0,
 +                        player->m_prerollFrames, decodedVideoTime() / 1000000.0);
 +                player->m_prerollTarget = -1;
++                player->didDecodeFrameLocked(decodedVideoTime());
 +                player->pushFrameToCompositor();
 +                startTime = system_time();
 +                startMediaTime = (bigtime_t)(player->m_currentTime * 1000000);
@@ -31865,6 +31949,7 @@ index 0000000000000000000000000000000000000000..7ea4e5ea1fb10f07cb453ba2a1929dd6
 +                        }
 +                    }
 +                    ++player->m_videoFrameGeneration;
++                    player->didDecodeFrameLocked(header.start_time);
 +                    if (!player->pushFrameToCompositor())
 +                        player->queueVideoFrameRepaint();
 +                } else {
@@ -31898,6 +31983,91 @@ index 0000000000000000000000000000000000000000..7ea4e5ea1fb10f07cb453ba2a1929dd6
 +    }
 +
 +    return B_OK;
++}
++
++#if USE(SKIA)
++// The frame with its alpha bytes set: B_RGB32 leaves them undefined, and
++// texImage2D copies them into the texture.
++static sk_sp<SkImage> opaqueFrameCopy(const BBitmap& frame, sk_sp<SkData>&& pixels)
++{
++    BRect bounds = frame.Bounds();
++    auto info = SkImageInfo::Make(bounds.IntegerWidth() + 1, bounds.IntegerHeight() + 1,
++        kBGRA_8888_SkColorType, kOpaque_SkAlphaType, SkColorSpace::MakeSRGB());
++    size_t rowBytes = frame.BytesPerRow();
++    if (!pixels)
++        pixels = SkData::MakeUninitialized(rowBytes * info.height());
++    auto* source = static_cast<const uint32_t*>(frame.Bits());
++    auto* destination = static_cast<uint32_t*>(pixels->writable_data());
++    for (size_t i = 0, count = rowBytes / 4 * info.height(); i < count; ++i)
++        destination[i] = source[i] | 0xff000000;
++    return SkImages::RasterFromData(info, WTF::move(pixels), rowBytes);
++}
++#endif
++
++void MediaPlayerPrivate::didDecodeFrameLocked(bigtime_t mediaTime)
++{
++    m_presentedFrameTime = mediaTime;
++    ++m_presentedFrames;
++#if USE(SKIA)
++    if (!m_hasFrameReaders || !m_frameBuffer)
++        return;
++    size_t size = m_frameBuffer->BytesPerRow() * (m_frameBuffer->Bounds().IntegerHeight() + 1);
++    sk_sp<SkData> pixels;
++    for (auto& buffer : m_readerBuffers) {
++        if (buffer->unique() && buffer->size() == size) {
++            pixels = buffer;
++            break;
++        }
++    }
++    if (!pixels) {
++        m_readerBuffers.removeAllMatching([](auto& buffer) { return buffer->unique(); });
++        pixels = SkData::MakeUninitialized(size);
++        if (m_readerBuffers.size() < 3)
++            m_readerBuffers.append(pixels);
++    }
++    auto image = opaqueFrameCopy(*m_frameBuffer, WTF::move(pixels));
++    BAutolock locker(m_readerFrameLock);
++    m_readerFrame = WTF::move(image);
++#endif
++}
++
++#if USE(SKIA)
++RefPtr<NativeImage> MediaPlayerPrivate::nativeImageForCurrentTime()
++{
++    if (!m_frameBuffer)
++        return nullptr;
++    sk_sp<SkImage> image;
++    if (m_hasFrameReaders.exchange(true)) {
++        BAutolock locker(m_readerFrameLock);
++        image = m_readerFrame;
++    }
++    // The first read, or none decoded since: the decoder copies the frames
++    // that follow.
++    if (!image) {
++        image = opaqueFrameCopy(*m_frameBuffer, nullptr);
++        BAutolock locker(m_readerFrameLock);
++        if (!m_readerFrame)
++            m_readerFrame = image;
++    }
++    return image ? NativeImage::create(WTF::move(image)) : nullptr;
++}
++#endif
++
++std::optional<VideoFrameMetadata> MediaPlayerPrivate::videoFrameMetadata()
++{
++    unsigned presented = m_presentedFrames;
++    if (!presented || presented == m_lastMetadataFrames)
++        return std::nullopt;
++    m_lastMetadataFrames = presented;
++    VideoFrameMetadata metadata;
++    auto size = naturalSize();
++    metadata.width = size.width();
++    metadata.height = size.height();
++    metadata.presentedFrames = presented;
++    metadata.mediaTime = m_presentedFrameTime / 1000000.0;
++    metadata.presentationTime = MonotonicTime::now().secondsSinceEpoch().seconds();
++    metadata.expectedDisplayTime = metadata.presentationTime;
++    return metadata;
 +}
 +
 +bool MediaPlayerPrivate::pushFrameToCompositor()
@@ -33089,10 +33259,10 @@ index 0000000000000000000000000000000000000000..7ea4e5ea1fb10f07cb453ba2a1929dd6
 +#endif
 diff --git a/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaiku.h b/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaiku.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..f62c80d30a84db0292b4f86920744a7d4adcd87f
+index 0000000000000000000000000000000000000000..03078f994a5787d45ca77da51941fce490212e27
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaiku.h
-@@ -0,0 +1,254 @@
+@@ -0,0 +1,278 @@
 +/*
 + * Copyright (C) 2014 Haiku, Inc.
 + *
@@ -33124,8 +33294,9 @@ index 0000000000000000000000000000000000000000..f62c80d30a84db0292b4f86920744a7d
 +#include <optional>
 +
 +#include <Locker.h>
-+#if USE(COORDINATED_GRAPHICS) && USE(TEXTURE_MAPPER) && USE(SKIA)
++#if USE(SKIA)
 +#include <skia/core/SkData.h>
++#include <skia/core/SkImage.h>
 +#endif
 +#include <MediaDefs.h>
 +#include <ObjectList.h>
@@ -33214,6 +33385,13 @@ index 0000000000000000000000000000000000000000..f62c80d30a84db0292b4f86920744a7d
 +        std::optional<bool> isCrossOrigin(const SecurityOrigin&) const final;
 +
 +        void paint(GraphicsContext&, const FloatRect&) override;
++#if USE(SKIA)
++        // The picture being shown, for WebGL's texImage2D and canvas
++        // drawImage without painting it into a buffer of their own first.
++        RefPtr<NativeImage> nativeImageForCurrentTime() override;
++#endif
++        // requestVideoFrameCallback: a frame that was not reported yet.
++        std::optional<VideoFrameMetadata> videoFrameMetadata() override;
 +#if USE(COORDINATED_GRAPHICS) && USE(TEXTURE_MAPPER) && USE(SKIA)
 +        // Decoded frames go straight to the compositor, so a busy page thread
 +        // does not hold them back.
@@ -33239,6 +33417,22 @@ index 0000000000000000000000000000000000000000..f62c80d30a84db0292b4f86920744a7d
 +        void queueVideoFrameRepaint();
 +        // Called with m_mediaLock held. False when the frame has to be painted.
 +        bool pushFrameToCompositor();
++        // A new picture is in m_frameBuffer (m_mediaLock held): counts it
++        // for videoFrameMetadata() and copies it for nativeImageForCurrentTime().
++        void didDecodeFrameLocked(bigtime_t mediaTime);
++#if USE(SKIA)
++        // Once something reads the frames (WebGL, a canvas), the decoder
++        // thread copies each new one while it holds it: reading m_frameBuffer
++        // from the page thread can catch the decoder writing the next.
++        std::atomic<bool> m_hasFrameReaders { false };
++        BLocker m_readerFrameLock;
++        sk_sp<SkImage> m_readerFrame;
++        // Pixels of the copies, reused once no image refers to them (m_mediaLock).
++        Vector<sk_sp<SkData>> m_readerBuffers;
++#endif
++        std::atomic<unsigned> m_presentedFrames { 0 };
++        std::atomic<bigtime_t> m_presentedFrameTime { 0 };
++        unsigned m_lastMetadataFrames { 0 };
 +#if USE(COORDINATED_GRAPHICS) && USE(TEXTURE_MAPPER) && USE(SKIA)
 +        mutable BLocker m_layerBufferProxyLock;
 +        RefPtr<CoordinatedPlatformLayerBufferProxy> m_layerBufferProxy;
@@ -33349,10 +33543,10 @@ index 0000000000000000000000000000000000000000..f62c80d30a84db0292b4f86920744a7d
 +#endif
 diff --git a/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaikuMSE.cpp b/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaikuMSE.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..f77a9c3236d3478a3c6f22443cd5c6018fb44379
+index 0000000000000000000000000000000000000000..653c3dcefc38ab8ad646b2a6fba5fe8e3e44767b
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaikuMSE.cpp
-@@ -0,0 +1,3103 @@
+@@ -0,0 +1,3151 @@
 +/*
 + * Copyright (C) 2026 Summit contributors.
 + *
@@ -33398,6 +33592,7 @@ index 0000000000000000000000000000000000000000..f77a9c3236d3478a3c6f22443cd5c601
 +#include "PlatformTimeRanges.h"
 +#include "SharedBuffer.h"
 +#include "VideoTrackPrivate.h"
++#include "VideoFrameMetadata.h"
 +#include "VideoPresentationTimelineHaiku.h"
 +#include <span>
 +#include <wtf/Condition.h>
@@ -33421,6 +33616,7 @@ index 0000000000000000000000000000000000000000..f77a9c3236d3478a3c6f22443cd5c601
 +#include <skia/core/SkColorSpace.h>
 +#include <skia/core/SkData.h>
 +#include <skia/core/SkImage.h>
++#include <skia/core/SkPixmap.h>
 +WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_END
 +#endif
 +
@@ -34047,6 +34243,8 @@ index 0000000000000000000000000000000000000000..f77a9c3236d3478a3c6f22443cd5c601
 +    // whose compositor reports them. SUMMIT_COUNT_UNSHOWN_FRAMES=0 counts
 +    // every frame handed to the compositor as presented, as before.
 +    unsigned presentedFrames() const { return m_presentedFrames - m_unshownFrames; }
++    // Every picture handed on, for requestVideoFrameCallback.
++    unsigned framesHandedOn() const { return m_presentedFrames; }
 +    unsigned droppedFrames() const { return m_droppedFrames + m_unshownFrames; }
 +    // For the browser's debugging tools (engineDescription()): the decoder
 +    // the last setup chose and how it went.
@@ -35993,6 +36191,50 @@ index 0000000000000000000000000000000000000000..f77a9c3236d3478a3c6f22443cd5c601
 +#endif
 +}
 +
++#if USE(SKIA)
++RefPtr<NativeImage> MediaPlayerPrivateHaikuMSE::nativeImageForCurrentTime()
++{
++    if (!m_videoRenderer)
++        return nullptr;
++    auto image = m_videoRenderer->currentFrame();
++    if (!image)
++        return nullptr;
++    if (image->uniqueID() == m_readerSourceID && m_readerImage)
++        return m_readerImage;
++    // With its alpha bytes set: decoders leave them undefined in B_RGB32,
++    // and texImage2D copies them into the texture.
++    SkPixmap source;
++    if (!image->peekPixels(&source) || source.colorType() != kBGRA_8888_SkColorType)
++        return NativeImage::create(WTF::move(image));
++    auto info = source.info().makeAlphaType(kOpaque_SkAlphaType);
++    auto pixels = SkData::MakeUninitialized(source.rowBytes() * source.height());
++    auto* from = static_cast<const uint32_t*>(source.addr());
++    auto* to = static_cast<uint32_t*>(pixels->writable_data());
++    for (size_t i = 0, count = source.rowBytes() / 4 * source.height(); i < count; ++i)
++        to[i] = from[i] | 0xff000000;
++    m_readerSourceID = image->uniqueID();
++    m_readerImage = NativeImage::create(SkImages::RasterFromData(info, WTF::move(pixels), source.rowBytes()));
++    return m_readerImage;
++}
++#endif
++
++std::optional<VideoFrameMetadata> MediaPlayerPrivateHaikuMSE::videoFrameMetadata()
++{
++    unsigned presented = m_videoRenderer ? m_videoRenderer->framesHandedOn() : 0;
++    if (!presented || presented == m_lastMetadataFrames)
++        return std::nullopt;
++    m_lastMetadataFrames = presented;
++    VideoFrameMetadata metadata;
++    auto size = naturalSize();
++    metadata.width = size.width();
++    metadata.height = size.height();
++    metadata.presentedFrames = presented;
++    metadata.mediaTime = currentTime().toDouble();
++    metadata.presentationTime = MonotonicTime::now().secondsSinceEpoch().seconds();
++    metadata.expectedDisplayTime = metadata.presentationTime;
++    return metadata;
++}
++
 +ColorSpace MediaPlayerPrivateHaikuMSE::colorSpace()
 +{
 +    return ColorSpace::SRGB();
@@ -36458,10 +36700,10 @@ index 0000000000000000000000000000000000000000..f77a9c3236d3478a3c6f22443cd5c601
 +#endif // ENABLE(MEDIA_SOURCE)
 diff --git a/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaikuMSE.h b/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaikuMSE.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..4f844a68fae9b11758e364b4c26e1ef19927c4bc
+index 0000000000000000000000000000000000000000..ac6bc64f8fd4da3fc841dbab4b7d57dabb6e9d02
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaikuMSE.h
-@@ -0,0 +1,408 @@
+@@ -0,0 +1,417 @@
 +/*
 + * Copyright (C) 2026 Summit contributors.
 + *
@@ -36719,6 +36961,15 @@ index 0000000000000000000000000000000000000000..4f844a68fae9b11758e364b4c26e1ef1
 +    const PlatformTimeRanges& buffered() const final;
 +    bool didLoadingProgress() const final { return std::exchange(m_dashLoadingProgress, false); }
 +    void paint(GraphicsContext&, const FloatRect&) final;
++#if USE(SKIA)
++    // The picture being shown, for WebGL's texImage2D and canvas drawImage.
++    RefPtr<NativeImage> nativeImageForCurrentTime() final;
++    uint32_t m_readerSourceID { 0 };
++    RefPtr<NativeImage> m_readerImage;
++#endif
++    // requestVideoFrameCallback: a frame that was not reported yet.
++    std::optional<VideoFrameMetadata> videoFrameMetadata() final;
++    unsigned m_lastMetadataFrames { 0 };
 +#if USE(COORDINATED_GRAPHICS) && USE(TEXTURE_MAPPER) && USE(SKIA)
 +    // Frames go straight from the decoder thread to the compositor.
 +    bool supportsAcceleratedRendering() const final { return true; }
@@ -42395,10 +42646,21 @@ index 776466ea87d3d721d32ac4e52db702bb2b544e46..3d0cf15e7f1c8d7cb8b0d8ad62861f48
          s_skiaGLContext = SkiaGLContext::create(*this);
          m_skiaGLContexts.add(*s_skiaGLContext);
 diff --git a/Source/WebCore/platform/graphics/skia/SkiaPaintingEngine.cpp b/Source/WebCore/platform/graphics/skia/SkiaPaintingEngine.cpp
-index ffcff7e0b02bdf8599d7b8f245f3323f2f2743cd..46a1df7a0cea44c6bb9882a2b8ebb9505e8a515c 100644
+index ffcff7e0b02bdf8599d7b8f245f3323f2f2743cd..39f80b109d3269cded44f8cf8737e404551aa2a4 100644
 --- a/Source/WebCore/platform/graphics/skia/SkiaPaintingEngine.cpp
 +++ b/Source/WebCore/platform/graphics/skia/SkiaPaintingEngine.cpp
-@@ -67,7 +67,13 @@ WTF_MAKE_TZONE_ALLOCATED_IMPL(SkiaPaintingEngine);
+@@ -58,6 +58,10 @@ WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_BEGIN
+ #include <skia/gpu/ganesh/SkSurfaceGanesh.h>
+ WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_END
+ #include <wtf/NumberOfCores.h>
++#if PLATFORM(HAIKU)
++#include <OS.h>
++#include <cstdio>
++#endif
+ #include <wtf/SystemTracing.h>
+ #include <wtf/text/StringToIntegerConversion.h>
+ 
+@@ -67,7 +71,13 @@ WTF_MAKE_TZONE_ALLOCATED_IMPL(SkiaPaintingEngine);
  
  static bool canPerformAcceleratedRendering()
  {
@@ -42412,7 +42674,7 @@ index ffcff7e0b02bdf8599d7b8f245f3323f2f2743cd..46a1df7a0cea44c6bb9882a2b8ebb950
  }
  
  SkiaPaintingEngine::SkiaPaintingEngine(sk_sp<GrContextThreadSafeProxy>&& threadSafeGrContext)
-@@ -109,7 +115,18 @@ void SkiaPaintingEngine::paintIntoGraphicsContext(const GraphicsLayer& layer, Gr
+@@ -109,7 +119,18 @@ void SkiaPaintingEngine::paintIntoGraphicsContext(const GraphicsLayer& layer, Gr
  
      context.translate(-dirtyRect.x(), -dirtyRect.y());
      context.scale(contentsScale);
@@ -42431,7 +42693,28 @@ index ffcff7e0b02bdf8599d7b8f245f3323f2f2743cd..46a1df7a0cea44c6bb9882a2b8ebb950
  }
  
  Ref<CoordinatedTileBuffer> SkiaPaintingEngine::createBuffer(RenderingMode renderingMode, const IntSize& size, bool contentsOpaque) const
-@@ -259,10 +276,24 @@ Ref<CoordinatedTileBuffer> SkiaPaintingEngine::replay(const GraphicsLayerCoordin
+@@ -247,11 +268,20 @@ Ref<SkiaRecordingResult> SkiaPaintingEngine::record(const GraphicsLayerCoordinat
+     return result;
+ }
+ 
++#if PLATFORM(HAIKU)
++Ref<CoordinatedTileBuffer> SkiaPaintingEngine::replay(const GraphicsLayerCoordinated& layer, Ref<SkiaRecordingResult>&& recording, const IntRect& tileRect, const IntRect& dirtyRect, bool holdsRenderingUpdate)
++#else
+ Ref<CoordinatedTileBuffer> SkiaPaintingEngine::replay(const GraphicsLayerCoordinated& layer, Ref<SkiaRecordingResult>&& recording, const IntRect& tileRect, const IntRect& dirtyRect)
++#endif
+ {
+     // ### Asynchronous rendering on worker threads ###
+     Ref platformLayer = layer.coordinatedPlatformLayer();
++#if PLATFORM(HAIKU)
++    if (holdsRenderingUpdate)
++        platformLayer->willPaintTile();
++#else
+     platformLayer->willPaintTile();
++#endif
+ 
+     auto renderingMode = recording->renderingMode();
+ #if USE(TEXTURE_MAPPER)
+@@ -259,10 +289,38 @@ Ref<CoordinatedTileBuffer> SkiaPaintingEngine::replay(const GraphicsLayerCoordin
  #else
      auto bufferSize = renderingMode == RenderingMode::Accelerated ? tileRect.size() : dirtyRect.size();
  #endif
@@ -42446,18 +42729,32 @@ index ffcff7e0b02bdf8599d7b8f245f3323f2f2743cd..46a1df7a0cea44c6bb9882a2b8ebb950
 +#if PLATFORM(HAIKU)
 +    // A mask hides where it is transparent: its empty tiles have to be drawn.
 +    const bool mayHaveNoTexture = !layer.isMaskLayer();
++    // SUMMIT_TILE_PAINT_TRACE=1: when each tile is handed to the painting
++    // threads, when one starts it and how long it takes.
++    static const bool tracePaints = [] {
++        const char* value = getenv("SUMMIT_TILE_PAINT_TRACE");
++        return value && value[0] == '1' && !value[1];
++    }();
++    const bigtime_t postedAt = tracePaints ? system_time() : 0;
++    if (tracePaints)
++        fprintf(stderr, "Summit tile paint: post layer=%p tile=%d,%d %dx%d holds=%d replayCanvas=%d at=%lld\n", platformLayer.ptr(),
++            tileRect.x(), tileRect.y(), dirtyRect.width(), dirtyRect.height(), holdsRenderingUpdate,
++            recording->hasFences() || recording->hasGPUAtlases(), static_cast<long long>(postedAt));
 +#endif
  
 -    m_paintingWorkerPool->postTask([platformLayer = WTF::move(platformLayer), buffer = Ref { buffer }, tileRect, dirtyRect, recording = WTF::move(recording), threadSafeGrContext = m_threadSafeGrContext]() mutable {
 +    m_paintingWorkerPool->postTask([platformLayer = WTF::move(platformLayer), buffer = Ref { buffer }, tileRect, dirtyRect, recording = WTF::move(recording), threadSafeGrContext = m_threadSafeGrContext
 +#if PLATFORM(HAIKU)
-+        , mayHaveNoTexture
++        , mayHaveNoTexture, holdsRenderingUpdate, postedAt
 +#endif
 +        ]() mutable {
++#if PLATFORM(HAIKU)
++        const bigtime_t startedAt = tracePaints ? system_time() : 0;
++#endif
          if (auto* canvas = buffer->canvas()) {
              auto replayPicture = [](const sk_sp<SkPicture>& picture, SkCanvas* canvas, const IntRect& recordRect, const IntRect& tileRect, const IntRect& dirtyRect, bool isDDLBuffer) {
                  canvas->save();
-@@ -297,6 +328,10 @@ Ref<CoordinatedTileBuffer> SkiaPaintingEngine::replay(const GraphicsLayerCoordin
+@@ -297,8 +355,21 @@ Ref<CoordinatedTileBuffer> SkiaPaintingEngine::replay(const GraphicsLayerCoordin
              WTFEndSignpost(canvas, PaintTile);
          }
  
@@ -42466,9 +42763,20 @@ index ffcff7e0b02bdf8599d7b8f245f3323f2f2743cd..46a1df7a0cea44c6bb9882a2b8ebb950
 +            static_cast<CoordinatedUnacceleratedTileBuffer&>(buffer.get()).noteIfTransparent();
 +#endif
          buffer->completePainting();
++#if PLATFORM(HAIKU)
++        if (tracePaints)
++            fprintf(stderr, "Summit tile paint: done layer=%p tile=%d,%d waited=%.1f paint=%.1f thread=%d at=%lld\n", platformLayer.ptr(),
++                tileRect.x(), tileRect.y(), (startedAt - postedAt) / 1000.0, (system_time() - startedAt) / 1000.0,
++                static_cast<int>(find_thread(nullptr)), static_cast<long long>(system_time()));
++        if (holdsRenderingUpdate)
++            platformLayer->didPaintTile();
++#else
          platformLayer->didPaintTile();
++#endif
      });
-@@ -310,7 +345,15 @@ unsigned SkiaPaintingEngine::numberOfCPUPaintingThreads()
+ 
+     return buffer;
+@@ -310,7 +381,15 @@ unsigned SkiaPaintingEngine::numberOfCPUPaintingThreads()
      static unsigned numberOfThreads = 0;
  
      std::call_once(onceFlag, [] {
@@ -42484,6 +42792,24 @@ index ffcff7e0b02bdf8599d7b8f245f3323f2f2743cd..46a1df7a0cea44c6bb9882a2b8ebb950
  
          if (const char* envString = getenv("WEBKIT_SKIA_CPU_PAINTING_THREADS")) {
              auto newValue = parseInteger<unsigned>(StringView::fromLatin1(envString));
+diff --git a/Source/WebCore/platform/graphics/skia/SkiaPaintingEngine.h b/Source/WebCore/platform/graphics/skia/SkiaPaintingEngine.h
+index 6600c24f0265dfae370e5c195967424f74f1ceae..b97341232fba94083b3f3c5d7d27a366b4b17346 100644
+--- a/Source/WebCore/platform/graphics/skia/SkiaPaintingEngine.h
++++ b/Source/WebCore/platform/graphics/skia/SkiaPaintingEngine.h
+@@ -68,7 +68,13 @@ public:
+     const sk_sp<GrContextThreadSafeProxy>& threadSafeGrContext() const { return m_threadSafeGrContext; }
+ 
+     Ref<SkiaRecordingResult> record(const GraphicsLayerCoordinated&, const IntRect& recordRect, bool contentsOpaque, float contentsScale, unsigned dirtyTilesCount);
++#if PLATFORM(HAIKU)
++    // holdsRenderingUpdate: the composition of the rendering update waits
++    // for the tile (it is in view).
++    Ref<CoordinatedTileBuffer> replay(const GraphicsLayerCoordinated&, Ref<SkiaRecordingResult>&&, const IntRect& tileRect, const IntRect& dirtyRect, bool holdsRenderingUpdate = true);
++#else
+     Ref<CoordinatedTileBuffer> replay(const GraphicsLayerCoordinated&, Ref<SkiaRecordingResult>&&, const IntRect& tileRect, const IntRect& dirtyRect);
++#endif
+ 
+ private:
+     Ref<CoordinatedTileBuffer> createBuffer(RenderingMode, const IntSize&, bool contentsOpaque) const;
 diff --git a/Source/WebCore/platform/graphics/texmap/ClipStack.h b/Source/WebCore/platform/graphics/texmap/ClipStack.h
 index 9fd560e16a7e8b8b5cdf0ef54b46ab2dddc32e4f..37b7905e18e26b577ae0ec335352ae63b2423295 100644
 --- a/Source/WebCore/platform/graphics/texmap/ClipStack.h
@@ -43921,10 +44247,10 @@ index f4510ce2501dd8b7577ceb994e9090da9e649dda..ba78da56a8a4e5249b4e0c83047186e2
          Opacity          = 1L << 3,
          Antialiasing     = 1L << 5,
 diff --git a/Source/WebCore/platform/graphics/texmap/coordinated/CoordinatedBackingStore.cpp b/Source/WebCore/platform/graphics/texmap/coordinated/CoordinatedBackingStore.cpp
-index 0badc4492a49e10ae2faa80d59da84a9cea259d6..1dda643ffb5f93beeb8308c8faaa05ff6cb95c1b 100644
+index 0badc4492a49e10ae2faa80d59da84a9cea259d6..c97d840e5793a9550a73cb1b842adc7537a9258b 100644
 --- a/Source/WebCore/platform/graphics/texmap/coordinated/CoordinatedBackingStore.cpp
 +++ b/Source/WebCore/platform/graphics/texmap/coordinated/CoordinatedBackingStore.cpp
-@@ -24,35 +24,144 @@
+@@ -24,35 +24,156 @@
  #include "BitmapTexture.h"
  #include "CoordinatedTileBuffer.h"
  #include "GraphicsLayer.h"
@@ -44035,14 +44361,18 @@ index 0badc4492a49e10ae2faa80d59da84a9cea259d6..1dda643ffb5f93beeb8308c8faaa05ff
 +        // were taken for tiles outside it. A composition that had used its
 +        // budget before it reached such a layer left them again, so parts of
 +        // GitHub's issue list kept showing an earlier layout.
-+        FloatRect shown = s_viewport.isEmpty() ? FloatRect(m_lastPaintClip) : FloatRect(s_viewport);
++        const FloatRect inView = s_viewport.isEmpty() ? FloatRect(m_lastPaintClip) : FloatRect(s_viewport);
++        FloatRect shown = inView;
 +        shown.inflate(margin);
 +        bool deferred = false;
 +        Vector<CoordinatedBackingStoreTile*, 64> others;
 +        for (auto& tile : m_tiles.values()) {
 +            if (!tile.hasPendingUpdates())
 +                continue;
-+            if (!m_lastPaintTransform.isAffine() || m_lastPaintTransform.mapRect(tile.rectAfterPendingUpdates()).intersects(shown)) {
++            const bool affine = m_lastPaintTransform.isAffine();
++            const FloatRect tileRect = affine ? m_lastPaintTransform.mapRect(tile.rectAfterPendingUpdates()) : FloatRect();
++            // A tile in the margin that is still being painted is not in view yet.
++            if (!affine || (tileRect.intersects(shown) && (tileRect.intersects(inView) || tile.pendingUpdatesArePainted()))) {
 +                tile.processPendingUpdates();
 +                if (m_hasDeferredTiles)
 +                    s_showsLateUpload = true;
@@ -44053,6 +44383,14 @@ index 0badc4492a49e10ae2faa80d59da84a9cea259d6..1dda643ffb5f93beeb8308c8faaa05ff
 +            if (system_time() >= s_uploadDeadline) {
 +                deferred = true;
 +                break;
++            }
++            // Tiles painted ahead of the scroll do not hold up the page's
++            // rendering update (CoordinatedBackingStoreProxy), so they can
++            // still be painting: waiting for them here held up this
++            // composition instead.
++            if (!tile->pendingUpdatesArePainted()) {
++                deferred = true;
++                continue;
 +            }
 +            tile->processPendingUpdates();
 +        }
@@ -44069,7 +44407,7 @@ index 0badc4492a49e10ae2faa80d59da84a9cea259d6..1dda643ffb5f93beeb8308c8faaa05ff
  
      for (auto& tile : m_tiles.values())
          tile.processPendingUpdates();
-@@ -62,6 +171,9 @@ void CoordinatedBackingStore::processPendingUpdates()
+@@ -62,6 +183,9 @@ void CoordinatedBackingStore::processPendingUpdates()
  
  void CoordinatedBackingStore::resize(const FloatSize& size, float scale)
  {
@@ -44079,7 +44417,7 @@ index 0badc4492a49e10ae2faa80d59da84a9cea259d6..1dda643ffb5f93beeb8308c8faaa05ff
      m_size = size;
      m_scale = scale;
  }
-@@ -74,6 +186,17 @@ void CoordinatedBackingStore::paintToTextureMapper(TextureMapper& textureMapper,
+@@ -74,6 +198,17 @@ void CoordinatedBackingStore::paintToTextureMapper(TextureMapper& textureMapper,
      ASSERT(!m_size.isZero());
      FloatRect layerRect = { { }, m_size };
      TransformationMatrix adjustedTransform = transform * TransformationMatrix::rectToRect(layerRect, targetRect);
@@ -44097,7 +44435,7 @@ index 0badc4492a49e10ae2faa80d59da84a9cea259d6..1dda643ffb5f93beeb8308c8faaa05ff
  
  #if ENABLE(DAMAGE_TRACKING)
      const auto& frameDamage = textureMapper.damage();
-@@ -86,8 +209,43 @@ void CoordinatedBackingStore::paintToTextureMapper(TextureMapper& textureMapper,
+@@ -86,8 +221,43 @@ void CoordinatedBackingStore::paintToTextureMapper(TextureMapper& textureMapper,
      }();
  #endif
  
@@ -44141,7 +44479,7 @@ index 0badc4492a49e10ae2faa80d59da84a9cea259d6..1dda643ffb5f93beeb8308c8faaa05ff
          const auto allEdgesExposed = allTileEdgesExposed(layerRect, tile.rect()) ? TextureMapper::AllEdgesExposed::Yes : TextureMapper::AllEdgesExposed::No;
  
  #if ENABLE(DAMAGE_TRACKING)
-@@ -105,6 +263,55 @@ void CoordinatedBackingStore::paintToTextureMapper(TextureMapper& textureMapper,
+@@ -105,6 +275,55 @@ void CoordinatedBackingStore::paintToTextureMapper(TextureMapper& textureMapper,
      }
  }
  
@@ -44255,7 +44593,7 @@ index 8723b9e2f90788a74d1ddc536a399463921231ec..4039a2586a2832d85258b7dc33b0db50
  
  } // namespace WebKit
 diff --git a/Source/WebCore/platform/graphics/texmap/coordinated/CoordinatedBackingStoreTile.cpp b/Source/WebCore/platform/graphics/texmap/coordinated/CoordinatedBackingStoreTile.cpp
-index 3f7acfab36c398a8e7af4c55768bdef27cdac477..3c8c8e0bc1dff262f949e978e756fb219ec443b4 100644
+index 3f7acfab36c398a8e7af4c55768bdef27cdac477..1d8a3db1e5009fc250226ac1900c88172ffe6a83 100644
 --- a/Source/WebCore/platform/graphics/texmap/coordinated/CoordinatedBackingStoreTile.cpp
 +++ b/Source/WebCore/platform/graphics/texmap/coordinated/CoordinatedBackingStoreTile.cpp
 @@ -25,6 +25,7 @@
@@ -44303,7 +44641,25 @@ index 3f7acfab36c398a8e7af4c55768bdef27cdac477..3c8c8e0bc1dff262f949e978e756fb21
  CoordinatedBackingStoreTile::CoordinatedBackingStoreTile(float scale)
      : m_scale(scale)
  {
-@@ -83,7 +112,13 @@ void CoordinatedBackingStoreTile::processPendingUpdates()
+@@ -70,6 +99,17 @@ void CoordinatedBackingStoreTile::ensureTexture(const IntSize& size, Coordinated
+     WTFEndSignpost(this, AcquireTexture);
+ }
+ 
++#if PLATFORM(HAIKU)
++bool CoordinatedBackingStoreTile::pendingUpdatesArePainted() const
++{
++    for (auto& update : m_updates) {
++        if (!update.buffer->isPaintingComplete())
++            return false;
++    }
++    return true;
++}
++#endif
++
+ void CoordinatedBackingStoreTile::processPendingUpdates()
+ {
+     auto updates = WTF::move(m_updates);
+@@ -83,7 +123,13 @@ void CoordinatedBackingStoreTile::processPendingUpdates()
  
          WTFBeginSignpost(this, CoordinatedSwapBuffer, "%u/%zu, rect %ix%i+%i+%i", updateIndex + 1, updatesCount, update.tileRect.x(), update.tileRect.y(), update.tileRect.width(), update.tileRect.height());
  
@@ -44317,7 +44673,7 @@ index 3f7acfab36c398a8e7af4c55768bdef27cdac477..3c8c8e0bc1dff262f949e978e756fb21
  
          FloatRect unscaledTileRect(update.tileRect);
          unscaledTileRect.scale(1. / m_scale);
-@@ -91,7 +126,13 @@ void CoordinatedBackingStoreTile::processPendingUpdates()
+@@ -91,7 +137,13 @@ void CoordinatedBackingStoreTile::processPendingUpdates()
          if (unscaledTileRect != m_rect) {
              m_rect = unscaledTileRect;
              m_texture = nullptr;
@@ -44331,7 +44687,7 @@ index 3f7acfab36c398a8e7af4c55768bdef27cdac477..3c8c8e0bc1dff262f949e978e756fb21
  
  #if USE(SKIA)
          if (update.buffer->isBackedByOpenGL()) {
-@@ -118,12 +159,46 @@ void CoordinatedBackingStoreTile::processPendingUpdates()
+@@ -118,12 +170,46 @@ void CoordinatedBackingStoreTile::processPendingUpdates()
          }
  #endif
          auto& buffer = static_cast<CoordinatedUnacceleratedTileBuffer&>(update.buffer.get());
@@ -44379,15 +44735,18 @@ index 3f7acfab36c398a8e7af4c55768bdef27cdac477..3c8c8e0bc1dff262f949e978e756fb21
          WTFEndSignpost(this, CoordinatedSwapBuffer);
      }
 diff --git a/Source/WebCore/platform/graphics/texmap/coordinated/CoordinatedBackingStoreTile.h b/Source/WebCore/platform/graphics/texmap/coordinated/CoordinatedBackingStoreTile.h
-index 74df231207380fa09298f846f66adefed719fd2a..0c3952170a61f5bca868a1eb3e54b0515416a959 100644
+index 74df231207380fa09298f846f66adefed719fd2a..0a0e2be57936fac6305af2194ccf16a67ec5fd3a 100644
 --- a/Source/WebCore/platform/graphics/texmap/coordinated/CoordinatedBackingStoreTile.h
 +++ b/Source/WebCore/platform/graphics/texmap/coordinated/CoordinatedBackingStoreTile.h
-@@ -50,10 +50,35 @@ public:
+@@ -50,10 +50,38 @@ public:
  
      bool canBePainted() const { return !!m_texture; }
  
 +#if PLATFORM(HAIKU)
 +    bool hasPendingUpdates() const { return !m_updates.isEmpty(); }
++    // Whether the painting threads have finished every pending update, so
++    // processPendingUpdates() does not wait for one.
++    bool pendingUpdatesArePainted() const;
 +    // Where the tile is once its pending updates are applied, in the
 +    // coordinates rect() uses.
 +    FloatRect rectAfterPendingUpdates() const;
@@ -109245,10 +109604,10 @@ index 0000000000000000000000000000000000000000..c9a119d02f85b7c5ad8fe9153bfc9604
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/WebView.cpp b/Source/WebKit/UIProcess/haiku/WebView.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..e5d0abaa8c0f9fc9fa04b40e4c3bb6d35e292ba6
+index 0000000000000000000000000000000000000000..72e82ce7ab59e0bbc72a29f55c47495ed238defb
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/WebView.cpp
-@@ -0,0 +1,2483 @@
+@@ -0,0 +1,2490 @@
 +/*
 + * Copyright (C) 2013 Intel Corporation. All rights reserved.
 + *
@@ -110607,6 +110966,13 @@ index 0000000000000000000000000000000000000000..e5d0abaa8c0f9fc9fa04b40e4c3bb6d3
 +    // SUMMIT_REQUEST_IDLE_CALLBACK=0 turns it off, to tell its cost apart.
 +    const char* idleCallbacks = std::getenv("SUMMIT_REQUEST_IDLE_CALLBACK");
 +    configuration->preferences().setRequestIdleCallbackEnabled(!idleCallbacks || std::strcmp(idleCallbacks, "0"));
++    // requestVideoFrameCallback, which Chrome and Firefox ship: three.js
++    // uploads a video texture only when the callback says a new frame came,
++    // and without it every playing video in every animation frame (getartcraft.com:
++    // four 640x360 pictures, 60 times a second, for videos of 24 to 30).
++    // SUMMIT_VIDEO_FRAME_CALLBACK=0 turns it off.
++    const char* videoFrameCallback = std::getenv("SUMMIT_VIDEO_FRAME_CALLBACK");
++    configuration->preferences().setRequestVideoFrameCallbackEnabled(!videoFrameCallback || std::strcmp(videoFrameCallback, "0"));
 +    // Muted videos that started themselves pause while nothing of them is on
 +    // screen and resume when they come back, as on iOS: CNN's front page
 +    // plays four at once, most of them below the fold, and took two cores.
