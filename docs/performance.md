@@ -234,8 +234,11 @@ the padding stays so. 600-1000-pixel-wide filter surfaces created in that
 scroll: 76-83 against 118-132; a blurred-and-clipped test page is
 pixel-identical after scrolling (`SUMMIT_FILTER_SURFACE_GRID=0` for exact
 sizes always). Edge tiles whose width changes by a pixel or two between
-frames, and the other intermediate surfaces, still make new textures. Two
-other things seen: linear.app repaints all of its
+frames, and the other intermediate surfaces, still make new textures.
+Textures now stay in the pool for 15 seconds instead of 3 on Haiku
+(`SUMMIT_POOL_KEEP_SECONDS`): getartcraft.com scrolled again after a
+7-second pause made 1-2 new textures instead of 50-51. Two other things
+seen: linear.app repaints all of its
 root contents when a script changes an inherited property (a custom
 property) on `html` or `body` (`RenderBox::styleWillChange`), and a picture
 shader still rasterizes a real repeating pattern again for every recording.
