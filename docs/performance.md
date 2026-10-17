@@ -248,6 +248,17 @@ playing video) is the next engine-side step. One such composition
 opaque background fill (1.85), four bands of page tiles (~0.7 each), and a
 dozen intermediate surfaces of 0.2-1 megapixel for blurs and groups.
 
+The background fill was a bug: a layer's background color is drawn under
+its tiles unless its opaque tiles cover all that the clip shows, and that
+test, made in the tiles' own coordinates (a tile is 292.57 units wide at
+175 %), took only the whole units inside each tile and so always found a
+column uncovered between two tiles. It now works in the target's pixels
+(`SUMMIT_TILE_COVER_IN_TARGET=0` for the old test). Megapixels drawn per
+composition while scrolling: getartcraft.com 11.5 against 12.9, github.com
+14.9 against 17.3, stripe.com 10.6 against 12.8, tailwindcss.com 1.9
+against 3.5; getartcraft.com's first scroll ran at 50-54 frames a second
+against 36-42 (two runs each). Static test pages are pixel-identical.
+
 Tried and dropped: tile textures allocated on a 64-pixel grid and drawn
 through `drawTextureWithPhysicalSize` (edge tiles of 430-433 pixels sharing
 448-pixel textures): 213-237 new textures against 250-261, but text in some
