@@ -179,6 +179,54 @@ compositing update. github.com scrolled: 296-335 ms of jank in 1.3 s against
 opacity, transforms and z-index in every frame with forced reads in between
 ends pixel-identical. `SUMMIT_DEFER_STYLE_COMPOSITING=0` updates at once.
 
+### Pictures, patterns and fixed backgrounds
+
+Pictures decode off the main thread. github.com decoded 32 pictures in
+place on its main thread while it loaded and scrolled, 130-260 ms (17 % of
+the main thread in a scroll profile). Three causes: asking whether a picture
+is HDR decoded it whole and dropped the frame (`BitmapImageDescriptor::
+hasHDRColorSpace`), and both `HTMLImageElement.decode()` and the layer path
+ask first, so every asynchronous decode began with a synchronous one;
+pictures composited directly into a layer (an `<img>` with its own layer, a
+simple container's background) were taken from the image in the compositing
+update; and frames decoded for a paint kept the size the paint asked for,
+though the decoders here always decode the whole picture, so a larger draw
+or a layer decoded them again. Now a picture is SDR until a decoded frame
+says otherwise (`SUMMIT_HDR_COLOR_SPACE_PROBE=1` probes), a composited
+picture over 32 KB decoded waits for the decoder's thread
+(`SUMMIT_COMPOSITED_IMAGE_ASYNC=0`), whole-picture frames count as full size
+(`SUMMIT_IMAGE_SIZE_FOR_DRAWING=1`), and an element's first picture decodes
+asynchronously on any paint (`SUMMIT_FIRST_IMAGE_ASYNC=0`). github.com: 27
+small decodes, 29 ms, left on the main thread (script textures); worst
+scroll frame 94-148 ms against 121-197. `SUMMIT_IMAGE_DECODE_TRACE=1` prints
+each decode in place and each release of decoded frames.
+
+A pattern that shows one copy of its image draws it through an image
+shader. CSS backgrounds and gradient images reach
+`GraphicsContextSkia::drawPattern` with a source rectangle that is the whole
+image but for rounding at 175 % (1961.75 of 1962 pixels), which sent them to
+Skia's picture shader: it rasterized the whole image (2000x1600 pixels for
+stripe.com's stats gradients) again for each recording, in the first tile
+painted from it, 45-80 ms. stripe.com, 60-notch scroll: 0.66-0.86 s of tile
+painting against 1.12-1.19 s, worst tile 10-11 ms against 58-70; a page of
+radial gradients 0.26 s against 1.51 s. `SUMMIT_SINGLE_TILE_PATTERN=0` keeps
+the picture shader, `SUMMIT_PATTERN_TRACE=1` prints what still reaches it.
+
+Fixed backgrounds (`background-attachment: fixed`) repaint only what is in
+view at each scroll step. Their renderers were repainted whole, which
+repainted every tile kept around the view, 59 times a second while
+scrolling: tailwindcss.com (two 40 by 11783-pixel hatched columns, a dozen
+dotted cards) painted 2230 tiles in 2.2-2.5 s during a 60-notch scroll, now
+1100-1150 in 1.3 s (`SUMMIT_SLOW_REPAINT_IN_VIEW=0` repaints all).
+
+Skia now reads the CPU's features in the web process (`SkGraphics::Init()`,
+as GTK and WPE do; `SUMMIT_SKIA_CPU_FEATURES=0` skips it), and WebKit's Skia
+build gives the AVX2 and AVX-512 pipelines (`SkOpts_ml3.cpp`,
+`SkOpts_ml4.cpp`) their `-march` flags again; they went to files Skia had
+renamed. Tiles were painted with SSE2 code only. With AVX2 the tile paint
+times of these tests did not change measurably; AVX-512 stays off (the
+kernel does not report ZMM state).
+
 Measuring on the laptop needs the screen awake: with the screen blanker
 running, every Summit frame comes 105 ms apart (rAF at 9.5 a second), which
 looked like a regression after the OS was updated (the session's
