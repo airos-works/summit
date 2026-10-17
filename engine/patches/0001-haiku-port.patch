@@ -22301,10 +22301,43 @@ index 25a33139079a55094a25c97216a9575a59224292..f218183a01f2781651d7af7ad93e6ccf
  
      static Ref<BitmapTexture> create(const IntSize& size, OptionSet<Flags> flags = { })
 diff --git a/Source/WebCore/platform/graphics/egl/BitmapTexturePool.cpp b/Source/WebCore/platform/graphics/egl/BitmapTexturePool.cpp
-index 36206e6f966e88e056cf20705257fddb8b14d601..9c6a1f0f635ecf3299f546d2f3078e20abbfe44f 100644
+index 36206e6f966e88e056cf20705257fddb8b14d601..4cfaaaf262bc63c27ecc4e3c8037de957624f3ec 100644
 --- a/Source/WebCore/platform/graphics/egl/BitmapTexturePool.cpp
 +++ b/Source/WebCore/platform/graphics/egl/BitmapTexturePool.cpp
-@@ -80,6 +80,9 @@ Ref<BitmapTexture> BitmapTexturePool::acquireTexture(const IntSize& size, Option
+@@ -27,6 +27,14 @@
+ #include "config.h"
+ #include "BitmapTexturePool.h"
+ 
++#if PLATFORM(HAIKU)
++#include <atomic>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include <wtf/Assertions.h>
++#endif
++
+ #include "GLContext.h"
+ #include "GLContextWrapper.h"
+ #include "PlatformDisplay.h"
+@@ -67,6 +75,17 @@ BitmapTexturePool::BitmapTexturePool()
+ #endif
+ }
+ 
++#if PLATFORM(HAIKU)
++// Textures the pool made because none of the right size was free, for the
++// compositor's timing trace.
++static std::atomic<unsigned> s_createdTexturesHaiku;
++
++unsigned takeCreatedPoolTexturesHaiku()
++{
++    return s_createdTexturesHaiku.exchange(0, std::memory_order_relaxed);
++}
++#endif
++
+ Ref<BitmapTexture> BitmapTexturePool::acquireTexture(const IntSize& size, OptionSet<BitmapTexture::Flags> flags)
+ {
+     ASSERT(GLContextWrapper::currentContext());
+@@ -80,10 +99,22 @@ Ref<BitmapTexture> BitmapTexturePool::acquireTexture(const IntSize& size, Option
              && entry.texture->flags().contains(BitmapTexture::Flags::ForceVivanteSuperTiledBuffer) == flags.contains(BitmapTexture::Flags::ForceVivanteSuperTiledBuffer)
  #endif
              && entry.texture->flags().contains(BitmapTexture::Flags::UseBGRALayout) == flags.contains(BitmapTexture::Flags::UseBGRALayout)
@@ -22314,14 +22347,28 @@ index 36206e6f966e88e056cf20705257fddb8b14d601..9c6a1f0f635ecf3299f546d2f3078e20
              && entry.texture->flags().contains(BitmapTexture::Flags::NearestFiltering) == flags.contains(BitmapTexture::Flags::NearestFiltering);
      });
  
-@@ -115,15 +118,35 @@ Ref<BitmapTexture> BitmapTexturePool::createTextureForImage(EGLImage image, cons
+     if (selectedEntry == m_textures.end()) {
++#if PLATFORM(HAIKU)
++        s_createdTexturesHaiku.fetch_add(1, std::memory_order_relaxed);
++        static const bool tracePool = getenv("SUMMIT_POOL_TRACE");
++        if (tracePool) {
++            fprintf(stderr, "Summit texture pool: new %dx%d flags=0x%x (%zu textures)\n", size.width(), size.height(), flags.toRaw(), m_textures.size());
++            if (!strcmp(getenv("SUMMIT_POOL_TRACE"), "2"))
++                WTFReportBacktraceWithPrefix("    ");
++        }
++#endif
+         m_textures.append(Entry(BitmapTexture::create(size, flags)));
+         selectedEntry = &m_textures.last();
+         m_poolSizeInBytes += selectedEntry->texture->sizeInBytes();
+@@ -115,15 +146,35 @@ Ref<BitmapTexture> BitmapTexturePool::createTextureForImage(EGLImage image, cons
  void BitmapTexturePool::scheduleReleaseUnusedTextures()
  {
      assertIsHeld(m_lock);
 -    if (m_releaseUnusedTexturesTimer.isActive())
 +    if (m_releaseTimerActive && !m_releaseTimerImmediate)
-+        return;
-+
+         return;
+ 
+-    m_releaseUnusedTexturesTimer.startOneShot(m_releaseUnusedTexturesTimerInterval);
 +    // A worker may hold m_lock while the timer fires on the main thread. The
 +    // timer's Haiku RunLoop operations take the main BLooper lock, so doing
 +    // them here from that worker deadlocks against the timer callback waiting
@@ -22335,10 +22382,9 @@ index 36206e6f966e88e056cf20705257fddb8b14d601..9c6a1f0f635ecf3299f546d2f3078e20
 +            m_releaseTimerSchedulePending = false;
 +            scheduleReleaseUnusedTextures();
 +        });
-         return;
++        return;
 +    }
- 
--    m_releaseUnusedTexturesTimer.startOneShot(m_releaseUnusedTexturesTimerInterval);
++
 +    bool immediate = m_releaseTimerImmediate;
 +    m_releaseTimerImmediate = false;
 +    m_releaseTimerActive = true;
@@ -22352,7 +22398,7 @@ index 36206e6f966e88e056cf20705257fddb8b14d601..9c6a1f0f635ecf3299f546d2f3078e20
  
      auto hasTextures = [this] -> bool {
          assertIsHeld(m_lock);
-@@ -139,12 +162,28 @@ void BitmapTexturePool::releaseUnusedTexturesTimerFired()
+@@ -139,12 +190,28 @@ void BitmapTexturePool::releaseUnusedTexturesTimerFired()
      if (!hasTextures())
          return;
  
@@ -22383,7 +22429,7 @@ index 36206e6f966e88e056cf20705257fddb8b14d601..9c6a1f0f635ecf3299f546d2f3078e20
              auto matchCount = m_textures.removeAllMatching([this, &minUsedTime](const Entry& entry) {
                  assertIsHeld(m_lock);
                  if (entry.canBeReleased(minUsedTime)) {
-@@ -194,7 +233,7 @@ void BitmapTexturePool::enterLimitExceededModeIfNeeded()
+@@ -194,7 +261,7 @@ void BitmapTexturePool::enterLimitExceededModeIfNeeded()
          m_onLimitExceededMode = true;
          m_releaseUnusedSecondsTolerance = s_releaseUnusedSecondsToleranceOnLimitExceeded;
          m_releaseUnusedTexturesTimerInterval = s_releaseUnusedTexturesTimerIntervalOnLimitExceeded;
@@ -42646,21 +42692,24 @@ index 776466ea87d3d721d32ac4e52db702bb2b544e46..3d0cf15e7f1c8d7cb8b0d8ad62861f48
          s_skiaGLContext = SkiaGLContext::create(*this);
          m_skiaGLContexts.add(*s_skiaGLContext);
 diff --git a/Source/WebCore/platform/graphics/skia/SkiaPaintingEngine.cpp b/Source/WebCore/platform/graphics/skia/SkiaPaintingEngine.cpp
-index ffcff7e0b02bdf8599d7b8f245f3323f2f2743cd..39f80b109d3269cded44f8cf8737e404551aa2a4 100644
+index ffcff7e0b02bdf8599d7b8f245f3323f2f2743cd..b5df122ac016b0a77f890c49249a46cf8e3f8ecb 100644
 --- a/Source/WebCore/platform/graphics/skia/SkiaPaintingEngine.cpp
 +++ b/Source/WebCore/platform/graphics/skia/SkiaPaintingEngine.cpp
-@@ -58,6 +58,10 @@ WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_BEGIN
+@@ -58,6 +58,13 @@ WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_BEGIN
  #include <skia/gpu/ganesh/SkSurfaceGanesh.h>
  WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_END
  #include <wtf/NumberOfCores.h>
 +#if PLATFORM(HAIKU)
 +#include <OS.h>
 +#include <cstdio>
++#include <wtf/Deque.h>
++#include <wtf/Lock.h>
++#include <wtf/ThreadSafeRefCounted.h>
 +#endif
  #include <wtf/SystemTracing.h>
  #include <wtf/text/StringToIntegerConversion.h>
  
-@@ -67,7 +71,13 @@ WTF_MAKE_TZONE_ALLOCATED_IMPL(SkiaPaintingEngine);
+@@ -67,11 +74,62 @@ WTF_MAKE_TZONE_ALLOCATED_IMPL(SkiaPaintingEngine);
  
  static bool canPerformAcceleratedRendering()
  {
@@ -42673,8 +42722,57 @@ index ffcff7e0b02bdf8599d7b8f245f3323f2f2743cd..39f80b109d3269cded44f8cf8737e404
 +#endif
  }
  
++#if PLATFORM(HAIKU)
++// The painting threads take tiles in view first. After a jump (a page that
++// scrolls itself, a fling) the tiles of the new view were queued behind 50
++// that the previous updates had asked for ahead of the scroll, and the page's
++// rendering update waited for all of them.
++class SkiaTileJobsHaiku : public ThreadSafeRefCounted<SkiaTileJobsHaiku> {
++public:
++    static Ref<SkiaTileJobsHaiku> create() { return adoptRef(*new SkiaTileJobsHaiku); }
++
++    void post(WorkerPool& pool, Function<void()>&& job, bool inView)
++    {
++        {
++            Locker locker { m_lock };
++            (inView ? m_inView : m_ahead).append(WTF::move(job));
++        }
++        // One pool task per job; each runs the most urgent job waiting then.
++        pool.postTask([jobs = Ref { *this }] {
++            jobs->runNext();
++        });
++    }
++
++private:
++    void runNext()
++    {
++        Function<void()> job;
++        {
++            Locker locker { m_lock };
++            if (!m_inView.isEmpty())
++                job = m_inView.takeFirst();
++            else if (!m_ahead.isEmpty())
++                job = m_ahead.takeFirst();
++        }
++        if (job)
++            job();
++    }
++
++    Lock m_lock;
++    Deque<Function<void()>> m_inView WTF_GUARDED_BY_LOCK(m_lock);
++    Deque<Function<void()>> m_ahead WTF_GUARDED_BY_LOCK(m_lock);
++};
++#endif
++
  SkiaPaintingEngine::SkiaPaintingEngine(sk_sp<GrContextThreadSafeProxy>&& threadSafeGrContext)
-@@ -109,7 +119,18 @@ void SkiaPaintingEngine::paintIntoGraphicsContext(const GraphicsLayer& layer, Gr
+     : m_threadSafeGrContext(WTF::move(threadSafeGrContext))
++#if PLATFORM(HAIKU)
++    , m_tileJobsHaiku(SkiaTileJobsHaiku::create())
++#endif
+ {
+ #if USE(TEXTURE_MAPPER)
+     if (canPerformAcceleratedRendering()) {
+@@ -109,7 +167,18 @@ void SkiaPaintingEngine::paintIntoGraphicsContext(const GraphicsLayer& layer, Gr
  
      context.translate(-dirtyRect.x(), -dirtyRect.y());
      context.scale(contentsScale);
@@ -42693,7 +42791,7 @@ index ffcff7e0b02bdf8599d7b8f245f3323f2f2743cd..39f80b109d3269cded44f8cf8737e404
  }
  
  Ref<CoordinatedTileBuffer> SkiaPaintingEngine::createBuffer(RenderingMode renderingMode, const IntSize& size, bool contentsOpaque) const
-@@ -247,11 +268,20 @@ Ref<SkiaRecordingResult> SkiaPaintingEngine::record(const GraphicsLayerCoordinat
+@@ -247,11 +316,20 @@ Ref<SkiaRecordingResult> SkiaPaintingEngine::record(const GraphicsLayerCoordinat
      return result;
  }
  
@@ -42714,7 +42812,7 @@ index ffcff7e0b02bdf8599d7b8f245f3323f2f2743cd..39f80b109d3269cded44f8cf8737e404
  
      auto renderingMode = recording->renderingMode();
  #if USE(TEXTURE_MAPPER)
-@@ -259,10 +289,38 @@ Ref<CoordinatedTileBuffer> SkiaPaintingEngine::replay(const GraphicsLayerCoordin
+@@ -259,10 +337,38 @@ Ref<CoordinatedTileBuffer> SkiaPaintingEngine::replay(const GraphicsLayerCoordin
  #else
      auto bufferSize = renderingMode == RenderingMode::Accelerated ? tileRect.size() : dirtyRect.size();
  #endif
@@ -42743,7 +42841,7 @@ index ffcff7e0b02bdf8599d7b8f245f3323f2f2743cd..39f80b109d3269cded44f8cf8737e404
 +#endif
  
 -    m_paintingWorkerPool->postTask([platformLayer = WTF::move(platformLayer), buffer = Ref { buffer }, tileRect, dirtyRect, recording = WTF::move(recording), threadSafeGrContext = m_threadSafeGrContext]() mutable {
-+    m_paintingWorkerPool->postTask([platformLayer = WTF::move(platformLayer), buffer = Ref { buffer }, tileRect, dirtyRect, recording = WTF::move(recording), threadSafeGrContext = m_threadSafeGrContext
++    Function<void()> task = [platformLayer = WTF::move(platformLayer), buffer = Ref { buffer }, tileRect, dirtyRect, recording = WTF::move(recording), threadSafeGrContext = m_threadSafeGrContext
 +#if PLATFORM(HAIKU)
 +        , mayHaveNoTexture, holdsRenderingUpdate, postedAt
 +#endif
@@ -42754,7 +42852,7 @@ index ffcff7e0b02bdf8599d7b8f245f3323f2f2743cd..39f80b109d3269cded44f8cf8737e404
          if (auto* canvas = buffer->canvas()) {
              auto replayPicture = [](const sk_sp<SkPicture>& picture, SkCanvas* canvas, const IntRect& recordRect, const IntRect& tileRect, const IntRect& dirtyRect, bool isDDLBuffer) {
                  canvas->save();
-@@ -297,8 +355,21 @@ Ref<CoordinatedTileBuffer> SkiaPaintingEngine::replay(const GraphicsLayerCoordin
+@@ -297,9 +403,27 @@ Ref<CoordinatedTileBuffer> SkiaPaintingEngine::replay(const GraphicsLayerCoordin
              WTFEndSignpost(canvas, PaintTile);
          }
  
@@ -42772,11 +42870,18 @@ index ffcff7e0b02bdf8599d7b8f245f3323f2f2743cd..39f80b109d3269cded44f8cf8737e404
 +            platformLayer->didPaintTile();
 +#else
          platformLayer->didPaintTile();
+-    });
 +#endif
-     });
++    };
++#if PLATFORM(HAIKU)
++    m_tileJobsHaiku->post(*m_paintingWorkerPool, WTF::move(task), holdsRenderingUpdate);
++#else
++    m_paintingWorkerPool->postTask(WTF::move(task));
++#endif
  
      return buffer;
-@@ -310,7 +381,15 @@ unsigned SkiaPaintingEngine::numberOfCPUPaintingThreads()
+ }
+@@ -310,7 +434,15 @@ unsigned SkiaPaintingEngine::numberOfCPUPaintingThreads()
      static unsigned numberOfThreads = 0;
  
      std::call_once(onceFlag, [] {
@@ -42793,10 +42898,21 @@ index ffcff7e0b02bdf8599d7b8f245f3323f2f2743cd..39f80b109d3269cded44f8cf8737e404
          if (const char* envString = getenv("WEBKIT_SKIA_CPU_PAINTING_THREADS")) {
              auto newValue = parseInteger<unsigned>(StringView::fromLatin1(envString));
 diff --git a/Source/WebCore/platform/graphics/skia/SkiaPaintingEngine.h b/Source/WebCore/platform/graphics/skia/SkiaPaintingEngine.h
-index 6600c24f0265dfae370e5c195967424f74f1ceae..b97341232fba94083b3f3c5d7d27a366b4b17346 100644
+index 6600c24f0265dfae370e5c195967424f74f1ceae..db4ff38f7f75579460ddde62c84ed8bfcc882b2f 100644
 --- a/Source/WebCore/platform/graphics/skia/SkiaPaintingEngine.h
 +++ b/Source/WebCore/platform/graphics/skia/SkiaPaintingEngine.h
-@@ -68,7 +68,13 @@ public:
+@@ -48,6 +48,10 @@ class SkiaImageAtlasLayout;
+ class SkiaRecordingResult;
+ enum class RenderingMode : uint8_t;
+ 
++#if PLATFORM(HAIKU)
++class SkiaTileJobsHaiku;
++#endif
++
+ class SkiaPaintingEngine {
+     WTF_MAKE_TZONE_ALLOCATED(SkiaPaintingEngine);
+     WTF_MAKE_NONCOPYABLE(SkiaPaintingEngine);
+@@ -68,7 +72,13 @@ public:
      const sk_sp<GrContextThreadSafeProxy>& threadSafeGrContext() const { return m_threadSafeGrContext; }
  
      Ref<SkiaRecordingResult> record(const GraphicsLayerCoordinated&, const IntRect& recordRect, bool contentsOpaque, float contentsScale, unsigned dirtyTilesCount);
@@ -42810,6 +42926,17 @@ index 6600c24f0265dfae370e5c195967424f74f1ceae..b97341232fba94083b3f3c5d7d27a366
  
  private:
      Ref<CoordinatedTileBuffer> createBuffer(RenderingMode, const IntSize&, bool contentsOpaque) const;
+@@ -77,6 +87,10 @@ private:
+     bool tryReuseCachedAtlases(SkiaRecordingResult&, unsigned fingerprint);
+ 
+     sk_sp<GrContextThreadSafeProxy> m_threadSafeGrContext;
++#if PLATFORM(HAIKU)
++    // Tiles in view are painted before the ones painted ahead of the scroll.
++    const Ref<SkiaTileJobsHaiku> m_tileJobsHaiku;
++#endif
+     const RefPtr<WorkerPool> m_paintingWorkerPool;
+     const RefPtr<WorkQueue> m_uploadWorkQueue;
+     unsigned m_cachedImageFingerprint { 0 };
 diff --git a/Source/WebCore/platform/graphics/texmap/ClipStack.h b/Source/WebCore/platform/graphics/texmap/ClipStack.h
 index 9fd560e16a7e8b8b5cdf0ef54b46ab2dddc32e4f..37b7905e18e26b577ae0ec335352ae63b2423295 100644
 --- a/Source/WebCore/platform/graphics/texmap/ClipStack.h
@@ -135600,7 +135727,7 @@ index 57163f65873e5a481e5ef5a4ec3beec4b40b7cea..61b49ac7c362b416cdec1d10c44304d2
      bool m_compositionRequired { false };
  #if ENABLE(SCROLLING_THREAD)
 diff --git a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/ThreadedCompositor.cpp b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/ThreadedCompositor.cpp
-index c238029ad9c99c5028ea7e456520af85d1d85532..6db9e13679baf9ae5239de15477f37469a06a6a5 100644
+index c238029ad9c99c5028ea7e456520af85d1d85532..4b12f8de363b52a9b6fd103bf432ab9f580c53db 100644
 --- a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/ThreadedCompositor.cpp
 +++ b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/ThreadedCompositor.cpp
 @@ -26,6 +26,11 @@
@@ -135643,13 +135770,19 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..6db9e13679baf9ae5239de15477f3746
  #if USE(GLIB_EVENT_LOOP)
  #include <wtf/glib/RunLoopSourcePriority.h>
  #endif
-@@ -68,18 +85,40 @@ WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_END
+@@ -68,18 +85,46 @@ WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_END
  #include <GLES2/gl2.h>
  #endif
  
 +#if PLATFORM(HAIKU)
 +namespace WebCore {
 +unsigned summitTakeTileHolesHaiku(unsigned& textureless);
++}
++#endif
++
++#if PLATFORM(HAIKU)
++namespace WebCore {
++unsigned takeCreatedPoolTexturesHaiku(); // BitmapTexturePool.cpp
 +}
 +#endif
 +
@@ -135684,7 +135817,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..6db9e13679baf9ae5239de15477f3746
      , m_layerTreeHost(&layerTreeHost)
      , m_surface(AcceleratedSurface::create(webPage, [this] { frameComplete(); }, AcceleratedSurface::RenderingPurpose::Composited))
      , m_sceneState(&sceneState)
-@@ -90,6 +129,19 @@ ThreadedCompositor::ThreadedCompositor(WebPage& webPage, LayerTreeHost& layerTre
+@@ -90,6 +135,19 @@ ThreadedCompositor::ThreadedCompositor(WebPage& webPage, LayerTreeHost& layerTre
  {
      ASSERT(RunLoop::isMain());
  
@@ -135704,7 +135837,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..6db9e13679baf9ae5239de15477f3746
      lazyInitialize(m_didCompositeRunLoopObserver, makeUnique<RunLoopObserver>(RunLoopObserver::WellKnownOrder::GraphicsCommit, [this] {
          this->didCompositeRunLoopObserverFired();
      }));
-@@ -127,6 +179,11 @@ ThreadedCompositor::ThreadedCompositor(WebPage& webPage, LayerTreeHost& layerTre
+@@ -127,6 +185,11 @@ ThreadedCompositor::ThreadedCompositor(WebPage& webPage, LayerTreeHost& layerTre
          }
  
          glGetIntegerv(GL_MAX_TEXTURE_SIZE, &m_maxTextureSize);
@@ -135716,7 +135849,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..6db9e13679baf9ae5239de15477f3746
  
  #if USE(TEXTURE_MAPPER)
          m_context = WTF::move(context);
-@@ -136,9 +193,70 @@ ThreadedCompositor::ThreadedCompositor(WebPage& webPage, LayerTreeHost& layerTre
+@@ -136,9 +199,70 @@ ThreadedCompositor::ThreadedCompositor(WebPage& webPage, LayerTreeHost& layerTre
          m_threadSafeGrContext = PlatformDisplay::sharedDisplay().skiaGrContext()->threadSafeProxy();
  #endif
      });
@@ -135730,8 +135863,8 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..6db9e13679baf9ae5239de15477f3746
 +    }
 +#endif
 +
- }
- 
++}
++
 +#if PLATFORM(HAIKU) && USE(TEXTURE_MAPPER)
 +// Shader programs the page is likely to need soon are compiled one per task
 +// (TextureMapper::warmShaderProgramsHaiku()): the two every first frame draws
@@ -135773,9 +135906,9 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..6db9e13679baf9ae5239de15477f3746
 +    m_workQueue->dispatch([this, protectedThis = Ref { *this }, remaining, waitsForQuiet] {
 +        warmShaderProgramsHaiku(remaining - 1, waitsForQuiet);
 +    });
-+}
+ }
 +#endif
-+
+ 
 +#if PLATFORM(HAIKU)
 +ThreadedCompositor::~ThreadedCompositor()
 +{
@@ -135787,7 +135920,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..6db9e13679baf9ae5239de15477f3746
  
  uint64_t ThreadedCompositor::surfaceID() const
  {
-@@ -216,8 +334,23 @@ void ThreadedCompositor::updateRenderTimer()
+@@ -216,8 +340,23 @@ void ThreadedCompositor::updateRenderTimer()
      }
  
      if (m_state.isRenderTimerActive) {
@@ -135813,7 +135946,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..6db9e13679baf9ae5239de15477f3746
      } else
          m_renderTimer.stop();
  }
-@@ -364,6 +497,10 @@ TargetContents ThreadedCompositor::paintToCurrentGLContext(const TransformationM
+@@ -364,6 +503,10 @@ TargetContents ThreadedCompositor::paintToCurrentGLContext(const TransformationM
  #if USE(TEXTURE_MAPPER)
  void ThreadedCompositor::paintToTextureMapper(const TransformationMatrix& matrix, const IntSize& size, const OptionSet<CompositionReason>& reasons)
  {
@@ -135824,7 +135957,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..6db9e13679baf9ae5239de15477f3746
      FloatRect clipRect(FloatPoint { }, size);
      TextureMapperLayer& currentRootLayer = m_sceneState->rootLayer().ensureTarget();
      if (currentRootLayer.transform() != matrix)
-@@ -371,11 +508,23 @@ void ThreadedCompositor::paintToTextureMapper(const TransformationMatrix& matrix
+@@ -371,11 +514,23 @@ void ThreadedCompositor::paintToTextureMapper(const TransformationMatrix& matrix
  
      bool sceneHasRunningAnimations = currentRootLayer.applyAnimationsRecursively(MonotonicTime::now());
  
@@ -135848,7 +135981,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..6db9e13679baf9ae5239de15477f3746
      currentRootLayer.prepareForPainting(*m_textureMapper);
      if (m_damage.flags) {
          Damage frameDamage(size, m_damage.flags->contains(DamagePropagationFlags::Unified) ? Damage::Mode::BoundingBox : Damage::Mode::Rectangles);
-@@ -383,7 +532,26 @@ void ThreadedCompositor::paintToTextureMapper(const TransformationMatrix& matrix
+@@ -383,7 +538,26 @@ void ThreadedCompositor::paintToTextureMapper(const TransformationMatrix& matrix
          WTFBeginSignpost(this, CollectDamage);
          currentRootLayer.collectDamage(*m_textureMapper, frameDamage);
          WTFEndSignpost(this, CollectDamage);
@@ -135875,7 +136008,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..6db9e13679baf9ae5239de15477f3746
          recordFrameDamage(WTF::move(frameDamage));
  
          if (m_damage.flags->contains(DamagePropagationFlags::UseForCompositing)) {
-@@ -392,23 +560,62 @@ void ThreadedCompositor::paintToTextureMapper(const TransformationMatrix& matrix
+@@ -392,23 +566,62 @@ void ThreadedCompositor::paintToTextureMapper(const TransformationMatrix& matrix
                  m_textureMapper->setDamage(std::nullopt);
              } else {
                  const auto& damageSinceLastSurfaceUse = m_surface->renderTargetDamage();
@@ -135938,7 +136071,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..6db9e13679baf9ae5239de15477f3746
  
  #if ENABLE(DAMAGE_TRACKING)
      if (rectContainingRegionThatActuallyChanged)
-@@ -426,6 +633,21 @@ void ThreadedCompositor::paintToTextureMapper(const TransformationMatrix& matrix
+@@ -426,6 +639,21 @@ void ThreadedCompositor::paintToTextureMapper(const TransformationMatrix& matrix
  
      m_textureMapper->endClip();
      m_textureMapper->endPainting();
@@ -135960,7 +136093,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..6db9e13679baf9ae5239de15477f3746
  
      if (sceneHasRunningAnimations)
          requestComposition(CompositionReason::Animation);
-@@ -525,8 +747,17 @@ void ThreadedCompositor::recordFrameDamage(Damage&& damage)
+@@ -525,8 +753,17 @@ void ThreadedCompositor::recordFrameDamage(Damage&& damage)
  
      // Nothing changed this frame: an empty damage contributes nothing to the targets, since Damage::add()
      // ignores empty damage. Skip it rather than replace the recorded frame damage with an empty one.
@@ -135979,7 +136112,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..6db9e13679baf9ae5239de15477f3746
  
      m_surface->setFrameDamage(WTF::move(damage));
  }
-@@ -556,6 +787,46 @@ void ThreadedCompositor::renderLayerTree()
+@@ -556,6 +793,46 @@ void ThreadedCompositor::renderLayerTree()
      if (m_suspendedCount > 0)
          return;
  
@@ -136026,7 +136159,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..6db9e13679baf9ae5239de15477f3746
      OptionSet<CompositionReason> reasons;
      bool shouldNotifiyDidComposite = false;
      {
-@@ -580,8 +851,20 @@ void ThreadedCompositor::renderLayerTree()
+@@ -580,8 +857,20 @@ void ThreadedCompositor::renderLayerTree()
  
          ASSERT(m_state.state == State::Scheduled);
          m_state.state = State::InProgress;
@@ -136047,7 +136180,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..6db9e13679baf9ae5239de15477f3746
  #if USE(TEXTURE_MAPPER)
      if (!m_context || !m_context->makeContextCurrent())
          return;
-@@ -599,23 +882,61 @@ void ThreadedCompositor::renderLayerTree()
+@@ -599,23 +888,61 @@ void ThreadedCompositor::renderLayerTree()
      if (viewportSize.isEmpty())
          return;
  
@@ -136109,7 +136242,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..6db9e13679baf9ae5239de15477f3746
  
      updateFPSCounter();
  
-@@ -631,8 +952,51 @@ void ThreadedCompositor::renderLayerTree()
+@@ -631,8 +958,51 @@ void ThreadedCompositor::renderLayerTree()
      PlatformDisplay::sharedDisplay().skiaGLContext()->swapBuffers();
  #endif
  
@@ -136143,14 +136276,14 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..6db9e13679baf9ae5239de15477f3746
 +#endif
 +#if PLATFORM(HAIKU)
 +    if (traceTiming)
-+        std::fprintf(stderr, "Summit compositor timing: pid=%d at=%lld async=%d update=%d surface=%.1f flush=%.1f paint=%.1f send=%.1f total=%.1f tiles=%u newTextures=%u tileMpx=%.2f paintWait=%.1f texture=%.1f upload=%.1f swap=%.1f read=%.1f ipc=%.1f deferred=%d draws=%u blended=%u intoSurfaces=%u surfaces=%u blurs=%u drawMpx=%.1f blendedMpx=%.1f transparentTiles=%u waitingInView=%u texturelessInView=%u drawCpu=%.1f stencilClips=%u\n",
++        std::fprintf(stderr, "Summit compositor timing: pid=%d at=%lld async=%d update=%d surface=%.1f flush=%.1f paint=%.1f send=%.1f total=%.1f tiles=%u newTextures=%u tileMpx=%.2f paintWait=%.1f texture=%.1f upload=%.1f swap=%.1f read=%.1f ipc=%.1f deferred=%d draws=%u blended=%u intoSurfaces=%u surfaces=%u blurs=%u drawMpx=%.1f blendedMpx=%.1f transparentTiles=%u waitingInView=%u texturelessInView=%u drawCpu=%.1f stencilClips=%u poolNew=%u\n",
 +            static_cast<int>(getpid()), static_cast<long long>(startedAt), reasons.contains(CompositionReason::AsyncScrolling),
 +            reasons.contains(CompositionReason::RenderingUpdate), (surfaceAt - startedAt) / 1000.0,
 +            (flushedAt - surfaceAt) / 1000.0, (paintedAt - flushedAt) / 1000.0,
 +            (system_time() - paintedAt) / 1000.0, (system_time() - startedAt) / 1000.0,
 +            tileUpdates.tiles, tileUpdates.newTextures, tileUpdates.megapixels, tileUpdates.paintWaitMs, tileUpdates.textureMs, tileUpdates.uploadMs,
 +            (swappedAt - paintedAt) / 1000.0, (readAt - swappedAt) / 1000.0, (system_time() - readAt) / 1000.0, deferredUploads,
-+            drawStats.draws, drawStats.blendedDraws, drawStats.drawsIntoSurfaces, drawStats.surfaceBinds, drawStats.blurPasses, drawStats.megapixels, drawStats.blendedMegapixels, tileUpdates.transparentTiles, waitingTiles, texturelessTiles, drawStats.drawMs, drawStats.stencilClips);
++            drawStats.draws, drawStats.blendedDraws, drawStats.drawsIntoSurfaces, drawStats.surfaceBinds, drawStats.blurPasses, drawStats.megapixels, drawStats.blendedMegapixels, tileUpdates.transparentTiles, waitingTiles, texturelessTiles, drawStats.drawMs, drawStats.stencilClips, WebCore::takeCreatedPoolTexturesHaiku());
 +    // The tiles that were left over are uploaded by the compositions that
 +    // follow, which this asks for in case nothing else does.
 +    if (deferredUploads)
@@ -136161,7 +136294,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..6db9e13679baf9ae5239de15477f3746
  
      RunLoop::mainSingleton().dispatch([this, protectedThis = Ref { *this }] {
          if (m_layerTreeHost)
-@@ -656,6 +1020,13 @@ void ThreadedCompositor::requestComposition(CompositionReason reason)
+@@ -656,6 +1026,13 @@ void ThreadedCompositor::requestComposition(CompositionReason reason)
  {
      Locker locker { m_state.lock };
      m_state.reasons.add(reason);
@@ -136175,7 +136308,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..6db9e13679baf9ae5239de15477f3746
      scheduleUpdateLocked();
  }
  
-@@ -703,6 +1074,10 @@ void ThreadedCompositor::scheduleUpdateLocked()
+@@ -703,6 +1080,10 @@ void ThreadedCompositor::scheduleUpdateLocked()
  void ThreadedCompositor::frameComplete()
  {
      ASSERT(m_workQueue->runLoop().isCurrent());
@@ -136186,7 +136319,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..6db9e13679baf9ae5239de15477f3746
  
      Locker locker { m_state.lock };
      WTFEmitSignpost(this, FrameComplete, "reasons: %s, state: %s, waiting for tiles: %s", reasonsToString(m_state.reasons).utf8(), stateToString(m_state.state).characters(), m_state.isWaitingForTiles ? "yes" : "no");
-@@ -726,6 +1101,112 @@ void ThreadedCompositor::frameComplete()
+@@ -726,6 +1107,112 @@ void ThreadedCompositor::frameComplete()
      }
  }
  
@@ -136299,7 +136432,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..6db9e13679baf9ae5239de15477f3746
  RunLoop* ThreadedCompositor::runLoop()
  {
      return m_surface ? &m_workQueue->runLoop() : nullptr;
-@@ -747,7 +1228,15 @@ void ThreadedCompositor::updateSceneAttributes(const IntSize& size, float device
+@@ -747,7 +1234,15 @@ void ThreadedCompositor::updateSceneAttributes(const IntSize& size, float device
  {
      m_attributes.viewportSize = size;
      m_attributes.deviceScaleFactor = deviceScaleFactor;

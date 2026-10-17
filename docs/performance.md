@@ -97,6 +97,35 @@ at 60:
   Lenis page from 47 to 33 ms a frame before these changes, and did nothing
   for getartcraft.com; Haiku keeps two.
 
+### What is left: new GPU textures on the laptop
+
+A realistic wheel scroll (one notch every 33 ms) shows two phases on
+getartcraft.com: the first scroll after the page loaded runs at 17-20
+frames a second (1.3 s of jank in 1.9 s), later ones at ~47. Tile painting is
+not the limit any more (90th percentile 1.8 ms a tile). The compositor is:
+70 % of its thread in the first scroll is `amdgpu_bo_alloc` (the kernel
+ioctl) under `BitmapTexture::allocateTexture`, for new tiles and for
+intermediate surfaces and blur textures whose size differs by a pixel from
+the last frame's; one composition took 108 ms in `flush` creating tile
+textures. A composition that creates no texture takes 1.5-3 ms where one
+that creates 11-17 takes 25-34. Each GPU allocation costs milliseconds on
+this machine (the same ioctl makes VA-API slow); that is for the OS. New
+diagnostics: `poolNew` in the compositor timing line (textures the pool had
+to create), and `SUMMIT_POOL_TRACE=1` (`=2` with stacks) names their sizes.
+
+Tried and dropped: reusing a free texture up to twice the size for
+intermediate surfaces (drawn clipped, the rest transparent) and keeping a
+texture's framebuffer and stencil buffer when the pool hands it out again at
+its size: no change in composition time or in textures created. The same for
+the filter cache's texture cut textures created by a fifth, but the cached
+texture lost its blur when drawn as a backdrop. Painting tiles in view before
+those ahead of the scroll (kept: the pool now runs the most urgent tile job)
+made no measurable difference either.
+
+Found, not fixed: `backdrop-filter` does not blur a composited sibling
+painted before it (a `will-change: transform` card under a blurred box stays
+sharp, in the builds before and after this work).
+
 ## 14 October 2026: YouTube on the Cubie A7S
 
 Goal: smoother YouTube playback with the board's video engine (sunxi_cedar)
