@@ -143,6 +143,18 @@ animations and later class changes render pixel-identical either way
 (`www/animstate.html` in the session's test kit). `SUMMIT_SKIP_STILL_ANIMATIONS=0`
 invalidates on every tick again.
 
+Filtered and masked layers get surfaces of steadier sizes. A layer with a
+filter or mask is drawn through a surface the size of its part in view; as
+the page scrolled that size changed in every frame, and each new size was a
+new texture pair (github.com: 1962-pixel-wide blur textures of a new height in
+each frame). A layer no larger than the view now gets a surface for all of
+it, and a larger one its part in view widened to a 256-pixel grid from its
+corner; what lies outside the view is clipped when the surface is drawn.
+github.com while scrolling: 12 % fewer textures created, 10 % less compositor
+time; pixel-identical on a test of blurred and masked layers in clipped,
+rounded containers. `SUMMIT_CLIPPED_FILTER_SURFACES=1` restores the sizes in
+view. Most textures still created there are new tiles.
+
 Found, not fixed: `backdrop-filter` does not blur a composited sibling
 painted before it (a `will-change: transform` card under a blurred box stays
 sharp, in the builds before and after this work).
