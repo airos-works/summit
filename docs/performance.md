@@ -235,7 +235,12 @@ scroll: 76-83 against 118-132; a blurred-and-clipped test page is
 pixel-identical after scrolling (`SUMMIT_FILTER_SURFACE_GRID=0` for exact
 sizes always). Edge tiles whose width changes by a pixel or two between
 frames, and the other intermediate surfaces, still make new textures.
-Textures now stay in the pool for 15 seconds instead of 3 on Haiku
+Tried and dropped: tile textures allocated on a 64-pixel grid and drawn
+through `drawTextureWithPhysicalSize` (edge tiles of 430-433 pixels sharing
+448-pixel textures): 213-237 new textures against 250-261, but text in some
+tiles of a fixed header came out shifted by a fraction of a pixel (up to
+48/255 on glyph edges), so every tile's sampling would need proving exact
+first. Textures now stay in the pool for 15 seconds instead of 3 on Haiku
 (`SUMMIT_POOL_KEEP_SECONDS`): getartcraft.com scrolled again after a
 7-second pause made 1-2 new textures instead of 50-51. Two other things
 seen: linear.app repaints all of its
