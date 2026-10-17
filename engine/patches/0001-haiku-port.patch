@@ -43899,7 +43899,7 @@ index b478a0e1d88443132d337f514434eeab7c8df464..69dda7202badacf9739212e7891b70ae
  protected:
      WEBCORE_EXPORT static bool allTileEdgesExposed(const FloatRect& totalRect, const FloatRect& tileRect);
 diff --git a/Source/WebCore/platform/graphics/texmap/TextureMapperLayer.cpp b/Source/WebCore/platform/graphics/texmap/TextureMapperLayer.cpp
-index 112d19b1676c297b0168941b1db5b619cd535a29..93fa0927ac0741d044b07d77146727ad4db6d49f 100644
+index 112d19b1676c297b0168941b1db5b619cd535a29..f69cb595adccac60829167486b8940d8c709560f 100644
 --- a/Source/WebCore/platform/graphics/texmap/TextureMapperLayer.cpp
 +++ b/Source/WebCore/platform/graphics/texmap/TextureMapperLayer.cpp
 @@ -21,6 +21,16 @@
@@ -44550,7 +44550,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..93fa0927ac0741d044b07d77146727ad
      auto rects = overlapRegion.rects();
      static const size_t OverlapRegionConsolidationThreshold = 4;
      if (rects.size() > OverlapRegionConsolidationThreshold) {
-@@ -1057,8 +1561,119 @@ Vector<IntRect, 1> TextureMapperLayer::computeConsolidatedOverlapRegionRects(Tex
+@@ -1057,8 +1561,121 @@ Vector<IntRect, 1> TextureMapperLayer::computeConsolidatedOverlapRegionRects(Tex
      return rects;
  }
  
@@ -44611,20 +44611,22 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..93fa0927ac0741d044b07d77146727ad
 +        target.move(static_cast<int>(std::round(dx)), static_cast<int>(std::round(dy)));
 +    } else {
 +        // Surface sizes on a 64-pixel grid when the filters reach outside the
-+        // layer (blur, drop shadow): a blurred layer whose size changes in
-+        // every frame (getartcraft.com: glows animated in size, a surface
-+        // and blur textures of a new size, so new GPU textures, each frame)
-+        // reuses the textures of the frames before. The margin kept for the
-+        // filters' reach is transparent, so the padding past it stays
-+        // transparent (a blur's downscaled passes fall on a slightly
-+        // different grid: near its edge a pixel may differ by 10 %).
-+        // SUMMIT_FILTER_SURFACE_GRID=0 uses the exact size.
++        // layer (blur, drop shadow) and the surface's size changed since it
++        // was last painted: a blurred layer whose size changes in every frame
++        // (getartcraft.com: glows animated in size, a surface and blur
++        // textures of a new size, so new GPU textures, each frame) reuses the
++        // textures of the frames before. A layer of a steady size keeps its
++        // exact surface (github.com's worst frames grew with the padding).
++        // The margin kept for the filters' reach is transparent, so the
++        // padding past it stays transparent (a blur's downscaled passes fall
++        // on a slightly different grid: near its edge a pixel may differ by
++        // 10 %). SUMMIT_FILTER_SURFACE_GRID=0 uses the exact size.
 +        static const int surfaceGrid = [] {
 +            const char* value = std::getenv("SUMMIT_FILTER_SURFACE_GRID");
 +            return value ? std::max(1, std::atoi(value)) : 64;
 +        }();
 +        IntSize surfaceSize = whole.size();
-+        if (surfaceGrid > 1 && m_currentFilters.hasOutsets()) {
++        if (surfaceGrid > 1 && m_currentFilters.hasOutsets() && cache && cache->rect.size() != whole.size()) {
 +            surfaceSize = IntSize(std::min(roundUpToMultipleOf(surfaceGrid, whole.width()), maxTextureSize.width()),
 +                std::min(roundUpToMultipleOf(surfaceGrid, whole.height()), maxTextureSize.height()));
 +        }
@@ -44670,7 +44672,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..93fa0927ac0741d044b07d77146727ad
      IntSize maxTextureSize = options.textureMapper.maxTextureSize();
      for (auto& rect : computeConsolidatedOverlapRegionRects(options)) {
          for (int x = rect.x(); x < rect.maxX(); x += maxTextureSize.width()) {
-@@ -1079,6 +1694,33 @@ void TextureMapperLayer::applyMask(TextureMapperPaintOptions& options)
+@@ -1079,6 +1696,33 @@ void TextureMapperLayer::applyMask(TextureMapperPaintOptions& options)
      options.textureMapper.setMaskMode(false);
  }
  
@@ -44704,7 +44706,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..93fa0927ac0741d044b07d77146727ad
  void TextureMapperLayer::paintIntoSurface(TextureMapperPaintOptions& options)
  {
      options.textureMapper.bindSurface(options.surface.get());
-@@ -1093,7 +1735,11 @@ void TextureMapperLayer::paintIntoSurface(TextureMapperPaintOptions& options)
+@@ -1093,7 +1737,11 @@ void TextureMapperLayer::paintIntoSurface(TextureMapperPaintOptions& options)
      bool hasMask = !!m_state.maskLayer;
      bool hasReplicaMask = options.replicaLayer == this && m_state.replicaLayer->m_state.maskLayer;
      bool defersLastFilterPass = !hasMask && !hasReplicaMask;
@@ -44716,7 +44718,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..93fa0927ac0741d044b07d77146727ad
      options.textureMapper.bindSurface(options.surface.get());
      if (hasMask)
          m_state.maskLayer->applyMask(options);
-@@ -1142,6 +1788,10 @@ void TextureMapperLayer::paintSelfAndChildrenWithIntermediateSurface(TextureMapp
+@@ -1142,6 +1790,10 @@ void TextureMapperLayer::paintSelfAndChildrenWithIntermediateSurface(TextureMapp
  
  void TextureMapperLayer::paintSelfChildrenReplicaFilterAndMask(TextureMapperPaintOptions& options)
  {
@@ -44727,7 +44729,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..93fa0927ac0741d044b07d77146727ad
      bool hasFilterOrMask = [&] {
          if (hasFilters())
              return true;
-@@ -1167,6 +1817,18 @@ void TextureMapperLayer::paintRecursive(TextureMapperPaintOptions& options)
+@@ -1167,6 +1819,18 @@ void TextureMapperLayer::paintRecursive(TextureMapperPaintOptions& options)
  {
      if (!isVisible())
          return;
@@ -44746,7 +44748,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..93fa0927ac0741d044b07d77146727ad
  
      SetForScope scopedOpacity(options.opacity, options.opacity * m_currentOpacity);
  
-@@ -1495,6 +2157,11 @@ void TextureMapperLayer::setBackgroundColor(const Color& color)
+@@ -1495,6 +2159,11 @@ void TextureMapperLayer::setBackgroundColor(const Color& color)
  void TextureMapperLayer::setFilters(const FilterOperations& filters)
  {
      m_state.filters = filters;
