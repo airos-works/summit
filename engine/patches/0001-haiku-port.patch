@@ -43899,7 +43899,7 @@ index b478a0e1d88443132d337f514434eeab7c8df464..69dda7202badacf9739212e7891b70ae
  protected:
      WEBCORE_EXPORT static bool allTileEdgesExposed(const FloatRect& totalRect, const FloatRect& tileRect);
 diff --git a/Source/WebCore/platform/graphics/texmap/TextureMapperLayer.cpp b/Source/WebCore/platform/graphics/texmap/TextureMapperLayer.cpp
-index 112d19b1676c297b0168941b1db5b619cd535a29..f69cb595adccac60829167486b8940d8c709560f 100644
+index 112d19b1676c297b0168941b1db5b619cd535a29..068ba41adf51a366ddf787ba1d2bd96bb454ddd6 100644
 --- a/Source/WebCore/platform/graphics/texmap/TextureMapperLayer.cpp
 +++ b/Source/WebCore/platform/graphics/texmap/TextureMapperLayer.cpp
 @@ -21,6 +21,16 @@
@@ -44550,7 +44550,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..f69cb595adccac60829167486b8940d8
      auto rects = overlapRegion.rects();
      static const size_t OverlapRegionConsolidationThreshold = 4;
      if (rects.size() > OverlapRegionConsolidationThreshold) {
-@@ -1057,8 +1561,121 @@ Vector<IntRect, 1> TextureMapperLayer::computeConsolidatedOverlapRegionRects(Tex
+@@ -1057,8 +1561,124 @@ Vector<IntRect, 1> TextureMapperLayer::computeConsolidatedOverlapRegionRects(Tex
      return rects;
  }
  
@@ -44626,7 +44626,10 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..f69cb595adccac60829167486b8940d8
 +            return value ? std::max(1, std::atoi(value)) : 64;
 +        }();
 +        IntSize surfaceSize = whole.size();
-+        if (surfaceGrid > 1 && m_currentFilters.hasOutsets() && cache && cache->rect.size() != whole.size()) {
++        // A pixel or two is the rounding of a layer moved by a fraction of a
++        // pixel; the pool keeps both sizes, and the surface stays exact.
++        bool sizeChanged = cache && (std::abs(cache->rect.width() - whole.width()) > 2 || std::abs(cache->rect.height() - whole.height()) > 2);
++        if (surfaceGrid > 1 && m_currentFilters.hasOutsets() && sizeChanged) {
 +            surfaceSize = IntSize(std::min(roundUpToMultipleOf(surfaceGrid, whole.width()), maxTextureSize.width()),
 +                std::min(roundUpToMultipleOf(surfaceGrid, whole.height()), maxTextureSize.height()));
 +        }
@@ -44672,7 +44675,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..f69cb595adccac60829167486b8940d8
      IntSize maxTextureSize = options.textureMapper.maxTextureSize();
      for (auto& rect : computeConsolidatedOverlapRegionRects(options)) {
          for (int x = rect.x(); x < rect.maxX(); x += maxTextureSize.width()) {
-@@ -1079,6 +1696,33 @@ void TextureMapperLayer::applyMask(TextureMapperPaintOptions& options)
+@@ -1079,6 +1699,33 @@ void TextureMapperLayer::applyMask(TextureMapperPaintOptions& options)
      options.textureMapper.setMaskMode(false);
  }
  
@@ -44706,7 +44709,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..f69cb595adccac60829167486b8940d8
  void TextureMapperLayer::paintIntoSurface(TextureMapperPaintOptions& options)
  {
      options.textureMapper.bindSurface(options.surface.get());
-@@ -1093,7 +1737,11 @@ void TextureMapperLayer::paintIntoSurface(TextureMapperPaintOptions& options)
+@@ -1093,7 +1740,11 @@ void TextureMapperLayer::paintIntoSurface(TextureMapperPaintOptions& options)
      bool hasMask = !!m_state.maskLayer;
      bool hasReplicaMask = options.replicaLayer == this && m_state.replicaLayer->m_state.maskLayer;
      bool defersLastFilterPass = !hasMask && !hasReplicaMask;
@@ -44718,7 +44721,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..f69cb595adccac60829167486b8940d8
      options.textureMapper.bindSurface(options.surface.get());
      if (hasMask)
          m_state.maskLayer->applyMask(options);
-@@ -1142,6 +1790,10 @@ void TextureMapperLayer::paintSelfAndChildrenWithIntermediateSurface(TextureMapp
+@@ -1142,6 +1793,10 @@ void TextureMapperLayer::paintSelfAndChildrenWithIntermediateSurface(TextureMapp
  
  void TextureMapperLayer::paintSelfChildrenReplicaFilterAndMask(TextureMapperPaintOptions& options)
  {
@@ -44729,7 +44732,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..f69cb595adccac60829167486b8940d8
      bool hasFilterOrMask = [&] {
          if (hasFilters())
              return true;
-@@ -1167,6 +1819,18 @@ void TextureMapperLayer::paintRecursive(TextureMapperPaintOptions& options)
+@@ -1167,6 +1822,18 @@ void TextureMapperLayer::paintRecursive(TextureMapperPaintOptions& options)
  {
      if (!isVisible())
          return;
@@ -44748,7 +44751,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..f69cb595adccac60829167486b8940d8
  
      SetForScope scopedOpacity(options.opacity, options.opacity * m_currentOpacity);
  
-@@ -1495,6 +2159,11 @@ void TextureMapperLayer::setBackgroundColor(const Color& color)
+@@ -1495,6 +2162,11 @@ void TextureMapperLayer::setBackgroundColor(const Color& color)
  void TextureMapperLayer::setFilters(const FilterOperations& filters)
  {
      m_state.filters = filters;
