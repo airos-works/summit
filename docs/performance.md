@@ -23,6 +23,17 @@ eight playing), Lenis smooth scrolling (every scroll frame is a
 | longest rAF gap in the wheel burst | 255-2900 ms | 88-182 ms |
 | median rAF interval while moving | 33-69 ms | 17 ms (3 runs of 4) |
 
+At the end of the session (installed 0656 engine against the last test
+engine, same copy and profile, a wheel notch every 33 ms for 1.3 s):
+
+| getartcraft.com, end of session | before | after |
+|---|---|---|
+| hero animation at rest (rAF) | 20.2 ms mean, 64 of 300 frames over 20 ms | 16.67 ms, 4 over 20 ms |
+| web process at rest, just after load | 1.75 cores | 0.79 |
+| first scroll after load | 2-3 frames a second, gaps of 0.8-1.2 s | 17-20, longest gap 0.26 s |
+| later scrolls | 4-24 frames a second, gaps of 0.2-0.7 s | 47-48, longest gap 0.08-0.11 s |
+| Speedometer 3.1 | 16.1, 16.2 | 16.3, 16.3 |
+
 What changed:
 
 - **`requestVideoFrameCallback`** is enabled (`SUMMIT_VIDEO_FRAME_CALLBACK=0`
