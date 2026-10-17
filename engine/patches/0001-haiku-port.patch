@@ -20069,6 +20069,164 @@ index aacc92d2633ea786c620125aa9cb8203f85e7e06..02363d59ed1c6a78d8d7120ec8bb67f1
      void requestLicense(LicenseType, KeyGroupingStrategy, const String& initDataType, Ref<SharedBuffer>&& initData, LicenseCallback&&) final;
      void updateLicense(const String&, LicenseType, Ref<SharedBuffer>&&, LicenseUpdateCallback&&) final;
      void loadSession(LicenseType, const String&, const String&, LoadSessionCallback&&) final;
+diff --git a/Source/WebCore/platform/graphics/BitmapImageDescriptor.cpp b/Source/WebCore/platform/graphics/BitmapImageDescriptor.cpp
+index ca354c1055ee4465976d2f7046ed16a6c457aee3..9cd622e52c033ad61ae48127123d8c0aeca163a4 100644
+--- a/Source/WebCore/platform/graphics/BitmapImageDescriptor.cpp
++++ b/Source/WebCore/platform/graphics/BitmapImageDescriptor.cpp
+@@ -30,6 +30,11 @@
+ #include "GraphicsContext.h"
+ #include "ImageDecoder.h"
+ 
++#if PLATFORM(HAIKU)
++#include <cstdlib>
++#include <cstring>
++#endif
++
+ namespace WebCore {
+ 
+ BitmapImageDescriptor::BitmapImageDescriptor(BitmapImageSource& source)
+@@ -194,6 +199,21 @@ bool BitmapImageDescriptor::hasHDRColorSpace() const
+     if (m_source->primaryNativeImageIfExists())
+         return colorSpace().usesITUR_2100TF();
+ 
++#if PLATFORM(HAIKU)
++    // Nothing here shows HDR, and learning the color space decodes the
++    // whole picture in place, then drops it: HTMLImageElement.decode() and
++    // every other asynchronous decode started with a synchronous one on the
++    // main thread (github.com: 15-60 ms per large picture). A picture is
++    // taken as SDR until a decoded frame tells otherwise.
++    // SUMMIT_HDR_COLOR_SPACE_PROBE=1 decodes to find out.
++    static const bool probes = [] {
++        const char* value = std::getenv("SUMMIT_HDR_COLOR_SPACE_PROBE");
++        return value && !std::strcmp(value, "1");
++    }();
++    if (!probes)
++        return false;
++#endif
++
+     bool hasHDRColorSpace = colorSpace().usesITUR_2100TF();
+ 
+     // FIXME: This frame may not be destroyed. It can be reused for sync image decoding.
+diff --git a/Source/WebCore/platform/graphics/BitmapImageSource.cpp b/Source/WebCore/platform/graphics/BitmapImageSource.cpp
+index 67d32560260172fa51f5b535bed034165a14b0a7..2ba4ba95b0f4ac4f67ce55c19d4d919b2e49f988 100644
+--- a/Source/WebCore/platform/graphics/BitmapImageSource.cpp
++++ b/Source/WebCore/platform/graphics/BitmapImageSource.cpp
+@@ -35,8 +35,43 @@
+ #include "ImageObserver.h"
+ #include "Logging.h"
+ 
++#if PLATFORM(HAIKU)
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include <wtf/HashMap.h>
++#include <wtf/MainThread.h>
++#include <wtf/MonotonicTime.h>
++#include <wtf/NeverDestroyed.h>
++#endif
++
+ namespace WebCore {
+ 
++#if PLATFORM(HAIKU)
++// SUMMIT_IMAGE_DECODE_TRACE=1 prints every picture decoded in the paint and
++// every release of decoded frames, with how often each picture went through
++// them, to find pictures decoded again and again while a page scrolls.
++static bool imageDecodeTraceHaiku()
++{
++    static const bool enabled = [] {
++        const char* value = std::getenv("SUMMIT_IMAGE_DECODE_TRACE");
++        return value && *value && std::strcmp(value, "0");
++    }();
++    return enabled;
++}
++
++struct ImageDecodeCountsHaiku {
++    unsigned synchronousDecodes { 0 };
++    unsigned releases { 0 };
++};
++
++static HashMap<const BitmapImageSource*, ImageDecodeCountsHaiku>& imageDecodeCountsHaiku()
++{
++    static NeverDestroyed<HashMap<const BitmapImageSource*, ImageDecodeCountsHaiku>> counts;
++    return counts;
++}
++#endif
++
+ Ref<BitmapImageSource> BitmapImageSource::create(BitmapImage& bitmapImage, AlphaOption alphaOption, GammaAndColorProfileOption gammaAndColorProfileOption)
+ {
+     return adoptRef(*new BitmapImageSource(bitmapImage, alphaOption, gammaAndColorProfileOption));
+@@ -50,7 +85,13 @@ BitmapImageSource::BitmapImageSource(BitmapImage& bitmapImage, AlphaOption alpha
+ {
+ }
+ 
+-BitmapImageSource::~BitmapImageSource() = default;
++BitmapImageSource::~BitmapImageSource()
++{
++#if PLATFORM(HAIKU)
++    if (imageDecodeTraceHaiku() && isMainThread())
++        imageDecodeCountsHaiku().remove(this);
++#endif
++}
+ 
+ ImageDecoder* BitmapImageSource::decoder(FragmentedSharedBuffer* data) const
+ {
+@@ -141,6 +182,15 @@ void BitmapImageSource::destroyDecodedFrames(bool destroyAll)
+         decodedSize += m_frames[index].clearImage();
+     }
+ 
++#if PLATFORM(HAIKU)
++    if (decodedSize && imageDecodeTraceHaiku() && isMainThread()) {
++        auto& counts = imageDecodeCountsHaiku().add(this, ImageDecodeCountsHaiku { }).iterator->value;
++        ++counts.releases;
++        auto imageSize = size(ImageOrientation::Orientation::None);
++        fprintf(stderr, "summit-image release %dx%d %u KB all=%d releases=%u decodes=%u %.120s\n", imageSize.width(), imageSize.height(), decodedSize / 1024, destroyAll, counts.releases, counts.synchronousDecodes, sourceUTF8().data());
++    }
++#endif
++
+     decodedSizeReset(decodedSize);
+ }
+ 
+@@ -510,6 +560,20 @@ void BitmapImageSource::cacheNativeImageAtIndex(unsigned index, SubsamplingLevel
+     auto& destination = frame.destination(options.decodingDestination());
+     destination.nativeImage = nativeImage.copyRef();
+     destination.decodingOptions = options;
++#if PLATFORM(HAIKU)
++    // The image decoders here decode the whole picture whatever size the
++    // paint asked for. Such a frame is kept as full size, so that drawing
++    // the picture larger, or showing it in a layer of its own, uses it rather
++    // than decoding it again (github.com: pictures decoded for a paint were
++    // decoded again, in place on the main thread, 14-46 ms each, for the
++    // next one). SUMMIT_IMAGE_SIZE_FOR_DRAWING=1 keeps the requested size.
++    static const bool keepsSizeForDrawing = [] {
++        const char* value = std::getenv("SUMMIT_IMAGE_SIZE_FOR_DRAWING");
++        return value && !std::strcmp(value, "1");
++    }();
++    if (!keepsSizeForDrawing && options.hasSizeForDrawing() && nativeImage->size() == sourceSize(ImageOrientation::Orientation::None))
++        destination.decodingOptions = DecodingOptions { options.decodingMode(), options.decodingDestination() };
++#endif
+     destination.headroom = nativeImage->headroom();
+ 
+     cacheMetadataAtIndex(index, subsamplingLevel, options);
+@@ -623,7 +687,19 @@ std::expected<Ref<NativeImage>, DecodingStatus> BitmapImageSource::nativeImageAt
+     else {
+         auto decodingOptions = DecodingOptions { DecodingMode::Synchronous, decodingDestination };
+ 
++#if PLATFORM(HAIKU)
++        auto decodeStart = MonotonicTime::now();
++#endif
+         auto result = protect(m_decoder)->createNativeImageAtIndex(index, subsamplingLevel, decodingOptions);
++#if PLATFORM(HAIKU)
++        if (imageDecodeTraceHaiku() && isMainThread()) {
++            auto& counts = imageDecodeCountsHaiku().add(this, ImageDecodeCountsHaiku { }).iterator->value;
++            ++counts.synchronousDecodes;
++            auto imageSize = size(ImageOrientation::Orientation::None);
++            auto sizeForDrawing = options.sizeForDrawing().value_or(IntSize { });
++            fprintf(stderr, "summit-image decode %dx%d %.2f ms decodes=%u releases=%u image=%p for=%dx%d sub=%d %.120s\n", imageSize.width(), imageSize.height(), (MonotonicTime::now() - decodeStart).milliseconds(), counts.synchronousDecodes, counts.releases, m_bitmapImage.get(), sizeForDrawing.width(), sizeForDrawing.height(), static_cast<int>(subsamplingLevel), sourceUTF8().data());
++        }
++#endif
+         if (!result)
+             return makeUnexpected(DecodingStatus::Invalid);
+ 
 diff --git a/Source/WebCore/platform/graphics/Color.h b/Source/WebCore/platform/graphics/Color.h
 index bf14e8de2903394a5f02ec82668006f221c2fc6c..80b99d7eacb1a7a060058808e9ccf43724003a67 100644
 --- a/Source/WebCore/platform/graphics/Color.h
@@ -64041,10 +64199,46 @@ index b69c7bf9751cc17db10467583c079ebdedd9f1ae..1b99d0bd99408eeaf4703d8fe90b34c0
  }
  
 diff --git a/Source/WebCore/rendering/RenderBoxModelObject.cpp b/Source/WebCore/rendering/RenderBoxModelObject.cpp
-index 71b979677ed9ea5b375f374fdb66f824f3074ba6..d696dbfdb06e0b1191a73a834a269c883bf6776e 100644
+index 71b979677ed9ea5b375f374fdb66f824f3074ba6..6e12a53e3b504aac91236cc6cf058ae02ff954f7 100644
 --- a/Source/WebCore/rendering/RenderBoxModelObject.cpp
 +++ b/Source/WebCore/rendering/RenderBoxModelObject.cpp
-@@ -363,7 +363,18 @@ DecodingMode RenderBoxModelObject::decodingModeForImageDraw(const Image& image,
+@@ -93,6 +93,11 @@
+ #include <wtf/RuntimeApplicationChecks.h>
+ #endif
+ 
++#if PLATFORM(HAIKU)
++#include <cstdlib>
++#include <cstring>
++#endif
++
+ namespace WebCore {
+ 
+ using namespace HTMLNames;
+@@ -323,7 +328,23 @@ DecodingMode RenderBoxModelObject::decodingModeForImageDraw(const Image& image,
+             return DecodingMode::Synchronous;
+ 
+         // First tile paint.
++#if PLATFORM(HAIKU)
++        // Any paint, not only a layer's first one: an element that has never
++        // painted a picture has none to flicker with, so its first one is
++        // decoded on the decoder's thread, as pictures being loaded show up
++        // when they are ready. A picture that loads or lazy-loads while it
++        // is in view was otherwise decoded in the paint on the main thread
++        // (github.com: 2000-pixel WebP and PNG pictures, 14-44 ms each,
++        // while the page scrolls). SUMMIT_FIRST_IMAGE_ASYNC=0 restores the
++        // first-tile-paint rule.
++        static const bool firstImageAsync = [] {
++            const char* value = std::getenv("SUMMIT_FIRST_IMAGE_ASYNC");
++            return !value || std::strcmp(value, "0");
++        }();
++        if (firstImageAsync || paintInfo.paintBehavior.contains(PaintBehavior::DefaultAsynchronousImageDecode)) {
++#else
+         if (paintInfo.paintBehavior.contains(PaintBehavior::DefaultAsynchronousImageDecode)) {
++#endif
+             // No image has been painted in this element yet and it should not flicker with previous painting.
+             auto observer = bitmapImage->imageObserver();
+             bool mayOverlapOtherClients = observer && observer->numberOfClients() > 1 && bitmapImage->currentFrameDecodingOptions().decodingMode() == DecodingMode::Asynchronous;
+@@ -363,7 +384,18 @@ DecodingMode RenderBoxModelObject::decodingModeForImageDraw(const Image& image,
      }
  
      // Large image case.
@@ -64297,22 +64491,24 @@ index e4016aa11263c14ff1ece803b6abdb2d697c2f75..4c4a7d020e2a91fbbe39ab92bc99ae05
      } else if (canCreateIntrinsicLogicalHeightsCacheForRowSizingFirstPass)
          m_intrinsicLogicalHeightsForRowSizingFirstPass.emplace();
 diff --git a/Source/WebCore/rendering/RenderLayerBacking.cpp b/Source/WebCore/rendering/RenderLayerBacking.cpp
-index 95122a10cacc10b498c40d3447599bd2cd4d2795..22a2dd2c74a265578e74aeeb18d150c4cb164ab3 100644
+index 95122a10cacc10b498c40d3447599bd2cd4d2795..590181fd245a31b71b8abb071033316d1f198f5b 100644
 --- a/Source/WebCore/rendering/RenderLayerBacking.cpp
 +++ b/Source/WebCore/rendering/RenderLayerBacking.cpp
-@@ -137,6 +137,11 @@
+@@ -137,6 +137,13 @@
  #include "ModelContext.h"
  #endif
  
 +#if PLATFORM(HAIKU)
++#include <cstdio>
 +#include <cstdlib>
 +#include <cstring>
++#include <wtf/Box.h>
 +#endif
 +
  #if USE(SYSTEM_PREVIEW) && ENABLE(MODEL_PROCESS) && ENABLE(INTERACTION_REGIONS_IN_EVENT_REGION)
  #include "ARKitBadgeSystemImage.h"
  #endif
-@@ -1218,6 +1223,10 @@ void RenderLayerBacking::updateAfterLayout(bool needsClippingUpdate, bool needsF
+@@ -1218,6 +1225,10 @@ void RenderLayerBacking::updateAfterLayout(bool needsClippingUpdate, bool needsF
          m_owningLayer.setNeedsCompositingGeometryUpdate();
      }
      
@@ -64323,7 +64519,7 @@ index 95122a10cacc10b498c40d3447599bd2cd4d2795..22a2dd2c74a265578e74aeeb18d150c4
      if (needsFullRepaint && canIssueSetNeedsDisplay())
          setContentsNeedDisplay();
  }
-@@ -1581,6 +1590,44 @@ private:
+@@ -1581,6 +1592,44 @@ private:
  LayoutRect RenderLayerBacking::computePrimaryGraphicsLayerRect(const RenderLayer* compositedAncestor, const LayoutRect& parentGraphicsLayerRect) const
  {
      ComputedOffsets compositedBoundsOffset(m_owningLayer, compositedAncestor, compositedBounds(), parentGraphicsLayerRect, { });
@@ -64368,7 +64564,7 @@ index 95122a10cacc10b498c40d3447599bd2cd4d2795..22a2dd2c74a265578e74aeeb18d150c4
      return LayoutRect(encloseRectToDevicePixels(LayoutRect(toLayoutPoint(compositedBoundsOffset.fromParentGraphicsLayer()), compositedBounds().size()),
          pixelSnappingScaleFactor()));
  }
-@@ -1935,8 +1982,18 @@ void RenderLayerBacking::updateGeometry(const RenderLayer* compositedAncestor)
+@@ -1935,8 +1984,18 @@ void RenderLayerBacking::updateGeometry(const RenderLayer* compositedAncestor)
  
      positionOverflowControlsLayers();
  
@@ -64388,6 +64584,91 @@ index 95122a10cacc10b498c40d3447599bd2cd4d2795..22a2dd2c74a265578e74aeeb18d150c4
  
  #if ENABLE(MODEL_ELEMENT)
      if (is<RenderModel>(renderer()))
+@@ -3543,6 +3602,56 @@ void RenderLayerBacking::updateDirectlyCompositedBackgroundColor(PaintedContents
+     didUpdateContentsRect = true;
+ }
+ 
++#if PLATFORM(HAIKU)
++enum class CompositedImageDecodeHaiku : uint8_t { Requesting, Waiting, Done };
++
++// A directly composited picture (an <img>, or the background of a simple
++// container) that is not decoded yet is decoded on the decoder's thread and
++// set on the layer when it is ready; the layer shows nothing until then, as
++// a picture still loading does. Taking it in place decoded it on the main
++// thread in the compositing update (github.com: 1100-2300-pixel WebP and PNG
++// pictures, 14-46 ms each, while the page scrolls). Pictures of at most
++// 32 KB decoded and animated ones are still taken in place.
++// SUMMIT_COMPOSITED_IMAGE_ASYNC=0 takes all of them in place.
++static bool decodesDirectlyCompositedImageLaterHaiku(RenderLayerModelObject& renderer, Image& image)
++{
++    static const bool enabled = [] {
++        const char* value = std::getenv("SUMMIT_COMPOSITED_IMAGE_ASYNC");
++        return !value || std::strcmp(value, "0");
++    }();
++    RefPtr bitmapImage = dynamicDowncast<BitmapImage>(image);
++    if (!enabled || !bitmapImage || bitmapImage->isAnimated())
++        return false;
++    if (bitmapImage->size().area() * sizeof(uint32_t) <= 32 * KB)
++        return false;
++
++    // decode() calls back at once when the frame is already decoded.
++    auto state = Box<CompositedImageDecodeHaiku>::create(CompositedImageDecodeHaiku::Requesting);
++    bitmapImage->decode([state, renderer = SingleThreadWeakPtr<RenderLayerModelObject> { renderer }](DecodingStatus status) {
++        bool waited = *state == CompositedImageDecodeHaiku::Waiting;
++        *state = CompositedImageDecodeHaiku::Done;
++        if (!waited || status != DecodingStatus::Complete || !renderer || !renderer->hasLayer())
++            return;
++        CheckedPtr layer = renderer->layer();
++        if (!layer->backing())
++            return;
++        // The configuration update takes the picture again, now decoded.
++        layer->setNeedsCompositingConfigurationUpdate();
++        layer->compositor().scheduleCompositingLayerUpdate();
++    });
++    static const bool trace = [] {
++        const char* value = std::getenv("SUMMIT_IMAGE_DECODE_TRACE");
++        return value && *value && std::strcmp(value, "0");
++    }();
++    if (trace)
++        fprintf(stderr, "summit-image composited %s %dx%d image=%p %.120s\n", *state == CompositedImageDecodeHaiku::Done ? "ready" : "wait", static_cast<int>(bitmapImage->size().width()), static_cast<int>(bitmapImage->size().height()), bitmapImage.get(), bitmapImage->sourceUTF8().data());
++    if (*state == CompositedImageDecodeHaiku::Done)
++        return false;
++    *state = CompositedImageDecodeHaiku::Waiting;
++    return true;
++}
++#endif
++
+ // Only bitmap images are directly composited, so the layer shows the image's current frame at its natural size.
+ static RefPtr<NativeImage> nativeImageForDirectlyCompositedImage(Image& image)
+ {
+@@ -3585,7 +3694,14 @@ void RenderLayerBacking::updateDirectlyCompositedBackgroundImage(PaintedContents
+     m_graphicsLayer->setContentsTilePhase(geometry.phase);
+     m_graphicsLayer->setContentsRect(geometry.destinationRect);
+     m_graphicsLayer->setContentsClippingRect(FloatRoundedRect(geometry.destinationRect));
+-    if (RefPtr nativeImage = nativeImageForDirectlyCompositedImage(Ref { *backgroundLayer.image().tryStyleImage()->cachedImage()->image() }))
++    Ref backgroundImage = *backgroundLayer.image().tryStyleImage()->cachedImage()->image();
++#if PLATFORM(HAIKU)
++    if (decodesDirectlyCompositedImageLaterHaiku(renderer(), backgroundImage)) {
++        didUpdateContentsRect = true;
++        return;
++    }
++#endif
++    if (RefPtr nativeImage = nativeImageForDirectlyCompositedImage(backgroundImage))
+         m_graphicsLayer->setContentsToNativeImage(nativeImage.get());
+ 
+     didUpdateContentsRect = true;
+@@ -4093,6 +4209,11 @@ void RenderLayerBacking::updateImageContents(PaintedContentsInfo& contentsInfo)
+         if (!cachedImage->isLoaded())
+             return;
+ 
++#if PLATFORM(HAIKU)
++        if (decodesDirectlyCompositedImageLaterHaiku(imageRenderer, *image))
++            return;
++#endif
++
+         if (RefPtr nativeImage = nativeImageForDirectlyCompositedImage(*image))
+             m_graphicsLayer->setContentsToNativeImage(nativeImage.get());
+ 
 diff --git a/Source/WebCore/rendering/RenderLayerCompositor.cpp b/Source/WebCore/rendering/RenderLayerCompositor.cpp
 index 4bf8021fddeb356aa2f416e2b5c07aae6136387b..2d3bb774ef11e3a05725494bd7c4724911cabffd 100644
 --- a/Source/WebCore/rendering/RenderLayerCompositor.cpp
