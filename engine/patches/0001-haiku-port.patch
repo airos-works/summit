@@ -135727,7 +135727,7 @@ index 57163f65873e5a481e5ef5a4ec3beec4b40b7cea..61b49ac7c362b416cdec1d10c44304d2
      bool m_compositionRequired { false };
  #if ENABLE(SCROLLING_THREAD)
 diff --git a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/ThreadedCompositor.cpp b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/ThreadedCompositor.cpp
-index c238029ad9c99c5028ea7e456520af85d1d85532..4b12f8de363b52a9b6fd103bf432ab9f580c53db 100644
+index c238029ad9c99c5028ea7e456520af85d1d85532..be2bb89fb451a05ca1d6c1f4037c2c9f7015bbac 100644
 --- a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/ThreadedCompositor.cpp
 +++ b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/ThreadedCompositor.cpp
 @@ -26,6 +26,11 @@
@@ -135920,7 +135920,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..4b12f8de363b52a9b6fd103bf432ab9f
  
  uint64_t ThreadedCompositor::surfaceID() const
  {
-@@ -216,8 +340,23 @@ void ThreadedCompositor::updateRenderTimer()
+@@ -216,8 +340,41 @@ void ThreadedCompositor::updateRenderTimer()
      }
  
      if (m_state.isRenderTimerActive) {
@@ -135935,7 +135935,25 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..4b12f8de363b52a9b6fd103bf432ab9f
 +                m_renderTimer.startOneShot(1_h);
 +                return;
 +            }
-+            if (m_minimumFrameInterval && m_lastRenderTimestamp) {
++            // The next frame is due a period after the last one was due, not
++            // after it started: started late by the timer's wake-up delay
++            // (0.2 ms), each frame came that much later, and animations ran
++            // at 59.2 frames a second on a 60 Hz screen, a frame repeated
++            // every four seconds. Due more than a period ago (the compositor
++            // was idle or behind), it is due now.
++            // SUMMIT_FRAME_GRID=0 counts from when the last frame started.
++            static const bool frameGrid = [] {
++                const char* value = getenv("SUMMIT_FRAME_GRID");
++                return !value || strcmp(value, "0");
++            }();
++            if (m_minimumFrameInterval && frameGrid) {
++                auto now = MonotonicTime::now();
++                auto due = m_frameDueHaiku + m_minimumFrameInterval;
++                if (!m_frameDueHaiku || due < now - m_minimumFrameInterval)
++                    due = now;
++                delay = std::max(0_s, due - now);
++                m_nextFrameDueHaiku = due;
++            } else if (m_minimumFrameInterval && m_lastRenderTimestamp) {
 +                Seconds elapsed = MonotonicTime::now() - m_lastRenderTimestamp;
 +                if (elapsed < m_minimumFrameInterval)
 +                    delay = m_minimumFrameInterval - elapsed;
@@ -135946,7 +135964,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..4b12f8de363b52a9b6fd103bf432ab9f
      } else
          m_renderTimer.stop();
  }
-@@ -364,6 +503,10 @@ TargetContents ThreadedCompositor::paintToCurrentGLContext(const TransformationM
+@@ -364,6 +521,10 @@ TargetContents ThreadedCompositor::paintToCurrentGLContext(const TransformationM
  #if USE(TEXTURE_MAPPER)
  void ThreadedCompositor::paintToTextureMapper(const TransformationMatrix& matrix, const IntSize& size, const OptionSet<CompositionReason>& reasons)
  {
@@ -135957,7 +135975,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..4b12f8de363b52a9b6fd103bf432ab9f
      FloatRect clipRect(FloatPoint { }, size);
      TextureMapperLayer& currentRootLayer = m_sceneState->rootLayer().ensureTarget();
      if (currentRootLayer.transform() != matrix)
-@@ -371,11 +514,23 @@ void ThreadedCompositor::paintToTextureMapper(const TransformationMatrix& matrix
+@@ -371,11 +532,23 @@ void ThreadedCompositor::paintToTextureMapper(const TransformationMatrix& matrix
  
      bool sceneHasRunningAnimations = currentRootLayer.applyAnimationsRecursively(MonotonicTime::now());
  
@@ -135981,7 +135999,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..4b12f8de363b52a9b6fd103bf432ab9f
      currentRootLayer.prepareForPainting(*m_textureMapper);
      if (m_damage.flags) {
          Damage frameDamage(size, m_damage.flags->contains(DamagePropagationFlags::Unified) ? Damage::Mode::BoundingBox : Damage::Mode::Rectangles);
-@@ -383,7 +538,26 @@ void ThreadedCompositor::paintToTextureMapper(const TransformationMatrix& matrix
+@@ -383,7 +556,26 @@ void ThreadedCompositor::paintToTextureMapper(const TransformationMatrix& matrix
          WTFBeginSignpost(this, CollectDamage);
          currentRootLayer.collectDamage(*m_textureMapper, frameDamage);
          WTFEndSignpost(this, CollectDamage);
@@ -136008,7 +136026,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..4b12f8de363b52a9b6fd103bf432ab9f
          recordFrameDamage(WTF::move(frameDamage));
  
          if (m_damage.flags->contains(DamagePropagationFlags::UseForCompositing)) {
-@@ -392,23 +566,62 @@ void ThreadedCompositor::paintToTextureMapper(const TransformationMatrix& matrix
+@@ -392,23 +584,62 @@ void ThreadedCompositor::paintToTextureMapper(const TransformationMatrix& matrix
                  m_textureMapper->setDamage(std::nullopt);
              } else {
                  const auto& damageSinceLastSurfaceUse = m_surface->renderTargetDamage();
@@ -136071,7 +136089,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..4b12f8de363b52a9b6fd103bf432ab9f
  
  #if ENABLE(DAMAGE_TRACKING)
      if (rectContainingRegionThatActuallyChanged)
-@@ -426,6 +639,21 @@ void ThreadedCompositor::paintToTextureMapper(const TransformationMatrix& matrix
+@@ -426,6 +657,21 @@ void ThreadedCompositor::paintToTextureMapper(const TransformationMatrix& matrix
  
      m_textureMapper->endClip();
      m_textureMapper->endPainting();
@@ -136093,7 +136111,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..4b12f8de363b52a9b6fd103bf432ab9f
  
      if (sceneHasRunningAnimations)
          requestComposition(CompositionReason::Animation);
-@@ -525,8 +753,17 @@ void ThreadedCompositor::recordFrameDamage(Damage&& damage)
+@@ -525,8 +771,17 @@ void ThreadedCompositor::recordFrameDamage(Damage&& damage)
  
      // Nothing changed this frame: an empty damage contributes nothing to the targets, since Damage::add()
      // ignores empty damage. Skip it rather than replace the recorded frame damage with an empty one.
@@ -136112,7 +136130,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..4b12f8de363b52a9b6fd103bf432ab9f
  
      m_surface->setFrameDamage(WTF::move(damage));
  }
-@@ -556,6 +793,46 @@ void ThreadedCompositor::renderLayerTree()
+@@ -556,6 +811,46 @@ void ThreadedCompositor::renderLayerTree()
      if (m_suspendedCount > 0)
          return;
  
@@ -136159,13 +136177,14 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..4b12f8de363b52a9b6fd103bf432ab9f
      OptionSet<CompositionReason> reasons;
      bool shouldNotifiyDidComposite = false;
      {
-@@ -580,8 +857,20 @@ void ThreadedCompositor::renderLayerTree()
+@@ -580,8 +875,21 @@ void ThreadedCompositor::renderLayerTree()
  
          ASSERT(m_state.state == State::Scheduled);
          m_state.state = State::InProgress;
 +#if PLATFORM(HAIKU)
 +        m_lastRenderTimestamp = MonotonicTime::now();
 +        m_inProgressSinceHaiku = m_lastRenderTimestamp;
++        m_frameDueHaiku = m_nextFrameDueHaiku ? m_nextFrameDueHaiku : m_lastRenderTimestamp;
 +        ++m_renderCountHaiku;
 +#endif
      }
@@ -136180,7 +136199,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..4b12f8de363b52a9b6fd103bf432ab9f
  #if USE(TEXTURE_MAPPER)
      if (!m_context || !m_context->makeContextCurrent())
          return;
-@@ -599,23 +888,61 @@ void ThreadedCompositor::renderLayerTree()
+@@ -599,23 +907,61 @@ void ThreadedCompositor::renderLayerTree()
      if (viewportSize.isEmpty())
          return;
  
@@ -136242,7 +136261,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..4b12f8de363b52a9b6fd103bf432ab9f
  
      updateFPSCounter();
  
-@@ -631,8 +958,51 @@ void ThreadedCompositor::renderLayerTree()
+@@ -631,8 +977,51 @@ void ThreadedCompositor::renderLayerTree()
      PlatformDisplay::sharedDisplay().skiaGLContext()->swapBuffers();
  #endif
  
@@ -136294,7 +136313,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..4b12f8de363b52a9b6fd103bf432ab9f
  
      RunLoop::mainSingleton().dispatch([this, protectedThis = Ref { *this }] {
          if (m_layerTreeHost)
-@@ -656,6 +1026,13 @@ void ThreadedCompositor::requestComposition(CompositionReason reason)
+@@ -656,6 +1045,13 @@ void ThreadedCompositor::requestComposition(CompositionReason reason)
  {
      Locker locker { m_state.lock };
      m_state.reasons.add(reason);
@@ -136308,7 +136327,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..4b12f8de363b52a9b6fd103bf432ab9f
      scheduleUpdateLocked();
  }
  
-@@ -703,6 +1080,10 @@ void ThreadedCompositor::scheduleUpdateLocked()
+@@ -703,6 +1099,10 @@ void ThreadedCompositor::scheduleUpdateLocked()
  void ThreadedCompositor::frameComplete()
  {
      ASSERT(m_workQueue->runLoop().isCurrent());
@@ -136319,7 +136338,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..4b12f8de363b52a9b6fd103bf432ab9f
  
      Locker locker { m_state.lock };
      WTFEmitSignpost(this, FrameComplete, "reasons: %s, state: %s, waiting for tiles: %s", reasonsToString(m_state.reasons).utf8(), stateToString(m_state.state).characters(), m_state.isWaitingForTiles ? "yes" : "no");
-@@ -726,6 +1107,112 @@ void ThreadedCompositor::frameComplete()
+@@ -726,6 +1126,112 @@ void ThreadedCompositor::frameComplete()
      }
  }
  
@@ -136432,7 +136451,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..4b12f8de363b52a9b6fd103bf432ab9f
  RunLoop* ThreadedCompositor::runLoop()
  {
      return m_surface ? &m_workQueue->runLoop() : nullptr;
-@@ -747,7 +1234,15 @@ void ThreadedCompositor::updateSceneAttributes(const IntSize& size, float device
+@@ -747,7 +1253,15 @@ void ThreadedCompositor::updateSceneAttributes(const IntSize& size, float device
  {
      m_attributes.viewportSize = size;
      m_attributes.deviceScaleFactor = deviceScaleFactor;
@@ -136449,7 +136468,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..4b12f8de363b52a9b6fd103bf432ab9f
  
  void ThreadedCompositor::initializeFPSCounter()
 diff --git a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/ThreadedCompositor.h b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/ThreadedCompositor.h
-index 350699338bff55157709efd32e703513e9ce6486..feb59d6b22128828f2e2e72cbe7c79c0f69333ee 100644
+index 350699338bff55157709efd32e703513e9ce6486..abb7a29049cac83f78bc65d1e5b828872abf7a19 100644
 --- a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/ThreadedCompositor.h
 +++ b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/ThreadedCompositor.h
 @@ -97,6 +97,9 @@ public:
@@ -136472,13 +136491,20 @@ index 350699338bff55157709efd32e703513e9ce6486..feb59d6b22128828f2e2e72cbe7c79c0
  
      void didCompositeRunLoopObserverFired();
  
-@@ -194,6 +200,26 @@ private:
+@@ -194,6 +200,33 @@ private:
      } m_attributes;
  
      RunLoop::Timer m_renderTimer;
 +#if PLATFORM(HAIKU)
 +    Seconds m_minimumFrameInterval;
 +    MonotonicTime m_lastRenderTimestamp;
++#if PLATFORM(HAIKU)
++    // When the frame the render timer was last started for was due, and when
++    // the next one is: frames keep to that grid, so the timer's wake-up delay
++    // does not lengthen the period.
++    MonotonicTime m_frameDueHaiku;
++    MonotonicTime m_nextFrameDueHaiku;
++#endif
 +    bool m_isWaitingForRenderTarget WTF_GUARDED_BY_LOCK(m_state.lock) { false };
 +    MonotonicTime m_renderTargetWaitStartedAt WTF_GUARDED_BY_LOCK(m_state.lock);
 +    // recoverFromStallHaiku(): when the frame now in progress started, and
@@ -136499,7 +136525,7 @@ index 350699338bff55157709efd32e703513e9ce6486..feb59d6b22128828f2e2e72cbe7c79c0
  #if USE(TEXTURE_MAPPER)
      std::unique_ptr<WebCore::TextureMapper> m_textureMapper;
  #endif
-@@ -234,4 +260,3 @@ private:
+@@ -234,4 +267,3 @@ private:
  } // namespace WebKit
  
  #endif // USE(COORDINATED_GRAPHICS)

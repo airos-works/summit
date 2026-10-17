@@ -122,6 +122,15 @@ texture lost its blur when drawn as a backdrop. Painting tiles in view before
 those ahead of the scroll (kept: the pool now runs the most urgent tile job)
 made no measurable difference either.
 
+Frames keep to a 60 Hz grid. The compositor waited a period after the last
+frame *started*; the render timer wakes ~0.2 ms late, so every period was that
+much longer: animations ran at 59.2 frames a second (rAF every 16.88 ms) on
+the laptop's 60 Hz panel, and a frame was shown twice every four seconds.
+The next frame is now due a period after the last one was due (restarting
+when the compositor was idle or a period behind): 60.0 frames a second, rAF
+every 16.61-16.67 ms, same jitter (0.7 ms). `SUMMIT_FRAME_GRID=0` restores
+the old timing.
+
 Found, not fixed: `backdrop-filter` does not blur a composited sibling
 painted before it (a `will-change: transform` card under a blurred box stays
 sharp, in the builds before and after this work).
