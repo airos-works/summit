@@ -256,8 +256,12 @@ column uncovered between two tiles. It now works in the target's pixels
 (`SUMMIT_TILE_COVER_IN_TARGET=0` for the old test). Megapixels drawn per
 composition while scrolling: getartcraft.com 11.5 against 12.9, github.com
 14.9 against 17.3, stripe.com 10.6 against 12.8, tailwindcss.com 1.9
-against 3.5; getartcraft.com's first scroll ran at 50-54 frames a second
-against 36-42 (two runs each). Static test pages are pixel-identical.
+against 3.5. getartcraft.com's first scroll delivered 50-54 frames a second
+against 36-42 (two runs each), but the page's own animation frames, which
+Lenis scrolls by, stayed at 35-37 a second either way (longest gap 167-178
+ms against 205-237): what paces them now is the main thread's rendering
+update waiting on the frame before, not the compositor's drawing. Static
+test pages are pixel-identical.
 
 Tried and dropped: tile textures allocated on a 64-pixel grid and drawn
 through `drawTextureWithPhysicalSize` (edge tiles of 430-433 pixels sharing
