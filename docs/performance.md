@@ -1,5 +1,150 @@
 # Summit performance: Speedometer 3.1 baseline, where the time goes, stress test
 
+## 19 October 2026: wheel and touchpad scrolling that keeps moving
+
+Goal: scrolling airos.works on the Framework 13 laptop felt jarring next to
+Firefox on Linux, which animates each wheel step and fills the gaps between
+them. First question: had something in a Summit that had run for more than a
+day made it worse?
+
+### Nothing on the laptop was slowing it down
+
+The installed Summit (0656) had run for 15.5 hours with 10 tabs in 14
+processes. At rest it used no CPU, and nothing else on the machine did either
+(15 % of one core in all, app_server 5 %). Memory was 33 % of 32 GB. The
+browser's 404 MiB are mostly eleven 27.2 MB frame buffers (3584x1899
+pixels), one or two per tab, which do not grow with time. airos.works' web
+process held 421 MiB. Summit's log had only 1Password's background page
+looking for its desktop app; the system log had no faults, and the screen
+blanker was off. A wheel burst on the long-running airos.works tab and on a
+fresh copy of the same build (same window size, a copy of the site served
+locally) moved the page equally unevenly: 0-9 frames that did not move in the
+middle of a scroll, single-frame steps of 0-74 px where the burst averages
+33 px. So the cause was in how the engine scrolls, not a leak.
+
+The laptop's only pointing device is its touchpad. Haiku's touchpad driver
+turns two-finger scrolling into whole wheel steps (`movement_maker.cpp`:
+`scroll_ystepsize` touchpad units a step), 10 to 100 steps a second while
+the fingers move, and the wheel message says which kind of device sent it
+(`be:device_subtype`).
+
+### Why the page lurched
+
+- **Each step stopped and started again.** A notch is 100 px. WebKit animated
+  it over distance / 1000 px/s = 100 ms with an ease-in-out, and a notch that
+  came during the animation restarted it from where it was, with an
+  ease-out's speed at its start. With steps 120 ms apart (a slow wheel, or
+  slow fingers) the page stopped between them; with quick steps the speed
+  jumped at each.
+- **The animation was sampled when a timer fired, not when frames were
+  composed.** Haiku has no display link. The web process advances scroll
+  animations from a 16 ms `dispatchAfter` chain (`EventDispatcher`), about
+  62 times a second, while the compositor composes on its own 60 Hz grid.
+  Each frame showed the position from the latest refresh before it: sampled
+  0 to 32 ms before the frame was due. Some frames showed two refreshes'
+  worth of motion and some none.
+
+### What changed
+
+- **Wheel steps continue the motion** (`ScrollAnimationSmooth`, the Haiku
+  wheel path in `ScrollingEffectsController::handleWheelEvent`), as in
+  Firefox. Each step starts a cubic Bézier curve at the position and speed
+  the running one has at that moment, to where all the steps add up to. It
+  lasts twice the average of the last three gaps between steps (input device
+  time, the message's `when`), at least 80 and at most 250 ms. A slow
+  burst's curves overlap, so the page never stops between steps; a quick
+  burst gets short curves and does not lag far behind. Unlike Firefox, which
+  counts imaginary long gaps before the first step, the second step's gap is
+  already the average. Firefox's way made the first steps of a quick burst
+  slow, and the page then caught up at 1.5 times the speed it settled at (52
+  against 34 px a frame). Keyboard and script scrolling keep WebKit's
+  animation. `SUMMIT_SMOOTH_WHEEL=0` animates wheel steps as before;
+  `SUMMIT_SMOOTH_WHEEL_MS=MIN,MAX` changes the 80 and 250 ms.
+- **Scroll animations are sampled at the time of the frame that shows
+  them.** After the compositor has taken a frame's scene, it publishes when
+  that frame was due (`ThreadedCompositor::nextFrameTimeHaiku()`, read by
+  the scrolling thread through `CoordinatedPlatformLayer::Client`). A
+  refresh then samples the animations at the next frame's due time
+  (`ScrollingTreeCoordinated::scrollAnimationSampleTimeHaiku()`), never
+  earlier than the last sample. While an animation runs, the refresh comes
+  every 8 ms instead of 16, so every frame gets one although the timer is not
+  in step with the compositor; a second refresh for the same frame samples
+  the same time and changes nothing. `SUMMIT_SCROLL_FRAME_TIMES=0` samples
+  at the refresh's own time every 16 ms, as before.
+- **Page Up, Page Down, Home and End scroll the page.** WebCore's default
+  handlers for them were compiled for GTK, WPE and Windows only; on Haiku
+  these keys are editing commands only in editable text
+  (`EditingCommandsHaiku.h`), so outside it they did nothing. In a text
+  field they still move the caret.
+- `SUMMIT_SCROLL_FRAME_TRACE=1` prints when each frame's scene is taken
+  (`Summit frame flush: at= due=`) and each new scroll position with the
+  time it was sampled for (`Summit scroll sample: at= sample= y=`), all in
+  microseconds of the monotonic clock. Each frame shows the last sample
+  before its flush.
+
+| switch | default | what it does |
+| --- | --- | --- |
+| `SUMMIT_SMOOTH_WHEEL` | 1 | a wheel or touchpad step continues the motion at its speed |
+| `SUMMIT_SMOOTH_WHEEL_MS` | 80,250 | shortest and longest animation of a step |
+| `SUMMIT_SCROLL_FRAME_TIMES` | 1 | scroll animations sampled when the frame showing them is due |
+| `SUMMIT_SCROLL_FRAME_TRACE` | 0 | prints each frame's flush and each sampled scroll position |
+
+### Measured
+
+The same test engine in a copy of Summit on the laptop, 2048x1200 window at
+175 %, the frame trace on. "Old" is `SUMMIT_SMOOTH_WHEEL=0
+SUMMIT_SCROLL_FRAME_TIMES=0`; "frames" is `SUMMIT_SMOOTH_WHEEL=0` only.
+Wheel messages come from Summit's MCP server (`scroll`): 20 notches 50 ms
+apart, 30 notches 16 ms apart, 10 notches 120 ms apart, and 14 single
+notches sent 70-180 ms apart, like slow touchpad steps. Jerk is the mean
+second difference of the page's position from frame to frame (px): what
+the eye reads as the page speeding up and slowing down. Stalls are frames
+that did not move in the middle of a scroll.
+
+| airos.works (local copy) | jerk: old, frames, new | stalls | largest step (px) | longest frame gap (ms) |
+| --- | --- | --- | --- | --- |
+| 50 ms notches | 9.3, 3.1, 2.7 | 1, 0, 0 | 76, 38, 42 | 16.7, 16.7, 16.7 |
+| 16 ms notches | 19.5, 8.1, 1.6 | 0, 0, 0 | 216, 136, 108 | 43.8, 16.7, 16.7 |
+| 120 ms notches | 6.3, 5.6, 0.6 | 4, 1, 0 | 35, 39, 15 | 34.9, 40.8, 16.7 |
+| irregular steps | 4.8, 5.7, 0.9 | 3, 1, 0 | 35, 39, 22 | 47.8, 50.2, 16.7 |
+
+| two runs each, old against new | jerk | stalls | longest frame gap (ms) |
+| --- | --- | --- | --- |
+| Wikipedia article, 50 ms notches | 11.4, 7.3 / 2.8, 2.4 | 3, 0 / 0, 0 | 16.7 / 16.7 |
+| Wikipedia article, irregular steps | 5.6, 5.2 / 0.8, 0.8 | 7, 5 / 0, 0 | 16.7 / 16.7 |
+| The Guardian, 50 ms notches | 9.1, 10.4 / 2.6, 2.3 | 1, 0 / 0, 0 | 16.7 / 16.7 |
+| The Guardian, irregular steps | 6.7, 4.6 / 0.8, 0.9 | 4, 2 / 0, 0 | 36.5, 44.6 / 16.7 |
+
+With the new code every frame of every run was 16.7 ms after the last, and
+every frame showed a position sampled at exactly its due time; with the old,
+the sample was 7 ms early on median and up to 32 ms off. The 50 ms bursts
+still have a small wave (31, 34, 35 px a frame, a notch every third frame):
+each curve slows down towards its end before the next step speeds it up.
+Keyboard scrolling, `scrollTo({behavior: "smooth"})`, scrolling an
+`overflow: auto` box both ways, a `scroll-snap-type: y mandatory` box,
+reversing the direction in the middle of a burst, and the end of the page
+behave as before. One pre-existing oddity, the same with both: after a
+snapping box snapped once, more notches over it scrolled the page instead.
+
+Tools: a Python model of both animations against these input patterns
+predicted the laptop's per-frame steps within a pixel or two and chose the
+80-250 ms range. 50-200 ms lagged less but jerked twice as much with quick
+touchpad steps; 100-300 ms was smoother still but lagged 400 px behind a fast
+swipe. The curve's shape (velocity weighting 0.25, deceleration weighting 0.4,
+twice the gap) is Firefox's original.
+
+### Left
+
+- **No vertical sync.** Frames are composed on a free-running 60 Hz grid and
+  presented into the screen without waiting for the retrace, and the
+  `amdgpu_kms` accelerant has no retrace semaphore. So frames can tear, and
+  the grid drifts against the panel's own 60 Hz. That is for the OS: a
+  retrace semaphore (or page-flip completion) would let the compositor keep
+  to the panel's grid.
+- **Touchpads send whole steps.** Pixel-precise deltas with scroll phases
+  from Haiku's touchpad driver would let the page follow the fingers
+  directly (and fling) instead of animating 100 px steps.
+
 ## 17-18 October 2026 (night): smooth scrolling and animation on the laptop
 
 Goal: pages with heavy animation and scripted scrolling as smooth as Firefox

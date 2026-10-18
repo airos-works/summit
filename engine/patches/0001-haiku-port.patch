@@ -14823,6 +14823,32 @@ index 20fa89dbac43fca28edabb48235e4a35ac61b8f2..a00f1d6eec4065c212769ed0eb94e2a6
      virtual void showShareSheet(ShareDataWithParsedURL&&, CompletionHandler<void(bool)>&& callback) { callback(false); }
      virtual void showContactPicker(ContactsRequestData&&, CompletionHandler<void(std::optional<Vector<ContactInfo>>&&)>&& callback) { callback(std::nullopt); }
  
+diff --git a/Source/WebCore/page/EventHandler.cpp b/Source/WebCore/page/EventHandler.cpp
+index 4555034d8312449920f8f16e8a9c252277d25003..fc2cb658f2f8ee869eaa6a7750ae834b53014a53 100644
+--- a/Source/WebCore/page/EventHandler.cpp
++++ b/Source/WebCore/page/EventHandler.cpp
+@@ -5177,7 +5177,9 @@ bool EventHandler::defaultKeyboardScrollEventHandler(KeyboardEvent& event, Scrol
+ 
+ void EventHandler::defaultPageUpDownEventHandler(KeyboardEvent& event)
+ {
+-#if PLATFORM(GTK) || PLATFORM(WPE) || PLATFORM(WIN)
++    // On Haiku these keys are editing commands only in editable text
++    // (EditingCommandsHaiku.h); elsewhere they scroll here, as on GTK.
++#if PLATFORM(GTK) || PLATFORM(WPE) || PLATFORM(WIN) || PLATFORM(HAIKU)
+     ASSERT(event.type() == eventNames().keydownEvent);
+ 
+     if (event.ctrlKey() || event.metaKey() || event.altKey() || event.shiftKey())
+@@ -5193,7 +5195,9 @@ void EventHandler::defaultPageUpDownEventHandler(KeyboardEvent& event)
+ 
+ void EventHandler::defaultHomeEndEventHandler(KeyboardEvent& event)
+ {
+-#if PLATFORM(GTK) || PLATFORM(WPE) || PLATFORM(WIN)
++    // On Haiku these keys are editing commands only in editable text
++    // (EditingCommandsHaiku.h); elsewhere they scroll here, as on GTK.
++#if PLATFORM(GTK) || PLATFORM(WPE) || PLATFORM(WIN) || PLATFORM(HAIKU)
+     ASSERT(event.type() == eventNames().keydownEvent);
+ 
+     if (event.ctrlKey() || event.metaKey() || event.altKey() || event.shiftKey())
 diff --git a/Source/WebCore/page/LocalFrameView.cpp b/Source/WebCore/page/LocalFrameView.cpp
 index 2132dee6a2c27be522007bb4df5bc1f5940c1c06..92204f12ac19f0bc5b70ba956ed5857a19114e92 100644
 --- a/Source/WebCore/page/LocalFrameView.cpp
@@ -16188,7 +16214,7 @@ index 55480f7ce9270da99c8fadcda856bb291e9ab6a9..05e2350f85f6b25bd78e0ad04379623e
  
      HashSet<Ref<ScrollingTreeOverflowScrollProxyNode>> m_activeOverflowScrollProxyNodes;
 diff --git a/Source/WebCore/page/scrolling/ThreadedScrollingTree.cpp b/Source/WebCore/page/scrolling/ThreadedScrollingTree.cpp
-index 77e274b5febc1b0c30c2f90092b4dd1ba1e49eea..44731794a4feb0ffa9ce5302e7970cf73555d5f0 100644
+index 77e274b5febc1b0c30c2f90092b4dd1ba1e49eea..fa154adb93f0366d3c9f710268b24c2e256f2c78 100644
 --- a/Source/WebCore/page/scrolling/ThreadedScrollingTree.cpp
 +++ b/Source/WebCore/page/scrolling/ThreadedScrollingTree.cpp
 @@ -37,6 +37,7 @@
@@ -16323,7 +16349,7 @@ index 77e274b5febc1b0c30c2f90092b4dd1ba1e49eea..44731794a4feb0ffa9ce5302e7970cf7
      m_state = SynchronizationState::Desynchronized;
  }
  
-@@ -550,19 +611,56 @@ void ThreadedScrollingTree::displayDidRefreshOnScrollingThread()
+@@ -550,19 +611,81 @@ void ThreadedScrollingTree::displayDidRefreshOnScrollingThread()
  {
      TraceScope tracingScope(ScrollingThreadDisplayDidRefreshStart, ScrollingThreadDisplayDidRefreshEnd, displayID());
      ASSERT(ScrollingThread::isCurrentThread());
@@ -16339,8 +16365,14 @@ index 77e274b5febc1b0c30c2f90092b4dd1ba1e49eea..44731794a4feb0ffa9ce5302e7970cf7
 +#if PLATFORM(HAIKU)
 +    waitsForLock.reset();
 +    ScrollingTraceScopeHaiku traceScope("a display refresh");
-+#endif
++    // Never sampled earlier than before: a frame due time can be later than
++    // the next refresh's now.
++    auto sampleTime = std::max(scrollAnimationSampleTimeHaiku(now), m_lastScrollAnimationSampleHaiku);
++    m_lastScrollAnimationSampleHaiku = sampleTime;
++    serviceScrollAnimations(sampleTime);
++#else
      serviceScrollAnimations(now);
++#endif
  
 -    if (m_state != SynchronizationState::Idle && canUpdateLayersOnScrollingThread())
 +#if PLATFORM(HAIKU)
@@ -16374,6 +16406,25 @@ index 77e274b5febc1b0c30c2f90092b4dd1ba1e49eea..44731794a4feb0ffa9ce5302e7970cf7
 +        m_scrolledSincePositionsAppliedHaiku = false;
 +#endif
 +    }
++
++#if PLATFORM(HAIKU)
++    // SUMMIT_SCROLL_FRAME_TRACE=1: each new position of the page, the time it
++    // was sampled for and when (ThreadedCompositor prints each frame's).
++    static const bool traceFrames = [] {
++        const char* value = getenv("SUMMIT_SCROLL_FRAME_TRACE");
++        return value && value[0] == '1' && !value[1];
++    }();
++    if (traceFrames && rootNode()) {
++        static float lastY = -1;
++        float y = rootNode()->currentScrollPosition().y();
++        if (y != lastY) {
++            lastY = y;
++            fprintf(stderr, "Summit scroll sample: at=%lld sample=%lld y=%.2f state=%d\n",
++                static_cast<long long>(now.secondsSinceEpoch().microseconds()),
++                static_cast<long long>(sampleTime.secondsSinceEpoch().microseconds()), y, static_cast<int>(m_state));
++        }
++    }
++#endif
  
      switch (m_state) {
      case SynchronizationState::Idle: {
@@ -16383,7 +16434,7 @@ index 77e274b5febc1b0c30c2f90092b4dd1ba1e49eea..44731794a4feb0ffa9ce5302e7970cf7
              constexpr auto maxStartRenderingUpdateDelay = 1_ms;
              scheduleDelayedRenderingUpdateDetectionTimer(maxStartRenderingUpdateDelay);
 diff --git a/Source/WebCore/page/scrolling/ThreadedScrollingTree.h b/Source/WebCore/page/scrolling/ThreadedScrollingTree.h
-index fbe73cf3679059de2b1a1e695f53bb4aa9bfce8a..843d91a97cc9ca8c3850cf9df89868c38d37d1a2 100644
+index fbe73cf3679059de2b1a1e695f53bb4aa9bfce8a..4f31606dfaf7d1a0bc0ae8a238e5008c2bdccf9f 100644
 --- a/Source/WebCore/page/scrolling/ThreadedScrollingTree.h
 +++ b/Source/WebCore/page/scrolling/ThreadedScrollingTree.h
 @@ -61,6 +61,14 @@ public:
@@ -16401,7 +16452,7 @@ index fbe73cf3679059de2b1a1e695f53bb4aa9bfce8a..843d91a97cc9ca8c3850cf9df89868c3
      void NODELETE didScheduleRenderingUpdate();
      void willStartRenderingUpdate();
      virtual void didCompleteRenderingUpdate();
-@@ -106,6 +114,12 @@ protected:
+@@ -106,6 +114,16 @@ protected:
  
      RefPtr<AsyncScrollingCoordinator> m_scrollingCoordinator;
      mutable Lock m_layerHitTestMutex;
@@ -16410,11 +16461,15 @@ index fbe73cf3679059de2b1a1e695f53bb4aa9bfce8a..843d91a97cc9ca8c3850cf9df89868c3
 +    // Set by a scroll on the scrolling thread, cleared when layer positions
 +    // are applied or a rendering update completes.
 +    std::atomic<bool> m_scrolledSincePositionsAppliedHaiku { false };
++    // The time scroll animations are sampled at in a refresh at now: when
++    // the frame that will show the result is due.
++    virtual MonotonicTime scrollAnimationSampleTimeHaiku(MonotonicTime now) WTF_REQUIRES_LOCK(m_treeLock) { return now; }
++    MonotonicTime m_lastScrollAnimationSampleHaiku;
 +#endif
  
  private:
      bool isThreadedScrollingTree() const override { return true; }
-@@ -132,6 +146,9 @@ private:
+@@ -132,6 +150,9 @@ private:
  
      void lockLayersForHitTesting() final WTF_ACQUIRES_LOCK(m_layerHitTestMutex);
      void unlockLayersForHitTesting() final WTF_RELEASES_LOCK(m_layerHitTestMutex);
@@ -16547,6 +16602,50 @@ index 508156f8eb3212b72696c0301b00d1c768bd90cf..b310d9b37764b68f9a3c34fb8e895a0e
  };
  
  } // namespace WebCore
+diff --git a/Source/WebCore/page/scrolling/coordinated/ScrollingTreeCoordinated.cpp b/Source/WebCore/page/scrolling/coordinated/ScrollingTreeCoordinated.cpp
+index c3108ca10a6c7319f09a67fd7385ac9764df5865..940a782c3a6b4cba29c256c6ddbeaac607304ce0 100644
+--- a/Source/WebCore/page/scrolling/coordinated/ScrollingTreeCoordinated.cpp
++++ b/Source/WebCore/page/scrolling/coordinated/ScrollingTreeCoordinated.cpp
+@@ -95,6 +95,25 @@ void ScrollingTreeCoordinated::applyLayerPositionsInternal()
+     }
+ }
+ 
++#if PLATFORM(HAIKU)
++MonotonicTime ScrollingTreeCoordinated::scrollAnimationSampleTimeHaiku(MonotonicTime now)
++{
++    // Haiku has no display link: refreshes come from a timer in the web
++    // process, at any time between two frames. Sampled at the refresh's own
++    // time, the animations moved by whatever time the timer's period and the
++    // compositor's had drifted apart: a frame showed two refreshes' worth or
++    // none, two or three times a second. Each frame now shows them where they
++    // are when it is due. SUMMIT_SCROLL_FRAME_TIMES=0 samples at the refresh.
++    auto* rootScrollingNode = rootNode();
++    if (!rootScrollingNode)
++        return now;
++    auto rootContentsLayer = static_cast<ScrollingTreeFrameScrollingNodeCoordinated*>(rootScrollingNode)->rootContentsLayer();
++    if (!rootContentsLayer)
++        return now;
++    return rootContentsLayer->nextFrameTimeHaiku(now).value_or(now);
++}
++#endif
++
+ void ScrollingTreeCoordinated::didCompleteRenderingUpdate()
+ {
+     // If there's a composition requested or ongoing, wait for didCompletePlatformRenderingUpdate() that will be
+diff --git a/Source/WebCore/page/scrolling/coordinated/ScrollingTreeCoordinated.h b/Source/WebCore/page/scrolling/coordinated/ScrollingTreeCoordinated.h
+index bb996f17aa1c975e1453fff46b016faaac0a44d3..11e2bf6a2333c636e6806fd19a8e8602c5dac6e6 100644
+--- a/Source/WebCore/page/scrolling/coordinated/ScrollingTreeCoordinated.h
++++ b/Source/WebCore/page/scrolling/coordinated/ScrollingTreeCoordinated.h
+@@ -48,6 +48,9 @@ private:
+ 
+     void applyLayerPositionsInternal() final;
+     void didCompleteRenderingUpdate() final;
++#if PLATFORM(HAIKU)
++    MonotonicTime scrollAnimationSampleTimeHaiku(MonotonicTime now) final WTF_REQUIRES_LOCK(m_treeLock);
++#endif
+ 
+ #if HAVE(DISPLAY_LINK)
+     // ScrollingTree
 diff --git a/Source/WebCore/platform/CookieChange.h b/Source/WebCore/platform/CookieChange.h
 new file mode 100644
 index 0000000000000000000000000000000000000000..a20566ed620a8f242de49978ae98d3ae48b110e0
@@ -17190,6 +17289,313 @@ index c814f8594668d14423d1bba0bc1df0e17ff98088..66a0f22d9c3fe8e6284d801e6f1c4b12
  #endif
  };
  
+diff --git a/Source/WebCore/platform/ScrollAnimationSmooth.cpp b/Source/WebCore/platform/ScrollAnimationSmooth.cpp
+index 9f27c732ae47f8edc572d51a1a90f19157fffd6a..547e04a793b6f117be0c27b43df493bf08448063 100644
+--- a/Source/WebCore/platform/ScrollAnimationSmooth.cpp
++++ b/Source/WebCore/platform/ScrollAnimationSmooth.cpp
+@@ -36,6 +36,13 @@
+ #include <wtf/TZoneMallocInlines.h>
+ #include <wtf/text/TextStream.h>
+ 
++#if PLATFORM(HAIKU)
++#include <cmath>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#endif
++
+ namespace WebCore {
+ 
+ WTF_MAKE_TZONE_ALLOCATED_IMPL(ScrollAnimationSmooth);
+@@ -43,6 +50,211 @@ WTF_MAKE_TZONE_ALLOCATED_IMPL(ScrollAnimationSmooth);
+ static const float animationSpeed { 1000.0f };
+ static const Seconds maxAnimationDuration { 200_ms };
+ 
++#if PLATFORM(HAIKU)
++// Wheel scrolling. A notch scrolled 100 px in 100 ms (the distance at
++// 1000 px/s), and a notch that came while it ran restarted the animation from
++// where it was, at the speed an ease-out starts with. Between slow notches,
++// and between the steps of a touchpad (Haiku's touchpads scroll with wheel
++// steps, 30 to 200 ms apart), the page stopped and then lurched. As in
++// Firefox, a step now continues the motion: the new curve starts at the
++// position and speed the running one has at that moment, ends where all the
++// steps add up to, and lasts twice the recent gap between steps (80 to
++// 250 ms), so that it is still running when the next step comes. A first step
++// takes longest. Unlike Firefox, which counts imaginary long gaps before it,
++// the second step's gap is the average already: those gaps made the first
++// steps of a quick burst too slow, and the page then caught up at one and a
++// half times the speed it settled at.
++// SUMMIT_SMOOTH_WHEEL=0 animates as before; SUMMIT_SMOOTH_WHEEL_MS=MIN,MAX
++// sets the shortest and longest animation in milliseconds.
++struct WheelPhysicsHaiku {
++    bool enabled { true };
++    Seconds minimumDuration { 80_ms };
++    Seconds maximumDuration { 250_ms };
++};
++
++static const WheelPhysicsHaiku& wheelPhysicsHaiku()
++{
++    static const WheelPhysicsHaiku physics = [] {
++        WheelPhysicsHaiku physics;
++        if (const char* value = std::getenv("SUMMIT_SMOOTH_WHEEL"); value && !std::strcmp(value, "0"))
++            physics.enabled = false;
++        if (const char* value = std::getenv("SUMMIT_SMOOTH_WHEEL_MS")) {
++            unsigned minimum = 0;
++            unsigned maximum = 0;
++            if (std::sscanf(value, "%u,%u", &minimum, &maximum) == 2 && minimum >= 16 && minimum <= maximum && maximum <= 1000) {
++                physics.minimumDuration = Seconds::fromMilliseconds(minimum);
++                physics.maximumDuration = Seconds::fromMilliseconds(maximum);
++            }
++        }
++        return physics;
++    }();
++    return physics;
++}
++
++// The original defaults of Firefox's Bézier scroll physics
++// (general.smoothScroll.durationToIntervalRatio, currentVelocityWeighting,
++// stopDecelerationWeighting).
++static constexpr double wheelDurationToGapRatioHaiku = 2;
++static constexpr double wheelVelocityWeightingHaiku = 0.25;
++static constexpr double wheelStopDecelerationWeightingHaiku = 0.4;
++
++// A cubic Bézier curve from (0, 0) to (1, 1) through (x1, y1) and
++// (1 - stopDecelerationWeighting, 1), as functions of its parameter s.
++struct WheelBezierHaiku {
++    WheelBezierHaiku(double x1, double y1)
++    {
++        constexpr double x2 = 1 - wheelStopDecelerationWeightingHaiku;
++        constexpr double y2 = 1;
++        cx = 3 * x1;
++        bx = 3 * (x2 - x1) - cx;
++        ax = 1 - cx - bx;
++        cy = 3 * y1;
++        by = 3 * (y2 - y1) - cy;
++        ay = 1 - cy - by;
++    }
++    double x(double s) const { return ((ax * s + bx) * s + cx) * s; }
++    double y(double s) const { return ((ay * s + by) * s + cy) * s; }
++    double dx(double s) const { return (3 * ax * s + 2 * bx) * s + cx; }
++    double dy(double s) const { return (3 * ay * s + 2 * by) * s + cy; }
++    // The parameter at which the curve reaches time fraction t (x is monotonic).
++    double solve(double t) const
++    {
++        if (t <= 0)
++            return 0;
++        if (t >= 1)
++            return 1;
++        double s = t;
++        for (int i = 0; i < 8; ++i) {
++            double error = x(s) - t;
++            if (std::abs(error) < 1e-7)
++                return s;
++            double slope = dx(s);
++            if (slope < 1e-6)
++                break;
++            s -= error / slope;
++            if (s < 0 || s > 1)
++                break;
++        }
++        double low = 0;
++        double high = 1;
++        s = t;
++        while (high - low > 1e-9) {
++            s = (low + high) / 2;
++            if (x(s) < t)
++                low = s;
++            else
++                high = s;
++        }
++        return s;
++    }
++
++    double ax, bx, cx, ay, by, cy;
++};
++
++bool ScrollAnimationSmooth::wheelPhysicsEnabledHaiku()
++{
++    return wheelPhysicsHaiku().enabled;
++}
++
++FloatPoint ScrollAnimationSmooth::wheelOffsetAtHaiku(MonotonicTime time) const
++{
++    double fraction = m_duration ? std::clamp((time - m_startTime) / m_duration, 0.0, 1.0) : 1.0;
++    auto progress = [fraction](const WheelCurveHaiku& curve) {
++        WheelBezierHaiku bezier(curve.x1, curve.y1);
++        return static_cast<float>(bezier.y(bezier.solve(fraction)));
++    };
++    return {
++        std::lerp(m_startOffset.x(), m_destinationOffset.x(), progress(m_wheelCurveXHaiku)),
++        std::lerp(m_startOffset.y(), m_destinationOffset.y(), progress(m_wheelCurveYHaiku)),
++    };
++}
++
++FloatSize ScrollAnimationSmooth::wheelVelocityAtHaiku(MonotonicTime time) const
++{
++    if (!m_duration)
++        return { };
++    double fraction = std::max(0.0, (time - m_startTime) / m_duration);
++    if (fraction >= 1)
++        return { };
++    auto velocity = [&](const WheelCurveHaiku& curve, float from, float to) {
++        WheelBezierHaiku bezier(curve.x1, curve.y1);
++        // At s = 0 a curve that starts at rest has dx = dy = 0; its direction
++        // is that just after.
++        double s = std::max(bezier.solve(fraction), 1e-3);
++        double dx = bezier.dx(s);
++        if (dx <= 0)
++            return 0.0f;
++        return static_cast<float>((to - from) * bezier.dy(s) / dx / m_duration.seconds());
++    };
++    return {
++        velocity(m_wheelCurveXHaiku, m_startOffset.x(), m_destinationOffset.x()),
++        velocity(m_wheelCurveYHaiku, m_startOffset.y(), m_destinationOffset.y()),
++    };
++}
++
++bool ScrollAnimationSmooth::startOrContinueWheelScrollHaiku(const FloatPoint& fromOffset, const FloatSize& delta, MonotonicTime eventTime)
++{
++    const auto& physics = wheelPhysicsHaiku();
++    auto now = MonotonicTime::now();
++    // The gaps between steps come from the input device's clock ("when"), so
++    // that a step held up on the way here does not shorten the next one.
++    if (!eventTime || eventTime > now || eventTime < now - 1_s)
++        eventTime = now;
++
++    FloatPoint offset = fromOffset;
++    FloatSize velocity;
++    FloatPoint destination = fromOffset + delta;
++    bool wheelScrollActive = isActive() && m_isWheelScrollHaiku;
++    bool continues = wheelScrollActive && now < m_startTime + m_duration;
++    if (continues) {
++        offset = wheelOffsetAtHaiku(now);
++        velocity = wheelVelocityAtHaiku(now);
++        destination = m_destinationOffset + delta;
++        // Up to the last three gaps, so that one late step changes little.
++        m_wheelEventTimesHaiku = { eventTime, m_wheelEventTimesHaiku[0], m_wheelEventTimesHaiku[1], m_wheelEventTimesHaiku[2] };
++        m_wheelEventCountHaiku = std::min<unsigned>(m_wheelEventCountHaiku + 1, m_wheelEventTimesHaiku.size());
++        Seconds averageGap = (eventTime - m_wheelEventTimesHaiku[m_wheelEventCountHaiku - 1]) / (m_wheelEventCountHaiku - 1);
++        m_duration = std::clamp(averageGap * wheelDurationToGapRatioHaiku, physics.minimumDuration, physics.maximumDuration);
++    } else {
++        // An animation that is over but has not had its last refresh yet
++        // still has the rest of its distance to go.
++        if (wheelScrollActive)
++            destination = m_destinationOffset + delta;
++        m_wheelEventTimesHaiku = { eventTime, { }, { }, { } };
++        m_wheelEventCountHaiku = 1;
++        m_duration = physics.maximumDuration;
++    }
++
++    auto extents = m_client.scrollExtentsForAnimation(*this);
++    destination = destination.constrainedBetween(extents.minimumScrollOffset(), extents.maximumScrollOffset());
++    if (!continues && destination == offset)
++        return false;
++
++    // The curve's first control point gives its start the current speed:
++    // its slope there is the speed as a share of the average speed.
++    auto curveFor = [this](float from, float to, float speed) -> WheelCurveHaiku {
++        if (from == to || !speed)
++            return { };
++        double slope = speed * m_duration.seconds() / (to - from);
++        double normalization = std::hypot(1.0, slope);
++        return { wheelVelocityWeightingHaiku / normalization, wheelVelocityWeightingHaiku * slope / normalization };
++    };
++    m_wheelCurveXHaiku = curveFor(offset.x(), destination.x(), velocity.width());
++    m_wheelCurveYHaiku = curveFor(offset.y(), destination.y(), velocity.height());
++    m_startOffset = offset;
++    m_destinationOffset = destination;
++    if (!continues)
++        m_currentOffset = offset;
++    m_isWheelScrollHaiku = true;
++
++    if (isActive())
++        m_startTime = now;
++    else
++        didStart(now);
++    return true;
++}
++#endif
++
+ ScrollAnimationSmooth::ScrollAnimationSmooth(ScrollAnimationClient& client)
+     : ScrollAnimation(Type::Smooth, client)
+     , m_timingFunction(CubicBezierTimingFunction::create())
+@@ -80,6 +292,9 @@ bool ScrollAnimationSmooth::retargetActiveAnimation(const FloatPoint& newOffset)
+ 
+     auto extents = m_client.scrollExtentsForAnimation(*this);
+ 
++#if PLATFORM(HAIKU)
++    m_isWheelScrollHaiku = false;
++#endif
+     m_startTime = MonotonicTime::now();
+     m_startOffset = m_currentOffset;
+     m_destinationOffset = newOffset.constrainedBetween(extents.minimumScrollOffset(), extents.maximumScrollOffset());
+@@ -116,6 +331,12 @@ void ScrollAnimationSmooth::serviceAnimation(MonotonicTime currentTime)
+ 
+ bool ScrollAnimationSmooth::animateScroll(MonotonicTime currentTime)
+ {
++#if PLATFORM(HAIKU)
++    if (m_isWheelScrollHaiku) {
++        m_currentOffset = wheelOffsetAtHaiku(currentTime);
++        return currentTime < m_startTime + m_duration;
++    }
++#endif
+     MonotonicTime endTime = m_startTime + m_duration;
+     currentTime = std::min(currentTime, endTime);
+ 
+diff --git a/Source/WebCore/platform/ScrollAnimationSmooth.h b/Source/WebCore/platform/ScrollAnimationSmooth.h
+index a0f25d5825b8fbbb83d2d034c5e10ba79d619d22..79c4c6a62ef7efcd0bfb286aad73b54a096fbdba 100644
+--- a/Source/WebCore/platform/ScrollAnimationSmooth.h
++++ b/Source/WebCore/platform/ScrollAnimationSmooth.h
+@@ -28,6 +28,9 @@
+ 
+ #include "ScrollAnimation.h"
+ #include <wtf/TZoneMalloc.h>
++#if PLATFORM(HAIKU)
++#include <array>
++#endif
+ 
+ namespace WebCore {
+ 
+@@ -46,6 +49,14 @@ public:
+ 
+     std::optional<FloatPoint> destinationOffset() const final { return m_destinationOffset; }
+ 
++#if PLATFORM(HAIKU)
++    // A wheel notch, or a step of a touchpad (Haiku's touchpads scroll with
++    // wheel steps too): starts a wheel animation from fromOffset, or continues
++    // the running one from where it is at the speed it has.
++    static bool wheelPhysicsEnabledHaiku();
++    bool startOrContinueWheelScrollHaiku(const FloatPoint& fromOffset, const FloatSize& delta, MonotonicTime eventTime);
++#endif
++
+ private:
+ 
+     void updateScrollExtents() final;
+@@ -56,6 +67,24 @@ private:
+ 
+     bool animateScroll(MonotonicTime);
+ 
++#if PLATFORM(HAIKU)
++    // The first control point of an axis's cubic Bézier curve; the second is
++    // fixed. (0, 0) starts at rest.
++    struct WheelCurveHaiku {
++        double x1 { 0 };
++        double y1 { 0 };
++    };
++    FloatPoint wheelOffsetAtHaiku(MonotonicTime) const;
++    FloatSize wheelVelocityAtHaiku(MonotonicTime) const;
++
++    bool m_isWheelScrollHaiku { false };
++    // The times of the last steps, newest first, and how many there are.
++    std::array<MonotonicTime, 4> m_wheelEventTimesHaiku;
++    unsigned m_wheelEventCountHaiku { 0 };
++    WheelCurveHaiku m_wheelCurveXHaiku;
++    WheelCurveHaiku m_wheelCurveYHaiku;
++#endif
++
+     Seconds m_duration;
+ 
+     FloatPoint m_startOffset;
 diff --git a/Source/WebCore/platform/ScrollbarsController.cpp b/Source/WebCore/platform/ScrollbarsController.cpp
 index a160424a2cbed2d1562892b8500407c8f2d342e1..4d8c15c1c51fa90a6c143eacebc77883ad50eae2 100644
 --- a/Source/WebCore/platform/ScrollbarsController.cpp
@@ -17203,6 +17609,30 @@ index a160424a2cbed2d1562892b8500407c8f2d342e1..4d8c15c1c51fa90a6c143eacebc77883
  
  WTF_MAKE_TZONE_ALLOCATED_IMPL(ScrollbarsController);
  
+diff --git a/Source/WebCore/platform/ScrollingEffectsController.cpp b/Source/WebCore/platform/ScrollingEffectsController.cpp
+index b52b305554da70194cd0751572f755112834ff02..bb4c9d96ff19f0a948f1cbb133821f18c7f81be5 100644
+--- a/Source/WebCore/platform/ScrollingEffectsController.cpp
++++ b/Source/WebCore/platform/ScrollingEffectsController.cpp
+@@ -428,6 +428,19 @@ bool ScrollingEffectsController::handleWheelEvent(const PlatformWheelEvent& whee
+         return false;
+ 
+ #if ENABLE(SMOOTH_SCROLLING)
++#if PLATFORM(HAIKU)
++    if (m_client.scrollAnimationEnabled() && !m_inScrollGesture && ScrollAnimationSmooth::wheelPhysicsEnabledHaiku()) {
++        CheckedPtr animation = dynamicDowncast<ScrollAnimationSmooth>(m_currentAnimation.get());
++        if (!animation || !animation->isActive()) {
++            if (CheckedPtr currentAnimation = m_currentAnimation.get())
++                currentAnimation->stop();
++            m_currentAnimation = makeUnique<ScrollAnimationSmooth>(*this);
++            animation = downcast<ScrollAnimationSmooth>(m_currentAnimation.get());
++        }
++        animation->startOrContinueWheelScrollHaiku(scrollOffset, { deltaX, deltaY }, wheelEvent.timestamp());
++        return true;
++    }
++#endif
+     if (m_client.scrollAnimationEnabled() && !m_inScrollGesture) {
+         if (!retargetAnimatedScrollBy({ deltaX, deltaY }))
+             startAnimatedScrollToDestination(scrollOffset, scrollOffset + FloatSize { deltaX, deltaY });
 diff --git a/Source/WebCore/platform/SharedMemory.h b/Source/WebCore/platform/SharedMemory.h
 index 68f798ab3b4a968c6dba787ac524e4c39e326bd2..20f3145e8d62462c19fbe78fdf228dfcc7eb5ce2 100644
 --- a/Source/WebCore/platform/SharedMemory.h
@@ -22099,7 +22529,7 @@ index 63ec41fac1fe1f6d4b7606555093bc4bed44d365..78e2febcc7cead319e453fd7f28e474f
  
          if (m_contentsBuffer.committed)
 diff --git a/Source/WebCore/platform/graphics/coordinated/CoordinatedPlatformLayer.h b/Source/WebCore/platform/graphics/coordinated/CoordinatedPlatformLayer.h
-index dc4108941486e941ebe3b62eb9a1612941385fa2..d42c5134d655c3e8e83451d03d24d7820180ddc8 100644
+index dc4108941486e941ebe3b62eb9a1612941385fa2..b6e99afc6a9deaef6c304c7ef9a9037ab8b04e11 100644
 --- a/Source/WebCore/platform/graphics/coordinated/CoordinatedPlatformLayer.h
 +++ b/Source/WebCore/platform/graphics/coordinated/CoordinatedPlatformLayer.h
 @@ -36,6 +36,7 @@
@@ -22110,7 +22540,20 @@ index dc4108941486e941ebe3b62eb9a1612941385fa2..d42c5134d655c3e8e83451d03d24d782
  #include <wtf/ThreadSafeRefCounted.h>
  #include <wtf/ThreadSafeWeakPtr.h>
  
-@@ -102,6 +103,12 @@ public:
+@@ -93,6 +94,12 @@ public:
+         virtual int maxTextureSize() const = 0;
+         virtual void willPaintTile() = 0;
+         virtual void didPaintTile() = 0;
++#if PLATFORM(HAIKU)
++        // When the compositor composes the frame that shows a change made
++        // now: the scrolling thread samples its scroll animations at that
++        // time, so that each frame shows them a frame further on.
++        virtual std::optional<MonotonicTime> nextFrameTimeHaiku(MonotonicTime) const { return std::nullopt; }
++#endif
+     };
+ 
+     static Ref<CoordinatedPlatformLayer> create();
+@@ -102,6 +109,12 @@ public:
  
      PlatformLayerIdentifier id() const { return m_id; }
      Lock& lock() LIFETIME_BOUND WTF_RETURNS_LOCK(m_lock) { return m_lock; }
@@ -22123,7 +22566,17 @@ index dc4108941486e941ebe3b62eb9a1612941385fa2..d42c5134d655c3e8e83451d03d24d782
  
      Client& client() const { ASSERT(m_client); return *m_client; }
      void invalidateClient();
-@@ -241,6 +248,9 @@ private:
+@@ -220,6 +233,9 @@ public:
+     void processPendingBackingStoreTileUpdates();
+     bool isCompositionRequiredOrOngoing() const;
+     void requestComposition(CompositionReason);
++#if PLATFORM(HAIKU)
++    std::optional<MonotonicTime> nextFrameTimeHaiku(MonotonicTime now) const { return m_client ? m_client->nextFrameTimeHaiku(now) : std::nullopt; }
++#endif
+     RunLoop* compositingRunLoop() const;
+     int maxTextureSize() const;
+ 
+@@ -241,6 +257,9 @@ private:
      void addDamage(Damage&&) WTF_REQUIRES_LOCK(m_lock);
  #endif
      void damageWholeLayer() WTF_REQUIRES_LOCK(m_lock);
@@ -22133,7 +22586,7 @@ index dc4108941486e941ebe3b62eb9a1612941385fa2..d42c5134d655c3e8e83451d03d24d782
  
  #if USE(TEXTURE_MAPPER)
      void flushCompositingStateOnTarget(const OptionSet<CompositionReason>&, TextureMapperLayer&);
-@@ -330,6 +340,9 @@ private:
+@@ -330,6 +349,9 @@ private:
      bool m_contentsVisible WTF_GUARDED_BY_LOCK(m_lock) { true };
      bool m_contentsOpaque WTF_GUARDED_BY_LOCK(m_lock) { false };
      FloatRect m_contentsRect WTF_GUARDED_BY_LOCK(m_lock);
@@ -136103,7 +136556,7 @@ index f7a92c96dec16106113dc0ee005ebd40f36a7ffb..0c69ec684f8b5d9c492fc67fda9863b4
  };
  
 diff --git a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/LayerTreeHost.cpp b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/LayerTreeHost.cpp
-index 3d6d03115b4e8f2c5868af50c90f83cccc25bcf7..b9f0c54c5eb433e43f7007a237d31a964f4e8f46 100644
+index 3d6d03115b4e8f2c5868af50c90f83cccc25bcf7..6476176ba0173818b38ae6dbbf2d02d921812195 100644
 --- a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/LayerTreeHost.cpp
 +++ b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/LayerTreeHost.cpp
 @@ -28,6 +28,7 @@
@@ -136420,7 +136873,21 @@ index 3d6d03115b4e8f2c5868af50c90f83cccc25bcf7..b9f0c54c5eb433e43f7007a237d31a96
      m_compositor->resume();
      FrameRenderer::resume();
  }
-@@ -447,8 +667,24 @@ void LayerTreeHost::didRenderFrame()
+@@ -389,6 +609,13 @@ void LayerTreeHost::requestComposition(CompositionReason reason)
+     m_compositor->requestComposition(reason);
+ }
+ 
++#if PLATFORM(HAIKU)
++std::optional<MonotonicTime> LayerTreeHost::nextFrameTimeHaiku(MonotonicTime now) const
++{
++    return m_compositor->nextFrameTimeHaiku(now);
++}
++#endif
++
+ RunLoop* LayerTreeHost::compositingRunLoop() const
+ {
+     return m_compositor->runLoop();
+@@ -447,8 +674,24 @@ void LayerTreeHost::didRenderFrame()
  
  void LayerTreeHost::requestCompositionForRenderingUpdate()
  {
@@ -136446,10 +136913,20 @@ index 3d6d03115b4e8f2c5868af50c90f83cccc25bcf7..b9f0c54c5eb433e43f7007a237d31a96
  
          if (!m_pendingForceRepaint && m_forcedRepaintAsyncCallback)
 diff --git a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/LayerTreeHost.h b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/LayerTreeHost.h
-index 57163f65873e5a481e5ef5a4ec3beec4b40b7cea..61b49ac7c362b416cdec1d10c44304d2aabb6534 100644
+index 57163f65873e5a481e5ef5a4ec3beec4b40b7cea..0ea6e01484681d4155f963155e14674a2faf8c24 100644
 --- a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/LayerTreeHost.h
 +++ b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/LayerTreeHost.h
-@@ -145,6 +145,18 @@ private:
+@@ -95,6 +95,9 @@ private:
+     void notifyCompositionRequired() override;
+     bool isCompositionRequiredOrOngoing() const override;
+     void requestComposition(WebCore::CompositionReason) override;
++#if PLATFORM(HAIKU)
++    std::optional<MonotonicTime> nextFrameTimeHaiku(MonotonicTime) const override;
++#endif
+     RunLoop* compositingRunLoop() const override;
+     int maxTextureSize() const override;
+     void willPaintTile() override;
+@@ -145,6 +148,18 @@ private:
      bool m_waitUntilPaintingComplete { false };
      bool m_isWaitingForRenderer { false };
      bool m_scheduledWhileWaitingForRenderer { false };
@@ -136469,7 +136946,7 @@ index 57163f65873e5a481e5ef5a4ec3beec4b40b7cea..61b49ac7c362b416cdec1d10c44304d2
      bool m_compositionRequired { false };
  #if ENABLE(SCROLLING_THREAD)
 diff --git a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/ThreadedCompositor.cpp b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/ThreadedCompositor.cpp
-index c238029ad9c99c5028ea7e456520af85d1d85532..be2bb89fb451a05ca1d6c1f4037c2c9f7015bbac 100644
+index c238029ad9c99c5028ea7e456520af85d1d85532..0ea7f7fa15270e0cd6ba3019af9dd92d0f16547e 100644
 --- a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/ThreadedCompositor.cpp
 +++ b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/ThreadedCompositor.cpp
 @@ -26,6 +26,11 @@
@@ -136662,7 +137139,50 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..be2bb89fb451a05ca1d6c1f4037c2c9f
  
  uint64_t ThreadedCompositor::surfaceID() const
  {
-@@ -216,8 +340,41 @@ void ThreadedCompositor::updateRenderTimer()
+@@ -184,6 +308,42 @@ void ThreadedCompositor::invalidate()
+     m_surface = nullptr;
+ }
+ 
++#if PLATFORM(HAIKU)
++// SUMMIT_SCROLL_FRAME_TRACE=1 prints when each frame's scene is taken and
++// what the scrolling thread sampled for it (ThreadedScrollingTree).
++static bool traceScrollFramesHaiku()
++{
++    static const bool enabled = [] {
++        const char* value = getenv("SUMMIT_SCROLL_FRAME_TRACE");
++        return value && !strcmp(value, "1");
++    }();
++    return enabled;
++}
++
++static bool framesKeepToGridHaiku()
++{
++    static const bool enabled = [] {
++        const char* value = getenv("SUMMIT_FRAME_GRID");
++        return !value || strcmp(value, "0");
++    }();
++    return enabled;
++}
++
++std::optional<MonotonicTime> ThreadedCompositor::nextFrameTimeHaiku(MonotonicTime now) const
++{
++    double flushedDue = m_flushedFrameDueHaiku.load();
++    Seconds interval { m_frameIntervalHaiku.load() };
++    if (!flushedDue || !interval)
++        return std::nullopt;
++    auto next = MonotonicTime::fromRawSeconds(flushedDue) + interval;
++    // A frame due more than a period ago is composed as soon as it is asked
++    // for, and the grid starts again there (updateRenderTimer()).
++    if (next < now - interval)
++        return now;
++    return next;
++}
++#endif
++
+ void ThreadedCompositor::startRenderTimer()
+ {
+     assertIsHeld(m_state.lock);
+@@ -216,8 +376,37 @@ void ThreadedCompositor::updateRenderTimer()
      }
  
      if (m_state.isRenderTimerActive) {
@@ -136684,11 +137204,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..be2bb89fb451a05ca1d6c1f4037c2c9f
 +            // every four seconds. Due more than a period ago (the compositor
 +            // was idle or behind), it is due now.
 +            // SUMMIT_FRAME_GRID=0 counts from when the last frame started.
-+            static const bool frameGrid = [] {
-+                const char* value = getenv("SUMMIT_FRAME_GRID");
-+                return !value || strcmp(value, "0");
-+            }();
-+            if (m_minimumFrameInterval && frameGrid) {
++            if (m_minimumFrameInterval && framesKeepToGridHaiku()) {
 +                auto now = MonotonicTime::now();
 +                auto due = m_frameDueHaiku + m_minimumFrameInterval;
 +                if (!m_frameDueHaiku || due < now - m_minimumFrameInterval)
@@ -136706,7 +137222,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..be2bb89fb451a05ca1d6c1f4037c2c9f
      } else
          m_renderTimer.stop();
  }
-@@ -364,6 +521,10 @@ TargetContents ThreadedCompositor::paintToCurrentGLContext(const TransformationM
+@@ -364,6 +553,10 @@ TargetContents ThreadedCompositor::paintToCurrentGLContext(const TransformationM
  #if USE(TEXTURE_MAPPER)
  void ThreadedCompositor::paintToTextureMapper(const TransformationMatrix& matrix, const IntSize& size, const OptionSet<CompositionReason>& reasons)
  {
@@ -136717,7 +137233,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..be2bb89fb451a05ca1d6c1f4037c2c9f
      FloatRect clipRect(FloatPoint { }, size);
      TextureMapperLayer& currentRootLayer = m_sceneState->rootLayer().ensureTarget();
      if (currentRootLayer.transform() != matrix)
-@@ -371,11 +532,23 @@ void ThreadedCompositor::paintToTextureMapper(const TransformationMatrix& matrix
+@@ -371,11 +564,23 @@ void ThreadedCompositor::paintToTextureMapper(const TransformationMatrix& matrix
  
      bool sceneHasRunningAnimations = currentRootLayer.applyAnimationsRecursively(MonotonicTime::now());
  
@@ -136741,7 +137257,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..be2bb89fb451a05ca1d6c1f4037c2c9f
      currentRootLayer.prepareForPainting(*m_textureMapper);
      if (m_damage.flags) {
          Damage frameDamage(size, m_damage.flags->contains(DamagePropagationFlags::Unified) ? Damage::Mode::BoundingBox : Damage::Mode::Rectangles);
-@@ -383,7 +556,26 @@ void ThreadedCompositor::paintToTextureMapper(const TransformationMatrix& matrix
+@@ -383,7 +588,26 @@ void ThreadedCompositor::paintToTextureMapper(const TransformationMatrix& matrix
          WTFBeginSignpost(this, CollectDamage);
          currentRootLayer.collectDamage(*m_textureMapper, frameDamage);
          WTFEndSignpost(this, CollectDamage);
@@ -136768,7 +137284,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..be2bb89fb451a05ca1d6c1f4037c2c9f
          recordFrameDamage(WTF::move(frameDamage));
  
          if (m_damage.flags->contains(DamagePropagationFlags::UseForCompositing)) {
-@@ -392,23 +584,62 @@ void ThreadedCompositor::paintToTextureMapper(const TransformationMatrix& matrix
+@@ -392,23 +616,62 @@ void ThreadedCompositor::paintToTextureMapper(const TransformationMatrix& matrix
                  m_textureMapper->setDamage(std::nullopt);
              } else {
                  const auto& damageSinceLastSurfaceUse = m_surface->renderTargetDamage();
@@ -136831,7 +137347,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..be2bb89fb451a05ca1d6c1f4037c2c9f
  
  #if ENABLE(DAMAGE_TRACKING)
      if (rectContainingRegionThatActuallyChanged)
-@@ -426,6 +657,21 @@ void ThreadedCompositor::paintToTextureMapper(const TransformationMatrix& matrix
+@@ -426,6 +689,21 @@ void ThreadedCompositor::paintToTextureMapper(const TransformationMatrix& matrix
  
      m_textureMapper->endClip();
      m_textureMapper->endPainting();
@@ -136853,7 +137369,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..be2bb89fb451a05ca1d6c1f4037c2c9f
  
      if (sceneHasRunningAnimations)
          requestComposition(CompositionReason::Animation);
-@@ -525,8 +771,17 @@ void ThreadedCompositor::recordFrameDamage(Damage&& damage)
+@@ -525,8 +803,17 @@ void ThreadedCompositor::recordFrameDamage(Damage&& damage)
  
      // Nothing changed this frame: an empty damage contributes nothing to the targets, since Damage::add()
      // ignores empty damage. Skip it rather than replace the recorded frame damage with an empty one.
@@ -136872,7 +137388,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..be2bb89fb451a05ca1d6c1f4037c2c9f
  
      m_surface->setFrameDamage(WTF::move(damage));
  }
-@@ -556,6 +811,46 @@ void ThreadedCompositor::renderLayerTree()
+@@ -556,6 +843,46 @@ void ThreadedCompositor::renderLayerTree()
      if (m_suspendedCount > 0)
          return;
  
@@ -136919,7 +137435,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..be2bb89fb451a05ca1d6c1f4037c2c9f
      OptionSet<CompositionReason> reasons;
      bool shouldNotifiyDidComposite = false;
      {
-@@ -580,8 +875,21 @@ void ThreadedCompositor::renderLayerTree()
+@@ -580,8 +907,21 @@ void ThreadedCompositor::renderLayerTree()
  
          ASSERT(m_state.state == State::Scheduled);
          m_state.state = State::InProgress;
@@ -136941,7 +137457,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..be2bb89fb451a05ca1d6c1f4037c2c9f
  #if USE(TEXTURE_MAPPER)
      if (!m_context || !m_context->makeContextCurrent())
          return;
-@@ -599,23 +907,61 @@ void ThreadedCompositor::renderLayerTree()
+@@ -599,23 +939,77 @@ void ThreadedCompositor::renderLayerTree()
      if (viewportSize.isEmpty())
          return;
  
@@ -136984,6 +137500,22 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..be2bb89fb451a05ca1d6c1f4037c2c9f
      flushCompositingState(reasons);
      WTFEndSignpost(this, FlushCompositingState);
 +#if PLATFORM(HAIKU)
++    // This frame's scene is taken: what the scrolling thread changes from now
++    // on is shown by the next one, and its scroll animations are sampled at
++    // the time that one is due.
++    static const bool sampleFrameTimes = [] {
++        const char* value = getenv("SUMMIT_SCROLL_FRAME_TIMES");
++        return !value || strcmp(value, "0");
++    }();
++    if (sampleFrameTimes && framesKeepToGridHaiku() && m_minimumFrameInterval && m_frameDueHaiku) {
++        m_frameIntervalHaiku.store(m_minimumFrameInterval.seconds());
++        m_flushedFrameDueHaiku.store(m_frameDueHaiku.secondsSinceEpoch().seconds());
++    }
++    if (traceScrollFramesHaiku()) {
++        std::fprintf(stderr, "Summit frame flush: at=%lld due=%lld\n",
++            static_cast<long long>(MonotonicTime::now().secondsSinceEpoch().microseconds()),
++            static_cast<long long>(m_frameDueHaiku.secondsSinceEpoch().microseconds()));
++    }
 +    const bigtime_t flushedAt = traceTiming ? system_time() : 0;
 +    const auto tileUpdates = CoordinatedBackingStoreTile::takeUpdateStatsHaiku();
 +    const bool deferredUploads = CoordinatedBackingStore::takeHasDeferredUploadsHaiku();
@@ -137003,7 +137535,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..be2bb89fb451a05ca1d6c1f4037c2c9f
  
      updateFPSCounter();
  
-@@ -631,8 +977,51 @@ void ThreadedCompositor::renderLayerTree()
+@@ -631,8 +1025,51 @@ void ThreadedCompositor::renderLayerTree()
      PlatformDisplay::sharedDisplay().skiaGLContext()->swapBuffers();
  #endif
  
@@ -137055,7 +137587,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..be2bb89fb451a05ca1d6c1f4037c2c9f
  
      RunLoop::mainSingleton().dispatch([this, protectedThis = Ref { *this }] {
          if (m_layerTreeHost)
-@@ -656,6 +1045,13 @@ void ThreadedCompositor::requestComposition(CompositionReason reason)
+@@ -656,6 +1093,13 @@ void ThreadedCompositor::requestComposition(CompositionReason reason)
  {
      Locker locker { m_state.lock };
      m_state.reasons.add(reason);
@@ -137069,7 +137601,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..be2bb89fb451a05ca1d6c1f4037c2c9f
      scheduleUpdateLocked();
  }
  
-@@ -703,6 +1099,10 @@ void ThreadedCompositor::scheduleUpdateLocked()
+@@ -703,6 +1147,10 @@ void ThreadedCompositor::scheduleUpdateLocked()
  void ThreadedCompositor::frameComplete()
  {
      ASSERT(m_workQueue->runLoop().isCurrent());
@@ -137080,7 +137612,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..be2bb89fb451a05ca1d6c1f4037c2c9f
  
      Locker locker { m_state.lock };
      WTFEmitSignpost(this, FrameComplete, "reasons: %s, state: %s, waiting for tiles: %s", reasonsToString(m_state.reasons).utf8(), stateToString(m_state.state).characters(), m_state.isWaitingForTiles ? "yes" : "no");
-@@ -726,6 +1126,112 @@ void ThreadedCompositor::frameComplete()
+@@ -726,6 +1174,112 @@ void ThreadedCompositor::frameComplete()
      }
  }
  
@@ -137193,7 +137725,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..be2bb89fb451a05ca1d6c1f4037c2c9f
  RunLoop* ThreadedCompositor::runLoop()
  {
      return m_surface ? &m_workQueue->runLoop() : nullptr;
-@@ -747,7 +1253,15 @@ void ThreadedCompositor::updateSceneAttributes(const IntSize& size, float device
+@@ -747,7 +1301,15 @@ void ThreadedCompositor::updateSceneAttributes(const IntSize& size, float device
  {
      m_attributes.viewportSize = size;
      m_attributes.deviceScaleFactor = deviceScaleFactor;
@@ -137210,20 +137742,23 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..be2bb89fb451a05ca1d6c1f4037c2c9f
  
  void ThreadedCompositor::initializeFPSCounter()
 diff --git a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/ThreadedCompositor.h b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/ThreadedCompositor.h
-index 350699338bff55157709efd32e703513e9ce6486..abb7a29049cac83f78bc65d1e5b828872abf7a19 100644
+index 350699338bff55157709efd32e703513e9ce6486..6e2f033ca0dbd8b18808f0383b68c25fe257cb8b 100644
 --- a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/ThreadedCompositor.h
 +++ b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/ThreadedCompositor.h
-@@ -97,6 +97,9 @@ public:
+@@ -97,6 +97,12 @@ public:
      void invalidate();
      void suspend();
      void resume();
 +#if PLATFORM(HAIKU)
 +    void recoverFromStallHaiku(Seconds waited);
++    // When the frame that shows a change made now is due: the one after the
++    // last frame whose scene was taken (any thread).
++    std::optional<MonotonicTime> nextFrameTimeHaiku(MonotonicTime now) const;
 +#endif
  
      bool isActive() const;
  
-@@ -137,6 +140,9 @@ private:
+@@ -137,6 +143,9 @@ private:
      TargetContents paintToSkiaCanvas(const WebCore::TransformationMatrix&, const WebCore::IntSize&, const OptionSet<WebCore::CompositionReason>&);
  #endif
      void frameComplete();
@@ -137233,7 +137768,7 @@ index 350699338bff55157709efd32e703513e9ce6486..abb7a29049cac83f78bc65d1e5b82887
  
      void didCompositeRunLoopObserverFired();
  
-@@ -194,6 +200,33 @@ private:
+@@ -194,6 +203,37 @@ private:
      } m_attributes;
  
      RunLoop::Timer m_renderTimer;
@@ -137246,6 +137781,10 @@ index 350699338bff55157709efd32e703513e9ce6486..abb7a29049cac83f78bc65d1e5b82887
 +    // does not lengthen the period.
 +    MonotonicTime m_frameDueHaiku;
 +    MonotonicTime m_nextFrameDueHaiku;
++    // The due time of the last frame whose scene was taken, and the period,
++    // in seconds, for nextFrameTimeHaiku().
++    std::atomic<double> m_flushedFrameDueHaiku { 0 };
++    std::atomic<double> m_frameIntervalHaiku { 0 };
 +#endif
 +    bool m_isWaitingForRenderTarget WTF_GUARDED_BY_LOCK(m_state.lock) { false };
 +    MonotonicTime m_renderTargetWaitStartedAt WTF_GUARDED_BY_LOCK(m_state.lock);
@@ -137267,7 +137806,7 @@ index 350699338bff55157709efd32e703513e9ce6486..abb7a29049cac83f78bc65d1e5b82887
  #if USE(TEXTURE_MAPPER)
      std::unique_ptr<WebCore::TextureMapper> m_textureMapper;
  #endif
-@@ -234,4 +267,3 @@ private:
+@@ -234,4 +274,3 @@ private:
  } // namespace WebKit
  
  #endif // USE(COORDINATED_GRAPHICS)
@@ -137375,7 +137914,7 @@ index 6110b083aca77c118adca1f9e5e222165a1b2531..33eb123ccbcbe5bb7d7cda8604df7d3c
      UpdateGeometry(WebCore::IntSize size) -> ()
  #endif
 diff --git a/Source/WebKit/WebProcess/WebPage/EventDispatcher.cpp b/Source/WebKit/WebProcess/WebPage/EventDispatcher.cpp
-index af1613ebb1b7b0ed2623ee9ad17eb274c17aa05b..440df619ed57a80108b6b96731e8e39115c3273f 100644
+index af1613ebb1b7b0ed2623ee9ad17eb274c17aa05b..f1c1f3017cefd00098e04fc647f38d4fbd850b55 100644
 --- a/Source/WebKit/WebProcess/WebPage/EventDispatcher.cpp
 +++ b/Source/WebKit/WebProcess/WebPage/EventDispatcher.cpp
 @@ -36,15 +36,28 @@
@@ -137628,7 +138167,7 @@ index af1613ebb1b7b0ed2623ee9ad17eb274c17aa05b..440df619ed57a80108b6b96731e8e391
              if (result.needsMainThreadProcessing()) {
                  if (result.steps.contains(WheelEventProcessingSteps::SynchronousScrolling)) {
                      dispatchWheelEventViaMainThread(pageID, wheelEvent, result.steps, WTF::move(completionHandler));
-@@ -207,6 +395,108 @@ void EventDispatcher::wheelEvent(PageIdentifier pageID, Ref<WebWheelEvent>&& whe
+@@ -207,6 +395,123 @@ void EventDispatcher::wheelEvent(PageIdentifier pageID, Ref<WebWheelEvent>&& whe
      internalWheelEvent(pageID, wheelEvent, rubberBandableEdges, WTF::move(completionHandler));
  }
  
@@ -137673,6 +138212,7 @@ index af1613ebb1b7b0ed2623ee9ad17eb274c17aa05b..440df619ed57a80108b6b96731e8e391
 +void EventDispatcher::refreshHaikuScrollingTrees()
 +{
 +    bool hasActiveTree = false;
++    bool animates = false;
 +    Vector<PageIdentifier> pagesToProbe;
 +    static bool traceDOM = [] {
 +        const char* value = std::getenv("SUMMIT_SCROLL_DOM_TRACE");
@@ -137685,6 +138225,7 @@ index af1613ebb1b7b0ed2623ee9ad17eb274c17aa05b..440df619ed57a80108b6b96731e8e391
 +            if (!scrollingTree->hasRecentActivity())
 +                continue;
 +            hasActiveTree = true;
++            animates = animates || scrollingTree->hasNodeWithActiveScrollAnimations();
 +            scrollingTree->displayDidRefresh(scrollingTree->displayID());
 +        }
 +        if (traceDOM && !hasActiveTree) {
@@ -137728,7 +138269,20 @@ index af1613ebb1b7b0ed2623ee9ad17eb274c17aa05b..440df619ed57a80108b6b96731e8e391
 +        return;
 +    }
 +
-+    m_queue->dispatchAfter(haikuScrollRefreshInterval(), [this, protectedThis = Ref { *this }] {
++    // A scroll animation is sampled at the time the next frame is due
++    // (ScrollingTreeCoordinated::scrollAnimationSampleTimeHaiku()), by
++    // whichever refresh comes first after the last frame's scene was taken:
++    // twice a frame, so that every frame gets one although the timer is not
++    // in step with the compositor. A second refresh for the same frame finds
++    // the animations where the first left them.
++    static const bool samplesAtFrameTimes = [] {
++        const char* value = std::getenv("SUMMIT_SCROLL_FRAME_TIMES");
++        return !value || value[0] != '0' || value[1];
++    }();
++    auto interval = haikuScrollRefreshInterval();
++    if (animates && samplesAtFrameTimes)
++        interval = interval / 2;
++    m_queue->dispatchAfter(interval, [this, protectedThis = Ref { *this }] {
 +        refreshHaikuScrollingTrees();
 +    });
 +}
@@ -137737,7 +138291,7 @@ index af1613ebb1b7b0ed2623ee9ad17eb274c17aa05b..440df619ed57a80108b6b96731e8e391
  #if ENABLE(MAC_GESTURE_EVENTS)
  void EventDispatcher::gestureEvent(FrameIdentifier frameID, PageIdentifier pageID, Ref<WebGestureEvent>&& gestureEvent, CompletionHandler<void(std::optional<WebEventType>, bool, std::optional<RemoteUserInputEventData>)>&& completionHandler)
  {
-@@ -357,8 +647,26 @@ void EventDispatcher::dispatchWheelEvent(PageIdentifier pageID, const WebWheelEv
+@@ -357,8 +662,26 @@ void EventDispatcher::dispatchWheelEvent(PageIdentifier pageID, const WebWheelEv
  
      bool handled = false;
      if (webPage && webPage->mainFrame()) {
