@@ -144,6 +144,18 @@ twice the gap) is Firefox's original.
 - **Touchpads send whole steps.** Pixel-precise deltas with scroll phases
   from Haiku's touchpad driver would let the page follow the fingers
   directly (and fling) instead of animating 100 px steps.
+- **`requestAnimationFrame` runs at 65 Hz.** Haiku builds the GLib drawing
+  area without a display link, so `RenderingUpdateScheduler` falls back to
+  its timer at `FullSpeedAnimationInterval`, which is 15 ms. airos.works in
+  the installed build: rAF every 15.4 ms on average, at rest and while
+  scrolling. Against the compositor's 60 Hz, about one update in eleven is
+  never shown. Scripted animations, including pages that scroll themselves
+  in rAF (Lenis), skip five or six times a second, and `scrollY` read in
+  rAF still shows a repeated or doubled step every 15 frames although every
+  composed frame moves evenly. The next step is a display refresh monitor
+  that the compositor's frames pace (one update just after each frame's
+  scene is taken, `nextFrameTimeHaiku()`), measured against Speedometer,
+  which waits for rAF between its steps.
 
 ## 17-18 October 2026 (night): smooth scrolling and animation on the laptop
 
