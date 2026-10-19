@@ -3446,6 +3446,13 @@ void BrowserWindow::MessageReceived(BMessage* message)
         }
         case kNewTab: {
             const char* url = nullptr;
+#if SUMMIT_MODERN_WEBKIT
+            if (!fWebApp.empty()) {
+                // A web app's window has no tabs: the page opens in an ordinary window.
+                RequestNewWindow({ message->FindString("url", &url) == B_OK ? url : NewTabAddress() }, fPrivate);
+                break;
+            }
+#endif
             // A new tab shows the home page; its address is selected, ready to type over.
             CreateTab(message->FindString("url", &url) == B_OK ? url : NewTabAddress());
             fAddress->MakeFocus();

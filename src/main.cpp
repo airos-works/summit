@@ -1167,7 +1167,8 @@ private:
         BMessenger target;
         if (message.FindMessenger("target", &target) != B_OK && message.FindPoint("where", &where) == B_OK) {
             for (const auto& record : fWindows) {
-                if (record.messenger == source || record.privateBrowsing != privateTab) continue;
+                // Not a web app's window, which shows only its own pages.
+                if (record.messenger == source || record.privateBrowsing != privateTab || !record.webApp.empty()) continue;
                 if (!record.window->LockWithTimeout(200000)) continue;
                 const bool under = record.window->Frame().Contains(where) && !record.window->IsHidden();
                 record.window->Unlock();
