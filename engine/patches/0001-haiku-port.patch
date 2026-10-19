@@ -58494,7 +58494,7 @@ index 0000000000000000000000000000000000000000..da71c185bfa5f93bf68ba7a513f48393
 +
 +#endif
 diff --git a/Source/WebCore/platform/network/curl/CurlRequest.cpp b/Source/WebCore/platform/network/curl/CurlRequest.cpp
-index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..30ccdd0813f2d4d29cef8126776ae82ff957c316 100644
+index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..e6db0970fff79f3b4c491e0de1a2b81b7eebbade 100644
 --- a/Source/WebCore/platform/network/curl/CurlRequest.cpp
 +++ b/Source/WebCore/platform/network/curl/CurlRequest.cpp
 @@ -36,19 +36,377 @@
@@ -59027,7 +59027,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..30ccdd0813f2d4d29cef8126776ae82f
  
      if (m_shouldDisableServerTrustEvaluation)
          m_curlHandle->disableServerTrustEvaluation();
-@@ -218,6 +639,12 @@ CURL* CurlRequest::setupTransfer()
+@@ -218,6 +639,17 @@ CURL* CurlRequest::setupTransfer()
      m_curlHandle->setHeaderCallbackFunction(didReceiveHeaderCallback, this);
      m_curlHandle->setWriteCallbackFunction(didReceiveDataCallback, this);
      m_curlHandle->setDebugCallbackFunction(didReceiveDebugInfoCallback, this);
@@ -59036,11 +59036,16 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..30ccdd0813f2d4d29cef8126776ae82f
 +        curl_easy_setopt(m_curlHandle->handle(), CURLOPT_PREREQFUNCTION, willSendRequestCallbackHaiku);
 +        curl_easy_setopt(m_curlHandle->handle(), CURLOPT_PREREQDATA, this);
 +    }
++    if (m_http2RetriesHaiku) {
++        curl_easy_setopt(m_curlHandle->handle(), CURLOPT_FRESH_CONNECT, 1L);
++        if (m_http2RetriesHaiku > 1)
++            curl_easy_setopt(m_curlHandle->handle(), CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_1_1);
++    }
 +#endif
  
      m_curlHandle->setTimeout(timeoutInterval());
  
-@@ -270,6 +697,27 @@ size_t CurlRequest::willSendData(char* buffer, size_t blockSize, size_t numberOf
+@@ -270,6 +702,27 @@ size_t CurlRequest::willSendData(char* buffer, size_t blockSize, size_t numberOf
      return *sendBytes;
  }
  
@@ -59068,7 +59073,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..30ccdd0813f2d4d29cef8126776ae82f
  // This is being called for each HTTP header in the response. This includes '\r\n'
  // for the last line of the header.
  
-@@ -294,6 +742,9 @@ size_t CurlRequest::didReceiveHeader(String&& header)
+@@ -294,6 +747,9 @@ size_t CurlRequest::didReceiveHeader(String&& header)
          m_didReceiveResponse = false;
          m_response = CurlResponse { };
          m_multipartHandle = nullptr;
@@ -59078,7 +59083,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..30ccdd0813f2d4d29cef8126776ae82f
      }
  
      auto receiveBytes = static_cast<size_t>(header.length());
-@@ -343,6 +794,20 @@ size_t CurlRequest::didReceiveHeader(String&& header)
+@@ -343,6 +799,20 @@ size_t CurlRequest::didReceiveHeader(String&& header)
  
      m_multipartHandle = CurlMultipartHandle::createIfNeeded(*this, m_response);
  
@@ -59099,7 +59104,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..30ccdd0813f2d4d29cef8126776ae82f
      // Response will send at didReceiveData() or didCompleteTransfer()
      // to receive continueDidRceiveResponse() for asynchronously.
  
-@@ -375,8 +840,24 @@ size_t CurlRequest::didReceiveData(std::span<const uint8_t> receivedData)
+@@ -375,8 +845,24 @@ size_t CurlRequest::didReceiveData(std::span<const uint8_t> receivedData)
          return CURL_WRITEFUNC_PAUSE;
      }
  
@@ -59124,7 +59129,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..30ccdd0813f2d4d29cef8126776ae82f
      if (receivedData.size()) {
          if (m_multipartHandle) {
              m_multipartHandle->didReceiveMessage(receivedData);
-@@ -393,7 +874,7 @@ size_t CurlRequest::didReceiveData(std::span<const uint8_t> receivedData)
+@@ -393,7 +879,7 @@ size_t CurlRequest::didReceiveData(std::span<const uint8_t> receivedData)
          }
      }
  
@@ -59133,7 +59138,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..30ccdd0813f2d4d29cef8126776ae82f
  }
  
  void CurlRequest::didReceiveHeaderFromMultipart(Vector<String>&& headers)
-@@ -446,6 +927,29 @@ void CurlRequest::didCompleteTransfer(CURLcode result)
+@@ -446,6 +932,31 @@ void CurlRequest::didCompleteTransfer(CURLcode result)
          return;
      }
  
@@ -59158,12 +59163,14 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..30ccdd0813f2d4d29cef8126776ae82f
 +        m_completed = true;
 +        return;
 +    }
++    if (retryAfterHttp2ErrorHaiku(result))
++        return;
 +#endif
 +
      // Newer versions of curl/OpenSSL report CURLE_RECV_ERROR or CURLE_PARTIAL_FILE
      // when a server closes the connection to signal end-of-body on responses with
      // no Content-Length and no chunked encoding. This is valid HTTP/1.1 behavior,
-@@ -475,6 +979,19 @@ void CurlRequest::didCompleteTransfer(CURLcode result)
+@@ -475,6 +986,19 @@ void CurlRequest::didCompleteTransfer(CURLcode result)
          }
  
          auto metrics = networkLoadMetrics();
@@ -59183,7 +59190,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..30ccdd0813f2d4d29cef8126776ae82f
  
          finalizeTransfer();
          callClient([networkLoadMetrics = WTF::move(metrics)](CurlRequest& request, CurlRequestClient& client) mutable {
-@@ -486,6 +1003,11 @@ void CurlRequest::didCompleteTransfer(CURLcode result)
+@@ -486,6 +1010,11 @@ void CurlRequest::didCompleteTransfer(CURLcode result)
      } else {
          auto type = (result == CURLE_OPERATION_TIMEDOUT && timeoutInterval()) ? ResourceError::Type::Timeout : ResourceError::Type::General;
          auto resourceError = ResourceError(result, m_request.url(), type);
@@ -59195,7 +59202,46 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..30ccdd0813f2d4d29cef8126776ae82f
  
          CertificateInfo certificateInfo;
          if (auto info = m_curlHandle->certificateInfo())
-@@ -506,10 +1028,12 @@ void CurlRequest::didCompleteTransfer(CURLcode result)
+@@ -503,13 +1032,51 @@ void CurlRequest::didCompleteTransfer(CURLcode result)
+     }
+ }
+ 
++#if PLATFORM(HAIKU)
++// A request that failed in the HTTP/2 layer before any of its response came
++// ("Error in the HTTP2 framing layer": a server's GOAWAY raced it, or the
++// connection's framing broke) is sent again without telling the page, as
++// other browsers do: once on a fresh connection, then once over HTTP/1.1.
++// Only requests that can be sent twice: GET, HEAD and OPTIONS.
++bool CurlRequest::retryAfterHttp2ErrorHaiku(CURLcode result)
++{
++    if (result != CURLE_HTTP2 && result != CURLE_HTTP2_STREAM)
++        return false;
++    if (m_preconnectOnlyHaiku || m_http2RetriesHaiku >= 2 || m_didReceiveResponse || m_response.statusCode || m_totalReceivedSize || m_multipartHandle)
++        return false;
++    const auto& method = m_request.httpMethod();
++    if (method != "GET"_s && method != "HEAD"_s && method != "OPTIONS"_s)
++        return false;
++
++    ++m_http2RetriesHaiku;
++    fprintf(stderr, "Summit net: %s from %s; sending the request again %s\n", curl_easy_strerror(result),
++        m_request.url().host().utf8().legacyCStringPointer(), m_http2RetriesHaiku == 1 ? "on a fresh connection" : "over HTTP/1.1");
++    finalizeTransfer();
++    m_response = CurlResponse { };
++    m_requestHeaderSize = 0;
++    m_requestHeaders = { };
++    m_contentDecoderHaiku = nullptr;
++    runOnMainThread([this, protectedThis = Ref { *this }] {
++        // Cancelled meanwhile: the scheduler no longer has the request.
++        if (isCancelled()) {
++            didCancelTransfer();
++            return;
++        }
++        startWithJobManager();
++    });
++    return true;
++}
++#endif
++
  void CurlRequest::didCancelTransfer()
  {
      finalizeTransfer();
@@ -59208,7 +59254,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..30ccdd0813f2d4d29cef8126776ae82f
      m_formDataStream.clean();
      m_multipartHandle = nullptr;
      m_curlHandle = nullptr;
-@@ -632,6 +1156,88 @@ void CurlRequest::completeDidReceiveResponse()
+@@ -632,6 +1199,88 @@ void CurlRequest::completeDidReceiveResponse()
          responseCompletionHandler();
  }
  
@@ -59297,7 +59343,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..30ccdd0813f2d4d29cef8126776ae82f
  NetworkLoadMetrics CurlRequest::networkLoadMetrics()
  {
      ASSERT(m_curlHandle);
-@@ -653,6 +1259,57 @@ NetworkLoadMetrics CurlRequest::networkLoadMetrics()
+@@ -653,6 +1302,57 @@ NetworkLoadMetrics CurlRequest::networkLoadMetrics()
      return WTF::move(*networkLoadMetrics);
  }
  
@@ -59356,7 +59402,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..30ccdd0813f2d4d29cef8126776ae82f
  {
      for (const auto& header : m_response.headers) {
 diff --git a/Source/WebCore/platform/network/curl/CurlRequest.h b/Source/WebCore/platform/network/curl/CurlRequest.h
-index 3b060605bbff32f845804a848610eca23dea834c..e27c50cbf085c611238bd5686662ac6ce9692214 100644
+index 3b060605bbff32f845804a848610eca23dea834c..847987936bcc59a08b9f01a1a6f5b6bb2e8ed67b 100644
 --- a/Source/WebCore/platform/network/curl/CurlRequest.h
 +++ b/Source/WebCore/platform/network/curl/CurlRequest.h
 @@ -32,16 +32,21 @@
@@ -59435,7 +59481,7 @@ index 3b060605bbff32f845804a848610eca23dea834c..e27c50cbf085c611238bd5686662ac6c
  
      int didReceiveDebugInfo(curl_infotype, std::span<const char>);
  
-@@ -126,15 +151,29 @@ private:
+@@ -126,15 +151,30 @@ private:
      bool needToInvokeDidCancelTransfer() const { return m_didNotifyResponse && !m_didReturnFromNotify && m_mustInvokeCancelTransfer; }
      void invokeDidReceiveResponseForFile(const URL&);
      void invokeDidReceiveResponse(const CurlResponse&, Function<void()>&& completionHandler = { });
@@ -59461,11 +59507,12 @@ index 3b060605bbff32f845804a848610eca23dea834c..e27c50cbf085c611238bd5686662ac6c
      static int didReceiveDebugInfoCallback(CURL*, curl_infotype, char*, size_t, void*);
 +#if PLATFORM(HAIKU)
 +    static int willSendRequestCallbackHaiku(void*, char*, char*, int, int);
++    bool retryAfterHttp2ErrorHaiku(CURLcode);
 +#endif
  
  
      CurlRequestClient* m_client { };
-@@ -149,23 +188,54 @@ private:
+@@ -149,23 +189,57 @@ private:
      bool m_shouldDisableServerTrustEvaluation { false };
      CurlHandle::LocalhostAlias m_localhostAlias { CurlHandle::LocalhostAlias::Disable };
  
@@ -59517,6 +59564,9 @@ index 3b060605bbff32f845804a848610eca23dea834c..e27c50cbf085c611238bd5686662ac6c
 +    // Set on the worker thread when the connection is up (preconnects).
 +    bool m_preconnectedHaiku { false };
 +    bool m_preconnectedMultiplexedHaiku { false };
++    // Times this request was sent again after an HTTP/2 error
++    // (retryAfterHttp2ErrorHaiku): 1 on a fresh connection, 2 over HTTP/1.1.
++    unsigned m_http2RetriesHaiku { 0 };
 +#endif
  };
  

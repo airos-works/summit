@@ -1,4 +1,4 @@
-# Issues #63–#76 (19 October 2026, evening)
+# Issues #63–#77 (19 October 2026, evening)
 
 The feature review of 19 October listed twelve things people expect from a
 browser (#65–#76); #63 and #64 were already open. This page covers the ones
@@ -201,6 +201,31 @@ rules are in `src/core/WebAppManifest.cpp` (host-tested).
 
 The app's windows belong to Summit's team, so the Deskbar lists them under
 Summit; an entry of their own would need a team (and signature) per app.
+
+## #77 "Error in the HTTP2 framing layer"
+
+Pages sometimes failed with "Could not load …: Error in the HTTP2 framing
+layer. Enter the address again to retry". That is libcurl's `CURLE_HTTP2`: the
+HTTP/2 connection the request went out on broke (typically a pooled
+connection the server was closing, its GOAWAY crossing the request). Other
+browsers send such a request again without showing anything; the engine
+showed the error.
+
+`CurlRequest::retryAfterHttp2ErrorHaiku` (`WebCore/platform/network/curl/
+CurlRequest.cpp`) now sends a GET, HEAD or OPTIONS request that failed with
+`CURLE_HTTP2` or `CURLE_HTTP2_STREAM` before any of its response arrived
+again: first on a fresh connection, then, if that fails the same way, over
+HTTP/1.1. The log gets one line each time ("Summit net: Error in the HTTP2
+framing layer from example.com; sending the request again on a fresh
+connection"). Requests with a body are not repeated (the server may have
+acted on them).
+
+Checked on the X399 with a test server that answers chosen HTTP/2 requests
+with a DATA frame on stream 0 (a connection error, curl's exit 16). Before the
+change the page failed with exactly the message above. After it, a page whose
+request broke on a pooled connection loaded from a new HTTP/2 connection; one
+that broke twice loaded over HTTP/1.1; a favicon request that broke was sent
+again the same way.
 
 Checked: Squoosh installed (launcher with its icon, Deskbar link), opened
 from its launcher and with `--app`.
