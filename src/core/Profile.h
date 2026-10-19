@@ -26,11 +26,11 @@ struct PageRecord {
 struct WindowSession {
     std::vector<PageRecord> tabs;
     size_t selected = 0;
-    // The first `pinned` tabs are pinned (small, icon-only tabs).
-    size_t pinned = 0;
     // Window frame in screen coordinates (left, top, right, bottom); all zero
     // when the window was never placed.
     float frame[4] = {0, 0, 0, 0};
+    // The first `pinned` tabs are pinned (small, icon-only tabs).
+    size_t pinned = 0;
     bool HasFrame() const { return frame[2] > frame[0] && frame[3] > frame[1]; }
 };
 // A server certificate the user chose to trust for a host although it failed
@@ -40,6 +40,14 @@ struct TrustedCertificate {
     std::string sha256; // lower-case hex SHA-256 of the DER leaf certificate
     std::string subject;
     int64_t added = 0;  // seconds since the epoch
+};
+// A website installed as an app (#75): its own window and launcher.
+struct WebApp {
+    std::string id;       // letters and digits, unique
+    std::string name;
+    std::string startURL;
+    std::string scope;    // pages under this address belong to the app
+    std::string launcher; // the launcher file (Deskbar and Tracker open it)
 };
 struct Profile {
     // Open windows, front to back as they were created. Older builds only
@@ -89,6 +97,8 @@ struct Profile {
     // without sound) or "block" (not before the user interacts). Sites can
     // have their own choice ("autoplay" in sitePermissions).
     std::string autoplay = "block-audio";
+    std::vector<WebApp> webApps;
+    const WebApp* FindWebApp(const std::string& id) const;
     bool SetProtocolHandler(const std::string& scheme, const ProtocolHandler&);
     bool RemoveProtocolHandler(const std::string& scheme);
     static Profile Load(const std::filesystem::path& path, std::string& error);

@@ -70,3 +70,12 @@ namespace summit {
 constexpr uint32 kPasswordChecked = 'pwck';
 constexpr uint32 kPasswordSaved = 'pwsv';
 }
+namespace summit {
+// Web apps (#75). kWebAppInstalled, to the window that installed it: the
+// new app's "id", "name", "start_url", "scope", "launcher", or "error".
+// kOpenWebApp, to the application: open app "id" (in its window, if open).
+// kRemoveWebApp, to the application: uninstall app "id".
+constexpr uint32 kWebAppInstalled = 'wapi';
+constexpr uint32 kOpenWebApp = 'wapo';
+constexpr uint32 kRemoveWebApp = 'wapr';
+}

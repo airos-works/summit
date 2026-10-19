@@ -14,6 +14,8 @@
 #include "PrintJob.h"
 #include "ProtocolHandlers.h"
 #include "SharedProfile.h"
+#include "WebApps.h"
+#include "core/WebAppManifest.h"
 #include "core/Address.h"
 #include "core/Protocol.h"
 #include <Alert.h>
@@ -188,7 +190,8 @@ void BrowserWindow::PageScriptMessage(BMessage& message)
                 json accounts = json::array();
                 for (const auto& account : PasswordStore::Accounts(origin))
                     accounts.push_back({{"username", account.username}, {"password", account.password}});
-                BWebKitView::ReplyToScriptMessage(token, json(accounts.dump()).dump().c_str());
+                // The page gets the reply as a string, which it parses.
+                BWebKitView::ReplyToScriptMessage(token, accounts.dump().c_str());
             }).detach();
             return;
         }
@@ -216,7 +219,7 @@ void BrowserWindow::PageScriptMessage(BMessage& message)
             }
         }
     }
-    if (token) BWebKitView::ReplyToScriptMessage(token, json(reply).dump().c_str());
+    if (token) BWebKitView::ReplyToScriptMessage(token, reply.c_str());
 }
 
 void BrowserWindow::MoveTabTo(int64 id, size_t index)
@@ -401,8 +404,17 @@ void BrowserWindow::RefreshNoticeBar()
         message->AddInt64("tab", id);
         return message;
     };
-    if (!tab || (!fWebApp.empty() && !tab->unresponsive)) {
+    if (!tab) {
         fNoticeBar->Clear();
+        return;
+    }
+    if (!fWebApp.empty() && !tab->unresponsive) {
+        // A web app's page that left the app (#75).
+        const bool web = tab->url.rfind("https://", 0) == 0 || tab->url.rfind("http://", 0) == 0;
+        if (web && !InWebAppScope(fWebAppScope, tab->url))
+            fNoticeBar->SetNotice(HostOf(tab->url) + " is not part of " + fWebAppName + ".",
+                {{"Open in Summit", new BMessage(kOpenInBrowser)}});
+        else fNoticeBar->Clear();
         return;
     }
     if (tab->unresponsive && !tab->waitedForPage && !tab->processExited) {
@@ -590,6 +602,58 @@ void BrowserWindow::PrintPagesReceived(BMessage& message)
     BNodeInfo(&file).SetType("application/pdf");
     const int32 pages = message.GetInt32("pageCount", 0);
     fStatus->SetText(("Saved " + std::to_string(pages) + (pages == 1 ? " page" : " pages") + " as " + path).c_str());
+}
+
+void BrowserWindow::InstallWebAppResult(const BMessage& message)
+{
+    const char* result = nullptr;
+    const auto plan = message.FindString("result", &result) == B_OK && result ? PlanWebApp(result) : WebAppPlan();
+    if (plan.name.empty()) {
+        ShowError(std::string("This page cannot be installed as an app") + (message.HasString("error")
+            ? std::string(": ") + message.GetString("error", "") : std::string(".")));
+        return;
+    }
+    const std::string text = "Install “" + plan.name + "” as an app?\n\nIt opens in a window of its own, "
+        "with its own icon in the Deskbar's Applications menu, and keeps your sign-ins.\n\n" + plan.startURL;
+    // The question and the download that follows run on a thread of their
+    // own (an alert belongs to the thread that makes it).
+    std::thread([text, plan, window = BMessenger(this), directory = fShared->Path().parent_path()] {
+        auto* alert = new BAlert("Install as App — Summit", text.c_str(), "Cancel", "Install", nullptr,
+            B_WIDTH_AS_USUAL, B_INFO_ALERT);
+        alert->SetShortcut(0, B_ESCAPE);
+        if (alert->Go() != 1) return;
+        WebApp app;
+        const auto error = InstallWebApp(plan, directory, app);
+        BMessage installed(kWebAppInstalled);
+        if (!error.empty()) installed.AddString("error", error.c_str());
+        installed.AddString("id", app.id.c_str());
+        installed.AddString("name", app.name.c_str());
+        installed.AddString("start_url", app.startURL.c_str());
+        installed.AddString("scope", app.scope.c_str());
+        installed.AddString("launcher", app.launcher.c_str());
+        window.SendMessage(&installed);
+    }).detach();
+}
+
+void BrowserWindow::WebAppInstalled(const BMessage& message)
+{
+    if (message.HasString("error")) {
+        ShowError(message.GetString("error", ""));
+        return;
+    }
+    WebApp app { message.GetString("id", ""), message.GetString("name", ""), message.GetString("start_url", ""),
+        message.GetString("scope", ""), message.GetString("launcher", "") };
+    if (app.id.empty()) return;
+    const std::string name = app.name;
+    fShared->Change([&](Profile& profile) -> uint32 {
+        profile.webApps.push_back(app);
+        return SharedProfile::kSettingsChanged;
+    });
+    fShared->SaveSoon();
+    fStatus->SetText(("Installed " + name + ": it is in the Deskbar's Applications menu.").c_str());
+    BMessage open(kOpenWebApp);
+    open.AddString("id", app.id.c_str());
+    be_app->PostMessage(&open);
 }
 }
 #endif

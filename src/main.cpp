@@ -5,6 +5,9 @@
 #include "ui/SharedProfile.h"
 #include "ui/Messages.h"
 #include "ui/FeatureMessages.h"
+#if SUMMIT_MODERN_WEBKIT
+#include "ui/WebApps.h"
+#endif
 #include "ui/ExtensionPermissionPrompt.h"
 #include "ui/ExtensionController.h"
 #include "ui/ExtensionTiming.h"
@@ -101,12 +104,39 @@ public:
         for (int32 i = 1; i < argc; ++i) {
             std::string argument = argv[i];
             if (argument == "--profile" && i + 1 < argc) { fProfile = argv[++i]; continue; }
+#if SUMMIT_MODERN_WEBKIT
+            if (argument == "--app" && i + 1 < argc) {
+                if (!fWindows.empty()) OpenWebApp(argv[++i]);
+                else fPendingWebApps.push_back(argv[++i]);
+                continue;
+            }
+#endif
             if (!fWindows.empty()) OpenInNormalWindow(argument);
             else fURLs.push_back(argument);
         }
     }
     void RefsReceived(BMessage* message) override
     {
+#if SUMMIT_MODERN_WEBKIT
+        // A web app's launcher (Deskbar, Tracker) opens the app.
+        {
+            BMessage others(*message);
+            others.RemoveName("refs");
+            entry_ref ref;
+            bool any = false;
+            for (int32 i = 0; message->FindRef("refs", i, &ref) == B_OK; ++i) {
+                if (const auto app = summit::WebAppOfLauncher(ref); !app.empty() && !fQuitting) {
+                    if (!fWindows.empty()) OpenWebApp(app);
+                    else fPendingWebApps.push_back(app);
+                } else {
+                    others.AddRef("refs", &ref);
+                    any = true;
+                }
+            }
+            if (!any) return;
+            *message = others;
+        }
+#endif
         if (fQuitting) {
             fRelaunch = true;
             entry_ref ref;
@@ -247,7 +277,14 @@ public:
         // Preferences say to start afresh.
         const auto saved = fShared->SavedWindows();
         const bool restore = fShared->Read([](const summit::Profile& profile) { return profile.restoreSession; });
-        if (!fURLs.empty() || saved.empty() || !restore) {
+        if (!fPendingWebApps.empty() && fURLs.empty()) {
+            // Started from a web app's launcher: just the app.
+            for (const auto& app : std::exchange(fPendingWebApps, {})) OpenWebApp(app);
+            if (fWindows.empty()) {
+                summit::BrowserWindowOptions options;
+                OpenWindow(options);
+            }
+        } else if (!fURLs.empty() || saved.empty() || !restore) {
             summit::BrowserWindowOptions options;
             options.urls = fURLs;
             OpenWindow(options);
@@ -598,6 +635,23 @@ public:
             TransferTab(*message);
             return;
         }
+        if (message->what == summit::kOpenWebApp) {
+            OpenWebApp(message->GetString("id", ""));
+            return;
+        }
+        if (message->what == summit::kRemoveWebApp) {
+            const std::string id = message->GetString("id", "");
+            std::optional<summit::WebApp> removed;
+            fShared->Change([&](summit::Profile& profile) -> uint32 {
+                auto found = std::find_if(profile.webApps.begin(), profile.webApps.end(), [&](const auto& app) { return app.id == id; });
+                if (found == profile.webApps.end()) return 0;
+                removed = *found;
+                profile.webApps.erase(found);
+                return summit::SharedProfile::kSettingsChanged;
+            });
+            if (removed) summit::RemoveWebAppFiles(*removed);
+            return;
+        }
         if (message->what == summit::kProtocolHandlerRemove) {
             const std::string scheme = message->GetString("scheme", "");
             fShared->Change([&](summit::Profile& profile) -> uint32 {
@@ -900,6 +954,8 @@ private:
         summit::BrowserWindow* window;
         uint64 key;
         bool privateBrowsing = false;
+        // A web app's window (#75), which links from elsewhere never open in.
+        std::string webApp;
     };
     // Most recently active first.
     std::vector<WindowRecord> fWindows;
@@ -922,7 +978,7 @@ private:
     // The most recently active window that is not private.
     BMessenger FrontNormalWindow() const
     {
-        for (const auto& window : fWindows) if (!window.privateBrowsing) return window.messenger;
+        for (const auto& window : fWindows) if (!window.privateBrowsing && window.webApp.empty()) return window.messenger;
         return BMessenger();
     }
     void OpenInNormalWindow(const std::string& url)
@@ -1078,6 +1134,32 @@ private:
         return frame;
     }
 #if SUMMIT_MODERN_WEBKIT
+    // Brings a web app's window forward, or opens it at its start address.
+    void OpenWebApp(const std::string& id)
+    {
+        for (const auto& record : fWindows) {
+            if (record.webApp != id) continue;
+            if (record.window->Lock()) {
+                record.window->Activate();
+                record.window->Unlock();
+            }
+            return;
+        }
+        const auto start = fShared->Read([&](const summit::Profile& profile) {
+            const auto* app = profile.FindWebApp(id);
+            return app ? app->startURL : std::string();
+        });
+        if (start.empty()) {
+            (new BAlert("Summit", "This web app is no longer installed. Remove its launcher, or install the site again "
+                "with File › Install as App….", "OK", nullptr, nullptr, B_WIDTH_AS_USUAL, B_WARNING_ALERT))->Go(nullptr);
+            return;
+        }
+        summit::BrowserWindowOptions options;
+        options.webApp = id;
+        options.urls.push_back(start);
+        options.frame = CascadedFrame();
+        OpenWindow(options);
+    }
     // A tab dragged out of its window (#68): to the browser window under the
     // drop point (of the same kind, private or not), or to a new window there.
     void TransferTab(const BMessage& message)
@@ -1138,7 +1220,7 @@ private:
             , context, bool(fPermissionPrompts)
 #endif
         );
-        fWindows.insert(fWindows.begin(), {BMessenger(window), window, options.key, options.privateBrowsing});
+        fWindows.insert(fWindows.begin(), {BMessenger(window), window, options.key, options.privateBrowsing, options.webApp});
         window->Show();
         SUMMIT_EXTENSION_TIMING("browser window shown");
         return window;
@@ -1166,6 +1248,10 @@ private:
                 profile.autoplay, profile.spellChecking, profile.savePasswords };
         });
         state.webKitDirectory = fProfile / "WebKit";
+        fShared->Read([&](const summit::Profile& profile) {
+            for (const auto& app : profile.webApps) state.webApps.emplace_back(app.id, app.name, app.startURL);
+            return 0;
+        });
         auto* window = new summit::PreferencesWindow(BMessenger(this), state);
         if (!fWindows.empty() && fWindows.front().messenger.LockTarget()) {
             const BRect front = fWindows.front().window->Frame();
@@ -1467,6 +1553,8 @@ private:
     int fExitStatus = 0;
     std::filesystem::path fProfile;
     std::vector<std::string> fURLs;
+    // Web apps asked for before the first window opened (#75).
+    std::vector<std::string> fPendingWebApps;
 };
 
 // The executable this instance runs: Summit is single-launch per executable.

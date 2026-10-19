@@ -55,6 +55,7 @@
 #include "FeatureMessages.h"
 #include "NoticeBar.h"
 #include "PrintJob.h"
+#include "WebApps.h"
 #include "CertificateInfoWindow.h"
 #include "ReaderMode.h"
 #include <WebKit/WebKitInfo.h>
@@ -98,6 +99,8 @@ static constexpr uint32 kStoreItemResolved = 'stir';
 // The identifier of window.__summitPipLargest()'s answer (reader requests
 // count up from 1).
 static constexpr uint64 kPictureInPictureQuery = uint64(1) << 61;
+// The page script of Install as App… (#75).
+static constexpr uint64 kWebAppQuery = (uint64(1) << 61) + 1;
 // The engine sends one 'wvfr' message when a coordinated frame reaches its
 // native view. Count those deliveries only in explicit performance runs.
 class FrameStatsWebKitView final : public BWebKitView {
@@ -619,6 +622,19 @@ BrowserWindow::BrowserWindow(std::shared_ptr<SharedProfile> profile, std::string
         }, [this](const std::string& url) { if (ActiveTab()) Navigate(url); else CreateTab(url); },
         [this](const std::string& error) { ShowError(error); });
     AddHandler(fProtocolHandlers.get());
+#if SUMMIT_MODERN_WEBKIT
+    // A web app's window shows only its pages (#75).
+    if (!options.webApp.empty()) {
+        fShared->Read([&](const Profile& profile) {
+            if (const auto* app = profile.FindWebApp(options.webApp)) {
+                fWebApp = app->id;
+                fWebAppScope = app->scope;
+                fWebAppName = app->name;
+            }
+            return 0;
+        });
+    }
+#endif
     std::tie(fBookmarksBarVisible, fInterfaceStyle) = fShared->Read([](const Profile& profile) {
         return std::make_pair(profile.showBookmarksBar, profile.interfaceStyle);
     });
@@ -632,6 +648,8 @@ BrowserWindow::BrowserWindow(std::shared_ptr<SharedProfile> profile, std::string
     AddItem(file, "Open File…", kOpenFile, 'O');
 #if SUMMIT_MODERN_WEBKIT
     file->AddSeparatorItem();
+    if (fWebApp.empty()) AddItem(file, "Install as App…", kInstallWebApp);
+    else AddItem(file, "Open in Summit", kOpenInBrowser);
     AddItem(file, "Save as PDF…", kSaveAsPDF, 'S', B_SHIFT_KEY);
     AddItem(file, "Page Setup…", kPageSetup);
     AddItem(file, "Print…", kPrint, 'P');
@@ -838,7 +856,7 @@ BrowserWindow::BrowserWindow(std::shared_ptr<SharedProfile> profile, std::string
     AddCommonFilter(new ZoomWheelFilter);
     AddCommonFilter(new AddressFocusFilter);
     ApplyInterfaceStyle();
-    if (!fBookmarksBarVisible) {
+    if (!fBookmarksBarVisible || !fWebApp.empty()) {
         fBookmarksBar->Hide();
         fBookmarksBarItem->SetLabel("Show Bookmarks Bar");
     }
@@ -2393,7 +2411,8 @@ void BrowserWindow::RefreshChrome()
                 [&](const PageRecord& bookmark) { return bookmark.url == tab->url; });
         });
         fBookmarkButton->SetIcon(bookmarked ? Icon::BookmarkFilled : Icon::Bookmark);
-        const std::string title = tab->title + (fPrivate ? " — Summit Private Browsing" : " — Summit");
+        const std::string title = !fWebApp.empty() ? (tab->title.empty() || tab->title == fWebAppName ? fWebAppName
+            : tab->title + " — " + fWebAppName) : tab->title + (fPrivate ? " — Summit Private Browsing" : " — Summit");
         if (title != Title()) {
             SetTitle(title.c_str());
             std::lock_guard lock(sWindowListLock);
@@ -2474,7 +2493,7 @@ void BrowserWindow::ProfileChanged(const BMessage& message)
         });
         if (bar != fBookmarksBarVisible) {
             fBookmarksBarVisible = bar;
-            if (bar && fBookmarksBar->IsHidden(fBookmarksBar)) fBookmarksBar->Show();
+            if (bar && fBookmarksBar->IsHidden(fBookmarksBar) && fWebApp.empty()) fBookmarksBar->Show();
             else if (!bar && !fBookmarksBar->IsHidden(fBookmarksBar)) fBookmarksBar->Hide();
             fBookmarksBarItem->SetLabel(bar ? "Hide Bookmarks Bar" : "Show Bookmarks Bar");
         }
@@ -2576,6 +2595,11 @@ void BrowserWindow::ApplyInterfaceStyle()
         view->Invalidate();
     for (int32 i = 0; i < fToolbar->CountChildren(); ++i) fToolbar->ChildAt(i)->Invalidate();
     fTabStrip->InvalidateLayout();
+    if (!fWebApp.empty()) {
+        // A web app's window: its pages, a menu and the status line.
+        for (BView* view : std::initializer_list<BView*>{fToolbar, fTabStrip, fBookmarksBar, fProgress})
+            show(view, false);
+    }
 }
 std::string BrowserWindow::DisplayURL(const std::string& url) const
 {
@@ -2927,8 +2951,8 @@ void BrowserWindow::SaveSession()
 #if SUMMIT_MODERN_WEBKIT
     if (fClosingWindow) return;
 #endif
-    // Private windows are not reopened.
-    if (fPrivate) return;
+    // Private windows are not reopened, nor are web apps' (their launchers do).
+    if (fPrivate || !fWebApp.empty()) return;
     WindowSession session;
     for (size_t i = 0; i < fTabs.size(); ++i) {
         session.tabs.push_back({fTabs[i].url, fTabs[i].title});
@@ -3249,6 +3273,10 @@ void BrowserWindow::MessageReceived(BMessage* message)
         case kShowCertificate: ShowCertificate(); break;
         case kToggleReader: ToggleReader(); break;
         case B_WEBKIT_JAVASCRIPT_RESULT:
+            if (message->GetUInt64("identifier", 0) == kWebAppQuery) {
+                InstallWebAppResult(*message);
+                break;
+            }
             if (message->GetUInt64("identifier", 0) == kPictureInPictureQuery) {
                 // window.__summitPipLargest(): the page's largest video.
                 const char* token = nullptr;
@@ -3374,6 +3402,18 @@ void BrowserWindow::MessageReceived(BMessage* message)
             break;
         }
         case kPasswordBarAnswer: PasswordBarAnswer(*message); break;
+        case kInstallWebApp:
+            if (tab && (tab->url.rfind("https://", 0) == 0 || tab->url.rfind("http://", 0) == 0) && !tab->processExited)
+                tab->view->EvaluateJavaScript(kWebAppPageScript, BMessenger(this), kWebAppQuery, true);
+            else ShowError("Only web pages can be installed as apps.");
+            break;
+        case kWebAppInstalled: WebAppInstalled(*message); break;
+        case kOpenInBrowser:
+            if (tab) {
+                RequestNewWindow({ tab->url }, fPrivate);
+                if (!fWebApp.empty() && tab->back) tab->view->GoBack();
+            }
+            break;
         case kPasswordChecked: {
             auto* target = FindTabByID(message->GetInt64("tab", 0));
             if (!target || message->GetBool("same", false)) break;
@@ -4229,7 +4269,8 @@ void BrowserWindow::NewPageRequested(const BMessage& message)
     const int32 modifiers = message.GetInt32("modifiers", 0);
     const int32 button = message.GetInt32("button", 0);
     if (!opener || fClosingWindow) { BWebKitView::DeclineNewPage(identifier); return; }
-    if (message.GetBool("popup", false) || (modifiers & B_SHIFT_KEY && !(modifiers & B_COMMAND_KEY))) {
+    // A web app's window has no tabs: what its pages open goes in a window.
+    if (message.GetBool("popup", false) || (modifiers & B_SHIFT_KEY && !(modifiers & B_COMMAND_KEY)) || !fWebApp.empty()) {
         // A sized pop-up (sign-in and payment windows) or Shift-click: its own window.
         BMessage request(kNewWindow);
         request.AddUInt64("new_page", identifier);

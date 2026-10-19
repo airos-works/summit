@@ -3,6 +3,8 @@
 #include <Messenger.h>
 #include <memory>
 #include <string>
+#include <tuple>
+#include <vector>
 
 class BCheckBox;
 class BColumnListView;
@@ -17,7 +19,8 @@ namespace summit {
 // export. Changes go to the application as kPreferencesChanged.
 class BrowsingPreferences : public BGroupView {
 public:
-    BrowsingPreferences(BMessenger owner, const std::string& autoplay, bool spellChecking, bool savePasswords);
+    BrowsingPreferences(BMessenger owner, const std::string& autoplay, bool spellChecking, bool savePasswords,
+        const std::vector<std::tuple<std::string, std::string, std::string>>& webApps);
     ~BrowsingPreferences() override;
     void AttachedToWindow() override;
     void MessageReceived(BMessage* message) override;
@@ -32,6 +35,9 @@ private:
     BColumnListView* fAccounts;
     BButton* fShow;
     BButton* fRemove;
+    BColumnListView* fApps;
+    BButton* fRemoveApp;
+    std::vector<std::string> fAppIDs;
     std::unique_ptr<BFilePanel> fPanel;
 };
 }

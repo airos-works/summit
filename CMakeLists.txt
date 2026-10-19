@@ -6,7 +6,7 @@ option(SUMMIT_MODERN_WEBKIT "Build Summit with the native multiprocess WebKit AP
 find_package(OpenSSL REQUIRED COMPONENTS Crypto)
 add_library(summit_core src/core/Address.cpp src/core/Protocol.cpp src/core/Profile.cpp src/core/ExtensionCatalog.cpp src/core/ExtensionIdentity.cpp src/core/ExtensionStore.cpp
     src/core/ExtensionPackage.cpp src/core/StoreOffer.cpp src/core/DownloadText.cpp src/core/Favicon.cpp src/core/InternalPages.cpp src/core/Zoom.cpp src/core/Suggest.cpp src/core/DevTools.cpp src/core/DevToolsFormat.cpp
-    src/core/Mcp.cpp src/core/McpHttp.cpp src/core/McpInspector.cpp)
+    src/core/Mcp.cpp src/core/McpHttp.cpp src/core/McpInspector.cpp src/core/WebAppManifest.cpp)
 target_link_libraries(summit_core PUBLIC OpenSSL::Crypto)
 target_include_directories(summit_core PUBLIC src vendor)
 target_compile_options(summit_core PRIVATE -Wall -Wextra -Wpedantic)
@@ -30,6 +30,9 @@ add_test(NAME summit_extension_identity COMMAND summit_extension_identity_tests 
 add_executable(summit_extension_store_tests tests/ExtensionStoreTests.cpp)
 target_link_libraries(summit_extension_store_tests PRIVATE summit_core)
 add_test(NAME summit_extension_store COMMAND summit_extension_store_tests)
+add_executable(summit_web_app_tests tests/WebAppTests.cpp)
+target_link_libraries(summit_web_app_tests PRIVATE summit_core)
+add_test(NAME summit_web_app COMMAND summit_web_app_tests)
 add_executable(summit_extension_package_tests tests/ExtensionPackageTests.cpp)
 target_link_libraries(summit_extension_package_tests PRIVATE summit_core)
 add_test(NAME summit_extension_package COMMAND summit_extension_package_tests ${CMAKE_SOURCE_DIR}/tests/fixtures/extensions/package-icons)

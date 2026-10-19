@@ -1,5 +1,6 @@
 #include "BrowsingPreferences.h"
 #include "Messages.h"
+#include "FeatureMessages.h"
 #include "PasswordStore.h"
 #include <WebKit/WebKitView.h>
 #include <Alert.h>
@@ -26,7 +27,8 @@ namespace summit {
 namespace {
 constexpr uint32 autoplayChosen = 'bpau', spellingToggled = 'bpsp', passwordsToggled = 'bppw',
     accountSelected = 'bpas', showPassword = 'bpsh', removeAccount = 'bprm', importPasswords = 'bpim',
-    exportPasswords = 'bpex', importChosen = 'bpic', exportChosen = 'bpec', accountsRead = 'bpar';
+    exportPasswords = 'bpex', importChosen = 'bpic', exportChosen = 'bpec', accountsRead = 'bpar',
+    appSelected = 'bpap', removeApp = 'bpra';
 BStringView* Title(const char* name, const char* text)
 {
     auto* title = new BStringView(name, text);
@@ -41,7 +43,8 @@ BStringView* Hint(const char* name, const char* text)
 }
 }
 
-BrowsingPreferences::BrowsingPreferences(BMessenger owner, const std::string& autoplay, bool spellChecking, bool savePasswords)
+BrowsingPreferences::BrowsingPreferences(BMessenger owner, const std::string& autoplay, bool spellChecking, bool savePasswords,
+    const std::vector<std::tuple<std::string, std::string, std::string>>& webApps)
     : BGroupView("Browsing", B_VERTICAL, 8), fOwner(owner)
 {
     auto* choices = new BPopUpMenu("autoplay");
@@ -66,6 +69,22 @@ BrowsingPreferences::BrowsingPreferences(BMessenger owner, const std::string& au
     fAccounts->SetSelectionMessage(new BMessage(accountSelected));
     fAccounts->SetSelectionMode(B_SINGLE_SELECTION_LIST);
     fAccounts->SetExplicitMinSize(BSize(470, 150));
+    fApps = new BColumnListView("web-apps", B_NAVIGABLE, B_FANCY_BORDER, true);
+    fApps->AddColumn(new BStringColumn("App", 200, 80, 400, B_TRUNCATE_END), 0);
+    fApps->AddColumn(new BStringColumn("Opens", 260, 80, 600, B_TRUNCATE_MIDDLE), 1);
+    fApps->SetSelectionMessage(new BMessage(appSelected));
+    fApps->SetSelectionMode(B_SINGLE_SELECTION_LIST);
+    fApps->SetSortingEnabled(false);
+    fApps->SetExplicitMinSize(BSize(470, 80));
+    for (const auto& [id, name, start] : webApps) {
+        auto* row = new BRow();
+        row->SetField(new BStringField(name.c_str()), 0);
+        row->SetField(new BStringField(start.c_str()), 1);
+        fApps->AddRow(row);
+        fAppIDs.push_back(id);
+    }
+    fRemoveApp = new BButton("remove-web-app", "Uninstall", new BMessage(removeApp));
+    fRemoveApp->SetEnabled(false);
     fShow = new BButton("show-password", "Show Password…", new BMessage(showPassword));
     fRemove = new BButton("remove-password", "Remove", new BMessage(removeAccount));
     BLayoutBuilder::Group<>(this)
@@ -94,6 +113,13 @@ BrowsingPreferences::BrowsingPreferences(BMessenger owner, const std::string& au
                 .Add(fShow)
                 .Add(fRemove)
             .End()
+        .End()
+        .AddStrut(6)
+        .Add(Title("apps-title", "Web Apps"))
+        .AddGroup(B_VERTICAL, 6).SetInsets(12, 0, 0, 0)
+            .Add(Hint("apps-hint", "Sites installed with File › Install as App…. They are in the Deskbar's Applications menu."))
+            .Add(fApps)
+            .AddGroup(B_HORIZONTAL, 8).AddGlue().Add(fRemoveApp).End()
         .End();
 }
 
@@ -110,6 +136,8 @@ void BrowsingPreferences::AttachedToWindow()
         if (auto* button = dynamic_cast<BButton*>(FindView(name))) button->SetTarget(this);
     fAutoplay->Menu()->SetTargetForItems(this);
     fAccounts->SetTarget(this);
+    fApps->SetTarget(this);
+    fRemoveApp->SetTarget(this);
     const std::string language = BWebKitSpellCheckingLanguage();
     fSpellingInfo->SetText(language.empty() ? "No dictionary is in use."
         : ("Dictionary: " + language + ". Words you add are kept in your settings folder.").c_str());
@@ -166,6 +194,20 @@ void BrowsingPreferences::MessageReceived(BMessage* message)
         }
         fShow->SetEnabled(false);
         fRemove->SetEnabled(false);
+        return;
+    }
+    case appSelected: fRemoveApp->SetEnabled(fApps->CurrentSelection() != nullptr); return;
+    case removeApp: {
+        auto* row = fApps->CurrentSelection();
+        const int32 index = row ? fApps->IndexOf(row) : -1;
+        if (index < 0 || index >= int32(fAppIDs.size())) return;
+        BMessage remove(kRemoveWebApp);
+        remove.AddString("id", fAppIDs[index].c_str());
+        fOwner.SendMessage(&remove);
+        fApps->RemoveRow(row);
+        delete row;
+        fAppIDs.erase(fAppIDs.begin() + index);
+        fRemoveApp->SetEnabled(false);
         return;
     }
     case spellingToggled: Send("spell_checking", fSpelling->Value() == B_CONTROL_ON); return;

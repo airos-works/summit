@@ -76,6 +76,12 @@ static Image Decode(const void* data, size_t size)
     return Translate(data, size);
 }
 
+std::unique_ptr<BBitmap> FaviconCache::DecodeIcon(const void* data, size_t size, int pixels)
+{
+    if (!data || !size) return nullptr;
+    return ToBitmap(ScaleImage(Decode(data, size), pixels));
+}
+
 FaviconCache::FaviconCache(std::filesystem::path directory, bool persistent)
     : fDirectory(std::move(directory)), fPersistent(persistent) { }
 FaviconCache::~FaviconCache() = default;

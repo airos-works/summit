@@ -27,6 +27,9 @@ public:
     // Drops the site's cached icon so it is read from disk again (another
     // window stored a new one). Previously returned bitmaps are released.
     void Forget(const std::string& pageURL);
+    // Decodes an icon file as Store() does, scaled to pixels x pixels
+    // (B_RGBA32), or null. Any thread.
+    static std::unique_ptr<BBitmap> DecodeIcon(const void* data, size_t size, int pixels);
 
 private:
     struct Entry {

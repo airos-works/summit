@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <memory>
 #include <string>
+#include <tuple>
 #include <vector>
 
 class BButton;
@@ -37,6 +38,8 @@ struct PreferencesState {
     std::string autoplay = "block-audio";
     bool spellChecking = true;
     bool savePasswords = true;
+    // Installed web apps: name and start address, by identifier.
+    std::vector<std::tuple<std::string, std::string, std::string>> webApps;
 };
 // Edit › Preferences…. One window for the application; changes apply to every
 // browser window as they are made and are saved in the profile.

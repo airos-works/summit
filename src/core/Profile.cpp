@@ -87,6 +87,17 @@ Profile Profile::Load(const std::filesystem::path& path, std::string& error)
         if (auto never = j.find("passwordNever"); never != j.end() && never->is_array() && never->size() <= 10000)
             for (const auto& origin : *never) if (origin.is_string()) profile.passwordNever.insert(origin.get<std::string>());
         if (auto spelling = j.find("spellChecking"); spelling != j.end() && spelling->is_boolean()) profile.spellChecking = *spelling;
+        if (auto apps = j.find("webApps"); apps != j.end() && apps->is_array() && apps->size() <= 500) {
+            for (const auto& item : *apps) {
+                if (!item.is_object()) continue;
+                WebApp app { item.value("id", ""), item.value("name", ""), item.value("startURL", ""),
+                    item.value("scope", ""), item.value("launcher", "") };
+                const bool valid = !app.id.empty() && app.id.size() <= 64
+                    && std::all_of(app.id.begin(), app.id.end(), [](char c) { return std::isalnum(static_cast<unsigned char>(c)); })
+                    && (app.startURL.rfind("https://", 0) == 0 || app.startURL.rfind("http://", 0) == 0);
+                if (valid && !profile.FindWebApp(app.id)) profile.webApps.push_back(std::move(app));
+            }
+        }
         if (auto autoplay = j.find("autoplay"); autoplay != j.end() && autoplay->is_string()) {
             const auto value = autoplay->get<std::string>();
             if (value == "allow" || value == "block-audio" || value == "block") profile.autoplay = value;
@@ -174,6 +185,12 @@ Profile Profile::Load(const std::filesystem::path& path, std::string& error)
     return profile;
 }
 
+const WebApp* Profile::FindWebApp(const std::string& id) const
+{
+    for (const auto& app : webApps) if (app.id == id) return &app;
+    return nullptr;
+}
+
 const std::vector<std::string>& SitePermissionNames()
 {
     static const std::vector<std::string> names = {"notifications", "geolocation", "camera", "microphone", "popups", "autoplay"};
@@ -255,7 +272,13 @@ bool Profile::Save(const std::filesystem::path& path, std::string& error) const
             {"bookmarks", Encode(bookmarks)}, {"history", Encode(history)},
             {"homeURL", homeURL}, {"showBookmarksBar", showBookmarksBar}, {"restoreSession", restoreSession},
             {"savePasswords", savePasswords}, {"passwordNever", passwordNever}, {"spellChecking", spellChecking},
-            {"autoplay", autoplay},
+            {"autoplay", autoplay}, {"webApps", [&] {
+                json apps = json::array();
+                for (const auto& app : webApps)
+                    apps.push_back({{"id", app.id}, {"name", app.name}, {"startURL", app.startURL},
+                        {"scope", app.scope}, {"launcher", app.launcher}});
+                return apps;
+            }()},
             {"interfaceStyle", interfaceStyle}, {"searchEngine", searchEngine},
             {"siteZoom", siteZoom}, {"unpinnedExtensions", unpinnedExtensions},
             {"trustedCertificates", trusted}, {"sitePermissions", sitePermissions},

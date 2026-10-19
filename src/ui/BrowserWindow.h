@@ -64,6 +64,8 @@ struct BrowserWindowOptions {
     // A private window: its context is the application's private one, and it
     // records no history, session or icons.
     bool privateBrowsing = false;
+    // A web app's window (#75): the app's identifier (Profile::webApps).
+    std::string webApp;
 };
 #if SUMMIT_MODERN_WEBKIT
 // A direct window, so that on a GPU the engine can put pages straight into
@@ -513,7 +515,12 @@ private:
     uint64 fPictureInPictureSession = 0;
     // A web app's window (#75): no tabs, toolbar or bookmarks bar.
     std::string fWebApp;
-    std::string fWebAppScope;
+    std::string fWebAppScope, fWebAppName;
+    void InstallWebAppResult(const BMessage& message);
+    void WebAppInstalled(const BMessage& message);
+public:
+    const std::string& WebAppID() const { return fWebApp; }
+private:
 #endif
     // Built-in pages (summit:home, summit:history, summit:bookmarks) are
     // files; this gives the address to load for any address.
