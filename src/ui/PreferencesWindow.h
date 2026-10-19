@@ -34,6 +34,9 @@ struct PreferencesState {
     bool mcpEnabled = false;
     int mcpPort = 7790;
     bool mcpLocalOnly = false;
+    // Preferences › General › Updates (UpdateChecker.h).
+    bool checkForUpdates = true;
+    int64 lastUpdateCheck = 0;
     // Preferences › Browsing (BrowsingPreferences.h).
     std::string autoplay = "block-audio";
     bool spellChecking = true;
@@ -52,6 +55,7 @@ private:
     void ShowHomeHint();
     void ShowHistoryCount(size_t count);
     void ShowTrustedCertificates(size_t count);
+    void ShowLastUpdateCheck(int64 when);
     // Measures the cache on another thread; kCacheMeasured brings the result.
     void MeasureCache();
     struct SiteEntry {
@@ -87,6 +91,8 @@ private:
     BStringView* fHint;
     BMenuField* fSearchEngine;
     BCheckBox* fRestoreSession;
+    BCheckBox* fCheckForUpdates;
+    BStringView* fUpdateInfo;
     BCheckBox* fBookmarksBar;
     BRadioButton* fHaikuStyle;
     BRadioButton* fSafariStyle;

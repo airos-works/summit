@@ -61,6 +61,9 @@ void McpUnregisterWindow(uint64 key);
 // were already running keep writing where they did.
 namespace mcplog {
 void Start();
+// Points stderr back where it went before Start(), for a Summit started as
+// this one ends (the capture's pipe has no reader once it is gone).
+void RestoreStderr();
 bool Capturing();
 bigtime_t Since();
 struct Line {

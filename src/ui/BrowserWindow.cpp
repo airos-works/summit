@@ -18,6 +18,7 @@
 #include "ExtensionStoreDownload.h"
 #include "FrameHistory.h"
 #include "McpService.h"
+#include "UpdateChecker.h"
 #include "core/StoreOffer.h"
 #include <WebKit/WebKitInspector.h>
 #endif
@@ -702,6 +703,9 @@ BrowserWindow::BrowserWindow(std::shared_ptr<SharedProfile> profile, std::string
     AddItem(file, "Reopen Closed Tab", kReopenTab, 'T', B_SHIFT_KEY);
     file->AddSeparatorItem();
     AddItem(file, "About Summit", B_ABOUT_REQUESTED);
+#if SUMMIT_MODERN_WEBKIT
+    AddItem(file, "Check for Updates…", kCheckForUpdates);
+#endif
     AddItem(file, "Quit", B_QUIT_REQUESTED, 'Q');
     // Quit ends the application, with every window.
     file->FindItem(B_QUIT_REQUESTED)->SetTarget(be_app);
@@ -3878,6 +3882,9 @@ void BrowserWindow::MessageReceived(BMessage* message)
             fStatus->SetText("History cleared");
             break;
         case kShowPreferences: be_app->PostMessage(kShowPreferences); break;
+#if SUMMIT_MODERN_WEBKIT
+        case kCheckForUpdates: be_app->PostMessage(kCheckForUpdates); break;
+#endif
         case kPreferencesUseCurrentPage:
             // From the application's Preferences window, for the front window's page.
             if (tab && Bookmarkable(tab->url)) {
@@ -4174,8 +4181,10 @@ void BrowserWindow::MessageReceived(BMessage* message)
 #endif
         case B_ABOUT_REQUESTED: {
 #if SUMMIT_MODERN_WEBKIT
-            std::string info = "Summit — a web browser for air/OS and Haiku\nBuilt for " SUMMIT_TARGET_NAME
-                "\n\nWebKit " + std::string(BWebKitVersion()) + "\nHaiku port " + BWebKitPortVersion();
+            // The packages (and commit) say which build this is.
+            std::string info = "Summit — a web browser for air/OS and Haiku\nBuilt for " SUMMIT_TARGET_NAME " ("
+                + std::string(PackageArchitecture()) + ")\n\n" + BuildDescription()
+                + "\n\nWebKit " + std::string(BWebKitVersion()) + "\nHaiku port " + BWebKitPortVersion();
 #else
             std::string info = "Summit — a web browser for air/OS and Haiku\nBuilt for " SUMMIT_TARGET_NAME
                 "\nDevelopment build\n\nWebKit "

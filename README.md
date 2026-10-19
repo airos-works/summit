@@ -79,6 +79,10 @@ For a stock Haiku installation, not air/OS. Install the packages together with `
   tree, matched and computed styles, the box model, an element picker and
   Inspect Element), JavaScript console output, network requests and storage,
   and View › View Page Source (Alt+U) for the HTML as the server sent it.
+- [Updates from inside the browser](docs/updates.md): File › Check for
+  Updates… and a daily check find newer builds of the release for your
+  system, list what changed, and Install and Restart installs the summit and
+  summit_webkit packages together and reopens your windows and tabs.
 - A [built-in MCP server](docs/mcp.md) (Preferences › Developer, off by
   default) that lets debugging tools such as Claude Code inspect tabs, pages,
   processes, memory, rendering, media and extensions on the machine itself.

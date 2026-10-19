@@ -175,6 +175,15 @@ constexpr uint32 kDuplicateTab = 'dtab';
 constexpr uint32 kCloseOtherTabs = 'cotb';
 constexpr uint32 kReloadTab = 'rtbx';
 constexpr uint32 kProfileChanged = 'prfc';
+// File › Check for Updates… and Preferences › General › Check Now (to the
+// application, which asks its UpdateChecker).
+constexpr uint32 kCheckForUpdates = 'upck';
+// The update window installed a new build (UpdateChecker.h): the application
+// quits as it does for Quit and starts again, with the same profile and its
+// windows and tabs.
+constexpr uint32 kUpdateRestart = 'uprs';
+// To the application: open "url" in a new tab of the front window.
+constexpr uint32 kOpenPageInTab = 'optb';
 // Page context menu commands ("url" names the link, image or media).
 constexpr uint32 kOpenLink = 'olnk';
 constexpr uint32 kOpenLinkInNewTab = 'olnt';

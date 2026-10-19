@@ -92,6 +92,11 @@ struct Profile {
     std::string autoplay = "block-audio";
     std::vector<WebApp> webApps;
     const WebApp* FindWebApp(const std::string& id) const;
+    // Preferences › General: look for a new Summit build once a day (File ›
+    // Check for Updates… looks at once), and when GitHub last answered that
+    // question, in seconds since the epoch (0: never).
+    bool checkForUpdates = true;
+    int64_t lastUpdateCheck = 0;
     bool SetProtocolHandler(const std::string& scheme, const ProtocolHandler&);
     bool RemoveProtocolHandler(const std::string& scheme);
     static Profile Load(const std::filesystem::path& path, std::string& error);

@@ -33,6 +33,9 @@ public:
         kExtensionsPinnedChanged = 1 << 7,
         // An extension was installed, removed, turned on or off.
         kExtensionsInstalledChanged = 1 << 8,
+        // When Summit last asked GitHub for a new build (Profile::lastUpdateCheck);
+        // nothing to show again.
+        kUpdateCheckChanged = 1 << 9,
     };
     // An extension in the Extensions window, for the cards on store pages.
     struct InstalledExtensionInfo {
