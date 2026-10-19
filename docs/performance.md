@@ -36,31 +36,37 @@ a first scroll of 40 notches 33 ms apart, as in the #37 runs. Frame counts
 come from the MCP's `frame_stats`. Read time is the sum of the compositor
 trace's `read` over a 3 s window from the first burst of new textures.
 
-| | copy on (7 runs) | copy off (6 runs) |
+| | copy on (6 runs) | copy off (6 runs) |
 | --- | --- | --- |
 | present failures | none | none |
-| frames through app_server, 18 s load | 0-28 (five of 0) | 61-64 |
+| frames through app_server, 18 s load | 0-10 (five of 0) | 61-64 |
 | frames through app_server, scroll | 0 | 6 |
 | frames through app_server, 2 s after | 0 | 7-8 |
-| read time per 3 s window | 68-119 ms (one run 184) | 100-122 ms |
-| of which reads of 2 ms or more | 11-57 ms | 48-73 ms |
-| fps of the scroll | 54-60 | 58-60 |
+| read time per 3 s window | 68-119 ms | 100-122 ms |
+| of which reads of 2 ms or more | 11-55 ms | 48-73 ms |
+| fps of the scroll | 56-60 | 58-60 |
 
-The copy-on runs are five with the switch set on the installed build and two
-of the new build with nothing set. The copy-off runs are four with the switch
+The copy-on runs are four with the switch set on the installed build and two
+of the new build with nothing set. A fifth with the switch set is left out:
+the OS session's present-and-mode-change stress test ran on the laptop
+during it. The copy-off runs are four with the switch
 unset on the installed build, one with `=0` and one with the import made to
 fail (a test-only build). The new build's `=0` and failed-import runs matched
 the copy-off runs.
 
 `read` runs from the swap to the end of the present. So each composition's
 ~0.3 ms wait for its direct present counts too: about 50-64 ms of every
-window but one, whether the copy is on or not. With the copy on, nothing is read back
-while the page changes, and the reads of 2 ms or more that remain are slow
-presents.
+window, whether the copy is on or not (the copy adds about 0.05 ms a frame
+to it). With the copy on, nothing is read back while the page changes, and
+the reads of 2 ms or more that remain are slow presents. The OS session's
+own split over the same logs: during steady animation, 16 of 20 windows
+with the copy had no read of 2 ms or more, against 9-13 a window without it
+(jmgasper/haiku#38, issuecomment-6259182365). Most of #37's 71-130 ms was
+these present waits, so the next step down is a present that does not wait
+for its copy.
 
-Three of the seven copy-on runs had slower scrolls (54-56 fps, gaps of 82-102
-ms), against at most one slow-ish copy-off run (58 fps, 77 ms). That is too
-few runs to put on the copy, but it is worth watching.
+Two of the six copy-on runs had slower scrolls (56 fps, gaps of 82-83 ms),
+against one copy-off run (58 fps, 77 ms): within the run-to-run spread.
 
 ## 19 October 2026 (later): animation frames on the compositor's frames, and tearing on AMD
 
