@@ -222,8 +222,11 @@ int main()
     CHECK(html.find(".i0{background-image:url(data:image/png;base64,QUJD)}") != std::string::npos);
     CHECK(html.find("icon letter\">B<") != std::string::npos);
     CHECK(RenderHistoryPage({}, now, nullptr).find("Pages you visit") != std::string::npos);
-    auto bookmarksHTML = RenderBookmarksPage({{"https://x.example/", "X", 0, true}, {"javascript:bad", "J"}},
-        [](const std::string&) { return std::string("data:image/png;base64,\"evil"); });
+    Bookmarks marks;
+    CHECK(marks.Add({"https://x.example/", "X"}, kBookmarksBarFolder) && !marks.Add({"javascript:bad", "J"}, kOtherBookmarksFolder));
+    CHECK(marks.AddFolder(kOtherBookmarksFolder, "Reading"));
+    auto bookmarksHTML = RenderBookmarksPage(marks,
+        [](const std::string&) { return std::string("data:image/png;base64,\"evil"); }, "abc123");
     CHECK(bookmarksHTML.find("Bookmarks Bar") != std::string::npos && bookmarksHTML.find("Other Bookmarks") != std::string::npos);
     CHECK(bookmarksHTML.find("href=\"javascript") == std::string::npos && bookmarksHTML.find("evil") == std::string::npos);
 
@@ -307,7 +310,7 @@ int main()
     CHECK(profile.TrustCertificate({"router.lan", std::string(64, 'b'), "", 300}));
     CHECK(profile.trustedCertificates.size() == 2 && profile.trustedCertificates[0].host == "router.lan"
         && profile.trustedCertificates[0].sha256 == routerCertificate);
-    profile.bookmarks = {{"https://webkit.org", "WebKit — 浏览器"}};
+    profile.AddBookmark({"https://webkit.org", "WebKit — 浏览器"}, false);
     profile.Visit({"https://example.com/", "First title"});
     profile.Visit({"https://webkit.org/", "WebKit"});
     profile.Visit({"https://example.com/", "Updated title"});
@@ -318,7 +321,8 @@ int main()
     CHECK(profile.history.front().visits == 2 && profile.history.back().visits == 1);
     profile.AddBookmark({"https://bar.example/", "Bar"}, true);
     profile.AddBookmark({"https://webkit.org", "ignored"}, true);
-    CHECK(profile.bookmarks.size() == 2 && profile.bookmarks[0].bar && profile.bookmarks[0].title == "WebKit — 浏览器");
+    CHECK(profile.bookmarks.Count() == 2 && profile.bookmarks.OnBar("https://webkit.org")
+        && profile.bookmarks.FindURL("https://webkit.org")->title == "WebKit — 浏览器");
     CHECK(profile.SetSitePermission("notifications", "https://github.com", true));
     CHECK(!profile.SetSitePermission("notifications", "https://github.com", true));
     CHECK(profile.SetSitePermission("geolocation", "https://maps.example:8443", false));
@@ -345,11 +349,11 @@ int main()
     CHECK(error.empty() && loaded.windows.size() == 2 && loaded.windows[0].tabs.size() == 2 && loaded.windows[0].selected == 1);
     CHECK(loaded.windows[0].HasFrame() && loaded.windows[0].frame[2] == 810 && !loaded.windows[1].HasFrame());
     CHECK(loaded.windows[1].tabs.at(0).url == "https://second.example/" && loaded.interfaceStyle == "safari");
-    CHECK(loaded.bookmarks.at(0).title == "WebKit — 浏览器");
+    CHECK(loaded.bookmarks.Pages().at(1).title == "WebKit — 浏览器");
     CHECK(loaded.history.size() == 2 && loaded.history.front().title == "Updated title");
     CHECK(loaded.history.front().visited == profile.history.front().visited);
     CHECK(loaded.history.front().visits == 2 && loaded.history.back().visits == 0);
-    CHECK(loaded.bookmarks.size() == 2 && loaded.bookmarks[1].bar && loaded.bookmarks[1].url == "https://bar.example/");
+    CHECK(loaded.bookmarks.Count() == 2 && loaded.bookmarks.Pages()[0].bar && loaded.bookmarks.Pages()[0].url == "https://bar.example/");
     CHECK(loaded.homeURL == "https://home.example/" && !loaded.showBookmarksBar && !loaded.restoreSession);
     CHECK(loaded.sitePermissions.size() == 4 && loaded.sitePermissions["notifications"].size() == 1
         && loaded.sitePermissions["notifications"]["https://github.com"]
@@ -365,7 +369,7 @@ int main()
     CHECK(loaded.trustedCertificates.size() == 2 && loaded.trustedCertificates[0].subject == "/CN=UniFi"
         && loaded.trustedCertificates[0].added == 100 && loaded.trustedCertificates[1].sha256 == std::string(64, 'b'));
     CHECK(loaded.RemoveBookmark("https://bar.example/") && !loaded.RemoveBookmark("https://bar.example/"));
-    CHECK(!loaded.FindBookmark("https://bar.example/") && loaded.FindBookmark("https://webkit.org"));
+    CHECK(!loaded.bookmarks.Contains("https://bar.example/") && loaded.bookmarks.Contains("https://webkit.org"));
     struct stat mode{};
     CHECK(stat(path.c_str(), &mode) == 0 && (mode.st_mode & 0777) == 0600);
     profile.windows = {{{{"https://different.example/", "Replacement"}}, 999}};

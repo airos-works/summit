@@ -1,5 +1,6 @@
 #pragma once
 #include <Button.h>
+#include <Messenger.h>
 #include <PopUpMenu.h>
 #include <View.h>
 #include <atomic>
@@ -8,6 +9,8 @@
 #include <memory>
 
 class BBitmap;
+class BMenu;
+class BMenuItem;
 class BMessageRunner;
 
 namespace summit {
@@ -108,7 +111,15 @@ private:
     std::unique_ptr<BMessageRunner> fTimer;
 };
 // capturing: the page uses the camera, microphone or a screen (a red dot).
-struct TabLabel { int64 id; std::string title; bool loading; const BBitmap* icon = nullptr; bool capturing = false; };
+// url: the page's address, for dragging the tab onto the bookmarks bar.
+struct TabLabel {
+    int64 id;
+    std::string title;
+    bool loading;
+    const BBitmap* icon = nullptr;
+    bool capturing = false;
+    std::string url;
+};
 // Draws a site icon, or a neutral globe when there is none.
 void DrawSiteIcon(BView* view, const BBitmap* icon, BPoint leftTop);
 class TabStrip : public BView {
@@ -117,7 +128,9 @@ public:
     void SetTabs(std::vector<TabLabel> tabs, int64 selected);
     void Draw(BRect update) override;
     void MouseDown(BPoint where) override;
+    void MouseUp(BPoint where) override;
     void MouseMoved(BPoint where, uint32 transit, const BMessage* drag) override;
+    void MessageReceived(BMessage* message) override;
     void FrameResized(float width, float height) override;
     BSize MinSize() override;
     BSize MaxSize() override;
@@ -135,34 +148,71 @@ private:
     int64 fSelected = 0;
     int64 fHoverClose = 0;
     bool fHoverNewTab = false;
+    // A tab pressed with the primary button, which can be dragged out (onto
+    // the bookmarks bar, or to Tracker as a bookmark file).
+    int64 fPressedTab = 0;
+    BPoint fPressPoint;
+    std::string fDraggedURL, fDraggedTitle;
 };
-struct BookmarkButton { std::string url, title; const BBitmap* icon = nullptr; };
+// A bookmark or a folder as the bookmarks bar and the Bookmarks menu show it:
+// a copy of the profile's, which menus read from their own threads.
+struct BookmarkButton {
+    int64 id = 0;
+    std::string url, title;
+    // The bar's own buttons only; owned by the window's icon cache.
+    const BBitmap* icon = nullptr;
+    bool folder = false;
+    std::vector<BookmarkButton> children;
+};
+// Adds a folder's contents to a menu: bookmarks, folders as submenus that
+// are filled when they open, and Open All in Tabs. Their messages go to target.
+void AddBookmarkItems(BMenu* menu, std::shared_ptr<const BookmarkButton> root, const BookmarkButton& folder,
+    const BMessenger& target, size_t limit = 300);
+// A folder as an item with its submenu (filled when it opens).
+BMenuItem* NewBookmarkFolderItem(std::shared_ptr<const BookmarkButton> root, const BookmarkButton& folder,
+    const BMessenger& target);
 // Safari-style favourites under the toolbar. Clicking opens a bookmark in the
-// current tab; a middle click or Command-click opens it in a new tab; the
-// secondary button offers the rest. Messages go to the window.
+// current tab; a middle click or Command-click opens it in a new tab; a
+// folder opens as a menu; the secondary button offers the rest. Buttons can
+// be dragged to another place or into a folder, and pages (tabs, links from
+// other applications, Tracker's bookmark files) dropped on the bar are
+// bookmarked there. Messages go to the window.
 class BookmarksBar : public BView {
 public:
     BookmarksBar();
-    void SetBookmarks(std::vector<BookmarkButton> bookmarks);
+    // The bar's folder: its children are the buttons.
+    void SetBookmarks(std::shared_ptr<const BookmarkButton> bar);
     // The window's current menu-cancel flag (it is replaced when a close is cancelled).
     void SetMenusCancelled(const std::shared_ptr<std::atomic<bool>>* flag) { fMenusCancelled = flag; }
     void Draw(BRect update) override;
     void MouseDown(BPoint where) override;
     void MouseUp(BPoint where) override;
     void MouseMoved(BPoint where, uint32 transit, const BMessage* drag) override;
+    void MessageReceived(BMessage* message) override;
     void FrameResized(float width, float height) override;
 private:
+    const std::vector<BookmarkButton>& Items() const;
     void LayoutItems();
     int32 ItemAt(BPoint where) const;
     void ShowOverflow();
+    void ShowFolder(int32 index);
     void ShowContextMenu(int32 index, BPoint where);
     void Open(int32 index, bool newTab);
-    std::vector<BookmarkButton> fBookmarks;
+    // Where a drop at where goes: before the button at the index (the
+    // number of buttons: after the last), or into the folder there.
+    int32 DropIndex(BPoint where, bool& into) const;
+    void SetDropTarget(int32 index, bool into);
+    std::shared_ptr<const BookmarkButton> fBar;
     std::vector<BRect> fRects;
     size_t fVisible = 0;
     BRect fOverflow;
     int32 fHover = -1, fPressed = -1;
     uint32 fPressedButtons = 0;
+    BPoint fPressPoint;
+    int32 fDropIndex = -1;
+    bool fDropInto = false;
+    // The button dragged last, for Tracker's request to make its file.
+    std::string fDraggedURL, fDraggedTitle;
     const std::shared_ptr<std::atomic<bool>>* fMenusCancelled = nullptr;
     BPopUpMenu* NewMenu(const char* name);
 };

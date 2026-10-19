@@ -55,8 +55,13 @@ For a stock Haiku installation, not air/OS. Install the packages together with `
 
 ## Browser features
 
-- Tabs, saved sessions, back/forward history, bookmarks, downloads, page find,
+- Tabs, saved sessions, back/forward history, downloads, page find,
   configurable search, and per-site zoom.
+- [Bookmarks in folders](docs/bookmarks.md), on the bookmarks bar (folders open
+  as menus, drag to reorder or drop tabs) and in the Bookmarks menu, edited on
+  the Bookmarks tab or from the star; import from WebPositive, Firefox
+  (places.sqlite or HTML) and Chrome with their history, and export as
+  bookmarks HTML.
 - [Private windows and browsing-data controls](docs/browser-privacy.md),
   [certificate warnings and connection details](docs/certificate-warnings.md),
   and native website permission prompts.

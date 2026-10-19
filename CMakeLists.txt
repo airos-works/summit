@@ -4,16 +4,19 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 option(SUMMIT_MODERN_WEBKIT "Build Summit with the native multiprocess WebKit API" OFF)
 find_package(OpenSSL REQUIRED COMPONENTS Crypto)
-add_library(summit_core src/core/Address.cpp src/core/Protocol.cpp src/core/Profile.cpp src/core/ExtensionCatalog.cpp src/core/ExtensionIdentity.cpp src/core/ExtensionStore.cpp
+add_library(summit_core src/core/Address.cpp src/core/Protocol.cpp src/core/Profile.cpp src/core/Bookmarks.cpp src/core/BookmarkIO.cpp src/core/ExtensionCatalog.cpp src/core/ExtensionIdentity.cpp src/core/ExtensionStore.cpp
     src/core/ExtensionPackage.cpp src/core/StoreOffer.cpp src/core/DownloadText.cpp src/core/Favicon.cpp src/core/InternalPages.cpp src/core/Zoom.cpp src/core/Suggest.cpp src/core/DevTools.cpp src/core/DevToolsFormat.cpp
     src/core/Mcp.cpp src/core/McpHttp.cpp src/core/McpInspector.cpp)
-target_link_libraries(summit_core PUBLIC OpenSSL::Crypto)
+target_link_libraries(summit_core PUBLIC OpenSSL::Crypto ${CMAKE_DL_LIBS})
 target_include_directories(summit_core PUBLIC src vendor)
 target_compile_options(summit_core PRIVATE -Wall -Wextra -Wpedantic)
 enable_testing()
 add_executable(summit_tests tests/CoreTests.cpp)
 target_link_libraries(summit_tests PRIVATE summit_core)
 add_test(NAME summit_core COMMAND summit_tests)
+add_executable(summit_bookmark_tests tests/BookmarkTests.cpp)
+target_link_libraries(summit_bookmark_tests PRIVATE summit_core)
+add_test(NAME summit_bookmarks COMMAND summit_bookmark_tests)
 add_executable(summit_devtools_tests tests/DevToolsTests.cpp)
 target_link_libraries(summit_devtools_tests PRIVATE summit_core)
 add_test(NAME summit_devtools COMMAND summit_devtools_tests)
@@ -47,7 +50,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Haiku")
     endif()
     find_program(HAIKU_RC rc REQUIRED)
     find_program(HAIKU_XRES xres REQUIRED)
-    add_executable(Summit src/main.cpp src/ui/BrowserWindow.cpp src/ui/Chrome.cpp src/ui/ExtensionPermissionPrompt.cpp src/ui/ExtensionController.cpp src/ui/ExtensionInstaller.cpp src/ui/ExtensionManager.cpp
+    add_executable(Summit src/main.cpp src/ui/BrowserWindow.cpp src/ui/BookmarkEditor.cpp src/ui/BookmarkImport.cpp src/ui/Chrome.cpp src/ui/ExtensionPermissionPrompt.cpp src/ui/ExtensionController.cpp src/ui/ExtensionInstaller.cpp src/ui/ExtensionManager.cpp
         src/ui/ExtensionStoreDownload.cpp src/ui/CertificateInfoWindow.cpp src/ui/ReaderMode.cpp
         src/ui/ProtocolHandlers.cpp src/ui/FaviconCache.cpp src/ui/PreferencesWindow.cpp src/ui/DefaultBrowser.cpp src/ui/SharedProfile.cpp src/ui/DirectWindowRescue.cpp
         src/ui/AddressSuggestions.cpp src/ui/SitePermissions.cpp src/ui/Location.cpp

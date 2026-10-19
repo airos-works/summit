@@ -8,6 +8,8 @@
 #include "DirectWindowRescue.h"
 #include "Messages.h"
 #include "SharedProfile.h"
+#include "BookmarkEditor.h"
+#include "BookmarkImport.h"
 #if SUMMIT_MODERN_WEBKIT
 #include "DevToolsWindow.h"
 #include "DownloadList.h"
@@ -20,6 +22,7 @@
 #endif
 #include "core/Address.h"
 #include "core/BuildTarget.h"
+#include "core/BookmarkIO.h"
 #include "core/InternalPages.h"
 #include "core/Suggest.h"
 #include "core/Zoom.h"
@@ -40,6 +43,7 @@
 #include <MenuItem.h>
 #include <MessageRunner.h>
 #include <MessageFilter.h>
+#include <NodeInfo.h>
 #include <OS.h>
 #include <Path.h>
 #include <PopUpMenu.h>
@@ -506,6 +510,39 @@ static std::string MenuLabel(const PageRecord& page)
     while (cut && (static_cast<unsigned char>(label[cut]) & 0xC0) == 0x80) --cut;
     return label.substr(0, cut) + "…";
 }
+// The bookmarks bar and the menus get copies of the bookmarks.
+static BookmarkButton ButtonFor(const BookmarkNode& node)
+{
+    BookmarkButton button{node.id, node.url, node.title, nullptr, node.folder, {}};
+    button.children.reserve(node.children.size());
+    for (const auto& child : node.children) button.children.push_back(ButtonFor(child));
+    return button;
+}
+// What the Bookmarks page's links must carry: random, made once per run and
+// shared by every window (they all write the same page).
+static const std::string& BookmarkPageSecret()
+{
+    static std::once_flag once;
+    static std::string secret;
+    std::call_once(once, [] {
+        uint8 bytes[16];
+        std::ifstream random("/dev/urandom", std::ios::binary);
+        if (!random.read(reinterpret_cast<char*>(bytes), sizeof bytes))
+            for (auto& byte : bytes) byte = uint8(std::rand() ^ system_time());
+        for (uint8 byte : bytes) {
+            secret += "0123456789abcdef"[byte >> 4];
+            secret += "0123456789abcdef"[byte & 15];
+        }
+    });
+    return secret;
+}
+// An address typed without its scheme is a web address.
+static std::string BookmarkAddress(const std::string& typed)
+{
+    std::string url = Trim(typed);
+    if (!url.empty() && url.find("://") == std::string::npos && url.rfind("file:", 0) != 0) url = "https://" + url;
+    return url;
+}
 static bool FindDownloads(BPath& path, std::string& error)
 {
     status_t status = find_directory(B_USER_DIRECTORY, &path);
@@ -625,6 +662,9 @@ BrowserWindow::BrowserWindow(std::shared_ptr<SharedProfile> profile, std::string
     AddItem(file, "New Tab", kNewTab, 'T');
     AddItem(file, "Open File…", kOpenFile, 'O');
     file->AddSeparatorItem();
+    AddItem(file, "Import Bookmarks and History…", kImportBookmarks);
+    AddItem(file, "Export Bookmarks…", kExportBookmarks);
+    file->AddSeparatorItem();
     AddItem(file, "Close Window", kCloseWindow, 'W', B_SHIFT_KEY);
     AddItem(file, "Close Tab", kCloseTab, 'W');
     AddItem(file, "Reopen Closed Tab", kReopenTab, 'T', B_SHIFT_KEY);
@@ -679,9 +719,12 @@ BrowserWindow::BrowserWindow(std::shared_ptr<SharedProfile> profile, std::string
     fBookmarksMenu = new BMenu("Bookmarks");
     AddItem(fBookmarksMenu, "Bookmark This Page", kBookmark, 'D');
     AddItem(fBookmarksMenu, "Add to Bookmarks Bar", kAddToBookmarksBar, 'D', B_SHIFT_KEY);
+    fEditBookmarkItem = new BMenuItem("Edit Bookmark…", new BMessage(kEditBookmark));
+    fBookmarksMenu->AddItem(fEditBookmarkItem);
     fRemoveBookmarkItem = new BMenuItem("Remove Bookmark", new BMessage(kRemoveBookmark));
     fBookmarksMenu->AddItem(fRemoveBookmarkItem);
     fBookmarksMenu->AddSeparatorItem();
+    AddItem(fBookmarksMenu, "New Folder…", kNewBookmarkFolder);
     AddItem(fBookmarksMenu, "Show All Bookmarks", kShowBookmarks, 'B');
     fBookmarksMenuFixed = fBookmarksMenu->CountItems();
     menu->AddItem(fBookmarksMenu);
@@ -1648,7 +1691,7 @@ void BrowserWindow::AddressModified()
     if (forward) {
         const int64 now = std::time(nullptr);
         fAutofill = fShared->Read([&](const Profile& profile) {
-            return AutofillAddress(profile.history, profile.bookmarks, text, now);
+            return AutofillAddress(profile.history, profile.bookmarks.Pages(), text, now);
         });
         if (!fAutofill.Empty()) {
             fAddressShown = fAutofill.text;
@@ -1667,7 +1710,7 @@ void BrowserWindow::ShowSuggestions(const std::string& typed)
     }
     const int64 now = std::time(nullptr);
     const auto pages = fShared->Read([&](const Profile& profile) {
-        return SuggestPages(profile.history, profile.bookmarks, typed, now, 8);
+        return SuggestPages(profile.history, profile.bookmarks.Pages(), typed, now, 8);
     });
     std::vector<SuggestionRow> rows;
     // The first row is what Enter does with the text as it stands.
@@ -2355,15 +2398,12 @@ void BrowserWindow::RefreshChrome()
     std::vector<TabLabel> labels;
     for (const auto& tab : fTabs)
         labels.push_back({tab.id, tab.title, tab.loading, fFavicons->Icon(tab.url),
-            tab.capturingCamera || tab.capturingMicrophone || tab.capturingScreen});
+            tab.capturingCamera || tab.capturingMicrophone || tab.capturingScreen, tab.url});
     fTabStrip->SetTabs(std::move(labels), fSelected);
     NoteWindowIcon();
     if (auto* tab = ActiveTab()) {
         fBookmarkButton->SetEnabled(Bookmarkable(tab->url));
-        const bool bookmarked = fShared->Read([&](const Profile& profile) {
-            return std::any_of(profile.bookmarks.begin(), profile.bookmarks.end(),
-                [&](const PageRecord& bookmark) { return bookmark.url == tab->url; });
-        });
+        const bool bookmarked = fShared->Read([&](const Profile& profile) { return profile.bookmarks.Contains(tab->url); });
         fBookmarkButton->SetIcon(bookmarked ? Icon::BookmarkFilled : Icon::Bookmark);
         const std::string title = tab->title + (fPrivate ? " — Summit Private Browsing" : " — Summit");
         if (title != Title()) {
@@ -2595,11 +2635,14 @@ std::filesystem::path BrowserWindow::InternalPagePath(const std::string& url) co
 bool BrowserWindow::WriteInternalPage(const std::string& url)
 {
     const auto icons = [this](const std::string& page) { return fFavicons->DataURL(page); };
-    const auto pages = fShared->Read([&](const Profile& profile) {
-        return url == kHistoryPage ? profile.history : profile.bookmarks;
-    });
-    const auto html = url == kHistoryPage ? RenderHistoryPage(pages, std::time(nullptr), icons)
-        : RenderBookmarksPage(pages, icons);
+    std::string html;
+    if (url == kHistoryPage) {
+        const auto pages = fShared->Read([](const Profile& profile) { return profile.history; });
+        html = RenderHistoryPage(pages, std::time(nullptr), icons);
+    } else {
+        const auto bookmarks = fShared->Read([](const Profile& profile) { return profile.bookmarks; });
+        html = RenderBookmarksPage(bookmarks, icons, BookmarkPageSecret());
+    }
     const auto path = InternalPagePath(url);
     std::error_code error;
     std::filesystem::create_directories(path.parent_path(), error);
@@ -2676,11 +2719,13 @@ void BrowserWindow::BookmarksChanged()
 }
 void BrowserWindow::RefreshBookmarks()
 {
-    std::vector<BookmarkButton> buttons;
-    const auto bookmarks = fShared->Read([](const Profile& profile) { return profile.bookmarks; });
-    for (const auto& bookmark : bookmarks)
-        if (bookmark.bar) buttons.push_back({bookmark.url, bookmark.title, fFavicons->Icon(bookmark.url)});
-    fBookmarksBar->SetBookmarks(std::move(buttons));
+    auto bar = std::make_shared<BookmarkButton>(fShared->Read([](const Profile& profile) {
+        return ButtonFor(profile.bookmarks.Bar());
+    }));
+    // Icons for the bar's own buttons; its folders' menus show none.
+    for (auto& button : bar->children)
+        if (!button.folder) button.icon = fFavicons->Icon(button.url);
+    fBookmarksBar->SetBookmarks(std::move(bar));
 }
 void BrowserWindow::SetBookmarksBarVisible(bool visible)
 {
@@ -2700,18 +2745,20 @@ void BrowserWindow::RebuildDynamicMenus()
 {
     auto* tab = ActiveTab();
     const bool bookmarkable = tab && Bookmarkable(tab->url);
-    std::vector<PageRecord> history, bookmarks;
+    std::vector<PageRecord> history;
     bool bookmarked = false;
+    // Both folders, for submenus that are filled when they open.
+    auto roots = std::make_shared<BookmarkButton>();
     fShared->Read([&](const Profile& profile) {
         history.assign(profile.history.begin(), profile.history.begin() + std::min<size_t>(profile.history.size(), 15));
-        bookmarks.assign(profile.bookmarks.begin(), profile.bookmarks.begin() + std::min<size_t>(profile.bookmarks.size(), 40));
-        bookmarked = tab && std::any_of(profile.bookmarks.begin(), profile.bookmarks.end(),
-            [&](const PageRecord& bookmark) { return bookmark.url == tab->url; });
+        roots->children = {ButtonFor(profile.bookmarks.Bar()), ButtonFor(profile.bookmarks.Other())};
+        bookmarked = tab && profile.bookmarks.Contains(tab->url);
         return 0;
     });
     if (auto* item = fBookmarksMenu->FindItem(kBookmark)) item->SetEnabled(bookmarkable);
     if (auto* item = fBookmarksMenu->FindItem(kAddToBookmarksBar)) item->SetEnabled(bookmarkable);
     fRemoveBookmarkItem->SetEnabled(bookmarkable && bookmarked);
+    fEditBookmarkItem->SetEnabled(bookmarkable && bookmarked);
     auto clear = [](BMenu* menu, int32 fixed) {
         while (menu->CountItems() > fixed) delete menu->RemoveItem(fixed);
     };
@@ -2728,8 +2775,22 @@ void BrowserWindow::RebuildDynamicMenus()
     for (const auto& page : history) add(fHistoryMenu, page);
     if (auto* item = fHistoryMenu->FindItem(kClearHistory)) item->SetEnabled(!history.empty());
     clear(fBookmarksMenu, fBookmarksMenuFixed);
-    if (!bookmarks.empty()) fBookmarksMenu->AddSeparatorItem();
-    for (const auto& page : bookmarks) add(fBookmarksMenu, page);
+    // The bar's as a submenu, then Other Bookmarks' own, as in Firefox.
+    fBookmarksMenu->AddSeparatorItem();
+    const std::shared_ptr<const BookmarkButton> snapshot = roots;
+    const BMessenger target(this);
+    fBookmarksMenu->AddItem(NewBookmarkFolderItem(snapshot, snapshot->children[0], target));
+    size_t shown = 0;
+    for (const auto& child : snapshot->children[1].children) {
+        if (shown++ == 60) {
+            auto* more = new BMenuItem("More Bookmarks…", new BMessage(kShowBookmarks));
+            more->SetTarget(this);
+            fBookmarksMenu->AddItem(more);
+            break;
+        }
+        if (child.folder) fBookmarksMenu->AddItem(NewBookmarkFolderItem(snapshot, child, target));
+        else add(fBookmarksMenu, {child.url, child.title});
+    }
     if (auto* item = fWindowMenu->FindItem(kMoveTabToNewWindow)) item->SetEnabled(fTabs.size() > 1);
     // Every browser window, the current one marked, as in other Haiku applications.
     clear(fWindowMenu, fWindowMenuFixed);
@@ -2752,17 +2813,30 @@ void BrowserWindow::ShowBookmarkMenu()
 {
     auto* tab = ActiveTab();
     if (!tab || !Bookmarkable(tab->url)) return;
-    const auto bookmark = fShared->Read([&](const Profile& profile) -> std::optional<PageRecord> {
-        for (const auto& page : profile.bookmarks) if (page.url == tab->url) return page;
-        return std::nullopt;
+    struct Bookmarked { bool found = false, onBar = false; std::string folder; };
+    const auto bookmark = fShared->Read([&](const Profile& profile) {
+        Bookmarked state;
+        if (const auto* node = profile.bookmarks.FindURL(tab->url)) {
+            state.found = true;
+            state.onBar = profile.bookmarks.OnBar(tab->url);
+            state.folder = profile.bookmarks.FolderPath(node->id);
+        }
+        return state;
     });
     if (IsClosing()) return;
     auto* menu = new CancellableMenu("bookmark-page", fMenusCancelled);
-    if (!bookmark) {
+    if (!bookmark.found) {
         menu->AddItem(new BMenuItem("Add to Bookmarks Bar", new BMessage(kAddToBookmarksBar)));
         menu->AddItem(new BMenuItem("Add to Bookmarks", new BMessage(kBookmark)));
+        menu->AddItem(new BMenuItem("Add to Folder…", new BMessage(kAddBookmarkToFolder)));
     } else {
-        menu->AddItem(bookmark->bar ? new BMenuItem("Remove from Bookmarks Bar", new BMessage(kRemoveFromBookmarksBar))
+        // Where it is, then what can be done with it.
+        auto* where = new BMenuItem(MenuLabel({"", "In " + bookmark.folder}).c_str(), nullptr);
+        where->SetEnabled(false);
+        menu->AddItem(where);
+        menu->AddSeparatorItem();
+        menu->AddItem(new BMenuItem("Edit Bookmark…", new BMessage(kEditBookmark)));
+        menu->AddItem(bookmark.onBar ? new BMenuItem("Remove from Bookmarks Bar", new BMessage(kRemoveFromBookmarksBar))
             : new BMenuItem("Add to Bookmarks Bar", new BMessage(kAddToBookmarksBar)));
         menu->AddItem(new BMenuItem("Remove Bookmark", new BMessage(kRemoveBookmark)));
     }
@@ -2772,6 +2846,184 @@ void BrowserWindow::ShowBookmarkMenu()
     menu->SetAsyncAutoDestruct(true);
     const BRect frame = fBookmarkButton->ConvertToScreen(fBookmarkButton->Bounds());
     menu->Go(BPoint(frame.left, frame.bottom + 1), true, false, frame, true);
+}
+void BrowserWindow::OpenBookmarkEditor(int64 id)
+{
+    BookmarkEditor::Fields fields;
+    const bool found = fShared->Read([&](const Profile& profile) {
+        const auto* node = profile.bookmarks.Find(id);
+        const auto* parent = profile.bookmarks.Parent(id);
+        if (!node || !parent) return false;
+        fields.mode = node->folder ? BookmarkEditor::kEditFolderMode : BookmarkEditor::kEditBookmarkMode;
+        fields.id = id;
+        fields.title = node->title;
+        fields.url = node->url;
+        fields.folder = parent->id;
+        // A folder cannot go inside itself.
+        fields.folders = profile.bookmarks.Folders(node->folder ? id : 0);
+        return true;
+    });
+    if (!found) {
+        fStatus->SetText("This page is not bookmarked.");
+        return;
+    }
+    (new BookmarkEditor(fields, BMessenger(this), Frame()))->Show();
+}
+void BrowserWindow::OpenNewBookmarkEditor(int64 folder, bool newFolder)
+{
+    BookmarkEditor::Fields fields;
+    fields.mode = newFolder ? BookmarkEditor::kNewFolderMode : BookmarkEditor::kNewBookmarkMode;
+    fields.folder = folder;
+    if (newFolder) fields.title = "New Folder";
+    else {
+        auto* tab = ActiveTab();
+        if (!tab || !Bookmarkable(tab->url)) return;
+        fields.title = tab->title;
+        fields.url = tab->url;
+    }
+    fields.folders = fShared->Read([](const Profile& profile) { return profile.bookmarks.Folders(); });
+    (new BookmarkEditor(fields, BMessenger(this), Frame()))->Show();
+}
+void BrowserWindow::BookmarkEdited(const BMessage& message)
+{
+    const int32 mode = message.GetInt32("mode", BookmarkEditor::kEditBookmarkMode);
+    const int64 id = message.GetInt64("id", 0);
+    const int64 folder = message.GetInt64("folder", kOtherBookmarksFolder);
+    const std::string title = message.GetString("title", "");
+    const std::string url = BookmarkAddress(message.GetString("url", ""));
+    const char* status = nullptr;
+    fShared->Change([&](Profile& profile) -> uint32 {
+        auto& bookmarks = profile.bookmarks;
+        const int64 now = std::time(nullptr);
+        if (mode == BookmarkEditor::kNewFolderMode) {
+            if (!bookmarks.AddFolder(folder, title, kBookmarkEnd, now)) { status = "The folder could not be made there."; return 0; }
+            status = "Folder added";
+            return SharedProfile::kBookmarksChanged;
+        }
+        int64 target = id;
+        if (mode == BookmarkEditor::kNewBookmarkMode) {
+            // A page bookmarked already keeps one bookmark, changed as asked.
+            const auto* existing = bookmarks.FindURL(url);
+            if (!existing) {
+                if (!bookmarks.Add({url, title}, folder, kBookmarkEnd, now)) { status = "You have reached the bookmark limit."; return 0; }
+                status = "Bookmark saved";
+                return SharedProfile::kBookmarksChanged;
+            }
+            target = existing->id;
+        }
+        if (!bookmarks.Find(target)) return 0;
+        bool changed = bookmarks.Edit(target, title, url);
+        if (const auto* parent = bookmarks.Parent(target); parent && parent->id != folder)
+            changed = bookmarks.Move(target, folder, kBookmarkEnd) || changed;
+        if (changed) status = "Bookmark saved";
+        return changed ? SharedProfile::kBookmarksChanged : 0;
+    }, BMessenger(this));
+    if (status) fStatus->SetText(status);
+}
+void BrowserWindow::DeleteBookmark(int64 id, bool confirm)
+{
+    struct Node { bool found = false, folder = false; size_t bookmarks = 0; std::string title; };
+    const auto node = fShared->Read([&](const Profile& profile) {
+        Node node;
+        if (const auto* found = profile.bookmarks.Find(id); found && profile.bookmarks.Parent(id))
+            node = {true, found->folder, found->folder ? CountBookmarks(*found) : 1, found->title};
+        return node;
+    });
+    if (!node.found) return;
+    if (confirm && node.folder && node.bookmarks) {
+        const std::string question = "Delete the folder “" + node.title + "” and the "
+            + (node.bookmarks == 1 ? std::string("bookmark") : std::to_string(node.bookmarks) + " bookmarks") + " in it?";
+        auto* alert = new BAlert("Delete Folder", question.c_str(), "Cancel", "Delete", nullptr, B_WIDTH_AS_USUAL, B_WARNING_ALERT);
+        alert->SetShortcut(0, B_ESCAPE);
+        auto* reply = new BMessage(kDeleteBookmarkReply);
+        reply->AddInt64("id", id);
+        alert->Go(new BInvoker(reply, this));
+        return;
+    }
+    fShared->Change([&](Profile& profile) -> uint32 {
+        return profile.bookmarks.Remove(id) ? SharedProfile::kBookmarksChanged : 0;
+    }, BMessenger(this));
+    fStatus->SetText(node.folder ? "Folder deleted" : "Bookmark deleted");
+}
+bool BrowserWindow::BookmarkPageRequest(Tab& tab, const std::string& source, const std::string& url)
+{
+    const std::string scheme = std::string(kBookmarksPageScheme) + ":";
+    if (url.size() < scheme.size() || strncasecmp(url.c_str(), scheme.c_str(), scheme.size()) != 0) return false;
+    // Only the Bookmarks page's own links, which carry this run's secret;
+    // anything else asking for summit-bookmarks: is ignored.
+    const auto link = ParseBookmarkPageLink(url);
+    if (!link || link->token != BookmarkPageSecret() || tab.url != kBookmarksPage
+        || StoredURL(BString(source.c_str())) != kBookmarksPage)
+        return true;
+    const std::string& action = link->action;
+    if (action == "import") ShowBookmarkImportWindow(fShared, Frame());
+    else if (action == "export") ExportBookmarks();
+    else if (action == "edit") OpenBookmarkEditor(link->id);
+    else if (action == "delete") DeleteBookmark(link->id, true);
+    else if (action == "move") {
+        fShared->Change([&](Profile& profile) -> uint32 {
+            return profile.bookmarks.Move(link->id, link->folder, link->index) ? SharedProfile::kBookmarksChanged : 0;
+        }, BMessenger(this));
+    } else if (action == "new-folder") {
+        const int64 parent = link->folder ? link->folder : kOtherBookmarksFolder;
+        if (!link->hasTitle) OpenNewBookmarkEditor(parent, true);
+        else {
+            const std::string title = Trim(link->title).empty() ? "New Folder" : Trim(link->title);
+            fShared->Change([&](Profile& profile) -> uint32 {
+                return profile.bookmarks.AddFolder(parent, title, kBookmarkEnd, std::time(nullptr)) ? SharedProfile::kBookmarksChanged : 0;
+            }, BMessenger(this));
+        }
+    } else if (action == "save") {
+        // The page's own editor: name, address and folder.
+        const std::string title = Trim(link->title);
+        const std::string address = BookmarkAddress(link->url);
+        const char* status = nullptr;
+        bool changed = false;
+        fShared->Change([&](Profile& profile) -> uint32 {
+            auto& bookmarks = profile.bookmarks;
+            const auto* node = bookmarks.Find(link->id);
+            if (!node || !bookmarks.Parent(link->id)) return 0;
+            if (!node->folder && !IsBookmarkableURL(address)) {
+                status = "Not saved: bookmarks keep web addresses (https://…) and files (file://…).";
+                return 0;
+            }
+            changed = bookmarks.Edit(link->id, title.empty() ? (node->folder ? "Untitled Folder" : address) : title, address);
+            if (link->folder && bookmarks.Parent(link->id)->id != link->folder)
+                changed = bookmarks.Move(link->id, link->folder, kBookmarkEnd) || changed;
+            if (changed) status = "Bookmark saved";
+            return changed ? SharedProfile::kBookmarksChanged : 0;
+        }, BMessenger(this));
+        if (status) fStatus->SetText(status);
+        // A change brings the page up to date; with nothing to change it is
+        // written again all the same, which closes its editor. An address
+        // that cannot be kept leaves the editor open, as typed.
+        if (!changed && !status) RefreshInternalPage(tab, true);
+    }
+    return true;
+}
+void BrowserWindow::ExportBookmarks()
+{
+    if (!fExportPanel) {
+        BMessenger target(this);
+        fExportPanel = std::make_unique<BFilePanel>(B_SAVE_PANEL, &target, nullptr, 0, false, new BMessage(kExportBookmarksChosen));
+        fExportPanel->Window()->SetTitle("Summit: Export Bookmarks");
+        BPath home;
+        if (find_directory(B_USER_DIRECTORY, &home) == B_OK) fExportPanel->SetPanelDirectory(home.Path());
+    }
+    fExportPanel->SetSaveText("bookmarks.html");
+    fExportPanel->Show();
+}
+void BrowserWindow::ExportBookmarksTo(const BMessage& message)
+{
+    entry_ref directory;
+    const char* name = nullptr;
+    if (message.FindRef("directory", &directory) != B_OK || message.FindString("name", &name) != B_OK || !name) return;
+    BPath path(&directory);
+    if (path.InitCheck() != B_OK || path.Append(name) != B_OK) return;
+    std::string error;
+    const size_t count = ExportBookmarksFile(*fShared, path.Path(), error);
+    if (!error.empty()) ShowError("Could not export the bookmarks: " + error);
+    else fStatus->SetText(("Exported " + std::to_string(count) + (count == 1 ? " bookmark to " : " bookmarks to ") + name).c_str());
 }
 void BrowserWindow::IconLoaded(const BMessage& message)
 {
@@ -3233,19 +3485,26 @@ void BrowserWindow::MessageReceived(BMessage* message)
             const char* status = nullptr;
             // Every window hears of the change (ProfileChanged) and redraws its bar and star.
             fShared->Change([&](Profile& profile) -> uint32 {
-                auto* bookmark = profile.FindBookmark(target);
+                auto& bookmarks = profile.bookmarks;
                 if (what == kRemoveBookmark) {
                     if (!profile.RemoveBookmark(target)) return 0;
                     status = "Bookmark removed";
                 } else if (what == kRemoveFromBookmarksBar) {
-                    if (!bookmark || !bookmark->bar) return 0;
-                    bookmark->bar = false;
+                    // Off the bar, into Other Bookmarks.
+                    int64 id = 0;
+                    for (const auto& child : bookmarks.Bar().children)
+                        if (!child.folder && child.url == target) { id = child.id; break; }
+                    if (!id || !bookmarks.Move(id, kOtherBookmarksFolder, kBookmarkEnd)) return 0;
+                    status = "Moved to Other Bookmarks";
                 } else {
-                    const bool bar = what == kAddToBookmarksBar || (bookmark && bookmark->bar);
-                    const bool existed = bookmark;
+                    const bool bar = what == kAddToBookmarksBar;
+                    if (bookmarks.Contains(target) && (!bar || bookmarks.OnBar(target))) {
+                        status = bar ? "This page is already on the bookmarks bar" : "This page is already bookmarked";
+                        return 0;
+                    }
                     profile.AddBookmark({target, title}, bar);
-                    if (!profile.FindBookmark(target)) { status = "You have reached the bookmark limit."; return 0; }
-                    status = bar ? "Added to the bookmarks bar" : existed ? "This page is already bookmarked" : "Bookmark saved";
+                    if (!bookmarks.Contains(target)) { status = "You have reached the bookmark limit."; return 0; }
+                    status = bar ? "Added to the bookmarks bar" : "Bookmark saved";
                 }
                 return SharedProfile::kBookmarksChanged;
             }, BMessenger(this));
@@ -3258,14 +3517,72 @@ void BrowserWindow::MessageReceived(BMessage* message)
             if (message->FindString("url", &url) != B_OK || !Bookmarkable(url)) break;
             message->FindString("title", &title);
             fShared->Change([&](Profile& profile) -> uint32 {
-                if (profile.FindBookmark(url)) return 0;
+                if (profile.bookmarks.Contains(url)) return 0;
                 profile.AddBookmark({url, title}, false);
-                return profile.FindBookmark(url) ? SharedProfile::kBookmarksChanged : 0;
+                return profile.bookmarks.Contains(url) ? SharedProfile::kBookmarksChanged : 0;
             }, BMessenger(this));
             fStatus->SetText("Bookmark saved");
             break;
         }
         case kToggleBookmarksBar: SetBookmarksBarVisible(!fBookmarksBarVisible); break;
+        case kEditBookmark: {
+            int64 id = message->GetInt64("id", 0);
+            if (!id && tab) id = fShared->Read([&](const Profile& profile) {
+                const auto* node = profile.bookmarks.FindURL(tab->url);
+                return node ? node->id : int64(0);
+            });
+            OpenBookmarkEditor(id);
+            break;
+        }
+        case kNewBookmarkFolder: OpenNewBookmarkEditor(message->GetInt64("folder", kOtherBookmarksFolder), true); break;
+        case kAddBookmarkToFolder: OpenNewBookmarkEditor(kOtherBookmarksFolder, false); break;
+        case kBookmarkEdited: BookmarkEdited(*message); break;
+        case kDeleteBookmarkNode: DeleteBookmark(message->GetInt64("id", 0), true); break;
+        case kDeleteBookmarkReply:
+            if (message->GetInt32("which", 0) == 1) DeleteBookmark(message->GetInt64("id", 0), false);
+            break;
+        case kMoveBookmark: case kDropBookmark: {
+            // From the bookmarks bar: one of its buttons, or a page dropped on it.
+            const int64 folder = message->GetInt64("folder", kBookmarksBarFolder);
+            const size_t index = message->HasInt64("index") ? size_t(std::max<int64>(0, message->GetInt64("index", 0))) : kBookmarkEnd;
+            const std::string url = message->GetString("url", "");
+            const std::string title = message->GetString("title", "");
+            const int64 id = message->GetInt64("id", 0);
+            const uint32 what = message->what;
+            if (what == kDropBookmark && !Bookmarkable(url)) break;
+            const char* status = nullptr;
+            fShared->Change([&](Profile& profile) -> uint32 {
+                auto& bookmarks = profile.bookmarks;
+                int64 moving = id;
+                // A page already bookmarked moves to where it was dropped.
+                if (what == kDropBookmark)
+                    if (const auto* existing = bookmarks.FindURL(url)) moving = existing->id;
+                if (moving) return bookmarks.Move(moving, folder, index) ? SharedProfile::kBookmarksChanged : 0;
+                if (!bookmarks.Add({url, title.empty() ? url : title}, folder, index, std::time(nullptr))) {
+                    status = "You have reached the bookmark limit.";
+                    return 0;
+                }
+                status = "Bookmark saved";
+                return SharedProfile::kBookmarksChanged;
+            }, BMessenger(this));
+            if (status) fStatus->SetText(status);
+            break;
+        }
+        case kOpenBookmarkFolder: {
+            const int64 id = message->GetInt64("id", 0);
+            const auto urls = fShared->Read([&](const Profile& profile) {
+                std::vector<std::string> urls;
+                if (const auto* folder = profile.bookmarks.Find(id))
+                    for (const auto& child : folder->children)
+                        if (!child.folder && urls.size() < 50) urls.push_back(child.url);
+                return urls;
+            });
+            for (size_t i = 0; i < urls.size(); ++i) CreateTab(urls[i], i == 0);
+            break;
+        }
+        case kImportBookmarks: ShowBookmarkImportWindow(fShared, Frame()); break;
+        case kExportBookmarks: ExportBookmarks(); break;
+        case kExportBookmarksChosen: ExportBookmarksTo(*message); break;
         case kClearHistory: {
             auto* alert = new BAlert("Clear History", "Remove every page from your history?\n\nBookmarks and open tabs are kept.",
                 "Cancel", "Clear History", nullptr, B_WIDTH_AS_USUAL, B_WARNING_ALERT);
@@ -3350,10 +3667,9 @@ void BrowserWindow::MessageReceived(BMessage* message)
             [[fallthrough]];
         case B_REFS_RECEIVED: {
             entry_ref ref;
-            for (int32 i = 0; message->FindRef("refs", i, &ref) == B_OK; ++i) {
-                BPath path(&ref);
-                if (path.InitCheck() == B_OK) CreateTab(FileURL(path.Path()));
-            } break;
+            for (int32 i = 0; message->FindRef("refs", i, &ref) == B_OK; ++i)
+                if (const auto url = RefURL(ref); !url.empty()) CreateTab(url);
+            break;
         }
 #if SUMMIT_MODERN_WEBKIT
         case kToggleDownloadsPanel: ToggleDownloadsPanel(); break;
@@ -3473,6 +3789,9 @@ void BrowserWindow::MessageReceived(BMessage* message)
             auto* tab = FindTab(view);
             if (!tab || tab != ActiveTab()) break;
             const std::string source = message->GetString("source_url", "");
+            if (message->what == B_WEBKIT_SCHEME_OPEN_REQUESTED && message->GetBool("main_frame", true)
+                && BookmarkPageRequest(*tab, source, message->GetString("url", "")))
+                break;
             if (source != tab->url) break;
             if (message->what == B_WEBKIT_SCHEME_OPEN_REQUESTED && StoreOfferChosen(*tab, message->GetString("url", "")))
                 break;

@@ -148,7 +148,7 @@ void SharedProfile::ClearHistory(const BMessenger& sender)
     {
         std::lock_guard lock(fMutex);
         fProfile.history.clear();
-        for (const auto& bookmark : fProfile.bookmarks) {
+        for (const auto& bookmark : fProfile.bookmarks.Pages()) {
             const auto key = FaviconKey(bookmark.url);
             keep.insert(key);
             keep.insert(key.rfind("www.", 0) == 0 ? key.substr(4) : "www." + key);

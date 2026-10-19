@@ -1,6 +1,7 @@
 #pragma once
 #include "Profile.h"
 #include <functional>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -22,7 +23,26 @@ std::vector<HistoryDay> GroupHistoryByDay(const std::vector<PageRecord>& history
 // Returns an image URL (normally data:) for a page's favicon, or empty.
 using IconSource = std::function<std::string(const std::string& pageURL)>;
 std::string RenderHistoryPage(const std::vector<PageRecord>& history, int64_t now, const IconSource& icons);
-std::string RenderBookmarksPage(const std::vector<PageRecord>& bookmarks, const IconSource& icons);
+// Both folders of bookmarks with their folders, to open, edit, delete and
+// drag around. The page asks the browser for changes by navigating to
+// summit-bookmarks: links carrying token (ParseBookmarkPageLink), which no
+// other page knows.
+std::string RenderBookmarksPage(const Bookmarks& bookmarks, const IconSource& icons, const std::string& token);
+constexpr const char* kBookmarksPageScheme = "summit-bookmarks";
+struct BookmarkPageLink {
+    // save, delete, move, new-folder, import or export
+    std::string action;
+    std::string token;
+    int64_t id = 0;
+    int64_t folder = 0;
+    size_t index = kBookmarkEnd;
+    // save and new-folder: what was typed (percent-decoded).
+    std::string title, url;
+    bool hasTitle = false, hasURL = false;
+};
+std::optional<BookmarkPageLink> ParseBookmarkPageLink(std::string_view url);
+// The token as the page carries it: lower-case hex digits, at most 64.
+std::string BookmarkPageToken(const std::string& token);
 // What a private window's new tabs show: what private browsing keeps and
 // forgets, and a search field for the chosen engine (SearchEngines()).
 std::string RenderPrivateStartPage(const std::string& searchEngineName, const std::string& searchPrefix);
