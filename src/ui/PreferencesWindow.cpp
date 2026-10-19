@@ -1,4 +1,7 @@
 #include "PreferencesWindow.h"
+#if SUMMIT_MODERN_WEBKIT
+#include "BrowsingPreferences.h"
+#endif
 #include "Messages.h"
 #include "McpService.h"
 #include "core/Address.h"
@@ -266,6 +269,9 @@ PreferencesWindow::PreferencesWindow(BMessenger owner, const PreferencesState& s
         .AddGlue();
     fTabs = new BTabView("preferences-tabs", B_WIDTH_FROM_LABEL);
     fTabs->AddTab(general);
+#if SUMMIT_MODERN_WEBKIT
+    fTabs->AddTab(new BrowsingPreferences(fOwner, state.autoplay, state.spellChecking, state.savePasswords));
+#endif
     fTabs->AddTab(data);
     fTabs->AddTab(sites);
     fTabs->AddTab(protocols);
@@ -345,7 +351,9 @@ void PreferencesWindow::ShowSitePermissions(const std::vector<SiteEntry>& entrie
         row->SetField(new BStringField(entry.permission == "notifications" ? "Notifications"
             : entry.permission == "geolocation" ? "Location"
             : entry.permission == "camera" ? "Camera"
-            : entry.permission == "microphone" ? "Microphone" : entry.permission.c_str()), kPermissionColumn);
+            : entry.permission == "microphone" ? "Microphone"
+            : entry.permission == "popups" ? "Pop-ups"
+            : entry.permission == "autoplay" ? "Autoplay" : entry.permission.c_str()), kPermissionColumn);
         row->SetField(new BStringField(entry.allowed ? "Allowed" : "Blocked"), kSettingColumn);
         fSites->AddRow(row);
         if (entry.origin == selectedOrigin && entry.permission == selectedPermission) selected = row;

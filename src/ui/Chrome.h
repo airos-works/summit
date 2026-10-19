@@ -108,15 +108,25 @@ private:
     std::unique_ptr<BMessageRunner> fTimer;
 };
 // capturing: the page uses the camera, microphone or a screen (a red dot).
-struct TabLabel { int64 id; std::string title; bool loading; const BBitmap* icon = nullptr; bool capturing = false; };
+// pinned: a small tab with only the icon, at the start of the strip.
+// audio: the page plays sound (a speaker, which mutes it) or is muted.
+enum class TabAudio { None, Playing, Muted };
+struct TabLabel {
+    int64 id; std::string title; bool loading; const BBitmap* icon = nullptr; bool capturing = false;
+    bool pinned = false; TabAudio audio = TabAudio::None;
+};
 // Draws a site icon, or a neutral globe when there is none.
 void DrawSiteIcon(BView* view, const BBitmap* icon, BPoint leftTop);
+// Tabs of a window. A tab can be dragged along the strip to reorder it
+// (kMoveTab) or out of it (kTabDragOut, to another window or a new one).
+// Pinned tabs come first; the window keeps them there.
 class TabStrip : public BView {
 public:
     TabStrip();
     void SetTabs(std::vector<TabLabel> tabs, int64 selected);
     void Draw(BRect update) override;
     void MouseDown(BPoint where) override;
+    void MouseUp(BPoint where) override;
     void MouseMoved(BPoint where, uint32 transit, const BMessage* drag) override;
     void FrameResized(float width, float height) override;
     BSize MinSize() override;
@@ -125,16 +135,28 @@ public:
 private:
     void DrawHaiku(BRect update);
     void DrawSafari(BRect update);
+    // The speaker of a tab that plays sound or is muted.
+    void DrawAudio(BRect rect, TabAudio audio, rgb_color color);
     BRect TabRect(size_t index) const;
     BRect CloseRect(size_t index) const;
+    BRect AudioRect(size_t index) const;
     BRect NewTabRect() const;
     float Height() const;
+    size_t PinnedCount() const;
+    float PinnedWidth() const;
     size_t FirstVisible() const;
     size_t VisibleCount() const;
+    // Every tab drawn: the pinned ones, then the unpinned ones that fit.
+    std::vector<size_t> VisibleTabs() const;
+    int32 IndexOf(int64 id) const;
     std::vector<TabLabel> fTabs;
     int64 fSelected = 0;
     int64 fHoverClose = 0;
     bool fHoverNewTab = false;
+    // A press on a tab that may become a drag.
+    int64 fDragTab = 0;
+    BPoint fDragStart;
+    bool fDragging = false, fDragOutside = false;
 };
 struct BookmarkButton { std::string url, title; const BBitmap* icon = nullptr; };
 // Safari-style favourites under the toolbar. Clicking opens a bookmark in the

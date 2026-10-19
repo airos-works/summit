@@ -26,6 +26,8 @@ struct PageRecord {
 struct WindowSession {
     std::vector<PageRecord> tabs;
     size_t selected = 0;
+    // The first `pinned` tabs are pinned (small, icon-only tabs).
+    size_t pinned = 0;
     // Window frame in screen coordinates (left, top, right, bottom); all zero
     // when the window was never placed.
     float frame[4] = {0, 0, 0, 0};
@@ -77,6 +79,16 @@ struct Profile {
     int mcpPort = 7790;
     bool mcpLocalOnly = false;
     std::string mcpToken;
+    // Saved passwords (#67, kept in the Haiku key store, not here): whether
+    // Summit offers to save them, and sites it never offers for.
+    bool savePasswords = true;
+    std::set<std::string> passwordNever;
+    // Spelling is checked while typing in pages (#66).
+    bool spellChecking = true;
+    // Media that start by themselves (#70): "allow", "block-audio" (only
+    // without sound) or "block" (not before the user interacts). Sites can
+    // have their own choice ("autoplay" in sitePermissions).
+    std::string autoplay = "block-audio";
     bool SetProtocolHandler(const std::string& scheme, const ProtocolHandler&);
     bool RemoveProtocolHandler(const std::string& scheme);
     static Profile Load(const std::filesystem::path& path, std::string& error);

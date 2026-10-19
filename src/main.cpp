@@ -4,6 +4,7 @@
 #include <thread>
 #include "ui/SharedProfile.h"
 #include "ui/Messages.h"
+#include "ui/FeatureMessages.h"
 #include "ui/ExtensionPermissionPrompt.h"
 #include "ui/ExtensionController.h"
 #include "ui/ExtensionTiming.h"
@@ -21,10 +22,13 @@
 #include <Alert.h>
 #include <Application.h>
 #include <Entry.h>
+#include <File.h>
+#include <Resources.h>
 #include <Invoker.h>
 #include <FindDirectory.h>
 #include <Path.h>
 #include <Roster.h>
+#include <Screen.h>
 #include <OS.h>
 #include <image.h>
 #include <unistd.h>
@@ -236,6 +240,7 @@ public:
 #if SUMMIT_MODERN_WEBKIT
         TrustSavedCertificates(*fWebKitContext);
         GiveSitePermissions(*fWebKitContext);
+        ApplySpellChecking();
 #endif
         summit::SetSearchEngine(fShared->Read([](const summit::Profile& profile) { return profile.searchEngine; }));
         // Reopen every window of the last session, unless pages were named or
@@ -547,6 +552,11 @@ public:
             const bool hasMcpLocal = message->FindBool("mcp_local_only", &mcpLocal) == B_OK;
             const bool hasMcpPort = message->FindInt32("mcp_port", &mcpPort) == B_OK && mcpPort > 0 && mcpPort < 65536;
             const bool newMcpToken = message->GetBool("mcp_new_token", false);
+            const char* autoplay = nullptr;
+            bool spelling = true, savePasswords = true;
+            const bool hasAutoplay = message->FindString("autoplay", &autoplay) == B_OK && autoplay;
+            const bool hasSpelling = message->FindBool("spell_checking", &spelling) == B_OK;
+            const bool hasSavePasswords = message->FindBool("save_passwords", &savePasswords) == B_OK;
             fShared->Change([&](summit::Profile& profile) -> uint32 {
                 bool changed = false;
                 if (hasMcpEnabled && profile.mcpEnabled != mcpEnabled) { profile.mcpEnabled = mcpEnabled; changed = true; }
@@ -561,6 +571,10 @@ public:
                 if (hasBar && profile.showBookmarksBar != bar) { profile.showBookmarksBar = bar; changed = true; }
                 if (hasRestore && profile.restoreSession != restore) { profile.restoreSession = restore; changed = true; }
                 if (hasStyle && profile.interfaceStyle != style) { profile.interfaceStyle = style; changed = true; }
+                if (hasAutoplay && profile.autoplay != autoplay && (!std::strcmp(autoplay, "allow")
+                    || !std::strcmp(autoplay, "block-audio") || !std::strcmp(autoplay, "block"))) { profile.autoplay = autoplay; changed = true; }
+                if (hasSpelling && profile.spellChecking != spelling) { profile.spellChecking = spelling; changed = true; }
+                if (hasSavePasswords && profile.savePasswords != savePasswords) { profile.savePasswords = savePasswords; changed = true; }
                 if (hasEngine && profile.searchEngine != engine) {
                     // Set before windows hear of the change, so they see the new engine.
                     summit::SetSearchEngine(engine);
@@ -569,9 +583,21 @@ public:
                 }
                 return changed ? summit::SharedProfile::kSettingsChanged : 0;
             });
+#if SUMMIT_MODERN_WEBKIT
+            if (hasAutoplay) {
+                const auto setting = fShared->Read([](const summit::Profile& profile) { return profile.autoplay; });
+                for (const auto& context : {fWebKitContext, fPrivateContext})
+                    if (context) context->SetSitePermission("autoplay", "*", AutoplayValue(setting));
+            }
+            if (hasSpelling) ApplySpellChecking();
+#endif
             return;
         }
 #if SUMMIT_MODERN_WEBKIT
+        if (message->what == summit::kTransferTab) {
+            TransferTab(*message);
+            return;
+        }
         if (message->what == summit::kProtocolHandlerRemove) {
             const std::string scheme = message->GetString("scheme", "");
             fShared->Change([&](summit::Profile& profile) -> uint32 {
@@ -937,13 +963,54 @@ private:
         fPrivateContext = std::move(context);
         return fPrivateContext;
     }
+    // Spell checking (#66) with the en_US dictionary Summit carries, copied
+    // to the profile's Dictionaries folder, or one installed in data/hunspell.
+    // SUMMIT_SPELLING_LANGUAGES names others first ("de_DE,en_US").
+    void ApplySpellChecking()
+    {
+        const bool enabled = fShared->Read([](const summit::Profile& profile) { return profile.spellChecking; });
+        const auto directory = fProfile / "Dictionaries";
+        std::error_code error;
+        if (enabled) {
+            std::filesystem::create_directories(directory, error);
+            app_info info;
+            if (be_app->GetAppInfo(&info) == B_OK) {
+                BFile file(&info.ref, B_READ_ONLY);
+                BResources resources(&file);
+                for (const char* name : { "en_US.aff", "en_US.dic" }) {
+                    size_t size = 0;
+                    const void* data = resources.LoadResource('RAWT', ("dictionary-" + std::string(name)).c_str(), &size);
+                    const auto target = directory / name;
+                    if (!data || !size || (std::filesystem::exists(target, error) && std::filesystem::file_size(target, error) == size)) continue;
+                    BFile out(target.c_str(), B_WRITE_ONLY | B_CREATE_FILE | B_ERASE_FILE);
+                    if (out.InitCheck() == B_OK) out.Write(data, size);
+                }
+            }
+        }
+        const char* languages = std::getenv("SUMMIT_SPELLING_LANGUAGES");
+        BWebKitSetSpellChecking(enabled, languages ? languages : "en_US", directory.c_str(), (directory / "words.txt").c_str());
+    }
+    // The engine's value of a saved decision: for autoplay, allowed means
+    // media play by themselves (0) and blocked that they wait for the user
+    // (2); the others are allowed (1) or blocked (0).
+    static int32 SitePermissionValue(const std::string& permission, bool allowed)
+    {
+        if (permission == "autoplay") return allowed ? 0 : 2;
+        return allowed ? 1 : 0;
+    }
+    // Media that start by themselves, for sites without their own choice.
+    static int32 AutoplayValue(const std::string& setting)
+    {
+        return setting == "allow" ? 0 : setting == "block" ? 2 : 1;
+    }
     void GiveSitePermissions(BWebKitContext& context)
     {
         if (!fShared) return;
         fShared->Read([&](const summit::Profile& profile) {
             for (const auto& [permission, origins] : profile.sitePermissions)
                 for (const auto& [origin, allowed] : origins)
-                    context.SetSitePermission(permission.c_str(), origin.c_str(), allowed ? 1 : 0);
+                    context.SetSitePermission(permission.c_str(), origin.c_str(), SitePermissionValue(permission, allowed));
+            context.SetSitePermission("autoplay", "*", AutoplayValue(profile.autoplay));
             return 0;
         });
     }
@@ -955,7 +1022,7 @@ private:
             return profile.SetSitePermission(permission, origin, allowed) ? summit::SharedProfile::kSettingsChanged : 0;
         });
         for (const auto& context : {fWebKitContext, fPrivateContext})
-            if (context) context->SetSitePermission(permission.c_str(), origin.c_str(), allowed ? (*allowed ? 1 : 0) : -1);
+            if (context) context->SetSitePermission(permission.c_str(), origin.c_str(), allowed ? SitePermissionValue(permission, *allowed) : -1);
     }
     // Certificates the user trusted despite failed verification (saved in
     // the profile) are given to each context when it is created.
@@ -1010,6 +1077,48 @@ private:
         }
         return frame;
     }
+#if SUMMIT_MODERN_WEBKIT
+    // A tab dragged out of its window (#68): to the browser window under the
+    // drop point (of the same kind, private or not), or to a new window there.
+    void TransferTab(const BMessage& message)
+    {
+        BMessenger source;
+        if (message.FindMessenger("window", &source) != B_OK) return;
+        const int64 id = message.GetInt64("id", 0);
+        const bool privateTab = message.GetBool("private", false);
+        BPoint where;
+        BMessenger target;
+        if (message.FindMessenger("target", &target) != B_OK && message.FindPoint("where", &where) == B_OK) {
+            for (const auto& record : fWindows) {
+                if (record.messenger == source || record.privateBrowsing != privateTab) continue;
+                if (!record.window->LockWithTimeout(200000)) continue;
+                const bool under = record.window->Frame().Contains(where) && !record.window->IsHidden();
+                record.window->Unlock();
+                if (under) { target = record.messenger; break; }
+            }
+        }
+        if (!target.IsValid()) {
+            // A window's only tab dropped outside every window stays put.
+            if (message.GetBool("last", false)) return;
+            summit::BrowserWindowOptions options;
+            options.empty = true;
+            options.privateBrowsing = privateTab;
+            BRect frame = CascadedFrame();
+            if (message.FindPoint("where", &where) == B_OK) frame.OffsetTo(where - BPoint(80, 12));
+            // On the screen, title bar and all.
+            const BRect screen = BScreen().Frame();
+            frame.OffsetTo(std::clamp(frame.left, screen.left + 5, std::max(screen.left + 5, screen.right - frame.Width() - 5)),
+                std::clamp(frame.top, screen.top + 30, std::max(screen.top + 30, screen.bottom - frame.Height() - 5)));
+            options.frame = frame;
+            if (auto* window = OpenWindow(options)) target = BMessenger(window);
+        }
+        if (!target.IsValid()) return;
+        BMessage detach(summit::kDetachTab);
+        detach.AddInt64("id", id);
+        detach.AddMessenger("target", target);
+        source.SendMessage(&detach);
+    }
+#endif
     summit::BrowserWindow* OpenWindow(summit::BrowserWindowOptions options)
     {
 #if SUMMIT_MODERN_WEBKIT
@@ -1053,7 +1162,8 @@ private:
         summit::PreferencesState state = fShared->Read([](const summit::Profile& profile) {
             return summit::PreferencesState { profile.homeURL, profile.showBookmarksBar, profile.interfaceStyle,
                 profile.searchEngine, profile.history.size(), { }, profile.trustedCertificates.size(),
-                profile.restoreSession, profile.mcpEnabled, profile.mcpPort, profile.mcpLocalOnly };
+                profile.restoreSession, profile.mcpEnabled, profile.mcpPort, profile.mcpLocalOnly,
+                profile.autoplay, profile.spellChecking, profile.savePasswords };
         });
         state.webKitDirectory = fProfile / "WebKit";
         auto* window = new summit::PreferencesWindow(BMessenger(this), state);

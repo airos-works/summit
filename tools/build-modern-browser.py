@@ -383,7 +383,9 @@ def main():
                    'src/ui/DevToolsWindow.cpp', 'src/ui/DevToolsNetwork.cpp', 'src/ui/DevToolsConsole.cpp', 'src/ui/DevToolsStorage.cpp', 'src/ui/FaviconCache.cpp', 'src/ui/PreferencesWindow.cpp', 'src/ui/DefaultBrowser.cpp', 'src/ui/SharedProfile.cpp', 'src/ui/DirectWindowRescue.cpp',
                    'src/ui/BrowserWindow.cpp', 'src/ui/ProtocolHandlers.cpp', 'src/ui/AddressSuggestions.cpp', 'src/ui/SitePermissions.cpp', 'src/ui/Location.cpp', 'src/ui/Chrome.cpp', 'src/ui/ExtensionPermissionPrompt.cpp',
                    'src/ui/ExtensionController.cpp', 'src/ui/ExtensionInstaller.cpp', 'src/ui/ExtensionManager.cpp', 'src/ui/ExtensionStoreDownload.cpp', 'src/ui/DownloadList.cpp', 'src/ui/DownloadsPanel.cpp', 'src/ui/CertificateInfoWindow.cpp', 'src/ui/ReaderMode.cpp',
-                   'src/ui/BrowserWindowMcp.cpp', 'src/ui/McpService.cpp', 'src/ui/McpLog.cpp', 'src/ui/McpBrowserTools.cpp', 'src/ui/McpSystemTools.cpp', 'src/ui/McpPageTools.cpp', 'src/ui/McpEngineTools.cpp', 'src/ui/McpDebugHelper.cpp']
+                   'src/ui/BrowserWindowMcp.cpp', 'src/ui/McpService.cpp', 'src/ui/McpLog.cpp', 'src/ui/McpBrowserTools.cpp', 'src/ui/McpSystemTools.cpp', 'src/ui/McpPageTools.cpp', 'src/ui/McpEngineTools.cpp', 'src/ui/McpDebugHelper.cpp',
+                   'src/ui/BrowserWindowFeatures.cpp', 'src/ui/NoticeBar.cpp', 'src/ui/PageScripts.cpp', 'src/ui/PasswordStore.cpp',
+                   'src/ui/PictureInPictureWindow.cpp', 'src/ui/PrintJob.cpp', 'src/ui/BrowsingPreferences.cpp']
     objects = [work / pathlib.Path(source).with_suffix('.o') for source in sources]
     commands = [flags + ['-c', str(ROOT / source), '-o', str(output)]
                 for source, output in zip(sources, objects)]

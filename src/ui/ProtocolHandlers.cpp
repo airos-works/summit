@@ -80,15 +80,21 @@ void ProtocolHandlers::Save(const Request& request)
         return profile.SetProtocolHandler(request.scheme, request.handler) ? SharedProfile::kSettingsChanged : 0;
     });
 }
-void ProtocolHandlers::Open(const std::string& url, int64 tab, const std::string& source)
+void ProtocolHandlers::Open(const std::string& url, int64 tab, const std::string& source, bool askAlways)
 {
     const auto scheme = URLScheme(url);
     if (!IsExternalScheme(scheme) || !fCheck(tab, source) || fRequest) return;
     Request request { ++fNext, tab, scheme, url, source, {}, false };
     if (auto saved = Saved(scheme)) {
         request.handler = *saved;
-        if (saved->kind == "web") { Launch(request); return; }
         entry_ref ref;
+        // A link no click asked for is confirmed even for a remembered choice.
+        if (askAlways && (saved->kind == "web" || Application(saved->target, ref))) {
+            fRequest = std::move(request);
+            Confirm();
+            return;
+        }
+        if (saved->kind == "web") { Launch(request); return; }
         if (Application(saved->target, ref)) { Launch(request); return; }
         // A moved or removed application gets a fresh chooser.
     }

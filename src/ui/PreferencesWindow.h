@@ -33,6 +33,10 @@ struct PreferencesState {
     bool mcpEnabled = false;
     int mcpPort = 7790;
     bool mcpLocalOnly = false;
+    // Preferences › Browsing (BrowsingPreferences.h).
+    std::string autoplay = "block-audio";
+    bool spellChecking = true;
+    bool savePasswords = true;
 };
 // Edit › Preferences…. One window for the application; changes apply to every
 // browser window as they are made and are saved in the profile.

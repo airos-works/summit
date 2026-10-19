@@ -216,6 +216,26 @@ private:
         // The card on an extension store page: what was last put in the page
         // (empty: none), and the page whose card was closed.
         std::string storeOffer, storeOfferDismissed;
+        // A small tab at the start of the strip (#68), whether the page plays
+        // sound and whether it is muted (#70).
+        bool pinned = false, playingAudio = false, audioMuted = false;
+        // Why the page's process ended ("crash", "memory"...), the view that
+        // says so in place of the page, and whether that happened while the
+        // tab was in the background (it then reloads when selected) (#71).
+        std::string exitReason;
+        BView* crashView = nullptr;
+        bool exitedInBackground = false;
+        // The page stopped answering input (#71).
+        bool unresponsive = false, waitedForPage = false;
+        // The last pop-up the page tried to open without a click, and how
+        // many (#73).
+        std::string blockedPopup;
+        int32 blockedPopups = 0;
+        // A sign-in the page just submitted, waiting for Save or Never (#67).
+        struct PendingPassword { std::string origin, username, password; bool update = false; };
+        std::optional<PendingPassword> pendingPassword;
+        // The video a context menu or the page chose for Picture in Picture (#74).
+        std::string pipToken;
 #endif
     };
 #if SUMMIT_MODERN_WEBKIT
@@ -450,6 +470,50 @@ private:
     uint64 fExtensionActionResultIdentifier = 0;
     status_t fExtensionActionResultError = B_OK;
     std::shared_ptr<std::atomic<bool>> fExtensionMenuCancelled;
+#endif
+#if SUMMIT_MODERN_WEBKIT
+    // October 2026 features (BrowserWindowFeatures.cpp).
+    // The scripts and script message handlers every web tab gets: pop-up
+    // detection, the Picture in Picture API and the password manager.
+    void AddPageScripts(BWebKitView* view);
+    void PageScriptMessage(BMessage& message);
+    void MoveTabTo(int64 id, size_t index);
+    void SetTabPinned(int64 id, bool pinned);
+    void ToggleTabMute(int64 id);
+    // Hands tab id to target (another window), which adopts its live view.
+    void DetachTab(int64 id, const BMessenger& target);
+    void AdoptTab(BMessage& message);
+    void TabDraggedOut(int64 id, BPoint where);
+    // The page area shows the crash view of a tab whose process ended.
+    void ShowCrashView(Tab& tab);
+    void RemoveCrashView(Tab& tab);
+    void ReloadCrashedTab(Tab& tab);
+    // The bar between the toolbar and the page: an unresponsive page, a
+    // password to save, a blocked pop-up (NoticeBar.h).
+    void RefreshNoticeBar();
+    void ResponsivenessChanged(const BMessage& message);
+    void ProcessExitReason(Tab& tab, const std::string& reason);
+    void PrintPage();
+    void SaveAsPDF();
+    void SaveAsPDFChosen(const BMessage& message);
+    void PrintPagesReceived(BMessage& message);
+    void StartPictureInPicture(const std::string& token);
+    void PictureInPictureCommand(const BMessage& message);
+    void SpellingCommand(const BMessage& message);
+    void PasswordBarAnswer(const BMessage& message);
+    void SchemeOpenRequested(const BMessage& message, Tab& tab);
+    class NoticeBar* fNoticeBar = nullptr;
+    BMenuItem* fSpellingItem = nullptr;
+    // Save as PDF: the chosen file, waiting for the pages.
+    std::unique_ptr<BFilePanel> fPDFPanel;
+    std::map<uint64, std::string> fPDFTargets;
+    uint64 fPrintRequest = 0;
+    BMessenger fPictureInPicture;
+    int64 fPictureInPictureTab = 0;
+    uint64 fPictureInPictureSession = 0;
+    // A web app's window (#75): no tabs, toolbar or bookmarks bar.
+    std::string fWebApp;
+    std::string fWebAppScope;
 #endif
     // Built-in pages (summit:home, summit:history, summit:bookmarks) are
     // files; this gives the address to load for any address.

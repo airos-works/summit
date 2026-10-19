@@ -71768,10 +71768,18 @@ index 3ed93c966d3d4fe0126d8691a0a685858bbe4b34..cf534af57632c4b69a8180027a7d0290
              result.append('#endif\n')
      result.append('    MessageDescription { "<invalid message name>"_s, ReceiverName::Invalid%s, false, ProcessName::Unknown, ProcessName::Unknown }\n' % (", false" * len(attributes_to_generate_validators)))
 diff --git a/Source/WebKit/Scripts/webkit/opaque_ipc_types.tracking.in b/Source/WebKit/Scripts/webkit/opaque_ipc_types.tracking.in
-index dc4615c707f9b9a5a2df83b9ede2c7c1a76d4465..0f41014e3bbba246282fe5fbc0e8e08fbb78ea97 100644
+index dc4615c707f9b9a5a2df83b9ede2c7c1a76d4465..6848f1463cd713222d993db55e2b6691b45a6ebb 100644
 --- a/Source/WebKit/Scripts/webkit/opaque_ipc_types.tracking.in
 +++ b/Source/WebKit/Scripts/webkit/opaque_ipc_types.tracking.in
-@@ -580,3 +580,17 @@
+@@ -445,6 +445,7 @@
+ [UnsafeWrapper] std::optional<WebCore::SharedMemory::Handle> {
+     [Legacy] MessageParamReply WebPage.DrawPagesForPrinting data
+     [Legacy] MessageParamReply WebPage.DrawPagesForPrintingDuringDOMPrintOperation data
++    [Legacy] MessageParamReply WebPage.DrawPagesForPrintingHaiku data
+     [Legacy] MessageParamReply RemoteMediaResourceLoader.DataReceived remoteData
+     [Legacy] MessageParam RemoteBuffer.Copy data
+     [Legacy] MessageParam RemoteQueue.WriteBuffer data
+@@ -580,3 +581,17 @@
  [NeedsReview] MessageParam NetworkTransportSession.ExportKeyingMaterial label std::span<const uint8_t>
  [NeedsReview] MessageParam NetworkTransportSession.ExportKeyingMaterial context std::span<const uint8_t>
  [NeedsReview] MessageParamReply NetworkTransportSession.ExportKeyingMaterial keyingMaterial std::optional<Vector<uint8_t>>
@@ -78466,10 +78474,10 @@ index 0000000000000000000000000000000000000000..574ed16658f0c14b1aa2e63208e990b8
 +#define WEBKIT_ENGINE_VERSION_HAIKU "@WebKit_HAIKU_MAJOR_VERSION@.@WebKit_HAIKU_MINOR_VERSION@.@WebKit_HAIKU_TINY_VERSION@"
 diff --git a/Source/WebKit/UIProcess/API/haiku/WebKitContext.cpp b/Source/WebKit/UIProcess/API/haiku/WebKitContext.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..ee93998d5279578e79487073ec1b9f038c381be7
+index 0000000000000000000000000000000000000000..d009a2e05250df5cd4865c0fbb53c9422690a40a
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/API/haiku/WebKitContext.cpp
-@@ -0,0 +1,707 @@
+@@ -0,0 +1,719 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#include "config.h"
@@ -78494,6 +78502,7 @@ index 0000000000000000000000000000000000000000..ee93998d5279578e79487073ec1b9f03
 +#include "WebsiteDataType.h"
 +#include <Application.h>
 +#include <cstdlib>
++#include <cstring>
 +#include <wtf/FileSystem.h>
 +#include <wtf/RunLoop.h>
 +#include <wtf/Threading.h>
@@ -79054,6 +79063,17 @@ index 0000000000000000000000000000000000000000..ee93998d5279578e79487073ec1b9f03
 +{
 +    if (m_status != B_OK || !permission || !origin || !*origin)
 +        return;
++    if (!std::strcmp(permission, "autoplay") || !std::strcmp(permission, "popups")) {
++        auto operation = [context = m_context, policy = String::fromUTF8(permission).isolatedCopy(),
++            origin = String::fromUTF8(origin).isolatedCopy(), state] {
++            context->setSitePolicy(policy, origin, state);
++        };
++        if (RunLoop::isMain())
++            operation();
++        else
++            RunLoop::mainSingleton().dispatch(WTF::move(operation));
++        return;
++    }
 +    auto kind = WebKit::SitePermissionsHaiku::kindForName(String::fromUTF8(permission));
 +    if (!kind)
 +        return;
@@ -79179,10 +79199,10 @@ index 0000000000000000000000000000000000000000..ee93998d5279578e79487073ec1b9f03
 +}
 diff --git a/Source/WebKit/UIProcess/API/haiku/WebKitContext.h b/Source/WebKit/UIProcess/API/haiku/WebKitContext.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..5691b130cd6f3f0cf5e28bf15063d2e03f88edec
+index 0000000000000000000000000000000000000000..c79ac7f7aec0e492df29e1bc532d8d4450046a67
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/API/haiku/WebKitContext.h
-@@ -0,0 +1,354 @@
+@@ -0,0 +1,359 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#pragma once
@@ -79523,6 +79543,11 @@ index 0000000000000000000000000000000000000000..5691b130cd6f3f0cf5e28bf15063d2e0
 +    // it (the page asks again). Pages see it at once (Notification.permission,
 +    // navigator.permissions.query()). The engine stores nothing: give the
 +    // saved decisions again after every start. Any thread.
++    // Two more apply to the next main-frame navigation of the origin, and
++    // origin may be "*" for every origin without its own entry:
++    //   "autoplay": 0 media may play by itself, 1 only without sound,
++    //               2 not before the user interacts with the page.
++    //   "popups":   1 the page opens windows without a click, 0 only with.
 +    void SetSitePermission(const char* permission, const char* origin, int32 state);
 +    void NotificationClicked(uint64 identifier);
 +    void NotificationClosed(uint64 identifier);
@@ -81342,10 +81367,10 @@ index 0000000000000000000000000000000000000000..9631bd827675ab531436c95f66f77b2b
 +}
 diff --git a/Source/WebKit/UIProcess/API/haiku/WebKitView.h b/Source/WebKit/UIProcess/API/haiku/WebKitView.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..2fbc501e6c58f7054cdcdfbeaf77196b075ad79e
+index 0000000000000000000000000000000000000000..eaeffc37e05f5885434e4166751375bb35667a29
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/API/haiku/WebKitView.h
-@@ -0,0 +1,253 @@
+@@ -0,0 +1,333 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#pragma once
@@ -81376,6 +81401,23 @@ index 0000000000000000000000000000000000000000..2fbc501e6c58f7054cdcdfbeaf77196b
 +// 200%). Bitmaps this many times their logical size, drawn into a logical
 +// rectangle, reach the screen pixel for pixel. Any thread; cached for a second.
 +WK_EXPORT float BWebKitDisplayScale();
++// Spell checking of editable text in every page, with Hunspell
++// (libhunspell-1.7.so.0, loaded when needed). languages: dictionary names in
++// order of preference, separated by commas ("en_US,de_DE"); the first one
++// found is used, then any en_US. Dictionaries (NAME.aff and NAME.dic) come
++// from dictionaryDirectory, then the user's and the system's data/hunspell
++// directories. wordListPath: a UTF-8 file, one word a line, that learned
++// words are added to (may be null). Callable from any thread; pages already
++// shown are checked again.
++WK_EXPORT void BWebKitSetSpellChecking(bool enabled, const char* languages, const char* dictionaryDirectory, const char* wordListPath);
++// The dictionary in use ("" when none was found or checking is off).
++WK_EXPORT const char* BWebKitSpellCheckingLanguage();
++
++enum : uint32 {
++    B_WEBKIT_SPELLING_REPLACE = 0,
++    B_WEBKIT_SPELLING_IGNORE = 1,
++    B_WEBKIT_SPELLING_LEARN = 2
++};
 +
 +enum : uint32 {
 +    // The page requests a native fullscreen transition. Fields: "view",
@@ -81390,8 +81432,14 @@ index 0000000000000000000000000000000000000000..2fbc501e6c58f7054cdcdfbeaf77196b
 +    // for conditional-mediation requests, which pages make at load.
 +    // "view", "create" (bool).
 +    B_WEBKIT_WEBAUTHN_UNHANDLED = 'wwau',
-+    // User-initiated external link: "view", "url", "source_url". The load
-+    // was ignored; the browser can offer an approved web or native handler.
++    // A page navigated to a scheme no page can show: "view", "url",
++    // "source_url" (the page's address), "committed_url", and bools
++    // "user_gesture", "main_frame", "redirect" and "trusted". The load was
++    // ignored; the browser can offer an approved web or native handler.
++    // Trusted: a click asked for it, or a main-frame load the host started
++    // (LoadURL) and its redirects ended there (an OAuth callback). Others
++    // are main-frame navigations a script made by itself (ask every time)
++    // or frames without a gesture (refused: say so at most).
 +    B_WEBKIT_SCHEME_OPEN_REQUESTED = 'wsch',
 +    // registerProtocolHandler / unregisterProtocolHandler: "view", "scheme",
 +    // "url" (validated same-origin HTTP(S) template), "source_url", "remove".
@@ -81400,8 +81448,17 @@ index 0000000000000000000000000000000000000000..2fbc501e6c58f7054cdcdfbeaf77196b
 +    // committed HTTPS main resource: url, host, subject, issuer, names and
 +    // sha256 (strings), validFrom/validUntil (epoch seconds, doubles), verified,
 +    // exception and mixedContent (bools), and problem (string).
++    // They also say whether the page plays sound: "playingAudio" and
++    // "audioMuted" (bools, SetAudioMuted).
 +    B_WEBKIT_STATE_CHANGED = 'wsta',
++    // The page's web process is gone. A second notice follows with "reason":
++    // "crash", "memory" (over its memory limit), "cpu", "stopped"
++    // (TerminateWebProcess), "unresponsive", or "exited". The view keeps the
++    // last picture until the host shows something else or reloads.
 +    B_WEBKIT_PROCESS_EXITED = 'wpex',
++    // The page's web process stopped answering input ("responsive" false)
++    // or answers again (true). Field "view".
++    B_WEBKIT_RESPONSIVENESS_CHANGED = 'wrsp',
 +    B_WEBKIT_FIND_RESULT = 'wfin',
 +    B_WEBKIT_CLOSE_REQUESTED = 'wclr',
 +    B_WEBKIT_CLOSE_CANCELLED = 'wclc',
@@ -81420,7 +81477,9 @@ index 0000000000000000000000000000000000000000..2fbc501e6c58f7054cdcdfbeaf77196b
 +    // "where" (BPoint, view coordinates), "main_frame" (bool), and when present
 +    // "frame_url", "selected_text", "link_url", "link_label", "link_title",
 +    // "link_filename", "image_url", "image_filename", "media_url" (strings),
-+    // "editable", "selected", "downloadable_media" (bool). Extensions' own
++    // "editable", "selected", "downloadable_media" (bool). On a misspelt
++    // word in editable text: "misspelled" (bool) and repeated
++    // "spelling_guess" strings (PerformSpellingCommand). Extensions' own
 +    // items (menus API) that apply come as repeated "extension" messages:
 +    // "name" and repeated "item" messages with "title", "enabled",
 +    // "checkable", "checked", and either "token" (uint64, for
@@ -81441,7 +81500,22 @@ index 0000000000000000000000000000000000000000..2fbc501e6c58f7054cdcdfbeaf77196b
 +    B_WEBKIT_LINK_OPEN_REQUESTED = 'wlop',
 +    // The pointer moved on to or off a link. Fields: "view", "url" (empty when
 +    // it left the link), optional "title".
-+    B_WEBKIT_LINK_HOVERED = 'wlhv'
++    B_WEBKIT_LINK_HOVERED = 'wlhv',
++    // The page called window.print(). Fields: "view", "main_frame" (bool).
++    B_WEBKIT_PRINT_REQUESTED = 'wprq',
++    // The answer to DrawPagesForPrinting: "identifier" (uint64), "pageCount"
++    // (int32, every page of the layout), "first" (int32), and either "pdf"
++    // (B_RAW_TYPE, a PDF document of the pages asked for) or repeated "page"
++    // (B_RAW_TYPE, 32-bit B_RGB32 rows of "width" x "height" pixels, int32).
++    // "error" (string) when nothing could be drawn.
++    B_WEBKIT_PRINT_PAGES = 'wprp',
++    // Picture in Picture (EnterPictureInPicture), sent to its target: a
++    // frame of the video, "page" (uint64), "width", "height" (int32),
++    // "pixels" (B_RAW_TYPE, B_RGB32 rows), "paused" (bool), "time" and
++    // "duration" (double, seconds); and when the video went away (removed,
++    // or the page closed or navigated) or was not found, "page" only.
++    B_WEBKIT_PICTURE_IN_PICTURE_FRAME = 'wpif',
++    B_WEBKIT_PICTURE_IN_PICTURE_ENDED = 'wpie'
 +};
 +
 +// Navigation and input are queued to the application thread. Notifications are
@@ -81497,6 +81571,37 @@ index 0000000000000000000000000000000000000000..2fbc501e6c58f7054cdcdfbeaf77196b
 +    void ResetZoomFactor();
 +    // Accepts B_CUT, B_COPY, B_PASTE, B_SELECT_ALL, B_UNDO and B_REDO.
 +    void ExecuteEditCommand(uint32);
++    // For the word of the last context menu that reported "misspelled":
++    // replace it with word (B_WEBKIT_SPELLING_REPLACE), accept it in every
++    // page until the browser quits (IGNORE), or add it to the word list
++    // (LEARN, see BWebKitSetSpellChecking).
++    void PerformSpellingCommand(uint32 command, const char* word = nullptr);
++    // Silences every sound of the page (its media keep playing).
++    void SetAudioMuted(bool);
++    // Sends the view's notifications to target from now on: the view was
++    // moved to another window (RemoveSelf, then AddChild there). A state
++    // notification follows.
++    void SetNotificationTarget(BMessenger target);
++    // Lays the main frame out for paper of paperWidth x paperHeight points
++    // with margins (left, top, right and bottom of the rectangle, points) at
++    // scale (1 = as other browsers print), and draws pages [first, first +
++    // count): as a PDF when rasterScale is 0, else as pictures of rasterScale
++    // pixels a point, with or without backgrounds. Answers
++    // B_WEBKIT_PRINT_PAGES to reply. Any thread.
++    void DrawPagesForPrinting(BMessenger reply, uint64 identifier, float paperWidth, float paperHeight,
++        BRect margins, float scale, uint32 first, uint32 count, float rasterScale, bool backgrounds);
++    // Picture in Picture: the page's <video data-summit-pip="token"> (a
++    // number; in any frame) sends its pictures, fitted into size, to target.
++    // The video gets enterpictureinpicture and, when it ends,
++    // leavepictureinpicture events. Commands: "play", "pause", "toggle".
++    void EnterPictureInPicture(const char* token, BMessenger target, BSize size);
++    void SetPictureInPictureSize(BSize size);
++    void PictureInPictureCommand(const char* command);
++    void ExitPictureInPicture();
++    // Ends the page's web process, for a page that stopped responding. The
++    // view then gets B_WEBKIT_PROCESS_EXITED with reason "stopped"; Reload
++    // starts a new process.
++    void TerminateWebProcess();
 +
 +    // Embedding: see WebKitEmbedding.h. Scripts run in the pages' own world.
 +    void AddUserScript(const char* source, bool atDocumentStart = true, bool allFrames = true);
@@ -81601,10 +81706,10 @@ index 0000000000000000000000000000000000000000..2fbc501e6c58f7054cdcdfbeaf77196b
 +};
 diff --git a/Source/WebKit/UIProcess/API/haiku/WebKitViewEmbedding.cpp b/Source/WebKit/UIProcess/API/haiku/WebKitViewEmbedding.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..5dd3bf6c6cbc0146d090b04e2aa4defdaa8d0f9c
+index 0000000000000000000000000000000000000000..de8e8a7a038d52d6990d3ad8c9e3f0b8f24a2e41
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/API/haiku/WebKitViewEmbedding.cpp
-@@ -0,0 +1,747 @@
+@@ -0,0 +1,922 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +// BWebKitView's embedding interfaces (WebKitEmbedding.h): user scripts,
@@ -81629,6 +81734,12 @@ index 0000000000000000000000000000000000000000..5dd3bf6c6cbc0146d090b04e2aa4defd
 +#include "RunJavaScriptParameters.h"
 +#include "WebPageProxy.h"
 +#include "WebProcessPool.h"
++#include "WebProcessProxy.h"
++#include "ProcessTerminationReason.h"
++#include "WebPageMessages.h"
++#include "PrintInfo.h"
++#include "WebFrameProxy.h"
++#include <WebCore/SharedMemory.h>
 +#include "WebScriptMessageHandler.h"
 +#include "WebURLSchemeHandler.h"
 +#include "WebURLSchemeTask.h"
@@ -81932,6 +82043,175 @@ index 0000000000000000000000000000000000000000..5dd3bf6c6cbc0146d090b04e2aa4defd
 +    WTF::RunLoop::mainSingleton().dispatch([state = m_state, factor] {
 +        if (auto* page = pageHaiku(state))
 +            page->setPageZoomFactor(factor);
++    });
++}
++
++void BWebKitView::PerformSpellingCommand(uint32 command, const char* word)
++{
++    if (m_status != B_OK)
++        return;
++    WTF::RunLoop::mainSingleton().dispatch([state = m_state, command, word = copyTextHaiku(word)] {
++        if (auto* page = pageHaiku(state))
++            performSpellingCommandHaiku(*page, command, stringHaiku(word));
++    });
++}
++
++void BWebKitView::SetAudioMuted(bool muted)
++{
++    if (m_status != B_OK)
++        return;
++    WTF::RunLoop::mainSingleton().dispatch([state = m_state, muted] {
++        auto* page = pageHaiku(state);
++        if (!page)
++            return;
++        auto flags = page->mutedStateFlags();
++        if (muted)
++            flags.add(WebCore::MediaProducerMutedState::AudioIsMuted);
++        else
++            flags.remove(WebCore::MediaProducerMutedState::AudioIsMuted);
++        page->setMuted(flags, WebPageProxy::FromApplication::Yes);
++        if (state->client)
++            state->client->notifyState();
++    });
++}
++
++void BWebKitView::DrawPagesForPrinting(BMessenger reply, uint64 identifier, float paperWidth, float paperHeight,
++    BRect margins, float scale, uint32 first, uint32 count, float rasterScale, bool backgrounds)
++{
++    auto fail = [reply, identifier](const char* error) mutable {
++        BMessage message(B_WEBKIT_PRINT_PAGES);
++        message.AddUInt64("identifier", identifier);
++        message.AddString("error", error);
++        reply.SendMessage(&message, static_cast<BHandler*>(nullptr), 0);
++    };
++    if (m_status != B_OK || !(paperWidth > 0) || !(paperHeight > 0) || !(scale > 0)) {
++        fail("The page cannot be printed");
++        return;
++    }
++    WTF::RunLoop::mainSingleton().dispatch([state = m_state, reply, identifier, paperWidth, paperHeight, margins, scale, first, count, rasterScale, backgrounds, fail]() mutable {
++        auto* page = pageHaiku(state);
++        RefPtr frame = page ? page->mainFrame() : nullptr;
++        if (!page || !frame || !page->hasRunningProcess()) {
++            fail("The page cannot be printed");
++            return;
++        }
++        // Points to CSS pixels: the web process lays pages out in pixels.
++        constexpr float pixelsPerPoint = 96.0f / 72.0f;
++        const float left = std::max(0.0f, margins.left), top = std::max(0.0f, margins.top);
++        const float right = std::max(0.0f, margins.right), bottom = std::max(0.0f, margins.bottom);
++        PrintInfo info;
++        info.pageSetupScaleFactor = scale;
++        info.availablePaperWidth = std::max(36.0f, paperWidth - left - right) * pixelsPerPoint / scale;
++        info.availablePaperHeight = std::max(36.0f, paperHeight - top - bottom) * pixelsPerPoint / scale;
++        info.margin = WebCore::FloatBoxExtent(top * pixelsPerPoint / scale, right * pixelsPerPoint / scale,
++            bottom * pixelsPerPoint / scale, left * pixelsPerPoint / scale);
++        protect(page->legacyMainFrameProcess())->sendWithAsyncReply(Messages::WebPage::DrawPagesForPrintingHaiku(frame->frameID(), info, first, count, rasterScale, backgrounds),
++            [reply, identifier, first, rasterScale, fail](std::optional<WebCore::SharedMemory::Handle>&& handle, uint32_t pageCount, WebCore::IntSize size) mutable {
++                RefPtr memory = handle ? WebCore::SharedMemory::map(WTF::move(*handle), WebCore::SharedMemory::Protection::ReadOnly) : nullptr;
++                if (!memory) {
++                    if (pageCount && first >= pageCount) {
++                        BMessage message(B_WEBKIT_PRINT_PAGES);
++                        message.AddUInt64("identifier", identifier);
++                        message.AddInt32("pageCount", pageCount);
++                        message.AddInt32("first", first);
++                        reply.SendMessage(&message, static_cast<BHandler*>(nullptr), 0);
++                        return;
++                    }
++                    fail("The page could not be drawn for printing");
++                    return;
++                }
++                BMessage message(B_WEBKIT_PRINT_PAGES);
++                message.AddUInt64("identifier", identifier);
++                message.AddInt32("pageCount", pageCount);
++                message.AddInt32("first", first);
++                auto bytes = memory->span();
++                if (rasterScale <= 0)
++                    message.AddData("pdf", B_RAW_TYPE, bytes.data(), bytes.size(), false);
++                else {
++                    const size_t pageBytes = static_cast<size_t>(size.width()) * size.height() * 4;
++                    message.AddInt32("width", size.width());
++                    message.AddInt32("height", size.height());
++                    for (size_t offset = 0; pageBytes && offset + pageBytes <= bytes.size(); offset += pageBytes)
++                        message.AddData("page", B_RAW_TYPE, bytes.data() + offset, pageBytes, false);
++                }
++                reply.SendMessage(&message, static_cast<BHandler*>(nullptr), 0);
++            }, page->webPageIDInMainFrameProcess());
++    });
++}
++
++void BWebKitView::EnterPictureInPicture(const char* token, BMessenger target, BSize size)
++{
++    if (m_status != B_OK || !token)
++        return;
++    BMessage carrier;
++    carrier.AddMessenger("target", target);
++    std::string flattened(carrier.FlattenedSize(), '\0');
++    if (carrier.Flatten(flattened.data(), flattened.size()) != B_OK)
++        return;
++    static constexpr char digits[] = "0123456789abcdef";
++    std::string hex;
++    for (unsigned char byte : flattened) {
++        hex += digits[byte >> 4];
++        hex += digits[byte & 15];
++    }
++    WTF::RunLoop::mainSingleton().dispatch([state = m_state, token = copyTextHaiku(token), hex = std::move(hex), size]() mutable {
++        if (auto* page = pageHaiku(state); page && page->hasRunningProcess())
++            protect(page->legacyMainFrameProcess())->send(Messages::WebPage::EnterPictureInPictureHaiku(stringHaiku(token), stringHaiku(hex),
++                WebCore::IntSize(std::lround(size.width), std::lround(size.height))), page->webPageIDInMainFrameProcess());
++    });
++}
++
++void BWebKitView::SetPictureInPictureSize(BSize size)
++{
++    if (m_status != B_OK)
++        return;
++    WTF::RunLoop::mainSingleton().dispatch([state = m_state, size] {
++        if (auto* page = pageHaiku(state); page && page->hasRunningProcess())
++            protect(page->legacyMainFrameProcess())->send(Messages::WebPage::SetPictureInPictureSizeHaiku(
++                WebCore::IntSize(std::lround(size.width), std::lround(size.height))), page->webPageIDInMainFrameProcess());
++    });
++}
++
++void BWebKitView::PictureInPictureCommand(const char* command)
++{
++    if (m_status != B_OK || !command)
++        return;
++    WTF::RunLoop::mainSingleton().dispatch([state = m_state, command = copyTextHaiku(command)] {
++        if (auto* page = pageHaiku(state); page && page->hasRunningProcess())
++            protect(page->legacyMainFrameProcess())->send(Messages::WebPage::PictureInPictureCommandHaiku(stringHaiku(command)), page->webPageIDInMainFrameProcess());
++    });
++}
++
++void BWebKitView::ExitPictureInPicture()
++{
++    if (m_status != B_OK)
++        return;
++    WTF::RunLoop::mainSingleton().dispatch([state = m_state] {
++        if (auto* page = pageHaiku(state); page && page->hasRunningProcess())
++            protect(page->legacyMainFrameProcess())->send(Messages::WebPage::ExitPictureInPictureHaiku(), page->webPageIDInMainFrameProcess());
++    });
++}
++
++void BWebKitView::SetNotificationTarget(BMessenger target)
++{
++    if (m_status != B_OK)
++        return;
++    WTF::RunLoop::mainSingleton().dispatch([state = m_state, target] {
++        if (state->closed)
++            return;
++        state->target = target;
++        if (state->client)
++            state->client->notifyState();
++    });
++}
++
++void BWebKitView::TerminateWebProcess()
++{
++    if (m_status != B_OK)
++        return;
++    WTF::RunLoop::mainSingleton().dispatch([state = m_state] {
++        if (auto* page = pageHaiku(state); page && page->hasRunningProcess())
++            protect(page->legacyMainFrameProcess())->requestTermination(ProcessTerminationReason::RequestedByClient);
 +    });
 +}
 +
@@ -103902,6 +104182,19 @@ index 69bcb99cf5da330d75b81fe8f53dec86a972175e..c61899ce22b1e192bdda2c609c27b78b
      // Auxiliary Client Creation
  #if ENABLE(FULLSCREEN_API)
      virtual WebFullScreenManagerProxyClient& fullScreenManagerProxyClient() = 0;
+diff --git a/Source/WebKit/UIProcess/TextChecker.cpp b/Source/WebKit/UIProcess/TextChecker.cpp
+index 36316127214c806c85fe86bee755714c318c0e4a..f57e376c619fe6d9799e3b964effd3ffca31abab 100644
+--- a/Source/WebKit/UIProcess/TextChecker.cpp
++++ b/Source/WebKit/UIProcess/TextChecker.cpp
+@@ -28,7 +28,7 @@
+ #include "config.h"
+ #include "TextChecker.h"
+ 
+-#if !PLATFORM(COCOA) && !PLATFORM(GTK) && !PLATFORM(WPE)
++#if !PLATFORM(COCOA) && !PLATFORM(GTK) && !PLATFORM(WPE) && !PLATFORM(HAIKU)
+ #include "TextCheckerState.h"
+ #include <WebCore/NotImplemented.h>
+ 
 diff --git a/Source/WebKit/UIProcess/UserMediaPermissionRequestManagerProxy.cpp b/Source/WebKit/UIProcess/UserMediaPermissionRequestManagerProxy.cpp
 index ed75cd4b36d92c580f0ad731f77ff6db6efebcef..2bb2c9b70ef9131558bdfb3b35b891eae1db3b95 100644
 --- a/Source/WebKit/UIProcess/UserMediaPermissionRequestManagerProxy.cpp
@@ -110192,12 +110485,13 @@ index 0000000000000000000000000000000000000000..726ae50d03c2b79e267235162e2c4f68
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/TextCheckerHaiku.cpp b/Source/WebKit/UIProcess/haiku/TextCheckerHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..82037ad3e803b1f34c0c83a5b0b816467403f207
+index 0000000000000000000000000000000000000000..6c348015a7e7bf46dab29a99eeb161f767ef8481
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/TextCheckerHaiku.cpp
-@@ -0,0 +1,50 @@
+@@ -0,0 +1,419 @@
 +/*
 + * Copyright (C) 2019 Haiku, Inc.
++ * Copyright (C) 2026 air/OS contributors.
 + *
 + * Redistribution and use in source and binary forms, with or without
 + * modification, are permitted provided that the following conditions
@@ -110221,31 +110515,399 @@ index 0000000000000000000000000000000000000000..82037ad3e803b1f34c0c83a5b0b81646
 + * THE POSSIBILITY OF SUCH DAMAGE.
 + */
 +
++// Spell checking with Hunspell, loaded when the browser turns it on
++// (BWebKitSetSpellChecking). WebCore asks through the web process's editor
++// client; everything here runs on the UI process's main thread.
++
 +#include "config.h"
 +#include "TextChecker.h"
 +
 +#include "TextCheckerState.h"
-+#include <WebCore/NotImplemented.h>
++#include "WebKitView.h"
++#include "WebProcessPool.h"
++#include <FindDirectory.h>
++#include <Path.h>
++#include <dlfcn.h>
++#include <fstream>
++#include <mutex>
++#include <string>
++#include <sys/stat.h>
++#include <strings.h>
++#include <unicode/ubrk.h>
++#include <unicode/uchar.h>
++#include <wtf/HashSet.h>
++#include <wtf/NeverDestroyed.h>
++#include <wtf/RunLoop.h>
++#include <wtf/text/StringHash.h>
++#include <wtf/text/TextBreakIterator.h>
 +
 +namespace WebKit {
 +using namespace WebCore;
 +
-+TextCheckerState& checkerState()
++namespace {
++
++// The part of Hunspell's C API (hunspell.h) Summit uses.
++struct HunspellLibrary {
++    using Create = void* (*)(const char* affix, const char* dictionary);
++    using Destroy = void (*)(void*);
++    using Spell = int (*)(void*, const char*);
++    using Suggest = int (*)(void*, char*** list, const char* word);
++    using FreeList = void (*)(void*, char*** list, int count);
++    using Add = int (*)(void*, const char* word);
++    using Encoding = char* (*)(void*);
++
++    bool load()
++    {
++        if (attempted)
++            return library;
++        attempted = true;
++        for (const char* name : { "libhunspell-1.7.so.0", "libhunspell-1.7.so", "libhunspell.so" }) {
++            if ((library = dlopen(name, RTLD_LAZY | RTLD_LOCAL)))
++                break;
++        }
++        if (!library)
++            return false;
++        create = reinterpret_cast<Create>(dlsym(library, "Hunspell_create"));
++        destroy = reinterpret_cast<Destroy>(dlsym(library, "Hunspell_destroy"));
++        spell = reinterpret_cast<Spell>(dlsym(library, "Hunspell_spell"));
++        suggest = reinterpret_cast<Suggest>(dlsym(library, "Hunspell_suggest"));
++        freeList = reinterpret_cast<FreeList>(dlsym(library, "Hunspell_free_list"));
++        add = reinterpret_cast<Add>(dlsym(library, "Hunspell_add"));
++        encoding = reinterpret_cast<Encoding>(dlsym(library, "Hunspell_get_dic_encoding"));
++        if (!create || !destroy || !spell || !suggest || !freeList || !add) {
++            dlclose(library);
++            library = nullptr;
++        }
++        return library;
++    }
++
++    bool attempted { false };
++    void* library { nullptr };
++    Create create { nullptr };
++    Destroy destroy { nullptr };
++    Spell spell { nullptr };
++    Suggest suggest { nullptr };
++    FreeList freeList { nullptr };
++    Add add { nullptr };
++    Encoding encoding { nullptr };
++};
++
++struct SpellCheckerHaiku {
++    HunspellLibrary hunspell;
++    void* handle { nullptr };
++    bool enabled { false };
++    bool loaded { false };
++    String languages;
++    String dictionaryDirectory;
++    String wordListPath;
++    String language;
++    HashSet<String> ignored;
++
++    static bool exists(const std::string& path)
++    {
++        struct stat info;
++        return !stat(path.c_str(), &info) && S_ISREG(info.st_mode);
++    }
++
++    std::vector<std::string> directories() const
++    {
++        std::vector<std::string> result;
++        if (!dictionaryDirectory.isEmpty())
++            result.push_back(dictionaryDirectory.utf8().legacyCStringPointer());
++        for (auto which : { B_USER_NONPACKAGED_DATA_DIRECTORY, B_USER_DATA_DIRECTORY, B_SYSTEM_NONPACKAGED_DATA_DIRECTORY, B_SYSTEM_DATA_DIRECTORY }) {
++            BPath path;
++            if (find_directory(which, &path) == B_OK) {
++                result.push_back(std::string(path.Path()) + "/hunspell");
++                result.push_back(std::string(path.Path()) + "/myspell");
++            }
++        }
++        return result;
++    }
++
++    void unload()
++    {
++        if (handle)
++            hunspell.destroy(handle);
++        handle = nullptr;
++        loaded = false;
++        language = { };
++    }
++
++    // Opens the first dictionary of languages that exists (en_US last).
++    void ensureLoaded()
++    {
++        if (loaded || !enabled)
++            return;
++        loaded = true;
++        if (!hunspell.load())
++            return;
++        Vector<String> names;
++        for (auto name : languages.split(','))
++            names.append(name.trim(isASCIIWhitespace<char16_t>));
++        names.append("en_US"_s);
++        for (const auto& name : names) {
++            if (name.isEmpty() || name.contains('/') || name.contains(".."_s))
++                continue;
++            for (const auto& directory : directories()) {
++                const auto base = directory + "/" + name.utf8().legacyCStringPointer();
++                if (!exists(base + ".aff") || !exists(base + ".dic"))
++                    continue;
++                handle = hunspell.create((base + ".aff").c_str(), (base + ".dic").c_str());
++                if (!handle)
++                    continue;
++                // Words are given as UTF-8: only dictionaries in UTF-8 fit.
++                if (hunspell.encoding) {
++                    if (const char* encoding = hunspell.encoding(handle); encoding && strcasecmp(encoding, "UTF-8")) {
++                        hunspell.destroy(handle);
++                        handle = nullptr;
++                        continue;
++                    }
++                }
++                language = name;
++                readWordList();
++                return;
++            }
++        }
++    }
++
++    void readWordList()
++    {
++        if (!handle || wordListPath.isEmpty())
++            return;
++        std::ifstream file(wordListPath.utf8().legacyCStringPointer());
++        std::string word;
++        while (std::getline(file, word)) {
++            if (!word.empty() && word.size() < 100)
++                hunspell.add(handle, word.c_str());
++        }
++    }
++
++    bool isCorrect(StringView word)
++    {
++        ensureLoaded();
++        if (!handle)
++            return true;
++        String text = word.toString();
++        if (ignored.contains(text))
++            return true;
++        // Numbers, words with digits and single letters are left alone.
++        bool letters = false;
++        for (auto character : StringView(text).codeUnits()) {
++            if (isASCIIDigit(character))
++                return true;
++            if (u_isalpha(character))
++                letters = true;
++        }
++        if (!letters || text.length() < 2)
++            return true;
++        return hunspell.spell(handle, text.utf8().legacyCStringPointer());
++    }
++
++    Vector<String> guesses(const String& word)
++    {
++        ensureLoaded();
++        if (!handle)
++            return { };
++        char** list = nullptr;
++        const int count = hunspell.suggest(handle, &list, word.utf8().legacyCStringPointer());
++        Vector<String> result;
++        for (int i = 0; i < count && result.size() < 6; ++i) {
++            if (list[i])
++                result.append(String::fromUTF8(list[i]));
++        }
++        if (list)
++            hunspell.freeList(handle, &list, count);
++        return result;
++    }
++
++    void learn(const String& word)
++    {
++        if (word.isEmpty() || word.length() >= 100 || word.contains('\n'))
++            return;
++        ensureLoaded();
++        if (handle)
++            hunspell.add(handle, word.utf8().legacyCStringPointer());
++        if (!wordListPath.isEmpty()) {
++            std::ofstream file(wordListPath.utf8().legacyCStringPointer(), std::ios::app);
++            file << word.utf8().legacyCStringPointer() << '\n';
++        }
++    }
++};
++
++SpellCheckerHaiku& spellChecker()
 +{
-+    static TextCheckerState textCheckerState;
-+    return textCheckerState;
++    ASSERT(RunLoop::isMain());
++    static NeverDestroyed<SpellCheckerHaiku> checker;
++    return checker.get();
 +}
 +
-+#if USE(UNIFIED_TEXT_CHECKING)
++OptionSet<TextCheckerState>& checkerState()
++{
++    static OptionSet<TextCheckerState> state;
++    return state;
++}
 +
-+Vector<TextCheckingResult> TextChecker::checkTextOfParagraph(SpellDocumentTag, StringView, int32_t, OptionSet<TextCheckingType>, bool)
++std::mutex languageLock;
++char languageName[64];
++
++} // namespace
++
++OptionSet<TextCheckerState> TextChecker::state()
++{
++    return checkerState();
++}
++
++void TextChecker::setTestingMode(bool)
++{
++}
++
++bool TextChecker::isTestingMode()
++{
++    return false;
++}
++
++bool TextChecker::isContinuousSpellCheckingAllowed()
++{
++    return true;
++}
++
++bool TextChecker::setContinuousSpellCheckingEnabled(bool enabled)
++{
++    if (checkerState().contains(TextCheckerState::ContinuousSpellCheckingEnabled) == enabled)
++        return false;
++    checkerState().set(TextCheckerState::ContinuousSpellCheckingEnabled, enabled);
++    spellChecker().enabled = enabled;
++    WebProcessPool::notifyProcessPoolsTextCheckerStateChanged();
++    return true;
++}
++
++void TextChecker::setGrammarCheckingEnabled(bool)
++{
++}
++
++void TextChecker::continuousSpellCheckingEnabledStateChanged(bool enabled)
++{
++    checkerState().set(TextCheckerState::ContinuousSpellCheckingEnabled, enabled);
++    spellChecker().enabled = enabled;
++}
++
++void TextChecker::grammarCheckingEnabledStateChanged(bool)
++{
++}
++
++SpellDocumentTag TextChecker::uniqueSpellDocumentTag(WebPageProxy*)
 +{
 +    return { };
 +}
 +
-+#endif
++void TextChecker::closeSpellDocumentWithTag(SpellDocumentTag)
++{
++}
++
++void TextChecker::checkSpellingOfString(SpellDocumentTag, StringView text, int32_t& misspellingLocation, int32_t& misspellingLength)
++{
++    misspellingLocation = -1;
++    misspellingLength = 0;
++    auto& checker = spellChecker();
++    if (!checker.enabled)
++        return;
++    UBreakIterator* iterator = wordBreakIterator(text);
++    if (!iterator)
++        return;
++    int start = ubrk_first(iterator);
++    for (int end = ubrk_next(iterator); end != UBRK_DONE; end = ubrk_next(iterator)) {
++        if (isWordTextBreak(iterator) && !checker.isCorrect(text.substring(start, end - start))) {
++            misspellingLocation = start;
++            misspellingLength = end - start;
++            return;
++        }
++        start = end;
++    }
++}
++
++void TextChecker::checkGrammarOfString(SpellDocumentTag, StringView, Vector<GrammarDetail>&, int32_t& badGrammarLocation, int32_t& badGrammarLength)
++{
++    badGrammarLocation = -1;
++    badGrammarLength = 0;
++}
++
++bool TextChecker::spellingUIIsShowing()
++{
++    return false;
++}
++
++void TextChecker::toggleSpellingUIIsShowing()
++{
++}
++
++void TextChecker::updateSpellingUIWithMisspelledWord(SpellDocumentTag, const String&)
++{
++}
++
++void TextChecker::updateSpellingUIWithGrammarString(SpellDocumentTag, const String&, const GrammarDetail&)
++{
++}
++
++void TextChecker::getGuessesForWord(SpellDocumentTag, const String& word, const String&, int32_t, Vector<String>& guesses, bool)
++{
++    guesses = spellChecker().guesses(word);
++}
++
++void TextChecker::learnWord(SpellDocumentTag, const String& word)
++{
++    spellChecker().learn(word);
++}
++
++void TextChecker::ignoreWord(SpellDocumentTag, const String& word)
++{
++    if (!word.isEmpty())
++        spellChecker().ignored.add(word);
++}
++
++void TextChecker::requestCheckingOfString(Ref<TextCheckerCompletion>&&, int32_t)
++{
++}
++
++void TextChecker::requestExtendedCheckingOfString(Ref<TextCheckerCompletion>&&, int32_t)
++{
++}
 +
 +} // namespace WebKit
++
++using namespace WebKit;
++
++void BWebKitSetSpellChecking(bool enabled, const char* languages, const char* dictionaryDirectory, const char* wordListPath)
++{
++    auto apply = [enabled, languages = String::fromUTF8(languages ? languages : "").isolatedCopy(),
++        directory = String::fromUTF8(dictionaryDirectory ? dictionaryDirectory : "").isolatedCopy(),
++        wordList = String::fromUTF8(wordListPath ? wordListPath : "").isolatedCopy()] {
++        auto& checker = spellChecker();
++        if (checker.languages != languages || checker.dictionaryDirectory != directory || checker.wordListPath != wordList || !enabled)
++            checker.unload();
++        checker.languages = languages;
++        checker.dictionaryDirectory = directory;
++        checker.wordListPath = wordList;
++        checker.enabled = enabled;
++        if (enabled)
++            checker.ensureLoaded();
++        {
++            std::lock_guard guard(languageLock);
++            auto name = checker.language.utf8();
++            strlcpy(languageName, name.legacyCStringPointer(), sizeof(languageName));
++        }
++        TextChecker::setContinuousSpellCheckingEnabled(enabled && !checker.language.isEmpty());
++    };
++    if (RunLoop::isMain())
++        apply();
++    else
++        RunLoop::mainSingleton().dispatch(WTF::move(apply));
++}
++
++const char* BWebKitSpellCheckingLanguage()
++{
++    std::lock_guard guard(languageLock);
++    return languageName;
++}
 diff --git a/Source/WebKit/UIProcess/haiku/WebColorPickerHaiku.cpp b/Source/WebKit/UIProcess/haiku/WebColorPickerHaiku.cpp
 new file mode 100644
 index 0000000000000000000000000000000000000000..7f0f82faf4ddc6bba0c5392912b862afbf66217f
@@ -111167,10 +111829,10 @@ index 0000000000000000000000000000000000000000..c9a119d02f85b7c5ad8fe9153bfc9604
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/WebView.cpp b/Source/WebKit/UIProcess/haiku/WebView.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..72e82ce7ab59e0bbc72a29f55c47495ed238defb
+index 0000000000000000000000000000000000000000..5f28ac5dd03897689bbc769e9d5b454046f6b6ac
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/WebView.cpp
-@@ -0,0 +1,2490 @@
+@@ -0,0 +1,2646 @@
 +/*
 + * Copyright (C) 2013 Intel Corporation. All rights reserved.
 + *
@@ -111211,6 +111873,7 @@ index 0000000000000000000000000000000000000000..72e82ce7ab59e0bbc72a29f55c47495e
 +#include "DownloadRegistryHaiku.h"
 +#include "APIPageConfiguration.h"
 +#include "APIWebsitePolicies.h"
++#include "ProcessTerminationReason.h"
 +#include "APINavigation.h"
 +#include "APIUIClient.h"
 +#include "DrawingAreaProxyHaiku.h"
@@ -111233,6 +111896,8 @@ index 0000000000000000000000000000000000000000..72e82ce7ab59e0bbc72a29f55c47495e
 +#include "WebColorPicker.h"
 +#include "WebColorPickerHaiku.h"
 +#include "WebContextMenuProxy.h"
++#include "WebContextMenuItem.h"
++#include "WebContextMenuItemData.h"
 +#include "WebDataListSuggestionsDropdown.h"
 +#include "WebDateTimePicker.h"
 +#include "WebDateTimePickerHaiku.h"
@@ -111259,6 +111924,8 @@ index 0000000000000000000000000000000000000000..72e82ce7ab59e0bbc72a29f55c47495e
 +#if ENABLE(MEDIA_STREAM)
 +#include "UserMediaPermissionRequestProxy.h"
 +#include <WebCore/MediaProducer.h>
++#include <WebCore/SecurityOrigin.h>
++#include <map>
 +#endif
 +#include <WebCore/PermissionState.h>
 +#include <WebCore/DragData.h>
@@ -111731,17 +112398,32 @@ index 0000000000000000000000000000000000000000..72e82ce7ab59e0bbc72a29f55c47495e
 +            && !url.protocolIsJavaScript() && !url.protocolIs("webkit-extension"_s)
 +            && !page.urlSchemeHandlerForScheme(url.protocol());
 +        if (external) {
-+            // Launch only during a genuine user action. The browser validates
-+            // the source tab and keeps a single native prompt outstanding.
-+            if (action->isProcessingUserGesture()) {
-+                if (auto state = m_state.lock(); state && !state->closed) {
-+                    BMessage message(B_WEBKIT_SCHEME_OPEN_REQUESTED);
-+                    auto cleanURL = url;
-+                    cleanURL.removeCredentials();
-+                    message.AddString("url", cleanURL.string().utf8().legacyCStringPointer());
-+                    message.AddString("source_url", page.pageLoadState().activeURL().string().utf8().legacyCStringPointer());
-+                    sendToHostHaiku(state, message);
-+                }
++            // Hand the link to the browser, which validates the source tab
++            // and keeps a single native prompt outstanding. "trusted" means a
++            // user action asked for it: a click (the gesture survives the
++            // redirects of the navigation it started), or a main-frame load
++            // the browser itself started (typed, or opened from another
++            // application) and its server redirects, such as an OAuth
++            // callback to an application's scheme. A main-frame navigation
++            // a script started by itself still reaches the browser, which
++            // asks every time; frames without a gesture are only reported.
++            if (auto state = m_state.lock(); state && !state->closed) {
++                const bool mainFrame = action->targetFrame() && action->targetFrame()->isMainFrame();
++                RefPtr navigation = action->mainFrameNavigation();
++                const bool clientNavigation = mainFrame && navigation
++                    && state->nativeNavigationIdentifier == navigation->navigationID();
++                const bool gesture = action->isProcessingUserGesture();
++                BMessage message(B_WEBKIT_SCHEME_OPEN_REQUESTED);
++                auto cleanURL = url;
++                cleanURL.removeCredentials();
++                message.AddString("url", cleanURL.string().utf8().legacyCStringPointer());
++                message.AddString("source_url", page.pageLoadState().activeURL().string().utf8().legacyCStringPointer());
++                message.AddString("committed_url", page.pageLoadState().url().string().utf8().legacyCStringPointer());
++                message.AddBool("user_gesture", gesture);
++                message.AddBool("trusted", gesture || clientNavigation);
++                message.AddBool("main_frame", mainFrame);
++                message.AddBool("redirect", action->isRedirect());
++                sendToHostHaiku(state, message);
 +            }
 +            listener->ignore();
 +            return;
@@ -111794,16 +112476,39 @@ index 0000000000000000000000000000000000000000..72e82ce7ab59e0bbc72a29f55c47495e
 +            }
 +#endif
 +        }
++        // The host's autoplay and pop-up choices for the page's site
++        // (BWebKitContext::SetSitePermission "autoplay" and "popups").
++        std::optional<WebsiteAutoplayPolicy> autoplay;
++        std::optional<WebsitePopUpPolicy> popUps;
++        if (auto state = m_state.lock(); state && state->context && action->targetFrame() && action->targetFrame()->isMainFrame()
++            && action->request().url().protocolIsInHTTPFamily()) {
++            const auto origin = SecurityOrigin::create(action->request().url())->toString();
++            if (auto value = state->context->sitePolicy("autoplay"_s, origin))
++                autoplay = *value >= 2 ? WebsiteAutoplayPolicy::Deny : *value == 1 ? WebsiteAutoplayPolicy::AllowWithoutSound : WebsiteAutoplayPolicy::Allow;
++            if (auto value = state->context->sitePolicy("popups"_s, origin))
++                popUps = *value > 0 ? WebsitePopUpPolicy::Allow : WebsitePopUpPolicy::Default;
++        }
++        RefPtr<API::WebsitePolicies> policies;
++        if (autoplay || popUps) {
++            policies = page.configuration().defaultWebsitePolicies().copy();
++            if (autoplay)
++                policies->setAutoplayPolicy(*autoplay);
++            if (popUps)
++                policies->setPopUpPolicy(*popUps);
++        }
 +#if ENABLE(WK_WEB_EXTENSIONS)
 +        // Tell the loads of this navigation where each extension may redirect
 +        // or modify requests (its host permissions), as Cocoa does.
 +        if (RefPtr controller = page.webExtensionController()) {
-+            Ref policies = page.configuration().defaultWebsitePolicies().copy();
-+            controller->updateWebsitePoliciesForNavigation(policies.get(), action.get());
-+            listener->use(policies.ptr());
-+            return;
++            if (!policies)
++                policies = page.configuration().defaultWebsitePolicies().copy();
++            controller->updateWebsitePoliciesForNavigation(*policies, action.get());
 +        }
 +#endif
++        if (policies) {
++            listener->use(policies.get());
++            return;
++        }
 +        listener->use();
 +    }
 +
@@ -111828,6 +112533,43 @@ index 0000000000000000000000000000000000000000..72e82ce7ab59e0bbc72a29f55c47495e
 +        else
 +            listener->ignore();
 +    }
++
++    // The host shows what happened to the page and reloads it when the
++    // user asks (WebKit would otherwise reload it by itself, once).
++    bool processDidTerminate(WebPageProxy&, ProcessTerminationReason reason) override
++    {
++        auto state = m_state.lock();
++        if (!state || state->closed)
++            return true;
++        const char* name = "exited";
++        switch (reason) {
++        case ProcessTerminationReason::Crash:
++        case ProcessTerminationReason::NonMainFrameWebContentProcessCrash:
++            name = "crash";
++            break;
++        case ProcessTerminationReason::ExceededMemoryLimit:
++            name = "memory";
++            break;
++        case ProcessTerminationReason::ExceededCPULimit:
++            name = "cpu";
++            break;
++        case ProcessTerminationReason::RequestedByClient:
++            name = "stopped";
++            break;
++        case ProcessTerminationReason::Unresponsive:
++            name = "unresponsive";
++            break;
++        default:
++            break;
++        }
++        BMessage message(B_WEBKIT_PROCESS_EXITED);
++        message.AddString("reason", name);
++        sendToHostHaiku(state, message);
++        return true;
++    }
++
++    void processDidBecomeUnresponsive(WebPageProxy&) override { notifyResponsiveness(false); }
++    void processDidBecomeResponsive(WebPageProxy&) override { notifyResponsiveness(true); }
 +
 +    void navigationActionDidBecomeDownload(WebPageProxy&, API::NavigationAction&, DownloadProxy& download) override { registerDownload(download); }
 +    void navigationResponseDidBecomeDownload(WebPageProxy&, API::NavigationResponse&, DownloadProxy& download) override { registerDownload(download); }
@@ -111930,6 +112672,15 @@ index 0000000000000000000000000000000000000000..72e82ce7ab59e0bbc72a29f55c47495e
 +    }
 +
 +private:
++    void notifyResponsiveness(bool responsive)
++    {
++        if (auto state = m_state.lock(); state && !state->closed) {
++            BMessage message(B_WEBKIT_RESPONSIVENESS_CHANGED);
++            message.AddBool("responsive", responsive);
++            sendToHostHaiku(state, message);
++        }
++    }
++
 +    void registerDownload(DownloadProxy& download)
 +    {
 +        if (auto state = m_state.lock(); state && state->context) {
@@ -112074,6 +112825,18 @@ index 0000000000000000000000000000000000000000..72e82ce7ab59e0bbc72a29f55c47495e
 +    // declines window.open() as before.
 +    JavaScriptUIClientHaiku(std::weak_ptr<WebViewStateHaiku> state, bool hostsNewPages)
 +        : m_state(std::move(state)), m_hostsNewPages(hostsNewPages) { }
++
++    // window.print(): the host shows its print dialog
++    // (BWebKitView::DrawPagesForPrinting). The page's script goes on at once.
++    void printFrame(WebPageProxy&, WebFrameProxy& frame, const FloatSize&, CompletionHandler<void()>&& completion) override
++    {
++        if (auto state = m_state.lock(); state && !state->closed && m_hostsNewPages) {
++            BMessage message(B_WEBKIT_PRINT_REQUESTED);
++            message.AddBool("main_frame", frame.isMainFrame());
++            sendToHostHaiku(state, message);
++        }
++        completion();
++    }
 +
 +    void createNewPage(WebPageProxy&, Ref<API::PageConfiguration>&& configuration, Ref<API::NavigationAction>&& action, CompletionHandler<void(RefPtr<WebPageProxy>&&)>&& completion) override
 +    {
@@ -112832,6 +113595,8 @@ index 0000000000000000000000000000000000000000..72e82ce7ab59e0bbc72a29f55c47495e
 +    message.AddDouble("pageZoom", m_page->pageZoomFactor());
 +    message.AddDouble("textZoom", m_page->textZoomFactor());
 +    message.AddBool("closeApprovalInvalidated", m_state->closeApprovalInvalidated);
++    message.AddBool("playingAudio", m_page->isPlayingAudio());
++    message.AddBool("audioMuted", m_page->isAudioMuted());
 +#if ENABLE(MEDIA_STREAM)
 +    auto mediaState = m_page->reportedMediaState();
 +    message.AddBool("capturingCamera", mediaState.containsAny({ WebCore::MediaProducerMediaState::HasActiveVideoCaptureDevice, WebCore::MediaProducerMediaState::HasMutedVideoCaptureDevice }));
@@ -113525,16 +114290,26 @@ index 0000000000000000000000000000000000000000..72e82ce7ab59e0bbc72a29f55c47495e
 +void performExtensionMenuItemHaiku(uint64_t) { }
 +#endif
 +
++// The frame of each page's last context menu on a misspelt word, for
++// performSpellingCommandHaiku(). Main thread only.
++static std::map<uint64_t, FrameInfoData>& spellingMenuFramesHaiku()
++{
++    static NeverDestroyed<std::map<uint64_t, FrameInfoData>> frames;
++    return frames.get();
++}
++
 +// The host builds its own native menu from what was clicked; WebKit's
-+// proposed items (and their actions) are not used.
++// proposed items (and their actions) are not used, except the spelling
++// guesses.
 +class PendingContextMenuHaiku final : public WebContextMenuProxy {
 +    WTF_MAKE_TZONE_ALLOCATED_INLINE(PendingContextMenuHaiku);
 +public:
 +    PendingContextMenuHaiku(std::weak_ptr<WebViewStateHaiku> state, WebPageProxy& page, FrameInfoData&& frame, ContextMenuContextData&& context, const UserData& data)
 +        : WebContextMenuProxy(page, WTF::move(frame), WTF::move(context), data), m_state(std::move(state)) { }
 +private:
-+    void showContextMenuWithItems(Vector<Ref<WebContextMenuItem>>&&) override
++    void showContextMenuWithItems(Vector<Ref<WebContextMenuItem>>&& items) override
 +    {
++        m_proposedItems = WTF::move(items);
 +        if (auto state = m_state.lock(); state && !state->closed) {
 +            BMessage message(B_WEBKIT_CONTEXT_MENU);
 +            const auto location = m_context.menuLocation();
@@ -113554,6 +114329,22 @@ index 0000000000000000000000000000000000000000..72e82ce7ab59e0bbc72a29f55c47495e
 +                message.AddBool("selected", hit->isSelected);
 +                message.AddBool("downloadable_media", hit->isDownloadableMedia);
 +            }
++            // WebCore proposes spelling guesses for a misspelt word under the
++            // pointer (Ignore and Learn come with them); the host offers them.
++            bool misspelled = false;
++            for (auto& item : m_proposedItems) {
++                const auto action = item->data().action();
++                if (action == ContextMenuItemTagSpellingGuess)
++                    addTextHaiku(message, "spelling_guess", item->data().title());
++                if (action == ContextMenuItemTagSpellingGuess || action == ContextMenuItemTagNoGuessesFound
++                    || action == ContextMenuItemTagLearnSpelling)
++                    misspelled = true;
++            }
++            if (misspelled) {
++                message.AddBool("misspelled", true);
++                if (RefPtr page = this->page())
++                    spellingMenuFramesHaiku().insert_or_assign(page->identifier().toUInt64(), m_frameInfo);
++            }
 +#if ENABLE(WK_WEB_EXTENSIONS)
 +            if (RefPtr page = this->page())
 +                addExtensionMenusHaiku(message, *page, m_context, m_frameInfo);
@@ -113565,7 +114356,34 @@ index 0000000000000000000000000000000000000000..72e82ce7ab59e0bbc72a29f55c47495e
 +    }
 +
 +    const std::weak_ptr<WebViewStateHaiku> m_state;
++    Vector<Ref<WebContextMenuItem>> m_proposedItems;
 +};
++
++void performSpellingCommandHaiku(WebPageProxy& page, uint32_t command, const String& word)
++{
++    ASSERT(RunLoop::isMain());
++    auto frame = spellingMenuFramesHaiku().find(page.identifier().toUInt64());
++    if (frame == spellingMenuFramesHaiku().end())
++        return;
++    auto frameInfo = frame->second;
++    switch (command) {
++    case B_WEBKIT_SPELLING_REPLACE:
++        // WebCore takes the word around the caret (Unix editing) and
++        // replaces it, as for its own menu's guesses.
++        if (!word.isEmpty())
++            page.contextMenuItemSelected(WebContextMenuItemData(ContextMenuItemType::Action, ContextMenuItemTagSpellingGuess, String { word }, true, false), frameInfo);
++        break;
++    case B_WEBKIT_SPELLING_IGNORE:
++    case B_WEBKIT_SPELLING_LEARN:
++        // Ignore and Learn act on the selection: select the word first.
++        page.executeEditCommand("SelectWord"_s, { });
++        page.contextMenuItemSelected(WebContextMenuItemData(ContextMenuItemType::Action,
++            command == B_WEBKIT_SPELLING_LEARN ? ContextMenuItemTagLearnSpelling : ContextMenuItemTagIgnoreSpelling,
++            String { }, true, false), frameInfo);
++        break;
++    }
++    spellingMenuFramesHaiku().erase(frame);
++}
 +
 +Ref<WebContextMenuProxy> WebView::createContextMenuProxy(WebPageProxy& page, FrameInfoData&& frame, ContextMenuContextData&& context, const UserData& data)
 +{
@@ -113663,10 +114481,10 @@ index 0000000000000000000000000000000000000000..72e82ce7ab59e0bbc72a29f55c47495e
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/WebViewContextHaiku.cpp b/Source/WebKit/UIProcess/haiku/WebViewContextHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..cec18405a06158fc6b2d1f68e7e90d61c28c8d01
+index 0000000000000000000000000000000000000000..5aa8116ab3df8910f8198b15127a8b4992316cc0
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/WebViewContextHaiku.cpp
-@@ -0,0 +1,331 @@
+@@ -0,0 +1,356 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#include "config.h"
@@ -113823,6 +114641,31 @@ index 0000000000000000000000000000000000000000..cec18405a06158fc6b2d1f68e7e90d61
 +    auto iterator = m_allowedServerCertificates.find(host.convertToASCIILowercase());
 +    return iterator != m_allowedServerCertificates.end()
 +        && iterator->value.contains(sha256.convertToASCIILowercase());
++}
++
++void WebViewContextHaiku::setSitePolicy(const String& policy, const String& origin, int32_t value)
++{
++    ASSERT(RunLoop::isMain());
++    if (policy.isEmpty() || origin.isEmpty())
++        return;
++    auto& origins = m_sitePolicies.ensure(policy, [] { return HashMap<String, int32_t> { }; }).iterator->value;
++    if (value < 0)
++        origins.remove(origin.convertToASCIILowercase());
++    else
++        origins.set(origin.convertToASCIILowercase(), value);
++}
++
++std::optional<int32_t> WebViewContextHaiku::sitePolicy(const String& policy, const String& origin) const
++{
++    ASSERT(RunLoop::isMain());
++    auto origins = m_sitePolicies.find(policy);
++    if (origins == m_sitePolicies.end())
++        return std::nullopt;
++    if (auto found = origins->value.find(origin.convertToASCIILowercase()); found != origins->value.end())
++        return found->value;
++    if (auto fallback = origins->value.find("*"_s); fallback != origins->value.end())
++        return fallback->value;
++    return std::nullopt;
 +}
 +
 +WebsiteDataStore& WebViewContextHaiku::dataStore() const
@@ -114000,10 +114843,10 @@ index 0000000000000000000000000000000000000000..cec18405a06158fc6b2d1f68e7e90d61
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/WebViewContextHaiku.h b/Source/WebKit/UIProcess/haiku/WebViewContextHaiku.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..72b20b3d5a964a65bbe8fb34aad9c94a3cb2cfc7
+index 0000000000000000000000000000000000000000..3e268fc22c64a580604be1662f7a8162e1a8ab4e
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/WebViewContextHaiku.h
-@@ -0,0 +1,98 @@
+@@ -0,0 +1,108 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#pragma once
@@ -114011,6 +114854,7 @@ index 0000000000000000000000000000000000000000..72b20b3d5a964a65bbe8fb34aad9c94a
 +#include <Messenger.h>
 +#include <SupportDefs.h>
 +#include <memory>
++#include <optional>
 +#include <wtf/HashMap.h>
 +#include <wtf/HashSet.h>
 +#include <wtf/Ref.h>
@@ -114074,6 +114918,14 @@ index 0000000000000000000000000000000000000000..72b20b3d5a964a65bbe8fb34aad9c94a
 +    void allowServerCertificate(const String& host, const String& sha256);
 +    void forgetServerCertificates(const String& host);
 +    bool allowsServerCertificate(const String& host, const String& sha256) const;
++    // What pages of an origin ("scheme://host[:port]", or "*" for every
++    // origin without its own) may do without asking: "autoplay" (0 play
++    // media, 1 only without sound, 2 nothing until the user interacts) and
++    // "popups" (1 open windows without a click, 0 the usual rule). A
++    // negative value removes the origin's entry. Applied to main-frame
++    // navigations from then on. Application thread only.
++    void setSitePolicy(const String& policy, const String& origin, int32_t value);
++    std::optional<int32_t> sitePolicy(const String& policy, const String& origin) const;
 +
 +private:
 +    explicit WebViewContextHaiku(Ref<WebsiteDataStore>&&, String extensionStorageDirectory);
@@ -114092,6 +114944,7 @@ index 0000000000000000000000000000000000000000..72b20b3d5a964a65bbe8fb34aad9c94a
 +    // Set when the extensions above are another context's.
 +    const std::shared_ptr<WebViewContextHaiku> m_extensionOwner;
 +    HashMap<String, HashSet<String>> m_allowedServerCertificates;
++    HashMap<String, HashMap<String, int32_t>> m_sitePolicies;
 +    const std::shared_ptr<SitePermissionsHaiku> m_sitePermissions;
 +#if ENABLE(WEBUSB)
 +    const std::shared_ptr<WebUSBBrokerHaiku> m_usb;
@@ -114319,10 +115172,10 @@ index 0000000000000000000000000000000000000000..63372cc3f12bccf01f83f9ed4395aaae
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/WebViewStateHaiku.h b/Source/WebKit/UIProcess/haiku/WebViewStateHaiku.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..5f9791a9b7588ef3126171b0265de45c5fe94982
+index 0000000000000000000000000000000000000000..4a79a4ace0a8083e4d6cdee7fc6f618df6b7058b
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/WebViewStateHaiku.h
-@@ -0,0 +1,183 @@
+@@ -0,0 +1,189 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#pragma once
@@ -114350,6 +115203,7 @@ index 0000000000000000000000000000000000000000..5f9791a9b7588ef3126171b0265de45c
 +namespace WebKit {
 +
 +class DirectPresentTargetHaiku;
++class WebPageProxy;
 +class WebView;
 +class WebViewContextHaiku;
 +
@@ -114395,7 +115249,9 @@ index 0000000000000000000000000000000000000000..5f9791a9b7588ef3126171b0265de45c
 +    std::mutex mutex;
 +    WebViewGeometryHaiku geometry;
 +    BMessenger view;
-+    const BMessenger target;
++    // Where notifications go. Changed only on the WebKit main thread
++    // (BWebKitView::SetNotificationTarget), which is where it is read.
++    BMessenger target;
 +    BitmapPresenterHaiku presenter;
 +    std::atomic<bool> closed { false };
 +    // A file drag from another application is over the view (window thread).
@@ -114504,6 +115360,9 @@ index 0000000000000000000000000000000000000000..5f9791a9b7588ef3126171b0265de45c
 +void declineNewPageHaiku(uint64_t identifier);
 +// Main thread only. Runs an extension item of the last B_WEBKIT_CONTEXT_MENU.
 +void performExtensionMenuItemHaiku(uint64_t token);
++// Main thread only. BWebKitView::PerformSpellingCommand for page's last
++// context menu on a misspelt word.
++void performSpellingCommandHaiku(WebPageProxy&, uint32_t command, const String& word);
 +
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/bluetooth/BluetoothSessionHaiku.cpp b/Source/WebKit/UIProcess/haiku/bluetooth/BluetoothSessionHaiku.cpp
@@ -138636,7 +139495,7 @@ index 11766a98414863026a09ccea0dbbdd432db4444f..5858d6f7059bf2e8a99b9a9b1b2928e6
          m_textManipulationIncludesSubframes = false;
      else if (m_textManipulationIncludesSubframes)
 diff --git a/Source/WebKit/WebProcess/WebPage/WebPage.h b/Source/WebKit/WebProcess/WebPage/WebPage.h
-index 5dfb080fb516a2c8bd2ec72245babd8c28d926bf..0a2d66b8f3976f99ee39f5b6f4ca9fdbbdf4b632 100644
+index 5dfb080fb516a2c8bd2ec72245babd8c28d926bf..cd8431481235351296cdef83670b77f027f8fa71 100644
 --- a/Source/WebKit/WebProcess/WebPage/WebPage.h
 +++ b/Source/WebKit/WebProcess/WebPage/WebPage.h
 @@ -25,6 +25,10 @@
@@ -138650,18 +139509,31 @@ index 5dfb080fb516a2c8bd2ec72245babd8c28d926bf..0a2d66b8f3976f99ee39f5b6f4ca9fdb
  #include "APIObject.h"
  #include "MessageReceiver.h"
  #include "MessageSender.h"
-@@ -925,6 +929,10 @@ public:
+@@ -925,6 +929,23 @@ public:
      bool suspendForProcessSwap();
  
      void sendSetWindowFrame(const WebCore::FloatRect&);
 +#if PLATFORM(HAIKU)
++    // Pages [first, first + count) of the frame laid out for printInfo: one
++    // PDF (rasterScale 0), or 32-bit pictures of rasterScale pixels a point,
++    // one after the other, each pageSize. pageCount counts every page.
++    void drawPagesForPrintingHaiku(WebCore::FrameIdentifier, const PrintInfo&, uint32_t first, uint32_t count, float rasterScale, bool printBackgrounds,
++        CompletionHandler<void(std::optional<WebCore::SharedMemoryHandle>&&, uint32_t pageCount, WebCore::IntSize pageSize)>&&);
 +    void setWindowFrameHaiku(const WebCore::FloatRect&);
 +    const WebCore::FloatRect& windowFrameHaiku() const LIFETIME_BOUND { return m_windowFrameHaiku; }
++    // Picture in Picture (WebPageHaiku.cpp): the frames of the page's
++    // <video data-summit-pip=token>, in any frame, go to target (a
++    // flattened BMessage with the BMessenger "target", in hexadecimal),
++    // fitted into size.
++    void enterPictureInPictureHaiku(String&& token, String&& target, WebCore::IntSize);
++    void setPictureInPictureSizeHaiku(WebCore::IntSize);
++    void pictureInPictureCommandHaiku(String&& command);
++    void exitPictureInPictureHaiku();
 +#endif
  
      double textZoomFactor() const;
      void didSetTextZoomFactor(double);
-@@ -1906,7 +1914,7 @@ public:
+@@ -1906,7 +1927,7 @@ public:
  #if ENABLE(WK_WEB_EXTENSIONS)
      WebExtensionControllerProxy* webExtensionControllerProxy() const
      {
@@ -138670,7 +139542,7 @@ index 5dfb080fb516a2c8bd2ec72245babd8c28d926bf..0a2d66b8f3976f99ee39f5b6f4ca9fdb
          return m_webExtensionController.get();
  #else
          return nullptr;
-@@ -2534,6 +2542,10 @@ private:
+@@ -2534,6 +2555,10 @@ private:
      void runJavaScript(WebFrame*, RunJavaScriptParameters&&, ContentWorldIdentifier, bool, CompletionHandler<void(RunJavaScriptResult&&)>&&);
      void runJavaScriptInFrameInScriptWorld(RunJavaScriptParameters&&, std::optional<WebCore::FrameIdentifier>, const ContentWorldData&, bool, CompletionHandler<void(RunJavaScriptResult&&)>&&);
      void clearContentWorld(ContentWorldIdentifier, CompletionHandler<void()>&&);
@@ -138681,7 +139553,7 @@ index 5dfb080fb516a2c8bd2ec72245babd8c28d926bf..0a2d66b8f3976f99ee39f5b6f4ca9fdb
      void getAccessibilityTreeData(CompletionHandler<void(const std::optional<IPC::SharedBufferReference>&)>&&);
      void updateRenderingWithForcedRepaint(CompletionHandler<void()>&&);
      void takeSnapshot(WebCore::IntRect snapshotRect, WebCore::IntSize bitmapSize, SnapshotOptions, CompletionHandler<void(std::optional<ImageBufferBackendHandle>&&, WebCore::Headroom)>&&);
-@@ -3087,8 +3099,12 @@ private:
+@@ -3087,8 +3112,12 @@ private:
  
      const Ref<WebUserContentController> m_userContentController;
  
@@ -138697,7 +139569,7 @@ index 5dfb080fb516a2c8bd2ec72245babd8c28d926bf..0a2d66b8f3976f99ee39f5b6f4ca9fdb
  
      const UniqueRef<WebScreenOrientationManager> m_screenOrientationManager;
 diff --git a/Source/WebKit/WebProcess/WebPage/WebPage.messages.in b/Source/WebKit/WebProcess/WebPage/WebPage.messages.in
-index 483df2ae00809b454f95152d8d8bb462a150fe22..0963a1cfe169cb5cdd2d8c5783b81b192ea66dee 100644
+index 483df2ae00809b454f95152d8d8bb462a150fe22..12a0cbc5b49debc0ed9b6ca2020f0df6524dcc82 100644
 --- a/Source/WebKit/WebProcess/WebPage/WebPage.messages.in
 +++ b/Source/WebKit/WebProcess/WebPage/WebPage.messages.in
 @@ -288,6 +288,10 @@ messages -> WebPage WantsAsyncDispatchMessage {
@@ -138711,7 +139583,21 @@ index 483df2ae00809b454f95152d8d8bb462a150fe22..0963a1cfe169cb5cdd2d8c5783b81b19
  
      ClearContentWorld(WebKit::ContentWorldIdentifier worldIdentifier) -> ()
  
-@@ -631,6 +635,9 @@ messages -> WebPage WantsAsyncDispatchMessage {
+@@ -549,6 +553,13 @@ messages -> WebPage WantsAsyncDispatchMessage {
+ #endif
+     DrawToPDF(std::optional<WebCore::FloatRect> rect, bool allowTransparentBackground) -> (RefPtr<WebCore::SharedBuffer> data)
+ #endif
++#if PLATFORM(HAIKU)
++    EnterPictureInPictureHaiku(String token, String target, WebCore::IntSize size)
++    SetPictureInPictureSizeHaiku(WebCore::IntSize size)
++    PictureInPictureCommandHaiku(String command)
++    ExitPictureInPictureHaiku()
++    DrawPagesForPrintingHaiku(WebCore::FrameIdentifier frameID, struct WebKit::PrintInfo printInfo, uint32_t first, uint32_t count, float rasterScale, bool printBackgrounds) -> (std::optional<WebCore::SharedMemory::Handle> data, uint32_t pageCount, WebCore::IntSize pageSize)
++#endif
+ #if PLATFORM(GTK)
+     DrawPagesForPrinting(WebCore::FrameIdentifier frameID, struct WebKit::PrintInfo printInfo) -> (std::optional<WebCore::SharedMemory::Handle> data, WebCore::ResourceError error)
+     DrawPagesForPrintingDuringDOMPrintOperation(WebCore::FrameIdentifier frameID, struct WebKit::PrintInfo printInfo) -> (std::optional<WebCore::SharedMemory::Handle> data, WebCore::ResourceError error) AllowedWhenWaitingForSyncReplyDuringUnboundedIPC
+@@ -631,6 +642,9 @@ messages -> WebPage WantsAsyncDispatchMessage {
      SetWritingSuggestion(String text, struct WebKit::EditingRange selectionRange)
      ConfirmCompositionAsync()
  #endif
@@ -140149,10 +141035,10 @@ index 0000000000000000000000000000000000000000..7459ce25f180160a1c12431c73926a1f
 +
 diff --git a/Source/WebKit/WebProcess/WebPage/haiku/WebPageHaiku.cpp b/Source/WebKit/WebProcess/WebPage/haiku/WebPageHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..0b0a79dd0813bcfae719f65f648a6f5c0aba68a8
+index 0000000000000000000000000000000000000000..75eb3bc86717348a963a01df505c353fb29734c3
 --- /dev/null
 +++ b/Source/WebKit/WebProcess/WebPage/haiku/WebPageHaiku.cpp
-@@ -0,0 +1,147 @@
+@@ -0,0 +1,446 @@
 +/*
 + * Copyright (C) 2014 Haiku, inc.
 + *
@@ -140182,6 +141068,9 @@ index 0000000000000000000000000000000000000000..0b0a79dd0813bcfae719f65f648a6f5c
 +#include "WebPage.h"
 +#include "EditingCommandsHaiku.h"
 +#include "StartupTraceHaiku.h"
++#include "PrintInfo.h"
++#include "WebFrame.h"
++#include "WebProcess.h"
 +
 +#include <WebCore/BackForwardController.h>
 +#include <WebCore/Document.h>
@@ -140198,6 +141087,29 @@ index 0000000000000000000000000000000000000000..0b0a79dd0813bcfae719f65f648a6f5c
 +#include <WebCore/Settings.h>
 +#include <WebCore/UserAgent.h>
 +#include <WebCore/WindowsKeyboardCodes.h>
++#include <WebCore/GraphicsContextSkia.h>
++#include <WebCore/PrintContext.h>
++#include <WebCore/ContainerNodeInlines.h>
++#include <WebCore/Event.h>
++#include <WebCore/EventNames.h>
++#include <WebCore/FrameTree.h>
++#include <WebCore/HTMLVideoElement.h>
++#include <WebCore/NativeImage.h>
++#include <Message.h>
++#include <Messenger.h>
++#include <skia/core/SkImage.h>
++#include <wtf/RunLoop.h>
++#include <wtf/WeakPtr.h>
++#include <wtf/NeverDestroyed.h>
++#include <wtf/text/MakeString.h>
++#include <WebCore/UserGestureIndicator.h>
++#include <WebCore/SharedBuffer.h>
++#include <WebCore/SharedMemory.h>
++#include <skia/core/SkCanvas.h>
++#include <skia/core/SkStream.h>
++#include <skia/core/SkSurface.h>
++#include <skia/docs/SkPDFDocument.h>
++#include <ctime>
 +
 +#include "WebKeyboardEvent.h"
 +
@@ -140216,6 +141128,279 @@ index 0000000000000000000000000000000000000000..0b0a79dd0813bcfae719f65f648a6f5c
 +
 +void WebPage::platformDetach()
 +{
++}
++
++namespace {
++
++// A page's video shown in the host's Picture in Picture window: its frames go
++// to the host as B_WEBKIT_PICTURE_IN_PICTURE_FRAME ('wpif') messages,
++// fitted into the window's size, at most 30 a second and only when the
++// picture changed. One per page; main thread only.
++struct PictureInPictureHaiku {
++    WeakPtr<WebPage> page;
++    WeakPtr<HTMLMediaElement> video;
++    BMessenger target;
++    IntSize size;
++    std::unique_ptr<RunLoop::Timer> timer;
++    double lastTime { -1 };
++    bool lastPaused { false };
++    IntSize lastVideoSize;
++    uint32_t idleTicks { 0 };
++};
++
++HashMap<uint64_t, std::unique_ptr<PictureInPictureHaiku>>& pictureInPicturesHaiku()
++{
++    static NeverDestroyed<HashMap<uint64_t, std::unique_ptr<PictureInPictureHaiku>>> pictures;
++    return pictures.get();
++}
++
++constexpr uint32 pictureInPictureFrameHaiku = 'wpif';
++constexpr uint32 pictureInPictureEndedHaiku = 'wpie';
++
++void endPictureInPictureHaiku(uint64_t pageID, bool notifyHost)
++{
++    auto entry = pictureInPicturesHaiku().take(pageID);
++    if (!entry)
++        return;
++    if (entry->timer)
++        entry->timer->stop();
++    if (RefPtr video = entry->video.get())
++        video->dispatchEvent(Event::create("leavepictureinpicture"_s, Event::CanBubble::Yes, Event::IsCancelable::No));
++    if (notifyHost) {
++        BMessage message(pictureInPictureEndedHaiku);
++        message.AddUInt64("page", pageID);
++        entry->target.SendMessage(&message, static_cast<BHandler*>(nullptr), 0);
++    }
++}
++
++void sendPictureInPictureFrameHaiku(uint64_t pageID)
++{
++    auto found = pictureInPicturesHaiku().find(pageID);
++    if (found == pictureInPicturesHaiku().end())
++        return;
++    auto& picture = *found->value;
++    RefPtr video = dynamicDowncast<HTMLVideoElement>(picture.video.get());
++    if (!video || !video->isConnected() || !picture.page) {
++        endPictureInPictureHaiku(pageID, true);
++        return;
++    }
++    const double time = video->currentTime();
++    const bool paused = video->paused();
++    // A paused picture that was sent stays; check once a second for a seek.
++    if (time == picture.lastTime && paused == picture.lastPaused && ++picture.idleTicks < 30)
++        return;
++    picture.idleTicks = 0;
++    RefPtr image = video->nativeImageForCurrentTime();
++    auto platformImage = image ? image->platformImage() : nullptr;
++    if (!platformImage || platformImage->width() <= 0 || platformImage->height() <= 0)
++        return;
++    const IntSize videoSize(platformImage->width(), platformImage->height());
++    if (time == picture.lastTime && paused == picture.lastPaused && videoSize == picture.lastVideoSize)
++        return;
++    const IntSize bounds(std::clamp(picture.size.width(), 64, 1920), std::clamp(picture.size.height(), 36, 1080));
++    const double fit = std::min(double(bounds.width()) / videoSize.width(), double(bounds.height()) / videoSize.height());
++    const int width = std::max(1, int(std::round(videoSize.width() * fit)));
++    const int height = std::max(1, int(std::round(videoSize.height() * fit)));
++    Vector<uint8_t> pixels(size_t(width) * height * 4);
++    auto surface = SkSurfaces::WrapPixels(SkImageInfo::MakeN32Premul(width, height), pixels.mutableSpan().data(), width * 4);
++    if (!surface)
++        return;
++    surface->getCanvas()->clear(SK_ColorBLACK);
++    surface->getCanvas()->drawImageRect(platformImage, SkRect::MakeWH(width, height), SkSamplingOptions(SkFilterMode::kLinear, SkMipmapMode::kNone));
++    BMessage message(pictureInPictureFrameHaiku);
++    message.AddUInt64("page", pageID);
++    message.AddInt32("width", width);
++    message.AddInt32("height", height);
++    message.AddData("pixels", B_RAW_TYPE, pixels.span().data(), pixels.size(), false);
++    message.AddBool("paused", paused);
++    message.AddDouble("time", time);
++    message.AddDouble("duration", video->duration());
++    // A full queue drops the frame rather than holding up the page.
++    if (picture.target.SendMessage(&message, static_cast<BHandler*>(nullptr), 0) == B_BAD_PORT_ID) {
++        endPictureInPictureHaiku(pageID, false);
++        return;
++    }
++    picture.lastTime = time;
++    picture.lastPaused = paused;
++    picture.lastVideoSize = videoSize;
++}
++
++} // namespace
++
++void WebPage::enterPictureInPictureHaiku(String&& token, String&& target, IntSize size)
++{
++    const uint64_t pageID = identifier().toUInt64();
++    endPictureInPictureHaiku(pageID, true);
++    if (token.isEmpty() || token.length() > 20)
++        return;
++    for (auto character : StringView(token).codeUnits()) {
++        if (!isASCIIDigit(character))
++            return;
++    }
++    Vector<uint8_t> bytes;
++    if (target.isEmpty() || target.length() % 2 || target.length() > 4096)
++        return;
++    for (unsigned i = 0; i < target.length(); i += 2) {
++        if (!isASCIIHexDigit(target[i]) || !isASCIIHexDigit(target[i + 1]))
++            return;
++        bytes.append(toASCIIHexValue(target[i], target[i + 1]));
++    }
++    BMessage carrier;
++    BMessenger messenger;
++    if (carrier.Unflatten(reinterpret_cast<const char*>(bytes.span().data())) != B_OK
++        || carrier.FindMessenger("target", &messenger) != B_OK)
++        return;
++    RefPtr<HTMLVideoElement> video;
++    const auto selector = makeString("video[data-summit-pip=\""_s, token, "\"]"_s);
++    for (RefPtr<Frame> frame = corePage() ? &corePage()->mainFrame() : nullptr; frame && !video; frame = frame->tree().traverseNext()) {
++        RefPtr localFrame = dynamicDowncast<LocalFrame>(frame);
++        RefPtr document = localFrame ? localFrame->document() : nullptr;
++        if (!document)
++            continue;
++        auto element = document->querySelector(selector);
++        if (!element.hasException())
++            video = dynamicDowncast<HTMLVideoElement>(element.releaseReturnValue());
++    }
++    if (!video) {
++        BMessage message(pictureInPictureEndedHaiku);
++        message.AddUInt64("page", pageID);
++        messenger.SendMessage(&message, static_cast<BHandler*>(nullptr), 0);
++        return;
++    }
++    auto picture = std::make_unique<PictureInPictureHaiku>();
++    picture->page = *this;
++    picture->video = *video;
++    picture->target = messenger;
++    picture->size = size;
++    picture->timer = std::make_unique<RunLoop::Timer>(RunLoop::mainSingleton(), "PictureInPictureHaiku"_s, [pageID] {
++        sendPictureInPictureFrameHaiku(pageID);
++    });
++    picture->timer->startRepeating(33_ms);
++    pictureInPicturesHaiku().set(pageID, WTF::move(picture));
++    video->dispatchEvent(Event::create("enterpictureinpicture"_s, Event::CanBubble::Yes, Event::IsCancelable::No));
++    sendPictureInPictureFrameHaiku(pageID);
++}
++
++void WebPage::setPictureInPictureSizeHaiku(IntSize size)
++{
++    if (auto found = pictureInPicturesHaiku().find(identifier().toUInt64()); found != pictureInPicturesHaiku().end()) {
++        found->value->size = size;
++        found->value->lastVideoSize = { };
++        found->value->lastTime = -1;
++    }
++}
++
++void WebPage::pictureInPictureCommandHaiku(String&& command)
++{
++    auto found = pictureInPicturesHaiku().find(identifier().toUInt64());
++    if (found == pictureInPicturesHaiku().end())
++        return;
++    RefPtr video = found->value->video.get();
++    if (!video)
++        return;
++    // The window's buttons are the user's own action.
++    UserGestureIndicator gesture(IsProcessingUserGesture::Yes, protect(video->document()).ptr());
++    if (command == "play"_s || (command == "toggle"_s && video->paused()))
++        video->play();
++    else if (command == "pause"_s || command == "toggle"_s)
++        video->pause();
++}
++
++void WebPage::exitPictureInPictureHaiku()
++{
++    endPictureInPictureHaiku(identifier().toUInt64(), false);
++}
++
++void WebPage::drawPagesForPrintingHaiku(FrameIdentifier frameID, const PrintInfo& printInfo, uint32_t first, uint32_t count, float rasterScale, bool printBackgrounds,
++    CompletionHandler<void(std::optional<WebCore::SharedMemoryHandle>&&, uint32_t, IntSize)>&& completion)
++{
++    RefPtr page = corePage();
++    if (!page) {
++        completion(std::nullopt, 0, { });
++        return;
++    }
++    // PrintInfo holds the paper's printable area and margins in CSS pixels
++    // (the host converts its points), so that pages are laid out as wide as
++    // in other browsers; pages are drawn on paper measured in points.
++    constexpr float pointsPerPixel = 0.75f;
++    const float scale = printInfo.pageSetupScaleFactor > 0 ? printInfo.pageSetupScaleFactor : 1;
++    const FloatSize paper((printInfo.availablePaperWidth + printInfo.margin.left() + printInfo.margin.right()) * pointsPerPixel * scale,
++        (printInfo.availablePaperHeight + printInfo.margin.top() + printInfo.margin.bottom()) * pointsPerPixel * scale);
++    const FloatPoint origin(printInfo.margin.left() * pointsPerPixel * scale, printInfo.margin.top() * pointsPerPixel * scale);
++    const float contentWidth = printInfo.availablePaperWidth * pointsPerPixel * scale;
++
++    auto& settings = page->settings();
++    const bool backgrounds = settings.shouldPrintBackgrounds();
++    settings.setShouldPrintBackgrounds(printBackgrounds);
++    PrintInfo layoutInfo = printInfo;
++    layoutInfo.pageSetupScaleFactor = 1;
++    beginPrinting(frameID, layoutInfo);
++    RefPtr printContext = m_printContext;
++    const uint32_t pageCount = printContext ? printContext->pageCount() : 0;
++    const uint32_t end = first < pageCount ? std::min<uint32_t>(pageCount, first + count) : first;
++    auto drawPage = [&](SkCanvas& canvas, uint32_t number) {
++        canvas.save();
++        canvas.translate(origin.x(), origin.y());
++        GraphicsContextSkia context(canvas, RenderingMode::Unaccelerated, RenderingPurpose::Unspecified);
++        printContext->spoolPage(context, number, contentWidth);
++        canvas.restore();
++    };
++
++    std::optional<WebCore::SharedMemoryHandle> handle;
++    IntSize pageSize;
++    if (printContext && first < end && rasterScale <= 0) {
++        SkDynamicMemoryWStream stream;
++        SkPDF::Metadata metadata;
++        RefPtr webFrame = WebProcess::singleton().webFrame(frameID);
++        RefPtr coreFrame = webFrame ? webFrame->coreLocalFrame() : nullptr;
++        if (RefPtr document = coreFrame ? coreFrame->document() : nullptr) {
++            auto title = document->title().utf8();
++            metadata.fTitle = SkString(title.legacyCStringPointer());
++        }
++        metadata.fCreator = SkString("Summit");
++        std::time_t now = std::time(nullptr);
++        if (std::tm local; localtime_r(&now, &local)) {
++            metadata.fCreation = SkPDF::DateTime { static_cast<int16_t>(local.tm_gmtoff / 60), static_cast<uint16_t>(local.tm_year + 1900),
++                static_cast<uint8_t>(local.tm_mon + 1), static_cast<uint8_t>(local.tm_wday), static_cast<uint8_t>(local.tm_mday),
++                static_cast<uint8_t>(local.tm_hour), static_cast<uint8_t>(local.tm_min), static_cast<uint8_t>(local.tm_sec) };
++            metadata.fModified = metadata.fCreation;
++        }
++        auto pdf = SkPDF::MakeDocument(&stream, metadata);
++        for (uint32_t number = first; pdf && number < end; ++number) {
++            if (auto* canvas = pdf->beginPage(paper.width(), paper.height())) {
++                drawPage(*canvas, number);
++                pdf->endPage();
++            }
++        }
++        if (pdf)
++            pdf->close();
++        auto data = SharedBuffer::create(stream.detachAsData());
++        if (RefPtr memory = SharedMemory::copyBuffer(data.get()))
++            handle = memory->createHandle(SharedMemory::Protection::ReadOnly);
++        pageSize = IntSize(std::ceil(paper.width()), std::ceil(paper.height()));
++    } else if (printContext && first < end) {
++        pageSize = IntSize(std::ceil(paper.width() * rasterScale), std::ceil(paper.height() * rasterScale));
++        const size_t pageBytes = static_cast<size_t>(pageSize.width()) * pageSize.height() * 4;
++        RefPtr memory = pageSize.isEmpty() || pageBytes * (end - first) > (512u << 20) ? nullptr : SharedMemory::allocate(pageBytes * (end - first));
++        if (memory) {
++            auto bytes = memory->mutableSpan();
++            for (uint32_t number = first; number < end; ++number) {
++                auto info = SkImageInfo::MakeN32Premul(pageSize.width(), pageSize.height());
++                auto surface = SkSurfaces::WrapPixels(info, bytes.subspan(pageBytes * (number - first)).data(), pageSize.width() * 4);
++                if (!surface)
++                    continue;
++                auto* canvas = surface->getCanvas();
++                canvas->clear(SK_ColorWHITE);
++                canvas->scale(rasterScale, rasterScale);
++                drawPage(*canvas, number);
++            }
++            handle = memory->createHandle(SharedMemory::Protection::ReadOnly);
++        }
++    }
++    if (m_printContext)
++        endPrintingImmediately();
++    settings.setShouldPrintBackgrounds(backgrounds);
++    completion(WTF::move(handle), pageCount, pageSize);
 +}
 +
 +void WebPage::setWindowFrameHaiku(const FloatRect& windowFrame)

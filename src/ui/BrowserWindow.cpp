@@ -52,6 +52,9 @@
 #include <WindowScreen.h>
 #if SUMMIT_MODERN_WEBKIT
 #include "ExtensionInstaller.h"
+#include "FeatureMessages.h"
+#include "NoticeBar.h"
+#include "PrintJob.h"
 #include "CertificateInfoWindow.h"
 #include "ReaderMode.h"
 #include <WebKit/WebKitInfo.h>
@@ -92,6 +95,9 @@ namespace summit {
 // A Firefox Add-ons item's add-on ID came from Mozilla ("slug"; "identifier"
 // and "name" unless that failed).
 static constexpr uint32 kStoreItemResolved = 'stir';
+// The identifier of window.__summitPipLargest()'s answer (reader requests
+// count up from 1).
+static constexpr uint64 kPictureInPictureQuery = uint64(1) << 61;
 // The engine sends one 'wvfr' message when a coordinated frame reaches its
 // native view. Count those deliveries only in explicit performance runs.
 class FrameStatsWebKitView final : public BWebKitView {
@@ -624,6 +630,12 @@ BrowserWindow::BrowserWindow(std::shared_ptr<SharedProfile> profile, std::string
     AddItem(file, "New Private Window", kNewPrivateWindow, 'N', B_SHIFT_KEY);
     AddItem(file, "New Tab", kNewTab, 'T');
     AddItem(file, "Open File…", kOpenFile, 'O');
+#if SUMMIT_MODERN_WEBKIT
+    file->AddSeparatorItem();
+    AddItem(file, "Save as PDF…", kSaveAsPDF, 'S', B_SHIFT_KEY);
+    AddItem(file, "Page Setup…", kPageSetup);
+    AddItem(file, "Print…", kPrint, 'P');
+#endif
     file->AddSeparatorItem();
     AddItem(file, "Close Window", kCloseWindow, 'W', B_SHIFT_KEY);
     AddItem(file, "Close Tab", kCloseTab, 'W');
@@ -645,6 +657,11 @@ BrowserWindow::BrowserWindow(std::shared_ptr<SharedProfile> profile, std::string
     edit->AddSeparatorItem();
     AddItem(edit, "Find in Page…", kFind, 'F');
     AddItem(edit, "Find Next", kFindNext, 'G');
+#if SUMMIT_MODERN_WEBKIT
+    edit->AddSeparatorItem();
+    fSpellingItem = new BMenuItem("Check Spelling While Typing", new BMessage(kToggleSpellChecking));
+    edit->AddItem(fSpellingItem);
+#endif
     edit->AddSeparatorItem();
     AddItem(edit, "Preferences…", kShowPreferences, ',');
     menu->AddItem(edit);
@@ -663,6 +680,8 @@ BrowserWindow::BrowserWindow(std::shared_ptr<SharedProfile> profile, std::string
     AddShortcut('+', B_SHIFT_KEY, new BMessage(kZoomIn));
     AddShortcut('=', 0, new BMessage(kZoomIn));
 #if SUMMIT_MODERN_WEBKIT
+    view->AddSeparatorItem();
+    AddItem(view, "Picture in Picture", kPictureInPicture, 'P', B_SHIFT_KEY);
     view->AddSeparatorItem();
     AddItem(view, "Developer Tools", kShowDeveloperTools, 'I', B_SHIFT_KEY);
 #endif
@@ -751,11 +770,20 @@ BrowserWindow::BrowserWindow(std::shared_ptr<SharedProfile> profile, std::string
     auto* statusLine = new BGroupView(B_HORIZONTAL, 8);
     BLayoutBuilder::Group<>(statusLine).SetInsets(4, 0, 4, 0).Add(fStatus, 1).Add(fStatusProgress);
     fStatusProgress->Hide();
+#if SUMMIT_MODERN_WEBKIT
+    fNoticeBar = new NoticeBar();
+#endif
     BLayoutBuilder::Group<>(this, B_VERTICAL, 0)
         .Add(menu).Add(fToolbar).Add(fBookmarksBar).Add(fTabStrip).Add(fProgress)
+#if SUMMIT_MODERN_WEBKIT
+        .Add(fNoticeBar)
+#endif
         .Add(fPages, 1)
         .Add(fFindBar).Add(statusLine);
     fLayout = static_cast<BGroupLayout*>(GetLayout());
+#if SUMMIT_MODERN_WEBKIT
+    fNoticeBar->Hide();
+#endif
 #if SUMMIT_MODERN_WEBKIT
     fFullScreenNotice = new BStringView("fullscreen-notice", "");
     fFullScreenNotice->SetAlignment(B_ALIGN_CENTER);
@@ -851,6 +879,7 @@ BrowserWindow::BrowserWindow(std::shared_ptr<SharedProfile> profile, std::string
             for (const auto& page : options.session.tabs) { fRestoringTitle = page.title; CreateTab(page.url, false); }
             fRestoringSession = false;
             fRestoringTitle.clear();
+            for (size_t i = 0; i < std::min(options.session.pinned, fTabs.size()); ++i) fTabs[i].pinned = true;
 #else
             for (const auto& page : options.session.tabs) CreateTab(page.url, false);
 #endif
@@ -1152,6 +1181,7 @@ void BrowserWindow::CreateTab(const std::string& input, bool select, BWebView* a
     created.frames = new FrameHistory();
     webView->AddFilter(created.frames);
     webView->SetURLSchemeHandler("summit-reader", BMessenger(this));
+    if (!extensionPage) AddPageScripts(webView);
     // As in other browsers, a restored session's tabs wait to be selected
     // before they load: a window of fifteen tabs would otherwise start fifteen
     // page loads and web processes at once, with only one of them on screen.
@@ -1235,6 +1265,12 @@ void BrowserWindow::SelectTab(int64 id, bool forClose)
         // Tabs can be reordered (tabs.move) without moving their views, so
         // find the tab's own card rather than assuming the same position.
         fCards->SetVisibleItem(fCards->IndexOfView(fTabs[i].view));
+#if SUMMIT_MODERN_WEBKIT
+        // A page whose process ended while the tab was behind loads again;
+        // the one that ended in front says what happened.
+        if (fTabs[i].processExited && fTabs[i].exitedInBackground && !fRestoringSession) ReloadCrashedTab(fTabs[i]);
+        else if (fTabs[i].crashView) fCards->SetVisibleItem(fCards->IndexOfView(fTabs[i].crashView));
+#endif
 #if !SUMMIT_MODERN_WEBKIT
         SetCurrentWebView(fTabs[i].view);
         fTabs[i].view->WebPage()->ResendNotifications();
@@ -1251,6 +1287,7 @@ void BrowserWindow::SelectTab(int64 id, bool forClose)
         RefreshInternalPage(fTabs[i]);
 #if SUMMIT_MODERN_WEBKIT
         SyncBrowserWindow();
+        RefreshNoticeBar();
 #endif
         RefreshChrome();
         AnnouncePointer();
@@ -1561,6 +1598,8 @@ void BrowserWindow::FinishCloseTab(int64 id)
         webView->RemoveSelf();
 #if SUMMIT_MODERN_WEBKIT
         CloseDeveloperTools(fTabs[i]);
+        RemoveCrashView(fTabs[i]);
+        if (fPictureInPictureTab == id && fPictureInPicture.IsValid()) fPictureInPicture.SendMessage(B_QUIT_REQUESTED);
         delete webView;
 #else
         webView->Shutdown();
@@ -2337,9 +2376,14 @@ void BrowserWindow::RefreshChrome()
     }
 #endif
     std::vector<TabLabel> labels;
-    for (const auto& tab : fTabs)
+    for (const auto& tab : fTabs) {
         labels.push_back({tab.id, tab.title, tab.loading, fFavicons->Icon(tab.url),
             tab.capturingCamera || tab.capturingMicrophone || tab.capturingScreen});
+#if SUMMIT_MODERN_WEBKIT
+        labels.back().pinned = tab.pinned;
+        labels.back().audio = tab.audioMuted ? TabAudio::Muted : tab.playingAudio ? TabAudio::Playing : TabAudio::None;
+#endif
+    }
     fTabStrip->SetTabs(std::move(labels), fSelected);
     NoteWindowIcon();
     if (auto* tab = ActiveTab()) {
@@ -2468,6 +2512,13 @@ void BrowserWindow::ShowTabMenu(const BMessage& message)
     menu->AddSeparatorItem();
     menu->AddItem(item("Reload Tab", kReloadTab));
     menu->AddItem(item("Duplicate Tab", kDuplicateTab));
+#if SUMMIT_MODERN_WEBKIT
+    const auto* clicked = FindTabByID(id);
+    auto* pin = item(clicked && clicked->pinned ? "Unpin Tab" : "Pin Tab", kPinTab);
+    pin->Message()->AddBool("pinned", !(clicked && clicked->pinned));
+    menu->AddItem(pin);
+    menu->AddItem(item(clicked && clicked->audioMuted ? "Unmute Tab" : "Mute Tab", kToggleTabMute));
+#endif
     auto* move = item("Move Tab to New Window", kMoveTabToNewWindow);
     move->SetEnabled(fTabs.size() > 1);
     menu->AddItem(move);
@@ -2476,6 +2527,15 @@ void BrowserWindow::ShowTabMenu(const BMessage& message)
     auto* others = item("Close Other Tabs", kCloseOtherTabs);
     others->SetEnabled(fTabs.size() > 1);
     menu->AddItem(others);
+#if SUMMIT_MODERN_WEBKIT
+    auto* right = item("Close Tabs to the Right", kCloseTabsToRight);
+    right->SetEnabled(!fTabs.empty() && fTabs.back().id != id);
+    menu->AddItem(right);
+    menu->AddSeparatorItem();
+    auto* reopen = new BMenuItem("Reopen Closed Tab", new BMessage(kReopenTab));
+    reopen->SetEnabled(!fClosedTabs.empty());
+    menu->AddItem(reopen);
+#endif
     menu->SetTargetForItems(this);
     menu->SetAsyncAutoDestruct(true);
     menu->Go(where, true, false, true);
@@ -2679,6 +2739,9 @@ void BrowserWindow::MenusBeginning()
 {
     BrowserWindowBase::MenusBeginning();
     RebuildDynamicMenus();
+#if SUMMIT_MODERN_WEBKIT
+    if (fSpellingItem) fSpellingItem->SetMarked(fShared->Read([](const Profile& profile) { return profile.spellChecking; }));
+#endif
 }
 void BrowserWindow::RebuildDynamicMenus()
 {
@@ -2870,6 +2933,9 @@ void BrowserWindow::SaveSession()
     for (size_t i = 0; i < fTabs.size(); ++i) {
         session.tabs.push_back({fTabs[i].url, fTabs[i].title});
         if (fTabs[i].id == fSelected) session.selected = i;
+#if SUMMIT_MODERN_WEBKIT
+        if (fTabs[i].pinned && session.pinned == i) ++session.pinned;
+#endif
     }
 #if SUMMIT_MODERN_WEBKIT
     const BRect frame = fFullScreenTab ? fBeforeFullScreen : Frame();
@@ -3104,6 +3170,7 @@ void BrowserWindow::MessageReceived(BMessage* message)
             if (!target) break;
             if (message->what == kReloadTab) {
 #if SUMMIT_MODERN_WEBKIT
+                if (target->processExited || target->crashView) { ReloadCrashedTab(*target); break; }
                 if (!PrepareTabNavigation(*target)) break;
                 if (!target->deferredURL.empty()) {
                     target->view->LoadURL(std::exchange(target->deferredURL, {}).c_str());
@@ -3151,6 +3218,7 @@ void BrowserWindow::MessageReceived(BMessage* message)
             break;
         case kReload: if (tab) {
 #if SUMMIT_MODERN_WEBKIT
+            if (tab->processExited || tab->crashView) { ReloadCrashedTab(*tab); break; }
             if (!tab->loading && !PrepareNavigation()) break;
 #endif
             if (tab->loading) {
@@ -3180,7 +3248,146 @@ void BrowserWindow::MessageReceived(BMessage* message)
 #if SUMMIT_MODERN_WEBKIT
         case kShowCertificate: ShowCertificate(); break;
         case kToggleReader: ToggleReader(); break;
-        case B_WEBKIT_JAVASCRIPT_RESULT: ReaderResult(*message); break;
+        case B_WEBKIT_JAVASCRIPT_RESULT:
+            if (message->GetUInt64("identifier", 0) == kPictureInPictureQuery) {
+                // window.__summitPipLargest(): the page's largest video.
+                const char* token = nullptr;
+                if (message->FindString("result", &token) == B_OK && token && *token) StartPictureInPicture(token);
+                else fStatus->SetText("This page has no video for Picture in Picture.");
+                break;
+            }
+            ReaderResult(*message);
+            break;
+        case B_WEBKIT_SCRIPT_MESSAGE: PageScriptMessage(*message); break;
+        case B_WEBKIT_RESPONSIVENESS_CHANGED: ResponsivenessChanged(*message); break;
+        case B_WEBKIT_PRINT_REQUESTED: {
+            BMessenger view;
+            if (message->FindMessenger("view", &view) == B_OK && FindTab(view) == ActiveTab()) PrintPage();
+            break;
+        }
+        case B_WEBKIT_PRINT_PAGES: PrintPagesReceived(*message); break;
+        case kPrint: PrintPage(); break;
+        case kPageSetup: PrintJob::ConfigurePage(); break;
+        case kSaveAsPDF: SaveAsPDF(); break;
+        case kSaveAsPDFChosen: SaveAsPDFChosen(*message); break;
+        case kPrintPagesRequest: {
+            BMessenger reply;
+            auto* target = FindTabByID(message->GetInt64("tab", 0));
+            if (message->FindMessenger("reply", &reply) != B_OK) break;
+            if (!target || target->processExited) {
+                BMessage failed(B_WEBKIT_PRINT_PAGES);
+                failed.AddString("error", "The tab is gone.");
+                reply.SendMessage(&failed);
+                break;
+            }
+            BSize paper;
+            BRect margins;
+            message->FindSize("paper", &paper);
+            message->FindRect("margins", &margins);
+            target->view->DrawPagesForPrinting(reply, message->GetUInt64("identifier", 0), paper.width, paper.height, margins,
+                1, message->GetInt32("first", 0), message->GetInt32("count", 1), message->GetFloat("scale", 2), false);
+            break;
+        }
+        case kPictureInPicture: {
+            if (!tab || tab->processExited) break;
+            const char* token = nullptr;
+            if (message->FindString("token", &token) == B_OK && token && *token) StartPictureInPicture(token);
+            else tab->view->EvaluateJavaScript("window.__summitPipLargest ? window.__summitPipLargest() : ''",
+                BMessenger(this), kPictureInPictureQuery);
+            break;
+        }
+        case kPictureInPictureCommand: PictureInPictureCommand(*message); break;
+        case kToggleTabMute: ToggleTabMute(message->GetInt64("id", fSelected)); break;
+        case kPinTab: SetTabPinned(message->GetInt64("id", fSelected), message->GetBool("pinned", true)); break;
+        case kMoveTab: MoveTabTo(message->GetInt64("id", 0), static_cast<size_t>(std::max<int32>(0, message->GetInt32("index", 0)))); break;
+        case kTabDragOut: {
+            BPoint where;
+            if (message->FindPoint("where", &where) == B_OK) TabDraggedOut(message->GetInt64("id", 0), where);
+            break;
+        }
+        case kDetachTab: {
+            BMessenger target;
+            if (message->FindMessenger("target", &target) == B_OK) DetachTab(message->GetInt64("id", 0), target);
+            break;
+        }
+        case kAdoptTab: AdoptTab(*message); break;
+        case kCloseTabsToRight: {
+            const int64 id = message->GetInt64("id", fSelected);
+            std::vector<int64> right;
+            bool after = false;
+            for (const auto& candidate : fTabs) {
+                if (after) right.push_back(candidate.id);
+                if (candidate.id == id) after = true;
+            }
+            for (auto close : right) CloseTab(close);
+            break;
+        }
+        case kOpenBlockedPopup: {
+            auto* target = FindTabByID(message->GetInt64("tab", 0));
+            if (!target) break;
+            const auto url = std::exchange(target->blockedPopup, {});
+            target->blockedPopups = 0;
+            RefreshNoticeBar();
+            if (!message->GetBool("dismiss", false) && !url.empty()) {
+                int32 index = 0;
+                for (size_t i = 0; i < fTabs.size(); ++i) if (fTabs[i].id == target->id) index = int32(i) + 1;
+                CreateTab(url, true, nullptr, index);
+            }
+            break;
+        }
+        case kAllowSitePopups: {
+            auto* target = FindTabByID(message->GetInt64("tab", 0));
+            if (!target) break;
+            const auto url = target->url;
+            const auto scheme = url.find("://");
+            const std::string origin = scheme == std::string::npos ? std::string() : url.substr(0, url.find_first_of("/?#", scheme + 3));
+            if (fPrivate) {
+                // A private window's choice lasts as long as it does.
+                fWebKitContext->SetSitePermission("popups", origin.c_str(), 1);
+            } else {
+                BMessage change(kSitePermissionChange);
+                change.AddString("permission", "popups");
+                change.AddString("origin", origin.c_str());
+                change.AddInt32("state", 1);
+                be_app->PostMessage(&change);
+            }
+            const auto popup = std::exchange(target->blockedPopup, {});
+            target->blockedPopups = 0;
+            RefreshNoticeBar();
+            if (!popup.empty()) CreateTab(popup, true);
+            break;
+        }
+        case kWaitForPage: case kStopPage: {
+            auto* target = FindTabByID(message->GetInt64("tab", 0));
+            if (!target) break;
+            if (message->what == kStopPage) target->view->TerminateWebProcess();
+            else target->waitedForPage = true;
+            RefreshNoticeBar();
+            break;
+        }
+        case kSpellingCommand: SpellingCommand(*message); break;
+        case kToggleSpellChecking: {
+            const bool enabled = !fShared->Read([](const Profile& profile) { return profile.spellChecking; });
+            BMessage changed(kPreferencesChanged);
+            changed.AddBool("spell_checking", enabled);
+            be_app->PostMessage(&changed);
+            break;
+        }
+        case kPasswordBarAnswer: PasswordBarAnswer(*message); break;
+        case kPasswordChecked: {
+            auto* target = FindTabByID(message->GetInt64("tab", 0));
+            if (!target || message->GetBool("same", false)) break;
+            target->pendingPassword = Tab::PendingPassword { message->GetString("origin", ""), message->GetString("username", ""),
+                message->GetString("password", ""), message->GetBool("update", false) };
+            RefreshNoticeBar();
+            break;
+        }
+        case kPasswordSaved: {
+            const std::string error = message->GetString("error", "");
+            if (!error.empty()) ShowError("Could not save the password: " + error);
+            else fStatus->SetText("The password was saved.");
+            break;
+        }
         case B_WEBKIT_URL_SCHEME_REQUEST: ReaderResource(*message); break;
         case B_WEBKIT_URL_SCHEME_REQUEST_STOPPED: break;
         case kExtensionStoreInstall: {
@@ -3457,12 +3664,14 @@ void BrowserWindow::MessageReceived(BMessage* message)
             auto* tab = FindTab(view);
             if (!tab || tab != ActiveTab()) break;
             const std::string source = message->GetString("source_url", "");
-            if (source != tab->url) break;
-            if (message->what == B_WEBKIT_SCHEME_OPEN_REQUESTED && StoreOfferChosen(*tab, message->GetString("url", "")))
+            // An app link's own checks are in SchemeOpenRequested: a redirect
+            // reports the page it left as committed_url.
+            if (source != tab->url && message->what != B_WEBKIT_SCHEME_OPEN_REQUESTED) break;
+            if (message->what == B_WEBKIT_SCHEME_OPEN_REQUESTED) {
+                SchemeOpenRequested(*message, *tab);
                 break;
-            if (message->what == B_WEBKIT_SCHEME_OPEN_REQUESTED)
-                fProtocolHandlers->Open(message->GetString("url", ""), tab->id, source);
-            else fProtocolHandlers->Register(message->GetString("scheme", ""), message->GetString("url", ""),
+            }
+            fProtocolHandlers->Register(message->GetString("scheme", ""), message->GetString("url", ""),
                 message->GetBool("remove", false), tab->id, source);
             break;
         }
@@ -3764,6 +3973,31 @@ void BrowserWindow::ShowPageContextMenu(const BMessage& message)
         return url.rfind("http://", 0) == 0 || url.rfind("https://", 0) == 0 || url.rfind("file:", 0) == 0
             || url.rfind("data:", 0) == 0 || url.rfind("blob:", 0) == 0;
     }(link);
+    if (message.GetBool("misspelled", false)) {
+        // Spelling suggestions for the word under the pointer (#66).
+        const char* guess = nullptr;
+        int32 guesses = 0;
+        for (; message.FindString("spelling_guess", guesses, &guess) == B_OK && guesses < 6; ++guesses) {
+            auto* replace = new BMessage(kSpellingCommand);
+            replace->AddUInt32("command", B_WEBKIT_SPELLING_REPLACE);
+            replace->AddString("word", guess);
+            menu->AddItem(new BMenuItem(guess, replace));
+        }
+        if (!guesses) {
+            auto* none = new BMenuItem("No Guesses Found", nullptr);
+            none->SetEnabled(false);
+            menu->AddItem(none);
+        }
+        menu->AddSeparatorItem();
+        auto spelling = [](uint32 command) {
+            auto* invocation = new BMessage(kSpellingCommand);
+            invocation->AddUInt32("command", command);
+            return invocation;
+        };
+        menu->AddItem(new BMenuItem("Ignore Spelling", spelling(B_WEBKIT_SPELLING_IGNORE)));
+        menu->AddItem(new BMenuItem("Add to Dictionary", spelling(B_WEBKIT_SPELLING_LEARN)));
+        menu->AddSeparatorItem();
+    }
     if (!link.empty()) {
         const bool script = link.rfind("javascript:", 0) == 0;
         auto* open = new BMenuItem("Open Link", withURL(kOpenLink, link));
@@ -3804,6 +4038,14 @@ void BrowserWindow::ShowPageContextMenu(const BMessage& message)
         menu->AddItem(new BMenuItem("Save Image As…", withURL(kSaveLinkAs, image, filename.c_str())));
         menu->AddItem(new BMenuItem("Download Image", withURL(kDownloadLink, image)));
         menu->AddItem(new BMenuItem("Copy Image Address", copy(image)));
+    }
+    if (!tab->pipToken.empty()) {
+        // The page's script named the video under the pointer (#74).
+        separate();
+        auto* picture = new BMessage(kPictureInPicture);
+        picture->AddString("token", tab->pipToken.c_str());
+        menu->AddItem(new BMenuItem("Picture in Picture", picture));
+        tab->pipToken.clear();
     }
     if (!media.empty() && media.rfind("blob:", 0) != 0) {
         // Streamed (Media Source) video has a blob: address nothing else can open.
@@ -3852,6 +4094,8 @@ void BrowserWindow::ShowPageContextMenu(const BMessage& message)
         copyAddress->SetEnabled(!DisplayURL(tab->url).empty());
         menu->AddItem(copyAddress);
         edit("Select All", B_SELECT_ALL);
+        menu->AddSeparatorItem();
+        menu->AddItem(new BMenuItem("Print…", new BMessage(kPrint)));
         menu->AddSeparatorItem();
         menu->AddItem(new BMenuItem("Developer Tools", new BMessage(kShowDeveloperTools)));
     }
@@ -4065,6 +4309,11 @@ void BrowserWindow::WebKitStateChanged(const BMessage& message)
     if (message.FindMessenger("view", &sender) != B_OK) return;
     auto* tab = FindTab(sender);
     if (!tab) return;
+    if (message.what == B_WEBKIT_PROCESS_EXITED && message.HasString("reason")) {
+        // The engine's second notice says why the process ended.
+        ProcessExitReason(*tab, message.GetString("reason", ""));
+        return;
+    }
     if (message.what == B_WEBKIT_PROCESS_EXITED) {
         tab->processExited = true;
         tab->loading = false;
@@ -4092,6 +4341,11 @@ void BrowserWindow::WebKitStateChanged(const BMessage& message)
             tab->readerRequest = 0;
             tab->readerExtracting = false;
             tab->readerAvailable = false;
+            // A new page: the last one's blocked pop-ups and its video are gone.
+            tab->blockedPopup.clear();
+            tab->blockedPopups = 0;
+            tab->pipToken.clear();
+            if (tab->id == fSelected) RefreshNoticeBar();
         }
         tab->loadGeneration = generation;
         tab->connectionCertificate.MakeEmpty();
@@ -4173,6 +4427,8 @@ void BrowserWindow::WebKitStateChanged(const BMessage& message)
     message.FindBool("capturingCamera", &tab->capturingCamera);
     message.FindBool("capturingMicrophone", &tab->capturingMicrophone);
     message.FindBool("capturingScreen", &tab->capturingScreen);
+    message.FindBool("playingAudio", &tab->playingAudio);
+    message.FindBool("audioMuted", &tab->audioMuted);
     double progress;
     if (message.FindDouble("progress", &progress) == B_OK && std::isfinite(progress))
         tab->progress = static_cast<float>(std::clamp(progress, 0.0, 1.0));
@@ -4183,6 +4439,9 @@ void BrowserWindow::WebKitStateChanged(const BMessage& message)
     if (tab->loading) {
         tab->processExited = false;
         tab->processError.clear();
+        if (tab->crashView) RemoveCrashView(*tab);
+        tab->exitReason.clear();
+        tab->exitedInBackground = false;
     }
     uint64 successSequence;
     bool internalPageLoaded = false;

@@ -19,7 +19,7 @@ public:
     ProtocolHandlers(std::shared_ptr<SharedProfile>, bool privateBrowsing, SourceCheck,
         std::function<void(const std::string&)> navigate, std::function<void(const std::string&)> error);
     ~ProtocolHandlers() override;
-    void Open(const std::string& url, int64 tab, const std::string& source);
+    void Open(const std::string& url, int64 tab, const std::string& source, bool askAlways = false);
     void Register(const std::string& scheme, const std::string& target, bool remove, int64 tab, const std::string& source);
     void MessageReceived(BMessage*) override;
 private:

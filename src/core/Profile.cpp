@@ -59,6 +59,8 @@ Profile Profile::Load(const std::filesystem::path& path, std::string& error)
                 window.tabs = Decode(item.at("tabs"), 512);
                 window.selected = item.at("selected").get<size_t>();
                 if (window.selected >= window.tabs.size()) window.selected = 0;
+                if (auto pinned = item.find("pinned"); pinned != item.end() && pinned->is_number_unsigned())
+                    window.pinned = std::min(pinned->get<size_t>(), window.tabs.size());
                 if (auto frame = item.find("frame"); frame != item.end()) {
                     if (!frame->is_array() || frame->size() != 4) throw std::runtime_error("Invalid window frame");
                     for (size_t i = 0; i < 4; ++i) window.frame[i] = (*frame)[i].get<float>();
@@ -81,6 +83,14 @@ Profile Profile::Load(const std::filesystem::path& path, std::string& error)
         }
         if (auto bar = j.find("showBookmarksBar"); bar != j.end()) profile.showBookmarksBar = bar->get<bool>();
         if (auto restore = j.find("restoreSession"); restore != j.end()) profile.restoreSession = restore->get<bool>();
+        if (auto save = j.find("savePasswords"); save != j.end() && save->is_boolean()) profile.savePasswords = *save;
+        if (auto never = j.find("passwordNever"); never != j.end() && never->is_array() && never->size() <= 10000)
+            for (const auto& origin : *never) if (origin.is_string()) profile.passwordNever.insert(origin.get<std::string>());
+        if (auto spelling = j.find("spellChecking"); spelling != j.end() && spelling->is_boolean()) profile.spellChecking = *spelling;
+        if (auto autoplay = j.find("autoplay"); autoplay != j.end() && autoplay->is_string()) {
+            const auto value = autoplay->get<std::string>();
+            if (value == "allow" || value == "block-audio" || value == "block") profile.autoplay = value;
+        }
         if (auto style = j.find("interfaceStyle"); style != j.end()) {
             profile.interfaceStyle = style->get<std::string>();
             if (profile.interfaceStyle != "haiku" && profile.interfaceStyle != "safari") profile.interfaceStyle = "haiku";
@@ -166,7 +176,7 @@ Profile Profile::Load(const std::filesystem::path& path, std::string& error)
 
 const std::vector<std::string>& SitePermissionNames()
 {
-    static const std::vector<std::string> names = {"notifications", "geolocation", "camera", "microphone"};
+    static const std::vector<std::string> names = {"notifications", "geolocation", "camera", "microphone", "popups", "autoplay"};
     return names;
 }
 
@@ -228,6 +238,7 @@ bool Profile::Save(const std::filesystem::path& path, std::string& error) const
         json sessions = json::array();
         for (const auto& window : windows) {
             json item = {{"tabs", Encode(window.tabs)}, {"selected", window.selected}};
+            if (window.pinned) item["pinned"] = window.pinned;
             if (window.HasFrame()) item["frame"] = {window.frame[0], window.frame[1], window.frame[2], window.frame[3]};
             sessions.push_back(std::move(item));
         }
@@ -243,6 +254,8 @@ bool Profile::Save(const std::filesystem::path& path, std::string& error) const
             {"windows", std::move(sessions)},
             {"bookmarks", Encode(bookmarks)}, {"history", Encode(history)},
             {"homeURL", homeURL}, {"showBookmarksBar", showBookmarksBar}, {"restoreSession", restoreSession},
+            {"savePasswords", savePasswords}, {"passwordNever", passwordNever}, {"spellChecking", spellChecking},
+            {"autoplay", autoplay},
             {"interfaceStyle", interfaceStyle}, {"searchEngine", searchEngine},
             {"siteZoom", siteZoom}, {"unpinnedExtensions", unpinnedExtensions},
             {"trustedCertificates", trusted}, {"sitePermissions", sitePermissions},
