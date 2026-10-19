@@ -55,8 +55,13 @@ For a stock Haiku installation, not air/OS. Install the packages together with `
 
 ## Browser features
 
-- Tabs, saved sessions, back/forward history, downloads, page find,
-  configurable search, and per-site zoom.
+- Tabs that can be dragged between windows, pinned and muted (a speaker shows
+  which tab plays sound), saved sessions, back/forward history, downloads,
+  page find, configurable search, and per-site zoom.
+- [Printing, Save as PDF, spell checking, saved passwords in the Haiku key
+  store, Picture in Picture, websites installed as apps](docs/issue-fixes-2026-10-19b.md),
+  an autoplay setting, blocked pop-up notices and a page for crashed or
+  hung tabs.
 - [Bookmarks in folders](docs/bookmarks.md), on the bookmarks bar (folders open
   as menus, drag to reorder or drop tabs) and in the Bookmarks menu, edited on
   the Bookmarks tab or from the star; import from WebPositive, Firefox
