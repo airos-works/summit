@@ -31,6 +31,14 @@ public:
         kIconsCleared = 1 << 6,
         // An extension's action was put on or taken off the toolbar.
         kExtensionsPinnedChanged = 1 << 7,
+        // An extension was installed, removed, turned on or off.
+        kExtensionsInstalledChanged = 1 << 8,
+    };
+    // An extension in the Extensions window, for the cards on store pages.
+    struct InstalledExtensionInfo {
+        std::string name;
+        bool enabled = true;
+        bool operator==(const InstalledExtensionInfo& other) const { return name == other.name && enabled == other.enabled; }
     };
     explicit SharedProfile(std::filesystem::path path);
     // Writes what has not been saved yet.
@@ -83,6 +91,14 @@ public:
         std::lock_guard lock(fMutex);
         return fNewTabOverride;
     }
+    // The installed extensions by identifier, which the application keeps up
+    // to date (a change is announced as kExtensionsInstalledChanged). Not saved.
+    void SetInstalledExtensions(std::map<std::string, InstalledExtensionInfo>);
+    std::map<std::string, InstalledExtensionInfo> InstalledExtensions() const
+    {
+        std::lock_guard lock(fMutex);
+        return fInstalledExtensions;
+    }
     // Writes the profile if anything changed since the last save.
     // Saves now, on the caller's thread.
     bool Save(std::string& error);
@@ -108,6 +124,7 @@ private:
     std::vector<WindowSession> fSavedWindows;
     std::string fLoadError;
     std::string fNewTabOverride;
+    std::map<std::string, InstalledExtensionInfo> fInstalledExtensions;
     std::map<std::string, double> fPrivateZoom;
     bool fWritable = true;
     std::map<uint64, WindowSession> fSessions;

@@ -1,4 +1,5 @@
 #include "core/ExtensionStore.h"
+#include "core/StoreOffer.h"
 #include <iostream>
 
 int main()
@@ -39,5 +40,36 @@ int main()
             "https://chromewebstore.google.com/detail/qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq",
             kChromeExtensionStore, kFirefoxExtensionStore, "file:///extension.xpi"})
         check(!ParseExtensionStoreURL(url), url);
-    std::cout << checks << " extension store URL checks passed\n";
+
+    // The card on store pages.
+    const std::string token = "0123456789abcdef0123456789abcdef";
+    check(StoreOfferLink("install", token) == "summit-extension:install?token=" + token, "offer link");
+    for (const char* action : {"install", "manage", "dismiss"}) {
+        auto choice = ParseStoreOfferLink(StoreOfferLink(action, token));
+        check(choice && choice->action == action && choice->token == token, std::string("offer choice ") + action);
+    }
+    for (const char* url : {"summit-extension:remove?token=abc", "summit-extension:install?token=", "summit-extension:install",
+            "summit-extension:install?token=ABC", "summit-extension:install?token=ab cd", "summit-extensions:install?token=ab",
+            "https://example.com/?token=ab", "summit-extension:"})
+        check(!ParseStoreOfferLink(url), std::string("bad offer link ") + url);
+    StoreOffer offer { "Dark \"Reader\" </script> %OFFER% %STYLE%", false, false, token };
+    auto script = StoreOfferScript(&offer);
+    check(script.find("\"Install Extension\"") != std::string::npos && script.find("Manage Extension") == std::string::npos, "install card");
+    check(script.find("summit-extension:install?token=" + token) != std::string::npos, "install link");
+    check(script.find("\"Dark \\\"Reader\\\" </script> %OFFER% %STYLE%\"") != std::string::npos, "name kept as a JSON string");
+    check(script.find("%LOGO%") == std::string::npos && script.find("summit-offer-logo-rock-front") != std::string::npos, "logo");
+    check(script.find("attachShadow({ mode: 'closed' })") != std::string::npos && script.find("innerHTML") == std::string::npos,
+        "built from elements in a closed shadow root");
+    offer.installed = true;
+    offer.disabled = true;
+    script = StoreOfferScript(&offer);
+    check(script.find("\"Manage Extension\"") != std::string::npos && script.find("turned off") != std::string::npos
+        && script.find("summit-extension:manage?token=" + token) != std::string::npos, "manage card");
+    offer.name = std::string("bad \xff utf-8");
+    check(StoreOfferScript(&offer).find("const offer = {") != std::string::npos, "invalid UTF-8 replaced");
+    check(StoreOfferScript(nullptr).find("const offer = null;") != std::string::npos, "removal script");
+    check(StoreItemNameFromTitle("Dark Reader - Chrome Web Store") == "Dark Reader", "Chrome title");
+    check(StoreItemNameFromTitle("uBlock Origin \xe2\x80\x93 Get this Extension for \xf0\x9f\xa6\x8a Firefox (en-US)") == "uBlock Origin", "Firefox title");
+    check(StoreItemNameFromTitle("  Plain  ") == "Plain", "plain title");
+    std::cout << checks << " extension store checks passed\n";
 }

@@ -4,6 +4,7 @@
 #include "core/InternalPages.h"
 #include "core/Zoom.h"
 #include "core/Suggest.h"
+#include "core/DownloadText.h"
 #include <set>
 #include <cstdlib>
 #include <ctime>
@@ -19,6 +20,42 @@ static int checks = 0, failures = 0;
 int main()
 {
     using namespace summit;
+    CHECK(FormatByteSize(0) == "0 bytes");
+    CHECK(FormatByteSize(1) == "1 byte");
+    CHECK(FormatByteSize(1023) == "1023 bytes");
+    CHECK(FormatByteSize(1536) == "1.5 KiB");
+    CHECK(FormatByteSize(150 * 1024) == "150 KiB");
+    CHECK(FormatByteSize(3 * 1024 * 1024 + 104858) == "3.1 MiB");
+    CHECK(FormatByteSize(1342177280ull) == "1.25 GiB");
+    CHECK(FormatByteProgress(512 * 1024, 15 * 1024 * 1024) == "0.5 of 15.0 MiB");
+    CHECK(FormatTimeLeft(4.2) == "5 seconds left");
+    CHECK(FormatTimeLeft(0.2) == "1 second left");
+    CHECK(FormatTimeLeft(125) == "2 minutes left");
+    CHECK(FormatTimeLeft(3599) == "1 hour left");
+    CHECK(FormatTimeLeft(3900) == "1 hour 5 minutes left");
+    CHECK(FormatTimeLeft(7200) == "2 hours left");
+    CHECK(FormatTimeLeft(-1).empty());
+    CHECK(DownloadFraction(5, 10) == 0.5 && DownloadFraction(5, -1) == -1 && DownloadFraction(20, 10) == 1);
+    {
+        DownloadStatus status;
+        CHECK(DownloadStatusText(status) == "Starting…");
+        status.received = 3 * 1024 * 1024;
+        status.expected = 15 * 1024 * 1024;
+        status.rate = 1024 * 1024;
+        CHECK(DownloadStatusText(status) == "3.0 of 15.0 MiB — 1.0 MiB/s, 12 seconds left");
+        status.expected = -1;
+        CHECK(DownloadStatusText(status) == "3.0 MiB — 1.0 MiB/s");
+        status.state = DownloadStatus::State::Succeeded;
+        status.host = "example.com";
+        CHECK(DownloadStatusText(status) == "3.0 MiB — example.com");
+        status.missing = true;
+        CHECK(DownloadStatusText(status) == "File moved or missing");
+        status.state = DownloadStatus::State::Failed;
+        status.error = "Connection reset";
+        CHECK(DownloadStatusText(status) == "Failed — Connection reset");
+        status.state = DownloadStatus::State::Cancelled;
+        CHECK(DownloadStatusText(status) == "Cancelled");
+    }
     CHECK(ResolveAddress("").url == "summit:home");
     CHECK(ResolveAddress("  example.com  ").url == "https://example.com");
     CHECK(ResolveAddress("localhost:8080/test").url == "http://localhost:8080/test");

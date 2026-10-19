@@ -187,6 +187,16 @@ void SharedProfile::Announce(uint32 changes, const BMessenger& sender, const std
     for (const auto& listener : listeners) listener.SendMessage(&message, static_cast<BHandler*>(nullptr), 0);
 }
 
+void SharedProfile::SetInstalledExtensions(std::map<std::string, InstalledExtensionInfo> extensions)
+{
+    {
+        std::lock_guard lock(fMutex);
+        if (extensions == fInstalledExtensions) return;
+        fInstalledExtensions = std::move(extensions);
+    }
+    Announce(kExtensionsInstalledChanged, BMessenger());
+}
+
 void SharedProfile::SetWindowSession(uint64 key, const WindowSession& session)
 {
     std::lock_guard lock(fMutex);

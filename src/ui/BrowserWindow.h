@@ -39,12 +39,14 @@ class ToolButton;
 class ExtensionActionButton;
 class TabStrip;
 class ProgressLine;
+class DownloadsButton;
 class ZoomButton;
 class BookmarksBar;
 class AddressSuggestions;
 class FaviconCache;
 class SharedProfile;
 class ProtocolHandlers;
+struct ExtensionStoreItem;
 // How a new window starts.
 struct BrowserWindowOptions {
     // The window's place in the saved session (windows are saved in key order).
@@ -211,6 +213,9 @@ private:
         // Older in-memory previews reopen their original web page when the
         // tab's single cached article has been replaced.
         std::map<std::string, std::string> readerOriginals;
+        // The card on an extension store page: what was last put in the page
+        // (empty: none), and the page whose card was closed.
+        std::string storeOffer, storeOfferDismissed;
 #endif
     };
 #if SUMMIT_MODERN_WEBKIT
@@ -256,6 +261,38 @@ private:
     int64 fClosePromptTab = 0;
     std::optional<CloseFocusState> fWindowCloseFocus;
     std::set<uint64> fDownloads;
+    // The toolbar's downloads button and its panel (DownloadsPanel.h).
+    void ToggleDownloadsPanel(bool open = false);
+    void RefreshDownloadsButton();
+    // wait: until the panel is gone (a window being destroyed must not
+    // leave it in its subset).
+    void CloseDownloadsPanel(bool wait = false);
+    DownloadsButton* fDownloadsButton = nullptr;
+    BMessenger fDownloadsPanel;
+    std::shared_ptr<std::atomic<bool>> fDownloadsPanelMenus;
+    // When the panel closed because the button was clicked: that click
+    // closes it, and does not open it again.
+    bigtime_t fDownloadsPanelClosedAt = 0;
+    // The card Summit puts on extension store pages (core/StoreOffer.h):
+    // Install Extension, or Manage Extension when it is installed.
+    void UpdateStoreOffer(Tab&);
+    // A click on one of the card's links; true when url was one.
+    bool StoreOfferChosen(Tab&, const std::string& url);
+    void StoreItemResolved(const BMessage&);
+    // The identifier an installed copy of the store page's extension has;
+    // empty while (or when) that is not known.
+    std::string StoreItemIdentifier(const ExtensionStoreItem&);
+    // The secret the card's links carry.
+    std::string fStoreOfferToken;
+    // Firefox Add-ons pages name an extension by its slug; installed
+    // extensions are known by their add-on ID, which Mozilla's API gives.
+    struct StoreItemIdentity {
+        bool asked = false, resolved = false;
+        // Not a theme or a dictionary, which Summit cannot install.
+        bool extension = true;
+        std::string identifier, name;
+    };
+    std::map<std::string, StoreItemIdentity> fStoreItems;
 #else
     Tab* FindTab(BWebView* view);
 #endif

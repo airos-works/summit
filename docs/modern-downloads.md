@@ -2,8 +2,10 @@
 
 The modern backend saves HTTP attachments, unsupported HTTP response types and
 HTML download links into the native user's `Downloads` directory. The status
-bar reports progress and completion; the toolbar and Window menu open that
-folder. A window close first obtains provisional page approvals, then asks
+bar reports progress and completion. The toolbar's downloads button shows
+their progress and opens a panel of this session's downloads, as Firefox's
+does ([issue-fixes-2026-10-19.md](issue-fixes-2026-10-19.md)); the panel and
+the Window menu open the folder. A window close first obtains provisional page approvals, then asks
 whether to cancel active downloads. Keep Browsing resets those approvals and
 preserves live documents, address drafts and selections. Confirmed quit keeps
 the application loop and context alive until cancellation replies finish.

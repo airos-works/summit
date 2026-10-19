@@ -11,8 +11,10 @@
 #include "ui/ExtensionInstaller.h"
 #include "ui/ExtensionManager.h"
 #if SUMMIT_MODERN_WEBKIT
+#include "ui/DownloadList.h"
 #include "ui/McpService.h"
 #include "ui/SitePermissions.h"
+#include <Mime.h>
 #include <nlohmann/json.hpp>
 #endif
 #include "core/Address.h"
@@ -286,7 +288,17 @@ public:
             return;
         }
         if (message->what == summit::kShowExtensions) {
-            ShowExtensions();
+            // A store page's Manage Extension names the extension to show.
+            ShowExtensions(message->GetString("extension_identifier", ""));
+            return;
+        }
+        if (message->what == summit::kDownloadCancel) {
+            // From a downloads panel; the download is in one of the contexts.
+            const uint64 identifier = message->GetUInt64("identifier", 0);
+            if (!identifier) return;
+            if (fWebKitContext) fWebKitContext->CancelDownload(identifier);
+            if (fPrivateContext) fPrivateContext->CancelDownload(identifier);
+            for (const auto& context : fRetiredPrivateContexts) context->CancelDownload(identifier);
             return;
         }
         if (message->what == summit::kBrowseExtensionStore || message->what == summit::kExtensionStoreInstall) {
@@ -392,6 +404,17 @@ public:
                 if (message->FindMessenger("view", &view) == B_OK) target = WindowOf(view);
             }
             if (!target.IsValid() && !fWindows.empty()) target = FrontWindow();
+            // The downloads button and panel of every window show it; private
+            // windows only their own.
+            const bool privateDownload = std::any_of(fWindows.begin(), fWindows.end(), [&](const WindowRecord& window) {
+                return window.messenger == target && window.privateBrowsing;
+            });
+            summit::DownloadList::Default().Update(*message, privateDownload);
+            if (message->what == B_WEBKIT_DOWNLOAD_FINISHED
+                && message->GetUInt32("result", B_WEBKIT_DOWNLOAD_FAILED) == B_WEBKIT_DOWNLOAD_SUCCEEDED)
+                if (const char* path = message->GetString("path", nullptr); path && *path)
+                    // Its type, for its icon and the application that opens it (in the background).
+                    update_mime_info(path, false, false, B_UPDATE_MIME_INFO_NO_FORCE);
             if (message->what == B_WEBKIT_DOWNLOAD_FINISHED) fDownloads.erase(identifier);
             else if (identifier) fDownloads[identifier] = target;
             if (target.IsValid()) target.SendMessage(message);
@@ -950,6 +973,7 @@ private:
     {
         fShared->ClearPrivateSession();
 #if SUMMIT_MODERN_WEBKIT
+        summit::DownloadList::Default().ForgetPrivate();
         if (!fPrivateContext) return;
         // Its cookies, cache and storage are only in memory: releasing the
         // context forgets them. Downloads still running are cancelled first.
@@ -1239,14 +1263,18 @@ private:
         }
         if (!target.IsValid() || target.SendMessage(message) != B_OK) fail("The browser window is not available.");
     }
-    void ShowExtensions()
+    // identifier: an extension to select in the window.
+    void ShowExtensions(const std::string& identifier = std::string())
     {
         if (fWindows.empty() || !fExtensions || !fInstaller || fQuitting) return;
+        BMessage show(summit::kShowExtensions);
+        if (!identifier.empty()) show.AddString("extension_identifier", identifier.c_str());
         if (!fExtensionWindow.IsValid()) {
             auto* manager = new summit::ExtensionManager(BMessenger(this), fExtensionWindows);
             fExtensionWindow = BMessenger(manager);
             manager->Show();
-        } else fExtensionWindow.SendMessage(summit::kShowExtensions);
+        }
+        fExtensionWindow.SendMessage(&show);
         RefreshExtensions();
     }
     void RefreshExtensions()
@@ -1265,6 +1293,11 @@ private:
                 }
             }
             fShared->SetNewTabOverride(std::move(newTab));
+            // For the cards on store pages: Install, or Manage when installed.
+            std::map<std::string, summit::SharedProfile::InstalledExtensionInfo> installed;
+            for (const auto& entry : fExtensions->Entries())
+                installed[entry.installation.identifier] = {entry.installation.name, entry.loaded || entry.installation.enabled};
+            fShared->SetInstalledExtensions(std::move(installed));
         }
         if (!fExtensionWindow.IsValid() || !fExtensions || !fInstaller) return;
         BMessage state = fInstaller->Snapshot();
@@ -1282,6 +1315,8 @@ private:
             item.AddBool("loaded", entry.loaded);
             item.AddBool("installed", entry.installed);
             item.AddBool("private", entry.installation.allowPrivateBrowsing);
+            // Where its icon is (the window reads the manifest's icons).
+            item.AddString("package", summit::ExtensionCatalog(fProfile / "Extensions").PackagePath(entry.installation).c_str());
             item.AddBool("pinned", !fShared || fShared->Read([&](const summit::Profile& profile) {
                 return !profile.unpinnedExtensions.contains(entry.installation.identifier);
             }));

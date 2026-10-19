@@ -10,8 +10,12 @@
 #include "SharedProfile.h"
 #if SUMMIT_MODERN_WEBKIT
 #include "DevToolsWindow.h"
+#include "DownloadList.h"
+#include "DownloadsPanel.h"
+#include "ExtensionStoreDownload.h"
 #include "FrameHistory.h"
 #include "McpService.h"
+#include "core/StoreOffer.h"
 #include <WebKit/WebKitInspector.h>
 #endif
 #include "core/Address.h"
@@ -72,6 +76,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <thread>
 #include <utility>
 
 #if SUMMIT_MODERN_WEBKIT
@@ -84,6 +89,9 @@ status_t get_display_frame(BRect, bool forZoom, BRect&) __attribute__((weak));
 
 namespace summit {
 #if SUMMIT_MODERN_WEBKIT
+// A Firefox Add-ons item's add-on ID came from Mozilla ("slug"; "identifier"
+// and "name" unless that failed).
+static constexpr uint32 kStoreItemResolved = 'stir';
 // The engine sends one 'wvfr' message when a coordinated frame reaches its
 // native view. Count those deliveries only in explicit performance runs.
 class FrameStatsWebKitView final : public BWebKitView {
@@ -682,7 +690,12 @@ BrowserWindow::BrowserWindow(std::shared_ptr<SharedProfile> profile, std::string
     AddItem(fWindowMenu, "Previous Tab", kPreviousTab);
     AddItem(fWindowMenu, "Move Tab to New Window", kMoveTabToNewWindow);
     fWindowMenu->AddSeparatorItem();
+#if SUMMIT_MODERN_WEBKIT
+    AddItem(fWindowMenu, "Downloads", kToggleDownloadsPanel, 'J');
+    AddItem(fWindowMenu, "Show Downloads Folder", kShowDownloads);
+#else
     AddItem(fWindowMenu, "Downloads", kShowDownloads, 'J');
+#endif
 #if SUMMIT_MODERN_WEBKIT
     auto* extensions = new BMenuItem("Extensions…", new BMessage(kShowExtensions));
     extensions->SetEnabled(extensionsEnabled);
@@ -701,7 +714,11 @@ BrowserWindow::BrowserWindow(std::shared_ptr<SharedProfile> profile, std::string
     static_cast<AddressControl*>(fAddress)->SetKeyHandler([this](char key) { return AddressKey(key); });
     fSuggestions = std::make_unique<AddressSuggestions>(this);
     fZoomButton = new ZoomButton;
+#if SUMMIT_MODERN_WEBKIT
+    auto* downloadsButton = fDownloadsButton = new DownloadsButton;
+#else
     auto* downloadsButton = new ToolButton("downloads", "Open Downloads", Icon::Downloads, kShowDownloads);
+#endif
     fBookmarkButton = new ToolButton("bookmark", "Bookmark this page", Icon::Bookmark, kBookmarkButton);
 #if SUMMIT_MODERN_WEBKIT
     fExtensionActions = new BGroupView("extension-actions", B_HORIZONTAL, 2);
@@ -805,6 +822,18 @@ BrowserWindow::BrowserWindow(std::shared_ptr<SharedProfile> profile, std::string
     AddShortcut(B_TAB, B_CONTROL_KEY | B_SHIFT_KEY, new BMessage(kPreviousTab));
     SetSizeLimits(760, 10000, 450, 10000);
 #if SUMMIT_MODERN_WEBKIT
+    DownloadList::Default().AddListener(BMessenger(this));
+    RefreshDownloadsButton();
+    {
+        uint8 secret[16];
+        std::ifstream random("/dev/urandom", std::ios::binary);
+        if (!random.read(reinterpret_cast<char*>(secret), sizeof secret))
+            for (auto& byte : secret) byte = uint8(std::rand() ^ system_time());
+        for (uint8 byte : secret) {
+            fStoreOfferToken += "0123456789abcdef"[byte >> 4];
+            fStoreOfferToken += "0123456789abcdef"[byte & 15];
+        }
+    }
     BPath downloadsPath;
     std::string downloadsError;
     if (!FindDownloads(downloadsPath, downloadsError)) ShowError(downloadsError);
@@ -863,6 +892,8 @@ BrowserWindow::~BrowserWindow()
 #if SUMMIT_MODERN_WEBKIT
     if (fExtensionMenuCancelled) *fExtensionMenuCancelled = true;
     if (fCertificateWindow.IsValid()) fCertificateWindow.SendMessage(B_QUIT_REQUESTED);
+    DownloadList::Default().RemoveListener(BMessenger(this));
+    CloseDownloadsPanel(true);
     fWebKitContext->SetBrowserWindowTabs(BMessenger(this), { }, nullptr, false);
     SaveSession();
     fSaveTimer.reset();
@@ -2295,9 +2326,18 @@ void BrowserWindow::RefreshChrome()
     static_cast<AddressControl*>(fAddress)->SetReader(active && !active->processExited
         && active->loadError.empty() && (active->readerActive || active->readerAvailable),
         active && active->readerActive, active && !active->loading && !active->readerExtracting && !active->processExited);
-    const bool storePage = fExtensionsEnabled && active && ParseExtensionStoreURL(active->url).has_value();
-    if (storePage && fStoreInstallButton->IsHidden(fStoreInstallButton)) fStoreInstallButton->Show();
-    else if (!storePage && !fStoreInstallButton->IsHidden(fStoreInstallButton)) fStoreInstallButton->Hide();
+    const auto storeItem = fExtensionsEnabled && active ? ParseExtensionStoreURL(active->url) : std::nullopt;
+    if (storeItem) {
+        const bool installed = fShared->InstalledExtensions().contains(StoreItemIdentifier(*storeItem));
+        const char* label = installed ? "Manage extension…" : "Install extension…";
+        if (std::strcmp(fStoreInstallButton->Label(), label)) {
+            fStoreInstallButton->SetLabel(label);
+            fStoreInstallButton->SetToolTip(installed ? "This extension is installed: change or remove it in the Extensions window."
+                : "Download this store extension and review its requested access in Summit.");
+        }
+    }
+    if (storeItem && fStoreInstallButton->IsHidden(fStoreInstallButton)) fStoreInstallButton->Show();
+    else if (!storeItem && !fStoreInstallButton->IsHidden(fStoreInstallButton)) fStoreInstallButton->Hide();
     const bool hasCertificate = active && !active->loading && !active->processExited && active->loadError.empty()
         && active->url == active->connectionCertificate.GetString("url", "")
         && active->connectionCertificate.HasString("sha256");
@@ -2390,6 +2430,8 @@ void BrowserWindow::ProfileChanged(const BMessage& message)
     }
 #if SUMMIT_MODERN_WEBKIT
     if (changes & SharedProfile::kExtensionsPinnedChanged) RefreshExtensionActions();
+    if (changes & SharedProfile::kExtensionsInstalledChanged)
+        for (auto& tab : fTabs) UpdateStoreOffer(tab);
 #endif
     if (changes & SharedProfile::kBookmarksChanged) {
         PagesChanged();
@@ -3158,7 +3200,14 @@ void BrowserWindow::MessageReceived(BMessage* message)
         case B_WEBKIT_URL_SCHEME_REQUEST: ReaderResource(*message); break;
         case B_WEBKIT_URL_SCHEME_REQUEST_STOPPED: break;
         case kExtensionStoreInstall: {
-            if (!fExtensionsEnabled || !tab || !ParseExtensionStoreURL(tab->url)) break;
+            const auto item = fExtensionsEnabled && tab ? ParseExtensionStoreURL(tab->url) : std::nullopt;
+            if (!item) break;
+            if (const auto identifier = StoreItemIdentifier(*item); fShared->InstalledExtensions().contains(identifier)) {
+                BMessage show(kShowExtensions);
+                show.AddString("extension_identifier", identifier.c_str());
+                be_app->PostMessage(&show);
+                break;
+            }
             BMessage request(kExtensionStoreInstall);
             request.AddMessenger("window", BMessenger(this));
             request.AddString("url", tab->url.c_str());
@@ -3306,6 +3355,25 @@ void BrowserWindow::MessageReceived(BMessage* message)
                 if (path.InitCheck() == B_OK) CreateTab(FileURL(path.Path()));
             } break;
         }
+#if SUMMIT_MODERN_WEBKIT
+        case kToggleDownloadsPanel: ToggleDownloadsPanel(); break;
+        case kDownloadsPanelClosed: {
+            BMessenger panel;
+            if (message->FindMessenger("panel", &panel) != B_OK || panel != fDownloadsPanel) break;
+            fDownloadsPanel = {};
+            if (message->GetBool("deactivated", false)) fDownloadsPanelClosedAt = system_time();
+            break;
+        }
+        case kDownloadsChanged: RefreshDownloadsButton(); break;
+        case kDownloadRetry: {
+            const char* url = nullptr;
+            auto* active = ActiveTab();
+            if (message->FindString("url", &url) != B_OK || !url || !*url || !active) break;
+            active->view->DownloadURL(url);
+            break;
+        }
+        case kStoreItemResolved: StoreItemResolved(*message); break;
+#endif
         case kShowDownloads: {
             BPath path;
             std::string error;
@@ -3365,6 +3433,10 @@ void BrowserWindow::MessageReceived(BMessage* message)
                     fSaveAsTargets.erase(target);
                 }
             fStatus->SetText("Downloading to your Downloads folder…");
+            // As in Firefox, a download started here shows the panel.
+            if (IsActive() && !fDownloadsPanel.IsValid() && fDownloadsButton
+                && !fDownloadsButton->IsHidden(fDownloadsButton))
+                ToggleDownloadsPanel(true);
             break;
         }
         case B_WEBKIT_DOWNLOAD_PROGRESS: {
@@ -3402,6 +3474,8 @@ void BrowserWindow::MessageReceived(BMessage* message)
             if (!tab || tab != ActiveTab()) break;
             const std::string source = message->GetString("source_url", "");
             if (source != tab->url) break;
+            if (message->what == B_WEBKIT_SCHEME_OPEN_REQUESTED && StoreOfferChosen(*tab, message->GetString("url", "")))
+                break;
             if (message->what == B_WEBKIT_SCHEME_OPEN_REQUESTED)
                 fProtocolHandlers->Open(message->GetString("url", ""), tab->id, source);
             else fProtocolHandlers->Register(message->GetString("scheme", ""), message->GetString("url", ""),
@@ -4168,6 +4242,7 @@ void BrowserWindow::WebKitStateChanged(const BMessage& message)
     // written (or the page cache's); bring it up to date once it has loaded.
     // Only then: any other state change may be the start of a navigation away.
     if (internalPageLoaded && !tab->loading) RefreshInternalPage(*tab);
+    UpdateStoreOffer(*tab);
     RefreshChrome();
 }
 
@@ -4186,6 +4261,144 @@ void BrowserWindow::ProbeReader(Tab& tab)
     tab.readerRequestURL = tab.url;
     tab.readerExtracting = false;
     tab.view->EvaluateJavaScriptIsolated(source.c_str(), BMessenger(this), tab.readerRequest, tab.readerGeneration);
+}
+
+void BrowserWindow::RefreshDownloadsButton()
+{
+    if (fDownloadsButton) fDownloadsButton->SetSummary(DownloadList::Default().Summarize(fPrivate));
+}
+
+void BrowserWindow::ToggleDownloadsPanel(bool open)
+{
+    if (fDownloadsPanel.IsValid()) {
+        if (!open) CloseDownloadsPanel();
+        return;
+    }
+    // A click on the button while the panel was open took the focus from the
+    // panel, which closed; the click is done with.
+    if (!open && fDownloadsPanelClosedAt && system_time() - fDownloadsPanelClosedAt < 500000) {
+        fDownloadsPanelClosedAt = 0;
+        return;
+    }
+    if (!fDownloadsButton) return;
+    // Under the button, or at the window's corner while the toolbar is hidden.
+    BRect anchor = fDownloadsButton->IsHidden(fDownloadsButton)
+        ? BRect(Frame().right - 8, Frame().top + 8, Frame().right - 8, Frame().top + 8)
+        : fDownloadsButton->ConvertToScreen(fDownloadsButton->Bounds());
+    fDownloadsPanelMenus = std::make_shared<std::atomic<bool>>(false);
+    auto* panel = new DownloadsPanel(this, fPrivate, anchor, fDownloadsPanelMenus);
+    fDownloadsPanel = BMessenger(panel);
+    panel->Show();
+}
+
+void BrowserWindow::CloseDownloadsPanel(bool wait)
+{
+    if (fDownloadsPanelMenus) fDownloadsPanelMenus->store(true);
+    if (wait) {
+        if (fDownloadsPanel.LockTarget()) {
+            BLooper* looper = nullptr;
+            fDownloadsPanel.Target(&looper);
+            looper->Quit();
+        }
+    } else if (fDownloadsPanel.IsValid()) fDownloadsPanel.SendMessage(B_QUIT_REQUESTED);
+    fDownloadsPanel = {};
+}
+
+std::string BrowserWindow::StoreItemIdentifier(const ExtensionStoreItem& item)
+{
+    if (item.store == ExtensionStoreItem::Store::Chrome) return item.identifier;
+    auto found = fStoreItems.find(item.identifier);
+    return found == fStoreItems.end() ? std::string() : found->second.identifier;
+}
+
+void BrowserWindow::UpdateStoreOffer(Tab& tab)
+{
+    // A new document has no card; one is put in once it has loaded.
+    if (tab.loading || tab.processExited) {
+        tab.storeOffer.clear();
+        return;
+    }
+    const auto item = fExtensionsEnabled && tab.loadError.empty() && tab.storeOfferDismissed != tab.url
+        ? ParseExtensionStoreURL(tab.url) : std::nullopt;
+    std::optional<StoreOffer> offer;
+    std::string wanted;
+    if (item) {
+        std::string name = StoreItemNameFromTitle(tab.title);
+        bool known = true;
+        if (item->store == ExtensionStoreItem::Store::Firefox) {
+            auto& identity = fStoreItems[item->identifier];
+            if (!identity.asked) {
+                identity.asked = true;
+                std::thread([item = *item, target = BMessenger(this)] {
+                    std::string identifier, name, error;
+                    bool extension = true;
+                    BMessage resolved(kStoreItemResolved);
+                    resolved.AddString("slug", item.identifier.c_str());
+                    if (ResolveFirefoxStoreItem(item, identifier, name, extension, error)) {
+                        resolved.AddString("identifier", identifier.c_str());
+                        resolved.AddString("name", name.c_str());
+                        resolved.AddBool("extension", extension);
+                    } else std::fprintf(stderr, "Summit: could not look up %s on Firefox Add-ons: %s\n",
+                        item.identifier.c_str(), error.c_str());
+                    target.SendMessage(&resolved);
+                }).detach();
+            }
+            known = identity.resolved && identity.extension;
+            if (!identity.name.empty()) name = identity.name;
+        }
+        if (known) {
+            const auto installed = fShared->InstalledExtensions();
+            offer = StoreOffer { name, false, false, fStoreOfferToken };
+            if (auto found = installed.find(StoreItemIdentifier(*item)); found != installed.end()) {
+                offer->installed = true;
+                offer->disabled = !found->second.enabled;
+                if (offer->name.empty()) offer->name = found->second.name;
+            }
+            wanted = tab.url + '\n' + offer->name + '\n' + (offer->installed ? offer->disabled ? "off" : "on" : "-");
+        }
+    }
+    if (wanted == tab.storeOffer) return;
+    tab.storeOffer = wanted;
+    const auto script = StoreOfferScript(offer ? &*offer : nullptr);
+    tab.view->EvaluateJavaScriptIsolated(script.c_str(), BMessenger(this), ++fReaderRequest, tab.loadGeneration);
+}
+
+void BrowserWindow::StoreItemResolved(const BMessage& message)
+{
+    const std::string slug = message.GetString("slug", "");
+    auto& identity = fStoreItems[slug];
+    identity.resolved = true;
+    identity.identifier = message.GetString("identifier", "");
+    identity.name = message.GetString("name", "");
+    identity.extension = message.GetBool("extension", true);
+    for (auto& tab : fTabs) {
+        const auto item = ParseExtensionStoreURL(tab.url);
+        if (item && item->store == ExtensionStoreItem::Store::Firefox && item->identifier == slug) UpdateStoreOffer(tab);
+    }
+    RefreshChrome();
+}
+
+bool BrowserWindow::StoreOfferChosen(Tab& tab, const std::string& url)
+{
+    if (url.compare(0, std::strlen(kStoreOfferScheme) + 1, std::string(kStoreOfferScheme) + ":") != 0) return false;
+    const auto choice = ParseStoreOfferLink(url);
+    const auto item = ParseExtensionStoreURL(tab.url);
+    // Only the card's own links, on the page it was put in.
+    if (!choice || choice->token != fStoreOfferToken || !item || !fExtensionsEnabled || tab.storeOffer.empty()) return true;
+    if (choice->action == "dismiss") {
+        tab.storeOfferDismissed = tab.url;
+        UpdateStoreOffer(tab);
+    } else if (choice->action == "install") {
+        BMessage request(kExtensionStoreInstall);
+        request.AddMessenger("window", BMessenger(this));
+        request.AddString("url", tab.url.c_str());
+        be_app->PostMessage(&request);
+    } else {
+        BMessage show(kShowExtensions);
+        show.AddString("extension_identifier", StoreItemIdentifier(*item).c_str());
+        be_app->PostMessage(&show);
+    }
+    return true;
 }
 
 void BrowserWindow::ToggleReader()

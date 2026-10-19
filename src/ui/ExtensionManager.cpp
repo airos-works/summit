@@ -2,7 +2,12 @@
 #if SUMMIT_MODERN_WEBKIT
 #include "ExtensionInstaller.h"
 #include "Messages.h"
+#include "core/ExtensionPackage.h"
+#include <WebKit/WebKitView.h>
+#include <Bitmap.h>
 #include <Button.h>
+#include <DataIO.h>
+#include <TranslationUtils.h>
 #include <CheckBox.h>
 #include <FilePanel.h>
 #include <GroupView.h>
@@ -11,9 +16,13 @@
 #include <ListView.h>
 #include <Message.h>
 #include <ScrollView.h>
+#include <String.h>
 #include <StringView.h>
 #include <TextView.h>
 #include <TextControl.h>
+#include <algorithm>
+#include <cctype>
+#include <cmath>
 
 namespace summit {
 namespace {
@@ -23,12 +32,18 @@ std::string field(const BMessage& message, const char* name)
     const char* value = nullptr;
     return message.FindString(name, &value) == B_OK && value ? value : "";
 }
-class Item final : public BStringItem {
+float Scale() { return std::max(1.0f, be_plain_font->Size() / 12.0f); }
+rgb_color Mix(rgb_color a, rgb_color b, float amount)
+{
+    auto channel = [&](uint8 x, uint8 y) { return static_cast<uint8>(x + (y - x) * amount); };
+    return make_color(channel(a.red, b.red), channel(a.green, b.green), channel(a.blue, b.blue));
+}
+// An extension in the list: its icon and its name, dimmed while it is off.
+class Item final : public BListItem {
 public:
     explicit Item(const BMessage& entry)
-        : BStringItem(ExtensionDisplayText(field(entry, "name")).c_str()), identifier(field(entry, "identifier"))
-        , name(field(entry, "name")), version(field(entry, "version")), error(field(entry, "error"))
-        , notice(field(entry, "notice"))
+        : identifier(field(entry, "identifier")), name(field(entry, "name")), version(field(entry, "version"))
+        , error(field(entry, "error")), notice(field(entry, "notice")), package(field(entry, "package"))
     {
         entry.FindBool("enabled", &enabled);
         entry.FindBool("loaded", &loaded);
@@ -36,9 +51,72 @@ public:
         entry.FindBool("pinned", &pinned);
         entry.FindBool("private", &privateBrowsing);
     }
-    std::string identifier, name, version, error, notice;
+    void Update(BView* owner, const BFont* font) override
+    {
+        BListItem::Update(owner, font);
+        font_height height;
+        font->GetHeight(&height);
+        SetHeight(std::ceil(std::max(IconSize(), height.ascent + height.descent) + 10 * Scale()));
+    }
+    void DrawItem(BView* owner, BRect frame, bool) override
+    {
+        const rgb_color background = ui_color(IsSelected() ? B_LIST_SELECTED_BACKGROUND_COLOR : B_LIST_BACKGROUND_COLOR);
+        const rgb_color text = ui_color(IsSelected() ? B_LIST_SELECTED_ITEM_TEXT_COLOR : B_LIST_ITEM_TEXT_COLOR);
+        owner->SetHighColor(background);
+        owner->FillRect(frame);
+        const float s = Scale(), size = IconSize();
+        const BRect iconFrame(frame.left + std::round(6 * s), frame.top + std::floor((frame.Height() + 1 - size) / 2),
+            frame.left + std::round(6 * s) + size - 1, frame.top + std::floor((frame.Height() + 1 - size) / 2) + size - 1);
+        const bool on = loaded || enabled;
+        owner->SetDrawingMode(B_OP_ALPHA);
+        if (icon) {
+            owner->SetBlendingMode(B_PIXEL_ALPHA, B_ALPHA_OVERLAY);
+            if (!on) {
+                owner->SetHighColor(0, 0, 0, 110);
+                owner->SetBlendingMode(B_CONSTANT_ALPHA, B_ALPHA_OVERLAY);
+            }
+            owner->DrawBitmap(icon.get(), icon->Bounds(), iconFrame, B_FILTER_BITMAP_BILINEAR);
+        } else {
+            // No icon Summit can read: the name's first letter on a tile.
+            owner->SetHighColor(Mix(background, text, on ? 0.22f : 0.12f));
+            owner->FillRoundRect(iconFrame, 4 * s, 4 * s);
+            BFont font(be_bold_font);
+            font.SetSize(size * 0.55f);
+            owner->SetFont(&font);
+            owner->SetHighColor(Mix(background, text, on ? 0.85f : 0.5f));
+            const std::string letter = name.empty() ? "?" : std::string(1, char(std::toupper(static_cast<unsigned char>(name[0]))));
+            font_height height;
+            font.GetHeight(&height);
+            owner->DrawString(letter.c_str(), BPoint(iconFrame.left + std::floor((size - font.StringWidth(letter.c_str())) / 2),
+                iconFrame.top + std::floor((size + height.ascent - height.descent) / 2)));
+            owner->SetFont(be_plain_font);
+        }
+        owner->SetDrawingMode(B_OP_COPY);
+        font_height height;
+        be_plain_font->GetHeight(&height);
+        owner->SetHighColor(on ? text : Mix(background, text, 0.55f));
+        BString label(ExtensionDisplayText(name).c_str());
+        const float left = iconFrame.right + std::round(8 * s);
+        owner->TruncateString(&label, B_TRUNCATE_END, std::max(0.0f, frame.right - left - 4));
+        owner->DrawString(label.String(), BPoint(left, frame.top + std::floor((frame.Height() + 1 + height.ascent - height.descent) / 2)));
+    }
+    static float IconSize() { return std::round(24 * Scale()); }
+    std::string identifier, name, version, error, notice, package;
     bool enabled = false, loaded = false, installed = true, pinned = true, privateBrowsing = false;
+    std::shared_ptr<BBitmap> icon;
 };
+// The extension's own icon from its package, at the screen's density.
+std::shared_ptr<BBitmap> LoadIcon(const std::string& package)
+{
+    if (package.empty()) return nullptr;
+    const int pixels = int(std::ceil(Item::IconSize() * std::max(1.0f, BWebKitDisplayScale())));
+    const auto data = ExtensionIconData(package, pixels);
+    if (data.empty()) return nullptr;
+    BMemoryIO input(data.data(), data.size());
+    std::shared_ptr<BBitmap> icon(BTranslationUtils::GetBitmap(&input));
+    if (!icon || icon->InitCheck() != B_OK) return nullptr;
+    return icon;
+}
 }
 ExtensionManager::ExtensionManager(BMessenger owner, std::shared_ptr<std::atomic<unsigned>> windows)
     : BWindow(BRect(130, 110, 1040, 680), "Extensions — Summit", B_TITLED_WINDOW,
@@ -138,13 +216,33 @@ void ExtensionManager::Apply(const BMessage& state)
     while (auto* item = fList->RemoveItem(int32(0))) delete item;
     BMessage entry;
     int32 selection = -1;
+    std::map<std::string, std::shared_ptr<BBitmap>> icons;
     for (int32 i = 0; state.FindMessage("entry", i, &entry) == B_OK; ++i) {
         auto* item = new Item(entry);
+        // Icons are read from the package once (until it is replaced).
+        const auto key = item->identifier + '\n' + item->package;
+        auto known = fIcons.find(key);
+        item->icon = known != fIcons.end() ? known->second : LoadIcon(item->package);
+        icons[key] = item->icon;
         fList->AddItem(item);
         if (item->identifier == identifier) selection = i;
     }
+    fIcons = std::move(icons);
+    // Manage Extension on a store page asked for this one.
+    bool chosen = false;
+    if (!fSelect.empty())
+        for (int32 i = 0; i < fList->CountItems(); ++i)
+            if (static_cast<Item*>(fList->ItemAt(i))->identifier == fSelect) {
+                selection = i;
+                chosen = true;
+                fSelect.clear();
+            }
     if (selection < 0 && fList->CountItems()) selection = 0;
     if (selection >= 0) fList->Select(selection);
+    if (chosen) {
+        fList->ScrollToSelection();
+        fList->MakeFocus();
+    }
     state.FindBool("ready", &fReady);
     state.FindBool("import_busy", &fBusy);
     state.FindBool("approval_ready", &fApprovalReady);
@@ -200,7 +298,22 @@ void ExtensionManager::Render()
 void ExtensionManager::MessageReceived(BMessage* message)
 {
     if (message->what == kExtensionsState) { Apply(*message); return; }
-    if (message->what == kShowExtensions) { Activate(); return; }
+    if (message->what == kShowExtensions) {
+        Activate();
+        if (const char* identifier = message->GetString("extension_identifier", nullptr); identifier && *identifier) {
+            fSelect = identifier;
+            for (int32 i = 0; i < fList->CountItems(); ++i)
+                if (static_cast<Item*>(fList->ItemAt(i))->identifier == fSelect) {
+                    fList->Select(i);
+                    fList->ScrollToSelection();
+                    fList->MakeFocus();
+                    fSelect.clear();
+                    Render();
+                    break;
+                }
+        }
+        return;
+    }
     if (message->what == kCloseExtensionManager) { Quit(); return; }
     if (message->what == selectEntry) { Render(); return; }
     if (message->what == kBrowseExtensionStore) { BMessage request(*message); Send(request); return; }

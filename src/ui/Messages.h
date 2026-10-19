@@ -86,9 +86,20 @@ constexpr uint32 kNextTab = 'next';
 constexpr uint32 kPreviousTab = 'prev';
 constexpr uint32 kReopenTab = 'rtab';
 constexpr uint32 kOpenFile = 'file';
+// Opens the Downloads folder in Tracker.
 constexpr uint32 kShowDownloads = 'down';
 constexpr uint32 kDownloadSave = 'dsav';
 constexpr uint32 kDownloadQuitReply = 'dqre';
+// The toolbar's downloads button and Window › Downloads: opens or closes the
+// window's downloads panel.
+constexpr uint32 kToggleDownloadsPanel = 'dpnl';
+// From a downloads panel to its window when it closes ("deactivated": it
+// closed because something else was clicked).
+constexpr uint32 kDownloadsPanelClosed = 'dpcd';
+// From a downloads panel: to the application, cancel the download
+// "identifier"; to its window, download "url" again.
+constexpr uint32 kDownloadCancel = 'dlcn';
+constexpr uint32 kDownloadRetry = 'dlrt';
 constexpr uint32 kShowExtensions = 'exts';
 constexpr uint32 kShowCertificate = 'cert';
 constexpr uint32 kToggleReader = 'read';

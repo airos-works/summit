@@ -3,9 +3,11 @@
 #include <Window.h>
 #include <Messenger.h>
 #include <atomic>
+#include <map>
 #include <memory>
 #include <string>
 
+class BBitmap;
 class BButton;
 class BCheckBox;
 class BFilePanel;
@@ -41,6 +43,10 @@ private:
     BCheckBox* fPrivate;
     BGroupView* fApproval;
     std::string fDraftName, fDraftBody, fStatusText;
+    // Icons of the listed extensions, by identifier and package.
+    std::map<std::string, std::shared_ptr<BBitmap>> fIcons;
+    // An extension to select once the list has it (Manage Extension).
+    std::string fSelect;
     uint64 fGeneration = 0;
     bool fBusy = false, fReady = false, fApprovalReady = false;
 };

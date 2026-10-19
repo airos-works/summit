@@ -143,4 +143,27 @@ std::unique_ptr<StagedExtensionPackage> DownloadStoreExtension(const ExtensionSt
         return nullptr;
     }
 }
+
+bool ResolveFirefoxStoreItem(const ExtensionStoreItem& item, std::string& identifier, std::string& name, bool& extension,
+    std::string& error)
+{
+    static const std::atomic<bool> never { false };
+    try {
+        if (item.store != ExtensionStoreItem::Store::Firefox) throw std::runtime_error("Not a Firefox Add-ons item.");
+        Transfer metadata { never, nullptr, {}, 0, 2 * 1024 * 1024 };
+        Get(item.requestURL + "?lang=en-US", metadata);
+        const auto addon = nlohmann::json::parse(metadata.text);
+        identifier = addon.at("guid").get<std::string>();
+        extension = addon.value("type", "") == "extension";
+        // A translated field: one string, or one per language.
+        const auto& names = addon.at("name");
+        if (names.is_string()) name = names.get<std::string>();
+        else if (names.is_object() && names.contains("en-US") && names["en-US"].is_string()) name = names["en-US"].get<std::string>();
+        else if (names.is_object() && !names.empty() && names.begin()->is_string()) name = names.begin()->get<std::string>();
+        return !identifier.empty();
+    } catch (const std::exception& exception) {
+        error = exception.what();
+        return false;
+    }
+}
 }
