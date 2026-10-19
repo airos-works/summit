@@ -65,8 +65,10 @@ For a stock Haiku installation, not air/OS. Install the packages together with `
 - A bundled [PDF viewer](docs/pdf-viewer.md) with navigation, search, zoom,
   password entry, and downloads of the original document.
 - Native [color, date, month, week, time, and local date/time pickers](docs/native-form-pickers.md).
-- [Developer tools](docs/developer-tools.md) for page inspection, JavaScript
-  console output, and network requests.
+- [Developer tools](docs/developer-tools.md): an Elements panel (the live DOM
+  tree, matched and computed styles, the box model, an element picker and
+  Inspect Element), JavaScript console output, network requests and storage,
+  and View › View Page Source (Alt+U) for the HTML as the server sent it.
 - A [built-in MCP server](docs/mcp.md) (Preferences › Developer, off by
   default) that lets debugging tools such as Claude Code inspect tabs, pages,
   processes, memory, rendering, media and extensions on the machine itself.

@@ -157,6 +157,64 @@ private:
     BButton* fSave;
 };
 
+// The page's DOM as a tree, followed as the page changes it, and the CSS of
+// the selected element: matched rules, computed styles and its boxes. Nodes
+// and styles are edited through the page; the element picker and Inspect
+// Element choose a node in the page. DevToolsElements.cpp.
+class ElementsPanel : public BView {
+public:
+    ElementsPanel(devtools::Session& session, DevToolsHost& host);
+    void AttachedToWindow() override;
+    void MessageReceived(BMessage* message) override;
+    void Apply(const devtools::Changes& changes);
+    // Whether the panel is the one shown: the page's document is read the
+    // first time it is, and the page's highlight goes when it is not.
+    void SetShown(bool shown);
+    // The element picker, as its button and Shift+Alt+C do.
+    void SetPicking(bool picking);
+    bool Picking() const;
+    // Inspect Element: the element at a point of the page, in CSS pixels.
+    void InspectAt(float x, float y);
+    void FocusSearch();
+    // An element was chosen in the page since the last call: the tools
+    // should come forward.
+    bool TakePicked();
+    bool Command(const std::string& action, const std::string& argument, std::string& error);
+    std::string StateJSON();
+
+private:
+    class Tree;
+    class Styles;
+    class BoxModel;
+    class HTMLEditor;
+    void ShowSelection();
+    void ShowStyles();
+    void ShowComputed();
+    void ShowSearch();
+    void ShowPicking();
+    void Notice(const std::string& text);
+    void OpenSource();
+    devtools::Session& fSession;
+    DevToolsHost& fHost;
+    bool fShown = false, fPicked = false;
+    std::string fComputedFilter;
+    BButton* fPick;
+    BTextControl* fSearch;
+    BStringView* fSearchCount;
+    BButton* fSearchPrevious;
+    BButton* fSearchNext;
+    Tree* fTree;
+    BStringView* fCrumbs;
+    BStringView* fNotice;
+    BTabView* fSide;
+    BTextControl* fStyleFilter;
+    Styles* fStyles;
+    BoxModel* fBox;
+    BTextControl* fComputedSearch;
+    BCheckBox* fComputedAll;
+    BColumnListView* fComputed;
+};
+
 class ConsolePanel : public BView {
 public:
     ConsolePanel(devtools::Session& session, DevToolsHost& host);

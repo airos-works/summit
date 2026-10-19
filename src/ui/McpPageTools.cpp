@@ -119,6 +119,26 @@ bool WithView(const BMessenger& window, int64 tab, const std::function<void(BWeb
     return found;
 }
 
+// The engine names a page's target after the page; a connection that is not
+// the page's first (the Developer Tools may be open) is not told the name.
+std::string PageTarget(const BMessenger& window, const std::string& id)
+{
+    if (window.LockTargetWithTimeout(3000000) != B_OK) return { };
+    BLooper* looper = nullptr;
+    window.Target(&looper);
+    std::string answer;
+    if (auto* browser = dynamic_cast<BrowserWindow*>(looper)) answer = browser->McpRequest("{\"action\":\"tabs\"}");
+    if (looper) looper->Unlock();
+    const Json tabs = Json::parse(answer, nullptr, false);
+    if (!tabs.is_object() || !tabs.contains("tabs") || !tabs["tabs"].is_array()) return { };
+    for (const auto& tab : tabs["tabs"]) {
+        if (!tab.is_object() || tab.value("id", std::string()) != id) continue;
+        const uint64 page = tab.value("pageIdentifier", uint64(0));
+        return page ? "page-" + std::to_string(page) : std::string();
+    }
+    return { };
+}
+
 std::shared_ptr<PageConnection> Connect(const Json& arguments)
 {
     McpTabRef ref = McpResolveTab(arguments);
@@ -160,6 +180,7 @@ std::shared_ptr<PageConnection> Connect(const Json& arguments)
     }
     if (connection == existing) return connection;
     if (!connection->session) throw ToolError("the engine made no inspector session for tab " + id);
+    const std::string target = PageTarget(ref.window, id);
     std::vector<std::string> outgoing;
     {
         std::lock_guard lock(sLock);
@@ -167,6 +188,7 @@ std::shared_ptr<PageConnection> Connect(const Json& arguments)
         sByIdentifier[connection->identifier] = connection;
         sByTab[id] = connection;
         connection->channel.Start();
+        connection->channel.AssumePageTarget(target);
         outgoing = connection->channel.TakeOutgoing();
     }
     Flush(*connection, std::move(outgoing));

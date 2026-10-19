@@ -24,6 +24,14 @@ void InspectorChannel::Start()
     fModel.Start();
 }
 
+void InspectorChannel::AssumePageTarget(const std::string& target)
+{
+    if (target.empty() || !fPageTarget.empty()) return;
+    fPageTarget = target;
+    fModel.AssumePageTarget(target);
+    for (auto& [id, inner] : std::exchange(fWaiting, { })) SendToPage(id, inner);
+}
+
 std::vector<std::string> InspectorChannel::TakeOutgoing()
 {
     for (auto& message : fModel.TakeOutgoing()) fOutgoing.push_back(std::move(message));

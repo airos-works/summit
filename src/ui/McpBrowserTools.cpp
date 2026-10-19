@@ -260,10 +260,10 @@ void RegisterMcpBrowserTools(mcp::Server& server, const std::shared_ptr<McpConte
 
     server.Add({"tab_control",
         "Acts on a tab: reload, stop, back, forward, select (activate=true also raises the window), close, zoom "
-        "(factor 0.25-5), devtools (opens Summit's Developer Tools window for it, panel network or console).",
+        "(factor 0.25-5), devtools (opens Summit's Developer Tools window for it, panel elements, network, console or storage).",
         Schema().Enum("action", "What to do", {"reload", "stop", "back", "forward", "select", "close", "zoom", "devtools"}, true)
             .String("tab", kTabArgument).Number("factor", "Zoom factor for zoom").Boolean("activate", "For select: raise the window")
-            .String("panel", "For devtools: network or console"),
+            .String("panel", "For devtools: elements, network, console or storage"),
         [](const Json& arguments) {
             Json request = {{"action", mcp::StringArgument(arguments, "action")}};
             if (mcp::HasArgument(arguments, "factor")) request["factor"] = mcp::NumberArgument(arguments, "factor", 1);

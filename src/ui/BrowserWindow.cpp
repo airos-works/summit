@@ -10,6 +10,7 @@
 #include "SharedProfile.h"
 #if SUMMIT_MODERN_WEBKIT
 #include "DevToolsWindow.h"
+#include "PageSourceWindow.h"
 #include "DownloadList.h"
 #include "DownloadsPanel.h"
 #include "ExtensionStoreDownload.h"
@@ -664,7 +665,12 @@ BrowserWindow::BrowserWindow(std::shared_ptr<SharedProfile> profile, std::string
     AddShortcut('=', 0, new BMessage(kZoomIn));
 #if SUMMIT_MODERN_WEBKIT
     view->AddSeparatorItem();
+    AddItem(view, "View Page Source", kViewPageSource, 'U');
     AddItem(view, "Developer Tools", kShowDeveloperTools, 'I', B_SHIFT_KEY);
+    auto* pick = new BMessage(kShowDeveloperTools);
+    pick->AddString("panel", "elements");
+    pick->AddBool("pick", true);
+    view->AddItem(new BMenuItem("Select Element in Page", pick, 'C', B_SHIFT_KEY));
 #endif
     menu->AddItem(view);
     fHistoryMenu = new BMenu("History");
@@ -3553,7 +3559,8 @@ void BrowserWindow::MessageReceived(BMessage* message)
         case kExtensionMenuItem:
             BWebKitView::PerformContextMenuExtensionItem(message->GetUInt64("token", 0));
             break;
-        case kShowDeveloperTools: ShowDeveloperTools(message->GetString("panel", nullptr)); break;
+        case kShowDeveloperTools: ShowDeveloperTools(message->GetString("panel", nullptr), message); break;
+        case kViewPageSource: ShowPageSource(); break;
         case kDeveloperToolsClosed: {
             BMessenger window;
             if (message->FindMessenger("window", &window) != B_OK) break;
@@ -3869,8 +3876,15 @@ void BrowserWindow::ShowPageContextMenu(const BMessage& message)
         menu->AddItem(copyAddress);
         edit("Select All", B_SELECT_ALL);
         menu->AddSeparatorItem();
+        menu->AddItem(new BMenuItem("View Page Source", new BMessage(kViewPageSource)));
         menu->AddItem(new BMenuItem("Developer Tools", new BMessage(kShowDeveloperTools)));
     }
+    // The element under the pointer, in the Developer Tools.
+    separate();
+    auto* inspect = new BMessage(kShowDeveloperTools);
+    inspect->AddString("panel", "elements");
+    inspect->AddPoint("inspect", where);
+    menu->AddItem(new BMenuItem("Inspect Element", inspect));
     // Items extensions add with the menus API, under the extension's name
     // unless it has just one (as Safari shows them).
     std::function<void(BMenu*, const BMessage&)> addExtensionItems = [&](BMenu* into, const BMessage& from) {
@@ -3912,26 +3926,47 @@ void BrowserWindow::ShowPageContextMenu(const BMessage& message)
     menu->Go(tab->view->ConvertToScreen(where), true, false, true);
 }
 
-void BrowserWindow::ShowDeveloperTools(const char* panel)
+// The inspector's name for the tab's page, which a session that is not the
+// page's first is not told.
+static std::string PageTarget(uint64 pageIdentifier)
+{
+    return pageIdentifier ? "page-" + std::to_string(pageIdentifier) : std::string();
+}
+
+void BrowserWindow::ShowDeveloperTools(const char* panel, const BMessage* request)
 {
     auto* tab = ActiveTab();
     if (!tab || !tab->view || fClosingWindow || tab->closeQueued) return;
+    BMessage show(kShowDeveloperTools);
+    if (panel) show.AddString("panel", panel);
+    BPoint where;
+    if (request && request->FindPoint("inspect", &where) == B_OK) {
+        // In the page view's pixels; the tools need the page's.
+        show.AddPoint("inspect", where);
+        show.AddDouble("zoom", tab->pageZoom);
+    }
+    if (request && request->GetBool("pick", false)) show.AddBool("pick", true);
     if (tab->devTools.IsValid()) {
-        BMessage show(kShowDeveloperTools);
-        if (panel) show.AddString("panel", panel);
         tab->devTools.SendMessage(&show);
         return;
     }
     auto* window = new DevToolsWindow(BMessenger(this), tab->id, tab->title, Frame());
     // The window hears of the page's messages, so it is made first; it reads
     // them only once it runs.
-    window->SetInspector(BWebKitInspectorSession::Create(*tab->view, BMessenger(window), static_cast<uint64>(tab->id)));
+    window->SetInspector(BWebKitInspectorSession::Create(*tab->view, BMessenger(window), static_cast<uint64>(tab->id)),
+        PageTarget(tab->pageIdentifier));
     tab->devTools = BMessenger(window);
-    if (panel) {
-        BMessage show(kShowDeveloperTools);
-        show.AddString("panel", panel);
-        window->PostMessage(&show);
-    }
+    if (!show.IsEmpty()) window->PostMessage(&show);
+    window->Show();
+}
+
+void BrowserWindow::ShowPageSource()
+{
+    auto* tab = ActiveTab();
+    if (!tab || !tab->view || fClosingWindow || tab->closeQueued) return;
+    auto* window = new SourceWindow("Source of " + tab->url, Frame());
+    window->FetchPageSource(BWebKitInspectorSession::Create(*tab->view, BMessenger(window), static_cast<uint64>(tab->id)),
+        PageTarget(tab->pageIdentifier));
     window->Show();
 }
 

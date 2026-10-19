@@ -1,6 +1,7 @@
 #include "DevTools.h"
 #include <nlohmann/json.hpp>
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdio>
 #include <ctime>
@@ -624,11 +625,34 @@ void StyledText::Add(std::string_view part, TextStyle style)
     text += part;
 }
 
+uint64_t Session::FirstCommand()
+{
+    // Ten million commands each, below the MCP tools' 10^9.
+    static std::atomic<uint64_t> sessions {0};
+    return 1 + (sessions++ % 90) * 10000000;
+}
+
 void Session::Start()
 {
     // A page that moves to another process starts loading in it at once;
     // paused, it waits until its requests are being recorded.
     Send("Target.setPauseOnStart", "{\"pauseOnStart\":true}");
+}
+
+std::vector<std::string> Session::TakeOutgoing()
+{
+    // The Elements panel's commands wait for the page's target.
+    for (auto& command : fDOM.TakeCommands()) fHeldDOM.push_back(std::move(command));
+    if (!fPageTarget.empty())
+        for (const auto& command : std::exchange(fHeldDOM, { }))
+            SendToTarget(fPageTarget, command.method, command.parameters, Pending::Elements, command.tag);
+    return std::exchange(fOutgoing, { });
+}
+
+Changes Session::TakeChanges()
+{
+    if (fDOM.HasChanges()) fChanges.elements = true;
+    return std::exchange(fChanges, { });
 }
 
 void Session::Send(const std::string& method, const std::string& parametersJSON)
@@ -659,14 +683,23 @@ void Session::Receive(std::string_view text)
         const auto& info = Member(parameters, "targetInfo");
         const auto target = Text(Member(info, "targetId"));
         if (target.empty()) return;
-        if (Text(Member(info, "type")) == "page")
+        if (Text(Member(info, "type")) == "page") {
+            // A target assumed already is not set up again.
+            if (!Flag(Member(info, "isProvisional")) && fTargets.count(target) && !fTargets[target]) return;
             TargetCreated(target, Flag(Member(info, "isProvisional")), Flag(Member(info, "isPaused")));
+        }
         else if (Flag(Member(info, "isPaused")))
             Send("Target.resume", "{\"targetId\":" + Quoted(target) + "}");
     } else if (method == "Target.targetDestroyed")
         TargetDestroyed(Text(Member(parameters, "targetId")));
     else if (method == "Target.didCommitProvisionalTarget")
         TargetCommitted(Text(Member(parameters, "oldTargetId")), Text(Member(parameters, "newTargetId")));
+}
+
+void Session::AssumePageTarget(const std::string& target)
+{
+    if (target.empty() || !fPageTarget.empty() || fTargets.count(target)) return;
+    TargetCreated(target, false, false);
 }
 
 void Session::TargetCreated(const std::string& target, bool provisional, bool paused)
@@ -712,6 +745,9 @@ void Session::TargetCommitted(const std::string& previous, const std::string& ta
     fTargets[target] = false;
     fPageTarget = target;
     if (previous == target) return;
+    // The DOM the panel knew is the other process's.
+    fHeldDOM.clear();
+    fDOM.TargetChanged();
     SendToTarget(target, "Page.getResourceTree", "{}", Pending::Frames);
     fPending.rbegin()->second.origin = target;
     // The page is now another process's: a navigation, seen from here.
@@ -737,11 +773,16 @@ void Session::FromTarget(const std::string& target, std::string_view text)
         if (found == fPending.end()) return;
         const auto pending = found->second;
         fPending.erase(found);
-        ProtocolReader::Answered(*this, pending, message);
+        if (pending.kind == Pending::Elements) fDOM.Answered(pending.serial, text);
+        else ProtocolReader::Answered(*this, pending, message);
         return;
     }
     const auto method = Text(Member(message, "method"));
     const auto& parameters = Member(message, "params");
+    if (target == fPageTarget && fDOM.Enabled()
+        && (method.rfind("DOM.", 0) == 0 || method.rfind("CSS.", 0) == 0 || method == "Inspector.inspect"
+            || method == "Page.domContentEventFired" || method == "Page.loadEventFired"))
+        fDOM.Event(text);
     if (method == "Network.dataReceived") ProtocolReader::DataReceived(*this, target, parameters);
     else if (method == "Network.requestWillBeSent") ProtocolReader::RequestWillBeSent(*this, target, parameters);
     else if (method == "Network.responseReceived") ProtocolReader::ResponseReceived(*this, target, parameters);

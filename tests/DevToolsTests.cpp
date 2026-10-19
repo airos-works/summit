@@ -1,5 +1,6 @@
 #include "core/DevTools.h"
 #include "core/DevToolsFormat.h"
+#include "core/PageSource.h"
 #include <nlohmann/json.hpp>
 #include <iostream>
 #include <string>
@@ -754,10 +755,473 @@ static void TestStorage()
     CHECK(Sent(empty).empty() && !empty.FindArea(StorageKind::Local, "https://example.com")->error.empty());
 }
 
+// A node as the protocol describes it.
+static json Node(int id, int type, const std::string& name, json more = json::object())
+{
+    std::string local;
+    if (type == 1)
+        for (const char c : name) local += static_cast<char>(c >= 'A' && c <= 'Z' ? c + 32 : c);
+    json node = {{"nodeId", id}, {"nodeType", type}, {"nodeName", name}, {"localName", local}, {"nodeValue", ""}};
+    if (type == 1) node["attributes"] = json::array();
+    node.update(more);
+    return node;
+}
+static std::string Joined(const std::vector<RowPart>& parts)
+{
+    std::string text;
+    for (const auto& part : parts) text += part.text;
+    return text;
+}
+// A document: doctype, html with head and body (base + 1 to base + 4).
+static json Document(int base)
+{
+    return Node(base, 9, "#document", {{"documentURL", "https://example.com/"}, {"childNodeCount", 2}, {"children", json::array({
+        Node(base + 1, 10, "html", {{"publicId", ""}, {"systemId", ""}}),
+        Node(base + 2, 1, "HTML", {{"attributes", {"lang", "en"}}, {"childNodeCount", 2}, {"children", json::array({
+            Node(base + 3, 1, "HEAD", {{"childNodeCount", 1}}),
+            Node(base + 4, 1, "BODY", {{"attributes", {"class", "home page"}}, {"childNodeCount", 3}})})}})})}});
+}
+
+static void TestElements()
+{
+    Session session;
+    session.Start();
+    Sent(session);
+    session.Receive(TargetCreated("page-1"));
+    Sent(session);
+    auto& dom = session.DOM();
+    // Until the panel is shown nothing is asked or followed.
+    CHECK(!dom.Enabled());
+    session.Receive(Event("page-1", "DOM.documentUpdated", json::object()));
+    CHECK(Sent(session).empty() && !session.TakeChanges().Any());
+
+    dom.Enable();
+    auto commands = Sent(session);
+    CHECK(Find(commands, "Inspector.enable") && Find(commands, "CSS.enable") && Find(commands, "CSS.getSupportedCSSProperties"));
+    const auto* get = Find(commands, "DOM.getDocument");
+    CHECK(get && get->target == "page-1");
+    session.Receive(Reply("page-1", Find(commands, "CSS.getSupportedCSSProperties")->id, {{"cssProperties", json::array({
+        {{"name", "color"}, {"inherited", true}}, {{"name", "font-size"}, {"inherited", true}}, {{"name", "display"}},
+        {{"name", "margin"}, {"longhands", {"margin-top", "margin-right", "margin-bottom", "margin-left"}}}})}}));
+    session.Receive(Reply("page-1", get->id, {{"root", Document(1)}}));
+    // The body is selected and expanded, as in other browsers.
+    CHECK(dom.Loaded() && dom.Document() == 1 && dom.Selected() == 5 && dom.IsExpanded(3) && dom.IsExpanded(5));
+    CHECK(session.TakeChanges().elements);
+    auto changes = dom.TakeChanges();
+    CHECK(changes.tree && changes.selection);
+    commands = Sent(session);
+    const auto* children = Find(commands, "DOM.requestChildNodes");
+    CHECK(children && children->parameters["nodeId"] == 5);
+    CHECK(Find(commands, "DOM.setInspectedNode") && Find(commands, "CSS.getMatchedStylesForNode")
+        && Find(commands, "CSS.getInlineStylesForNode") && Find(commands, "CSS.getComputedStyleForNode") && Find(commands, "DOM.resolveNode"));
+
+    // The doctype, html, head, body (its children on their way), </html>.
+    auto rows = dom.Rows();
+    CHECK(rows.size() == 5 && rows[0].node == 2 && rows[1].node == 3 && rows[2].node == 4 && rows[2].depth == 1 && rows[3].node == 5
+        && rows[4].closing && rows[4].node == 3);
+    CHECK_TEXT(Joined(dom.DescribeRow(rows[0])), "<!DOCTYPE html>");
+    CHECK_TEXT(Joined(dom.DescribeRow(rows[1])), "<html lang=\"en\">");
+    CHECK_TEXT(Joined(dom.DescribeRow(rows[2])), "<head>…</head>");
+    CHECK_TEXT(Joined(dom.DescribeRow(rows[3])), "<body class=\"home page\">…</body>");
+    CHECK(dom.DescribeRow(rows[1])[1].kind == Piece::Tag && dom.DescribeRow(rows[1])[3].kind == Piece::AttributeName
+        && dom.DescribeRow(rows[1])[5].kind == Piece::AttributeValue);
+
+    session.Receive(Event("page-1", "DOM.setChildNodes", {{"parentId", 5}, {"nodes", json::array({
+        Node(6, 1, "H1", {{"attributes", {"id", "title"}}, {"childNodeCount", 1}, {"children", json::array({
+            Node(7, 3, "#text", {{"nodeValue", "  Hello\n  world "}})})}}),
+        Node(8, 8, "#comment", {{"nodeValue", " note "}}),
+        Node(9, 1, "DIV", {{"childNodeCount", 2}})})}}));
+    rows = dom.Rows();
+    CHECK(rows.size() == 9 && rows[7].closing && rows[7].node == 5);
+    CHECK_TEXT(Joined(dom.DescribeRow(rows[4])), "<h1 id=\"title\">Hello world</h1>");
+    CHECK(rows[4].depth == 2 && !dom.Expandable(6));
+    CHECK_TEXT(Joined(dom.DescribeRow(rows[5])), "<!-- note -->");
+    CHECK_TEXT(Joined(dom.DescribeRow(rows[6])), "<div>…</div>");
+    CHECK_TEXT(dom.Breadcrumbs(6), "html › body.home.page › h1#title");
+    CHECK_TEXT(dom.Selector(6), "#title");
+    CHECK_TEXT(dom.Selector(9), "body > div");
+    CHECK_TEXT(dom.PathOf(9), "1,HTML,1,BODY,2,DIV");
+    CHECK_TEXT(dom.AttributesText(5), "class=\"home page\"");
+
+    // The page changes: a node inserted, attributes and text changed.
+    session.Receive(Event("page-1", "DOM.childNodeInserted", {{"parentNodeId", 5}, {"previousNodeId", 6},
+        {"node", Node(10, 1, "P", {{"childNodeCount", 0}})}}));
+    CHECK(dom.Find(5)->children == std::vector<int>({6, 10, 8, 9}) && dom.Find(5)->childCount == 4);
+    CHECK_TEXT(Joined(dom.DescribeRow({10, 2, false})), "<p></p>");
+    session.Receive(Event("page-1", "DOM.attributeModified", {{"nodeId", 6}, {"name", "class"}, {"value", "big \"one\" & two"}}));
+    CHECK_TEXT(dom.AttributesText(6), "id=\"title\" class=\"big &quot;one&quot; &amp; two\"");
+    session.Receive(Event("page-1", "DOM.attributeRemoved", {{"nodeId", 6}, {"name", "class"}}));
+    session.Receive(Event("page-1", "DOM.characterDataModified", {{"nodeId", 7}, {"characterData", "Bye"}}));
+    std::string text;
+    CHECK(dom.InlineText(6, &text) && text == "Bye");
+    CHECK(dom.TakeChanges().nodes);
+    session.Receive(Event("page-1", "DOM.childNodeCountUpdated", {{"nodeId", 4}, {"childNodeCount", 0}}));
+    CHECK(!dom.Expandable(4));
+    CHECK_TEXT(Joined(dom.DescribeRow({4, 1, false})), "<head></head>");
+    // Children it has not given come back (an undo puts a node's children back).
+    session.Receive(Event("page-1", "DOM.childNodeCountUpdated", {{"nodeId", 4}, {"childNodeCount", 2}}));
+    CHECK(dom.Expandable(4) && !dom.Find(4)->childrenKnown);
+    CHECK_TEXT(Joined(dom.DescribeRow({4, 1, false})), "<head>…</head>");
+
+    // A node removed: the selection in it moves to the node after it.
+    dom.Select(10);
+    Sent(session);
+    dom.Remove(10);
+    commands = Sent(session);
+    CHECK(Find(commands, "DOM.removeNode") && Find(commands, "DOM.removeNode")->parameters["nodeId"] == 10
+        && Find(commands, "DOM.markUndoableState"));
+    session.Receive(Event("page-1", "DOM.childNodeRemoved", {{"parentNodeId", 5}, {"nodeId", 10}}));
+    CHECK(!dom.Find(10) && dom.Selected() == 8);
+    // A subtree removed with the selection deep in it: the parent is selected.
+    dom.SetExpanded(9, true);
+    commands = Sent(session);
+    CHECK(Find(commands, "DOM.requestChildNodes") && Find(commands, "DOM.requestChildNodes")->parameters["nodeId"] == 9);
+    session.Receive(Event("page-1", "DOM.setChildNodes", {{"parentId", 9}, {"nodes", json::array({
+        Node(11, 3, "#text", {{"nodeValue", "a"}}), Node(12, 1, "SPAN", {{"childNodeCount", 0}})})}}));
+    CHECK(dom.Rows().size() == 12);
+    dom.Select(12);
+    session.Receive(Event("page-1", "DOM.childNodeRemoved", {{"parentNodeId", 5}, {"nodeId", 9}}));
+    CHECK(!dom.Find(9) && !dom.Find(11) && !dom.Find(12) && dom.Selected() == 5 && !dom.IsExpanded(9));
+
+    // Attributes edited as text: those left out are removed.
+    Sent(session);
+    dom.SetAttributesText(6, "id=\"main\" data-x='1 2' hidden");
+    commands = Sent(session);
+    CHECK(!Find(commands, "DOM.removeAttribute") && Find(commands, "DOM.setAttributesAsText")
+        && Find(commands, "DOM.setAttributesAsText")->parameters["text"] == "id=\"main\" data-x='1 2' hidden");
+    dom.SetAttributesText(6, "");
+    commands = Sent(session);
+    CHECK(Find(commands, "DOM.removeAttribute") && Find(commands, "DOM.removeAttribute")->parameters["name"] == "id"
+        && !Find(commands, "DOM.setAttributesAsText"));
+    CHECK(AttributeNames("a=1 B='x y' c=\"q > r\" d  e = f/g /h") == std::vector<std::string>({"a", "b", "c", "d", "e", "h"}));
+    dom.SetNodeText(7, "Hi");
+    dom.SetTagName(6, "h2");
+    commands = Sent(session);
+    CHECK(Find(commands, "DOM.setNodeValue") && Find(commands, "DOM.setNodeValue")->parameters["value"] == "Hi");
+    const auto* rename = Find(commands, "DOM.setNodeName");
+    CHECK(rename && rename->parameters["name"] == "h2");
+    session.Receive(Event("page-1", "DOM.childNodeRemoved", {{"parentNodeId", 5}, {"nodeId", 6}}));
+    session.Receive(Event("page-1", "DOM.childNodeInserted", {{"parentNodeId", 5}, {"previousNodeId", 0},
+        {"node", Node(13, 1, "H2", {{"childNodeCount", 0}})}}));
+    session.Receive(Reply("page-1", rename->id, {{"nodeId", 13}}));
+    CHECK(dom.Selected() == 13 && dom.Find(5)->children.front() == 13);
+    // An error is told.
+    dom.Remove(8);
+    commands = Sent(session);
+    session.Receive(FromTarget("page-1", {{"id", Find(commands, "DOM.removeNode")->id}, {"error", {{"message", "Node is in a shadow tree"}}}}));
+    CHECK(dom.TakeChanges().notice == "Node is in a shadow tree" && dom.Find(8));
+
+    // Search: the results are selected in turn.
+    dom.Search("note");
+    commands = Sent(session);
+    const auto* search = Find(commands, "DOM.performSearch");
+    CHECK(search && search->parameters["query"] == "note" && dom.Searching());
+    session.Receive(Reply("page-1", search->id, {{"searchId", "s1"}, {"resultCount", 2}}));
+    commands = Sent(session);
+    const auto* results = Find(commands, "DOM.getSearchResults");
+    CHECK(results && results->parameters["searchId"] == "s1" && results->parameters["toIndex"] == 2);
+    session.Receive(Reply("page-1", results->id, {{"nodeIds", {8, 13}}}));
+    CHECK(dom.SearchCount() == 2 && dom.Selected() == 8 && dom.SearchIndex() == 0 && !dom.Searching());
+    dom.SearchStep(1);
+    CHECK(dom.Selected() == 13 && dom.SearchIndex() == 1);
+    dom.SearchStep(1);
+    CHECK(dom.Selected() == 8);
+    dom.SearchStep(-1);
+    CHECK(dom.Selected() == 13);
+    dom.Search("");
+    commands = Sent(session);
+    CHECK(Find(commands, "DOM.discardSearchResults") && dom.SearchCount() == 0);
+
+    // The picker: the page tells what was clicked with Inspector.inspect.
+    dom.SetPicking(true);
+    commands = Sent(session);
+    const auto* pick = Find(commands, "DOM.setInspectModeEnabled");
+    CHECK(pick && pick->parameters["enabled"] == true && pick->parameters["highlightConfig"].is_object() && dom.Picking());
+    session.Receive(Event("page-1", "Inspector.inspect", {{"object", {{"type", "object"}, {"subtype", "node"}, {"objectId", "o1"}}},
+        {"hints", json::object()}}));
+    CHECK(!dom.Picking());
+    commands = Sent(session);
+    const auto* request = Find(commands, "DOM.requestNode");
+    CHECK(request && request->parameters["objectId"] == "o1" && Find(commands, "Runtime.releaseObject"));
+    // The path to the node arrives first.
+    session.Receive(Event("page-1", "DOM.setChildNodes", {{"parentId", 4}, {"nodes", json::array({Node(14, 1, "TITLE", {{"childNodeCount", 0}})})}}));
+    session.Receive(Reply("page-1", request->id, {{"nodeId", 14}}));
+    CHECK(dom.Selected() == 14 && dom.IsExpanded(4));
+    changes = dom.TakeChanges();
+    CHECK(changes.picked && changes.picking);
+    // Inspect Element: the element at a point of the page.
+    dom.InspectAt(10, 20.5);
+    commands = Sent(session);
+    const auto* evaluate = Find(commands, "Runtime.evaluate");
+    CHECK(evaluate && evaluate->parameters["expression"].get<std::string>().find("(10.00, 20.50)") != std::string::npos);
+    session.Receive(Reply("page-1", evaluate->id, {{"result", {{"type", "object"}, {"subtype", "node"}, {"objectId", "o2"}}}}));
+    commands = Sent(session);
+    request = Find(commands, "DOM.requestNode");
+    CHECK(request && request->parameters["objectId"] == "o2");
+    session.Receive(Reply("page-1", request->id, {{"nodeId", 8}}));
+    CHECK(dom.Selected() == 8 && dom.TakeChanges().picked);
+    dom.Highlight(13);
+    dom.Highlight(13);
+    dom.HideHighlight();
+    commands = Sent(session);
+    CHECK(Find(commands, "DOM.highlightNode") && Find(commands, "DOM.highlightNode")->parameters["nodeId"] == 13
+        && Find(commands, "DOM.hideHighlight"));
+    size_t highlights = 0;
+    for (const auto& command : commands) highlights += command.method == "DOM.highlightNode";
+    CHECK(highlights == 1);
+
+    // A reload: the document is read again and the selection found by its path.
+    dom.Select(13);
+    session.Receive(Event("page-1", "DOM.documentUpdated", json::object()));
+    CHECK(!dom.Loaded() && dom.Selected() == 0);
+    commands = Sent(session);
+    get = Find(commands, "DOM.getDocument");
+    CHECK(get && !Find(commands, "CSS.enable"));
+    session.Receive(Reply("page-1", get->id, {{"root", Document(21)}}));
+    commands = Sent(session);
+    const auto* path = Find(commands, "DOM.pushNodeByPathToFrontend");
+    CHECK(path && path->parameters["path"] == "1,HTML,1,BODY,0,H2" && dom.Selected() == 25);
+    session.Receive(Event("page-1", "DOM.setChildNodes", {{"parentId", 25}, {"nodes", json::array({Node(30, 1, "H2", {{"childNodeCount", 0}})})}}));
+    session.Receive(Reply("page-1", path->id, {{"nodeId", 30}}));
+    CHECK(dom.Selected() == 30);
+
+    // Another process: the document is read from the new target.
+    session.Receive(TargetCreated("page-2", true));
+    Sent(session);
+    session.Receive(json{{"method", "Target.didCommitProvisionalTarget"}, {"params", {{"oldTargetId", "page-1"}, {"newTargetId", "page-2"}}}}.dump());
+    CHECK(!dom.Loaded());
+    commands = Sent(session);
+    CHECK(Find(commands, "DOM.getDocument") && Find(commands, "DOM.getDocument")->target == "page-2" && Find(commands, "CSS.enable"));
+    // A search asked before the document is there runs once it is.
+    dom.Search("x");
+    CHECK(!Find(Sent(session), "DOM.performSearch"));
+}
+
+static void TestElementStyles()
+{
+    // Blocks as shown: the element's own from the strongest, then inherited.
+    StyleBlock inlined, rule, weak, agent, parent;
+    inlined.kind = StyleBlock::Inline;
+    inlined.declarations = {{"color", "red", "color: red;"}};
+    rule.declarations = {{"color", "blue", "color: blue !important;"}, {"margin", "0", "margin: 0;"}, {"margin", "1px", "margin: 1px;"}};
+    rule.declarations[0].important = true;
+    // WebKit marks a property overridden later in the same rule.
+    rule.declarations[1].overridden = true;
+    weak.declarations = {{"margin", "2px", "margin: 2px;"}, {"padding", "1px", "padding: 1px"}, {"display", "flex", "/* display: flex; */"}};
+    weak.declarations[2].enabled = false;
+    agent.origin = "user-agent";
+    agent.declarations = {{"display", "block"}};
+    parent.inheritedFrom = 7;
+    parent.declarations = {{"color", "green", "color: green;"}, {"font-size", "12px", "font-size: 12px;"}};
+    std::vector<StyleBlock> blocks = {inlined, rule, weak, agent, parent};
+    MarkOverridden(blocks);
+    CHECK(blocks[0].declarations[0].overridden);
+    CHECK(!blocks[1].declarations[0].overridden && blocks[1].declarations[1].overridden && !blocks[1].declarations[2].overridden);
+    CHECK(blocks[2].declarations[0].overridden && !blocks[2].declarations[1].overridden && !blocks[2].declarations[2].overridden);
+    CHECK(!blocks[3].declarations[0].overridden);
+    CHECK(blocks[4].declarations[0].overridden && !blocks[4].declarations[1].overridden);
+    // Shorthands and their parts.
+    StyleBlock strong, weaker;
+    strong.declarations = {{"padding", "0", "padding: 0;"}};
+    weaker.declarations = {{"padding-top", "1em", "padding-top: 1em;"}, {"margin", "1px", "margin: 1px;"}};
+    std::vector<StyleBlock> shorthands = {weaker, strong};
+    shorthands[0].declarations.insert(shorthands[0].declarations.begin(), {"margin-top", "2px", "margin-top: 2px;"});
+    const std::map<std::string, std::vector<std::string>> longhands = {{"padding", {"padding-top", "padding-right"}},
+        {"margin", {"margin-top", "margin-bottom"}}};
+    // margin-top: 2px, padding-top: 1em, margin: 1px (top taken; bottom its own); then padding: 0.
+    MarkOverridden(shorthands, longhands);
+    CHECK(!shorthands[0].declarations[0].overridden && !shorthands[0].declarations[1].overridden
+        && !shorthands[0].declarations[2].overridden && !shorthands[1].declarations[0].overridden);
+    std::vector<StyleBlock> reversed = {strong, weaker};
+    MarkOverridden(reversed, longhands);
+    CHECK(reversed[1].declarations[0].overridden && !reversed[1].declarations[1].overridden);
+
+    // Changing a style's text: switched off and on, replaced, removed, added.
+    CHECK_TEXT(EditStyleText(weak, 1, StyleEdit::Toggle), "margin: 2px; /* padding: 1px; */ /* display: flex; */");
+    CHECK_TEXT(EditStyleText(weak, 2, StyleEdit::Toggle), "margin: 2px; padding: 1px; display: flex;");
+    CHECK_TEXT(EditStyleText(weak, 0, StyleEdit::Replace, " margin : 3px "), "margin : 3px; padding: 1px; /* display: flex; */");
+    CHECK_TEXT(EditStyleText(weak, 0, StyleEdit::Replace, ""), "padding: 1px; /* display: flex; */");
+    CHECK_TEXT(EditStyleText(agent, 0, StyleEdit::Add, "color: red"), "display: block; color: red;");
+    CHECK(agent.Location() == "user agent style sheet");
+    rule.sourceURL = "https://example.com/css/site.css?v=2";
+    rule.line = 12;
+    CHECK(rule.Location() == "site.css:12" && inlined.Location().empty());
+
+    // The protocol's answers make the panel's blocks.
+    DOMModel dom;
+    dom.Enable();
+    const auto answer = [&](uint64_t tag, const json& result) { dom.Answered(tag, json {{"id", 1}, {"result", result}}.dump()); };
+    std::map<std::string, uint64_t> tags;
+    const auto take = [&] {
+        tags.clear();
+        const auto commands = dom.TakeCommands();
+        for (const auto& command : commands) tags[command.method] = command.tag;
+        return commands;
+    };
+    take();
+    answer(tags["CSS.getSupportedCSSProperties"], {{"cssProperties", json::array({{{"name", "color"}, {"inherited", true}},
+        {{"name", "margin"}, {"longhands", {"margin-top", "margin-right", "margin-bottom", "margin-left"}}}})}});
+    // The author's rules are in a <style> of the document, from its fifth line.
+    dom.Event(json {{"method", "CSS.styleSheetAdded"}, {"params", {{"header", {{"styleSheetId", "1"},
+        {"sourceURL", "https://example.com/"}, {"origin", "author"}, {"isInline", true}, {"startLine", 4}}}}}}.dump());
+    answer(tags["DOM.getDocument"], {{"root", Document(1)}});
+    CHECK(dom.Selected() == 5 && dom.StylesLoading());
+    take();
+    const json userAgent = {{"origin", "user-agent"}, {"selectorList", {{"text", "body"}}}, {"sourceLine", 0},
+        {"style", {{"styleId", {{"styleSheetId", "3"}, {"ordinal", 2}}}, {"cssProperties", json::array({
+            {{"name", "display"}, {"value", "block"}}, {{"name", "margin-top"}, {"value", "8px"}},
+            {{"name", "margin-right"}, {"value", "8px"}, {"implicit", true}}, {{"name", "margin-bottom"}, {"value", "8px"}, {"implicit", true}},
+            {{"name", "margin-left"}, {"value", "8px"}, {"implicit", true}}})}, {"shorthandEntries", json::array({{{"name", "margin"}, {"value", "8px"}}})}}}};
+    const json author = {{"origin", "author"}, {"ruleId", {{"styleSheetId", "1"}, {"ordinal", 1}}}, {"selectorList", {{"text", "body"}}},
+        {"sourceURL", "https://example.com/"}, {"sourceLine", 4}, {"groupings", json::array({{{"type", "media-rule"}, {"text", "screen"}}})},
+        {"style", {{"styleId", {{"styleSheetId", "1"}, {"ordinal", 1}}}, {"cssProperties", json::array({
+            {{"name", "margin"}, {"value", "auto"}, {"text", "margin:auto;"}, {"status", "active"}},
+            {{"name", "color"}, {"value", "#333"}, {"text", "color:#333"}, {"status", "active"}},
+            {{"name", "margin-top"}, {"value", "auto"}, {"implicit", true}}})}}}};
+    const json html = {{"origin", "author"}, {"selectorList", {{"text", "html"}}}, {"sourceURL", "https://example.com/"}, {"sourceLine", 1},
+        {"style", {{"styleId", {{"styleSheetId", "1"}, {"ordinal", 0}}}, {"cssProperties", json::array({
+            {{"name", "color"}, {"value", "black"}, {"text", "color: black;"}}, {{"name", "background"}, {"value", "#eee"}, {"text", "background: #eee;"}}})}}}};
+    answer(tags["CSS.getMatchedStylesForNode"], {{"matchedCSSRules", json::array({{{"rule", userAgent}}, {{"rule", author}}})},
+        {"inherited", json::array({{{"matchedCSSRules", json::array({{{"rule", html}}})}}})}, {"pseudoElements", json::array()}});
+    answer(tags["CSS.getInlineStylesForNode"], {{"inlineStyle", {{"styleId", {{"styleSheetId", "5"}, {"ordinal", 0}}}, {"cssText", ""},
+        {"cssProperties", json::array()}}}, {"attributesStyle", {{"cssProperties", json::array()}}}});
+    answer(tags["CSS.getComputedStyleForNode"], {{"computedStyle", json::array({{{"name", "width"}, {"value", "480px"}},
+        {{"name", "height"}, {"value", "auto"}}, {{"name", "margin-top"}, {"value", "8px"}}, {{"name", "padding-left"}, {"value", "2px"}},
+        {{"name", "padding-right"}, {"value", "2px"}}, {{"name", "border-left-width"}, {"value", "1px"}}, {{"name", "display"}, {"value", "block"}},
+        {{"name", "box-sizing"}, {"value", "border-box"}}, {{"name", "color"}, {"value", "rgb(51, 51, 51)"}}})}});
+    answer(tags["DOM.resolveNode"], {{"object", {{"objectId", "box1"}}}});
+    CHECK(dom.StylesLoading());
+    take();
+    CHECK(tags.count("Runtime.callFunctionOn") && tags.count("Runtime.releaseObject"));
+    answer(tags["Runtime.callFunctionOn"], {{"result", {{"type", "object"}, {"value", {480, 300}}}}});
+    CHECK(!dom.StylesLoading() && dom.TakeChanges().styles);
+    const auto& styles = dom.Styles();
+    CHECK(styles.node == 5 && styles.blocks.size() == 4);
+    CHECK(styles.blocks[0].kind == StyleBlock::Inline && styles.blocks[0].Editable() && styles.blocks[0].declarations.empty());
+    // The author's rule: what it says, and where.
+    const auto& own = styles.blocks[1];
+    CHECK(own.Editable() && own.declarations.size() == 2 && own.declarations[1].text == "color:#333" && own.Location() == "example.com:9"
+        && own.groupings == std::vector<std::string>({"@media screen"}));
+    // The browser's rule shows the shorthand it was given; it cannot be edited.
+    const auto& browser = styles.blocks[2];
+    CHECK(!browser.Editable() && browser.declarations.size() == 2 && browser.declarations[1].name == "margin"
+        && browser.declarations[1].value == "8px" && browser.declarations[1].overridden && !browser.declarations[0].overridden);
+    // From the parent only what is inherited, overridden by the element's own.
+    const auto& inherited = styles.blocks[3];
+    CHECK(inherited.inheritedFrom == 3 && inherited.declarations.size() == 1 && inherited.declarations[0].overridden);
+    // The content box of a border-box element: its width less padding and border.
+    CHECK(styles.box.known && styles.box.width == 480 - 4 - 1 && styles.box.height == 300 && styles.box.margin[0] == 8);
+    CHECK(dom.Declared("margin-left") && dom.Declared("color") && !dom.Declared("background"));
+    // The style sheet is opened at the rule's line in it.
+    dom.RequestSheetSource(1);
+    take();
+    CHECK(tags.count("CSS.getStyleSheetText"));
+    answer(tags["CSS.getStyleSheetText"], {{"text", "a {}\n\n\n\nbody { margin:auto; color:#333 }"}});
+    CHECK(dom.TakeChanges().source && dom.Source().line == 5 && dom.Source().title == "Style sheet in https://example.com/"
+        && dom.Source().error.empty());
+    // Switching a declaration off: shown at once, then the styles are read again.
+    dom.ToggleDeclaration(1, 1);
+    CHECK(!dom.Styles().blocks[1].declarations[1].enabled);
+    auto commands = take();
+    CHECK(commands.size() == 1 && commands[0].method == "CSS.setStyleText");
+    const auto set = json::parse(commands[0].parameters);
+    CHECK(set["styleId"]["styleSheetId"] == "1" && set["styleId"]["ordinal"] == 1 && set["text"] == "margin:auto; /* color:#333; */");
+    answer(commands[0].tag, {{"style", json::object()}});
+    commands = take();
+    CHECK(commands.size() == 4 && dom.StylesLoading());
+    // element.style takes a new declaration.
+    dom.AddDeclaration(0, "color: red");
+    commands = take();
+    CHECK(commands.size() == 1 && json::parse(commands[0].parameters)["text"] == "color: red;"
+        && json::parse(commands[0].parameters)["styleId"]["styleSheetId"] == "5");
+}
+
+static void TestPageSource()
+{
+    const auto inner = [](const std::string& outer) {
+        return json::parse(json::parse(outer)["params"]["message"].get<std::string>());
+    };
+    PageSourceRequest request;
+    CHECK(request.TakeOutgoing().empty());
+    // A provisional page is not the one shown.
+    request.Receive(TargetCreated("page-2", true));
+    CHECK(request.TakeOutgoing().empty());
+    request.Receive(TargetCreated("page-1"));
+    auto sent = request.TakeOutgoing();
+    CHECK(sent.size() == 1);
+    const auto outer = json::parse(sent.at(0));
+    auto command = inner(sent.at(0));
+    CHECK(outer["method"] == "Target.sendMessageToTarget" && outer["params"]["targetId"] == "page-1" && command["method"] == "Page.getResourceTree");
+    request.Receive(Reply("page-1", command["id"], {{"frameTree", {{"frame", {{"id", "0.1"}, {"url", "https://example.com/a#b"},
+        {"mimeType", "text/html"}}}, {"resources", json::array()}}}}));
+    command = inner(request.TakeOutgoing().at(0));
+    CHECK(command["method"] == "Page.getResourceContent" && command["params"]["frameId"] == "0.1"
+        && command["params"]["url"] == "https://example.com/a#b");
+    CHECK(request.Status() == PageSourceRequest::State::Waiting);
+    request.Receive(Reply("page-1", command["id"], {{"content", "<!doctype html><p>Hi"}, {"base64Encoded", false}}));
+    CHECK(request.Status() == PageSourceRequest::State::Done && request.Text() == "<!doctype html><p>Hi"
+        && request.URL() == "https://example.com/a#b" && request.MimeType() == "text/html");
+
+    PageSourceRequest encoded;
+    encoded.Receive(TargetCreated("page-1"));
+    command = inner(encoded.TakeOutgoing().at(0));
+    encoded.Receive(Reply("page-1", command["id"], {{"frameTree", {{"frame", {{"id", "f"}, {"url", "https://example.com/"}}}}}}));
+    command = inner(encoded.TakeOutgoing().at(0));
+    encoded.Receive(Reply("page-1", command["id"], {{"content", "PGI+eDwvYj4="}, {"base64Encoded", true}}));
+    CHECK(encoded.Status() == PageSourceRequest::State::Done && encoded.Text() == "<b>x</b>");
+
+    PageSourceRequest empty;
+    empty.Receive(TargetCreated("page-1"));
+    command = inner(empty.TakeOutgoing().at(0));
+    empty.Receive(Reply("page-1", command["id"], {{"frameTree", {{"frame", {{"id", "f"}, {"url", "about:blank"}}}}}}));
+    command = inner(empty.TakeOutgoing().at(0));
+    empty.Receive(Reply("page-1", command["id"], {{"content", ""}, {"base64Encoded", false}}));
+    CHECK(empty.Status() == PageSourceRequest::State::Failed && !empty.Error().empty());
+
+    PageSourceRequest closed;
+    closed.Receive(TargetCreated("page-1"));
+    closed.Receive(json{{"method", "Target.targetDestroyed"}, {"params", {{"targetId", "page-1"}}}}.dump());
+    CHECK(closed.Status() == PageSourceRequest::State::Failed);
+
+    // Not the page's first connection: the target is assumed, the page's
+    // answers to other connections are passed over, and a target announced
+    // later changes nothing.
+    PageSourceRequest second;
+    second.AssumeTarget("page-7");
+    command = inner(second.TakeOutgoing().at(0));
+    CHECK(command["method"] == "Page.getResourceTree" && command["id"].get<int64_t>() >= 2000000000);
+    second.Receive(Reply("page-7", 3, {{"frameTree", {{"frame", {{"id", "x"}, {"url", "https://other.example/"}}}}}}));
+    CHECK(second.TakeOutgoing().empty() && second.Status() == PageSourceRequest::State::Waiting);
+    second.Receive(TargetCreated("page-7"));
+    CHECK(second.TakeOutgoing().empty());
+    // A target that is not the page's.
+    PageSourceRequest wrong;
+    wrong.AssumeTarget("page-9");
+    const auto outerID = json::parse(wrong.TakeOutgoing().at(0))["id"];
+    wrong.Receive(json{{"id", outerID}, {"error", {{"message", "Missing target for given targetId"}}}}.dump());
+    CHECK(wrong.Status() == PageSourceRequest::State::Failed);
+    // Two requests number their commands apart.
+    PageSourceRequest third;
+    third.AssumeTarget("page-7");
+    CHECK(inner(third.TakeOutgoing().at(0))["id"] != command["id"]);
+
+    // A session that is not the page's first assumes its target too.
+    Session session;
+    session.Start();
+    session.AssumePageTarget("page-7");
+    const auto commands = Sent(session);
+    CHECK(Find(commands, "Network.enable") && Find(commands, "Network.enable")->target == "page-7");
+    session.Receive(TargetCreated("page-7"));
+    CHECK(Sent(session).empty());
+}
+
 int main()
 {
     TestSession();
     TestStorage();
+    TestElements();
+    TestElementStyles();
+    TestPageSource();
     TestConsole();
     TestHeaders();
     TestKinds();
