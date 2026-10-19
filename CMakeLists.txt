@@ -5,7 +5,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 option(SUMMIT_MODERN_WEBKIT "Build Summit with the native multiprocess WebKit API" OFF)
 find_package(OpenSSL REQUIRED COMPONENTS Crypto)
 add_library(summit_core src/core/Address.cpp src/core/Protocol.cpp src/core/Profile.cpp src/core/Bookmarks.cpp src/core/BookmarkIO.cpp src/core/ExtensionCatalog.cpp src/core/ExtensionIdentity.cpp src/core/ExtensionStore.cpp
-    src/core/ExtensionPackage.cpp src/core/StoreOffer.cpp src/core/DownloadText.cpp src/core/Favicon.cpp src/core/InternalPages.cpp src/core/Zoom.cpp src/core/Suggest.cpp src/core/DevTools.cpp src/core/DevToolsFormat.cpp
+    src/core/ExtensionPackage.cpp src/core/StoreOffer.cpp src/core/DownloadText.cpp src/core/Favicon.cpp src/core/InternalPages.cpp src/core/Zoom.cpp src/core/Suggest.cpp src/core/DevTools.cpp src/core/DevToolsFormat.cpp src/core/DevToolsElements.cpp src/core/PageSource.cpp
     src/core/Mcp.cpp src/core/McpHttp.cpp src/core/McpInspector.cpp src/core/WebAppManifest.cpp)
 target_link_libraries(summit_core PUBLIC OpenSSL::Crypto ${CMAKE_DL_LIBS})
 target_include_directories(summit_core PUBLIC src vendor)
@@ -57,7 +57,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Haiku")
         src/ui/ExtensionStoreDownload.cpp src/ui/CertificateInfoWindow.cpp src/ui/ReaderMode.cpp
         src/ui/ProtocolHandlers.cpp src/ui/FaviconCache.cpp src/ui/PreferencesWindow.cpp src/ui/DefaultBrowser.cpp src/ui/SharedProfile.cpp src/ui/DirectWindowRescue.cpp
         src/ui/AddressSuggestions.cpp src/ui/SitePermissions.cpp src/ui/Location.cpp
-        src/ui/SourceView.cpp src/ui/DevToolsWindow.cpp src/ui/DevToolsNetwork.cpp src/ui/DevToolsConsole.cpp src/ui/DevToolsStorage.cpp
+        src/ui/SourceView.cpp src/ui/DevToolsWindow.cpp src/ui/DevToolsNetwork.cpp src/ui/DevToolsConsole.cpp src/ui/DevToolsStorage.cpp src/ui/DevToolsElements.cpp src/ui/PageSourceWindow.cpp
         src/ui/BrowserWindowMcp.cpp src/ui/McpService.cpp src/ui/McpLog.cpp src/ui/McpBrowserTools.cpp src/ui/McpSystemTools.cpp
         src/ui/McpPageTools.cpp src/ui/McpEngineTools.cpp src/ui/McpDebugHelper.cpp)
     target_include_directories(Summit PRIVATE ${SUMMIT_WEBKIT_INCLUDE_DIR} /boot/system/develop/headers/private/netservices)

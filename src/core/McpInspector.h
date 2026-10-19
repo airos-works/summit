@@ -25,6 +25,10 @@ public:
     static constexpr uint64_t kFirstCommand = 1000000000;
 
     void Start();
+    // The page's target ("page-N") when the connection is not the page's
+    // first (the Developer Tools are open): the engine announces its
+    // targets to the first frontend only.
+    void AssumePageTarget(const std::string& target);
     // Protocol messages for the engine, in order.
     std::vector<std::string> TakeOutgoing();
     // One protocol message from the engine.

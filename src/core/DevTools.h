@@ -1,4 +1,5 @@
 #pragma once
+#include "DevToolsElements.h"
 #include "DevToolsFormat.h"
 #include <cstdint>
 #include <deque>
@@ -155,12 +156,14 @@ struct Changes {
     bool Any() const
     {
         return requestsReset || consoleReset || consoleAdded || consoleLastChanged || !requests.empty() || !bodies.empty()
-            || origins || storage;
+            || origins || storage || elements;
     }
     // The page's origins (StorageOrigins()) changed; a storage area or the
     // cookies changed or were answered.
     bool origins = false;
     bool storage = false;
+    // The Elements panel's model changed: DOM().TakeChanges() says how.
+    bool elements = false;
 };
 
 // Text with the parts of it that are drawn differently.
@@ -190,10 +193,13 @@ public:
     // Protocol messages for the engine are queued by Start() and by whatever
     // below needs the page to do something; TakeOutgoing() hands them over.
     void Start();
-    std::vector<std::string> TakeOutgoing() { return std::exchange(fOutgoing, { }); }
+    // The page's target ("page-N"), for a session that is not the page's
+    // first: the engine announces its targets to the first frontend only.
+    void AssumePageTarget(const std::string& target);
+    std::vector<std::string> TakeOutgoing();
     // One protocol message from the engine.
     void Receive(std::string_view message);
-    Changes TakeChanges() { return std::exchange(fChanges, { }); }
+    Changes TakeChanges();
 
     const std::deque<Request>& Requests() const { return fRequests; }
     const Request* FindRequest(uint64_t serial) const;
@@ -227,10 +233,15 @@ public:
     void ClearStorage(StorageKind kind, const std::string& origin);
     void DeleteCookie(const Cookie& cookie);
 
+    // The Elements panel's model of the page's DOM and styles; its commands
+    // go to the page with the session's.
+    DOMModel& DOM() { return fDOM; }
+    const DOMModel& DOM() const { return fDOM; }
+
 private:
     friend struct ProtocolReader;
     struct Pending {
-        enum Kind { Body, Evaluation, Storage, StorageEdit, Frames, Other };
+        enum Kind { Body, Evaluation, Storage, StorageEdit, Frames, Elements, Other };
         Kind kind;
         uint64_t serial;
         // Storage and StorageEdit: the area; Frames: the target asked.
@@ -268,9 +279,14 @@ private:
     std::string fPageTarget, fPageURL;
     std::vector<std::string> fOrigins;
     std::map<std::pair<StorageKind, std::string>, StorageArea> fAreas;
+    DOMModel fDOM;
+    std::vector<DOMModel::Command> fHeldDOM;
     std::vector<std::string> fOutgoing;
     Changes fChanges;
-    uint64_t fNextSerial = 1, fNextCommand = 1, fBodyBytes = 0;
+    // The engine gives every connection of a page every answer: each
+    // session numbers its commands apart from the others'.
+    static uint64_t FirstCommand();
+    uint64_t fNextSerial = 1, fNextCommand = FirstCommand(), fBodyBytes = 0;
     int fGroupDepth = 0;
     bool fPreserveRequests = false, fPreserveConsole = false;
 };

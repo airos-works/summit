@@ -15,7 +15,7 @@
 namespace summit {
 using namespace devtools;
 namespace {
-constexpr uint32 kPulse = 'dvpu';
+constexpr uint32 kPulse = 'dvpu', kTogglePicker = 'dvpk', kFocusSearch = 'dvfs';
 // Where the last Developer Tools window was, for the next one.
 BRect sLastFrame;
 
@@ -36,9 +36,15 @@ BRect FrameBeside(BRect browser)
     return frame;
 }
 
+// The tabs, in their order.
+const char* const kPanels[] = {"elements", "network", "console", "storage"};
+enum { kElementsPanel, kNetworkPanel, kConsolePanel, kStoragePanel };
+
 int32 PanelIndex(const char* name)
 {
-    return !std::strcmp(name, "console") ? 1 : !std::strcmp(name, "storage") ? 2 : 0;
+    for (int32 i = 0; i < 4; ++i)
+        if (!std::strcmp(name, kPanels[i])) return i;
+    return kElementsPanel;
 }
 
 std::string TitleFor(const std::string& page)
@@ -56,6 +62,7 @@ DevToolsWindow::DevToolsWindow(BMessenger owner, int64 tab, const std::string& p
     const char* trace = std::getenv("SUMMIT_DEVTOOLS_TRACE");
     fTrace = trace && (!std::strcmp(trace, "1") || !std::strcmp(trace, "2"));
     fTraceProtocol = trace && !std::strcmp(trace, "2");
+    fElements = new ElementsPanel(fSession, *this);
     fNetwork = new NetworkPanel(fSession, *this);
     fConsole = new ConsolePanel(fSession, *this);
     fStorage = new StoragePanel(fSession, *this);
@@ -66,6 +73,7 @@ DevToolsWindow::DevToolsWindow(BMessenger owner, int64 tab, const std::string& p
         fTabs->AddTab(panel, tab);
         tab->SetLabel(label);
     };
+    add(fElements, "Elements");
     add(fNetwork, "Network");
     add(fConsole, "Console");
     add(fStorage, "Storage");
@@ -73,14 +81,18 @@ DevToolsWindow::DevToolsWindow(BMessenger owner, int64 tab, const std::string& p
         .SetInsets(0, 4, 0, 0)
         .Add(fTabs);
     SetSizeLimits(560, 10000, 360, 10000);
+    // The element picker, as in other browsers; Alt+F finds in the tree.
+    AddShortcut('C', B_SHIFT_KEY, new BMessage(kTogglePicker));
+    AddShortcut('F', 0, new BMessage(kFocusSearch));
 }
 
 DevToolsWindow::~DevToolsWindow() = default;
 
-void DevToolsWindow::SetInspector(std::shared_ptr<BWebKitInspectorSession> inspector)
+void DevToolsWindow::SetInspector(std::shared_ptr<BWebKitInspectorSession> inspector, const std::string& pageTarget)
 {
     fInspector = std::move(inspector);
     fSession.Start();
+    fSession.AssumePageTarget(pageTarget);
     for (const auto& message : fSession.TakeOutgoing()) fInspector->Send(message.c_str());
     // An announcement that found the window's port full is made up for here.
     BMessage pulse(kPulse);
@@ -91,6 +103,13 @@ bool DevToolsWindow::QuitRequested()
 {
     sLastFrame = Frame();
     fPulse.reset();
+    // The page's highlight and picker go with the tools, whoever else is
+    // connected to it.
+    if (fInspector) {
+        fSession.DOM().SetPicking(false);
+        fSession.DOM().HideHighlight();
+        for (const auto& message : fSession.TakeOutgoing()) fInspector->Send(message.c_str());
+    }
     // The page stops reporting when its session ends.
     fInspector.reset();
     BMessage closed(kDeveloperToolsClosed);
@@ -107,6 +126,16 @@ void DevToolsWindow::MessageReceived(BMessage* message)
         case kPulse:
             PanelShown();
             Drain();
+            // Styles the page changed are read again a moment later.
+            if (fSession.DOM().StylesWaiting()) Sync();
+            break;
+        case kTogglePicker:
+            fTabs->Select(kElementsPanel);
+            PanelShown();
+            fElements->SetPicking(!fElements->Picking());
+            break;
+        case kFocusSearch:
+            if (fTabs->Selection() == kElementsPanel) fElements->FocusSearch();
             break;
         case kDeveloperToolsPage: {
             const char* title = nullptr;
@@ -114,9 +143,22 @@ void DevToolsWindow::MessageReceived(BMessage* message)
             break;
         }
         case kShowDeveloperTools: {
-            // "panel": which one to show ("network" or "console"), if any.
+            // "panel": which one to show ("elements", "network", "console" or
+            // "storage"), if any. "pick": the element picker is started, and
+            // the page keeps the focus. "inspect": the element at that point
+            // of the page view, whose zoom is "zoom", is selected.
             const char* panel = nullptr;
             if (message->FindString("panel", &panel) == B_OK) fTabs->Select(PanelIndex(panel));
+            PanelShown();
+            BPoint where;
+            if (message->FindPoint("inspect", &where) == B_OK) {
+                const double zoom = std::max(0.1, message->GetDouble("zoom", 1));
+                fElements->InspectAt(static_cast<float>(where.x / zoom), static_cast<float>(where.y / zoom));
+            }
+            if (message->GetBool("pick", false)) {
+                fElements->SetPicking(true);
+                if (!IsHidden()) break;
+            }
             if (IsMinimized()) Minimize(false);
             Activate(true);
             break;
@@ -145,8 +187,8 @@ void DevToolsWindow::Command(const BMessage& message, BMessage& reply)
     if (action == "panel") {
         fTabs->Select(PanelIndex(argument.c_str()));
         PanelShown();
-    } else if (action != "state" && !fNetwork->Command(action, argument, error) && !fConsole->Command(action, argument, error)
-        && !fStorage->Command(action, argument, error))
+    } else if (action != "state" && !fElements->Command(action, argument, error) && !fNetwork->Command(action, argument, error)
+        && !fConsole->Command(action, argument, error) && !fStorage->Command(action, argument, error))
         error = "Unknown action";
     Drain();
     if (!error.empty()) reply.AddString("error", error.c_str());
@@ -174,24 +216,34 @@ std::string DevToolsWindow::StateJSON()
             {"text", entry.text}, {"place", entry.Location()}, {"repeat", entry.repeat}, {"stack", entry.stack},
             {"source", entry.source}});
     }
-    static const char* const panels[] = {"network", "console", "storage"};
-    json state = {{"title", Title()}, {"panel", panels[std::clamp<int32>(fTabs->Selection(), 0, 2)]}, {"page", fSession.PageURL()},
-        {"requests", requests}, {"entries", entries}, {"network", json::parse(fNetwork->StateJSON())},
-        {"console", json::parse(fConsole->StateJSON())}, {"storage", json::parse(fStorage->StateJSON())}};
+    json state = {{"title", Title()}, {"panel", kPanels[std::clamp<int32>(fTabs->Selection(), 0, 3)]}, {"page", fSession.PageURL()},
+        {"requests", requests}, {"entries", entries}, {"elements", json::parse(fElements->StateJSON())},
+        {"network", json::parse(fNetwork->StateJSON())}, {"console", json::parse(fConsole->StateJSON())},
+        {"storage", json::parse(fStorage->StateJSON())}};
     return state.dump(-1, ' ', false, json::error_handler_t::replace);
 }
 
 void DevToolsWindow::PanelShown()
 {
-    // The Storage panel reads the page only while it is looked at.
+    // The Storage panel reads the page only while it is looked at; the
+    // Elements panel reads the document the first time it is.
     const int32 panel = fTabs->Selection();
     if (panel == fShownPanel) return;
     fShownPanel = panel;
-    fStorage->SetShown(panel == 2);
+    fStorage->SetShown(panel == kStoragePanel);
+    fElements->SetShown(panel == kElementsPanel);
 }
 
 void DevToolsWindow::DispatchMessage(BMessage* message, BHandler* handler)
 {
+    // Escape stops the element picker, wherever the focus is.
+    if (message->what == B_KEY_DOWN && fElements->Picking()) {
+        const char* bytes = nullptr;
+        if (message->FindString("bytes", &bytes) == B_OK && bytes && bytes[0] == B_ESCAPE) {
+            fElements->SetPicking(false);
+            return;
+        }
+    }
     BWindow::DispatchMessage(message, handler);
     // A click on a tab changes the selection without telling the window.
     if (message->what == B_MOUSE_UP || message->what == B_KEY_DOWN) PanelShown();
@@ -231,11 +283,19 @@ void DevToolsWindow::Sync()
         const auto changes = fSession.TakeChanges();
         if (!changes.Any() && !sent) break;
         if (fTrace) Trace(changes);
+        fElements->Apply(changes);
         fNetwork->Apply(changes);
         fConsole->Apply(changes);
         fStorage->Apply(changes);
     }
     fSyncing = false;
+    // An element chosen in the page is shown.
+    if (fElements->TakePicked()) {
+        fTabs->Select(kElementsPanel);
+        PanelShown();
+        if (IsMinimized()) Minimize(false);
+        Activate(true);
+    }
 }
 
 void DevToolsWindow::Trace(const Changes& changes)

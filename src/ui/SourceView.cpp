@@ -208,7 +208,8 @@ void SourceView::ReplaceText(const std::string& text)
     SendMessage(SCI_CLEARALL);
     SendMessage(SCI_ALLOCATE, text.size() + 1);
     SendMessage(SCI_ADDTEXT, text.size(), Pointer(text.data()));
-    SendMessage(SCI_SETREADONLY, 1);
+    SendMessage(SCI_SETREADONLY, fEditable ? 0 : 1);
+    if (fEditable) SendMessage(SCI_EMPTYUNDOBUFFER);
     SendMessage(SCI_SETSEL, 0, 0);
     SendMessage(SCI_SETXOFFSET, 0);
     SendMessage(SCI_SETSCROLLWIDTH, 1);
@@ -269,6 +270,15 @@ void SourceView::SetStyled(const devtools::StyledText& styled)
         SendMessage(SCI_STARTSTYLING, run.offset);
         SendMessage(SCI_SETSTYLING, run.length, kRunStyle + static_cast<int>(run.style));
     }
+}
+
+void SourceView::SetEditable(bool editable)
+{
+    fEditable = editable;
+    SendMessage(SCI_SETREADONLY, editable ? 0 : 1);
+    SendMessage(SCI_SETUNDOCOLLECTION, editable ? 1 : 0);
+    SendMessage(SCI_SETCARETLINEVISIBLE, editable ? 1 : 0);
+    if (editable) SendMessage(SCI_SETCARETLINEBACK, SciColor(CurrentSourcePalette().line));
 }
 
 void SourceView::SetWrap(bool wrap) { SendMessage(SCI_SETWRAPMODE, wrap ? SC_WRAP_WORD : SC_WRAP_NONE); }

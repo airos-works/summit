@@ -197,6 +197,8 @@ constexpr uint32 kExtensionMenuItem = 'exmi';
 constexpr uint32 kShowDeveloperTools = 'dvtl';
 constexpr uint32 kDeveloperToolsClosed = 'dvtc';
 constexpr uint32 kDeveloperToolsPage = 'dvtp';
+// View › View Page Source: the current page's HTML as the server sent it.
+constexpr uint32 kViewPageSource = 'vpsr';
 // Drives a Developer Tools window as its controls do and reports what it
 // shows, for tests ("action", "argument"; the reply has "json" or "error").
 // Refused unless SUMMIT_ENABLE_INPUT_SYNTHESIS=1; see docs/developer-tools.md.

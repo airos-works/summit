@@ -334,8 +334,12 @@ private:
 #if SUMMIT_MODERN_WEBKIT
     void ShowPageContextMenu(const BMessage&);
     // Opens the current tab's Developer Tools, or brings them forward;
-    // panel ("network", "console") chooses what they show.
-    void ShowDeveloperTools(const char* panel = nullptr);
+    // panel ("elements", "network"...) chooses what they show. request's
+    // "pick" starts the element picker, its "inspect" (a point of the page
+    // view) selects the element there.
+    void ShowDeveloperTools(const char* panel = nullptr, const BMessage* request = nullptr);
+    // View › View Page Source: the current page's HTML as the server sent it.
+    void ShowPageSource();
     // wait: until the window is gone, which a window that is being destroyed
     // owes the engine (the tools' connection ends on the WebKit thread).
     void CloseDeveloperTools(Tab&, bool wait = false);

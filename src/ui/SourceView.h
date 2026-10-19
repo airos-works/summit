@@ -36,6 +36,8 @@ public:
     void SetStyled(const devtools::StyledText& text);
     void SetWrap(bool wrap);
     bool Wraps();
+    // Text that can be typed into (Edit as HTML), with undo.
+    void SetEditable(bool editable);
     std::string Text();
     // The selection, or all of the text without one, to the clipboard.
     void Copy();
@@ -56,6 +58,7 @@ protected:
 private:
     void StyleLexer();
     std::string fLexer = "null";
+    bool fEditable = false;
 };
 
 // Puts text on the clipboard as text/plain.

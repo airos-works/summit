@@ -103,7 +103,9 @@ Some ways to use them:
   protocol: console and network go to the developer tools' model
   (`devtools::Session`), the tools' own commands carry identifiers from 10⁹ up
   and their answers are kept until taken; a page that moves to another
-  process gets the commands that were waiting.
+  process gets the commands that were waiting. The engine announces a page's
+  target only to its first connection, so a session made while the Developer
+  Tools are open is told it (`page-` and the tab's page identifier).
 - **Engine diagnostics** (engine patch): every web and network process starts
   a thread that waits on a port named "WebKit diagnostics"
   (`Shared/haiku/ProcessDiagnosticsHaiku.{h,cpp}`). Topics that only the main

@@ -12,10 +12,11 @@ class BTabView;
 class BWebKitInspectorSession;
 
 namespace summit {
-// View › Developer Tools: what a tab's page requests from the network and
-// writes to its console. One window for each tab that has asked for one; it
-// records from the moment it opens (and shows the console messages the page
-// kept from before). docs/developer-tools.md describes it.
+// View › Developer Tools: a tab's page's DOM and styles, what it requests
+// from the network and writes to its console, and its storage. One window
+// for each tab that has asked for one; it records from the moment it opens
+// (and shows the console messages the page kept from before).
+// docs/developer-tools.md describes it.
 //
 // The window owns the model (devtools::Session) and gives it the engine's
 // protocol messages on its own thread, so a busy page's log costs the browser
@@ -26,8 +27,9 @@ public:
     DevToolsWindow(BMessenger owner, int64 tab, const std::string& pageTitle, BRect browserFrame);
     ~DevToolsWindow() override;
     // Before Show(): the connection to the tab's page, whose messages are
-    // announced to this window.
-    void SetInspector(std::shared_ptr<BWebKitInspectorSession> inspector);
+    // announced to this window, and the page's target ("page-N") if it is
+    // known, which the engine tells only the page's first connection.
+    void SetInspector(std::shared_ptr<BWebKitInspectorSession> inspector, const std::string& pageTarget = { });
     void MessageReceived(BMessage* message) override;
     bool QuitRequested() override;
 
@@ -46,6 +48,7 @@ private:
     std::shared_ptr<BWebKitInspectorSession> fInspector;
     std::unique_ptr<BMessageRunner> fPulse;
     BTabView* fTabs;
+    ElementsPanel* fElements;
     NetworkPanel* fNetwork;
     ConsolePanel* fConsole;
     StoragePanel* fStorage;

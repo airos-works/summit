@@ -237,6 +237,21 @@ static void TestInspectorChannel()
     auto answer = channel.TakeAnswer(early);
     CHECK(answer && (*answer)["result"]["result"]["value"] == 2);
     CHECK(!channel.TakeAnswer(early));
+    // A connection that is not the page's first is told its target.
+    InspectorChannel second;
+    second.Start();
+    second.TakeOutgoing();
+    const uint64_t waiting = second.Command("Runtime.evaluate", {{"expression", "2"}});
+    second.AssumePageTarget("page-4");
+    CHECK(second.PageTarget() == "page-4");
+    bool sentWaiting = false;
+    for (const auto& message : second.TakeOutgoing()) {
+        const Json outer = Json::parse(message);
+        if (outer["method"] != "Target.sendMessageToTarget") continue;
+        const Json inner = Json::parse(outer["params"]["message"].get<std::string>());
+        if (inner["id"] == waiting) sentWaiting = outer["params"]["targetId"] == "page-4";
+    }
+    CHECK(sentWaiting);
     // Console messages reach the developer tools' model.
     channel.Receive(FromTarget("page-1", {{"method", "Console.messageAdded"}, {"params", {{"message",
         {{"source", "console-api"}, {"level", "error"}, {"text", "boom"}, {"type", "log"}}}}}}));
