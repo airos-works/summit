@@ -338,7 +338,8 @@ std::string AssetName(std::string_view packageFileName)
     return name;
 }
 
-std::optional<ReleaseBuild> ChooseReleaseBuild(const Release& release, std::string_view architecture, std::string& error)
+std::optional<ReleaseBuild> ChooseReleaseBuild(const Release& release, std::string_view architecture, std::string& error,
+    bool requireHTTPS)
 {
     // The notes name each package as it is named itself (with '~').
     const auto notes = ParseChecksums(release.body);
@@ -375,7 +376,8 @@ std::optional<ReleaseBuild> ChooseReleaseBuild(const Release& release, std::stri
         return std::nullopt;
     }
     for (const auto* package : {&*summit, &*webkit}) {
-        if (!package->asset.size || !StartsWith(package->asset.url, "https://")) {
+        const bool secure = StartsWith(package->asset.url, "https://") || (!requireHTTPS && StartsWith(package->asset.url, "http://"));
+        if (!package->asset.size || !secure) {
             error = where + " lists " + package->asset.name + " without a size or a secure address.";
             return std::nullopt;
         }

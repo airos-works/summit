@@ -153,6 +153,9 @@ int main()
         Release insecure = *release;
         insecure.assets[1].url = "http://example.com/summit.hpkg";
         check(!ChooseReleaseBuild(insecure, "x86_64", error), "insecure address");
+        check(ChooseReleaseBuild(insecure, "x86_64", error, false).has_value(), "plain HTTP for a test server");
+        insecure.assets[1].url = "file:///boot/home/summit.hpkg";
+        check(!ChooseReleaseBuild(insecure, "x86_64", error, false), "never a file address");
     }
     check(AssetName("summit-0.1.0~git20261019.0340-1-x86_64.hpkg") == "summit-0.1.0.git20261019.0340-1-x86_64.hpkg", "asset name");
 

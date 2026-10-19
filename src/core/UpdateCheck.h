@@ -50,6 +50,8 @@ struct InstalledBuild {
     bool home = false;
     // The Summit commit it was built from (from its package description), short.
     std::string commit;
+    // Why the commit is not known, when it is not.
+    std::string commitProblem;
     // Described by SUMMIT_UPDATE_INSTALLED for tests: never really installed.
     bool simulated = false;
     // Why the build cannot update itself, when it cannot.
@@ -107,8 +109,10 @@ struct ReleaseBuild {
     std::optional<ReleaseAsset> checksumFile;
 };
 // The summit and summit_webkit packages of one architecture: both, from the
-// same build, or nothing with error.
-std::optional<ReleaseBuild> ChooseReleaseBuild(const Release&, std::string_view architecture, std::string& error);
+// same build, at https:// addresses (plain HTTP too without requireHTTPS, for
+// a test server), or nothing with error.
+std::optional<ReleaseBuild> ChooseReleaseBuild(const Release&, std::string_view architecture, std::string& error,
+    bool requireHTTPS = true);
 // Adds a SHA256SUMS file's hashes to the packages' checksums.
 void AddChecksums(ReleaseBuild&, const std::map<std::string, std::string>& sums);
 // The checksum the packages' sources agree on; empty with error if they differ.

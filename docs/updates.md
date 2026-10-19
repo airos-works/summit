@@ -84,8 +84,11 @@ nor Haiku, tested on the host in `summit_update_tests`;
   install -y [-H] summit_webkit-….hpkg summit-….hpkg`, so one is never
   installed without the other; afterwards the executable's `SYS:PACKAGE`
   must name the new version. Commands run through `/bin/sh` without the
-  test copy's `LIBRARY_PATH`, and report their exit status in their output
-  (the engine's process reaper may collect the shell first).
+  test copy's `LIBRARY_PATH`, started with `load_image()`: `posix_spawn()`
+  with redirections forks the whole browser process, which failed on stock
+  R1/beta6 ("could not start /bin/sh"). Their output goes to a temporary
+  file that ends with their exit status (the engine's process reaper may
+  collect the shell before Summit could).
 - **Restarting** (`kUpdateRestart`) is the quit of File › Quit, which saves
   the session and lets pages ask about unsaved work (#58), followed by the
   start of the same executable (now the new package's file) with `--profile
@@ -97,7 +100,9 @@ nor Haiku, tested on the host in `summit_update_tests`;
   not listen and requests hung, and stderr was the old log capture's pipe,
   which nobody read. `StartAgain` now marks every descriptor close-on-exec
   and points stderr back where it went before the capture
-  (`mcplog::RestoreStderr`). This also fixes starting Summit while it quits.
+  (`mcplog::RestoreStderr`), and the MCP server's sockets are close-on-exec
+  from the start, so engine processes that outlive a Summit do not keep its
+  port either. This also fixes starting Summit while it quits.
 - **Rate limits and failures.** GitHub allows 60 requests an hour from one
   address without an account; a check is one request, two when there is an
   update. A 403 or 429 with no requests left (or `Retry-After`) becomes "GitHub
@@ -148,3 +153,20 @@ On the X399 (air/OS, x86_64) with a test copy on CI's 0340 engine
   whose SHA-256 is wrong (refused after downloading), a `SHA256SUMS` file
   (checked, then unpacked and restarted) and Cancel during the download.
 - pkgman itself was not run on the X399, whose Summit runs from test bundles.
+
+The real installation was tested on the stock Haiku R1/beta6 test machine
+(`.vm/haiku-r1beta6`, booted on copy-on-write overlays so its images were
+not changed), with a Haiku R1/beta6 build of this branch packaged twice from
+CI's latest-haiku packages: as an "old" 0.1.0~git20261019.0305 (commit
+2b89650) installed with pkgman, and as a "new" 0.1.0~git20261019.0400
+(15fce3d) served by a stand-in release. The installed Summit read both
+versions from `SYS:PACKAGE` and its commit from `package list -i`, found the
+new build, listed its change, and Install and Restart downloaded and checked
+both packages, ran `pkgman install -y` with both in one transaction
+("upgrade package summit_webkit … upgrade package summit …"), confirmed the
+new `SYS:PACKAGE`, and restarted from `/boot/system/apps/Summit` as
+0.1.0~git20261019.0400-1 with both tabs back; a check from the new build
+said it was up to date. The machine's 1.4 GB boot volume has too little
+free space for the downloads, so its `/boot/system/cache/tmp` pointed to the
+data disk for the test. This test found the R1/beta6 `posix_spawn` failure
+and the MCP port held by leftover processes, both fixed above.

@@ -1,5 +1,6 @@
 #include "McpHttp.h"
 #include <arpa/inet.h>
+#include <fcntl.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <poll.h>
@@ -211,6 +212,9 @@ std::string HttpServer::Start()
     if (fOptions.token.empty()) return "no access token";
     const int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) return std::strerror(errno);
+    // Processes Summit starts (the engine's, a restarted Summit) must not
+    // keep the port.
+    fcntl(fd, F_SETFD, FD_CLOEXEC);
     int one = 1;
     setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
     sockaddr_in address {};
@@ -249,6 +253,7 @@ std::string HttpServer::Start()
             socklen_t peerLength = sizeof(peer);
             const int connection = accept(state->listener, reinterpret_cast<sockaddr*>(&peer), &peerLength);
             if (connection < 0) continue;
+            fcntl(connection, F_SETFD, FD_CLOEXEC);
             int on = 1;
             setsockopt(connection, IPPROTO_TCP, TCP_NODELAY, &on, sizeof(on));
             char name[INET_ADDRSTRLEN] = "?";

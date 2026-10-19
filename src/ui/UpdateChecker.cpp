@@ -29,14 +29,12 @@
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
-#include <fcntl.h>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <mutex>
-#include <signal.h>
-#include <spawn.h>
 #include <stdexcept>
 #include <sys/statvfs.h>
-#include <sys/wait.h>
 #include <thread>
 #include <unistd.h>
 
@@ -93,74 +91,55 @@ std::string Attribute(const std::string& path, const char* name)
     return length > 0 ? std::string(value, strnlen(value, size_t(length))) : std::string();
 }
 
+std::string Tail(const std::string& text, size_t limit)
+{
+    if (text.size() <= limit) return text;
+    const size_t start = text.find('\n', text.size() - limit);
+    return "…" + text.substr(start == std::string::npos ? text.size() - limit : start);
+}
+
 // Runs a /bin/sh command line with the system's library path (a test copy's
-// LIBRARY_PATH names its own libraries), its output (stdout and stderr) the
-// result, its exit status in status (-1 when it did not finish in time). The
-// status comes in the output: the engine's process reaper may collect the
-// shell before waitpid() here does.
+// LIBRARY_PATH names its own libraries) and returns its output (stdout and
+// stderr), its exit status in status (-1 when it did not finish in time).
+// The shell is started with load_image(): posix_spawn() with redirections
+// forks this large, many-threaded process, which failed on Haiku R1/beta6.
+// So its output goes to a temporary file, which its exit status ends: the
+// engine's process reaper may collect the shell before waitpid() here could.
 std::string RunShell(const std::string& command, bigtime_t timeout, int& status)
 {
     status = -1;
     constexpr const char* marker = "summit-update-status=";
-    const std::string script = "unset LIBRARY_PATH LD_PRELOAD; " + command + "\nstatus=$?; echo; echo \"" + marker + "$status\"";
-    int fds[2];
-    if (pipe(fds) != 0) return "no pipe: " + std::string(std::strerror(errno));
-    posix_spawn_file_actions_t actions;
-    posix_spawn_file_actions_init(&actions);
-    posix_spawn_file_actions_addopen(&actions, 0, "/dev/null", O_RDONLY, 0);
-    posix_spawn_file_actions_adddup2(&actions, fds[1], 1);
-    posix_spawn_file_actions_adddup2(&actions, fds[1], 2);
-    posix_spawn_file_actions_addclose(&actions, fds[0]);
-    std::string shell = "/bin/sh", option = "-c";
-    char* argv[] = { shell.data(), option.data(), const_cast<char*>(script.c_str()), nullptr };
-    pid_t child = -1;
-    const int spawned = posix_spawn(&child, "/bin/sh", &actions, nullptr, argv, environ);
-    posix_spawn_file_actions_destroy(&actions);
-    close(fds[1]);
-    if (spawned != 0) {
-        close(fds[0]);
-        return "could not start /bin/sh: " + std::string(std::strerror(spawned));
-    }
-    std::string output;
-    fcntl(fds[0], F_SETFL, O_NONBLOCK);
+    BPath temporary;
+    std::string file = std::string(find_directory(B_SYSTEM_TEMP_DIRECTORY, &temporary) == B_OK ? temporary.Path() : "/tmp")
+        + "/summit-run-XXXXXX";
+    const int fd = mkstemp(file.data());
+    if (fd < 0) return "no temporary file: " + std::string(std::strerror(errno));
+    close(fd);
+    struct Remove {
+        const std::string& path;
+        ~Remove() { unlink(path.c_str()); }
+    } remove { file };
+    const std::string script = "unset LIBRARY_PATH LD_PRELOAD; exec </dev/null >" + ShellQuote(file) + " 2>&1\n" + command
+        + "\nstatus=$?; echo; echo \"" + marker + "$status\"";
+    const char* argv[] = { "/bin/sh", "-c", script.c_str(), nullptr };
+    const thread_id shell = load_image(3, argv, const_cast<const char**>(environ));
+    if (shell < 0) return "could not start /bin/sh: " + std::string(std::strerror(shell));
+    resume_thread(shell);
+    // The team's main thread is gone once the shell has exited.
     const bigtime_t deadline = system_time() + timeout;
-    bool finished = false;
-    char buffer[8192];
-    while (system_time() < deadline) {
-        const ssize_t count = read(fds[0], buffer, sizeof(buffer));
-        if (count > 0) {
-            output.append(buffer, size_t(count));
-            // pkgman's progress can run long: the end tells what happened.
-            if (output.size() > 512 * 1024) output.erase(0, output.size() - 256 * 1024);
-            continue;
-        }
-        if (count == 0) {
-            finished = true;
-            break;
-        }
-        if (errno != EAGAIN && errno != EINTR) break;
-        snooze(20000);
-    }
-    close(fds[0]);
-    if (!finished) {
-        kill(child, SIGKILL);
-        waitpid(child, nullptr, 0);
-        return output + "\n(stopped: it took too long)";
-    }
-    waitpid(child, nullptr, 0);
+    thread_info info;
+    while (get_thread_info(shell, &info) == B_OK && system_time() < deadline) snooze(20000);
+    const bool finished = get_thread_info(shell, &info) != B_OK;
+    if (!finished) kill_team(shell);
+    std::ifstream in(file, std::ios::binary);
+    std::string output((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    if (!finished) return Tail(output, 256 * 1024) + "\n(stopped: it took too long)";
     if (const size_t at = output.rfind(marker); at != std::string::npos) {
         status = std::atoi(output.c_str() + at + std::strlen(marker));
         output.resize(at);
         while (!output.empty() && (output.back() == '\n' || output.back() == '\r')) output.pop_back();
     }
     return output;
-}
-
-std::string Tail(const std::string& text, size_t limit)
-{
-    if (text.size() <= limit) return text;
-    const size_t start = text.find('\n', text.size() - limit);
-    return "…" + text.substr(start == std::string::npos ? text.size() - limit : start);
 }
 
 InstalledBuild DetectBuild()
@@ -210,9 +189,11 @@ InstalledBuild DetectBuild()
         return build;
     }
     int status = 0;
-    const auto info = ParsePackageInfo(RunShell("package list -i "
-        + ShellQuote((std::filesystem::path(build.packagesDirectory) / build.packageFile).string()), 30000000, status));
-    build.commit = CommitFromDescription(info.description);
+    const auto output = RunShell("package list -i "
+        + ShellQuote((std::filesystem::path(build.packagesDirectory) / build.packageFile).string()), 30000000, status);
+    build.commit = CommitFromDescription(ParsePackageInfo(output).description);
+    if (build.commit.empty())
+        build.commitProblem = "package list -i (status " + std::to_string(status) + "): " + Tail(output, 400);
     return build;
 }
 
@@ -495,7 +476,8 @@ void RunCheck(UpdateChecker::Job& job)
     }
     job.release = ParseRelease(response.body, job.error);
     if (!job.release) return;
-    job.build = ChooseReleaseBuild(*job.release, PackageArchitecture(), job.error);
+    // A test server (SUMMIT_UPDATE_API) may serve its packages over plain HTTP.
+    job.build = ChooseReleaseBuild(*job.release, PackageArchitecture(), job.error, !std::getenv("SUMMIT_UPDATE_API"));
     if (!job.build) return;
     if (!std::getenv("SUMMIT_UPDATE_API")) {
         for (const auto* package : {&job.build->summit, &job.build->webkit})
@@ -528,7 +510,7 @@ void RunCheck(UpdateChecker::Job& job)
 json BuildJSON(const InstalledBuild& build)
 {
     return {{"executable", build.executable}, {"summit", build.summit ? build.summit->ToString() : ""},
-        {"summitWebKit", build.webkit ? build.webkit->ToString() : ""}, {"commit", build.commit},
+        {"summitWebKit", build.webkit ? build.webkit->ToString() : ""}, {"commit", build.commit}, {"commitProblem", build.commitProblem},
         {"packageFile", build.packageFile}, {"packagesDirectory", build.packagesDirectory}, {"home", build.home},
         {"simulated", build.simulated}, {"fromPackages", build.FromPackages()}, {"problem", build.problem}};
 }
