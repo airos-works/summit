@@ -722,8 +722,6 @@ BrowserWindow::BrowserWindow(std::shared_ptr<SharedProfile> profile, std::string
     fBookmarkButton = new ToolButton("bookmark", "Bookmark this page", Icon::Bookmark, kBookmarkButton);
 #if SUMMIT_MODERN_WEBKIT
     fExtensionActions = new BGroupView("extension-actions", B_HORIZONTAL, 2);
-    fStoreInstallButton = new BButton("install-store-extension", "Install extension…", new BMessage(kExtensionStoreInstall));
-    fStoreInstallButton->SetToolTip("Download this store extension and review its requested access in Summit.");
     fCertificateButton = static_cast<AddressControl*>(fAddress)->CertificateButton();
 #endif
     fTabStrip = new TabStrip();
@@ -788,13 +786,11 @@ BrowserWindow::BrowserWindow(std::shared_ptr<SharedProfile> profile, std::string
         .Add(fBookmarkButton)
         .Add(downloadsButton)
 #if SUMMIT_MODERN_WEBKIT
-        .Add(fStoreInstallButton)
         .Add(fExtensionActions)
 #endif
         ;
 #if SUMMIT_MODERN_WEBKIT
     fExtensionActions->Hide();
-    fStoreInstallButton->Hide();
 #endif
     fZoomButton->Hide();
     if (fPrivate) {
@@ -2326,18 +2322,6 @@ void BrowserWindow::RefreshChrome()
     static_cast<AddressControl*>(fAddress)->SetReader(active && !active->processExited
         && active->loadError.empty() && (active->readerActive || active->readerAvailable),
         active && active->readerActive, active && !active->loading && !active->readerExtracting && !active->processExited);
-    const auto storeItem = fExtensionsEnabled && active ? ParseExtensionStoreURL(active->url) : std::nullopt;
-    if (storeItem) {
-        const bool installed = fShared->InstalledExtensions().contains(StoreItemIdentifier(*storeItem));
-        const char* label = installed ? "Manage extension…" : "Install extension…";
-        if (std::strcmp(fStoreInstallButton->Label(), label)) {
-            fStoreInstallButton->SetLabel(label);
-            fStoreInstallButton->SetToolTip(installed ? "This extension is installed: change or remove it in the Extensions window."
-                : "Download this store extension and review its requested access in Summit.");
-        }
-    }
-    if (storeItem && fStoreInstallButton->IsHidden(fStoreInstallButton)) fStoreInstallButton->Show();
-    else if (!storeItem && !fStoreInstallButton->IsHidden(fStoreInstallButton)) fStoreInstallButton->Hide();
     const bool hasCertificate = active && !active->loading && !active->processExited && active->loadError.empty()
         && active->url == active->connectionCertificate.GetString("url", "")
         && active->connectionCertificate.HasString("sha256");

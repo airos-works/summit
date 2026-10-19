@@ -7,13 +7,13 @@ namespace summit {
 namespace {
 constexpr const char* kStyle = R"css(
 :host { all: initial; }
-.card { position: fixed; right: 24px; bottom: 24px; z-index: 2147483647; box-sizing: border-box;
+.card { position: fixed; top: 16px; left: 50%; transform: translateX(-50%); z-index: 2147483647; box-sizing: border-box;
   display: flex; align-items: center; gap: 14px; max-width: min(560px, calc(100vw - 32px));
   padding: 10px 12px 10px 10px; border-radius: 999px; background: #fff; color: #1f2328;
   box-shadow: 0 8px 28px rgba(0, 0, 0, .18), 0 0 0 1px rgba(0, 0, 0, .08);
   font: 400 14px/1.35 system-ui, -apple-system, "Noto Sans", "DejaVu Sans", sans-serif;
   text-align: left; animation: summit-offer-in .18s ease-out; }
-@keyframes summit-offer-in { from { opacity: 0; transform: translateY(8px); } }
+@keyframes summit-offer-in { from { opacity: 0; transform: translate(-50%, -8px); } }
 .logo { flex: none; width: 48px; height: 48px; border-radius: 50%; display: flex;
   align-items: center; justify-content: center; overflow: hidden; background: #eef4fa;
   box-shadow: inset 0 0 0 1px rgba(0, 0, 0, .06); }
@@ -39,7 +39,7 @@ constexpr const char* kStyle = R"css(
   .close { color: #c9d1d9; }
   .close:hover { background: rgba(255, 255, 255, .1); }
 }
-@media (max-width: 520px) { .card { left: 12px; right: 12px; bottom: 12px; } }
+@media (max-width: 520px) { .card { left: 12px; right: 12px; top: 12px; transform: none; } }
 )css";
 
 // %OFFER% is the card's text and links as JSON, or null.

@@ -514,7 +514,6 @@ private:
     BMenuItem* fRemoveBookmarkItem;
     ToolButton* fBookmarkButton;
 #if SUMMIT_MODERN_WEBKIT
-    BButton* fStoreInstallButton = nullptr;
     ToolButton* fCertificateButton = nullptr;
     BMessenger fCertificateWindow;
     int64 fCertificateTab = 0;

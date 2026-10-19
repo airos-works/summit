@@ -2,14 +2,15 @@
 
 Window → Extensions has links to the Chrome Web Store and Firefox Add-ons,
 plus a field for an extension's store link. On an extension detail page,
-Summit's toolbar also shows **Install extension…**, and the page gets a card
-with the Summit icon and **Install Extension** (see
-[issue-fixes-2026-10-19.md](issue-fixes-2026-10-19.md)). These entry points
-download the package and open the existing native permission review. The
-extension starts only after the user chooses Install. Store pages' own
+the page gets a card, centred at the top of the page, with the Summit icon
+and **Install Extension** (see
+[issue-fixes-2026-10-19.md](issue-fixes-2026-10-19.md); the toolbar button
+that did the same was removed for issue #63). These entry points download
+the package and open the existing native permission review. The extension
+starts only after the user chooses Install. Store pages' own
 browser-specific install buttons are not required. When the page's extension
-is installed, the card and the toolbar button say Manage Extension instead
-and open the Extensions window with it selected.
+is installed, the card says Manage Extension instead and opens the
+Extensions window with it selected.
 
 The installer accepts only HTTPS detail-page URLs on the official store
 origins. Chrome packages come from Google's CRX update service; their CRX3
