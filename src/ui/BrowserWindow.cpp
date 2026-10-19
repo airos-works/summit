@@ -60,6 +60,7 @@
 #include "NoticeBar.h"
 #include "PrintJob.h"
 #include "WebApps.h"
+#include "core/Bookmarks.h"
 #include "CertificateInfoWindow.h"
 #include "ReaderMode.h"
 #include <WebKit/WebKitInfo.h>
@@ -903,6 +904,13 @@ BrowserWindow::BrowserWindow(std::shared_ptr<SharedProfile> profile, std::string
         fBookmarksBar->Hide();
         fBookmarksBarItem->SetLabel("Show Bookmarks Bar");
     }
+#if SUMMIT_MODERN_WEBKIT
+    for (char number = '1'; number <= '9'; ++number) {
+        auto* select = new BMessage(kSelectTabNumber);
+        select->AddInt32("number", number - '0');
+        AddShortcut(number, B_COMMAND_KEY, select);
+    }
+#endif
     AddShortcut(B_TAB, B_CONTROL_KEY, new BMessage(kNextTab));
     AddShortcut(B_TAB, B_CONTROL_KEY | B_SHIFT_KEY, new BMessage(kPreviousTab));
     SetSizeLimits(760, 10000, 450, 10000);
@@ -2588,6 +2596,8 @@ void BrowserWindow::ShowTabMenu(const BMessage& message)
     others->SetEnabled(fTabs.size() > 1);
     menu->AddItem(others);
 #if SUMMIT_MODERN_WEBKIT
+    auto* all = new BMenuItem("Bookmark All Tabs", new BMessage(kBookmarkAllTabs));
+    menu->AddItem(all);
     auto* right = item("Close Tabs to the Right", kCloseTabsToRight);
     right->SetEnabled(!fTabs.empty() && fTabs.back().id != id);
     menu->AddItem(right);
@@ -3655,6 +3665,30 @@ void BrowserWindow::MessageReceived(BMessage* message)
             break;
         }
         case kPasswordBarAnswer: PasswordBarAnswer(*message); break;
+        case kBookmarkAllTabs: {
+            // A folder named after the day, in Other Bookmarks.
+            char name[64] = "Tabs";
+            const std::time_t now = std::time(nullptr);
+            if (std::tm local; localtime_r(&now, &local)) std::strftime(name, sizeof name, "Tabs %Y-%m-%d %H:%M", &local);
+            size_t added = 0;
+            fShared->Change([&](Profile& profile) -> uint32 {
+                const int64 folder = profile.bookmarks.AddFolder(kOtherBookmarksFolder, name);
+                if (!folder) return 0;
+                for (const auto& page : fTabs)
+                    if (IsBookmarkableURL(page.url) && profile.bookmarks.Add({page.url, page.title}, folder)) ++added;
+                if (!added) profile.bookmarks.Remove(folder);
+                return SharedProfile::kBookmarksChanged;
+            });
+            fStatus->SetText(added ? (std::to_string(added) + " tabs bookmarked in Other Bookmarks › " + name).c_str()
+                : "None of these tabs can be bookmarked.");
+            break;
+        }
+        case kSelectTabNumber: {
+            const int32 number = message->GetInt32("number", 0);
+            if (number >= 9 && !fTabs.empty()) SelectTab(fTabs.back().id);
+            else if (number >= 1 && size_t(number) <= fTabs.size()) SelectTab(fTabs[number - 1].id);
+            break;
+        }
         case kInstallWebApp:
             if (tab && (tab->url.rfind("https://", 0) == 0 || tab->url.rfind("http://", 0) == 0) && !tab->processExited)
                 tab->view->EvaluateJavaScript(kWebAppPageScript, BMessenger(this), kWebAppQuery, true);

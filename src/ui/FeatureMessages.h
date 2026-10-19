@@ -79,3 +79,11 @@ constexpr uint32 kWebAppInstalled = 'wapi';
 constexpr uint32 kOpenWebApp = 'wapo';
 constexpr uint32 kRemoveWebApp = 'wapr';
 }
+namespace summit {
+// Alt+1 to Alt+8 select those tabs, Alt+9 the last one ("number").
+constexpr uint32 kSelectTabNumber = 'stnb';
+}
+namespace summit {
+// The tab menu's Bookmark All Tabs: a new folder in Other Bookmarks.
+constexpr uint32 kBookmarkAllTabs = 'bkat';
+}

@@ -68,14 +68,14 @@ BrowsingPreferences::BrowsingPreferences(BMessenger owner, const std::string& au
     fAccounts->AddColumn(new BStringColumn("Account", 200, 60, 500, B_TRUNCATE_END), 1);
     fAccounts->SetSelectionMessage(new BMessage(accountSelected));
     fAccounts->SetSelectionMode(B_SINGLE_SELECTION_LIST);
-    fAccounts->SetExplicitMinSize(BSize(470, 150));
+    fAccounts->SetExplicitMinSize(BSize(470, 100));
     fApps = new BColumnListView("web-apps", B_NAVIGABLE, B_FANCY_BORDER, true);
     fApps->AddColumn(new BStringColumn("App", 200, 80, 400, B_TRUNCATE_END), 0);
     fApps->AddColumn(new BStringColumn("Opens", 260, 80, 600, B_TRUNCATE_MIDDLE), 1);
     fApps->SetSelectionMessage(new BMessage(appSelected));
     fApps->SetSelectionMode(B_SINGLE_SELECTION_LIST);
     fApps->SetSortingEnabled(false);
-    fApps->SetExplicitMinSize(BSize(470, 80));
+    fApps->SetExplicitMinSize(BSize(470, 60));
     for (const auto& [id, name, start] : webApps) {
         auto* row = new BRow();
         row->SetField(new BStringField(name.c_str()), 0);
