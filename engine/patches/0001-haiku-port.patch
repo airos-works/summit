@@ -134734,10 +134734,10 @@ index 0000000000000000000000000000000000000000..abc82f6d26d2b1374740dc304282ae75
 +
 +}
 diff --git a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/AcceleratedSurface.cpp b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/AcceleratedSurface.cpp
-index 8177756a0e14111347846c912b8e3851f2559b4a..68a243773c2da9e52b183813ec038fcb7b46aa05 100644
+index 8177756a0e14111347846c912b8e3851f2559b4a..7413ae1140c1c59d0d4b8b42be47e59fb0b0166b 100644
 --- a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/AcceleratedSurface.cpp
 +++ b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/AcceleratedSurface.cpp
-@@ -26,6 +26,23 @@
+@@ -26,6 +26,24 @@
  #include "config.h"
  #include "AcceleratedSurface.h"
  
@@ -134746,6 +134746,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..68a243773c2da9e52b183813ec038fcb
 +#include "PresentStatsHaiku.h"
 +#include <image.h>
 +#include <algorithm>
++#include <atomic>
 +#include <cstdio>
 +#include <cstdlib>
 +#include <cstring>
@@ -134761,7 +134762,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..68a243773c2da9e52b183813ec038fcb
  #if USE(COORDINATED_GRAPHICS)
  #include "WebPage.h"
  #include "WebProcess.h"
-@@ -51,12 +68,18 @@ WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_BEGIN
+@@ -51,12 +69,18 @@ WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_BEGIN
  #include <skia/gpu/ganesh/GrBackendSurface.h>
  #include <skia/gpu/ganesh/SkSurfaceGanesh.h>
  #include <skia/gpu/ganesh/gl/GrGLBackendSurface.h>
@@ -134781,7 +134782,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..68a243773c2da9e52b183813ec038fcb
  #include <epoxy/egl.h>
  #endif
  
-@@ -94,6 +117,19 @@ using namespace WebCore;
+@@ -94,6 +118,19 @@ using namespace WebCore;
  
  WTF_MAKE_TZONE_ALLOCATED_IMPL(AcceleratedSurface);
  
@@ -134801,7 +134802,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..68a243773c2da9e52b183813ec038fcb
  Ref<AcceleratedSurface> AcceleratedSurface::create(WebPage& webPage, Function<void()>&& frameCompleteHandler, RenderingPurpose renderingPurpose)
  {
      return adoptRef(*new AcceleratedSurface(webPage, WTF::move(frameCompleteHandler), renderingPurpose));
-@@ -122,7 +158,7 @@ AcceleratedSurface::AcceleratedSurface(WebPage& webPage, Function<void()>&& fram
+@@ -122,7 +159,7 @@ AcceleratedSurface::AcceleratedSurface(WebPage& webPage, Function<void()>&& fram
  #endif
      , m_id(generateID())
      , m_renderingPurpose(renderingPurpose)
@@ -134810,7 +134811,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..68a243773c2da9e52b183813ec038fcb
      , m_hardwareAccelerationEnabled(webPage.corePage()->settings().hardwareAccelerationEnabled())
  #endif
      , m_backgroundColor(webPage.backgroundColor())
-@@ -130,11 +166,338 @@ AcceleratedSurface::AcceleratedSurface(WebPage& webPage, Function<void()>&& fram
+@@ -130,11 +167,373 @@ AcceleratedSurface::AcceleratedSurface(WebPage& webPage, Function<void()>&& fram
      , m_isVisible(webPage.activityState().contains(ActivityState::IsVisible))
      , m_useExplicitSync(usesGL() && useExplicitSync())
  #if ENABLE(DAMAGE_TRACKING)
@@ -134826,30 +134827,51 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..68a243773c2da9e52b183813ec038fcb
      , m_damageTracker(m_swapChain, !usesGL())
  #endif
 +#endif
- {
- }
- 
++{
++}
++
 +#if PLATFORM(HAIKU)
 +// app_server's copy of the screen, mapped once for the life of the process.
 +// Mesa keeps the pages of the mapping it presents into locked for the GPU,
 +// and deleting an area whose pages are locked can hang the system; a page
 +// that changes size gets a new surface (and presenter), so the mapping must
 +// not belong to a presenter.
++// Set once the driver could not import app_server's copy (Mesa's -4): every
++// later present goes to the screen without it.
++static std::atomic<bool> backBufferImportFailedHaiku;
++
++// Whether this process's GPU is AMD's: zink runs on RADV, whose ICD it has
++// loaded by the first present.
++static bool usesRadvHaiku()
+ {
++    image_info info;
++    int32 cookie = 0;
++    while (get_next_image_info(B_CURRENT_TEAM, &cookie, &info) == B_OK) {
++        if (std::strstr(info.name, "libvulkan_radeon"))
++            return true;
++    }
++    return false;
+ }
+ 
 +static void* backBufferMappingHaiku(area_id source)
 +{
 +    static NeverDestroyed<std::mutex> lock;
 +    static NeverDestroyed<HashMap<area_id, void*>> mappings;
-+    if (source < 0)
++    if (source < 0 || backBufferImportFailedHaiku)
 +        return nullptr;
-+    // Off unless SUMMIT_DIRECT_PRESENT_BACK=1: a web process that ends while
-+    // the driver holds these pages for the GPU hangs the X399 (Haiku tears the
-+    // address space down before it closes the driver), and a crash ends a
-+    // process that way. Until that is fixed in the OS, app_server's copy is
-+    // kept current by a frame through app_server now and then instead
++    // A web process that ends while the driver holds these pages for the GPU
++    // hangs the X399 (Haiku tears the address space down before it closes the
++    // driver), and a crash ends a process that way. amdgpu lets go of a dying
++    // team's pages first (haiku#38), so on AMD's GPUs this is on unless
++    // SUMMIT_DIRECT_PRESENT_BACK=0; elsewhere it is off unless
++    // SUMMIT_DIRECT_PRESENT_BACK=1, and app_server's copy is kept current by
++    // a frame through app_server now and then instead
 +    // (AcceleratedSurface::didRenderFrame).
 +    static const bool enabled = [] {
 +        const char* value = getenv("SUMMIT_DIRECT_PRESENT_BACK");
-+        return value && !strcmp(value, "1");
++        if (value)
++            return !strcmp(value, "1");
++        return usesRadvHaiku();
 +    }();
 +    if (!enabled)
 +        return nullptr;
@@ -134979,6 +135001,20 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..68a243773c2da9e52b183813ec038fcb
 +        request.cookie = &m_state->inFlight;
 +        m_state->inFlight.fetch_add(1);
 +        int result = present(framebuffer, &request);
++        // -4: the driver could not import app_server's copy (an amdgpu
++        // without userptr, say), and Mesa would try again, and fail, every
++        // frame. This frame and every later one go to the screen without it,
++        // and frames through app_server keep that copy current instead.
++        if (result == -4 && m_backBits) {
++            backBufferImportFailedHaiku = true;
++            m_backBits = nullptr;
++            request.backBits = nullptr;
++            request.backBytesPerRow = 0;
++            request.backWidth = 0;
++            request.backHeight = 0;
++            std::fprintf(stderr, "Summit direct present: app_server's copy could not be imported (-4); presenting without it\n");
++            result = present(framebuffer, &request);
++        }
 +        // SUMMIT_DIRECT_PRESENT_TRACE: where a slow present waited, the
 +        // UI process's lock or the presents still in flight.
 +        if (directPresentTraceHaiku() && system_time() - lockStart > 15000)
@@ -135149,7 +135185,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..68a243773c2da9e52b183813ec038fcb
  AcceleratedSurface::~AcceleratedSurface() = default;
  
  WTF_MAKE_TZONE_ALLOCATED_IMPL(AcceleratedSurface::RenderTarget);
-@@ -176,7 +539,7 @@ void AcceleratedSurface::RenderTarget::createSkiaSurfaceForFramebuffer(unsigned
+@@ -176,7 +575,7 @@ void AcceleratedSurface::RenderTarget::createSkiaSurfaceForFramebuffer(unsigned
      m_skiaSurface = SkSurfaces::WrapBackendRenderTarget(display.skiaGrContext(), backendRenderTarget, origin, kRGBA_8888_SkColorType, SkColorSpace::MakeSRGB(), &properties);
  }
  
@@ -135158,7 +135194,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..68a243773c2da9e52b183813ec038fcb
  WTF_MAKE_TZONE_ALLOCATED_IMPL(AcceleratedSurface::RenderTargetShareableBuffer);
  
  AcceleratedSurface::RenderTargetShareableBuffer::RenderTargetShareableBuffer(AcceleratedSurface& surface, const IntSize& size)
-@@ -218,9 +581,36 @@ void AcceleratedSurface::RenderTargetShareableBuffer::initializeColorBuffer(EGLI
+@@ -218,9 +617,36 @@ void AcceleratedSurface::RenderTargetShareableBuffer::initializeColorBuffer(EGLI
      glBindRenderbuffer(GL_RENDERBUFFER, m_colorBuffer);
      if (image)
          glEGLImageTargetRenderbufferStorageOES(GL_RENDERBUFFER, image);
@@ -135196,7 +135232,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..68a243773c2da9e52b183813ec038fcb
  
      if (m_surface->useSkia())
          createSkiaSurfaceForFramebuffer(m_fbo);
-@@ -228,6 +618,10 @@ void AcceleratedSurface::RenderTargetShareableBuffer::initializeColorBuffer(EGLI
+@@ -228,6 +654,10 @@ void AcceleratedSurface::RenderTargetShareableBuffer::initializeColorBuffer(EGLI
  
  void AcceleratedSurface::RenderTargetShareableBuffer::sendFrame(Vector<WebCore::IntRect, 1>&& damageRects)
  {
@@ -135207,7 +135243,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..68a243773c2da9e52b183813ec038fcb
      WebProcess::singleton().parentProcessConnection()->send(Messages::AcceleratedBackingStore::Frame(m_id, WTF::move(damageRects), WTF::move(m_renderingFenceFD)), m_surface->surfaceID());
  }
  
-@@ -418,7 +812,14 @@ std::unique_ptr<AcceleratedSurface::RenderTarget> AcceleratedSurface::RenderTarg
+@@ -418,7 +848,14 @@ std::unique_ptr<AcceleratedSurface::RenderTarget> AcceleratedSurface::RenderTarg
          return nullptr;
      }
  
@@ -135222,7 +135258,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..68a243773c2da9e52b183813ec038fcb
      if (!bufferHandle) {
          WTFLogAlways("Failed to create handle for shared memory buffer");
          return nullptr;
-@@ -439,13 +840,479 @@ AcceleratedSurface::RenderTargetSHMImage::RenderTargetSHMImage(AcceleratedSurfac
+@@ -439,13 +876,479 @@ AcceleratedSurface::RenderTargetSHMImage::RenderTargetSHMImage(AcceleratedSurfac
      WebProcess::singleton().parentProcessConnection()->send(Messages::AcceleratedBackingStore::DidCreateSHMBuffer(m_id, WTF::move(bitmapHandle)), m_surface->surfaceID());
  }
  
@@ -135702,7 +135738,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..68a243773c2da9e52b183813ec038fcb
  
          SkImageInfo info = SkImageInfo::Make(m_bitmap->size().width(), m_bitmap->size().height(), SkColorType::kBGRA_8888_SkColorType, SkAlphaType::kPremul_SkAlphaType);
  
-@@ -457,9 +1324,14 @@ void AcceleratedSurface::RenderTargetSHMImage::didRenderFrame()
+@@ -457,9 +1360,14 @@ void AcceleratedSurface::RenderTargetSHMImage::didRenderFrame()
          return;
      }
  
@@ -135717,7 +135753,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..68a243773c2da9e52b183813ec038fcb
  std::unique_ptr<AcceleratedSurface::RenderTarget> AcceleratedSurface::RenderTargetTexture::create(AcceleratedSurface& surface, const IntSize& size)
  {
      auto texture = BitmapTexture::create(size);
-@@ -515,8 +1387,9 @@ AcceleratedSurface::RenderTargetTexture::RenderTargetTexture(AcceleratedSurface&
+@@ -515,8 +1423,9 @@ AcceleratedSurface::RenderTargetTexture::RenderTargetTexture(AcceleratedSurface&
  }
  
  AcceleratedSurface::RenderTargetTexture::~RenderTargetTexture() = default;
@@ -135728,7 +135764,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..68a243773c2da9e52b183813ec038fcb
  
  #if USE(WPE_RENDERER)
  std::unique_ptr<AcceleratedSurface::RenderTarget> AcceleratedSurface::RenderTargetWPEBackend::create(AcceleratedSurface& surface, const IntSize& initialSize, UnixFileDescriptor&& hostFD)
-@@ -594,7 +1467,7 @@ void AcceleratedSurface::RenderTargetWPEBackend::didRenderFrame()
+@@ -594,7 +1503,7 @@ void AcceleratedSurface::RenderTargetWPEBackend::didRenderFrame()
  AcceleratedSurface::SwapChain::SwapChain(AcceleratedSurface& surface)
      : m_surface(surface)
  {
@@ -135737,7 +135773,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..68a243773c2da9e52b183813ec038fcb
      if (!m_surface->hardwareAccelerationEnabled()) {
          m_type = Type::SharedMemory;
          return;
-@@ -632,7 +1505,7 @@ AcceleratedSurface::SwapChain::SwapChain(AcceleratedSurface& surface)
+@@ -632,7 +1541,7 @@ AcceleratedSurface::SwapChain::SwapChain(AcceleratedSurface& surface)
      case PlatformDisplay::Type::GBM:
  #endif
          break;
@@ -135746,7 +135782,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..68a243773c2da9e52b183813ec038fcb
  #if USE(WPE_RENDERER)
      case PlatformDisplay::Type::WPE:
          m_type = Type::WPEBackend;
-@@ -646,11 +1519,19 @@ AcceleratedSurface::SwapChain::SwapChain(AcceleratedSurface& surface)
+@@ -646,11 +1555,19 @@ AcceleratedSurface::SwapChain::SwapChain(AcceleratedSurface& surface)
      case PlatformDisplay::Type::Default:
          break;
  #endif // PLATFORM(GTK)
@@ -135767,7 +135803,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..68a243773c2da9e52b183813ec038fcb
  void AcceleratedSurface::SwapChain::setupBufferFormat()
  {
      if (m_type != Type::EGLImage)
-@@ -749,7 +1630,7 @@ bool AcceleratedSurface::SwapChain::resize(const IntSize& size)
+@@ -749,7 +1666,7 @@ bool AcceleratedSurface::SwapChain::resize(const IntSize& size)
  
  bool AcceleratedSurface::SwapChain::handleBufferFormatChangeIfNeeded()
  {
@@ -135776,7 +135812,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..68a243773c2da9e52b183813ec038fcb
      if (m_type == Type::EGLImage) {
          Locker locker { m_bufferFormatLock };
          if (m_bufferFormatChanged) {
-@@ -765,7 +1646,7 @@ bool AcceleratedSurface::SwapChain::handleBufferFormatChangeIfNeeded()
+@@ -765,7 +1682,7 @@ bool AcceleratedSurface::SwapChain::handleBufferFormatChangeIfNeeded()
  std::unique_ptr<AcceleratedSurface::RenderTarget> AcceleratedSurface::SwapChain::createTarget() const
  {
      switch (m_type) {
@@ -135785,7 +135821,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..68a243773c2da9e52b183813ec038fcb
  #if USE(GBM) || OS(ANDROID)
      case Type::EGLImage: {
          Locker locker { m_bufferFormatLock };
-@@ -773,7 +1654,11 @@ std::unique_ptr<AcceleratedSurface::RenderTarget> AcceleratedSurface::SwapChain:
+@@ -773,7 +1690,11 @@ std::unique_ptr<AcceleratedSurface::RenderTarget> AcceleratedSurface::SwapChain:
      }
  #endif
      case Type::Texture:
@@ -135797,7 +135833,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..68a243773c2da9e52b183813ec038fcb
      case Type::SharedMemory:
          return RenderTargetSHMImage::create(m_surface.get(), m_size);
  #endif
-@@ -812,6 +1697,11 @@ AcceleratedSurface::RenderTarget* AcceleratedSurface::SwapChain::nextTarget()
+@@ -812,6 +1733,11 @@ AcceleratedSurface::RenderTarget* AcceleratedSurface::SwapChain::nextTarget()
              if (auto target = createTarget())
                  m_freeTargets.append(WTF::move(target));
          }
@@ -135809,7 +135845,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..68a243773c2da9e52b183813ec038fcb
  
  #if ENABLE(WPE_PLATFORM)
          if (m_freeTargets.size() != targetsToCreate)
-@@ -841,6 +1731,12 @@ void AcceleratedSurface::SwapChain::releaseTarget(uint64_t targetID, UnixFileDes
+@@ -841,6 +1767,12 @@ void AcceleratedSurface::SwapChain::releaseTarget(uint64_t targetID, UnixFileDes
          m_freeTargets.insert(0, WTF::move(m_lockedTargets[index]));
          m_lockedTargets.removeAt(index);
      }
@@ -135822,7 +135858,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..68a243773c2da9e52b183813ec038fcb
  }
  
  void AcceleratedSurface::SwapChain::reset()
-@@ -859,6 +1755,11 @@ void AcceleratedSurface::SwapChain::releaseUnusedBuffers()
+@@ -859,6 +1791,11 @@ void AcceleratedSurface::SwapChain::releaseUnusedBuffers()
  #if USE(WPE_RENDERER)
      ASSERT(m_type != Type::WPEBackend);
  #endif
@@ -135834,7 +135870,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..68a243773c2da9e52b183813ec038fcb
  
  #if ENABLE(WPE_PLATFORM)
      WebProcess::singleton().parentProcessConnection()->send(Messages::AcceleratedBackingStore::DidChangeBufferConfiguration(m_lockedTargets.size()), m_surface->surfaceID());
-@@ -901,6 +1802,17 @@ Vector<IntRect, 1> AcceleratedSurface::SwapChainDamageTracker::takeFrameDamageRe
+@@ -901,6 +1838,17 @@ Vector<IntRect, 1> AcceleratedSurface::SwapChainDamageTracker::takeFrameDamageRe
      if (frameDamage.mode() != Damage::Mode::Rectangles || m_swapChain.size().isEmpty())
          return frameDamage.rects();
  
@@ -135852,7 +135888,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..68a243773c2da9e52b183813ec038fcb
      // The frame damage is fine-grained, because the compositing restriction needs it that way, but the
      // platform only wants a bounded number of rects. Merge it down to the threshold here, which is the
      // only thing the threshold bounds.
-@@ -929,7 +1841,7 @@ bool AcceleratedSurface::shouldPaintMirrored() const
+@@ -929,7 +1877,7 @@ bool AcceleratedSurface::shouldPaintMirrored() const
      switch (m_swapChain.type()) {
      case SwapChain::Type::Invalid:
          return false;
@@ -135861,7 +135897,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..68a243773c2da9e52b183813ec038fcb
      case SwapChain::Type::Texture:
  #if USE(GBM) || OS(ANDROID)
      case SwapChain::Type::EGLImage:
-@@ -960,6 +1872,10 @@ void AcceleratedSurface::preferredBufferFormatsDidChange()
+@@ -960,6 +1908,10 @@ void AcceleratedSurface::preferredBufferFormatsDidChange()
  
  void AcceleratedSurface::visibilityDidChange(bool isVisible)
  {
@@ -135872,7 +135908,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..68a243773c2da9e52b183813ec038fcb
      if (m_isVisible == isVisible)
          return;
  
-@@ -1000,7 +1916,7 @@ void AcceleratedSurface::backgroundColorDidChange()
+@@ -1000,7 +1952,7 @@ void AcceleratedSurface::backgroundColorDidChange()
      if (isOpaque == wasOpaque)
          return;
  
@@ -135881,7 +135917,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..68a243773c2da9e52b183813ec038fcb
      m_swapChain.setupBufferFormat();
  #endif
  }
-@@ -1022,7 +1938,7 @@ void AcceleratedSurface::didCreateCompositingRunLoop(RunLoop& runLoop)
+@@ -1022,7 +1974,7 @@ void AcceleratedSurface::didCreateCompositingRunLoop(RunLoop& runLoop)
  #if USE(GLIB_EVENT_LOOP)
      m_releaseUnusedBuffersTimer->setPriority(RunLoopSourcePriority::ReleaseUnusedResourcesTimer);
  #endif
@@ -135890,7 +135926,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..68a243773c2da9e52b183813ec038fcb
      WebProcess::singleton().parentProcessConnection()->addMessageReceiver(runLoop, *this, Messages::AcceleratedSurface::messageReceiverName(), m_id);
  #endif
  }
-@@ -1030,6 +1946,10 @@ void AcceleratedSurface::didCreateCompositingRunLoop(RunLoop& runLoop)
+@@ -1030,6 +1982,10 @@ void AcceleratedSurface::didCreateCompositingRunLoop(RunLoop& runLoop)
  void AcceleratedSurface::willDestroyCompositingRunLoop()
  {
      m_frameCompleteHandler = nullptr;
@@ -135901,7 +135937,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..68a243773c2da9e52b183813ec038fcb
  
  #if USE(WPE_RENDERER)
      if (m_swapChain.type() == SwapChain::Type::WPEBackend)
-@@ -1043,7 +1963,7 @@ void AcceleratedSurface::willDestroyCompositingRunLoop()
+@@ -1043,7 +1999,7 @@ void AcceleratedSurface::willDestroyCompositingRunLoop()
              protectedThis->m_releaseUnusedBuffersTimer = nullptr;
          });
      }
@@ -135910,7 +135946,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..68a243773c2da9e52b183813ec038fcb
      WebProcess::singleton().parentProcessConnection()->removeMessageReceiver(Messages::AcceleratedSurface::messageReceiverName(), m_id);
  #endif
  }
-@@ -1149,18 +2069,142 @@ void AcceleratedSurface::didRenderFrame(TargetContents targetContents)
+@@ -1149,18 +2105,143 @@ void AcceleratedSurface::didRenderFrame(TargetContents targetContents)
      if (!m_target)
          return;
  
@@ -135948,7 +135984,8 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..68a243773c2da9e52b183813ec038fcb
 +#endif
 +    auto now = MonotonicTime::now();
 +    // Where every direct present also writes app_server's copy
-+    // (SUMMIT_DIRECT_PRESENT_BACK=1 and a Mesa that does it), the frames
++    // (on AMD's GPUs or with SUMMIT_DIRECT_PRESENT_BACK=1, and a driver and
++    // Mesa that do it: backBufferMappingHaiku), the frames
 +    // through app_server only keep the view's own bitmap current. The view
 +    // draws that only when app_server asks it for a part of the window
 +    // again, and then the page goes into the screen in full anyway. So a
@@ -136053,7 +136090,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..68a243773c2da9e52b183813ec038fcb
      m_pendingFrameNotifyTargets.insert(0, { m_target, WTF::move(damageRects) });
      m_target = nullptr;
  }
-@@ -1182,13 +2226,17 @@ const std::optional<Damage>& AcceleratedSurface::renderTargetDamage()
+@@ -1182,13 +2263,17 @@ const std::optional<Damage>& AcceleratedSurface::renderTargetDamage()
  }
  #endif
  

@@ -1,5 +1,67 @@
 # Summit performance: Speedometer 3.1 baseline, where the time goes, stress test
 
+## 19 October 2026 (evening): app_server's copy of the screen written on AMD
+
+Since jmgasper/haiku#37 the web process copies its frames straight into the
+frame buffer, but on the Framework 13 it could not also write app_server's
+copy of the screen. That copy is what screenshots and VNC read, and what
+app_server copies back when a window moves away. Mesa's import of it as host
+memory failed (-4), because the amdgpu port had userptr compiled out. So,
+just as without the copy, a page that kept changing still sent a frame
+through app_server, with a blocking readback, every 250 ms. jmgasper/haiku#38
+added userptr to the port by pinning pages, and released them when a team
+dies, before its address space goes (linux-drm `airos-6.18.52` 4fe74a3,
+`amdgpu_drm` 6.18.52~git20261019-1, hrev60207+1694). The OS session then
+used `kill -9` on 50 importers mid-copy: 30 test probes and 20 of Summit's
+web processes mid-animation. It also killed 50 importing children. The
+syslog stayed clean, and the page kept presenting directly.
+
+What changed in Summit:
+
+- **The copy is on by default where the web process runs on RADV**
+  (`libvulkan_radeon` loaded, `usesRadvHaiku()` in `AcceleratedSurface.cpp`).
+  `SUMMIT_DIRECT_PRESENT_BACK=0` turns it off and `=1` still turns it on
+  anywhere. It stays off on NVIDIA: nvidia_rm still has the dying-team hang
+  that the copy was off for.
+- **A driver that cannot import the copy gets one try.** Mesa returned -4 for
+  every present when the import failed (an older `amdgpu_drm`, say), so every
+  frame would have been read back. Now the first -4 is logged
+  (`app_server's copy could not be imported (-4); presenting without it`),
+  that frame is presented again without the copy, and so is every later one
+  in that process. Frames through app_server then keep the copy current as
+  before.
+
+Measured on the laptop on getartcraft.com: a fresh launch, an 18 s load, then
+a first scroll of 40 notches 33 ms apart, as in the #37 runs. Frame counts
+come from the MCP's `frame_stats`. Read time is the sum of the compositor
+trace's `read` over a 3 s window from the first burst of new textures.
+
+| | copy on (7 runs) | copy off (6 runs) |
+| --- | --- | --- |
+| present failures | none | none |
+| frames through app_server, 18 s load | 0-28 (five of 0) | 61-64 |
+| frames through app_server, scroll | 0 | 6 |
+| frames through app_server, 2 s after | 0 | 7-8 |
+| read time per 3 s window | 68-119 ms (one run 184) | 100-122 ms |
+| of which reads of 2 ms or more | 11-57 ms | 48-73 ms |
+| fps of the scroll | 54-60 | 58-60 |
+
+The copy-on runs are five with the switch set on the installed build and two
+of the new build with nothing set. The copy-off runs are four with the switch
+unset on the installed build, one with `=0` and one with the import made to
+fail (a test-only build). The new build's `=0` and failed-import runs matched
+the copy-off runs.
+
+`read` runs from the swap to the end of the present. So each composition's
+~0.3 ms wait for its direct present counts too: about 50-64 ms of every
+window but one, whether the copy is on or not. With the copy on, nothing is read back
+while the page changes, and the reads of 2 ms or more that remain are slow
+presents.
+
+Three of the seven copy-on runs had slower scrolls (54-56 fps, gaps of 82-102
+ms), against at most one slow-ish copy-off run (58 fps, 77 ms). That is too
+few runs to put on the copy, but it is worth watching.
+
 ## 19 October 2026 (later): animation frames on the compositor's frames, and tearing on AMD
 
 Two follow-ups from the morning's list (below): the vertical sync on the

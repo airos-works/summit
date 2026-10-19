@@ -140,13 +140,17 @@ Three pieces, one in each layer:
 **app_server's copy of the screen.** It is what screenshots and the VNC
 server read and what app_server copies back when a window moves away, so it
 must hold the page too. Mesa can copy into it as well (imported host
-memory), but that is off unless `SUMMIT_DIRECT_PRESENT_BACK=1`: a web
-process that ends while the driver holds those pages for the GPU hangs the
-X399 (Haiku deletes the address space before it closes the driver), and a
-crash ends a process that way. Instead a page that changes goes through
-app_server, read back as before, four times a second; the UI holds that
-frame's `FrameDone` until the view has drawn it (100 ms at most), so the
-older pixels never cover a newer direct frame.
+memory). A web process that ends while the driver holds those pages for the
+GPU hangs the X399 (Haiku deletes the address space before it closes the
+driver), and a crash ends a process that way. amdgpu lets go of a dying
+team's pages first (jmgasper/haiku#38), so where the web process runs on
+RADV the copy is on unless `SUMMIT_DIRECT_PRESENT_BACK=0`; elsewhere it is
+off unless `SUMMIT_DIRECT_PRESENT_BACK=1`. A driver that cannot import the
+copy (Mesa's -4) gets one try, after which frames go to the screen without
+it. Without the copy, a page that changes goes through app_server, read
+back as before, four times a second; the UI holds that frame's `FrameDone`
+until the view has drawn it (100 ms at most), so the older pixels never
+cover a newer direct frame.
 
 **Two ways to hang the X399 found on the way** (both kernel faults, reported
 to the OS work; no ping on either interface, nothing in the syslog):
