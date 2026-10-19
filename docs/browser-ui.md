@@ -19,7 +19,9 @@ buttons and a list) is gone; each of its jobs moved somewhere else.
   tab; middle-click or Alt-click opens a new tab; the secondary button offers
   Open, Open in New Tab, Remove from Bookmarks Bar and Delete Bookmark.
   Bookmarks that do not fit go in a » menu. View › Hide/Show Bookmarks Bar
-  (Shift+Alt+B) or Preferences toggle it.
+  (Shift+Alt+B) or Preferences toggle it. (Since 19 October bookmarks are in
+  folders, which the bar opens as menus, and can be edited, dragged, imported
+  and exported: see [bookmarks.md](bookmarks.md).)
 - **Star button** (toolbar) is filled when the current page is bookmarked. It
   offers Add to Bookmarks Bar / Add to Bookmarks, or Remove from Bookmarks Bar
   / Remove Bookmark. The Bookmarks menu has the same commands (Alt+D,
@@ -144,8 +146,9 @@ refresh that cancelled a click on a History entry.
 
 ## Not done
 
-- No bookmark editing (rename, reorder, folders) beyond add/remove and
-  bar membership; no drag and drop onto the bar.
+- ~~No bookmark editing (rename, reorder, folders) beyond add/remove and
+  bar membership; no drag and drop onto the bar.~~ Done 19 October:
+  [bookmarks.md](bookmarks.md).
 - History keeps one entry per address (its latest visit), as before.
 - SVG-only favicons are not shown.
 - Menus list pages without icons.

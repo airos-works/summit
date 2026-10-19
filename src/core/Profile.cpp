@@ -42,6 +42,46 @@ static std::vector<PageRecord> Decode(const json& value, size_t limit)
     }
     return pages;
 }
+// Folders as nested arrays: a folder has "children", a bookmark "url".
+static json EncodeBookmarks(const std::vector<BookmarkNode>& nodes)
+{
+    json result = json::array();
+    for (const auto& node : nodes) {
+        json item = {{"title", node.title}};
+        if (node.folder) item["children"] = EncodeBookmarks(node.children);
+        else item["url"] = node.url;
+        if (node.added) item["added"] = node.added;
+        result.push_back(std::move(item));
+    }
+    return result;
+}
+// Unusable entries are dropped rather than failing the profile; so are
+// folders nested deeper than kMaxBookmarkDepth and anything past the limits.
+static void DecodeBookmarks(const json& value, BookmarkNode& folder, size_t depth, size_t& bookmarks, size_t& folders)
+{
+    if (!value.is_array()) return;
+    for (const auto& item : value) {
+        if (!item.is_object()) continue;
+        auto title = item.find("title");
+        if (title == item.end() || !title->is_string() || title->get_ref<const std::string&>().size() > 65536) continue;
+        BookmarkNode node;
+        node.title = title->get<std::string>();
+        if (auto added = item.find("added"); added != item.end() && added->is_number_integer()) node.added = added->get<int64_t>();
+        if (auto children = item.find("children"); children != item.end()) {
+            if (depth + 1 > kMaxBookmarkDepth || folders >= kMaxBookmarkFolders) continue;
+            node.folder = true;
+            ++folders;
+            DecodeBookmarks(*children, node, depth + 1, bookmarks, folders);
+        } else {
+            auto url = item.find("url");
+            if (url == item.end() || !url->is_string() || bookmarks >= kMaxBookmarks) continue;
+            node.url = url->get<std::string>();
+            if (!IsBookmarkableURL(node.url)) continue;
+            ++bookmarks;
+        }
+        folder.children.push_back(std::move(node));
+    }
+}
 Profile Profile::Load(const std::filesystem::path& path, std::string& error)
 {
     error.clear();
@@ -74,7 +114,16 @@ Profile Profile::Load(const std::filesystem::path& path, std::string& error)
             if (window.selected >= window.tabs.size()) window.selected = 0;
             if (!window.tabs.empty()) profile.windows.push_back(std::move(window));
         }
-        profile.bookmarks = Decode(j.at("bookmarks"), 10000);
+        const auto pages = Decode(j.at("bookmarks"), kMaxBookmarks);
+        // Builds since the folders came keep them in "bookmarkTree"; older
+        // ones (which leave it out when they save) only have the flat list.
+        if (auto tree = j.find("bookmarkTree"); tree != j.end() && tree->is_object()) {
+            BookmarkNode bar, other;
+            size_t bookmarks = 0, folders = 0;
+            if (auto items = tree->find("bar"); items != tree->end()) DecodeBookmarks(*items, bar, 0, bookmarks, folders);
+            if (auto items = tree->find("other"); items != tree->end()) DecodeBookmarks(*items, other, 0, bookmarks, folders);
+            profile.bookmarks.Assign(std::move(bar), std::move(other));
+        } else profile.bookmarks.AssignPages(pages);
         profile.history = Decode(j.at("history"), 2000);
         if (auto home = j.find("homeURL"); home != j.end()) {
             profile.homeURL = home->get<std::string>();
@@ -269,7 +318,9 @@ bool Profile::Save(const std::filesystem::path& path, std::string& error) const
         const WindowSession first = windows.empty() ? WindowSession() : windows.front();
         std::string data = json{{"version", 1}, {"tabs", Encode(first.tabs)}, {"selected", first.selected},
             {"windows", std::move(sessions)},
-            {"bookmarks", Encode(bookmarks)}, {"history", Encode(history)},
+            {"bookmarks", Encode(bookmarks.Pages())},
+            {"bookmarkTree", {{"bar", EncodeBookmarks(bookmarks.Bar().children)}, {"other", EncodeBookmarks(bookmarks.Other().children)}}},
+            {"history", Encode(history)},
             {"homeURL", homeURL}, {"showBookmarksBar", showBookmarksBar}, {"restoreSession", restoreSession},
             {"savePasswords", savePasswords}, {"passwordNever", passwordNever}, {"spellChecking", spellChecking},
             {"autoplay", autoplay}, {"webApps", [&] {
@@ -323,28 +374,41 @@ bool Profile::Visit(const PageRecord& page, int64_t now)
     if (history.size() > 2000) history.resize(2000);
     return true;
 }
-PageRecord* Profile::FindBookmark(const std::string& url)
-{
-    auto found = std::find_if(bookmarks.begin(), bookmarks.end(), [&](const auto& bookmark) { return bookmark.url == url; });
-    return found == bookmarks.end() ? nullptr : &*found;
-}
 void Profile::AddBookmark(const PageRecord& page, bool bar)
 {
-    if (auto* existing = FindBookmark(page.url)) {
-        existing->bar = bar;
+    if (const auto* existing = bookmarks.FindURL(page.url)) {
+        if (bar && !bookmarks.OnBar(page.url)) bookmarks.Move(existing->id, kBookmarksBarFolder, kBookmarkEnd);
         return;
     }
-    if (bookmarks.size() >= 10000) return;
-    PageRecord bookmark{page.url, page.title};
-    bookmark.bar = bar;
-    bookmarks.push_back(std::move(bookmark));
+    bookmarks.Add(page, bar ? kBookmarksBarFolder : kOtherBookmarksFolder, kBookmarkEnd, std::time(nullptr));
 }
-bool Profile::RemoveBookmark(const std::string& url)
+size_t Profile::ImportHistory(const std::vector<PageRecord>& pages)
 {
-    const auto size = bookmarks.size();
-    bookmarks.erase(std::remove_if(bookmarks.begin(), bookmarks.end(), [&](const auto& bookmark) {
-        return bookmark.url == url;
-    }), bookmarks.end());
-    return bookmarks.size() != size;
+    std::map<std::string, size_t> known;
+    for (size_t i = 0; i < history.size(); ++i) known.emplace(history[i].url, i);
+    std::set<std::string> addedURLs;
+    for (const auto& page : pages) {
+        if (page.url.rfind("https://", 0) != 0 && page.url.rfind("http://", 0) != 0) continue;
+        if (page.url.size() > 65536 || page.title.size() > 65536 || page.url.find('\0') != std::string::npos) continue;
+        if (auto found = known.find(page.url); found != known.end()) {
+            // A page visited in both keeps the later visit and the larger count.
+            auto& existing = history[found->second];
+            existing.visited = std::max(existing.visited, page.visited);
+            existing.visits = std::min(std::max(existing.visits, page.visits), 1000000);
+            if (existing.title.empty()) existing.title = page.title;
+            continue;
+        }
+        PageRecord record{page.url, page.title, page.visited, false, std::clamp(page.visits, 0, 1000000)};
+        known.emplace(record.url, history.size());
+        addedURLs.insert(record.url);
+        history.push_back(std::move(record));
+    }
+    if (addedURLs.empty()) return 0;
+    std::stable_sort(history.begin(), history.end(), [](const PageRecord& a, const PageRecord& b) { return a.visited > b.visited; });
+    if (history.size() > 2000) history.resize(2000);
+    // Count only the imported pages that were kept.
+    size_t kept = 0;
+    for (const auto& page : history) kept += addedURLs.count(page.url);
+    return kept;
 }
 }

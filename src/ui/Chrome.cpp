@@ -1,7 +1,10 @@
 #include "Chrome.h"
+#include "BookmarkImport.h"
 #include "Messages.h"
 #include "FeatureMessages.h"
 #include <Cursor.h>
+#include "core/Address.h"
+#include "core/Bookmarks.h"
 #include <Window.h>
 #include <Message.h>
 #include <Bitmap.h>
@@ -12,6 +15,8 @@
 #include <PopUpMenu.h>
 #include <ControlLook.h>
 #include <MessageRunner.h>
+#include <Entry.h>
+#include <Path.h>
 #if SUMMIT_MODERN_WEBKIT
 #include "ExtensionInstaller.h"
 #include <WebKit/WebKitView.h>
@@ -21,6 +26,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <cstdio>
 #include <mutex>
 #include <set>
 
@@ -897,18 +903,145 @@ void TabStrip::MouseMoved(BPoint where, uint32 transit, const BMessage*)
     fHoverNewTab = hoverNewTab;
     Invalidate();
 }
+void TabStrip::MessageReceived(BMessage* message)
+{
+    BView::MessageReceived(message);
+}
 void TabStrip::FrameResized(float, float) { Invalidate(); }
 static constexpr int32 kOverflowItem = -2;
+namespace {
+// Menu labels are cut at a character boundary; BMenu does not truncate.
+std::string BookmarkLabel(const BookmarkButton& item)
+{
+    std::string label = item.title.empty() ? item.url : item.title;
+    if (label.empty()) label = item.folder ? "Untitled Folder" : "Untitled";
+    if (label.size() <= 70) return label;
+    size_t cut = 70;
+    while (cut && (static_cast<unsigned char>(label[cut]) & 0xC0) == 0x80) --cut;
+    return label.substr(0, cut) + "…";
+}
+
+// A folder's submenu, filled when it first opens: imported folders can hold
+// thousands of bookmarks, and most menus are never opened. It runs on the
+// menu's own thread and reads only the snapshot it keeps.
+class BookmarkFolderMenu final : public BMenu {
+public:
+    BookmarkFolderMenu(std::shared_ptr<const BookmarkButton> root, const BookmarkButton& folder, const BMessenger& target)
+        : BMenu(BookmarkLabel(folder).c_str()), fRoot(std::move(root)), fFolder(folder), fTarget(target) { }
+    void AttachedToWindow() override
+    {
+        if (!fFilled) {
+            fFilled = true;
+            AddBookmarkItems(this, fRoot, fFolder, fTarget);
+        }
+        BMenu::AttachedToWindow();
+    }
+
+private:
+    std::shared_ptr<const BookmarkButton> fRoot;
+    const BookmarkButton& fFolder;
+    BMessenger fTarget;
+    bool fFilled = false;
+};
+
+// What a drag over the bar carries: one of its own buttons ("summit:bookmark"),
+// a tab or another page ("summit:url"), a Tracker file (a bookmark file's
+// address, or the file itself), or an address as text.
+bool DraggedPage(const BMessage* drag, std::string& url, std::string& title, int64& id)
+{
+    if (!drag) return false;
+    id = drag->GetInt64("summit:bookmark", 0);
+    title = drag->GetString("summit:title", "");
+    if (const char* text = drag->GetString("summit:url", nullptr)) url = text;
+    if (id || !url.empty()) return true;
+    entry_ref ref;
+    if (drag->FindRef("refs", &ref) == B_OK) {
+        BPath path(&ref);
+        if (path.InitCheck() != B_OK) return false;
+        // A bookmark file's title is its name, as Tracker shows it; other
+        // files are bookmarked themselves.
+        url = BookmarkFileURL(path.Path());
+        title = ref.name;
+        if (url.empty()) {
+            BEntry entry(&ref, true);
+            if (!entry.IsFile()) return false;
+            url = FileURL(path.Path());
+        }
+        return true;
+    }
+    const void* data = nullptr;
+    ssize_t size = 0;
+    if (drag->FindData("text/plain", B_MIME_TYPE, &data, &size) == B_OK && size > 0 && size < 65536) {
+        const std::string text = Trim(std::string(static_cast<const char*>(data), static_cast<size_t>(size)));
+        if (IsBookmarkableURL(text) && text.find_first_of(" \t\r\n") == std::string::npos) {
+            url = text;
+            return true;
+        }
+    }
+    return false;
+}
+}
+
+void AddBookmarkItems(BMenu* menu, std::shared_ptr<const BookmarkButton> root, const BookmarkButton& folder,
+    const BMessenger& target, size_t limit)
+{
+    size_t shown = 0;
+    bool bookmarks = false;
+    for (const auto& child : folder.children) {
+        if (shown++ == limit) {
+            auto* more = new BMenuItem("More Bookmarks…", new BMessage(kShowBookmarks));
+            more->SetTarget(target);
+            menu->AddItem(more);
+            break;
+        }
+        if (child.folder) {
+            menu->AddItem(NewBookmarkFolderItem(root, child, target));
+            continue;
+        }
+        auto* open = new BMessage(kOpenBookmark);
+        open->AddString("url", child.url.c_str());
+        auto* item = new BMenuItem(BookmarkLabel(child).c_str(), open);
+        item->SetTarget(target);
+        menu->AddItem(item);
+        bookmarks = true;
+    }
+    if (folder.children.empty()) {
+        auto* empty = new BMenuItem("(Empty)", nullptr);
+        empty->SetEnabled(false);
+        menu->AddItem(empty);
+    }
+    if (bookmarks) {
+        menu->AddSeparatorItem();
+        auto* openAll = new BMessage(kOpenBookmarkFolder);
+        openAll->AddInt64("id", folder.id);
+        auto* item = new BMenuItem("Open All in Tabs", openAll);
+        item->SetTarget(target);
+        menu->AddItem(item);
+    }
+}
+
+BMenuItem* NewBookmarkFolderItem(std::shared_ptr<const BookmarkButton> root, const BookmarkButton& folder,
+    const BMessenger& target)
+{
+    return new BMenuItem(new BookmarkFolderMenu(std::move(root), folder, target));
+}
+
 BookmarksBar::BookmarksBar() : BView("bookmarks-bar", B_WILL_DRAW | B_FRAME_EVENTS)
 {
     SetViewColor(B_TRANSPARENT_COLOR);
     SetExplicitMinSize(BSize(200, 27));
     SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, 27));
 }
-void BookmarksBar::SetBookmarks(std::vector<BookmarkButton> bookmarks)
+const std::vector<BookmarkButton>& BookmarksBar::Items() const
 {
-    fBookmarks = std::move(bookmarks);
+    static const std::vector<BookmarkButton> none;
+    return fBar ? fBar->children : none;
+}
+void BookmarksBar::SetBookmarks(std::shared_ptr<const BookmarkButton> bar)
+{
+    fBar = std::move(bar);
     fHover = fPressed = -1;
+    fDropIndex = -1;
     LayoutItems();
     Invalidate();
 }
@@ -917,7 +1050,7 @@ void BookmarksBar::LayoutItems()
     fRects.clear();
     const float height = Bounds().Height();
     float x = 6;
-    for (const auto& bookmark : fBookmarks) {
+    for (const auto& bookmark : Items()) {
         float width = 8 + 16 + 8;
         if (!bookmark.title.empty()) width += 5 + std::min(150.0f, std::ceil(StringWidth(bookmark.title.c_str())));
         fRects.push_back(BRect(x, 2, x + width - 1, height - 3));
@@ -939,6 +1072,25 @@ int32 BookmarksBar::ItemAt(BPoint where) const
     for (size_t i = 0; i < fVisible; ++i) if (fRects[i].Contains(where)) return int32(i);
     return -1;
 }
+// A folder icon in the colours of the bar's text, as the site icons' globe.
+static void DrawFolderIcon(BView* view, BPoint leftTop, rgb_color ink, bool haiku)
+{
+    view->PushState();
+    const rgb_color fill = haiku ? rgb_color{238, 196, 82, 255} : Mix(ink, rgb_color{255, 255, 255, 255}, 0.55f);
+    const rgb_color edge = haiku ? rgb_color{150, 110, 20, 255} : ink;
+    BRect tab(leftTop.x + 1, leftTop.y + 2, leftTop.x + 7, leftTop.y + 5);
+    BRect body(leftTop.x + 1, leftTop.y + 4, leftTop.x + 15, leftTop.y + 14);
+    view->SetHighColor(fill);
+    view->FillRoundRect(tab, 1.5f, 1.5f);
+    view->FillRoundRect(body, 1.5f, 1.5f);
+    view->SetHighColor(edge);
+    view->SetPenSize(1);
+    view->StrokeRoundRect(body, 1.5f, 1.5f);
+    view->StrokeLine(BPoint(tab.left, tab.bottom), BPoint(tab.left, tab.top + 1));
+    view->StrokeLine(BPoint(tab.left + 1, tab.top), BPoint(tab.right - 1, tab.top));
+    view->StrokeLine(BPoint(tab.right, tab.top + 1), BPoint(tab.right + 1, body.top));
+    view->PopState();
+}
 void BookmarksBar::Draw(BRect update)
 {
     const BRect bounds = Bounds();
@@ -954,34 +1106,46 @@ void BookmarksBar::Draw(BRect update)
     font_height metrics;
     GetFontHeight(&metrics);
     const float baseline = std::floor((bounds.Height() + metrics.ascent - metrics.descent) / 2);
-    if (fBookmarks.empty()) {
+    const auto& items = Items();
+    if (items.empty()) {
         SetHighColor(haiku || dark ? Mix(ink, panel, 0.5f) : rgb_color{135, 147, 141, 255});
-        DrawString("Add favourite pages here with Bookmarks › Add to Bookmarks Bar", BPoint(12, baseline));
+        DrawString(fDropIndex >= 0 ? "Drop here to bookmark it on the bar"
+            : "Add favourite pages here with Bookmarks › Add to Bookmarks Bar, or drag tabs here", BPoint(12, baseline));
         return;
     }
     for (size_t i = 0; i < fVisible; ++i) {
         const BRect rect = fRects[i];
-        if (int32(i) == fPressed || int32(i) == fHover) {
+        const bool target = fDropInto && int32(i) == fDropIndex;
+        if (int32(i) == fPressed || int32(i) == fHover || target) {
             if (haiku) {
                 // Flat buttons that rise under the pointer, like a Haiku toolbar.
                 BRect button = rect;
-                const uint32 flags = int32(i) == fPressed ? BControlLook::B_ACTIVATED : BControlLook::B_HOVER;
+                const uint32 flags = int32(i) == fPressed || target ? BControlLook::B_ACTIVATED : BControlLook::B_HOVER;
                 be_control_look->DrawButtonFrame(this, button, update, colors.control, panel, flags);
                 be_control_look->DrawButtonBackground(this, button, update, colors.control, flags);
             } else {
-                SetHighColor(dark ? Mix(panel, colors.control, int32(i) == fPressed ? 1.0f : 0.6f)
-                    : int32(i) == fPressed ? rgb_color{212, 225, 222, 255} : rgb_color{225, 232, 230, 255});
+                SetHighColor(dark ? Mix(panel, colors.control, int32(i) == fPressed || target ? 1.0f : 0.6f)
+                    : int32(i) == fPressed || target ? rgb_color{212, 225, 222, 255} : rgb_color{225, 232, 230, 255});
                 FillRoundRect(rect, 5, 5);
             }
         }
-        DrawSiteIcon(this, fBookmarks[i].icon, BPoint(rect.left + 8, std::floor(rect.top + (rect.Height() - 15) / 2)));
-        if (fBookmarks[i].title.empty()) continue;
-        BString title(fBookmarks[i].title.c_str());
+        const BPoint iconAt(rect.left + 8, std::floor(rect.top + (rect.Height() - 15) / 2));
+        if (items[i].folder) DrawFolderIcon(this, iconAt, ink, haiku);
+        else DrawSiteIcon(this, items[i].icon, iconAt);
+        if (items[i].title.empty()) continue;
+        BString title(items[i].title.c_str());
         TruncateString(&title, B_TRUNCATE_END, 150);
         SetHighColor(ink);
         SetDrawingMode(B_OP_OVER);
         DrawString(title.String(), BPoint(rect.left + 29, baseline));
         SetDrawingMode(B_OP_COPY);
+    }
+    if (fDropIndex >= 0 && !fDropInto) {
+        // Where a dragged page goes.
+        const float x = size_t(fDropIndex) < fVisible ? fRects[fDropIndex].left - 1
+            : fVisible ? fRects[fVisible - 1].right + 1 : 5;
+        SetHighColor(haiku ? ui_color(B_CONTROL_HIGHLIGHT_COLOR) : rgb_color{44, 125, 104, 255});
+        FillRect(BRect(x - 1, 3, x, bounds.bottom - 3));
     }
     if (fOverflow.IsValid()) {
         if (fHover == kOverflowItem) {
@@ -1005,34 +1169,121 @@ void BookmarksBar::MouseDown(BPoint where)
         message->FindInt32("buttons", reinterpret_cast<int32*>(&buttons));
     const int32 index = ItemAt(where);
     if (index == kOverflowItem) { ShowOverflow(); return; }
-    if (index < 0) return;
     if (buttons & B_SECONDARY_MOUSE_BUTTON) { ShowContextMenu(index, where); return; }
+    if (index < 0) return;
     fPressed = index;
     fPressedButtons = buttons;
+    fPressPoint = where;
     SetMouseEventMask(B_POINTER_EVENTS, B_LOCK_WINDOW_FOCUS);
     Invalidate();
 }
 void BookmarksBar::MouseUp(BPoint where)
 {
-    if (fPressed >= 0 && ItemAt(where) == fPressed)
-        Open(fPressed, (fPressedButtons & B_TERTIARY_MOUSE_BUTTON) || (modifiers() & B_COMMAND_KEY));
+    if (fPressed >= 0 && ItemAt(where) == fPressed) {
+        if (Items()[fPressed].folder) ShowFolder(fPressed);
+        else Open(fPressed, (fPressedButtons & B_TERTIARY_MOUSE_BUTTON) || (modifiers() & B_COMMAND_KEY));
+    }
     fPressed = -1;
     Invalidate();
 }
-void BookmarksBar::MouseMoved(BPoint where, uint32 transit, const BMessage*)
+void BookmarksBar::MouseMoved(BPoint where, uint32 transit, const BMessage* drag)
 {
+    if (drag) {
+        // A page dragged over the bar: show where it would go.
+        std::string url, title;
+        int64 id = 0;
+        bool into = false;
+        if (transit == B_EXITED_VIEW || transit == B_OUTSIDE_VIEW || !DraggedPage(drag, url, title, id)) SetDropTarget(-1, false);
+        else {
+            const int32 index = DropIndex(where, into);
+            SetDropTarget(index, into);
+        }
+        return;
+    }
+    if (fPressed >= 0 && (fPressedButtons & B_PRIMARY_MOUSE_BUTTON)
+        && std::fabs(where.x - fPressPoint.x) + std::fabs(where.y - fPressPoint.y) > 5) {
+        // Dragging a button: to another place on the bar, into a folder, or
+        // to Tracker, which makes a bookmark file of it.
+        const auto& item = Items()[fPressed];
+        BMessage message(B_SIMPLE_DATA);
+        message.AddInt64("summit:bookmark", item.id);
+        message.AddString("summit:title", item.title.c_str());
+        if (!item.folder) {
+            message.AddString("summit:url", item.url.c_str());
+            AddBookmarkFileDragData(message, item.url, item.title);
+            fDraggedURL = item.url;
+            fDraggedTitle = item.title;
+        }
+        DragMessage(&message, fRects[fPressed]);
+        fPressed = -1;
+        fHover = -1;
+        Invalidate();
+        return;
+    }
     const int32 hover = transit == B_EXITED_VIEW || transit == B_OUTSIDE_VIEW ? -1 : ItemAt(where);
     if (hover == fHover) return;
     fHover = hover;
-    if (hover >= 0) SetToolTip(fBookmarks[hover].url.c_str());
+    if (hover >= 0) SetToolTip(Items()[hover].folder ? Items()[hover].title.c_str() : Items()[hover].url.c_str());
     else SetToolTip(hover == kOverflowItem ? "More bookmarks" : static_cast<const char*>(nullptr));
     Invalidate();
 }
+int32 BookmarksBar::DropIndex(BPoint where, bool& into) const
+{
+    into = false;
+    const auto& items = Items();
+    for (size_t i = 0; i < fVisible; ++i) {
+        const BRect rect = fRects[i];
+        if (where.x > rect.right) continue;
+        // The middle half of a folder drops into it.
+        if (items[i].folder && where.x > rect.left + rect.Width() / 4 && where.x < rect.right - rect.Width() / 4) {
+            into = true;
+            return int32(i);
+        }
+        return int32(where.x < (rect.left + rect.right) / 2 ? i : i + 1);
+    }
+    // Past the buttons shown: at the very end.
+    return int32(items.size());
+}
+void BookmarksBar::SetDropTarget(int32 index, bool into)
+{
+    if (index == fDropIndex && into == fDropInto) return;
+    fDropIndex = index;
+    fDropInto = into;
+    Invalidate();
+}
+void BookmarksBar::MessageReceived(BMessage* message)
+{
+    if (message->what == B_COPY_TARGET) {
+        // Tracker asks for the file of a button dragged to it.
+        std::string error;
+        WriteDroppedBookmarkFile(*message, fDraggedURL, fDraggedTitle, error);
+        if (!error.empty()) std::fprintf(stderr, "Summit: %s\n", error.c_str());
+        return;
+    }
+    std::string url, title;
+    int64 id = 0;
+    if (message->WasDropped() && DraggedPage(message, url, title, id)) {
+        bool into = false;
+        const int32 index = DropIndex(ConvertFromScreen(message->DropPoint()), into);
+        SetDropTarget(-1, false);
+        BMessage request(id ? kMoveBookmark : kDropBookmark);
+        if (id) request.AddInt64("id", id);
+        else {
+            request.AddString("url", url.c_str());
+            request.AddString("title", title.c_str());
+        }
+        request.AddInt64("folder", into ? Items()[index].id : kBookmarksBarFolder);
+        if (!into && size_t(index) < Items().size()) request.AddInt64("index", index);
+        Window()->PostMessage(&request);
+        return;
+    }
+    BView::MessageReceived(message);
+}
 void BookmarksBar::Open(int32 index, bool newTab)
 {
-    if (index < 0 || size_t(index) >= fBookmarks.size()) return;
+    if (index < 0 || size_t(index) >= Items().size()) return;
     BMessage open(kOpenBookmark);
-    open.AddString("url", fBookmarks[index].url.c_str());
+    open.AddString("url", Items()[index].url.c_str());
     open.AddBool("new_tab", newTab);
     Window()->PostMessage(&open);
 }
@@ -1041,6 +1292,12 @@ static BMessage* BookmarkMessage(uint32 what, const std::string& url, bool newTa
     auto* message = new BMessage(what);
     message->AddString("url", url.c_str());
     if (newTab) message->AddBool("new_tab", true);
+    return message;
+}
+static BMessage* NodeMessage(uint32 what, const char* field, int64 id)
+{
+    auto* message = new BMessage(what);
+    message->AddInt64(field, id);
     return message;
 }
 BPopUpMenu* BookmarksBar::NewMenu(const char* name)
@@ -1052,25 +1309,55 @@ BPopUpMenu* BookmarksBar::NewMenu(const char* name)
 }
 void BookmarksBar::ShowOverflow()
 {
+    // The tooltip of the button under the pointer would cover the menu.
+    HideToolTip();
     auto* menu = NewMenu("more-bookmarks");
-    for (size_t i = fVisible; i < fBookmarks.size(); ++i) {
-        const auto& title = fBookmarks[i].title.empty() ? fBookmarks[i].url : fBookmarks[i].title;
-        menu->AddItem(new BMenuItem(title.c_str(), BookmarkMessage(kOpenBookmark, fBookmarks[i].url)));
+    const BMessenger target(Window());
+    for (size_t i = fVisible; i < Items().size(); ++i) {
+        const auto& item = Items()[i];
+        if (item.folder) menu->AddItem(NewBookmarkFolderItem(fBar, item, target));
+        else menu->AddItem(new BMenuItem(BookmarkLabel(item).c_str(), BookmarkMessage(kOpenBookmark, item.url)));
     }
     menu->SetTargetForItems(Window());
     menu->SetAsyncAutoDestruct(true);
     menu->Go(ConvertToScreen(BPoint(fOverflow.left, fOverflow.bottom + 1)), true, false,
         ConvertToScreen(fOverflow), true);
 }
+void BookmarksBar::ShowFolder(int32 index)
+{
+    if (index < 0 || size_t(index) >= Items().size()) return;
+    HideToolTip();
+    auto* menu = NewMenu("bookmark-folder");
+    AddBookmarkItems(menu, fBar, Items()[index], BMessenger(Window()));
+    menu->SetAsyncAutoDestruct(true);
+    const BRect button = fRects[index];
+    // Opened by a click, so it stays open once the button is up.
+    menu->Go(ConvertToScreen(BPoint(button.left, button.bottom + 1)), true, true, ConvertToScreen(button), true);
+}
 void BookmarksBar::ShowContextMenu(int32 index, BPoint where)
 {
-    const auto& url = fBookmarks[index].url;
+    HideToolTip();
     auto* menu = NewMenu("bookmark");
-    menu->AddItem(new BMenuItem("Open", BookmarkMessage(kOpenBookmark, url)));
-    menu->AddItem(new BMenuItem("Open in New Tab", BookmarkMessage(kOpenBookmark, url, true)));
-    menu->AddSeparatorItem();
-    menu->AddItem(new BMenuItem("Remove from Bookmarks Bar", BookmarkMessage(kRemoveFromBookmarksBar, url)));
-    menu->AddItem(new BMenuItem("Delete Bookmark", BookmarkMessage(kRemoveBookmark, url)));
+    if (index < 0) {
+        menu->AddItem(new BMenuItem("New Folder…", NodeMessage(kNewBookmarkFolder, "folder", kBookmarksBarFolder)));
+        menu->AddSeparatorItem();
+        menu->AddItem(new BMenuItem("Show All Bookmarks", new BMessage(kShowBookmarks)));
+    } else if (Items()[index].folder) {
+        const int64 id = Items()[index].id;
+        menu->AddItem(new BMenuItem("Open All in Tabs", NodeMessage(kOpenBookmarkFolder, "id", id)));
+        menu->AddSeparatorItem();
+        menu->AddItem(new BMenuItem("Edit Folder…", NodeMessage(kEditBookmark, "id", id)));
+        menu->AddItem(new BMenuItem("New Folder…", NodeMessage(kNewBookmarkFolder, "folder", id)));
+        menu->AddItem(new BMenuItem("Delete Folder", NodeMessage(kDeleteBookmarkNode, "id", id)));
+    } else {
+        const auto& item = Items()[index];
+        menu->AddItem(new BMenuItem("Open", BookmarkMessage(kOpenBookmark, item.url)));
+        menu->AddItem(new BMenuItem("Open in New Tab", BookmarkMessage(kOpenBookmark, item.url, true)));
+        menu->AddSeparatorItem();
+        menu->AddItem(new BMenuItem("Edit…", NodeMessage(kEditBookmark, "id", item.id)));
+        menu->AddItem(new BMenuItem("Remove from Bookmarks Bar", BookmarkMessage(kRemoveFromBookmarksBar, item.url)));
+        menu->AddItem(new BMenuItem("Delete Bookmark", NodeMessage(kDeleteBookmarkNode, "id", item.id)));
+    }
     menu->SetTargetForItems(Window());
     menu->SetAsyncAutoDestruct(true);
     menu->Go(ConvertToScreen(where), true, false, true);

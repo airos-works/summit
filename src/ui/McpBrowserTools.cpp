@@ -417,6 +417,21 @@ void RegisterMcpBrowserTools(mcp::Server& server, const std::shared_ptr<McpConte
                 3000000, "The application thread (WebKit's main loop)"));
         }, false});
 
+    server.Add({"bookmarks",
+        "The bookmarks as a tree: the bookmarks bar and Other Bookmarks with their folders, each node with its id. "
+        "action=import reads path as File › Import Bookmarks and History does (WebPositive's Bookmarks folder, an "
+        "exported bookmarks HTML file, Chrome's Bookmarks file, Firefox's places.sqlite) into \"Imported from …\"; "
+        "action=export writes every bookmark to path as bookmarks HTML.",
+        Schema().Enum("action", "list (default), import or export", {"list", "import", "export"})
+            .String("path", "For import and export: a path on this machine")
+            .Boolean("history", "For import: the history of visited pages too (default true)"),
+        [context](const Json& arguments) {
+            const std::string action = mcp::StringArgument(arguments, "action", "list");
+            if (action != "list" && mcp::StringArgument(arguments, "path", "").empty()) throw ToolError(action + " needs a path");
+            return ToolResult::Data(McpAsk(context->app, {{"action", "bookmarks"}, {"do", action},
+                {"path", mcp::StringArgument(arguments, "path", "")}, {"history", mcp::BooleanArgument(arguments, "history", true)}},
+                60000000, "The application thread (WebKit's main loop)"));
+        }, false});
     server.Add({"preferences",
         "Summit's settings as the profile keeps them (home page, search engine, session restore, appearance, "
         "site permissions, link handlers, trusted certificates; the MCP server's port). show=true also opens the "

@@ -17,6 +17,7 @@
 #include "WebApps.h"
 #include "core/WebAppManifest.h"
 #include "core/Address.h"
+#include "core/Bookmarks.h"
 #include "core/Protocol.h"
 #include <Alert.h>
 #include <Application.h>
@@ -263,6 +264,17 @@ void BrowserWindow::TabDraggedOut(int64 id, BPoint where)
 {
     auto* tab = FindTabByID(id);
     if (!tab || fClosingWindow || fFullScreenTab == id) return;
+    // Dropped on the bookmarks bar: the page becomes a bookmark there.
+    if (fBookmarksBar && !fBookmarksBar->IsHidden(fBookmarksBar) && fBookmarksBar->Bounds().Contains(fBookmarksBar->ConvertFromScreen(where))) {
+        if (IsBookmarkableURL(tab->url)) {
+            BMessage drop(kDropBookmark);
+            drop.AddString("url", tab->url.c_str());
+            drop.AddString("title", tab->title.c_str());
+            drop.AddInt64("folder", kBookmarksBarFolder);
+            PostMessage(&drop);
+        }
+        return;
+    }
     // Dropped back on this window: nothing to do (along the strip it was
     // already moved).
     if (Frame().Contains(where)) return;

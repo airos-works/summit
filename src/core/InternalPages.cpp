@@ -1,6 +1,7 @@
 #include "InternalPages.h"
 #include "Address.h"
 #include "Favicon.h"
+#include <cctype>
 #include <cstdio>
 #include <ctime>
 #include <map>
@@ -114,6 +115,8 @@ public:
         fBody += link ? "</a>\n" : "</div>\n";
     }
     void Raw(const std::string& html) { fBody += html; }
+    const std::string& Body() const { return fBody; }
+    const std::string& IconStyles() const { return fIconStyles; }
 
     std::string Finish(const char* title, const char* placeholder, bool empty, const char* emptyText) const
     {
@@ -138,7 +141,6 @@ public:
         return page;
     }
 
-private:
     std::string Icon(const std::string& url)
     {
         std::string image = fIcons ? fIcons(url) : std::string();
@@ -157,6 +159,7 @@ private:
         return std::string("<span class=\"icon letter\">") + letter + "</span>";
     }
 
+private:
     const IconSource& fIcons;
     std::map<std::string, size_t> fIconClasses;
     std::string fIconStyles;
@@ -184,19 +187,407 @@ std::string RenderHistoryPage(const std::vector<PageRecord>& history, int64_t no
     return writer.Finish("History", "Search History", history.empty(), "Pages you visit will be listed here.");
 }
 
-std::string RenderBookmarksPage(const std::vector<PageRecord>& bookmarks, const IconSource& icons)
+namespace {
+const char* kBookmarksStyle = R"(<style>
+nav.actions{display:flex;gap:8px;align-items:center;margin:-8px 0 20px}
+.button{font:inherit;font-size:13px;color:inherit;text-decoration:none;padding:5px 12px;border:1px solid #d5e0d6;border-radius:7px;background:white;cursor:pointer}
+.button:hover{background:#eef5ed}.hint{color:#7b897f;font-size:12px;margin-left:auto}
+.item{position:relative}.item>.list{margin-left:28px;border:0;border-radius:0;background:none;overflow:visible}
+.item+.item>.row,.item+.item>form,.item>.list>.item:first-child>.row{border-top:1px solid #eef2ed}
+.list .placeholder{padding:10px 12px;color:#9aa69f;font-size:13px}
+.row{gap:10px;padding:0 8px 0 12px;-webkit-user-select:none;user-select:none}
+.row:hover{background:#eef5ed}
+.link,.toggle{flex:1;min-width:0;display:flex;align-items:center;gap:12px;padding:8px 0;color:inherit;text-decoration:none;
+font:inherit;background:none;border:0;text-align:left;cursor:default;-webkit-user-drag:none}
+a.link,.toggle{cursor:pointer}
+.chevron{flex:none;width:10px;height:10px;position:relative}
+.chevron:before{content:"";position:absolute;left:1px;top:1px;width:5px;height:5px;border:solid #71877b;border-width:0 1.6px 1.6px 0;transform:rotate(-45deg)}
+.toggle[aria-expanded=true] .chevron:before{transform:rotate(45deg);top:0}
+.foldericon{border-radius:2px;background:#9cc3ac;position:relative;height:12px;margin-top:2px}
+.foldericon:before{content:"";position:absolute;left:0;top:-3px;width:7px;height:4px;border-radius:2px 2px 0 0;background:#9cc3ac}
+.tools{flex:none;display:flex;gap:2px;opacity:.55}.row:hover .tools{opacity:1}
+.tool{font:inherit;font-size:12px;color:#456c51;text-decoration:none;padding:3px 7px;border-radius:5px;border:0;background:none;cursor:pointer}
+.tool:hover{background:#dfeade}
+form.editor{display:flex;flex-wrap:wrap;gap:8px 14px;align-items:center;padding:10px 12px;background:#f3f8f2}
+form.editor label{display:flex;gap:6px;align-items:center;font-size:13px;color:#4c6357}
+form.editor input{width:220px;padding:5px 8px}form.editor input.address{width:300px}
+form.editor select{font:inherit;font-size:13px;padding:4px 6px;border:1px solid #d5e0d6;border-radius:6px;background:white;color:inherit;max-width:260px}
+form.editor .buttons{display:flex;gap:6px;margin-left:auto}
+.moving,.moving *{cursor:grabbing!important}.dragging>.row{opacity:.45}
+.drop-into{background:#dbeedf!important;outline:2px solid #9cc3ac;outline-offset:-2px}
+.marker{position:absolute;height:2px;background:#2c7d68;border-radius:1px;pointer-events:none;z-index:2}
+</style>
+)";
+
+const char* kBookmarksScript = R"(<script>
+(() => {
+const main = document.querySelector('main');
+const token = main.dataset.token;
+const filter = document.getElementById('filter');
+const none = document.getElementById('none');
+const folderOptions = document.getElementById('folder-options');
+const store = (() => { try { return window.sessionStorage; } catch (e) { return null; } })();
+const read = (key, fallback) => { try { const value = store && store.getItem(key); return value === null ? fallback : value; } catch (e) { return fallback; } };
+const write = (key, value) => { try { if (store) store.setItem(key, value); } catch (e) { } };
+let open;
+try { open = new Set(JSON.parse(read('summit-open-folders', '[]'))); } catch (e) { open = new Set(); }
+const ownList = item => item.querySelector(':scope > .list');
+const ownRow = item => item.querySelector(':scope > .row');
+const items = list => [...list.children].filter(child => child.classList.contains('item'));
+function showFolder(item, shown) {
+  ownList(item).hidden = !shown;
+  ownRow(item).querySelector('.toggle').setAttribute('aria-expanded', shown ? 'true' : 'false');
+}
+function setOpen(item, shown) {
+  showFolder(item, shown);
+  if (shown) open.add(item.dataset.id); else open.delete(item.dataset.id);
+  write('summit-open-folders', JSON.stringify([...open]));
+}
+for (const item of document.querySelectorAll('.item.folder')) showFolder(item, open.has(item.dataset.id));
+
+function visit(item, query) {
+  const row = ownRow(item);
+  const own = !query || (row.dataset.title + ' ' + (row.dataset.url || '')).toLowerCase().includes(query);
+  if (!item.classList.contains('folder')) { item.hidden = !own; return own; }
+  let inside = false;
+  for (const child of items(ownList(item))) inside = visit(child, query) || inside;
+  // A folder whose name matches shows everything in it.
+  if (query && own) for (const child of item.querySelectorAll('.item')) child.hidden = false;
+  item.hidden = !(own || inside);
+  showFolder(item, query ? own || inside : open.has(item.dataset.id));
+  return own || inside;
+}
+function applyFilter() {
+  if (!filter) return;
+  const query = filter.value.trim().toLowerCase();
+  write('summit-bookmarks-filter', filter.value);
+  let any = false;
+  for (const section of document.querySelectorAll('section.root')) {
+    let shown = false;
+    for (const item of items(section.querySelector(':scope > .list'))) shown = visit(item, query) || shown;
+    section.hidden = !!query && !shown;
+    any = any || shown;
+  }
+  if (none) none.hidden = !query || any;
+}
+if (filter) {
+  filter.value = read('summit-bookmarks-filter', '');
+  filter.addEventListener('input', applyFilter);
+  if (filter.value) applyFilter();
+}
+
+// Changes go to the browser as summit-bookmarks: links; it changes the
+// bookmarks and this page is written again.
+const go = (action, fields) => {
+  let url = 'summit-bookmarks:' + action + '?token=' + token;
+  for (const [name, value] of Object.entries(fields)) url += '&' + name + '=' + encodeURIComponent(value);
+  location.href = url;
+};
+function field(label, name, value, wide) {
+  const wrapper = document.createElement('label');
+  wrapper.textContent = label + ' ';
+  const input = document.createElement('input');
+  input.dataset.field = name;
+  input.value = value;
+  input.spellcheck = false;
+  if (wide) input.className = 'address';
+  wrapper.appendChild(input);
+  return wrapper;
+}
+// The folders it can go in: not itself, nor a folder inside it.
+function folderChooser(item, selected) {
+  const wrapper = document.createElement('label');
+  wrapper.textContent = 'Folder ';
+  const select = document.createElement('select');
+  select.dataset.field = 'folder';
+  for (const option of folderOptions.content.querySelectorAll('option')) {
+    if (item && item.classList.contains('folder')
+      && (option.value === item.dataset.id || item.querySelector('.item.folder[data-id="' + option.value + '"]'))) continue;
+    select.appendChild(option.cloneNode(true));
+  }
+  select.value = selected;
+  wrapper.appendChild(select);
+  return wrapper;
+}
+function editor(fields, submitLabel, onSubmit, onCancel) {
+  const form = document.createElement('form');
+  form.className = 'editor';
+  for (const element of fields) form.appendChild(element);
+  const buttons = document.createElement('span');
+  buttons.className = 'buttons';
+  const cancel = document.createElement('button');
+  cancel.type = 'button';
+  cancel.className = 'button';
+  cancel.textContent = 'Cancel';
+  cancel.addEventListener('click', () => { form.remove(); onCancel(); });
+  const submit = document.createElement('button');
+  submit.type = 'submit';
+  submit.className = 'button';
+  submit.textContent = submitLabel;
+  buttons.append(cancel, submit);
+  form.appendChild(buttons);
+  form.addEventListener('submit', event => {
+    event.preventDefault();
+    const values = {};
+    for (const input of form.querySelectorAll('[data-field]')) values[input.dataset.field] = input.value;
+    onSubmit(values);
+  });
+  form.addEventListener('keydown', event => { if (event.key === 'Escape') { form.remove(); onCancel(); } });
+  return form;
+}
+function edit(item) {
+  if (item.querySelector(':scope > form')) return;
+  const row = ownRow(item);
+  const folder = item.classList.contains('folder');
+  const fields = [field('Name', 'title', row.dataset.title)];
+  if (!folder) fields.push(field('Address', 'url', row.dataset.url, true));
+  fields.push(folderChooser(item, item.parentElement.dataset.folder));
+  const form = editor(fields, 'Save', values => go('save', Object.assign({ id: item.dataset.id }, values)),
+    () => { row.hidden = false; });
+  row.hidden = true;
+  item.insertBefore(form, row.nextSibling);
+  const name = form.querySelector('input');
+  name.focus();
+  name.select();
+}
+const newFolder = document.getElementById('new-folder');
+if (newFolder) newFolder.addEventListener('click', () => {
+  if (document.getElementById('new-folder-form')) return;
+  const form = editor([field('Name', 'title', 'New Folder'), folderChooser(null, newFolder.dataset.folder)], 'Create',
+    values => go('new-folder', values), () => { });
+  form.id = 'new-folder-form';
+  newFolder.parentElement.insertAdjacentElement('afterend', form);
+  const name = form.querySelector('input');
+  name.focus();
+  name.select();
+});
+
+// Moving: press on a row and drag it before or after another, or onto a folder.
+const marker = document.createElement('div');
+marker.className = 'marker';
+marker.hidden = true;
+document.body.appendChild(marker);
+let drag = null, swallowClick = false, highlighted = null;
+function highlight(row) {
+  if (highlighted === row) return;
+  if (highlighted) highlighted.classList.remove('drop-into');
+  highlighted = row;
+  if (row) row.classList.add('drop-into');
+}
+function target(x, y) {
+  const element = document.elementFromPoint(x, y);
+  if (!element) return null;
+  const row = element.closest('.row');
+  if (row) {
+    const item = row.parentElement;
+    if (item === drag.item || drag.item.contains(item)) return null;
+    const rect = row.getBoundingClientRect();
+    if (item.classList.contains('folder') && y > rect.top + rect.height / 4 && y < rect.bottom - rect.height / 4)
+      return { folder: item.dataset.id, index: -1, into: row };
+    const list = item.parentElement;
+    const after = y > rect.top + rect.height / 2;
+    return { folder: list.dataset.folder, index: items(list).indexOf(item) + (after ? 1 : 0),
+      line: after ? rect.bottom : rect.top, left: rect.left, width: rect.width };
+  }
+  const section = element.closest('section.root');
+  if (!section) return null;
+  const list = section.querySelector(':scope > .list');
+  const rect = list.getBoundingClientRect();
+  return { folder: section.dataset.folder, index: -1, line: rect.bottom, left: rect.left, width: rect.width };
+}
+document.addEventListener('mousedown', event => {
+  if (event.button !== 0 || event.target.closest('.tools, form')) return;
+  const row = event.target.closest('.row');
+  if (!row) return;
+  drag = { item: row.parentElement, x: event.clientX, y: event.clientY, active: false, to: null };
+  // No text selection, and no link drag (which this port cannot carry out).
+  event.preventDefault();
+});
+document.addEventListener('mousemove', event => {
+  if (!drag) return;
+  if (!drag.active) {
+    if (Math.abs(event.clientX - drag.x) + Math.abs(event.clientY - drag.y) < 5) return;
+    drag.active = true;
+    drag.item.classList.add('dragging');
+    document.body.classList.add('moving');
+  }
+  drag.to = target(event.clientX, event.clientY);
+  highlight(drag.to && drag.to.into ? drag.to.into : null);
+  if (drag.to && !drag.to.into) {
+    marker.style.top = (drag.to.line + window.scrollY - 1) + 'px';
+    marker.style.left = (drag.to.left + window.scrollX) + 'px';
+    marker.style.width = drag.to.width + 'px';
+    marker.hidden = false;
+  } else marker.hidden = true;
+});
+document.addEventListener('mouseup', () => {
+  if (!drag) return;
+  const { item, active, to } = drag;
+  drag = null;
+  marker.hidden = true;
+  highlight(null);
+  item.classList.remove('dragging');
+  document.body.classList.remove('moving');
+  if (!active) return;
+  swallowClick = true;
+  setTimeout(() => { swallowClick = false; }, 0);
+  if (to) go('move', to.index >= 0 ? { id: item.dataset.id, folder: to.folder, index: to.index } : { id: item.dataset.id, folder: to.folder });
+});
+document.addEventListener('click', event => {
+  if (swallowClick) { event.preventDefault(); event.stopPropagation(); swallowClick = false; return; }
+  const tool = event.target.closest('.tool[data-action]');
+  if (tool) {
+    event.preventDefault();
+    const item = tool.closest('.item');
+    if (tool.dataset.action === 'edit') edit(item);
+    else go('delete', { id: item.dataset.id });
+    return;
+  }
+  const toggle = event.target.closest('.toggle');
+  if (toggle) {
+    const item = toggle.closest('.item');
+    setOpen(item, ownList(item).hidden);
+  }
+}, true);
+})();
+</script>
+)";
+
+const char* kBookmarkTools = "<span class=\"tools\"><button class=\"tool\" type=\"button\" data-action=\"edit\">Edit</button>"
+    "<button class=\"tool\" type=\"button\" data-action=\"delete\">Delete</button></span>";
+
+void BookmarkItems(PageWriter& writer, const std::vector<BookmarkNode>& nodes)
 {
+    for (const auto& node : nodes) {
+        const std::string id = std::to_string(node.id);
+        if (node.folder) {
+            const size_t count = CountBookmarks(node);
+            writer.Raw("<div class=\"item folder\" data-id=\"" + id + "\"><div class=\"row\" data-title=\"" + EscapeHTML(node.title)
+                + "\"><button class=\"toggle\" type=\"button\" aria-expanded=\"false\"><span class=\"chevron\"></span>"
+                "<span class=\"icon foldericon\"></span><span class=\"text\"><span class=\"title\">" + EscapeHTML(node.title)
+                + "</span><span class=\"url\">" + std::to_string(count) + (count == 1 ? " bookmark" : " bookmarks")
+                + "</span></span></button>" + kBookmarkTools + "</div>\n<div class=\"list\" data-folder=\"" + id + "\" hidden>\n");
+            BookmarkItems(writer, node.children);
+            if (node.children.empty()) writer.Raw("<div class=\"placeholder\">Empty</div>\n");
+            writer.Raw("</div></div>\n");
+            continue;
+        }
+        const bool link = IsBookmarkableURL(node.url);
+        auto shown = node.url;
+        if (auto scheme = shown.find("://"); scheme != std::string::npos) shown.erase(0, scheme + 3);
+        writer.Raw("<div class=\"item\" data-id=\"" + id + "\"><div class=\"row\" data-title=\"" + EscapeHTML(node.title)
+            + "\" data-url=\"" + EscapeHTML(node.url) + "\">");
+        writer.Raw(link ? "<a class=\"link\" draggable=\"false\" href=\"" + EscapeHTML(node.url) + "\">" : std::string("<span class=\"link\">"));
+        writer.Raw(writer.Icon(node.url) + "<span class=\"text\"><span class=\"title\">"
+            + EscapeHTML(node.title.empty() ? node.url : node.title) + "</span><span class=\"url\">" + EscapeHTML(shown)
+            + "</span></span>" + (link ? "</a>" : "</span>") + kBookmarkTools + "</div></div>\n");
+    }
+}
+
+std::string PercentDecode(std::string_view text)
+{
+    std::string result;
+    for (size_t i = 0; i < text.size(); ++i) {
+        if (text[i] == '%' && i + 2 < text.size() && std::isxdigit(static_cast<unsigned char>(text[i + 1]))
+            && std::isxdigit(static_cast<unsigned char>(text[i + 2]))) {
+            result += static_cast<char>(std::stoi(std::string(text.substr(i + 1, 2)), nullptr, 16));
+            i += 2;
+        } else result += text[i];
+    }
+    return result;
+}
+}
+
+std::string BookmarkPageToken(const std::string& token)
+{
+    std::string clean;
+    for (char c : token) if ((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) clean += c;
+    return clean.substr(0, 64);
+}
+
+std::optional<BookmarkPageLink> ParseBookmarkPageLink(std::string_view url)
+{
+    const std::string prefix = std::string(kBookmarksPageScheme) + ":";
+    if (url.size() > 300000 || url.size() < prefix.size()) return std::nullopt;
+    for (size_t i = 0; i < prefix.size(); ++i)
+        if (std::tolower(static_cast<unsigned char>(url[i])) != prefix[i]) return std::nullopt;
+    url.remove_prefix(prefix.size());
+    BookmarkPageLink link;
+    const size_t query = url.find('?');
+    link.action = std::string(url.substr(0, query));
+    if (link.action.empty() || link.action.find_first_not_of("abcdefghijklmnopqrstuvwxyz-") != std::string::npos)
+        return std::nullopt;
+    std::string_view rest = query == std::string_view::npos ? std::string_view() : url.substr(query + 1);
+    auto number = [](std::string_view text, int64_t& value) {
+        if (text.empty() || text.size() > 18 || text.find_first_not_of("0123456789") != std::string_view::npos) return false;
+        value = std::stoll(std::string(text));
+        return true;
+    };
+    while (!rest.empty()) {
+        const size_t end = rest.find('&');
+        const auto field = rest.substr(0, end);
+        rest = end == std::string_view::npos ? std::string_view() : rest.substr(end + 1);
+        const size_t equals = field.find('=');
+        if (equals == std::string_view::npos) continue;
+        const auto name = field.substr(0, equals), value = field.substr(equals + 1);
+        int64_t parsed = 0;
+        if (name == "token") link.token = std::string(value);
+        else if (name == "id" && number(value, parsed)) link.id = parsed;
+        else if (name == "folder" && number(value, parsed)) link.folder = parsed;
+        else if (name == "index" && number(value, parsed)) link.index = static_cast<size_t>(parsed);
+        else if (name == "title") { link.title = PercentDecode(value); link.hasTitle = true; }
+        else if (name == "url") { link.url = PercentDecode(value); link.hasURL = true; }
+    }
+    if (link.token.empty() || link.token != BookmarkPageToken(link.token)) return std::nullopt;
+    return link;
+}
+
+std::string RenderBookmarksPage(const Bookmarks& bookmarks, const IconSource& icons, const std::string& pageToken)
+{
+    const std::string token = BookmarkPageToken(pageToken);
     PageWriter writer(icons);
-    for (bool bar : {true, false}) {
-        bool any = false;
-        for (const auto& page : bookmarks) any = any || page.bar == bar;
-        if (!any) continue;
-        writer.Raw(std::string("<section><h2>") + (bar ? "Bookmarks Bar" : "Other Bookmarks") + "</h2><div class=\"list\">\n");
-        for (const auto& page : bookmarks) if (page.bar == bar) writer.Row(page, { });
+    const bool empty = bookmarks.Empty();
+    for (const auto* root : {&bookmarks.Bar(), &bookmarks.Other()}) {
+        if (empty) break;
+        const std::string id = std::to_string(root->id);
+        writer.Raw("<section class=\"root\" data-folder=\"" + id + "\"><h2>" + EscapeHTML(root->title)
+            + "</h2><div class=\"list\" data-folder=\"" + id + "\">\n");
+        BookmarkItems(writer, root->children);
+        if (root->children.empty())
+            writer.Raw(std::string("<div class=\"placeholder\">") + (root->id == kBookmarksBarFolder
+                ? "Drag bookmarks here to show them on the bookmarks bar." : "Drag bookmarks here.") + "</div>\n");
         writer.Raw("</div></section>\n");
     }
-    return writer.Finish("Bookmarks", "Search Bookmarks", bookmarks.empty(),
-        "No bookmarks yet. Use Bookmarks › Bookmark This Page, or the star in the toolbar.");
+    std::string options;
+    for (const auto& folder : bookmarks.Folders()) {
+        std::string indent;
+        for (size_t i = 0; i < folder.depth; ++i) indent += "\xC2\xA0\xC2\xA0\xC2\xA0\xC2\xA0";
+        options += "<option value=\"" + std::to_string(folder.id) + "\">" + indent + EscapeHTML(folder.title) + "</option>";
+    }
+    std::string page = "<!doctype html>\n<html lang=\"en\">\n<meta charset=\"utf-8\">\n<title>Bookmarks</title>\n";
+    page += kStyle;
+    page += kBookmarksStyle;
+    if (!writer.IconStyles().empty()) page += "<style>\n" + writer.IconStyles() + "</style>\n";
+    page += "<main data-token=\"" + token + "\">\n<header><h1>Bookmarks</h1>";
+    if (!empty) page += "<input id=\"filter\" type=\"search\" placeholder=\"Search Bookmarks\" autofocus>";
+    page += "</header>\n<nav class=\"actions\">";
+    page += "<button class=\"button\" type=\"button\" id=\"new-folder\" data-folder=\"" + std::to_string(kOtherBookmarksFolder)
+        + "\">New Folder…</button>";
+    page += "<a class=\"button\" href=\"" + EscapeHTML(std::string(kBookmarksPageScheme) + ":import?token=" + token) + "\">Import…</a>";
+    if (!empty) page += "<a class=\"button\" href=\"" + EscapeHTML(std::string(kBookmarksPageScheme) + ":export?token=" + token)
+        + "\">Export…</a><span class=\"hint\">Drag bookmarks to move them.</span>";
+    page += "</nav>\n<template id=\"folder-options\">" + options + "</template>\n";
+    if (empty)
+        page += "<p class=\"empty\">No bookmarks yet. Use Bookmarks › Bookmark This Page, or the star in the toolbar, "
+            "or import them from another browser.</p>\n";
+    else {
+        page += writer.Body();
+        page += "<p class=\"empty\" id=\"none\" hidden>Nothing matches your search.</p>\n";
+    }
+    page += "</main>\n";
+    page += kBookmarksScript;
+    page += "</html>\n";
+    return page;
 }
 
 std::string RenderPrivateStartPage(const std::string& searchEngineName, const std::string& searchPrefix)

@@ -33,6 +33,34 @@ constexpr uint32 kRemoveFromBookmarksBar = 'rbkb';
 constexpr uint32 kRemoveBookmark = 'dbkm';
 constexpr uint32 kBookmarkButton = 'bkbt';
 constexpr uint32 kToggleBookmarksBar = 'tbkb';
+// Bookmarks and folders by "id" (int64, Bookmarks' node ids), to the window.
+// Edit: opens the editor ("id"; without one the current page's bookmark).
+constexpr uint32 kEditBookmark = 'edbk';
+// The editor for a new folder in "folder" (default Other Bookmarks).
+constexpr uint32 kNewBookmarkFolder = 'nbkf';
+// The editor for bookmarking the current page in a folder of one's choice.
+constexpr uint32 kAddBookmarkToFolder = 'abkf';
+// Deletes "id"; a folder with bookmarks in it is confirmed first (the
+// alert answers with kDeleteBookmarkReply, "which" and "id").
+constexpr uint32 kDeleteBookmarkNode = 'dlbk';
+constexpr uint32 kDeleteBookmarkReply = 'dlbr';
+// The editor's answer: "mode" (BookmarkEditor::Mode), "id", "title", "url",
+// "folder".
+constexpr uint32 kBookmarkEdited = 'bked';
+// Moves "id" into "folder" before its child at "index" (absent: at the end).
+constexpr uint32 kMoveBookmark = 'mvbk';
+// A page dropped on the bookmarks bar ("url", "title"): bookmarked in
+// "folder" at "index", or moved there when it already is.
+constexpr uint32 kDropBookmark = 'drbk';
+// Opens every bookmark of folder "id" in new tabs.
+constexpr uint32 kOpenBookmarkFolder = 'obkf';
+// File › Import Bookmarks and History…, File › Export Bookmarks… (the save
+// panel answers with kExportBookmarksChosen: "directory", "name").
+constexpr uint32 kImportBookmarks = 'imbk';
+constexpr uint32 kExportBookmarks = 'exbk';
+constexpr uint32 kExportBookmarksChosen = 'exbc';
+// The import window's worker is done: "message" (what to show), "error" (bool).
+constexpr uint32 kBookmarkImportDone = 'imdn';
 constexpr uint32 kClearHistory = 'clhi';
 constexpr uint32 kClearHistoryReply = 'clhr';
 constexpr uint32 kShowPreferences = 'pref';

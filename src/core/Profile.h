@@ -1,4 +1,6 @@
 #pragma once
+#include "Bookmarks.h"
+#include "PageRecord.h"
 #include "Protocol.h"
 #include <cstdint>
 #include <ctime>
@@ -10,18 +12,6 @@
 #include <vector>
 
 namespace summit {
-struct PageRecord {
-    std::string url;
-    std::string title;
-    // History: when the page was last visited, in seconds since the epoch
-    // (0 for entries saved before visits were timed).
-    int64_t visited = 0;
-    // Bookmarks: shown on the bookmarks bar under the toolbar.
-    bool bar = false;
-    // History: how many times the page was visited (0 for older entries,
-    // which count as one). Address field type-ahead ranks pages by it.
-    int visits = 0;
-};
 // One browser window of a saved session.
 struct WindowSession {
     std::vector<PageRecord> tabs;
@@ -53,7 +43,10 @@ struct Profile {
     // Open windows, front to back as they were created. Older builds only
     // read "tabs" and "selected", which hold the first window.
     std::vector<WindowSession> windows;
-    std::vector<PageRecord> bookmarks;
+    // In folders: the bookmarks bar and Other Bookmarks. profile.json keeps
+    // the folders in "bookmarkTree" and every bookmark in "bookmarks" too, the
+    // flat list older builds read (they ignore the folders).
+    Bookmarks bookmarks;
     std::vector<PageRecord> history;
     // Where the Home button goes; empty means the built-in start page.
     std::string homeURL;
@@ -105,10 +98,13 @@ struct Profile {
     bool Save(const std::filesystem::path& path, std::string& error) const;
     // Records a visit to an http(s) page; returns false for other pages.
     bool Visit(const PageRecord& page, int64_t now = std::time(nullptr));
-    PageRecord* FindBookmark(const std::string& url);
-    // Adds the page, or moves an existing bookmark on to (or off) the bar.
+    // Adds the page to the bar or Other Bookmarks, or moves an existing
+    // bookmark of its address onto the bar (bar true).
     void AddBookmark(const PageRecord& page, bool bar);
-    bool RemoveBookmark(const std::string& url);
+    bool RemoveBookmark(const std::string& url) { return bookmarks.RemoveURL(url); }
+    // Adds pages visited in another browser that history does not have yet,
+    // keeping the most recent 2000 pages; returns how many were added.
+    size_t ImportHistory(const std::vector<PageRecord>& pages);
     // Remembers a trusted certificate (host names compare without case); false
     // when that host already had it.
     bool TrustCertificate(const TrustedCertificate&);

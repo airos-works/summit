@@ -534,6 +534,16 @@ private:
     void RefreshBookmarks();
     void RebuildDynamicMenus();
     void ShowBookmarkMenu();
+    // Editing bookmarks (BookmarkEditor) and the summit:bookmarks page's
+    // requests (summit-bookmarks: links; true when url was one).
+    void OpenBookmarkEditor(int64 id);
+    void OpenNewBookmarkEditor(int64 folder, bool newFolder);
+    void BookmarkEdited(const BMessage& message);
+    void DeleteBookmark(int64 id, bool confirm);
+    bool BookmarkPageRequest(Tab& tab, const std::string& source, const std::string& url);
+    void ExportBookmarks();
+    void ExportBookmarksTo(const BMessage& message);
+    std::unique_ptr<BFilePanel> fExportPanel;
     void IconLoaded(const BMessage& message);
 #if SUMMIT_MODERN_WEBKIT
     void FullScreenRequested(const BMessage&);
@@ -583,6 +593,7 @@ private:
     int32 fHistoryMenuFixed = 0, fBookmarksMenuFixed = 0;
     BMenuItem* fBookmarksBarItem;
     BMenuItem* fRemoveBookmarkItem;
+    BMenuItem* fEditBookmarkItem = nullptr;
     ToolButton* fBookmarkButton;
 #if SUMMIT_MODERN_WEBKIT
     ToolButton* fCertificateButton = nullptr;

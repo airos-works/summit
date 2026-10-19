@@ -18,6 +18,7 @@
 #include "ui/DownloadList.h"
 #include "ui/McpService.h"
 #include "ui/SitePermissions.h"
+#include "ui/BookmarkImport.h"
 #include <Mime.h>
 #include <nlohmann/json.hpp>
 #endif
@@ -140,27 +141,21 @@ public:
         if (fQuitting) {
             fRelaunch = true;
             entry_ref ref;
-            for (int32 i = 0; message->FindRef("refs", i, &ref) == B_OK; ++i) {
-                BPath path(&ref);
-                if (path.InitCheck() == B_OK) fRelaunchArguments.push_back(summit::FileURL(path.Path()));
-            }
+            for (int32 i = 0; message->FindRef("refs", i, &ref) == B_OK; ++i)
+                if (const auto url = summit::RefURL(ref); !url.empty()) fRelaunchArguments.push_back(url);
             return;
         }
         if (!fWindows.empty()) {
             if (FrontNormalWindow().IsValid()) FrontNormalWindow().SendMessage(message);
             else {
                 entry_ref ref;
-                for (int32 i = 0; message->FindRef("refs", i, &ref) == B_OK; ++i) {
-                    BPath path(&ref);
-                    if (path.InitCheck() == B_OK) OpenInNormalWindow(summit::FileURL(path.Path()));
-                }
+                for (int32 i = 0; message->FindRef("refs", i, &ref) == B_OK; ++i)
+                    if (const auto url = summit::RefURL(ref); !url.empty()) OpenInNormalWindow(url);
             }
         } else {
             entry_ref ref;
-            for (int32 i = 0; message->FindRef("refs", i, &ref) == B_OK; ++i) {
-                BPath path(&ref);
-                if (path.InitCheck() == B_OK) fURLs.push_back(summit::FileURL(path.Path()));
-            }
+            for (int32 i = 0; message->FindRef("refs", i, &ref) == B_OK; ++i)
+                if (const auto url = summit::RefURL(ref); !url.empty()) fURLs.push_back(url);
         }
     }
     void ReadyToRun() override
@@ -1401,6 +1396,39 @@ private:
             summit::McpReply(message, {{"extension", identifier}, {"enabled", request.value("enabled", true)}, {"note", "loading or unloading continues in the background"}});
             return;
         }
+        if (action == "bookmarks") {
+            // Imports and exports as the File menu does, for test scripts.
+            const std::string what = request.value("do", "list");
+            const std::string path = request.value("path", "");
+            if (what == "import") {
+                const auto outcome = summit::ImportBookmarksFrom(*fShared, path, request.value("history", true));
+                if (!outcome.ok) { summit::McpReplyError(message, outcome.message); return; }
+                summit::McpReply(message, {{"message", outcome.message}, {"bookmarks", outcome.bookmarks},
+                    {"history", outcome.history}, {"folder", outcome.folder}});
+                return;
+            }
+            if (what == "export") {
+                std::string error;
+                const size_t count = summit::ExportBookmarksFile(*fShared, path.c_str(), error);
+                if (!error.empty()) { summit::McpReplyError(message, error); return; }
+                summit::McpReply(message, {{"exported", count}, {"path", path}});
+                return;
+            }
+            std::function<json(const summit::BookmarkNode&)> node = [&](const summit::BookmarkNode& item) {
+                json result = {{"id", item.id}, {"title", item.title}};
+                if (!item.folder) result["url"] = item.url;
+                else {
+                    result["children"] = json::array();
+                    for (const auto& child : item.children) result["children"].push_back(node(child));
+                }
+                return result;
+            };
+            summit::McpReply(message, fShared->Read([&](const summit::Profile& profile) {
+                return json{{"bookmarks", profile.bookmarks.Count()}, {"folders", profile.bookmarks.FolderCount()},
+                    {"bar", node(profile.bookmarks.Bar())}, {"other", node(profile.bookmarks.Other())}};
+            }));
+            return;
+        }
         if (action == "preferences") {
             json preferences = fShared->Read([](const summit::Profile& profile) {
                 json sites = json::object();
@@ -1412,7 +1440,7 @@ private:
                 for (const auto& certificate : profile.trustedCertificates) certificates.push_back(certificate.host);
                 return json{{"homeURL", profile.homeURL}, {"searchEngine", profile.searchEngine}, {"restoreSession", profile.restoreSession},
                     {"interfaceStyle", profile.interfaceStyle}, {"showBookmarksBar", profile.showBookmarksBar},
-                    {"bookmarks", profile.bookmarks.size()}, {"history", profile.history.size()}, {"siteZoom", profile.siteZoom},
+                    {"bookmarks", profile.bookmarks.Count()}, {"history", profile.history.size()}, {"siteZoom", profile.siteZoom},
                     {"sitePermissions", sites}, {"protocolHandlers", handlers}, {"trustedCertificates", certificates},
                     {"mcp", {{"enabled", profile.mcpEnabled}, {"port", profile.mcpPort}, {"localOnly", profile.mcpLocalOnly}}}};
             });
