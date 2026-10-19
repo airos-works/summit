@@ -1,5 +1,112 @@
 # Summit performance: Speedometer 3.1 baseline, where the time goes, stress test
 
+## 19 October 2026 (later): animation frames on the compositor's frames, and tearing on AMD
+
+Two follow-ups from the morning's list (below): the vertical sync on the
+Framework 13, and `requestAnimationFrame`'s 65 Hz.
+
+### Tearing: Summit's own copies into the screen are not timed
+
+`amdgpu_kms` has a retrace semaphore per output and tells where the scan
+is (`B_GET_DISPLAY_OUTPUT_RETRACE_SEMAPHORE`, `B_GET_DISPLAY_OUTPUT_SCAN_LINE`),
+and app_server's copies to the screen have come at each output's blank since
+15 October. Summit's direct present (since jmgasper/haiku#37) bypasses them: the web process
+copies each frame into the frame buffer on the GPU whenever it is composed.
+A program cannot do better yet: `BScreen::WaitForRetrace()` gets the primary
+output's semaphore whatever screen it asks about (app_server ignores the id),
+and nothing tells a program the scan timing of the output under its window.
+
+Counted at the scanout with the display controller's CRC of every frame
+(`retrace/crcwatch`, cross-built to `~/claude-test/crcwatch` on the laptop): a
+2000x1200 window on the 4K monitor on DP-3 (CRTC 2), its page swapping two
+greys at every animation frame, so a whole frame is one of exactly two CRCs.
+In three 20 s runs, 672, 1182 and 1182 of 1198 frames were neither: torn. The
+count wanders because the compositor's grid is not locked to the monitor, so
+the tear line stays put for minutes and then moves. Filed as
+jmgasper/haiku#39: programs need the blank and scan timing of the output
+that shows their window; Summit's part is then to put its frame grid on that
+output's phase and start each copy while the scan is clear of the window.
+
+### `requestAnimationFrame` on the compositor's frames
+
+The morning's note overstated it. Measured on the laptop in a test copy
+(2048x1200 window, `raf.html`, 10 s each):
+
+| animation frame loop (before) | rate | intervals (ms, rounded) |
+| --- | --- | --- |
+| changes nothing | 64.9-66.3 Hz | 15 x 470-634, 16, 17 |
+| moves a composited box | 60.00 Hz, one composed frame each | 16 x 211, 17 x 407, 18 x 5 |
+| repaints a block | 60.01 Hz, one composed frame each | 16 x 220, 17 x 393, 18 x 11 |
+
+A rendering update that changes the page asks for a composition, and the
+next update waits for it (`LayerTreeHost`), so animations already ran at the
+compositor's 60 Hz. Only loops that change nothing ran on
+`RenderingUpdateScheduler`'s 15 ms timer (Haiku has no display link): Lenis
+at rest, scripts that watch `scrollY`, and the first frame of any animation
+started from one, at no particular point of the compositor's frames.
+
+What a script saw of the scroll position was worse. The scrolling thread
+samples a scroll animation for the next frame at the first refresh after a
+frame's scene is taken, and those refreshes run on their own 8 ms timer. So
+the rendering update found the next frame's position on some frames and the
+last one's on others: in a wheel burst (20 notches 50 ms apart), the steps of
+`scrollY` that requestAnimationFrame saw had a step of 0 and one doubled
+every 12-15 frames, 3 to 6 of each a burst, and a script parallax moved in
+those jerks against a page that scrolled evenly.
+
+What changed:
+
+- **Rendering updates keep to the compositor's frames.** After taking a
+  frame's scene, the compositor publishes when that frame was due and its
+  period (`ThreadedCompositor::frameGridHaiku()`), which reaches WebCore's
+  scheduler through `ChromeClient::compositorFrameGridHaiku()` (WebChromeClient,
+  DrawingArea, FrameRenderer, LayerTreeHost). The scheduler's timer then aims
+  at the first point 1 ms after a frame's due time that is at least half a
+  period after the last update (`RenderingUpdateScheduler::delayOnFrameGridHaiku()`):
+  one update a frame, and an update that is overdue (an input event on an
+  idle page) still runs at once. Throttled pages keep their own interval.
+  `SUMMIT_RENDERING_UPDATE_GRID=0` returns to the 15 ms timer.
+- **Scroll animations are sampled as soon as a frame's scene is taken.** The
+  compositor asks the scrolling trees with running scroll animations to
+  sample for the next frame then (`EventDispatcher::compositorDidFlushFrameHaiku()`),
+  so the position is there when the rendering update starts a millisecond
+  later, and what a script draws with it is composed in the frame that shows
+  the page at that position. The refresh timer still runs and samples the
+  same time again. `SUMMIT_SCROLL_FRAME_SAMPLE=0` leaves the sampling to the
+  timer.
+- `SUMMIT_SCROLL_FRAME_TRACE=1` also prints when each rendering update starts
+  (`Summit rendering update: at=`).
+
+| switch | default | what it does |
+| --- | --- | --- |
+| `SUMMIT_RENDERING_UPDATE_GRID` | 1 | rendering updates start 1 ms after the compositor's frames are due |
+| `SUMMIT_SCROLL_FRAME_SAMPLE` | 1 | scroll animations sampled for the next frame as each frame's scene is taken |
+
+Measured with the same engine, both switches off against on:
+
+| | before | after |
+| --- | --- | --- |
+| loop that changes nothing | 66.3 Hz, 15 ms x 634 | 60.00 Hz, 16 x 205, 17 x 407, 15/18 x 3 |
+| moving box: rate, update start after a frame's due time | 60.0 Hz, 0.1-0.3 ms | 60.0 Hz, 1.0-1.1 ms |
+| moving box: gaps between updates | 16.1-17.3 ms | 16.5-16.8 ms |
+| repainted block (three runs) | 60.0 Hz | 60.0 Hz (one run had six 103 ms pauses in the compositor's own frames while the laptop was in use; the two reruns had none) |
+| `scrollY` steps seen in rAF in a wheel burst, repeated + doubled (two bursts) | 4 + 4, 4 + 4 | 0 + 1, 0 + 0 |
+| script parallax (a box moved by `scrollY` in rAF), repeated + doubled | 2 + 5, 4 + 4 | 0 + 0, 0 + 0 |
+
+Composed frames were 16.67 ms apart in every run. One residue: a wheel step
+that arrives between a frame's flush and the update that follows changes the
+next frame's position after the script has read it; in one burst whose
+notches came exactly every third frame, one step in three read 25/44 px
+instead of 34/35.
+
+Speedometer 3.1 (official, in the same test copy, the two settings
+alternating, ten runs): before 14.4, 14.3, 14.4, 14.3 and 12.4 +- 2.1; after
+14.3, 14.4, 14.3, 14.4 and 11.7 +- 2.5 (the others +- 0.26 to 0.35). The two
+wide runs, one of each, came while the laptop was in use. The morning's wheel bursts on airos.works measure the same as then
+(jerk 2.8, 1.7, 0.7, 0.7 for 50 ms, 16 ms, 120 ms and irregular notches, every
+frame 16.7 ms apart and sampled at its due time), and so do its key,
+overflow-box, snap and `scrollTo` checks.
+
 ## 19 October 2026: wheel and touchpad scrolling that keeps moving
 
 Goal: scrolling airos.works on the Framework 13 laptop felt jarring next to
@@ -136,26 +243,22 @@ twice the gap) is Firefox's original.
 ### Left
 
 - **No vertical sync.** Frames are composed on a free-running 60 Hz grid and
-  presented into the screen without waiting for the retrace, and the
-  `amdgpu_kms` accelerant has no retrace semaphore. So frames can tear, and
-  the grid drifts against the panel's own 60 Hz. That is for the OS: a
-  retrace semaphore (or page-flip completion) would let the compositor keep
-  to the panel's grid.
+  copied into the screen (direct present) without regard to the scan, so
+  they tear, and the grid drifts against each monitor's refresh. (This said
+  at first that `amdgpu_kms` has no retrace semaphore. It has, per output,
+  and app_server's own copies have been timed to them since 15 October; a
+  search cut short missed it.) What Summit lacks is the blank and scan
+  timing of the output its window is on: see the section above and
+  jmgasper/haiku#39.
 - **Touchpads send whole steps.** Pixel-precise deltas with scroll phases
   from Haiku's touchpad driver would let the page follow the fingers
   directly (and fling) instead of animating 100 px steps.
-- **`requestAnimationFrame` runs at 65 Hz.** Haiku builds the GLib drawing
-  area without a display link, so `RenderingUpdateScheduler` falls back to
-  its timer at `FullSpeedAnimationInterval`, which is 15 ms. airos.works in
-  the installed build: rAF every 15.4 ms on average, at rest and while
-  scrolling. Against the compositor's 60 Hz, about one update in eleven is
-  never shown. Scripted animations, including pages that scroll themselves
-  in rAF (Lenis), skip five or six times a second, and `scrollY` read in
-  rAF still shows a repeated or doubled step every 15 frames although every
-  composed frame moves evenly. The next step is a display refresh monitor
-  that the compositor's frames pace (one update just after each frame's
-  scene is taken, `nextFrameTimeHaiku()`), measured against Speedometer,
-  which waits for rAF between its steps.
+- **`requestAnimationFrame` runs at 65 Hz.** Done the same day, see the
+  section above. This said that one update in eleven was never shown and
+  that scripted animations skipped; measured, an update that changes the
+  page waits for its composition and runs at 60 Hz. Only updates that
+  change nothing ran at 65 Hz, and scripts reading `scrollY` saw repeated
+  and doubled steps.
 
 ## 17-18 October 2026 (night): smooth scrolling and animation on the laptop
 
