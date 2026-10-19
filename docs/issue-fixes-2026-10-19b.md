@@ -202,6 +202,9 @@ rules are in `src/core/WebAppManifest.cpp` (host-tested).
 The app's windows belong to Summit's team, so the Deskbar lists them under
 Summit; an entry of their own would need a team (and signature) per app.
 
+Checked: Squoosh installed (launcher with its icon, Deskbar link), opened
+from its launcher and with `--app`.
+
 ## #77 "Error in the HTTP2 framing layer"
 
 Pages sometimes failed with "Could not load …: Error in the HTTP2 framing
@@ -226,6 +229,3 @@ change the page failed with exactly the message above. After it, a page whose
 request broke on a pooled connection loaded from a new HTTP/2 connection; one
 that broke twice loaded over HTTP/1.1; a favicon request that broke was sent
 again the same way.
-
-Checked: Squoosh installed (launcher with its icon, Deskbar link), opened
-from its launcher and with `--app`.
