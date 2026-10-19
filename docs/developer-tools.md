@@ -518,7 +518,9 @@ is started again.
   it goes on exactly when the object has no document and reads its view. A
   WebProcess on the X399 crashed this way (`WebProcess-24879-debug-…report`)
   after the picker had shown a label and the page's heading was renamed. The
-  `!!` wants to be `!`; with that, `showInfo` can be turned on again.
+  engine has `!` there since 19 October (5e48736); the label stays off
+  because accessibility for the whole web process costs time on every change
+  of the page.
 - Also in Elements: editing a selector or adding a rule, forcing `:hover`
   and the like, event listeners, CSS variables' values, colour pickers,
   the hovered node selected in the tree while picking, dragging nodes, and
