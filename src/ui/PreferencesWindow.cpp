@@ -22,6 +22,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <ctime>
 #include <cstring>
 #include <tuple>
 #include <thread>
@@ -33,7 +34,7 @@ constexpr uint32 homeEdited = 'phed', useStartPage = 'phsp', bookmarksBarToggled
     clearSiteData = 'pcsd', clearSiteDataConfirmed = 'pcsc', cacheMeasured = 'pcms',
     forgetCertificates = 'pfce', forgetCertificatesConfirmed = 'pfcc', siteSelected = 'psse', siteAllow = 'pssa',
     restoreSessionToggled = 'prss', mcpToggled = 'pmcp', mcpLocalToggled = 'pmcl', mcpPortEdited = 'pmpe',
-    mcpCopy = 'pmcc', mcpNewToken = 'pmnt', mcpNewTokenConfirmed = 'pmnc',
+    mcpCopy = 'pmcc', mcpNewToken = 'pmnt', mcpNewTokenConfirmed = 'pmnc', checkForUpdatesToggled = 'pupd',
     siteBlock = 'pssb', siteRemove = 'pssr', protocolSelected = 'ppse', protocolRemove = 'pprm';
 enum SiteColumn { kSiteColumn, kPermissionColumn, kSettingColumn };
 
@@ -85,6 +86,15 @@ PreferencesWindow::PreferencesWindow(BMessenger owner, const PreferencesState& s
     fRestoreSession->SetValue(state.restoreSession ? B_CONTROL_ON : B_CONTROL_OFF);
     auto* restoreHint = new BStringView("restore-hint", "Also after the computer was shut down or restarted.");
     restoreHint->SetHighUIColor(B_PANEL_TEXT_COLOR, B_DARKEN_2_TINT);
+    fCheckForUpdates = new BCheckBox("check-for-updates", "Check for a new build of Summit once a day",
+        new BMessage(checkForUpdatesToggled));
+    fCheckForUpdates->SetValue(state.checkForUpdates ? B_CONTROL_ON : B_CONTROL_OFF);
+    auto* updatesHint = new BStringView("updates-hint", "Summit asks GitHub for its latest release and says when there "
+        "is a newer one; nothing is installed without asking.");
+    updatesHint->SetHighUIColor(B_PANEL_TEXT_COLOR, B_DARKEN_2_TINT);
+    fUpdateInfo = new BStringView("updates-info", "");
+    fUpdateInfo->SetHighUIColor(B_PANEL_TEXT_COLOR, B_DARKEN_2_TINT);
+    ShowLastUpdateCheck(state.lastUpdateCheck);
     fBookmarksBar = new BCheckBox("show-bookmarks-bar", "Show the bookmarks bar under the toolbar",
         new BMessage(bookmarksBarToggled));
     fBookmarksBar->SetValue(state.showBookmarksBar ? B_CONTROL_ON : B_CONTROL_OFF);
@@ -170,6 +180,17 @@ PreferencesWindow::PreferencesWindow(BMessenger owner, const PreferencesState& s
         .AddGroup(B_VERTICAL, 4).SetInsets(12, 0, 0, 0)
             .Add(fHaikuStyle)
             .Add(fSafariStyle)
+        .End()
+        .AddStrut(6)
+        .Add(SectionTitle("updates-title", "Updates"))
+        .AddGroup(B_VERTICAL, 6).SetInsets(12, 0, 0, 0)
+            .AddGroup(B_HORIZONTAL, 8)
+                .Add(fCheckForUpdates)
+                .AddGlue()
+                .Add(new BButton("check-updates-now", "Check Now", new BMessage(kCheckForUpdates)))
+            .End()
+            .Add(updatesHint)
+            .Add(fUpdateInfo)
         .End()
         .AddGlue();
     auto* data = new BGroupView("History and Data", B_VERTICAL, 10);
@@ -320,6 +341,22 @@ void PreferencesWindow::ShowTrustedCertificates(size_t count)
     fForgetCertificates->SetEnabled(count > 0);
 }
 
+void PreferencesWindow::ShowLastUpdateCheck(int64 when)
+{
+    static const char* const months[] = {"January", "February", "March", "April", "May", "June", "July", "August",
+        "September", "October", "November", "December"};
+    const time_t time = static_cast<time_t>(when);
+    struct tm local {};
+    if (when <= 0 || !localtime_r(&time, &local)) {
+        fUpdateInfo->SetText("Not checked yet.");
+        return;
+    }
+    char text[96];
+    std::snprintf(text, sizeof(text), "Last checked %d %s %d, %02d:%02d.", local.tm_mday, months[local.tm_mon],
+        local.tm_year + 1900, local.tm_hour, local.tm_min);
+    fUpdateInfo->SetText(text);
+}
+
 void PreferencesWindow::ShowSitePermissions(const std::vector<SiteEntry>& entries)
 {
     // Keep the selection on the same site and permission across updates.
@@ -424,6 +461,15 @@ void PreferencesWindow::MessageReceived(BMessage* message)
             fOwner.SendMessage(&changed);
             break;
         }
+        case checkForUpdatesToggled: {
+            BMessage changed(kPreferencesChanged);
+            changed.AddBool("check_for_updates", fCheckForUpdates->Value() == B_CONTROL_ON);
+            fOwner.SendMessage(&changed);
+            break;
+        }
+        case kCheckForUpdates:
+            fOwner.SendMessage(kCheckForUpdates);
+            break;
         case mcpToggled: {
             BMessage changed(kPreferencesChanged);
             changed.AddBool("mcp_enabled", fMcpEnabled->Value() == B_CONTROL_ON);
@@ -586,6 +632,10 @@ void PreferencesWindow::MessageReceived(BMessage* message)
             bool restore = true;
             if (message->FindBool("restore_session", &restore) == B_OK)
                 fRestoreSession->SetValue(restore ? B_CONTROL_ON : B_CONTROL_OFF);
+            bool updates = true;
+            if (message->FindBool("check_for_updates", &updates) == B_OK)
+                fCheckForUpdates->SetValue(updates ? B_CONTROL_ON : B_CONTROL_OFF);
+            if (int64 checked = 0; message->FindInt64("last_update_check", &checked) == B_OK) ShowLastUpdateCheck(checked);
             const char* style = nullptr;
             if (message->FindString("interface_style", &style) == B_OK && style)
                 (std::string(style) == "safari" ? fSafariStyle : fHaikuStyle)->SetValue(B_CONTROL_ON);

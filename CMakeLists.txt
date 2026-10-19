@@ -6,7 +6,7 @@ option(SUMMIT_MODERN_WEBKIT "Build Summit with the native multiprocess WebKit AP
 find_package(OpenSSL REQUIRED COMPONENTS Crypto)
 add_library(summit_core src/core/Address.cpp src/core/Protocol.cpp src/core/Profile.cpp src/core/ExtensionCatalog.cpp src/core/ExtensionIdentity.cpp src/core/ExtensionStore.cpp
     src/core/ExtensionPackage.cpp src/core/StoreOffer.cpp src/core/DownloadText.cpp src/core/Favicon.cpp src/core/InternalPages.cpp src/core/Zoom.cpp src/core/Suggest.cpp src/core/DevTools.cpp src/core/DevToolsFormat.cpp
-    src/core/Mcp.cpp src/core/McpHttp.cpp src/core/McpInspector.cpp)
+    src/core/Mcp.cpp src/core/McpHttp.cpp src/core/McpInspector.cpp src/core/UpdateCheck.cpp)
 target_link_libraries(summit_core PUBLIC OpenSSL::Crypto)
 target_include_directories(summit_core PUBLIC src vendor)
 target_compile_options(summit_core PRIVATE -Wall -Wextra -Wpedantic)
@@ -21,6 +21,9 @@ find_package(Threads REQUIRED)
 add_executable(summit_mcp_tests tests/McpTests.cpp)
 target_link_libraries(summit_mcp_tests PRIVATE summit_core Threads::Threads)
 add_test(NAME summit_mcp COMMAND summit_mcp_tests)
+add_executable(summit_update_tests tests/UpdateCheckTests.cpp)
+target_link_libraries(summit_update_tests PRIVATE summit_core)
+add_test(NAME summit_update COMMAND summit_update_tests)
 add_executable(summit_extension_catalog_tests tests/ExtensionCatalogTests.cpp)
 target_link_libraries(summit_extension_catalog_tests PRIVATE summit_core)
 add_test(NAME summit_extension_catalog COMMAND summit_extension_catalog_tests)
@@ -53,7 +56,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Haiku")
         src/ui/AddressSuggestions.cpp src/ui/SitePermissions.cpp src/ui/Location.cpp
         src/ui/SourceView.cpp src/ui/DevToolsWindow.cpp src/ui/DevToolsNetwork.cpp src/ui/DevToolsConsole.cpp src/ui/DevToolsStorage.cpp
         src/ui/BrowserWindowMcp.cpp src/ui/McpService.cpp src/ui/McpLog.cpp src/ui/McpBrowserTools.cpp src/ui/McpSystemTools.cpp
-        src/ui/McpPageTools.cpp src/ui/McpEngineTools.cpp src/ui/McpDebugHelper.cpp)
+        src/ui/McpPageTools.cpp src/ui/McpEngineTools.cpp src/ui/McpDebugHelper.cpp src/ui/UpdateChecker.cpp)
     target_include_directories(Summit PRIVATE ${SUMMIT_WEBKIT_INCLUDE_DIR} /boot/system/develop/headers/private/netservices)
     target_compile_options(Summit PRIVATE -Wno-multichar)
     target_compile_definitions(Summit PRIVATE SUMMIT_MODERN_WEBKIT=$<BOOL:${SUMMIT_MODERN_WEBKIT}>)

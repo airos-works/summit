@@ -67,6 +67,10 @@ For a stock Haiku installation, not air/OS. Install the packages together with `
 - Native [color, date, month, week, time, and local date/time pickers](docs/native-form-pickers.md).
 - [Developer tools](docs/developer-tools.md) for page inspection, JavaScript
   console output, and network requests.
+- [Updates from inside the browser](docs/updates.md): File › Check for
+  Updates… and a daily check find newer builds of the release for your
+  system, list what changed, and Install and Restart installs the summit and
+  summit_webkit packages together and reopens your windows and tabs.
 - A [built-in MCP server](docs/mcp.md) (Preferences › Developer, off by
   default) that lets debugging tools such as Claude Code inspect tabs, pages,
   processes, memory, rendering, media and extensions on the machine itself.

@@ -14,6 +14,7 @@
 #include "ui/DownloadList.h"
 #include "ui/McpService.h"
 #include "ui/SitePermissions.h"
+#include "ui/UpdateChecker.h"
 #include <Mime.h>
 #include <nlohmann/json.hpp>
 #endif
@@ -28,6 +29,7 @@
 #include <OS.h>
 #include <image.h>
 #include <unistd.h>
+#include <fcntl.h>
 #if !SUMMIT_MODERN_WEBKIT
 #include <WebPage.h>
 #include <WebSettings.h>
@@ -51,6 +53,10 @@
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <netdb.h>
+
+// The argument of a start after an update (UpdateChecker.h): reopen the last
+// session's windows and tabs even when Preferences say to start afresh.
+static constexpr const char* kRestoreSessionArgument = "--restore-session";
 
 class SummitApp : public BApplication {
 public:
@@ -97,6 +103,10 @@ public:
         for (int32 i = 1; i < argc; ++i) {
             std::string argument = argv[i];
             if (argument == "--profile" && i + 1 < argc) { fProfile = argv[++i]; continue; }
+            if (argument == kRestoreSessionArgument) {
+                if (fWindows.empty()) fRestoreAfterUpdate = true;
+                continue;
+            }
             if (!fWindows.empty()) OpenInNormalWindow(argument);
             else fURLs.push_back(argument);
         }
@@ -241,8 +251,8 @@ public:
         // Reopen every window of the last session, unless pages were named or
         // Preferences say to start afresh.
         const auto saved = fShared->SavedWindows();
-        const bool restore = fShared->Read([](const summit::Profile& profile) { return profile.restoreSession; });
-        if (!fURLs.empty() || saved.empty() || !restore) {
+        const bool restore = fRestoreAfterUpdate || fShared->Read([](const summit::Profile& profile) { return profile.restoreSession; });
+        if ((!fURLs.empty() && !fRestoreAfterUpdate) || saved.empty() || !restore) {
             summit::BrowserWindowOptions options;
             options.urls = fURLs;
             OpenWindow(options);
@@ -252,6 +262,8 @@ public:
                 options.session = session;
                 OpenWindow(options);
             }
+            // Pages asked for while the old build quit open beside them.
+            for (const auto& url : fURLs) OpenInNormalWindow(url);
         }
         if (!fShared->LoadError().empty())
             (new BAlert("Summit", ("The saved profile could not be read. It has been preserved. " + fShared->LoadError()).c_str(),
@@ -269,6 +281,29 @@ public:
             AddHandler(fInstaller.get());
             fInstaller->Start();
         }
+        // File › Check for Updates… and the daily check (Preferences › General).
+        fUpdates = std::make_unique<summit::UpdateChecker>(
+            [shared = fShared] {
+                return shared->Read([](const summit::Profile& profile) {
+                    return summit::UpdateChecker::Settings { profile.checkForUpdates, profile.lastUpdateCheck };
+                });
+            },
+            [shared = fShared](int64_t when) {
+                shared->Change([when](summit::Profile& profile) -> uint32 {
+                    profile.lastUpdateCheck = when;
+                    return summit::SharedProfile::kUpdateCheckChanged;
+                });
+            },
+            [this] {
+                BRect frame;
+                if (!fWindows.empty() && fWindows.front().messenger.LockTarget()) {
+                    frame = fWindows.front().window->Frame();
+                    fWindows.front().window->Unlock();
+                }
+                return frame;
+            });
+        AddHandler(fUpdates.get());
+        fUpdates->Start();
 #endif
     }
     void MessageReceived(BMessage* message) override
@@ -426,7 +461,7 @@ public:
             if (message->GetInt32("which", 0) == 1) {
                 fDownloadQuitApproved = true;
                 PostMessage(B_QUIT_REQUESTED);
-            }
+            } else if (std::exchange(fUpdateRestart, false) && fUpdates) fUpdates->RestartCancelled();
             return;
         }
         if (message->what == summit::kWindowReadyToClose) {
@@ -479,8 +514,10 @@ public:
             for (auto key : fClosedWhileQuitting) fShared->RemoveWindowSession(key);
             fClosedWhileQuitting.clear();
             fShared->SaveSoon();
-            // What was started meanwhile opens here after all.
+            // What was started meanwhile opens here after all; an update
+            // starts the next time.
             fRelaunch = false;
+            if (std::exchange(fUpdateRestart, false) && fUpdates) fUpdates->RestartCancelled();
             for (const auto& argument : std::exchange(fRelaunchArguments, { })) OpenInNormalWindow(argument);
             return;
         }
@@ -521,6 +558,24 @@ public:
             return;
         }
         if (message->what == summit::kShowPreferences) { ShowPreferences(message->GetString("tab", nullptr)); return; }
+#if SUMMIT_MODERN_WEBKIT
+        if (message->what == summit::kCheckForUpdates) {
+            if (fUpdates && !fQuitting) fUpdates->Check(true);
+            return;
+        }
+        if (message->what == summit::kUpdateRestart) {
+            // As Quit does (pages may still ask about unsaved work), then
+            // the new build starts with this profile's windows and tabs.
+            if (fQuitting) return;
+            fUpdateRestart = true;
+            PostMessage(B_QUIT_REQUESTED);
+            return;
+        }
+#endif
+        if (message->what == summit::kOpenPageInTab) {
+            if (const char* url = message->GetString("url", nullptr); url && *url && !fQuitting) OpenInNormalWindow(url);
+            return;
+        }
         if (message->what == summit::kMakeDefaultBrowser || message->what == summit::kDefaultBrowserState) {
             // From Preferences (or summitctl); kDefaultBrowserState only asks.
             std::string error;
@@ -547,8 +602,14 @@ public:
             const bool hasMcpLocal = message->FindBool("mcp_local_only", &mcpLocal) == B_OK;
             const bool hasMcpPort = message->FindInt32("mcp_port", &mcpPort) == B_OK && mcpPort > 0 && mcpPort < 65536;
             const bool newMcpToken = message->GetBool("mcp_new_token", false);
+            bool checkForUpdates = true;
+            const bool hasCheckForUpdates = message->FindBool("check_for_updates", &checkForUpdates) == B_OK;
             fShared->Change([&](summit::Profile& profile) -> uint32 {
                 bool changed = false;
+                if (hasCheckForUpdates && profile.checkForUpdates != checkForUpdates) {
+                    profile.checkForUpdates = checkForUpdates;
+                    changed = true;
+                }
                 if (hasMcpEnabled && profile.mcpEnabled != mcpEnabled) { profile.mcpEnabled = mcpEnabled; changed = true; }
                 if (hasMcpLocal && profile.mcpLocalOnly != mcpLocal) { profile.mcpLocalOnly = mcpLocal; changed = true; }
                 if (hasMcpPort && profile.mcpPort != mcpPort) { profile.mcpPort = mcpPort; changed = true; }
@@ -668,7 +729,8 @@ public:
 #if SUMMIT_MODERN_WEBKIT
             if (message->GetUInt32("changes", 0) & summit::SharedProfile::kSettingsChanged) ApplyMcpSettings();
 #endif
-            if (message->GetUInt32("changes", 0) & (summit::SharedProfile::kSettingsChanged | summit::SharedProfile::kHistoryChanged))
+            if (message->GetUInt32("changes", 0) & (summit::SharedProfile::kSettingsChanged | summit::SharedProfile::kHistoryChanged
+                    | summit::SharedProfile::kUpdateCheckChanged))
                 SendPreferencesState();
             return;
         }
@@ -866,6 +928,14 @@ public:
     bool TakeRelaunch(std::vector<std::string>& arguments)
     {
         arguments = std::exchange(fRelaunchArguments, { });
+#if SUMMIT_MODERN_WEBKIT
+        if (std::exchange(fUpdateRestart, false)) {
+            // The new build: this profile, with its windows and tabs.
+            arguments.insert(arguments.begin(), {"--profile", fProfile.string(), kRestoreSessionArgument});
+            fRelaunch = false;
+            return true;
+        }
+#endif
         return std::exchange(fRelaunch, false);
     }
 private:
@@ -1053,7 +1123,8 @@ private:
         summit::PreferencesState state = fShared->Read([](const summit::Profile& profile) {
             return summit::PreferencesState { profile.homeURL, profile.showBookmarksBar, profile.interfaceStyle,
                 profile.searchEngine, profile.history.size(), { }, profile.trustedCertificates.size(),
-                profile.restoreSession, profile.mcpEnabled, profile.mcpPort, profile.mcpLocalOnly };
+                profile.restoreSession, profile.mcpEnabled, profile.mcpPort, profile.mcpLocalOnly, profile.checkForUpdates,
+                profile.lastUpdateCheck };
         });
         state.webKitDirectory = fProfile / "WebKit";
         auto* window = new summit::PreferencesWindow(BMessenger(this), state);
@@ -1111,6 +1182,8 @@ private:
             state.AddBool("mcp_enabled", profile.mcpEnabled);
             state.AddInt32("mcp_port", profile.mcpPort);
             state.AddBool("mcp_local_only", profile.mcpLocalOnly);
+            state.AddBool("check_for_updates", profile.checkForUpdates);
+            state.AddInt64("last_update_check", profile.lastUpdateCheck);
             AddSitePermissions(state, profile);
             state.AddBool("has_protocol_handlers", true);
             for (const auto& [scheme, handler] : profile.protocolHandlers) {
@@ -1218,9 +1291,20 @@ private:
                     {"interfaceStyle", profile.interfaceStyle}, {"showBookmarksBar", profile.showBookmarksBar},
                     {"bookmarks", profile.bookmarks.size()}, {"history", profile.history.size()}, {"siteZoom", profile.siteZoom},
                     {"sitePermissions", sites}, {"protocolHandlers", handlers}, {"trustedCertificates", certificates},
-                    {"mcp", {{"enabled", profile.mcpEnabled}, {"port", profile.mcpPort}, {"localOnly", profile.mcpLocalOnly}}}};
+                    {"mcp", {{"enabled", profile.mcpEnabled}, {"port", profile.mcpPort}, {"localOnly", profile.mcpLocalOnly}}},
+                    {"updates", {{"dailyCheck", profile.checkForUpdates}, {"lastCheck", profile.lastUpdateCheck}}}};
             });
             summit::McpReply(message, preferences);
+            return;
+        }
+        if (action == "updates") {
+            if (!fUpdates) { summit::McpReplyError(message, "the update checker is not running"); return; }
+            const std::string what = request.value("do", "status");
+            if (what == "check") fUpdates->Check(true);
+            else if (what == "install" || what == "later" || what == "changes") {
+                if (!fUpdates->Answer(what)) { summit::McpReplyError(message, "no update window is open"); return; }
+            } else if (what != "status") { summit::McpReplyError(message, "unknown updates request \"" + what + "\""); return; }
+            summit::McpReply(message, fUpdates->State());
             return;
         }
         summit::McpReplyError(message, "unknown request \"" + action + "\"");
@@ -1347,6 +1431,10 @@ private:
     std::unique_ptr<summit::ExtensionController> fExtensions;
     std::unique_ptr<summit::ExtensionInstaller> fInstaller;
     std::unique_ptr<summit::McpService> fMcp;
+    std::unique_ptr<summit::UpdateChecker> fUpdates;
+    // The update window installed a new build: the quit under way starts
+    // Summit again (TakeRelaunch).
+    bool fUpdateRestart = false;
     BMessenger fExtensionWindow;
     std::shared_ptr<std::atomic<unsigned>> fExtensionWindows = std::make_shared<std::atomic<unsigned>>(0);
     bool fWaitingForNativeUI = false;
@@ -1357,6 +1445,9 @@ private:
     int fExitStatus = 0;
     std::filesystem::path fProfile;
     std::vector<std::string> fURLs;
+    // Started again after an update (kRestoreSessionArgument): the last
+    // session's windows and tabs open whatever Preferences say.
+    bool fRestoreAfterUpdate = false;
 };
 
 // The executable this instance runs: Summit is single-launch per executable.
@@ -1392,6 +1483,14 @@ static void WaitForExitingInstance()
 
 static void StartAgain(const std::vector<std::string>& arguments)
 {
+    // The new Summit inherits this one's descriptors: the debugging server's
+    // listening socket would keep its port taken, unanswered, and stderr is
+    // the log capture's pipe, which nobody reads once this one is gone.
+#if SUMMIT_MODERN_WEBKIT
+    summit::mcplog::RestoreStderr();
+#endif
+    for (int fd = 3, limit = std::min(getdtablesize(), 65536); fd < limit; ++fd)
+        if (const int flags = fcntl(fd, F_GETFD); flags >= 0 && !(flags & FD_CLOEXEC)) fcntl(fd, F_SETFD, flags | FD_CLOEXEC);
     std::vector<std::string> strings { ExecutablePath() };
     strings.insert(strings.end(), arguments.begin(), arguments.end());
     std::vector<const char*> argv;

@@ -28,6 +28,8 @@ size_t sBytes = 0;
 uint64 sNext = 1;
 std::atomic<bool> sCapturing { false };
 std::atomic<bigtime_t> sSince { 0 };
+// Where stderr went before the capture (a copy, closed on exec).
+std::atomic<int> sOriginal { -1 };
 std::string sPartial;
 
 void Append(std::string text)
@@ -104,7 +106,15 @@ void Start()
     }
     close(fds[1]);
     sSince = system_time();
+    sOriginal = original;
     std::thread(Copy, fds[0], original).detach();
+}
+
+void RestoreStderr()
+{
+    if (!sCapturing) return;
+    std::fflush(stderr);
+    if (const int original = sOriginal; original >= 0) dup2(original, STDERR_FILENO);
 }
 
 bool Capturing()

@@ -124,6 +124,11 @@ Profile Profile::Load(const std::filesystem::path& path, std::string& error)
             if (auto token = mcp->find("token"); token != mcp->end() && token->is_string() && token->get<std::string>().size() <= 256)
                 profile.mcpToken = *token;
         }
+        if (auto updates = j.find("updates"); updates != j.end() && updates->is_object()) {
+            if (auto check = updates->find("check"); check != updates->end() && check->is_boolean()) profile.checkForUpdates = *check;
+            if (auto last = updates->find("lastCheck"); last != updates->end() && last->is_number_integer() && *last >= 0)
+                profile.lastUpdateCheck = *last;
+        }
         if (auto handlers = j.find("protocolHandlers"); handlers != j.end() && handlers->is_object() && handlers->size() <= 1000) {
             for (const auto& [scheme, item] : handlers->items()) {
                 if (!item.is_object()) continue;
@@ -247,7 +252,8 @@ bool Profile::Save(const std::filesystem::path& path, std::string& error) const
             {"siteZoom", siteZoom}, {"unpinnedExtensions", unpinnedExtensions},
             {"trustedCertificates", trusted}, {"sitePermissions", sitePermissions},
             {"protocolHandlers", handlers}, {"declinedProtocolHandlers", declinedProtocolHandlers},
-            {"mcp", {{"enabled", mcpEnabled}, {"port", mcpPort}, {"localOnly", mcpLocalOnly}, {"token", mcpToken}}}}.dump(2);
+            {"mcp", {{"enabled", mcpEnabled}, {"port", mcpPort}, {"localOnly", mcpLocalOnly}, {"token", mcpToken}}},
+            {"updates", {{"check", checkForUpdates}, {"lastCheck", lastUpdateCheck}}}}.dump(2);
         if (data.size() > 16 * 1024 * 1024) throw std::runtime_error("Profile is too large");
         temporary = path.string() + ".XXXXXX";
         fd = mkstemp(temporary.data());

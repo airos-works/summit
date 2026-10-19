@@ -431,6 +431,17 @@ void RegisterMcpBrowserTools(mcp::Server& server, const std::shared_ptr<McpConte
             }
             return ToolResult::Data(McpAsk(context->app, {{"action", "preferences"}}, 3000000, "The application thread (WebKit's main loop)"));
         }, false});
+
+    server.Add({"updates",
+        "Summit's own updates (File › Check for Updates…): the build that runs (its summit and summit_webkit "
+        "packages and commit, or why it cannot update itself), the release it updates from, the daily check, the "
+        "last check's result and the update window (phase, status, progress). do=check checks now as the menu "
+        "does (a newer build opens the update window); install, later and changes press that window's buttons.",
+        Schema().Enum("do", "status (default), check, install, later or changes", {"status", "check", "install", "later", "changes"}),
+        [context](const Json& arguments) {
+            return ToolResult::Data(McpAsk(context->app, {{"action", "updates"}, {"do", mcp::StringArgument(arguments, "do", "status")}},
+                5000000, "The application thread (WebKit's main loop)"));
+        }, false});
 }
 }
 #endif
