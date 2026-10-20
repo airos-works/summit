@@ -149,6 +149,57 @@ e[e.tagName==='OBJECT'?'data':'src']=url;document.body.append(e);window.fixtureR
 })().catch(e=>window.fixtureError=String(e));'''
                 self.send_response(200); self.send_header('Content-Type', 'text/javascript')
                 self.end_headers(); self.wfile.write(body); return
+            if name == 'webmail-preview':
+                # Proton Mail's attachment preview: its CSP (frame-ancestors
+                # leaves out the mail site itself), and an object whose
+                # fallback content is an embed and a notice.
+                inner = 'inner' in parse_qs(request.query)
+                body = b'''<!doctype html><title>Webmail PDF preview</title>
+<style>html,body{margin:0;height:100%}body{display:flex;flex-direction:column;font:14px sans-serif}
+#status{padding:4px 8px;background:#eee}#root{flex:1 1 auto;display:flex;flex-direction:column}
+object{width:100%;flex:1 1 auto;display:flex;flex-direction:column-reverse}embed{display:flex}
+iframe{border:0;width:100%;flex:1 1 auto}</style>
+<script src="webmail-preview.js" defer></script><body><div id="status">starting</div><div id="root"></div>'''
+                self.send_response(200)
+                self.send_header('Content-Type', 'text/html')
+                self.send_header('Content-Security-Policy', "default-src 'self'; media-src 'self' blob:; connect-src 'self' blob:; "
+                    + "script-src 'self' 'wasm-unsafe-eval' blob:; style-src 'self' 'unsafe-inline'; img-src http: https: data: blob: cid:; "
+                    + "frame-src 'self' blob:; object-src 'self' blob:; child-src 'self' data: blob:; frame-ancestors "
+                    + ("'self'" if inner else "https://calendar.invalid https://drive.invalid"))
+                self.send_header('Cross-Origin-Opener-Policy', 'same-origin-allow-popups')
+                self.end_headers(); self.wfile.write(body); return
+            if name == 'webmail-preview.js':
+                body = b'''window.preview={state:'starting',violations:[]};
+document.addEventListener('securitypolicyviolation',e=>preview.violations.push(e.effectiveDirective));
+const q=new URLSearchParams(location.search);
+const show=t=>{document.getElementById('status').textContent=t;document.title='PDF preview: '+t};
+const navigatorReport=()=>({pdfViewerEnabled:navigator.pdfViewerEnabled,plugins:[...navigator.plugins].map(p=>p.name),
+mimeTypes:[...navigator.mimeTypes].map(m=>m.type+':'+m.enabledPlugin.name)});
+(async()=>{
+if(q.get('frame')==='1'&&!q.has('inner')){
+const f=document.createElement('iframe');const p=new URLSearchParams(q);p.delete('frame');p.set('inner','1');
+f.src='webmail-preview?'+p;document.getElementById('root').append(f);
+setInterval(()=>{const r=f.contentWindow&&f.contentWindow.preview;if(r){window.preview=r;show('framed: '+r.state)}},250);return}
+const r=await fetch('fixture.pdf');const contents=[new Uint8Array(await r.arrayBuffer())];
+const url=q.get('source')==='http'?'fixture.pdf':URL.createObjectURL(new File(contents,'fixture.pdf',{type:'application/pdf'}));
+// React builds the element off the document, children included, then inserts it.
+await new Promise(r=>setTimeout(r,50));
+const late=q.get('order')==='late';
+const o=document.createElement('object');if(!late)o.data=url;
+o.className='preview';o.type='application/pdf';o.title='fixture.pdf';
+const e=document.createElement('embed');e.className='flex';e.src=url;e.type='application/pdf';
+const p=document.createElement('p');p.textContent='This browser does not support previewing PDF documents. Please download the file.';
+o.append(e,p);document.getElementById('root').append(o);if(late)o.data=url;
+const report=()=>{const d=o.contentDocument;Object.assign(preview,{url,navigator:navigatorReport(),
+fallbackShown:p.getClientRects().length>0,embedShown:e.getClientRects().length>0,
+objectDocument:d?d.contentType:null,objectHeight:o.getBoundingClientRect().height});
+preview.state=preview.fallbackShown||preview.embedShown?'fallback':preview.objectDocument?'shown':'waiting';
+show(preview.state+' | pdfViewerEnabled='+navigator.pdfViewerEnabled+' plugins='+navigator.plugins.length+
+' mimeTypes='+navigator.mimeTypes.length+' document='+preview.objectDocument+(preview.violations.length?' violations='+preview.violations:''))};
+o.onload=report;setInterval(report,500);report();
+})().catch(e=>{preview.state='error';preview.error=String(e);show('error: '+e)});'''
+                self.send_response(200); self.send_header('Content-Type', 'text/javascript')
+                self.end_headers(); self.wfile.write(body); return
             if name == 'start':
                 body = b'<!doctype html><title>PDF session ready</title><a href="private.pdf">Private PDF</a>'
                 self.send_response(200); self.send_header('Set-Cookie', 'summit-pdf-session=1; HttpOnly; SameSite=Strict; Path=/')

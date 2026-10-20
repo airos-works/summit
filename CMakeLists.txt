@@ -42,6 +42,8 @@ add_test(NAME summit_web_app COMMAND summit_web_app_tests)
 add_executable(summit_extension_package_tests tests/ExtensionPackageTests.cpp)
 target_link_libraries(summit_extension_package_tests PRIVATE summit_core)
 add_test(NAME summit_extension_package COMMAND summit_extension_package_tests ${CMAKE_SOURCE_DIR}/tests/fixtures/extensions/package-icons)
+add_test(NAME summit_engine_options COMMAND ${CMAKE_COMMAND} -DINIT_CACHE=${CMAKE_SOURCE_DIR}/engine/arm64/rpi4-gl/init-cache-rtc.cmake
+    -P ${CMAKE_SOURCE_DIR}/tests/EngineOptions.cmake)
 if(CMAKE_SYSTEM_NAME STREQUAL "Haiku")
     if(SUMMIT_MODERN_WEBKIT)
         find_path(WEBKIT_MODERN_INCLUDE_DIR WebKit/WebKitView.h PATH_SUFFIXES webkit REQUIRED)

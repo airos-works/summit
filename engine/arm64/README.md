@@ -18,4 +18,4 @@ steps from its own paths, building the libraries from jmgasper's forks.
 | `build-engine.sh`, `run-engine-build.sh` | memory-capped ninja runs of the engine build |
 | `build-app.sh` | cross-builds the Summit browser against the engine |
 | `hosttools-env.sh` | PATH for the host ninja/cmake/patchelf the scripts use |
-| `rpi4-gl/haiku-arm64-gl.cmake`, `rpi4-gl/init-cache-rtc.cmake` | the Raspberry Pi GL + WebRTC engine configuration (Skia, GL compositing, WebGL, MEDIA_STREAM / WEB_RTC / MEDIA_RECORDER / WEB_AUDIO **on**). Use this cache, not the summit-gl one, which turns WebRTC off. |
+| `rpi4-gl/haiku-arm64-gl.cmake`, `rpi4-gl/init-cache-rtc.cmake` | the Raspberry Pi GL + WebRTC engine configuration (Skia, GL compositing, WebGL, MEDIA_STREAM / WEB_RTC / MEDIA_RECORDER / WEB_AUDIO, FULLSCREEN_API and PDFJS **on**). Use this cache, not the summit-gl one, which turns WebRTC off. CI configures every architecture's released engine from it, and its values override OptionsHaiku.cmake's defaults: `tests/EngineOptions.cmake` (ctest `summit_engine_options`) checks that the options Summit needs stay on. |
