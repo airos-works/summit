@@ -132,6 +132,8 @@ Profile Profile::Load(const std::filesystem::path& path, std::string& error)
         }
         if (auto bar = j.find("showBookmarksBar"); bar != j.end()) profile.showBookmarksBar = bar->get<bool>();
         if (auto text = j.find("zoomTextOnly"); text != j.end() && text->is_boolean()) profile.zoomTextOnly = text->get<bool>();
+        if (auto language = j.find("spellingLanguage"); language != j.end() && language->is_string() && language->get<std::string>().size() < 64)
+            profile.spellingLanguage = language->get<std::string>();
         if (auto restore = j.find("restoreSession"); restore != j.end()) profile.restoreSession = restore->get<bool>();
         if (auto save = j.find("savePasswords"); save != j.end() && save->is_boolean()) profile.savePasswords = *save;
         if (auto never = j.find("passwordNever"); never != j.end() && never->is_array() && never->size() <= 10000)
@@ -327,7 +329,7 @@ bool Profile::Save(const std::filesystem::path& path, std::string& error) const
             {"bookmarks", Encode(bookmarks.Pages())},
             {"bookmarkTree", {{"bar", EncodeBookmarks(bookmarks.Bar().children)}, {"other", EncodeBookmarks(bookmarks.Other().children)}}},
             {"history", Encode(history)},
-            {"homeURL", homeURL}, {"showBookmarksBar", showBookmarksBar}, {"zoomTextOnly", zoomTextOnly}, {"restoreSession", restoreSession},
+            {"homeURL", homeURL}, {"showBookmarksBar", showBookmarksBar}, {"zoomTextOnly", zoomTextOnly}, {"spellingLanguage", spellingLanguage}, {"restoreSession", restoreSession},
             {"savePasswords", savePasswords}, {"passwordNever", passwordNever}, {"spellChecking", spellChecking},
             {"autoplay", autoplay}, {"webApps", [&] {
                 json apps = json::array();

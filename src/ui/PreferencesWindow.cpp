@@ -291,7 +291,8 @@ PreferencesWindow::PreferencesWindow(BMessenger owner, const PreferencesState& s
     fTabs = new BTabView("preferences-tabs", B_WIDTH_FROM_LABEL);
     fTabs->AddTab(general);
 #if SUMMIT_MODERN_WEBKIT
-    fTabs->AddTab(new BrowsingPreferences(fOwner, state.autoplay, state.spellChecking, state.savePasswords, state.webApps));
+    fTabs->AddTab(new BrowsingPreferences(fOwner, state.autoplay, state.spellChecking, state.spellingLanguage, state.dictionaries,
+        state.savePasswords, state.webApps));
 #endif
     fTabs->AddTab(data);
     fTabs->AddTab(sites);

@@ -18,6 +18,7 @@
 #include <PopUpMenu.h>
 #include <StringView.h>
 #include <Window.h>
+#include <algorithm>
 #include <fstream>
 #include <optional>
 #include <sstream>
@@ -28,7 +29,7 @@ namespace {
 constexpr uint32 autoplayChosen = 'bpau', spellingToggled = 'bpsp', passwordsToggled = 'bppw',
     accountSelected = 'bpas', showPassword = 'bpsh', removeAccount = 'bprm', importPasswords = 'bpim',
     exportPasswords = 'bpex', importChosen = 'bpic', exportChosen = 'bpec', accountsRead = 'bpar',
-    appSelected = 'bpap', removeApp = 'bpra';
+    appSelected = 'bpap', removeApp = 'bpra', spellingLanguageChosen = 'bpsl';
 BStringView* Title(const char* name, const char* text)
 {
     auto* title = new BStringView(name, text);
@@ -43,7 +44,8 @@ BStringView* Hint(const char* name, const char* text)
 }
 }
 
-BrowsingPreferences::BrowsingPreferences(BMessenger owner, const std::string& autoplay, bool spellChecking, bool savePasswords,
+BrowsingPreferences::BrowsingPreferences(BMessenger owner, const std::string& autoplay, bool spellChecking,
+    const std::string& spellingLanguage, const std::vector<std::string>& dictionaries, bool savePasswords,
     const std::vector<std::tuple<std::string, std::string, std::string>>& webApps)
     : BGroupView("Browsing", B_VERTICAL, 8), fOwner(owner)
 {
@@ -60,6 +62,21 @@ BrowsingPreferences::BrowsingPreferences(BMessenger owner, const std::string& au
     fAutoplay = new BMenuField("autoplay", "Media that start by themselves:", choices);
     fSpelling = new BCheckBox("spell-checking", "Check spelling while typing", new BMessage(spellingToggled));
     fSpelling->SetValue(spellChecking ? B_CONTROL_ON : B_CONTROL_OFF);
+    auto* languages = new BPopUpMenu("spelling-language");
+    auto addLanguage = [&](const std::string& value, const std::string& label) {
+        auto* message = new BMessage(spellingLanguageChosen);
+        message->AddString("language", value.c_str());
+        auto* item = new BMenuItem(label.c_str(), message);
+        item->SetMarked(spellingLanguage == value);
+        languages->AddItem(item);
+    };
+    addLanguage("", "The system's language");
+    if (!dictionaries.empty()) languages->AddSeparatorItem();
+    for (const auto& name : dictionaries) addLanguage(name, name);
+    // A dictionary chosen before and removed since.
+    if (!spellingLanguage.empty() && std::find(dictionaries.begin(), dictionaries.end(), spellingLanguage) == dictionaries.end())
+        addLanguage(spellingLanguage, spellingLanguage + " (not installed)");
+    fSpellingLanguage = new BMenuField("spelling-language", "Language:", languages);
     fSpellingInfo = Hint("spelling-info", "");
     fSavePasswords = new BCheckBox("save-passwords", "Offer to save passwords when you sign in", new BMessage(passwordsToggled));
     fSavePasswords->SetValue(savePasswords ? B_CONTROL_ON : B_CONTROL_OFF);
@@ -98,6 +115,7 @@ BrowsingPreferences::BrowsingPreferences(BMessenger owner, const std::string& au
         .Add(Title("spelling-title", "Spelling"))
         .AddGroup(B_VERTICAL, 6).SetInsets(12, 0, 0, 0)
             .Add(fSpelling)
+            .AddGroup(B_HORIZONTAL, 0).Add(fSpellingLanguage).AddGlue().End()
             .Add(fSpellingInfo)
         .End()
         .AddStrut(6)
@@ -135,6 +153,7 @@ void BrowsingPreferences::AttachedToWindow()
     for (const char* name : { "import-passwords", "export-passwords" })
         if (auto* button = dynamic_cast<BButton*>(FindView(name))) button->SetTarget(this);
     fAutoplay->Menu()->SetTargetForItems(this);
+    fSpellingLanguage->Menu()->SetTargetForItems(this);
     fAccounts->SetTarget(this);
     fApps->SetTarget(this);
     fRemoveApp->SetTarget(this);
@@ -211,6 +230,14 @@ void BrowsingPreferences::MessageReceived(BMessage* message)
         return;
     }
     case spellingToggled: Send("spell_checking", fSpelling->Value() == B_CONTROL_ON); return;
+    case spellingLanguageChosen: {
+        BMessage changed(kPreferencesChanged);
+        changed.AddString("spelling_language", message->GetString("language", ""));
+        fOwner.SendMessage(&changed);
+        // The engine opens the new dictionary at the next word it checks.
+        fSpellingInfo->SetText("Words are checked against the new dictionary from the next one you type.");
+        return;
+    }
     case passwordsToggled: Send("save_passwords", fSavePasswords->Value() == B_CONTROL_ON); return;
     case accountSelected: {
         const bool any = fAccounts->CurrentSelection() != nullptr;

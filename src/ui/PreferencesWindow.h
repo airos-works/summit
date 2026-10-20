@@ -41,6 +41,9 @@ struct PreferencesState {
     std::string autoplay = "block-audio";
     bool spellChecking = true;
     bool savePasswords = true;
+    // The dictionary chosen (empty: the system's language) and those installed.
+    std::string spellingLanguage;
+    std::vector<std::string> dictionaries;
     // Installed web apps: name and start address, by identifier.
     std::vector<std::tuple<std::string, std::string, std::string>> webApps;
 };

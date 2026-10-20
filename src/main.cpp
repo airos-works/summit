@@ -24,6 +24,7 @@
 #include <nlohmann/json.hpp>
 #endif
 #include "core/Address.h"
+#include "core/Spelling.h"
 #include <Alert.h>
 #include <Application.h>
 #include <Entry.h>
@@ -643,6 +644,9 @@ public:
             bool spelling = true, savePasswords = true;
             const bool hasAutoplay = message->FindString("autoplay", &autoplay) == B_OK && autoplay;
             const bool hasSpelling = message->FindBool("spell_checking", &spelling) == B_OK;
+            const char* spellingLanguage = nullptr;
+            const bool hasSpellingLanguage = message->FindString("spelling_language", &spellingLanguage) == B_OK && spellingLanguage
+                && std::strlen(spellingLanguage) < 64;
             const bool hasSavePasswords = message->FindBool("save_passwords", &savePasswords) == B_OK;
             bool checkForUpdates = true;
             const bool hasCheckForUpdates = message->FindBool("check_for_updates", &checkForUpdates) == B_OK;
@@ -667,6 +671,10 @@ public:
                 if (hasAutoplay && profile.autoplay != autoplay && (!std::strcmp(autoplay, "allow")
                     || !std::strcmp(autoplay, "block-audio") || !std::strcmp(autoplay, "block"))) { profile.autoplay = autoplay; changed = true; }
                 if (hasSpelling && profile.spellChecking != spelling) { profile.spellChecking = spelling; changed = true; }
+                if (hasSpellingLanguage && profile.spellingLanguage != spellingLanguage) {
+                    profile.spellingLanguage = spellingLanguage;
+                    changed = true;
+                }
                 if (hasSavePasswords && profile.savePasswords != savePasswords) { profile.savePasswords = savePasswords; changed = true; }
                 if (hasEngine && profile.searchEngine != engine) {
                     // Set before windows hear of the change, so they see the new engine.
@@ -682,7 +690,7 @@ public:
                 for (const auto& context : {fWebKitContext, fPrivateContext})
                     if (context) context->SetSitePermission("autoplay", "*", AutoplayValue(setting));
             }
-            if (hasSpelling) ApplySpellChecking();
+            if (hasSpelling || hasSpellingLanguage) ApplySpellChecking();
 #endif
             return;
         }
@@ -1084,8 +1092,40 @@ private:
         fPrivateContext = std::move(context);
         return fPrivateContext;
     }
+    // Where the engine looks for dictionaries (TextCheckerHaiku): the
+    // profile's Dictionaries folder, then data/hunspell and data/myspell.
+    std::vector<std::string> SpellingDirectories() const
+    {
+        std::vector<std::string> result{(fProfile / "Dictionaries").string()};
+        for (auto which : {B_USER_NONPACKAGED_DATA_DIRECTORY, B_USER_DATA_DIRECTORY, B_SYSTEM_NONPACKAGED_DATA_DIRECTORY,
+                B_SYSTEM_DATA_DIRECTORY}) {
+            BPath path;
+            if (find_directory(which, &path) != B_OK) continue;
+            result.push_back(std::string(path.Path()) + "/hunspell");
+            result.push_back(std::string(path.Path()) + "/myspell");
+        }
+        return result;
+    }
+    // The system's preferred languages ("de", "en_AU"), from the Locale
+    // preferences' settings (BLocaleRoster is in liblocale, which Summit
+    // does not link).
+    static std::vector<std::string> SystemLanguages()
+    {
+        std::vector<std::string> result;
+        BPath path;
+        BFile file;
+        BMessage settings;
+        if (find_directory(B_USER_SETTINGS_DIRECTORY, &path) == B_OK && path.Append("Locale settings") == B_OK
+            && file.SetTo(path.Path(), B_READ_ONLY) == B_OK && settings.Unflatten(&file) == B_OK) {
+            const char* language = nullptr;
+            for (int32 i = 0; settings.FindString("language", i, &language) == B_OK && language; ++i)
+                result.push_back(language);
+        }
+        return result;
+    }
     // Spell checking (#66) with the en_US dictionary Summit carries, copied
-    // to the profile's Dictionaries folder, or one installed in data/hunspell.
+    // to the profile's Dictionaries folder, or one installed in data/hunspell:
+    // the one chosen in Preferences, else the system language's (#110).
     // SUMMIT_SPELLING_LANGUAGES names others first ("de_DE,en_US").
     void ApplySpellChecking()
     {
@@ -1108,8 +1148,11 @@ private:
                 }
             }
         }
-        const char* languages = std::getenv("SUMMIT_SPELLING_LANGUAGES");
-        BWebKitSetSpellChecking(enabled, languages ? languages : "en_US", directory.c_str(), (directory / "words.txt").c_str());
+        const char* override = std::getenv("SUMMIT_SPELLING_LANGUAGES");
+        const auto chosen = fShared->Read([](const summit::Profile& profile) { return profile.spellingLanguage; });
+        const std::string languages = override ? std::string(override)
+            : summit::SpellingLanguages(chosen, SystemLanguages(), summit::SpellingDictionaries(SpellingDirectories()));
+        BWebKitSetSpellChecking(enabled, languages.c_str(), directory.c_str(), (directory / "words.txt").c_str());
     }
     // The engine's value of a saved decision: for autoplay, allowed means
     // media play by themselves (0) and blocked that they wait for the user
@@ -1323,6 +1366,8 @@ private:
                 profile.lastUpdateCheck, profile.autoplay, profile.spellChecking, profile.savePasswords };
         });
         state.webKitDirectory = fProfile / "WebKit";
+        state.spellingLanguage = fShared->Read([](const summit::Profile& profile) { return profile.spellingLanguage; });
+        state.dictionaries = summit::SpellingDictionaries(SpellingDirectories());
         fShared->Read([&](const summit::Profile& profile) {
             for (const auto& app : profile.webApps) state.webApps.emplace_back(app.id, app.name, app.startURL);
             return 0;

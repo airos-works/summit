@@ -1,6 +1,7 @@
 #include "core/Address.h"
 #include "core/Profile.h"
 #include "core/Favicon.h"
+#include "core/Spelling.h"
 #include "core/InternalPages.h"
 #include "core/Zoom.h"
 #include "core/Suggest.h"
@@ -215,6 +216,25 @@ int main()
         CHECK(!RasterizeSvg("<svg", 32, vector) && !RasterizeSvg(svg, 0, vector));
         // Damaged input must not crash.
         for (size_t cut = 0; cut < svg.size(); cut += 7) RasterizeSvg(svg.substr(0, cut), 16, vector);
+    }
+
+    // Spelling dictionaries and the languages given to the engine.
+    {
+        const auto root = std::filesystem::temp_directory_path() / ("summit-spelling-" + std::to_string(::getpid()));
+        std::filesystem::create_directories(root / "a");
+        std::filesystem::create_directories(root / "b");
+        for (const char* name : {"a/de_DE.aff", "a/de_DE.dic", "a/en_US.aff", "a/en_US.dic", "b/en_AU.aff", "b/en_AU.dic",
+                "b/fr_FR.aff", "b/de_DE.aff", "b/de_DE.dic"})
+            std::ofstream(root / name) << "x";
+        const auto found = SpellingDictionaries({(root / "a").string(), (root / "b").string(), (root / "missing").string()});
+        CHECK((found == std::vector<std::string>{"de_DE", "en_AU", "en_US"}));
+        CHECK(SpellingLanguages("", {"de"}, found) == "de_DE,en_US");
+        CHECK(SpellingLanguages("", {"en-AU", "de_CH"}, found) == "en_AU,de_DE,en_US");
+        CHECK(SpellingLanguages("", {"fr"}, found) == "en_US");
+        CHECK(SpellingLanguages("en_AU", {"de"}, found) == "en_AU,en_US");
+        CHECK(SpellingLanguages("it_IT", {"de"}, found) == "de_DE,en_US");
+        CHECK(SpellingLanguages("", {}, {}) == "en_US");
+        std::filesystem::remove_all(root);
     }
 
     // History grouped by day, and the built-in pages.

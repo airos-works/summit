@@ -51,6 +51,9 @@ struct Profile {
     // Where the Home button goes; empty means the built-in start page.
     std::string homeURL;
     bool showBookmarksBar = true;
+    // Preferences › Browsing › Spelling: the dictionary to check with ("de_DE");
+    // empty for the system's language.
+    std::string spellingLanguage;
     // View › Zoom Text Only: zooming changes the text's size, not the page's.
     bool zoomTextOnly = false;
     // Whether Summit starts with the windows and tabs open when it last quit

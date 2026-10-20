@@ -19,7 +19,10 @@ namespace summit {
 // export. Changes go to the application as kPreferencesChanged.
 class BrowsingPreferences : public BGroupView {
 public:
-    BrowsingPreferences(BMessenger owner, const std::string& autoplay, bool spellChecking, bool savePasswords,
+    // spellingLanguage: the dictionary chosen, empty for the system's
+    // language; dictionaries: those installed.
+    BrowsingPreferences(BMessenger owner, const std::string& autoplay, bool spellChecking, const std::string& spellingLanguage,
+        const std::vector<std::string>& dictionaries, bool savePasswords,
         const std::vector<std::tuple<std::string, std::string, std::string>>& webApps);
     ~BrowsingPreferences() override;
     void AttachedToWindow() override;
@@ -30,6 +33,7 @@ private:
     BMessenger fOwner;
     BMenuField* fAutoplay;
     BCheckBox* fSpelling;
+    BMenuField* fSpellingLanguage;
     BStringView* fSpellingInfo;
     BCheckBox* fSavePasswords;
     BColumnListView* fAccounts;

@@ -80,6 +80,17 @@ While Typing** and Preferences › Browsing turn it off.
 - Summit carries the en_US dictionary (SCOWL, [licence](dictionary-en_US-license.txt))
   in its resources and copies it to `~/config/settings/Summit/Dictionaries`.
   `SUMMIT_SPELLING_LANGUAGES=de_DE,en_US` names others to try first.
+- Since 20 October (#110), Preferences › Browsing › Spelling has a
+  **Language** menu: "The system's language" (the default) and each Hunspell
+  dictionary installed (a `.aff` with its `.dic` in the profile's
+  Dictionaries folder or `data/hunspell` / `data/myspell`), kept in the
+  profile as `spellingLanguage`. The system's language comes from the Locale
+  preferences' settings file (`~/config/settings/Locale settings`, its
+  `language` list; Summit does not link liblocale): "de" takes de_DE or another
+  de_ dictionary, "en_AU" en_AU first, and en_US always comes last
+  (`SpellingLanguages` in `src/core/Spelling.cpp`, host-tested). Other
+  languages need their dictionaries installed, from HaikuPorts' hunspell
+  dictionary packages or by hand; the page's `lang` is not used yet.
 
 Checked: typing "Anothr sentnce." underlined both; the menu offered
 Another/Anthrax and replaced the word; Add to Dictionary wrote `sentnce` to
