@@ -2,6 +2,7 @@
 #include "ProtocolHandlers.h"
 #include "ExtensionTiming.h"
 #include "StallTrace.h"
+#include "NavigationTrace.h"
 #include "Chrome.h"
 #include "FaviconCache.h"
 #include "AddressSuggestions.h"
@@ -349,6 +350,7 @@ public:
             return B_DISPATCH_MESSAGE;
         }
         if (fControl.IsEnabled() && fControl.TextView()->IsFocus()) {
+            NavigationTraceBegin(message->GetInt64("when", 0), "Enter in the address field");
             // BTextControl normally suppresses Enter when the text matches its
             // saved value. An address must remain submit-able for retry/reload.
             fControl.Invoke();
@@ -1717,7 +1719,15 @@ void BrowserWindow::Navigate(const std::string& text)
 #endif
     if (auto* tab = ActiveTab()) {
         fAddress->SetText(DisplayURL(address.url).c_str());
+        if (NavigationTraceEnabled()) {
+            // Navigations that did not come from the key (a suggestion, the
+            // MCP's navigate) are traced from here.
+            if (!NavigationTraceStart() || system_time() - NavigationTraceStart() > 2000000)
+                NavigationTraceBegin(0, "navigation");
+            NavigationTrace("LoadURL %s", LoadableURL(address.url).c_str());
+        }
         tab->view->LoadURL(LoadableURL(address.url).c_str());
+        NavigationTrace("LoadURL returned");
         tab->pageRevision = fPagesRevision;
     }
 }
@@ -1749,6 +1759,15 @@ void BrowserWindow::AddressModified()
     // keys) come back as modifications too.
     if (text == fAddressShown) return;
     if (const int32 selected = fSuggestions->Selected(); selected >= 0 && text == fSuggestions->Rows()[selected].fill) return;
+#if SUMMIT_MODERN_WEBKIT
+    // An address being typed is a navigation soon, most often to another
+    // site, which runs in a web process of its own: have one started while
+    // the user types rather than after Enter (0.15 s on the laptop).
+    if (auto* tab = ActiveTab(); tab && tab->view && system_time() - fProcessPrewarmedAt > 1000000) {
+        fProcessPrewarmedAt = system_time();
+        tab->view->PrewarmProcess();
+    }
+#endif
     int32 start = 0, end = 0;
     textView->GetSelection(&start, &end);
     // Only typing forward at the end completes; deleting (Backspace, which
@@ -3388,6 +3407,7 @@ void BrowserWindow::MessageReceived(BMessage* message)
             const char* url = nullptr;
             const bool typed = message->FindString("url", &url) != B_OK;
             const std::string target = typed ? AddressTarget() : std::string(url);
+            NavigationTrace("window handles the address: %s", target.c_str());
             HideSuggestions();
             Navigate(target);
             // As in other browsers, the page takes the focus once an address
@@ -4933,6 +4953,18 @@ void BrowserWindow::WebKitStateChanged(const BMessage& message)
     if (internalPageLoaded && !tab->loading) RefreshInternalPage(*tab);
     UpdateStoreOffer(*tab);
     RefreshChrome();
+    if (NavigationTraceEnabled() && tab->id == fSelected && NavigationTraceStart()
+        && system_time() - NavigationTraceStart() < 60000000) {
+        // Each change of what the tab shows while a traced navigation runs.
+        static std::string last;
+        char line[400];
+        std::snprintf(line, sizeof(line), "loading=%d progress=%.2f outcome=%s url=%.200s", tab->loading, tab->progress,
+            tab->loadOutcome.c_str(), tab->url.c_str());
+        if (last != line) {
+            last = line;
+            NavigationTrace("tab state %s", line);
+        }
+    }
 }
 
 void BrowserWindow::ProbeReader(Tab& tab)
