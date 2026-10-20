@@ -81430,10 +81430,10 @@ index 0000000000000000000000000000000000000000..9631bd827675ab531436c95f66f77b2b
 +}
 diff --git a/Source/WebKit/UIProcess/API/haiku/WebKitView.h b/Source/WebKit/UIProcess/API/haiku/WebKitView.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..eaeffc37e05f5885434e4166751375bb35667a29
+index 0000000000000000000000000000000000000000..9c2763f4a907281873e8b845bcc824afc090a246
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/API/haiku/WebKitView.h
-@@ -0,0 +1,333 @@
+@@ -0,0 +1,341 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#pragma once
@@ -81575,8 +81575,12 @@ index 0000000000000000000000000000000000000000..eaeffc37e05f5885434e4166751375bb
 +    // Picture in Picture (EnterPictureInPicture), sent to its target: a
 +    // frame of the video, "page" (uint64), "width", "height" (int32),
 +    // "pixels" (B_RAW_TYPE, B_RGB32 rows), "paused" (bool), "time" and
-+    // "duration" (double, seconds); and when the video went away (removed,
-+    // or the page closed or navigated) or was not found, "page" only.
++    // "duration" (double, seconds; duration NaN before the video's metadata,
++    // infinite for a live stream), "volume" (double, 0-1) and "muted"
++    // (bool). Frames come at most 30 a second, when the picture, time,
++    // paused, volume or muted changed (and for half a second after a seek).
++    // When the video went away (removed, or the page closed or navigated)
++    // or was not found, "page" only.
 +    B_WEBKIT_PICTURE_IN_PICTURE_FRAME = 'wpif',
 +    B_WEBKIT_PICTURE_IN_PICTURE_ENDED = 'wpie'
 +};
@@ -81656,7 +81660,11 @@ index 0000000000000000000000000000000000000000..eaeffc37e05f5885434e4166751375bb
 +    // Picture in Picture: the page's <video data-summit-pip="token"> (a
 +    // number; in any frame) sends its pictures, fitted into size, to target.
 +    // The video gets enterpictureinpicture and, when it ends,
-+    // leavepictureinpicture events. Commands: "play", "pause", "toggle".
++    // leavepictureinpicture events. Commands, as the user's own action:
++    // "play", "pause", "toggle"; "seek:<seconds>" (to that time) and
++    // "skip:<seconds>" (forward, or back when negative), both kept within the
++    // video's seekable range; "volume:<0-1>"; "mute" and "unmute". Anything
++    // else, or a number that does not parse or is not finite, is ignored.
 +    void EnterPictureInPicture(const char* token, BMessenger target, BSize size);
 +    void SetPictureInPictureSize(BSize size);
 +    void PictureInPictureCommand(const char* command);
@@ -141385,10 +141393,10 @@ index 0000000000000000000000000000000000000000..7459ce25f180160a1c12431c73926a1f
 +
 diff --git a/Source/WebKit/WebProcess/WebPage/haiku/WebPageHaiku.cpp b/Source/WebKit/WebProcess/WebPage/haiku/WebPageHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..e9d091b04649d3a861693ab0930fa08660811b0b
+index 0000000000000000000000000000000000000000..0430cb9fea01ddfe25ff8ff5a3fbc9746bd10919
 --- /dev/null
 +++ b/Source/WebKit/WebProcess/WebPage/haiku/WebPageHaiku.cpp
-@@ -0,0 +1,450 @@
+@@ -0,0 +1,512 @@
 +/*
 + * Copyright (C) 2014 Haiku, inc.
 + *
@@ -141445,6 +141453,7 @@ index 0000000000000000000000000000000000000000..e9d091b04649d3a861693ab0930fa086
 +#include <WebCore/FrameTree.h>
 +#include <WebCore/HTMLVideoElement.h>
 +#include <WebCore/NativeImage.h>
++#include <WebCore/TimeRanges.h>
 +#include <Message.h>
 +#include <Messenger.h>
 +#include <skia/core/SkImage.h>
@@ -141486,7 +141495,8 @@ index 0000000000000000000000000000000000000000..e9d091b04649d3a861693ab0930fa086
 +// A page's video shown in the host's Picture in Picture window: its frames go
 +// to the host as B_WEBKIT_PICTURE_IN_PICTURE_FRAME ('wpif') messages,
 +// fitted into the window's size, at most 30 a second and only when the
-+// picture changed. One per page; main thread only.
++// picture or the state the window shows (time, paused, volume) changed. One
++// per page; main thread only.
 +struct PictureInPictureHaiku {
 +    WeakPtr<WebPage> page;
 +    WeakPtr<HTMLMediaElement> video;
@@ -141495,8 +141505,14 @@ index 0000000000000000000000000000000000000000..e9d091b04649d3a861693ab0930fa086
 +    std::unique_ptr<RunLoop::Timer> timer;
 +    double lastTime { -1 };
 +    bool lastPaused { false };
++    double lastVolume { -1 };
++    bool lastMuted { false };
++    bool seeking { false };
 +    IntSize lastVideoSize;
 +    uint32_t idleTicks { 0 };
++    // Frames sent whatever changed: after a seek the picture at the new time
++    // can come a little after the time does, also while paused.
++    uint32_t forcedTicks { 0 };
 +};
 +
 +HashMap<uint64_t, std::unique_ptr<PictureInPictureHaiku>>& pictureInPicturesHaiku()
@@ -141537,8 +141553,18 @@ index 0000000000000000000000000000000000000000..e9d091b04649d3a861693ab0930fa086
 +    }
 +    const double time = video->currentTime();
 +    const bool paused = video->paused();
++    const double volume = video->volume();
++    const bool muted = video->muted();
++    // The picture of a seek that just ended, which a paused video shows at
++    // a time already sent.
++    const bool seekEnded = picture.seeking && !video->seeking();
++    picture.seeking = video->seeking();
++    const bool forced = picture.forcedTicks || seekEnded;
++    if (picture.forcedTicks)
++        --picture.forcedTicks;
++    const bool same = time == picture.lastTime && paused == picture.lastPaused && volume == picture.lastVolume && muted == picture.lastMuted;
 +    // A paused picture that was sent stays; check once a second for a seek.
-+    if (time == picture.lastTime && paused == picture.lastPaused && ++picture.idleTicks < 30)
++    if (same && !forced && ++picture.idleTicks < 30)
 +        return;
 +    picture.idleTicks = 0;
 +    RefPtr image = video->nativeImageForCurrentTime();
@@ -141546,7 +141572,7 @@ index 0000000000000000000000000000000000000000..e9d091b04649d3a861693ab0930fa086
 +    if (!platformImage || platformImage->width() <= 0 || platformImage->height() <= 0)
 +        return;
 +    const IntSize videoSize(platformImage->width(), platformImage->height());
-+    if (time == picture.lastTime && paused == picture.lastPaused && videoSize == picture.lastVideoSize)
++    if (same && !forced && videoSize == picture.lastVideoSize)
 +        return;
 +    const IntSize bounds(std::clamp(picture.size.width(), 64, 1920), std::clamp(picture.size.height(), 36, 1080));
 +    const double fit = std::min(double(bounds.width()) / videoSize.width(), double(bounds.height()) / videoSize.height());
@@ -141566,6 +141592,8 @@ index 0000000000000000000000000000000000000000..e9d091b04649d3a861693ab0930fa086
 +    message.AddBool("paused", paused);
 +    message.AddDouble("time", time);
 +    message.AddDouble("duration", video->duration());
++    message.AddDouble("volume", volume);
++    message.AddBool("muted", muted);
 +    // A full queue drops the frame rather than holding up the page.
 +    if (picture.target.SendMessage(&message, static_cast<BHandler*>(nullptr), 0) == B_BAD_PORT_ID) {
 +        endPictureInPictureHaiku(pageID, false);
@@ -141573,7 +141601,20 @@ index 0000000000000000000000000000000000000000..e9d091b04649d3a861693ab0930fa086
 +    }
 +    picture.lastTime = time;
 +    picture.lastPaused = paused;
++    picture.lastVolume = volume;
++    picture.lastMuted = muted;
 +    picture.lastVideoSize = videoSize;
++}
++
++// A time to seek to, kept within what the video can seek to.
++double clampedPictureInPictureTimeHaiku(HTMLMediaElement& video, double time)
++{
++    Ref seekableRanges = video.seekable();
++    const auto& seekable = seekableRanges->ranges();
++    if (seekable.length())
++        return std::clamp(time, seekable.minimumBufferedTime().toDouble(), seekable.maximumBufferedTime().toDouble());
++    const double duration = video.duration();
++    return std::isfinite(duration) ? std::clamp(time, 0.0, duration) : std::max(time, 0.0);
 +}
 +
 +} // namespace
@@ -141651,10 +141692,39 @@ index 0000000000000000000000000000000000000000..e9d091b04649d3a861693ab0930fa086
 +        return;
 +    // The window's buttons are the user's own action.
 +    UserGestureIndicator gesture(IsProcessingUserGesture::Yes, protect(video->document()).ptr());
++    // The argument of "name:<number>": a finite number, else nothing.
++    auto argument = [&](ASCIILiteral name) -> std::optional<double> {
++        if (command.length() > 40 || !command.startsWith(name))
++            return std::nullopt;
++        bool valid = false;
++        const double value = StringView(command).substring(name.length()).toDouble(valid);
++        if (!valid || !std::isfinite(value))
++            return std::nullopt;
++        return value;
++    };
++    // More frames after a seek: the window shows the new time and picture.
++    auto sendFrames = [pageID = identifier().toUInt64()] {
++        if (auto entry = pictureInPicturesHaiku().find(pageID); entry != pictureInPicturesHaiku().end())
++            entry->value->forcedTicks = 15;
++    };
 +    if (command == "play"_s || (command == "toggle"_s && video->paused()))
 +        video->play();
 +    else if (command == "pause"_s || command == "toggle"_s)
 +        video->pause();
++    else if (command == "mute"_s || command == "unmute"_s)
++        video->setMuted(command == "mute"_s);
++    else if (auto time = argument("seek:"_s)) {
++        (void)video->setCurrentTimeForBindings(clampedPictureInPictureTimeHaiku(*video, *time));
++        sendFrames();
++    } else if (auto delta = argument("skip:"_s)) {
++        if (std::fabs(*delta) <= 24 * 3600) {
++            (void)video->setCurrentTimeForBindings(clampedPictureInPictureTimeHaiku(*video, video->currentTime() + *delta));
++            sendFrames();
++        }
++    } else if (auto volume = argument("volume:"_s)) {
++        if (*volume >= 0 && *volume <= 1)
++            (void)video->setVolume(*volume);
++    }
 +}
 +
 +void WebPage::exitPictureInPictureHaiku()

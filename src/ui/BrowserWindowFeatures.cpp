@@ -510,7 +510,10 @@ void BrowserWindow::PictureInPictureCommand(const BMessage& message)
         return;
     }
     if (!tab) return;
-    if (command == "toggle" || command == "play" || command == "pause") tab->view->PictureInPictureCommand(command.c_str());
+    // The controller's commands go to the engine, which checks their numbers.
+    const bool media = command == "toggle" || command == "play" || command == "pause" || command == "mute" || command == "unmute"
+        || (command.size() < 40 && (command.starts_with("seek:") || command.starts_with("skip:") || command.starts_with("volume:")));
+    if (media) tab->view->PictureInPictureCommand(command.c_str());
     else if (command == "size") {
         BSize size;
         if (message.FindSize("size", &size) == B_OK) tab->view->SetPictureInPictureSize(size);

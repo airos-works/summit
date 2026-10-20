@@ -33,8 +33,9 @@ constexpr uint32 kPageSetup = 'pstp';
 // Picture in Picture of the current tab's video ("token" when the page or a
 // context menu chose one; otherwise the largest playing video).
 constexpr uint32 kPictureInPicture = 'pipt';
-// The Picture in Picture window's buttons and its closing, to the window
-// that opened it: "tab", "command" ("toggle", "back", "close").
+// The Picture in Picture window's controls and its closing, to the window
+// that opened it: "tab", "session", "command" ("toggle", "seek:<s>",
+// "skip:<s>", "volume:<0-1>", "mute", "unmute", "back", "size", "closed").
 constexpr uint32 kPictureInPictureCommand = 'pipc';
 // Pop-ups the current page tried to open: open the last one ("tab"), or
 // always allow the page's site.

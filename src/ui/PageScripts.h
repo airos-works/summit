@@ -8,7 +8,8 @@ namespace summit {
 //   summitPip:       the Picture in Picture API: {type: "enter", token},
 //                    {type: "exit"}, {type: "context", token} (the video under
 //                    a context menu). window.__summitPipLargest() names the
-//                    largest video of the frame.
+//                    largest video of the frame. A Picture in Picture button
+//                    shows over the video under the pointer.
 //   summitPasswords: {type: "submit", username, password} after a sign-in,
 //                    {type: "query"} when the user starts on a sign-in form
 //                    (the reply lists the site's saved accounts as JSON).
