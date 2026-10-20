@@ -295,6 +295,7 @@ void BrowserWindow::DetachTab(int64 id, const BMessenger& target)
     if (fPictureInPictureTab == id && fPictureInPicture.IsValid()) fPictureInPicture.SendMessage(B_QUIT_REQUESTED);
     CloseDeveloperTools(*found, true);
     RemoveCrashView(*found);
+    RemoveLoadErrorView(*found, false);
     const bool wasSelected = found->id == fSelected;
     int64 next = 0;
     if (wasSelected) {
@@ -454,6 +455,11 @@ void BrowserWindow::RefreshNoticeBar()
         dismiss->AddBool("dismiss", true);
         fNoticeBar->SetNotice(text, {{"Open Pop-up", with(kOpenBlockedPopup, tab->id)},
             {"Always Allow", with(kAllowSitePopups, tab->id)}, {"Close", dismiss}});
+        return;
+    }
+    // A notice for the whole window (#93), when its tab has none.
+    if (!fWindowNotice.empty()) {
+        fNoticeBar->SetNotice(fWindowNotice, {{"OK", new BMessage(kDismissWindowNotice)}});
         return;
     }
     fNoticeBar->Clear();

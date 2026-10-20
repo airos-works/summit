@@ -24,6 +24,7 @@
 #include <nlohmann/json.hpp>
 #endif
 #include "core/Address.h"
+#include "core/ProfileLock.h"
 #include "core/Spelling.h"
 #include <Alert.h>
 #include <Application.h>
@@ -204,6 +205,7 @@ public:
             StartupError("Could not open the profile folder:\n" + fProfile.string() + "\n\n" + error.message());
             return;
         }
+        if (!LockProfile()) return;
         fShared = std::make_shared<summit::SharedProfile>(fProfile / "profile.json");
         fShared->AddListener(BMessenger(this));
 #if SUMMIT_MODERN_WEBKIT
@@ -279,8 +281,8 @@ public:
         ApplySpellChecking();
 #endif
         summit::SetSearchEngine(fShared->Read([](const summit::Profile& profile) { return profile.searchEngine; }));
-        // Reopen every window of the last session, unless pages were named or
-        // Preferences say to start afresh.
+        // Reopen every window of the last session unless Preferences say to
+        // start afresh; pages named at the start open beside them (#94).
         const auto saved = fShared->SavedWindows();
         const bool restore = fRestoreAfterUpdate || fShared->Read([](const summit::Profile& profile) { return profile.restoreSession; });
         if (!fPendingWebApps.empty() && fURLs.empty() && !fRestoreAfterUpdate) {
@@ -290,7 +292,7 @@ public:
                 summit::BrowserWindowOptions options;
                 OpenWindow(options);
             }
-        } else if ((!fURLs.empty() && !fRestoreAfterUpdate) || saved.empty() || !restore) {
+        } else if (saved.empty() || !restore) {
             summit::BrowserWindowOptions options;
             options.urls = fURLs;
             OpenWindow(options);
@@ -300,12 +302,20 @@ public:
                 options.session = session;
                 OpenWindow(options);
             }
-            // Pages asked for while the old build quit open beside them.
+            // A link opened while Summit was not running (or asked for while
+            // the old build quit) goes in a new tab of the window in front,
+            // the last one restored; the session keeps its tabs.
             for (const auto& url : fURLs) OpenInNormalWindow(url);
         }
-        if (!fShared->LoadError().empty())
-            (new BAlert("Summit", ("The saved profile could not be read. It has been preserved. " + fShared->LoadError()).c_str(),
-                "OK", nullptr, nullptr, B_WIDTH_AS_USUAL, B_WARNING_ALERT))->Go(nullptr);
+        // A damaged profile is said in the window, not in an alert that
+        // holds every click until it is answered (#93).
+        if (const auto notice = ProfileNotice(); !notice.empty()) {
+            BMessage show(summit::kWindowNotice);
+            show.AddString("text", notice.c_str());
+            std::fprintf(stderr, "Summit: %s (%s)\n", notice.c_str(), fShared->LoadError().c_str());
+            if (auto window = FrontNormalWindow(); window.IsValid()) window.SendMessage(&show);
+            else if (auto front = FrontWindow(); front.IsValid()) front.SendMessage(&show);
+        }
 #if SUMMIT_MODERN_WEBKIT
         if (fPermissionPrompts) {
             fExtensions = std::make_unique<summit::ExtensionController>(fWebKitContext, fProfile / "Extensions",
@@ -586,6 +596,7 @@ public:
 #if SUMMIT_MODERN_WEBKIT
             options.newPage = message->GetUInt64("new_page", 0);
             options.newPageURL = message->GetString("new_page_url", "about:blank");
+            options.popup = options.newPage && message->GetBool("popup", false);
             if (fQuitting) {
                 if (options.newPage) BWebKitView::DeclineNewPage(options.newPage);
                 return;
@@ -1007,6 +1018,8 @@ public:
     bool WebKitInitialized() const { return fWebKitInitialized; }
     int ExitStatus() const { return fExitStatus; }
     std::shared_ptr<summit::SharedProfile> Profile() const { return fShared; }
+    // Held until the profile's last save, after the application is gone.
+    std::unique_ptr<summit::ProfileLock> TakeProfileLock() { return std::move(fProfileLock); }
     // Whether Summit was started again while it quit, and with what.
     bool TakeRelaunch(std::vector<std::string>& arguments)
     {
@@ -1687,6 +1700,88 @@ private:
         fExtensionWindow.SendMessage(&state, static_cast<BHandler*>(nullptr), 0);
     }
 #endif
+    // One Summit per profile folder (#93). Another build or package of
+    // Summit (the registrar keeps one of each executable) that finds the
+    // folder in use hands what it was asked to open to the one using it, and
+    // quits; a copy that does not answer gets a message, never a wait.
+    bool LockProfile()
+    {
+        auto lock = std::make_unique<summit::ProfileLock>();
+        const bigtime_t deadline = system_time() + 8000000;
+        while (true) {
+            int64_t holder = 0;
+            std::string error;
+            const auto result = lock->Take(fProfile, Team(), holder, error);
+            if (result == summit::ProfileLock::Result::Taken) {
+                fProfileLock = std::move(lock);
+                return true;
+            }
+            if (result == summit::ProfileLock::Result::Unsupported) {
+                std::fprintf(stderr, "Summit: the profile folder cannot be locked (%s); using it anyway\n", error.c_str());
+                return true;
+            }
+            if (holder > 0 && holder != Team()) {
+                const status_t handed = HandToRunningCopy(static_cast<team_id>(holder));
+                if (handed == B_OK) {
+                    std::fprintf(stderr, "Summit: the profile is in use by team %lld; handed this start to it\n",
+                        static_cast<long long>(holder));
+                    PostMessage(B_QUIT_REQUESTED);
+                    return false;
+                }
+                // There, and not answering: the pages wait in its queue,
+                // and are not sent again.
+                if (handed != B_BAD_TEAM_ID && handed != B_BAD_PORT_ID) break;
+            }
+            // One that is quitting lets go in a moment.
+            if (system_time() > deadline) break;
+            snooze(250000);
+        }
+        StartupError("Another copy of Summit is using this profile and does not answer:\n" + fProfile.string()
+            + "\n\nQuit it first, or start this one with --profile and another folder.");
+        return false;
+    }
+    // B_BAD_TEAM_ID or B_BAD_PORT_ID: that copy is gone.
+    status_t HandToRunningCopy(team_id team)
+    {
+        status_t status = B_ERROR;
+        BMessenger running(nullptr, team, &status);
+        if (status != B_OK || !running.IsValid()) return B_BAD_TEAM_ID;
+        BMessage start(B_ARGV_RECEIVED);
+        std::vector<std::string> arguments { "Summit" };
+        for (const auto& app : fPendingWebApps) arguments.insert(arguments.end(), {"--app", app});
+        arguments.insert(arguments.end(), fURLs.begin(), fURLs.end());
+        if (arguments.size() == 1) start.what = B_SILENT_RELAUNCH;
+        else {
+            start.AddInt32("argc", static_cast<int32>(arguments.size()));
+            for (const auto& argument : arguments) start.AddString("argv", argument.c_str());
+        }
+        // The reply (B_NO_REPLY once it has been handled) says that it was.
+        BMessage reply;
+        if (const status_t sent = running.SendMessage(&start, &reply, 2000000, 6000000); sent != B_OK) return sent;
+        be_roster->ActivateApp(team);
+        return B_OK;
+    }
+    // What the window says about a profile that could not be read.
+    std::string ProfileNotice() const
+    {
+        if (!fShared || fShared->LoadError().empty()) return { };
+        const auto damaged = fShared->DamagedCopy().filename().string();
+        const std::string kept = damaged.empty() ? std::string() : " The damaged file was kept as " + damaged + ".";
+        if (!fShared->Writable())
+            return "Summit could not read your profile and has left it as it is; changes in this session are not saved.";
+        if (fShared->RestoredFrom().empty())
+            return "Your profile could not be read and there was no earlier copy, so Summit started a new one." + kept;
+        const time_t when = static_cast<time_t>(fShared->RestoredTime());
+        const time_t now = std::time(nullptr);
+        struct tm local { };
+        char text[64] = "";
+        if (when > 0 && localtime_r(&when, &local))
+            std::strftime(text, sizeof text, now - when < 6 * 86400 ? "%A, %H:%M" : "%e %B, %H:%M", &local);
+        std::string date = text;
+        date.erase(0, date.find_first_not_of(' '));
+        return "Your profile was damaged. Summit restored it from " + (date.empty() ? std::string("an earlier copy") : date)
+            + " and saves it again." + kept;
+    }
     void StartupError(const std::string& message)
     {
         fExitStatus = 1;
@@ -1725,6 +1820,7 @@ private:
     std::vector<std::string> fURLs;
     // Web apps asked for before the first window opened (#75).
     std::vector<std::string> fPendingWebApps;
+    std::unique_ptr<summit::ProfileLock> fProfileLock;
     // Started again after an update (kRestoreSessionArgument): the last
     // session's windows and tabs open whatever Preferences say.
     bool fRestoreAfterUpdate = false;
@@ -1786,6 +1882,7 @@ static int RunApplication()
     umask(0077);
     status_t status = B_NO_INIT;
     std::shared_ptr<summit::SharedProfile> profile;
+    std::unique_ptr<summit::ProfileLock> lock;
     std::vector<std::string> relaunchArguments;
     bool relaunch = false;
     port_id exiting = -1;
@@ -1805,6 +1902,7 @@ static int RunApplication()
 #endif
         exitStatus = app.ExitStatus();
         profile = app.Profile();
+        lock = app.TakeProfileLock();
         relaunch = app.TakeRelaunch(relaunchArguments);
         if (profile) exiting = create_port(1, ExitingPortName().c_str());
     }
@@ -1814,6 +1912,7 @@ static int RunApplication()
     SUMMIT_QUIT_TRACE("application destroyed");
     profile = nullptr;
     SUMMIT_QUIT_TRACE("profile saved");
+    lock.reset();
     if (exiting >= 0) delete_port(exiting);
     if (relaunch) StartAgain(relaunchArguments);
     return exitStatus;

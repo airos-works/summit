@@ -104,7 +104,13 @@ working like Firefox's address bar:
   epoch), bookmarks carry `bar`, and the profile has `homeURL` and
   `showBookmarksBar`. All are optional in `profile.json`, so older profiles
   load unchanged and older builds ignore them. `Visit` only records http(s)
-  pages and says whether it did.
+  pages and says whether it did. Every save keeps the file it replaces as
+  `profile.json.1` and the day's first save as `profile-backup-DATE.json`
+  (three days); a damaged `profile.json` is moved to
+  `profile.damaged-DATE.json` and the newest readable copy loaded
+  (`Profile::LoadOrRestore`), which a bar under the toolbar says until it is
+  dismissed. The profile folder's `lock` file is held (`flock`) while Summit
+  runs (#93, [issue-fixes-2026-10-20-app.md](issue-fixes-2026-10-20-app.md)).
 - `src/core/InternalPages.*` — day grouping (local calendar days, stepped back
   at noon so daylight saving cannot skip one) and the two pages' HTML. The pages
   are self-contained: icons are `data:` PNGs in a `<style>` block, one class per

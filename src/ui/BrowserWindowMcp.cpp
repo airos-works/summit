@@ -190,9 +190,17 @@ std::string BrowserWindow::McpRequest(const std::string& text)
         Navigate(url);
         return json{{"navigating", tabName(*tab)}, {"url", url}}.dump();
     }
-    if (action == "reload") { tab->view->Reload(); return json{{"reloading", tabName(*tab)}}.dump(); }
+    // As the toolbar's buttons do on an error page (#89): Reload tries the
+    // address again, Back shows the page before it.
+    if (action == "reload") {
+        if (tab->errorView && !tab->loading) RetryFailedLoad(*tab); else tab->view->Reload();
+        return json{{"reloading", tabName(*tab)}}.dump();
+    }
     if (action == "stop") { tab->view->Stop(); return json{{"stopped", tabName(*tab)}}.dump(); }
-    if (action == "back") { tab->view->GoBack(); return json{{"back", tabName(*tab)}}.dump(); }
+    if (action == "back") {
+        if (!LeaveLoadErrorView(*tab)) tab->view->GoBack();
+        return json{{"back", tabName(*tab)}}.dump();
+    }
     if (action == "forward") { tab->view->GoForward(); return json{{"forward", tabName(*tab)}}.dump(); }
     if (action == "zoom") {
         const double factor = request.value("factor", 1.0);

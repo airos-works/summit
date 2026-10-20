@@ -39,6 +39,7 @@ struct WebApp {
     std::string scope;    // pages under this address belong to the app
     std::string launcher; // the launcher file (Deskbar and Tracker open it)
 };
+struct ProfileLoad;
 struct Profile {
     // Open windows, front to back as they were created. Older builds only
     // read "tabs" and "selected", which hold the first window.
@@ -105,7 +106,18 @@ struct Profile {
     bool SetProtocolHandler(const std::string& scheme, const ProtocolHandler&);
     bool RemoveProtocolHandler(const std::string& scheme);
     static Profile Load(const std::filesystem::path& path, std::string& error);
-    bool Save(const std::filesystem::path& path, std::string& error) const;
+    // Load(), and when the file is damaged, the newest of its copies that
+    // can be read (Backups()), so that a power cut that zero-filled the
+    // file costs at most the last changes (#93). The damaged file is kept
+    // beside it as profile.damaged-DATE.json.
+    static ProfileLoad LoadOrRestore(const std::filesystem::path& path, int64_t now = std::time(nullptr));
+    // Writes the profile (a new file, then renamed over the old one). The
+    // file it replaces becomes path.1, and the first save of a day is also
+    // kept as profile-backup-DATE.json, for the last kDailyBackups days.
+    bool Save(const std::filesystem::path& path, std::string& error, int64_t now = std::time(nullptr)) const;
+    static constexpr size_t kDailyBackups = 3;
+    // The copies Save() keeps, newest first.
+    static std::vector<std::filesystem::path> Backups(const std::filesystem::path& path);
     // Records a visit to an http(s) page; returns false for other pages.
     bool Visit(const PageRecord& page, int64_t now = std::time(nullptr));
     // Adds the page to the bar or Other Bookmarks, or moves an existing
@@ -121,6 +133,22 @@ struct Profile {
     // Records (allowed or denied) or forgets (nullopt) a site's permission;
     // false when nothing changed or the names are not usable.
     bool SetSitePermission(const std::string& permission, const std::string& origin, std::optional<bool> allowed);
+};
+// What Profile::LoadOrRestore() found.
+struct ProfileLoad {
+    Profile profile;
+    // Why the profile itself could not be read; empty when it was.
+    std::string error;
+    // The copy loaded instead, and when it was written (seconds since the
+    // epoch); empty when none could be read (the profile starts afresh).
+    std::filesystem::path restoredFrom;
+    int64_t restoredTime = 0;
+    // Where the unreadable file was moved.
+    std::filesystem::path damagedCopy;
+    // Whether the profile may be saved. Not when the file is a newer
+    // Summit's (an unknown version) or could not be moved aside: it is then
+    // left as it is.
+    bool writable = true;
 };
 // The permissions sites can ask for, in the order the Preferences list them.
 const std::vector<std::string>& SitePermissionNames();

@@ -7,12 +7,15 @@
 #include <cerrno>
 #include <cstring>
 #include <fstream>
+#include <functional>
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
 namespace summit {
 using nlohmann::json;
+// A newer Summit's profile, which this one leaves as it is.
+static constexpr const char* kUnknownVersion = "Unknown profile version";
 static json Encode(const std::vector<PageRecord>& pages)
 {
     json result = json::array();
@@ -91,7 +94,7 @@ Profile Profile::Load(const std::filesystem::path& path, std::string& error)
         if (std::filesystem::file_size(path) > 16 * 1024 * 1024) throw std::runtime_error("Profile is too large");
         std::ifstream stream(path);
         auto j = json::parse(stream);
-        if (j.at("version") != 1) throw std::runtime_error("Unknown profile version");
+        if (j.at("version") != 1) throw std::runtime_error(kUnknownVersion);
         if (auto windows = j.find("windows"); windows != j.end()) {
             if (!windows->is_array() || windows->size() > 64) throw std::runtime_error("Invalid window list");
             for (const auto& item : *windows) {
@@ -302,11 +305,102 @@ bool Profile::TrustCertificate(const TrustedCertificate& certificate)
     trustedCertificates.push_back(std::move(stored));
     return true;
 }
-bool Profile::Save(const std::filesystem::path& path, std::string& error) const
+// Local date (and time) for backup names: 2026-10-20 (-131502).
+static std::string Stamp(int64_t seconds, bool withTime)
+{
+    const std::time_t time = static_cast<std::time_t>(seconds);
+    std::tm local { };
+    char text[32] = "";
+    if (localtime_r(&time, &local)) std::strftime(text, sizeof text, withTime ? "%Y-%m-%d-%H%M%S" : "%Y-%m-%d", &local);
+    return text;
+}
+static std::filesystem::path PreviousCopy(const std::filesystem::path& path) { return path.string() + ".1"; }
+static std::string DailyPrefix(const std::filesystem::path& path) { return path.stem().string() + "-backup-"; }
+// Writes data to a new file beside path, on the disk before it returns, and
+// renames it to path.
+static void WriteFileAtomically(const std::filesystem::path& path, const std::string& data,
+    const std::function<void()>& beforeRename = { })
+{
+    std::string temporary = path.string() + ".XXXXXX";
+    int fd = mkstemp(temporary.data());
+    if (fd < 0) throw std::runtime_error(std::strerror(errno));
+    try {
+        size_t written = 0;
+        while (written < data.size()) {
+            ssize_t count = write(fd, data.data() + written, data.size() - written);
+            if (count < 0 && errno == EINTR) continue;
+            if (count <= 0) throw std::runtime_error(std::strerror(errno));
+            written += count;
+        }
+        if (fsync(fd) != 0) throw std::runtime_error(std::strerror(errno));
+        const int closed = close(fd);
+        fd = -1;
+        if (closed != 0) throw std::runtime_error(std::strerror(errno));
+        if (beforeRename) beforeRename();
+        if (rename(temporary.c_str(), path.c_str()) != 0) throw std::runtime_error(std::strerror(errno));
+    } catch (...) {
+        if (fd >= 0) close(fd);
+        unlink(temporary.c_str());
+        throw;
+    }
+}
+std::vector<std::filesystem::path> Profile::Backups(const std::filesystem::path& path)
+{
+    std::vector<std::filesystem::path> result;
+    std::error_code error;
+    if (std::filesystem::is_regular_file(PreviousCopy(path), error)) result.push_back(PreviousCopy(path));
+    const std::string prefix = DailyPrefix(path), extension = path.extension().string();
+    std::vector<std::string> daily;
+    for (auto entry = std::filesystem::directory_iterator(path.parent_path(), error);
+        !error && entry != std::filesystem::directory_iterator(); entry.increment(error)) {
+        const auto name = entry->path().filename().string();
+        if (name.size() > prefix.size() + extension.size() && name.compare(0, prefix.size(), prefix) == 0
+            && name.compare(name.size() - extension.size(), extension.size(), extension) == 0)
+            daily.push_back(name);
+    }
+    // The dates sort as text.
+    std::sort(daily.rbegin(), daily.rend());
+    for (const auto& name : daily) result.push_back(path.parent_path() / name);
+    return result;
+}
+ProfileLoad Profile::LoadOrRestore(const std::filesystem::path& path, int64_t now)
+{
+    ProfileLoad result;
+    std::error_code ignored;
+    const bool present = std::filesystem::exists(path, ignored);
+    result.profile = Load(path, result.error);
+    if (present && result.error.empty()) return result;
+    if (result.error == kUnknownVersion) {
+        result.writable = false;
+        return result;
+    }
+    const auto backups = Backups(path);
+    // A first start.
+    if (!present && backups.empty()) return result;
+    // Gone, with copies left: a save cut short between its two renames.
+    if (!present) result.error = "The profile file is missing";
+    for (const auto& backup : backups) {
+        std::string failure;
+        auto restored = Load(backup, failure);
+        if (!failure.empty()) continue;
+        result.profile = std::move(restored);
+        result.restoredFrom = backup;
+        struct stat status { };
+        if (stat(backup.c_str(), &status) == 0) result.restoredTime = status.st_mtime;
+        break;
+    }
+    if (present) {
+        // Kept for whoever wants to look, out of the way of the next save.
+        const auto damaged = path.parent_path() / (path.stem().string() + ".damaged-" + Stamp(now, true) + path.extension().string());
+        if (rename(path.c_str(), damaged.c_str()) == 0) result.damagedCopy = damaged;
+        else result.writable = false;
+    }
+    return result;
+}
+bool Profile::Save(const std::filesystem::path& path, std::string& error, int64_t now) const
 {
     error.clear();
-    int fd = -1;
-    std::string temporary;
+    std::string data;
     try {
         std::filesystem::create_directories(path.parent_path());
         json sessions = json::array();
@@ -324,7 +418,7 @@ bool Profile::Save(const std::filesystem::path& path, std::string& error) const
         for (const auto& [scheme, handler] : protocolHandlers)
             handlers[scheme] = {{"kind", handler.kind}, {"target", handler.target}, {"origin", handler.origin}};
         const WindowSession first = windows.empty() ? WindowSession() : windows.front();
-        std::string data = json{{"version", 1}, {"tabs", Encode(first.tabs)}, {"selected", first.selected},
+        data = json{{"version", 1}, {"tabs", Encode(first.tabs)}, {"selected", first.selected},
             {"windows", std::move(sessions)},
             {"bookmarks", Encode(bookmarks.Pages())},
             {"bookmarkTree", {{"bar", EncodeBookmarks(bookmarks.Bar().children)}, {"other", EncodeBookmarks(bookmarks.Other().children)}}},
@@ -345,27 +439,29 @@ bool Profile::Save(const std::filesystem::path& path, std::string& error) const
             {"mcp", {{"enabled", mcpEnabled}, {"port", mcpPort}, {"localOnly", mcpLocalOnly}, {"token", mcpToken}}},
             {"updates", {{"check", checkForUpdates}, {"lastCheck", lastUpdateCheck}}}}.dump(2);
         if (data.size() > 16 * 1024 * 1024) throw std::runtime_error("Profile is too large");
-        temporary = path.string() + ".XXXXXX";
-        fd = mkstemp(temporary.data());
-        if (fd < 0) throw std::runtime_error(std::strerror(errno));
-        size_t written = 0;
-        while (written < data.size()) {
-            ssize_t count = write(fd, data.data() + written, data.size() - written);
-            if (count < 0 && errno == EINTR) continue;
-            if (count <= 0) throw std::runtime_error(std::strerror(errno));
-            written += count;
-        }
-        if (fsync(fd) != 0) throw std::runtime_error(std::strerror(errno));
-        if (close(fd) != 0) { fd = -1; throw std::runtime_error(std::strerror(errno)); }
-        fd = -1;
-        if (rename(temporary.c_str(), path.c_str()) != 0) throw std::runtime_error(std::strerror(errno));
-        return true;
+        // The file this one replaces stays as the newest copy (#93).
+        WriteFileAtomically(path, data, [&] { rename(path.c_str(), PreviousCopy(path).c_str()); });
     } catch (const std::exception& e) {
         error = e.what();
-        if (fd >= 0) close(fd);
-        if (!temporary.empty()) unlink(temporary.c_str());
         return false;
     }
+    // The day's first save is kept for a few days too: a file written
+    // seconds before a power cut can be lost with the newest one. A copy
+    // that cannot be written does not fail the save.
+    try {
+        const auto daily = path.parent_path() / (DailyPrefix(path) + Stamp(now, false) + path.extension().string());
+        std::error_code ignored;
+        if (!Stamp(now, false).empty() && !std::filesystem::exists(daily, ignored)) {
+            WriteFileAtomically(daily, data);
+            auto copies = Backups(path);
+            size_t kept = 0;
+            for (const auto& copy : copies) {
+                if (copy == PreviousCopy(path)) continue;
+                if (++kept > kDailyBackups) std::filesystem::remove(copy, ignored);
+            }
+        }
+    } catch (const std::exception&) { }
+    return true;
 }
 bool Profile::Visit(const PageRecord& page, int64_t now)
 {
