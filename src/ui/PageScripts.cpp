@@ -47,7 +47,7 @@ Object.defineProperty(HTMLVideoElement.prototype, 'disablePictureInPicture', {
   get() { return this.hasAttribute('disablepictureinpicture'); },
   set(value) { if (value) this.setAttribute('disablepictureinpicture', ''); else this.removeAttribute('disablepictureinpicture'); }
 });
-HTMLVideoElement.prototype.requestPictureInPicture = function () {
+const request = HTMLVideoElement.prototype.requestPictureInPicture = function () {
   const video = this;
   if (video.readyState === 0) return Promise.reject(new DOMException('The video has no data yet.', 'InvalidStateError'));
   if (video.disablePictureInPicture) return Promise.reject(new DOMException('Picture in Picture is turned off for this video.', 'InvalidStateError'));
@@ -88,6 +88,127 @@ window.__summitPipLargest = () => {
   }
   return best ? tokenOf(best) : '';
 };
+// A Picture in Picture button at the right edge of the video under the
+// pointer: players such as YouTube cover the video and take its right
+// clicks. It lives in a closed shadow root on a fixed host of its own, out of
+// the page's layout and styles, and the page never sees its clicks (these
+// listeners on the window are the first to run).
+let host = null, button = null, shownFor = null, overButton = false, checkTimer = 0, idleTimer = 0, x = 0, y = 0;
+const css = ':host{all:initial}' +
+  'button{all:initial;position:fixed;display:flex;align-items:center;box-sizing:border-box;height:32px;padding:0 9px;' +
+  'transform:translate(-100%,-50%);border-radius:8px;background:rgba(18,18,20,.78);color:#fff;cursor:pointer;' +
+  'box-shadow:0 1px 4px rgba(0,0,0,.35),inset 0 0 0 1px rgba(255,255,255,.14);font:500 13px/1 system-ui,"Noto Sans",sans-serif;' +
+  'white-space:nowrap;pointer-events:auto;user-select:none;-webkit-user-select:none;transition:background .15s}' +
+  'button:hover{background:rgba(12,12,14,.92)}button.off{display:none}' +
+  'svg{display:block;width:20px;height:16px;flex:none}' +
+  'span{display:block;max-width:0;overflow:hidden;transition:max-width .2s,margin .2s}' +
+  'button:hover span{max-width:170px;margin-left:7px}';
+const svg = (name, attributes) => {
+  const element = document.createElementNS('http://www.w3.org/2000/svg', name);
+  for (const key in attributes) element.setAttribute(key, attributes[key]);
+  return element;
+};
+const ensureHost = (video) => {
+  const fullscreen = document.fullscreenElement || document.webkitFullscreenElement;
+  if (fullscreen && (fullscreen === video || !fullscreen.contains(video))) return false;
+  const parent = fullscreen || document.documentElement;
+  if (!parent) return false;
+  if (!host) {
+    host = document.createElement('summit-pip-button');
+    const fixed = { all: 'initial', position: 'fixed', left: '0', top: '0', width: '0', height: '0', 'z-index': '2147483647',
+      display: 'block', overflow: 'visible', 'pointer-events': 'none', visibility: 'visible', opacity: '1', transform: 'none' };
+    for (const key in fixed) host.style.setProperty(key, fixed[key], 'important');
+    const root = host.attachShadow({ mode: 'closed' });
+    if ('adoptedStyleSheets' in root && window.CSSStyleSheet) {
+      const sheet = new CSSStyleSheet();
+      sheet.replaceSync(css);
+      root.adoptedStyleSheets = [sheet];
+    } else {
+      const style = document.createElement('style');
+      style.textContent = css;
+      root.appendChild(style);
+    }
+    button = document.createElement('button');
+    button.className = 'off';
+    button.tabIndex = -1;
+    button.title = 'Picture in Picture';
+    button.setAttribute('aria-label', 'Picture in Picture');
+    const icon = svg('svg', { viewBox: '0 0 20 16', 'aria-hidden': 'true' });
+    icon.append(svg('rect', { x: '1', y: '1', width: '18', height: '14', rx: '2', fill: 'none', stroke: 'currentColor', 'stroke-width': '1.6' }),
+      svg('rect', { x: '9.5', y: '7.5', width: '7', height: '5', rx: '1', fill: 'currentColor' }));
+    const label = document.createElement('span');
+    label.textContent = 'Picture in Picture';
+    button.append(icon, label);
+    root.appendChild(button);
+  }
+  if (host.parentNode !== parent) parent.appendChild(host);
+  return true;
+};
+const hide = () => {
+  clearTimeout(idleTimer);
+  shownFor = null;
+  overButton = false;
+  if (button) button.className = 'off';
+};
+const videos = document.getElementsByTagName('video');
+// Big enough to be the page's video rather than a decoration, and loaded.
+const eligible = (video) => video.readyState > 0 && video !== current && !video.disablePictureInPicture && !(video.duration < 15);
+const videoAt = () => {
+  let found = null;
+  try {
+    found = document.elementsFromPoint(x, y).find((element) => element instanceof HTMLVideoElement) || null;
+  } catch (error) { }
+  // A video that takes no pointer events is still found by its box.
+  if (!found) {
+    for (const video of videos) {
+      const rect = video.getBoundingClientRect();
+      if (x >= rect.left && x < rect.right && y >= rect.top && y < rect.bottom && getComputedStyle(video).visibility === 'visible') { found = video; break; }
+    }
+  }
+  return found;
+};
+const check = () => {
+  checkTimer = 0;
+  // Most pages have no video: no hit test (and no layout) for them.
+  if (!videos.length) { if (shownFor) hide(); return; }
+  if (overButton && shownFor && eligible(shownFor)) { clearTimeout(idleTimer); return; }
+  const video = videoAt();
+  const rect = video && video.getBoundingClientRect();
+  if (!video || !eligible(video) || rect.width < 200 || rect.height < 110 || !ensureHost(video)) { hide(); return; }
+  const view = document.documentElement;
+  const right = Math.min(rect.right, view.clientWidth || innerWidth), top = Math.max(rect.top, 0);
+  const bottom = Math.min(rect.bottom, view.clientHeight || innerHeight);
+  if (bottom - top < 48) { hide(); return; }
+  button.style.left = Math.round(right - 10) + 'px';
+  button.style.top = Math.round((top + bottom) / 2) + 'px';
+  button.className = '';
+  shownFor = video;
+  // It goes when the pointer rests, as the players' own controls do.
+  clearTimeout(idleTimer);
+  idleTimer = setTimeout(() => { if (!overButton) hide(); }, 3000);
+};
+window.addEventListener('mousemove', (event) => {
+  x = event.clientX;
+  y = event.clientY;
+  overButton = !!host && event.target === host;
+  if (!checkTimer) checkTimer = setTimeout(check, overButton ? 0 : 90);
+}, { capture: true, passive: true });
+const press = (event) => {
+  if (!host || event.target !== host) return;
+  event.stopImmediatePropagation();
+  // Not on pointer events: a cancelled pointerdown would lose the click.
+  if (!event.type.startsWith('pointer')) event.preventDefault();
+  if (event.type === 'click' && event.button === 0 && shownFor) {
+    const video = shownFor;
+    hide();
+    request.call(video).catch(() => {});
+  }
+};
+for (const type of ['pointerdown', 'pointerup', 'mousedown', 'mouseup', 'click', 'dblclick', 'auxclick'])
+  window.addEventListener(type, press, true);
+for (const type of ['scroll', 'resize', 'blur', 'fullscreenchange', 'webkitfullscreenchange', 'enterpictureinpicture'])
+  window.addEventListener(type, (event) => { if (shownFor && (type !== 'blur' || event.target === window)) hide(); }, { capture: true, passive: true });
+document.addEventListener('mouseout', (event) => { if (!event.relatedTarget && shownFor) hide(); }, { capture: true, passive: true });
 })();)js";
 
 const char* const kPasswordScript = R"js((() => {

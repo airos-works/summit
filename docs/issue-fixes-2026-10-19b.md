@@ -185,6 +185,10 @@ Checked: a page's own button (`requestPictureInPicture()`), View › Picture in
 Picture, play/pause from the window, the picture still moving with the tab in
 the background, and a second request replacing the first window.
 
+#80 added a Picture in Picture button on the video, airTime's controller over
+the picture and a clearer back-to-tab button: see
+[picture-in-picture.md](picture-in-picture.md).
+
 ## #75 Websites as apps
 
 **File › Install as App…** reads the page's web app manifest (name, start
