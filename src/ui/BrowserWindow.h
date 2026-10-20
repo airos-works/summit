@@ -130,6 +130,9 @@ public:
     // does to a DirectConnected() over half a second: the pages then get no
     // word of the window moving or closing (BrowserWindow.cpp).
     bool DirectDaemonLost() const;
+    // Until app_server's first DirectConnected() for the shown window has
+    // returned, timeout at most; whether it has.
+    bool WaitForDirectConnection(bigtime_t timeout) const;
 #endif
 #else
     void NavigationRequested(const BString& url, BWebView* view) override;
@@ -412,6 +415,7 @@ private:
     std::map<std::string, bigtime_t> fPreconnected;
 #if SUMMIT_MODERN_WEBKIT
     std::atomic<thread_id> fDirectDaemon { -1 };
+    std::atomic<int32> fDirectConnections { 0 };
     bool fDirectDaemonLostHandled = false;
 #endif
     void RefreshChrome();

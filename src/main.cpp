@@ -1288,6 +1288,15 @@ private:
         );
         fWindows.insert(fWindows.begin(), {BMessenger(window), window, options.key, options.privateBrowsing, options.webApp});
         window->Show();
+#if SUMMIT_MODERN_WEBKIT
+        // The daemon thread of a new direct window clones the frame buffer over
+        // the application's app_server link before its first DirectConnected(),
+        // while app_server waits for that, half a second at most. This thread
+        // held the link creating the next window, so with several windows to
+        // restore one of them lost its daemon at every launch and its pages
+        // drew through app_server for good (#97). The next window waits.
+        window->WaitForDirectConnection(300000);
+#endif
         SUMMIT_EXTENSION_TIMING("browser window shown");
         return window;
     }

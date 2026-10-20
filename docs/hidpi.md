@@ -161,6 +161,20 @@ vertical blank). Untimed copies tore most frames there.
 `SUMMIT_DIRECT_PRESENT_SCAN_TIMING=0` turns it off; see performance.md,
 "20 October 2026".
 
+**Windows restored at launch keep their connection (#97).** The daemon
+thread of a new direct window clones the frame buffer over the application's
+app_server link before its first `DirectConnected()`, while app_server
+waits for it, half a second at most, and then gives the window up for good.
+The application thread held that link while it created the next restored
+window, so with five windows to restore three or four lost their daemon at
+every launch on the laptop ("lost its direct daemon", and app_server's
+"killed for a problem in DirectConnected()" in the syslog), and their pages
+drew through app_server. Each new window now waits, 300 ms at most, for its
+first connection before the next one is made: eight launches restoring five
+windows, no window lost. A daemon that app_server gives up on later (a
+monitor waking while another thread holds the link) still cannot be
+reconnected; that window's pages draw through app_server.
+
 **Two ways to hang the X399 found on the way** (both kernel faults, reported
 to the OS work; no ping on either interface, nothing in the syslog):
 

@@ -2407,6 +2407,15 @@ void BrowserWindow::DirectConnected(direct_buffer_info* info)
     fDirectDaemon = find_thread(nullptr);
     if (forward)
         BWebKitView::WindowDirectConnected(this, info);
+    fDirectConnections.fetch_add(1);
+}
+
+bool BrowserWindow::WaitForDirectConnection(bigtime_t timeout) const
+{
+    const bigtime_t end = system_time() + timeout;
+    while (!fDirectConnections.load() && system_time() < end)
+        snooze(2000);
+    return fDirectConnections.load() > 0;
 }
 
 bool BrowserWindow::DirectDaemonLost() const
