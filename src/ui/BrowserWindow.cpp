@@ -2018,8 +2018,8 @@ void BrowserWindow::OpenTabsForCommand(const BMessage& message, uint64 identifie
     for (int32 i = 0; message.FindString("url", i, &url) == B_OK; ++i) urls.push_back(url);
     bool select = message.GetBool(window ? "focused" : "active", true);
     if (window) {
-        // This browser has one window: windows.create() opens its pages as
-        // tabs here. Existing tabs named by the request already live here.
+        // The application made this window for windows.create() (empty): its
+        // pages open as tabs here, and the existing tabs it names are ours.
         BMessenger view;
         for (int32 i = 0; message.FindMessenger("view", i, &view) == B_OK; ++i) {
             auto* tab = FindTab(view);

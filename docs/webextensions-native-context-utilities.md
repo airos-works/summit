@@ -1,5 +1,10 @@
 # Native context permission and rule-path utilities
 
+> **Historical:** a design note from the porting of WebKit's extension runtime
+> (14-16 September 2026), written before any extension ran in Summit. What runs
+> today is described in [browser-extensions-default.md](browser-extensions-default.md),
+> the `modern-extension-*.md` and `webextensions-*.md` notes, and the issues.
+
 `hasActiveUserGesture` and `clearUserGesture` move from the Cocoa context to
 common C++ without changing their bodies. Clearing a gesture still removes
 the tab's temporary match pattern and forwards the permission-removal

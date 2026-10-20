@@ -1,5 +1,10 @@
 # Native runtime namespace bindings
 
+> **Historical:** a design note from the porting of WebKit's extension runtime
+> (14-16 September 2026), written before any extension ran in Summit. What runs
+> today is described in [browser-extensions-default.md](browser-extensions-default.md),
+> the `modern-extension-*.md` and `webextensions-*.md` notes, and the issues.
+
 Both extension and webpage namespace IDLs still marked `runtime` as
 Cocoa-only after the runtime implementation had been ported. The webpage
 namespace also guarded its C++ getter and backing member. These gates are

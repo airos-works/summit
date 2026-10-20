@@ -1,5 +1,10 @@
 # Native dynamic action icons
 
+> **Historical:** a design note from the porting of WebKit's extension runtime
+> (14-16 September 2026), written before any extension ran in Summit. What runs
+> today is described in [browser-extensions-default.md](browser-extensions-default.md),
+> the `modern-extension-*.md` and `webextensions-*.md` notes, and the issues.
+
 The native icon suite passes against `bundle-ptx4moys`: **49 API cases, 55 SDK
 and desktop pixel observations, and 455 native checks**. The owned browser and
 helpers exit cleanly, the crash monitor passes, and the frozen bundle and staged

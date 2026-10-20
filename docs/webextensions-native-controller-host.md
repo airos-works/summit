@@ -1,5 +1,10 @@
 # Native extension controller and browsing context
 
+> **Historical:** a design note from the porting of WebKit's extension runtime
+> (14-16 September 2026), written before any extension ran in Summit. What runs
+> today is described in [browser-extensions-default.md](browser-extensions-default.md),
+> the `modern-extension-*.md` and `webextensions-*.md` notes, and the issues.
+
 Haiku extension controllers now initialize an owned native browser-tab registry.
 When extensions are enabled, WebViewContextHaiku creates a controller bound to
 its existing website data store and uses that controller's registry for the

@@ -1,5 +1,10 @@
 # Native declarative request-rule loading
 
+> **Historical:** a design note from the porting of WebKit's extension runtime
+> (14-16 September 2026), written before any extension ran in Summit. What runs
+> today is described in [browser-extensions-default.md](browser-extensions-default.md),
+> the `modern-extension-*.md` and `webextensions-*.md` notes, and the issues.
+
 Engine patch `c3ff5b56144df26ae0b6d85df42c1ca453867d6a77f3fefa8a87966cc092519b`
 integrates this loader. The preceding popup build reached the linker with this
 function as its only missing symbol. Its first combined build exposed a missing

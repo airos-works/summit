@@ -1,5 +1,10 @@
 # Native extension test reporting
 
+> **Historical:** a design note from the porting of WebKit's extension runtime
+> (14-16 September 2026), written before any extension ran in Summit. What runs
+> today is described in [browser-extensions-default.md](browser-extensions-default.md),
+> the `modern-extension-*.md` and `webextensions-*.md` notes, and the issues.
+
 Haiku's controller handles the seven existing test-report messages: assertion,
 equality, log, message, added, started and finished. Each produces a
 `WebExtension test: ` log line followed by a JSON object. Reports retain source

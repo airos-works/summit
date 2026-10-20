@@ -1,5 +1,10 @@
 # Native sorted JSON for extension test reporting
 
+> **Historical:** a design note from the porting of WebKit's extension runtime
+> (14-16 September 2026), written before any extension ran in Summit. What runs
+> today is described in [browser-extensions-default.md](browser-extensions-default.md),
+> the `modern-extension-*.md` and `webextensions-*.md` notes, and the issues.
+
 The native JS wrapper now implements `toSortedJSONString`, used by extension
 test reports. JavaScriptCore serializes the input once, preserving JSON's
 handling of getters, `toJSON`, omitted properties and invalid root values.

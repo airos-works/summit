@@ -1,5 +1,10 @@
 # Deferred extension replies and background task draining
 
+> **Historical:** a design note from the porting of WebKit's extension runtime
+> (14-16 September 2026), written before any extension ran in Summit. What runs
+> today is described in [browser-extensions-default.md](browser-extensions-default.md),
+> the `modern-extension-*.md` and `webextensions-*.md` notes, and the issues.
+
 Queued background operations now retain an eager reply aggregator with an
 explicit fallback result. The actual completion handler is constructed when
 the queued operation starts. Discarding an operation before it starts thus

@@ -1,5 +1,10 @@
 # Request status and frame metadata
 
+> **Historical:** a design note from the porting of WebKit's extension runtime
+> (14-16 September 2026), written before any extension ran in Summit. What runs
+> today is described in [browser-extensions-default.md](browser-extensions-default.md),
+> the `modern-extension-*.md` and `webextensions-*.md` notes, and the issues.
+
 Request events now serialize the HTTP protocol, status code and server reason
 text together, for example `HTTP/1.1 404 Not Found`. A response without reason
 text retains its protocol and code without a fabricated phrase. Missing protocol

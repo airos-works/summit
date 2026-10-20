@@ -1,5 +1,10 @@
 # Native cookie API port
 
+> **Historical:** a design note from the porting of WebKit's extension runtime
+> (14-16 September 2026), written before any extension ran in Summit. What runs
+> today is described in [browser-extensions-default.md](browser-extensions-default.md),
+> the `modern-extension-*.md` and `webextensions-*.md` notes, and the issues.
+
 The port connects `cookies.get`, `getAll`, `set`, `remove` and
 `getAllCookieStores` to Haiku's real website data stores and Curl cookie database.
 It includes generated C++ bindings, privileged context IPC and populated

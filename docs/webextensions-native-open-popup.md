@@ -1,5 +1,10 @@
 # Native programmatic action popups
 
+> **Historical:** a design note from the porting of WebKit's extension runtime
+> (14-16 September 2026), written before any extension ran in Summit. What runs
+> today is described in [browser-extensions-default.md](browser-extensions-default.md),
+> the `modern-extension-*.md` and `webextensions-*.md` notes, and the issues.
+
 The Haiku `openPopup` implementation passes 342 browser checks across 41
 background commands, repeated on three fresh profiles in QEMU.
 Patch `591548f4b18259ad3de2ac4eeac855d882176d083f6718b15f41f5b2fd424c34`

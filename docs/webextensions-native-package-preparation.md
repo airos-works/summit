@@ -1,5 +1,10 @@
 # Native extension package preparation
 
+> **Historical:** a design note from the porting of WebKit's extension runtime
+> (14-16 September 2026), written before any extension ran in Summit. What runs
+> today is described in [browser-extensions-default.md](browser-extensions-default.md),
+> the `modern-extension-*.md` and `webextensions-*.md` notes, and the issues.
+
 The public `BWebKitContext` preparation API separates filesystem work from WebKit
 object creation. A serial worker extracts ZIP/XPI archives or snapshots directory
 packages. It copies and fingerprints the resources, then transfers an owned

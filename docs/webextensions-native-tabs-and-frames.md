@@ -1,5 +1,10 @@
 # Native extension tab, window and frame queries
 
+> **Historical:** a design note from the porting of WebKit's extension runtime
+> (14-16 September 2026), written before any extension ran in Summit. What runs
+> today is described in [browser-extensions-default.md](browser-extensions-default.md),
+> the `modern-extension-*.md` and `webextensions-*.md` notes, and the issues.
+
 Haiku extension contexts now map registered browser pages and windows to their
 normal per-extension identifiers. Each tab holds a weak WebPageProxy reference;
 each window holds its registry identifier. Lookups require a loaded context,

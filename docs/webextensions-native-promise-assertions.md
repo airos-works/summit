@@ -1,5 +1,10 @@
 # Native extension promise assertions
 
+> **Historical:** a design note from the porting of WebKit's extension runtime
+> (14-16 September 2026), written before any extension ran in Summit. What runs
+> today is described in [browser-extensions-default.md](browser-extensions-default.md),
+> the `modern-extension-*.md` and `webextensions-*.md` notes, and the issues.
+
 The implementation moves `browser.test.assertRejects` and `assertResolves` from Cocoa
 to common C++. A shared helper resolves input through a fresh intrinsic promise
 and transforms its settlement through native callbacks. Callback return values

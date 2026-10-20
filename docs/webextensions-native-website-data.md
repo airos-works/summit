@@ -1,5 +1,10 @@
 # Native stale extension website-data cleanup
 
+> **Historical:** a design note from the porting of WebKit's extension runtime
+> (14-16 September 2026), written before any extension ran in Summit. What runs
+> today is described in [browser-extensions-default.md](browser-extensions-default.md),
+> the `modern-extension-*.md` and `webextensions-*.md` notes, and the issues.
+
 Haiku's persistent extension context now fetches website-data records from the
 controller's default data store and applies the existing Cocoa cleanup policy.
 It selects origins whose schemes are registered extension schemes and whose

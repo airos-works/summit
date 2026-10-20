@@ -1,5 +1,10 @@
 # Native DNR URL-filter translation
 
+> **Historical:** a design note from the porting of WebKit's extension runtime
+> (14-16 September 2026), written before any extension ran in Summit. What runs
+> today is described in [browser-extensions-default.md](browser-extensions-default.md),
+> the `modern-extension-*.md` and `webextensions-*.md` notes, and the issues.
+
 The Haiku port has a native C++ foundation for translating the URL fields of
 declarative request rules into WebCore content-rule filters. This helper is not
 yet connected to the DNR ruleset loader. It does not apply actions, register rule

@@ -1,5 +1,10 @@
 # Compound URL conditions for native declarative request rules
 
+> **Historical:** a design note from the porting of WebKit's extension runtime
+> (14-16 September 2026), written before any extension ran in Summit. What runs
+> today is described in [browser-extensions-default.md](browser-extensions-default.md),
+> the `modern-extension-*.md` and `webextensions-*.md` notes, and the issues.
+
 WebCore's content-rule compiler now has a representation for independent request,
 top-page and frame URL conditions. This supplies the matching foundation for the
 native DNR translator. The extension ruleset loader is still unfinished, the full

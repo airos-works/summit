@@ -1,5 +1,10 @@
 # Native windows reads and event dispatch
 
+> **Historical:** a design note from the porting of WebKit's extension runtime
+> (14-16 September 2026), written before any extension ran in Summit. What runs
+> today is described in [browser-extensions-default.md](browser-extensions-default.md),
+> the `modern-extension-*.md` and `webextensions-*.md` notes, and the issues.
+
 The Haiku port implements `windows.get`, `getCurrent`, `getLastFocused`,
 `getAll`, `WINDOW_ID_NONE`, `WINDOW_ID_CURRENT`, and web-process dispatch for
 `onCreated`, `onRemoved`, and `onFocusChanged`. It reads the native browser

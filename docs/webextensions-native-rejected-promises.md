@@ -1,5 +1,10 @@
 # Native rejected-promise construction
 
+> **Historical:** a design note from the porting of WebKit's extension runtime
+> (14-16 September 2026), written before any extension ran in Summit. What runs
+> today is described in [browser-extensions-default.md](browser-extensions-default.md),
+> the `modern-extension-*.md` and `webextensions-*.md` notes, and the issues.
+
 Generated extension bindings use `toJSRejectedPromise` for some invalid API
 calls. Its implementation previously required Cocoa's JSValue wrapper and
 was missing from the native link. It now lives in common C++, using

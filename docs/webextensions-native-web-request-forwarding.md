@@ -1,5 +1,10 @@
 # Native resource notifications for extensions
 
+> **Historical:** a design note from the porting of WebKit's extension runtime
+> (14-16 September 2026), written before any extension ran in Summit. What runs
+> today is described in [browser-extensions-default.md](browser-extensions-default.md),
+> the `modern-extension-*.md` and `webextensions-*.md` notes, and the issues.
+
 Haiku now marks loader requests when their page's actual extension controller has
 loaded contexts. This activates WebKit's existing network resource notifications.
 The page proxy forwards request, redirect, challenge, response, completion and

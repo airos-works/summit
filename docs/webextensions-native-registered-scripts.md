@@ -1,5 +1,10 @@
 # Native restoration of registered scripts
 
+> **Historical:** a design note from the porting of WebKit's extension runtime
+> (14-16 September 2026), written before any extension ran in Summit. What runs
+> today is described in [browser-extensions-default.md](browser-extensions-default.md),
+> the `modern-extension-*.md` and `webextensions-*.md` notes, and the issues.
+
 Restoring saved registered scripts now uses common C++ and a JSON parser.
 The parser preserves ordered file lists, optional fields, explicit false
 values, frame choices, injection time, world and CSS origin. Initial

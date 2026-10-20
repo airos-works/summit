@@ -1,5 +1,10 @@
 # Native extension test-message delivery
 
+> **Historical:** a design note from the porting of WebKit's extension runtime
+> (14-16 September 2026), written before any extension ran in Summit. What runs
+> today is described in [browser-extensions-default.md](browser-extensions-default.md),
+> the `modern-extension-*.md` and `webextensions-*.md` notes, and the issues.
+
 Haiku's extension context accepts JSON values for test messages and test-started
 and test-finished notifications. It retains arguments while queued, then routes
 the existing IPC messages to web-page and content-script listeners and wakes

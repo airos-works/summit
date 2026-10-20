@@ -1,5 +1,10 @@
 # Native extension package identity and install state
 
+> **Historical:** a design note from the porting of WebKit's extension runtime
+> (14-16 September 2026), written before any extension ran in Summit. What runs
+> today is described in [browser-extensions-default.md](browser-extensions-default.md),
+> the `modern-extension-*.md` and `webextensions-*.md` notes, and the issues.
+
 Haiku extension construction now creates an owned resource snapshot and records
 its SHA-256 fingerprint. Directory loads copy their resources into a private
 `WebKitPackage-*` directory. ZIP/XPI loads first use the existing extractor, copy

@@ -1,5 +1,10 @@
 # Native extension action popup
 
+> **Historical:** a design note from the porting of WebKit's extension runtime
+> (14-16 September 2026), written before any extension ran in Summit. What runs
+> today is described in [browser-extensions-default.md](browser-extensions-default.md),
+> the `modern-extension-*.md` and `webextensions-*.md` notes, and the issues.
+
 The native WebKit action popup now runs real extension HTML and JavaScript
 through Summit's toolbar and public SDK. The complete engine builds and the
 browser tests cover actual popup input, storage, tab changes, unload and

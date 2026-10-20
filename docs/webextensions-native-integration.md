@@ -1,4 +1,9 @@
-Native WebExtensions integration investigation, 2026-09-14
+# Native WebExtensions integration investigation, 2026-09-14
+
+> **Historical:** a design note from the porting of WebKit's extension runtime
+> (14-16 September 2026), written before any extension ran in Summit. What runs
+> today is described in [browser-extensions-default.md](browser-extensions-default.md),
+> the `modern-extension-*.md` and `webextensions-*.md` notes, and the issues.
 
 This records the native integration route for upstream WebKit
 `00991b6cdc59937da6076c69a22ae6a9460a4445` and the implemented extension

@@ -1,5 +1,10 @@
 # Native extension action state
 
+> **Historical:** a design note from the porting of WebKit's extension runtime
+> (14-16 September 2026), written before any extension ran in Summit. What runs
+> today is described in [browser-extensions-default.md](browser-extensions-default.md),
+> the `modern-extension-*.md` and `webextensions-*.md` notes, and the issues.
+
 Haiku now implements action objects for default, window and tab scopes. Labels,
 badge text, enabled state, popup paths and custom icons follow their scope's
 fallback action. Icon selection uses the existing native resource loader and

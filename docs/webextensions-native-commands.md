@@ -1,5 +1,10 @@
 # Native extension commands
 
+> **Historical:** a design note from the porting of WebKit's extension runtime
+> (14-16 September 2026), written before any extension ran in Summit. What runs
+> today is described in [browser-extensions-default.md](browser-extensions-default.md),
+> the `modern-extension-*.md` and `webextensions-*.md` notes, and the issues.
+
 Haiku implements the command model, `commands.getAll()`, Firefox-style
 `commands.update()` and `commands.reset()`, and both command event dispatchers.
 The namespace and generated JavaScript bindings now expose these native

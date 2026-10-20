@@ -1,5 +1,10 @@
 # Native menu implementation candidate
 
+> **Historical:** a design note from the porting of WebKit's extension runtime
+> (14-16 September 2026), written before any extension ran in Summit. What runs
+> today is described in [browser-extensions-default.md](browser-extensions-default.md),
+> the `modern-extension-*.md` and `webextensions-*.md` notes, and the issues.
+
 The 25-file candidate connects menu property validation, typed identifiers,
 JavaScript bindings, UI IPC, menu model operations and callback dispatch.
 Both `menus` and `contextMenus` use the same native API object and require

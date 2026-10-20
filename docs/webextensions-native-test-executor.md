@@ -1,5 +1,10 @@
 # Common extension queued-test execution
 
+> **Historical:** a design note from the porting of WebKit's extension runtime
+> (14-16 September 2026), written before any extension ran in Summit. What runs
+> today is described in [browser-extensions-default.md](browser-extensions-default.md),
+> the `modern-extension-*.md` and `webextensions-*.md` notes, and the issues.
+
 The implementation moves `addTest` and the sequential test executor from Cocoa to
 common C++. Named functions are queued with their completion functions and
 source locations. Each run emits TestAdded, TestStarted and TestFinished through

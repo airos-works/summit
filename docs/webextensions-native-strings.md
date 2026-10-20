@@ -1,5 +1,10 @@
 # Extension string preservation
 
+> **Historical:** a design note from the porting of WebKit's extension runtime
+> (14-16 September 2026), written before any extension ran in Summit. What runs
+> today is described in [browser-extensions-default.md](browser-extensions-default.md),
+> the `modern-extension-*.md` and `webextensions-*.md` notes, and the issues.
+
 The common extension string bridge now copies UTF-16 code units directly
 between WTF strings and JavaScriptCore strings. Its previous UTF-8 C-string
 conversion truncated embedded NULs and replaced unpaired surrogates. The

@@ -1,5 +1,10 @@
 # Native background listener state
 
+> **Historical:** a design note from the porting of WebKit's extension runtime
+> (14-16 September 2026), written before any extension ran in Summit. What runs
+> today is described in [browser-extensions-default.md](browser-extensions-default.md),
+> the `modern-extension-*.md` and `webextensions-*.md` notes, and the issues.
+
 The Haiku background adapter now loads and saves its event listener cache
 in the context's JSON state, using the existing atomic state-file writer.
 The cache stores full event names and unsigned registration counts. It

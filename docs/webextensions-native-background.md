@@ -1,5 +1,10 @@
 # Native extension background pages
 
+> **Historical:** a design note from the porting of WebKit's extension runtime
+> (14-16 September 2026), written before any extension ran in Summit. What runs
+> today is described in [browser-extensions-default.md](browser-extensions-default.md),
+> the `modern-extension-*.md` and `webextensions-*.md` notes, and the issues.
+
 The Haiku extension context now has an adapter for creating and owning a
 background page through the existing native `WebView` page client. The
 extension-only factory accepts a prepared `API::PageConfiguration` and

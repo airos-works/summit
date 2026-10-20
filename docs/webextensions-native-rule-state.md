@@ -1,5 +1,10 @@
 # Native saved network-rule state
 
+> **Historical:** a design note from the porting of WebKit's extension runtime
+> (14-16 September 2026), written before any extension ran in Summit. What runs
+> today is described in [browser-extensions-default.md](browser-extensions-default.md),
+> the `modern-extension-*.md` and `webextensions-*.md` notes, and the issues.
+
 Haiku restores enabled static rulesets from its JSON extension state. Valid
 saved booleans override the corresponding manifest defaults. Missing entries,
 malformed values and unknown identifiers leave the declared defaults intact.

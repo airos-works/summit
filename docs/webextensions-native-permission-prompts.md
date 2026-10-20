@@ -1,5 +1,10 @@
 # Native extension consent
 
+> **Historical:** a design note from the porting of WebKit's extension runtime
+> (14-16 September 2026), written before any extension ran in Summit. What runs
+> today is described in [browser-extensions-default.md](browser-extensions-default.md),
+> the `modern-extension-*.md` and `webextensions-*.md` notes, and the issues.
+
 Summit now has a native consent broker, a public SDK listener/reply path, and a
 scrollable Haiku permission dialog. Extension controllers own the broker;
 their profile context exposes it to the SDK. An extension unload cancels

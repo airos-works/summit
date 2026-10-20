@@ -1,5 +1,10 @@
 # Native temporary tab access and command routing
 
+> **Historical:** a design note from the porting of WebKit's extension runtime
+> (14-16 September 2026), written before any extension ran in Summit. What runs
+> today is described in [browser-extensions-default.md](browser-extensions-default.md),
+> the `modern-extension-*.md` and `webextensions-*.md` notes, and the issues.
+
 Engine patch `ccacaaa8748dde7ba4432cd53707f5731332951c7b8d727f82d0d45599ff3b5d`
 connects native user gestures to temporary tab permissions and command dispatch.
 The helper passes 61 checks in Haiku; nine connected engine translation units

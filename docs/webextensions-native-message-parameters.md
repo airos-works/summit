@@ -1,5 +1,10 @@
 # Extension message metadata
 
+> **Historical:** a design note from the porting of WebKit's extension runtime
+> (14-16 September 2026), written before any extension ran in Summit. What runs
+> today is described in [browser-extensions-default.md](browser-extensions-default.md),
+> the `modern-extension-*.md` and `webextensions-*.md` notes, and the issues.
+
 Runtime sender conversion now lives in common C++ and uses a new
 `JSWebExtensionTabParameters` helper. The helper creates the JavaScript tab
 object directly, preserving absent optional fields and explicit false

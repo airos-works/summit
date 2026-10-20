@@ -145,12 +145,16 @@ support, or at a different profile, produces the same impression.
 
 ## Known limits that affect 1Password
 
-- Blocking `webRequest` decisions are not applied (HTTP-auth filling through
-  `onAuthRequired`).
-- `notifications.onClicked` never fires.
-- `downloads` is absent (exporting files such as the Emergency Kit).
-- `storage.managed` is absent (unused by the Firefox build).
-- No desktop-app integration, biometrics or SSH agent: those need a native host.
+Updated 20 October 2026. Since this was first written, blocking `webRequest`
+(cancel, redirect, headers and `onAuthRequired`,
+[webextensions-webrequest-blocking.md](webextensions-webrequest-blocking.md)),
+the `downloads` API (exporting the Emergency Kit,
+[webextensions-dnr-downloads.md](webextensions-dnr-downloads.md)),
+`storage.managed` and OffscreenCanvas have landed. What is left:
+
+- `notifications.onClicked` (issue #102, in progress).
+- No desktop-app integration, biometrics or SSH agent: those need a native
+  messaging host (#106).
 
 ## CPU scheduling (9 October 2026)
 

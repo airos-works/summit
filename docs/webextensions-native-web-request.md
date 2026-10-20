@@ -1,5 +1,10 @@
 # Web request extension events in common C++
 
+> **Historical:** a design note from the porting of WebKit's extension runtime
+> (14-16 September 2026), written before any extension ran in Summit. What runs
+> today is described in [browser-extensions-default.md](browser-extensions-default.md),
+> the `modern-extension-*.md` and `webextensions-*.md` notes, and the issues.
+
 The WebRequest namespace and event bindings now use C++. Six process-side
 resource notification handlers produce the nine existing WebKit request events,
 including request headers/body, response metadata, redirects, authentication

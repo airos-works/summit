@@ -1,5 +1,10 @@
 # Native tabs reads and events
 
+> **Historical:** a design note from the porting of WebKit's extension runtime
+> (14-16 September 2026), written before any extension ran in Summit. What runs
+> today is described in [browser-extensions-default.md](browser-extensions-default.md),
+> the `modern-extension-*.md` and `webextensions-*.md` notes, and the issues.
+
 The Haiku port implements `tabs.get`, `tabs.getCurrent`, `tabs.query`,
 `TAB_ID_NONE`, and all nine upstream tab lifecycle events to the native C++
 bindings. It uses the existing native browser registry and permission-filtered

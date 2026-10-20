@@ -1,5 +1,10 @@
 # Native extension state and resource adapters
 
+> **Historical:** a design note from the porting of WebKit's extension runtime
+> (14-16 September 2026), written before any extension ran in Summit. What runs
+> today is described in [browser-extensions-default.md](browser-extensions-default.md),
+> the `modern-extension-*.md` and `webextensions-*.md` notes, and the issues.
+
 The 2026-09-14 port adds native context state and resource-serving implementations
 and extracts more of WebKit's lifecycle from Cocoa. **No extension runs in Summit
 yet.** The ordinary browser keeps `ENABLE_WK_WEB_EXTENSIONS=OFF`; the separate

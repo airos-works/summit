@@ -1,5 +1,10 @@
 # Native cookie backend port
 
+> **Historical:** a design note from the porting of WebKit's extension runtime
+> (14-16 September 2026), written before any extension ran in Summit. What runs
+> today is described in [browser-extensions-default.md](browser-extensions-default.md),
+> the `modern-extension-*.md` and `webextensions-*.md` notes, and the issues.
+
 The cookie API port exposed missing behavior in the Curl backend. This port
 repairs storage metadata, expiry and exact cookie deletion, and implements the
 native network session's URL lookup. It is integrated as engine patch

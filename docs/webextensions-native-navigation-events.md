@@ -1,5 +1,10 @@
 # Common navigation and cookie event forwarding
 
+> **Historical:** a design note from the porting of WebKit's extension runtime
+> (14-16 September 2026), written before any extension ran in Summit. What runs
+> today is described in [browser-extensions-default.md](browser-extensions-default.md),
+> the `modern-extension-*.md` and `webextensions-*.md` notes, and the issues.
+
 Four context navigation handlers now live in common C++: provisional start,
 commit, completion and failure. The two cookie notification methods move
 with them. All six bodies are unchanged from Cocoa. They retain permission

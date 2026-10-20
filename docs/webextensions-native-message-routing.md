@@ -1,5 +1,10 @@
 # Native extension message routing
 
+> **Historical:** a design note from the porting of WebKit's extension runtime
+> (14-16 September 2026), written before any extension ran in Summit. What runs
+> today is described in [browser-extensions-default.md](browser-extensions-default.md),
+> the `modern-extension-*.md` and `webextensions-*.md` notes, and the issues.
+
 The UI runtime handlers for background-page lookup, reload, internal
 messages/connections, page-to-extension messages/connections and startup/
 install events now live in common `WebExtensionContextAPIRuntime.cpp`.
