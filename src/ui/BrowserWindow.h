@@ -413,6 +413,8 @@ private:
     Autofill fAutofill;
     // Servers connected to ahead of time, by origin, and when.
     std::map<std::string, bigtime_t> fPreconnected;
+    // When typing in the field last asked the engine for a spare web process.
+    bigtime_t fProcessPrewarmedAt = 0;
 #if SUMMIT_MODERN_WEBKIT
     std::atomic<thread_id> fDirectDaemon { -1 };
     std::atomic<int32> fDirectConnections { 0 };

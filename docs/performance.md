@@ -73,6 +73,102 @@ percentile 17.0-33.5 ms timed against 20.6-48.4 ms untimed.
 Programs other than Summit that write into the screen (BDirectWindow) still
 need jmgasper/haiku#39.
 
+## 20 October 2026: from Enter to the page (#81)
+
+jmgasper/summit#81: on the Framework 13 the time from Enter in the address
+field to the page starting to load seemed longer than it should be. Measured
+on the laptop with test copies of the browser (CI 0816 with
+`SUMMIT_NAV_TRACE=1`, see [navigation-timing.md](navigation-timing.md)),
+wired network, fresh profiles, addresses typed into the field with
+`summitctl typeaddress` and Enter a second later.
+
+### Where the time goes
+
+Milliseconds from the key, typical ranges over about 80 navigations
+(Wikipedia articles, GitHub, Hacker News, BBC, ABC News, The Guardian,
+YouTube, a DuckDuckGo search, typed with and without `https://`):
+
+| stage | same site | another site, spare process ready | another site, no spare |
+| --- | --- | --- | --- |
+| tab shows loading (address, dot, progress line) | 1-3 | 1-4 | 1-4 |
+| load on the engine's main loop | 0-1 | 0-1 | 0-1 |
+| old web process asks the navigation policy | 1-8 | 1-8 | 1-8 (19-80 while the old page is still busy loading) |
+| request leaves (provisional load) | 2-7 | 15-37 | 160-310 |
+| first byte of the response | network | network | network |
+| first byte to commit | 2-47 | 2-47 | 2-47 |
+| first visually non-empty layout to first frame | 30-50 | 30-50 (a process that painted before), 60-160 (a new one; 290 once) | 60-160 |
+
+- **The browser's part is quick.** Enter reaches the engine within 1 ms and
+  the tab shows that it is loading 1-4 ms after the key. The UI process's
+  navigation policy takes 0.1-0.3 ms. The same held with uBlock Origin,
+  1Password and SponsorBlock installed (the blocking webRequest round trips
+  add 4-12 ms before the request), and with a second window animating a
+  canvas at 60 fps and a background tab running a WebSocket dashboard
+  (request at 33-39 ms on a process swap). No UI-thread stall over 50 ms
+  during the navigations (`SUMMIT_UI_STALL_TRACE=1`).
+- **Most of the wait is the network.** The laptop is 185 ms from Wikipedia's
+  nearest servers: a new connection is DNS (1-200 ms, the router's cache),
+  TCP and TLS 1.3 (2 round trips, 370-390 ms), and the page another round
+  trip, 590 ms in all, as `curl` measures from the same laptop. A page missing
+  from Wikipedia's edge cache (it varies on the user agent) adds 0.5-1 s of
+  server time; that happened on several article loads. The engine preconnects
+  as the navigation starts (1 ms), so a process swap's 15-37 ms overlap the
+  connection. Wikipedia's edge sends the body about 40 ms after the headers,
+  and the curl port hands the response on with its first bytes: the 40 ms of
+  "first byte to commit".
+- **The slow case was a missing spare process.** Every new site gets a web
+  process of its own (WebKit swaps processes on cross-site navigations here),
+  and starting one costs 0.15-0.3 s before the page can even be asked for. The
+  engine kept a spare one, but only started it a second after a page had
+  finished loading. Any address entered within a few seconds of the last one,
+  or while a page was still loading (pages with ads or streams can take many
+  seconds to finish), waited for a process to start.
+- **A new process's first frame is slower.** The first composition in a fresh
+  web process took 63-97 ms (241 ms once), against 12-34 ms in one that had
+  painted before: its surface (9-12 ms), new tile textures, and the first
+  direct present with app_server's copy of the screen on AMD (34-60 ms;
+  4-18 ms with `SUMMIT_DIRECT_PRESENT_BACK=0`). Not changed here.
+- The X399 (NVIDIA, fresh profile, same sites) is slower than the laptop:
+  15-104 ms before a swapped navigation's request and 100-400 ms from the
+  first visually non-empty layout to the first frame.
+
+### What changed
+
+A spare web process is started while the user types in the address field
+(`BWebKitView::PrewarmProcess()`, new) and a second after each page's first
+visually non-empty layout, as well as a second after a load finishes as
+before. Same sequence, typed into a fresh profile each run, before (CI 0816
+engine with the trace) and after:
+
+| address entered 0.4 s after the last (still loading), DuckDuckGo search | before (4 runs) | after (6 runs) |
+| --- | --- | --- |
+| old web process asks the navigation policy | 4, 80, 8, 55 ms | 55, 24, 12, 19, 129, 51 ms |
+| request leaves | 186, 258, 197, 312 ms | 81, 46, 42, 41, 153, 76 ms |
+| of which after the policy (process start) | 182, 178, 189, 257 ms | 26, 22, 30, 22, 24, 25 ms |
+| first frame of the new page | 805, 1016, 726, 1028 ms | 697, 692, 666, 668, 759, 699 ms |
+
+The last two "after" runs are the final engine and browser (test engine
+`nav4`, browser `nav4a`); the first four had the same change in an earlier
+test engine. What is left after Enter in that case is the old page's web
+process, busy loading, answering the load request before it asks the policy
+(12-129 ms): WebKit sends a typed load to the page's current process first.
+
+Hacker News typed while The Guardian was still loading needed a new process
+in one of the four runs before (request at 200 ms) and in none after
+(26-31 ms). Ordinary navigations with a spare ready did not change: over the
+ten-site sequence (two runs each) the request left at a median of 28-30 ms
+before and after, and the first frame came at a median of 642-692 ms before
+and 648-654 ms after. A spare process is one more process for a while
+(about the size of an empty page's), as before; there is never more than one.
+
+Also tried and left out: the disk cache's speculative revalidation
+(`WebsiteDataStoreConfiguration::setNetworkCacheSpeculativeValidationEnabled`,
+on in the GTK and WPE ports). It holds first-party subresources until the
+page's own response (no gain), and for a test page whose style sheets came
+from another site it revalidated them early but the page's own requests
+then went to the server again (the stored request headers did not match), so
+nothing was gained.
+
 ## 19 October 2026 (evening): app_server's copy of the screen written on AMD
 
 Since jmgasper/haiku#37 the web process copies its frames straight into the

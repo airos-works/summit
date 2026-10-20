@@ -17800,6 +17800,52 @@ index 68f798ab3b4a968c6dba787ac524e4c39e326bd2..20f3145e8d62462c19fbe78fdf228dfc
  #endif
  };
  
+diff --git a/Source/WebCore/platform/ThreadTimers.cpp b/Source/WebCore/platform/ThreadTimers.cpp
+index 08ef6a3e6069a8b6e04415fb6aff9c0ac913edad..6a8c253bb948c09de8cc32dd21748dde8c86e361 100644
+--- a/Source/WebCore/platform/ThreadTimers.cpp
++++ b/Source/WebCore/platform/ThreadTimers.cpp
+@@ -33,6 +33,7 @@
+ #include "Timer.h"
+ #include <wtf/ApproximateTime.h>
+ #include <wtf/MainThread.h>
++#include <wtf/SetForScope.h>
+ #include <wtf/SystemTracing.h>
+ #include <wtf/TZoneMallocInlines.h>
+ 
+@@ -106,12 +107,19 @@ void ThreadTimers::sharedTimerFiredInternal()
+         return;
+ 
+     TraceScope threadTimersScope { ThreadTimersStart, ThreadTimersEnd };
+-    m_firingTimers = true;
+     m_pendingSharedTimerFireTime = MonotonicTime { };
+ 
+     auto fireTime = MonotonicTime::now();
+     auto timeToQuit = ApproximateTime::now() + maxDurationOfFiringTimers;
+ 
++    {
++#if PLATFORM(HAIKU)
++    // Cleared however the loop is left: a flag left set would stop every timer
++    // of the thread for good (updateSharedTimer() below arms none while it is).
++    SetForScope firingTimers { m_firingTimers, true };
++#else
++    m_firingTimers = true;
++#endif
+     while (!m_timerHeap.isEmpty()) {
+         Ref item = m_timerHeap.first();
+         ASSERT(item->hasTimer());
+@@ -140,8 +148,11 @@ void ThreadTimers::sharedTimerFiredInternal()
+         if (m_shouldBreakFireLoopForRenderingUpdate)
+             break;
+     }
+-
++#if !PLATFORM(HAIKU)
+     m_firingTimers = false;
++#endif
++    }
++
+     m_shouldBreakFireLoopForRenderingUpdate = false;
+ 
+     updateSharedTimer();
 diff --git a/Source/WebCore/platform/VideoFrame.cpp b/Source/WebCore/platform/VideoFrame.cpp
 index 423db07dd43dea3b02f525149cff6389c3f2b929..1133a8c8c376fa132fe497e7f1b0e0263b269ca6 100644
 --- a/Source/WebCore/platform/VideoFrame.cpp
@@ -58931,7 +58977,7 @@ index 0000000000000000000000000000000000000000..da71c185bfa5f93bf68ba7a513f48393
 +
 +#endif
 diff --git a/Source/WebCore/platform/network/curl/CurlRequest.cpp b/Source/WebCore/platform/network/curl/CurlRequest.cpp
-index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..e6db0970fff79f3b4c491e0de1a2b81b7eebbade 100644
+index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..5ae8ff7d07d46c147e02e3944d621f1be29662ae 100644
 --- a/Source/WebCore/platform/network/curl/CurlRequest.cpp
 +++ b/Source/WebCore/platform/network/curl/CurlRequest.cpp
 @@ -36,19 +36,377 @@
@@ -59348,7 +59394,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..e6db0970fff79f3b4c491e0de1a2b81b
 +#if PLATFORM(HAIKU)
 +    if (netTraceHaiku()) {
 +        m_netTraceQueuedAtHaiku = MonotonicTime::now();
-+        fprintf(stderr, "Summit net: start id=%p %s %s\n", this, m_request.httpMethod().utf8().legacyCStringPointer(), netTraceURLHaiku(m_request.url()).legacyCStringPointer());
++        fprintf(stderr, "Summit net: start id=%p at=%.3f %s %s\n", this, m_netTraceQueuedAtHaiku.secondsSinceEpoch().seconds(), m_request.httpMethod().utf8().legacyCStringPointer(), netTraceURLHaiku(m_request.url()).legacyCStringPointer());
 +    }
 +#endif
  
@@ -59585,8 +59631,8 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..e6db0970fff79f3b4c491e0de1a2b81b
 +        auto metrics = networkLoadMetrics();
 +        noteServerProtocolHaiku(m_request.url(), !m_preconnectedMultiplexedHaiku);
 +        if (netTraceHaiku() && m_netTraceQueuedAtHaiku) {
-+            fprintf(stderr, "Summit net: preconnected id=%p queue=%.0f dns=%.0f connect=%.0f tls=%.0f total=%.0f proto=%s %s\n",
-+                this, netTraceMsHaiku(m_netTraceQueuedAtHaiku, m_performStartTime),
++            fprintf(stderr, "Summit net: preconnected id=%p at=%.3f queue=%.0f dns=%.0f connect=%.0f tls=%.0f total=%.0f proto=%s %s\n",
++                this, MonotonicTime::now().secondsSinceEpoch().seconds(), netTraceMsHaiku(m_netTraceQueuedAtHaiku, m_performStartTime),
 +                netTraceMsHaiku(metrics.domainLookupStart, metrics.domainLookupEnd), netTraceMsHaiku(metrics.connectStart, metrics.connectEnd),
 +                netTraceMsHaiku(metrics.secureConnectionStart, metrics.connectEnd), netTraceMsHaiku(m_netTraceQueuedAtHaiku, MonotonicTime::now()),
 +                m_preconnectedMultiplexedHaiku ? "h2" : "http/1.1 (closed)", netTraceURLHaiku(m_request.url()).legacyCStringPointer());
@@ -59616,8 +59662,8 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..e6db0970fff79f3b4c491e0de1a2b81b
 +            noteServerProtocolHaiku(m_request.url(), metrics.protocol == "http/1.1"_s || metrics.protocol == "http/1.0"_s);
 +        if (netTraceHaiku() && m_netTraceQueuedAtHaiku) {
 +            auto now = MonotonicTime::now();
-+            fprintf(stderr, "Summit net: done id=%p status=%d queue=%.0f dns=%.0f connect=%.0f tls=%.0f ttfb=%.0f total=%.0f bytes=%zu proto=%s %s\n",
-+                this, m_response.statusCode, netTraceMsHaiku(m_netTraceQueuedAtHaiku, m_performStartTime),
++            fprintf(stderr, "Summit net: done id=%p at=%.3f first-byte-at=%.3f status=%d queue=%.0f dns=%.0f connect=%.0f tls=%.0f ttfb=%.0f total=%.0f bytes=%zu proto=%s %s\n",
++                this, now.secondsSinceEpoch().seconds(), metrics.responseStart.secondsSinceEpoch().seconds(), m_response.statusCode, netTraceMsHaiku(m_netTraceQueuedAtHaiku, m_performStartTime),
 +                netTraceMsHaiku(metrics.domainLookupStart, metrics.domainLookupEnd), netTraceMsHaiku(metrics.connectStart, metrics.connectEnd),
 +                netTraceMsHaiku(metrics.secureConnectionStart, metrics.connectEnd), netTraceMsHaiku(metrics.requestStart, metrics.responseStart),
 +                netTraceMsHaiku(m_netTraceQueuedAtHaiku, now), m_totalReceivedSize, metrics.protocol.utf8().legacyCStringPointer(),
@@ -59633,7 +59679,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..e6db0970fff79f3b4c491e0de1a2b81b
          auto resourceError = ResourceError(result, m_request.url(), type);
 +#if PLATFORM(HAIKU)
 +        if (netTraceHaiku() && m_netTraceQueuedAtHaiku)
-+            fprintf(stderr, "Summit net: fail id=%p result=%d (%s) total=%.0f %s\n", this, static_cast<int>(result), curl_easy_strerror(result),
++            fprintf(stderr, "Summit net: fail id=%p at=%.3f result=%d (%s) total=%.0f %s\n", this, MonotonicTime::now().secondsSinceEpoch().seconds(), static_cast<int>(result), curl_easy_strerror(result),
 +                netTraceMsHaiku(m_netTraceQueuedAtHaiku, MonotonicTime::now()), netTraceURLHaiku(m_request.url()).legacyCStringPointer());
 +#endif
  
@@ -68177,7 +68223,7 @@ index 5a8bebfa4fb03b8ed66afe52ec6ea95d97a987ac..7595c5866ece87286d0992e64c684ede
 +#endif
  }
 diff --git a/Source/WebKit/NetworkProcess/NetworkResourceLoader.cpp b/Source/WebKit/NetworkProcess/NetworkResourceLoader.cpp
-index 0ecf172b29e1ba69a2573c3de5351f86e5a4ef0e..12341ff7480d381c8eb430e1df7c2de05c911d2a 100644
+index 0ecf172b29e1ba69a2573c3de5351f86e5a4ef0e..91f7663a7514e60fa33e37ff383d335609f4e16c 100644
 --- a/Source/WebKit/NetworkProcess/NetworkResourceLoader.cpp
 +++ b/Source/WebKit/NetworkProcess/NetworkResourceLoader.cpp
 @@ -115,6 +115,14 @@
@@ -68226,7 +68272,7 @@ index 0ecf172b29e1ba69a2573c3de5351f86e5a4ef0e..12341ff7480d381c8eb430e1df7c2de0
 +        // BFS competes with the cache's own writes during a large load.
 +        static const bool netTrace = [] { const char* value = getenv("SUMMIT_NET_TRACE"); return value && !strcmp(value, "1"); }();
 +        if (netTrace)
-+            fprintf(stderr, "Summit net: cache %s in %.0f ms %s\n", entry ? "hit" : "miss", (info.completionTime - info.startTime).milliseconds(), request.url().string().left(160).utf8().legacyCStringPointer());
++            fprintf(stderr, "Summit net: cache %s at=%.3f in %.0f ms %s\n", entry ? "hit" : "miss", MonotonicTime::now().secondsSinceEpoch().seconds(), (info.completionTime - info.startTime).milliseconds(), request.url().string().left(160).utf8().legacyCStringPointer());
 +#endif
  
          if (!entry) {
@@ -77825,10 +77871,10 @@ index 0000000000000000000000000000000000000000..7b3fb7cba806ac1a7415813534d8d12f
 +} // namespace WebKit
 diff --git a/Source/WebKit/Shared/haiku/StartupTraceHaiku.h b/Source/WebKit/Shared/haiku/StartupTraceHaiku.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..cf8ab8c905bdb24bbb1768a1a61c13ef1dc6f3c3
+index 0000000000000000000000000000000000000000..e5b76e31655a3a7a3f07c4ba7cd992ad339d8ea5
 --- /dev/null
 +++ b/Source/WebKit/Shared/haiku/StartupTraceHaiku.h
-@@ -0,0 +1,73 @@
+@@ -0,0 +1,99 @@
 +/*
 + * Copyright (C) 2026 Summit contributors
 + *
@@ -77862,6 +77908,7 @@ index 0000000000000000000000000000000000000000..cf8ab8c905bdb24bbb1768a1a61c13ef
 +#include <cstdlib>
 +#include <cstring>
 +#include <unistd.h>
++#include <unordered_map>
 +
 +namespace WebKit {
 +
@@ -77889,7 +77936,32 @@ index 0000000000000000000000000000000000000000..cf8ab8c905bdb24bbb1768a1a61c13ef
 +    return enabled;
 +}
 +
++// SUMMIT_NAV_TRACE=1 does the same for a navigation: when the load reaches
++// the engine's main loop, its policy decisions, the process it runs in, the
++// provisional start, the response, the commit, the first paint and the end.
++inline bool navigationTraceEnabledHaiku()
++{
++    static const bool enabled = [] {
++        const char* value = std::getenv("SUMMIT_NAV_TRACE");
++        return value && !std::strcmp(value, "1");
++    }();
++    return enabled;
++}
++
++// Main-frame commits per page seen by the UI process while the navigation
++// trace is on, so that the first frame after each one can be traced.
++inline std::unordered_map<uint64_t, uint64_t>& navigationTraceCommitsHaiku()
++{
++    static std::unordered_map<uint64_t, uint64_t> commits;
++    return commits;
++}
++
 +} // namespace WebKit
++
++#define SUMMIT_NAV_TRACE(format, ...) do { \
++    if (WebKit::navigationTraceEnabledHaiku()) \
++        std::fprintf(stderr, "Summit nav %.3f pid=%d " format "\n", system_time() / 1e6, static_cast<int>(getpid()), ##__VA_ARGS__); \
++} while (0)
 +
 +#define SUMMIT_STARTUP_TRACE(format, ...) do { \
 +    if (WebKit::startupTraceEnabledHaiku()) \
@@ -80923,10 +80995,10 @@ index 0000000000000000000000000000000000000000..d28a6cad6339adf79b155cf974e85bfd
 +
 diff --git a/Source/WebKit/UIProcess/API/haiku/WebKitView.cpp b/Source/WebKit/UIProcess/API/haiku/WebKitView.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..9631bd827675ab531436c95f66f77b2b7a3261f7
+index 0000000000000000000000000000000000000000..98260b2d1a95da86f4e4284492663d3c90261224
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/API/haiku/WebKitView.cpp
-@@ -0,0 +1,1034 @@
+@@ -0,0 +1,1046 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#include "config.h"
@@ -81455,6 +81527,18 @@ index 0000000000000000000000000000000000000000..9631bd827675ab531436c95f66f77b2b
 +void BWebKitView::LoadURL(const char* url) { SendCommand(viewLoadHaiku, url); }
 +void BWebKitView::DownloadURL(const char* url) { SendCommand(viewDownloadHaiku, url); }
 +void BWebKitView::Preconnect(const char* url) { SendCommand(viewPreconnectHaiku, url); }
++
++void BWebKitView::PrewarmProcess()
++{
++    if (m_status != B_OK)
++        return;
++    WTF::RunLoop::mainSingleton().dispatch([state = m_state] {
++        if (state->closed)
++            return;
++        if (RefPtr client = state->client; client && client->page())
++            prewarmWebProcessHaiku(*client->page(), true);
++    });
++}
 +void BWebKitView::GoBack() { SendCommand(viewBackHaiku); }
 +void BWebKitView::GoForward() { SendCommand(viewForwardHaiku); }
 +void BWebKitView::Reload() { SendCommand(viewReloadHaiku); }
@@ -81963,10 +82047,10 @@ index 0000000000000000000000000000000000000000..9631bd827675ab531436c95f66f77b2b
 +}
 diff --git a/Source/WebKit/UIProcess/API/haiku/WebKitView.h b/Source/WebKit/UIProcess/API/haiku/WebKitView.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..9c2763f4a907281873e8b845bcc824afc090a246
+index 0000000000000000000000000000000000000000..522b2c760532ed07e8cfa0e05c68bcc37f14ede5
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/API/haiku/WebKitView.h
-@@ -0,0 +1,341 @@
+@@ -0,0 +1,346 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#pragma once
@@ -82144,6 +82228,11 @@ index 0000000000000000000000000000000000000000..9c2763f4a907281873e8b845bcc824af
 +    // load soon (DNS, TCP and TLS), so that load's first request goes out at
 +    // once. Nothing is sent to the server. Any thread.
 +    void Preconnect(const char*);
++    // A navigation to a new site is likely soon (the user is typing an
++    // address): makes sure a spare web process is ready for it, since a site
++    // gets a process of its own and starting one takes a moment. Nothing
++    // when one is ready. Any thread.
++    void PrewarmProcess();
 +    void GoBack();
 +    void GoForward();
 +    void Reload();
@@ -105803,10 +105892,10 @@ index 8ace95c1b44f471e9072adcce4b7875472a98436..177e029c622167f73699813a22b48025
      DidChangeBufferConfiguration(uint32_t bufferCount);
 diff --git a/Source/WebKit/UIProcess/haiku/AcceleratedBackingStore.cpp b/Source/WebKit/UIProcess/haiku/AcceleratedBackingStore.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..5a70ad8970afa272523114ab01bdb47ffc75a1ed
+index 0000000000000000000000000000000000000000..a0d6269d5bfabb3d4e4d2930311cf327d0b34e34
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/AcceleratedBackingStore.cpp
-@@ -0,0 +1,301 @@
+@@ -0,0 +1,316 @@
 +/*
 + * Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause
 + */
@@ -105948,6 +106037,19 @@ index 0000000000000000000000000000000000000000..5a70ad8970afa272523114ab01bdb47f
 +        process->send(Messages::AcceleratedSurface::RedisplayDirect(), m_surfaceID);
 +}
 +
++// SUMMIT_NAV_TRACE=1: the first frame after each main-frame commit, where a
++// navigation's trace reaches what the user sees.
++static void traceFirstFrameAfterCommitHaiku(WebPageProxy* page, const char* how)
++{
++    if (!navigationTraceEnabledHaiku() || !page)
++        return;
++    static NeverDestroyed<std::unordered_map<uint64_t, uint64_t>> traced;
++    auto identifier = page->identifier().toUInt64();
++    auto commits = navigationTraceCommitsHaiku()[identifier];
++    if (std::exchange(traced.get()[identifier], commits) != commits)
++        SUMMIT_NAV_TRACE("first frame after the commit %s", how);
++}
++
 +void AcceleratedBackingStore::directFrame(uint64_t id)
 +{
 +    // Target 0: the web process cannot present directly (a Mesa without
@@ -105958,6 +106060,7 @@ index 0000000000000000000000000000000000000000..5a70ad8970afa272523114ab01bdb47f
 +    }
 +    m_directFrameSeen = true;
 +    m_directPresentDeclined = false;
++    traceFirstFrameAfterCommitHaiku(m_webPage.get(), "presented directly");
 +    if (swapChainTraceEnabled())
 +        std::fprintf(stderr, "Summit backing store: surface=%llu direct frame=%llu\n",
 +            static_cast<unsigned long long>(m_surfaceID), static_cast<unsigned long long>(id));
@@ -106016,6 +106119,7 @@ index 0000000000000000000000000000000000000000..5a70ad8970afa272523114ab01bdb47f
 +    static bool firstFrameTraced;
 +    if (!std::exchange(firstFrameTraced, true))
 +        SUMMIT_STARTUP_TRACE("first frame received by the browser");
++    traceFirstFrameAfterCommitHaiku(m_webPage.get(), "received by the view");
 +    if (!m_directFrameSeen && !m_directPresentDeclined && m_directTarget && m_directTarget->enabled() && MonotonicTime::now() - m_directTargetSentAt >= 1_s) {
 +        sendDirectTarget();
 +        requestDirectRedisplay();
@@ -112433,10 +112537,10 @@ index 0000000000000000000000000000000000000000..c9a119d02f85b7c5ad8fe9153bfc9604
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/WebView.cpp b/Source/WebKit/UIProcess/haiku/WebView.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..c23c871cef734bf6694b8b91dec0ee8db6de0636
+index 0000000000000000000000000000000000000000..9bb87c77e6d048f5b7961bc44762f5efbe853796
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/WebView.cpp
-@@ -0,0 +1,2647 @@
+@@ -0,0 +1,2705 @@
 +/*
 + * Copyright (C) 2013 Intel Corporation. All rights reserved.
 + *
@@ -112495,6 +112599,7 @@ index 0000000000000000000000000000000000000000..c23c871cef734bf6694b8b91dec0ee8d
 +#include "EmbeddingHaiku.h"
 +#include "OpenPanelHaiku.h"
 +#include "PageLoadState.h"
++#include "ProvisionalPageProxy.h"
 +#include "WKAPICast.h"
 +#include "WKPage.h"
 +#include "WebColorPicker.h"
@@ -112563,6 +112668,7 @@ index 0000000000000000000000000000000000000000..c23c871cef734bf6694b8b91dec0ee8d
 +#include <wtf/text/StringBuilder.h>
 +#include <OS.h>
 +#include <cstdio>
++#include <wtf/MemoryPressureHandler.h>
 +#include <wtf/NeverDestroyed.h>
 +#include <wtf/RunLoop.h>
 +#include <wtf/TZoneMallocInlines.h>
@@ -112933,16 +113039,19 @@ index 0000000000000000000000000000000000000000..c23c871cef734bf6694b8b91dec0ee8d
 +    }
 +}
 +
-+// Every tab gets its own web process, and starting one on Haiku means loading
-+// and relocating the whole engine before the page can be fetched. WebKit's
-+// automatic prewarming only runs with process swapping on navigation, which
-+// this port does not use, so a spare process is started here once a page has
-+// loaded, ready for the next tab. It waits a second: a page goes on painting
-+// and running scripts after its load event, and on the Raspberry Pi 4 the
-+// spare process (0.6 s of a core to load its libraries, then EGL) started
-+// before the first page had its first frame. SUMMIT_PREWARM_PROCESS=0 turns
-+// it off.
-+static void prewarmWebProcessHaiku(WebPageProxy& page)
++// Every tab gets its own web process, and so does every new site a tab goes
++// to (WebKit swaps processes on cross-site navigations). Starting one on
++// Haiku means loading and relocating the whole engine, then EGL, before the
++// page can even be asked for: 0.15 s on a Ryzen laptop, more on a Raspberry
++// Pi. WebKit's automatic prewarming is off for this port, so a spare process
++// is started here, ready for the next tab or site: a second after a page has
++// first painted or finished loading, and at once when the host expects a
++// navigation (BWebKitView::PrewarmProcess, while the user types an address).
++// The second's wait is for the page that just started: it goes on painting
++// and running scripts, and on the Raspberry Pi 4 the spare process (0.6 s of
++// a core to load its libraries, then EGL) started before the first page had
++// its first frame. SUMMIT_PREWARM_PROCESS=0 turns it off.
++void prewarmWebProcessHaiku(WebPageProxy& page, bool now)
 +{
 +    static const bool enabled = [] {
 +        const char* value = std::getenv("SUMMIT_PREWARM_PROCESS");
@@ -112950,9 +113059,15 @@ index 0000000000000000000000000000000000000000..c23c871cef734bf6694b8b91dec0ee8d
 +    }();
 +    if (!enabled)
 +        return;
-+    RunLoop::mainSingleton().dispatchAfter(1_s, [pool = Ref { page.configuration().processPool() }] {
++    auto prewarm = [pool = Ref { page.configuration().processPool() }] {
++        if (MemoryPressureHandler::singleton().isUnderMemoryPressure())
++            return;
 +        pool->prewarmProcess();
-+    });
++    };
++    if (now)
++        prewarm();
++    else
++        RunLoop::mainSingleton().dispatchAfter(1_s, WTF::move(prewarm));
 +}
 +
 +class CloseNavigationClientHaiku final : public API::NavigationClient {
@@ -112997,6 +113112,19 @@ index 0000000000000000000000000000000000000000..c23c871cef734bf6694b8b91dec0ee8d
 +    void decidePolicyForNavigationAction(WebPageProxy& page, Ref<API::NavigationAction>&& action, Ref<WebFramePolicyListenerProxy>&& listener) override
 +    {
 +        const auto& url = action->request().url();
++        const bool traceMainFrame = navigationTraceEnabledHaiku() && action->targetFrame() && action->targetFrame()->isMainFrame();
++        if (traceMainFrame)
++            SUMMIT_NAV_TRACE("navigation policy asked by web process %d (type %d%s): %s", page.legacyMainFrameProcess().processID(),
++                static_cast<int>(action->navigationType()), action->isRedirect() ? ", redirect" : "", url.string().left(160).utf8().legacyCStringPointer());
++        struct DecisionTrace {
++            bool enabled;
++            bigtime_t started { system_time() };
++            ~DecisionTrace()
++            {
++                if (enabled)
++                    SUMMIT_NAV_TRACE("navigation policy decided in %.1f ms", (system_time() - started) / 1000.0);
++            }
++        } decisionTrace { traceMainFrame };
 +        const bool external = url.isValid() && !url.protocolIsInHTTPFamily() && !url.protocolIsFile()
 +            && !url.protocolIsAbout() && !url.protocolIsData() && !url.protocolIsBlob()
 +            && !url.protocolIsJavaScript() && !url.protocolIs("webkit-extension"_s)
@@ -113116,9 +113244,12 @@ index 0000000000000000000000000000000000000000..c23c871cef734bf6694b8b91dec0ee8d
 +        listener->use();
 +    }
 +
-+    void decidePolicyForNavigationResponse(WebPageProxy&, Ref<API::NavigationResponse>&& navigation, Ref<WebFramePolicyListenerProxy>&& listener) override
++    void decidePolicyForNavigationResponse(WebPageProxy& page, Ref<API::NavigationResponse>&& navigation, Ref<WebFramePolicyListenerProxy>&& listener) override
 +    {
 +        const auto& response = navigation->response();
++        if (navigation->frame().isMainFrame())
++            SUMMIT_NAV_TRACE("response policy asked (status %d, %s, web process %d)", response.httpStatusCode(), response.mimeType().utf8().legacyCStringPointer(),
++                page.provisionalPageProxy() ? page.provisionalPageProxy()->process().processID() : page.legacyMainFrameProcess().processID());
 +        // A frame inside the page only downloads what the server marks as an
 +        // attachment, and not an empty one. Its other content that cannot be
 +        // shown is dropped, as other browsers do: advertising pages load
@@ -113172,6 +113303,20 @@ index 0000000000000000000000000000000000000000..c23c871cef734bf6694b8b91dec0ee8d
 +        return true;
 +    }
 +
++    void renderingProgressDidChange(WebPageProxy& page, OptionSet<WebCore::LayoutMilestone> milestones) override
++    {
++        if (milestones.contains(WebCore::LayoutMilestone::DidFirstLayout))
++            SUMMIT_NAV_TRACE("first layout");
++        if (milestones.contains(WebCore::LayoutMilestone::DidFirstVisuallyNonEmptyLayout)) {
++            SUMMIT_NAV_TRACE("first visually non-empty layout");
++            // The page is on its way: get the next process ready without
++            // waiting for its load to finish, which can take many seconds.
++            prewarmWebProcessHaiku(page, false);
++        }
++        if (milestones.contains(WebCore::LayoutMilestone::DidFirstMeaningfulPaint))
++            SUMMIT_NAV_TRACE("first meaningful paint");
++    }
++
 +    void processDidBecomeUnresponsive(WebPageProxy&) override { notifyResponsiveness(false); }
 +    void processDidBecomeResponsive(WebPageProxy&) override { notifyResponsiveness(true); }
 +
@@ -113179,8 +113324,13 @@ index 0000000000000000000000000000000000000000..c23c871cef734bf6694b8b91dec0ee8d
 +    void navigationResponseDidBecomeDownload(WebPageProxy&, API::NavigationResponse&, DownloadProxy& download) override { registerDownload(download); }
 +    void contextMenuDidCreateDownload(WebPageProxy&, DownloadProxy& download) override { registerDownload(download); }
 +
-+    void didStartProvisionalNavigation(WebPageProxy& page, const ResourceRequest&, API::Navigation* navigation, API::Object*) override
++    void didStartProvisionalNavigation(WebPageProxy& page, const ResourceRequest& request, API::Navigation* navigation, API::Object*) override
 +    {
++        if (RefPtr provisional = page.provisionalPageProxy())
++            SUMMIT_NAV_TRACE("provisional load started in new web process %d (was %d): %s", provisional->process().processID(),
++                page.legacyMainFrameProcess().processID(), request.url().string().left(160).utf8().legacyCStringPointer());
++        else
++            SUMMIT_NAV_TRACE("provisional load started in web process %d: %s", page.legacyMainFrameProcess().processID(), request.url().string().left(160).utf8().legacyCStringPointer());
 +        if (auto state = m_state.lock()) {
 +            navigationChangedHaiku(state);
 +            if (navigation)
@@ -113195,8 +113345,12 @@ index 0000000000000000000000000000000000000000..c23c871cef734bf6694b8b91dec0ee8d
 +        }
 +    }
 +
-+    void didCommitNavigation(WebPageProxy&, API::Navigation* navigation, API::Object*) override
++    void didCommitNavigation(WebPageProxy& page, API::Navigation* navigation, API::Object*) override
 +    {
++        if (navigationTraceEnabledHaiku()) {
++            ++navigationTraceCommitsHaiku()[page.identifier().toUInt64()];
++            SUMMIT_NAV_TRACE("committed in web process %d", page.legacyMainFrameProcess().processID());
++        }
 +        if (auto state = m_state.lock(); state && matchesLoadHaiku(*state, navigation))
 +            state->load.committed = true;
 +    }
@@ -113228,6 +113382,8 @@ index 0000000000000000000000000000000000000000..c23c871cef734bf6694b8b91dec0ee8d
 +    void didFailProvisionalNavigationWithError(WebPageProxy& page, FrameInfoData&& frame,
 +        API::Navigation* navigation, const URL& requestURL, const ResourceError& error, API::Object*) override
 +    {
++        if (isMainFrameHaiku(frame, &page))
++            SUMMIT_NAV_TRACE("provisional load failed (%d %s)", error.errorCode(), error.localizedDescription().utf8().legacyCStringPointer());
 +        if (auto state = m_state.lock(); state && isMainFrameHaiku(frame, &page) && matchesLoadHaiku(*state, navigation))
 +            failLoadHaiku(state, requestURL, error, true);
 +        // An uncommitted failure without a Navigation ID has no document
@@ -113244,9 +113400,10 @@ index 0000000000000000000000000000000000000000..c23c871cef734bf6694b8b91dec0ee8d
 +
 +    void didFinishNavigation(WebPageProxy& page, API::Navigation* navigation, API::Object*) override
 +    {
++        SUMMIT_NAV_TRACE("load finished");
 +        if (auto state = m_state.lock(); state && matchesLoadHaiku(*state, navigation))
 +            finishLoadHaiku(state, page);
-+        prewarmWebProcessHaiku(page);
++        prewarmWebProcessHaiku(page, false);
 +    }
 +
 +    void didFinishLoadForFrame(WebPageProxy& page, ResourceRequest&&, FrameInfoData&& frame) override
@@ -113765,7 +113922,9 @@ index 0000000000000000000000000000000000000000..c23c871cef734bf6694b8b91dec0ee8d
 +
 +void dispatchViewMessageHaiku(std::shared_ptr<WebViewStateHaiku> state, BMessage&& message)
 +{
-+    RunLoop::mainSingleton().dispatch([state = std::move(state), message = std::move(message)] {
++    RunLoop::mainSingleton().dispatch([state = std::move(state), message = std::move(message), sentAt = system_time()] {
++        if (message.what == viewLoadHaiku)
++            SUMMIT_NAV_TRACE("load request reached the main loop after %.1f ms: %s", (system_time() - sentAt) / 1000.0, message.FindString("url"));
 +        if (!state->closed) {
 +            if (RefPtr client = state->client)
 +                client->handleMessage(message);
@@ -114291,7 +114450,10 @@ index 0000000000000000000000000000000000000000..c23c871cef734bf6694b8b91dec0ee8d
 +            String fragmentURL = fragmentDocument ? url.string() : String();
 +            navigationChangedHaiku(m_state);
 +            beginUnidentifiedLoadHaiku(m_state);
++            const bigtime_t started = system_time();
 +            RefPtr navigation = m_page->loadRequest(ResourceRequest(WTF::move(url)));
++            SUMMIT_NAV_TRACE("loadRequest took %.1f ms (navigation %llu, web process %d)", (system_time() - started) / 1000.0,
++                navigation ? static_cast<unsigned long long>(navigation->navigationID().toUInt64()) : 0ULL, m_page->legacyMainFrameProcess().processID());
 +            trackLoadHaiku(m_state, navigation.get());
 +            m_state->load.sameDocumentIdentifier = fragmentDocument;
 +            m_state->load.sameDocumentURL = WTF::move(fragmentURL);
@@ -115777,10 +115939,10 @@ index 0000000000000000000000000000000000000000..63372cc3f12bccf01f83f9ed4395aaae
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/WebViewStateHaiku.h b/Source/WebKit/UIProcess/haiku/WebViewStateHaiku.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..4a79a4ace0a8083e4d6cdee7fc6f618df6b7058b
+index 0000000000000000000000000000000000000000..b0b14acdb92d45e52269bb73ef1bbc6a19a858e3
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/WebViewStateHaiku.h
-@@ -0,0 +1,189 @@
+@@ -0,0 +1,193 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#pragma once
@@ -115958,6 +116120,10 @@ index 0000000000000000000000000000000000000000..4a79a4ace0a8083e4d6cdee7fc6f618d
 +void commitViewCloseHaiku(std::vector<std::shared_ptr<WebViewStateHaiku>>, BMessenger, uint64_t);
 +
 +void dispatchViewMessageHaiku(std::shared_ptr<WebViewStateHaiku>, BMessage&&);
++
++// Main thread only. Starts a spare web process for the next new site, at once
++// or a second later (WebView.cpp); nothing when one is ready.
++void prewarmWebProcessHaiku(WebPageProxy&, bool now);
 +
 +// Main thread only. Answer a B_WEBKIT_NEW_PAGE_REQUESTED identifier with this
 +// view's state, or decline it.
