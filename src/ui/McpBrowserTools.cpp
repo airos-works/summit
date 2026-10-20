@@ -435,9 +435,9 @@ void RegisterMcpBrowserTools(mcp::Server& server, const std::shared_ptr<McpConte
     server.Add({"preferences",
         "Summit's settings as the profile keeps them (home page, search engine, session restore, appearance, "
         "site permissions, link handlers, trusted certificates; the MCP server's port). show=true also opens the "
-        "Preferences window (tab: general, data, sites, links or developer).",
+        "Preferences window (tab: general, browsing, data, sites, links or developer).",
         Schema().Boolean("show", "Open the Preferences window").Enum("tab", "Which tab to show",
-            {"general", "data", "sites", "links", "developer"}),
+            {"general", "browsing", "data", "sites", "links", "developer"}),
         [context](const Json& arguments) {
             if (mcp::BooleanArgument(arguments, "show", false)) {
                 BMessage show('pref');

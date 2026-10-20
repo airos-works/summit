@@ -745,7 +745,9 @@ public:
         }
 #endif
         if (message->what == summit::kClearHistoryRequest) {
-            fShared->ClearHistory(BMessenger());
+            // A time range (Preferences › History and Data) forgets only its visits.
+            if (const int64 since = message->GetInt64("since", 0); since > 0) fShared->ForgetHistorySince(since, BMessenger());
+            else fShared->ClearHistory(BMessenger());
             BMessage cleared(summit::kDataCleared);
             cleared.AddInt32("kind", summit::kClearHistoryRequest);
             fPreferences.SendMessage(&cleared);
@@ -763,12 +765,34 @@ public:
             message->SendReply(&reply);
             return;
         }
+        if (message->what == summit::kSiteDataSizesRequest) {
+            BMessenger reply;
+            if (message->FindMessenger("reply", &reply) == B_OK && fWebKitContext)
+                fWebKitContext->FetchWebsiteDataSizes(B_WEBKIT_DATA_COOKIES | B_WEBKIT_DATA_CACHE | B_WEBKIT_DATA_LOCAL_STORAGE
+                    | B_WEBKIT_DATA_INDEXED_DB | B_WEBKIT_DATA_SERVICE_WORKERS, reply, 0);
+            return;
+        }
         if (message->what == summit::kClearCacheRequest || message->what == summit::kClearSiteDataRequest) {
             // Extensions keep their own storage; only websites' is removed.
             const uint32 types = message->what == summit::kClearCacheRequest ? B_WEBKIT_DATA_CACHE
                 : B_WEBKIT_DATA_COOKIES | B_WEBKIT_DATA_LOCAL_STORAGE | B_WEBKIT_DATA_INDEXED_DB | B_WEBKIT_DATA_SERVICE_WORKERS;
             fDataRequests[++fNextDataRequest] = message->what;
-            fWebKitContext->RemoveWebsiteData(types, BMessenger(this), fNextDataRequest);
+            // Chosen sites of the Site data list: all they keep, caches too.
+            std::vector<std::string> sites;
+            const char* site = nullptr;
+            for (int32 i = 0; message->FindString("site", i, &site) == B_OK; ++i) sites.push_back(site);
+            if (!sites.empty()) {
+                fWebKitContext->RemoveWebsiteDataOfSites(types | B_WEBKIT_DATA_CACHE, sites, BMessenger(this), fNextDataRequest);
+                return;
+            }
+            // A time range: cookies and caches by their times, the storage of
+            // the sites visited then.
+            if (const int64 since = message->GetInt64("since", 0); since > 0) {
+                const auto visited = fShared->HostsVisitedSince(since);
+                fWebKitContext->RemoveWebsiteDataSince(types, since, std::vector<std::string>(visited.begin(), visited.end()),
+                    BMessenger(this), fNextDataRequest);
+            } else
+                fWebKitContext->RemoveWebsiteData(types, BMessenger(this), fNextDataRequest);
             return;
         }
         if (message->what == summit::kTrustCertificate) {

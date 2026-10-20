@@ -79142,10 +79142,10 @@ index 0000000000000000000000000000000000000000..574ed16658f0c14b1aa2e63208e990b8
 +#define WEBKIT_ENGINE_VERSION_HAIKU "@WebKit_HAIKU_MAJOR_VERSION@.@WebKit_HAIKU_MINOR_VERSION@.@WebKit_HAIKU_TINY_VERSION@"
 diff --git a/Source/WebKit/UIProcess/API/haiku/WebKitContext.cpp b/Source/WebKit/UIProcess/API/haiku/WebKitContext.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..d009a2e05250df5cd4865c0fbb53c9422690a40a
+index 0000000000000000000000000000000000000000..4013f5cbc2aa0abec573dd09cf0033f93d60f28a
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/API/haiku/WebKitContext.cpp
-@@ -0,0 +1,719 @@
+@@ -0,0 +1,890 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#include "config.h"
@@ -79165,10 +79165,13 @@ index 0000000000000000000000000000000000000000..d009a2e05250df5cd4865c0fbb53c942
 +#include <MessageRunner.h>
 +#include "WebKitView.h"
 +#include "WebKitEmbedding.h"
++#include "WebsiteDataFetchOption.h"
 +#include "WebsiteDataRecord.h"
 +#include "WebsiteDataStore.h"
 +#include "WebsiteDataType.h"
 +#include <Application.h>
++#include <WebCore/RegistrableDomain.h>
++#include <wtf/HashSet.h>
 +#include <cstdlib>
 +#include <cstring>
 +#include <wtf/FileSystem.h>
@@ -79789,6 +79792,174 @@ index 0000000000000000000000000000000000000000..d009a2e05250df5cd4865c0fbb53c942
 +    });
 +}
 +
++// B_WEBKIT_DATA_* as WebKit's types.
++static OptionSet<WebKit::WebsiteDataType> websiteDataTypesHaiku(uint32 types)
++{
++    using WebKit::WebsiteDataType;
++    OptionSet<WebsiteDataType> result;
++    if (types & B_WEBKIT_DATA_COOKIES)
++        result.add(WebsiteDataType::Cookies);
++    if (types & B_WEBKIT_DATA_CACHE)
++        result.add({ WebsiteDataType::DiskCache, WebsiteDataType::MemoryCache });
++    if (types & B_WEBKIT_DATA_LOCAL_STORAGE)
++        result.add({ WebsiteDataType::LocalStorage, WebsiteDataType::SessionStorage });
++    if (types & B_WEBKIT_DATA_INDEXED_DB)
++        result.add(WebsiteDataType::IndexedDBDatabases);
++    if (types & B_WEBKIT_DATA_SERVICE_WORKERS)
++        result.add({ WebsiteDataType::ServiceWorkerRegistrations, WebsiteDataType::DOMCache });
++    return result;
++}
++
++// A site's record without extensions' own origins; false when nothing is left.
++static bool websiteRecordWithoutExtensionsHaiku(WebKit::WebsiteDataRecord& record)
++{
++    record.origins.removeIf([](const WebCore::SecurityOriginData& origin) {
++        return origin.protocol() == "webkit-extension"_s;
++    });
++    return !record.origins.isEmpty() || !record.cookieHostNames.isEmpty();
++}
++
++void BWebKitContext::FetchWebsiteDataSizes(uint32 types, const BMessenger& reply, uint64 identifier)
++{
++    if (m_status != B_OK) {
++        BMessage message(B_WEBKIT_WEBSITE_DATA_SIZES);
++        message.AddUInt64("identifier", identifier);
++        message.AddString("error", "The website data could not be opened");
++        reply.SendMessage(&message, static_cast<BHandler*>(nullptr), 0);
++        return;
++    }
++    auto operation = [context = m_context, types, reply, identifier] {
++        Ref store = context->dataStore();
++        store->fetchData(websiteDataTypesHaiku(types), WebKit::WebsiteDataFetchOption::ComputeSizes,
++            [reply, identifier](Vector<WebKit::WebsiteDataRecord> records) mutable {
++                BMessage message(B_WEBKIT_WEBSITE_DATA_SIZES);
++                message.AddUInt64("identifier", identifier);
++                for (auto& record : records) {
++                    if (record.displayName.isEmpty() || !websiteRecordWithoutExtensionsHaiku(record))
++                        continue;
++                    message.AddString("site", record.displayName.utf8().legacyCStringPointer());
++                    message.AddUInt64("size", record.size ? record.size->totalSize : 0);
++                }
++                reply.SendMessage(&message, static_cast<BHandler*>(nullptr), 0);
++            });
++    };
++    if (RunLoop::isMain())
++        operation();
++    else
++        RunLoop::mainSingleton().dispatch(WTF::move(operation));
++}
++
++void BWebKitContext::RemoveWebsiteDataOfSites(uint32 types, const std::vector<std::string>& sites, const BMessenger& reply, uint64 identifier)
++{
++    auto respond = [reply, identifier](const char* error) {
++        BMessage message(B_WEBKIT_WEBSITE_DATA_REMOVED);
++        message.AddUInt64("identifier", identifier);
++        if (error)
++            message.AddString("error", error);
++        reply.SendMessage(&message, static_cast<BHandler*>(nullptr), 0);
++    };
++    if (m_status != B_OK) {
++        respond("The website data could not be opened");
++        return;
++    }
++    HashSet<String> names;
++    for (const auto& site : sites) {
++        if (!site.empty())
++            names.add(String::fromUTF8(site.c_str()).isolatedCopy());
++    }
++    auto operation = [context = m_context, types, names = WTF::move(names), respond] {
++        Ref store = context->dataStore();
++        const auto dataTypes = websiteDataTypesHaiku(types);
++        store->fetchData(dataTypes, { }, [store, dataTypes, names, respond](Vector<WebKit::WebsiteDataRecord> records) mutable {
++            Vector<WebKit::WebsiteDataRecord> removable;
++            for (auto& record : records) {
++                if (names.contains(record.displayName) && websiteRecordWithoutExtensionsHaiku(record))
++                    removable.append(WTF::move(record));
++            }
++            if (removable.isEmpty()) {
++                respond(nullptr);
++                return;
++            }
++            store->removeData(dataTypes, removable, [respond] { respond(nullptr); });
++        });
++    };
++    if (RunLoop::isMain())
++        operation();
++    else
++        RunLoop::mainSingleton().dispatch(WTF::move(operation));
++}
++
++void BWebKitContext::RemoveWebsiteDataSince(uint32 types, int64 since, const std::vector<std::string>& hosts, const BMessenger& reply,
++    uint64 identifier)
++{
++    auto respond = [reply, identifier](const char* error) {
++        BMessage message(B_WEBKIT_WEBSITE_DATA_REMOVED);
++        message.AddUInt64("identifier", identifier);
++        if (error)
++            message.AddString("error", error);
++        reply.SendMessage(&message, static_cast<BHandler*>(nullptr), 0);
++    };
++    if (m_status != B_OK) {
++        respond("The website data could not be opened");
++        return;
++    }
++    HashSet<String> domains;
++    for (const auto& host : hosts) {
++        auto domain = WebCore::RegistrableDomain::uncheckedCreateFromHost(String::fromUTF8(host.c_str()));
++        if (!domain.isEmpty())
++            domains.add(domain.string().isolatedCopy());
++    }
++    auto operation = [context = m_context, types, since, domains = WTF::move(domains), respond] {
++        using WebKit::WebsiteDataType;
++        OptionSet<WebsiteDataType> timed;
++        OptionSet<WebsiteDataType> bySite;
++        if (types & B_WEBKIT_DATA_COOKIES)
++            timed.add(WebsiteDataType::Cookies);
++        if (types & B_WEBKIT_DATA_CACHE)
++            timed.add({ WebsiteDataType::DiskCache, WebsiteDataType::MemoryCache });
++        if (types & B_WEBKIT_DATA_LOCAL_STORAGE)
++            bySite.add({ WebsiteDataType::LocalStorage, WebsiteDataType::SessionStorage });
++        if (types & B_WEBKIT_DATA_INDEXED_DB)
++            bySite.add(WebsiteDataType::IndexedDBDatabases);
++        if (types & B_WEBKIT_DATA_SERVICE_WORKERS)
++            bySite.add({ WebsiteDataType::ServiceWorkerRegistrations, WebsiteDataType::DOMCache });
++        Ref store = context->dataStore();
++        auto pending = std::make_shared<unsigned>(2);
++        auto finished = [pending, respond] {
++            if (!--*pending)
++                respond(nullptr);
++        };
++        if (timed)
++            store->removeData(timed, WallTime::fromRawSeconds(std::max<int64>(since, 0)), [finished] { finished(); });
++        else
++            finished();
++        if (!bySite || domains.isEmpty()) {
++            finished();
++            return;
++        }
++        store->fetchData(bySite, { }, [store, bySite, domains, finished](Vector<WebKit::WebsiteDataRecord> records) mutable {
++            Vector<WebKit::WebsiteDataRecord> removable;
++            for (auto& record : records) {
++                record.origins.removeIf([&](const WebCore::SecurityOriginData& origin) {
++                    return origin.protocol() == "webkit-extension"_s
++                        || !domains.contains(WebCore::RegistrableDomain::uncheckedCreateFromHost(origin.host()).string());
++                });
++                if (!record.origins.isEmpty())
++                    removable.append(WTF::move(record));
++            }
++            if (removable.isEmpty()) {
++                finished();
++                return;
++            }
++            store->removeData(bySite, removable, WTF::move(finished));
++        });
++    };
++    if (RunLoop::isMain())
++        operation();
++    else
++        RunLoop::mainSingleton().dispatch(WTF::move(operation));
++}
++
 +void BWebKitContext::RemoveWebsiteData(uint32 types, const BMessenger& reply, uint64 identifier, bool includeExtensions)
 +{
 +    auto respond = [reply, identifier](const char* error) {
@@ -79867,10 +80038,10 @@ index 0000000000000000000000000000000000000000..d009a2e05250df5cd4865c0fbb53c942
 +}
 diff --git a/Source/WebKit/UIProcess/API/haiku/WebKitContext.h b/Source/WebKit/UIProcess/API/haiku/WebKitContext.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..c79ac7f7aec0e492df29e1bc532d8d4450046a67
+index 0000000000000000000000000000000000000000..87ce8b5c0ae8b32302801bd41a9267172bca7b89
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/API/haiku/WebKitContext.h
-@@ -0,0 +1,359 @@
+@@ -0,0 +1,373 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#pragma once
@@ -80185,6 +80356,20 @@ index 0000000000000000000000000000000000000000..c79ac7f7aec0e492df29e1bc532d8d44
 +    // service workers) survives unless includeExtensions is true, as clearing a
 +    // browser's site data does not reset its extensions. Any looper.
 +    void RemoveWebsiteData(uint32 types, const BMessenger& reply, uint64 identifier, bool includeExtensions = false);
++    // As above, for what changed from since on (seconds since the epoch):
++    // cookies and caches by their own times; storage (local storage,
++    // IndexedDB, service workers), which keeps no times, of the sites in
++    // hosts only (those the host's history saw in that time; compared by
++    // registrable domain). Extensions' storage is kept.
++    void RemoveWebsiteDataSince(uint32 types, int64 since, const std::vector<std::string>& hosts, const BMessenger& reply,
++        uint64 identifier);
++    // The sites that keep B_WEBKIT_DATA_* data and how much, as
++    // B_WEBKIT_WEBSITE_DATA_SIZES to reply. Extensions' own data is left out.
++    void FetchWebsiteDataSizes(uint32 types, const BMessenger& reply, uint64 identifier);
++    // Removes the B_WEBKIT_DATA_* data of the sites named as
++    // FetchWebsiteDataSizes names them, their cookies included, and answers
++    // B_WEBKIT_WEBSITE_DATA_REMOVED.
++    void RemoveWebsiteDataOfSites(uint32 types, const std::vector<std::string>& sites, const BMessenger& reply, uint64 identifier);
 +
 +    // Trusts a server certificate that failed verification (self-signed,
 +    // expired, issued for another name or by an unknown authority) for host,
@@ -80500,10 +80685,10 @@ index 0000000000000000000000000000000000000000..a01adc63a79750299cb52a405f82e7e4
 +WK_EXPORT std::string BWebKitProcessDiagnostics(team_id, const char* request, bigtime_t timeout = 5000000);
 diff --git a/Source/WebKit/UIProcess/API/haiku/WebKitEmbedding.h b/Source/WebKit/UIProcess/API/haiku/WebKitEmbedding.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..8cde8df9b748e85e2a21e2482d54bc95a41bcbb7
+index 0000000000000000000000000000000000000000..f7fe5c8dcba9df0aa191d1bb73461bfb805c0631
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/API/haiku/WebKitEmbedding.h
-@@ -0,0 +1,89 @@
+@@ -0,0 +1,93 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#pragma once
@@ -80557,7 +80742,11 @@ index 0000000000000000000000000000000000000000..8cde8df9b748e85e2a21e2482d54bc95
 +    // Answers SetCookie() and DeleteCookies(): "identifier", "error" on failure.
 +    B_WEBKIT_COOKIES_CHANGED = 'wcoc',
 +    // Answers RemoveWebsiteData(): "identifier".
-+    B_WEBKIT_WEBSITE_DATA_REMOVED = 'wdrm'
++    B_WEBKIT_WEBSITE_DATA_REMOVED = 'wdrm',
++    // Answers FetchWebsiteDataSizes(): "identifier", and for each site with
++    // data repeated "site" (as WebKit names it: the registrable domain) and
++    // "size" (uint64, bytes; cookies count for nothing). "error" on failure.
++    B_WEBKIT_WEBSITE_DATA_SIZES = 'wdsz'
 +};
 +
 +// RemoveWebsiteData(): what to remove.

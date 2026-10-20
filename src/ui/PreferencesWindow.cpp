@@ -5,6 +5,9 @@
 #include "Messages.h"
 #include "McpService.h"
 #include "core/Address.h"
+#if SUMMIT_MODERN_WEBKIT
+#include <WebKit/WebKitEmbedding.h>
+#endif
 #include <Alert.h>
 #include <interface/ColumnListView.h>
 #include <interface/ColumnTypes.h>
@@ -25,6 +28,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <cctype>
 #include <ctime>
 #include <cstring>
 #include <tuple>
@@ -116,6 +120,27 @@ PreferencesWindow::PreferencesWindow(BMessenger owner, const PreferencesState& s
     dataHint->SetHighUIColor(B_PANEL_TEXT_COLOR, B_DARKEN_2_TINT);
     fDataStatus = new BStringView("data-status", "");
     fDataStatus->SetHighUIColor(B_PANEL_TEXT_COLOR, B_DARKEN_2_TINT);
+    auto* ranges = new BPopUpMenu("clear-range");
+    for (const auto& [seconds, label] : std::initializer_list<std::pair<int64, const char*>> {
+            {3600, "The last hour"}, {86400, "The last 24 hours"}, {7 * 86400, "The last 7 days"},
+            {28 * 86400, "The last 4 weeks"}, {0, "All time"}}) {
+        auto* message = new BMessage('pcrg');
+        message->AddInt64("seconds", seconds);
+        auto* item = new BMenuItem(label, message);
+        item->SetMarked(seconds == 0);
+        ranges->AddItem(item);
+    }
+    fClearRange = new BMenuField("clear-range", "Clear what was saved in:", ranges);
+    fSiteData = new BColumnListView("site-data", B_NAVIGABLE, B_FANCY_BORDER, true);
+    fSiteData->AddColumn(new BStringColumn("Site", 300, 80, 600, B_TRUNCATE_MIDDLE), 0);
+    fSiteData->AddColumn(new BSizeColumn("Size", 100, 60, 200), 1);
+    fSiteData->SetSelectionMode(B_MULTIPLE_SELECTION_LIST);
+    fSiteData->SetSelectionMessage(new BMessage('psdl'));
+    fSiteData->SetSortColumn(fSiteData->ColumnAt(1), false, false);
+    fSiteData->SetExplicitMinSize(BSize(420, 120));
+    fSiteDataTotal = new BStringView("site-data-total", "Site data: measuring…");
+    fSiteDataRemove = new BButton("site-data-remove", "Remove", new BMessage('psdr'));
+    fSiteDataRemove->SetEnabled(false);
     ShowHistoryCount(state.historyCount);
     fCertificatesInfo = new BStringView("certificates-info", "");
     // The three buttons share one width, so they line up in their column.
@@ -200,6 +225,7 @@ PreferencesWindow::PreferencesWindow(BMessenger owner, const PreferencesState& s
     BLayoutBuilder::Group<>(data)
         .SetInsets(18)
         .Add(SectionTitle("data-title", "History and Data"))
+        .AddGroup(B_HORIZONTAL, 0).SetInsets(12, 0, 0, 0).Add(fClearRange).AddGlue().End()
         .AddGrid(10, 6).SetInsets(12, 0, 0, 0)
             .Add(fHistoryInfo, 0, 0)
             .Add(clearButton("clear-history", "Clear History…", clearHistory), 1, 0)
@@ -212,6 +238,12 @@ PreferencesWindow::PreferencesWindow(BMessenger owner, const PreferencesState& s
             .Add(fForgetCertificates = clearButton("forget-certificates", "Forget Trusted Certificates…",
                 forgetCertificates), 1, 4)
             .Add(fDataStatus, 0, 5, 2, 1)
+        .End()
+        .AddStrut(6)
+        .Add(SectionTitle("site-data-title", "Site data"))
+        .AddGroup(B_VERTICAL, 6).SetInsets(12, 0, 0, 0)
+            .Add(fSiteData)
+            .AddGroup(B_HORIZONTAL, 8).Add(fSiteDataTotal).AddGlue().Add(fSiteDataRemove).End()
         .End()
         .AddGlue();
     auto* sites = new BGroupView("Site Permissions", B_VERTICAL, 8);
@@ -305,6 +337,7 @@ PreferencesWindow::PreferencesWindow(BMessenger owner, const PreferencesState& s
     ShowTrustedCertificates(state.trustedCertificates);
     ShowHomeHint();
     MeasureCache();
+    RequestSiteData();
     fMcpCopy->SetEnabled(false);
     fMcpNewToken->SetEnabled(state.mcpEnabled);
     // The server's status (requests answered, the last client) changes by
@@ -430,6 +463,13 @@ void PreferencesWindow::ShowHistoryCount(size_t count)
     fHistoryInfo->SetText(text.c_str());
 }
 
+void PreferencesWindow::RequestSiteData()
+{
+    BMessage request(kSiteDataSizesRequest);
+    request.AddMessenger("reply", BMessenger(this));
+    fOwner.SendMessage(&request);
+}
+
 void PreferencesWindow::MeasureCache()
 {
     // Walking a few thousand cache files takes a moment; the window stays usable.
@@ -446,6 +486,21 @@ void PreferencesWindow::MeasureCache()
         measured.AddUInt64("bytes", total);
         window.SendMessage(&measured);
     }).detach();
+}
+
+int64 PreferencesWindow::ClearSince() const
+{
+    const BMenuItem* item = fClearRange->Menu()->FindMarked();
+    const int64 seconds = item && item->Message() ? item->Message()->GetInt64("seconds", 0) : 0;
+    return seconds > 0 ? static_cast<int64>(std::time(nullptr)) - seconds : 0;
+}
+
+std::string PreferencesWindow::ClearRangeText() const
+{
+    const BMenuItem* item = fClearRange->Menu()->FindMarked();
+    std::string text = item ? item->Label() : "All time";
+    if (!text.empty()) text[0] = std::tolower(static_cast<unsigned char>(text[0]));
+    return text;
 }
 
 void PreferencesWindow::MessageReceived(BMessage* message)
@@ -542,9 +597,46 @@ void PreferencesWindow::MessageReceived(BMessage* message)
             ShowHomeHint();
             break;
         }
+        case 'psdl':
+            fSiteDataRemove->SetEnabled(fSiteData->CurrentSelection() != nullptr);
+            break;
+        case 'psdr': {
+            BMessage request(kClearSiteDataRequest);
+            for (BRow* row = fSiteData->CurrentSelection(); row; row = fSiteData->CurrentSelection(row))
+                if (auto* field = static_cast<BStringField*>(row->GetField(0))) request.AddString("site", field->String());
+            if (!request.HasString("site")) break;
+            fDataStatus->SetText("Removing the selected sites' data…");
+            fOwner.SendMessage(&request);
+            break;
+        }
+#if SUMMIT_MODERN_WEBKIT
+        case B_WEBKIT_WEBSITE_DATA_SIZES: {
+            fSiteData->Clear();
+            uint64 total = 0;
+            const char* site = nullptr;
+            for (int32 i = 0; message->FindString("site", i, &site) == B_OK; ++i) {
+                const uint64 size = message->GetUInt64("size", i, 0);
+                total += size;
+                auto* row = new BRow();
+                row->SetField(new BStringField(site), 0);
+                row->SetField(new BSizeField(size), 1);
+                fSiteData->AddRow(row);
+            }
+            fSiteDataRemove->SetEnabled(false);
+            const int32 count = fSiteData->CountRows();
+            fSiteDataTotal->SetText(count ? (std::to_string(count) + (count == 1 ? " site, " : " sites, ") + SizeLabel(total)).c_str()
+                : "No site keeps data.");
+            break;
+        }
+#endif
+        case 'pcrg':
+            // The menu marks its own choice; nothing to do until a Clear.
+            break;
         case clearHistory: {
-            auto* alert = new BAlert("Clear History", "Clear your history?\n\nEvery page you have visited is forgotten, "
-                "with the icons of sites you have not bookmarked. Bookmarks and open tabs are kept.",
+            const std::string text = ClearSince() ? "Clear your history of " + ClearRangeText() + "?\n\nThe pages you visited "
+                "then are forgotten. Bookmarks and open tabs are kept." : std::string("Clear your history?\n\nEvery page you "
+                "have visited is forgotten, with the icons of sites you have not bookmarked. Bookmarks and open tabs are kept.");
+            auto* alert = new BAlert("Clear History", text.c_str(),
                 "Cancel", "Clear History", nullptr, B_WIDTH_AS_USUAL, B_WARNING_ALERT);
             alert->SetShortcut(0, B_ESCAPE);
             alert->Go(new BInvoker(new BMessage(clearHistoryConfirmed), this));
@@ -553,15 +645,25 @@ void PreferencesWindow::MessageReceived(BMessage* message)
         case clearHistoryConfirmed:
             if (message->GetInt32("which", 0) != 1) break;
             fDataStatus->SetText("Clearing history…");
-            fOwner.SendMessage(kClearHistoryRequest);
+            {
+                BMessage request(kClearHistoryRequest);
+                request.AddInt64("since", ClearSince());
+                fOwner.SendMessage(&request);
+            }
             break;
-        case clearCache:
+        case clearCache: {
             fDataStatus->SetText("Clearing the cache…");
-            fOwner.SendMessage(kClearCacheRequest);
+            BMessage request(kClearCacheRequest);
+            request.AddInt64("since", ClearSince());
+            fOwner.SendMessage(&request);
             break;
+        }
         case clearSiteData: {
-            auto* alert = new BAlert("Clear Cookies and Site Data", "Clear cookies and site data?\n\nYou will be signed "
-                "out of websites, and the data they keep on this computer is deleted. Extensions keep their own data.",
+            const std::string text = ClearSince() ? "Clear the cookies and site data of " + ClearRangeText() + "?\n\nCookies "
+                "set then are deleted, and the data of the sites you visited then. You may be signed out of them. Extensions "
+                "keep their own data." : std::string("Clear cookies and site data?\n\nYou will be signed out of websites, and "
+                "the data they keep on this computer is deleted. Extensions keep their own data.");
+            auto* alert = new BAlert("Clear Cookies and Site Data", text.c_str(),
                 "Cancel", "Clear", nullptr, B_WIDTH_AS_USUAL, B_WARNING_ALERT);
             alert->SetShortcut(0, B_ESCAPE);
             alert->Go(new BInvoker(new BMessage(clearSiteDataConfirmed), this));
@@ -570,7 +672,11 @@ void PreferencesWindow::MessageReceived(BMessage* message)
         case clearSiteDataConfirmed:
             if (message->GetInt32("which", 0) != 1) break;
             fDataStatus->SetText("Clearing cookies and site data…");
-            fOwner.SendMessage(kClearSiteDataRequest);
+            {
+                BMessage request(kClearSiteDataRequest);
+                request.AddInt64("since", ClearSince());
+                fOwner.SendMessage(&request);
+            }
             break;
         case forgetCertificates: {
             auto* alert = new BAlert("Forget Trusted Certificates", "Forget the certificates you chose to trust?\n\n"
@@ -593,6 +699,7 @@ void PreferencesWindow::MessageReceived(BMessage* message)
                 : kind == kClearCacheRequest ? "Cache cleared."
                 : kind == kForgetCertificatesRequest ? "Trusted certificates forgotten." : "Cookies and site data cleared.");
             if (kind == kClearCacheRequest) MeasureCache();
+            if (kind == kClearSiteDataRequest || kind == kClearCacheRequest) RequestSiteData();
             break;
         }
         case cacheMeasured:
@@ -688,8 +795,13 @@ void PreferencesWindow::MessageReceived(BMessage* message)
         }
         case kShowPreferences:
             if (const char* tab = nullptr; message->FindString("tab", &tab) == B_OK && tab) {
+                // By label: the Browsing tab exists only with the modern engine.
                 const std::string name = tab;
-                fTabs->Select(name == "data" ? 1 : name == "sites" ? 2 : name == "links" ? 3 : name == "developer" ? 4 : 0);
+                const char* label = name == "browsing" ? "Browsing" : name == "data" ? "History and Data"
+                    : name == "sites" ? "Site Permissions" : name == "links" ? "Link Handlers"
+                    : name == "developer" ? "Developer" : "General";
+                for (int32 i = 0; i < fTabs->CountTabs(); ++i)
+                    if (fTabs->TabAt(i) && fTabs->TabAt(i)->Label() && !std::strcmp(fTabs->TabAt(i)->Label(), label)) fTabs->Select(i);
             }
             Activate();
             break;

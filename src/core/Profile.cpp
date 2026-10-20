@@ -23,6 +23,7 @@ static json Encode(const std::vector<PageRecord>& pages)
         json item = {{"url", page.url}, {"title", page.title}};
         if (page.visited) item["visited"] = page.visited;
         if (page.visits > 1) item["visits"] = page.visits;
+        if (!page.earlier.empty()) item["earlier"] = page.earlier;
         if (page.bar) item["bar"] = true;
         result.push_back(std::move(item));
     }
@@ -41,6 +42,12 @@ static std::vector<PageRecord> Decode(const json& value, size_t limit)
         if (auto visited = item.find("visited"); visited != item.end()) page.visited = visited->get<int64_t>();
         if (auto bar = item.find("bar"); bar != item.end()) page.bar = bar->get<bool>();
         if (auto visits = item.find("visits"); visits != item.end()) page.visits = std::clamp(visits->get<int>(), 0, 1000000);
+        if (auto earlier = item.find("earlier"); earlier != item.end() && earlier->is_array()) {
+            for (const auto& time : *earlier) {
+                if (page.earlier.size() >= kMaxEarlierVisits) break;
+                if (time.is_number_integer() && time.get<int64_t>() > 0) page.earlier.push_back(time.get<int64_t>());
+            }
+        }
         pages.push_back(std::move(page));
     }
     return pages;
@@ -463,21 +470,61 @@ bool Profile::Save(const std::filesystem::path& path, std::string& error, int64_
     } catch (const std::exception&) { }
     return true;
 }
+// Local calendar days, to keep one visit of each.
+static int64_t LocalDay(int64_t time)
+{
+    std::time_t seconds = static_cast<std::time_t>(time);
+    std::tm local {};
+    localtime_r(&seconds, &local);
+    return (local.tm_year + 1900) * 1000 + local.tm_yday;
+}
 bool Profile::Visit(const PageRecord& page, int64_t now)
 {
     if (page.url.rfind("https://", 0) != 0 && page.url.rfind("http://", 0) != 0) return false;
     int visits = 0;
+    std::vector<int64_t> earlier;
     history.erase(std::remove_if(history.begin(), history.end(), [&](const auto& old) {
         if (old.url != page.url) return false;
         visits = std::max(visits, std::max(1, old.visits));
+        // The last visit of another day stays, so the page is listed then too.
+        earlier = old.earlier;
+        if (old.visited > 0 && LocalDay(old.visited) != LocalDay(now)) earlier.insert(earlier.begin(), old.visited);
         return true;
     }), history.end());
+    if (earlier.size() > kMaxEarlierVisits) earlier.resize(kMaxEarlierVisits);
     history.insert(history.begin(), page);
     history.front().visited = now;
     history.front().visits = std::min(visits + 1, 1000000);
+    history.front().earlier = std::move(earlier);
     history.front().bar = false;
     if (history.size() > 2000) history.resize(2000);
     return true;
+}
+size_t Profile::ForgetVisitsSince(int64_t since)
+{
+    size_t forgotten = 0;
+    history.erase(std::remove_if(history.begin(), history.end(), [&](PageRecord& page) {
+        auto& earlier = page.earlier;
+        const size_t before = earlier.size();
+        earlier.erase(std::remove_if(earlier.begin(), earlier.end(), [&](int64_t time) { return time >= since; }), earlier.end());
+        int removed = static_cast<int>(before - earlier.size());
+        // Pages kept from before visits had times (0) are older than any range.
+        if (page.visited >= since) {
+            ++removed;
+            if (earlier.empty()) {
+                forgotten += removed;
+                return true;
+            }
+            // The page's latest visit before then becomes its last one.
+            page.visited = earlier.front();
+            earlier.erase(earlier.begin());
+        }
+        forgotten += removed;
+        page.visits = std::max(1, page.visits - removed);
+        return false;
+    }), history.end());
+    std::stable_sort(history.begin(), history.end(), [](const PageRecord& a, const PageRecord& b) { return a.visited > b.visited; });
+    return forgotten;
 }
 void Profile::AddBookmark(const PageRecord& page, bool bar)
 {

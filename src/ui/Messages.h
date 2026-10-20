@@ -79,6 +79,11 @@ constexpr uint32 kClearHistoryRequest = 'pclh';
 constexpr uint32 kClearCacheRequest = 'pclc';
 constexpr uint32 kClearSiteDataRequest = 'pcld';
 constexpr uint32 kDataCleared = 'pdcl';
+// Preferences › History and Data › Site data, to the application: the sites
+// that keep data and their sizes, answered to "reply" with
+// B_WEBKIT_WEBSITE_DATA_SIZES. kClearSiteDataRequest with repeated "site"
+// removes those sites' data only.
+constexpr uint32 kSiteDataSizesRequest = 'psds';
 // Preferences › History and Data › Forget Trusted Certificates, to the
 // application; answered with kDataCleared like the requests above.
 constexpr uint32 kForgetCertificatesRequest = 'pclt';

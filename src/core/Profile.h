@@ -120,6 +120,9 @@ struct Profile {
     static std::vector<std::filesystem::path> Backups(const std::filesystem::path& path);
     // Records a visit to an http(s) page; returns false for other pages.
     bool Visit(const PageRecord& page, int64_t now = std::time(nullptr));
+    // Forgets the visits from since (seconds since the epoch) on, and the
+    // pages visited only then; returns how many visits went.
+    size_t ForgetVisitsSince(int64_t since);
     // Adds the page to the bar or Other Bookmarks, or moves an existing
     // bookmark of its address onto the bar (bar true).
     void AddBookmark(const PageRecord& page, bool bar);

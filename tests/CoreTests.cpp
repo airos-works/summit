@@ -248,7 +248,7 @@ int main()
         {"https://c.example/", "C", now - 86400}, {"https://d.example/", "D", now - 2 * 86400},
         {"https://e.example/", "E", 0}};
     auto days = GroupHistoryByDay(visits, now);
-    CHECK(days.size() == 4 && days[0].label == "Today" && days[0].pages.size() == 2);
+    CHECK(days.size() == 4 && days[0].label == "Today" && days[0].visits.size() == 2);
     CHECK(days[1].label == "Yesterday" && days[2].label == "Thursday, 24 September 2026" && days[3].label == "Earlier");
     auto html = RenderHistoryPage(visits, now, [](const std::string& url) {
         return url == "https://a.example/" ? std::string("data:image/png;base64,QUJD") : std::string();
@@ -258,6 +258,34 @@ int main()
     CHECK(html.find(".i0{background-image:url(data:image/png;base64,QUJD)}") != std::string::npos);
     CHECK(html.find("icon letter\">B<") != std::string::npos);
     CHECK(RenderHistoryPage({}, now, nullptr).find("Pages you visit") != std::string::npos);
+    // A page visited on three days is under each of them, and a time range
+    // can be forgotten.
+    {
+        Profile profile;
+        CHECK(profile.Visit({"https://daily.example/", "Daily"}, now - 2 * 86400) && profile.Visit({"https://daily.example/", "Daily"}, now - 86400));
+        CHECK(profile.Visit({"https://daily.example/", "Daily"}, now - 7200) && profile.Visit({"https://daily.example/", "Daily"}, now - 60));
+        CHECK(profile.Visit({"https://once.example/", "Once"}, now - 600));
+        CHECK(profile.history.size() == 2 && profile.history[1].earlier.size() == 2 && profile.history[1].visits == 4);
+        auto grouped = GroupHistoryByDay(profile.history, now);
+        CHECK(grouped.size() == 3 && grouped[0].visits.size() == 2 && grouped[1].label == "Yesterday" && grouped[2].visits.size() == 1);
+        CHECK(grouped[1].visits[0].page->url == "https://daily.example/" && grouped[1].visits[0].time == now - 86400);
+        // Saved and read back.
+        const auto folder = std::filesystem::temp_directory_path() / ("summit-visits-" + std::to_string(::getpid()));
+        std::filesystem::create_directories(folder);
+        std::string error;
+        CHECK(profile.Save(folder / "profile.json", error));
+        auto loaded = Profile::Load(folder / "profile.json", error);
+        CHECK(error.empty() && loaded.history.size() == 2 && loaded.history[1].earlier == profile.history[1].earlier);
+        std::filesystem::remove_all(folder);
+        // The last hour: once.example goes, daily.example falls back to its
+        // last visit of an earlier day (earlier visits of today are not kept).
+        CHECK(profile.ForgetVisitsSince(now - 3600) == 2);
+        CHECK(profile.history.size() == 1 && profile.history[0].visited == now - 86400 && profile.history[0].earlier.size() == 1);
+        CHECK(profile.ForgetVisitsSince(now - 30 * 86400) == 2 && profile.history.empty());
+        // Pages from before visits had times stay.
+        profile.history.push_back({"https://old.example/", "Old"});
+        CHECK(profile.ForgetVisitsSince(now - 3600) == 0 && profile.history.size() == 1);
+    }
     Bookmarks marks;
     CHECK(marks.Add({"https://x.example/", "X"}, kBookmarksBarFolder) && !marks.Add({"javascript:bad", "J"}, kOtherBookmarksFolder));
     CHECK(marks.AddFolder(kOtherBookmarksFolder, "Reading"));

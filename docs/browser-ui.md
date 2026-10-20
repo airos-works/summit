@@ -155,7 +155,10 @@ refresh that cancelled a click on a History entry.
 - ~~No bookmark editing (rename, reorder, folders) beyond add/remove and
   bar membership; no drag and drop onto the bar.~~ Done 19 October:
   [bookmarks.md](bookmarks.md).
-- History keeps one entry per address (its latest visit), as before.
+- ~~History keeps one entry per address (its latest visit), as before.~~ Done 20
+  October (#109): an entry keeps its latest visit and the last visit of each
+  earlier day it was visited on (60 days at most, `earlier` in the profile), and
+  the History page lists the page under each of those days.
 - ~~SVG-only favicons are not shown.~~ Done 20 October (below).
 - ~~Menus list pages without icons.~~ Done 20 October: the History menu and
   the Bookmarks menu with its folders show each page's site icon (`NewPageMenuItem`

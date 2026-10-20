@@ -151,7 +151,20 @@ keystrokes.
 
 ## Not done
 
-- No "Clear recent history" time range; data is cleared for all time.
+- ~~No "Clear recent history" time range; data is cleared for all time.~~ Done
+  20 October (#109). Preferences › History and Data has **Clear what was saved
+  in:** the last hour, 24 hours, 7 days, 4 weeks or all time, for Clear History,
+  Clear Cache and Clear Cookies and Site Data. History forgets the visits of
+  that time (a page falls back to its last visit of an earlier day, or goes);
+  cookies and caches are removed by their own times
+  (`BWebKitContext::RemoveWebsiteDataSince`); site storage (local storage,
+  IndexedDB, service workers) keeps no times, so it is removed for the sites the
+  history saw in that time, by registrable domain: clear cookies and site data
+  before the history of the same time. Extensions' storage is kept.
+- **Site data** in the same tab lists the sites that keep data, largest first,
+  with their size and a total (`FetchWebsiteDataSizes`); Remove deletes a
+  site's data, its cookies included (`RemoveWebsiteDataOfSites`). Extensions'
+  own origins are not listed.
 - The cookie/site-data size is not shown (it includes extensions' data, which
   is kept).
 - ~~Text-only zoom is not offered.~~ Done 20 October: View › Zoom Text Only

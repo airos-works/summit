@@ -1,6 +1,7 @@
 #pragma once
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace summit {
 // A page in history, a tab or a bookmark (Profile).
@@ -15,5 +16,10 @@ struct PageRecord {
     // History: how many times the page was visited (0 for older entries,
     // which count as one). Address field type-ahead ranks pages by it.
     int visits = 0;
+    // History: the last visit of each earlier day the page was visited on,
+    // newest first (kMaxEarlierVisits at most), so that History lists it
+    // under each of those days.
+    std::vector<int64_t> earlier;
 };
+constexpr size_t kMaxEarlierVisits = 60;
 }

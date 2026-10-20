@@ -179,6 +179,34 @@ void SharedProfile::ClearHistory(const BMessenger& sender)
     Announce(kHistoryChanged | kHistoryCleared | kIconsCleared, sender);
 }
 
+void SharedProfile::ForgetHistorySince(int64_t since, const BMessenger& sender)
+{
+    {
+        std::lock_guard lock(fMutex);
+        fProfile.ForgetVisitsSince(since);
+        ++fRevision;
+    }
+    std::string error;
+    Save(error);
+    std::error_code ignored;
+    std::filesystem::remove(fPath.parent_path() / "Pages" / "history.html", ignored);
+    Announce(kHistoryChanged | kHistoryCleared, sender);
+}
+
+std::set<std::string> SharedProfile::HostsVisitedSince(int64_t since) const
+{
+    std::set<std::string> hosts;
+    std::lock_guard lock(fMutex);
+    for (const auto& page : fProfile.history) {
+        bool visited = page.visited >= since;
+        for (int64_t time : page.earlier) visited = visited || time >= since;
+        if (!visited) continue;
+        const auto host = FaviconKey(page.url);
+        if (!host.empty()) hosts.insert(host);
+    }
+    return hosts;
+}
+
 void SharedProfile::Announce(uint32 changes, const BMessenger& sender, const std::string& iconURL, const BMessage* details)
 {
     std::vector<BMessenger> listeners;

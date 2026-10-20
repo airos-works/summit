@@ -11,13 +11,19 @@ namespace summit {
 constexpr const char* kHistoryPage = "summit:history";
 constexpr const char* kBookmarksPage = "summit:bookmarks";
 
+// A visit of a page: its latest one, or the last of an earlier day.
+struct HistoryVisit {
+    const PageRecord* page;
+    int64_t time;
+};
 struct HistoryDay {
     std::string label;
-    std::vector<const PageRecord*> pages;
+    std::vector<HistoryVisit> visits;
 };
-// Groups history (most recent first) by local calendar day: "Today",
-// "Yesterday", then the date, e.g. "Thursday, 24 September 2026". Visits
-// recorded before visits had times are grouped under "Earlier".
+// Groups history's visits (most recent first) by local calendar day:
+// "Today", "Yesterday", then the date, e.g. "Thursday, 24 September 2026". A
+// page visited on several days is under each. Visits recorded before visits
+// had times are grouped under "Earlier".
 std::vector<HistoryDay> GroupHistoryByDay(const std::vector<PageRecord>& history, int64_t now);
 
 // Returns an image URL (normally data:) for a page's favicon, or empty.

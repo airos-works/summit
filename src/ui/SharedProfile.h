@@ -6,6 +6,7 @@
 #include <functional>
 #include <map>
 #include <mutex>
+#include <set>
 #include <string>
 #include <thread>
 #include <vector>
@@ -84,6 +85,11 @@ public:
     // Forgets every visited page: the history list, the History page written
     // from it and the icons of sites that are not bookmarked.
     void ClearHistory(const BMessenger& sender);
+    // Forgets the visits from since on (seconds since the epoch), and the
+    // pages visited only then; icons stay.
+    void ForgetHistorySince(int64_t since, const BMessenger& sender);
+    // The hosts of the pages visited from since on.
+    std::set<std::string> HostsVisitedSince(int64_t since) const;
 
     // Each window publishes its tabs under its own key; windows are saved in
     // key order. A window closed while Summit keeps running is removed.

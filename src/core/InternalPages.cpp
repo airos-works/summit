@@ -1,6 +1,7 @@
 #include "InternalPages.h"
 #include "Address.h"
 #include "Favicon.h"
+#include <algorithm>
 #include <cctype>
 #include <cstdio>
 #include <ctime>
@@ -35,19 +36,26 @@ std::vector<HistoryDay> GroupHistoryByDay(const std::vector<PageRecord>& history
     previous.tm_min = previous.tm_sec = 0;
     previous.tm_isdst = -1;
     const std::tm yesterday = LocalTime(static_cast<int64_t>(std::mktime(&previous)));
+    std::vector<HistoryVisit> visits;
+    for (const auto& page : history) {
+        visits.push_back({&page, page.visited});
+        for (int64_t time : page.earlier) visits.push_back({&page, time});
+    }
+    // Untimed visits (0) last, in history's order.
+    std::stable_sort(visits.begin(), visits.end(), [](const HistoryVisit& a, const HistoryVisit& b) { return a.time > b.time; });
     std::vector<HistoryDay> days;
     std::map<int, size_t> byKey;
-    for (const auto& page : history) {
+    for (const auto& visit : visits) {
         int key = -1;
         std::string label = "Earlier";
-        if (page.visited > 0) {
-            const std::tm visited = LocalTime(page.visited);
+        if (visit.time > 0) {
+            const std::tm visited = LocalTime(visit.time);
             key = DayKey(visited);
             label = key == DayKey(today) ? "Today" : key == DayKey(yesterday) ? "Yesterday" : DateLabel(visited);
         }
         auto [found, inserted] = byKey.try_emplace(key, days.size());
         if (inserted) days.push_back({label, { }});
-        days[found->second].pages.push_back(&page);
+        days[found->second].visits.push_back(visit);
     }
     return days;
 }
@@ -172,15 +180,15 @@ std::string RenderHistoryPage(const std::vector<PageRecord>& history, int64_t no
     PageWriter writer(icons);
     for (const auto& day : GroupHistoryByDay(history, now)) {
         writer.Raw("<section><h2>" + EscapeHTML(day.label) + "</h2><div class=\"list\">\n");
-        for (const auto* page : day.pages) {
+        for (const auto& visit : day.visits) {
             std::string time;
-            if (page->visited > 0) {
-                const std::tm visited = LocalTime(page->visited);
+            if (visit.time > 0) {
+                const std::tm visited = LocalTime(visit.time);
                 char text[8];
                 std::snprintf(text, sizeof text, "%02d:%02d", visited.tm_hour, visited.tm_min);
                 time = text;
             }
-            writer.Row(*page, time);
+            writer.Row(*visit.page, time);
         }
         writer.Raw("</div></section>\n");
     }

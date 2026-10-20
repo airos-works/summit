@@ -82,6 +82,11 @@ private:
     std::vector<std::pair<std::string, std::string>> fProtocolEntries;
     BTabView* fTabs;
     BColumnListView* fSites;
+    // Preferences › History and Data › Site data: sites and their sizes.
+    BColumnListView* fSiteData;
+    BStringView* fSiteDataTotal;
+    BButton* fSiteDataRemove;
+    void RequestSiteData();
     BButton* fSiteAllow;
     BButton* fSiteBlock;
     BButton* fSiteRemove;
@@ -104,6 +109,10 @@ private:
     BButton* fForgetCertificates;
     BStringView* fCacheInfo;
     BStringView* fDataStatus;
+    // What the three Clear buttons take: the last this many seconds, 0 all time.
+    BMenuField* fClearRange;
+    int64 ClearSince() const;
+    std::string ClearRangeText() const;
     std::filesystem::path fWebKitDirectory;
 };
 }
