@@ -31,7 +31,7 @@ and a replacement receives a new creation time. Expired replacements remove the
 stored row using wall-clock time, and enumeration excludes expired cookies.
 URL-query ordering uses path length and creation time. The HTTP parser retains
 SameSite values. This does not implement SameSite enforcement on network
-requests. Partitioned writes remain unsupported and are rejected by the
+requests (added on 20 October 2026, [networking.md](networking.md)). Partitioned writes remain unsupported and are rejected by the
 structured database writer.
 
 An exact-key deletion method preserves the stored name, domain and path instead
