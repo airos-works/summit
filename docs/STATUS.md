@@ -1,5 +1,11 @@
 # Development verification
 
+> A dated log, newest first. What older entries call missing or not done
+> (multiple windows, private browsing, certificate screens, permissions,
+> developer tools, updates, the downloads panel) has mostly been done since:
+> see [REQUIREMENTS.md](REQUIREMENTS.md), the README's feature list and the
+> GitHub issues for what is left.
+
 ## 2 October 2026, evening: NanoKVM screen stayed black
 
 Reported by the owner: the NanoKVM at 192.168.1.8 (attached to the Rock 5)
