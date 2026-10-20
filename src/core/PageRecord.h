@@ -19,7 +19,7 @@ struct PageRecord {
     // History: the last visit of each earlier day the page was visited on,
     // newest first (kMaxEarlierVisits at most), so that History lists it
     // under each of those days.
-    std::vector<int64_t> earlier;
+    std::vector<int64_t> earlier {};
 };
 constexpr size_t kMaxEarlierVisits = 60;
 }

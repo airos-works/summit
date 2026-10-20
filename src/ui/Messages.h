@@ -159,6 +159,21 @@ constexpr uint32 kExtensionSetPrivate = 'expv';
 // A secondary click on an extension's toolbar button ("extension_identifier",
 // "where": the screen point).
 constexpr uint32 kExtensionActionMenu = 'exmn';
+// From the Extensions window to the application ("window"): look for updates
+// now; turn an extension's automatic updates on or off
+// ("extension_identifier", "enabled"); install a waiting update that asks for
+// more access ("extension_identifier"); open the keyboard shortcuts.
+constexpr uint32 kExtensionCheckUpdates = 'excu';
+constexpr uint32 kExtensionSetAutoUpdate = 'exau';
+constexpr uint32 kExtensionApproveUpdate = 'exua';
+constexpr uint32 kShowExtensionShortcuts = 'exks';
+// The keyboard shortcuts window: its state from the application, and to the
+// application a command's new keys ("extension_identifier", "command",
+// "shortcut" in the engine's form, empty for none, absent for the
+// manifest's), and that it closed.
+constexpr uint32 kExtensionShortcutsState = 'exkt';
+constexpr uint32 kExtensionSetShortcut = 'exsc';
+constexpr uint32 kExtensionShortcutsClosed = 'exkc';
 constexpr uint32 kBrowserState = 'stat';
 // Windows. kNewWindow goes to the application ("url": repeated, optional;
 // "new_page"/"new_page_url": a page opened by another page; "popup": bool;

@@ -81,8 +81,12 @@ up de-duplication of identical bodies.
 ## 4. Native notifications cannot call back into the sender
 
 `BNotification` can launch an application or open a file on click, but offers no
-activation callback. Extension `notifications.onClicked`/`onButtonClicked`
-therefore never fire; `create/update/clear/getAll` work.
+activation callback, and its notifications have no buttons. Summit works
+around it (#102): an extension's notification starts the browser again with
+`--summit-extension-notification-click` and the notification's identity, the
+running instance routes the click to the extension, and a small window
+offers the buttons. Real per-button actions and a "closed by the user" report
+would still need the notification server's help.
 
 ## 5. Stock Mesa 22.0.5 EGL does not initialize
 

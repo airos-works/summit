@@ -1,6 +1,7 @@
 #include "ExtensionInstaller.h"
 #if SUMMIT_MODERN_WEBKIT
 #include "core/ExtensionIdentity.h"
+#include "core/ExtensionUpdate.h"
 #include "ExtensionStoreDownload.h"
 #include <WebKit/WebKitContext.h>
 #include <MessageRunner.h>
@@ -290,6 +291,12 @@ void ExtensionInstaller::MessageReceived(BMessage* message)
             throw std::runtime_error("An extension with this identity is already installed. Remove it before installing a replacement.");
         draft.permissions = values(*message, "permission");
         draft.origins = values(*message, "origin");
+        // What was approved, and where updates come from (ExtensionUpdater).
+        draft.entry.permissions = draft.permissions;
+        draft.entry.origins = draft.origins;
+        draft.entry.source = ExtensionUpdateSource(manifest, draft.entry.identifier, verifiedCRXIdentity);
+        if (manifest.contains("update_url") && manifest["update_url"].is_string() && manifest["update_url"].get<std::string>().size() <= 4096)
+            draft.entry.updateURL = manifest["update_url"].get<std::string>();
         std::set<std::string> requested, optional;
         auto collect = [&](const char* name, std::set<std::string>& target) {
             if (!manifest.contains(name)) return;

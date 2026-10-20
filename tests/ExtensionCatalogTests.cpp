@@ -219,6 +219,40 @@ int main()
     put(storage / "catalog.json", invalid.dump());
     CHECK(!catalog.Load(entries, error));
     put(storage / "catalog.json", saved);
+    // Older catalogs have no update details: they load with automatic updates on.
+    CHECK(catalog.Load(entries, error) && entries.size() == 1 && entries[0].source.empty() && entries[0].autoUpdate
+        && !entries[0].updated && !entries[0].checked);
+    CHECK(catalog.Modify(entry.identifier, [](InstalledExtension& item) {
+        item.source = "firefox";
+        item.autoUpdate = false;
+        item.checked = 1760000000;
+    }, error));
+    CHECK(catalog.Load(entries, error) && entries[0].source == "firefox" && !entries[0].autoUpdate && entries[0].checked == 1760000000);
+    CHECK(!catalog.Modify(entry.identifier, [](InstalledExtension& item) { item.source = "elsewhere"; }, error));
+    CHECK(!catalog.Modify(entry.identifier, [](InstalledExtension& item) { item.package = "pkg-000000"; }, error));
+    CHECK(!catalog.Modify("missing@example.test", [](InstalledExtension&) { }, error));
+    // An update takes a new package; the old one goes once no record names it.
+    {
+        put(source, "updated archive bytes");
+        auto update = catalog.Stage(source, error);
+        CHECK(update);
+        if (!update) return 2;
+        auto replacement = entries[0];
+        replacement.version = "1.2.4";
+        replacement.fingerprint = std::string(64, 'b');
+        replacement.updated = 1760000100;
+        const auto oldPackage = entries[0].package;
+        CHECK(!catalog.RemovePackage(oldPackage, error));
+        CHECK(catalog.Replace(*update, replacement, error));
+        CHECK(!catalog.Replace(*update, replacement, error));
+        CHECK(catalog.Load(entries, error) && entries.size() == 1 && entries[0].version == "1.2.4" && entries[0].package != oldPackage
+            && entries[0].updated == 1760000100 && entries[0].installationOrder == replacement.installationOrder && !entries[0].autoUpdate);
+        CHECK(read(catalog.PackagePath(entries[0])) == "updated archive bytes");
+        CHECK(fs::exists(storage / "packages" / oldPackage) && catalog.RemovePackage(oldPackage, error) && !fs::exists(storage / "packages" / oldPackage));
+        CHECK(!catalog.RemovePackage(entries[0].package, error) && !catalog.RemovePackage("../escape", error));
+        saved = read(storage / "catalog.json");
+        installedPath = catalog.PackagePath(entries[0]);
+    }
     CHECK(catalog.Forget(entry.identifier, error));
     CHECK(catalog.Load(entries, error) && entries.empty());
     CHECK(fs::exists(installedPath)); // Metadata removal does not delete package or runtime data.

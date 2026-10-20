@@ -42,9 +42,9 @@ The intended API contracts follow [MDN's command manifest documentation](https:/
 and [`reset()`](https://developer.mozilla.org/en-US/docs/Mozilla/Add-ons/WebExtensions/API/commands/reset).
 Persistence of overrides and migration of action settings were checked against
 [Mozilla's ExtensionShortcuts implementation](https://github.com/mozilla/gecko-dev/blob/master/toolkit/components/extensions/ExtensionShortcuts.sys.mjs).
-Compatibility is still incomplete: whitespace-normalized shortcut spellings,
-shortcut conflict management, global shortcuts and shortcut settings UI need
-further work.
+Compatibility is still incomplete: whitespace-normalized shortcut spellings
+and global shortcuts need further work. Conflicts and the settings window
+are Summit's (#101).
 
 ## Events
 
@@ -63,10 +63,13 @@ supplies the existing user-gesture scope and native tab conversion. It snapshots
 listeners, creates a separate tab object for each listener, roots JavaScript
 arguments across allocations, and passes `undefined` when no tab is supplied.
 
-**Summit's keyboard handling does not yet call this engine command path.**
-Action popup/click routing and the extension host SDK still need integration.
-No physical shortcut, background command listener, promise completion or
-extension-context state write has been exercised in a running extension.
+Summit's keyboard handling calls this path since 20 October 2026 (#101):
+`BWebKitContext::GetExtensionCommands`, `PerformExtensionCommand` and
+`SetExtensionCommandShortcut`, the key lookup in `BrowserWindow`, and the
+Keyboard Shortcuts window. On Haiku the manifest's `linux` key now comes
+before its `default` one. What the user sees, how the keys map to Haiku's
+and what was tried in running extensions (a test extension, Dark Reader,
+1Password) is in [extension-fixes-2026-10-20.md](extension-fixes-2026-10-20.md).
 
 ## Verification
 

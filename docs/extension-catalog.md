@@ -8,7 +8,13 @@ automatic startup and its [native installer and manager](modern-extension-manage
 An `ExtensionCatalog` owns a dedicated profile directory containing
 `catalog.json` and a `packages` directory. Each installation records its stable
 identity, display name, version, approved resource fingerprint, owned package
-name, enabled state, and explicit file/private-access flags. Runtime permission
+name, enabled state, and explicit file/private-access flags. Since #104 it
+also records where updates come from (`source`: `chrome` or `firefox`, and the
+manifest's `update_url`), the `auto_update` switch, when the extension was
+`updated` and `checked` (seconds since the epoch), and the required
+`permissions` and `origins` the user approved. These fields are optional:
+older catalogs load with automatic updates on, and the controller fills them
+in at the next start. Runtime permission
 grants remain in WebKit's saved state; the catalog does not grant permissions.
 Fingerprints retain their exact hexadecimal spelling, including the uppercase
 digits returned by WebKit's native digest formatter.
@@ -46,9 +52,14 @@ keeps the prior catalog intact. Reads are bounded to 4 MiB even if a file grows
 while being read; malformed, duplicate, unsupported-version, or unsafe-path
 records cause an error without replacing the caller's current list or rewriting
 the file. `SetEnabled` persists an existing installation's enabled state.
-`Forget` removes only its record. The manager unloads the runtime first and
-explicitly tells the user that package bytes and WebKit data are retained.
-Erasing that retained data and automatic updates remain future work.
+`Forget` removes only its record; `RemovePackage` then deletes a package no
+record names. `Modify` changes a record's update details and switches (never
+its identity, package or order), and `Replace` commits a new version of an
+installed extension: the record takes the staged package and the new name,
+version and fingerprint, and keeps its order. When the user removes an
+extension, the manager unloads it, forgets the record, has the engine erase
+its storage and website data (`BWebKitContext::RemoveExtensionData`) and then
+deletes the package. See [extension-fixes-2026-10-20.md](extension-fixes-2026-10-20.md).
 
 The host core suite passes, and `ExtensionCatalogTests.cpp` passes 57 checks in
 Haiku. The native run has unchanged input hashes and a clean crash-log interval:

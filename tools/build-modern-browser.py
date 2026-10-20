@@ -386,7 +386,9 @@ def main():
                    'src/ui/BrowserWindowMcp.cpp', 'src/ui/McpService.cpp', 'src/ui/McpLog.cpp', 'src/ui/McpBrowserTools.cpp', 'src/ui/McpSystemTools.cpp', 'src/ui/McpPageTools.cpp', 'src/ui/McpEngineTools.cpp', 'src/ui/McpDebugHelper.cpp',
                    'src/ui/BrowserWindowFeatures.cpp', 'src/ui/BrowserWindowLoadErrors.cpp', 'src/ui/NoticeBar.cpp', 'src/ui/PageScripts.cpp', 'src/ui/PasswordStore.cpp', 'src/ui/AuthenticationPrompt.cpp', 'src/ui/BrowserWindowAuthentication.cpp',
                    'src/ui/PictureInPictureWindow.cpp', 'src/ui/PrintJob.cpp', 'src/ui/BrowsingPreferences.cpp',
-                   'src/ui/WebApps.cpp', 'src/core/WebAppManifest.cpp', 'src/ui/UpdateChecker.cpp']
+                   'src/ui/WebApps.cpp', 'src/core/WebAppManifest.cpp', 'src/ui/UpdateChecker.cpp',
+                   'src/core/ExtensionShortcut.cpp', 'src/core/ExtensionUpdate.cpp', 'src/ui/ExtensionShortcuts.cpp',
+                   'src/ui/ExtensionShortcutsWindow.cpp', 'src/ui/ExtensionUpdater.cpp']
     objects = [work / pathlib.Path(source).with_suffix('.o') for source in sources]
     commands = [flags + ['-c', str(ROOT / source), '-o', str(output)]
                 for source, output in zip(sources, objects)]

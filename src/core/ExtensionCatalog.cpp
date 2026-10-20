@@ -48,7 +48,12 @@ void validate(const InstalledExtension& entry)
             // WebKit's native digest formatter returns uppercase hexadecimal.
             // Retain the exact SDK value because approval compares it verbatim.
             return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
-        }))
+        })
+        || (entry.source != "" && entry.source != "chrome" && entry.source != "firefox")
+        || entry.updateURL.size() > 4096 || entry.updateURL.find('\0') != std::string::npos
+        || entry.updated < 0 || entry.checked < 0 || entry.permissions.size() > 4096 || entry.origins.size() > 4096
+        || !std::all_of(entry.permissions.begin(), entry.permissions.end(), textValid)
+        || !std::all_of(entry.origins.begin(), entry.origins.end(), textValid))
         throw std::runtime_error("Invalid installed extension record");
 }
 void privateDirectory(const fs::path& path)
@@ -178,9 +183,15 @@ bool ExtensionCatalog::Load(std::vector<InstalledExtension>& result, std::string
         const auto& items = data.at("extensions");
         const bool hasOrder = !items.empty() && items.front().contains("installation_order");
         for (const auto& item : items) {
-            InstalledExtension entry { item.at("identifier"), item.at("name"), item.at("version"),
-                item.at("fingerprint"), item.at("package"), item.at("enabled"),
-                item.at("allow_file_urls"), item.at("allow_private_browsing") };
+            InstalledExtension entry;
+            entry.identifier = item.at("identifier");
+            entry.name = item.at("name");
+            entry.version = item.at("version");
+            entry.fingerprint = item.at("fingerprint");
+            entry.package = item.at("package");
+            entry.enabled = item.at("enabled");
+            entry.allowFileURLs = item.at("allow_file_urls");
+            entry.allowPrivateBrowsing = item.at("allow_private_browsing");
             if (item.contains("installation_order") != hasOrder)
                 throw std::runtime_error("Incomplete extension installation order metadata");
             if (hasOrder) {
@@ -193,6 +204,14 @@ bool ExtensionCatalog::Load(std::vector<InstalledExtension>& result, std::string
                 // Migrate in memory; a read alone must not rewrite the catalog.
                 entry.installationOrder = entries.size() + 1;
             }
+            // Update details came later; older catalogs have none.
+            entry.source = item.value("source", "");
+            entry.updateURL = item.value("update_url", "");
+            entry.autoUpdate = item.value("auto_update", true);
+            entry.updated = item.value("updated", int64_t(0));
+            entry.checked = item.value("checked", int64_t(0));
+            entry.permissions = item.value("permissions", std::vector<std::string>());
+            entry.origins = item.value("origins", std::vector<std::string>());
             validate(entry);
             if (!identities.insert(entry.identifier).second || !packages.insert(entry.package).second
                 || !orders.insert(entry.installationOrder).second)
@@ -231,7 +250,9 @@ bool ExtensionCatalog::Save(const std::vector<InstalledExtension>& entries, std:
             items.push_back({{"identifier", entry.identifier}, {"name", entry.name}, {"version", entry.version},
                 {"fingerprint", entry.fingerprint}, {"package", entry.package}, {"enabled", entry.enabled},
                 {"allow_file_urls", entry.allowFileURLs}, {"allow_private_browsing", entry.allowPrivateBrowsing},
-                {"installation_order", entry.installationOrder}});
+                {"installation_order", entry.installationOrder}, {"source", entry.source}, {"update_url", entry.updateURL},
+                {"auto_update", entry.autoUpdate}, {"updated", entry.updated}, {"checked", entry.checked},
+                {"permissions", entry.permissions}, {"origins", entry.origins}});
         }
         auto data = json{{"format", 1}, {"extensions", std::move(items)}}.dump(2);
         if (data.size() > catalogLimit) throw std::runtime_error("Extension catalog is too large");
@@ -339,6 +360,61 @@ bool ExtensionCatalog::Forget(const std::string& identifier, std::string& error)
     if (found == entries.end()) { error = "Extension is not installed"; return false; }
     entries.erase(found);
     return Save(entries, error);
+}
+bool ExtensionCatalog::Modify(const std::string& identifier, const std::function<void(InstalledExtension&)>& change,
+    std::string& error) const
+{
+    std::vector<InstalledExtension> entries;
+    if (!Load(entries, error)) return false;
+    auto found = std::find_if(entries.begin(), entries.end(), [&](const auto& entry) { return entry.identifier == identifier; });
+    if (found == entries.end()) { error = "Extension is not installed"; return false; }
+    auto changed = *found;
+    change(changed);
+    if (changed.identifier != found->identifier || changed.package != found->package
+        || changed.installationOrder != found->installationOrder) {
+        error = "An installation's identity cannot change";
+        return false;
+    }
+    *found = std::move(changed);
+    return Save(entries, error);
+}
+bool ExtensionCatalog::Replace(StagedExtensionPackage& staged, const InstalledExtension& entry, std::string& error) const
+{
+    error.clear();
+    try {
+        if (staged.fInstalled || staged.fDirectory.parent_path() != fRoot / "packages")
+            throw std::runtime_error("Prepared update belongs to another catalog or is already installed");
+        std::vector<InstalledExtension> entries;
+        if (!Load(entries, error)) return false;
+        auto found = std::find_if(entries.begin(), entries.end(), [&](const auto& old) { return old.identifier == entry.identifier; });
+        if (found == entries.end()) throw std::runtime_error("Extension is not installed");
+        auto replacement = entry;
+        replacement.package = staged.fDirectory.filename().string();
+        replacement.installationOrder = found->installationOrder;
+        if (replacement.package == found->package) throw std::runtime_error("The update is the installed package");
+        *found = std::move(replacement);
+        if (!Save(entries, error)) return false;
+        staged.fInstalled = true;
+        return true;
+    } catch (const std::exception& exception) {
+        error = exception.what();
+        return false;
+    }
+}
+bool ExtensionCatalog::RemovePackage(const std::string& package, std::string& error) const
+{
+    error.clear();
+    if (!packageValid(package)) { error = "Invalid extension package"; return false; }
+    std::vector<InstalledExtension> entries;
+    if (!Load(entries, error)) return false;
+    if (std::any_of(entries.begin(), entries.end(), [&](const auto& entry) { return entry.package == package; })) {
+        error = "The package is still installed";
+        return false;
+    }
+    std::error_code failure;
+    fs::remove_all(fRoot / "packages" / package, failure);
+    if (failure) { error = failure.message(); return false; }
+    return true;
 }
 fs::path ExtensionCatalog::PackagePath(const InstalledExtension& entry) const
 {

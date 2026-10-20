@@ -14,6 +14,9 @@
 #include "ui/StallTrace.h"
 #include "ui/ExtensionInstaller.h"
 #include "ui/ExtensionManager.h"
+#include "ui/ExtensionShortcuts.h"
+#include "ui/ExtensionShortcutsWindow.h"
+#include "ui/ExtensionUpdater.h"
 #if SUMMIT_MODERN_WEBKIT
 #include "ui/DownloadList.h"
 #include "ui/McpService.h"
@@ -67,6 +70,11 @@
 // The argument of a start after an update (UpdateChecker.h): reopen the last
 // session's windows and tabs even when Preferences say to start afresh.
 static constexpr const char* kRestoreSessionArgument = "--restore-session";
+// A click on a notification an extension showed starts Summit with this, the
+// extension, the notification, its title and its buttons' titles
+// (BWebKitContext::ExtensionNotificationClicked).
+static constexpr const char* kExtensionNotificationClickArgument = "--summit-extension-notification-click";
+static constexpr uint32 kExtensionNotificationChoice = 'senc';
 
 class SummitApp : public BApplication {
 public:
@@ -100,6 +108,12 @@ public:
             const bool privateContext = !std::strcmp(argv[2], "private");
             auto& service = privateContext ? fPrivateSitePermissions : fSitePermissions;
             if (service) service->NotificationClicked(std::strtoull(argv[3], nullptr, 10));
+            return;
+        }
+        if (argc >= 4 && !std::strcmp(argv[1], kExtensionNotificationClickArgument)) {
+            std::vector<std::string> buttons;
+            for (int32 i = 5; i < std::min<int32>(argc, 7); ++i) buttons.push_back(argv[i]);
+            ExtensionNotificationClicked(argv[2], argv[3], argc > 4 ? argv[4] : "", buttons);
             return;
         }
 #endif
@@ -328,6 +342,11 @@ public:
                 }, [this] { RefreshExtensions(); });
             AddHandler(fInstaller.get());
             fInstaller->Start();
+            // New versions from the extensions' stores (Extensions › Check for Updates).
+            fExtensionUpdates = std::make_unique<summit::ExtensionUpdater>(fWebKitContext, fProfile / "Extensions", *fExtensions,
+                [this] { RefreshExtensions(); });
+            AddHandler(fExtensionUpdates.get());
+            fExtensionUpdates->Start();
         }
         // File › Check for Updates… and the daily check (Preferences › General).
         fUpdates = std::make_unique<summit::UpdateChecker>(
@@ -362,8 +381,29 @@ public:
             return;
         }
 #if SUMMIT_MODERN_WEBKIT
+        if (message->what == kExtensionNotificationChoice) {
+            // The last button is the notification itself.
+            const int32 which = message->GetInt32("which", -1);
+            const int32 buttons = message->GetInt32("buttons", 0);
+            if (fWebKitContext && which >= 0 && which <= buttons)
+                fWebKitContext->ExtensionNotificationClicked(message->GetString("extension", ""), message->GetString("notification", ""),
+                    which < buttons ? which : -1);
+            return;
+        }
         if (message->what == B_WEBKIT_EXTENSION_ACTIONS_CHANGED) {
             for (const auto& window : fWindows) window.messenger.SendMessage(message);
+            // Loads, unloads and changed keys: the commands' shortcuts again.
+            RefreshExtensionCommands();
+            return;
+        }
+        if (message->what == B_WEBKIT_EXTENSION_COMMANDS) {
+            ExtensionCommandsReceived(*message);
+            return;
+        }
+        if (message->what == summit::kShowExtensionShortcuts || message->what == summit::kExtensionSetShortcut
+            || message->what == summit::kExtensionShortcutsClosed || message->what == summit::kExtensionCheckUpdates
+            || message->what == summit::kExtensionSetAutoUpdate || message->what == summit::kExtensionApproveUpdate) {
+            ExtensionSettingsMessage(*message);
             return;
         }
         if (message->what == B_WEBKIT_BROWSER_COMMAND || message->what == B_WEBKIT_BROWSER_COMMAND_CANCELLED) {
@@ -464,7 +504,15 @@ public:
             else if (!fInstaller->IsBusy()) {
                 const char* identifier = nullptr;
                 if (message->FindString("extension_identifier", &identifier) == B_OK) {
-                    if (message->what == summit::kExtensionRemove) fExtensions->Remove(identifier);
+                    if (message->what == summit::kExtensionRemove) {
+                        // Nothing of it stays in the profile, its toolbar setting neither.
+                        if (fExtensions->Remove(identifier) && fShared) {
+                            const std::string id = identifier;
+                            fShared->Change([&](summit::Profile& profile) -> uint32 {
+                                return profile.unpinnedExtensions.erase(id) ? uint32(summit::SharedProfile::kExtensionsPinnedChanged) : 0;
+                            });
+                        }
+                    }
                     else {
                         bool enabled = false;
                         if (message->FindBool("enabled", &enabled) == B_OK) fExtensions->SetEnabled(identifier, enabled);
@@ -963,9 +1011,12 @@ public:
             fWebKitContext->SetExtensionActionListener({});
             fWebKitContext->SetBrowserCommandListener({});
             if (fExtensionWindow.IsValid()) fExtensionWindow.SendMessage(summit::kCloseExtensionManager);
+            if (fShortcutsWindow.IsValid()) fShortcutsWindow.SendMessage(B_QUIT_REQUESTED);
             if (fInstaller) fInstaller->Shutdown();
+            if (fExtensionUpdates) fExtensionUpdates->Shutdown();
             if (fExtensions) fExtensions->Shutdown();
             if (fExtensionWindows->load() || (fInstaller && fInstaller->HasPendingWork())
+                || (fExtensionUpdates && fExtensionUpdates->HasPendingWork())
                 || (fExtensions && fExtensions->HasPendingWork())) {
                 fWaitingForNativeUI = true;
                 SetPulseRate(100000);
@@ -978,6 +1029,11 @@ public:
             if (fExtensions) {
                 RemoveHandler(fExtensions.get());
                 fExtensions.reset();
+            }
+            // After the controller, which may still report to it.
+            if (fExtensionUpdates) {
+                RemoveHandler(fExtensionUpdates.get());
+                fExtensionUpdates.reset();
             }
             if (fPermissionPrompts) {
                 fWebKitContext->CancelExtensionPermissionRequests();
@@ -1347,6 +1403,36 @@ private:
         source.SendMessage(&detach);
     }
 #endif
+#if SUMMIT_MODERN_WEBKIT
+    // Haiku's notifications have no buttons of their own: a click on one that
+    // has buttons offers them, and the notification itself.
+    void ExtensionNotificationClicked(const std::string& extension, const std::string& notification, const std::string& title,
+        const std::vector<std::string>& buttons)
+    {
+        if (!fWebKitContext) return;
+        if (buttons.empty()) {
+            fWebKitContext->ExtensionNotificationClicked(extension.c_str(), notification.c_str());
+            return;
+        }
+        BMessage choice(kExtensionNotificationChoice);
+        choice.AddString("extension", extension.c_str());
+        choice.AddString("notification", notification.c_str());
+        choice.AddInt32("buttons", static_cast<int32>(buttons.size()));
+        // Named for its extension: anything can start Summit with these arguments.
+        std::string name = extension;
+        if (fExtensions)
+            for (const auto& entry : fExtensions->Entries())
+                if (entry.installation.identifier == extension) name = entry.installation.name;
+        const std::string text = summit::ExtensionDisplayText(name) + "\n\n"
+            + (title.empty() ? std::string("Its notification offers:") : summit::ExtensionDisplayText(title));
+        const std::string first = summit::ExtensionDisplayText(buttons[0]),
+            second = buttons.size() > 1 ? summit::ExtensionDisplayText(buttons[1]) : std::string();
+        auto* alert = new BAlert("Notification", text.c_str(), first.c_str(),
+            buttons.size() > 1 ? second.c_str() : "Open", buttons.size() > 1 ? "Open" : nullptr,
+            B_WIDTH_AS_USUAL, B_INFO_ALERT);
+        alert->Go(new BInvoker(new BMessage(choice), this));
+    }
+#endif
     summit::BrowserWindow* OpenWindow(summit::BrowserWindowOptions options)
     {
 #if SUMMIT_MODERN_WEBKIT
@@ -1676,6 +1762,93 @@ private:
         fExtensionWindow.SendMessage(&show);
         RefreshExtensions();
     }
+    void RefreshExtensionCommands()
+    {
+        // Badges change often (CHANGED each time): one request at a time.
+        if (fCommandsInFlight) {
+            fCommandsAgain = true;
+            return;
+        }
+        if (fWebKitContext && fExtensions && !fQuitting)
+            fCommandsInFlight = fWebKitContext->GetExtensionCommands(BMessenger(this), ++fCommandsRequest) == B_OK;
+    }
+    void ExtensionCommandsReceived(const BMessage& message)
+    {
+        const uint64 identifier = message.GetUInt64("identifier", 0);
+        if (identifier && identifier == fShortcutRequest) {
+            // The answer to a change made in the Keyboard Shortcuts window.
+            if (const status_t error = message.GetInt32("error", B_OK); error != B_OK && fShortcutsWindow.IsValid()) {
+                BMessage state(summit::kExtensionShortcutsState);
+                const char* reason = message.GetString("description", nullptr);
+                state.AddString("status", (std::string("The keys were not changed: ") + (reason ? reason : std::strerror(error))).c_str());
+                fShortcutsWindow.SendMessage(&state);
+            }
+            RefreshExtensionCommands();
+            return;
+        }
+        if (identifier != fCommandsRequest) return;
+        fCommandsInFlight = false;
+        if (std::exchange(fCommandsAgain, false)) RefreshExtensionCommands();
+        if (message.GetInt32("error", B_ERROR) != B_OK || !fExtensions) return;
+        std::vector<summit::ExtensionCommandBinding> bindings;
+        BMessage command;
+        for (int32 i = 0; i < 1024 && message.FindMessage("command", i, &command) == B_OK; ++i)
+            bindings.push_back({ command.GetString("extension_identifier", ""), command.GetString("extension_name", ""),
+                command.GetString("name", ""), command.GetString("description", ""), command.GetString("shortcut", ""),
+                command.GetString("suggested_shortcut", ""), {}, {} });
+        // The earlier installation keeps keys a later one asks for too.
+        std::map<std::string, uint64> order;
+        for (const auto& entry : fExtensions->Entries()) order[entry.installation.identifier] = entry.installation.installationOrder;
+        std::stable_sort(bindings.begin(), bindings.end(), [&](const auto& a, const auto& b) {
+            return order[a.extension] < order[b.extension];
+        });
+        summit::ExtensionShortcuts::Default().Set(std::move(bindings));
+        if (fShortcutsWindow.IsValid()) fShortcutsWindow.SendMessage(summit::kExtensionShortcutsState);
+    }
+    // From the Extensions and Keyboard Shortcuts windows.
+    void ExtensionSettingsMessage(const BMessage& message)
+    {
+        BMessenger sender;
+        if (!fExtensions || message.FindMessenger("window", &sender) != B_OK
+            || (sender != fExtensionWindow && sender != fShortcutsWindow)) return;
+        const char* identifier = message.GetString("extension_identifier", "");
+        switch (message.what) {
+            case summit::kShowExtensionShortcuts:
+                if (!fShortcutsWindow.IsValid()) {
+                    auto* window = new summit::ExtensionShortcutsWindow(BMessenger(this), fExtensionWindows);
+                    fShortcutsWindow = BMessenger(window);
+                    window->Show();
+                } else {
+                    BMessage state(summit::kExtensionShortcutsState);
+                    state.AddBool("activate", true);
+                    fShortcutsWindow.SendMessage(&state);
+                }
+                RefreshExtensionCommands();
+                break;
+            case summit::kExtensionShortcutsClosed:
+                if (sender == fShortcutsWindow) fShortcutsWindow = {};
+                break;
+            case summit::kExtensionSetShortcut: {
+                const char* command = message.GetString("command", "");
+                const char* shortcut = message.GetString("shortcut", nullptr);
+                if (*identifier && *command && fWebKitContext)
+                    fWebKitContext->SetExtensionCommandShortcut(identifier, command, shortcut, BMessenger(this), ++fShortcutRequest);
+                break;
+            }
+            case summit::kExtensionCheckUpdates:
+                if (fExtensionUpdates) fExtensionUpdates->CheckNow();
+                break;
+            case summit::kExtensionSetAutoUpdate: {
+                const bool enabled = message.GetBool("enabled", true);
+                fExtensions->ModifyInstallation(identifier, [enabled](summit::InstalledExtension& record) { record.autoUpdate = enabled; });
+                break;
+            }
+            case summit::kExtensionApproveUpdate:
+                if (fExtensionUpdates) fExtensionUpdates->Approve(identifier);
+                break;
+        }
+        RefreshExtensions();
+    }
     void RefreshExtensions()
     {
         if (fExtensions && fExtensions->IsReady())
@@ -1703,6 +1876,11 @@ private:
         state.what = summit::kExtensionsState;
         state.AddBool("ready", fExtensions->IsReady());
         state.AddString("catalog_error", fExtensions->CatalogError().c_str());
+        state.AddString("removal_error", fExtensions->RemovalError().c_str());
+        if (fExtensionUpdates) {
+            state.AddString("update_status", fExtensionUpdates->Status().c_str());
+            state.AddBool("checking", fExtensionUpdates->IsChecking());
+        }
         for (const auto& entry : fExtensions->Entries()) {
             BMessage item;
             item.AddString("identifier", entry.installation.identifier.c_str());
@@ -1714,6 +1892,13 @@ private:
             item.AddBool("loaded", entry.loaded);
             item.AddBool("installed", entry.installed);
             item.AddBool("private", entry.installation.allowPrivateBrowsing);
+            item.AddString("source", entry.installation.source.c_str());
+            item.AddBool("auto_update", entry.installation.autoUpdate);
+            item.AddInt64("updated", entry.installation.updated);
+            if (fExtensionUpdates) {
+                item.AddString("update_note", fExtensionUpdates->Note(entry.installation.identifier).c_str());
+                item.AddBool("update_waiting", fExtensionUpdates->IsWaiting(entry.installation.identifier));
+            }
             // Where its icon is (the window reads the manifest's icons).
             item.AddString("package", summit::ExtensionCatalog(fProfile / "Extensions").PackagePath(entry.installation).c_str());
             item.AddBool("pinned", !fShared || fShared->Read([&](const summit::Profile& profile) {
@@ -1827,6 +2012,12 @@ private:
     std::unique_ptr<summit::SitePermissionService> fPrivateSitePermissions;
     std::unique_ptr<summit::ExtensionController> fExtensions;
     std::unique_ptr<summit::ExtensionInstaller> fInstaller;
+    std::unique_ptr<summit::ExtensionUpdater> fExtensionUpdates;
+    // Extensions › Keyboard Shortcuts…, and the engine requests for the
+    // commands' keys and for a change of them.
+    BMessenger fShortcutsWindow;
+    uint64 fCommandsRequest = 0, fShortcutRequest = 0;
+    bool fCommandsInFlight = false, fCommandsAgain = false;
     std::unique_ptr<summit::McpService> fMcp;
     std::unique_ptr<summit::UpdateChecker> fUpdates;
     // The update window installed a new build: the quit under way starts

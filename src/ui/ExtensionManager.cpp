@@ -4,6 +4,7 @@
 #include "Messages.h"
 #include "core/ExtensionPackage.h"
 #include <WebKit/WebKitView.h>
+#include <Alert.h>
 #include <Bitmap.h>
 #include <Button.h>
 #include <DataIO.h>
@@ -11,6 +12,7 @@
 #include <CheckBox.h>
 #include <FilePanel.h>
 #include <GroupView.h>
+#include <Invoker.h>
 #include <LayoutBuilder.h>
 #include <ListItem.h>
 #include <ListView.h>
@@ -23,10 +25,12 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <ctime>
 
 namespace summit {
 namespace {
-constexpr uint32 choosePackage = 'exfp', selectEntry = 'exse', pinnedToggled = 'expt', privateToggled = 'exvt';
+constexpr uint32 choosePackage = 'exfp', selectEntry = 'exse', pinnedToggled = 'expt', privateToggled = 'exvt',
+    autoUpdateToggled = 'exat', removeConfirmed = 'exrc';
 std::string field(const BMessage& message, const char* name)
 {
     const char* value = nullptr;
@@ -44,12 +48,16 @@ public:
     explicit Item(const BMessage& entry)
         : identifier(field(entry, "identifier")), name(field(entry, "name")), version(field(entry, "version"))
         , error(field(entry, "error")), notice(field(entry, "notice")), package(field(entry, "package"))
+        , source(field(entry, "source")), updateNote(field(entry, "update_note"))
     {
         entry.FindBool("enabled", &enabled);
         entry.FindBool("loaded", &loaded);
         entry.FindBool("installed", &installed);
         entry.FindBool("pinned", &pinned);
         entry.FindBool("private", &privateBrowsing);
+        entry.FindBool("auto_update", &autoUpdate);
+        entry.FindBool("update_waiting", &updateWaiting);
+        entry.FindInt64("updated", &updated);
     }
     void Update(BView* owner, const BFont* font) override
     {
@@ -101,8 +109,10 @@ public:
         owner->DrawString(label.String(), BPoint(left, frame.top + std::floor((frame.Height() + 1 + height.ascent - height.descent) / 2)));
     }
     static float IconSize() { return std::round(24 * Scale()); }
-    std::string identifier, name, version, error, notice, package;
+    std::string identifier, name, version, error, notice, package, source, updateNote;
     bool enabled = false, loaded = false, installed = true, pinned = true, privateBrowsing = false;
+    bool autoUpdate = true, updateWaiting = false;
+    int64 updated = 0;
     std::shared_ptr<BBitmap> icon;
 };
 // The extension's own icon from its package, at the screen's density.
@@ -127,6 +137,11 @@ ExtensionManager::ExtensionManager(BMessenger owner, std::shared_ptr<std::atomic
     auto* title = new BStringView("extensions-title", "Extensions");
     title->SetFont(be_bold_font);
     fAdd = new BButton("extension-add", "Add extension…", new BMessage(choosePackage));
+    fShortcuts = new BButton("extension-shortcuts", "Keyboard Shortcuts…", new BMessage(kShowExtensionShortcuts));
+    fShortcuts->SetToolTip("See and change the keys of the extensions' commands.");
+    fCheckUpdates = new BButton("extension-check-updates", "Check for Updates", new BMessage(kExtensionCheckUpdates));
+    fCheckUpdates->SetToolTip("Look for new versions of the extensions from the Chrome Web Store and Firefox Add-ons now. "
+        "Summit also looks when it starts and once a day.");
     auto storeButton = [](const char* label, const char* url) {
         auto* message = new BMessage(kBrowseExtensionStore);
         message->AddString("url", url);
@@ -155,6 +170,10 @@ ExtensionManager::ExtensionManager(BMessenger owner, std::shared_ptr<std::atomic
     details->SetExplicitMinSize(BSize(420, 260));
     fToggle = new BButton("extension-toggle", "Enable", new BMessage(kExtensionEnable));
     fRemove = new BButton("extension-remove", "Remove", new BMessage(kExtensionRemove));
+    fUpdate = new BButton("extension-update", "Update", new BMessage(kExtensionApproveUpdate));
+    fUpdate->SetToolTip("Install the new version, with the access it asks for.");
+    fAutoUpdate = new BCheckBox("extension-auto-update", "Update automatically", new BMessage(autoUpdateToggled));
+    fAutoUpdate->SetToolTip("Install new versions from its store as they come out. Versions that ask for more access wait for you.");
     fPinned = new BCheckBox("extension-pinned", "Show on the toolbar", new BMessage(pinnedToggled));
     fPinned->SetToolTip("Without a toolbar button, the extension is in the menu of the toolbar's extensions button.");
     fPrivate = new BCheckBox("extension-private", "Allow in private windows", new BMessage(privateToggled));
@@ -171,7 +190,7 @@ ExtensionManager::ExtensionManager(BMessenger owner, std::shared_ptr<std::atomic
         .AddGroup(B_HORIZONTAL, 8).AddGlue().Add(fCancel).Add(fInstall).End();
     BLayoutBuilder::Group<>(this, B_VERTICAL, 12)
         .SetInsets(16)
-        .AddGroup(B_HORIZONTAL).Add(title).AddGlue().Add(fAdd).End()
+        .AddGroup(B_HORIZONTAL).Add(title).AddGlue().Add(fShortcuts).Add(fCheckUpdates).Add(fAdd).End()
         .AddGroup(B_HORIZONTAL, 8)
             .Add(storeButton("Chrome Web Store", kChromeExtensionStore))
             .Add(storeButton("Firefox Add-ons", kFirefoxExtensionStore)).AddGlue().End()
@@ -180,14 +199,16 @@ ExtensionManager::ExtensionManager(BMessenger owner, std::shared_ptr<std::atomic
             .Add(list)
             .AddGroup(B_VERTICAL, 8)
                 .Add(fHeading).Add(details)
-                .AddGroup(B_HORIZONTAL, 8).Add(fToggle).Add(fRemove).AddGlue().End()
+                .AddGroup(B_HORIZONTAL, 8).Add(fToggle).Add(fRemove).Add(fUpdate).AddGlue().End()
                 .Add(fPinned)
                 .Add(fPrivate)
+                .Add(fAutoUpdate)
                 .Add(fApproval)
             .End()
         .End()
         .Add(fStatus);
     fApproval->Hide();
+    fUpdate->Hide();
     Render();
 }
 ExtensionManager::~ExtensionManager()
@@ -253,7 +274,11 @@ void ExtensionManager::Apply(const BMessage& state)
     fDraftName = field(state, "draft_name");
     fDraftBody = field(state, "draft_body");
     fStatusText = field(state, "import_status");
+    // An update or a removal is newer news than an earlier installation's.
+    if (!field(state, "update_status").empty() && !fBusy) fStatusText = field(state, "update_status");
+    if (!field(state, "removal_error").empty() && !fBusy) fStatusText = field(state, "removal_error");
     if (!field(state, "catalog_error").empty()) fStatusText = field(state, "catalog_error");
+    state.FindBool("checking", &fChecking);
     Render();
 }
 void ExtensionManager::Render()
@@ -269,6 +294,15 @@ void ExtensionManager::Render()
     fPinned->SetValue(item && item->pinned ? B_CONTROL_ON : B_CONTROL_OFF);
     fPrivate->SetEnabled(fReady && !fBusy && item && item->installed);
     fPrivate->SetValue(item && item->privateBrowsing ? B_CONTROL_ON : B_CONTROL_OFF);
+    fAutoUpdate->SetEnabled(fReady && !fBusy && item && item->installed && !item->source.empty());
+    fAutoUpdate->SetValue(item && item->autoUpdate && !item->source.empty() ? B_CONTROL_ON : B_CONTROL_OFF);
+    fCheckUpdates->SetEnabled(fReady && !fBusy && !fChecking);
+    fShortcuts->SetEnabled(fReady);
+    const bool waiting = item && item->updateWaiting;
+    // IsHidden(itself): the window's own hiding (before Show) does not count.
+    if (waiting && fUpdate->IsHidden(fUpdate)) fUpdate->Show();
+    else if (!waiting && !fUpdate->IsHidden(fUpdate)) fUpdate->Hide();
+    fUpdate->SetEnabled(waiting && fReady && !fBusy);
     fInstall->SetEnabled(fApprovalReady);
     fFiles->SetEnabled(fApprovalReady);
     fCancel->SetEnabled(fBusy);
@@ -279,14 +313,24 @@ void ExtensionManager::Render()
         fDetails->SetText(fDraftBody.empty() ? fStatusText.c_str() : fDraftBody.c_str());
     } else if (item) {
         fHeading->SetText(ExtensionDisplayText(item->name).c_str());
-        std::string body = "Version " + ExtensionDisplayText(item->version) + "\n"
-            + (item->loaded ? "Running" : item->enabled ? "Enabled, but not running" : "Disabled")
-            + (item->privateBrowsing ? ", also in private windows" : "")
-            + "\nIdentifier: " + ExtensionDisplayText(item->identifier);
+        std::string body = "Version " + ExtensionDisplayText(item->version);
+        if (item->updated > 0) {
+            const time_t when = item->updated;
+            struct tm local {};
+            char date[64] = "";
+            if (localtime_r(&when, &local) && std::strftime(date, sizeof(date), "%e %B %Y", &local))
+                body += std::string(", updated on ") + (date[0] == ' ' ? date + 1 : date);
+        }
+        body += std::string("\n") + (item->loaded ? "Running" : item->enabled ? "Enabled, but not running" : "Disabled")
+            + (item->privateBrowsing ? ", also in private windows" : "");
+        if (item->source == "chrome") body += "\nFrom the Chrome Web Store";
+        else if (item->source == "firefox") body += "\nFrom Firefox Add-ons";
+        body += "\nIdentifier: " + ExtensionDisplayText(item->identifier);
         if (!item->installed) body += "\nThis temporary runtime could not be saved as an installation.";
         if (!item->error.empty()) body += "\n\n" + ExtensionDisplayText(item->error);
         if (!item->notice.empty()) body += "\n\n" + ExtensionDisplayText(item->notice);
-        body += "\n\nRemoving stops this extension and removes it from startup. Its package and saved data stay in this profile.";
+        if (!item->updateNote.empty()) body += "\n\n" + item->updateNote;
+        body += "\n\nRemoving it deletes it with its settings and the data it saved. Disabling it keeps them.";
         fDetails->SetText(body.c_str());
     } else {
         fHeading->SetText("No extensions installed");
@@ -352,6 +396,43 @@ void ExtensionManager::MessageReceived(BMessage* message)
         Send(request);
         return;
     }
+    if (message->what == kShowExtensionShortcuts || message->what == kExtensionCheckUpdates) {
+        BMessage request(message->what);
+        Send(request);
+        return;
+    }
+    if (message->what == autoUpdateToggled || message->what == kExtensionApproveUpdate) {
+        auto* item = dynamic_cast<Item*>(fList->ItemAt(fList->CurrentSelection()));
+        if (!item || !fReady || fBusy) { Render(); return; }
+        BMessage request(message->what == autoUpdateToggled ? kExtensionSetAutoUpdate : kExtensionApproveUpdate);
+        request.AddString("extension_identifier", item->identifier.c_str());
+        request.AddBool("enabled", fAutoUpdate->Value() == B_CONTROL_ON);
+        Send(request);
+        return;
+    }
+    if (message->what == kExtensionRemove) {
+        // Removal deletes its data too: ask first, naming it.
+        auto* item = dynamic_cast<Item*>(fList->ItemAt(fList->CurrentSelection()));
+        if (!item || !fReady || fBusy) return;
+        const auto name = ExtensionDisplayText(item->name.empty() ? item->identifier : item->name);
+        auto* alert = new BAlert("Remove extension", ("Remove \u201c" + name + "\u201d?\n\nIts settings and the data it saved "
+            "in Summit are deleted. To keep them, disable it instead.").c_str(), "Cancel", "Remove", nullptr,
+            B_WIDTH_AS_USUAL, B_WARNING_ALERT);
+        alert->SetShortcut(0, B_ESCAPE);
+        auto* confirmed = new BMessage(removeConfirmed);
+        confirmed->AddString("extension_identifier", item->identifier.c_str());
+        alert->Go(new BInvoker(confirmed, this));
+        return;
+    }
+    if (message->what == removeConfirmed) {
+        const char* identifier = nullptr;
+        if (message->GetInt32("which", 0) != 1 || message->FindString("extension_identifier", &identifier) != B_OK
+            || !fReady || fBusy) return;
+        BMessage request(kExtensionRemove);
+        request.AddString("extension_identifier", identifier);
+        Send(request);
+        return;
+    }
     if (message->what == pinnedToggled || message->what == privateToggled) {
         auto* item = dynamic_cast<Item*>(fList->ItemAt(fList->CurrentSelection()));
         if (!item || !fReady || fBusy) { Render(); return; }
@@ -362,7 +443,7 @@ void ExtensionManager::MessageReceived(BMessage* message)
         Send(request);
         return;
     }
-    if (message->what == kExtensionEnable || message->what == kExtensionRemove) {
+    if (message->what == kExtensionEnable) {
         auto* item = dynamic_cast<Item*>(fList->ItemAt(fList->CurrentSelection()));
         if (!item || !fReady || fBusy) return;
         BMessage request(message->what);

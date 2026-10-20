@@ -1,4 +1,7 @@
 #include "BrowserWindow.h"
+#if SUMMIT_MODERN_WEBKIT
+#include "ExtensionShortcuts.h"
+#endif
 #include "ProtocolHandlers.h"
 #include "ExtensionTiming.h"
 #include "StallTrace.h"
@@ -932,6 +935,17 @@ BrowserWindow::BrowserWindow(std::shared_ptr<SharedProfile> profile, std::string
 #endif
     AddShortcut(B_TAB, B_CONTROL_KEY, new BMessage(kNextTab));
     AddShortcut(B_TAB, B_CONTROL_KEY | B_SHIFT_KEY, new BMessage(kPreviousTab));
+#if SUMMIT_MODERN_WEBKIT
+    // Summit's own shortcuts win over extensions' (the Keyboard Shortcuts
+    // window says so); a full browser window has them all.
+    if (fWebApp.empty() && !fPopup) {
+        std::vector<std::pair<ExtensionShortcutKeys, std::string>> shortcuts;
+        CollectMenuShortcuts(menu, shortcuts);
+        for (unsigned number = '1'; number <= '9'; ++number)
+            shortcuts.emplace_back(ExtensionShortcutKeys { number, ExtensionShortcutKeys::Command }, "Select Tab " + std::string(1, char(number)));
+        ExtensionShortcuts::Default().SetBrowserShortcuts(std::move(shortcuts));
+    }
+#endif
     // Pop-ups as small as pages make them (sign-in and share dialogs), web
     // apps as their pages need (#95); the rest room for the whole toolbar.
     if (fPopup) SetSizeLimits(200, 10000, 150, 10000);
@@ -2339,10 +2353,28 @@ void BrowserWindow::ActivateExtensionAction(const BMessage& message)
     }
 }
 
+bool BrowserWindow::RunExtensionShortcut(const BMessage& message)
+{
+    if (!fExtensionsEnabled || fClosingWindow || fCloseCommitPending) return false;
+    const auto binding = ExtensionShortcuts::Default().Find(message);
+    if (!binding) return false;
+    // A menu shortcut of Summit's own goes first (only Command ones exist).
+    const uint32 modifiers = message.GetInt32("modifiers", 0);
+    const char* bytes = message.GetString("bytes", "");
+    if ((modifiers & B_COMMAND_KEY) && bytes[0] && HasShortcut(static_cast<unsigned char>(bytes[0]), modifiers)) return false;
+    // Held keys run it once.
+    if (message.GetInt32("be:key_repeat", 0) > 0) return true;
+    SUMMIT_EXTENSION_TIMING("shortcut %s of %s pressed", binding->command.c_str(), binding->extension.c_str());
+    const auto status = fWebKitContext->PerformExtensionCommand(binding->extension.c_str(), binding->command.c_str(), BMessenger(this));
+    if (status != B_OK) fStatus->SetText(("Could not run the extension's shortcut: " + std::string(std::strerror(status))).c_str());
+    return true;
+}
+
 void BrowserWindow::DispatchMessage(BMessage* message, BHandler* handler)
 {
     summit::StallScope scope("window", message ? message->what : 0);
 #if SUMMIT_MODERN_WEBKIT
+    if (message && message->what == B_KEY_DOWN && RunExtensionShortcut(*message)) return;
     if (message && message->what == B_MOUSE_DOWN) {
         fLastMouseDown = system_time();
         fMouseButtons = message->GetInt32("buttons", 0);

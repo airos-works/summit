@@ -22,12 +22,21 @@ fails, it retains a visible session-only entry so shutdown still owns it.
 These failure branches have code review coverage; persistence failure during
 live installation still needs dedicated native fault-injection coverage.
 
-**Disable** unloads before persisting the disabled state. **Enable** prepares
-the stored package again and restores its existing approval only when the
-fingerprint matches. **Remove** unloads and forgets the startup record; the UI
-explicitly says package files and saved data remain in the profile. Shutdown
-waits for installer work and manager/file-picker window destruction before
-releasing the shared WebKit context.
+**Disable** unloads before persisting the disabled state and keeps all of
+the extension's data. **Enable** prepares the stored package again and
+restores its existing approval only when the fingerprint matches. **Remove**
+asks first, naming the extension, then unloads it, forgets the startup
+record and deletes its package, unpacked copy, storage and website data
+(`BWebKitContext::RemoveExtensionData`, #104); reinstalling it starts from
+scratch. Shutdown waits for installer work and manager/file-picker window
+destruction before releasing the shared WebKit context.
+
+Extensions from the Chrome Web Store and Firefox Add-ons update themselves
+(a minute after launch, daily, and with **Check for Updates**), keep their
+settings and data, and wait for approval (**Update**) when a new version
+asks for more access; each has an **Update automatically** switch and shows
+when it was updated. **Keyboard Shortcuts…** opens the extensions' command
+keys (#101). See [extension-fixes-2026-10-20.md](extension-fixes-2026-10-20.md).
 
 For [verified CRX3 packages](extension-crx.md), the signer supplies the stable
 identity. For other packages, declared `browser_specific_settings.gecko.id` or
@@ -37,8 +46,7 @@ receive a local identity that remains in their installation record. Duplicate
 declared identities are rejected before activation. See
 [identity behavior and tests](extension-identity.md), including mixed-manifest
 precedence. Safari bundle import, XPI signatures/store authentication,
-updates, data erasure, remaining action APIs,
-private browsing controls and broad extension API compatibility remain
+remaining action APIs and broad extension API compatibility remain
 unfinished. A lost SDK reply has no operation deadline yet; cancellation after
 submitting a load also needs further native integration coverage.
 

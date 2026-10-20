@@ -16,4 +16,9 @@ std::unique_ptr<StagedExtensionPackage> DownloadStoreExtension(const ExtensionSt
 // thread of its own. False with error on failure.
 bool ResolveFirefoxStoreItem(const ExtensionStoreItem&, std::string& identifier, std::string& name, bool& extension,
     std::string& error);
+// The text a store's HTTPS address answers (update checks), at most limit
+// bytes, and its HTTP status. Blocks for the network; false with error on
+// failure.
+bool FetchStoreText(const std::string& url, size_t limit, const std::atomic<bool>& cancelled, std::string& text,
+    std::string& error, long* status = nullptr);
 }

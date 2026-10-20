@@ -18,6 +18,7 @@ struct Transfer {
     std::string text;
     size_t count = 0, limit;
     bool tooLarge = false;
+    long status = 0;
 };
 size_t Write(char* data, size_t size, size_t count, void* context)
 {
@@ -65,6 +66,7 @@ void Get(const std::string& url, Transfer& transfer)
     const auto result = curl_easy_perform(handle);
     long status = 0;
     curl_easy_getinfo(handle, CURLINFO_RESPONSE_CODE, &status);
+    transfer.status = status;
     if (transfer.cancelled) throw std::runtime_error("Installation cancelled.");
     if (transfer.tooLarge) throw std::runtime_error("The store response exceeds the extension size limit.");
     if (result != CURLE_OK) throw std::runtime_error(std::string("The extension could not be downloaded: ") + curl_easy_strerror(result));
@@ -163,6 +165,22 @@ bool ResolveFirefoxStoreItem(const ExtensionStoreItem& item, std::string& identi
         return !identifier.empty();
     } catch (const std::exception& exception) {
         error = exception.what();
+        return false;
+    }
+}
+
+bool FetchStoreText(const std::string& url, size_t limit, const std::atomic<bool>& cancelled, std::string& text,
+    std::string& error, long* status)
+{
+    Transfer transfer { cancelled, nullptr, {}, 0, limit };
+    try {
+        Get(url, transfer);
+        text = std::move(transfer.text);
+        if (status) *status = transfer.status;
+        return true;
+    } catch (const std::exception& exception) {
+        error = exception.what();
+        if (status) *status = transfer.status;
         return false;
     }
 }

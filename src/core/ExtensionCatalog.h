@@ -1,6 +1,7 @@
 #pragma once
 #include <filesystem>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -16,6 +17,19 @@ struct InstalledExtension {
     bool allowFileURLs = false;
     bool allowPrivateBrowsing = false;
     uint64_t installationOrder = 0;
+    // Where updates come from: "chrome" (the Chrome Web Store, by the identity)
+    // or "firefox" (Firefox Add-ons, by the add-on ID); empty for none.
+    std::string source;
+    // The manifest's update_url, for Chrome packages.
+    std::string updateURL;
+    bool autoUpdate = true;
+    // When an update was installed and when updates were last looked for,
+    // in seconds since the epoch (0: never).
+    int64_t updated = 0;
+    int64_t checked = 0;
+    // The required permissions and sites the user approved for this version
+    // (an update asking for more needs approval again); empty when unknown.
+    std::vector<std::string> permissions, origins;
 };
 
 // An import owns a private copy until Install commits it to the catalog. Pass
@@ -50,6 +64,14 @@ public:
     // Forget only the installation record. Unload first; package/data removal
     // is a separate operation so a failed metadata write cannot lose resources.
     bool Forget(const std::string& identifier, std::string& error) const;
+    // Change an installation's record (not its identity, package or order).
+    bool Modify(const std::string& identifier, const std::function<void(InstalledExtension&)>&, std::string& error) const;
+    // Commit a new version of an installed extension: its record takes the
+    // staged package, name, version, fingerprint and update details of entry.
+    // The replaced package stays until RemovePackage.
+    bool Replace(StagedExtensionPackage&, const InstalledExtension& entry, std::string& error) const;
+    // Delete a package that no record names any more.
+    bool RemovePackage(const std::string& package, std::string& error) const;
     std::filesystem::path PackagePath(const InstalledExtension&) const;
 private:
     bool Save(const std::vector<InstalledExtension>&, std::string& error) const;

@@ -71,8 +71,8 @@ is where content-script errors appear.
 
 1. `chrome.notifications` — namespace absent (`onClicked` of undefined).
    Added `create/update/clear/getAll/getPermissionLevel` and the four events,
-   shown through `BNotification`. Click events cannot fire yet: the native
-   notification server has no activation callback.
+   shown through `BNotification`. Clicks reach the extension since #102
+   (the notification starts Summit again with its identity).
 2. `chrome.privacy` — added by the previous agent but never linked: two
    sources included `WebExtensionPrivacyControllerHaiku.h` without its `haiku/`
    directory. Added the `services` category (`passwordSavingEnabled`,
@@ -152,7 +152,6 @@ the `downloads` API (exporting the Emergency Kit,
 [webextensions-dnr-downloads.md](webextensions-dnr-downloads.md)),
 `storage.managed` and OffscreenCanvas have landed. What is left:
 
-- `notifications.onClicked` (issue #102, in progress).
 - No desktop-app integration, biometrics or SSH agent: those need a native
   messaging host (#106).
 

@@ -5,6 +5,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 option(SUMMIT_MODERN_WEBKIT "Build Summit with the native multiprocess WebKit API" OFF)
 find_package(OpenSSL REQUIRED COMPONENTS Crypto)
 add_library(summit_core src/core/Address.cpp src/core/Protocol.cpp src/core/Profile.cpp src/core/Bookmarks.cpp src/core/BookmarkIO.cpp src/core/ExtensionCatalog.cpp src/core/ExtensionIdentity.cpp src/core/ExtensionStore.cpp
+    src/core/ExtensionShortcut.cpp src/core/ExtensionUpdate.cpp
     src/core/ExtensionPackage.cpp src/core/StoreOffer.cpp src/core/DownloadText.cpp src/core/Favicon.cpp src/core/InternalPages.cpp src/core/Zoom.cpp src/core/Suggest.cpp src/core/DevTools.cpp src/core/DevToolsFormat.cpp src/core/DevToolsElements.cpp src/core/PageSource.cpp
     src/core/Mcp.cpp src/core/McpHttp.cpp src/core/McpInspector.cpp src/core/WebAppManifest.cpp src/core/UpdateCheck.cpp src/core/Spelling.cpp src/core/LoadError.cpp src/core/ProfileLock.cpp)
 target_link_libraries(summit_core PUBLIC OpenSSL::Crypto ${CMAKE_DL_LIBS})
@@ -30,6 +31,9 @@ add_test(NAME summit_update COMMAND summit_update_tests)
 add_executable(summit_extension_catalog_tests tests/ExtensionCatalogTests.cpp)
 target_link_libraries(summit_extension_catalog_tests PRIVATE summit_core)
 add_test(NAME summit_extension_catalog COMMAND summit_extension_catalog_tests)
+add_executable(summit_extension_shortcut_tests tests/ExtensionShortcutTests.cpp)
+target_link_libraries(summit_extension_shortcut_tests PRIVATE summit_core)
+add_test(NAME summit_extension_shortcut COMMAND summit_extension_shortcut_tests)
 add_executable(summit_extension_identity_tests tests/ExtensionIdentityTests.cpp)
 target_link_libraries(summit_extension_identity_tests PRIVATE summit_core)
 add_test(NAME summit_extension_identity COMMAND summit_extension_identity_tests ${CMAKE_SOURCE_DIR}/tests/fixtures/extensions/chrome-key/public-key.txt)

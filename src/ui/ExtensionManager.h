@@ -35,12 +35,16 @@ private:
     BTextView* fDetails;
     BStringView* fStatus;
     BButton *fAdd, *fToggle, *fRemove, *fInstall, *fCancel;
+    // Keyboard Shortcuts…, Check for Updates, and Update (a waiting version
+    // that asks for more access).
+    BButton *fShortcuts, *fCheckUpdates, *fUpdate;
     BButton* fStoreInstall;
     BTextControl* fStoreURL;
     BCheckBox* fFiles;
     // Of the selected extension: its toolbar button, and private windows.
     BCheckBox* fPinned;
     BCheckBox* fPrivate;
+    BCheckBox* fAutoUpdate;
     BGroupView* fApproval;
     std::string fDraftName, fDraftBody, fStatusText;
     // Icons of the listed extensions, by identifier and package.
@@ -48,7 +52,7 @@ private:
     // An extension to select once the list has it (Manage Extension).
     std::string fSelect;
     uint64 fGeneration = 0;
-    bool fBusy = false, fReady = false, fApprovalReady = false;
+    bool fBusy = false, fReady = false, fApprovalReady = false, fChecking = false;
 };
 }
 #endif

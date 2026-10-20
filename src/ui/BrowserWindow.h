@@ -484,6 +484,9 @@ private:
     void RefreshExtensionActions();
     void ExtensionActionsReceived(const BMessage&);
     void ActivateExtensionAction(const BMessage&);
+    // An extension's keyboard shortcut (manifest "commands"); false when the
+    // keys are not one, or Summit uses them.
+    bool RunExtensionShortcut(const BMessage& keyDown);
     void PreloadExtensionAction(const BMessage&);
 public:
     void DispatchMessage(BMessage*, BHandler*) override;

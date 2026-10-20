@@ -20,6 +20,10 @@ Mozilla's metadata, and their manifest identity must match its GUID. HTTPS
 redirects, download limits and cancellation apply to the entire operation.
 Temporary downloads are removed after staging, failure or cancellation.
 
+Extensions installed this way, or from a saved package signed for its store
+identity, update themselves from the same services, with the same checks
+(#104, [extension-fixes-2026-10-20.md](extension-fixes-2026-10-20.md)).
+
 This does not add API compatibility for arbitrary extensions. The review
 continues to distinguish CRX signature verification from store provenance;
 Firefox's XPI signature is not independently verified. Package downloads and
