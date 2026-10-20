@@ -6,7 +6,9 @@ namespace summit {
 // What the downloads panel says about a download (the second line of its
 // row), worded as Firefox's panel words it.
 struct DownloadStatus {
-    enum class State { Active, Succeeded, Failed, Cancelled };
+    // Paused: stopped with its partial file, to be resumed (also one that a
+    // crash cut off: interrupted).
+    enum class State { Active, Paused, Succeeded, Failed, Cancelled };
     State state = State::Active;
     uint64_t received = 0;
     // -1 when the server did not say.
@@ -18,6 +20,10 @@ struct DownloadStatus {
     std::string error;
     // A finished download's file is no longer where it was saved.
     bool missing = false;
+    // Paused: a crash stopped it; it continues from where it was (resumable)
+    // or has to start over. Active: it started over, because the server sent
+    // the whole file again.
+    bool interrupted = false, resumable = true, restarted = false;
 };
 // "512 bytes", "12.4 KiB", "3.1 MiB", "1.25 GiB".
 std::string FormatByteSize(uint64_t bytes);

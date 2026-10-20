@@ -228,6 +228,10 @@ public:
             StartupError("Could not initialize downloads: " + std::string(std::strerror(initialization)));
             return;
         }
+        // A failed download keeps its partial file for Retry to continue in;
+        // the list of downloads is kept in the profile.
+        fWebKitContext->SetKeepFailedDownloads(true);
+        summit::DownloadList::Default().Open(fProfile / "downloads.json");
         fSitePermissions = std::make_unique<summit::SitePermissionService>(fWebKitContext, false, fProfile / "Favicons",
             [this](const std::string& permission, const std::string& origin, std::optional<bool> allowed) {
                 SaveSitePermission(permission, origin, allowed);
@@ -375,13 +379,28 @@ public:
             ShowExtensions(message->GetString("extension_identifier", ""));
             return;
         }
-        if (message->what == summit::kDownloadCancel) {
+        if (message->what == summit::kDownloadCancel || message->what == summit::kDownloadPause) {
             // From a downloads panel; the download is in one of the contexts.
-            const uint64 identifier = message->GetUInt64("identifier", 0);
-            if (!identifier) return;
-            if (fWebKitContext) fWebKitContext->CancelDownload(identifier);
-            if (fPrivateContext) fPrivateContext->CancelDownload(identifier);
-            for (const auto& context : fRetiredPrivateContexts) context->CancelDownload(identifier);
+            const auto entry = summit::DownloadList::Default().Find(message->GetUInt64("identifier", 0));
+            if (!entry) return;
+            if (!entry->engine) {
+                // Paused: nothing downloads; cancelling removes its partial file.
+                if (message->what == summit::kDownloadCancel) summit::DownloadList::Default().Discard(entry->identifier);
+                return;
+            }
+            auto stop = [&](BWebKitContext& context) {
+                if (message->what == summit::kDownloadCancel) context.CancelDownload(entry->engine);
+                else context.PauseDownload(entry->engine);
+            };
+            if (fWebKitContext) stop(*fWebKitContext);
+            if (fPrivateContext) stop(*fPrivateContext);
+            for (const auto& context : fRetiredPrivateContexts) stop(*context);
+            return;
+        }
+        if (message->what == summit::kDownloadResume) {
+            BMessenger window;
+            message->FindMessenger("window", &window);
+            ResumeDownload(message->GetUInt64("identifier", 0), window);
             return;
         }
         if (message->what == summit::kBrowseExtensionStore || message->what == summit::kExtensionStoreInstall) {
@@ -944,11 +963,11 @@ public:
         SUMMIT_QUIT_TRACE("quit requested (%zu windows%s)", fWindows.size(), fQuitting ? ", already quitting" : "");
         if (!fWindows.empty()) {
             if (fQuitting || fDownloadPromptPending) return false;
-            if (!fDownloads.empty() && !fDownloadQuitApproved) {
+            std::string lost = fDownloadQuitApproved ? std::string() : DownloadsLostOnQuit();
+            if (!lost.empty()) {
                 // Downloads belong to the application, not to one window.
                 fDownloadPromptPending = true;
-                auto* prompt = new BAlert("Downloads", "Downloads are still in progress. Quit and cancel them?",
-                    "Keep Browsing", "Quit");
+                auto* prompt = new BAlert("Downloads", lost.c_str(), "Keep Browsing", "Quit");
                 prompt->SetShortcut(0, B_ESCAPE);
                 prompt->Go(new BInvoker(new BMessage(summit::kDownloadQuitReply), this));
                 return false;
@@ -994,8 +1013,9 @@ public:
             ReleaseRetiredPrivateContexts();
             if (fWebKitContext->HasPendingDownloads() || !fRetiredPrivateContexts.empty()) {
                 if (!fCancellingDownloads) {
+                    // Paused, they are listed to be resumed the next time.
                     fCancellingDownloads = true;
-                    fWebKitContext->CancelAllDownloads();
+                    fWebKitContext->PauseAllDownloads();
                 }
                 fWaitingForNativeUI = true;
                 SetPulseRate(100000);
@@ -1114,6 +1134,7 @@ private:
         // allowed in private windows work there with their own saved data.
         auto context = std::make_shared<BWebKitContext>(fWebKitContext);
         if (context->InitCheck() != B_OK || context->SetDownloadListener(BMessenger(this)) != B_OK) return nullptr;
+        context->SetKeepFailedDownloads(true);
         TrustSavedCertificates(*context);
         // Saved site permissions apply in private windows too; what is
         // answered there is forgotten with the session.
@@ -1251,6 +1272,52 @@ private:
         }
         fPrivateContext.reset();
 #endif
+    }
+    // What quitting would cost the downloads in progress, to ask about it
+    // first; empty when nothing (they are paused and resume next time).
+    std::string DownloadsLostOnQuit() const
+    {
+        size_t restarting = 0, cancelled = 0;
+        for (bool privateBrowsing : {false, true})
+            for (const auto& entry : summit::DownloadList::Default().Entries(privateBrowsing)) {
+                if (entry.state != summit::DownloadStatus::State::Active) continue;
+                if (privateBrowsing) ++cancelled;
+                else if (entry.received && !entry.acceptsRanges) ++restarting;
+            }
+        if (!restarting && !cancelled) return {};
+        std::string text;
+        if (cancelled)
+            text = cancelled == 1 ? "A download of a private window is still in progress: quitting cancels it."
+                : "Downloads of private windows are still in progress: quitting cancels them.";
+        if (restarting) {
+            if (!text.empty()) text += " ";
+            text += restarting == 1
+                ? "A download is still in progress whose server cannot resume it: quitting pauses it, but it will have to start over."
+                : std::to_string(restarting) + " downloads are still in progress whose servers cannot resume them: quitting "
+                    "pauses them, but they will have to start over.";
+        }
+        return text + "\n\nQuit anyway?";
+    }
+    // Continues a paused or failed download of the list in its partial file
+    // (or afresh), in the context it belongs to.
+    void ResumeDownload(uint64 identifier, const BMessenger& window)
+    {
+        const auto entry = summit::DownloadList::Default().Find(identifier);
+        if (!entry || entry->state == summit::DownloadStatus::State::Active) return;
+        BWebKitContext* context = entry->privateBrowsing ? fPrivateContext.get() : fWebKitContext.get();
+        if (!context) {
+            summit::DownloadList::Default().ResumeFailed(identifier, "Its private session has ended");
+            return;
+        }
+        const std::string& url = entry->requestURL.empty() ? entry->url : entry->requestURL;
+        uint64 engine = 0;
+        const status_t status = context->ResumeDownload(url.c_str(), entry->partial ? entry->path.c_str() : "",
+            entry->validator.c_str(), entry->expected, window.IsValid() ? window : FrontWindow(), &engine);
+        if (status != B_OK) {
+            summit::DownloadList::Default().ResumeFailed(identifier, "Could not resume: " + std::string(std::strerror(status)));
+            return;
+        }
+        summit::DownloadList::Default().Resumed(identifier, engine);
     }
     void ReleaseRetiredPrivateContexts()
     {
@@ -1527,6 +1594,53 @@ private:
             if (fExtensions && !fExtensions->CatalogError().empty()) state["extensionCatalogError"] = fExtensions->CatalogError();
             if (fMcp) state["mcp"] = {{"status", fMcp->Status()}, {"endpoint", fMcp->Endpoint()}};
             summit::McpReply(message, state);
+            return;
+        }
+        if (action == "downloads") {
+            // The downloads panel's list and its buttons, for test scripts.
+            const std::string what = request.value("do", "list");
+            const uint64 identifier = request.value("id", uint64(0));
+            auto& downloads = summit::DownloadList::Default();
+            const auto entry = downloads.Find(identifier);
+            if (what == "start") {
+                const std::string url = request.value("url", "");
+                const auto window = FrontNormalWindow();
+                if (url.empty() || !window.IsValid()) { summit::McpReplyError(message, "start needs a url and a normal browser window"); return; }
+                BMessage start(summit::kDownloadRetry);
+                start.AddString("url", url.c_str());
+                window.SendMessage(&start);
+            } else if (what == "clear") downloads.ClearFinished(false);
+            else if (what != "list") {
+                if (!entry) { summit::McpReplyError(message, "no download " + std::to_string(identifier) + " (ids are in list)"); return; }
+                if (what == "pause" || what == "cancel") {
+                    BMessage stop(what == "pause" ? summit::kDownloadPause : summit::kDownloadCancel);
+                    stop.AddUInt64("identifier", identifier);
+                    PostMessage(&stop);
+                } else if (what == "resume" || (what == "retry" && entry->CanContinue())) ResumeDownload(identifier, FrontWindow());
+                else if (what == "retry") {
+                    const auto window = FrontNormalWindow();
+                    if (!window.IsValid()) { summit::McpReplyError(message, "retry needs a normal browser window"); return; }
+                    BMessage retry(summit::kDownloadRetry);
+                    retry.AddString("url", (entry->requestURL.empty() ? entry->url : entry->requestURL).c_str());
+                    window.SendMessage(&retry);
+                    downloads.Remove(identifier);
+                } else if (what == "remove") downloads.Remove(identifier);
+                else { summit::McpReplyError(message, "unknown do: " + what); return; }
+            }
+            json list = json::array();
+            for (bool privateBrowsing : {false, true})
+                for (const auto& item : downloads.Entries(privateBrowsing)) {
+                    static const char* const states[] = {"active", "paused", "succeeded", "failed", "cancelled"};
+                    json record = {{"id", item.identifier}, {"engine", item.engine}, {"state", states[int(item.state)]},
+                        {"url", item.url}, {"requestURL", item.requestURL}, {"path", item.path}, {"filename", item.filename},
+                        {"received", item.received}, {"expected", item.expected}, {"partial", item.partial},
+                        {"interrupted", item.interrupted}, {"restarted", item.restarted}, {"validator", item.validator},
+                        {"acceptsRanges", item.acceptsRanges}, {"canResume", item.CanResume()}, {"private", privateBrowsing},
+                        {"status", summit::DownloadStatusText(item.Status())}};
+                    if (!item.error.empty()) record["error"] = item.error;
+                    list.push_back(std::move(record));
+                }
+            summit::McpReply(message, {{"downloads", list}});
             return;
         }
         if (action == "extensions") {

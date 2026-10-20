@@ -21,12 +21,13 @@ private:
     DownloadList::Summary fSummary;
 };
 
-// The panel the downloads button opens: this session's downloads, newest
-// first, with their progress; cancel, retry, open and show them. A window
+// The panel the downloads button opens: the downloads, newest first, with
+// their progress; pause, resume, cancel, retry, open and show them. A window
 // of its own under the button, closed when it loses the focus. It tells its
-// browser window when it closes (kDownloadsPanelClosed) and asks it to retry
-// a download (kDownloadRetry); cancelling goes to the application
-// (kDownloadCancel), which knows the download's engine context.
+// browser window when it closes (kDownloadsPanelClosed) and asks it to
+// download a file again (kDownloadRetry); pausing, resuming and cancelling go
+// to the application (kDownloadPause, kDownloadResume, kDownloadCancel),
+// which knows the download's engine context.
 class DownloadsPanel final : public BWindow {
 public:
     // anchor: the downloads button's frame on the screen. menusCancelled

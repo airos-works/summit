@@ -129,9 +129,12 @@ constexpr uint32 kToggleDownloadsPanel = 'dpnl';
 // From a downloads panel to its window when it closes ("deactivated": it
 // closed because something else was clicked).
 constexpr uint32 kDownloadsPanelClosed = 'dpcd';
-// From a downloads panel: to the application, cancel the download
-// "identifier"; to its window, download "url" again.
+// From a downloads panel: to the application, cancel, pause or resume the
+// download "identifier" (DownloadList's; resume: "window", its panel's);
+// to its window, download "url" again.
 constexpr uint32 kDownloadCancel = 'dlcn';
+constexpr uint32 kDownloadPause = 'dlps';
+constexpr uint32 kDownloadResume = 'dlrs';
 constexpr uint32 kDownloadRetry = 'dlrt';
 constexpr uint32 kShowExtensions = 'exts';
 constexpr uint32 kShowCertificate = 'cert';

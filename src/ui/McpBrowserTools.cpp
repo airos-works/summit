@@ -417,6 +417,20 @@ void RegisterMcpBrowserTools(mcp::Server& server, const std::shared_ptr<McpConte
                 3000000, "The application thread (WebKit's main loop)"));
         }, false});
 
+    server.Add({"downloads",
+        "The downloads panel's list (this and earlier sessions, private windows' too): id, state (active, paused, "
+        "succeeded, failed, cancelled), addresses, file, bytes, whether a partial file is kept and the download can "
+        "resume, and the panel's status line. do=start downloads url in the front window; pause, resume, cancel, "
+        "retry and remove act on the download id as the panel's buttons do; clear is Clear List.",
+        Schema().Enum("do", "list (default), start, pause, resume, cancel, retry, remove or clear",
+            {"list", "start", "pause", "resume", "cancel", "retry", "remove", "clear"})
+            .Integer("id", "For pause, resume, cancel, retry and remove: the download's id from list")
+            .String("url", "For start: the address to download"),
+        [context](const Json& arguments) {
+            return ToolResult::Data(McpAsk(context->app, {{"action", "downloads"}, {"do", mcp::StringArgument(arguments, "do", "list")},
+                {"id", uint64(mcp::IntegerArgument(arguments, "id", 0))}, {"url", mcp::StringArgument(arguments, "url", "")}},
+                3000000, "The application thread (WebKit's main loop)"));
+        }, false});
     server.Add({"bookmarks",
         "The bookmarks as a tree: the bookmarks bar and Other Bookmarks with their folders, each node with its id. "
         "action=import reads path as File › Import Bookmarks and History does (WebPositive's Bookmarks folder, an "

@@ -71,16 +71,23 @@ std::string DownloadStatusText(const DownloadStatus& status)
 {
     switch (status.state) {
     case DownloadStatus::State::Active: {
-        if (!status.received && status.rate <= 0) return "Starting…";
+        if (!status.received && status.rate <= 0) return status.restarted ? "Starting over…" : "Starting…";
         std::string text = status.expected > 0 && uint64_t(status.expected) >= status.received
             ? FormatByteProgress(status.received, uint64_t(status.expected))
             : FormatByteSize(status.received);
+        if (status.restarted) text = "Starting over — " + text;
         if (status.rate > 0) {
             text += " — " + FormatByteSize(uint64_t(status.rate)) + "/s";
             if (status.expected > 0 && uint64_t(status.expected) > status.received)
                 text += ", " + FormatTimeLeft((uint64_t(status.expected) - status.received) / status.rate);
         }
         return text;
+    }
+    case DownloadStatus::State::Paused: {
+        std::string text = status.interrupted ? "Interrupted" : "Paused";
+        if (!status.resumable || !status.received) return text + (status.received ? " — will start over" : "");
+        return text + " — " + (status.expected > 0 && uint64_t(status.expected) >= status.received
+            ? FormatByteProgress(status.received, uint64_t(status.expected)) : FormatByteSize(status.received));
     }
     case DownloadStatus::State::Succeeded:
         if (status.missing) return "File moved or missing";

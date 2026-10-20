@@ -4149,6 +4149,9 @@ void BrowserWindow::MessageReceived(BMessage* message)
             uint64 current = 0;
             message->FindUInt64("current_size", &current);
             std::string status = "Downloaded " + std::to_string(current / 1024) + " KiB";
+            // A resumed download whose server sent the whole file again.
+            if (message->GetBool("restarted", false))
+                status = "The server could not resume the download, so it started over — " + status;
             fStatus->SetText(status.c_str());
             break;
         }
@@ -4163,6 +4166,8 @@ void BrowserWindow::MessageReceived(BMessage* message)
                 fStatus->SetText("Download complete — open Downloads to view the file");
             else if (result == B_WEBKIT_DOWNLOAD_CANCELLED)
                 fStatus->SetText("Download cancelled");
+            else if (result == B_WEBKIT_DOWNLOAD_PAUSED)
+                fStatus->SetText("Download paused — resume it in the downloads panel");
             else {
                 const char* description = nullptr;
                 message->FindString("error_description", &description);

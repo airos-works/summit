@@ -26,7 +26,8 @@ namespace summit {
 namespace {
 // Actions of a row (to the panel, "identifier").
 constexpr uint32 kOpenDownload = 'dpop', kShowDownload = 'dpsh', kCancelDownload = 'dpcn', kRetryDownload = 'dprt',
-    kRemoveDownload = 'dprm', kCopyDownloadLink = 'dpcp', kClearDownloads = 'dpcl';
+    kRemoveDownload = 'dprm', kCopyDownloadLink = 'dpcp', kClearDownloads = 'dpcl', kPauseDownload = 'dpps',
+    kResumeDownload = 'dprs';
 // Rows the panel shows; older downloads are in the Downloads folder.
 constexpr size_t kShownRows = 8;
 
@@ -47,6 +48,29 @@ struct Row {
     bool missing = false;
     std::shared_ptr<BBitmap> icon;
 };
+
+// The round buttons at a row's end, left to right.
+enum class Glyph { Cancel, Pause, Resume, Retry, Folder };
+struct RowButton {
+    uint32 what;
+    Glyph glyph;
+};
+// A paused download that would start over is restarted rather than resumed.
+bool Restarts(const DownloadList::Entry& entry) { return entry.received && !entry.CanResume(); }
+std::vector<RowButton> ButtonsOf(const Row& row)
+{
+    const auto& entry = row.entry;
+    switch (entry.state) {
+    case DownloadStatus::State::Active: return {{kPauseDownload, Glyph::Pause}, {kCancelDownload, Glyph::Cancel}};
+    case DownloadStatus::State::Paused:
+        return {{kResumeDownload, Restarts(entry) ? Glyph::Retry : Glyph::Resume}, {kCancelDownload, Glyph::Cancel}};
+    case DownloadStatus::State::Succeeded:
+        return {row.missing ? RowButton{kRetryDownload, Glyph::Retry} : RowButton{kShowDownload, Glyph::Folder}};
+    default:
+        // A failed download continues in its partial file (Retry resumes).
+        return {{entry.partial ? kResumeDownload : kRetryDownload, Glyph::Retry}};
+    }
+}
 
 // The file's icon: its type's (guessed from its name while it downloads),
 // or Tracker's for the file, or a plain document.
@@ -81,7 +105,7 @@ public:
     {
         fRows = std::move(rows);
         fHover = -1;
-        fHoverButton = false;
+        fHoverButton = -1;
         Invalidate();
     }
     const std::vector<Row>& Rows() const { return fRows; }
@@ -102,7 +126,7 @@ public:
         FillRect(update);
         if (fRows.empty()) {
             SetHighColor(dim);
-            const char* empty = "No downloads in this session";
+            const char* empty = "No downloads";
             font_height height;
             GetFontHeight(&height);
             DrawString(empty, BPoint(std::floor((Bounds().Width() - StringWidth(empty)) / 2),
@@ -121,7 +145,8 @@ public:
             const BRect frame(0, i * rowHeight, Bounds().right, (i + 1) * rowHeight - 1);
             if (!frame.Intersects(update)) continue;
             const bool active = entry.state == DownloadStatus::State::Active;
-            if (int32(i) == fHover && !fHoverButton && entry.state == DownloadStatus::State::Succeeded && !row.missing) {
+            const bool paused = entry.state == DownloadStatus::State::Paused;
+            if (int32(i) == fHover && fHoverButton < 0 && entry.state == DownloadStatus::State::Succeeded && !row.missing) {
                 SetHighColor(Mix(background, text, 0.07f));
                 FillRect(frame);
             }
@@ -142,9 +167,9 @@ public:
                 DrawBitmap(row.icon.get(), row.icon->Bounds(), iconFrame, B_FILTER_BITMAP_BILINEAR);
                 SetDrawingMode(B_OP_COPY);
             }
-            const BRect button = ButtonFrame(i);
+            const auto buttons = ButtonsOf(row);
             const float textLeft = iconFrame.right + padding;
-            const float textRight = button.left - std::round(6 * s);
+            const float textRight = ButtonFrame(i, 0, buttons.size()).left - std::round(6 * s);
             // The name, then what is happening, then (while active) a bar.
             const float nameBaseline = frame.top + std::round(8 * s) + std::ceil(plainHeight.ascent);
             SetFont(&plain);
@@ -162,13 +187,14 @@ public:
             const float statusBaseline = nameBaseline + std::ceil(plainHeight.descent) + std::round(3 * s) + std::ceil(smallHeight.ascent);
             DrawString(line.String(), BPoint(textLeft, statusBaseline));
             SetFont(be_plain_font);
-            if (active) {
+            // A paused download's bar stays where it stopped, greyed.
+            if (active || (paused && entry.received && entry.expected > 0)) {
                 const float top = statusBaseline + std::ceil(smallHeight.descent) + std::round(4 * s);
                 const BRect track(textLeft, top, textRight, top + std::round(4 * s) - 1);
                 SetHighColor(Mix(background, text, 0.14f));
                 FillRoundRect(track, 2 * s, 2 * s);
                 const double fraction = DownloadFraction(entry.received, entry.expected);
-                SetHighColor(accent);
+                SetHighColor(active ? accent : Mix(background, text, 0.45f));
                 if (fraction >= 0) {
                     BRect done = track;
                     done.right = track.left + std::max(4 * s, float(track.Width() * fraction));
@@ -182,14 +208,14 @@ public:
                     FillRoundRect(moving, 2 * s, 2 * s);
                 }
             }
-            DrawButton(i, button, text, background);
+            for (size_t b = 0; b < buttons.size(); ++b) DrawButton(i, b, ButtonFrame(i, b, buttons.size()), buttons[b].glyph, text, background);
         }
     }
 
     void MouseMoved(BPoint where, uint32 transit, const BMessage*) override
     {
         int32 row = transit == B_EXITED_VIEW || transit == B_OUTSIDE_VIEW ? -1 : RowAt(where);
-        const bool button = row >= 0 && ButtonFrame(row).Contains(where);
+        const int32 button = row >= 0 ? ButtonAt(row, where) : -1;
         if (row == fHover && button == fHoverButton) return;
         fHover = row;
         fHoverButton = button;
@@ -203,20 +229,17 @@ public:
         if (row < 0) return;
         if (buttons & B_SECONDARY_MOUSE_BUTTON) { ShowMenu(row, where); return; }
         fPressed = row;
-        fPressedButton = ButtonFrame(row).Contains(where);
+        fPressedButton = ButtonAt(row, where);
         SetMouseEventMask(B_POINTER_EVENTS, B_LOCK_WINDOW_FOCUS);
     }
     void MouseUp(BPoint where) override
     {
         const int32 row = RowAt(where), pressed = std::exchange(fPressed, -1);
-        if (row < 0 || row != pressed || ButtonFrame(row).Contains(where) != fPressedButton) return;
+        if (row < 0 || row != pressed || ButtonAt(row, where) != fPressedButton) return;
         const auto& entry = fRows[row].entry;
         uint32 what = 0;
-        if (fPressedButton) {
-            what = entry.state == DownloadStatus::State::Active ? kCancelDownload
-                : entry.state == DownloadStatus::State::Succeeded ? (fRows[row].missing ? kRetryDownload : kShowDownload)
-                : kRetryDownload;
-        } else if (entry.state == DownloadStatus::State::Succeeded && !fRows[row].missing) what = kOpenDownload;
+        if (fPressedButton >= 0) what = ButtonsOf(fRows[row])[fPressedButton].what;
+        else if (entry.state == DownloadStatus::State::Succeeded && !fRows[row].missing) what = kOpenDownload;
         if (!what) return;
         BMessage message(what);
         message.AddUInt64("identifier", entry.identifier);
@@ -230,18 +253,27 @@ private:
         const int32 row = int32(where.y / RowHeight());
         return where.y >= 0 && row < int32(fRows.size()) ? row : -1;
     }
-    BRect ButtonFrame(size_t row) const
+    // Button index of count in a row, from the left; the last is at the end.
+    BRect ButtonFrame(size_t row, size_t index, size_t count) const
     {
-        const float size = std::round(30 * Scale()), padding = std::round(10 * Scale());
+        const float size = std::round(30 * Scale()), padding = std::round(10 * Scale()), gap = std::round(2 * Scale());
         const float top = row * RowHeight() + std::floor((RowHeight() - size) / 2);
-        return BRect(Bounds().right - padding - size + 1, top, Bounds().right - padding, top + size - 1);
+        const float right = Bounds().right - padding - (count - 1 - index) * (size + gap);
+        return BRect(right - size + 1, top, right, top + size - 1);
     }
-    // Cancel (×) while active, show in folder once done, retry after a failure.
-    void DrawButton(size_t row, BRect frame, rgb_color text, rgb_color background)
+    int32 ButtonAt(int32 row, BPoint where) const
     {
-        const auto& entry = fRows[row].entry;
+        const size_t count = ButtonsOf(fRows[row]).size();
+        for (size_t index = 0; index < count; ++index)
+            if (ButtonFrame(row, index, count).Contains(where)) return int32(index);
+        return -1;
+    }
+    // Pause (two bars) and cancel (×) while active, resume (a triangle) or
+    // restart when paused, show in folder once done, retry after a failure.
+    void DrawButton(size_t row, size_t index, BRect frame, Glyph glyph, rgb_color text, rgb_color background)
+    {
         const float s = Scale();
-        if (int32(row) == fHover && fHoverButton) {
+        if (int32(row) == fHover && fHoverButton == int32(index)) {
             SetHighColor(Mix(background, text, 0.12f));
             FillEllipse(frame);
         }
@@ -250,10 +282,15 @@ private:
         SetDrawingMode(B_OP_ALPHA);
         const BPoint c(frame.left + frame.Width() / 2, frame.top + frame.Height() / 2);
         const float r = 5 * s;
-        if (entry.state == DownloadStatus::State::Active) {
+        if (glyph == Glyph::Cancel) {
             StrokeLine(c + BPoint(-r, -r), c + BPoint(r, r));
             StrokeLine(c + BPoint(r, -r), c + BPoint(-r, r));
-        } else if (entry.state == DownloadStatus::State::Succeeded && !fRows[row].missing) {
+        } else if (glyph == Glyph::Pause) {
+            StrokeLine(c + BPoint(-2.5f * s, -r), c + BPoint(-2.5f * s, r));
+            StrokeLine(c + BPoint(2.5f * s, -r), c + BPoint(2.5f * s, r));
+        } else if (glyph == Glyph::Resume) {
+            StrokeTriangle(c + BPoint(-0.6f * r, -r), c + BPoint(r, 0), c + BPoint(-0.6f * r, r));
+        } else if (glyph == Glyph::Folder) {
             // A folder.
             BPoint folder[] = { c + BPoint(-r - 1, -r + 1), c + BPoint(-2 * s, -r + 1), c + BPoint(0, -r + 3 * s),
                 c + BPoint(r + 1, -r + 3 * s), c + BPoint(r + 1, r), c + BPoint(-r - 1, r) };
@@ -281,13 +318,16 @@ private:
         };
         const bool done = entry.state == DownloadStatus::State::Succeeded && !fRows[row].missing;
         const bool active = entry.state == DownloadStatus::State::Active;
+        const bool paused = entry.state == DownloadStatus::State::Paused;
         item("Open", kOpenDownload, done);
         item("Show in Folder", kShowDownload, done);
         menu->AddSeparatorItem();
-        if (active) item("Cancel", kCancelDownload);
-        else item("Retry", kRetryDownload, entry.state != DownloadStatus::State::Succeeded || fRows[row].missing);
+        if (active) item("Pause", kPauseDownload);
+        else if (paused) item(Restarts(entry) ? "Restart" : "Resume", kResumeDownload);
+        else item("Retry", entry.partial ? kResumeDownload : kRetryDownload, entry.state != DownloadStatus::State::Succeeded || fRows[row].missing);
+        if (active || paused) item("Cancel", kCancelDownload);
         item("Copy Download Link", kCopyDownloadLink, !entry.url.empty());
-        item("Remove from List", kRemoveDownload, !active);
+        item("Remove from List", kRemoveDownload, !active && !paused);
         menu->AddSeparatorItem();
         menu->AddItem(new BMenuItem("Clear List", new BMessage(kClearDownloads)));
         menu->SetTargetForItems(Window());
@@ -297,7 +337,8 @@ private:
     std::vector<Row> fRows;
     std::shared_ptr<std::atomic<bool>> fMenusCancelled;
     int32 fHover = -1, fPressed = -1;
-    bool fHoverButton = false, fPressedButton = false;
+    // The button under the pointer or pressed in that row; -1 for the row itself.
+    int32 fHoverButton = -1, fPressedButton = -1;
 };
 
 DownloadsButton::DownloadsButton() : ToolButton("downloads", "Downloads", Icon::Downloads, kToggleDownloadsPanel) { }
@@ -410,7 +451,7 @@ void DownloadsPanel::Refresh()
             BEntry file(entry.path.c_str());
             row.missing = entry.path.empty() || !file.Exists();
         }
-        if (entry.state != DownloadStatus::State::Active) finished = true;
+        if (entry.state != DownloadStatus::State::Active && entry.state != DownloadStatus::State::Paused) finished = true;
         auto known = icons.find(entry.identifier);
         if (known != icons.end() && std::get<0>(known->second) == entry.state && std::get<1>(known->second) == entry.filename
             && std::get<2>(known->second))
@@ -461,16 +502,30 @@ void DownloadsPanel::Act(uint32 what, uint64 identifier)
         PostMessage(B_QUIT_REQUESTED);
         break;
     }
-    case kCancelDownload: {
-        BMessage cancel(kDownloadCancel);
-        cancel.AddUInt64("identifier", identifier);
-        be_app->PostMessage(&cancel);
+    case kCancelDownload: case kPauseDownload: {
+        BMessage request(what == kCancelDownload ? kDownloadCancel : kDownloadPause);
+        request.AddUInt64("identifier", identifier);
+        be_app->PostMessage(&request);
+        break;
+    }
+    case kResumeDownload: {
+        // The application knows the download's engine context.
+        BMessage resume(kDownloadResume);
+        resume.AddUInt64("identifier", identifier);
+        resume.AddMessenger("window", fOwner);
+        be_app->PostMessage(&resume);
         break;
     }
     case kRetryDownload: {
-        if (entry->url.empty()) break;
+        if (entry->CanContinue()) {
+            Act(kResumeDownload, identifier);
+            break;
+        }
+        // The address first asked for: a redirect's may have expired.
+        const std::string& url = entry->requestURL.empty() ? entry->url : entry->requestURL;
+        if (url.empty()) break;
         BMessage retry(kDownloadRetry);
-        retry.AddString("url", entry->url.c_str());
+        retry.AddString("url", url.c_str());
         fOwner.SendMessage(&retry);
         DownloadList::Default().Remove(identifier);
         break;
@@ -479,10 +534,10 @@ void DownloadsPanel::Act(uint32 what, uint64 identifier)
         DownloadList::Default().Remove(identifier);
         break;
     case kCopyDownloadLink:
-        if (be_clipboard->Lock()) {
+        if (const std::string& link = entry->requestURL.empty() ? entry->url : entry->requestURL; be_clipboard->Lock()) {
             be_clipboard->Clear();
             if (BMessage* clip = be_clipboard->Data())
-                clip->AddData("text/plain", B_MIME_TYPE, entry->url.data(), entry->url.size());
+                clip->AddData("text/plain", B_MIME_TYPE, link.data(), link.size());
             be_clipboard->Commit();
             be_clipboard->Unlock();
         }
@@ -500,7 +555,7 @@ void DownloadsPanel::MessageReceived(BMessage* message)
         PostMessage(B_QUIT_REQUESTED);
         break;
     case kOpenDownload: case kShowDownload: case kCancelDownload: case kRetryDownload:
-    case kRemoveDownload: case kCopyDownloadLink:
+    case kRemoveDownload: case kCopyDownloadLink: case kPauseDownload: case kResumeDownload:
         Act(message->what, message->GetUInt64("identifier", 0));
         break;
     default: BWindow::MessageReceived(message);
