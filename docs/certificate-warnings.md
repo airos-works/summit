@@ -96,7 +96,82 @@ crash reports or debugger events. The native viewer screenshot was inspected;
 all five portable CTest suites pass. Local evidence is
 `.vm/issue41-native-results.json` and `.vm/issue41-viewer.png`.
 
+## Sites that ask for a name and password
+
+Added 20 October 2026 for [issue #87](https://github.com/jmgasper/summit/issues/87).
+Routers, NAS boxes, printers, intranet and staging servers protect pages with
+HTTP authentication: a `401` answer with `WWW-Authenticate: Basic` (or
+`Digest`, or `NTLM`). Summit showed the server's 401 page and offered no way
+to sign in.
+
+### What the user sees
+
+- A sheet opens over the window: **192.168.1.1 asks you to sign in**, the
+  server's own words for the account (*It says: "Router admin"*), **Name**,
+  **Password**, **Remember this password**, **Cancel** and **Sign In** (the
+  default). On plain `http` it warns in red: with Basic, *your password is
+  sent as you type it, and others on the network can read it*; with Digest or
+  NTLM, *others on the network can see the page and your name*.
+- A wrong name or password asks again, saying *That name or password was not
+  accepted*, with the name filled in.
+- **Cancel** (and Escape) shows the server's own page for the refusal, as
+  other browsers do. Starting another navigation in the tab, closing it, or
+  its page crashing closes the sheet.
+- **Remember** (on by default when Preferences › Browsing saves passwords)
+  keeps the account in the Haiku key store with the other saved passwords
+  (#67, keyring "Summit"): it shows in Preferences and in the password export.
+  The next time the site asks, one saved account for the site signs in by
+  itself, without the sheet; with several, the sheet opens with the first one
+  filled in, and typing another saved name fills in its password. A saved
+  password the server refuses is asked about, never retried.
+- Within a session the engine remembers what was given (WebKit's credential
+  storage): a Basic site gets the name and password with its later requests
+  without asking, a Digest site answers the server's next challenge itself.
+- Private windows ask, but neither fill in nor save.
+- A proxy that asks (`407`) gets the same sheet (**The proxy … asks you to
+  sign in**), without Remember.
+- The sheet belongs to its tab: one waiting in a background tab opens when
+  the tab is selected, and several requests for the same server and realm
+  (a page and its images) are answered together.
+
+### How it works
+
+- The curl network task already turned a `401`/`407` into an authentication
+  challenge for the UI process, which answered every one with the default
+  handling. `didReceiveAuthenticationChallenge` in `UIProcess/haiku/WebView.cpp`
+  now sends Basic, Digest and NTLM challenges to the host as
+  `B_WEBKIT_AUTHENTICATION_REQUESTED` (`"identifier"`, `"url"`, `"host"`,
+  `"port"`, `"realm"`, `"scheme"`, `"secure"`, `"proxy"`,
+  `"previous_failures"`, `"user"`) when the view asked for them
+  (`BWebKitView::SetAuthenticationRequests(true)`; off by default, so other
+  programs on the engine keep the 401 page). The challenge waits, on WebKit's
+  main thread, until `BWebKitView::AnswerAuthentication(identifier, name,
+  password, persistence)` or `CancelAuthentication(identifier)`. A null name
+  continues without signing in (the server's page). `B_WEBKIT_CREDENTIAL_FOR_SESSION`
+  stores the credential in the session's credential storage, as the curl
+  task does for `ForSession` credentials.
+- When the view's page starts another main-frame navigation, closes or loses
+  its web process, its waiting challenges are cancelled and the host gets
+  the notice again with `"withdrawn"`, to close its sheet.
+- In Summit, `src/ui/BrowserWindowAuthentication.cpp` keeps the window's
+  waiting requests and `src/ui/AuthenticationPrompt.cpp` is the sheet (a
+  `B_MODAL_SUBSET_WINDOW_FEEL` window over the browser window). The key store
+  is read and written on threads of their own: keystore_server may ask the
+  user to allow Summit, and that blocks the caller.
+
+Checked on the X399 on 20 October with a test server on the build host
+(Basic and Digest, `user`/`passwd`) and with
+`https://httpbin.org/basic-auth/user/passwd` and
+`https://httpbin.org/digest-auth/auth/user/passwd`: each asked, a wrong
+password asked again saying so, the right one loaded the page; Cancel showed
+the 401 page; Remember saved the account, and after a restart both test sites
+signed in from the key store without the sheet; navigating away or closing
+the tab closed a waiting sheet.
+
 ## Remaining work
 
-- HTTP authentication (basic/digest) challenges still get the engine's
-  default handling, which does not ask for a password.
+- `BWebView` programs (WebPositive on Summit's engine, [legacy-webview.md](legacy-webview.md))
+  still get no `AUTHENTICATION_CHALLENGE`: the compatibility library does not
+  yet ask for `B_WEBKIT_AUTHENTICATION_REQUESTED`.
+- A saved account is not tied to the realm: a site's form password and its
+  HTTP password share the site's entry in the key store.

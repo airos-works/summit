@@ -106,6 +106,7 @@ Run them serially because that final log check covers the whole test VM.
 
 See [the verification record](STATUS.md) for exact results and failed runs.
 Certificates that fail verification now ask whether to continue
-([certificate-warnings.md](certificate-warnings.md)). HTTP authentication UI
-remains separate work. The error pages were checked on the X399 on 20 October
-2026 (see [issue-fixes-2026-10-20-app.md](issue-fixes-2026-10-20-app.md)).
+([certificate-warnings.md](certificate-warnings.md)), and so do sites that ask
+for a name and password (HTTP authentication, same page). The error pages were
+checked on the X399 on 20 October 2026 (see
+[issue-fixes-2026-10-20-app.md](issue-fixes-2026-10-20-app.md)).

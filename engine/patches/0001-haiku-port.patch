@@ -5597,6 +5597,53 @@ index 9b642c760a0aa1ea0e1888f00e0ce52196c0f822..7eea57492e165a4549ee95d954b9dc4d
      bool receivedFirstInitializationSegment() const { return m_receivedFirstInitializationSegment; }
  
  #if !RELEASE_LOG_DISABLED
+diff --git a/Source/WebCore/Modules/modern-media-controls/media/pip-support.js b/Source/WebCore/Modules/modern-media-controls/media/pip-support.js
+index 760bb8b038ff94fd34ff200228a0313fe243d092..15403102944c94a1de88e5dcda4b20e56a992463 100644
+--- a/Source/WebCore/Modules/modern-media-controls/media/pip-support.js
++++ b/Source/WebCore/Modules/modern-media-controls/media/pip-support.js
+@@ -49,6 +49,11 @@ class PiPSupport extends MediaControllerSupport
+     buttonWasPressed(control)
+     {
+         const media = this.mediaController.media;
++        if (this._browserShowsPictureInPicture()) {
++            media.dispatchEvent(new Event("summitpictureinpicturetoggle", { composed: true }));
++            return;
++        }
++
+         if (!document.pictureInPictureEnabled) {
+             media.webkitSetPresentationMode(media.webkitPresentationMode === PiPMode ? InlineMode : PiPMode);
+             return;
+@@ -62,6 +67,11 @@ class PiPSupport extends MediaControllerSupport
+ 
+     syncControl()
+     {
++        if (this._browserShowsPictureInPicture()) {
++            this.control.enabled = !this.mediaController.isAudio && !this.mediaController.media.hasAttribute("disablepictureinpicture");
++            return;
++        }
++
+         if (!this.mediaController.layoutTraits?.supportsPiP()) {
+             this.control.enabled = false;
+             return;
+@@ -74,4 +84,18 @@ class PiPSupport extends MediaControllerSupport
+             this.control.enabled = false;
+     }
+ 
++    // Private
++
++    // A browser can play videos in a window of its own through a script in
++    // the page, which these controls cannot call from their isolated world.
++    // Summit's (Haiku) cancels this event on the video to say that it does,
++    // and enters or leaves Picture in Picture on the toggle event.
++    _browserShowsPictureInPicture()
++    {
++        const media = this.mediaController.media;
++        if (!(media instanceof HTMLVideoElement))
++            return false;
++        return !media.dispatchEvent(new Event("summitpictureinpicturequery", { cancelable: true, composed: true }));
++    }
++
+ }
 diff --git a/Source/WebCore/Modules/pdfjs-extras/haiku/configuration.js b/Source/WebCore/Modules/pdfjs-extras/haiku/configuration.js
 new file mode 100644
 index 0000000000000000000000000000000000000000..883aa898608405f49a1ef2f74bf09e759a00c024
@@ -12198,7 +12245,7 @@ index aeb17770f3e1e6fca6f5efc89419a0895221014b..dbb756d88aeab3b8845f4c58ecdc7e44
  }
  
 diff --git a/Source/WebCore/html/HTMLMediaElement.cpp b/Source/WebCore/html/HTMLMediaElement.cpp
-index 81443b80c390626d0f6b2521a34c815f323f7445..e2452d5d12d09244697d84bdea82c7851d63ee32 100644
+index 81443b80c390626d0f6b2521a34c815f323f7445..41df88efd239c86a24c1d515eb0708784c15ad73 100644
 --- a/Source/WebCore/html/HTMLMediaElement.cpp
 +++ b/Source/WebCore/html/HTMLMediaElement.cpp
 @@ -3697,7 +3697,15 @@ void HTMLMediaElement::mediaPlayerInitializationDataEncountered(const String& in
@@ -12255,6 +12302,15 @@ index 81443b80c390626d0f6b2521a34c815f323f7445..e2452d5d12d09244697d84bdea82c785
  
      // or the current playback position is the earliest possible position and the direction
      // of playback is backwards
+@@ -8889,7 +8906,7 @@ static inline bool isRemoteMediaStreamVideoTrack(const Ref<MediaStreamTrack>& it
+ 
+ HTMLMediaElement::SleepType HTMLMediaElement::shouldDisableSleep() const
+ {
+-#if !PLATFORM(COCOA) && !PLATFORM(GTK) && !PLATFORM(WPE)
++#if !PLATFORM(COCOA) && !PLATFORM(GTK) && !PLATFORM(WPE) && !PLATFORM(HAIKU)
+     return SleepType::None;
+ #endif
+     if (m_sentEndEvent)
 diff --git a/Source/WebCore/html/HTMLMediaElement.idl b/Source/WebCore/html/HTMLMediaElement.idl
 index 35fefdacfa8e5ce92579c4ab5f46241c7afe3236..14de6e363fc52d5c8e84f5ebd1492eece8ad26b7 100644
 --- a/Source/WebCore/html/HTMLMediaElement.idl
@@ -32236,10 +32292,10 @@ index 0000000000000000000000000000000000000000..1a59f5ca77ca81301993268bcdee2f36
 +} // namespace WebCore
 diff --git a/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaiku.cpp b/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..7578b66b805122e22fff9264340351c4205d99da
+index 0000000000000000000000000000000000000000..5438cae6ac710aad9a42f667e240cfb885c4e5ee
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaiku.cpp
-@@ -0,0 +1,2040 @@
+@@ -0,0 +1,2076 @@
 +/*
 + * Copyright (C) 2014-2016 Haiku, Inc.
 + *
@@ -32693,6 +32749,11 @@ index 0000000000000000000000000000000000000000..7578b66b805122e22fff9264340351c4
 +    // TODO should we seek the tracks to 0? reset m_currentTime? other things?
 +}
 +
++void MediaPlayerPrivate::setPreload(MediaPlayer::Preload preload)
++{
++    m_preloadNone = preload == MediaPlayer::Preload::None;
++}
++
 +static bigtime_t audioTrackTime(BMediaTrack& track, const media_raw_audio_format& format)
 +{
 +    // Some Media Kit FFmpeg decoders return packet timestamps in their stream
@@ -32786,6 +32847,8 @@ index 0000000000000000000000000000000000000000..7578b66b805122e22fff9264340351c4
 +            player->m_player.durationChanged();
 +            player->m_player.sizeChanged();
 +            player->m_player.firstVideoFrameAvailable();
++            // The first picture of a paused video (decodeFirstFrameHaiku()).
++            player->m_player.repaint();
 +
 +            player->m_readyState = MediaPlayer::ReadyState::HaveEnoughData;
 +            player->m_networkState = MediaPlayer::NetworkState::Loaded;
@@ -34128,6 +34191,10 @@ index 0000000000000000000000000000000000000000..7578b66b805122e22fff9264340351c4
 +
 +        if (m_videoTrack) {
 +            if (m_paused) {
++                // A video that has not played yet shows its first picture,
++                // as in other browsers, unless the page asked to load nothing.
++                if (!m_preloadNone && !m_abort)
++                    decodeFirstFrameHaiku();
 +                m_substituteVideo = nullptr;
 +                m_videoTrackFile->ReleaseTrack(m_videoTrack);
 +                m_videoTrack = nullptr;
@@ -34154,6 +34221,31 @@ index 0000000000000000000000000000000000000000..7578b66b805122e22fff9264340351c4
 +    }
 +}
 +
++
++
++// Loading thread, holding the parked track: the page thread does not use it
++// before the loading thread says the media loaded. The picture stays in
++// m_frameBuffer while the decoder is released; play() and seeks position a
++// new track before they decode from it.
++void MediaPlayerPrivate::decodeFirstFrameHaiku()
++{
++    if (!m_frameBuffer)
++        return;
++    bigtime_t startedAt = mediaPlaybackTraceEnabled() ? system_time() : 0;
++    int64 count = 1;
++    media_header header = { };
++    status_t status = m_substituteVideo ? m_substituteVideo->readFrame(m_frameBuffer->Bits(), &count, &header)
++        : m_videoTrack->ReadFrames(m_frameBuffer->Bits(), &count, &header);
++    if (mediaPlaybackTraceEnabled())
++        std::fprintf(stderr, "Summit media playback: player=%p firstFrame status=%ld decode=%.1f\n",
++            this, long(status), (system_time() - startedAt) / 1000.0);
++    if (status != B_OK || !m_mediaLock.Lock())
++        return;
++    ++m_videoFrameGeneration;
++    didDecodeFrameLocked(header.start_time);
++    pushFrameToCompositor();
++    m_mediaLock.Unlock();
++}
 +
 +
 +// #pragma mark - static methods
@@ -34282,10 +34374,10 @@ index 0000000000000000000000000000000000000000..7578b66b805122e22fff9264340351c4
 +#endif
 diff --git a/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaiku.h b/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaiku.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..03078f994a5787d45ca77da51941fce490212e27
+index 0000000000000000000000000000000000000000..0eeca0723092ea14bc51cbe9c3c50b692239a0f8
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaiku.h
-@@ -0,0 +1,278 @@
+@@ -0,0 +1,287 @@
 +/*
 + * Copyright (C) 2014 Haiku, Inc.
 + *
@@ -34374,6 +34466,7 @@ index 0000000000000000000000000000000000000000..03078f994a5787d45ca77da51941fce4
 +        void cancelLoad() override;
 +
 +        void prepareToPlay() override;
++        void setPreload(MediaPlayer::Preload) override;
 +
 +        void play() override;
 +        void pause() override;
@@ -34381,6 +34474,9 @@ index 0000000000000000000000000000000000000000..03078f994a5787d45ca77da51941fce4
 +        FloatSize naturalSize() const override;
 +        bool hasAudio() const override;
 +        bool hasVideo() const override;
++        // The video element goes full screen as an element (FULLSCREEN_API):
++        // the controls' full-screen button and webkitEnterFullscreen().
++        bool supportsFullscreen() const override { return true; }
 +
 +        void setPageIsVisible(bool) override;
 +
@@ -34432,6 +34528,9 @@ index 0000000000000000000000000000000000000000..03078f994a5787d45ca77da51941fce4
 +private:
 +    private:
 +        void IdentifyTracks(const String& url);
++        // The first picture of a video that does not play yet, decoded on
++        // the loading thread before the page hears that the media loaded.
++        void decodeFirstFrameHaiku();
 +        void startVideoPlaybackIfNeeded(bool forSeek = false);
 +        void startAudioPlaybackIfNeeded();
 +        void releaseAudioOutput();
@@ -34532,6 +34631,8 @@ index 0000000000000000000000000000000000000000..03078f994a5787d45ca77da51941fce4
 +        std::atomic<bool> m_ended { false };
 +        std::atomic<bool> m_paused;
 +        std::atomic<bool> m_abort;
++        // preload="none": nothing is decoded before the page plays the media.
++        std::atomic<bool> m_preloadNone { false };
 +
 +        thread_id m_loadingThread;
 +        thread_id m_videoThread;
@@ -37723,10 +37824,10 @@ index 0000000000000000000000000000000000000000..653c3dcefc38ab8ad646b2a6fba5fe8e
 +#endif // ENABLE(MEDIA_SOURCE)
 diff --git a/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaikuMSE.h b/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaikuMSE.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..ac6bc64f8fd4da3fc841dbab4b7d57dabb6e9d02
+index 0000000000000000000000000000000000000000..be761bfc668c62f4a24c60f22e85d97e41eed2d2
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaikuMSE.h
-@@ -0,0 +1,417 @@
+@@ -0,0 +1,419 @@
 +/*
 + * Copyright (C) 2026 Summit contributors.
 + *
@@ -37963,6 +38064,8 @@ index 0000000000000000000000000000000000000000..ac6bc64f8fd4da3fc841dbab4b7d57da
 +    bool paused() const final { return m_paused; }
 +    FloatSize naturalSize() const final;
 +    bool hasVideo() const final;
++    // The video element goes full screen as an element (FULLSCREEN_API).
++    bool supportsFullscreen() const final { return true; }
 +    std::optional<bool> isCrossOrigin(const SecurityOrigin&) const final;
 +    bool hasAudio() const final;
 +    void setPageIsVisible(bool) final { }
@@ -47588,6 +47691,452 @@ index 0000000000000000000000000000000000000000..32ba8e2f08efde1fa6ffccd7f3b73935
 +}
 +
 +
+diff --git a/Source/WebCore/platform/haiku/MediaControlsImagesHaiku.h b/Source/WebCore/platform/haiku/MediaControlsImagesHaiku.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..de87da3050935c21365e9cf23bf47cf5683b46c4
+--- /dev/null
++++ b/Source/WebCore/platform/haiku/MediaControlsImagesHaiku.h
+@@ -0,0 +1,440 @@
++// Generated by Tools/Scripts/generate-media-controls-images-haiku.py from
++// Source/WebCore/Modules/modern-media-controls/images/adwaita; do not edit.
++// The icons of the media controls (RenderThemeAdwaita.cpp), built into the
++// library: there are no GResources on Haiku.
++
++#pragma once
++
++#include <span>
++#include <wtf/StdLibExtras.h>
++#include <wtf/text/WTFString.h>
++
++namespace WebCore {
++namespace MediaControlsImagesHaiku {
++
++// EnterFullscreen.svg
++static constexpr char image0[] = R"SVG(<?xml version='1.0' encoding='UTF-8' standalone='no'?>
++<svg width='16' height='16' version='1.1' xmlns='http://www.w3.org/2000/svg' xmlns:svg='http://www.w3.org/2000/svg'>
++<defs id='defs59' />
++<g color='%23000' fill='%23FFFFFF' id='g53' transform='matrix(-1,0,0,1,15.998034,0)'>
++<path
++   d='M 1.984,8.986 A 1,1 0 0 0 1,10 v 4 a 1,1 0 0 0 1,1 H 6 A 1,1 0 1 0 6,13 H 3 V 10 A 1,1 0 0 0 1.984,8.986 Z'
++   style='line-height:normal;font-variant-ligatures:normal;font-variant-position:normal;font-variant-caps:normal;font-variant-numeric:normal;font-variant-alternates:normal;font-feature-settings:normal;text-indent:0;text-align:start;text-decoration-line:none;text-decoration-style:solid;text-transform:none;text-orientation:mixed;shape-padding:0;isolation:auto;mix-blend-mode:normal;marker:none'
++   font-weight='400'
++   font-family='sans-serif'
++   white-space='normal'
++   overflow='visible'
++   id='path39' />
++<path
++   d='M 6.48,8.49 A 1,1 0 0 0 5.793,8.793 l -4.5,4.5 a 1,1 0 1 0 1.414,1.414 l 4.5,-4.5 A 1,1 0 0 0 6.48,8.49 Z'
++   style='line-height:normal;font-variant-ligatures:normal;font-variant-position:normal;font-variant-caps:normal;font-variant-numeric:normal;font-variant-alternates:normal;font-feature-settings:normal;text-indent:0;text-align:start;text-decoration-line:none;text-decoration-style:solid;text-transform:none;text-orientation:mixed;shape-padding:0;isolation:auto;mix-blend-mode:normal;marker:none'
++   font-weight='400'
++   font-family='sans-serif'
++   white-space='normal'
++   overflow='visible'
++   id='path41' />
++<path
++   d='m 1,14 h 1 v 1 H 1 Z'
++   style='marker:none'
++   overflow='visible'
++   id='path43' />
++<path
++   d='m 10,1 a 1,1 0 1 0 0,2 h 3 v 3 a 1,1 0 1 0 2,0 V 2 A 1,1 0 0 0 14,1 Z'
++   style='line-height:normal;font-variant-ligatures:normal;font-variant-position:normal;font-variant-caps:normal;font-variant-numeric:normal;font-variant-alternates:normal;font-feature-settings:normal;text-indent:0;text-align:start;text-decoration-line:none;text-decoration-style:solid;text-transform:none;text-orientation:mixed;shape-padding:0;isolation:auto;mix-blend-mode:normal;marker:none'
++   font-weight='400'
++   font-family='sans-serif'
++   white-space='normal'
++   overflow='visible'
++   id='path45' />
++<path
++   d='m 14,1 h 1 v 1 h -1 z'
++   style='marker:none'
++   overflow='visible'
++   id='path47' />
++<path
++   d='m 13.984,0.99 a 1,1 0 0 0 -0.69,0.301 l -4.5,4.469 a 1.0002056,1.0002056 0 1 0 1.411,1.418 l 4.5,-4.469 A 1,1 0 0 0 13.985,0.99 Z'
++   style='line-height:normal;font-variant-ligatures:normal;font-variant-position:normal;font-variant-caps:normal;font-variant-numeric:normal;font-variant-alternates:normal;font-feature-settings:normal;text-indent:0;text-align:start;text-decoration-line:none;text-decoration-style:solid;text-transform:none;text-orientation:mixed;shape-padding:0;isolation:auto;mix-blend-mode:normal;marker:none'
++   font-weight='400'
++   font-family='sans-serif'
++   white-space='normal'
++   overflow='visible'
++   id='path49' />
++<path
++   d='m 1,9 h 1 v 1 H 1 Z m 5,5 h 1 v 1 H 6 Z m 8,-8 h 1 V 7 H 14 Z M 9,1 h 1 V 2 H 9 Z'
++   style='marker:none'
++   overflow='visible'
++   id='path51'/>
++</g></svg>
++)SVG";
++// ExitFullscreen.svg
++static constexpr char image1[] = R"SVG(<svg xmlns='http://www.w3.org/2000/svg' width='16.014' height='16.01'> \
++          <g color='%23000' fill='%23FFFFFF'> \
++            <path d='M12 1.006l-2 .008.018 4.996H15v-2h-2.99z' style='line-height:normal;font-variant-ligatures:normal;font-variant-position:normal;font-variant-caps:normal;font-variant-numeric:normal;font-variant-alternates:normal;font-feature-settings:normal;text-indent:0;text-align:start;text-decoration-line:none;text-decoration-style:solid;text-decoration-color:%23000;text-transform:none;text-orientation:mixed;shape-padding:0;isolation:auto;mix-blend-mode:normal;marker:none' font-weight='400' font-family='sans-serif' white-space='normal' overflow='visible'/> \
++            <path d='M14.979 0a1 1 0 0 0-.688.305l-3.984 4a1 1 0 1 0 1.416 1.41l3.986-4A1 1 0 0 0 14.979 0zM1.014 6.01a1 1 0 0 0-1 1v8a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1v-8a1 1 0 0 0-1-1zm1 2h6v6h-6z' style='line-height:normal;font-variant-ligatures:normal;font-variant-position:normal;font-variant-caps:normal;font-variant-numeric:normal;font-variant-alternates:normal;font-feature-settings:normal;text-indent:0;text-align:start;text-decoration-line:none;text-decoration-style:solid;text-decoration-color:%23000;text-transform:none;text-orientation:mixed;shape-padding:0;isolation:auto;mix-blend-mode:normal;marker:none' font-weight='400' font-family='sans-serif' white-space='normal' overflow='visible'/> \
++            <path d='M1.014 8.01a1 1 0 1 0 0 2h8a1 1 0 1 0 0-2z' style='line-height:normal;font-variant-ligatures:normal;font-variant-position:normal;font-variant-caps:normal;font-variant-numeric:normal;font-variant-alternates:normal;font-feature-settings:normal;text-indent:0;text-align:start;text-decoration-line:none;text-decoration-style:solid;text-decoration-color:%23000;text-transform:none;text-orientation:mixed;shape-padding:0;isolation:auto;mix-blend-mode:normal;marker:none' font-weight='400' font-family='sans-serif' white-space='normal' overflow='visible' fill-rule='evenodd'/> \
++            <path d='M15 5.01h1v1h-1zM10 .01h1v1h-1zM9.014 15.01h1v1h-1zM.014 15.01h1v1h-1z' style='marker:none' overflow='visible'/> \
++            <path d='M11 .01c.554 0 1 .446 1 1s-.446 1-1 1-1-.446-1-1 .446-1 1-1zM15 4.01c.554 0 1 .446 1 1s-.446 1-1 1-1-.446-1-1 .446-1 1-1z' style='marker:none' overflow='visible'/> \
++          </g> \
++        </svg>)SVG";
++// Forward.svg
++static constexpr char image2[] = R"SVG(<?xml version="1.0" encoding="UTF-8"?>
++<svg height="16px" viewBox="0 0 16 16" width="16px" xmlns="http://www.w3.org/2000/svg">
++    <g fill="#2e3436">
++        <path d="m 2 4 c 0.179688 0 0.359375 0.046875 0.515625 0.140625 l 5 3 c 0.648437 0.386719 0.648437 1.328125 0 1.71875 l -5 3 c -0.15625 0.089844 -0.335937 0.140625 -0.515625 0.136719 c -1 0.003906 -1 -0.996094 -1 -0.996094 v -6 s -0.003906 -1 1 -1 z m 0 0"/>
++        <path d="m 9 4 c 0.179688 0 0.359375 0.046875 0.515625 0.140625 l 5 3 c 0.648437 0.386719 0.648437 1.328125 0 1.71875 l -5 3 c -0.15625 0.089844 -0.335937 0.140625 -0.515625 0.136719 c -1 0.003906 -1 -0.996094 -1 -0.996094 v -6 s -0.003906 -1 1 -1 z m 0 0"/>
++    </g>
++</svg>
++)SVG";
++// MediaSelector-fullscreen.svg
++static constexpr char image3[] = R"SVG(<?xml version="1.0" encoding="UTF-8"?>
++<svg xmlns="http://www.w3.org/2000/svg" height="16px" viewBox="0 0 16 16" width="16px"><g fill="#2e3436"><path d="m 2.5 0 c -1.382812 0 -2.50390625 1.117188 -2.5 2.5 v 8 c 0 1.386719 1.113281 2.5 2.5 2.5 h 8.375 l 3.125 3 v -3.0625 c 1.164062 -0.230469 2 -1.253906 2 -2.4375 v -8 c 0 -1.386719 -1.113281 -2.5 -2.5 -2.5 z m 0 2 h 11 c 0.277344 0 0.5 0.222656 0.5 0.5 v 8 c 0 0.277344 -0.222656 0.5 -0.5 0.5 h -11 c -0.277344 0 -0.5 -0.222656 -0.5 -0.5 v -8 c 0 -0.277344 0.222656 -0.5 0.5 -0.5 z m 0 0"/><path d="m 4 7 h 6 v 2 h -6 z m 0 0"/><path d="m 4 4 h 8 v 2 h -8 z m 0 0"/></g></svg>
++)SVG";
++// MediaSelector.svg
++static constexpr char image4[] = R"SVG(<svg xmlns='http://www.w3.org/2000/svg' width='16' height='16'> \
++          <path d='M3.5 2A2.495 2.495 0 0 0 1 4.5v5c0 1.385 1.115 2.52 2.5 2.5h6.375L13 15v-3.063A2.486 2.486 0 0 0 15 9.5v-5C15 3.115 13.885 2 12.5 2zM3 7h4v1H3zm5 0h5v1H8zM3 9h2v1H3zm3 0h5v1H6zm6 0h1v1h-1z' fill='%23FFFFFF'/> \
++        </svg>)SVG";
++// Overflow.svg
++static constexpr char image5[] = R"SVG(<?xml version="1.0" encoding="UTF-8"?>
++<svg height="16px" viewBox="0 0 16 16" width="16px" xmlns="http://www.w3.org/2000/svg">
++    <path d="m 7.75 0 c -0.414062 0 -0.75 0.335938 -0.75 0.75 v 1.332031 c -0.589844 0.101563 -1.148438 0.289063 -1.667969 0.546875 l -0.785156 -1.082031 c -0.152344 -0.210937 -0.390625 -0.316406 -0.632813 -0.308594 c -0.144531 0.003907 -0.289062 0.050781 -0.414062 0.144531 l -0.40625 0.292969 c -0.335938 0.246094 -0.410156 0.710938 -0.164062 1.046875 l 0.789062 1.082032 c -0.410156 0.417968 -0.757812 0.894531 -1.03125 1.417968 l -1.273438 -0.414062 c -0.074218 -0.023438 -0.148437 -0.035156 -0.222656 -0.035156 c -0.320312 -0.007813 -0.617187 0.195312 -0.722656 0.519531 l -0.15625 0.472656 c -0.125 0.394531 0.085938 0.816406 0.480469 0.945313 l 1.269531 0.414062 c -0.039062 0.285156 -0.0625 0.578125 -0.0625 0.875 s 0.023438 0.589844 0.0625 0.878906 l -1.269531 0.410156 c -0.394531 0.128907 -0.605469 0.550782 -0.480469 0.945313 l 0.15625 0.476563 c 0.128906 0.394531 0.550781 0.609374 0.945312 0.480468 l 1.273438 -0.414062 c 0.273438 0.519531 0.621094 1 1.03125 1.417968 l -0.789062 1.082032 c -0.246094 0.335937 -0.171876 0.800781 0.164062 1.046875 l 0.40625 0.296875 c 0.335938 0.242187 0.800781 0.167968 1.046875 -0.167969 l 0.785156 -1.082031 c 0.519531 0.257812 1.078125 0.441406 1.667969 0.542968 v 1.335938 c 0 0.414062 0.335938 0.75 0.75 0.75 h 0.5 c 0.414062 0 0.75 -0.335938 0.75 -0.75 v -1.335938 c 0.589844 -0.101562 1.148438 -0.285156 1.667969 -0.542968 l 0.785156 1.082031 c 0.246094 0.335937 0.710937 0.410156 1.046875 0.167969 l 0.40625 -0.292969 c 0.335938 -0.246094 0.410156 -0.714844 0.164062 -1.050781 l -0.789062 -1.082032 c 0.410156 -0.417968 0.757812 -0.898437 1.03125 -1.417968 l 1.273438 0.414062 c 0.394531 0.128906 0.816406 -0.085937 0.945312 -0.480468 l 0.15625 -0.476563 c 0.125 -0.394531 -0.085938 -0.816406 -0.480469 -0.945313 l -1.273437 -0.410156 c 0.042968 -0.289062 0.066406 -0.582031 0.066406 -0.878906 s -0.023438 -0.589844 -0.066406 -0.875 l 1.273437 -0.414062 c 0.394531 -0.128907 0.605469 -0.550782 0.480469 -0.945313 l -0.15625 -0.472656 c -0.105469 -0.324219 -0.402344 -0.527344 -0.722656 -0.519531 c -0.074219 0 -0.148438 0.011718 -0.222656 0.035156 l -1.273438 0.414062 c -0.273438 -0.523437 -0.621094 -1 -1.03125 -1.417968 l 0.789062 -1.082032 c 0.246094 -0.335937 0.171876 -0.800781 -0.164062 -1.046875 l -0.40625 -0.292969 c -0.148438 -0.109374 -0.320312 -0.15625 -0.488281 -0.144531 c -0.214844 0.011719 -0.421875 0.121094 -0.558594 0.308594 l -0.785156 1.085937 c -0.519531 -0.261718 -1.078125 -0.445312 -1.667969 -0.546874 v -1.335938 c 0 -0.414062 -0.335938 -0.75 -0.75 -0.75 z m 0.25 4 c 0.808594 0 1.558594 0.234375 2.183594 0.644531 l 0.324218 0.230469 c 0.558594 0.449219 0.992188 1.042969 1.242188 1.730469 c 0.003906 0.003906 0.007812 0.007812 0.007812 0.015625 l 0.085938 0.261718 c 0.101562 0.355469 0.15625 0.730469 0.15625 1.117188 s -0.054688 0.761719 -0.15625 1.117188 l -0.085938 0.261718 v 0.003906 c -0.253906 0.691407 -0.6875 1.289063 -1.25 1.742188 l -0.324218 0.234375 c -0.625 0.40625 -1.375 0.640625 -2.183594 0.640625 c -0.804688 0 -1.554688 -0.234375 -2.179688 -0.636719 l -0.328124 -0.238281 c -0.554688 -0.445312 -0.988282 -1.035156 -1.238282 -1.714844 l -0.105468 -0.316406 c -0.097657 -0.347656 -0.148438 -0.714844 -0.148438 -1.09375 s 0.050781 -0.746094 0.148438 -1.089844 l 0.109374 -0.328125 c 0.25 -0.675781 0.683594 -1.261719 1.234376 -1.703125 l 0.328124 -0.238281 c 0.625 -0.40625 1.375 -0.640625 2.179688 -0.640625 z m 0 0" fill="#2e3436"/>
++</svg>
++)SVG";
++// Pause.svg
++static constexpr char image6[] = R"SVG(<?xml version="1.0" encoding="UTF-8"?>
++<svg xmlns="http://www.w3.org/2000/svg" height="16px" viewBox="0 0 16 16" width="16px"><g fill="#2e3436"><path d="m 3 2 h 4 v 12 h -4 z m 0 0"/><path d="m 9 2 h 4 v 12 h -4 z m 0 0"/></g></svg>
++)SVG";
++// PipIn-fullscreen.svg
++static constexpr char image7[] = R"SVG(<?xml version="1.0" encoding="UTF-8"?>
++<svg xmlns="http://www.w3.org/2000/svg" height="16px" viewBox="0 0 16 16" width="16px"><g fill="#2e3436"><path d="m 1 2.007812 c -0.550781 0 -1 0.449219 -1 1 v 9 c 0 0.550782 0.449219 1 1 1 h 4 v -2 h -3 v -7 h 10 v 3 h 2 v -4 c 0 -0.550781 -0.449219 -1 -1 -1 z m 0 0" fill-opacity="0.35"/><path d="m 9 10 c -0.550781 0 -1 0.449219 -1 1 v 4.007812 c 0 0.550782 0.449219 1 1 1 h 6 c 0.550781 0 1 -0.449218 1 -1 v -4.007812 c 0 -0.550781 -0.449219 -1 -1 -1 z m 1 2 h 4 v 2.007812 h -4 z m 0 0"/><path d="m 3.132812 5.140625 c 0.171876 -0.164063 0.496094 -0.1875 0.757813 0.015625 l 3.109375 3.089844 v 0.753906 h -0.753906 l -3.109375 -3.089844 c -0.191407 -0.191406 -0.179688 -0.597656 -0.003907 -0.769531 z m 0 0"/><path d="m 4 9 h 4 v 1 h -4 z m 0 0"/><path d="m 7 6 h 1 v 4 h -1 z m 0 0"/></g></svg>
++)SVG";
++// PipIn.svg
++static constexpr char image8[] = R"SVG(<?xml version="1.0" encoding="UTF-8"?>
++<svg xmlns="http://www.w3.org/2000/svg" height="16px" viewBox="0 0 16 16" width="16px"><g fill="#2e3436"><path d="m 1 2.007812 c -0.550781 0 -1 0.449219 -1 1 v 9 c 0 0.550782 0.449219 1 1 1 h 4 v -2 h -3 v -7 h 10 v 3 h 2 v -4 c 0 -0.550781 -0.449219 -1 -1 -1 z m 0 0" fill-opacity="0.35"/><path d="m 9 10 c -0.550781 0 -1 0.449219 -1 1 v 4.007812 c 0 0.550782 0.449219 1 1 1 h 6 c 0.550781 0 1 -0.449218 1 -1 v -4.007812 c 0 -0.550781 -0.449219 -1 -1 -1 z m 1 2 h 4 v 2.007812 h -4 z m 0 0"/><path d="m 3.132812 5.140625 c 0.171876 -0.164063 0.496094 -0.1875 0.757813 0.015625 l 3.109375 3.089844 v 0.753906 h -0.753906 l -3.109375 -3.089844 c -0.191407 -0.191406 -0.179688 -0.597656 -0.003907 -0.769531 z m 0 0"/><path d="m 4 9 h 4 v 1 h -4 z m 0 0"/><path d="m 7 6 h 1 v 4 h -1 z m 0 0"/></g></svg>
++)SVG";
++// PipOut.svg
++static constexpr char image9[] = R"SVG(<?xml version="1.0" encoding="UTF-8"?>
++<svg xmlns="http://www.w3.org/2000/svg" height="16px" viewBox="0 0 16 16" width="16px"><g fill="#2e3436"><path d="m 1 2.007812 c -0.550781 0 -1 0.449219 -1 1 v 9 c 0 0.550782 0.449219 1 1 1 h 4 v -2 h -3 v -7 h 10 v 3 h 2 v -4 c 0 -0.550781 -0.449219 -1 -1 -1 z m 0 0"/><path d="m 9 10 c -0.550781 0 -1 0.449219 -1 1 v 4.007812 c 0 0.550782 0.449219 1 1 1 h 6 c 0.550781 0 1 -0.449218 1 -1 v -4.007812 c 0 -0.550781 -0.449219 -1 -1 -1 z m 1 2 h 4 v 2.007812 h -4 z m 0 0" fill-opacity="0.35"/><path d="m 7.863281 9.871094 c -0.167969 0.164062 -0.492187 0.1875 -0.753906 -0.019532 l -3.113281 -3.085937 v -0.753906 h 0.753906 l 3.109375 3.085937 c 0.191406 0.191406 0.179687 0.601563 0.003906 0.773438 z m 0 0"/><path d="m 6.996094 6.011719 h -4 v -1 h 4 z m 0 0"/><path d="m 3.996094 9.011719 h -1 v -4 h 1 z m 0 0"/></g></svg>
++)SVG";
++// Play.svg
++static constexpr char image10[] = R"SVG(<?xml version="1.0" encoding="UTF-8"?>
++<svg xmlns="http://www.w3.org/2000/svg" height="16px" viewBox="0 0 16 16" width="16px"><path d="m 4 2.996094 v 10 h 1 c 0.175781 0 0.347656 -0.039063 0.5 -0.125 l 7 -4 c 0.3125 -0.171875 0.46875 -0.523438 0.46875 -0.875 c 0 -0.351563 -0.15625 -0.703125 -0.46875 -0.875 l -7 -4 c -0.152344 -0.085938 -0.324219 -0.125 -0.5 -0.125 z m 0 0" fill="#2e3436"/></svg>
++)SVG";
++// Rewind.svg
++static constexpr char image11[] = R"SVG(<?xml version="1.0" encoding="UTF-8"?>
++<svg height="16px" viewBox="0 0 16 16" width="16px" xmlns="http://www.w3.org/2000/svg">
++    <g fill="#2e3436">
++        <path d="m 7 4.003906 c -0.179688 -0.003906 -0.359375 0.046875 -0.515625 0.140625 l -5 3 c -0.648437 0.386719 -0.648437 1.328125 0 1.714844 l 5 3 c 0.15625 0.09375 0.335937 0.140625 0.515625 0.140625 v 0.003906 c 1 -0.003906 1 -1 1 -1 v -6 s 0.003906 -1 -1 -1 z m 0 0"/>
++        <path d="m 14 4.003906 c -0.179688 -0.003906 -0.359375 0.046875 -0.515625 0.140625 l -5 3 c -0.648437 0.386719 -0.648437 1.328125 0 1.714844 l 5 3 c 0.15625 0.09375 0.335937 0.140625 0.515625 0.140625 v 0.003906 c 1 -0.003906 1 -1 1 -1 v -6 s 0.003906 -1 -1 -1 z m 0 0"/>
++    </g>
++</svg>
++)SVG";
++// SkipBack10.svg
++static constexpr char image12[] = R"SVG(<?xml version="1.0" encoding="UTF-8"?>
++<svg xmlns="http://www.w3.org/2000/svg" height="16px" viewBox="0 0 16 16" width="16px"><path d="m 8.25 1 c -0.132812 0.007812 -0.261719 0.046875 -0.375 0.117188 l -3.75 2.25 c -0.210938 0.140624 -0.332031 0.382812 -0.328125 0.632812 c 0 0.25 0.117187 0.5 0.328125 0.636719 l 3.75 2.25 c 0.113281 0.070312 0.242188 0.109375 0.375 0.113281 h 0.75 v -2 c 1.746094 -0.003906 3.292969 1.132812 3.816406 2.800781 c 0.527344 1.664063 -0.089844 3.480469 -1.523437 4.480469 c -0.292969 0.203125 -0.457031 0.546875 -0.429688 0.90625 c 0.03125 0.359375 0.25 0.671875 0.578125 0.824219 c 0.324219 0.152343 0.707032 0.113281 1 -0.09375 c 2.144532 -1.503907 3.066406 -4.222657 2.285156 -6.71875 c -0.792968 -2.5 -3.109374 -4.195313 -5.726562 -4.199219 v -2 z m -1.09375 7.898438 c -1.535156 0 -2.5625 1.25 -2.5625 3.121093 c 0 1.839844 1.011719 3.066407 2.519531 3.066407 c 1.523438 0 2.554688 -1.246094 2.554688 -3.128907 c 0 -1.835937 -1.011719 -3.058593 -2.511719 -3.058593 z m -4.875 0.089843 l -2.070312 1.195313 l 0.5625 1.074218 l 0.902343 -0.46875 v 2.929688 h -1.160156 v 1.285156 h 3.726563 v -1.285156 h -1.066407 v -4.730469 z m 4.839844 1.195313 c 0.597656 0 1.003906 0.734375 1.003906 1.84375 c 0 1.066406 -0.398438 1.777344 -0.976562 1.777344 h -0.003907 c -0.613281 -0.003907 -1.011719 -0.738282 -1.011719 -1.835938 c 0 -1.074219 0.398438 -1.785156 0.988282 -1.785156 z m 0 0" fill="#2e3436"/></svg>
++)SVG";
++// SkipBack15.svg
++static constexpr char image13[] = R"SVG(<svg height="16" width="16" xmlns="http://www.w3.org/2000/svg">
++    <path style="fill:#2e3436" d="m5.115 8.98-.154 3.442.133-.026a6.49 6.49 0 0 1 1.18-.125c.452 0 .8.09 1.029.243.228.152.342.36.342.644 0 .258-.095.443-.278.578-.183.135-.463.215-.826.215a3.328 3.328 0 0 1-1.437-.334l-.108-.053-.373 1.045.082.043c.56.293 1.165.45 1.828.45.724 0 1.333-.193 1.766-.55.432-.355.681-.876.681-1.503 0-.575-.211-1.05-.603-1.371-.761-.478-1.333-.468-2.078-.418l.049-1.13h2.338V8.98ZM8.25 1a.798.798 0 0 0-.375.117l-3.75 2.25A.748.748 0 0 0 3.797 4c0 .25.117.5.328.637l3.75 2.25c.113.07.242.11.375.113H9V5a3.995 3.995 0 0 1 3.816 2.8 3.994 3.994 0 0 1-1.523 4.481 1.008 1.008 0 0 0-.43.906 1.001 1.001 0 0 0 1.578.731 6.013 6.013 0 0 0 2.286-6.719A6.017 6.017 0 0 0 9 3V1ZM2.281 8.988l-2.07 1.196.562 1.074.903-.469v2.93H.516v1.285h3.726v-1.285H3.176v-4.73Z"/>
++</svg>
++)SVG";
++// SkipForward10.svg
++static constexpr char image14[] = R"SVG(<?xml version="1.0" encoding="UTF-8"?>
++<svg xmlns="http://www.w3.org/2000/svg" height="16px" viewBox="0 0 16 16" width="16px"><path d="m 7 1 v 2 c -2.617188 0.003906 -4.933594 1.699219 -5.722656 4.199219 c -0.785156 2.496093 0.136718 5.214843 2.28125 6.71875 c 0.292968 0.207031 0.675781 0.246093 1 0.09375 c 0.328125 -0.152344 0.546875 -0.464844 0.578125 -0.824219 c 0.027343 -0.359375 -0.136719 -0.703125 -0.429688 -0.90625 c -1.433593 -1 -2.050781 -2.816406 -1.523437 -4.480469 c 0.523437 -1.667969 2.070312 -2.804687 3.816406 -2.800781 v 2 h 0.75 c 0.132812 -0.003906 0.261719 -0.046875 0.375 -0.117188 l 3.75 -2.25 c 0.210938 -0.140624 0.332031 -0.378906 0.328125 -0.632812 c 0.003906 -0.253906 -0.117187 -0.492188 -0.328125 -0.632812 l -3.75 -2.25 c -0.113281 -0.070313 -0.242188 -0.113282 -0.375 -0.117188 z m 6.15625 7.898438 c -1.535156 0 -2.566406 1.25 -2.566406 3.121093 c 0 1.835938 1.011718 3.066407 2.523437 3.066407 c 1.523438 0 2.554688 -1.246094 2.554688 -3.128907 c 0 -1.835937 -1.011719 -3.058593 -2.511719 -3.058593 z m -4.875 0.085937 l -2.070312 1.195313 l 0.5625 1.074218 l 0.902343 -0.46875 v 2.933594 h -1.160156 v 1.28125 h 3.726563 v -1.28125 h -1.066407 v -4.734375 z m 4.839844 1.195313 c 0.597656 0 1.003906 0.738281 1.003906 1.847656 c 0 1.066406 -0.398438 1.777344 -0.980469 1.777344 c -0.613281 0 -1.011719 -0.738282 -1.011719 -1.839844 c 0 -1.074219 0.398438 -1.785156 0.988282 -1.785156 z m 0 0" fill="#2e3436"/></svg>
++)SVG";
++// SkipForward15.svg
++static constexpr char image15[] = R"SVG(<svg height="16" width="16" xmlns="http://www.w3.org/2000/svg">
++    <path style="fill:#2e3436" d="m11.127 8.984-.154 3.442.133-.026a6.49 6.49 0 0 1 1.18-.125c.452 0 .8.09 1.029.243.228.152.342.36.342.644 0 .258-.095.443-.278.578-.183.135-.463.215-.826.215a3.328 3.328 0 0 1-1.437-.334l-.108-.053-.373 1.045.082.043c.56.293 1.165.45 1.828.45.724 0 1.333-.193 1.766-.55.432-.355.681-.876.681-1.503 0-.575-.211-1.05-.603-1.371-.761-.478-1.333-.468-2.078-.418l.049-1.13h2.338v-1.15ZM7 1v2a6.008 6.008 0 0 0-5.723 4.2 6.005 6.005 0 0 0 2.282 6.718 1 1 0 1 0 1.148-1.637 3.994 3.994 0 0 1-1.523-4.48A3.995 3.995 0 0 1 7 5v2h.75a.756.756 0 0 0 .375-.117l3.75-2.25A.743.743 0 0 0 12.203 4a.743.743 0 0 0-.328-.633l-3.75-2.25A.756.756 0 0 0 7.75 1Zm1.281 7.984-2.07 1.196.562 1.074.903-.469v2.934h-1.16V15h3.726v-1.281H9.176V8.984Z"/>
++</svg>
++)SVG";
++// Volume0-RTL.svg
++static constexpr char image16[] = R"SVG(<?xml version="1.0" encoding="UTF-8" standalone="no"?>
++<svg
++   height="16px"
++   viewBox="0 0 16 16"
++   width="16px"
++   version="1.1"
++   id="svg4"
++   xmlns="http://www.w3.org/2000/svg"
++   xmlns:svg="http://www.w3.org/2000/svg">
++  <defs
++     id="defs8" />
++  <path
++     d="m 9.005515,1.0586431 c 0.296875,-0.0039 0.578125,0.125 0.769531,0.351563 l 3.230469,3.640625 h 1 c 1.09375,0 2,0.84375 2,2 v 2 c 0,1.0898439 -0.910156,1.9999999 -2,1.9999999 h -1 l -3.230469,3.640625 c -0.210937,0.253906 -0.492187,0.363281 -0.769531,0.359375 z"
++     fill="#2e3436"
++     id="path2" />
++</svg>
++)SVG";
++// Volume0.svg
++static constexpr char image17[] = R"SVG(<?xml version="1.0" encoding="UTF-8" standalone="no"?>
++<svg
++   height="16px"
++   viewBox="0 0 16 16"
++   width="16px"
++   version="1.1"
++   id="svg4"
++   xmlns="http://www.w3.org/2000/svg"
++   xmlns:svg="http://www.w3.org/2000/svg">
++  <defs
++     id="defs8" />
++  <path
++     d="M 7,1.007812 C 6.703125,1.003906 6.421875,1.132812 6.230469,1.359375 L 3,5 H 2 C 0.90625,5 0,5.84375 0,7 v 2 c 0,1.089844 0.910156,2 2,2 h 1 l 3.230469,3.640625 C 6.441406,14.894531 6.722656,15.003906 7,15 Z"
++     fill="#2e3436"
++     id="path2" />
++</svg>
++)SVG";
++// Volume1-RTL.svg
++static constexpr char image18[] = R"SVG(<?xml version="1.0" encoding="UTF-8" standalone="no"?>
++<svg
++   height="16px"
++   viewBox="0 0 16 16"
++   width="16px"
++   version="1.1"
++   id="svg186"
++   xmlns="http://www.w3.org/2000/svg"
++   xmlns:svg="http://www.w3.org/2000/svg">
++  <defs
++     id="defs190" />
++  <path
++     d="m 9,1.007812 c 0.296875,-0.00391 0.578125,0.125 0.769531,0.351563 L 13,5 h 1 c 1.09375,0 2,0.84375 2,2 v 2 c 0,1.089844 -0.910156,2 -2,2 H 13 L 9.769531,14.640625 C 9.558594,14.894531 9.277344,15.003906 9,15 Z M 6.042969,3.988281 C 6.242188,4 6.4375,4.0625 6.605469,4.191406 c 0.441406,0.332032 0.53125,0.960938 0.195312,1.402344 -1.074219,1.425781 -1.074219,3.386719 0,4.8125 0.335938,0.441406 0.246094,1.070312 -0.195312,1.402344 C 6.164062,12.140625 5.539062,12.050781 5.207031,11.613281 4.402344,10.542969 4,9.273438 4,8 4,6.726562 4.402344,5.457031 5.207031,4.386719 5.390625,4.140625 5.671875,4.003906 5.960938,3.988281 c 0.02734,0 0.05469,0 0.08594,0 z m 0,0"
++     fill="#2e3436"
++     id="path184" />
++</svg>
++)SVG";
++// Volume1.svg
++static constexpr char image19[] = R"SVG(<?xml version="1.0" encoding="UTF-8"?>
++<svg height="16px" viewBox="0 0 16 16" width="16px" xmlns="http://www.w3.org/2000/svg">
++    <path d="m 7 1.007812 c -0.296875 -0.003906 -0.578125 0.125 -0.769531 0.351563 l -3.230469 3.640625 h -1 c -1.09375 0 -2 0.84375 -2 2 v 2 c 0 1.089844 0.910156 2 2 2 h 1 l 3.230469 3.640625 c 0.210937 0.253906 0.492187 0.363281 0.769531 0.359375 z m 2.957031 2.980469 c -0.199219 0.011719 -0.394531 0.074219 -0.5625 0.203125 c -0.441406 0.332032 -0.53125 0.960938 -0.195312 1.402344 c 1.074219 1.425781 1.074219 3.386719 0 4.8125 c -0.335938 0.441406 -0.246094 1.070312 0.195312 1.402344 c 0.441407 0.332031 1.066407 0.242187 1.398438 -0.195313 c 0.804687 -1.070312 1.207031 -2.339843 1.207031 -3.613281 s -0.402344 -2.542969 -1.207031 -3.613281 c -0.183594 -0.246094 -0.464844 -0.382813 -0.753907 -0.398438 c -0.027343 0 -0.054687 0 -0.085937 0 z m 0 0" fill="#2e3436"/>
++</svg>
++)SVG";
++// Volume2-RTL.svg
++static constexpr char image20[] = R"SVG(<?xml version="1.0" encoding="UTF-8" standalone="no"?>
++<svg
++   height="16px"
++   viewBox="0 0 16 16"
++   width="16px"
++   version="1.1"
++   id="svg8"
++   xmlns="http://www.w3.org/2000/svg"
++   xmlns:svg="http://www.w3.org/2000/svg">
++  <defs
++     id="defs12" />
++  <g
++     fill="#2e3436"
++     id="g6"
++     transform="matrix(-1,0,0,1,16,0)">
++    <path
++       d="M 7,1.007812 C 6.703125,1.003906 6.421875,1.132812 6.230469,1.359375 L 3,5 H 2 C 0.90625,5 0,5.84375 0,7 v 2 c 0,1.089844 0.910156,2 2,2 h 1 l 3.230469,3.640625 C 6.441406,14.894531 6.722656,15.003906 7,15 Z m 3.039062,2.980469 C 9.816406,3.980469 9.585938,4.046875 9.394531,4.191406 9.132812,4.390625 9,4.691406 9,4.996094 V 5.0625 c 0.011719,0.1875 0.078125,0.371094 0.199219,0.527344 1.074219,1.429687 1.074219,3.390625 0,4.816406 C 9.078125,10.566406 9.011719,10.75 9,10.9375 v 0.06641 c 0,0.304688 0.132812,0.605469 0.394531,0.804688 0.441407,0.332031 1.066407,0.242187 1.398438,-0.199219 C 11.597656,10.542969 12,9.273438 12,8 12,6.726562 11.597656,5.457031 10.792969,4.386719 10.609375,4.140625 10.328125,4.003906 10.039062,3.988281 Z m 0,0"
++       id="path2" />
++    <path
++       d="m 13.460938,1.96875 c -0.191407,-0.00391 -0.386719,0.054688 -0.558594,0.167969 -0.457032,0.3125 -0.578125,0.933593 -0.269532,1.390625 1.824219,2.707031 1.824219,6.238281 0,8.945312 -0.308593,0.457032 -0.1875,1.078125 0.269532,1.390625 0.457031,0.308594 1.078125,0.1875 1.390625,-0.269531 C 15.429688,11.902344 16,9.953125 16,8 16,6.046875 15.429688,4.097656 14.292969,2.40625 14.097656,2.121094 13.78125,1.96875 13.460938,1.96875 Z m 0,0"
++       fill-opacity="0.34902"
++       id="path4" />
++  </g>
++</svg>
++)SVG";
++// Volume2.svg
++static constexpr char image21[] = R"SVG(<?xml version="1.0" encoding="UTF-8"?>
++<svg height="16px" viewBox="0 0 16 16" width="16px" xmlns="http://www.w3.org/2000/svg">
++    <g fill="#2e3436">
++        <path d="m 7 1.007812 c -0.296875 -0.003906 -0.578125 0.125 -0.769531 0.351563 l -3.230469 3.640625 h -1 c -1.09375 0 -2 0.84375 -2 2 v 2 c 0 1.089844 0.910156 2 2 2 h 1 l 3.230469 3.640625 c 0.210937 0.253906 0.492187 0.363281 0.769531 0.359375 z m 3.039062 2.980469 c -0.222656 -0.007812 -0.453124 0.058594 -0.644531 0.203125 c -0.261719 0.199219 -0.394531 0.5 -0.394531 0.804688 v 0.066406 c 0.011719 0.1875 0.078125 0.371094 0.199219 0.527344 c 1.074219 1.429687 1.074219 3.390625 0 4.816406 c -0.121094 0.160156 -0.1875 0.34375 -0.199219 0.53125 v 0.066406 c 0 0.304688 0.132812 0.605469 0.394531 0.804688 c 0.441407 0.332031 1.066407 0.242187 1.398438 -0.199219 c 0.804687 -1.066406 1.207031 -2.335937 1.207031 -3.609375 s -0.402344 -2.542969 -1.207031 -3.613281 c -0.183594 -0.246094 -0.464844 -0.382813 -0.753907 -0.398438 z m 0 0"/>
++        <path d="m 13.460938 1.96875 c -0.191407 -0.003906 -0.386719 0.054688 -0.558594 0.167969 c -0.457032 0.3125 -0.578125 0.933593 -0.269532 1.390625 c 1.824219 2.707031 1.824219 6.238281 0 8.945312 c -0.308593 0.457032 -0.1875 1.078125 0.269532 1.390625 c 0.457031 0.308594 1.078125 0.1875 1.390625 -0.269531 c 1.136719 -1.691406 1.707031 -3.640625 1.707031 -5.59375 s -0.570312 -3.902344 -1.707031 -5.59375 c -0.195313 -0.285156 -0.511719 -0.4375 -0.832031 -0.4375 z m 0 0" fill-opacity="0.34902"/>
++    </g>
++</svg>
++)SVG";
++// Volume3-RTL.svg
++static constexpr char image22[] = R"SVG(<?xml version="1.0" encoding="UTF-8" standalone="no"?>
++<svg
++   height="16px"
++   viewBox="0 0 16 16"
++   width="16px"
++   version="1.1"
++   id="svg4"
++   xmlns="http://www.w3.org/2000/svg"
++   xmlns:svg="http://www.w3.org/2000/svg">
++  <defs
++     id="defs8" />
++  <path
++     d="m 9,1.007812 c 0.296875,-0.00391 0.578125,0.125 0.769531,0.351563 L 13,5 h 1 c 1.09375,0 2,0.84375 2,2 v 2 c 0,1.089844 -0.910156,2 -2,2 H 13 L 9.769531,14.640625 C 9.558594,14.894531 9.277344,15.003906 9,15 Z M 2.539062,1.96875 c 0.191407,-0.00391 0.386719,0.054688 0.558594,0.167969 0.457032,0.3125 0.578125,0.933593 0.269532,1.390625 -1.824219,2.707031 -1.824219,6.238281 0,8.945312 0.308593,0.457032 0.1875,1.078125 -0.269532,1.390625 C 2.640625,14.171875 2.019531,14.050781 1.707031,13.59375 0.570312,11.902344 0,9.953125 0,8 0,6.046875 0.570312,4.097656 1.707031,2.40625 1.902344,2.121094 2.21875,1.96875 2.539062,1.96875 Z M 5.960938,3.988281 C 6.183594,3.980469 6.414062,4.046875 6.605469,4.191406 6.867188,4.390625 7,4.691406 7,4.996094 v 0.058594 c -0.011719,0.191406 -0.074219,0.375 -0.199219,0.535156 -1.074219,1.429687 -1.074219,3.390625 0,4.816406 0.125,0.164062 0.1875,0.347656 0.199219,0.535156 v 0.0625 C 7,11.308594 6.867188,11.609375 6.605469,11.808594 6.164062,12.140625 5.539062,12.050781 5.207031,11.609375 4.402344,10.542969 4,9.273438 4,8 4,6.726562 4.402344,5.457031 5.207031,4.386719 5.390625,4.140625 5.671875,4.003906 5.960938,3.988281 Z m 0,0"
++     fill="#2e3436"
++     id="path2" />
++</svg>
++)SVG";
++// Volume3.svg
++static constexpr char image23[] = R"SVG(<?xml version="1.0" encoding="UTF-8"?>
++<svg height="16px" viewBox="0 0 16 16" width="16px" xmlns="http://www.w3.org/2000/svg">
++    <path d="m 7 1.007812 c -0.296875 -0.003906 -0.578125 0.125 -0.769531 0.351563 l -3.230469 3.640625 h -1 c -1.09375 0 -2 0.84375 -2 2 v 2 c 0 1.089844 0.910156 2 2 2 h 1 l 3.230469 3.640625 c 0.210937 0.253906 0.492187 0.363281 0.769531 0.359375 z m 6.460938 0.960938 c -0.191407 -0.003906 -0.386719 0.054688 -0.558594 0.167969 c -0.457032 0.3125 -0.578125 0.933593 -0.269532 1.390625 c 1.824219 2.707031 1.824219 6.238281 0 8.945312 c -0.308593 0.457032 -0.1875 1.078125 0.269532 1.390625 c 0.457031 0.308594 1.078125 0.1875 1.390625 -0.269531 c 1.136719 -1.691406 1.707031 -3.640625 1.707031 -5.59375 s -0.570312 -3.902344 -1.707031 -5.59375 c -0.195313 -0.285156 -0.511719 -0.4375 -0.832031 -0.4375 z m -3.421876 2.019531 c -0.222656 -0.007812 -0.453124 0.058594 -0.644531 0.203125 c -0.261719 0.199219 -0.394531 0.5 -0.394531 0.804688 v 0.058594 c 0.011719 0.191406 0.074219 0.375 0.199219 0.535156 c 1.074219 1.429687 1.074219 3.390625 0 4.816406 c -0.125 0.164062 -0.1875 0.347656 -0.199219 0.535156 v 0.0625 c 0 0.304688 0.132812 0.605469 0.394531 0.804688 c 0.441407 0.332031 1.066407 0.242187 1.398438 -0.199219 c 0.804687 -1.066406 1.207031 -2.335937 1.207031 -3.609375 s -0.402344 -2.542969 -1.207031 -3.613281 c -0.183594 -0.246094 -0.464844 -0.382813 -0.753907 -0.398438 z m 0 0" fill="#2e3436"/>
++</svg>
++)SVG";
++// VolumeMuted-RTL.svg
++static constexpr char image24[] = R"SVG(<?xml version="1.0" encoding="UTF-8" standalone="no"?>
++<svg
++   width="16"
++   height="16"
++   version="1.1"
++   id="svg12"
++   xmlns="http://www.w3.org/2000/svg"
++   xmlns:svg="http://www.w3.org/2000/svg"><defs
++   id="defs16" />
++<g
++   fill="%23FFFFFF"
++   id="g10"
++   transform="matrix(-1,0,0,1,16,0)"> \
++            <path
++   d="m 11,11 h 1.375 L 13.5,12.094 14.594,11 H 16 v 1.469 L 14.906,13.531 16,14.594 V 16 H 14.562 L 13.5,14.937 12.437,16 H 11 V 14.594 L 12.062,13.531 11,12.47 Z M 0,5 H 2.484 L 5.454,2 H 6 V 14 H 5.525 L 2.485,11 H 0 Z"
++   style="marker:none"
++   color="%23bebebe"
++   overflow="visible"
++   id="path2" />
++ \
++            <path
++   d="M 11,1 V 2.48 C 12.265,4 13,5.7 13,8 c 0,0.723 -0.085,1.382 -0.229,2 h 2.034 C 14.929,9.355 15,8.686 15,8 15,5.186 14,2.828 12.414,1 Z"
++   style="marker:none"
++   color="%23000"
++   overflow="visible"
++   opacity="0.35"
++   id="path4" />
++ \
++            <path
++   d="m 9,3 v 2 c 0.607,0.789 1,1.759 1,3 0,1.241 -0.393,2.22 -1,3 v 2 h 1 v -3 h 1.75 C 11.908,9.374 12,8.703 12,8 12,5.833 11.261,3.98 10,3 Z"
++   style="marker:none"
++   color="%23000"
++   overflow="visible"
++   opacity="0.35"
++   id="path6" />
++ \
++            <path
++   d="M 9,8 C 9,6.743 8.688,5.784 8,5 H 7 v 6 H 8 C 8.672,10.163 9,9.258 9,8 Z"
++   style="line-height:normal;-inkscape-font-specification:Sans;text-indent:0;text-align:start;text-decoration-line:none;text-transform:none;marker:none"
++   color="%23000"
++   font-weight="400"
++   font-family="Sans"
++   overflow="visible"
++   opacity="0.35"
++   id="path8" />
++ \
++          </g>
++ \
++        </svg>
++)SVG";
++// VolumeMuted.svg
++static constexpr char image25[] = R"SVG(<svg xmlns='http://www.w3.org/2000/svg' width='16' height='16'> \
++          <g fill='%23FFFFFF'> \
++            <path d='M11 11h1.375l1.125 1.094L14.594 11H16v1.469l-1.094 1.062L16 14.594V16h-1.438L13.5 14.937 12.437 16H11v-1.406l1.062-1.063L11 12.47zM0 5h2.484l2.97-3H6v12h-.475l-3.04-3H0z' style='marker:none' color='%23bebebe' overflow='visible'/> \
++            <path d='M11 1v1.48C12.265 4 13 5.7 13 8c0 .723-.085 1.382-.229 2h2.034c.124-.645.195-1.314.195-2 0-2.814-1-5.172-2.586-7z' style='marker:none' color='%23000' overflow='visible' opacity='.35'/> \
++            <path d='M9 3v2c.607.789 1 1.759 1 3s-.393 2.22-1 3v2h1v-3h1.75c.158-.626.25-1.297.25-2 0-2.167-.739-4.02-2-5z' style='marker:none' color='%23000' overflow='visible' opacity='.35'/> \
++            <path d='M9 8c0-1.257-.312-2.216-1-3H7v6h1c.672-.837 1-1.742 1-3z' style='line-height:normal;-inkscape-font-specification:Sans;text-indent:0;text-align:start;text-decoration-line:none;text-transform:none;marker:none' color='%23000' font-weight='400' font-family='Sans' overflow='visible' opacity='.35'/> \
++          </g> \
++        </svg>)SVG";
++// X.svg
++static constexpr char image26[] = R"SVG(<?xml version="1.0" encoding="UTF-8"?>
++<svg xmlns="http://www.w3.org/2000/svg" height="16px" viewBox="0 0 16 16" width="16px"><path d="m 3.980469 4 h 1 h 0.03125 c 0.253906 0.011719 0.511719 0.128906 0.6875 0.3125 l 2.28125 2.28125 l 2.3125 -2.28125 c 0.265625 -0.230469 0.445312 -0.304688 0.6875 -0.3125 h 1 v 1 c 0 0.285156 -0.035157 0.550781 -0.25 0.75 l -2.28125 2.28125 l 2.25 2.25 c 0.1875 0.1875 0.28125 0.453125 0.28125 0.71875 v 1 h -1 c -0.265625 0 -0.53125 -0.09375 -0.71875 -0.28125 l -2.28125 -2.28125 l -2.28125 2.28125 c -0.1875 0.1875 -0.453125 0.28125 -0.71875 0.28125 h -1 v -1 c 0 -0.265625 0.09375 -0.53125 0.28125 -0.71875 l 2.28125 -2.25 l -2.28125 -2.28125 c -0.210938 -0.195312 -0.304688 -0.46875 -0.28125 -0.75 z m 0 0" fill="#2e3436"/></svg>
++)SVG";
++// invalid-placard@1x.png
++static constexpr char image27[] =
++    "\x89\x50\x4e\x47\x0d\x0a\x1a\x0a\x00\x00\x00\x0d\x49\x48\x44\x52\x00\x00\x00\x0f\x00\x00\x00\x0f"
++    "\x08\x06\x00\x00\x00\x3b\xd6\x95\x4a\x00\x00\x00\x09\x70\x48\x59\x73\x00\x00\x0e\xc3\x00\x00\x0e"
++    "\xc3\x01\xc7\x6f\xa8\x64\x00\x00\x00\x19\x74\x45\x58\x74\x53\x6f\x66\x74\x77\x61\x72\x65\x00\x77"
++    "\x77\x77\x2e\x69\x6e\x6b\x73\x63\x61\x70\x65\x2e\x6f\x72\x67\x9b\xee\x3c\x1a\x00\x00\x01\x82\x49"
++    "\x44\x41\x54\x28\x91\x8d\x93\xcf\x4a\x5b\x41\x18\xc5\xcf\xb9\xc6\x5a\xa1\x6f\x50\xb0\x2f\x20\x37"
++    "\x83\x3a\x33\x57\x6b\x0a\x2e\x7d\x82\x6c\xec\x13\xb8\xd1\x55\xcd\x03\x08\xd2\x45\x0b\x2e\xbb\x29"
++    "\x94\x16\x04\x77\xd2\x76\x5f\x48\xf0\x66\x26\xc4\xe6\xa2\x6d\xb7\x6d\x1f\xa1\x50\x05\x49\x8e\x0b"
++    "\x6b\x89\x37\xfe\xc9\x59\xce\x99\xdf\xe1\x7c\x1f\x33\x4c\x17\xfc\x06\x30\xc8\x24\x1e\x31\xd1\xb7"
++    "\x22\xc6\x8f\x92\x84\x31\x94\x10\x9a\x01\x58\x27\xb1\x03\xf1\x20\xb5\x2e\x9a\x85\x6c\x79\x1c\x98"
++    "\x92\x90\xda\xec\x33\xa1\xd5\xa1\x73\x01\xd8\xeb\xab\xbf\x75\xdc\xe9\xfc\xba\x13\x06\x80\xd4\x65"
++    "\x87\x94\xb2\x92\x7f\x4a\x62\xf7\xec\xc1\xe4\xf6\x8f\x66\xf3\xcf\x48\x6d\x00\x98\x9d\x5d\x79\x54"
++    "\x84\x7c\x51\x44\x2c\xf9\xd3\x12\x5e\x4c\x9d\x9d\x7f\x37\x36\x7b\x4e\x92\x23\x70\xf2\xf0\xef\xba"
++    "\x71\x6e\xad\x08\x6d\x27\xe2\x70\xb4\x1f\x1e\x0b\x7a\x97\x5a\x17\xab\xf3\xbe\x76\x0d\x26\x31\x21"
++    "\xf1\xad\x71\xae\x5e\x84\xf6\x12\xc8\x70\xe3\x90\xc2\x3c\x12\x7c\xa9\x5a\xff\xf2\x3f\xfc\x4f\x15"
++    "\x89\xef\x8d\x73\xf5\x5e\xc8\xfd\xad\x01\x00\x01\xac\x93\x64\x52\x32\xc6\x09\x90\xc8\x5d\x49\x2a"
++    "\xc3\x57\x01\x1f\x8c\x73\x6b\xbd\x90\xfb\xe1\x1d\x08\x88\x09\x06\xb5\x22\xe4\x8d\x72\xed\x61\x5d"
++    "\xdf\x01\xd8\xbc\xec\xab\xd6\x51\x8c\xad\xab\x4b\xb7\xc1\x00\x50\x19\x88\x6f\xe6\xe6\x9e\x3e\xe9"
++    "\xc5\xbc\x26\x72\x07\xe0\x46\xd5\xba\xd7\xf7\xc1\x22\xb1\x3f\x51\x49\xaa\xdd\x6e\xeb\x27\x00\x14"
++    "\x21\x6f\x94\x03\x2a\x37\x80\x1d\x8a\x9b\x5f\x63\xde\x2c\x1b\x45\xc8\x1b\xc6\xfa\x29\x81\x9b\xc6"
++    "\x7a\x5d\xbe\x6d\xef\x17\xd1\xc7\xb3\x44\x38\xe9\x75\xc3\xa7\xfb\x7e\x95\xb1\xfe\xd5\x00\xf8\x7d"
++    "\x01\x4b\xd8\xb0\x39\xc4\xdf\x63\x4d\x00\x00\x00\x00\x49\x45\x4e\x44\xae\x42\x60\x82";
++// invalid-placard@2x.png
++static constexpr char image28[] =
++    "\x89\x50\x4e\x47\x0d\x0a\x1a\x0a\x00\x00\x00\x0d\x49\x48\x44\x52\x00\x00\x00\x1e\x00\x00\x00\x1e"
++    "\x08\x06\x00\x00\x00\x3b\x30\xae\xa2\x00\x00\x00\x09\x70\x48\x59\x73\x00\x00\x1d\x87\x00\x00\x1d"
++    "\x87\x01\x8f\xe5\xf1\x65\x00\x00\x00\x19\x74\x45\x58\x74\x53\x6f\x66\x74\x77\x61\x72\x65\x00\x77"
++    "\x77\x77\x2e\x69\x6e\x6b\x73\x63\x61\x70\x65\x2e\x6f\x72\x67\x9b\xee\x3c\x1a\x00\x00\x02\x9b\x49"
++    "\x44\x41\x54\x48\x89\xbd\xd7\xbd\x4f\x14\x41\x18\xc7\xf1\xef\xb3\xbc\x14\x60\x40\xff\x0c\x0d\xee"
++    "\x61\xd8\xbb\x45\x4b\x13\x63\x63\xab\x9d\x89\xc1\x68\x62\xb0\x21\xda\x49\x65\x67\xa3\x16\xbe\x60"
++    "\x88\x76\xda\x58\x1b\xc5\x18\xb1\x31\xde\xcb\x82\xdc\x7a\x68\xd0\xc2\x46\x13\xa3\x85\x44\x63\x42"
++    "\xe0\x6e\x7f\x16\xde\xe1\x09\x5c\x6e\x77\x39\x7c\xba\xd9\x99\xd9\x4f\x76\x9e\x3c\x33\xb3\x26\x89"
++    "\xe1\xec\xe8\x98\xd0\xa1\x30\x28\x9e\x95\x14\xf1\x1f\xc2\x32\x9e\x3f\x26\x34\x0d\x38\xa0\x5f\x98"
++    "\xad\x02\x20\xbe\x60\x76\xa7\x27\xaa\xde\x0a\x82\x60\xad\xd3\xb0\x23\x31\xfa\x07\x05\xb0\x7e\xc4"
++    "\x1e\xc4\x1e\x60\x2f\xd2\xf5\x35\xba\x16\x5d\xcf\x3f\xde\x69\xd8\x00\x73\xb3\xb9\x9b\x88\x73\x6d"
++    "\x46\x3e\x8f\x6a\x36\xf1\x66\x2e\x1f\x76\x04\x96\x84\x99\xc5\xc3\x21\x02\xee\xb3\xda\x7d\xb1\x5c"
++    "\x7e\xf9\x75\xdb\x30\x80\x99\x59\x26\x9b\xab\x48\xec\x8b\x31\x6f\x59\x70\xb9\x57\xb5\x1b\x69\xf3"
++    "\xbf\x0e\xd7\x71\xc7\xf5\x72\x65\x60\x28\xd6\x6c\xf1\x41\x70\x29\x0c\x0a\x0f\xb7\x05\xa7\xc2\x21"
++    "\x55\xfe\x37\xc1\xa9\xf1\x84\xf9\x77\x9a\x1b\x43\xbe\x9f\x01\x90\x14\x85\x41\x71\x18\xec\x5d\x02"
++    "\xd8\x01\x4e\xd2\x5b\x5d\x72\xb3\xfe\x84\xe7\x79\x3d\xb1\xe1\xae\x1a\x8f\x32\x23\xa3\xa3\x75\xbc"
++    "\x16\x06\x85\x21\xa0\x92\x00\x07\xd8\x6d\x70\xb5\x5d\xfd\xff\xb3\xd4\x99\xac\xff\x43\x20\x8b\xec"
++    "\x68\x79\x2e\x9f\x87\xd4\xcb\xde\x24\x6c\x9d\x7f\x67\xf3\x38\x06\x70\xf4\x24\xe3\x1d\xf4\xe1\xef"
++    "\xb2\x9b\xd9\xdb\x54\xb0\x38\xec\x38\x9a\x1b\xce\xe6\x6e\x78\x9e\xd7\xd7\x12\xae\xc7\x20\x16\xcd"
++    "\x34\xe1\xb5\x72\xa9\xe0\xa6\xc6\xa1\x5b\xd8\xf8\x9a\x75\xdd\x6e\x07\xef\x04\x0e\x70\xc2\xcc\x9c"
++    "\x76\xf0\x4e\xe1\xc4\x81\x3b\x8a\x0b\x1e\x34\xce\xfb\x38\x70\x27\xf0\x35\xc1\xd5\x9f\xbb\xfa\xc6"
++    "\x1b\x0f\xe2\xc2\x00\x83\xb2\xe8\x69\x73\x9d\x97\x4b\x85\xfd\xb4\xad\x73\x7b\x66\xa6\x03\x61\xa9"
++    "\x70\xe1\xe3\xec\xec\x4a\x1a\x18\x83\x01\x39\x9a\x69\xc2\xa3\x30\x28\x66\x5a\xe0\x4b\x8e\x38\x56"
++    "\x2e\xe5\x8f\x2c\x14\x8b\x8b\x1b\x3b\x13\xc1\x49\x70\x49\xaf\x16\xe6\x8a\x8f\x5b\xbd\x27\x31\xdc"
++    "\xc0\xb7\xd8\x64\x32\xc2\x5e\xac\x8f\x31\x3b\xb5\xdf\xcb\x4d\x37\xca\xa7\x23\x70\x3d\x36\xe6\x3c"
++    "\x7a\x13\x14\x0e\x63\xac\x6f\x12\x06\x63\xad\xf0\xed\xc0\x18\x7c\xa6\x2b\xea\x6f\xb4\x25\x29\x2c"
++    "\x15\xc7\xe3\xe0\xdd\x29\xc5\xef\x8a\xb8\x12\xad\xfc\xba\x56\xa9\x54\x56\x9b\xbb\x24\xc9\xcc\xc6"
++    "\xdd\x6c\x8e\xc6\x1d\xae\x8e\x63\x66\x67\x1a\x75\x9c\x14\xae\x1a\xba\xe7\x54\xab\x93\xf3\xf3\xf3"
++    "\xdf\x5a\x0d\x8a\x83\x27\x80\xed\x19\xd4\x26\x16\x4a\xa5\x58\xe7\x73\x3b\x3c\x0e\xfc\x5e\x62\x32"
++    "\x0c\xf2\x89\x2f\x74\x75\xfc\xbc\xeb\xe5\x7a\x81\xd3\x0d\xdc\x1d\xf1\x6b\x1b\xe1\x65\x8c\x6a\x7d"
++    "\xd6\x27\x93\x4d\x77\x53\x9b\xda\xce\x2f\x8c\xa4\xc8\xcc\xce\xb8\xd9\xdc\x6a\xfd\xcb\x05\xd1\xeb"
++    "\x2d\x2f\x7b\x3b\x11\x66\xe6\xb8\x23\xfe\x14\xa6\x42\xb9\x54\xb8\xfb\x1b\xcb\xb7\xa5\x21\xcc\xf7"
++    "\x3c\xc5\x00\x00\x00\x00\x49\x45\x4e\x44\xae\x42\x60\x82";
++
++struct Image {
++    ASCIILiteral name;
++    ASCIILiteral type;
++    std::span<const char> data;
++};
++
++static constexpr Image images[] = {
++    { "EnterFullscreen"_s, "svg"_s, { image0, sizeof(image0) - 1 } },
++    { "ExitFullscreen"_s, "svg"_s, { image1, sizeof(image1) - 1 } },
++    { "Forward"_s, "svg"_s, { image2, sizeof(image2) - 1 } },
++    { "MediaSelector-fullscreen"_s, "svg"_s, { image3, sizeof(image3) - 1 } },
++    { "MediaSelector"_s, "svg"_s, { image4, sizeof(image4) - 1 } },
++    { "Overflow"_s, "svg"_s, { image5, sizeof(image5) - 1 } },
++    { "Pause"_s, "svg"_s, { image6, sizeof(image6) - 1 } },
++    { "PipIn-fullscreen"_s, "svg"_s, { image7, sizeof(image7) - 1 } },
++    { "PipIn"_s, "svg"_s, { image8, sizeof(image8) - 1 } },
++    { "PipOut"_s, "svg"_s, { image9, sizeof(image9) - 1 } },
++    { "Play"_s, "svg"_s, { image10, sizeof(image10) - 1 } },
++    { "Rewind"_s, "svg"_s, { image11, sizeof(image11) - 1 } },
++    { "SkipBack10"_s, "svg"_s, { image12, sizeof(image12) - 1 } },
++    { "SkipBack15"_s, "svg"_s, { image13, sizeof(image13) - 1 } },
++    { "SkipForward10"_s, "svg"_s, { image14, sizeof(image14) - 1 } },
++    { "SkipForward15"_s, "svg"_s, { image15, sizeof(image15) - 1 } },
++    { "Volume0-RTL"_s, "svg"_s, { image16, sizeof(image16) - 1 } },
++    { "Volume0"_s, "svg"_s, { image17, sizeof(image17) - 1 } },
++    { "Volume1-RTL"_s, "svg"_s, { image18, sizeof(image18) - 1 } },
++    { "Volume1"_s, "svg"_s, { image19, sizeof(image19) - 1 } },
++    { "Volume2-RTL"_s, "svg"_s, { image20, sizeof(image20) - 1 } },
++    { "Volume2"_s, "svg"_s, { image21, sizeof(image21) - 1 } },
++    { "Volume3-RTL"_s, "svg"_s, { image22, sizeof(image22) - 1 } },
++    { "Volume3"_s, "svg"_s, { image23, sizeof(image23) - 1 } },
++    { "VolumeMuted-RTL"_s, "svg"_s, { image24, sizeof(image24) - 1 } },
++    { "VolumeMuted"_s, "svg"_s, { image25, sizeof(image25) - 1 } },
++    { "X"_s, "svg"_s, { image26, sizeof(image26) - 1 } },
++    { "invalid-placard@1x"_s, "png"_s, { image27, sizeof(image27) - 1 } },
++    { "invalid-placard@2x"_s, "png"_s, { image28, sizeof(image28) - 1 } },
++};
++
++// The file iconName.iconType, or an empty span.
++inline std::span<const uint8_t> find(const String& iconName, const String& iconType)
++{
++    for (auto& image : images) {
++        if (iconName == image.name && iconType == image.type)
++            return byteCast<uint8_t>(image.data);
++    }
++    return { };
++}
++
++} // namespace MediaControlsImagesHaiku
++} // namespace WebCore
 diff --git a/Source/WebCore/platform/haiku/PasteboardHaiku.cpp b/Source/WebCore/platform/haiku/PasteboardHaiku.cpp
 new file mode 100644
 index 0000000000000000000000000000000000000000..272c840064e1290abc654367c841e5e9d70b81e2
@@ -58977,10 +59526,10 @@ index 0000000000000000000000000000000000000000..da71c185bfa5f93bf68ba7a513f48393
 +
 +#endif
 diff --git a/Source/WebCore/platform/network/curl/CurlRequest.cpp b/Source/WebCore/platform/network/curl/CurlRequest.cpp
-index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..5ae8ff7d07d46c147e02e3944d621f1be29662ae 100644
+index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..fd45b98fd3d105c2450f00356baf096e5bc7fcc1 100644
 --- a/Source/WebCore/platform/network/curl/CurlRequest.cpp
 +++ b/Source/WebCore/platform/network/curl/CurlRequest.cpp
-@@ -36,19 +36,377 @@
+@@ -36,19 +36,411 @@
  #include "NetworkLoadMetrics.h"
  #include "ResourceError.h"
  #include "SharedBuffer.h"
@@ -58993,6 +59542,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..5ae8ff7d07d46c147e02e3944d621f1b
  #include <wtf/text/MakeString.h>
  
 +#if PLATFORM(HAIKU)
++#include <atomic>
 +#include <cstdio>
 +#include <dlfcn.h>
 +#include <openssl/ssl.h>
@@ -59326,6 +59876,39 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..5ae8ff7d07d46c147e02e3944d621f1b
 +#endif
 +
 +#if PLATFORM(HAIKU)
++// When the network went away (NetworkStateNotifierHaiku.cpp), 0 while it is there.
++extern std::atomic<double> networkLostAtHaiku;
++
++// How long a response the page set no timeout for may take to start.
++static constexpr Seconds responseStartTimeoutHaiku { 300_s };
++
++// A transfer without an idle limit that has been quiet since the network
++// went away is given up after this long: its connection is most likely dead,
++// and Haiku's TCP would never say so.
++static constexpr Seconds quietAfterNetworkLossHaiku { 15_s };
++
++// libcurl calls this about once a second while a transfer waits, and as data
++// moves (only for requests with the default timeout).
++int CurlRequest::progressCallbackHaiku(void* data, curl_off_t, curl_off_t downloaded, curl_off_t, curl_off_t uploaded)
++{
++    auto& request = *static_cast<CurlRequest*>(data);
++    auto now = MonotonicTime::now();
++    if (downloaded + uploaded != request.m_progressBytesHaiku) {
++        request.m_progressBytesHaiku = downloaded + uploaded;
++        request.m_lastProgressHaiku = now;
++        return 0;
++    }
++    double lostAt = networkLostAtHaiku.load(std::memory_order_relaxed);
++    if (!lostAt)
++        return 0;
++    auto quietSince = std::max(request.m_lastProgressHaiku, MonotonicTime::fromRawSeconds(lostAt));
++    if (now - quietSince < quietAfterNetworkLossHaiku)
++        return 0;
++    fprintf(stderr, "Summit net: gave up on a request quiet since the network went away (%.0f s): %s\n",
++        (now - quietSince).seconds(), netTraceURLHaiku(request.m_request.url()).legacyCStringPointer());
++    return 1;
++}
++
 +// libcurl calls this once the connection is up (resolved, connected, TLS
 +// and ALPN done) or found in its pool, just before sending the request.
 +int CurlRequest::willSendRequestCallbackHaiku(void* userData, char*, char*, int, int)
@@ -59358,7 +59941,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..5ae8ff7d07d46c147e02e3944d621f1b
      , m_formDataStream(m_request.httpBody())
      , m_captureExtraMetrics(captureExtraMetrics == CaptureNetworkLoadMetrics::Extended)
  {
-@@ -95,7 +453,7 @@ void CurlRequest::setUserPass(const String& user, const String& password)
+@@ -95,7 +487,7 @@ void CurlRequest::setUserPass(const String& user, const String& password)
      m_password = password.isolatedCopy();
  }
  
@@ -59367,7 +59950,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..5ae8ff7d07d46c147e02e3944d621f1b
  {
      // The pausing of transfer does not work with protocols, like file://.
      // Therefore, PAUSE can not be done in didReceiveData().
-@@ -108,10 +466,16 @@ void CurlRequest::resume()
+@@ -108,10 +500,16 @@ void CurlRequest::resume()
  
      ASSERT(isMainThread());
  
@@ -59387,7 +59970,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..5ae8ff7d07d46c147e02e3944d621f1b
  
      if (m_request.url().protocolIsFile())
          invokeDidReceiveResponseForFile(m_request.url());
-@@ -122,8 +486,14 @@ void CurlRequest::resume()
+@@ -122,8 +520,14 @@ void CurlRequest::resume()
  void CurlRequest::startWithJobManager()
  {
      ASSERT(isMainThread());
@@ -59403,7 +59986,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..5ae8ff7d07d46c147e02e3944d621f1b
  }
  
  void CurlRequest::cancel()
-@@ -137,6 +507,10 @@ void CurlRequest::cancel()
+@@ -137,6 +541,10 @@ void CurlRequest::cancel()
  
          m_cancelled = true;
      }
@@ -59414,7 +59997,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..5ae8ff7d07d46c147e02e3944d621f1b
  
      auto& scheduler = CurlContext::singleton().scheduler();
  
-@@ -144,7 +518,7 @@ void CurlRequest::cancel()
+@@ -144,7 +552,7 @@ void CurlRequest::cancel()
          runOnWorkerThreadIfRequired([this, protectedThis = Ref { *this }]() {
              didCancelTransfer();
          });
@@ -59423,7 +60006,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..5ae8ff7d07d46c147e02e3944d621f1b
          scheduler.cancel(this);
  
      invalidateClient();
-@@ -162,6 +536,41 @@ bool CurlRequest::isCompletedOrCancelled()
+@@ -162,6 +570,41 @@ bool CurlRequest::isCompletedOrCancelled()
      return m_completed || m_cancelled;
  }
  
@@ -59465,7 +60048,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..5ae8ff7d07d46c147e02e3944d621f1b
  /* `this` is protected inside this method. */
  void CurlRequest::callClient(Function<void(CurlRequest&, CurlRequestClient&)>&& task)
  {
-@@ -173,13 +582,13 @@ void CurlRequest::callClient(Function<void(CurlRequest&, CurlRequestClient&)>&&
+@@ -173,13 +616,13 @@ void CurlRequest::callClient(Function<void(CurlRequest&, CurlRequestClient&)>&&
  
  void CurlRequest::runOnMainThread(Function<void()>&& task)
  {
@@ -59481,7 +60064,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..5ae8ff7d07d46c147e02e3944d621f1b
      else
          task();
  }
-@@ -190,6 +599,17 @@ CURL* CurlRequest::setupTransfer()
+@@ -190,6 +633,17 @@ CURL* CurlRequest::setupTransfer()
      appendAcceptLanguageHeaderIfNeeded(httpHeaderFields);
  
      m_curlHandle = makeUnique<CurlHandle>();
@@ -59499,7 +60082,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..5ae8ff7d07d46c147e02e3944d621f1b
  
      m_curlHandle->setURL(m_request.url(), m_localhostAlias);
  
-@@ -209,8 +629,9 @@ CURL* CurlRequest::setupTransfer()
+@@ -209,8 +663,9 @@ CURL* CurlRequest::setupTransfer()
          setupPUT();
      }
  
@@ -59510,7 +60093,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..5ae8ff7d07d46c147e02e3944d621f1b
  
      if (m_shouldDisableServerTrustEvaluation)
          m_curlHandle->disableServerTrustEvaluation();
-@@ -218,6 +639,17 @@ CURL* CurlRequest::setupTransfer()
+@@ -218,7 +673,35 @@ CURL* CurlRequest::setupTransfer()
      m_curlHandle->setHeaderCallbackFunction(didReceiveHeaderCallback, this);
      m_curlHandle->setWriteCallbackFunction(didReceiveDataCallback, this);
      m_curlHandle->setDebugCallbackFunction(didReceiveDebugInfoCallback, this);
@@ -59526,9 +60109,27 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..5ae8ff7d07d46c147e02e3944d621f1b
 +    }
 +#endif
  
++#if PLATFORM(HAIKU)
++    // A request the page set no timeout for may wait as long as its server
++    // holds it: a long poll answers when there is news. As in Firefox, the
++    // response gets 300 s to start, and once it has (didReceiveHeader) only
++    // the server, the page or the network going away
++    // (progressCallbackHaiku) ends it. Haiku's TCP sends no keepalives yet;
++    // the option is for when it does.
++    m_usesDefaultTimeoutHaiku = !m_request.timeoutInterval() && !m_request.defaultTimeoutInterval();
++    if (m_usesDefaultTimeoutHaiku) {
++        m_curlHandle->setTimeout(responseStartTimeoutHaiku);
++        curl_easy_setopt(m_curlHandle->handle(), CURLOPT_TCP_KEEPALIVE, 1L);
++        curl_easy_setopt(m_curlHandle->handle(), CURLOPT_XFERINFOFUNCTION, progressCallbackHaiku);
++        curl_easy_setopt(m_curlHandle->handle(), CURLOPT_XFERINFODATA, this);
++        curl_easy_setopt(m_curlHandle->handle(), CURLOPT_NOPROGRESS, 0L);
++        m_progressBytesHaiku = -1;
++    } else
++#endif
      m_curlHandle->setTimeout(timeoutInterval());
  
-@@ -270,6 +702,27 @@ size_t CurlRequest::willSendData(char* buffer, size_t blockSize, size_t numberOf
+     m_performStartTime = MonotonicTime::now();
+@@ -270,6 +753,27 @@ size_t CurlRequest::willSendData(char* buffer, size_t blockSize, size_t numberOf
      return *sendBytes;
  }
  
@@ -59556,7 +60157,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..5ae8ff7d07d46c147e02e3944d621f1b
  // This is being called for each HTTP header in the response. This includes '\r\n'
  // for the last line of the header.
  
-@@ -294,6 +747,9 @@ size_t CurlRequest::didReceiveHeader(String&& header)
+@@ -294,6 +798,9 @@ size_t CurlRequest::didReceiveHeader(String&& header)
          m_didReceiveResponse = false;
          m_response = CurlResponse { };
          m_multipartHandle = nullptr;
@@ -59566,7 +60167,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..5ae8ff7d07d46c147e02e3944d621f1b
      }
  
      auto receiveBytes = static_cast<size_t>(header.length());
-@@ -343,6 +799,20 @@ size_t CurlRequest::didReceiveHeader(String&& header)
+@@ -343,6 +850,26 @@ size_t CurlRequest::didReceiveHeader(String&& header)
  
      m_multipartHandle = CurlMultipartHandle::createIfNeeded(*this, m_response);
  
@@ -59583,11 +60184,17 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..5ae8ff7d07d46c147e02e3944d621f1b
 +
 +    if (isStreamingResponse(m_response))
 +        m_curlHandle->setTimeout(0_s);
++#if PLATFORM(HAIKU)
++    // The response has started (a 401 or 407 is answered again, with a name
++    // and password, on the same transfer).
++    else if (m_usesDefaultTimeoutHaiku && statusCode >= 200 && statusCode != 401 && statusCode != 407)
++        m_curlHandle->setTimeout(0_s);
++#endif
 +
      // Response will send at didReceiveData() or didCompleteTransfer()
      // to receive continueDidRceiveResponse() for asynchronously.
  
-@@ -375,8 +845,24 @@ size_t CurlRequest::didReceiveData(std::span<const uint8_t> receivedData)
+@@ -375,8 +902,24 @@ size_t CurlRequest::didReceiveData(std::span<const uint8_t> receivedData)
          return CURL_WRITEFUNC_PAUSE;
      }
  
@@ -59612,7 +60219,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..5ae8ff7d07d46c147e02e3944d621f1b
      if (receivedData.size()) {
          if (m_multipartHandle) {
              m_multipartHandle->didReceiveMessage(receivedData);
-@@ -393,7 +879,7 @@ size_t CurlRequest::didReceiveData(std::span<const uint8_t> receivedData)
+@@ -393,7 +936,7 @@ size_t CurlRequest::didReceiveData(std::span<const uint8_t> receivedData)
          }
      }
  
@@ -59621,7 +60228,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..5ae8ff7d07d46c147e02e3944d621f1b
  }
  
  void CurlRequest::didReceiveHeaderFromMultipart(Vector<String>&& headers)
-@@ -446,6 +932,31 @@ void CurlRequest::didCompleteTransfer(CURLcode result)
+@@ -446,6 +989,31 @@ void CurlRequest::didCompleteTransfer(CURLcode result)
          return;
      }
  
@@ -59653,7 +60260,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..5ae8ff7d07d46c147e02e3944d621f1b
      // Newer versions of curl/OpenSSL report CURLE_RECV_ERROR or CURLE_PARTIAL_FILE
      // when a server closes the connection to signal end-of-body on responses with
      // no Content-Length and no chunked encoding. This is valid HTTP/1.1 behavior,
-@@ -475,6 +986,19 @@ void CurlRequest::didCompleteTransfer(CURLcode result)
+@@ -475,6 +1043,19 @@ void CurlRequest::didCompleteTransfer(CURLcode result)
          }
  
          auto metrics = networkLoadMetrics();
@@ -59673,7 +60280,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..5ae8ff7d07d46c147e02e3944d621f1b
  
          finalizeTransfer();
          callClient([networkLoadMetrics = WTF::move(metrics)](CurlRequest& request, CurlRequestClient& client) mutable {
-@@ -486,6 +1010,11 @@ void CurlRequest::didCompleteTransfer(CURLcode result)
+@@ -486,6 +1067,11 @@ void CurlRequest::didCompleteTransfer(CURLcode result)
      } else {
          auto type = (result == CURLE_OPERATION_TIMEDOUT && timeoutInterval()) ? ResourceError::Type::Timeout : ResourceError::Type::General;
          auto resourceError = ResourceError(result, m_request.url(), type);
@@ -59685,7 +60292,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..5ae8ff7d07d46c147e02e3944d621f1b
  
          CertificateInfo certificateInfo;
          if (auto info = m_curlHandle->certificateInfo())
-@@ -503,13 +1032,51 @@ void CurlRequest::didCompleteTransfer(CURLcode result)
+@@ -503,13 +1089,51 @@ void CurlRequest::didCompleteTransfer(CURLcode result)
      }
  }
  
@@ -59737,7 +60344,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..5ae8ff7d07d46c147e02e3944d621f1b
      m_formDataStream.clean();
      m_multipartHandle = nullptr;
      m_curlHandle = nullptr;
-@@ -632,6 +1199,88 @@ void CurlRequest::completeDidReceiveResponse()
+@@ -632,6 +1256,88 @@ void CurlRequest::completeDidReceiveResponse()
          responseCompletionHandler();
  }
  
@@ -59826,7 +60433,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..5ae8ff7d07d46c147e02e3944d621f1b
  NetworkLoadMetrics CurlRequest::networkLoadMetrics()
  {
      ASSERT(m_curlHandle);
-@@ -653,6 +1302,57 @@ NetworkLoadMetrics CurlRequest::networkLoadMetrics()
+@@ -653,6 +1359,57 @@ NetworkLoadMetrics CurlRequest::networkLoadMetrics()
      return WTF::move(*networkLoadMetrics);
  }
  
@@ -59885,7 +60492,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..5ae8ff7d07d46c147e02e3944d621f1b
  {
      for (const auto& header : m_response.headers) {
 diff --git a/Source/WebCore/platform/network/curl/CurlRequest.h b/Source/WebCore/platform/network/curl/CurlRequest.h
-index 3b060605bbff32f845804a848610eca23dea834c..847987936bcc59a08b9f01a1a6f5b6bb2e8ed67b 100644
+index 3b060605bbff32f845804a848610eca23dea834c..0319c9a6646dfbdec1e54e1b8c52eb769bd2e782 100644
 --- a/Source/WebCore/platform/network/curl/CurlRequest.h
 +++ b/Source/WebCore/platform/network/curl/CurlRequest.h
 @@ -32,16 +32,21 @@
@@ -59964,7 +60571,7 @@ index 3b060605bbff32f845804a848610eca23dea834c..847987936bcc59a08b9f01a1a6f5b6bb
  
      int didReceiveDebugInfo(curl_infotype, std::span<const char>);
  
-@@ -126,15 +151,30 @@ private:
+@@ -126,15 +151,31 @@ private:
      bool needToInvokeDidCancelTransfer() const { return m_didNotifyResponse && !m_didReturnFromNotify && m_mustInvokeCancelTransfer; }
      void invokeDidReceiveResponseForFile(const URL&);
      void invokeDidReceiveResponse(const CurlResponse&, Function<void()>&& completionHandler = { });
@@ -59990,12 +60597,13 @@ index 3b060605bbff32f845804a848610eca23dea834c..847987936bcc59a08b9f01a1a6f5b6bb
      static int didReceiveDebugInfoCallback(CURL*, curl_infotype, char*, size_t, void*);
 +#if PLATFORM(HAIKU)
 +    static int willSendRequestCallbackHaiku(void*, char*, char*, int, int);
++    static int progressCallbackHaiku(void*, curl_off_t, curl_off_t, curl_off_t, curl_off_t);
 +    bool retryAfterHttp2ErrorHaiku(CURLcode);
 +#endif
  
  
      CurlRequestClient* m_client { };
-@@ -149,23 +189,57 @@ private:
+@@ -149,23 +190,62 @@ private:
      bool m_shouldDisableServerTrustEvaluation { false };
      CurlHandle::LocalhostAlias m_localhostAlias { CurlHandle::LocalhostAlias::Disable };
  
@@ -60050,6 +60658,11 @@ index 3b060605bbff32f845804a848610eca23dea834c..847987936bcc59a08b9f01a1a6f5b6bb
 +    // Times this request was sent again after an HTTP/2 error
 +    // (retryAfterHttp2ErrorHaiku): 1 on a fresh connection, 2 over HTTP/1.1.
 +    unsigned m_http2RetriesHaiku { 0 };
++    // The page set no timeout (setupTransfer); for progressCallbackHaiku,
++    // on the worker thread: the bytes moved so far, and when they last did.
++    bool m_usesDefaultTimeoutHaiku { false };
++    curl_off_t m_progressBytesHaiku { -1 };
++    MonotonicTime m_lastProgressHaiku;
 +#endif
  };
  
@@ -63349,10 +63962,10 @@ index 0000000000000000000000000000000000000000..d2a6d10f61944390e0c50fd1eadfce9b
 +#endif /* !HAIKUFORMDATASTREAM_H */
 diff --git a/Source/WebCore/platform/network/haiku/NetworkStateNotifierHaiku.cpp b/Source/WebCore/platform/network/haiku/NetworkStateNotifierHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..47cb3e98d72d00856e64b46373925ad7de24102a
+index 0000000000000000000000000000000000000000..b87c9a0de1f3beff1075549a0f989cfd458e1953
 --- /dev/null
 +++ b/Source/WebCore/platform/network/haiku/NetworkStateNotifierHaiku.cpp
-@@ -0,0 +1,48 @@
+@@ -0,0 +1,185 @@
 +/*
 + * Copyright (C) 2008 Apple Inc. All Rights Reserved.
 + *
@@ -63375,29 +63988,166 @@ index 0000000000000000000000000000000000000000..47cb3e98d72d00856e64b46373925ad7
 + * PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY
 + * OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 + * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-+ * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE. 
++ * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 + */
 +
 +#include "config.h"
 +#include "NetworkStateNotifier.h"
-+#include "NotImplemented.h"
 +
++#include <Looper.h>
++#include <Messenger.h>
++#include <NetworkNotifications.h>
++#include <arpa/inet.h>
++#include <atomic>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include <dlfcn.h>
++#include <ifaddrs.h>
++#include <net/if.h>
++#include <netinet/in.h>
 +#include <wtf/MainThread.h>
++#include <wtf/MonotonicTime.h>
++#include <wtf/RunLoop.h>
 +#include <wtf/Vector.h>
++#include <wtf/text/StringView.h>
++#include <wtf/text/WTFString.h>
 +
 +namespace WebCore {
 +
++// When the network was last seen to go away (0 while it is there), in
++// MonotonicTime seconds. The network process's curl thread reads it to give
++// up on transfers that have been quiet since then (CurlRequest.cpp): Haiku's
++// TCP sends no keepalives, so a connection whose network went away never
++// fails by itself.
++std::atomic<double> networkLostAtHaiku { 0 };
++
++// SUMMIT_NETWORK_IGNORE_INTERFACES_FILE: a file naming interfaces (as
++// ifconfig shows them, separated by commas or lines) to leave out, as if
++// they were not there, read at every check. For testing on a machine
++// reached over its only network: name its interfaces in the file, then make
++// the stack announce a change (ifconfig loop metric 0).
++static Vector<String> ignoredInterfaces()
++{
++    static const char* path = std::getenv("SUMMIT_NETWORK_IGNORE_INTERFACES_FILE");
++    FILE* file = path ? std::fopen(path, "r") : nullptr;
++    if (!file)
++        return { };
++    char text[1024];
++    size_t length = std::fread(text, 1, sizeof(text) - 1, file);
++    std::fclose(file);
++    for (size_t i = 0; i < length; ++i) {
++        if (text[i] == '\n' || text[i] == '\r')
++            text[i] = ',';
++    }
++    Vector<String> names;
++    for (auto name : StringView(std::span { reinterpret_cast<const Latin1Character*>(text), length }).split(',')) {
++        name = name.trim(isASCIIWhitespace<char16_t>);
++        if (!name.isEmpty())
++            names.append(name.toString());
++    }
++    return names;
++}
++
++// An address the interface only has without a network: none, or the
++// self-assigned IPv4 (169.254/16) and IPv6 link-local ones.
++static bool isUsableAddress(const sockaddr& address)
++{
++    if (address.sa_family == AF_INET) {
++        auto value = ntohl(reinterpret_cast<const sockaddr_in&>(address).sin_addr.s_addr);
++        return value != INADDR_ANY && (value >> 16) != 0xa9fe && (value >> 24) != 127;
++    }
++    if (address.sa_family == AF_INET6) {
++        auto& value = reinterpret_cast<const sockaddr_in6&>(address).sin6_addr;
++        return !IN6_IS_ADDR_UNSPECIFIED(&value) && !IN6_IS_ADDR_LOOPBACK(&value) && !IN6_IS_ADDR_LINKLOCAL(&value);
++    }
++    return false;
++}
++
++// Online: an interface other than loopback is up, has a link (IFF_LINK: a
++// cable, or a joined wireless network) and an address.
++static bool isOnLineHaiku()
++{
++    struct ifaddrs* interfaces = nullptr;
++    if (getifaddrs(&interfaces) || !interfaces)
++        return true; // Unknown: do not stop pages that might work.
++    auto ignored = ignoredInterfaces();
++    bool online = false;
++    for (auto* entry = interfaces; entry && !online; entry = entry->ifa_next) {
++        if (!entry->ifa_addr || !entry->ifa_name || (entry->ifa_flags & IFF_LOOPBACK)
++            || (entry->ifa_flags & (IFF_UP | IFF_LINK)) != (IFF_UP | IFF_LINK))
++            continue;
++        if (isUsableAddress(*entry->ifa_addr) && !ignored.contains(String::fromLatin1(entry->ifa_name)))
++            online = true;
++    }
++    freeifaddrs(interfaces);
++    return online;
++}
++
 +void NetworkStateNotifier::updateStateWithoutNotifying()
 +{
-+	// Should return true if at least one network interface is up.
-+	notImplemented();
-+    m_isOnLine = true;
++    bool wasOnLine = m_isOnLine.value_or(true);
++    m_isOnLine = isOnLineHaiku();
++    if (wasOnLine && !*m_isOnLine)
++        networkLostAtHaiku = MonotonicTime::now().secondsSinceEpoch().seconds();
++    else if (*m_isOnLine)
++        networkLostAtHaiku = 0;
++    if (wasOnLine != *m_isOnLine)
++        std::fprintf(stderr, "Summit: the network is %s\n", *m_isOnLine ? "back" : "gone");
 +}
++
++// The network stack's notifications (start_watching_network) arrive at this
++// looper. libbnetapi has the function; the engine does not link it, so it is
++// looked up when the first page asks.
++class NetworkWatcherHaiku final : public BLooper {
++public:
++    explicit NetworkWatcherHaiku(Function<void()>&& changed)
++        : BLooper("network state", B_LOW_PRIORITY)
++        , m_changed(WTF::move(changed))
++    {
++    }
++
++    void MessageReceived(BMessage* message) final
++    {
++        if (message->what == B_NETWORK_MONITOR) {
++            m_changed();
++            return;
++        }
++        BLooper::MessageReceived(message);
++    }
++
++private:
++    Function<void()> m_changed;
++};
 +
 +void NetworkStateNotifier::startObserving()
 +{
-+	// Should register to call singleton().updateStateSoon() when an interface is up/down
-+	notImplemented();
++    // Interfaces come and go in bursts (link, then an address from DHCP);
++    // updateStateSoon() reads them once things have settled.
++    auto* watcher = new NetworkWatcherHaiku([] {
++        callOnMainThread([] {
++            singleton().updateStateSoon();
++        });
++    });
++    watcher->Run();
++
++    using StartWatching = status_t (*)(uint32, const BMessenger&);
++    StartWatching startWatching = nullptr;
++    if (void* library = dlopen("libbnetapi.so", RTLD_LAZY | RTLD_LOCAL))
++        startWatching = reinterpret_cast<StartWatching>(dlsym(library, "_Z22start_watching_networkjRK10BMessenger"));
++    status_t status = startWatching
++        ? startWatching(B_WATCH_NETWORK_INTERFACE_CHANGES | B_WATCH_NETWORK_LINK_CHANGES | B_WATCH_NETWORK_WLAN_CHANGES, BMessenger(watcher))
++        : B_NOT_SUPPORTED;
++    if (status == B_OK)
++        return;
++
++    // Without notifications, look every five seconds.
++    std::fprintf(stderr, "Summit: cannot watch the network (%s); checking it every 5 s\n", std::strerror(status));
++    watcher->PostMessage(B_QUIT_REQUESTED);
++    auto* timer = new RunLoop::Timer(Ref { RunLoop::mainSingleton() }, "NetworkStateNotifier poll"_s, [] {
++        singleton().updateState();
++    });
++    timer->startRepeating(5_s);
 +}
 +
 +} // namespace WebCore
@@ -66381,6 +67131,83 @@ index 2b5c9f572f37b8ab7c61f5524e4a49d4a57976e4..402dd047e253d82dd66b0159c02c1ada
      // The contents background could come from the root (document element) renderer.
      // If the root is not composited, repainting this RenderView should repaint it and
      // its background. But if it's composited, then the background doesn't get repainted
+diff --git a/Source/WebCore/rendering/adwaita/RenderThemeAdwaita.cpp b/Source/WebCore/rendering/adwaita/RenderThemeAdwaita.cpp
+index a6fb2e3ceb842891f2529697f12dd0d6780f3bdb..bc0da7c7402a1db43bb2cd87b1125e7119bdb236 100644
+--- a/Source/WebCore/rendering/adwaita/RenderThemeAdwaita.cpp
++++ b/Source/WebCore/rendering/adwaita/RenderThemeAdwaita.cpp
+@@ -64,6 +64,12 @@
+ #include <wtf/glib/GSpanExtras.h>
+ #endif
+ 
++#if PLATFORM(HAIKU)
++#include "LocalizedStrings.h"
++#include "MediaControlsImagesHaiku.h"
++#include <TimeUnitFormat.h>
++#endif
++
+ namespace WebCore {
+ using namespace CSS::Literals;
+ using namespace WebCore::Adwaita;
+@@ -237,6 +243,11 @@ RefPtr<FragmentedSharedBuffer> RenderThemeAdwaita::mediaControlsImageDataForIcon
+     if (!data)
+         return nullptr;
+     return SharedBuffer::create(WTF::move(*data));
++#elif PLATFORM(HAIKU)
++    auto data = MediaControlsImagesHaiku::find(iconName, iconType);
++    if (data.empty())
++        return nullptr;
++    return SharedBuffer::create(data);
+ #else
+     return nullptr;
+ #endif
+@@ -256,6 +267,11 @@ String RenderThemeAdwaita::mediaControlsBase64StringForIconNameAndType(const Str
+     if (!data)
+         return { };
+     return base64EncodeToString(data->span());
++#elif PLATFORM(HAIKU)
++    auto data = MediaControlsImagesHaiku::find(iconName, iconType);
++    if (data.empty())
++        return emptyString();
++    return base64EncodeToString(data);
+ #else
+     return { };
+ #endif
+@@ -263,8 +279,35 @@ String RenderThemeAdwaita::mediaControlsBase64StringForIconNameAndType(const Str
+ 
+ String RenderThemeAdwaita::mediaControlsFormattedStringForDuration(double durationInSeconds)
+ {
++#if PLATFORM(HAIKU)
++    // What screen readers say for the times and the scrubber: "1 minute,
++    // 33 seconds" in the user's language, as BDurationFormat writes it.
++    if (!std::isfinite(durationInSeconds))
++        return localizedMediaTimeDescription(static_cast<float>(durationInSeconds));
++    auto seconds = static_cast<int64_t>(std::abs(durationInSeconds));
++    const int32 values[] = { static_cast<int32>(std::min<int64_t>(seconds / 3600, INT32_MAX)), static_cast<int32>(seconds / 60 % 60), static_cast<int32>(seconds % 60) };
++    const time_unit_element units[] = { B_TIME_UNIT_HOUR, B_TIME_UNIT_MINUTE, B_TIME_UNIT_SECOND };
++    // Called for every time the labels show, on the main thread.
++    static NeverDestroyed<BTimeUnitFormat> format(B_TIME_UNIT_FULL);
++    BString text;
++    for (size_t i = 0; i < std::size(values); ++i) {
++        // Hours and minutes only when there are some; seconds always.
++        if (!values[i] && i < std::size(values) - 1)
++            continue;
++        if (!values[i] && !text.IsEmpty())
++            break;
++        BString part;
++        if (format->Format(part, values[i], units[i]) != B_OK)
++            return localizedMediaTimeDescription(static_cast<float>(durationInSeconds));
++        if (!text.IsEmpty())
++            text << ", ";
++        text << part;
++    }
++    return String::fromUTF8(text.String());
++#else
+     // FIXME: Format this somehow, maybe through GDateTime?
+     return makeString(durationInSeconds);
++#endif
+ }
+ #endif // ENABLE(VIDEO)
+ 
 diff --git a/Source/WebCore/rendering/haiku/RenderThemeHaiku.cpp b/Source/WebCore/rendering/haiku/RenderThemeHaiku.cpp
 new file mode 100644
 index 0000000000000000000000000000000000000000..92d20a3ff6fd83acdf255b10fa5b68cdfff528ae
@@ -69021,10 +69848,20 @@ index be40151510176ea4e881fd41af8f79ab6ab6a306..b5fdd6e41375e8108fb406089992f8e5
      if (metaData.headerHash != computeSHA1(headerData, salt)) {
          LOG(NetworkCacheStorage, "(NetworkProcess) header checksum mismatch");
 diff --git a/Source/WebKit/NetworkProcess/curl/NetworkDataTaskCurl.cpp b/Source/WebKit/NetworkProcess/curl/NetworkDataTaskCurl.cpp
-index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..30969b24d0d7bd62862983933dee533a4c79690a 100644
+index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..ced47ba522b16100692d80113bd1a607b1f77dd5 100644
 --- a/Source/WebKit/NetworkProcess/curl/NetworkDataTaskCurl.cpp
 +++ b/Source/WebKit/NetworkProcess/curl/NetworkDataTaskCurl.cpp
-@@ -79,11 +79,20 @@ NetworkDataTaskCurl::NetworkDataTaskCurl(NetworkSession& session, NetworkDataTas
+@@ -36,7 +36,9 @@
+ #include "PrivateRelayed.h"
+ #include "WebErrors.h"
+ #include <WebCore/AuthenticationChallenge.h>
++#include <WebCore/Cookie.h>
+ #include <WebCore/CookieJar.h>
++#include <WebCore/CookieUtil.h>
+ #include <WebCore/CurlRequest.h>
+ #include <WebCore/NetworkLoadMetrics.h>
+ #include <WebCore/NotImplemented.h>
+@@ -79,11 +81,20 @@ NetworkDataTaskCurl::NetworkDataTaskCurl(NetworkSession& session, NetworkDataTas
          blockCookies();
      restrictRequestReferrerToOriginIfNeeded(request);
  
@@ -69045,7 +69882,7 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..30969b24d0d7bd62862983933dee533a
  }
  
  NetworkDataTaskCurl::~NetworkDataTaskCurl()
-@@ -101,6 +110,15 @@ void NetworkDataTaskCurl::resume()
+@@ -101,6 +112,15 @@ void NetworkDataTaskCurl::resume()
  
      if (m_curlRequest)
          m_curlRequest->resume();
@@ -69061,7 +69898,7 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..30969b24d0d7bd62862983933dee533a
  }
  
  void NetworkDataTaskCurl::cancel()
-@@ -132,7 +150,12 @@ NetworkDataTask::State NetworkDataTaskCurl::state() const
+@@ -132,7 +152,12 @@ NetworkDataTask::State NetworkDataTaskCurl::state() const
  
  Ref<CurlRequest> NetworkDataTaskCurl::createCurlRequest(ResourceRequest&& request, RequestStatus status)
  {
@@ -69075,7 +69912,7 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..30969b24d0d7bd62862983933dee533a
          appendCookieHeader(request);
  
      // Creates a CurlRequest in suspended state.
-@@ -142,6 +165,10 @@ Ref<CurlRequest> NetworkDataTaskCurl::createCurlRequest(ResourceRequest&& reques
+@@ -142,6 +167,10 @@ Ref<CurlRequest> NetworkDataTaskCurl::createCurlRequest(ResourceRequest&& reques
  
      if (m_session->networkProcess().localhostAliasesForTesting().contains<StringViewHashTranslator>(curlRequest->resourceRequest().url().host()))
          curlRequest->enableLocalhostAlias();
@@ -69086,7 +69923,7 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..30969b24d0d7bd62862983933dee533a
  
      return curlRequest;
  }
-@@ -168,7 +195,7 @@ void NetworkDataTaskCurl::curlDidReceiveResponse(CurlRequest& request, CurlRespo
+@@ -168,7 +197,7 @@ void NetworkDataTaskCurl::curlDidReceiveResponse(CurlRequest& request, CurlRespo
  
      handleCookieHeaders(request.resourceRequest(), receivedResponse);
  
@@ -69095,7 +69932,7 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..30969b24d0d7bd62862983933dee533a
          willPerformHTTPRedirection();
          return;
      }
-@@ -236,7 +263,12 @@ void NetworkDataTaskCurl::curlDidFailWithError(CurlRequest& request, ResourceErr
+@@ -236,7 +265,12 @@ void NetworkDataTaskCurl::curlDidFailWithError(CurlRequest& request, ResourceErr
      if (state() == State::Canceling || state() == State::Completed || (!m_client && !isDownload()))
          return;
  
@@ -69109,7 +69946,7 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..30969b24d0d7bd62862983933dee533a
          tryServerTrustEvaluation(AuthenticationChallenge(request.resourceRequest().url(), certificateInfo, resourceError));
          return;
      }
-@@ -256,22 +288,6 @@ void NetworkDataTaskCurl::curlDidFailWithError(CurlRequest& request, ResourceErr
+@@ -256,22 +290,6 @@ void NetworkDataTaskCurl::curlDidFailWithError(CurlRequest& request, ResourceErr
      m_client->didCompleteWithError(resourceError);
  }
  
@@ -69132,7 +69969,7 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..30969b24d0d7bd62862983933dee533a
  bool NetworkDataTaskCurl::shouldRedirectAsGET(const ResourceRequest& request, bool crossOrigin)
  {
      if (request.httpMethod() == "GET"_s || request.httpMethod() == "HEAD"_s)
-@@ -409,6 +425,7 @@ void NetworkDataTaskCurl::willPerformHTTPRedirection()
+@@ -409,6 +427,7 @@ void NetworkDataTaskCurl::willPerformHTTPRedirection()
              m_curlRequest->setUserPass(m_initialCredential.user(), m_initialCredential.password());
              m_curlRequest->setAuthenticationScheme(ProtectionSpace::AuthenticationScheme::HTTPBasic);
          }
@@ -69140,7 +69977,7 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..30969b24d0d7bd62862983933dee533a
  
          if (m_state != State::Suspended) {
              m_state = State::Suspended;
-@@ -531,6 +548,7 @@ void NetworkDataTaskCurl::restartWithCredential(const ProtectionSpace& protectio
+@@ -531,6 +550,7 @@ void NetworkDataTaskCurl::restartWithCredential(const ProtectionSpace& protectio
      m_curlRequest->setUserPass(credential.user(), credential.password());
      if (shouldDisableServerTrustEvaluation)
          m_curlRequest->disableServerTrustEvaluation();
@@ -69148,6 +69985,63 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..30969b24d0d7bd62862983933dee533a
  
      if (m_state != State::Suspended) {
          m_state = State::Suspended;
+@@ -538,11 +558,30 @@ void NetworkDataTaskCurl::restartWithCredential(const ProtectionSpace& protectio
+     }
+ }
+ 
++// The facts SameSite rules need about a request (NetworkStorageSessionCurl).
++// A request no page made (a download the browser started) leaves them
++// unspecified: it counts as same-site unless its first party is another
++// site, as in libsoup. Requests of an extension's own pages count as
++// same-site, as in Chrome: the extension has permission for the sites it
++// fetches from.
++static SameSiteInfo sameSiteInfoForCookies(const ResourceRequest& request)
++{
++    auto sameSiteInfo = SameSiteInfo::create(request);
++#if PLATFORM(HAIKU)
++    const auto& firstParty = request.firstPartyForCookies();
++    if (request.isSameSiteUnspecified())
++        sameSiteInfo.isSameSite = firstParty.isEmpty() || areRegistrableDomainsEqual(firstParty, request.url());
++    if (firstParty.protocolIs("webkit-extension"_s))
++        sameSiteInfo.isSameSite = true;
++#endif
++    return sameSiteInfo;
++}
++
+ void NetworkDataTaskCurl::appendCookieHeader(WebCore::ResourceRequest& request)
+ {
+     if (CheckedPtr storageSession = m_session->networkStorageSession()) {
+         auto includeSecureCookies = request.url().protocolIs("https"_s) ? IncludeSecureCookies::Yes : IncludeSecureCookies::No;
+-        auto cookieHeaderField = storageSession->cookieRequestHeaderFieldValue(request.firstPartyForCookies(), WebCore::SameSiteInfo::create(request), request.url(), std::nullopt, std::nullopt, includeSecureCookies, ApplyTrackingPrevention::Yes, WebCore::ShouldRelaxThirdPartyCookieBlocking::No, WebCore::IsKnownCrossSiteTracker::No).first;
++        auto cookieHeaderField = storageSession->cookieRequestHeaderFieldValue(request.firstPartyForCookies(), sameSiteInfoForCookies(request), request.url(), std::nullopt, std::nullopt, includeSecureCookies, ApplyTrackingPrevention::Yes, WebCore::ShouldRelaxThirdPartyCookieBlocking::No, WebCore::IsKnownCrossSiteTracker::No).first;
+         if (!cookieHeaderField.isEmpty())
+             request.addHTTPHeaderField(HTTPHeaderName::Cookie, cookieHeaderField);
+     }
+@@ -552,10 +591,24 @@ void NetworkDataTaskCurl::handleCookieHeaders(const WebCore::ResourceRequest& re
+ {
+     static constexpr auto setCookieHeader = "set-cookie: "_s;
+ 
++#if PLATFORM(HAIKU)
++    // Only same-site requests and top-level navigations may set SameSite=Lax
++    // or Strict cookies (RFC 6265bis 5.7, step 23): a cross-site image,
++    // fetch or frame cannot.
++    auto sameSiteInfo = sameSiteInfoForCookies(request);
++    bool maySetSameSiteCookies = sameSiteInfo.isSameSite || sameSiteInfo.isTopSite;
++#endif
+     if (auto* storageSession = m_session->networkStorageSession()) {
+         for (auto header : response.headers) {
+             if (header.startsWithIgnoringASCIICase(setCookieHeader)) {
+                 String setCookieString = header.right(header.length() - setCookieHeader.length());
++#if PLATFORM(HAIKU)
++                if (!maySetSameSiteCookies) {
++                    auto cookie = CookieUtil::parseCookieHeader(setCookieString);
++                    if (cookie && cookie->sameSite != Cookie::SameSitePolicy::None)
++                        continue;
++                }
++#endif
+                 storageSession->setCookiesFromHTTPResponse(request.firstPartyForCookies(), response.url, setCookieString);
+             }
+         }
 diff --git a/Source/WebKit/NetworkProcess/curl/NetworkDataTaskCurl.h b/Source/WebKit/NetworkProcess/curl/NetworkDataTaskCurl.h
 index 34a4d1cd69624e0f86025f8ee86667dffd0646dc..cafb51726fa2e5e5b257bacbfa86e952a2d99207 100644
 --- a/Source/WebKit/NetworkProcess/curl/NetworkDataTaskCurl.h
@@ -69237,10 +70131,71 @@ index 7c9075474552a6beaffbeffe6838dd4e5b24b0d0..74fe55e1e669a9abf183be97b68e71ef
  
  } // namespace WebKit
 diff --git a/Source/WebKit/NetworkProcess/curl/NetworkStorageSessionCurl.cpp b/Source/WebKit/NetworkProcess/curl/NetworkStorageSessionCurl.cpp
-index 20aff066ab01aa0fa12c7bf47741b0109d927eea..32eaf5d087896cd002a80c4dd2544af17513fa5a 100644
+index 20aff066ab01aa0fa12c7bf47741b0109d927eea..c55e4a46d67600e197f2cbc18dbd3c27eaeb280b 100644
 --- a/Source/WebKit/NetworkProcess/curl/NetworkStorageSessionCurl.cpp
 +++ b/Source/WebKit/NetworkProcess/curl/NetworkStorageSessionCurl.cpp
-@@ -105,7 +105,16 @@ NetworkStorageSession::~NetworkStorageSession()
+@@ -31,6 +31,7 @@
+ #include <WebCore/Cookie.h>
+ #include <WebCore/CookieJarDB.h>
+ #include <WebCore/CookieStoreGetOptions.h>
++#include <WebCore/CookieUtil.h>
+ #include <WebCore/CurlContext.h>
+ #include <WebCore/HTTPCookieAcceptPolicy.h>
+ #include <optional>
+@@ -65,7 +66,38 @@ static String alternativeServicesStorageFile(const String& alternativeServicesDi
+     return FileSystem::pathByAppendingComponent(alternativeServicesDirectory, defaultFileName);
+ }
+ 
+-static std::pair<String, bool> cookiesForSession(const NetworkStorageSession& session, const URL& firstParty, const URL& url, bool forHTTPHeader, IncludeSecureCookies includeSecureCookies)
++#if PLATFORM(HAIKU)
++// The SameSite rules of RFC 6265bis (5.8.3), as Safari applies them: a cookie
++// without the attribute goes everywhere, as SameSite=None, rather than as Lax
++// (Chrome's default). Strict cookies go only with same-site requests, Lax
++// ones also with top-level navigations by a safe method (a link, not a
++// cross-site form POST). For document.cookie, the web process counts a
++// top-level document as same-site.
++static bool sameSiteAllowsCookie(const Cookie& cookie, const SameSiteInfo& sameSiteInfo)
++{
++    switch (cookie.sameSite) {
++    case Cookie::SameSitePolicy::None:
++        return true;
++    case Cookie::SameSitePolicy::Lax:
++        return sameSiteInfo.isSameSite || (sameSiteInfo.isTopSite && sameSiteInfo.isSafeHTTPMethod);
++    case Cookie::SameSitePolicy::Strict:
++        return sameSiteInfo.isSameSite;
++    }
++    return true;
++}
++
++// A cookie a document sets with SameSite=Lax or Strict is dropped unless the
++// document is same-site with its top-level page (RFC 6265bis 5.7, step 22).
++static bool scriptMaySetCookie(const String& cookieString, const SameSiteInfo& sameSiteInfo)
++{
++    if (sameSiteInfo.isSameSite)
++        return true;
++    auto cookie = CookieUtil::parseCookieHeader(cookieString);
++    return !cookie || cookie->sameSite == Cookie::SameSitePolicy::None;
++}
++#endif
++
++static std::pair<String, bool> cookiesForSession(const NetworkStorageSession& session, const URL& firstParty, const SameSiteInfo& sameSiteInfo, const URL& url, bool forHTTPHeader, IncludeSecureCookies includeSecureCookies)
+ {
+     StringBuilder cookies;
+     bool didAccessSecureCookies = false;
+@@ -74,6 +106,12 @@ static std::pair<String, bool> cookiesForSession(const NetworkStorageSession& se
+ 
+     if (auto result = session.cookieDatabase().searchCookies(firstParty, url, searchHTTPOnly, secure, std::nullopt)) {
+         for (const auto& cookie : *result) {
++#if PLATFORM(HAIKU)
++            if (!sameSiteAllowsCookie(cookie, sameSiteInfo))
++                continue;
++#else
++            UNUSED_PARAM(sameSiteInfo);
++#endif
+             if (!cookies.isEmpty())
+                 cookies.append("; "_s);
+             if (!cookie.name.isEmpty())
+@@ -105,7 +143,16 @@ NetworkStorageSession::~NetworkStorageSession()
  
  void NetworkStorageSession::setCookieDatabase(UniqueRef<CookieJarDB>&& cookieDatabase)
  {
@@ -69257,7 +70212,35 @@ index 20aff066ab01aa0fa12c7bf47741b0109d927eea..32eaf5d087896cd002a80c4dd2544af1
  }
  
  CookieJarDB& NetworkStorageSession::cookieDatabase() const
-@@ -182,8 +191,7 @@ void NetworkStorageSession::setCookie(const Cookie& cookie, const URL&, const UR
+@@ -114,8 +161,14 @@ CookieJarDB& NetworkStorageSession::cookieDatabase() const
+     return m_cookieDatabase;
+ }
+ 
+-void NetworkStorageSession::setCookiesFromDOM(const URL& firstParty, const SameSiteInfo&, const URL& url, std::optional<FrameIdentifier>, std::optional<WebPageProxyIdentifier> webPageProxyID, ApplyTrackingPrevention, RequiresScriptTrackingPrivacy requiresScriptTrackingPrivacy, const String& value, ShouldRelaxThirdPartyCookieBlocking, IsKnownCrossSiteTracker) const
++void NetworkStorageSession::setCookiesFromDOM(const URL& firstParty, const SameSiteInfo& sameSiteInfo, const URL& url, std::optional<FrameIdentifier>, std::optional<WebPageProxyIdentifier> webPageProxyID, ApplyTrackingPrevention, RequiresScriptTrackingPrivacy requiresScriptTrackingPrivacy, const String& value, ShouldRelaxThirdPartyCookieBlocking, IsKnownCrossSiteTracker) const
+ {
++#if PLATFORM(HAIKU)
++    if (!scriptMaySetCookie(value, sameSiteInfo))
++        return;
++#else
++    UNUSED_PARAM(sameSiteInfo);
++#endif
+     auto cappedLifetime = clientSideCookieCap(RegistrableDomain { firstParty }, requiresScriptTrackingPrivacy, webPageProxyID);
+     cookieDatabase().setCookie(firstParty, url, value, CookieJarDB::Source::Script, cappedLifetime);
+ }
+@@ -153,9 +206,9 @@ HTTPCookieAcceptPolicy NetworkStorageSession::cookieAcceptPolicy() const
+     return HTTPCookieAcceptPolicy::OnlyFromMainDocumentDomain;
+ }
+ 
+-std::pair<String, bool> NetworkStorageSession::cookiesForDOM(const URL& firstParty, const SameSiteInfo&, const URL& url, std::optional<FrameIdentifier>, std::optional<WebPageProxyIdentifier>, IncludeSecureCookies includeSecureCookies, ApplyTrackingPrevention, ShouldRelaxThirdPartyCookieBlocking, IsKnownCrossSiteTracker) const
++std::pair<String, bool> NetworkStorageSession::cookiesForDOM(const URL& firstParty, const SameSiteInfo& sameSiteInfo, const URL& url, std::optional<FrameIdentifier>, std::optional<WebPageProxyIdentifier>, IncludeSecureCookies includeSecureCookies, ApplyTrackingPrevention, ShouldRelaxThirdPartyCookieBlocking, IsKnownCrossSiteTracker) const
+ {
+-    return cookiesForSession(*this, firstParty, url, false, includeSecureCookies);
++    return cookiesForSession(*this, firstParty, sameSiteInfo, url, false, includeSecureCookies);
+ }
+ 
+ std::optional<Vector<Cookie>> NetworkStorageSession::cookiesForDOMAsVector(const URL&, const SameSiteInfo&, const URL&, std::optional<FrameIdentifier>, std::optional<WebPageProxyIdentifier>, IncludeSecureCookies, ApplyTrackingPrevention, ShouldRelaxThirdPartyCookieBlocking, IsKnownCrossSiteTracker, CookieStoreGetOptions&&) const
+@@ -182,8 +235,7 @@ void NetworkStorageSession::setCookie(const Cookie& cookie, const URL&, const UR
  
  void NetworkStorageSession::deleteCookie(const Cookie& cookie, CompletionHandler<void()>&& completionHandler)
  {
@@ -69267,7 +70250,7 @@ index 20aff066ab01aa0fa12c7bf47741b0109d927eea..32eaf5d087896cd002a80c4dd2544af1
      completionHandler();
  }
  
-@@ -199,9 +207,9 @@ void NetworkStorageSession::deleteAllCookies(CompletionHandler<void()>&& complet
+@@ -199,9 +251,9 @@ void NetworkStorageSession::deleteAllCookies(CompletionHandler<void()>&& complet
      completionHandler();
  }
  
@@ -69279,7 +70262,7 @@ index 20aff066ab01aa0fa12c7bf47741b0109d927eea..32eaf5d087896cd002a80c4dd2544af1
      completionHandler();
  }
  
-@@ -222,10 +230,13 @@ void NetworkStorageSession::getHostnamesWithCookies(HashSet<String>& hostnames)
+@@ -222,10 +274,13 @@ void NetworkStorageSession::getHostnamesWithCookies(HashSet<String>& hostnames)
      hostnames = cookieDatabase().allDomains();
  }
  
@@ -69296,6 +70279,36 @@ index 20aff066ab01aa0fa12c7bf47741b0109d927eea..32eaf5d087896cd002a80c4dd2544af1
  }
  
  void NetworkStorageSession::hasCookies(const RegistrableDomain&, CompletionHandler<void(bool)>&& completionHandler) const
+@@ -234,19 +289,26 @@ void NetworkStorageSession::hasCookies(const RegistrableDomain&, CompletionHandl
+     completionHandler(false);
+ }
+ 
+-bool NetworkStorageSession::getRawCookies(const URL& firstParty, const SameSiteInfo&, const URL& url, std::optional<FrameIdentifier>, std::optional<WebPageProxyIdentifier>, ApplyTrackingPrevention, ShouldRelaxThirdPartyCookieBlocking, Vector<Cookie>& rawCookies) const
++bool NetworkStorageSession::getRawCookies(const URL& firstParty, const SameSiteInfo& sameSiteInfo, const URL& url, std::optional<FrameIdentifier>, std::optional<WebPageProxyIdentifier>, ApplyTrackingPrevention, ShouldRelaxThirdPartyCookieBlocking, Vector<Cookie>& rawCookies) const
+ {
+     auto cookies = cookieDatabase().searchCookies(firstParty, url, std::nullopt, std::nullopt, std::nullopt);
+     if (!cookies)
+         return false;
+ 
++#if PLATFORM(HAIKU)
++    cookies->removeAllMatching([&](auto& cookie) {
++        return !sameSiteAllowsCookie(cookie, sameSiteInfo);
++    });
++#else
++    UNUSED_PARAM(sameSiteInfo);
++#endif
+     rawCookies = WTF::move(*cookies);
+     return true;
+ }
+ 
+-std::pair<String, bool> NetworkStorageSession::cookieRequestHeaderFieldValue(const URL& firstParty, const SameSiteInfo&, const URL& url, std::optional<FrameIdentifier>, std::optional<WebPageProxyIdentifier>, IncludeSecureCookies includeSecureCookies, ApplyTrackingPrevention, ShouldRelaxThirdPartyCookieBlocking, IsKnownCrossSiteTracker) const
++std::pair<String, bool> NetworkStorageSession::cookieRequestHeaderFieldValue(const URL& firstParty, const SameSiteInfo& sameSiteInfo, const URL& url, std::optional<FrameIdentifier>, std::optional<WebPageProxyIdentifier>, IncludeSecureCookies includeSecureCookies, ApplyTrackingPrevention, ShouldRelaxThirdPartyCookieBlocking, IsKnownCrossSiteTracker) const
+ {
+-    return cookiesForSession(*this, firstParty, url, true, includeSecureCookies);
++    return cookiesForSession(*this, firstParty, sameSiteInfo, url, true, includeSecureCookies);
+ }
+ 
+ void NetworkStorageSession::setProxySettings(const CurlProxySettings& proxySettings)
 diff --git a/Source/WebKit/NetworkProcess/haiku/NetworkProcessHaiku.cpp b/Source/WebKit/NetworkProcess/haiku/NetworkProcessHaiku.cpp
 new file mode 100644
 index 0000000000000000000000000000000000000000..4c21c1bdf92f8107cf0f7452833e81b170b26c85
@@ -82236,10 +83249,10 @@ index 0000000000000000000000000000000000000000..98260b2d1a95da86f4e4284492663d3c
 +}
 diff --git a/Source/WebKit/UIProcess/API/haiku/WebKitView.h b/Source/WebKit/UIProcess/API/haiku/WebKitView.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..522b2c760532ed07e8cfa0e05c68bcc37f14ede5
+index 0000000000000000000000000000000000000000..e8adf1886b53c5cefa06dcd87c7c66ca40b3f8a0
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/API/haiku/WebKitView.h
-@@ -0,0 +1,346 @@
+@@ -0,0 +1,384 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#pragma once
@@ -82288,7 +83301,29 @@ index 0000000000000000000000000000000000000000..522b2c760532ed07e8cfa0e05c68bcc3
 +    B_WEBKIT_SPELLING_LEARN = 2
 +};
 +
++// How long BWebKitView::AnswerAuthentication's name and password are kept:
++// for the request that asked only, or for the rest of the session (the
++// context's website data), when the engine also sends them unasked to the
++// same server and realm.
 +enum : uint32 {
++    B_WEBKIT_CREDENTIAL_FOR_REQUEST = 0,
++    B_WEBKIT_CREDENTIAL_FOR_SESSION = 1
++};
++
++enum : uint32 {
++    // A server (or the proxy) asks for a name and password: HTTP Basic,
++    // Digest or NTLM authentication (401 or 407), sent only to views that
++    // asked for it (SetAuthenticationRequests). Fields: "view",
++    // "identifier" (uint64), "url" (the request's, without credentials),
++    // "host", "port" (int32), "realm" (the server's own text, may be empty),
++    // "scheme" ("basic", "digest" or "ntlm"), "secure" (bool: the name and
++    // password travel over https), "proxy" (bool), "previous_failures"
++    // (int32: names and passwords this request had refused) and "user" (the
++    // name last tried, when known). The request waits until
++    // AnswerAuthentication or CancelAuthentication. When it no longer waits
++    // (the page started another navigation, closed or crashed), a notice
++    // with "identifier" and "withdrawn" (true) follows.
++    B_WEBKIT_AUTHENTICATION_REQUESTED = 'waut',
 +    // The page requests a native fullscreen transition. Fields: "view",
 +    // "fullscreen" (bool), "request" (uint64). Change the window on its looper,
 +    // then call CompleteFullScreenRequest. A zero request only restores the
@@ -82318,7 +83353,11 @@ index 0000000000000000000000000000000000000000..522b2c760532ed07e8cfa0e05c68bcc3
 +    // sha256 (strings), validFrom/validUntil (epoch seconds, doubles), verified,
 +    // exception and mixedContent (bools), and problem (string).
 +    // They also say whether the page plays sound: "playingAudio" and
-+    // "audioMuted" (bools, SetAudioMuted).
++    // "audioMuted" (bools, SetAudioMuted), and "keepScreenAwake" (bool):
++    // the page asks for the screen to stay on (a video with sound playing
++    // where it can be seen, or a screen wake lock). While a page the user
++    // can see asks, keep the screen blanker away, for example by putting
++    // the pointer where it already is every 20 s (set_mouse_position).
 +    B_WEBKIT_STATE_CHANGED = 'wsta',
 +    // The page's web process is gone. A second notice follows with "reason":
 +    // "crash", "memory" (over its memory limit), "cpu", "stopped"
@@ -82516,6 +83555,18 @@ index 0000000000000000000000000000000000000000..522b2c760532ed07e8cfa0e05c68bcc3
 +    static void RespondToURLSchemeRequest(uint64 identifier, int32 status, const char* mimeType,
 +        const BMessage* headers, const void* data, size_t size);
 +    static void FailURLSchemeRequest(uint64 identifier, const char* description = nullptr);
++    // Sends B_WEBKIT_AUTHENTICATION_REQUESTED for the view's HTTP
++    // authentication challenges. Off by default: the page then gets the
++    // server's own 401 or 407 response, as without a name and password.
++    void SetAuthenticationRequests(bool enabled);
++    // Answers B_WEBKIT_AUTHENTICATION_REQUESTED with a name and password
++    // (persistence: B_WEBKIT_CREDENTIAL_*). A null name continues without
++    // signing in: the page gets the server's own response. Any thread;
++    // unknown, withdrawn and answered identifiers are ignored.
++    static void AnswerAuthentication(uint64 identifier, const char* name, const char* password,
++        uint32 persistence = B_WEBKIT_CREDENTIAL_FOR_SESSION);
++    // Stops the request that asked: its load fails as cancelled.
++    static void CancelAuthentication(uint64 identifier);
 +    // How a beforeunload handler that asks to stay is answered; notifications
 +    // (B_WEBKIT_BEFORE_UNLOAD_PREVENTED) go to target.
 +    void SetBeforeUnloadBehavior(uint32 behavior, BMessenger target = BMessenger());
@@ -82588,10 +83639,10 @@ index 0000000000000000000000000000000000000000..522b2c760532ed07e8cfa0e05c68bcc3
 +};
 diff --git a/Source/WebKit/UIProcess/API/haiku/WebKitViewEmbedding.cpp b/Source/WebKit/UIProcess/API/haiku/WebKitViewEmbedding.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..de8e8a7a038d52d6990d3ad8c9e3f0b8f24a2e41
+index 0000000000000000000000000000000000000000..3ef4d7a7278a87b7896f068a0f5c56b20ec0c4d3
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/API/haiku/WebKitViewEmbedding.cpp
-@@ -0,0 +1,922 @@
+@@ -0,0 +1,942 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +// BWebKitView's embedding interfaces (WebKitEmbedding.h): user scripts,
@@ -83167,6 +84218,26 @@ index 0000000000000000000000000000000000000000..de8e8a7a038d52d6990d3ad8c9e3f0b8
 +            return;
 +        }
 +        completion(WTF::move(*result));
++    });
++}
++
++void BWebKitView::SetAuthenticationRequests(bool enabled)
++{
++    m_state->asksForAuthentication = enabled;
++}
++
++void BWebKitView::AnswerAuthentication(uint64 identifier, const char* name, const char* password, uint32 persistence)
++{
++    auto answer = name ? AuthenticationAnswerHaiku::SignIn : AuthenticationAnswerHaiku::Continue;
++    WTF::RunLoop::mainSingleton().dispatch([identifier, answer, name = copyTextHaiku(name), password = copyTextHaiku(password), persistence] {
++        answerAuthenticationHaiku(identifier, answer, stringHaiku(name), stringHaiku(password), persistence == B_WEBKIT_CREDENTIAL_FOR_SESSION);
++    });
++}
++
++void BWebKitView::CancelAuthentication(uint64 identifier)
++{
++    WTF::RunLoop::mainSingleton().dispatch([identifier] {
++        answerAuthenticationHaiku(identifier, AuthenticationAnswerHaiku::Cancel, { }, { }, false);
 +    });
 +}
 +
@@ -112726,10 +113797,10 @@ index 0000000000000000000000000000000000000000..c9a119d02f85b7c5ad8fe9153bfc9604
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/WebView.cpp b/Source/WebKit/UIProcess/haiku/WebView.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..9bb87c77e6d048f5b7961bc44762f5efbe853796
+index 0000000000000000000000000000000000000000..d61ebb0bb824e9f3de136713236c16b4c96510eb
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/WebView.cpp
-@@ -0,0 +1,2705 @@
+@@ -0,0 +1,2895 @@
 +/*
 + * Copyright (C) 2013 Intel Corporation. All rights reserved.
 + *
@@ -112827,6 +113898,7 @@ index 0000000000000000000000000000000000000000..9bb87c77e6d048f5b7961bc44762f5ef
 +#endif
 +#include <WebCore/PermissionState.h>
 +#include <WebCore/DragData.h>
++#include <WebCore/SleepDisablerClient.h>
 +#include "WebHitTestResultData.h"
 +#if ENABLE(WK_WEB_EXTENSIONS)
 +#include "WebExtension.h"
@@ -112873,6 +113945,79 @@ index 0000000000000000000000000000000000000000..9bb87c77e6d048f5b7961bc44762f5ef
 +using namespace WebCore;
 +
 +WTF_MAKE_TZONE_ALLOCATED_IMPL(WebView);
++
++// Pages that ask for the screen to stay on: a video with sound playing where
++// it can be seen, or a screen wake lock. The web process sends the requests
++// to the page's proxy (WebSleepDisablerClient), whose own SleepDisabler
++// brings them here. The view's state then says "keepScreenAwake", and the
++// browser keeps the screen on while it shows the page: this process has no
++// way to do it for every embedder, and only the browser knows what is seen.
++class ScreenAwakeRequestsHaiku final : public SleepDisablerClient {
++    WTF_MAKE_TZONE_ALLOCATED_INLINE(ScreenAwakeRequestsHaiku);
++public:
++    static ScreenAwakeRequestsHaiku& singleton()
++    {
++        ASSERT(RunLoop::isMain());
++        static ScreenAwakeRequestsHaiku* requests;
++        if (!requests) {
++            auto client = makeUnique<ScreenAwakeRequestsHaiku>();
++            requests = client.get();
++            sleepDisablerClient() = WTF::move(client);
++        }
++        return *requests;
++    }
++
++    bool keepsScreenAwake(const WebPageProxy& page) const
++    {
++        for (auto& requester : m_requests.values()) {
++            if (requester.get() == &page)
++                return true;
++        }
++        return false;
++    }
++
++    void didCreateSleepDisabler(SleepDisablerIdentifier identifier, const String&, bool display, std::optional<PageIdentifier> pageID) final
++    {
++        // Display requests only: a hidden page's video asks for the system
++        // to stay awake, which Haiku does anyway.
++        RefPtr page = display && pageID ? WebProcessProxy::webPage(*pageID) : nullptr;
++        if (!page)
++            return;
++        bool wasAwake = keepsScreenAwake(*page);
++        m_requests.set(identifier, WeakPtr { *page });
++        if (!wasAwake)
++            notify(WeakPtr { *page });
++    }
++
++    void didDestroySleepDisabler(SleepDisablerIdentifier identifier, std::optional<PageIdentifier>) final
++    {
++        // Also called while a closing page lets go of its requests: the
++        // page is looked at only later.
++        if (WeakPtr page = m_requests.take(identifier))
++            notify(WTF::move(page));
++    }
++
++    // A new document in the main frame starts without requests. Those of
++    // the one before end with it, but not always here: after a process
++    // swap the old page's messages go to its suspended page, which drops
++    // them, and the screen would be kept on for good.
++    void forgetPage(WebPageProxy& page)
++    {
++        if (m_requests.removeIf([&](auto& entry) { return entry.value.get() == &page; }))
++            notify(WeakPtr { page });
++    }
++
++private:
++    static void notify(WeakPtr<WebPageProxy>&& page)
++    {
++        RunLoop::mainSingleton().dispatch([page = WTF::move(page)] {
++            if (RefPtr protectedPage = page.get(); protectedPage && protectedPage->pageClient())
++                static_cast<WebView*>(protectedPage->pageClient())->notifyState();
++        });
++    }
++
++    HashMap<SleepDisablerIdentifier, WeakPtr<WebPageProxy>> m_requests;
++};
 +
 +template<typename Completion> static JavaScriptDialogRequestsHaiku::Completion dialogCompletionOnMainHaiku(Completion&& completion)
 +{
@@ -113259,6 +114404,109 @@ index 0000000000000000000000000000000000000000..9bb87c77e6d048f5b7961bc44762f5ef
 +        RunLoop::mainSingleton().dispatchAfter(1_s, WTF::move(prewarm));
 +}
 +
++// HTTP authentication challenges the host was asked about
++// (B_WEBKIT_AUTHENTICATION_REQUESTED). They wait here, on the main thread,
++// until the host answers or the page moves on.
++struct PendingAuthenticationHaiku {
++    std::weak_ptr<WebViewStateHaiku> state;
++    Ref<AuthenticationChallengeProxy> challenge;
++};
++
++static std::unordered_map<uint64_t, PendingAuthenticationHaiku>& pendingAuthenticationsHaiku()
++{
++    static NeverDestroyed<std::unordered_map<uint64_t, PendingAuthenticationHaiku>> challenges;
++    return challenges.get();
++}
++
++// The schemes a name and password answer; the others (Negotiate, Bearer...)
++// keep the default handling.
++static const char* authenticationSchemeNameHaiku(ProtectionSpace::AuthenticationScheme scheme)
++{
++    switch (scheme) {
++    case ProtectionSpace::AuthenticationScheme::HTTPBasic:
++        return "basic";
++    case ProtectionSpace::AuthenticationScheme::HTTPDigest:
++        return "digest";
++    case ProtectionSpace::AuthenticationScheme::NTLM:
++        return "ntlm";
++    default:
++        return nullptr;
++    }
++}
++
++static bool askForAuthenticationHaiku(const std::shared_ptr<WebViewStateHaiku>& state, AuthenticationChallengeProxy& challenge)
++{
++    const auto& core = challenge.core();
++    const auto& space = core.protectionSpace();
++    const char* scheme = authenticationSchemeNameHaiku(space.authenticationScheme());
++    if (!state || state->closed || !state->asksForAuthentication || !scheme)
++        return false;
++    static uint64_t lastIdentifier;
++    uint64_t identifier = ++lastIdentifier;
++    auto url = core.failureResponse().url();
++    url.removeCredentials();
++    BMessage message(B_WEBKIT_AUTHENTICATION_REQUESTED);
++    message.AddUInt64("identifier", identifier);
++    message.AddString("url", url.string().utf8().legacyCStringPointer());
++    message.AddString("host", space.host().utf8().legacyCStringPointer());
++    message.AddInt32("port", space.port());
++    message.AddString("realm", space.realm().utf8().legacyCStringPointer());
++    message.AddString("scheme", scheme);
++    message.AddBool("secure", space.serverType() == ProtectionSpace::ServerType::HTTPS
++        || space.serverType() == ProtectionSpace::ServerType::ProxyHTTPS);
++    message.AddBool("proxy", space.isProxy());
++    message.AddInt32("previous_failures", static_cast<int32>(core.previousFailureCount()));
++    addTextHaiku(message, "user", core.proposedCredential().user());
++    if (sendToHostHaiku(state, message) != B_OK)
++        return false;
++    pendingAuthenticationsHaiku().emplace(identifier, PendingAuthenticationHaiku { state, challenge });
++    return true;
++}
++
++void answerAuthenticationHaiku(uint64_t identifier, AuthenticationAnswerHaiku answer, const String& user, const String& password, bool forSession)
++{
++    ASSERT(RunLoop::isMain());
++    auto pending = pendingAuthenticationsHaiku().extract(identifier);
++    if (pending.empty())
++        return;
++    Ref challenge = pending.mapped().challenge;
++    switch (answer) {
++    case AuthenticationAnswerHaiku::SignIn:
++        challenge->listener().completeChallenge(AuthenticationChallengeDisposition::UseCredential,
++            Credential(user, password, forSession ? CredentialPersistence::ForSession : CredentialPersistence::None));
++        break;
++    case AuthenticationAnswerHaiku::Continue:
++        challenge->listener().completeChallenge(AuthenticationChallengeDisposition::PerformDefaultHandling);
++        break;
++    case AuthenticationAnswerHaiku::Cancel:
++        challenge->listener().completeChallenge(AuthenticationChallengeDisposition::Cancel);
++        break;
++    }
++}
++
++// The view's page started another navigation, closed or lost its process:
++// the requests that asked are going away, and so must the host's prompts.
++static void withdrawAuthenticationsHaiku(const WebViewStateHaiku& state)
++{
++    Vector<uint64_t> identifiers;
++    for (auto& [identifier, pending] : pendingAuthenticationsHaiku()) {
++        auto owner = pending.state.lock();
++        if (!owner || owner.get() == &state)
++            identifiers.append(identifier);
++    }
++    for (auto identifier : identifiers) {
++        auto pending = pendingAuthenticationsHaiku().extract(identifier);
++        auto owner = pending.mapped().state.lock();
++        Ref { pending.mapped().challenge }->listener().completeChallenge(AuthenticationChallengeDisposition::Cancel);
++        if (owner && !owner->closed) {
++            BMessage message(B_WEBKIT_AUTHENTICATION_REQUESTED);
++            message.AddUInt64("identifier", identifier);
++            message.AddBool("withdrawn", true);
++            sendToHostHaiku(owner, message);
++        }
++    }
++}
++
 +class CloseNavigationClientHaiku final : public API::NavigationClient {
 +    WTF_MAKE_TZONE_ALLOCATED_INLINE(CloseNavigationClientHaiku);
 +public:
@@ -113268,12 +114516,15 @@ index 0000000000000000000000000000000000000000..9bb87c77e6d048f5b7961bc44762f5ef
 +    // before it gives up). Certificates the user trusted for the host through
 +    // BWebKitContext::AllowServerCertificate() proceed; the others are refused
 +    // and remembered, so that the failed load can tell the host which
-+    // certificate it was. Every other challenge keeps the default handling.
++    // certificate it was. A server asking for a name and password asks the
++    // host when it wants that (B_WEBKIT_AUTHENTICATION_REQUESTED). Every
++    // other challenge keeps the default handling.
 +    void didReceiveAuthenticationChallenge(WebPageProxy&, AuthenticationChallengeProxy& challenge) override
 +    {
 +        const auto& protectionSpace = challenge.core().protectionSpace();
 +        if (protectionSpace.authenticationScheme() != ProtectionSpace::AuthenticationScheme::ServerTrustEvaluationRequested) {
-+            challenge.listener().completeChallenge(AuthenticationChallengeDisposition::PerformDefaultHandling);
++            if (!askForAuthenticationHaiku(m_state.lock(), challenge))
++                challenge.listener().completeChallenge(AuthenticationChallengeDisposition::PerformDefaultHandling);
 +            return;
 +        }
 +        auto state = m_state.lock();
@@ -113465,6 +114716,7 @@ index 0000000000000000000000000000000000000000..9bb87c77e6d048f5b7961bc44762f5ef
 +        auto state = m_state.lock();
 +        if (!state || state->closed)
 +            return true;
++        withdrawAuthenticationsHaiku(*state);
 +        const char* name = "exited";
 +        switch (reason) {
 +        case ProcessTerminationReason::Crash:
@@ -113521,6 +114773,7 @@ index 0000000000000000000000000000000000000000..9bb87c77e6d048f5b7961bc44762f5ef
 +        else
 +            SUMMIT_NAV_TRACE("provisional load started in web process %d: %s", page.legacyMainFrameProcess().processID(), request.url().string().left(160).utf8().legacyCStringPointer());
 +        if (auto state = m_state.lock()) {
++            withdrawAuthenticationsHaiku(*state);
 +            navigationChangedHaiku(state);
 +            if (navigation)
 +                trackLoadHaiku(state, navigation);
@@ -113560,6 +114813,7 @@ index 0000000000000000000000000000000000000000..9bb87c77e6d048f5b7961bc44762f5ef
 +#endif
 +        if (!isMainFrameHaiku(frame, &page))
 +            return;
++        ScreenAwakeRequestsHaiku::singleton().forgetPage(page);
 +        if (auto state = m_state.lock()) {
 +            state->documentIdentifier = frame.documentID ? std::optional { *frame.documentID } : std::nullopt;
 +            navigationChangedHaiku(state);
@@ -114177,6 +115431,9 @@ index 0000000000000000000000000000000000000000..9bb87c77e6d048f5b7961bc44762f5ef
 +WebView::WebView(std::shared_ptr<WebViewStateHaiku> state)
 +    : m_state(std::move(state))
 +{
++    // Before any page exists: a request made without the client could not
++    // be ended once it is there (SleepDisabler has no identifier then).
++    ScreenAwakeRequestsHaiku::singleton();
 +}
 +
 +void WebView::initialize(RefPtr<API::PageConfiguration> configuration)
@@ -114234,9 +115491,11 @@ index 0000000000000000000000000000000000000000..9bb87c77e6d048f5b7961bc44762f5ef
 +    // for Skia ports, so an unset variable preserves the shipping behavior.
 +    if (const char* canvasAcceleration = std::getenv("SUMMIT_CANVAS_ACCELERATION"))
 +        configuration->preferences().setCanvasUsesAcceleratedDrawing(std::strcmp(canvasAcceleration, "0"));
-+    // There is no native way to keep the display awake yet, and a granted request ended the
-+    // page's process (seen on browserbench.org). Pages must see the API as absent.
-+    configuration->preferences().setScreenWakeLockAPIEnabled(false);
++    // navigator.wakeLock: a screen lock keeps the screen on through the browser
++    // (ScreenAwakeRequestsHaiku) until it is released or the page is hidden.
++    // SUMMIT_SCREEN_WAKE_LOCK=0 reports the API as absent.
++    const char* wakeLock = std::getenv("SUMMIT_SCREEN_WAKE_LOCK");
++    configuration->preferences().setScreenWakeLockAPIEnabled(!wakeLock || std::strcmp(wakeLock, "0"));
 +#if ENABLE(FULLSCREEN_API)
 +    configuration->preferences().setFullScreenEnabled(true);
 +#endif
@@ -114407,6 +115666,7 @@ index 0000000000000000000000000000000000000000..9bb87c77e6d048f5b7961bc44762f5ef
 +#endif
 +    m_state->contentSizeChanged = nullptr;
 +    m_state->dialogs->cancelAll(true);
++    withdrawAuthenticationsHaiku(*m_state);
 +    BMessage dismissDialogs(javaScriptDialogsCancelHaiku);
 +    sendToView(dismissDialogs);
 +    m_state->presenter.close();
@@ -114550,6 +115810,7 @@ index 0000000000000000000000000000000000000000..9bb87c77e6d048f5b7961bc44762f5ef
 +    message.AddBool("closeApprovalInvalidated", m_state->closeApprovalInvalidated);
 +    message.AddBool("playingAudio", m_page->isPlayingAudio());
 +    message.AddBool("audioMuted", m_page->isAudioMuted());
++    message.AddBool("keepScreenAwake", ScreenAwakeRequestsHaiku::singleton().keepsScreenAwake(*m_page));
 +#if ENABLE(MEDIA_STREAM)
 +    auto mediaState = m_page->reportedMediaState();
 +    message.AddBool("capturingCamera", mediaState.containsAny({ WebCore::MediaProducerMediaState::HasActiveVideoCaptureDevice, WebCore::MediaProducerMediaState::HasMutedVideoCaptureDevice }));
@@ -116128,10 +117389,10 @@ index 0000000000000000000000000000000000000000..63372cc3f12bccf01f83f9ed4395aaae
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/WebViewStateHaiku.h b/Source/WebKit/UIProcess/haiku/WebViewStateHaiku.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..b0b14acdb92d45e52269bb73ef1bbc6a19a858e3
+index 0000000000000000000000000000000000000000..76ca2242108785f69d7b950dc98f37876affda2d
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/WebViewStateHaiku.h
-@@ -0,0 +1,193 @@
+@@ -0,0 +1,202 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#pragma once
@@ -116219,6 +117480,9 @@ index 0000000000000000000000000000000000000000..b0b14acdb92d45e52269bb73ef1bbc6a
 +    bool onCurrentWorkspace { true };
 +    std::atomic<status_t> status { B_NO_INIT };
 +    std::atomic<uint64_t> findRequestIdentifier { 0 };
++    // The host answers HTTP authentication challenges
++    // (BWebKitView::SetAuthenticationRequests).
++    std::atomic<bool> asksForAuthentication { false };
 +    const std::shared_ptr<JavaScriptDialogRequestsHaiku> dialogs { std::make_shared<JavaScriptDialogRequestsHaiku>() };
 +    std::shared_ptr<WebViewContextHaiku> context;
 +    // Where on the screen the page goes when the view's window is a direct
@@ -116318,6 +117582,12 @@ index 0000000000000000000000000000000000000000..b0b14acdb92d45e52269bb73ef1bbc6a
 +// view's state, or decline it.
 +void openNewPageHaiku(std::shared_ptr<WebViewStateHaiku>, uint64_t identifier);
 +void declineNewPageHaiku(uint64_t identifier);
++// Main thread only. Answers a B_WEBKIT_AUTHENTICATION_REQUESTED identifier:
++// sign in with user and password (for the session, or this request only),
++// continue without (the page gets the server's own response), or cancel the
++// request.
++enum class AuthenticationAnswerHaiku : uint8_t { SignIn, Continue, Cancel };
++void answerAuthenticationHaiku(uint64_t identifier, AuthenticationAnswerHaiku, const String& user, const String& password, bool forSession);
 +// Main thread only. Runs an extension item of the last B_WEBKIT_CONTEXT_MENU.
 +void performExtensionMenuItemHaiku(uint64_t token);
 +// Main thread only. BWebKitView::PerformSpellingCommand for page's last
@@ -143189,10 +144459,10 @@ index 0000000000000000000000000000000000000000..a150bd67553ae6f1864c655cd04be661
 +} // namespace WebKit
 diff --git a/Source/WebKit/WebProcess/haiku/WebProcessHaiku.cpp b/Source/WebKit/WebProcess/haiku/WebProcessHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..ba19a248a66798cdb455d524f14f5c84f8dcfa24
+index 0000000000000000000000000000000000000000..6df2b74242878c9101ebaa7e6ebf2cc510093390
 --- /dev/null
 +++ b/Source/WebKit/WebProcess/haiku/WebProcessHaiku.cpp
-@@ -0,0 +1,137 @@
+@@ -0,0 +1,143 @@
 +/*
 + * Copyright (C) 2014,2019 Haiku, Inc.
 + *
@@ -143224,6 +144494,7 @@ index 0000000000000000000000000000000000000000..ba19a248a66798cdb455d524f14f5c84
 +#include "WebProcessCreationParameters.h"
 +#include "WebProcessDiagnosticsHaiku.h"
 +#include "WebProcessDataStoreParameters.h"
++#include "WebSleepDisablerClient.h"
 +#include <Application.h>
 +#if USE(COORDINATED_GRAPHICS)
 +#include <WebCore/PlatformDisplayHaiku.h>
@@ -143286,6 +144557,11 @@ index 0000000000000000000000000000000000000000..ba19a248a66798cdb455d524f14f5c84
 +    // The browser's debugging tools (BWebKitProcessDiagnostics) ask a thread
 +    // of this process about its pages, memory, media and compositors.
 +    startWebProcessDiagnosticsHaiku();
++    // Playing videos and screen wake locks ask to keep the screen on. This
++    // process has no window: the requests go to the page's proxy, as on
++    // Cocoa, and the browser keeps the screen on while it shows the page
++    // (ScreenAwakeRequestsHaiku in UIProcess/haiku/WebView.cpp).
++    WebCore::sleepDisablerClient() = makeUnique<WebSleepDisablerClient>();
 +}
 +
 +void WebProcess::platformSetWebsiteDataStoreParameters(WebProcessDataStoreParameters&& parameters)
@@ -167664,6 +168940,98 @@ index 365e0270d017689a0db3e83c0e71d6c1b5508414..7f4ae629c5f58f461f355ac157a00c38
 +}
 +
  exit exitStatus($result);
+diff --git a/Tools/Scripts/generate-media-controls-images-haiku.py b/Tools/Scripts/generate-media-controls-images-haiku.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..32dd71b3f12ace35a2ee81531ebb0a035a5bb0a5
+--- /dev/null
++++ b/Tools/Scripts/generate-media-controls-images-haiku.py
+@@ -0,0 +1,86 @@
++#!/usr/bin/env python3
++"""Write MediaControlsImagesHaiku.h: the media controls' Adwaita icons as a table
++built into WebCore. GTK and WPE read them from GResources and Windows from files
++beside the DLL; Haiku has neither. Run again after the images change:
++
++    Tools/Scripts/generate-media-controls-images-haiku.py
++"""
++import argparse
++import pathlib
++
++root = pathlib.Path(__file__).resolve().parents[2]
++parser = argparse.ArgumentParser()
++parser.add_argument('--images', type=pathlib.Path,
++                    default=root / 'Source/WebCore/Modules/modern-media-controls/images/adwaita')
++parser.add_argument('--output', type=pathlib.Path,
++                    default=root / 'Source/WebCore/platform/haiku/MediaControlsImagesHaiku.h')
++args = parser.parse_args()
++
++files = sorted(path for path in args.images.iterdir() if path.suffix in ('.svg', '.png'))
++if not files:
++    raise SystemExit('No media controls images in ' + str(args.images))
++
++lines = [
++    '// Generated by Tools/Scripts/generate-media-controls-images-haiku.py from',
++    '// Source/WebCore/Modules/modern-media-controls/images/adwaita; do not edit.',
++    '// The icons of the media controls (RenderThemeAdwaita.cpp), built into the',
++    '// library: there are no GResources on Haiku.',
++    '',
++    '#pragma once',
++    '',
++    '#include <span>',
++    '#include <wtf/StdLibExtras.h>',
++    '#include <wtf/text/WTFString.h>',
++    '',
++    'namespace WebCore {',
++    'namespace MediaControlsImagesHaiku {',
++    '',
++]
++entries = []
++for index, path in enumerate(files):
++    data = path.read_bytes()
++    if not data or len(data) > 1000000:
++        raise SystemExit('Unexpected image size: ' + str(path))
++    name = f'image{index}'
++    if path.suffix == '.svg':
++        text = data.decode('utf-8')
++        if ')SVG"' in text:
++            raise SystemExit('Raw string delimiter in ' + str(path))
++        lines.append(f'// {path.name}')
++        lines.append(f'static constexpr char {name}[] = R"SVG({text})SVG";')
++    else:
++        lines.append(f'// {path.name}')
++        escaped = ''.join(f'\\x{byte:02x}' for byte in data)
++        chunks = [escaped[start:start + 96] for start in range(0, len(escaped), 96)]
++        lines.append(f'static constexpr char {name}[] =')
++        lines += [f'    "{chunk}"' for chunk in chunks[:-1]]
++        lines.append(f'    "{chunks[-1]}";')
++    entries.append(f'    {{ "{path.stem}"_s, "{path.suffix[1:]}"_s, {{ {name}, sizeof({name}) - 1 }} }},')
++
++lines += [
++    '',
++    'struct Image {',
++    '    ASCIILiteral name;',
++    '    ASCIILiteral type;',
++    '    std::span<const char> data;',
++    '};',
++    '',
++    'static constexpr Image images[] = {',
++    *entries,
++    '};',
++    '',
++    '// The file iconName.iconType, or an empty span.',
++    'inline std::span<const uint8_t> find(const String& iconName, const String& iconType)',
++    '{',
++    '    for (auto& image : images) {',
++    '        if (iconName == image.name && iconType == image.type)',
++    '            return byteCast<uint8_t>(image.data);',
++    '    }',
++    '    return { };',
++    '}',
++    '',
++    '} // namespace MediaControlsImagesHaiku',
++    '} // namespace WebCore',
++]
++args.output.parent.mkdir(parents=True, exist_ok=True)
++args.output.write_text('\n'.join(lines) + '\n')
 diff --git a/Tools/Scripts/generate-pdfjs-haiku-resources.py b/Tools/Scripts/generate-pdfjs-haiku-resources.py
 new file mode 100644
 index 0000000000000000000000000000000000000000..d20ca9f34e49e90c63fd4e5cbab489916844c631

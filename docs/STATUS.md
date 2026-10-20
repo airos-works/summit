@@ -1313,6 +1313,8 @@ verification. The preview's tests do not establish those requirements.
 The inherited Curl cookie database also lacks SameSite persistence/enforcement
 and partitioned cookie storage; the new adapter does not claim to fix those
 requirements and rejects partitioned access instead of mixing stores.
+(SameSite is enforced since 20 October 2026, [networking.md](networking.md);
+partitioned storage is still missing.)
 
 ## Native helper exit follow-up
 

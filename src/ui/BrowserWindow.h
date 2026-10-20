@@ -574,6 +574,30 @@ private:
     BMessenger fPictureInPicture;
     int64 fPictureInPictureTab = 0;
     uint64 fPictureInPictureSession = 0;
+    // HTTP authentication (#87, BrowserWindowAuthentication.cpp): requests
+    // that wait for a name and password, in the order they came, and the
+    // sign-in sheet showing one of the selected tab's.
+    struct AuthenticationRequest {
+        uint64 identifier = 0;
+        int64 tab = 0;
+        // origin: the site's, where Remember saves (empty for a proxy).
+        std::string origin, host, realm, scheme, user;
+        int32 port = 0, failures = 0;
+        bool secure = false, proxy = false, lookingUp = false;
+        std::vector<std::pair<std::string, std::string>> accounts;
+    };
+    void AuthenticationRequested(const BMessage& message);
+    void AuthenticationAccounts(const BMessage& message);
+    void AuthenticationAnswered(const BMessage& message);
+    void ShowAuthenticationPrompt();
+    // A tab closes or moves to another window: its requests go on without
+    // a name and password.
+    void DropTabAuthentications(int64 tab);
+    std::vector<AuthenticationRequest> fAuthentications;
+    BMessenger fAuthenticationPrompt;
+    uint64 fAuthenticationShown = 0;
+    // The name last signed in with, by protection space (AuthenticationSpace).
+    std::map<std::string, std::string> fAuthenticationUsers;
     // A web app's window (#75): no tabs, toolbar or bookmarks bar.
     std::string fWebApp;
     std::string fWebAppScope, fWebAppName;

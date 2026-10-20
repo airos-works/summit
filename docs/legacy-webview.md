@@ -117,8 +117,10 @@ summit_webkit-1.10.0-3) and uninstall summit_webkitlegacy.
   `FrameSource()`) and the frame tree.
 - Web Inspector for BWebView programs (`SetInspectorView()` is kept, unused).
 - HTTP authentication and certificate questions: `AUTHENTICATION_CHALLENGE`
-  and `SSL_CERT_ERROR` are never sent, because the engine's API does not ask
-  its host (Summit itself has no such dialogs yet).
+  and `SSL_CERT_ERROR` are never sent. Since 20 October the engine can ask its
+  host for a name and password (`B_WEBKIT_AUTHENTICATION_REQUESTED`,
+  [certificate-warnings.md](certificate-warnings.md)); this library does not
+  turn that on yet.
 - WebPositive's cookie window still reads its own (now unused) cookie jar;
   the pages' cookies are the engine's.
 - `window.opener` for pages opened by `window.open()` (above).

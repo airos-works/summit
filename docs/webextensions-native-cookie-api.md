@@ -47,7 +47,8 @@ run in native tests. Network-to-UI delivery and extension listeners have not.
 Partition keys, Firefox first-party isolation and container stores, and
 `getPartitionKey` remain unfinished. WebCore still folds an omitted SameSite
 attribute into `None`; explicit `unspecified` is rejected. SameSite metadata
-storage does not establish SameSite enforcement on network requests. Unknown
+storage does not establish SameSite enforcement on network requests (added
+separately on 20 October 2026, [networking.md](networking.md)). Unknown
 query/write dimensions are rejected instead of silently broadening scope.
 Cocoa retains adapters to its existing dictionary implementations; no Cocoa SDK
 compile or runtime has been performed.
