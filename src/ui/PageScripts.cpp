@@ -73,6 +73,19 @@ Document.prototype.exitPictureInPicture = function () {
 };
 document.addEventListener('enterpictureinpicture', (event) => { current = event.target; }, true);
 document.addEventListener('leavepictureinpicture', (event) => { if (current === event.target) current = null; }, true);
+// The Picture in Picture button of the engine's own video controls (#83),
+// which cannot call this script from their world: they ask first whether
+// the browser shows videos in their own window, then toggle.
+document.addEventListener('summitpictureinpicturequery', (event) => {
+  if (event.target instanceof HTMLVideoElement) event.preventDefault();
+}, true);
+const requestPip = HTMLVideoElement.prototype.requestPictureInPicture, exitPip = Document.prototype.exitPictureInPicture;
+document.addEventListener('summitpictureinpicturetoggle', (event) => {
+  const video = event.target;
+  if (!(video instanceof HTMLVideoElement)) return;
+  if (current === video) exitPip.call(document).catch(() => {});
+  else requestPip.call(video).catch(() => {});
+}, true);
 // Players lay their controls over the video: find it under the pointer.
 document.addEventListener('contextmenu', (event) => {
   const video = document.elementsFromPoint(event.clientX, event.clientY).find((element) => element instanceof HTMLVideoElement);
