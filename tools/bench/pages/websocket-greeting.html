@@ -1,0 +1,63 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>websocket greeting: running</title>
+<style>
+body { font: 14px sans-serif; margin: 16px; }
+pre { background: #f4f4f4; padding: 8px; }
+</style>
+</head>
+<body>
+<h3>A server that speaks first</h3>
+<p>Connects to an echo server that sends a greeting as soon as the connection
+is open (as Microsoft Teams' notification channel does) and times how long
+the greeting takes to arrive, then how long an echo takes. Both should be a
+round trip or less; the greeting used to wait for the next packet.
+<code>?url=wss://…</code> picks another server. The title ends as
+<code>websocket greeting: N/M</code>.</p>
+<pre id="log"></pre>
+<script>
+const params = new URLSearchParams(location.search);
+const url = params.get('url') || 'wss://echo.websocket.org/';
+const logElement = document.getElementById('log');
+const results = [];
+function log(text) { logElement.textContent += text + '\n'; console.log('websocket-greeting: ' + text); }
+function check(name, ok, detail = '') { results.push({ name, ok }); log((ok ? 'PASS ' : 'FAIL ') + name + (detail ? ' (' + detail + ')' : '')); }
+
+async function run() {
+    for (let attempt = 1; attempt <= 3; attempt++) {
+        const ws = new WebSocket(url);
+        const start = performance.now();
+        let opened = 0;
+        const greeting = await new Promise(resolve => {
+            ws.onopen = () => { opened = performance.now(); };
+            ws.onmessage = event => resolve({ at: performance.now(), data: String(event.data) });
+            ws.onerror = () => resolve(null);
+            setTimeout(() => resolve(null), 5000);
+        });
+        const openMs = opened ? opened - start : -1;
+        if (!greeting) {
+            check(`greeting ${attempt}`, false, `open after ${openMs.toFixed(0)} ms, no greeting within 5 s`);
+            ws.close();
+            continue;
+        }
+        const afterOpen = greeting.at - opened;
+        check(`greeting ${attempt} within a second of open`, afterOpen < 1000, `open after ${openMs.toFixed(0)} ms, greeting ${afterOpen.toFixed(0)} ms later: "${greeting.data.slice(0, 40)}"`);
+        const sent = performance.now();
+        const echo = await new Promise(resolve => {
+            ws.onmessage = event => resolve(String(event.data));
+            setTimeout(() => resolve(null), 5000);
+            ws.send('hello ' + attempt);
+        });
+        check(`echo ${attempt}`, echo === 'hello ' + attempt, `${(performance.now() - sent).toFixed(0)} ms`);
+        ws.close();
+    }
+    const failed = results.filter(result => !result.ok).map(result => result.name);
+    document.title = `websocket greeting: ${results.length - failed.length}/${results.length}` + (failed.length ? ' failed: ' + failed.join(', ') : '');
+    log(document.title);
+}
+run().catch(error => { log('error: ' + error); document.title = 'websocket greeting: error ' + error; });
+</script>
+</body>
+</html>

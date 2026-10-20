@@ -53413,10 +53413,10 @@ index 0000000000000000000000000000000000000000..45f9b5810dcc89414a8444dfd9a93e62
 +#endif // ENABLE(MEDIA_STREAM) && PLATFORM(HAIKU)
 diff --git a/Source/WebCore/platform/mediastream/haiku/HaikuCaptureSources.cpp b/Source/WebCore/platform/mediastream/haiku/HaikuCaptureSources.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..d5b9670a0c0656fd1adb9f4529bd51e4b728547f
+index 0000000000000000000000000000000000000000..0e1fbf25b8f8edf7fb91667448c3cb0acd2b4b7e
 --- /dev/null
 +++ b/Source/WebCore/platform/mediastream/haiku/HaikuCaptureSources.cpp
-@@ -0,0 +1,917 @@
+@@ -0,0 +1,1339 @@
 +/*
 + * Copyright (C) 2026 Summit contributors.
 + *
@@ -53452,9 +53452,11 @@ index 0000000000000000000000000000000000000000..d5b9670a0c0656fd1adb9f4529bd51e4
 +#include <cstdlib>
 +#include <interface/Screen.h>
 +#include <private/interface/WindowInfo.h>
++#include <wtf/HashMap.h>
 +#include <wtf/MainThread.h>
 +#include <wtf/NeverDestroyed.h>
 +#include <wtf/text/MakeString.h>
++#include <wtf/text/StringHash.h>
 +#include <wtf/text/StringToIntegerConversion.h>
 +
 +WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_BEGIN
@@ -53632,6 +53634,517 @@ index 0000000000000000000000000000000000000000..d5b9670a0c0656fd1adb9f4529bd51e4
 +    return HaikuDisplayCaptureSource::create(device, WTF::move(hashSalts), constraints, pageIdentifier);
 +}
 +
++// Devices shared by the sources that capture from them.
++//
++// A camera's node and a sound card's input serve one consumer at a time, and
++// pages ask for the same device several times at once: the Teams device
++// check asks for the microphone four times and for the camera five times as
++// it starts, keeps the first streams and asks again with the devices' ids,
++// and every request but the first failed with NotReadableError (20 October
++// 2026). Other browsers hand out as many streams of a device as a page asks
++// for. So this process connects to each device once, for all its sources;
++// their tracks stop and change on their own. Pages in other processes still
++// find the device in use.
++
++class HaikuSharedCamera {
++    WTF_MAKE_NONCOPYABLE(HaikuSharedCamera);
++    WTF_DEPRECATED_MAKE_FAST_ALLOCATED(HaikuSharedCamera);
++public:
++    // Main thread, all of them.
++    static HaikuSharedCamera& forDevice(const String& persistentId, const String& label);
++    static HaikuSharedCamera* existing(const String& persistentId);
++    // Forgets the camera when it has no sources left (which disconnects it).
++    static void releaseIfUnused(const String& persistentId);
++
++    HaikuSharedCamera(const String& persistentId, const String& label)
++        : m_persistentId(persistentId)
++        , m_label(label)
++    {
++    }
++
++    ~HaikuSharedCamera()
++    {
++        // Before the members its handler uses.
++        m_connection = nullptr;
++    }
++
++    // False when the camera cannot be connected; the source is not added.
++    bool addSource(HaikuVideoCaptureSource&, IntSize);
++    void setSourceSize(HaikuVideoCaptureSource&, IntSize);
++    void removeSource(HaikuVideoCaptureSource&);
++
++private:
++    struct Source {
++        ThreadSafeWeakPtr<HaikuVideoCaptureSource> source;
++        const HaikuVideoCaptureSource* identity;
++        IntSize size;
++    };
++
++    bool hasSources();
++    IntSize largestSize();
++    bool update();
++    bool connect(IntSize);
++    void failSources();
++    void pictureReceived(const void*, size_t, const media_format&);
++
++    const String m_persistentId;
++    const String m_label;
++    std::unique_ptr<HaikuCaptureConnection> m_connection;
++    Lock m_lock;
++    Vector<Source> m_sources WTF_GUARDED_BY_LOCK(m_lock);
++    // The size asked of the camera.
++    IntSize m_connectedSize WTF_GUARDED_BY_LOCK(m_lock);
++};
++
++static HashMap<String, std::unique_ptr<HaikuSharedCamera>>& sharedCameras()
++{
++    ASSERT(isMainThread());
++    static NeverDestroyed<HashMap<String, std::unique_ptr<HaikuSharedCamera>>> cameras;
++    return cameras;
++}
++
++HaikuSharedCamera& HaikuSharedCamera::forDevice(const String& persistentId, const String& label)
++{
++    return *sharedCameras().ensure(persistentId, [&] {
++        return makeUnique<HaikuSharedCamera>(persistentId, label);
++    }).iterator->value;
++}
++
++HaikuSharedCamera* HaikuSharedCamera::existing(const String& persistentId)
++{
++    return sharedCameras().get(persistentId);
++}
++
++void HaikuSharedCamera::releaseIfUnused(const String& persistentId)
++{
++    auto iterator = sharedCameras().find(persistentId);
++    if (iterator != sharedCameras().end() && !iterator->value->hasSources())
++        sharedCameras().remove(iterator);
++}
++
++bool HaikuSharedCamera::hasSources()
++{
++    Locker locker { m_lock };
++    return !m_sources.isEmpty();
++}
++
++IntSize HaikuSharedCamera::largestSize()
++{
++    Locker locker { m_lock };
++    IntSize largest;
++    for (auto& source : m_sources) {
++        if (int64_t(source.size.width()) * source.size.height() > int64_t(largest.width()) * largest.height())
++            largest = source.size;
++    }
++    return largest;
++}
++
++bool HaikuSharedCamera::addSource(HaikuVideoCaptureSource& source, IntSize size)
++{
++    {
++        Locker locker { m_lock };
++        m_sources.append({ ThreadSafeWeakPtr { source }, &source, size });
++    }
++    if (update())
++        return true;
++    {
++        Locker locker { m_lock };
++        m_sources.removeFirstMatching([&](auto& entry) {
++            return entry.identity == &source;
++        });
++    }
++    // The others lost the camera with it.
++    failSources();
++    return false;
++}
++
++void HaikuSharedCamera::setSourceSize(HaikuVideoCaptureSource& source, IntSize size)
++{
++    {
++        Locker locker { m_lock };
++        for (auto& entry : m_sources) {
++            if (entry.identity == &source)
++                entry.size = size;
++        }
++    }
++    if (!update())
++        failSources();
++}
++
++void HaikuSharedCamera::removeSource(HaikuVideoCaptureSource& source)
++{
++    {
++        Locker locker { m_lock };
++        m_sources.removeFirstMatching([&](auto& entry) {
++            return entry.identity == &source;
++        });
++    }
++    if (!hasSources()) {
++        m_connection = nullptr;
++        return;
++    }
++    if (!update())
++        failSources();
++}
++
++// The camera runs at the largest size its sources ask for; the others get
++// its pictures cut and scaled to theirs. A new size is a new connection, and
++// when the camera cannot give it, the last one is kept.
++bool HaikuSharedCamera::update()
++{
++    auto size = largestSize();
++    if (size.isEmpty())
++        return false;
++    std::optional<IntSize> previous;
++    {
++        Locker locker { m_lock };
++        if (m_connection && size == m_connectedSize)
++            return true;
++        if (m_connection)
++            previous = m_connectedSize;
++    }
++    // The camera has one output: free it first.
++    m_connection = nullptr;
++    if (connect(size))
++        return true;
++    return previous && connect(*previous);
++}
++
++bool HaikuSharedCamera::connect(IntSize size)
++{
++    auto input = haikuMediaInputWithId(B_MEDIA_RAW_VIDEO, m_persistentId);
++    if (!input)
++        return false;
++
++    media_format format;
++    format.type = B_MEDIA_RAW_VIDEO;
++    format.u.raw_video = media_raw_video_format::wildcard;
++    format.u.raw_video.display.format = B_RGB32;
++    format.u.raw_video.display.line_width = size.width();
++    format.u.raw_video.display.line_count = size.height();
++
++    {
++        Locker locker { m_lock };
++        m_connectedSize = size;
++    }
++    String error;
++    // Destroying the connection waits for its handler, so it never outlives
++    // this object.
++    m_connection = HaikuCaptureConnection::connect(input->node, format, [this](const void* data, size_t bytes, const media_format& format, bigtime_t) {
++        pictureReceived(data, bytes, format);
++    }, error);
++    if (!m_connection) {
++        fprintf(stderr, "Summit: camera \"%s\": %s\n", m_label.utf8().legacyCStringPointer(), error.utf8().legacyCStringPointer());
++        return false;
++    }
++    return true;
++}
++
++// Ends the tracks of a camera that could not be connected again.
++void HaikuSharedCamera::failSources()
++{
++    Vector<ThreadSafeWeakPtr<HaikuVideoCaptureSource>> sources;
++    {
++        Locker locker { m_lock };
++        for (auto& entry : m_sources)
++            sources.append(entry.source);
++    }
++    for (auto& source : sources) {
++        callOnMainThread([source = WTF::move(source)] {
++            if (RefPtr protectedSource = source.get())
++                protectedSource->captureFailed();
++        });
++    }
++}
++
++// `picture` cut to the shape of `size` around its middle and scaled to it.
++static RefPtr<VideoFrameHaiku> fitPicture(const VideoFrameHaiku& picture, IntSize size)
++{
++    auto from = picture.size();
++    if (size.isEmpty() || from.isEmpty())
++        return nullptr;
++    int width = from.width();
++    int height = from.height();
++    if (int64_t(width) * size.height() > int64_t(height) * size.width())
++        width = std::max(2, int(int64_t(height) * size.width() / size.height()) & ~1);
++    else
++        height = std::max(2, int(int64_t(width) * size.height() / size.width()) & ~1);
++    // Even, so the chroma planes line up.
++    int left = ((from.width() - width) / 2) & ~1;
++    int top = ((from.height() - height) / 2) & ~1;
++
++    auto result = VideoFrameHaiku::create(VideoFrameHaiku::Format::I420, size, picture.presentationTime());
++    auto& y = picture.plane(0);
++    auto& u = picture.plane(1);
++    auto& v = picture.plane(2);
++    auto& toY = result->plane(0);
++    auto& toU = result->plane(1);
++    auto& toV = result->plane(2);
++    if (libyuv::I420Scale(y.data + top * y.stride + left, y.stride, u.data + (top / 2) * u.stride + left / 2, u.stride,
++        v.data + (top / 2) * v.stride + left / 2, v.stride, width, height,
++        toY.data, toY.stride, toU.data, toU.stride, toV.data, toV.stride, size.width(), size.height(), libyuv::kFilterBox))
++        return nullptr;
++    return result;
++}
++
++void HaikuSharedCamera::pictureReceived(const void* data, size_t bytes, const media_format& format)
++{
++    Locker locker { m_lock };
++    auto now = MonotonicTime::now();
++    Vector<std::pair<RefPtr<HaikuVideoCaptureSource>, IntSize>, 4> takers;
++    for (auto& entry : m_sources) {
++        RefPtr source = entry.source.get();
++        if (source && source->wantsPicture(now))
++            takers.append({ WTF::move(source), entry.size == m_connectedSize ? IntSize() : entry.size });
++    }
++    if (takers.isEmpty())
++        return;
++
++    auto& video = format.u.raw_video;
++    int width = video.display.line_width;
++    int height = video.display.line_count;
++    if (width <= 0 || height <= 0)
++        return;
++    auto picture = VideoFrameHaiku::create(VideoFrameHaiku::Format::I420, { width, height }, currentMediaTime());
++    auto& y = picture->plane(0);
++    auto& u = picture->plane(1);
++    auto& v = picture->plane(2);
++    int status = -1;
++    switch (video.display.format) {
++    case B_RGB32:
++    case B_RGBA32: {
++        size_t rowBytes = video.display.bytes_per_row ? video.display.bytes_per_row : 4 * width;
++        if (bytes < rowBytes * height)
++            return;
++        status = libyuv::ARGBToI420(static_cast<const uint8_t*>(data), rowBytes, y.data, y.stride, u.data, u.stride, v.data, v.stride, width, height);
++        break;
++    }
++    case B_YCbCr422: {
++        size_t rowBytes = video.display.bytes_per_row ? video.display.bytes_per_row : 2 * width;
++        if (bytes < rowBytes * height)
++            return;
++        status = libyuv::YUY2ToI420(static_cast<const uint8_t*>(data), rowBytes, y.data, y.stride, u.data, u.stride, v.data, v.stride, width, height);
++        break;
++    }
++    default:
++        break;
++    }
++    if (status)
++        return;
++
++    for (auto& [source, fitTo] : takers)
++        source->pictureReceived(picture.get(), fitTo);
++}
++
++class HaikuSharedMicrophone {
++    WTF_MAKE_NONCOPYABLE(HaikuSharedMicrophone);
++    WTF_DEPRECATED_MAKE_FAST_ALLOCATED(HaikuSharedMicrophone);
++public:
++    // Main thread, all of them.
++    static HaikuSharedMicrophone& forDevice(const String& persistentId, const String& label);
++    static HaikuSharedMicrophone* existing(const String& persistentId);
++    static void releaseIfUnused(const String& persistentId);
++
++    HaikuSharedMicrophone(const String& persistentId, const String& label)
++        : m_persistentId(persistentId)
++        , m_label(label)
++    {
++    }
++
++    ~HaikuSharedMicrophone()
++    {
++        // Before the members its handler uses.
++        m_connection = nullptr;
++    }
++
++    // False when the input cannot be connected; the source is not added.
++    bool addSource(HaikuAudioCaptureSource&);
++    void removeSource(HaikuAudioCaptureSource&);
++    double sampleRate() const { return m_connection ? m_connection->format().u.raw_audio.frame_rate : 0; }
++
++private:
++    struct Source {
++        ThreadSafeWeakPtr<HaikuAudioCaptureSource> source;
++        const HaikuAudioCaptureSource* identity;
++    };
++
++    bool hasSources();
++    void samplesReceived(const void*, size_t, const media_format&);
++
++    const String m_persistentId;
++    const String m_label;
++    std::unique_ptr<HaikuCaptureConnection> m_connection;
++    Lock m_lock;
++    Vector<Source> m_sources WTF_GUARDED_BY_LOCK(m_lock);
++    // On the consumer's thread only.
++    Vector<float> m_samples;
++    // Samples waiting for a whole 10 ms chunk when voice processing is on.
++    Vector<float> m_pending;
++    Vector<float> m_unprocessed;
++};
++
++static HashMap<String, std::unique_ptr<HaikuSharedMicrophone>>& sharedMicrophones()
++{
++    ASSERT(isMainThread());
++    static NeverDestroyed<HashMap<String, std::unique_ptr<HaikuSharedMicrophone>>> microphones;
++    return microphones;
++}
++
++HaikuSharedMicrophone& HaikuSharedMicrophone::forDevice(const String& persistentId, const String& label)
++{
++    return *sharedMicrophones().ensure(persistentId, [&] {
++        return makeUnique<HaikuSharedMicrophone>(persistentId, label);
++    }).iterator->value;
++}
++
++HaikuSharedMicrophone* HaikuSharedMicrophone::existing(const String& persistentId)
++{
++    return sharedMicrophones().get(persistentId);
++}
++
++void HaikuSharedMicrophone::releaseIfUnused(const String& persistentId)
++{
++    auto iterator = sharedMicrophones().find(persistentId);
++    if (iterator != sharedMicrophones().end() && !iterator->value->hasSources())
++        sharedMicrophones().remove(iterator);
++}
++
++bool HaikuSharedMicrophone::hasSources()
++{
++    Locker locker { m_lock };
++    return !m_sources.isEmpty();
++}
++
++bool HaikuSharedMicrophone::addSource(HaikuAudioCaptureSource& source)
++{
++    if (!m_connection) {
++        auto input = haikuMediaInputWithId(B_MEDIA_RAW_AUDIO, m_persistentId);
++        if (!input)
++            return false;
++        media_format format;
++        format.type = B_MEDIA_RAW_AUDIO;
++        format.u.raw_audio = media_raw_audio_format::wildcard;
++        String error;
++        // Destroying the connection waits for its handler, so it never
++        // outlives this object.
++        m_connection = HaikuCaptureConnection::connect(input->node, format, [this](const void* data, size_t bytes, const media_format& format, bigtime_t) {
++            samplesReceived(data, bytes, format);
++        }, error);
++        if (!m_connection) {
++            fprintf(stderr, "Summit: microphone \"%s\": %s\n", m_label.utf8().legacyCStringPointer(), error.utf8().legacyCStringPointer());
++            return false;
++        }
++    }
++    Locker locker { m_lock };
++    m_sources.append({ ThreadSafeWeakPtr { source }, &source });
++    return true;
++}
++
++void HaikuSharedMicrophone::removeSource(HaikuAudioCaptureSource& source)
++{
++    {
++        Locker locker { m_lock };
++        m_sources.removeFirstMatching([&](auto& entry) {
++            return entry.identity == &source;
++        });
++    }
++    if (!hasSources())
++        m_connection = nullptr;
++}
++
++void HaikuSharedMicrophone::samplesReceived(const void* data, size_t bytes, const media_format& format)
++{
++    auto& audio = format.u.raw_audio;
++    unsigned channels = audio.channel_count;
++    double rate = audio.frame_rate;
++    if (!channels || rate <= 0)
++        return;
++
++    size_t sampleSize = audio.format & media_raw_audio_format::B_AUDIO_SIZE_MASK;
++    if (!sampleSize)
++        return;
++    size_t frames = bytes / sampleSize / channels;
++    if (!frames)
++        return;
++    size_t sampleCount = frames * channels;
++    m_samples.resize(sampleCount);
++
++    switch (audio.format) {
++    case media_raw_audio_format::B_AUDIO_FLOAT: {
++        auto* in = static_cast<const float*>(data);
++        for (size_t i = 0; i < sampleCount; ++i)
++            m_samples[i] = in[i];
++        break;
++    }
++    case media_raw_audio_format::B_AUDIO_INT: {
++        auto* in = static_cast<const int32_t*>(data);
++        for (size_t i = 0; i < sampleCount; ++i)
++            m_samples[i] = in[i] / 2147483648.0f;
++        break;
++    }
++    case media_raw_audio_format::B_AUDIO_SHORT: {
++        auto* in = static_cast<const int16_t*>(data);
++        for (size_t i = 0; i < sampleCount; ++i)
++            m_samples[i] = in[i] / 32768.0f;
++        break;
++    }
++    case media_raw_audio_format::B_AUDIO_CHAR: {
++        auto* in = static_cast<const int8_t*>(data);
++        for (size_t i = 0; i < sampleCount; ++i)
++            m_samples[i] = in[i] / 128.0f;
++        break;
++    }
++    case media_raw_audio_format::B_AUDIO_UCHAR: {
++        auto* in = static_cast<const uint8_t*>(data);
++        for (size_t i = 0; i < sampleCount; ++i)
++            m_samples[i] = (int(in[i]) - 128) / 128.0f;
++        break;
++    }
++    default:
++        return;
++    }
++
++    Locker locker { m_lock };
++    Vector<std::pair<RefPtr<HaikuAudioCaptureSource>, bool>, 4> takers;
++    bool anyProcessed = false;
++    bool anyUnprocessed = false;
++    for (auto& entry : m_sources) {
++        RefPtr source = entry.source.get();
++        if (!source || !source->isProducingData())
++            continue;
++        bool processed = source->wantsVoiceProcessing();
++        (processed ? anyProcessed : anyUnprocessed) = true;
++        takers.append({ WTF::move(source), processed });
++    }
++
++    // Voice processing keeps the state of one stream: the samples go through
++    // it once, whatever the number of sources that want it.
++    if (!anyProcessed || rate != std::floor(rate) || std::fmod(rate, 100)) {
++        m_pending.clear();
++        for (auto& [source, processed] : takers)
++            source->samplesReceived(m_samples.span(), channels, rate);
++        return;
++    }
++
++    // Voice processing takes 10 ms at a time.
++    m_pending.append(m_samples.span());
++    size_t chunk = static_cast<size_t>(rate / 100) * channels;
++    size_t offset = 0;
++    while (m_pending.size() - offset >= chunk) {
++        auto samples = m_pending.mutableSpan().subspan(offset, chunk);
++        if (anyUnprocessed) {
++            m_unprocessed.clear();
++            m_unprocessed.append(samples);
++        }
++        HaikuVoiceProcessing::singleton().processCapture(samples, channels, static_cast<unsigned>(rate), true, true, true);
++        for (auto& [source, processed] : takers)
++            source->samplesReceived(processed ? std::span<const float> { samples } : std::span<const float> { m_unprocessed.span() }, channels, rate);
++        offset += chunk;
++    }
++    if (offset)
++        m_pending.removeAt(0, offset);
++}
++
 +// Camera.
 +
 +CaptureSourceOrError HaikuVideoCaptureSource::create(const CaptureDevice& device, MediaDeviceHashSalts&& hashSalts, const MediaConstraints* constraints, std::optional<PageIdentifier> pageIdentifier)
@@ -53723,47 +54236,42 @@ index 0000000000000000000000000000000000000000..d5b9670a0c0656fd1adb9f4529bd51e4
 +    m_currentSettings = std::nullopt;
 +    if (!flags.containsAny({ RealtimeMediaSourceSettings::Flag::Width, RealtimeMediaSourceSettings::Flag::Height }))
 +        return;
-+    // A new size is a new connection.
-+    if (m_connection && size() != m_connectedSize) {
-+        disconnect();
-+        connect();
-+    }
++    if (!m_connected)
++        return;
++    if (auto* camera = HaikuSharedCamera::existing(persistentID()))
++        camera->setSourceSize(*this, requestedSize());
++}
++
++IntSize HaikuVideoCaptureSource::requestedSize() const
++{
++    auto size = this->size();
++    if (size.isEmpty())
++        size = { 640, 480 };
++    return size;
 +}
 +
 +void HaikuVideoCaptureSource::connect()
 +{
-+    auto input = haikuMediaInputWithId(B_MEDIA_RAW_VIDEO, persistentID());
-+    if (!input) {
++    if (m_connected)
++        return;
++    auto& camera = HaikuSharedCamera::forDevice(persistentID(), name());
++    if (!camera.addSource(*this, requestedSize())) {
++        HaikuSharedCamera::releaseIfUnused(persistentID());
 +        captureFailed();
 +        return;
 +    }
-+
-+    auto size = this->size();
-+    if (size.isEmpty())
-+        size = { 640, 480 };
-+    media_format format;
-+    format.type = B_MEDIA_RAW_VIDEO;
-+    format.u.raw_video = media_raw_video_format::wildcard;
-+    format.u.raw_video.display.format = B_RGB32;
-+    format.u.raw_video.display.line_width = size.width();
-+    format.u.raw_video.display.line_count = size.height();
-+
-+    String error;
-+    m_connection = HaikuCaptureConnection::connect(input->node, format, [weakThis = ThreadSafeWeakPtr { *this }](const void* data, size_t bytes, const media_format& format, bigtime_t) {
-+        if (RefPtr protectedThis = weakThis.get())
-+            protectedThis->pictureReceived(data, bytes, format);
-+    }, error);
-+    if (!m_connection) {
-+        fprintf(stderr, "Summit: camera \"%s\": %s\n", name().utf8().legacyCStringPointer(), error.utf8().legacyCStringPointer());
-+        captureFailed();
-+        return;
-+    }
-+    m_connectedSize = size;
++    m_connected = true;
 +}
 +
 +void HaikuVideoCaptureSource::disconnect()
 +{
-+    m_connection = nullptr;
++    if (!m_connected)
++        return;
++    m_connected = false;
++    if (auto* camera = HaikuSharedCamera::existing(persistentID())) {
++        camera->removeSource(*this);
++        HaikuSharedCamera::releaseIfUnused(persistentID());
++    }
 +}
 +
 +void HaikuVideoCaptureSource::startProducingData()
@@ -53777,57 +54285,35 @@ index 0000000000000000000000000000000000000000..d5b9670a0c0656fd1adb9f4529bd51e4
 +    disconnect();
 +}
 +
-+void HaikuVideoCaptureSource::pictureReceived(const void* data, size_t bytes, const media_format& format)
++bool HaikuVideoCaptureSource::wantsPicture(MonotonicTime now)
 +{
 +    if (!isProducingData() || muted())
-+        return;
++        return false;
 +
 +    // Keep to the frame rate asked for.
-+    auto now = MonotonicTime::now();
 +    double rate = frameRate();
 +    if (rate > 0 && rate < 29 && now - m_lastPicture < Seconds(0.9 / rate))
-+        return;
++        return false;
 +    m_lastPicture = now;
++    return true;
++}
 +
-+    auto& video = format.u.raw_video;
-+    int width = video.display.line_width;
-+    int height = video.display.line_count;
-+    if (width <= 0 || height <= 0)
++void HaikuVideoCaptureSource::pictureReceived(VideoFrameHaiku& picture, IntSize fitTo)
++{
++    if (!fitTo.isEmpty()) {
++        if (auto fitted = fitPicture(picture, fitTo))
++            dispatchVideoFrameToObservers(*fitted, { });
 +        return;
-+    auto frame = VideoFrameHaiku::create(VideoFrameHaiku::Format::I420, { width, height }, currentMediaTime());
-+    auto& y = frame->plane(0);
-+    auto& u = frame->plane(1);
-+    auto& v = frame->plane(2);
-+    int status = -1;
-+    switch (video.display.format) {
-+    case B_RGB32:
-+    case B_RGBA32: {
-+        size_t rowBytes = video.display.bytes_per_row ? video.display.bytes_per_row : 4 * width;
-+        if (bytes < rowBytes * height)
-+            return;
-+        status = libyuv::ARGBToI420(static_cast<const uint8_t*>(data), rowBytes, y.data, y.stride, u.data, u.stride, v.data, v.stride, width, height);
-+        break;
 +    }
-+    case B_YCbCr422: {
-+        size_t rowBytes = video.display.bytes_per_row ? video.display.bytes_per_row : 2 * width;
-+        if (bytes < rowBytes * height)
-+            return;
-+        status = libyuv::YUY2ToI420(static_cast<const uint8_t*>(data), rowBytes, y.data, y.stride, u.data, u.stride, v.data, v.stride, width, height);
-+        break;
-+    }
-+    default:
-+        break;
-+    }
-+    if (status)
-+        return;
 +
-+    if (IntSize(width, height) != intrinsicSize()) {
-+        callOnMainThread([weakThis = ThreadSafeWeakPtr { *this }, width, height] {
++    auto size = picture.size();
++    if (size != intrinsicSize()) {
++        callOnMainThread([weakThis = ThreadSafeWeakPtr { *this }, size] {
 +            if (RefPtr protectedThis = weakThis.get())
-+                protectedThis->setIntrinsicSize({ width, height });
++                protectedThis->setIntrinsicSize(size);
 +        });
 +    }
-+    dispatchVideoFrameToObservers(frame.get(), { });
++    dispatchVideoFrameToObservers(picture, { });
 +}
 +
 +// Screen.
@@ -54132,7 +54618,7 @@ index 0000000000000000000000000000000000000000..d5b9670a0c0656fd1adb9f4529bd51e4
 +
 +HaikuAudioCaptureSource::~HaikuAudioCaptureSource()
 +{
-+    m_connection = nullptr;
++    disconnect();
 +}
 +
 +const RealtimeMediaSourceCapabilities& HaikuAudioCaptureSource::capabilities()
@@ -54189,29 +54675,19 @@ index 0000000000000000000000000000000000000000..d5b9670a0c0656fd1adb9f4529bd51e4
 +
 +void HaikuAudioCaptureSource::startProducingData()
 +{
-+    auto input = haikuMediaInputWithId(B_MEDIA_RAW_AUDIO, persistentID());
-+    if (!input) {
-+        captureFailed();
++    if (m_connected)
 +        return;
-+    }
-+    media_format format;
-+    format.type = B_MEDIA_RAW_AUDIO;
-+    format.u.raw_audio = media_raw_audio_format::wildcard;
-+
 +    m_framesSent = 0;
 +    m_baseTime = MediaTime::invalidTime();
 +    m_gain = volume();
-+    String error;
-+    m_connection = HaikuCaptureConnection::connect(input->node, format, [weakThis = ThreadSafeWeakPtr { *this }](const void* data, size_t bytes, const media_format& format, bigtime_t) {
-+        if (RefPtr protectedThis = weakThis.get())
-+            protectedThis->samplesReceived(data, bytes, format);
-+    }, error);
-+    if (!m_connection) {
-+        fprintf(stderr, "Summit: microphone \"%s\": %s\n", name().utf8().legacyCStringPointer(), error.utf8().legacyCStringPointer());
++    auto& microphone = HaikuSharedMicrophone::forDevice(persistentID(), name());
++    if (!microphone.addSource(*this)) {
++        HaikuSharedMicrophone::releaseIfUnused(persistentID());
 +        captureFailed();
 +        return;
 +    }
-+    auto rate = m_connection->format().u.raw_audio.frame_rate;
++    m_connected = true;
++    auto rate = microphone.sampleRate();
 +    if (rate > 0 && rate != sampleRate()) {
 +        callOnMainThread([weakThis = ThreadSafeWeakPtr { *this }, rate] {
 +            if (RefPtr protectedThis = weakThis.get())
@@ -54222,83 +54698,29 @@ index 0000000000000000000000000000000000000000..d5b9670a0c0656fd1adb9f4529bd51e4
 +
 +void HaikuAudioCaptureSource::stopProducingData()
 +{
-+    m_connection = nullptr;
++    disconnect();
 +}
 +
-+void HaikuAudioCaptureSource::samplesReceived(const void* data, size_t bytes, const media_format& format)
++void HaikuAudioCaptureSource::disconnect()
++{
++    if (!m_connected)
++        return;
++    m_connected = false;
++    if (auto* microphone = HaikuSharedMicrophone::existing(persistentID())) {
++        microphone->removeSource(*this);
++        HaikuSharedMicrophone::releaseIfUnused(persistentID());
++    }
++}
++
++void HaikuAudioCaptureSource::samplesReceived(std::span<const float> samples, unsigned channels, double rate)
 +{
 +    if (!isProducingData())
 +        return;
-+    auto& audio = format.u.raw_audio;
-+    unsigned channels = audio.channel_count;
-+    double rate = audio.frame_rate;
-+    if (!channels || rate <= 0)
-+        return;
-+
-+    size_t sampleSize = audio.format & media_raw_audio_format::B_AUDIO_SIZE_MASK;
-+    if (!sampleSize)
-+        return;
-+    size_t sampleCount = bytes / sampleSize;
-+    size_t frames = sampleCount / channels;
-+    if (!frames)
-+        return;
-+    m_samples.resize(frames * channels);
 +    float gain = m_gain;
-+    sampleCount = frames * channels;
-+
-+    switch (audio.format) {
-+    case media_raw_audio_format::B_AUDIO_FLOAT: {
-+        auto* in = static_cast<const float*>(data);
-+        for (size_t i = 0; i < sampleCount; ++i)
-+            m_samples[i] = in[i] * gain;
-+        break;
-+    }
-+    case media_raw_audio_format::B_AUDIO_INT: {
-+        auto* in = static_cast<const int32_t*>(data);
-+        for (size_t i = 0; i < sampleCount; ++i)
-+            m_samples[i] = in[i] * (gain / 2147483648.0f);
-+        break;
-+    }
-+    case media_raw_audio_format::B_AUDIO_SHORT: {
-+        auto* in = static_cast<const int16_t*>(data);
-+        for (size_t i = 0; i < sampleCount; ++i)
-+            m_samples[i] = in[i] * (gain / 32768.0f);
-+        break;
-+    }
-+    case media_raw_audio_format::B_AUDIO_CHAR: {
-+        auto* in = static_cast<const int8_t*>(data);
-+        for (size_t i = 0; i < sampleCount; ++i)
-+            m_samples[i] = in[i] * (gain / 128.0f);
-+        break;
-+    }
-+    case media_raw_audio_format::B_AUDIO_UCHAR: {
-+        auto* in = static_cast<const uint8_t*>(data);
-+        for (size_t i = 0; i < sampleCount; ++i)
-+            m_samples[i] = (int(in[i]) - 128) * (gain / 128.0f);
-+        break;
-+    }
-+    default:
-+        return;
-+    }
-+
-+    if (!m_voiceProcessing || rate != std::floor(rate) || std::fmod(rate, 100)) {
-+        m_pending.clear();
-+        sendSamples(m_samples.mutableSpan(), channels, rate);
-+        return;
-+    }
-+
-+    // Voice processing takes 10 ms at a time.
-+    m_pending.append(m_samples.span());
-+    size_t chunk = static_cast<size_t>(rate / 100) * channels;
-+    size_t offset = 0;
-+    while (m_pending.size() - offset >= chunk) {
-+        auto samples = m_pending.mutableSpan().subspan(offset, chunk);
-+        HaikuVoiceProcessing::singleton().processCapture(samples, channels, static_cast<unsigned>(rate), true, true, true);
-+        sendSamples(samples, channels, rate);
-+        offset += chunk;
-+    }
-+    if (offset)
-+        m_pending.removeAt(0, offset);
++    m_samples.resize(samples.size());
++    for (size_t i = 0; i < samples.size(); ++i)
++        m_samples[i] = samples[i] * gain;
++    sendSamples(m_samples.mutableSpan(), channels, rate);
 +}
 +
 +void HaikuAudioCaptureSource::sendSamples(std::span<float> samples, unsigned channels, double rate)
@@ -54336,10 +54758,10 @@ index 0000000000000000000000000000000000000000..d5b9670a0c0656fd1adb9f4529bd51e4
 +#endif // ENABLE(MEDIA_STREAM) && PLATFORM(HAIKU)
 diff --git a/Source/WebCore/platform/mediastream/haiku/HaikuCaptureSources.h b/Source/WebCore/platform/mediastream/haiku/HaikuCaptureSources.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..0c89f9bb2bcec1ce8f3796ad0e40a132510afd01
+index 0000000000000000000000000000000000000000..cd106bc074d2bc3ee339b6881a1f61467c66cd97
 --- /dev/null
 +++ b/Source/WebCore/platform/mediastream/haiku/HaikuCaptureSources.h
-@@ -0,0 +1,226 @@
+@@ -0,0 +1,241 @@
 +/*
 + * Copyright (C) 2026 Summit contributors.
 + *
@@ -54377,7 +54799,9 @@ index 0000000000000000000000000000000000000000..0c89f9bb2bcec1ce8f3796ad0e40a132
 +
 +namespace WebCore {
 +
-+class HaikuCaptureConnection;
++class HaikuSharedCamera;
++class HaikuSharedMicrophone;
++class VideoFrameHaiku;
 +
 +// Cameras (video) or microphones (audio) the Media Kit has: the default one
 +// first.
@@ -54422,7 +54846,8 @@ index 0000000000000000000000000000000000000000..0c89f9bb2bcec1ce8f3796ad0e40a132
 +};
 +
 +// A camera, through a consumer node of ours connected to it. It sends B_RGB32
-+// pictures of the size asked for; they go out as I420.
++// pictures of the size asked for; they go out as I420. The sources of one
++// camera in this process share the connection (HaikuSharedCamera).
 +class HaikuVideoCaptureSource final : public RealtimeVideoCaptureSource {
 +public:
 +    static CaptureSourceOrError create(const CaptureDevice&, MediaDeviceHashSalts&&, const MediaConstraints*, std::optional<PageIdentifier>);
@@ -54444,12 +54869,20 @@ index 0000000000000000000000000000000000000000..0c89f9bb2bcec1ce8f3796ad0e40a132
 +    void applyFrameRateAndZoomWithPreset(double, double, std::optional<VideoPreset>&&) final;
 +    void configurationChanged() final;
 +
++    friend class HaikuSharedCamera;
 +    void connect();
 +    void disconnect();
-+    void pictureReceived(const void*, size_t, const media_format&);
++    // The size to ask the camera for.
++    IntSize requestedSize() const;
++    // On the consumer's thread: whether this source takes the next picture
++    // (it is producing, not muted, and one is due at its frame rate).
++    bool wantsPicture(MonotonicTime);
++    // `fitTo` is empty when the camera runs at this source's size; else the
++    // camera runs larger for another source and the picture is cut and
++    // scaled to it.
++    void pictureReceived(VideoFrameHaiku&, IntSize fitTo);
 +
-+    std::unique_ptr<HaikuCaptureConnection> m_connection;
-+    IntSize m_connectedSize;
++    bool m_connected { false };
 +    std::optional<RealtimeMediaSourceCapabilities> m_capabilities;
 +    std::optional<RealtimeMediaSourceSettings> m_currentSettings;
 +    // Pictures are dropped to keep to the frame rate asked for.
@@ -54498,7 +54931,8 @@ index 0000000000000000000000000000000000000000..0c89f9bb2bcec1ce8f3796ad0e40a132
 +};
 +
 +// A microphone (or a sound card's input), through a consumer node of ours.
-+// Samples go out as interleaved float (HaikuAudioData).
++// Samples go out as interleaved float (HaikuAudioData). The sources of one
++// input in this process share the connection (HaikuSharedMicrophone).
 +// Destroyed on the main run loop: the last reference can be dropped on the
 +// capture node's thread, which cannot stop and disconnect its own node.
 +class HaikuAudioCaptureSource final : public RealtimeMediaSource, public ThreadSafeRefCountedAndCanMakeThreadSafeWeakPtr<HaikuAudioCaptureSource, WTF::DestructionThread::MainRunLoop> {
@@ -54521,14 +54955,17 @@ index 0000000000000000000000000000000000000000..0c89f9bb2bcec1ce8f3796ad0e40a132
 +    void settingsDidChange(OptionSet<RealtimeMediaSourceSettings::Flag>) final;
 +    void configurationChanged() final;
 +
-+    void samplesReceived(const void*, size_t, const media_format&);
++    friend class HaikuSharedMicrophone;
++    void disconnect();
++    bool wantsVoiceProcessing() const { return m_voiceProcessing; }
++    // On the consumer's thread: the input's samples, interleaved float,
++    // through voice processing when this source wants it.
++    void samplesReceived(std::span<const float>, unsigned channels, double rate);
 +
 +    void sendSamples(std::span<float>, unsigned channels, double rate);
 +
-+    std::unique_ptr<HaikuCaptureConnection> m_connection;
++    bool m_connected { false };
 +    Vector<float> m_samples;
-+    // Samples waiting for a whole 10 ms chunk when voice processing is on.
-+    Vector<float> m_pending;
 +    std::atomic<bool> m_voiceProcessing { false };
 +    uint64_t m_framesSent { 0 };
 +    MediaTime m_baseTime { MediaTime::invalidTime() };
@@ -60330,6 +60767,102 @@ index 0000000000000000000000000000000000000000..59f374ad848098e03b661974c7932c2c
 +};
 +
 +} // namespace WebCore
+diff --git a/Source/WebCore/platform/network/curl/CurlStream.cpp b/Source/WebCore/platform/network/curl/CurlStream.cpp
+index e7708fd8bf2a6a759976953050c4ac007c36f06f..1d43be8194f0db36914651ea8d05dc9e0b0cc8d8 100644
+--- a/Source/WebCore/platform/network/curl/CurlStream.cpp
++++ b/Source/WebCore/platform/network/curl/CurlStream.cpp
+@@ -124,7 +124,7 @@ void CurlStream::tryToTransfer(const fd_set& readfds, const fd_set& writefds, co
+         return;
+     }
+ 
+-    if (FD_ISSET(*socket, &readfds) || FD_ISSET(*socket, &exceptfds))
++    if (m_mayHaveReceivedData || FD_ISSET(*socket, &readfds) || FD_ISSET(*socket, &exceptfds))
+         tryToReceive();
+ 
+     if (FD_ISSET(*socket, &writefds))
+@@ -133,27 +133,39 @@ void CurlStream::tryToTransfer(const fd_set& readfds, const fd_set& writefds, co
+ 
+ void CurlStream::tryToReceive()
+ {
+-    if (!m_curlHandle)
+-        return;
+-
+-    Vector<uint8_t> receiveBuffer(kReceiveBufferSize);
+-    size_t bytesReceived = 0;
+-
+-    auto errorCode = m_curlHandle->receive(receiveBuffer.mutableSpan().data(), kReceiveBufferSize, bytesReceived);
+-    if (errorCode != CURLE_OK) {
+-        if (errorCode != CURLE_AGAIN)
+-            notifyFailure(errorCode);
+-        return;
++    // curl reads ahead of what it hands out (a whole TLS record, its socket
++    // buffer), and data it holds does not make the socket readable again: a
++    // frame that came with the handshake's answer waited for the next packet,
++    // and servers that speak first (Microsoft Teams' notification channel)
++    // timed out. So read until curl has nothing more, as curl_easy_recv() asks.
++    m_mayHaveReceivedData = false;
++    size_t totalReceived = 0;
++    while (m_curlHandle) {
++        if (totalReceived >= kMaxReceivedPerPass) {
++            m_mayHaveReceivedData = true;
++            return;
++        }
++
++        Vector<uint8_t> receiveBuffer(kReceiveBufferSize);
++        size_t bytesReceived = 0;
++
++        auto errorCode = m_curlHandle->receive(receiveBuffer.mutableSpan().data(), kReceiveBufferSize, bytesReceived);
++        if (errorCode != CURLE_OK) {
++            if (errorCode != CURLE_AGAIN)
++                notifyFailure(errorCode);
++            return;
++        }
++
++        // 0 bytes indicates a closed connection.
++        if (!bytesReceived)
++            destroyHandle();
++
++        totalReceived += bytesReceived;
++        receiveBuffer.resize(bytesReceived);
++        m_scheduler.callClientOnMainThread(m_streamID, [streamID = m_streamID, buffer = SharedBuffer::create(WTF::move(receiveBuffer))](Client& client) {
++            client.didReceiveData(streamID, buffer);
++        });
+     }
+-
+-    // 0 bytes indicates a closed connection.
+-    if (!bytesReceived)
+-        destroyHandle();
+-
+-    receiveBuffer.resize(bytesReceived);
+-    m_scheduler.callClientOnMainThread(m_streamID, [streamID = m_streamID, buffer = SharedBuffer::create(WTF::move(receiveBuffer))](Client& client) {
+-        client.didReceiveData(streamID, buffer);
+-    });
+ }
+ 
+ void CurlStream::tryToSend()
+diff --git a/Source/WebCore/platform/network/curl/CurlStream.h b/Source/WebCore/platform/network/curl/CurlStream.h
+index af04c9f7ac0333ffdb5c6638eb6b1ae20ab8104e..6085594fbae2ff4b8995fe561d1923da4b240a54 100644
+--- a/Source/WebCore/platform/network/curl/CurlStream.h
++++ b/Source/WebCore/platform/network/curl/CurlStream.h
+@@ -78,6 +78,8 @@ private:
+     void notifyFailure(CURLcode);
+ 
+     static const size_t kReceiveBufferSize = 16 * 1024;
++    // Most read in one pass before the other streams get their turn.
++    static const size_t kMaxReceivedPerPass = 1024 * 1024;
+ 
+     CurlStreamScheduler& m_scheduler;
+     CurlStreamID m_streamID;
+@@ -86,6 +88,9 @@ private:
+ 
+     Vector<std::pair<UniqueArray<uint8_t>, size_t>> m_sendBuffers;
+     size_t m_sendBufferOffset { 0 };
++    // A pass stopped at kMaxReceivedPerPass: curl may hold data the socket
++    // no longer reports.
++    bool m_mayHaveReceivedData { false };
+ };
+ 
+ } // namespace WebCore
 diff --git a/Source/WebCore/platform/network/curl/DNSResolveQueueCurl.cpp b/Source/WebCore/platform/network/curl/DNSResolveQueueCurl.cpp
 index 0a21c097975d267a561b77b3f750872b987bd98f..aefac57fa5ef7dbe444cebb76dca6708e6145071 100644
 --- a/Source/WebCore/platform/network/curl/DNSResolveQueueCurl.cpp
