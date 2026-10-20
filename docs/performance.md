@@ -1,5 +1,78 @@
 # Summit performance: Speedometer 3.1 baseline, where the time goes, stress test
 
+## 20 October 2026: direct presents timed to the scan on AMD (#82)
+
+On the Framework 13 scrolling showed quick horizontal tearing and flickering
+lines (issue #82). That was the untimed direct present described below
+("Tearing: Summit's own copies into the screen are not timed"): the web
+process copied each frame into the frame buffer whenever it was composed,
+and a copy made while the monitor's scan passed through the page showed the
+top of one frame and the bottom of the next. While the page scrolled, that
+line jumped about.
+
+jmgasper/haiku#39 is still open, but Summit does not need it. amdgpu_drm's
+KMS node, `/dev/dri/card0`, answers an ordinary program, alongside
+app_server, which holds the display:
+
+- `DRM_IOCTL_MODE_GETRESOURCES` and `GETCRTC` give each CRTC's place in the
+  frame buffer and its mode. On the laptop that is eDP at 0,0, the 4K
+  monitors at 2255,0 and 6095,0, the frame buffer's layout.
+- `DRM_IOCTL_WAIT_VBLANK` with a sequence of 0 returns at once with the time
+  the last vertical blank ended. amdgpu takes that from the scan position,
+  so it is exact to a line.
+
+So the web process can work out where any monitor's scan is. A probe
+program read all three CRTCs this way, and its blocking waits woke 0.4 ms
+before the active scan, as app_server's do.
+
+What Summit does now (`ScanTimingHaiku` in `AcceleratedSurface.cpp`, only
+where zink runs on RADV):
+
+- Before a direct present, the web process finishes the frame's drawing
+  (`glFinish`), so the copy runs when it is submitted and not whenever the
+  GPU gets to it.
+- It takes the rectangle the copy will write (the visible parts of the page
+  that changed) and the CRTC that shows most of it, and works out the scan's
+  row from the last blank's time and the line time.
+- If the scan is outside those rows and will not reach them before the copy
+  is done, the copy starts at once. "Done" is the time it takes to start
+  (`SUMMIT_SCAN_MARGIN_US`, 300 µs) plus how long the last copies took,
+  measured by Mesa's completion callback (a falling maximum, 1.5 to 2.3 ms
+  for a 4K page).
+- Otherwise it waits until the scan has just left the rows. From there the
+  copy, a blit several times faster than the scan, stays ahead of the scan
+  until it comes round again. A page as tall as the screen is copied from
+  the start of the blank.
+- The CRTCs are read again once a second, for a changed layout or mode.
+  `SUMMIT_DIRECT_PRESENT_SCAN_TIMING=0` turns it off. With
+  `SUMMIT_DIRECT_PRESENT_TRACE=1`, a line every 5 s says how many presents
+  waited, how long, and how long the copies took.
+
+The frame rate holds: a frame that misses its moment is presented a frame
+later, and the compositor's grid then starts the next one there, so frames
+settle just after the moment. The cost is up to one frame of latency, as with
+any vsync.
+
+Measured on the laptop (hrev60207+1716) with a test copy of the 0816 build,
+the display controller's CRC of every frame (`crcwatch`, 10 s, 598 frames, a
+window inside the page). Two greys swapped at every animation frame, or the
+page scrolled between two places at every frame; a whole frame is one of the
+pictures, anything else is torn:
+
+| Page, monitor | 0816 engine: torn frames | Timed: torn frames |
+| --- | --- | --- |
+| greys, laptop panel (eDP) | 255 of 598 | 0 of 598 (presents waited 3.0 ms on average) |
+| greys, 4K monitor | — | 0 and 0 of 598 (waited 11-12 ms) |
+| scrolling between two places, 4K monitor | 512 and 577 of 598 (432-552 different CRCs) | 0 of 598 in three runs (each frame one of the two pictures; their look changed once mid-run) |
+
+Every run kept 60 frames a second (300 presents in each 5 s). Wheel bursts
+on a Wikipedia article on the 4K monitor (`frame_stats scroll=true`, six
+bursts each): the median gap between frames was 16.7 ms both ways, the 95th
+percentile 17.0-33.5 ms timed against 20.6-48.4 ms untimed.
+
+Programs other than Summit that write into the screen (BDirectWindow) still
+need jmgasper/haiku#39.
+
 ## 19 October 2026 (evening): app_server's copy of the screen written on AMD
 
 Since jmgasper/haiku#37 the web process copies its frames straight into the

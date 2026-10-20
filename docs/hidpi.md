@@ -152,6 +152,15 @@ back as before, four times a second; the UI holds that frame's `FrameDone`
 until the view has drawn it (100 ms at most), so the older pixels never
 cover a newer direct frame.
 
+**Timed to the scan on AMD (#82).** Where the web process runs on RADV, a
+present finishes the frame's drawing and then starts its copy only when the
+monitor's scan will not run into the rows it writes, else just after the
+scan has left them. The scan's place comes from amdgpu_drm's KMS node
+(`/dev/dri/card0`: each CRTC's place and mode, and the time of its last
+vertical blank). Untimed copies tore most frames there.
+`SUMMIT_DIRECT_PRESENT_SCAN_TIMING=0` turns it off; see performance.md,
+"20 October 2026".
+
 **Two ways to hang the X399 found on the way** (both kernel faults, reported
 to the OS work; no ping on either interface, nothing in the syslog):
 

@@ -135656,10 +135656,10 @@ index 0000000000000000000000000000000000000000..abc82f6d26d2b1374740dc304282ae75
 +
 +}
 diff --git a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/AcceleratedSurface.cpp b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/AcceleratedSurface.cpp
-index 8177756a0e14111347846c912b8e3851f2559b4a..7413ae1140c1c59d0d4b8b42be47e59fb0b0166b 100644
+index 8177756a0e14111347846c912b8e3851f2559b4a..fb88e0e487c3dcf42a5b20acee24d670ea9637b1 100644
 --- a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/AcceleratedSurface.cpp
 +++ b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/AcceleratedSurface.cpp
-@@ -26,6 +26,24 @@
+@@ -26,6 +26,27 @@
  #include "config.h"
  #include "AcceleratedSurface.h"
  
@@ -135667,8 +135667,11 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..7413ae1140c1c59d0d4b8b42be47e59f
 +#include "DirectPresentHaiku.h"
 +#include "PresentStatsHaiku.h"
 +#include <image.h>
++#include <sys/ioctl.h>
 +#include <algorithm>
 +#include <atomic>
++#include <cerrno>
++#include <cmath>
 +#include <cstdio>
 +#include <cstdlib>
 +#include <cstring>
@@ -135684,7 +135687,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..7413ae1140c1c59d0d4b8b42be47e59f
  #if USE(COORDINATED_GRAPHICS)
  #include "WebPage.h"
  #include "WebProcess.h"
-@@ -51,12 +69,18 @@ WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_BEGIN
+@@ -51,12 +72,18 @@ WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_BEGIN
  #include <skia/gpu/ganesh/GrBackendSurface.h>
  #include <skia/gpu/ganesh/SkSurfaceGanesh.h>
  #include <skia/gpu/ganesh/gl/GrGLBackendSurface.h>
@@ -135704,7 +135707,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..7413ae1140c1c59d0d4b8b42be47e59f
  #include <epoxy/egl.h>
  #endif
  
-@@ -94,6 +118,19 @@ using namespace WebCore;
+@@ -94,6 +121,19 @@ using namespace WebCore;
  
  WTF_MAKE_TZONE_ALLOCATED_IMPL(AcceleratedSurface);
  
@@ -135724,7 +135727,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..7413ae1140c1c59d0d4b8b42be47e59f
  Ref<AcceleratedSurface> AcceleratedSurface::create(WebPage& webPage, Function<void()>&& frameCompleteHandler, RenderingPurpose renderingPurpose)
  {
      return adoptRef(*new AcceleratedSurface(webPage, WTF::move(frameCompleteHandler), renderingPurpose));
-@@ -122,7 +159,7 @@ AcceleratedSurface::AcceleratedSurface(WebPage& webPage, Function<void()>&& fram
+@@ -122,7 +162,7 @@ AcceleratedSurface::AcceleratedSurface(WebPage& webPage, Function<void()>&& fram
  #endif
      , m_id(generateID())
      , m_renderingPurpose(renderingPurpose)
@@ -135733,7 +135736,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..7413ae1140c1c59d0d4b8b42be47e59f
      , m_hardwareAccelerationEnabled(webPage.corePage()->settings().hardwareAccelerationEnabled())
  #endif
      , m_backgroundColor(webPage.backgroundColor())
-@@ -130,11 +167,373 @@ AcceleratedSurface::AcceleratedSurface(WebPage& webPage, Function<void()>&& fram
+@@ -130,11 +170,657 @@ AcceleratedSurface::AcceleratedSurface(WebPage& webPage, Function<void()>&& fram
      , m_isVisible(webPage.activityState().contains(ActivityState::IsVisible))
      , m_useExplicitSync(usesGL() && useExplicitSync())
  #if ENABLE(DAMAGE_TRACKING)
@@ -135809,6 +135812,197 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..7413ae1140c1c59d0d4b8b42be47e59f
 +
 +static bool directPresentTraceHaiku();
 +
++// Where the monitors' scans are, for the presents into the frame buffer on
++// AMD's GPUs (#82). Nothing timed those copies: one made while the scan
++// passed through the page showed the top of one frame and the bottom of the
++// next, and while the page scrolled the line between them flickered across
++// it (haiku#39: programs cannot get an output's blanks from app_server).
++// amdgpu_drm's KMS node answers any program, though: each CRTC's place in
++// the frame buffer, its timing, and when its last vertical blank ended,
++// exact to a line, so where its scan is at any moment. A present starts its
++// copy only where the copy will be done before the scan reaches the rows it
++// writes, else it waits until the scan has just left them; the copy, a GPU
++// blit many times faster than the scan, then stays ahead of it, as
++// app_server's own copies do (its vertical blank flush).
++// SUMMIT_DIRECT_PRESENT_SCAN_TIMING=0 turns it off; SUMMIT_SCAN_MARGIN_US is
++// the time a copy may take to start (300 by default), on top of how long the
++// last copies took.
++class ScanTimingHaiku {
++    WTF_MAKE_NONCOPYABLE(ScanTimingHaiku);
++public:
++    // Null where presents are not timed.
++    static ScanTimingHaiku* singleton()
++    {
++        static ScanTimingHaiku* timing = [] () -> ScanTimingHaiku* {
++            const char* value = getenv("SUMMIT_DIRECT_PRESENT_SCAN_TIMING");
++            if (value ? !strcmp(value, "0") : !usesRadvHaiku())
++                return nullptr;
++            int device = open("/dev/dri/card0", O_RDWR | O_CLOEXEC);
++            if (device < 0) {
++                std::fprintf(stderr, "Summit direct present: no KMS node (%s); presents are not timed to the scan\n", strerror(errno));
++                return nullptr;
++            }
++            // Opened while no one held the display (app_server starting), the
++            // node would make this process its master.
++            ioctl(device, linuxIoctl(0, 0x1f, 0));
++            auto* timing = new ScanTimingHaiku(device);
++            if (const char* margin = getenv("SUMMIT_SCAN_MARGIN_US"))
++                timing->m_startMicros = std::clamp(atoi(margin), 0, 8000);
++            return timing;
++        }();
++        return timing;
++    }
++
++    // Until a copy into the rectangle (frame buffer pixels, edges included)
++    // that takes copyMicros can be made out of the way of the scan of the
++    // monitor showing most of it. Returns how long it waited (microseconds).
++    bigtime_t waitUntilClear(int32_t left, int32_t top, int32_t right, int32_t bottom, bigtime_t copyMicros)
++    {
++        std::optional<Crtc> best;
++        {
++            std::lock_guard guard(m_lock);
++            if (m_failed)
++                return 0;
++            if (system_time() - m_refreshed > 1000000)
++                refresh();
++            int64_t bestArea = 0;
++            for (auto& crtc : m_crtcs) {
++                int64_t width = std::min(right + 1, crtc.x + crtc.width) - std::max(left, crtc.x);
++                int64_t height = std::min(bottom + 1, crtc.y + crtc.height) - std::max(top, crtc.y);
++                if (width > 0 && height > 0 && width * height > bestArea) {
++                    bestArea = width * height;
++                    best = crtc;
++                }
++            }
++        }
++        if (!best)
++            return 0;
++        const double first = std::max(0, top - best->y);
++        const double end = std::min(best->height, bottom + 1 - best->y);
++        if (first >= end)
++            return 0;
++
++        DrmWaitVBlank query { };
++        query.request.type = vblankRelative | ((best->index << 1) & 0x3e);
++        query.request.sequence = 0;
++        if (ioctl(m_device, linuxIoctl(3, 0x3a, sizeof(DrmWaitVBlank)), &query) != 0) {
++            std::lock_guard guard(m_lock);
++            if (++m_errors == 10) {
++                m_failed = true;
++                std::fprintf(stderr, "Summit direct present: the KMS node gives no blank times (%s); presents are not timed to the scan\n", strerror(errno));
++            }
++            return 0;
++        }
++        const bigtime_t scanStart = bigtime_t(query.reply.tvalSeconds) * 1000000 + query.reply.tvalMicroseconds;
++        const double lineMicros = double(best->htotal) * 1000 / best->clock;
++        const bigtime_t now = system_time();
++        // The scan's row now: negative while the blank before row 0 lasts.
++        double line = std::fmod((now - scanStart) / lineMicros, double(best->vtotal));
++        if (line < 0)
++            line += best->vtotal;
++        if (line >= best->height)
++            line -= best->vtotal;
++        const double margin = (m_startMicros + copyMicros) / lineMicros;
++        // Rows still to scan before the scan reaches the first of them.
++        const double ahead = line < first ? first - line : best->vtotal - line + first;
++        if ((line < first || line >= end) && ahead >= margin)
++            return 0;
++        // A page too tall for the blank (one filling the screen) is copied
++        // from there all the same: the copy is faster than the scan.
++        const double toEnd = line < end ? end - line : best->vtotal - line + end;
++        const bigtime_t wait = static_cast<bigtime_t>(toEnd * lineMicros) + 1;
++        snooze(wait);
++        return wait;
++    }
++
++private:
++    explicit ScanTimingHaiku(int device)
++        : m_device(device)
++    {
++    }
++
++    // Linux's ioctl numbers, which amdgpu_drm decodes (Haiku's BSD macros
++    // encode them differently).
++    static constexpr unsigned long linuxIoctl(unsigned direction, unsigned number, size_t size)
++    {
++        return (static_cast<unsigned long>(direction) << 30) | (size << 16) | ('d' << 8) | number;
++    }
++
++    // Linux's DRM structures (uapi drm.h, drm_mode.h).
++    static constexpr uint32_t vblankRelative = 0x1;
++    union DrmWaitVBlank {
++        struct {
++            uint32_t type;
++            uint32_t sequence;
++            unsigned long signal;
++        } request;
++        struct {
++            uint32_t type;
++            uint32_t sequence;
++            long tvalSeconds;
++            long tvalMicroseconds;
++        } reply;
++    };
++    struct DrmCardResources {
++        uint64_t framebuffers, crtcs, connectors, encoders;
++        uint32_t framebufferCount, crtcCount, connectorCount, encoderCount;
++        uint32_t minimumWidth, maximumWidth, minimumHeight, maximumHeight;
++    };
++    struct DrmModeInfo {
++        uint32_t clock;
++        uint16_t hdisplay, hsyncStart, hsyncEnd, htotal, hskew;
++        uint16_t vdisplay, vsyncStart, vsyncEnd, vtotal, vscan;
++        uint32_t vrefresh, flags, type;
++        char name[32];
++    };
++    struct DrmCrtc {
++        uint64_t connectors;
++        uint32_t connectorCount, crtcID, framebufferID, x, y, gammaSize, modeValid;
++        DrmModeInfo mode;
++    };
++    static_assert(sizeof(DrmCardResources) == 64 && sizeof(DrmModeInfo) == 68 && sizeof(DrmCrtc) == 104);
++
++    // A monitor being scanned out: its part of the frame buffer and timing.
++    struct Crtc {
++        uint32_t index;
++        int32_t x, y, width, height;
++        uint32_t clock, htotal, vtotal;
++    };
++
++    // The CRTCs as they are now; once a second, for a changed layout or mode.
++    void refresh()
++    {
++        m_refreshed = system_time();
++        m_crtcs.clear();
++        DrmCardResources counts { };
++        if (ioctl(m_device, linuxIoctl(3, 0xa0, sizeof(DrmCardResources)), &counts) != 0)
++            return;
++        uint32_t ids[32] = { };
++        DrmCardResources resources { };
++        resources.crtcCount = std::min<uint32_t>(counts.crtcCount, 32);
++        resources.crtcs = reinterpret_cast<uintptr_t>(ids);
++        if (ioctl(m_device, linuxIoctl(3, 0xa0, sizeof(DrmCardResources)), &resources) != 0)
++            return;
++        for (uint32_t i = 0; i < std::min<uint32_t>(resources.crtcCount, 32); ++i) {
++            DrmCrtc crtc { };
++            crtc.crtcID = ids[i];
++            if (ioctl(m_device, linuxIoctl(3, 0xa1, sizeof(DrmCrtc)), &crtc) != 0 || !crtc.modeValid
++                || !crtc.mode.clock || !crtc.mode.htotal || crtc.mode.vtotal <= crtc.mode.vdisplay || !crtc.mode.vdisplay)
++                continue;
++            m_crtcs.append({ i, static_cast<int32_t>(crtc.x), static_cast<int32_t>(crtc.y), crtc.mode.hdisplay, crtc.mode.vdisplay,
++                crtc.mode.clock, crtc.mode.htotal, crtc.mode.vtotal });
++        }
++    }
++
++    int m_device;
++    int m_startMicros { 300 };
++    std::mutex m_lock;
++    Vector<Crtc, 4> m_crtcs;
++    bigtime_t m_refreshed { 0 };
++    unsigned m_errors { 0 };
++    bool m_failed { false };
++};
++
 +// Copies composited frames straight into the screen where the UI process
 +// says the page is (DirectPresentHaiku.h), through Summit's private Mesa
 +// (patch 06, summit_haiku_present_framebuffer in libEGL_mesa). Compositing
@@ -135859,6 +136053,17 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..7413ae1140c1c59d0d4b8b42be47e59f
 +        auto present = functions().present;
 +        if (!present || !m_state->enabled)
 +            return false;
++        // Timed to the scan (ScanTimingHaiku): the frame's drawing is finished
++        // first, so that the copy runs when it is submitted, at a moment
++        // chosen for it. The target is read without the lock: only the
++        // moment depends on it.
++        bigtime_t scanWait = 0;
++        if (auto* timing = ScanTimingHaiku::singleton()) {
++            if (auto bounds = boundsForTiming(damage)) {
++                glFinish();
++                scanWait = timing->waitUntilClear((*bounds)[0], (*bounds)[1], (*bounds)[2], (*bounds)[3], m_completion.copyMicros());
++            }
++        }
 +        // The UI process holds the lock only while it changes the target.
 +        const bigtime_t lockStart = system_time();
 +        if (acquire_sem_etc(m_state->lock, 1, B_RELATIVE_TIMEOUT, 20000) != B_OK)
@@ -135919,9 +136124,12 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..7413ae1140c1c59d0d4b8b42be47e59f
 +            request.backHeight = m_state->backHeight;
 +        }
 +        request.framesInFlight = 2;
-+        request.completed = [](void* cookie) { static_cast<std::atomic<int32_t>*>(cookie)->fetch_sub(1); };
-+        request.cookie = &m_state->inFlight;
++        request.completed = [](void* cookie) { static_cast<Completion*>(cookie)->completed(); };
++        m_completion.inFlight = &m_state->inFlight;
++        m_completion.submitted = system_time();
++        request.cookie = &m_completion;
 +        m_state->inFlight.fetch_add(1);
++        const bigtime_t presentStart = system_time();
 +        int result = present(framebuffer, &request);
 +        // -4: the driver could not import app_server's copy (an amdgpu
 +        // without userptr, say), and Mesa would try again, and fail, every
@@ -135965,6 +136173,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..7413ae1140c1c59d0d4b8b42be47e59f
 +        m_presentedAny = true;
 +        m_state->presentedGeneration = m_state->generation;
 +        m_state->presents.fetch_add(1);
++        traceScanTiming(scanWait, presentStart);
 +        if (PresentStageStatsHaiku::enabled()) {
 +            static NeverDestroyed<PresentStageStatsHaiku> copied("pixels presented directly (web)");
 +            double pixels = 0;
@@ -135977,6 +136186,68 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..7413ae1140c1c59d0d4b8b42be47e59f
 +
 +private:
 +    DirectPresenterHaiku() { ++liveCount(); }
++
++    // What a present is going to write, as one rectangle: the visible parts
++    // of the page that changed (all of them for a present in full).
++    std::optional<std::array<int32_t, 4>> boundsForTiming(const Vector<IntRect, 1>& damage) const
++    {
++        const bool full = !m_presentedAny || m_state->generation != m_state->presentedGeneration.load();
++        const uint32_t visibleCount = std::min(m_state->rectCount, DirectPresentStateHaiku::maximumRects);
++        std::optional<std::array<int32_t, 4>> bounds;
++        auto add = [&](int32_t left, int32_t top, int32_t right, int32_t bottom) {
++            if (left > right || top > bottom)
++                return;
++            if (!bounds) {
++                bounds = std::array<int32_t, 4> { left, top, right, bottom };
++                return;
++            }
++            auto& united = *bounds;
++            united = { std::min(united[0], left), std::min(united[1], top), std::max(united[2], right), std::max(united[3], bottom) };
++        };
++        for (uint32_t i = 0; i < visibleCount; ++i) {
++            const int32_t* visible = m_state->rects + i * 4;
++            if (full) {
++                add(visible[0], visible[1], visible[2], visible[3]);
++                continue;
++            }
++            for (auto& rect : damage) {
++                add(std::max(visible[0], m_state->originX + rect.x()), std::max(visible[1], m_state->originY + rect.y()),
++                    std::min(visible[2], m_state->originX + rect.maxX() - 1), std::min(visible[3], m_state->originY + rect.maxY() - 1));
++            }
++        }
++        return bounds;
++    }
++
++    // SUMMIT_DIRECT_PRESENT_TRACE: how long presents waited for the scan and
++    // how long their copies took, every 5 seconds. The copy is waited for
++    // here (only while tracing) to time it.
++    void traceScanTiming(bigtime_t scanWait, bigtime_t presented)
++    {
++        if (!directPresentTraceHaiku() || !ScanTimingHaiku::singleton())
++            return;
++        if (functions().waitIdle)
++            functions().waitIdle();
++        static std::mutex lock;
++        static bigtime_t since = 0, waitTotal = 0, waitLongest = 0, copyTotal = 0, copyLongest = 0;
++        static unsigned presents = 0, waited = 0;
++        std::lock_guard guard(lock);
++        const bigtime_t now = system_time();
++        if (!since)
++            since = now;
++        ++presents;
++        waited += scanWait > 0;
++        waitTotal += scanWait;
++        waitLongest = std::max(waitLongest, scanWait);
++        copyTotal += now - presented;
++        copyLongest = std::max(copyLongest, now - presented);
++        if (now - since < 5000000)
++            return;
++        std::fprintf(stderr, "Summit direct present: %u presents, %u waited for the scan (%.2f ms on average, longest %.2f ms), copies %.2f ms on average, longest %.2f ms\n",
++            presents, waited, waited ? waitTotal / 1000.0 / waited : 0.0, waitLongest / 1000.0, copyTotal / 1000.0 / presents, copyLongest / 1000.0);
++        since = now;
++        presents = waited = 0;
++        waitTotal = waitLongest = copyTotal = copyLongest = 0;
++    }
 +    // Presenters alive in this process; compositing threads and the main one.
 +    static std::atomic<int>& liveCount()
 +    {
@@ -136038,8 +136309,24 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..7413ae1140c1c59d0d4b8b42be47e59f
 +        return found;
 +    }
 +
++    // When the GPU finished the copies, on Mesa's thread: how long they take
++    // (the larger of the last one and a slowly falling estimate).
++    struct Completion {
++        std::atomic<int32_t>* inFlight { nullptr };
++        std::atomic<bigtime_t> submitted { 0 };
++        std::atomic<bigtime_t> estimate { 1000 };
++        void completed()
++        {
++            const bigtime_t took = std::clamp<bigtime_t>(system_time() - submitted.load(), 0, 8000);
++            estimate = std::max(took, estimate.load() * 15 / 16);
++            inFlight->fetch_sub(1);
++        }
++        bigtime_t copyMicros() const { return estimate.load(); }
++    };
++
 +    area_id m_clone { -1 };
 +    DirectPresentStateHaiku* m_state { nullptr };
++    Completion m_completion;
 +    area_id m_backSource { -1 };
 +    void* m_backBits { nullptr };
 +    Vector<std::array<int32_t, 4>> m_rects;
@@ -136107,7 +136394,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..7413ae1140c1c59d0d4b8b42be47e59f
  AcceleratedSurface::~AcceleratedSurface() = default;
  
  WTF_MAKE_TZONE_ALLOCATED_IMPL(AcceleratedSurface::RenderTarget);
-@@ -176,7 +575,7 @@ void AcceleratedSurface::RenderTarget::createSkiaSurfaceForFramebuffer(unsigned
+@@ -176,7 +862,7 @@ void AcceleratedSurface::RenderTarget::createSkiaSurfaceForFramebuffer(unsigned
      m_skiaSurface = SkSurfaces::WrapBackendRenderTarget(display.skiaGrContext(), backendRenderTarget, origin, kRGBA_8888_SkColorType, SkColorSpace::MakeSRGB(), &properties);
  }
  
@@ -136116,7 +136403,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..7413ae1140c1c59d0d4b8b42be47e59f
  WTF_MAKE_TZONE_ALLOCATED_IMPL(AcceleratedSurface::RenderTargetShareableBuffer);
  
  AcceleratedSurface::RenderTargetShareableBuffer::RenderTargetShareableBuffer(AcceleratedSurface& surface, const IntSize& size)
-@@ -218,9 +617,36 @@ void AcceleratedSurface::RenderTargetShareableBuffer::initializeColorBuffer(EGLI
+@@ -218,9 +904,36 @@ void AcceleratedSurface::RenderTargetShareableBuffer::initializeColorBuffer(EGLI
      glBindRenderbuffer(GL_RENDERBUFFER, m_colorBuffer);
      if (image)
          glEGLImageTargetRenderbufferStorageOES(GL_RENDERBUFFER, image);
@@ -136154,7 +136441,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..7413ae1140c1c59d0d4b8b42be47e59f
  
      if (m_surface->useSkia())
          createSkiaSurfaceForFramebuffer(m_fbo);
-@@ -228,6 +654,10 @@ void AcceleratedSurface::RenderTargetShareableBuffer::initializeColorBuffer(EGLI
+@@ -228,6 +941,10 @@ void AcceleratedSurface::RenderTargetShareableBuffer::initializeColorBuffer(EGLI
  
  void AcceleratedSurface::RenderTargetShareableBuffer::sendFrame(Vector<WebCore::IntRect, 1>&& damageRects)
  {
@@ -136165,7 +136452,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..7413ae1140c1c59d0d4b8b42be47e59f
      WebProcess::singleton().parentProcessConnection()->send(Messages::AcceleratedBackingStore::Frame(m_id, WTF::move(damageRects), WTF::move(m_renderingFenceFD)), m_surface->surfaceID());
  }
  
-@@ -418,7 +848,14 @@ std::unique_ptr<AcceleratedSurface::RenderTarget> AcceleratedSurface::RenderTarg
+@@ -418,7 +1135,14 @@ std::unique_ptr<AcceleratedSurface::RenderTarget> AcceleratedSurface::RenderTarg
          return nullptr;
      }
  
@@ -136180,7 +136467,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..7413ae1140c1c59d0d4b8b42be47e59f
      if (!bufferHandle) {
          WTFLogAlways("Failed to create handle for shared memory buffer");
          return nullptr;
-@@ -439,13 +876,479 @@ AcceleratedSurface::RenderTargetSHMImage::RenderTargetSHMImage(AcceleratedSurfac
+@@ -439,13 +1163,479 @@ AcceleratedSurface::RenderTargetSHMImage::RenderTargetSHMImage(AcceleratedSurfac
      WebProcess::singleton().parentProcessConnection()->send(Messages::AcceleratedBackingStore::DidCreateSHMBuffer(m_id, WTF::move(bitmapHandle)), m_surface->surfaceID());
  }
  
@@ -136660,7 +136947,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..7413ae1140c1c59d0d4b8b42be47e59f
  
          SkImageInfo info = SkImageInfo::Make(m_bitmap->size().width(), m_bitmap->size().height(), SkColorType::kBGRA_8888_SkColorType, SkAlphaType::kPremul_SkAlphaType);
  
-@@ -457,9 +1360,14 @@ void AcceleratedSurface::RenderTargetSHMImage::didRenderFrame()
+@@ -457,9 +1647,14 @@ void AcceleratedSurface::RenderTargetSHMImage::didRenderFrame()
          return;
      }
  
@@ -136675,7 +136962,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..7413ae1140c1c59d0d4b8b42be47e59f
  std::unique_ptr<AcceleratedSurface::RenderTarget> AcceleratedSurface::RenderTargetTexture::create(AcceleratedSurface& surface, const IntSize& size)
  {
      auto texture = BitmapTexture::create(size);
-@@ -515,8 +1423,9 @@ AcceleratedSurface::RenderTargetTexture::RenderTargetTexture(AcceleratedSurface&
+@@ -515,8 +1710,9 @@ AcceleratedSurface::RenderTargetTexture::RenderTargetTexture(AcceleratedSurface&
  }
  
  AcceleratedSurface::RenderTargetTexture::~RenderTargetTexture() = default;
@@ -136686,7 +136973,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..7413ae1140c1c59d0d4b8b42be47e59f
  
  #if USE(WPE_RENDERER)
  std::unique_ptr<AcceleratedSurface::RenderTarget> AcceleratedSurface::RenderTargetWPEBackend::create(AcceleratedSurface& surface, const IntSize& initialSize, UnixFileDescriptor&& hostFD)
-@@ -594,7 +1503,7 @@ void AcceleratedSurface::RenderTargetWPEBackend::didRenderFrame()
+@@ -594,7 +1790,7 @@ void AcceleratedSurface::RenderTargetWPEBackend::didRenderFrame()
  AcceleratedSurface::SwapChain::SwapChain(AcceleratedSurface& surface)
      : m_surface(surface)
  {
@@ -136695,7 +136982,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..7413ae1140c1c59d0d4b8b42be47e59f
      if (!m_surface->hardwareAccelerationEnabled()) {
          m_type = Type::SharedMemory;
          return;
-@@ -632,7 +1541,7 @@ AcceleratedSurface::SwapChain::SwapChain(AcceleratedSurface& surface)
+@@ -632,7 +1828,7 @@ AcceleratedSurface::SwapChain::SwapChain(AcceleratedSurface& surface)
      case PlatformDisplay::Type::GBM:
  #endif
          break;
@@ -136704,7 +136991,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..7413ae1140c1c59d0d4b8b42be47e59f
  #if USE(WPE_RENDERER)
      case PlatformDisplay::Type::WPE:
          m_type = Type::WPEBackend;
-@@ -646,11 +1555,19 @@ AcceleratedSurface::SwapChain::SwapChain(AcceleratedSurface& surface)
+@@ -646,11 +1842,19 @@ AcceleratedSurface::SwapChain::SwapChain(AcceleratedSurface& surface)
      case PlatformDisplay::Type::Default:
          break;
  #endif // PLATFORM(GTK)
@@ -136725,7 +137012,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..7413ae1140c1c59d0d4b8b42be47e59f
  void AcceleratedSurface::SwapChain::setupBufferFormat()
  {
      if (m_type != Type::EGLImage)
-@@ -749,7 +1666,7 @@ bool AcceleratedSurface::SwapChain::resize(const IntSize& size)
+@@ -749,7 +1953,7 @@ bool AcceleratedSurface::SwapChain::resize(const IntSize& size)
  
  bool AcceleratedSurface::SwapChain::handleBufferFormatChangeIfNeeded()
  {
@@ -136734,7 +137021,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..7413ae1140c1c59d0d4b8b42be47e59f
      if (m_type == Type::EGLImage) {
          Locker locker { m_bufferFormatLock };
          if (m_bufferFormatChanged) {
-@@ -765,7 +1682,7 @@ bool AcceleratedSurface::SwapChain::handleBufferFormatChangeIfNeeded()
+@@ -765,7 +1969,7 @@ bool AcceleratedSurface::SwapChain::handleBufferFormatChangeIfNeeded()
  std::unique_ptr<AcceleratedSurface::RenderTarget> AcceleratedSurface::SwapChain::createTarget() const
  {
      switch (m_type) {
@@ -136743,7 +137030,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..7413ae1140c1c59d0d4b8b42be47e59f
  #if USE(GBM) || OS(ANDROID)
      case Type::EGLImage: {
          Locker locker { m_bufferFormatLock };
-@@ -773,7 +1690,11 @@ std::unique_ptr<AcceleratedSurface::RenderTarget> AcceleratedSurface::SwapChain:
+@@ -773,7 +1977,11 @@ std::unique_ptr<AcceleratedSurface::RenderTarget> AcceleratedSurface::SwapChain:
      }
  #endif
      case Type::Texture:
@@ -136755,7 +137042,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..7413ae1140c1c59d0d4b8b42be47e59f
      case Type::SharedMemory:
          return RenderTargetSHMImage::create(m_surface.get(), m_size);
  #endif
-@@ -812,6 +1733,11 @@ AcceleratedSurface::RenderTarget* AcceleratedSurface::SwapChain::nextTarget()
+@@ -812,6 +2020,11 @@ AcceleratedSurface::RenderTarget* AcceleratedSurface::SwapChain::nextTarget()
              if (auto target = createTarget())
                  m_freeTargets.append(WTF::move(target));
          }
@@ -136767,7 +137054,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..7413ae1140c1c59d0d4b8b42be47e59f
  
  #if ENABLE(WPE_PLATFORM)
          if (m_freeTargets.size() != targetsToCreate)
-@@ -841,6 +1767,12 @@ void AcceleratedSurface::SwapChain::releaseTarget(uint64_t targetID, UnixFileDes
+@@ -841,6 +2054,12 @@ void AcceleratedSurface::SwapChain::releaseTarget(uint64_t targetID, UnixFileDes
          m_freeTargets.insert(0, WTF::move(m_lockedTargets[index]));
          m_lockedTargets.removeAt(index);
      }
@@ -136780,7 +137067,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..7413ae1140c1c59d0d4b8b42be47e59f
  }
  
  void AcceleratedSurface::SwapChain::reset()
-@@ -859,6 +1791,11 @@ void AcceleratedSurface::SwapChain::releaseUnusedBuffers()
+@@ -859,6 +2078,11 @@ void AcceleratedSurface::SwapChain::releaseUnusedBuffers()
  #if USE(WPE_RENDERER)
      ASSERT(m_type != Type::WPEBackend);
  #endif
@@ -136792,7 +137079,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..7413ae1140c1c59d0d4b8b42be47e59f
  
  #if ENABLE(WPE_PLATFORM)
      WebProcess::singleton().parentProcessConnection()->send(Messages::AcceleratedBackingStore::DidChangeBufferConfiguration(m_lockedTargets.size()), m_surface->surfaceID());
-@@ -901,6 +1838,17 @@ Vector<IntRect, 1> AcceleratedSurface::SwapChainDamageTracker::takeFrameDamageRe
+@@ -901,6 +2125,17 @@ Vector<IntRect, 1> AcceleratedSurface::SwapChainDamageTracker::takeFrameDamageRe
      if (frameDamage.mode() != Damage::Mode::Rectangles || m_swapChain.size().isEmpty())
          return frameDamage.rects();
  
@@ -136810,7 +137097,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..7413ae1140c1c59d0d4b8b42be47e59f
      // The frame damage is fine-grained, because the compositing restriction needs it that way, but the
      // platform only wants a bounded number of rects. Merge it down to the threshold here, which is the
      // only thing the threshold bounds.
-@@ -929,7 +1877,7 @@ bool AcceleratedSurface::shouldPaintMirrored() const
+@@ -929,7 +2164,7 @@ bool AcceleratedSurface::shouldPaintMirrored() const
      switch (m_swapChain.type()) {
      case SwapChain::Type::Invalid:
          return false;
@@ -136819,7 +137106,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..7413ae1140c1c59d0d4b8b42be47e59f
      case SwapChain::Type::Texture:
  #if USE(GBM) || OS(ANDROID)
      case SwapChain::Type::EGLImage:
-@@ -960,6 +1908,10 @@ void AcceleratedSurface::preferredBufferFormatsDidChange()
+@@ -960,6 +2195,10 @@ void AcceleratedSurface::preferredBufferFormatsDidChange()
  
  void AcceleratedSurface::visibilityDidChange(bool isVisible)
  {
@@ -136830,7 +137117,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..7413ae1140c1c59d0d4b8b42be47e59f
      if (m_isVisible == isVisible)
          return;
  
-@@ -1000,7 +1952,7 @@ void AcceleratedSurface::backgroundColorDidChange()
+@@ -1000,7 +2239,7 @@ void AcceleratedSurface::backgroundColorDidChange()
      if (isOpaque == wasOpaque)
          return;
  
@@ -136839,7 +137126,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..7413ae1140c1c59d0d4b8b42be47e59f
      m_swapChain.setupBufferFormat();
  #endif
  }
-@@ -1022,7 +1974,7 @@ void AcceleratedSurface::didCreateCompositingRunLoop(RunLoop& runLoop)
+@@ -1022,7 +2261,7 @@ void AcceleratedSurface::didCreateCompositingRunLoop(RunLoop& runLoop)
  #if USE(GLIB_EVENT_LOOP)
      m_releaseUnusedBuffersTimer->setPriority(RunLoopSourcePriority::ReleaseUnusedResourcesTimer);
  #endif
@@ -136848,7 +137135,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..7413ae1140c1c59d0d4b8b42be47e59f
      WebProcess::singleton().parentProcessConnection()->addMessageReceiver(runLoop, *this, Messages::AcceleratedSurface::messageReceiverName(), m_id);
  #endif
  }
-@@ -1030,6 +1982,10 @@ void AcceleratedSurface::didCreateCompositingRunLoop(RunLoop& runLoop)
+@@ -1030,6 +2269,10 @@ void AcceleratedSurface::didCreateCompositingRunLoop(RunLoop& runLoop)
  void AcceleratedSurface::willDestroyCompositingRunLoop()
  {
      m_frameCompleteHandler = nullptr;
@@ -136859,7 +137146,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..7413ae1140c1c59d0d4b8b42be47e59f
  
  #if USE(WPE_RENDERER)
      if (m_swapChain.type() == SwapChain::Type::WPEBackend)
-@@ -1043,7 +1999,7 @@ void AcceleratedSurface::willDestroyCompositingRunLoop()
+@@ -1043,7 +2286,7 @@ void AcceleratedSurface::willDestroyCompositingRunLoop()
              protectedThis->m_releaseUnusedBuffersTimer = nullptr;
          });
      }
@@ -136868,7 +137155,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..7413ae1140c1c59d0d4b8b42be47e59f
      WebProcess::singleton().parentProcessConnection()->removeMessageReceiver(Messages::AcceleratedSurface::messageReceiverName(), m_id);
  #endif
  }
-@@ -1149,18 +2105,143 @@ void AcceleratedSurface::didRenderFrame(TargetContents targetContents)
+@@ -1149,18 +2392,143 @@ void AcceleratedSurface::didRenderFrame(TargetContents targetContents)
      if (!m_target)
          return;
  
@@ -137012,7 +137299,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..7413ae1140c1c59d0d4b8b42be47e59f
      m_pendingFrameNotifyTargets.insert(0, { m_target, WTF::move(damageRects) });
      m_target = nullptr;
  }
-@@ -1182,13 +2263,17 @@ const std::optional<Damage>& AcceleratedSurface::renderTargetDamage()
+@@ -1182,13 +2550,17 @@ const std::optional<Damage>& AcceleratedSurface::renderTargetDamage()
  }
  #endif
  
