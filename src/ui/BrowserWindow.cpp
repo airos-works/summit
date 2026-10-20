@@ -58,6 +58,7 @@
 #include <WindowScreen.h>
 #if SUMMIT_MODERN_WEBKIT
 #include "ExtensionInstaller.h"
+#include "AuthenticationPrompt.h"
 #include "FeatureMessages.h"
 #include "NoticeBar.h"
 #include "PrintJob.h"
@@ -977,6 +978,7 @@ BrowserWindow::~BrowserWindow()
     RemoveHandler(fProtocolHandlers.get());
     fProtocolHandlers.reset();
 #if SUMMIT_MODERN_WEBKIT
+    if (fAuthenticationPrompt.IsValid()) fAuthenticationPrompt.SendMessage(B_QUIT_REQUESTED);
     BWebKitView::WindowDirectConnected(this, nullptr);
     // Without its daemon thread ~BDirectWindow would wait for ever.
     if (DirectDaemonLost()) {
@@ -1261,6 +1263,8 @@ void BrowserWindow::CreateTab(const std::string& input, bool select, BWebView* a
     webView->AddFilter(created.frames);
     webView->SetURLSchemeHandler("summit-reader", BMessenger(this));
     if (!extensionPage) AddPageScripts(webView);
+    // Sites that ask for a name and password get a sign-in sheet (#87).
+    if (!extensionPage) webView->SetAuthenticationRequests(true);
     // As in other browsers, a restored session's tabs wait to be selected
     // before they load: a window of fifteen tabs would otherwise start fifteen
     // page loads and web processes at once, with only one of them on screen.
@@ -1359,6 +1363,7 @@ void BrowserWindow::SelectTab(int64 id, bool forClose)
             fTabs[i].view->LoadURL(std::exchange(fTabs[i].deferredURL, {}).c_str());
         if (!forClose && !fRestoringSession && fTabs[i].certificate && !fTabs[i].certificate->asked)
             AskAboutCertificate(fTabs[i]);
+        ShowAuthenticationPrompt();
         ProbeReader(fTabs[i]);
 #endif
         fTabs[i].view->MakeFocus();
@@ -1676,6 +1681,7 @@ void BrowserWindow::FinishCloseTab(int64 id)
 #endif
         webView->RemoveSelf();
 #if SUMMIT_MODERN_WEBKIT
+        DropTabAuthentications(id);
         CloseDeveloperTools(fTabs[i]);
         RemoveCrashView(fTabs[i]);
         if (fPictureInPictureTab == id && fPictureInPicture.IsValid()) fPictureInPicture.SendMessage(B_QUIT_REQUESTED);
@@ -3726,6 +3732,9 @@ void BrowserWindow::MessageReceived(BMessage* message)
             RefreshNoticeBar();
             break;
         }
+        case B_WEBKIT_AUTHENTICATION_REQUESTED: AuthenticationRequested(*message); break;
+        case kAuthenticationAccounts: AuthenticationAccounts(*message); break;
+        case kAuthenticationAnswer: AuthenticationAnswered(*message); break;
         case kPasswordSaved: {
             const std::string error = message->GetString("error", "");
             if (!error.empty()) ShowError("Could not save the password: " + error);

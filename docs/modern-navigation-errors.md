@@ -61,6 +61,6 @@ Run them serially because that final log check covers the whole test VM.
 
 See [the verification record](STATUS.md) for exact results and failed runs.
 Certificates that fail verification now ask whether to continue
-([certificate-warnings.md](certificate-warnings.md)). HTTP authentication UI,
-an error page with recovery controls, and wider network-failure coverage
-remain separate work.
+([certificate-warnings.md](certificate-warnings.md)), and so do sites that ask
+for a name and password (HTTP authentication, same page). An error page with
+recovery controls and wider network-failure coverage remain separate work.

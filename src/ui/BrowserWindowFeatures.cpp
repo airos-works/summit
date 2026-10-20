@@ -293,6 +293,7 @@ void BrowserWindow::DetachTab(int64 id, const BMessenger& target)
     if (found == fTabs.end() || fClosingWindow || found->closeQueued || found->closeRequested || found->closeApproved) return;
     if (fFullScreenTab == id) ExitPageFullScreen();
     if (fPictureInPictureTab == id && fPictureInPicture.IsValid()) fPictureInPicture.SendMessage(B_QUIT_REQUESTED);
+    DropTabAuthentications(id);
     CloseDeveloperTools(*found, true);
     RemoveCrashView(*found);
     const bool wasSelected = found->id == fSelected;
