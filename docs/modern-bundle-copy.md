@@ -1,5 +1,11 @@
 # Copying a frozen modern bundle
 
+> **Retired (20 October 2026, #120):** `tools/copy-modern-browser-bundle.py`
+> needed the VM's exact CMake configuration and rejected every bundle built on
+> the workstations, and releases now come from CI's packages (the README's
+> "Latest builds"; docs/updates.md). The tool is gone; this page stays as the
+> record of the bundles it copied and their digests, which other notes link to.
+
 After a modern browser bundle has completed and its runtime checks have passed,
 run this on the host from the Summit checkout:
 

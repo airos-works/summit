@@ -137,8 +137,8 @@ bash tools/build-modern-browser-in-vm.sh --browser --bundle --modern-extensions
 
 The scripts record the resulting bundle path. Copy the entire bundle and run
 its `run-browser.sh`; it carries the matching engine, process helpers, private
-libraries, source archive, and build manifest. See
-[bundle instructions](docs/modern-bundle-copy.md) and the [native test VM](docs/VM.md).
+libraries, source archive, and build manifest. See the [native test VM](docs/VM.md);
+released builds are CI's packages (above).
 
 For UI development against an installed Haiku WebKit SDK:
 
