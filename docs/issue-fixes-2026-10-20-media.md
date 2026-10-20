@@ -5,7 +5,7 @@ video and audio controls have their icons, a video that has not played shows
 its first picture, and the screen stays on while a video plays. Everything was
 tried on the X399 with a test copy of the browser on a test engine built from
 CI's tree (`/boot/home/summit/claude-s36/bundle-mediaapp1`, engines `media2` to
-`media4`).
+`media5`).
 
 ## #83 Icons in the native video and audio controls
 
@@ -111,7 +111,10 @@ How it works:
   `WebProcessHaiku.cpp`). There a client of the UI process
   (`ScreenAwakeRequestsHaiku`, `UIProcess/haiku/WebView.cpp`) counts the
   display requests per page and the view's state says `keepScreenAwake`
-  (`B_WEBKIT_STATE_CHANGED`, documented in `WebKitView.h`).
+  (`B_WEBKIT_STATE_CHANGED`, documented in `WebKitView.h`). A page's
+  requests are also dropped when its main frame commits a new document:
+  after a process swap the old document's "done" messages go to its
+  suspended page, which ignores them, and the screen would stay on.
 - The browser keeps the screen on while the current tab of a window asks:
   every 20 seconds it puts the pointer where it already is
   (`set_mouse_position`), which input_server counts as use of the computer,
@@ -131,5 +134,7 @@ the blanker itself was not shortened): a probe reading `idle_time()` every
 half second while a wake lock was held showed the idle time reset within
 0.1 s of each of the browser's moves, 20.0 s apart (it never passed 20 s);
 the keep-awake turned on for a playing video (inline, opened directly,
-YouTube) and a granted lock, and off on pause, on release, and when the tab
-was hidden (the page saw `release` then `visibilitychange` hidden).
+YouTube) and a granted lock, and off on pause, at the end, on release, when
+the tab was hidden (the page saw `release` then `visibilitychange` hidden)
+and when the tab went to another site while the video played; back again,
+the video resumed from the back/forward cache and the keep-awake with it.
