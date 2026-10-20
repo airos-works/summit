@@ -172,7 +172,13 @@ struct BookmarkButton {
     const BBitmap* icon = nullptr;
     bool folder = false;
     std::vector<BookmarkButton> children;
+    // For the menus: a copy, as menus outlive a change of the cache.
+    std::shared_ptr<const BBitmap> menuIcon;
 };
+// A page in a menu (history, bookmarks): its site icon (a copy is kept;
+// null leaves the icon's place empty, so labels line up) before the label.
+BMenuItem* NewPageMenuItem(const char* label, BMessage* message, const BBitmap* icon);
+BMenuItem* NewPageMenuItem(const char* label, BMessage* message, std::shared_ptr<const BBitmap> icon);
 // Adds a folder's contents to a menu: bookmarks, folders as submenus that
 // are filled when they open, and Open All in Tabs. Their messages go to target.
 void AddBookmarkItems(BMenu* menu, std::shared_ptr<const BookmarkButton> root, const BookmarkButton& folder,

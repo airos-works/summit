@@ -2866,10 +2866,24 @@ void BrowserWindow::RebuildDynamicMenus()
     auto add = [this](BMenu* menu, const PageRecord& page) {
         auto* open = new BMessage(kOpenBookmark);
         open->AddString("url", page.url.c_str());
-        auto* item = new BMenuItem(MenuLabel(page).c_str(), open);
+        auto* item = NewPageMenuItem(MenuLabel(page).c_str(), open, fFavicons->Icon(page.url));
         item->SetTarget(this);
         menu->AddItem(item);
     };
+    // The bookmarks' icons for the folders' menus (filled when they open,
+    // from this copy), as many as the menus show.
+    size_t icons = 0;
+    std::function<void(BookmarkButton&)> addIcons = [&](BookmarkButton& button) {
+        for (auto& child : button.children) {
+            if (icons >= 600) return;
+            if (child.folder) addIcons(child);
+            else if (const BBitmap* icon = fFavicons->Icon(child.url)) {
+                child.menuIcon = std::make_shared<const BBitmap>(icon);
+                ++icons;
+            }
+        }
+    };
+    addIcons(*roots);
     // Recently visited pages, then every bookmark, as in Safari's menus.
     clear(fHistoryMenu, fHistoryMenuFixed);
     if (!history.empty()) fHistoryMenu->AddSeparatorItem();

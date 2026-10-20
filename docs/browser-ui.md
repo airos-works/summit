@@ -151,7 +151,10 @@ refresh that cancelled a click on a History entry.
   [bookmarks.md](bookmarks.md).
 - History keeps one entry per address (its latest visit), as before.
 - ~~SVG-only favicons are not shown.~~ Done 20 October (below).
-- Menus list pages without icons.
+- ~~Menus list pages without icons.~~ Done 20 October: the History menu and
+  the Bookmarks menu with its folders show each page's site icon (`NewPageMenuItem`
+  in `src/ui/Chrome.cpp`, sized to the menu font; a page without one keeps the
+  place empty so the labels line up).
 
 ## Installed
 

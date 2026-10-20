@@ -982,6 +982,66 @@ bool DraggedPage(const BMessage* drag, std::string& url, std::string& title, int
 }
 }
 
+namespace {
+class PageMenuItem final : public BMenuItem {
+public:
+    PageMenuItem(const char* label, BMessage* message, std::shared_ptr<const BBitmap> icon)
+        : BMenuItem(label, message), fIcon(std::move(icon)) { }
+    void GetContentSize(float* width, float* height) override
+    {
+        BMenuItem::GetContentSize(width, height);
+        const float size = IconSize();
+        *width += size + Gap();
+        *height = std::max(*height, size + 2);
+    }
+    void DrawContent() override
+    {
+        BMenu* menu = Menu();
+        BPoint where = ContentLocation();
+        const float size = IconSize();
+        if (fIcon) {
+            const BRect frame = Frame();
+            const float top = std::floor(frame.top + (frame.Height() + 1 - size) / 2);
+            // Not in a pushed state: app_server draws bitmaps there without
+            // the window's scale.
+            const drawing_mode mode = menu->DrawingMode();
+            source_alpha alpha;
+            alpha_function function;
+            menu->GetBlendingMode(&alpha, &function);
+            menu->SetDrawingMode(B_OP_ALPHA);
+            menu->SetBlendingMode(B_PIXEL_ALPHA, B_ALPHA_OVERLAY);
+            menu->DrawBitmap(fIcon.get(), fIcon->Bounds(), BRect(where.x, top, where.x + size - 1, top + size - 1),
+                B_FILTER_BITMAP_BILINEAR);
+            menu->SetBlendingMode(alpha, function);
+            menu->SetDrawingMode(mode);
+        }
+        where.x += size + Gap();
+        menu->MovePenTo(where);
+        BMenuItem::DrawContent();
+    }
+private:
+    // The menu font's line height, 16 at its usual size.
+    float IconSize() const
+    {
+        font_height height;
+        Menu()->GetFontHeight(&height);
+        return std::ceil((height.ascent + height.descent) * 1.15f);
+    }
+    float Gap() const { return std::ceil(IconSize() / 3); }
+    std::shared_ptr<const BBitmap> fIcon;
+};
+}
+
+BMenuItem* NewPageMenuItem(const char* label, BMessage* message, std::shared_ptr<const BBitmap> icon)
+{
+    return new PageMenuItem(label, message, std::move(icon));
+}
+
+BMenuItem* NewPageMenuItem(const char* label, BMessage* message, const BBitmap* icon)
+{
+    return new PageMenuItem(label, message, icon ? std::make_shared<const BBitmap>(icon) : nullptr);
+}
+
 void AddBookmarkItems(BMenu* menu, std::shared_ptr<const BookmarkButton> root, const BookmarkButton& folder,
     const BMessenger& target, size_t limit)
 {
@@ -1000,7 +1060,7 @@ void AddBookmarkItems(BMenu* menu, std::shared_ptr<const BookmarkButton> root, c
         }
         auto* open = new BMessage(kOpenBookmark);
         open->AddString("url", child.url.c_str());
-        auto* item = new BMenuItem(BookmarkLabel(child).c_str(), open);
+        auto* item = NewPageMenuItem(BookmarkLabel(child).c_str(), open, child.menuIcon);
         item->SetTarget(target);
         menu->AddItem(item);
         bookmarks = true;
