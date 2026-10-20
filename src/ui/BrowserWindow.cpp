@@ -109,6 +109,9 @@ static constexpr uint32 kStoreItemResolved = 'stir';
 static constexpr uint64 kPictureInPictureQuery = uint64(1) << 61;
 // The page script of Install as App… (#75).
 static constexpr uint64 kWebAppQuery = (uint64(1) << 61) + 1;
+// Every 20 seconds while the current tab asks for the screen to stay on.
+static constexpr uint32 kKeepScreenAwake = 'kawk';
+static constexpr bigtime_t kKeepScreenAwakeInterval = 20000000;
 // The engine sends one 'wvfr' message when a coordinated frame reaches its
 // native view. Count those deliveries only in explicit performance runs.
 class FrameStatsWebKitView final : public BWebKitView {
@@ -1379,6 +1382,7 @@ void BrowserWindow::SelectTab(int64 id, bool forClose)
 #if SUMMIT_MODERN_WEBKIT
         SyncBrowserWindow();
         RefreshNoticeBar();
+        UpdateKeepScreenAwake();
 #endif
         RefreshChrome();
         AnnouncePointer();
@@ -1400,6 +1404,55 @@ void BrowserWindow::AnnouncePointer()
         return;
     set_mouse_position(static_cast<int32>(where.x), static_cast<int32>(where.y));
 }
+#if SUMMIT_MODERN_WEBKIT
+static bool keepScreenAwakeTraced()
+{
+    static const bool traced = [] {
+        const char* value = std::getenv("SUMMIT_KEEP_AWAKE_TRACE");
+        return value && !std::strcmp(value, "1");
+    }();
+    return traced;
+}
+
+// A video with sound playing in the current tab, or a page's screen wake
+// lock, keeps the screen on (#88): every 20 seconds the pointer is put where
+// it already is, which input_server counts as use of the computer, as
+// airTime and MediaPlayer do. The engine stops asking when the video pauses
+// or ends, the lock is released, or the page is hidden.
+void BrowserWindow::UpdateKeepScreenAwake()
+{
+    const auto* tab = ActiveTab();
+    const bool wanted = tab && tab->keepScreenAwake;
+    if (wanted == !!fKeepAwakeTimer) return;
+    if (wanted) {
+        BMessage kick(kKeepScreenAwake);
+        fKeepAwakeTimer = std::make_unique<BMessageRunner>(BMessenger(this), &kick, kKeepScreenAwakeInterval);
+    } else
+        fKeepAwakeTimer.reset();
+    if (keepScreenAwakeTraced())
+        std::fprintf(stderr, "Summit keep awake: %s (window %llu, tab %lld)\n", wanted ? "on" : "off",
+            static_cast<unsigned long long>(fKey), static_cast<long long>(tab ? tab->id : 0));
+}
+
+// Only where the user can see the page, and not while a button is held (a
+// drag would jump).
+void BrowserWindow::KeepScreenAwake()
+{
+    const auto* tab = ActiveTab();
+    if (!tab || !tab->keepScreenAwake || IsHidden() || IsMinimized() || !(Workspaces() & (1u << current_workspace())))
+        return;
+    BPoint where;
+    uint32 buttons = 0;
+    if (get_mouse(&where, &buttons) != B_OK || buttons)
+        return;
+    const bigtime_t idle = idle_time();
+    set_mouse_position(static_cast<int32>(where.x), static_cast<int32>(where.y));
+    if (keepScreenAwakeTraced())
+        std::fprintf(stderr, "Summit keep awake: pointer kept at %.0f,%.0f at %lld (idle for %.1f s)\n", where.x, where.y,
+            static_cast<long long>(system_time()), idle / 1000000.0);
+}
+#endif
+
 void BrowserWindow::CloseTab(int64 id)
 {
 #if SUMMIT_MODERN_WEBKIT
@@ -4218,6 +4271,9 @@ void BrowserWindow::MessageReceived(BMessage* message)
             if (fFullScreenTab && !fFullScreenNotice->IsHidden(fFullScreenNotice))
                 fFullScreenNotice->Hide();
             break;
+        case kKeepScreenAwake:
+            KeepScreenAwake();
+            break;
         case B_WEBKIT_STATE_CHANGED: case B_WEBKIT_PROCESS_EXITED:
             WebKitStateChanged(*message);
             break;
@@ -4875,6 +4931,8 @@ void BrowserWindow::WebKitStateChanged(const BMessage& message)
         tab->processExited = true;
         tab->loading = false;
         tab->progress = 0;
+        tab->keepScreenAwake = false;
+        if (tab->id == fSelected) UpdateKeepScreenAwake();
         int32 error;
         tab->processError = message.FindInt32("error", &error) == B_OK && error != B_OK
             ? "Could not initialize the web page: " + std::string(std::strerror(error))
@@ -4994,6 +5052,8 @@ void BrowserWindow::WebKitStateChanged(const BMessage& message)
     message.FindBool("capturingScreen", &tab->capturingScreen);
     message.FindBool("playingAudio", &tab->playingAudio);
     message.FindBool("audioMuted", &tab->audioMuted);
+    if (message.FindBool("keepScreenAwake", &tab->keepScreenAwake) == B_OK && tab->id == fSelected)
+        UpdateKeepScreenAwake();
     double progress;
     if (message.FindDouble("progress", &progress) == B_OK && std::isfinite(progress))
         tab->progress = static_cast<float>(std::clamp(progress, 0.0, 1.0));

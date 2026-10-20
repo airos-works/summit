@@ -227,6 +227,9 @@ private:
         // A small tab at the start of the strip (#68), whether the page plays
         // sound and whether it is muted (#70).
         bool pinned = false, playingAudio = false, audioMuted = false;
+        // The page asks for the screen to stay on: a video with sound plays,
+        // or it holds a screen wake lock (#88).
+        bool keepScreenAwake = false;
         // Why the page's process ended ("crash", "memory"...), the view that
         // says so in place of the page, and whether that happened while the
         // tab was in the background (it then reloads when selected) (#71).
@@ -614,6 +617,10 @@ private:
     std::vector<BView*> fFullScreenHidden;
     BStringView* fFullScreenNotice = nullptr;
     std::unique_ptr<BMessageRunner> fFullScreenNoticeTimer;
+    // Keeps the screen blanker away while the current tab asks (#88).
+    void UpdateKeepScreenAwake();
+    void KeepScreenAwake();
+    std::unique_ptr<BMessageRunner> fKeepAwakeTimer;
 #endif
     void SetBookmarksBarVisible(bool visible);
     std::string HomeAddress() const;

@@ -5782,6 +5782,10 @@ sites, benchmarks) will lose its tab the same way. Also note that `loadOutcome` 
 `process-exited` after a harmless COOP process swap too; only the status text tells the
 two apart.
 
+Update, 20 October (#88): the API is on again, with the requests routed to the browser,
+which keeps the screen on; `tools/bench/pages/wakelock.html`'s request is granted and the
+page process stays ([issue-fixes-2026-10-20-media.md](issue-fixes-2026-10-20-media.md)).
+
 ### Rendering correctness in the screenshots
 
 Speedometer's own UI (suite name, progress counter, score, gauge) and the suites' content
