@@ -31,9 +31,12 @@ Haiku-specific configuration and styles live outside the vendored PDF.js
 distribution, under `Source/WebCore/Modules/pdfjs-extras/haiku` in the engine
 patch. The bundle includes PDF.js's upstream license.
 
-The Haiku engine configuration defaults `ENABLE_PDFJS` to `ON`. When reusing
-an engine build directory that previously cached it as `OFF`, reconfigure
-with `-DENABLE_PDFJS=ON` before building and freezing a browser bundle.
+The Haiku engine configuration defaults `ENABLE_PDFJS` to `ON`. The released
+engines are configured from `engine/arm64/rpi4-gl/init-cache-rtc.cmake`, whose
+forced values override that default, so the init cache turns it on too (see
+issue #78 below). When reusing an engine build directory that previously
+cached it as `OFF`, reconfigure with `-DENABLE_PDFJS=ON` before building and
+freezing a browser bundle.
 
 ## Native verification
 
@@ -109,3 +112,71 @@ and restart through the normal desktop launcher, the customer's original
 attachment renders directly in Proton Mail; both pages were visually checked
 through VNC. The signed-in email session was restored. Screenshots and private
 fixture files remain under the ignored `.vm/fixes-2026-10-09/` directory.
+
+## Released engines without PDF.js (issue #78, 20 October 2026)
+
+Proton Mail's attachment preview said "This browser does not support
+previewing PDF documents. Please download the file." In the same builds a
+link to a PDF downloaded the file instead of opening it in a tab, and `embed`
+and `iframe` elements with a PDF stayed blank. Pages were told the opposite:
+`navigator.pdfViewerEnabled` was true and `navigator.plugins` listed the five
+PDF viewers of the HTML specification.
+
+Every `summit_webkit` package CI has built lacked PDF.js. airos-ci's
+`summit/build-engine.sh` configures the engine for every target (air/OS
+x86_64, arm64, and stock Haiku R1/beta6) from
+`engine/arm64/rpi4-gl/init-cache-rtc.cmake`. That file is a cache dump of the
+Raspberry Pi's engine build, and it forced `ENABLE_PDFJS` to `OFF`, which
+overrides `OptionsHaiku.cmake`'s default. The 9 October checks above used an
+engine built in the VM, which had PDF.js. Without PDF.js,
+`WebLocalFrameLoaderClient::objectContentType` finds nothing that shows
+`application/pdf`, so Proton's `<object>` displays its fallback content. That
+fallback is an `<embed>` of the same blob, which cannot show it either, and
+then the notice. The `navigator` values come from
+`WebLocalFrameLoaderClient::canShowMIMEType`, which was a stub that answered
+yes for every type.
+
+- The init cache turns `ENABLE_PDFJS` on. This changes `cmakeconfig.h`, so the
+  next CI engine build rebuilds nearly the whole engine. The PDF.js viewer,
+  worker, fonts, character maps and WebAssembly come from the WebKit tree
+  (`Source/ThirdParty/pdfjs`, part of CI's sparse checkout). They are compiled
+  into `libWebKit.so.1`, which grows by 3.4 MB stripped (149.2 to 152.6 MB),
+  and the package needs no new files.
+- Engine, Haiku only (`WebProcess/WebCoreSupport/WebLocalFrameLoaderClient.cpp`):
+  for PDF types, `canShowMIMEType` now answers what the page can really show
+  (`WebPage::canShowMIMEType`: PDF.js built in and its preference on). Other
+  types still answer yes. `navigator.pdfViewerEnabled`, `plugins` and
+  `mimeTypes` now follow the engine: true, five plugins, and `application/pdf`
+  and `text/pdf` with PDF.js; false and empty lists without it. Sites can then
+  offer a download instead of an empty preview.
+- `tests/EngineOptions.cmake` (ctest `summit_engine_options`) fails when the
+  init cache turns off PDF.js or another feature Summit relies on. The
+  Fullscreen API was off in the same way until issue #55.
+
+`tools/bench/pdf-fixture.py` serves `/webmail-preview`, a copy of Proton's
+preview. It sends Proton Mail's CSP, whose `frame-ancestors` leaves out the
+mail site itself. The page reads the fetched bytes into a `File`, calls
+`createObjectURL`, builds `<object><embed><p>notice</p></object>` off the
+document and then inserts it, as React does. With `order=late`, `data` is set
+after insertion. `frame=1` runs the page in a same-origin iframe, and
+`source=http` uses the PDF's HTTP address instead of the blob. The status line
+and the title say `shown` or `fallback` and give the `navigator` values.
+`tests/ModernPDFTests.cpp` loads all four variants.
+
+Checked on the X399 with the browser of main `fbb1ae5` and test copies of the
+CI tree's engine (`/boot/home/summit/claude-s36`):
+
+- Released engine 0816: every preview variant shows the fallback notice, and
+  `navigator` says `pdfViewerEnabled=true plugins=5 mimeTypes=2`. A PDF link
+  downloads, and a blob PDF `embed` stays blank.
+- CI's configuration with the `canShowMIMEType` change (test build `pdfn1`,
+  still without PDF.js): `pdfViewerEnabled=false plugins=0 mimeTypes=0`. A PDF
+  link still downloads.
+- The same tree with `ENABLE_PDFJS` on and the change (`pdfe1`): all four
+  preview variants show the PDF in the `object` with the viewer's toolbar
+  (`document=application/pdf`), and the notice and the inner `embed` are not
+  shown. The PDF link opens in a tab at its own address, and blob PDFs in
+  `embed` and `iframe` render (screenshots). `attachment.pdf` downloads
+  byte-identical to the original (SHA-256 `e7477fa2…`). The native suite
+  passes all 120 checks, including the webmail previews and `navigator`, and
+  its viewer Save downloads also match the original byte for byte.

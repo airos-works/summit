@@ -356,6 +356,17 @@ private:
             Require(inspector.Evaluate("PDFViewerApplicationOptions.get('enableScripting')===false", context) == true,
                 "blob PDF under inherited frame-ancestors renders with PDF scripting disabled");
         }
+        // Proton Mail's attachment preview (issue #78): an object with a File's
+        // blob URL whose fallback content is an embed and a notice.
+        for (const char* variant : {"", "?order=late", "?frame=1", "?source=http"}) {
+            const auto preview = m_base + "/webmail-preview" + variant;
+            Navigate(preview); context = Ready(inspector, preview);
+            Wait([&] { return inspector.Evaluate("window.preview?.state") == "shown"; },
+                "webmail preview object shows the PDF instead of its fallback notice");
+        }
+        Require(inspector.Evaluate("navigator.pdfViewerEnabled===true && navigator.plugins.length===5"
+            " && [...navigator.mimeTypes].map(m=>m.type).join()==='application/pdf,text/pdf'") == true,
+            "navigator reports the built-in PDF viewer and its two MIME types");
         Navigate(m_base + "/embedded?source=http-blocked&tag=iframe");
         Wait([&] { return inspector.Evaluate("window.fixtureLoaded===true") == true; },
             "HTTP PDF with frame-ancestors completes its blocked frame load");
