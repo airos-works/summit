@@ -47,8 +47,15 @@ public:
     // Writes what has not been saved yet.
     ~SharedProfile();
     const std::filesystem::path& Path() const { return fPath; }
-    // Why the saved profile could not be read (it is then left untouched).
+    // Why the saved profile could not be read; then the copy that was
+    // loaded instead and when it was saved (none: the profile starts
+    // afresh), and where the damaged file was put. Without that, or when
+    // !Writable(), the file was left untouched.
     const std::string& LoadError() const { return fLoadError; }
+    const std::filesystem::path& RestoredFrom() const { return fRestoredFrom; }
+    int64_t RestoredTime() const { return fRestoredTime; }
+    const std::filesystem::path& DamagedCopy() const { return fDamagedCopy; }
+    bool Writable() const { return fWritable; }
     // The windows saved when Summit last quit.
     std::vector<WindowSession> SavedWindows() const;
 
@@ -126,6 +133,8 @@ private:
     Profile fProfile;
     std::vector<WindowSession> fSavedWindows;
     std::string fLoadError;
+    std::filesystem::path fRestoredFrom, fDamagedCopy;
+    int64_t fRestoredTime = 0;
     std::string fNewTabOverride;
     std::map<std::string, InstalledExtensionInfo> fInstalledExtensions;
     std::map<std::string, double> fPrivateZoom;

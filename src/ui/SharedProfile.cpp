@@ -20,9 +20,17 @@ static bool SameSession(const WindowSession& a, const WindowSession& b)
 
 SharedProfile::SharedProfile(std::filesystem::path path) : fPath(std::move(path))
 {
-    fProfile = Profile::Load(fPath, fLoadError);
-    // An unreadable profile is preserved: nothing is written over it.
-    fWritable = fLoadError.empty();
+    // A damaged profile is moved aside and its newest readable copy used
+    // (#93); only a newer Summit's profile is left alone, and not written.
+    auto load = Profile::LoadOrRestore(fPath);
+    fProfile = std::move(load.profile);
+    fLoadError = std::move(load.error);
+    fRestoredFrom = std::move(load.restoredFrom);
+    fRestoredTime = load.restoredTime;
+    fDamagedCopy = std::move(load.damagedCopy);
+    fWritable = load.writable;
+    // What was restored is written back with the first save.
+    if (!fLoadError.empty() && fWritable) ++fRevision;
     fSavedWindows = std::move(fProfile.windows);
     fProfile.windows.clear();
 }

@@ -643,6 +643,7 @@ BrowserWindow::BrowserWindow(std::shared_ptr<SharedProfile> profile, std::string
     // In a private window only extensions allowed there show (the engine
     // leaves the others out).
     fExtensionsEnabled = extensionsEnabled;
+    fPopup = options.popup;
 #endif
     SetPrivateWindow(this, fPrivate);
     ++sOpenWindows;
@@ -801,7 +802,7 @@ BrowserWindow::BrowserWindow(std::shared_ptr<SharedProfile> profile, std::string
     fForward = new ToolButton("forward", "Forward", Icon::Forward, kForward);
     fReload = new ToolButton("reload", "Reload / stop", Icon::Reload, kReload);
     fAddress = new AddressControl;
-    fAddress->SetExplicitMinSize(BSize(240, 30));
+    fAddress->SetExplicitMinSize(BSize(fPopup ? 120 : 240, 30));
     static_cast<AddressControl*>(fAddress)->SetKeyHandler([this](char key) { return AddressKey(key); });
     fSuggestions = std::make_unique<AddressSuggestions>(this);
     fZoomButton = new ZoomButton;
@@ -822,7 +823,7 @@ BrowserWindow::BrowserWindow(std::shared_ptr<SharedProfile> profile, std::string
     fPages = new BView("pages", 0);
     fCards = new BCardLayout();
     fPages->SetLayout(fCards);
-    fPages->SetExplicitMinSize(BSize(320, 200));
+    fPages->SetExplicitMinSize(fPopup ? BSize(160, 100) : BSize(320, 200));
     fFindBar = new BGroupView(B_HORIZONTAL, 6);
     fFindText = new BTextControl("find", "Find:", "", new BMessage(kFindNext));
     BLayoutBuilder::Group<>(fFindBar).SetInsets(8, 5, 8, 5)
@@ -910,7 +911,7 @@ BrowserWindow::BrowserWindow(std::shared_ptr<SharedProfile> profile, std::string
     AddCommonFilter(new ZoomWheelFilter);
     AddCommonFilter(new AddressFocusFilter);
     ApplyInterfaceStyle();
-    if (!fBookmarksBarVisible || !fWebApp.empty()) {
+    if (!fBookmarksBarVisible || !fWebApp.empty() || fPopup) {
         fBookmarksBar->Hide();
         fBookmarksBarItem->SetLabel("Show Bookmarks Bar");
     }
@@ -923,7 +924,11 @@ BrowserWindow::BrowserWindow(std::shared_ptr<SharedProfile> profile, std::string
 #endif
     AddShortcut(B_TAB, B_CONTROL_KEY, new BMessage(kNextTab));
     AddShortcut(B_TAB, B_CONTROL_KEY | B_SHIFT_KEY, new BMessage(kPreviousTab));
-    SetSizeLimits(760, 10000, 450, 10000);
+    // Pop-ups as small as pages make them (sign-in and share dialogs), web
+    // apps as their pages need (#95); the rest room for the whole toolbar.
+    if (fPopup) SetSizeLimits(200, 10000, 150, 10000);
+    else if (!fWebApp.empty()) SetSizeLimits(320, 10000, 240, 10000);
+    else SetSizeLimits(760, 10000, 450, 10000);
 #if SUMMIT_MODERN_WEBKIT
     DownloadList::Default().AddListener(BMessenger(this));
     RefreshDownloadsButton();
@@ -1243,7 +1248,7 @@ void BrowserWindow::CreateTab(const std::string& input, bool select, BWebView* a
 #else
     auto* webView = adopted ? adopted : new BWebView("web-page");
 #endif
-    webView->SetExplicitMinSize(BSize(320, 200));
+    webView->SetExplicitMinSize(fPopup ? BSize(160, 100) : BSize(320, 200));
     webView->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNLIMITED));
 #if SUMMIT_MODERN_WEBKIT
     // The card layout and the tab list share one order; keep them in step.
@@ -1362,7 +1367,10 @@ void BrowserWindow::SelectTab(int64 id, bool forClose)
         ProbeReader(fTabs[i]);
 #endif
         fTabs[i].view->MakeFocus();
-        fAddress->SetText(DisplayURL(fTabs[i].url).c_str());
+        fAddress->SetText(DisplayURL(fTabs[i].ShownURL()).c_str());
+#if SUMMIT_MODERN_WEBKIT
+        if (fTabs[i].errorView) ShowLoadErrorView(fTabs[i]);
+#endif
         RefreshInternalPage(fTabs[i]);
 #if SUMMIT_MODERN_WEBKIT
         SyncBrowserWindow();
@@ -1678,6 +1686,7 @@ void BrowserWindow::FinishCloseTab(int64 id)
 #if SUMMIT_MODERN_WEBKIT
         CloseDeveloperTools(fTabs[i]);
         RemoveCrashView(fTabs[i]);
+        RemoveLoadErrorView(fTabs[i], false);
         if (fPictureInPictureTab == id && fPictureInPicture.IsValid()) fPictureInPicture.SendMessage(B_QUIT_REQUESTED);
         delete webView;
 #else
@@ -2254,6 +2263,19 @@ void BrowserWindow::DispatchMessage(BMessage* message, BHandler* handler)
 {
     summit::StallScope scope("window", message ? message->what : 0);
 #if SUMMIT_MODERN_WEBKIT
+    if (message && message->what == B_MOUSE_DOWN) {
+        fLastMouseDown = system_time();
+        fMouseButtons = message->GetInt32("buttons", 0);
+    } else if (message && message->what == B_MOUSE_UP) fMouseButtons = message->GetInt32("buttons", 0);
+    else if (message && message->what == B_MOUSE_MOVED && fMouseButtons && !message->GetInt32("buttons", 0)
+        && system_time() - fLastMouseDown < 1000000) {
+        // A window that a click activates hears of it with a mouse-moved
+        // message that says no button is down, before the click's mouse-up:
+        // the page took the mouse-up for another button's and fired no click
+        // (a link, or a full-screen button, needed a second click, #95). The
+        // button is down until its mouse-up.
+        message->ReplaceInt32("buttons", fMouseButtons);
+    }
     if (fFullScreenTab && message && message->what == B_KEY_DOWN
         && message->GetString("bytes", "")[0] == B_ESCAPE) {
         ExitPageFullScreen();
@@ -2456,7 +2478,7 @@ void BrowserWindow::RefreshChrome()
 #endif
     std::vector<TabLabel> labels;
     for (const auto& tab : fTabs) {
-        labels.push_back({tab.id, tab.title, tab.loading, fFavicons->Icon(tab.url),
+        labels.push_back({tab.id, tab.ShownTitle(), tab.loading, fFavicons->Icon(tab.url),
             tab.capturingCamera || tab.capturingMicrophone || tab.capturingScreen});
         labels.back().url = tab.url;
 #if SUMMIT_MODERN_WEBKIT
@@ -2470,14 +2492,15 @@ void BrowserWindow::RefreshChrome()
         fBookmarkButton->SetEnabled(Bookmarkable(tab->url));
         const bool bookmarked = fShared->Read([&](const Profile& profile) { return profile.bookmarks.Contains(tab->url); });
         fBookmarkButton->SetIcon(bookmarked ? Icon::BookmarkFilled : Icon::Bookmark);
-        const std::string title = !fWebApp.empty() ? (tab->title.empty() || tab->title == fWebAppName ? fWebAppName
-            : tab->title + " — " + fWebAppName) : tab->title + (fPrivate ? " — Summit Private Browsing" : " — Summit");
+        const std::string& shown = tab->ShownTitle();
+        const std::string title = !fWebApp.empty() ? (shown.empty() || shown == fWebAppName ? fWebAppName
+            : shown + " — " + fWebAppName) : shown + (fPrivate ? " — Summit Private Browsing" : " — Summit");
         if (title != Title()) {
             SetTitle(title.c_str());
             std::lock_guard lock(sWindowListLock);
             for (auto& entry : sWindowList) if (entry.key == fKey) entry.title = fPrivate ? tab->title + " (Private)" : tab->title;
         }
-        fBack->SetEnabled(tab->back); fForward->SetEnabled(tab->forward);
+        fBack->SetEnabled(tab->back || (tab->errorView && tab->errorBack)); fForward->SetEnabled(tab->forward);
         fReload->SetIcon(tab->loading ? Icon::Stop : Icon::Reload);
         fProgress->SetProgress(tab->loading ? std::max(0.03f, tab->progress) : 0);
         // The Haiku look shows progress in the status bar, like WebPositive.
@@ -2552,7 +2575,7 @@ void BrowserWindow::ProfileChanged(const BMessage& message)
         });
         if (bar != fBookmarksBarVisible) {
             fBookmarksBarVisible = bar;
-            if (bar && fBookmarksBar->IsHidden(fBookmarksBar) && fWebApp.empty()) fBookmarksBar->Show();
+            if (bar && fBookmarksBar->IsHidden(fBookmarksBar) && fWebApp.empty() && !fPopup) fBookmarksBar->Show();
             else if (!bar && !fBookmarksBar->IsHidden(fBookmarksBar)) fBookmarksBar->Hide();
             fBookmarksBarItem->SetLabel(bar ? "Hide Bookmarks Bar" : "Show Bookmarks Bar");
         }
@@ -3157,7 +3180,14 @@ void BrowserWindow::FullScreenRequested(const BMessage& message)
 bool BrowserWindow::SetPageFullScreen(int64 tab, bool enter)
 {
     if (enter) {
-        if (tab != fSelected || !IsActive() || fClosingWindow) return false;
+        if (tab != fSelected || fClosingWindow) return false;
+        // A click on an inactive window reaches its page before the window
+        // hears that it is active: a request that comes with the click is
+        // the user's, and the window comes to the front for it.
+        if (!IsActive()) {
+            if (system_time() - fLastMouseDown > 1000000) return false;
+            Activate();
+        }
         if (fFullScreenTab) return fFullScreenTab == tab;
         // The display the window is on, whatever the desktop's zoom setting
         // says about spanning displays: a full-screen page, like airTime's
@@ -3475,6 +3505,7 @@ void BrowserWindow::MessageReceived(BMessage* message)
             if (message->what == kReloadTab) {
 #if SUMMIT_MODERN_WEBKIT
                 if (target->processExited || target->crashView) { ReloadCrashedTab(*target); break; }
+                if (target->errorView) { RetryFailedLoad(*target); break; }
                 if (!PrepareTabNavigation(*target)) break;
                 if (!target->deferredURL.empty()) {
                     target->view->LoadURL(std::exchange(target->deferredURL, {}).c_str());
@@ -3510,6 +3541,8 @@ void BrowserWindow::MessageReceived(BMessage* message)
         }
         case kBack:
 #if SUMMIT_MODERN_WEBKIT
+            // From an error page to the page before it, which is still there.
+            if (tab && tab->errorView && LeaveLoadErrorView(*tab)) break;
             if (!tab || !tab->back || !PrepareNavigation()) break;
 #endif
             if (tab) tab->view->GoBack();
@@ -3523,6 +3556,7 @@ void BrowserWindow::MessageReceived(BMessage* message)
         case kReload: if (tab) {
 #if SUMMIT_MODERN_WEBKIT
             if (tab->processExited || tab->crashView) { ReloadCrashedTab(*tab); break; }
+            if (tab->errorView && !tab->loading) { RetryFailedLoad(*tab); break; }
             if (!tab->loading && !PrepareNavigation()) break;
 #endif
             if (tab->loading) {
@@ -3682,6 +3716,14 @@ void BrowserWindow::MessageReceived(BMessage* message)
             break;
         }
         case kPasswordBarAnswer: PasswordBarAnswer(*message); break;
+        case kRetryFailedLoad:
+            if (auto* target = FindTabByID(message->GetInt64("tab", 0))) RetryFailedLoad(*target);
+            break;
+        case kCheckNetwork: CheckNetworkForErrorPages(); break;
+        case kWindowNotice: case kDismissWindowNotice:
+            fWindowNotice = message->what == kWindowNotice ? message->GetString("text", "") : "";
+            RefreshNoticeBar();
+            break;
         case kBookmarkAllTabs: {
             // A folder named after the day, in Other Bookmarks.
             char name[64] = "Tabs";
@@ -4679,20 +4721,27 @@ void BrowserWindow::NewPageRequested(const BMessage& message)
         // A sized pop-up (sign-in and payment windows) or Shift-click: its own window.
         BMessage request(kNewWindow);
         request.AddUInt64("new_page", identifier);
+        bool sized = false;
         request.AddString("new_page_url", url.c_str());
         // The page belongs to the opener's context, so it opens in a window of the same kind.
         request.AddBool("private", fPrivate);
         BRect frame = Frame().OffsetByCopy(24, 24);
         float width, height;
         if (message.FindFloat("width", &width) == B_OK && message.FindFloat("height", &height) == B_OK) {
-            // Room for the page plus the window's own bars.
-            const float chrome = Bounds().Height() - fPages->Bounds().Height();
-            frame.right = frame.left + std::clamp(width, 400.0f, 4000.0f);
-            frame.bottom = frame.top + std::clamp(height, 200.0f, 4000.0f) + chrome;
+            // Room for the page plus the window's own bars: this window's,
+            // less those a pop-up does not have or show yet.
+            float chrome = Bounds().Height() - fPages->Bounds().Height();
+            for (BView* bar : std::initializer_list<BView*>{fBookmarksBar, fNoticeBar, fFindBar})
+                if (bar && !bar->IsHidden(bar)) chrome -= bar->Bounds().Height() + 1;
+            // A BRect's width is one pixel short of the pixels it covers.
+            frame.right = frame.left + std::clamp(width, 200.0f, 4000.0f) - 1;
+            frame.bottom = frame.top + std::clamp(height, 150.0f, 4000.0f) - 1 + chrome;
+            sized = message.GetBool("popup", false);
             float x, y;
             if (message.FindFloat("x", &x) == B_OK && message.FindFloat("y", &y) == B_OK) frame.OffsetTo(x, y);
         }
         request.AddRect("frame", frame);
+        request.AddBool("popup", sized);
         if (be_app->PostMessage(&request) != B_OK) BWebKitView::DeclineNewPage(identifier);
         return;
     }
@@ -4812,6 +4861,14 @@ void BrowserWindow::WebKitStateChanged(const BMessage& message)
                 if (message.FindString("loadErrorURL", &value) == B_OK && value) tab->loadErrorURL = value;
                 message.FindInt32("loadErrorCode", &tab->loadErrorCode);
                 message.FindBool("loadErrorProvisional", &tab->loadErrorProvisional);
+            }
+            if (failed && MediaTookOverLoad(*tab, message, generation)) {
+                tab->loadErrorDescription.clear();
+                tab->loadErrorDomain.clear();
+                tab->loadErrorURL.clear();
+                tab->loadErrorCode = 0;
+                tab->loadErrorProvisional = false;
+            } else if (failed) {
                 tab->loadError = tab->loadErrorProvisional ? "Could not load " : "Loading was interrupted for ";
                 tab->loadError += tab->loadErrorURL.empty() ? "this page" : tab->loadErrorURL;
                 bool certificateFailed = false;
@@ -4921,8 +4978,9 @@ void BrowserWindow::WebKitStateChanged(const BMessage& message)
             return changes;
         }, BMessenger(this), false);
     }
+    UpdateLoadErrorView(*tab);
     if (tab->id == fSelected) {
-        if (!fAddress->TextView()->IsFocus()) fAddress->SetText(DisplayURL(tab->url).c_str());
+        if (!fAddress->TextView()->IsFocus()) fAddress->SetText(DisplayURL(tab->ShownURL()).c_str());
         ShowTabStatus(*tab);
         if (tab->certificate && !tab->certificate->asked) AskAboutCertificate(*tab);
         ProbeReader(*tab);

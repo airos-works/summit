@@ -5,6 +5,8 @@
 #include "core/Zoom.h"
 #include "core/Suggest.h"
 #include "core/DownloadText.h"
+#include "core/LoadError.h"
+#include "core/ProfileLock.h"
 #include <set>
 #include <cstdlib>
 #include <ctime>
@@ -398,6 +400,106 @@ int main()
     CHECK(std::filesystem::file_size(path) == 7);
     CHECK(!profile.Save(path / "impossible.json", error) && !error.empty());
     CHECK(std::filesystem::file_size(path) == 7);
+
+    // #93: every save keeps the file it replaces, and the day's first save a
+    // dated copy; a damaged profile loads from the newest readable copy.
+    {
+        const auto folder = std::filesystem::path(created) / "backups";
+        const auto file = folder / "profile.json";
+        std::tm noon { }; // 19 October 2026 at noon, local time
+        noon.tm_year = 126; noon.tm_mon = 9; noon.tm_mday = 19; noon.tm_hour = 12; noon.tm_isdst = -1;
+        const int64_t monday = static_cast<int64_t>(std::mktime(&noon));
+        Profile first;
+        first.homeURL = "https://first.example/";
+        CHECK(first.Save(file, error, monday) && error.empty());
+        CHECK(!std::filesystem::exists(folder / "profile.json.1"));
+        CHECK(Profile::Backups(file).size() == 1);
+        Profile second = first;
+        second.homeURL = "https://second.example/";
+        CHECK(second.Save(file, error, monday + 60));
+        CHECK(Profile::Load(folder / "profile.json.1", error).homeURL == "https://first.example/" && error.empty());
+        auto copies = Profile::Backups(file);
+        CHECK(copies.size() == 2 && copies[0].filename() == "profile.json.1");
+        CHECK(Profile::Load(copies[1], error).homeURL == "https://first.example/");
+        // One dated copy a day, for the last kDailyBackups days.
+        for (int day = 1; day <= 4; ++day) {
+            Profile later = second;
+            later.homeURL = "https://day" + std::to_string(day) + ".example/";
+            CHECK(later.Save(file, error, monday + day * 86400));
+        }
+        copies = Profile::Backups(file);
+        CHECK(copies.size() == 1 + Profile::kDailyBackups);
+        CHECK(Profile::Load(copies[1], error).homeURL == "https://day4.example/");
+        CHECK(Profile::Load(copies.back(), error).homeURL == "https://day2.example/");
+        CHECK(Profile::Load(file, error).homeURL == "https://day4.example/");
+        // Readable: nothing to restore.
+        auto load = Profile::LoadOrRestore(file, monday);
+        CHECK(load.error.empty() && load.restoredFrom.empty() && load.writable && load.profile.homeURL == "https://day4.example/");
+        // Zero-filled, as BFS leaves a file whose blocks never reached the disk.
+        { std::ofstream out(file, std::ios::binary); out << std::string(4096, '\0'); }
+        load = Profile::LoadOrRestore(file, monday + 5 * 86400);
+        CHECK(!load.error.empty() && load.writable && load.restoredFrom == folder / "profile.json.1");
+        CHECK(load.profile.homeURL == "https://day3.example/" && load.restoredTime > 0);
+        CHECK(!std::filesystem::exists(file) && std::filesystem::exists(load.damagedCopy)
+            && load.damagedCopy.filename().string().rfind("profile.damaged-", 0) == 0
+            && std::filesystem::file_size(load.damagedCopy) == 4096);
+        // Saving goes on.
+        CHECK(load.profile.Save(file, error, monday + 5 * 86400));
+        CHECK(Profile::Load(file, error).homeURL == "https://day3.example/" && error.empty());
+        // Truncated, with the newest copy damaged too: an older one.
+        { std::ofstream out(file, std::ios::binary | std::ios::trunc); out << R"({"version":1,"tabs":[)"; }
+        { std::ofstream out(folder / "profile.json.1", std::ios::binary | std::ios::trunc); out << "{"; }
+        load = Profile::LoadOrRestore(file, monday + 5 * 86400 + 1);
+        CHECK(!load.error.empty() && load.writable && load.restoredFrom.filename().string().rfind("profile-backup-", 0) == 0);
+        CHECK(load.profile.homeURL == "https://day3.example/");
+        // A save cut short between its renames leaves only the copies.
+        std::filesystem::remove(file);
+        load = Profile::LoadOrRestore(file, monday + 6 * 86400);
+        CHECK(!load.error.empty() && !load.restoredFrom.empty() && load.damagedCopy.empty() && load.writable);
+        // Nothing readable at all: a fresh profile, the damaged file kept.
+        for (const auto& copy : Profile::Backups(file)) std::filesystem::remove(copy);
+        { std::ofstream out(file); out << "garbage"; }
+        load = Profile::LoadOrRestore(file, monday + 6 * 86400 + 2);
+        CHECK(!load.error.empty() && load.restoredFrom.empty() && load.writable && !load.damagedCopy.empty());
+        CHECK(load.profile.homeURL.empty() && !std::filesystem::exists(file));
+        // A newer Summit's profile is left as it is, and not written.
+        { std::ofstream out(file); out << R"({"version":2,"tabs":[],"selected":0,"bookmarks":[],"history":[]})"; }
+        load = Profile::LoadOrRestore(file, monday + 7 * 86400);
+        CHECK(!load.error.empty() && !load.writable && load.damagedCopy.empty() && std::filesystem::exists(file));
+        // A first start.
+        load = Profile::LoadOrRestore(folder / "new" / "profile.json", monday);
+        CHECK(load.error.empty() && load.writable && load.restoredFrom.empty());
+    }
+    // #93: one Summit per profile folder.
+    {
+        const auto folder = std::filesystem::path(created) / "locked";
+        std::filesystem::create_directories(folder);
+        ProfileLock first, second;
+        int64_t holder = -1;
+        CHECK(first.Take(folder, 1234, holder, error) == ProfileLock::Result::Taken && first.Holds() && error.empty());
+        CHECK(second.Take(folder, 99, holder, error) == ProfileLock::Result::Held && holder == 1234 && !second.Holds());
+        first.Release();
+        CHECK(second.Take(folder, 99, holder, error) == ProfileLock::Result::Taken && second.Holds());
+        CHECK(first.Take(folder, 1234, holder, error) == ProfileLock::Result::Held && holder == 99);
+        CHECK(first.Take(folder / "missing", 1, holder, error) == ProfileLock::Result::Unsupported && !error.empty());
+    }
+    // #89, #95: what the error page says, and what is no error.
+    CHECK(ClassifyLoadFailure("CurlErrorDomain", 6) == LoadFailure::HostNotFound);
+    CHECK(ClassifyLoadFailure("CurlErrorDomain", 7) == LoadFailure::Refused);
+    CHECK(ClassifyLoadFailure("CurlErrorDomain", 56) == LoadFailure::Reset);
+    CHECK(ClassifyLoadFailure("CurlErrorDomain", 28) == LoadFailure::TimedOut);
+    CHECK(ClassifyLoadFailure("CurlErrorDomain", 35) == LoadFailure::Secure);
+    CHECK(ClassifyLoadFailure("CurlErrorDomain", 3) == LoadFailure::Other);
+    CHECK(ClassifyLoadFailure("WebKitErrorDomain", 204) == LoadFailure::None && IsMediaTakeover("WebKitErrorDomain", 204));
+    CHECK(!IsMediaTakeover("CurlErrorDomain", 204) && !IsMediaTakeover("WebKitErrorDomain", 102));
+    CHECK(ClassifyLoadFailure("WebKitErrorDomain", 102) == LoadFailure::None);
+    CHECK(ClassifyLoadFailure("WebKitNetworkError", 302) == LoadFailure::None);
+    CHECK(ClassifyLoadFailure("WebKitErrorDomain", 101) == LoadFailure::Other);
+    CHECK(LoadFailureHost("https://user@Example.com:8443/path?q") == "Example.com");
+    CHECK(LoadFailureHost("http://[::1]:8080/") == "::1" && LoadFailureHost("about:blank") == "about:blank");
+    CHECK(DescribeLoadFailure(LoadFailure::HostNotFound, "https://nowhere.invalid/x", "").title == "Can't find nowhere.invalid");
+    CHECK(DescribeLoadFailure(LoadFailure::Offline, "https://a.example/", "").title == "You're offline");
+    CHECK(DescribeLoadFailure(LoadFailure::Other, "file:///x", "File does not exist").explanation == "File does not exist");
     std::filesystem::remove_all(created);
     std::cout << checks << " checks, " << failures << " failures\n";
     return failures ? 1 : 0;

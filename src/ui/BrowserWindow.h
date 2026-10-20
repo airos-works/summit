@@ -66,6 +66,9 @@ struct BrowserWindowOptions {
     bool privateBrowsing = false;
     // A web app's window (#75): the app's identifier (Profile::webApps).
     std::string webApp;
+    // A pop-up a page opened with a size (window.open() with width and
+    // height): it may be small, and has no bookmarks bar (#95).
+    bool popup = false;
 };
 #if SUMMIT_MODERN_WEBKIT
 // A direct window, so that on a GPU the engine can put pages straight into
@@ -229,6 +232,19 @@ private:
         bool exitedInBackground = false;
         // The page stopped answering input (#71).
         bool unresponsive = false, waitedForPage = false;
+        // The page area says why the last page could not be loaded (#89):
+        // the view, the address that failed and what the page and tab are
+        // called, the load it is for, the address the tab showed when it
+        // came, whether Back returns to that page and whether the network
+        // was down (it then loads again by itself when the network is back).
+        BView* errorView = nullptr;
+        std::string errorURL, errorTitle, errorShownURL;
+        uint64 errorGeneration = 0;
+        bool errorBack = false, errorOffline = false;
+        // The load whose media document took over (#95), recorded in history once.
+        uint64 mediaGeneration = 0;
+        const std::string& ShownURL() const { return errorView ? errorURL : url; }
+        const std::string& ShownTitle() const { return errorView ? errorTitle : title; }
         // The last pop-up the page tried to open without a click, and how
         // many (#73).
         std::string blockedPopup;
@@ -508,6 +524,35 @@ private:
     void SpellingCommand(const BMessage& message);
     void PasswordBarAnswer(const BMessage& message);
     void SchemeOpenRequested(const BMessage& message, Tab& tab);
+    // The error page of a page that could not be loaded (#89,
+    // BrowserWindowLoadErrors.cpp): shown, updated or taken away after each
+    // state notification of the tab.
+    void UpdateLoadErrorView(Tab& tab);
+    void ShowLoadErrorView(Tab& tab);
+    // focus: the page takes the focus again.
+    void RemoveLoadErrorView(Tab& tab, bool focus = true);
+    // Back from the error page: the page before it, which is still loaded;
+    // false when there is none.
+    bool LeaveLoadErrorView(Tab& tab);
+    // Try Again (the button, Return, Reload): the address that failed.
+    void RetryFailedLoad(Tab& tab);
+    // Offline error pages load again once the network is back.
+    void CheckNetworkForErrorPages();
+    // A state notification whose load error is a media document taking the
+    // load over: the page loaded (#95). Records the visit once.
+    bool MediaTookOverLoad(Tab& tab, const BMessage& message, uint64 generation);
+    std::unique_ptr<BMessageRunner> fNetworkCheck;
+    bool fNetworkWasUp = false;
+    // A notice for the whole window (a damaged profile was restored, #93),
+    // shown in the notice bar until dismissed.
+    std::string fWindowNotice;
+    // A pop-up window (BrowserWindowOptions::popup).
+    bool fPopup = false;
+    // When the window last got a mouse button press, and the buttons down:
+    // the click that activates a window can ask a page to go full screen
+    // before the window knows it is active (#95).
+    bigtime_t fLastMouseDown = 0;
+    int32 fMouseButtons = 0;
     class NoticeBar* fNoticeBar = nullptr;
     BMenuItem* fSpellingItem = nullptr;
     // Save as PDF: the chosen file, waiting for the pages.

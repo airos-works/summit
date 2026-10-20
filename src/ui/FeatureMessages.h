@@ -71,6 +71,16 @@ constexpr uint32 kPasswordChecked = 'pwck';
 constexpr uint32 kPasswordSaved = 'pwsv';
 }
 namespace summit {
+// A page that could not be loaded (#89): its error page's Try Again ("tab"),
+// and the window's look at whether the network is back.
+constexpr uint32 kRetryFailedLoad = 'lerr';
+constexpr uint32 kCheckNetwork = 'lenc';
+// The application to a window: show "text" in the notice bar until the user
+// dismisses it (kDismissWindowNotice). A damaged profile was restored (#93).
+constexpr uint32 kWindowNotice = 'wntc';
+constexpr uint32 kDismissWindowNotice = 'wntd';
+}
+namespace summit {
 // Web apps (#75). kWebAppInstalled, to the window that installed it: the
 // new app's "id", "name", "start_url", "scope", "launcher", or "error".
 // kOpenWebApp, to the application: open app "id" (in its window, if open).
