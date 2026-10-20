@@ -324,7 +324,9 @@ void Merge(const BookmarkNode& from, BookmarkNode& into, size_t depth, ImportSta
                 [&](const BookmarkNode& node) { return node.folder && node.title == title; });
             if (existing == into.children.end()) {
                 into.children.push_back({state.nextID++, title, "", true, child.added ? child.added : state.now, {}});
-                state.created.insert(into.children.back().id);
+                // A folder empty in the file stays (one exported empty comes
+                // back); one left empty by duplicates goes (RemoveEmptyCreated).
+                if (!child.children.empty()) state.created.insert(into.children.back().id);
                 ++state.folders;
                 existing = into.children.end() - 1;
             }
@@ -368,8 +370,8 @@ BookmarkImportResult Bookmarks::Import(const BookmarkNode& imported, const std::
     }
     const int64_t folder = existing->id;
     Merge(imported, *existing, 1, state);
-    // Folders that only held duplicates (or nothing) are not kept; folders
-    // that were there before keep whatever they had.
+    // Folders that only held duplicates are not kept; folders that were there
+    // before keep whatever they had, and so do folders empty in the file.
     BookmarkNode root;
     root.children.push_back(std::move(*existing));
     RemoveEmptyCreated(root, state.created);

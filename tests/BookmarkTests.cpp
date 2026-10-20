@@ -178,6 +178,23 @@ int main()
         CHECK(marks.Other().children.size() == 1);
         // Nothing to add makes no folder.
         CHECK(marks.Import(imported, "Imported from Chrome").added == 0 && !Child(marks.Other(), "Imported from Chrome"));
+        // A folder empty in the file comes in (an export of an empty folder
+        // imported back), and the import folder with it.
+        BookmarkNode empty{0, "", "", true, 0, {{0, "Later", "", true, 0, {}},
+            {0, "Only duplicates", "", true, 0, {{0, "Known", "https://known.example/", false, 0, {}}}}}};
+        marks.Import(empty, "Imported from a file");
+        const auto* file = Child(marks.Other(), "Imported from a file");
+        CHECK(file && Titles(*file) == "Later/");
+        // The same through an export and the HTML reader.
+        Bookmarks exported;
+        exported.AddFolder(kOtherBookmarksFolder, "Nothing yet");
+        exported.Add({"https://kept.example/", "Kept"}, kOtherBookmarksFolder);
+        BookmarkNode read;
+        std::string readError;
+        CHECK(ParseNetscapeBookmarks(WriteNetscapeBookmarks(exported), read, readError));
+        Bookmarks round;
+        round.Import(read, "Imported");
+        CHECK(Titles(*Child(round.Other(), "Imported")) == "Nothing yet/,Kept");
     }
 
     // Netscape bookmarks HTML, as Firefox exports it.

@@ -182,9 +182,17 @@ bool ParseNetscapeBookmarks(std::string_view html, BookmarkNode& folder, std::st
     // while it is on top, and the folders below are not changed meanwhile.
     std::vector<BookmarkNode*> open;
     BookmarkNode* pending = nullptr;
+    // Where each open folder and the pending one are, as child indices from
+    // the top, and the browsers' own roots (Chrome's bar, Firefox's toolbar
+    // and Other Bookmarks): empty, they are no folder of the user's, and an
+    // import would make an empty folder of them.
+    std::vector<std::vector<size_t>> openPaths;
+    std::vector<size_t> pendingPath;
+    std::vector<std::vector<size_t>> roots;
     size_t nodes = 0;
     bool any = false;
     auto current = [&]() -> BookmarkNode& { return open.empty() ? folder : *open.back(); };
+    auto currentPath = [&]() { return openPaths.empty() ? std::vector<size_t>{} : openPaths.back(); };
     for (size_t position = html.find('<'); position != std::string_view::npos && position < html.size();
         position = html.find('<', position)) {
         Tag tag;
@@ -192,14 +200,20 @@ bool ParseNetscapeBookmarks(std::string_view html, BookmarkNode& folder, std::st
         if (tag.name == "dl") {
             if (tag.closing) {
                 if (!open.empty()) open.pop_back();
+                if (!openPaths.empty()) openPaths.pop_back();
                 pending = nullptr;
                 continue;
             }
             // The first list is the file's top level; past the depth limit
             // folders' contents go into the folder above.
             BookmarkNode* opened = pending ? pending : open.empty() ? &folder : open.back();
-            if (open.size() > kMaxBookmarkDepth) opened = open.back();
+            auto openedPath = pending ? pendingPath : currentPath();
+            if (open.size() > kMaxBookmarkDepth) {
+                opened = open.back();
+                openedPath = openPaths.back();
+            }
             open.push_back(opened);
+            openPaths.push_back(std::move(openedPath));
             pending = nullptr;
             any = true;
             continue;
@@ -223,8 +237,22 @@ bool ParseNetscapeBookmarks(std::string_view html, BookmarkNode& folder, std::st
             node.folder = true;
             current().children.push_back(std::move(node));
             pending = &current().children.back();
+            pendingPath = currentPath();
+            pendingPath.push_back(current().children.size() - 1);
+            if (tag.attributes.count("personal_toolbar_folder") || tag.attributes.count("unfiled_bookmarks_folder"))
+                roots.push_back(pendingPath);
         }
         any = true;
+    }
+    // Later ones first, so that the indices of earlier ones still hold.
+    std::sort(roots.rbegin(), roots.rend());
+    for (const auto& path : roots) {
+        BookmarkNode* parent = &folder;
+        for (size_t i = 0; i + 1 < path.size() && parent; ++i)
+            parent = path[i] < parent->children.size() ? &parent->children[path[i]] : nullptr;
+        if (parent && path.back() < parent->children.size() && parent->children[path.back()].folder
+            && parent->children[path.back()].children.empty())
+            parent->children.erase(parent->children.begin() + path.back());
     }
     if (!any) {
         error = "This file has no bookmarks in the Netscape bookmarks format.";

@@ -202,7 +202,11 @@ engine, profile `p-bm`):
   smart folders (`place:` queries) and bookmarklets are skipped.
 - Links cannot be dragged out of pages onto the bar (the port starts no
   drags from pages); tabs, Tracker files and text from other applications can.
-- Exporting and importing back leaves out empty folders.
+- ~~Exporting and importing back leaves out empty folders.~~ Done 20 October
+  (#110): a folder empty in the file is imported (one only duplicates filled is
+  still left out), and the HTML reader drops the browsers' own root folders
+  (`PERSONAL_TOOLBAR_FOLDER`, `UNFILED_BOOKMARKS_FOLDER`) when they are empty,
+  so an export with an empty bar does not come back with an empty "Bookmarks Bar".
 - The Bookmarks menu shows no site icons.
 - Opening a bookmark file with Summit from Tracker (Open With) was not tried
   on the X399; dropping one on the bar was.
