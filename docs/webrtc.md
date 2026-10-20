@@ -79,8 +79,16 @@ the GLib files, which are portable).
 - Camera (`HaikuVideoCaptureSource`): the Media Kit node of a USB camera
   (`usb_webcam` add-on) sends `B_RGB32` pictures of the size put in the
   connection's format; they become I420 frames (libyuv). Presets 160x120 to
-  1920x1080 at up to 30 per second. One consumer at a time: a camera in use
-  elsewhere fails with "The device is in use by another program."
+  1920x1080 at up to 30 per second. A camera's node serves one consumer at a
+  time: a camera in use in another process fails with "The device is in use
+  by another program."
+- Within a web process, every source of a device shares one connection
+  (`HaikuSharedCamera`, `HaikuSharedMicrophone`), so a page can open the same
+  camera or microphone many times at once, as Teams does (20 October 2026,
+  [teams-camera.md](teams-camera.md)). The camera runs at the largest size
+  its sources ask for; smaller ones get the picture cut to their shape and
+  scaled. Microphone samples go through voice processing once for all the
+  sources that want it.
 - Microphone (`HaikuAudioCaptureSource`): a sound card's input or a USB
   microphone, samples converted to interleaved float. The sound card node is
   never stopped (it also plays). The default is the system's (Media
@@ -244,7 +252,9 @@ codecs both directions have); Summit calls Chromium (VP8 and VP9).
 - System audio capture (sharing what the computer plays).
 - WebCodecs (WebKit's are Cocoa's or GStreamer's; Zoom's web client uses
   them when present).
-- `devicechange` events: devices are listed when asked, but plugging one in
-  is not announced.
-- Not yet tried against Zoom or Teams themselves (they need meetings to
-  join); Summit presents itself as Safari, which both support.
+- `devicechange` when a camera is plugged in: the Media Kit sends no notice,
+  so the change is announced only the next time a page lists the devices.
+- Not yet tried in a real Zoom or Teams meeting (they need accounts or
+  meetings to join); Summit presents itself as Safari, which both support.
+  Teams' device check, its meeting launcher and Microsoft's calling library
+  were tried on 20 October 2026 ([teams-camera.md](teams-camera.md)).

@@ -1,0 +1,149 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>camera share: running</title>
+<style>
+body { font: 14px sans-serif; margin: 16px; }
+video { width: 240px; height: 135px; background: #222; margin: 4px; object-fit: contain; }
+pre { background: #f4f4f4; padding: 8px; max-height: 50vh; overflow: auto; }
+</style>
+</head>
+<body>
+<h3>Camera and microphone opened several times at once</h3>
+<p>What the Teams device check does: the microphone four times and the camera
+five times at once, then again with the devices' ids while the first streams
+are still open, then streams of different sizes side by side. Needs the
+camera and microphone allowed for this page. <code>?camera=NAME</code> picks
+a camera by a part of its label. The title ends as
+<code>camera share: N/M</code>.</p>
+<div id="videos"></div>
+<pre id="log"></pre>
+<script>
+const params = new URLSearchParams(location.search);
+const results = [];
+const logElement = document.getElementById('log');
+function log(text) { logElement.textContent += text + '\n'; console.log('camera-share: ' + text); }
+function check(name, ok, detail = '') {
+    results.push({ name, ok });
+    log((ok ? 'PASS ' : 'FAIL ') + name + (detail ? ' (' + detail + ')' : ''));
+}
+function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
+
+function show(stream) {
+    const video = document.createElement('video');
+    video.autoplay = true;
+    video.muted = true;
+    video.playsInline = true;
+    video.srcObject = stream;
+    document.getElementById('videos').append(video);
+    return video;
+}
+
+// Whether a video element shows moving pictures of the expected size.
+async function videoRuns(video, width, height) {
+    for (let i = 0; i < 50 && video.readyState < 2; i++)
+        await sleep(100);
+    const sizeOk = !width || (video.videoWidth === width && video.videoHeight === height);
+    const before = video.currentTime;
+    await sleep(1500);
+    const advanced = video.currentTime > before;
+    return { ok: sizeOk && advanced, detail: `${video.videoWidth}x${video.videoHeight}, time ${before.toFixed(2)} -> ${video.currentTime.toFixed(2)}` };
+}
+
+const settled = promises => Promise.allSettled(promises).then(outcomes => outcomes.map(outcome =>
+    outcome.status === 'fulfilled' ? outcome.value : outcome.reason));
+
+async function run() {
+    const allStreams = [];
+    const keep = streams => { for (const stream of streams) if (stream instanceof MediaStream) allStreams.push(stream); return streams; };
+    const failures = list => list.filter(item => !(item instanceof MediaStream)).map(error => error.name + ': ' + error.message);
+
+    // As Teams starts: the microphone four times, then the camera five times
+    // at 1280x720, without waiting.
+    const hd = { width: { min: 1280, max: 1280 }, height: { min: 720, max: 720 }, frameRate: { max: 30, ideal: 30 } };
+    let devices = await navigator.mediaDevices.enumerateDevices();
+    let camera = devices.find(device => device.kind === 'videoinput' && (!params.get('camera') || device.label.includes(params.get('camera'))));
+    const cameraConstraint = camera && camera.deviceId ? { deviceId: { exact: camera.deviceId } } : {};
+    const microphones = settled([1, 2, 3, 4].map(() => navigator.mediaDevices.getUserMedia({ audio: {} })));
+    const cameras = settled([1, 2, 3, 4, 5].map(() => navigator.mediaDevices.getUserMedia({ video: { ...hd, ...cameraConstraint } })));
+    const microphoneStreams = keep(await microphones);
+    const cameraStreams = keep(await cameras);
+    check('microphone opened 4 times at once', failures(microphoneStreams).length === 0, failures(microphoneStreams).join('; '));
+    check('camera opened 5 times at once', failures(cameraStreams).length === 0, failures(cameraStreams).join('; '));
+
+    devices = await navigator.mediaDevices.enumerateDevices();
+    const microphone = devices.find(device => device.kind === 'audioinput');
+    camera = devices.find(device => device.kind === 'videoinput' && (!params.get('camera') || device.label.includes(params.get('camera'))));
+    log('camera: ' + (camera ? camera.label : 'none') + ', microphone: ' + (microphone ? microphone.label : 'none'));
+
+    const first = cameraStreams.find(stream => stream instanceof MediaStream);
+    if (first) {
+        const run = await videoRuns(show(first), 1280, 720);
+        check('first camera stream plays at 1280x720', run.ok, run.detail);
+    }
+
+    // Again with the devices' ids while those are open.
+    const again = keep(await settled([
+        navigator.mediaDevices.getUserMedia({ audio: { deviceId: { exact: microphone.deviceId } } }),
+        navigator.mediaDevices.getUserMedia({ video: { ...hd, deviceId: { exact: camera.deviceId } } }),
+    ]));
+    check('microphone and camera opened again by id', failures(again).length === 0, failures(again).join('; '));
+
+    // Teams stops the first streams after its check.
+    for (const stream of [...microphoneStreams, ...cameraStreams])
+        if (stream instanceof MediaStream) stream.getTracks().forEach(track => track.stop());
+    const kept = again[1];
+    let keptVideo = null;
+    if (kept instanceof MediaStream) {
+        keptVideo = show(kept);
+        const run = await videoRuns(keptVideo, 1280, 720);
+        check('stream opened by id still plays after the others stopped', run.ok, run.detail);
+    }
+
+    // Two sizes at once: the camera runs at the larger one, the smaller one
+    // is cut and scaled.
+    const small = await navigator.mediaDevices.getUserMedia({ video: { deviceId: { exact: camera.deviceId }, width: { exact: 640 }, height: { exact: 480 } } }).catch(error => error);
+    if (small instanceof MediaStream) {
+        allStreams.push(small);
+        const settings = small.getVideoTracks()[0].getSettings();
+        check('640x480 stream next to a 1280x720 one', settings.width === 640 && settings.height === 480, `${settings.width}x${settings.height}`);
+        const smallVideo = show(small);
+        const run = await videoRuns(smallVideo, 640, 480);
+        check('640x480 stream plays at its size', run.ok, run.detail);
+        if (keptVideo) {
+            const bigRun = await videoRuns(keptVideo, 1280, 720);
+            check('1280x720 stream still plays', bigRun.ok, bigRun.detail);
+            kept.getTracks().forEach(track => track.stop());
+            const after = await videoRuns(smallVideo, 640, 480);
+            check('640x480 stream plays after the larger one stopped', after.ok, after.detail);
+        }
+        // A track that changes its own size leaves the others alone.
+        const track = small.getVideoTracks()[0];
+        await track.applyConstraints({ width: { exact: 320 }, height: { exact: 240 } }).catch(error => log('applyConstraints: ' + error.name));
+        const changed = track.getSettings();
+        check('applyConstraints changes one track', changed.width === 320 && changed.height === 240, `${changed.width}x${changed.height}`);
+    } else
+        check('640x480 stream next to a 1280x720 one', false, small.name + ': ' + small.message);
+
+    for (const stream of allStreams)
+        stream.getTracks().forEach(track => track.stop());
+    await sleep(500);
+
+    // Everything stopped: the camera is free again.
+    const last = await navigator.mediaDevices.getUserMedia({ video: { deviceId: { exact: camera.deviceId } } }).catch(error => error);
+    check('camera opens again after every stream stopped', last instanceof MediaStream, last instanceof MediaStream ? '' : last.name + ': ' + last.message);
+    if (last instanceof MediaStream) {
+        const run = await videoRuns(show(last), 0, 0);
+        check('and plays', run.ok, run.detail);
+        last.getTracks().forEach(track => track.stop());
+    }
+
+    const failed = results.filter(result => !result.ok).map(result => result.name);
+    document.title = `camera share: ${results.length - failed.length}/${results.length}` + (failed.length ? ' failed: ' + failed.join(', ') : '');
+    log(document.title);
+}
+run().catch(error => { log('error: ' + error); document.title = 'camera share: error ' + error; });
+</script>
+</body>
+</html>
