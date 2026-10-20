@@ -67,10 +67,18 @@ visually non-empty layout, as well as a second after a load finishes as
 before. Same sequence, typed into a fresh profile each run, before (CI 0816
 engine with the trace) and after:
 
-| address entered 0.4 s after the last (still loading), DuckDuckGo search | before (4 runs) | after (4 runs) |
+| address entered 0.4 s after the last (still loading), DuckDuckGo search | before (4 runs) | after (6 runs) |
 | --- | --- | --- |
-| request leaves | 186, 258, 197, 312 ms | 81, 46, 42, 41 ms |
-| first frame of the new page | 805, 1016, 726, 1028 ms | 697, 692, 666, 668 ms |
+| old web process asks the navigation policy | 4, 80, 8, 55 ms | 55, 24, 12, 19, 129, 51 ms |
+| request leaves | 186, 258, 197, 312 ms | 81, 46, 42, 41, 153, 76 ms |
+| of which after the policy (process start) | 182, 178, 189, 257 ms | 26, 22, 30, 22, 24, 25 ms |
+| first frame of the new page | 805, 1016, 726, 1028 ms | 697, 692, 666, 668, 759, 699 ms |
+
+The last two "after" runs are the final engine and browser (test engine
+`nav4`, browser `nav4a`); the first four had the same change in an earlier
+test engine. What is left after Enter in that case is the old page's web
+process, busy loading, answering the load request before it asks the policy
+(12-129 ms): WebKit sends a typed load to the page's current process first.
 
 Hacker News typed while The Guardian was still loading needed a new process
 in one of the four runs before (request at 200 ms) and in none after

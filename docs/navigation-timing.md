@@ -17,9 +17,14 @@ this page says what changed and how to trace a navigation.
   loading, and many pages take seconds to finish. Now a spare is started
   while the user types in the address field, and a second after each page
   first paints. In the measured case (a search entered while the last page
-  was still loading) the request now leaves 41-81 ms after Enter instead of
-  186-312 ms, and the new page's first frame comes 670-700 ms after Enter
-  instead of 730-1030 ms.
+  was still loading) the request now leaves 22-30 ms after the navigation
+  policy instead of 178-257 ms (41-153 ms after Enter instead of
+  186-312 ms), and the new page's first frame comes 666-759 ms after Enter
+  instead of 726-1028 ms.
+- What can still delay the start is the page being left: a typed load goes
+  to the tab's current web process first, which asks for the navigation
+  policy when its main thread is free (1-8 ms when idle, up to 130 ms while
+  it is busy loading a page).
 - Nothing else changes: the address field, the tab's loading dot and the
   progress line react within 1-4 ms of the key, as before.
 
