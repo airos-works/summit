@@ -514,6 +514,7 @@ private:
     void SchemeOpenRequested(const BMessage& message, Tab& tab);
     class NoticeBar* fNoticeBar = nullptr;
     BMenuItem* fSpellingItem = nullptr;
+    BMenuItem* fZoomTextOnlyItem = nullptr;
     // Save as PDF: the chosen file, waiting for the pages.
     std::unique_ptr<BFilePanel> fPDFPanel;
     std::map<uint64, std::string> fPDFTargets;

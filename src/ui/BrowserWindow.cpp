@@ -740,6 +740,8 @@ BrowserWindow::BrowserWindow(std::shared_ptr<SharedProfile> profile, std::string
     AddItem(view, "Zoom In", kZoomIn, '+');
     AddItem(view, "Zoom Out", kZoomOut, '-');
     AddItem(view, "Actual Size", kZoomReset, '0');
+    fZoomTextOnlyItem = new BMenuItem("Zoom Text Only", new BMessage(kToggleZoomTextOnly));
+    view->AddItem(fZoomTextOnlyItem);
     // '+' is Shift-= on most keyboards, and shortcuts match their modifiers exactly.
     AddShortcut('+', B_SHIFT_KEY, new BMessage(kZoomIn));
     AddShortcut('=', 0, new BMessage(kZoomIn));
@@ -2708,6 +2710,16 @@ void BrowserWindow::ChangeZoom(int direction)
 {
     auto* tab = ActiveTab();
     if (!tab) return;
+#if SUMMIT_MODERN_WEBKIT
+    // Text only: the engine's text zoom of the tab, not remembered for the
+    // site. Actual Size resets both.
+    if (direction && fShared->Read([](const Profile& profile) { return profile.zoomTextOnly; })) {
+        if (direction > 0) tab->view->IncreaseZoomFactor(true);
+        else tab->view->DecreaseZoomFactor(true);
+        return;
+    }
+    if (!direction) tab->view->ResetZoomFactor();
+#endif
     const double zoom = direction ? NextZoomLevel(tab->pageZoom, direction) : 1.0;
     if (std::fabs(zoom - tab->pageZoom) >= 0.001) {
         tab->view->SetZoomFactor(zoom);
@@ -2840,6 +2852,7 @@ void BrowserWindow::MenusBeginning()
     RebuildDynamicMenus();
 #if SUMMIT_MODERN_WEBKIT
     if (fSpellingItem) fSpellingItem->SetMarked(fShared->Read([](const Profile& profile) { return profile.spellChecking; }));
+    if (fZoomTextOnlyItem) fZoomTextOnlyItem->SetMarked(fShared->Read([](const Profile& profile) { return profile.zoomTextOnly; }));
 #endif
 }
 void BrowserWindow::RebuildDynamicMenus()
@@ -3697,6 +3710,12 @@ void BrowserWindow::MessageReceived(BMessage* message)
             break;
         }
         case kSpellingCommand: SpellingCommand(*message); break;
+        case kToggleZoomTextOnly:
+            fShared->Change([](Profile& profile) -> uint32 {
+                profile.zoomTextOnly = !profile.zoomTextOnly;
+                return SharedProfile::kSettingsChanged;
+            }, BMessenger(this));
+            break;
         case kToggleSpellChecking: {
             const bool enabled = !fShared->Read([](const Profile& profile) { return profile.spellChecking; });
             BMessage changed(kPreferencesChanged);

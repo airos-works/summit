@@ -48,6 +48,8 @@ constexpr uint32 kStopPage = 'stpg';
 // "word"; and Check Spelling While Typing.
 constexpr uint32 kSpellingCommand = 'splc';
 constexpr uint32 kToggleSpellChecking = 'spck';
+// View › Zoom Text Only (Profile::zoomTextOnly).
+constexpr uint32 kToggleZoomTextOnly = 'ztxt';
 // The password bar's answers: "tab", "which" (0 save, 1 never for the site,
 // 2 not now).
 constexpr uint32 kPasswordBarAnswer = 'pwba';

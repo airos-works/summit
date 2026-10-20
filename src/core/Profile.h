@@ -51,6 +51,8 @@ struct Profile {
     // Where the Home button goes; empty means the built-in start page.
     std::string homeURL;
     bool showBookmarksBar = true;
+    // View › Zoom Text Only: zooming changes the text's size, not the page's.
+    bool zoomTextOnly = false;
     // Whether Summit starts with the windows and tabs open when it last quit
     // (or the system shut down), where they were; otherwise with one window.
     bool restoreSession = true;

@@ -154,5 +154,8 @@ keystrokes.
 - No "Clear recent history" time range; data is cleared for all time.
 - The cookie/site-data size is not shown (it includes extensions' data, which
   is kept).
-- Text-only zoom is not offered.
+- ~~Text-only zoom is not offered.~~ Done 20 October: View › Zoom Text Only
+  (kept in the profile, `zoomTextOnly`) makes Zoom In and Zoom Out change the
+  tab's text size (the engine's text zoom, steps of 10%) instead of the page's;
+  it is not remembered per site. Actual Size resets both.
 - ~~Private windows cannot allow chosen extensions yet.~~ Done 30 September.
