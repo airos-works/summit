@@ -26,6 +26,11 @@ bool IsIco(std::string_view data);
 IcoEntry SelectIcoEntry(std::string_view data, int wanted = 32);
 // Decodes an uncompressed 1/4/8/24/32-bit DIB from an .ico, with its mask.
 bool DecodeDIB(std::string_view dib, Image& out);
+// Whether the data is an SVG image (an <svg> element near the start).
+bool IsSvg(std::string_view data);
+// Draws an SVG image into a size x size square (keeping its aspect ratio,
+// centred); false for one that cannot be read or draws nothing.
+bool RasterizeSvg(std::string_view data, int size, Image& out);
 // Fits the image into a size x size square (keeping its aspect ratio,
 // centred) by area averaging.
 Image ScaleImage(const Image& image, int size);

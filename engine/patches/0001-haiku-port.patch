@@ -111900,10 +111900,10 @@ index 0000000000000000000000000000000000000000..c9a119d02f85b7c5ad8fe9153bfc9604
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/WebView.cpp b/Source/WebKit/UIProcess/haiku/WebView.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..5f28ac5dd03897689bbc769e9d5b454046f6b6ac
+index 0000000000000000000000000000000000000000..c23c871cef734bf6694b8b91dec0ee8db6de0636
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/WebView.cpp
-@@ -0,0 +1,2646 @@
+@@ -0,0 +1,2647 @@
 +/*
 + * Copyright (C) 2013 Intel Corporation. All rights reserved.
 + *
@@ -112830,7 +112830,8 @@ index 0000000000000000000000000000000000000000..5f28ac5dd03897689bbc769e9d5b4540
 +// Loads one favicon per main-frame document and hands its bytes to the host,
 +// which decodes, caches and draws it. WebCore offers every <link rel=icon>
 +// (and /favicon.ico when a page names none); the host only needs the one
-+// closest to tab size in a format the Translation Kit can read.
++// closest to tab size in a format the Translation Kit can read, or an SVG
++// one (which Summit draws itself) when the page offers nothing else.
 +class IconLoadingClientHaiku final : public API::IconLoadingClient {
 +    WTF_MAKE_TZONE_ALLOCATED_INLINE(IconLoadingClientHaiku);
 +public:
@@ -112843,13 +112844,13 @@ index 0000000000000000000000000000000000000000..5f28ac5dd03897689bbc769e9d5b4540
 +        for (const auto& [identifier, icon] : icons) {
 +            if (icon.type != WebCore::LinkIconType::Favicon)
 +                continue;
-+            // Haiku has no SVG translator.
-+            if (icon.mimeType.containsIgnoringASCIICase("svg"_s) || icon.url.path().endsWithIgnoringASCIICase(".svg"_s))
-+                continue;
 +            // An .ico without sizes usually holds both 16 and 32 pixel images.
 +            int score = icon.size ? std::abs(static_cast<int>(*icon.size) - 32) : 8;
 +            if (icon.size && *icon.size < 16)
 +                score += 64;
++            // Haiku has no SVG translator: last.
++            if (icon.mimeType.containsIgnoringASCIICase("svg"_s) || icon.url.path().endsWithIgnoringASCIICase(".svg"_s))
++                score = 100000;
 +            if (score < bestScore) {
 +                bestScore = score;
 +                best = identifier;
@@ -135320,7 +135321,7 @@ index b9dbf9818f1d6bff413fdd81160d6c7b794f7a77..a562f874e2d8dd6cb4cc026f035904cf
      void postAccessibilityNodeTextChangeNotification(WebCore::AccessibilityObject*, WebCore::AXTextChange, unsigned, const String&) final;
      void postAccessibilityFrameLoadingEventNotification(WebCore::AccessibilityObject*, WebCore::AXLoadingEvent) final;
 diff --git a/Source/WebKit/WebProcess/WebCoreSupport/WebLocalFrameLoaderClient.cpp b/Source/WebKit/WebProcess/WebCoreSupport/WebLocalFrameLoaderClient.cpp
-index beb654baaa80231aff8ed6f61d602bf29d70d6f6..c014b07573982f238b7a301c0691daa4eb0c0a80 100644
+index beb654baaa80231aff8ed6f61d602bf29d70d6f6..d8c14a6356ba688b2a36a07bd821cc88d6a7c2b1 100644
 --- a/Source/WebKit/WebProcess/WebCoreSupport/WebLocalFrameLoaderClient.cpp
 +++ b/Source/WebKit/WebProcess/WebCoreSupport/WebLocalFrameLoaderClient.cpp
 @@ -120,7 +120,7 @@
@@ -135382,7 +135383,28 @@ index beb654baaa80231aff8ed6f61d602bf29d70d6f6..c014b07573982f238b7a301c0691daa4
      // Notify the extensions controller.
      if (RefPtr extensionControllerProxy = webPage->webExtensionControllerProxy())
          extensionControllerProxy->didFinishLoadForFrame(*webPage, m_frame, m_frame->url());
-@@ -2013,7 +2020,7 @@ void WebLocalFrameLoaderClient::dispatchGlobalObjectAvailable(DOMWrapperWorld& w
+@@ -1569,8 +1576,19 @@ bool WebLocalFrameLoaderClient::canHandleRequest(const ResourceRequest&) const
+     return true;
+ }
+ 
+-bool WebLocalFrameLoaderClient::canShowMIMEType(const String& /*MIMEType*/) const
++bool WebLocalFrameLoaderClient::canShowMIMEType(const String& mimeType) const
+ {
++#if PLATFORM(HAIKU)
++    // navigator.pdfViewerEnabled, plugins and mimeTypes come from this: PDF
++    // only when the page can show it (PDF.js built in and turned on), as
++    // objects and embeds with a PDF otherwise show their fallback content.
++    if (MIMETypeRegistry::isPDFMIMEType(mimeType)) {
++        RefPtr webPage = m_frame->page();
++        return webPage && webPage->canShowMIMEType(mimeType);
++    }
++#else
++    UNUSED_PARAM(mimeType);
++#endif
+     notImplemented();
+     return true;
+ }
+@@ -2013,7 +2031,7 @@ void WebLocalFrameLoaderClient::dispatchGlobalObjectAvailable(DOMWrapperWorld& w
      if (!webPage)
          return;
  
@@ -135391,7 +135413,7 @@ index beb654baaa80231aff8ed6f61d602bf29d70d6f6..c014b07573982f238b7a301c0691daa4
      if (RefPtr extensionControllerProxy = webPage->webExtensionControllerProxy())
          extensionControllerProxy->globalObjectIsAvailableForFrame(*webPage, m_frame, world);
  #endif
-@@ -2027,7 +2034,7 @@ void WebLocalFrameLoaderClient::dispatchServiceWorkerGlobalObjectAvailable(DOMWr
+@@ -2027,7 +2045,7 @@ void WebLocalFrameLoaderClient::dispatchServiceWorkerGlobalObjectAvailable(DOMWr
      if (!webPage)
          return;
  
@@ -135400,7 +135422,7 @@ index beb654baaa80231aff8ed6f61d602bf29d70d6f6..c014b07573982f238b7a301c0691daa4
      if (RefPtr extensionControllerProxy = webPage->webExtensionControllerProxy())
          extensionControllerProxy->serviceWorkerGlobalObjectIsAvailableForFrame(*webPage, m_frame, world);
  #endif
-@@ -2041,7 +2048,7 @@ void WebLocalFrameLoaderClient::willInjectUserScript(DOMWrapperWorld& world)
+@@ -2041,7 +2059,7 @@ void WebLocalFrameLoaderClient::willInjectUserScript(DOMWrapperWorld& world)
      if (!webPage)
          return;
  

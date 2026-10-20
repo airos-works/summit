@@ -201,6 +201,20 @@ int main()
         auto png = EncodePNG(scaled);
         CHECK(png.size() > 8 && png.substr(1, 3) == "PNG" && png.find("IEND") != std::string::npos);
         CHECK(!IsIco("\x89PNG") && SelectIcoEntry("junk").kind == IcoEntryKind::None);
+        // SVG favicons: a red square on the left half of a 2:1 picture, centred.
+        const std::string svg = "<?xml version=\"1.0\"?>\n<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 64 32\">"
+            "<rect x=\"0\" y=\"0\" width=\"32\" height=\"32\" fill=\"#ff0000\"/></svg>";
+        CHECK(IsSvg(svg) && !IsSvg("\x89PNG") && !IsSvg("<html><body></body></html>"));
+        Image vector;
+        CHECK(RasterizeSvg(svg, 32, vector) && vector.width == 32 && vector.height == 32);
+        const auto at = [&](int x, int y) { return &vector.rgba[(size_t(y) * 32 + x) * 4]; };
+        CHECK(at(4, 4)[3] == 0);                                   // above the picture
+        CHECK(at(4, 16)[0] == 255 && at(4, 16)[3] == 255);           // red
+        CHECK(at(24, 16)[3] == 0);                                  // right half empty
+        CHECK(!RasterizeSvg("<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>", 32, vector) && vector.Empty());
+        CHECK(!RasterizeSvg("<svg", 32, vector) && !RasterizeSvg(svg, 0, vector));
+        // Damaged input must not crash.
+        for (size_t cut = 0; cut < svg.size(); cut += 7) RasterizeSvg(svg.substr(0, cut), 16, vector);
     }
 
     // History grouped by day, and the built-in pages.

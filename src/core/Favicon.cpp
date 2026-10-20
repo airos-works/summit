@@ -3,6 +3,21 @@
 #include <array>
 #include <cmath>
 #include <cstring>
+#include <memory>
+
+// Sites that offer only an SVG favicon: Haiku has no SVG translator.
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wpedantic"
+#pragma GCC diagnostic ignored "-Wunused-function"
+#pragma GCC diagnostic ignored "-Wunused-parameter"
+#pragma GCC diagnostic ignored "-Wsign-compare"
+#pragma GCC diagnostic ignored "-Wmissing-field-initializers"
+#pragma GCC diagnostic ignored "-Wimplicit-fallthrough"
+#define NANOSVG_IMPLEMENTATION
+#define NANOSVGRAST_IMPLEMENTATION
+#include <nanosvg/nanosvg.h>
+#include <nanosvg/nanosvgrast.h>
+#pragma GCC diagnostic pop
 
 namespace summit {
 static uint32_t Read16(std::string_view data, size_t offset)
@@ -50,6 +65,37 @@ IcoEntry SelectIcoEntry(std::string_view data, int wanted)
         }
     }
     return best;
+}
+
+bool IsSvg(std::string_view data)
+{
+    const auto head = data.substr(0, 1024);
+    const auto start = head.find_first_not_of(" \t\r\n\xef\xbb\xbf");
+    if (start == std::string_view::npos || head[start] != '<') return false;
+    return head.find("<svg") != std::string_view::npos;
+}
+
+bool RasterizeSvg(std::string_view data, int size, Image& out)
+{
+    out = Image();
+    // A favicon is small; a large one is not worth the time.
+    if (size <= 0 || size > 512 || data.empty() || data.size() > 256 * 1024 || !IsSvg(data)) return false;
+    std::string text(data);
+    std::unique_ptr<NSVGimage, decltype(&nsvgDelete)> image(nsvgParse(text.data(), "px", 96), nsvgDelete);
+    if (!image || !image->shapes || !(image->width > 0) || !(image->height > 0)) return false;
+    std::unique_ptr<NSVGrasterizer, decltype(&nsvgDeleteRasterizer)> rasterizer(nsvgCreateRasterizer(), nsvgDeleteRasterizer);
+    if (!rasterizer) return false;
+    const float scale = size / std::max(image->width, image->height);
+    if (!std::isfinite(scale) || scale <= 0) return false;
+    out.width = size;
+    out.height = size;
+    out.rgba.assign(size_t(size) * size * 4, 0);
+    const float x = (size - image->width * scale) / 2, y = (size - image->height * scale) / 2;
+    nsvgRasterize(rasterizer.get(), image.get(), x, y, scale, out.rgba.data(), size, size, size * 4);
+    for (size_t i = 3; i < out.rgba.size(); i += 4)
+        if (out.rgba[i]) return true;
+    out = Image();
+    return false;
 }
 
 bool DecodeDIB(std::string_view dib, Image& out)

@@ -63,6 +63,11 @@ static Image Translate(const void* data, size_t size)
 static Image Decode(const void* data, size_t size)
 {
     const std::string_view bytes(static_cast<const char*>(data), size);
+    if (IsSvg(bytes)) {
+        Image image;
+        RasterizeSvg(bytes, 32, image);
+        return image;
+    }
     if (IsIco(bytes)) {
         // Choose the entry ourselves: the translator takes whichever comes first.
         const auto entry = SelectIcoEntry(bytes, 32);

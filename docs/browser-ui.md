@@ -122,8 +122,8 @@ working like Firefox's address bar:
 - Engine: WebCore already collects `<link rel=icon>` candidates (and
   `/favicon.ico` when a page names none), but the Haiku port never attached an
   icon-loading client, so none were loaded. `IconLoadingClientHaiku` in
-  `Source/WebKit/UIProcess/haiku/WebView.cpp` accepts the non-SVG favicon
-  closest to 32 px (Haiku has no SVG translator) and posts
+  `Source/WebKit/UIProcess/haiku/WebView.cpp` accepts the favicon closest to
+  32 px, an SVG one only when there is no other (see "SVG favicons" below) and posts
   `B_WEBKIT_ICON_LOADED` ('wico': `view`, `url`, `iconURL`, `mimeType`, `data`,
   at most 1 MiB) to the view's notification target. The engine fetches it with
   the page's own network session, cookies and cache.
@@ -150,7 +150,7 @@ refresh that cancelled a click on a History entry.
   bar membership; no drag and drop onto the bar.~~ Done 19 October:
   [bookmarks.md](bookmarks.md).
 - History keeps one entry per address (its latest visit), as before.
-- SVG-only favicons are not shown.
+- ~~SVG-only favicons are not shown.~~ Done 20 October (below).
 - Menus list pages without icons.
 
 ## Installed
@@ -165,3 +165,16 @@ the new bundle. Installation evidence is in
 
 The original 26 September browser UI rollout used `bundle-14gx1mrh`, with
 `Summit-current.pre-browser-ui-20260926.sh` as its launcher backup.
+
+## SVG favicons (#110)
+
+A site that offers only an SVG favicon (`<link rel="icon" type="image/svg+xml">`)
+shows it in its tab, the address field and the lists, like any other icon.
+Haiku has no SVG translator, so the engine offers an SVG icon only when the
+page names no other (`IconLoadingClientHaiku` in the engine's `WebView.cpp`
+scores it last), and Summit draws it itself with nanosvg (`vendor/nanosvg`,
+zlib licence; `RasterizeSvg` in `src/core/Favicon.cpp`) at 32 pixels before it
+caches it as usual. SVGs over 256 KiB are not drawn, and nanosvg does not
+read CSS `<style>` sheets, so an icon drawn only through one (GitHub's dark
+mode icon) stays the default; 15,000 damaged copies of five real favicons
+went through it under AddressSanitizer without a fault.
