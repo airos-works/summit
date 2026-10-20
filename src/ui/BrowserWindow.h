@@ -234,16 +234,18 @@ private:
         bool unresponsive = false, waitedForPage = false;
         // The page area says why the last page could not be loaded (#89):
         // the view, the address that failed and what the page and tab are
-        // called, the load it is for, the address the tab showed when it
-        // came, whether Back returns to that page and whether the network
-        // was down (it then loads again by itself when the network is back).
+        // called, the load it is for, whether Back returns to the page
+        // behind it and whether the network was down (it then loads again
+        // by itself when the network is back).
         BView* errorView = nullptr;
-        std::string errorURL, errorTitle, errorShownURL;
+        std::string errorURL, errorTitle;
         uint64 errorGeneration = 0;
         bool errorBack = false, errorOffline = false;
         // The load whose media document took over (#95), recorded in history once.
         uint64 mediaGeneration = 0;
-        const std::string& ShownURL() const { return errorView ? errorURL : url; }
+        // The address field shows the address that failed, except while
+        // another load is on its way.
+        const std::string& ShownURL() const { return errorView && (errorGeneration == loadGeneration || !loading) ? errorURL : url; }
         const std::string& ShownTitle() const { return errorView ? errorTitle : title; }
         // The last pop-up the page tried to open without a click, and how
         // many (#73).

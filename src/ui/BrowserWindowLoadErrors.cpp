@@ -188,12 +188,9 @@ void BrowserWindow::UpdateLoadErrorView(Tab& tab)
             return;
         }
         tab.errorGeneration = tab.loadGeneration;
-        if (!tab.errorView) {
-            // The page the tab shows behind the error page; none when the
-            // failed load was the tab's first.
-            tab.errorShownURL = tab.url;
-            tab.errorBack = tab.loadSuccessSequence > 0;
-        }
+        // Whether a page is behind the error page; none when the failed load
+        // was the tab's first.
+        if (!tab.errorView) tab.errorBack = tab.loadSuccessSequence > 0;
         tab.errorURL = tab.loadErrorURL.empty() ? tab.url : tab.loadErrorURL;
         tab.errorOffline = tab.loadErrorDomain == "CurlErrorDomain" && failure != LoadFailure::Secure
             && !IsLocalHost(LoadFailureHost(tab.errorURL)) && !NetworkIsUp();
@@ -205,39 +202,45 @@ void BrowserWindow::UpdateLoadErrorView(Tab& tab)
         static_cast<LoadErrorView*>(tab.errorView)->SetLoading(tab.loading);
         return;
     }
-    // A newer load keeps the error page until it shows a page (the address
-    // changes, or the load finishes), as a stopped one does.
-    if (crashed || tab.url != tab.errorShownURL || tab.loadOutcome == "succeeded") RemoveLoadErrorView(tab, false);
+    // A newer load keeps the error page until it shows a page, as a stopped
+    // one does. Its address is the tab's from its start; it has a page once
+    // its progress passes the 0.1 a load starts at (data came), or it ended.
+    const bool committed = tab.loadOutcome == "succeeded" || (tab.loading && tab.progress > 0.11f);
+    if (crashed || question || committed) RemoveLoadErrorView(tab, false);
     else static_cast<LoadErrorView*>(tab.errorView)->SetLoading(tab.loading);
 }
 
 void BrowserWindow::ShowLoadErrorView(Tab& tab)
 {
-    const auto failure = FailureOf(tab.loadErrorDomain, tab.loadErrorCode, tab.errorOffline);
-    const auto text = DescribeLoadFailure(failure == LoadFailure::None ? LoadFailure::Other : failure,
-        tab.errorURL, tab.loadErrorDescription);
-    tab.errorTitle = text.title;
-    const std::string address = DisplayURL(tab.errorURL);
     auto* view = static_cast<LoadErrorView*>(tab.errorView);
-    if (!view || !view->Shows(text, address)) {
-        // Made afresh for another failure, where it was.
-        auto* made = new LoadErrorView(tab.id, text, address);
-        const bool hadFocus = view && view->HasFocus(CurrentFocus());
-        const int32 index = view ? fCards->IndexOfView(view) : -1;
-        if (view) {
-            view->RemoveSelf();
-            delete view;
+    // What failed is in the tab's error fields only while that load is the
+    // latest: a newer one (Try Again) clears them, and the page stays as it is.
+    if (!view || tab.errorGeneration == tab.loadGeneration) {
+        const auto failure = FailureOf(tab.loadErrorDomain, tab.loadErrorCode, tab.errorOffline);
+        const auto text = DescribeLoadFailure(failure == LoadFailure::None ? LoadFailure::Other : failure,
+            tab.errorURL, tab.loadErrorDescription);
+        tab.errorTitle = text.title;
+        const std::string address = DisplayURL(tab.errorURL);
+        if (!view || !view->Shows(text, address)) {
+            // Made afresh for another failure, where it was.
+            auto* made = new LoadErrorView(tab.id, text, address);
+            const bool hadFocus = view && view->HasFocus(CurrentFocus());
+            const int32 index = view ? fCards->IndexOfView(view) : -1;
+            if (view) {
+                view->RemoveSelf();
+                delete view;
+            }
+            if (index >= 0) fCards->AddView(index, made);
+            else fCards->AddView(made);
+            tab.errorView = view = made;
+            if (hadFocus) view->FocusButton();
         }
-        if (index >= 0) fCards->AddView(index, made);
-        else fCards->AddView(made);
-        tab.errorView = view = made;
-        if (hadFocus) view->FocusButton();
     }
     view->SetLoading(tab.loading);
     if (tab.id == fSelected) {
         fCards->SetVisibleItem(fCards->IndexOfView(tab.errorView));
         // The address stays in the field, to correct or enter again.
-        if (!fAddress->TextView()->IsFocus()) fAddress->SetText(DisplayURL(tab.errorURL).c_str());
+        if (!fAddress->TextView()->IsFocus()) fAddress->SetText(DisplayURL(tab.ShownURL()).c_str());
         // Return now means Try Again, where it meant the page.
         if (!CurrentFocus() || CurrentFocus() == tab.view) view->FocusButton();
     }

@@ -52,8 +52,10 @@ Links now also behave as in other browsers: `target=_blank` and
 `window.open()` open a tab after the opener (in front); a middle click or
 Command-click opens a background tab (Shift brings it to the front); a
 `window.open()` that asks for a size opens its own window, sized to the
-request, and keeps its `window.opener`. Pop-ups need a click or key press;
-pages cannot open windows by themselves.
+request (the page gets the width and height it asked for; such a pop-up has
+no bookmarks bar and can be as narrow as its menu bar, about 335 pixels), and
+keeps its `window.opener`. Pop-ups need a click or key press; pages cannot
+open windows by themselves. Web app windows can be as small as 320×240.
 
 ### Multiple windows
 
@@ -66,7 +68,11 @@ pages cannot open windows by themselves.
   closing the last one, or File › Quit, quits Summit and keeps every window's
   tabs and frame for the next start. Preferences › General › "Reopen the
   windows and tabs from last time" (`restoreSession`, on by default) turns
-  that off: Summit then starts with one window.
+  that off: Summit then starts with one window. A start with addresses (a
+  link opened from another application while Summit was not running, or
+  `Summit https://…`) brings back the saved windows too and opens the
+  addresses as new tabs of the window in front, the last one restored; with
+  the preference off it opens just the addresses (#94).
 - A shutdown or restart of the system quits Summit the same way, without the
   downloads question, and the next start reopens its windows (#58).
 - Bookmarks, history, the bookmarks bar and the look are shared: a change in
@@ -145,7 +151,6 @@ command now takes any character and `--mod alt/ctrl/shift`):
   Window reloads the page there (its back list stays behind).
 - An extension's `tabs.remove()` naming tabs in several windows only closes
   those in the first tab's window.
-- Pop-up windows keep the normal minimum window size (760×450).
 - No Copy Image (only its address), no Inspect Element.
 - The legacy (WebKitLegacy) build was not updated or compiled.
 
