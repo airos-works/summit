@@ -92,6 +92,9 @@ public:
 			void				SetDefaultFixedFontSize(float size);
 
 			void				SetJavascriptEnabled(bool enable);
+	// Summit extension: empty restores the engine's default user agent.
+	// Like the font and script setters, takes effect on Apply().
+			void				SetUserAgent(const BString& userAgent);
 
 	static	void				SetProxyInfo(const BString& host = "",
 									uint32 port = 0,

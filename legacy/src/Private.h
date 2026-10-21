@@ -29,6 +29,8 @@ class BBitmap;
 
 namespace SummitLegacy {
 
+enum : uint32 { kApplySettings = 'swas' };
+
 // The engine context every BWebView shares: one website data store (cookies,
 // cache, storage) in <persistent storage path>/WebKit. Made on the
 // application thread; until then, and on other threads before it exists,
@@ -113,14 +115,17 @@ public:
 	static BMessenger DownloadListener() { return BWebPage::sDownloadListener; }
 };
 
-// Settings a legacy application sets. The engine has no per-page font or
-// script settings to give them to; they are kept for the application.
+// Pending setters and committed values are separate: Apply() publishes a
+// snapshot. A page's explicit overrides survive later default changes.
 class WebSettingsPrivate {
 public:
+	static void Bind(BWebSettings*, BMessenger page);
+	static BMessage Snapshot(BWebSettings*);
+	static void ApplyTo(BWebSettings*, BWebKitView*);
+	~WebSettingsPrivate();
 	std::mutex lock;
-	BString standardFont, serifFont, sansSerifFont, fixedFont;
-	float standardFontSize = 16, fixedFontSize = 13;
-	bool javascriptEnabled = true;
+	BMessage pending, applied;
+	BMessenger page;
 	BString localStoragePath;
 };
 

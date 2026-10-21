@@ -85303,10 +85303,10 @@ index 0000000000000000000000000000000000000000..d28a6cad6339adf79b155cf974e85bfd
 +
 diff --git a/Source/WebKit/UIProcess/API/haiku/WebKitView.cpp b/Source/WebKit/UIProcess/API/haiku/WebKitView.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..718432c8c2aa4314a4e20cecd5249048041aba78
+index 0000000000000000000000000000000000000000..0447a557fdc236517af3f367f36226fbd3b4628e
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/API/haiku/WebKitView.cpp
-@@ -0,0 +1,1408 @@
+@@ -0,0 +1,1426 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#include "config.h"
@@ -85749,11 +85749,19 @@ index 0000000000000000000000000000000000000000..718432c8c2aa4314a4e20cecd5249048
 +}
 +
 +BWebKitView::BWebKitView(BRect frame, const char* name, BMessenger target, uint32 resizingMode, std::shared_ptr<BWebKitContext> context)
++    : BWebKitView(frame, name, target, BMessage(), resizingMode, std::move(context))
++{
++}
++
++BWebKitView::BWebKitView(BRect frame, const char* name, BMessenger target, const BMessage& settings, uint32 resizingMode, std::shared_ptr<BWebKitContext> context)
 +    : BView(frame, name, resizingMode, B_WILL_DRAW | B_FRAME_EVENTS | B_NAVIGABLE | B_FULL_UPDATE_ON_RESIZE)
 +    , m_state(std::make_shared<WebViewStateHaiku>(target))
 +{
 +    SetViewColor(B_TRANSPARENT_COLOR);
 +    if (!webKitInitializedHaiku)
++        return;
++    m_state->status = m_status = validatePageSettingsHaiku(settings);
++    if (m_status != B_OK)
 +        return;
 +    if (context) {
 +        m_status = context->InitCheck();
@@ -85765,19 +85773,29 @@ index 0000000000000000000000000000000000000000..718432c8c2aa4314a4e20cecd5249048
 +    m_status = B_OK;
 +    m_state->status = B_OK;
 +    UpdateGeometry();
-+    WTF::RunLoop::mainSingleton().dispatch([state = m_state] {
++    WTF::RunLoop::mainSingleton().dispatch([state = m_state, settings] {
 +        if (!state->closed)
-+            state->client = WebView::create(state);
++            state->client = WebView::create(state, &settings);
 +    });
 +}
 +
 +BWebKitView::BWebKitView(BRect frame, const char* name, BMessenger target, uint64 newPageRequest, uint32 resizingMode, std::shared_ptr<BWebKitContext> context)
++    : BWebKitView(frame, name, target, newPageRequest, BMessage(), resizingMode, std::move(context))
++{
++}
++
++BWebKitView::BWebKitView(BRect frame, const char* name, BMessenger target, uint64 newPageRequest, const BMessage& settings, uint32 resizingMode, std::shared_ptr<BWebKitContext> context)
 +    : BView(frame, name, resizingMode, B_WILL_DRAW | B_FRAME_EVENTS | B_NAVIGABLE | B_FULL_UPDATE_ON_RESIZE)
 +    , m_state(std::make_shared<WebViewStateHaiku>(target))
 +{
 +    SetViewColor(B_TRANSPARENT_COLOR);
 +    if (!webKitInitializedHaiku)
 +        return;
++    m_state->status = m_status = validatePageSettingsHaiku(settings);
++    if (m_status != B_OK) {
++        DeclineNewPage(newPageRequest);
++        return;
++    }
 +    if (context) {
 +        m_status = context->InitCheck();
 +        m_state->status = m_status;
@@ -85790,8 +85808,8 @@ index 0000000000000000000000000000000000000000..718432c8c2aa4314a4e20cecd5249048
 +    m_status = B_OK;
 +    m_state->status = B_OK;
 +    UpdateGeometry();
-+    WTF::RunLoop::mainSingleton().dispatch([state = m_state, newPageRequest] {
-+        openNewPageHaiku(state, newPageRequest);
++    WTF::RunLoop::mainSingleton().dispatch([state = m_state, newPageRequest, settings] {
++        openNewPageHaiku(state, newPageRequest, settings);
 +    });
 +}
 +
@@ -86717,10 +86735,10 @@ index 0000000000000000000000000000000000000000..718432c8c2aa4314a4e20cecd5249048
 +}
 diff --git a/Source/WebKit/UIProcess/API/haiku/WebKitView.h b/Source/WebKit/UIProcess/API/haiku/WebKitView.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..7c0d6b903d4e24b3c363ef0f1518d0d6a64b5e33
+index 0000000000000000000000000000000000000000..152e1fdbc7287bed3d00a9f4ecfec0552112f22f
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/API/haiku/WebKitView.h
-@@ -0,0 +1,406 @@
+@@ -0,0 +1,422 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#pragma once
@@ -86914,6 +86932,13 @@ index 0000000000000000000000000000000000000000..7c0d6b903d4e24b3c363ef0f1518d0d6
 +    // request is no longer pending, the view starts empty.
 +    BWebKitView(BRect, const char* name, BMessenger notificationTarget, uint64 newPageRequest,
 +        uint32 resizingMode = B_FOLLOW_ALL, std::shared_ptr<BWebKitContext> = nullptr);
++    // Initial settings use SetPageSettings' fields and validation, applied
++    // before the web process is initialized or an opened page is accepted.
++    // Invalid settings make InitCheck fail and decline an opened-page request.
++    BWebKitView(BRect, const char* name, BMessenger notificationTarget, const BMessage& initialSettings,
++        uint32 resizingMode = B_FOLLOW_ALL, std::shared_ptr<BWebKitContext> = nullptr);
++    BWebKitView(BRect, const char* name, BMessenger notificationTarget, uint64 newPageRequest,
++        const BMessage& initialSettings, uint32 resizingMode = B_FOLLOW_ALL, std::shared_ptr<BWebKitContext> = nullptr);
 +    // Refuses a B_WEBKIT_NEW_PAGE_REQUESTED notification; window.open() then
 +    // returns null. Callable from any thread.
 +    static void DeclineNewPage(uint64 newPageRequest);
@@ -87034,6 +87059,15 @@ index 0000000000000000000000000000000000000000..7c0d6b903d4e24b3c363ef0f1518d0d6
 +    void EvaluateJavaScriptIsolated(const char* source, BMessenger reply, uint64 identifier, uint64 expectedGeneration, bool keepWorld);
 +    // An empty string restores the engine's own user agent.
 +    void SetCustomUserAgent(const char*);
++    // Apply only the supplied settings to this view, preserving other pages'
++    // preferences, including an opener's. Fields (one value each):
++    // standardFont, serifFont, sansSerifFont, fixedFont (nonempty UTF-8 strings),
++    // standardFontSize, fixedFontSize (int32 CSS pixels, 1..512),
++    // javascriptEnabled (bool), userAgent (UTF-8 string; empty restores the
++    // engine default). Unknown fields, wrong types and invalid values reject
++    // the whole update. B_OK means queued; a closed view ignores it. Any thread.
++    // Disabling JavaScript affects page scripts; host inspection remains available.
++    status_t SetPageSettings(const BMessage&);
 +    // The view's pages load URLs of scheme through target, once per scheme and
 +    // view, and never for schemes the engine loads itself (http, file...).
 +    void SetURLSchemeHandler(const char* scheme, BMessenger target, uint32 flags = 0);
@@ -87129,10 +87163,10 @@ index 0000000000000000000000000000000000000000..7c0d6b903d4e24b3c363ef0f1518d0d6
 +};
 diff --git a/Source/WebKit/UIProcess/API/haiku/WebKitViewEmbedding.cpp b/Source/WebKit/UIProcess/API/haiku/WebKitViewEmbedding.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..6aa399922dcd2eb2c81b6fda4e17b18cdcf2f437
+index 0000000000000000000000000000000000000000..ffff468c5270958ddb1ce347711cc1a26847ba32
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/API/haiku/WebKitViewEmbedding.cpp
-@@ -0,0 +1,953 @@
+@@ -0,0 +1,1028 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +// BWebKitView's embedding interfaces (WebKitEmbedding.h): user scripts,
@@ -87156,6 +87190,7 @@ index 0000000000000000000000000000000000000000..6aa399922dcd2eb2c81b6fda4e17b18c
 +#include "JavaScriptEvaluationResult.h"
 +#include "RunJavaScriptParameters.h"
 +#include "WebPageProxy.h"
++#include "WebPreferences.h"
 +#include "WebProcessPool.h"
 +#include "WebProcessProxy.h"
 +#include "ProcessTerminationReason.h"
@@ -87848,6 +87883,80 @@ index 0000000000000000000000000000000000000000..6aa399922dcd2eb2c81b6fda4e17b18c
 +        if (auto* page = pageHaiku(state))
 +            page->setCustomUserAgent(stringHaiku(userAgent));
 +    });
++}
++
++status_t WebKit::validatePageSettingsHaiku(const BMessage& settings)
++{
++    static constexpr struct { const char* name; type_code type; } fields[] {
++        { "standardFont", B_STRING_TYPE }, { "serifFont", B_STRING_TYPE },
++        { "sansSerifFont", B_STRING_TYPE }, { "fixedFont", B_STRING_TYPE },
++        { "standardFontSize", B_INT32_TYPE }, { "fixedFontSize", B_INT32_TYPE },
++        { "javascriptEnabled", B_BOOL_TYPE }, { "userAgent", B_STRING_TYPE }
++    };
++    int32 supplied = 0;
++    for (const auto& field : fields) {
++        type_code type;
++        int32 count;
++        if (settings.GetInfo(field.name, &type, &count) != B_OK)
++            continue;
++        if (type != field.type || count != 1)
++            return B_BAD_VALUE;
++        ++supplied;
++        if (type == B_STRING_TYPE) {
++            const char* value = settings.GetString(field.name, "");
++            if (String::fromUTF8(value).isNull() || (!*value && strcmp(field.name, "userAgent")))
++                return B_BAD_VALUE;
++        } else if (type == B_INT32_TYPE) {
++            int32 value = settings.GetInt32(field.name, 0);
++            if (value < 1 || value > 512)
++                return B_BAD_VALUE;
++        }
++    }
++    if (supplied != settings.CountNames(B_ANY_TYPE))
++        return B_BAD_VALUE;
++    return B_OK;
++}
++
++void WebKit::applyPageSettingsHaiku(WebPageProxy& page, const BMessage& settings)
++{
++    if (!settings.CountNames(B_ANY_TYPE))
++        return;
++    // Opened pages may share their configuration's preferences object.
++    // Never mutate it in place when a host changes one native view.
++    Ref preferences = page.preferences().copy();
++    const char* value;
++    if (settings.FindString("standardFont", &value) == B_OK)
++        preferences->setStandardFontFamily(String::fromUTF8(value));
++    if (settings.FindString("serifFont", &value) == B_OK)
++        preferences->setSerifFontFamily(String::fromUTF8(value));
++    if (settings.FindString("sansSerifFont", &value) == B_OK)
++        preferences->setSansSerifFontFamily(String::fromUTF8(value));
++    if (settings.FindString("fixedFont", &value) == B_OK)
++        preferences->setFixedFontFamily(String::fromUTF8(value));
++    int32 size;
++    if (settings.FindInt32("standardFontSize", &size) == B_OK)
++        preferences->setDefaultFontSize(size);
++    if (settings.FindInt32("fixedFontSize", &size) == B_OK)
++        preferences->setDefaultFixedFontSize(size);
++    bool enabled;
++    if (settings.FindBool("javascriptEnabled", &enabled) == B_OK)
++        preferences->setJavaScriptEnabled(enabled);
++    page.setPreferences(preferences);
++    if (settings.FindString("userAgent", &value) == B_OK)
++        page.setCustomUserAgent(String::fromUTF8(value));
++}
++
++status_t BWebKitView::SetPageSettings(const BMessage& settings)
++{
++    if (m_status != B_OK)
++        return m_status;
++    if (status_t status = validatePageSettingsHaiku(settings); status != B_OK)
++        return status;
++    WTF::RunLoop::mainSingleton().dispatch([state = m_state, settings] {
++        if (auto* page = pageHaiku(state))
++            applyPageSettingsHaiku(*page, settings);
++    });
++    return B_OK;
 +}
 +
 +void BWebKitView::SetURLSchemeHandler(const char* scheme, BMessenger target, uint32 flags)
@@ -118293,10 +118402,10 @@ index 0000000000000000000000000000000000000000..c9a119d02f85b7c5ad8fe9153bfc9604
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/WebView.cpp b/Source/WebKit/UIProcess/haiku/WebView.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..e38bf266c09eaeab67a13cd0dd160aef9dc0b868
+index 0000000000000000000000000000000000000000..e88d7e0ac211fa70e3bccbfe5b4790001dd136ee
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/WebView.cpp
-@@ -0,0 +1,3077 @@
+@@ -0,0 +1,3079 @@
 +/*
 + * Copyright (C) 2013 Intel Corporation. All rights reserved.
 + *
@@ -119446,7 +119555,7 @@ index 0000000000000000000000000000000000000000..e38bf266c09eaeab67a13cd0dd160aef
 +        pending->completion(nullptr);
 +}
 +
-+void openNewPageHaiku(std::shared_ptr<WebViewStateHaiku> state, uint64_t identifier)
++void openNewPageHaiku(std::shared_ptr<WebViewStateHaiku> state, uint64_t identifier, const BMessage& initialSettings)
 +{
 +    ASSERT(RunLoop::isMain());
 +    auto pending = takeNewPageHaiku(identifier);
@@ -119457,10 +119566,10 @@ index 0000000000000000000000000000000000000000..e38bf266c09eaeab67a13cd0dd160aef
 +    }
 +    if (!pending) {
 +        // The opener went away first: an ordinary empty page.
-+        state->client = WebView::create(state);
++        state->client = WebView::create(state, &initialSettings);
 +        return;
 +    }
-+    Ref view = WebView::createWithConfiguration(state, WTF::move(pending->configuration));
++    Ref view = WebView::createWithConfiguration(state, WTF::move(pending->configuration), &initialSettings);
 +    state->client = view.ptr();
 +    RefPtr page = view->page();
 +    pending->completion(WTF::move(page));
@@ -119881,17 +119990,17 @@ index 0000000000000000000000000000000000000000..e38bf266c09eaeab67a13cd0dd160aef
 +    });
 +}
 +
-+Ref<WebView> WebView::create(std::shared_ptr<WebViewStateHaiku> state)
++Ref<WebView> WebView::create(std::shared_ptr<WebViewStateHaiku> state, const BMessage* initialSettings)
 +{
 +    auto view = adoptRef(*new WebView(std::move(state)));
-+    view->initialize();
++    view->initialize(nullptr, initialSettings);
 +    return view;
 +}
 +
-+Ref<WebView> WebView::createWithConfiguration(std::shared_ptr<WebViewStateHaiku> state, Ref<API::PageConfiguration>&& configuration)
++Ref<WebView> WebView::createWithConfiguration(std::shared_ptr<WebViewStateHaiku> state, Ref<API::PageConfiguration>&& configuration, const BMessage* initialSettings)
 +{
 +    Ref view = adoptRef(*new WebView(std::move(state)));
-+    view->initialize(WTF::move(configuration));
++    view->initialize(WTF::move(configuration), initialSettings);
 +    return view;
 +}
 +
@@ -119942,7 +120051,7 @@ index 0000000000000000000000000000000000000000..e38bf266c09eaeab67a13cd0dd160aef
 +    ScreenAwakeRequestsHaiku::singleton();
 +}
 +
-+void WebView::initialize(RefPtr<API::PageConfiguration> configuration)
++void WebView::initialize(RefPtr<API::PageConfiguration> configuration, const BMessage* initialSettings)
 +{
 +    ASSERT(RunLoop::isMain());
 +    if (!m_state->context) {
@@ -120119,6 +120228,8 @@ index 0000000000000000000000000000000000000000..e38bf266c09eaeab67a13cd0dd160aef
 +    }
 +    auto& pool = configuration->processPool();
 +    m_page = pool.createWebPage(*this, configuration.releaseNonNull());
++    if (initialSettings)
++        applyPageSettingsHaiku(*m_page, *initialSettings);
 +    m_page->setUIClient(makeUnique<JavaScriptUIClientHaiku>(m_state, true));
 +    m_page->setNavigationClient(makeUniqueRef<CloseNavigationClientHaiku>(m_state));
 +    m_page->setIconLoadingClient(makeUnique<IconLoadingClientHaiku>(m_state));
@@ -121886,7 +121997,7 @@ index 0000000000000000000000000000000000000000..520ed4b88123bc3011d015a47a3e89ef
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/WebViewPrivate.h b/Source/WebKit/UIProcess/haiku/WebViewPrivate.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..00f921f7cf81d4eee3659eb822edd264faf91833
+index 0000000000000000000000000000000000000000..3670bf654afeab72d15d457060553c36220c35e6
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/WebViewPrivate.h
 @@ -0,0 +1,221 @@
@@ -121935,10 +122046,10 @@ index 0000000000000000000000000000000000000000..00f921f7cf81d4eee3659eb822edd264
 +{
 +    WTF_MAKE_TZONE_ALLOCATED(WebView);
 +public:
-+    static Ref<WebView> create(std::shared_ptr<WebViewStateHaiku>);
++    static Ref<WebView> create(std::shared_ptr<WebViewStateHaiku>, const BMessage* initialSettings = nullptr);
 +    // A page the engine asked for (window.open, a link with a target), made
 +    // with the opener's configuration.
-+    static Ref<WebView> createWithConfiguration(std::shared_ptr<WebViewStateHaiku>, Ref<API::PageConfiguration>&&);
++    static Ref<WebView> createWithConfiguration(std::shared_ptr<WebViewStateHaiku>, Ref<API::PageConfiguration>&&, const BMessage* initialSettings = nullptr);
 +#if ENABLE(WK_WEB_EXTENSIONS)
 +    static Ref<WebView> createForExtensionBackground(Ref<API::PageConfiguration>&&);
 +    static Ref<WebView> createForExtensionPopup(std::shared_ptr<WebViewStateHaiku>, Ref<API::PageConfiguration>&&);
@@ -121987,7 +122098,7 @@ index 0000000000000000000000000000000000000000..00f921f7cf81d4eee3659eb822edd264
 +
 +private:
 +    explicit WebView(std::shared_ptr<WebViewStateHaiku>);
-+    void initialize(RefPtr<API::PageConfiguration> = nullptr);
++    void initialize(RefPtr<API::PageConfiguration> = nullptr, const BMessage* initialSettings = nullptr);
 +    WebViewGeometryHaiku geometry() const;
 +    void sendToView(BMessage&) const;
 +    void updateGeometry();
@@ -122113,10 +122224,10 @@ index 0000000000000000000000000000000000000000..00f921f7cf81d4eee3659eb822edd264
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/WebViewStateHaiku.h b/Source/WebKit/UIProcess/haiku/WebViewStateHaiku.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..0ddb5ef7ffb6f4911433483ff557f5d7dbf67dd8
+index 0000000000000000000000000000000000000000..ac0d66cd73464e122c25be1b8534138988086164
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/WebViewStateHaiku.h
-@@ -0,0 +1,222 @@
+@@ -0,0 +1,224 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#pragma once
@@ -122324,7 +122435,9 @@ index 0000000000000000000000000000000000000000..0ddb5ef7ffb6f4911433483ff557f5d7
 +
 +// Main thread only. Answer a B_WEBKIT_NEW_PAGE_REQUESTED identifier with this
 +// view's state, or decline it.
-+void openNewPageHaiku(std::shared_ptr<WebViewStateHaiku>, uint64_t identifier);
++void openNewPageHaiku(std::shared_ptr<WebViewStateHaiku>, uint64_t identifier, const BMessage& initialSettings);
++status_t validatePageSettingsHaiku(const BMessage&);
++void applyPageSettingsHaiku(WebPageProxy&, const BMessage&);
 +void declineNewPageHaiku(uint64_t identifier);
 +// Main thread only. Answers a B_WEBKIT_AUTHENTICATION_REQUESTED identifier:
 +// sign in with user and password (for the session, or this request only),

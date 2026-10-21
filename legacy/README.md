@@ -20,10 +20,17 @@ engine (`summit_webkit`: `BWebKitView`, `BWebKitContext`).
   package, which replaces `haikuwebkit` and `haikuwebkit_devel`.
 
 The engine headers and library must include
-`BWebKitView::ContinueAfterCertificateError(uint64)` (added 22 October 2026).
+`BWebKitView::ContinueAfterCertificateError(uint64)`, `SetPageSettings()` and
+the constructors accepting initial settings (added 22 October 2026).
 Certificate approval uses that operation to validate the failed navigation
 before trusting its exact host/certificate and retrying. Build and install the
 matching engine first; an older engine cannot load this shim.
+
+Font and JavaScript setters take effect on `Apply()`. Application defaults
+update existing and future pages while preserving explicit page overrides.
+Summit's additional, nonvirtual `BWebSettings::SetUserAgent(const BString&)`
+follows the same rules; an empty string restores the engine's user agent.
+Existing public class layouts and virtual methods are unchanged.
 
 Summit's `docs/legacy-webview.md` describes what maps to what, what is not
 available and how it was tested.

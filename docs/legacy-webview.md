@@ -20,7 +20,7 @@ classes, implemented on Summit's engine API (`BWebKitView`,
 | Certificate failures | `SSL_CERT_ERROR` carries the failed host, certificate details and session scope to the existing `BWebWindow` dialog, which defaults to Stop. An asynchronous response can approve only the exact current failed navigation. See [native acceptance and limits](legacy-certificates-2026-10-22.md). |
 | Context menu | The engine leaves the menu to its host; the old engine drew its own. `BWebView` shows one: open link or image in a new tab, copy its address, download it, cut/copy/paste, back/forward/reload. |
 | `BWebDownload` | The engine reports downloads to a handler of the application looper, which makes `BWebDownload` objects and sends `B_DOWNLOAD_ADDED` to the download listener. The engine starts saving at once (to the Desktop); `Start(folder)` moves the file into the application's folder when it is complete. `B_DOWNLOAD_STARTED`, `B_DOWNLOAD_PROGRESS` and a synchronous `B_DOWNLOAD_REMOVED` follow as before; the file gets its `META:url` and MIME type. |
-| `BWebSettings` | `SetPersistentStoragePath()` chooses where the engine keeps the application's website data: `<path>/WebKit` (WebPositive: `~/config/settings/WebPositive/WebKit`). `SendIconForURL()` answers from the site icons the engine reported. Fonts, script and proxy settings are kept but not applied: the engine has no per-application settings for them. |
+| `BWebSettings` | `SetPersistentStoragePath()` chooses where the engine keeps the application's website data: `<path>/WebKit` (WebPositive: `~/config/settings/WebPositive/WebKit`). `SendIconForURL()` answers from the site icons the engine reported. `Apply()` publishes font and JavaScript settings, with application defaults and per-page overrides. `SetUserAgent()` adds the same control for the user agent. Proxy settings remain unapplied. See [settings behavior and acceptance](legacy-settings-2026-10-22.md). |
 | `BWebFrame` | The main frame: address, title, editing commands, zoom, find. What needs the document itself (its text, its source, editing it) is not available, because the page runs in another process. |
 | `SendPageSource()` | The source as the server sent it (from the cache), or the page's markup. |
 | `GetContentsAsMHTML()` | A MIME archive of the document's markup as it stands, with a `<base>` so that its links and pictures still lead to the site. Waits for the engine; it cannot be called on the application thread. |
@@ -118,7 +118,9 @@ summit_webkit-1.10.0-3) and uninstall summit_webkitlegacy.
 
 ## Not done
 
-- A per-application user agent, fonts and JavaScript switch (no engine API).
+- Installed WebPositive's font preferences still need checking with a matching
+  stock engine and shim. Per-application font, JavaScript and user-agent
+  settings pass native `BWebView` acceptance.
 - `BWebFrame`'s document access (`InnerText()`, `AsMarkup()`,
   `FrameSource()`) and the frame tree.
 - Web Inspector for BWebView programs (`SetInspectorView()` is kept, unused).

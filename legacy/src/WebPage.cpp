@@ -210,6 +210,7 @@ BWebPage::Init()
 		be_app->AddHandler(this);
 		be_app->Unlock();
 	}
+	BPrivate::WebSettingsPrivate::Bind(fSettings, BMessenger(this));
 	fPagePrivate->pendingNewPage = std::exchange(SummitLegacy::gNewPageRequest, 0);
 	if (fPagePrivate->pendingNewPage == 0)
 		WebCore::ChromeClientHaiku::CreateEngineView(this);
@@ -227,9 +228,10 @@ WebCore::ChromeClientHaiku::CreateEngineView(BWebPage* page)
 	BRect frame = page->fWebView->Bounds();
 	if (!frame.IsValid())
 		frame.Set(0, 0, 99, 99);
+	const BMessage settings = BPrivate::WebSettingsPrivate::Snapshot(page->fSettings);
 	BWebKitView* view = request != 0
-		? new BWebKitView(frame, "engine view", BMessenger(page), request, B_FOLLOW_ALL, context)
-		: new BWebKitView(frame, "engine view", BMessenger(page), B_FOLLOW_ALL, context);
+		? new BWebKitView(frame, "engine view", BMessenger(page), request, settings, B_FOLLOW_ALL, context)
+		: new BWebKitView(frame, "engine view", BMessenger(page), settings, B_FOLLOW_ALL, context);
 	view->SetAuthenticationRequests(true);
 	page->fWebView->AddChild(view);
 	if (getenv("SUMMIT_LEGACY_TRACE") != nullptr)
@@ -300,6 +302,9 @@ BWebPage::LoadURL(const char* urlString)
 		std::lock_guard lock(fPagePrivate->lock);
 		fPagePrivate->requestedURL = url;
 	}
+	// Publish committed settings before this navigation is queued. Apply()
+	// also updates already loaded pages through their application handlers.
+	BPrivate::WebSettingsPrivate::ApplyTo(fSettings, fPagePrivate->view);
 	fPagePrivate->view->LoadURL(url.String());
 }
 
@@ -307,24 +312,30 @@ BWebPage::LoadURL(const char* urlString)
 void
 BWebPage::Reload()
 {
-	if (fPagePrivate->view != nullptr)
+	if (fPagePrivate->view != nullptr) {
+		BPrivate::WebSettingsPrivate::ApplyTo(fSettings, fPagePrivate->view);
 		fPagePrivate->view->Reload();
+	}
 }
 
 
 void
 BWebPage::GoBack()
 {
-	if (fPagePrivate->view != nullptr)
+	if (fPagePrivate->view != nullptr) {
+		BPrivate::WebSettingsPrivate::ApplyTo(fSettings, fPagePrivate->view);
 		fPagePrivate->view->GoBack();
+	}
 }
 
 
 void
 BWebPage::GoForward()
 {
-	if (fPagePrivate->view != nullptr)
+	if (fPagePrivate->view != nullptr) {
+		BPrivate::WebSettingsPrivate::ApplyTo(fSettings, fPagePrivate->view);
 		fPagePrivate->view->GoForward();
+	}
 }
 
 
@@ -568,6 +579,13 @@ void
 BWebPage::MessageReceived(BMessage* message)
 {
 	switch (message->what) {
+		case SummitLegacy::kApplySettings:
+		{
+			std::lock_guard lock(fPagePrivate->lock);
+			if (!fPagePrivate->shutDown && fPagePrivate->view)
+				BPrivate::WebSettingsPrivate::ApplyTo(fSettings, fPagePrivate->view);
+			break;
+		}
 		case B_WEBKIT_AUTHENTICATION_REQUESTED:
 		{
 			const uint64 identifier = message->GetUInt64("identifier", 0);
