@@ -4,11 +4,15 @@ The modern engine sends cursor keywords or bounded bitmap pixels from its
 application thread to `BWebKitView`. Haiku's `BCursor::Archive(BMessage*)` and
 `BCursor(BMessage*)` are stubs; using them loses image and keyword cursors.
 
-Image cursors use a native `B_RGBA32` bitmap with straight BGRA pixels and the
+Image cursors use a native `B_RGBA32` bitmap with premultiplied BGRA pixels and the
 CSS hot spot. WebKit's image scale (including `image-set()` and SVG rasterization)
 is removed before creating the bitmap. The resulting dimensions are logical
 pixels. air/OS app_server scales the bitmap and hot spot for the display, so the
 browser must not multiply them by the display scale again.
+
+app_server's cursor blend adds the source channels to the remaining background
+contribution. Sending straight channels causes translucent pixels to overflow
+and change color. The transport therefore retains premultiplied channels.
 
 Both ends bound the bitmap to 128 × 128 pixels. The receiving view checks the
 dimensions, byte length and finite hot spot before allocating a `BBitmap`.

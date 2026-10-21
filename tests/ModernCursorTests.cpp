@@ -179,9 +179,11 @@ private:
             const auto* bytes = static_cast<const uint8*>(data);
             const auto* red = bytes + (5 * 32 + 5) * 4;
             const auto* alpha = bytes + (14 * 32 + 5) * 4;
-            if (bytes[3] || red[0] != 64 || red[1] != 32 || red[2] != 240 || red[3] != 255
-                || std::abs(alpha[2] - 32) > 1 || std::abs(alpha[3] - 128) > 1)
-                return Fail("straight BGRA pixels and transparency");
+            if (bytes[0] || bytes[1] || bytes[2] || bytes[3]
+                || red[0] != 64 || red[1] != 32 || red[2] != 240 || red[3] != 255
+                || std::abs(alpha[0] - 120) > 1 || std::abs(alpha[1] - 32) > 1
+                || std::abs(alpha[2] - 16) > 1 || std::abs(alpha[3] - 128) > 1)
+                return Fail("premultiplied BGRA pixels and transparency");
             auto pixel = [&](int x, int y, int r, int g, int b) {
                 const size_t offset = ((40 - hotspot + y) * 96 + 40 - hotspot + x) * 3;
                 return std::abs(rgb[offset] - r) <= 3 && std::abs(rgb[offset + 1] - g) <= 3
@@ -203,7 +205,9 @@ private:
             } else if (m_case == 8 && (rgb == m_default || rgb == m_cross))
                 return Fail("hand cursor did not change");
             else if (m_case == 9) {
-                for (auto value : rgb) if (value != 255) return Fail("cursor:none remained visible");
+                // app_server's integer cursor blend can round white down by
+                // one even for a fully transparent native cursor.
+                for (auto value : rgb) if (value < 254) return Fail("cursor:none remained visible");
             }
         }
         std::printf("PASS %s native cursor\n", kCases[m_case]); std::fflush(stdout);
