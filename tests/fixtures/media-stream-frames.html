@@ -93,11 +93,89 @@ window.testStreamFrameCallbacks = async () => {
 
     source.width = 320; source.height = 180;
     await wait(() => streamFrameResults.callbacks.some(f => f.width === 320 && f.height === 180), 'metadata follows stream size changes');
-    stopStreamFrameTest(); await sleep(200);
+    clearInterval(timer);
+    preview.srcObject.getTracks().forEach(track => track.stop());
+    await sleep(200);
     const endedCount = streamFrameResults.callbacks.length;
     await sleep(300);
-    check('stopping the stream and cancelling leaves no callbacks', streamFrameResults.callbacks.length === endedCount);
+    check('an ended stream stops frame notifications', streamFrameResults.callbacks.length === endedCount);
   } catch (error) { streamFrameResults.errors.push(String(error)); }
+  stopStreamFrameTest();
   return { checks, passed: checks.filter(c => c.ok).length, errors: streamFrameResults.errors, state: streamFrameStatus() };
+};
+
+// Two peers on this machine exercise the received-video path without a camera,
+// microphone, signalling service or STUN server.
+window.testRemoteStreamFrameCallbacks = async () => {
+  const checks = [], errors = [], frames = [];
+  const canvas = document.createElement('canvas');
+  canvas.width = 160; canvas.height = 120;
+  const context = canvas.getContext('2d');
+  const video = document.createElement('video');
+  video.autoplay = true; video.muted = true; video.playsInline = true;
+  document.querySelector('.views').append(video);
+  const sender = new RTCPeerConnection({ iceServers: [] });
+  const receiver = new RTCPeerConnection({ iceServers: [] });
+  const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+  const check = (name, ok) => { checks.push({ name, ok }); if (!ok) throw new Error(name); };
+  let stream, interval, callbackId, count = 0;
+  const pending = new Map([[sender, []], [receiver, []]]);
+  for (const [from, to] of [[sender, receiver], [receiver, sender]]) {
+    from.onicecandidate = async ({ candidate }) => {
+      if (!candidate) return;
+      if (!to.remoteDescription) { pending.get(to).push(candidate); return; }
+      try { await to.addIceCandidate(candidate); } catch (error) { errors.push(String(error)); }
+    };
+  }
+  const setRemote = async (peer, description) => {
+    await peer.setRemoteDescription(description);
+    for (const candidate of pending.get(peer).splice(0)) await peer.addIceCandidate(candidate);
+  };
+  const callback = (now, metadata) => {
+    frames.push({ now, ...metadata });
+    callbackId = video.requestVideoFrameCallback(callback);
+  };
+  try {
+    const draw = () => {
+      context.fillStyle = ++count % 2 ? '#e47b3c' : '#3c9be4';
+      context.fillRect(0, 0, 160, 120);
+      context.fillStyle = '#fff'; context.fillRect(count % 140, 40, 20, 40);
+    };
+    draw(); interval = setInterval(draw, 40);
+    stream = canvas.captureStream(25);
+    receiver.ontrack = event => { video.srcObject = event.streams[0]; };
+    stream.getTracks().forEach(track => sender.addTrack(track, stream));
+    callbackId = video.requestVideoFrameCallback(callback);
+    await sender.setLocalDescription(await sender.createOffer());
+    await setRemote(receiver, sender.localDescription);
+    await receiver.setLocalDescription(await receiver.createAnswer());
+    await setRemote(sender, receiver.localDescription);
+    const deadline = performance.now() + 10000;
+    while (frames.length < 8 && performance.now() < deadline) await sleep(50);
+    check('received WebRTC video delivers repeated frame callbacks', frames.length >= 8);
+    check('received frame dimensions match the stream', frames.every(f => f.width === 160 && f.height === 120));
+    check('received frame counts increase', frames.every((f, i) => !i || f.presentedFrames > frames[i - 1].presentedFrames));
+    check('received frame timestamps are finite and ordered', frames.every((f, i) =>
+      Number.isFinite(f.mediaTime) && Number.isFinite(f.presentationTime) && Number.isFinite(f.expectedDisplayTime)
+      && f.mediaTime >= 0 && f.presentationTime <= f.expectedDisplayTime
+      && (!i || f.mediaTime >= frames[i - 1].mediaTime)));
+    check('WebRTC frame metadata retains RTP, receive and decode timing', frames.every(f =>
+      Number.isFinite(f.rtpTimestamp) && f.rtpTimestamp >= 0
+      && Number.isFinite(f.receiveTime) && f.receiveTime <= f.presentationTime
+      && Number.isFinite(f.processingDuration) && f.processingDuration >= 0));
+    context.drawImage(video, 0, 0);
+    const pixel = context.getImageData(0, 0, 1, 1).data;
+    check('received video contains the generated picture', pixel[3] === 255 && Math.abs(pixel[0] - pixel[2]) > 80);
+    const stats = [...(await receiver.getStats()).values()];
+    check('frames passed through the WebRTC decoder', stats.some(s => s.type === 'inbound-rtp' && s.kind === 'video' && s.framesDecoded >= 8));
+  } catch (error) { errors.push(String(error)); }
+  finally {
+    clearInterval(interval);
+    video.cancelVideoFrameCallback(callbackId);
+    sender.close(); receiver.close();
+    stream?.getTracks().forEach(track => track.stop());
+    video.srcObject = null; video.remove();
+  }
+  return { checks, passed: checks.filter(c => c.ok).length, errors, frames: frames.slice(0, 8) };
 };
 </script>

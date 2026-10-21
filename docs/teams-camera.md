@@ -7,6 +7,41 @@ call said Teams could not use the camera, and Teams' device check
 test worked. Looked into on the laptop on 20 October 2026 with a test copy of
 Summit on a test engine.
 
+## Follow-up: missing frame callbacks (#126, 21 October 2026)
+
+[Issue #126](https://github.com/jmgasper/summit/issues/126) reports a blank
+self-preview and “Couldn't apply background” after the camera and microphone
+can be selected. A separate MediaStream defect is fixed in `831a8dc`: a video
+element could play a live stream, but `requestVideoFrameCallback()` never
+called the page. A preview or processing pipeline driven by that API therefore
+stalled even though the stream was live.
+
+The Haiku MediaStream player now exposes metadata for each new frame, including
+its dimensions, presentation count and timing. WebRTC receive/decode timing and
+RTP timestamps are preserved when supplied by the source. The metadata is
+shared under the frame lock; callbacks consume each new count once. The
+accelerated video path continues to deliver frames directly to the compositor.
+
+The native airOS workstation reproduced the failure with an animated canvas
+captured into a video: 69 source frames, a playing 160×120 video, and **zero
+callbacks** on engine `31a91fe`. Engine `831a8dc` passes all **11 local-stream
+checks** and **7 WebRTC receive checks** in
+`tests/fixtures/media-stream-frames.html`, served from localhost. The checks
+cover a callback-driven canvas containing actual video pixels, repeated frames,
+dimensions and timing, cancellation, pause/resume, size changes and stream end.
+Two local WebRTC peers also confirm decoding, video pixels and RTP/receive/decode
+metadata; they use generated video and no external signalling or STUN service.
+
+To repeat, load the fixture and run `await testStreamFrameCallbacks()` and
+`await testRemoteStreamFrameCallbacks()` in the console. Reload before repeating
+the local-stream test, which stops its source at the end.
+
+**#126 remains open.** This proves the frame-callback defect and its fix; it
+does not establish that it is the only cause of Teams' reported failure. The
+workstation currently enumerates no camera, and the laptop used for #79 was
+unreachable during this check. Teams' self-preview and background effect still
+need verification with the reported camera and user-agent setting.
+
 ## What the user sees now
 
 - **A page can open a camera or a microphone as often as it likes.** Teams
