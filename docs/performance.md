@@ -1,5 +1,45 @@
 # Summit performance: Speedometer 3.1 baseline, where the time goes, stress test
 
+## 21 October 2026: startup without EGL (#100, partial)
+
+Commit `f382c16` lets a web process whose EGL display cannot initialize use the
+non-composited Skia CPU renderer and shared-memory surface buffers. It disables
+GPU compositing, accelerated canvas drawing and WebGL after every preference
+update, so attaching the inspector cannot accidentally turn them back on. The
+browser shows a dismissible software-rendering notice once per window;
+`e7ee764` also shows it inside web app windows.
+
+Native acceptance used the GTX 1070 workstation at `devicePixelRatio = 2`,
+isolated profiles, engine bundle `bundle-issue100-f382c16-20261021`, and the app
+at `e7ee764`. The engine patch is
+`7454fa5ca4136560ad26100e9cb74fa6aaad525dfeac7c758179e8e7afaae17c`.
+With `__EGL_VENDOR_LIBRARY_FILENAMES=/does-not-exist/summit-no-egl.json`, the
+previous `bce34bc` engine delivered zero frames. The candidate passed
+`tests/fixtures/rendering-fallback.html`:
+
+- Native window and page screenshots contain the exact three DOM swatch colors
+  (10,800 pixels each) and two canvas colors (14,280 pixels each). Resizing
+  preserves those counts. This checks visible presentation, not just canvas
+  readback.
+- Animation advances, scrolling reaches 1,094 CSS pixels, and the same document
+  retains entered text. WebGL 1/2 stay unavailable after inspector attachment
+  triggers another preferences update.
+- Dismissing the notice, navigating to a new document, and opening a second
+  origin in a separate web process all preserve working CPU rendering without
+  showing the notice again. A web app also paints and shows/dismisses the notice.
+- With EGL available, the coordinated layer-tree renderer still starts, WebGL
+  1/2 work, the same pixel checks pass, and no fallback notice appears. Both
+  modes quit cleanly; the tested browser and web-process teams exit.
+
+The first navigation probe sampled the old document before navigation committed;
+its failure is retained. Waiting for a changed document identity fixes that test
+race. Build logs, source audit, bundle manifest, native captures and probe results
+are under `.vm/issue100/`. No production bundle or regular profile was changed.
+
+This verifies the no-EGL startup portion only. GPU context-loss recovery,
+including safe teardown of lost GL resources and repainting the existing
+document, remains outstanding; #100 stays open.
+
 ## 21 October 2026: composited backdrop filters (#98)
 
 The empty-layer shortcut treated a backdrop layer as empty because it has no
@@ -6604,9 +6644,11 @@ Three more things had to be true, and each was silently absent:
   area asks for one as soon as a page is created, and `sharedDisplay()` asserts
   rather than making one; `LayerTreeHostHaiku` used to create it on the way into
   GL compositing and is not built any more. The GLib and PlayStation ports set
-  theirs in `platformInitializeWebProcess`, and Haiku now does too. There is no
-  software fallback: without EGL the web process dies on that assertion, and on
-  this machine EGL comes from the private Mesa, so `LIBRARY_PATH` must include
+  theirs in `platformInitializeWebProcess`, and Haiku now does too. At the time
+  of this measurement there was no software fallback: without EGL the web
+  process died on that assertion. The 21 October #100 startup fix above now
+  selects CPU rendering instead. For GPU rendering on this machine, EGL comes
+  from the private Mesa, so `LIBRARY_PATH` must include
   `/boot/home/summit-mesa/prefix/lib`. It is `LIBRARY_PATH` on Haiku, not
   `LD_LIBRARY_PATH`.
 

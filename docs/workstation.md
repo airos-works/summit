@@ -370,6 +370,14 @@ and repaint the existing document. Multiple pages and worker contexts must be
 quiesced before replacing shared state. A process restart or permanent software
 fallback does not qualify this recovery path.
 
+The separate no-EGL startup failure is fixed by `f382c16`: an unavailable EGL
+display now selects CPU rendering and sends a one-time notice to the browser.
+Native validation with an invalid EGL vendor path passed DOM/canvas pixel
+checks, animation, scrolling, navigation, multiple processes and clean shutdown;
+web app notices are covered by `e7ee764`. See the 21 October startup-without-EGL
+entry in `performance.md`. This does not repair the live GPU-reset failure
+described here, so #100 remains open.
+
 Evidence, exact source/binary hashes, commands, unsuccessful trials, PNGs and
 terminal driver state are pinned in
 `/mnt/HaikuWork/x399/evidence/wx5100/mesa-native/summit-recovery-manifest.json`.
