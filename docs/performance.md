@@ -524,6 +524,10 @@ next frame's position after the script has read it; in one burst whose
 notches came exactly every third frame, one step in three read 25/44 px
 instead of 34/35.
 
+The remaining position disagreement was resolved on 21 October; see
+[wheel targeting and scroll synchronization](scrolling.md) for the fix and
+native pixel comparisons.
+
 Speedometer 3.1 (official, in the same test copy, the two settings
 alternating, ten runs): before 14.4, 14.3, 14.4, 14.3 and 12.4 +- 2.1; after
 14.3, 14.4, 14.3, 14.4 and 11.7 +- 2.5 (the others +- 0.26 to 0.35). The two
@@ -657,6 +661,10 @@ Keyboard scrolling, `scrollTo({behavior: "smooth"})`, scrolling an
 reversing the direction in the middle of a burst, and the end of the page
 behave as before. One pre-existing oddity, the same with both: after a
 snapping box snapped once, more notches over it scrolled the page instead.
+
+The 21 October [targeted-wheel tests](scrolling.md) found that MCP bursts
+discarded the requested coordinates and horizontal delta. That path is fixed;
+repeated single notches and bursts now pass both snap axes and direction changes.
 
 Tools: a Python model of both animations against these input patterns
 predicted the laptop's per-frame steps within a pixel or two and chose the

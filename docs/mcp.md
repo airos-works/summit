@@ -155,7 +155,7 @@ The same day's scroll-burst fix preserves `x`, `y`, `dx` and `activate` when
 horizontal notch did nothing and a vertical notch could scroll the page behind
 the intended container. `tools/test-scroll-snap.py` checks both snap axes,
 direction reversal, targeted bursts and invalid coordinates/deltas through the
-native browser. It passed at 200% against engine `4db8e46`. Serve
+native browser. It passed at 100% and 200% against engine `31a91fe`. Serve
 `tests/fixtures/scroll-snap.html`, set `SUMMIT_TEST_MCP_TOKEN` for an isolated test
 browser, and pass `--mcp-url`, `--tab` and `--fixture-url` to the script.
 
