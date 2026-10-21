@@ -105,8 +105,63 @@ listener in that case. The corrected test checks this behavior explicitly,
 navigates with scripting enabled and then verifies the native click handler.
 The failed run is retained; it exited normally with no new crash events.
 
-This verifies native `BWebView` use. Installed WebPositive's preferences
-window and a matching stock-Haiku engine/shim still need acceptance.
+## Installed stock WebPositive preferences
+
+The unchanged installed WebPositive on R1/beta6 `hrev59866+79` passes
+**18 UI, rendering and restart checks** using the complete published stock
+`70b6789` engine (`20261021.2224`) and its matching shim, cross-compiled with
+the stock SDK. All 239 extracted package files and 27 frozen test inputs
+match their recorded hashes. Loaded-image checks confirm the selected engine
+and shim in both browser launches.
+
+`tools/test-legacy-webpositive-settings.py` opens the actual Settings window
+and selects its Fonts tab through native scripting. It changes the real size
+controls and sends the font selectors' native family-selection messages.
+The loopback page reports computed font sizes and rendered text widths,
+compared with explicit Noto Serif and Noto Sans Mono reference spans.
+
+The checks confirm that:
+
+- Initial pages receive the saved standard and fixed font sizes.
+- Editing controls alone leaves page fonts unchanged, including a new page.
+- Apply changes existing pages to 30px standard / 21px fixed, uses the selected
+  standard family, and preserves the selected monospace family. New pages
+  inherit those settings.
+- Revert discards a later uncommitted size change; a second Apply updates the
+  existing page to 26px standard / 21px fixed.
+- After a normal quit and restart with saved tabs, a new page receives the
+  persisted choices before loading.
+
+Both launches exit zero and drain their helper groups without forced cleanup.
+All 106 recorded input/runtime hashes remain unchanged; the complete native
+crash interval contains no new events. The runner preserves and restores the
+owned VM's `Application` and `Session` files byte for byte. WebPositive's
+ordinary history/cache writes remain; no installed packages are replaced.
+
+Two harness failures are retained. The first used the unsupported `Name`
+property on a `BHandler`; it now uses `InternalName`. The second requested a
+proportional Noto Sans family through WebPositive's fixed-font selector,
+which deliberately excludes proportional families. The corrected test uses
+the available Noto Sans Mono family. Both failed attempts required cleanup,
+restored the two profile files and had no fresh native crash events. Neither
+required an engine or shim change.
+
+To repeat with the matching stock build:
+
+```sh
+python3 tools/test-legacy-webpositive-settings.py \
+  --library PATH/libWebKitLegacy.so.1 --bundle PATH/lib/summit-webkit \
+  --ui-helper PATH/LegacyWebPositiveUITests \
+  --images-helper PATH/NativeLoadedImages \
+  --egl-vendor PATH/egl-vendor.json --output NEW_RESULT_DIRECTORY
+```
+
+Use an owned VM with WebPositive stopped. The shim's RPATH and external EGL
+vendor JSON must select the isolated target engine and its Mesa library.
+The `installed_stock_webpositive` evidence section contains all three runs,
+native scripting replies, font measurements, profile hashes, build logs and
+package/source audits. WebPositive has no JavaScript or user-agent preference
+controls; those API settings are covered by the separate native probe above.
 
 Proxy configuration, per-page storage paths, and persistent host preference
 storage are outside this settings change. The host remains responsible for

@@ -118,9 +118,10 @@ summit_webkit-1.10.0-3) and uninstall summit_webkitlegacy.
 
 ## Not done
 
-- Installed WebPositive's font preferences still need checking with a matching
-  stock engine and shim. Per-application font, JavaScript and user-agent
-  settings pass native `BWebView` acceptance.
+- Proxy configuration and per-page storage paths remain unapplied.
+  Font, JavaScript and user-agent settings pass native `BWebView` acceptance;
+  installed stock WebPositive also passes font Apply/Revert and restart checks.
+  See [settings acceptance](legacy-settings-2026-10-22.md).
 - `BWebFrame`'s document access (`InnerText()`, `AsMarkup()`,
   `FrameSource()`) and the frame tree.
 - Web Inspector for BWebView programs (`SetInspectorView()` is kept, unused).
