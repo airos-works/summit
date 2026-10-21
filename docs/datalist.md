@@ -10,6 +10,10 @@ the list. Clicking a row accepts it. Acceptance uses WebCore's existing datalist
 path, which updates the input and dispatches input/change events. An unselected
 Return or dismissal does not choose a value.
 
+The Haiku keyboard adapter maps Escape to `U+001B`, as WebCore's input handling
+expects. Its generic hexadecimal fallback omitted the leading zeros and kept
+Escape from reaching the suggestion picker.
+
 The popup closes when its page scrolls, its view geometry or focus changes, the
 user clicks outside it, or its owner disappears. Native results carry the filter
 generation; a result from an older list cannot fill the field after a newer
@@ -59,8 +63,10 @@ On 2026-10-21, this harness loaded the fixture at devicePixelRatio 2 against
 the previous engine and correctly failed when the first native dropdown did
 not appear. It exited normally after its helpers finished.
 
-Full browser acceptance is still pending. Serve `tests/fixtures/datalist.html`
-and check its five initial choices, value and label filtering, mouse/keyboard
-selection, and event log. Repeat at 100% and 200% display scaling. Check dismissal
-on page scroll, window movement, tab switching, and closing the tab while the
-list is visible. Issue #91 stays open until these integrated checks pass.
+On 2026-10-21, all 133 browser checks passed against engine revision `4db8e46`
+on air/OS at both native 100% and 200% display scaling. These cover the five
+initial choices, value and label filtering, mouse/keyboard acceptance, exactly
+one trusted input/change pair, focus and popup positioning, Escape without a
+value change, outside clicks, page scroll, window movement, hiding the tab and
+destroying it with the list visible. The test exits after native windows and
+engine helpers finish. Both display configurations were restored after testing.
