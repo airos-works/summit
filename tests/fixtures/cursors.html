@@ -1,0 +1,47 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Loading cursor fixture</title>
+<style>
+  html, body { margin: 0; height: 100%; background: white; font: 16px sans-serif; }
+  #label { position: absolute; top: 20px; left: 20px; pointer-events: none; }
+</style>
+<div id="label"></div>
+<script>
+(async () => {
+  // The same transparent 32px image in PNG, SVG, and a 2x PNG image-set.
+  // Solid interior samples make native readback independent of edge filtering.
+  function png(scale = 1, size = 32) {
+    const canvas = document.createElement('canvas');
+    canvas.width = canvas.height = size * scale;
+    const ctx = canvas.getContext('2d');
+    ctx.scale(scale, scale);
+    ctx.fillStyle = '#f02040'; ctx.fillRect(4, 4, 24, 24);
+    ctx.fillStyle = '#20c040'; ctx.fillRect(12, 4, 8, 8);
+    ctx.clearRect(4, 12, 8, 8);
+    ctx.fillStyle = 'rgba(32,64,240,0.5)'; ctx.fillRect(4, 12, 8, 8);
+    return canvas.toDataURL();
+  }
+  const bitmap = png(), retina = png(2), huge = png(1, 129);
+  const svg = 'data:image/svg+xml,' + encodeURIComponent(
+    '<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32">' +
+    '<path fill="#f02040" d="M4 4H28V28H4V20H12V12H4Z"/>' +
+    '<path fill="#20c040" d="M12 4H20V12H12Z"/>' +
+    '<path fill="#2040f0" fill-opacity=".5" d="M4 12H12V20H4Z"/></svg>');
+  await Promise.all([bitmap, retina, huge, svg].map(src => new Promise((resolve, reject) => {
+    const image = new Image(); image.onload = resolve; image.onerror = reject; image.src = src;
+  })));
+  const styles = {
+    png: `url("${bitmap}") 8 8, auto`,
+    svg: `url("${svg}") 8 8, auto`,
+    retina: `image-set(url("${retina}") 2x) 8 8, auto`,
+    clamped: `url("${bitmap}") 99 99, auto`,
+    oversized: `url("${huge}") 8 8, crosshair`,
+    missing: 'url("data:image/png;base64,broken") 8 8, crosshair',
+    pointer: 'default', crosshair: 'crosshair', hand: 'pointer', none: 'none'
+  };
+  const name = new URLSearchParams(location.search).get('case') || 'png';
+  document.body.style.cursor = styles[name];
+  document.getElementById('label').textContent = `${name} — devicePixelRatio ${devicePixelRatio}`;
+  document.title = `CURSOR ${name} dpr=${devicePixelRatio}`;
+})().catch(error => document.title = 'CURSOR ERROR ' + error);
+</script>

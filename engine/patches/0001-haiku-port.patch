@@ -82558,10 +82558,10 @@ index 0000000000000000000000000000000000000000..d28a6cad6339adf79b155cf974e85bfd
 +
 diff --git a/Source/WebKit/UIProcess/API/haiku/WebKitView.cpp b/Source/WebKit/UIProcess/API/haiku/WebKitView.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..98260b2d1a95da86f4e4284492663d3c90261224
+index 0000000000000000000000000000000000000000..3c63d1100d88a1fefd2349ad0b6c8f15f4cf4fe6
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/API/haiku/WebKitView.cpp
-@@ -0,0 +1,1046 @@
+@@ -0,0 +1,1066 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#include "config.h"
@@ -82580,6 +82580,7 @@ index 0000000000000000000000000000000000000000..98260b2d1a95da86f4e4284492663d3c
 +#include "WebExtensionTimingHaiku.h"
 +#include <Application.h>
 +#include <Cursor.h>
++#include <WebCore/Cursor.h>
 +#include <MessageFilter.h>
 +#include <MessageRunner.h>
 +#include <OS.h>
@@ -83578,14 +83579,33 @@ index 0000000000000000000000000000000000000000..98260b2d1a95da86f4e4284492663d3c
 +        SetToolTip(message->FindString("text"));
 +        return;
 +    case viewCursorHaiku: {
-+        BMessage archive;
-+        if (message->FindMessage("cursor", &archive) == B_OK) {
-+            auto cursor = std::make_unique<BCursor>(&archive);
-+            if (cursor->InitCheck() == B_OK) {
-+                m_cursor = std::move(cursor);
-+                SetViewCursor(m_cursor.get());
++        auto type = static_cast<WebCore::Cursor::Type>(message->GetUInt32("cursor_type", 0));
++        std::unique_ptr<BCursor> cursor;
++        if (type == WebCore::Cursor::Type::Custom) {
++            const int32 width = message->GetInt32("width", 0);
++            const int32 height = message->GetInt32("height", 0);
++            BPoint hotspot;
++            const void* pixels = nullptr;
++            ssize_t length = 0;
++            if (width > 0 && width <= 128 && height > 0 && height <= 128
++                && message->FindPoint("hotspot", &hotspot) == B_OK
++                && std::isfinite(hotspot.x) && std::isfinite(hotspot.y)
++                && hotspot.x >= 0 && hotspot.x < width && hotspot.y >= 0 && hotspot.y < height
++                && message->FindData("pixels", B_RAW_TYPE, &pixels, &length) == B_OK
++                && length == width * height * 4) {
++                BBitmap bitmap(BRect(0, 0, width - 1, height - 1), B_RGBA32);
++                if (bitmap.InitCheck() == B_OK && bitmap.ImportBits(pixels, length, width * 4, 0, B_RGBA32) == B_OK)
++                    cursor = std::make_unique<BCursor>(&bitmap, hotspot);
 +            }
++        } else if (type > WebCore::Cursor::Type::Invalid && type < WebCore::Cursor::Type::Custom) {
++            // Copying retains the native cursor token. Never archive it.
++            if (auto* native = WebCore::Cursor::fromType(type).platformCursor())
++                cursor = std::make_unique<BCursor>(*native);
 +        }
++        if (!cursor || cursor->InitCheck() != B_OK)
++            cursor = std::make_unique<BCursor>(B_CURSOR_ID_SYSTEM_DEFAULT);
++        m_cursor = std::move(cursor);
++        SetViewCursor(m_cursor.get());
 +        return;
 +    }
 +    case B_MOUSE_WHEEL_CHANGED: {
@@ -114614,10 +114634,10 @@ index 0000000000000000000000000000000000000000..c9a119d02f85b7c5ad8fe9153bfc9604
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/WebView.cpp b/Source/WebKit/UIProcess/haiku/WebView.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..d61ebb0bb824e9f3de136713236c16b4c96510eb
+index 0000000000000000000000000000000000000000..88aabc7b0b06e563e99cc6cbf644878f46919837
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/WebView.cpp
-@@ -0,0 +1,2895 @@
+@@ -0,0 +1,2931 @@
 +/*
 + * Copyright (C) 2013 Intel Corporation. All rights reserved.
 + *
@@ -114726,6 +114746,9 @@ index 0000000000000000000000000000000000000000..d61ebb0bb824e9f3de136713236c16b4
 +#include "WebExtensionPermission.h"
 +#endif
 +#include <WebCore/Cursor.h>
++#include <WebCore/GraphicsContext.h>
++#include <WebCore/ImageBuffer.h>
++#include <WebCore/PixelBuffer.h>
 +#include <WebCore/WindowFeatures.h>
 +#include <WebCore/DOMPasteAccess.h>
 +#include <WebCore/ResourceError.h>
@@ -114751,6 +114774,7 @@ index 0000000000000000000000000000000000000000..d61ebb0bb824e9f3de136713236c16b4
 +#include <wtf/RunLoop.h>
 +#include <wtf/TZoneMallocInlines.h>
 +#include <wtf/text/CString.h>
++#include <algorithm>
 +#include <cmath>
 +#include <cstdlib>
 +#include <limits>
@@ -117171,14 +117195,46 @@ index 0000000000000000000000000000000000000000..d61ebb0bb824e9f3de136713236c16b4
 +
 +void WebView::setCursor(const Cursor& cursor)
 +{
-+    if (auto* native = cursor.platformCursor()) {
-+        BMessage archive;
-+        if (native->Archive(&archive) == B_OK) {
-+            BMessage message(viewCursorHaiku);
-+            message.AddMessage("cursor", &archive);
-+            sendToView(message);
++    // BCursor::Archive and BCursor(BMessage*) are unimplemented, even for
++    // system cursors. Send the keyword or actual pixels to the view instead.
++    BMessage message(viewCursorHaiku);
++    message.AddUInt32("cursor_type", static_cast<uint32>(cursor.type()));
++    if (cursor.type() == Cursor::Type::Custom) {
++        RefPtr image = cursor.image();
++        float scale = 1;
++#if ENABLE(MOUSE_CURSOR_SCALE)
++        scale = cursor.imageScaleFactor();
++#endif
++        // The image scale belongs to image-set()/SVG rasterization. The hot
++        // spot is already in CSS coordinates (as in CursorMac). BCursor takes
++        // logical pixels; air/OS app_server scales both the bitmap and hot spot
++        // for the display. Multiplying by deviceScaleFactor here doubles that.
++        if (image && std::isfinite(scale) && scale > 0) {
++            FloatSize size = image->size() / scale;
++            // Match WebCore's 128 CSS pixel cursor limit and bound allocations
++            // independently of the untrusted cursor arriving over process IPC.
++            if (std::isfinite(size.width()) && std::isfinite(size.height())
++                && size.width() > 0 && size.height() > 0 && size.width() <= 128 && size.height() <= 128) {
++                IntSize pixelsSize = expandedIntSize(size);
++                RefPtr buffer = ImageBuffer::create(FloatSize(pixelsSize), RenderingMode::Unaccelerated,
++                    RenderingPurpose::DOM, 1, ColorSpace::SRGB(), PixelFormat::BGRA8);
++                if (buffer) {
++                    buffer->context().drawImage(*image, ConcreteObjectSize::fixed(image->size()),
++                        FloatRect { FloatPoint { }, size });
++                    auto pixels = buffer->getPixelBuffer({ AlphaPremultiplication::Unpremultiplied,
++                        PixelFormat::BGRA8, ColorSpace::SRGB() }, IntRect { IntPoint { }, pixelsSize });
++                    if (pixels && pixels->bytes().size() == static_cast<size_t>(pixelsSize.width() * pixelsSize.height() * 4)) {
++                        message.AddInt32("width", pixelsSize.width());
++                        message.AddInt32("height", pixelsSize.height());
++                        message.AddPoint("hotspot", BPoint(std::clamp(cursor.hotSpot().x(), 0, pixelsSize.width() - 1),
++                            std::clamp(cursor.hotSpot().y(), 0, pixelsSize.height() - 1)));
++                        message.AddData("pixels", B_RAW_TYPE, pixels->bytes().data(), pixels->bytes().size());
++                    }
++                }
++            }
 +        }
 +    }
++    sendToView(message);
 +}
 +
 +void WebView::registerEditCommand(Ref<WebEditCommandProxy>&& command, UndoOrRedo kind) { m_undoController.registerEditCommand(WTF::move(command), kind); }
