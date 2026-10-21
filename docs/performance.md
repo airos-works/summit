@@ -1,6 +1,6 @@
 # Summit performance: Speedometer 3.1 baseline, where the time goes, stress test
 
-## 21 October 2026: X399 renderer and media seek recovery (in progress)
+## 21 October 2026: X399 renderer, media seek and PGO recovery
 
 The X399 has its GTX 1070 again, with hrev60207+1733, two 4K displays at
 200%, and the October 19 `bundle-ci0816` browser. The initial browser used
@@ -19,13 +19,16 @@ Afterward, a 30-second 1080p60 AV1 playback interval presented 1,791 of 1,802
 frames, with no waiting or stalled events. A later five-second interval
 presented 300 frames, with a 16.6 ms median and 18.6 ms p95 frame gap.
 
-A compatible candidate browser built from Summit `5611677` and the current CI
-engine also establishes direct presentation on its first window. Its tested non-PGO bundle
-`bundle-perf-coalesced-20261021` is now installed while the PGO rebuild runs. Its normal-profile trial preserved the
+A compatible browser built from Summit `5611677` and the current CI engine
+establishes direct presentation on its first window. The tested non-PGO bundle
+`bundle-perf-coalesced-20261021` was installed first; the qualified full-engine
+PGO bundle `bundle-perf-pgo-use-20261021` now replaces it. The normal-profile trial preserved the
 pre-existing unreadable JSON as `profile.damaged-2026-10-21-095434.json` and
 started a writable profile; all four installed extensions remained enabled and
-loaded. Separate recovery copies were also verified before launch. Pending
-download work in the Summit worktree was excluded from this candidate build.
+loaded. Separate recovery copies were also verified before launch. The existing
+download feature merge was tested and committed separately; the installed
+performance bundle retains the pinned `5611677` app and does not include that
+download feature.
 
 ### Direct presentation: combine overlapping damage
 
@@ -63,7 +66,7 @@ route and hash.
 
 ### Software decoder trial
 
-Haiku's `summit-media-latency` branch limits video decoding to eight workers,
+Haiku commit `5e72aaf0fe`, integrated into master by `ad06fd93be`, limits video decoding to eight workers,
 assigns presentation timestamps to video chunks without FFmpeg packet metadata,
 and honors the negative `time_to_decode` preroll hint already understood by
 NVDEC. The decoder still reconstructs reference pictures; progressive pictures
@@ -99,9 +102,36 @@ the browser to return to it. In the same 75–100 second scene at 4K60 VP9,
 the original decoder dropped 7 of 1,500 frames; two candidate runs dropped
 13 of 1,499 and 6 of 1,498. All these steady-state drops were compositor
 replacements. An earlier candidate interval dropped 105 frames; this did not
-repeat in the controlled scene runs. Repeated starts/seeks remain under test.
+repeat in the controlled scene runs.
 
-### Speedometer remains under investigation
+The final PGO engine's normal-profile foreground intervals dropped 11 of 1,503
+frames at 1080p60 AV1 and 3 of 1,511 at 4K60 VP9. Neither interval had waiting
+or stalled events. Its initial automatic-quality 4K60 VP9 playback dropped
+8 of 1,812 frames over a steady 30.2 seconds, without stalled samples. The first
+advancing sample arrived 7.0 seconds after navigation, including the helper's
+play gesture; this is not a controlled cold-start comparison. Ordinary H.264
+still selected NVDEC. Platform, muted MSE/seek and ordinary H.264 probes all
+completed uncontended with clean exits and no new crash reports. Native
+full-desktop captures again verified video clipping and redraw after covering,
+moving, resizing and restoring the playing window.
+
+The final installed desktop launcher, without the MSE diagnostic override,
+also passed: its automatic 1080p60 AV1 startup interval dropped 25 of 1,206
+frames over 20.1 seconds without stalled samples; the controlled 75–100 second
+scene then dropped 2 of 1,502 frames without waiting or stalled events. One
+measurement-helper connection timed out before that controlled sample; it was
+repeated successfully without restarting the browser. The playing-state check
+showed no buffering or visible spinner. Both the desktop launcher and system
+link select the verified private NVIDIA Mesa/ICD and the new PGO bundle.
+
+The final AV1 seek-bar targets 31.704, 298.017, 19.022 and 507.263 seconds reached
+their decoded pictures in 1,292, 896, 961 and 962 ms. All four resumed without
+a lingering spinner. Software AV1 keyframe preroll can therefore still take
+about 1.3 seconds; the first seek's one-second fallback started the clock 40 ms
+before its target picture, while the other three started after the picture was
+ready. These final targets differ from the earlier decoder comparison above.
+
+### Speedometer: full-engine PGO
 
 Renderer recovery alone did not restore Speedometer. At 1910×903 CSS pixels,
 DPR 2, the normal profile scored 6.98±0.17; a fresh profile with that same engine
@@ -114,13 +144,24 @@ profile to 7.49±0.18; all four were restored afterward. That explains only part
 of the gap. An older October 5 PGO bundle scored 9.94±0.47 in an uncontended repeat
 (0.05 foreign CPU cores before and during the run). Its first 9.91±0.60 run
 was marked contended. Current CI builds have JIT/DFG/FTL,
-`-O3`, mimalloc and symbolic linking enabled, but no PGO. A separate instrumented
-build and representative training have completed; the profile-use rebuild is running. The matching
-non-PGO presentation-fix build scored 8.28±0.38 uncontended. No PGO improvement
-is claimed yet. While the full engine rebuild runs, a JSC-only PGO bundle
-scored 8.46±0.33 uncontended. That overlaps the non-PGO baseline's confidence
-range and does not establish a gain; the rendering-engine comparison remains
-pending.
+`-O3`, mimalloc and symbolic linking enabled, but no PGO.
+
+The controlled current-engine comparison used the same app, presentation fix,
+fresh-profile policy and 1910×903 viewport at DPR 2:
+
+| Engine | Speedometer 3.1, ten iterations |
+| --- | ---: |
+| Non-PGO | 8.278±0.377 |
+| JavaScriptCore-only PGO | 8.457±0.332 |
+| Full-engine PGO | 9.459±0.429 |
+
+All three runs were uncontended. JSC-only PGO does not establish a gain within
+these confidence ranges. Full-engine PGO improves the matching baseline by
+14.3%, with clean shutdown and no crash reports. Its normal-profile official
+browserbench.org result is 8.869±0.403 with all four extensions enabled and
+loaded, versus the earlier candidate's 7.989±0.335. The older October 5 bundle
+uses a different upstream engine, so its 9.94 result is contextual rather than
+a controlled PGO comparison.
 
 Counter validation caught two training issues before the long run. Haiku's
 libgcov cannot create missing directories, so the output directory tree is
@@ -136,6 +177,12 @@ units agreed at `runs=57`; 4,144 files (87.7 MB) were imported into the same
 build directory for profile use. The MSE fixture needed `muted=1` for the fresh
 profile's autoplay policy. YouTube training now waits for the quality switch
 to finish before seeking; the corrected 4K run reached both requested targets.
+The full profile-use rebuild completed without coverage-mismatch or corrupt
+profile diagnostics. The build recipe, counters, binary manifest and native
+qualification records are retained in `/mnt/HaikuWork/build/summit-perf-pgo/`.
+This installed bundle is a separately trained performance build; ordinary CI
+builds still do not enable PGO automatically. All twelve host CTest suites also
+passed for the source tree including the existing download-feature merge.
 
 Evidence: `.vm/bench/x399-perf-20261021/`, the individual Speedometer run
 directories from this date, and `/mnt/HaikuWork/build/summit-media-perf/`.
