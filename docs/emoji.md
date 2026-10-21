@@ -54,4 +54,8 @@ XML escaping in profile paths, preservation of custom font aliases, normal
 browser shutdown and no fresh native debugger events. It also saves a native
 PNG screenshot in the test profile.
 
-On 2026-10-21, these checks pass on stock Haiku R1/beta6 at 100% display scale.
+On 2026-10-21, these checks passed on stock Haiku R1/beta6 at 100% display scale
+and on the air/OS workstation at 200%. Each run checked 48 rendered samples
+across the four launch modes, for 96 total. The native 200% screenshot also
+confirmed color emoji and joined sequences in ordinary DOM text. Both runs
+finished without fresh native debugger events.
