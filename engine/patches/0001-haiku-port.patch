@@ -44153,7 +44153,7 @@ index d39fe093c43d4f04d6cc8fe3a59c82bb0e2e43f1..df0bd25776d93618df33523a1d357e8b
          auto data = encodeAcceleratedImage(nativeImage, mimeType, quality);
          if (!data)
 diff --git a/Source/WebCore/platform/graphics/skia/PlatformDisplaySkia.cpp b/Source/WebCore/platform/graphics/skia/PlatformDisplaySkia.cpp
-index 776466ea87d3d721d32ac4e52db702bb2b544e46..3d0cf15e7f1c8d7cb8b0d8ad62861f48b2236afc 100644
+index 776466ea87d3d721d32ac4e52db702bb2b544e46..5733747eeb23c9e74ca9047f31fd8627e375ab19 100644
 --- a/Source/WebCore/platform/graphics/skia/PlatformDisplaySkia.cpp
 +++ b/Source/WebCore/platform/graphics/skia/PlatformDisplaySkia.cpp
 @@ -29,6 +29,7 @@
@@ -44164,7 +44164,23 @@ index 776466ea87d3d721d32ac4e52db702bb2b544e46..3d0cf15e7f1c8d7cb8b0d8ad62861f48
  
  WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_BEGIN
  #include <skia/core/SkColorSpace.h>
-@@ -369,7 +370,15 @@ private:
+@@ -280,8 +281,13 @@ public:
+         // terminates the display. Once it is terminated, drop the Skia resources without calling into GL.
+         RefPtr display = glContext->display();
+         bool didRelease = display && display->runIfNotTerminated([&](EGLDisplay) {
+-            glContext->makeContextCurrent();
+-            grContext->releaseResourcesAndAbandonContext();
++            // A live display does not guarantee that this context can bind.
++            // Releasing GPU resources after a failed bind may call GL with
++            // no current context (or with a different context on this thread).
++            if (glContext->makeContextCurrent())
++                grContext->releaseResourcesAndAbandonContext();
++            else
++                grContext->abandonContext();
+             grContext = nullptr;
+         });
+         if (!didRelease)
+@@ -369,7 +375,15 @@ private:
  
  GLContext* PlatformDisplay::skiaGLContext()
  {
