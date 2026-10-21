@@ -82,6 +82,9 @@ def main():
             shutil.copy2(ROOT / 'resources/artwork/fontawesome' / name, bundle / 'licenses/FontAwesome' / name)
         (bundle / 'licenses/nlohmann').mkdir(parents=True)
         shutil.copy2(ROOT / 'vendor/nlohmann/LICENSE.MIT', bundle / 'licenses/nlohmann/LICENSE.MIT')
+        (bundle / 'licenses/CLD2').mkdir(parents=True)
+        for name in ('LICENSE', 'README.md'):
+            shutil.copy2(ROOT / 'vendor/cld2' / name, bundle / 'licenses/CLD2' / name)
         originals = {'Summit': digest(executable)}
         for name, soname, source in libraries:
             destination = bundle / 'lib' / source.name

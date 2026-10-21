@@ -234,6 +234,10 @@ def freeze(work, inputs, commands, before, configuration, build, executable_name
                 shutil.copy2(ROOT / 'resources/reader' / name, bundle / 'licenses/Reader' / name)
                 assets.append('licenses/Reader/' + name)
             (bundle / 'resources').mkdir()
+            (bundle / 'licenses/CLD2').mkdir(parents=True)
+            for name in ('LICENSE', 'README.md'):
+                shutil.copy2(ROOT / 'vendor/cld2' / name, bundle / 'licenses/CLD2' / name)
+                assets.append('licenses/CLD2/' + name)
             shutil.copy2(ROOT / 'resources/start.html', bundle / 'resources/start.html')
             assets.append('resources/start.html')
         for license_file in (SOURCE / 'Source').rglob('*'):
@@ -388,7 +392,33 @@ def main():
                    'src/ui/PictureInPictureWindow.cpp', 'src/ui/PrintJob.cpp', 'src/ui/BrowsingPreferences.cpp',
                    'src/ui/WebApps.cpp', 'src/core/WebAppManifest.cpp', 'src/ui/UpdateChecker.cpp',
                    'src/core/ExtensionShortcut.cpp', 'src/core/ExtensionUpdate.cpp', 'src/ui/ExtensionShortcuts.cpp',
-                   'src/ui/ExtensionShortcutsWindow.cpp', 'src/ui/ExtensionUpdater.cpp']
+                   'src/ui/ExtensionShortcutsWindow.cpp', 'src/ui/ExtensionUpdater.cpp', 'src/core/PageLanguage.cpp',
+                   # Keep these entries equal to vendor/cld2/sources.list.
+                   # Release CI parses this literal list without running Python.
+                   'vendor/cld2/internal/cldutil.cc',
+                   'vendor/cld2/internal/cldutil_shared.cc',
+                   'vendor/cld2/internal/compact_lang_det.cc',
+                   'vendor/cld2/internal/compact_lang_det_hint_code.cc',
+                   'vendor/cld2/internal/compact_lang_det_impl.cc',
+                   'vendor/cld2/internal/debug.cc',
+                   'vendor/cld2/internal/fixunicodevalue.cc',
+                   'vendor/cld2/internal/generated_entities.cc',
+                   'vendor/cld2/internal/generated_language.cc',
+                   'vendor/cld2/internal/generated_ulscript.cc',
+                   'vendor/cld2/internal/getonescriptspan.cc',
+                   'vendor/cld2/internal/lang_script.cc',
+                   'vendor/cld2/internal/offsetmap.cc',
+                   'vendor/cld2/internal/scoreonescriptspan.cc',
+                   'vendor/cld2/internal/tote.cc',
+                   'vendor/cld2/internal/utf8statetable.cc',
+                   'vendor/cld2/internal/cld_generated_cjk_uni_prop_80.cc',
+                   'vendor/cld2/internal/cld2_generated_cjk_compatible.cc',
+                   'vendor/cld2/internal/cld_generated_cjk_delta_bi_4.cc',
+                   'vendor/cld2/internal/generated_distinct_bi_0.cc',
+                   'vendor/cld2/internal/cld2_generated_quadchrome_2.cc',
+                   'vendor/cld2/internal/cld2_generated_deltaoctachrome.cc',
+                   'vendor/cld2/internal/cld2_generated_distinctoctachrome.cc',
+                   'vendor/cld2/internal/cld_generated_score_quad_octa_2.cc']
     objects = [work / pathlib.Path(source).with_suffix('.o') for source in sources]
     commands = [flags + ['-c', str(ROOT / source), '-o', str(output)]
                 for source, output in zip(sources, objects)]

@@ -26,7 +26,8 @@ WEBKIT_LINK_LIBRARY = WebKitLegacy
 endif
 CORE = $(wildcard src/core/*.cpp) $(wildcard src/extensions/*.cpp)
 UI = $(wildcard src/ui/*.cpp) src/main.cpp
-CORE_OBJ = $(CORE:%.cpp=$(BUILD)/%.o)
+CLD2 = $(addprefix vendor/cld2/,$(shell cat vendor/cld2/sources.list))
+CORE_OBJ = $(CORE:%.cpp=$(BUILD)/%.o) $(CLD2:%.cc=$(BUILD)/%.o)
 UI_OBJ = $(UI:%.cpp=$(BUILD)/%.o)
 LIBS = -L$(WEBKIT_LIBRARY_DIR) -l$(WEBKIT_LINK_LIBRARY) -lbe -lnetwork -lbnetapi -ltranslation -ltracker -lcrypto -lcurl $(DEVTOOLS_LIBS)
 .PHONY: all check clean package browser-smoke
@@ -42,13 +43,19 @@ $(BUILD)/resources/start.html: resources/start.html
 $(BUILD)/%.o: %.cpp
 	mkdir -p $(dir $@)
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -MMD -MP -c $< -o $@
+$(BUILD)/vendor/cld2/%.o: vendor/cld2/%.cc
+	mkdir -p $(dir $@)
+	$(CXX) $(CPPFLAGS) $(filter-out -Wall -Wextra,$(CXXFLAGS)) -MMD -MP -c $< -o $@
 $(BUILD)/summit_tests: $(CORE_OBJ) $(BUILD)/tests/CoreTests.o
 	$(CXX) -o $@ $^ -lcrypto
 $(BUILD)/summit_devtools_tests: $(CORE_OBJ) $(BUILD)/tests/DevToolsTests.o
 	$(CXX) -o $@ $^ -lcrypto
-check: $(BUILD)/summit_tests $(BUILD)/summit_devtools_tests
+$(BUILD)/summit_page_language_tests: $(CORE_OBJ) $(BUILD)/tests/PageLanguageTests.o
+	$(CXX) -o $@ $^ -lcrypto
+check: $(BUILD)/summit_tests $(BUILD)/summit_devtools_tests $(BUILD)/summit_page_language_tests
 	$(BUILD)/summit_tests
 	$(BUILD)/summit_devtools_tests
+	$(BUILD)/summit_page_language_tests
 $(BUILD)/summit_browser_smoke: $(BUILD)/tests/BrowserSmoke.o
 	$(CXX) -o $@ $^ -lbe
 $(BUILD)/summit_browser_probe: $(BUILD)/tests/BrowserProbe.o
