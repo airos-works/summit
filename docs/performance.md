@@ -1,5 +1,30 @@
 # Summit performance: Speedometer 3.1 baseline, where the time goes, stress test
 
+## 22 October 2026: live compositor recovery (#100)
+
+The renderer now replaces a lost native share group and rebuilds the retained
+scene without navigating or restarting the web process. `a68b4b2` adds the
+coordinator and resource replacement; `7cac867` restores the new context's
+viewport; `eb9af69` gives restored WebGL contexts a fresh ANGLE virtualization
+group and sends the first recovered frame through app_server.
+
+Native GTX 1070/zink acceptance uses the isolated `eb9af69` engine and
+`tests/fixtures/rendering-recovery.html`. The compositor hook retires the whole
+share group and destroys its owned context after 240 frames. A marker that is
+painted only after loss becomes visible in app_server's framebuffer after
+**439 ms with direct presentation** and **169 ms with readback presentation**.
+The first recovered frames are sent after 119 ms and 97 ms respectively.
+The native capture timestamp excludes PNG encoding and transfer. Screenshots
+then verify the new marker, DOM colors, 2D canvas, restored WebGL canvas and
+retained image layer. The same document and web process keep entered text,
+scrolling and animation, and quit cleanly.
+
+The final engine also passes **66 native resource/capability/Skia checks** and
+**38 WebGL stream-capture checks**. Hiding the EGL vendor file still renders
+through the CPU path, shows the software-rendering notice, and keeps WebGL
+disabled after inspector preference updates. Detailed reproduction, evidence
+and limits are in [the workstation notes](workstation.md#live-compositor-recovery-22-october-2026-100).
+
 ## 21 October 2026: startup without EGL (#100, partial)
 
 Commit `f382c16` lets a web process whose EGL display cannot initialize use the
@@ -36,9 +61,9 @@ its failure is retained. Waiting for a changed document identity fixes that test
 race. Build logs, source audit, bundle manifest, native captures and probe results
 are under `.vm/issue100/`. No production bundle or regular profile was changed.
 
-This verifies the no-EGL startup portion only. GPU context-loss recovery,
-including safe teardown of lost GL resources and repainting the existing
-document, remains outstanding; #100 stays open.
+This initial acceptance covered startup without EGL. The later live recovery
+acceptance above also covers replacing lost GL resources and repainting the
+existing document.
 
 ## 21 October 2026: composited backdrop filters (#98)
 

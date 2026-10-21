@@ -492,8 +492,8 @@ rejected with `vkCreateImage failed`; that unsuccessful setup is retained in
 the evidence. The qualified fixture uses a color framebuffer. GL fences are
 disabled in this engine configuration, so their guarded paths have no native
 runtime acceptance here. These results do not establish real device-reset
-recovery, worker quiescence, or a recovered browser document. **#100 remains
-open for that coordinated recovery.** Logs, baseline header identities, source
+recovery, worker quiescence, or a recovered browser document. The coordinated
+recovery acceptance below follows these prerequisite checks. Logs, baseline header identities, source
 audit, bundle manifest and screenshot are in `.vm/issue100/context-state/`.
 
 ### Capabilities of replacement contexts, 22 October 2026 (#100)
@@ -525,3 +525,79 @@ Evidence, exact source/binary hashes, commands, unsuccessful trials, PNGs and
 terminal driver state are pinned in
 `/mnt/HaikuWork/x399/evidence/wx5100/mesa-native/summit-recovery-manifest.json`.
 No system Summit default was changed; the production media add-on is restored.
+
+### Live compositor recovery, 22 October 2026 (#100)
+
+`a68b4b2`, `7cac867` and `eb9af69` replace the lost native share group, compositor,
+texture pools, frame targets and layer backing stores while retaining the page.
+Callers lease the shared root while creating contexts so replacing it cannot
+free a root still in use by another thread. Skia retires and recreates its
+thread-local context on its owning thread; old images retain their abandoned
+Skia context until their resources are released. CPU images are uploaded again,
+and active GPU canvases recreate their surfaces and replay their drawing state.
+The EGL display remains alive.
+
+Two visual failures were found during acceptance. A replacement context had an
+empty viewport because the window had not resized; recovery now initializes
+its viewport and damage state. WebGL initially restored API pixels but stayed
+blank on screen: ANGLE's old virtualization group reused a native context from
+the lost share group even when given a new sharing context. Each native root
+now gets a different group, with workers kept separate. The first recovered
+frame also updates the UI's retained bitmap through app_server immediately.
+
+Native acceptance used the isolated bundle
+`bundle-issue100-eb9af69-20261021`, patch SHA-256
+`bf96eb5f7219ba1c11bfd66a7d01a843dd4e270ad04efd65f93185c7fb7ea0f7`.
+The 1,472-file source audit matches the owned build tree. No regular profile,
+production bundle, or pre-existing Debugger alert was changed.
+
+To reproduce, serve `tests/fixtures/rendering-recovery.html` from localhost and
+launch a test browser with `SUMMIT_TEST_CONTEXT_LOSS_AFTER_FRAMES=240`. The hook
+runs once per web process. It marks the entire shared group lost and destroys
+the compositor context through its owner; it does not reset the hardware.
+The WebGL loss handler paints a new cyan marker, and permits WebGL restoration.
+`tools/bench/rendering-recovery-marker.cpp` reads app_server's framebuffer and
+reports its monotonic capture timestamp and exact marker pixel count. Establish
+a zero baseline, then poll after loss and compare `capturedAt` with the hook's
+logged `at` timestamp. Keep other windows clear of the fixture.
+
+Both presentation paths pass:
+
+| Check | Direct presentation | Readback presentation |
+| --- | ---: | ---: |
+| First recovered frame sent | 119 ms | 97 ms |
+| New marker visible in framebuffer | 439 ms | 169 ms |
+| Marker pixels, RGB (18,164,214) | 3,600 | 3,600 |
+| Restored WebGL pixels, RGB (204,51,102) | 28,800 | 28,800 |
+| Retained image pixels, RGB (42,120,220) | 6,241 | 6,241 |
+
+PNG screenshots also contain all five DOM/canvas color regions. A screenshot
+of the previous healthy picture cannot satisfy the new-marker check. The
+native capture excludes the time spent encoding and transferring the PNG;
+early direct-presentation captures taken before app_server's next copy are
+retained among the unsuccessful trials.
+
+The document UUID, tab, web-process team, entered text and scroll position are
+unchanged. Animation and worker-canvas pixels continue; the 2D canvas retains
+its transform and clip. WebGL delivers loss/restoration events and renders
+again on screen, using its normal approximately one-second restoration timer.
+The owned browser and web-process teams exit after each run without an abort.
+
+`tools/bench/gl-shared-context-recovery.cpp`, built with
+`build-skia-context-teardown.py --source`, adds **11 checks** using real main and
+worker Skia GPU contexts. Both observe shared loss, abandon their old contexts
+on their own threads, join the same fresh group and render exact pixels. The
+final candidate passes these plus 13 capability checks, 35 retained-resource
+checks and 7 Skia teardown checks: **66 total**. Normal browser acceptance passes
+38 WebGL stream-capture checks, multiple tabs and document preservation.
+Hiding the EGL vendor file still paints in software with the notice, correct
+pixels, scrolling and animation, and WebGL stays unavailable after inspector
+updates.
+
+These tests qualify the issue's forced-loss and missing-EGL acceptance cases.
+They do not simulate a real hardware reset or a permanently unavailable driver.
+Failed context recreation retries every 200 ms. Lost pixels of a static GPU
+canvas cannot be read back; the canvas fixture redraws each animation frame.
+No 2D canvas context-loss events are added. GL fences remain disabled in the
+tested configuration. Logs, failed trials, captures, source audit and binary
+manifest are under `.vm/issue100/live-recovery/`.
