@@ -197,7 +197,7 @@ second site also changed the first site's values. The reproducer is
 127.0.0.1 as top-level sites, with an iframe on localhost. Use an isolated
 profile trusting a test certificate for those three hosts.
 
-Native component validation currently passes **237 database/parser/change
+Native component validation passes **237 database/parser/change
 checks** and **145 query/JavaScript conversion checks**. This covers real
 SQLite, migrations from versions 0, 1 and 2, rollback, partition isolation,
 expiry, event identity, wildcard queries and structured API results. Build
@@ -206,5 +206,27 @@ the executables from the configured engine using
 --runtime-lib-dir HAIKU_LIBRARY_DIRECTORY`, within its Haiku SDK environment;
 then run both executables on Haiku with the matching libraries.
 
-Full browser, extension restart and developer-tools acceptance is still in
-progress. The extension fixture is `tests/fixtures/extensions/chips`.
+The native workstation browser with engine commit `d4fed42` passed **nine
+HTTPS scenarios**: seed under A, visit unseeded B, seed under B, return to A,
+restart and revisit both, delete A's cookies, revisit B, and reseed A. Both
+the server's echoed request header and the frame's `document.cookie` retained
+the expected partition; HttpOnly cookies stayed out of the DOM. Ordinary
+cookies remained shared.
+
+The extension fixture, `tests/fixtures/extensions/chips`, passed **17 checks**
+from `runCookiePartitionTest()` and **two restart checks** from
+`resumeCookiePartitionTest()`. These use the actual extension API, including
+write/removal receipts, event delivery, wildcard queries, path filtering,
+denied host permissions, exact expiry and persistent partitioned cookies.
+
+The native Storage panel showed distinct ordinary and partitioned rows with
+the same name, filtered by partition key, and deleted the selected partitioned
+row. Extension enumeration then confirmed that the ordinary same-name cookie
+and the other site's cookie remained. The host DevTools suite also passed
+**380 checks**.
+
+Finally, a copy of the original browser's schema-2 profile migrated to schema
+3 in the new browser. All three persistent fixture rows retained every old
+column and their row IDs, acquired empty partition keys, and remained usable
+by the page. The original profile was unchanged. The test bundle was installed
+alongside the existing browser, and all acceptance checks used isolated profiles.
