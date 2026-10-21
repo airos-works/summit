@@ -41,6 +41,24 @@ owner destruction, cancellation before startup, invalid owner, empty results,
 invalid geometry, and keys queued before startup. The four changed engine
 translation units also compile with the current cross toolchain.
 
+`tests/ModernDataListTests.cpp` runs the browser-level checks through a real
+`BWebKitView` and inspector session. It sends native pointer/keyboard events,
+checks native row counts and positioning, and observes the HTML value and
+trusted input/change events. It also hides and destroys the view with a live
+popup. With matching engine headers and the bundle's usual graphics environment:
+
+```sh
+c++ -std=c++23 -O1 -Wall -Wextra -Wno-multichar -DBUILDING_HAIKU__=1 \
+  -Ivendor -I"$WEBKIT_HEADERS" -I"$WEBKIT_HEADERS/WebKit" \
+  tests/ModernDataListTests.cpp -L"$SUMMIT_BUNDLE/lib" -lWebKit -lbe \
+  -o ModernDataListTests
+./ModernDataListTests http://HOST:8766/datalist.html "$SUMMIT_BUNDLE"
+```
+
+On 2026-10-21, this harness loaded the fixture at devicePixelRatio 2 against
+the previous engine and correctly failed when the first native dropdown did
+not appear. It exited normally after its helpers finished.
+
 Full browser acceptance is still pending. Serve `tests/fixtures/datalist.html`
 and check its five initial choices, value and label filtering, mouse/keyboard
 selection, and event log. Repeat at 100% and 200% display scaling. Check dismissal
