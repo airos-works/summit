@@ -286,6 +286,20 @@ static void Cleanup(const BMessenger& app, team_id team)
 
 int main(int argc, char** argv)
 {
+    if (argc == 4 && std::string(argv[1]) == "--close-browser") {
+        BApplication application("application/x-vnd.Summit-close-owned-browser");
+        const auto team = static_cast<team_id>(std::strtol(argv[2], nullptr, 10));
+        app_info info;
+        BMessenger app(nullptr, team);
+        if (team <= 0 || !app.IsValid() || be_roster->GetRunningAppInfo(team, &info) != B_OK) return 1;
+        BPath executable(&info.ref);
+        std::error_code error;
+        auto actual = std::filesystem::canonical(executable.Path(), error);
+        if (error) return 1;
+        auto expected = std::filesystem::canonical(argv[3], error);
+        if (error || actual != expected) return 1;
+        return app.SendMessage(B_QUIT_REQUESTED) == B_OK ? 0 : 1;
+    }
     if (argc == 3 && std::string(argv[1]) == "--check-executable-unused") {
         const auto expected = std::filesystem::canonical(argv[2]);
         int32 cookie = 0;

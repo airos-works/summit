@@ -1388,6 +1388,13 @@ Evidence: `.vm/modern-network-exit-bundle-copy.log` and the artifact's
 `copy-provenance.json`. Earlier bundles remain available with their recorded
 limitations.
 
+**22 October 2026 shutdown recheck:** release builds passed five stock Haiku
+TLS/worker/WebSocket shutdown cycles, but a subsequent run trapped in libepoxy
+from the WebProcess compositor. The airOS workstation passed one cycle and
+then stalled during worker-request startup. These are failed acceptance runs,
+not evidence to close #120. See [the report](network-shutdown-2026-10-22.md)
+for the current workload, hashes and native stack.
+
 ## Native navigation outcomes and history
 
 Patch `b6ffb54286c7f699389f0502021540bd8b79d9a7b100d242b68e09b8e8889686`
