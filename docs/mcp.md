@@ -106,6 +106,10 @@ Some ways to use them:
   process gets the commands that were waiting. The engine announces a page's
   target only to its first connection, so a session made while the Developer
   Tools are open is told it (`page-` and the tab's page identifier).
+  Registration also queues an initial drain: the engine can announce messages
+  before the session enters the lookup map, and coalesces further announcements
+  until those messages are taken. This avoids a lost first notification leaving
+  every page command waiting indefinitely.
 - **Engine diagnostics** (engine patch): every web and network process starts
   a thread that waits on a port named "WebKit diagnostics"
   (`Shared/haiku/ProcessDiagnosticsHaiku.{h,cpp}`). Topics that only the main
@@ -141,6 +145,10 @@ Some ways to use them:
 
 Host: `tests/McpTests.cpp` (protocol, HTTP parsing and responses, a real
 socket round trip, the inspector channel, timeline and heap summaries).
+
+On 21 October 2026, the registration fix was checked against the native engine
+on air/OS: Excalidraw page evaluation timed out before the fix, then succeeded
+afterward through five detach/reattach cycles, including during navigation.
 
 On the laptop (17 October, test copy `/boot/home/claude-test/swmcp`, profile
 `pmcp`): every tool was called against Wikipedia, a VP9 video and

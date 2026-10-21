@@ -191,6 +191,14 @@ std::shared_ptr<PageConnection> Connect(const Json& arguments)
         connection->channel.AssumePageTarget(target);
         outgoing = connection->channel.TakeOutgoing();
     }
+    // Create() attaches on the WebKit main loop. Its first notification may
+    // reach the pump before this connection is registered above. The engine
+    // coalesces notifications until Take(), so explicitly drain once after
+    // registration even if that early notification was missed.
+    BMessage ready(B_WEBKIT_INSPECTOR_MESSAGES);
+    ready.AddUInt64("identifier", connection->identifier);
+    if (pump.SendMessage(&ready, static_cast<BHandler*>(nullptr), 1000000) != B_OK)
+        throw ToolError("the inspector message pump could not be reached");
     Flush(*connection, std::move(outgoing));
     return connection;
 }
