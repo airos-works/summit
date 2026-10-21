@@ -136,9 +136,13 @@ int main(int argc, char** argv)
         check("Destroyed context bind rejected", !rebound && eglGetError() == EGL_BAD_CONTEXT);
         check("Failed group is retired for siblings", !sibling->makeContextCurrent());
     } else if (resetMode) {
+        // Loss must use the function cached during the healthy bind. Looking
+        // it up again now would obtain the real driver's healthy response.
+        epoxy_eglGetProcAddress = realGetProcAddress;
+        auto queriesBeforeReset = resetQueries;
         resetStatus = GL_GUILTY_CONTEXT_RESET_KHR;
         check("Cached-current path detects reset", !owner->makeContextCurrent());
-        check("Cached reset entry point was queried", resetQueries > 0);
+        check("Cached reset entry point was queried", resetQueries > queriesBeforeReset);
         resetStatus = GL_NO_ERROR;
         check("Reset remains sticky after status clears", !owner->makeContextCurrent());
         check("Reset retires sibling contexts", !sibling->makeContextCurrent());
