@@ -37,7 +37,7 @@ window.testWebGLStreamCapture = async () => {
     const video = document.createElement('video'); video.muted = true; video.autoplay = true; video.playsInline = true;
     document.getElementById('views').append(canvas, video);
     let stream, timer, callback, gl;
-    let changed = false;
+    let changed = false, opacity = 1;
     const colors = () => changed ? [[32, 224, 64], [224, 192, 32]] : [[224, 32, 64], [32, 64, 224]];
     const pixels = () => {
       const sample = document.createElement('canvas'); sample.width = 8; sample.height = 8;
@@ -47,7 +47,7 @@ window.testWebGLStreamCapture = async () => {
     const matches = () => {
       if (video.readyState < 2) return false;
       const actual = pixels();
-      return colors().every((color, i) => [...color, 255].every((v, channel) => Math.abs(actual[i][channel] - v) <= 3));
+      return colors().every((color, i) => [...color, Math.round(opacity * 255)].every((v, channel) => Math.abs(actual[i][channel] - v) <= 3));
     };
     try {
       gl = canvas.getContext(options.type, options);
@@ -58,7 +58,7 @@ window.testWebGLStreamCapture = async () => {
         for (let i = 0; i < 2; ++i) {
           const color = colors()[i];
           gl.scissor(0, i ? 0 : canvas.height / 2, canvas.width, canvas.height / 2);
-          gl.clearColor(...color.map(v => v / 255), 1); gl.clear(gl.COLOR_BUFFER_BIT);
+          gl.clearColor(...color.map(v => v / 255 * opacity), opacity); gl.clear(gl.COLOR_BUFFER_BIT);
         }
       };
       draw(); stream = canvas.captureStream(30); video.srcObject = stream;
@@ -74,6 +74,10 @@ window.testWebGLStreamCapture = async () => {
       canvas.width = 192; canvas.height = 128;
       await wait(() => video.videoWidth === 192 && video.videoHeight === 128, 'capture follows canvas size changes');
       await wait(matches, 'resized frame has the right pixels');
+      if (options.alpha) {
+        opacity = 0.5;
+        await wait(matches, 'premultiplied pixels retain colour and transparency');
+      }
       check('capture leaves WebGL error state clean', gl.getError() === gl.NO_ERROR);
       clearInterval(timer); stream.getTracks().forEach(track => track.stop());
       await sleep(100); const count = result.frames;

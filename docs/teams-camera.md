@@ -48,6 +48,49 @@ establish a working background-processing pipeline. The workstation currently
 enumerates no camera, and the laptop used for #79 was unreachable during the
 automated checks.
 
+### WebGL output capture for background effects
+
+`bce34bc` fixes a second, independently reproduced defect: a WebGL canvas's
+`captureStream()` returned a live track but never delivered a frame. The EGL
+implementation of `surfaceBufferToVideoFrame()` had only a GStreamer branch;
+Haiku always returned null. Background processors can successfully draw their
+output while the video receiving that output stays empty or retains an old
+picture.
+
+The Haiku path now reads the requested drawing/display buffer through
+`copyNativeImage()` and converts it to a native video frame. This uses the
+presented buffer even with `preserveDrawingBuffer: false`, flips GL's rows to
+the correct orientation, and converts premultiplied or opaque pixels correctly.
+
+Native workstation acceptance on the isolated `bce34bc` engine:
+
+- `tests/fixtures/webgl-stream-capture.html`, served from localhost:
+  **38 checks pass**. WebGL 1 and 2, preserved and discarded drawing buffers,
+  opaque and alpha canvases, repeated frames, exact colour/orientation,
+  changing pixels, resizing, transparency, GL errors and track stop are covered.
+  Before the fix, all four context configurations delivered **zero frames**.
+- Microsoft's `@azure/communication-calling` **2.0.0** and
+  `@azure/communication-calling-effects` **1.3.2**, bundled locally with esbuild
+  **0.25.12**, were exercised with a generated 320×180 striped camera and the
+  documented `LocalVideoStream.feature(Features.VideoEffects)` API. Only device
+  enumeration/capture were replaced by that generated camera, before loading
+  the SDK. No account, microphone, real camera or external call was used.
+- Before the fix, the SDK reported an active replacement effect at about
+  28 fps, while its output video stayed at `readyState: 0`, time zero. After
+  the fix, the video plays and its measured pixels match the replacement
+  colour exactly: **RGB (32, 239, 32)**.
+- A fresh blur run reduces the generated stripes' mean adjacent-pixel
+  difference from **47.40 to 0**, preserving their mean RGB **(128, 128, 128)**.
+  A local WebRTC receiver decodes five frames of that blurred output with the
+  same mean colour and no errors.
+
+These are processing-pipeline checks, not person-segmentation quality tests or
+a Teams acceptance result on the Framework. One rapid stop/start transition
+in the SDK harness stalled with `Worker based timer is already in use`; its
+cause remains undiagnosed, and it is not counted as a successful effect switch.
+Replacement and blur were each verified from a fresh page. **#126 stays open
+until the Framework retest**, including changing and removing effects.
+
 ## What the user sees now
 
 - **A page can open a camera or a microphone as often as it likes.** Teams
