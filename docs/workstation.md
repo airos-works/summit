@@ -432,6 +432,19 @@ observed cleanup calls. The failed-bind test deliberately fails with the same
 14 calls, reproducing cleanup after the context can no longer bind. Logs are
 retained at `.vm/issue100/recovery/skia-baseline-final-{healthy,failed-bind}.log`.
 
+`ac13269` checks the result of `makeContextCurrent()` before releasing Skia's
+GPU resources. A failed bind uses `abandonContext()` instead. On the native
+candidate, the same probe passes: the failed-bind case makes **zero** observed
+cleanup calls, while the healthy control still makes **14**. Both cases render
+the expected pixels before teardown and abandon their retained Skia context.
+The fixed logs and the audited bundle manifest are in
+`.vm/issue100/recovery/`. An isolated browser using this candidate also passes
+the uninstrumented GPU canvas pixel, WebGL 1/2, animation, scrolling, retained
+document/text and clean-quit checks in `rendering-fallback.html`.
+This fixes Skia's failed-bind cleanup; it does not
+detect GPU resets or recover the compositor's shared resources, so #100 stays
+open.
+
 Evidence, exact source/binary hashes, commands, unsuccessful trials, PNGs and
 terminal driver state are pinned in
 `/mnt/HaikuWork/x399/evidence/wx5100/mesa-native/summit-recovery-manifest.json`.
