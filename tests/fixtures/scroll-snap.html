@@ -1,0 +1,52 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Scroll snap and frame position checks</title>
+<style>
+  body { margin: 0; font: 16px sans-serif; }
+  h1 { margin: 16px 20px; font-size: 20px; }
+  .box { position: absolute; top: 70px; width: 320px; height: 180px; overflow: auto; border: 2px solid #345; }
+  #horizontal { left: 20px; display: flex; scroll-snap-type: x mandatory; }
+  #vertical { left: 380px; scroll-snap-type: y mandatory; }
+  .slide { box-sizing: border-box; flex: 0 0 320px; height: 180px; scroll-snap-align: start; padding: 30px; }
+  .slide:nth-child(odd) { background: #cee5fc; }
+  .slide:nth-child(even) { background: #ffdfb0; }
+  #lines { position: absolute; top: 300px; left: 0; right: 0; }
+  .line { height: 100px; box-sizing: border-box; border-top: 2px solid #d68; padding: 20px; }
+  #parallax { position: fixed; top: 280px; right: 20px; width: 40px; height: 40px; background: #357; will-change: transform; }
+</style>
+<h1>Horizontal and vertical mandatory snap; scrollable page behind both</h1>
+<div id="horizontal" class="box"></div>
+<div id="vertical" class="box"></div>
+<div id="lines"></div>
+<div id="parallax"></div>
+<script>
+for (const id of ['horizontal', 'vertical']) {
+  for (let i = 0; i < 6; ++i) {
+    const slide = document.createElement('div');
+    slide.className = 'slide'; slide.textContent = `${id} ${i + 1}`;
+    document.getElementById(id).append(slide);
+  }
+}
+for (let i = 0; i < 160; ++i) {
+  const row = document.createElement('div');
+  row.className = 'line'; row.textContent = `Page row ${i}`;
+  lines.append(row);
+}
+window.scrollSamples = [];
+window.recording = false;
+window.sampleParallax = false;
+window.scrollState = () => ({ x: scrollX, y: scrollY, horizontal: horizontal.scrollLeft, vertical: vertical.scrollTop });
+window.beginScrollRecording = (parallax = false) => {
+  scrollSamples.length = 0; recording = true; sampleParallax = parallax;
+  function frame(time) {
+    if (!recording) return;
+    scrollSamples.push({ kind: 'raf', time, ...scrollState() });
+    if (sampleParallax) document.getElementById('parallax').style.transform = `translateY(${scrollY % 180}px)`;
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+};
+addEventListener('scroll', () => {
+  if (recording) scrollSamples.push({ kind: 'scroll', time: performance.now(), ...scrollState() });
+});
+</script>

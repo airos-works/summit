@@ -1100,8 +1100,10 @@ void BrowserWindow::SimulateScroll(const BMessage& message, BMessage& reply)
     const int32 count = message.GetInt32("count", 60);
     const int32 interval = message.GetInt32("interval_ms", 16);
     const float delta = message.GetFloat("delta", 3.0f);
+    const float deltaX = message.GetFloat("delta_x", 0.0f);
     if (count < 1 || count > 100000 || interval < 0 || interval > 10000
-        || !std::isfinite(delta) || std::fabs(delta) > 1000) {
+        || !std::isfinite(delta) || std::fabs(delta) > 1000
+        || !std::isfinite(deltaX) || std::fabs(deltaX) > 1000) {
         reply.AddString("error", "unusable burst parameters");
         return;
     }
@@ -1116,7 +1118,7 @@ void BrowserWindow::SimulateScroll(const BMessage& message, BMessage& reply)
     burst->count = count;
     burst->interval = bigtime_t(interval) * 1000;
     burst->event.what = B_MOUSE_WHEEL_CHANGED;
-    burst->event.AddFloat("be:wheel_delta_x", 0.0f);
+    burst->event.AddFloat("be:wheel_delta_x", deltaX);
     burst->event.AddFloat("be:wheel_delta_y", delta);
     // A wheel notch applies where the pointer is. Name the middle of the page
     // instead of moving the pointer, so a burst does not take the mouse away

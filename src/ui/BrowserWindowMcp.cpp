@@ -311,6 +311,15 @@ std::string BrowserWindow::McpRequest(const std::string& text)
         burst.AddInt32("count", std::clamp(request.value("count", 30), 1, 10000));
         burst.AddInt32("interval_ms", std::clamp(request.value("interval_ms", 16), 0, 1000));
         burst.AddFloat("delta", float(request.value("delta", 3.0)));
+        burst.AddFloat("delta_x", float(request.value("delta_x", 0.0)));
+        if (request.contains("x") || request.contains("y")) {
+            const BRect bounds = tab->view->Bounds();
+            burst.AddPoint("at", BPoint(request.value("x", bounds.Width() / 2), request.value("y", bounds.Height() / 2)));
+        }
+        if (request.value("activate", false)) {
+            if (tab->id != fSelected) SelectTab(tab->id);
+            Activate(true);
+        }
         if (tab->id != fSelected) return fail("the tab is not selected");
         SimulateScroll(burst, reply);
         if (const char* error = nullptr; reply.FindString("error", &error) == B_OK) return fail(error);

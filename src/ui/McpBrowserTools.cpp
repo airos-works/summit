@@ -387,7 +387,10 @@ void RegisterMcpBrowserTools(mcp::Server& server, const std::shared_ptr<McpConte
             if (mcp::HasArgument(arguments, "count")) {
                 Json request = {{"action", "burst"}, {"count", mcp::IntegerArgument(arguments, "count", 30, 1, 10000)},
                     {"interval_ms", mcp::IntegerArgument(arguments, "interval_ms", 16, 0, 1000)},
-                    {"delta", mcp::NumberArgument(arguments, "dy", 3)}};
+                    {"delta", mcp::NumberArgument(arguments, "dy", 3)},
+                    {"delta_x", mcp::NumberArgument(arguments, "dx", 0)}};
+                if (mcp::HasArgument(arguments, "x")) request["x"] = mcp::NumberArgument(arguments, "x", 0);
+                if (mcp::HasArgument(arguments, "y")) request["y"] = mcp::NumberArgument(arguments, "y", 0);
                 return input(arguments, request);
             }
             Json request = {{"action", "input"}, {"kind", "scroll"}, {"dy", mcp::NumberArgument(arguments, "dy", 3)},

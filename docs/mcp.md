@@ -150,6 +150,15 @@ On 21 October 2026, the registration fix was checked against the native engine
 on air/OS: Excalidraw page evaluation timed out before the fix, then succeeded
 afterward through five detach/reattach cycles, including during navigation.
 
+The same day's scroll-burst fix preserves `x`, `y`, `dx` and `activate` when
+`count` is supplied. Previously bursts ignored these arguments, so a targeted
+horizontal notch did nothing and a vertical notch could scroll the page behind
+the intended container. `tools/test-scroll-snap.py` checks both snap axes,
+direction reversal, targeted bursts and invalid coordinates/deltas through the
+native browser. It passed at 200% against engine `4db8e46`. Serve
+`tests/fixtures/scroll-snap.html`, set `SUMMIT_TEST_MCP_TOKEN` for an isolated test
+browser, and pass `--mcp-url`, `--tab` and `--fixture-url` to the script.
+
 On the laptop (17 October, test copy `/boot/home/claude-test/swmcp`, profile
 `pmcp`): every tool was called against Wikipedia, a VP9 video and
 example.com. The preference path was checked without environment overrides:
