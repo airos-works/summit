@@ -39,8 +39,10 @@ the local-stream test, which stops its source at the end.
 **#126 remains open.** This proves the frame-callback defect and its fix; it
 does not establish that it is the only cause of Teams' reported failure. The
 workstation currently enumerates no camera, and the laptop used for #79 was
-unreachable during this check. Teams' self-preview and background effect still
-need verification with the reported camera and user-agent setting.
+unreachable during this check. The reporter confirmed the failure was on the
+Framework laptop with an older build predating the user-agent selector. Teams'
+self-preview and background effect still need verification there on the
+current build.
 
 ## What the user sees now
 
