@@ -85,11 +85,37 @@ Native workstation acceptance on the isolated `bce34bc` engine:
   same mean colour and no errors.
 
 These are processing-pipeline checks, not person-segmentation quality tests or
-a Teams acceptance result on the Framework. One rapid stop/start transition
-in the SDK harness stalled with `Worker based timer is already in use`; its
-cause remains undiagnosed, and it is not counted as a successful effect switch.
-Replacement and blur were each verified from a fresh page. **#126 stays open
-until the Framework retest**, including changing and removing effects.
+a Teams acceptance result on the Framework. **#126 stays open until the
+Framework retest**, including changing and removing effects, on a confirmed
+build containing `bce34bc`.
+
+### Changing and removing effects
+
+A follow-up on the isolated workstation engine `f382c16` (which contains
+`bce34bc`) used the same SDK versions and generated camera. Following
+[Microsoft's documented switch API](https://learn.microsoft.com/en-us/azure/communication-services/quickstarts/voice-video-calling/get-started-video-effects),
+`startEffects(newEffect)` changes replacement to blur without stopping first.
+Pixel checks pass for replacement → blur → off → replacement → off: blur has
+mean RGB (128, 128, 128) and zero stripe contrast; replacement is (32, 239, 32);
+turning effects off restores the original 47.40 stripe contrast. The output
+video remains playing at 320×180 throughout these checks.
+
+An immediate `await stopEffects(); await startEffects(newBlurEffect)` still
+reproduces a separate SDK stall. Both promises resolve and `activeEffects`
+reports blur, but the output pixels are transparent black. The SDK logs
+`Worker based timer is already in use` 5 ms after requesting a stop; its worker
+acknowledges the stop 17 ms later. Inspection of Effects SDK 1.3.2 shows that
+`clearInterval()` posts a worker message, while its occupied timer state is
+cleared only by the asynchronous reply. A restart before that reply is rejected
+without scheduling a new timer. This explains the observed SDK timer failure;
+it does not establish that Teams takes the same path. Stopping again, allowing
+250 ms before restarting, restored blurred output in this harness. That delay
+is diagnostic evidence, not a browser fix or a guaranteed workaround.
+
+One initial load of the generated-camera harness also crashed in Mesa while
+Skia read back a captured 2D canvas. Reloading and a fresh test process ran the
+checks above, but the startup crash remains undiagnosed. Neither these results
+nor the SDK race closes the outstanding Framework Teams report.
 
 ## What the user sees now
 
