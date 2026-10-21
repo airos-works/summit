@@ -55,8 +55,13 @@ exit path to avoid racing WebKit worker teardown against libbe global destructio
 Check the native syslog interval for fresh debugger events as well as the exit
 status. Excalidraw's live tool cursors are an additional manual acceptance check.
 
-On 2026-10-21, all ten native cases passed on air/OS at 200% display scaling
-with the rebuilt engine. The test also reproduced the old engine's PNG transport
-failure. WebCore resolves an out-of-image CSS hot spot to `(0, 0)` before
-transport. Verification at 100% and with Excalidraw remains pending; issue #86
-remains open.
+On 2026-10-21, all ten native cases passed on air/OS at both native 100% and
+200% display scaling with the rebuilt engine (`3a2a569`). The test also
+reproduced the old engine's PNG transport failure. WebCore resolves an
+out-of-image CSS hot spot to `(0, 0)` before transport.
+
+Excalidraw's live site was also checked at 200% in an isolated profile against
+engine `4db8e46`: the freehand and rectangle tools show crosshairs, the eraser
+shows its circular image cursor, the hand tool shows the grab cursor, and
+selection shows the arrow. Native captures include app_server's actual cursor.
+Display settings and the original pointer position were restored afterward.
