@@ -1,0 +1,50 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Loading emoji fixture</title>
+<style>
+body { margin: 16px; background: #fff; color: #222; font: 16px sans-serif; }
+#samples { display: flex; flex-wrap: wrap; gap: 8px; }
+.sample { width: 160px; padding: 8px; border: 1px solid #bbb; }
+canvas { display: block; width: 160px; height: 100px; }
+</style>
+<h1>Bundled emoji</h1>
+<p>Color, variation selectors, skin tones, flags and joined sequences.</p>
+<p style="font: 32px sans-serif">DOM text: 😀 🚀 🫠 ❤️ 👍🏽 👩‍💻 👨‍👩‍👧‍👦 🇦🇺 1️⃣ ♥︎</p>
+<div id="samples"></div>
+<script>
+(async () => {
+  await document.fonts.ready;
+  const cases = {
+    face: '\u{1f600}', rocket: '\u{1f680}', melting: '\u{1fae0}',
+    heart: '\u2764\ufe0f', thumb: '\u{1f44d}',
+    skin: '\u{1f44d}\u{1f3fd}',
+    profession: '\u{1f469}\u200d\u{1f4bb}',
+    family: '\u{1f468}\u200d\u{1f469}\u200d\u{1f467}\u200d\u{1f466}',
+    flag: '\u{1f1e6}\u{1f1fa}', keycap: '1\ufe0f\u20e3',
+    text: 'Summit', textHeart: '\u2764\ufe0e'
+  };
+  const result = {};
+  for (const [name, text] of Object.entries(cases)) {
+    const box = document.createElement('div'); box.className = 'sample';
+    const label = document.createElement('div'); label.textContent = name;
+    const canvas = document.createElement('canvas'); canvas.width = 160; canvas.height = 100;
+    box.append(label, canvas); document.getElementById('samples').append(box);
+    const ctx = canvas.getContext('2d');
+    ctx.font = '64px sans-serif'; ctx.fillStyle = 'black';
+    ctx.fillText(text, 0, 75);
+    const pixels = ctx.getImageData(0, 0, 160, 100).data;
+    let colored = 0, visible = 0;
+    for (let i = 0; i < pixels.length; i += 4) {
+      if (pixels[i + 3] < 128) continue;
+      visible++;
+      if (Math.max(pixels[i], pixels[i + 1], pixels[i + 2])
+          - Math.min(pixels[i], pixels[i + 1], pixels[i + 2]) > 40) colored++;
+    }
+    result[name] = { colored, visible, width: ctx.measureText(text).width };
+  }
+  const report = { dpr: devicePixelRatio, samples: result };
+  document.title = 'EMOJI ' + JSON.stringify(report);
+  const key = new URLSearchParams(location.search).get('report');
+  if (key) await fetch('/report?key=' + encodeURIComponent(key), { method: 'POST', body: JSON.stringify(report) });
+})().catch(error => document.title = 'EMOJI ERROR ' + error);
+</script>

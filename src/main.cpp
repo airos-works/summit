@@ -227,6 +227,8 @@ public:
         // The debugging server (Preferences › Developer) starts before the
         // engine, so that its log has the engine processes' output.
         ApplyMcpSettings();
+        if (!PrepareEmojiFont())
+            std::fputs("Summit: could not prepare bundled emoji; using the installed fonts\n", stderr);
         status_t initialization = BWebKitInitialize();
         if (initialization != B_OK) {
             StartupError("Could not initialize WebKit: " + std::string(std::strerror(initialization)));
@@ -1243,6 +1245,78 @@ private:
                 result.push_back(language);
         }
         return result;
+    }
+    // Keep fontconfig's system/user configuration and add Summit's own color
+    // font. FONTCONFIG_FILE is inherited by WebProcess, before Skia creates
+    // its font manager. No system font installation or configuration changes.
+    bool PrepareEmojiFont()
+    {
+        app_info info;
+        if (GetAppInfo(&info) != B_OK) return false;
+        BFile executable(&info.ref, B_READ_ONLY);
+        BResources resources(&executable);
+        const auto directory = fProfile / "Fonts";
+        std::error_code error;
+        std::filesystem::create_directories(directory, error);
+        if (error) return false;
+        auto store = [](const std::filesystem::path& path, const void* data, size_t size) {
+            if (!data || !size) return false;
+            BFile existing(path.c_str(), B_READ_ONLY);
+            off_t length = 0;
+            bool matches = existing.GetSize(&length) == B_OK && length == static_cast<off_t>(size);
+            std::vector<char> chunk(65536);
+            for (size_t offset = 0; matches && offset < size;) {
+                size_t count = std::min(chunk.size(), size - offset);
+                matches = existing.Read(chunk.data(), count) == static_cast<ssize_t>(count)
+                    && !std::memcmp(chunk.data(), static_cast<const char*>(data) + offset, count);
+                offset += count;
+            }
+            if (matches) return true;
+            const auto temporary = path.string() + ".tmp-" + std::to_string(getpid());
+            BFile output(temporary.c_str(), B_WRITE_ONLY | B_CREATE_FILE | B_ERASE_FILE);
+            bool written = output.InitCheck() == B_OK
+                && output.Write(data, size) == static_cast<ssize_t>(size) && output.Sync() == B_OK;
+            output.Unset();
+            if (written && !std::rename(temporary.c_str(), path.c_str())) return true;
+            std::remove(temporary.c_str());
+            return false;
+        };
+        for (const auto& [name, file] : { std::pair { "emoji-font", "Noto-COLRv1.ttf" },
+                std::pair { "emoji-license", "OFL.txt" }, std::pair { "emoji-text-font", "NotoEmoji.ttf" },
+                std::pair { "emoji-text-license", "NotoEmoji-OFL.txt" } }) {
+            size_t size = 0;
+            const void* data = resources.LoadResource('RAWT', name, &size);
+            if (!store(directory / file, data, size)) return false;
+        }
+        BPath system;
+        if (find_directory(B_SYSTEM_SETTINGS_DIRECTORY, &system) != B_OK) return false;
+        // A web app launched by Summit inherits this environment too. Remember
+        // the original config so its new profile does not include an old
+        // profile's generated file (or recursively include itself).
+        const char* inherited = std::getenv("SUMMIT_BASE_FONTCONFIG_FILE");
+        if (!inherited) inherited = std::getenv("FONTCONFIG_FILE");
+        const std::string base = inherited && *inherited ? inherited
+            : std::string(system.Path()) + "/fonts/fonts.conf";
+        auto xml = [](const std::string& value) {
+            std::string escaped;
+            for (char c : value) {
+                if (c == '&') escaped += "&amp;";
+                else if (c == '<') escaped += "&lt;";
+                else if (c == '>') escaped += "&gt;";
+                else escaped += c;
+            }
+            return escaped;
+        };
+        const std::string configuration = "<?xml version=\"1.0\"?>\n"
+            "<!DOCTYPE fontconfig SYSTEM \"urn:fontconfig:fonts.dtd\">\n<fontconfig>\n"
+            "<include ignore_missing=\"yes\">" + xml(base) + "</include>\n"
+            "<dir>" + xml(directory.string()) + "</dir>\n"
+            "<alias><family>emoji</family><prefer><family>Noto Color Emoji</family></prefer></alias>\n"
+            "</fontconfig>\n";
+        const auto configPath = directory / "fonts.conf";
+        if (!store(configPath, configuration.data(), configuration.size())) return false;
+        return !setenv("SUMMIT_BASE_FONTCONFIG_FILE", base.c_str(), 1)
+            && !setenv("FONTCONFIG_FILE", configPath.c_str(), 1);
     }
     // Spell checking (#66) with the en_US dictionary Summit carries, copied
     // to the profile's Dictionaries folder, or one installed in data/hunspell:

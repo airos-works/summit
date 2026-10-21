@@ -48,9 +48,9 @@ pkgman install ./summit_webkit-*.hpkg ./summit-*.hpkg
 `lexilla` (the developer tools' text views). Summit then appears in Deskbar's
 Applications menu. The packages need Haiku R1/beta6 (hrev59866_79) or later.
 
-Only Latin, Greek, Cyrillic and CJK fonts come with Haiku. For pages in
-other scripts, install more Noto fonts from HaikuDepot, as you would for
-WebPositive.
+Summit bundles [color and monochrome emoji fonts](emoji.md). For pages in
+scripts beyond the fonts installed with Haiku, install more Noto fonts from
+HaikuDepot, as you would for WebPositive.
 
 The air/OS packages are not meant for Haiku. They do not declare the
 HaikuPorts libraries above, they make Summit the default browser when they
