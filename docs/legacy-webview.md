@@ -14,7 +14,7 @@ classes, implemented on Summit's engine API (`BWebKitView`,
 | --- | --- |
 | `BWebView` | A container holding the engine's `BWebKitView` as its child (in the slot `fOffscreenView` of the unchanged class layout). The engine view draws the page and takes the mouse and keyboard; `MakeFocus()` gives it the focus. |
 | `BWebPage` | As before, a handler of the application looper. The engine's notifications for its view arrive there and go to the page's listener as the old messages: `LOAD_NEGOTIATING`/`LOAD_STARTED` when a load starts, `LOAD_COMMITTED` when the address changes, `LOAD_PROGRESS` (0-100), `LOAD_DOC_COMPLETED` and `LOAD_FINISHED`, or `LOAD_FAILED` and `MAIN_DOCUMENT_ERROR`, `TITLE_CHANGED`, `UPDATE_NAVIGATION_INTERFACE`, `UPDATE_HISTORY` for each successful load, `SET_STATUS_TEXT` for the link under the pointer, `ICON_RECEIVED`, `CLOSE_WINDOW_REQUESTED`. |
-| New windows | `window.open()` and links with a target: the page makes a new `BWebView` for the address and sends `NEW_PAGE_CREATED` with it (and a frame when the page asked for a sized pop-up), as before; the view loads the address once the application has put it in a window. A middle click on a link sends `NEW_WINDOW_REQUESTED`. |
+| New windows | `window.open()` and links with a target: the page makes a new `BWebView` and sends `NEW_PAGE_CREATED` with it (and a frame when the page asked for a sized pop-up). Once attached to a window, the view accepts the engine's opened page, preserving its opener and any script-written content. A middle click on a link sends `NEW_WINDOW_REQUESTED`. |
 | The listener | As before, a `BWebView` makes its window its page's listener when it is attached (WebPositive never sets one itself). |
 | Context menu | The engine leaves the menu to its host; the old engine drew its own. `BWebView` shows one: open link or image in a new tab, copy its address, download it, cut/copy/paste, back/forward/reload. |
 | `BWebDownload` | The engine reports downloads to a handler of the application looper, which makes `BWebDownload` objects and sends `B_DOWNLOAD_ADDED` to the download listener. The engine starts saving at once (to the Desktop); `Start(folder)` moves the file into the application's folder when it is complete. `B_DOWNLOAD_STARTED`, `B_DOWNLOAD_PROGRESS` and a synchronous `B_DOWNLOAD_REMOVED` follow as before; the file gets its `META:url` and MIME type. |
@@ -80,18 +80,22 @@ over SSH that afternoon:
 | Source, saving | View › Page source handed the source to WebPositive (which then could not start the VM's source viewer, a VM matter); Window › Save page as… wrote an MHTML archive with the markup and a `<base>` |
 | New windows | Window › New window (Alt+N) |
 
-Two findings on the way. A view whose page begins before a window of its
-own shows it (a pop-up) stays blank, so pages opened for a new view load
-only once the view is attached. And every view the engine opened a page
-into (the engine's side of `window.open()`) stayed blank under WebPositive,
-although Summit's own new tabs and pop-ups draw with the same engine; the
-cause was not found in the time there was. So the library opens the
-address in a view of its own and declines the engine's page:
-`window.open()` returns `null` in the opening page and the new page has no
-`window.opener` (sign-in pop-ups that report back to their opener do not
-work). `SUMMIT_LEGACY_OPENED_PAGES=1` goes back to the engine's pages, to
-look at that again. `SUMMIT_LEGACY_TRACE=1` logs what the pages send to
-their listeners.
+The September build needed a fallback: it declined the engine's opened page
+and loaded its address independently after attachment to a window. This drew
+the child, but made `window.open()` return `null`, removed `window.opener`,
+and discarded initially blank popups. Engine-created pages stayed blank at
+that time; the cause was not isolated.
+
+On 22 October, the current engine's opened pages rendered in both a native
+airOS `BWebView` probe and the installed stock Haiku WebPositive. The shim now
+always accepts the engine's page after attachment, removing that fallback and
+the `SUMMIT_LEGACY_OPENED_PAGES` switch. The real WebPositive test covers a sized
+popup, an ordinary new tab, and an initially blank popup populated with
+`document.write()`: each preserves its opener, exchanges messages, renders on
+screen, and closes through script. See [the acceptance record](legacy-popups-2026-10-22.md)
+for exact builds, failed attempts and remaining limits. Live GitHub/Google
+sign-in is not yet verified. `SUMMIT_LEGACY_TRACE=1` still logs what the pages
+send to their listeners.
 
 ## Installed on the X399
 
@@ -123,5 +127,6 @@ summit_webkit-1.10.0-3) and uninstall summit_webkitlegacy.
   turn that on yet.
 - WebPositive's cookie window still reads its own (now unused) cookie jar;
   the pages' cookies are the engine's.
-- `window.opener` for pages opened by `window.open()` (above).
+- Live GitHub/Google sign-in acceptance through a popup. The opener mechanics
+  now pass the controlled tests above.
 

@@ -87,8 +87,6 @@ BWebView::AttachedToWindow()
 		fOffscreenView->MoveTo(0, 0);
 		fOffscreenView->ResizeTo(Bounds().Width(), Bounds().Height());
 	}
-	if (fWebPage != nullptr)
-		WebCore::ChromeClientHaiku::LoadPendingURL(fWebPage);
 }
 
 

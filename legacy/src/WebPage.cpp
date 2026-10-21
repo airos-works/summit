@@ -105,16 +105,6 @@ BWebPage::Init()
 
 
 /*static*/ void
-WebCore::ChromeClientHaiku::LoadPendingURL(BWebPage* page)
-{
-	BString url = page->fPagePrivate->pendingURL;
-	page->fPagePrivate->pendingURL = "";
-	if (url.Length() > 0)
-		page->LoadURL(url.String());
-}
-
-
-/*static*/ void
 WebCore::ChromeClientHaiku::CreateEngineView(BWebPage* page)
 {
 	BPrivate::WebPagePrivate& data = *page->fPagePrivate;
@@ -594,28 +584,11 @@ BWebPage::MessageReceived(BMessage* message)
 				BWebKitView::DeclineNewPage(identifier);
 				break;
 			}
-			// A view the engine opens the page into stays blank under
-			// programs of this API (docs/legacy-webview.md), so the address is
-			// opened in a view of its own and the engine's page declined:
-			// window.open() then returns null and the page has no opener.
-			// SUMMIT_LEGACY_OPENED_PAGES=1 lets the engine open it instead.
-			static const bool enginePages = getenv("SUMMIT_LEGACY_OPENED_PAGES") != nullptr;
-			BString url = StringField(*message, "url");
-			BWebView* view;
-			if (enginePages) {
-				SummitLegacy::gNewPageRequest = identifier;
-				view = new BWebView("web view", fContext);
-				SummitLegacy::gNewPageRequest = 0;
-			} else {
-				BWebKitView::DeclineNewPage(identifier);
-				if (url.Length() == 0 || url == "about:blank")
-					break;
-				view = new BWebView("web view", fContext);
-				// Loaded once the application has put it in a window: a
-				// view that begins its page before a window of its own
-				// shows it stays blank.
-				view->WebPage()->fPagePrivate->pendingURL = url;
-			}
+			// Preserve the engine's page and opener relationship. The view
+			// accepts the request when its host attaches it to a window.
+			SummitLegacy::gNewPageRequest = identifier;
+			BWebView* view = new BWebView("web view", fContext);
+			SummitLegacy::gNewPageRequest = 0;
 			BRect frame;
 			float width, height, x = 50, y = 50;
 			if (message->GetBool("popup", false) && message->FindFloat("width", &width) == B_OK

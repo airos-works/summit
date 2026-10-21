@@ -1,0 +1,67 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Legacy popup test</title>
+<button style="width:200px;height:60px">Open popup</button>
+<script>
+'use strict';
+function childFixture(kind, origin) {
+    document.title = 'Legacy child ' + kind;
+    document.body.textContent = '';
+    document.documentElement.style.cssText = 'margin:0;width:100%;height:100%;background:rgb(66,140,222)';
+    document.body.style.cssText = 'margin:0;width:100%;height:100%;background:rgb(66,140,222)';
+    const report = value => fetch(origin + '/event?value=' + encodeURIComponent(kind + ':' + value));
+    report('opener-' + !!opener);
+    addEventListener('message', event => {
+        if (event.origin !== origin || event.source !== opener) return;
+        if (event.data === kind + ':ping') opener.postMessage(kind + ':pong', origin);
+        if (event.data === kind + ':close') {
+            report('received-close');
+            window.close();
+        }
+    });
+    if (opener) opener.postMessage(kind + ':child-ready', origin);
+}
+if (location.pathname === '/child') {
+    childFixture(new URLSearchParams(location.search).get('case'), location.origin);
+} else {
+    const cases = ['popup', 'tab', 'blank'];
+    let index = 0, child = null;
+    const report = value => fetch('/event?value=' + encodeURIComponent(value));
+    const button = document.querySelector('button');
+    addEventListener('message', event => {
+        if (event.origin !== location.origin || event.source !== child) return;
+        const kind = cases[index];
+        report(event.data);
+        if (event.data === kind + ':child-ready') child.postMessage(kind + ':ping', location.origin);
+        if (event.data === kind + ':pong') {
+            fetch('/allow-close?case=' + kind).then(() => {
+                report(kind + ':sending-close');
+                child.postMessage(kind + ':close', location.origin);
+            }).catch(error => report(kind + ':close-error:' + error));
+        }
+    });
+    button.onclick = () => {
+        const kind = cases[index];
+        button.disabled = true;
+        const url = kind === 'blank' ? '' : '/child?case=' + kind;
+        child = kind === 'tab' ? window.open(url, 'legacy-' + kind)
+            : window.open(url, 'legacy-' + kind, 'width=420,height=300');
+        report(kind + (child ? ':returned-window' : ':returned-null'));
+        if (kind === 'blank' && child) {
+            child.document.write('<!doctype html><body><script>(' + childFixture.toString() + ')('
+                + JSON.stringify(kind) + ',' + JSON.stringify(location.origin) + ');<' + '/script>');
+            child.document.close();
+        }
+        const timer = setInterval(() => {
+            if (!child || !child.closed) return;
+            clearInterval(timer);
+            report(kind + ':closed');
+            if (++index < cases.length) {
+                button.disabled = false;
+                report(cases[index] + ':ready-to-open');
+            }
+        }, 50);
+    };
+    report(cases[0] + ':ready-to-open');
+}
+</script>
