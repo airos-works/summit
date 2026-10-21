@@ -1,4 +1,4 @@
-# Pasting images and dropping files
+# Clipboard and native drag and drop
 
 Added 2 October 2026 for [issue #14](https://github.com/jmgasper/summit/issues/14)
 (drag and drop files into the browser) and
@@ -27,7 +27,8 @@ screenshot into a GitHub issue).
 
 ## How it works
 
-All in the engine; the browser needed nothing.
+The original clipboard and file-drop support is in the engine. Page drags also
+use the browser’s bookmarks bar and tab strip, described below.
 
 - **Clipboard** (`Source/WebCore/platform/haiku/PasteboardHaiku.cpp`). The
   pasteboard reads `be_clipboard` directly in the web process (it has a
@@ -60,13 +61,34 @@ All in the engine; the browser needed nothing.
   does) and sends the drop once the grant is in place. Before, the
   navigation was refused ("outside the sandbox") and nothing happened.
 
-## Not done
+## Native page drags (#90)
 
-- Drags that start in a page and leave it (dragging an image or link out to
-  Tracker), and HTML drag and drop between elements of one page: the port's
-  drag client does not start a system drag (`WebDragClient::startDrag` is
-  empty on Haiku).
-- Dropping text or links from other applications (only files are understood).
+The Haiku drag client now starts a native drag for HTML draggable elements,
+selected content, links and images. The page receives drag progress and the
+accepted operation on `dragend`. Skia supplies the drag preview and its hotspot;
+the native view uses a bounded BGRA bitmap in view coordinates.
+
+Each drag has its own pasteboard. Text, HTML and URLs cross the native boundary
+under their MIME types. Custom string data carries its source origin, so pages
+at the same origin can exchange card IDs and other custom formats; a different
+origin receives only the standard public formats. The protected drag store
+exposes types during hover without exposing values or file contents. Incoming
+HTML is sanitized before scripts read it. This does not enable the unfinished
+custom-data API for the system clipboard.
+
+Page images supply PNG bytes. Tracker negotiates a file destination and the
+browser writes the image and its MIME attribute. The export refuses to replace
+a nonempty file or follow a destination symlink. Native applications can also
+request MIME bytes directly. Incoming drops accept files, text, URLs, HTML and
+PNG/JPEG/GIF/WebP data. For sources such as ShowImage that advertise a format
+before producing its bytes, Summit requests that format asynchronously; a
+navigation, another drag, a closed view or the five-second timeout invalidates
+the pending reply.
+
+The bookmarks bar accepts a page link with its title. Hovering over another tab
+during a drag selects it, allowing a drop into that page; dropping a URL directly
+on a tab navigates it. Native drag messages keep browser bookkeeping separate
+from page-supplied format names.
 
 ## Checking it
 
@@ -98,3 +120,54 @@ Checked on the X399 on 2 October 2026 with a 320×200 PNG:
 `DataTransferItemsEnabled`, which defaults to on only for the Cocoa, GTK, WPE
 and Windows ports; scripts that look at `items` before `files` (GitHub's
 among them) threw.
+
+For page drag checks, `tests/fixtures/drag-and-drop.html` provides a card board,
+custom text/HTML data and preview, editable targets, a link and a generated
+128×96 image. Serve it over localhost. Use a second localhost tab and a
+127.0.0.1 tab to check same-origin and cross-origin custom data. Native pointer
+input is required: dispatched JavaScript drag events do not exercise Haiku’s
+drag session.
+
+`tools/bench/negotiated-drag.cpp` is a MIME-only native source with an adjustable
+reply delay. Use it to check delayed image/text/URL/HTML drops, navigation while
+a reply is pending, and replies arriving after the timeout. The helper retains
+the delivered message for its reply; copying a Haiku `BMessage` clears delivery
+metadata ([Haiku implementation](https://github.com/haiku/haiku/blob/master/src/kits/app/Message.cpp)).
+
+### Native acceptance, 21 October 2026 (#90)
+
+An isolated airOS workstation bundle at `5b804d7` passed **23 native checks**
+with real pointer drags. The complete payload build passed 30 steps, followed
+by five steps for the preview pixel-format correction. The deployed library
+hashes and all 1,456 modified engine source files matched the pinned patch.
+
+- The original HTML5 demo, hosted locally, and the live
+  `https://html5demos.com/drag` redirect both accept a dragged item into the bin.
+  The live site redirects to `https://bestvpn.org/html5demos/drag`; its footer
+  covers the first item, so the test used the visible second item without
+  changing the page. The fixture board reorders C/A/B and reports a move.
+- Plain text, original HTML and custom string data reach the page. The textarea
+  receives the exact Unicode text; rich editing preserves bold text (the
+  sanitizer adds style attributes, so this is checked semantically).
+- Same-origin cross-tab drops retain custom data. A 127.0.0.1 destination hides
+  the localhost custom type and value while receiving standard text and HTML.
+  Hover handlers cannot read the protected values or files.
+- A page image arrives as a 128×96 PNG file. Dragging it into Tracker saves
+  `Image.png`, 361 bytes, with MIME type `image/png` and exact red/green/blue
+  stripe pixels; the source reports a copy. Dragging that saved Tracker file
+  back into a file input preserves its bytes, dimensions and pixels.
+- StyledEdit inserts the exact selected Unicode text and newline into the
+  textarea. A page link dropped on the bookmarks bar has the expected title
+  and URL. Rejected drops report no accepted operation. Drags leave the system
+  clipboard count unchanged.
+- ShowImage's negotiated PNG drop succeeds. A delayed native image reply is
+  accepted; replies after navigation or the five-second timeout are ignored.
+  Negotiated text, URI-list and HTML also work, and script markup is stripped
+  from the HTML. Source logs confirm the late replies were actually sent.
+
+The owned test browser quit cleanly, fixture windows were closed and the pointer
+was restored. Native drag-preview pixels and hotspot appearance were not
+independently certified: VNC and BScreen captures omitted both Summit's preview
+and a standalone control application's solid magenta drag bitmap. The native
+session, bounded BGRA bitmap transport and functional drop checks above were
+verified; this capture limitation is not a visual acceptance claim.

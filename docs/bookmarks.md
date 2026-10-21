@@ -36,8 +36,8 @@ folders nested up to 32 deep. No engine change.
 - **Dragging on the bar.** A button dragged along the bar moves there (a line
   shows where); dropped on the middle of a folder it goes into the folder.
   A **tab** dragged onto the bar is bookmarked where it is dropped; so are a
-  link or address dragged from another application (text) and a Haiku
-  bookmark file dragged from Tracker. A page that is bookmarked already moves
+  link dragged from a page, a link or address from another application (text),
+  and a Haiku bookmark file dragged from Tracker. A page that is bookmarked already moves
   to the drop place instead of being added twice. A bar button or a tab
   dragged **to Tracker** (a folder or the Desktop) becomes a Haiku bookmark
   file (`application/x-vnd.Be-bookmark`, address in `META:url`), and opening
@@ -132,8 +132,8 @@ folders nested up to 32 deep. No engine change.
   handlers were not used: they would give every page `window.webkit`, which
   some sites take to mean an iOS app's web view. The page reloads after each
   change, as before; open folders and the search text survive it.
-  HTML drag and drop does not work inside pages on this port (the drag client
-  starts no system drag), so the page moves rows with mouse events of its own.
+  The Bookmarks page moves rows with its own mouse handlers. Native HTML drag
+  and drop is also supported by the engine (see `clipboard-and-drag.md`).
 - **Menus**: the window copies the bookmarks into `BookmarkButton` trees
   (`src/ui/Chrome.h`); `BookmarkFolderMenu` fills a submenu from its copy in
   `AttachedToWindow`, on the menu's own thread, so nothing there touches the
@@ -200,8 +200,6 @@ engine, profile `p-bm`):
 
 - Separators, keywords, tags and descriptions are not imported; Firefox's
   smart folders (`place:` queries) and bookmarklets are skipped.
-- Links cannot be dragged out of pages onto the bar (the port starts no
-  drags from pages); tabs, Tracker files and text from other applications can.
 - ~~Exporting and importing back leaves out empty folders.~~ Done 20 October
   (#110): a folder empty in the file is imported (one only duplicates filled is
   still left out), and the HTML reader drops the browsers' own root folders
