@@ -362,13 +362,13 @@ catches both the syslog stack and the in-progress Debugger report. This is a
 failed renderer recovery test even though its JavaScript report passes.
 
 The active renderer is CoordinatedGraphics `ThreadedCompositor` with
-`AcceleratedSurface`; `LayerTreeHostHaiku` is a different path. Further work
-must detect context loss, finish or cancel pending frame callbacks, retire old
-GL resources without resolving functions against a lost context, clear shared
-texture and Skia state, recreate the shared EGL display and compositor contexts,
-and repaint the existing document. Multiple pages and worker contexts must be
-quiesced before replacing shared state. A process restart or permanent software
-fallback does not qualify this recovery path.
+`AcceleratedSurface`; `LayerTreeHostHaiku` is a different path. Reset detection
+and resource cleanup guards are implemented in `1376553`, as described below.
+Recovery still needs to finish or cancel pending frame callbacks, quiesce all
+pages and worker contexts, clear shared texture and Skia state, recreate the
+shared EGL display and compositor contexts, and repaint the existing document.
+A process restart or permanent software fallback does not qualify this recovery
+path.
 
 The separate no-EGL startup failure is fixed by `f382c16`: an unavailable EGL
 display now selects CPU rendering and sends a one-time notice to the browser.
@@ -444,6 +444,57 @@ document/text and clean-quit checks in `rendering-fallback.html`.
 This fixes Skia's failed-bind cleanup; it does not
 detect GPU resets or recover the compositor's shared resources, so #100 stays
 open.
+
+### Reset detection and retained GL resources, 22 October 2026 (#100)
+
+`1376553` resolves the native reset-status function while a context is current
+and checks it on subsequent binds, including the cached-current path. A reset
+or failed bind retires the native share group permanently; clearing a later
+reset-status response does not make that group's resources valid again.
+Resources retain their context/share-group identity independently of EGL's
+recyclable handles. Shader, texture, buffer and frame-target cleanup skips GL
+calls after loss or when an unrelated context is current. Shared objects may
+be deleted through a surviving sibling, while context-local framebuffer names
+are not deleted there. Destroying a non-current context now preserves the
+current sibling binding.
+
+Compositor invalidation retires its resources on the compositor queue even if
+binding fails. Its shader cache uses the retained context identity, and access
+to the process-wide cache map is locked. Skia's memory-pressure cleanup also
+abandons resources if binding fails.
+
+`tools/bench/gl-resource-lifecycle.cpp` is built with the same SDK and helper as
+the Skia probe, using `--source tools/bench/gl-resource-lifecycle.cpp`. Its modes
+are `healthy`, `sibling`, `failed-bind`, `reset`, `foreign`, `destroyed` and
+`terminated`. The reset mode substitutes the driver's reset-status entry point;
+the other fault modes destroy/unbind only owned contexts or terminate only the
+probe's EGL display. **No hardware reset is performed.**
+
+Native comparison against the previous `ac13269` bundle uses its matching
+headers (`--headers`), extracted from the committed engine patch. The healthy
+control passes on both bundles. All six lifecycle cases fail on the previous
+engine and pass on `1376553`, for **35 passing checks** on the candidate. Every
+case first verifies exact framebuffer pixels and real texture, buffer and
+shader objects. Healthy cleanup makes eight observed GL calls; sibling cleanup
+makes seven, excluding the owner's framebuffer. The five invalid-context cases
+make zero calls. The reset test checks detection, a cached function pointer,
+sticky loss and propagation to siblings.
+
+The previous Skia cleanup probes and 15-check native EGL probe still pass.
+An uninstrumented browser passes **38 WebGL capture checks**, GPU canvas pixels,
+animation, scrolling, two tabs, retained document/text after closing the capture
+tab, and clean shutdown. A native page screenshot verifies all five fixture
+colors after those context changes. The pre-existing Debugger alert for team
+306157 overlaps its right side and was left untouched.
+
+The fixture initially requested a stencil-only attachment which this driver
+rejected with `vkCreateImage failed`; that unsuccessful setup is retained in
+the evidence. The qualified fixture uses a color framebuffer. GL fences are
+disabled in this engine configuration, so their guarded paths have no native
+runtime acceptance here. These results do not establish real device-reset
+recovery, worker quiescence, or a recovered browser document. **#100 remains
+open for that coordinated recovery.** Logs, baseline header identities, source
+audit, bundle manifest and screenshot are in `.vm/issue100/context-state/`.
 
 Evidence, exact source/binary hashes, commands, unsuccessful trials, PNGs and
 terminal driver state are pinned in
