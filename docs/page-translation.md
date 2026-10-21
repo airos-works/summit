@@ -69,3 +69,22 @@ The package passes its options object to the worker through structured clone;
 passing an `onerror` function in that object fails with `DataCloneError`.
 The successful probes pass only serializable options. Integration must handle
 worker failure without leaving requests pending.
+
+## Retaining original DOM nodes
+
+The modern API now has a five-argument `EvaluateJavaScriptIsolated` overload.
+Setting its final `keepWorld` argument to `true` reuses one browser-owned
+content world for the view. Translation can retain references to text nodes
+and their originals without adding properties or identifiers to the website's
+world. A new document has new globals; another view has an independent world.
+The view releases the retained world on the WebKit main thread when closing.
+The existing four-argument API still creates a fresh world on every call.
+
+Both forms check the load generation before execution and before accepting
+the result, and neither grants nor consumes user activation. The native
+`tests/NativeIsolatedWorldTests.cpp` acceptance program passes **18 checks**
+on the workstation, including restoring the same node after the website moves
+it, page-global and prototype isolation, independent views, fresh calls,
+navigation, stale requests that must not run, and normal teardown. The test
+uses its own private context and local scheme handler; it needs no network
+or existing browser profile.

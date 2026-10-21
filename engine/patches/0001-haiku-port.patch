@@ -86280,10 +86280,10 @@ index 0000000000000000000000000000000000000000..97b0ea235303cfe1c5c402c07338dae5
 +}
 diff --git a/Source/WebKit/UIProcess/API/haiku/WebKitView.h b/Source/WebKit/UIProcess/API/haiku/WebKitView.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..4cc2dcf1f8d4f9d0e1e953f1e01663f142f10825
+index 0000000000000000000000000000000000000000..c79b37e759fa9c89c54ab273402a417a756a08c5
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/API/haiku/WebKitView.h
-@@ -0,0 +1,388 @@
+@@ -0,0 +1,394 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#pragma once
@@ -86577,6 +86577,12 @@ index 0000000000000000000000000000000000000000..4cc2dcf1f8d4f9d0e1e953f1e01663f1
 +    // replies also include "generation". Website globals/prototype overrides
 +    // are not visible. Source is a synchronous script returning a value.
 +    void EvaluateJavaScriptIsolated(const char* source, BMessenger reply, uint64 identifier, uint64 expectedGeneration);
++    // keepWorld retains one private content world for this view. Repeated
++    // calls in the same document can retain DOM references (for example to
++    // restore translated text). A new document has new globals. The world
++    // is never shared with another view or the website, and closes with the
++    // view. Generation and user-activation rules are the same as above.
++    void EvaluateJavaScriptIsolated(const char* source, BMessenger reply, uint64 identifier, uint64 expectedGeneration, bool keepWorld);
 +    // An empty string restores the engine's own user agent.
 +    void SetCustomUserAgent(const char*);
 +    // The view's pages load URLs of scheme through target, once per scheme and
@@ -86674,10 +86680,10 @@ index 0000000000000000000000000000000000000000..4cc2dcf1f8d4f9d0e1e953f1e01663f1
 +};
 diff --git a/Source/WebKit/UIProcess/API/haiku/WebKitViewEmbedding.cpp b/Source/WebKit/UIProcess/API/haiku/WebKitViewEmbedding.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..3ef4d7a7278a87b7896f068a0f5c56b20ec0c4d3
+index 0000000000000000000000000000000000000000..6aa399922dcd2eb2c81b6fda4e17b18cdcf2f437
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/API/haiku/WebKitViewEmbedding.cpp
-@@ -0,0 +1,942 @@
+@@ -0,0 +1,953 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +// BWebKitView's embedding interfaces (WebKitEmbedding.h): user scripts,
@@ -87334,6 +87340,11 @@ index 0000000000000000000000000000000000000000..3ef4d7a7278a87b7896f068a0f5c56b2
 +
 +void BWebKitView::EvaluateJavaScriptIsolated(const char* source, BMessenger reply, uint64 identifier, uint64 expectedGeneration)
 +{
++    EvaluateJavaScriptIsolated(source, reply, identifier, expectedGeneration, false);
++}
++
++void BWebKitView::EvaluateJavaScriptIsolated(const char* source, BMessenger reply, uint64 identifier, uint64 expectedGeneration, bool keepWorld)
++{
 +    if (m_status != B_OK) {
 +        BMessage message(B_WEBKIT_JAVASCRIPT_RESULT);
 +        message.AddUInt64("identifier", identifier);
@@ -87341,7 +87352,7 @@ index 0000000000000000000000000000000000000000..3ef4d7a7278a87b7896f068a0f5c56b2
 +        reply.SendMessage(&message, static_cast<BHandler*>(nullptr), 0);
 +        return;
 +    }
-+    RunLoop::mainSingleton().dispatch([state = m_state, source = copyTextHaiku(source), reply, identifier, expectedGeneration] {
++    RunLoop::mainSingleton().dispatch([state = m_state, source = copyTextHaiku(source), reply, identifier, expectedGeneration, keepWorld] {
 +        BMessage message(B_WEBKIT_JAVASCRIPT_RESULT);
 +        message.AddMessenger("view", viewOfStateHaiku(state));
 +        message.AddUInt64("identifier", identifier);
@@ -87358,7 +87369,13 @@ index 0000000000000000000000000000000000000000..3ef4d7a7278a87b7896f068a0f5c56b2
 +            reply.SendMessage(&message, static_cast<BHandler*>(nullptr), 0);
 +            return;
 +        }
-+        auto world = API::ContentWorld::createNamelessWorld({ ContentWorldOption::DisableLegacyBuiltinOverrides });
++        auto world = [&]() -> Ref<API::ContentWorld> {
++            if (!keepWorld)
++                return API::ContentWorld::createNamelessWorld({ ContentWorldOption::DisableLegacyBuiltinOverrides });
++            if (!state->inspectionWorld)
++                state->inspectionWorld = API::ContentWorld::createNamelessWorld({ ContentWorldOption::DisableLegacyBuiltinOverrides });
++            return *state->inspectionWorld;
++        }();
 +        WebKit::RunJavaScriptParameters parameters { WTF::move(*string), JSC::SourceTaintedOrigin::Untainted, URL { },
 +            RunAsAsyncFunction::No, std::nullopt, ForceUserGesture::No, RemoveTransientActivation::No };
 +        page->runJavaScriptInFrameInScriptWorld(WTF::move(parameters), std::nullopt, world, true,
@@ -117808,10 +117825,10 @@ index 0000000000000000000000000000000000000000..c9a119d02f85b7c5ad8fe9153bfc9604
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/WebView.cpp b/Source/WebKit/UIProcess/haiku/WebView.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..2769e642788bc59bc663d7311a72bdd2317e8679
+index 0000000000000000000000000000000000000000..3b7a31f84fb18f37f3ad79a4bd05d99392b1a17d
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/WebView.cpp
-@@ -0,0 +1,3052 @@
+@@ -0,0 +1,3054 @@
 +/*
 + * Copyright (C) 2013 Intel Corporation. All rights reserved.
 + *
@@ -117843,6 +117860,7 @@ index 0000000000000000000000000000000000000000..2769e642788bc59bc663d7311a72bdd2
 +#include <MessageRunner.h>
 +
 +#include "APIData.h"
++#include "APIContentWorld.h"
 +#include "APIFrameInfo.h"
 +#include "APIIconLoadingClient.h"
 +#include "BrowserTabRegistryHaiku.h"
@@ -119683,6 +119701,7 @@ index 0000000000000000000000000000000000000000..2769e642788bc59bc663d7311a72bdd2
 +        m_state->context->bluetooth()->cancelPage(m_page->identifier().toUInt64());
 +#endif
 +    m_state->contentSizeChanged = nullptr;
++    m_state->inspectionWorld = nullptr;
 +    m_state->dialogs->cancelAll(true);
 +    withdrawAuthenticationsHaiku(*m_state);
 +    BMessage dismissDialogs(javaScriptDialogsCancelHaiku);
@@ -121603,10 +121622,10 @@ index 0000000000000000000000000000000000000000..00f921f7cf81d4eee3659eb822edd264
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/WebViewStateHaiku.h b/Source/WebKit/UIProcess/haiku/WebViewStateHaiku.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..ec08aea37eda2e2a1e0ebba8de39189ff843f728
+index 0000000000000000000000000000000000000000..2af808fca6e2747b477e28178624f5539731b987
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/WebViewStateHaiku.h
-@@ -0,0 +1,217 @@
+@@ -0,0 +1,221 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#pragma once
@@ -121631,6 +121650,7 @@ index 0000000000000000000000000000000000000000..ec08aea37eda2e2a1e0ebba8de39189f
 +#include <wtf/text/WTFString.h>
 +
 +class BWindow;
++namespace API { class ContentWorld; }
 +
 +namespace WebKit {
 +
@@ -121735,6 +121755,9 @@ index 0000000000000000000000000000000000000000..ec08aea37eda2e2a1e0ebba8de39189f
 +    // This reference is read, assigned and released only on the WebKit main
 +    // thread. Native windows retain the state without touching the client.
 +    RefPtr<WebView> client;
++    // Browser-owned persistent inspection world. Created, used and cleared
++    // only on the WebKit main thread, independently for each native view.
++    RefPtr<API::ContentWorld> inspectionWorld;
 +    bool softwareRendering { false }; // WebKit main thread only.
 +    // Read, invoked and cleared only on the WebKit main thread.
 +    RefPtr<SharedTask<void(const WebCore::IntSize&)>> contentSizeChanged;
