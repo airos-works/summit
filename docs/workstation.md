@@ -378,6 +378,31 @@ web app notices are covered by `e7ee764`. See the 21 October startup-without-EGL
 entry in `performance.md`. This does not repair the live GPU-reset failure
 described here, so #100 remains open.
 
+### Context lifecycle probe, 21 October 2026 (#100)
+
+`tools/bench/egl-context-lifecycle.cpp` builds as a small native executable with
+`g++ -std=c++17 egl-context-lifecycle.cpp -o egl-context-lifecycle -lepoxy -lbe`.
+Run it with the same Mesa environment as Summit. It creates only offscreen
+contexts owned by the probe and never resets the GPU or changes the display.
+
+On the GTX 1070 workstation, Mesa 25.3.6/zink exposes EGL 1.4,
+`EGL_EXT_create_context_robustness`, GLES 3.1 and
+`glGetGraphicsResetStatusKHR`. All 15 checks pass: destruction of a current
+context is deferred until it is unbound; binding its destroyed handle then
+fails with `EGL_BAD_CONTEXT` (0x3006). A sibling context still sees their shared
+texture, and the reset-status query remains `GL_NO_ERROR`. Both a replacement
+in the existing share group and a fresh share group work; the fresh group
+renders exact RGBA (204, 51, 102, 255), then tears down cleanly.
+
+This distinction matters for the recovery test: destroying one compositor
+context does not invalidate the shared textures or the Skia contexts as a
+real graphics reset can. Recovery must also cover lost shared state, rather
+than pass only a context-replacement test. The
+[Khronos robustness specification](https://registry.khronos.org/OpenGL/extensions/KHR/KHR_robustness.txt)
+requires a new context after a reset. Native probe output is retained at
+`.vm/issue100/recovery/egl-lifecycle-native.log`. This is prerequisite evidence;
+it does not qualify renderer recovery or close #100.
+
 Evidence, exact source/binary hashes, commands, unsuccessful trials, PNGs and
 terminal driver state are pinned in
 `/mnt/HaikuWork/x399/evidence/wx5100/mesa-native/summit-recovery-manifest.json`.
