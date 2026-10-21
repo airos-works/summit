@@ -19,6 +19,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <utility>
 
 BMessenger BWebPage::sDownloadListener;
@@ -26,7 +27,8 @@ BMessenger BWebPage::sDownloadListener;
 namespace {
 enum {
 	kShutdown = 'swsd',
-	kAuthenticationAnswered = 'saau'
+	kAuthenticationAnswered = 'saau',
+	kCertificateAnswered = 'sace'
 };
 enum : uint32 {
 	kScriptPageSource = 1
@@ -85,6 +87,66 @@ ForgetAuthentication(BPrivate::WebPagePrivate& data, uint64 identifier)
 	if (handler->Looper() != nullptr)
 		handler->Looper()->RemoveHandler(handler);
 	data.authentications.erase(found);
+}
+
+class CertificateReply final : public BHandler {
+public:
+	CertificateReply(BMessenger page, uint64 generation)
+		: BHandler("legacy certificate reply"), fPage(page), fGeneration(generation) { }
+
+	void MessageReceived(BMessage* message) override
+	{
+		if (!message->IsReply()) {
+			BHandler::MessageReceived(message);
+			return;
+		}
+		BMessage answer(kCertificateAnswered);
+		answer.AddUInt64("generation", fGeneration);
+		answer.AddBool("continue", message->GetBool("continue", false));
+		fPage.SendMessage(&answer);
+	}
+
+private:
+	BMessenger fPage;
+	uint64 fGeneration;
+};
+
+void
+ForgetCertificate(BPrivate::WebPagePrivate& data)
+{
+	if (data.certificateReply && data.certificateReply->Looper())
+		data.certificateReply->Looper()->RemoveHandler(data.certificateReply.get());
+	data.certificateReply.reset();
+}
+
+BString
+CertificateDate(double seconds)
+{
+	if (!std::isfinite(seconds) || seconds <= 0 || seconds > 253402300799.0)
+		return "unavailable";
+	const time_t value = static_cast<time_t>(seconds);
+	tm utc;
+	char text[64];
+	if (gmtime_r(&value, &utc) && strftime(text, sizeof(text), "%Y-%m-%d %H:%M:%S UTC", &utc))
+		return text;
+	return "unavailable";
+}
+
+BString
+CertificateQuestion(const BMessage& message)
+{
+	BString text("The connection to ");
+	text << message.GetString("loadErrorCertificateHost", "") << " is not private.\n\n"
+		<< message.GetString("loadErrorCertificateProblem", "Certificate verification failed.")
+		<< "\n\nAddress: " << message.GetString("loadErrorURL", "")
+		<< "\nIssued to: " << message.GetString("loadErrorCertificateSubject", "")
+		<< "\nIssued by: " << message.GetString("loadErrorCertificateIssuer", "")
+		<< "\nValid for: " << message.GetString("loadErrorCertificateNames", "")
+		<< "\nValid from: " << CertificateDate(message.GetDouble("loadErrorCertificateValidFrom", 0))
+		<< "\nValid until: " << CertificateDate(message.GetDouble("loadErrorCertificateValidUntil", 0))
+		<< "\nSHA-256: " << message.GetString("loadErrorCertificateSHA256", "")
+		<< "\n\nContinue trusts only this certificate for this host during this application session.";
+	return text;
 }
 }
 
@@ -557,6 +619,17 @@ BWebPage::MessageReceived(BMessage* message)
 		case kAuthenticationAnswered:
 			ForgetAuthentication(*fPagePrivate, message->GetUInt64("identifier", 0));
 			break;
+		case kCertificateAnswered:
+		{
+			const uint64 generation = message->GetUInt64("generation", 0);
+			if (!fPagePrivate->certificateReply || generation != fPagePrivate->certificateGeneration)
+				break;
+			ForgetCertificate(*fPagePrivate);
+			std::lock_guard lock(fPagePrivate->lock);
+			if (!fPagePrivate->shutDown && fPagePrivate->view && message->GetBool("continue", false))
+				fPagePrivate->view->ContinueAfterCertificateError(generation);
+			break;
+		}
 		case B_WEBKIT_STATE_CHANGED:
 		{
 			const BString url = StringField(*message, "url");
@@ -568,8 +641,37 @@ BWebPage::MessageReceived(BMessage* message)
 			const std::string outcome = message->GetString("loadOutcome", "");
 			const uint64 successSequence = message->GetUInt64("loadSuccessSequence", 0);
 			const BString successURL = StringField(*message, "loadSuccessURL");
-			BWebKitView* view = fPagePrivate->view;
-			(void)view;
+			const uint64 generation = message->GetUInt64("loadGeneration", 0);
+			if (generation != fPagePrivate->certificateGeneration || outcome != "failed"
+				|| !message->GetBool("loadErrorCertificate", false))
+				ForgetCertificate(*fPagePrivate);
+			bool certificateQuestion = false;
+			bool shuttingDown;
+			{
+				std::lock_guard lock(fPagePrivate->lock);
+				shuttingDown = fPagePrivate->shutDown;
+			}
+			if (!shuttingDown && generation && outcome == "failed"
+				&& message->GetBool("loadErrorCertificate", false)
+				&& StringField(*message, "loadErrorCertificateHost").Length()
+				&& StringField(*message, "loadErrorCertificateSHA256").Length()
+				&& fListener.IsValid() && Looper()) {
+				certificateQuestion = true;
+				if (generation != fPagePrivate->certificateGeneration) {
+					fPagePrivate->certificateGeneration = generation;
+					BMessage question(SSL_CERT_ERROR);
+					question.AddString("text", CertificateQuestion(*message));
+					question.AddPointer("view", fWebView);
+					auto reply = std::make_unique<CertificateReply>(BMessenger(this), generation);
+					Looper()->AddHandler(reply.get());
+					BMessenger target(reply.get());
+					fPagePrivate->certificateReply = std::move(reply);
+					if (fListener.SendMessage(&question, target, 0) != B_OK) {
+						ForgetCertificate(*fPagePrivate);
+						certificateQuestion = false;
+					}
+				}
+			}
 			bool wasLoading, navigationChanged, urlChanged, titleChanged, succeeded;
 			{
 				std::lock_guard lock(fPagePrivate->lock);
@@ -618,7 +720,7 @@ BWebPage::MessageReceived(BMessage* message)
 					BString failingURL = StringField(*message, "loadErrorURL");
 					if (outcome == "process-exited")
 						description = "The page's process ended.";
-					if (description.Length() > 0) {
+					if (description.Length() > 0 && !certificateQuestion) {
 						BMessage error(MAIN_DOCUMENT_ERROR);
 						error.AddString("url", failingURL.Length() > 0 ? failingURL : url);
 						error.AddString("error", description);
@@ -744,6 +846,7 @@ BWebPage::MessageReceived(BMessage* message)
 		}
 		case kShutdown:
 		{
+			ForgetCertificate(*fPagePrivate);
 			while (!fPagePrivate->authentications.empty()) {
 				const uint64 identifier = fPagePrivate->authentications.begin()->first;
 				BWebKitView::CancelAuthentication(identifier);

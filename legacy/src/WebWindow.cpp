@@ -29,9 +29,8 @@
  */
 
 /*
- * Summit: the old BWebWindow, unchanged apart from the old engine's
- * completion handler for LOAD_NEGOTIATING, which Summit's engine does not
- * send.
+ * Summit: the old BWebWindow without the old engine's LOAD_NEGOTIATING
+ * completion handler. Certificate questions default to Stop.
  */
 #include "WebWindow.h"
 
@@ -282,9 +281,8 @@ void BWebWindow::MessageReceived(BMessage* message)
 
         BAlert* alert = new BAlert("Unsecure SSL certificate", text,
             "Continue", "Stop", NULL, B_WIDTH_AS_USUAL, B_WARNING_ALERT);
-        // TODO add information about the certificate to the alert
-        // (in a "details" area or so)
-        // (but this can be done in WebPositive as well)
+        alert->SetDefaultButton(alert->ButtonAt(1));
+        alert->SetShortcut(1, B_ESCAPE);
 
         int button = alert->Go();
         BMessage reply;

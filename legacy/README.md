@@ -19,5 +19,11 @@ engine (`summit_webkit`: `BWebKitView`, `BWebKitContext`).
   `tools/package-summit-webkitlegacy.sh` builds the `summit_webkitlegacy`
   package, which replaces `haikuwebkit` and `haikuwebkit_devel`.
 
+The engine headers and library must include
+`BWebKitView::ContinueAfterCertificateError(uint64)` (added 22 October 2026).
+Certificate approval uses that operation to validate the failed navigation
+before trusting its exact host/certificate and retrying. Build and install the
+matching engine first; an older engine cannot load this shim.
+
 Summit's `docs/legacy-webview.md` describes what maps to what, what is not
 available and how it was tested.

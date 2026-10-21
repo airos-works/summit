@@ -17,6 +17,7 @@ classes, implemented on Summit's engine API (`BWebKitView`,
 | New windows | `window.open()` and links with a target: the page makes a new `BWebView` and sends `NEW_PAGE_CREATED` with it (and a frame when the page asked for a sized pop-up). Once attached to a window, the view accepts the engine's opened page, preserving its opener and any script-written content. A middle click on a link sends `NEW_WINDOW_REQUESTED`. |
 | The listener | As before, a `BWebView` makes its window its page's listener when it is attached (WebPositive never sets one itself). |
 | HTTP authentication | Engine challenges become the old `AUTHENTICATION_CHALLENGE` message. A separate reply handler binds each asynchronous response to its request, keeping the engine application thread free while WebPositive's existing panel waits. Basic/Digest login, retry, cancellation and session reuse are [verified](legacy-authentication-2026-10-22.md). |
+| Certificate failures | `SSL_CERT_ERROR` carries the failed host, certificate details and session scope to the existing `BWebWindow` dialog, which defaults to Stop. An asynchronous response can approve only the exact current failed navigation. See [native acceptance and limits](legacy-certificates-2026-10-22.md). |
 | Context menu | The engine leaves the menu to its host; the old engine drew its own. `BWebView` shows one: open link or image in a new tab, copy its address, download it, cut/copy/paste, back/forward/reload. |
 | `BWebDownload` | The engine reports downloads to a handler of the application looper, which makes `BWebDownload` objects and sends `B_DOWNLOAD_ADDED` to the download listener. The engine starts saving at once (to the Desktop); `Start(folder)` moves the file into the application's folder when it is complete. `B_DOWNLOAD_STARTED`, `B_DOWNLOAD_PROGRESS` and a synchronous `B_DOWNLOAD_REMOVED` follow as before; the file gets its `META:url` and MIME type. |
 | `BWebSettings` | `SetPersistentStoragePath()` chooses where the engine keeps the application's website data: `<path>/WebKit` (WebPositive: `~/config/settings/WebPositive/WebKit`). `SendIconForURL()` answers from the site icons the engine reported. Fonts, script and proxy settings are kept but not applied: the engine has no per-application settings for them. |
@@ -121,9 +122,10 @@ summit_webkit-1.10.0-3) and uninstall summit_webkitlegacy.
 - `BWebFrame`'s document access (`InnerText()`, `AsMarkup()`,
   `FrameSource()`) and the frame tree.
 - Web Inspector for BWebView programs (`SetInspectorView()` is kept, unused).
-- Certificate questions: `SSL_CERT_ERROR` is not yet forwarded. HTTP
-  authentication now reaches the existing host prompt; NTLM, proxy requests
-  and persistent Remember acceptance remain untested. The legacy listener
+- Certificate questions now reach the inherited `BWebWindow` dialog, with
+  native airOS acceptance. Installed stock WebPositive acceptance still
+  needs a matching engine containing `ContinueAfterCertificateError()`.
+  HTTP NTLM, proxy requests and persistent Remember acceptance remain untested. The legacy listener
   protocol cannot dismiss a host-owned prompt when a request is withdrawn;
   its late response is ignored.
 - WebPositive's cookie window still reads its own (now unused) cookie jar;

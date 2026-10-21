@@ -28,20 +28,23 @@ parser.add_argument('--library', type=Path, required=True)
 parser.add_argument('--ui-helper', type=Path, required=True)
 parser.add_argument('--images-helper', type=Path, required=True)
 parser.add_argument('--output', type=Path, required=True)
+parser.add_argument('--bundle', type=Path, default=Path('/boot/system/lib/summit-webkit'))
 parser.add_argument('--expect-unavailable', action='store_true')
 parser.add_argument('--lifecycle-probe', type=Path,
                     help='Native BWebView listener probe, instead of the WebPositive UI cases')
 a = parser.parse_args()
 if not sys.platform.startswith('haiku'):
     parser.error('Requires native Haiku')
-for name in ('browser', 'library', 'ui_helper', 'images_helper'):
+for name in ('library', 'ui_helper', 'images_helper', 'bundle'):
     setattr(a, name, getattr(a, name).resolve(strict=True))
 if a.lifecycle_probe:
     a.lifecycle_probe = a.lifecycle_probe.resolve(strict=True)
     assert not a.expect_unavailable
 a.output.mkdir(mode=0o700)
-assert subprocess.run(['hey', 'WebPositive', 'get', 'Name'],
-                      capture_output=True).returncode != 0, 'WebPositive already running'
+if not a.lifecycle_probe:
+    a.browser = a.browser.resolve(strict=True)
+    assert subprocess.run(['hey', 'WebPositive', 'get', 'Name'],
+                          capture_output=True).returncode != 0, 'WebPositive already running'
 
 
 def sha(path):
@@ -140,8 +143,10 @@ report = {'platform': subprocess.check_output(['uname', '-a'], text=True).strip(
           'passed': False, 'checks': [], 'events': events, 'forced_cleanup': False,
           'loaded_images': {}, 'expect_unavailable': a.expect_unavailable,
           'lifecycle_probe': str(a.lifecycle_probe) if a.lifecycle_probe else None}
-inputs = [a.browser, a.library, a.ui_helper, a.images_helper, Path(__file__),
+inputs = [a.library, a.ui_helper, a.images_helper, Path(__file__),
           ROOT / 'tools/native_crash_log.py', ROOT / 'tests/LegacyWebPositiveUITests.cpp']
+if not a.lifecycle_probe:
+    inputs.append(a.browser)
 if a.lifecycle_probe:
     inputs += [a.lifecycle_probe, ROOT / 'tests/LegacyAuthenticationTests.cpp',
                ROOT / 'tests/ModernPDFTests.cpp', ROOT / 'vendor/nlohmann/json.hpp']
@@ -207,7 +212,7 @@ def capture_runtime():
 
 
 try:
-    bundle = '/boot/system/lib/summit-webkit'
+    bundle = str(a.bundle)
     env = dict(os.environ, WEBKIT_EXEC_PATH=bundle,
                LIBRARY_PATH=f'{a.library.parent}:{bundle}/lib:{bundle}/mesa/lib:/boot/system/lib',
                __EGL_VENDOR_LIBRARY_FILENAMES=bundle + '/mesa/egl_vendor.d/50_mesa.json')
@@ -272,7 +277,7 @@ try:
         check(any(path.endswith(('/libWebKitLegacy.so.1', '/libWebKitLegacy.so.1.10.0'))
                   and report['sha256'].get(path) == report['sha256'][str(a.library)]
                   for paths in report['loaded_images'].values() for path in paths),
-              'installed WebPositive loads the selected shim')
+              'native host loads the selected shim')
         if not a.lifecycle_probe:
             subprocess.run([str(a.ui_helper), str(proc.pid), 'quit'], check=True, timeout=10)
             report['exit'] = proc.wait(timeout=25)

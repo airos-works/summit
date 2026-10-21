@@ -173,8 +173,10 @@ the tab closed a waiting sheet.
 - `BWebView` programs now receive `AUTHENTICATION_CHALLENGE` through the
   compatibility library; the installed WebPositive passes Basic/Digest,
   retry, Cancel, empty credentials and session reuse
-  ([native acceptance](legacy-authentication-2026-10-22.md)). Certificate-error
-  forwarding, legacy NTLM/proxy acceptance and persistent Remember testing
-  remain unfinished.
+  ([native acceptance](legacy-authentication-2026-10-22.md)). Certificate errors
+  now reach the inherited legacy dialog, with navigation-bound approval
+  ([airOS acceptance](legacy-certificates-2026-10-22.md)); installed stock
+  WebPositive acceptance needs the matching new engine. Legacy NTLM/proxy
+  acceptance and persistent Remember testing remain unfinished.
 - A saved account is not tied to the realm: a site's form password and its
   HTTP password share the site's entry in the key store.

@@ -85303,10 +85303,10 @@ index 0000000000000000000000000000000000000000..d28a6cad6339adf79b155cf974e85bfd
 +
 diff --git a/Source/WebKit/UIProcess/API/haiku/WebKitView.cpp b/Source/WebKit/UIProcess/API/haiku/WebKitView.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..bab9b823ed44a3891293db9a296efdce59d63d7b
+index 0000000000000000000000000000000000000000..718432c8c2aa4314a4e20cecd5249048041aba78
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/API/haiku/WebKitView.cpp
-@@ -0,0 +1,1400 @@
+@@ -0,0 +1,1408 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#include "config.h"
@@ -85858,6 +85858,14 @@ index 0000000000000000000000000000000000000000..bab9b823ed44a3891293db9a296efdce
 +}
 +
 +void BWebKitView::LoadURL(const char* url) { SendCommand(viewLoadHaiku, url); }
++void BWebKitView::ContinueAfterCertificateError(uint64 expectedGeneration)
++{
++    if (m_status != B_OK)
++        return;
++    BMessage message(viewContinueCertificateHaiku);
++    message.AddUInt64("generation", expectedGeneration);
++    dispatchViewMessageHaiku(m_state, std::move(message));
++}
 +void BWebKitView::DownloadURL(const char* url) { SendCommand(viewDownloadHaiku, url); }
 +void BWebKitView::Preconnect(const char* url) { SendCommand(viewPreconnectHaiku, url); }
 +
@@ -86709,10 +86717,10 @@ index 0000000000000000000000000000000000000000..bab9b823ed44a3891293db9a296efdce
 +}
 diff --git a/Source/WebKit/UIProcess/API/haiku/WebKitView.h b/Source/WebKit/UIProcess/API/haiku/WebKitView.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..d426994f3c5efa7d227e3657c23278757f88da2e
+index 0000000000000000000000000000000000000000..7c0d6b903d4e24b3c363ef0f1518d0d6a64b5e33
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/API/haiku/WebKitView.h
-@@ -0,0 +1,398 @@
+@@ -0,0 +1,406 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#pragma once
@@ -86915,6 +86923,14 @@ index 0000000000000000000000000000000000000000..d426994f3c5efa7d227e3657c2327875
 +    ~BWebKitView() override;
 +    status_t InitCheck() const;
 +    void LoadURL(const char*);
++    // After explicit user approval of a certificate failure reported in
++    // B_WEBKIT_STATE_CHANGED, trust that exact host/leaf certificate for this
++    // view's context session and retry its failed URL. expectedGeneration is
++    // the notification's loadGeneration. The engine checks it when applying
++    // the decision: navigation, Stop(), closure or an already handled failure
++    // makes an old approval ineffective. No caller-supplied host or certificate
++    // is trusted. Callable from any thread.
++    void ContinueAfterCertificateError(uint64 expectedGeneration);
 +    // Queue an explicit download of a valid URL without changing this page.
 +    // Uses this view's context, configured download directory and listener.
 +    void DownloadURL(const char*);
@@ -118277,10 +118293,10 @@ index 0000000000000000000000000000000000000000..c9a119d02f85b7c5ad8fe9153bfc9604
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/WebView.cpp b/Source/WebKit/UIProcess/haiku/WebView.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..3b7a31f84fb18f37f3ad79a4bd05d99392b1a17d
+index 0000000000000000000000000000000000000000..e38bf266c09eaeab67a13cd0dd160aef9dc0b868
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/WebView.cpp
-@@ -0,0 +1,3054 @@
+@@ -0,0 +1,3077 @@
 +/*
 + * Copyright (C) 2013 Intel Corporation. All rights reserved.
 + *
@@ -118803,9 +118819,11 @@ index 0000000000000000000000000000000000000000..3b7a31f84fb18f37f3ad79a4bd05d993
 +
 +static void stopLoadHaiku(const std::shared_ptr<WebViewStateHaiku>& state)
 +{
++    // Stop also withdraws approval of a certificate failure whose network
++    // request has already ended, before a delayed host response can retry it.
++    state->load.stopped = true;
 +    if (!state->load.pending)
 +        return;
-+    state->load.stopped = true;
 +    state->load.pending = false;
 +    state->load.outcome = "cancelled";
 +    notifyLoadStateHaiku(state);
@@ -120444,8 +120462,29 @@ index 0000000000000000000000000000000000000000..3b7a31f84fb18f37f3ad79a4bd05d993
 +            m_page->preconnectTo(ResourceRequest(WTF::move(url)));
 +        break;
 +    }
++    case viewContinueCertificateHaiku:
 +    case viewLoadHaiku: {
-+        URL url { String::fromUTF8(message.FindString("url")) };
++        URL url;
++        if (message.what == viewContinueCertificateHaiku) {
++            // Validation, trust and retry share the engine thread with all
++            // navigation. Never rely on a host's possibly stale state copy.
++            const auto& load = m_state->load;
++            if (!message.GetUInt64("generation", 0)
++                || message.GetUInt64("generation", 0) != load.generation
++                || load.pending || load.stopped || strcmp(load.outcome, "failed")
++                || !load.errorCertificate || !m_state->context)
++                break;
++            url = URL { load.errorURL };
++            const auto& certificate = *load.errorCertificate;
++            if (!url.isValid() || !url.protocolIs("https"_s)
++                || !equalIgnoringASCIICase(url.host(), certificate.host)
++                || certificate.sha256.isEmpty())
++                break;
++            m_state->context->allowServerCertificate(certificate.host, certificate.sha256);
++            ++m_state->findRequestIdentifier;
++            ++m_state->nativeDropRequest;
++        } else
++            url = URL { String::fromUTF8(message.FindString("url")) };
 +        if (url.isValid()) {
 +            auto fragmentDocument = url.hasFragmentIdentifier()
 +                && equalIgnoringFragmentIdentifier(url, m_page->pageLoadState().url())
@@ -122074,10 +122113,10 @@ index 0000000000000000000000000000000000000000..00f921f7cf81d4eee3659eb822edd264
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/WebViewStateHaiku.h b/Source/WebKit/UIProcess/haiku/WebViewStateHaiku.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..2af808fca6e2747b477e28178624f5539731b987
+index 0000000000000000000000000000000000000000..0ddb5ef7ffb6f4911433483ff557f5d7dbf67dd8
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/WebViewStateHaiku.h
-@@ -0,0 +1,221 @@
+@@ -0,0 +1,222 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#pragma once
@@ -122115,6 +122154,7 @@ index 0000000000000000000000000000000000000000..2af808fca6e2747b477e28178624f553
 +    viewFrameHaiku = 'wvfr', viewGeometryHaiku = 'wvge', viewInputHaiku = 'wvin',
 +    viewDownloadHaiku = 'wvdn', viewLoadHaiku = 'wvld', viewBackHaiku = 'wvba', viewForwardHaiku = 'wvfo',
 +    viewReloadHaiku = 'wvrl', viewStopHaiku = 'wvst', viewPresentedHaiku = 'wvpr',
++    viewContinueCertificateHaiku = 'wvcc',
 +    viewCursorHaiku = 'wvcu', viewTooltipHaiku = 'wvtt',
 +    viewFindHaiku = 'wvfi', viewHideFindHaiku = 'wvhf',
 +    viewZoomHaiku = 'wvzo', viewEditHaiku = 'wved', viewRequestCloseHaiku = 'wvcl',

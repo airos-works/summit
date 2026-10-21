@@ -88,6 +88,10 @@ public:
 	// Legacy listeners reply without an identifier. A separate reply handler
 	// binds each response to its engine challenge, on the application looper.
 	std::map<uint64, std::unique_ptr<BHandler>> authentications;
+	// One asynchronous certificate question per failed navigation. Generation
+	// is checked again by the engine when applying an explicit approval.
+	std::unique_ptr<BHandler> certificateReply;
+	uint64 certificateGeneration = 0;
 };
 
 // A download the engine reported, until it is finished and handed over.
