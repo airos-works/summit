@@ -45,9 +45,11 @@ baseline library hashes and forced cleanup. Correcting the runtime links made
 the unchanged candidate pass; this was a deployment error, not an accepted run.
 
 The stock R1/beta6 and airOS baseline runs each pass their three checks with
-clean shutdown and complete crash-log coverage. They hash loaded images before
-the workload and again after it (101 stock files, 106 airOS files). The airOS
-candidate is not substituted into the stock installation.
+clean shutdown and complete crash-log coverage. Their initial image snapshots
+cover 73 stock files and 97 airOS files; later translator loads bring the totals
+to 101 and 106. Later-loaded files are hashed when first observed and checked
+at shutdown. The candidate has all 106 runtime files in its initial snapshot.
+The airOS candidate is not substituted into the stock installation.
 
 ## Behavior and limits
 
