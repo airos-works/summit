@@ -38287,10 +38287,10 @@ index 0000000000000000000000000000000000000000..be761bfc668c62f4a24c60f22e85d97e
 +#endif // ENABLE(MEDIA_SOURCE)
 diff --git a/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateMediaStreamHaiku.cpp b/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateMediaStreamHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..e5b238af128e01081280c450d3319007ad093d44
+index 0000000000000000000000000000000000000000..bbc3617f7d38ca1f67b6d0f4c1bae7fa76b07d9c
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateMediaStreamHaiku.cpp
-@@ -0,0 +1,509 @@
+@@ -0,0 +1,532 @@
 +/*
 + * Copyright (C) 2026 Summit contributors.
 + *
@@ -38661,7 +38661,7 @@ index 0000000000000000000000000000000000000000..e5b238af128e01081280c450d3319007
 +    updateReadyState();
 +}
 +
-+void MediaPlayerPrivateMediaStreamHaiku::videoFrameAvailable(VideoFrame& videoFrame, VideoFrameTimeMetadata)
++void MediaPlayerPrivateMediaStreamHaiku::videoFrameAvailable(VideoFrame& videoFrame, VideoFrameTimeMetadata timeMetadata)
 +{
 +    // A paused element keeps its picture, as in other browsers.
 +    if (!m_playingForFrames && m_hasFrame)
@@ -38686,6 +38686,15 @@ index 0000000000000000000000000000000000000000..e5b238af128e01081280c450d3319007
 +    {
 +        Locker locker { m_frameLock };
 +        m_frame = frame;
++        m_frameMetadata.width = frame->presentationSize().width();
++        m_frameMetadata.height = frame->presentationSize().height();
++        ++m_frameMetadata.presentedFrames;
++        m_frameMetadata.presentationTime = MonotonicTime::now().secondsSinceEpoch().seconds();
++        m_frameMetadata.expectedDisplayTime = m_frameMetadata.presentationTime;
++        m_frameMetadata.processingDuration = timeMetadata.processingDuration;
++        m_frameMetadata.captureTime = timeMetadata.captureTime ? std::optional<double> { timeMetadata.captureTime->seconds() } : std::nullopt;
++        m_frameMetadata.receiveTime = timeMetadata.receiveTime ? std::optional<double> { timeMetadata.receiveTime->seconds() } : std::nullopt;
++        m_frameMetadata.rtpTimestamp = timeMetadata.rtpTimestamp;
 +#if USE(COORDINATED_GRAPHICS) && USE(TEXTURE_MAPPER) && USE(SKIA)
 +        proxy = m_layerBufferProxy;
 +#endif
@@ -38785,6 +38794,20 @@ index 0000000000000000000000000000000000000000..e5b238af128e01081280c450d3319007
 +    return currentFrame();
 +}
 +
++std::optional<VideoFrameMetadata> MediaPlayerPrivateMediaStreamHaiku::videoFrameMetadata()
++{
++    ASSERT(isMainThread());
++    Locker locker { m_frameLock };
++    if (!m_frame || m_frameMetadata.presentedFrames == m_lastMetadataFrames)
++        return std::nullopt;
++    m_lastMetadataFrames = m_frameMetadata.presentedFrames;
++    auto metadata = m_frameMetadata;
++    // Capture and remote-frame timestamps use their source's clock. The media
++    // element exposes its own live timeline, including pauses and resumes.
++    metadata.mediaTime = currentTime().toDouble();
++    return metadata;
++}
++
 +RefPtr<NativeImage> MediaPlayerPrivateMediaStreamHaiku::nativeImageForCurrentTime()
 +{
 +    if (auto frame = currentFrame())
@@ -38802,10 +38825,10 @@ index 0000000000000000000000000000000000000000..e5b238af128e01081280c450d3319007
 +#endif // ENABLE(MEDIA_STREAM) && PLATFORM(HAIKU)
 diff --git a/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateMediaStreamHaiku.h b/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateMediaStreamHaiku.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..e6b9ce308a2b76bb59854568e81eb2f90a47d55a
+index 0000000000000000000000000000000000000000..7c73d4c841ba7cfa514de2386995d9b412514b87
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateMediaStreamHaiku.h
-@@ -0,0 +1,150 @@
+@@ -0,0 +1,154 @@
 +/*
 + * Copyright (C) 2026 Summit contributors.
 + *
@@ -38831,6 +38854,7 @@ index 0000000000000000000000000000000000000000..e6b9ce308a2b76bb59854568e81eb2f9
 +#include "MediaStreamPrivate.h"
 +#include "MediaStreamTrackPrivate.h"
 +#include "RealtimeMediaSource.h"
++#include "VideoFrameMetadata.h"
 +#include <wtf/HashMap.h>
 +#include <wtf/Lock.h>
 +#include <wtf/RunLoop.h>
@@ -38895,6 +38919,7 @@ index 0000000000000000000000000000000000000000..e6b9ce308a2b76bb59854568e81eb2f9
 +    void paint(GraphicsContext&, const FloatRect&) final;
 +    RefPtr<VideoFrame> videoFrameForCurrentTime() final;
 +    RefPtr<NativeImage> nativeImageForCurrentTime() final;
++    std::optional<VideoFrameMetadata> videoFrameMetadata() final;
 +    ColorSpace colorSpace() final;
 +    bool supportsFullscreen() const final { return true; }
 +    bool didPassCORSAccessCheck() const final { return true; }
@@ -38936,6 +38961,8 @@ index 0000000000000000000000000000000000000000..e6b9ce308a2b76bb59854568e81eb2f9
 +
 +    mutable Lock m_frameLock;
 +    RefPtr<VideoFrameHaiku> m_frame WTF_GUARDED_BY_LOCK(m_frameLock);
++    VideoFrameMetadata m_frameMetadata WTF_GUARDED_BY_LOCK(m_frameLock);
++    unsigned m_lastMetadataFrames { 0 };
 +#if USE(COORDINATED_GRAPHICS) && USE(TEXTURE_MAPPER) && USE(SKIA)
 +    RefPtr<CoordinatedPlatformLayerBufferProxy> m_layerBufferProxy WTF_GUARDED_BY_LOCK(m_frameLock);
 +#endif

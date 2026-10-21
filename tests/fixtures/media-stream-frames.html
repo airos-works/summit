@@ -1,0 +1,103 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>MediaStream frame callbacks</title>
+<style>
+  body { font: 16px sans-serif; margin: 20px; }
+  canvas, video { width: 240px; height: 180px; background: #222; }
+  .views { display: flex; gap: 20px; }
+  pre { white-space: pre-wrap; }
+</style>
+<h1>MediaStream preview and frame callbacks</h1>
+<p>The source, native video and callback-driven preview should all animate.</p>
+<div class="views">
+  <div>Source<br><canvas id="source" width="160" height="120"></canvas></div>
+  <div>Native video<br><video id="preview" autoplay muted playsinline></video></div>
+  <div>Callback-driven preview<br><canvas id="processed" width="160" height="120"></canvas></div>
+</div>
+<pre id="status">Starting…</pre>
+<script>
+window.streamFrameResults = { callbacks: [], sourceFrames: 0, errors: [] };
+const sourceContext = source.getContext('2d');
+const processedContext = processed.getContext('2d');
+let timer;
+function draw() {
+  const frame = ++streamFrameResults.sourceFrames;
+  sourceContext.fillStyle = frame % 2 ? '#e47b3c' : '#3c9be4';
+  sourceContext.fillRect(0, 0, 160, 120);
+  sourceContext.fillStyle = '#fff';
+  sourceContext.fillRect(frame % 140, 40, 20, 40);
+}
+function frameCallback(now, metadata) {
+  streamFrameResults.callbacks.push({ now, ...metadata });
+  processedContext.drawImage(preview, 0, 0, 160, 120);
+  window.streamFrameCallbackId = preview.requestVideoFrameCallback(frameCallback);
+}
+window.streamFrameStatus = () => ({
+  sourceFrames: streamFrameResults.sourceFrames,
+  callbacks: streamFrameResults.callbacks.length,
+  videoWidth: preview.videoWidth, videoHeight: preview.videoHeight,
+  currentTime: preview.currentTime, readyState: preview.readyState,
+  paused: preview.paused, errors: streamFrameResults.errors,
+  tracks: preview.srcObject?.getTracks().map(t => ({ kind: t.kind, readyState: t.readyState, muted: t.muted }))
+});
+window.stopStreamFrameTest = () => {
+  clearInterval(timer);
+  preview.cancelVideoFrameCallback(window.streamFrameCallbackId);
+  preview.srcObject?.getTracks().forEach(track => track.stop());
+};
+(async () => {
+  try {
+    draw(); timer = setInterval(draw, 40);
+    preview.srcObject = source.captureStream(25);
+    window.streamFrameCallbackId = preview.requestVideoFrameCallback(frameCallback);
+    await preview.play();
+  } catch (error) { streamFrameResults.errors.push(String(error)); }
+  setInterval(() => { document.getElementById('status').textContent = JSON.stringify(streamFrameStatus(), null, 2); }, 250);
+})();
+
+window.testStreamFrameCallbacks = async () => {
+  const checks = [];
+  const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+  const check = (name, ok) => { checks.push({ name, ok }); if (!ok) throw new Error(name); };
+  const wait = async (predicate, name, timeout = 5000) => {
+    const deadline = performance.now() + timeout;
+    while (!predicate() && performance.now() < deadline) await sleep(25);
+    check(name, predicate());
+  };
+  try {
+    await wait(() => streamFrameResults.callbacks.length >= 5, 'live stream delivers repeated frame callbacks');
+    const frames = streamFrameResults.callbacks.slice();
+    check('frame dimensions match the stream', frames.every(f => f.width === 160 && f.height === 120));
+    check('frame counts increase without duplicate notifications', frames.every((f, i) => !i || f.presentedFrames > frames[i - 1].presentedFrames));
+    check('timestamps are finite and ordered', frames.every((f, i) =>
+      Number.isFinite(f.mediaTime) && Number.isFinite(f.presentationTime) && Number.isFinite(f.expectedDisplayTime)
+      && f.mediaTime >= 0 && f.presentationTime <= f.expectedDisplayTime
+      && (!i || f.mediaTime >= frames[i - 1].mediaTime)));
+    const pixel = processedContext.getImageData(0, 0, 1, 1).data;
+    check('callback-driven canvas contains the live video', pixel[3] === 255 && Math.abs(pixel[0] - pixel[2]) > 100);
+
+    let cancelled = 0;
+    const cancelledId = preview.requestVideoFrameCallback(() => cancelled++);
+    preview.cancelVideoFrameCallback(cancelledId);
+    await sleep(200);
+    check('cancelled callback is not invoked', cancelled === 0);
+
+    preview.pause(); await sleep(200);
+    const pausedCount = streamFrameResults.callbacks.length;
+    const pausedSourceCount = streamFrameResults.sourceFrames;
+    await sleep(300);
+    check('paused video stops frame notifications', streamFrameResults.callbacks.length === pausedCount);
+    check('the source continues while its video element is paused', streamFrameResults.sourceFrames > pausedSourceCount + 3);
+    await preview.play();
+    await wait(() => streamFrameResults.callbacks.length > pausedCount + 3, 'callbacks resume with playback');
+
+    source.width = 320; source.height = 180;
+    await wait(() => streamFrameResults.callbacks.some(f => f.width === 320 && f.height === 180), 'metadata follows stream size changes');
+    stopStreamFrameTest(); await sleep(200);
+    const endedCount = streamFrameResults.callbacks.length;
+    await sleep(300);
+    check('stopping the stream and cancelling leaves no callbacks', streamFrameResults.callbacks.length === endedCount);
+  } catch (error) { streamFrameResults.errors.push(String(error)); }
+  return { checks, passed: checks.filter(c => c.ok).length, errors: streamFrameResults.errors, state: streamFrameStatus() };
+};
+</script>
