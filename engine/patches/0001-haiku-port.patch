@@ -53789,10 +53789,10 @@ index 0000000000000000000000000000000000000000..53a749007215515136ef3d72a82246f0
 +} // namespace WebCore
 diff --git a/Source/WebCore/platform/haiku/UserAgentHaiku.cpp b/Source/WebCore/platform/haiku/UserAgentHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..3b164b009a03b69315cd098d73da018a58ed7f3b
+index 0000000000000000000000000000000000000000..25b4def9c11f111b689a3c698ce7d51f80d1dc59
 --- /dev/null
 +++ b/Source/WebCore/platform/haiku/UserAgentHaiku.cpp
-@@ -0,0 +1,92 @@
+@@ -0,0 +1,97 @@
 +/*
 + * Copyright (C) 2021 Haiku Inc.
 + *
@@ -53822,6 +53822,7 @@ index 0000000000000000000000000000000000000000..3b164b009a03b69315cd098d73da018a
 +#include "UserAgent.h"
 +
 +#include <wtf/NeverDestroyed.h>
++#include <wtf/URL.h>
 +#include <wtf/text/MakeString.h>
 +
 +// WARNING! WARNING! WARNING!
@@ -53875,12 +53876,16 @@ index 0000000000000000000000000000000000000000..3b164b009a03b69315cd098d73da018a
 +    return makeString(standardUserAgentStatic(), ' ', applicationName, '/', applicationVersion.isEmpty() ? versionForUAString() : applicationVersion);
 +}
 +
-+String standardUserAgentForURL(const URL&)
++String standardUserAgentForURL(const URL& url)
 +{
-+    // No per-site quirks. The null string, as on GTK, leaves the page's own
-+    // user agent in place: returning the standard one here overrode every
-+    // custom user agent (embedders, extension contexts) whenever site
-+    // quirks were on. Pages without one still get the standard agent.
++    // Zoom's launcher rejects the Haiku OS token before offering its browser
++    // join flow. Keep the engine's Safari identity, using the desktop OS token
++    // that flow recognizes. Callers must preserve explicit custom user agents.
++    if (url.isMatchingDomain("zoom.us"_s))
++        return makeString("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/"_s,
++            versionForUAString(), " (KHTML, like Gecko) Version/26.0 Safari/"_s, versionForUAString());
++
++    // A null string leaves the page's own user agent in place on other sites.
 +    return String();
 +}
 +
@@ -80751,6 +80756,34 @@ index f5d465ab8f8ce8096c4b19592c4020f62bcd6e69..1ea6f0eb4f0622453c8d899c7755aaa2
  #include "WebKeyboardEvent.h"
  #include <WebCore/WindowsKeyboardCodes.h>
  #include <wtf/TZoneMallocInlines.h>
+diff --git a/Source/WebKit/Shared/WebPageCreationParameters.h b/Source/WebKit/Shared/WebPageCreationParameters.h
+index 4176a80ce8e77f5e2ed82b4f39796a6de91d48ca..f8b82a6b80896017e3bb9ae46349bac63529ccba 100644
+--- a/Source/WebKit/Shared/WebPageCreationParameters.h
++++ b/Source/WebKit/Shared/WebPageCreationParameters.h
+@@ -154,6 +154,9 @@ struct WebPageCreationParameters {
+     double gapBetweenPages { 0 };
+     
+     String userAgent { };
++#if PLATFORM(HAIKU)
++    bool hasCustomUserAgent { false };
++#endif
+ 
+     VisitedLinkTableIdentifier visitedLinkTableID;
+     bool canRunBeforeUnloadConfirmPanel { false };
+diff --git a/Source/WebKit/Shared/WebPageCreationParameters.serialization.in b/Source/WebKit/Shared/WebPageCreationParameters.serialization.in
+index 63aa4825aacb23bcb61131e3081df19200c63c10..04ce0baa5449834fd58e85c2d8bb43999e71af25 100644
+--- a/Source/WebKit/Shared/WebPageCreationParameters.serialization.in
++++ b/Source/WebKit/Shared/WebPageCreationParameters.serialization.in
+@@ -65,6 +65,9 @@ enum class WebCore::UserInterfaceLayoutDirection : bool;
+     double gapBetweenPages;
+ 
+     String userAgent;
++#if PLATFORM(HAIKU)
++    bool hasCustomUserAgent;
++#endif
+ 
+     WebKit::VisitedLinkTableIdentifier visitedLinkTableID;
+     bool canRunBeforeUnloadConfirmPanel;
 diff --git a/Source/WebKit/Shared/haiku/AuxiliaryProcessMainHaiku.cpp b/Source/WebKit/Shared/haiku/AuxiliaryProcessMainHaiku.cpp
 new file mode 100644
 index 0000000000000000000000000000000000000000..ee93bdaf3f08d885309473d7532b715e2a4e3797
@@ -110110,7 +110143,7 @@ index f0a894576a62be24a8e7e5b8009d63128b210aa7..85264fa2c360e44d115c8604754c9e0c
  #if ENABLE(WEBDRIVER_BIDI)
          if (RefPtr page = m_page.get()) {
 diff --git a/Source/WebKit/UIProcess/WebPageProxy.cpp b/Source/WebKit/UIProcess/WebPageProxy.cpp
-index abc66b25d5be6d2b961364268f19eb3762ab2c3a..b614caa06360b72f8acacff7d4eef488216d6564 100644
+index abc66b25d5be6d2b961364268f19eb3762ab2c3a..fcd4a964f86b2059ce4c010f42d584f8586966c7 100644
 --- a/Source/WebKit/UIProcess/WebPageProxy.cpp
 +++ b/Source/WebKit/UIProcess/WebPageProxy.cpp
 @@ -65,7 +65,9 @@
@@ -110331,7 +110364,39 @@ index abc66b25d5be6d2b961364268f19eb3762ab2c3a..b614caa06360b72f8acacff7d4eef488
  #if ENABLE(TOUCH_EVENTS)
  
  static TrackingType mergeTrackingTypes(TrackingType a, TrackingType b)
-@@ -8333,6 +8431,13 @@ void WebPageProxy::setDevicePostureType(WebCore::DevicePostureType type)
+@@ -6934,8 +7032,16 @@ bool WebPageProxy::isPageOpenedByDOMShowingInitialEmptyDocument() const
+ 
+ void WebPageProxy::setUserAgent(String&& userAgent, IsCustomUserAgent isCustomUserAgent)
+ {
+-    if (m_userAgent == userAgent)
++    if (m_userAgent == userAgent) {
++#if PLATFORM(HAIKU)
++        if (hasRunningProcess()) {
++            forEachWebContentProcess([&](auto& webProcess, auto pageID) {
++                webProcess.send(Messages::WebPage::SetHasCustomUserAgent(isCustomUserAgent == IsCustomUserAgent::Yes), pageID);
++            });
++        }
++#endif
+         return;
++    }
+     m_userAgent = WTF::move(userAgent);
+ 
+     // We update the service worker there at the moment to be sure we use values used by actual web pages.
+@@ -6974,8 +7080,13 @@ void WebPageProxy::setCustomUserAgent(String&& customUserAgent)
+         return;
+     }
+ 
++#if PLATFORM(HAIKU)
++    // An explicit agent equal to the default must still disable site quirks.
++    setUserAgent(String { m_customUserAgent }, IsCustomUserAgent::Yes);
++#else
+     if (m_userAgent != m_customUserAgent)
+         setUserAgent(String { m_customUserAgent }, IsCustomUserAgent::Yes);
++#endif
+ }
+ 
+ void WebPageProxy::resumeActiveDOMObjectsAndAnimations()
+@@ -8333,6 +8444,13 @@ void WebPageProxy::setDevicePostureType(WebCore::DevicePostureType type)
  
  void WebPageProxy::preferencesDidChange()
  {
@@ -110345,7 +110410,7 @@ index abc66b25d5be6d2b961364268f19eb3762ab2c3a..b614caa06360b72f8acacff7d4eef488
      if (!hasRunningProcess())
          return;
  
-@@ -8372,7 +8477,7 @@ void WebPageProxy::didCreateSubframe(FrameIdentifier parentID, FrameIdentifier n
+@@ -8372,7 +8490,7 @@ void WebPageProxy::didCreateSubframe(FrameIdentifier parentID, FrameIdentifier n
  
  void WebPageProxy::didDestroyFrame(IPC::Connection& connection, FrameIdentifier frameID)
  {
@@ -110354,7 +110419,7 @@ index abc66b25d5be6d2b961364268f19eb3762ab2c3a..b614caa06360b72f8acacff7d4eef488
      protect(protect(websiteDataStore())->authenticatorManager())->cancelRequest(webPageIDInMainFrameProcess(), frameID);
  #endif
      if (RefPtr automationSession = m_configuration->processPool().automationSession())
-@@ -8831,7 +8936,7 @@ void WebPageProxy::didStartProvisionalLoadForFrameShared(Ref<WebProcessProxy>&&
+@@ -8831,7 +8949,7 @@ void WebPageProxy::didStartProvisionalLoadForFrameShared(Ref<WebProcessProxy>&&
          m_navigationClient->didStartProvisionalLoadForFrame(*this, WTF::move(request), WTF::move(frameInfo));
      }
  
@@ -110363,7 +110428,7 @@ index abc66b25d5be6d2b961364268f19eb3762ab2c3a..b614caa06360b72f8acacff7d4eef488
      protect(protect(websiteDataStore())->authenticatorManager())->cancelRequest(m_webPageID, frameID);
  #endif
  }
-@@ -8862,6 +8967,10 @@ void WebPageProxy::didExplicitOpenForFrame(IPC::Connection& connection, FrameIde
+@@ -8862,6 +8980,10 @@ void WebPageProxy::didExplicitOpenForFrame(IPC::Connection& connection, FrameIde
          process->didCommitMeaningfulProvisionalLoad();
  
      pageLoadState->commitChanges();
@@ -110374,7 +110439,7 @@ index abc66b25d5be6d2b961364268f19eb3762ab2c3a..b614caa06360b72f8acacff7d4eef488
  }
  
  void WebPageProxy::didReceiveServerRedirectForProvisionalLoadForFrame(IPC::Connection& connection, FrameIdentifier frameID, std::optional<WebCore::NavigationIdentifier> navigationID, ResourceRequest&& request, const UserData& userData)
-@@ -11308,7 +11417,7 @@ void WebPageProxy::contentRuleListMatchedRule(WebCore::ContentRuleListMatchedRul
+@@ -11308,7 +11430,7 @@ void WebPageProxy::contentRuleListMatchedRule(WebCore::ContentRuleListMatchedRul
  #if ENABLE(WK_WEB_EXTENSIONS) && ENABLE(CONTENT_EXTENSIONS)
  void WebPageProxy::contentRuleListDidBlockLoad(WebExtensionContentRuleListBlockedLoadInfo&& info)
  {
@@ -110383,7 +110448,7 @@ index abc66b25d5be6d2b961364268f19eb3762ab2c3a..b614caa06360b72f8acacff7d4eef488
      if (RefPtr webExtensionController = this->webExtensionController())
          webExtensionController->resourceLoadWasBlockedByContentRuleList(identifier(), WTF::move(info));
  #endif
-@@ -11757,8 +11866,12 @@ void WebPageProxy::closePage()
+@@ -11757,8 +11879,12 @@ void WebPageProxy::closePage()
          return;
  
      WEBPAGEPROXY_RELEASE_LOG(Process, "closePage:");
@@ -110396,7 +110461,7 @@ index abc66b25d5be6d2b961364268f19eb3762ab2c3a..b614caa06360b72f8acacff7d4eef488
      m_uiClient->close(this);
  }
  
-@@ -12762,6 +12875,9 @@ void WebPageProxy::didChangeIntrinsicContentSize(const IntSize& intrinsicContent
+@@ -12762,6 +12888,9 @@ void WebPageProxy::didChangeIntrinsicContentSize(const IntSize& intrinsicContent
  #if USE(APPKIT)
      if (RefPtr pageClient = this->pageClient())
          pageClient->intrinsicContentSizeDidChange(intrinsicContentSize);
@@ -110406,7 +110471,7 @@ index abc66b25d5be6d2b961364268f19eb3762ab2c3a..b614caa06360b72f8acacff7d4eef488
  #endif
  }
  
-@@ -12936,7 +13052,7 @@ WebInspectorUIProxy* WebPageProxy::inspector() const
+@@ -12936,7 +13065,7 @@ WebInspectorUIProxy* WebPageProxy::inspector() const
      return m_inspector.get();
  }
  
@@ -110415,7 +110480,7 @@ index abc66b25d5be6d2b961364268f19eb3762ab2c3a..b614caa06360b72f8acacff7d4eef488
  static bool isParentFrameMainFrame(const ResourceLoadInfo& loadInfo, WebFrameProxy* mainFrame)
  {
      return loadInfo.parentFrameID && mainFrame && *loadInfo.parentFrameID == mainFrame->frameID();
-@@ -12945,7 +13061,7 @@ static bool isParentFrameMainFrame(const ResourceLoadInfo& loadInfo, WebFramePro
+@@ -12945,7 +13074,7 @@ static bool isParentFrameMainFrame(const ResourceLoadInfo& loadInfo, WebFramePro
  
  void WebPageProxy::resourceLoadDidSendRequest(ResourceLoadInfo&& loadInfo, WebCore::ResourceRequest&& request)
  {
@@ -110424,7 +110489,7 @@ index abc66b25d5be6d2b961364268f19eb3762ab2c3a..b614caa06360b72f8acacff7d4eef488
      if (RefPtr webExtensionController = this->webExtensionController()) {
          loadInfo.parentFrameIsMainFrame = isParentFrameMainFrame(loadInfo, mainFrame());
          webExtensionController->resourceLoadDidSendRequest(identifier(), loadInfo, request);
-@@ -12958,7 +13074,7 @@ void WebPageProxy::resourceLoadDidSendRequest(ResourceLoadInfo&& loadInfo, WebCo
+@@ -12958,7 +13087,7 @@ void WebPageProxy::resourceLoadDidSendRequest(ResourceLoadInfo&& loadInfo, WebCo
  
  void WebPageProxy::resourceLoadDidPerformHTTPRedirection(ResourceLoadInfo&& loadInfo, WebCore::ResourceResponse&& response, WebCore::ResourceRequest&& request)
  {
@@ -110433,7 +110498,7 @@ index abc66b25d5be6d2b961364268f19eb3762ab2c3a..b614caa06360b72f8acacff7d4eef488
      if (RefPtr webExtensionController = this->webExtensionController()) {
          loadInfo.parentFrameIsMainFrame = isParentFrameMainFrame(loadInfo, mainFrame());
          webExtensionController->resourceLoadDidPerformHTTPRedirection(identifier(), loadInfo, response, request);
-@@ -12971,7 +13087,7 @@ void WebPageProxy::resourceLoadDidPerformHTTPRedirection(ResourceLoadInfo&& load
+@@ -12971,7 +13100,7 @@ void WebPageProxy::resourceLoadDidPerformHTTPRedirection(ResourceLoadInfo&& load
  
  void WebPageProxy::resourceLoadDidReceiveChallenge(ResourceLoadInfo&& loadInfo, WebCore::AuthenticationChallenge&& challenge)
  {
@@ -110442,7 +110507,7 @@ index abc66b25d5be6d2b961364268f19eb3762ab2c3a..b614caa06360b72f8acacff7d4eef488
      if (RefPtr webExtensionController = this->webExtensionController()) {
          loadInfo.parentFrameIsMainFrame = isParentFrameMainFrame(loadInfo, mainFrame());
          webExtensionController->resourceLoadDidReceiveChallenge(identifier(), loadInfo, challenge);
-@@ -12984,7 +13100,7 @@ void WebPageProxy::resourceLoadDidReceiveChallenge(ResourceLoadInfo&& loadInfo,
+@@ -12984,7 +13113,7 @@ void WebPageProxy::resourceLoadDidReceiveChallenge(ResourceLoadInfo&& loadInfo,
  
  void WebPageProxy::resourceLoadDidReceiveResponse(ResourceLoadInfo&& loadInfo, WebCore::ResourceResponse&& response)
  {
@@ -110451,7 +110516,7 @@ index abc66b25d5be6d2b961364268f19eb3762ab2c3a..b614caa06360b72f8acacff7d4eef488
      if (RefPtr webExtensionController = this->webExtensionController()) {
          loadInfo.parentFrameIsMainFrame = isParentFrameMainFrame(loadInfo, mainFrame());
          webExtensionController->resourceLoadDidReceiveResponse(identifier(), loadInfo, response);
-@@ -12997,7 +13113,7 @@ void WebPageProxy::resourceLoadDidReceiveResponse(ResourceLoadInfo&& loadInfo, W
+@@ -12997,7 +13126,7 @@ void WebPageProxy::resourceLoadDidReceiveResponse(ResourceLoadInfo&& loadInfo, W
  
  void WebPageProxy::resourceLoadDidCompleteWithError(ResourceLoadInfo&& loadInfo, WebCore::ResourceResponse&& response, WebCore::ResourceError&& error)
  {
@@ -110460,7 +110525,7 @@ index abc66b25d5be6d2b961364268f19eb3762ab2c3a..b614caa06360b72f8acacff7d4eef488
      if (RefPtr webExtensionController = this->webExtensionController()) {
          loadInfo.parentFrameIsMainFrame = isParentFrameMainFrame(loadInfo, mainFrame());
          webExtensionController->resourceLoadDidCompleteWithError(identifier(), loadInfo, response, error);
-@@ -14815,7 +14931,7 @@ void WebPageProxy::resetState(ResetStateReason resetStateReason)
+@@ -14815,7 +14944,7 @@ void WebPageProxy::resetState(ResetStateReason resetStateReason)
      resetSpeechSynthesizer();
  #endif
  
@@ -110469,7 +110534,17 @@ index abc66b25d5be6d2b961364268f19eb3762ab2c3a..b614caa06360b72f8acacff7d4eef488
      protect(protect(websiteDataStore())->authenticatorManager())->cancelRequest(m_webPageID, std::nullopt);
  #endif
  
-@@ -15270,9 +15386,9 @@ WebPageCreationParameters WebPageProxy::creationParameters(WebProcessProxy& proc
+@@ -15092,6 +15221,9 @@ WebPageCreationParameters WebPageProxy::creationParameters(WebProcessProxy& proc
+     parameters.pageLength = m_pageLength;
+     parameters.gapBetweenPages = m_gapBetweenPages;
+     parameters.userAgent = userAgent();
++#if PLATFORM(HAIKU)
++    parameters.hasCustomUserAgent = !m_customUserAgent.isEmpty();
++#endif
+     parameters.canRunBeforeUnloadConfirmPanel = m_uiClient->canRunBeforeUnloadConfirmPanel();
+     parameters.canRunModal = m_canRunModal;
+     parameters.deviceScaleFactor = deviceScaleFactor();
+@@ -15270,9 +15402,9 @@ WebPageCreationParameters WebPageProxy::creationParameters(WebProcessProxy& proc
      parameters.hasResourceLoadClient = !!m_resourceLoadClient;
      parameters.portsForUpgradingInsecureSchemeForTesting = m_configuration->portsForUpgradingInsecureSchemeForTesting();
  
@@ -110482,7 +110557,7 @@ index abc66b25d5be6d2b961364268f19eb3762ab2c3a..b614caa06360b72f8acacff7d4eef488
  
      if (RefPtr weakWebExtensionController = m_weakWebExtensionController.get())
          parameters.webExtensionControllerParameters = weakWebExtensionController->parameters(m_configuration, process);
-@@ -19004,7 +19120,13 @@ void WebPageProxy::decidePolicyForSOAuthorizationLoad(const String& extension, C
+@@ -19004,7 +19136,13 @@ void WebPageProxy::decidePolicyForSOAuthorizationLoad(const String& extension, C
  #if ENABLE(WEB_AUTHN)
  void WebPageProxy::setMockWebAuthenticationConfiguration(MockWebAuthenticationConfiguration&& configuration)
  {
@@ -118021,10 +118096,10 @@ index 0000000000000000000000000000000000000000..b12e656b2046acc0f1325d1b28ee8be2
 +#endif
 diff --git a/Source/WebKit/UIProcess/haiku/WebPageProxyHaiku.cpp b/Source/WebKit/UIProcess/haiku/WebPageProxyHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..982d08fe2f872273b8e0c6eab18550af3a91e055
+index 0000000000000000000000000000000000000000..4d8851009b0f6f9403abfdec830c3b519c7b3ea2
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/WebPageProxyHaiku.cpp
-@@ -0,0 +1,180 @@
+@@ -0,0 +1,186 @@
 +/*
 + * Copyright (C) 2014-2021 Haiku, inc.
 + *
@@ -118056,6 +118131,7 @@ index 0000000000000000000000000000000000000000..982d08fe2f872273b8e0c6eab18550af
 +#include "PageClient.h"
 +#include "WebFrameProxy.h"
 +#include "WebProcessProxy.h"
++#include "WebPreferences.h"
 +#include <WebCore/ProtocolHandlerUtilities.h>
 +#include <WebCore/SecurityOrigin.h>
 +#include <WebCore/PasteboardCustomData.h>
@@ -118179,8 +118255,13 @@ index 0000000000000000000000000000000000000000..982d08fe2f872273b8e0c6eab18550af
 +{
 +}
 +
-+String WebPageProxy::userAgentForURL(const URL&)
++String WebPageProxy::userAgentForURL(const URL& url)
 +{
++    if (m_customUserAgent.isEmpty() && !url.isNull() && preferences().needsSiteSpecificQuirks()) {
++        auto agent = WebCore::standardUserAgentForURL(url);
++        if (!agent.isNull())
++            return agent;
++    }
 +    return userAgent();
 +}
 +
@@ -147433,7 +147514,7 @@ index ef7265c051a15504903ee0421ca40f29d7b47b9c..a8aeff45e3fcdd7b4142cf5751ed95f0
      const std::unique_ptr<WebCore::WheelEventDeltaFilter> m_recentWheelEventDeltaFilter;
  #if ENABLE(IOS_TOUCH_EVENTS)
 diff --git a/Source/WebKit/WebProcess/WebPage/WebPage.cpp b/Source/WebKit/WebProcess/WebPage/WebPage.cpp
-index 11766a98414863026a09ccea0dbbdd432db4444f..5858d6f7059bf2e8a99b9a9b1b2928e6a90396fc 100644
+index 11766a98414863026a09ccea0dbbdd432db4444f..4a9d7da063d7f392f03f53452fa7fd2c0a87bc11 100644
 --- a/Source/WebKit/WebProcess/WebPage/WebPage.cpp
 +++ b/Source/WebKit/WebProcess/WebPage/WebPage.cpp
 @@ -505,7 +505,7 @@
@@ -147456,7 +147537,17 @@ index 11766a98414863026a09ccea0dbbdd432db4444f..5858d6f7059bf2e8a99b9a9b1b2928e6
  namespace WebKit {
  using namespace WebCore;
  
-@@ -880,7 +884,7 @@ WebPage::WebPage(PageIdentifier pageID, WebPageCreationParameters&& parameters)
+@@ -648,6 +652,9 @@ WebPage::WebPage(PageIdentifier pageID, WebPageCreationParameters&& parameters)
+     , m_mainFrame(WebFrame::create(*this, parameters.mainFrameIdentifier))
+     , m_pageGroup(WebProcess::singleton().webPageGroup(WTF::move(parameters.pageGroupData)))
+     , m_userAgent(WTF::move(parameters.userAgent))
++#if PLATFORM(HAIKU)
++    , m_hasCustomUserAgent(parameters.hasCustomUserAgent)
++#endif
+ #if ENABLE(TILED_CA_DRAWING_AREA)
+     , m_drawingAreaType(parameters.drawingAreaType)
+ #endif
+@@ -880,7 +887,7 @@ WebPage::WebPage(PageIdentifier pageID, WebPageCreationParameters&& parameters)
      pageConfiguration.deviceOrientationUpdateProvider = WebDeviceOrientationUpdateProvider::create(*this);
  #endif
  
@@ -147465,7 +147556,7 @@ index 11766a98414863026a09ccea0dbbdd432db4444f..5858d6f7059bf2e8a99b9a9b1b2928e6
      if (parameters.webExtensionControllerParameters)
          lazyInitialize(m_webExtensionController, WebExtensionControllerProxy::getOrCreate(parameters.webExtensionControllerParameters.value(), this));
  #endif
-@@ -2454,6 +2458,9 @@ void WebPage::tryClose(CompletionHandler<void(bool)>&& completionHandler)
+@@ -2454,6 +2461,9 @@ void WebPage::tryClose(CompletionHandler<void(bool)>&& completionHandler)
          completionHandler(false);
          return;
      }
@@ -147475,7 +147566,25 @@ index 11766a98414863026a09ccea0dbbdd432db4444f..5858d6f7059bf2e8a99b9a9b1b2928e6
      completionHandler(coreFrame->loader().shouldClose());
  }
  
-@@ -5461,7 +5468,7 @@ void WebPage::updatePreferences(const WebPreferencesStore& store)
+@@ -4997,7 +5007,17 @@ void WebPage::setUserAgent(String&& userAgent)
+ 
+ void WebPage::setHasCustomUserAgent(bool hasCustomUserAgent)
+ {
++#if PLATFORM(HAIKU)
++    if (m_hasCustomUserAgent == hasCustomUserAgent)
++        return;
++#endif
+     m_hasCustomUserAgent = hasCustomUserAgent;
++#if PLATFORM(HAIKU)
++    // Explicitly choosing the same string as the default still disables site
++    // quirks; invalidate Navigator's cached user agent when only this bit changes.
++    if (RefPtr page = m_page)
++        page->userAgentChanged();
++#endif
+ }
+ 
+ void WebPage::suspendActiveDOMObjectsAndAnimations()
+@@ -5461,7 +5481,7 @@ void WebPage::updatePreferences(const WebPreferencesStore& store)
  
      updateSettingsGenerated(store, settings);
  
@@ -147484,7 +147593,7 @@ index 11766a98414863026a09ccea0dbbdd432db4444f..5858d6f7059bf2e8a99b9a9b1b2928e6
      if (!settings.acceleratedCompositingEnabled()) {
          WEBPAGE_RELEASE_LOG(Layers, "updatePreferences: acceleratedCompositingEnabled setting was false. WebKit cannot function in this mode; changing setting to true");
          settings.setAcceleratedCompositingEnabled(true);
-@@ -8450,6 +8457,13 @@ void WebPage::didCommitLoad(WebFrame* frame)
+@@ -8450,6 +8470,13 @@ void WebPage::didCommitLoad(WebFrame* frame)
      dismissVolumetricScenesForDetachedElements();
  #endif
  
@@ -149039,7 +149148,7 @@ index 0000000000000000000000000000000000000000..7459ce25f180160a1c12431c73926a1f
 +
 diff --git a/Source/WebKit/WebProcess/WebPage/haiku/WebPageHaiku.cpp b/Source/WebKit/WebProcess/WebPage/haiku/WebPageHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..0430cb9fea01ddfe25ff8ff5a3fbc9746bd10919
+index 0000000000000000000000000000000000000000..fa653ec792568be1f8f5abd60c4ac11c6f870b9f
 --- /dev/null
 +++ b/Source/WebKit/WebProcess/WebPage/haiku/WebPageHaiku.cpp
 @@ -0,0 +1,512 @@
@@ -149503,7 +149612,7 @@ index 0000000000000000000000000000000000000000..0430cb9fea01ddfe25ff8ff5a3fbc974
 +
 +String WebPage::platformUserAgent(const URL& url) const
 +{
-+    if (url.isNull() || !m_page->settings().needsSiteSpecificQuirks())
++    if (m_hasCustomUserAgent || url.isNull() || !m_page->settings().needsSiteSpecificQuirks())
 +        return emptyString();
 +
 +    return WebCore::standardUserAgentForURL(url);
