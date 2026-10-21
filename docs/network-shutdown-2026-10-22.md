@@ -1,9 +1,9 @@
 # Native network shutdown recheck, 22 October 2026
 
 **Acceptance is incomplete; #120 remains open.** Five stock Haiku cycles
-passed, but a subsequent run caught a compositor-thread abort during shutdown.
-The airOS workstation completed one cycle, then stalled before the next
-shutdown. Neither failed run is counted as a pass.
+passed, but a subsequent run caught a compositor-thread abort. The airOS
+request stall is now fixed and verified in an isolated engine; release-package
+validation is pending. Neither earlier failed run is counted as a pass.
 
 The test uses published packages with the current engine pin `fb054d0`:
 stock R1/beta6 `cd9de3e`, and airOS `008ccfc`. Both contain the same engine
@@ -11,6 +11,50 @@ patch (`df10f964784bb1ada936435c86d1170e0a085600bb92d872ee673d00e8a73fc4`).
 These are release CI builds, without PGO profile use. Package, executable,
 loaded-library and fixture hashes, per-cycle results, and the native crash
 stack are in [the machine-readable report](network-shutdown-2026-10-22.json).
+
+## Follow-up: requests waiting behind an HTTP/1.1 stream
+
+The airOS trace shows sibling requests entering curl's `PIPEWAIT` state while
+a TLS connection negotiates its protocol. That connection falls back to
+HTTP/1.1 without ALPN and starts a response whose body remains open. The
+sibling requests stay pending, even though the server has already sent
+HTTP/1.1 headers. The fixture's service-worker and page transfers reproduce
+this with curl 8.22.0; a later stock-Haiku run with curl 8.21.0 also stalled.
+
+The Haiku `CurlHandle::enableHttp()` path now uses curl's default connection
+policy (`CURLOPT_PIPEWAIT=0`). It keeps ALPN, HTTP/2 and the existing per-host
+connection limit. This permits another connection while negotiation is pending;
+it may open more connections at startup than the previous policy. See curl's
+[PIPEWAIT contract](https://curl.se/libcurl/c/CURLOPT_PIPEWAIT.html).
+
+Native workstation validation of patch
+`483862e88fdc5a784c4ae2c6aaa2f6358d637d8ebca4e46ccd129e0d3e55077a`:
+
+- A diagnostic preload changing only this option first made all five cycles
+  pass on the published engine. The trace-only control still stalled.
+- The rebuilt engine then passed all five cycles **without a preload**:
+  three live HTTPS bodies and a secure WebSocket at each quit, two service-worker
+  unregistrations, persistent cookie/localStorage/Cache API values, zero browser
+  exit codes, empty process groups and no fresh debugger events.
+- A separate HTTP/2 server kept one response stream open while twelve other
+  responses completed on that same established connection. The browser reported
+  `h2`; server session/stream IDs independently confirm multiplexing. Browser
+  shutdown was clean. Total TLS-session counts include certificate-challenge
+  retries against the fixture's self-signed certificate, so they are not a
+  cold-start performance measurement.
+
+All four engine targets built. The isolated source audit matched all 1,472 port
+files, and loaded runtime hashes stayed unchanged during the tests. This uses
+the existing PGO-profile engine build; release CI builds are checked separately.
+Evidence: [candidate and HTTP/2 reports](network-pipewait-2026-10-22.json).
+
+Reading the full stock browser log also refined the graphics failure: libepoxy
+printed `Unable to interpret GL_VERSION string: 3.1 Mesa 25.3.6` **before** the
+quit trace. Shutdown monitoring detected the trapped helper, but the evidence
+does not establish shutdown as its trigger. Standalone native probes passed
+800,000 concurrent scans of that string and 400,000 version queries across four
+EGL contexts. Another 24 browser startup/animation/quit cycles passed. The
+original abort is retained as a failure and remains unexplained.
 
 ## Workload and results
 

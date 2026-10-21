@@ -61261,7 +61261,7 @@ index 0000000000000000000000000000000000000000..6b5fc0f78f205ca35494521f2ebefe65
 +
 +} // namespace WebCore
 diff --git a/Source/WebCore/platform/network/curl/CurlContext.cpp b/Source/WebCore/platform/network/curl/CurlContext.cpp
-index 2e6a2537f3e283d7cb7f2081c8549f0256ee4e71..0073a53fa8010f52b9dd155e5f602892aae9b034 100644
+index 2e6a2537f3e283d7cb7f2081c8549f0256ee4e71..e98e0f5f0cec52b7d22e1bbba2f3c350772b4183 100644
 --- a/Source/WebCore/platform/network/curl/CurlContext.cpp
 +++ b/Source/WebCore/platform/network/curl/CurlContext.cpp
 @@ -27,6 +27,9 @@
@@ -61274,7 +61274,23 @@ index 2e6a2537f3e283d7cb7f2081c8549f0256ee4e71..0073a53fa8010f52b9dd155e5f602892
  #if USE(CURL)
  #include "CertificateInfo.h"
  #include "CurlRequestScheduler.h"
-@@ -563,6 +566,21 @@ void CurlHandle::enableAltSvc()
+@@ -503,7 +506,15 @@ void CurlHandle::enableHttp()
+     if (m_url.protocolIs("https"_s) && (isHttp2Enabled || isHttp3Enabled)) {
+         // The appropriate HTTP version is selected based on ALPN, Alt-Svc, etc.
+         curl_easy_setopt(m_handle, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_NONE);
++#if PLATFORM(HAIKU)
++        // PIPEWAIT can strand sibling requests behind a streaming response
++        // when a pending TLS connection falls back to HTTP/1.1 without ALPN.
++        // Use curl's default connection policy. Established HTTP/2 connections
++        // still multiplex, and the scheduler's per-host connection limit holds.
++        curl_easy_setopt(m_handle, CURLOPT_PIPEWAIT, 0L);
++#else
+         curl_easy_setopt(m_handle, CURLOPT_PIPEWAIT, 1L);
++#endif
+ #if LIBCURL_VERSION_NUM <= 0x075500
+         curl_easy_setopt(m_handle, CURLOPT_SSL_ENABLE_ALPN, 1L);
+         curl_easy_setopt(m_handle, CURLOPT_SSL_ENABLE_NPN, 0L);
+@@ -563,6 +574,21 @@ void CurlHandle::enableAltSvc()
      if (CurlContext::singleton().alternativeServicesStorageFile().isEmpty())
          return;
  
