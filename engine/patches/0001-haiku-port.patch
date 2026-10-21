@@ -23845,7 +23845,7 @@ index 04c7f35b45eb11fc3e87bd16b5aa657e46501001..09ba02743c2a405b4aa1895da07a9542
      bool m_onLimitExceededMode WTF_GUARDED_BY_LOCK(m_lock) { false };
      Seconds m_releaseUnusedSecondsTolerance WTF_GUARDED_BY_LOCK(m_lock);
 diff --git a/Source/WebCore/platform/graphics/egl/GLContext.cpp b/Source/WebCore/platform/graphics/egl/GLContext.cpp
-index 6b748ca4023885f7ffb540f02da458ed39476ba7..a4f95423be023374ae655c9c6687109f7e007fae 100644
+index 6b748ca4023885f7ffb540f02da458ed39476ba7..66bc2d6b6590c793206282097343536b7f72a488 100644
 --- a/Source/WebCore/platform/graphics/egl/GLContext.cpp
 +++ b/Source/WebCore/platform/graphics/egl/GLContext.cpp
 @@ -45,6 +45,9 @@ WTF_MAKE_TZONE_ALLOCATED_IMPL(GLContext);
@@ -24094,12 +24094,28 @@ index 6b748ca4023885f7ffb540f02da458ed39476ba7..a4f95423be023374ae655c9c6687109f
  GCGLContext GLContext::platformContext() const
  {
      return m_context;
+@@ -636,8 +792,7 @@ unsigned GLContext::version() const
+ 
+ const GLContext::GLExtensions& GLContext::glExtensions() const
+ {
+-    static std::once_flag flag;
+-    std::call_once(flag, [this] {
++    std::call_once(m_glExtensionsOnceFlag, [this] {
+         const char* extensionsString = reinterpret_cast<const char*>(glGetString(GL_EXTENSIONS));
+         m_glExtensions.OES_texture_npot = isExtensionSupported(extensionsString, "GL_OES_texture_npot");
+         m_glExtensions.EXT_unpack_subimage = isExtensionSupported(extensionsString, "GL_EXT_unpack_subimage");
 diff --git a/Source/WebCore/platform/graphics/egl/GLContext.h b/Source/WebCore/platform/graphics/egl/GLContext.h
-index 28829bd1aac3177356f62c6aa30919288ca3f36d..aa9c70f371d9aa461894feec6be7004304ec86ca 100644
+index 28829bd1aac3177356f62c6aa30919288ca3f36d..dd1f607e1a46f9b6671af2089bd35256d1d3cb9f 100644
 --- a/Source/WebCore/platform/graphics/egl/GLContext.h
 +++ b/Source/WebCore/platform/graphics/egl/GLContext.h
-@@ -25,8 +25,20 @@
+@@ -21,12 +21,26 @@
+ 
+ #include "GLContextWrapper.h"
+ #include "IntSize.h"
++#include <mutex>
+ #include <wtf/Noncopyable.h>
  #include <wtf/TZoneMalloc.h>
++#include <wtf/ThreadSafeRefCounted.h>
  #include <wtf/ThreadSafeWeakPtr.h>
  
 -#if !PLATFORM(GTK) && !PLATFORM(WPE)
@@ -24120,7 +24136,7 @@ index 28829bd1aac3177356f62c6aa30919288ca3f36d..aa9c70f371d9aa461894feec6be70043
  typedef EGLNativeWindowType GLNativeWindowType;
  #else
  typedef uint64_t GLNativeWindowType;
-@@ -50,6 +62,29 @@ namespace WebCore {
+@@ -50,6 +64,29 @@ namespace WebCore {
  class GLDisplay;
  class PlatformDisplay;
  
@@ -24150,7 +24166,7 @@ index 28829bd1aac3177356f62c6aa30919288ca3f36d..aa9c70f371d9aa461894feec6be70043
  class GLContext final : public GLContextWrapper
  #if ENABLE(MEDIA_TELEMETRY)
      , public MediaTelemetryWaylandInfoGetter
-@@ -95,6 +130,11 @@ public:
+@@ -95,6 +132,11 @@ public:
      bool unmakeContextCurrent();
      WEBCORE_EXPORT void swapBuffers();
      GCGLContext platformContext() const;
@@ -24162,7 +24178,7 @@ index 28829bd1aac3177356f62c6aa30919288ca3f36d..aa9c70f371d9aa461894feec6be70043
  
      struct GLExtensions {
          bool OES_texture_npot { false };
-@@ -155,6 +195,9 @@ private:
+@@ -155,6 +197,9 @@ private:
  #endif
  
      static bool getEGLConfig(EGLDisplay, EGLConfig*, int);
@@ -24172,7 +24188,7 @@ index 28829bd1aac3177356f62c6aa30919288ca3f36d..aa9c70f371d9aa461894feec6be70043
  
  #if !LOG_DISABLED || !RELEASE_LOG_DISABLED
      bool enableDebugLogging();
-@@ -176,6 +219,12 @@ private:
+@@ -176,6 +221,12 @@ private:
  #endif
  
      ThreadSafeWeakPtr<GLDisplay> m_display;
@@ -24185,6 +24201,14 @@ index 28829bd1aac3177356f62c6aa30919288ca3f36d..aa9c70f371d9aa461894feec6be70043
      mutable unsigned m_version { 0 };
      EGLContext m_context { nullptr };
      EGLSurface m_surface { nullptr };
+@@ -183,6 +234,7 @@ private:
+ #if USE(WPE_RENDERER)
+     struct wpe_renderer_backend_egl_offscreen_target* m_wpeTarget { nullptr };
+ #endif
++    mutable std::once_flag m_glExtensionsOnceFlag;
+     mutable GLExtensions m_glExtensions;
+ };
+ 
 diff --git a/Source/WebCore/platform/graphics/egl/GLFenceEGL.cpp b/Source/WebCore/platform/graphics/egl/GLFenceEGL.cpp
 index dee3a440582ce6b1384f94b6d755e9122bc20e68..b49252f25f54b75e3e963fb3f79078922111561f 100644
 --- a/Source/WebCore/platform/graphics/egl/GLFenceEGL.cpp
