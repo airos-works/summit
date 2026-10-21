@@ -85,6 +85,23 @@ USB's permissions-policy value is included in IPC serialization, and transfer
 result constructors preserve their supplied DataView objects through GC-traced
 attribute caches.
 
+**VIA keyboard configuration (#122) requires WebHID, which is not implemented.**
+On 21 October 2026 the current native browser reproduced VIA's "USB Detection
+Error" on `https://www.usevia.app/` in a fresh profile: the page was a secure
+context, `typeof navigator.usb` was `"object"`, and `typeof navigator.hid` was
+`"undefined"`. The error also appeared without a keyboard attached. VIA's
+[device implementation](https://github.com/the-via/app/blob/935106a990af39bdd1ade881c02366eac486240d/src/shims/node-hid.ts)
+uses `navigator.hid.getDevices()` / `requestDevice()`, filters HID collections
+by usage page `0xff60` and usage `0x61`, then uses output reports and
+`inputreport` events. Its UI explicitly requires a WebHID-capable browser.
+The WebUSB implementation above does not provide those interfaces.
+
+The remaining work is a WebHID implementation with HID report/collection
+parsing, a native chooser, origin grants, report transfers and connection
+events, followed by validation with a VIA keyboard. WebUSB's protected HID
+class checks remain necessary; relaxing them would neither implement
+`navigator.hid` nor provide WebHID's collection-level access rules.
+
 Toolbar icons are native HVIF resources rendered at the display scale, with
 BControl's pressed and disabled variants. Back, Forward, Stop and Home come
 from Haiku WebPositive; the remaining toolbar vectors are Summit resources.
