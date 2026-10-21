@@ -8927,10 +8927,10 @@ index 0000000000000000000000000000000000000000..48e19a5957df4c1ae60378dd9a84cbe4
 +/* Copyright (C) 2026 Summit contributors. SPDX-License-Identifier: BSD-2-Clause */
 +enum USBTransferStatus { "ok", "stall", "babble" };
 diff --git a/Source/WebCore/PlatformHaiku.cmake b/Source/WebCore/PlatformHaiku.cmake
-index 16a88804a1baa39ccdd9fc2870b6e2524d941298..bcecdff68141d8fab319c68b2dddc24537ddf4ce 100644
+index 16a88804a1baa39ccdd9fc2870b6e2524d941298..01e9c5f8a7c36b0c6d443e648a7ac5d291ab19fb 100644
 --- a/Source/WebCore/PlatformHaiku.cmake
 +++ b/Source/WebCore/PlatformHaiku.cmake
-@@ -1,52 +1,366 @@
+@@ -1,52 +1,367 @@
 +include(platform/Haiku.cmake)
  include(platform/ImageDecoders.cmake)
  include(platform/OpenSSL.cmake)
@@ -9112,6 +9112,7 @@ index 16a88804a1baa39ccdd9fc2870b6e2524d941298..bcecdff68141d8fab319c68b2dddc245
 +  # image buffers; see platform/SourcesSkia.txt. Only the Haiku pieces it has no
 +  # equivalent for stay above.
 +  include(platform/Skia.cmake)
++  list(APPEND WebCore_SOURCES platform/skia/DragImageSkia.cpp)
 +  # The Haiku themes draw with BControlLook, which needs a BView to draw into.
 +  # Adwaita is the theme the other Skia ports use and paints through
 +  # GraphicsContext alone, so it works whatever is behind the context.
@@ -9303,7 +9304,7 @@ index 16a88804a1baa39ccdd9fc2870b6e2524d941298..bcecdff68141d8fab319c68b2dddc245
    textencoding
    translation
    ${WEBP_LIBRARIES}
-@@ -61,6 +375,242 @@ list(APPEND WebCore_SYSTEM_INCLUDE_DIRECTORIES
+@@ -61,6 +376,242 @@ list(APPEND WebCore_SYSTEM_INCLUDE_DIRECTORIES
    ${SQLITE_INCLUDE_DIR}
    ${WEBP_INCLUDE_DIRS}
    ${ZLIB_INCLUDE_DIRS}
@@ -17051,6 +17052,19 @@ index 8c5d0b2c3529dd64257ffb6d1b0170aaa81d6998..7ce7798ec7d55b9678b8dbe7957007e9
  #endif
      bool m_disallowFileAccess { false };
  };
+diff --git a/Source/WebCore/platform/DragImage.cpp b/Source/WebCore/platform/DragImage.cpp
+index 90de42a2fa118a18ba648a8a9872ede31d4f377f..03e8854bdffad6fe9b6675a8ba9ceeafd434e095 100644
+--- a/Source/WebCore/platform/DragImage.cpp
++++ b/Source/WebCore/platform/DragImage.cpp
+@@ -272,7 +272,7 @@ DragImage::~DragImage()
+         deleteDragImage(m_dragImageRef);
+ }
+ 
+-#if !PLATFORM(COCOA) && !PLATFORM(GTK) && !PLATFORM(WIN) && !(PLATFORM(WPE) && ENABLE(DRAG_SUPPORT))
++#if !PLATFORM(COCOA) && !PLATFORM(GTK) && !PLATFORM(WIN) && !(PLATFORM(WPE) && ENABLE(DRAG_SUPPORT)) && !(PLATFORM(HAIKU) && USE(SKIA))
+ 
+ IntSize dragImageSize(DragImageRef)
+ {
 diff --git a/Source/WebCore/platform/DragImage.h b/Source/WebCore/platform/DragImage.h
 index 104157e6a0ad5e8b5b9d88b9cef4b5a19b9aa4f8..c91778df7bc81e283073f0bb479358059c8fc984 100644
 --- a/Source/WebCore/platform/DragImage.h
@@ -65643,6 +65657,48 @@ index 0000000000000000000000000000000000000000..09e42d8e9a598aa58a68373c51c4d590
 +
 +#endif
 +
+diff --git a/Source/WebCore/platform/skia/DragImageSkia.cpp b/Source/WebCore/platform/skia/DragImageSkia.cpp
+index 5454f8c1c7b31abfb48d8d05bd1b08f04ec90ac4..36821c716d2555f7bc486bbef018652d91b1694f 100644
+--- a/Source/WebCore/platform/skia/DragImageSkia.cpp
++++ b/Source/WebCore/platform/skia/DragImageSkia.cpp
+@@ -19,7 +19,9 @@
+ #include "config.h"
+ #include "DragImage.h"
+ 
++#include "Document.h"
+ #include "Element.h"
++#include "LocalFrame.h"
+ #include "Image.h"
+ #include "NativeImage.h"
+ #include "TextFlags.h"
+@@ -96,7 +98,10 @@ DragImageRef dissolveDragImageToFraction(DragImageRef image, float fraction)
+ 
+ DragImageRef createDragImageFromImage(Image* image, ImageOrientation, GraphicsClient*, float)
+ {
+-    return image->currentNativeImage(ConcreteObjectSize::fixed(image->size()))->platformImage();
++    if (!image)
++        return nullptr;
++    RefPtr nativeImage = image->currentNativeImage(ConcreteObjectSize::fixed(image->size()));
++    return nativeImage ? nativeImage->platformImage() : nullptr;
+ }
+ 
+ DragImageRef createDragImageIconForCachedImageFilename(const String&)
+@@ -104,8 +109,14 @@ DragImageRef createDragImageIconForCachedImageFilename(const String&)
+     return nullptr;
+ }
+ 
+-DragImageData createDragImageForLink(Element&, URL&, const String&, float)
++DragImageData createDragImageForLink(Element& element, URL&, const String&, float)
+ {
++#if PLATFORM(HAIKU)
++    if (RefPtr frame = element.document().frame())
++        return { createDragImageForNode(*frame, element), nullptr };
++#else
++    UNUSED_PARAM(element);
++#endif
+     return { nullptr, nullptr };
+ }
+ 
 diff --git a/Source/WebCore/platform/text/LocaleICU.cpp b/Source/WebCore/platform/text/LocaleICU.cpp
 index 209c5f5c6f72f675b1d51b7a8454a150abcc5019..7350cf7a11d4501f62fe6f4cedbe18417aef07e1 100644
 --- a/Source/WebCore/platform/text/LocaleICU.cpp
@@ -83208,10 +83264,10 @@ index 0000000000000000000000000000000000000000..d28a6cad6339adf79b155cf974e85bfd
 +
 diff --git a/Source/WebKit/UIProcess/API/haiku/WebKitView.cpp b/Source/WebKit/UIProcess/API/haiku/WebKitView.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..395e11a0036f34ea857ca766de25a46654e52b94
+index 0000000000000000000000000000000000000000..8d4bbccb1c1eb369778aa94a7a710f47eaa94ec9
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/API/haiku/WebKitView.cpp
-@@ -0,0 +1,1309 @@
+@@ -0,0 +1,1315 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#include "config.h"
@@ -84159,6 +84215,8 @@ index 0000000000000000000000000000000000000000..395e11a0036f34ea857ca766de25a466
 +    BPoint point;
 +    uint32 buttons = 0;
 +    GetMouse(&point, &buttons, false);
++    if (auto* trace = std::getenv("SUMMIT_DRAG_TRACE"); trace && *trace == '1')
++        fprintf(stderr, "Summit drag: native source start, buttons %u, bytes %zd\n", buttons, source.FlattenedSize());
 +    if (m_state->sourceDragActive)
 +        FinishDrag(0, ConvertToScreen(point));
 +    static std::atomic<uint64_t> nextSession { 1 };
@@ -84232,6 +84290,8 @@ index 0000000000000000000000000000000000000000..395e11a0036f34ea857ca766de25a466
 +{
 +    if (!m_state->sourceDragActive)
 +        return;
++    if (auto* trace = std::getenv("SUMMIT_DRAG_TRACE"); trace && *trace == '1')
++        fprintf(stderr, "Summit drag: native source end, operation %u\n", operation);
 +    m_state->sourceDragActive = false;
 +    m_state->sourceDragPending = false;
 +    m_state->sourceDragTimer = nullptr;
@@ -84263,6 +84323,8 @@ index 0000000000000000000000000000000000000000..395e11a0036f34ea857ca766de25a466
 +{
 +    if (m_status != B_OK || !Window())
 +        return;
++    if (auto* trace = std::getenv("SUMMIT_DRAG_TRACE"); trace && *trace == '1' && strcmp(phase, "updated"))
++        fprintf(stderr, "Summit drag: destination %s\n", phase);
 +    const bool entering = !strcmp(phase, "entered") || !strcmp(phase, "drop");
 +    m_state->dragActive = !strcmp(phase, "entered") || !strcmp(phase, "updated");
 +    UpdateGeometry();
@@ -140033,10 +140095,10 @@ index b9dbf9818f1d6bff413fdd81160d6c7b794f7a77..a562f874e2d8dd6cb4cc026f035904cf
      void postAccessibilityNodeTextChangeNotification(WebCore::AccessibilityObject*, WebCore::AXTextChange, unsigned, const String&) final;
      void postAccessibilityFrameLoadingEventNotification(WebCore::AccessibilityObject*, WebCore::AXLoadingEvent) final;
 diff --git a/Source/WebKit/WebProcess/WebCoreSupport/WebDragClient.cpp b/Source/WebKit/WebProcess/WebCoreSupport/WebDragClient.cpp
-index b3f2fc81270244d1e52568f2355b7e4390ce4ae3..5fe5014f4f1704da10f77f9abe1a5c467b29dfdd 100644
+index b3f2fc81270244d1e52568f2355b7e4390ce4ae3..3ecbd33042a3448f0cd629363a28cfc4df9e8f80 100644
 --- a/Source/WebKit/WebProcess/WebCoreSupport/WebDragClient.cpp
 +++ b/Source/WebKit/WebProcess/WebCoreSupport/WebDragClient.cpp
-@@ -29,6 +29,19 @@
+@@ -29,6 +29,21 @@
  #if ENABLE(DRAG_SUPPORT)
  
  #include "WebPage.h"
@@ -140049,6 +140111,8 @@ index b3f2fc81270244d1e52568f2355b7e4390ce4ae3..5fe5014f4f1704da10f77f9abe1a5c46
 +#include <WebCore/Page.h>
 +#include <WebCore/Pasteboard.h>
 +#include <WebCore/ShareableBitmap.h>
++#include <cstdio>
++#include <cstdlib>
 +#if USE(SKIA)
 +#include <skia/core/SkCanvas.h>
 +#endif
@@ -140056,7 +140120,7 @@ index b3f2fc81270244d1e52568f2355b7e4390ce4ae3..5fe5014f4f1704da10f77f9abe1a5c46
  #include <wtf/TZoneMallocInlines.h>
  
  namespace WebKit {
-@@ -54,8 +67,31 @@ OptionSet<DragSourceAction> WebDragClient::dragSourceActionMaskForPoint(const In
+@@ -54,8 +69,33 @@ OptionSet<DragSourceAction> WebDragClient::dragSourceActionMaskForPoint(const In
  }
  
  #if !PLATFORM(COCOA) && !PLATFORM(GTK) && !PLATFORM(WPE)
@@ -140064,6 +140128,8 @@ index b3f2fc81270244d1e52568f2355b7e4390ce4ae3..5fe5014f4f1704da10f77f9abe1a5c46
 +void WebDragClient::startDrag(DragItem item, DataTransfer& transfer, Frame&, const std::optional<NodeIdentifier>&)
  {
 +#if PLATFORM(HAIKU)
++    if (auto* trace = std::getenv("SUMMIT_DRAG_TRACE"); trace && *trace == '1')
++        fprintf(stderr, "Summit drag: web source start, image %d, operations %u\n", !!item.image, transfer.sourceOperationMask().toRaw());
 +    std::optional<ShareableBitmap::Handle> handle;
 +#if USE(SKIA)
 +    if (auto image = item.image.get()) {
