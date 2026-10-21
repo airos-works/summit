@@ -57,6 +57,12 @@ int main()
     disable_debugger(1);
     BApplication app("application/x-vnd.Summit-GLContextCapabilities");
     WTF::initializeMainThread();
+    image_info image;
+    int32 cookie = 0;
+    while (get_next_image_info(B_CURRENT_TEAM, &cookie, &image) == B_OK) {
+        if (std::strstr(image.name, "libWebKit"))
+            std::printf("Engine: %s\n", image.name);
+    }
     auto display = PlatformDisplayHaiku::create();
     if (!display)
         return 2;

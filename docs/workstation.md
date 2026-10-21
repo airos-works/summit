@@ -496,6 +496,31 @@ recovery, worker quiescence, or a recovered browser document. **#100 remains
 open for that coordinated recovery.** Logs, baseline header identities, source
 audit, bundle manifest and screenshot are in `.vm/issue100/context-state/`.
 
+### Capabilities of replacement contexts, 22 October 2026 (#100)
+
+`4fc6f41` fixes capability discovery for sibling and replacement contexts.
+`GLContext::glExtensions()` stored its result in each context but used a
+process-wide `once_flag`, so only the first context's fields were populated.
+Each context now initializes its own cache. This matters when a replacement
+renderer decides which texture upload and synchronization features it can use.
+
+`tools/bench/gl-context-capabilities.cpp`, built with
+`build-skia-context-teardown.py --source`, compares those fields against the
+actual current context's extension string. The previous `1376553` engine
+correctly reports four supported extensions for the first context, then
+incorrectly reports all four as unavailable in its sibling, the retained
+sibling after the first is destroyed, and a replacement in a fresh share
+group. The candidate passes all **13 checks** with matching capabilities and
+no GL errors. Baseline and candidate probes use their matching headers and
+report the engine library actually loaded.
+
+Normal browser rendering also passes: **38 WebGL capture checks**, GPU canvas
+pixels, animation, scrolling, two tabs, preserved document/text after closing
+the capture tab, and clean shutdown. The screenshot contains all five expected
+color regions; the existing Debugger alert remains untouched. Evidence is in
+`.vm/issue100/capabilities/`. This fixes another replacement-context defect;
+it does not yet implement coordinated recovery of a lost browser compositor.
+
 Evidence, exact source/binary hashes, commands, unsuccessful trials, PNGs and
 terminal driver state are pinned in
 `/mnt/HaikuWork/x399/evidence/wx5100/mesa-native/summit-recovery-manifest.json`.
