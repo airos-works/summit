@@ -3,8 +3,9 @@
 The unprofiled x86_64 airOS candidate at `eefce05` passes **218 native checks**
 for the Inspector CPUProfiler and Memory domains and the new MCP
 `resource_usage` tool. The published `9d1ebd0` airOS release passes 208 checks.
-Stock-Haiku release acceptance fails when stopping a busy JavaScript worker;
-its native JIT-trap crash remains under investigation. Both published
+Stock-Haiku release acceptance failed when stopping a busy JavaScript worker.
+The [signal compatibility fix](vm-traps-haiku-2026-10-22.md) passes native
+candidate tests on both targets; a new full release still needs acceptance. Both published
 `56f49a8` baselines return “domain not found” for these domains, confirming
 the original #120 limitation.
 
@@ -94,6 +95,8 @@ as `SIGILL`/`ILL_PRVOPC`; Haiku commit `1676c2d77c` changed it to
 `SIGBUS`/`BUS_OBJERR` on 29 September. JSC's signal-based VM trap handler
 currently registers for access faults (`SIGSEGV` and `SIGBUS`), so the older
 signal needs separate handling for its known installed trap locations.
+The [implemented compatibility change and candidate acceptance](vm-traps-haiku-2026-10-22.md)
+now cover that older signal without selecting polling traps.
 
 ## Behavior and limits
 

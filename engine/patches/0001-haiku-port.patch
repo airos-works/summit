@@ -553,6 +553,51 @@ index 22302e4f55593a311a60a15f80f7d75ade40db76..6f0938043e9cc7eb5202df3d189d587d
      RETURN_IF_EXCEPTION(scope, encodedJSValue());
      JSObject* target = proxy->target();
      if (applyMethod.isUndefined()) {
+diff --git a/Source/JavaScriptCore/runtime/VMTraps.cpp b/Source/JavaScriptCore/runtime/VMTraps.cpp
+index 54e789b7c71ef967e2b98326c6b69bafc534ddf9..dd4ce57c2909eb711c0c2764b283a40fc75a0329 100644
+--- a/Source/JavaScriptCore/runtime/VMTraps.cpp
++++ b/Source/JavaScriptCore/runtime/VMTraps.cpp
+@@ -206,14 +206,23 @@ public:
+         , m_condition(vm.traps().m_condition)
+     {
+         activateSignalHandlersFor(Signal::AccessFault);
++#if OS(HAIKU) && CPU(X86_64)
++        // Older Haiku kernels deliver the x86 halt instruction's #GP as
++        // SIGILL/ILL_PRVOPC; newer kernels use SIGBUS/BUS_OBJERR.
++        activateSignalHandlersFor(Signal::IllegalInstruction);
++#endif
+     }
+ 
+     static void initializeSignals()
+     {
+         static std::once_flag once;
+         std::call_once(once, [] {
+-            addSignalHandler(Signal::AccessFault, [] (Signal signal, SigInfo&, PlatformRegisters& registers) -> SignalAction {
++            auto handleTrap = [] (Signal signal, SigInfo&, PlatformRegisters& registers) -> SignalAction {
++#if OS(HAIKU) && CPU(X86_64)
++                RELEASE_ASSERT(signal == Signal::AccessFault || signal == Signal::IllegalInstruction);
++#else
+                 RELEASE_ASSERT(signal == Signal::AccessFault);
++#endif
+                 auto signalContext = SignalContext::tryCreate(registers);
+                 if (!signalContext)
+                     return SignalAction::NotHandled;
+@@ -257,7 +266,14 @@ public:
+                 RELEASE_ASSERT(sawCurrentCodeBlock);
+                 
+                 return SignalAction::Handled; // We've successfully jettisoned the codeBlocks.
+-            });
++            };
++#if OS(HAIKU) && CPU(X86_64)
++            // The handler accepts only PCs registered for installed VM trap
++            // breakpoints. Other illegal instructions keep their normal path.
++            auto handleLegacyTrap = handleTrap;
++            addSignalHandler(Signal::IllegalInstruction, WTF::move(handleLegacyTrap));
++#endif
++            addSignalHandler(Signal::AccessFault, WTF::move(handleTrap));
+         });
+     }
+ 
 diff --git a/Source/JavaScriptCore/wasm/WasmMemory.cpp b/Source/JavaScriptCore/wasm/WasmMemory.cpp
 index d2312fb4d921f9ae0532ed47be74f4b1c58fb183..8c4b728f19b6453121d70df873b8830ee9308499 100644
 --- a/Source/JavaScriptCore/wasm/WasmMemory.cpp
