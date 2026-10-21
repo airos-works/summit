@@ -3954,6 +3954,36 @@ index 7d01fe9cd0574de69acfa8356e11f20fe557afc0..0b8adce8aeb7e68827a8c10455eef2d2
  #else
      _exit(status);
  #endif
+diff --git a/Source/WTF/wtf/generic/MainThreadGeneric.cpp b/Source/WTF/wtf/generic/MainThreadGeneric.cpp
+index 6f873d07712d59da0b72512bf2fa433a67adc5d5..5d2e121d96e2b5c97ee58e4202b29846f6abf0d3 100644
+--- a/Source/WTF/wtf/generic/MainThreadGeneric.cpp
++++ b/Source/WTF/wtf/generic/MainThreadGeneric.cpp
+@@ -35,6 +35,10 @@
+ 
+ #include <wtf/RunLoop.h>
+ 
++#if OS(HAIKU)
++#include <time.h>
++#endif
++
+ namespace WTF {
+ 
+ static pthread_t s_mainThread;
+@@ -47,6 +51,14 @@ void initializeMainThreadPlatform()
+     // controlled by a language runtime or virtual machine; for example, in Eclipse, the OS main thread is
+     // controlled by the JVM, while the separate WebKit main thread runs all the GUI and WebKit stuff.
+     s_mainThread = pthread_self();
++#if OS(HAIKU)
++    // libroot lazily loads its ICU locale backend on the first time conversion.
++    // Its ctype tables become visible before they are initialized, so a concurrent
++    // sscanf() can reject valid digits (including libepoxy's GL_VERSION scan).
++    // Finish that initialization before WebKit starts its worker threads. This
++    // preserves the selected locale and time zone; it does not call setlocale().
++    tzset();
++#endif
+ }
+ 
+ bool isMainThread()
 diff --git a/Source/WTF/wtf/haiku/LanguageHaiku.cpp b/Source/WTF/wtf/haiku/LanguageHaiku.cpp
 index f7c1f5175e14e27e4c67598f5424782e2af77050..cde8501928cd6510cb4386b3afb6edd1e961b549 100644
 --- a/Source/WTF/wtf/haiku/LanguageHaiku.cpp

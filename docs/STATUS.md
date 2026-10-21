@@ -1395,6 +1395,14 @@ then stalled during worker-request startup. These are failed acceptance runs,
 not evidence to close #120. See [the report](network-shutdown-2026-10-22.md)
 for the current workload, hashes and native stack.
 
+**22 October follow-up:** `b22cb50` fixes curl requests stranded behind a
+streaming HTTP/1.1 connection; published `e732dd0` stock-Haiku packages pass five
+network cycles. The graphics abort is traced to libroot publishing uninitialized
+locale tables. Early initialization now avoids that race: an isolated airOS
+engine and stock packages with the candidate JavaScriptCore library each pass
+20 complete cycles. See [the locale report](locale-startup-2026-10-22.md) for
+the native reproducer, candidate configurations and pending release checks.
+
 ## Native navigation outcomes and history
 
 Patch `b6ffb54286c7f699389f0502021540bd8b79d9a7b100d242b68e09b8e8889686`

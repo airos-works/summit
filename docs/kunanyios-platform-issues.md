@@ -4,6 +4,16 @@ These are operating-system behaviours that Summit currently works around in its
 WebKit port. Each one has a proper fix in the OS; the workarounds can be removed
 once KunanyiOS ships those fixes. Found on Haiku R1/beta6 hrev59866+79 x86_64.
 
+## Locale backend publishes uninitialized ctype tables (22 October 2026)
+
+The first time conversion loads libroot's ICU backend, which publishes its ctype
+table pointers before filling them. A concurrent `sscanf()` can reject ASCII
+digits, causing libepoxy to abort on a valid Mesa version string. A standalone
+native reproducer also fails on the airOS workstation. Summit initializes this
+backend during engine startup before starting its workers. The OS still needs
+to initialize the tables before publishing them and safely publish the backend.
+See [the diagnosis, reproducer and validation](locale-startup-2026-10-22.md).
+
 ## 1. app_server drops text and bitmaps inside `BView::BeginLayer()` layers
 
 **Symptom.** Any page content inside an element with `opacity < 1` lost its text

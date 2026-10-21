@@ -2,8 +2,9 @@
 
 **Acceptance is incomplete; #120 remains open.** Five stock Haiku cycles
 passed, but a subsequent run caught a compositor-thread abort. The airOS
-request stall is now fixed and verified in an isolated engine; release-package
-validation is pending. Neither earlier failed run is counted as a pass.
+request stall is now fixed and verified in an isolated engine and published
+stock-Haiku packages. The graphics failure is traced to native locale startup;
+its workaround is described below. Neither earlier failed run is counted as a pass.
 
 The test uses published packages with the current engine pin `fb054d0`:
 stock R1/beta6 `cd9de3e`, and airOS `008ccfc`. Both contain the same engine
@@ -54,7 +55,26 @@ quit trace. Shutdown monitoring detected the trapped helper, but the evidence
 does not establish shutdown as its trigger. Standalone native probes passed
 800,000 concurrent scans of that string and 400,000 version queries across four
 EGL contexts. Another 24 browser startup/animation/quit cycles passed. The
-original abort is retained as a failure and remains unexplained.
+original abort is retained as a failure. The subsequent investigation below
+identifies the first-time locale initialization those standalone probes missed.
+
+### Published network fix and locale startup diagnosis
+
+Release CI [39646509855](https://github.com/jmgasper/summit/actions/runs/39646509855)
+completed successfully. Stock-Haiku packages `e732dd0` (21 October, 17:44 UTC),
+containing `b22cb50`, pass five full TLS/worker/WebSocket shutdown and persistence
+cycles without a preload. The loaded runtime and fixture hashes remain unchanged,
+all owned groups exit, and the native crash interval is clean. This verifies the
+network fix in the release configuration; that release predates the locale
+workaround.
+
+Further diagnostics reproduced the graphics abort and identified a separate
+libroot initialization race: the first time conversion publishes its ICU ctype
+tables before filling them. A concurrent `sscanf()` can then reject the `3` in
+the valid Mesa version string. Early locale initialization now works around this
+in the Haiku engine. See [the locale investigation](locale-startup-2026-10-22.md)
+and [its evidence](locale-startup-2026-10-22.json) for the reproducer, candidate
+browser checks, and remaining release validation.
 
 ## Workload and results
 
@@ -82,10 +102,9 @@ The stock failure's native stack runs through libepoxy,
 `TextureMapper::bindDefaultSurface()`,
 `ThreadedCompositor::paintToTextureMapper()` and `renderLayerTree()`.
 It is a **WebProcess graphics failure**, distinct from the historical
-NetworkProcess exit reports. Its cause has not been established. Earlier
-airOS attempts also stalled during worker startup; the captured network
-diagnostics do not yet distinguish a browser defect from a fixture/server
-interaction.
+NetworkProcess exit reports. The follow-ups above establish the locale-startup
+cause and the separate curl connection-wait defect; the original failures are
+retained in the report.
 
 The existing NetworkProcess fix still calls `exitProcess()` after normal
 auxiliary event-loop/session teardown, avoiding libbe static destruction
