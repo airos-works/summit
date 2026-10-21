@@ -170,8 +170,11 @@ the tab closed a waiting sheet.
 
 ## Remaining work
 
-- `BWebView` programs (WebPositive on Summit's engine, [legacy-webview.md](legacy-webview.md))
-  still get no `AUTHENTICATION_CHALLENGE`: the compatibility library does not
-  yet ask for `B_WEBKIT_AUTHENTICATION_REQUESTED`.
+- `BWebView` programs now receive `AUTHENTICATION_CHALLENGE` through the
+  compatibility library; the installed WebPositive passes Basic/Digest,
+  retry, Cancel, empty credentials and session reuse
+  ([native acceptance](legacy-authentication-2026-10-22.md)). Certificate-error
+  forwarding, legacy NTLM/proxy acceptance and persistent Remember testing
+  remain unfinished.
 - A saved account is not tied to the realm: a site's form password and its
   HTTP password share the site's entry in the key store.

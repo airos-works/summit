@@ -85,6 +85,9 @@ public:
 	uint64 nextScript = 1;
 	// Scripts whose answers the page waits for, by identifier: what they are for.
 	std::map<uint64, uint32> scripts;
+	// Legacy listeners reply without an identifier. A separate reply handler
+	// binds each response to its engine challenge, on the application looper.
+	std::map<uint64, std::unique_ptr<BHandler>> authentications;
 };
 
 // A download the engine reported, until it is finished and handed over.

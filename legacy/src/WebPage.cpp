@@ -14,6 +14,7 @@
 #include <DataIO.h>
 #include <Window.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -24,7 +25,8 @@ BMessenger BWebPage::sDownloadListener;
 
 namespace {
 enum {
-	kShutdown = 'swsd'
+	kShutdown = 'swsd',
+	kAuthenticationAnswered = 'saau'
 };
 enum : uint32 {
 	kScriptPageSource = 1
@@ -35,6 +37,54 @@ StringField(const BMessage& message, const char* name)
 {
 	const char* value = nullptr;
 	return message.FindString(name, &value) == B_OK && value != nullptr ? BString(value) : BString();
+}
+
+// Waiting synchronously for the legacy listener here would block the engine's
+// application thread while WebPositive's authentication panel is open.
+class AuthenticationReply final : public BHandler {
+public:
+	AuthenticationReply(BMessenger page, uint64 identifier)
+		: BHandler("legacy authentication reply"), fPage(page), fIdentifier(identifier) { }
+
+	void MessageReceived(BMessage* message) override
+	{
+		if (!message->IsReply()) {
+			BHandler::MessageReceived(message);
+			return;
+		}
+		const char* user = nullptr;
+		const char* password = nullptr;
+		if (message->FindString("user", &user) != B_OK
+			|| message->FindString("password", &password) != B_OK)
+			BWebKitView::CancelAuthentication(fIdentifier);
+		else if (!user[0] && !password[0])
+			BWebKitView::AnswerAuthentication(fIdentifier, nullptr, nullptr);
+		else {
+			// WebPositive manages Remember in its own credential storage.
+			// The engine keeps an accepted credential only for this session.
+			BWebKitView::AnswerAuthentication(fIdentifier, user, password,
+				B_WEBKIT_CREDENTIAL_FOR_SESSION);
+		}
+		BMessage finished(kAuthenticationAnswered);
+		finished.AddUInt64("identifier", fIdentifier);
+		fPage.SendMessage(&finished);
+	}
+
+private:
+	BMessenger fPage;
+	uint64 fIdentifier;
+};
+
+void
+ForgetAuthentication(BPrivate::WebPagePrivate& data, uint64 identifier)
+{
+	auto found = data.authentications.find(identifier);
+	if (found == data.authentications.end())
+		return;
+	BHandler* handler = found->second.get();
+	if (handler->Looper() != nullptr)
+		handler->Looper()->RemoveHandler(handler);
+	data.authentications.erase(found);
 }
 }
 
@@ -118,6 +168,7 @@ WebCore::ChromeClientHaiku::CreateEngineView(BWebPage* page)
 	BWebKitView* view = request != 0
 		? new BWebKitView(frame, "engine view", BMessenger(page), request, B_FOLLOW_ALL, context)
 		: new BWebKitView(frame, "engine view", BMessenger(page), B_FOLLOW_ALL, context);
+	view->SetAuthenticationRequests(true);
 	page->fWebView->AddChild(view);
 	if (getenv("SUMMIT_LEGACY_TRACE") != nullptr)
 		fprintf(stderr, "Summit legacy page %p: engine view %s, frame %.0fx%.0f, in window %d, hidden %d\n", page,
@@ -455,6 +506,57 @@ void
 BWebPage::MessageReceived(BMessage* message)
 {
 	switch (message->what) {
+		case B_WEBKIT_AUTHENTICATION_REQUESTED:
+		{
+			const uint64 identifier = message->GetUInt64("identifier", 0);
+			if (!identifier)
+				break;
+			if (message->GetBool("withdrawn", false)) {
+				// A late reply to an abandoned navigation must not answer a
+				// different challenge or retain a handler for a closed page.
+				ForgetAuthentication(*fPagePrivate, identifier);
+				break;
+			}
+			if (fPagePrivate->authentications.contains(identifier))
+				break;
+			bool shuttingDown;
+			{
+				std::lock_guard lock(fPagePrivate->lock);
+				shuttingDown = fPagePrivate->shutDown;
+			}
+			if (shuttingDown || fWebView == nullptr || !fListener.IsValid() || Looper() == nullptr) {
+				BWebKitView::AnswerAuthentication(identifier, nullptr, nullptr);
+				break;
+			}
+			BString text(message->GetBool("proxy", false) ? "Proxy \"" : "Host \"");
+			// WebPositive uses this text as its credential key. Include the
+			// scheme and port so different origins cannot share that key.
+			text << (message->GetBool("secure", false) ? "https://" : "http://")
+				<< message->GetString("host", "") << ":" << message->GetInt32("port", 0)
+				<< "\" requests authentication for realm \"" << message->GetString("realm", "")
+				<< "\"\nAuthentication scheme: " << message->GetString("scheme", "");
+			if (!message->GetBool("secure", false)
+				&& StringField(*message, "scheme") == "basic")
+				text << " (credentials are sent without encryption)";
+			BMessage challenge(AUTHENTICATION_CHALLENGE);
+			challenge.AddString("text", text);
+			challenge.AddString("user", message->GetString("user", ""));
+			challenge.AddString("password", "");
+			challenge.AddUInt32("failureCount", std::max<int32>(0, message->GetInt32("previous_failures", 0)));
+			challenge.AddPointer("view", fWebView);
+			auto reply = std::make_unique<AuthenticationReply>(BMessenger(this), identifier);
+			Looper()->AddHandler(reply.get());
+			BMessenger target(reply.get());
+			fPagePrivate->authentications.emplace(identifier, std::move(reply));
+			if (fListener.SendMessage(&challenge, target, 0) != B_OK) {
+				ForgetAuthentication(*fPagePrivate, identifier);
+				BWebKitView::AnswerAuthentication(identifier, nullptr, nullptr);
+			}
+			break;
+		}
+		case kAuthenticationAnswered:
+			ForgetAuthentication(*fPagePrivate, message->GetUInt64("identifier", 0));
+			break;
 		case B_WEBKIT_STATE_CHANGED:
 		{
 			const BString url = StringField(*message, "url");
@@ -642,6 +744,11 @@ BWebPage::MessageReceived(BMessage* message)
 		}
 		case kShutdown:
 		{
+			while (!fPagePrivate->authentications.empty()) {
+				const uint64 identifier = fPagePrivate->authentications.begin()->first;
+				BWebKitView::CancelAuthentication(identifier);
+				ForgetAuthentication(*fPagePrivate, identifier);
+			}
 			// On the application thread, as before: the view (and with it the
 			// engine's page) goes, then the page.
 			if (fWebView != nullptr) {
