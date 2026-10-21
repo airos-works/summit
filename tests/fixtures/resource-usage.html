@@ -1,0 +1,43 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>CPU and memory timeline acceptance</title>
+<p>Controlled CPU workers and retained JavaScript memory for native Inspector tests.</p>
+<script>
+'use strict';
+window.resourceProbe = {
+    workers: [], allocation: null,
+    async startWorkers(count = 2) {
+        this.stopWorkers();
+        const code = `
+            let accumulator = 0;
+            function work() {
+                const end = performance.now() + 35;
+                do { for (let i = 0; i < 10000; ++i) accumulator += Math.sqrt(i + accumulator % 19); }
+                while (performance.now() < end);
+                setTimeout(work, 0);
+            }
+            postMessage('ready'); work();`;
+        const url = URL.createObjectURL(new Blob([code], {type: 'text/javascript'}));
+        try {
+            await Promise.all(Array.from({length: count}, (_, i) => new Promise((resolve, reject) => {
+                const worker = new Worker(url, {name: 'resource-load-' + i});
+                this.workers.push(worker);
+                worker.onmessage = () => resolve();
+                worker.onerror = event => reject(new Error(event.message));
+            })));
+        } finally { URL.revokeObjectURL(url); }
+        return this.workers.length;
+    },
+    stopWorkers() {
+        for (const worker of this.workers) worker.terminate();
+        this.workers = [];
+        return true;
+    },
+    allocate(mebibytes = 32) {
+        this.allocation = new Uint8Array(mebibytes * 1024 * 1024);
+        this.allocation.fill(173);
+        return {bytes: this.allocation.byteLength, first: this.allocation[0], last: this.allocation.at(-1)};
+    },
+    release() { this.allocation = null; return true; }
+};
+</script>
