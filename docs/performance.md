@@ -1,5 +1,46 @@
 # Summit performance: Speedometer 3.1 baseline, where the time goes, stress test
 
+## 21 October 2026: composited backdrop filters (#98)
+
+The empty-layer shortcut treated a backdrop layer as empty because it has no
+backing store of its own. Such a layer samples the preceding content, so it
+must still paint. Commit `1efc1ef` excludes backdrop layers from that shortcut.
+This restored the blur over composited siblings. A second fixture exposed
+later siblings being included in the backdrop replay: returning at the effect
+target skipped only that branch, then the parent's loop continued. Commit
+`78d17a3` stops the traversal there and scopes that state to the backdrop pass.
+
+Native GTX 1070/zink acceptance used an isolated bundle and profile, at rendering
+scales 1 and 2 (`devicePixelRatio` checked; desktop preferences stayed at 200%).
+`tests/fixtures/composited-filters.html` and
+`tools/bench/check-filter-captures.py` cover a 20px backdrop blur over composited
+black/white stripes, a 40px red glow, and a later blue foreground sibling.
+The old engine fails the backdrop sharpness assertion. The final engine passes:
+
+- The blurred stripe interior averages 140.5/140.4 out of 255 at 100%/200%,
+  against the expected 140.25, with standard deviation 2.64/2.63. Stripes
+  outside the filter retain their full black-to-white range.
+- The foreground sibling changes no pixels in the earlier backdrop beside it.
+  A second comparison with the foreground covering the source image also
+  preserves the visible part of the backdrop exactly.
+- The red glow fades beyond all its original edges. Its mean absolute channel
+  difference from WebCore's software snapshot is at most 1.15/1.45, with maximum
+  error 9/11. This simple blur already faded correctly in the current baseline;
+  no extra padding change was needed for this case.
+
+The first 200% capture immediately after resizing a fresh window showed an
+incomplete presentation. The settled repeat passed; this is not evidence that
+initial presentation or context-loss recovery (#100) is fixed. The test checks
+actual page screenshots. `page_render` is used only for the ordinary blur:
+WebCore's snapshot does not reproduce the compositor's backdrop pass.
+
+On YouTube search results scrolled beneath the header, the native page uses
+`backdrop-filter: blur(48px)` and a 90% white background. Holding the page and
+background fixed, temporarily reducing the blur to 0.01px increased the mean
+adjacent-pixel difference in an uncovered header strip from 0.072 to 0.355.
+The normal blur was restored after capturing both versions. This confirms that
+the header now blurs the thumbnails rather than merely tinting them.
+
 ## 21 October 2026: X399 renderer, media seek and PGO recovery
 
 The X399 has its GTX 1070 again, with hrev60207+1733, two 4K displays at
@@ -996,7 +1037,8 @@ looked like a regression after the OS was updated (the session's
 
 Found, not fixed: `backdrop-filter` does not blur a composited sibling
 painted before it (a `will-change: transform` card under a blurred box stays
-sharp, in the builds before and after this work).
+sharp, in the builds before and after this work). This was subsequently fixed
+and verified on 21 October under "composited backdrop filters (#98)" above.
 
 ## 14 October 2026: YouTube on the Cubie A7S
 
@@ -10703,7 +10745,9 @@ device pixels: at 200% every composited blur, including every
 are now scaled by the layer's scale before TextureMapper applies them. One
 difference remains: TextureMapper samples the layer's edge pixels beyond its
 edge, so a composited blur keeps hard outer edges where the software blur
-fades them into transparency.
+fades them into transparency. The 21 October #98 recheck above no longer
+reproduced this on the composited coloured-box fixture: its existing outset
+surface fades smoothly and closely matches the software snapshot.
 
 ### Stale and black tiles (found while checking the above)
 
