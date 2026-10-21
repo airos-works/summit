@@ -69848,10 +69848,10 @@ index be40151510176ea4e881fd41af8f79ab6ab6a306..b5fdd6e41375e8108fb406089992f8e5
      if (metaData.headerHash != computeSHA1(headerData, salt)) {
          LOG(NetworkCacheStorage, "(NetworkProcess) header checksum mismatch");
 diff --git a/Source/WebKit/NetworkProcess/curl/NetworkDataTaskCurl.cpp b/Source/WebKit/NetworkProcess/curl/NetworkDataTaskCurl.cpp
-index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..ced47ba522b16100692d80113bd1a607b1f77dd5 100644
+index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..390ff50c3b21b4490339985779299878dd9388a8 100644
 --- a/Source/WebKit/NetworkProcess/curl/NetworkDataTaskCurl.cpp
 +++ b/Source/WebKit/NetworkProcess/curl/NetworkDataTaskCurl.cpp
-@@ -36,7 +36,9 @@
+@@ -36,11 +36,14 @@
  #include "PrivateRelayed.h"
  #include "WebErrors.h"
  #include <WebCore/AuthenticationChallenge.h>
@@ -69861,7 +69861,38 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..ced47ba522b16100692d80113bd1a607
  #include <WebCore/CurlRequest.h>
  #include <WebCore/NetworkLoadMetrics.h>
  #include <WebCore/NotImplemented.h>
-@@ -79,11 +81,20 @@ NetworkDataTaskCurl::NetworkDataTaskCurl(NetworkSession& session, NetworkDataTas
+ #include <WebCore/OriginAccessPatterns.h>
++#include <WebCore/ParsedContentRange.h>
+ #include <WebCore/ResourceError.h>
+ #include <WebCore/SameSiteInfo.h>
+ #include <WebCore/SharedBuffer.h>
+@@ -48,11 +51,25 @@
+ #include <WebCore/TimingAllowOrigin.h>
+ #include <pal/text/TextEncoding.h>
+ #include <wtf/FileSystem.h>
++#if PLATFORM(HAIKU)
++#include <wtf/text/StringToIntegerConversion.h>
++#endif
+ 
+ namespace WebKit {
+ 
+ using namespace WebCore;
+ 
++#if PLATFORM(HAIKU)
++// N of the "Range: bytes=N-" a paused download continues with.
++static std::optional<uint64_t> requestedRangeStartHaiku(const ResourceRequest& request)
++{
++    auto range = request.httpHeaderField(HTTPHeaderName::Range);
++    if (!range.startsWith("bytes="_s) || !range.endsWith('-'))
++        return std::nullopt;
++    return parseInteger<uint64_t>(StringView(range).substring(6, range.length() - 7));
++}
++#endif
++
+ NetworkDataTaskCurl::NetworkDataTaskCurl(NetworkSession& session, NetworkDataTaskClient& client, const NetworkLoadParameters& parameters)
+     : NetworkDataTask(session, client, parameters.request, parameters.storedCredentialsPolicy, parameters.shouldClearReferrerOnHTTPSToHTTPRedirect, parameters.isMainFrameNavigation, parameters.isInitiatedByDedicatedWorker)
+     , m_frameID(parameters.webFrameID)
+@@ -79,11 +96,20 @@ NetworkDataTaskCurl::NetworkDataTaskCurl(NetworkSession& session, NetworkDataTas
          blockCookies();
      restrictRequestReferrerToOriginIfNeeded(request);
  
@@ -69882,7 +69913,7 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..ced47ba522b16100692d80113bd1a607
  }
  
  NetworkDataTaskCurl::~NetworkDataTaskCurl()
-@@ -101,6 +112,15 @@ void NetworkDataTaskCurl::resume()
+@@ -101,6 +127,15 @@ void NetworkDataTaskCurl::resume()
  
      if (m_curlRequest)
          m_curlRequest->resume();
@@ -69898,7 +69929,24 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..ced47ba522b16100692d80113bd1a607
  }
  
  void NetworkDataTaskCurl::cancel()
-@@ -132,7 +152,12 @@ NetworkDataTask::State NetworkDataTaskCurl::state() const
+@@ -113,8 +148,15 @@ void NetworkDataTaskCurl::cancel()
+     if (m_curlRequest)
+         m_curlRequest->cancel();
+ 
+-    if (isDownload())
++    if (isDownload()) {
++#if PLATFORM(HAIKU)
++        // The UI process's download registry removes the partial file, or
++        // keeps it for a paused download to continue in.
++        m_downloadDestinationFile = { };
++#else
+         deleteDownloadFile();
++#endif
++    }
+ }
+ 
+ void NetworkDataTaskCurl::invalidateAndCancel()
+@@ -132,7 +174,12 @@ NetworkDataTask::State NetworkDataTaskCurl::state() const
  
  Ref<CurlRequest> NetworkDataTaskCurl::createCurlRequest(ResourceRequest&& request, RequestStatus status)
  {
@@ -69912,7 +69960,7 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..ced47ba522b16100692d80113bd1a607
          appendCookieHeader(request);
  
      // Creates a CurlRequest in suspended state.
-@@ -142,6 +167,10 @@ Ref<CurlRequest> NetworkDataTaskCurl::createCurlRequest(ResourceRequest&& reques
+@@ -142,6 +189,10 @@ Ref<CurlRequest> NetworkDataTaskCurl::createCurlRequest(ResourceRequest&& reques
  
      if (m_session->networkProcess().localhostAliasesForTesting().contains<StringViewHashTranslator>(curlRequest->resourceRequest().url().host()))
          curlRequest->enableLocalhostAlias();
@@ -69923,7 +69971,7 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..ced47ba522b16100692d80113bd1a607
  
      return curlRequest;
  }
-@@ -168,7 +197,7 @@ void NetworkDataTaskCurl::curlDidReceiveResponse(CurlRequest& request, CurlRespo
+@@ -168,7 +219,7 @@ void NetworkDataTaskCurl::curlDidReceiveResponse(CurlRequest& request, CurlRespo
  
      handleCookieHeaders(request.resourceRequest(), receivedResponse);
  
@@ -69932,7 +69980,7 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..ced47ba522b16100692d80113bd1a607
          willPerformHTTPRedirection();
          return;
      }
-@@ -236,7 +265,12 @@ void NetworkDataTaskCurl::curlDidFailWithError(CurlRequest& request, ResourceErr
+@@ -236,13 +287,22 @@ void NetworkDataTaskCurl::curlDidFailWithError(CurlRequest& request, ResourceErr
      if (state() == State::Canceling || state() == State::Completed || (!m_client && !isDownload()))
          return;
  
@@ -69946,7 +69994,17 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..ced47ba522b16100692d80113bd1a607
          tryServerTrustEvaluation(AuthenticationChallenge(request.resourceRequest().url(), certificateInfo, resourceError));
          return;
      }
-@@ -256,22 +290,6 @@ void NetworkDataTaskCurl::curlDidFailWithError(CurlRequest& request, ResourceErr
+ 
+     if (isDownload()) {
++#if PLATFORM(HAIKU)
++        m_downloadDestinationFile = { };
++#else
+         deleteDownloadFile();
++#endif
+         if (m_client)
+             m_client->didCompleteWithError(resourceError);
+         else {
+@@ -256,22 +316,6 @@ void NetworkDataTaskCurl::curlDidFailWithError(CurlRequest& request, ResourceErr
      m_client->didCompleteWithError(resourceError);
  }
  
@@ -69969,7 +70027,38 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..ced47ba522b16100692d80113bd1a607
  bool NetworkDataTaskCurl::shouldRedirectAsGET(const ResourceRequest& request, bool crossOrigin)
  {
      if (request.httpMethod() == "GET"_s || request.httpMethod() == "HEAD"_s)
-@@ -409,6 +427,7 @@ void NetworkDataTaskCurl::willPerformHTTPRedirection()
+@@ -307,6 +351,30 @@ void NetworkDataTaskCurl::invokeDidReceiveResponse()
+             invalidateAndCancel();
+             break;
+         case PolicyAction::Download: {
++#if PLATFORM(HAIKU)
++            // A destination the UI process lets us write to is a paused
++            // download's partial file: the rest of it (206 from the offset
++            // asked for) is appended; a whole file (200) replaces it.
++            std::optional<uint64_t> resumeOffset;
++            if (m_allowOverwriteDownload && m_response.httpStatusCode() == 206) {
++                auto asked = requestedRangeStartHaiku(m_curlRequest ? m_curlRequest->resourceRequest() : m_firstRequest);
++                ParsedContentRange range(m_response.httpHeaderField(HTTPHeaderName::ContentRange));
++                if (asked && range.isValid() && static_cast<uint64_t>(range.firstBytePosition()) == *asked) {
++                    m_downloadDestinationFile = FileSystem::openFile(m_pendingDownloadLocation, FileSystem::FileOpenMode::ReadWrite);
++                    auto size = m_downloadDestinationFile ? m_downloadDestinationFile.size() : std::nullopt;
++                    if (!size || *size < *asked || !m_downloadDestinationFile.truncate(*asked)
++                        || m_downloadDestinationFile.seek(*asked, FileSystem::FileSeekOrigin::Beginning) != asked)
++                        m_downloadDestinationFile = { };
++                    resumeOffset = asked;
++                }
++                if (!resumeOffset) {
++                    if (m_client)
++                        m_client->didCompleteWithError(ResourceError(CURLE_RANGE_ERROR, m_response.url()));
++                    invalidateAndCancel();
++                    return;
++                }
++            } else
++#endif
+             m_downloadDestinationFile = FileSystem::openFile(m_pendingDownloadLocation, FileSystem::FileOpenMode::Truncate, FileSystem::FileAccessPermission::All, { }, !m_allowOverwriteDownload);
+             if (!m_downloadDestinationFile) {
+                 if (m_client)
+@@ -409,6 +477,7 @@ void NetworkDataTaskCurl::willPerformHTTPRedirection()
              m_curlRequest->setUserPass(m_initialCredential.user(), m_initialCredential.password());
              m_curlRequest->setAuthenticationScheme(ProtectionSpace::AuthenticationScheme::HTTPBasic);
          }
@@ -69977,7 +70066,7 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..ced47ba522b16100692d80113bd1a607
  
          if (m_state != State::Suspended) {
              m_state = State::Suspended;
-@@ -531,6 +550,7 @@ void NetworkDataTaskCurl::restartWithCredential(const ProtectionSpace& protectio
+@@ -531,6 +600,7 @@ void NetworkDataTaskCurl::restartWithCredential(const ProtectionSpace& protectio
      m_curlRequest->setUserPass(credential.user(), credential.password());
      if (shouldDisableServerTrustEvaluation)
          m_curlRequest->disableServerTrustEvaluation();
@@ -69985,7 +70074,7 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..ced47ba522b16100692d80113bd1a607
  
      if (m_state != State::Suspended) {
          m_state = State::Suspended;
-@@ -538,11 +558,30 @@ void NetworkDataTaskCurl::restartWithCredential(const ProtectionSpace& protectio
+@@ -538,11 +608,30 @@ void NetworkDataTaskCurl::restartWithCredential(const ProtectionSpace& protectio
      }
  }
  
@@ -70017,7 +70106,7 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..ced47ba522b16100692d80113bd1a607
          if (!cookieHeaderField.isEmpty())
              request.addHTTPHeaderField(HTTPHeaderName::Cookie, cookieHeaderField);
      }
-@@ -552,10 +591,24 @@ void NetworkDataTaskCurl::handleCookieHeaders(const WebCore::ResourceRequest& re
+@@ -552,10 +641,24 @@ void NetworkDataTaskCurl::handleCookieHeaders(const WebCore::ResourceRequest& re
  {
      static constexpr auto setCookieHeader = "set-cookie: "_s;
  
@@ -80155,10 +80244,10 @@ index 0000000000000000000000000000000000000000..574ed16658f0c14b1aa2e63208e990b8
 +#define WEBKIT_ENGINE_VERSION_HAIKU "@WebKit_HAIKU_MAJOR_VERSION@.@WebKit_HAIKU_MINOR_VERSION@.@WebKit_HAIKU_TINY_VERSION@"
 diff --git a/Source/WebKit/UIProcess/API/haiku/WebKitContext.cpp b/Source/WebKit/UIProcess/API/haiku/WebKitContext.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..42f0b5da464387f0f25583e53a7c7553751d9376
+index 0000000000000000000000000000000000000000..fb7a4e1a0fc55b6e68bf44cb9939cdff9d05b241
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/API/haiku/WebKitContext.cpp
-@@ -0,0 +1,1016 @@
+@@ -0,0 +1,1064 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#include "config.h"
@@ -80686,6 +80775,54 @@ index 0000000000000000000000000000000000000000..42f0b5da464387f0f25583e53a7c7553
 +    });
 +}
 +
++void BWebKitContext::PauseDownload(uint64 identifier)
++{
++    if (m_status != B_OK)
++        return;
++    WTF::RunLoop::mainSingleton().dispatch([context = m_context, identifier] {
++        context->downloads()->pause(identifier);
++    });
++}
++
++void BWebKitContext::PauseAllDownloads()
++{
++    if (m_status != B_OK)
++        return;
++    WTF::RunLoop::mainSingleton().dispatch([context = m_context] {
++        context->downloads()->pauseAll();
++    });
++}
++
++status_t BWebKitContext::SetKeepFailedDownloads(bool keep)
++{
++    if (m_status != B_OK)
++        return m_status;
++    if (!be_app || be_app->Thread() != find_thread(nullptr))
++        return B_BAD_THREAD_ID;
++    return m_context->downloads()->setKeepFailedDownloads(keep);
++}
++
++status_t BWebKitContext::ResumeDownload(const char* url, const char* path, const char* validator, int64 expectedSize,
++    const BMessenger& view, uint64* identifier)
++{
++    if (m_status != B_OK)
++        return m_status;
++    if (!be_app || be_app->Thread() != find_thread(nullptr))
++        return B_BAD_THREAD_ID;
++    if (!url || !*url || !identifier)
++        return B_BAD_VALUE;
++    auto address = String::fromUTF8(url);
++    auto file = String::fromUTF8(path ? path : "");
++    auto check = String::fromUTF8(validator ? validator : "");
++    if (address.isNull() || (path && *path && file.isNull()) || (validator && *validator && check.isNull()))
++        return B_BAD_VALUE;
++    uint64_t created = 0;
++    auto status = m_context->resumeDownload(address, file, check, expectedSize, view, created);
++    if (status == B_OK)
++        *identifier = created;
++    return status;
++}
++
 +bool BWebKitContext::HasPendingDownloads() const
 +{
 +    return m_context && m_context->downloads()->hasPendingDownloads();
@@ -81177,10 +81314,10 @@ index 0000000000000000000000000000000000000000..42f0b5da464387f0f25583e53a7c7553
 +}
 diff --git a/Source/WebKit/UIProcess/API/haiku/WebKitContext.h b/Source/WebKit/UIProcess/API/haiku/WebKitContext.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..257e6b2d5a9d17617824a4f449caaf73f45eb843
+index 0000000000000000000000000000000000000000..72bab1c11dab43735c106b1d3c85c5901d5e4e7c
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/API/haiku/WebKitContext.h
-@@ -0,0 +1,423 @@
+@@ -0,0 +1,456 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#pragma once
@@ -81206,6 +81343,15 @@ index 0000000000000000000000000000000000000000..257e6b2d5a9d17617824a4f449caaf73
 +// STARTED registers the operation; path may remain empty until PROGRESS reports
 +// that the NetworkProcess has created the destination. FINISHED always carries
 +// the final counters, including transfers too short for a progress update.
++// Once the server has answered, notifications also contain request_url (the
++// address first asked for, before redirects), validator (string: the strong
++// ETag, else Last-Modified, for ResumeDownload; empty when the server gave
++// neither) and accepts_ranges (bool: the server can send part of the file).
++// A resumed download (ResumeDownload) has its path from STARTED on and
++// resumed_from (uint64): the bytes the server agreed to continue after (0 when
++// it sent the whole file again, restarted then being true). FINISHED says
++// with partial (bool) whether an incomplete file was kept at path: always
++// after pausing, after a failure when SetKeepFailedDownloads is on.
 +enum : uint32 {
 +    B_WEBKIT_DOWNLOAD_STARTED = 'wdst',
 +    B_WEBKIT_DOWNLOAD_PROGRESS = 'wdpr',
@@ -81224,7 +81370,8 @@ index 0000000000000000000000000000000000000000..257e6b2d5a9d17617824a4f449caaf73
 +enum : uint32 {
 +    B_WEBKIT_DOWNLOAD_SUCCEEDED,
 +    B_WEBKIT_DOWNLOAD_FAILED,
-+    B_WEBKIT_DOWNLOAD_CANCELLED
++    B_WEBKIT_DOWNLOAD_CANCELLED,
++    B_WEBKIT_DOWNLOAD_PAUSED
 +};
 +
 +// Browser commands ask the host to change its own tab and window model for a
@@ -81532,8 +81679,31 @@ index 0000000000000000000000000000000000000000..257e6b2d5a9d17617824a4f449caaf73
 +    // Cancellation may be requested from any looper while this context is alive.
 +    // Completion is asynchronous. An engine finish/failure that wins the race
 +    // retains its result; otherwise the terminal result is CANCELLED.
++    // Cancelling removes the partial file.
 +    void CancelDownload(uint64 identifier);
 +    void CancelAllDownloads();
++    // Pausing stops a download as cancelling does, from any looper, but keeps
++    // its partial file: FINISHED has result PAUSED (unless the transfer ended
++    // first) and partial true once the file exists.
++    void PauseDownload(uint64 identifier);
++    void PauseAllDownloads();
++    // On (off by default): a failed transfer keeps its partial file too, to be
++    // resumed. Application thread, while no download is pending.
++    status_t SetKeepFailedDownloads(bool);
++    // Continues a download that was paused, failed or cut off (for example by
++    // a crash) in its partial file at path, on the application thread. path
++    // must be in the download directory and not be written by another
++    // download; when it is empty or the file is gone the download starts
++    // afresh (a new file for an empty path). The new download asks url for
++    // the rest from the file's size (Range) if the file is unchanged on the
++    // server (If-Range with validator, as its earlier download reported).
++    // Without a validator, an answer whose total size is not expectedSize
++    // (when that is >= 0) fails rather than mixing two files. A server that
++    // sends the whole file instead starts it over from zero (restarted).
++    // identifier receives the new download's; its notifications follow as
++    // for any other, to view's window when view is valid.
++    status_t ResumeDownload(const char* url, const char* path, const char* validator, int64 expectedSize,
++        const BMessenger& view, uint64* identifier);
 +    // Query on the application thread after queued view commands have drained.
 +    // Keep its RunLoop and this context alive until cancellation replies finish.
 +    bool HasPendingDownloads() const;
@@ -108517,10 +108687,10 @@ index 0000000000000000000000000000000000000000..4bacf045a2c597f0e182667aa572dc93
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/DownloadRegistryHaiku.cpp b/Source/WebKit/UIProcess/haiku/DownloadRegistryHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..a45f40a65f8f25639ae2b7d14f3804d2ca9700fe
+index 0000000000000000000000000000000000000000..187f107ab945107268ef80443ca14ef5c64bcf28
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/DownloadRegistryHaiku.cpp
-@@ -0,0 +1,489 @@
+@@ -0,0 +1,661 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#include "config.h"
@@ -108531,6 +108701,8 @@ index 0000000000000000000000000000000000000000..a45f40a65f8f25639ae2b7d14f3804d2
 +#include "DownloadProxy.h"
 +#include "WebKitContext.h"
 +#include <Message.h>
++#include <WebCore/HTTPHeaderNames.h>
++#include <WebCore/ParsedContentRange.h>
 +#include <WebCore/ResourceError.h>
 +#include <WebCore/ResourceResponse.h>
 +#include <cerrno>
@@ -108544,6 +108716,8 @@ index 0000000000000000000000000000000000000000..a45f40a65f8f25639ae2b7d14f3804d2
 +#include <wtf/RunLoop.h>
 +#include <wtf/TZoneMallocInlines.h>
 +#include <wtf/text/CString.h>
++#include <wtf/text/MakeString.h>
++#include <wtf/text/StringToIntegerConversion.h>
 +
 +namespace WebKit {
 +
@@ -108648,6 +108822,36 @@ index 0000000000000000000000000000000000000000..a45f40a65f8f25639ae2b7d14f3804d2
 +    const std::weak_ptr<DownloadRegistryHaiku> m_registry;
 +};
 +
++// What If-Range can name: a strong ETag (a weak one never matches a range),
++// else the Last-Modified date.
++static String validatorOf(const WebCore::ResourceResponse& response)
++{
++    auto etag = response.httpHeaderField(WebCore::HTTPHeaderName::ETag).trim(isASCIIWhitespace<char16_t>);
++    if (!etag.isEmpty() && !etag.startsWith("W/"_s))
++        return etag;
++    return response.httpHeaderField(WebCore::HTTPHeaderName::LastModified).trim(isASCIIWhitespace<char16_t>);
++}
++
++static bool acceptsByteRanges(const WebCore::ResourceResponse& response)
++{
++    if (response.httpStatusCode() == 206)
++        return true;
++    for (auto unit : response.httpHeaderField(WebCore::HTTPHeaderName::AcceptRanges).split(',')) {
++        if (equalLettersIgnoringASCIICase(unit.trim(isASCIIWhitespace<char16_t>), "bytes"_s))
++            return true;
++    }
++    return false;
++}
++
++// The size a 416 answer gives ("Content-Range: bytes */1234").
++static std::optional<uint64_t> unsatisfiedRangeLength(const WebCore::ResourceResponse& response)
++{
++    auto value = response.httpHeaderField(WebCore::HTTPHeaderName::ContentRange).trim(isASCIIWhitespace<char16_t>);
++    if (!value.startsWith("bytes */"_s))
++        return std::nullopt;
++    return parseInteger<uint64_t>(StringView(value).substring(8));
++}
++
 +struct DownloadRegistryHaiku::Entry {
 +    explicit Entry(DownloadProxy& proxy, const BMessenger& listener, const String& directory)
 +        : download(proxy), target(listener), directory(directory) { }
@@ -108662,6 +108866,17 @@ index 0000000000000000000000000000000000000000..a45f40a65f8f25639ae2b7d14f3804d2
 +    String mimeType;
 +    uint64_t currentSize { 0 };
 +    int64_t expectedSize { -1 };
++    // The network process created the destination, or the host gave it (a
++    // resumed download): it is removed unless kept for resuming.
++    bool ownsFile { false };
++    bool keepFile { false };
++    bool partial { false };
++    std::optional<Resume> resume;
++    std::optional<uint64_t> resumedFrom;
++    bool restarted { false };
++    bool answered { false };
++    String validator;
++    bool acceptsRanges { false };
 +    MonotonicTime lastProgress;
 +    bool cancelling { false };
 +    bool cancelIssued { false };
@@ -108726,6 +108941,47 @@ index 0000000000000000000000000000000000000000..a45f40a65f8f25639ae2b7d14f3804d2
 +    return B_OK;
 +}
 +
++status_t DownloadRegistryHaiku::setKeepFailedDownloads(bool keep)
++{
++    ASSERT(RunLoop::isMain());
++    if (m_shuttingDown)
++        return B_NO_INIT;
++    if (!m_downloads.empty())
++        return B_BUSY;
++    m_keepFailedDownloads = keep;
++    return B_OK;
++}
++
++status_t DownloadRegistryHaiku::prepareResume(const String& path, const String& validator, int64_t expectedSize, Resume& resume) const
++{
++    ASSERT(RunLoop::isMain());
++    if (m_shuttingDown || m_directory.isEmpty())
++        return B_NO_INIT;
++    resume = { };
++    resume.hasValidator = !validator.isEmpty();
++    resume.expectedSize = expectedSize;
++    if (path.isEmpty())
++        return B_OK;
++    // Only a file directly in the download directory, as every destination is.
++    if (FileSystem::parentPath(path) != m_directory || FileSystem::pathFileName(path).isEmpty())
++        return B_BAD_VALUE;
++    for (const auto& [identifier, other] : m_downloads) {
++        if (other->destination == path)
++            return B_BUSY;
++    }
++    struct stat info;
++    if (lstat(path.utf8().legacyCStringPointer(), &info)) {
++        // Gone: the download starts afresh and chooses a free name again
++        // rather than writing over whatever may appear at this one.
++        return errno == ENOENT ? B_OK : B_IO_ERROR;
++    }
++    if (!S_ISREG(info.st_mode))
++        return B_BAD_VALUE;
++    resume.path = path;
++    resume.offset = static_cast<uint64_t>(info.st_size);
++    return B_OK;
++}
++
 +bool DownloadRegistryHaiku::hasPendingDownloads() const
 +{
 +    ASSERT(RunLoop::isMain());
@@ -108744,7 +109000,7 @@ index 0000000000000000000000000000000000000000..a45f40a65f8f25639ae2b7d14f3804d2
 +    m_observer = WTF::move(observer);
 +}
 +
-+void DownloadRegistryHaiku::registerDownload(DownloadProxy& download, const BMessenger& view, const String& requestedFilename)
++void DownloadRegistryHaiku::registerDownload(DownloadProxy& download, const BMessenger& view, const String& requestedFilename, const Resume* resume)
 +{
 +    ASSERT(RunLoop::isMain());
 +    auto identifier = download.downloadID().toUInt64();
@@ -108758,6 +109014,12 @@ index 0000000000000000000000000000000000000000..a45f40a65f8f25639ae2b7d14f3804d2
 +    auto item = std::make_unique<Entry>(download, m_listener, m_directory);
 +    item->view = view;
 +    item->requestedFilename = requestedFilename;
++    if (resume && !resume->path.isEmpty()) {
++        item->resume = *resume;
++        item->destination = resume->path;
++        item->currentSize = resume->offset;
++        item->ownsFile = true;
++    }
 +    auto* value = item.get();
 +    m_downloads.emplace(identifier, std::move(item));
 +    download.setClient(adoptRef(*new DownloadClientHaiku(weak_from_this())));
@@ -108803,6 +109065,15 @@ index 0000000000000000000000000000000000000000..a45f40a65f8f25639ae2b7d14f3804d2
 +    appendString("filename", FileSystem::pathFileName(item.destination));
 +    append(message.AddUInt64("current_size", item.currentSize));
 +    append(message.AddInt64("expected_size", item.expectedSize));
++    appendString("request_url", item.download->request().url().string());
++    if (item.answered) {
++        appendString("validator", item.validator);
++        append(message.AddBool("accepts_ranges", item.acceptsRanges));
++    }
++    if (item.resumedFrom)
++        append(message.AddUInt64("resumed_from", *item.resumedFrom));
++    if (item.restarted)
++        append(message.AddBool("restarted", true));
 +    if (item.view.IsValid())
 +        append(message.AddMessenger("view", item.view));
 +    if (what == B_WEBKIT_DOWNLOAD_FINISHED) {
@@ -108810,6 +109081,7 @@ index 0000000000000000000000000000000000000000..a45f40a65f8f25639ae2b7d14f3804d2
 +        appendString("error_domain", domain);
 +        append(message.AddInt32("error", error));
 +        appendString("error_description", description);
++        append(message.AddBool("partial", item.partial));
 +    }
 +    if (status != B_OK)
 +        return status;
@@ -108856,6 +109128,50 @@ index 0000000000000000000000000000000000000000..a45f40a65f8f25639ae2b7d14f3804d2
 +    item->responseURL = response.url().string();
 +    item->mimeType = response.mimeType();
 +    item->expectedSize = response.expectedContentLength() < 0 ? -1 : response.expectedContentLength();
++    item->validator = validatorOf(response);
++    item->acceptsRanges = acceptsByteRanges(response);
++    item->answered = true;
++    if (item->resume) {
++        // The network process appends a 206 answer from the asked offset to
++        // the partial file and writes any other success over it.
++        const auto& resume = *item->resume;
++        auto status = response.httpStatusCode();
++        String failure;
++        bool complete = false;
++        if (status == 206) {
++            WebCore::ParsedContentRange range(response.httpHeaderField(WebCore::HTTPHeaderName::ContentRange));
++            bool knownLength = range.isValid() && range.instanceLength() != WebCore::ParsedContentRange::unknownLength;
++            if (!range.isValid() || static_cast<uint64_t>(range.firstBytePosition()) != resume.offset)
++                failure = "The server sent a different part of the file"_s;
++            else if (!resume.hasValidator && resume.expectedSize >= 0 && knownLength && range.instanceLength() != resume.expectedSize)
++                failure = "The file changed on the server"_s;
++            else {
++                item->resumedFrom = resume.offset;
++                item->currentSize = resume.offset;
++                if (knownLength)
++                    item->expectedSize = range.instanceLength();
++                else if (item->expectedSize >= 0)
++                    item->expectedSize += resume.offset;
++            }
++        } else if (status == 416 && resume.offset && unsatisfiedRangeLength(response) == resume.offset) {
++            // The partial file was the whole file already.
++            complete = true;
++            item->currentSize = resume.offset;
++            item->expectedSize = resume.offset;
++        } else if (status >= 200 && status < 300) {
++            item->resumedFrom = 0;
++            item->restarted = resume.offset > 0;
++            item->currentSize = 0;
++        } else
++            failure = makeString("The server could not continue the download (HTTP "_s, status, ')');
++        if (complete || !failure.isNull()) {
++            completion(AllowOverwrite::No, { });
++            requestCancel(identifier, complete ? B_WEBKIT_DOWNLOAD_SUCCEEDED : B_WEBKIT_DOWNLOAD_FAILED, complete ? B_OK : B_ERROR, failure, true);
++            return;
++        }
++        completion(AllowOverwrite::Yes, item->destination);
++        return;
++    }
 +    if (item->destination.isEmpty())
 +        item->destination = chooseDestination(*item, item->requestedFilename.isEmpty() ? filename : item->requestedFilename);
 +    if (item->destination.isEmpty()) {
@@ -108876,6 +109192,7 @@ index 0000000000000000000000000000000000000000..a45f40a65f8f25639ae2b7d14f3804d2
 +    if (!item || item->cancelling)
 +        return;
 +    item->destination = path;
++    item->ownsFile = true;
 +    auto result = notify(*item, B_WEBKIT_DOWNLOAD_PROGRESS);
 +    if (result != B_OK)
 +        requestCancel(identifier, B_WEBKIT_DOWNLOAD_FAILED, result, "Download listener is unavailable"_s);
@@ -108912,6 +109229,16 @@ index 0000000000000000000000000000000000000000..a45f40a65f8f25639ae2b7d14f3804d2
 +        return;
 +    auto item = std::move(found->second);
 +    m_downloads.erase(found);
++    // The network process leaves an incomplete file where it was: a paused
++    // download continues in it, so may a failed one if the host wants that.
++    if (item->ownsFile && !item->destination.isEmpty() && result != B_WEBKIT_DOWNLOAD_SUCCEEDED) {
++        bool keep = result == B_WEBKIT_DOWNLOAD_PAUSED || item->keepFile
++            || (result == B_WEBKIT_DOWNLOAD_FAILED && m_keepFailedDownloads);
++        if (keep)
++            item->partial = FileSystem::fileExists(item->destination);
++        else
++            FileSystem::deleteFile(item->destination);
++    }
 +    notify(*item, B_WEBKIT_DOWNLOAD_FINISHED, result, domain, error, description);
 +}
 +
@@ -108964,16 +109291,19 @@ index 0000000000000000000000000000000000000000..a45f40a65f8f25639ae2b7d14f3804d2
 +    finish(download.downloadID().toUInt64(), B_WEBKIT_DOWNLOAD_FAILED, "HaikuDownload"_s, B_ERROR, "Download network process exited"_s);
 +}
 +
-+void DownloadRegistryHaiku::requestCancel(uint64_t identifier, uint32_t result, int32_t error, const String& description)
++void DownloadRegistryHaiku::requestCancel(uint64_t identifier, uint32_t result, int32_t error, const String& description, bool keepFile)
 +{
 +    ASSERT(RunLoop::isMain());
 +    auto* item = entry(identifier);
 +    if (!item || item->cancelling)
 +        return;
 +    item->cancelling = true;
++    item->keepFile = keepFile;
 +    item->cancelResult = result;
 +    item->cancelError = error;
 +    item->cancelDescription = description;
++    if (result == B_WEBKIT_DOWNLOAD_SUCCEEDED)
++        item->cancelDomain = { };
 +    // Defer the map mutation out of download callbacks, in particular the
 +    // DownloadProxyMap::invalidate iteration used during process shutdown.
 +    RunLoop::mainSingleton().dispatch([registry = shared_from_this(), identifier] {
@@ -109002,6 +109332,18 @@ index 0000000000000000000000000000000000000000..a45f40a65f8f25639ae2b7d14f3804d2
 +        cancel(identifier);
 +}
 +
++void DownloadRegistryHaiku::pause(uint64_t identifier)
++{
++    requestCancel(identifier, B_WEBKIT_DOWNLOAD_PAUSED, B_INTERRUPTED, "Download paused"_s, true);
++}
++
++void DownloadRegistryHaiku::pauseAll()
++{
++    ASSERT(RunLoop::isMain());
++    for (const auto& [identifier, item] : m_downloads)
++        pause(identifier);
++}
++
 +void DownloadRegistryHaiku::shutdown()
 +{
 +    ASSERT(RunLoop::isMain());
@@ -109012,10 +109354,10 @@ index 0000000000000000000000000000000000000000..a45f40a65f8f25639ae2b7d14f3804d2
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/DownloadRegistryHaiku.h b/Source/WebKit/UIProcess/haiku/DownloadRegistryHaiku.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..1d510a02fd093a8289edf1be18d9bf4519362f6c
+index 0000000000000000000000000000000000000000..aa491ceab24cb6fb32d217e1126a955960182df7
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/DownloadRegistryHaiku.h
-@@ -0,0 +1,87 @@
+@@ -0,0 +1,104 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#pragma once
@@ -109067,14 +109409,30 @@ index 0000000000000000000000000000000000000000..1d510a02fd093a8289edf1be18d9bf45
 +
 +    status_t setListener(const BMessenger&);
 +    status_t setDirectory(const char*);
++    status_t setKeepFailedDownloads(bool);
 +    bool hasPendingDownloads() const;
 +    void cancel(uint64_t);
 +    void cancelAll();
++    // Like cancel, but the partial file stays (BWebKitContext::PauseDownload).
++    void pause(uint64_t);
++    void pauseAll();
 +    void shutdown();
++
++    // A download continuing in a partial file (BWebKitContext::ResumeDownload).
++    struct Resume {
++        String path;
++        // The file's size when the download was registered: the Range start.
++        uint64_t offset { 0 };
++        bool hasValidator { false };
++        int64_t expectedSize { -1 };
++    };
++    // Checks a host's partial file and fills resume (its offset); path may be
++    // empty for a download that never had a file.
++    status_t prepareResume(const String& path, const String& validator, int64_t expectedSize, Resume&) const;
 +
 +    // requestedFilename, when not empty, replaces the engine's suggested name.
 +    // It is sanitized and uniquified like every other destination.
-+    void registerDownload(DownloadProxy&, const BMessenger& = { }, const String& requestedFilename = { });
++    void registerDownload(DownloadProxy&, const BMessenger& = { }, const String& requestedFilename = { }, const Resume* = nullptr);
 +    // One observer (the native extension downloads bridge). Null clears it.
 +    void setObserver(Function<void(const DownloadRegistryEventHaiku&)>&&);
 +    const String& directory() const { return m_directory; }
@@ -109090,7 +109448,7 @@ index 0000000000000000000000000000000000000000..1d510a02fd093a8289edf1be18d9bf45
 +    DownloadRegistryHaiku() = default;
 +    struct Entry;
 +    Entry* entry(uint64_t);
-+    void requestCancel(uint64_t, uint32_t result, int32_t error, const String& description);
++    void requestCancel(uint64_t, uint32_t result, int32_t error, const String& description, bool keepFile = false);
 +    void finish(uint64_t, uint32_t result, const String& domain = { }, int32_t error = 0, const String& description = { });
 +    status_t notify(Entry&, uint32_t what, uint32_t result = 0, const String& domain = { }, int32_t error = 0, const String& description = { });
 +    String chooseDestination(const Entry&, const String&) const;
@@ -109099,6 +109457,7 @@ index 0000000000000000000000000000000000000000..1d510a02fd093a8289edf1be18d9bf45
 +    Function<void(const DownloadRegistryEventHaiku&)> m_observer;
 +    String m_directory;
 +    bool m_shuttingDown { false };
++    bool m_keepFailedDownloads { false };
 +    std::unordered_map<uint64_t, std::unique_ptr<Entry>> m_downloads;
 +};
 +
@@ -117141,10 +117500,10 @@ index 0000000000000000000000000000000000000000..d61ebb0bb824e9f3de136713236c16b4
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/WebViewContextHaiku.cpp b/Source/WebKit/UIProcess/haiku/WebViewContextHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..5aa8116ab3df8910f8198b15127a8b4992316cc0
+index 0000000000000000000000000000000000000000..8efcfe3e8441d6bb04bcd33ca81b8777dd49d3eb
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/WebViewContextHaiku.cpp
-@@ -0,0 +1,356 @@
+@@ -0,0 +1,386 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#include "config.h"
@@ -117176,11 +117535,14 @@ index 0000000000000000000000000000000000000000..5aa8116ab3df8910f8198b15127a8b49
 +#include "haiku/WebExtensionStagingDirectoryHaiku.h"
 +#endif
 +#include "WebProcessPool.h"
++#include <WebCore/HTTPHeaderNames.h>
++#include <WebCore/ResourceRequest.h>
 +#include <pal/SessionID.h>
 +#include <cstdlib>
 +#include <wtf/FileSystem.h>
 +#include <wtf/NeverDestroyed.h>
 +#include <wtf/RunLoop.h>
++#include <wtf/text/MakeString.h>
 +
 +namespace WebKit {
 +
@@ -117500,13 +117862,40 @@ index 0000000000000000000000000000000000000000..5aa8116ab3df8910f8198b15127a8b49
 +    m_downloads->registerDownload(download.get(), view);
 +}
 +
++status_t WebViewContextHaiku::resumeDownload(const String& address, const String& path, const String& validator, int64_t expectedSize,
++    const BMessenger& view, uint64_t& identifier)
++{
++    ASSERT(RunLoop::isMain());
++    URL url { address };
++    if (!url.isValid() || !url.protocolIsInHTTPFamily())
++        return B_BAD_VALUE;
++    // A header value: ETags and dates are printable ASCII.
++    for (auto character : StringView(validator).codeUnits()) {
++        if (character < 0x20 || character > 0x7e)
++            return B_BAD_VALUE;
++    }
++    DownloadRegistryHaiku::Resume resume;
++    if (auto status = m_downloads->prepareResume(path, validator, expectedSize, resume); status != B_OK)
++        return status;
++    WebCore::ResourceRequest request(WTF::move(url));
++    if (resume.offset) {
++        request.setHTTPHeaderField(WebCore::HTTPHeaderName::Range, makeString("bytes="_s, resume.offset, '-'));
++        if (!validator.isEmpty())
++            request.setHTTPHeaderField(WebCore::HTTPHeaderName::IfRange, validator);
++    }
++    Ref download = m_processPool->download(m_dataStore.get(), nullptr, request, std::nullopt);
++    identifier = download->downloadID().toUInt64();
++    m_downloads->registerDownload(download.get(), view, { }, &resume);
++    return B_OK;
++}
++
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/WebViewContextHaiku.h b/Source/WebKit/UIProcess/haiku/WebViewContextHaiku.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..3e268fc22c64a580604be1662f7a8162e1a8ab4e
+index 0000000000000000000000000000000000000000..520ed4b88123bc3011d015a47a3e89ef246f2aac
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/WebViewContextHaiku.h
-@@ -0,0 +1,108 @@
+@@ -0,0 +1,112 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#pragma once
@@ -117564,6 +117953,10 @@ index 0000000000000000000000000000000000000000..3e268fc22c64a580604be1662f7a8162
 +    std::shared_ptr<BrowserCommandBrokerHaiku> browserCommands() const;
 +    std::shared_ptr<ExtensionPackageRegistryHaiku> extensionPackages() const;
 +    void download(WebPageProxy&, const WebCore::ResourceRequest&, const BMessenger&);
++    // BWebKitContext::ResumeDownload: a download with no page that continues
++    // the partial file at path (or starts afresh). Application thread.
++    status_t resumeDownload(const String& url, const String& path, const String& validator, int64_t expectedSize,
++        const BMessenger& view, uint64_t& identifier);
 +    // Notifications and location: requests, the host's decisions, providers.
 +    const std::shared_ptr<SitePermissionsHaiku>& sitePermissions() const { return m_sitePermissions; }
 +#if ENABLE(WEBUSB)

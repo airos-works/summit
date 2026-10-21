@@ -6,6 +6,7 @@
 #include "core/Zoom.h"
 #include "core/Suggest.h"
 #include "core/DownloadText.h"
+#include "core/DownloadHistory.h"
 #include "core/LoadError.h"
 #include "core/ProfileLock.h"
 #include <set>
@@ -58,6 +59,72 @@ int main()
         CHECK(DownloadStatusText(status) == "Failed — Connection reset");
         status.state = DownloadStatus::State::Cancelled;
         CHECK(DownloadStatusText(status) == "Cancelled");
+        status = DownloadStatus();
+        status.state = DownloadStatus::State::Paused;
+        CHECK(DownloadStatusText(status) == "Paused");
+        status.received = 400 * 1024 * 1024;
+        status.expected = 1000 * 1024 * 1024;
+        CHECK(DownloadStatusText(status) == "Paused — 400 of 1000 MiB");
+        status.interrupted = true;
+        CHECK(DownloadStatusText(status) == "Interrupted — 400 of 1000 MiB");
+        status.resumable = false;
+        CHECK(DownloadStatusText(status) == "Interrupted — will start over");
+        status = DownloadStatus();
+        status.restarted = true;
+        CHECK(DownloadStatusText(status) == "Starting over…");
+        status.received = 1024 * 1024;
+        status.expected = 4 * 1024 * 1024;
+        CHECK(DownloadStatusText(status) == "Starting over — 1.0 of 4.0 MiB");
+    }
+    {
+        DownloadRecord paused;
+        paused.url = "https://cdn.example.com/a.iso?sig=1";
+        paused.requestURL = "https://example.com/a.iso";
+        paused.path = "/boot/home/Downloads/a.iso";
+        paused.filename = "a.iso";
+        paused.state = DownloadStatus::State::Paused;
+        paused.received = 5000;
+        paused.expected = 9000;
+        paused.validator = "\"abc\"";
+        paused.acceptsRanges = true;
+        paused.partial = true;
+        paused.started = 1700000000;
+        CHECK(paused.CanResume());
+        DownloadRecord active = paused;
+        active.state = DownloadStatus::State::Active;
+        active.partial = false;
+        active.requestURL = active.url;
+        DownloadRecord done;
+        done.url = done.requestURL = "https://example.com/b.zip";
+        done.path = "/boot/home/Downloads/b.zip";
+        done.state = DownloadStatus::State::Succeeded;
+        done.received = 12;
+        done.finished = 1700000100;
+        DownloadRecord failed = done;
+        failed.state = DownloadStatus::State::Failed;
+        failed.error = "Transferred a partial file";
+        const auto records = DecodeDownloads(EncodeDownloads({paused, active, done, failed}));
+        CHECK(records.size() == 4);
+        if (records.size() == 4) {
+            CHECK(records[0].requestURL == paused.requestURL && records[0].url == paused.url && records[0].path == paused.path
+                && records[0].state == DownloadStatus::State::Paused && records[0].received == 5000 && records[0].expected == 9000
+                && records[0].validator == "\"abc\"" && records[0].acceptsRanges && records[0].partial && !records[0].interrupted
+                && records[0].started == 1700000000);
+            // Still active when Summit stopped: a crash. It comes back paused, with its file.
+            CHECK(records[1].state == DownloadStatus::State::Paused && records[1].interrupted && records[1].partial
+                && records[1].requestURL == records[1].url);
+            CHECK(records[2].state == DownloadStatus::State::Succeeded && !records[2].partial && records[2].finished == 1700000100
+                && records[2].expected == -1 && !records[2].CanResume());
+            CHECK(records[3].state == DownloadStatus::State::Failed && records[3].error == "Transferred a partial file");
+        }
+        DownloadRecord unresumable = paused;
+        unresumable.acceptsRanges = false;
+        CHECK(!unresumable.CanResume());
+        CHECK(DecodeDownloads("").empty() && DecodeDownloads("{\"version\":2,\"downloads\":[]}").empty()
+            && DecodeDownloads("[1,2]").empty());
+        const auto mixed = DecodeDownloads("{\"version\":1,\"downloads\":[{\"state\":\"bogus\",\"url\":\"x\"},"
+            "{\"state\":\"failed\"},{\"state\":\"succeeded\",\"url\":\"https://e.com/f\",\"received\":-5},7]}");
+        CHECK(mixed.size() == 1 && mixed[0].received == 0 && mixed[0].url == "https://e.com/f");
     }
     CHECK(ResolveAddress("").url == "summit:home");
     CHECK(ResolveAddress("  example.com  ").url == "https://example.com");
