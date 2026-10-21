@@ -294,6 +294,8 @@ void BrowserWindow::DetachTab(int64 id, const BMessenger& target)
     if (fFullScreenTab == id) ExitPageFullScreen();
     if (fPictureInPictureTab == id && fPictureInPicture.IsValid()) fPictureInPicture.SendMessage(B_QUIT_REQUESTED);
     DropTabAuthentications(id);
+    CancelTranslation(*found, false);
+    found->translation.probed = 0;
     CloseDeveloperTools(*found, true);
     RemoveCrashView(*found);
     RemoveLoadErrorView(*found, false);
@@ -432,6 +434,7 @@ void BrowserWindow::RefreshNoticeBar()
         if (web && !InWebAppScope(fWebAppScope, tab->url))
             fNoticeBar->SetNotice(HostOf(tab->url) + " is not part of " + fWebAppName + ".",
                 {{"Open in Summit", new BMessage(kOpenInBrowser)}});
+        else if (TranslationNotice(*tab)) return;
         else if (fSoftwareRenderingNoticePending)
             showSoftwareRenderingNotice();
         else fNoticeBar->Clear();
@@ -465,6 +468,7 @@ void BrowserWindow::RefreshNoticeBar()
         return;
     }
     // A notice for the whole window (#93), when its tab has none.
+    if (TranslationNotice(*tab)) return;
     if (!fWindowNotice.empty()) {
         fNoticeBar->SetNotice(fWindowNotice, {{"OK", new BMessage(kDismissWindowNotice)}});
         return;

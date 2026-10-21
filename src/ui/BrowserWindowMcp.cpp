@@ -145,6 +145,10 @@ std::string BrowserWindow::McpRequest(const std::string& text)
                     {"screen", item.capturingScreen}};
             if (item.devTools.IsValid()) entry["developerToolsOpen"] = true;
             if (item.readerActive) entry["readerMode"] = true;
+            if (!item.translation.phase.empty()) entry["translation"] = {
+                {"phase", item.translation.phase}, {"from", item.translation.from}, {"to", item.translation.to},
+                {"active", item.translation.active}, {"dismissed", item.translation.dismissed},
+                {"partial", item.translation.truncated}, {"message", item.translation.message}};
             if (!item.notice.empty() && item.noticeUntil > now) entry["notice"] = item.notice;
             if (item.view) {
                 entry["view"] = {{"hidden", item.view->IsHidden()}, {"width", item.view->Bounds().Width() + 1},

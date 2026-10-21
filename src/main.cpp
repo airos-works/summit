@@ -23,6 +23,7 @@
 #include "ui/SitePermissions.h"
 #include "ui/BookmarkImport.h"
 #include "ui/UpdateChecker.h"
+#include "ui/PageTranslation.h"
 #include <Mime.h>
 #include <nlohmann/json.hpp>
 #endif
@@ -382,6 +383,9 @@ public:
     }
     void MessageReceived(BMessage* message) override
     {
+#if SUMMIT_MODERN_WEBKIT
+        if (summit::HandleTranslationContextMessage(message)) return;
+#endif
         // Summit started again without arguments (its icon) while quitting.
         if (message->what == B_SILENT_RELAUNCH && fQuitting) {
             fRelaunch = true;

@@ -85,6 +85,10 @@ def main():
         (bundle / 'licenses/CLD2').mkdir(parents=True)
         for name in ('LICENSE', 'README.md'):
             shutil.copy2(ROOT / 'vendor/cld2' / name, bundle / 'licenses/CLD2' / name)
+        (bundle / 'licenses/Translation').mkdir(parents=True)
+        for name in ('bergamot-license.txt', 'translation-runtime-notices.txt'):
+            shutil.copy2(ROOT / 'docs' / name, bundle / 'licenses/Translation' / name)
+        shutil.copy2(ROOT / 'resources/translation/sources.json', bundle / 'licenses/Translation/sources.json')
         originals = {'Summit': digest(executable)}
         for name, soname, source in libraries:
             destination = bundle / 'lib' / source.name

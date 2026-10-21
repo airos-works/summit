@@ -238,6 +238,12 @@ def freeze(work, inputs, commands, before, configuration, build, executable_name
             for name in ('LICENSE', 'README.md'):
                 shutil.copy2(ROOT / 'vendor/cld2' / name, bundle / 'licenses/CLD2' / name)
                 assets.append('licenses/CLD2/' + name)
+            (bundle / 'licenses/Translation').mkdir(parents=True)
+            for name in ('bergamot-license.txt', 'translation-runtime-notices.txt'):
+                shutil.copy2(ROOT / 'docs' / name, bundle / 'licenses/Translation' / name)
+                assets.append('licenses/Translation/' + name)
+            shutil.copy2(ROOT / 'resources/translation/sources.json', bundle / 'licenses/Translation/sources.json')
+            assets.append('licenses/Translation/sources.json')
             shutil.copy2(ROOT / 'resources/start.html', bundle / 'resources/start.html')
             assets.append('resources/start.html')
         for license_file in (SOURCE / 'Source').rglob('*'):
@@ -393,6 +399,7 @@ def main():
                    'src/ui/WebApps.cpp', 'src/core/WebAppManifest.cpp', 'src/ui/UpdateChecker.cpp',
                    'src/core/ExtensionShortcut.cpp', 'src/core/ExtensionUpdate.cpp', 'src/ui/ExtensionShortcuts.cpp',
                    'src/ui/ExtensionShortcutsWindow.cpp', 'src/ui/ExtensionUpdater.cpp', 'src/core/PageLanguage.cpp',
+                   'src/core/TranslationModels.cpp', 'src/ui/PageTranslation.cpp', 'src/ui/BrowserWindowTranslation.cpp',
                    # Keep these entries equal to vendor/cld2/sources.list.
                    # Release CI parses this literal list without running Python.
                    'vendor/cld2/internal/cldutil.cc',

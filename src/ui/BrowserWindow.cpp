@@ -71,6 +71,7 @@
 #include "core/Bookmarks.h"
 #include "CertificateInfoWindow.h"
 #include "ReaderMode.h"
+#include "PageTranslation.h"
 #include <WebKit/WebKitInfo.h>
 #include <WebKit/WebKitEmbedding.h>
 #include <nlohmann/json.hpp>
@@ -760,6 +761,9 @@ BrowserWindow::BrowserWindow(std::shared_ptr<SharedProfile> profile, std::string
     view->AddSeparatorItem();
     AddItem(view, "View Page Source", kViewPageSource, 'U');
     AddItem(view, "Picture in Picture", kPictureInPicture, 'P', B_SHIFT_KEY);
+    auto* translation = new BMessage(kTranslatePage);
+    translation->AddBool("offer", true);
+    view->AddItem(new BMenuItem("Translate Page…", translation));
     view->AddSeparatorItem();
     AddItem(view, "Developer Tools", kShowDeveloperTools, 'I', B_SHIFT_KEY);
     auto* pick = new BMessage(kShowDeveloperTools);
@@ -1005,6 +1009,8 @@ BrowserWindow::~BrowserWindow()
     RemoveHandler(fProtocolHandlers.get());
     fProtocolHandlers.reset();
 #if SUMMIT_MODERN_WEBKIT
+    fTranslationTimer.reset();
+    fTranslator.reset();
     if (fAuthenticationPrompt.IsValid()) fAuthenticationPrompt.SendMessage(B_QUIT_REQUESTED);
     BWebKitView::WindowDirectConnected(this, nullptr);
     // Without its daemon thread ~BDirectWindow would wait for ever.
@@ -1397,6 +1403,7 @@ void BrowserWindow::SelectTab(int64 id, bool forClose)
             AskAboutCertificate(fTabs[i]);
         ShowAuthenticationPrompt();
         ProbeReader(fTabs[i]);
+        ProbeTranslation(fTabs[i]);
 #endif
         fTabs[i].view->MakeFocus();
         fAddress->SetText(DisplayURL(fTabs[i].ShownURL()).c_str());
@@ -1766,6 +1773,7 @@ void BrowserWindow::FinishCloseTab(int64 id)
 #endif
         webView->RemoveSelf();
 #if SUMMIT_MODERN_WEBKIT
+        CancelTranslation(fTabs[i]);
         DropTabAuthentications(id);
         CloseDeveloperTools(fTabs[i]);
         RemoveCrashView(fTabs[i]);
@@ -3743,7 +3751,28 @@ void BrowserWindow::MessageReceived(BMessage* message)
 #if SUMMIT_MODERN_WEBKIT
         case kShowCertificate: ShowCertificate(); break;
         case kToggleReader: ToggleReader(); break;
+        case kTranslatePage: {
+            auto* tab = message->HasInt64("tab") ? FindTabByID(message->GetInt64("tab", 0)) : ActiveTab();
+            if (!tab) break;
+            if (message->GetBool("offer", false)) {
+                tab->translation.dismissed = false;
+                if (!tab->translation.active) ProbeTranslation(*tab, true);
+                else RefreshNoticeBar();
+            } else StartTranslation(*tab);
+            break;
+        }
+        case kRestoreTranslation: {
+            if (auto* tab = FindTabByID(message->GetInt64("tab", fSelected))) RestoreTranslation(*tab);
+            break;
+        }
+        case kDismissTranslation: {
+            if (auto* tab = FindTabByID(message->GetInt64("tab", fSelected))) tab->translation.dismissed = true;
+            RefreshNoticeBar(); break;
+        }
+        case kTranslationStatus: TranslationStatus(*message); break;
+        case kTranslationTick: TranslationTick(); break;
         case B_WEBKIT_JAVASCRIPT_RESULT:
+            if (TranslationResult(*message)) break;
             if (message->GetUInt64("identifier", 0) == kWebAppQuery) {
                 InstallWebAppResult(*message);
                 break;
@@ -4988,6 +5017,8 @@ void BrowserWindow::WebKitStateChanged(const BMessage& message)
         return;
     }
     if (message.what == B_WEBKIT_PROCESS_EXITED) {
+        CancelTranslation(*tab);
+        tab->translation = {};
         tab->processExited = true;
         tab->loading = false;
         tab->progress = 0;
@@ -5013,6 +5044,8 @@ void BrowserWindow::WebKitStateChanged(const BMessage& message)
     // cannot restore a previous navigation's load error.
     if (message.FindUInt64("loadGeneration", &generation) == B_OK && generation >= tab->loadGeneration) {
         if (generation != tab->loadGeneration) {
+            CancelTranslation(*tab);
+            tab->translation = {};
             tab->readerRequest = 0;
             tab->readerExtracting = false;
             tab->readerAvailable = false;
@@ -5172,6 +5205,7 @@ void BrowserWindow::WebKitStateChanged(const BMessage& message)
         ShowTabStatus(*tab);
         if (tab->certificate && !tab->certificate->asked) AskAboutCertificate(*tab);
         ProbeReader(*tab);
+        ProbeTranslation(*tab);
     }
     // Back or Forward to a built-in page shows the copy from when it was
     // written (or the page cache's); bring it up to date once it has loaded.

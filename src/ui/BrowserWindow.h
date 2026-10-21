@@ -46,6 +46,7 @@ class AddressSuggestions;
 class FaviconCache;
 class SharedProfile;
 class ProtocolHandlers;
+class PageTranslator;
 struct ExtensionStoreItem;
 // How a new window starts.
 struct BrowserWindowOptions {
@@ -221,6 +222,13 @@ private:
         // Older in-memory previews reopen their original web page when the
         // tab's single cached article has been replaced.
         std::map<std::string, std::string> readerOriginals;
+        struct TranslationState {
+            std::string phase, from, to, message, action, pendingIDs;
+            uint64 probed = 0, generation = 0, request = 0, epoch = 0, job = 0;
+            bigtime_t probeAfter = 0;
+            unsigned probeAttempts = 0;
+            bool active = false, dismissed = false, truncated = false;
+        } translation;
         // The card on an extension store page: what was last put in the page
         // (empty: none), and the page whose card was closed.
         std::string storeOffer, storeOfferDismissed;
@@ -278,6 +286,20 @@ private:
     void ReaderResult(const BMessage&);
     void ReaderResource(const BMessage&);
     uint64 fReaderRequest = 0;
+    void ProbeTranslation(Tab&, bool manual = false);
+    void StartTranslation(Tab&);
+    void RestoreTranslation(Tab&);
+    void CancelTranslation(Tab&, bool invalidated = true);
+    void PrepareTranslation(Tab&);
+    void TranslationScript(Tab&, const char* action, const std::string& expression, bool library = false);
+    bool TranslationResult(const BMessage&);
+    void TranslationStatus(const BMessage&);
+    void TranslationTick();
+    void ScheduleTranslationTick();
+    bool TranslationNotice(Tab&);
+    std::unique_ptr<PageTranslator> fTranslator;
+    std::unique_ptr<BMessageRunner> fTranslationTimer;
+    int64 fTranslationTab = 0;
     void WebKitFindResult(const BMessage& message);
     void WebKitCloseResult(const BMessage& message);
     void WebKitClosePrompt(const BMessage& message);

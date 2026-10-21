@@ -10,7 +10,7 @@ add_library(summit_cld2 STATIC ${SUMMIT_CLD2_SOURCES})
 add_library(summit_core src/core/Address.cpp src/core/Protocol.cpp src/core/Profile.cpp src/core/Bookmarks.cpp src/core/BookmarkIO.cpp src/core/ExtensionCatalog.cpp src/core/ExtensionIdentity.cpp src/core/ExtensionStore.cpp
     src/core/ExtensionShortcut.cpp src/core/ExtensionUpdate.cpp src/core/UserAgent.cpp
     src/core/ExtensionPackage.cpp src/core/StoreOffer.cpp src/core/DownloadText.cpp src/core/DownloadHistory.cpp src/core/Favicon.cpp src/core/InternalPages.cpp src/core/Zoom.cpp src/core/Suggest.cpp src/core/DevTools.cpp src/core/DevToolsFormat.cpp src/core/DevToolsElements.cpp src/core/PageSource.cpp
-    src/core/Mcp.cpp src/core/McpHttp.cpp src/core/McpInspector.cpp src/core/WebAppManifest.cpp src/core/UpdateCheck.cpp src/core/Spelling.cpp src/core/PageLanguage.cpp src/core/LoadError.cpp src/core/ProfileLock.cpp)
+    src/core/Mcp.cpp src/core/McpHttp.cpp src/core/McpInspector.cpp src/core/WebAppManifest.cpp src/core/UpdateCheck.cpp src/core/Spelling.cpp src/core/PageLanguage.cpp src/core/TranslationModels.cpp src/core/LoadError.cpp src/core/ProfileLock.cpp)
 target_link_libraries(summit_core PUBLIC OpenSSL::Crypto ${CMAKE_DL_LIBS})
 target_link_libraries(summit_core PRIVATE summit_cld2)
 target_include_directories(summit_core PUBLIC src vendor)
@@ -50,6 +50,9 @@ add_test(NAME summit_web_app COMMAND summit_web_app_tests)
 add_executable(summit_page_language_tests tests/PageLanguageTests.cpp)
 target_link_libraries(summit_page_language_tests PRIVATE summit_core)
 add_test(NAME summit_page_language COMMAND summit_page_language_tests)
+add_executable(summit_translation_models_tests tests/TranslationModelsTests.cpp)
+target_link_libraries(summit_translation_models_tests PRIVATE summit_core)
+add_test(NAME summit_translation_models COMMAND summit_translation_models_tests ${CMAKE_SOURCE_DIR}/resources/translation/models.json)
 add_executable(summit_extension_package_tests tests/ExtensionPackageTests.cpp)
 target_link_libraries(summit_extension_package_tests PRIVATE summit_core)
 add_test(NAME summit_extension_package COMMAND summit_extension_package_tests ${CMAKE_SOURCE_DIR}/tests/fixtures/extensions/package-icons)
@@ -70,7 +73,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Haiku")
     find_program(HAIKU_RC rc REQUIRED)
     find_program(HAIKU_XRES xres REQUIRED)
     add_executable(Summit src/main.cpp src/ui/BrowserWindow.cpp src/ui/BookmarkEditor.cpp src/ui/BookmarkImport.cpp src/ui/Chrome.cpp src/ui/ExtensionPermissionPrompt.cpp src/ui/ExtensionController.cpp src/ui/ExtensionInstaller.cpp src/ui/ExtensionManager.cpp
-        src/ui/ExtensionStoreDownload.cpp src/ui/CertificateInfoWindow.cpp src/ui/ReaderMode.cpp
+        src/ui/ExtensionStoreDownload.cpp src/ui/CertificateInfoWindow.cpp src/ui/ReaderMode.cpp src/ui/PageTranslation.cpp src/ui/BrowserWindowTranslation.cpp
         src/ui/ProtocolHandlers.cpp src/ui/FaviconCache.cpp src/ui/PreferencesWindow.cpp src/ui/DefaultBrowser.cpp src/ui/SharedProfile.cpp src/ui/DirectWindowRescue.cpp
         src/ui/AddressSuggestions.cpp src/ui/SitePermissions.cpp src/ui/Location.cpp
         src/ui/SourceView.cpp src/ui/DevToolsWindow.cpp src/ui/DevToolsNetwork.cpp src/ui/DevToolsConsole.cpp src/ui/DevToolsStorage.cpp src/ui/DevToolsElements.cpp src/ui/PageSourceWindow.cpp
@@ -97,6 +100,8 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Haiku")
     set_property(TARGET Summit APPEND PROPERTY LINK_DEPENDS ${SUMMIT_TOOLBAR_RESOURCES})
     file(GLOB SUMMIT_READER_RESOURCES CONFIGURE_DEPENDS resources/reader/*.js)
     set_property(TARGET Summit APPEND PROPERTY LINK_DEPENDS ${SUMMIT_READER_RESOURCES})
+    file(GLOB_RECURSE SUMMIT_TRANSLATION_RESOURCES CONFIGURE_DEPENDS resources/translation/*)
+    set_property(TARGET Summit APPEND PROPERTY LINK_DEPENDS ${SUMMIT_TRANSLATION_RESOURCES})
     file(GLOB SUMMIT_FONT_RESOURCES CONFIGURE_DEPENDS resources/fonts/*)
     set_property(TARGET Summit APPEND PROPERTY LINK_DEPENDS ${SUMMIT_FONT_RESOURCES})
     add_custom_command(TARGET Summit POST_BUILD

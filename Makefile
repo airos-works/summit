@@ -29,10 +29,10 @@ UI = $(wildcard src/ui/*.cpp) src/main.cpp
 CLD2 = $(addprefix vendor/cld2/,$(shell cat vendor/cld2/sources.list))
 CORE_OBJ = $(CORE:%.cpp=$(BUILD)/%.o) $(CLD2:%.cc=$(BUILD)/%.o)
 UI_OBJ = $(UI:%.cpp=$(BUILD)/%.o)
-LIBS = -L$(WEBKIT_LIBRARY_DIR) -l$(WEBKIT_LINK_LIBRARY) -lbe -lnetwork -lbnetapi -ltranslation -ltracker -lcrypto -lcurl $(DEVTOOLS_LIBS)
+LIBS = -L$(WEBKIT_LIBRARY_DIR) -l$(WEBKIT_LINK_LIBRARY) -lbe -lgame -lnetwork -lbnetapi -ltranslation -ltracker -lcrypto -lcurl $(DEVTOOLS_LIBS)
 .PHONY: all check clean package browser-smoke
 all: $(BUILD)/Summit $(BUILD)/resources/start.html
-$(BUILD)/Summit: $(CORE_OBJ) $(UI_OBJ) resources/Summit.rdef resources/Summit.hvif $(wildcard resources/toolbar/*.hvif resources/toolbar/*.png resources/reader/*.js resources/fonts/*)
+$(BUILD)/Summit: $(CORE_OBJ) $(UI_OBJ) resources/Summit.rdef resources/Summit.hvif $(wildcard resources/toolbar/*.hvif resources/toolbar/*.png resources/reader/*.js resources/fonts/* resources/translation/* resources/translation/bergamot/*)
 	$(CXX) $(LDFLAGS) -o $@.new $(CORE_OBJ) $(UI_OBJ) $(LIBS)
 	rc -I resources -o $(BUILD)/Summit.rsrc resources/Summit.rdef
 	xres -o $@.new $(BUILD)/Summit.rsrc
