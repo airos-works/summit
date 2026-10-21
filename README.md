@@ -70,6 +70,8 @@ For a stock Haiku installation, not air/OS. Install the packages together with `
 - [Private windows and browsing-data controls](docs/browser-privacy.md),
   [certificate warnings and connection details](docs/certificate-warnings.md),
   and native website permission prompts.
+- [User-agent presets](docs/user-agent.md) in Preferences › Compatibility:
+  Chrome, Firefox, Safari and Edge identities for sites that reject Summit.
 - [Reader mode](docs/reader-mode.md) for articles, with a book button in the
   address field, sanitized content, and the original page's URL retained in history.
 - A bundled [PDF viewer](docs/pdf-viewer.md) with navigation, search, zoom,

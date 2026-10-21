@@ -34,3 +34,14 @@ python3 tools/test-user-agent.py --browser /path/to/Summit --control /path/to/su
 The default target is the test VM; `--shell tools/ws.sh --host HOST_ADDRESS`
 selects the workstation and the address on which it can reach the test host.
 The harness uses a separate profile and addresses only its own browser team.
+
+Verified on 21 October 2026 with browser commit `3251c7f`, built natively on
+stock Haiku R1/beta6 hrev59866+79 against the released `519aae1` engine
+(`summit_webkit-1.10.1.git20261021.0130-1-x86_64.hpkg`). All 17 runtime
+cases passed, including clean quit and restart; all 12 host CTest suites passed.
+The Preferences tab and complete menu were inspected on screen, and selecting
+Firefox — Windows with the mouse wrote `firefox-windows` to the profile.
+Local evidence: `.vm/issues-20261021/user-agent-runtime.log` and
+`compatibility{,-menu,-selected}.png` in that directory. The VM's initial SSH
+failure was a stock-kernel TCP panic in `sshd`; its log was preserved before
+restarting the VM, and the checks above ran after recovery.
