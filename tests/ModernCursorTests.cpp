@@ -20,7 +20,7 @@
 #include <vector>
 
 static constexpr uint32 kObservedCursor = 'ctob';
-static constexpr const char* kCases[] = { "pointer", "png", "svg", "retina", "clamped",
+static constexpr const char* kCases[] = { "pointer", "png", "svg", "retina", "outside",
     "crosshair", "oversized", "missing", "hand", "none" };
 
 class CursorView final : public BWebKitView {
@@ -170,12 +170,18 @@ private:
         const bool custom = m_case >= 1 && m_case <= 4;
         const void* data = nullptr; ssize_t length = 0;
         if (custom) {
-            const int hotspot = m_case == 4 ? 31 : 8;
+            // WebCore resolves an out-of-image spot to the intrinsic spot,
+            // or (0, 0) for this PNG, before the native port receives it.
+            const int hotspot = m_case == 4 ? 0 : 8;
             BPoint point;
             if (m_cursor.GetInt32("width", 0) != 32 || m_cursor.GetInt32("height", 0) != 32
                 || m_cursor.FindPoint("hotspot", &point) != B_OK || point != BPoint(hotspot, hotspot)
-                || m_cursor.FindData("pixels", B_RAW_TYPE, &data, &length) != B_OK || length != 32 * 32 * 4)
+                || m_cursor.FindData("pixels", B_RAW_TYPE, &data, &length) != B_OK || length != 32 * 32 * 4) {
+                std::fprintf(stderr, "cursor payload: size=%ldx%ld hotspot=%.0f,%.0f bytes=%ld\n",
+                    static_cast<long>(m_cursor.GetInt32("width", 0)), static_cast<long>(m_cursor.GetInt32("height", 0)),
+                    point.x, point.y, static_cast<long>(length));
                 return Fail("image dimensions, hot spot or pixel transport");
+            }
             const auto* bytes = static_cast<const uint8*>(data);
             const auto* red = bytes + (5 * 32 + 5) * 4;
             const auto* alpha = bytes + (14 * 32 + 5) * 4;

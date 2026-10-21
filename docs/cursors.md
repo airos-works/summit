@@ -29,7 +29,7 @@ conversion remains separate from this path.
 transparent, opaque and translucent regions. `tests/ModernCursorTests.cpp` loads
 the fixture through the real engine, moves the native pointer, checks the
 transported bitmap and hot spot, and reads the cursor painted by app_server.
-It also checks hot-spot clamping, oversized and invalid image fallbacks, and
+It also checks out-of-image hot spots, oversized and invalid image fallbacks, and
 default, crosshair, hand and invisible keyword cursors. Captures are saved as
 PPM files. Run this on a test desktop at both 100% and 200% display scaling.
 
@@ -55,7 +55,8 @@ exit path to avoid racing WebKit worker teardown against libbe global destructio
 Check the native syslog interval for fresh debugger events as well as the exit
 status. Excalidraw's live tool cursors are an additional manual acceptance check.
 
-On 2026-10-21, the new native test reproduced the old engine's PNG transport
-failure at devicePixelRatio 2. Both changed engine translation units and the
-native harness compile. Full rebuilt-engine runtime verification is pending;
-issue #86 remains open.
+On 2026-10-21, all ten native cases passed on air/OS at 200% display scaling
+with the rebuilt engine. The test also reproduced the old engine's PNG transport
+failure. WebCore resolves an out-of-image CSS hot spot to `(0, 0)` before
+transport. Verification at 100% and with Excalidraw remains pending; issue #86
+remains open.
