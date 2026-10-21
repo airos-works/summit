@@ -24673,7 +24673,7 @@ index f2e9fcbce80505145e2639e1bb61b4662a2b57a8..dc821ecb4e8018cf21fa510824ad3399
      void serverWait() override;
  
 diff --git a/Source/WebCore/platform/graphics/egl/GraphicsContextGLEGL.cpp b/Source/WebCore/platform/graphics/egl/GraphicsContextGLEGL.cpp
-index 24ac596ad8c9275e9018b351ec61b5fd5037e5ba..ae07d41624b7007c6adfeeaa172586736555fd74 100644
+index 24ac596ad8c9275e9018b351ec61b5fd5037e5ba..bbecd1406b9bc978e02f9aacdee573584f6ab3df 100644
 --- a/Source/WebCore/platform/graphics/egl/GraphicsContextGLEGL.cpp
 +++ b/Source/WebCore/platform/graphics/egl/GraphicsContextGLEGL.cpp
 @@ -26,6 +26,10 @@
@@ -24811,7 +24811,7 @@ index 24ac596ad8c9275e9018b351ec61b5fd5037e5ba..ae07d41624b7007c6adfeeaa17258673
      eglContextAttributes.append(EGL_ROBUST_RESOURCE_INITIALIZATION_ANGLE);
      eglContextAttributes.append(EGL_TRUE);
      // WebGL doesn't allow client arrays.
-@@ -304,9 +361,15 @@ bool GraphicsContextGLEGL::platformInitializeContext()
+@@ -304,9 +361,26 @@ bool GraphicsContextGLEGL::platformInitializeContext()
      // WebGL doesn't allow implicit creation of objects on bind.
      eglContextAttributes.append(EGL_CONTEXT_BIND_GENERATES_RESOURCE_CHROMIUM);
      eglContextAttributes.append(EGL_FALSE);
@@ -24819,16 +24819,27 @@ index 24ac596ad8c9275e9018b351ec61b5fd5037e5ba..ae07d41624b7007c6adfeeaa17258673
 +#if USE(COORDINATED_GRAPHICS) || PLATFORM(HAIKU)
      eglContextAttributes.append(EGL_CONTEXT_VIRTUALIZATION_GROUP_ANGLE);
 +#if PLATFORM(HAIKU)
-+    // A virtualization group uses one native EGL context and must never be
-+    // current on two threads. Keep each worker separate from the compositor.
-+    eglContextAttributes.append(isMainThread() ? 0 : find_thread(nullptr));
++    // ANGLE reuses a group's native context even if a different share context
++    // is requested. Give a replacement native root a new group while old
++    // WebGL contexts are still alive, and keep every worker thread separate.
++    static std::atomic<EGLint> nextVirtualizationGroup { 0 };
++    thread_local EGLint virtualizationGroup = ++nextVirtualizationGroup;
++    thread_local std::weak_ptr<GLContext> virtualizationRoot;
++    if (isMainThread()) {
++        m_nativeSharingContextHaiku = sharedDisplay.sharingGLContext();
++        if (virtualizationRoot.lock() != m_nativeSharingContextHaiku) {
++            virtualizationRoot = m_nativeSharingContextHaiku;
++            virtualizationGroup = ++nextVirtualizationGroup;
++        }
++    }
++    eglContextAttributes.append(virtualizationGroup);
 +#else
      eglContextAttributes.append(0);
 +#endif
  #endif
  
      if (WTF::contains(unsafeSpan(displayExtensions), "EGL_ANGLE_power_preference"_span)) {
-@@ -317,23 +380,46 @@ bool GraphicsContextGLEGL::platformInitializeContext()
+@@ -317,23 +391,47 @@ bool GraphicsContextGLEGL::platformInitializeContext()
      }
      eglContextAttributes.append(EGL_NONE);
  
@@ -24843,12 +24854,13 @@ index 24ac596ad8c9275e9018b351ec61b5fd5037e5ba..ae07d41624b7007c6adfeeaa17258673
  #if PLATFORM(WIN)
 -    m_contextObj = EGL_CreateContext(m_displayObj, m_configObj, sharedDisplay.angleSharingGLContext(), eglContextAttributes.span().data());
 +    m_contextObj = EGL_CreateContext(m_displayObj, m_configObj, sharedDisplay.angleSharingGLContext(sharedDisplay.sharingGLContext()), eglContextAttributes.span().data());
++#else
++    {
++#if PLATFORM(HAIKU)
++    auto nativeSharingContext = m_nativeSharingContextHaiku;
  #else
 -    m_angleSharingContextObj = sharedDisplay.angleSharingGLContext();
-+    {
 +    auto nativeSharingContext = sharedDisplay.sharingGLContext();
-+#if PLATFORM(HAIKU)
-+    m_nativeSharingContextHaiku = nativeSharingContext;
 +#endif
 +    m_angleSharingContextObj = sharedDisplay.angleSharingGLContext(nativeSharingContext);
      if (m_angleSharingContextObj == EGL_NO_CONTEXT) {
@@ -24877,7 +24889,7 @@ index 24ac596ad8c9275e9018b351ec61b5fd5037e5ba..ae07d41624b7007c6adfeeaa17258673
          return false;
      }
      LOG(WebGL, "Got EGLContext");
-@@ -407,6 +493,10 @@ GLContextWrapper::Type GraphicsContextGLEGL::type() const
+@@ -407,6 +505,10 @@ GLContextWrapper::Type GraphicsContextGLEGL::type() const
  
  bool GraphicsContextGLEGL::makeCurrentImpl()
  {
@@ -142221,7 +142233,7 @@ index 0000000000000000000000000000000000000000..abc82f6d26d2b1374740dc304282ae75
 +
 +}
 diff --git a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/AcceleratedSurface.cpp b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/AcceleratedSurface.cpp
-index 8177756a0e14111347846c912b8e3851f2559b4a..e7d9241dabe469fa96efccbbb16cc893c837648f 100644
+index 8177756a0e14111347846c912b8e3851f2559b4a..da8321441c420f3e72830d53de46a843a55520eb 100644
 --- a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/AcceleratedSurface.cpp
 +++ b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/AcceleratedSurface.cpp
 @@ -26,6 +26,27 @@
@@ -143790,7 +143802,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..e7d9241dabe469fa96efccbbb16cc893
      WebProcess::singleton().parentProcessConnection()->removeMessageReceiver(Messages::AcceleratedSurface::messageReceiverName(), m_id);
  #endif
  }
-@@ -1053,6 +2336,11 @@ void AcceleratedSurface::willDestroyGLContext()
+@@ -1053,6 +2336,14 @@ void AcceleratedSurface::willDestroyGLContext()
      m_pendingFrameNotifyTargets.clear();
      m_target = nullptr;
      m_swapChain.reset();
@@ -143798,11 +143810,14 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..e7d9241dabe469fa96efccbbb16cc893
 +    // The replacement context has a fresh viewport even when the window has
 +    // not resized. Make the next frame initialize it and reset damage too.
 +    m_swapChain.resize({ });
++    // Replace the UI's retained bitmap as soon as recovery paints. Direct
++    // presentation normally delays that copy while the page keeps animating.
++    m_forceFrameThroughAppServerHaiku = true;
 +#endif
  }
  
  uint64_t AcceleratedSurface::window()
-@@ -1149,18 +2437,143 @@ void AcceleratedSurface::didRenderFrame(TargetContents targetContents)
+@@ -1149,18 +2440,143 @@ void AcceleratedSurface::didRenderFrame(TargetContents targetContents)
      if (!m_target)
          return;
  
@@ -143854,9 +143869,9 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..e7d9241dabe469fa96efccbbb16cc893
 +    // blurred backdrop on the Cubie), which had every other one read back.
 +    bool appServerCopyCurrent = m_directPresenter && m_directPresenter->writesAppServerCopy();
 +    bool lastFrameRequested = std::exchange(m_lastFrameThroughAppServerRequestedHaiku, false);
-+    bool throughAppServer = m_directPresenter && m_directPagesPendingHaiku
++    bool throughAppServer = std::exchange(m_forceFrameThroughAppServerHaiku, false) || (m_directPresenter && m_directPagesPendingHaiku
 +        && now - m_directPagesPendingSinceHaiku >= 250_ms && now - m_lastFrameThroughAppServerHaiku >= 250_ms
-+        && (!appServerCopyCurrent || (lastFrameRequested && now - m_lastChangedDirectFrameHaiku >= 250_ms));
++        && (!appServerCopyCurrent || (lastFrameRequested && now - m_lastChangedDirectFrameHaiku >= 250_ms)));
 +    // Without a presenter the target notes that this frame is read back.
 +    bool presentedDirectly = m_target->presentDirectlyHaiku(throughAppServer ? nullptr : m_directPresenter.get(), targetDamage);
 +    if (presentedDirectly) {
@@ -143946,7 +143961,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..e7d9241dabe469fa96efccbbb16cc893
      m_pendingFrameNotifyTargets.insert(0, { m_target, WTF::move(damageRects) });
      m_target = nullptr;
  }
-@@ -1182,13 +2595,17 @@ const std::optional<Damage>& AcceleratedSurface::renderTargetDamage()
+@@ -1182,13 +2598,17 @@ const std::optional<Damage>& AcceleratedSurface::renderTargetDamage()
  }
  #endif
  
@@ -143966,7 +143981,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..e7d9241dabe469fa96efccbbb16cc893
  #endif
  
 diff --git a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/AcceleratedSurface.h b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/AcceleratedSurface.h
-index 9c24ddab5df0f74f95b87ad7ac594ed2a9c237ab..39f455b24df2502e8c0c80b54244b6ebfa4f6b46 100644
+index 9c24ddab5df0f74f95b87ad7ac594ed2a9c237ab..23f14eb34c8bf454683dc0bf146fe5c1c5155bdc 100644
 --- a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/AcceleratedSurface.h
 +++ b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/AcceleratedSurface.h
 @@ -27,10 +27,15 @@
@@ -144207,7 +144222,7 @@ index 9c24ddab5df0f74f95b87ad7ac594ed2a9c237ab..39f455b24df2502e8c0c80b54244b6eb
          mutable Lock m_bufferFormatLock;
          BufferFormat m_bufferFormat WTF_GUARDED_BY_LOCK(m_bufferFormatLock);
          bool m_bufferFormatChanged WTF_GUARDED_BY_LOCK(m_bufferFormatLock) { false };
-@@ -478,10 +555,32 @@ private:
+@@ -478,10 +555,33 @@ private:
  
      const WeakRef<WebPage> m_webPage;
      Function<void()> m_frameCompleteHandler;
@@ -144215,6 +144230,7 @@ index 9c24ddab5df0f74f95b87ad7ac594ed2a9c237ab..39f455b24df2502e8c0c80b54244b6eb
 +    Function<void()> m_renderTargetReleasedHandler;
 +    Function<void()> m_redisplayHandlerHaiku;
 +    std::unique_ptr<DirectPresenterHaiku> m_directPresenter;
++    bool m_forceFrameThroughAppServerHaiku { false };
 +    // Frames presented directly since one last went through app_server, and
 +    // when that was (didRenderFrame()).
 +    bool m_directPagesPendingHaiku { false };
