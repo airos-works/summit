@@ -44718,7 +44718,7 @@ index b478a0e1d88443132d337f514434eeab7c8df464..69dda7202badacf9739212e7891b70ae
  protected:
      WEBCORE_EXPORT static bool allTileEdgesExposed(const FloatRect& totalRect, const FloatRect& tileRect);
 diff --git a/Source/WebCore/platform/graphics/texmap/TextureMapperLayer.cpp b/Source/WebCore/platform/graphics/texmap/TextureMapperLayer.cpp
-index 112d19b1676c297b0168941b1db5b619cd535a29..068ba41adf51a366ddf787ba1d2bd96bb454ddd6 100644
+index 112d19b1676c297b0168941b1db5b619cd535a29..4040396938e20e8745e24269b604e044853b1357 100644
 --- a/Source/WebCore/platform/graphics/texmap/TextureMapperLayer.cpp
 +++ b/Source/WebCore/platform/graphics/texmap/TextureMapperLayer.cpp
 @@ -21,6 +21,16 @@
@@ -44738,7 +44738,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..068ba41adf51a366ddf787ba1d2bd96b
  #include "BitmapTexturePool.h"
  #include "ClipPath.h"
  #include "FloatQuad.h"
-@@ -32,12 +42,225 @@
+@@ -32,12 +42,227 @@
  #include <wtf/SetForScope.h>
  #include <wtf/TZoneMallocInlines.h>
  
@@ -44834,13 +44834,15 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..068ba41adf51a366ddf787ba1d2bd96b
 +    FloatRoundedRect contentsClippingRect;
 +};
 +
-+// A layer with nothing in it draws nothing, whatever its filters, mask or
-+// replica would do. YouTube's watch page has an empty blurred layer the size
++// A regular layer with nothing in it draws nothing, whatever its filters,
++// mask or replica would do. A backdrop layer samples earlier content instead
++// of owning a backing store, so it must still paint. YouTube's watch page has
++// an empty blurred layer the size
 +// of its player, and on the Cubie A7S each video frame ran it through eight
 +// surfaces and two blur passes.
 +bool TextureMapperLayer::drawsNothingHaiku() const
 +{
-+    return m_children.isEmpty() && !m_backingStore && !m_contentsLayer && !hasBackdrop() && !isFlattened()
++    return !m_isBackdrop && m_children.isEmpty() && !m_backingStore && !m_contentsLayer && !hasBackdrop() && !isFlattened()
 +        && !(m_state.backgroundColor.isValid() && m_state.backgroundColor.isVisible())
 +        && !(m_state.solidColor.isValid() && m_state.solidColor.isVisible());
 +}
@@ -44964,7 +44966,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..068ba41adf51a366ddf787ba1d2bd96b
  WTF_MAKE_TZONE_ALLOCATED_IMPL(TextureMapperLayer);
  
  static constexpr auto s_opacityVisibilityThreshold = 0.01;
-@@ -363,14 +586,37 @@ void TextureMapperLayer::prepareForPainting(TextureMapper& textureMapper)
+@@ -363,14 +588,37 @@ void TextureMapperLayer::prepareForPainting(TextureMapper& textureMapper)
  
  void TextureMapperLayer::paint(TextureMapper& textureMapper)
  {
@@ -45002,7 +45004,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..068ba41adf51a366ddf787ba1d2bd96b
  }
  
  #if ENABLE(DAMAGE_TRACKING)
-@@ -390,24 +636,102 @@ void TextureMapperLayer::setDamage(Damage&& damage)
+@@ -390,24 +638,102 @@ void TextureMapperLayer::setDamage(Damage&& damage)
          m_damageInLayerCoordinateSpace = WTF::move(damage);
  }
  
@@ -45105,7 +45107,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..068ba41adf51a366ddf787ba1d2bd96b
      if (!isVisible()) {
          if (m_collectDamageDespiteBeingInvisible)
              m_collectDamageDespiteBeingInvisible = false;
-@@ -490,11 +814,26 @@ void TextureMapperLayer::collectDamageSelf(TextureMapperPaintOptions& options, D
+@@ -490,11 +816,26 @@ void TextureMapperLayer::collectDamageSelf(TextureMapperPaintOptions& options, D
          return;
      }
  
@@ -45132,7 +45134,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..068ba41adf51a366ddf787ba1d2bd96b
  
      TransformationMatrix transform;
      transform.translate(options.offset.width(), options.offset.height());
-@@ -507,6 +846,20 @@ void TextureMapperLayer::collectDamageSelf(TextureMapperPaintOptions& options, D
+@@ -507,6 +848,20 @@ void TextureMapperLayer::collectDamageSelf(TextureMapperPaintOptions& options, D
      // layer-level operations such as resizes, transformations, etc.
      const auto& clipBounds = options.textureMapper.clipBounds();
      if (m_damageInLayerCoordinateSpace) {
@@ -45153,7 +45155,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..068ba41adf51a366ddf787ba1d2bd96b
          for (const auto& rect : *m_damageInLayerCoordinateSpace)
              damage.add(intersection(transformRectFromLayerToGlobalCoordinateSpace(rect, transform, options), clipBounds));
      }
-@@ -533,6 +886,28 @@ void TextureMapperLayer::collectDamageSelfChildrenReplicaFilterAndMask(TextureMa
+@@ -533,6 +888,28 @@ void TextureMapperLayer::collectDamageSelfChildrenReplicaFilterAndMask(TextureMa
  
  void TextureMapperLayer::collectDamageSelfChildrenFilterAndMask(TextureMapperPaintOptions& options, Damage& damage)
  {
@@ -45182,7 +45184,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..068ba41adf51a366ddf787ba1d2bd96b
      const IntSize maxTextureSize = options.textureMapper.maxTextureSize();
      for (auto& rect : computeConsolidatedOverlapRegionRects(options)) {
          for (int x = rect.x(); x < rect.maxX(); x += maxTextureSize.width()) {
-@@ -545,8 +920,31 @@ void TextureMapperLayer::collectDamageSelfChildrenFilterAndMask(TextureMapperPai
+@@ -545,8 +922,31 @@ void TextureMapperLayer::collectDamageSelfChildrenFilterAndMask(TextureMapperPai
          }
      }
  
@@ -45215,7 +45217,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..068ba41adf51a366ddf787ba1d2bd96b
  }
  
  void TextureMapperLayer::damageWholeLayer()
-@@ -578,12 +976,38 @@ void TextureMapperLayer::paintSelf(TextureMapperPaintOptions& options)
+@@ -578,12 +978,38 @@ void TextureMapperLayer::paintSelf(TextureMapperPaintOptions& options)
      auto targetRect = layerRect();
      if (targetRect.isEmpty())
          return;
@@ -45254,7 +45256,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..068ba41adf51a366ddf787ba1d2bd96b
  
      if (isFlattened() && !m_flattenedLayer->needsUpdate()) {
          m_flattenedLayer->paintToTextureMapper(options.textureMapper, m_flattenedLayer->layerRect(), transform, options.opacity);
-@@ -592,6 +1016,26 @@ void TextureMapperLayer::paintSelf(TextureMapperPaintOptions& options)
+@@ -592,6 +1018,26 @@ void TextureMapperLayer::paintSelf(TextureMapperPaintOptions& options)
  
      TextureMapperSolidColorLayer solidColorLayer;
      TextureMapperBackingStore* backingStore = m_backingStore;
@@ -45281,7 +45283,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..068ba41adf51a366ddf787ba1d2bd96b
      if (m_state.backgroundColor.isValid()) {
          solidColorLayer.setColor(m_state.backgroundColor);
          backingStore = &solidColorLayer;
-@@ -599,6 +1043,10 @@ void TextureMapperLayer::paintSelf(TextureMapperPaintOptions& options)
+@@ -599,6 +1045,10 @@ void TextureMapperLayer::paintSelf(TextureMapperPaintOptions& options)
  
      options.textureMapper.setWrapMode(TextureMapper::WrapMode::Stretch);
      options.textureMapper.setPatternTransform(TransformationMatrix());
@@ -45292,7 +45294,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..068ba41adf51a366ddf787ba1d2bd96b
  
      if (backingStore) {
          backingStore->paintToTextureMapper(options.textureMapper, targetRect, transform, options.opacity);
-@@ -608,6 +1056,10 @@ void TextureMapperLayer::paintSelf(TextureMapperPaintOptions& options)
+@@ -608,6 +1058,10 @@ void TextureMapperLayer::paintSelf(TextureMapperPaintOptions& options)
          if (m_state.showRepaintCounter)
              backingStore->drawRepaintCounter(options.textureMapper, m_state.repaintCount, m_state.debugBorderColor, targetRect, transform);
      }
@@ -45303,7 +45305,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..068ba41adf51a366ddf787ba1d2bd96b
  
      TextureMapperPlatformLayer* contentsLayer = m_contentsLayer;
      if (m_state.solidColor.isValid() && m_state.solidColor.isVisible()) {
-@@ -638,6 +1090,10 @@ void TextureMapperLayer::paintSelf(TextureMapperPaintOptions& options)
+@@ -638,6 +1092,10 @@ void TextureMapperLayer::paintSelf(TextureMapperPaintOptions& options)
  
      if (m_state.showDebugBorders)
          contentsLayer->drawBorder(options.textureMapper, m_state.debugBorderColor, m_state.debugBorderWidth, m_state.contentsRect, transform);
@@ -45314,7 +45316,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..068ba41adf51a366ddf787ba1d2bd96b
  }
  
  void TextureMapperLayer::paintBackdrop(TextureMapperPaintOptions& options)
-@@ -1047,6 +1503,54 @@ Vector<IntRect, 1> TextureMapperLayer::computeConsolidatedOverlapRegionRects(Tex
+@@ -1047,6 +1505,54 @@ Vector<IntRect, 1> TextureMapperLayer::computeConsolidatedOverlapRegionRects(Tex
      computeOverlapRegions(data, options.transform, false);
      ASSERT(nonOverlapRegion.isEmpty());
  
@@ -45369,7 +45371,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..068ba41adf51a366ddf787ba1d2bd96b
      auto rects = overlapRegion.rects();
      static const size_t OverlapRegionConsolidationThreshold = 4;
      if (rects.size() > OverlapRegionConsolidationThreshold) {
-@@ -1057,8 +1561,124 @@ Vector<IntRect, 1> TextureMapperLayer::computeConsolidatedOverlapRegionRects(Tex
+@@ -1057,8 +1563,124 @@ Vector<IntRect, 1> TextureMapperLayer::computeConsolidatedOverlapRegionRects(Tex
      return rects;
  }
  
@@ -45494,7 +45496,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..068ba41adf51a366ddf787ba1d2bd96b
      IntSize maxTextureSize = options.textureMapper.maxTextureSize();
      for (auto& rect : computeConsolidatedOverlapRegionRects(options)) {
          for (int x = rect.x(); x < rect.maxX(); x += maxTextureSize.width()) {
-@@ -1079,6 +1699,33 @@ void TextureMapperLayer::applyMask(TextureMapperPaintOptions& options)
+@@ -1079,6 +1701,33 @@ void TextureMapperLayer::applyMask(TextureMapperPaintOptions& options)
      options.textureMapper.setMaskMode(false);
  }
  
@@ -45528,7 +45530,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..068ba41adf51a366ddf787ba1d2bd96b
  void TextureMapperLayer::paintIntoSurface(TextureMapperPaintOptions& options)
  {
      options.textureMapper.bindSurface(options.surface.get());
-@@ -1093,7 +1740,11 @@ void TextureMapperLayer::paintIntoSurface(TextureMapperPaintOptions& options)
+@@ -1093,7 +1742,11 @@ void TextureMapperLayer::paintIntoSurface(TextureMapperPaintOptions& options)
      bool hasMask = !!m_state.maskLayer;
      bool hasReplicaMask = options.replicaLayer == this && m_state.replicaLayer->m_state.maskLayer;
      bool defersLastFilterPass = !hasMask && !hasReplicaMask;
@@ -45540,7 +45542,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..068ba41adf51a366ddf787ba1d2bd96b
      options.textureMapper.bindSurface(options.surface.get());
      if (hasMask)
          m_state.maskLayer->applyMask(options);
-@@ -1142,6 +1793,10 @@ void TextureMapperLayer::paintSelfAndChildrenWithIntermediateSurface(TextureMapp
+@@ -1142,6 +1795,10 @@ void TextureMapperLayer::paintSelfAndChildrenWithIntermediateSurface(TextureMapp
  
  void TextureMapperLayer::paintSelfChildrenReplicaFilterAndMask(TextureMapperPaintOptions& options)
  {
@@ -45551,7 +45553,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..068ba41adf51a366ddf787ba1d2bd96b
      bool hasFilterOrMask = [&] {
          if (hasFilters())
              return true;
-@@ -1167,6 +1822,18 @@ void TextureMapperLayer::paintRecursive(TextureMapperPaintOptions& options)
+@@ -1167,6 +1824,18 @@ void TextureMapperLayer::paintRecursive(TextureMapperPaintOptions& options)
  {
      if (!isVisible())
          return;
@@ -45570,7 +45572,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..068ba41adf51a366ddf787ba1d2bd96b
  
      SetForScope scopedOpacity(options.opacity, options.opacity * m_currentOpacity);
  
-@@ -1495,6 +2162,11 @@ void TextureMapperLayer::setBackgroundColor(const Color& color)
+@@ -1495,6 +2164,11 @@ void TextureMapperLayer::setBackgroundColor(const Color& color)
  void TextureMapperLayer::setFilters(const FilterOperations& filters)
  {
      m_state.filters = filters;
