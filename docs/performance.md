@@ -1,5 +1,146 @@
 # Summit performance: Speedometer 3.1 baseline, where the time goes, stress test
 
+## 21 October 2026: X399 renderer and media seek recovery (in progress)
+
+The X399 has its GTX 1070 again, with hrev60207+1733, two 4K displays at
+200%, and the October 19 `bundle-ci0816` browser. The initial browser used
+llvmpipe: its launcher selected the AMD-only system Mesa left from the WX 5100.
+`tools/install-on-workstation.sh` now selects the tested private
+`prefix-20261002` on NVIDIA and supplies its nouveau Vulkan ICD explicitly.
+The native EGL probe reports zink/NVK on the GTX 1070, correct pixels, and
+1.08 ms for a 1024×768 clear/readback. Explicit `SUMMIT_MESA_PREFIX` and
+`SUMMIT_VULKAN_ICD` overrides remain available.
+
+The retired user NVDEC add-on was restored. A wedged audio service also blocked
+`BSoundPlayer` setup on the page thread for about 15 seconds. Restarting the
+media service restored 48 kHz stereo output (56 ms creation, 200 callbacks in
+two seconds). This is a service recovery, not a demonstrated audio-driver fix.
+Afterward, a 30-second 1080p60 AV1 playback interval presented 1,791 of 1,802
+frames, with no waiting or stalled events. A later five-second interval
+presented 300 frames, with a 16.6 ms median and 18.6 ms p95 frame gap.
+
+A compatible candidate browser built from Summit `5611677` and the current CI
+engine also establishes direct presentation on its first window. Its tested non-PGO bundle
+`bundle-perf-coalesced-20261021` is now installed while the PGO rebuild runs. Its normal-profile trial preserved the
+pre-existing unreadable JSON as `profile.damaged-2026-10-21-095434.json` and
+started a writable profile; all four installed extensions remained enabled and
+loaded. Separate recovery copies were also verified before launch. Pending
+download work in the Summit worktree was excluded from this candidate build.
+
+### Direct presentation: combine overlapping damage
+
+The current engine could submit 33–35 overlapping damage rectangles for a video
+frame. Each rectangle became another GPU copy, and those presentations took
+26–28 ms. `DirectPresenterHaiku` now unites the damage into a `Region` before
+clipping it to the visible window. This preserves the same pixel coverage and
+window clipping while avoiding repeated copies. `SUMMIT_DIRECT_COALESCE_DAMAGE=0`
+retains the old behavior for comparisons.
+
+In normal-profile 1080p60 AV1 startup runs, the steady 30-second intervals each
+contained 1,810 frames: the old path dropped 104, the candidate 6. All of these
+steady drops were compositor replacements. The candidate's later five-second
+sample delivered 300 frames with no gap over 33 ms (median 16.7 ms, p95 20.5 ms).
+Recent composition times had a 5.0 ms median and 10.9 ms maximum. The preceding
+GPU fence was separately traced below 0.1 ms; removing it was rejected as a fix.
+The production change retains the existing fence and readback behavior.
+
+Earlier same-scene tests opened DevTools without reactivating the video window.
+Their foreground/occlusion conditions differ from the startup comparison above;
+the production build subsequently dropped 5 of 1,503 frames in a 25-second
+foreground 1080p60 AV1 interval, with no waiting or stalled events. A foreground
+4K60 VP9 interval dropped 47 of 1,503 frames, also without waiting or stalled
+events; 4K still has less rendering headroom. Its initial summary script selected
+an inactive video element; the raw samples identify one active 2160p player and
+were rechecked. Native full-desktop captures show correct clipping behind
+DevTools and clean redraw after moving/resizing the playing window. The actual
+installed wrapper reports zink/NVK and all four extensions enabled and loaded.
+Its automatic-quality 1440p60 VP9 check dropped 5 of 1,750 frames over 29.2
+seconds, with no stalled samples; the subsequent playing-state check showed
+no buffering class or visible spinner. The first
+instrumented diagnostic launch also loaded its unchanged `libWebKit.so.1` file,
+so it is treated only as another baseline. Subsequent tests verified the library
+route and hash.
+
+### Software decoder trial
+
+Haiku's `summit-media-latency` branch limits video decoding to eight workers,
+assigns presentation timestamps to video chunks without FFmpeg packet metadata,
+and honors the negative `time_to_decode` preroll hint already understood by
+NVDEC. The decoder still reconstructs reference pictures; progressive pictures
+before the seek target avoid RGB conversion/copy. Interlaced pictures retain
+temporal-filter processing. QEMU and native checks match post-target RGB hashes
+for H.264 and four FATE AV1 clips; four complete AV1 hashes also match the previous
+decoder. The probe additionally verifies untouched output buffers for preroll.
+
+Actual YouTube seek-bar clicks and a drag, using 1080p60 AV1, compare the
+thread-limit-only decoder with the timestamp/preroll candidate:
+
+| Target (seconds) | Previous target decoded (ms) | Candidate (ms) |
+| --- | ---: | ---: |
+| 31.566 | 1,275 | 926 |
+| 298.019 | 774 | 654 |
+| 19.032 | 929 | 724 |
+| 507.375 (drag) | 423 | 355 |
+
+These are native MSE trace times from the seek request, one comparison, not
+`seeked` event latency. The longest old seek started the clock after the
+one-second fallback, 219 ms before its target picture was ready. The candidate
+reached the picture before starting the clock. The page's video-frame callback
+metadata currently reports the playback clock as media time, so it can label
+an old picture with the seek target; those callback times are not used here.
+
+The trial plugin belongs in
+`/boot/system/non-packaged/add-ons/media/plugins/ffmpeg`, below the user NVDEC
+plugin in lookup order. Installing FFmpeg beside NVDEC in the user directory
+made ordinary H.264 choose software. Moving it to the system override directory
+restored NVDEC selection (60 frames at 115 fps), and YouTube also selects NVDEC.
+The packaged decoder is unchanged. Remove the owned system override and restart
+the browser to return to it. In the same 75–100 second scene at 4K60 VP9,
+the original decoder dropped 7 of 1,500 frames; two candidate runs dropped
+13 of 1,499 and 6 of 1,498. All these steady-state drops were compositor
+replacements. An earlier candidate interval dropped 105 frames; this did not
+repeat in the controlled scene runs. Repeated starts/seeks remain under test.
+
+### Speedometer remains under investigation
+
+Renderer recovery alone did not restore Speedometer. At 1910×903 CSS pixels,
+DPR 2, the normal profile scored 6.98±0.17; a fresh profile with that same engine
+scored 8.39±0.35 locally and 8.38±0.36 on browserbench.org. The latest candidate
+scored 8.28±0.32 with a fresh profile and 7.99±0.34 after normal-profile recovery,
+with all four extensions enabled. These runs also differ in app version and
+background tabs, so the latter gain is not attributed solely to profile recovery.
+Disabling all four extensions temporarily raised the original normal
+profile to 7.49±0.18; all four were restored afterward. That explains only part
+of the gap. An older October 5 PGO bundle scored 9.94±0.47 in an uncontended repeat
+(0.05 foreign CPU cores before and during the run). Its first 9.91±0.60 run
+was marked contended. Current CI builds have JIT/DFG/FTL,
+`-O3`, mimalloc and symbolic linking enabled, but no PGO. A separate instrumented
+build and representative training have completed; the profile-use rebuild is running. The matching
+non-PGO presentation-fix build scored 8.28±0.38 uncontended. No PGO improvement
+is claimed yet. While the full engine rebuild runs, a JSC-only PGO bundle
+scored 8.46±0.33 uncontended. That overlaps the non-PGO baseline's confidence
+range and does not establish a gain; the rendering-engine comparison remains
+pending.
+
+Counter validation caught two training issues before the long run. Haiku's
+libgcov cannot create missing directories, so the output directory tree is
+prepared explicitly. Symbolic linking also gave libWebKit its own gcov master,
+but its dumper was imported from JavaScriptCore; only 344 profile files were
+saved. Instrumented links now force the hidden `__gcov_dump_int` routine into
+each module, and the opt-in exit hook calls each loaded module's dumper under
+the existing inter-process file lock. The validation probe saved 4,144 files
+(759 WebCore, 334 WebKit, 190 JSC, and support libraries), with matching
+`runs=4` and summary counters across sampled DOM/style/layout/bindings units.
+It exited cleanly with no crash reports. After the full training, sampled core
+units agreed at `runs=57`; 4,144 files (87.7 MB) were imported into the same
+build directory for profile use. The MSE fixture needed `muted=1` for the fresh
+profile's autoplay policy. YouTube training now waits for the quality switch
+to finish before seeking; the corrected 4K run reached both requested targets.
+
+Evidence: `.vm/bench/x399-perf-20261021/`, the individual Speedometer run
+directories from this date, and `/mnt/HaikuWork/build/summit-media-perf/`.
+
+
 ## 20 October 2026: direct presents timed to the scan on AMD (#82)
 
 On the Framework 13 scrolling showed quick horizontal tearing and flickering

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Run the profile-training workloads on the X399 against an instrumented
 # bundle (built with -fprofile-generate -fprofile-update=atomic and linked with
-# -u__gcov_dump). Every process writes its counters on exit because
+# -Wl,-u,__gcov_dump_int so every module owns its dumper). Every process
+# writes its counters on exit because
 # SUMMIT_GCOV_DUMP=1. Haiku's libgcov does not lock the .gcda files, so the
 # engine takes turns on a lock file (WTFProcess.cpp, SUMMIT_GCOV_LOCK) and
 # helpers get three minutes before anyone is killed. The last step prints
@@ -34,7 +35,7 @@ python3 tools/bench/run-scroll.py "https://en.wikipedia.org/wiki/Haiku_(operatin
 step real sites
 python3 tools/bench/run-multitab.py --bundle "$bundle" --windows 2 --tabs 6 --idle 10 --load-timeout 120 --label pgo2-train "${env[@]}" \
     | grep -E 'load:|scroll under' | cut -c1-160 || true
-for page in "media.html?src=refs-media/refs4.mp4&seek=6.5" "media.html?src=refs-media/refs16.mp4&seek=6.5" "mse.html"; do
+for page in "media.html?src=refs-media/refs4.mp4&seek=6.5" "media.html?src=refs-media/refs16.mp4&seek=6.5" "mse.html?muted=1&seek=6.5"; do
     step "$page"
     python3 tools/bench/run-probe.py --bundle "$bundle" --page "$page" --label pgo2-train-media "${env[@]}" | tail -1 || true
 done
