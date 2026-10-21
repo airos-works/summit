@@ -71,7 +71,7 @@ candidate JavaScriptCore library that contains the startup change. Actual loaded
 paths and hashes verify that substitution in every process. All the cleanup,
 persistence, native-crash and unchanged-input checks above pass. This checks the
 workaround on stock libroot; it is not a full release build of the new patch.
-Release CI and acceptance of its packages remain pending.
+The separate full release check below now also passes.
 
 An initial attempt to run the full airOS-built candidate on stock Haiku failed
 at relocation because its WebKit library requires airOS's `StrokeFrameLineArray`
@@ -83,7 +83,19 @@ The [machine-readable evidence](locale-startup-2026-10-22.json) retains diagnost
 results, runtime hashes, the cold/warm comparisons and browser acceptance.
 Repeated loaded-image inventories are indexed once per distinct inventory;
 each process retains its inventory index.
-#120 remains open for its other work and the remaining release validation.
+#120 remains open for its other work.
+
+### Full release packages
+
+CI [39649186372](https://github.com/jmgasper/summit/actions/runs/39649186372)
+succeeded for revision `56f49a8`. Its complete published stock-Haiku and airOS
+x86_64 packages each pass five TLS/worker/WebSocket shutdown and persistence
+cycles without a preload or substituted library. Every owned process exits
+normally, all held connections close, both native crash intervals are clean,
+and loaded-runtime and fixture hashes remain unchanged. The stock packages were
+installed normally; only paths were relocated in the isolated workstation copy.
+These are ordinary CI builds without profile use. Exact package/runtime hashes
+and per-cycle results are in [the release report](network-release-2026-10-22.json).
 
 ## Reproduction
 

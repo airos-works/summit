@@ -1400,8 +1400,12 @@ streaming HTTP/1.1 connection; published `e732dd0` stock-Haiku packages pass fiv
 network cycles. The graphics abort is traced to libroot publishing uninitialized
 locale tables. Early initialization now avoids that race: an isolated airOS
 engine and stock packages with the candidate JavaScriptCore library each pass
-20 complete cycles. See [the locale report](locale-startup-2026-10-22.md) for
-the native reproducer, candidate configurations and pending release checks.
+20 complete cycles. Published `56f49a8` packages then pass five complete cycles
+on each x86_64 target, without a preload or substituted library; cleanup,
+persistence, native crash monitoring and unchanged-input checks all pass.
+See [the locale report](locale-startup-2026-10-22.md) and
+[release evidence](network-release-2026-10-22.json). The network shutdown recheck
+is complete; #120 has other unfinished items.
 
 ## Native navigation outcomes and history
 

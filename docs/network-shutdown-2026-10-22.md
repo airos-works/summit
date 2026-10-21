@@ -1,10 +1,23 @@
 # Native network shutdown recheck, 22 October 2026
 
-**Acceptance is incomplete; #120 remains open.** Five stock Haiku cycles
-passed, but a subsequent run caught a compositor-thread abort. The airOS
-request stall is now fixed and verified in an isolated engine and published
-stock-Haiku packages. The graphics failure is traced to native locale startup;
-its workaround is described below. Neither earlier failed run is counted as a pass.
+**The network shutdown recheck passes on both x86_64 release targets.** Published
+`56f49a8` packages pass five complete cycles each on stock R1/beta6 and airOS,
+including persistence, native crash monitoring and complete process cleanup.
+The two defects found by the earlier runs are addressed by the curl connection
+policy fix (`b22cb50`) and early locale initialization (`7d0654b`). The earlier
+failures remain recorded below. #120 stays open for its other items.
+
+Release CI [39649186372](https://github.com/jmgasper/summit/actions/runs/39649186372)
+succeeded. Both targets used the complete published packages from 21 October,
+18:02 UTC, without a preload or substituted engine library. Stock packages were
+installed with `pkgman`; the workstation packages were extracted into an
+isolated directory, relocating only the app's RPATH and Mesa vendor JSON.
+Every cycle closed three held HTTPS bodies and one secure WebSocket, preserved
+cookie/localStorage/Cache API values, exited zero and left no owned process.
+Both native crash intervals are clean; runtime and fixture hashes are unchanged.
+Package hashes, build metadata and per-cycle evidence are in
+[the release report](network-release-2026-10-22.json). These finite x86_64 checks
+do not claim long-duration reliability or ARM runtime acceptance.
 
 The test uses published packages with the current engine pin `fb054d0`:
 stock R1/beta6 `cd9de3e`, and airOS `008ccfc`. Both contain the same engine
@@ -73,8 +86,8 @@ libroot initialization race: the first time conversion publishes its ICU ctype
 tables before filling them. A concurrent `sscanf()` can then reject the `3` in
 the valid Mesa version string. Early locale initialization now works around this
 in the Haiku engine. See [the locale investigation](locale-startup-2026-10-22.md)
-and [its evidence](locale-startup-2026-10-22.json) for the reproducer, candidate
-browser checks, and remaining release validation.
+and [its evidence](locale-startup-2026-10-22.json) for the reproducer and candidate
+browser checks. The completed release validation is recorded at the top.
 
 ## Workload and results
 
