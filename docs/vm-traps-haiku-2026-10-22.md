@@ -62,6 +62,11 @@ passed 212 checks but was not accepted as a fix. An initial cross-compile
 rejected lvalue lambda conversion to `WTF::Function`; the handler registration
 now moves separate closure copies, and both target builds complete.
 
-Full published-package acceptance still needs repeating after release CI
-includes this fix. ARM behavior and unrelated illegal-instruction cases are
-not established by these x86_64 worker tests.
+The full published `8224d7a` packages now pass **212 stock checks and 210 airOS
+checks**, including worker termination, with normal trap settings. Both runs
+exit cleanly, retain input/runtime hashes and have no new crash events. All
+four loaded engine binaries match their published packages; no candidate
+library is substituted. See the [release acceptance record](resource-usage-2026-10-22.md#published-release-after-the-worker-trap-fix)
+and [complete release evidence](resource-usage-release-2026-10-22.json).
+ARM behavior and unrelated illegal-instruction cases are not established by
+these x86_64 worker tests.

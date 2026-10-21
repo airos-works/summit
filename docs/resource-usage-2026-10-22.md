@@ -2,10 +2,11 @@
 
 The unprofiled x86_64 airOS candidate at `eefce05` passes **218 native checks**
 for the Inspector CPUProfiler and Memory domains and the new MCP
-`resource_usage` tool. The published `9d1ebd0` airOS release passes 208 checks.
-Stock-Haiku release acceptance failed when stopping a busy JavaScript worker.
-The [signal compatibility fix](vm-traps-haiku-2026-10-22.md) passes native
-candidate tests on both targets; a new full release still needs acceptance. Both published
+`resource_usage` tool. After the
+[worker-trap compatibility fix](vm-traps-haiku-2026-10-22.md), the full published
+`8224d7a` release passes **212 checks on stock Haiku and 210 on airOS**.
+The earlier `9d1ebd0` stock release failed when stopping a busy JavaScript worker;
+its airOS release passed 208 checks. Both published
 `56f49a8` baselines return “domain not found” for these domains, confirming
 the original #120 limitation.
 
@@ -92,11 +93,45 @@ exits normally, keeps its hashes and has no fresh crash events. This changes
 the trap strategy and is not normal-release acceptance. The kernel source
 shows the compatibility difference: stock reports a general-protection fault
 as `SIGILL`/`ILL_PRVOPC`; Haiku commit `1676c2d77c` changed it to
-`SIGBUS`/`BUS_OBJERR` on 29 September. JSC's signal-based VM trap handler
-currently registers for access faults (`SIGSEGV` and `SIGBUS`), so the older
+`SIGBUS`/`BUS_OBJERR` on 29 September. That release's signal-based VM trap handler
+registered only for access faults (`SIGSEGV` and `SIGBUS`), so the older
 signal needs separate handling for its known installed trap locations.
 The [implemented compatibility change and candidate acceptance](vm-traps-haiku-2026-10-22.md)
 now cover that older signal without selecting polling traps.
+
+## Published release after the worker-trap fix
+
+CI [39688911838](https://github.com/jmgasper/summit/actions/runs/39688911838)
+successfully publishes `8224d7a`, containing `18efa21`, as the
+`20261021.2246` packages. Full matching x86_64 app and engine bundles pass on
+both targets with normal trap settings. No candidate library is substituted,
+and both `LD_PRELOAD` and `JSC_usePollingTraps` are absent from the launch
+environment. Only the browser RPATH is relocated for each isolated bundle;
+all engine binaries retain their published bytes.
+
+| Target | Passed checks | Median idle → worker CPU | Runtime hashes |
+| --- | ---: | ---: | ---: |
+| Stock R1/beta6, hrev59866+79 | 212 | 0.165% → 179.752% | 101 |
+| airOS, hrev60207+1733 | 210 | 0.182% → 179.447% | 102 |
+
+Worker termination and the subsequent CPU reduction pass on both. The retained
+32 MiB allocation, GC accounting, recording restart/overlap, detach cleanup and
+shutdown checks also pass. Both browsers exit zero and all owned processes
+drain without forced cleanup. Both complete native crash intervals contain
+no new events; all recorded input/runtime hashes remain unchanged. The number
+of sample-level assertions varies with the number of collected samples.
+
+Loaded-image hashes match the published WebKit, JSC, WebProcess and
+NetworkProcess binaries. Independent audits after exit verify all 241 stock
+package files, 242 airOS files and six test inputs per target, accounting for
+the app's RPATH relocation and its Deskbar symlink. No installed packages or
+normal browser profiles are modified. The package build metadata records the
+same patched tree, `3087969a76beaad3e721e257662666b084f50460`, on both targets.
+
+[Complete release evidence](resource-usage-release-2026-10-22.json) includes
+both native reports, raw samples, logs, package manifests, selected loaded
+hashes and final audits. The earlier failures and polling-only diagnostic
+remain in the original evidence file.
 
 ## Behavior and limits
 
@@ -122,4 +157,4 @@ the same helper/library/Mesa environment as their normal launch.
 
 This implements the CPU/Memory backend portion of #120. JIT symbolization,
 extension background-page attachment, and the native Timelines UI in #108
-remain unfinished. Stock release and ARM runtime acceptance remain open.
+remain unfinished. ARM runtime acceptance remains open.
