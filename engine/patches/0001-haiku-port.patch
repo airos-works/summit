@@ -72869,10 +72869,10 @@ index 0000000000000000000000000000000000000000..abdba4dff009ff314eecd9f825a128aa
 +} // namespace WebKit
 diff --git a/Source/WebKit/PlatformHaiku.cmake b/Source/WebKit/PlatformHaiku.cmake
 new file mode 100644
-index 0000000000000000000000000000000000000000..d0db0f97e93c6be4fba4e8a2e47fcfb30cf109e1
+index 0000000000000000000000000000000000000000..1640178cfebfd3d583866e12f71c83c21fb563ee
 --- /dev/null
 +++ b/Source/WebKit/PlatformHaiku.cmake
-@@ -0,0 +1,507 @@
+@@ -0,0 +1,508 @@
 +include(Headers.cmake)
 +include(Platform/Curl.cmake)
 +
@@ -73004,6 +73004,7 @@ index 0000000000000000000000000000000000000000..d0db0f97e93c6be4fba4e8a2e47fcfb3
 +    UIProcess/haiku/WebPageProxyHaiku.cpp
 +    UIProcess/haiku/WebColorPickerHaiku.cpp
 +    UIProcess/haiku/WebDateTimePickerHaiku.cpp
++    UIProcess/haiku/WebDataListSuggestionsDropdownHaiku.cpp
 +    UIProcess/haiku/WebPopupMenuProxyHaiku.cpp
 +    UIProcess/haiku/WebProcessPoolHaiku.cpp
 +    UIProcess/haiku/WebView.cpp
@@ -82558,10 +82559,10 @@ index 0000000000000000000000000000000000000000..d28a6cad6339adf79b155cf974e85bfd
 +
 diff --git a/Source/WebKit/UIProcess/API/haiku/WebKitView.cpp b/Source/WebKit/UIProcess/API/haiku/WebKitView.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..3c63d1100d88a1fefd2349ad0b6c8f15f4cf4fe6
+index 0000000000000000000000000000000000000000..7021a12d9ac222b29477373f4d0f9ac934557c00
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/API/haiku/WebKitView.cpp
-@@ -0,0 +1,1066 @@
+@@ -0,0 +1,1075 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#include "config.h"
@@ -82573,6 +82574,7 @@ index 0000000000000000000000000000000000000000..3c63d1100d88a1fefd2349ad0b6c8f15
 +#include "JavaScriptDialogHaiku.h"
 +#include "NativeSelectPopupHaiku.h"
 +#include "NativeExtensionPopupHaiku.h"
++#include "NativeDataListSuggestionsHaiku.h"
 +#include "WebViewPrivate.h"
 +#include "WebViewStateHaiku.h"
 +#include "DirectPresentTargetHaiku.h"
@@ -82710,7 +82712,7 @@ index 0000000000000000000000000000000000000000..3c63d1100d88a1fefd2349ad0b6c8f15
 +
 +bool BWebKitHasPendingNativeUI()
 +{
-+    return JavaScriptDialogHaiku::activeCount() || NativeSelectPopupHaiku::activeCount() || NativeExtensionPopupHaiku::activeCount();
++    return JavaScriptDialogHaiku::activeCount() || NativeSelectPopupHaiku::activeCount() || NativeExtensionPopupHaiku::activeCount() || NativeDataListSuggestionsHaiku::activeCount();
 +}
 +
 +// Presenting pages straight into the screen (DirectPresentHaiku.h). A direct
@@ -82921,9 +82923,14 @@ index 0000000000000000000000000000000000000000..3c63d1100d88a1fefd2349ad0b6c8f15
 +    {
 +    }
 +
-+    filter_result Filter(BMessage* message, BHandler**) override
++    filter_result Filter(BMessage* message, BHandler** target) override
 +    {
 +        switch (message->what) {
++        case B_MOUSE_DOWN:
++            // Clicks on browser chrome need not change focus. Page clicks are
++            // dismissed in WebView before dispatch, preserving event order.
++            if (*target != m_view.Target(nullptr)) m_view.SendMessage(viewDismissDataListHaiku);
++            break;
 +        case B_MINIMIZE:
 +        case B_WORKSPACE_ACTIVATED:
 +        case B_WORKSPACES_CHANGED:
@@ -83517,6 +83524,9 @@ index 0000000000000000000000000000000000000000..3c63d1100d88a1fefd2349ad0b6c8f15
 +    switch (message->what) {
 +    case viewRetryCloseHaiku:
 +        RequestClose();
++        return;
++    case viewDismissDataListHaiku:
++        SendCommand(viewDismissDataListHaiku);
 +        return;
 +    case viewWindowVisibilityHaiku:
 +        if (Window())
@@ -111680,6 +111690,290 @@ index 0000000000000000000000000000000000000000..e9cb002658620cb1ebd184697a6b4499
 +    BMessenger m_window;
 +};
 +} // namespace WebKit
+diff --git a/Source/WebKit/UIProcess/haiku/NativeDataListSuggestionsHaiku.h b/Source/WebKit/UIProcess/haiku/NativeDataListSuggestionsHaiku.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..5207569116db94edce3a1009a7e57304be507f14
+--- /dev/null
++++ b/Source/WebKit/UIProcess/haiku/NativeDataListSuggestionsHaiku.h
+@@ -0,0 +1,278 @@
++/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
++#pragma once
++#include <ListItem.h>
++#include <ListView.h>
++#include <MessageRunner.h>
++#include <Messenger.h>
++#include <Screen.h>
++#include <ScrollView.h>
++#include <String.h>
++#include <Window.h>
++#include <algorithm>
++#include <atomic>
++#include <cmath>
++#include <functional>
++#include <memory>
++#include <mutex>
++#include <optional>
++#include <string>
++#include <utility>
++#include <vector>
++
++namespace WebKit {
++
++// The native looper owns the window and list. The engine owns only this
++// cancellation handle; callbacks must dispatch back to the engine's run loop.
++class NativeDataListSuggestionsHaiku final {
++public:
++    struct Item { std::string value; std::string label; };
++    using Completion = std::function<void(std::optional<std::string>, uint64_t)>;
++    enum class Key { Up, Down, Enter, Escape };
++
++    NativeDataListSuggestionsHaiku(BMessenger view, Completion completion)
++        : m_control(std::make_shared<Control>(view, std::move(completion))) { }
++    ~NativeDataListSuggestionsHaiku() { cancel(); }
++    static unsigned activeCount() { return s_active.load(); }
++    BMessenger target() const { std::lock_guard lock(m_control->mutex); return m_control->target; }
++    void cancel() { m_control->cancelled = true; target().SendMessage(updateMessage); }
++    void update(std::vector<Item> items, BRect anchor, uint64_t generation)
++    {
++        {
++            std::lock_guard lock(m_control->mutex);
++            m_control->items = std::move(items);
++            m_control->anchor = anchor;
++            m_control->generation = generation;
++        }
++        target().SendMessage(updateMessage);
++    }
++    void key(Key key)
++    {
++        {
++            std::lock_guard lock(m_control->mutex);
++            m_control->keys.emplace_back(key, m_control->generation);
++        }
++        target().SendMessage(updateMessage);
++    }
++    status_t start()
++    {
++        if (std::exchange(m_started, true)) return B_NOT_ALLOWED;
++        auto* data = new std::shared_ptr<Control>(m_control);
++        ++s_active;
++        auto thread = spawn_thread([](void* pointer) -> int32 {
++            std::unique_ptr<std::shared_ptr<Control>> data(static_cast<std::shared_ptr<Control>*>(pointer));
++            auto control = *data;
++            status_t status = B_TIMED_OUT;
++            const auto deadline = system_time() + 2000000;
++            while (!control->cancelled && system_time() < deadline) {
++                status = control->view.LockTargetWithTimeout(50000);
++                if (status != B_TIMED_OUT && status != B_WOULD_BLOCK) break;
++            }
++            Window* window = nullptr;
++            if (status == B_OK) {
++                BLooper* looper = nullptr;
++                auto* view = dynamic_cast<BView*>(control->view.Target(&looper));
++                auto* owner = view ? view->Window() : nullptr;
++                if (!control->cancelled && owner && owner->IsActive() && !owner->IsHidden() && !view->IsHidden()) {
++                    window = new Window(control);
++                    if (window->AddToSubset(owner) != B_OK) { delete window; window = nullptr; }
++                }
++                if (looper) looper->Unlock();
++            }
++            if (window) {
++                {
++                    std::lock_guard lock(control->mutex);
++                    control->target = BMessenger(window);
++                }
++                // Begin hidden; the first update validates the owner's focus
++                // again, after releasing its looper lock.
++                if (window->Run() < B_OK) delete window;
++                else control->target.SendMessage(updateMessage);
++            } else finish(control, std::nullopt, 0);
++            --s_active;
++            return B_OK;
++        }, "WebKit datalist", B_NORMAL_PRIORITY, data);
++        if (thread < B_OK) { --s_active; delete data; return thread; }
++        auto status = resume_thread(thread);
++        if (status != B_OK) { kill_thread(thread); --s_active; delete data; }
++        return status;
++    }
++
++private:
++    static constexpr uint32 updateMessage = 'dlup', chooseMessage = 'dlch';
++    struct Control {
++        Control(BMessenger view, Completion completion) : view(view), completion(std::move(completion)) { }
++        const BMessenger view;
++        const Completion completion;
++        std::mutex mutex;
++        BMessenger target;
++        std::vector<Item> items;
++        BRect anchor;
++        uint64_t generation { 0 };
++        std::vector<std::pair<Key, uint64_t>> keys;
++        std::atomic<bool> cancelled { false }, finished { false };
++    };
++    static void finish(const std::shared_ptr<Control>& control, std::optional<std::string> value, uint64_t generation)
++    {
++        if (!control->finished.exchange(true))
++            control->completion(control->cancelled ? std::nullopt : std::move(value), generation);
++    }
++    class Row final : public BListItem {
++    public:
++        explicit Row(Item item) : m_item(std::move(item)) { }
++        const std::string& value() const { return m_item.value; }
++        void Update(BView* view, const BFont* font) override
++        {
++            BListItem::Update(view, font);
++            font_height height; font->GetHeight(&height);
++            SetHeight(std::ceil(height.ascent + height.descent + height.leading) + 12);
++        }
++        void DrawItem(BView* view, BRect rect, bool) override
++        {
++            const bool selected = IsSelected();
++            view->SetHighColor(ui_color(selected ? B_LIST_SELECTED_BACKGROUND_COLOR : B_LIST_BACKGROUND_COLOR));
++            view->FillRect(rect);
++            view->SetLowColor(view->HighColor());
++            BFont font; view->GetFont(&font);
++            font_height height; font.GetHeight(&height);
++            const float available = std::max(0.0f, rect.Width() - 16);
++            BString value(m_item.value.c_str()), label(m_item.label.c_str());
++            const bool hasLabel = !label.IsEmpty() && label != value;
++            const float valueWidth = hasLabel ? std::min(font.StringWidth(value.String()), available * .55f) : available;
++            font.TruncateString(&value, B_TRUNCATE_END, valueWidth);
++            view->SetHighColor(ui_color(selected ? B_LIST_SELECTED_ITEM_TEXT_COLOR : B_LIST_ITEM_TEXT_COLOR));
++            const auto baseline = rect.top + (rect.Height() - height.ascent - height.descent) / 2 + height.ascent;
++            view->DrawString(value.String(), BPoint(rect.left + 8, baseline));
++            if (hasLabel) {
++                font.TruncateString(&label, B_TRUNCATE_END, std::max(0.0f, available - valueWidth - 12));
++                if (!selected) view->SetHighColor(tint_color(view->HighColor(), B_LIGHTEN_1_TINT));
++                view->DrawString(label.String(), BPoint(rect.left + 20 + valueWidth, baseline));
++            }
++        }
++    private:
++        Item m_item;
++    };
++    class List final : public BListView {
++    public:
++        explicit List(BRect frame) : BListView(frame, "datalist", B_SINGLE_SELECTION_LIST, B_FOLLOW_ALL, B_WILL_DRAW | B_FRAME_EVENTS) { }
++        ~List() override { clear(); }
++        void clear() { while (auto* item = RemoveItem(int32(0))) delete item; }
++        void MouseDown(BPoint point) override
++        {
++            const auto index = IndexOf(point);
++            if (index >= 0) { Select(index); Invoke(); }
++        }
++    };
++    class Activity {
++    protected:
++        Activity() { ++s_active; }
++        ~Activity() { --s_active; }
++    };
++    class CompletionAfterDestruction {
++    protected:
++        explicit CompletionAfterDestruction(std::shared_ptr<Control> control) : m_control(std::move(control)) { }
++        ~CompletionAfterDestruction() { finish(m_control, std::move(m_value), m_generation); }
++        std::optional<std::string> m_value;
++        uint64_t m_generation { 0 };
++    private:
++        std::shared_ptr<Control> m_control;
++    };
++    class Window final : private Activity, private CompletionAfterDestruction, public BWindow {
++    public:
++        explicit Window(std::shared_ptr<Control> control)
++            : CompletionAfterDestruction(control)
++            , BWindow(BRect(0, 0, 300, 100), "WebKit suggestions", B_NO_BORDER_WINDOW_LOOK, B_FLOATING_SUBSET_WINDOW_FEEL,
++                B_AVOID_FOCUS | B_NOT_MOVABLE | B_NOT_CLOSABLE | B_NOT_ZOOMABLE | B_NOT_MINIMIZABLE | B_NOT_RESIZABLE
++                    | B_WILL_ACCEPT_FIRST_CLICK | B_ASYNCHRONOUS_CONTROLS)
++            , m_control(std::move(control))
++        {
++            m_list = new List(BRect(0, 0, Bounds().Width() - B_V_SCROLL_BAR_WIDTH, Bounds().Height()));
++            AddChild(new BScrollView("datalist-scroll", m_list, B_FOLLOW_ALL, 0, false, true, B_NO_BORDER));
++            m_list->SetInvocationMessage(new BMessage(chooseMessage));
++            m_list->SetTarget(this);
++            BMessage update(updateMessage);
++            m_timer = std::make_unique<BMessageRunner>(BMessenger(this), &update, 100000);
++        }
++        void MessageReceived(BMessage* message) override
++        {
++            if (message->what == updateMessage) {
++                refresh();
++                std::vector<std::pair<Key, uint64_t>> keys;
++                {
++                    std::lock_guard lock(m_control->mutex);
++                    // Keep keys queued until the native list has caught up.
++                    if (m_generation == m_control->generation) keys.swap(m_control->keys);
++                }
++                for (auto [key, generation] : keys)
++                    if (!m_closing && generation == m_generation) handleKey(key);
++                return;
++            }
++            if (message->what == chooseMessage) { choose(); return; }
++            BWindow::MessageReceived(message);
++        }
++    private:
++        void dismiss() { m_closing = true; PostMessage(B_QUIT_REQUESTED); }
++        void handleKey(Key key)
++        {
++            if (key == Key::Escape) { dismiss(); return; }
++            if (key == Key::Enter) { choose(); return; }
++            const int32 count = m_list->CountItems();
++            auto index = m_list->CurrentSelection();
++            if (count && (key == Key::Up || key == Key::Down)) {
++                index = key == Key::Down ? (index + 1) % count : (index <= 0 ? count - 1 : index - 1);
++                m_list->Select(index);
++                m_list->ScrollToSelection();
++            }
++        }
++        void choose()
++        {
++            if (m_closing) return;
++            if (auto* item = static_cast<Row*>(m_list->ItemAt(m_list->CurrentSelection()))) m_value = item->value();
++            dismiss();
++        }
++        void refresh()
++        {
++            if (m_closing) return;
++            if (m_control->cancelled || !m_control->view.IsValid()) { dismiss(); return; }
++            // Never wait for an owner that might be waiting on app_server.
++            if (m_control->view.LockTargetWithTimeout(0) != B_OK) return;
++            BLooper* looper = nullptr;
++            auto* view = dynamic_cast<BView*>(m_control->view.Target(&looper));
++            auto* owner = view ? view->Window() : nullptr;
++            const bool available = owner && owner->IsActive() && !owner->IsHidden() && !owner->IsMinimized() && !view->IsHidden();
++            if (looper) looper->Unlock();
++            if (!available) { dismiss(); return; }
++            BRect anchor;
++            std::vector<Item> items;
++            {
++                std::lock_guard lock(m_control->mutex);
++                if (m_generation == m_control->generation) return;
++                m_generation = m_control->generation;
++                anchor = m_control->anchor;
++                items = m_control->items;
++            }
++            if (items.empty() || !anchor.IsValid() || !std::isfinite(anchor.left) || !std::isfinite(anchor.top)
++                || !std::isfinite(anchor.right) || !std::isfinite(anchor.bottom)) { dismiss(); return; }
++            m_list->clear();
++            for (auto& item : items) m_list->AddItem(new Row(std::move(item)));
++            m_list->ScrollTo(0, 0);
++            const auto screen = BScreen(this).Frame();
++            const float width = std::min(std::max(anchor.Width(), 300.0f), screen.Width());
++            const float height = std::min(m_list->ItemAt(0)->Height() * std::min<size_t>(8, items.size()), screen.Height());
++            const float x = std::clamp(anchor.left, screen.left, screen.right - width);
++            float y = anchor.bottom + 1;
++            if (y + height > screen.bottom) y = anchor.top - height - 1;
++            y = std::clamp(y, screen.top, screen.bottom - height);
++            ResizeTo(width, height);
++            MoveTo(x, y);
++            if (IsHidden()) Show();
++        }
++        const std::shared_ptr<Control> m_control;
++        List* m_list { nullptr };
++        std::unique_ptr<BMessageRunner> m_timer;
++        bool m_closing { false };
++    };
++    const std::shared_ptr<Control> m_control;
++    bool m_started { false };
++    inline static std::atomic<unsigned> s_active { 0 };
++};
++}
 diff --git a/Source/WebKit/UIProcess/haiku/NativeDateTimePickerHaiku.h b/Source/WebKit/UIProcess/haiku/NativeDateTimePickerHaiku.h
 new file mode 100644
 index 0000000000000000000000000000000000000000..4e2f3c504a1210c1c5ebff4679aa533885aae00b
@@ -113845,6 +114139,144 @@ index 0000000000000000000000000000000000000000..60291d60bcbc7a44b006a88500f1c374
 +    std::unique_ptr<NativeColorPickerHaiku> m_native;
 +};
 +}
+diff --git a/Source/WebKit/UIProcess/haiku/WebDataListSuggestionsDropdownHaiku.cpp b/Source/WebKit/UIProcess/haiku/WebDataListSuggestionsDropdownHaiku.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..fa1b00778b1389c6a805f35f949bcd6ac41fc733
+--- /dev/null
++++ b/Source/WebKit/UIProcess/haiku/WebDataListSuggestionsDropdownHaiku.cpp
+@@ -0,0 +1,96 @@
++/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
++#include "config.h"
++#include "WebDataListSuggestionsDropdownHaiku.h"
++#include "NativeDataListSuggestionsHaiku.h"
++#include "WebPageProxy.h"
++#include "WebViewStateHaiku.h"
++#include <WebCore/DataListSuggestionInformation.h>
++#include <wtf/Function.h>
++#include <wtf/RunLoop.h>
++
++namespace WebKit {
++struct WebDataListSuggestionsDropdownHaiku::CompletionState {
++    // Accessed only on the WebKit main loop.
++    Function<void(std::optional<std::string>, uint64_t)> callback;
++};
++Ref<WebDataListSuggestionsDropdownHaiku> WebDataListSuggestionsDropdownHaiku::create(WebPageProxy& page, std::shared_ptr<WebViewStateHaiku> state)
++{
++    return adoptRef(*new WebDataListSuggestionsDropdownHaiku(page, std::move(state)));
++}
++WebDataListSuggestionsDropdownHaiku::WebDataListSuggestionsDropdownHaiku(WebPageProxy& page, std::shared_ptr<WebViewStateHaiku> state)
++    : WebDataListSuggestionsDropdown(page), m_state(std::move(state)) { }
++WebDataListSuggestionsDropdownHaiku::~WebDataListSuggestionsDropdownHaiku() { invalidate(); }
++void WebDataListSuggestionsDropdownHaiku::invalidate()
++{
++    ASSERT(RunLoop::isMain());
++    if (m_completion) m_completion->callback = nullptr;
++    m_completion = nullptr;
++    m_native = nullptr;
++    m_values.clear();
++}
++void WebDataListSuggestionsDropdownHaiku::close()
++{
++    Ref protectedThis { *this };
++    invalidate();
++    WebDataListSuggestionsDropdown::close();
++}
++void WebDataListSuggestionsDropdownHaiku::platformShow(WebCore::DataListSuggestionInformation&& information)
++{
++    ASSERT(RunLoop::isMain());
++    auto state = m_state.lock();
++    if (!m_page || !state || state->closed || information.suggestions.isEmpty()) { close(); return; }
++    WebViewGeometryHaiku geometry;
++    BMessenger view;
++    { std::lock_guard lock(state->mutex); geometry = state->geometry; view = state->view; }
++    if (!geometry.attached || !geometry.visible || !geometry.focused || !geometry.active) { close(); return; }
++    const auto& rect = information.elementRect;
++    // Both the field rect and native screen origin are logical coordinates.
++    BRect anchor(geometry.screenOrigin.x() + rect.x(), geometry.screenOrigin.y() + rect.y(),
++        geometry.screenOrigin.x() + static_cast<double>(rect.maxX()), geometry.screenOrigin.y() + static_cast<double>(rect.maxY()));
++    std::vector<NativeDataListSuggestionsHaiku::Item> items;
++    auto copy = [](const String& value) { auto bytes = value.utf8(); return std::string(bytes.legacyCStringPointer(), bytes.length()); };
++    m_values.clear();
++    for (auto& suggestion : information.suggestions) {
++        auto value = copy(suggestion.value);
++        m_values.push_back(value);
++        items.push_back({ std::move(value), copy(suggestion.label) });
++    }
++    bool start = !m_native;
++    if (start) {
++        m_completion = std::make_shared<CompletionState>();
++        m_completion->callback = [this](std::optional<std::string> value, uint64_t generation) { complete(std::move(value), generation); };
++        m_native = std::make_unique<NativeDataListSuggestionsHaiku>(view,
++            [completion = m_completion](std::optional<std::string> value, uint64_t generation) {
++                RunLoop::mainSingleton().dispatch([completion, value = std::move(value), generation]() mutable {
++                    if (auto callback = std::exchange(completion->callback, nullptr)) callback(std::move(value), generation);
++                });
++            });
++    }
++    m_native->update(std::move(items), anchor, ++m_generation);
++    if (start && m_native->start() != B_OK) close();
++}
++void WebDataListSuggestionsDropdownHaiku::handleKeydownWithIdentifier(const String& key)
++{
++    if (!m_native) return;
++    using Key = NativeDataListSuggestionsHaiku::Key;
++    if (key == "Up"_s) m_native->key(Key::Up);
++    else if (key == "Down"_s) m_native->key(Key::Down);
++    else if (key == "Enter"_s) m_native->key(Key::Enter);
++    else if (key == "U+001B"_s) close();
++}
++void WebDataListSuggestionsDropdownHaiku::complete(std::optional<std::string> value, uint64_t generation)
++{
++    ASSERT(RunLoop::isMain());
++    Ref protectedThis { *this };
++    auto state = m_state.lock();
++    if (value && generation == m_generation && state && !state->closed
++        && std::find(m_values.begin(), m_values.end(), *value) != m_values.end()) {
++        bool available;
++        { std::lock_guard lock(state->mutex); const auto& g = state->geometry; available = g.attached && g.visible && g.focused && g.active; }
++        if (available) {
++            if (RefPtr page = m_page.get()) page->didSelectOption(String::fromUTF8(*value), m_targetFrameID);
++        }
++    }
++    close();
++}
++}
+diff --git a/Source/WebKit/UIProcess/haiku/WebDataListSuggestionsDropdownHaiku.h b/Source/WebKit/UIProcess/haiku/WebDataListSuggestionsDropdownHaiku.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..e19d5bab80c2c57c973d4e59f2c5240804e1f6f1
+--- /dev/null
++++ b/Source/WebKit/UIProcess/haiku/WebDataListSuggestionsDropdownHaiku.h
+@@ -0,0 +1,30 @@
++/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
++#pragma once
++#include "WebDataListSuggestionsDropdown.h"
++#include <memory>
++#include <optional>
++#include <string>
++#include <vector>
++
++namespace WebKit {
++class NativeDataListSuggestionsHaiku;
++struct WebViewStateHaiku;
++class WebDataListSuggestionsDropdownHaiku final : public WebDataListSuggestionsDropdown {
++public:
++    static Ref<WebDataListSuggestionsDropdownHaiku> create(WebPageProxy&, std::shared_ptr<WebViewStateHaiku>);
++    ~WebDataListSuggestionsDropdownHaiku() override;
++    void handleKeydownWithIdentifier(const String&) override;
++    void close() override;
++private:
++    WebDataListSuggestionsDropdownHaiku(WebPageProxy&, std::shared_ptr<WebViewStateHaiku>);
++    void platformShow(WebCore::DataListSuggestionInformation&&) override;
++    void invalidate();
++    void complete(std::optional<std::string>, uint64_t);
++    struct CompletionState;
++    const std::weak_ptr<WebViewStateHaiku> m_state;
++    std::shared_ptr<CompletionState> m_completion;
++    std::unique_ptr<NativeDataListSuggestionsHaiku> m_native;
++    std::vector<std::string> m_values;
++    uint64_t m_generation { 0 };
++};
++}
 diff --git a/Source/WebKit/UIProcess/haiku/WebDateTimePickerHaiku.cpp b/Source/WebKit/UIProcess/haiku/WebDateTimePickerHaiku.cpp
 new file mode 100644
 index 0000000000000000000000000000000000000000..28aa449338ea36dcf54c2b96097c6a01a549a7c5
@@ -114634,10 +115066,10 @@ index 0000000000000000000000000000000000000000..c9a119d02f85b7c5ad8fe9153bfc9604
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/WebView.cpp b/Source/WebKit/UIProcess/haiku/WebView.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..88aabc7b0b06e563e99cc6cbf644878f46919837
+index 0000000000000000000000000000000000000000..2acfcfb914a599a36279fa462b770c4b695aac25
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/WebView.cpp
-@@ -0,0 +1,2931 @@
+@@ -0,0 +1,2945 @@
 +/*
 + * Copyright (C) 2013 Intel Corporation. All rights reserved.
 + *
@@ -114705,6 +115137,7 @@ index 0000000000000000000000000000000000000000..88aabc7b0b06e563e99cc6cbf644878f
 +#include "WebContextMenuItem.h"
 +#include "WebContextMenuItemData.h"
 +#include "WebDataListSuggestionsDropdown.h"
++#include "WebDataListSuggestionsDropdownHaiku.h"
 +#include "WebDateTimePicker.h"
 +#include "WebDateTimePickerHaiku.h"
 +#include "WebFindOptions.h"
@@ -116897,6 +117330,9 @@ index 0000000000000000000000000000000000000000..88aabc7b0b06e563e99cc6cbf644878f
 +        break;
 +    }
 +    case viewGeometryHaiku: updateGeometry(); break;
++    case viewDismissDataListHaiku:
++        if (RefPtr picker = m_dataListSuggestions.get()) picker->close();
++        break;
 +#if USE(COORDINATED_GRAPHICS)
 +    case viewDirectTargetHaiku:
 +        if (m_acceleratedBackingStore) {
@@ -116969,6 +117405,9 @@ index 0000000000000000000000000000000000000000..88aabc7b0b06e563e99cc6cbf644878f
 +        else if (auto wheel = NativeWebWheelEvent::create(native, local, screen))
 +            m_page->handleNativeWheelEvent(wheel.releaseNonNull());
 +        else if (auto mouse = NativeWebMouseEvent::create(native, local, screen, m_buttons)) {
++            if (native.what == B_MOUSE_DOWN) {
++                if (RefPtr picker = m_dataListSuggestions.get()) picker->close();
++            }
 +            m_buttons = mouse->buttons();
 +            m_page->handleMouseEvent(mouse.releaseNonNull());
 +        }
@@ -116992,6 +117431,8 @@ index 0000000000000000000000000000000000000000..88aabc7b0b06e563e99cc6cbf644878f
 +    if (!m_page)
 +        return;
 +    auto current = geometry();
++    // Geometry/focus changes can move the anchor or hide its tab.
++    if (RefPtr picker = m_dataListSuggestions.get()) picker->close();
 +    m_page->legacyMainFrameProcess().send(Messages::WebPage::SetWindowFrameHaiku(FloatRect(current.windowFrame)), m_page->webPageIDInMainFrameProcess());
 +    // The screen's density changes when monitors are rearranged or rescaled.
 +    if (current.scale > 0)
@@ -117254,7 +117695,12 @@ index 0000000000000000000000000000000000000000..88aabc7b0b06e563e99cc6cbf644878f
 +{
 +    return WebColorPickerHaiku::create(page, m_state, WTF::move(suggestions), frame);
 +}
-+RefPtr<WebDataListSuggestionsDropdown> WebView::createDataListSuggestionsDropdown(WebPageProxy&) { return nullptr; }
++RefPtr<WebDataListSuggestionsDropdown> WebView::createDataListSuggestionsDropdown(WebPageProxy& page)
++{
++    auto picker = WebDataListSuggestionsDropdownHaiku::create(page, m_state);
++    m_dataListSuggestions = picker.get();
++    return picker;
++}
 +RefPtr<WebDateTimePicker> WebView::createDateTimePicker(WebPageProxy& page)
 +{
 +    auto picker = WebDateTimePickerHaiku::create(page, m_state);
@@ -118081,10 +118527,10 @@ index 0000000000000000000000000000000000000000..520ed4b88123bc3011d015a47a3e89ef
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/WebViewPrivate.h b/Source/WebKit/UIProcess/haiku/WebViewPrivate.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..63372cc3f12bccf01f83f9ed4395aaaec84b14d4
+index 0000000000000000000000000000000000000000..2ec2c1fb9f2177ea0b4bc50ff51ddf713f30ee64
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/WebViewPrivate.h
-@@ -0,0 +1,209 @@
+@@ -0,0 +1,210 @@
 +/*
 +   Copyright (C) 2014 Haiku, inc.
 +
@@ -118278,6 +118724,7 @@ index 0000000000000000000000000000000000000000..63372cc3f12bccf01f83f9ed4395aaae
 +    const std::shared_ptr<WebViewStateHaiku> m_state;
 +    RefPtr<WebPageProxy> m_page;
 +    WeakPtr<WebDateTimePicker> m_dateTimePicker;
++    WeakPtr<WebDataListSuggestionsDropdown> m_dataListSuggestions;
 +    DefaultUndoController m_undoController;
 +    CompletionHandler<void()> m_presentationCallback;
 +    uint64_t m_presentationIdentifier { 0 };
@@ -118296,10 +118743,10 @@ index 0000000000000000000000000000000000000000..63372cc3f12bccf01f83f9ed4395aaae
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/WebViewStateHaiku.h b/Source/WebKit/UIProcess/haiku/WebViewStateHaiku.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..76ca2242108785f69d7b950dc98f37876affda2d
+index 0000000000000000000000000000000000000000..a6b7ce3a24a20092c358bc87625b6c3a1d4b308b
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/WebViewStateHaiku.h
-@@ -0,0 +1,202 @@
+@@ -0,0 +1,203 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#pragma once
@@ -118338,6 +118785,7 @@ index 0000000000000000000000000000000000000000..76ca2242108785f69d7b950dc98f3787
 +    viewCursorHaiku = 'wvcu', viewTooltipHaiku = 'wvtt',
 +    viewFindHaiku = 'wvfi', viewHideFindHaiku = 'wvhf',
 +    viewZoomHaiku = 'wvzo', viewEditHaiku = 'wved', viewRequestCloseHaiku = 'wvcl',
++    viewDismissDataListHaiku = 'wvdl',
 +    viewResetCloseHaiku = 'wvcr', viewRetryCloseHaiku = 'wvrc',
 +    // Files dragged over the view: phase ("entered", "updated", "exited",
 +    // "drop"), local, screen, repeated path (with entered and drop).
@@ -138319,7 +138767,7 @@ index 8677b9d9f5c1e61cbe8b0a184b669022d8db3eed..3ef5c5295f89885202331129b3eb86ac
  #include "MessageSenderInlines.h"
  #include "WebAuthenticatorCoordinatorProxyMessages.h"
 diff --git a/Source/WebKit/WebProcess/WebCoreSupport/WebChromeClient.cpp b/Source/WebKit/WebProcess/WebCoreSupport/WebChromeClient.cpp
-index 5d337c36f13b7536068905f99d062affc54900c0..d3ae2843e5534c1c8325ed054ab33d55288060c1 100644
+index 5d337c36f13b7536068905f99d062affc54900c0..6277b2d66a3adc5f6c555424002c764661a6e5fa 100644
 --- a/Source/WebKit/WebProcess/WebCoreSupport/WebChromeClient.cpp
 +++ b/Source/WebKit/WebProcess/WebCoreSupport/WebChromeClient.cpp
 @@ -122,6 +122,9 @@
@@ -138341,6 +138789,15 @@ index 5d337c36f13b7536068905f99d062affc54900c0..d3ae2843e5534c1c8325ed054ab33d55
  #endif
  
      auto sendResult = protect(WebProcess::singleton().parentProcessConnection())->sendSync(Messages::WebPageProxy::GetWindowFrame(), page->identifier());
+@@ -1063,7 +1068,7 @@ RefPtr<DataListSuggestionPicker> WebChromeClient::createDataListSuggestionPicker
+ 
+ bool WebChromeClient::canShowDataListSuggestionLabels() const
+ {
+-#if PLATFORM(MAC)
++#if PLATFORM(MAC) || PLATFORM(HAIKU)
+     return true;
+ #else
+     return false;
 @@ -1103,6 +1108,43 @@ void WebChromeClient::transcodeChosenFiles(Vector<String>&& transcodingPaths, St
      page->sendWithAsyncReply(Messages::WebPageProxy::TranscodeChosenFiles(transcodingPaths, destinationUTI, destinationExtension), WTF::move(completion));
  }
