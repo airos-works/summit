@@ -2,9 +2,11 @@
 
 The unprofiled x86_64 airOS candidate at `eefce05` passes **218 native checks**
 for the Inspector CPUProfiler and Memory domains and the new MCP
-`resource_usage` tool. Published-package acceptance and a stock-Haiku candidate
-run are pending. Both published `56f49a8` baselines return “domain not found”
-for these domains, confirming the original #120 limitation.
+`resource_usage` tool. The published `9d1ebd0` airOS release passes 208 checks.
+Stock-Haiku release acceptance fails when stopping a busy JavaScript worker;
+its native JIT-trap crash remains under investigation. Both published
+`56f49a8` baselines return “domain not found” for these domains, confirming
+the original #120 limitation.
 
 The [machine-readable evidence](resource-usage-2026-10-22.json) contains the
 baseline and candidate results, raw samples, loaded-image hashes, crash-log
@@ -51,6 +53,48 @@ to 101 and 106. Later-loaded files are hashed when first observed and checked
 at shutdown. The candidate has all 106 runtime files in its initial snapshot.
 The airOS candidate is not substituted into the stock installation.
 
+## Published packages
+
+Release CI [39665615342](https://github.com/jmgasper/summit/actions/runs/39665615342)
+successfully published the full x86_64 browser and engine packages for
+`9d1ebd0` on both targets. Acceptance extracts each target's complete bundle
+into an owned directory. Only the browser RPATH is relocated; its Deskbar
+symlink resolves to that same binary. An external EGL vendor file selects
+the packaged Mesa library. All other package files retain their published
+bytes. No engine library is substituted and no preload is used.
+
+The airOS release passes **208 checks**: median CPU rises from 0.175% idle to
+180.002% with two workers, and the retained 32 MiB array grows the JavaScript
+category by 33,548,681 bytes. Recording, detach, GC and shutdown checks pass;
+the browser exits zero with no owned processes left, no fresh crash events,
+and unchanged inputs and 102 recorded runtime files.
+
+The first airOS release attempt failed its allocation comparison: three of
+six samples preceded an automatic GC and did not yet count the typed array's
+backing store; the remaining samples included it. JSC accounts for oversize
+typed-array backing stores when visiting them during GC. The runner now
+collects before each allocation comparison to compare settled counters. The
+failed attempt is retained with its forced cleanup.
+
+Stock R1/beta6 reproduces a general-protection fault when terminating an
+optimized JavaScript worker after the CPU measurement. The initial run reaches
+about 180.10% worker CPU before failing. A diagnostic repeat reaches 179.90%
+and saves a native report showing both worker threads faulting in generated
+code, called by `ScheduledAction` through their timer loops. Both runs fail
+their native crash checks and require cleanup; neither is release acceptance.
+The repeat deliberately holds its failed process for 45 seconds so the native
+debugger can save a report. The complete reports, package manifests and saved
+debugger report are retained in the machine-readable evidence.
+
+A separate stock diagnostic with `JSC_usePollingTraps=1` passes 212 checks,
+exits normally, keeps its hashes and has no fresh crash events. This changes
+the trap strategy and is not normal-release acceptance. The kernel source
+shows the compatibility difference: stock reports a general-protection fault
+as `SIGILL`/`ILL_PRVOPC`; Haiku commit `1676c2d77c` changed it to
+`SIGBUS`/`BUS_OBJERR` on 29 September. JSC's signal-based VM trap handler
+currently registers for access faults (`SIGSEGV` and `SIGBUS`), so the older
+signal needs separate handling for its known installed trap locations.
+
 ## Behavior and limits
 
 The collector samples about every 500 ms while observed. Native team counters
@@ -60,7 +104,8 @@ collection resumes. Memory counters are read on the owning main thread with
 the VM lock, and memory remainder arithmetic saturates instead of wrapping.
 
 These are WebProcess measurements. The JavaScript category covers the page VM,
-not separate worker heaps; JIT is process-wide. Images and Layers use existing
+not separate worker heaps, and some backing-store counters reflect the most
+recent GC rather than every allocation immediately; JIT is process-wide. Images and Layers use existing
 cache/tile counters. The Page allocator category remains zero. Resident area
 and allocation estimates are not exact private physical memory, and shared
 mappings can be counted more than once. See [MCP usage and limits](mcp.md#cpu-and-memory-recordings).
@@ -74,4 +119,4 @@ the same helper/library/Mesa environment as their normal launch.
 
 This implements the CPU/Memory backend portion of #120. JIT symbolization,
 extension background-page attachment, and the native Timelines UI in #108
-remain unfinished. It does not establish ARM runtime or release-package acceptance.
+remain unfinished. Stock release and ARM runtime acceptance remain open.

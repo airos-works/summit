@@ -217,9 +217,14 @@ def main():
             check(any(sum(t.get('type') == 'webkit' and bool(t.get('targetId')) and t['usage'] > 20
                           for t in s['threads']) >= 2 for s in busy['cpu'][1:]), 'both loaded workers have target identities')
             check(evaluate('resourceProbe.stopWorkers()'), 'workers terminated')
+            # Oversize typed-array backing stores enter JSC's retained-memory
+            # counters when visited by GC. Compare settled snapshots on both
+            # sides rather than depending on the next automatic collection.
+            call('inspector', method='Heap.gc')
             before = record('before_allocation', cpu=False)
             allocation = evaluate('resourceProbe.allocate(32)')
             check(allocation == {'bytes': 32 * 1024**2, 'first': 173, 'last': 173}, '32 MiB allocated and touched')
+            call('inspector', method='Heap.gc')
             allocated = record('allocated', cpu=False)
             check(any(c['size'] > 0 for s in allocated['memory'] for c in s['categories'] if c['type'] == 'jit'),
                   'committed JIT memory is reported')
