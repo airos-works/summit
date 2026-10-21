@@ -293,6 +293,39 @@ passed for the source tree including the existing download-feature merge.
 Evidence: `.vm/bench/x399-perf-20261021/`, the individual Speedometer run
 directories from this date, and `/mnt/HaikuWork/build/summit-media-perf/`.
 
+### 22 October 2026: PGO audit and CI decision (#120)
+
+The retraining requested in #120 was completed on 21 October, after the gcov
+locking and per-module dump fixes. An independent audit on 22 October verified
+all **4,144 counter files** against the retained import manifest and archive,
+including their sizes and SHA-256 hashes. `gcov-dump` independently confirms
+`runs=57` and the recorded summary values in all seven sampled units. The
+original 5,087-step profile-use build completed without compiler errors,
+coverage-mismatch diagnostics or corrupt-profile diagnostics; the earlier
+multi-hour compile stalls did not prevent this rebuild.
+
+The three original benchmark reports also confirm completed runs, no foreign
+load contention, no new crash/debugger events, and no leftover helpers. The
+full-engine score is **14.3% above** its matching non-PGO baseline. This is an
+audit of the 21 October measurements above, not a new benchmark of today's
+engine. Counter provenance, exact scores, native binary manifest and build-log
+hashes are retained in [the audit report](pgo-decision-2026-10-22.json).
+
+**Decision: keep ordinary CI and release builds without PGO.** Retain the
+separately trained x86_64 airOS performance build. The measured gain establishes
+its value on the X399, but this profile was generated for one target and source/
+compiler configuration, then imported into the same build directory. It has no
+matching stock-Haiku or arm64 performance qualification. Current source changes
+already produce profile-mismatch warnings in that development build. Applying
+the retained profile to all release targets would not reproduce the measured
+configuration.
+
+Enabling PGO in CI later requires target-specific training and profile artifacts
+tied to the source/compiler configuration, rejecting stale or incomplete data,
+and separate performance and native acceptance for each release target. No CI
+configuration changes are needed for the present decision. The retraining,
+measurement and CI decision portion of #120 is complete.
+
 
 ## 20 October 2026: direct presents timed to the scan on AMD (#82)
 
