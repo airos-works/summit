@@ -23641,7 +23641,7 @@ index 28829bd1aac3177356f62c6aa30919288ca3f36d..137925cf79133c96182b0df77fdc59fe
  #else
  typedef uint64_t GLNativeWindowType;
 diff --git a/Source/WebCore/platform/graphics/egl/GraphicsContextGLEGL.cpp b/Source/WebCore/platform/graphics/egl/GraphicsContextGLEGL.cpp
-index 24ac596ad8c9275e9018b351ec61b5fd5037e5ba..f190c9428f85785a7ccbd74822110f97bc039da6 100644
+index 24ac596ad8c9275e9018b351ec61b5fd5037e5ba..10424e9064d539e62dff6654bc46c89cc0a9ccff 100644
 --- a/Source/WebCore/platform/graphics/egl/GraphicsContextGLEGL.cpp
 +++ b/Source/WebCore/platform/graphics/egl/GraphicsContextGLEGL.cpp
 @@ -26,6 +26,10 @@
@@ -23655,7 +23655,17 @@ index 24ac596ad8c9275e9018b351ec61b5fd5037e5ba..f190c9428f85785a7ccbd74822110f97
  
  #if ENABLE(WEBGL) && (USE(GRAPHICS_LAYER_WC) || USE(COORDINATED_GRAPHICS))
  
-@@ -62,6 +66,10 @@
+@@ -40,6 +44,9 @@
+ 
+ #if ENABLE(MEDIA_STREAM) || ENABLE(WEB_CODECS)
+ #include "VideoFrame.h"
++#if PLATFORM(HAIKU)
++#include "NativeImage.h"
++#endif
+ #if USE(GSTREAMER)
+ #include "VideoFrameContentHint.h"
+ #include "VideoFrameGStreamer.h"
+@@ -62,6 +69,10 @@
  #include "GraphicsLayerContentsDisplayDelegateCoordinated.h"
  #endif
  
@@ -23666,7 +23676,21 @@ index 24ac596ad8c9275e9018b351ec61b5fd5037e5ba..f190c9428f85785a7ccbd74822110f97
  namespace WebCore {
  
  WTF_MAKE_TZONE_ALLOCATED_IMPL(GraphicsContextGLEGL);
-@@ -263,6 +271,9 @@ bool GraphicsContextGLEGL::platformInitializeContext()
+@@ -225,6 +236,13 @@ RefPtr<VideoFrame> GraphicsContextGLEGL::surfaceBufferToVideoFrame(SurfaceBuffer
+         options.isMirrored = true;
+         return VideoFrameGStreamer::createFromPixelBuffer(pixelBuffer.releaseNonNull(), { }, 30, options);
+     }
++#elif PLATFORM(HAIKU)
++    // Canvas capture needs the presented WebGL buffer, including when the
++    // drawing buffer is discarded after presentation. copyNativeImage reads
++    // that buffer and flips GL's bottom-up rows. The native-image conversion
++    // also handles opaque RGBX and unpremultiplies alpha for VideoFrameHaiku.
++    if (RefPtr image = copyNativeImage(buffer))
++        return VideoFrame::fromNativeImage(*image);
+ #else
+     UNUSED_PARAM(buffer);
+ #endif
+@@ -263,6 +281,9 @@ bool GraphicsContextGLEGL::platformInitializeContext()
      EGL_ChooseConfig(m_displayObj, configAttributes, &m_configObj, 1, &numberConfigsReturned);
      if (numberConfigsReturned != 1) {
          LOG(WebGL, "EGLConfig Initialization failed.");
@@ -23676,7 +23700,7 @@ index 24ac596ad8c9275e9018b351ec61b5fd5037e5ba..f190c9428f85785a7ccbd74822110f97
          return false;
      }
      LOG(WebGL, "Got EGLConfig");
-@@ -304,9 +315,15 @@ bool GraphicsContextGLEGL::platformInitializeContext()
+@@ -304,9 +325,15 @@ bool GraphicsContextGLEGL::platformInitializeContext()
      // WebGL doesn't allow implicit creation of objects on bind.
      eglContextAttributes.append(EGL_CONTEXT_BIND_GENERATES_RESOURCE_CHROMIUM);
      eglContextAttributes.append(EGL_FALSE);
@@ -23693,7 +23717,7 @@ index 24ac596ad8c9275e9018b351ec61b5fd5037e5ba..f190c9428f85785a7ccbd74822110f97
  #endif
  
      if (WTF::contains(unsafeSpan(displayExtensions), "EGL_ANGLE_power_preference"_span)) {
-@@ -317,23 +334,42 @@ bool GraphicsContextGLEGL::platformInitializeContext()
+@@ -317,23 +344,42 @@ bool GraphicsContextGLEGL::platformInitializeContext()
      }
      eglContextAttributes.append(EGL_NONE);
  

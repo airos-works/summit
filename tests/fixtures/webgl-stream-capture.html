@@ -1,0 +1,98 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>WebGL canvas video capture</title>
+<style>
+  body { font: 16px sans-serif; margin: 20px; }
+  canvas, video { width: 256px; height: 192px; background: #222; }
+  pre { white-space: pre-wrap; }
+</style>
+<h1>WebGL canvas video capture</h1>
+<p>Run from localhost or HTTPS. Each captured video must show the canvas's colours in the same orientation.</p>
+<button id="run">Run tests</button>
+<div id="views"></div>
+<pre id="status">Ready.</pre>
+<script>
+window.webglCaptureResults = null;
+window.testWebGLStreamCapture = async () => {
+  const results = [];
+  const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+  for (const options of [
+    { type: 'webgl', alpha: true, preserveDrawingBuffer: false },
+    { type: 'webgl', alpha: false, preserveDrawingBuffer: true },
+    { type: 'webgl2', alpha: false, preserveDrawingBuffer: false },
+    { type: 'webgl2', alpha: true, preserveDrawingBuffer: true }
+  ]) {
+    const result = { options, checks: [], errors: [], frames: 0 };
+    results.push(result);
+    const check = (name, ok, detail) => {
+      result.checks.push({ name, ok, detail });
+      if (!ok) throw new Error(name);
+    };
+    const wait = async (predicate, name) => {
+      const deadline = performance.now() + 2500;
+      while (!predicate() && performance.now() < deadline) await sleep(20);
+      check(name, !!predicate());
+    };
+    const canvas = document.createElement('canvas'); canvas.width = 128; canvas.height = 96;
+    const video = document.createElement('video'); video.muted = true; video.autoplay = true; video.playsInline = true;
+    document.getElementById('views').append(canvas, video);
+    let stream, timer, callback, gl;
+    let changed = false;
+    const colors = () => changed ? [[32, 224, 64], [224, 192, 32]] : [[224, 32, 64], [32, 64, 224]];
+    const pixels = () => {
+      const sample = document.createElement('canvas'); sample.width = 8; sample.height = 8;
+      const context = sample.getContext('2d'); context.drawImage(video, 0, 0, 8, 8);
+      return [[...context.getImageData(4, 1, 1, 1).data], [...context.getImageData(4, 6, 1, 1).data]];
+    };
+    const matches = () => {
+      if (video.readyState < 2) return false;
+      const actual = pixels();
+      return colors().every((color, i) => [...color, 255].every((v, channel) => Math.abs(actual[i][channel] - v) <= 3));
+    };
+    try {
+      gl = canvas.getContext(options.type, options);
+      check('WebGL context created', !!gl);
+      const draw = () => {
+        gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+        gl.enable(gl.SCISSOR_TEST);
+        for (let i = 0; i < 2; ++i) {
+          const color = colors()[i];
+          gl.scissor(0, i ? 0 : canvas.height / 2, canvas.width, canvas.height / 2);
+          gl.clearColor(...color.map(v => v / 255), 1); gl.clear(gl.COLOR_BUFFER_BIT);
+        }
+      };
+      draw(); stream = canvas.captureStream(30); video.srcObject = stream;
+      const frame = () => { ++result.frames; callback = video.requestVideoFrameCallback(frame); };
+      callback = video.requestVideoFrameCallback(frame);
+      video.play().catch(error => result.errors.push(String(error)));
+      timer = setInterval(draw, 33);
+      await wait(() => result.frames >= 3, 'captured WebGL stream delivers repeated frames');
+      check('pixel colours, opacity and vertical orientation match', matches(), pixels());
+      check('capture dimensions match the canvas', video.videoWidth === 128 && video.videoHeight === 96);
+      changed = true;
+      await wait(matches, 'new drawing reaches the video');
+      canvas.width = 192; canvas.height = 128;
+      await wait(() => video.videoWidth === 192 && video.videoHeight === 128, 'capture follows canvas size changes');
+      await wait(matches, 'resized frame has the right pixels');
+      check('capture leaves WebGL error state clean', gl.getError() === gl.NO_ERROR);
+      clearInterval(timer); stream.getTracks().forEach(track => track.stop());
+      await sleep(100); const count = result.frames;
+      await sleep(150);
+      check('stopped stream delivers no more frames', result.frames === count);
+    } catch (error) { result.errors.push(String(error)); }
+    finally {
+      clearInterval(timer);
+      if (callback) video.cancelVideoFrameCallback(callback);
+      stream?.getTracks().forEach(track => track.stop());
+      video.srcObject = null;
+      gl?.getExtension('WEBGL_lose_context')?.loseContext();
+      canvas.remove(); video.remove();
+    }
+  }
+  window.webglCaptureResults = { results, passed: results.flatMap(r => r.checks).filter(c => c.ok).length,
+    failed: results.flatMap(r => r.checks).filter(c => !c.ok).length, errors: results.flatMap(r => r.errors) };
+  document.getElementById('status').textContent = JSON.stringify(webglCaptureResults, null, 2);
+  return webglCaptureResults;
+};
+document.getElementById('run').onclick = () => testWebGLStreamCapture();
+</script>
