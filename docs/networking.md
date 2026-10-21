@@ -132,11 +132,8 @@ request forgery):
 - The cookie lists of the developer tools' Storage tab and of extensions'
   `cookies` API come from the whole store and are unchanged: they still show
   every cookie with its SameSite.
-- Not done: partitioned cookies (CHIPS, `Partitioned`) are still kept in the
-  one jar, not per top-level site (they work, without the isolation); doing
-  it needs a partition column or table in `CookieJarDB` and partition-aware
-  lookups, deletion and expiry. The legacy `BWebView` loader
-  (`CookieStorageSessionHaikuCurl.cpp`) keeps the old behaviour.
+- Partitioned cookie storage is described below. The legacy `BWebView`
+  loader still lacks the SameSite enforcement described in this section.
 
 Checked on the X399 with two sites on the build host (`http://192.168.1.200:8861`
 and `http://airos-build:8861`; an address and a host name are different
@@ -148,3 +145,66 @@ neither, and of the `Lax`, `Strict` and `None` cookies it and a cross-site
 frame response set, only the `None` ones were stored. A typed address on the
 first site sent all of them, and the developer tools' Storage tab listed them
 with Strict, Lax and None.
+
+## Partitioned cookies (CHIPS, #121)
+
+The Curl cookie store now recognizes `Partitioned` in HTTP response headers
+and `document.cookie`. These cookies require `Secure` and an HTTPS setter;
+their key includes the top-level site's scheme and registrable domain. Paths,
+ports and subdomains of that top-level site share a partition, while different
+schemes or sites do not. Ordinary cookies retain their existing behavior.
+This follows the [CHIPS top-level site model](https://privacysandbox.google.com/cookies/chips).
+
+`CookieJarDB` schema version 3 includes `partitionkey` in the cookie's unique
+identity. Migration rebuilds the table in a transaction, retaining existing
+values, creation times, SameSite policy and update times. Existing cookies
+remain unpartitioned: old versions discarded the attribute, so their rows
+cannot be retrospectively classified. Session cookies are removed at startup
+as before. A failed migration rolls back without deleting the old database.
+
+Request headers and `document.cookie` select ordinary cookies plus cookies of
+the current top-level site. Overwrite, expiry, HttpOnly checks, exact deletion
+and mutation receipts use the complete partitioned identity. Privileged
+enumeration retains partition keys, and cookie equality distinguishes them
+when the inspector combines results from multiple frames.
+
+The native developer tools' Storage panel shows a **Partition Key** column and
+includes it in filtering and row identity. Deleting a partitioned row expires
+that exact structured cookie through `Page.setCookie`; the older
+`Page.deleteCookie` command cannot express a partition. The inspector and
+network process verify that a partitioned edit belongs to the inspected
+top-level site and the embedded cookie origin.
+
+The extensions API accepts `partitionKey: {topLevelSite: "https://site.example"}`
+for `cookies.get`, `getAll`, `set` and `remove`. Omission selects ordinary
+cookies; `getAll({partitionKey: {}})` explicitly selects all partitions.
+Returned cookies, removal receipts and `onChanged` events include the key.
+Host permissions and private-store restrictions still apply, including to
+wildcard queries. See the [Chrome cookies API](https://developer.chrome.com/docs/extensions/reference/api/cookies).
+
+The key here is the top-level site. Chrome's additional `hasCrossSiteAncestor`
+dimension and `cookies.getPartitionKey` are not implemented; unsupported
+partition fields fail explicitly instead of silently broadening a query.
+The legacy loader uses the same CHIPS database for opt-in cookies but still
+rejects separate tracking-prevention requests for automatic partitioning.
+
+### Validation
+
+On 21 October 2026, the original browser sent a third-party frame's server and
+JavaScript cookies under both unrelated top-level sites; writing under the
+second site also changed the first site's values. The reproducer is
+`tools/bench/chips-server.py`: an HTTPS server using the machine's LAN IP and
+127.0.0.1 as top-level sites, with an iframe on localhost. Use an isolated
+profile trusting a test certificate for those three hosts.
+
+Native component validation currently passes **237 database/parser/change
+checks** and **145 query/JavaScript conversion checks**. This covers real
+SQLite, migrations from versions 0, 1 and 2, rollback, partition isolation,
+expiry, event identity, wildcard queries and structured API results. Build
+the executables from the configured engine using
+`tools/test-engine-cookie-components.py --build BUILD --output OUTPUT
+--runtime-lib-dir HAIKU_LIBRARY_DIRECTORY`, within its Haiku SDK environment;
+then run both executables on Haiku with the matching libraries.
+
+Full browser, extension restart and developer-tools acceptance is still in
+progress. The extension fixture is `tests/fixtures/extensions/chips`.

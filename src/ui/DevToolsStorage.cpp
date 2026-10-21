@@ -22,7 +22,7 @@ constexpr uint32 kAreaSelected = 'dsar', kItemSelected = 'dsit', kRefresh = 'dsr
     kFilterItems = 'dsfl', kSaveItem = 'dssv';
 enum { kItemKey, kItemValue };
 enum { kCookieName, kCookieValue, kCookieDomain, kCookiePath, kCookieExpires, kCookieSize, kCookieHttpOnly, kCookieSecure,
-    kCookieSameSite };
+    kCookieSameSite, kCookiePartition };
 enum { kTableItems, kTableCookies };
 
 std::string LowerCase(std::string text)
@@ -43,7 +43,7 @@ std::string OneLine(const std::string& text)
 }
 
 // What names a cookie among the page's: several can share a name.
-std::string CookieID(const Cookie& cookie) { return cookie.name + '\n' + cookie.domain + '\n' + cookie.path; }
+std::string CookieID(const Cookie& cookie) { return cookie.ID(); }
 
 const char* KindName(StorageKind kind)
 {
@@ -103,7 +103,7 @@ StoragePanel::StoragePanel(Session& session, DevToolsHost& host)
     fFilter = new BTextControl("filter", "Filter:", "", nullptr);
     fFilter->SetModificationMessage(new BMessage(kFilterItems));
     fFilter->TextView()->SetExplicitMinSize(BSize(140, B_SIZE_UNSET));
-    fFilter->SetToolTip("Show items whose key or value contains this");
+    fFilter->SetToolTip("Filter keys, values, cookie domains or partition keys");
 
     fAreas = new BOutlineListView("areas");
     fAreas->SetSelectionMessage(new BMessage(kAreaSelected));
@@ -124,6 +124,7 @@ StoragePanel::StoragePanel(Session& session, DevToolsHost& host)
     fCookies->AddColumn(new BStringColumn("HttpOnly", 70, 30, 200, B_TRUNCATE_END, B_ALIGN_CENTER), kCookieHttpOnly);
     fCookies->AddColumn(new BStringColumn("Secure", 60, 30, 200, B_TRUNCATE_END, B_ALIGN_CENTER), kCookieSecure);
     fCookies->AddColumn(new BStringColumn("SameSite", 70, 30, 200, B_TRUNCATE_END), kCookieSameSite);
+    fCookies->AddColumn(new BStringColumn("Partition Key", 180, 60, 2000, B_TRUNCATE_MIDDLE), kCookiePartition);
     for (auto* list : {fItems, fCookies}) {
         list->SetSelectionMode(B_SINGLE_SELECTION_LIST);
         list->SetSelectionMessage(new BMessage(kItemSelected));
@@ -357,7 +358,7 @@ void StoragePanel::Fill()
     if (area && cookies) {
         total = area->cookies.size();
         for (const auto& cookie : area->cookies) {
-            if (!matches(cookie.name, cookie.value + " " + cookie.domain)) continue;
+            if (!matches(cookie.name, cookie.value + " " + cookie.domain + " " + cookie.partitionKey)) continue;
             auto* row = new Row();
             row->id = CookieID(cookie);
             row->SetField(new BStringField(OneLine(cookie.name).c_str()), kCookieName);
@@ -369,6 +370,7 @@ void StoragePanel::Fill()
             row->SetField(new BStringField(cookie.httpOnly ? "✓" : ""), kCookieHttpOnly);
             row->SetField(new BStringField(cookie.secure ? "✓" : ""), kCookieSecure);
             row->SetField(new BStringField(cookie.sameSite.c_str()), kCookieSameSite);
+            row->SetField(new BStringField(cookie.partitionKey.c_str()), kCookiePartition);
             fCookies->AddRow(row);
             if (row->id == fSelected) selected = row;
             ++shown;
@@ -453,7 +455,7 @@ bool StoragePanel::Command(const std::string& action, const std::string& argumen
         fSelected.clear();
         if (const auto* area = Area()) {
             for (const auto& item : area->items) if (item.key == argument) fSelected = item.key;
-            for (const auto& cookie : area->cookies) if (cookie.name == argument) fSelected = CookieID(cookie);
+            for (const auto& cookie : area->cookies) if (cookie.name == argument || cookie.ID() == argument) fSelected = CookieID(cookie);
         }
         if (fSelected.empty()) error = "No such item";
         Fill();

@@ -13292,6 +13292,47 @@ index 630b8da74fe0d770a34b573e653a7ca05b1a117e..86acd08e780d52d13ee4bcf10c144203
      if (CheckedPtr canvasAgent = enabledCanvasAgent(canvasRenderingContext))
          canvasAgent->recordAction(canvasRenderingContext, WTF::move(name), WTF::move(arguments));
  }
+diff --git a/Source/WebCore/inspector/agents/InspectorPageAgent.cpp b/Source/WebCore/inspector/agents/InspectorPageAgent.cpp
+index ae292e47510d5537fe8023a85931e8c869bcaca1..098925628465e0b6b775b1697970f0e0324c9b36 100644
+--- a/Source/WebCore/inspector/agents/InspectorPageAgent.cpp
++++ b/Source/WebCore/inspector/agents/InspectorPageAgent.cpp
+@@ -35,6 +35,10 @@
+ #include "CachedResource.h"
+ #include "Cookie.h"
+ #include "CookieJar.h"
++#if PLATFORM(HAIKU) && USE(CURL)
++#include "CookieUtil.h"
++#include "Site.h"
++#endif
+ #include "DOMWrapperWorld.h"
+ #include "DocumentLoader.h"
+ #include "DocumentResourceLoader.h"
+@@ -550,10 +554,21 @@ Inspector::Protocol::ErrorStringOr<void> InspectorPageAgent::setCookie(Ref<JSON:
+         RefPtr page = document->page();
+         if (!page)
+             continue;
+-        if (!RegistrableDomain::uncheckedCreateFromHost(cookie->domain).matches(document->firstPartyForCookies()))
+-            continue;
+-        if (!RegistrableDomain(document->cookieURL()).matches(document->firstPartyForCookies()))
+-            continue;
++#if PLATFORM(HAIKU) && USE(CURL)
++        if (shouldPartition.value_or(false) && cookie->partitionKey.isEmpty())
++            cookie->partitionKey = Site { document->firstPartyForCookies() }.toString();
++        if (!cookie->partitionKey.isEmpty()) {
++            if (cookie->partitionKey != Site { document->firstPartyForCookies() }.toString()
++                || !CookieUtil::domainMatch(cookie->domain, document->cookieURL().host().toString()))
++                continue;
++        } else
++#endif
++        {
++            if (!RegistrableDomain::uncheckedCreateFromHost(cookie->domain).matches(document->firstPartyForCookies()))
++                continue;
++            if (!RegistrableDomain(document->cookieURL()).matches(document->firstPartyForCookies()))
++                continue;
++        }
+         page->cookieJar().setRawCookie(*document, cookie.value(), shouldPartitionCookie);
+     }
+ 
 diff --git a/Source/WebCore/layout/formattingContexts/grid/GridFormattingContext.cpp b/Source/WebCore/layout/formattingContexts/grid/GridFormattingContext.cpp
 index 1e32526022d7299e8ba3b5f4f82c59d5244267af..42eba71cd13dd736fde5b3ca949bddba0595983b 100644
 --- a/Source/WebCore/layout/formattingContexts/grid/GridFormattingContext.cpp
@@ -57107,6 +57148,25 @@ index e0f2bdb231dafa06f6794fc560386e6ae440766f..a83cec33717df8e90159333df206ea27
  CaptureSourceOrError MockRealtimeVideoSource::create(String&& deviceID, AtomString&& name, MediaDeviceHashSalts&& hashSalts, const MediaConstraints* constraints, std::optional<PageIdentifier> pageIdentifier)
  {
  #ifndef NDEBUG
+diff --git a/Source/WebCore/platform/network/Cookie.cpp b/Source/WebCore/platform/network/Cookie.cpp
+index bdc42211a45a7b35e712e9a15a758d0f1278dd1e..b3ca0b9eef76ff99b900e88716e183bcdcb04590 100644
+--- a/Source/WebCore/platform/network/Cookie.cpp
++++ b/Source/WebCore/platform/network/Cookie.cpp
+@@ -42,12 +42,13 @@ bool Cookie::operator==(const Cookie& other) const
+     return name == other.name
+         && domain == other.domain
+         && path == other.path
++        && partitionKey == other.partitionKey
+         && secure == other.secure;
+ }
+     
+ unsigned Cookie::hash() const
+ {
+-    return StringHash::hash(name) + StringHash::hash(domain) + StringHash::hash(path) + secure;
++    return StringHash::hash(name) + StringHash::hash(domain) + StringHash::hash(path) + StringHash::hash(partitionKey.isEmpty() ? emptyString() : partitionKey) + secure;
+ }
+ #endif
+ 
 diff --git a/Source/WebCore/platform/network/CookieStorageSession.cpp b/Source/WebCore/platform/network/CookieStorageSession.cpp
 index b84528f1ee474709bc43139d8368229a6d66ffba..cc8bb0d96f3846ece976c1767e6329caed061133 100644
 --- a/Source/WebCore/platform/network/CookieStorageSession.cpp
@@ -57591,14 +57651,15 @@ index 1373e6e9b7b3e517f8570d11022f02a40ce42c27..97f95743448a1c0b9baa0c092916ac81
  }
  
 diff --git a/Source/WebCore/platform/network/curl/CookieJarDB.cpp b/Source/WebCore/platform/network/curl/CookieJarDB.cpp
-index 3c56c7dff8d09bee15b4c67831a44b23f65d5604..4f8ecebe46d263e5a40a6a2b97b697ea8b1862f0 100644
+index 3c56c7dff8d09bee15b4c67831a44b23f65d5604..ec961622e805a774b59a65ab9de878355b7bdad6 100644
 --- a/Source/WebCore/platform/network/curl/CookieJarDB.cpp
 +++ b/Source/WebCore/platform/network/curl/CookieJarDB.cpp
-@@ -31,10 +31,12 @@
+@@ -31,10 +31,13 @@
  #include "PublicSuffixStore.h"
  #include "RegistrableDomain.h"
  #include "SQLiteFileSystem.h"
 +#include "SQLiteTransaction.h"
++#include "Site.h"
 +#include <algorithm>
 +#include <cmath>
  #include <wtf/DateMath.h>
@@ -57608,41 +57669,57 @@ index 3c56c7dff8d09bee15b4c67831a44b23f65d5604..4f8ecebe46d263e5a40a6a2b97b697ea
  #include <wtf/TZoneMallocInlines.h>
  #include <wtf/URL.h>
  #include <wtf/Vector.h>
-@@ -59,6 +61,8 @@ WTF_MAKE_TZONE_ALLOCATED_IMPL(CookieJarDB);
+@@ -59,8 +62,11 @@ WTF_MAKE_TZONE_ALLOCATED_IMPL(CookieJarDB);
      "  session INTEGER NOT NULL,"\
      "  httponly INTEGER NOT NULL DEFAULT 0,"\
      "  secure INTEGER NOT NULL DEFAULT 0,"\
 +    "  created REAL NOT NULL DEFAULT 0,"\
 +    "  samesite INTEGER NOT NULL DEFAULT 0,"\
++    "  partitionkey TEXT NOT NULL DEFAULT '',"\
      "  lastupdated INTEGER NOT NULL DEFAULT CURRENT_TIMESTAMP, "\
-     "  UNIQUE(name, domain, path));"_s
+-    "  UNIQUE(name, domain, path));"_s
++    "  UNIQUE(name, domain, path, partitionkey));"_s
  #define CREATE_DOMAIN_INDEX_SQL \
-@@ -72,8 +76,13 @@ WTF_MAKE_TZONE_ALLOCATED_IMPL(CookieJarDB);
+     "CREATE INDEX IF NOT EXISTS domain_index ON Cookie(domain);"_s
+ #define CREATE_PATH_INDEX_SQL \
+@@ -68,16 +74,21 @@ WTF_MAKE_TZONE_ALLOCATED_IMPL(CookieJarDB);
+ #define SELECT_ALL_DOMAINS_SQL \
+     "SELECT DISTINCT domain FROM Cookie;"_s
+ #define CHECK_EXISTS_COOKIE_SQL \
+-    "SELECT domain FROM Cookie WHERE ((domain = ?) OR (domain GLOB ?));"_s
++    "SELECT domain FROM Cookie WHERE partitionkey = '' AND ((domain = ?) OR (domain GLOB ?));"_s
  #define CHECK_EXISTS_HTTPONLY_COOKIE_SQL \
-     "SELECT name FROM Cookie WHERE (name = ?) AND (domain = ?) AND (path = ?) AND (httponly = 1);"_s
+-    "SELECT name FROM Cookie WHERE (name = ?) AND (domain = ?) AND (path = ?) AND (httponly = 1);"_s
++    "SELECT name FROM Cookie WHERE name = ? AND domain = ? AND path = ? AND partitionkey = ? AND httponly = 1;"_s
  #define SET_COOKIE_SQL \
 -    "INSERT OR REPLACE INTO Cookie (name, value, domain, path, expires, size, session, httponly, secure) "\
 -    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);"_s
-+    "INSERT INTO Cookie (name, value, domain, path, expires, size, session, httponly, secure, created, samesite) "\
-+    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "\
-+    "ON CONFLICT(name, domain, path) DO UPDATE SET value=excluded.value, expires=excluded.expires, "\
++    "INSERT INTO Cookie (name, value, domain, path, expires, size, session, httponly, secure, created, samesite, partitionkey) "\
++    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "\
++    "ON CONFLICT(name, domain, path, partitionkey) DO UPDATE SET value=excluded.value, expires=excluded.expires, "\
 +    "size=excluded.size, session=excluded.session, httponly=excluded.httponly, secure=excluded.secure, "\
 +    "samesite=excluded.samesite, created=COALESCE(NULLIF(Cookie.created, 0), excluded.created), lastupdated=CURRENT_TIMESTAMP;"_s
 +#define SELECT_COOKIE_COLUMNS_SQL \
-+    "SELECT name, value, domain, path, expires, httponly, secure, session, created, samesite FROM Cookie "
++    "SELECT name, value, domain, path, expires, httponly, secure, session, created, samesite, partitionkey FROM Cookie "
  #define DELETE_COOKIE_BY_NAME_DOMAIN_PATH_SQL \
-     "DELETE FROM Cookie WHERE name = ? AND domain = ? AND path = ?;"_s
+-    "DELETE FROM Cookie WHERE name = ? AND domain = ? AND path = ?;"_s
++    "DELETE FROM Cookie WHERE name = ? AND domain = ? AND path = ? AND partitionkey = ?;"_s
  #define DELETE_COOKIE_BY_NAME_DOMAIN_SQL \
-@@ -91,7 +100,7 @@ WTF_MAKE_TZONE_ALLOCATED_IMPL(CookieJarDB);
+-    "DELETE FROM Cookie WHERE name = ? AND domain = ?;"_s
++    "DELETE FROM Cookie WHERE name = ? AND domain = ? AND partitionkey = '';"_s
+ #define DELETE_ALL_SESSION_COOKIE_SQL \
+     "DELETE FROM Cookie WHERE session = 1;"_s
+ #define DELETE_COOKIES_BY_DOMAIN_SQL \
+@@ -91,7 +102,7 @@ WTF_MAKE_TZONE_ALLOCATED_IMPL(CookieJarDB);
  // If the database schema is updated:
  // - Increment schemaVersion
  // - Add upgrade logic in verifySchemaVersion to migrate databases from the previous schema version
 -static constexpr int schemaVersion = 1;
-+static constexpr int schemaVersion = 2;
++static constexpr int schemaVersion = 3;
  
  
  CookieJarDB::CookieJarDB(const String& databasePath)
-@@ -101,6 +110,7 @@ CookieJarDB::CookieJarDB(const String& databasePath)
+@@ -101,6 +112,7 @@ CookieJarDB::CookieJarDB(const String& databasePath)
  
  CookieJarDB::~CookieJarDB()
  {
@@ -57650,7 +57727,7 @@ index 3c56c7dff8d09bee15b4c67831a44b23f65d5604..4f8ecebe46d263e5a40a6a2b97b697ea
      closeDatabase();
      m_database.setDidBeginCheckedPtrDeletion();
  }
-@@ -124,9 +134,7 @@ bool CookieJarDB::openDatabase()
+@@ -124,9 +136,7 @@ bool CookieJarDB::openDatabase()
  
      if (existsDatabaseFile) {
          if (m_database.open(m_databasePath)) {
@@ -57661,7 +57738,7 @@ index 3c56c7dff8d09bee15b4c67831a44b23f65d5604..4f8ecebe46d263e5a40a6a2b97b697ea
                  // delete database and try to re-create again
                  LOG_ERROR("Cookie database validity check failed, attempting to recreate the database");
                  m_database.close();
-@@ -153,7 +161,10 @@ bool CookieJarDB::openDatabase()
+@@ -153,7 +163,10 @@ bool CookieJarDB::openDatabase()
      if (!isOnMemory() && !m_database.turnOnIncrementalAutoVacuum())
          LOG_ERROR("Unable to turn on incremental auto-vacuum (%d %s)", m_database.lastError(), m_database.lastErrorMsg());
  
@@ -57673,7 +57750,7 @@ index 3c56c7dff8d09bee15b4c67831a44b23f65d5604..4f8ecebe46d263e5a40a6a2b97b697ea
  
      if (!existsDatabaseFile || !m_database.tableExists("Cookie"_s)) {
          bool ok = executeSQLStatement(m_database.prepareStatement(CREATE_COOKIE_TABLE_SQL))
-@@ -171,14 +182,23 @@ bool CookieJarDB::openDatabase()
+@@ -171,14 +184,23 @@ bool CookieJarDB::openDatabase()
      m_database.setSynchronous(SQLiteDatabase::SyncNormal);
  
      // create prepared statements
@@ -57694,17 +57771,17 @@ index 3c56c7dff8d09bee15b4c67831a44b23f65d5604..4f8ecebe46d263e5a40a6a2b97b697ea
 +        closeDatabase();
 +        return false;
 +    }
- 
++
 +    if (existsDatabaseFile && !executeSQLStatement(m_database.prepareStatement(DELETE_ALL_SESSION_COOKIE_SQL))) {
 +        closeDatabase();
 +        return false;
 +    }
-+
+ 
 +    scheduleCookieExpiration();
      return true;
  }
  
-@@ -190,32 +210,36 @@ void CookieJarDB::closeDatabase()
+@@ -190,32 +212,47 @@ void CookieJarDB::closeDatabase()
      }
  }
  
@@ -57755,6 +57832,17 @@ index 3c56c7dff8d09bee15b4c67831a44b23f65d5604..4f8ecebe46d263e5a40a6a2b97b697ea
 +            || !m_database.executeCommand("ALTER TABLE Cookie ADD COLUMN samesite INTEGER NOT NULL DEFAULT 0"_s))
 +            return false;
 +    }
++    if (hasCookies && version <= 2) {
++        // SQLite cannot alter a UNIQUE constraint. Rebuild atomically, keeping
++        // every old cookie in the unpartitioned jar and preserving row order.
++        if (!m_database.executeCommand("ALTER TABLE Cookie RENAME TO CookieBeforePartitioning"_s)
++            || !m_database.executeCommand(CREATE_COOKIE_TABLE_SQL)
++            || !m_database.executeCommand("INSERT INTO Cookie (rowid, name, value, domain, path, expires, size, session, httponly, secure, created, samesite, lastupdated) SELECT rowid, name, value, domain, path, expires, size, session, httponly, secure, created, samesite, lastupdated FROM CookieBeforePartitioning"_s)
++            || !m_database.executeCommand("DROP TABLE CookieBeforePartitioning"_s)
++            || !m_database.executeCommand(CREATE_DOMAIN_INDEX_SQL)
++            || !m_database.executeCommand(CREATE_PATH_INDEX_SQL))
++            return false;
++    }
 +    if (!m_database.executeCommandSlow(makeString("PRAGMA user_version="_s, schemaVersion)))
 +        return false;
 +    transaction.commit();
@@ -57762,24 +57850,31 @@ index 3c56c7dff8d09bee15b4c67831a44b23f65d5604..4f8ecebe46d263e5a40a6a2b97b697ea
  }
  
  void CookieJarDB::deleteAllTables()
-@@ -385,13 +409,13 @@ std::optional<Vector<Cookie>> CookieJarDB::searchCookies(const URL& firstParty,
+@@ -385,13 +422,14 @@ std::optional<Vector<Cookie>> CookieJarDB::searchCookies(const URL& firstParty,
  
      RegistrableDomain registrableDomain { requestUrl };
  
 -    auto pstmt = m_database.prepareStatement("SELECT name, value, domain, path, expires, httponly, secure, session FROM Cookie WHERE "\
 -        "(NOT ((session = 0) AND (expires < ?)))"
-+    auto pstmt = m_database.prepareStatement("SELECT name, value, domain, path, expires, httponly, secure, session, created, samesite FROM Cookie WHERE "\
++    auto pstmt = m_database.prepareStatement(SELECT_COOKIE_COLUMNS_SQL "WHERE "\
 +        "(NOT ((session = 0) AND (expires <= ?)))"
          "AND (httponly = COALESCE(NULLIF(?, -1), httponly)) "\
          "AND (secure = COALESCE(NULLIF(?, -1), secure)) "\
          "AND (session = COALESCE(NULLIF(?, -1), session)) "\
          "AND ((domain = ?) OR (domain GLOB ?)) "\
 -        "ORDER BY length(path) DESC, lastupdated"_s);
++        "AND (partitionkey = '' OR partitionkey = ?) "\
 +        "ORDER BY length(path) DESC, created, rowid"_s);
      if (!pstmt)
          return std::nullopt;
  
-@@ -410,9 +434,6 @@ std::optional<Vector<Cookie>> CookieJarDB::searchCookies(const URL& firstParty,
+@@ -405,14 +443,12 @@ std::optional<Vector<Cookie>> CookieJarDB::searchCookies(const URL& firstParty,
+         pstmt->bindNull(6);
+     else
+         pstmt->bindText(6, makeString("*."_s, registrableDomain.string()));
++    pstmt->bindText(7, firstParty.isValid() && firstParty.protocolIsInHTTPFamily() ? Site { firstParty }.toString() : emptyString());
+ 
+     Vector<Cookie> results;
  
      while (pstmt->step() == SQLITE_ROW) {
  
@@ -57789,7 +57884,7 @@ index 3c56c7dff8d09bee15b4c67831a44b23f65d5604..4f8ecebe46d263e5a40a6a2b97b697ea
          String cookieName = pstmt->columnText(0);
          String cookieValue = pstmt->columnText(1);
          String cookieDomain = pstmt->columnText(2).convertToASCIILowercase();
-@@ -443,6 +464,10 @@ std::optional<Vector<Cookie>> CookieJarDB::searchCookies(const URL& firstParty,
+@@ -443,6 +479,11 @@ std::optional<Vector<Cookie>> CookieJarDB::searchCookies(const URL& firstParty,
          cookie.httpOnly = cookieHttpOnly;
          cookie.secure = cookieSecure;
          cookie.session = cookieSession;
@@ -57797,15 +57892,16 @@ index 3c56c7dff8d09bee15b4c67831a44b23f65d5604..4f8ecebe46d263e5a40a6a2b97b697ea
 +        auto sameSite = pstmt->columnInt(9);
 +        if (sameSite >= 0 && sameSite <= static_cast<int>(Cookie::SameSitePolicy::Strict))
 +            cookie.sameSite = static_cast<Cookie::SameSitePolicy>(sameSite);
++        cookie.partitionKey = pstmt->columnText(10);
          results.append(WTF::move(cookie));
      }
  
-@@ -455,10 +480,11 @@ Vector<Cookie> CookieJarDB::getAllCookies()
+@@ -455,10 +496,11 @@ Vector<Cookie> CookieJarDB::getAllCookies()
      if (!isEnabled() || !m_database.isOpen())
          return result;
  
 -    auto pstmt = m_database.prepareStatement("SELECT name, value, domain, path, expires, httponly, secure, session FROM Cookie"_s);
-+    auto pstmt = m_database.prepareStatement("SELECT name, value, domain, path, expires, httponly, secure, session, created, samesite FROM Cookie WHERE session = 1 OR expires > ? ORDER BY length(path) DESC, created, rowid"_s);
++    auto pstmt = m_database.prepareStatement(SELECT_COOKIE_COLUMNS_SQL "WHERE session = 1 OR expires > ? ORDER BY length(path) DESC, created, rowid"_s);
      if (!pstmt)
          return result;
  
@@ -57813,7 +57909,7 @@ index 3c56c7dff8d09bee15b4c67831a44b23f65d5604..4f8ecebe46d263e5a40a6a2b97b697ea
      while (pstmt->step() == SQLITE_ROW) {
          Cookie cookie;
          cookie.name = pstmt->columnText(0);
-@@ -471,6 +497,10 @@ Vector<Cookie> CookieJarDB::getAllCookies()
+@@ -471,18 +513,24 @@ Vector<Cookie> CookieJarDB::getAllCookies()
          cookie.httpOnly = (pstmt->columnInt(5) == 1);
          cookie.secure = (pstmt->columnInt(6) == 1);
          cookie.session = (pstmt->columnInt(7) == 1);
@@ -57821,10 +57917,37 @@ index 3c56c7dff8d09bee15b4c67831a44b23f65d5604..4f8ecebe46d263e5a40a6a2b97b697ea
 +        auto sameSite = pstmt->columnInt(9);
 +        if (sameSite >= 0 && sameSite <= static_cast<int>(Cookie::SameSitePolicy::Strict))
 +            cookie.sameSite = static_cast<Cookie::SameSitePolicy>(sameSite);
++        cookie.partitionKey = pstmt->columnText(10);
          result.append(WTF::move(cookie));
      }
      return result;
-@@ -517,25 +547,176 @@ bool CookieJarDB::canAcceptCookie(const Cookie& cookie, const URL& firstParty, c
+ }
+ 
+-bool CookieJarDB::hasHttpOnlyCookie(const String& name, const String& domain, const String& path)
++bool CookieJarDB::hasHttpOnlyCookie(const Cookie& cookie)
+ {
+     auto& statement = preparedStatement(CHECK_EXISTS_HTTPONLY_COOKIE_SQL);
+ 
+-    statement.bindText(1, name);
+-    statement.bindText(2, domain);
+-    statement.bindText(3, path);
++    statement.bindText(1, cookie.name);
++    statement.bindText(2, cookie.domain);
++    statement.bindText(3, cookie.path);
++    statement.bindText(4, cookie.partitionKey.isEmpty() ? emptyString() : cookie.partitionKey);
+ 
+     return statement.step() == SQLITE_ROW;
+ }
+@@ -505,7 +553,7 @@ bool CookieJarDB::canAcceptCookie(const Cookie& cookie, const URL& firstParty, c
+         return false;
+ 
+     bool fromJavaScript = source == CookieJarDB::Source::Script;
+-    if (fromJavaScript && (cookie.httpOnly || hasHttpOnlyCookie(cookie.name, cookie.domain, cookie.path)))
++    if (fromJavaScript && (cookie.httpOnly || hasHttpOnlyCookie(cookie)))
+         return false;
+ 
+     if (!CookieUtil::domainMatch(cookie.domain, url.host().convertToASCIILowercase()))
+@@ -517,25 +565,186 @@ bool CookieJarDB::canAcceptCookie(const Cookie& cookie, const URL& firstParty, c
      return true;
  }
  
@@ -57845,6 +57968,7 @@ index 3c56c7dff8d09bee15b4c67831a44b23f65d5604..4f8ecebe46d263e5a40a6a2b97b697ea
 +    if (sameSite < 0 || sameSite > static_cast<int>(Cookie::SameSitePolicy::Strict))
 +        return std::nullopt;
 +    cookie.sameSite = static_cast<Cookie::SameSitePolicy>(sameSite);
++    cookie.partitionKey = statement.columnText(10);
 +    return cookie;
 +}
 +
@@ -57856,9 +57980,10 @@ index 3c56c7dff8d09bee15b4c67831a44b23f65d5604..4f8ecebe46d263e5a40a6a2b97b697ea
 +bool CookieJarDB::readCookie(const Cookie& key, std::optional<Cookie>& cookie)
 +{
 +    cookie = std::nullopt;
-+    auto statement = m_database.prepareStatement(SELECT_COOKIE_COLUMNS_SQL "WHERE name = ? AND domain = ? AND path = ?"_s);
++    auto statement = m_database.prepareStatement(SELECT_COOKIE_COLUMNS_SQL "WHERE name = ? AND domain = ? AND path = ? AND partitionkey = ?"_s);
 +    if (!statement || statement->bindText(1, key.name) != SQLITE_OK
-+        || statement->bindText(2, key.domain) != SQLITE_OK || statement->bindText(3, key.path) != SQLITE_OK)
++        || statement->bindText(2, key.domain) != SQLITE_OK || statement->bindText(3, key.path) != SQLITE_OK
++        || statement->bindText(4, key.partitionKey.isEmpty() ? emptyString() : key.partitionKey) != SQLITE_OK)
 +        return false;
 +    auto code = statement->step();
 +    if (code == SQLITE_DONE)
@@ -57945,8 +58070,14 @@ index 3c56c7dff8d09bee15b4c67831a44b23f65d5604..4f8ecebe46d263e5a40a6a2b97b697ea
 +bool CookieJarDB::setCookieWithResult(const Cookie& cookie, std::optional<Cookie>& storedCookie)
 +{
 +    storedCookie = std::nullopt;
-+    if (!isEnabled() || !m_database.isOpen() || !cookie.partitionKey.isEmpty())
++    if (!isEnabled() || !m_database.isOpen())
 +        return false;
++    if (!cookie.partitionKey.isEmpty()) {
++        URL partitionURL { cookie.partitionKey };
++        if (!cookie.secure || !partitionURL.isValid() || !partitionURL.protocolIsInHTTPFamily()
++            || partitionURL.host().isEmpty() || Site { partitionURL }.toString() != cookie.partitionKey)
++            return false;
++    }
 +    auto expires = cookie.expires.value_or(0.0);
 +    if (!std::isfinite(expires) || expires < static_cast<double>(std::numeric_limits<int64_t>::min())
 +        || expires >= static_cast<double>(std::numeric_limits<int64_t>::max()))
@@ -57980,6 +58111,7 @@ index 3c56c7dff8d09bee15b4c67831a44b23f65d5604..4f8ecebe46d263e5a40a6a2b97b697ea
 +            auto statement = m_database.prepareStatement(DELETE_COOKIE_BY_NAME_DOMAIN_PATH_SQL);
 +            if (!statement || statement->bindText(1, cookie.name) != SQLITE_OK
 +                || statement->bindText(2, cookie.domain) != SQLITE_OK || statement->bindText(3, cookie.path) != SQLITE_OK
++                || statement->bindText(4, cookie.partitionKey.isEmpty() ? emptyString() : cookie.partitionKey) != SQLITE_OK
 +                || !checkSQLiteReturnCode(statement->step()) || m_database.lastChanges() != 1)
 +                return false;
 +        }
@@ -57996,6 +58128,7 @@ index 3c56c7dff8d09bee15b4c67831a44b23f65d5604..4f8ecebe46d263e5a40a6a2b97b697ea
 +                || statement->bindInt(9, cookie.secure ? 1 : 0) != SQLITE_OK
 +                || statement->bindDouble(10, std::isfinite(cookie.created) && cookie.created > 0 ? cookie.created : now) != SQLITE_OK
 +                || statement->bindInt(11, static_cast<int>(cookie.sameSite)) != SQLITE_OK
++                || statement->bindText(12, cookie.partitionKey.isEmpty() ? emptyString() : cookie.partitionKey) != SQLITE_OK
 +                || !checkSQLiteReturnCode(statement->step()) || m_database.lastChanges() != 1)
 +                return false;
 +            if (!readCookie(cookie, result) || !result)
@@ -58016,25 +58149,49 @@ index 3c56c7dff8d09bee15b4c67831a44b23f65d5604..4f8ecebe46d263e5a40a6a2b97b697ea
  }
  
  bool CookieJarDB::setCookie(const URL& firstParty, const URL& url, const String& body, CookieJarDB::Source source, std::optional<Seconds> cappedLifetime)
-@@ -586,6 +767,17 @@ HashSet<String> CookieJarDB::allDomains()
+@@ -546,13 +755,23 @@ bool CookieJarDB::setCookie(const URL& firstParty, const URL& url, const String&
+     if (url.isEmpty() || body.isEmpty())
+         return false;
+ 
+-    auto cookie = CookieUtil::parseCookieHeader(body);
++    bool partitioned = false;
++    auto cookie = CookieUtil::parseCookieHeader(body, &partitioned);
+     if (!cookie || (cookie->name.isEmpty() && cookie->value.isEmpty()))
+         return false;
+ 
+     if (!checkSecureCookie(*cookie))
+         return false;
+ 
++    if (partitioned) {
++        if (!cookie->secure || !url.protocolIs("https"_s) || !firstParty.isValid()
++            || !firstParty.protocolIsInHTTPFamily() || firstParty.host().isEmpty())
++            return false;
++        cookie->partitionKey = Site { firstParty }.toString();
++        if (cookie->partitionKey.isEmpty())
++            return false;
++    }
++
+     if (cookie->domain.isEmpty())
+         cookie->domain = url.host().convertToASCIILowercase();
+ 
+@@ -586,6 +805,16 @@ HashSet<String> CookieJarDB::allDomains()
      return domains;
  }
  
 +bool CookieJarDB::deleteCookie(const Cookie& cookie)
 +{
-+    if (!cookie.partitionKey.isEmpty())
-+        return false;
 +    // An empty path is still an exact key for this API.
-+    return deleteCookiesMatching(SELECT_COOKIE_COLUMNS_SQL "WHERE name = ? AND domain = ? AND path = ? ORDER BY rowid"_s,
++    return deleteCookiesMatching(SELECT_COOKIE_COLUMNS_SQL "WHERE name = ? AND domain = ? AND path = ? AND partitionkey = ? ORDER BY rowid"_s,
 +        DELETE_COOKIE_BY_NAME_DOMAIN_PATH_SQL, [&cookie](SQLiteStatement& statement) {
-+            return statement.bindText(1, cookie.name) == SQLITE_OK && statement.bindText(2, cookie.domain) == SQLITE_OK && statement.bindText(3, cookie.path) == SQLITE_OK;
++            return statement.bindText(1, cookie.name) == SQLITE_OK && statement.bindText(2, cookie.domain) == SQLITE_OK && statement.bindText(3, cookie.path) == SQLITE_OK
++                && statement.bindText(4, cookie.partitionKey.isEmpty() ? emptyString() : cookie.partitionKey) == SQLITE_OK;
 +        }, CookieChangeCause::Explicit);
 +}
 +
  bool CookieJarDB::deleteCookie(const String& url, const String& name)
  {
      if (!isEnabled() || !m_database.isOpen())
-@@ -607,12 +799,55 @@ bool CookieJarDB::deleteCookie(const String& url, const String& name)
+@@ -607,12 +836,55 @@ bool CookieJarDB::deleteCookie(const String& url, const String& name)
  
  bool CookieJarDB::deleteCookieInternal(const String& name, const String& domain, const String& path)
  {
@@ -58044,12 +58201,12 @@ index 3c56c7dff8d09bee15b4c67831a44b23f65d5604..4f8ecebe46d263e5a40a6a2b97b697ea
 -    if (!path.isEmpty())
 -        statement.bindText(3, path);
 -    return checkSQLiteReturnCode(statement.step());
-+    return deleteCookiesMatching(path.isEmpty() ? SELECT_COOKIE_COLUMNS_SQL "WHERE name = ? AND domain = ? ORDER BY rowid"_s
-+        : SELECT_COOKIE_COLUMNS_SQL "WHERE name = ? AND domain = ? AND path = ? ORDER BY rowid"_s,
++    return deleteCookiesMatching(path.isEmpty() ? SELECT_COOKIE_COLUMNS_SQL "WHERE name = ? AND domain = ? AND partitionkey = '' ORDER BY rowid"_s
++        : SELECT_COOKIE_COLUMNS_SQL "WHERE name = ? AND domain = ? AND path = ? AND partitionkey = ? ORDER BY rowid"_s,
 +        path.isEmpty() ? DELETE_COOKIE_BY_NAME_DOMAIN_SQL : DELETE_COOKIE_BY_NAME_DOMAIN_PATH_SQL,
 +        [&name, &domain, &path](SQLiteStatement& statement) {
 +            return statement.bindText(1, name) == SQLITE_OK && statement.bindText(2, domain) == SQLITE_OK
-+                && (path.isEmpty() || statement.bindText(3, path) == SQLITE_OK);
++                && (path.isEmpty() || (statement.bindText(3, path) == SQLITE_OK && statement.bindText(4, emptyString()) == SQLITE_OK));
 +        }, CookieChangeCause::Explicit);
 +}
 +
@@ -58096,7 +58253,7 @@ index 3c56c7dff8d09bee15b4c67831a44b23f65d5604..4f8ecebe46d263e5a40a6a2b97b697ea
  }
  
  bool CookieJarDB::deleteCookies(const String&)
-@@ -624,24 +859,49 @@ bool CookieJarDB::deleteCookies(const String&)
+@@ -624,24 +896,49 @@ bool CookieJarDB::deleteCookies(const String&)
  
  bool CookieJarDB::deleteCookiesForHostname(const String& hostname, IncludeHttpOnlyCookies includeHttpOnlyCookies)
  {
@@ -58117,8 +58274,7 @@ index 3c56c7dff8d09bee15b4c67831a44b23f65d5604..4f8ecebe46d263e5a40a6a2b97b697ea
 +    return deleteCookiesMatching(SELECT_COOKIE_COLUMNS_SQL "ORDER BY rowid"_s, DELETE_ALL_COOKIE_SQL,
 +        [](SQLiteStatement&) { return true; }, CookieChangeCause::Explicit);
 +}
- 
--    return executeSQLStatement(m_database.prepareStatement(DELETE_ALL_COOKIE_SQL));
++
 +bool CookieJarDB::deleteCookiesModifiedSince(WallTime since)
 +{
 +    // Clearing "all time" arrives as the epoch.
@@ -58132,17 +58288,18 @@ index 3c56c7dff8d09bee15b4c67831a44b23f65d5604..4f8ecebe46d263e5a40a6a2b97b697ea
 +        [milliseconds, seconds](SQLiteStatement& statement) {
 +            return statement.bindDouble(1, milliseconds) == SQLITE_OK && statement.bindInt64(2, seconds) == SQLITE_OK;
 +        }, CookieChangeCause::Explicit);
- }
++}
  
--void CookieJarDB::createPrepareStatement(ASCIILiteral sql)
+-    return executeSQLStatement(m_database.prepareStatement(DELETE_ALL_COOKIE_SQL));
 +bool CookieJarDB::deleteExpiredCookies()
 +{
 +    auto now = static_cast<int64_t>(WallTime::now().secondsSinceEpoch().milliseconds());
 +    return deleteCookiesMatching(SELECT_COOKIE_COLUMNS_SQL "WHERE session = 0 AND expires <= ? ORDER BY rowid"_s,
 +        "DELETE FROM Cookie WHERE session = 0 AND expires <= ?"_s,
 +        [now](SQLiteStatement& statement) { return statement.bindInt64(1, now) == SQLITE_OK; }, CookieChangeCause::Expired);
-+}
-+
+ }
+ 
+-void CookieJarDB::createPrepareStatement(ASCIILiteral sql)
 +bool CookieJarDB::createPrepareStatement(ASCIILiteral sql)
  {
      auto statement = m_database.prepareStatement(sql);
@@ -58154,7 +58311,7 @@ index 3c56c7dff8d09bee15b4c67831a44b23f65d5604..4f8ecebe46d263e5a40a6a2b97b697ea
  }
  
  SQLiteStatement& CookieJarDB::preparedStatement(const String& sql)
-@@ -654,7 +914,8 @@ SQLiteStatement& CookieJarDB::preparedStatement(const String& sql)
+@@ -654,7 +951,8 @@ SQLiteStatement& CookieJarDB::preparedStatement(const String& sql)
  
  bool CookieJarDB::executeSQLStatement(std::unique_ptr<SQLiteStatement>&& statement)
  {
@@ -58165,7 +58322,7 @@ index 3c56c7dff8d09bee15b4c67831a44b23f65d5604..4f8ecebe46d263e5a40a6a2b97b697ea
          return false;
      }
 diff --git a/Source/WebCore/platform/network/curl/CookieJarDB.h b/Source/WebCore/platform/network/curl/CookieJarDB.h
-index 81dd17092439fa65a2bbcefb55cc98f77eccf2f0..68f28266c9106d5014ce36ef2fb73cf50ab9a97b 100644
+index 81dd17092439fa65a2bbcefb55cc98f77eccf2f0..8d110ab267fb84c5b7688ab36293db97b731a0b1 100644
 --- a/Source/WebCore/platform/network/curl/CookieJarDB.h
 +++ b/Source/WebCore/platform/network/curl/CookieJarDB.h
 @@ -24,13 +24,17 @@
@@ -58218,7 +58375,7 @@ index 81dd17092439fa65a2bbcefb55cc98f77eccf2f0..68f28266c9106d5014ce36ef2fb73cf5
  
      WEBCORE_EXPORT CookieJarDB(const String& databasePath);
      WEBCORE_EXPORT ~CookieJarDB();
-@@ -91,14 +105,22 @@ private:
+@@ -91,15 +105,23 @@ private:
      bool checkDatabaseValidity();
      void deleteAllDatabaseFiles();
  
@@ -58232,6 +58389,7 @@ index 81dd17092439fa65a2bbcefb55cc98f77eccf2f0..68f28266c9106d5014ce36ef2fb73cf5
      bool executeSQLStatement(std::unique_ptr<SQLiteStatement>&&);
  
      bool deleteCookieInternal(const String& name, const String& domain, const String& path);
+-    bool hasHttpOnlyCookie(const String& name, const String& domain, const String& path);
 +    bool readCookie(const Cookie&, std::optional<Cookie>&);
 +    bool deleteCookiesMatching(ASCIILiteral selectSQL, ASCIILiteral deleteSQL, Function<bool(SQLiteStatement&)>&&, CookieChangeCause);
 +    void notifyCookieChanges(Vector<CookieChange>&&);
@@ -58240,11 +58398,12 @@ index 81dd17092439fa65a2bbcefb55cc98f77eccf2f0..68f28266c9106d5014ce36ef2fb73cf5
 +    RefPtr<ChangeHandler> m_cookieChangeHandler;
 +    std::unique_ptr<RunLoop::Timer> m_cookieExpirationTimer;
 +
-     bool hasHttpOnlyCookie(const String& name, const String& domain, const String& path);
++    bool hasHttpOnlyCookie(const Cookie&);
      bool canAcceptCookie(const Cookie&, const URL& firstParty, const URL&, CookieJarDB::Source);
      bool checkCookieAcceptPolicy(const URL& firstParty, const URL&);
+     bool hasCookies(const URL&);
 diff --git a/Source/WebCore/platform/network/curl/CookieUtil.cpp b/Source/WebCore/platform/network/curl/CookieUtil.cpp
-index 7d0ffb01d0cfc846045fea9ad8a4b2e7a7d63e8c..6635b56b82d892e8c385a661b7158bd35cb9505c 100644
+index 7d0ffb01d0cfc846045fea9ad8a4b2e7a7d63e8c..c2f4f3c6af6e4a4f2f08abf1c6a17ec400027e07 100644
 --- a/Source/WebCore/platform/network/curl/CookieUtil.cpp
 +++ b/Source/WebCore/platform/network/curl/CookieUtil.cpp
 @@ -55,30 +55,24 @@ namespace CookieUtil {
@@ -58264,16 +58423,16 @@ index 7d0ffb01d0cfc846045fea9ad8a4b2e7a7d63e8c..6635b56b82d892e8c385a661b7158bd3
 -
 -    // Check if host equals cookie domain.
 -    if (tailMatch && !index)
--        return true;
--
--    // Check if host is a subdomain of the domain in the cookie.
--    // Curl uses a '.' in front of domains to indicate it's valid on subdomains.
--    if (tailMatch && index > 0 && host[index] == '.')
 +    if (cookieDomain.isEmpty() || host.isEmpty())
 +        return false;
 +    if (cookieDomain == host)
          return true;
  
+-    // Check if host is a subdomain of the domain in the cookie.
+-    // Curl uses a '.' in front of domains to indicate it's valid on subdomains.
+-    if (tailMatch && index > 0 && host[index] == '.')
+-        return true;
+-
 -    // Check the special case where host equals the cookie domain, except for a leading '.' in the cookie domain.
 -    // E.g. cookie domain is .apple.com and host is apple.com.
 -    if (cookieDomain[0] == '.' && cookieDomain.find(host) == 1)
@@ -58289,11 +58448,22 @@ index 7d0ffb01d0cfc846045fea9ad8a4b2e7a7d63e8c..6635b56b82d892e8c385a661b7158bd3
  }
  
  static std::optional<double> parseExpiresMS(std::span<const Latin1Character> expires)
-@@ -107,7 +101,14 @@ static void parseCookieAttributes(const String& attribute, bool& hasMaxAge, Cook
+@@ -90,7 +84,7 @@ static std::optional<double> parseExpiresMS(std::span<const Latin1Character> exp
+     return std::optional<double> {tmp};
+ }
+ 
+-static void parseCookieAttributes(const String& attribute, bool& hasMaxAge, Cookie& result)
++static void parseCookieAttributes(const String& attribute, bool& hasMaxAge, bool& isPartitioned, Cookie& result)
+ {
+     size_t assignmentPosition = attribute.find('=');
+ 
+@@ -107,7 +101,16 @@ static void parseCookieAttributes(const String& attribute, bool& hasMaxAge, Cook
          result.httpOnly = true;
      else if (equalLettersIgnoringASCIICase(attributeName, "secure"_s))
          result.secure = true;
 -    else if (equalLettersIgnoringASCIICase(attributeName, "domain"_s)) {
++    else if (equalLettersIgnoringASCIICase(attributeName, "partitioned"_s))
++        isPartitioned = true;
 +    else if (equalLettersIgnoringASCIICase(attributeName, "samesite"_s)) {
 +        if (equalLettersIgnoringASCIICase(attributeValue, "lax"_s))
 +            result.sameSite = Cookie::SameSitePolicy::Lax;
@@ -58305,19 +58475,50 @@ index 7d0ffb01d0cfc846045fea9ad8a4b2e7a7d63e8c..6635b56b82d892e8c385a661b7158bd3
          if (attributeValue.isEmpty())
              return;
  
-@@ -177,8 +178,10 @@ std::optional<Cookie> parseCookieHeader(const String& cookieLine)
+@@ -146,8 +149,10 @@ static void parseCookieAttributes(const String& attribute, bool& hasMaxAge, Cook
+     }
+ }
+ 
+-std::optional<Cookie> parseCookieHeader(const String& cookieLine)
++std::optional<Cookie> parseCookieHeader(const String& cookieLine, bool* isPartitioned)
+ {
++    if (isPartitioned)
++        *isPartitioned = false;
+     if (cookieLine.length() >= MAX_COOKIE_LINE)
+         return std::nullopt;
+ 
+@@ -175,10 +180,16 @@ std::optional<Cookie> parseCookieHeader(const String& cookieLine)
+     cookie.value = cookieValue.trim(deprecatedIsSpaceOrNewline);
+ 
      bool hasMaxAge = false;
++    bool partitioned = false;
      cookie.session = true;
  
 -    for (auto attribute : cookieLine.splitAllowingEmptyEntries(';'))
 -        parseCookieAttributes(attribute, hasMaxAge, cookie);
 +    if (separatorPosition != notFound) {
 +        for (auto attribute : cookieLine.substring(separatorPosition + 1).splitAllowingEmptyEntries(';'))
-+            parseCookieAttributes(attribute, hasMaxAge, cookie);
++            parseCookieAttributes(attribute, hasMaxAge, partitioned, cookie);
 +    }
++
++    if (isPartitioned)
++        *isPartitioned = partitioned;
  
      return cookie;
  }
+diff --git a/Source/WebCore/platform/network/curl/CookieUtil.h b/Source/WebCore/platform/network/curl/CookieUtil.h
+index 7dc22680ab7447786be9fed7f40cf422810c053b..097c16b749fd890e2524e40b936792cf65358af4 100644
+--- a/Source/WebCore/platform/network/curl/CookieUtil.h
++++ b/Source/WebCore/platform/network/curl/CookieUtil.h
+@@ -34,7 +34,7 @@ struct Cookie;
+ 
+ namespace CookieUtil {
+ 
+-std::optional<Cookie> parseCookieHeader(const String&);
++std::optional<Cookie> parseCookieHeader(const String&, bool* isPartitioned = nullptr);
+ 
+ bool isIPAddress(const String&);
+ 
 diff --git a/Source/WebCore/platform/network/curl/CurlCacheEntry.cpp b/Source/WebCore/platform/network/curl/CurlCacheEntry.cpp
 new file mode 100644
 index 0000000000000000000000000000000000000000..e9ee3cad1b3ffa4681e32715b2a9f0451026a4a2
@@ -63350,10 +63551,10 @@ index 0000000000000000000000000000000000000000..2e04085716f12be1665b7f0e70816673
 +
 diff --git a/Source/WebCore/platform/network/haiku/CookieStorageSessionHaikuCurl.cpp b/Source/WebCore/platform/network/haiku/CookieStorageSessionHaikuCurl.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..aedbb21f537123a3ace638fb66ae2139e8dd16fd
+index 0000000000000000000000000000000000000000..a20c7a432f1313460c92c8138766dfed56e31460
 --- /dev/null
 +++ b/Source/WebCore/platform/network/haiku/CookieStorageSessionHaikuCurl.cpp
-@@ -0,0 +1,144 @@
+@@ -0,0 +1,143 @@
 +/*
 + * Copyright (C) 2020 Sony Interactive Entertainment Inc.
 + *
@@ -63398,8 +63599,8 @@ index 0000000000000000000000000000000000000000..aedbb21f537123a3ace638fb66ae2139
 +    return *m_cookieDatabase;
 +}
 +
-+// CookieJarDB does not store partition keys yet. A partitioned request must
-+// never fall through to the unpartitioned database.
++// Explicit tracking-prevention partition requests still fail closed. CHIPS
++// opt-in cookies are partitioned by CookieJarDB using firstParty below.
 +static bool cookieAccessIsBlocked(ThirdPartyCookieBlockingDecision decision, const String& partition)
 +{
 +    return decision != ThirdPartyCookieBlockingDecision::None || !partition.isEmpty();
@@ -63478,8 +63679,7 @@ index 0000000000000000000000000000000000000000..aedbb21f537123a3ace638fb66ae2139
 +
 +void CookieStorageSession::setCookie(const Cookie& cookie)
 +{
-+    if (cookie.partitionKey.isEmpty())
-+        cookieDatabase().setCookie(cookie);
++    cookieDatabase().setCookie(cookie);
 +}
 +
 +void CookieStorageSession::deleteCookie(const URL&, const URL& url, const String& name, const String& partition, CompletionHandler<void()>&& completionHandler) const
@@ -68651,6 +68851,27 @@ index 9a6c5c95b12253c3aa3ff94b63b71153ed2742b3..b2926db31e84022eb9d21dc8b4215e4d
  #endif
  
      if (predicate.isDefaultMode() && m_sharedTimer->isActive())
+diff --git a/Source/WebInspectorUI/UserInterface/Models/CookieStorageObject.js b/Source/WebInspectorUI/UserInterface/Models/CookieStorageObject.js
+index 02a8ac8d66a39a7bff0c763cd949c6117d1fc06d..f8797faf845920f113421854b78c5e3bb002dd6c 100644
+--- a/Source/WebInspectorUI/UserInterface/Models/CookieStorageObject.js
++++ b/Source/WebInspectorUI/UserInterface/Models/CookieStorageObject.js
+@@ -133,6 +133,16 @@ WI.CookieStorageObject = class CookieStorageObject
+             return WI.backendTarget.StorageAgent.deleteCookies.invoke({filter, partition: {type: "context"}});
+         }
+ 
++        // The legacy delete command has no partition key. Expire the exact
++        // structured cookie instead, preserving same-name cookies in other jars.
++        if (cookie.partitionKey) {
++            let payload = cookie.toProtocol();
++            if (!payload)
++                return Promise.reject(new Error("Invalid partitioned cookie"));
++            payload.session = false;
++            payload.expires = 0;
++            return WI.assumingMainTarget().PageAgent.setCookie.invoke({cookie: payload});
++        }
+         return WI.assumingMainTarget().PageAgent.deleteCookie(cookie.name, cookie.url);
+     }
+ 
 diff --git a/Source/WebKit/CMakeLists.txt b/Source/WebKit/CMakeLists.txt
 index 019da599264a4f70fa936c5ce4eb175ff8e7938f..27586338c3e49e715729734df638a2dc6aee0a2c 100644
 --- a/Source/WebKit/CMakeLists.txt
@@ -68952,10 +69173,22 @@ index b02792fe46e6dcf5849043e487a9596fc30d3d01..01cd68d2ffffbdfd17625d991a5337f3
 +
  } // namespace WebKit
 diff --git a/Source/WebKit/NetworkProcess/NetworkConnectionToWebProcess.cpp b/Source/WebKit/NetworkProcess/NetworkConnectionToWebProcess.cpp
-index 48bd4d372724d10de347c001b8fde0ce7779c0c2..fcd40f10153d97c2c53d59175ae4a4a736e27bf1 100644
+index 48bd4d372724d10de347c001b8fde0ce7779c0c2..1648d0d6961c1f4d9f7f34f2c2f5846875008f32 100644
 --- a/Source/WebKit/NetworkProcess/NetworkConnectionToWebProcess.cpp
 +++ b/Source/WebKit/NetworkProcess/NetworkConnectionToWebProcess.cpp
-@@ -815,7 +815,7 @@ void NetworkConnectionToWebProcess::preconnectTo(PreconnectRequest&& preconnectR
+@@ -92,6 +92,11 @@
+ #include <WebCore/ResourceLoadStatistics.h>
+ #include <WebCore/ResourceRequest.h>
+ #include <WebCore/SameSiteInfo.h>
++#if PLATFORM(HAIKU) && USE(CURL)
++#include <WebCore/CookieUtil.h>
++#include <WebCore/PublicSuffixStore.h>
++#include <WebCore/Site.h>
++#endif
+ #include <WebCore/SecurityOriginData.h>
+ #include <WebCore/SecurityPolicy.h>
+ #include <WebCore/SerializedScriptValue.h>
+@@ -815,7 +820,7 @@ void NetworkConnectionToWebProcess::preconnectTo(PreconnectRequest&& preconnectR
      }
  #endif
  
@@ -68964,6 +69197,28 @@ index 48bd4d372724d10de347c001b8fde0ce7779c0c2..fcd40f10153d97c2c53d59175ae4a4a7
      CheckedPtr session = networkSession();
      if (session && session->allowsServerPreconnect()) {
          NetworkLoadParameters parameters;
+@@ -1030,8 +1035,19 @@ void NetworkConnectionToWebProcess::setRawCookie(const URL& firstParty, const UR
+ {
+     auto access = validateCookieAccess("setRawCookie"_s, firstParty, url, nullptr, std::nullopt);
+     MESSAGE_CHECK(access != CookieAccess::Terminate);
+-    MESSAGE_CHECK(RegistrableDomain::uncheckedCreateFromHost(cookie.domain).matches(firstParty));
+-    MESSAGE_CHECK(RegistrableDomain(url).matches(firstParty));
++#if PLATFORM(HAIKU) && USE(CURL)
++    if (!cookie.partitionKey.isEmpty()) {
++        MESSAGE_CHECK(cookie.secure && url.protocolIs("https"_s));
++        MESSAGE_CHECK(cookie.partitionKey == Site { firstParty }.toString());
++        MESSAGE_CHECK(CookieUtil::domainMatch(cookie.domain, url.host().toString()));
++        auto domain = cookie.domain.startsWith('.') ? cookie.domain.substring(1) : cookie.domain;
++        MESSAGE_CHECK(!PublicSuffixStore::singleton().isPublicSuffix(domain));
++    } else
++#endif
++    {
++        MESSAGE_CHECK(RegistrableDomain::uncheckedCreateFromHost(cookie.domain).matches(firstParty));
++        MESSAGE_CHECK(RegistrableDomain(url).matches(firstParty));
++    }
+     if (access != CookieAccess::Allow)
+         return;
+ 
 diff --git a/Source/WebKit/NetworkProcess/NetworkLoad.cpp b/Source/WebKit/NetworkProcess/NetworkLoad.cpp
 index 90aa4198b4343bb87082a13c94762e486dddf722..2ee2dd31cc02723aed7bb9ab1a1f56a1ce21e532 100644
 --- a/Source/WebKit/NetworkProcess/NetworkLoad.cpp
@@ -74355,17 +74610,103 @@ index 97ec7c434b41f997ad18082ffa2477a4cdb0699f..ca56634f77b7310675bed37c1b7f35e5
      HashSet<String> unsupportedAPIs;
  
      HashMap<String, WallTime> grantedPermissions;
+diff --git a/Source/WebKit/Shared/Extensions/WebExtensionCookieParameters.h b/Source/WebKit/Shared/Extensions/WebExtensionCookieParameters.h
+index b03a1f75602bf93dec3f3280814e610e4a610566..3f894316a829ae1451a3f28fa7e2ca8f9fb508fa 100644
+--- a/Source/WebKit/Shared/Extensions/WebExtensionCookieParameters.h
++++ b/Source/WebKit/Shared/Extensions/WebExtensionCookieParameters.h
+@@ -39,6 +39,9 @@ struct WebExtensionCookieParameters {
+ };
+ 
+ struct WebExtensionCookieFilterParameters {
++#if PLATFORM(HAIKU)
++    std::optional<String> partitionKey { emptyString() };
++#endif
+     std::optional<String> name;
+     std::optional<String> domain;
+     std::optional<String> path;
+diff --git a/Source/WebKit/Shared/Extensions/WebExtensionCookieParameters.serialization.in b/Source/WebKit/Shared/Extensions/WebExtensionCookieParameters.serialization.in
+index c55bde434b8ada1a8c16b16066a94416007ee906..7029f0f5588b50b0ffda978520231f0fb16de93b 100644
+--- a/Source/WebKit/Shared/Extensions/WebExtensionCookieParameters.serialization.in
++++ b/Source/WebKit/Shared/Extensions/WebExtensionCookieParameters.serialization.in
+@@ -28,6 +28,9 @@ struct WebKit::WebExtensionCookieParameters {
+ };
+ 
+ [CustomHeader] struct WebKit::WebExtensionCookieFilterParameters {
++#if PLATFORM(HAIKU)
++    std::optional<String> partitionKey;
++#endif
+     std::optional<String> name;
+     std::optional<String> domain;
+     std::optional<String> path;
+diff --git a/Source/WebKit/Shared/Extensions/WebExtensionCookiePartitionKey.h b/Source/WebKit/Shared/Extensions/WebExtensionCookiePartitionKey.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..d4b1b1012cf671056a10cd3eefa2b317d5e4d5ac
+--- /dev/null
++++ b/Source/WebKit/Shared/Extensions/WebExtensionCookiePartitionKey.h
+@@ -0,0 +1,51 @@
++/* Copyright (C) 2026 Summit contributors. SPDX-License-Identifier: BSD-2-Clause */
++#pragma once
++
++#if ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
++#include <WebCore/Site.h>
++#include <expected>
++#include <wtf/JSONValues.h>
++
++namespace WebKit {
++
++// nullopt is a wildcard for getAll only; an empty string is the unpartitioned
++// jar. Nonempty keys are canonical schemeful sites, without paths or ports.
++inline bool isValidWebExtensionCookiePartitionKey(const String& key)
++{
++    if (key.isEmpty())
++        return true;
++    URL url { key };
++    return url.isValid() && url.protocolIsInHTTPFamily() && !url.host().isEmpty()
++        && WebCore::Site { url }.toString() == key;
++}
++
++inline std::expected<std::optional<String>, String> parseWebExtensionCookiePartitionKey(const JSON::Value& value, bool allowWildcard)
++{
++    RefPtr object = value.asObject();
++    if (!object)
++        return std::unexpected("partitionKey must be an object"_s);
++    for (auto& key : object->keys()) {
++        // This backend keys CHIPS by top-level site. Do not silently accept an
++        // ancestor-bit filter that it cannot distinguish.
++        if (key != "topLevelSite"_s)
++            return std::unexpected("unsupported cookie partitionKey field"_s);
++    }
++    RefPtr site = object->getValue("topLevelSite"_s);
++    if (!site) {
++        if (allowWildcard)
++            return std::optional<String> { };
++        return std::unexpected("partitionKey requires topLevelSite"_s);
++    }
++    if (site->type() != JSON::Value::Type::String)
++        return std::unexpected("partitionKey topLevelSite must be a string"_s);
++    auto text = site->asString();
++    if (text.isEmpty())
++        return std::optional<String> { emptyString() };
++    URL url { text };
++    if (text.contains('\0') || !url.isValid() || !url.protocolIsInHTTPFamily() || url.host().isEmpty())
++        return std::unexpected("partitionKey topLevelSite must be an HTTP or HTTPS site"_s);
++    return std::optional<String> { WebCore::Site { url }.toString() };
++}
++
++} // namespace WebKit
++#endif
 diff --git a/Source/WebKit/Shared/Extensions/WebExtensionCookieQueryParser.cpp b/Source/WebKit/Shared/Extensions/WebExtensionCookieQueryParser.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..1221b82398e90b060ad3204172180a52386a550f
+index 0000000000000000000000000000000000000000..c337ad8f34d7c2858cc5be0e7619af041ea8b705
 --- /dev/null
 +++ b/Source/WebKit/Shared/Extensions/WebExtensionCookieQueryParser.cpp
-@@ -0,0 +1,58 @@
+@@ -0,0 +1,66 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +#include "config.h"
 +#include "WebExtensionCookieQueryParser.h"
 +#if ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
 +#include "WebExtensionCookieStoreIdentifier.h"
++#include "WebExtensionCookiePartitionKey.h"
 +namespace WebKit {
 +std::expected<WebExtensionCookieQuery, String> parseWebExtensionCookieQuery(const JSON::Value* value, WebExtensionCookieQueryKind kind)
 +{
@@ -74375,6 +74716,13 @@ index 0000000000000000000000000000000000000000..1221b82398e90b060ad3204172180a52
 +    WebExtensionCookieQuery result;
 +    for (auto& key : object->keys()) {
 +        Ref field = object->getValue(key).releaseNonNull();
++        if (key == "partitionKey"_s) {
++            auto partition = parseWebExtensionCookiePartitionKey(field.get(), kind == WebExtensionCookieQueryKind::GetAll);
++            if (!partition)
++                return std::unexpected(partition.error());
++            result.filter.partitionKey = WTF::move(*partition);
++            continue;
++        }
 +        if (kind == WebExtensionCookieQueryKind::GetAll && (key == "secure"_s || key == "session"_s)) {
 +            auto flag = field->asBoolean();
 +            if (!flag)
@@ -74506,15 +74854,16 @@ index 0000000000000000000000000000000000000000..cb6243b681180200ed4ce67b70ec8f73
 +#endif
 diff --git a/Source/WebKit/Shared/Extensions/WebExtensionCookieWriteParser.cpp b/Source/WebKit/Shared/Extensions/WebExtensionCookieWriteParser.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..8fada5b8640879308e3eb62de5608d6c673d9123
+index 0000000000000000000000000000000000000000..5bf18a0eb216b8e3b0f29646c047d7b56e5c9d33
 --- /dev/null
 +++ b/Source/WebKit/Shared/Extensions/WebExtensionCookieWriteParser.cpp
-@@ -0,0 +1,143 @@
+@@ -0,0 +1,153 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +#include "config.h"
 +#include "WebExtensionCookieWriteParser.h"
 +#if ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
 +#include "WebExtensionCookieStoreIdentifier.h"
++#include "WebExtensionCookiePartitionKey.h"
 +#include <WebCore/PublicSuffixStore.h>
 +#include <WebCore/SecurityOrigin.h>
 +#include <cmath>
@@ -74547,6 +74896,13 @@ index 0000000000000000000000000000000000000000..8fada5b8640879308e3eb62de5608d6c
 +    bool explicitNoRestriction = false;
 +    for (auto& key : object->keys()) {
 +        Ref field = object->getValue(key).releaseNonNull();
++        if (key == "partitionKey"_s) {
++            auto partition = parseWebExtensionCookiePartitionKey(field.get(), false);
++            if (!partition)
++                return std::unexpected(partition.error());
++            cookie.partitionKey = WTF::move(**partition);
++            continue;
++        }
 +        if (key == "secure"_s || key == "httpOnly"_s) {
 +            auto flag = field->asBoolean();
 +            if (!flag)
@@ -74642,6 +74998,8 @@ index 0000000000000000000000000000000000000000..8fada5b8640879308e3eb62de5608d6c
 +        return std::unexpected("secure cookies require a trustworthy URL"_s);
 +    if (explicitNoRestriction && !cookie.secure)
 +        return std::unexpected("SameSite no_restriction requires secure"_s);
++    if (!cookie.partitionKey.isEmpty() && (!cookie.secure || !result.url.protocolIs("https"_s)))
++        return std::unexpected("partitioned cookies require secure and an HTTPS URL"_s);
 +    if (cookie.name.startsWith("__Secure-"_s) && !cookie.secure)
 +        return std::unexpected("__Secure- cookies require secure"_s);
 +    if (cookie.name.startsWith("__Host-"_s) && (!cookie.secure || hasDomainAttribute || cookie.path != "/"_s))
@@ -89420,7 +89778,7 @@ index 8947f24ec9866c39f206aab464ec21c5d4213b95..a9ed26e830b6d06517cdd0f6c10628b2
  
  #endif // ENABLE(WK_WEB_EXTENSIONS)
 diff --git a/Source/WebKit/UIProcess/Extensions/WebExtensionContext.h b/Source/WebKit/UIProcess/Extensions/WebExtensionContext.h
-index 5f8454dd5897a49ffba794e50fb04b7257ad2291..5e21c1f2fe7447446a49489ed17bffdb4582c016 100644
+index 5f8454dd5897a49ffba794e50fb04b7257ad2291..a7ace4c2f19a981d1c2cbdeb6bb4a112d6ec374f 100644
 --- a/Source/WebKit/UIProcess/Extensions/WebExtensionContext.h
 +++ b/Source/WebKit/UIProcess/Extensions/WebExtensionContext.h
 @@ -40,6 +40,9 @@
@@ -89741,18 +90099,20 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..5e21c1f2fe7447446a49489ed17bffdb
      String declarativeNetRequestContentRuleListFilePath();
  
      // Updating user content controllers with new rules.
-@@ -892,6 +1034,10 @@ private:
+@@ -892,6 +1034,12 @@ private:
      Ref<WebExtensionStorageSQLiteStore> syncStorageStore();
  
      void fetchCookies(WebsiteDataStore&, const URL&, const WebExtensionCookieFilterParameters&, CompletionHandler<void(std::expected<Vector<WebExtensionCookieParameters>, WebExtensionError>&&)>&&);
 +#if PLATFORM(HAIKU)
 +    void fetchCookies(WebsiteDataStore&, const URL&, const WebExtensionCookieFilterParameters&, bool requireCookieHostPermission, CompletionHandler<void(std::expected<Vector<WebExtensionCookieParameters>, WebExtensionError>&&)>&&);
 +    void cookiesSetJSON(const String&, CompletionHandler<void(std::expected<std::optional<WebExtensionCookieParameters>, WebExtensionError>&&)>&&);
++    void cookiesGetJSON(const String&, CompletionHandler<void(std::expected<std::optional<WebExtensionCookieParameters>, WebExtensionError>&&)>&&);
++    void cookiesRemoveJSON(const String&, CompletionHandler<void(std::expected<std::optional<WebExtensionCookieParameters>, WebExtensionError>&&)>&&);
 +#endif
  
      // Action APIs
      bool isActionMessageAllowed(IPC::Decoder&);
-@@ -903,6 +1049,10 @@ private:
+@@ -903,6 +1051,10 @@ private:
      void actionOpenPopup(WebPageProxyIdentifier, std::optional<WebExtensionWindowIdentifier>, std::optional<WebExtensionTabIdentifier>, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
      void actionGetBadgeText(std::optional<WebExtensionWindowIdentifier>, std::optional<WebExtensionTabIdentifier>, CompletionHandler<void(std::expected<String, WebExtensionError>&&)>&&);
      void actionSetBadgeText(std::optional<WebExtensionWindowIdentifier>, std::optional<WebExtensionTabIdentifier>, const String& text, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
@@ -89763,7 +90123,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..5e21c1f2fe7447446a49489ed17bffdb
      void actionGetEnabled(std::optional<WebExtensionWindowIdentifier>, std::optional<WebExtensionTabIdentifier>, CompletionHandler<void(std::expected<bool, WebExtensionError>&&)>&&);
      void actionSetEnabled(std::optional<WebExtensionTabIdentifier>, bool enabled, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
      void fireActionClickedEventIfNeeded(WebExtensionTab*);
-@@ -934,6 +1084,11 @@ private:
+@@ -934,6 +1086,11 @@ private:
      // Commands APIs
      bool isCommandsMessageAllowed(IPC::Decoder&);
      void commandsGetAll(CompletionHandler<void(Vector<WebExtensionCommandParameters>)>&&);
@@ -89775,7 +90135,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..5e21c1f2fe7447446a49489ed17bffdb
      void fireCommandEventIfNeeded(const WebExtensionCommand&, WebExtensionTab*);
      void fireCommandChangedEventIfNeeded(const WebExtensionCommand&, const String& oldShortcut);
  
-@@ -944,7 +1099,9 @@ private:
+@@ -944,7 +1101,9 @@ private:
      void cookiesSet(std::optional<PAL::SessionID>, const WebExtensionCookieParameters&, CompletionHandler<void(std::expected<std::optional<WebExtensionCookieParameters>, WebExtensionError>&&)>&&);
      void cookiesRemove(std::optional<PAL::SessionID>, const String& name, const URL&, CompletionHandler<void(std::expected<std::optional<WebExtensionCookieParameters>, WebExtensionError>&&)>&&);
      void cookiesGetAllCookieStores(CompletionHandler<void(std::expected<HashMap<PAL::SessionID, Vector<WebExtensionTabIdentifier>>, WebExtensionError>&&)>&&);
@@ -89785,7 +90145,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..5e21c1f2fe7447446a49489ed17bffdb
  
      // DeclarativeNetRequest APIs
      bool isDeclarativeNetRequestMessageAllowed(IPC::Decoder&);
-@@ -960,6 +1117,27 @@ private:
+@@ -960,6 +1119,27 @@ private:
      void declarativeNetRequestUpdateDynamicRules(String&& rulesToAddJSON, Vector<double>&& ruleIDsToDelete, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
      void declarativeNetRequestGetSessionRules(Vector<double>&& filter, CompletionHandler<void(std::expected<String, WebExtensionError>&&)>&&);
      void declarativeNetRequestUpdateSessionRules(String&& rulesToAddJSON, Vector<double>&& ruleIDsToDelete, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
@@ -89813,7 +90173,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..5e21c1f2fe7447446a49489ed17bffdb
  
  #if ENABLE(INSPECTOR_EXTENSIONS)
      // DevTools APIs
-@@ -975,12 +1153,20 @@ private:
+@@ -975,12 +1155,20 @@ private:
  
      // Extension APIs
      void extensionIsAllowedIncognitoAccess(CompletionHandler<void(bool)>&&);
@@ -89834,7 +90194,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..5e21c1f2fe7447446a49489ed17bffdb
      void menusCreate(const WebExtensionMenuItemParameters&, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
      void menusUpdate(const String& identifier, const WebExtensionMenuItemParameters&, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
      void menusRemove(const String& identifier, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
-@@ -1009,9 +1195,18 @@ private:
+@@ -1009,9 +1197,18 @@ private:
  
      // Permissions APIs
      void permissionsGetAll(CompletionHandler<void(Vector<String>&& permissions, Vector<String>&& origins)>&&);
@@ -89853,7 +90213,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..5e21c1f2fe7447446a49489ed17bffdb
      void firePermissionsEventListenerIfNecessary(WebExtensionEventListenerType, const PermissionsSet&, const MatchPatternSet&);
  
      // Port APIs
-@@ -1021,7 +1216,7 @@ private:
+@@ -1021,7 +1218,7 @@ private:
      void disconnectPortsForPage(WebPageProxy&);
      void addPorts(WebExtensionContentWorldType sourceContentWorldType, WebExtensionContentWorldType targetContentWorldType, WebExtensionPortChannelIdentifier, HashCountedSet<WebPageProxyIdentifier>&&);
      void removePort(WebExtensionContentWorldType sourceContentWorldType, WebExtensionContentWorldType targetContentWorldType, WebExtensionPortChannelIdentifier, WebPageProxyIdentifier);
@@ -89862,7 +90222,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..5e21c1f2fe7447446a49489ed17bffdb
      void removeNativePort(WebExtensionMessagePort&);
      unsigned openPortCount(WebExtensionContentWorldType, WebExtensionPortChannelIdentifier);
      bool isPortConnected(WebExtensionContentWorldType sourceContentWorldType, WebExtensionContentWorldType targetContentWorldType, WebExtensionPortChannelIdentifier);
-@@ -1030,7 +1225,7 @@ private:
+@@ -1030,7 +1227,7 @@ private:
      void firePortMessageEventsIfNeeded(WebExtensionContentWorldType, std::optional<WebPageProxyIdentifier>, WebExtensionPortChannelIdentifier, const String& messageJSON, bool userGesture);
      void fireQueuedPortMessageEventsIfNeeded(WebExtensionContentWorldType, WebExtensionPortChannelIdentifier);
      void sendQueuedNativePortMessagesIfNeeded(WebExtensionPortChannelIdentifier);
@@ -89871,7 +90231,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..5e21c1f2fe7447446a49489ed17bffdb
  
      // Runtime APIs
      void runtimeGetBackgroundPage(CompletionHandler<void(std::expected<std::optional<WebCore::PageIdentifier>, WebExtensionError>&&)>&&);
-@@ -1055,6 +1250,15 @@ private:
+@@ -1055,6 +1252,15 @@ private:
      void scriptingGetRegisteredScripts(const Vector<String>&, CompletionHandler<void(std::expected<Vector<WebExtensionRegisteredScriptParameters>, WebExtensionError>&&)>&&);
      void scriptingUnregisterContentScripts(const Vector<String>&, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
      bool createInjectedContentForScripts(const Vector<WebExtensionRegisteredScriptParameters>&, WebExtensionDynamicScripts::WebExtensionRegisteredScript::FirstTimeRegistration, DynamicInjectedContentsMap&, NSString *callingAPIName, NSString **errorMessage);
@@ -89887,7 +90247,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..5e21c1f2fe7447446a49489ed17bffdb
  
      // Sidebar APIs
  #if ENABLE(WK_WEB_EXTENSIONS_SIDEBAR)
-@@ -1103,6 +1307,9 @@ private:
+@@ -1103,6 +1309,9 @@ private:
      void tabsSetZoom(WebPageProxyIdentifier, std::optional<WebExtensionTabIdentifier>, double, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
      void tabsMove(Vector<WebExtensionTabIdentifier>, std::optional<WebExtensionWindowIdentifier>, double, CompletionHandler<void(std::expected<Vector<WebExtensionTabParameters>, WebExtensionError>&&)>&&);
      void tabsRemove(Vector<WebExtensionTabIdentifier>, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
@@ -89897,7 +90257,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..5e21c1f2fe7447446a49489ed17bffdb
      void tabsExecuteScript(WebPageProxyIdentifier, std::optional<WebExtensionTabIdentifier>, const WebExtensionScriptInjectionParameters&, bool userGesture, CompletionHandler<void(std::expected<Vector<WebExtensionScriptInjectionResultParameters>, WebExtensionError>&&)>&&);
      void tabsInsertCSS(WebPageProxyIdentifier, std::optional<WebExtensionTabIdentifier>, const WebExtensionScriptInjectionParameters&, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
      void tabsRemoveCSS(WebPageProxyIdentifier, std::optional<WebExtensionTabIdentifier>, const WebExtensionScriptInjectionParameters&, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
-@@ -1133,8 +1340,20 @@ private:
+@@ -1133,8 +1342,20 @@ private:
      void fireWindowsEventIfNeeded(WebExtensionEventListenerType, std::optional<WebExtensionWindowParameters>);
  
      // webRequest support.
@@ -89920,7 +90280,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..5e21c1f2fe7447446a49489ed17bffdb
  
      // IPC::MessageReceiver.
      void didReceiveMessage(IPC::Connection&, IPC::Decoder&) override;
-@@ -1151,6 +1370,13 @@ private:
+@@ -1151,6 +1372,13 @@ private:
      RetainPtr<NSMutableDictionary> m_state;
  #elif ENABLE(2022_GLIB_API)
      GRefPtr<GKeyFile> m_state;
@@ -89934,7 +90294,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..5e21c1f2fe7447446a49489ed17bffdb
  #endif
      Vector<Ref<API::Error>> m_errors;
  
-@@ -1169,6 +1395,15 @@ private:
+@@ -1169,6 +1397,15 @@ private:
  
      RefPtr<API::ContentWorld> m_contentScriptWorld;
  
@@ -89950,7 +90310,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..5e21c1f2fe7447446a49489ed17bffdb
      PermissionsMap m_grantedPermissions;
      PermissionsMap m_deniedPermissions;
  
-@@ -1194,6 +1429,14 @@ private:
+@@ -1194,6 +1431,14 @@ private:
      EventListenerTypeCountedSet m_backgroundContentEventListeners;
      EventListenerTypeFrameMap m_eventListenerFrames;
  
@@ -89965,7 +90325,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..5e21c1f2fe7447446a49489ed17bffdb
      bool m_shouldFireStartupEvent { false };
      InstallReason m_installReason { InstallReason::None };
      String m_previousVersion;
-@@ -1216,6 +1459,16 @@ private:
+@@ -1216,6 +1461,16 @@ private:
  #elif ENABLE(2022_GLIB_API)
      GRefPtr<WebKitWebView> m_backgroundWebView;
      GWeakPtr<WebKitWebExtensionContext> m_delegate;
@@ -89982,7 +90342,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..5e21c1f2fe7447446a49489ed17bffdb
  #endif
      Variant<std::monostate, Ref<ProcessThrottlerActivity>, Ref<ProcessActivityGroup>> m_backgroundWebViewActivity;
      RefPtr<API::Error> m_backgroundContentLoadError;
-@@ -1237,6 +1490,7 @@ private:
+@@ -1237,6 +1492,7 @@ private:
      HashMap<Ref<WebExtensionMatchPattern>, UserScriptVector> m_injectedScriptsPerPatternMap;
      HashMap<Ref<WebExtensionMatchPattern>, UserStyleSheetVector> m_injectedStyleSheetsPerPatternMap;
  
@@ -89990,7 +90350,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..5e21c1f2fe7447446a49489ed17bffdb
      HashMap<String, Ref<WebExtensionDynamicScripts::WebExtensionRegisteredScript>> m_registeredScriptsMap;
      RefPtr<WebExtensionRegisteredScriptsSQLiteStore> m_registeredContentScriptsStorage;
  
-@@ -1256,11 +1510,17 @@ private:
+@@ -1256,11 +1512,17 @@ private:
  #endif // ENABLE(WK_WEB_EXTENSIONS_SIDEBAR)
  
      PortCountedSet m_ports;
@@ -90009,7 +90369,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..5e21c1f2fe7447446a49489ed17bffdb
      mutable WindowIdentifierVector m_windowOrderVector;
      mutable std::optional<WebExtensionWindowIdentifier> m_focusedWindowIdentifier;
  
-@@ -1276,6 +1536,12 @@ private:
+@@ -1276,6 +1538,12 @@ private:
      bool m_populatedCommands { false };
  
      String m_declarativeNetRequestContentRuleListFilePath;
@@ -90022,7 +90382,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..5e21c1f2fe7447446a49489ed17bffdb
      DeclarativeNetRequestMatchedRuleVector m_matchedRules;
      RefPtr<WebExtensionDeclarativeNetRequestSQLiteStore> m_declarativeNetRequestDynamicRulesStore;
      RefPtr<WebExtensionDeclarativeNetRequestSQLiteStore> m_declarativeNetRequestSessionRulesStore;
-@@ -1283,6 +1549,9 @@ private:
+@@ -1283,6 +1551,9 @@ private:
      HashSet<double> m_sessionRulesIDs;
      HashSet<double> m_dynamicRulesIDs;
  
@@ -90032,7 +90392,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..5e21c1f2fe7447446a49489ed17bffdb
      MenuItemMap m_menuItems;
      MenuItemVector m_mainMenuItems;
  
-@@ -1300,12 +1569,16 @@ private:
+@@ -1300,12 +1571,16 @@ private:
          String message;
  #if PLATFORM(COCOA)
          RetainPtr<id> argument;
@@ -90049,7 +90409,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..5e21c1f2fe7447446a49489ed17bffdb
  
      Deque<TestMessage> m_testMessageQueue;
      Deque<TestMessage> m_testStartedQueue;
-@@ -1315,6 +1588,8 @@ private:
+@@ -1315,6 +1590,8 @@ private:
      void sendQueuedTestMessagesIfNeeded(WebExtensionEventListenerType);
  #if PLATFORM(COCOA)
      void addTestMessageToQueue(const String& message, id argument, WebExtensionEventListenerType);
@@ -90059,7 +90419,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..5e21c1f2fe7447446a49489ed17bffdb
  };
  
 diff --git a/Source/WebKit/UIProcess/Extensions/WebExtensionContext.messages.in b/Source/WebKit/UIProcess/Extensions/WebExtensionContext.messages.in
-index 6581f34180846663e2a8be51064e43c2d8173b64..38c8b1e8aa748cc3d8f0a24d7343b70d1ec60fcc 100644
+index 6581f34180846663e2a8be51064e43c2d8173b64..ec5b6c0e567b80330d5b32763e0cf01a21b5f68b 100644
 --- a/Source/WebKit/UIProcess/Extensions/WebExtensionContext.messages.in
 +++ b/Source/WebKit/UIProcess/Extensions/WebExtensionContext.messages.in
 @@ -31,10 +31,127 @@
@@ -90154,7 +90514,7 @@ index 6581f34180846663e2a8be51064e43c2d8173b64..38c8b1e8aa748cc3d8f0a24d7343b70d
 +    [Validator=isLoadedAndPrivilegedMessage] AddBlockingWebRequestListenerHaiku(WebCore::FrameIdentifier frameIdentifier, WebKit::WebExtensionEventListenerType listenerType)
 +    [Validator=isLoadedAndPrivilegedMessage] RemoveBlockingWebRequestListenerHaiku(WebCore::FrameIdentifier frameIdentifier, WebKit::WebExtensionEventListenerType listenerType, uint64_t removedCount)
 +#endif
-+
+ 
 +    // Runtime APIs
 +    [Validator=isLoaded] RuntimeGetBackgroundPage() -> (std::expected<std::optional<WebCore::PageIdentifier>, WebKit::WebExtensionError> result)
 +    [Validator=isLoaded] RuntimeReload()
@@ -90162,7 +90522,7 @@ index 6581f34180846663e2a8be51064e43c2d8173b64..38c8b1e8aa748cc3d8f0a24d7343b70d
 +    [Validator=isLoaded] RuntimeConnect(String extensionID, WebKit::WebExtensionPortChannelIdentifier channelIdentifier, String name, struct WebKit::WebExtensionMessageSenderParameters senderParameters, bool userGesture) -> (std::expected<void, WebKit::WebExtensionError> result)
 +    [Validator=isLoaded] RuntimeWebPageSendMessage(String extensionID, String messageJSON, struct WebKit::WebExtensionMessageSenderParameters senderParameters) -> (std::expected<String, WebKit::WebExtensionError> result)
 +    [Validator=isLoaded] RuntimeWebPageConnect(String extensionID, WebKit::WebExtensionPortChannelIdentifier channelIdentifier, String name, struct WebKit::WebExtensionMessageSenderParameters senderParameters) -> (std::expected<void, WebKit::WebExtensionError> result)
- 
++
 +    // Port APIs
 +    [Validator=isLoaded] PortPostMessage(WebKit::WebExtensionContentWorldType sourceContentWorldType, WebKit::WebExtensionContentWorldType targetContentWorldType, std::optional<WebKit::WebPageProxyIdentifier> sendingPageProxyIdentifier, WebKit::WebExtensionPortChannelIdentifier channelIdentifier, String messageJSON, bool userGesture)
 +    [Validator=isLoaded] PortRemoved(WebKit::WebExtensionContentWorldType sourceContentWorldType, WebKit::WebExtensionContentWorldType targetContentWorldType, WebKit::WebPageProxyIdentifier pageProxyIdentifier, WebKit::WebExtensionPortChannelIdentifier channelIdentifier)
@@ -90196,10 +90556,10 @@ index 6581f34180846663e2a8be51064e43c2d8173b64..38c8b1e8aa748cc3d8f0a24d7343b70d
  #endif
  
 +#if PLATFORM(HAIKU)
-+    [Validator=isCookiesMessageAllowed] CookiesGet(std::optional<PAL::SessionID> sessionID, String name, URL url) -> (std::expected<std::optional<WebKit::WebExtensionCookieParameters>, WebKit::WebExtensionError> result)
++    [Validator=isCookiesMessageAllowed] CookiesGetJSON(String detailsJSON) -> (std::expected<std::optional<WebKit::WebExtensionCookieParameters>, WebKit::WebExtensionError> result)
 +    [Validator=isCookiesMessageAllowed] CookiesGetAll(std::optional<PAL::SessionID> sessionID, URL url, struct WebKit::WebExtensionCookieFilterParameters filterParameters) -> (std::expected<Vector<WebKit::WebExtensionCookieParameters>, WebKit::WebExtensionError> result)
 +    [Validator=isCookiesMessageAllowed] CookiesSetJSON(String detailsJSON) -> (std::expected<std::optional<WebKit::WebExtensionCookieParameters>, WebKit::WebExtensionError> result)
-+    [Validator=isCookiesMessageAllowed] CookiesRemove(std::optional<PAL::SessionID> sessionID, String name, URL url) -> (std::expected<std::optional<WebKit::WebExtensionCookieParameters>, WebKit::WebExtensionError> result)
++    [Validator=isCookiesMessageAllowed] CookiesRemoveJSON(String detailsJSON) -> (std::expected<std::optional<WebKit::WebExtensionCookieParameters>, WebKit::WebExtensionError> result)
 +    [Validator=isCookiesMessageAllowed] CookiesGetAllCookieStores() -> (std::expected<HashMap<PAL::SessionID, Vector<WebKit::WebExtensionTabIdentifier>>, WebKit::WebExtensionError> result)
 +#endif
 +
@@ -94214,10 +94574,10 @@ index 0000000000000000000000000000000000000000..8568a4ea133a137222c9c34a08367e66
 +#endif
 diff --git a/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextAPICookiesHaiku.cpp b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextAPICookiesHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..a66084db987eeaa2e5d20feac0587b73201c44d8
+index 0000000000000000000000000000000000000000..6cd58c82f5b76b28c25f4c2f63575e9012bbfa21
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextAPICookiesHaiku.cpp
-@@ -0,0 +1,262 @@
+@@ -0,0 +1,284 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +#include "config.h"
 +#include "WebExtensionContext.h"
@@ -94225,11 +94585,14 @@ index 0000000000000000000000000000000000000000..a66084db987eeaa2e5d20feac0587b73
 +#include "APIHTTPCookieStore.h"
 +#include "WebExtensionCookieHostAccess.h"
 +#include "WebExtensionCookieWriteParser.h"
++#include "WebExtensionCookieQueryParser.h"
++#include "WebExtensionCookiePartitionKey.h"
 +#include "WebExtensionContextProxyMessages.h"
 +#include "WebExtensionPermission.h"
 +#include "WebExtensionUtilities.h"
 +#include "WebPageProxy.h"
 +#include "WebsiteDataStore.h"
++#include <WebCore/CookieUtil.h>
 +#include <algorithm>
 +#include <cmath>
 +#include <wtf/text/MakeString.h>
@@ -94281,7 +94644,7 @@ index 0000000000000000000000000000000000000000..a66084db987eeaa2e5d20feac0587b73
 +        return;
 +    Vector<WebCore::CookieChange> permittedChanges;
 +    for (auto& change : changes) {
-+        if (change.cookie.partitionKey.isEmpty() && hasCookieHostPermission(*this, cookieOrigin(change.cookie)))
++        if (hasCookieHostPermission(*this, cookieOrigin(change.cookie)))
 +            permittedChanges.append(change);
 +    }
 +    if (permittedChanges.isEmpty())
@@ -94321,6 +94684,10 @@ index 0000000000000000000000000000000000000000..a66084db987eeaa2e5d20feac0587b73
 +        completion(toWebExtensionError("cookies"_s, nullString(), "cookie store or host permission is unavailable"_s));
 +        return;
 +    }
++    if (filter.partitionKey && !isValidWebExtensionCookiePartitionKey(*filter.partitionKey)) {
++        completion(toWebExtensionError("cookies"_s, nullString(), "invalid cookie partition key"_s));
++        return;
++    }
 +    for (auto* value : { &filter.name, &filter.domain, &filter.path }) {
 +        if (*value && (*value)->contains('\0')) {
 +            completion(toWebExtensionError("cookies"_s, nullString(), "invalid cookie filter"_s));
@@ -94336,8 +94703,17 @@ index 0000000000000000000000000000000000000000..a66084db987eeaa2e5d20feac0587b73
 +        Vector<WebExtensionCookieParameters> result;
 +        auto now = WallTime::now().secondsSinceEpoch().milliseconds();
 +        for (auto& cookie : cookies) {
-+            if (!cookie.partitionKey.isEmpty() || (!cookie.session && (!cookie.expires || !std::isfinite(*cookie.expires) || *cookie.expires <= now)))
++            if ((filter.partitionKey && cookie.partitionKey != *filter.partitionKey)
++                || (!cookie.session && (!cookie.expires || !std::isfinite(*cookie.expires) || *cookie.expires <= now)))
 +                continue;
++            if (!url.isEmpty()) {
++                auto path = url.path();
++                if (!WebCore::CookieUtil::domainMatch(cookie.domain, url.host().toString())
++                    || (cookie.secure && !url.protocolIs("https"_s))
++                    || !(path == cookie.path || (path.startsWith(cookie.path)
++                        && (cookie.path.endsWith('/') || (path.length() > cookie.path.length() && path[cookie.path.length()] == '/')))))
++                    continue;
++            }
 +            if ((filter.name && cookie.name != *filter.name) || (filter.path && cookie.path != *filter.path)
 +                || (filter.secure && cookie.secure != *filter.secure) || (filter.session && cookie.session != *filter.session))
 +                continue;
@@ -94360,21 +94736,24 @@ index 0000000000000000000000000000000000000000..a66084db987eeaa2e5d20feac0587b73
 +        });
 +        completion(WTF::move(result));
 +    };
-+    if (url.isEmpty())
++    if (url.isEmpty() || !filter.partitionKey || !filter.partitionKey->isEmpty())
 +        protect(store.cookieStore())->cookies(WTF::move(received));
 +    else
 +        protect(store.cookieStore())->cookiesForURL(url.isolatedCopy(), WTF::move(received));
 +}
-+void WebExtensionContext::cookiesGet(std::optional<PAL::SessionID> session, const String& name, const URL& url, CompletionHandler<void(std::expected<std::optional<WebExtensionCookieParameters>, WebExtensionError>&&)>&& completion)
++void WebExtensionContext::cookiesGetJSON(const String& details, CompletionHandler<void(std::expected<std::optional<WebExtensionCookieParameters>, WebExtensionError>&&)>&& completion)
 +{
-+    RefPtr store = websiteDataStore(session);
-+    if (!store || !validCookieURL(url) || name.contains('\0')) {
++    auto parsed = parseWebExtensionCookieQuery(JSON::Value::parseJSON(details).get(), WebExtensionCookieQueryKind::Get);
++    if (!parsed) {
++        completion(toWebExtensionError("cookies.get()"_s, nullString(), parsed.error()));
++        return;
++    }
++    RefPtr store = websiteDataStore(parsed->session);
++    if (!store) {
 +        completion(toWebExtensionError("cookies.get()"_s, nullString(), "invalid cookie store, name or URL"_s));
 +        return;
 +    }
-+    WebExtensionCookieFilterParameters filter;
-+    filter.name = name;
-+    fetchCookies(*store, url, filter, false, [completion = WTF::move(completion)](auto&& result) mutable {
++    fetchCookies(*store, parsed->url, parsed->filter, false, [completion = WTF::move(completion)](auto&& result) mutable {
 +        if (!result)
 +            completion(std::unexpected(result.error()));
 +        else if (result->isEmpty())
@@ -94420,17 +94799,20 @@ index 0000000000000000000000000000000000000000..a66084db987eeaa2e5d20feac0587b73
 +            completion({ WebExtensionCookieParameters { store->sessionID(), WTF::move(*cookie) } });
 +    });
 +}
-+void WebExtensionContext::cookiesRemove(std::optional<PAL::SessionID> session, const String& name, const URL& url, CompletionHandler<void(std::expected<std::optional<WebExtensionCookieParameters>, WebExtensionError>&&)>&& completion)
++void WebExtensionContext::cookiesRemoveJSON(const String& details, CompletionHandler<void(std::expected<std::optional<WebExtensionCookieParameters>, WebExtensionError>&&)>&& completion)
 +{
-+    RefPtr store = websiteDataStore(session);
-+    if (!store || !validCookieURL(url) || name.contains('\0')) {
++    auto parsed = parseWebExtensionCookieQuery(JSON::Value::parseJSON(details).get(), WebExtensionCookieQueryKind::Get);
++    if (!parsed) {
++        completion(toWebExtensionError("cookies.remove()"_s, nullString(), parsed.error()));
++        return;
++    }
++    RefPtr store = websiteDataStore(parsed->session);
++    if (!store) {
 +        completion(toWebExtensionError("cookies.remove()"_s, nullString(), "invalid cookie store, name or URL"_s));
 +        return;
 +    }
 +    auto loadIdentifier = privilegedIdentifier();
-+    WebExtensionCookieFilterParameters filter;
-+    filter.name = name;
-+    fetchCookies(*store, url, filter, false, [this, protectedThis = Ref { *this }, store, url, loadIdentifier, completion = WTF::move(completion)](std::expected<Vector<WebExtensionCookieParameters>, WebExtensionError>&& result) mutable {
++    fetchCookies(*store, parsed->url, parsed->filter, false, [this, protectedThis = Ref { *this }, store, url = parsed->url, loadIdentifier, completion = WTF::move(completion)](std::expected<Vector<WebExtensionCookieParameters>, WebExtensionError>&& result) mutable {
 +        if (!result) {
 +            completion(std::unexpected(result.error()));
 +            return;
@@ -125618,7 +126000,7 @@ index 50355b88656007ccd2b3fa9710b5bc1079e6582c..3dcbef42ab33c5a9d1648408ac0ce5b2
  } // namespace WebKit
 diff --git a/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPICookies.cpp b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPICookies.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..a346a7aa8ca9f3aeff3680e42bd3c991a34cc400
+index 0000000000000000000000000000000000000000..f6ba8975b26952e01d1aa5c28a2cdd819ef989c5
 --- /dev/null
 +++ b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPICookies.cpp
 @@ -0,0 +1,122 @@
@@ -125653,7 +126035,7 @@ index 0000000000000000000000000000000000000000..a346a7aa8ca9f3aeff3680e42bd3c991
 +        exception = query.error();
 +        return;
 +    }
-+    WebProcess::singleton().sendWithAsyncReply(Messages::WebExtensionContext::CookiesGet(query->session, *query->filter.name, query->url),
++    WebProcess::singleton().sendWithAsyncReply(Messages::WebExtensionContext::CookiesGetJSON(details->toJSONString()),
 +        [protectedThis = Ref { *this }, callback = WTF::move(callback)](auto&& result) {
 +            callWithCookie(callback.get(), WTF::move(result));
 +        }, extensionContext().identifier());
@@ -125696,7 +126078,7 @@ index 0000000000000000000000000000000000000000..a346a7aa8ca9f3aeff3680e42bd3c991
 +        exception = query.error();
 +        return;
 +    }
-+    WebProcess::singleton().sendWithAsyncReply(Messages::WebExtensionContext::CookiesRemove(query->session, *query->filter.name, query->url),
++    WebProcess::singleton().sendWithAsyncReply(Messages::WebExtensionContext::CookiesRemoveJSON(details->toJSONString()),
 +        [protectedThis = Ref { *this }, callback = WTF::move(callback), url = query->url](std::expected<std::optional<WebExtensionCookieParameters>, WebExtensionError>&& result) {
 +            if (!result) {
 +                callback->reportError(result.error());
@@ -133750,10 +134132,10 @@ index 0000000000000000000000000000000000000000..692bb73d9edfc46fdfa2bf5a6acb1f78
 +#endif
 diff --git a/Source/WebKit/WebProcess/Extensions/Bindings/JSWebExtensionCookieParameters.cpp b/Source/WebKit/WebProcess/Extensions/Bindings/JSWebExtensionCookieParameters.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..14acd6337443cfde1ac9dbb8d6ae4f8bbe26124c
+index 0000000000000000000000000000000000000000..f63508e911fcf17ec1d1ff1f77e3c582c84e7709
 --- /dev/null
 +++ b/Source/WebKit/WebProcess/Extensions/Bindings/JSWebExtensionCookieParameters.cpp
-@@ -0,0 +1,105 @@
+@@ -0,0 +1,115 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +#include "config.h"
 +#include "JSWebExtensionCookieParameters.h"
@@ -133763,9 +134145,17 @@ index 0000000000000000000000000000000000000000..14acd6337443cfde1ac9dbb8d6ae4f8b
 +#include "WebExtensionCookieStoreIdentifier.h"
 +#include <cmath>
 +namespace WebKit {
++static void setPartitionKey(JSContextRef context, JSObjectRef object, const WebCore::Cookie& cookie)
++{
++    if (cookie.partitionKey.isEmpty())
++        return;
++    Protected<JSObjectRef> partition(JSContextGetGlobalContext(context), JSObjectMake(context, nullptr, nullptr));
++    JSObjectSetProperty(context, partition.get(), toJSString("topLevelSite"_s).get(), JSValueMakeString(context, toJSString(cookie.partitionKey).get()), kJSPropertyAttributeNone, nullptr);
++    JSObjectSetProperty(context, object, toJSString("partitionKey"_s).get(), partition.get(), kJSPropertyAttributeNone, nullptr);
++}
 +JSValueRef toWebAPICookieChange(JSContextRef context, PAL::SessionID session, const WebCore::CookieChange& change)
 +{
-+    if (!session.isValid() || !change.cookie.partitionKey.isEmpty())
++    if (!session.isValid())
 +        return JSValueMakeNull(context);
 +    ASCIILiteral cause;
 +    switch (change.cause) {
@@ -133796,6 +134186,7 @@ index 0000000000000000000000000000000000000000..14acd6337443cfde1ac9dbb8d6ae4f8b
 +    set("url"_s, url.string());
 +    set("name"_s, parameters.cookie.name);
 +    set("storeId"_s, webExtensionCookieStoreIdentifier(*parameters.sessionIdentifier));
++    setPartitionKey(context, result.get(), parameters.cookie);
 +    return result.get();
 +}
 +JSValueRef toWebAPI(JSContextRef context, const WebExtensionCookieParameters& parameters)
@@ -133824,6 +134215,7 @@ index 0000000000000000000000000000000000000000..14acd6337443cfde1ac9dbb8d6ae4f8b
 +    set("session"_s, JSValueMakeBoolean(context, cookie.session));
 +    set("storeId"_s, string(webExtensionCookieStoreIdentifier(*parameters.sessionIdentifier)));
 +    set("value"_s, string(cookie.value));
++    setPartitionKey(context, result.get(), cookie);
 +    if (!cookie.session && cookie.expires && std::isfinite(*cookie.expires))
 +        set("expirationDate"_s, JSValueMakeNumber(context, *cookie.expires / 1000.0));
 +    return result.get();

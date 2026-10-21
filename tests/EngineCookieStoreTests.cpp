@@ -37,7 +37,7 @@ static Cookie makeCookie()
     cookie.httpOnly = true;
     return cookie;
 }
-static void checkMigration(const String& path, bool conflictingColumn, int version)
+static void checkMigration(const String& path, bool conflictingColumn, int version, bool validVersionTwo = false)
 {
     {
         SQLiteDatabase seed;
@@ -46,6 +46,9 @@ static void checkMigration(const String& path, bool conflictingColumn, int versi
             "the migration fixture uses the previous cookie schema");
         if (conflictingColumn)
             check(seed.executeCommand("ALTER TABLE Cookie ADD COLUMN samesite INTEGER NOT NULL DEFAULT 0"_s), "the failed-migration fixture contains a conflicting second column");
+        if (validVersionTwo)
+            check(seed.executeCommand("ALTER TABLE Cookie ADD COLUMN created REAL NOT NULL DEFAULT 0"_s)
+                && seed.executeCommand("ALTER TABLE Cookie ADD COLUMN samesite INTEGER NOT NULL DEFAULT 0"_s), "the version-two fixture includes SameSite and creation metadata");
         check(seed.executeCommand("INSERT INTO Cookie (name,value,domain,path,expires,size,session) VALUES ('legacy','keep-me','example.test','/',4000000000000,7,0), ('session','discard-at-restart','example.test','/',0,18,1)"_s),
             "legacy persistent and session cookies are seeded");
         check(seed.executeCommandSlow(makeString("PRAGMA user_version="_s, version)), "the fixture records its original schema version");
@@ -54,11 +57,11 @@ static void checkMigration(const String& path, bool conflictingColumn, int versi
         CookieJarDB database(path);
         database.open();
         auto restored = database.getAllCookies();
-        if (!conflictingColumn && version <= 1) {
+        if (!conflictingColumn && (version <= 1 || validVersionTwo)) {
             check(restored.size() == 1 && restored[0].name == "legacy"_s && restored[0].value == "keep-me"_s,
                 "migration retains persistent cookies and removes session cookies at restart");
             if (restored.size() == 1)
-                check(restored[0].created == 0 && restored[0].sameSite == Cookie::SameSitePolicy::None,
+                check(restored[0].created == 0 && restored[0].sameSite == Cookie::SameSitePolicy::None && restored[0].partitionKey.isEmpty(),
                     "old metadata stays unknown instead of acquiring a fabricated creation time or policy");
         } else
             check(restored.isEmpty() && !database.setCookie(makeCookie()), "failed or future schemas refuse reads and writes");
@@ -67,13 +70,68 @@ static void checkMigration(const String& path, bool conflictingColumn, int versi
         SQLiteDatabase inspect;
         check(inspect.open(path), "the database file still opens after the migration attempt");
         auto current = inspect.prepareStatement("PRAGMA user_version"_s);
-        bool succeeded = !conflictingColumn && version <= 1;
-        check(current && current->columnInt(0) == (succeeded ? 2 : version), "only a successful migration advances the schema version");
+        bool succeeded = !conflictingColumn && (version <= 1 || validVersionTwo);
+        check(current && current->columnInt(0) == (succeeded ? 3 : version), "only a successful migration advances the schema version");
         auto rows = inspect.prepareStatement("SELECT count(*) FROM Cookie"_s);
         check(rows && rows->columnInt(0) == (succeeded ? 1 : 2), "a failed migration preserves all original cookie rows");
         auto columns = inspect.prepareStatement("SELECT count(*) FROM pragma_table_info('Cookie') WHERE name='created'"_s);
         check(columns && columns->columnInt(0) == (succeeded ? 1 : 0), "a failed second migration step rolls back the first column addition");
     }
+}
+
+static void checkPartitionedCookies()
+{
+    CookieJarDB database(":memory:"_s);
+    database.open();
+    URL embed("https://widget.test/area/page"_s), first("https://shop.example/"_s), second("https://news.example/"_s);
+    URL sibling("https://sub.shop.example:8443/other"_s), otherScheme("http://shop.example/"_s);
+    auto set = [&](const URL& top, const String& header, CookieJarDB::Source source = CookieJarDB::Source::Network) {
+        return database.setCookie(top, embed, header, source);
+    };
+    auto values = [&](const URL& top) {
+        Vector<String> result;
+        if (auto cookies = database.searchCookies(top, embed, std::nullopt, std::nullopt, std::nullopt)) {
+            for (auto& cookie : *cookies)
+                result.append(cookie.value);
+        }
+        return result;
+    };
+    check(set(first, "id=ordinary; Secure; Path=/; SameSite=None"_s)
+        && set(first, "id=first; Secure; Path=/; SameSite=None; Partitioned; Max-Age=3600"_s)
+        && set(second, "id=second; Secure; Path=/; SameSite=None; pArTiTiOnEd; Max-Age=3600"_s),
+        "identical cookie names, domains and paths coexist in different partitions and the ordinary jar");
+    check(values(first).size() == 2 && values(first).contains("first"_s) && !values(first).contains("second"_s),
+        "the first embedding site sees only its own partition plus ordinary cookies");
+    check(values(second).size() == 2 && values(second).contains("second"_s) && !values(second).contains("first"_s),
+        "the second embedding site cannot read the first partition");
+    check(values(sibling) == values(first), "subdomains, paths and ports share their top-level schemeful site");
+    check(values(otherScheme).size() == 1 && values(otherScheme).contains("ordinary"_s), "HTTP and HTTPS top-level sites use distinct partitions");
+    check(values(URL { }).size() == 1, "an unknown top-level site never widens partition access");
+    auto all = database.getAllCookies();
+    check(all.size() == 3 && all[1].partitionKey == "https://shop.example"_s && all[2].partitionKey == "https://news.example"_s,
+        "privileged enumeration retains canonical partition keys");
+    check(all.size() == 3 && !(all[0] == all[1]) && !(all[1] == all[2]), "cookie equality distinguishes partition identities for inspector enumeration");
+    check(set(first, "id=updated; Secure; Path=/; Partitioned"_s) && values(first).contains("updated"_s)
+        && values(second).contains("second"_s), "a partitioned replacement affects only its own jar");
+    check(set(first, "id=gone; Secure; Path=/; Partitioned; Max-Age=0"_s)
+        && values(first).size() == 1 && values(second).size() == 2, "partitioned expiration does not delete another partition or the ordinary cookie");
+    check(!set(first, "insecure=bad; Partitioned"_s)
+        && !database.setCookie(first, URL("http://widget.test/"_s), "insecure=bad; Secure; Partitioned"_s, CookieJarDB::Source::Network)
+        && !set(URL("data:text/html,opaque"_s), "opaque=bad; Secure; Partitioned"_s),
+        "Partitioned requires Secure, an HTTPS setter and a usable top-level site");
+    check(set(first, "locked=server; Path=/; Secure; HttpOnly; Partitioned"_s)
+        && !set(first, "locked=script; Path=/; Secure; Partitioned"_s, CookieJarDB::Source::Script)
+        && set(second, "locked=other-partition; Path=/; Secure; Partitioned"_s, CookieJarDB::Source::Script),
+        "HttpOnly overwrite protection applies to the exact partition");
+    auto rows = database.getAllCookies();
+    for (auto& row : rows) {
+        if (row.value == "second"_s)
+            check(database.deleteCookie(row), "structured deletion accepts a partitioned cookie's exact identity");
+    }
+    check(!values(second).contains("second"_s) && values(second).contains("ordinary"_s), "exact partition deletion preserves the ordinary same-name cookie");
+    auto invalid = makeCookie();
+    invalid.partitionKey = "https://sub.shop.example/path"_s;
+    check(!database.setCookie(invalid), "structured writes reject noncanonical partition keys");
 }
 #if SUMMIT_COOKIE_CHANGE_TESTS
 void runCookieChangeChecks(void (*)(bool, const char*));
@@ -84,6 +142,7 @@ void runCookieChangeIPCChecks(void (*)(bool, const char*));
 #endif
 static void runChecks()
 {
+    checkPartitionedCookies();
 #if SUMMIT_COOKIE_IPC_TESTS
     runCookieChangeIPCChecks(check);
 #endif
@@ -141,8 +200,9 @@ static void runChecks()
         "a session write receipt omits an expiry that was not stored");
     auto partitioned = cookie;
     partitioned.partitionKey = "https://top.test"_s;
-    check(!memory.setCookieWithResult(partitioned, receipt) && !receipt,
-        "a rejected partitioned write clears any old receipt and reports failure");
+    check(memory.setCookieWithResult(partitioned, receipt) && receipt && receipt->partitionKey == partitioned.partitionKey,
+        "a partitioned write receipt retains the actual stored partition key");
+    check(memory.deleteCookie(partitioned), "the receipt test removes only its partitioned row");
     memory.setAcceptPolicy(CookieAcceptPolicy::Never);
     receipt = cookie;
     check(!memory.setCookieWithResult(cookie, receipt) && !receipt && !memory.deleteCookie(cookie),
@@ -197,6 +257,7 @@ static void runChecks()
     auto failed = makeString(String::fromUTF8(created), "/failed.sqlite"_s);
     auto future = makeString(String::fromUTF8(created), "/future.sqlite"_s);
     auto malformed = makeString(String::fromUTF8(created), "/malformed.sqlite"_s);
+    auto versionTwo = makeString(String::fromUTF8(created), "/version-two.sqlite"_s);
     auto rejected = makeString(String::fromUTF8(created), "/rejected.sqlite"_s);
     {
         CookieJarDB database(rejected);
@@ -223,7 +284,8 @@ static void runChecks()
     checkMigration(failed, true, 1);
     checkMigration(future, false, 99);
     checkMigration(malformed, false, 2);
-    for (auto& databasePath : { path, legacy, unversioned, failed, future, malformed, rejected }) {
+    checkMigration(versionTwo, false, 2, true);
+    for (auto& databasePath : { path, legacy, unversioned, failed, future, malformed, rejected, versionTwo }) {
         for (auto suffix : { ""_s, "-wal"_s, "-shm"_s })
             unlink(makeString(databasePath, suffix).utf8().legacyCStringPointer());
     }

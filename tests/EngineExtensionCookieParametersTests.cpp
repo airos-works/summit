@@ -80,8 +80,19 @@ static void checkQueries()
     for (auto invalid : { ""_s, "relative/path"_s, "file:///tmp/cookie"_s, "javascript:1"_s, "https://"_s })
         check(!parse(makeString("{\"url\":\""_s, invalid, "\"}"_s)), "cookie queries reject empty, malformed and non-HTTP URLs");
     check(!parse(R"({"storeId":"persistent-1suffix"})"_s), "query parsing enforces complete store-ID consumption");
-    for (auto unknown : { "partitionKey"_s, "firstPartyDomain"_s, "typo"_s })
+    for (auto unknown : { "firstPartyDomain"_s, "typo"_s })
         check(!parse(makeString("{\""_s, unknown, "\":{}}"_s)), "unimplemented or unknown query dimensions cannot silently broaden a read");
+    auto ordinary = parse("{}"_s);
+    auto wildcard = parse(R"({"partitionKey":{}})"_s);
+    auto partition = parse(R"({"partitionKey":{"topLevelSite":"https://sub.example.test:8443/page"}})"_s);
+    check(ordinary && ordinary->filter.partitionKey && ordinary->filter.partitionKey->isEmpty(), "cookie queries default to the unpartitioned jar");
+    check(wildcard && !wildcard->filter.partitionKey, "an explicit empty partition filter requests all jars");
+    check(partition && partition->filter.partitionKey == "https://example.test"_s, "partition filters normalize to scheme and registrable domain");
+    for (auto invalid : { "null"_s, "true"_s, R"({"topLevelSite":7})"_s, R"({"topLevelSite":"data:text/html,opaque"})"_s,
+        R"({"topLevelSite":"https://example.test","hasCrossSiteAncestor":true})"_s })
+        check(!parse(makeString("{\"partitionKey\":"_s, invalid, '}')), "invalid or unsupported partition dimensions fail instead of widening access");
+    check(!parse(R"({"name":"n","url":"https://example.test","partitionKey":{}})"_s, WebExtensionCookieQueryKind::Get),
+        "a single-cookie query cannot use a wildcard partition");
     check(!parse(R"({"name":"n","url":"https://example.test","secure":true})"_s, WebExtensionCookieQueryKind::Get), "getAll-only filters are rejected for a single-cookie query");
 }
 static void checkJavaScriptValues()
@@ -164,7 +175,10 @@ static void checkJavaScriptValues()
     change.cause = WebCore::CookieChangeCause::Explicit;
     check(JSValueIsNull(context, toWebAPICookieChange(context, PAL::SessionID { uint64_t { 0 } }, change)), "an event with no valid cookie store is rejected");
     change.cookie.partitionKey = "https://top.test"_s;
-    check(JSValueIsNull(context, toWebAPICookieChange(context, PAL::SessionID::defaultSessionID(), change)), "partitioned events cannot masquerade as unpartitioned cookies");
+    publish("partitionChange"_s, toWebAPICookieChange(context, PAL::SessionID::defaultSessionID(), change));
+    verify("partitionChange.cookie.partitionKey.topLevelSite === 'https://top.test'"_s, "partitioned events expose their actual top-level site");
+    publish("partitionRemoval"_s, toWebAPICookieRemoval(context, URL("https://example.test/"_s), { PAL::SessionID::defaultSessionID(), change.cookie }));
+    verify("partitionRemoval.partitionKey.topLevelSite === 'https://top.test'"_s, "removal receipts retain the selected partition");
     change.cookie.partitionKey = emptyString();
     publish("firstChange"_s, toWebAPICookieChange(context, PAL::SessionID::defaultSessionID(), change));
     publish("secondChange"_s, toWebAPICookieChange(context, PAL::SessionID::defaultSessionID(), change));

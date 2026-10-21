@@ -700,12 +700,25 @@ static void TestStorage()
         {{"name", "sid"}, {"value", "abc"}, {"domain", ".example.com"}, {"path", "/"}, {"expires", 1790000000000.0},
             {"session", false}, {"httpOnly", true}, {"secure", true}, {"sameSite", "Lax"}},
         {{"name", "pref"}, {"value", "1"}, {"domain", "example.com"}, {"path", "/app"}, {"expires", 0},
-            {"session", true}, {"httpOnly", false}, {"secure", false}, {"sameSite", "None"}}})}}));
+            {"session", true}, {"httpOnly", false}, {"secure", false}, {"sameSite", "None"}},
+        {{"name", "sid"}, {"value", "partitioned"}, {"domain", ".example.com"}, {"path", "/"},
+            {"session", true}, {"httpOnly", true}, {"secure", true}, {"sameSite", "None"}, {"partitionKey", "https://shop.test"}}})}}));
     const auto* cookies = session.FindArea(StorageKind::Cookies, "");
-    CHECK(cookies && cookies->loaded && cookies->cookies.size() == 2 && cookies->cookies[0].httpOnly && cookies->cookies[0].secure);
+    CHECK(cookies && cookies->loaded && cookies->cookies.size() == 3 && cookies->cookies[0].httpOnly && cookies->cookies[0].secure);
     CHECK(cookies->cookies[0].URL() == "https://example.com/" && cookies->cookies[1].URL() == "http://example.com/app");
     CHECK(cookies->cookies[1].ExpiresLabel() == "Session" && cookies->cookies[0].ExpiresLabel().rfind("2026-", 0) == 0);
-    CHECK(cookies->cookies[0].Size() == 6 && cookies->Bytes() == 6 + 5);
+    CHECK(cookies->cookies[0].Size() == 6 && cookies->Bytes() == 6 + 5 + 14);
+    auto partitioned = cookies->cookies[2];
+    CHECK(partitioned.partitionKey == "https://shop.test" && partitioned.ID() != cookies->cookies[0].ID());
+    session.DeleteCookie(partitioned);
+    commands = Sent(session);
+    CHECK(commands.size() == 1 && commands[0].method == "Page.setCookie"
+        && commands[0].parameters["cookie"]["partitionKey"] == "https://shop.test"
+        && commands[0].parameters["cookie"]["expires"] == 0
+        && commands[0].parameters["cookie"]["session"] == false
+        && commands[0].parameters["cookie"]["name"] == "sid"
+        && commands[0].parameters["cookie"]["domain"] == ".example.com"
+        && commands[0].parameters["cookie"]["path"] == "/");
     session.DeleteCookie(cookies->cookies[0]);
     commands = Sent(session);
     CHECK(commands.size() == 1 && commands[0].method == "Page.deleteCookie" && commands[0].parameters["cookieName"] == "sid"

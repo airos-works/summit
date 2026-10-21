@@ -140,8 +140,12 @@ void runCookieChangeChecks(void (*check)(bool, const char*))
     batches.clear();
     auto partitioned = cookie;
     partitioned.partitionKey = "https://top.test"_s;
-    check(!memory.setCookie(partitioned) && !memory.deleteCookie(partitioned) && batches.isEmpty(),
-        "unsupported partitioned mutations emit no cookie changes");
+    check(memory.setCookie(partitioned) && memory.deleteCookie(partitioned) && batches.size() == 2
+        && batches[0].size() == 1 && batches[1].size() == 1
+        && batches[0][0].cookie.partitionKey == partitioned.partitionKey
+        && batches[1][0].cookie.partitionKey == partitioned.partitionKey && batches[1][0].removed,
+        "partitioned insert and delete events retain the exact partition identity");
+    batches.clear();
     memory.setAcceptPolicy(CookieAcceptPolicy::Never);
     check(!memory.setCookie(cookie) && !memory.deleteAllCookies() && !memory.deleteExpiredCookies() && batches.isEmpty(),
         "disabled database operations emit no changes");

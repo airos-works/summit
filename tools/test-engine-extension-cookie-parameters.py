@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import shlex
 import subprocess
+import sys
 import tarfile
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -118,6 +119,9 @@ def native():
 
 
 def host(overlay):
+    candidate = Path(overlay).resolve() if overlay else ROOT / '.cache/WebKit'
+    if (candidate / 'Source/WebKit/Shared/Extensions/WebExtensionCookiePartitionKey.h').exists():
+        raise SystemExit('CHIPS site normalization requires the actual WebCore library. Use --cross-build BUILD --output OUTPUT --runtime-lib-dir HAIKU_LIB_DIR to build the current native tests.')
     files = {}
     for directory, names in HELPERS.items():
         for name in names:
@@ -173,5 +177,13 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--native', action='store_true')
     parser.add_argument('--overlay', help='Candidate source root containing Source/')
+    parser.add_argument('--cross-build', type=Path, help='Configured cross-build of the current engine, including WebCore')
+    parser.add_argument('--output', type=Path, help='Output directory for current native test executables')
+    parser.add_argument('--runtime-lib-dir', help='Matching engine library directory on Haiku')
     args = parser.parse_args()
+    if args.cross_build:
+        if not args.output or not args.runtime_lib_dir:
+            parser.error('--cross-build requires --output and --runtime-lib-dir')
+        raise SystemExit(subprocess.call([sys.executable, str(ROOT / 'tools/test-engine-cookie-components.py'),
+            '--build', str(args.cross_build), '--output', str(args.output), '--runtime-lib-dir', args.runtime_lib_dir]))
     raise SystemExit(native() if args.native else host(args.overlay))

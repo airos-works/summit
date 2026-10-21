@@ -163,7 +163,7 @@ def host(compile_only, resume, overlay, with_api_parser=False, ipc_generated=Non
         if overlay:
             backend = Path(overlay).resolve() / 'Source/WebCore/platform/network/curl'
             manifest['extra_sources'], manifest['compile_sources'] = {}, ['CookieJarDB.cpp', 'CookieUtil.cpp']
-            for name in ('CookieJarDB.cpp', 'CookieJarDB.h', 'CookieUtil.cpp'):
+            for name in ('CookieJarDB.cpp', 'CookieJarDB.h', 'CookieUtil.cpp', 'CookieUtil.h'):
                 path = backend / name
                 files['sources/' + name] = path.read_bytes()
                 manifest['extra_sources'][name] = {'source': str(path), 'sha256': digest(path)}
@@ -179,12 +179,14 @@ def host(compile_only, resume, overlay, with_api_parser=False, ipc_generated=Non
                 manifest['with_cookie_changes'] = True
             files['sources/WebCore/CookieJarDB.h'] = files['sources/CookieJarDB.h']
             manifest['extra_sources']['WebCore/CookieJarDB.h'] = manifest['extra_sources']['CookieJarDB.h']
+            files['sources/WebCore/CookieUtil.h'] = files['sources/CookieUtil.h']
+            manifest['extra_sources']['WebCore/CookieUtil.h'] = manifest['extra_sources']['CookieUtil.h']
             if with_api_parser:
                 manifest['with_api_parser'] = True
                 directory = Path('Source/WebKit/Shared/Extensions')
                 for name in ('WebExtensionCookieStoreIdentifier.h', 'WebExtensionCookieStoreIdentifier.cpp',
                              'WebExtensionCookieWriteParser.h', 'WebExtensionCookieWriteParser.cpp',
-                             'WebExtensionCookieParameters.h'):
+                             'WebExtensionCookieParameters.h', 'WebExtensionCookiePartitionKey.h'):
                     path = Path(overlay).resolve() / directory / name
                     if not path.exists():
                         path = ROOT / '.cache/WebKit' / directory / name

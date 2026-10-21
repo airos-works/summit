@@ -47,6 +47,8 @@ void runCookieWriteChecks(void (*check)(bool, const char*))
     check(!!parse(R"({"url":"https://example.com/","name":"__Host-Http-id","secure":true,"httpOnly":true,"path":"/"})"_s),
         "a correctly scoped secure HttpOnly host-prefixed cookie is accepted");
     check(!!parse(R"({"url":"https://example.com/","secure":true,"sameSite":"no_restriction"})"_s), "explicit SameSite None with secure is accepted");
+    auto partition = parse(R"({"url":"https://example.com/","secure":true,"partitionKey":{"topLevelSite":"https://sub.top.test:8443/path"}})"_s);
+    check(partition && partition->cookie.partitionKey == "https://top.test"_s, "partitioned API writes retain the normalized top-level site");
     for (auto text : { "null"_s, "[]"_s, "{}"_s, R"({"url":"file:///tmp/cookies"})"_s,
         R"({"url":"https://example.com/","name":"bad;name"})"_s,
         R"({"url":"https://example.com/","name":"bad=name"})"_s,

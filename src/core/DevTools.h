@@ -122,8 +122,10 @@ struct Cookie {
     // Milliseconds since 1970; 0 for a cookie that ends with the session.
     double expires = 0;
     bool session = false, httpOnly = false, secure = false;
+    std::string partitionKey;
+    std::string ID() const { return name + '\n' + domain + '\n' + path + '\n' + partitionKey; }
     uint64_t Size() const { return name.size() + value.size(); }
-    // An address the cookie is sent to, which names it for deleting.
+    // An address the cookie is sent to. Partitioned deletion also needs its key.
     std::string URL() const;
     // "Session", or the date and time it expires.
     std::string ExpiresLabel() const;

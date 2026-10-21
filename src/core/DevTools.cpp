@@ -525,6 +525,7 @@ struct ProtocolReader {
                         cookie.domain = Text(Member(item, "domain"));
                         cookie.path = Text(Member(item, "path"));
                         cookie.sameSite = Text(Member(item, "sameSite"));
+                        cookie.partitionKey = Text(Member(item, "partitionKey"));
                         cookie.session = Flag(Member(item, "session"));
                         cookie.expires = cookie.session ? 0 : Number(Member(item, "expires"));
                         cookie.httpOnly = Flag(Member(item, "httpOnly"));
@@ -1095,6 +1096,15 @@ void Session::ClearStorage(StorageKind kind, const std::string& origin)
 
 void Session::DeleteCookie(const Cookie& cookie)
 {
+    if (!cookie.partitionKey.empty()) {
+        // Page.deleteCookie has no partition field. Expire the exact structured
+        // cookie so deleting this row cannot delete an ordinary same-name one.
+        const json expired = {{"name", cookie.name}, {"value", cookie.value}, {"domain", cookie.domain},
+            {"path", cookie.path}, {"partitionKey", cookie.partitionKey}, {"session", false}, {"expires", 0},
+            {"httpOnly", cookie.httpOnly}, {"secure", cookie.secure}, {"sameSite", cookie.sameSite}};
+        StorageEdit(StorageKind::Cookies, { }, "Page.setCookie", json{{"cookie", expired}}.dump());
+        return;
+    }
     StorageEdit(StorageKind::Cookies, { }, "Page.deleteCookie",
         "{\"cookieName\":" + Quoted(cookie.name) + ",\"url\":" + Quoted(cookie.URL()) + "}");
 }
