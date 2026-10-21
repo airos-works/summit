@@ -16353,7 +16353,7 @@ index 55480f7ce9270da99c8fadcda856bb291e9ab6a9..05e2350f85f6b25bd78e0ad04379623e
  
      HashSet<Ref<ScrollingTreeOverflowScrollProxyNode>> m_activeOverflowScrollProxyNodes;
 diff --git a/Source/WebCore/page/scrolling/ThreadedScrollingTree.cpp b/Source/WebCore/page/scrolling/ThreadedScrollingTree.cpp
-index 77e274b5febc1b0c30c2f90092b4dd1ba1e49eea..66ed45d6492c1c8f54a036bf5d5a517c2decca68 100644
+index 77e274b5febc1b0c30c2f90092b4dd1ba1e49eea..3bbbe9b9630ce0af534e05154067db31b837e8f6 100644
 --- a/Source/WebCore/page/scrolling/ThreadedScrollingTree.cpp
 +++ b/Source/WebCore/page/scrolling/ThreadedScrollingTree.cpp
 @@ -37,6 +37,7 @@
@@ -16505,7 +16505,7 @@ index 77e274b5febc1b0c30c2f90092b4dd1ba1e49eea..66ed45d6492c1c8f54a036bf5d5a517c
      m_state = SynchronizationState::Desynchronized;
  }
  
-@@ -550,19 +622,81 @@ void ThreadedScrollingTree::displayDidRefreshOnScrollingThread()
+@@ -550,19 +622,87 @@ void ThreadedScrollingTree::displayDidRefreshOnScrollingThread()
  {
      TraceScope tracingScope(ScrollingThreadDisplayDidRefreshStart, ScrollingThreadDisplayDidRefreshEnd, displayID());
      ASSERT(ScrollingThread::isCurrentThread());
@@ -16524,8 +16524,14 @@ index 77e274b5febc1b0c30c2f90092b4dd1ba1e49eea..66ed45d6492c1c8f54a036bf5d5a517c
 +    // Never sampled earlier than before: a frame due time can be later than
 +    // the next refresh's now.
 +    auto sampleTime = std::max(scrollAnimationSampleTimeHaiku(now), m_lastScrollAnimationSampleHaiku);
-+    m_lastScrollAnimationSampleHaiku = sampleTime;
-+    serviceScrollAnimations(sampleTime);
++    // A later wheel event may retarget the curve after the main thread has
++    // read this frame's position. Do not change that position on another timer
++    // tick for the same frame. willStartRenderingUpdate() explicitly resamples
++    // pending input before the DOM snapshot; the next frame takes later input.
++    if (sampleTime > m_lastScrollAnimationSampleHaiku) {
++        m_lastScrollAnimationSampleHaiku = sampleTime;
++        serviceScrollAnimations(sampleTime);
++    }
 +#else
      serviceScrollAnimations(now);
 +#endif
