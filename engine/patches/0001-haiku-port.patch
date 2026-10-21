@@ -16353,7 +16353,7 @@ index 55480f7ce9270da99c8fadcda856bb291e9ab6a9..05e2350f85f6b25bd78e0ad04379623e
  
      HashSet<Ref<ScrollingTreeOverflowScrollProxyNode>> m_activeOverflowScrollProxyNodes;
 diff --git a/Source/WebCore/page/scrolling/ThreadedScrollingTree.cpp b/Source/WebCore/page/scrolling/ThreadedScrollingTree.cpp
-index 77e274b5febc1b0c30c2f90092b4dd1ba1e49eea..fa154adb93f0366d3c9f710268b24c2e256f2c78 100644
+index 77e274b5febc1b0c30c2f90092b4dd1ba1e49eea..66ed45d6492c1c8f54a036bf5d5a517c2decca68 100644
 --- a/Source/WebCore/page/scrolling/ThreadedScrollingTree.cpp
 +++ b/Source/WebCore/page/scrolling/ThreadedScrollingTree.cpp
 @@ -37,6 +37,7 @@
@@ -16384,7 +16384,7 @@ index 77e274b5febc1b0c30c2f90092b4dd1ba1e49eea..fa154adb93f0366d3c9f710268b24c2e
      addPendingScrollUpdateWithDeferReason(WTF::move(scrollUpdate), WheelEventTestMonitor::DeferReason::ScrollingThreadSyncNeeded);
  }
  
-@@ -421,12 +428,32 @@ void ThreadedScrollingTree::setActiveScrollSnapIndices(ScrollingNodeID nodeID, s
+@@ -421,13 +428,33 @@ void ThreadedScrollingTree::setActiveScrollSnapIndices(ScrollingNodeID nodeID, s
  void ThreadedScrollingTree::lockLayersForHitTesting()
  {
      m_layerHitTestMutex.lock();
@@ -16398,26 +16398,27 @@ index 77e274b5febc1b0c30c2f90092b4dd1ba1e49eea..fa154adb93f0366d3c9f710268b24c2e
 +#if PLATFORM(HAIKU)
 +    auto lockedAt = m_layersLockedForHitTestingAtHaiku;
 +#endif
-+    m_layerHitTestMutex.unlock();
+     m_layerHitTestMutex.unlock();
 +#if PLATFORM(HAIKU)
 +    if (lockedAt)
 +        ScrollingTraceScopeHaiku::report("the main thread kept the layers from hit tests", MonotonicTime::now() - lockedAt);
 +#endif
-+}
-+
+ }
+ 
 +#if PLATFORM(HAIKU)
 +bool ThreadedScrollingTree::canHitTestWithoutWaitingHaiku()
 +{
 +    if (!m_layerHitTestMutex.tryLock())
 +        return false;
-     m_layerHitTestMutex.unlock();
++    m_layerHitTestMutex.unlock();
 +    return true;
- }
++}
 +#endif
- 
++
  void ThreadedScrollingTree::didScheduleRenderingUpdate()
  {
-@@ -443,6 +470,9 @@ void ThreadedScrollingTree::willStartRenderingUpdate()
+     m_renderingUpdateWasScheduled = true;
+@@ -443,11 +470,25 @@ void ThreadedScrollingTree::willStartRenderingUpdate()
          return;
  
      tracePoint(ScrollingThreadRenderUpdateSyncStart);
@@ -16427,7 +16428,23 @@ index 77e274b5febc1b0c30c2f90092b4dd1ba1e49eea..fa154adb93f0366d3c9f710268b24c2e
  
      // Wait for the scrolling thread to acquire m_treeLock. This ensures that any pending wheel events are processed.
      BinarySemaphore semaphore;
-@@ -457,8 +487,30 @@ void ThreadedScrollingTree::willStartRenderingUpdate()
+     ScrollingThread::dispatch([protectedThis = Ref { *this }, &semaphore]() {
+         Locker treeLocker { protectedThis->m_treeLock };
++#if PLATFORM(HAIKU)
++        // A wheel event can retarget an animation after the compositor sampled
++        // the next frame, but before this rendering update. Sample it again
++        // after pending input and before synchronizing the DOM scroll position,
++        // so scroll events and rAF observe the position that frame will paint.
++        if (protectedThis->hasNodeWithActiveScrollAnimations()) {
++            auto sampleTime = std::max(protectedThis->scrollAnimationSampleTimeHaiku(MonotonicTime::now()), protectedThis->m_lastScrollAnimationSampleHaiku);
++            protectedThis->m_lastScrollAnimationSampleHaiku = sampleTime;
++            protectedThis->serviceScrollAnimations(sampleTime);
++        }
++#endif
+         semaphore.signal();
+         protectedThis->waitForRenderingUpdateCompletionOrTimeout();
+     });
+@@ -457,8 +498,30 @@ void ThreadedScrollingTree::willStartRenderingUpdate()
      m_state = SynchronizationState::InRenderingUpdate;
  }
  
@@ -16458,7 +16475,7 @@ index 77e274b5febc1b0c30c2f90092b4dd1ba1e49eea..fa154adb93f0366d3c9f710268b24c2e
      auto scrollingCoordinator = m_scrollingCoordinator;
      if (!scrollingCoordinator)
          return;
-@@ -476,6 +528,9 @@ void ThreadedScrollingTree::hasNodeWithAnimatedScrollChanged(bool hasNodeWithAni
+@@ -476,6 +539,9 @@ void ThreadedScrollingTree::hasNodeWithAnimatedScrollChanged(bool hasNodeWithAni
  // commit layer positions.
  void ThreadedScrollingTree::waitForRenderingUpdateCompletionOrTimeout()
  {
@@ -16468,7 +16485,7 @@ index 77e274b5febc1b0c30c2f90092b4dd1ba1e49eea..fa154adb93f0366d3c9f710268b24c2e
      ASSERT(ScrollingThread::isCurrentThread());
      ASSERT(m_treeLock.isLocked());
  
-@@ -523,6 +578,9 @@ void ThreadedScrollingTree::renderingUpdateComplete()
+@@ -523,6 +589,9 @@ void ThreadedScrollingTree::renderingUpdateComplete()
          m_stateCondition.notifyOne();
  
      m_state = SynchronizationState::Idle;
@@ -16478,7 +16495,7 @@ index 77e274b5febc1b0c30c2f90092b4dd1ba1e49eea..fa154adb93f0366d3c9f710268b24c2e
  }
  
  void ThreadedScrollingTree::scheduleDelayedRenderingUpdateDetectionTimer(Seconds delay)
-@@ -543,6 +601,9 @@ void ThreadedScrollingTree::delayedRenderingUpdateDetectionTimerFired()
+@@ -543,6 +612,9 @@ void ThreadedScrollingTree::delayedRenderingUpdateDetectionTimerFired()
      Locker locker { m_treeLock };
      if (canUpdateLayersOnScrollingThread())
          applyLayerPositionsInternal();
@@ -16488,7 +16505,7 @@ index 77e274b5febc1b0c30c2f90092b4dd1ba1e49eea..fa154adb93f0366d3c9f710268b24c2e
      m_state = SynchronizationState::Desynchronized;
  }
  
-@@ -550,19 +611,81 @@ void ThreadedScrollingTree::displayDidRefreshOnScrollingThread()
+@@ -550,19 +622,81 @@ void ThreadedScrollingTree::displayDidRefreshOnScrollingThread()
  {
      TraceScope tracingScope(ScrollingThreadDisplayDidRefreshStart, ScrollingThreadDisplayDidRefreshEnd, displayID());
      ASSERT(ScrollingThread::isCurrentThread());
