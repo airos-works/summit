@@ -46,6 +46,7 @@ struct PreferencesState {
     std::vector<std::string> dictionaries;
     // Installed web apps: name and start address, by identifier.
     std::vector<std::tuple<std::string, std::string, std::string>> webApps;
+    std::string userAgent = "default";
 };
 // Edit › Preferences…. One window for the application; changes apply to every
 // browser window as they are made and are saved in the profile.

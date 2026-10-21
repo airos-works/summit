@@ -27,6 +27,7 @@
 #include <WebKit/WebKitInspector.h>
 #endif
 #include "core/Address.h"
+#include "core/UserAgent.h"
 #include "core/BuildTarget.h"
 #include "core/BookmarkIO.h"
 #include "core/InternalPages.h"
@@ -1291,6 +1292,9 @@ void BrowserWindow::CreateTab(const std::string& input, bool select, BWebView* a
     if (!extensionPage) AddPageScripts(webView);
     // Sites that ask for a name and password get a sign-in sheet (#87).
     if (!extensionPage) webView->SetAuthenticationRequests(true);
+    webView->SetCustomUserAgent(fShared->Read([](const Profile& profile) {
+        return FindUserAgentPreset(profile.userAgent).agent;
+    }));
     // As in other browsers, a restored session's tabs wait to be selected
     // before they load: a window of fifteen tabs would otherwise start fifteen
     // page loads and web processes at once, with only one of them on screen.
@@ -2691,6 +2695,10 @@ void BrowserWindow::ProfileChanged(const BMessage& message)
     }
     if (changes & SharedProfile::kSettingsChanged) {
         ShowSearchEngine();
+#if SUMMIT_MODERN_WEBKIT
+        const char* agent = fShared->Read([](const Profile& profile) { return FindUserAgentPreset(profile.userAgent).agent; });
+        for (auto& tab : fTabs) tab.view->SetCustomUserAgent(agent);
+#endif
         const auto [bar, style] = fShared->Read([](const Profile& profile) {
             return std::make_pair(profile.showBookmarksBar, profile.interfaceStyle);
         });

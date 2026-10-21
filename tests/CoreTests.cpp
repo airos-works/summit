@@ -1,4 +1,5 @@
 #include "core/Address.h"
+#include "core/UserAgent.h"
 #include "core/Profile.h"
 #include "core/Favicon.h"
 #include "core/Spelling.h"
@@ -24,6 +25,20 @@ static int checks = 0, failures = 0;
 int main()
 {
     using namespace summit;
+    CHECK(std::string(FindUserAgentPreset("unknown").id) == "default");
+    CHECK(std::string(FindUserAgentPreset("").agent).empty());
+    std::set<std::string> userAgentIDs;
+    for (const auto& preset : UserAgentPresets()) {
+        CHECK(userAgentIDs.insert(preset.id).second);
+        CHECK(&FindUserAgentPreset(preset.id) == &preset);
+        CHECK(std::string(preset.agent).find_first_of("\r\n") == std::string::npos);
+        if (std::string(preset.id) == "default") continue;
+        const std::string agent = preset.agent, id = preset.id;
+        CHECK(agent.rfind("Mozilla/5.0 ", 0) == 0);
+        CHECK(agent.find(id.find("windows") != std::string::npos ? "Windows NT" : "Macintosh") != std::string::npos);
+        CHECK(agent.find(id.rfind("edge", 0) == 0 ? "Edg/" : id.rfind("firefox", 0) == 0 ? "Firefox/"
+            : id.rfind("chrome", 0) == 0 ? "Chrome/" : "Version/") != std::string::npos);
+    }
     CHECK(FormatByteSize(0) == "0 bytes");
     CHECK(FormatByteSize(1) == "1 byte");
     CHECK(FormatByteSize(1023) == "1023 bytes");
@@ -433,6 +448,7 @@ int main()
         {{{"https://second.example/", "Second"}}, 0}};
     profile.interfaceStyle = "safari";
     profile.searchEngine = "bing";
+    profile.userAgent = "firefox-macos";
     profile.siteZoom = {{"example.com", 1.5}, {"file", 0.8}};
     profile.unpinnedExtensions = {"ext-1", "ext-2"};
     const std::string routerCertificate(64, 'a');
@@ -496,6 +512,12 @@ int main()
     CHECK(loaded.RemoveProtocolHandler("mailto") && !loaded.RemoveProtocolHandler("mailto"));
     CHECK(loaded.RemoveProtocolHandler("web+demo") && loaded.declinedProtocolHandlers.empty());
     CHECK(loaded.searchEngine == "bing" && loaded.siteZoom.size() == 2 && loaded.siteZoom["example.com"] == 1.5);
+    CHECK(loaded.userAgent == "firefox-macos");
+    for (const auto& preset : UserAgentPresets()) {
+        profile.userAgent = preset.id;
+        CHECK(profile.Save(path, error));
+        CHECK(Profile::Load(path, error).userAgent == preset.id && error.empty());
+    }
     CHECK(loaded.unpinnedExtensions == std::set<std::string>({"ext-1", "ext-2"}));
     CHECK(loaded.trustedCertificates.size() == 2 && loaded.trustedCertificates[0].subject == "/CN=UniFi"
         && loaded.trustedCertificates[0].added == 100 && loaded.trustedCertificates[1].sha256 == std::string(64, 'b'));
@@ -512,15 +534,17 @@ int main()
         R"("bookmarks":[],"history":[],"interfaceStyle":"nonsense"})"; }
     loaded = Profile::Load(path, error);
     CHECK(error.empty() && loaded.windows.size() == 1 && loaded.windows[0].tabs[0].url == "https://old.example/");
+    CHECK(loaded.userAgent == "default");
     CHECK(loaded.interfaceStyle == "haiku" && loaded.searchEngine == "duckduckgo" && loaded.siteZoom.empty()
         && loaded.unpinnedExtensions.empty());
     // Unknown engines and unusable zoom entries fall back instead of failing the profile.
     { std::ofstream out(path); out << R"({"version":1,"tabs":[],"selected":0,"bookmarks":[],"history":[],)"
-        R"("searchEngine":"altavista","siteZoom":{"a.example":7,"b.example":1.2,"":1.1},)"
+        R"("searchEngine":"altavista","userAgent":"unrecognised","siteZoom":{"a.example":7,"b.example":1.2,"":1.1},)"
         R"("trustedCertificates":[{"host":"","sha256":"00"},{"host":"nas.lan","sha256":"not hex"},)"
         R"({"host":"nas.lan","sha256":")" << std::string(64, 'c') << R"("}]})"; }
     loaded = Profile::Load(path, error);
     CHECK(error.empty() && loaded.searchEngine == "duckduckgo" && loaded.siteZoom.size() == 1 && loaded.siteZoom["b.example"] == 1.2);
+    CHECK(loaded.userAgent == "default");
     CHECK(loaded.trustedCertificates.size() == 1 && loaded.trustedCertificates[0].host == "nas.lan"
         && loaded.trustedCertificates[0].subject.empty());
     { std::ofstream out(path); out << "{broken"; }

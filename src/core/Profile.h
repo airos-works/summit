@@ -65,6 +65,8 @@ struct Profile {
     std::string interfaceStyle = "haiku";
     // The engine that searches text typed in the address field (SearchEngines()).
     std::string searchEngine = "duckduckgo";
+    // Preferences › Compatibility: a UserAgentPresets() identifier.
+    std::string userAgent = "default";
     // Page zoom remembered per site (ZoomKey()); sites at 100% are not listed.
     std::map<std::string, double> siteZoom;
     // Extensions whose action button is not on the toolbar (their actions

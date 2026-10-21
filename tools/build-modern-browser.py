@@ -376,7 +376,7 @@ def main():
                   '-I/boot/system/develop/headers/private',
                   # The developer tools show text with Scintilla and Lexilla, as Kiri does.
                   '-I/boot/system/develop/headers/scintilla', '-I/boot/system/develop/headers/lexilla']
-        sources = ['src/main.cpp', 'src/core/Address.cpp', 'src/core/Protocol.cpp', 'src/core/Profile.cpp', 'src/core/Bookmarks.cpp', 'src/core/BookmarkIO.cpp', 'src/core/ExtensionCatalog.cpp', 'src/core/ExtensionIdentity.cpp', 'src/core/ExtensionStore.cpp',
+        sources = ['src/main.cpp', 'src/core/Address.cpp', 'src/core/UserAgent.cpp', 'src/core/Protocol.cpp', 'src/core/Profile.cpp', 'src/core/Bookmarks.cpp', 'src/core/BookmarkIO.cpp', 'src/core/ExtensionCatalog.cpp', 'src/core/ExtensionIdentity.cpp', 'src/core/ExtensionStore.cpp',
                    'src/core/ExtensionPackage.cpp', 'src/core/StoreOffer.cpp', 'src/core/DownloadText.cpp', 'src/core/DownloadHistory.cpp',
                    'src/core/Favicon.cpp', 'src/core/InternalPages.cpp', 'src/core/Zoom.cpp', 'src/core/Suggest.cpp',
                    'src/core/DevTools.cpp', 'src/core/DevToolsFormat.cpp', 'src/core/DevToolsElements.cpp', 'src/core/PageSource.cpp', 'src/core/Mcp.cpp', 'src/core/McpHttp.cpp', 'src/core/McpInspector.cpp', 'src/core/UpdateCheck.cpp', 'src/core/Spelling.cpp', 'src/core/LoadError.cpp', 'src/core/ProfileLock.cpp', 'src/ui/SourceView.cpp',

@@ -5,6 +5,7 @@
 #include "Messages.h"
 #include "McpService.h"
 #include "core/Address.h"
+#include "core/UserAgent.h"
 #if SUMMIT_MODERN_WEBKIT
 #include <WebKit/WebKitEmbedding.h>
 #endif
@@ -37,7 +38,7 @@
 namespace summit {
 namespace {
 constexpr uint32 homeEdited = 'phed', useStartPage = 'phsp', bookmarksBarToggled = 'pbar', styleChosen = 'psty',
-    searchChosen = 'psrc', clearHistory = 'pchi', clearHistoryConfirmed = 'pchc', clearCache = 'pcca',
+    searchChosen = 'psrc', userAgentChosen = 'puac', clearHistory = 'pchi', clearHistoryConfirmed = 'pchc', clearCache = 'pcca',
     clearSiteData = 'pcsd', clearSiteDataConfirmed = 'pcsc', cacheMeasured = 'pcms',
     forgetCertificates = 'pfce', forgetCertificatesConfirmed = 'pfcc', siteSelected = 'psse', siteAllow = 'pssa',
     restoreSessionToggled = 'prss', mcpToggled = 'pmcp', mcpLocalToggled = 'pmcl', mcpPortEdited = 'pmpe',
@@ -325,6 +326,29 @@ PreferencesWindow::PreferencesWindow(BMessenger owner, const PreferencesState& s
 #if SUMMIT_MODERN_WEBKIT
     fTabs->AddTab(new BrowsingPreferences(fOwner, state.autoplay, state.spellChecking, state.spellingLanguage, state.dictionaries,
         state.savePasswords, state.webApps));
+    auto* compatibility = new BGroupView("Compatibility", B_VERTICAL, 10);
+    auto* agents = new BPopUpMenu("user-agents");
+    for (const auto& preset : UserAgentPresets()) {
+        auto* message = new BMessage(userAgentChosen);
+        message->AddString("user_agent", preset.id);
+        auto* item = new BMenuItem(preset.name, message);
+        item->SetMarked(std::string_view(FindUserAgentPreset(state.userAgent).id) == preset.id);
+        agents->AddItem(item);
+    }
+    BLayoutBuilder::Group<>(compatibility)
+        .SetInsets(18)
+        .Add(SectionTitle("compatibility-title", "Website compatibility"))
+        .AddGroup(B_VERTICAL, 8).SetInsets(12, 0, 0, 0)
+            .Add(new BStringView("user-agent-hint", "Choose how Summit identifies itself to websites."))
+            .AddGroup(B_HORIZONTAL, 0)
+                .Add(new BMenuField("user-agent", "User agent:", agents)).AddGlue()
+            .End()
+            .Add(new BStringView("user-agent-scope", "Applies to all windows, including private windows, and is saved for next time."))
+            .Add(new BStringView("user-agent-reload", "Reload open pages to use the new identity."))
+            .Add(new BStringView("user-agent-engine", "Sites still run in WebKit. Try Summit (default) if a site stops working."))
+        .End()
+        .AddGlue();
+    fTabs->AddTab(compatibility);
 #endif
     fTabs->AddTab(data);
     fTabs->AddTab(sites);
@@ -506,6 +530,12 @@ std::string PreferencesWindow::ClearRangeText() const
 void PreferencesWindow::MessageReceived(BMessage* message)
 {
     switch (message->what) {
+        case userAgentChosen: {
+            BMessage changed(kPreferencesChanged);
+            changed.AddString("user_agent", FindUserAgentPreset(message->GetString("user_agent", "default")).id);
+            fOwner.SendMessage(&changed);
+            break;
+        }
         case homeEdited: {
             ShowHomeHint();
             const auto text = Trim(fHome->Text());
@@ -799,7 +829,7 @@ void PreferencesWindow::MessageReceived(BMessage* message)
                 const std::string name = tab;
                 const char* label = name == "browsing" ? "Browsing" : name == "data" ? "History and Data"
                     : name == "sites" ? "Site Permissions" : name == "links" ? "Link Handlers"
-                    : name == "developer" ? "Developer" : "General";
+                    : name == "developer" ? "Developer" : name == "compatibility" ? "Compatibility" : "General";
                 for (int32 i = 0; i < fTabs->CountTabs(); ++i)
                     if (fTabs->TabAt(i) && fTabs->TabAt(i)->Label() && !std::strcmp(fTabs->TabAt(i)->Label(), label)) fTabs->Select(i);
             }

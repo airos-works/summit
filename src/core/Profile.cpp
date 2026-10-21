@@ -1,4 +1,5 @@
 #include "Profile.h"
+#include "UserAgent.h"
 #include "Address.h"
 #include "Zoom.h"
 #include <nlohmann/json.hpp>
@@ -141,6 +142,8 @@ Profile Profile::Load(const std::filesystem::path& path, std::string& error)
                 throw std::runtime_error("Invalid home page");
         }
         if (auto bar = j.find("showBookmarksBar"); bar != j.end()) profile.showBookmarksBar = bar->get<bool>();
+        if (auto agent = j.find("userAgent"); agent != j.end() && agent->is_string())
+            profile.userAgent = FindUserAgentPreset(agent->get<std::string>()).id;
         if (auto text = j.find("zoomTextOnly"); text != j.end() && text->is_boolean()) profile.zoomTextOnly = text->get<bool>();
         if (auto language = j.find("spellingLanguage"); language != j.end() && language->is_string() && language->get<std::string>().size() < 64)
             profile.spellingLanguage = language->get<std::string>();
@@ -432,7 +435,7 @@ bool Profile::Save(const std::filesystem::path& path, std::string& error, int64_
             {"history", Encode(history)},
             {"homeURL", homeURL}, {"showBookmarksBar", showBookmarksBar}, {"zoomTextOnly", zoomTextOnly}, {"spellingLanguage", spellingLanguage}, {"restoreSession", restoreSession},
             {"savePasswords", savePasswords}, {"passwordNever", passwordNever}, {"spellChecking", spellChecking},
-            {"autoplay", autoplay}, {"webApps", [&] {
+            {"autoplay", autoplay}, {"userAgent", FindUserAgentPreset(userAgent).id}, {"webApps", [&] {
                 json apps = json::array();
                 for (const auto& app : webApps)
                     apps.push_back({{"id", app.id}, {"name", app.name}, {"startURL", app.startURL},

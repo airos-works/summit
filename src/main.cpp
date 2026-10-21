@@ -27,6 +27,7 @@
 #include <nlohmann/json.hpp>
 #endif
 #include "core/Address.h"
+#include "core/UserAgent.h"
 #include "core/ProfileLock.h"
 #include "core/Spelling.h"
 #include <Alert.h>
@@ -712,6 +713,8 @@ public:
             const bool hasRestore = message->FindBool("restore_session", &restore) == B_OK;
             const bool hasStyle = message->FindString("interface_style", &style) == B_OK && style;
             const bool hasEngine = message->FindString("search_engine", &engine) == B_OK && engine;
+            const char* userAgent = nullptr;
+            const bool hasUserAgent = message->FindString("user_agent", &userAgent) == B_OK && userAgent;
             bool mcpEnabled = false, mcpLocal = false;
             int32 mcpPort = 0;
             const bool hasMcpEnabled = message->FindBool("mcp_enabled", &mcpEnabled) == B_OK;
@@ -746,6 +749,10 @@ public:
                 if (hasBar && profile.showBookmarksBar != bar) { profile.showBookmarksBar = bar; changed = true; }
                 if (hasRestore && profile.restoreSession != restore) { profile.restoreSession = restore; changed = true; }
                 if (hasStyle && profile.interfaceStyle != style) { profile.interfaceStyle = style; changed = true; }
+                if (hasUserAgent && profile.userAgent != summit::FindUserAgentPreset(userAgent).id) {
+                    profile.userAgent = summit::FindUserAgentPreset(userAgent).id;
+                    changed = true;
+                }
                 if (hasAutoplay && profile.autoplay != autoplay && (!std::strcmp(autoplay, "allow")
                     || !std::strcmp(autoplay, "block-audio") || !std::strcmp(autoplay, "block"))) { profile.autoplay = autoplay; changed = true; }
                 if (hasSpelling && profile.spellChecking != spelling) { profile.spellChecking = spelling; changed = true; }
@@ -1556,6 +1563,7 @@ private:
                 profile.lastUpdateCheck, profile.autoplay, profile.spellChecking, profile.savePasswords };
         });
         state.webKitDirectory = fProfile / "WebKit";
+        state.userAgent = fShared->Read([](const summit::Profile& profile) { return profile.userAgent; });
         state.spellingLanguage = fShared->Read([](const summit::Profile& profile) { return profile.spellingLanguage; });
         state.dictionaries = summit::SpellingDictionaries(SpellingDirectories());
         fShared->Read([&](const summit::Profile& profile) {

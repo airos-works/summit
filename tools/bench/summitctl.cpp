@@ -34,6 +34,7 @@
 //   summitctl --team ID closewindow           closes the window (--window N) like its close box
 //   summitctl --team ID search ENGINE          Preferences' search engine (duckduckgo, google, bing)
 //   summitctl --team ID style haiku|safari     Preferences' appearance
+//   summitctl --team ID useragent PRESET       Preferences' compatibility identity
 //   summitctl --team ID clearhistory|clearcache|clearsitedata|preferences
 //                                             Preferences' History and Data buttons (without
 //                                             asking), or open the Preferences window
@@ -355,10 +356,10 @@ int main(int argc, char** argv)
         std::printf("{\"answered\":%s}\n", reply.GetBool("answered", false) ? "true" : "false");
         return reply.GetBool("answered", false) ? 0 : 4;
     }
-    if (command == "style") {
+    if (command == "style" || command == "useragent") {
         if (!argument) return 2;
         BMessage message(summit::kPreferencesChanged);
-        message.AddString("interface_style", argument);
+        message.AddString(command == "style" ? "interface_style" : "user_agent", argument);
         return app.SendMessage(&message, static_cast<BHandler*>(nullptr), timeout) == B_OK ? 0 : 5;
     }
     if (command == "search" || command == "clearhistory" || command == "clearcache" || command == "clearsitedata"
