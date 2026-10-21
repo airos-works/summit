@@ -17,6 +17,9 @@ def main():
     parser.add_argument("build", type=Path, help="Configured WebKit Ninja build directory")
     parser.add_argument("deps", type=Path, help="Target dependency prefix containing libepoxy")
     parser.add_argument("output", type=Path, help="Output native executable")
+    parser.add_argument("--source", type=Path, default=Path(__file__).with_name("skia-context-teardown.cpp"),
+        help="Alternative native GL probe source")
+    parser.add_argument("--headers", type=Path, help="Matching baseline headers when testing an older engine")
     args = parser.parse_args()
     build, deps, output = args.build.resolve(), args.deps.resolve(), args.output.resolve()
     rules = subprocess.check_output(["ninja", "-C", str(build), "-t", "rules"], text=True).splitlines()
@@ -43,8 +46,9 @@ def main():
         i += 1
     output.parent.mkdir(parents=True, exist_ok=True)
     obj = output.with_suffix(".o")
-    source = Path(__file__).with_name("skia-context-teardown.cpp").resolve()
-    subprocess.run(compiler + compile_args + ["-c", str(source), "-o", str(obj)], cwd=build, check=True)
+    source = args.source.resolve()
+    overrides = ["-I" + str(args.headers.resolve())] if args.headers else []
+    subprocess.run(compiler + overrides + compile_args + ["-c", str(source), "-o", str(obj)], cwd=build, check=True)
     target_flags = [arg for arg in compile_args if arg.startswith(("--sysroot=", "-specs="))]
     subprocess.run(compiler + target_flags + [str(obj), "-L" + str(build / "lib"),
         "-lWebKit", "-lJavaScriptCore", "-L" + str(deps / "lib"), "-lepoxy", "-lbe", "-lnetwork",
