@@ -6,6 +6,17 @@
 > see [REQUIREMENTS.md](REQUIREMENTS.md), the README's feature list and the
 > GitHub issues for what is left.
 
+## 22 October 2026: Inspector CPU and memory recordings
+
+The unprofiled airOS candidate `eefce05` passes 218 native resource-usage
+checks: worker CPU and target identities, allocation/GC accounting, recording
+restart and overlap, detach cleanup and normal shutdown. All five loaded
+candidate binaries match their manifest, with clean crash coverage and stable
+input/runtime hashes. Published packages and a stock-Haiku candidate still need
+acceptance; both published baselines confirm the domains were unavailable.
+See [the resource-usage report](resource-usage-2026-10-22.md). JIT symbols,
+extension background attachment and the native Timelines UI remain unfinished.
+
 ## 2 October 2026, evening: NanoKVM screen stayed black
 
 Reported by the owner: the NanoKVM at 192.168.1.8 (attached to the Rock 5)

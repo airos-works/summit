@@ -118,6 +118,9 @@ Inspector events still waits for that thread to run. This tool does not
 provide JavaScript stack samples or add a Timelines pane to the native
 Developer Tools window.
 
+Native acceptance and exact build evidence: [22 October 2026 resource-usage
+report](resource-usage-2026-10-22.md).
+
 ## How it works
 
 - **Server.** `src/core/Mcp.{h,cpp}` is the protocol (JSON-RPC 2.0, MCP
