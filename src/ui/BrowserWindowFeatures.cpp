@@ -324,11 +324,11 @@ void BrowserWindow::DetachTab(int64 id, const BMessenger& target)
         return;
     }
     if (fTabs.empty()) {
-        // The last tab left: the window goes too.
-        fClosingWindow = true;
-        SaveSession();
-        PostMessage(B_QUIT_REQUESTED);
+        // Enter the normal close handshake even with no documents left.
+        // Setting fClosingWindow before that handshake makes BeginWindowClose
+        // return early, leaving a hidden window that prevents quitting.
         Hide();
+        BeginWindowClose();
         return;
     }
     if (wasSelected && next) SelectTab(next);

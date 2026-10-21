@@ -121,7 +121,22 @@ native offer and completion notices were also inspected on screen.
 
 Moving a translated tab to another window preserves its text and resumes
 translation of new content there. Show Original in the receiving window
-restores the same document's original text.
+restores the same document's original text. The move test also found a
+pre-existing close-handshake bug: setting the source window's closing flag
+before requesting close left it hidden and prevented application shutdown.
+Detaching the final tab now enters the normal close handshake directly.
+Four native checks confirm the empty source window closes, translation resumes
+in the destination, the original text restores, and the browser exits normally.
+
+To repeat the main flow, serve `tests/fixtures` over HTTP, open
+`page-translation.html` with English first in Locale preferences, and choose
+Translate in the notice. `translationFixture.snapshot()` reports the current
+and original texts, element identity and form values. Use
+`translationFixture.add()` to insert new German text, and
+`translationFixture.moveAndEdit()` before Show Original to check restoration
+after moving a node and preserving a website edit. The `?delayed` variant adds
+the article after the load event. Use a separate test profile for cancellation
+or cache corruption checks.
 
 `tests/TranslationModelsTests.cpp` passes **69 checks** for direct and intermediate routes,
 unsupported languages, all pinned model configurations, and malformed model
