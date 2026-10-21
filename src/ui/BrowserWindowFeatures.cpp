@@ -418,6 +418,10 @@ void BrowserWindow::RefreshNoticeBar()
         message->AddInt64("tab", id);
         return message;
     };
+    auto showSoftwareRenderingNotice = [&] {
+        fNoticeBar->SetNotice("Summit is rendering pages in software because graphics acceleration is unavailable.",
+            {{"OK", new BMessage(kDismissSoftwareRenderingNotice)}});
+    };
     if (!tab) {
         fNoticeBar->Clear();
         return;
@@ -428,6 +432,8 @@ void BrowserWindow::RefreshNoticeBar()
         if (web && !InWebAppScope(fWebAppScope, tab->url))
             fNoticeBar->SetNotice(HostOf(tab->url) + " is not part of " + fWebAppName + ".",
                 {{"Open in Summit", new BMessage(kOpenInBrowser)}});
+        else if (fSoftwareRenderingNoticePending)
+            showSoftwareRenderingNotice();
         else fNoticeBar->Clear();
         return;
     }
@@ -464,8 +470,7 @@ void BrowserWindow::RefreshNoticeBar()
         return;
     }
     if (fSoftwareRenderingNoticePending) {
-        fNoticeBar->SetNotice("Summit is rendering pages in software because graphics acceleration is unavailable.",
-            {{"OK", new BMessage(kDismissSoftwareRenderingNotice)}});
+        showSoftwareRenderingNotice();
         return;
     }
     fNoticeBar->Clear();
