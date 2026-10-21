@@ -43,7 +43,9 @@ public:
         if (message->what == B_COPY_TARGET) {
             if (fMime != message->GetString("be:types", ""))
                 return;
-            fRequest = std::make_unique<BMessage>(*message);
+            // Cloning a BMessage clears its delivery/reply metadata on Haiku.
+            // Retain the delivered message itself for the asynchronous reply.
+            fRequest.reset(Looper()->DetachCurrentMessage());
             BMessage reply('mime');
             BMessageRunner::StartSending(BMessenger(this), &reply, fDelay, 1);
             std::puts("MIME requested");

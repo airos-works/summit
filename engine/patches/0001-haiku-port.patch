@@ -11326,10 +11326,62 @@ index d073fc72fc5f38f819baff14ee07cd871e2c8e27..c1296f7f4d14a6c3898ca82dcb49e18f
      void didMutate();
      
 diff --git a/Source/WebCore/dom/DataTransfer.cpp b/Source/WebCore/dom/DataTransfer.cpp
-index a7339e182f59f517e27c3c754bb13a0fd9d64576..ad097a0e3795ed69105234fd6470a1452c9dced0 100644
+index a7339e182f59f517e27c3c754bb13a0fd9d64576..4260356cb468093d4bb496f1b8df012db96c286c 100644
 --- a/Source/WebCore/dom/DataTransfer.cpp
 +++ b/Source/WebCore/dom/DataTransfer.cpp
-@@ -287,7 +287,7 @@ bool DataTransfer::shouldSuppressGetAndSetDataToAvoidExposingFilePaths() const
+@@ -214,7 +214,7 @@ String DataTransfer::getDataForItem(Document& document, const String& type) cons
+             });
+         }
+ 
+-        if (lowercaseType == textHTMLContentTypeAtom() && DeprecatedGlobalSettings::customPasteboardDataEnabled()) {
++        if (lowercaseType == textHTMLContentTypeAtom() && usesCustomPasteboardData()) {
+             // If the pasteboard contains files and the page requests 'text/html', we only read from rich text types to prevent file
+             // paths from leaking (e.g. from plain text data on the pasteboard) since we sanitize cross-origin markup. However, if
+             // custom pasteboard data is disabled, then we can't ensure that the markup we deliver is sanitized, so we fall back to
+@@ -228,9 +228,20 @@ String DataTransfer::getDataForItem(Document& document, const String& type) cons
+     return readStringFromPasteboard(document, lowercaseType, WebContentReadingPolicy::AnyType);
+ }
+ 
++bool DataTransfer::usesCustomPasteboardData() const
++{
++#if PLATFORM(HAIKU)
++    // Native drags preserve origin-tagged custom data independently of the
++    // system clipboard, whose custom-data API is not yet implemented.
++    if (forDrag())
++        return true;
++#endif
++    return DeprecatedGlobalSettings::customPasteboardDataEnabled();
++}
++
+ String DataTransfer::readStringFromPasteboard(Document& document, const String& lowercaseType, WebContentReadingPolicy policy) const
+ {
+-    if (!DeprecatedGlobalSettings::customPasteboardDataEnabled())
++    if (!usesCustomPasteboardData())
+         return m_pasteboard->readString(lowercaseType);
+ 
+     // StaticPasteboard is only used to stage data written by websites before being committed to the system pasteboard.
+@@ -244,6 +255,12 @@ String DataTransfer::readStringFromPasteboard(Document& document, const String&
+         return { };
+ 
+     if (!is<StaticPasteboard>(*m_pasteboard) && lowercaseType == textHTMLContentTypeAtom()) {
++#if PLATFORM(HAIKU)
++        // Haiku's pasteboard does not implement WebContentMarkupReader.
++        // Apply the same sanitizer to HTML arriving through a native drag.
++        if (forDrag())
++            return sanitizeMarkup(m_pasteboard->readString(lowercaseType), &document);
++#endif
+         if (!document.frame())
+             return { };
+         WebContentMarkupReader reader { protect(document.frame()).releaseNonNull() };
+@@ -280,14 +297,14 @@ String DataTransfer::getData(Document& document, const String& type) const
+ 
+ bool DataTransfer::shouldSuppressGetAndSetDataToAvoidExposingFilePaths() const
+ {
+-    if (!forFileDrag() && !DeprecatedGlobalSettings::customPasteboardDataEnabled())
++    if (!forFileDrag() && !usesCustomPasteboardData())
+         return false;
+     return m_pasteboard->fileContentState() == Pasteboard::FileContentState::MayContainFilePaths;
+ }
  
  bool DataTransfer::allowsFileAccess() const
  {
@@ -11338,6 +11390,89 @@ index a7339e182f59f517e27c3c754bb13a0fd9d64576..ad097a0e3795ed69105234fd6470a145
      return !forDrag() || forFileDrag();
  #elif PLATFORM(GTK) || PLATFORM(WPE)
      // File drag access is disabled until https://webkit.org/b/271957 is resolved for GTK/WPE ports.
+@@ -318,7 +335,7 @@ void DataTransfer::setDataFromItemList(Document& document, const String& type, c
+     ASSERT(canWriteData());
+ 
+     auto& pasteboard = downcast<StaticPasteboard>(*m_pasteboard);
+-    if (!DeprecatedGlobalSettings::customPasteboardDataEnabled()) {
++    if (!usesCustomPasteboardData()) {
+         pasteboard.writeString(type, data);
+         return;
+     }
+@@ -386,7 +403,7 @@ Vector<String> DataTransfer::types(Document& document, AddFilesType addFilesType
+         return { };
+     
+     bool hideFilesType = !canWriteData() && !allowsFileAccess();
+-    if (!DeprecatedGlobalSettings::customPasteboardDataEnabled()) {
++    if (!usesCustomPasteboardData()) {
+         auto types = m_pasteboard->typesForLegacyUnsafeBindings();
+         ASSERT(!types.contains("Files"_s));
+         if (!hideFilesType && m_pasteboard->fileContentState() != Pasteboard::FileContentState::NoFileOrImageData && addFilesType == AddFilesType::Yes)
+@@ -415,7 +432,7 @@ Vector<String> DataTransfer::types(Document& document, AddFilesType addFilesType
+ 
+         if (safeTypes.contains("text/uri-list"_s))
+             types.append("text/uri-list"_s);
+-        if (safeTypes.contains(textHTMLContentTypeAtom()) && DeprecatedGlobalSettings::customPasteboardDataEnabled())
++        if (safeTypes.contains(textHTMLContentTypeAtom()) && usesCustomPasteboardData())
+             types.append(textHTMLContentTypeAtom());
+         return types;
+     }
+@@ -521,7 +538,7 @@ void DataTransfer::commitToPasteboard(Pasteboard& nativePasteboard)
+     }
+ 
+     auto customData = staticPasteboard.takeCustomData();
+-    if (DeprecatedGlobalSettings::customPasteboardDataEnabled()) {
++    if (usesCustomPasteboardData()) {
+         customData.setOrigin(m_originIdentifier);
+         nativePasteboard.writeCustomData({ customData });
+         return;
+diff --git a/Source/WebCore/dom/DataTransfer.h b/Source/WebCore/dom/DataTransfer.h
+index eb981cb9d8efaeb7209f405534bdcb6f93077f28..11693df2025039ec0158365ff12b53b02cb2adc4 100644
+--- a/Source/WebCore/dom/DataTransfer.h
++++ b/Source/WebCore/dom/DataTransfer.h
+@@ -84,6 +84,8 @@ public:
+     bool NODELETE canReadData() const;
+     bool NODELETE canWriteData() const;
+ 
++    bool usesCustomPasteboardData() const;
++
+     bool hasFileOfType(const String&);
+     bool hasStringOfType(Document&, const String&);
+ 
+diff --git a/Source/WebCore/dom/DataTransferItemList.cpp b/Source/WebCore/dom/DataTransferItemList.cpp
+index 25d1a39c50333e9d5c5f48936cf1d9bad22d09d8..6025a0f1ed9ea0e138b59a0c6a8870b4bc16fb6f 100644
+--- a/Source/WebCore/dom/DataTransferItemList.cpp
++++ b/Source/WebCore/dom/DataTransferItemList.cpp
+@@ -69,9 +69,9 @@ RefPtr<DataTransferItem> DataTransferItemList::item(unsigned index)
+     return items[index].copyRef();
+ }
+ 
+-static bool shouldExposeTypeInItemList(const String& type)
++static bool shouldExposeTypeInItemList(const DataTransfer& dataTransfer, const String& type)
+ {
+-    return DeprecatedGlobalSettings::customPasteboardDataEnabled() || Pasteboard::isSafeTypeForDOMToReadAndWrite(type);
++    return dataTransfer.usesCustomPasteboardData() || Pasteboard::isSafeTypeForDOMToReadAndWrite(type);
+ }
+ 
+ ExceptionOr<RefPtr<DataTransferItem>> DataTransferItemList::add(Document& document, const String& data, const String& type)
+@@ -87,7 +87,7 @@ ExceptionOr<RefPtr<DataTransferItem>> DataTransferItemList::add(Document& docume
+ 
+     String lowercasedType = type.convertToASCIILowercase();
+ 
+-    if (!shouldExposeTypeInItemList(lowercasedType))
++    if (!shouldExposeTypeInItemList(dataTransfer, lowercasedType))
+         return nullptr;
+ 
+     dataTransfer->setDataFromItemList(document, lowercasedType, data);
+@@ -160,7 +160,7 @@ Vector<Ref<DataTransferItem>>& DataTransferItemList::ensureItems() const
+     Vector<Ref<DataTransferItem>> items;
+     for (auto& type : dataTransfer->typesForItemList(document)) {
+         auto lowercasedType = type.convertToASCIILowercase();
+-        if (shouldExposeTypeInItemList(lowercasedType))
++        if (shouldExposeTypeInItemList(dataTransfer, lowercasedType))
+             items.append(DataTransferItem::create(*this, lowercasedType, DataTransferItem::Kind::String));
+     }
+ 
 diff --git a/Source/WebCore/dom/Document.cpp b/Source/WebCore/dom/Document.cpp
 index 79f2bcbc106c7c43e8a971816c183dcc00610b83..ad9a1054f6810245d1176e5b260b98229e20bbe1 100644
 --- a/Source/WebCore/dom/Document.cpp
@@ -16084,6 +16219,41 @@ index a149c021fab264535bc4ca151ef4f8017943cb6a..3da3772771f5d62951c1362b22048099
      bool isTopLevelFrame = ancestorOrigins.isEmpty();
      if (isTopLevelFrame)
          return true;
+diff --git a/Source/WebCore/page/haiku/DragControllerHaiku.cpp b/Source/WebCore/page/haiku/DragControllerHaiku.cpp
+index dbf51bdb9833c3eb5c36e246d2630af6d427a072..db05fd0414c894809f72d3e5458a2e3748a1503c 100644
+--- a/Source/WebCore/page/haiku/DragControllerHaiku.cpp
++++ b/Source/WebCore/page/haiku/DragControllerHaiku.cpp
+@@ -27,8 +27,14 @@
+ #include "config.h"
+ #include "DragController.h"
+ 
++#include "DataTransfer.h"
+ #include "Document.h"
+ #include "DragData.h"
++#include "Editor.h"
++#include "Element.h"
++#include "FrameDestructionObserverInlines.h"
++#include "LocalFrameInlines.h"
++#include "NodeDocument.h"
+ #include "NotImplemented.h"
+ #include "Pasteboard.h"
+ 
+@@ -72,12 +78,12 @@ const IntSize& DragController::maxDragImageSize()
+ 
+ void DragController::cleanupAfterSystemDrag()
+ {
+-    notImplemented();
+ }
+ 
+-void DragController::declareAndWriteDragImage(DataTransfer& /*clipboard*/, Element&, const URL&, const String& /*label*/)
++void DragController::declareAndWriteDragImage(DataTransfer& dataTransfer, Element& element, const URL& url, const String& label)
+ {
+-    notImplemented();
++    if (RefPtr frame = element.document().frame())
++        frame->editor().writeImageToPasteboard(dataTransfer.pasteboard(), element, url, label);
+ }
+ 
+ } // namespace WebCore
 diff --git a/Source/WebCore/page/haiku/EventHandlerHaiku.cpp b/Source/WebCore/page/haiku/EventHandlerHaiku.cpp
 index 89f2b38d398b9fb7d5319d06bf0b918cfc569e1b..fbd1eea56e97654861c4b24b25c0da6e9f750604 100644
 --- a/Source/WebCore/page/haiku/EventHandlerHaiku.cpp
