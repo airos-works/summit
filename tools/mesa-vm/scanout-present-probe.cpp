@@ -36,14 +36,20 @@
 
 #ifndef B_DIRECT_DEVICE_PIXELS
 #	define B_DIRECT_DEVICE_PIXELS 0x00000400
-#	define DEVICE_SCALE(info) ((info)->_reserved1[0])
-#	define DRAWING_AREA(info) ((area_id)(info)->_reserved1[1])
-#	define DRAWING_BPR(info) ((int32)(info)->_reserved1[2])
-#else
-#	define DEVICE_SCALE(info) ((info)->device_scale)
-#	define DRAWING_AREA(info) ((info)->drawing_bits_area)
-#	define DRAWING_BPR(info) ((info)->drawing_bytes_per_row)
 #endif
+
+// device_scale, drawing_bits_area and drawing_bytes_per_row follow bits_area;
+// in headers from before them they are the start of _reserved1. Read by
+// position, as WebKitView.cpp does: B_DIRECT_DEVICE_PIXELS is an enumerator
+// in Window.h, not a macro, so #ifdef cannot tell the headers apart.
+static inline const uint32*
+direct_extension(const direct_buffer_info* info)
+{
+	return reinterpret_cast<const uint32*>(&info->bits_area + 1);
+}
+#define DEVICE_SCALE(info) (direct_extension(info)[0])
+#define DRAWING_AREA(info) ((area_id)direct_extension(info)[1])
+#define DRAWING_BPR(info) ((int32)direct_extension(info)[2])
 
 // Mirrors zink_haiku_present.h.
 struct summit_haiku_present {
