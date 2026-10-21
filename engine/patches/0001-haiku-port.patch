@@ -16969,7 +16969,7 @@ index f959bc4de8e956e2b96870ed1ae1b69519f1f3a5..ef147662aa3721f1a3bbb2930d17c5d1
  using PlatformCursor = void*;
  #endif
 diff --git a/Source/WebCore/platform/DragData.cpp b/Source/WebCore/platform/DragData.cpp
-index dd5c7bf82939a3d9161262012befaadd1081ee4d..4084b268e69a430a7a71759559123dfbd01b111d 100644
+index dd5c7bf82939a3d9161262012befaadd1081ee4d..4d1617347f2ef6e2496b164a20b2d511e7dd9555 100644
 --- a/Source/WebCore/platform/DragData.cpp
 +++ b/Source/WebCore/platform/DragData.cpp
 @@ -56,6 +56,21 @@ DragData::DragData(const IntPoint& clientPosition, const IntPoint& globalPositio
@@ -16994,12 +16994,13 @@ index dd5c7bf82939a3d9161262012befaadd1081ee4d..4084b268e69a430a7a71759559123dfb
  std::unique_ptr<PasteboardContext> DragData::createPasteboardContext() const
  {
      return PagePasteboardContext::create(std::optional<PageIdentifier> { m_pageID });
-@@ -64,6 +79,9 @@ std::unique_ptr<PasteboardContext> DragData::createPasteboardContext() const
+@@ -64,6 +79,10 @@ std::unique_ptr<PasteboardContext> DragData::createPasteboardContext() const
  void DragData::disallowFileAccess()
  {
      m_fileNames = { };
 +#if PLATFORM(HAIKU)
-+    m_haikuData.clear("image/png"_s);
++    for (auto type : { "image/png"_s, "image/jpeg"_s, "image/gif"_s, "image/webp"_s })
++        m_haikuData.clear(type);
 +#endif
      m_disallowFileAccess = true;
  }
@@ -46674,10 +46675,10 @@ index 0000000000000000000000000000000000000000..9a4f164ae35746049273719ea57e35a5
 +
 diff --git a/Source/WebCore/platform/haiku/DragDataHaiku.cpp b/Source/WebCore/platform/haiku/DragDataHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..308d4211d7a6852b68df9243a1ca65e95fe4aacd
+index 0000000000000000000000000000000000000000..625e0206c2b804d915a916e1f586df7a28a18a5e
 --- /dev/null
 +++ b/Source/WebCore/platform/haiku/DragDataHaiku.cpp
-@@ -0,0 +1,120 @@
+@@ -0,0 +1,129 @@
 +/*
 + * Copyright (C) 2007 Apple Inc.  All rights reserved.
 + * Copyright (C) 2007 Ryan Leavengood <leavengood@gmail.com>
@@ -46728,14 +46729,23 @@ index 0000000000000000000000000000000000000000..308d4211d7a6852b68df9243a1ca65e9
 +    return false;
 +}
 +
++static bool containsImageHaiku(const PasteboardCustomData& data)
++{
++    for (auto type : { "image/png"_s, "image/jpeg"_s, "image/gif"_s, "image/webp"_s }) {
++        if (data.readBuffer(type))
++            return true;
++    }
++    return false;
++}
++
 +bool DragData::containsFiles() const
 +{
-+    return !m_fileNames.isEmpty() || !!m_haikuData.readBuffer("image/png"_s);
++    return !m_fileNames.isEmpty() || containsImageHaiku(m_haikuData);
 +}
 +
 +unsigned DragData::numberOfFiles() const
 +{
-+    return m_fileNames.size() + !!m_haikuData.readBuffer("image/png"_s);
++    return m_fileNames.size() + containsImageHaiku(m_haikuData);
 +}
 +
 +Vector<String> DragData::asFilenames() const
@@ -46763,7 +46773,7 @@ index 0000000000000000000000000000000000000000..308d4211d7a6852b68df9243a1ca65e9
 +    if (purpose == DraggingPurpose::ForFileUpload)
 +        return containsFiles();
 +    return containsURL() || containsPlainText() || containsFiles()
-+        || !m_haikuData.readString("text/html"_s).isNull() || !!m_haikuData.readBuffer("image/png"_s);
++        || !m_haikuData.readString("text/html"_s).isNull() || containsImageHaiku(m_haikuData);
 +}
 +
 +// A file dropped where the page takes nothing opens in the tab, as in other
@@ -48404,10 +48414,10 @@ index 0000000000000000000000000000000000000000..de87da3050935c21365e9cf23bf47cf5
 +} // namespace WebCore
 diff --git a/Source/WebCore/platform/haiku/PasteboardHaiku.cpp b/Source/WebCore/platform/haiku/PasteboardHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..618efb61d504a970e5f609bcd961e32d20ed95b2
+index 0000000000000000000000000000000000000000..44d74da08537fdc403e3b963aa216c80b9ea8d98
 --- /dev/null
 +++ b/Source/WebCore/platform/haiku/PasteboardHaiku.cpp
-@@ -0,0 +1,720 @@
+@@ -0,0 +1,729 @@
 +/*
 + * Copyright (C) 2006 Zack Rusin <zack@kde.org>
 + * Copyright (C) 2007 Ryan Leavengood <leavengood@gmail.com>
@@ -48566,6 +48576,15 @@ index 0000000000000000000000000000000000000000..618efb61d504a970e5f609bcd961e32d
 +    String type;
 +    RefPtr<SharedBuffer> data;
 +};
++
++static ClipboardImage readDragImage(const PasteboardCustomData& data)
++{
++    for (auto type : { "image/png"_s, "image/jpeg"_s, "image/gif"_s, "image/webp"_s }) {
++        if (auto image = data.readBuffer(type))
++            return { type, WTF::move(image) };
++    }
++    return { };
++}
 +
 +// The clipboard's image as a file a page can take: PNG for bitmaps. Call with
 +// the clipboard locked.
@@ -48826,7 +48845,7 @@ index 0000000000000000000000000000000000000000..618efb61d504a970e5f609bcd961e32d
 +    if (m_forDragAndDrop) {
 +        if (!m_dragFileNames.isEmpty())
 +            return FileContentState::MayContainFilePaths;
-+        return m_dragData.readBuffer("image/png"_s) ? FileContentState::InMemoryImage : FileContentState::NoFileOrImageData;
++        return readDragImage(m_dragData).data ? FileContentState::InMemoryImage : FileContentState::NoFileOrImageData;
 +    }
 +    AutoClipboardLocker locker(be_clipboard);
 +    if (!locker.isLocked())
@@ -48878,9 +48897,9 @@ index 0000000000000000000000000000000000000000..618efb61d504a970e5f609bcd961e32d
 +            if (RefPtr fragment = createFragmentFromMarkup(*frame.document(), html, String(), { }))
 +                return fragment;
 +        }
-+        if (auto image = m_dragData.readBuffer("image/png"_s); image && frame.document()) {
++        if (auto image = readDragImage(m_dragData); image.data && frame.document()) {
 +            Ref document = *frame.document();
-+            auto url = DOMURL::createObjectURL(document, Blob::create(document.ptr(), image->extractData(), "image/png"_s));
++            auto url = DOMURL::createObjectURL(document, Blob::create(document.ptr(), image.data->extractData(), image.type));
 +            return createFragmentForImageAndURL(document, url, { });
 +        }
 +        if (allowPlainText) {
@@ -49106,9 +49125,9 @@ index 0000000000000000000000000000000000000000..618efb61d504a970e5f609bcd961e32d
 +            if (!index || *index == i)
 +                reader.readFilename(m_dragFileNames[i]);
 +        }
-+        if ((!index || *index == m_dragFileNames.size()) && reader.shouldReadBuffer("image/png"_s)) {
-+            if (auto image = m_dragData.readBuffer("image/png"_s))
-+                reader.readBuffer("image.png"_s, "image/png"_s, image.releaseNonNull());
++        if (!index || *index == m_dragFileNames.size()) {
++            if (auto image = readDragImage(m_dragData); image.data && reader.shouldReadBuffer(image.type))
++                reader.readBuffer(fileNameForImageType(image.type), image.type, image.data.releaseNonNull());
 +        }
 +        return;
 +    }
@@ -83264,10 +83283,10 @@ index 0000000000000000000000000000000000000000..d28a6cad6339adf79b155cf974e85bfd
 +
 diff --git a/Source/WebKit/UIProcess/API/haiku/WebKitView.cpp b/Source/WebKit/UIProcess/API/haiku/WebKitView.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..8d4bbccb1c1eb369778aa94a7a710f47eaa94ec9
+index 0000000000000000000000000000000000000000..97b0ea235303cfe1c5c402c07338dae5ab72ff67
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/API/haiku/WebKitView.cpp
-@@ -0,0 +1,1315 @@
+@@ -0,0 +1,1394 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#include "config.h"
@@ -83802,8 +83821,10 @@ index 0000000000000000000000000000000000000000..8d4bbccb1c1eb369778aa94a7a710f47
 +{
 +    if (m_status != B_OK)
 +        return;
-+    if (what == viewLoadHaiku || what == viewBackHaiku || what == viewForwardHaiku || what == viewReloadHaiku)
++    if (what == viewLoadHaiku || what == viewBackHaiku || what == viewForwardHaiku || what == viewReloadHaiku) {
 +        ++m_state->findRequestIdentifier;
++        ++m_state->nativeDropRequest;
++    }
 +    BMessage message(what);
 +    if (url)
 +        message.AddString("url", url);
@@ -83999,6 +84020,7 @@ index 0000000000000000000000000000000000000000..8d4bbccb1c1eb369778aa94a7a710f47
 +
 +void BWebKitView::DetachedFromWindow()
 +{
++    ++m_state->nativeDropRequest;
 +    FinishDrag(0, ConvertToScreen(BPoint()));
 +    m_state->sourceDragData = nullptr;
 +    if (auto* filter = std::exchange(m_state->windowFilter, nullptr)) {
@@ -84177,6 +84199,7 @@ index 0000000000000000000000000000000000000000..8d4bbccb1c1eb369778aa94a7a710f47
 +
 +void BWebKitView::MouseDown(BPoint point)
 +{
++    ++m_state->nativeDropRequest;
 +    MakeFocus();
 +    SetMouseEventMask(B_POINTER_EVENTS, B_NO_POINTER_HISTORY);
 +    if (Window() && Window()->CurrentMessage())
@@ -84191,15 +84214,33 @@ index 0000000000000000000000000000000000000000..8d4bbccb1c1eb369778aa94a7a710f47
 +        SendInput(*Window()->CurrentMessage(), point);
 +}
 +
-+static bool isPageDragHaiku(const BMessage& message)
++static bool hasDirectDragDataHaiku(const BMessage& message)
 +{
 +    if (message.HasRef("refs") || message.HasData("org.webkit.drag-data", B_RAW_TYPE))
 +        return true;
-+    for (auto* type : { "text/plain", "text/html", "text/uri-list", "image/png" }) {
++    for (auto* type : { "text/plain", "text/html", "text/uri-list", "image/png", "image/jpeg", "image/gif", "image/webp" }) {
 +        if (message.HasData(type, B_MIME_TYPE))
 +            return true;
 +    }
 +    return false;
++}
++
++// A native image editor can offer formats without including any bytes yet.
++static const char* negotiatedDragTypeHaiku(const BMessage& message)
++{
++    for (auto* preferred : { "image/png", "image/jpeg", "image/gif", "image/webp", "text/html", "text/uri-list", "text/plain" }) {
++        const char* offered = nullptr;
++        for (int32 index = 0; message.FindString("be:types", index, &offered) == B_OK; ++index) {
++            if (!strcmp(preferred, offered))
++                return preferred;
++        }
++    }
++    return nullptr;
++}
++
++static bool isPageDragHaiku(const BMessage& message)
++{
++    return hasDirectDragDataHaiku(message) || negotiatedDragTypeHaiku(message);
 +}
 +
 +static uint64 dragSessionHaiku(const BMessage& message)
@@ -84309,8 +84350,11 @@ index 0000000000000000000000000000000000000000..8d4bbccb1c1eb369778aa94a7a710f47
 +        if (transit == B_EXITED_VIEW || transit == B_OUTSIDE_VIEW) {
 +            if (m_state->dragActive)
 +                SendDrag(*dragMessage, point, "exited");
-+        } else
++        } else {
++            if (!m_state->dragActive)
++                ++m_state->nativeDropRequest;
 +            SendDrag(*dragMessage, point, m_state->dragActive ? "updated" : "entered");
++        }
 +        return;
 +    }
 +    if (m_state->dragActive)
@@ -84341,11 +84385,15 @@ index 0000000000000000000000000000000000000000..8d4bbccb1c1eb369778aa94a7a710f47
 +            if (entry.GetPath(&path) == B_OK)
 +                message.AddString("path", path.Path());
 +        }
++        if (!hasDirectDragDataHaiku(drag)) {
++            if (auto* type = negotiatedDragTypeHaiku(drag))
++                message.AddString("offeredType", type);
++        }
 +        const void* data = nullptr;
 +        ssize_t length = 0;
 +        if (drag.FindData("org.webkit.drag-data", B_RAW_TYPE, &data, &length) == B_OK && length > 0 && length <= 1024 * 1024)
 +            message.AddData("org.webkit.drag-data", B_RAW_TYPE, data, length);
-+        for (auto* type : { "text/plain", "text/html", "text/uri-list", "image/png" }) {
++        for (auto* type : { "text/plain", "text/html", "text/uri-list", "image/png", "image/jpeg", "image/gif", "image/webp" }) {
 +            if (drag.FindData(type, B_MIME_TYPE, &data, &length) == B_OK && length >= 0 && length <= 16 * 1024 * 1024)
 +                message.AddData(type, B_MIME_TYPE, data, length);
 +        }
@@ -84415,10 +84463,60 @@ index 0000000000000000000000000000000000000000..8d4bbccb1c1eb369778aa94a7a710f47
 +void BWebKitView::MessageReceived(BMessage* message)
 +{
 +    if (message->WasDropped() && isPageDragHaiku(*message)) {
++        auto requestID = ++m_state->nativeDropRequest;
++        if (!hasDirectDragDataHaiku(*message)) {
++            if (auto* type = negotiatedDragTypeHaiku(*message)) {
++                BMessage request(B_COPY_TARGET);
++                request.AddString("be:types", type);
++                request.AddUInt64("webkit:drop-request", requestID);
++                request.AddPoint("webkit:drop-screen", message->DropPoint());
++                BMessage origin;
++                if (message->FindMessage("be:originator-data", &origin) == B_OK)
++                    request.AddMessage("be:originator-data", &origin);
++                // Reply asynchronously: encoding a large image must not block
++                // the native window. BMessage::Previous carries our request.
++                m_state->dragActive = false;
++                if (message->SendReply(&request, this, 0) == B_OK) {
++                    BMessage timeout(viewNegotiatedDropTimeoutHaiku);
++                    timeout.AddUInt64("request", requestID);
++                    BMessageRunner::StartSending(BMessenger(this), &timeout, 5000000, 1);
++                } else
++                    SendDrag(BMessage(), ConvertFromScreen(message->DropPoint()), "exited");
++                return;
++            }
++        }
 +        SendDrag(*message, ConvertFromScreen(message->DropPoint()), "drop");
 +        return;
 +    }
 +    switch (message->what) {
++    case B_MIME_DATA: {
++        const BMessage* request = message->Previous();
++        auto requestID = request ? request->GetUInt64("webkit:drop-request", 0) : 0;
++        if (!requestID || requestID != m_state->nativeDropRequest || m_state->closed
++            || request->what != B_COPY_TARGET || !negotiatedDragTypeHaiku(*request))
++            return;
++        ++m_state->nativeDropRequest;
++        const char* type = request->GetString("be:types", "");
++        BPoint point = ConvertFromScreen(request->GetPoint("webkit:drop-screen", BPoint()));
++        const void* bytes = nullptr;
++        ssize_t length = 0;
++        const ssize_t limit = !strncmp(type, "image/", 6) ? 16 * 1024 * 1024 : 1024 * 1024;
++        if (message->FindData(type, B_MIME_TYPE, &bytes, &length) != B_OK || length < 0 || length > limit) {
++            SendDrag(BMessage(), point, "exited");
++            return;
++        }
++        BMessage data;
++        data.AddData(type, B_MIME_TYPE, bytes, length);
++        data.AddUInt32("operations", 1); // Native negotiated copy.
++        SendDrag(data, point, "drop");
++        return;
++    }
++    case viewNegotiatedDropTimeoutHaiku:
++        if (message->GetUInt64("request", 0) == m_state->nativeDropRequest) {
++            ++m_state->nativeDropRequest;
++            SendDrag(BMessage(), BPoint(), "exited");
++        }
++        return;
 +    case viewStartDragHaiku:
 +        StartDrag(*message);
 +        return;
@@ -116113,10 +116211,10 @@ index 0000000000000000000000000000000000000000..c9a119d02f85b7c5ad8fe9153bfc9604
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/WebView.cpp b/Source/WebKit/UIProcess/haiku/WebView.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..903168d5b173b422483e4db61d46807ba748249c
+index 0000000000000000000000000000000000000000..2769e642788bc59bc663d7311a72bdd2317e8679
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/WebView.cpp
-@@ -0,0 +1,3038 @@
+@@ -0,0 +1,3052 @@
 +/*
 + * Copyright (C) 2013 Intel Corporation. All rights reserved.
 + *
@@ -116392,6 +116490,7 @@ index 0000000000000000000000000000000000000000..903168d5b173b422483e4db61d46807b
 +    if (state->closed)
 +        return;
 +    ++state->navigationGeneration;
++    ++state->nativeDropRequest;
 +    if (state->closeRequestApproved || state->closeRequestPending) {
 +        state->closeApprovalInvalidated = true;
 +        state->closeRequestApproved = false;
@@ -118495,8 +118594,20 @@ index 0000000000000000000000000000000000000000..903168d5b173b422483e4db61d46807b
 +                if (message.FindData(type, B_MIME_TYPE, &bytes, &length) == B_OK && length >= 0 && length <= 1024 * 1024)
 +                    m_dragData.writeString(String::fromLatin1(type), String::fromUTF8(std::span(static_cast<const char*>(bytes), length)));
 +            }
-+            if (message.FindData("image/png", B_MIME_TYPE, &bytes, &length) == B_OK && length > 0 && length <= 16 * 1024 * 1024)
-+                m_dragData.writeData("image/png"_s, WebCore::SharedBuffer::create(std::span(static_cast<const uint8_t*>(bytes), length)));
++            for (auto* type : { "image/png", "image/jpeg", "image/gif", "image/webp" }) {
++                if (message.FindData(type, B_MIME_TYPE, &bytes, &length) == B_OK && length > 0 && length <= 16 * 1024 * 1024)
++                    m_dragData.writeData(String::fromLatin1(type), WebCore::SharedBuffer::create(std::span(static_cast<const uint8_t*>(bytes), length)));
++            }
++            // While a negotiated drag hovers, only its types are available.
++            // WebCore's protected drag data store keeps these placeholders
++            // unreadable until the actual MIME bytes arrive for the drop.
++            if (!strcmp(phase, "entered")) {
++                const char* offered = message.GetString("offeredType", "");
++                if (!strcmp(offered, "image/png") || !strcmp(offered, "image/jpeg") || !strcmp(offered, "image/gif") || !strcmp(offered, "image/webp"))
++                    m_dragData.writeData(String::fromLatin1(offered), WebCore::SharedBuffer::create());
++                else if (!strcmp(offered, "text/plain") || !strcmp(offered, "text/html") || !strcmp(offered, "text/uri-list"))
++                    m_dragData.writeString(String::fromLatin1(offered), emptyString());
++            }
 +            m_dragOperations = OptionSet<WebCore::DragOperation>::fromRaw(message.GetUInt32("operations", static_cast<uint32_t>(WebCore::DragOperation::Copy)));
 +        }
 +        WebCore::DragData dragData(WebCore::IntPoint(local.x, local.y), WebCore::IntPoint(screen.x, screen.y), m_dragFiles, m_dragData,
@@ -118742,6 +118853,7 @@ index 0000000000000000000000000000000000000000..903168d5b173b422483e4db61d46807b
 +    BMessage dismissDialogs(javaScriptDialogsCancelHaiku);
 +    sendToView(dismissDialogs);
 +    ++m_state->findRequestIdentifier;
++    ++m_state->nativeDropRequest;
 +    m_undoController.clearAllEditCommands();
 +    if (m_presentationCallback)
 +        std::exchange(m_presentationCallback, { })();
@@ -119894,10 +120006,10 @@ index 0000000000000000000000000000000000000000..00f921f7cf81d4eee3659eb822edd264
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/WebViewStateHaiku.h b/Source/WebKit/UIProcess/haiku/WebViewStateHaiku.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..950b323b01f218ed97dca11fb1b7bca3c5c12daf
+index 0000000000000000000000000000000000000000..ec08aea37eda2e2a1e0ebba8de39189ff843f728
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/WebViewStateHaiku.h
-@@ -0,0 +1,214 @@
+@@ -0,0 +1,217 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#pragma once
@@ -119943,6 +120055,7 @@ index 0000000000000000000000000000000000000000..950b323b01f218ed97dca11fb1b7bca3
 +    // "drop"), local, screen, repeated path (with entered and drop).
 +    viewDragHaiku = 'wvdg', viewStartDragHaiku = 'wvds',
 +    viewDragStartedHaiku = 'wvda', viewDragEndedHaiku = 'wvdz',
++    viewNegotiatedDropTimeoutHaiku = 'wdnt',
 +    viewNativeDragTickHaiku = 'wdtk', viewNativeDragPendingHaiku = 'wdpn', viewNativeDragReplyHaiku = 'wdrp',
 +    // Presenting straight into the screen (DirectPresentHaiku.h): the view
 +    // has a target for its page, or the page needs presenting again in full.
@@ -119982,6 +120095,8 @@ index 0000000000000000000000000000000000000000..950b323b01f218ed97dca11fb1b7bca3
 +    std::atomic<bool> closed { false };
 +    // A file drag from another application is over the view (window thread).
 +    bool dragActive { false };
++    // Invalidated by navigation, another drop, a click, or detaching the view.
++    std::atomic<uint64_t> nativeDropRequest { 0 };
 +    // Source session: only the native window thread touches these fields.
 +    uint64_t sourceDragSession { 0 };
 +    bool sourceDragActive { false };
