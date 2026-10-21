@@ -403,6 +403,35 @@ requires a new context after a reset. Native probe output is retained at
 `.vm/issue100/recovery/egl-lifecycle-native.log`. This is prerequisite evidence;
 it does not qualify renderer recovery or close #100.
 
+### Skia teardown after a failed bind
+
+`tools/bench/skia-context-teardown.cpp` exercises the engine's actual Skia
+context destructor. Build it from the engine's SDK environment (including its
+private-header `CPATH`) with:
+
+```sh
+python3 tools/bench/build-skia-context-teardown.py /path/to/engine-build /path/to/deps /tmp/skia-context-teardown
+```
+
+Run the executable on Haiku with the candidate's `LIBRARY_PATH`, Mesa variables
+and `SUMMIT_SKIA_GL_CONTEXT=1`, first with `healthy`, then with `failed-bind`.
+The probe creates a real Skia GPU surface and checks exact RGBA
+(204, 51, 102, 255). The failure case destroys only its own EGL context and
+confirms that WebCore's next bind fails with `EGL_BAD_CONTEXT`. It then calls
+`PlatformDisplay::clearGLContexts()`, retaining the surface until after that
+call to cover delayed resource destruction.
+
+The probe intercepts nine GL cleanup/flush entry points before Skia assembles
+its GL interface. During teardown it counts and suppresses those calls to avoid
+crashing in libepoxy's lazy resolver. Healthy teardown must request cleanup;
+failed-bind teardown must abandon the context without those calls. This checks
+Skia's response to a real bind failure, not a driver reset or compositor recovery.
+
+On the pre-fix `5b804d7` native bundle, the healthy control passes with 14
+observed cleanup calls. The failed-bind test deliberately fails with the same
+14 calls, reproducing cleanup after the context can no longer bind. Logs are
+retained at `.vm/issue100/recovery/skia-baseline-final-{healthy,failed-bind}.log`.
+
 Evidence, exact source/binary hashes, commands, unsuccessful trials, PNGs and
 terminal driver state are pinned in
 `/mnt/HaikuWork/x399/evidence/wx5100/mesa-native/summit-recovery-manifest.json`.
