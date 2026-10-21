@@ -124,10 +124,11 @@ summit_webkit-1.10.0-3) and uninstall summit_webkitlegacy.
 - `BWebFrame`'s document access (`InnerText()`, `AsMarkup()`,
   `FrameSource()`) and the frame tree.
 - Web Inspector for BWebView programs (`SetInspectorView()` is kept, unused).
-- Certificate questions now reach the inherited `BWebWindow` dialog, with
-  native airOS acceptance. Installed stock WebPositive acceptance still
-  needs a matching engine containing `ContinueAfterCertificateError()`.
-  HTTP NTLM, proxy requests and persistent Remember acceptance remain untested. The legacy listener
+- HTTP NTLM, proxy requests and persistent Remember acceptance remain untested.
+  Certificate questions pass native airOS lifetime checks and two complete
+  installed stock WebPositive UI runs; an earlier helper shutdown failure
+  remains unexplained. See [certificate acceptance](legacy-certificates-2026-10-22.md).
+  The legacy listener
   protocol cannot dismiss a host-owned prompt when a request is withdrawn;
   its late response is ignored.
 - WebPositive's cookie window still reads its own (now unused) cookie jar;

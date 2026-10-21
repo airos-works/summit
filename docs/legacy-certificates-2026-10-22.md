@@ -100,6 +100,58 @@ log interval. It records process-group cleanup separately from assertion results
 The [machine-readable evidence](legacy-certificates-2026-10-22.json) includes
 the exact builds, complete native reports and logs, and retained failures.
 
+## Installed stock WebPositive
+
+The unchanged `/boot/system/apps/WebPositive` on stock R1/beta6
+`hrev59866+79` also passes the certificate UI checks. It loads the complete
+published stock engine from `958ec59` (`20261021.2134`), with the matching
+shim cross-compiled from that commit using the stock SDK. The engine is
+extracted into an isolated directory; installed packages are unchanged.
+Loaded-image hashes confirm that WebPositive uses the selected engine and shim.
+
+`tools/test-legacy-webpositive-certificates.py` drives the actual application's
+native dialog and checks its URL, subject and certificate fingerprint. Stop
+prevents the HTTP request; Continue loads the requested document, executes
+JavaScript and paints the expected blue pixels in the real browser view.
+Session reuse needs no new prompt. A replacement certificate and a different
+hostname each require separate approval before any HTTP request is sent.
+
+| Run | Passed checks | Input/runtime hashes | Saved tabs |
+| --- | ---: | ---: | --- |
+| `ui-run-2` | 21 | 76 | Temporarily set aside and restored byte for byte |
+| `ui-run-3` | 21 | 105 | Normal WebPositive session restoration |
+
+Both runs exit zero, drain all owned helpers without forced cleanup, retain
+unchanged input/runtime hashes and have complete native crash intervals with
+no new events. These use the owned VM's normal profile. The optional
+`--fresh-session` mode preserves and restores only its `Session` file;
+WebPositive still writes its ordinary history and settings. The subsequent
+normal-session run checks shutdown with restored tabs too.
+
+The first run passed all 20 dialog/rendering checks but failed the final
+shutdown check: WebPositive exited zero while one owned process remained
+after 15 seconds and required cleanup. Its identity was not captured, and
+the initial saved-session state was not preserved. The runner now records
+remaining processes before cleanup. The two successful runs do not establish
+the cause or a fix for that earlier failure; it remains in the evidence.
+
+To repeat in an owned stock VM, build the shim and helpers with the matching
+stock SDK and run:
+
+```sh
+python3 tools/test-legacy-webpositive-certificates.py \
+  --library PATH/libWebKitLegacy.so.1 --bundle PATH/lib/summit-webkit \
+  --ui-helper PATH/LegacyWebPositiveUITests \
+  --images-helper PATH/NativeLoadedImages \
+  --egl-vendor PATH/egl-vendor.json --output NEW_RESULT_DIRECTORY
+```
+
+The EGL vendor JSON must select the isolated bundle's Mesa library. The
+runner refuses to start if WebPositive is already running. For these tests,
+the shim's RPATH selects the isolated engine; no preload is used. The stock
+build, package/source audits, complete reports, logs and first failure are in
+the `installed_stock_webpositive` section of the machine-readable evidence.
+
 ## Retained failures and limits
 
 - Engine attempt 1 selected the installed older engine through the probe's
@@ -113,10 +165,10 @@ the exact builds, complete native reports and logs, and retained failures.
   native process because its harness unnecessarily required an installed
   WebPositive executable. The harness now requires it only for the actual
   WebPositive UI cases; the lifecycle probe uses its selected isolated bundle.
-- Native acceptance uses the inherited `BWebWindow` dialog in a test host;
-  it is not installed WebPositive acceptance. Stock Haiku still needs a full
-  matching engine and shim before that verification. airOS engine libraries
-  must not be substituted into a stock Haiku installation.
+- The airOS lifetime checks use the inherited `BWebWindow` dialog in a test
+  host; the stock checks above use installed WebPositive. These are separate
+  matching builds. airOS engine libraries must not be substituted into a
+  stock Haiku installation.
 - The old listener protocol has no withdrawal message that can close an
   already displayed host-owned dialog. Its late response is ignored. Trust
   is session-only; this change does not add persistent legacy exceptions.
