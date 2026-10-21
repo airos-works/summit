@@ -1096,7 +1096,9 @@ public:
             PostMessage(B_QUIT_REQUESTED);
             return false;
         }
-        if (BWebKitHasPendingNativeUI()) {
+        // load_image() workers still need to resume or cancel their helpers
+        // and deliver completion on this loop after the context is released.
+        if (BWebKitHasPendingNativeUI() || BWebKitHasPendingProcessLaunches()) {
             fWaitingForNativeUI = true;
             fNativeUIExitReady = false;
             SetPulseRate(100000); // Native pulse intervals use 100 ms granularity.

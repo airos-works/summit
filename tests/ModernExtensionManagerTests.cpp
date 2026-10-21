@@ -396,6 +396,24 @@ int main(int argc, char** argv)
                 popup(6);
             }
             Button(manager, "extension-remove");
+            BMessenger confirmation;
+            Require(Wait([&] { confirmation = NamedWindow(app, "Remove extension"); return confirmation.IsValid(); }),
+                "removal asks for confirmation before deleting extension data");
+            const auto beforeRemoval = catalog();
+            Require(Entries(manager) == 1 && beforeRemoval["extensions"].size() == 1,
+                "opening removal confirmation preserves the installed extension");
+            auto cancel = View(confirmation, "_b0_");
+            Require(String(Property(cancel, "Label"), "result") == "Cancel", "native removal dialog has a Cancel button");
+            Key(cancel, " ", 0x5e);
+            Require(Wait([&] { return !confirmation.IsValid(); }) && Entries(manager) == 1 && catalog() == beforeRemoval,
+                "cancelling removal preserves the extension and saved installation");
+            Button(manager, "extension-remove");
+            Require(Wait([&] { confirmation = NamedWindow(app, "Remove extension"); return confirmation.IsValid(); }),
+                "removal can be confirmed after cancellation");
+            auto remove = View(confirmation, "_b1_");
+            Require(String(Property(remove, "Label"), "result") == "Remove", "native removal dialog has a Remove button");
+            Key(remove, " ", 0x5e);
+            Require(Wait([&] { return !confirmation.IsValid(); }), "confirmed removal dismisses its native dialog");
             Require(Wait([&] { auto state = catalog(); return Entries(manager) == 0 && Enabled(manager, "extension-add")
                 && state.is_object() && state["extensions"].empty(); }), "remove unloads extension and removes its startup record");
             if (actions) Require(Wait([&] { return !ActionPopup(app).IsValid() && !View(browser, actionName.c_str()).IsValid(); }),

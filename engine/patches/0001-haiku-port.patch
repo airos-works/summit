@@ -84880,10 +84880,10 @@ index 0000000000000000000000000000000000000000..d28a6cad6339adf79b155cf974e85bfd
 +
 diff --git a/Source/WebKit/UIProcess/API/haiku/WebKitView.cpp b/Source/WebKit/UIProcess/API/haiku/WebKitView.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..97b0ea235303cfe1c5c402c07338dae5ab72ff67
+index 0000000000000000000000000000000000000000..bab9b823ed44a3891293db9a296efdce59d63d7b
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/API/haiku/WebKitView.cpp
-@@ -0,0 +1,1394 @@
+@@ -0,0 +1,1400 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#include "config.h"
@@ -84900,6 +84900,7 @@ index 0000000000000000000000000000000000000000..97b0ea235303cfe1c5c402c07338dae5
 +#include <Entry.h>
 +
 +#include "WebKit2Initialize.h"
++#include "haiku/HaikuProcess.h"
 +#include "JavaScriptDialogHaiku.h"
 +#include "NativeSelectPopupHaiku.h"
 +#include "NativeExtensionPopupHaiku.h"
@@ -85042,6 +85043,11 @@ index 0000000000000000000000000000000000000000..97b0ea235303cfe1c5c402c07338dae5
 +bool BWebKitHasPendingNativeUI()
 +{
 +    return JavaScriptDialogHaiku::activeCount() || NativeSelectPopupHaiku::activeCount() || NativeExtensionPopupHaiku::activeCount() || NativeDataListSuggestionsHaiku::activeCount();
++}
++
++bool BWebKitHasPendingProcessLaunches()
++{
++    return webKitInitializedHaiku && hasPendingProcessLaunchesHaiku();
 +}
 +
 +// Presenting pages straight into the screen (DirectPresentHaiku.h). A direct
@@ -86280,10 +86286,10 @@ index 0000000000000000000000000000000000000000..97b0ea235303cfe1c5c402c07338dae5
 +}
 diff --git a/Source/WebKit/UIProcess/API/haiku/WebKitView.h b/Source/WebKit/UIProcess/API/haiku/WebKitView.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..c79b37e759fa9c89c54ab273402a417a756a08c5
+index 0000000000000000000000000000000000000000..d426994f3c5efa7d227e3657c23278757f88da2e
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/API/haiku/WebKitView.h
-@@ -0,0 +1,394 @@
+@@ -0,0 +1,398 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#pragma once
@@ -86310,6 +86316,10 @@ index 0000000000000000000000000000000000000000..c79b37e759fa9c89c54ab273402a417a
 +// observing false, queue one final application turn to drain completions that
 +// native UI has already submitted.
 +WK_EXPORT bool BWebKitHasPendingNativeUI();
++// After releasing the last context, keep the application loop running while
++// helper launches finish. Exiting during load_image() strands suspended teams.
++// Query on the application thread, alongside BWebKitHasPendingNativeUI().
++WK_EXPORT bool BWebKitHasPendingProcessLaunches();
 +// Frame buffer pixels per logical pixel of the screen (2 on 4K monitors at
 +// 200%). Bitmaps this many times their logical size, drawn into a logical
 +// rectangle, reach the screen pixel for pixel. Any thread; cached for a second.
@@ -108726,10 +108736,10 @@ index 4cd2a109f24ab7eabd414fc8c04c1cf5594f73ae..196bc5de3a3bd3d2efecbbe36e62e10a
      ReadWrite,
 diff --git a/Source/WebKit/UIProcess/Launcher/haiku/HaikuProcess.h b/Source/WebKit/UIProcess/Launcher/haiku/HaikuProcess.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..8a418c283373b3ad30d46aea00e6d191c08b3d82
+index 0000000000000000000000000000000000000000..8e3594f13706deab22502e0d02692457760d1dbd
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Launcher/haiku/HaikuProcess.h
-@@ -0,0 +1,91 @@
+@@ -0,0 +1,95 @@
 +/*
 + * Copyright (c) 2026 KunanyiOS contributors
 + * SPDX-License-Identifier: MIT
@@ -108757,6 +108767,10 @@ index 0000000000000000000000000000000000000000..8a418c283373b3ad30d46aea00e6d191
 +    pid_t process { 0 };
 +    int error { 0 };
 +};
++
++// Main-thread query; includes delivery of the launch completion. An embedder
++// must keep its application loop running until pending launches are drained.
++bool hasPendingProcessLaunchesHaiku();
 +
 +// Match AuxiliaryProcessMainCommon's process-identifier/socket argument pair.
 +// File descriptors owned by the caller must have FD_CLOEXEC unless deliberately
@@ -108823,10 +108837,10 @@ index 0000000000000000000000000000000000000000..8a418c283373b3ad30d46aea00e6d191
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/Launcher/haiku/ProcessLauncherHaiku.cpp b/Source/WebKit/UIProcess/Launcher/haiku/ProcessLauncherHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..9dbcac6b63cd17dcce91b7d2c924c849ee33d126
+index 0000000000000000000000000000000000000000..3c998940e35f7fc93650844cc07553dfae952ee0
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Launcher/haiku/ProcessLauncherHaiku.cpp
-@@ -0,0 +1,247 @@
+@@ -0,0 +1,262 @@
 +/*
 + *  Copyright (C) 2019 Haiku, Inc.
 + *
@@ -108877,6 +108891,17 @@ index 0000000000000000000000000000000000000000..9dbcac6b63cd17dcce91b7d2c924c849
 +using namespace WebCore;
 +
 +namespace WebKit {
++
++// Only the main run loop reads or changes this count. A load_image() worker
++// must finish resuming (or cancelling) its child before the application exits;
++// otherwise Haiku leaves the child's main thread suspended indefinitely.
++static unsigned pendingProcessLaunches;
++
++bool hasPendingProcessLaunchesHaiku()
++{
++    ASSERT(RunLoop::isMain());
++    return pendingProcessLaunches;
++}
 +
 +// Haiku starts programs with 256 descriptors. A web process holds two per
 +// frame buffer besides its IPC sockets and font files, and the network
@@ -109003,6 +109028,7 @@ index 0000000000000000000000000000000000000000..9dbcac6b63cd17dcce91b7d2c924c849
 +
 +void ProcessLauncher::launchProcess()
 +{
++    ASSERT(RunLoop::isMain());
 +    raiseFileDescriptorLimit();
 +    static std::once_flag abandonedHelpersOnce;
 +    std::call_once(abandonedHelpersOnce, [] {
@@ -109033,6 +109059,7 @@ index 0000000000000000000000000000000000000000..9dbcac6b63cd17dcce91b7d2c924c849
 +    // load_image() returns once the new team has loaded its libraries, a
 +    // third of a second for a web process: not on the main thread, and not
 +    // one launch after another.
++    ++pendingProcessLaunches;
 +    Thread::create("WebKit process launcher"_s, [protectedThis = Ref { *this }, executable = executable.utf8(), processIdentifier = m_launchOptions.processIdentifier.toUInt64(),
 +        failForTesting = m_launchOptions.shouldMakeProcessLaunchFailForTesting, client = WTF::move(sockets.client), server = WTF::move(sockets.server),
 +        arguments = WTF::move(arguments)] mutable {
@@ -109047,6 +109074,7 @@ index 0000000000000000000000000000000000000000..9dbcac6b63cd17dcce91b7d2c924c849
 +        if (result.error) {
 +            RunLoop::mainSingleton().dispatch([protectedThis = WTF::move(protectedThis)] {
 +                protectedThis->didFinishLaunchingProcess(0, { });
++                --pendingProcessLaunches;
 +            });
 +            return;
 +        }
@@ -109058,6 +109086,7 @@ index 0000000000000000000000000000000000000000..9dbcac6b63cd17dcce91b7d2c924c849
 +            if (!protectedThis->m_client)
 +                kill(process, SIGKILL);
 +            protectedThis->didFinishLaunchingProcess(process, IPC::Connection::Identifier { WTF::move(server) });
++            --pendingProcessLaunches;
 +        });
 +    })->detach();
 +}
