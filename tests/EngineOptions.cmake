@@ -18,6 +18,7 @@ set(required
     ENABLE_WEB_AUTHN            # passkeys
     ENABLE_NOTIFICATIONS
     ENABLE_REMOTE_INSPECTOR     # Developer Tools and the MCP page tools
+    ENABLE_RESOURCE_USAGE       # Inspector CPU and memory timelines
 )
 if(NOT EXISTS "${INIT_CACHE}")
     message(FATAL_ERROR "no init cache at '${INIT_CACHE}'")

@@ -153,6 +153,22 @@ index 0c61f573f90d0021fa23f0c092ac2e67deb960da..e732cadbfc392cdcda6fbd4c98b3e2d6
  
              previousEntryFrame = currentEntryFrame;
              previousEntryFrameStackTraceInsertPos = results.size();
+diff --git a/Source/JavaScriptCore/jit/ExecutableAllocator.h b/Source/JavaScriptCore/jit/ExecutableAllocator.h
+index 0dcf47f27f50f561ebad7dc65ba6e910c7b7f450..18aa4e44ec05b9d59053a30f717b32107273fd29 100644
+--- a/Source/JavaScriptCore/jit/ExecutableAllocator.h
++++ b/Source/JavaScriptCore/jit/ExecutableAllocator.h
+@@ -347,9 +347,9 @@ public:
+ 
+     bool isValidExecutableMemory(const AbstractLocker&, void* address);
+ 
+-    static size_t committedByteCount();
++    JS_EXPORT_PRIVATE static size_t committedByteCount();
+ 
+-    Lock& getLock() const;
++    JS_EXPORT_PRIVATE Lock& getLock() const;
+ 
+ #if ENABLE(MPROTECT_RX_TO_RWX)
+     void startWriting(const void* start, size_t sizeInBytes);
 diff --git a/Source/JavaScriptCore/offlineasm/arm64.rb b/Source/JavaScriptCore/offlineasm/arm64.rb
 index 53334dff39c8aead44bedf21d3fdf35c57e81986..59d05fffafbfd279d6d03086331df450f4585c22 100644
 --- a/Source/JavaScriptCore/offlineasm/arm64.rb
@@ -3630,7 +3646,7 @@ index 9c73a375b327ba6a86c1454d3a8d7efcbdf92cfe..8f535e07936fff38a590591e1be2c712
  #define ENABLE_SCROLLING_THREAD 0
  #endif
 diff --git a/Source/WTF/wtf/PlatformHaiku.cmake b/Source/WTF/wtf/PlatformHaiku.cmake
-index c466c25cf60489517be9b9bcffe952ae0622261e..106ad25cb7a8b976f488bfdf9d473b346aeb7944 100644
+index c466c25cf60489517be9b9bcffe952ae0622261e..7272fa366d9997f36e768021bb073dbc57949f5e 100644
 --- a/Source/WTF/wtf/PlatformHaiku.cmake
 +++ b/Source/WTF/wtf/PlatformHaiku.cmake
 @@ -6,6 +6,8 @@ list(APPEND WTF_SOURCES
@@ -3642,17 +3658,18 @@ index c466c25cf60489517be9b9bcffe952ae0622261e..106ad25cb7a8b976f488bfdf9d473b34
  
      posix/CPUTimePOSIX.cpp
      posix/FileHandlePOSIX.cpp
-@@ -24,6 +26,9 @@ list(APPEND WTF_SOURCES
+@@ -24,6 +26,10 @@ list(APPEND WTF_SOURCES
  )
  
  list(APPEND WTF_PUBLIC_HEADERS
++    haiku/CurrentProcessMemoryStatus.h
 +    haiku/ProcessPriorityHaiku.h
 +    haiku/RunLoopHaiku.h
 +
      unix/UnixFileDescriptor.h
  )
  
-@@ -38,4 +43,3 @@ list(APPEND WTF_INCLUDE_DIRECTORIES
+@@ -38,4 +44,3 @@ list(APPEND WTF_INCLUDE_DIRECTORIES
  )
  
  add_definitions(-D_DEFAULT_SOURCE)
@@ -3815,6 +3832,41 @@ index cd2186c7e61118e7eb6da2ea24d9c501700bb0d7..346d7f8cd24069833fe0fa7a4cf3b14d
      GTKWPEPortRange = 20000,
  
      LayerTreeHostRenderingUpdateStart,
+diff --git a/Source/WTF/wtf/Threading.h b/Source/WTF/wtf/Threading.h
+index 94d2c4b11dcf5ad50ddb06306ce1fa29fbbc858e..a4bf8c2da2131ddc336fd69959066745472c1e6f 100644
+--- a/Source/WTF/wtf/Threading.h
++++ b/Source/WTF/wtf/Threading.h
+@@ -198,7 +198,7 @@ public:
+     WTF_EXPORT_PRIVATE void barrierInstructionCache();
+ 
+ #if USE(PTHREADS)
+-#if OS(LINUX)
++#if OS(LINUX) || OS(HAIKU)
+     WTF_EXPORT_PRIVATE static ThreadIdentifier currentID();
+     ThreadIdentifier id() const { return m_id; }
+ #endif
+@@ -409,7 +409,7 @@ protected:
+ #elif OS(DARWIN)
+     mach_port_t m_platformThread { MACH_PORT_NULL };
+ #elif USE(PTHREADS)
+-#if OS(LINUX)
++#if OS(LINUX) || OS(HAIKU)
+     ThreadIdentifier m_id { 0 };
+ #endif
+     PlatformRegisters* m_platformRegisters { nullptr };
+diff --git a/Source/WTF/wtf/ThreadingPrimitives.h b/Source/WTF/wtf/ThreadingPrimitives.h
+index 5b4c0629b5ef8281d65a961b2f498fd1ff6eafbd..3e68a322f0076b856cd6b96f19b691e7975ec89e 100644
+--- a/Source/WTF/wtf/ThreadingPrimitives.h
++++ b/Source/WTF/wtf/ThreadingPrimitives.h
+@@ -57,7 +57,7 @@ using PlatformThreadHandle = pthread_t;
+ using PlatformMutex = pthread_mutex_t;
+ using PlatformCondition = pthread_cond_t;
+ using ThreadSpecificKey = pthread_key_t;
+-#if OS(LINUX)
++#if OS(LINUX) || OS(HAIKU)
+ using ThreadIdentifier = pid_t;
+ #endif
+ #elif OS(WINDOWS)
 diff --git a/Source/WTF/wtf/TimeZone.cpp b/Source/WTF/wtf/TimeZone.cpp
 index 1b92b5db8941dcf7c670790e9cbeb93f849b4ffd..bdc52634a7a748c58808d94ec357578554f20ff4 100644
 --- a/Source/WTF/wtf/TimeZone.cpp
@@ -3984,6 +4036,19 @@ index 6f873d07712d59da0b72512bf2fa433a67adc5d5..5d2e121d96e2b5c97ee58e4202b29846
  }
  
  bool isMainThread()
+diff --git a/Source/WTF/wtf/haiku/CurrentProcessMemoryStatus.h b/Source/WTF/wtf/haiku/CurrentProcessMemoryStatus.h
+index ffb790bad80bb6c7966318666978122a7c5b90b0..2eae4d59640d110896538dc0fa809c192c949c5a 100644
+--- a/Source/WTF/wtf/haiku/CurrentProcessMemoryStatus.h
++++ b/Source/WTF/wtf/haiku/CurrentProcessMemoryStatus.h
+@@ -29,7 +29,7 @@
+ 
+ namespace WTF {
+ 
+-void currentProcessMemoryStatus(ProcessMemoryStatus&);
++WTF_EXPORT_PRIVATE void currentProcessMemoryStatus(ProcessMemoryStatus&);
+ 
+ } // namespace WTF
+ 
 diff --git a/Source/WTF/wtf/haiku/LanguageHaiku.cpp b/Source/WTF/wtf/haiku/LanguageHaiku.cpp
 index f7c1f5175e14e27e4c67598f5424782e2af77050..cde8501928cd6510cb4386b3afb6edd1e961b549 100644
 --- a/Source/WTF/wtf/haiku/LanguageHaiku.cpp
@@ -4844,7 +4909,7 @@ index 581c21b35e31c8af0f8ecb698586bf6f023bb132..0ab9b3d335549f2646bea23957ad5812
  #else
      UNUSED_PARAM(address);
 diff --git a/Source/WTF/wtf/posix/ThreadingPOSIX.cpp b/Source/WTF/wtf/posix/ThreadingPOSIX.cpp
-index 94ecfb0a7d65820ae25a1dab5eed53b73b3b6b4d..960787e09083333822924006aea37e0c94403849 100644
+index 94ecfb0a7d65820ae25a1dab5eed53b73b3b6b4d..a89e5058efee46ea61858ea2cb46b8870ffe9a0d 100644
 --- a/Source/WTF/wtf/posix/ThreadingPOSIX.cpp
 +++ b/Source/WTF/wtf/posix/ThreadingPOSIX.cpp
 @@ -31,6 +31,7 @@
@@ -4918,7 +4983,19 @@ index 94ecfb0a7d65820ae25a1dab5eed53b73b3b6b4d..960787e09083333822924006aea37e0c
  Thread::~Thread() = default;
  
  #if !OS(DARWIN)
-@@ -445,6 +495,38 @@ void Thread::updateSchedulingAttributes(SchedulingState state) const
+@@ -243,6 +293,11 @@ ThreadIdentifier Thread::currentID()
+ {
+     return static_cast<ThreadIdentifier>(syscall(SYS_gettid));
+ }
++#elif OS(HAIKU)
++ThreadIdentifier Thread::currentID()
++{
++    return find_thread(nullptr);
++}
+ #endif
+ 
+ void Thread::initializeCurrentThreadEvenIfNonWTFCreated()
+@@ -445,6 +500,38 @@ void Thread::updateSchedulingAttributes(SchedulingState state) const
          || setpriority(PRIO_PROCESS, m_id, attributes.niceLevel))
          logSchedulingAttributesFailure(m_id);
  #endif // HAVE(SCHED_SETATTR)
@@ -4957,7 +5034,19 @@ index 94ecfb0a7d65820ae25a1dab5eed53b73b3b6b4d..960787e09083333822924006aea37e0c
  #else
      UNUSED_PARAM(state);
  #endif // OS(LINUX)
-@@ -873,6 +955,8 @@ void Thread::yield()
+@@ -726,6 +813,11 @@ void Thread::establishPlatformSpecificHandle(pthread_t handle)
+ {
+     Locker locker { m_mutex };
+     m_handle = handle;
++#if OS(HAIKU)
++    // Set the immutable identity before Thread::create publishes this thread
++    // to allThreads(), including when the new thread has not started yet.
++    m_id = get_pthread_thread_id(handle);
++#endif
+ #if OS(DARWIN)
+     m_platformThread = pthread_mach_thread_np(handle);
+ #endif
+@@ -873,6 +965,8 @@ void Thread::yield()
  #endif
  }
  
@@ -8957,10 +9046,10 @@ index 0000000000000000000000000000000000000000..48e19a5957df4c1ae60378dd9a84cbe4
 +/* Copyright (C) 2026 Summit contributors. SPDX-License-Identifier: BSD-2-Clause */
 +enum USBTransferStatus { "ok", "stall", "babble" };
 diff --git a/Source/WebCore/PlatformHaiku.cmake b/Source/WebCore/PlatformHaiku.cmake
-index 16a88804a1baa39ccdd9fc2870b6e2524d941298..01e9c5f8a7c36b0c6d443e648a7ac5d291ab19fb 100644
+index 16a88804a1baa39ccdd9fc2870b6e2524d941298..ec56049a044dbd3133c241ab8d2755349cbf56ca 100644
 --- a/Source/WebCore/PlatformHaiku.cmake
 +++ b/Source/WebCore/PlatformHaiku.cmake
-@@ -1,52 +1,367 @@
+@@ -1,52 +1,369 @@
 +include(platform/Haiku.cmake)
  include(platform/ImageDecoders.cmake)
  include(platform/OpenSSL.cmake)
@@ -9079,8 +9168,9 @@ index 16a88804a1baa39ccdd9fc2870b6e2524d941298..01e9c5f8a7c36b0c6d443e648a7ac5d2
  
    page/haiku/DragControllerHaiku.cpp
    page/haiku/EventHandlerHaiku.cpp
- 
--  platform/audio/FFTFrameStub.cpp
++  page/haiku/ResourceUsageThreadHaiku.cpp
++  page/linux/ResourceUsageOverlayLinux.cpp
++
 +  page/PointerLockController.cpp
 +
 +  platform/Cursor.cpp
@@ -9108,7 +9198,8 @@ index 16a88804a1baa39ccdd9fc2870b6e2524d941298..01e9c5f8a7c36b0c6d443e648a7ac5d2
 +  platform/haiku/TemporaryLinkStubs.cpp
 +  platform/haiku/UserAgentHaiku.cpp
 +  platform/haiku/WidgetHaiku.cpp
-+
+ 
+-  platform/audio/FFTFrameStub.cpp
  
    platform/graphics/PlatformDisplay.cpp
    platform/graphics/WOFFFileFormat.cpp
@@ -9334,7 +9425,7 @@ index 16a88804a1baa39ccdd9fc2870b6e2524d941298..01e9c5f8a7c36b0c6d443e648a7ac5d2
    textencoding
    translation
    ${WEBP_LIBRARIES}
-@@ -61,6 +376,242 @@ list(APPEND WebCore_SYSTEM_INCLUDE_DIRECTORIES
+@@ -61,6 +378,242 @@ list(APPEND WebCore_SYSTEM_INCLUDE_DIRECTORIES
    ${SQLITE_INCLUDE_DIR}
    ${WEBP_INCLUDE_DIRS}
    ${ZLIB_INCLUDE_DIRS}
@@ -13458,6 +13549,20 @@ index 630b8da74fe0d770a34b573e653a7ca05b1a117e..86acd08e780d52d13ee4bcf10c144203
      if (CheckedPtr canvasAgent = enabledCanvasAgent(canvasRenderingContext))
          canvasAgent->recordAction(canvasRenderingContext, WTF::move(name), WTF::move(arguments));
  }
+diff --git a/Source/WebCore/inspector/agents/InspectorMemoryAgent.cpp b/Source/WebCore/inspector/agents/InspectorMemoryAgent.cpp
+index 37ff7e2ba390b97a381b4792a60700c457a8584f..d17f362a44cb1556c31b1c15832eafea70bb8a07 100644
+--- a/Source/WebCore/inspector/agents/InspectorMemoryAgent.cpp
++++ b/Source/WebCore/inspector/agents/InspectorMemoryAgent.cpp
+@@ -57,6 +57,9 @@ void InspectorMemoryAgent::didCreateFrontendAndBackend()
+ 
+ void InspectorMemoryAgent::willDestroyFrontendAndBackend(DisconnectReason)
+ {
++    // Tracking is independent of enable(), which controls pressure events.
++    // disable() can return early when no pressure observer was enabled.
++    std::ignore = stopTracking();
+     std::ignore = disable();
+ 
+     Ref { m_instrumentingAgents.get() }->setPersistentMemoryAgent(nullptr);
 diff --git a/Source/WebCore/inspector/agents/InspectorPageAgent.cpp b/Source/WebCore/inspector/agents/InspectorPageAgent.cpp
 index ae292e47510d5537fe8023a85931e8c869bcaca1..098925628465e0b6b775b1697970f0e0324c9b36 100644
 --- a/Source/WebCore/inspector/agents/InspectorPageAgent.cpp
@@ -16223,6 +16328,80 @@ index 27245cb297f582e0b872150b321a234fb12014ae..55442a23297859736f066e492b623e19
  };
  
  } // namespace WebCore
+diff --git a/Source/WebCore/page/ResourceUsageOverlay.h b/Source/WebCore/page/ResourceUsageOverlay.h
+index afcc234fa5d42f6b35e324a9467fd7026f6a331c..d3459fc7f71adad4f95ae3aa91299aaf0397ce71 100644
+--- a/Source/WebCore/page/ResourceUsageOverlay.h
++++ b/Source/WebCore/page/ResourceUsageOverlay.h
+@@ -40,7 +40,7 @@
+ #include "PlatformCALayer.h"
+ #endif
+ 
+-#if OS(LINUX)
++#if OS(LINUX) || OS(HAIKU)
+ #include "GraphicsLayer.h"
+ #endif
+ 
+@@ -92,7 +92,7 @@ private:
+     const RetainPtr<CALayer> m_containerLayer;
+ #endif
+ 
+-#if OS(LINUX)
++#if OS(LINUX) || OS(HAIKU)
+     RefPtr<GraphicsLayer> m_paintLayer;
+     std::unique_ptr<GraphicsLayerClient> m_overlayPainter;
+ #endif
+diff --git a/Source/WebCore/page/ResourceUsageThread.cpp b/Source/WebCore/page/ResourceUsageThread.cpp
+index 0bf432a47cd5f8a54e85f43a51be741f2e65fd62..f3d8905c371a48597fb5c499b51bafe22a0af6c5 100644
+--- a/Source/WebCore/page/ResourceUsageThread.cpp
++++ b/Source/WebCore/page/ResourceUsageThread.cpp
+@@ -108,6 +108,12 @@ void ResourceUsageThread::recomputeCollectionMode()
+     for (auto& pair : m_observers.values())
+         mode = static_cast<ResourceUsageCollectionMode>(mode | pair.first);
+ 
++#if OS(HAIKU)
++    // A memory observer may keep the sampler alive between CPU recordings.
++    // Do not average that unrecorded interval into the first new CPU sample.
++    if ((mode & CPU) && !(m_collectionMode & CPU))
++        m_resetCPUSample.store(true);
++#endif
+     m_collectionMode = mode;
+ }
+ 
+diff --git a/Source/WebCore/page/ResourceUsageThread.h b/Source/WebCore/page/ResourceUsageThread.h
+index 2b5a1f91a3545c3e89b88598f829de7aa1a7850d..ed66d7785ac864eae1c10942ff9b1b2252494d69 100644
+--- a/Source/WebCore/page/ResourceUsageThread.h
++++ b/Source/WebCore/page/ResourceUsageThread.h
+@@ -29,6 +29,7 @@
+ 
+ #include "ResourceUsageData.h"
+ #include <array>
++#include <atomic>
+ #include <functional>
+ #include <wtf/Condition.h>
+ #include <wtf/HashMap.h>
+@@ -88,11 +89,22 @@ private:
+     // They should ensure their use of the VM is thread safe.
+     JSC::VM* m_vm { nullptr };
+ 
++#if OS(HAIKU)
++    // Only the collector thread owns the counters. Observer changes happen on
++    // the main thread and may overlap a collection already in progress.
++    std::atomic<bool> m_resetCPUSample { true };
++    int64_t m_previousSampleTime { 0 };
++    int64_t m_previousTeamCPUTime { 0 };
++    HashMap<int32_t, int64_t> m_previousThreadCPUTimes;
++#endif
++
+ #if ENABLE(SAMPLING_PROFILER)
+ #if OS(DARWIN)
+     mach_port_t m_samplingProfilerMachThread { MACH_PORT_NULL };
+ #elif OS(LINUX)
+     pid_t m_samplingProfilerThreadID { 0 };
++#elif OS(HAIKU)
++    std::atomic<pid_t> m_samplingProfilerThreadID { 0 };
+ #endif
+ #endif
+ 
 diff --git a/Source/WebCore/page/csp/ContentSecurityPolicy.cpp b/Source/WebCore/page/csp/ContentSecurityPolicy.cpp
 index a149c021fab264535bc4ca151ef4f8017943cb6a..3da3772771f5d62951c1362b22048099d5e1e623 100644
 --- a/Source/WebCore/page/csp/ContentSecurityPolicy.cpp
@@ -16296,6 +16475,204 @@ index 89f2b38d398b9fb7d5319d06bf0b918cfc569e1b..fbd1eea56e97654861c4b24b25c0da6e
  #include "MouseEventWithHitTestResults.h"
  #include "NotImplemented.h"
  #include "Page.h"
+diff --git a/Source/WebCore/page/haiku/ResourceUsageThreadHaiku.cpp b/Source/WebCore/page/haiku/ResourceUsageThreadHaiku.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..eac28aa0d30bc1ff0c511ffb6a0a504ab2dc4130
+--- /dev/null
++++ b/Source/WebCore/page/haiku/ResourceUsageThreadHaiku.cpp
+@@ -0,0 +1,173 @@
++/*
++ * Copyright (C) 2026 Summit contributors.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
++ * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
++ * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
++ * HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
++ * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED
++ * TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
++ * PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
++ * LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
++ * NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
++ * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include "config.h"
++#include "ResourceUsageThread.h"
++
++#if ENABLE(RESOURCE_USAGE) && OS(HAIKU)
++
++#include "MemoryCache.h"
++#include "WorkerThread.h"
++#include <JavaScriptCore/ExecutableAllocator.h>
++#include <JavaScriptCore/GCActivityCallback.h>
++#include <JavaScriptCore/JSLock.h>
++#include <JavaScriptCore/SamplingProfiler.h>
++#include <JavaScriptCore/VM.h>
++#include <OS.h>
++#include <algorithm>
++#include <unistd.h>
++#include <wtf/MainThread.h>
++#include <wtf/haiku/CurrentProcessMemoryStatus.h>
++
++#if USE(COORDINATED_GRAPHICS)
++#include "CoordinatedTileBuffer.h"
++#endif
++
++namespace WebCore {
++
++void ResourceUsageThread::platformSaveStateBeforeStarting()
++{
++    m_resetCPUSample.store(true);
++#if USE(COORDINATED_GRAPHICS)
++    CoordinatedTileBuffer::resetMemoryUsage();
++#endif
++#if ENABLE(SAMPLING_PROFILER)
++    m_samplingProfilerThreadID.store(0);
++    if (auto* profiler = m_vm->samplingProfiler()) {
++        if (auto* thread = profiler->thread())
++            m_samplingProfilerThreadID.store(thread->id());
++    }
++#endif
++}
++
++void ResourceUsageThread::platformCollectCPUData(JSC::VM*, ResourceUsageData& data)
++{
++    team_usage_info teamUsage;
++    if (get_team_usage_info(getpid(), B_TEAM_USAGE_SELF, &teamUsage) != B_OK)
++        return;
++
++    int64_t now = system_time();
++    int64_t teamTime = teamUsage.user_time + teamUsage.kernel_time;
++    bool reset = m_resetCPUSample.exchange(false) || !m_previousSampleTime;
++    int64_t elapsed = reset ? 0 : now - m_previousSampleTime;
++    auto percent = [elapsed](int64_t delta) -> float {
++        return elapsed > 0 ? 100.0 * std::max<int64_t>(delta, 0) / elapsed : 0;
++    };
++
++    // The team counter includes threads that exited between samples. Summing
++    // only live thread counters would lose their work.
++    data.cpu = reset ? 0 : percent(teamTime - m_previousTeamCPUTime);
++    m_previousSampleTime = now;
++    m_previousTeamCPUTime = teamTime;
++
++    HashSet<pid_t> knownWebKitThreads;
++    for (auto& thread : Thread::allThreads()) {
++        if (auto id = thread.id())
++            knownWebKitThreads.add(id);
++    }
++    HashMap<pid_t, String> knownWorkerThreads;
++    for (auto& thread : WorkerOrWorkletThread::workerOrWorkletThreads()) {
++        if (thread.thread()) {
++            if (auto id = thread.thread()->id())
++                knownWorkerThreads.set(id, thread.inspectorIdentifier().isolatedCopy());
++        }
++    }
++
++    HashMap<int32_t, int64_t> currentThreadTimes;
++    int32 cookie = 0;
++    thread_info info;
++    float debuggerCPU = 0;
++    auto collectorID = Thread::currentID();
++    while (get_next_thread_info(getpid(), &cookie, &info) == B_OK) {
++        int64_t cpuTime = info.user_time + info.kernel_time;
++        currentThreadTimes.set(info.thread, cpuTime);
++        // A new thread's lifetime fits inside this interval. Thread IDs are
++        // native identities, not reusable pthread handles.
++        float usage = reset ? 0 : std::clamp(percent(cpuTime - m_previousThreadCPUTimes.get(info.thread)), 0.0f, 100.0f);
++        bool debugger = info.thread == collectorID;
++#if ENABLE(SAMPLING_PROFILER)
++        debugger |= info.thread == m_samplingProfilerThreadID.load();
++#endif
++        if (debugger) {
++            debuggerCPU += usage;
++            continue;
++        }
++        if (info.thread == getpid()) {
++            data.cpuThreads.append(ThreadCPUInfo { "Main Thread"_s, { }, usage, ThreadCPUInfo::Type::Main });
++            continue;
++        }
++        String name = String::fromUTF8(info.name);
++        String identifier = knownWorkerThreads.get(info.thread);
++        bool webKit = knownWebKitThreads.contains(info.thread) || !identifier.isEmpty() || name == "BMScavenger"_s;
++        data.cpuThreads.append(ThreadCPUInfo { name, identifier, usage, webKit ? ThreadCPUInfo::Type::WebKit : ThreadCPUInfo::Type::Unknown });
++    }
++    m_previousThreadCPUTimes = WTF::move(currentThreadTimes);
++    data.cpuExcludingDebuggerThreads = std::max(0.0f, data.cpu - debuggerCPU);
++}
++
++void ResourceUsageThread::platformCollectMemoryData(JSC::VM* vm, ResourceUsageData& data)
++{
++    // Read the page VM and cache on their owning thread. These categories are
++    // allocation counters, not private physical-memory measurements.
++    callOnMainThreadAndWait([&] {
++        JSC::JSLockHolder locker { vm };
++        size_t extra = vm->heap.extraMemorySize();
++        size_t external = std::min(extra, vm->heap.externalMemorySize());
++        data.categories[MemoryCategory::GCHeap].dirtySize = vm->heap.blockBytesAllocated();
++        data.categories[MemoryCategory::GCOwned].dirtySize = extra - external;
++        data.categories[MemoryCategory::GCOwned].externalSize = external;
++        data.totalExternalSize = external;
++        data.categories[MemoryCategory::Images].dirtySize = MemoryCache::singleton().getStatistics().images.decodedSize;
++        data.timeOfNextEdenCollection = data.timestamp + vm->heap.edenActivityCallback()->timeUntilFire().value_or(Seconds(std::numeric_limits<double>::infinity()));
++        data.timeOfNextFullCollection = data.timestamp + vm->heap.fullActivityCallback()->timeUntilFire().value_or(Seconds(std::numeric_limits<double>::infinity()));
++    });
++
++#if ENABLE(JIT)
++    {
++        Locker locker { JSC::ExecutableAllocator::singleton().getLock() };
++        data.categories[MemoryCategory::JSJIT].dirtySize = JSC::ExecutableAllocator::committedByteCount();
++    }
++#endif
++#if USE(COORDINATED_GRAPHICS)
++    data.categories[MemoryCategory::Layers].dirtySize = CoordinatedTileBuffer::getMemoryUsage();
++#endif
++
++    ProcessMemoryStatus status;
++    currentProcessMemoryStatus(status);
++    // Haiku exposes resident area/cache sizes, not a private dirty total.
++    // copy_count counts copy-on-write events and cannot identify shared RAM.
++    data.totalDirtySize = status.resident;
++    // Categories and resident areas are different estimates, collected at
++    // different instants. Saturate each subtraction to avoid underflow or an
++    // overflowing sum of allocation counters.
++    size_t remaining = status.resident;
++    for (auto& category : data.categories)
++        remaining -= std::min(remaining, category.dirtySize);
++    data.categories[MemoryCategory::Other].dirtySize = remaining;
++}
++
++} // namespace WebCore
++
++#endif // ENABLE(RESOURCE_USAGE) && OS(HAIKU)
+diff --git a/Source/WebCore/page/linux/ResourceUsageOverlayLinux.cpp b/Source/WebCore/page/linux/ResourceUsageOverlayLinux.cpp
+index cd25fc220f5d9105344dc5d1eb2f3da7139ad5a7..3b2faa128e4ebc27282276de9dac942f62dda08a 100644
+--- a/Source/WebCore/page/linux/ResourceUsageOverlayLinux.cpp
++++ b/Source/WebCore/page/linux/ResourceUsageOverlayLinux.cpp
+@@ -26,7 +26,7 @@
+ #include "config.h"
+ #include "ResourceUsageOverlay.h"
+ 
+-#if ENABLE(RESOURCE_USAGE) && OS(LINUX)
++#if ENABLE(RESOURCE_USAGE) && (OS(LINUX) || OS(HAIKU))
+ 
+ #include "Chrome.h"
+ #include "ChromeClient.h"
+@@ -164,4 +164,4 @@ void ResourceUsageOverlay::platformDestroy()
+ 
+ } // namespace WebCore
+ 
+-#endif // ENABLE(RESOURCE_USAGE) && OS(LINUX)
++#endif // ENABLE(RESOURCE_USAGE) && (OS(LINUX) || OS(HAIKU))
 diff --git a/Source/WebCore/page/scrolling/AsyncScrollingCoordinator.cpp b/Source/WebCore/page/scrolling/AsyncScrollingCoordinator.cpp
 index 4a4625112ea83d9e61a2bc54027c07da9ab5c824..feb57f9c9058abc83cf4621649292cae4f464c1a 100644
 --- a/Source/WebCore/page/scrolling/AsyncScrollingCoordinator.cpp
@@ -165529,10 +165906,10 @@ index 359c3765d3a41ba1c6cfdb6b44fa292cc7811a0d..18a4d1524bbb7a68b2bec420d013fd89
  endif ()
 diff --git a/Source/cmake/OptionsHaiku.cmake b/Source/cmake/OptionsHaiku.cmake
 new file mode 100644
-index 0000000000000000000000000000000000000000..7d8c6ec2e0f597b2b591a7025002d0cb5c5e2009
+index 0000000000000000000000000000000000000000..7abaa97a38d5a7dfd978d14919314c72a4eb83bd
 --- /dev/null
 +++ b/Source/cmake/OptionsHaiku.cmake
-@@ -0,0 +1,379 @@
+@@ -0,0 +1,380 @@
 +include(GNUInstallDirs)
 +include(VersioningUtils)
 +
@@ -165626,6 +166003,7 @@ index 0000000000000000000000000000000000000000..7d8c6ec2e0f597b2b591a7025002d0cb
 +WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_OFFSCREEN_CANVAS_IN_WORKERS PRIVATE ON)
 +WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_MOUSE_CURSOR_SCALE PUBLIC ON)
 +WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_NOTIFICATIONS PUBLIC ON)
++WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_RESOURCE_USAGE PRIVATE ON)
 +WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_SAMPLING_PROFILER PUBLIC OFF)
 +WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_SPEECH_SYNTHESIS PUBLIC OFF)
 +WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_SPELLCHECK PUBLIC OFF)

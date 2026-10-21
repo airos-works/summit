@@ -151,6 +151,19 @@ def main():
         return statistics.median(next(c['size'] for c in s['categories'] if c['type'] == 'javascript')
                                  for s in result['memory'])
 
+    def capture_runtime():
+        loaded = {}
+        for team in group_members(browser.pid):
+            images = subprocess.run([str(args.images_helper), str(team)], capture_output=True, text=True)
+            if images.returncode:
+                continue
+            paths = images.stdout.splitlines()
+            loaded[str(team)] = paths
+            for path in paths:
+                if path != 'commpage' and path not in runtime:
+                    runtime[path] = digest(path)
+        return loaded
+
     monitor = NativeCrashLog()
     browser = None
     log = (args.output / 'browser.log').open('w')
@@ -174,6 +187,8 @@ def main():
             time.sleep(.1)
         else:
             raise RuntimeError('Fixture readiness deadline')
+
+        report['initial_loaded_images'] = capture_runtime()
 
         if args.expect_unavailable:
             report['domain_errors'] = {}
@@ -221,35 +236,40 @@ def main():
             call('page_detach')
             reattached = record('reattached')
             check(bool(reattached['cpu']) and bool(reattached['memory']), 'recording works after detach and reattach')
-            with ThreadPoolExecutor(max_workers=1) as pool:
-                pending = pool.submit(call, 'resource_usage', seconds=4, memory=False)
-                time.sleep(.75)
+            call('page_detach')
+            barrier = threading.Barrier(2)
+
+            def concurrent_record():
+                barrier.wait(timeout=5)
                 try:
-                    call('resource_usage', seconds=1)
+                    return call('resource_usage', seconds=4, memory=False)
                 except RuntimeError as error:
-                    check('already has a resource recording' in str(error), 'overlapping recording rejected')
-                else:
-                    check(False, 'overlapping recording rejected')
-                report['recordings']['concurrent_owner'] = pending.result(timeout=20)
-                check(len(report['recordings']['concurrent_owner']['cpu']) >= 5,
-                      'rejected overlap does not stop the original recording')
+                    return {'error': str(error)}
+
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                pending = [pool.submit(concurrent_record) for _ in range(2)]
+                attempts = [future.result(timeout=25) for future in pending]
+            report['concurrent_first_attach'] = attempts
+            accepted = [result for result in attempts if 'error' not in result]
+            refused = [result for result in attempts if 'error' in result]
+            check(len(accepted) == len(refused) == 1 and 'already has a resource recording' in refused[0]['error'],
+                  'overlapping first requests allow exactly one recording')
+            check(len(accepted[0]['cpu']) >= 5 and not accepted[0].get('stopErrors'),
+                  'rejected overlap does not interrupt the original recording')
+            # Memory.startTracking does not require Memory.enable. Detaching
+            # must still remove its observer, as well as the CPU observer.
+            call('inspector', method='Memory.startTracking')
+            call('inspector', method='CPUProfiler.startTracking')
+            time.sleep(1)
+            call('page_detach')
             time.sleep(1)
             sampler = call('threads', tab=reattached['tab'], filter='*ResourceUsage*', sample_ms=1000)
             report['sampler_after_stop'] = sampler
             check(len(sampler['threads']) == 1, 'recordings reuse one collector thread')
             check(sampler['threads'][0]['cores'] <= .001 and sampler['threads'][0]['state'] == 'waiting',
-                  'collector waits without polling when no observers remain')
+                  'collector waits without polling after detach removes all observers')
 
-        report['loaded_images'] = {}
-        for team in group_members(browser.pid):
-            images = subprocess.run([str(args.images_helper), str(team)], capture_output=True, text=True)
-            if images.returncode:
-                continue
-            paths = images.stdout.splitlines()
-            report['loaded_images'][str(team)] = paths
-            for path in paths:
-                if path != 'commpage' and path not in runtime:
-                    runtime[path] = digest(path)
+        report['loaded_images'] = capture_runtime()
         closed = subprocess.run([str(args.close_helper), '--close-browser', str(browser.pid),
                                  str(args.browser)], timeout=10)
         report['close_exit'] = closed.returncode

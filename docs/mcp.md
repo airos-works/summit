@@ -58,7 +58,7 @@ a tool works on the front window's selected tab.
 |---|---|
 | Browser | `summit_info` (versions and packages, processes and roles, display and accelerant, environment, log state), `tabs` (every window and tab: address, load state and errors, web process, frames in the last second), `open_tab`, `navigate`, `tab_control` (reload, stop, back, forward, select, close, zoom, devtools), `preferences` (`show` opens the window on a tab), `updates` (the build that runs, the last update check, the update window; `do` checks or presses its buttons), `bookmarks` (the tree with ids; `import` or `export` a path as the File menu does), `downloads` (the downloads panel's list with ids and states; `do` starts, pauses, resumes, cancels, retries or removes one as the panel's buttons do, or clears the list), `extensions`, `extension_control` |
 | Views and input | `screenshot` (screen, window or page as on screen), `page_frame` (the last frame the engine presented to the view, device pixels), `page_render` (the page as WebCore paints it), `frame_stats` (frames per second and gaps; `scroll=true` measures a wheel burst), `click`, `type_text`, `press_key`, `scroll` |
-| Pages (Web Inspector) | `evaluate`, `console`, `network` (with `request=SERIAL` for headers and body), `dom`, `page_metrics` (navigation timing, FCP/LCP, resources, DOM size, animation frame rate), `page_media`, `timeline` (main-thread time by kind, rendering frames, longest tasks), `layers` (compositing layers, memory, paint counts, reasons), `heap` (objects and bytes per class; gc), `inspector` (any protocol command), `page_detach` |
+| Pages (Web Inspector) | `evaluate`, `console`, `network` (with `request=SERIAL` for headers and body), `dom`, `page_metrics` (navigation timing, FCP/LCP, resources, DOM size, animation frame rate), `page_media`, `timeline` (main-thread time by kind, rendering frames, longest tasks), `resource_usage` (CPU and memory samples, including worker CPU), `layers` (compositing layers, memory, paint counts, reasons), `heap` (objects and bytes per class; gc), `inspector` (any protocol command), `page_detach` |
 | Engine | `engine_report` (a web or network process's pages, memory, media, graphics/compositor, network topics; or this browser's view of its processes), `media` (players, decoders, frames presented and dropped), `graphics` (view presentation, compositor and GL renderer, frames delivered, screen mode), `memory_action` (gc, release-memory) |
 | Processes | `processes` (CPU and memory of every Summit process), `threads` (states, waits, CPU per thread), `memory` (areas by kind), `cpu` (the whole machine), `stacks`, `profile`, `logs`, `syslog`, `crash_reports`, `environment`, `set_environment`, `restart_process` |
 
@@ -78,12 +78,45 @@ Some ways to use them:
   `set_environment SUMMIT_MEDIA_PLAYBACK_TRACE=1` or `SUMMIT_MSE_TRACE=1`,
   `restart_process` and `logs`.
 - **Memory grows.** `processes`, `memory` with `all=true`, `engine_report`
-  topic memory, `heap` (and `heap action=gc`, then again), `memory_action`.
+  topic memory, `resource_usage` with `cpu=false`, `heap` (and
+  `heap action=gc`, then again), `memory_action`.
 - **CPU is busy.** `cpu` (which team), `threads` (which thread), `profile`
   (which functions, self and inclusive).
 - **An extension misbehaves.** `extensions` (loaded, errors, notices), `logs`
   filtered by its name (its pages' console), `extension_control` to restart
   it, `open_tab` with its `baseURL` pages to inspect them with the page tools.
+
+## CPU and memory recordings
+
+`resource_usage` records the Inspector's `CPUProfiler` and `Memory` events.
+It accepts `tab`, `seconds` (1–60, default 3), `cpu` and `memory` (both true
+by default). The result contains timestamped `cpu` and `memory` arrays,
+the tab ID and whether its process changed during the recording. A failed
+stop is reported in `stopErrors`; an unsupported engine returns its protocol
+error. Concurrent resource recordings on the same tab are rejected.
+
+The native collector samples about every 500 ms while observed. CPU is a
+percentage of one core, so a process using multiple cores can exceed 100%.
+Thread samples identify the main thread, WebKit threads and workers, including
+workers' Inspector target IDs. Process CPU includes work by threads that
+exited between samples and excludes the resource collector's CPU. CPU deltas
+reset when collection resumes; baseline samples report zero. Recordings in
+pages sharing a process also share its collector.
+
+These measurements describe the inspected **WebProcess**, including other
+pages sharing it. JavaScript memory is the page VM's heap and owned allocations;
+JIT memory is process-wide committed executable memory. Images covers the
+decoded image cache, and Layers covers tracked coordinated tile buffers.
+The Page allocator category is unavailable and remains zero. Other is the
+nonnegative remainder of resident area estimates after attributed allocations.
+The OS reports cache-backed area sizes; shared mappings can be counted more
+than once, and allocation counts are not private physical-memory totals.
+
+Memory counters are collected on the page's main thread. Set `memory=false`
+to keep CPU collection independent of a busy main thread; delivery of the
+Inspector events still waits for that thread to run. This tool does not
+provide JavaScript stack samples or add a Timelines pane to the native
+Developer Tools window.
 
 ## How it works
 
@@ -171,9 +204,9 @@ stack in the JavaScript interpreter under `Runtime.evaluate`.
 
 ## Limits
 
-- The inspector's Memory and CPUProfiler domains are not built on this port
-  (`ENABLE_RESOURCE_USAGE` off) and the ScriptProfiler gives no samples
-  (`ENABLE_SAMPLING_PROFILER` off): use `engine_report`, `memory`, `profile`.
+- The ScriptProfiler gives no JavaScript stack samples
+  (`ENABLE_SAMPLING_PROFILER` remains off). `resource_usage` records CPU and
+  memory counters; use `profile` for the existing native sampling tool.
 - JIT code has no symbols: such frames show as addresses, and frames in
   functions that are not exported take the nearest exported name.
 - A blanked desktop captures black (`screenshot` says when `screen_blanker`

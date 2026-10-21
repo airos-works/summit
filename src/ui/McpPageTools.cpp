@@ -22,6 +22,7 @@
 #include <condition_variable>
 #include <map>
 #include <memory>
+#include <set>
 #include <thread>
 
 namespace summit {
@@ -49,6 +50,7 @@ std::mutex sLock;
 std::condition_variable sChanged;
 std::map<uint64, std::shared_ptr<PageConnection>> sByIdentifier;
 std::map<std::string, std::shared_ptr<PageConnection>> sByTab;
+std::set<std::string> sResourceRecordings; // Protected by sLock, including replacement connections.
 uint64 sNextIdentifier = 1;
 
 void Flush(PageConnection& connection, std::vector<std::string> outgoing)
@@ -184,6 +186,10 @@ std::shared_ptr<PageConnection> Connect(const Json& arguments)
     std::vector<std::string> outgoing;
     {
         std::lock_guard lock(sLock);
+        // Another first request may have attached while Create() ran. Keep
+        // one connection per view; the unused session detaches on destruction.
+        if (auto found = sByTab.find(id); found != sByTab.end() && found->second->view == connection->view)
+            return found->second;
         if (existing) sByIdentifier.erase(existing->identifier);
         sByIdentifier[connection->identifier] = connection;
         sByTab[id] = connection;
@@ -652,6 +658,91 @@ void RegisterMcpPageTools(mcp::Server& server, const std::shared_ptr<McpContext>
             return ToolResult::Data(summary);
         }});
 
+    server.Add({"resource_usage",
+        "Records the inspected WebProcess's CPU and memory timelines (default 3 seconds), with timestamped "
+        "samples and per-thread CPU usage. 100% CPU is one full core; the process can exceed 100%. Memory "
+        "categories are allocation/resident estimates in bytes: JavaScript covers the page VM, JIT covers "
+        "the process, and Other includes unattributed resident areas. The Page allocator category is "
+        "unavailable (zero). Shared areas may be counted more than "
+        "once; these are not exact private-memory totals. CPU-only recording avoids waiting on a busy page "
+        "thread for memory counters. Other tabs in the same process contribute to these measurements.",
+        Schema().String("tab", kTabArgument).Number("seconds", "Recording time (1-60, default 3)")
+            .Boolean("cpu", "Collect CPU samples (default true)").Boolean("memory", "Collect memory samples (default true)"),
+        [](const Json& arguments) {
+            auto connection = Connect(arguments);
+            const bool cpu = mcp::BooleanArgument(arguments, "cpu", true);
+            const bool memory = mcp::BooleanArgument(arguments, "memory", true);
+            if (!cpu && !memory) throw ToolError("Select CPU, memory, or both.");
+            const double seconds = std::clamp(mcp::NumberArgument(arguments, "seconds", 3), 1.0, 60.0);
+            int commits;
+            {
+                std::lock_guard lock(sLock);
+                if (!sResourceRecordings.insert(connection->id).second)
+                    throw ToolError("This tab already has a resource recording in progress.");
+                commits = connection->channel.Commits();
+                for (const char* prefix : {"CPUProfiler.", "Memory."}) {
+                    connection->channel.TakeEvents(prefix);
+                    connection->channel.Collect(prefix, true);
+                }
+            }
+            struct CollectionGuard {
+                PageConnection& connection;
+                ~CollectionGuard()
+                {
+                    std::lock_guard lock(sLock);
+                    sResourceRecordings.erase(connection.id);
+                    for (const char* prefix : {"CPUProfiler.", "Memory."}) {
+                        connection.channel.Collect(prefix, false);
+                        connection.channel.TakeEvents(prefix);
+                    }
+                }
+            } guard { *connection };
+            bool cpuStarted = false, memoryEnabled = false, memoryStarted = false;
+            Json stopErrors = Json::array();
+            auto stop = [&] {
+                auto command = [&](bool& active, const char* method) {
+                    if (!active) return;
+                    active = false;
+                    try { Command(*connection, method, Json::object(), 5000000); }
+                    catch (const ToolError& error) { stopErrors.push_back(error.what()); }
+                };
+                command(cpuStarted, "CPUProfiler.stopTracking");
+                command(memoryStarted, "Memory.stopTracking");
+                command(memoryEnabled, "Memory.disable");
+            };
+            try {
+                if (cpu) {
+                    cpuStarted = true;
+                    Command(*connection, "CPUProfiler.startTracking", Json::object());
+                }
+                if (memory) {
+                    Command(*connection, "Memory.enable", Json::object());
+                    memoryEnabled = true;
+                    memoryStarted = true;
+                    Command(*connection, "Memory.startTracking", Json::object());
+                }
+                Pause(bigtime_t(seconds * 1e6));
+                stop();
+            } catch (...) {
+                stop();
+                throw;
+            }
+            Json result = {{"tab", connection->id}, {"recordedSeconds", seconds},
+                {"scope", "WebProcess"}, {"cpu", Json::array()}, {"memory", Json::array()}};
+            {
+                std::lock_guard lock(sLock);
+                result["processChanged"] = connection->channel.Commits() != commits;
+                for (const auto& event : connection->channel.TakeEvents("CPUProfiler."))
+                    if (event.value("method", "") == "CPUProfiler.trackingUpdate")
+                        result["cpu"].push_back(event.at("params").at("event"));
+                for (const auto& event : connection->channel.TakeEvents("Memory."))
+                    if (event.value("method", "") == "Memory.trackingUpdate")
+                        result["memory"].push_back(event.at("params").at("event"));
+            }
+            if (!stopErrors.empty()) result["stopErrors"] = std::move(stopErrors);
+            return ToolResult::Data(result);
+        }});
+
     server.Add({"layers",
         "A tab's compositing layers (the inspector's LayerTree): how many, their memory and paint counts, and "
         "for the largest the element, size and why they are composited. Too many or too large layers cost GPU "
@@ -797,8 +888,8 @@ void RegisterMcpPageTools(mcp::Server& server, const std::shared_ptr<McpContext>
     server.Add({"inspector",
         "Sends any Web Inspector protocol command to a tab's page target and returns its result (domains: "
         "Runtime, Page, DOM, CSS, Network, Console, Debugger, DOMStorage, IndexedDB, LayerTree, Timeline, Heap, "
-        "Canvas, Animation, Audit, Worker; see WebKit's Source/JavaScriptCore/inspector/protocol). Events are "
-        "not returned; the other tools cover the common ones. Memory and CPUProfiler are not built on this port.",
+        "Canvas, Animation, Audit, Worker, Memory, CPUProfiler; see WebKit's Source/JavaScriptCore/inspector/protocol). "
+        "Events are not returned; resource_usage records CPU/memory events and the other tools cover the common ones.",
         Schema().String("method", "Domain.command", true).Object("params", "The command's parameters").String("tab", kTabArgument)
             .Integer("timeout_ms", "How long to wait (default 15000)").Integer("max_bytes", "Most of the result returned (default 200000)"),
         [](const Json& arguments) {
