@@ -36,13 +36,17 @@ To repeat, load the fixture and run `await testStreamFrameCallbacks()` and
 `await testRemoteStreamFrameCallbacks()` in the console. Reload before repeating
 the local-stream test, which stops its source at the end.
 
-**#126 remains open.** This proves the frame-callback defect and its fix; it
-does not establish that it is the only cause of Teams' reported failure. The
-workstation currently enumerates no camera, and the laptop used for #79 was
-unreachable during this check. The reporter confirmed the failure was on the
-Framework laptop with an older build predating the user-agent selector. Teams'
-self-preview and background effect still need verification there on the
-current build.
+**The reporter confirmed the self-preview works after updating the Framework
+laptop's build on 21 October 2026.** Both background replacement and background
+blur can be selected, but the picture stays unchanged. The exact updated
+revision and selected user agent were not supplied. The original failure used an older build predating the user-agent
+selector.
+
+**#126 remains open for background effects.** The native fixture results and
+the reporter's Teams retest establish progress on the preview; they do not
+establish a working background-processing pipeline. The workstation currently
+enumerates no camera, and the laptop used for #79 was unreachable during the
+automated checks.
 
 ## What the user sees now
 
