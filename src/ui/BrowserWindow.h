@@ -227,6 +227,7 @@ private:
         // A small tab at the start of the strip (#68), whether the page plays
         // sound and whether it is muted (#70).
         bool pinned = false, playingAudio = false, audioMuted = false;
+        bool softwareRendering = false;
         // The page asks for the screen to stay on: a video with sound plays,
         // or it holds a screen wake lock (#88).
         bool keepScreenAwake = false;
@@ -560,6 +561,8 @@ private:
     // A notice for the whole window (a damaged profile was restored, #93),
     // shown in the notice bar until dismissed.
     std::string fWindowNotice;
+    bool fSoftwareRenderingNoticeShown = false;
+    bool fSoftwareRenderingNoticePending = false;
     // A pop-up window (BrowserWindowOptions::popup).
     bool fPopup = false;
     // When the window last got a mouse button press, and the buttons down:

@@ -129,7 +129,7 @@ std::string BrowserWindow::McpRequest(const std::string& text)
             json entry = {{"id", tabName(item)}, {"url", item.url}, {"title", item.title}, {"selected", item.id == fSelected},
                 {"loading", item.loading}, {"progress", item.progress}, {"canGoBack", item.back}, {"canGoForward", item.forward},
                 {"pageZoom", item.pageZoom}, {"loadOutcome", item.loadOutcome}, {"webProcess", item.processID},
-                {"pageIdentifier", item.pageIdentifier}};
+                {"pageIdentifier", item.pageIdentifier}, {"softwareRendering", item.softwareRendering}};
             if (!item.deferredURL.empty()) entry["notLoadedYet"] = item.deferredURL;
             if (!item.loadError.empty())
                 entry["loadError"] = {{"text", item.loadError}, {"description", item.loadErrorDescription},
@@ -156,7 +156,8 @@ std::string BrowserWindow::McpRequest(const std::string& text)
         json window = {{"key", fKey}, {"private", fPrivate}, {"active", IsActive()}, {"minimized", IsMinimized()},
             {"hidden", IsHidden()}, {"frame", Rect(Frame())}, {"title", Title()}, {"fullscreen", fFullScreenTab != 0},
             {"workspaces", Workspaces()}, {"address", fAddress->Text()}, {"status", fStatus->Text()},
-            {"downloads", fDownloads.size()}, {"closing", fClosingWindow}, {"tabs", tabs}};
+            {"downloads", fDownloads.size()}, {"closing", fClosingWindow}, {"tabs", tabs},
+            {"softwareRenderingNoticePending", fSoftwareRenderingNoticePending}};
         return window.dump();
     }
     if (action == "open") {

@@ -82,6 +82,7 @@ constexpr uint32 kCheckNetwork = 'lenc';
 // dismisses it (kDismissWindowNotice). A damaged profile was restored (#93).
 constexpr uint32 kWindowNotice = 'wntc';
 constexpr uint32 kDismissWindowNotice = 'wntd';
+constexpr uint32 kDismissSoftwareRenderingNotice = 'srnd';
 }
 namespace summit {
 // Web apps (#75). kWebAppInstalled, to the window that installed it: the

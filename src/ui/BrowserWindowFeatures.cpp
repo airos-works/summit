@@ -463,6 +463,11 @@ void BrowserWindow::RefreshNoticeBar()
         fNoticeBar->SetNotice(fWindowNotice, {{"OK", new BMessage(kDismissWindowNotice)}});
         return;
     }
+    if (fSoftwareRenderingNoticePending) {
+        fNoticeBar->SetNotice("Summit is rendering pages in software because graphics acceleration is unavailable.",
+            {{"OK", new BMessage(kDismissSoftwareRenderingNotice)}});
+        return;
+    }
     fNoticeBar->Clear();
 }
 

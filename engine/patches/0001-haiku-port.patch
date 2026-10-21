@@ -84153,10 +84153,10 @@ index 0000000000000000000000000000000000000000..3bc39230080f5a8bf406cfdcc8f457bf
 +}
 diff --git a/Source/WebKit/UIProcess/API/haiku/WebKitView.h b/Source/WebKit/UIProcess/API/haiku/WebKitView.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..e8adf1886b53c5cefa06dcd87c7c66ca40b3f8a0
+index 0000000000000000000000000000000000000000..6795abf559ae9a2bc3aa858342d55e880c511dcb
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/API/haiku/WebKitView.h
-@@ -0,0 +1,384 @@
+@@ -0,0 +1,386 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#pragma once
@@ -84263,6 +84263,8 @@ index 0000000000000000000000000000000000000000..e8adf1886b53c5cefa06dcd87c7c66ca
 +    // can see asks, keep the screen blanker away, for example by putting
 +    // the pointer where it already is every 20 s (set_mouse_position).
 +    B_WEBKIT_STATE_CHANGED = 'wsta',
++    // State snapshots include "softwareRendering" (bool): the web process
++    // selected CPU rendering because graphics acceleration is unavailable.
 +    // The page's web process is gone. A second notice follows with "reason":
 +    // "crash", "memory" (over its memory limit), "cpu", "stopped"
 +    // (TerminateWebProcess), "unresponsive", or "exited". The view keeps the
@@ -107058,14 +107060,15 @@ index 3f32fc7518d0318997e6bfc56b4440e834e0a31e..41305411f66be6bb786ba9a7555c1254
      DeleteWebsiteDataInWebProcessesForOrigin(OptionSet<WebKit::WebsiteDataType> websiteDataTypes, struct WebCore::ClientOrigin origin, PAL::SessionID sessionID, WebKit::WebPageProxyIdentifier webPageProxyID) -> ()
      ReloadExecutionContextsForOrigin(struct WebCore::ClientOrigin origin, PAL::SessionID sessionID, std::optional<WebCore::FrameIdentifier> triggeringFrame) -> ()
 diff --git a/Source/WebKit/UIProcess/PageClient.h b/Source/WebKit/UIProcess/PageClient.h
-index 69bcb99cf5da330d75b81fe8f53dec86a972175e..c61899ce22b1e192bdda2c609c27b78b93534402 100644
+index 69bcb99cf5da330d75b81fe8f53dec86a972175e..6b8b09c762020219201e4d3b5df3e9d894c51f0c 100644
 --- a/Source/WebKit/UIProcess/PageClient.h
 +++ b/Source/WebKit/UIProcess/PageClient.h
-@@ -263,6 +263,11 @@ public:
+@@ -263,6 +263,12 @@ public:
      // Tell the view to invalidate the given region. The region is in view coordinates.
      virtual void setViewNeedsDisplay(const WebCore::Region&) = 0;
  
 +#if PLATFORM(HAIKU)
++    virtual void didFallBackToSoftwareRenderingHaiku() { }
 +    // Complete on the WebKit main thread after presentation or view teardown.
 +    virtual void presentBitmapHaiku(Ref<WebCore::ShareableBitmap>&&, const WebCore::IntSize&, float, CompletionHandler<void()>&& completionHandler) { completionHandler(); }
 +#endif
@@ -107073,7 +107076,7 @@ index 69bcb99cf5da330d75b81fe8f53dec86a972175e..c61899ce22b1e192bdda2c609c27b78b
      // Tell the view to scroll to the given position, and whether this was a programmatic scroll.
      virtual void requestScroll(const WebCore::FloatPoint& scrollPosition, const WebCore::IntPoint& scrollOrigin, WebCore::ScrollIsAnimated, WebCore::InterruptScrollAnimation) = 0;
  
-@@ -672,6 +677,18 @@ public:
+@@ -672,6 +678,18 @@ public:
      virtual void cancelTextRecognitionForVideoInElementFullscreen() { }
  #endif
  
@@ -107708,13 +107711,16 @@ index abc66b25d5be6d2b961364268f19eb3762ab2c3a..b614caa06360b72f8acacff7d4eef488
  #endif
  
 diff --git a/Source/WebKit/UIProcess/WebPageProxy.h b/Source/WebKit/UIProcess/WebPageProxy.h
-index 30bfad6de4894bb5b8aeaf5d1d31cf4df4091e3a..a8e8383552e672184b3684271ee7a5d2ab63ff89 100644
+index 30bfad6de4894bb5b8aeaf5d1d31cf4df4091e3a..5c76ef1eb0dd1d4cfac2da09088a0d92749a6fe0 100644
 --- a/Source/WebKit/UIProcess/WebPageProxy.h
 +++ b/Source/WebKit/UIProcess/WebPageProxy.h
-@@ -1138,6 +1138,15 @@ public:
+@@ -1138,6 +1138,18 @@ public:
      void clearSelection(std::optional<WebCore::FrameIdentifier> = std::nullopt);
      void restoreSelectionInFocusedEditableElement();
  
++#if PLATFORM(HAIKU)
++    void didFallBackToSoftwareRenderingHaiku();
++#endif
 +#if ENABLE(CUSTOM_PROTOCOL_HANDLERS)
 +    void protocolHandlerRequested(IPC::Connection&, WebCore::FrameIdentifier, const String&, IPC::Untrusted<URL>&&, bool);
 +#endif
@@ -107727,7 +107733,7 @@ index 30bfad6de4894bb5b8aeaf5d1d31cf4df4091e3a..a8e8383552e672184b3684271ee7a5d2
      PageClient* NODELETE pageClient() const;
  
      void setViewNeedsDisplay(const WebCore::Region&);
-@@ -1985,6 +1994,9 @@ public:
+@@ -1985,6 +1997,9 @@ public:
  #endif
  
      void preferencesDidChange();
@@ -107737,7 +107743,7 @@ index 30bfad6de4894bb5b8aeaf5d1d31cf4df4091e3a..a8e8383552e672184b3684271ee7a5d2
  
  #if ENABLE(CONTEXT_MENUS)
      // Called by the WebContextMenuProxy.
-@@ -3948,6 +3960,13 @@ private:
+@@ -3948,6 +3963,13 @@ private:
      Ref<WebProcessProxy> m_legacyMainFrameProcess;
      const Ref<WebPageGroup> m_pageGroup;
      Ref<WebPreferences> m_preferences;
@@ -107752,13 +107758,16 @@ index 30bfad6de4894bb5b8aeaf5d1d31cf4df4091e3a..a8e8383552e672184b3684271ee7a5d2
      const Ref<WebUserContentControllerProxy> m_userContentController;
  
 diff --git a/Source/WebKit/UIProcess/WebPageProxy.messages.in b/Source/WebKit/UIProcess/WebPageProxy.messages.in
-index e546b9c0d5424549b7c9ba06641850c46571f772..19a371e24b10b07b82290ab0515ac1d280410e51 100644
+index e546b9c0d5424549b7c9ba06641850c46571f772..aa27a8481d58ff038285afb44cb238db226c7f5f 100644
 --- a/Source/WebKit/UIProcess/WebPageProxy.messages.in
 +++ b/Source/WebKit/UIProcess/WebPageProxy.messages.in
-@@ -27,8 +27,17 @@ Copyright (C) 2010-2024 Apple Inc. All rights reserved.
+@@ -27,8 +27,20 @@ Copyright (C) 2010-2024 Apple Inc. All rights reserved.
      SharedPreferencesNeedsConnection
  ]
  messages -> WebPageProxy {
++#if PLATFORM(HAIKU)
++    DidFallBackToSoftwareRenderingHaiku()
++#endif
 +#if ENABLE(WEBUSB)
 +    UsbRequest(WebCore::FrameIdentifier frameID, String arguments, Vector<uint8_t> bytes) -> (String response, Vector<uint8_t> data)
 +#endif
@@ -115197,10 +115206,10 @@ index 0000000000000000000000000000000000000000..b12e656b2046acc0f1325d1b28ee8be2
 +#endif
 diff --git a/Source/WebKit/UIProcess/haiku/WebPageProxyHaiku.cpp b/Source/WebKit/UIProcess/haiku/WebPageProxyHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..79f33c7d74ab003802aedcfbf583f11a931f3dbf
+index 0000000000000000000000000000000000000000..b2bb8bd14238efd074ab41b60b01639df677227a
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/WebPageProxyHaiku.cpp
-@@ -0,0 +1,160 @@
+@@ -0,0 +1,166 @@
 +/*
 + * Copyright (C) 2014-2021 Haiku, inc.
 + *
@@ -115243,6 +115252,12 @@ index 0000000000000000000000000000000000000000..79f33c7d74ab003802aedcfbf583f11a
 +#include <wtf/JSONValues.h>
 +
 +namespace WebKit {
++
++void WebPageProxy::didFallBackToSoftwareRenderingHaiku()
++{
++    if (RefPtr client = pageClient())
++        client->didFallBackToSoftwareRenderingHaiku();
++}
 +
 +#if ENABLE(CUSTOM_PROTOCOL_HANDLERS)
 +void WebPageProxy::protocolHandlerRequested(IPC::Connection& connection, WebCore::FrameIdentifier frameID, const String& scheme, IPC::Untrusted<URL>&& untrustedURL, bool remove)
@@ -115603,10 +115618,10 @@ index 0000000000000000000000000000000000000000..c9a119d02f85b7c5ad8fe9153bfc9604
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/WebView.cpp b/Source/WebKit/UIProcess/haiku/WebView.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..4dac2052cacc571c8bb8e1694354dbe2fe5a37d4
+index 0000000000000000000000000000000000000000..688e4cebb79e26d16e63122f743fe61a617e5656
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/WebView.cpp
-@@ -0,0 +1,2946 @@
+@@ -0,0 +1,2953 @@
 +/*
 + * Copyright (C) 2013 Intel Corporation. All rights reserved.
 + *
@@ -117581,6 +117596,12 @@ index 0000000000000000000000000000000000000000..4dac2052cacc571c8bb8e1694354dbe2
 +}
 +#endif
 +
++void WebView::didFallBackToSoftwareRenderingHaiku()
++{
++    m_state->softwareRendering = true;
++    notifyState();
++}
++
 +void WebView::notifyState(uint32_t what) const
 +{
 +    if (!m_page || m_state->closed)
@@ -117593,6 +117614,7 @@ index 0000000000000000000000000000000000000000..4dac2052cacc571c8bb8e1694354dbe2
 +    message.AddDouble("progress", state.estimatedProgress());
 +    message.AddBool("canGoBack", state.canGoBack());
 +    message.AddBool("canGoForward", state.canGoForward());
++    message.AddBool("softwareRendering", m_state->softwareRendering);
 +    // Describe the certificate from the committed main resource, never a
 +    // separate probe of the address. In particular a provisional navigation
 +    // must not display the previous document's certificate beside its URL.
@@ -119065,10 +119087,10 @@ index 0000000000000000000000000000000000000000..520ed4b88123bc3011d015a47a3e89ef
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/WebViewPrivate.h b/Source/WebKit/UIProcess/haiku/WebViewPrivate.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..2ec2c1fb9f2177ea0b4bc50ff51ddf713f30ee64
+index 0000000000000000000000000000000000000000..a04b42499a8cc5efb29918da879225e7f0f11f06
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/WebViewPrivate.h
-@@ -0,0 +1,210 @@
+@@ -0,0 +1,211 @@
 +/*
 +   Copyright (C) 2014 Haiku, inc.
 +
@@ -119148,6 +119170,7 @@ index 0000000000000000000000000000000000000000..2ec2c1fb9f2177ea0b4bc50ff51ddf71
 +    void bluetoothRequest(uint64_t, const String&, const String&, Vector<uint8_t>&&, CompletionHandler<void(String&&, Vector<uint8_t>&&)>&&) override;
 +#endif
 +    void notifyState(uint32_t = B_WEBKIT_STATE_CHANGED) const;
++    void didFallBackToSoftwareRenderingHaiku() override;
 +    // The frame the view shows now (device pixels), or null.
 +    std::shared_ptr<const BitmapPresenterHaiku::Frame> presentedFrameHaiku() const { return m_state->presenter.snapshot(); }
 +    // A frame the view draws straight from the web process's shared memory.
@@ -119281,10 +119304,10 @@ index 0000000000000000000000000000000000000000..2ec2c1fb9f2177ea0b4bc50ff51ddf71
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/WebViewStateHaiku.h b/Source/WebKit/UIProcess/haiku/WebViewStateHaiku.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..a6b7ce3a24a20092c358bc87625b6c3a1d4b308b
+index 0000000000000000000000000000000000000000..cd0bc39008bef1c1bb0ecd0806b43bf26e2e38f9
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/WebViewStateHaiku.h
-@@ -0,0 +1,203 @@
+@@ -0,0 +1,204 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#pragma once
@@ -119400,6 +119423,7 @@ index 0000000000000000000000000000000000000000..a6b7ce3a24a20092c358bc87625b6c3a
 +    // This reference is read, assigned and released only on the WebKit main
 +    // thread. Native windows retain the state without touching the client.
 +    RefPtr<WebView> client;
++    bool softwareRendering { false }; // WebKit main thread only.
 +    // Read, invoked and cleared only on the WebKit main thread.
 +    RefPtr<SharedTask<void(const WebCore::IntSize&)>> contentSizeChanged;
 +    // Main-thread load bookkeeping, separate from the close-handshake
@@ -141923,10 +141947,42 @@ index efd16800da06dcf0fb4248500b730c89d92388fe..1ee9ed77ed614b0c96726c0d36bbb3ea
  #include "UpdateInfo.h"
  #include "WebDisplayRefreshMonitor.h"
 diff --git a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/DrawingAreaCoordinatedGraphicsGLib.cpp b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/DrawingAreaCoordinatedGraphicsGLib.cpp
-index f188f71c7802934b0e1f335c11fb85ab6b000d95..b37776b737471bd0f8f7b9b2b3284bc36fb7b5db 100644
+index f188f71c7802934b0e1f335c11fb85ab6b000d95..bc42b51ec7f490cb0a32f771aae72be13fe8a62b 100644
 --- a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/DrawingAreaCoordinatedGraphicsGLib.cpp
 +++ b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/DrawingAreaCoordinatedGraphicsGLib.cpp
-@@ -133,6 +133,17 @@ void DrawingAreaCoordinatedGraphics::updatePreferences(const WebPreferencesStore
+@@ -49,6 +49,10 @@
+ #include <WebCore/WindowEventLoop.h>
+ #include <wtf/SetForScope.h>
+ #include <wtf/SystemTracing.h>
++#if PLATFORM(HAIKU)
++#include "WebPageProxyMessages.h"
++#include <WebCore/PlatformDisplay.h>
++#endif
+ 
+ namespace WebKit {
+ using namespace WebCore;
+@@ -121,6 +125,20 @@ void DrawingAreaCoordinatedGraphics::updatePreferences(const WebPreferencesStore
+     }
+ #endif
+     settings.setForceCompositingMode(store.getBoolValueForKey(WebPreferencesKey::forceCompositingModeKey()));
++#if PLATFORM(HAIKU)
++    if (!PlatformDisplay::sharedDisplayIfExists()) {
++        // Apply after every preference update: a later change must not turn
++        // GPU features back on while this process has no display. Disabling
++        // hardware acceleration also selects CPU-backed surface buffers.
++        settings.setHardwareAccelerationEnabled(false);
++        settings.setAcceleratedCompositingEnabled(false);
++        settings.setForceCompositingMode(false);
++        settings.setCanvasUsesAcceleratedDrawing(false);
++        settings.setWebGLEnabled(false);
++        if (!std::exchange(m_notifiedSoftwareRenderingHaiku, true))
++            m_webPage->send(Messages::WebPageProxy::DidFallBackToSoftwareRenderingHaiku());
++    }
++#endif
+     // Fixed position elements need to be composited and create stacking contexts
+     // in order to be scrolled by the ScrollingCoordinator.
+     settings.setAcceleratedCompositingForFixedPositionEnabled(settings.acceleratedCompositingEnabled());
+@@ -133,6 +151,17 @@ void DrawingAreaCoordinatedGraphics::updatePreferences(const WebPreferencesStore
              m_supportsAsyncScrolling = false;
      }
  #endif
@@ -141944,7 +142000,7 @@ index f188f71c7802934b0e1f335c11fb85ab6b000d95..b37776b737471bd0f8f7b9b2b3284bc3
  
      // If async scrolling is disabled, we have to force-disable async frame and overflow scrolling
      // to keep the non-async scrolling on those elements working.
-@@ -145,10 +156,22 @@ void DrawingAreaCoordinatedGraphics::updatePreferences(const WebPreferencesStore
+@@ -145,10 +174,22 @@ void DrawingAreaCoordinatedGraphics::updatePreferences(const WebPreferencesStore
  bool DrawingAreaCoordinatedGraphics::enterAcceleratedCompositingModeIfNeeded()
  {
      Ref webPage = m_webPage;
@@ -141968,7 +142024,7 @@ index f188f71c7802934b0e1f335c11fb85ab6b000d95..b37776b737471bd0f8f7b9b2b3284bc3
  
      if (m_renderer) {
          if (m_layerTreeStateIsFrozen)
-@@ -236,10 +259,19 @@ void DrawingAreaCoordinatedGraphics::triggerRenderingUpdate()
+@@ -236,10 +277,19 @@ void DrawingAreaCoordinatedGraphics::triggerRenderingUpdate()
      m_renderer->scheduleRenderingUpdate();
  }
  
@@ -141989,7 +142045,7 @@ index f188f71c7802934b0e1f335c11fb85ab6b000d95..b37776b737471bd0f8f7b9b2b3284bc3
  void DrawingAreaCoordinatedGraphics::activityStateDidChange(OptionSet<ActivityState> changed, ActivityStateChangeID, CompletionHandler<void()>&& completionHandler)
  {
 diff --git a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/DrawingAreaCoordinatedGraphicsGLib.h b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/DrawingAreaCoordinatedGraphicsGLib.h
-index 966a06fa799167a5ffe3eb3a3047fb38fe3ef02b..eaf5a3af5ba6f15f11830ad97db00dff102a2d3f 100644
+index 966a06fa799167a5ffe3eb3a3047fb38fe3ef02b..f8afecce1076792f55b4ddb7b7bd6d33ca4eb7fe 100644
 --- a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/DrawingAreaCoordinatedGraphicsGLib.h
 +++ b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/DrawingAreaCoordinatedGraphicsGLib.h
 @@ -84,8 +84,13 @@ private:
@@ -142006,6 +142062,16 @@ index 966a06fa799167a5ffe3eb3a3047fb38fe3ef02b..eaf5a3af5ba6f15f11830ad97db00dff
  
      void activityStateDidChange(OptionSet<WebCore::ActivityState>, ActivityStateChangeID, CompletionHandler<void()>&&) override;
      void attachViewOverlayGraphicsLayer(WebCore::FrameIdentifier, WebCore::GraphicsLayer*) override;
+@@ -127,6 +132,9 @@ private:
+     std::unique_ptr<FrameRenderer> m_renderer;
+ 
+     bool m_supportsAsyncScrolling { true };
++#if PLATFORM(HAIKU)
++    bool m_notifiedSoftwareRenderingHaiku { false };
++#endif
+ 
+ #if PLATFORM(GTK)
+     bool m_transientZoom { false };
 diff --git a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/FrameRenderer.cpp b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/FrameRenderer.cpp
 index 832cf9654eda96a582713c2bc24b76914546f982..3a3050f921e49ed461a5c98414deace973b69d96 100644
 --- a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/FrameRenderer.cpp
@@ -146466,10 +146532,10 @@ index 0000000000000000000000000000000000000000..a150bd67553ae6f1864c655cd04be661
 +} // namespace WebKit
 diff --git a/Source/WebKit/WebProcess/haiku/WebProcessHaiku.cpp b/Source/WebKit/WebProcess/haiku/WebProcessHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..6df2b74242878c9101ebaa7e6ebf2cc510093390
+index 0000000000000000000000000000000000000000..681beff21b945e596a3df462c5bbc6c6db3ce343
 --- /dev/null
 +++ b/Source/WebKit/WebProcess/haiku/WebProcessHaiku.cpp
-@@ -0,0 +1,143 @@
+@@ -0,0 +1,144 @@
 +/*
 + * Copyright (C) 2014,2019 Haiku, Inc.
 + *
@@ -146552,13 +146618,14 @@ index 0000000000000000000000000000000000000000..6df2b74242878c9101ebaa7e6ebf2cc5
 +    if (!WebCore::PlatformDisplay::sharedDisplayIfExists()) {
 +        auto display = WebCore::PlatformDisplayHaiku::create();
 +        if (!display) {
-+            // Coordinated graphics has no software path: sharedDisplay() asserts.
-+            WTFLogAlways("Summit: no EGL display in the web process. Coordinated graphics needs one; "
-+                "on this machine EGL comes from the private Mesa, so LIBRARY_PATH must include its prefix.");
++            // The drawing area disables GPU features and selects the CPU
++            // renderer before constructing a surface. Do not install a dummy
++            // display: WebGL and accelerated image buffers must fail cleanly.
++            WTFLogAlways("Summit: EGL is unavailable; rendering pages in software.");
 +        }
 +        if (display)
 +            WebCore::PlatformDisplay::setSharedDisplay(WTF::move(display));
-+        SUMMIT_STARTUP_TRACE("EGL display ready");
++        SUMMIT_STARTUP_TRACE("graphics display initialization finished");
 +    }
 +#endif
 +    // The browser's debugging tools (BWebKitProcessDiagnostics) ask a thread

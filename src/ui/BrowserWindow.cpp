@@ -3887,6 +3887,10 @@ void BrowserWindow::MessageReceived(BMessage* message)
             fWindowNotice = message->what == kWindowNotice ? message->GetString("text", "") : "";
             RefreshNoticeBar();
             break;
+        case kDismissSoftwareRenderingNotice:
+            fSoftwareRenderingNoticePending = false;
+            RefreshNoticeBar();
+            break;
         case kBookmarkAllTabs: {
             // A folder named after the day, in Other Bookmarks.
             char name[64] = "Tabs";
@@ -5108,6 +5112,12 @@ void BrowserWindow::WebKitStateChanged(const BMessage& message)
     message.FindBool("capturingScreen", &tab->capturingScreen);
     message.FindBool("playingAudio", &tab->playingAudio);
     message.FindBool("audioMuted", &tab->audioMuted);
+    message.FindBool("softwareRendering", &tab->softwareRendering);
+    if (tab->softwareRendering && !fSoftwareRenderingNoticeShown) {
+        fSoftwareRenderingNoticeShown = true;
+        fSoftwareRenderingNoticePending = true;
+        RefreshNoticeBar();
+    }
     if (message.FindBool("keepScreenAwake", &tab->keepScreenAwake) == B_OK && tab->id == fSelected)
         UpdateKeepScreenAwake();
     double progress;
