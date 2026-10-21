@@ -36,8 +36,18 @@ async function verifyBadgeColors() {
     await new Promise(resolve => chrome.browserAction.setBadgeBackgroundColor({color: [7, 8, 9, 255]}, resolve));
     equal(await new Promise(resolve => chrome.browserAction.getBadgeBackgroundColor({}, resolve)), [7, 8, 9, 255], "Chrome callback round trip");
 
-    const tabs = await browser.tabs.query({});
-    const tab = tabs.find(item => item.active);
+    // Restoring a session and opening the fixture URL can still be committing
+    // navigation when the background starts. A commit correctly clears tab
+    // action overrides, so wait for the test page before checking their scope.
+    let tab;
+    const deadline = Date.now() + 10000;
+    while (Date.now() < deadline) {
+        const tabs = await browser.tabs.query({});
+        tab = tabs.find(item => item.active && item.status === "complete"
+            && item.url?.includes("/page?run=@NONCE@"));
+        if (tab) break;
+        await new Promise(resolve => setTimeout(resolve, 50));
+    }
     if (!tab || !(tab.id > 0) || !(tab.windowId > 0)) throw new Error("missing native tab/window for badge scope");
     const tabScope = {tabId: tab.id}, windowScope = {windowId: tab.windowId};
     await action.setBadgeBackgroundColor({color: "black"});

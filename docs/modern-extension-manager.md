@@ -66,12 +66,17 @@ The native harness opens the actual browser menu, operates the real picker
 through its native scripting interface, selects entries in its file list and
 presses its controls. It then exercises consent, stale approval rejection,
 cancel/reopen, closing during import, installation, duplicate rejection,
-disable/enable, and removal across three distinct Summit processes. The last
+disable/enable, cancellation and confirmation of removal across three distinct
+Summit processes. The last
 process quits with both the manager and picker open. A generated fixture checks
 real background execution, persisted storage and restored grants through HTTP
 reports; optional `tabs` access must stay ungranted. The runner checks actual
 kernel process-group membership, normal exits, new debugger events, and frozen
 bundle/staged/host source hashes.
+
+The current published stock R1/beta6 packages also pass the manager and action
+fixture: [22 October acceptance](haiku-build.md#extension-acceptance-22-october-2026),
+including clean shutdown after removal and with an open extension popup.
 
 On `bundle-tz1tfyzh` with engine patch
 `2972cc15e98b23f6dd04186631cf3f4370fe3a7d3a573175c6fd126a3fbdd3ca`,

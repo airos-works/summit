@@ -30,7 +30,8 @@ them.
 
 Everything else is the same code in both builds. Pages, scripts and media
 were checked on R1/beta6 ([below](#what-was-checked-on-stock-r1beta6));
-extensions have not been tested there yet.
+native extension installation, permissions, storage, toolbar actions, popups,
+removal and shutdown were also checked on 22 October 2026.
 
 ## Installing on Haiku R1/beta6
 
@@ -139,6 +140,44 @@ no GPU.
 The first page in a new profile waits a few seconds while Fontconfig builds
 its cache, as WebPositive's first start does. Only Latin, Greek, Cyrillic and
 CJK fonts come with Haiku, so other scripts need more fonts installed.
+
+### Extension acceptance, 22 October 2026
+
+The published `20261021.1632` browser and engine packages (Summit `cd9de3e`)
+pass **252 native checks** and four rounds of **58 JavaScript badge checks**
+on a fresh R1/beta6 hrev59866+79 VM, with four virtual CPUs, 4 GiB RAM and
+standard VGA. `pkgman` installed the packages and their Lexilla, Scintilla,
+LLVM 21 and Vulkan dependencies. The engine's installed build metadata names
+the stock Haiku target and the tested commit.
+
+`tests/ModernExtensionManagerTests.cpp`, compiled against the R1/beta6 SDK,
+operates the actual manager, file picker, consent controls and popups. The
+`startup` and `actions` extension fixtures verify required versus optional
+permissions, duplicate rejection, saved storage across disable/enable and
+browser restart, popup JavaScript and pointer input, toolbar icons and badge
+pixels, action scopes, and rejection of stale invocations. Removal covers both
+Cancel and Remove in the confirmation dialog, then checks that the extension
+stays absent after another restart. The badge fixture waits for its page's
+navigation to complete before testing per-tab overrides, which navigation
+correctly clears.
+
+All four browser processes and their helpers exited normally, with no forced
+cleanup or new debugger events. Eight additional launches followed by an
+immediate quit also exited cleanly. Runtime and fixture hashes remained
+unchanged. The [machine-readable acceptance record](haiku-extensions-2026-10-22.json)
+contains package and runtime hashes, per-phase results and the native crash-log
+checks. The raw evidence is retained in `.vm/issue120-stock-20261022/` and in
+the dedicated VM under `/Data/issue120/`.
+
+These tests found a shutdown defect in the preceding published build: after
+extension removal, a WebProcess could still be inside `load_image()` when
+Summit exited, leaving its main thread suspended indefinitely. This reproduced
+three times. `cd9de3e` tracks pending launches through their main-loop completion
+and keeps the application loop running until they finish, including failure
+and cancellation. The updated packages passed the same removal/shutdown
+scenario and [release CI](https://github.com/jmgasper/summit/actions/runs/39635703321).
+This fixture acceptance does not establish compatibility with every third-party
+extension or account-backed feature.
 
 ## Testing on stock Haiku
 
