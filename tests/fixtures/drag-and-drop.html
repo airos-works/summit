@@ -1,0 +1,88 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Native drag and drop</title>
+<style>
+  body { margin: 24px; font: 18px sans-serif; color: #17212b; }
+  #board { display: flex; gap: 12px; padding: 0; list-style: none; }
+  #board li { padding: 30px; background: #c9e4ff; border: 2px solid #2473b8; cursor: grab; }
+  #source { display: inline-block; padding: 24px; background: #ffe09c; cursor: grab; }
+  #drop { width: 430px; height: 120px; margin: 20px 0; padding: 14px; border: 3px dashed #2473b8; }
+  #drop.over { background: #d1f0d8; }
+  #editor { display: block; width: 460px; height: 70px; margin: 18px 0; }
+  #rich { width: 460px; min-height: 55px; border: 1px solid #aaa; margin: 18px 0; }
+  #preview { position: absolute; left: -1000px; width: 120px; height: 40px; background: #ff40a0; color: black; }
+  #image { width: 128px; height: 96px; margin-left: 30px; vertical-align: middle; }
+  pre { font-size: 13px; white-space: pre-wrap; max-width: 900px; }
+</style>
+<h1>Native drag and drop</h1>
+<p>Reorder cards, drop rich text, drag a link to the bookmarks bar, and export the image to Tracker.</p>
+<ul id="board"><li id="card-a" draggable="true">Card A</li><li id="card-b" draggable="true">Card B</li><li id="card-c" draggable="true">Card C</li></ul>
+<div id="source" draggable="true">Drag text and custom data</div>
+<img id="image" alt="Three colour test image">
+<p><a id="link" href="?linked=1" title="Drag fixture bookmark">Drag fixture bookmark</a></p>
+<div id="drop">Drop zone: copies text, HTML, custom data and files</div>
+<textarea id="editor" placeholder="Drop plain text here"></textarea>
+<div id="rich" contenteditable="true">Drop formatted text here: </div>
+<div id="preview">Custom drag preview</div>
+<pre id="report"></pre>
+<script>
+const events = [];
+let lastDrop = null;
+const text = 'Drag text — café ✓';
+const custom = 'same-origin-custom-data';
+const record = event => {
+  if (events.length > 100) events.shift();
+  events.push({type: event.type, target: event.target.id, effect: event.dataTransfer?.dropEffect,
+    types: [...(event.dataTransfer?.types || [])]});
+};
+for (const type of ['dragstart', 'dragenter', 'dragover', 'dragleave', 'drop', 'dragend'])
+  document.addEventListener(type, event => { record(event); if (type === 'dragend') show(); }, true);
+for (const card of board.children) {
+  card.addEventListener('dragstart', event => {
+    event.dataTransfer.effectAllowed = 'move';
+    event.dataTransfer.setData('text/plain', card.id);
+    event.dataTransfer.setData('application/x-summit-card', card.id);
+  });
+  card.addEventListener('dragover', event => { event.preventDefault(); event.dataTransfer.dropEffect = 'move'; });
+  card.addEventListener('drop', event => {
+    event.preventDefault();
+    const source = document.getElementById(event.dataTransfer.getData('application/x-summit-card'));
+    if (source && source.parentElement === board) board.insertBefore(source, card);
+    show();
+  });
+}
+source.addEventListener('dragstart', event => {
+  event.dataTransfer.effectAllowed = 'copy';
+  event.dataTransfer.setData('text/plain', text);
+  event.dataTransfer.setData('text/html', '<b>Drag text — café ✓</b>');
+  event.dataTransfer.setData('application/x-summit-drag', custom);
+  event.dataTransfer.setDragImage(preview, 12, 8);
+});
+drop.addEventListener('dragover', event => { event.preventDefault(); event.dataTransfer.dropEffect = 'copy'; drop.classList.add('over'); });
+drop.addEventListener('dragleave', () => drop.classList.remove('over'));
+drop.addEventListener('drop', async event => {
+  event.preventDefault();
+  drop.classList.remove('over');
+  const data = event.dataTransfer;
+  lastDrop = {text: data.getData('text/plain'), html: data.getData('text/html'), custom: data.getData('application/x-summit-drag'),
+    types: [...data.types], files: [...data.files].map(file => ({name: file.name, type: file.type, size: file.size}))};
+  for (const file of data.files) {
+    if (file.type.startsWith('image/')) {
+      const bitmap = await createImageBitmap(file);
+      lastDrop.image = {width: bitmap.width, height: bitmap.height};
+      bitmap.close();
+    }
+  }
+  show();
+});
+const canvas = document.createElement('canvas'); canvas.width = 128; canvas.height = 96;
+const paint = canvas.getContext('2d');
+paint.fillStyle = 'rgb(220,40,40)'; paint.fillRect(0,0,128,32);
+paint.fillStyle = 'rgb(40,180,80)'; paint.fillRect(0,32,128,32);
+paint.fillStyle = 'rgb(40,90,220)'; paint.fillRect(0,64,128,32);
+image.src = canvas.toDataURL('image/png');
+window.dragState = () => ({order: [...board.children].map(card => card.id), events, lastDrop, text: editor.value,
+  rich: rich.innerHTML, origin: location.origin});
+function show() { report.textContent = JSON.stringify(dragState(), null, 2); }
+show();
+</script>

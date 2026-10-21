@@ -16968,15 +16968,15 @@ index f959bc4de8e956e2b96870ed1ae1b69519f1f3a5..ef147662aa3721f1a3bbb2930d17c5d1
  using PlatformCursor = void*;
  #endif
 diff --git a/Source/WebCore/platform/DragData.cpp b/Source/WebCore/platform/DragData.cpp
-index dd5c7bf82939a3d9161262012befaadd1081ee4d..cffab1fc1720e49db810bc768b64baa9f66c3152 100644
+index dd5c7bf82939a3d9161262012befaadd1081ee4d..4084b268e69a430a7a71759559123dfbd01b111d 100644
 --- a/Source/WebCore/platform/DragData.cpp
 +++ b/Source/WebCore/platform/DragData.cpp
-@@ -56,6 +56,20 @@ DragData::DragData(const IntPoint& clientPosition, const IntPoint& globalPositio
+@@ -56,6 +56,21 @@ DragData::DragData(const IntPoint& clientPosition, const IntPoint& globalPositio
  }
  #endif
  
 +#if PLATFORM(HAIKU)
-+DragData::DragData(const IntPoint& clientPosition, const IntPoint& globalPosition, const Vector<String>& fileNames, OptionSet<DragOperation> sourceOperationMask, OptionSet<DragApplicationFlags> flags, OptionSet<DragDestinationAction> destinationActionMask, std::optional<PageIdentifier> pageID)
++DragData::DragData(const IntPoint& clientPosition, const IntPoint& globalPosition, const Vector<String>& fileNames, const PasteboardCustomData& data, OptionSet<DragOperation> sourceOperationMask, OptionSet<DragApplicationFlags> flags, OptionSet<DragDestinationAction> destinationActionMask, std::optional<PageIdentifier> pageID)
 +    : m_clientPosition(clientPosition)
 +    , m_globalPosition(globalPosition)
 +    , m_platformDragData(nullptr)
@@ -16985,6 +16985,7 @@ index dd5c7bf82939a3d9161262012befaadd1081ee4d..cffab1fc1720e49db810bc768b64baa9
 +    , m_fileNames(fileNames)
 +    , m_dragDestinationActionMask(destinationActionMask)
 +    , m_pageID(pageID)
++    , m_haikuData(data)
 +{
 +}
 +#endif
@@ -16992,11 +16993,31 @@ index dd5c7bf82939a3d9161262012befaadd1081ee4d..cffab1fc1720e49db810bc768b64baa9
  std::unique_ptr<PasteboardContext> DragData::createPasteboardContext() const
  {
      return PagePasteboardContext::create(std::optional<PageIdentifier> { m_pageID });
+@@ -64,6 +79,9 @@ std::unique_ptr<PasteboardContext> DragData::createPasteboardContext() const
+ void DragData::disallowFileAccess()
+ {
+     m_fileNames = { };
++#if PLATFORM(HAIKU)
++    m_haikuData.clear("image/png"_s);
++#endif
+     m_disallowFileAccess = true;
+ }
+ 
 diff --git a/Source/WebCore/platform/DragData.h b/Source/WebCore/platform/DragData.h
-index 8c5d0b2c3529dd64257ffb6d1b0170aaa81d6998..3296d1d17e17d518b9b60cf78cfd4eebf90c8791 100644
+index 8c5d0b2c3529dd64257ffb6d1b0170aaa81d6998..7ce7798ec7d55b9678b8dbe7957007e93d7d6e07 100644
 --- a/Source/WebCore/platform/DragData.h
 +++ b/Source/WebCore/platform/DragData.h
-@@ -54,6 +54,9 @@ namespace WebCore {
+@@ -29,6 +29,9 @@
+ #include <WebCore/DragActions.h>
+ #include <WebCore/IntPoint.h>
+ #include <WebCore/PageIdentifier.h>
++#if PLATFORM(HAIKU)
++#include <WebCore/PasteboardCustomData.h>
++#endif
+ #include <wtf/Forward.h>
+ #include <wtf/HashMap.h>
+ #include <wtf/OptionSet.h>
+@@ -54,6 +57,9 @@ namespace WebCore {
  class SelectionData;
  }
  typedef WebCore::SelectionData* DragDataRef;
@@ -17006,17 +17027,30 @@ index 8c5d0b2c3529dd64257ffb6d1b0170aaa81d6998..3296d1d17e17d518b9b60cf78cfd4eeb
  #else
  typedef void* DragDataRef;
  #endif
-@@ -89,6 +92,10 @@ public:
+@@ -89,6 +95,13 @@ public:
  
  #if PLATFORM(COCOA)
      WEBCORE_EXPORT DragData(const String& dragStorageName, const IntPoint& clientPosition, const IntPoint& globalPosition, const Vector<String>&, Vector<String>&& /* promisedFileMIMETypes */, OptionSet<DragOperation>, OptionSet<DragApplicationFlags> = { }, OptionSet<DragDestinationAction> = anyDragDestinationAction(), std::optional<PageIdentifier> pageID = std::nullopt);
 +#endif
 +#if PLATFORM(HAIKU)
-+    // An external drag (files from Tracker) carries its files' paths, also over IPC.
-+    WEBCORE_EXPORT DragData(const IntPoint& clientPosition, const IntPoint& globalPosition, const Vector<String>& fileNames, OptionSet<DragOperation>, OptionSet<DragApplicationFlags> = { }, OptionSet<DragDestinationAction> = anyDragDestinationAction(), std::optional<PageIdentifier> pageID = std::nullopt);
++    // Native drag contents travel by value, including across web processes.
++    WEBCORE_EXPORT DragData(const IntPoint& clientPosition, const IntPoint& globalPosition, const Vector<String>& fileNames, const PasteboardCustomData&, OptionSet<DragOperation>, OptionSet<DragApplicationFlags> = { }, OptionSet<DragDestinationAction> = anyDragDestinationAction(), std::optional<PageIdentifier> pageID = std::nullopt);
++#endif
++#if PLATFORM(HAIKU)
++    const PasteboardCustomData& haikuData() const LIFETIME_BOUND { return m_haikuData; }
  #endif
      // This constructor should used only by WebKit2 IPC because DragData
      // is initialized by the decoder and not in the constructor.
+@@ -157,6 +170,9 @@ private:
+ #endif
+ #if PLATFORM(WIN)
+     DragDataMap m_dragDataMap;
++#endif
++#if PLATFORM(HAIKU)
++    PasteboardCustomData m_haikuData;
+ #endif
+     bool m_disallowFileAccess { false };
+ };
 diff --git a/Source/WebCore/platform/DragImage.h b/Source/WebCore/platform/DragImage.h
 index 104157e6a0ad5e8b5b9d88b9cef4b5a19b9aa4f8..c91778df7bc81e283073f0bb479358059c8fc984 100644
 --- a/Source/WebCore/platform/DragImage.h
@@ -17259,7 +17293,7 @@ index d65ff90dc36887139a180ecc8d16be88fde5b1a9..1a4a65584f5f7d6a37d58eece820b628
      crypto/openssl/OpenSSLUtilities.cpp
      crypto/openssl/SerializedCryptoKeyWrapOpenSSL.cpp
 diff --git a/Source/WebCore/platform/Pasteboard.h b/Source/WebCore/platform/Pasteboard.h
-index 961f5caacd9cf17b85b5195b7a142bc937a7f7b9..23c735e56cb8dcd52aba7896d3634e9b505e7411 100644
+index 961f5caacd9cf17b85b5195b7a142bc937a7f7b9..ad7f6f7a0e01238775eee553661c61c8694cabec 100644
 --- a/Source/WebCore/platform/Pasteboard.h
 +++ b/Source/WebCore/platform/Pasteboard.h
 @@ -264,7 +264,13 @@ public:
@@ -17268,22 +17302,23 @@ index 961f5caacd9cf17b85b5195b7a142bc937a7f7b9..23c735e56cb8dcd52aba7896d3634e9b
  
 -#if PLATFORM(WIN)
 +#if PLATFORM(HAIKU)
-+    // A drag-and-drop pasteboard holds what an external drag carries (the
-+    // files dropped on the page); only copy and paste uses the clipboard.
-+    Pasteboard(std::unique_ptr<PasteboardContext>&&, Vector<String>&& dragFileNames);
++    // A drag has its own contents; it never reads or changes the clipboard.
++    Pasteboard(std::unique_ptr<PasteboardContext>&&, Vector<String>&& dragFileNames, const PasteboardCustomData& = { });
++    const PasteboardCustomData& dragDataHaiku() const { return m_dragData; }
 +#endif
 +
 +#if PLATFORM(WIN) || PLATFORM(HAIKU)
      RefPtr<DocumentFragment> documentFragment(LocalFrame&, const SimpleRange&, bool allowPlainText, bool& chosePlainText); // FIXME: Layering violation.
      void writeImage(Element&, const URL&, const String& title); // FIXME: Layering violation.
      void writeSelection(const std::optional<SimpleRange>&, bool canSmartCopyOrDelete, LocalFrame&, ShouldSerializeSelectedTextForDataTransfer = DefaultSelectedTextType); // FIXME: Layering violation.
-@@ -389,6 +395,11 @@ private:
+@@ -389,6 +395,12 @@ private:
  #endif
      Vector<String> m_promisedFileMIMETypes;
  
 +#if PLATFORM(HAIKU)
 +    bool m_forDragAndDrop { false };
 +    Vector<String> m_dragFileNames;
++    PasteboardCustomData m_dragData;
 +#endif
 +
  #if PLATFORM(WIN)
@@ -46625,10 +46660,10 @@ index 0000000000000000000000000000000000000000..9a4f164ae35746049273719ea57e35a5
 +
 diff --git a/Source/WebCore/platform/haiku/DragDataHaiku.cpp b/Source/WebCore/platform/haiku/DragDataHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..7ad802557fbd6a0f81d4d98cbc90880676ae2819
+index 0000000000000000000000000000000000000000..308d4211d7a6852b68df9243a1ca65e95fe4aacd
 --- /dev/null
 +++ b/Source/WebCore/platform/haiku/DragDataHaiku.cpp
-@@ -0,0 +1,111 @@
+@@ -0,0 +1,120 @@
 +/*
 + * Copyright (C) 2007 Apple Inc.  All rights reserved.
 + * Copyright (C) 2007 Ryan Leavengood <leavengood@gmail.com>
@@ -46659,6 +46694,7 @@ index 0000000000000000000000000000000000000000..7ad802557fbd6a0f81d4d98cbc908806
 +#include "DragData.h"
 +
 +#include "Document.h"
++#include "SharedBuffer.h"
 +#include "DocumentFragment.h"
 +#include "NotImplemented.h"
 +#include <wtf/URL.h>
@@ -46666,9 +46702,7 @@ index 0000000000000000000000000000000000000000..7ad802557fbd6a0f81d4d98cbc908806
 +
 +namespace WebCore {
 +
-+// Only drags from other applications reach a page (a drag that starts in a
-+// page is not handed to the system), and of those only files are understood:
-+// Tracker's drags carry refs, which the view turns into paths.
++// Native drag contents are copied into DragData before crossing IPC.
 +
 +bool DragData::canSmartReplace() const
 +{
@@ -46682,12 +46716,12 @@ index 0000000000000000000000000000000000000000..7ad802557fbd6a0f81d4d98cbc908806
 +
 +bool DragData::containsFiles() const
 +{
-+    return !m_fileNames.isEmpty();
++    return !m_fileNames.isEmpty() || !!m_haikuData.readBuffer("image/png"_s);
 +}
 +
 +unsigned DragData::numberOfFiles() const
 +{
-+    return m_fileNames.size();
++    return m_fileNames.size() + !!m_haikuData.readBuffer("image/png"_s);
 +}
 +
 +Vector<String> DragData::asFilenames() const
@@ -46697,12 +46731,12 @@ index 0000000000000000000000000000000000000000..7ad802557fbd6a0f81d4d98cbc908806
 +
 +bool DragData::containsPlainText() const
 +{
-+    return false;
++    return !m_haikuData.readString("text/plain"_s).isNull();
 +}
 +
 +String DragData::asPlainText() const
 +{
-+    return String();
++    return m_haikuData.readString("text/plain"_s);
 +}
 +
 +Color DragData::asColor() const
@@ -46714,19 +46748,29 @@ index 0000000000000000000000000000000000000000..7ad802557fbd6a0f81d4d98cbc908806
 +{
 +    if (purpose == DraggingPurpose::ForFileUpload)
 +        return containsFiles();
-+    return containsColor() || containsURL() || containsPlainText() || containsFiles();
++    return containsURL() || containsPlainText() || containsFiles()
++        || !m_haikuData.readString("text/html"_s).isNull() || !!m_haikuData.readBuffer("image/png"_s);
 +}
 +
 +// A file dropped where the page takes nothing opens in the tab, as in other
 +// browsers: its file: URL is the drag's URL.
 +bool DragData::containsURL(FilenameConversionPolicy policy) const
 +{
-+    return policy == ConvertFilenames && containsFiles();
++    return !asURL(policy).isEmpty();
 +}
 +
 +String DragData::asURL(FilenameConversionPolicy policy, String* title) const
 +{
-+    if (policy != ConvertFilenames || !containsFiles())
++    // URI lists may contain comments and multiple lines; use the first URL.
++    for (auto line : m_haikuData.readString("text/uri-list"_s).split('\n')) {
++        line = line.trim(isASCIIWhitespace);
++        if (!line.isEmpty() && !line.startsWith('#') && URL { line }.isValid()) {
++            if (title)
++                *title = line;
++            return line;
++        }
++    }
++    if (policy != ConvertFilenames || m_fileNames.isEmpty())
 +        return String();
 +    if (title)
 +        *title = m_fileNames[0].substring(m_fileNames[0].reverseFind('/') + 1);
@@ -48346,10 +48390,10 @@ index 0000000000000000000000000000000000000000..de87da3050935c21365e9cf23bf47cf5
 +} // namespace WebCore
 diff --git a/Source/WebCore/platform/haiku/PasteboardHaiku.cpp b/Source/WebCore/platform/haiku/PasteboardHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..272c840064e1290abc654367c841e5e9d70b81e2
+index 0000000000000000000000000000000000000000..618efb61d504a970e5f609bcd961e32d20ed95b2
 --- /dev/null
 +++ b/Source/WebCore/platform/haiku/PasteboardHaiku.cpp
-@@ -0,0 +1,629 @@
+@@ -0,0 +1,720 @@
 +/*
 + * Copyright (C) 2006 Zack Rusin <zack@kde.org>
 + * Copyright (C) 2007 Ryan Leavengood <leavengood@gmail.com>
@@ -48429,7 +48473,7 @@ index 0000000000000000000000000000000000000000..272c840064e1290abc654367c841e5e9
 +
 +std::unique_ptr<Pasteboard> Pasteboard::create(const DragData& dragData)
 +{
-+    return std::make_unique<Pasteboard>(dragData.createPasteboardContext(), dragData.asFilenames());
++    return std::make_unique<Pasteboard>(dragData.createPasteboardContext(), dragData.asFilenames(), dragData.haikuData());
 +}
 +#endif
 +
@@ -48438,10 +48482,11 @@ index 0000000000000000000000000000000000000000..272c840064e1290abc654367c841e5e9
 +{
 +}
 +
-+Pasteboard::Pasteboard(std::unique_ptr<PasteboardContext>&& context, Vector<String>&& dragFileNames)
++Pasteboard::Pasteboard(std::unique_ptr<PasteboardContext>&& context, Vector<String>&& dragFileNames, const PasteboardCustomData& data)
 +    : m_context(std::move(context))
 +    , m_forDragAndDrop(true)
 +    , m_dragFileNames(std::move(dragFileNames))
++    , m_dragData(data)
 +{
 +}
 +
@@ -48557,8 +48602,10 @@ index 0000000000000000000000000000000000000000..272c840064e1290abc654367c841e5e9
 +
 +void Pasteboard::writeString(const String& type, const String& data)
 +{
-+    if (m_forDragAndDrop)
++    if (m_forDragAndDrop) {
++        m_dragData.writeString(type, data);
 +        return;
++    }
 +    if (be_clipboard->Lock()) {
 +        bool result = false;
 +        BMessage* bdata = be_clipboard->Data();
@@ -48583,8 +48630,13 @@ index 0000000000000000000000000000000000000000..272c840064e1290abc654367c841e5e9
 +
 +void Pasteboard::writeSelection(const std::optional<SimpleRange>& selectedRange, bool canSmartCopyOrDelete, LocalFrame& frame, ShouldSerializeSelectedTextForDataTransfer)
 +{
-+    if (m_forDragAndDrop)
++    if (m_forDragAndDrop) {
++        m_dragData.clear();
++        m_dragData.writeString("text/plain"_s, frame.editor().selectedText());
++        if (selectedRange)
++            m_dragData.writeString("text/html"_s, serializePreservingVisualAppearance(*selectedRange, nullptr, AnnotateForInterchange::Yes));
 +        return;
++    }
 +    AutoClipboardLocker locker(be_clipboard);
 +    if (!locker.isLocked())
 +        return;
@@ -48610,8 +48662,11 @@ index 0000000000000000000000000000000000000000..272c840064e1290abc654367c841e5e9
 +
 +void Pasteboard::writePlainText(const String& text, SmartReplaceOption smartReplaceOption)
 +{
-+    if (m_forDragAndDrop)
++    if (m_forDragAndDrop) {
++        m_dragData.clear();
++        m_dragData.writeString("text/plain"_s, text);
 +        return;
++    }
 +    AutoClipboardLocker locker(be_clipboard);
 +    if (!locker.isLocked())
 +        return;
@@ -48631,7 +48686,7 @@ index 0000000000000000000000000000000000000000..272c840064e1290abc654367c841e5e9
 +// as Haiku applications (ShowImage, WonderBrush) paste it.
 +void WebCore::Pasteboard::write(WebCore::PasteboardImage const& pasteboardImage)
 +{
-+    if (m_forDragAndDrop || !pasteboardImage.image)
++    if (!pasteboardImage.image)
 +        return;
 +    RefPtr nativeImage = pasteboardImage.image->nativeImage(ConcreteObjectSize::fixed(pasteboardImage.image->size()));
 +    if (!nativeImage)
@@ -48640,6 +48695,15 @@ index 0000000000000000000000000000000000000000..272c840064e1290abc654367c841e5e9
 +    if (png.isEmpty())
 +        return;
 +
++    if (m_forDragAndDrop) {
++        m_dragData.clear();
++        m_dragData.writeData("image/png"_s, SharedBuffer::create(png.span()));
++        if (!pasteboardImage.url.url.isEmpty()) {
++            m_dragData.writeString("text/uri-list"_s, pasteboardImage.url.url.string());
++            m_dragData.writeString("text/plain"_s, pasteboardImage.url.url.string());
++        }
++        return;
++    }
 +    AutoClipboardLocker locker(be_clipboard);
 +    if (!locker.isLocked())
 +        return;
@@ -48667,8 +48731,12 @@ index 0000000000000000000000000000000000000000..272c840064e1290abc654367c841e5e9
 +
 +void WebCore::Pasteboard::write(WebCore::PasteboardWebContent const& content)
 +{
-+    if (m_forDragAndDrop)
++    if (m_forDragAndDrop) {
++        m_dragData.clear();
++        m_dragData.writeString("text/html"_s, content.markup);
++        m_dragData.writeString("text/plain"_s, content.text);
 +        return;
++    }
 +    AutoClipboardLocker locker(be_clipboard);
 +    if (!locker.isLocked())
 +        return;
@@ -48687,8 +48755,11 @@ index 0000000000000000000000000000000000000000..272c840064e1290abc654367c841e5e9
 +
 +void WebCore::Pasteboard::writeMarkup(WTF::String const& text)
 +{
-+    if (m_forDragAndDrop)
++    if (m_forDragAndDrop) {
++        m_dragData.clear();
++        m_dragData.writeString("text/html"_s, text);
 +        return;
++    }
 +    AutoClipboardLocker locker(be_clipboard);
 +    if (!locker.isLocked())
 +        return;
@@ -48707,8 +48778,14 @@ index 0000000000000000000000000000000000000000..272c840064e1290abc654367c841e5e9
 +
 +void Pasteboard::write(const PasteboardURL& url)
 +{
-+    if (m_forDragAndDrop)
++    if (m_forDragAndDrop) {
++        m_dragData.clear();
++        m_dragData.writeString("text/plain"_s, url.url.string());
++        m_dragData.writeString("text/uri-list"_s, url.url.string());
++        if (!url.markup.isEmpty())
++            m_dragData.writeString("text/html"_s, url.markup);
 +        return;
++    }
 +    ASSERT(!url.url.isEmpty());
 +
 +    AutoClipboardLocker locker(be_clipboard);
@@ -48732,8 +48809,11 @@ index 0000000000000000000000000000000000000000..272c840064e1290abc654367c841e5e9
 +
 +Pasteboard::FileContentState Pasteboard::fileContentState()
 +{
-+    if (m_forDragAndDrop)
-+        return m_dragFileNames.isEmpty() ? FileContentState::NoFileOrImageData : FileContentState::MayContainFilePaths;
++    if (m_forDragAndDrop) {
++        if (!m_dragFileNames.isEmpty())
++            return FileContentState::MayContainFilePaths;
++        return m_dragData.readBuffer("image/png"_s) ? FileContentState::InMemoryImage : FileContentState::NoFileOrImageData;
++    }
 +    AutoClipboardLocker locker(be_clipboard);
 +    if (!locker.isLocked())
 +        return FileContentState::NoFileOrImageData;
@@ -48755,8 +48835,10 @@ index 0000000000000000000000000000000000000000..272c840064e1290abc654367c841e5e9
 +
 +void Pasteboard::read(PasteboardPlainText& text, WebCore::PlainTextURLReadingPolicy, std::optional<long unsigned int>)
 +{
-+    if (m_forDragAndDrop)
++    if (m_forDragAndDrop) {
++        text.text = m_dragData.readString("text/plain"_s);
 +        return;
++    }
 +    AutoClipboardLocker locker(be_clipboard);
 +    if (!locker.isLocked())
 +        return;
@@ -48776,8 +48858,26 @@ index 0000000000000000000000000000000000000000..272c840064e1290abc654367c841e5e9
 +													  bool allowPlainText, bool& chosePlainText)
 +{
 +    chosePlainText = false;
-+    if (m_forDragAndDrop)
++    if (m_forDragAndDrop) {
++        auto html = m_dragData.readString("text/html"_s);
++        if (!html.isEmpty()) {
++            if (RefPtr fragment = createFragmentFromMarkup(*frame.document(), html, String(), { }))
++                return fragment;
++        }
++        if (auto image = m_dragData.readBuffer("image/png"_s); image && frame.document()) {
++            Ref document = *frame.document();
++            auto url = DOMURL::createObjectURL(document, Blob::create(document.ptr(), image->extractData(), "image/png"_s));
++            return createFragmentForImageAndURL(document, url, { });
++        }
++        if (allowPlainText) {
++            auto text = m_dragData.readString("text/plain"_s);
++            if (!text.isNull()) {
++                chosePlainText = true;
++                return createFragmentFromText(context, text);
++            }
++        }
 +        return nullptr;
++    }
 +
 +    AutoClipboardLocker locker(be_clipboard);
 +    if (!locker.isLocked())
@@ -48826,7 +48926,7 @@ index 0000000000000000000000000000000000000000..272c840064e1290abc654367c841e5e9
 +bool Pasteboard::hasData()
 +{
 +    if (m_forDragAndDrop)
-+        return !m_dragFileNames.isEmpty();
++        return !m_dragFileNames.isEmpty() || m_dragData.hasData();
 +    bool result = false;
 +
 +    if (be_clipboard->Lock()) {
@@ -48843,8 +48943,10 @@ index 0000000000000000000000000000000000000000..272c840064e1290abc654367c841e5e9
 +
 +void Pasteboard::clear(const String& type)
 +{
-+    if (m_forDragAndDrop)
++    if (m_forDragAndDrop) {
++        m_dragData.clear(type);
 +        return;
++    }
 +    if (be_clipboard->Lock()) {
 +        BMessage* data = be_clipboard->Data();
 +
@@ -48859,6 +48961,8 @@ index 0000000000000000000000000000000000000000..272c840064e1290abc654367c841e5e9
 +
 +String Pasteboard::readOrigin()
 +{
++    if (m_forDragAndDrop)
++        return m_dragData.origin();
 +    notImplemented(); // webkit.org/b/177633: [GTK] Move to new Pasteboard API
 +    return { };
 +}
@@ -48866,7 +48970,7 @@ index 0000000000000000000000000000000000000000..272c840064e1290abc654367c841e5e9
 +String Pasteboard::readString(const String& type)
 +{
 +    if (m_forDragAndDrop)
-+        return { };
++        return m_dragData.readString(type);
 +    String result;
 +
 +    if (be_clipboard->Lock()) {
@@ -48886,13 +48990,18 @@ index 0000000000000000000000000000000000000000..272c840064e1290abc654367c841e5e9
 +
 +String Pasteboard::readStringInCustomData(const String& type)
 +{
-+	return readString(type);
++    if (m_forDragAndDrop)
++        return m_dragData.readStringInCustomData(type);
++    return readString(type);
 +}
 +
 +void Pasteboard::clear()
 +{
-+    if (m_forDragAndDrop)
++    if (m_forDragAndDrop) {
++        m_dragData.clear();
++        m_dragFileNames.clear();
 +        return;
++    }
 +    AutoClipboardLocker locker(be_clipboard);
 +    if (!locker.isLocked())
 +        return;
@@ -48914,8 +49023,10 @@ index 0000000000000000000000000000000000000000..272c840064e1290abc654367c841e5e9
 +Vector<String> Pasteboard::typesForLegacyUnsafeBindings()
 +{
 +    Vector<String> result;
-+    if (m_forDragAndDrop)
++    if (m_forDragAndDrop) {
++        m_dragData.forEachPlatformString([&](const String& type, const String&) { result.append(type); });
 +        return result;
++    }
 +
 +    if (be_clipboard->Lock()) {
 +        BMessage* data = be_clipboard->Data();
@@ -48937,14 +49048,34 @@ index 0000000000000000000000000000000000000000..272c840064e1290abc654367c841e5e9
 +    return result;
 +}
 +
-+Vector<String> Pasteboard::typesSafeForBindings(const String&)
++Vector<String> Pasteboard::typesSafeForBindings(const String& origin)
 +{
-+	return typesForLegacyUnsafeBindings();
++    if (!m_forDragAndDrop)
++        return typesForLegacyUnsafeBindings();
++    OrderedHashSet<String> types;
++    if (m_dragData.origin() == origin) {
++        m_dragData.forEachCustomString([&](const String& type, const String&) { types.add(type); });
++    }
++    m_dragData.forEachPlatformString([&](const String& type, const String&) {
++        if (type == "text/plain"_s || type == "text/html"_s || type == "text/uri-list"_s)
++            types.add(type);
++    });
++    return copyToVector(types);
 +}
 +
 +void Pasteboard::writeCustomData(const WTF::Vector<PasteboardCustomData>& data, WebCore::PasteboardWriteType)
 +{
-+	if (!data.isEmpty()) {
++    if (m_forDragAndDrop && !data.isEmpty()) {
++        const auto& custom = data[0];
++        m_dragData.setOrigin(custom.origin());
++        custom.forEachPlatformStringOrBuffer([&](const String& type, const auto& value) {
++            WTF::switchOn(value, [&](const String& text) { m_dragData.writeString(type, text); },
++                [&](const Ref<SharedBuffer>& buffer) { m_dragData.writeData(type, buffer.copyRef()); });
++        });
++        custom.forEachCustomString([&](const String& type, const String& value) { m_dragData.writeStringInCustomData(type, value); });
++        return;
++    }
++    if (!data.isEmpty()) {
 +		const auto& customData = data[0];
 +		customData.forEachPlatformString([this] (auto& type, auto& string) {
 +			writeString(type, string);
@@ -48960,6 +49091,10 @@ index 0000000000000000000000000000000000000000..272c840064e1290abc654367c841e5e9
 +        for (size_t i = 0; i < m_dragFileNames.size(); ++i) {
 +            if (!index || *index == i)
 +                reader.readFilename(m_dragFileNames[i]);
++        }
++        if ((!index || *index == m_dragFileNames.size()) && reader.shouldReadBuffer("image/png"_s)) {
++            if (auto image = m_dragData.readBuffer("image/png"_s))
++                reader.readBuffer("image.png"_s, "image/png"_s, image.releaseNonNull());
 +        }
 +        return;
 +    }
@@ -78352,7 +78487,7 @@ index 04bfb854a2dae611ac4afa90715c69dafcea9def..2fecf75852ff63db9504d0330b5bc3c0
  
  #if HAVE(COOKIE_CHANGE_LISTENER_API)
 diff --git a/Source/WebKit/Shared/WebCoreArgumentCoders.serialization.in b/Source/WebKit/Shared/WebCoreArgumentCoders.serialization.in
-index 1592d815c2ff85825a27006ec9fc7d559abde82c..3d8bbcf8581996a07b2bd3303e202ef2cefbc67d 100644
+index 1592d815c2ff85825a27006ec9fc7d559abde82c..ff324b9ee6613fa0fccd923e1cbf760cbd7a7541 100644
 --- a/Source/WebKit/Shared/WebCoreArgumentCoders.serialization.in
 +++ b/Source/WebKit/Shared/WebCoreArgumentCoders.serialization.in
 @@ -1700,7 +1700,7 @@ header: <wtf/MachSendRight.h>
@@ -78364,7 +78499,7 @@ index 1592d815c2ff85825a27006ec9fc7d559abde82c..3d8bbcf8581996a07b2bd3303e202ef2
      [Validator='!!m_handle && *m_handle'] UnixFileDescriptor m_handle;
  #endif
  #if OS(DARWIN)
-@@ -1845,8 +1845,10 @@ class WebCore::DragData {
+@@ -1845,8 +1845,13 @@ class WebCore::DragData {
  #endif
      WebCore::IntPoint clientPosition();
      WebCore::IntPoint globalPosition();
@@ -78372,11 +78507,14 @@ index 1592d815c2ff85825a27006ec9fc7d559abde82c..3d8bbcf8581996a07b2bd3303e202ef2
 +#if PLATFORM(COCOA) || PLATFORM(HAIKU)
      Vector<String> fileNames();
 +#endif
++#if PLATFORM(HAIKU)
++    WebCore::PasteboardCustomData haikuData();
++#endif
 +#if PLATFORM(COCOA)
      Vector<String> promisedFileMIMETypes();
  #endif
      OptionSet<WebCore::DragOperation> draggingSourceOperationMask();
-@@ -3160,6 +3162,9 @@ enum class WebCore::MediaPlayerMediaEngineIdentifier : uint8_t {
+@@ -3160,6 +3165,9 @@ enum class WebCore::MediaPlayerMediaEngineIdentifier : uint8_t {
      AVFoundationCF,
      GStreamer,
      GStreamerMSE,
@@ -78386,7 +78524,7 @@ index 1592d815c2ff85825a27006ec9fc7d559abde82c..3d8bbcf8581996a07b2bd3303e202ef2
      HolePunch,
      MediaFoundation,
      MockMSE,
-@@ -6784,7 +6789,11 @@ using WebCore::GlyphBufferGlyph = CGGlyph
+@@ -6784,7 +6792,11 @@ using WebCore::GlyphBufferGlyph = CGGlyph
  #else
  using WebCore::GlyphBufferGlyph = WebCore::Glyph
  #endif
@@ -78398,7 +78536,7 @@ index 1592d815c2ff85825a27006ec9fc7d559abde82c..3d8bbcf8581996a07b2bd3303e202ef2
  
  enum class WebCore::ContentExtensionDefaultEnablement : bool
  using WebCore::ContentExtensionEnablement = std::pair<WebCore::ContentExtensionDefaultEnablement, HashSet<String>>;
-@@ -6912,6 +6921,9 @@ struct WebCore::OwnerPermissionsPolicyData {
+@@ -6912,6 +6924,9 @@ struct WebCore::OwnerPermissionsPolicyData {
      SyncXHR,
      Fullscreen,
      WebShare,
@@ -78408,7 +78546,7 @@ index 1592d815c2ff85825a27006ec9fc7d559abde82c..3d8bbcf8581996a07b2bd3303e202ef2
  #if ENABLE(DEVICE_ORIENTATION)
      Gyroscope,
      Accelerometer,
-@@ -6934,7 +6946,9 @@ struct WebCore::OwnerPermissionsPolicyData {
+@@ -6934,7 +6949,9 @@ struct WebCore::OwnerPermissionsPolicyData {
  
  class WebCore::PermissionsPolicy {
      WebCore::PermissionsPolicy::InheritedPolicy inheritedPolicy()
@@ -83070,15 +83208,23 @@ index 0000000000000000000000000000000000000000..d28a6cad6339adf79b155cf974e85bfd
 +
 diff --git a/Source/WebKit/UIProcess/API/haiku/WebKitView.cpp b/Source/WebKit/UIProcess/API/haiku/WebKitView.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..3bc39230080f5a8bf406cfdcc8f457bf18d455f6
+index 0000000000000000000000000000000000000000..395e11a0036f34ea857ca766de25a46654e52b94
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/API/haiku/WebKitView.cpp
-@@ -0,0 +1,1077 @@
+@@ -0,0 +1,1309 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#include "config.h"
 +#include "WebKitView.h"
 +#include <Path.h>
++#include <Directory.h>
++#include <File.h>
++#include <NodeInfo.h>
++#include <String.h>
++#include <sys/stat.h>
++#include <fcntl.h>
++#include <cerrno>
++#include <unistd.h>
 +#include <Entry.h>
 +
 +#include "WebKit2Initialize.h"
@@ -83797,6 +83943,8 @@ index 0000000000000000000000000000000000000000..3bc39230080f5a8bf406cfdcc8f457bf
 +
 +void BWebKitView::DetachedFromWindow()
 +{
++    FinishDrag(0, ConvertToScreen(BPoint()));
++    m_state->sourceDragData = nullptr;
 +    if (auto* filter = std::exchange(m_state->windowFilter, nullptr)) {
 +        Window()->RemoveCommonFilter(filter);
 +        delete filter;
@@ -83981,15 +84129,123 @@ index 0000000000000000000000000000000000000000..3bc39230080f5a8bf406cfdcc8f457bf
 +
 +void BWebKitView::MouseUp(BPoint point)
 +{
++    if (m_state->sourceDragActive)
++        return;
 +    if (Window() && Window()->CurrentMessage())
 +        SendInput(*Window()->CurrentMessage(), point);
 +}
 +
-+// Files dragged from Tracker (any drag carrying refs) are offered to the page
-+// as an HTML drag; the page sees no mouse moves meanwhile, as in other ports.
++static bool isPageDragHaiku(const BMessage& message)
++{
++    if (message.HasRef("refs") || message.HasData("org.webkit.drag-data", B_RAW_TYPE))
++        return true;
++    for (auto* type : { "text/plain", "text/html", "text/uri-list", "image/png" }) {
++        if (message.HasData(type, B_MIME_TYPE))
++            return true;
++    }
++    return false;
++}
++
++static uint64 dragSessionHaiku(const BMessage& message)
++{
++    BMessage origin;
++    return message.FindMessage("be:originator-data", &origin) == B_OK ? origin.GetUInt64("webkit:session", 0) : 0;
++}
++
++void BWebKitView::StartDrag(const BMessage& source)
++{
++    if (!Window() || m_state->closed)
++        return;
++    BPoint point;
++    uint32 buttons = 0;
++    GetMouse(&point, &buttons, false);
++    if (m_state->sourceDragActive)
++        FinishDrag(0, ConvertToScreen(point));
++    static std::atomic<uint64_t> nextSession { 1 };
++    m_state->sourceDragSession = nextSession.fetch_add(1);
++    m_state->sourceDragActive = true;
++    m_state->sourceDragPending = false;
++    m_state->sourceDragReleasedAt = 0;
++    m_state->sourceDragData = std::make_unique<BMessage>(source);
++    if (!(buttons & B_PRIMARY_MOUSE_BUTTON)) {
++        FinishDrag(0, ConvertToScreen(point));
++        return;
++    }
++
++    BMessage drag(source);
++    drag.what = B_SIMPLE_DATA;
++    drag.RemoveName("preview");
++    drag.RemoveName("width");
++    drag.RemoveName("height");
++    drag.RemoveName("stride");
++    drag.RemoveName("hotspot");
++    BMessage origin;
++    origin.AddUInt64("webkit:session", m_state->sourceDragSession);
++    drag.AddMessage("be:originator-data", &origin);
++    drag.AddInt32("be:actions", B_COPY_TARGET);
++    const void* bytes = nullptr;
++    ssize_t length = 0;
++    const bool image = drag.HasData("image/png", B_MIME_TYPE);
++    drag.AddString("be:clip_name", image ? "Image.png" : "Text clipping");
++    for (auto* type : { "image/png", "text/plain", "text/html" }) {
++        if (drag.HasData(type, B_MIME_TYPE)) {
++            drag.AddString("be:types", type);
++            drag.AddString("be:filetypes", type);
++            drag.AddString("be:type_descriptions", type);
++        }
++    }
++    if (drag.HasString("be:filetypes"))
++        drag.AddString("be:types", B_FILE_MIME_TYPE);
++    if (drag.FindData("text/uri-list", B_MIME_TYPE, &bytes, &length) == B_OK && length > 0) {
++        std::string url(static_cast<const char*>(bytes), length);
++        auto newline = url.find_first_of("\r\n");
++        if (newline != std::string::npos)
++            url.resize(newline);
++        if (!url.empty() && url[0] != '#')
++            drag.AddString("summit:url", url.c_str());
++    }
++
++    std::unique_ptr<BBitmap> bitmap;
++    int32 width = source.GetInt32("width", 0), height = source.GetInt32("height", 0), stride = source.GetInt32("stride", 0);
++    if (width > 0 && width <= 2048 && height > 0 && height <= 2048 && stride >= width * 4 && stride <= 16384
++        && source.FindData("preview", B_RAW_TYPE, &bytes, &length) == B_OK && length == stride * height) {
++        bitmap = std::make_unique<BBitmap>(BRect(0, 0, width - 1, height - 1), B_RGBA32);
++        if (bitmap->InitCheck() != B_OK || bitmap->ImportBits(bytes, length, stride, 0, B_RGBA32) != B_OK)
++            bitmap = nullptr;
++    }
++    m_state->sourceDragData->RemoveName("preview");
++    BPoint hotspot = source.GetPoint("hotspot", BPoint());
++    if (!std::isfinite(hotspot.x) || !std::isfinite(hotspot.y))
++        hotspot = BPoint();
++    SetMouseEventMask(B_POINTER_EVENTS, B_NO_POINTER_HISTORY);
++    if (bitmap)
++        DragMessage(&drag, bitmap.release(), B_OP_ALPHA, hotspot);
++    else
++        DragMessage(&drag, BRect(point.x - 8, point.y - 8, point.x + 8, point.y + 8));
++    dispatchViewMessageHaiku(m_state, BMessage(viewDragStartedHaiku));
++    BMessage tick(viewNativeDragTickHaiku);
++    tick.AddUInt64("session", m_state->sourceDragSession);
++    m_state->sourceDragTimer = std::make_unique<BMessageRunner>(BMessenger(this), &tick, 50000);
++}
++
++void BWebKitView::FinishDrag(uint32 operation, BPoint screenPoint)
++{
++    if (!m_state->sourceDragActive)
++        return;
++    m_state->sourceDragActive = false;
++    m_state->sourceDragPending = false;
++    m_state->sourceDragTimer = nullptr;
++    BMessage ended(viewDragEndedHaiku);
++    ended.AddPoint("screen", screenPoint);
++    ended.AddPoint("local", ConvertFromScreen(screenPoint));
++    auto allowed = m_state->sourceDragData ? m_state->sourceDragData->GetUInt32("operations", 0) : 0;
++    ended.AddUInt32("operation", operation & allowed);
++    dispatchViewMessageHaiku(m_state, std::move(ended));
++}
++
 +void BWebKitView::MouseMoved(BPoint point, uint32 transit, const BMessage* dragMessage)
 +{
-+    if (dragMessage && dragMessage->HasRef("refs")) {
++    if (dragMessage && isPageDragHaiku(*dragMessage)) {
 +        if (transit == B_EXITED_VIEW || transit == B_OUTSIDE_VIEW) {
 +            if (m_state->dragActive)
 +                SendDrag(*dragMessage, point, "exited");
@@ -83997,11 +84253,9 @@ index 0000000000000000000000000000000000000000..3bc39230080f5a8bf406cfdcc8f457bf
 +            SendDrag(*dragMessage, point, m_state->dragActive ? "updated" : "entered");
 +        return;
 +    }
-+    if (m_state->dragActive) {
-+        // The drag ended somewhere else, or was cancelled.
++    if (m_state->dragActive)
 +        SendDrag(BMessage(), point, "exited");
-+    }
-+    if (Window() && Window()->CurrentMessage())
++    if (!m_state->sourceDragActive && Window() && Window()->CurrentMessage())
 +        SendInput(*Window()->CurrentMessage(), point);
 +}
 +
@@ -84016,6 +84270,7 @@ index 0000000000000000000000000000000000000000..3bc39230080f5a8bf406cfdcc8f457bf
 +    message.AddString("phase", phase);
 +    message.AddPoint("local", point);
 +    message.AddPoint("screen", ConvertToScreen(point));
++    message.AddBool("copy", modifiers() & B_CONTROL_KEY);
 +    if (entering) {
 +        entry_ref ref;
 +        for (int32 index = 0; drag.FindRef("refs", index, &ref) == B_OK; ++index) {
@@ -84024,17 +84279,132 @@ index 0000000000000000000000000000000000000000..3bc39230080f5a8bf406cfdcc8f457bf
 +            if (entry.GetPath(&path) == B_OK)
 +                message.AddString("path", path.Path());
 +        }
++        const void* data = nullptr;
++        ssize_t length = 0;
++        if (drag.FindData("org.webkit.drag-data", B_RAW_TYPE, &data, &length) == B_OK && length > 0 && length <= 1024 * 1024)
++            message.AddData("org.webkit.drag-data", B_RAW_TYPE, data, length);
++        for (auto* type : { "text/plain", "text/html", "text/uri-list", "image/png" }) {
++            if (drag.FindData(type, B_MIME_TYPE, &data, &length) == B_OK && length >= 0 && length <= 16 * 1024 * 1024)
++                message.AddData(type, B_MIME_TYPE, data, length);
++        }
++        message.AddUInt32("operations", drag.GetUInt32("operations", 1 | 2 | 4));
++    }
++    if (!strcmp(phase, "drop")) {
++        MakeFocus();
++        auto session = dragSessionHaiku(drag);
++        message.AddUInt64("session", session);
++        message.AddMessenger("source", drag.ReturnAddress());
++        if (session) {
++            BMessage pending(viewNativeDragPendingHaiku);
++            pending.AddUInt64("session", session);
++            drag.ReturnAddress().SendMessage(&pending, static_cast<BHandler*>(nullptr), 0);
++        }
 +    }
 +    dispatchViewMessageHaiku(m_state, std::move(message));
 +}
 +
++// Tracker creates an empty clipping file and replies with its directory/name.
++// Refuse paths and existing nonempty files; never follow a symlink supplied as
++// the negotiated filename. Native applications can also request MIME bytes.
++static bool exportDragHaiku(BMessage& request, const BMessage& data)
++{
++    const char* type = request.GetString("be:filetypes", request.GetString("be:types", ""));
++    if (strcmp(type, "image/png") && strcmp(type, "text/plain") && strcmp(type, "text/html"))
++        return false;
++    const void* bytes = nullptr;
++    ssize_t length = 0;
++    if (data.FindData(type, B_MIME_TYPE, &bytes, &length) != B_OK || length < 0)
++        return false;
++    entry_ref directory;
++    const char* name = nullptr;
++    if (request.FindRef("directory", &directory) == B_OK && request.FindString("name", &name) == B_OK) {
++        if (!name || !*name || !strcmp(name, ".") || !strcmp(name, "..") || strchr(name, '/') || strlen(name) >= B_FILE_NAME_LENGTH)
++            return false;
++        BPath path(&directory);
++        if (path.InitCheck() != B_OK || path.Append(name) != B_OK)
++            return false;
++        int descriptor = open(path.Path(), O_WRONLY | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0600);
++        if (descriptor < 0)
++            return false;
++        struct stat info;
++        bool success = fstat(descriptor, &info) == 0 && S_ISREG(info.st_mode) && !info.st_size;
++        size_t written = 0;
++        while (success && written < static_cast<size_t>(length)) {
++            auto count = write(descriptor, static_cast<const uint8_t*>(bytes) + written, length - written);
++            if (count <= 0) {
++                if (count < 0 && errno == EINTR)
++                    continue;
++                success = false;
++            } else
++                written += count;
++        }
++        close(descriptor);
++        if (success) {
++            BNode node(path.Path());
++            BNodeInfo(&node).SetType(type);
++        }
++        return success;
++    }
++    BMessage reply(B_MIME_DATA);
++    reply.AddData(type, B_MIME_TYPE, bytes, length);
++    return request.SendReply(&reply) == B_OK;
++}
++
 +void BWebKitView::MessageReceived(BMessage* message)
 +{
-+    if (message->WasDropped() && message->HasRef("refs")) {
++    if (message->WasDropped() && isPageDragHaiku(*message)) {
 +        SendDrag(*message, ConvertFromScreen(message->DropPoint()), "drop");
 +        return;
 +    }
 +    switch (message->what) {
++    case viewStartDragHaiku:
++        StartDrag(*message);
++        return;
++    case viewNativeDragPendingHaiku:
++        if (m_state->sourceDragActive && message->GetUInt64("session", 0) == m_state->sourceDragSession)
++            m_state->sourceDragPending = true;
++        return;
++    case viewNativeDragReplyHaiku:
++        if (message->GetUInt64("session", 0) == m_state->sourceDragSession)
++            FinishDrag(message->GetUInt32("operation", 0), message->GetPoint("screen", ConvertToScreen(BPoint())));
++        return;
++    case viewNativeDragTickHaiku: {
++        if (!m_state->sourceDragActive || message->GetUInt64("session", 0) != m_state->sourceDragSession)
++            return;
++        BPoint point;
++        uint32 buttons = 0;
++        GetMouse(&point, &buttons, false);
++        if (buttons)
++            return;
++        if (!m_state->sourceDragReleasedAt)
++            m_state->sourceDragReleasedAt = system_time();
++        // Native mouse-up precedes delivery of the drop message. Give the
++        // target time to acknowledge it, and wait for WebKit's async result.
++        bigtime_t timeout = m_state->sourceDragPending ? 10000000 : 750000;
++        if (system_time() - m_state->sourceDragReleasedAt >= timeout)
++            FinishDrag(0, ConvertToScreen(point));
++        return;
++    }
++    case B_COPY_TARGET: {
++        if (!m_state->sourceDragData || dragSessionHaiku(*message) != m_state->sourceDragSession)
++            return;
++        bool accepted = exportDragHaiku(*message, *m_state->sourceDragData);
++        BPoint point;
++        uint32 buttons = 0;
++        GetMouse(&point, &buttons, false);
++        FinishDrag(accepted ? 1 : 0, ConvertToScreen(point));
++        return;
++    }
++    case B_REPLY:
++        if (dragSessionHaiku(*message) && dragSessionHaiku(*message) == m_state->sourceDragSession) {
++            BPoint point;
++            uint32 buttons = 0;
++            GetMouse(&point, &buttons, false);
++            FinishDrag(message->GetInt32("be:action", 0) == B_COPY_TARGET ? 1 : 0, ConvertToScreen(point));
++            return;
++        }
++        BView::MessageReceived(message);
++        return;
 +    case viewRetryCloseHaiku:
 +        RequestClose();
 +        return;
@@ -84153,10 +84523,10 @@ index 0000000000000000000000000000000000000000..3bc39230080f5a8bf406cfdcc8f457bf
 +}
 diff --git a/Source/WebKit/UIProcess/API/haiku/WebKitView.h b/Source/WebKit/UIProcess/API/haiku/WebKitView.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..6795abf559ae9a2bc3aa858342d55e880c511dcb
+index 0000000000000000000000000000000000000000..4cc2dcf1f8d4f9d0e1e953f1e01663f142f10825
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/API/haiku/WebKitView.h
-@@ -0,0 +1,386 @@
+@@ -0,0 +1,388 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#pragma once
@@ -84533,7 +84903,9 @@ index 0000000000000000000000000000000000000000..6795abf559ae9a2bc3aa858342d55e88
 +    BWebKitView(BRect, const char*, std::shared_ptr<WebKit::WebViewStateHaiku>);
 +    void UpdateGeometry();
 +    void SendInput(const BMessage&, BPoint = BPoint());
-+    // Offers files dragged from another application to the page.
++    void StartDrag(const BMessage&);
++    void FinishDrag(uint32 operation, BPoint screenPoint);
++    // Offers native text, images, URLs and files to the page.
 +    void SendDrag(const BMessage& drag, BPoint, const char* phase);
 +    void SendCommand(uint32, const char* = nullptr);
 +    void ChangeZoomFactor(int32 direction, bool textOnly);
@@ -107060,10 +107432,18 @@ index 3f32fc7518d0318997e6bfc56b4440e834e0a31e..41305411f66be6bb786ba9a7555c1254
      DeleteWebsiteDataInWebProcessesForOrigin(OptionSet<WebKit::WebsiteDataType> websiteDataTypes, struct WebCore::ClientOrigin origin, PAL::SessionID sessionID, WebKit::WebPageProxyIdentifier webPageProxyID) -> ()
      ReloadExecutionContextsForOrigin(struct WebCore::ClientOrigin origin, PAL::SessionID sessionID, std::optional<WebCore::FrameIdentifier> triggeringFrame) -> ()
 diff --git a/Source/WebKit/UIProcess/PageClient.h b/Source/WebKit/UIProcess/PageClient.h
-index 69bcb99cf5da330d75b81fe8f53dec86a972175e..6b8b09c762020219201e4d3b5df3e9d894c51f0c 100644
+index 69bcb99cf5da330d75b81fe8f53dec86a972175e..161bba099b54f1c115eb73e82678a6dfe20a97d9 100644
 --- a/Source/WebKit/UIProcess/PageClient.h
 +++ b/Source/WebKit/UIProcess/PageClient.h
-@@ -263,6 +263,12 @@ public:
+@@ -153,6 +153,7 @@ template <typename> class RectEdges;
+ 
+ #if ENABLE(DRAG_SUPPORT)
+ struct DragItem;
++class PasteboardCustomData;
+ #endif
+ 
+ #if ENABLE(ATTACHMENT_ELEMENT)
+@@ -263,6 +264,12 @@ public:
      // Tell the view to invalidate the given region. The region is in view coordinates.
      virtual void setViewNeedsDisplay(const WebCore::Region&) = 0;
  
@@ -107076,7 +107456,17 @@ index 69bcb99cf5da330d75b81fe8f53dec86a972175e..6b8b09c762020219201e4d3b5df3e9d8
      // Tell the view to scroll to the given position, and whether this was a programmatic scroll.
      virtual void requestScroll(const WebCore::FloatPoint& scrollPosition, const WebCore::IntPoint& scrollOrigin, WebCore::ScrollIsAnimated, WebCore::InterruptScrollAnimation) = 0;
  
-@@ -672,6 +678,18 @@ public:
+@@ -373,6 +380,9 @@ public:
+     virtual void startDrag(WebCore::SelectionData&&, OptionSet<WebCore::DragOperation>, RefPtr<WebCore::ShareableBitmap>&& dragImage, WebCore::IntPoint&& dragImageHotspot) = 0;
+ #else
+     virtual void startDrag(const WebCore::DragItem&, WebCore::ShareableBitmap::Handle&&, const std::optional<WebCore::NodeIdentifier>&, const std::optional<WebCore::FrameIdentifier>&) { }
++#endif
++#if PLATFORM(HAIKU)
++    virtual void startDragHaiku(WebCore::PasteboardCustomData&&, OptionSet<WebCore::DragOperation>, RefPtr<WebCore::ShareableBitmap>&&, const WebCore::IntPoint&, const String&) { }
+ #endif
+     virtual void didPerformDragOperation(bool) { }
+     virtual void didPerformDragControllerAction() { }
+@@ -672,6 +682,18 @@ public:
      virtual void cancelTextRecognitionForVideoInElementFullscreen() { }
  #endif
  
@@ -107711,10 +108101,18 @@ index abc66b25d5be6d2b961364268f19eb3762ab2c3a..b614caa06360b72f8acacff7d4eef488
  #endif
  
 diff --git a/Source/WebKit/UIProcess/WebPageProxy.h b/Source/WebKit/UIProcess/WebPageProxy.h
-index 30bfad6de4894bb5b8aeaf5d1d31cf4df4091e3a..5c76ef1eb0dd1d4cfac2da09088a0d92749a6fe0 100644
+index 30bfad6de4894bb5b8aeaf5d1d31cf4df4091e3a..ddfa0ec67b230dd20caf7955e7ccd9207971b3bf 100644
 --- a/Source/WebKit/UIProcess/WebPageProxy.h
 +++ b/Source/WebKit/UIProcess/WebPageProxy.h
-@@ -1138,6 +1138,18 @@ public:
+@@ -152,6 +152,7 @@ class Cursor;
+ class DataSegment;
+ class DocumentSyncData;
+ class DragData;
++class PasteboardCustomData;
+ class Exception;
+ class FloatPoint;
+ class FloatQuad;
+@@ -1138,6 +1139,18 @@ public:
      void clearSelection(std::optional<WebCore::FrameIdentifier> = std::nullopt);
      void restoreSelectionInFocusedEditableElement();
  
@@ -107733,7 +108131,17 @@ index 30bfad6de4894bb5b8aeaf5d1d31cf4df4091e3a..5c76ef1eb0dd1d4cfac2da09088a0d92
      PageClient* NODELETE pageClient() const;
  
      void setViewNeedsDisplay(const WebCore::Region&);
-@@ -1985,6 +1997,9 @@ public:
+@@ -1878,6 +1891,9 @@ public:
+ #if PLATFORM(GTK) || PLATFORM(WPE)
+     void startDrag(WebCore::SelectionData&&, OptionSet<WebCore::DragOperation>, std::optional<WebCore::ShareableBitmapHandle>&& dragImage, WebCore::IntPoint&& dragImageHotspot);
+ #endif
++#if PLATFORM(HAIKU)
++    void startDragHaiku(WebCore::PasteboardCustomData&&, OptionSet<WebCore::DragOperation>, std::optional<WebCore::ShareableBitmapHandle>&&, const WebCore::IntPoint&, const String&);
++#endif
+ #if ENABLE(MODEL_PROCESS)
+     void modelDragEnded(const WebCore::NodeIdentifier);
+ #endif
+@@ -1985,6 +2001,9 @@ public:
  #endif
  
      void preferencesDidChange();
@@ -107743,7 +108151,7 @@ index 30bfad6de4894bb5b8aeaf5d1d31cf4df4091e3a..5c76ef1eb0dd1d4cfac2da09088a0d92
  
  #if ENABLE(CONTEXT_MENUS)
      // Called by the WebContextMenuProxy.
-@@ -3948,6 +3963,13 @@ private:
+@@ -3948,6 +3967,13 @@ private:
      Ref<WebProcessProxy> m_legacyMainFrameProcess;
      const Ref<WebPageGroup> m_pageGroup;
      Ref<WebPreferences> m_preferences;
@@ -107758,7 +108166,7 @@ index 30bfad6de4894bb5b8aeaf5d1d31cf4df4091e3a..5c76ef1eb0dd1d4cfac2da09088a0d92
      const Ref<WebUserContentControllerProxy> m_userContentController;
  
 diff --git a/Source/WebKit/UIProcess/WebPageProxy.messages.in b/Source/WebKit/UIProcess/WebPageProxy.messages.in
-index e546b9c0d5424549b7c9ba06641850c46571f772..aa27a8481d58ff038285afb44cb238db226c7f5f 100644
+index e546b9c0d5424549b7c9ba06641850c46571f772..885a0739abe44a6ce7498675d3f4267876c3e0d9 100644
 --- a/Source/WebKit/UIProcess/WebPageProxy.messages.in
 +++ b/Source/WebKit/UIProcess/WebPageProxy.messages.in
 @@ -27,8 +27,20 @@ Copyright (C) 2010-2024 Apple Inc. All rights reserved.
@@ -107782,6 +108190,17 @@ index e546b9c0d5424549b7c9ba06641850c46571f772..aa27a8481d58ff038285afb44cb238db
      ShowPage()
      ClosePage()
      RunJavaScriptAlert(WebCore::FrameIdentifier frameID, struct WebKit::FrameInfoData frameInfo, String message) -> () Synchronous
+@@ -359,6 +371,10 @@ messages -> WebPageProxy {
+     StartDrag(WebCore::SelectionData selectionData, OptionSet<WebCore::DragOperation> dragOperationMask, std::optional<WebCore::ShareableBitmapHandle> dragImage, WebCore::IntPoint dragImageHotspot)
+ #endif
+ 
++#if PLATFORM(HAIKU) && ENABLE(DRAG_SUPPORT)
++    StartDragHaiku(WebCore::PasteboardCustomData data, OptionSet<WebCore::DragOperation> operations, std::optional<WebCore::ShareableBitmapHandle> image, WebCore::IntPoint hotspot, String title)
++#endif
++
+ #if PLATFORM(IOS_FAMILY) && ENABLE(DRAG_SUPPORT)
+     WillReceiveEditDragSnapshot()
+     DidReceiveEditDragSnapshot(RefPtr<WebCore::TextIndicator> textIndicator)
 diff --git a/Source/WebKit/UIProcess/WebPageProxyInternals.h b/Source/WebKit/UIProcess/WebPageProxyInternals.h
 index 41190ed770ac926edc65b498d52879ee7dc0eca6..90bd49e69683c16e1731252157f8edd120d50b05 100644
 --- a/Source/WebKit/UIProcess/WebPageProxyInternals.h
@@ -115206,10 +115625,10 @@ index 0000000000000000000000000000000000000000..b12e656b2046acc0f1325d1b28ee8be2
 +#endif
 diff --git a/Source/WebKit/UIProcess/haiku/WebPageProxyHaiku.cpp b/Source/WebKit/UIProcess/haiku/WebPageProxyHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..b2bb8bd14238efd074ab41b60b01639df677227a
+index 0000000000000000000000000000000000000000..982d08fe2f872273b8e0c6eab18550af3a91e055
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/WebPageProxyHaiku.cpp
-@@ -0,0 +1,166 @@
+@@ -0,0 +1,180 @@
 +/*
 + * Copyright (C) 2014-2021 Haiku, inc.
 + *
@@ -115243,6 +115662,8 @@ index 0000000000000000000000000000000000000000..b2bb8bd14238efd074ab41b60b01639d
 +#include "WebProcessProxy.h"
 +#include <WebCore/ProtocolHandlerUtilities.h>
 +#include <WebCore/SecurityOrigin.h>
++#include <WebCore/PasteboardCustomData.h>
++#include <WebCore/ShareableBitmap.h>
 +
 +#include <WebCore/NotImplemented.h>
 +#include <WebCore/SearchPopupMenu.h>
@@ -115252,6 +115673,18 @@ index 0000000000000000000000000000000000000000..b2bb8bd14238efd074ab41b60b01639d
 +#include <wtf/JSONValues.h>
 +
 +namespace WebKit {
++
++#if ENABLE(DRAG_SUPPORT)
++void WebPageProxy::startDragHaiku(WebCore::PasteboardCustomData&& data, OptionSet<WebCore::DragOperation> operations,
++    std::optional<WebCore::ShareableBitmapHandle>&& imageHandle, const WebCore::IntPoint& hotspot, const String& title)
++{
++    if (RefPtr client = pageClient()) {
++        RefPtr image = imageHandle ? WebCore::ShareableBitmap::create(WTF::move(*imageHandle)) : nullptr;
++        client->startDragHaiku(WTF::move(data), operations, WTF::move(image), hotspot, title);
++    } else
++        dragCancelled();
++}
++#endif
 +
 +void WebPageProxy::didFallBackToSoftwareRenderingHaiku()
 +{
@@ -115618,10 +116051,10 @@ index 0000000000000000000000000000000000000000..c9a119d02f85b7c5ad8fe9153bfc9604
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/WebView.cpp b/Source/WebKit/UIProcess/haiku/WebView.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..688e4cebb79e26d16e63122f743fe61a617e5656
+index 0000000000000000000000000000000000000000..903168d5b173b422483e4db61d46807ba748249c
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/WebView.cpp
-@@ -0,0 +1,2953 @@
+@@ -0,0 +1,3038 @@
 +/*
 + * Copyright (C) 2013 Intel Corporation. All rights reserved.
 + *
@@ -115650,6 +116083,7 @@ index 0000000000000000000000000000000000000000..688e4cebb79e26d16e63122f743fe61a
 +#include "config.h"
 +#include "FrameInfoHaiku.h"
 +#include "WebViewPrivate.h"
++#include <MessageRunner.h>
 +
 +#include "APIData.h"
 +#include "APIFrameInfo.h"
@@ -117514,6 +117948,63 @@ index 0000000000000000000000000000000000000000..688e4cebb79e26d16e63122f743fe61a
 +    return m_state->geometry;
 +}
 +
++#if ENABLE(DRAG_SUPPORT)
++void WebView::startDragHaiku(WebCore::PasteboardCustomData&& data, OptionSet<WebCore::DragOperation> operations,
++    RefPtr<WebCore::ShareableBitmap>&& image, const WebCore::IntPoint& hotspot, const String& title)
++{
++    BMessage message(viewStartDragHaiku);
++    message.AddUInt32("operations", operations.toRaw());
++    message.AddString("summit:title", title.utf8().legacyCStringPointer());
++    message.AddPoint("hotspot", BPoint(hotspot.x(), hotspot.y()));
++    // The private payload preserves same-origin custom types. Native apps see
++    // standard MIME fields only; private browser bookkeeping is never sourced
++    // from arbitrary DataTransfer field names.
++    if (auto png = data.readBuffer("image/png"_s); png && png->size() <= 16 * 1024 * 1024)
++        message.AddData("image/png", B_MIME_TYPE, png->span().data(), png->size());
++    data.clear("image/png"_s);
++    size_t textBytes = 0;
++    data.forEachPlatformString([&](const String&, const String& text) { textBytes += text.utf8().length(); });
++    auto serialized = data.createSharedBuffer();
++    if (serialized->size() + textBytes > 1024 * 1024) {
++        m_page->dragCancelled();
++        return;
++    }
++    message.AddData("org.webkit.drag-data", B_RAW_TYPE, serialized->span().data(), serialized->size());
++    data.forEachPlatformString([&](const String& type, const String& text) {
++        if (type == "text/plain"_s || type == "text/html"_s || type == "text/uri-list"_s) {
++            auto bytes = text.utf8();
++            message.AddData(type.utf8().legacyCStringPointer(), B_MIME_TYPE, bytes.data(), bytes.length());
++        }
++    });
++    if (image && image->size().width() <= 2048 && image->size().height() <= 2048
++        && image->pixelFormat() == WebCore::PixelFormat::BGRA8) {
++        message.AddInt32("width", image->size().width());
++        message.AddInt32("height", image->size().height());
++        message.AddInt32("stride", image->bytesPerRow());
++        message.AddData("preview", B_RAW_TYPE, image->span().data(), image->span().size());
++    }
++    if (nativeView().SendMessage(&message, static_cast<BHandler*>(nullptr), 0) != B_OK)
++        m_page->dragCancelled();
++}
++
++void WebView::didPerformDragOperation(bool handled)
++{
++    if (m_dropSession && m_dropSource.IsValid()) {
++        BMessage reply(viewNativeDragReplyHaiku);
++        reply.AddUInt64("session", m_dropSession);
++        reply.AddPoint("screen", m_dropScreenPoint);
++        auto operation = handled ? m_page->currentDragOperation().value_or(WebCore::DragOperation::Copy) : static_cast<WebCore::DragOperation>(0);
++        reply.AddUInt32("operation", static_cast<uint32_t>(operation));
++        m_dropSource.SendMessage(&reply, static_cast<BHandler*>(nullptr), 0);
++    }
++    m_dropSource = { };
++    m_dropSession = 0;
++    m_dragFiles.clear();
++    m_dragData.clear();
++    m_page->resetCurrentDragInformation();
++}
++#endif
++
 +void WebView::sendToView(BMessage& message) const
 +{
 +    BMessenger view;
@@ -117911,19 +118402,43 @@ index 0000000000000000000000000000000000000000..688e4cebb79e26d16e63122f743fe61a
 +        break;
 +    }
 +#if ENABLE(DRAG_SUPPORT)
++    case viewDragStartedHaiku:
++        m_buttons = 0;
++        m_page->didStartDrag();
++        break;
++    case viewDragEndedHaiku: {
++        BPoint local = message.FindPoint("local"), screen = message.FindPoint("screen");
++        m_page->dragEnded({ static_cast<int>(local.x), static_cast<int>(local.y) },
++            { static_cast<int>(screen.x), static_cast<int>(screen.y) },
++            OptionSet<WebCore::DragOperation>::fromRaw(message.GetUInt32("operation", 0)));
++        m_buttons = 0;
++        break;
++    }
 +    case viewDragHaiku: {
 +        const char* phase = nullptr;
 +        if (message.FindString("phase", &phase) != B_OK || !phase)
 +            break;
 +        BPoint local = message.FindPoint("local"), screen = message.FindPoint("screen");
-+        Vector<String> paths;
-+        const char* path = nullptr;
-+        for (int32 index = 0; message.FindString("path", index, &path) == B_OK; ++index)
-+            paths.append(String::fromUTF8(path));
-+        if (!paths.isEmpty())
-+            m_dragFiles = WTF::move(paths);
-+        WebCore::DragData dragData(WebCore::IntPoint(local.x, local.y), WebCore::IntPoint(screen.x, screen.y), m_dragFiles,
-+            { WebCore::DragOperation::Copy, WebCore::DragOperation::Generic, WebCore::DragOperation::Link }, { },
++        if (!strcmp(phase, "entered") || !strcmp(phase, "drop")) {
++            m_dragFiles.clear();
++            m_dragData = { };
++            const char* path = nullptr;
++            for (int32 index = 0; message.FindString("path", index, &path) == B_OK; ++index)
++                m_dragFiles.append(String::fromUTF8(path));
++            const void* bytes = nullptr;
++            ssize_t length = 0;
++            if (message.FindData("org.webkit.drag-data", B_RAW_TYPE, &bytes, &length) == B_OK && length > 0 && length <= 1024 * 1024)
++                m_dragData = WebCore::PasteboardCustomData::fromSharedBuffer(WebCore::SharedBuffer::create(std::span(static_cast<const uint8_t*>(bytes), length)).get());
++            for (auto* type : { "text/plain", "text/html", "text/uri-list" }) {
++                if (message.FindData(type, B_MIME_TYPE, &bytes, &length) == B_OK && length >= 0 && length <= 1024 * 1024)
++                    m_dragData.writeString(String::fromLatin1(type), String::fromUTF8(std::span(static_cast<const char*>(bytes), length)));
++            }
++            if (message.FindData("image/png", B_MIME_TYPE, &bytes, &length) == B_OK && length > 0 && length <= 16 * 1024 * 1024)
++                m_dragData.writeData("image/png"_s, WebCore::SharedBuffer::create(std::span(static_cast<const uint8_t*>(bytes), length)));
++            m_dragOperations = OptionSet<WebCore::DragOperation>::fromRaw(message.GetUInt32("operations", static_cast<uint32_t>(WebCore::DragOperation::Copy)));
++        }
++        WebCore::DragData dragData(WebCore::IntPoint(local.x, local.y), WebCore::IntPoint(screen.x, screen.y), m_dragFiles, m_dragData,
++            m_dragOperations, message.GetBool("copy", false) ? OptionSet { WebCore::DragApplicationFlags::IsCopyKeyDown } : OptionSet<WebCore::DragApplicationFlags> { },
 +            WebCore::anyDragDestinationAction(), m_page->webPageIDInMainFrameProcess());
 +        if (!strcmp(phase, "entered")) {
 +            m_page->resetCurrentDragInformation();
@@ -117934,10 +118449,13 @@ index 0000000000000000000000000000000000000000..688e4cebb79e26d16e63122f743fe61a
 +            m_page->dragExited(dragData);
 +            m_page->resetCurrentDragInformation();
 +            m_dragFiles.clear();
++            m_dragData.clear();
 +        } else if (!strcmp(phase, "drop")) {
++            m_dropSource = { };
++            message.FindMessenger("source", &m_dropSource);
++            m_dropSession = message.GetUInt64("session", 0);
++            m_dropScreenPoint = screen;
 +            m_page->performDragOperation(dragData, { }, { }, { });
-+            m_page->resetCurrentDragInformation();
-+            m_dragFiles.clear();
 +        }
 +        break;
 +    }
@@ -119087,10 +119605,10 @@ index 0000000000000000000000000000000000000000..520ed4b88123bc3011d015a47a3e89ef
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/WebViewPrivate.h b/Source/WebKit/UIProcess/haiku/WebViewPrivate.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..a04b42499a8cc5efb29918da879225e7f0f11f06
+index 0000000000000000000000000000000000000000..00f921f7cf81d4eee3659eb822edd264faf91833
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/WebViewPrivate.h
-@@ -0,0 +1,211 @@
+@@ -0,0 +1,221 @@
 +/*
 +   Copyright (C) 2014 Haiku, inc.
 +
@@ -119119,6 +119637,7 @@ index 0000000000000000000000000000000000000000..a04b42499a8cc5efb29918da879225e7
 +#include "WebKitView.h"
 +#include "WebViewStateHaiku.h"
 +#include <wtf/CompletionHandler.h>
++#include <WebCore/PasteboardCustomData.h>
 +
 +namespace API { class PageConfiguration; }
 +
@@ -119171,6 +119690,10 @@ index 0000000000000000000000000000000000000000..a04b42499a8cc5efb29918da879225e7
 +#endif
 +    void notifyState(uint32_t = B_WEBKIT_STATE_CHANGED) const;
 +    void didFallBackToSoftwareRenderingHaiku() override;
++#if ENABLE(DRAG_SUPPORT)
++    void startDragHaiku(WebCore::PasteboardCustomData&&, OptionSet<WebCore::DragOperation>, RefPtr<WebCore::ShareableBitmap>&&, const WebCore::IntPoint&, const String&) override;
++    void didPerformDragOperation(bool) override;
++#endif
 +    // The frame the view shows now (device pixels), or null.
 +    std::shared_ptr<const BitmapPresenterHaiku::Frame> presentedFrameHaiku() const { return m_state->presenter.snapshot(); }
 +    // A frame the view draws straight from the web process's shared memory.
@@ -119293,8 +119816,13 @@ index 0000000000000000000000000000000000000000..a04b42499a8cc5efb29918da879225e7
 +    // frame to the next, so the next one it shows is redrawn whole.
 +    bool m_presentationNeedsFullRedraw { true };
 +    uint32_t m_buttons { 0 };
-+    // The files of the drag over the view (viewDragHaiku).
++    // Destination contents and reply address, owned by WebKit's main thread.
 +    Vector<String> m_dragFiles;
++    WebCore::PasteboardCustomData m_dragData;
++    OptionSet<WebCore::DragOperation> m_dragOperations;
++    BMessenger m_dropSource;
++    uint64_t m_dropSession { 0 };
++    BPoint m_dropScreenPoint;
 +
 +#if USE(COORDINATED_GRAPHICS)
 +    RefPtr<AcceleratedBackingStore> m_acceleratedBackingStore;
@@ -119304,10 +119832,10 @@ index 0000000000000000000000000000000000000000..a04b42499a8cc5efb29918da879225e7
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/WebViewStateHaiku.h b/Source/WebKit/UIProcess/haiku/WebViewStateHaiku.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..cd0bc39008bef1c1bb0ecd0806b43bf26e2e38f9
+index 0000000000000000000000000000000000000000..950b323b01f218ed97dca11fb1b7bca3c5c12daf
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/WebViewStateHaiku.h
-@@ -0,0 +1,204 @@
+@@ -0,0 +1,214 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#pragma once
@@ -119326,6 +119854,7 @@ index 0000000000000000000000000000000000000000..cd0bc39008bef1c1bb0ecd0806b43bf2
 +#include <vector>
 +
 +class BMessageFilter;
++class BMessageRunner;
 +#include <wtf/RefPtr.h>
 +#include <wtf/SharedTask.h>
 +#include <wtf/text/WTFString.h>
@@ -119350,7 +119879,9 @@ index 0000000000000000000000000000000000000000..cd0bc39008bef1c1bb0ecd0806b43bf2
 +    viewResetCloseHaiku = 'wvcr', viewRetryCloseHaiku = 'wvrc',
 +    // Files dragged over the view: phase ("entered", "updated", "exited",
 +    // "drop"), local, screen, repeated path (with entered and drop).
-+    viewDragHaiku = 'wvdg',
++    viewDragHaiku = 'wvdg', viewStartDragHaiku = 'wvds',
++    viewDragStartedHaiku = 'wvda', viewDragEndedHaiku = 'wvdz',
++    viewNativeDragTickHaiku = 'wdtk', viewNativeDragPendingHaiku = 'wdpn', viewNativeDragReplyHaiku = 'wdrp',
 +    // Presenting straight into the screen (DirectPresentHaiku.h): the view
 +    // has a target for its page, or the page needs presenting again in full.
 +    viewDirectTargetHaiku = 'wvdt', viewDirectRedisplayHaiku = 'wvdr',
@@ -119389,6 +119920,13 @@ index 0000000000000000000000000000000000000000..cd0bc39008bef1c1bb0ecd0806b43bf2
 +    std::atomic<bool> closed { false };
 +    // A file drag from another application is over the view (window thread).
 +    bool dragActive { false };
++    // Source session: only the native window thread touches these fields.
++    uint64_t sourceDragSession { 0 };
++    bool sourceDragActive { false };
++    bool sourceDragPending { false };
++    bigtime_t sourceDragReleasedAt { 0 };
++    std::unique_ptr<BMessage> sourceDragData;
++    std::unique_ptr<BMessageRunner> sourceDragTimer;
 +    // Window thread: the filter that tells the view when its window is
 +    // minimized, restored or moved between workspaces (WebKitView.cpp), and
 +    // whether the window is on the workspace shown.
@@ -139494,6 +140032,63 @@ index b9dbf9818f1d6bff413fdd81160d6c7b794f7a77..a562f874e2d8dd6cb4cc026f035904cf
      void postAccessibilityNotification(WebCore::AccessibilityObject&, WebCore::AXNotification) final;
      void postAccessibilityNodeTextChangeNotification(WebCore::AccessibilityObject*, WebCore::AXTextChange, unsigned, const String&) final;
      void postAccessibilityFrameLoadingEventNotification(WebCore::AccessibilityObject*, WebCore::AXLoadingEvent) final;
+diff --git a/Source/WebKit/WebProcess/WebCoreSupport/WebDragClient.cpp b/Source/WebKit/WebProcess/WebCoreSupport/WebDragClient.cpp
+index b3f2fc81270244d1e52568f2355b7e4390ce4ae3..5fe5014f4f1704da10f77f9abe1a5c467b29dfdd 100644
+--- a/Source/WebKit/WebProcess/WebCoreSupport/WebDragClient.cpp
++++ b/Source/WebKit/WebProcess/WebCoreSupport/WebDragClient.cpp
+@@ -29,6 +29,19 @@
+ #if ENABLE(DRAG_SUPPORT)
+ 
+ #include "WebPage.h"
++#if PLATFORM(HAIKU)
++#include "MessageSenderInlines.h"
++#include "WebPageProxyMessages.h"
++#include <WebCore/DataTransfer.h>
++#include <WebCore/DragItem.h>
++#include <WebCore/GraphicsContext.h>
++#include <WebCore/Page.h>
++#include <WebCore/Pasteboard.h>
++#include <WebCore/ShareableBitmap.h>
++#if USE(SKIA)
++#include <skia/core/SkCanvas.h>
++#endif
++#endif
+ #include <wtf/TZoneMallocInlines.h>
+ 
+ namespace WebKit {
+@@ -54,8 +67,31 @@ OptionSet<DragSourceAction> WebDragClient::dragSourceActionMaskForPoint(const In
+ }
+ 
+ #if !PLATFORM(COCOA) && !PLATFORM(GTK) && !PLATFORM(WPE)
+-void WebDragClient::startDrag(DragItem, DataTransfer&, Frame&, const std::optional<NodeIdentifier>&)
++void WebDragClient::startDrag(DragItem item, DataTransfer& transfer, Frame&, const std::optional<NodeIdentifier>&)
+ {
++#if PLATFORM(HAIKU)
++    std::optional<ShareableBitmap::Handle> handle;
++#if USE(SKIA)
++    if (auto image = item.image.get()) {
++        // Native drag bitmaps use view coordinates, not device pixels.
++        float scale = m_page->corePage()->deviceScaleFactor();
++        IntSize size(std::ceil(image->width() / scale), std::ceil(image->height() / scale));
++        if (!size.isEmpty() && size.width() <= 2048 && size.height() <= 2048) {
++            if (auto bitmap = ShareableBitmap::create({ size })) {
++                if (auto context = bitmap->createGraphicsContext()) {
++                    context->scale({ 1 / scale, 1 / scale });
++                    context->platformContext()->drawImage(image.get(), 0, 0);
++                    handle = bitmap->createHandle();
++                }
++            }
++        }
++    }
++#endif
++    auto hotspot = item.eventPositionInRootViewCoordinates - item.dragLocationInWindowCoordinates;
++    m_page->willStartDrag();
++    m_page->send(Messages::WebPageProxy::StartDragHaiku(transfer.pasteboard().dragDataHaiku(), transfer.sourceOperationMask(),
++        WTF::move(handle), IntPoint(hotspot.width(), hotspot.height()), item.title));
++#endif
+ }
+ 
+ void WebDragClient::didConcludeEditDrag()
 diff --git a/Source/WebKit/WebProcess/WebCoreSupport/WebLocalFrameLoaderClient.cpp b/Source/WebKit/WebProcess/WebCoreSupport/WebLocalFrameLoaderClient.cpp
 index beb654baaa80231aff8ed6f61d602bf29d70d6f6..d8c14a6356ba688b2a36a07bd821cc88d6a7c2b1 100644
 --- a/Source/WebKit/WebProcess/WebCoreSupport/WebLocalFrameLoaderClient.cpp

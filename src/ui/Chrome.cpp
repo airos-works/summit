@@ -850,8 +850,34 @@ void TabStrip::MouseUp(BPoint where)
     fDragTab = 0;
     fDragging = fDragOutside = false;
 }
-void TabStrip::MouseMoved(BPoint where, uint32 transit, const BMessage*)
+namespace {
+bool DraggedPage(const BMessage*, std::string& url, std::string& title, int64& id);
+void AcceptPageDrop(BMessage& message)
 {
+    BMessage reply(B_REPLY), origin;
+    reply.AddInt32("be:action", B_COPY_TARGET);
+    if (message.FindMessage("be:originator-data", &origin) == B_OK)
+        reply.AddMessage("be:originator-data", &origin);
+    message.SendReply(&reply);
+}
+}
+
+void TabStrip::MouseMoved(BPoint where, uint32 transit, const BMessage* drag)
+{
+    if (drag) {
+        // Keep a page drag alive while switching to its destination tab.
+        if (transit != B_EXITED_VIEW && transit != B_OUTSIDE_VIEW) {
+            for (auto i : VisibleTabs()) {
+                if (TabRect(i).Contains(where) && fTabs[i].id != fSelected) {
+                    BMessage select(kSelectTab);
+                    select.AddInt64("id", fTabs[i].id);
+                    Window()->PostMessage(&select);
+                    break;
+                }
+            }
+        }
+        return;
+    }
     if (fDragTab) {
         uint32 buttons = 0;
         if (auto* message = Window()->CurrentMessage()) message->FindInt32("buttons", reinterpret_cast<int32*>(&buttons));
@@ -905,6 +931,26 @@ void TabStrip::MouseMoved(BPoint where, uint32 transit, const BMessage*)
 }
 void TabStrip::MessageReceived(BMessage* message)
 {
+    std::string url, title;
+    int64 bookmark = 0;
+    if (message->WasDropped() && DraggedPage(message, url, title, bookmark) && !url.empty()) {
+        bool newTab = true;
+        const BPoint where = ConvertFromScreen(message->DropPoint());
+        for (auto i : VisibleTabs()) {
+            if (!TabRect(i).Contains(where)) continue;
+            BMessage select(kSelectTab);
+            select.AddInt64("id", fTabs[i].id);
+            Window()->PostMessage(&select);
+            newTab = false;
+            break;
+        }
+        BMessage open(kOpenBookmark);
+        open.AddString("url", url.c_str());
+        open.AddBool("new_tab", newTab);
+        Window()->PostMessage(&open);
+        AcceptPageDrop(*message);
+        return;
+    }
     BView::MessageReceived(message);
 }
 void TabStrip::FrameResized(float, float) { Invalidate(); }
@@ -1335,6 +1381,7 @@ void BookmarksBar::MessageReceived(BMessage* message)
         request.AddInt64("folder", into ? Items()[index].id : kBookmarksBarFolder);
         if (!into && size_t(index) < Items().size()) request.AddInt64("index", index);
         Window()->PostMessage(&request);
+        AcceptPageDrop(*message);
         return;
     }
     BView::MessageReceived(message);
