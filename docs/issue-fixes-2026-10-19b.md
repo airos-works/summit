@@ -71,7 +71,7 @@ While Typing** and Preferences › Browsing turn it off.
   `TextChecker` on Hunspell, loaded with `dlopen` (`libhunspell-1.7.so.0`,
   part of air/OS and in HaikuPorts), so the engine has no build dependency.
   `BWebKitSetSpellChecking(enabled, languages, directory, wordList)` picks the
-  dictionary: the first of `languages` found in the given directory or
+  fallback dictionary: the first of `languages` found in the given directory or
   `data/hunspell` / `data/myspell` (user, then system), else en_US. Learned
   words are appended to the word list and read back at start.
   `B_WEBKIT_CONTEXT_MENU` carries `misspelled` and `spelling_guess`;
@@ -81,7 +81,7 @@ While Typing** and Preferences › Browsing turn it off.
   in its resources and copies it to `~/config/settings/Summit/Dictionaries`.
   `SUMMIT_SPELLING_LANGUAGES=de_DE,en_US` names others to try first.
 - Since 20 October (#110), Preferences › Browsing › Spelling has a
-  **Language** menu: "The system's language" (the default) and each Hunspell
+  **Language** menu: originally "The system's language" and each Hunspell
   dictionary installed (a `.aff` with its `.dic` in the profile's
   Dictionaries folder or `data/hunspell` / `data/myspell`), kept in the
   profile as `spellingLanguage`. The system's language comes from the Locale
@@ -90,7 +90,10 @@ While Typing** and Preferences › Browsing turn it off.
   de_ dictionary, "en_AU" en_AU first, and en_US always comes last
   (`SpellingLanguages` in `src/core/Spelling.cpp`, host-tested). Other
   languages need their dictionaries installed, from HaikuPorts' hunspell
-  dictionary packages or by hand; the page's `lang` is not used yet.
+  dictionary packages or by hand. The 22 October follow-up changes the default
+  to **Page language (system fallback)** and uses each field's inherited
+  language for checking and suggestions. An explicit Preferences choice still
+  wins. [Behavior and native acceptance](page-language-spelling.md).
 
 Checked: typing "Anothr sentnce." underlined both; the menu offered
 Another/Anthrax and replaced the word; Add to Dictionary wrote `sentnce` to

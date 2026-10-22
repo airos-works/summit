@@ -127,6 +127,23 @@ public:
         }
         throw std::runtime_error("Inspector evaluation timed out");
     }
+    JSON Call(const char* method, const JSON& parameters)
+    {
+        Drain();
+        if (m_target.empty()) throw std::runtime_error("Inspector target is unavailable");
+        const auto id = Send(m_target, method, parameters);
+        const auto deadline = system_time() + 5000000;
+        while (system_time() < deadline) {
+            Drain();
+            if (auto it = m_answers.find(id); it != m_answers.end()) {
+                auto response = std::move(it->second); m_answers.erase(it);
+                if (response.contains("error")) throw std::runtime_error(response["error"].dump());
+                return response.value("result", JSON::object());
+            }
+            snooze(10000);
+        }
+        throw std::runtime_error("Inspector command timed out");
+    }
     unsigned Viewer()
     {
         Drain();

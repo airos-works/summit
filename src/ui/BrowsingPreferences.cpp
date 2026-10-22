@@ -70,7 +70,7 @@ BrowsingPreferences::BrowsingPreferences(BMessenger owner, const std::string& au
         item->SetMarked(spellingLanguage == value);
         languages->AddItem(item);
     };
-    addLanguage("", "The system's language");
+    addLanguage("", "Page language (system fallback)");
     if (!dictionaries.empty()) languages->AddSeparatorItem();
     for (const auto& name : dictionaries) addLanguage(name, name);
     // A dictionary chosen before and removed since.

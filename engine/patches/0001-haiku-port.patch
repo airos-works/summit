@@ -9786,6 +9786,19 @@ index 7dba487e979fa82a190a72ba7961e05dfefa20ce..c8fdb87f7bc15a9e495e6772142b6825
  JSCanvasImageData.cpp
  JSCanvasImageSmoothing.cpp
  JSCanvasLineCap.cpp
+diff --git a/Source/WebCore/accessibility/AccessibilityObject.cpp b/Source/WebCore/accessibility/AccessibilityObject.cpp
+index eaf3aee12b98b01a9d97a71cecdee1af09b66458..403ac738b6839c419959fe55310cc6f2b951eaf8 100644
+--- a/Source/WebCore/accessibility/AccessibilityObject.cpp
++++ b/Source/WebCore/accessibility/AccessibilityObject.cpp
+@@ -468,7 +468,7 @@ Vector<AXTextMarkerRange> AccessibilityObject::misspellingRanges() const
+     } else {
+         int location = -1;
+         int length = 0;
+-        textChecker->checkSpellingOfString(stringValue(), &location, &length);
++        textChecker->checkSpellingOfStringForNode(stringValue(), node.get(), &location, &length);
+         if (location > -1 && length > 0)
+             ranges = { { treeID(), objectID(), static_cast<unsigned>(location), static_cast<unsigned>(length) } };
+     }
 diff --git a/Source/WebCore/accessibility/playstation/AXObjectCachePlayStation.cpp b/Source/WebCore/accessibility/playstation/AXObjectCachePlayStation.cpp
 index 27ff2f14f28c9e87747ac02ddde34549545c9aa1..5c7fadd1505554bff6e340a0f8c66b7af54b16f0 100644
 --- a/Source/WebCore/accessibility/playstation/AXObjectCachePlayStation.cpp
@@ -12566,7 +12579,7 @@ index 7f18cb986d1972948b04893b511de16598d7f103..68525703b1263997f5100c89a1c31dd9
      chomp($ccLocation = `xcrun -find cc -sdk '$ENV{SDKROOT}'`);
  } else {
 diff --git a/Source/WebCore/editing/Editor.cpp b/Source/WebCore/editing/Editor.cpp
-index ded8fbcc946056d316ba617ebdb86aa26f9c25a5..4ad67d599532797d5683fb66d6ab4890ea83d270 100644
+index ded8fbcc946056d316ba617ebdb86aa26f9c25a5..9bab3f8049d6c65819e6d0b73769a0ecfed243f2 100644
 --- a/Source/WebCore/editing/Editor.cpp
 +++ b/Source/WebCore/editing/Editor.cpp
 @@ -1460,10 +1460,13 @@ bool Editor::insertTextWithoutSendingTextEvent(const String& text, bool selectIn
@@ -12587,6 +12600,109 @@ index ded8fbcc946056d316ba617ebdb86aa26f9c25a5..4ad67d599532797d5683fb66d6ab4890
  
      bool shouldConsiderApplyingAutocorrection = false;
      if (text == " "_s || text == "\t"_s)
+@@ -2961,7 +2964,7 @@ String Editor::misspelledWordAtCaretOrRange(Node* clickedNode) const
+     int wordLength = word.length();
+     int misspellingLocation = -1;
+     int misspellingLength = 0;
+-    textChecker()->checkSpellingOfString(word, &misspellingLocation, &misspellingLength);
++    textChecker()->checkSpellingOfStringForNode(word, wordRange->start.container.ptr(), &misspellingLocation, &misspellingLength);
+ 
+     return misspellingLength == wordLength ? word : String();
+ }
+@@ -2976,7 +2979,7 @@ String Editor::misspelledSelectionString() const
+ 
+     int misspellingLocation = -1;
+     int misspellingLength = 0;
+-    textChecker()->checkSpellingOfString(selectedString, &misspellingLocation, &misspellingLength);
++    textChecker()->checkSpellingOfStringForNode(selectedString, document().selection().selection().start().containerNode(), &misspellingLocation, &misspellingLength);
+ 
+     // The selection only counts as misspelled if the selected text is exactly one misspelled word
+     if (misspellingLength != length)
+diff --git a/Source/WebCore/editing/TextCheckingHelper.cpp b/Source/WebCore/editing/TextCheckingHelper.cpp
+index 6f30790447d09d77aaf13d6c223ebc4437bf7f1f..9f723a314005ee375268a7f5bfba2a8f31f8c0ce 100644
+--- a/Source/WebCore/editing/TextCheckingHelper.cpp
++++ b/Source/WebCore/editing/TextCheckingHelper.cpp
+@@ -73,7 +73,7 @@ static void findGrammaticalErrors(TextCheckerClient& client, StringView text, Ve
+     }
+ }
+ 
+-static void findMisspellings(TextCheckerClient& client, StringView text, Vector<TextCheckingResult>& results)
++static void findMisspellings(TextCheckerClient& client, StringView text, Node* node, Vector<TextCheckingResult>& results)
+ {
+     UBreakIterator* iterator = wordBreakIterator(text);
+     if (!iterator)
+@@ -86,7 +86,7 @@ static void findMisspellings(TextCheckerClient& client, StringView text, Vector<
+         int wordLength = wordEnd - wordStart;
+         int misspellingLocation = -1;
+         int misspellingLength = 0;
+-        client.checkSpellingOfString(text.substring(wordStart, wordLength), &misspellingLocation, &misspellingLength);
++        client.checkSpellingOfStringForNode(text.substring(wordStart, wordLength), node, &misspellingLocation, &misspellingLength);
+ 
+         if (misspellingLength > 0) {
+             ASSERT(misspellingLocation >= 0);
+@@ -244,7 +244,8 @@ auto TextCheckingHelper::findMisspelledWords(Operation operation) const -> std::
+ 
+         int misspellingLocation = -1;
+         int misspellingLength = 0;
+-        protect(m_client)->textChecker()->checkSpellingOfString(text, &misspellingLocation, &misspellingLength);
++        auto chunkStart = resolveCharacterRange(m_range, CharacterRange(currentChunkOffset, 0)).start;
++        protect(m_client)->textChecker()->checkSpellingOfStringForNode(text, chunkStart.container.ptr(), &misspellingLocation, &misspellingLength);
+ 
+         int textLength = text.length();
+ 
+@@ -340,7 +341,7 @@ auto TextCheckingHelper::findFirstMisspelledWordOrUngrammaticalPhrase(bool check
+                 VisibleSelection currentSelection;
+                 if (RefPtr frame = paragraphRange.start.document().frame())
+                     currentSelection = frame->selection().selection();
+-                checkTextOfParagraph(*protect(m_client)->textChecker(), paragraphString, checkingTypes, results, currentSelection);
++                checkTextOfParagraph(*protect(m_client)->textChecker(), paragraphString, checkingTypes, results, currentSelection, paragraphRange.start.container.ptr());
+ 
+                 for (auto& result : results) {
+                     if (result.type == TextCheckingType::Spelling && result.range.location >= currentStartOffset && result.range.location + result.range.length <= currentEndOffset) {
+@@ -520,7 +521,7 @@ TextCheckingGuesses TextCheckingHelper::guessesForMisspelledWordOrUngrammaticalP
+     if (RefPtr frame = m_range.start.document().frame())
+         currentSelection = frame->selection().selection();
+     CheckedRef client = m_client;
+-    checkTextOfParagraph(*client->textChecker(), paragraph.text(), checkingTypes, results, currentSelection);
++    checkTextOfParagraph(*client->textChecker(), paragraph.text(), checkingTypes, results, currentSelection, paragraph.paragraphRange().start.container.ptr());
+ 
+     for (auto& result : results) {
+         if (result.type == TextCheckingType::Spelling && paragraph.checkingRangeMatches(result.range)) {
+@@ -568,16 +569,18 @@ bool TextCheckingHelper::unifiedTextCheckerEnabled() const
+     return WebCore::unifiedTextCheckerEnabled(m_range.start.document().frame());
+ }
+ 
+-void checkTextOfParagraph(TextCheckerClient& client, StringView text, OptionSet<TextCheckingType> checkingTypes, Vector<TextCheckingResult>& results, const VisibleSelection& currentSelection)
++void checkTextOfParagraph(TextCheckerClient& client, StringView text, OptionSet<TextCheckingType> checkingTypes, Vector<TextCheckingResult>& results, const VisibleSelection& currentSelection, Node* node)
+ {
+ #if USE(UNIFIED_TEXT_CHECKING)
++    UNUSED_PARAM(node);
+     results = client.checkTextOfParagraph(text, checkingTypes, currentSelection);
+ #else
+-    UNUSED_PARAM(currentSelection);
++    if (!node)
++        node = currentSelection.start().containerNode();
+ 
+     Vector<TextCheckingResult> misspellings;
+     if (checkingTypes.contains(TextCheckingType::Spelling))
+-        findMisspellings(client, text, misspellings);
++        findMisspellings(client, text, node, misspellings);
+ 
+     // Look for grammatical errors that occur before the first misspelling.
+     Vector<TextCheckingResult> grammaticalErrors;
+diff --git a/Source/WebCore/editing/TextCheckingHelper.h b/Source/WebCore/editing/TextCheckingHelper.h
+index 85089555687524518dc00eb32134f60e060208b3..9db1b3a3efa189b454c6429b212ae7f638ed6b4b 100644
+--- a/Source/WebCore/editing/TextCheckingHelper.h
++++ b/Source/WebCore/editing/TextCheckingHelper.h
+@@ -113,7 +113,7 @@ private:
+     SimpleRange m_range;
+ };
+ 
+-void checkTextOfParagraph(TextCheckerClient&, StringView, OptionSet<TextCheckingType>, Vector<TextCheckingResult>&, const VisibleSelection& currentSelection);
++void checkTextOfParagraph(TextCheckerClient&, StringView, OptionSet<TextCheckingType>, Vector<TextCheckingResult>&, const VisibleSelection& currentSelection, Node* = nullptr);
+ 
+ bool unifiedTextCheckerEnabled(const LocalFrame*);
+ bool NODELETE platformDrivenTextCheckerEnabled();
 diff --git a/Source/WebCore/editing/glib/EditorGLib.cpp b/Source/WebCore/editing/glib/EditorGLib.cpp
 index fdc5b8fc0424fc394e954fa583f40e825727dc47..ee9ab0719ef8e6050eeaf97b29649a4d059f773f 100644
 --- a/Source/WebCore/editing/glib/EditorGLib.cpp
@@ -67951,6 +68067,31 @@ index 209c5f5c6f72f675b1d51b7a8454a150abcc5019..7350cf7a11d4501f62fe6f4cedbe1841
  #endif
  }
  
+diff --git a/Source/WebCore/platform/text/TextCheckerClient.h b/Source/WebCore/platform/text/TextCheckerClient.h
+index 8da8a7534e2838f9a80bb507178bd87c305107ea..a867b0eb64b236af565ba73e8c9b84b95a551aba 100644
+--- a/Source/WebCore/platform/text/TextCheckerClient.h
++++ b/Source/WebCore/platform/text/TextCheckerClient.h
+@@ -32,6 +32,7 @@
+ namespace WebCore {
+ 
+ class VisibleSelection;
++class Node;
+ 
+ class TextCheckerClient {
+ public:
+@@ -41,6 +42,12 @@ public:
+     virtual void ignoreWordInSpellDocument(const String&) = 0;
+     virtual void learnWord(const String&) = 0;
+     virtual void checkSpellingOfString(StringView, int* misspellingLocation, int* misspellingLength) = 0;
++    // Preserve the checked node's language across process boundaries. Ports
++    // without per-language dictionaries retain their existing behavior.
++    virtual void checkSpellingOfStringForNode(StringView text, Node*, int* location, int* length)
++    {
++        checkSpellingOfString(text, location, length);
++    }
+     virtual void checkGrammarOfString(StringView, Vector<GrammarDetail>&, int* badGrammarLocation, int* badGrammarLength) = 0;
+ 
+ #if USE(UNIFIED_TEXT_CHECKING)
 diff --git a/Source/WebCore/platform/text/haiku/StringHaiku.cpp b/Source/WebCore/platform/text/haiku/StringHaiku.cpp
 new file mode 100644
 index 0000000000000000000000000000000000000000..61ea71ea73a945cf4fea7a961443c30a88a4fb8c
@@ -86967,10 +87108,10 @@ index 0000000000000000000000000000000000000000..cfed966ea3a8d84ec0317ee4a924ece3
 +}
 diff --git a/Source/WebKit/UIProcess/API/haiku/WebKitView.h b/Source/WebKit/UIProcess/API/haiku/WebKitView.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..e22bf062f23d1d74b8b633845e9be5481cfdeaf4
+index 0000000000000000000000000000000000000000..02d8ef97eca4e210651076dec1248230da1ddccb
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/API/haiku/WebKitView.h
-@@ -0,0 +1,436 @@
+@@ -0,0 +1,439 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#pragma once
@@ -87014,7 +87155,10 @@ index 0000000000000000000000000000000000000000..e22bf062f23d1d74b8b633845e9be548
 +// words are added to (may be null). Callable from any thread; pages already
 +// shown are checked again.
 +WK_EXPORT void BWebKitSetSpellChecking(bool enabled, const char* languages, const char* dictionaryDirectory, const char* wordListPath);
-+// The dictionary in use ("" when none was found or checking is off).
++// Page/field language selects an installed dictionary by default; pass false
++// to keep an explicit user choice. The configured list remains the fallback.
++WK_EXPORT void BWebKitSetSpellChecking(bool enabled, const char* languages, const char* dictionaryDirectory, const char* wordListPath, bool usePageLanguage);
++// The fallback dictionary ("" when none was found or checking is off).
 +WK_EXPORT const char* BWebKitSpellCheckingLanguage();
 +
 +enum : uint32 {
@@ -110143,6 +110287,21 @@ index 36316127214c806c85fe86bee755714c318c0e4a..f57e376c619fe6d9799e3b964effd3ff
  #include "TextCheckerState.h"
  #include <WebCore/NotImplemented.h>
  
+diff --git a/Source/WebKit/UIProcess/TextChecker.h b/Source/WebKit/UIProcess/TextChecker.h
+index 8842bc89df532e17b4b33db802e2ea5b6d2035ea..951e5f12d016232449caf48d42c936d2c3d02d63 100644
+--- a/Source/WebKit/UIProcess/TextChecker.h
++++ b/Source/WebKit/UIProcess/TextChecker.h
+@@ -82,6 +82,10 @@ public:
+     static Vector<WebCore::TextCheckingResult> checkTextOfParagraph(SpellDocumentTag, StringView, int32_t insertionPoint, OptionSet<WebCore::TextCheckingType>, bool initialCapitalizationEnabled);
+ #endif
+     static void NODELETE checkSpellingOfString(SpellDocumentTag, StringView text, int32_t& misspellingLocation, int32_t& misspellingLength);
++#if PLATFORM(HAIKU)
++    static void checkSpellingForLanguageHaiku(StringView, const String&, int32_t&, int32_t&);
++    static Vector<String> spellingGuessesForLanguageHaiku(const String&, const String&);
++#endif
+     static void NODELETE checkGrammarOfString(SpellDocumentTag, StringView text, Vector<WebCore::GrammarDetail>&, int32_t& badGrammarLocation, int32_t& badGrammarLength);
+     static bool spellingUIIsShowing();
+     static void toggleSpellingUIIsShowing();
 diff --git a/Source/WebKit/UIProcess/UserMediaPermissionRequestManagerProxy.cpp b/Source/WebKit/UIProcess/UserMediaPermissionRequestManagerProxy.cpp
 index ed75cd4b36d92c580f0ad731f77ff6db6efebcef..2bb2c9b70ef9131558bdfb3b35b891eae1db3b95 100644
 --- a/Source/WebKit/UIProcess/UserMediaPermissionRequestManagerProxy.cpp
@@ -110359,7 +110518,7 @@ index f0a894576a62be24a8e7e5b8009d63128b210aa7..85264fa2c360e44d115c8604754c9e0c
  #if ENABLE(WEBDRIVER_BIDI)
          if (RefPtr page = m_page.get()) {
 diff --git a/Source/WebKit/UIProcess/WebPageProxy.cpp b/Source/WebKit/UIProcess/WebPageProxy.cpp
-index abc66b25d5be6d2b961364268f19eb3762ab2c3a..fcd4a964f86b2059ce4c010f42d584f8586966c7 100644
+index abc66b25d5be6d2b961364268f19eb3762ab2c3a..a22e2d3d47f4b2cc1ab6771b9b904f29d6152c70 100644
 --- a/Source/WebKit/UIProcess/WebPageProxy.cpp
 +++ b/Source/WebKit/UIProcess/WebPageProxy.cpp
 @@ -65,7 +65,9 @@
@@ -110741,7 +110900,28 @@ index abc66b25d5be6d2b961364268f19eb3762ab2c3a..fcd4a964f86b2059ce4c010f42d584f8
      if (RefPtr webExtensionController = this->webExtensionController()) {
          loadInfo.parentFrameIsMainFrame = isParentFrameMainFrame(loadInfo, mainFrame());
          webExtensionController->resourceLoadDidCompleteWithError(identifier(), loadInfo, response, error);
-@@ -14815,7 +14944,7 @@ void WebPageProxy::resetState(ResetStateReason resetStateReason)
+@@ -13976,6 +14105,20 @@ void WebPageProxy::checkSpellingOfString(const String& text, CompletionHandler<v
+     completionHandler(misspellingLocation, misspellingLength);
+ }
+ 
++#if PLATFORM(HAIKU)
++void WebPageProxy::checkSpellingForLanguageHaiku(const String& text, const String& language, CompletionHandler<void(int32_t, int32_t)>&& completion)
++{
++    int32_t location = -1, length = 0;
++    TextChecker::checkSpellingForLanguageHaiku(text, language, location, length);
++    completion(location, length);
++}
++
++void WebPageProxy::getSpellingGuessesForLanguageHaiku(const String& word, const String& language, CompletionHandler<void(Vector<String>&&)>&& completion)
++{
++    completion(TextChecker::spellingGuessesForLanguageHaiku(word, language));
++}
++#endif
++
+ void WebPageProxy::checkGrammarOfString(const String& text, CompletionHandler<void(Vector<WebCore::GrammarDetail>&&, int32_t badGrammarLocation, int32_t badGrammarLength)>&& completionHandler)
+ {
+     Vector<GrammarDetail> grammarDetails;
+@@ -14815,7 +14958,7 @@ void WebPageProxy::resetState(ResetStateReason resetStateReason)
      resetSpeechSynthesizer();
  #endif
  
@@ -110750,7 +110930,7 @@ index abc66b25d5be6d2b961364268f19eb3762ab2c3a..fcd4a964f86b2059ce4c010f42d584f8
      protect(protect(websiteDataStore())->authenticatorManager())->cancelRequest(m_webPageID, std::nullopt);
  #endif
  
-@@ -15092,6 +15221,9 @@ WebPageCreationParameters WebPageProxy::creationParameters(WebProcessProxy& proc
+@@ -15092,6 +15235,9 @@ WebPageCreationParameters WebPageProxy::creationParameters(WebProcessProxy& proc
      parameters.pageLength = m_pageLength;
      parameters.gapBetweenPages = m_gapBetweenPages;
      parameters.userAgent = userAgent();
@@ -110760,7 +110940,7 @@ index abc66b25d5be6d2b961364268f19eb3762ab2c3a..fcd4a964f86b2059ce4c010f42d584f8
      parameters.canRunBeforeUnloadConfirmPanel = m_uiClient->canRunBeforeUnloadConfirmPanel();
      parameters.canRunModal = m_canRunModal;
      parameters.deviceScaleFactor = deviceScaleFactor();
-@@ -15270,9 +15402,9 @@ WebPageCreationParameters WebPageProxy::creationParameters(WebProcessProxy& proc
+@@ -15270,9 +15416,9 @@ WebPageCreationParameters WebPageProxy::creationParameters(WebProcessProxy& proc
      parameters.hasResourceLoadClient = !!m_resourceLoadClient;
      parameters.portsForUpgradingInsecureSchemeForTesting = m_configuration->portsForUpgradingInsecureSchemeForTesting();
  
@@ -110773,7 +110953,7 @@ index abc66b25d5be6d2b961364268f19eb3762ab2c3a..fcd4a964f86b2059ce4c010f42d584f8
  
      if (RefPtr weakWebExtensionController = m_weakWebExtensionController.get())
          parameters.webExtensionControllerParameters = weakWebExtensionController->parameters(m_configuration, process);
-@@ -19004,7 +19136,13 @@ void WebPageProxy::decidePolicyForSOAuthorizationLoad(const String& extension, C
+@@ -19004,7 +19150,13 @@ void WebPageProxy::decidePolicyForSOAuthorizationLoad(const String& extension, C
  #if ENABLE(WEB_AUTHN)
  void WebPageProxy::setMockWebAuthenticationConfiguration(MockWebAuthenticationConfiguration&& configuration)
  {
@@ -110788,7 +110968,7 @@ index abc66b25d5be6d2b961364268f19eb3762ab2c3a..fcd4a964f86b2059ce4c010f42d584f8
  #endif
  
 diff --git a/Source/WebKit/UIProcess/WebPageProxy.h b/Source/WebKit/UIProcess/WebPageProxy.h
-index 30bfad6de4894bb5b8aeaf5d1d31cf4df4091e3a..ddfa0ec67b230dd20caf7955e7ccd9207971b3bf 100644
+index 30bfad6de4894bb5b8aeaf5d1d31cf4df4091e3a..c4ade4dd294f9ed4dade0dda26bfab25904dad02 100644
 --- a/Source/WebKit/UIProcess/WebPageProxy.h
 +++ b/Source/WebKit/UIProcess/WebPageProxy.h
 @@ -152,6 +152,7 @@ class Cursor;
@@ -110838,7 +111018,18 @@ index 30bfad6de4894bb5b8aeaf5d1d31cf4df4091e3a..ddfa0ec67b230dd20caf7955e7ccd920
  
  #if ENABLE(CONTEXT_MENUS)
      // Called by the WebContextMenuProxy.
-@@ -3948,6 +3967,13 @@ private:
+@@ -3499,6 +3518,10 @@ private:
+ 
+     // Spelling and grammar.
+     void checkSpellingOfString(const String& text, CompletionHandler<void(int32_t misspellingLocation, int32_t misspellingLength)>&&);
++#if PLATFORM(HAIKU)
++    void checkSpellingForLanguageHaiku(const String&, const String&, CompletionHandler<void(int32_t, int32_t)>&&);
++    void getSpellingGuessesForLanguageHaiku(const String&, const String&, CompletionHandler<void(Vector<String>&&)>&&);
++#endif
+     void checkGrammarOfString(const String& text, CompletionHandler<void(Vector<WebCore::GrammarDetail>&&, int32_t badGrammarLocation, int32_t badGrammarLength)>&&);
+     void spellingUIIsShowing(CompletionHandler<void(bool)>&&);
+     void updateSpellingUIWithMisspelledWord(const String& misspelledWord);
+@@ -3948,6 +3971,13 @@ private:
      Ref<WebProcessProxy> m_legacyMainFrameProcess;
      const Ref<WebPageGroup> m_pageGroup;
      Ref<WebPreferences> m_preferences;
@@ -110853,7 +111044,7 @@ index 30bfad6de4894bb5b8aeaf5d1d31cf4df4091e3a..ddfa0ec67b230dd20caf7955e7ccd920
      const Ref<WebUserContentControllerProxy> m_userContentController;
  
 diff --git a/Source/WebKit/UIProcess/WebPageProxy.messages.in b/Source/WebKit/UIProcess/WebPageProxy.messages.in
-index e546b9c0d5424549b7c9ba06641850c46571f772..885a0739abe44a6ce7498675d3f4267876c3e0d9 100644
+index e546b9c0d5424549b7c9ba06641850c46571f772..fc172b98f4d03b32409bffbefb5056127f5fbcea 100644
 --- a/Source/WebKit/UIProcess/WebPageProxy.messages.in
 +++ b/Source/WebKit/UIProcess/WebPageProxy.messages.in
 @@ -27,8 +27,20 @@ Copyright (C) 2010-2024 Apple Inc. All rights reserved.
@@ -110877,7 +111068,18 @@ index e546b9c0d5424549b7c9ba06641850c46571f772..885a0739abe44a6ce7498675d3f42678
      ShowPage()
      ClosePage()
      RunJavaScriptAlert(WebCore::FrameIdentifier frameID, struct WebKit::FrameInfoData frameInfo, String message) -> () Synchronous
-@@ -359,6 +371,10 @@ messages -> WebPageProxy {
+@@ -339,6 +351,10 @@ messages -> WebPageProxy {
+     CheckTextOfParagraph(String text, OptionSet<WebCore::TextCheckingType> checkingTypes, int32_t insertionPoint) -> (Vector<WebCore::TextCheckingResult> results) Synchronous
+ #endif
+     CheckSpellingOfString(String text) -> (int32_t misspellingLocation, int32_t misspellingLength) Synchronous
++#if PLATFORM(HAIKU)
++    CheckSpellingForLanguageHaiku(String text, String language) -> (int32_t misspellingLocation, int32_t misspellingLength) Synchronous
++    GetSpellingGuessesForLanguageHaiku(String word, String language) -> (Vector<String> guesses) Synchronous
++#endif
+     CheckGrammarOfString(String text) -> (Vector<WebCore::GrammarDetail> results, int32_t badGrammarLocation, int32_t badGrammarLength) Synchronous
+     SpellingUIIsShowing() -> (bool isShowing) Synchronous
+     UpdateSpellingUIWithMisspelledWord(String misspelledWord)
+@@ -359,6 +375,10 @@ messages -> WebPageProxy {
      StartDrag(WebCore::SelectionData selectionData, OptionSet<WebCore::DragOperation> dragOperationMask, std::optional<WebCore::ShareableBitmapHandle> dragImage, WebCore::IntPoint dragImageHotspot)
  #endif
  
@@ -117234,12 +117436,100 @@ index 0000000000000000000000000000000000000000..726ae50d03c2b79e267235162e2c4f68
 +};
 +
 +} // namespace WebKit
+diff --git a/Source/WebKit/UIProcess/haiku/SpellingLanguageHaiku.h b/Source/WebKit/UIProcess/haiku/SpellingLanguageHaiku.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..8097f7a017033ac54c4f2131279f7585e978f7b0
+--- /dev/null
++++ b/Source/WebKit/UIProcess/haiku/SpellingLanguageHaiku.h
+@@ -0,0 +1,82 @@
++/* Copyright (C) 2026 air/OS contributors. SPDX-License-Identifier: BSD-2-Clause */
++#pragma once
++
++#include <algorithm>
++#include <string>
++#include <string_view>
++#include <vector>
++
++namespace WebKit::SpellingLanguageHaiku {
++
++inline std::string normalize(std::string_view language)
++{
++    if (language.empty() || language.size() > 128)
++        return { };
++    std::string result;
++    unsigned subtagLength = 0;
++    bool first = true;
++    for (unsigned char character : language) {
++        if (character == '-' || character == '_') {
++            if (!subtagLength || subtagLength > 8 || (first && subtagLength < 2))
++                return { };
++            result += '-';
++            subtagLength = 0;
++            first = false;
++            continue;
++        }
++        if (character >= 'A' && character <= 'Z')
++            character += 'a' - 'A';
++        if (!((character >= 'a' && character <= 'z') || (!first && character >= '0' && character <= '9')))
++            return { };
++        result += character;
++        ++subtagLength;
++    }
++    if (!subtagLength || subtagLength > 8 || (first && subtagLength < 2))
++        return { };
++    return result;
++}
++
++// Prefer the exact tag, then progressively less specific tags. When a tag
++// only names a language, keep a matching system preference before choosing
++// another installed regional dictionary. Return the installed spelling of
++// the name, never a filename supplied by the page.
++inline std::string select(std::string_view language, const std::vector<std::string>& available,
++    const std::vector<std::string>& preferred)
++{
++    auto candidate = normalize(language);
++    while (!candidate.empty()) {
++        for (const auto& name : available) {
++            if (normalize(name) == candidate)
++                return name;
++        }
++        const auto prefix = candidate + '-';
++        for (const auto& preference : preferred) {
++            const auto normalized = normalize(preference);
++            if (!normalized.starts_with(prefix))
++                continue;
++            for (const auto& name : available) {
++                if (normalize(name) == normalized)
++                    return name;
++            }
++        }
++        for (const auto& name : available) {
++            if (normalize(name) == candidate + '-' + candidate)
++                return name;
++        }
++        for (const auto& name : available) {
++            if (normalize(name).starts_with(prefix))
++                return name;
++        }
++        auto separator = candidate.rfind('-');
++        if (separator == std::string::npos)
++            break;
++        candidate.resize(separator);
++        // Remove an extension singleton together with its last subtag.
++        separator = candidate.rfind('-');
++        if (separator != std::string::npos && candidate.size() - separator == 2)
++            candidate.resize(separator);
++    }
++    return { };
++}
++
++} // namespace WebKit::SpellingLanguageHaiku
 diff --git a/Source/WebKit/UIProcess/haiku/TextCheckerHaiku.cpp b/Source/WebKit/UIProcess/haiku/TextCheckerHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..6c348015a7e7bf46dab29a99eeb161f767ef8481
+index 0000000000000000000000000000000000000000..5ca1b76c12f5da4e10f9c52388b01945a7d99337
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/TextCheckerHaiku.cpp
-@@ -0,0 +1,419 @@
+@@ -0,0 +1,512 @@
 +/*
 + * Copyright (C) 2019 Haiku, Inc.
 + * Copyright (C) 2026 air/OS contributors.
@@ -117274,11 +117564,14 @@ index 0000000000000000000000000000000000000000..6c348015a7e7bf46dab29a99eeb161f7
 +#include "TextChecker.h"
 +
 +#include "TextCheckerState.h"
++#include "SpellingLanguageHaiku.h"
 +#include "WebKitView.h"
 +#include "WebProcessPool.h"
 +#include <FindDirectory.h>
 +#include <Path.h>
 +#include <dlfcn.h>
++#include <dirent.h>
++#include <memory>
 +#include <fstream>
 +#include <mutex>
 +#include <string>
@@ -117345,7 +117638,16 @@ index 0000000000000000000000000000000000000000..6c348015a7e7bf46dab29a99eeb161f7
 +
 +struct SpellCheckerHaiku {
 +    HunspellLibrary hunspell;
-+    void* handle { nullptr };
++    struct Dictionary {
++        HunspellLibrary& library;
++        void* handle;
++        ~Dictionary() { library.destroy(handle); }
++    };
++    std::unique_ptr<Dictionary> dictionary;
++    std::vector<std::pair<std::string, std::unique_ptr<Dictionary>>> pageDictionaries;
++    std::vector<std::string> availableLanguages;
++    bool scannedLanguages { false };
++    bool usePageLanguage { true };
 +    bool enabled { false };
 +    bool loaded { false };
 +    String languages;
@@ -117377,53 +117679,113 @@ index 0000000000000000000000000000000000000000..6c348015a7e7bf46dab29a99eeb161f7
 +
 +    void unload()
 +    {
-+        if (handle)
-+            hunspell.destroy(handle);
-+        handle = nullptr;
++        dictionary.reset();
++        pageDictionaries.clear();
++        availableLanguages.clear();
++        scannedLanguages = false;
 +        loaded = false;
 +        language = { };
 +    }
 +
-+    // Opens the first dictionary of languages that exists (en_US last).
++    const std::vector<std::string>& installedLanguages()
++    {
++        if (scannedLanguages)
++            return availableLanguages;
++        scannedLanguages = true;
++        for (const auto& directory : directories()) {
++            auto* entries = opendir(directory.c_str());
++            if (!entries)
++                continue;
++            while (auto* entry = readdir(entries)) {
++                std::string name = entry->d_name;
++                if (!name.ends_with(".aff"))
++                    continue;
++                name.resize(name.size() - 4);
++                if (!SpellingLanguageHaiku::normalize(name).empty()
++                    && exists(directory + "/" + name + ".aff") && exists(directory + "/" + name + ".dic"))
++                    availableLanguages.push_back(WTF::move(name));
++            }
++            closedir(entries);
++        }
++        std::sort(availableLanguages.begin(), availableLanguages.end());
++        availableLanguages.erase(std::unique(availableLanguages.begin(), availableLanguages.end()), availableLanguages.end());
++        return availableLanguages;
++    }
++
++    std::unique_ptr<Dictionary> loadDictionary(const String& name)
++    {
++        if (name.isEmpty() || name.contains('/') || name.contains(".."_s) || !hunspell.load())
++            return nullptr;
++        for (const auto& directory : directories()) {
++            const auto base = directory + "/" + name.utf8().legacyCStringPointer();
++            if (!exists(base + ".aff") || !exists(base + ".dic"))
++                continue;
++            auto* handle = hunspell.create((base + ".aff").c_str(), (base + ".dic").c_str());
++            if (!handle)
++                continue;
++            auto result = std::make_unique<Dictionary>(hunspell, handle);
++            // Words are given as UTF-8: only dictionaries in UTF-8 fit.
++            if (hunspell.encoding) {
++                if (const char* encoding = hunspell.encoding(handle); encoding && strcasecmp(encoding, "UTF-8"))
++                    continue;
++            }
++            readWordList(handle);
++            return result;
++        }
++        return nullptr;
++    }
++
++    // Opens the first configured dictionary that exists (en_US last).
 +    void ensureLoaded()
 +    {
 +        if (loaded || !enabled)
 +            return;
 +        loaded = true;
-+        if (!hunspell.load())
-+            return;
 +        Vector<String> names;
 +        for (auto name : languages.split(','))
 +            names.append(name.trim(isASCIIWhitespace<char16_t>));
 +        names.append("en_US"_s);
 +        for (const auto& name : names) {
-+            if (name.isEmpty() || name.contains('/') || name.contains(".."_s))
-+                continue;
-+            for (const auto& directory : directories()) {
-+                const auto base = directory + "/" + name.utf8().legacyCStringPointer();
-+                if (!exists(base + ".aff") || !exists(base + ".dic"))
-+                    continue;
-+                handle = hunspell.create((base + ".aff").c_str(), (base + ".dic").c_str());
-+                if (!handle)
-+                    continue;
-+                // Words are given as UTF-8: only dictionaries in UTF-8 fit.
-+                if (hunspell.encoding) {
-+                    if (const char* encoding = hunspell.encoding(handle); encoding && strcasecmp(encoding, "UTF-8")) {
-+                        hunspell.destroy(handle);
-+                        handle = nullptr;
-+                        continue;
-+                    }
-+                }
++            dictionary = loadDictionary(name);
++            if (dictionary) {
 +                language = name;
-+                readWordList();
 +                return;
 +            }
 +        }
 +    }
 +
-+    void readWordList()
++    void* handleForLanguage(const String& pageLanguage)
 +    {
-+        if (!handle || wordListPath.isEmpty())
++        if (!enabled)
++            return nullptr;
++        ensureLoaded();
++        void* fallback = dictionary ? dictionary->handle : nullptr;
++        if (!usePageLanguage || pageLanguage.isEmpty() || pageLanguage.length() > 128)
++            return fallback;
++        std::vector<std::string> preferred;
++        for (auto name : languages.split(','))
++            preferred.emplace_back(name.trim(isASCIIWhitespace<char16_t>).utf8().legacyCStringPointer());
++        preferred.emplace_back("en_US");
++        const auto selected = SpellingLanguageHaiku::select(pageLanguage.utf8().legacyCStringPointer(), installedLanguages(), preferred);
++        if (selected.empty() || selected == language.utf8().legacyCStringPointer())
++            return fallback;
++        for (const auto& entry : pageDictionaries) {
++            if (entry.first == selected)
++                return entry.second ? entry.second->handle : fallback;
++        }
++        // Bound dictionary memory independently of arbitrary page tags. Cache
++        // by installed name; aliases and missing languages cannot grow it.
++        if (pageDictionaries.size() == 8)
++            pageDictionaries.erase(pageDictionaries.begin());
++        auto extra = loadDictionary(String::fromUTF8(selected));
++        void* handle = extra ? extra->handle : fallback;
++        pageDictionaries.emplace_back(selected, WTF::move(extra));
++        return handle;
++    }
++
++    void readWordList(void* handle)
++    {
++        if (wordListPath.isEmpty())
 +            return;
 +        std::ifstream file(wordListPath.utf8().legacyCStringPointer());
 +        std::string word;
@@ -117433,9 +117795,9 @@ index 0000000000000000000000000000000000000000..6c348015a7e7bf46dab29a99eeb161f7
 +        }
 +    }
 +
-+    bool isCorrect(StringView word)
++    bool isCorrect(StringView word, const String& pageLanguage)
 +    {
-+        ensureLoaded();
++        auto* handle = handleForLanguage(pageLanguage);
 +        if (!handle)
 +            return true;
 +        String text = word.toString();
@@ -117454,9 +117816,9 @@ index 0000000000000000000000000000000000000000..6c348015a7e7bf46dab29a99eeb161f7
 +        return hunspell.spell(handle, text.utf8().legacyCStringPointer());
 +    }
 +
-+    Vector<String> guesses(const String& word)
++    Vector<String> guesses(const String& word, const String& pageLanguage = { })
 +    {
-+        ensureLoaded();
++        auto* handle = handleForLanguage(pageLanguage);
 +        if (!handle)
 +            return { };
 +        char** list = nullptr;
@@ -117476,8 +117838,12 @@ index 0000000000000000000000000000000000000000..6c348015a7e7bf46dab29a99eeb161f7
 +        if (word.isEmpty() || word.length() >= 100 || word.contains('\n'))
 +            return;
 +        ensureLoaded();
-+        if (handle)
-+            hunspell.add(handle, word.utf8().legacyCStringPointer());
++        if (dictionary)
++            hunspell.add(dictionary->handle, word.utf8().legacyCStringPointer());
++        for (const auto& entry : pageDictionaries) {
++            if (entry.second)
++                hunspell.add(entry.second->handle, word.utf8().legacyCStringPointer());
++        }
 +        if (!wordListPath.isEmpty()) {
 +            std::ofstream file(wordListPath.utf8().legacyCStringPointer(), std::ios::app);
 +            file << word.utf8().legacyCStringPointer() << '\n';
@@ -117557,6 +117923,11 @@ index 0000000000000000000000000000000000000000..6c348015a7e7bf46dab29a99eeb161f7
 +
 +void TextChecker::checkSpellingOfString(SpellDocumentTag, StringView text, int32_t& misspellingLocation, int32_t& misspellingLength)
 +{
++    checkSpellingForLanguageHaiku(text, { }, misspellingLocation, misspellingLength);
++}
++
++void TextChecker::checkSpellingForLanguageHaiku(StringView text, const String& language, int32_t& misspellingLocation, int32_t& misspellingLength)
++{
 +    misspellingLocation = -1;
 +    misspellingLength = 0;
 +    auto& checker = spellChecker();
@@ -117567,7 +117938,7 @@ index 0000000000000000000000000000000000000000..6c348015a7e7bf46dab29a99eeb161f7
 +        return;
 +    int start = ubrk_first(iterator);
 +    for (int end = ubrk_next(iterator); end != UBRK_DONE; end = ubrk_next(iterator)) {
-+        if (isWordTextBreak(iterator) && !checker.isCorrect(text.substring(start, end - start))) {
++        if (isWordTextBreak(iterator) && !checker.isCorrect(text.substring(start, end - start), language)) {
 +            misspellingLocation = start;
 +            misspellingLength = end - start;
 +            return;
@@ -117604,6 +117975,11 @@ index 0000000000000000000000000000000000000000..6c348015a7e7bf46dab29a99eeb161f7
 +    guesses = spellChecker().guesses(word);
 +}
 +
++Vector<String> TextChecker::spellingGuessesForLanguageHaiku(const String& word, const String& language)
++{
++    return spellChecker().guesses(word, language);
++}
++
 +void TextChecker::learnWord(SpellDocumentTag, const String& word)
 +{
 +    spellChecker().learn(word);
@@ -117629,13 +118005,19 @@ index 0000000000000000000000000000000000000000..6c348015a7e7bf46dab29a99eeb161f7
 +
 +void BWebKitSetSpellChecking(bool enabled, const char* languages, const char* dictionaryDirectory, const char* wordListPath)
 +{
-+    auto apply = [enabled, languages = String::fromUTF8(languages ? languages : "").isolatedCopy(),
++    BWebKitSetSpellChecking(enabled, languages, dictionaryDirectory, wordListPath, true);
++}
++
++void BWebKitSetSpellChecking(bool enabled, const char* languages, const char* dictionaryDirectory, const char* wordListPath, bool usePageLanguage)
++{
++    auto apply = [enabled, usePageLanguage, languages = String::fromUTF8(languages ? languages : "").isolatedCopy(),
 +        directory = String::fromUTF8(dictionaryDirectory ? dictionaryDirectory : "").isolatedCopy(),
 +        wordList = String::fromUTF8(wordListPath ? wordListPath : "").isolatedCopy()] {
 +        auto& checker = spellChecker();
-+        if (checker.languages != languages || checker.dictionaryDirectory != directory || checker.wordListPath != wordList || !enabled)
++        if (checker.languages != languages || checker.dictionaryDirectory != directory || checker.wordListPath != wordList || checker.usePageLanguage != usePageLanguage || !enabled)
 +            checker.unload();
 +        checker.languages = languages;
++        checker.usePageLanguage = usePageLanguage;
 +        checker.dictionaryDirectory = directory;
 +        checker.wordListPath = wordList;
 +        checker.enabled = enabled;
@@ -117646,7 +118028,8 @@ index 0000000000000000000000000000000000000000..6c348015a7e7bf46dab29a99eeb161f7
 +            auto name = checker.language.utf8();
 +            strlcpy(languageName, name.legacyCStringPointer(), sizeof(languageName));
 +        }
-+        TextChecker::setContinuousSpellCheckingEnabled(enabled && !checker.language.isEmpty());
++        TextChecker::setContinuousSpellCheckingEnabled(enabled && (!checker.language.isEmpty()
++            || (usePageLanguage && checker.hunspell.load() && !checker.installedLanguages().empty())));
 +    };
 +    if (RunLoop::isMain())
 +        apply();
@@ -142856,6 +143239,68 @@ index b3f2fc81270244d1e52568f2355b7e4390ce4ae3..9e83b7471f25ce56c17cd34bad6fa3aa
  }
  
  void WebDragClient::didConcludeEditDrag()
+diff --git a/Source/WebKit/WebProcess/WebCoreSupport/WebEditorClient.cpp b/Source/WebKit/WebProcess/WebCoreSupport/WebEditorClient.cpp
+index c21aaf34e66e4aa1f7d3e10cbabeb12cb8273a56..6f28b68416de6b9c91cdb387b4127477d8f2622a 100644
+--- a/Source/WebKit/WebProcess/WebCoreSupport/WebEditorClient.cpp
++++ b/Source/WebKit/WebProcess/WebCoreSupport/WebEditorClient.cpp
+@@ -637,6 +637,31 @@ void WebEditorClient::checkSpellingOfString(StringView text, int* misspellingLoc
+     *misspellingLength = resultLength;
+ }
+ 
++#if PLATFORM(HAIKU)
++static String spellingLanguageForNode(Node* node)
++{
++    if (!node)
++        return { };
++    RefPtr element = dynamicDowncast<Element>(*node);
++    if (!element)
++        element = node->parentOrShadowHostElement();
++    auto language = element ? element->effectiveLang() : node->document().effectiveDocumentElementLanguage();
++    return language.length() <= 128 ? String(language) : String();
++}
++
++void WebEditorClient::checkSpellingOfStringForNode(StringView text, Node* node, int* location, int* length)
++{
++    RefPtr page = m_page.get();
++    if (!page) {
++        *location = -1;
++        *length = 0;
++        return;
++    }
++    auto result = page->sendSync(Messages::WebPageProxy::CheckSpellingForLanguageHaiku(text.toStringWithoutCopying(), spellingLanguageForNode(node)));
++    std::tie(*location, *length) = result.takeReplyOr(-1, 0);
++}
++#endif
++
+ void WebEditorClient::checkGrammarOfString(StringView text, Vector<WebCore::GrammarDetail>& grammarDetails, int* badGrammarLocation, int* badGrammarLength)
+ {
+     RefPtr page = m_page.get();
+@@ -704,7 +729,11 @@ void WebEditorClient::getGuessesForWord(const String& word, const String& contex
+     RefPtr page = m_page.get();
+     if (!page)
+         return;
++#if PLATFORM(HAIKU)
++    auto sendResult = page->sendSync(Messages::WebPageProxy::GetSpellingGuessesForLanguageHaiku(word, spellingLanguageForNode(currentSelection.start().containerNode())));
++#else
+     auto sendResult = page->sendSync(Messages::WebPageProxy::GetGuessesForWord(word, context, insertionPointFromCurrentSelection(currentSelection)));
++#endif
+     if (sendResult.succeeded())
+         std::tie(guesses) = sendResult.takeReply();
+ }
+diff --git a/Source/WebKit/WebProcess/WebCoreSupport/WebEditorClient.h b/Source/WebKit/WebProcess/WebCoreSupport/WebEditorClient.h
+index e87e0707430a4343d4fd8dd759dae284a30838f4..27da431fb4a5972b2077bf365f3e134b742b3147 100644
+--- a/Source/WebKit/WebProcess/WebCoreSupport/WebEditorClient.h
++++ b/Source/WebKit/WebProcess/WebCoreSupport/WebEditorClient.h
+@@ -170,6 +170,9 @@ private:
+     void ignoreWordInSpellDocument(const String&) final;
+     void learnWord(const String&) final;
+     void checkSpellingOfString(StringView, int* misspellingLocation, int* misspellingLength) final;
++#if PLATFORM(HAIKU)
++    void checkSpellingOfStringForNode(StringView, WebCore::Node*, int*, int*) final;
++#endif
+     void checkGrammarOfString(StringView, Vector<WebCore::GrammarDetail>&, int* badGrammarLocation, int* badGrammarLength) final;
+ 
+ #if USE(UNIFIED_TEXT_CHECKING)
 diff --git a/Source/WebKit/WebProcess/WebCoreSupport/WebLocalFrameLoaderClient.cpp b/Source/WebKit/WebProcess/WebCoreSupport/WebLocalFrameLoaderClient.cpp
 index beb654baaa80231aff8ed6f61d602bf29d70d6f6..d8c14a6356ba688b2a36a07bd821cc88d6a7c2b1 100644
 --- a/Source/WebKit/WebProcess/WebCoreSupport/WebLocalFrameLoaderClient.cpp

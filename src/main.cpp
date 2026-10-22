@@ -1326,7 +1326,8 @@ private:
     }
     // Spell checking (#66) with the en_US dictionary Summit carries, copied
     // to the profile's Dictionaries folder, or one installed in data/hunspell:
-    // the one chosen in Preferences, else the system language's (#110).
+    // the one chosen in Preferences, else each field/page's language, with
+    // the system language as fallback (#110).
     // SUMMIT_SPELLING_LANGUAGES names others first ("de_DE,en_US").
     void ApplySpellChecking()
     {
@@ -1353,7 +1354,7 @@ private:
         const auto chosen = fShared->Read([](const summit::Profile& profile) { return profile.spellingLanguage; });
         const std::string languages = override ? std::string(override)
             : summit::SpellingLanguages(chosen, SystemLanguages(), summit::SpellingDictionaries(SpellingDirectories()));
-        BWebKitSetSpellChecking(enabled, languages.c_str(), directory.c_str(), (directory / "words.txt").c_str());
+        BWebKitSetSpellChecking(enabled, languages.c_str(), directory.c_str(), (directory / "words.txt").c_str(), chosen.empty() && !override);
     }
     // The engine's value of a saved decision: for autoplay, allowed means
     // media play by themselves (0) and blocked that they wait for the user
