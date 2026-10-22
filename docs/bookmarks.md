@@ -88,7 +88,7 @@ added on 22 October 2026 for #110.
 
   Bookmarks go into a folder **Imported from WebPositive** (Firefox, Chrome,
   …; for an HTML file from another browser its file name) in Other Bookmarks,
-  with their folders. Addresses that are bookmarked already keep their existing
+  with their folders. For formats without item identities, addresses that are bookmarked already keep their existing
   title and location, gain new tags and keyword aliases, and receive a description only if they have
   none. Importing again adds only what is new; folders left empty by duplicates are not made,
   and an "Imported from …" folder that exists is filled again (its folders of
@@ -97,6 +97,10 @@ added on 22 October 2026 for #110.
   Summit cannot yet evaluate (see **Live smart folders** below). Empty folders present in the source are
   kept, including imports containing no addresses. The window reports added
   bookmarks, folders and separators, updated metadata, skipped addresses, and imported history.
+  Firefox databases retain each distinct bookmark item, including the same
+  address in multiple folders. Reimporting the same database matches those
+  identities, preserving local names, moves and edited addresses. Separate
+  databases have separate namespaces, even when their folder IDs overlap.
 - **File › Export Bookmarks…** saves `bookmarks.html` (Netscape bookmarks
   HTML, the format every browser imports) where the save panel says: the
   bookmarks bar as a folder marked as the toolbar (`PERSONAL_TOOLBAR_FOLDER`),
@@ -140,9 +144,10 @@ added on 22 October 2026 for #110.
   linked (the CI link line is fixed): `/boot/system/lib/libsqlite3.so.0` is
   `dlopen()`ed for the eight functions needed. The database and its
   write-ahead log are copied to a temporary folder first, because Firefox or
-  Chrome may be running and holding them. Firefox's roots are found by guid:
-  the toolbar becomes "Bookmarks Toolbar", the Bookmarks Menu's own come
-  first-level, then "Other Bookmarks" and "Mobile Bookmarks". Firefox type-3
+  Chrome may be running and holding them. Firefox's roots are found by GUID:
+  "Bookmarks Toolbar", "Bookmarks Menu", "Other Bookmarks" and "Mobile
+  Bookmarks" remain real folders, including empty roots, so shortcuts to one
+  root cannot include its siblings. Firefox type-3
   records become separators. History is the 2000 most
   recent visible pages with visit counts.
 - **Separator import/export** uses `<HR>`, as in
@@ -270,6 +275,8 @@ Examples supported by this implementation:
 | `place:queryType=1&tag=work` | Bookmarks tagged `work` |
 | `place:queryType=1&terms=reading` | Bookmarks whose title, address or tags contain `reading` |
 | `place:type=6&sort=1` | Tag folders containing their bookmarked pages |
+| `place:parent=toolbar_____` | The referenced toolbar's direct folder tree |
+| `place:folder=10` | A legacy numeric reference to folder 10 in the imported database |
 
 Other implemented filters include exact URI, domain (optionally exact host),
 visit-count bounds, multiple required or excluded tags, bookmarked-only history,
@@ -278,11 +285,38 @@ last visit, visit count, bookmark addition time and tags. A zero result limit
 means no additional query limit. Title sorting with a limit first selects the
 most recently visited matches. Menus evaluate an immutable snapshot on opening;
 profile changes replace the snapshot for subsequent menus. Circular query
-expansion stops at a repeated query or eight nested queries. Tag expansion
+expansion stops at a repeated query in its source scope or eight nested queries. Tag expansion
 is bounded to 10,000 page memberships.
 
+**Folder references** retain the target's imported GUID and numeric ID. Simple
+one-parent shortcuts expose ordered direct children, including folders,
+separators and nested shortcuts. Constrained searches (for example a parent
+plus search terms or a result limit) search descendants, as
+[Firefox's query implementation](https://github.com/mozilla-firefox/firefox/blob/main/toolkit/components/places/nsNavHistory.cpp)
+does. Multiple parents select the union of their subtrees.
+Legacy root names `BOOKMARKS_MENU`, `TOOLBAR`, `UNFILED_BOOKMARKS`,
+`MOBILE_BOOKMARKS` and `PLACES_ROOT` are recognised. Missing or ambiguous targets
+show an explanation with no broader substitute results. Moving, renaming or
+editing a target keeps its identity; membership follows its current contents.
+
+Each imported item keeps an `origin` containing a source scope, GUID and numeric
+ID. The scope hashes the database's canonical source path, so it contains no
+path text and reimporting that file remains stable. Importing a database from a
+different path creates a distinct source; Summit HTML exports carry their
+existing identities in `SUMMIT_ORIGIN` attributes. Profile saves and Summit
+HTML export/reimport preserve those identities, even after runtime node IDs
+are renumbered. Reimports find moved items by identity instead of restoring
+their former positions. Keywords and native query activation retain the saved
+node ID, so identical query URLs in different source scopes do not select the
+first matching URL accidentally.
+
+Standard Firefox HTML exports lack the database identities needed to recover
+arbitrary folder references. Such queries remain saved with an unresolved
+target explanation; they are never redirected to similarly named Summit
+folders. Import `places.sqlite` when folder references must be resolved.
+
 **This does not complete Firefox smart-folder compatibility or #110.** Folder
-references (`parent`/legacy `folder`), time ranges, visit transitions, OR clauses,
+references are implemented for retained database identities; time ranges, visit transitions, OR clauses,
 annotations, modification-time/frecency sorts and other result groupings remain
 unsupported. Such queries stay saved and show an explicit explanation, with no
 broader substitute results. Query history is limited to Summit's retained 2,000
@@ -298,11 +332,35 @@ entries with instructions to run them from the bar or menu.
 
 ## Testing
 
+The folder-reference follow-up adds **70 folder-query checks** on host and
+native airOS. The existing **328 bookmark**, **100 general query** and **384
+host core** checks pass; native UI checks now total **52**. Fixtures cover
+GUID, numeric and symbolic references, direct trees versus descendant
+searches, separators, missing targets, duplicate addresses, overlapping
+identities across two databases, moves, renames, native keywords, profile
+reloads and HTML round trips. The 328 bookmark and 70 folder-query checks also
+pass with AddressSanitizer and UndefinedBehaviorSanitizer.
+
+The full browser passes **60 browser/fixture checks and 99 native action
+assertions**, including the prior common-query checks. Two SQLite imports
+deliberately reuse every GUID, numeric ID and query URL. Native menu and
+saved-query activation select the correct source; moving targets or nested
+folders changes live results, native editing keeps the source scope, and
+reimports preserve local moves without adding duplicate items. The presented
+scoped-folder page was visually inspected. All four selected engine images were
+loaded, all **676 frozen hashes** remained unchanged, and the browser exited
+normally with no helpers or crash events across the complete log interval.
+The full-browser run preceded a final separator-only correction: comparing
+truncated names on reimport prevents overlong separator names from multiplying.
+That correction is covered by the final host, sanitizer and native focused
+runs; the query evaluator and browser UI are unchanged. Evidence:
+[`bookmark-folder-queries-native-2026-10-22.json`](bookmark-folder-queries-native-2026-10-22.json).
+
 The live-query follow-up passes **328 bookmark checks** and **100 query checks**
 on the host and native airOS, **384 host core checks**, and **46 native UI
 checks**. `tests/BookmarkQueryTests.cpp` covers parsing, filtering, ordering,
 limits, live changes, import/persistence/export, unsupported clauses and inert
-script results. `tools/bench/bookmarks-native.sh` builds the three native
+script results. `tools/bench/bookmarks-native.sh` builds the four native
 bookmark test programs.
 
 The full browser passes **36 browser/fixture checks and 61 native action

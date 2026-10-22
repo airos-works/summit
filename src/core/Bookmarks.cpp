@@ -21,6 +21,22 @@ std::string MetadataText(std::string text, size_t limit)
 }
 }
 
+BookmarkOrigin NormalizeBookmarkOrigin(BookmarkOrigin origin)
+{
+    const auto valid = [](const std::string& text) {
+        return text.size() <= 128 && text.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-") == std::string::npos;
+    };
+    if (origin.scope.empty() || !valid(origin.scope) || !valid(origin.guid) || origin.id < 0
+        || (origin.guid.empty() && !origin.id)) return {};
+    return origin;
+}
+
+std::string BookmarkOriginKey(const BookmarkOrigin& origin)
+{
+    const auto value = NormalizeBookmarkOrigin(origin);
+    return value.Empty() ? std::string() : value.scope + ":" + (value.guid.empty() ? "#" + std::to_string(value.id) : value.guid);
+}
+
 BookmarkMetadata NormalizeBookmarkMetadata(BookmarkMetadata metadata)
 {
     metadata.description = MetadataText(std::move(metadata.description), kMaxBookmarkDescription);
@@ -239,6 +255,7 @@ bool Bookmarks::Empty() const { return fBar.children.empty() && fOther.children.
 void Bookmarks::Number(BookmarkNode& node)
 {
     node.id = fNextID++;
+    node.origin = NormalizeBookmarkOrigin(std::move(node.origin));
     for (auto& child : node.children) Number(child);
 }
 
@@ -441,7 +458,9 @@ bool Bookmarks::RemoveURL(const std::string& url)
 namespace {
 struct ImportState {
     std::map<std::string, int64_t> known;
+    std::map<std::string, int64_t> origins;
     std::function<BookmarkNode*(int64_t)> find;
+    std::function<size_t(int64_t)> depth;
     std::set<int64_t> updated;
     // Folders this import made: those left empty are removed again.
     std::set<int64_t> created;
@@ -483,73 +502,98 @@ void MergeExisting(const BookmarkNode& from, ImportState& state)
         if (child.separator) { ++state.result.overLimit; continue; }
         const auto url = TrimmedURL(child.url);
         if (!IsBookmarkableURL(url)) { ++state.result.unsupported; continue; }
-        if (auto known = state.known.find(url); known != state.known.end()) {
+        const auto key = BookmarkOriginKey(child.origin);
+        const auto& knownItems = key.empty() ? state.known : state.origins;
+        if (auto known = knownItems.find(key.empty() ? url : key); known != knownItems.end()) {
             ++state.result.duplicates;
             if (auto* existing = state.find(known->second)) MergeMetadata(child, *existing, state);
         } else ++state.result.overLimit;
     }
 }
 
-void Merge(const BookmarkNode& from, BookmarkNode& into, size_t depth, ImportState& state)
+void Merge(const BookmarkNode& from, BookmarkNode& destination, size_t depth, ImportState& state)
 {
-    // Reimporting the same folder must not multiply its separators. Match
-    // their occurrences within this folder; repeated separators in the file
-    // are distinct. Existing nodes keep their order, as with bookmarks.
+    const auto destinationID = destination.id;
     std::map<std::string, size_t> separators;
-    for (const auto& child : into.children)
-        if (child.separator) ++separators[child.title];
+    for (const auto& child : destination.children)
+        if (child.separator && child.origin.Empty()) ++separators[child.title];
     for (const auto& child : from.children) {
+        // Existing imported nodes may have been moved elsewhere. Resolve IDs
+        // afresh: adding a sibling of this destination can move its vector.
+        auto* into = state.find(destinationID);
+        if (!into) return;
+        const auto origin = NormalizeBookmarkOrigin(child.origin);
+        const auto key = BookmarkOriginKey(origin);
+        BookmarkNode* identified = nullptr;
+        if (!key.empty())
+            if (auto found = state.origins.find(key); found != state.origins.end()) identified = state.find(found->second);
+        if (identified && (identified->folder != child.folder || identified->separator != child.separator)) {
+            ++state.result.unsupported;
+            continue;
+        }
         if (child.folder) {
-            // Folders past the limits give their bookmarks to the folder above.
-            if (depth + 1 > kMaxBookmarkDepth) {
-                Merge(child, into, depth, state);
+            if (depth + 1 > kMaxBookmarkDepth && !identified) {
+                Merge(child, *into, depth, state);
                 continue;
             }
             const std::string title = child.title.substr(0, 4096);
-            auto existing = std::find_if(into.children.begin(), into.children.end(),
-                [&](const BookmarkNode& node) { return node.folder && node.title == title; });
-            const bool created = existing == into.children.end();
-            if (created) {
+            auto* target = identified;
+            if (!target && origin.Empty()) {
+                auto found = std::find_if(into->children.begin(), into->children.end(), [&](const BookmarkNode& node) {
+                    return node.folder && node.origin.Empty() && node.title == title;
+                });
+                if (found != into->children.end()) target = &*found;
+            }
+            if (!target) {
                 if (state.folders >= kMaxBookmarkFolders) {
                     ++state.result.overLimit;
-                    Merge(child, into, depth, state);
+                    Merge(child, *into, depth, state);
                     continue;
                 }
-                into.children.push_back({state.nextID++, title, "", true, child.added ? child.added : state.now, {}});
-                // A folder empty in the file stays (one exported empty comes
-                // back); one left empty by duplicates goes (RemoveEmptyCreated).
-                if (!child.children.empty()) state.created.insert(into.children.back().id);
+                into->children.push_back({state.nextID++, title, "", true, child.added ? child.added : state.now, {}});
+                target = &into->children.back();
+                target->origin = origin;
+                target->metadata = NormalizeBookmarkMetadata(child.metadata);
+                if (!child.children.empty()) state.created.insert(target->id);
+                if (!key.empty()) state.origins.emplace(key, target->id);
                 ++state.folders;
-                existing = into.children.end() - 1;
-            }
-            if (created) existing->metadata = NormalizeBookmarkMetadata(child.metadata);
-            else MergeMetadata(child, *existing, state);
-            // Only the folder's own children change below, so the reference stays valid.
-            Merge(child, *existing, depth + 1, state);
+            } else MergeMetadata(child, *target, state);
+            const auto targetID = target->id;
+            Merge(child, *target, state.depth(targetID), state);
             continue;
         }
         if (child.separator) {
+            if (identified) continue;
             const auto title = child.title.substr(0, 4096);
             auto& matching = separators[title];
-            if (matching) { --matching; continue; }
+            if (origin.Empty() && matching) { --matching; continue; }
             if (state.separators >= kMaxBookmarkSeparators) { ++state.result.overLimit; continue; }
-            into.children.push_back({state.nextID++, title, "", false, child.added ? child.added : state.now, {}, true});
+            into->children.push_back({state.nextID++, title, "", false, child.added ? child.added : state.now, {}, true});
+            into->children.back().origin = origin;
+            if (!key.empty()) state.origins.emplace(key, into->children.back().id);
             ++state.separators;
             ++state.result.separatorsAdded;
             continue;
         }
         const std::string url = TrimmedURL(child.url);
         if (!IsBookmarkableURL(url)) { ++state.result.unsupported; continue; }
-        if (auto found = state.known.find(url); found != state.known.end()) {
+        // Firefox can bookmark an address in several folders. Its item
+        // identity, rather than the URL, preserves those live memberships.
+        if (!identified && origin.Empty())
+            if (auto found = state.known.find(url); found != state.known.end()) identified = state.find(found->second);
+        if (identified) {
             ++state.result.duplicates;
-            if (auto* existing = state.find(found->second)) MergeMetadata(child, *existing, state);
+            MergeMetadata(child, *identified, state);
             continue;
         }
         if (state.count >= kMaxBookmarks) { ++state.result.overLimit; continue; }
-        into.children.push_back({state.nextID++, (child.title.empty() ? url : child.title).substr(0, 4096), url, false,
+        into->children.push_back({state.nextID++, (child.title.empty() ? url : child.title).substr(0, 4096), url, false,
             child.added ? child.added : state.now, {}});
-        into.children.back().metadata = NormalizeBookmarkMetadata(child.metadata);
-        state.known.emplace(url, into.children.back().id);
+        auto& added = into->children.back();
+        added.origin = origin;
+        added.metadata = NormalizeBookmarkMetadata(child.metadata);
+        state.known.emplace(url, added.id);
+        if (!key.empty()) state.origins.emplace(key, added.id);
         ++state.count;
         ++state.result.added;
     }
@@ -560,7 +604,7 @@ void RemoveEmptyCreated(BookmarkNode& folder, const std::set<int64_t>& created)
     for (auto& child : folder.children)
         if (child.folder) RemoveEmptyCreated(child, created);
     folder.children.erase(std::remove_if(folder.children.begin(), folder.children.end(), [&](const BookmarkNode& child) {
-        return child.folder && child.children.empty() && child.metadata.Empty() && created.count(child.id);
+        return child.folder && child.children.empty() && child.metadata.Empty() && child.origin.Empty() && created.count(child.id);
     }), folder.children.end());
 }
 }
@@ -568,9 +612,11 @@ void RemoveEmptyCreated(BookmarkNode& folder, const std::set<int64_t>& created)
 BookmarkImportResult Bookmarks::Import(const BookmarkNode& imported, const std::string& folderTitle, int64_t now)
 {
     const size_t oldFolders = fFolders;
-    ImportState state{{}, [this](int64_t id) { return FindNode(id); }, {}, {}, fPages.size(), fFolders, fSeparators, {}, fNextID, now};
+    ImportState state{{}, {}, [this](int64_t id) { return FindNode(id); },
+        [this](int64_t id) { return Depth(fBar, fOther, id); }, {}, {}, fPages.size(), fFolders, fSeparators, {}, fNextID, now};
     std::function<void(const BookmarkNode&)> collect = [&](const BookmarkNode& folder) {
         for (const auto& child : folder.children) {
+            if (auto key = BookmarkOriginKey(child.origin); !key.empty()) state.origins.emplace(key, child.id);
             if (child.folder) collect(child);
             else if (!child.separator) state.known.emplace(child.url, child.id);
         }
@@ -578,9 +624,15 @@ BookmarkImportResult Bookmarks::Import(const BookmarkNode& imported, const std::
     collect(fBar);
     collect(fOther);
     const std::string title = folderTitle.substr(0, 4096);
+    const auto origin = NormalizeBookmarkOrigin(imported.origin);
     auto existing = std::find_if(fOther.children.begin(), fOther.children.end(),
-        [&](const BookmarkNode& node) { return node.folder && node.title == title; });
-    if (existing == fOther.children.end()) {
+        [&](const BookmarkNode& node) { return node.folder && (origin.Empty()
+            ? node.origin.Empty() && node.title == title : BookmarkOriginKey(node.origin) == BookmarkOriginKey(origin)); });
+    BookmarkNode* target = existing == fOther.children.end() ? nullptr : &*existing;
+    if (!origin.Empty())
+        if (auto found = state.origins.find(BookmarkOriginKey(origin)); found != state.origins.end()) target = FindNode(found->second);
+    if (target && !target->folder) { state.result.unsupported = CountBookmarks(imported); return state.result; }
+    if (!target) {
         if (fFolders >= kMaxBookmarkFolders) {
             MergeExisting(imported, state);
             state.result.updated = state.updated.size();
@@ -589,19 +641,18 @@ BookmarkImportResult Bookmarks::Import(const BookmarkNode& imported, const std::
             return state.result;
         }
         fOther.children.push_back({fNextID++, title, "", true, now, {}});
+        fOther.children.back().origin = origin;
         state.created.insert(fOther.children.back().id);
         ++state.folders;
-        existing = fOther.children.end() - 1;
+        target = &fOther.children.back();
     }
-    const int64_t folder = existing->id;
-    Merge(imported, *existing, 1, state);
+    const int64_t folder = target->id;
+    if (auto key = BookmarkOriginKey(origin); !key.empty()) state.origins.emplace(key, folder);
+    Merge(imported, *target, state.depth(folder), state);
     // Folders that only held duplicates are not kept; folders that were there
     // before keep whatever they had, and so do folders empty in the file.
-    BookmarkNode root;
-    root.children.push_back(std::move(*existing));
-    RemoveEmptyCreated(root, state.created);
-    if (root.children.empty()) fOther.children.erase(existing);
-    else *existing = std::move(root.children.front());
+    RemoveEmptyCreated(fBar, state.created);
+    RemoveEmptyCreated(fOther, state.created);
     auto result = state.result;
     Reindex();
     result.foldersAdded = fFolders - oldFolders;

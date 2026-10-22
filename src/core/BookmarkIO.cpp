@@ -1,5 +1,6 @@
 #include "BookmarkIO.h"
 #include "Address.h"
+#include "BookmarkQueries.h"
 #include <nlohmann/json.hpp>
 #include <algorithm>
 #include <cctype>
@@ -10,6 +11,7 @@
 #include <fstream>
 #include <map>
 #include <random>
+#include <openssl/sha.h>
 #include <sys/stat.h>
 #include <type_traits>
 
@@ -21,6 +23,15 @@ constexpr size_t kMaxImportNodes = 100000;
 constexpr uintmax_t kMaxImportFile = 256 * 1024 * 1024;
 // Chrome counts microseconds from 1601.
 constexpr int64_t kWindowsEpochSeconds = 11644473600;
+
+std::string Digest(const std::string& source)
+{
+    unsigned char digest[SHA256_DIGEST_LENGTH];
+    SHA256(reinterpret_cast<const unsigned char*>(source.data()), source.size(), digest);
+    std::string value;
+    for (auto byte : digest) { value += "0123456789abcdef"[byte >> 4]; value += "0123456789abcdef"[byte & 15]; }
+    return value;
+}
 
 std::string Lower(std::string_view text)
 {
@@ -222,6 +233,17 @@ BookmarkMetadata AttributeMetadata(const Tag& tag)
     return NormalizeBookmarkMetadata(std::move(metadata));
 }
 
+BookmarkOrigin AttributeOrigin(const Tag& tag)
+{
+    auto found = tag.attributes.find("summit_origin");
+    if (found == tag.attributes.end() || found->second.size() > 1024) return {};
+    const auto value = nlohmann::json::parse(found->second, nullptr, false);
+    if (!value.is_object() || !value.contains("scope") || !value["scope"].is_string()
+        || !value.contains("guid") || !value["guid"].is_string()
+        || !value.contains("id") || !value["id"].is_number_integer()) return {};
+    return NormalizeBookmarkOrigin({value["scope"].get<std::string>(), value["guid"].get<std::string>(), value["id"].get<int64_t>()});
+}
+
 size_t DescriptionEnd(std::string_view html, size_t position)
 {
     for (size_t next = html.find('<', position); next != std::string_view::npos; next = html.find('<', position)) {
@@ -294,6 +316,7 @@ bool ParseNetscapeBookmarks(std::string_view html, BookmarkNode& folder, std::st
             if (++nodes > kMaxImportNodes) break;
             BookmarkNode node;
             node.separator = true;
+            node.origin = AttributeOrigin(tag);
             node.added = AttributeTime(tag, "add_date");
             if (auto name = tag.attributes.find("name"); name != tag.attributes.end()) node.title = name->second;
             current().children.push_back(std::move(node));
@@ -314,10 +337,14 @@ bool ParseNetscapeBookmarks(std::string_view html, BookmarkNode& folder, std::st
         node.title = text;
         node.added = AttributeTime(tag, "add_date");
         node.metadata = AttributeMetadata(tag);
+        node.origin = AttributeOrigin(tag);
         if (link) {
             auto href = tag.attributes.find("href");
             if (href == tag.attributes.end()) continue;
             node.url = Trim(href->second);
+            // Standard HTML exports omit the database's folder identities.
+            // Never reinterpret their references as Summit's native roots.
+            if (IsBookmarkQueryURL(node.url) && node.origin.Empty()) node.origin = {"unresolved-html", Digest(node.url), 0};
             current().children.push_back(std::move(node));
         } else {
             node.folder = true;
@@ -338,7 +365,8 @@ bool ParseNetscapeBookmarks(std::string_view html, BookmarkNode& folder, std::st
         for (size_t i = 0; i + 1 < path.size() && parent; ++i)
             parent = path[i] < parent->children.size() ? &parent->children[path[i]] : nullptr;
         if (parent && path.back() < parent->children.size() && parent->children[path.back()].folder
-            && parent->children[path.back()].children.empty() && parent->children[path.back()].metadata.Empty())
+            && parent->children[path.back()].children.empty() && parent->children[path.back()].metadata.Empty()
+            && parent->children[path.back()].origin.Empty())
             parent->children.erase(parent->children.begin() + path.back());
     }
     if (!any) {
@@ -593,7 +621,7 @@ struct PlacesRow {
 };
 
 void PlacesFolder(const std::map<int64_t, std::vector<const PlacesRow*>>& children, int64_t id, BookmarkNode& into,
-    size_t depth)
+    size_t depth, const std::string& scope)
 {
     auto found = children.find(id);
     if (found == children.end()) return;
@@ -601,16 +629,21 @@ void PlacesFolder(const std::map<int64_t, std::vector<const PlacesRow*>>& childr
         if (row->type == 1 && !row->url.empty()) {
             into.children.push_back({0, row->title, row->url, false, row->added, {}});
             into.children.back().metadata = row->metadata;
+            into.children.back().origin = NormalizeBookmarkOrigin({scope, row->guid, row->id});
         }
-        else if (row->type == 3) into.children.push_back({0, row->title, "", false, row->added, {}, true});
+        else if (row->type == 3) {
+            into.children.push_back({0, row->title, "", false, row->added, {}, true});
+            into.children.back().origin = NormalizeBookmarkOrigin({scope, row->guid, row->id});
+        }
         else if (row->type == 2) {
             BookmarkNode* target = &into;
             if (depth + 1 <= kMaxBookmarkDepth) {
                 into.children.push_back({0, row->title, "", true, row->added, {}});
                 target = &into.children.back();
                 target->metadata = row->metadata;
+                target->origin = NormalizeBookmarkOrigin({scope, row->guid, row->id});
             }
-            if (depth < 64) PlacesFolder(children, row->id, *target, depth + 1);
+            if (depth < 64) PlacesFolder(children, row->id, *target, depth + 1, scope);
         }
     }
 }
@@ -627,6 +660,9 @@ bool ReadFirefoxPlaces(const std::filesystem::path& places, const std::string& s
     if (folder) {
         folder->folder = true;
         folder->children.clear();
+        // Stable across reimports of this database; exported metadata carries
+        // the namespace so moving a Summit export does not change its links.
+        const auto scope = "firefox-" + Digest(std::filesystem::weakly_canonical(places).string());
         std::vector<PlacesRow> rows;
         if (!database.Query("SELECT b.id, b.parent, b.type, IFNULL(b.title, ''), IFNULL(p.url, ''), IFNULL(b.dateAdded, 0), "
                 "IFNULL(b.guid, '') FROM moz_bookmarks b LEFT JOIN moz_places p ON p.id = b.fk ORDER BY b.parent, b.position",
@@ -693,16 +729,18 @@ bool ReadFirefoxPlaces(const std::filesystem::path& places, const std::string& s
                         row->second->metadata.description = database.Text(item, 1);
                 }, error)) return false;
         for (auto& row : rows) row.metadata = NormalizeBookmarkMetadata(std::move(row.metadata));
-        // The toolbar first, then the Bookmarks Menu's own, then the rest.
-        for (auto [guid, title] : {std::pair{"toolbar_____", "Bookmarks Toolbar"}, {"menu________", ""},
+        if (auto root = roots.find("root________"); root != roots.end()) folder->origin = {scope, root->first, root->second};
+        // Keep every root as a real folder, including empty roots. Folder
+        // shortcuts must not accidentally include siblings of a flattened root.
+        for (auto [guid, title] : {std::pair{"toolbar_____", "Bookmarks Toolbar"}, {"menu________", "Bookmarks Menu"},
                 {"unfiled_____", "Other Bookmarks"}, {"mobile______", "Mobile Bookmarks"}}) {
             auto root = roots.find(guid);
             if (root == roots.end()) continue;
-            if (!*title) { PlacesFolder(children, root->second, *folder, 0); continue; }
             BookmarkNode node{0, title, "", true, 0, {}};
+            node.origin = {scope, guid, root->second};
             if (auto row = byID.find(root->second); row != byID.end()) node.metadata = row->second->metadata;
-            PlacesFolder(children, root->second, node, 1);
-            if (!node.children.empty() || !node.metadata.Empty()) folder->children.push_back(std::move(node));
+            PlacesFolder(children, root->second, node, 1, scope);
+            folder->children.push_back(std::move(node));
         }
     }
     if (history) {
@@ -809,9 +847,11 @@ namespace {
 std::string WriteMetadata(const BookmarkNode& node)
 {
     std::string attributes;
+    if (!node.origin.Empty()) attributes = " SUMMIT_ORIGIN=\"" + EscapeHTML(nlohmann::json{
+        {"scope", node.origin.scope}, {"guid", node.origin.guid}, {"id", node.origin.id}}.dump()) + "\"";
     if (!node.folder && !node.metadata.keywords.empty()) {
         const auto& first = node.metadata.keywords.front();
-        attributes = " SHORTCUTURL=\"" + EscapeHTML(first.name) + "\"";
+        attributes += " SHORTCUTURL=\"" + EscapeHTML(first.name) + "\"";
         if (!first.postData.empty()) attributes += " POST_DATA=\"" + EscapeHTML(first.postData) + "\"";
         if (!first.charset.empty()) attributes += " LAST_CHARSET=\"" + EscapeHTML(first.charset) + "\"";
         auto aliases = nlohmann::json::array();
@@ -854,7 +894,7 @@ void WriteNodes(const std::vector<BookmarkNode>& nodes, int depth, std::string& 
             WriteNodes(node.children, depth + 1, html);
             html += indent + "</DL><p>\n";
         } else if (node.separator)
-            html += indent + "<HR" + (node.title.empty() ? "" : " NAME=\"" + EscapeHTML(node.title) + "\"") + added + ">\n";
+            html += indent + "<HR" + (node.title.empty() ? "" : " NAME=\"" + EscapeHTML(node.title) + "\"") + added + WriteMetadata(node) + ">\n";
         else {
             html += indent + "<DT><A HREF=\"" + EscapeHTML(node.url) + "\"" + added + WriteMetadata(node) + ">" + EscapeHTML(node.title) + "</A>\n";
             html += WriteDescription(node, indent);

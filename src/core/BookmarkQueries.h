@@ -10,5 +10,5 @@ struct BookmarkQueryResult {
     std::string error;
 };
 BookmarkQueryResult QueryBookmarks(std::string_view url, const Bookmarks& bookmarks,
-    const std::vector<PageRecord>& history);
+    const std::vector<PageRecord>& history, const BookmarkOrigin& origin = {});
 }

@@ -1103,12 +1103,13 @@ BookmarkButton BookmarkButtons(const Bookmarks& bookmarks, const std::vector<Pag
                 button.folder = true;
                 button.queryContents = [owner, node, ancestors = std::move(ancestors)] {
                     BookmarkButton expanded{node.id, node.url, node.title, nullptr, true, {}};
-                    if (ancestors.size() >= 8 || std::find(ancestors.begin(), ancestors.end(), node.url) != ancestors.end()) {
+                    const auto identity = node.url + "\n" + node.origin.scope;
+                    if (ancestors.size() >= 8 || std::find(ancestors.begin(), ancestors.end(), identity) != ancestors.end()) {
                         expanded.emptyMessage = "This smart folder contains a circular query.";
                         return expanded;
                     }
-                    auto path = ancestors; path.push_back(node.url);
-                    auto result = QueryBookmarks(node.url, owner->bookmarks, owner->history);
+                    auto path = ancestors; path.push_back(identity);
+                    auto result = QueryBookmarks(node.url, owner->bookmarks, owner->history, node.origin);
                     expanded.emptyMessage = result.error;
                     for (const auto& item : result.items) expanded.children.push_back(owner->Button(item, path, owner));
                     return expanded;
@@ -1149,6 +1150,7 @@ void AddBookmarkItems(BMenu* menu, std::shared_ptr<const BookmarkButton> root, c
         }
         auto* open = new BMessage(kOpenBookmark);
         open->AddString("url", child.url.c_str());
+        open->AddInt64("id", child.id);
         auto* item = NewPageMenuItem(BookmarkLabel(child).c_str(), open, child.menuIcon);
         item->SetTarget(target);
         menu->AddItem(item);
@@ -1445,6 +1447,7 @@ void BookmarksBar::Open(int32 index, bool newTab)
     if (index < 0 || size_t(index) >= Items().size() || Items()[index].separator) return;
     BMessage open(kOpenBookmark);
     open.AddString("url", Items()[index].url.c_str());
+    open.AddInt64("id", Items()[index].id);
     open.AddBool("new_tab", newTab);
     Window()->PostMessage(&open);
 }
@@ -1508,7 +1511,9 @@ void BookmarksBar::ShowContextMenu(int32 index, BPoint where)
         menu->AddItem(new BMenuItem("Delete Separator", NodeMessage(kDeleteBookmarkNode, "id", Items()[index].id)));
     } else if (Items()[index].queryContents) {
         const auto& query = Items()[index];
-        menu->AddItem(new BMenuItem("Show Smart Folder", BookmarkMessage(kOpenBookmark, query.url)));
+        auto* show = BookmarkMessage(kOpenBookmark, query.url);
+        show->AddInt64("id", query.id);
+        menu->AddItem(new BMenuItem("Show Smart Folder", show));
         menu->AddItem(new BMenuItem("Open All in Tabs", NodeMessage(kOpenBookmarkFolder, "id", query.id)));
         menu->AddSeparatorItem();
         menu->AddItem(new BMenuItem("Edit Smart Folder…", NodeMessage(kEditBookmark, "id", query.id)));

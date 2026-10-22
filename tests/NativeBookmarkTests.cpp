@@ -220,7 +220,7 @@ public:
         BMenu badMenu("Unsupported");
         AddBookmarkItems(&badMenu, badButtons, *badButtons, BMessenger(this));
         Check(badMenu.CountItems() == 1 && !badMenu.ItemAt(0)->IsEnabled()
-            && std::string(badMenu.ItemAt(0)->Label()).find("does not yet support: parent") != std::string::npos,
+            && std::string(badMenu.ItemAt(0)->Label()).find("target is missing or was not imported") != std::string::npos,
             "unsupported query is retained as a disabled explanation instead of broadening its results");
         const auto self = queries.Add({"place:queryType=1", "Recursive"}, kBookmarksBarFolder);
         auto recursive = BookmarkButtons(queries, visits, *queries.Find(self)).queryContents();
@@ -229,6 +229,33 @@ public:
             "native smart menus stop circular query expansion");
         Check(queries.Find(popular)->children.empty() && queries.Count() == 3,
             "native menu expansion does not save derived bookmarks");
+
+        Bookmarks scoped;
+        for (const auto* scope : {"first", "second"}) {
+            BookmarkNode imported{0, "", "", true, 0, {}};
+            imported.origin = {scope, "root________", 1};
+            BookmarkNode folder{0, "Work", "", true, 0, {}};
+            folder.origin = {scope, "work________", 10};
+            folder.children.push_back({0, scope, std::string("https://") + scope + ".test/", false, 0, {}});
+            folder.children.back().origin = {scope, "page________", 20};
+            folder.children.push_back({0, "", "", false, 0, {}, true});
+            folder.children.back().origin = {scope, "separator___", 21};
+            imported.children.push_back(folder);
+            imported.children.push_back({0, scope, "place:parent=work________", false, 0, {}});
+            imported.children.back().origin = {scope, "query_______", 30};
+            Check(scoped.Import(imported, "Firefox").added == 2, "scoped native query fixture imports");
+        }
+        const auto& secondQuery = scoped.Other().children.back().children.back();
+        auto scopedButtons = std::make_shared<const BookmarkButton>(BookmarkButtons(scoped, {}, secondQuery));
+        BMenu scopedMenu("Scoped");
+        AddBookmarkItems(&scopedMenu, scopedButtons, *scopedButtons, BMessenger(this));
+        Check(scopedMenu.CountItems() == 4 && std::string(scopedMenu.ItemAt(0)->Label()) == "second",
+            "same query URL in two imported profiles expands the correct native folder");
+        Check(std::string(scopedMenu.ItemAt(0)->Message()->GetString("url", "")) == "https://second.test/",
+            "scoped query menu result retains its correct address");
+        Check(dynamic_cast<BSeparatorItem*>(scopedMenu.ItemAt(1)), "folder query preserves native separators");
+        Check(scopedMenu.ItemAt(3)->Message()->GetInt64("id", 0) == secondQuery.id,
+            "scoped Open All identifies the actual saved query");
 
         BBitmap bitmap(BRect(0, 0, 399, 27), B_RGB32, true);
         const bool locked = bitmap.InitCheck() == B_OK && bitmap.Lock();

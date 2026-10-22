@@ -63,6 +63,7 @@ static json EncodeBookmarks(const std::vector<BookmarkNode>& nodes)
         else if (node.separator) item["separator"] = true;
         else item["url"] = node.url;
         if (node.added) item["added"] = node.added;
+        if (!node.origin.Empty()) item["origin"] = {{"scope", node.origin.scope}, {"guid", node.origin.guid}, {"id", node.origin.id}};
         if (!node.metadata.description.empty()) item["description"] = node.metadata.description;
         if (!node.metadata.tags.empty()) item["tags"] = node.metadata.tags;
         if (!node.folder && !node.separator && !node.metadata.keywords.empty()) {
@@ -86,6 +87,11 @@ static void DecodeBookmarks(const json& value, BookmarkNode& folder, size_t dept
         if (title == item.end() || !title->is_string() || title->get_ref<const std::string&>().size() > 65536) continue;
         BookmarkNode node;
         node.title = title->get<std::string>();
+        if (auto origin = item.find("origin"); origin != item.end() && origin->is_object()
+            && origin->contains("scope") && (*origin)["scope"].is_string()
+            && origin->contains("guid") && (*origin)["guid"].is_string()
+            && origin->contains("id") && (*origin)["id"].is_number_integer())
+            node.origin = NormalizeBookmarkOrigin({(*origin)["scope"].get<std::string>(), (*origin)["guid"].get<std::string>(), (*origin)["id"].get<int64_t>()});
         if (auto added = item.find("added"); added != item.end() && added->is_number_integer()) node.added = added->get<int64_t>();
         if (auto children = item.find("children"); children != item.end()) {
             if (depth + 1 > kMaxBookmarkDepth || folders >= kMaxBookmarkFolders) continue;

@@ -388,8 +388,8 @@ int main()
         options.sqliteLibrary = sqlite;
         CHECK(ReadImport(places, options, imported, error) && imported.source == "Firefox");
         if (!error.empty()) std::cerr << error << "\n";
-        CHECK(Titles(imported.bookmarks) == "Bookmarks Toolbar/,--,Tagged");
-        CHECK(imported.bookmarks.children[1].separator);
+        CHECK(Titles(imported.bookmarks) == "Bookmarks Toolbar/,Bookmarks Menu/,Other Bookmarks/");
+        CHECK(Child(imported.bookmarks, "Bookmarks Menu")->children[0].separator);
         const auto* toolbar = Child(imported.bookmarks, "Bookmarks Toolbar");
         CHECK(toolbar && Titles(*toolbar) == "Mozilla,Add-ons,Nested/" && toolbar->children[0].added == 1690000000);
         CHECK(Child(*toolbar, "Nested")->children[0].url == "https://in.example/");
@@ -441,7 +441,7 @@ int main()
         CHECK(Child(*toolbar, "Nested")->metadata.description == "Folder notes");
         CHECK(Child(*toolbar, "Nested")->children[0].metadata.description.empty());
         CHECK(Child(*toolbar, "Nested")->children[0].metadata.tags == std::vector<std::string>{"tag, comma"});
-        CHECK(Titles(imported.bookmarks) == "Bookmarks Toolbar/,--,Tagged");
+        CHECK(Titles(imported.bookmarks) == "Bookmarks Toolbar/,Bookmarks Menu/,Other Bookmarks/");
 
         const auto chromeHistory = directory / "Default" / "History";
         CHECK(MakeDatabase(sqlite, chromeHistory, R"(

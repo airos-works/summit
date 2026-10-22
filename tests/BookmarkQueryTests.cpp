@@ -83,7 +83,7 @@ int main()
         "place:terms=%zz", "place:terms=%", "place:terms=%2", "place:sort=999999999999999999999999999999"}) {
         const auto result = query(invalid); CHECK(result.items.empty() && !result.error.empty());
     }
-    for (const auto* unsupported : {"place:parent=toolbar_____", "place:folder=3", "place:beginTimeRef=1", "place:transition=2",
+    for (const auto* unsupported : {"place:parent=unknown", "place:folder=3", "place:beginTimeRef=1", "place:transition=2",
         "place:OR", "place:annotation=test", "place:includeHidden=1", "place:originalTitle=1", "place:type=3", "place:sort=14", "place:sort=22"}) {
         const auto result = query(unsupported); CHECK(result.items.empty() && !result.error.empty());
     }
@@ -96,7 +96,7 @@ int main()
     const auto unsupported = marks.Add({"place:parent=unknown", "Folder shortcut"}, kOtherBookmarksFolder);
     marks.SetMetadata(smart, {"A live search", {"smart"}, {{"popular", "", ""}}});
     CHECK(marks.Find(smart) && !marks.Find(smart)->folder && marks.Find(smart)->children.empty());
-    CHECK(query("place:queryType=1&excludeQueries=1").items.size() == 4);
+    CHECK(query("place:queryType=1&excludeQueries=1").items.size() == 5); // Folder shortcuts remain included.
     CHECK(query("place:queryType=1&excludeItems=1").items.size() == 2);
     CHECK(marks.ResolveKeyword("popular")->url == "place:sort=8&maxResults=2");
     auto snapshot = query(marks.Find(smart)->url);
@@ -106,7 +106,7 @@ int main()
     const auto d = marks.Add({"https://new.test/", "New"}, kOtherBookmarksFolder, kBookmarkEnd, 50);
     CHECK(URLs(query("place:queryType=1&sort=12&maxResults=1&excludeQueries=1")) == "https://new.test/");
     CHECK(marks.Remove(d));
-    CHECK(query("place:queryType=1&excludeQueries=1").items.size() == 4);
+    CHECK(query("place:queryType=1&excludeQueries=1").items.size() == 5);
     const auto manager = RenderBookmarksPage(marks, {}, "ab12");
     CHECK(manager.find("href=\"place:") == std::string::npos && manager.find("summit-bookmarks:query?token=ab12&amp;id=") != std::string::npos);
     CHECK(manager.find("Smart folder · place:") != std::string::npos);
@@ -114,7 +114,7 @@ int main()
     CHECK(page.find("Most visited &lt;safe&gt;") != std::string::npos && page.find("Most visited <safe>") == std::string::npos);
     CHECK(page.find("href=\"https://sub.example.com/b\"") < page.find("href=\"https://example.com/a\""));
     CHECK(page.find("Edit Smart Folder") != std::string::npos && page.find("All Bookmarks") != std::string::npos);
-    CHECK(RenderBookmarkQueryPage(marks, profile.history, unsupported, {}, "ab12").find("does not yet support: parent") != std::string::npos);
+    CHECK(RenderBookmarkQueryPage(marks, profile.history, unsupported, {}, "ab12").find("target is missing or was not imported") != std::string::npos);
     CHECK(RenderBookmarkQueryPage(marks, profile.history, 9999, {}, "ab12").find("removed or changed") != std::string::npos);
     const auto script = marks.Add({"javascript:alert(1)", "Script"}, kOtherBookmarksFolder);
     const auto all = marks.Add({"place:queryType=1&excludeQueries=1", "All"}, kBookmarksBarFolder);

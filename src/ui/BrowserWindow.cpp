@@ -1829,7 +1829,8 @@ void BrowserWindow::Navigate(const std::string& text)
     const auto query = keyword ? keyword->url : Trim(text);
     if (IsBookmarkQueryURL(query) && (!keyword || keyword->error.empty())) {
         const auto id = fShared->Read([&](const Profile& profile) {
-            const auto* node = profile.bookmarks.FindURL(query); return node ? node->id : int64_t(0);
+            const auto* node = keyword ? profile.bookmarks.Find(keyword->bookmarkID) : profile.bookmarks.FindURL(query);
+            return node && node->url == query ? node->id : int64_t(0);
         });
         if (id) ShowBookmarkQuery(id);
         else ShowError("Save this smart folder in Bookmarks before opening it.");
@@ -4108,7 +4109,14 @@ void BrowserWindow::MessageReceived(BMessage* message)
         case kOpenBookmark: {
             const char* url = nullptr;
             if (message->FindString("url", &url) != B_OK || !url) break;
-            if (IsBookmarkQueryURL(url)) { Navigate(url); break; }
+            if (IsBookmarkQueryURL(url)) {
+                const auto id = fShared->Read([&](const Profile& profile) {
+                    const auto* node = profile.bookmarks.Find(message->GetInt64("id", 0));
+                    return node && node->url == url ? node->id : int64_t(0);
+                });
+                if (id) ShowBookmarkQuery(id); else Navigate(url);
+                break;
+            }
             if (IsBookmarkletURL(url)) {
                 // This message is also used by history and tab-strip drops.
                 // Only a deliberately saved bookmark may run a script.
@@ -4220,7 +4228,7 @@ void BrowserWindow::MessageReceived(BMessage* message)
                 std::vector<std::string> urls;
                 if (const auto* folder = profile.bookmarks.Find(id)) {
                     const auto children = IsBookmarkQueryURL(folder->url)
-                        ? QueryBookmarks(folder->url, profile.bookmarks, profile.history).items : folder->children;
+                        ? QueryBookmarks(folder->url, profile.bookmarks, profile.history, folder->origin).items : folder->children;
                     for (const auto& child : children)
                         if (!child.folder && !child.separator && !IsBookmarkletURL(child.url) && !IsBookmarkQueryURL(child.url) && urls.size() < 50) urls.push_back(child.url);
                 } else if (!id) {

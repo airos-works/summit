@@ -57,6 +57,15 @@ int main(int argc, char** argv)
             Key(menu, std::string(1, B_ESCAPE), 0x01);
             Require(Wait([&] { return String(active(), "url") == argv[5] && String(active(), "loadOutcome") == "succeeded"; }),
                 "query menu activation loads its first page");
+        } else if (mode == "open-query") {
+            Send(window, summit::kOpenBookmark, id, argv[5]);
+            Require(Wait([&] { return String(active(), "url") == "summit:bookmarks"
+                && String(active(), "title") != "Bookmarks" && String(active(), "loadOutcome") == "succeeded"; }),
+                "saved-query activation opens its internal result page");
+        } else if (mode == "move") {
+            BMessage move(summit::kMoveBookmark); move.AddInt64("id", id);
+            move.AddInt64("folder", std::strtoll(argv[5], nullptr, 10)); move.AddInt64("index", 0);
+            Require(window.SendMessage(&move) == B_OK, "deliver native bookmark move for the owned profile");
         } else if (mode == "keyword") {
             Send(window, summit::kFocusAddress);
             const auto address = Child(View(window, "address"), 0);

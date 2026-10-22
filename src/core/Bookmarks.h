@@ -19,7 +19,19 @@ struct BookmarkKeyword {
 struct BookmarkNavigation {
     std::string url, postData, title, error;
     bool post = false;
+    int64_t bookmarkID = 0;
 };
+// Identity in an imported bookmark database. The scope distinguishes databases
+// whose numeric IDs and built-in root GUIDs overlap. It contains no source path.
+struct BookmarkOrigin {
+    std::string scope, guid;
+    int64_t id = 0;
+    bool Empty() const { return scope.empty(); }
+    bool operator==(const BookmarkOrigin& other) const
+        { return scope == other.scope && guid == other.guid && id == other.id; }
+};
+BookmarkOrigin NormalizeBookmarkOrigin(BookmarkOrigin origin);
+std::string BookmarkOriginKey(const BookmarkOrigin& origin);
 struct BookmarkMetadata {
     std::string description;
     std::vector<std::string> tags;
@@ -58,6 +70,7 @@ struct BookmarkNode {
     // Separators have no address or children; their position is significant.
     bool separator = false;
     BookmarkMetadata metadata = {};
+    BookmarkOrigin origin = {};
 };
 // The two folders every profile has, which cannot be moved, renamed or deleted.
 constexpr int64_t kBookmarksBarFolder = 1;

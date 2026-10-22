@@ -141,7 +141,8 @@ std::optional<BookmarkNavigation> Bookmarks::ResolveKeyword(std::string_view inp
             if (child.folder) { visit(child); continue; }
             if (child.separator) continue;
             for (const auto& candidate : child.metadata.keywords) if (candidate.name == name) {
-                if (keyword && (bookmark->url != child.url || !(*keyword == candidate))) ambiguous = true;
+                if (keyword && (bookmark->url != child.url || !(*keyword == candidate)
+                    || (IsBookmarkQueryURL(child.url) && bookmark->origin.scope != child.origin.scope))) ambiguous = true;
                 else { bookmark = &child; keyword = &candidate; }
             }
         }
@@ -154,6 +155,7 @@ std::optional<BookmarkNavigation> Bookmarks::ResolveKeyword(std::string_view inp
         return result;
     }
     result.url = bookmark->url;
+    result.bookmarkID = bookmark->id;
     result.title = bookmark->title;
     result.post = !keyword->postData.empty();
     const auto decoded = Unescape(keyword->postData);

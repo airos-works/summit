@@ -644,10 +644,11 @@ std::string RenderBookmarkQueryPage(const Bookmarks& bookmarks, const std::vecto
     const auto* saved = bookmarks.Find(id);
     const bool available = saved && IsBookmarkQueryURL(saved->url);
     const auto title = available ? saved->title : std::string("Smart folder unavailable");
-    auto result = available ? QueryBookmarks(saved->url, bookmarks, history) : BookmarkQueryResult{{}, "This smart folder has been removed or changed."};
+    auto result = available ? QueryBookmarks(saved->url, bookmarks, history, saved->origin) : BookmarkQueryResult{{}, "This smart folder has been removed or changed."};
     PageWriter writer(icons);
     std::function<void(const std::vector<BookmarkNode>&)> rows = [&](const auto& nodes) {
         for (const auto& node : nodes) {
+            if (node.separator) { writer.Raw("<hr>\n"); continue; }
             if (node.folder) {
                 writer.Raw("<section><h2>" + EscapeHTML(node.title) + "</h2>\n");
                 rows(node.children); writer.Raw("</section>\n"); continue;
