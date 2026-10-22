@@ -57,6 +57,12 @@ const char* Question(const std::string& permission)
         : "wants a permission.";
 }
 
+// Permissions answered by choosing a device, for this browsing session only.
+bool DeviceChooser(const std::string& permission)
+{
+    return permission == "usb" || permission == "hid" || permission == "bluetooth";
+}
+
 // getDisplayMedia(): which screen or window to share, asked every time.
 // Answers the service with kPromptAnswered ("which" 2 and "device_id", or
 // "which" 1).
@@ -64,7 +70,8 @@ class DevicePermissionPicker final : public BWindow {
 public:
     DevicePermissionPicker(const BMessage& request, const std::string& question, BMessenger service)
         : BWindow(BRect(0, 0, 380, 260), std::strcmp(request.GetString("permission", ""), "bluetooth") == 0 ? "Connect Bluetooth Device"
-            : std::strcmp(request.GetString("permission", ""), "usb") == 0 ? "Connect USB Device" : "Share Your Screen", B_FLOATING_WINDOW_LOOK, B_FLOATING_APP_WINDOW_FEEL,
+            : std::strcmp(request.GetString("permission", ""), "usb") == 0 ? "Connect USB Device"
+            : std::strcmp(request.GetString("permission", ""), "hid") == 0 ? "Connect HID Device" : "Share Your Screen", B_FLOATING_WINDOW_LOOK, B_FLOATING_APP_WINDOW_FEEL,
             B_NOT_ZOOMABLE | B_AUTO_UPDATE_SIZE_LIMITS | B_CLOSE_ON_ESCAPE)
         , fService(service)
         , fPermission(request.GetString("permission", ""))
@@ -72,7 +79,7 @@ public:
         , fIdentifier(request.GetUInt64("identifier", 0))
     {
         auto* text = new BStringView("question", question.c_str());
-        auto* note = new BStringView("note", (fPermission == "usb" || fPermission == "bluetooth")
+        auto* note = new BStringView("note", DeviceChooser(fPermission)
             ? "Access lasts for this browsing session."
             : "The page sees everything in it while you share. A window is shared with whatever covers it.");
         BFont small(be_plain_font);
@@ -95,7 +102,7 @@ public:
         be_plain_font->GetHeight(&metrics);
         const float row = metrics.ascent + metrics.descent + metrics.leading + 8;
         scroll->SetExplicitMinSize(BSize(340, row * std::min<int32>(std::max<int32>(fList->CountItems(), 3), 10) + 4));
-        auto* share = new BButton("share", (fPermission == "usb" || fPermission == "bluetooth") ? "Connect" : "Share", new BMessage(kShare));
+        auto* share = new BButton("share", DeviceChooser(fPermission) ? "Connect" : "Share", new BMessage(kShare));
         auto* cancel = new BButton("cancel", "Cancel", new BMessage(B_QUIT_REQUESTED));
         BLayoutBuilder::Group<>(this, B_VERTICAL, B_USE_DEFAULT_SPACING)
             .SetInsets(B_USE_WINDOW_INSETS)
@@ -225,16 +232,18 @@ void SitePermissionService::Ask(const BMessage& request)
             static_cast<unsigned long long>(identifier));
     // Device requests may contain different filter/device sets. Never merge their
     // answers into an existing prompt for the same origin.
-    if ((permission == "usb" || permission == "bluetooth") && fPrompts.count({permission, origin})) {
+    if (DeviceChooser(permission) && fPrompts.count({permission, origin})) {
         context->RespondToMediaPermissionRequest(identifier, false, "");
         return;
     }
     auto& waiting = fPrompts[{permission, origin}];
     waiting.push_back(identifier);
     if (waiting.size() > 1) return;
-    if (permission == "screen" || permission == "usb" || permission == "bluetooth") {
+    if (permission == "screen" || DeviceChooser(permission)) {
         std::string question = HostOf(origin) + (permission == "bluetooth" ? " wants to connect to a Bluetooth device."
-            : permission == "usb" ? " wants to connect to a USB device." : " wants to see your screen.");
+            : permission == "usb" ? " wants to connect to a USB device."
+            : permission == "hid" ? " wants to connect to a HID device."
+            : " wants to see your screen.");
         if (request.GetBool("audio", false)) question += " (Its sound is not shared.)";
         auto* picker = new DevicePermissionPicker(request, question, BMessenger(this));
         picker->Lock();
@@ -288,7 +297,7 @@ bool SitePermissionService::AnswerOpenPrompt(int32 which, int32 deviceIndex)
     answer.AddString("origin", origin.c_str());
     answer.AddUInt64("identifier", fPrompts.begin()->second.front());
     answer.AddInt32("which", which);
-    if ((permission == "screen" || permission == "usb" || permission == "bluetooth") && which == 2) {
+    if ((permission == "screen" || DeviceChooser(permission)) && which == 2) {
         const auto shown = fPromptWindows.find(fPrompts.begin()->first);
         if (shown == fPromptWindows.end() || shown->second.devices.empty()) return false;
         const auto& devices = shown->second.devices;
@@ -323,7 +332,7 @@ void SitePermissionService::Answered(const BMessage& message)
     // every time.
     std::vector<std::string> saved;
     if (permission == "camera-microphone") saved = {"camera", "microphone"};
-    else if (permission != "screen" && permission != "usb" && permission != "bluetooth") saved = {permission};
+    else if (permission != "screen" && !DeviceChooser(permission)) saved = {permission};
     if (which != 1) {
         for (const auto& name : saved) fSave(name, origin, allowed);
     }
@@ -333,7 +342,7 @@ void SitePermissionService::Answered(const BMessage& message)
             for (const auto& name : saved) context->SetSitePermission(name.c_str(), origin.c_str(), allowed ? 1 : 0);
         }
         for (const uint64 identifier : identifiers) {
-            if (permission == "screen" || permission == "usb" || permission == "bluetooth")
+            if (permission == "screen" || DeviceChooser(permission))
                 context->RespondToMediaPermissionRequest(identifier, allowed && !device.empty(), device.c_str());
             else
                 context->RespondToPermissionRequest(identifier, allowed);
