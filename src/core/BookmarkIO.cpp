@@ -218,6 +218,17 @@ bool ParseNetscapeBookmarks(std::string_view html, BookmarkNode& folder, std::st
             any = true;
             continue;
         }
+        if (!tag.closing && tag.name == "hr") {
+            if (++nodes > kMaxImportNodes) break;
+            BookmarkNode node;
+            node.separator = true;
+            node.added = AttributeTime(tag, "add_date");
+            if (auto name = tag.attributes.find("name"); name != tag.attributes.end()) node.title = name->second;
+            current().children.push_back(std::move(node));
+            pending = nullptr;
+            any = true;
+            continue;
+        }
         if (tag.closing || (tag.name != "a" && tag.name != "h3")) continue;
         const bool link = tag.name == "a";
         const size_t end = FindClose(html, position, link ? "</a" : "</h3");
@@ -511,6 +522,7 @@ void PlacesFolder(const std::map<int64_t, std::vector<const PlacesRow*>>& childr
     if (found == children.end()) return;
     for (const auto* row : found->second) {
         if (row->type == 1 && !row->url.empty()) into.children.push_back({0, row->title, row->url, false, row->added, {}});
+        else if (row->type == 3) into.children.push_back({0, row->title, "", false, row->added, {}, true});
         else if (row->type == 2) {
             BookmarkNode* target = &into;
             if (depth + 1 <= kMaxBookmarkDepth) {
@@ -673,7 +685,9 @@ void WriteNodes(const std::vector<BookmarkNode>& nodes, int depth, std::string& 
             html += indent + "<DL><p>\n";
             WriteNodes(node.children, depth + 1, html);
             html += indent + "</DL><p>\n";
-        } else
+        } else if (node.separator)
+            html += indent + "<HR" + (node.title.empty() ? "" : " NAME=\"" + EscapeHTML(node.title) + "\"") + added + ">\n";
+        else
             html += indent + "<DT><A HREF=\"" + EscapeHTML(node.url) + "\"" + added + ">" + EscapeHTML(node.title) + "</A>\n";
     }
 }

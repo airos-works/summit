@@ -24,7 +24,8 @@ static const BookmarkNode* Child(const BookmarkNode& folder, const std::string& 
 static std::string Titles(const BookmarkNode& folder)
 {
     std::string text;
-    for (const auto& child : folder.children) text += (text.empty() ? "" : ",") + child.title + (child.folder ? "/" : "");
+    for (const auto& child : folder.children)
+        text += (text.empty() ? "" : ",") + (child.separator ? "--" : child.title + (child.folder ? "/" : ""));
     return text;
 }
 
@@ -182,9 +183,12 @@ int main()
         // imported back), and the import folder with it.
         BookmarkNode empty{0, "", "", true, 0, {{0, "Later", "", true, 0, {}},
             {0, "Only duplicates", "", true, 0, {{0, "Known", "https://known.example/", false, 0, {}}}}}};
-        marks.Import(empty, "Imported from a file");
+        result = marks.Import(empty, "Imported from a file");
+        CHECK(result.Changed() && result.added == 0 && result.foldersAdded == 2 && result.folder);
         const auto* file = Child(marks.Other(), "Imported from a file");
         CHECK(file && Titles(*file) == "Later/");
+        result = marks.Import(empty, "Imported from a file");
+        CHECK(!result.Changed() && result.folder == 0);
         // The same through an export and the HTML reader.
         Bookmarks exported;
         exported.AddFolder(kOtherBookmarksFolder, "Nothing yet");
@@ -240,8 +244,9 @@ int main()
         const auto* toolbar = Child(root, "Bookmarks Toolbar");
         CHECK(toolbar && Titles(*toolbar) == "Hacker News,Rust & C++/,Empty/");
         const auto* rust = Child(*toolbar, "Rust & C++");
-        CHECK(rust && rust->added == 1696000005 && Titles(*rust) == "The Rust Book — <online>,cppreference");
-        CHECK(rust->children[1].url == "https://en.cppreference.com/" && rust->children[1].added == 1696000007);
+        CHECK(rust && rust->added == 1696000005 && Titles(*rust) == "The Rust Book — <online>,--,cppreference");
+        CHECK(rust->children[1].separator && rust->children[1].url.empty());
+        CHECK(rust->children[2].url == "https://en.cppreference.com/" && rust->children[2].added == 1696000007);
         CHECK(Child(root, "Other Bookmarks")->children[0].url == "https://example.com/?a=1&b=2");
         CHECK(root.children[2].url == "place:sort=8&maxResults=10");
         CHECK(!ParseNetscapeBookmarks("<html><body>Hello</body></html>", root, error) && !error.empty());
@@ -381,7 +386,8 @@ int main()
         options.sqliteLibrary = sqlite;
         CHECK(ReadImport(places, options, imported, error) && imported.source == "Firefox");
         if (!error.empty()) std::cerr << error << "\n";
-        CHECK(Titles(imported.bookmarks) == "Bookmarks Toolbar/,Tagged");
+        CHECK(Titles(imported.bookmarks) == "Bookmarks Toolbar/,--,Tagged");
+        CHECK(imported.bookmarks.children[1].separator);
         const auto* toolbar = Child(imported.bookmarks, "Bookmarks Toolbar");
         CHECK(toolbar && Titles(*toolbar) == "Mozilla,Add-ons,Nested/" && toolbar->children[0].added == 1690000000);
         CHECK(Child(*toolbar, "Nested")->children[0].url == "https://in.example/");
@@ -404,9 +410,113 @@ int main()
         CHECK(ReadImport(directory / "Default" / "Bookmarks", options, imported, error) && imported.history.size() == 1
             && imported.history[0].url == "https://chromium.org/" && imported.history[0].visited == 13340000000 - 11644473600);
         CHECK(ReadImport(chromeHistory, options, imported, error) && imported.history.size() == 1 && imported.bookmarks.children.empty());
-        options.sqliteLibrary = "/nonexistent/libsqlite3.so.0";
+        // Haiku may resolve an absent absolute path by its library basename.
+        // Use a missing name as well, so the installed SQLite cannot satisfy it.
+        options.sqliteLibrary = "/nonexistent/summit-missing-sqlite-library.so";
         CHECK(!ReadImport(places, options, imported, error) && error.find("SQLite") != std::string::npos);
     } else std::cerr << "SQLite (" << sqlite << ") is not available: places.sqlite tests skipped\n";
+
+    // Separators retain their position through import, save, move and export.
+    // They never become pages, URLs, suggestions, or editable links.
+    {
+        BookmarkNode source;
+        std::string error;
+        CHECK(ParseNetscapeBookmarks(R"(<DL><HR NAME="&lt;named&gt;" ADD_DATE="1700000000">
+            <DT><A HREF="https://before.example/">Before</A><HR><HR>
+            <DT><H3>Nested</H3><DL><HR><DT><A HREF="https://nested.example/">In</A><HR></DL>
+            <DT><A HREF="https://after.example/">After</A><HR></DL>)", source, error));
+        CHECK(Titles(source) == "--,Before,--,--,Nested/,After,--" && CountBookmarks(source) == 3);
+        CHECK(source.children[0].title == "<named>" && source.children[0].added == 1700000000);
+        Profile profile;
+        auto& marks = profile.bookmarks;
+        auto imported = marks.Import(source, "Imported");
+        CHECK(imported.Changed() && imported.added == 3 && imported.separatorsAdded == 6 && imported.foldersAdded == 2);
+        CHECK(marks.Count() == 3 && marks.SeparatorCount() == 6 && marks.FolderCount() == 2);
+        const auto folder = imported.folder;
+        CHECK(folder && Titles(*marks.Find(folder)) == "--,Before,--,--,Nested/,After,--");
+        CHECK(!marks.FindURL("") && !marks.Contains("") && !marks.OnBar(""));
+        const auto first = marks.Find(folder)->children[0].id;
+        CHECK(!marks.Edit(first, "Changed", "https://changed.example/"));
+        imported = marks.Import(source, "Imported");
+        CHECK(!imported.Changed() && imported.duplicates == 3 && imported.unsupported == 0 && marks.SeparatorCount() == 6);
+        CHECK(Titles(*marks.Find(folder)) == "--,Before,--,--,Nested/,After,--");
+        CHECK(marks.Move(first, kBookmarksBarFolder, 0) && marks.Bar().children[0].separator && !marks.OnBar(""));
+        CHECK(marks.Count() == 3 && marks.SeparatorCount() == 6);
+        const auto path = directory / "separators.json";
+        CHECK(profile.Save(path, error));
+        nlohmann::json saved;
+        { std::ifstream in(path); in >> saved; }
+        CHECK(saved["bookmarkTree"]["bar"][0]["separator"] == true && !saved["bookmarkTree"]["bar"][0].contains("url"));
+        CHECK(saved["bookmarks"].size() == 3);
+        auto loaded = Profile::Load(path, error);
+        CHECK(error.empty() && loaded.bookmarks.Count() == 3 && loaded.bookmarks.SeparatorCount() == 6);
+        CHECK(loaded.bookmarks.Bar().children[0].separator && loaded.bookmarks.Bar().children[0].title == "<named>");
+        CHECK(loaded.bookmarks.Bar().children[0].added == 1700000000);
+        CHECK(Titles(loaded.bookmarks.Other().children[0]) == "Before,--,--,Nested/,After,--");
+        const auto html = WriteNetscapeBookmarks(loaded.bookmarks);
+        CHECK(html.find("<HR NAME=\"&lt;named&gt;\" ADD_DATE=\"1700000000\">") != std::string::npos);
+        CHECK(ParseNetscapeBookmarks(html, source, error));
+        Bookmarks round;
+        imported = round.Import(source, "Round trip");
+        CHECK(imported.added == 3 && imported.separatorsAdded == 6 && round.SeparatorCount() == 6);
+        const auto& original = *Child(*round.Find(imported.folder), "Imported");
+        CHECK(Titles(original) == "Before,--,--,Nested/,After,--");
+        const auto page = RenderBookmarksPage(marks, nullptr, "ab");
+        CHECK(page.find("class=\"item separator\" data-id=\"" + std::to_string(first) + "\"") != std::string::npos);
+        CHECK(page.find("role=\"separator\" aria-label=\"&lt;named&gt;\"") != std::string::npos);
+        CHECK(page.find("href=\"\"") == std::string::npos && page.find("data-url=\"\"") == std::string::npos);
+        CHECK(marks.Remove(first) && marks.SeparatorCount() == 5 && marks.Count() == 3);
+        const auto added = marks.AddSeparator(kBookmarksBarFolder, 0, 42);
+        CHECK(added && marks.Find(added)->separator && marks.Find(added)->added == 42);
+        CHECK(!marks.AddSeparator(999999) && !marks.AddSeparator(marks.FindURL("https://before.example/")->id));
+    }
+
+    // Separator-only imports count as changes, repeat without duplication,
+    // and have their own bound without using the page or folder allowance.
+    {
+        BookmarkNode source;
+        std::string error;
+        CHECK(ParseNetscapeBookmarks("<HR><HR>", source, error));
+        Bookmarks marks;
+        auto result = marks.Import(source, "Separators");
+        CHECK(result.Changed() && result.added == 0 && result.separatorsAdded == 2 && result.folder);
+        CHECK(marks.Count() == 0 && !marks.Empty() && marks.SeparatorCount() == 2);
+        CHECK(!marks.Import(source, "Separators").Changed());
+        source.children.assign(kMaxBookmarkSeparators + 2, BookmarkNode{0, "", "", false, 0, {}, true});
+        result = marks.Import(source, "Separators");
+        CHECK(result.separatorsAdded == kMaxBookmarkSeparators - 2 && result.overLimit == 2);
+        CHECK(marks.SeparatorCount() == kMaxBookmarkSeparators && !marks.AddSeparator(kOtherBookmarksFolder));
+        CHECK(marks.Add({"https://limit.example/", "Still fits"}, kBookmarksBarFolder));
+        Profile profile;
+        profile.bookmarks = marks;
+        const auto path = directory / "separator-limit.json";
+        CHECK(profile.Save(path, error));
+        nlohmann::json saved;
+        { std::ifstream in(path); in >> saved; }
+        saved["bookmarkTree"]["bar"].push_back({{"title", "Extra"}, {"separator", true}});
+        saved["bookmarkTree"]["bar"].push_back({{"title", "Malformed"}, {"separator", "true"}});
+        WriteText(path, saved.dump());
+        const auto loaded = Profile::Load(path, error);
+        CHECK(error.empty() && loaded.bookmarks.SeparatorCount() == kMaxBookmarkSeparators && loaded.bookmarks.Count() == 1);
+    }
+
+    // At the folder limit, existing folders still merge normally. A new
+    // import container cannot exceed that limit, even for separator-only input.
+    {
+        BookmarkNode bar, other;
+        other.children.push_back({0, "Imported", "", true, 0,
+            {{0, "Nested", "", true, 0, {{0, "", "", false, 0, {}, true}}}}});
+        while (other.children.size() < kMaxBookmarkFolders - 1)
+            other.children.push_back({0, "Folder " + std::to_string(other.children.size()), "", true, 0, {}});
+        Bookmarks marks;
+        marks.Assign(bar, other);
+        BookmarkNode source = other.children.front();
+        CHECK(marks.FolderCount() == kMaxBookmarkFolders);
+        const auto result = marks.Import(source, "Imported");
+        CHECK(!result.Changed() && result.overLimit == 0 && marks.SeparatorCount() == 1);
+        CHECK(Titles(marks.Other().children.front()) == "Nested/");
+        CHECK(marks.Import(source, "Another import").overLimit > 0 && marks.FolderCount() == kMaxBookmarkFolders);
+    }
 
     // The Bookmarks page and its links.
     {

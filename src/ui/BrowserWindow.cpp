@@ -537,6 +537,7 @@ static std::string MenuLabel(const PageRecord& page)
 static BookmarkButton ButtonFor(const BookmarkNode& node)
 {
     BookmarkButton button{node.id, node.url, node.title, nullptr, node.folder, {}};
+    button.separator = node.separator;
     button.children.reserve(node.children.size());
     for (const auto& child : node.children) button.children.push_back(ButtonFor(child));
     return button;
@@ -2985,7 +2986,7 @@ void BrowserWindow::RefreshBookmarks()
     }));
     // Icons for the bar's own buttons; its folders' menus show none.
     for (auto& button : bar->children)
-        if (!button.folder) button.icon = fFavicons->Icon(button.url);
+        if (!button.folder && !button.separator) button.icon = fFavicons->Icon(button.url);
     fBookmarksBar->SetBookmarks(std::move(bar));
 }
 void BrowserWindow::SetBookmarksBarVisible(bool visible)
@@ -3040,6 +3041,7 @@ void BrowserWindow::RebuildDynamicMenus()
     std::function<void(BookmarkButton&)> addIcons = [&](BookmarkButton& button) {
         for (auto& child : button.children) {
             if (icons >= 600) return;
+            if (child.separator) continue;
             if (child.folder) addIcons(child);
             else if (const BBitmap* icon = fFavicons->Icon(child.url)) {
                 child.menuIcon = std::make_shared<const BBitmap>(icon);
@@ -3067,7 +3069,8 @@ void BrowserWindow::RebuildDynamicMenus()
             fBookmarksMenu->AddItem(more);
             break;
         }
-        if (child.folder) fBookmarksMenu->AddItem(NewBookmarkFolderItem(snapshot, child, target));
+        if (child.separator) fBookmarksMenu->AddSeparatorItem();
+        else if (child.folder) fBookmarksMenu->AddItem(NewBookmarkFolderItem(snapshot, child, target));
         else add(fBookmarksMenu, {child.url, child.title});
     }
     if (auto* item = fWindowMenu->FindItem(kMoveTabToNewWindow)) item->SetEnabled(fTabs.size() > 1);
@@ -3132,7 +3135,7 @@ void BrowserWindow::OpenBookmarkEditor(int64 id)
     const bool found = fShared->Read([&](const Profile& profile) {
         const auto* node = profile.bookmarks.Find(id);
         const auto* parent = profile.bookmarks.Parent(id);
-        if (!node || !parent) return false;
+        if (!node || !parent || node->separator) return false;
         fields.mode = node->folder ? BookmarkEditor::kEditFolderMode : BookmarkEditor::kEditBookmarkMode;
         fields.id = id;
         fields.title = node->title;
@@ -3201,11 +3204,11 @@ void BrowserWindow::BookmarkEdited(const BMessage& message)
 }
 void BrowserWindow::DeleteBookmark(int64 id, bool confirm)
 {
-    struct Node { bool found = false, folder = false; size_t bookmarks = 0; std::string title; };
+    struct Node { bool found = false, folder = false; size_t bookmarks = 0; std::string title; bool separator = false; };
     const auto node = fShared->Read([&](const Profile& profile) {
         Node node;
         if (const auto* found = profile.bookmarks.Find(id); found && profile.bookmarks.Parent(id))
-            node = {true, found->folder, found->folder ? CountBookmarks(*found) : 1, found->title};
+            node = {true, found->folder, found->folder ? CountBookmarks(*found) : !found->separator, found->title, found->separator};
         return node;
     });
     if (!node.found) return;
@@ -3222,7 +3225,7 @@ void BrowserWindow::DeleteBookmark(int64 id, bool confirm)
     fShared->Change([&](Profile& profile) -> uint32 {
         return profile.bookmarks.Remove(id) ? SharedProfile::kBookmarksChanged : 0;
     }, BMessenger(this));
-    fStatus->SetText(node.folder ? "Folder deleted" : "Bookmark deleted");
+    fStatus->SetText(node.folder ? "Folder deleted" : node.separator ? "Separator deleted" : "Bookmark deleted");
 }
 bool BrowserWindow::BookmarkPageRequest(Tab& tab, const std::string& source, const std::string& url)
 {
@@ -4101,7 +4104,7 @@ void BrowserWindow::MessageReceived(BMessage* message)
                 std::vector<std::string> urls;
                 if (const auto* folder = profile.bookmarks.Find(id))
                     for (const auto& child : folder->children)
-                        if (!child.folder && urls.size() < 50) urls.push_back(child.url);
+                        if (!child.folder && !child.separator && urls.size() < 50) urls.push_back(child.url);
                 return urls;
             });
             for (size_t i = 0; i < urls.size(); ++i) CreateTab(urls[i], i == 0);

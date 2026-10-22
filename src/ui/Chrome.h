@@ -174,6 +174,7 @@ struct BookmarkButton {
     std::vector<BookmarkButton> children;
     // For the menus: a copy, as menus outlive a change of the cache.
     std::shared_ptr<const BBitmap> menuIcon;
+    bool separator = false;
 };
 // A page in a menu (history, bookmarks): its site icon (a copy is kept;
 // null leaves the icon's place empty, so labels line up) before the label.

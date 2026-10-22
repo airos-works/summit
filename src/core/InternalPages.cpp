@@ -216,6 +216,8 @@ a.link,.toggle{cursor:pointer}
 .tools{flex:none;display:flex;gap:2px;opacity:.55}.row:hover .tools{opacity:1}
 .tool{font:inherit;font-size:12px;color:#456c51;text-decoration:none;padding:3px 7px;border-radius:5px;border:0;background:none;cursor:pointer}
 .tool:hover{background:#dfeade}
+.separator .row{min-height:32px}.separator-line{flex:1;display:flex;align-items:center;gap:10px;color:#7b897f;font-size:12px}
+.separator-line:before,.separator-line:after{content:"";flex:1;border-top:1px solid #9aa69f}
 form.editor{display:flex;flex-wrap:wrap;gap:8px 14px;align-items:center;padding:10px 12px;background:#f3f8f2}
 form.editor label{display:flex;gap:6px;align-items:center;font-size:13px;color:#4c6357}
 form.editor input{width:220px;padding:5px 8px}form.editor input.address{width:300px}
@@ -468,6 +470,14 @@ void BookmarkItems(PageWriter& writer, const std::vector<BookmarkNode>& nodes)
 {
     for (const auto& node : nodes) {
         const std::string id = std::to_string(node.id);
+        if (node.separator) {
+            const auto label = EscapeHTML(node.title.empty() ? "Separator" : node.title);
+            writer.Raw("<div class=\"item separator\" data-id=\"" + id + "\"><div class=\"row\" data-title=\"" + label
+                + "\"><span class=\"separator-line\" role=\"separator\" aria-label=\"" + label + "\">" + label
+                + "</span><span class=\"tools\"><button class=\"tool\" type=\"button\" data-action=\"delete\">Delete</button>"
+                "</span></div></div>\n");
+            continue;
+        }
         if (node.folder) {
             const size_t count = CountBookmarks(node);
             writer.Raw("<div class=\"item folder\" data-id=\"" + id + "\"><div class=\"row\" data-title=\"" + EscapeHTML(node.title)

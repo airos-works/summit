@@ -53,13 +53,14 @@ static std::vector<PageRecord> Decode(const json& value, size_t limit)
     }
     return pages;
 }
-// Folders as nested arrays: a folder has "children", a bookmark "url".
+// Folders have "children", bookmarks "url", separators "separator": true.
 static json EncodeBookmarks(const std::vector<BookmarkNode>& nodes)
 {
     json result = json::array();
     for (const auto& node : nodes) {
         json item = {{"title", node.title}};
         if (node.folder) item["children"] = EncodeBookmarks(node.children);
+        else if (node.separator) item["separator"] = true;
         else item["url"] = node.url;
         if (node.added) item["added"] = node.added;
         result.push_back(std::move(item));
@@ -68,7 +69,8 @@ static json EncodeBookmarks(const std::vector<BookmarkNode>& nodes)
 }
 // Unusable entries are dropped rather than failing the profile; so are
 // folders nested deeper than kMaxBookmarkDepth and anything past the limits.
-static void DecodeBookmarks(const json& value, BookmarkNode& folder, size_t depth, size_t& bookmarks, size_t& folders)
+static void DecodeBookmarks(const json& value, BookmarkNode& folder, size_t depth, size_t& bookmarks, size_t& folders,
+    size_t& separators)
 {
     if (!value.is_array()) return;
     for (const auto& item : value) {
@@ -82,7 +84,11 @@ static void DecodeBookmarks(const json& value, BookmarkNode& folder, size_t dept
             if (depth + 1 > kMaxBookmarkDepth || folders >= kMaxBookmarkFolders) continue;
             node.folder = true;
             ++folders;
-            DecodeBookmarks(*children, node, depth + 1, bookmarks, folders);
+            DecodeBookmarks(*children, node, depth + 1, bookmarks, folders, separators);
+        } else if (auto separator = item.find("separator"); separator != item.end() && *separator == true) {
+            if (separators >= kMaxBookmarkSeparators) continue;
+            node.separator = true;
+            ++separators;
         } else {
             auto url = item.find("url");
             if (url == item.end() || !url->is_string() || bookmarks >= kMaxBookmarks) continue;
@@ -130,9 +136,9 @@ Profile Profile::Load(const std::filesystem::path& path, std::string& error)
         // ones (which leave it out when they save) only have the flat list.
         if (auto tree = j.find("bookmarkTree"); tree != j.end() && tree->is_object()) {
             BookmarkNode bar, other;
-            size_t bookmarks = 0, folders = 0;
-            if (auto items = tree->find("bar"); items != tree->end()) DecodeBookmarks(*items, bar, 0, bookmarks, folders);
-            if (auto items = tree->find("other"); items != tree->end()) DecodeBookmarks(*items, other, 0, bookmarks, folders);
+            size_t bookmarks = 0, folders = 0, separators = 0;
+            if (auto items = tree->find("bar"); items != tree->end()) DecodeBookmarks(*items, bar, 0, bookmarks, folders, separators);
+            if (auto items = tree->find("other"); items != tree->end()) DecodeBookmarks(*items, other, 0, bookmarks, folders, separators);
             profile.bookmarks.Assign(std::move(bar), std::move(other));
         } else profile.bookmarks.AssignPages(pages);
         profile.history = Decode(j.at("history"), 2000);

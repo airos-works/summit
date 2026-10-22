@@ -6,7 +6,7 @@
 #include <vector>
 
 namespace summit {
-// A bookmark, or a folder of bookmarks and folders.
+// A bookmark, a separator, or a folder of nodes.
 struct BookmarkNode {
     // Unique among the profile's bookmarks while Summit runs. Not saved: the
     // nodes are numbered again when the profile is read.
@@ -18,19 +18,22 @@ struct BookmarkNode {
     // When it was added, in seconds since the epoch (0 when not known).
     int64_t added = 0;
     std::vector<BookmarkNode> children;
+    // Separators have no address or children; their position is significant.
+    bool separator = false;
 };
 // The two folders every profile has, which cannot be moved, renamed or deleted.
 constexpr int64_t kBookmarksBarFolder = 1;
 constexpr int64_t kOtherBookmarksFolder = 2;
 constexpr size_t kMaxBookmarks = 10000;
 constexpr size_t kMaxBookmarkFolders = 5000;
+constexpr size_t kMaxBookmarkSeparators = 5000;
 // Folders inside folders: the bar and Other Bookmarks are depth 0.
 constexpr size_t kMaxBookmarkDepth = 32;
 constexpr size_t kBookmarkEnd = std::numeric_limits<size_t>::max();
 
 // Addresses Summit keeps as bookmarks: http, https and file.
 bool IsBookmarkableURL(const std::string& url);
-// Bookmarks (not folders) inside a folder, at any depth.
+// Bookmarks (not folders or separators) inside a folder, at any depth.
 size_t CountBookmarks(const BookmarkNode& folder);
 
 // A folder, for choosers: its depth (0 for the bar and Other Bookmarks).
@@ -41,10 +44,13 @@ struct BookmarkFolderChoice {
 };
 struct BookmarkImportResult {
     size_t added = 0;
+    size_t foldersAdded = 0;
+    size_t separatorsAdded = 0;
     size_t duplicates = 0;   // already bookmarked (or twice in the import)
     size_t unsupported = 0;  // addresses Summit does not keep (javascript:, place:...)
-    size_t overLimit = 0;    // past kMaxBookmarks
+    size_t overLimit = 0;    // past a bookmark, folder or separator limit
     int64_t folder = 0;      // the "Imported from …" folder, 0 when nothing was added
+    bool Changed() const { return added || foldersAdded || separatorsAdded; }
 };
 
 // A profile's bookmarks: the bookmarks bar and Other Bookmarks, each a
@@ -61,6 +67,7 @@ public:
     const std::vector<PageRecord>& Pages() const { return fPages; }
     size_t Count() const;
     size_t FolderCount() const { return fFolders; }
+    size_t SeparatorCount() const { return fSeparators; }
     bool Empty() const;
 
     // Replaces every bookmark; the nodes' ids are assigned here.
@@ -87,6 +94,7 @@ public:
     // position among the folder's children (kBookmarkEnd: at the end).
     int64_t Add(const PageRecord& page, int64_t folder, size_t index = kBookmarkEnd, int64_t added = 0);
     int64_t AddFolder(int64_t parent, const std::string& title, size_t index = kBookmarkEnd, int64_t added = 0);
+    int64_t AddSeparator(int64_t parent, size_t index = kBookmarkEnd, int64_t added = 0);
     // A folder's address is ignored. False when nothing changed.
     bool Edit(int64_t id, const std::string& title, const std::string& url);
     // Puts a node before the child now at index of folder (kBookmarkEnd: at
@@ -111,6 +119,7 @@ private:
     BookmarkNode fBar, fOther;
     std::vector<PageRecord> fPages;
     size_t fFolders = 0;
+    size_t fSeparators = 0;
     int64_t fNextID = kOtherBookmarksFolder + 1;
 };
 }

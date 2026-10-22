@@ -2,8 +2,8 @@
 
 Added 19 October 2026 for [issue #69](https://github.com/jmgasper/summit/issues/69).
 Summit's bookmarks used to be a flat list with a "bar" flag; they are now two
-folders, **Bookmarks Bar** and **Other Bookmarks**, that hold bookmarks and
-folders nested up to 32 deep. No engine change.
+folders, **Bookmarks Bar** and **Other Bookmarks**, that hold bookmarks,
+separators and folders nested up to 32 deep. No engine change.
 
 ## What the user sees
 
@@ -28,6 +28,11 @@ folders nested up to 32 deep. No engine change.
   without a scheme gets `https://`. **Delete** removes the bookmark; deleting
   a folder that has bookmarks in it asks first ("Delete the folder “Work” and
   the 12 bookmarks in it?").
+- **Imported separators** retain their positions. Menus show native separator
+  lines, the bar shows vertical lines, and the Bookmarks tab shows draggable
+  separator rows with Delete. A separator on the bar can be dragged or removed
+  with its secondary-button menu. Clicking it opens no page, and Open All in
+  Tabs ignores separators.
 - **The bookmarks bar's secondary-button menu**: for a bookmark Open, Open in
   New Tab, Edit…, Remove from Bookmarks Bar (it moves to Other Bookmarks) and
   Delete Bookmark; for a folder Open All in Tabs, Edit Folder…, New Folder…
@@ -46,7 +51,7 @@ folders nested up to 32 deep. No engine change.
 - **The Bookmarks tab** (`summit:bookmarks`, Alt+B) shows both folders as a
   tree. Folders open and close (the page remembers which while the tab
   lives); the search field shows matching bookmarks with the folders they are
-  in, and a matching folder with everything in it. Each row has **Edit**,
+  in, and a matching folder with everything in it. Bookmark and folder rows have **Edit**,
   which turns it into a small form (Name, Address, Folder) saved with Enter
   or Save, and **Delete**. Rows are dragged with the mouse: before or after
   another row, or onto a folder's row to go inside it. **New Folder…**,
@@ -65,13 +70,12 @@ folders nested up to 32 deep. No engine change.
   Bookmarks go into a folder **Imported from WebPositive** (Firefox, Chrome,
   …; for an HTML file from another browser its file name) in Other Bookmarks,
   with their folders. Addresses that are bookmarked already are skipped, so
-  importing again adds only what is new; folders left empty are not made,
+  importing again adds only what is new; folders left empty by skipped duplicates are not made,
   and an "Imported from …" folder that exists is filled again (its folders of
   the same name merged). javascript: bookmarklets and Firefox's `place:`
-  queries are counted and left out. The window then says what happened:
-  "Imported 16 bookmarks from WebPositive into the folder “Imported from
-  WebPositive” in Other Bookmarks. 1 was already bookmarked. Added 21 pages
-  to History."
+  queries are counted and left out. Empty folders present in the source are
+  kept, including imports containing no addresses. The window reports added
+  bookmarks, folders and separators, skipped addresses, and imported history.
 - **File › Export Bookmarks…** saves `bookmarks.html` (Netscape bookmarks
   HTML, the format every browser imports) where the save panel says: the
   bookmarks bar as a folder marked as the toolbar (`PERSONAL_TOOLBAR_FOLDER`),
@@ -80,24 +84,26 @@ folders nested up to 32 deep. No engine change.
 ## How it works
 
 - **The model** is `src/core/Bookmarks.{h,cpp}`: `BookmarkNode` (title,
-  address or children, time added) and `Bookmarks`, which owns the two root
-  folders and is the only way to change them (`Add`, `AddFolder`, `Edit`,
+  address or children, time added, separator flag) and `Bookmarks`, which owns the two root
+  folders and is the only way to change them (`Add`, `AddFolder`, `AddSeparator`, `Edit`,
   `Move` — before the child now at an index, so a drag's index needs no
   adjusting — `Remove`, `RemoveURL`, `Import`). Node ids are numbered when the
   profile is read and are unique while Summit runs; the pages, menus and
   messages name bookmarks by id. Every change rebuilds a flat list of all
   bookmarks (`Pages()`, the bar's first, those directly on the bar flagged),
   which the address field's suggestions, the star and history clearing use.
-  Limits: 10000 bookmarks (as before), 5000 folders, 32 levels.
+  Separators stay out of that flat list and address lookups. Limits: 10000
+  bookmarks (as before), 5000 folders, 5000 separators, 32 levels.
 - **`profile.json`** keeps the folders in a new `bookmarkTree` (`bar` and
   `other`, nested `children`) and still writes `bookmarks`, the flat list,
   with `bar` set for the bar's own bookmarks. Older builds read only the flat
   list: they show every bookmark (the bar's on their bar, the rest in Other
   Bookmarks) and ignore the folders. A profile without `bookmarkTree` (saved
   by an older build) is read from the flat list. Unusable tree entries are
-  dropped rather than failing the profile.
+  dropped rather than failing the profile. Separators are saved with
+  `"separator": true` and no address; older builds ignore them.
 - **Formats** are `src/core/BookmarkIO.{h,cpp}`: a tolerant Netscape HTML
-  reader (`<DL>`/`<DT>`/`<H3>`/`<A>`, entities, quoted or bare attributes,
+  reader (`<DL>`/`<DT>`/`<H3>`/`<A>`/`<HR>`, entities, quoted or bare attributes,
   `ADD_DATE` in seconds, milliseconds or microseconds, unclosed lists) and
   writer; Chrome's JSON (`roots`: the bar becomes a folder, "other" comes
   first-level, other roots such as mobile bookmarks become folders; dates in
@@ -110,9 +116,16 @@ folders nested up to 32 deep. No engine change.
   write-ahead log are copied to a temporary folder first, because Firefox or
   Chrome may be running and holding them. Firefox's roots are found by guid:
   the toolbar becomes "Bookmarks Toolbar", the Bookmarks Menu's own come
-  first-level, then "Other Bookmarks" and "Mobile Bookmarks"; tags and
-  separators are left out. History is the 2000 most recent visible pages with
-  visit counts.
+  first-level, then "Other Bookmarks" and "Mobile Bookmarks". Firefox type-3
+  records become separators; tags are still left out. History is the 2000 most
+  recent visible pages with visit counts.
+- **Separator import/export** uses `<HR>`, as in
+  [Firefox's HTML importer/exporter](https://searchfox.org/firefox-main/source/toolkit/components/places/BookmarkHTMLUtils.sys.mjs).
+  Optional names and added dates survive a Summit round trip. Repeat imports
+  match existing separators by name and occurrence in each merged folder;
+  existing nodes retain their positions, just as existing bookmarks do.
+  `BookmarkImportResult::Changed()` includes folders and separators so an
+  import with no new page addresses still saves and refreshes browser windows.
 - **History import** (`Profile::ImportHistory`) adds pages history does not
   have, keeps the later visit and larger count of pages both have, and keeps
   the 2000 most recent. WebPositive's `BrowsingHistory` (a flattened message
@@ -151,6 +164,31 @@ folders nested up to 32 deep. No engine change.
   [mcp.md](mcp.md)).
 
 ## Testing
+
+The 22 October #110 follow-up passes **171 bookmark checks** on the host and
+native airOS, plus the host core suite. Separator ordering, repeated and
+separator-only imports, HTML/SQLite parsing, profile and export round trips,
+escaped names, URL exclusion, moves/deletes, and folder/separator limits are
+covered. The missing-SQLite test uses a nonexistent library name: Haiku can
+resolve `/nonexistent/libsqlite3.so.0` to its installed SQLite by basename.
+
+`tests/NativeBookmarkTests.cpp` passes **21 native UI checks** on airOS
+hrev60207+1733. These use the actual `SharedProfile`/import UI code and native
+menus and toolbar: both empty-folder and separator-only imports reach disk,
+repeat imports send no change notification, native menu separators have no
+navigation command, toolbar pixels contain a separator line, and clicking the
+line opens nothing while the adjacent bookmark opens once. The tests use a
+fresh isolated profile and a hidden test window, exit normally, and leave no
+test process. They do not launch WebKit. The modern `BrowserWindow` translation
+unit and the application's `main.cpp` also compile with these changes. Source
+and binary hashes and the native results are recorded in
+[`bookmark-separators-native-2026-10-22.json`](bookmark-separators-native-2026-10-22.json).
+
+Build the native probes with `tools/bench/bookmarks-native.sh OUTPUT_DIRECTORY`
+on Haiku; set `WEBKIT_INCLUDE_DIR` to the modern engine's public header directory
+when it is not installed. Run `OUTPUT_DIRECTORY/BookmarkTests` and
+`OUTPUT_DIRECTORY/NativeBookmarkTests NEW_PROFILE_DIRECTORY`. `CXX`, `CPPFLAGS`
+and `LDFLAGS` can select the Haiku cross compiler/sysroot when building elsewhere.
 
 Host: `tests/BookmarkTests.cpp` (`summit_bookmark_tests`): the tree
 operations and limits, `profile.json` both ways (an older build's flat list,
@@ -198,7 +236,7 @@ engine, profile `p-bm`):
 
 ## Not done
 
-- Separators, keywords, tags and descriptions are not imported; Firefox's
+- Keywords, tags and descriptions are not imported; Firefox's
   smart folders (`place:` queries) and bookmarklets are skipped.
 - ~~Exporting and importing back leaves out empty folders.~~ Done 20 October
   (#110): a folder empty in the file is imported (one only duplicates filled is

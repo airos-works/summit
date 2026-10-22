@@ -157,7 +157,7 @@ ImportOutcome ImportBookmarksFrom(SharedProfile& shared, const std::filesystem::
     shared.Change([&](Profile& profile) -> uint32 {
         uint32 changes = 0;
         result = profile.bookmarks.Import(imported.bookmarks, folderTitle, std::time(nullptr));
-        if (result.added) changes |= SharedProfile::kBookmarksChanged;
+        if (result.Changed()) changes |= SharedProfile::kBookmarksChanged;
         if (history) {
             outcome.history = profile.ImportHistory(imported.history);
             if (outcome.history) changes |= SharedProfile::kHistoryChanged;
@@ -168,20 +168,28 @@ ImportOutcome ImportBookmarksFrom(SharedProfile& shared, const std::filesystem::
     outcome.bookmarks = result.added;
     outcome.folder = result.folder;
     std::string text;
-    if (result.added)
-        text = "Imported " + Count(result.added, "bookmark", "bookmarks") + " from " + imported.source
+    if (result.Changed()) {
+        std::string items;
+        auto describe = [&](size_t count, const char* singular, const char* plural) {
+            if (count) items += (items.empty() ? "" : ", ") + Count(count, singular, plural);
+        };
+        describe(result.added, "bookmark", "bookmarks");
+        describe(result.foldersAdded, "folder", "folders");
+        describe(result.separatorsAdded, "separator", "separators");
+        text = "Imported " + items + " from " + imported.source
             + " into the folder “" + folderTitle + "” in Other Bookmarks.";
+    }
     else if (found && result.duplicates == found)
         text = "Nothing new to import: every bookmark from " + imported.source + " is bookmarked already.";
     else if (found || imported.history.empty()) text = "There were no new bookmarks to import from " + imported.source + ".";
-    if (result.added && result.duplicates)
+    if (result.Changed() && result.duplicates)
         text += " " + std::to_string(result.duplicates) + (result.duplicates == 1 ? " was already bookmarked." : " were already bookmarked.");
     if (result.unsupported)
         text += " " + Count(result.unsupported, "bookmark", "bookmarks") + " could not be kept: Summit bookmarks web "
             "addresses and files (not javascript: bookmarklets or searches).";
     if (result.overLimit)
-        text += " " + std::to_string(result.overLimit) + " did not fit: Summit keeps at most "
-            + std::to_string(kMaxBookmarks) + " bookmarks.";
+        text += " Some items did not fit: Summit keeps at most " + std::to_string(kMaxBookmarks) + " bookmarks, "
+            + std::to_string(kMaxBookmarkFolders) + " folders and " + std::to_string(kMaxBookmarkSeparators) + " separators.";
     if (history && outcome.history) text += (text.empty() ? "" : " ") + std::string("Added ") + Count(outcome.history, "page", "pages") + " to History.";
     else if (history && !imported.history.empty()) text += (text.empty() ? "" : " ") + std::string("History already had every page visited there.");
     outcome.message = text;

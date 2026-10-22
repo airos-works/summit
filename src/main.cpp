@@ -1868,7 +1868,8 @@ private:
             }
             std::function<json(const summit::BookmarkNode&)> node = [&](const summit::BookmarkNode& item) {
                 json result = {{"id", item.id}, {"title", item.title}};
-                if (!item.folder) result["url"] = item.url;
+                if (item.separator) result["separator"] = true;
+                else if (!item.folder) result["url"] = item.url;
                 else {
                     result["children"] = json::array();
                     for (const auto& child : item.children) result["children"].push_back(node(child));
@@ -1877,6 +1878,7 @@ private:
             };
             summit::McpReply(message, fShared->Read([&](const summit::Profile& profile) {
                 return json{{"bookmarks", profile.bookmarks.Count()}, {"folders", profile.bookmarks.FolderCount()},
+                    {"separators", profile.bookmarks.SeparatorCount()},
                     {"bar", node(profile.bookmarks.Bar())}, {"other", node(profile.bookmarks.Other())}};
             }));
             return;

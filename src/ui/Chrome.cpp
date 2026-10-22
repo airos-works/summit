@@ -1100,6 +1100,10 @@ void AddBookmarkItems(BMenu* menu, std::shared_ptr<const BookmarkButton> root, c
             menu->AddItem(more);
             break;
         }
+        if (child.separator) {
+            menu->AddSeparatorItem();
+            continue;
+        }
         if (child.folder) {
             menu->AddItem(NewBookmarkFolderItem(root, child, target));
             continue;
@@ -1159,6 +1163,7 @@ void BookmarksBar::LayoutItems()
     for (const auto& bookmark : Items()) {
         float width = 8 + 16 + 8;
         if (!bookmark.title.empty()) width += 5 + std::min(150.0f, std::ceil(StringWidth(bookmark.title.c_str())));
+        if (bookmark.separator) width = 12;
         fRects.push_back(BRect(x, 2, x + width - 1, height - 3));
         x += width + 2;
     }
@@ -1221,6 +1226,12 @@ void BookmarksBar::Draw(BRect update)
     }
     for (size_t i = 0; i < fVisible; ++i) {
         const BRect rect = fRects[i];
+        if (items[i].separator) {
+            SetHighColor(Mix(ink, panel, 0.55f));
+            const float x = std::floor((rect.left + rect.right) / 2);
+            StrokeLine(BPoint(x, rect.top + 4), BPoint(x, rect.bottom - 4));
+            continue;
+        }
         const bool target = fDropInto && int32(i) == fDropIndex;
         if (int32(i) == fPressed || int32(i) == fHover || target) {
             if (haiku) {
@@ -1314,7 +1325,7 @@ void BookmarksBar::MouseMoved(BPoint where, uint32 transit, const BMessage* drag
         BMessage message(B_SIMPLE_DATA);
         message.AddInt64("summit:bookmark", item.id);
         message.AddString("summit:title", item.title.c_str());
-        if (!item.folder) {
+        if (!item.folder && !item.separator) {
             message.AddString("summit:url", item.url.c_str());
             AddBookmarkFileDragData(message, item.url, item.title);
             fDraggedURL = item.url;
@@ -1329,7 +1340,8 @@ void BookmarksBar::MouseMoved(BPoint where, uint32 transit, const BMessage* drag
     const int32 hover = transit == B_EXITED_VIEW || transit == B_OUTSIDE_VIEW ? -1 : ItemAt(where);
     if (hover == fHover) return;
     fHover = hover;
-    if (hover >= 0) SetToolTip(Items()[hover].folder ? Items()[hover].title.c_str() : Items()[hover].url.c_str());
+    if (hover >= 0) SetToolTip(Items()[hover].separator ? "Separator"
+        : Items()[hover].folder ? Items()[hover].title.c_str() : Items()[hover].url.c_str());
     else SetToolTip(hover == kOverflowItem ? "More bookmarks" : static_cast<const char*>(nullptr));
     Invalidate();
 }
@@ -1388,7 +1400,7 @@ void BookmarksBar::MessageReceived(BMessage* message)
 }
 void BookmarksBar::Open(int32 index, bool newTab)
 {
-    if (index < 0 || size_t(index) >= Items().size()) return;
+    if (index < 0 || size_t(index) >= Items().size() || Items()[index].separator) return;
     BMessage open(kOpenBookmark);
     open.AddString("url", Items()[index].url.c_str());
     open.AddBool("new_tab", newTab);
@@ -1422,7 +1434,8 @@ void BookmarksBar::ShowOverflow()
     const BMessenger target(Window());
     for (size_t i = fVisible; i < Items().size(); ++i) {
         const auto& item = Items()[i];
-        if (item.folder) menu->AddItem(NewBookmarkFolderItem(fBar, item, target));
+        if (item.separator) menu->AddSeparatorItem();
+        else if (item.folder) menu->AddItem(NewBookmarkFolderItem(fBar, item, target));
         else menu->AddItem(new BMenuItem(BookmarkLabel(item).c_str(), BookmarkMessage(kOpenBookmark, item.url)));
     }
     menu->SetTargetForItems(Window());
@@ -1449,6 +1462,8 @@ void BookmarksBar::ShowContextMenu(int32 index, BPoint where)
         menu->AddItem(new BMenuItem("New Folder…", NodeMessage(kNewBookmarkFolder, "folder", kBookmarksBarFolder)));
         menu->AddSeparatorItem();
         menu->AddItem(new BMenuItem("Show All Bookmarks", new BMessage(kShowBookmarks)));
+    } else if (Items()[index].separator) {
+        menu->AddItem(new BMenuItem("Delete Separator", NodeMessage(kDeleteBookmarkNode, "id", Items()[index].id)));
     } else if (Items()[index].folder) {
         const int64 id = Items()[index].id;
         menu->AddItem(new BMenuItem("Open All in Tabs", NodeMessage(kOpenBookmarkFolder, "id", id)));

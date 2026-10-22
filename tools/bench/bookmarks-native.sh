@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# Build the core and native bookmark tests with a Haiku compiler. No engine is
+# linked or launched: unused modern toolbar code is removed from this probe.
+set -euo pipefail
+if [[ $# != 1 ]]; then
+    echo 'Usage: bookmarks-native.sh OUTPUT_DIRECTORY' >&2
+    exit 64
+fi
+SUMMIT_BOOKMARK_ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
+mkdir -p -- "$1"
+SUMMIT_BOOKMARK_OUTPUT=$(cd -- "$1" && pwd)
+cd "$SUMMIT_BOOKMARK_ROOT"
+read -r -a SUMMIT_BOOKMARK_COMPILER <<< "${CXX:-g++}"
+read -r -a SUMMIT_BOOKMARK_CPPFLAGS <<< "${CPPFLAGS:-}"
+read -r -a SUMMIT_BOOKMARK_LDFLAGS <<< "${LDFLAGS:-}"
+SUMMIT_BOOKMARK_FLAGS=(-std=c++23 -O1 -g -ffunction-sections -fdata-sections -fvisibility=hidden
+    -Wno-multichar -DSUMMIT_MODERN_WEBKIT=1 -DBUILDING_HAIKU__=1 -Isrc -Ivendor
+    "-I${WEBKIT_INCLUDE_DIR:-/boot/system/develop/headers}")
+SUMMIT_BOOKMARK_SOURCES=()
+for SUMMIT_BOOKMARK_UNIT in Bookmarks BookmarkIO Profile Address Favicon Zoom Protocol UserAgent Spelling TranslationModels PageLanguage InternalPages; do
+    SUMMIT_BOOKMARK_SOURCES+=("src/core/$SUMMIT_BOOKMARK_UNIT.cpp")
+done
+for SUMMIT_BOOKMARK_UNIT in Chrome BookmarkImport SharedProfile; do
+    SUMMIT_BOOKMARK_SOURCES+=("src/ui/$SUMMIT_BOOKMARK_UNIT.cpp")
+done
+SUMMIT_BOOKMARK_OBJECTS=()
+for SUMMIT_BOOKMARK_SOURCE in "${SUMMIT_BOOKMARK_SOURCES[@]}"; do
+    SUMMIT_BOOKMARK_OBJECT="$SUMMIT_BOOKMARK_OUTPUT/$(basename "${SUMMIT_BOOKMARK_SOURCE%.cpp}").o"
+    "${SUMMIT_BOOKMARK_COMPILER[@]}" "${SUMMIT_BOOKMARK_CPPFLAGS[@]}" "${SUMMIT_BOOKMARK_FLAGS[@]}" -c "$SUMMIT_BOOKMARK_SOURCE" -o "$SUMMIT_BOOKMARK_OBJECT"
+    SUMMIT_BOOKMARK_OBJECTS+=("$SUMMIT_BOOKMARK_OBJECT")
+done
+for SUMMIT_BOOKMARK_TEST in BookmarkTests NativeBookmarkTests; do
+    "${SUMMIT_BOOKMARK_COMPILER[@]}" "${SUMMIT_BOOKMARK_CPPFLAGS[@]}" "${SUMMIT_BOOKMARK_FLAGS[@]}" \
+        "tests/$SUMMIT_BOOKMARK_TEST.cpp" "${SUMMIT_BOOKMARK_OBJECTS[@]}" "${SUMMIT_BOOKMARK_LDFLAGS[@]}" \
+        -Wl,--gc-sections -lbe -ltracker -ltranslation -lcrypto -lnetwork -o "$SUMMIT_BOOKMARK_OUTPUT/$SUMMIT_BOOKMARK_TEST"
+done
+echo "Built $SUMMIT_BOOKMARK_OUTPUT/BookmarkTests and NativeBookmarkTests"
