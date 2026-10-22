@@ -1,6 +1,7 @@
 #pragma once
 #include <cstdint>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace summit {
@@ -23,6 +24,13 @@ struct PageRecord {
     // History: retained individual visits, in microseconds since the epoch.
     // Newest first; older profiles have only the second-resolution summaries.
     std::vector<int64_t> visitTimes {};
+    // Known Firefox transition types (1..9), paired with retained visit times.
+    // An absent pair means unknown, not a link visit. Equal times can have
+    // several types after merging sources; no Firefox visit IDs are retained.
+    std::vector<std::pair<int64_t, uint32_t>> visitTransitions {};
+    // Firefox excludes downloads/reloads from visit_count. Distinguish its
+    // real zero from the unknown zero in older Summit profiles.
+    bool visitCountKnown = false;
 };
 constexpr size_t kMaxEarlierVisits = 60;
 }

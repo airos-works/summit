@@ -125,7 +125,7 @@ int main(int argc, char** argv)
     CHECK(result.items.size() == 5 && Rows(result).size() == 5); // Overlap does not duplicate a visit.
     CHECK(query("place:type=1&OR&uri=http%3A%2F%2Falpha.example%2Fa").items.size() == 3);
     CHECK(query("place:type=1&beginTimeRef=2&beginTime="+std::to_string(times[1]-now)+"&endTimeRef=2&endTime="+std::to_string(times[1]-now)).items.size() == 3);
-    for (const auto* suffix : {"&parent=toolbar_____","&folder=TOOLBAR","&transition=1","&annotation=x","&sort=22","&includeHidden=1","&beginTimeRef=2&beginTime=9223372036854775807"}) {
+    for (const auto* suffix : {"&parent=toolbar_____","&folder=TOOLBAR","&transition=invalid","&annotation=x","&sort=22","&includeHidden=1","&beginTimeRef=2&beginTime=9223372036854775807"}) {
         const auto bad = query(std::string("place:type=1")+suffix);
         CHECK(!bad.error.empty() && bad.items.empty() && bad.visitTimes.empty());
     }

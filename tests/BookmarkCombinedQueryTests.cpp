@@ -75,7 +75,7 @@ int main()
     CHECK(query("place:OR&OR").items.size() == 4);
     CHECK(query("place:domainIsHost=1&OR&terms=Gamma").items.size() == 1);
     CHECK(query("place:queryType=1&onlyBookmarked=1&OR&terms=Gamma").items.size() == 1);
-    for (const auto* invalid : {"place:terms=Alpha%20red&OR&transition=2", "place:terms=Alpha%20red&OR&annotation=foo",
+    for (const auto* invalid : {"place:terms=Alpha%20red&OR&transition=invalid", "place:terms=Alpha%20red&OR&annotation=foo",
             "place:terms=Alpha%20red&OR&beginTimeRef=2&beginTime=9223372036854775807",
             "place:terms=Alpha%20red&OR&parent=missing_____", "place:terms=Alpha%20red&OR&terms=%ff%00",
             "place:terms=Alpha%20red&or&terms=Gamma", "place:terms=Alpha%20red&%4f%52&terms=Gamma"}) {

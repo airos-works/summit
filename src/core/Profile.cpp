@@ -24,9 +24,11 @@ static json Encode(const std::vector<PageRecord>& pages)
     for (const auto& page : pages) {
         json item = {{"url", page.url}, {"title", page.title}};
         if (page.visited) item["visited"] = page.visited;
-        if (page.visits > 1) item["visits"] = page.visits;
+        if (page.visits > 1 || page.visitCountKnown) item["visits"] = page.visits;
+        if (page.visitCountKnown) item["visitCountKnown"] = true;
         if (!page.earlier.empty()) item["earlier"] = page.earlier;
         if (!page.visitTimes.empty()) item["visitTimes"] = page.visitTimes;
+        if (!page.visitTransitions.empty()) item["visitTransitions"] = page.visitTransitions;
         if (page.bar) item["bar"] = true;
         result.push_back(std::move(item));
     }
@@ -45,6 +47,7 @@ static std::vector<PageRecord> Decode(const json& value, size_t limit)
         if (auto visited = item.find("visited"); visited != item.end()) page.visited = visited->get<int64_t>();
         if (auto bar = item.find("bar"); bar != item.end()) page.bar = bar->get<bool>();
         if (auto visits = item.find("visits"); visits != item.end()) page.visits = std::clamp(visits->get<int>(), 0, 1000000);
+        if (auto known = item.find("visitCountKnown"); known != item.end()) page.visitCountKnown = known->get<bool>();
         if (auto earlier = item.find("earlier"); earlier != item.end() && earlier->is_array()) {
             for (const auto& time : *earlier) {
                 if (page.earlier.size() >= kMaxEarlierVisits) break;
@@ -59,8 +62,19 @@ static std::vector<PageRecord> Decode(const json& value, size_t limit)
                     throw std::runtime_error("Invalid history visit time");
                 page.visitTimes.push_back(time.get<int64_t>());
             }
-            SetHistoryVisitTimes(page, HistoryVisitTimes(page));
         }
+        if (auto transitions = item.find("visitTransitions"); transitions != item.end()) {
+            if (!transitions->is_array() || transitions->size() > kMaxHistoryVisitTimes * 9)
+                throw std::runtime_error("Invalid history visit transitions");
+            for (const auto& visit : *transitions) {
+                if (!visit.is_array() || visit.size() != 2 || !visit[0].is_number_integer() || !visit[1].is_number_integer()
+                    || (visit[0].is_number_unsigned() && visit[0].get<uint64_t>() > uint64_t(INT64_MAX))
+                    || (!visit[1].is_number_unsigned() && visit[1].get<int64_t>() < 0) || visit[1].get<uint64_t>() > UINT32_MAX)
+                    throw std::runtime_error("Invalid history visit transition");
+                page.visitTransitions.emplace_back(visit[0].get<int64_t>(), visit[1].get<uint32_t>());
+            }
+        }
+        if (item.contains("visitTimes") || item.contains("visitTransitions")) SetHistoryVisitTimes(page, HistoryVisitTimes(page));
         pages.push_back(std::move(page));
     }
     return pages;
@@ -540,20 +554,26 @@ static bool RecordVisit(Profile& profile, const PageRecord& page, int64_t micros
 {
     if (page.url.rfind("https://", 0) != 0 && page.url.rfind("http://", 0) != 0) return false;
     int visits = 0;
+    bool countKnown = false;
     std::vector<int64_t> times;
+    std::vector<std::pair<int64_t, uint32_t>> transitions;
     auto& history = profile.history;
     history.erase(std::remove_if(history.begin(), history.end(), [&](const auto& old) {
         if (old.url != page.url) return false;
-        visits = std::max(visits, std::max(1, old.visits));
+        visits = std::max(visits, HistoryVisitCount(old));
+        countKnown |= old.visitCountKnown;
         auto oldTimes = HistoryVisitTimes(old);
         times.insert(times.end(), oldTimes.begin(), oldTimes.end());
+        transitions.insert(transitions.end(), old.visitTransitions.begin(), old.visitTransitions.end());
         return true;
     }), history.end());
     times.push_back(micros);
     history.insert(history.begin(), page);
     auto& record = history.front();
+    record.visitTransitions = std::move(transitions);
     SetHistoryVisitTimes(record, std::move(times));
     record.visits = std::min(visits + 1, 1000000);
+    record.visitCountKnown = countKnown;
     record.bar = false;
     std::stable_sort(history.begin(), history.end(), [](const auto& a, const auto& b) { return a.visited > b.visited; });
     if (history.size() > 2000) history.resize(2000);
@@ -573,13 +593,22 @@ size_t Profile::ForgetVisitsSince(int64_t since)
     history.erase(std::remove_if(history.begin(), history.end(), [&](PageRecord& page) {
         auto times = HistoryVisitTimes(page);
         const size_t before = times.size();
+        int counted = 0;
+        for (auto time : times) if (time / 1000000 >= since) {
+            bool known = false, counts = false;
+            for (const auto& visit : page.visitTransitions) if (visit.first == time) {
+                known = true;
+                counts |= visit.second != 4 && visit.second != 7 && visit.second != 8 && visit.second != 9;
+            }
+            if (!known || counts) ++counted;
+        }
         times.erase(std::remove_if(times.begin(), times.end(), [&](int64_t time) { return time / 1000000 >= since; }), times.end());
         const int removed = static_cast<int>(before - times.size());
         if (!removed) return false; // Unknown legacy dates remain unknown.
         forgotten += removed;
         if (times.empty()) return true;
         SetHistoryVisitTimes(page, std::move(times));
-        page.visits = std::max(1, page.visits - removed);
+        page.visits = std::max(page.visitCountKnown ? 0 : 1, page.visits - counted);
         return false;
     }), history.end());
     std::stable_sort(history.begin(), history.end(), [](const PageRecord& a, const PageRecord& b) { return a.visited > b.visited; });
@@ -610,14 +639,21 @@ size_t Profile::ImportHistory(const std::vector<PageRecord>& pages, bool* change
             auto times = HistoryVisitTimes(existing);
             auto importedTimes = HistoryVisitTimes(page);
             times.insert(times.end(), importedTimes.begin(), importedTimes.end());
+            existing.visitTransitions.insert(existing.visitTransitions.end(), page.visitTransitions.begin(), page.visitTransitions.end());
             SetHistoryVisitTimes(existing, std::move(times));
-            existing.visits = std::clamp(std::max(existing.visits, page.visits), 0, 1000000);
+            if (existing.visitCountKnown || page.visitCountKnown) {
+                existing.visits = std::max(HistoryVisitCount(existing), HistoryVisitCount(page));
+                existing.visitCountKnown = true;
+            } else existing.visits = std::clamp(std::max(existing.visits, page.visits), 0, 1000000);
             if (existing.title.empty()) existing.title = page.title;
             updated |= before.visited != existing.visited || before.visits != existing.visits
-                || before.title != existing.title || before.earlier != existing.earlier || before.visitTimes != existing.visitTimes;
+                || before.title != existing.title || before.earlier != existing.earlier || before.visitTimes != existing.visitTimes
+                || before.visitTransitions != existing.visitTransitions || before.visitCountKnown != existing.visitCountKnown;
             continue;
         }
         PageRecord record{page.url, page.title, page.visited, false, std::clamp(page.visits, 0, 1000000)};
+        record.visitTransitions = page.visitTransitions;
+        record.visitCountKnown = page.visitCountKnown;
         SetHistoryVisitTimes(record, HistoryVisitTimes(page));
         known.emplace(record.url, history.size());
         addedURLs.insert(record.url);

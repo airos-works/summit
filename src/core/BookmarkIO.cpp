@@ -691,6 +691,10 @@ bool ReadVisitTimes(SQLite& database, bool firefox, const std::map<int64_t, size
     bool available = false;
     if (!database.Query(("SELECT 1 FROM sqlite_master WHERE type='table' AND name='" + table + "'").c_str(),
             [&](void*) { available = true; }, error)) return false;
+    bool transitionTypes = false;
+    if (available && firefox && !database.Query("PRAGMA table_info(moz_historyvisits)", [&](void* row) {
+            if (database.Text(row, 1) == "visit_type") transitionTypes = true;
+        }, error)) return false;
     for (auto [id, index] : pages) {
         auto times = HistoryVisitTimes(history[index]);
         if (available) {
@@ -708,6 +712,21 @@ bool ReadVisitTimes(SQLite& database, bool firefox, const std::map<int64_t, size
             if (!database.Query(recent.c_str(), read, error) || !database.Query(daily.c_str(), read, error)) return false;
         }
         SetHistoryVisitTimes(history[index], std::move(times));
+        if (transitionTypes && !history[index].visitTimes.empty()) {
+            std::string retained;
+            for (auto time : history[index].visitTimes) {
+                if (!retained.empty()) retained += ',';
+                retained += std::to_string(time);
+            }
+            // Select types for the actual retained rows, including the daily
+            // samples. Do not associate an arbitrary type with a MAX() group.
+            const auto query = "SELECT visit_date, visit_type FROM moz_historyvisits WHERE place_id=" + std::to_string(id)
+                + " AND visit_date IN (" + retained + ") AND visit_type BETWEEN 1 AND 9 GROUP BY visit_date, visit_type";
+            if (!database.Query(query.c_str(), [&](void* row) {
+                    history[index].visitTransitions.emplace_back(database.Int(row, 0), uint32_t(database.Int(row, 1)));
+                }, error)) return false;
+            SetHistoryVisitTimes(history[index], history[index].visitTimes);
+        }
     }
     return true;
 }
@@ -822,12 +841,13 @@ bool ReadFirefoxPlaces(const std::filesystem::path& places, const std::string& s
         history->clear();
         std::map<int64_t, size_t> pages;
         if (!database.Query("SELECT url, IFNULL(title, ''), visit_count, IFNULL(last_visit_date, 0), id FROM moz_places "
-                "WHERE visit_count > 0 AND hidden = 0 AND last_visit_date IS NOT NULL ORDER BY last_visit_date DESC LIMIT 2000",
+                "WHERE (visit_count > 0 OR last_visit_date > 0) AND hidden = 0 AND last_visit_date IS NOT NULL ORDER BY last_visit_date DESC LIMIT 2000",
                 [&](void* row) {
                     pages.emplace(database.Int(row, 4), history->size());
                     history->push_back({database.Text(row, 0), database.Text(row, 1), Seconds(database.Int(row, 3)), false,
                         static_cast<int>(std::clamp<int64_t>(database.Int(row, 2), 0, 1000000))});
                     history->back().visitTimes = {database.Int(row, 3)};
+                    history->back().visitCountKnown = true;
                 }, error)) {
             error = "The history in this places.sqlite could not be read: " + error;
             return false;
@@ -858,6 +878,7 @@ bool ReadChromeHistory(const std::filesystem::path& historyFile, const std::stri
                 history.push_back({database.Text(row, 0), database.Text(row, 1), seconds > 0 ? seconds : 0, false,
                     static_cast<int>(std::clamp<int64_t>(database.Int(row, 2), 0, 1000000))});
                 history.back().visitTimes = {micros};
+                history.back().visitCountKnown = true;
             }, error)) {
         error = "This History database could not be read: " + error;
         return false;

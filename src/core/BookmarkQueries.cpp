@@ -93,10 +93,11 @@ struct Clause {
     bool hasDomain = false;
     std::string terms, domain, uri;
     std::vector<std::string> tags;
+    std::vector<uint32_t> transitions;
     std::vector<std::pair<bool, std::string>> parents; // legacy numeric/symbolic folder, or GUID parent
     bool HasConditions(bool bookmarkQuery) const {
         return minVisits >= 0 || maxVisits >= 0 || HasBegin() || HasEnd() || hasDomain || !uri.empty()
-            || !terms.empty() || !tags.empty() || !parents.empty() || (onlyBookmarked && !bookmarkQuery);
+            || !terms.empty() || !tags.empty() || !transitions.empty() || !parents.empty() || (onlyBookmarked && !bookmarkQuery);
     }
 };
 
@@ -113,7 +114,7 @@ bool SimpleFolder(const Query& query)
     if (query.clauses.size() != 1) return false;
     const auto& clause = query.clauses.front();
     return clause.parents.size() == 1 && clause.terms.empty() && !clause.hasDomain && clause.uri.empty()
-        && clause.tags.empty() && !query.limit && query.type == 0 && !clause.HasBegin() && !clause.HasEnd();
+        && clause.tags.empty() && clause.transitions.empty() && !query.limit && query.type == 0 && !clause.HasBegin() && !clause.HasEnd();
 }
 
 Query Parse(std::string_view url)
@@ -166,6 +167,11 @@ Query Parse(std::string_view url)
         else if (name == "domain") { text(clause.domain); clause.hasDomain = true; }
         else if (name == "uri") text(clause.uri);
         else if (name == "terms") text(clause.terms);
+        else if (name == "transition") {
+            int64_t type = 0; number(type, 0, INT32_MAX);
+            if (q.error.empty() && std::find(clause.transitions.begin(), clause.transitions.end(), uint32_t(type)) == clause.transitions.end())
+                clause.transitions.push_back(uint32_t(type));
+        }
         else if (name == "parent" || name == "folder") {
             std::string parent; text(parent);
             if (parent.empty() || parent.size() > 128) q.error = "Invalid folder reference.";
@@ -207,7 +213,7 @@ Query Parse(std::string_view url)
         // filters have different SQL/container semantics from ordinary searches;
         // support only the verified complete time-range form for now.
         if (q.clauses.size() != 1 || c.minVisits >= 0 || c.maxVisits >= 0 || c.onlyBookmarked
-            || !c.terms.empty() || !c.uri.empty() || !c.tags.empty() || !c.parents.empty()
+            || !c.terms.empty() || !c.uri.empty() || !c.tags.empty() || !c.transitions.empty() || !c.parents.empty()
             || c.HasBegin() != c.HasEnd() || (c.hasDomain && !c.HasBegin()))
             q.error = "Site grouping currently supports an unfiltered history query or a complete visit-time range, optionally restricted by domain.";
         q.source = 0;
@@ -217,6 +223,8 @@ Query Parse(std::string_view url)
             q.error = "Date grouping with additional conditions is not yet supported.";
         q.source = 0;
     }
+    if (q.error.empty() && q.type == 6 && std::any_of(q.clauses.begin(), q.clauses.end(), [](const auto& c) { return !c.transitions.empty(); }))
+        q.error = "Tag grouping with transition conditions is not yet supported.";
     return q;
 }
 
@@ -288,7 +296,7 @@ BookmarkNode RootContents(const BookmarkNode& folder, const Query& query,
         const auto* page = visit(node);
         return !page ? int64_t(0) : page->visitTimes.empty() ? HistoryMicroseconds(page->visited) : page->visitTimes.front();
     };
-    auto count = [&](const BookmarkNode& node) { const auto* page = visit(node); return page ? std::max(1, page->visits) : 0; };
+    auto count = [&](const BookmarkNode& node) { const auto* page = visit(node); return page ? HistoryVisitCount(*page) : 0; };
     const auto mode = query.sort;
     if (mode) std::stable_sort(result.children.begin(), result.children.end(), [&](const auto& a, const auto& b) {
         auto compare = [](const auto& x, const auto& y) { return x < y ? -1 : y < x ? 1 : 0; };
@@ -533,13 +541,19 @@ BookmarkQueryResult QueryBookmarks(std::string_view url, const Bookmarks& bookma
             folderShortcut = nested.error.empty() && SimpleFolder(nested);
         }
         if ((query && q.excludeQueries && !folderShortcut) || (!query && q.excludeItems && q.type == 0)) return;
-        const int count = visit ? std::max(1, visit->visits) : 0;
+        const int count = visit ? HistoryVisitCount(*visit) : 0;
         const auto search = Lower(node.title + " " + node.url + " " + BookmarkTagsText(node.metadata.tags));
         for (const auto& filter : filters) {
             const auto& clause = *filter.condition;
             if (!simpleFolder && !filter.parents.empty() && !filter.allowed.count(node.id)) continue;
             if (clause.onlyBookmarked && !saved.count(node.url)) continue;
             if ((clause.minVisits >= 0 && count < clause.minVisits) || (clause.maxVisits >= 0 && count > clause.maxVisits)) continue;
+            // Places tests each transition independently at page level, just
+            // like its time predicate. The qualifying visits need not coincide.
+            if (std::any_of(clause.transitions.begin(), clause.transitions.end(), [&](uint32_t type) {
+                    return !visit || std::none_of(visit->visitTransitions.begin(), visit->visitTransitions.end(),
+                        [&](const auto& sample) { return sample.second == type; });
+                })) continue;
             if (clause.HasBegin() || clause.HasEnd()) {
                 if (!visit) continue;
                 const auto times = HistoryVisitTimes(*visit);
@@ -596,7 +610,7 @@ BookmarkQueryResult QueryBookmarks(std::string_view url, const Bookmarks& bookma
     const bool historyOrder = groupedHistory || q.type == 1;
     auto date = [&](const Entry& e) { return q.type == 1 ? e.visitTime : e.visit ? (e.visit->visitTimes.empty()
         ? HistoryMicroseconds(e.visit->visited) : e.visit->visitTimes.front()) : int64_t(0); };
-    auto count = [](const Entry& e) { return e.visit ? std::max(1, e.visit->visits) : 0; };
+    auto count = [](const Entry& e) { return e.visit ? HistoryVisitCount(*e.visit) : 0; };
     auto sort = [&](int64_t mode) {
         if (!mode) return;
         // History visit rows have null tag columns unless queryType=1 and

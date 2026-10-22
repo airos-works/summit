@@ -9,6 +9,7 @@ constexpr size_t kMaxHistoryVisitTimes = kRecentHistoryVisits + kMaxEarlierVisit
 int64_t HistoryNowMicroseconds();
 // Zero means an unknown/unrepresentable legacy timestamp.
 int64_t HistoryMicroseconds(int64_t seconds);
+int HistoryVisitCount(const PageRecord&);
 std::vector<int64_t> HistoryVisitTimes(const PageRecord&);
 void SetHistoryVisitTimes(PageRecord&, std::vector<int64_t>);
 }

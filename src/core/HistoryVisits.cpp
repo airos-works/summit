@@ -14,6 +14,10 @@ int64_t HistoryMicroseconds(int64_t seconds)
 {
     return seconds > 0 && seconds <= INT64_MAX / 1000000 ? seconds * 1000000 : 0;
 }
+int HistoryVisitCount(const PageRecord& page)
+{
+    return std::clamp(page.visits, page.visitCountKnown ? 0 : 1, 1000000);
+}
 class LocalDays {
 public:
     int64_t operator()(int64_t micros)
@@ -65,6 +69,15 @@ void SetHistoryVisitTimes(PageRecord& page, std::vector<int64_t> times)
 {
     Normalize(times);
     page.visitTimes = std::move(times);
+    auto& transitions = page.visitTransitions;
+    transitions.erase(std::remove_if(transitions.begin(), transitions.end(), [&](const auto& visit) {
+        return visit.second < 1 || visit.second > 9
+            || !std::binary_search(page.visitTimes.begin(), page.visitTimes.end(), visit.first, std::greater<int64_t>());
+    }), transitions.end());
+    std::sort(transitions.begin(), transitions.end(), [](const auto& a, const auto& b) {
+        return a.first != b.first ? a.first > b.first : a.second < b.second;
+    });
+    transitions.erase(std::unique(transitions.begin(), transitions.end()), transitions.end());
     page.earlier.clear();
     if (page.visitTimes.empty()) { page.visited = 0; return; }
     page.visited = page.visitTimes.front() / 1000000;

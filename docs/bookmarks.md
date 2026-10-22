@@ -279,6 +279,7 @@ Examples supported by this implementation:
 | `place:type=3&sort=4` | Calendar folders containing their matching history pages, newest visits first |
 | `place:type=1&sort=4` | One row per retained visit, newest first, with a visible timestamp |
 | `place:type=8&sort=1` | The imported profile’s bookmark roots, with sorted descendants |
+| `place:transition=7&sort=4` | Pages with a retained Firefox download visit, newest page visits first |
 | `place:type=5&sort=4` | Calendar folders containing host folders, with pages sorted by title |
 | `place:parent=toolbar_____` | The referenced toolbar's direct folder tree |
 | `place:folder=10` | A legacy numeric reference to folder 10 in the imported database |
@@ -354,6 +355,50 @@ visits and preserves earlier visits on the same day, when available. Saving
 and reopening the profile preserves the remaining timestamps and daily History
 entries.
 
+### Imported visit transitions
+
+Ordinary page searches and individual-visit queries accept `transition=` using
+Firefox's type numbers: link (1), typed address (2), bookmark (3), embed (4),
+permanent/temporary redirect (5/6), download (7), framed link (8) and reload (9).
+The importer retains `moz_historyvisits.visit_type` alongside each retained
+microsecond timestamp. Older databases without that column, older profiles and
+visits without a recorded type remain unknown; they do not become link visits.
+
+Repeated filters require every requested type somewhere in the page's retained
+history. For example, `transition=1&transition=7` selects pages with both a link
+visit and a download visit. A time range may match a different visit to the same
+page. Individual-visit results then show every retained visit to the selected
+page, including visits with other types or outside the range. Transition filters
+also combine with text, domain, URI, bookmark/folder restrictions and legacy OR
+groups. Overlapping groups still return each page or retained timestamp once.
+
+Firefox download and reload visits can have a real `visit_count` of zero. Those
+visible pages are now imported when they have a last-visit timestamp. Profile
+saves distinguish a known zero from an older unknown count, which retains its
+existing one-visit fallback. Count filters and ordering use the known value.
+Summit's aggregate navigation counter retains its existing behavior.
+
+Reimporting known types for an existing timestamp updates and saves history,
+notifies windows and refreshes open queries without adding another URL or visit.
+Repeated imports are idempotent. Sources reporting different types at the same
+timestamp retain each distinct pair; Firefox visit IDs are not retained.
+Discarding a timestamp through retention or history deletion also discards its
+types. Removing known non-counting Firefox visits does not subtract an unrelated
+counted visit. The existing 2,000-page and recent/daily timestamp bounds still
+apply; hidden pages remain excluded from history imports.
+
+This supports **retained Firefox transition data**. Classification of new Summit
+navigations/downloads and mapping Chrome's different transition encoding remain
+unfinished. Grouped tag, site, date and virtual-root queries with transition
+conditions show an explanation. Invalid numeric filters also show an explanation
+instead of reproducing Firefox's fallback to a broader query.
+
+The [transition oracle fixture](../tests/fixtures/bookmarks/transition-query-firefox158.json)
+records 99 queries from Firefox 158.0.1. Comparisons cover 69 valid current queries;
+15 invalid-value and six grouped cases are checked as explanations. Nine cases
+using removed `onlyBookmarked` or legacy `OR` syntax are recorded separately;
+Summit's existing legacy semantics are tested independently.
+
 ### Modification-time ordering
 
 `place:queryType=1&sort=14&maxResults=10` lists the ten most recently modified
@@ -392,8 +437,8 @@ reimporting the saved query.
 Older Firefox saved searches can separate condition groups with `&OR&`, for
 example `place:domain=example.com&OR&tag=work&sort=8&maxResults=10`. Conditions
 within each group must all match; a result can match either group. Domain,
-text, URI, tags and tag exclusion, visit bounds, times and folder references
-belong to their own group. Sorting, result grouping, query type, exclusions
+text, URI, tags and tag exclusion, visit bounds, times, transitions and folder
+references belong to their own group. Sorting, result grouping, query type, exclusions
 and the result limit apply to the combined result, wherever those options
 appear in the URL. Repeating an option keeps its last value.
 
@@ -417,9 +462,10 @@ and [combined query builder](https://hg.mozilla.org/releases/mozilla-release/raw
 which support saved multi-query URLs from older profiles.
 
 **This does not complete Firefox smart-folder compatibility or #110.** Folder
-references and visit-time ranges are implemented for retained data; visit transitions,
-annotations, frecency sorts, other groupings and more complex grouped filters remain
-unsupported. Such queries stay saved and show an explicit explanation, with no
+references, visit-time ranges and imported transitions are implemented for retained
+data. Classification of new navigations remains unfinished. Annotations, frecency
+sorts, other groupings and more complex grouped filters remain unsupported.
+Unsupported queries stay saved and show an explicit explanation, with no
 broader substitute results. Query history is limited to Summit's retained 2,000
 pages; Firefox frecency is not stored. Text matching uses
 ASCII case folding, and tag names match exactly, rather than Firefox's full
@@ -606,6 +652,25 @@ the default root view, recursive order/filtering, limits, query links and error
 cases; the non-default preference is recorded as unavailable import context.
 
 ## Testing
+
+The imported-transition follow-up passes **233 transition-query checks** on the
+host and native airOS, including real SQLite imports, zero counts, metadata-only
+reimports, profile restart, daily sampling, retention and history deletion.
+The Firefox fixture records **99 cases**: 69 current-query comparisons, 15 invalid
+values, six unsupported grouped cases and nine separately recorded legacy cases.
+All **24 host suites** and **11 bookmark/query sanitizer suites** pass. Native
+coverage also retains all earlier query suites and **106 UI checks**.
+
+The full browser passes **260 checks and 265 native action assertions**.
+It verifies live refresh when a reimport adds only transition metadata, retained
+zero counts, unknown provenance, conjunctive and legacy-OR filters, page-level
+time membership, visit labels, native actions, export/reimport and history
+clearing. The rendered page was visually inspected. All **718 frozen hashes**
+remain unchanged, all four engine images loaded, and normal shutdown leaves no
+helpers or debugger events across a complete log interval. Temporary RAMFS
+cleanup follows an all-team scan. Earlier test-setup and compatibility failures
+are recorded separately in the evidence.
+Evidence: [`bookmark-transition-queries-native-2026-10-22.json`](bookmark-transition-queries-native-2026-10-22.json).
 
 The virtual-root follow-up passes **825 root-query checks** on the host and
 native airOS. The oracle records **98 Firefox cases** across both mobile-root
