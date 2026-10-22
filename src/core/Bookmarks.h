@@ -69,7 +69,8 @@ constexpr size_t kMaxBookmarkSeparators = 5000;
 constexpr size_t kMaxBookmarkDepth = 32;
 constexpr size_t kBookmarkEnd = std::numeric_limits<size_t>::max();
 
-// Addresses Summit keeps as bookmarks: http, https, file and javascript.
+// Addresses Summit keeps as bookmarks: http, https, file, javascript and
+// saved place: searches (opened by the bookmark UI, not by the web engine).
 bool IsBookmarkableURL(const std::string& url);
 bool IsBookmarkletURL(const std::string& url);
 // Editors add https to a schemeless address, preserving bookmarklet source.
@@ -89,7 +90,7 @@ struct BookmarkImportResult {
     size_t separatorsAdded = 0;
     size_t updated = 0;     // existing nodes enriched with imported metadata
     size_t duplicates = 0;   // already bookmarked (or twice in the import)
-    size_t unsupported = 0;  // addresses Summit does not keep (place:, data:...)
+    size_t unsupported = 0;  // addresses Summit does not keep (data:...)
     size_t overLimit = 0;    // past a bookmark, folder or separator limit
     int64_t folder = 0;      // the "Imported from …" folder, 0 when nothing was added
     bool Changed() const { return added || foldersAdded || separatorsAdded || updated; }

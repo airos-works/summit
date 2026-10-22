@@ -174,6 +174,7 @@ private:
         float progress = 0;
         // For summit:history and summit:bookmarks, the page revision shown.
         uint64 pageRevision = 0;
+        int64 bookmarkQuery = 0;
         // The site whose remembered zoom the page has (ZoomKey()).
         std::string zoomKey;
 #if SUMMIT_MODERN_WEBKIT
@@ -639,10 +640,12 @@ private:
     // Built-in pages (summit:home, summit:history, summit:bookmarks) are
     // files; this gives the address to load for any address.
     std::string LoadableURL(const std::string& url);
-    std::filesystem::path InternalPagePath(const std::string& url) const;
-    bool WriteInternalPage(const std::string& url);
+    std::filesystem::path InternalPagePath(const std::string& url, int64 bookmarkQuery = 0) const;
+    int64 BookmarkQueryForURL(const BString& url) const;
+    bool WriteInternalPage(const std::string& url, int64 bookmarkQuery = 0);
+    void ShowBookmarkQuery(int64 id);
     void ShowInternalPage(const std::string& url);
-    void RefreshInternalPage(Tab& tab, bool force = false);
+    void RefreshInternalPage(Tab& tab, bool force = false, bool navigate = false);
     void PagesChanged();
     void BookmarksChanged();
     void RefreshBookmarks();

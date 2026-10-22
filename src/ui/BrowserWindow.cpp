@@ -69,6 +69,7 @@
 #include "PrintJob.h"
 #include "WebApps.h"
 #include "core/Bookmarks.h"
+#include "core/BookmarkQueries.h"
 #include "CertificateInfoWindow.h"
 #include "ReaderMode.h"
 #include "PageTranslation.h"
@@ -533,15 +534,6 @@ static std::string MenuLabel(const PageRecord& page)
     size_t cut = 70;
     while (cut && (static_cast<unsigned char>(label[cut]) & 0xC0) == 0x80) --cut;
     return label.substr(0, cut) + "…";
-}
-// The bookmarks bar and the menus get copies of the bookmarks.
-static BookmarkButton ButtonFor(const BookmarkNode& node)
-{
-    BookmarkButton button{node.id, node.url, node.title, nullptr, node.folder, {}};
-    button.separator = node.separator;
-    button.children.reserve(node.children.size());
-    for (const auto& child : node.children) button.children.push_back(ButtonFor(child));
-    return button;
 }
 // What the Bookmarks page's links must carry: random, made once per run and
 // shared by every window (they all write the same page).
@@ -1188,6 +1180,7 @@ std::string BrowserWindow::StoredURL(const BString& url) const
     if (fPrivate && matches(FileURL((fShared->Path().parent_path() / "Pages" / "private.html").string()))) return "summit:home";
     for (const char* page : {kHistoryPage, kBookmarksPage})
         if (matches(FileURL(InternalPagePath(page).string()))) return page;
+    if (BookmarkQueryForURL(url)) return kBookmarksPage;
     return value;
 }
 #if SUMMIT_MODERN_WEBKIT
@@ -1833,6 +1826,15 @@ void BrowserWindow::RunBookmarklet(const std::string& url)
 void BrowserWindow::Navigate(const std::string& text)
 {
     const auto keyword = fShared->Read([&](const Profile& profile) { return profile.bookmarks.ResolveKeyword(text); });
+    const auto query = keyword ? keyword->url : Trim(text);
+    if (IsBookmarkQueryURL(query) && (!keyword || keyword->error.empty())) {
+        const auto id = fShared->Read([&](const Profile& profile) {
+            const auto* node = profile.bookmarks.FindURL(query); return node ? node->id : int64_t(0);
+        });
+        if (id) ShowBookmarkQuery(id);
+        else ShowError("Save this smart folder in Bookmarks before opening it.");
+        return;
+    }
     auto address = keyword ? Address{keyword->url, keyword->error, false} : ResolveAddress(text);
     if (!address.error.empty()) { ShowError(address.error); return; }
     if (keyword && IsBookmarkletURL(address.url)) { RunBookmarklet(address.url); return; }
@@ -2725,7 +2727,11 @@ void BrowserWindow::ProfileChanged(const BMessage& message)
         RefreshChrome();
         RefreshBookmarks();
     }
-    if (changes & SharedProfile::kHistoryChanged) PagesChanged();
+    if (changes & (SharedProfile::kHistoryChanged | SharedProfile::kHistoryCleared)) {
+        PagesChanged();
+        RefreshBookmarks();
+        if (auto* tab = ActiveTab(); tab && tab->url == kBookmarksPage && tab->bookmarkQuery) RefreshInternalPage(*tab);
+    }
     if (changes & SharedProfile::kHistoryCleared) {
         // Recently closed tabs are history too.
         fClosedTabs.clear();
@@ -2939,11 +2945,22 @@ void BrowserWindow::ShowZoom()
     if (show && fZoomButton->IsHidden(fZoomButton)) fZoomButton->Show();
     else if (!show && !fZoomButton->IsHidden(fZoomButton)) fZoomButton->Hide();
 }
-std::filesystem::path BrowserWindow::InternalPagePath(const std::string& url) const
+int64 BrowserWindow::BookmarkQueryForURL(const BString& url) const
 {
-    return fShared->Path().parent_path() / "Pages" / (url == kHistoryPage ? "history.html" : "bookmarks.html");
+    auto prefix = FileURL((fShared->Path().parent_path() / "Pages" / "bookmarks-query-").string());
+    const std::string value = url.String();
+    if (value.rfind(prefix, 0) != 0 && prefix.rfind("file:///", 0) == 0) prefix = "file:" + prefix.substr(7);
+    if (value.rfind(prefix, 0) != 0 || value.size() < prefix.size() + 6 || !value.ends_with(".html")) return 0;
+    const auto number = value.substr(prefix.size(), value.size() - prefix.size() - 5);
+    if (number.empty() || number.size() > 18 || number.find_first_not_of("0123456789") != std::string::npos) return 0;
+    return std::stoll(number);
 }
-bool BrowserWindow::WriteInternalPage(const std::string& url)
+std::filesystem::path BrowserWindow::InternalPagePath(const std::string& url, int64 bookmarkQuery) const
+{
+    return fShared->Path().parent_path() / "Pages" / (url == kHistoryPage ? "history.html"
+        : bookmarkQuery ? "bookmarks-query-" + std::to_string(bookmarkQuery) + ".html" : "bookmarks.html");
+}
+bool BrowserWindow::WriteInternalPage(const std::string& url, int64 bookmarkQuery)
 {
     const auto icons = [this](const std::string& page) { return fFavicons->DataURL(page); };
     std::string html;
@@ -2951,10 +2968,11 @@ bool BrowserWindow::WriteInternalPage(const std::string& url)
         const auto pages = fShared->Read([](const Profile& profile) { return profile.history; });
         html = RenderHistoryPage(pages, std::time(nullptr), icons);
     } else {
-        const auto bookmarks = fShared->Read([](const Profile& profile) { return profile.bookmarks; });
-        html = RenderBookmarksPage(bookmarks, icons, BookmarkPageSecret());
+        const auto snapshot = fShared->Read([](const Profile& profile) { return std::pair{profile.bookmarks, profile.history}; });
+        html = bookmarkQuery ? RenderBookmarkQueryPage(snapshot.first, snapshot.second, bookmarkQuery, icons, BookmarkPageSecret())
+            : RenderBookmarksPage(snapshot.first, icons, BookmarkPageSecret());
     }
-    const auto path = InternalPagePath(url);
+    const auto path = InternalPagePath(url, bookmarkQuery);
     std::error_code error;
     std::filesystem::create_directories(path.parent_path(), error);
     const auto temporary = path.string() + ".tmp";
@@ -3005,16 +3023,25 @@ void BrowserWindow::ShowInternalPage(const std::string& url)
     }
     CreateTab(url);
 }
-void BrowserWindow::RefreshInternalPage(Tab& tab, bool force)
+void BrowserWindow::ShowBookmarkQuery(int64 id)
+{
+    ShowInternalPage(kBookmarksPage);
+    if (auto* tab = ActiveTab(); tab && tab->url == kBookmarksPage) {
+        tab->bookmarkQuery = id;
+        RefreshInternalPage(*tab, true, true);
+    }
+}
+void BrowserWindow::RefreshInternalPage(Tab& tab, bool force, bool navigate)
 {
     if (tab.url != kHistoryPage && tab.url != kBookmarksPage) return;
     if (!force && tab.pageRevision == fPagesRevision) return;
 #if SUMMIT_MODERN_WEBKIT
     if (!PrepareTabNavigation(tab)) return;
 #endif
-    if (!WriteInternalPage(tab.url)) return;
+    if (!WriteInternalPage(tab.url, tab.bookmarkQuery)) return;
     tab.pageRevision = fPagesRevision;
-    tab.view->Reload();
+    if (navigate) tab.view->LoadURL(FileURL(InternalPagePath(tab.url, tab.bookmarkQuery).string()).c_str());
+    else tab.view->Reload();
 }
 void BrowserWindow::PagesChanged()
 {
@@ -3031,7 +3058,7 @@ void BrowserWindow::BookmarksChanged()
 void BrowserWindow::RefreshBookmarks()
 {
     auto bar = std::make_shared<BookmarkButton>(fShared->Read([](const Profile& profile) {
-        return ButtonFor(profile.bookmarks.Bar());
+        return BookmarkButtons(profile.bookmarks, profile.history, profile.bookmarks.Bar());
     }));
     // Icons for the bar's own buttons; its folders' menus show none.
     for (auto& button : bar->children)
@@ -3066,7 +3093,8 @@ void BrowserWindow::RebuildDynamicMenus()
     auto roots = std::make_shared<BookmarkButton>();
     fShared->Read([&](const Profile& profile) {
         history.assign(profile.history.begin(), profile.history.begin() + std::min<size_t>(profile.history.size(), 15));
-        roots->children = {ButtonFor(profile.bookmarks.Bar()), ButtonFor(profile.bookmarks.Other())};
+        roots->children = {BookmarkButtons(profile.bookmarks, profile.history, profile.bookmarks.Bar()),
+            BookmarkButtons(profile.bookmarks, profile.history, profile.bookmarks.Other())};
         bookmarked = tab && profile.bookmarks.Contains(tab->url);
         return 0;
     });
@@ -3306,6 +3334,7 @@ bool BrowserWindow::BookmarkPageRequest(Tab& tab, const std::string& source, con
     if (action == "import") ShowBookmarkImportWindow(fShared, Frame());
     else if (action == "export") ExportBookmarks();
     else if (action == "edit") OpenBookmarkEditor(link->id);
+    else if (action == "query") { tab.bookmarkQuery = link->id; RefreshInternalPage(tab, true, true); }
     else if (action == "delete") DeleteBookmark(link->id, true);
     else if (action == "move") {
         fShared->Change([&](Profile& profile) -> uint32 {
@@ -3331,7 +3360,7 @@ bool BrowserWindow::BookmarkPageRequest(Tab& tab, const std::string& source, con
             const auto* node = bookmarks.Find(link->id);
             if (!node || !bookmarks.Parent(link->id)) return 0;
             if (!node->folder && !IsBookmarkableURL(address)) {
-                status = "Not saved: bookmarks keep web addresses (https://…), files (file://…) and bookmarklets (javascript:…).";
+                status = "Not saved: bookmarks keep web addresses (https://…), files (file://…), bookmarklets (javascript:…) and smart folders (place:…).";
                 return 0;
             }
             changed = bookmarks.Edit(link->id, title.empty() ? (node->folder ? "Untitled Folder" : address) : title, address);
@@ -3820,7 +3849,7 @@ void BrowserWindow::MessageReceived(BMessage* message)
             break;
         }
 #endif
-        case kShowBookmarks: ShowInternalPage(kBookmarksPage); break;
+        case kShowBookmarks: ShowBookmarkQuery(0); break;
         case kShowHistory: ShowInternalPage(kHistoryPage); break;
         case kShowExtensions: be_app->PostMessage(kShowExtensions); break;
 #if SUMMIT_MODERN_WEBKIT
@@ -4079,6 +4108,7 @@ void BrowserWindow::MessageReceived(BMessage* message)
         case kOpenBookmark: {
             const char* url = nullptr;
             if (message->FindString("url", &url) != B_OK || !url) break;
+            if (IsBookmarkQueryURL(url)) { Navigate(url); break; }
             if (IsBookmarkletURL(url)) {
                 // This message is also used by history and tab-strip drops.
                 // Only a deliberately saved bookmark may run a script.
@@ -4188,9 +4218,16 @@ void BrowserWindow::MessageReceived(BMessage* message)
             const int64 id = message->GetInt64("id", 0);
             const auto urls = fShared->Read([&](const Profile& profile) {
                 std::vector<std::string> urls;
-                if (const auto* folder = profile.bookmarks.Find(id))
-                    for (const auto& child : folder->children)
-                        if (!child.folder && !child.separator && !IsBookmarkletURL(child.url) && urls.size() < 50) urls.push_back(child.url);
+                if (const auto* folder = profile.bookmarks.Find(id)) {
+                    const auto children = IsBookmarkQueryURL(folder->url)
+                        ? QueryBookmarks(folder->url, profile.bookmarks, profile.history).items : folder->children;
+                    for (const auto& child : children)
+                        if (!child.folder && !child.separator && !IsBookmarkletURL(child.url) && !IsBookmarkQueryURL(child.url) && urls.size() < 50) urls.push_back(child.url);
+                } else if (!id) {
+                    const char* url = nullptr;
+                    for (int32 i = 0; i < 50 && message->FindString("url", i, &url) == B_OK; ++i)
+                        if (IsBookmarkableURL(url) && !IsBookmarkletURL(url) && !IsBookmarkQueryURL(url)) urls.push_back(url);
+                }
                 return urls;
             });
             for (size_t i = 0; i < urls.size(); ++i) CreateTab(urls[i], i == 0);
@@ -5215,6 +5252,7 @@ void BrowserWindow::WebKitStateChanged(const BMessage& message)
     if (message.FindString("url", &value) == B_OK && value && *value) {
         tab->readerActive = !tab->readerURL.empty() && tab->readerURL == value;
         tab->url = StoredURL(value);
+        tab->bookmarkQuery = BookmarkQueryForURL(value);
         ApplySiteZoom(*tab);
     }
     if (message.FindString("title", &value) == B_OK && value) {
@@ -5676,7 +5714,7 @@ void BrowserWindow::LoadNegotiating(const BString& url, BWebView* view)
 }
 void BrowserWindow::LoadCommitted(const BString& url, BWebView* view)
 {
-    if (auto* tab = FindTab(view)) tab->url = StoredURL(url);
+    if (auto* tab = FindTab(view)) { tab->url = StoredURL(url); tab->bookmarkQuery = BookmarkQueryForURL(url); }
     if (view == CurrentWebView() && !fAddress->TextView()->IsFocus())
         fAddress->SetText(DisplayURL(StoredURL(url)).c_str());
 }
@@ -5704,6 +5742,7 @@ void BrowserWindow::LoadFinished(const BString& url, BWebView* view)
         // BWebWindow calls this at DOM readiness, before images and other
         // resources finish. Completion arrives through LoadProgress(100).
         tab->url = StoredURL(url);
+        tab->bookmarkQuery = BookmarkQueryForURL(url);
         const PageRecord visit { tab->url, tab->title };
         fShared->Change([&](Profile& profile) -> uint32 {
             return profile.Visit(visit) ? SharedProfile::kHistoryChanged : 0;

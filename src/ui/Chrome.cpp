@@ -5,6 +5,7 @@
 #include <Cursor.h>
 #include "core/Address.h"
 #include "core/Bookmarks.h"
+#include "core/BookmarkQueries.h"
 #include <Window.h>
 #include <Message.h>
 #include <Bitmap.h>
@@ -1088,9 +1089,47 @@ BMenuItem* NewPageMenuItem(const char* label, BMessage* message, const BBitmap* 
     return new PageMenuItem(label, message, icon ? std::make_shared<const BBitmap>(icon) : nullptr);
 }
 
+BookmarkButton BookmarkButtons(const Bookmarks& bookmarks, const std::vector<PageRecord>& history, const BookmarkNode& node)
+{
+    struct Snapshot {
+        Bookmarks bookmarks;
+        std::vector<PageRecord> history;
+        BookmarkButton Button(const BookmarkNode& node, std::vector<std::string> ancestors,
+            const std::shared_ptr<const Snapshot>& owner) const
+        {
+            BookmarkButton button{node.id, node.url, node.title, nullptr, node.folder, {}};
+            button.separator = node.separator;
+            if (IsBookmarkQueryURL(node.url)) {
+                button.folder = true;
+                button.queryContents = [owner, node, ancestors = std::move(ancestors)] {
+                    BookmarkButton expanded{node.id, node.url, node.title, nullptr, true, {}};
+                    if (ancestors.size() >= 8 || std::find(ancestors.begin(), ancestors.end(), node.url) != ancestors.end()) {
+                        expanded.emptyMessage = "This smart folder contains a circular query.";
+                        return expanded;
+                    }
+                    auto path = ancestors; path.push_back(node.url);
+                    auto result = QueryBookmarks(node.url, owner->bookmarks, owner->history);
+                    expanded.emptyMessage = result.error;
+                    for (const auto& item : result.items) expanded.children.push_back(owner->Button(item, path, owner));
+                    return expanded;
+                };
+            } else for (const auto& child : node.children) button.children.push_back(Button(child, ancestors, owner));
+            return button;
+        }
+    };
+    const auto snapshot = std::make_shared<const Snapshot>(Snapshot{bookmarks, history});
+    return snapshot->Button(node, {}, snapshot);
+}
+
 void AddBookmarkItems(BMenu* menu, std::shared_ptr<const BookmarkButton> root, const BookmarkButton& folder,
     const BMessenger& target, size_t limit)
 {
+    if (folder.queryContents) {
+        // Keep the expansion alive for its lazy submenus too.
+        auto expanded = std::make_shared<const BookmarkButton>(folder.queryContents());
+        AddBookmarkItems(menu, expanded, *expanded, target, limit);
+        return;
+    }
     size_t shown = 0;
     bool bookmarks = false;
     for (const auto& child : folder.children) {
@@ -1116,7 +1155,7 @@ void AddBookmarkItems(BMenu* menu, std::shared_ptr<const BookmarkButton> root, c
         bookmarks = bookmarks || !IsBookmarkletURL(child.url);
     }
     if (folder.children.empty()) {
-        auto* empty = new BMenuItem("(Empty)", nullptr);
+        auto* empty = new BMenuItem(folder.emptyMessage.empty() ? "(Empty)" : folder.emptyMessage.c_str(), nullptr);
         empty->SetEnabled(false);
         menu->AddItem(empty);
     }
@@ -1124,6 +1163,9 @@ void AddBookmarkItems(BMenu* menu, std::shared_ptr<const BookmarkButton> root, c
         menu->AddSeparatorItem();
         auto* openAll = new BMessage(kOpenBookmarkFolder);
         openAll->AddInt64("id", folder.id);
+        if (!folder.id)
+            for (const auto& child : folder.children)
+                if (!child.folder && !child.separator && !IsBookmarkletURL(child.url)) openAll->AddString("url", child.url.c_str());
         auto* item = new BMenuItem("Open All in Tabs", openAll);
         item->SetTarget(target);
         menu->AddItem(item);
@@ -1353,7 +1395,7 @@ int32 BookmarksBar::DropIndex(BPoint where, bool& into) const
         const BRect rect = fRects[i];
         if (where.x > rect.right) continue;
         // The middle half of a folder drops into it.
-        if (items[i].folder && where.x > rect.left + rect.Width() / 4 && where.x < rect.right - rect.Width() / 4) {
+        if (items[i].folder && !items[i].queryContents && where.x > rect.left + rect.Width() / 4 && where.x < rect.right - rect.Width() / 4) {
             into = true;
             return int32(i);
         }
@@ -1464,6 +1506,13 @@ void BookmarksBar::ShowContextMenu(int32 index, BPoint where)
         menu->AddItem(new BMenuItem("Show All Bookmarks", new BMessage(kShowBookmarks)));
     } else if (Items()[index].separator) {
         menu->AddItem(new BMenuItem("Delete Separator", NodeMessage(kDeleteBookmarkNode, "id", Items()[index].id)));
+    } else if (Items()[index].queryContents) {
+        const auto& query = Items()[index];
+        menu->AddItem(new BMenuItem("Show Smart Folder", BookmarkMessage(kOpenBookmark, query.url)));
+        menu->AddItem(new BMenuItem("Open All in Tabs", NodeMessage(kOpenBookmarkFolder, "id", query.id)));
+        menu->AddSeparatorItem();
+        menu->AddItem(new BMenuItem("Edit Smart Folder…", NodeMessage(kEditBookmark, "id", query.id)));
+        menu->AddItem(new BMenuItem("Delete Smart Folder", NodeMessage(kDeleteBookmarkNode, "id", query.id)));
     } else if (Items()[index].folder) {
         const int64 id = Items()[index].id;
         menu->AddItem(new BMenuItem("Open All in Tabs", NodeMessage(kOpenBookmarkFolder, "id", id)));

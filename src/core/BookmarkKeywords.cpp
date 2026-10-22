@@ -1,4 +1,5 @@
 #include "Bookmarks.h"
+#include "BookmarkQueries.h"
 #include "Address.h"
 #include <algorithm>
 #include <cerrno>
@@ -174,7 +175,8 @@ std::optional<BookmarkNavigation> Bookmarks::ResolveKeyword(std::string_view inp
     } else result.postData = keyword->postData;
     // Only a resolved, saved keyword can enter the bookmarklet route; raw
     // javascript typed/pasted into the address field is still rejected.
-    const auto address = IsBookmarkletURL(result.url) ? Address{result.url, {}, false} : ResolveAddress(result.url);
+    const auto address = IsBookmarkletURL(result.url) || IsBookmarkQueryURL(result.url)
+        ? Address{result.url, {}, false} : ResolveAddress(result.url);
     if (!address.error.empty() || !IsBookmarkableURL(result.url)
         || result.postData.size() > 1024 * 1024 || result.postData.find('\0') != std::string::npos)
         result.error = "The bookmark shortcut produces an invalid or oversized request.";

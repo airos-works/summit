@@ -18,6 +18,7 @@
 #include <filesystem>
 #include <fstream>
 #include <memory>
+#include <algorithm>
 
 using namespace summit;
 namespace {
@@ -192,6 +193,42 @@ public:
         AddBookmarkItems(&scriptMenu, scripts, *scripts, BMessenger(this));
         Check(scriptMenu.CountItems() == 1 && scriptMenu.ItemAt(0)->Message()
             && scriptMenu.ItemAt(0)->Message()->what == kOpenBookmark, "bookmarklet-only folder has activation but no Open All");
+
+        Bookmarks queries;
+        const auto popular = queries.Add({"place:sort=8&maxResults=2", "Most visited"}, kBookmarksBarFolder);
+        std::vector<PageRecord> visits{{"https://one.test/", "One", 100, false, 1}, {"https://two.test/", "Two", 200, false, 8}};
+        auto queryButtons = std::make_shared<const BookmarkButton>(BookmarkButtons(queries, visits, queries.Bar()));
+        Check(queryButtons->children[0].folder && bool(queryButtons->children[0].queryContents)
+            && queryButtons->children[0].children.empty(), "smart folder keeps a lazy query in the native toolbar snapshot");
+        BMenu popularMenu("Popular");
+        AddBookmarkItems(&popularMenu, queryButtons, queryButtons->children[0], BMessenger(this));
+        Check(popularMenu.CountItems() == 4 && std::string(popularMenu.ItemAt(0)->Label()) == "Two",
+            "opening the native query menu evaluates visit order and includes Open All");
+        Check(std::string(popularMenu.ItemAt(0)->Message()->GetString("url", "")) == "https://two.test/",
+            "native query result carries the page address");
+        Check(popularMenu.ItemAt(3)->Message()->GetInt64("id", 0) == popular,
+            "Open All identifies the saved query for evaluation at activation");
+        visits[0].visits = 30;
+        auto updatedQueries = std::make_shared<const BookmarkButton>(BookmarkButtons(queries, visits, queries.Bar()));
+        BMenu updatedMenu("Updated"), originalMenu("Original");
+        AddBookmarkItems(&updatedMenu, updatedQueries, updatedQueries->children[0], BMessenger(this));
+        AddBookmarkItems(&originalMenu, queryButtons, queryButtons->children[0], BMessenger(this));
+        Check(std::string(updatedMenu.ItemAt(0)->Label()) == "One" && std::string(originalMenu.ItemAt(0)->Label()) == "Two",
+            "updated history changes the next snapshot without mutating an open menu");
+        const auto bad = queries.Add({"place:parent=unknown", "Folder shortcut"}, kBookmarksBarFolder);
+        auto badButtons = std::make_shared<const BookmarkButton>(BookmarkButtons(queries, visits, *queries.Find(bad)));
+        BMenu badMenu("Unsupported");
+        AddBookmarkItems(&badMenu, badButtons, *badButtons, BMessenger(this));
+        Check(badMenu.CountItems() == 1 && !badMenu.ItemAt(0)->IsEnabled()
+            && std::string(badMenu.ItemAt(0)->Label()).find("does not yet support: parent") != std::string::npos,
+            "unsupported query is retained as a disabled explanation instead of broadening its results");
+        const auto self = queries.Add({"place:queryType=1", "Recursive"}, kBookmarksBarFolder);
+        auto recursive = BookmarkButtons(queries, visits, *queries.Find(self)).queryContents();
+        const auto nested = std::find_if(recursive.children.begin(), recursive.children.end(), [self](const auto& button) { return button.id == self; });
+        Check(nested != recursive.children.end() && nested->queryContents().emptyMessage.find("circular") != std::string::npos,
+            "native smart menus stop circular query expansion");
+        Check(queries.Find(popular)->children.empty() && queries.Count() == 3,
+            "native menu expansion does not save derived bookmarks");
 
         BBitmap bitmap(BRect(0, 0, 399, 27), B_RGB32, true);
         const bool locked = bitmap.InitCheck() == B_OK && bitmap.Lock();

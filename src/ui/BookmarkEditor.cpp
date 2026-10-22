@@ -124,7 +124,7 @@ void BookmarkEditor::Save()
     if (!folder) {
         url = NormalizeBookmarkAddress(url);
         if (!IsBookmarkableURL(url)) {
-            auto* alert = new BAlert("Edit Bookmark", "Bookmarks keep web addresses (https://…), files (file://…) and bookmarklets (javascript:…).",
+            auto* alert = new BAlert("Edit Bookmark", "Bookmarks keep web addresses (https://…), files (file://…), bookmarklets (javascript:…) and smart folders (place:…).",
                 "OK", nullptr, nullptr, B_WIDTH_AS_USUAL, B_WARNING_ALERT);
             alert->SetShortcut(0, B_ESCAPE);
             alert->Go(nullptr);

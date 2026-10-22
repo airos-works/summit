@@ -7,6 +7,7 @@
 #include <string>
 #include <vector>
 #include <memory>
+#include <functional>
 
 class BBitmap;
 class BMenu;
@@ -14,6 +15,9 @@ class BMenuItem;
 class BMessageRunner;
 
 namespace summit {
+class Bookmarks;
+struct BookmarkNode;
+struct PageRecord;
 enum class Icon { Back, Forward, Reload, Stop, Plus, Bookmark, BookmarkFilled, Downloads, Home, More, Go, Lock, LockWarning, Reader, ReaderActive };
 // The look of the browser's own controls, for every window: true draws them
 // like other Haiku applications (BControlLook buttons and tabs), false keeps
@@ -175,7 +179,12 @@ struct BookmarkButton {
     // For the menus: a copy, as menus outlive a change of the cache.
     std::shared_ptr<const BBitmap> menuIcon;
     bool separator = false;
+    // Query results are evaluated only when their menu opens, against an
+    // immutable copy of the current profile. No derived nodes are saved.
+    std::function<BookmarkButton()> queryContents;
+    std::string emptyMessage;
 };
+BookmarkButton BookmarkButtons(const Bookmarks&, const std::vector<PageRecord>&, const BookmarkNode&);
 // A page in a menu (history, bookmarks): its site icon (a copy is kept;
 // null leaves the icon's place empty, so labels line up) before the label.
 BMenuItem* NewPageMenuItem(const char* label, BMessage* message, const BBitmap* icon);

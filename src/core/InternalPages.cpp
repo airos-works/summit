@@ -1,4 +1,5 @@
 #include "InternalPages.h"
+#include "BookmarkQueries.h"
 #include "Address.h"
 #include "Favicon.h"
 #include <algorithm>
@@ -487,7 +488,7 @@ std::string MetadataSummary(const BookmarkNode& node)
     return "<span class=\"metadata\">" + EscapeHTML(text) + "</span>";
 }
 
-void BookmarkItems(PageWriter& writer, const std::vector<BookmarkNode>& nodes)
+void BookmarkItems(PageWriter& writer, const std::vector<BookmarkNode>& nodes, const std::string& token)
 {
     for (const auto& node : nodes) {
         const std::string id = std::to_string(node.id);
@@ -506,18 +507,21 @@ void BookmarkItems(PageWriter& writer, const std::vector<BookmarkNode>& nodes)
                 "<span class=\"icon foldericon\"></span><span class=\"text\"><span class=\"title\">" + EscapeHTML(node.title)
                 + "</span><span class=\"url\">" + std::to_string(count) + (count == 1 ? " bookmark" : " bookmarks")
                 + "</span>" + MetadataSummary(node) + "</span></button>" + kBookmarkTools + "</div>\n<div class=\"list\" data-folder=\"" + id + "\" hidden>\n");
-            BookmarkItems(writer, node.children);
+            BookmarkItems(writer, node.children, token);
             if (node.children.empty()) writer.Raw("<div class=\"placeholder\">Empty</div>\n");
             writer.Raw("</div></div>\n");
             continue;
         }
         const bool bookmarklet = IsBookmarkletURL(node.url);
+        const bool query = IsBookmarkQueryURL(node.url);
         const bool link = IsBookmarkableURL(node.url) && !bookmarklet;
-        auto shown = bookmarklet ? std::string("Bookmarklet — run on a webpage from the Bookmarks menu or bar.") : node.url;
+        const std::string href = query ? "summit-bookmarks:query?token=" + token + "&id=" + id : node.url;
+        auto shown = bookmarklet ? std::string("Bookmarklet — run on a webpage from the Bookmarks menu or bar.")
+            : query ? "Smart folder · " + node.url : node.url;
         if (auto scheme = shown.find("://"); scheme != std::string::npos) shown.erase(0, scheme + 3);
         writer.Raw("<div class=\"item\" data-id=\"" + id + "\"><div class=\"row\" data-title=\"" + EscapeHTML(node.title)
             + "\" data-url=\"" + EscapeHTML(node.url) + "\"" + MetadataAttributes(node) + ">");
-        writer.Raw(link ? "<a class=\"link\" draggable=\"false\" href=\"" + EscapeHTML(node.url) + "\">" : std::string("<span class=\"link\">"));
+        writer.Raw(link ? "<a class=\"link\" draggable=\"false\" href=\"" + EscapeHTML(href) + "\">" : std::string("<span class=\"link\">"));
         writer.Raw(writer.Icon(node.url) + "<span class=\"text\"><span class=\"title\">"
             + EscapeHTML(node.title.empty() ? node.url : node.title) + "</span><span class=\"url\">" + EscapeHTML(shown)
             + "</span>" + MetadataSummary(node) + "</span>" + (link ? "</a>" : "</span>") + kBookmarkTools + "</div></div>\n");
@@ -595,7 +599,7 @@ std::string RenderBookmarksPage(const Bookmarks& bookmarks, const IconSource& ic
         const std::string id = std::to_string(root->id);
         writer.Raw("<section class=\"root\" data-folder=\"" + id + "\"><h2>" + EscapeHTML(root->title)
             + "</h2><div class=\"list\" data-folder=\"" + id + "\">\n");
-        BookmarkItems(writer, root->children);
+        BookmarkItems(writer, root->children, token);
         if (root->children.empty())
             writer.Raw(std::string("<div class=\"placeholder\">") + (root->id == kBookmarksBarFolder
                 ? "Drag bookmarks here to show them on the bookmarks bar." : "Drag bookmarks here.") + "</div>\n");
@@ -631,6 +635,46 @@ std::string RenderBookmarksPage(const Bookmarks& bookmarks, const IconSource& ic
     page += kBookmarksScript;
     page += "</html>\n";
     return page;
+}
+
+std::string RenderBookmarkQueryPage(const Bookmarks& bookmarks, const std::vector<PageRecord>& history, int64_t id,
+    const IconSource& icons, const std::string& pageToken)
+{
+    const auto token = BookmarkPageToken(pageToken);
+    const auto* saved = bookmarks.Find(id);
+    const bool available = saved && IsBookmarkQueryURL(saved->url);
+    const auto title = available ? saved->title : std::string("Smart folder unavailable");
+    auto result = available ? QueryBookmarks(saved->url, bookmarks, history) : BookmarkQueryResult{{}, "This smart folder has been removed or changed."};
+    PageWriter writer(icons);
+    std::function<void(const std::vector<BookmarkNode>&)> rows = [&](const auto& nodes) {
+        for (const auto& node : nodes) {
+            if (node.folder) {
+                writer.Raw("<section><h2>" + EscapeHTML(node.title) + "</h2>\n");
+                rows(node.children); writer.Raw("</section>\n"); continue;
+            }
+            const bool script = IsBookmarkletURL(node.url), query = IsBookmarkQueryURL(node.url);
+            const auto href = query ? "summit-bookmarks:query?token=" + token + "&id=" + std::to_string(node.id) : node.url;
+            writer.Raw("<div class=\"query-result\">");
+            writer.Raw(script ? "<span class=\"link\">" : "<a class=\"link\" href=\"" + EscapeHTML(href) + "\">");
+            writer.Raw(writer.Icon(node.url) + "<span class=\"text\"><span class=\"title\">"
+                + EscapeHTML(node.title.empty() ? node.url : node.title) + "</span><span class=\"url\">"
+                + EscapeHTML(script ? "Bookmarklet · Run from the Bookmarks menu or bar" : node.url)
+                + "</span></span>" + (script ? "</span>" : "</a>") + "</div>\n");
+        }
+    };
+    rows(result.items);
+    std::string page = "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><title>" + EscapeHTML(title) + " — Bookmarks</title>\n";
+    page += kStyle; page += kBookmarksStyle;
+    page += "<style>.query-result{padding:10px 0;border-bottom:1px solid #8884}" + writer.IconStyles() + "</style>\n";
+    page += "<main><header><h1>" + EscapeHTML(title) + "</h1></header><nav class=\"actions\"><a class=\"button\" href=\"summit-bookmarks:query?token="
+        + token + "&amp;id=0\">All Bookmarks</a>";
+    if (available) page += "<a class=\"button\" href=\"summit-bookmarks:edit?token=" + token + "&amp;id=" + std::to_string(id) + "\">Edit Smart Folder…</a>";
+    page += "</nav><p class=\"hint\">Results follow your saved bookmarks and history.</p>\n";
+    if (!result.error.empty()) page += "<p class=\"empty\">" + EscapeHTML(result.error) + "</p>\n";
+    else if (result.items.empty()) page += "<p class=\"empty\">No matching pages.</p>\n";
+    else page += writer.Body();
+    if (available) page += "<p class=\"hint\">" + EscapeHTML(saved->url) + "</p>\n";
+    return page + "</main></html>\n";
 }
 
 std::string RenderPrivateStartPage(const std::string& searchEngineName, const std::string& searchPrefix)

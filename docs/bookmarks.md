@@ -93,7 +93,8 @@ added on 22 October 2026 for #110.
   none. Importing again adds only what is new; folders left empty by duplicates are not made,
   and an "Imported from …" folder that exists is filled again (its folders of
   the same name merged). Bookmarklets retain their script source and metadata;
-  Firefox's `place:` queries are counted and left out. Empty folders present in the source are
+  Firefox's `place:` queries retain their source and metadata, including queries
+  Summit cannot yet evaluate (see **Live smart folders** below). Empty folders present in the source are
   kept, including imports containing no addresses. The window reports added
   bookmarks, folders and separators, updated metadata, skipped addresses, and imported history.
 - **File › Export Bookmarks…** saves `bookmarks.html` (Netscape bookmarks
@@ -244,7 +245,80 @@ added on 22 October 2026 for #110.
   exports a path as the File menu does (for test scripts; see
   [mcp.md](mcp.md)).
 
+## Live smart folders
+
+The 22 October 2026 follow-up for #110 preserves Firefox `place:` bookmarks
+from HTML and SQLite, through profile saves, editing and HTML export. Opening
+one evaluates its saved query against Summit's current bookmarks and history.
+The bar and Bookmarks menu show results as a submenu; the Bookmarks tab opens
+a result page with **All Bookmarks** and **Edit Smart Folder…** controls.
+A fixed keyword can open a saved query too. Visiting pages, changing bookmarks
+and clearing history update results without reimporting or saving derived
+bookmarks. Open All in Tabs opens up to 50 direct page results and skips scripts
+and nested queries.
+
+`src/core/BookmarkQueries.cpp` implements a subset of the query fields and
+constants in Mozilla's
+[Places interface](https://github.com/mozilla-firefox/firefox/blob/main/toolkit/components/places/nsINavHistoryService.idl)
+and [query parser](https://github.com/mozilla-firefox/firefox/blob/main/toolkit/components/places/nsNavHistoryQuery.cpp).
+Examples supported by this implementation:
+
+| Saved query | Live results |
+| --- | --- |
+| `place:sort=8&maxResults=10` | Ten most visited pages in Summit's retained history |
+| `place:queryType=1&sort=12&maxResults=10&excludeQueries=1` | Ten most recently added ordinary bookmarks |
+| `place:queryType=1&tag=work` | Bookmarks tagged `work` |
+| `place:queryType=1&terms=reading` | Bookmarks whose title, address or tags contain `reading` |
+| `place:type=6&sort=1` | Tag folders containing their bookmarked pages |
+
+Other implemented filters include exact URI, domain (optionally exact host),
+visit-count bounds, multiple required or excluded tags, bookmarked-only history,
+and exclusion of queries or ordinary items. Sorts include title, address,
+last visit, visit count, bookmark addition time and tags. A zero result limit
+means no additional query limit. Title sorting with a limit first selects the
+most recently visited matches. Menus evaluate an immutable snapshot on opening;
+profile changes replace the snapshot for subsequent menus. Circular query
+expansion stops at a repeated query or eight nested queries. Tag expansion
+is bounded to 10,000 page memberships.
+
+**This does not complete Firefox smart-folder compatibility or #110.** Folder
+references (`parent`/legacy `folder`), time ranges, visit transitions, OR clauses,
+annotations, modification-time/frecency sorts and other result groupings remain
+unsupported. Such queries stay saved and show an explicit explanation, with no
+broader substitute results. Query history is limited to Summit's retained 2,000
+pages; individual visits and Firefox frecency are not stored. Text matching uses
+ASCII case folding, and tag names match exactly, rather than Firefox's full
+locale-aware collation. Parameterized query keywords are not supported.
+
+The result pages use separate files per query so Back can restore the preceding
+view. Their addresses map to the internal Bookmarks page, and their actions use
+the same per-run secret and source checks as the manager. Saved `place:` URLs
+are never handed to the web engine. Query pages show bookmarklets as inert
+entries with instructions to run them from the bar or menu.
+
 ## Testing
+
+The live-query follow-up passes **328 bookmark checks** and **100 query checks**
+on the host and native airOS, **384 host core checks**, and **46 native UI
+checks**. `tests/BookmarkQueryTests.cpp` covers parsing, filtering, ordering,
+limits, live changes, import/persistence/export, unsupported clauses and inert
+script results. `tools/bench/bookmarks-native.sh` builds the three native
+bookmark test programs.
+
+The full browser passes **36 browser/fixture checks and 61 native action
+assertions** using HTML and Firefox SQLite imports in an isolated profile.
+`tests/NativeBookmarkQueryTests.cpp` exercises native Back, actual toolbar
+popup selection, address-field keyword entry, editor Save, Open All and the
+confirmed clear-history handler. The controller verifies live visit ordering,
+updates while a query page is open, tag results, both editors, retained
+unsupported source and export. Three presented pages were captured and
+visually inspected. This is airOS x86_64 candidate acceptance, not published
+package or stock-Haiku runtime acceptance. All four engine images were verified
+as loaded; all **673 frozen hashes** remained unchanged. The browser exited
+normally, left no helpers and had no crash events across the complete log
+interval. After scanning all 41 native teams, the owned RAM filesystem was
+unmounted and its empty mount directory removed. Evidence:
+[`bookmark-queries-native-2026-10-22.json`](bookmark-queries-native-2026-10-22.json).
 
 The bookmarklet follow-up passes **327 bookmark checks** on both the host and
 native airOS, the host core suite, and **38 native UI checks**. These cover HTML,
@@ -402,8 +476,9 @@ engine, profile `p-bm`):
 
 ## Not done
 
-- Firefox's smart folders (`place:` queries) are skipped. Keywords and
-  bookmarklets are supported by the 22 October #110 follow-ups.
+- Advanced Firefox smart-folder clauses remain unsupported; see **Live smart
+  folders** above for the implemented subset and outstanding work. Keywords
+  and bookmarklets are supported by the 22 October #110 follow-ups.
 - ~~Exporting and importing back leaves out empty folders.~~ Done 20 October
   (#110): a folder empty in the file is imported (one only duplicates filled is
   still left out), and the HTML reader drops the browsers' own root folders

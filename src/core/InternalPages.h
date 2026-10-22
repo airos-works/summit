@@ -34,6 +34,8 @@ std::string RenderHistoryPage(const std::vector<PageRecord>& history, int64_t no
 // summit-bookmarks: links carrying token (ParseBookmarkPageLink), which no
 // other page knows.
 std::string RenderBookmarksPage(const Bookmarks& bookmarks, const IconSource& icons, const std::string& token);
+std::string RenderBookmarkQueryPage(const Bookmarks&, const std::vector<PageRecord>& history, int64_t id,
+    const IconSource&, const std::string& token);
 constexpr const char* kBookmarksPageScheme = "summit-bookmarks";
 struct BookmarkPageLink {
     // save, delete, move, new-folder, import or export

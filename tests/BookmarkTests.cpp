@@ -161,7 +161,7 @@ int main()
             {0, "Toolbar", "", true, 0, {{0, "Known again", "https://known.example/", false, 0, {}},
                 {0, "New", " https://new.example/ ", false, 5, {}}}},
             {0, "Only duplicates", "", true, 0, {{0, "Known", "https://known.example/", false, 0, {}}}},
-            {0, "Smart", "place:sort=8", false, 0, {}},
+            {0, "Unsupported", "data:text/plain,unsupported", false, 0, {}},
             {0, "", "https://untitled.example/", false, 0, {}},
             {0, "Twice", "https://new.example/", false, 0, {}}}};
         auto result = marks.Import(imported, "Imported from Firefox", 99);
@@ -416,6 +416,7 @@ int main()
         CHECK(toolbar->children[1].metadata.keywords[1].postData == "search=%s");
         Bookmarks shortcuts;
         shortcuts.Import(imported.bookmarks, "Firefox");
+        CHECK(shortcuts.FindURL("place:tag=x"));
         CHECK(shortcuts.ResolveKeyword("MOZ")->url == "https://www.mozilla.org/");
         CHECK(shortcuts.ResolveKeyword("addons café & tea")->postData == "q=caf%C3%A9%20%26%20tea&from=bookmark");
         CHECK(shortcuts.ResolveKeyword("extensions theme")->postData == "search=theme");
