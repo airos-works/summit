@@ -8,6 +8,10 @@
 #include <Application.h>
 #include <Bitmap.h>
 #include <Button.h>
+#include <ControlLook.h>
+#include <File.h>
+#include <IconUtils.h>
+#include <Resources.h>
 #include <LayoutBuilder.h>
 #include <ListView.h>
 #include <ScrollView.h>
@@ -55,6 +59,25 @@ const char* Question(const std::string& permission)
         : permission == "microphone" ? "wants to use your microphone."
         : permission == "camera-microphone" ? "wants to use your camera and microphone."
         : "wants a permission.";
+}
+
+// The camera or microphone icon for those questions (#128); nullptr keeps
+// the alert's own icon. The alert takes the bitmap.
+BBitmap* PromptIcon(const std::string& permission)
+{
+    const int32 identifier = permission == "microphone" ? 222
+        : permission == "camera" || permission == "camera-microphone" ? 221 : 0;
+    app_info info;
+    if (!identifier || !be_app || be_app->GetAppInfo(&info) != B_OK) return nullptr;
+    // A private reader: toolbar icons are loaded on window threads.
+    BFile file(&info.ref, B_READ_ONLY);
+    BResources resources(&file);
+    size_t size = 0;
+    const auto* data = static_cast<const uint8*>(resources.LoadResource('VICN', identifier, &size));
+    if (!data || !size) return nullptr;
+    auto icon = std::make_unique<BBitmap>(BRect(BPoint(0, 0), be_control_look->ComposeIconSize(32)), B_RGBA32);
+    if (icon->InitCheck() != B_OK || BIconUtils::GetVectorIcon(data, size, icon.get()) != B_OK) return nullptr;
+    return icon.release();
 }
 
 // Permissions answered by choosing a device, for this browsing session only.
@@ -265,6 +288,7 @@ void SitePermissionService::Ask(const BMessage& request)
             "network address.";
     if (fPrivate) text += "\n\nIn a private window, the answer is forgotten when the window closes.";
     auto* alert = new BAlert("Summit", text.c_str(), "Block", "Not Now", "Allow", B_WIDTH_FROM_LABEL, B_IDEA_ALERT);
+    if (auto* icon = PromptIcon(permission)) alert->SetIcon(icon);
     alert->SetShortcut(1, B_ESCAPE);
     alert->SetFeel(B_FLOATING_APP_WINDOW_FEEL);
     BMessenger view;
