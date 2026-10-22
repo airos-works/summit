@@ -35,13 +35,22 @@ std::string RenderHistoryPage(const std::vector<PageRecord>& history, int64_t no
 // other page knows.
 std::string RenderBookmarksPage(const Bookmarks& bookmarks, const IconSource& icons, const std::string& token);
 std::string RenderBookmarkQueryPage(const Bookmarks&, const std::vector<PageRecord>& history, int64_t id,
-    const IconSource&, const std::string& token);
+    const IconSource&, const std::string& token, unsigned section = 0);
+struct BookmarkQueryPageLocation {
+    int64_t id = 0;
+    unsigned section = 0;
+};
+// The generated page name carries the selected library link through reload and
+// back/forward navigation. It contains no source paths or imported identities.
+std::string BookmarkQueryPageName(int64_t id, unsigned section = 0);
+std::optional<BookmarkQueryPageLocation> ParseBookmarkQueryPageName(std::string_view name);
 constexpr const char* kBookmarksPageScheme = "summit-bookmarks";
 struct BookmarkPageLink {
     // save, delete, move, new-folder, import or export
     std::string action;
     std::string token;
     int64_t id = 0;
+    unsigned section = 0;
     int64_t folder = 0;
     size_t index = kBookmarkEnd;
     // save and new-folder: what was typed (percent-decoded).

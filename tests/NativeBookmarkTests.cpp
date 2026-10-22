@@ -471,6 +471,49 @@ public:
         Check(nestedExpansion.children.size()==1 && !nestedExpansion.children[0].folder && !nestedExpansion.children[0].queryContents,
             "disabled query expansion propagates through an expandable folder shortcut");
 
+        Check(roots.Edit(rootQueryID,"Library","place:type=9"), "native saved query can expose the library");
+        PageRecord download{"https://library.test/download","Downloaded page",0,false,0};
+        download.visitCountKnown=true;download.visitTransitions={{clock,7}};SetHistoryVisitTimes(download,{clock});
+        auto librarySnapshot=BookmarkButtons(roots,{download},*roots.Find(rootQueryID));
+        auto library=std::make_shared<const BookmarkButton>(librarySnapshot.queryContents());
+        Check(library->children.size()==4 && library->children[0].title=="History"
+            && library->children[1].title=="Downloads" && library->children[3].title=="All Bookmarks",
+            "native library exposes all four Firefox sections in their default order");
+        Check(library->children[1].id==0 && library->children[1].queryParent==rootQueryID
+            && library->children[1].querySection==2 && library->children[1].queryContents,
+            "generated native query retains its saved parent and stable section");
+        BMenu libraryMenu("Library");AddBookmarkItems(&libraryMenu,library,*library,BMessenger(this));
+        Check(libraryMenu.CountItems()==4 && libraryMenu.ItemAt(1)->Submenu(), "library links expand as native submenus");
+        auto downloadRows=std::make_shared<const BookmarkButton>(library->children[1].queryContents());
+        Check(downloadRows->children.size()==1 && downloadRows->children[0].url==download.url,
+            "native Downloads submenu includes imported zero-count download visits");
+        BMenu downloadsMenu("Downloads");AddBookmarkItems(&downloadsMenu,downloadRows,*downloadRows,BMessenger(this));
+        Check(downloadsMenu.CountItems()==3 && downloadsMenu.ItemAt(0)->Message()->GetInt64("id",-1)==0,
+            "generated download row navigates without a saved bookmark ID");
+        const auto* downloadAll=downloadsMenu.ItemAt(2)->Message();
+        Check(downloadAll->GetInt64("id",-1)==0 && std::string(downloadAll->GetString("url",""))==download.url,
+            "generated Downloads Open All carries the displayed URLs");
+        const auto allRoots=library->children[3].queryContents();
+        Check(allRoots.children.size()==3 && allRoots.children[0].children[0].url=="https://roots.test/z",
+            "native All Bookmarks preserves the parent library's imported source");
+        const auto recursiveLibrary=allRoots.children[1].children[0].queryContents();
+        Check(recursiveLibrary.children.empty() && recursiveLibrary.emptyMessage.find("circular")!=std::string::npos,
+            "library inside its own generated roots stops circular expansion");
+        Check(roots.Edit(rootQueryID,"Library","place:type=9&expandQueries=0"), "library can disable native query expansion");
+        auto libraryLinks=std::make_shared<const BookmarkButton>(BookmarkButtons(roots,{download},*roots.Find(rootQueryID)).queryContents());
+        Check(!libraryLinks->children[1].folder && !libraryLinks->children[1].queryContents,
+            "unexpanded generated queries remain clickable native links");
+        BMenu linksMenu("Library links");AddBookmarkItems(&linksMenu,libraryLinks,*libraryLinks,BMessenger(this));
+        Check(linksMenu.CountItems()==4 && !linksMenu.ItemAt(1)->Submenu(),
+            "unexpanded library has four links and no empty Open All action");
+        const auto* sectionMessage=linksMenu.ItemAt(1)->Message();
+        Check(sectionMessage->GetInt64("id",-1)==0 && sectionMessage->GetInt64("query_parent",0)==rootQueryID
+            && sectionMessage->GetUInt32("query_section",0)==2
+            && std::string(sectionMessage->GetString("url",""))=="place:transition=7&sort=4",
+            "native link activation carries the exact saved-parent section instead of a global URL lookup");
+        Check(librarySnapshot.queryContents().children[1].queryContents().children.size()==1,
+            "already-open library retains its immutable query snapshot after editing");
+
         Bookmarks scoped;
         for (const auto* scope : {"first", "second"}) {
             BookmarkNode imported{0, "", "", true, 0, {}};

@@ -183,6 +183,10 @@ struct BookmarkButton {
     // immutable copy of the current profile. No derived nodes are saved.
     std::function<BookmarkButton()> queryContents;
     std::string emptyMessage;
+    // Generated library links have no saved ID. Their saved parent and stable
+    // section let activation resolve the current query with its source scope.
+    int64 queryParent = 0;
+    unsigned querySection = 0;
 };
 BookmarkButton BookmarkButtons(const Bookmarks&, const std::vector<PageRecord>&, const BookmarkNode&);
 // A page in a menu (history, bookmarks): its site icon (a copy is kept;

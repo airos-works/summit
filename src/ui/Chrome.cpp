@@ -1095,13 +1095,17 @@ BookmarkButton BookmarkButtons(const Bookmarks& bookmarks, const std::vector<Pag
         Bookmarks bookmarks;
         std::vector<PageRecord> history;
         BookmarkButton Button(const BookmarkNode& node, std::vector<std::string> ancestors,
-            const std::shared_ptr<const Snapshot>& owner, bool expandQueries = true) const
+            const std::shared_ptr<const Snapshot>& owner, bool expandQueries = true, int64 queryParent = 0) const
         {
             BookmarkButton button{node.id, node.url, node.title, nullptr, node.folder, {}};
             button.separator = node.separator;
+            if (!node.id && IsBookmarkQueryURL(node.url)) {
+                button.queryParent = queryParent;
+                button.querySection = BookmarkQuerySectionForURL(node.url);
+            }
             if (IsBookmarkQueryURL(node.url) && (expandQueries || IsBookmarkFolderQueryURL(node.url))) {
                 button.folder = true;
-                button.queryContents = [owner, node, ancestors = std::move(ancestors), expandQueries] {
+                button.queryContents = [owner, node, ancestors = std::move(ancestors), expandQueries, queryParent] {
                     BookmarkButton expanded{node.id, node.url, node.title, nullptr, true, {}};
                     const auto identity = node.url + "\n" + node.origin.scope;
                     if (ancestors.size() >= 8 || std::find(ancestors.begin(), ancestors.end(), identity) != ancestors.end()) {
@@ -1112,14 +1116,15 @@ BookmarkButton BookmarkButtons(const Bookmarks& bookmarks, const std::vector<Pag
                     auto result = QueryBookmarks(node.url, owner->bookmarks, owner->history, node.origin);
                     expanded.emptyMessage = result.error;
                     for (size_t index = 0; index < result.items.size(); ++index) {
-                        auto child = owner->Button(result.items[index], path, owner, expandQueries && result.expandQueries);
+                        auto child = owner->Button(result.items[index], path, owner, expandQueries && result.expandQueries,
+                            node.id ? node.id : queryParent);
                         if (result.visitTimes.size() == result.items.size())
                             child.title = (child.title.empty() ? child.url : child.title) + " — " + FormatBookmarkVisitTime(result.visitTimes[index]);
                         expanded.children.push_back(std::move(child));
                     }
                     return expanded;
                 };
-            } else for (const auto& child : node.children) button.children.push_back(Button(child, ancestors, owner, expandQueries));
+            } else for (const auto& child : node.children) button.children.push_back(Button(child, ancestors, owner, expandQueries, queryParent));
             return button;
         }
     };
@@ -1156,10 +1161,14 @@ void AddBookmarkItems(BMenu* menu, std::shared_ptr<const BookmarkButton> root, c
         auto* open = new BMessage(kOpenBookmark);
         open->AddString("url", child.url.c_str());
         open->AddInt64("id", child.id);
+        if (child.queryParent && child.querySection) {
+            open->AddInt64("query_parent", child.queryParent);
+            open->AddUInt32("query_section", child.querySection);
+        }
         auto* item = NewPageMenuItem(BookmarkLabel(child).c_str(), open, child.menuIcon);
         item->SetTarget(target);
         menu->AddItem(item);
-        bookmarks = bookmarks || !IsBookmarkletURL(child.url);
+        bookmarks = bookmarks || (!IsBookmarkletURL(child.url) && !IsBookmarkQueryURL(child.url));
     }
     if (folder.children.empty()) {
         auto* empty = new BMenuItem(folder.emptyMessage.empty() ? "(Empty)" : folder.emptyMessage.c_str(), nullptr);
@@ -1172,7 +1181,8 @@ void AddBookmarkItems(BMenu* menu, std::shared_ptr<const BookmarkButton> root, c
         openAll->AddInt64("id", folder.id);
         if (!folder.id)
             for (const auto& child : folder.children)
-                if (!child.folder && !child.separator && !IsBookmarkletURL(child.url)) openAll->AddString("url", child.url.c_str());
+                if (!child.folder && !child.separator && !IsBookmarkletURL(child.url) && !IsBookmarkQueryURL(child.url))
+                    openAll->AddString("url", child.url.c_str());
         auto* item = new BMenuItem("Open All in Tabs", openAll);
         item->SetTarget(target);
         menu->AddItem(item);

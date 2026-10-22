@@ -280,6 +280,7 @@ Examples supported by this implementation:
 | `place:type=1&sort=4` | One row per retained visit, newest first, with a visible timestamp |
 | `place:type=8&sort=1` | The imported profile’s bookmark roots, with sorted descendants |
 | `place:transition=7&sort=4` | Pages with a retained Firefox download visit, newest page visits first |
+| `place:type=9` | Library links to History, Downloads, Tags and All Bookmarks |
 | `place:type=5&sort=4` | Calendar folders containing host folders, with pages sorted by title |
 | `place:parent=toolbar_____` | The referenced toolbar's direct folder tree |
 | `place:folder=10` | A legacy numeric reference to folder 10 in the imported database |
@@ -651,7 +652,60 @@ records 98 queries with both values of the mobile preference. Comparisons cover
 the default root view, recursive order/filtering, limits, query links and error
 cases; the non-default preference is recorded as unavailable import context.
 
+### Library links
+
+`place:type=9` shows Firefox's four library sections: History, Downloads, Tags
+and All Bookmarks. They are generated query links, not new saved bookmarks.
+History opens the date-grouped history view; Downloads matches retained Firefox
+download visits; Tags follows saved bookmark metadata; All Bookmarks opens the
+virtual roots belonging to the saved library query's imported source. Downloads
+does not yet classify new Summit download events.
+
+The default order is History, Downloads, Tags, All Bookmarks. Title sorting runs
+after the result limit; URI sorting runs before it. `excludeQueries=1` removes
+the generated links, while `excludeItems=1` retains them. `expandQueries=0`
+keeps clickable links in the native menu instead of expanding submenus. Other
+query conditions remain unsupported and show an explanation.
+
+Opening a generated link retains its saved parent and a stable section, so
+equal query URLs in different imports keep their own source context. Query
+pages support reload, Back/Forward and a link back to their saved parent.
+Changing or deleting the parent revalidates the selected section; removing it
+shows an explanation. Native menus use an immutable bookmark/history snapshot,
+retain the source context for unexpanded links, and stop circular expansion.
+Open All uses the displayed page URLs for generated containers.
+
+Moving imported roots preserves their identity. HTML export/reimport and profile
+saves retain the original library query and source identities without storing
+generated children. Plain HTML without identities leaves All Bookmarks with an
+unresolved-target explanation, rather than selecting the native roots.
+
+The [library oracle fixture](../tests/fixtures/bookmarks/sidebar-query-firefox158.json)
+records 41 Firefox 158.0.1 cases. Comparisons cover 27 current queries, including
+sorting, limits and exclusions; 14 cases using additional conditions, unavailable
+options or removed syntax are checked as explicit explanations. Result type 7
+is the deprecated tag-contents view, not the library sidebar, and remains
+unsupported.
+
 ## Testing
+
+The library-sidebar follow-up passes **244 sidebar-query checks** on the host
+and native airOS. Its Firefox oracle records **41 cases**, with 27 current-query
+comparisons and 14 explicit explanations. All **25 host suites** and **12
+bookmark/query sanitizer suites** pass. Native coverage includes **120 UI checks**
+and all previous bookmark/query suites.
+
+The final browser passes **311 checks and 343 native action assertions**.
+It covers both imported sources, all four generated sections, reload, Back/Forward,
+real unexpanded native menu actions, parent edits/deletion, root moves/reimports,
+HTML round trips and history clearing. The first browser run exposed a stale
+parent after Back; changing the selected query/section now invalidates its page
+revision. The fresh final run includes that regression. Both rendered library
+pages were visually inspected. All **723 frozen hashes** remain unchanged;
+all four engine images loaded; normal shutdown leaves no helpers or debugger
+events across a complete log interval. The owned RAMFS was removed after an
+all-team scan. Earlier failures remain in the evidence.
+Evidence: [`bookmark-sidebar-queries-native-2026-10-22.json`](bookmark-sidebar-queries-native-2026-10-22.json).
 
 The imported-transition follow-up passes **233 transition-query checks** on the
 host and native airOS, including real SQLite imports, zero counts, metadata-only

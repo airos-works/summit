@@ -4,6 +4,7 @@
 #include "Favicon.h"
 #include <algorithm>
 #include <cctype>
+#include <charconv>
 #include <cstdio>
 #include <ctime>
 #include <map>
@@ -577,6 +578,10 @@ std::optional<BookmarkPageLink> ParseBookmarkPageLink(std::string_view url)
         int64_t parsed = 0;
         if (name == "token") link.token = std::string(value);
         else if (name == "id" && number(value, parsed)) link.id = parsed;
+        else if (name == "section") {
+            if (!number(value, parsed) || parsed > 4) return std::nullopt;
+            link.section = static_cast<unsigned>(parsed);
+        }
         else if (name == "folder" && number(value, parsed)) link.folder = parsed;
         else if (name == "index" && number(value, parsed)) link.index = static_cast<size_t>(parsed);
         else if (name == "title") { link.title = PercentDecode(value); link.hasTitle = true; }
@@ -586,7 +591,33 @@ std::optional<BookmarkPageLink> ParseBookmarkPageLink(std::string_view url)
         else if (name == "keywords") { link.keywords = PercentDecode(value); link.hasKeywords = true; }
     }
     if (link.token.empty() || link.token != BookmarkPageToken(link.token)) return std::nullopt;
+    if (link.section && (link.action != "query" || !link.id)) return std::nullopt;
     return link;
+}
+
+std::string BookmarkQueryPageName(int64_t id, unsigned section)
+{
+    return "bookmarks-query-" + std::to_string(id) + (section ? "-" + std::to_string(section) : "") + ".html";
+}
+
+std::optional<BookmarkQueryPageLocation> ParseBookmarkQueryPageName(std::string_view name)
+{
+    constexpr std::string_view prefix = "bookmarks-query-", suffix = ".html";
+    if (name.size() < prefix.size() + suffix.size() || name.substr(0, prefix.size()) != prefix
+        || name.substr(name.size() - suffix.size()) != suffix) return std::nullopt;
+    name.remove_prefix(prefix.size()); name.remove_suffix(suffix.size());
+    BookmarkQueryPageLocation location;
+    const auto split = name.find('-');
+    const auto id = name.substr(0, split);
+    if (id.empty() || id.size() > 18 || id.find_first_not_of("0123456789") != std::string_view::npos) return std::nullopt;
+    const auto parsed = std::from_chars(id.data(), id.data() + id.size(), location.id);
+    if (parsed.ec != std::errc() || !location.id) return std::nullopt;
+    if (split != std::string_view::npos) {
+        const auto section = name.substr(split + 1);
+        if (section.size() != 1 || section[0] < '1' || section[0] > '4') return std::nullopt;
+        location.section = section[0] - '0';
+    }
+    return location;
 }
 
 std::string RenderBookmarksPage(const Bookmarks& bookmarks, const IconSource& icons, const std::string& pageToken)
@@ -638,13 +669,14 @@ std::string RenderBookmarksPage(const Bookmarks& bookmarks, const IconSource& ic
 }
 
 std::string RenderBookmarkQueryPage(const Bookmarks& bookmarks, const std::vector<PageRecord>& history, int64_t id,
-    const IconSource& icons, const std::string& pageToken)
+    const IconSource& icons, const std::string& pageToken, unsigned section)
 {
     const auto token = BookmarkPageToken(pageToken);
     const auto* saved = bookmarks.Find(id);
-    const bool available = saved && IsBookmarkQueryURL(saved->url);
-    const auto title = available ? saved->title : std::string("Smart folder unavailable");
-    auto result = available ? QueryBookmarks(saved->url, bookmarks, history, saved->origin) : BookmarkQueryResult{{}, "This smart folder has been removed or changed."};
+    const auto target = ResolveBookmarkQueryTarget(bookmarks, history, id, section);
+    const bool available = target.error.empty();
+    const auto title = available ? target.node.title : std::string("Smart folder unavailable");
+    auto result = available ? QueryBookmarks(target.node.url, bookmarks, history, target.node.origin) : BookmarkQueryResult{{}, target.error};
     PageWriter writer(icons);
     std::function<void(const std::vector<BookmarkNode>&, unsigned)> rows = [&](const auto& nodes, unsigned depth) {
         for (size_t index = 0; index < nodes.size(); ++index) {
@@ -656,7 +688,9 @@ std::string RenderBookmarkQueryPage(const Bookmarks& bookmarks, const std::vecto
                 rows(node.children, depth + 1); writer.Raw("</section>\n"); continue;
             }
             const bool script = IsBookmarkletURL(node.url), query = IsBookmarkQueryURL(node.url);
-            const auto href = query ? "summit-bookmarks:query?token=" + token + "&id=" + std::to_string(node.id) : node.url;
+            const auto child = !node.id ? BookmarkQuerySectionForURL(node.url) : 0;
+            const auto href = query ? "summit-bookmarks:query?token=" + token + "&id=" + std::to_string(child ? id : node.id)
+                + (child ? "&section=" + std::to_string(child) : "") : node.url;
             writer.Raw("<div class=\"query-result\">");
             writer.Raw(script ? "<span class=\"link\">" : "<a class=\"link\" href=\"" + EscapeHTML(href) + "\">");
             writer.Raw(writer.Icon(node.url) + "<span class=\"text\"><span class=\"title\">"
@@ -674,12 +708,16 @@ std::string RenderBookmarkQueryPage(const Bookmarks& bookmarks, const std::vecto
     page += "<style>.query-result{padding:10px 0;border-bottom:1px solid #8884}.query-group .query-group{margin-left:24px}.visit-time{display:block;font-size:13px;font-variant-numeric:tabular-nums}" + writer.IconStyles() + "</style>\n";
     page += "<main><header><h1>" + EscapeHTML(title) + "</h1></header><nav class=\"actions\"><a class=\"button\" href=\"summit-bookmarks:query?token="
         + token + "&amp;id=0\">All Bookmarks</a>";
-    if (available) page += "<a class=\"button\" href=\"summit-bookmarks:edit?token=" + token + "&amp;id=" + std::to_string(id) + "\">Edit Smart Folder…</a>";
+    if (saved && IsBookmarkQueryURL(saved->url)) {
+        if (section) page += "<a class=\"button\" href=\"summit-bookmarks:query?token=" + token + "&amp;id=" + std::to_string(id)
+            + "\">Back to " + EscapeHTML(saved->title) + "</a>";
+        page += "<a class=\"button\" href=\"summit-bookmarks:edit?token=" + token + "&amp;id=" + std::to_string(id) + "\">Edit Smart Folder…</a>";
+    }
     page += "</nav><p class=\"hint\">Results follow your saved bookmarks and history.</p>\n";
     if (!result.error.empty()) page += "<p class=\"empty\">" + EscapeHTML(result.error) + "</p>\n";
     else if (result.items.empty()) page += "<p class=\"empty\">No matching pages.</p>\n";
     else page += writer.Body();
-    if (available) page += "<p class=\"hint\">" + EscapeHTML(saved->url) + "</p>\n";
+    if (available) page += "<p class=\"hint\">" + EscapeHTML(target.node.url) + "</p>\n";
     return page + "</main></html>\n";
 }
 

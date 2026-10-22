@@ -29,14 +29,15 @@ for SUMMIT_BOOKMARK_SOURCE in "${SUMMIT_BOOKMARK_SOURCES[@]}"; do
     "${SUMMIT_BOOKMARK_COMPILER[@]}" "${SUMMIT_BOOKMARK_CPPFLAGS[@]}" "${SUMMIT_BOOKMARK_FLAGS[@]}" -c "$SUMMIT_BOOKMARK_SOURCE" -o "$SUMMIT_BOOKMARK_OBJECT"
     SUMMIT_BOOKMARK_OBJECTS+=("$SUMMIT_BOOKMARK_OBJECT")
 done
-for SUMMIT_BOOKMARK_TEST in BookmarkTests BookmarkQueryTests BookmarkFolderQueryTests BookmarkTimeQueryTests BookmarkModifiedQueryTests BookmarkCombinedQueryTests BookmarkSiteQueryTests BookmarkDateQueryTests BookmarkVisitQueryTests BookmarkRootQueryTests BookmarkTransitionQueryTests NativeBookmarkTests; do
+for SUMMIT_BOOKMARK_TEST in BookmarkTests BookmarkQueryTests BookmarkFolderQueryTests BookmarkTimeQueryTests BookmarkModifiedQueryTests BookmarkCombinedQueryTests BookmarkSiteQueryTests BookmarkDateQueryTests BookmarkVisitQueryTests BookmarkRootQueryTests BookmarkTransitionQueryTests BookmarkSidebarQueryTests NativeBookmarkTests; do
     "${SUMMIT_BOOKMARK_COMPILER[@]}" "${SUMMIT_BOOKMARK_CPPFLAGS[@]}" "${SUMMIT_BOOKMARK_FLAGS[@]}" \
         "tests/$SUMMIT_BOOKMARK_TEST.cpp" "${SUMMIT_BOOKMARK_OBJECTS[@]}" "${SUMMIT_BOOKMARK_LDFLAGS[@]}" \
         -Wl,--gc-sections -lbe -ltracker -ltranslation -lcrypto -lnetwork -o "$SUMMIT_BOOKMARK_OUTPUT/$SUMMIT_BOOKMARK_TEST"
 done
-echo "Built $SUMMIT_BOOKMARK_OUTPUT/BookmarkTests, BookmarkQueryTests, BookmarkFolderQueryTests, BookmarkTimeQueryTests, BookmarkModifiedQueryTests, BookmarkCombinedQueryTests, BookmarkSiteQueryTests, BookmarkDateQueryTests, BookmarkVisitQueryTests, BookmarkRootQueryTests, BookmarkTransitionQueryTests and NativeBookmarkTests"
+echo "Built $SUMMIT_BOOKMARK_OUTPUT/BookmarkTests, BookmarkQueryTests, BookmarkFolderQueryTests, BookmarkTimeQueryTests, BookmarkModifiedQueryTests, BookmarkCombinedQueryTests, BookmarkSiteQueryTests, BookmarkDateQueryTests, BookmarkVisitQueryTests, BookmarkRootQueryTests, BookmarkTransitionQueryTests, BookmarkSidebarQueryTests and NativeBookmarkTests"
 echo "Run BookmarkSiteQueryTests with tests/fixtures/bookmarks/site-query-firefox158.json as its argument."
 echo "Run BookmarkDateQueryTests with tests/fixtures/bookmarks/date-query-firefox158.json as its argument."
 echo "Run BookmarkVisitQueryTests with tests/fixtures/bookmarks/visit-query-firefox158.json as its argument."
 echo "Run BookmarkRootQueryTests with tests/fixtures/bookmarks/root-query-firefox158.json as its argument."
 echo "Run BookmarkTransitionQueryTests with tests/fixtures/bookmarks/transition-query-firefox158.json as its argument."
+echo "Run BookmarkSidebarQueryTests with tests/fixtures/bookmarks/sidebar-query-firefox158.json as its argument."

@@ -42,6 +42,10 @@ bool IsBookmarkQueryURL(std::string_view url)
 }
 
 namespace {
+constexpr std::pair<std::string_view, std::string_view> kLibraryQueries[] = {
+    {"History", "place:type=3&sort=4"}, {"Downloads", "place:transition=7&sort=4"},
+    {"Tags", "place:type=6&sort=1"}, {"All Bookmarks", "place:type=8"}
+};
 std::string Lower(std::string text)
 {
     for (char& c : text) if (c >= 'A' && c <= 'Z') c += 'a' - 'A';
@@ -190,7 +194,7 @@ Query Parse(std::string_view url)
         } else q.error = "This smart folder uses a query clause Summit does not yet support: " + std::string(name) + ".";
         if (!q.error.empty()) break;
     }
-    if (q.error.empty() && q.type != 0 && q.type != 1 && q.type != 3 && q.type != 4 && q.type != 5 && q.type != 6 && q.type != 8)
+    if (q.error.empty() && q.type != 0 && q.type != 1 && q.type != 3 && q.type != 4 && q.type != 5 && q.type != 6 && q.type != 8 && q.type != 9)
         q.error = "This smart folder's result grouping is not yet supported.";
     if (q.error.empty() && q.sort != 0 && q.sort != 1 && q.sort != 2 && q.sort != 3 && q.sort != 4
         && q.sort != 5 && q.sort != 6 && q.sort != 7 && q.sort != 8 && q.sort != 11 && q.sort != 12
@@ -199,6 +203,8 @@ Query Parse(std::string_view url)
     if (q.type == 6 || q.type == 8 || std::any_of(q.clauses.begin(), q.clauses.end(), [](const auto& c) { return !c.parents.empty(); })) q.source = 1;
     if (q.error.empty() && q.type == 8 && std::any_of(q.clauses.begin(), q.clauses.end(), [](const auto& c) { return c.HasConditions(true); }))
         q.error = "Virtual bookmark roots with additional conditions are not supported.";
+    if (q.error.empty() && q.type == 9 && (q.clauses.size() != 1 || q.clauses.front().HasConditions(false)))
+        q.error = "Library queries with additional conditions are not yet supported.";
     if (q.type == 1) {
         // Places selects visits even with queryType=1. Parent queries can take
         // a separate folder-shortcut path; do not silently broaden those.
@@ -411,6 +417,28 @@ bool IsBookmarkFolderQueryURL(std::string_view url)
     return query.error.empty() && SimpleFolder(query);
 }
 
+unsigned BookmarkQuerySectionForURL(std::string_view url)
+{
+    for (unsigned i = 0; i < std::size(kLibraryQueries); ++i)
+        if (url == kLibraryQueries[i].second) return i + 1;
+    return 0;
+}
+
+BookmarkQueryTarget ResolveBookmarkQueryTarget(const Bookmarks& bookmarks, const std::vector<PageRecord>& history,
+    int64_t id, unsigned section)
+{
+    const auto* saved = bookmarks.Find(id);
+    if (!saved || !IsBookmarkQueryURL(saved->url)) return {{}, "This smart folder has been removed or changed."};
+    if (!section) return {*saved, {}};
+    if (section <= std::size(kLibraryQueries)) {
+        const auto parent = QueryBookmarks(saved->url, bookmarks, history, saved->origin);
+        if (!parent.error.empty()) return {{}, parent.error};
+        for (const auto& child : parent.items)
+            if (!child.id && BookmarkQuerySectionForURL(child.url) == section) return {child, {}};
+    }
+    return {{}, "This smart folder no longer contains the selected query."};
+}
+
 BookmarkQueryResult QueryBookmarks(std::string_view url, const Bookmarks& bookmarks, const std::vector<PageRecord>& history,
     const BookmarkOrigin& origin, int64_t now)
 {
@@ -419,6 +447,26 @@ BookmarkQueryResult QueryBookmarks(std::string_view url, const Bookmarks& bookma
     result.error = q.error;
     result.expandQueries = q.expandQueries;
     if (!result.error.empty()) return result;
+    if (q.type == 9) {
+        if (q.excludeQueries) return result;
+        for (const auto& [title, query] : kLibraryQueries) {
+            BookmarkNode node{0, std::string(title), std::string(query), false, 0, {}};
+            node.origin.scope = origin.scope;
+            result.items.push_back(std::move(node));
+        }
+        // Places applies URI order in SQL before LIMIT, and title order to
+        // the limited result. Other supported columns are equal for these rows.
+        if (q.sort == 5 || q.sort == 6)
+            std::stable_sort(result.items.begin(), result.items.end(), [&](const auto& a, const auto& b) {
+                return q.sort == 5 ? a.url < b.url : b.url < a.url;
+            });
+        if (q.limit && result.items.size() > uint64_t(q.limit)) result.items.resize(q.limit);
+        if (q.sort == 1 || q.sort == 2)
+            std::stable_sort(result.items.begin(), result.items.end(), [&](const auto& a, const auto& b) {
+                return q.sort == 1 ? Lower(a.title) < Lower(b.title) : Lower(b.title) < Lower(a.title);
+            });
+        return result;
+    }
     auto resolveTime = [&](int64_t offset, int64_t reference, int64_t& time) {
         int64_t base = 0;
         if (reference == 2) base = now;
