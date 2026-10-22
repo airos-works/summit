@@ -246,6 +246,8 @@ int main()
         const auto* rust = Child(*toolbar, "Rust & C++");
         CHECK(rust && rust->added == 1696000005 && Titles(*rust) == "The Rust Book — <online>,--,cppreference");
         CHECK(rust->children[1].separator && rust->children[1].url.empty());
+        CHECK(rust->children[0].metadata.tags == std::vector<std::string>{"rust"});
+        CHECK(rust->children[0].metadata.description == "A description that is not a title");
         CHECK(rust->children[2].url == "https://en.cppreference.com/" && rust->children[2].added == 1696000007);
         CHECK(Child(root, "Other Bookmarks")->children[0].url == "https://example.com/?a=1&b=2");
         CHECK(root.children[2].url == "place:sort=8&maxResults=10");
@@ -391,6 +393,7 @@ int main()
         const auto* toolbar = Child(imported.bookmarks, "Bookmarks Toolbar");
         CHECK(toolbar && Titles(*toolbar) == "Mozilla,Add-ons,Nested/" && toolbar->children[0].added == 1690000000);
         CHECK(Child(*toolbar, "Nested")->children[0].url == "https://in.example/");
+        CHECK(toolbar->children[0].metadata.tags == std::vector<std::string>{"x"});
         CHECK(imported.history.size() == 2 && imported.history[0].url == "https://addons.mozilla.org/"
             && imported.history[0].visited == 1700000100 && imported.history[1].visits == 3);
         Profile profile;
@@ -399,6 +402,25 @@ int main()
         CHECK(profile.history[0].url == "https://addons.mozilla.org/" && profile.history[1].visited == 1700000000
             && profile.history[1].visits == 3);
         CHECK(profile.ImportHistory(imported.history) == 0);
+
+        // Old Firefox descriptions are optional item annotations. Tags are
+        // URL associations under the tags root, not ordinary imported folders.
+        CHECK(MakeDatabase(sqlite, places, R"(
+            CREATE TABLE moz_anno_attributes (id INTEGER PRIMARY KEY, name TEXT);
+            CREATE TABLE moz_items_annos (id INTEGER PRIMARY KEY, item_id INTEGER, anno_attribute_id INTEGER, content TEXT);
+            INSERT INTO moz_anno_attributes VALUES (1, 'bookmarkProperties/description'), (2, 'unrelated');
+            INSERT INTO moz_items_annos VALUES (1, 11, 1, 'Mozilla notes'), (2, 12, 1, 'Folder notes'), (3, 13, 2, 'Ignored');
+            INSERT INTO moz_bookmarks VALUES (18, 2, NULL, 4, 1, 'tag, comma', 0, 'i'),
+                (19, 1, 1, 18, 0, NULL, 0, 'j'), (20, 1, 5, 18, 1, NULL, 0, 'k');
+        )"));
+        CHECK(ReadImport(places, options, imported, error));
+        toolbar = Child(imported.bookmarks, "Bookmarks Toolbar");
+        CHECK(toolbar->children[0].metadata.description == "Mozilla notes");
+        CHECK((toolbar->children[0].metadata.tags == std::vector<std::string>{"x", "tag, comma"}));
+        CHECK(Child(*toolbar, "Nested")->metadata.description == "Folder notes");
+        CHECK(Child(*toolbar, "Nested")->children[0].metadata.description.empty());
+        CHECK(Child(*toolbar, "Nested")->children[0].metadata.tags == std::vector<std::string>{"tag, comma"});
+        CHECK(Titles(imported.bookmarks) == "Bookmarks Toolbar/,--,Tagged");
 
         const auto chromeHistory = directory / "Default" / "History";
         CHECK(MakeDatabase(sqlite, chromeHistory, R"(
@@ -516,6 +538,132 @@ int main()
         CHECK(!result.Changed() && result.overLimit == 0 && marks.SeparatorCount() == 1);
         CHECK(Titles(marks.Other().children.front()) == "Nested/");
         CHECK(marks.Import(source, "Another import").overLimit > 0 && marks.FolderCount() == kMaxBookmarkFolders);
+        const auto id = marks.Add({"https://known.example/", "Keep my title"}, kBookmarksBarFolder);
+        BookmarkNode metadata;
+        metadata.children.push_back({0, "Imported title", "https://known.example/", false, 0, {}});
+        metadata.children.back().metadata = {"Imported description", {"new tag"}};
+        const auto updated = marks.Import(metadata, "No room for this folder");
+        CHECK(updated.Changed() && updated.updated == 1 && updated.duplicates == 1 && updated.overLimit == 0);
+        CHECK(updated.folder == 0 && updated.foldersAdded == 0 && marks.FolderCount() == kMaxBookmarkFolders);
+        CHECK(marks.Find(id)->metadata == metadata.children.back().metadata && marks.Find(id)->title == "Keep my title");
+        CHECK(!marks.Import(metadata, "No room for this folder").Changed());
+    }
+
+    // Metadata survives parsing, merge, editing, profile save and HTML export.
+    {
+        BookmarkNode source;
+        std::string error;
+        CHECK(ParseNetscapeBookmarks(R"(<DL>
+            <DT><H3 TAGS="folder, research">Notes</H3><DD>Folder <em>description</em>
+            <DL><DT><A HREF="https://metadata.example/" TAGS=" one, two,one,,three ">Imported title</A>
+            <DD>Read <a href="https://inline.example/">this link</a> &amp; more
+            <DT><A HREF="https://second.example/">Second</A><DD>Second description</DD>
+            </DL><DT><A HREF="https://outside.example/">Outside</A></DL>)", source, error));
+        CHECK(CountBookmarks(source) == 3 && source.children.size() == 2);
+        CHECK(source.children[0].metadata.description == "Folder description");
+        CHECK((source.children[0].metadata.tags == std::vector<std::string>{"folder", "research"}));
+        const auto metadata = source.children[0].children[0].metadata;
+        CHECK(metadata.description == "Read this link & more");
+        CHECK((metadata.tags == std::vector<std::string>{"one", "two", "three"}));
+        CHECK(source.children[0].children[1].metadata.description == "Second description");
+        CHECK(source.children[1].metadata.Empty());
+        BookmarkNode describedRoot;
+        CHECK(ParseNetscapeBookmarks("<DL><DT><H3 PERSONAL_TOOLBAR_FOLDER='true'>Toolbar</H3>"
+            "<DD>Keep these notes<DL></DL></DL>", describedRoot, error));
+        CHECK(describedRoot.children.size() == 1 && describedRoot.children[0].metadata.description == "Keep these notes");
+
+        Profile profile;
+        auto result = profile.bookmarks.Import(source, "Imported");
+        CHECK(result.added == 3 && result.Changed());
+        const auto id = profile.bookmarks.FindURL("https://metadata.example/")->id;
+        CHECK(profile.bookmarks.Find(id)->metadata == metadata);
+        BookmarkMetadata edited{"<notes> & \"quotes\"\n  next\tline\n", {"comma, tag", "quote\"tag", "Café"}};
+        CHECK(profile.bookmarks.SetMetadata(id, edited));
+        CHECK(!profile.bookmarks.SetMetadata(id, edited));
+        CHECK(ParseBookmarkTags(BookmarkTagsText(edited.tags)) == edited.tags);
+        CHECK((ParseBookmarkTags("one, \"comma, tag\",\"quote\"\"tag\", one,, ") == std::vector<std::string>{"one", "comma, tag", "quote\"tag"}));
+        const auto path = directory / "metadata.json";
+        CHECK(profile.Save(path, error));
+        auto loaded = Profile::Load(path, error);
+        CHECK(error.empty() && loaded.bookmarks.FindURL("https://metadata.example/")->metadata == edited);
+        const auto html = WriteNetscapeBookmarks(loaded.bookmarks);
+        CHECK(html.find("<DD>&lt;notes&gt;") != std::string::npos && html.find("SUMMIT_TAGS=") != std::string::npos);
+        CHECK(ParseNetscapeBookmarks(html, source, error));
+        Bookmarks round;
+        CHECK(round.Import(source, "Round trip").added == 3);
+        CHECK(round.FindURL("https://metadata.example/")->metadata == edited);
+        CHECK(Child(round.Other().children[0].children[0], "Notes")->metadata.description == "Folder description");
+        const auto page = RenderBookmarksPage(profile.bookmarks, nullptr, "ab");
+        CHECK(page.find("data-description=\"&lt;notes&gt; &amp; &quot;quotes&quot;") != std::string::npos);
+        CHECK(page.find("<span class=\"metadata\">") != std::string::npos && page.find("<notes>") == std::string::npos);
+        CHECK(page.find("row.dataset.tags, row.dataset.description") != std::string::npos);
+        auto link = ParseBookmarkPageLink("summit-bookmarks:save?token=ab&id=4&description=line%201%0Aline%202&tags=one%2C%20%22comma%2C%20tag%22");
+        CHECK(link && link->hasDescription && link->hasTags && link->description == "line 1\nline 2");
+        CHECK((ParseBookmarkTags(link->tags) == std::vector<std::string>{"one", "comma, tag"}));
+        CHECK(profile.bookmarks.SetMetadata(id, {}) && profile.bookmarks.Find(id)->metadata.Empty());
+        CHECK(profile.Save(path, error));
+        CHECK(Profile::Load(path, error).bookmarks.FindURL("https://metadata.example/")->metadata.Empty());
+        nlohmann::json saved;
+        { std::ifstream input(path); input >> saved; }
+        auto& item = saved["bookmarkTree"]["other"][0]["children"][0]["children"][0];
+        item["description"] = 42;
+        item["tags"] = {false, "valid", nullptr};
+        WriteText(path, saved.dump());
+        loaded = Profile::Load(path, error);
+        CHECK(error.empty() && loaded.bookmarks.FindURL("https://metadata.example/")->metadata.description.empty());
+        CHECK(loaded.bookmarks.FindURL("https://metadata.example/")->metadata.tags == std::vector<std::string>{"valid"});
+        CHECK(!profile.bookmarks.SetMetadata(kBookmarksBarFolder, edited));
+        CHECK(!profile.bookmarks.SetMetadata(profile.bookmarks.AddSeparator(kBookmarksBarFolder), edited));
+    }
+
+    // Reimporting metadata enriches existing bookmarks without replacing their
+    // title, folder, or nonempty description, and without creating an empty import.
+    {
+        Bookmarks marks;
+        const auto id = marks.Add({"https://known.example/", "My title"}, kBookmarksBarFolder);
+        marks.SetMetadata(id, {"My description", {"mine"}});
+        BookmarkNode source;
+        std::string error;
+        CHECK(ParseNetscapeBookmarks("<DL><DT><A HREF='https://known.example/' TAGS='new,mine'>Different</A>"
+            "<DD>Different description</DL>", source, error));
+        auto result = marks.Import(source, "Imported");
+        CHECK(result.Changed() && result.added == 0 && result.updated == 1 && result.duplicates == 1 && result.folder == 0);
+        CHECK(marks.Other().children.empty() && marks.Find(id)->title == "My title");
+        CHECK(marks.Find(id)->metadata.description == "My description");
+        CHECK((marks.Find(id)->metadata.tags == std::vector<std::string>{"mine", "new"}));
+        CHECK(!marks.Import(source, "Imported").Changed());
+        marks.SetMetadata(id, {});
+        CHECK(marks.Import(source, "Imported").updated == 1);
+        CHECK(marks.Find(id)->metadata.description == "Different description");
+        // Duplicate records inside the same import also contribute metadata.
+        source.children.push_back(source.children[0]);
+        source.children.back().metadata.tags = {"extra"};
+        Bookmarks fresh;
+        result = fresh.Import(source, "Imported");
+        CHECK(result.added == 1 && result.duplicates == 1);
+        CHECK((fresh.FindURL("https://known.example/")->metadata.tags == std::vector<std::string>{"new", "mine", "extra"}));
+        BookmarkNode folder{0, "", "", true, 0, {{0, "Described folder", "", true, 0, source.children}}};
+        folder.children[0].metadata.description = "Keep even when its links are already bookmarked";
+        result = marks.Import(folder, "Imported");
+        CHECK(result.foldersAdded == 2 && marks.Other().children[0].children[0].children.empty());
+        CHECK(!marks.Other().children[0].children[0].metadata.Empty());
+        CHECK(!marks.Import(folder, "Imported").Changed());
+    }
+
+    // Metadata bounds preserve UTF-8 boundaries, remove embedded NULs, and
+    // discard duplicate/empty tags without affecting ordinary bookmark data.
+    {
+        BookmarkMetadata metadata;
+        metadata.description = std::string(kMaxBookmarkDescription - 1, 'a') + "é";
+        metadata.tags = {"", "  ", " A ", "A", std::string("nul\0tag", 7)};
+        auto normalized = NormalizeBookmarkMetadata(metadata);
+        CHECK(normalized.description.size() == kMaxBookmarkDescription - 1);
+        CHECK((normalized.tags == std::vector<std::string>{"A", "nultag"}));
+        metadata.tags.clear();
+        for (size_t i = 0; i < kMaxBookmarkTags + 2; ++i)
+            metadata.tags.push_back(std::to_string(i) + std::string(kMaxBookmarkTagLength, 'x'));
+        normalized = NormalizeBookmarkMetadata(std::move(metadata));
+        CHECK(normalized.tags.size() == kMaxBookmarkTags && normalized.tags[0].size() == kMaxBookmarkTagLength);
     }
 
     // The Bookmarks page and its links.
@@ -530,7 +678,7 @@ int main()
         CHECK(html.find("data-token=\"0123456789abcdef\"") != std::string::npos);
         CHECK(html.find("summit-bookmarks:import?token=0123456789abcdef\"") != std::string::npos);
         CHECK(html.find("<div class=\"item\" data-id=\"" + std::to_string(bar) + "\"><div class=\"row\" data-title=\"X &lt;b&gt;\" "
-            "data-url=\"https://x.example/\">") != std::string::npos && html.find("data-action=\"edit\"") != std::string::npos);
+            "data-url=\"https://x.example/\"") != std::string::npos && html.find("data-action=\"edit\"") != std::string::npos);
         CHECK(html.find("<option value=\"" + std::to_string(folder) + "\">\xC2\xA0\xC2\xA0\xC2\xA0\xC2\xA0Reading &quot;list&quot;</option>")
             != std::string::npos);
         CHECK(html.find("Reading &quot;list&quot;") != std::string::npos && html.find("X &lt;b&gt;") != std::string::npos);

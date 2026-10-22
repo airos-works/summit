@@ -168,7 +168,7 @@ ImportOutcome ImportBookmarksFrom(SharedProfile& shared, const std::filesystem::
     outcome.bookmarks = result.added;
     outcome.folder = result.folder;
     std::string text;
-    if (result.Changed()) {
+    if (result.added || result.foldersAdded || result.separatorsAdded) {
         std::string items;
         auto describe = [&](size_t count, const char* singular, const char* plural) {
             if (count) items += (items.empty() ? "" : ", ") + Count(count, singular, plural);
@@ -179,9 +179,12 @@ ImportOutcome ImportBookmarksFrom(SharedProfile& shared, const std::filesystem::
         text = "Imported " + items + " from " + imported.source
             + " into the folder “" + folderTitle + "” in Other Bookmarks.";
     }
-    else if (found && result.duplicates == found)
+    else if (!result.updated && found && result.duplicates == found)
         text = "Nothing new to import: every bookmark from " + imported.source + " is bookmarked already.";
-    else if (found || imported.history.empty()) text = "There were no new bookmarks to import from " + imported.source + ".";
+    else if (!result.updated && (found || imported.history.empty())) text = "There were no new bookmarks to import from " + imported.source + ".";
+    if (result.updated)
+        text += (text.empty() ? "" : " ") + std::string("Updated tags and descriptions on ")
+            + Count(result.updated, "existing item", "existing items") + ".";
     if (result.Changed() && result.duplicates)
         text += " " + std::to_string(result.duplicates) + (result.duplicates == 1 ? " was already bookmarked." : " were already bookmarked.");
     if (result.unsupported)

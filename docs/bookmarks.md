@@ -23,8 +23,10 @@ separators and folders nested up to 32 deep. No engine change.
   Work") and offers **Edit Bookmark…**; for a page that is not bookmarked it
   offers Add to Bookmarks Bar, Add to Bookmarks and **Add to Folder…**.
 - **The bookmark editor** (Edit Bookmark…, Add to Folder…, the bar's Edit… and
-  Edit Folder…, New Folder…) is a small window with Name, Address and a
-  Folder menu that shows the folders indented by depth. An address typed
+  Edit Folder…, New Folder…) has Name, Address, Tags, a multiline Description,
+  and a Folder menu that shows the folders indented by depth. Separate tags
+  with commas; quote a tag containing a comma, doubling any quote inside it.
+  An address typed
   without a scheme gets `https://`. **Delete** removes the bookmark; deleting
   a folder that has bookmarks in it asks first ("Delete the folder “Work” and
   the 12 bookmarks in it?").
@@ -50,9 +52,9 @@ separators and folders nested up to 32 deep. No engine change.
   its page instead of the empty file.
 - **The Bookmarks tab** (`summit:bookmarks`, Alt+B) shows both folders as a
   tree. Folders open and close (the page remembers which while the tab
-  lives); the search field shows matching bookmarks with the folders they are
+  lives); the search field matches titles, addresses, tags and descriptions with the folders they are
   in, and a matching folder with everything in it. Bookmark and folder rows have **Edit**,
-  which turns it into a small form (Name, Address, Folder) saved with Enter
+  which turns it into a form (Name, Address, Folder, Tags, Description) saved with Enter
   or Save, and **Delete**. Rows are dragged with the mouse: before or after
   another row, or onto a folder's row to go inside it. **New Folder…**,
   **Import…** and **Export…** are at the top.
@@ -69,13 +71,14 @@ separators and folders nested up to 32 deep. No engine change.
 
   Bookmarks go into a folder **Imported from WebPositive** (Firefox, Chrome,
   …; for an HTML file from another browser its file name) in Other Bookmarks,
-  with their folders. Addresses that are bookmarked already are skipped, so
-  importing again adds only what is new; folders left empty by skipped duplicates are not made,
+  with their folders. Addresses that are bookmarked already keep their existing
+  title and location, gain new tags, and receive a description only if they have
+  none. Importing again adds only what is new; folders left empty by duplicates are not made,
   and an "Imported from …" folder that exists is filled again (its folders of
   the same name merged). javascript: bookmarklets and Firefox's `place:`
   queries are counted and left out. Empty folders present in the source are
   kept, including imports containing no addresses. The window reports added
-  bookmarks, folders and separators, skipped addresses, and imported history.
+  bookmarks, folders and separators, updated metadata, skipped addresses, and imported history.
 - **File › Export Bookmarks…** saves `bookmarks.html` (Netscape bookmarks
   HTML, the format every browser imports) where the save panel says: the
   bookmarks bar as a folder marked as the toolbar (`PERSONAL_TOOLBAR_FOLDER`),
@@ -84,8 +87,8 @@ separators and folders nested up to 32 deep. No engine change.
 ## How it works
 
 - **The model** is `src/core/Bookmarks.{h,cpp}`: `BookmarkNode` (title,
-  address or children, time added, separator flag) and `Bookmarks`, which owns the two root
-  folders and is the only way to change them (`Add`, `AddFolder`, `AddSeparator`, `Edit`,
+  address or children, time added, separator flag, tags and description) and `Bookmarks`, which owns the two root
+  folders and is the only way to change them (`Add`, `AddFolder`, `AddSeparator`, `Edit`, `SetMetadata`,
   `Move` — before the child now at an index, so a drag's index needs no
   adjusting — `Remove`, `RemoveURL`, `Import`). Node ids are numbered when the
   profile is read and are unique while Summit runs; the pages, menus and
@@ -93,7 +96,10 @@ separators and folders nested up to 32 deep. No engine change.
   bookmarks (`Pages()`, the bar's first, those directly on the bar flagged),
   which the address field's suggestions, the star and history clearing use.
   Separators stay out of that flat list and address lookups. Limits: 10000
-  bookmarks (as before), 5000 folders, 5000 separators, 32 levels.
+  bookmarks (as before), 5000 folders, 5000 separators, 32 levels. Each node's
+  metadata is bounded to a 16 KiB description and 100 tags of up to 256 bytes;
+  truncation preserves UTF-8 character boundaries. Empty and duplicate tags
+  are removed, and embedded NULs are removed from metadata.
 - **`profile.json`** keeps the folders in a new `bookmarkTree` (`bar` and
   `other`, nested `children`) and still writes `bookmarks`, the flat list,
   with `bar` set for the bar's own bookmarks. Older builds read only the flat
@@ -102,6 +108,8 @@ separators and folders nested up to 32 deep. No engine change.
   by an older build) is read from the flat list. Unusable tree entries are
   dropped rather than failing the profile. Separators are saved with
   `"separator": true` and no address; older builds ignore them.
+  Optional `description` and `tags` fields preserve metadata in the tree;
+  older builds ignore these fields, and saving with one loses them.
 - **Formats** are `src/core/BookmarkIO.{h,cpp}`: a tolerant Netscape HTML
   reader (`<DL>`/`<DT>`/`<H3>`/`<A>`/`<HR>`, entities, quoted or bare attributes,
   `ADD_DATE` in seconds, milliseconds or microseconds, unclosed lists) and
@@ -117,7 +125,7 @@ separators and folders nested up to 32 deep. No engine change.
   Chrome may be running and holding them. Firefox's roots are found by guid:
   the toolbar becomes "Bookmarks Toolbar", the Bookmarks Menu's own come
   first-level, then "Other Bookmarks" and "Mobile Bookmarks". Firefox type-3
-  records become separators; tags are still left out. History is the 2000 most
+  records become separators. History is the 2000 most
   recent visible pages with visit counts.
 - **Separator import/export** uses `<HR>`, as in
   [Firefox's HTML importer/exporter](https://searchfox.org/firefox-main/source/toolkit/components/places/BookmarkHTMLUtils.sys.mjs).
@@ -126,6 +134,22 @@ separators and folders nested up to 32 deep. No engine change.
   existing nodes retain their positions, just as existing bookmarks do.
   `BookmarkImportResult::Changed()` includes folders and separators so an
   import with no new page addresses still saves and refreshes browser windows.
+- **Tags and descriptions** are read from HTML `TAGS` attributes and `<DD>`
+  text following bookmarks or folders. Inline HTML becomes plain text. Firefox
+  databases associate tags with URLs through folders under the tags root, as
+  in its [tagging service](https://github.com/mozilla-firefox/firefox/blob/main/toolkit/components/places/TaggingService.sys.mjs).
+  When present, old `bookmarkProperties/description` item annotations supply
+  descriptions; newer profiles can omit these annotation tables. Data already
+  removed by Firefox cannot be recovered by importing it.
+  HTML export writes standard `TAGS` and `<DD>` plus a `SUMMIT_TAGS` JSON
+  attribute so names containing commas survive a Summit round trip. Other
+  browsers can read the standard attributes; the standard comma list cannot
+  distinguish a comma inside a tag name. Description whitespace is entity
+  encoded so indentation in the exported file does not change it on reimport.
+  Metadata-only imports mark the profile dirty and notify windows, even when
+  the folder allowance is full; repeat imports with identical metadata do
+  neither. Duplicate URLs are resolved by
+  stable node IDs so growing folder vectors cannot invalidate merge targets.
 - **History import** (`Profile::ImportHistory`) adds pages history does not
   have, keeps the later visit and larger count of pages both have, and keeps
   the 2000 most recent. WebPositive's `BrowsingHistory` (a flattened message
@@ -164,6 +188,28 @@ separators and folders nested up to 32 deep. No engine change.
   [mcp.md](mcp.md)).
 
 ## Testing
+
+The tag/description follow-up passes **237 bookmark checks** on the host and
+native airOS, the host core suite, and **31 native UI checks**. It covers
+Firefox tag associations, optional legacy annotations, descriptions attached
+to the correct HTML node, duplicate enrichment, exact profile/export round
+trips (including newlines, repeated spaces, Unicode and commas in tag names),
+clearing metadata, malformed profile metadata, and size bounds. Native checks
+exercise metadata-only import saving and notifications and the real native
+editor's Save button with quoted tag names and a multiline description.
+
+The full browser passes **14 checks** for importing and listing metadata,
+filtering by tags and descriptions, opening the inline editor, saving quoted
+tags and multiline text through the page's actual Save route, and preserving
+the result in the saved profile and exported HTML. WebCore screenshots of the
+editor and saved result were inspected; the editor has no horizontal overflow.
+The isolated browser exits normally, leaves no helpers, and records no crash
+events across the complete log interval. All **628 source and runtime hashes**
+remain unchanged. This uses the previously accepted PDF engine from `4548921`
+with a freshly built application, not a new published package. The native
+editor probe uses a hidden window; its Save action is verified, but its layout
+was not visually inspected. Results and provenance are in
+[`bookmark-metadata-native-2026-10-22.json`](bookmark-metadata-native-2026-10-22.json).
 
 The 22 October #110 follow-up passes **171 bookmark checks** on the host and
 native airOS, plus the host core suite. Separator ordering, repeated and
@@ -236,7 +282,7 @@ engine, profile `p-bm`):
 
 ## Not done
 
-- Keywords, tags and descriptions are not imported; Firefox's
+- Keywords are not imported; Firefox's
   smart folders (`place:` queries) and bookmarklets are skipped.
 - ~~Exporting and importing back leaves out empty folders.~~ Done 20 October
   (#110): a folder empty in the file is imported (one only duplicates filled is

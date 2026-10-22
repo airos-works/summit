@@ -171,6 +171,43 @@ int64_t AttributeTime(const Tag& tag, const char* name)
     while (value > 100000000000) value /= 1000;
     return value;
 }
+
+BookmarkMetadata AttributeMetadata(const Tag& tag)
+{
+    BookmarkMetadata metadata;
+    // TAGS is a plain comma-separated list in Firefox's format. Our extra
+    // attribute preserves tag names containing commas during a round trip.
+    if (auto tags = tag.attributes.find("summit_tags"); tags != tag.attributes.end()) {
+        auto values = nlohmann::json::parse(tags->second, nullptr, false);
+        if (values.is_array()) {
+            for (const auto& value : values)
+                if (value.is_string() && metadata.tags.size() < kMaxBookmarkTags)
+                    metadata.tags.push_back(value.get<std::string>());
+            return NormalizeBookmarkMetadata(std::move(metadata));
+        }
+    }
+    if (auto tags = tag.attributes.find("tags"); tags != tag.attributes.end()) {
+        size_t start = 0;
+        do {
+            const size_t end = tags->second.find(',', start);
+            metadata.tags.push_back(tags->second.substr(start, end == std::string::npos ? end : end - start));
+            if (end == std::string::npos) break;
+            start = end + 1;
+        } while (metadata.tags.size() < kMaxBookmarkTags);
+    }
+    return NormalizeBookmarkMetadata(std::move(metadata));
+}
+
+size_t DescriptionEnd(std::string_view html, size_t position)
+{
+    for (size_t next = html.find('<', position); next != std::string_view::npos; next = html.find('<', position)) {
+        position = next;
+        Tag tag;
+        ReadTag(html, position, tag);
+        if (tag.name == "dt" || tag.name == "dd" || tag.name == "dl" || tag.name == "h3" || tag.name == "hr") return next;
+    }
+    return html.size();
+}
 }
 
 bool ParseNetscapeBookmarks(std::string_view html, BookmarkNode& folder, std::string& error)
@@ -182,6 +219,7 @@ bool ParseNetscapeBookmarks(std::string_view html, BookmarkNode& folder, std::st
     // while it is on top, and the folders below are not changed meanwhile.
     std::vector<BookmarkNode*> open;
     BookmarkNode* pending = nullptr;
+    BookmarkNode* previous = nullptr;
     // Where each open folder and the pending one are, as child indices from
     // the top, and the browsers' own roots (Chrome's bar, Firefox's toolbar
     // and Other Bookmarks): empty, they are no folder of the user's, and an
@@ -197,7 +235,17 @@ bool ParseNetscapeBookmarks(std::string_view html, BookmarkNode& folder, std::st
         position = html.find('<', position)) {
         Tag tag;
         if (!ReadTag(html, position, tag) || tag.name.empty()) continue;
+        if (tag.name == "dd" && !tag.closing) {
+            const size_t end = DescriptionEnd(html, position);
+            if (previous && !previous->separator) {
+                previous->metadata.description = ElementText(html.substr(position, end - position));
+                previous->metadata = NormalizeBookmarkMetadata(std::move(previous->metadata));
+            }
+            position = end;
+            continue;
+        }
         if (tag.name == "dl") {
+            previous = nullptr;
             if (tag.closing) {
                 if (!open.empty()) open.pop_back();
                 if (!openPaths.empty()) openPaths.pop_back();
@@ -225,6 +273,7 @@ bool ParseNetscapeBookmarks(std::string_view html, BookmarkNode& folder, std::st
             node.added = AttributeTime(tag, "add_date");
             if (auto name = tag.attributes.find("name"); name != tag.attributes.end()) node.title = name->second;
             current().children.push_back(std::move(node));
+            previous = nullptr;
             pending = nullptr;
             any = true;
             continue;
@@ -236,9 +285,11 @@ bool ParseNetscapeBookmarks(std::string_view html, BookmarkNode& folder, std::st
         if (end != std::string_view::npos) position = end;
         if (++nodes > kMaxImportNodes) break;
         pending = nullptr;
+        previous = nullptr;
         BookmarkNode node;
         node.title = text;
         node.added = AttributeTime(tag, "add_date");
+        node.metadata = AttributeMetadata(tag);
         if (link) {
             auto href = tag.attributes.find("href");
             if (href == tag.attributes.end()) continue;
@@ -253,6 +304,7 @@ bool ParseNetscapeBookmarks(std::string_view html, BookmarkNode& folder, std::st
             if (tag.attributes.count("personal_toolbar_folder") || tag.attributes.count("unfiled_bookmarks_folder"))
                 roots.push_back(pendingPath);
         }
+        previous = &current().children.back();
         any = true;
     }
     // Later ones first, so that the indices of earlier ones still hold.
@@ -262,7 +314,7 @@ bool ParseNetscapeBookmarks(std::string_view html, BookmarkNode& folder, std::st
         for (size_t i = 0; i + 1 < path.size() && parent; ++i)
             parent = path[i] < parent->children.size() ? &parent->children[path[i]] : nullptr;
         if (parent && path.back() < parent->children.size() && parent->children[path.back()].folder
-            && parent->children[path.back()].children.empty())
+            && parent->children[path.back()].children.empty() && parent->children[path.back()].metadata.Empty())
             parent->children.erase(parent->children.begin() + path.back());
     }
     if (!any) {
@@ -513,6 +565,7 @@ private:
 struct PlacesRow {
     int64_t id, parent, type, added;
     std::string title, url, guid;
+    BookmarkMetadata metadata = {};
 };
 
 void PlacesFolder(const std::map<int64_t, std::vector<const PlacesRow*>>& children, int64_t id, BookmarkNode& into,
@@ -521,13 +574,17 @@ void PlacesFolder(const std::map<int64_t, std::vector<const PlacesRow*>>& childr
     auto found = children.find(id);
     if (found == children.end()) return;
     for (const auto* row : found->second) {
-        if (row->type == 1 && !row->url.empty()) into.children.push_back({0, row->title, row->url, false, row->added, {}});
+        if (row->type == 1 && !row->url.empty()) {
+            into.children.push_back({0, row->title, row->url, false, row->added, {}});
+            into.children.back().metadata = row->metadata;
+        }
         else if (row->type == 3) into.children.push_back({0, row->title, "", false, row->added, {}, true});
         else if (row->type == 2) {
             BookmarkNode* target = &into;
             if (depth + 1 <= kMaxBookmarkDepth) {
                 into.children.push_back({0, row->title, "", true, row->added, {}});
                 target = &into.children.back();
+                target->metadata = row->metadata;
             }
             if (depth < 64) PlacesFolder(children, row->id, *target, depth + 1);
         }
@@ -563,6 +620,34 @@ bool ReadFirefoxPlaces(const std::filesystem::path& places, const std::string& s
             children[row.parent].push_back(&row);
             roots[row.guid] = row.id;
         }
+        std::map<std::string, std::vector<std::string>> tags;
+        if (auto root = roots.find("tags________"); root != roots.end()) {
+            for (const auto* tag : children[root->second]) {
+                if (tag->type != 2 || tag->title.empty()) continue;
+                for (const auto* item : children[tag->id]) {
+                    if (item->type != 1 || item->url.empty()) continue;
+                    auto& names = tags[item->url];
+                    if (names.size() < kMaxBookmarkTags) names.push_back(tag->title);
+                }
+            }
+        }
+        std::map<int64_t, PlacesRow*> byID;
+        for (auto& row : rows) {
+            byID[row.id] = &row;
+            if (auto found = tags.find(row.url); found != tags.end()) row.metadata.tags = found->second;
+        }
+        // Descriptions were item annotations in older Firefox profiles. Newer
+        // profiles may omit these tables altogether; neither is required.
+        size_t annotationTables = 0;
+        if (!database.Query("SELECT name FROM sqlite_master WHERE type = 'table' AND name IN "
+                "('moz_items_annos', 'moz_anno_attributes')", [&](void*) { ++annotationTables; }, error)) return false;
+        if (annotationTables == 2 && !database.Query("SELECT a.item_id, IFNULL(a.content, '') FROM moz_items_annos a "
+                "JOIN moz_anno_attributes n ON n.id = a.anno_attribute_id WHERE n.name = 'bookmarkProperties/description' "
+                "ORDER BY a.id LIMIT 100000", [&](void* item) {
+                    if (auto row = byID.find(database.Int(item, 0)); row != byID.end())
+                        row->second->metadata.description = database.Text(item, 1);
+                }, error)) return false;
+        for (auto& row : rows) row.metadata = NormalizeBookmarkMetadata(std::move(row.metadata));
         // The toolbar first, then the Bookmarks Menu's own, then the rest.
         for (auto [guid, title] : {std::pair{"toolbar_____", "Bookmarks Toolbar"}, {"menu________", ""},
                 {"unfiled_____", "Other Bookmarks"}, {"mobile______", "Mobile Bookmarks"}}) {
@@ -570,8 +655,9 @@ bool ReadFirefoxPlaces(const std::filesystem::path& places, const std::string& s
             if (root == roots.end()) continue;
             if (!*title) { PlacesFolder(children, root->second, *folder, 0); continue; }
             BookmarkNode node{0, title, "", true, 0, {}};
+            if (auto row = byID.find(root->second); row != byID.end()) node.metadata = row->second->metadata;
             PlacesFolder(children, root->second, node, 1);
-            if (!node.children.empty()) folder->children.push_back(std::move(node));
+            if (!node.children.empty() || !node.metadata.Empty()) folder->children.push_back(std::move(node));
         }
     }
     if (history) {
@@ -675,20 +761,48 @@ bool ReadImport(const std::filesystem::path& path, const BookmarkImportOptions& 
 }
 
 namespace {
+std::string WriteMetadata(const BookmarkNode& node)
+{
+    if (node.metadata.tags.empty()) return {};
+    std::string tags;
+    for (const auto& tag : node.metadata.tags) tags += (tags.empty() ? "" : ",") + tag;
+    return " TAGS=\"" + EscapeHTML(tags) + "\" SUMMIT_TAGS=\""
+        + EscapeHTML(nlohmann::json(node.metadata.tags).dump()) + "\"";
+}
+
+std::string WriteDescription(const BookmarkNode& node, const std::string& indent)
+{
+    if (node.metadata.description.empty()) return {};
+    std::string text;
+    // Encode whitespace so the tolerant reader can distinguish the saved
+    // description's spacing from indentation in a hand-formatted HTML file.
+    for (char c : EscapeHTML(node.metadata.description)) {
+        if (c == ' ') text += "&#32;";
+        else if (c == '\n') text += "&#10;";
+        else if (c == '\r') text += "&#13;";
+        else if (c == '\t') text += "&#9;";
+        else text += c;
+    }
+    return indent + "<DD>" + text + "\n";
+}
+
 void WriteNodes(const std::vector<BookmarkNode>& nodes, int depth, std::string& html)
 {
     const std::string indent(4 * depth, ' ');
     for (const auto& node : nodes) {
         const std::string added = node.added ? " ADD_DATE=\"" + std::to_string(node.added) + "\"" : "";
         if (node.folder) {
-            html += indent + "<DT><H3" + added + ">" + EscapeHTML(node.title) + "</H3>\n";
+            html += indent + "<DT><H3" + added + WriteMetadata(node) + ">" + EscapeHTML(node.title) + "</H3>\n";
+            html += WriteDescription(node, indent);
             html += indent + "<DL><p>\n";
             WriteNodes(node.children, depth + 1, html);
             html += indent + "</DL><p>\n";
         } else if (node.separator)
             html += indent + "<HR" + (node.title.empty() ? "" : " NAME=\"" + EscapeHTML(node.title) + "\"") + added + ">\n";
-        else
-            html += indent + "<DT><A HREF=\"" + EscapeHTML(node.url) + "\"" + added + ">" + EscapeHTML(node.title) + "</A>\n";
+        else {
+            html += indent + "<DT><A HREF=\"" + EscapeHTML(node.url) + "\"" + added + WriteMetadata(node) + ">" + EscapeHTML(node.title) + "</A>\n";
+            html += WriteDescription(node, indent);
+        }
     }
 }
 }

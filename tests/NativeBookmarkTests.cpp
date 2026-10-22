@@ -1,14 +1,18 @@
 #include "core/Bookmarks.h"
 #include "core/Profile.h"
 #include "ui/BookmarkImport.h"
+#include "ui/BookmarkEditor.h"
 #include "ui/Chrome.h"
 #include "ui/Messages.h"
 #include "ui/SharedProfile.h"
 #include <Application.h>
 #include <Bitmap.h>
+#include <Button.h>
 #include <Menu.h>
 #include <MenuItem.h>
 #include <SeparatorItem.h>
+#include <TextControl.h>
+#include <TextView.h>
 #include <Window.h>
 #include <cstdio>
 #include <filesystem>
@@ -112,6 +116,45 @@ public:
         result = ImportBookmarksFrom(*fShared, separatorsFile, false);
         Check(result.ok && !result.folder, "repeated separator import has no change");
 
+        const auto metadataFile = fDirectory / "metadata.html";
+        { std::ofstream file(metadataFile); file << "<DL><DT><A HREF='https://metadata.example/' TAGS='first'>Metadata</A></DL>"; }
+        result = ImportBookmarksFrom(*fShared, metadataFile, false);
+        Check(result.ok && result.bookmarks == 1, "bookmark with metadata imported");
+        Check(fShared->Save(error), "initial metadata import saved");
+        { std::ofstream file(metadataFile); file << "<DL><DT><A HREF='https://metadata.example/' TAGS='first,second'>Other title</A>"
+            "<DD>Imported description</DL>"; }
+        result = ImportBookmarksFrom(*fShared, metadataFile, false);
+        Check(result.ok && result.bookmarks == 0 && result.message.find("Updated tags and descriptions") != std::string::npos,
+            "metadata-only import reports an update");
+        Check(fShared->Save(error), "metadata-only import saved");
+        loaded = Profile::Load(profilePath, error);
+        const auto* updated = loaded.bookmarks.FindURL("https://metadata.example/");
+        Check(updated && updated->title == "Metadata" && updated->metadata.description == "Imported description"
+            && updated->metadata.tags == std::vector<std::string>{"first", "second"},
+            "metadata-only import survives reopening without replacing the title");
+        result = ImportBookmarksFrom(*fShared, metadataFile, false);
+        Check(result.ok && result.message.find("Updated") == std::string::npos, "identical metadata reimport changes nothing");
+
+        BookmarkEditor::Fields fields;
+        fields.title = "Editor test";
+        fields.url = "https://metadata.example/";
+        fields.metadata = {"Original\nnotes", {"one", "comma, tag"}};
+        fields.folders = {{kOtherBookmarksFolder, 0, "Other Bookmarks"}};
+        auto* editor = new BookmarkEditor(fields, BMessenger(this), BRect(0, 0, 800, 600));
+        fEditor = BMessenger(editor);
+        auto* tags = dynamic_cast<BTextControl*>(editor->FindView("tags"));
+        auto* description = dynamic_cast<BTextView*>(editor->FindView("description"));
+        auto* save = dynamic_cast<BButton*>(editor->FindView("save"));
+        Check(tags && description && save, "native editor exposes tags and a multiline description");
+        if (tags && description && save) {
+            Check(ParseBookmarkTags(tags->Text()) == fields.metadata.tags && description->Text() == fields.metadata.description,
+                "native editor shows imported metadata without losing commas or newlines");
+            tags->SetText("one, \"comma, tag\", \"quote\"\"tag\"");
+            description->SetText("Edited\nsecond line");
+            save->Invoke();
+        } else editor->PostMessage(B_QUIT_REQUESTED);
+        editor->Run();
+
         auto snapshot = Snapshot();
         BMenu menu("Bookmarks");
         AddBookmarkItems(&menu, snapshot, *snapshot, BMessenger(this));
@@ -151,6 +194,14 @@ public:
     {
         if (message->what == kProfileChanged) {
             if (message->GetUInt32("changes", 0) & SharedProfile::kBookmarksChanged) ++fNotifications;
+        } else if (message->what == kBookmarkEdited) {
+            Check(std::string(message->GetString("description", "")) == "Edited\nsecond line",
+                "native Save retains the edited multiline description");
+            std::vector<std::string> tags;
+            const char* tag;
+            for (int32 i = 0; message->FindString("tag", i, &tag) == B_OK; ++i) tags.emplace_back(tag);
+            Check(tags == std::vector<std::string>{"one", "comma, tag", "quote\"tag"}, "native Save retains quoted tag names");
+            fEditorDone = true;
         } else if (message->what == kDone) {
             Check(message->GetInt32("opened", -1) == 1 && std::string(message->GetString("url", "")) == "https://example.com/",
                 "toolbar click ignores separator and opens the adjacent bookmark once");
@@ -159,14 +210,15 @@ public:
     }
     void Pulse() override
     {
-        if (fDone && !fWindow.IsValid()) {
-            Check(fNotifications == 2, "only changed imports notify the browser windows");
+        if (fDone && !fWindow.IsValid() && fEditorDone && !fEditor.IsValid()) {
+            Check(fNotifications == 4, "only changed imports notify the browser windows");
             fShared.reset();
             std::printf("%d native checks, %d failures\n", checks, failures);
             PostMessage(B_QUIT_REQUESTED);
         } else if (system_time() - fStarted > 5000000) {
             Check(false, "native test finishes within five seconds");
             if (fWindow.IsValid()) fWindow.SendMessage(B_QUIT_REQUESTED);
+            if (fEditor.IsValid()) fEditor.SendMessage(B_QUIT_REQUESTED);
             PostMessage(B_QUIT_REQUESTED);
         }
     }
@@ -174,8 +226,10 @@ private:
     std::filesystem::path fDirectory;
     std::unique_ptr<SharedProfile> fShared;
     BMessenger fWindow;
+    BMessenger fEditor;
     int fNotifications = 0;
     bool fDone = false;
+    bool fEditorDone = false;
     bigtime_t fStarted = 0;
 };
 }

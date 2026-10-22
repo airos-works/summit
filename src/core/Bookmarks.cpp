@@ -2,10 +2,72 @@
 #include <algorithm>
 #include <cctype>
 #include <ctime>
+#include <functional>
 #include <map>
 #include <set>
 
 namespace summit {
+namespace {
+std::string MetadataText(std::string text, size_t limit)
+{
+    text.erase(std::remove(text.begin(), text.end(), '\0'), text.end());
+    if (text.size() > limit) {
+        while (limit && (static_cast<unsigned char>(text[limit]) & 0xc0) == 0x80) --limit;
+        text.resize(limit);
+    }
+    return text;
+}
+}
+
+BookmarkMetadata NormalizeBookmarkMetadata(BookmarkMetadata metadata)
+{
+    metadata.description = MetadataText(std::move(metadata.description), kMaxBookmarkDescription);
+    std::vector<std::string> tags;
+    std::set<std::string> seen;
+    for (auto tag : metadata.tags) {
+        for (char& c : tag) if (c == '\r' || c == '\n' || c == '\t') c = ' ';
+        const auto start = tag.find_first_not_of(" ");
+        if (start == std::string::npos) continue;
+        tag = MetadataText(tag.substr(start, tag.find_last_not_of(" ") - start + 1), kMaxBookmarkTagLength);
+        if (!tag.empty() && seen.insert(tag).second) tags.push_back(std::move(tag));
+        if (tags.size() == kMaxBookmarkTags) break;
+    }
+    metadata.tags = std::move(tags);
+    return metadata;
+}
+
+std::vector<std::string> ParseBookmarkTags(std::string_view text)
+{
+    BookmarkMetadata metadata;
+    std::string tag;
+    bool quoted = false;
+    for (size_t i = 0; i < text.size(); ++i) {
+        const char c = text[i];
+        if (c == '"' && (quoted || tag.find_first_not_of(" \t") == std::string::npos)) {
+            if (quoted && i + 1 < text.size() && text[i + 1] == '"') { tag += '"'; ++i; }
+            else quoted = !quoted;
+        } else if (c == ',' && !quoted) {
+            metadata.tags.push_back(std::move(tag));
+            tag.clear();
+        } else tag += c;
+    }
+    metadata.tags.push_back(std::move(tag));
+    return NormalizeBookmarkMetadata(std::move(metadata)).tags;
+}
+
+std::string BookmarkTagsText(const std::vector<std::string>& tags)
+{
+    std::string text;
+    for (const auto& tag : tags) {
+        if (!text.empty()) text += ", ";
+        if (tag.find_first_of(",\"") == std::string::npos) { text += tag; continue; }
+        text += '"';
+        for (char c : tag) { text += c; if (c == '"') text += '"'; }
+        text += '"';
+    }
+    return text;
+}
+
 static bool StartsWithLower(const std::string& text, const char* prefix)
 {
     for (size_t i = 0; prefix[i]; ++i)
@@ -280,6 +342,16 @@ bool Bookmarks::Move(int64_t id, int64_t folder, size_t index)
     return true;
 }
 
+bool Bookmarks::SetMetadata(int64_t id, BookmarkMetadata metadata)
+{
+    auto* node = FindNode(id);
+    if (!node || node->separator || id == kBookmarksBarFolder || id == kOtherBookmarksFolder) return false;
+    metadata = NormalizeBookmarkMetadata(std::move(metadata));
+    if (node->metadata == metadata) return false;
+    node->metadata = std::move(metadata);
+    return true;
+}
+
 bool Bookmarks::Remove(int64_t id)
 {
     size_t index = 0;
@@ -306,7 +378,9 @@ bool Bookmarks::RemoveURL(const std::string& url)
 
 namespace {
 struct ImportState {
-    std::set<std::string> known;
+    std::map<std::string, int64_t> known;
+    std::function<BookmarkNode*(int64_t)> find;
+    std::set<int64_t> updated;
     // Folders this import made: those left empty are removed again.
     std::set<int64_t> created;
     size_t count;
@@ -323,6 +397,34 @@ std::string TrimmedURL(std::string url)
     size_t start = 0;
     while (start < url.size() && std::isspace(static_cast<unsigned char>(url[start]))) ++start;
     return url.substr(start);
+}
+
+void MergeMetadata(const BookmarkNode& from, BookmarkNode& into, ImportState& state)
+{
+    auto metadata = into.metadata;
+    if (metadata.description.empty()) metadata.description = from.metadata.description;
+    metadata.tags.insert(metadata.tags.end(), from.metadata.tags.begin(), from.metadata.tags.end());
+    metadata = NormalizeBookmarkMetadata(std::move(metadata));
+    if (!(into.metadata == metadata)) {
+        into.metadata = std::move(metadata);
+        state.updated.insert(into.id);
+    }
+}
+
+// Even without room for an import folder, existing URLs can gain metadata.
+// New items still require that folder and retain the normal limit reporting.
+void MergeExisting(const BookmarkNode& from, ImportState& state)
+{
+    for (const auto& child : from.children) {
+        if (child.folder) { MergeExisting(child, state); continue; }
+        if (child.separator) { ++state.result.overLimit; continue; }
+        const auto url = TrimmedURL(child.url);
+        if (!IsBookmarkableURL(url)) { ++state.result.unsupported; continue; }
+        if (auto known = state.known.find(url); known != state.known.end()) {
+            ++state.result.duplicates;
+            if (auto* existing = state.find(known->second)) MergeMetadata(child, *existing, state);
+        } else ++state.result.overLimit;
+    }
 }
 
 void Merge(const BookmarkNode& from, BookmarkNode& into, size_t depth, ImportState& state)
@@ -343,7 +445,8 @@ void Merge(const BookmarkNode& from, BookmarkNode& into, size_t depth, ImportSta
             const std::string title = child.title.substr(0, 4096);
             auto existing = std::find_if(into.children.begin(), into.children.end(),
                 [&](const BookmarkNode& node) { return node.folder && node.title == title; });
-            if (existing == into.children.end()) {
+            const bool created = existing == into.children.end();
+            if (created) {
                 if (state.folders >= kMaxBookmarkFolders) {
                     ++state.result.overLimit;
                     Merge(child, into, depth, state);
@@ -356,6 +459,8 @@ void Merge(const BookmarkNode& from, BookmarkNode& into, size_t depth, ImportSta
                 ++state.folders;
                 existing = into.children.end() - 1;
             }
+            if (created) existing->metadata = NormalizeBookmarkMetadata(child.metadata);
+            else MergeMetadata(child, *existing, state);
             // Only the folder's own children change below, so the reference stays valid.
             Merge(child, *existing, depth + 1, state);
             continue;
@@ -372,10 +477,16 @@ void Merge(const BookmarkNode& from, BookmarkNode& into, size_t depth, ImportSta
         }
         const std::string url = TrimmedURL(child.url);
         if (!IsBookmarkableURL(url)) { ++state.result.unsupported; continue; }
-        if (!state.known.insert(url).second) { ++state.result.duplicates; continue; }
+        if (auto found = state.known.find(url); found != state.known.end()) {
+            ++state.result.duplicates;
+            if (auto* existing = state.find(found->second)) MergeMetadata(child, *existing, state);
+            continue;
+        }
         if (state.count >= kMaxBookmarks) { ++state.result.overLimit; continue; }
         into.children.push_back({state.nextID++, (child.title.empty() ? url : child.title).substr(0, 4096), url, false,
             child.added ? child.added : state.now, {}});
+        into.children.back().metadata = NormalizeBookmarkMetadata(child.metadata);
+        state.known.emplace(url, into.children.back().id);
         ++state.count;
         ++state.result.added;
     }
@@ -386,7 +497,7 @@ void RemoveEmptyCreated(BookmarkNode& folder, const std::set<int64_t>& created)
     for (auto& child : folder.children)
         if (child.folder) RemoveEmptyCreated(child, created);
     folder.children.erase(std::remove_if(folder.children.begin(), folder.children.end(), [&](const BookmarkNode& child) {
-        return child.folder && child.children.empty() && created.count(child.id);
+        return child.folder && child.children.empty() && child.metadata.Empty() && created.count(child.id);
     }), folder.children.end());
 }
 }
@@ -394,14 +505,24 @@ void RemoveEmptyCreated(BookmarkNode& folder, const std::set<int64_t>& created)
 BookmarkImportResult Bookmarks::Import(const BookmarkNode& imported, const std::string& folderTitle, int64_t now)
 {
     const size_t oldFolders = fFolders;
-    ImportState state{{}, {}, fPages.size(), fFolders, fSeparators, {}, fNextID, now};
-    for (const auto& page : fPages) state.known.insert(page.url);
+    ImportState state{{}, [this](int64_t id) { return FindNode(id); }, {}, {}, fPages.size(), fFolders, fSeparators, {}, fNextID, now};
+    std::function<void(const BookmarkNode&)> collect = [&](const BookmarkNode& folder) {
+        for (const auto& child : folder.children) {
+            if (child.folder) collect(child);
+            else if (!child.separator) state.known.emplace(child.url, child.id);
+        }
+    };
+    collect(fBar);
+    collect(fOther);
     const std::string title = folderTitle.substr(0, 4096);
     auto existing = std::find_if(fOther.children.begin(), fOther.children.end(),
         [&](const BookmarkNode& node) { return node.folder && node.title == title; });
     if (existing == fOther.children.end()) {
         if (fFolders >= kMaxBookmarkFolders) {
-            state.result.overLimit = std::max<size_t>(1, CountBookmarks(imported));
+            MergeExisting(imported, state);
+            state.result.updated = state.updated.size();
+            if (!state.result.duplicates && !state.result.unsupported && !state.result.overLimit)
+                state.result.overLimit = 1;
             return state.result;
         }
         fOther.children.push_back({fNextID++, title, "", true, now, {}});
@@ -421,7 +542,8 @@ BookmarkImportResult Bookmarks::Import(const BookmarkNode& imported, const std::
     auto result = state.result;
     Reindex();
     result.foldersAdded = fFolders - oldFolders;
-    if (result.Changed()) result.folder = folder;
+    result.updated = state.updated.size();
+    if ((result.added || result.foldersAdded || result.separatorsAdded) && Find(folder)) result.folder = folder;
     return result;
 }
 }

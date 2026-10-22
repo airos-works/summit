@@ -3140,6 +3140,7 @@ void BrowserWindow::OpenBookmarkEditor(int64 id)
         fields.id = id;
         fields.title = node->title;
         fields.url = node->url;
+        fields.metadata = node->metadata;
         fields.folder = parent->id;
         // A folder cannot go inside itself.
         fields.folders = profile.bookmarks.Folders(node->folder ? id : 0);
@@ -3173,12 +3174,19 @@ void BrowserWindow::BookmarkEdited(const BMessage& message)
     const int64 folder = message.GetInt64("folder", kOtherBookmarksFolder);
     const std::string title = message.GetString("title", "");
     const std::string url = BookmarkAddress(message.GetString("url", ""));
+    BookmarkMetadata metadata;
+    metadata.description = message.GetString("description", "");
+    const char* tag = nullptr;
+    for (int32 i = 0; message.FindString("tag", i, &tag) == B_OK; ++i) metadata.tags.emplace_back(tag);
+    const bool hasMetadata = message.HasString("description");
     const char* status = nullptr;
     fShared->Change([&](Profile& profile) -> uint32 {
         auto& bookmarks = profile.bookmarks;
         const int64 now = std::time(nullptr);
         if (mode == BookmarkEditor::kNewFolderMode) {
-            if (!bookmarks.AddFolder(folder, title, kBookmarkEnd, now)) { status = "The folder could not be made there."; return 0; }
+            const auto added = bookmarks.AddFolder(folder, title, kBookmarkEnd, now);
+            if (!added) { status = "The folder could not be made there."; return 0; }
+            if (hasMetadata) bookmarks.SetMetadata(added, metadata);
             status = "Folder added";
             return SharedProfile::kBookmarksChanged;
         }
@@ -3187,7 +3195,9 @@ void BrowserWindow::BookmarkEdited(const BMessage& message)
             // A page bookmarked already keeps one bookmark, changed as asked.
             const auto* existing = bookmarks.FindURL(url);
             if (!existing) {
-                if (!bookmarks.Add({url, title}, folder, kBookmarkEnd, now)) { status = "You have reached the bookmark limit."; return 0; }
+                const auto added = bookmarks.Add({url, title}, folder, kBookmarkEnd, now);
+                if (!added) { status = "You have reached the bookmark limit."; return 0; }
+                if (hasMetadata) bookmarks.SetMetadata(added, metadata);
                 status = "Bookmark saved";
                 return SharedProfile::kBookmarksChanged;
             }
@@ -3195,6 +3205,7 @@ void BrowserWindow::BookmarkEdited(const BMessage& message)
         }
         if (!bookmarks.Find(target)) return 0;
         bool changed = bookmarks.Edit(target, title, url);
+        if (hasMetadata) changed = bookmarks.SetMetadata(target, metadata) || changed;
         if (const auto* parent = bookmarks.Parent(target); parent && parent->id != folder)
             changed = bookmarks.Move(target, folder, kBookmarkEnd) || changed;
         if (changed) status = "Bookmark saved";
@@ -3270,6 +3281,12 @@ bool BrowserWindow::BookmarkPageRequest(Tab& tab, const std::string& source, con
                 return 0;
             }
             changed = bookmarks.Edit(link->id, title.empty() ? (node->folder ? "Untitled Folder" : address) : title, address);
+            if (link->hasDescription || link->hasTags) {
+                auto metadata = node->metadata;
+                if (link->hasDescription) metadata.description = link->description;
+                if (link->hasTags) metadata.tags = ParseBookmarkTags(link->tags);
+                changed = bookmarks.SetMetadata(link->id, std::move(metadata)) || changed;
+            }
             if (link->folder && bookmarks.Parent(link->id)->id != link->folder)
                 changed = bookmarks.Move(link->id, link->folder, kBookmarkEnd) || changed;
             if (changed) status = "Bookmark saved";

@@ -20,7 +20,7 @@ SUMMIT_BOOKMARK_SOURCES=()
 for SUMMIT_BOOKMARK_UNIT in Bookmarks BookmarkIO Profile Address Favicon Zoom Protocol UserAgent Spelling TranslationModels PageLanguage InternalPages; do
     SUMMIT_BOOKMARK_SOURCES+=("src/core/$SUMMIT_BOOKMARK_UNIT.cpp")
 done
-for SUMMIT_BOOKMARK_UNIT in Chrome BookmarkImport SharedProfile; do
+for SUMMIT_BOOKMARK_UNIT in Chrome BookmarkImport BookmarkEditor SharedProfile; do
     SUMMIT_BOOKMARK_SOURCES+=("src/ui/$SUMMIT_BOOKMARK_UNIT.cpp")
 done
 SUMMIT_BOOKMARK_OBJECTS=()

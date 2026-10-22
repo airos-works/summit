@@ -63,6 +63,8 @@ static json EncodeBookmarks(const std::vector<BookmarkNode>& nodes)
         else if (node.separator) item["separator"] = true;
         else item["url"] = node.url;
         if (node.added) item["added"] = node.added;
+        if (!node.metadata.description.empty()) item["description"] = node.metadata.description;
+        if (!node.metadata.tags.empty()) item["tags"] = node.metadata.tags;
         result.push_back(std::move(item));
     }
     return result;
@@ -95,6 +97,17 @@ static void DecodeBookmarks(const json& value, BookmarkNode& folder, size_t dept
             node.url = url->get<std::string>();
             if (!IsBookmarkableURL(node.url)) continue;
             ++bookmarks;
+        }
+        if (!node.separator) {
+            if (auto description = item.find("description"); description != item.end() && description->is_string())
+                node.metadata.description = description->get<std::string>();
+            if (auto tags = item.find("tags"); tags != item.end() && tags->is_array()) {
+                for (const auto& tag : *tags) {
+                    if (tag.is_string()) node.metadata.tags.push_back(tag.get<std::string>());
+                    if (node.metadata.tags.size() == kMaxBookmarkTags) break;
+                }
+            }
+            node.metadata = NormalizeBookmarkMetadata(std::move(node.metadata));
         }
         folder.children.push_back(std::move(node));
     }

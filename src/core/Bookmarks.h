@@ -3,9 +3,24 @@
 #include <cstdint>
 #include <limits>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace summit {
+struct BookmarkMetadata {
+    std::string description;
+    std::vector<std::string> tags;
+    bool Empty() const { return description.empty() && tags.empty(); }
+    bool operator==(const BookmarkMetadata& other) const { return description == other.description && tags == other.tags; }
+};
+constexpr size_t kMaxBookmarkDescription = 16384;
+constexpr size_t kMaxBookmarkTags = 100;
+constexpr size_t kMaxBookmarkTagLength = 256;
+BookmarkMetadata NormalizeBookmarkMetadata(BookmarkMetadata metadata);
+// Comma-separated tags for the editors. Quotes and doubled quotes preserve
+// commas and quotes inside a tag; these are not the Netscape TAGS syntax.
+std::vector<std::string> ParseBookmarkTags(std::string_view text);
+std::string BookmarkTagsText(const std::vector<std::string>& tags);
 // A bookmark, a separator, or a folder of nodes.
 struct BookmarkNode {
     // Unique among the profile's bookmarks while Summit runs. Not saved: the
@@ -20,6 +35,7 @@ struct BookmarkNode {
     std::vector<BookmarkNode> children;
     // Separators have no address or children; their position is significant.
     bool separator = false;
+    BookmarkMetadata metadata = {};
 };
 // The two folders every profile has, which cannot be moved, renamed or deleted.
 constexpr int64_t kBookmarksBarFolder = 1;
@@ -46,11 +62,12 @@ struct BookmarkImportResult {
     size_t added = 0;
     size_t foldersAdded = 0;
     size_t separatorsAdded = 0;
+    size_t updated = 0;     // existing nodes enriched with imported metadata
     size_t duplicates = 0;   // already bookmarked (or twice in the import)
     size_t unsupported = 0;  // addresses Summit does not keep (javascript:, place:...)
     size_t overLimit = 0;    // past a bookmark, folder or separator limit
     int64_t folder = 0;      // the "Imported from …" folder, 0 when nothing was added
-    bool Changed() const { return added || foldersAdded || separatorsAdded; }
+    bool Changed() const { return added || foldersAdded || separatorsAdded || updated; }
 };
 
 // A profile's bookmarks: the bookmarks bar and Other Bookmarks, each a
@@ -97,6 +114,7 @@ public:
     int64_t AddSeparator(int64_t parent, size_t index = kBookmarkEnd, int64_t added = 0);
     // A folder's address is ignored. False when nothing changed.
     bool Edit(int64_t id, const std::string& title, const std::string& url);
+    bool SetMetadata(int64_t id, BookmarkMetadata metadata);
     // Puts a node before the child now at index of folder (kBookmarkEnd: at
     // the end). False for the two fixed folders, a folder moved into itself,
     // or no change.

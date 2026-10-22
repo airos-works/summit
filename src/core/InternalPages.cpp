@@ -218,9 +218,11 @@ a.link,.toggle{cursor:pointer}
 .tool:hover{background:#dfeade}
 .separator .row{min-height:32px}.separator-line{flex:1;display:flex;align-items:center;gap:10px;color:#7b897f;font-size:12px}
 .separator-line:before,.separator-line:after{content:"";flex:1;border-top:1px solid #9aa69f}
+.metadata{display:block;font-size:12px;color:#63776a;white-space:pre-wrap;max-height:4.5em;overflow:hidden}
 form.editor{display:flex;flex-wrap:wrap;gap:8px 14px;align-items:center;padding:10px 12px;background:#f3f8f2}
 form.editor label{display:flex;gap:6px;align-items:center;font-size:13px;color:#4c6357}
 form.editor input{width:220px;padding:5px 8px}form.editor input.address{width:300px}
+form.editor textarea{font:inherit;width:300px;min-height:64px;padding:5px 8px;resize:vertical}
 form.editor select{font:inherit;font-size:13px;padding:4px 6px;border:1px solid #d5e0d6;border-radius:6px;background:white;color:inherit;max-width:260px}
 form.editor .buttons{display:flex;gap:6px;margin-left:auto}
 .moving,.moving *{cursor:grabbing!important}.dragging>.row{opacity:.45}
@@ -257,7 +259,8 @@ for (const item of document.querySelectorAll('.item.folder')) showFolder(item, o
 
 function visit(item, query) {
   const row = ownRow(item);
-  const own = !query || (row.dataset.title + ' ' + (row.dataset.url || '')).toLowerCase().includes(query);
+  const own = !query || [row.dataset.title, row.dataset.url, row.dataset.tags, row.dataset.description]
+    .filter(Boolean).join(' ').toLowerCase().includes(query);
   if (!item.classList.contains('folder')) { item.hidden = !own; return own; }
   let inside = false;
   for (const child of items(ownList(item))) inside = visit(child, query) || inside;
@@ -293,10 +296,10 @@ const go = (action, fields) => {
   for (const [name, value] of Object.entries(fields)) url += '&' + name + '=' + encodeURIComponent(value);
   location.href = url;
 };
-function field(label, name, value, wide) {
+function field(label, name, value, wide, multiline) {
   const wrapper = document.createElement('label');
   wrapper.textContent = label + ' ';
-  const input = document.createElement('input');
+  const input = document.createElement(multiline ? 'textarea' : 'input');
   input.dataset.field = name;
   input.value = value;
   input.spellcheck = false;
@@ -352,6 +355,8 @@ function edit(item) {
   const fields = [field('Name', 'title', row.dataset.title)];
   if (!folder) fields.push(field('Address', 'url', row.dataset.url, true));
   fields.push(folderChooser(item, item.parentElement.dataset.folder));
+  fields.push(field('Tags', 'tags', row.dataset.tags || ''));
+  fields.push(field('Description', 'description', row.dataset.description || '', false, true));
   const form = editor(fields, 'Save', values => go('save', Object.assign({ id: item.dataset.id }, values)),
     () => { row.hidden = false; });
   row.hidden = true;
@@ -466,6 +471,20 @@ document.addEventListener('click', event => {
 const char* kBookmarkTools = "<span class=\"tools\"><button class=\"tool\" type=\"button\" data-action=\"edit\">Edit</button>"
     "<button class=\"tool\" type=\"button\" data-action=\"delete\">Delete</button></span>";
 
+std::string MetadataAttributes(const BookmarkNode& node)
+{
+    return " data-tags=\"" + EscapeHTML(BookmarkTagsText(node.metadata.tags)) + "\" data-description=\""
+        + EscapeHTML(node.metadata.description) + "\"";
+}
+
+std::string MetadataSummary(const BookmarkNode& node)
+{
+    if (node.metadata.Empty()) return {};
+    std::string text = BookmarkTagsText(node.metadata.tags);
+    if (!node.metadata.description.empty()) text += (text.empty() ? "" : "\n") + node.metadata.description;
+    return "<span class=\"metadata\">" + EscapeHTML(text) + "</span>";
+}
+
 void BookmarkItems(PageWriter& writer, const std::vector<BookmarkNode>& nodes)
 {
     for (const auto& node : nodes) {
@@ -481,10 +500,10 @@ void BookmarkItems(PageWriter& writer, const std::vector<BookmarkNode>& nodes)
         if (node.folder) {
             const size_t count = CountBookmarks(node);
             writer.Raw("<div class=\"item folder\" data-id=\"" + id + "\"><div class=\"row\" data-title=\"" + EscapeHTML(node.title)
-                + "\"><button class=\"toggle\" type=\"button\" aria-expanded=\"false\"><span class=\"chevron\"></span>"
+                + "\"" + MetadataAttributes(node) + "><button class=\"toggle\" type=\"button\" aria-expanded=\"false\"><span class=\"chevron\"></span>"
                 "<span class=\"icon foldericon\"></span><span class=\"text\"><span class=\"title\">" + EscapeHTML(node.title)
                 + "</span><span class=\"url\">" + std::to_string(count) + (count == 1 ? " bookmark" : " bookmarks")
-                + "</span></span></button>" + kBookmarkTools + "</div>\n<div class=\"list\" data-folder=\"" + id + "\" hidden>\n");
+                + "</span>" + MetadataSummary(node) + "</span></button>" + kBookmarkTools + "</div>\n<div class=\"list\" data-folder=\"" + id + "\" hidden>\n");
             BookmarkItems(writer, node.children);
             if (node.children.empty()) writer.Raw("<div class=\"placeholder\">Empty</div>\n");
             writer.Raw("</div></div>\n");
@@ -494,11 +513,11 @@ void BookmarkItems(PageWriter& writer, const std::vector<BookmarkNode>& nodes)
         auto shown = node.url;
         if (auto scheme = shown.find("://"); scheme != std::string::npos) shown.erase(0, scheme + 3);
         writer.Raw("<div class=\"item\" data-id=\"" + id + "\"><div class=\"row\" data-title=\"" + EscapeHTML(node.title)
-            + "\" data-url=\"" + EscapeHTML(node.url) + "\">");
+            + "\" data-url=\"" + EscapeHTML(node.url) + "\"" + MetadataAttributes(node) + ">");
         writer.Raw(link ? "<a class=\"link\" draggable=\"false\" href=\"" + EscapeHTML(node.url) + "\">" : std::string("<span class=\"link\">"));
         writer.Raw(writer.Icon(node.url) + "<span class=\"text\"><span class=\"title\">"
             + EscapeHTML(node.title.empty() ? node.url : node.title) + "</span><span class=\"url\">" + EscapeHTML(shown)
-            + "</span></span>" + (link ? "</a>" : "</span>") + kBookmarkTools + "</div></div>\n");
+            + "</span>" + MetadataSummary(node) + "</span>" + (link ? "</a>" : "</span>") + kBookmarkTools + "</div></div>\n");
     }
 }
 
@@ -555,6 +574,8 @@ std::optional<BookmarkPageLink> ParseBookmarkPageLink(std::string_view url)
         else if (name == "index" && number(value, parsed)) link.index = static_cast<size_t>(parsed);
         else if (name == "title") { link.title = PercentDecode(value); link.hasTitle = true; }
         else if (name == "url") { link.url = PercentDecode(value); link.hasURL = true; }
+        else if (name == "description") { link.description = PercentDecode(value); link.hasDescription = true; }
+        else if (name == "tags") { link.tags = PercentDecode(value); link.hasTags = true; }
     }
     if (link.token.empty() || link.token != BookmarkPageToken(link.token)) return std::nullopt;
     return link;

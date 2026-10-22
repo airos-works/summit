@@ -45,6 +45,8 @@ struct BookmarkPageLink {
     // save and new-folder: what was typed (percent-decoded).
     std::string title, url;
     bool hasTitle = false, hasURL = false;
+    std::string description, tags;
+    bool hasDescription = false, hasTags = false;
 };
 std::optional<BookmarkPageLink> ParseBookmarkPageLink(std::string_view url);
 // The token as the page carries it: lower-case hex digits, at most 64.

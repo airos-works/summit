@@ -8,7 +8,10 @@
 #include <MenuItem.h>
 #include <PopUpMenu.h>
 #include <SpaceLayoutItem.h>
+#include <ScrollView.h>
+#include <StringView.h>
 #include <TextControl.h>
+#include <TextView.h>
 
 namespace summit {
 namespace {
@@ -56,6 +59,13 @@ BookmarkEditor::BookmarkEditor(const Fields& fields, BMessenger target, BRect ow
     fName = new BTextControl("name", "Name:", fields.title.c_str(), nullptr);
     fName->SetExplicitMinSize(BSize(360, B_SIZE_UNSET));
     if (!folder) fAddress = new BTextControl("address", "Address:", fields.url.c_str(), nullptr);
+    fTags = new BTextControl("tags", "Tags:", BookmarkTagsText(fields.metadata.tags).c_str(), nullptr);
+    fTags->SetToolTip("Separate tags with commas. Quote a tag that contains a comma.");
+    fDescription = new BTextView("description");
+    fDescription->SetText(fields.metadata.description.c_str());
+    fDescription->SetExplicitMinSize(BSize(300, 64));
+    fDescription->SetFontAndColor(be_plain_font);
+    auto* description = new BScrollView("description-scroll", fDescription, 0, false, true);
     auto* menu = new BPopUpMenu("folders");
     for (const auto& choice : fields.folders) {
         auto* message = new BMessage('fold');
@@ -83,6 +93,10 @@ BookmarkEditor::BookmarkEditor(const Fields& fields, BMessenger target, BRect ow
     }
     grid->AddItem(fFolder->CreateLabelLayoutItem(), 0, row);
     grid->AddItem(fFolder->CreateMenuBarLayoutItem(), 1, row++);
+    grid->AddItem(fTags->CreateLabelLayoutItem(), 0, row);
+    grid->AddItem(fTags->CreateTextViewLayoutItem(), 1, row++);
+    grid->AddView(new BStringView("description-label", "Description:"), 0, row);
+    grid->AddView(description, 1, row++);
     // Delete sits at the left, away from Save.
     if (!creating) buttons->AddView(new BButton("delete", folder ? "Delete Folder" : "Delete", new BMessage(kDelete)));
     buttons->AddItem(BSpaceLayoutItem::CreateGlue());
@@ -121,6 +135,8 @@ void BookmarkEditor::Save()
     edited.AddString("title", title.c_str());
     edited.AddString("url", url.c_str());
     edited.AddInt64("folder", parent);
+    edited.AddString("description", fDescription->Text());
+    for (const auto& tag : ParseBookmarkTags(fTags->Text())) edited.AddString("tag", tag.c_str());
     fTarget.SendMessage(&edited);
     Quit();
 }

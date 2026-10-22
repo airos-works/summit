@@ -1868,6 +1868,8 @@ private:
             }
             std::function<json(const summit::BookmarkNode&)> node = [&](const summit::BookmarkNode& item) {
                 json result = {{"id", item.id}, {"title", item.title}};
+                if (!item.metadata.description.empty()) result["description"] = item.metadata.description;
+                if (!item.metadata.tags.empty()) result["tags"] = item.metadata.tags;
                 if (item.separator) result["separator"] = true;
                 else if (!item.folder) result["url"] = item.url;
                 else {
