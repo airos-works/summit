@@ -351,6 +351,38 @@ public:
             "site membership refresh leaves an open native menu snapshot intact");
         Check(queries.Find(siteQuery)->children.empty(), "native site expansion never persists generated folders");
 
+        Bookmarks dates;
+        const auto dateQuery = dates.Add({"place:type=3&sort=1", "Dates"}, kBookmarksBarFolder);
+        const auto dateSiteQuery = dates.Add({"place:type=5&sort=4", "Dates and sites"}, kBookmarksBarFolder);
+        std::vector<PageRecord> dateVisits{{"https://one.test/a", "A"}, {"https://two.test/b", "B"}};
+        const auto clock = HistoryNowMicroseconds();
+        for (auto& page : dateVisits) SetHistoryVisitTimes(page,{clock});
+        auto dateButtons = std::make_shared<const BookmarkButton>(BookmarkButtons(dates, dateVisits, *dates.Find(dateQuery)).queryContents());
+        BMenu datesMenu("Dates");
+        AddBookmarkItems(&datesMenu, dateButtons, *dateButtons, BMessenger(this));
+        Check(datesMenu.CountItems() == 1 && datesMenu.ItemAt(0)->Submenu()
+            && std::string(datesMenu.ItemAt(0)->Label()) == "Today", "date query has a native Today submenu");
+        BMenu todayMenu("Today");
+        AddBookmarkItems(&todayMenu, dateButtons, dateButtons->children[0], BMessenger(this));
+        const auto* dateAll = todayMenu.ItemAt(todayMenu.CountItems()-1)->Message();
+        const char* secondURL = nullptr;
+        Check(todayMenu.CountItems() == 4 && dateAll && dateAll->GetInt64("id", -1) == 0
+            && dateAll->FindString("url", 1, &secondURL) == B_OK && std::string(secondURL) == "https://two.test/b",
+            "date folder Open All embeds both history URLs with no saved folder ID");
+        auto dateSites = std::make_shared<const BookmarkButton>(BookmarkButtons(dates, dateVisits, *dates.Find(dateSiteQuery)).queryContents());
+        BMenu todaySites("Today sites");
+        AddBookmarkItems(&todaySites, dateSites, dateSites->children[0], BMessenger(this));
+        Check(todaySites.CountItems() == 2 && todaySites.ItemAt(0)->Submenu() && todaySites.ItemAt(1)->Submenu(),
+            "date/site query retains the intermediate native host submenus");
+        BMenu oneSite("One site");
+        AddBookmarkItems(&oneSite, dateSites, dateSites->children[0].children[0], BMessenger(this));
+        Check(oneSite.CountItems() == 3 && std::string(oneSite.ItemAt(0)->Message()->GetString("url", "")) == "https://one.test/a",
+            "nested date/site leaf retains its page address and Open All action");
+        Check(BookmarkButtons(dates, {}, *dates.Find(dateQuery)).queryContents().children.empty()
+            && dateButtons->children.size() == 1, "clearing history empties later date snapshots without changing an open menu");
+        Check(dates.Count() == 2 && dates.Find(dateQuery)->children.empty() && dates.Find(dateSiteQuery)->children.empty(),
+            "native date and host containers are never saved as bookmarks");
+
         Bookmarks scoped;
         for (const auto* scope : {"first", "second"}) {
             BookmarkNode imported{0, "", "", true, 0, {}};

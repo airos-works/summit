@@ -163,7 +163,7 @@ Query Parse(std::string_view url)
         } else q.error = "This smart folder uses a query clause Summit does not yet support: " + std::string(name) + ".";
         if (!q.error.empty()) break;
     }
-    if (q.error.empty() && q.type != 0 && q.type != 4 && q.type != 6)
+    if (q.error.empty() && q.type != 0 && q.type != 3 && q.type != 4 && q.type != 5 && q.type != 6)
         q.error = "This smart folder's result grouping is not yet supported.";
     if (q.error.empty() && q.sort != 0 && q.sort != 1 && q.sort != 2 && q.sort != 3 && q.sort != 4
         && q.sort != 5 && q.sort != 6 && q.sort != 7 && q.sort != 8 && q.sort != 11 && q.sort != 12
@@ -181,6 +181,11 @@ Query Parse(std::string_view url)
             q.error = "Site grouping currently supports an unfiltered history query or a complete visit-time range, optionally restricted by domain.";
         q.source = 0;
     }
+    if (q.error.empty() && (q.type == 3 || q.type == 5)) {
+        if (q.clauses.size() != 1 || q.clauses.front().HasConditions(false))
+            q.error = "Date grouping with additional conditions is not yet supported.";
+        q.source = 0;
+    }
     return q;
 }
 
@@ -188,6 +193,76 @@ struct Entry {
     BookmarkNode node;
     const PageRecord* visit = nullptr;
 };
+
+struct DateRange {
+    std::string title;
+    int64_t begin, end, visibleBegin, visibleEnd;
+};
+
+bool DateRanges(int64_t now, std::vector<DateRange>& ranges)
+{
+    auto seconds = now / 1000000;
+    if (now % 1000000 < 0) --seconds;
+    const std::time_t clock = seconds;
+    std::tm local {};
+    if (int64_t(clock) != seconds || !localtime_r(&clock, &local)) return false;
+    auto midnight = [&](int days, int months, bool monthStart, int64_t& value, std::tm* normalized = nullptr) {
+        auto date = local;
+        date.tm_hour = date.tm_min = date.tm_sec = 0;
+        date.tm_isdst = -1;
+        if (monthStart) date.tm_mday = 1;
+        date.tm_mday += days;
+        date.tm_mon += months;
+        const auto time = std::mktime(&date);
+        if (time == std::time_t(-1) || time > INT64_MAX / 1000000 || time < INT64_MIN / 1000000) return false;
+        value = int64_t(time) * 1000000;
+        if (normalized) *normalized = date;
+        return true;
+    };
+    int64_t today, tomorrow, yesterday, week, month;
+    if (!midnight(0, 0, false, today) || !midnight(1, 0, false, tomorrow)
+        || !midnight(-1, 0, false, yesterday) || !midnight(-7, 0, false, week)
+        || !midnight(0, 0, true, month)) return false;
+    // Visibility is half-open. Generated Places child queries use inclusive
+    // bounds, so an exact midnight can also appear in the preceding folder.
+    ranges = {{"Today", today, tomorrow, today, tomorrow},
+        {"Yesterday", yesterday, today, yesterday, today},
+        {"Last 7 days", week, tomorrow, week, yesterday},
+        {"This month", month, tomorrow, month, week}};
+    constexpr const char* names[] = {"January", "February", "March", "April", "May", "June",
+        "July", "August", "September", "October", "November", "December"};
+    auto end = month;
+    for (int offset = 1; offset <= 5; ++offset) {
+        int64_t begin;
+        std::tm date {};
+        if (!midnight(0, -offset, true, begin, &date)) return false;
+        std::string title = names[date.tm_mon];
+        if (date.tm_year < local.tm_year) title += " " + std::to_string(date.tm_year + 1900);
+        ranges.push_back({std::move(title), begin, end, begin, end});
+        end = begin;
+    }
+    // Firefox's SQLite datetime(0,'unixepoch') numeric conversion yields 1970,
+    // then multiplies by a million. Preserve the verified generated bound.
+    constexpr int64_t oldest = 1970000000;
+    ranges.push_back({"Older than 6 months", oldest, end, oldest, end});
+    return true;
+}
+
+std::vector<BookmarkNode> SiteGroups(const std::vector<const Entry*>& entries, bool showItems)
+{
+    std::map<std::string, BookmarkNode> groups;
+    for (const auto* entry : entries) {
+        auto host = Lower(Host(entry->node.url));
+        if (host.empty() && Lower(entry->node.url.substr(0, 5)) != "file:") continue;
+        auto& group = groups[host];
+        group.folder = true;
+        group.title = host.empty() ? "(local files)" : host;
+        if (showItems) group.children.push_back(entry->node);
+    }
+    std::vector<BookmarkNode> result;
+    for (auto& [host, group] : groups) result.push_back(std::move(group));
+    return result;
+}
 }
 
 BookmarkQueryResult QueryBookmarks(std::string_view url, const Bookmarks& bookmarks, const std::vector<PageRecord>& history,
@@ -368,6 +443,7 @@ BookmarkQueryResult QueryBookmarks(std::string_view url, const Bookmarks& bookma
             accept(node, &page);
         }
     }
+    const bool groupedHistory = q.type >= 3 && q.type <= 5;
     auto date = [](const Entry& e) { return e.visit ? (e.visit->visitTimes.empty()
         ? HistoryMicroseconds(e.visit->visited) : e.visit->visitTimes.front()) : int64_t(0); };
     auto count = [](const Entry& e) { return e.visit ? std::max(1, e.visit->visits) : 0; };
@@ -378,27 +454,27 @@ BookmarkQueryResult QueryBookmarks(std::string_view url, const Bookmarks& bookma
             auto less = [&](const auto& x, const auto& y) { return descending ? y < x : x < y; };
             switch (mode) {
                 case 1: case 2:
-                    if (q.type == 4) {
+                    if (groupedHistory) {
                         if (Lower(a.node.title) == Lower(b.node.title)) return less(a.node.url, b.node.url);
                         return less(Lower(a.node.title), Lower(b.node.title));
                     }
                     return less(Lower(a.node.title.empty() ? a.node.url : a.node.title), Lower(b.node.title.empty() ? b.node.url : b.node.title));
                 case 3: case 4:
-                    if (q.type == 4 && date(a) == date(b)) return less(Lower(a.node.title), Lower(b.node.title));
+                    if (groupedHistory && date(a) == date(b)) return less(Lower(a.node.title), Lower(b.node.title));
                     return less(date(a), date(b));
                 case 5: case 6: return less(a.node.url, b.node.url);
                 case 7: case 8:
-                    if (q.type == 4 && count(a) == count(b)) return less(date(a), date(b));
+                    if (groupedHistory && count(a) == count(b)) return less(date(a), date(b));
                     return less(count(a), count(b));
                 case 11: case 12:
-                    if (q.type == 4 && a.node.added == b.node.added) return less(Lower(a.node.title), Lower(b.node.title));
+                    if (groupedHistory && a.node.added == b.node.added) return less(Lower(a.node.title), Lower(b.node.title));
                     return less(a.node.added, b.node.added);
                 case 13: case 14:
                     if (a.node.modified != b.node.modified) return less(a.node.modified, b.node.modified);
                     if (Lower(a.node.title) != Lower(b.node.title)) return less(Lower(a.node.title), Lower(b.node.title));
                     return less(positions[a.node.id], positions[b.node.id]);
                 case 17: case 18:
-                    if (q.type == 4 && a.node.metadata.tags == b.node.metadata.tags) {
+                    if (groupedHistory && a.node.metadata.tags == b.node.metadata.tags) {
                         if (Lower(a.node.title) == Lower(b.node.title)) return less(a.node.url, b.node.url);
                         return less(Lower(a.node.title), Lower(b.node.title));
                     }
@@ -407,22 +483,42 @@ BookmarkQueryResult QueryBookmarks(std::string_view url, const Bookmarks& bookma
             }
         });
     };
-    if (q.type == 4) {
+    if (groupedHistory) {
         if (q.excludeQueries) return result;
-        sort(q.sort); // The limit belongs to the containers, never their children.
-        std::map<std::string, BookmarkNode> groups;
-        for (auto& entry : matches) {
-            auto host = Lower(Host(entry.node.url));
-            if (host.empty() && Lower(entry.node.url.substr(0, 5)) != "file:") continue;
-            auto& group = groups[host];
-            group.folder = true;
-            group.title = host.empty() ? "(local files)" : host;
-            if (!q.excludeItems && q.expandQueries) group.children.push_back(std::move(entry.node));
+        // Date/site descendants always use title order. Date-only descendants
+        // inherit the requested order, defaulting to title when none is set.
+        sort(q.type == 5 || (q.type == 3 && !q.sort) ? 1 : q.sort);
+        if (q.type == 4) {
+            std::vector<const Entry*> selected;
+            for (const auto& entry : matches) selected.push_back(&entry);
+            result.items = SiteGroups(selected, !q.excludeItems && q.expandQueries);
+        } else {
+            std::vector<DateRange> ranges;
+            if (!DateRanges(now, ranges)) return {{}, "This smart folder's calendar ranges cannot be represented."};
+            for (const auto& range : ranges) {
+                bool visible = false;
+                std::vector<const Entry*> selected;
+                for (const auto& entry : matches) {
+                    if (!entry.visit) continue;
+                    bool member = false;
+                    for (const auto time : HistoryVisitTimes(*entry.visit)) {
+                        visible = visible || (time >= range.visibleBegin && time < range.visibleEnd);
+                        member = member || (time >= range.begin && time <= range.end);
+                    }
+                    if (member) selected.push_back(&entry);
+                }
+                if (!visible) continue;
+                BookmarkNode group;
+                group.folder = true; group.title = range.title;
+                if (q.type == 5) group.children = SiteGroups(selected, !q.excludeItems && q.expandQueries);
+                else if (q.expandQueries && !q.excludeItems)
+                    for (const auto* entry : selected) group.children.push_back(entry->node);
+                result.items.push_back(std::move(group));
+            }
         }
-        for (auto& [host, group] : groups) result.items.push_back(std::move(group));
         // Places' SQL orders site URIs before LIMIT. Title sorts run after
-        // LIMIT; date/count/metadata columns on site containers are null.
-        if (q.sort == 6) std::reverse(result.items.begin(), result.items.end());
+        // LIMIT. Date containers retain their calendar order for other sorts.
+        if (q.type == 4 && q.sort == 6) std::reverse(result.items.begin(), result.items.end());
         if (q.limit && result.items.size() > uint64_t(q.limit)) result.items.resize(q.limit);
         if (q.sort == 1 || q.sort == 2) {
             std::stable_sort(result.items.begin(), result.items.end(), [&](const auto& a, const auto& b) {

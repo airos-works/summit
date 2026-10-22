@@ -276,6 +276,8 @@ Examples supported by this implementation:
 | `place:queryType=1&terms=reading` | Bookmarks whose title, address or tags contain `reading` |
 | `place:type=6&sort=1` | Tag folders containing their bookmarked pages |
 | `place:type=4&sort=1` | Retained history grouped by exact host, with pages sorted by title |
+| `place:type=3&sort=4` | Calendar folders containing their matching history pages, newest visits first |
+| `place:type=5&sort=4` | Calendar folders containing host folders, with pages sorted by title |
 | `place:parent=toolbar_____` | The referenced toolbar's direct folder tree |
 | `place:folder=10` | A legacy numeric reference to folder 10 in the imported database |
 
@@ -414,7 +416,7 @@ which support saved multi-query URLs from older profiles.
 
 **This does not complete Firefox smart-folder compatibility or #110.** Folder
 references and visit-time ranges are implemented for retained data; visit transitions,
-annotations, frecency sorts, date/other groupings and more complex grouped filters remain
+annotations, frecency sorts, other groupings and more complex grouped filters remain
 unsupported. Such queries stay saved and show an explicit explanation, with no
 broader substitute results. Query history is limited to Summit's retained 2,000
 pages; Firefox frecency is not stored. Text matching uses
@@ -451,8 +453,7 @@ Grouped text/tag/URI/bookmark-only filters, visit-count conditions, folder
 references, legacy OR groups and one-sided time bounds remain unsupported and
 show an explanation. Firefox's site SQL and subsequent container filtering do
 not apply these conditions like an ordinary page search; Summit does not
-substitute a broader search for an unsupported grouped query. Date and
-date/site groupings (`type=3/5`) remain unsupported too.
+substitute a broader search for an unsupported grouped query.
 
 The ordering and supported membership cases were compared with the official
 Firefox 158.0.1 Linux release, using an isolated generated history profile.
@@ -463,6 +464,56 @@ The implementation follows the release's
 and [result sorting](https://hg.mozilla.org/releases/mozilla-release/raw-file/48a735cc74a7e6d730f9bf59c3de58f750287a23/toolkit/components/places/nsNavHistoryResult.cpp),
 subject to Summit's retained-history and ASCII-collation limits described above.
 
+### History grouped by date
+
+`place:type=3&sort=4` displays history in **Today**, **Yesterday**, **Last 7 days**,
+**This month**, the previous five calendar months, and **Older than 6 months**.
+Empty periods are omitted. A prior year's month includes its year. Local
+calendar boundaries follow the system timezone, including 23/25-hour DST days,
+leap days and fractional-hour offsets. Opening the query resolves its dates
+again; imports, visits and clearing history refresh its results.
+
+These folders overlap, following Firefox's Places queries. Last 7 days includes
+the recent day folders but appears only when there are visits older than
+yesterday. This month includes recent days but appears only when there are
+visits older than the last-week boundary. A folder's visibility uses a half-open
+interval; its child query uses inclusive bounds. An exact midnight can therefore
+appear in both Today and Yesterday when Yesterday has another qualifying visit.
+The same rule applies at month boundaries. A page appears only once within each
+period even if several of its retained visits qualify.
+
+`place:type=5&sort=4` adds host folders beneath each date. The date/site view
+sorts hosts and pages by title, as Firefox's generated child queries do,
+independently of the root's sorting option. Date-only folders inherit the
+requested page sort, defaulting to title order for `sort=0`. Equal visit counts
+and last-visit timestamps retain Summit's history order; Firefox's underlying
+SQL order is unspecified for those equal-ranked rows.
+
+The result limit selects calendar folders in their normal recent-to-old order;
+title sorting (`sort=1/2`) then rearranges that selected set. For example,
+`type=3&sort=2&maxResults=2` displays Yesterday then Today if both exist. Other
+root sort modes preserve calendar order. The limit never truncates a selected
+folder's pages or host folders. `queryType=1` still produces history groups.
+`excludeQueries=1` hides them; `excludeItems=1` hides leaf pages. With
+`expandQueries=0`, date-only folders are empty, while date/site folders retain
+their empty host folders.
+
+The older-period lower bound preserves Firefox 158's generated value of
+1,970,000,000 microseconds after the Unix epoch, resulting from its SQLite
+`datetime(0,'unixepoch')` numeric conversion. This excludes visits from the
+first 1,970 seconds of 1970 from that folder. Additional conditions on date
+queries, including legacy OR groups, remain unsupported and show an explanation.
+Firefox's date SQL does not apply those conditions like an ordinary page search.
+Result types for individual visits, virtual bookmark roots and the library
+sidebar remain unfinished.
+
+The [date oracle fixture](../tests/fixtures/bookmarks/date-query-firefox158.json)
+captures 68 result trees from the same official Firefox release and source
+revision used for site queries. Comparison preserves ordering between unequal
+visit ranks and allows either order only within consecutive equal-ranked runs.
+Native menus expose the date/host hierarchy and page URLs without persisting
+generated folders. Query pages use nested headings and indentation for hosts.
+
 The result pages use separate files per query so Back can restore the preceding
 view. Their addresses map to the internal Bookmarks page, and their actions use
 the same per-run secret and source checks as the manager. Saved `place:` URLs
@@ -470,6 +521,23 @@ are never handed to the web engine. Query pages show bookmarklets as inert
 entries with instructions to run them from the bar or menu.
 
 ## Testing
+
+The date-query follow-up passes **2,945 date-query checks**, including **68
+Firefox oracle result trees**, on the host and native airOS. The existing core
+and bookmark/query suites pass too; all eight bookmark/query suites pass
+AddressSanitizer and UndefinedBehaviorSanitizer. Native UI coverage is **83
+checks**, including calendar/host submenus and transient Open All URLs.
+
+The full browser passes **161 checks and 188 native action assertions**.
+It exercises the previous query scenarios plus HTML/SQLite calendar queries,
+overlapping midnight membership, nested host headings, native activation,
+additional history refreshing an open query, page navigation, group limits,
+presentation flags, unsupported conditions, export/reimport and history
+clearing. The nested date/site page was visually inspected. All **700 frozen
+hashes** remain unchanged, all four engine images loaded, and the browser exits
+normally with no helpers or crash events across a complete log interval. The
+owned RAM filesystem was unmounted after scanning all 42 native teams.
+Evidence: [`bookmark-date-queries-native-2026-10-22.json`](bookmark-date-queries-native-2026-10-22.json).
 
 The site-query follow-up passes **483 site-query checks**, including **38
 Firefox oracle result trees**, on the host and native airOS. The existing core
