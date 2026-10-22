@@ -647,7 +647,8 @@ std::string RenderBookmarkQueryPage(const Bookmarks& bookmarks, const std::vecto
     auto result = available ? QueryBookmarks(saved->url, bookmarks, history, saved->origin) : BookmarkQueryResult{{}, "This smart folder has been removed or changed."};
     PageWriter writer(icons);
     std::function<void(const std::vector<BookmarkNode>&, unsigned)> rows = [&](const auto& nodes, unsigned depth) {
-        for (const auto& node : nodes) {
+        for (size_t index = 0; index < nodes.size(); ++index) {
+            const auto& node = nodes[index];
             if (node.separator) { writer.Raw("<hr>\n"); continue; }
             if (node.folder) {
                 const auto heading = std::to_string(std::min(2u + depth, 6u));
@@ -661,13 +662,16 @@ std::string RenderBookmarkQueryPage(const Bookmarks& bookmarks, const std::vecto
             writer.Raw(writer.Icon(node.url) + "<span class=\"text\"><span class=\"title\">"
                 + EscapeHTML(node.title.empty() ? node.url : node.title) + "</span><span class=\"url\">"
                 + EscapeHTML(script ? "Bookmarklet · Run from the Bookmarks menu or bar" : node.url)
-                + "</span></span>" + (script ? "</span>" : "</a>") + "</div>\n");
+                + "</span>");
+            if (!depth && result.visitTimes.size() == nodes.size())
+                writer.Raw("<span class=\"visit-time\">Visited " + EscapeHTML(FormatBookmarkVisitTime(result.visitTimes[index])) + "</span>");
+            writer.Raw("</span>" + std::string(script ? "</span>" : "</a>") + "</div>\n");
         }
     };
     rows(result.items, 0);
     std::string page = "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><title>" + EscapeHTML(title) + " — Bookmarks</title>\n";
     page += kStyle; page += kBookmarksStyle;
-    page += "<style>.query-result{padding:10px 0;border-bottom:1px solid #8884}.query-group .query-group{margin-left:24px}" + writer.IconStyles() + "</style>\n";
+    page += "<style>.query-result{padding:10px 0;border-bottom:1px solid #8884}.query-group .query-group{margin-left:24px}.visit-time{display:block;font-size:13px;font-variant-numeric:tabular-nums}" + writer.IconStyles() + "</style>\n";
     page += "<main><header><h1>" + EscapeHTML(title) + "</h1></header><nav class=\"actions\"><a class=\"button\" href=\"summit-bookmarks:query?token="
         + token + "&amp;id=0\">All Bookmarks</a>";
     if (available) page += "<a class=\"button\" href=\"summit-bookmarks:edit?token=" + token + "&amp;id=" + std::to_string(id) + "\">Edit Smart Folder…</a>";

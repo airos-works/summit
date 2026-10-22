@@ -1111,7 +1111,12 @@ BookmarkButton BookmarkButtons(const Bookmarks& bookmarks, const std::vector<Pag
                     auto path = ancestors; path.push_back(identity);
                     auto result = QueryBookmarks(node.url, owner->bookmarks, owner->history, node.origin);
                     expanded.emptyMessage = result.error;
-                    for (const auto& item : result.items) expanded.children.push_back(owner->Button(item, path, owner));
+                    for (size_t index = 0; index < result.items.size(); ++index) {
+                        auto child = owner->Button(result.items[index], path, owner);
+                        if (result.visitTimes.size() == result.items.size())
+                            child.title = (child.title.empty() ? child.url : child.title) + " — " + FormatBookmarkVisitTime(result.visitTimes[index]);
+                        expanded.children.push_back(std::move(child));
+                    }
                     return expanded;
                 };
             } else for (const auto& child : node.children) button.children.push_back(Button(child, ancestors, owner));

@@ -2,12 +2,33 @@
 #include "Address.h"
 #include <algorithm>
 #include <charconv>
+#include <cstdio>
 #include <ctime>
 #include <functional>
 #include <map>
 #include <set>
 
 namespace summit {
+std::string FormatBookmarkVisitTime(int64_t microseconds)
+{
+    auto seconds = microseconds / 1000000;
+    auto fraction = microseconds % 1000000;
+    if (fraction < 0) { --seconds; fraction += 1000000; }
+    const std::time_t clock = seconds;
+    std::tm local {};
+    char date[64], offset[32], subsecond[8];
+    if (int64_t(clock) != seconds || !localtime_r(&clock, &local)
+        || !std::strftime(date, sizeof(date), "%Y-%m-%d %H:%M:%S", &local))
+        return std::to_string(microseconds) + " µs since Unix epoch";
+    // Haiku's strftime %z prints negative offsets as large positive numbers
+    // on x86_64. localtime_r supplies the correct signed offset in tm_gmtoff.
+    const long minutes = local.tm_gmtoff / 60;
+    const long magnitude = minutes < 0 ? -minutes : minutes;
+    std::snprintf(offset, sizeof(offset), "%c%02ld%02ld", minutes < 0 ? '-' : '+', magnitude / 60, magnitude % 60);
+    std::snprintf(subsecond, sizeof(subsecond), ".%06d", int(fraction));
+    return std::string(date) + (fraction ? subsecond : "") + " " + offset;
+}
+
 bool IsBookmarkQueryURL(std::string_view url)
 {
     if (url.size() < 6 || url.size() > 65536 || url.find('\0') != std::string_view::npos) return false;
@@ -81,7 +102,7 @@ struct Clause {
 
 struct Query {
     int64_t source = 0, sort = 0, type = 0, limit = 0;
-    bool excludeQueries = false, excludeItems = false, expandQueries = true;
+    bool excludeQueries = false, excludeItems = false, expandQueries = true, visitTags = false;
     std::string error;
     // Legacy Places OR separates conditions; presentation options are global.
     std::vector<Clause> clauses{1};
@@ -163,13 +184,21 @@ Query Parse(std::string_view url)
         } else q.error = "This smart folder uses a query clause Summit does not yet support: " + std::string(name) + ".";
         if (!q.error.empty()) break;
     }
-    if (q.error.empty() && q.type != 0 && q.type != 3 && q.type != 4 && q.type != 5 && q.type != 6)
+    if (q.error.empty() && q.type != 0 && q.type != 1 && q.type != 3 && q.type != 4 && q.type != 5 && q.type != 6)
         q.error = "This smart folder's result grouping is not yet supported.";
     if (q.error.empty() && q.sort != 0 && q.sort != 1 && q.sort != 2 && q.sort != 3 && q.sort != 4
         && q.sort != 5 && q.sort != 6 && q.sort != 7 && q.sort != 8 && q.sort != 11 && q.sort != 12
         && q.sort != 13 && q.sort != 14 && q.sort != 17 && q.sort != 18)
         q.error = "This smart folder's sort order requires data Summit does not yet retain.";
     if (q.type == 6 || std::any_of(q.clauses.begin(), q.clauses.end(), [](const auto& c) { return !c.parents.empty(); })) q.source = 1;
+    if (q.type == 1) {
+        // Places selects visits even with queryType=1. Parent queries can take
+        // a separate folder-shortcut path; do not silently broaden those.
+        if (q.error.empty() && std::any_of(q.clauses.begin(), q.clauses.end(), [](const auto& c) { return !c.parents.empty(); }))
+            q.error = "Individual visits restricted by bookmark folders are not yet supported.";
+        q.visitTags = q.source == 1 && !q.excludeItems;
+        q.source = 0;
+    }
     if (q.error.empty() && q.type == 4) {
         const auto& c = q.clauses.front();
         // Places creates history containers even with queryType=1. Additional
@@ -192,6 +221,7 @@ Query Parse(std::string_view url)
 struct Entry {
     BookmarkNode node;
     const PageRecord* visit = nullptr;
+    int64_t visitTime = 0;
 };
 
 struct DateRange {
@@ -414,7 +444,12 @@ BookmarkQueryResult QueryBookmarks(std::string_view url, const Bookmarks& bookma
                 })) continue;
             // Each candidate is visited once. Overlapping OR branches cannot
             // duplicate it, while distinct bookmarks sharing a URL remain distinct.
-            matches.push_back({node, visit});
+            // Like Places' EXISTS time predicate, the range selects pages
+            // having a qualifying visit. Visit results then expose every
+            // retained visit to that page, including ones outside the range.
+            if (q.type == 1) {
+                if (visit) for (auto time : HistoryVisitTimes(*visit)) matches.push_back({node, visit, time});
+            } else matches.push_back({node, visit});
             return;
         }
     };
@@ -444,38 +479,50 @@ BookmarkQueryResult QueryBookmarks(std::string_view url, const Bookmarks& bookma
         }
     }
     const bool groupedHistory = q.type >= 3 && q.type <= 5;
-    auto date = [](const Entry& e) { return e.visit ? (e.visit->visitTimes.empty()
+    const bool historyOrder = groupedHistory || q.type == 1;
+    auto date = [&](const Entry& e) { return q.type == 1 ? e.visitTime : e.visit ? (e.visit->visitTimes.empty()
         ? HistoryMicroseconds(e.visit->visited) : e.visit->visitTimes.front()) : int64_t(0); };
     auto count = [](const Entry& e) { return e.visit ? std::max(1, e.visit->visits) : 0; };
     auto sort = [&](int64_t mode) {
         if (!mode) return;
+        // History visit rows have null tag columns unless queryType=1 and
+        // excludeItems is false; their tag comparator falls back to title.
+        if (q.type == 1 && !q.visitTags && (mode == 17 || mode == 18)) mode -= 16;
         std::stable_sort(matches.begin(), matches.end(), [&](const Entry& a, const Entry& b) {
             const bool descending = !(mode % 2);
             auto less = [&](const auto& x, const auto& y) { return descending ? y < x : x < y; };
             switch (mode) {
                 case 1: case 2:
-                    if (groupedHistory) {
-                        if (Lower(a.node.title) == Lower(b.node.title)) return less(a.node.url, b.node.url);
+                    if (historyOrder) {
+                        if (Lower(a.node.title) == Lower(b.node.title)) {
+                            if (q.type == 1 && a.node.url == b.node.url) return less(date(a), date(b));
+                            return less(a.node.url, b.node.url);
+                        }
                         return less(Lower(a.node.title), Lower(b.node.title));
                     }
                     return less(Lower(a.node.title.empty() ? a.node.url : a.node.title), Lower(b.node.title.empty() ? b.node.url : b.node.title));
                 case 3: case 4:
-                    if (groupedHistory && date(a) == date(b)) return less(Lower(a.node.title), Lower(b.node.title));
+                    if (historyOrder && date(a) == date(b)) return less(Lower(a.node.title), Lower(b.node.title));
                     return less(date(a), date(b));
-                case 5: case 6: return less(a.node.url, b.node.url);
+                case 5: case 6:
+                    if (q.type == 1 && a.node.url == b.node.url) return less(date(a), date(b));
+                    return less(a.node.url, b.node.url);
                 case 7: case 8:
-                    if (groupedHistory && count(a) == count(b)) return less(date(a), date(b));
+                    if (historyOrder && count(a) == count(b)) return less(date(a), date(b));
                     return less(count(a), count(b));
                 case 11: case 12:
-                    if (groupedHistory && a.node.added == b.node.added) return less(Lower(a.node.title), Lower(b.node.title));
+                    if (historyOrder && a.node.added == b.node.added) return less(Lower(a.node.title), Lower(b.node.title));
                     return less(a.node.added, b.node.added);
                 case 13: case 14:
                     if (a.node.modified != b.node.modified) return less(a.node.modified, b.node.modified);
                     if (Lower(a.node.title) != Lower(b.node.title)) return less(Lower(a.node.title), Lower(b.node.title));
                     return less(positions[a.node.id], positions[b.node.id]);
                 case 17: case 18:
-                    if (groupedHistory && a.node.metadata.tags == b.node.metadata.tags) {
-                        if (Lower(a.node.title) == Lower(b.node.title)) return less(a.node.url, b.node.url);
+                    if (historyOrder && BookmarkTagsText(a.node.metadata.tags) == BookmarkTagsText(b.node.metadata.tags)) {
+                        if (Lower(a.node.title) == Lower(b.node.title)) {
+                            if (q.type == 1 && a.node.url == b.node.url) return less(date(a), date(b));
+                            return less(a.node.url, b.node.url);
+                        }
                         return less(Lower(a.node.title), Lower(b.node.title));
                     }
                     return less(BookmarkTagsText(a.node.metadata.tags), BookmarkTagsText(b.node.metadata.tags));
@@ -556,10 +603,14 @@ BookmarkQueryResult QueryBookmarks(std::string_view url, const Bookmarks& bookma
         return result;
     }
     // Firefox chooses the newest maxResults before sorting by title.
-    sort(q.limit && (q.sort == 1 || q.sort == 2) ? 4 : q.sort);
+    const bool visitPostSort = q.type == 1 && q.sort >= 11;
+    sort(visitPostSort && q.limit ? 0 : q.limit && (q.sort == 1 || q.sort == 2) ? 4 : q.sort);
     if (q.limit && matches.size() > uint64_t(q.limit)) matches.resize(q.limit);
-    if (q.limit && (q.sort == 1 || q.sort == 2)) sort(q.sort);
-    for (auto& entry : matches) result.items.push_back(std::move(entry.node));
+    if (q.limit && (q.sort == 1 || q.sort == 2 || visitPostSort)) sort(q.sort);
+    for (auto& entry : matches) {
+        if (q.type == 1) result.visitTimes.push_back(entry.visitTime);
+        result.items.push_back(std::move(entry.node));
+    }
     return result;
 }
 }

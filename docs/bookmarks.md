@@ -277,6 +277,7 @@ Examples supported by this implementation:
 | `place:type=6&sort=1` | Tag folders containing their bookmarked pages |
 | `place:type=4&sort=1` | Retained history grouped by exact host, with pages sorted by title |
 | `place:type=3&sort=4` | Calendar folders containing their matching history pages, newest visits first |
+| `place:type=1&sort=4` | One row per retained visit, newest first, with a visible timestamp |
 | `place:type=5&sort=4` | Calendar folders containing host folders, with pages sorted by title |
 | `place:parent=toolbar_____` | The referenced toolbar's direct folder tree |
 | `place:folder=10` | A legacy numeric reference to folder 10 in the imported database |
@@ -504,8 +505,7 @@ The older-period lower bound preserves Firefox 158's generated value of
 first 1,970 seconds of 1970 from that folder. Additional conditions on date
 queries, including legacy OR groups, remain unsupported and show an explanation.
 Firefox's date SQL does not apply those conditions like an ordinary page search.
-Result types for individual visits, virtual bookmark roots and the library
-sidebar remain unfinished.
+Result types for virtual bookmark roots and the library sidebar remain unfinished.
 
 The [date oracle fixture](../tests/fixtures/bookmarks/date-query-firefox158.json)
 captures 68 result trees from the same official Firefox release and source
@@ -520,7 +520,67 @@ the same per-run secret and source checks as the manager. Saved `place:` URLs
 are never handed to the web engine. Query pages show bookmarklets as inert
 entries with instructions to run them from the bar or menu.
 
+### Individual history visits
+
+`place:type=1&sort=4` shows one row for each retained visit, newest first.
+Repeated visits to a page remain separate. Each result displays its local date,
+time, microseconds when present, and UTC offset; the offset distinguishes the
+repeated hour when daylight saving ends. Native bookmark menus include the same
+timestamp beside the page title. Links navigate to the original page address,
+and **Open All in Tabs** opens one tab per selected visit, subject to the existing
+50-tab limit. Only the query URL is saved or exported.
+
+Visit queries use history even with `queryType=1`. Text, URI, domain, tag,
+visit-count and legacy bookmark-only filters apply to the page; overlapping
+legacy OR branches do not repeat its visits. Time ranges follow Firefox's
+page-level `EXISTS` predicate: if a page has one retained visit in the inclusive
+range, all its retained visits are returned, including those outside the range.
+Visit-count conditions and ordering use the page's total count, not the number
+of retained samples or visits in the range.
+
+Date sorting uses each row's timestamp. Title and URI ties use that timestamp,
+and visit-count ties do likewise. A result limit counts visits rather than
+unique pages. Title limits choose the newest visits before sorting their titles.
+Metadata sorts apply after limiting; their initial subset is unspecified in
+Firefox's SQL. Tags are available to the visit tag comparator with
+`queryType=1` unless `excludeItems=1`; otherwise it falls back to title order.
+`excludeItems`, `excludeQueries` and `expandQueries` do not remove visit rows.
+Parent/folder restrictions on visit results remain unsupported and show an
+explanation because Firefox can route them through a separate folder shortcut.
+
+The [visit oracle fixture](../tests/fixtures/bookmarks/visit-query-firefox158.json)
+records 66 queries from Firefox 158.0.1, with the same pinned primary sources
+used above. Tests preserve exact ordering wherever the source defines it. For
+SQL limits that cut through equal ranks, they validate the primary ranks,
+retained membership, uniqueness and subsequent ordering; unspecified subsets
+are not treated as stable Firefox output. Current Firefox has removed
+`onlyBookmarked`; Summit retains the already supported legacy filter.
+
+Results remain bounded by Summit's history retention: at most 2,000 pages,
+128 recent timestamps per page and up to 60 older daily samples. Aggregate
+visit counts do not manufacture missing timestamps. Visits with identical
+stored timestamps cannot be distinguished because Summit retains timestamps,
+not Firefox visit IDs. These limits also apply to imported history.
+
 ## Testing
+
+The individual-visit follow-up passes **907 visit-query checks** on the host
+and native airOS, using **66 Firefox oracle captures**. All previous core and
+bookmark/query suites pass, as do all nine bookmark/query suites under
+AddressSanitizer and UndefinedBehaviorSanitizer. Native UI coverage is **91
+checks**. Native DST checks exposed Haiku's incorrect negative `%z` output;
+Summit formats the correct signed `tm_gmtoff` directly, with positive/negative
+fractional-hour offsets and repeated DST hours covered.
+
+The full browser passes **191 checks and 215 native action assertions**,
+including repeated visit rows, visible microseconds, HTML/SQLite imports,
+page-level range membership, row limits, live refresh, export/reimport, native
+Open All/menu actions, page navigation and history clearing. The individual-visit
+page was visually inspected. All **706 frozen hashes** remain unchanged,
+all four engine images loaded, and shutdown leaves no helpers or crash events
+across a complete log interval. The owned RAM filesystem was unmounted after an
+all-team scan.
+Evidence: [`bookmark-visit-queries-native-2026-10-22.json`](bookmark-visit-queries-native-2026-10-22.json).
 
 The date-query follow-up passes **2,945 date-query checks**, including **68
 Firefox oracle result trees**, on the host and native airOS. The existing core

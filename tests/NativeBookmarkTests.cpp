@@ -1,4 +1,5 @@
 #include "core/Bookmarks.h"
+#include "core/BookmarkQueries.h"
 #include "core/Profile.h"
 #include "core/HistoryVisits.h"
 #include <dlfcn.h>
@@ -382,6 +383,35 @@ public:
             && dateButtons->children.size() == 1, "clearing history empties later date snapshots without changing an open menu");
         Check(dates.Count() == 2 && dates.Find(dateQuery)->children.empty() && dates.Find(dateSiteQuery)->children.empty(),
             "native date and host containers are never saved as bookmarks");
+
+        Bookmarks individual;
+        const auto individualQuery = individual.Add({"place:type=1&sort=4", "Visits"}, kBookmarksBarFolder);
+        std::vector<PageRecord> repeated{{"https://visits.test/a", "Repeated", 0, false, 7}, {"https://visits.test/b", ""}};
+        SetHistoryVisitTimes(repeated[0], {clock-1, clock-2});
+        SetHistoryVisitTimes(repeated[1], {clock-3});
+        auto visitSnapshot = BookmarkButtons(individual, repeated, *individual.Find(individualQuery));
+        auto visitButtons = std::make_shared<const BookmarkButton>(visitSnapshot.queryContents());
+        Check(visitButtons->children.size() == 3 && visitButtons->children[0].url == visitButtons->children[1].url,
+            "individual query retains repeated visits without inventing aggregate-count rows");
+        Check(visitButtons->children[0].title == "Repeated — " + FormatBookmarkVisitTime(clock-1)
+            && visitButtons->children[1].title == "Repeated — " + FormatBookmarkVisitTime(clock-2),
+            "native visit labels distinguish subsecond timestamps");
+        Check(visitButtons->children[2].title == "https://visits.test/b — " + FormatBookmarkVisitTime(clock-3),
+            "untitled visits retain a readable address before their timestamp");
+        BMenu visitMenu("Visits");
+        AddBookmarkItems(&visitMenu, visitButtons, *visitButtons, BMessenger(this));
+        Check(visitMenu.CountItems() == 5 && std::string(visitMenu.ItemAt(0)->Label()) != visitMenu.ItemAt(1)->Label(),
+            "native menu displays distinguishable repeated visits and Open All");
+        Check(std::string(visitMenu.ItemAt(0)->Message()->GetString("url", "")) == "https://visits.test/a"
+            && std::string(visitMenu.ItemAt(1)->Message()->GetString("url", "")) == "https://visits.test/a",
+            "both visit actions navigate to the original page address");
+        Check(visitMenu.ItemAt(4)->Message()->GetInt64("id", -1) == individualQuery,
+            "visit Open All resolves the saved query at activation");
+        repeated.clear();
+        Check(BookmarkButtons(individual, repeated, *individual.Find(individualQuery)).queryContents().children.empty()
+            && visitSnapshot.queryContents().children.size() == 3, "open visit menus retain their immutable history snapshot");
+        Check(individual.Count() == 1 && individual.Find(individualQuery)->children.empty()
+            && individual.Find(individualQuery)->title == "Visits", "visit timestamps never alter saved bookmark data");
 
         Bookmarks scoped;
         for (const auto* scope : {"first", "second"}) {
