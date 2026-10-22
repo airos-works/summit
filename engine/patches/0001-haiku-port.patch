@@ -72669,10 +72669,23 @@ index b02792fe46e6dcf5849043e487a9596fc30d3d01..01cd68d2ffffbdfd17625d991a5337f3
 +
  } // namespace WebKit
 diff --git a/Source/WebKit/NetworkProcess/NetworkConnectionToWebProcess.cpp b/Source/WebKit/NetworkProcess/NetworkConnectionToWebProcess.cpp
-index 48bd4d372724d10de347c001b8fde0ce7779c0c2..1648d0d6961c1f4d9f7f34f2c2f5846875008f32 100644
+index 48bd4d372724d10de347c001b8fde0ce7779c0c2..d08fcfadde12103e5adc2ae092366d14c01871f1 100644
 --- a/Source/WebKit/NetworkProcess/NetworkConnectionToWebProcess.cpp
 +++ b/Source/WebKit/NetworkProcess/NetworkConnectionToWebProcess.cpp
-@@ -92,6 +92,11 @@
+@@ -42,6 +42,12 @@
+ #include "NetworkProcessConnectionParameters.h"
+ #include "NetworkProcessMessages.h"
+ #include "NetworkProcessProxyMessages.h"
++#if ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
++#include "FormDataReference.h"
++#include "ResourceLoadInfo.h"
++#include "WebExtensionWebRequestGateResultHaiku.h"
++#include "WebSocketChannelMessages.h"
++#endif
+ #include "NetworkRTCMonitorMessages.h"
+ #include "NetworkRTCProviderMessages.h"
+ #include "NetworkResourceLoadParameters.h"
+@@ -92,6 +98,11 @@
  #include <WebCore/ResourceLoadStatistics.h>
  #include <WebCore/ResourceRequest.h>
  #include <WebCore/SameSiteInfo.h>
@@ -72684,7 +72697,62 @@ index 48bd4d372724d10de347c001b8fde0ce7779c0c2..1648d0d6961c1f4d9f7f34f2c2f58468
  #include <WebCore/SecurityOriginData.h>
  #include <WebCore/SecurityPolicy.h>
  #include <WebCore/SerializedScriptValue.h>
-@@ -815,7 +820,7 @@ void NetworkConnectionToWebProcess::preconnectTo(PreconnectRequest&& preconnectR
+@@ -307,6 +318,10 @@ bool NetworkConnectionToWebProcess::dispatchMessage(IPC::Connection& connection,
+         MESSAGE_CHECK_WITH_RETURN_VALUE(AtomicObjectIdentifier<WebSocketIdentifierType>::isValidIdentifier(decoder.destinationID()), false);
+         if (RefPtr channel = m_networkSocketChannels.get(AtomicObjectIdentifier<WebSocketIdentifierType>(decoder.destinationID())))
+             channel->didReceiveMessage(connection, decoder);
++#if ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
++        else if (decoder.messageName() == IPC::MessageName::NetworkSocketChannel_Close)
++            m_pendingSocketChannelsHaiku.remove(AtomicObjectIdentifier<WebSocketIdentifierType>(decoder.destinationID()));
++#endif
+         return true;
+     }
+ 
+@@ -549,6 +564,43 @@ void NetworkConnectionToWebProcess::createSocketChannel(const ResourceRequest& r
+     }
+ 
+     ASSERT(!m_networkSocketChannels.contains(identifier));
++#if ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
++    // A blocking onBeforeRequest listener (uBlock Origin's $websocket filters,
++    // Privacy Badger) decides before the connection is made. The page sees a
++    // blocked connection fail as one the server refused.
++    if (m_networkProcess->webRequestBlockingPhasesHaiku() & webExtensionWebRequestPhaseBitHaiku(webExtensionWebRequestBeforeRequestPhaseHaiku)) {
++        if (RefPtr parent = m_networkProcess->parentProcessConnection()) {
++            ResourceLoadInfo loadInfo { NetworkResourceLoadIdentifier::generate() };
++            loadInfo.frameID = frameID;
++            loadInfo.originalURL = request.url();
++            loadInfo.originalHTTPMethod = "GET"_s;
++            loadInfo.eventTimestamp = WallTime::now();
++            loadInfo.type = ResourceLoadInfo::Type::WebSocket;
++            m_pendingSocketChannelsHaiku.add(identifier);
++            parent->sendWithAsyncReply(Messages::NetworkProcessProxy::ResourceLoadWebRequestDecisionHaiku(webPageProxyID, webExtensionWebRequestBeforeRequestPhaseHaiku, loadInfo, request, std::nullopt, std::nullopt, std::nullopt),
++                [weakThis = WeakPtr { *this }, request, protocol, identifier, webPageProxyID, frameID, pageID, clientOrigin, hadMainFrameMainResourcePrivateRelayed, allowPrivacyProxy, advancedPrivacyProtections, storedCredentialsPolicy, isInitiatedByDedicatedWorker](WebExtensionWebRequestGateResultHaiku&& result) mutable {
++                    RefPtr protectedThis = weakThis.get();
++                    // The page may have closed the socket meanwhile.
++                    if (!protectedThis || !protectedThis->m_pendingSocketChannelsHaiku.remove(identifier))
++                        return;
++                    if (result.cancel || result.surrogate) {
++                        Ref connection = protectedThis->connection();
++                        connection->send(Messages::WebSocketChannel::DidReceiveMessageError { "WebSocket connection blocked by an extension"_s }, identifier.toUInt64());
++                        connection->send(Messages::WebSocketChannel::DidClose { 1006, String { } }, identifier.toUInt64());
++                        return;
++                    }
++                    protectedThis->addSocketChannelHaiku(result.redirectURL && (result.redirectURL->protocolIs("ws"_s) || result.redirectURL->protocolIs("wss"_s))
++                        ? ResourceRequest { URL { *result.redirectURL } } : request, protocol, identifier, webPageProxyID, frameID, pageID, clientOrigin, hadMainFrameMainResourcePrivateRelayed, allowPrivacyProxy, advancedPrivacyProtections, storedCredentialsPolicy, isInitiatedByDedicatedWorker);
++                });
++            return;
++        }
++    }
++    addSocketChannelHaiku(request, protocol, identifier, webPageProxyID, frameID, pageID, clientOrigin, hadMainFrameMainResourcePrivateRelayed, allowPrivacyProxy, advancedPrivacyProtections, storedCredentialsPolicy, isInitiatedByDedicatedWorker);
++}
++
++void NetworkConnectionToWebProcess::addSocketChannelHaiku(const ResourceRequest& request, const String& protocol, WebSocketIdentifier identifier, WebPageProxyIdentifier webPageProxyID, std::optional<FrameIdentifier> frameID, std::optional<PageIdentifier> pageID, const ClientOrigin& clientOrigin, bool hadMainFrameMainResourcePrivateRelayed, bool allowPrivacyProxy, OptionSet<AdvancedPrivacyProtections> advancedPrivacyProtections, WebCore::StoredCredentialsPolicy storedCredentialsPolicy, WebCore::IsInitiatedByDedicatedWorker isInitiatedByDedicatedWorker)
++{
++#endif
+     if (RefPtr channel = NetworkSocketChannel::create(*this, m_sessionID, request, protocol, identifier, webPageProxyID, frameID, pageID, clientOrigin, hadMainFrameMainResourcePrivateRelayed, allowPrivacyProxy, advancedPrivacyProtections, storedCredentialsPolicy, isInitiatedByDedicatedWorker))
+         m_networkSocketChannels.add(identifier, channel.releaseNonNull());
+ }
+@@ -815,7 +867,7 @@ void NetworkConnectionToWebProcess::preconnectTo(PreconnectRequest&& preconnectR
      }
  #endif
  
@@ -72693,7 +72761,7 @@ index 48bd4d372724d10de347c001b8fde0ce7779c0c2..1648d0d6961c1f4d9f7f34f2c2f58468
      CheckedPtr session = networkSession();
      if (session && session->allowsServerPreconnect()) {
          NetworkLoadParameters parameters;
-@@ -1030,8 +1035,19 @@ void NetworkConnectionToWebProcess::setRawCookie(const URL& firstParty, const UR
+@@ -1030,8 +1082,19 @@ void NetworkConnectionToWebProcess::setRawCookie(const URL& firstParty, const UR
  {
      auto access = validateCookieAccess("setRawCookie"_s, firstParty, url, nullptr, std::nullopt);
      MESSAGE_CHECK(access != CookieAccess::Terminate);
@@ -72715,6 +72783,31 @@ index 48bd4d372724d10de347c001b8fde0ce7779c0c2..1648d0d6961c1f4d9f7f34f2c2f58468
      if (access != CookieAccess::Allow)
          return;
  
+diff --git a/Source/WebKit/NetworkProcess/NetworkConnectionToWebProcess.h b/Source/WebKit/NetworkProcess/NetworkConnectionToWebProcess.h
+index 55d3a77aed521a9c2c30d021bf148c9dd241c0bc..efadbfed39d5cb8ef08d18023d25e8accac532cc 100644
+--- a/Source/WebKit/NetworkProcess/NetworkConnectionToWebProcess.h
++++ b/Source/WebKit/NetworkProcess/NetworkConnectionToWebProcess.h
+@@ -374,6 +374,9 @@ private:
+     void setCaptureExtraNetworkLoadMetricsEnabled(bool);
+ 
+     void createSocketChannel(const WebCore::ResourceRequest&, const String& protocol, WebCore::WebSocketIdentifier, WebPageProxyIdentifier, std::optional<WebCore::FrameIdentifier>, std::optional<WebCore::PageIdentifier>, const WebCore::ClientOrigin&, bool hadMainFrameMainResourcePrivateRelayed, bool allowPrivacyProxy, OptionSet<WebCore::AdvancedPrivacyProtections>, WebCore::StoredCredentialsPolicy, WebCore::IsInitiatedByDedicatedWorker);
++#if ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
++    void addSocketChannelHaiku(const WebCore::ResourceRequest&, const String& protocol, WebCore::WebSocketIdentifier, WebPageProxyIdentifier, std::optional<WebCore::FrameIdentifier>, std::optional<WebCore::PageIdentifier>, const WebCore::ClientOrigin&, bool hadMainFrameMainResourcePrivateRelayed, bool allowPrivacyProxy, OptionSet<WebCore::AdvancedPrivacyProtections>, WebCore::StoredCredentialsPolicy, WebCore::IsInitiatedByDedicatedWorker);
++#endif
+     void queryLocalNetworkAccessPermission(std::optional<WebPageProxyIdentifier>, WebCore::ClientOrigin&&, WebCore::IPAddressSpace, CompletionHandler<void(std::optional<WebCore::PermissionState>)>&&);
+     void countWebSocketChannelsForTesting(CompletionHandler<void(uint32_t)>&&);
+ 
+@@ -544,6 +547,10 @@ private:
+     PAL::SessionID m_sessionID;
+ 
+     HashMap<WebCore::WebSocketIdentifier, Ref<NetworkSocketChannel>> m_networkSocketChannels;
++#if ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
++    // WebSockets waiting for a blocking webRequest decision.
++    HashSet<WebCore::WebSocketIdentifier> m_pendingSocketChannelsHaiku;
++#endif
+     NetworkResourceLoadMap m_networkResourceLoaders;
+     Vector<ResourceNetworkActivityTracker> m_networkActivityTrackers;
+     HashMap<WebCore::PageIdentifier, NetworkActivityTracker::CompletionCode> m_lastRootActivityCompletionCodesForTesting;
 diff --git a/Source/WebKit/NetworkProcess/NetworkLoad.cpp b/Source/WebKit/NetworkProcess/NetworkLoad.cpp
 index 90aa4198b4343bb87082a13c94762e486dddf722..2ee2dd31cc02723aed7bb9ab1a1f56a1ce21e532 100644
 --- a/Source/WebKit/NetworkProcess/NetworkLoad.cpp
@@ -72868,7 +72961,7 @@ index 5a8bebfa4fb03b8ed66afe52ec6ea95d97a987ac..7595c5866ece87286d0992e64c684ede
 +#endif
  }
 diff --git a/Source/WebKit/NetworkProcess/NetworkResourceLoader.cpp b/Source/WebKit/NetworkProcess/NetworkResourceLoader.cpp
-index 0ecf172b29e1ba69a2573c3de5351f86e5a4ef0e..91f7663a7514e60fa33e37ff383d335609f4e16c 100644
+index 0ecf172b29e1ba69a2573c3de5351f86e5a4ef0e..393f799d0c25af8667598250c8ccd6f9fb552e09 100644
 --- a/Source/WebKit/NetworkProcess/NetworkResourceLoader.cpp
 +++ b/Source/WebKit/NetworkProcess/NetworkResourceLoader.cpp
 @@ -115,6 +115,14 @@
@@ -72922,7 +73015,7 @@ index 0ecf172b29e1ba69a2573c3de5351f86e5a4ef0e..91f7663a7514e60fa33e37ff383d3356
  
          if (!entry) {
              protectedThis->startNetworkLoad(WTF::move(request), FirstLoad::Yes);
-@@ -571,6 +594,160 @@ void NetworkResourceLoader::continueStartNetworkLoad(ResourceRequest&& request,
+@@ -571,6 +594,199 @@ void NetworkResourceLoader::continueStartNetworkLoad(ResourceRequest&& request,
          LOADER_RELEASE_LOG("startNetworkLoad: Going to the network (description=%" PUBLIC_LOG_STRING ")", networkLoad->description().utf8());
  }
  
@@ -73008,6 +73101,12 @@ index 0ecf172b29e1ba69a2573c3de5351f86e5a4ef0e..91f7663a7514e60fa33e37ff383d3356
 +            protectedThis->didFailLoading(blockedByContentBlockerError(request));
 +            return;
 +        }
++        if (result.surrogate) {
++            LOADER_RELEASE_LOG_WITH_THIS(protectedThis, "applyBeforeRequestWebRequestHaiku: answered with a blocking webRequest listener's surrogate");
++            abandon();
++            protectedThis->serveWebRequestSurrogateHaiku(request, WTF::move(*result.surrogate));
++            return;
++        }
 +        if (result.redirectURL) {
 +            LOADER_RELEASE_LOG_WITH_THIS(protectedThis, "applyBeforeRequestWebRequestHaiku: redirected by a blocking webRequest listener");
 +            abandon();
@@ -73043,6 +73142,39 @@ index 0ecf172b29e1ba69a2573c3de5351f86e5a4ef0e..91f7663a7514e60fa33e37ff383d3356
 +            request.setHTTPHeaderFields(WTF::move(headers));
 +        }
 +        proceed(WTF::move(request));
++    });
++}
++
++void NetworkResourceLoader::serveWebRequestSurrogateHaiku(const ResourceRequest& request, std::pair<String, Vector<uint8_t>>&& surrogate)
++{
++    // The page receives the surrogate under the URL it asked for, as if the
++    // server had sent it: a redirect to a data: or extension URL would fail
++    // the WebProcess' redirect checks, and Chrome's internal redirect is not
++    // observable to scripts either.
++    auto& [mimeType, body] = surrogate;
++    ResourceResponse response { URL { request.url() }, String { mimeType }, static_cast<long long>(body.size()), { } };
++    response.setHTTPStatusCode(200);
++    response.setHTTPStatusText("OK"_s);
++    response.setHTTPVersion("HTTP/1.1"_s);
++    response.setHTTPHeaderField(HTTPHeaderName::ContentType, mimeType);
++    response.setHTTPHeaderField(HTTPHeaderName::ContentLength, String::number(body.size()));
++    response.setHTTPHeaderField(HTTPHeaderName::CacheControl, "no-store"_s);
++    response.setHTTPHeaderField("Non-Authoritative-Reason"_s, "WebRequest API"_s);
++    if (auto origin = request.httpOrigin(); !origin.isEmpty()) {
++        response.setHTTPHeaderField(HTTPHeaderName::AccessControlAllowOrigin, origin);
++        response.setHTTPHeaderField(HTTPHeaderName::AccessControlAllowCredentials, "true"_s);
++    } else
++        response.setHTTPHeaderField(HTTPHeaderName::AccessControlAllowOrigin, "*"_s);
++    Ref buffer = SharedBuffer::create(WTF::move(body));
++    // Not offered to onHeadersReceived: the extension made this response.
++    SetForScope applying { m_isApplyingWebRequestResponseHaiku, true };
++    didReceiveResponse(WTF::move(response), PrivateRelayed::No, [weakThis = WeakPtr { *this }, buffer = WTF::move(buffer)](PolicyAction action) mutable {
++        RefPtr protectedThis = weakThis.get();
++        if (!protectedThis || action != PolicyAction::Use)
++            return;
++        if (!buffer->isEmpty())
++            protectedThis->didReceiveBuffer(buffer.get());
++        protectedThis->didFinishLoading(NetworkLoadMetrics { });
 +    });
 +}
 +
@@ -73083,7 +73215,7 @@ index 0ecf172b29e1ba69a2573c3de5351f86e5a4ef0e..91f7663a7514e60fa33e37ff383d3356
  ResourceLoadInfo NetworkResourceLoader::resourceLoadInfo()
  {
      auto loadedFromCache = [] (const ResourceResponse& response) {
-@@ -1277,7 +1454,7 @@ ResourceRequest NetworkResourceLoader::constructPreconnectRequest(const Resource
+@@ -1277,7 +1493,7 @@ ResourceRequest NetworkResourceLoader::constructPreconnectRequest(const Resource
  
  void NetworkResourceLoader::startPreconnectTask(const URL& baseURL, const LinkHeader& header, const ContentSecurityPolicy& contentSecurityPolicy)
  {
@@ -73092,7 +73224,7 @@ index 0ecf172b29e1ba69a2573c3de5351f86e5a4ef0e..91f7663a7514e60fa33e37ff383d3356
      if (!parameters().linkPreconnectEarlyHintsEnabled)
          return;
  
-@@ -1316,6 +1493,46 @@ void NetworkResourceLoader::startPreconnectTask(const URL& baseURL, const LinkHe
+@@ -1316,6 +1532,46 @@ void NetworkResourceLoader::startPreconnectTask(const URL& baseURL, const LinkHe
  
  void NetworkResourceLoader::didReceiveResponse(ResourceResponse&& receivedResponse, PrivateRelayed privateRelayed, ResponseCompletionHandler&& completionHandler)
  {
@@ -73139,7 +73271,7 @@ index 0ecf172b29e1ba69a2573c3de5351f86e5a4ef0e..91f7663a7514e60fa33e37ff383d3356
  #if HAVE(BROKEN_MULTIPART_RESPONSE_FLOW_CONTROL)
      if (m_isProcessingResponse) {
          m_deferredMessages.append(DeferredResponse { WTF::move(receivedResponse), privateRelayed, WTF::move(completionHandler) });
-@@ -1797,6 +2014,32 @@ void NetworkResourceLoader::didReceiveChallenge(const AuthenticationChallenge& c
+@@ -1797,6 +2053,32 @@ void NetworkResourceLoader::didReceiveChallenge(const AuthenticationChallenge& c
          protect(connectionToWebProcess().networkProcess())->parentProcessConnection()->send(Messages::NetworkProcessProxy::ResourceLoadDidReceiveChallenge(webPageProxyID(), resourceLoadInfo(), challenge), 0);
  }
  
@@ -73172,7 +73304,7 @@ index 0ecf172b29e1ba69a2573c3de5351f86e5a4ef0e..91f7663a7514e60fa33e37ff383d3356
  std::optional<Seconds> NetworkResourceLoader::validateCacheEntryForMaxAgeCapValidation(const ResourceRequest& request, const ResourceRequest& redirectRequest, const ResourceResponse& redirectResponse)
  {
      bool existingCacheEntryMatchesNewResponse = false;
-@@ -2057,6 +2300,15 @@ void NetworkResourceLoader::restartNetworkLoad(WebCore::ResourceRequest&& newReq
+@@ -2057,6 +2339,15 @@ void NetworkResourceLoader::restartNetworkLoad(WebCore::ResourceRequest&& newReq
  
      completionHandler({ });
  
@@ -73188,7 +73320,7 @@ index 0ecf172b29e1ba69a2573c3de5351f86e5a4ef0e..91f7663a7514e60fa33e37ff383d3356
      if (!newRequest.isEmpty())
          startNetworkLoad(WTF::move(newRequest), FirstLoad::No);
  }
-@@ -2146,6 +2398,18 @@ void NetworkResourceLoader::continueWillSendRequest(ResourceRequest&& newRequest
+@@ -2146,6 +2437,18 @@ void NetworkResourceLoader::continueWillSendRequest(ResourceRequest&& newRequest
          LOG(NetworkCache, "(NetworkProcess) Retrieving cached redirect");
          LOADER_RELEASE_LOG("continueWillSendRequest: m_isWaitingContinueWillSendRequestForCachedRedirect was set");
  
@@ -73207,7 +73339,7 @@ index 0ecf172b29e1ba69a2573c3de5351f86e5a4ef0e..91f7663a7514e60fa33e37ff383d3356
          if (canUseCachedRedirect(newRequest))
              retrieveCacheEntry(newRequest);
          else
-@@ -2156,6 +2420,27 @@ void NetworkResourceLoader::continueWillSendRequest(ResourceRequest&& newRequest
+@@ -2156,6 +2459,27 @@ void NetworkResourceLoader::continueWillSendRequest(ResourceRequest&& newRequest
      if (m_networkLoad) {
          LOADER_RELEASE_LOG("continueWillSendRequest: Telling NetworkLoad to proceed with the redirect");
  
@@ -73235,7 +73367,7 @@ index 0ecf172b29e1ba69a2573c3de5351f86e5a4ef0e..91f7663a7514e60fa33e37ff383d3356
          if (shouldSendResourceLoadMessages() && !newRequest.isNull())
              protect(connectionToWebProcess().networkProcess())->parentProcessConnection()->send(Messages::NetworkProcessProxy::ResourceLoadDidPerformHTTPRedirection(webPageProxyID(), resourceLoadInfo(), m_redirectResponse, newRequest), 0);
  
-@@ -2344,6 +2629,12 @@ void NetworkResourceLoader::tryStoreAsCacheEntry()
+@@ -2344,6 +2668,12 @@ void NetworkResourceLoader::tryStoreAsCacheEntry()
      }
  
      if (isCrossOriginPrefetch()) {
@@ -73249,7 +73381,7 @@ index 0ecf172b29e1ba69a2573c3de5351f86e5a4ef0e..91f7663a7514e60fa33e37ff383d3356
              LOADER_RELEASE_LOG("tryStoreAsCacheEntry: Storing entry in prefetch cache");
              session->prefetchCache().store(m_networkLoad->currentRequest().url(), WTF::move(m_response), m_privateRelayed, m_bufferedDataForCache.takeBuffer());
 diff --git a/Source/WebKit/NetworkProcess/NetworkResourceLoader.h b/Source/WebKit/NetworkProcess/NetworkResourceLoader.h
-index 867bf9c5ec02bd497e31cbd97fc869fcd5933434..239ed3af2cc6aa5014808c166247a4d4fbc71d52 100644
+index 867bf9c5ec02bd497e31cbd97fc869fcd5933434..101bce06886cc474b12531cca0c318fcd82667dc 100644
 --- a/Source/WebKit/NetworkProcess/NetworkResourceLoader.h
 +++ b/Source/WebKit/NetworkProcess/NetworkResourceLoader.h
 @@ -35,6 +35,9 @@
@@ -73272,7 +73404,7 @@ index 867bf9c5ec02bd497e31cbd97fc869fcd5933434..239ed3af2cc6aa5014808c166247a4d4
      bool shouldCaptureExtraNetworkLoadMetrics() const final;
  
  #if HAVE(BROKEN_MULTIPART_RESPONSE_FLOW_CONTROL)
-@@ -269,6 +275,20 @@ private:
+@@ -269,6 +275,21 @@ private:
      void startNetworkLoad(WebCore::ResourceRequest&&, FirstLoad);
      bool shouldFetchWithCompressionDictionary(const WebCore::ResourceRequest&) const;
      void continueStartNetworkLoad(WebCore::ResourceRequest&&, NetworkLoadParameters&&);
@@ -73288,12 +73420,13 @@ index 867bf9c5ec02bd497e31cbd97fc869fcd5933434..239ed3af2cc6aa5014808c166247a4d4
 +    void applyBeforeRequestWebRequestHaiku(WebCore::ResourceRequest&&, Function<void(WebCore::ResourceRequest&&)>&& proceed, Function<void()>&& abandon);
 +    void applyBeforeSendHeadersWebRequestHaiku(WebCore::ResourceRequest&&, Function<void(WebCore::ResourceRequest&&)>&& proceed, Function<void()>&& abandon);
 +    void startWebRequestRedirectHaiku(WebCore::ResourceRequest&&, const URL&);
++    void serveWebRequestSurrogateHaiku(const WebCore::ResourceRequest&, std::pair<String, Vector<uint8_t>>&&);
 +    void continueStartRequestHaiku(WebCore::ResourceRequest&&);
 +#endif
      void restartNetworkLoad(WebCore::ResourceRequest&&, CompletionHandler<void(WebCore::ResourceRequest&&)>&&);
      void continueDidReceiveResponse();
      void didReceiveMainResourceResponse(const WebCore::ResourceResponse&);
-@@ -382,6 +402,10 @@ private:
+@@ -382,6 +403,10 @@ private:
      std::unique_ptr<NetworkCache::Entry> m_cacheEntryForValidation;
      std::unique_ptr<NetworkCache::Entry> m_cacheEntryForMaxAgeCapValidation;
      bool m_isWaitingContinueWillSendRequestForCachedRedirect { false };
@@ -81118,10 +81251,10 @@ index 0000000000000000000000000000000000000000..fd699c122637b61eed23542ec868bf61
 +#endif
 diff --git a/Source/WebKit/Shared/Extensions/WebExtensionWebRequestGateResultHaiku.h b/Source/WebKit/Shared/Extensions/WebExtensionWebRequestGateResultHaiku.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..c6eabd8f5bc2c9a9debc30ad89c6dcdb7da8c082
+index 0000000000000000000000000000000000000000..3001f2cff4c8cd460352b483777b65479cb052ce
 --- /dev/null
 +++ b/Source/WebKit/Shared/Extensions/WebExtensionWebRequestGateResultHaiku.h
-@@ -0,0 +1,49 @@
+@@ -0,0 +1,53 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +#pragma once
 +#if ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
@@ -81165,18 +81298,22 @@ index 0000000000000000000000000000000000000000..c6eabd8f5bc2c9a9debc30ad89c6dcdb
 +    std::optional<URL> redirectURL;
 +    std::optional<Vector<std::pair<String, String>>> headers;
 +    std::optional<std::pair<String, String>> credentials;
++    // A redirect to a data: URL or to a web-accessible extension resource
++    // (uBlock Origin's redirect= surrogates), which the network process cannot
++    // load: the MIME type and body it answers the original request with.
++    std::optional<std::pair<String, Vector<uint8_t>>> surrogate;
 +
-+    bool isEmpty() const { return !cancel && !redirectURL && !headers && !credentials; }
++    bool isEmpty() const { return !cancel && !redirectURL && !headers && !credentials && !surrogate; }
 +};
 +
 +}
 +#endif
 diff --git a/Source/WebKit/Shared/Extensions/WebExtensionWebRequestGateResultHaiku.serialization.in b/Source/WebKit/Shared/Extensions/WebExtensionWebRequestGateResultHaiku.serialization.in
 new file mode 100644
-index 0000000000000000000000000000000000000000..c96ffa5ed98e0cabce9ba03a067c60cc74bf4aea
+index 0000000000000000000000000000000000000000..9a7c24cc1f9ebbf51f162b9eb45bbcba35cfa6fe
 --- /dev/null
 +++ b/Source/WebKit/Shared/Extensions/WebExtensionWebRequestGateResultHaiku.serialization.in
-@@ -0,0 +1,10 @@
+@@ -0,0 +1,11 @@
 +# Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause
 +
 +#if ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
@@ -81185,6 +81322,7 @@ index 0000000000000000000000000000000000000000..c96ffa5ed98e0cabce9ba03a067c60cc
 +    std::optional<URL> redirectURL;
 +    std::optional<Vector<std::pair<String, String>>> headers;
 +    std::optional<std::pair<String, String>> credentials;
++    std::optional<std::pair<String, Vector<uint8_t>>> surrogate;
 +};
 +#endif
 diff --git a/Source/WebKit/Shared/Extensions/WebExtensionWebRequestMergeHaiku.cpp b/Source/WebKit/Shared/Extensions/WebExtensionWebRequestMergeHaiku.cpp
@@ -81749,6 +81887,39 @@ index 04bfb854a2dae611ac4afa90715c69dafcea9def..2fecf75852ff63db9504d0330b5bc3c0
  #endif
  
  #if HAVE(COOKIE_CHANGE_LISTENER_API)
+diff --git a/Source/WebKit/Shared/ResourceLoadInfo.h b/Source/WebKit/Shared/ResourceLoadInfo.h
+index 697e9973af33a9c9c2b37a46bac679cc0cf5b399..ae2ee6667732d27a5eecc953dff791fbe9624d96 100644
+--- a/Source/WebKit/Shared/ResourceLoadInfo.h
++++ b/Source/WebKit/Shared/ResourceLoadInfo.h
+@@ -50,7 +50,11 @@ struct ResourceLoadInfo {
+         Script,
+         Stylesheet,
+         XMLHTTPRequest,
+-        XSLT
++        XSLT,
++#if PLATFORM(HAIKU)
++        // Only blocking webRequest decisions describe WebSocket connections.
++        WebSocket,
++#endif
+     };
+ 
+     NetworkResourceLoadIdentifier resourceLoadID;
+diff --git a/Source/WebKit/Shared/ResourceLoadInfo.serialization.in b/Source/WebKit/Shared/ResourceLoadInfo.serialization.in
+index 890f42a669ecff3e7dfcfcd0cff1184e03f5d289..2a651210f586a619c48f18673dde8706841ce27c 100644
+--- a/Source/WebKit/Shared/ResourceLoadInfo.serialization.in
++++ b/Source/WebKit/Shared/ResourceLoadInfo.serialization.in
+@@ -35,7 +35,10 @@
+     Script,
+     Stylesheet,
+     XMLHTTPRequest,
+-    XSLT
++    XSLT,
++#if PLATFORM(HAIKU)
++    WebSocket,
++#endif
+ };
+ 
+ struct WebKit::ResourceLoadInfo {
 diff --git a/Source/WebKit/Shared/WebCoreArgumentCoders.serialization.in b/Source/WebKit/Shared/WebCoreArgumentCoders.serialization.in
 index 1592d815c2ff85825a27006ec9fc7d559abde82c..ff324b9ee6613fa0fccd923e1cbf760cbd7a7541 100644
 --- a/Source/WebKit/Shared/WebCoreArgumentCoders.serialization.in
@@ -95621,7 +95792,7 @@ index 0000000000000000000000000000000000000000..b1acea1774558b69bfb93e7ddb21a56a
 +
 +#endif // ENABLE(WK_WEB_EXTENSIONS)
 diff --git a/Source/WebKit/UIProcess/Extensions/WebExtensionMatchPattern.cpp b/Source/WebKit/UIProcess/Extensions/WebExtensionMatchPattern.cpp
-index 4e97a0bde16b11e50f0a066169659c14a6bd80d9..dd5f3799af83e75a7094dd87ab4e38f1824452ce 100644
+index 4e97a0bde16b11e50f0a066169659c14a6bd80d9..5366d9604693957959145e76ea8dcfb2dbb73c9d 100644
 --- a/Source/WebKit/UIProcess/Extensions/WebExtensionMatchPattern.cpp
 +++ b/Source/WebKit/UIProcess/Extensions/WebExtensionMatchPattern.cpp
 @@ -28,9 +28,6 @@
@@ -95656,6 +95827,30 @@ index 4e97a0bde16b11e50f0a066169659c14a6bd80d9..dd5f3799af83e75a7094dd87ab4e38f1
  bool WebExtensionMatchPattern::isWebExtensionURL(const URL& url)
  {
      if (!url.isValid())
+@@ -368,10 +350,22 @@ bool WebExtensionMatchPattern::isValidScheme(String scheme)
+     return !scheme.isEmpty() && validSchemes().contains(scheme);
+ }
+ 
+-bool WebExtensionMatchPattern::matchesURL(const URL& urlToMatch, OptionSet<Options> options) const
++bool WebExtensionMatchPattern::matchesURL(const URL& url, OptionSet<Options> options) const
+ {
+     ASSERT(!options.contains(Options::MatchBidirectionally));
+ 
++#if PLATFORM(HAIKU)
++    // A WebSocket URL matches as its HTTP(S) equivalent, as in Chrome: host
++    // permissions and webRequest filters cover ws: and wss: connections.
++    URL urlToMatch = url;
++    if (url.protocolIs("ws"_s))
++        urlToMatch.setProtocol("http"_s);
++    else if (url.protocolIs("wss"_s))
++        urlToMatch.setProtocol("https"_s);
++#else
++    const URL& urlToMatch = url;
++#endif
++
+     if (!isValid() || !urlToMatch.isValid())
+         return false;
+ 
 diff --git a/Source/WebKit/UIProcess/Extensions/WebExtensionMatchPatternProcessPool.cpp b/Source/WebKit/UIProcess/Extensions/WebExtensionMatchPatternProcessPool.cpp
 new file mode 100644
 index 0000000000000000000000000000000000000000..dcb82f153bf77388c21d2babca1b6334e9d13017
@@ -105490,10 +105685,10 @@ index 0000000000000000000000000000000000000000..25600e412c2690295ad0faf8ac058b38
 +#endif // ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
 diff --git a/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionControllerWebRequestBlockingHaiku.cpp b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionControllerWebRequestBlockingHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..454bbb96a06e13427065cdb9ae59a8fcb9989622
+index 0000000000000000000000000000000000000000..e27b473d981963b451159cd4e3d3a92fd2f28100
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionControllerWebRequestBlockingHaiku.cpp
-@@ -0,0 +1,340 @@
+@@ -0,0 +1,387 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#include "config.h"
@@ -105501,11 +105696,13 @@ index 0000000000000000000000000000000000000000..454bbb96a06e13427065cdb9ae59a8fc
 +
 +#if ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
 +
++#include "APIData.h"
 +#include "FormDataReference.h"
 +#include "Logging.h"
 +#include "NetworkProcessMessages.h"
 +#include "NetworkProcessProxy.h"
 +#include "ResourceLoadInfo.h"
++#include "WebExtension.h"
 +#include "WebExtensionContext.h"
 +#include "WebExtensionWebRequestDecisionHaiku.h"
 +#include "WebExtensionWebRequestGateResultHaiku.h"
@@ -105515,6 +105712,7 @@ index 0000000000000000000000000000000000000000..454bbb96a06e13427065cdb9ae59a8fc
 +#include "WebProcessProxy.h"
 +#include "WebsiteDataStore.h"
 +#include <WebCore/AuthenticationChallenge.h>
++#include <WebCore/DataURLDecoder.h>
 +#include <WebCore/FormData.h>
 +#include <WebCore/HTTPHeaderMap.h>
 +#include <WebCore/ResourceRequest.h>
@@ -105576,11 +105774,40 @@ index 0000000000000000000000000000000000000000..454bbb96a06e13427065cdb9ae59a8fc
 +// One blocking decision for one phase of one request, spanning every eligible
 +// extension. Completes exactly once: when every extension has replied (or its
 +// processes went away), or when the listener timeout fires, whichever is first.
++// What a blocking listener's redirect to a non-HTTP(S) URL serves, if anything.
++std::optional<std::pair<String, Vector<uint8_t>>> webRequestSurrogateHaiku(const WebExtensionController& controller, const URL& destination, const URL& pageURL)
++{
++    static constexpr size_t maximumSurrogateSize = 16 * 1024 * 1024;
++    if (destination.protocolIsData()) {
++        auto decoded = WebCore::DataURLDecoder::decode(destination, WebCore::DataURLDecoder::ShouldValidatePadding::No);
++        if (!decoded || decoded->data.size() > maximumSurrogateSize)
++            return std::nullopt;
++        return std::pair { decoded->contentType.isEmpty() ? decoded->mimeType : decoded->contentType, WTF::move(decoded->data) };
++    }
++    for (Ref context : controller.extensionContexts()) {
++        if (context->extensionController() != &controller || !protocolHostAndPortAreEqual(context->baseURL(), destination))
++            continue;
++        // As in Chrome, a page's request may only become one of the resources
++        // the extension lets pages load.
++        Ref extension = context->extension();
++        if (!extension->isWebAccessibleResource(destination, pageURL))
++            return std::nullopt;
++        auto path = destination.path().toString();
++        auto data = extension->resourceDataForPath(path, WebExtension::CacheResult::Yes, WebExtension::SuppressNotFoundErrors::Yes);
++        if (!data || (*data)->size() > maximumSurrogateSize)
++            return std::nullopt;
++        return std::pair { extension->resourceMIMETypeForPath(path), Vector<uint8_t> { (*data)->span() } };
++    }
++    return std::nullopt;
++}
++
++using SurrogateResolverHaiku = Function<std::optional<std::pair<String, Vector<uint8_t>>>(const URL&)>;
++
 +class BlockingTransaction : public RefCounted<BlockingTransaction> {
 +public:
-+    static Ref<BlockingTransaction> create(uint8_t phase, URL&& url, Vector<WebExtensionWebRequestHeaderHaiku>&& originalHeaders, CompletionHandler<void(WebExtensionWebRequestGateResultHaiku&&)>&& completionHandler)
++    static Ref<BlockingTransaction> create(uint8_t phase, URL&& url, Vector<WebExtensionWebRequestHeaderHaiku>&& originalHeaders, SurrogateResolverHaiku&& surrogateResolver, CompletionHandler<void(WebExtensionWebRequestGateResultHaiku&&)>&& completionHandler)
 +    {
-+        return adoptRef(*new BlockingTransaction(phase, WTF::move(url), WTF::move(originalHeaders), WTF::move(completionHandler)));
++        return adoptRef(*new BlockingTransaction(phase, WTF::move(url), WTF::move(originalHeaders), WTF::move(surrogateResolver), WTF::move(completionHandler)));
 +    }
 +
 +    ~BlockingTransaction()
@@ -105617,10 +105844,11 @@ index 0000000000000000000000000000000000000000..454bbb96a06e13427065cdb9ae59a8fc
 +    }
 +
 +private:
-+    BlockingTransaction(uint8_t phase, URL&& url, Vector<WebExtensionWebRequestHeaderHaiku>&& originalHeaders, CompletionHandler<void(WebExtensionWebRequestGateResultHaiku&&)>&& completionHandler)
++    BlockingTransaction(uint8_t phase, URL&& url, Vector<WebExtensionWebRequestHeaderHaiku>&& originalHeaders, SurrogateResolverHaiku&& surrogateResolver, CompletionHandler<void(WebExtensionWebRequestGateResultHaiku&&)>&& completionHandler)
 +        : m_phase(phase)
 +        , m_url(WTF::move(url))
 +        , m_originalHeaders(WTF::move(originalHeaders))
++        , m_surrogateResolver(WTF::move(surrogateResolver))
 +        , m_completionHandler(WTF::move(completionHandler))
 +        , m_timeout(RunLoop::mainSingleton(), "WebExtensionWebRequestBlockingTimeout"_s, [this] {
 +            RELEASE_LOG_ERROR(Extensions, "Blocking webRequest listeners did not answer in time; continuing with the replies received so far");
@@ -105666,11 +105894,16 @@ index 0000000000000000000000000000000000000000..454bbb96a06e13427065cdb9ae59a8fc
 +                if (destination != m_url)
 +                    result.redirectURL = destination;
 +            } else {
-+                // The network process can only follow HTTP(S) redirects.
-+                // data:/about:blank are Chrome's cancellation-style redirects;
-+                // extension resources (web_accessible_resources surrogates) and
-+                // other schemes are blocked rather than silently allowed.
-+                RELEASE_LOG(Extensions, "Blocking webRequest redirect to a non-HTTP(S) URL is applied as cancellation");
++                // The network process can only follow HTTP(S) redirects. It
++                // answers the request itself with what a data: URL or a
++                // web-accessible extension resource holds (uBlock Origin's
++                // redirect= surrogates: noop.js, 1x1.gif, google-ima.js...).
++                // Anything else, about:blank included, blocks the request.
++                if (auto surrogate = m_surrogateResolver ? m_surrogateResolver(destination) : std::nullopt) {
++                    result.surrogate = WTF::move(*surrogate);
++                    return result;
++                }
++                RELEASE_LOG(Extensions, "Blocking webRequest redirect to a non-HTTP(S) URL that cannot be served is applied as cancellation");
 +                result.cancel = true;
 +                return result;
 +            }
@@ -105696,6 +105929,7 @@ index 0000000000000000000000000000000000000000..454bbb96a06e13427065cdb9ae59a8fc
 +    const uint8_t m_phase;
 +    const URL m_url;
 +    const Vector<WebExtensionWebRequestHeaderHaiku> m_originalHeaders;
++    SurrogateResolverHaiku m_surrogateResolver;
 +    Vector<WebExtensionWebRequestReplyHaiku> m_replies;
 +    CompletionHandler<void(WebExtensionWebRequestGateResultHaiku&&)> m_completionHandler;
 +    RunLoop::Timer m_timeout;
@@ -105734,7 +105968,15 @@ index 0000000000000000000000000000000000000000..454bbb96a06e13427065cdb9ae59a8fc
 +    else if (phase == webExtensionWebRequestHeadersReceivedPhaseHaiku && response)
 +        originalHeaders = headersForMerge(response->httpHeaderFields());
 +
-+    auto transaction = BlockingTransaction::create(phase, URL { request.url() }, WTF::move(originalHeaders), WTF::move(completionHandler));
++    SurrogateResolverHaiku surrogateResolver;
++    if (phase == webExtensionWebRequestBeforeRequestPhaseHaiku) {
++        RefPtr page = WebProcessProxy::webPage(pageIdentifier);
++        surrogateResolver = [weakThis = WeakPtr { *this }, pageURL = page ? URL { page->currentURL() } : URL { }](const URL& destination) {
++            RefPtr protectedThis = weakThis.get();
++            return protectedThis ? webRequestSurrogateHaiku(*protectedThis, destination, pageURL) : std::nullopt;
++        };
++    }
++    auto transaction = BlockingTransaction::create(phase, URL { request.url() }, WTF::move(originalHeaders), WTF::move(surrogateResolver), WTF::move(completionHandler));
 +    for (Ref context : eligibleContexts) {
 +        auto installationIdentifier = context->nativeInstallationIdentifier();
 +        auto installationOrder = context->nativeInstallationOrder();
@@ -145262,10 +145504,10 @@ index 0000000000000000000000000000000000000000..8632934ea2d621688b51df26a89089f2
 +#endif // ENABLE(WK_WEB_EXTENSIONS)
 diff --git a/Source/WebKit/WebProcess/Extensions/WebExtensionWebRequestFilter.cpp b/Source/WebKit/WebProcess/Extensions/WebExtensionWebRequestFilter.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..27710731d9ba808e35d45e2b28d08443bd6390f7
+index 0000000000000000000000000000000000000000..05833107ea313dbb6f17444838a625b493010bbd
 --- /dev/null
 +++ b/Source/WebKit/WebProcess/Extensions/WebExtensionWebRequestFilter.cpp
-@@ -0,0 +1,148 @@
+@@ -0,0 +1,151 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#include "config.h"
@@ -145296,6 +145538,9 @@ index 0000000000000000000000000000000000000000..27710731d9ba808e35d45e2b28d08443
 +    case ResourceLoadInfo::Type::XMLHTTPRequest: return "xmlhttprequest"_s;
 +    case ResourceLoadInfo::Type::XSLT: return "xslt"_s;
 +    case ResourceLoadInfo::Type::Other: return "other"_s;
++#if PLATFORM(HAIKU)
++    case ResourceLoadInfo::Type::WebSocket: return "websocket"_s;
++#endif
 +    }
 +    ASSERT_NOT_REACHED();
 +    return "other"_s;

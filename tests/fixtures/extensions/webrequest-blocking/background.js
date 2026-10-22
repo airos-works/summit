@@ -13,6 +13,7 @@ const has = (details, marker) => new URL(details.url).pathname.includes(marker);
 // 1. onBeforeRequest: cancel, redirect, Promise cancel, never-settling Promise.
 api.webRequest.onBeforeRequest.addListener(details => {
     if (has(details, '/wr-block/')) {
+        // Also WebSockets (type "websocket") and beacons (type "beacon").
         log('cancel', details.type, details.url);
         return {cancel: true};
     }
@@ -24,6 +25,20 @@ api.webRequest.onBeforeRequest.addListener(details => {
     if (has(details, '/wr-promise-block/')) {
         log('promise cancel', details.type, details.url);
         return new Promise(resolve => setTimeout(() => resolve({cancel: true}), 100));
+    }
+    if (has(details, '/wr-surrogate-js/')) {
+        // uBlock Origin's redirect= surrogates: a web-accessible extension file.
+        log('surrogate script', details.type, details.url);
+        return {redirectUrl: api.runtime.getURL('surrogates/noop.js')};
+    }
+    if (has(details, '/wr-surrogate-data/')) {
+        log('surrogate data: URL', details.type, details.url);
+        return {redirectUrl: 'data:text/plain;base64,' + btoa('surrogate data')};
+    }
+    if (has(details, '/wr-surrogate-hidden/')) {
+        // Not web-accessible: the request must be blocked, not served.
+        log('surrogate not web-accessible', details.type, details.url);
+        return {redirectUrl: api.runtime.getURL('background.js')};
     }
     if (has(details, '/wr-slow/')) {
         // Never settles: the load must continue unmodified after the listener

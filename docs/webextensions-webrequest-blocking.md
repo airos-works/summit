@@ -119,19 +119,38 @@ WebProcess (page)          NetworkProcess                      UIProcess        
   still reaches non-blocking listeners. When no blocking dispatch happened
   (e.g. a cached response for `onHeadersReceived`), blocking listeners get the
   ordinary observation, without effect.
-* Redirect destinations: `http(s)` URLs redirect. Any other scheme (`data:`,
-  `about:blank`, extension `web_accessible_resources` surrogates, …) is applied
-  as a **cancel**, because the network process cannot load it (see decisions).
+* Redirect destinations: `http(s)` URLs redirect. A `data:` URL or a resource
+  the redirecting extension lists in `web_accessible_resources` (uBlock
+  Origin's `redirect=` surrogates: `noop.js`, `google-ima.js`, `1x1.gif`…) is
+  served by the network process as a `200` response under the request's own
+  URL (#103): the UI process reads the bytes and MIME type
+  (`WebExtensionControllerWebRequestBlockingHaiku.cpp`) and returns them in
+  the decision; `NetworkResourceLoader::serveWebRequestSurrogateHaiku` answers
+  with them (`Access-Control-Allow-Origin` echoed, `no-store`, not offered to
+  `onHeadersReceived`). Chrome's internal redirect to the extension URL is not
+  observable to scripts either, and a redirect to a `data:` or extension URL
+  would fail the WebProcess' redirect checks. Any other destination
+  (`about:blank`, a resource that is not web-accessible, another extension's
+  URL) is applied as a **cancel**.
+* WebSocket connections (#103) pass `onBeforeRequest` with type `websocket`
+  before the network process connects
+  (`NetworkConnectionToWebProcess::createSocketChannel`): a cancel fails the
+  connection as one the server refused (`error`, `close` 1006) and a redirect
+  to a `ws:`/`wss:` URL connects there instead. Match patterns treat `ws:` and
+  `wss:` URLs as `http:` and `https:` (host permissions and listener filters,
+  as in Chrome).
 
 ## Limits
 
 * Synchronous XHR is never held (its WebProcess is blocked and could host the
   listener); it is observed only.
-* Not intercepted: ping/beacon (`PingLoad`), WebSocket, service-worker
-  handled fetches, speculative/prefetch loads, downloads, and responses served
-  from the disk cache for `onHeadersReceived` (cache hits do pass
-  `onBeforeRequest`/`onBeforeSendHeaders`). `redirectUrl` from
-  `onHeadersReceived` is ignored.
+* Not intercepted: service-worker handled fetches, speculative/prefetch
+  loads, downloads, and responses served from the disk cache for
+  `onHeadersReceived` (cache hits do pass `onBeforeRequest`/
+  `onBeforeSendHeaders`). `redirectUrl` from `onHeadersReceived` is ignored.
+  Pings and `navigator.sendBeacon` are ordinary keep-alive loads of the
+  page's `CachedResourceLoader` in this engine (the old `PingLoad` is gone),
+  so they pass the same gates as other subresources.
 * Request headers seen/modified in `onBeforeSendHeaders` are WebKit's request
   headers before libcurl adds `Cookie`, `Accept-Encoding`, `Host` etc.
 * Blocking listeners must be registered in a live extension page (MV2 persistent
@@ -145,10 +164,9 @@ WebProcess (page)          NetworkProcess                      UIProcess        
 
 ## Decisions for the lead
 
-1. **Non-HTTP(S) redirects become cancel.** uBlock's `redirect=` surrogates
-   (extension URLs) are therefore blocked rather than replaced. Serving them
-   would need the WebProcess to restart the load through the extension scheme
-   handler after a network-process redirect.
+1. **Non-HTTP(S) redirects are served, not followed** (#103, 23 October
+   2026): `data:` URLs and the redirecting extension's web-accessible
+   resources become the response itself; anything else is a cancel.
 2. **Unregistered contexts do not block** (they lack the immutable
    installation order the conflict rules need).
 3. **MV3** manifests may use `webRequestBlocking` (Firefox model; Chrome only
@@ -179,6 +197,12 @@ background, `webRequest`, `webRequestBlocking`, host permissions for
 | request header | JSON echo contains `"x-summit-webrequest": "request-header-added"` |
 | response header | `response-header-added` |
 | auth (`/wr-auth/`) | `200 authorized`, no credential prompt |
+| surrogate data: URL (`/wr-surrogate-data/`) | `200 surrogate data` |
+| surrogate not web-accessible (`/wr-surrogate-hidden/`) | `blocked` |
+| surrogate script (`/wr-surrogate-js/`) | `ran 1 time(s)`: the extension's `noop.js` ran as the page's script |
+| websocket allowed (`/ws/echo`) | `open, message hello, close 1000` |
+| websocket cancel (`/wr-block/ws`) | `error, close 1006`, and the server never sees the handshake |
+| beacons | `ok sent, blocked one stopped` |
 | slow (never settles) | `200` after about 20 s (fail open) |
 
 4. Click the main-frame links: `/wr-block/page.html` shows the blocked-load
