@@ -76805,10 +76805,10 @@ index 0000000000000000000000000000000000000000..abdba4dff009ff314eecd9f825a128aa
 +} // namespace WebKit
 diff --git a/Source/WebKit/PlatformHaiku.cmake b/Source/WebKit/PlatformHaiku.cmake
 new file mode 100644
-index 0000000000000000000000000000000000000000..b59101026a0ed3b071b73e6e9a5ed2c1ea740b1f
+index 0000000000000000000000000000000000000000..4871f04e0f05f913e8c39595b5ada16426ed0959
 --- /dev/null
 +++ b/Source/WebKit/PlatformHaiku.cmake
-@@ -0,0 +1,511 @@
+@@ -0,0 +1,513 @@
 +include(Headers.cmake)
 +include(Platform/Curl.cmake)
 +
@@ -77230,6 +77230,7 @@ index 0000000000000000000000000000000000000000..b59101026a0ed3b071b73e6e9a5ed2c1
 +        WebProcess/Extensions/Interfaces/WebExtensionAPIPrivacyCategory
 +        WebProcess/Extensions/Interfaces/WebExtensionAPIPrivacySetting
 +        WebProcess/Extensions/Interfaces/WebExtensionAPIScripting
++        WebProcess/Extensions/Interfaces/WebExtensionAPIUserScripts
 +    )
 +    # The scripting and declarativeNetRequest namespaces use the C++ bindings here, not the Objective-C ones.
 +    list(REMOVE_ITEM WebKit_BINDINGS_IN_FILES
@@ -77259,6 +77260,7 @@ index 0000000000000000000000000000000000000000..b59101026a0ed3b071b73e6e9a5ed2c1
 +        UIProcess/Extensions/haiku/WebExtensionContextBrowserCommandsHaiku.cpp
 +        UIProcess/Extensions/haiku/WebExtensionTabCommandsHaiku.cpp
 +        WebProcess/Extensions/API/WebExtensionAPIScripting.cpp
++        WebProcess/Extensions/API/WebExtensionAPIUserScripts.cpp
 +    )
 +endif ()
 +
@@ -78728,6 +78730,23 @@ index 0000000000000000000000000000000000000000..786389356ffcf87d818bc62c570e3623
 +} // namespace WebKit
 +
 +#endif // ENABLE(WK_WEB_EXTENSIONS)
+diff --git a/Source/WebKit/Shared/Extensions/WebExtensionDynamicScripts.serialization.in b/Source/WebKit/Shared/Extensions/WebExtensionDynamicScripts.serialization.in
+index e1e00f448cdfe28b28e6ac184bdb9025666411de..bbe23d2c25f24c8c9031515e563fee8b58f485ed 100644
+--- a/Source/WebKit/Shared/Extensions/WebExtensionDynamicScripts.serialization.in
++++ b/Source/WebKit/Shared/Extensions/WebExtensionDynamicScripts.serialization.in
+@@ -65,6 +65,12 @@ struct WebKit::WebExtensionRegisteredScriptParameters {
+ 
+     std::optional<WebKit::WebExtensionContentWorldType> world;
+     std::optional<WebCore::UserStyleLevel> styleLevel;
++
++#if PLATFORM(HAIKU)
++    std::optional<Vector<std::pair<String, String>>> userScriptSources;
++    std::optional<Vector<String>> includeGlobs;
++    std::optional<Vector<String>> excludeGlobs;
++#endif
+ }
+ 
+ [Nested] enum class WebKit::WebExtension::InjectionTime : uint8_t {
 diff --git a/Source/WebKit/Shared/Extensions/WebExtensionEventListenerType.h b/Source/WebKit/Shared/Extensions/WebExtensionEventListenerType.h
 index c6ffb3e89eeaffe26af5d76690da641e7b65c4c0..c71dbdcfb65137fa950b35451b2415e1466a0b2f 100644
 --- a/Source/WebKit/Shared/Extensions/WebExtensionEventListenerType.h
@@ -79713,12 +79732,41 @@ index 0000000000000000000000000000000000000000..4906d8c425b8bdc6983ac60b7a965808
 +Ref<JSON::Object> serializeWebExtensionPrivacySettingsHaiku(const WebExtensionPrivacySettingsHaiku&, const String& installationIdentifier);
 +}
 +#endif
+diff --git a/Source/WebKit/Shared/Extensions/WebExtensionRegisteredScriptParameters.h b/Source/WebKit/Shared/Extensions/WebExtensionRegisteredScriptParameters.h
+index 6b9a24e39b61a6842d49d352ff4211f8765e7e33..0585ee6f886b2a0e20384983da08015416871f28 100644
+--- a/Source/WebKit/Shared/Extensions/WebExtensionRegisteredScriptParameters.h
++++ b/Source/WebKit/Shared/Extensions/WebExtensionRegisteredScriptParameters.h
+@@ -51,8 +51,24 @@ struct WebExtensionRegisteredScriptParameters {
+ 
+     std::optional<WebExtensionContentWorldType> world;
+     std::optional<WebCore::UserStyleLevel> styleLevel;
++
++#if PLATFORM(HAIKU)
++    // userScripts (identifier prefixed with webExtensionUserScriptPrefix): its
++    // sources in order, each a (file, code) pair with one of the two set, and
++    // the glob patterns the page URL must (not) match.
++    std::optional<Vector<std::pair<String, String>>> userScriptSources;
++    std::optional<Vector<String>> includeGlobs;
++    std::optional<Vector<String>> excludeGlobs;
++#endif
+ };
+ 
++#if PLATFORM(HAIKU)
++// userScripts.register() IDs live beside scripting.registerContentScripts()
++// IDs, which may not start with '_', so the prefix keeps the two apart.
++static constexpr auto webExtensionUserScriptPrefix = "_us:"_s;
++inline bool isWebExtensionUserScriptIdentifier(const String& identifier) { return identifier.startsWith(webExtensionUserScriptPrefix); }
++#endif
++
+ } // namespace WebKit
+ 
+ #endif // ENABLE(WK_WEB_EXTENSIONS)
 diff --git a/Source/WebKit/Shared/Extensions/WebExtensionRegisteredScriptParser.cpp b/Source/WebKit/Shared/Extensions/WebExtensionRegisteredScriptParser.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..a7a53fc73bd1b4dacf3e3e950318d9a46e8e9ecf
+index 0000000000000000000000000000000000000000..e90e8a0086a0ef874c70a9b91b37ecbbaba70e2f
 --- /dev/null
 +++ b/Source/WebKit/Shared/Extensions/WebExtensionRegisteredScriptParser.cpp
-@@ -0,0 +1,134 @@
+@@ -0,0 +1,297 @@
 +/*
 + * Copyright (C) 2023 Apple Inc. All rights reserved.
 + *
@@ -79850,15 +79898,178 @@ index 0000000000000000000000000000000000000000..a7a53fc73bd1b4dacf3e3e950318d9a4
 +    return result;
 +}
 +
++#if PLATFORM(HAIKU)
++std::expected<Vector<WebExtensionRegisteredScriptParameters>, String> parseWebExtensionUserScripts(const Vector<Ref<JSON::Object>>& scripts, WebExtensionRegisteredScriptParseMode mode, WebExtensionUserScriptIdentifiers identifiers)
++{
++    // Inline code is held by the browser process and stored with the script.
++    static constexpr size_t maximumCodeLength = 32 * 1024 * 1024;
++    Vector<WebExtensionRegisteredScriptParameters> result;
++    for (auto& script : scripts) {
++        auto invalid = [](ASCIILiteral key, ASCIILiteral message) {
++            return makeUnexpected(makeString("Invalid '"_s, key, "': "_s, message));
++        };
++        for (auto key : { "id"_s, "runAt"_s, "world"_s, "worldId"_s }) {
++            if (RefPtr value = script->getValue(key); value && value->type() != JSON::Value::Type::String)
++                return invalid(key, "expected a string"_s);
++        }
++        if (RefPtr value = script->getValue("allFrames"_s); value && value->type() != JSON::Value::Type::Boolean)
++            return invalid("allFrames"_s, "expected a boolean"_s);
++
++        auto strings = [&](ASCIILiteral key) -> std::expected<std::optional<Vector<String>>, String> {
++            RefPtr value = script->getValue(key);
++            if (!value)
++                return std::optional<Vector<String>> { };
++            RefPtr array = value->asArray();
++            if (!array)
++                return invalid(key, "expected an array of strings"_s);
++            Vector<String> items;
++            for (auto& item : *array) {
++                if (item->type() != JSON::Value::Type::String)
++                    return invalid(key, "expected an array of strings"_s);
++                items.append(item->asString());
++            }
++            return std::optional { WTF::move(items) };
++        };
++
++        WebExtensionRegisteredScriptParameters parameters;
++        auto identifier = script->getString("id"_s);
++        if (identifiers == WebExtensionUserScriptIdentifiers::Stored) {
++            if (!isWebExtensionUserScriptIdentifier(identifier) || identifier.length() == webExtensionUserScriptPrefix.length())
++                return invalid("id"_s, "it is not a stored user script"_s);
++            parameters.identifier = identifier;
++        } else {
++            if (identifier.isEmpty())
++                return invalid("id"_s, "it must not be empty"_s);
++            if (identifier[0] == '_')
++                return invalid("id"_s, "it must not start with '_'"_s);
++            parameters.identifier = makeString(webExtensionUserScriptPrefix, identifier);
++        }
++
++        for (auto [key, target] : { std::pair { "matches"_s, &parameters.matchPatterns }, std::pair { "excludeMatches"_s, &parameters.excludeMatchPatterns },
++            std::pair { "includeGlobs"_s, &parameters.includeGlobs }, std::pair { "excludeGlobs"_s, &parameters.excludeGlobs } }) {
++            auto value = strings(key);
++            if (!value)
++                return makeUnexpected(value.error());
++            *target = WTF::move(*value);
++        }
++
++        if (RefPtr value = script->getValue("js"_s)) {
++            RefPtr array = value->asArray();
++            if (!array)
++                return invalid("js"_s, "expected an array of script sources"_s);
++            Vector<std::pair<String, String>> sources;
++            size_t length = 0;
++            for (auto& item : *array) {
++                RefPtr source = item->asObject();
++                if (!source)
++                    return invalid("js"_s, "expected an array of script sources"_s);
++                RefPtr file = source->getValue("file"_s);
++                RefPtr code = source->getValue("code"_s);
++                if (!file == !code)
++                    return invalid("js"_s, "each source must have exactly one of 'file' and 'code'"_s);
++                if ((file && file->type() != JSON::Value::Type::String) || (code && code->type() != JSON::Value::Type::String))
++                    return invalid("js"_s, "'file' and 'code' must be strings"_s);
++                auto text = (file ? file : code)->asString();
++                if (file && text.isEmpty())
++                    return invalid("js"_s, "a 'file' must not be empty"_s);
++                length += text.length();
++                if (length > maximumCodeLength)
++                    return invalid("js"_s, "the scripts are too long"_s);
++                sources.append(file ? std::pair { text, String { } } : std::pair { String { }, text });
++            }
++            parameters.userScriptSources = WTF::move(sources);
++        }
++
++        bool registration = mode == WebExtensionRegisteredScriptParseMode::Registration;
++        if (registration && (!parameters.matchPatterns || parameters.matchPatterns->isEmpty()))
++            return invalid("matches"_s, "it must specify at least one match pattern"_s);
++        if (registration && (!parameters.userScriptSources || parameters.userScriptSources->isEmpty()))
++            return invalid("js"_s, "it must specify at least one script source"_s);
++        if (parameters.userScriptSources && parameters.userScriptSources->isEmpty())
++            return invalid("js"_s, "it must not be empty"_s);
++
++        if (script->getValue("runAt"_s)) {
++            auto value = script->getString("runAt"_s);
++            if (value == "document_start"_s)
++                parameters.injectionTime = WebExtension::InjectionTime::DocumentStart;
++            else if (value == "document_end"_s)
++                parameters.injectionTime = WebExtension::InjectionTime::DocumentEnd;
++            else if (value == "document_idle"_s)
++                parameters.injectionTime = WebExtension::InjectionTime::DocumentIdle;
++            else
++                return invalid("runAt"_s, "it must specify either 'document_start', 'document_end', or 'document_idle'"_s);
++        }
++        // The USER_SCRIPT world is the extension's content script world here:
++        // Tampermonkey listens to runtime.onMessage beside onUserScriptMessage.
++        if (script->getValue("world"_s)) {
++            auto value = script->getString("world"_s);
++            if (value == "MAIN"_s)
++                parameters.world = WebExtensionContentWorldType::Main;
++            else if (value == "USER_SCRIPT"_s)
++                parameters.world = WebExtensionContentWorldType::ContentScript;
++            else
++                return invalid("world"_s, "it must specify either 'USER_SCRIPT' or 'MAIN'"_s);
++        } else if (registration)
++            parameters.world = WebExtensionContentWorldType::ContentScript;
++        parameters.allFrames = script->getBoolean("allFrames"_s);
++        parameters.persistent = true;
++        result.append(WTF::move(parameters));
++    }
++    return result;
++}
++
++Ref<JSON::Object> webExtensionUserScriptJSON(const WebExtensionRegisteredScriptParameters& parameters, WebExtensionUserScriptIdentifiers identifiers)
++{
++    Ref object = JSON::Object::create();
++    object->setString("id"_s, identifiers == WebExtensionUserScriptIdentifiers::Stored ? parameters.identifier
++        : parameters.identifier.substring(webExtensionUserScriptPrefix.length()));
++    auto strings = [&](ASCIILiteral key, const std::optional<Vector<String>>& values) {
++        if (!values)
++            return;
++        Ref array = JSON::Array::create();
++        for (auto& value : *values)
++            array->pushString(value);
++        object->setArray(key, WTF::move(array));
++    };
++    strings("matches"_s, parameters.matchPatterns);
++    strings("excludeMatches"_s, parameters.excludeMatchPatterns);
++    strings("includeGlobs"_s, parameters.includeGlobs);
++    strings("excludeGlobs"_s, parameters.excludeGlobs);
++    if (parameters.userScriptSources) {
++        Ref array = JSON::Array::create();
++        for (auto& [file, code] : *parameters.userScriptSources) {
++            Ref source = JSON::Object::create();
++            if (!file.isEmpty())
++                source->setString("file"_s, file);
++            else
++                source->setString("code"_s, code);
++            array->pushObject(WTF::move(source));
++        }
++        object->setArray("js"_s, WTF::move(array));
++    }
++    if (parameters.injectionTime) {
++        switch (*parameters.injectionTime) {
++        case WebExtension::InjectionTime::DocumentStart: object->setString("runAt"_s, "document_start"_s); break;
++        case WebExtension::InjectionTime::DocumentEnd: object->setString("runAt"_s, "document_end"_s); break;
++        case WebExtension::InjectionTime::DocumentIdle: object->setString("runAt"_s, "document_idle"_s); break;
++        }
++    }
++    if (parameters.allFrames)
++        object->setBoolean("allFrames"_s, *parameters.allFrames);
++    object->setString("world"_s, parameters.world == WebExtensionContentWorldType::Main ? "MAIN"_s : "USER_SCRIPT"_s);
++    return object;
++}
++#endif
++
 +} // namespace WebKit
 +
 +#endif // ENABLE(WK_WEB_EXTENSIONS)
 diff --git a/Source/WebKit/Shared/Extensions/WebExtensionRegisteredScriptParser.h b/Source/WebKit/Shared/Extensions/WebExtensionRegisteredScriptParser.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..a722963c4900d124123b25b53b2299cda04cdf16
+index 0000000000000000000000000000000000000000..e953ed899eaed03afa9b0f765501038c865ac113
 --- /dev/null
 +++ b/Source/WebKit/Shared/Extensions/WebExtensionRegisteredScriptParser.h
-@@ -0,0 +1,41 @@
+@@ -0,0 +1,51 @@
 +/*
 + * Copyright (C) 2023 Apple Inc. All rights reserved.
 + *
@@ -79896,6 +80107,16 @@ index 0000000000000000000000000000000000000000..a722963c4900d124123b25b53b2299cd
 +enum class WebExtensionRegisteredScriptParseMode : bool { Registration, Update };
 +
 +std::expected<Vector<WebExtensionRegisteredScriptParameters>, String> parseWebExtensionRegisteredScripts(const Vector<Ref<JSON::Object>>&, WebExtensionRegisteredScriptParseMode);
++
++#if PLATFORM(HAIKU)
++// chrome.userScripts' RegisteredUserScript objects. The parameters' identifiers
++// carry webExtensionUserScriptPrefix; stored ones already have it.
++enum class WebExtensionUserScriptIdentifiers : bool { FromAPI, Stored };
++std::expected<Vector<WebExtensionRegisteredScriptParameters>, String> parseWebExtensionUserScripts(const Vector<Ref<JSON::Object>>&, WebExtensionRegisteredScriptParseMode, WebExtensionUserScriptIdentifiers);
++// The RegisteredUserScript object for a user script, with the identifier as
++// the API shows it or as stored.
++Ref<JSON::Object> webExtensionUserScriptJSON(const WebExtensionRegisteredScriptParameters&, WebExtensionUserScriptIdentifiers);
++#endif
 +
 +} // namespace WebKit
 +
@@ -90887,10 +91108,10 @@ index 0000000000000000000000000000000000000000..84cc0fc4951d3e47bacbe759f5d2395a
 +#endif // ENABLE(WK_WEB_EXTENSIONS)
 diff --git a/Source/WebKit/UIProcess/Extensions/API/WebExtensionContextAPIScripting.cpp b/Source/WebKit/UIProcess/Extensions/API/WebExtensionContextAPIScripting.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..764a81fecb54c6239e8d49cb65bcb9929223f55a
+index 0000000000000000000000000000000000000000..06e0edb16921b6b4de36743b57e1e73af38e908c
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/API/WebExtensionContextAPIScripting.cpp
-@@ -0,0 +1,186 @@
+@@ -0,0 +1,283 @@
 +/*
 + * Copyright (C) 2023-2024 Apple Inc. All rights reserved.
 + *
@@ -90925,6 +91146,9 @@ index 0000000000000000000000000000000000000000..764a81fecb54c6239e8d49cb65bcb992
 +#include "WebExtensionPermission.h"
 +#include "WebExtensionRegisteredScriptParser.h"
 +#include "WebExtensionUtilities.h"
++#if PLATFORM(HAIKU)
++#include <wtf/text/StringBuilder.h>
++#endif
 +
 +namespace WebKit {
 +
@@ -90934,23 +91158,47 @@ index 0000000000000000000000000000000000000000..764a81fecb54c6239e8d49cb65bcb992
 +void WebExtensionContext::loadRegisteredContentScripts()
 +{
 +    auto generation = ++m_registeredContentScriptsGeneration;
-+    if (!hasPermission(WebExtensionPermission::scripting()))
++#if PLATFORM(HAIKU)
++    auto allowed = [this] { return hasPermission(WebExtensionPermission::scripting()) || hasPermission("userScripts"_s); };
++#else
++    auto allowed = [this] { return hasPermission(WebExtensionPermission::scripting()); };
++#endif
++    if (!allowed())
 +        return;
 +
-+    registeredContentScriptsStore()->getScripts([this, protectedThis = Ref { *this }, generation](Vector<Ref<JSON::Object>> scripts, const String& errorMessage) mutable {
-+        if (!isLoaded() || generation != m_registeredContentScriptsGeneration || !hasPermission(WebExtensionPermission::scripting()))
++    registeredContentScriptsStore()->getScripts([this, protectedThis = Ref { *this }, generation, allowed](Vector<Ref<JSON::Object>> scripts, const String& errorMessage) mutable {
++        if (!isLoaded() || generation != m_registeredContentScriptsGeneration || !allowed())
 +            return;
 +        if (!errorMessage.isEmpty()) {
 +            RELEASE_LOG_ERROR(Extensions, "Unable to get registered scripts: %s", errorMessage.utf8().legacyCStringPointer());
 +            return;
 +        }
 +
++#if PLATFORM(HAIKU)
++        // Content scripts and user scripts share the store; each needs its
++        // own permission.
++        Vector<Ref<JSON::Object>> userScripts;
++        scripts.removeAllMatching([&](auto& script) {
++            if (!isWebExtensionUserScriptIdentifier(script->getString("id"_s)))
++                return !hasPermission(WebExtensionPermission::scripting());
++            if (hasPermission("userScripts"_s))
++                userScripts.append(script.copyRef());
++            return true;
++        });
++#endif
 +        auto parsed = parseWebExtensionRegisteredScripts(scripts, WebExtensionRegisteredScriptParseMode::Registration);
 +        if (!parsed) {
 +            RELEASE_LOG_ERROR(Extensions, "Failed to parse registered scripts: %s", parsed.error().utf8().legacyCStringPointer());
 +            return;
 +        }
 +        auto parametersVector = WTF::move(*parsed);
++#if PLATFORM(HAIKU)
++        auto parsedUserScripts = parseWebExtensionUserScripts(userScripts, WebExtensionRegisteredScriptParseMode::Registration, WebExtensionUserScriptIdentifiers::Stored);
++        if (!parsedUserScripts)
++            RELEASE_LOG_ERROR(Extensions, "Failed to parse stored user scripts: %s", parsedUserScripts.error().utf8().legacyCStringPointer());
++        else
++            parametersVector.appendVector(WTF::move(*parsedUserScripts));
++#endif
 +        DynamicInjectedContentsMap injectedContentsMap;
 +        String validationError;
 +        if (!createInjectedContentForScripts(parametersVector, FirstTimeRegistration::Yes, injectedContentsMap, nullString(), &validationError)) {
@@ -90978,6 +91226,46 @@ index 0000000000000000000000000000000000000000..764a81fecb54c6239e8d49cb65bcb992
 +            RELEASE_LOG_ERROR(Extensions, "Failed to delete registered content scripts database. Error: %s", errorMessage.utf8().legacyCStringPointer());
 +    });
 +}
++
++#if PLATFORM(HAIKU)
++// userScripts' includeGlobs/excludeGlobs match the whole page URL ('*' any run
++// of characters, '?' one). User content patterns cannot express them, so the
++// script checks the URL itself; it runs inside a function for that.
++static String globGuardedUserScript(const String& source, const Vector<String>& includeGlobs, const Vector<String>& excludeGlobs)
++{
++    if (includeGlobs.isEmpty() && excludeGlobs.isEmpty())
++        return source;
++    auto expressions = [](const Vector<String>& globs) {
++        StringBuilder list;
++        list.append('[');
++        for (size_t i = 0; i < globs.size(); ++i) {
++            StringBuilder pattern;
++            pattern.append('^');
++            for (auto character : StringView(globs[i]).codeUnits()) {
++                switch (character) {
++                case '*': pattern.append(".*"_s); break;
++                case '?': pattern.append('.'); break;
++                case '\\': case '^': case '$': case '.': case '|': case '+': case '(': case ')':
++                case '[': case ']': case '{': case '}': case '/':
++                    pattern.append('\\', character);
++                    break;
++                default: pattern.append(character); break;
++                }
++            }
++            pattern.append('$');
++            if (i)
++                list.append(',');
++            list.append("new RegExp("_s, JSON::Value::create(pattern.toString())->toJSONString(), ')');
++        }
++        list.append(']');
++        return list.toString();
++    };
++    return makeString("(function () {\nconst summitUserScriptURL = location.href;\nif (!("_s,
++        includeGlobs.isEmpty() ? "true"_s : makeString(expressions(includeGlobs), ".some(glob => glob.test(summitUserScriptURL))"_s),
++        ") || "_s, expressions(excludeGlobs), ".some(glob => glob.test(summitUserScriptURL)))\n    return;\n"_s,
++        source, "\n})();\n"_s);
++}
++#endif
 +
 +bool WebExtensionContext::createInjectedContentForScripts(const Vector<WebExtensionRegisteredScriptParameters>& scripts, FirstTimeRegistration firstTimeRegistration, DynamicInjectedContentsMap& injectedContentsMap, const String& callingAPIName, String* errorMessage)
 +{
@@ -91056,6 +91344,33 @@ index 0000000000000000000000000000000000000000..764a81fecb54c6239e8d49cb65bcb992
 +            excludeMatchPatterns.add(matchPattern.releaseNonNull());
 +        }
 +
++#if PLATFORM(HAIKU)
++        Vector<std::pair<String, String>> userScriptSources;
++        if (parameters.userScriptSources) {
++            auto includeGlobs = parameters.includeGlobs.value_or(Vector<String> { });
++            auto excludeGlobs = parameters.excludeGlobs.value_or(Vector<String> { });
++            size_t index = 0;
++            for (auto& [file, code] : *parameters.userScriptSources) {
++                String source = code;
++                String path = file;
++                if (!file.isEmpty()) {
++                    auto scriptValue = extension->resourceStringForPath(file);
++                    if (!scriptValue) {
++                        recordErrorIfNeeded(scriptValue.error());
++                        *errorMessage = toErrorString(callingAPIName, nullString(), makeString("invalid resource '"_s, file, "'"_s));
++                        return false;
++                    }
++                    source = scriptValue.value();
++                } else {
++                    // A URL for the debugger and error reports.
++                    path = makeString("/__userscripts__/"_s, encodeWithURLEscapeSequences(scriptID.substring(webExtensionUserScriptPrefix.length())), '/', index, ".js"_s);
++                }
++                userScriptSources.append({ path, globGuardedUserScript(source, includeGlobs, excludeGlobs) });
++                ++index;
++            }
++        }
++#endif
++
 +        InjectedContentData injectedContentData;
 +        injectedContentData.identifier = parameters.identifier;
 +        injectedContentData.includeMatchPatterns = WTF::move(includeMatchPatterns);
@@ -91067,6 +91382,9 @@ index 0000000000000000000000000000000000000000..764a81fecb54c6239e8d49cb65bcb992
 +        injectedContentData.styleLevel = parameters.styleLevel.value_or(WebCore::UserStyleLevel::Author);
 +        injectedContentData.scriptPaths = WTF::move(scriptPaths);
 +        injectedContentData.styleSheetPaths = WTF::move(styleSheetPaths);
++#if PLATFORM(HAIKU)
++        injectedContentData.scriptSources = WTF::move(userScriptSources);
++#endif
 +
 +        injectedContentsMap.add(scriptID, WTF::move(injectedContentData));
 +    }
@@ -92928,7 +93246,7 @@ index 713a395f6fda1c50c694eef6181a23349c9b5fb2..d6419587d5402f01e573eb5f7335695a
  } // namespace WebExtensionDynamicScripts
  
 diff --git a/Source/WebKit/UIProcess/Extensions/WebExtension.cpp b/Source/WebKit/UIProcess/Extensions/WebExtension.cpp
-index 5ee894425eae1d1ba27e29aba5928af432d98095..d0de252caff8f3ce91046bf3af6a679b1d1ac55c 100644
+index 5ee894425eae1d1ba27e29aba5928af432d98095..a086c5dc45447f24e3dbd704d2158ffcc1a9b182 100644
 --- a/Source/WebKit/UIProcess/Extensions/WebExtension.cpp
 +++ b/Source/WebKit/UIProcess/Extensions/WebExtension.cpp
 @@ -48,6 +48,10 @@
@@ -93029,7 +93347,7 @@ index 5ee894425eae1d1ba27e29aba5928af432d98095..d0de252caff8f3ce91046bf3af6a679b
          if (mimeTypePosition != notFound)
              return path.substring(dataPrefix.length(), mimeTypePosition - dataPrefix.length());
          return defaultMIMEType();
-@@ -1642,6 +1674,11 @@ const WebExtension::PermissionsSet& WebExtension::supportedPermissions()
+@@ -1642,6 +1674,13 @@ const WebExtension::PermissionsSet& WebExtension::supportedPermissions()
          WebExtensionPermission::contextMenus(), WebExtensionPermission::cookies(), WebExtensionPermission::declarativeNetRequest(), WebExtensionPermission::declarativeNetRequestFeedback(),
          WebExtensionPermission::declarativeNetRequestWithHostAccess(), WebExtensionPermission::menus(), WebExtensionPermission::nativeMessaging(), WebExtensionPermission::notifications(), WebExtensionPermission::scripting(),
          WebExtensionPermission::storage(), WebExtensionPermission::tabs(), WebExtensionPermission::unlimitedStorage(), WebExtensionPermission::webNavigation(), WebExtensionPermission::webRequest(),
@@ -93037,11 +93355,13 @@ index 5ee894425eae1d1ba27e29aba5928af432d98095..d0de252caff8f3ce91046bf3af6a679b
 +        WebExtensionPermission::privacy(), WebExtensionPermission::downloads(), "idle"_s, "management"_s, "webRequestBlocking"_s,
 +        // MV3's permission for answering onAuthRequired (Bitwarden, LastPass).
 +        "webRequestAuthProvider"_s,
++        // chrome.userScripts (Tampermonkey, Violentmonkey).
++        "userScripts"_s,
 +#endif
  #if ENABLE(WK_WEB_EXTENSIONS_SIDEBAR)
          WebExtensionPermission::sidePanel(),
  #endif
-@@ -2216,6 +2253,12 @@ using ModifierFlags = WebExtension::ModifierFlags;
+@@ -2216,6 +2255,12 @@ using ModifierFlags = WebExtension::ModifierFlags;
  
  static bool parseCommandShortcut(const String& shortcut, OptionSet<ModifierFlags>& modifierFlags, String& key)
  {
@@ -93054,7 +93374,7 @@ index 5ee894425eae1d1ba27e29aba5928af432d98095..d0de252caff8f3ce91046bf3af6a679b
      modifierFlags = { };
      key = emptyString();
  
-@@ -2300,6 +2343,7 @@ static bool parseCommandShortcut(const String& shortcut, OptionSet<ModifierFlags
+@@ -2300,6 +2345,7 @@ static bool parseCommandShortcut(const String& shortcut, OptionSet<ModifierFlags
          return false;
  
      return true;
@@ -93062,7 +93382,7 @@ index 5ee894425eae1d1ba27e29aba5928af432d98095..d0de252caff8f3ce91046bf3af6a679b
  }
  
  void WebExtension::populateCommandsIfNeeded()
-@@ -2355,6 +2399,13 @@ void WebExtension::populateCommandsIfNeeded()
+@@ -2355,6 +2401,13 @@ void WebExtension::populateCommandsIfNeeded()
  
              // Descriptions are required for standard commands, but are optional for action commands.
              auto description = commandObject->getString(commandsDescriptionKeyManifestKey);
@@ -93076,7 +93396,7 @@ index 5ee894425eae1d1ba27e29aba5928af432d98095..d0de252caff8f3ce91046bf3af6a679b
              if (description.isEmpty() && !isActionCommand) {
                  error = WEB_UI_STRING("Empty or invalid `description` in the `commands` manifest entry.", "WKWebExtensionErrorInvalidManifestEntry description for invalid command description");
                  continue;
-@@ -2368,11 +2419,30 @@ void WebExtension::populateCommandsIfNeeded()
+@@ -2368,11 +2421,30 @@ void WebExtension::populateCommandsIfNeeded()
  
              commandData.description = description;
  
@@ -93108,7 +93428,7 @@ index 5ee894425eae1d1ba27e29aba5928af432d98095..d0de252caff8f3ce91046bf3af6a679b
                  const auto linuxPlatform = "linux"_s;
  #endif
                  const auto defaultPlatform = "default"_s;
-@@ -2382,7 +2452,7 @@ void WebExtension::populateCommandsIfNeeded()
+@@ -2382,7 +2454,7 @@ void WebExtension::populateCommandsIfNeeded()
                  platformShortcut = !suggestedKeyObject->getString(macPlatform).isEmpty() ? suggestedKeyObject->getString(macPlatform) : suggestedKeyObject->getString(iosPlatform);
  #elif PLATFORM(IOS_FAMILY)
                  platformShortcut = !suggestedKeyObject->getString(iosPlatform).isEmpty() ? suggestedKeyObject->getString(iosPlatform) : suggestedKeyObject->getString(macPlatform);
@@ -93118,7 +93438,7 @@ index 5ee894425eae1d1ba27e29aba5928af432d98095..d0de252caff8f3ce91046bf3af6a679b
  #endif
                  if (platformShortcut.isEmpty())
 diff --git a/Source/WebKit/UIProcess/Extensions/WebExtension.h b/Source/WebKit/UIProcess/Extensions/WebExtension.h
-index cfe1950fe9083e218330ca9bf101bffc0be311cb..5e9a9b1fad483065e2b6abf4a022d88f9aabb420 100644
+index cfe1950fe9083e218330ca9bf101bffc0be311cb..62ec09b34d15f17f09eb8c9ab37d757b81b7db92 100644
 --- a/Source/WebKit/UIProcess/Extensions/WebExtension.h
 +++ b/Source/WebKit/UIProcess/Extensions/WebExtension.h
 @@ -29,6 +29,7 @@
@@ -93165,7 +93485,19 @@ index cfe1950fe9083e218330ca9bf101bffc0be311cb..5e9a9b1fad483065e2b6abf4a022d88f
  
      static constexpr OptionSet<ModifierFlags> allModifierFlags()
      {
-@@ -238,6 +239,11 @@ public:
+@@ -185,6 +186,11 @@ public:
+ 
+         Vector<String> scriptPaths;
+         Vector<String> styleSheetPaths;
++#if PLATFORM(HAIKU)
++        // userScripts: (URL path, source text) of each script, injected after
++        // scriptPaths.
++        Vector<std::pair<String, String>> scriptSources;
++#endif
+ 
+         Vector<String> includeGlobPatternStrings;
+         Vector<String> excludeGlobPatternStrings;
+@@ -238,6 +244,11 @@ public:
      NSData *bundleHash() const;
  #endif
  
@@ -93177,7 +93509,7 @@ index cfe1950fe9083e218330ca9bf101bffc0be311cb..5e9a9b1fad483065e2b6abf4a022d88f
  #if PLATFORM(MAC)
      bool validateResourceData(NSURL *, NSData *, NSError **);
  #endif
-@@ -409,6 +415,13 @@ private:
+@@ -409,6 +420,13 @@ private:
      mutable RetainPtr<SecStaticCodeRef> m_bundleStaticCode;
  #endif
  
@@ -93250,7 +93582,7 @@ index 65b9841a9d4469a699b92c47435fecaaaa034d77..0361d615767169f4af1a6c192853c93e
  
      OptionSet<ModifierFlags> modifierFlags() const { return !m_activationKey.isEmpty() ? m_modifierFlags : OptionSet<ModifierFlags> { }; }
 diff --git a/Source/WebKit/UIProcess/Extensions/WebExtensionContext.cpp b/Source/WebKit/UIProcess/Extensions/WebExtensionContext.cpp
-index 8947f24ec9866c39f206aab464ec21c5d4213b95..a9ed26e830b6d06517cdd0f6c10628b27fc427ae 100644
+index 8947f24ec9866c39f206aab464ec21c5d4213b95..f5caeb2ad71876437ee2c475d31e23fa30627cb3 100644
 --- a/Source/WebKit/UIProcess/Extensions/WebExtensionContext.cpp
 +++ b/Source/WebKit/UIProcess/Extensions/WebExtensionContext.cpp
 @@ -34,11 +34,24 @@
@@ -93827,7 +94159,27 @@ index 8947f24ec9866c39f206aab464ec21c5d4213b95..a9ed26e830b6d06517cdd0f6c10628b2
  
      // Access the maps here to remove any expired entries, and only do it once for this call.
      auto& grantedPermissionMatchPatterns = this->grantedPermissionMatchPatterns();
-@@ -1615,6 +2015,16 @@ bool WebExtensionContext::purgeMatchedRulesFromBefore(const WallTime& startTime)
+@@ -1433,6 +1833,19 @@ void WebExtensionContext::addInjectedContent(const InjectedContentVector& inject
+             }
+         }
+ 
++#if PLATFORM(HAIKU)
++        for (auto& [scriptPath, source] : injectedContentData.scriptSources) {
++            Ref userScript = API::UserScript::create(WebCore::UserScript { String { source }, URL { m_baseURL, scriptPath }, Vector { includeMatchPatterns }, Vector { excludeMatchPatterns }, injectionTime, injectedFrames, matchParentFrame }, executionWorld);
++            originInjectedScripts.append(userScript);
++
++            for (Ref userContentController : userContentControllers)
++                userContentController->addUserScript(userScript, InjectUserScriptImmediately::Yes);
++
++            if (RefPtr registeredScript = isRegisteredScript ? m_registeredScriptsMap.get(scriptID) : nullptr)
++                registeredScript->addUserScript(scriptID, userScript);
++        }
++#endif
++
+         for (auto& styleSheetPath : injectedContentData.styleSheetPaths) {
+             auto styleSheetStringResult = extension->resourceStringForPath(styleSheetPath, WebExtension::CacheResult::Yes);
+             if (!styleSheetStringResult) {
+@@ -1615,6 +2028,16 @@ bool WebExtensionContext::purgeMatchedRulesFromBefore(const WallTime& startTime)
  
  void WebExtensionContext::addDeclarativeNetRequestRules(WebUserContentControllerProxy& controllerProxy)
  {
@@ -93844,7 +94196,7 @@ index 8947f24ec9866c39f206aab464ec21c5d4213b95..a9ed26e830b6d06517cdd0f6c10628b2
      API::ContentRuleListStore::defaultStoreSingleton().lookupContentRuleListFile(declarativeNetRequestContentRuleListFilePath(), uniqueIdentifier().isolatedCopy(), [this, protectedThis = Ref { *this }, controllerProxy = Ref { controllerProxy }](RefPtr<API::ContentRuleList> ruleList, std::error_code) {
          if (!ruleList)
              return;
-@@ -1625,10 +2035,17 @@ void WebExtensionContext::addDeclarativeNetRequestRules(WebUserContentController
+@@ -1625,10 +2048,17 @@ void WebExtensionContext::addDeclarativeNetRequestRules(WebUserContentController
  
          controllerProxy->addContentRuleList(*ruleList, m_baseURL);
      });
@@ -93862,7 +94214,7 @@ index 8947f24ec9866c39f206aab464ec21c5d4213b95..a9ed26e830b6d06517cdd0f6c10628b2
      API::ContentRuleListStore::defaultStoreSingleton().lookupContentRuleListFile(declarativeNetRequestContentRuleListFilePath(), uniqueIdentifier().isolatedCopy(), [this, protectedThis = Ref { *this }](RefPtr<API::ContentRuleList> ruleList, std::error_code) {
          if (!ruleList)
              return;
-@@ -1640,6 +2057,7 @@ void WebExtensionContext::addDeclarativeNetRequestRulesToPrivateUserContentContr
+@@ -1640,6 +2070,7 @@ void WebExtensionContext::addDeclarativeNetRequestRulesToPrivateUserContentContr
          for (Ref controller : extensionController()->allPrivateUserContentControllers())
              controller->addContentRuleList(*ruleList, m_baseURL);
      });
@@ -93870,7 +94222,7 @@ index 8947f24ec9866c39f206aab464ec21c5d4213b95..a9ed26e830b6d06517cdd0f6c10628b2
  }
  
  static HashMap<WebExtensionContextIdentifier, WeakRef<WebExtensionContext>>& NODELETE webExtensionContexts()
-@@ -1660,7 +2078,15 @@ WebExtensionContext::WebExtensionContext()
+@@ -1660,7 +2091,15 @@ WebExtensionContext::WebExtensionContext()
  }
  
  #if !USE(GLIB)
@@ -93887,7 +94239,7 @@ index 8947f24ec9866c39f206aab464ec21c5d4213b95..a9ed26e830b6d06517cdd0f6c10628b2
  #endif
  
  WebExtensionContextIdentifier WebExtensionContext::privilegedIdentifier() const
-@@ -1686,6 +2112,9 @@ WebExtensionContextParameters WebExtensionContext::parameters(IncludePrivilegedI
+@@ -1686,6 +2125,9 @@ WebExtensionContextParameters WebExtensionContext::parameters(IncludePrivilegedI
          includePrivilegedIdentifier == IncludePrivilegedIdentifier::Yes ? std::optional(privilegedIdentifier()) : std::nullopt,
          baseURL(),
          uniqueIdentifier(),
@@ -93897,7 +94249,7 @@ index 8947f24ec9866c39f206aab464ec21c5d4213b95..a9ed26e830b6d06517cdd0f6c10628b2
          unsupportedAPIs(),
          m_grantedPermissions,
          extension->serializeLocalization(),
-@@ -1798,9 +2227,17 @@ void WebExtensionContext::loadBackgroundContent(CompletionHandler<void(RefPtr<AP
+@@ -1798,9 +2240,17 @@ void WebExtensionContext::loadBackgroundContent(CompletionHandler<void(RefPtr<AP
          return;
      }
  
@@ -93918,7 +94270,7 @@ index 8947f24ec9866c39f206aab464ec21c5d4213b95..a9ed26e830b6d06517cdd0f6c10628b2
      });
  }
  
-@@ -2003,6 +2440,128 @@ Ref<WebExtensionRegisteredScriptsSQLiteStore> WebExtensionContext::registeredCon
+@@ -2003,6 +2453,128 @@ Ref<WebExtensionRegisteredScriptsSQLiteStore> WebExtensionContext::registeredCon
      return *m_registeredContentScriptsStorage;
  }
  
@@ -95665,10 +96017,10 @@ index cce62c8f08ed179e214c76a5272ac5f73a256823..9365cedde065d5494d979f82965b99b6
  
 diff --git a/Source/WebKit/UIProcess/Extensions/WebExtensionDynamicScripts.cpp b/Source/WebKit/UIProcess/Extensions/WebExtensionDynamicScripts.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..b1acea1774558b69bfb93e7ddb21a56a5be95b69
+index 0000000000000000000000000000000000000000..f502b06cc156ab3cff205b7da53353f4b3b8cc48
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/WebExtensionDynamicScripts.cpp
-@@ -0,0 +1,123 @@
+@@ -0,0 +1,134 @@
 +/*
 + * Copyright (C) 2023 Apple Inc. All rights reserved.
 + *
@@ -95742,6 +96094,17 @@ index 0000000000000000000000000000000000000000..b1acea1774558b69bfb93e7ddb21a56a
 +
 +    if (!parameters.world && m_parameters.world)
 +        parameters.world = m_parameters.world.value();
++
++#if PLATFORM(HAIKU)
++    if (!parameters.userScriptSources && m_parameters.userScriptSources)
++        parameters.userScriptSources = m_parameters.userScriptSources.value();
++
++    if (!parameters.includeGlobs && m_parameters.includeGlobs)
++        parameters.includeGlobs = m_parameters.includeGlobs.value();
++
++    if (!parameters.excludeGlobs && m_parameters.excludeGlobs)
++        parameters.excludeGlobs = m_parameters.excludeGlobs.value();
++#endif
 +}
 +
 +void WebExtensionRegisteredScript::addUserScript(const String& identifier, API::UserScript& userScript)
@@ -100783,10 +101146,10 @@ index 0000000000000000000000000000000000000000..87f9f3f91adb4d6506770a637f90eca0
 +#endif
 diff --git a/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextAPIScriptingHaiku.cpp b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextAPIScriptingHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..1dd20c49553438da863b8e4ec85e589a3a7598da
+index 0000000000000000000000000000000000000000..ef935e9aa0104dc22308026565130ac382d5d76b
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextAPIScriptingHaiku.cpp
-@@ -0,0 +1,723 @@
+@@ -0,0 +1,742 @@
 +/*
 + * Copyright (C) 2023-2024 Apple Inc. All rights reserved.
 + *
@@ -100830,6 +101193,7 @@ index 0000000000000000000000000000000000000000..1dd20c49553438da863b8e4ec85e589a
 +#include "WebExtensionMessageTargetParameters.h"
 +#include "WebExtensionPermission.h"
 +#include "WebExtensionRegisteredScriptParameters.h"
++#include "WebExtensionRegisteredScriptParser.h"
 +#include "WebExtensionScriptInjectionParameters.h"
 +#include "WebExtensionTabScriptExecution.h"
 +#include "WebExtensionUtilities.h"
@@ -101101,7 +101465,8 @@ index 0000000000000000000000000000000000000000..1dd20c49553438da863b8e4ec85e589a
 +
 +bool WebExtensionContext::isScriptingMessageAllowed(IPC::Decoder& message)
 +{
-+    return isLoadedAndPrivilegedMessage(message) && hasPermission(WebExtensionPermission::scripting());
++    // userScripts registers its scripts through the same messages.
++    return isLoadedAndPrivilegedMessage(message) && (hasPermission(WebExtensionPermission::scripting()) || hasPermission("userScripts"_s));
 +}
 +
 +void WebExtensionContext::scriptingInsertCSS(const WebExtensionScriptInjectionParameters& parameters, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&& completionHandler)
@@ -101308,6 +101673,16 @@ index 0000000000000000000000000000000000000000..1dd20c49553438da863b8e4ec85e589a
 +    Vector<Ref<JSON::Object>> result;
 +
 +    for (const auto& parameters : scripts) {
++        // User scripts are stored as RegisteredUserScript objects, inline code
++        // included, under their prefixed identifiers.
++        if (isWebExtensionUserScriptIdentifier(parameters.identifier)) {
++            Ref object = webExtensionUserScriptJSON(parameters, WebExtensionUserScriptIdentifiers::Stored);
++            // The store keeps only scripts that persist; user scripts always do.
++            object->setBoolean("persistAcrossSessions"_s, true);
++            result.append(WTF::move(object));
++            continue;
++        }
++
 +        Ref object = JSON::Object::create();
 +
 +        ASSERT(parameters.matchPatterns);
@@ -101476,8 +101851,15 @@ index 0000000000000000000000000000000000000000..1dd20c49553438da863b8e4ec85e589a
 +{
 +    static constexpr auto apiName = "scripting.unregisterContentScripts()"_s;
 +
-+    // Remove all registered scripts if no filter is specififed.
-+    auto ids = scriptIDs.isEmpty() ? copyToVector(m_registeredScriptsMap.keys()) : scriptIDs;
++    // Without a filter, every content script goes; user scripts belong to
++    // userScripts.unregister(), which names them.
++    auto ids = scriptIDs;
++    if (ids.isEmpty()) {
++        for (auto& identifier : m_registeredScriptsMap.keys()) {
++            if (!isWebExtensionUserScriptIdentifier(identifier))
++                ids.append(identifier);
++        }
++    }
 +
 +    for (auto& scriptID : ids) {
 +        if (!m_registeredScriptsMap.contains(scriptID)) {
@@ -134523,7 +134905,7 @@ index 8f99137471c0c991d6ec6d0f865f7e0ccc282ce1..575ecdd802c55256d56d1b4885118035
  
  } // namespace WebKit
 diff --git a/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPINamespace.cpp b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPINamespace.cpp
-index cdf7b6ed9b22a11f8ebdce34e1755607c892c4d1..a23530d7e601607d4b27f294e9b93d224af223c3 100644
+index cdf7b6ed9b22a11f8ebdce34e1755607c892c4d1..6e8040d8501639f4d8a37751682c984aa63ba266 100644
 --- a/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPINamespace.cpp
 +++ b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPINamespace.cpp
 @@ -32,7 +32,7 @@
@@ -134694,7 +135076,7 @@ index cdf7b6ed9b22a11f8ebdce34e1755607c892c4d1..a23530d7e601607d4b27f294e9b93d22
  
  #if ENABLE(WK_WEB_EXTENSIONS_OFFSCREEN)
  WebExtensionAPIOffscreen& WebExtensionAPINamespace::offscreen()
-@@ -244,16 +274,45 @@ WebExtensionAPIOffscreen& WebExtensionAPINamespace::offscreen()
+@@ -244,16 +274,54 @@ WebExtensionAPIOffscreen& WebExtensionAPINamespace::offscreen()
  }
  #endif
  
@@ -134740,12 +135122,21 @@ index cdf7b6ed9b22a11f8ebdce34e1755607c892c4d1..a23530d7e601607d4b27f294e9b93d22
 +        lazyInitialize(m_privacy, WebExtensionAPIPrivacy::create(*this));
 +    return *m_privacy;
 +}
++
++WebExtensionAPIUserScripts& WebExtensionAPINamespace::userScripts()
++{
++    // Documentation: https://developer.chrome.com/docs/extensions/reference/api/userScripts
++
++    if (!m_userScripts)
++        lazyInitialize(m_userScripts, WebExtensionAPIUserScripts::create(*this));
++    return *m_userScripts;
++}
 +#endif
 +
  WebExtensionAPIPermissions& WebExtensionAPINamespace::permissions()
  {
      // Documentation: https://developer.mozilla.org/docs/Mozilla/Add-ons/WebExtensions/API/permissions
-@@ -286,6 +345,7 @@ WebExtensionAPIScripting& WebExtensionAPINamespace::scripting()
+@@ -286,6 +354,7 @@ WebExtensionAPIScripting& WebExtensionAPINamespace::scripting()
      return *m_scripting;
  }
  
@@ -134753,7 +135144,7 @@ index cdf7b6ed9b22a11f8ebdce34e1755607c892c4d1..a23530d7e601607d4b27f294e9b93d22
  #if ENABLE(WK_WEB_EXTENSIONS_SIDEBAR)
  WebExtensionAPISidePanel& WebExtensionAPINamespace::sidePanel()
  {
-@@ -320,15 +380,8 @@ WebExtensionAPIBookmarks& WebExtensionAPINamespace::bookmarks()
+@@ -320,15 +389,8 @@ WebExtensionAPIBookmarks& WebExtensionAPINamespace::bookmarks()
  }
  #endif
  
@@ -134770,7 +135161,7 @@ index cdf7b6ed9b22a11f8ebdce34e1755607c892c4d1..a23530d7e601607d4b27f294e9b93d22
  
  WebExtensionAPITabs& WebExtensionAPINamespace::tabs()
  {
-@@ -339,27 +392,15 @@ WebExtensionAPITabs& WebExtensionAPINamespace::tabs()
+@@ -339,27 +401,15 @@ WebExtensionAPITabs& WebExtensionAPINamespace::tabs()
  
      return *m_tabs;
  }
@@ -134803,7 +135194,7 @@ index cdf7b6ed9b22a11f8ebdce34e1755607c892c4d1..a23530d7e601607d4b27f294e9b93d22
  }
  
  WebExtensionAPIWebNavigation& WebExtensionAPINamespace::webNavigation()
-@@ -381,7 +422,28 @@ WebExtensionAPIWebRequest& WebExtensionAPINamespace::webRequest()
+@@ -381,7 +431,28 @@ WebExtensionAPIWebRequest& WebExtensionAPINamespace::webRequest()
  
      return *m_webRequest;
  }
@@ -134834,10 +135225,10 @@ index cdf7b6ed9b22a11f8ebdce34e1755607c892c4d1..a23530d7e601607d4b27f294e9b93d22
  } // namespace WebKit
  
 diff --git a/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPINamespace.h b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPINamespace.h
-index fc3e8017564cf29eb647731205e00dc8500dd13d..599b8957cd19a3b7f6dbda97bb3b2dd7ec2bddc4 100644
+index fc3e8017564cf29eb647731205e00dc8500dd13d..d8f2823f9c0f1664554092f4c705aecc43c46844 100644
 --- a/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPINamespace.h
 +++ b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPINamespace.h
-@@ -45,6 +45,13 @@
+@@ -45,6 +45,14 @@
  #include "WebExtensionAPIObject.h"
  #include "WebExtensionAPIOffscreen.h"
  #include "WebExtensionAPIPermissions.h"
@@ -134847,11 +135238,12 @@ index fc3e8017564cf29eb647731205e00dc8500dd13d..599b8957cd19a3b7f6dbda97bb3b2dd7
 +#include "WebExtensionAPIManagement.h"
 +#include "WebExtensionAPINotificationsHaiku.h"
 +#include "WebExtensionAPIPrivacy.h"
++#include "WebExtensionAPIUserScripts.h"
 +#endif
  #include "WebExtensionAPIRuntime.h"
  #include "WebExtensionAPIScripting.h"
  #include "WebExtensionAPISidePanel.h"
-@@ -66,33 +73,38 @@ class WebExtensionAPINamespace : public WebExtensionAPIObject, public JSWebExten
+@@ -66,33 +74,39 @@ class WebExtensionAPINamespace : public WebExtensionAPIObject, public JSWebExten
  
  public:
      bool isPropertyAllowed(const ASCIILiteral& propertyName, WebPage*);
@@ -134891,6 +135283,7 @@ index fc3e8017564cf29eb647731205e00dc8500dd13d..599b8957cd19a3b7f6dbda97bb3b2dd7
 +    WebExtensionAPIManagement& management();
 +    WebExtensionAPINotificationsHaiku& notificationsHaiku();
 +    WebExtensionAPIPrivacy& privacy();
++    WebExtensionAPIUserScripts& userScripts();
  #endif
      WebExtensionAPIRuntime& runtime() const final;
 -#if PLATFORM(COCOA)
@@ -134899,7 +135292,7 @@ index fc3e8017564cf29eb647731205e00dc8500dd13d..599b8957cd19a3b7f6dbda97bb3b2dd7
  #if ENABLE(WK_WEB_EXTENSIONS_SIDEBAR)
      WebExtensionAPISidePanel& sidePanel();
      WebExtensionAPISidebarAction& sidebarAction();
-@@ -100,15 +112,13 @@ public:
+@@ -100,15 +114,13 @@ public:
  #if ENABLE(WK_WEB_EXTENSIONS_BOOKMARKS)
      WebExtensionAPIBookmarks& bookmarks();
  #endif
@@ -134919,7 +135312,7 @@ index fc3e8017564cf29eb647731205e00dc8500dd13d..599b8957cd19a3b7f6dbda97bb3b2dd7
  
  private:
      const RefPtr<WebExtensionAPIAction> m_action;
-@@ -127,7 +137,14 @@ private:
+@@ -127,7 +139,15 @@ private:
  #if ENABLE(WK_WEB_EXTENSIONS_OFFSCREEN)
      const RefPtr<WebExtensionAPIOffscreen> m_offscreen;
  #endif
@@ -134931,6 +135324,7 @@ index fc3e8017564cf29eb647731205e00dc8500dd13d..599b8957cd19a3b7f6dbda97bb3b2dd7
 +    RefPtr<WebExtensionAPIManagement> m_management;
 +    RefPtr<WebExtensionAPINotificationsHaiku> m_notificationsHaiku;
 +    RefPtr<WebExtensionAPIPrivacy> m_privacy;
++    RefPtr<WebExtensionAPIUserScripts> m_userScripts;
 +#endif
      mutable RefPtr<WebExtensionAPIRuntime> m_runtime;
      const RefPtr<WebExtensionAPIScripting> m_scripting;
@@ -136077,7 +136471,7 @@ index 0000000000000000000000000000000000000000..413f2e16107bcca192b92268f84c4d3d
 +SPECIALIZE_TYPE_TRAITS_WEB_EXTENSION(WebExtensionAPIPrivacySetting, privacySetting);
 +#endif
 diff --git a/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIRuntime.cpp b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIRuntime.cpp
-index 81412a7ab5e7f5845d4d19a813c2552c1cf361d6..7062fa74d3e9121b1dd9f0ee1c1c5f1c4b0b8331 100644
+index 81412a7ab5e7f5845d4d19a813c2552c1cf361d6..769db259c842a1d13dfc4182e8a126b17186182e 100644
 --- a/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIRuntime.cpp
 +++ b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIRuntime.cpp
 @@ -30,6 +30,8 @@
@@ -136394,7 +136788,32 @@ index 81412a7ab5e7f5845d4d19a813c2552c1cf361d6..7062fa74d3e9121b1dd9f0ee1c1c5f1c
  
      return port;
  }
-@@ -599,6 +718,119 @@ bool WebExtensionContextProxy::matchesTarget(WebFrame& frame, const std::optiona
+@@ -573,6 +692,24 @@ WebExtensionAPIEvent& WebExtensionAPIRuntime::onMessageExternal()
+     return *m_onMessageExternal;
+ }
+ 
++#if PLATFORM(HAIKU)
++// Never fired: user scripts share the content script world, whose messages
++// reach onMessage and onConnect (Tampermonkey listens to both).
++WebExtensionAPIEvent& WebExtensionAPIRuntime::onUserScriptMessage()
++{
++    if (!m_onUserScriptMessage)
++        lazyInitialize(m_onUserScriptMessage, WebExtensionAPIEvent::create(*this, WebExtensionEventListenerType::Unknown));
++    return *m_onUserScriptMessage;
++}
++
++WebExtensionAPIEvent& WebExtensionAPIRuntime::onUserScriptConnect()
++{
++    if (!m_onUserScriptConnect)
++        lazyInitialize(m_onUserScriptConnect, WebExtensionAPIEvent::create(*this, WebExtensionEventListenerType::Unknown));
++    return *m_onUserScriptConnect;
++}
++#endif
++
+ bool WebExtensionContextProxy::matchesTarget(WebFrame& frame, const std::optional<WebExtensionMessageTargetParameters>& targetParameters)
+ {
+     if (!targetParameters)
+@@ -599,6 +736,119 @@ bool WebExtensionContextProxy::matchesTarget(WebFrame& frame, const std::optiona
      return true;
  }
  
@@ -136514,7 +136933,7 @@ index 81412a7ab5e7f5845d4d19a813c2552c1cf361d6..7062fa74d3e9121b1dd9f0ee1c1c5f1c
  void WebExtensionContextProxy::dispatchRuntimeMessageEvent(WebExtensionContentWorldType contentWorldType, const String& messageJSON, const std::optional<WebExtensionMessageTargetParameters>& targetParameters, const WebExtensionMessageSenderParameters& senderParameters, bool userGesture, CompletionHandler<void(String&& replyJSON)>&& completionHandler)
  {
      switch (contentWorldType) {
-@@ -606,11 +838,11 @@ void WebExtensionContextProxy::dispatchRuntimeMessageEvent(WebExtensionContentWo
+@@ -606,11 +856,11 @@ void WebExtensionContextProxy::dispatchRuntimeMessageEvent(WebExtensionContentWo
  #if ENABLE(INSPECTOR_EXTENSIONS)
      case WebExtensionContentWorldType::Inspector:
  #endif
@@ -136528,7 +136947,7 @@ index 81412a7ab5e7f5845d4d19a813c2552c1cf361d6..7062fa74d3e9121b1dd9f0ee1c1c5f1c
          return;
  
      case WebExtensionContentWorldType::Native:
-@@ -715,7 +947,7 @@ void WebExtensionContextProxy::dispatchRuntimeInstalledEvent(WebExtensionContext
+@@ -715,7 +965,7 @@ void WebExtensionContextProxy::dispatchRuntimeInstalledEvent(WebExtensionContext
  
      details->setString(reasonKey, toWebAPI(installReason));
  
@@ -136538,7 +136957,7 @@ index 81412a7ab5e7f5845d4d19a813c2552c1cf361d6..7062fa74d3e9121b1dd9f0ee1c1c5f1c
  
      enumerateNamespaceObjects([&](auto& namespaceObject) {
 diff --git a/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIRuntime.h b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIRuntime.h
-index 9ea340d60b7060923cd5b05ed26da12ac9d6f68a..6346e5c31c51700350d067ce8f26fb4b8842ca52 100644
+index 9ea340d60b7060923cd5b05ed26da12ac9d6f68a..9523805a364bb63337dbd61ae095e7be6d12b8b7 100644
 --- a/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIRuntime.h
 +++ b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIRuntime.h
 @@ -41,6 +41,7 @@ class WebExtensionAPIRuntime;
@@ -136576,7 +136995,17 @@ index 9ea340d60b7060923cd5b05ed26da12ac9d6f68a..6346e5c31c51700350d067ce8f26fb4b
      JSValueRef NODELETE lastError();
  
      void sendMessage(WebPageProxyIdentifier, WebFrame&, const String& extensionID, const String& messageJSON, RefPtr<JSON::Value> options, Ref<WebExtensionCallbackHandler>&&, String& outExceptionString);
-@@ -95,12 +109,17 @@ private:
+@@ -89,18 +103,31 @@ public:
+     WebExtensionAPIEvent& onStartup();
+     WebExtensionAPIEvent& onConnectExternal();
+     WebExtensionAPIEvent& onMessageExternal();
++#if PLATFORM(HAIKU)
++    WebExtensionAPIEvent& onUserScriptMessage();
++    WebExtensionAPIEvent& onUserScriptConnect();
++#endif
+ 
+ private:
+     friend class WebExtensionAPIWebPageRuntime;
  
      static bool parseConnectOptions(RefPtr<JSON::Value>, std::optional<String>& name, const String& sourceKey, String& outExceptionString);
  
@@ -136597,15 +137026,19 @@ index 9ea340d60b7060923cd5b05ed26da12ac9d6f68a..6346e5c31c51700350d067ce8f26fb4b
 +#endif
 +    RefPtr<WebExtensionAPIEvent> m_onConnectExternal;
 +    RefPtr<WebExtensionAPIEvent> m_onMessageExternal;
++#if PLATFORM(HAIKU)
++    RefPtr<WebExtensionAPIEvent> m_onUserScriptMessage;
++    RefPtr<WebExtensionAPIEvent> m_onUserScriptConnect;
++#endif
  };
  
  class WebExtensionAPIWebPageRuntime : public WebExtensionAPIObject, public WebExtensionAPIRuntimeBase {
 diff --git a/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIScripting.cpp b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIScripting.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..a309faf6094175b50652a80faa4368d6708d25cd
+index 0000000000000000000000000000000000000000..3f6b00231a029fcc22f11c4095d664cae8e3c162
 --- /dev/null
 +++ b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIScripting.cpp
-@@ -0,0 +1,536 @@
+@@ -0,0 +1,542 @@
 +/*
 + * Copyright (C) 2022-2024 Apple Inc. All rights reserved.
 + *
@@ -137113,8 +137546,14 @@ index 0000000000000000000000000000000000000000..a309faf6094175b50652a80faa4368d6
 +                return;
 +            }
 +            Ref scripts = JSON::Array::create();
-+            for (auto& parameters : *result)
++            for (auto& parameters : *result) {
++#if PLATFORM(HAIKU)
++                // userScripts.getScripts() lists those.
++                if (isWebExtensionUserScriptIdentifier(parameters.identifier))
++                    continue;
++#endif
 +                scripts->pushObject(toWebAPI(parameters));
++            }
 +            auto context = callback->globalContext();
 +            Protected<JSValueRef> value(context, fromJSON(context, RefPtr<JSON::Value> { WTF::move(scripts) }));
 +            callback->call(value.get());
@@ -138782,6 +139221,272 @@ index eb4d57b0aa5359e56ff413fec44a826db7045831..426fb3c90d2df66bb62e3eb2d02aecdb
  JSValueRef WebExtensionAPITest::addTest(JSContextRef context, JSValueRef testFunction)
  {
      return addTest(context, testFunction, "test.addTest()"_s);
+diff --git a/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIUserScripts.cpp b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIUserScripts.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..740e403f93a8000eaf8b577ec072952a02b458e2
+--- /dev/null
++++ b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIUserScripts.cpp
+@@ -0,0 +1,216 @@
++/* Copyright (C) 2026 Summit contributors. SPDX-License-Identifier: BSD-2-Clause */
++#include "config.h"
++#include "WebExtensionAPIUserScripts.h"
++
++#if ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
++
++#include "MessageSenderInlines.h"
++#include "WebExtensionContextMessages.h"
++#include "WebExtensionContextProxy.h"
++#include "WebExtensionRegisteredScriptParameters.h"
++#include "WebExtensionRegisteredScriptParser.h"
++#include "WebExtensionUtilities.h"
++#include "WebProcess.h"
++#include <wtf/text/MakeString.h>
++
++namespace WebKit {
++
++static std::expected<Vector<Ref<JSON::Object>>, String> objects(const JSON::Value* input)
++{
++    // JSON::Value only offers a mutable array view; nothing here modifies it.
++    RefPtr array = input ? const_cast<JSON::Value*>(input)->asArray() : nullptr;
++    if (!array)
++        return makeUnexpected(toErrorString(nullString(), "scripts"_s, "an array of objects is expected"_s));
++    if (array->length() > 1024)
++        return makeUnexpected(toErrorString(nullString(), "scripts"_s, "it names too many scripts"_s));
++    Vector<Ref<JSON::Object>> result;
++    for (auto& item : *array) {
++        RefPtr object = item->asObject();
++        if (!object)
++            return makeUnexpected(toErrorString(nullString(), "scripts"_s, "an array of objects is expected"_s));
++        result.append(object.releaseNonNull());
++    }
++    return result;
++}
++
++// The filter's ids as stored, or nullopt for every user script.
++static std::expected<std::optional<Vector<String>>, String> filterIdentifiers(const JSON::Value* input)
++{
++    if (!input || input->isNull())
++        return std::optional<Vector<String>> { };
++    RefPtr filter = const_cast<JSON::Value*>(input)->asObject();
++    if (!filter)
++        return makeUnexpected(toErrorString(nullString(), "filter"_s, "an object is expected"_s));
++    RefPtr ids = filter->getValue("ids"_s);
++    if (!ids || ids->isNull())
++        return std::optional<Vector<String>> { };
++    RefPtr array = ids->asArray();
++    if (!array)
++        return makeUnexpected(toErrorString(nullString(), "ids"_s, "an array of strings is expected"_s));
++    Vector<String> result;
++    for (auto& item : *array) {
++        if (item->type() != JSON::Value::Type::String)
++            return makeUnexpected(toErrorString(nullString(), "ids"_s, "an array of strings is expected"_s));
++        result.append(makeString(webExtensionUserScriptPrefix, item->asString()));
++    }
++    return std::optional { WTF::move(result) };
++}
++
++static void completeVoid(Ref<WebExtensionCallbackHandler>&& callback, std::expected<void, WebExtensionError>&& result)
++{
++    if (!result) {
++        callback->reportError(result.error());
++        return;
++    }
++    callback->call();
++}
++
++void WebExtensionAPIUserScripts::registerScripts(RefPtr<JSON::Value> scripts, Ref<WebExtensionCallbackHandler>&& callback, String& outExceptionString)
++{
++    auto list = objects(scripts.get());
++    if (!list) {
++        outExceptionString = list.error();
++        return;
++    }
++    auto parameters = parseWebExtensionUserScripts(*list, WebExtensionRegisteredScriptParseMode::Registration, WebExtensionUserScriptIdentifiers::FromAPI);
++    if (!parameters) {
++        outExceptionString = parameters.error();
++        return;
++    }
++    WebProcess::singleton().sendWithAsyncReply(Messages::WebExtensionContext::ScriptingRegisterContentScripts(WTF::move(*parameters)),
++        [protectedThis = Ref { *this }, callback = WTF::move(callback)](std::expected<void, WebExtensionError>&& result) mutable {
++            completeVoid(WTF::move(callback), WTF::move(result));
++        }, extensionContext().identifier());
++}
++
++void WebExtensionAPIUserScripts::updateScripts(RefPtr<JSON::Value> scripts, Ref<WebExtensionCallbackHandler>&& callback, String& outExceptionString)
++{
++    auto list = objects(scripts.get());
++    if (!list) {
++        outExceptionString = list.error();
++        return;
++    }
++    auto parameters = parseWebExtensionUserScripts(*list, WebExtensionRegisteredScriptParseMode::Update, WebExtensionUserScriptIdentifiers::FromAPI);
++    if (!parameters) {
++        outExceptionString = parameters.error();
++        return;
++    }
++    WebProcess::singleton().sendWithAsyncReply(Messages::WebExtensionContext::ScriptingUpdateRegisteredScripts(WTF::move(*parameters)),
++        [protectedThis = Ref { *this }, callback = WTF::move(callback)](std::expected<void, WebExtensionError>&& result) mutable {
++            completeVoid(WTF::move(callback), WTF::move(result));
++        }, extensionContext().identifier());
++}
++
++void WebExtensionAPIUserScripts::unregisterScripts(RefPtr<JSON::Value> filter, Ref<WebExtensionCallbackHandler>&& callback, String& outExceptionString)
++{
++    auto identifiers = filterIdentifiers(filter.get());
++    if (!identifiers) {
++        outExceptionString = identifiers.error();
++        return;
++    }
++    auto unregister = [protectedThis = Ref { *this }, callback = WTF::move(callback)](Vector<String>&& identifiers) mutable {
++        // An empty list would mean every content script to the browser process.
++        if (identifiers.isEmpty()) {
++            callback->call();
++            return;
++        }
++        auto contextIdentifier = protectedThis->extensionContext().identifier();
++        WebProcess::singleton().sendWithAsyncReply(Messages::WebExtensionContext::ScriptingUnregisterContentScripts(WTF::move(identifiers)),
++            [protectedThis = protectedThis.copyRef(), callback = WTF::move(callback)](std::expected<void, WebExtensionError>&& result) mutable {
++                completeVoid(WTF::move(callback), WTF::move(result));
++            }, contextIdentifier);
++    };
++    if (*identifiers) {
++        unregister(WTF::move(**identifiers));
++        return;
++    }
++    // Every user script: find their identifiers first.
++    WebProcess::singleton().sendWithAsyncReply(Messages::WebExtensionContext::ScriptingGetRegisteredScripts({ }),
++        [unregister = WTF::move(unregister)](std::expected<Vector<WebExtensionRegisteredScriptParameters>, WebExtensionError>&& result) mutable {
++            Vector<String> identifiers;
++            if (result) {
++                for (auto& parameters : *result) {
++                    if (isWebExtensionUserScriptIdentifier(parameters.identifier))
++                        identifiers.append(parameters.identifier);
++                }
++            }
++            unregister(WTF::move(identifiers));
++        }, extensionContext().identifier());
++}
++
++void WebExtensionAPIUserScripts::getScripts(RefPtr<JSON::Value> filter, Ref<WebExtensionCallbackHandler>&& callback, String& outExceptionString)
++{
++    auto identifiers = filterIdentifiers(filter.get());
++    if (!identifiers) {
++        outExceptionString = identifiers.error();
++        return;
++    }
++    // An empty list asks for every registered script.
++    auto requested = identifiers->value_or(Vector<String> { });
++    bool filtered = !!*identifiers;
++    if (filtered && requested.isEmpty()) {
++        Ref empty = JSON::Array::create();
++        auto context = callback->globalContext();
++        Protected<JSValueRef> value(context, fromJSON(context, RefPtr<JSON::Value> { WTF::move(empty) }));
++        callback->call(value.get());
++        return;
++    }
++    WebProcess::singleton().sendWithAsyncReply(Messages::WebExtensionContext::ScriptingGetRegisteredScripts(WTF::move(requested)),
++        [protectedThis = Ref { *this }, callback = WTF::move(callback)](std::expected<Vector<WebExtensionRegisteredScriptParameters>, WebExtensionError>&& result) {
++            if (!result) {
++                callback->reportError(result.error());
++                return;
++            }
++            Ref scripts = JSON::Array::create();
++            for (auto& parameters : *result) {
++                if (isWebExtensionUserScriptIdentifier(parameters.identifier))
++                    scripts->pushObject(webExtensionUserScriptJSON(parameters, WebExtensionUserScriptIdentifiers::FromAPI));
++            }
++            auto context = callback->globalContext();
++            Protected<JSValueRef> value(context, fromJSON(context, RefPtr<JSON::Value> { WTF::move(scripts) }));
++            callback->call(value.get());
++        }, extensionContext().identifier());
++}
++
++void WebExtensionAPIUserScripts::configureWorld(RefPtr<JSON::Value> properties, Ref<WebExtensionCallbackHandler>&& callback, String& outExceptionString)
++{
++    RefPtr object = properties ? properties->asObject() : nullptr;
++    if (!object) {
++        outExceptionString = toErrorString(nullString(), "properties"_s, "an object is expected"_s);
++        return;
++    }
++    for (auto key : { "csp"_s, "worldId"_s }) {
++        if (RefPtr value = object->getValue(key); value && value->type() != JSON::Value::Type::String) {
++            outExceptionString = toErrorString(nullString(), key, "a string is expected"_s);
++            return;
++        }
++    }
++    if (RefPtr value = object->getValue("messaging"_s); value && value->type() != JSON::Value::Type::Boolean) {
++        outExceptionString = toErrorString(nullString(), "messaging"_s, "a boolean is expected"_s);
++        return;
++    }
++    // The default world has no worldId.
++    auto worldId = object->getString("worldId"_s);
++    m_worldConfigurations.set(worldId.isNull() ? emptyString() : worldId, object.releaseNonNull());
++    callback->call();
++}
++
++void WebExtensionAPIUserScripts::resetWorldConfiguration(const String& worldId, Ref<WebExtensionCallbackHandler>&& callback)
++{
++    m_worldConfigurations.remove(worldId.isNull() ? emptyString() : worldId);
++    callback->call();
++}
++
++void WebExtensionAPIUserScripts::getWorldConfigurations(Ref<WebExtensionCallbackHandler>&& callback)
++{
++    Ref configurations = JSON::Array::create();
++    for (auto& configuration : m_worldConfigurations.values())
++        configurations->pushObject(configuration.copyRef());
++    auto context = callback->globalContext();
++    Protected<JSValueRef> value(context, fromJSON(context, RefPtr<JSON::Value> { WTF::move(configurations) }));
++    callback->call(value.get());
++}
++
++} // namespace WebKit
++
++#endif // ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
+diff --git a/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIUserScripts.h b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIUserScripts.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..3802f8ec393389f7ca61ec3d9f772582dc52c516
+--- /dev/null
++++ b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIUserScripts.h
+@@ -0,0 +1,38 @@
++/* Copyright (C) 2026 Summit contributors. SPDX-License-Identifier: BSD-2-Clause */
++#pragma once
++
++#if ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
++
++#include "JSWebExtensionAPIUserScripts.h"
++#include "WebExtensionAPIObject.h"
++#include <wtf/JSONValues.h>
++
++namespace WebKit {
++
++// chrome.userScripts. User scripts are registered scripts whose identifiers
++// carry webExtensionUserScriptPrefix, so they share the scripting messages,
++// the store and the injection of scripting.registerContentScripts().
++class WebExtensionAPIUserScripts : public WebExtensionAPIObject, public JSWebExtensionWrappable {
++    WEB_EXTENSION_DECLARE_JS_WRAPPER_CLASS(WebExtensionAPIUserScripts, userScripts, userScripts);
++
++public:
++    void registerScripts(RefPtr<JSON::Value> scripts, Ref<WebExtensionCallbackHandler>&&, String& outExceptionString);
++    void updateScripts(RefPtr<JSON::Value> scripts, Ref<WebExtensionCallbackHandler>&&, String& outExceptionString);
++    void unregisterScripts(RefPtr<JSON::Value> filter, Ref<WebExtensionCallbackHandler>&&, String& outExceptionString);
++    void getScripts(RefPtr<JSON::Value> filter, Ref<WebExtensionCallbackHandler>&&, String& outExceptionString);
++
++    void configureWorld(RefPtr<JSON::Value> properties, Ref<WebExtensionCallbackHandler>&&, String& outExceptionString);
++    void resetWorldConfiguration(const String& worldId, Ref<WebExtensionCallbackHandler>&&);
++    void getWorldConfigurations(Ref<WebExtensionCallbackHandler>&&);
++
++private:
++    // World configurations (csp, messaging) are kept for getWorldConfigurations();
++    // user scripts run in the content script world, which already has messaging.
++    HashMap<String, Ref<JSON::Object>> m_worldConfigurations;
++};
++
++} // namespace WebKit
++
++SPECIALIZE_TYPE_TRAITS_WEB_EXTENSION(WebExtensionAPIUserScripts, userScripts);
++
++#endif // ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
 diff --git a/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIWebNavigation.cpp b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIWebNavigation.cpp
 new file mode 100644
 index 0000000000000000000000000000000000000000..3a0032b039d0815e2174ecc87b84eaafe286794e
@@ -142475,9 +143180,27 @@ index 566901ed1e1b5d89a4b164941b8b8b7deb3761d0..0d275dddf9768f5d8e5f71da7fcb9aa7
  inline JSValueRef toJSValueRefOrJSNull(JSContextRef context, RefPtr<JSON::Object> value)
  {
 diff --git a/Source/WebKit/WebProcess/Extensions/Bindings/Scripts/CodeGeneratorExtensions.pm b/Source/WebKit/WebProcess/Extensions/Bindings/Scripts/CodeGeneratorExtensions.pm
-index db1f3438b6d53c9f026dee88eb481963982bfc88..8d82b5c1af085dbe865dcf7db16bb1464f1b36a9 100644
+index db1f3438b6d53c9f026dee88eb481963982bfc88..45a59e0eab7d7bda5d8b65fdcd84ba30e5de6f34 100644
 --- a/Source/WebKit/WebProcess/Extensions/Bindings/Scripts/CodeGeneratorExtensions.pm
 +++ b/Source/WebKit/WebProcess/Extensions/Bindings/Scripts/CodeGeneratorExtensions.pm
+@@ -226,7 +226,7 @@ EOF
+ 
+             push(@contents, "#if ${platformString}\n") if $platformString;
+             push(@contents, "#if ${conditionalString}\n") if $conditionalString;
+-            push(@contents, "    static JSValueRef @{[$function->name]}(JSContextRef, JSObjectRef, JSObjectRef, size_t, const JSValueRef[], JSValueRef*);\n");
++            push(@contents, "    static JSValueRef @{[_callbackName($function->name)]}(JSContextRef, JSObjectRef, JSObjectRef, size_t, const JSValueRef[], JSValueRef*);\n");
+             push(@contents, "    static bool setProperty(JSContextRef, JSObjectRef, JSStringRef, JSValueRef, JSValueRef*);\n") if $function->extendedAttributes->{"SetProperty"};
+             push(@contents, "    static JSValueRef getProperty(JSContextRef, JSObjectRef, JSStringRef, JSValueRef*);\n") if $function->extendedAttributes->{"GetProperty"};
+             push(@contents, "    static bool deleteProperty(JSContextRef, JSObjectRef, JSStringRef, JSValueRef*);\n") if $function->extendedAttributes->{"DeleteProperty"};
+@@ -464,7 +464,7 @@ EOF
+ 
+             push(@contents, "\n");
+ 
+-            my $functionSignature = "JSValueRef ${className}::@{[$function->name]}(JSContextRef context, JSObjectRef, JSObjectRef thisObject, size_t argumentCount, const JSValueRef unsafeArguments[], JSValueRef* exception)";
++            my $functionSignature = "JSValueRef ${className}::@{[_callbackName($function->name)]}(JSContextRef context, JSObjectRef, JSObjectRef thisObject, size_t argumentCount, const JSValueRef unsafeArguments[], JSValueRef* exception)";
+             my $call = _callString($idlType, $function, 1);
+ 
+             my $defaultEarlyReturnValue = "JSValueMakeUndefined(context)";
 @@ -475,7 +475,7 @@ EOF
              my $isDeletePropertyFunction = defined $function->extendedAttributes->{"DeleteProperty"};
              my $isPropertyFunction = $isSetPropertyFunction || $isGetPropertyFunction || $isDeletePropertyFunction;
@@ -142555,16 +143278,38 @@ index db1f3438b6d53c9f026dee88eb481963982bfc88..8d82b5c1af085dbe865dcf7db16bb146
      return "JSValueToNumber(context, $argumentName, nullptr)" if $$self{codeGenerator}->IsPrimitiveType($idlType);
      return "to" . _implementationClassName($idlType) . "(context, $argumentName)";
  }
-@@ -1674,7 +1693,7 @@ sub _staticFunctionsGetterImplementation
+@@ -1663,6 +1682,15 @@ sub _setterName
+     return "set" . $$self{codeGenerator}->WK_ucfirst($name);
+ }
+ 
++# The C++ name of an operation's static callback. JavaScript names that are
++# C++ keywords (userScripts.register) get a suffix.
++sub _callbackName
++{
++    my ($name) = @_;
++    my %keywords = map { $_ => 1 } qw(register delete new default export import operator template typename union);
++    return $keywords{$name} ? "${name}Callback" : $name;
++}
++
+ sub _staticFunctionsGetterImplementation
+ {
+     my ($self, $interface) = @_;
+@@ -1674,10 +1702,11 @@ sub _staticFunctionsGetterImplementation
          my @attributes = ();
          push(@attributes, "kJSPropertyAttributeDontEnum") if $_->extendedAttributes->{"DontEnum"};
          my $jsproperties = scalar @attributes == 0 ? "kJSPropertyAttributeNone" : join(" | ", @attributes);
 -        my $conditionalString = conditionalString($_);
 +        my $conditionalString = join(" && ", map { "($_)" } grep { $_ } (conditionalString($_), platformString($_)));
  
-         return "#if ${conditionalString}\n        { \"$name\", $name, $jsproperties },\n        #endif" if $conditionalString;
-         return "{ \"$name\", $name, $jsproperties },";
-@@ -1927,7 +1946,7 @@ EOF
+-        return "#if ${conditionalString}\n        { \"$name\", $name, $jsproperties },\n        #endif" if $conditionalString;
+-        return "{ \"$name\", $name, $jsproperties },";
++        my $callback = _callbackName($name);
++        return "#if ${conditionalString}\n        { \"$name\", $callback, $jsproperties },\n        #endif" if $conditionalString;
++        return "{ \"$name\", $callback, $jsproperties },";
+     };
+ 
+     my @initializers = map(&$mapFunction, @{$interface->operations});
+@@ -1927,11 +1956,11 @@ EOF
              my $condition = "JSStringIsEqualToUTF8CString(propertyName, \"${name}\")" if $hasMainWorldOnlyProperties and !$hasDynamicProperties;
              $condition = &$generateCondition($function, "JSStringIsEqualToUTF8CString(propertyName, \"${name}\")") if $hasDynamicProperties;
  
@@ -142573,6 +143318,11 @@ index db1f3438b6d53c9f026dee88eb481963982bfc88..8d82b5c1af085dbe865dcf7db16bb146
  
              push(@contents, "#if ${conditionalString}\n") if $conditionalString;
              push(@contents, "    if (${condition})\n");
+-            push(@contents, "        return JSObjectMakeFunctionWithCallback(context, propertyName, ${name});\n");
++            push(@contents, "        return JSObjectMakeFunctionWithCallback(context, propertyName, @{[_callbackName($name)]});\n");
+             push(@contents, "#endif // ${conditionalString}\n") if $conditionalString;
+             push(@contents, "\n");
+         }
 diff --git a/Source/WebKit/WebProcess/Extensions/Bindings/Scripts/IDLAttributes.json b/Source/WebKit/WebProcess/Extensions/Bindings/Scripts/IDLAttributes.json
 index 3a20f9d1694c78175c5ce007ac7a252dad6e5c22..298e5a1171e1b5935dc39e1285d3092ef43735d8 100644
 --- a/Source/WebKit/WebProcess/Extensions/Bindings/Scripts/IDLAttributes.json
@@ -143297,10 +144047,10 @@ index 2868b8c1b322da84dda89344451196e063c4264d..adf8a12013a530323b5c8e07befc9155
  
      readonly attribute WebExtensionAPIEvent onClicked;
 diff --git a/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPINamespace.idl b/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPINamespace.idl
-index cf3a76d37a4d9379d4191ac666ba4bc97bd9013d..5b875971043d4301cafaf5d01694b26be44a0a93 100644
+index cf3a76d37a4d9379d4191ac666ba4bc97bd9013d..ccc5af03367bff4264d271d5bc9f9f30b56aa2cc 100644
 --- a/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPINamespace.idl
 +++ b/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPINamespace.idl
-@@ -33,57 +33,65 @@
+@@ -33,57 +33,67 @@
      * in the offscreen web view context) - and automatically grant it in WebExtensionAPINamespace::isPropertyAllowed.
      */
  
@@ -143350,19 +144100,21 @@ index cf3a76d37a4d9379d4191ac666ba4bc97bd9013d..5b875971043d4301cafaf5d01694b26b
  
      [MainWorldOnly, Dynamic, Platform=COCOA, Conditional=WK_WEB_EXTENSIONS_NOTIFICATIONS] readonly attribute WebExtensionAPINotifications notifications;
 +    [MainWorldOnly, Dynamic, Platform=HAIKU, ImplementedAs=notificationsHaiku] readonly attribute WebExtensionAPINotificationsHaiku notifications;
- 
--    [MainWorldOnly, Dynamic, Platform=COCOA, Conditional=WK_WEB_EXTENSIONS_OFFSCREEN] readonly attribute WebExtensionAPIOffscreen offscreen;
++
 +    [MainWorldOnly, Dynamic, Conditional=WK_WEB_EXTENSIONS_OFFSCREEN] readonly attribute WebExtensionAPIOffscreen offscreen;
  
--    [MainWorldOnly, Dynamic, Platform=COCOA] readonly attribute WebExtensionAPIAction pageAction;
+-    [MainWorldOnly, Dynamic, Platform=COCOA, Conditional=WK_WEB_EXTENSIONS_OFFSCREEN] readonly attribute WebExtensionAPIOffscreen offscreen;
 +    [MainWorldOnly, Dynamic] readonly attribute WebExtensionAPIAction pageAction;
  
--    [MainWorldOnly, Dynamic, Platform=COCOA] readonly attribute WebExtensionAPIPermissions permissions;
+-    [MainWorldOnly, Dynamic, Platform=COCOA] readonly attribute WebExtensionAPIAction pageAction;
 +    [MainWorldOnly, Dynamic] readonly attribute WebExtensionAPIPermissions permissions;
 +    [MainWorldOnly, Dynamic, Platform=HAIKU] readonly attribute WebExtensionAPIPrivacy privacy;
  
--    [MainWorldOnly, Dynamic, Platform=COCOA] readonly attribute WebExtensionAPIScripting scripting;
+-    [MainWorldOnly, Dynamic, Platform=COCOA] readonly attribute WebExtensionAPIPermissions permissions;
 +    [MainWorldOnly, Dynamic] readonly attribute WebExtensionAPIScripting scripting;
+ 
+-    [MainWorldOnly, Dynamic, Platform=COCOA] readonly attribute WebExtensionAPIScripting scripting;
++    [MainWorldOnly, Dynamic, Platform=HAIKU] readonly attribute WebExtensionAPIUserScripts userScripts;
  
      [MainWorldOnly, Dynamic, Platform=COCOA, Conditional=WK_WEB_EXTENSIONS_SIDEBAR] readonly attribute WebExtensionAPISidebarAction sidebarAction;
  
@@ -143538,7 +144290,7 @@ index 0000000000000000000000000000000000000000..56290af91f7eec2eb9a056c0a43a165c
 +    readonly attribute WebExtensionAPIEvent onChange;
 +};
 diff --git a/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPIRuntime.idl b/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPIRuntime.idl
-index 4b75480574369d609ccee902e1ee45e72e521f53..ed76ac2825fd26f442f512e5a77507b3fdf5fdf5 100644
+index 4b75480574369d609ccee902e1ee45e72e521f53..7daa47e40c18f1266e49844609d31219e77fcd10 100644
 --- a/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPIRuntime.idl
 +++ b/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPIRuntime.idl
 @@ -56,6 +56,14 @@ dictionary WebExtensionSendMessageOptions {
@@ -143556,8 +144308,15 @@ index 4b75480574369d609ccee902e1ee45e72e521f53..ed76ac2825fd26f442f512e5a77507b3
      [URL, ConvertNullStringTo=Null, RaisesStringException] DOMString getURL(DOMString resourcePath);
      [JSONValue] any getManifest();
      DOMString getVersion();
-@@ -85,5 +93,11 @@ dictionary WebExtensionSendMessageOptions {
+@@ -83,7 +91,18 @@ dictionary WebExtensionSendMessageOptions {
+ 
+     [MainWorldOnly] readonly attribute WebExtensionAPIEvent onConnectExternal;
      [MainWorldOnly] readonly attribute WebExtensionAPIEvent onMessageExternal;
++
++    // userScripts' messaging events. User scripts run in the content script
++    // world here, so their messages arrive through onMessage and onConnect.
++    [MainWorldOnly, Platform=HAIKU] readonly attribute WebExtensionAPIEvent onUserScriptMessage;
++    [MainWorldOnly, Platform=HAIKU] readonly attribute WebExtensionAPIEvent onUserScriptConnect;
      [MainWorldOnly] readonly attribute WebExtensionAPIEvent onStartup;
      [MainWorldOnly] readonly attribute WebExtensionAPIEvent onInstalled;
 +    [MainWorldOnly, Platform=HAIKU] readonly attribute WebExtensionAPIEvent onSuspend;
@@ -143718,6 +144477,33 @@ index a744e37f5fd4c546a27627a69573d8eeb454312b..f18ae9012320a7e6f6cab3d978692515
  
      [ImplementedAs=tabIdentifierNone] readonly attribute double TAB_ID_NONE;
  
+diff --git a/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPIUserScripts.idl b/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPIUserScripts.idl
+new file mode 100644
+index 0000000000000000000000000000000000000000..7c4cec960f8fbd8c7042b75473dc820684d4ea95
+--- /dev/null
++++ b/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPIUserScripts.idl
+@@ -0,0 +1,21 @@
++/* Copyright (C) 2026 Summit contributors. SPDX-License-Identifier: BSD-2-Clause */
++
++// chrome.userScripts (Tampermonkey, Violentmonkey):
++// https://developer.chrome.com/docs/extensions/reference/api/userScripts
++[
++    Conditional=WK_WEB_EXTENSIONS,
++    MainWorldOnly,
++    ReturnsPromiseWhenCallbackIsOmitted,
++    UseCPPAPI,
++] interface WebExtensionAPIUserScripts {
++
++    [RaisesStringException, ImplementedAs=registerScripts] void register([JSONValue=Array] any scripts, [Optional, CallbackHandler] function callback);
++    [RaisesStringException, ImplementedAs=updateScripts] void update([JSONValue=Array] any scripts, [Optional, CallbackHandler] function callback);
++    [RaisesStringException, ImplementedAs=unregisterScripts] void unregister([Optional, JSONValue] any filter, [Optional, CallbackHandler] function callback);
++    [RaisesStringException] void getScripts([Optional, JSONValue] any filter, [Optional, CallbackHandler] function callback);
++
++    [RaisesStringException] void configureWorld([JSONValue] any properties, [Optional, CallbackHandler] function callback);
++    void resetWorldConfiguration([Optional] DOMString worldId, [Optional, CallbackHandler] function callback);
++    void getWorldConfigurations([Optional, CallbackHandler] function callback);
++
++};
 diff --git a/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPIWebNavigation.idl b/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPIWebNavigation.idl
 index d33b517303f1d30fb58ef17f3dec5d66de13b725..1c93e2e57d7c47ee3c4c2c71fc7d97d8691b208f 100644
 --- a/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPIWebNavigation.idl

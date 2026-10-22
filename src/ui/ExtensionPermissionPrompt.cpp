@@ -67,6 +67,7 @@ const char* PermissionDescription(const char* permission)
         { "nativeMessaging", "Communicate with installed applications" },
         { "webRequest", "Observe requests to permitted sites" },
         { "scripting", "Run scripts on permitted sites" },
+        { "userScripts", "Run user scripts you add on permitted sites" },
         { "storage", "Store extension data" }
     };
     for (auto& description : descriptions) {
