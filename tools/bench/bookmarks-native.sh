@@ -29,9 +29,9 @@ for SUMMIT_BOOKMARK_SOURCE in "${SUMMIT_BOOKMARK_SOURCES[@]}"; do
     "${SUMMIT_BOOKMARK_COMPILER[@]}" "${SUMMIT_BOOKMARK_CPPFLAGS[@]}" "${SUMMIT_BOOKMARK_FLAGS[@]}" -c "$SUMMIT_BOOKMARK_SOURCE" -o "$SUMMIT_BOOKMARK_OBJECT"
     SUMMIT_BOOKMARK_OBJECTS+=("$SUMMIT_BOOKMARK_OBJECT")
 done
-for SUMMIT_BOOKMARK_TEST in BookmarkTests BookmarkQueryTests BookmarkFolderQueryTests BookmarkTimeQueryTests NativeBookmarkTests; do
+for SUMMIT_BOOKMARK_TEST in BookmarkTests BookmarkQueryTests BookmarkFolderQueryTests BookmarkTimeQueryTests BookmarkModifiedQueryTests NativeBookmarkTests; do
     "${SUMMIT_BOOKMARK_COMPILER[@]}" "${SUMMIT_BOOKMARK_CPPFLAGS[@]}" "${SUMMIT_BOOKMARK_FLAGS[@]}" \
         "tests/$SUMMIT_BOOKMARK_TEST.cpp" "${SUMMIT_BOOKMARK_OBJECTS[@]}" "${SUMMIT_BOOKMARK_LDFLAGS[@]}" \
         -Wl,--gc-sections -lbe -ltracker -ltranslation -lcrypto -lnetwork -o "$SUMMIT_BOOKMARK_OUTPUT/$SUMMIT_BOOKMARK_TEST"
 done
-echo "Built $SUMMIT_BOOKMARK_OUTPUT/BookmarkTests, BookmarkQueryTests, BookmarkFolderQueryTests, BookmarkTimeQueryTests and NativeBookmarkTests"
+echo "Built $SUMMIT_BOOKMARK_OUTPUT/BookmarkTests, BookmarkQueryTests, BookmarkFolderQueryTests, BookmarkTimeQueryTests, BookmarkModifiedQueryTests and NativeBookmarkTests"

@@ -144,7 +144,7 @@ Query Parse(std::string_view url)
         q.error = "This smart folder's result grouping is not yet supported.";
     if (q.error.empty() && q.sort != 0 && q.sort != 1 && q.sort != 2 && q.sort != 3 && q.sort != 4
         && q.sort != 5 && q.sort != 6 && q.sort != 7 && q.sort != 8 && q.sort != 11 && q.sort != 12
-        && q.sort != 17 && q.sort != 18)
+        && q.sort != 13 && q.sort != 14 && q.sort != 17 && q.sort != 18)
         q.error = "This smart folder's sort order requires data Summit does not yet retain.";
     if (q.type == 6 || !q.parents.empty()) q.source = 1;
     return q;
@@ -189,8 +189,11 @@ BookmarkQueryResult QueryBookmarks(std::string_view url, const Bookmarks& bookma
     for (const auto& page : history) visits.emplace(page.url, &page);
     std::map<std::string, const BookmarkNode*> saved;
     std::vector<const BookmarkNode*> ordered;
+    std::map<int64_t, size_t> positions;
     std::function<void(const BookmarkNode&)> collect = [&](const BookmarkNode& folder) {
+        size_t position = 0;
         for (const auto& child : folder.children) {
+            positions.emplace(child.id, position++);
             if (child.folder) collect(child);
             else if (!child.separator) { ordered.push_back(&child); saved.emplace(child.url, &child); }
         }
@@ -299,6 +302,9 @@ BookmarkQueryResult QueryBookmarks(std::string_view url, const Bookmarks& bookma
         }
     } else if (q.source == 1) {
         for (const auto* node : ordered) {
+            // General Places bookmark queries exclude saved queries; simple
+            // folder shortcuts above retain them in their direct hierarchy.
+            if (IsBookmarkQueryURL(node->url)) continue;
             if (!parents.empty() && !allowed.count(node->id)) continue;
             auto found = visits.find(node->url);
             accept(*node, found == visits.end() ? nullptr : found->second);
@@ -324,6 +330,10 @@ BookmarkQueryResult QueryBookmarks(std::string_view url, const Bookmarks& bookma
                 case 5: case 6: return less(a.node.url, b.node.url);
                 case 7: case 8: return less(count(a), count(b));
                 case 11: case 12: return less(a.node.added, b.node.added);
+                case 13: case 14:
+                    if (a.node.modified != b.node.modified) return less(a.node.modified, b.node.modified);
+                    if (Lower(a.node.title) != Lower(b.node.title)) return less(Lower(a.node.title), Lower(b.node.title));
+                    return less(positions[a.node.id], positions[b.node.id]);
                 case 17: case 18: return less(BookmarkTagsText(a.node.metadata.tags), BookmarkTagsText(b.node.metadata.tags));
                 default: return false;
             }

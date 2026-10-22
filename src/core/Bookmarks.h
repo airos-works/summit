@@ -71,6 +71,8 @@ struct BookmarkNode {
     bool separator = false;
     BookmarkMetadata metadata = {};
     BookmarkOrigin origin = {};
+    // Last modification, in microseconds since the epoch (0 when unknown).
+    int64_t modified = 0;
 };
 // The two folders every profile has, which cannot be moved, renamed or deleted.
 constexpr int64_t kBookmarksBarFolder = 1;

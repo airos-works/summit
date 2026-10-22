@@ -5,6 +5,7 @@
 #include <nlohmann/json.hpp>
 #include <algorithm>
 #include <cctype>
+#include <charconv>
 #include <cstdio>
 #include <cstring>
 #include <ctime>
@@ -184,6 +185,20 @@ int64_t AttributeTime(const Tag& tag, const char* name)
     return value;
 }
 
+int64_t PositiveTime(std::string_view text)
+{
+    int64_t time = 0;
+    const auto result = std::from_chars(text.data(), text.data() + text.size(), time);
+    return result.ec == std::errc() && result.ptr == text.data() + text.size() && time > 0 ? time : 0;
+}
+
+int64_t AttributeModified(const Tag& tag)
+{
+    if (auto value = tag.attributes.find("summit_last_modified_us"); value != tag.attributes.end())
+        if (auto time = PositiveTime(value->second)) return time;
+    return HistoryMicroseconds(AttributeTime(tag, "last_modified"));
+}
+
 BookmarkMetadata AttributeMetadata(const Tag& tag)
 {
     BookmarkMetadata metadata;
@@ -319,6 +334,7 @@ bool ParseNetscapeBookmarks(std::string_view html, BookmarkNode& folder, std::st
             node.separator = true;
             node.origin = AttributeOrigin(tag);
             node.added = AttributeTime(tag, "add_date");
+            node.modified = AttributeModified(tag);
             if (auto name = tag.attributes.find("name"); name != tag.attributes.end()) node.title = name->second;
             current().children.push_back(std::move(node));
             previous = nullptr;
@@ -337,6 +353,7 @@ bool ParseNetscapeBookmarks(std::string_view html, BookmarkNode& folder, std::st
         BookmarkNode node;
         node.title = text;
         node.added = AttributeTime(tag, "add_date");
+        node.modified = AttributeModified(tag);
         node.metadata = AttributeMetadata(tag);
         node.origin = AttributeOrigin(tag);
         if (link) {
@@ -388,11 +405,20 @@ std::string NetscapeBookmarksSource(std::string_view html)
 }
 
 namespace {
+int64_t ChromeModified(const nlohmann::json& item)
+{
+    if (auto value = item.find("date_modified"); value != item.end() && value->is_string()) {
+        const auto time = PositiveTime(value->get_ref<const std::string&>());
+        if (time > kWindowsEpochSeconds * 1000000) return time - kWindowsEpochSeconds * 1000000;
+    }
+    return 0;
+}
 void ChromeNode(const nlohmann::json& item, BookmarkNode& into, size_t depth, size_t& nodes)
 {
     if (!item.is_object() || ++nodes > kMaxImportNodes) return;
     const auto type = item.value("type", std::string());
     BookmarkNode node;
+    node.modified = ChromeModified(item);
     if (auto name = item.find("name"); name != item.end() && name->is_string()) node.title = name->get<std::string>();
     if (auto added = item.find("date_added"); added != item.end() && added->is_string()) {
         const auto& text = added->get_ref<const std::string&>();
@@ -448,6 +474,7 @@ bool ParseChromeBookmarks(std::string_view text, BookmarkNode& folder, std::stri
         if (key != "other") {
             BookmarkNode node;
             node.folder = true;
+            node.modified = ChromeModified(*root);
             auto name = root->find("name");
             node.title = name != root->end() && name->is_string() && !name->get_ref<const std::string&>().empty()
                 ? name->get<std::string>() : names.count(key) ? names.at(key) : key;
@@ -619,6 +646,7 @@ struct PlacesRow {
     int64_t id, parent, type, added;
     std::string title, url, guid;
     BookmarkMetadata metadata = {};
+    int64_t modified = 0;
 };
 
 void PlacesFolder(const std::map<int64_t, std::vector<const PlacesRow*>>& children, int64_t id, BookmarkNode& into,
@@ -630,10 +658,12 @@ void PlacesFolder(const std::map<int64_t, std::vector<const PlacesRow*>>& childr
         if (row->type == 1 && !row->url.empty()) {
             into.children.push_back({0, row->title, row->url, false, row->added, {}});
             into.children.back().metadata = row->metadata;
+            into.children.back().modified = row->modified;
             into.children.back().origin = NormalizeBookmarkOrigin({scope, row->guid, row->id});
         }
         else if (row->type == 3) {
             into.children.push_back({0, row->title, "", false, row->added, {}, true});
+            into.children.back().modified = row->modified;
             into.children.back().origin = NormalizeBookmarkOrigin({scope, row->guid, row->id});
         }
         else if (row->type == 2) {
@@ -642,6 +672,7 @@ void PlacesFolder(const std::map<int64_t, std::vector<const PlacesRow*>>& childr
                 into.children.push_back({0, row->title, "", true, row->added, {}});
                 target = &into.children.back();
                 target->metadata = row->metadata;
+                target->modified = row->modified;
                 target->origin = NormalizeBookmarkOrigin({scope, row->guid, row->id});
             }
             if (depth < 64) PlacesFolder(children, row->id, *target, depth + 1, scope);
@@ -759,6 +790,14 @@ bool ReadFirefoxPlaces(const std::filesystem::path& places, const std::string& s
                     if (auto row = byID.find(database.Int(item, 0)); row != byID.end())
                         row->second->metadata.description = database.Text(item, 1);
                 }, error)) return false;
+        bool hasModified = false;
+        if (!database.Query("PRAGMA table_info(moz_bookmarks)", [&](void* row) {
+                if (database.Text(row, 1) == "lastModified") hasModified = true;
+            }, error)) return false;
+        if (hasModified && !database.Query("SELECT id, lastModified FROM moz_bookmarks", [&](void* row) {
+                if (auto found = byID.find(database.Int(row, 0)); found != byID.end())
+                    found->second->modified = std::max(int64_t(0), database.Int(row, 1));
+            }, error)) return false;
         for (auto& row : rows) row.metadata = NormalizeBookmarkMetadata(std::move(row.metadata));
         if (auto root = roots.find("root________"); root != roots.end()) folder->origin = {scope, root->first, root->second};
         // Keep every root as a real folder, including empty roots. Folder
@@ -769,10 +808,15 @@ bool ReadFirefoxPlaces(const std::filesystem::path& places, const std::string& s
             if (root == roots.end()) continue;
             BookmarkNode node{0, title, "", true, 0, {}};
             node.origin = {scope, guid, root->second};
-            if (auto row = byID.find(root->second); row != byID.end()) node.metadata = row->second->metadata;
+            if (auto row = byID.find(root->second); row != byID.end()) {
+                node.metadata = row->second->metadata;
+                node.added = row->second->added;
+                node.modified = row->second->modified;
+            }
             PlacesFolder(children, root->second, node, 1, scope);
             folder->children.push_back(std::move(node));
         }
+        if (auto root = byID.find(folder->origin.id); root != byID.end()) folder->modified = root->second->modified;
     }
     if (history) {
         history->clear();
@@ -929,11 +973,17 @@ std::string WriteDescription(const BookmarkNode& node, const std::string& indent
     return indent + "<DD>" + text + "\n";
 }
 
+std::string ModifiedAttributes(const BookmarkNode& node)
+{
+    return node.modified > 0 ? " LAST_MODIFIED=\"" + std::to_string(node.modified / 1000000)
+        + "\" SUMMIT_LAST_MODIFIED_US=\"" + std::to_string(node.modified) + "\"" : "";
+}
+
 void WriteNodes(const std::vector<BookmarkNode>& nodes, int depth, std::string& html)
 {
     const std::string indent(4 * depth, ' ');
     for (const auto& node : nodes) {
-        const std::string added = node.added ? " ADD_DATE=\"" + std::to_string(node.added) + "\"" : "";
+        const std::string added = (node.added ? " ADD_DATE=\"" + std::to_string(node.added) + "\"" : "") + ModifiedAttributes(node);
         if (node.folder) {
             html += indent + "<DT><H3" + added + WriteMetadata(node) + ">" + EscapeHTML(node.title) + "</H3>\n";
             html += WriteDescription(node, indent);
@@ -961,7 +1011,7 @@ std::string WriteNetscapeBookmarks(const Bookmarks& bookmarks)
         "<TITLE>Bookmarks</TITLE>\n"
         "<H1>Bookmarks</H1>\n"
         "<DL><p>\n";
-    html += "    <DT><H3 PERSONAL_TOOLBAR_FOLDER=\"true\">" + EscapeHTML(bookmarks.Bar().title) + "</H3>\n    <DL><p>\n";
+    html += "    <DT><H3 PERSONAL_TOOLBAR_FOLDER=\"true\"" + ModifiedAttributes(bookmarks.Bar()) + ">" + EscapeHTML(bookmarks.Bar().title) + "</H3>\n    <DL><p>\n";
     WriteNodes(bookmarks.Bar().children, 2, html);
     html += "    </DL><p>\n";
     WriteNodes(bookmarks.Other().children, 1, html);

@@ -75,6 +75,7 @@ static json EncodeBookmarks(const std::vector<BookmarkNode>& nodes)
         else if (node.separator) item["separator"] = true;
         else item["url"] = node.url;
         if (node.added) item["added"] = node.added;
+        if (node.modified > 0) item["modified"] = node.modified;
         if (!node.origin.Empty()) item["origin"] = {{"scope", node.origin.scope}, {"guid", node.origin.guid}, {"id", node.origin.id}};
         if (!node.metadata.description.empty()) item["description"] = node.metadata.description;
         if (!node.metadata.tags.empty()) item["tags"] = node.metadata.tags;
@@ -105,6 +106,9 @@ static void DecodeBookmarks(const json& value, BookmarkNode& folder, size_t dept
             && origin->contains("id") && (*origin)["id"].is_number_integer())
             node.origin = NormalizeBookmarkOrigin({(*origin)["scope"].get<std::string>(), (*origin)["guid"].get<std::string>(), (*origin)["id"].get<int64_t>()});
         if (auto added = item.find("added"); added != item.end() && added->is_number_integer()) node.added = added->get<int64_t>();
+        if (auto modified = item.find("modified"); modified != item.end() && modified->is_number_integer()
+            && (!modified->is_number_unsigned() || modified->get<uint64_t>() <= uint64_t(INT64_MAX)))
+            node.modified = std::max(int64_t(0), modified->get<int64_t>());
         if (auto children = item.find("children"); children != item.end()) {
             if (depth + 1 > kMaxBookmarkDepth || folders >= kMaxBookmarkFolders) continue;
             node.folder = true;
@@ -184,6 +188,10 @@ Profile Profile::Load(const std::filesystem::path& path, std::string& error)
         // ones (which leave it out when they save) only have the flat list.
         if (auto tree = j.find("bookmarkTree"); tree != j.end() && tree->is_object()) {
             BookmarkNode bar, other;
+            for (auto pair : {std::pair{"barModified", &bar}, std::pair{"otherModified", &other}})
+                if (auto value = tree->find(pair.first); value != tree->end() && value->is_number_integer()
+                    && (!value->is_number_unsigned() || value->get<uint64_t>() <= uint64_t(INT64_MAX)))
+                    pair.second->modified = std::max(int64_t(0), value->get<int64_t>());
             size_t bookmarks = 0, folders = 0, separators = 0;
             if (auto items = tree->find("bar"); items != tree->end()) DecodeBookmarks(*items, bar, 0, bookmarks, folders, separators);
             if (auto items = tree->find("other"); items != tree->end()) DecodeBookmarks(*items, other, 0, bookmarks, folders, separators);
@@ -485,7 +493,8 @@ bool Profile::Save(const std::filesystem::path& path, std::string& error, int64_
         data = json{{"version", 1}, {"tabs", Encode(first.tabs)}, {"selected", first.selected},
             {"windows", std::move(sessions)},
             {"bookmarks", Encode(bookmarks.Pages())},
-            {"bookmarkTree", {{"bar", EncodeBookmarks(bookmarks.Bar().children)}, {"other", EncodeBookmarks(bookmarks.Other().children)}}},
+            {"bookmarkTree", {{"bar", EncodeBookmarks(bookmarks.Bar().children)}, {"other", EncodeBookmarks(bookmarks.Other().children)},
+                {"barModified", bookmarks.Bar().modified}, {"otherModified", bookmarks.Other().modified}}},
             {"history", Encode(history)},
             {"homeURL", homeURL}, {"showBookmarksBar", showBookmarksBar}, {"zoomTextOnly", zoomTextOnly}, {"spellingLanguage", spellingLanguage}, {"restoreSession", restoreSession},
             {"savePasswords", savePasswords}, {"passwordNever", passwordNever}, {"spellChecking", spellChecking},

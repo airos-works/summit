@@ -263,7 +263,7 @@ public:
         Check(badMenu.CountItems() == 1 && !badMenu.ItemAt(0)->IsEnabled()
             && std::string(badMenu.ItemAt(0)->Label()).find("target is missing or was not imported") != std::string::npos,
             "unsupported query is retained as a disabled explanation instead of broadening its results");
-        const auto self = queries.Add({"place:queryType=1", "Recursive"}, kBookmarksBarFolder);
+        const auto self = queries.Add({"place:parent=toolbar_____", "Recursive"}, kBookmarksBarFolder);
         auto recursive = BookmarkButtons(queries, visits, *queries.Find(self)).queryContents();
         const auto nested = std::find_if(recursive.children.begin(), recursive.children.end(), [self](const auto& button) { return button.id == self; });
         Check(nested != recursive.children.end() && nested->queryContents().emptyMessage.find("circular") != std::string::npos,
@@ -285,6 +285,28 @@ public:
         auto clearedTimes = BookmarkButtons(queries, visits, *queries.Find(timed)).queryContents();
         Check(clearedTimes.children.empty() && !timeButtons->queryContents().children.empty(),
             "time query changes with retained visits without changing an open snapshot");
+
+        BookmarkNode dated;
+        dated.children = {{0, "Dated A", "https://modified.test/a", false, 0, {}},
+            {0, "Dated B", "https://modified.test/b", false, 0, {}}};
+        dated.children[0].modified = 1000002;
+        dated.children[1].modified = 1000001;
+        Bookmarks modified;
+        modified.Assign(std::move(dated), {});
+        const auto modifiedQuery = modified.Add({"place:queryType=1&sort=14", "Recently modified"}, kBookmarksBarFolder);
+        auto modifiedButtons = std::make_shared<const BookmarkButton>(BookmarkButtons(modified, {}, *modified.Find(modifiedQuery)));
+        BMenu modifiedMenu("Recently modified");
+        AddBookmarkItems(&modifiedMenu, modifiedButtons, *modifiedButtons, BMessenger(this));
+        Check(modifiedMenu.CountItems() == 4 && std::string(modifiedMenu.ItemAt(0)->Label()) == "Dated A",
+            "native modification query uses precise dates and excludes itself");
+        const auto datedB = modified.FindURL("https://modified.test/b")->id;
+        Check(modified.Edit(datedB, "Changed B", "https://modified.test/b"), "editing updates the bookmark modification time");
+        auto changedDates = BookmarkButtons(modified, {}, *modified.Find(modifiedQuery)).queryContents();
+        Check(changedDates.children[0].title == "Changed B" && modifiedButtons->queryContents().children[0].title == "Dated A",
+            "modification query reorder leaves an open native snapshot intact");
+        const auto editTime = modified.Find(datedB)->modified;
+        Check(!modified.Edit(datedB, "Changed B", "https://modified.test/b") && modified.Find(datedB)->modified == editTime,
+            "saving an unchanged bookmark does not rewrite its modification date");
 
         Bookmarks scoped;
         for (const auto* scope : {"first", "second"}) {

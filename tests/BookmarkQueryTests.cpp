@@ -84,7 +84,7 @@ int main()
         const auto result = query(invalid); CHECK(result.items.empty() && !result.error.empty());
     }
     for (const auto* unsupported : {"place:parent=unknown", "place:folder=3", "place:transition=2",
-        "place:OR", "place:annotation=test", "place:includeHidden=1", "place:originalTitle=1", "place:type=3", "place:sort=14", "place:sort=22"}) {
+        "place:OR", "place:annotation=test", "place:includeHidden=1", "place:originalTitle=1", "place:type=3", "place:sort=22"}) {
         const auto result = query(unsupported); CHECK(result.items.empty() && !result.error.empty());
     }
     CHECK(query("place:includeHidden=false&originalTitle=0&asyncEnabled=1&expandQueries=1").items.size() == 4);
@@ -96,8 +96,8 @@ int main()
     const auto unsupported = marks.Add({"place:parent=unknown", "Folder shortcut"}, kOtherBookmarksFolder);
     marks.SetMetadata(smart, {"A live search", {"smart"}, {{"popular", "", ""}}});
     CHECK(marks.Find(smart) && !marks.Find(smart)->folder && marks.Find(smart)->children.empty());
-    CHECK(query("place:queryType=1&excludeQueries=1").items.size() == 5); // Folder shortcuts remain included.
-    CHECK(query("place:queryType=1&excludeItems=1").items.size() == 2);
+    CHECK(query("place:queryType=1&excludeQueries=1").items.size() == 4); // General bookmark queries exclude all saved place: rows.
+    CHECK(query("place:queryType=1&excludeItems=1").items.empty());
     CHECK(marks.ResolveKeyword("popular")->url == "place:sort=8&maxResults=2");
     auto snapshot = query(marks.Find(smart)->url);
     profile.history[1].visits = 20;
@@ -106,7 +106,7 @@ int main()
     const auto d = marks.Add({"https://new.test/", "New"}, kOtherBookmarksFolder, kBookmarkEnd, 50);
     CHECK(URLs(query("place:queryType=1&sort=12&maxResults=1&excludeQueries=1")) == "https://new.test/");
     CHECK(marks.Remove(d));
-    CHECK(query("place:queryType=1&excludeQueries=1").items.size() == 5);
+    CHECK(query("place:queryType=1&excludeQueries=1").items.size() == 4);
     const auto manager = RenderBookmarksPage(marks, {}, "ab12");
     CHECK(manager.find("href=\"place:") == std::string::npos && manager.find("summit-bookmarks:query?token=ab12&amp;id=") != std::string::npos);
     CHECK(manager.find("Smart folder · place:") != std::string::npos);

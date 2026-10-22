@@ -1,9 +1,11 @@
 #include "Bookmarks.h"
+#include "HistoryVisits.h"
 #include "BookmarkQueries.h"
 #include "Address.h"
 #include <algorithm>
 #include <cctype>
 #include <ctime>
+#include <deque>
 #include <functional>
 #include <map>
 #include <set>
@@ -255,6 +257,7 @@ bool Bookmarks::Empty() const { return fBar.children.empty() && fOther.children.
 void Bookmarks::Number(BookmarkNode& node)
 {
     node.id = fNextID++;
+    node.modified = std::max(int64_t(0), node.modified);
     node.origin = NormalizeBookmarkOrigin(std::move(node.origin));
     for (auto& child : node.children) Number(child);
 }
@@ -264,6 +267,8 @@ void Bookmarks::Assign(BookmarkNode bar, BookmarkNode other)
     fNextID = kOtherBookmarksFolder + 1;
     fBar.children = std::move(bar.children);
     fOther.children = std::move(other.children);
+    fBar.modified = std::max(int64_t(0), bar.modified);
+    fOther.modified = std::max(int64_t(0), other.modified);
     for (auto* root : {&fBar, &fOther})
         for (auto& child : root->children) Number(child);
     Reindex();
@@ -344,13 +349,27 @@ static size_t Depth(const BookmarkNode& bar, const BookmarkNode& other, int64_t 
     return 0;
 }
 
+// Content and membership edits also change the containing folders. During an
+// import, newly copied nodes keep the dates supplied by their source.
+static bool Touch(BookmarkNode& node, const std::set<int64_t>& changed, int64_t now,
+    const std::set<int64_t>& preserved = {})
+{
+    bool touched = changed.count(node.id);
+    for (auto& child : node.children) touched |= Touch(child, changed, now, preserved);
+    if (touched && !preserved.count(node.id)) node.modified = now;
+    return touched;
+}
+
 int64_t Bookmarks::Add(const PageRecord& page, int64_t folder, size_t index, int64_t added)
 {
     auto* parent = FindNode(folder);
     if (!parent || !parent->folder || !IsBookmarkableURL(page.url) || fPages.size() >= kMaxBookmarks) return 0;
     BookmarkNode node{fNextID++, page.title.substr(0, 4096), page.url, false, added, {}};
+    node.modified = added ? HistoryMicroseconds(added) : HistoryNowMicroseconds();
     const int64_t id = node.id;
+    const auto modified = node.modified;
     parent->children.insert(parent->children.begin() + std::min(index, parent->children.size()), std::move(node));
+    Touch(fBar, {folder}, modified); Touch(fOther, {folder}, modified);
     Reindex();
     return id;
 }
@@ -361,8 +380,11 @@ int64_t Bookmarks::AddFolder(int64_t parent, const std::string& title, size_t in
     if (!folder || !folder->folder || fFolders >= kMaxBookmarkFolders
         || Depth(fBar, fOther, parent) + 1 > kMaxBookmarkDepth) return 0;
     BookmarkNode node{fNextID++, title.substr(0, 4096), "", true, added, {}};
+    node.modified = added ? HistoryMicroseconds(added) : HistoryNowMicroseconds();
     const int64_t id = node.id;
+    const auto modified = node.modified;
     folder->children.insert(folder->children.begin() + std::min(index, folder->children.size()), std::move(node));
+    Touch(fBar, {parent}, modified); Touch(fOther, {parent}, modified);
     Reindex();
     return id;
 }
@@ -372,8 +394,11 @@ int64_t Bookmarks::AddSeparator(int64_t parent, size_t index, int64_t added)
     auto* folder = FindNode(parent);
     if (!folder || !folder->folder || fSeparators >= kMaxBookmarkSeparators) return 0;
     BookmarkNode node{fNextID++, "", "", false, added, {}, true};
+    node.modified = added ? HistoryMicroseconds(added) : HistoryNowMicroseconds();
     const int64_t id = node.id;
+    const auto modified = node.modified;
     folder->children.insert(folder->children.begin() + std::min(index, folder->children.size()), std::move(node));
+    Touch(fBar, {parent}, modified); Touch(fOther, {parent}, modified);
     Reindex();
     return id;
 }
@@ -391,6 +416,8 @@ bool Bookmarks::Edit(int64_t id, const std::string& title, const std::string& ur
         node->title = newTitle;
         node->url = url;
     }
+    const auto now = HistoryNowMicroseconds();
+    Touch(fBar, {id}, now); Touch(fOther, {id}, now);
     Reindex();
     return true;
 }
@@ -412,11 +439,14 @@ bool Bookmarks::Move(int64_t id, int64_t folder, size_t index)
         if (index == from || index == from + 1) return false;
         if (index > from) --index;
     }
+    const auto now = HistoryNowMicroseconds();
+    Touch(fBar, {parent->id}, now); Touch(fOther, {parent->id}, now);
     BookmarkNode moved = std::move(parent->children[from]);
     parent->children.erase(parent->children.begin() + from);
     // Erasing may have moved the target (a later sibling of the node).
     target = FindNode(folder);
     target->children.insert(target->children.begin() + std::min(index, target->children.size()), std::move(moved));
+    Touch(fBar, {id}, now); Touch(fOther, {id}, now);
     Reindex();
     return true;
 }
@@ -428,6 +458,8 @@ bool Bookmarks::SetMetadata(int64_t id, BookmarkMetadata metadata)
     metadata = NormalizeBookmarkMetadata(std::move(metadata));
     if (node->metadata == metadata) return false;
     node->metadata = std::move(metadata);
+    const auto now = HistoryNowMicroseconds();
+    Touch(fBar, {id}, now); Touch(fOther, {id}, now);
     return true;
 }
 
@@ -436,6 +468,8 @@ bool Bookmarks::Remove(int64_t id)
     size_t index = 0;
     auto* parent = ParentNode(id, &index);
     if (!parent) return false;
+    const auto now = HistoryNowMicroseconds();
+    Touch(fBar, {parent->id}, now); Touch(fOther, {parent->id}, now);
     parent->children.erase(parent->children.begin() + index);
     Reindex();
     return true;
@@ -444,10 +478,12 @@ bool Bookmarks::Remove(int64_t id)
 bool Bookmarks::RemoveURL(const std::string& url)
 {
     bool removed = false;
+    const auto now = HistoryNowMicroseconds();
     while (const auto* found = FindURL(url)) {
         size_t index = 0;
         auto* parent = ParentNode(found->id, &index);
         if (!parent) break;
+        Touch(fBar, {parent->id}, now); Touch(fOther, {parent->id}, now);
         parent->children.erase(parent->children.begin() + index);
         removed = true;
     }
@@ -470,6 +506,7 @@ struct ImportState {
     BookmarkImportResult result;
     int64_t& nextID;
     int64_t now;
+    std::set<int64_t> newNodes, changedParents;
 };
 
 std::string TrimmedURL(std::string url)
@@ -489,6 +526,10 @@ void MergeMetadata(const BookmarkNode& from, BookmarkNode& into, ImportState& st
     metadata = NormalizeBookmarkMetadata(std::move(metadata));
     if (!(into.metadata == metadata)) {
         into.metadata = std::move(metadata);
+        state.updated.insert(into.id);
+        state.changedParents.insert(into.id);
+    } else if (!into.modified && from.modified > 0) {
+        into.modified = from.modified;
         state.updated.insert(into.id);
     }
 }
@@ -514,9 +555,9 @@ void MergeExisting(const BookmarkNode& from, ImportState& state)
 void Merge(const BookmarkNode& from, BookmarkNode& destination, size_t depth, ImportState& state)
 {
     const auto destinationID = destination.id;
-    std::map<std::string, size_t> separators;
+    std::map<std::string, std::deque<int64_t>> separators;
     for (const auto& child : destination.children)
-        if (child.separator && child.origin.Empty()) ++separators[child.title];
+        if (child.separator && child.origin.Empty()) separators[child.title].push_back(child.id);
     for (const auto& child : from.children) {
         // Existing imported nodes may have been moved elsewhere. Resolve IDs
         // afresh: adding a sibling of this destination can move its vector.
@@ -553,6 +594,8 @@ void Merge(const BookmarkNode& from, BookmarkNode& destination, size_t depth, Im
                 into->children.push_back({state.nextID++, title, "", true, child.added ? child.added : state.now, {}});
                 target = &into->children.back();
                 target->origin = origin;
+                target->modified = std::max(int64_t(0), child.modified);
+                state.newNodes.insert(target->id);
                 target->metadata = NormalizeBookmarkMetadata(child.metadata);
                 if (!child.children.empty()) state.created.insert(target->id);
                 if (!key.empty()) state.origins.emplace(key, target->id);
@@ -563,13 +606,18 @@ void Merge(const BookmarkNode& from, BookmarkNode& destination, size_t depth, Im
             continue;
         }
         if (child.separator) {
-            if (identified) continue;
+            if (identified) { MergeMetadata(child, *identified, state); continue; }
             const auto title = child.title.substr(0, 4096);
             auto& matching = separators[title];
-            if (origin.Empty() && matching) { --matching; continue; }
+            if (origin.Empty() && !matching.empty()) {
+                if (auto* existing = state.find(matching.front())) MergeMetadata(child, *existing, state);
+                matching.pop_front(); continue;
+            }
             if (state.separators >= kMaxBookmarkSeparators) { ++state.result.overLimit; continue; }
             into->children.push_back({state.nextID++, title, "", false, child.added ? child.added : state.now, {}, true});
             into->children.back().origin = origin;
+            into->children.back().modified = std::max(int64_t(0), child.modified);
+            state.newNodes.insert(into->children.back().id);
             if (!key.empty()) state.origins.emplace(key, into->children.back().id);
             ++state.separators;
             ++state.result.separatorsAdded;
@@ -591,6 +639,8 @@ void Merge(const BookmarkNode& from, BookmarkNode& destination, size_t depth, Im
             child.added ? child.added : state.now, {}});
         auto& added = into->children.back();
         added.origin = origin;
+        added.modified = std::max(int64_t(0), child.modified);
+        state.newNodes.insert(added.id);
         added.metadata = NormalizeBookmarkMetadata(child.metadata);
         state.known.emplace(url, added.id);
         if (!key.empty()) state.origins.emplace(key, added.id);
@@ -612,10 +662,14 @@ void RemoveEmptyCreated(BookmarkNode& folder, const std::set<int64_t>& created)
 BookmarkImportResult Bookmarks::Import(const BookmarkNode& imported, const std::string& folderTitle, int64_t now)
 {
     const size_t oldFolders = fFolders;
+    const auto modifiedNow = now ? HistoryMicroseconds(now) : HistoryNowMicroseconds();
     ImportState state{{}, {}, [this](int64_t id) { return FindNode(id); },
-        [this](int64_t id) { return Depth(fBar, fOther, id); }, {}, {}, fPages.size(), fFolders, fSeparators, {}, fNextID, now};
+        [this](int64_t id) { return Depth(fBar, fOther, id); }, {}, {}, fPages.size(), fFolders, fSeparators, {}, fNextID, now, {}, {}};
+    std::map<int64_t, std::vector<int64_t>> membership;
     std::function<void(const BookmarkNode&)> collect = [&](const BookmarkNode& folder) {
+        auto& ids = membership[folder.id];
         for (const auto& child : folder.children) {
+            ids.push_back(child.id);
             if (auto key = BookmarkOriginKey(child.origin); !key.empty()) state.origins.emplace(key, child.id);
             if (child.folder) collect(child);
             else if (!child.separator) state.known.emplace(child.url, child.id);
@@ -635,6 +689,7 @@ BookmarkImportResult Bookmarks::Import(const BookmarkNode& imported, const std::
     if (!target) {
         if (fFolders >= kMaxBookmarkFolders) {
             MergeExisting(imported, state);
+            Touch(fBar, state.changedParents, modifiedNow); Touch(fOther, state.changedParents, modifiedNow);
             state.result.updated = state.updated.size();
             if (!state.result.duplicates && !state.result.unsupported && !state.result.overLimit)
                 state.result.overLimit = 1;
@@ -642,10 +697,14 @@ BookmarkImportResult Bookmarks::Import(const BookmarkNode& imported, const std::
         }
         fOther.children.push_back({fNextID++, title, "", true, now, {}});
         fOther.children.back().origin = origin;
+        fOther.children.back().modified = origin.Empty() && imported.modified <= 0
+            ? modifiedNow : std::max(int64_t(0), imported.modified);
+        state.newNodes.insert(fOther.children.back().id);
         state.created.insert(fOther.children.back().id);
         ++state.folders;
         target = &fOther.children.back();
     }
+    if (!state.newNodes.count(target->id)) MergeMetadata(imported, *target, state);
     const int64_t folder = target->id;
     if (auto key = BookmarkOriginKey(origin); !key.empty()) state.origins.emplace(key, folder);
     Merge(imported, *target, state.depth(folder), state);
@@ -653,6 +712,18 @@ BookmarkImportResult Bookmarks::Import(const BookmarkNode& imported, const std::
     // before keep whatever they had, and so do folders empty in the file.
     RemoveEmptyCreated(fBar, state.created);
     RemoveEmptyCreated(fOther, state.created);
+    std::function<void(const BookmarkNode&)> changedMembership = [&](const BookmarkNode& node) {
+        if (!node.folder) return;
+        if (auto old = membership.find(node.id); old != membership.end()) {
+            std::vector<int64_t> ids;
+            for (const auto& child : node.children) ids.push_back(child.id);
+            if (ids != old->second) state.changedParents.insert(node.id);
+        }
+        for (const auto& child : node.children) changedMembership(child);
+    };
+    changedMembership(fBar); changedMembership(fOther);
+    Touch(fBar, state.changedParents, modifiedNow, state.newNodes);
+    Touch(fOther, state.changedParents, modifiedNow, state.newNodes);
     auto result = state.result;
     Reindex();
     result.foldersAdded = fFolders - oldFolders;

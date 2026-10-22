@@ -299,8 +299,9 @@ int main()
         marks.Add({"file:///boot/home/notes.html", "Notes"}, sub);
         const auto html = WriteNetscapeBookmarks(marks);
         CHECK(html.rfind("<!DOCTYPE NETSCAPE-Bookmark-file-1>", 0) == 0 && NetscapeBookmarksSource(html) == "Summit");
-        CHECK(html.find("PERSONAL_TOOLBAR_FOLDER=\"true\">Bookmarks Bar</H3>") != std::string::npos);
-        CHECK(html.find("HREF=\"https://bar.example/?q=&quot;x&quot;&amp;y\" ADD_DATE=\"1700000000\">Bar &lt;one&gt;</A>") != std::string::npos);
+        CHECK(html.find("PERSONAL_TOOLBAR_FOLDER=\"true\"") != std::string::npos && html.find(">Bookmarks Bar</H3>") != std::string::npos);
+        CHECK(html.find("HREF=\"https://bar.example/?q=&quot;x&quot;&amp;y\" ADD_DATE=\"1700000000\"") != std::string::npos
+            && html.find(">Bar &lt;one&gt;</A>") != std::string::npos);
         BookmarkNode root;
         std::string error;
         CHECK(ParseNetscapeBookmarks(html, root, error));
@@ -497,7 +498,7 @@ int main()
         CHECK(loaded.bookmarks.Bar().children[0].added == 1700000000);
         CHECK(Titles(loaded.bookmarks.Other().children[0]) == "Before,--,--,Nested/,After,--");
         const auto html = WriteNetscapeBookmarks(loaded.bookmarks);
-        CHECK(html.find("<HR NAME=\"&lt;named&gt;\" ADD_DATE=\"1700000000\">") != std::string::npos);
+        CHECK(html.find("<HR NAME=\"&lt;named&gt;\" ADD_DATE=\"1700000000\"") != std::string::npos);
         CHECK(ParseNetscapeBookmarks(html, source, error));
         Bookmarks round;
         imported = round.Import(source, "Round trip");

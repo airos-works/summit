@@ -281,7 +281,7 @@ Examples supported by this implementation:
 Other implemented filters include exact URI, domain (optionally exact host),
 inclusive visit-time ranges, visit-count bounds, multiple required or excluded tags, bookmarked-only history,
 and exclusion of queries or ordinary items. Sorts include title, address,
-last visit, visit count, bookmark addition time and tags. A zero result limit
+last visit, visit count, bookmark addition/modification times and tags. A zero result limit
 means no additional query limit. Title sorting with a limit first selects the
 most recently visited matches. Menus evaluate an immutable snapshot on opening;
 profile changes replace the snapshot for subsequent menus. Circular query
@@ -349,9 +349,42 @@ visits and preserves earlier visits on the same day, when available. Saving
 and reopening the profile preserves the remaining timestamps and daily History
 entries.
 
+### Modification-time ordering
+
+`place:queryType=1&sort=14&maxResults=10` lists the ten most recently modified
+bookmarks; `sort=13` puts older changes first. A simple folder shortcut can also
+sort its direct bookmark/folder children by modification time. Equal dates use
+the title and then the item's position in its parent, reversing all three keys
+for descending order. Title comparison currently retains Summit's ASCII case
+folding rather than Firefox's locale-aware collation.
+
+General bookmark searches exclude saved `place:` query rows, including folder
+shortcuts, as Firefox's bookmark SQL does. Direct simple-folder views still
+include their child queries, with circular expansion detection. This keeps a
+recently modified search from returning itself as a result.
+
+Firefox SQLite `lastModified`, HTML `LAST_MODIFIED` and Chrome `date_modified`
+values are retained when present. The in-memory and profile `modified` field
+uses microseconds since the Unix epoch; zero means the source did not supply a
+known date. HTML exports include the standard second-resolution `LAST_MODIFIED`
+plus `SUMMIT_LAST_MODIFIED_US` so a Summit round trip preserves precise ordering.
+Folders and separators retain their dates too; profiles also keep the fixed
+bar/Other roots' dates. Chrome stores dates relative to 1601, which are converted
+on import. Missing source dates remain unknown. An extra destination folder
+created by Summit receives its local creation time.
+
+Creating a local item sets its first modification date. Title/URL edits,
+metadata changes, moves and membership changes update the affected items and
+ancestor folders. Invalid operations and no-op edits leave dates alone. Imported
+new items retain their source dates; identical reimports do not change dates or
+undo local edits/moves. A reimport can fill a previously missing date. When it
+actually enriches an existing item's metadata, that local change updates the
+item and its containing folders. Query results follow these changes without
+reimporting the saved query.
+
 **This does not complete Firefox smart-folder compatibility or #110.** Folder
 references and visit-time ranges are implemented for retained data; visit transitions, OR clauses,
-annotations, modification-time/frecency sorts and other result groupings remain
+annotations, frecency sorts and other result groupings remain
 unsupported. Such queries stay saved and show an explicit explanation, with no
 broader substitute results. Query history is limited to Summit's retained 2,000
 pages; Firefox frecency is not stored. Text matching uses
@@ -365,6 +398,25 @@ are never handed to the web engine. Query pages show bookmarklets as inert
 entries with instructions to run them from the bar or menu.
 
 ## Testing
+
+The modification-time follow-up passes **76 modification-query checks** on
+host and native airOS, plus **384 host core**, **328 bookmark**, **98 general
+query**, **70 folder-query** and **88 time-query** checks. Native UI coverage
+totals **66 checks**. The bookmark and modification suites also pass
+AddressSanitizer and UndefinedBehaviorSanitizer. Source dates, unknown dates,
+microsecond ordering, local edits/moves, metadata enrichment, no-op edits,
+same-named separators and profile/HTML round trips are covered.
+
+The final full browser passes **93 browser checks and 140 native action
+assertions**. An open modification query reorders immediately after native
+editing and moving; metadata edits update the order, while unchanged saves and
+reimports preserve dates. The rendered recently-modified result was visually
+inspected. All **684 frozen hashes** stayed unchanged, all four engine images
+were loaded, and the browser exited normally with no helpers or crash events
+across a complete log interval. The owned RAM filesystem was unmounted after
+scanning all 42 teams. The first browser run stopped on an incorrectly
+copied test helper's execute permission; it is not counted as acceptance.
+Evidence: [`bookmark-modified-queries-native-2026-10-22.json`](bookmark-modified-queries-native-2026-10-22.json).
 
 The visit-time follow-up passes **88 time-query checks** on host and native
 airOS, along with **384 host core**, **328 bookmark**, **99 general query** and
@@ -417,7 +469,7 @@ The live-query follow-up passes **328 bookmark checks** and **100 query checks**
 on the host and native airOS, **384 host core checks**, and **46 native UI
 checks**. `tests/BookmarkQueryTests.cpp` covers parsing, filtering, ordering,
 limits, live changes, import/persistence/export, unsupported clauses and inert
-script results. `tools/bench/bookmarks-native.sh` builds the four native
+script results. `tools/bench/bookmarks-native.sh` builds the core and native UI
 bookmark test programs.
 
 The full browser passes **36 browser/fixture checks and 61 native action
