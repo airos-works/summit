@@ -278,6 +278,7 @@ Examples supported by this implementation:
 | `place:type=4&sort=1` | Retained history grouped by exact host, with pages sorted by title |
 | `place:type=3&sort=4` | Calendar folders containing their matching history pages, newest visits first |
 | `place:type=1&sort=4` | One row per retained visit, newest first, with a visible timestamp |
+| `place:type=8&sort=1` | The imported profile’s bookmark roots, with sorted descendants |
 | `place:type=5&sort=4` | Calendar folders containing host folders, with pages sorted by title |
 | `place:parent=toolbar_____` | The referenced toolbar's direct folder tree |
 | `place:folder=10` | A legacy numeric reference to folder 10 in the imported database |
@@ -505,7 +506,7 @@ The older-period lower bound preserves Firefox 158's generated value of
 first 1,970 seconds of 1970 from that folder. Additional conditions on date
 queries, including legacy OR groups, remain unsupported and show an explanation.
 Firefox's date SQL does not apply those conditions like an ordinary page search.
-Result types for virtual bookmark roots and the library sidebar remain unfinished.
+The library-sidebar result type remains unfinished.
 
 The [date oracle fixture](../tests/fixtures/bookmarks/date-query-firefox158.json)
 captures 68 result trees from the same official Firefox release and source
@@ -562,7 +563,68 @@ visit counts do not manufacture missing timestamps. Visits with identical
 stored timestamps cannot be distinguished because Summit retains timestamps,
 not Firefox visit IDs. These limits also apply to imported history.
 
+### Virtual bookmark roots
+
+`place:type=8` displays the bookmark roots belonging to the query's imported
+Firefox source: **Bookmarks Toolbar**, **Bookmarks Menu** and **Other Bookmarks**.
+The source scope and GUIDs identify them even after moving or renaming a root.
+An identical query imported from a second database resolves only that source's
+roots. Missing or ambiguous identities produce an explanation for the whole
+query; they never fall back to another imported profile. A locally created query
+without source identities addresses Summit's own
+**Bookmarks Bar** and **Other Bookmarks**. Plain Firefox HTML imports retain
+an unresolved source marker and show a missing-target explanation, since their
+original root identities are unavailable.
+
+Firefox's `browser.bookmarks.showMobileBookmarks` preference is not part of a
+bookmark import. Scoped root queries use its default three-root view. Imported
+mobile bookmarks remain in the normal bookmark tree and are accessible through
+`place:parent=mobile______` in their source scope.
+
+Empty roots stay visible. The result limit applies to roots, not their children.
+Title sorts run after selecting that limit; URI sorts select their ordered roots
+before limiting. Other sorts retain the root order and sort descendants instead.
+Descendant folders retain their hierarchy, separators and saved query links;
+visit counts, timestamps and bookmark metadata supply their sort keys. Addition
+times use Summit's existing second precision, and text comparison retains the
+ASCII-collation limitation described above.
+
+`excludeItems=1` hides pages and separators throughout the hierarchy.
+`excludeQueries=1` hides ordinary saved queries while retaining folder shortcuts.
+`expandQueries=0` leaves saved queries as normal native actions, including in
+nested folders; folder shortcuts remain expandable. Native **Open All in Tabs**
+uses the displayed page URLs and order from its immutable menu snapshot. Virtual
+folder IDs are transient, while saved query links keep their real bookmark IDs
+and source scope. No generated tree is persisted or exported.
+
+Additional root conditions are unsupported and show an explanation. Firefox's
+virtual-root SQL returns no rows or errors for the captured condition cases;
+Summit does not substitute a broader view. The
+[root oracle fixture](../tests/fixtures/bookmarks/root-query-firefox158.json)
+records 98 queries with both values of the mobile preference. Comparisons cover
+the default root view, recursive order/filtering, limits, query links and error
+cases; the non-default preference is recorded as unavailable import context.
+
 ## Testing
+
+The virtual-root follow-up passes **825 root-query checks** on the host and
+native airOS. The oracle records **98 Firefox cases** across both mobile-root
+preference values; comparisons cover the **49 default cases**, including 36
+result trees and 13 unsupported-condition cases. All previous core/query suites
+pass, as do all ten bookmark/query suites under AddressSanitizer and
+UndefinedBehaviorSanitizer. Native UI coverage is **106 checks**, including
+transient Open All, circular queries and expansion controls through shortcuts.
+
+The full browser passes **227 checks and 238 native action assertions**.
+It covers two source scopes, unresolved HTML roots, missing identities, hierarchy,
+ordering/limits, exclusions, saved links, moving a root and its pages,
+export/reimport and history clearing. The root page was visually inspected.
+All **713 frozen hashes** remain unchanged, all four engine images loaded,
+and normal shutdown leaves no helpers or crash events across a complete log
+interval. Earlier harness failures, scope-expectation corrections and incomplete
+crash-log coverage are recorded separately in the evidence. Owned RAMFS cleanup
+follows an all-team scan.
+Evidence: [`bookmark-root-queries-native-2026-10-22.json`](bookmark-root-queries-native-2026-10-22.json).
 
 The individual-visit follow-up passes **907 visit-query checks** on the host
 and native airOS, using **66 Firefox oracle captures**. All previous core and

@@ -184,13 +184,15 @@ Query Parse(std::string_view url)
         } else q.error = "This smart folder uses a query clause Summit does not yet support: " + std::string(name) + ".";
         if (!q.error.empty()) break;
     }
-    if (q.error.empty() && q.type != 0 && q.type != 1 && q.type != 3 && q.type != 4 && q.type != 5 && q.type != 6)
+    if (q.error.empty() && q.type != 0 && q.type != 1 && q.type != 3 && q.type != 4 && q.type != 5 && q.type != 6 && q.type != 8)
         q.error = "This smart folder's result grouping is not yet supported.";
     if (q.error.empty() && q.sort != 0 && q.sort != 1 && q.sort != 2 && q.sort != 3 && q.sort != 4
         && q.sort != 5 && q.sort != 6 && q.sort != 7 && q.sort != 8 && q.sort != 11 && q.sort != 12
         && q.sort != 13 && q.sort != 14 && q.sort != 17 && q.sort != 18)
         q.error = "This smart folder's sort order requires data Summit does not yet retain.";
-    if (q.type == 6 || std::any_of(q.clauses.begin(), q.clauses.end(), [](const auto& c) { return !c.parents.empty(); })) q.source = 1;
+    if (q.type == 6 || q.type == 8 || std::any_of(q.clauses.begin(), q.clauses.end(), [](const auto& c) { return !c.parents.empty(); })) q.source = 1;
+    if (q.error.empty() && q.type == 8 && std::any_of(q.clauses.begin(), q.clauses.end(), [](const auto& c) { return c.HasConditions(true); }))
+        q.error = "Virtual bookmark roots with additional conditions are not supported.";
     if (q.type == 1) {
         // Places selects visits even with queryType=1. Parent queries can take
         // a separate folder-shortcut path; do not silently broaden those.
@@ -223,6 +225,106 @@ struct Entry {
     const PageRecord* visit = nullptr;
     int64_t visitTime = 0;
 };
+
+const BookmarkNode* ResolveFolder(const Bookmarks& bookmarks, const BookmarkOrigin& origin,
+    bool legacy, const std::string& reference, std::string& error)
+{
+    std::string guid = reference;
+    int64_t numeric = 0;
+    if (legacy) {
+        if (reference == "BOOKMARKS_MENU") guid = "menu________";
+        else if (reference == "TOOLBAR") guid = "toolbar_____";
+        else if (reference == "UNFILED_BOOKMARKS") guid = "unfiled_____";
+        else if (reference == "PLACES_ROOT") guid = "root________";
+        else if (reference == "MOBILE_BOOKMARKS") guid = "mobile______";
+        else {
+            auto parsed = std::from_chars(reference.data(), reference.data() + reference.size(), numeric);
+            if (parsed.ec != std::errc() || parsed.ptr != reference.data() + reference.size() || numeric <= 0) {
+                error = "Invalid folder reference: " + reference + "."; return nullptr;
+            }
+            guid.clear();
+        }
+    }
+    const BookmarkNode* found = nullptr;
+    bool ambiguous = false;
+    std::function<void(const BookmarkNode&)> locate = [&](const BookmarkNode& node) {
+        if (!node.folder) return;
+        const bool matches = !origin.scope.empty() ? node.origin.scope == origin.scope
+            && (numeric ? node.origin.id == numeric : node.origin.guid == guid)
+            : (guid == "toolbar_____" && node.id == kBookmarksBarFolder)
+                || (guid == "unfiled_____" && node.id == kOtherBookmarksFolder);
+        if (matches) { if (found) ambiguous = true; else found = &node; }
+        for (const auto& child : node.children) locate(child);
+    };
+    locate(bookmarks.Bar()); locate(bookmarks.Other());
+    if (ambiguous) error = "This smart folder's target is ambiguous: " + reference + ".";
+    else if (!found) error = "This smart folder's target is missing or was not imported: " + reference + ".";
+    return error.empty() ? found : nullptr;
+}
+
+BookmarkNode RootContents(const BookmarkNode& folder, const Query& query,
+    const std::map<std::string, const PageRecord*>& visits)
+{
+    auto result = folder;
+    result.children.clear();
+    std::map<int64_t, size_t> positions;
+    for (size_t i = 0; i < folder.children.size(); ++i) {
+        const auto& node = folder.children[i];
+        positions.emplace(node.id, i);
+        const bool savedQuery = IsBookmarkQueryURL(node.url);
+        if (query.excludeItems && !node.folder && !savedQuery) continue;
+        if (query.excludeQueries && savedQuery) {
+            const auto nested = Parse(node.url);
+            if (!nested.error.empty() || !SimpleFolder(nested)) continue;
+        }
+        result.children.push_back(node.folder ? RootContents(node, query, visits) : node);
+    }
+    auto visit = [&](const BookmarkNode& node) -> const PageRecord* {
+        if (node.folder || node.separator || IsBookmarkQueryURL(node.url)) return nullptr;
+        const auto found = visits.find(node.url);
+        return found == visits.end() ? nullptr : found->second;
+    };
+    auto date = [&](const BookmarkNode& node) {
+        const auto* page = visit(node);
+        return !page ? int64_t(0) : page->visitTimes.empty() ? HistoryMicroseconds(page->visited) : page->visitTimes.front();
+    };
+    auto count = [&](const BookmarkNode& node) { const auto* page = visit(node); return page ? std::max(1, page->visits) : 0; };
+    const auto mode = query.sort;
+    if (mode) std::stable_sort(result.children.begin(), result.children.end(), [&](const auto& a, const auto& b) {
+        auto compare = [](const auto& x, const auto& y) { return x < y ? -1 : y < x ? 1 : 0; };
+        auto title = [&] { return compare(Lower(a.title), Lower(b.title)); };
+        auto titleRank = [&] {
+            int order = title();
+            if (!order && !a.folder && !b.folder && !a.separator && !b.separator
+                && !IsBookmarkQueryURL(a.url) && !IsBookmarkQueryURL(b.url)) order = compare(a.url, b.url);
+            if (!order) order = compare(date(a), date(b));
+            return order;
+        };
+        int order = 0;
+        switch (mode) {
+            case 1: case 2: order = titleRank(); break;
+            case 3: case 4: order = compare(date(a), date(b)); if (!order) order = title(); break;
+            case 5: case 6: {
+                const bool aContainer = a.folder || IsBookmarkQueryURL(a.url), bContainer = b.folder || IsBookmarkQueryURL(b.url);
+                if (aContainer != bContainer) order = aContainer ? -1 : 1;
+                else if (!aContainer && !a.separator && !b.separator) order = compare(a.url, b.url);
+                else order = title();
+                if (!order) order = compare(date(a), date(b));
+                break;
+            }
+            case 7: case 8: order = compare(count(a), count(b)); if (!order) order = compare(date(a), date(b)); break;
+            case 11: case 12: order = compare(a.added, b.added); if (!order) order = title(); break;
+            case 13: case 14: order = compare(a.modified, b.modified); if (!order) order = title(); break;
+            case 17: case 18:
+                order = compare(BookmarkTagsText(a.metadata.tags), BookmarkTagsText(b.metadata.tags));
+                if (!order) order = titleRank();
+                break;
+        }
+        if (!order) order = compare(positions[a.id], positions[b.id]);
+        return mode % 2 ? order < 0 : order > 0;
+    });
+    return result;
+}
 
 struct DateRange {
     std::string title;
@@ -295,12 +397,19 @@ std::vector<BookmarkNode> SiteGroups(const std::vector<const Entry*>& entries, b
 }
 }
 
+bool IsBookmarkFolderQueryURL(std::string_view url)
+{
+    const auto query = Parse(url);
+    return query.error.empty() && SimpleFolder(query);
+}
+
 BookmarkQueryResult QueryBookmarks(std::string_view url, const Bookmarks& bookmarks, const std::vector<PageRecord>& history,
     const BookmarkOrigin& origin, int64_t now)
 {
     const auto q = Parse(url);
     BookmarkQueryResult result;
     result.error = q.error;
+    result.expandQueries = q.expandQueries;
     if (!result.error.empty()) return result;
     auto resolveTime = [&](int64_t offset, int64_t reference, int64_t& time) {
         int64_t base = 0;
@@ -322,6 +431,38 @@ BookmarkQueryResult QueryBookmarks(std::string_view url, const Bookmarks& bookma
     };
     std::map<std::string, const PageRecord*> visits;
     for (const auto& page : history) visits.emplace(page.url, &page);
+    if (q.type == 8) {
+        // SQLite imports retain each Firefox root's identity and source scope.
+        // A query without imported identities addresses Summit's own two roots.
+        // Firefox's showMobileBookmarks UI preference is not part of the import;
+        // use its default three-root view for a scoped Firefox query.
+        for (const auto& [guid, title] : {std::pair{"toolbar_____", "Bookmarks Toolbar"},
+                {"menu________", "Bookmarks Menu"}, {"unfiled_____", "Other Bookmarks"}}) {
+            if (origin.scope.empty() && std::string_view(guid) == "menu________") continue;
+            const auto* folder = ResolveFolder(bookmarks, origin, false, guid, result.error);
+            if (!folder) { result.items.clear(); return result; }
+            auto root = RootContents(*folder, q, visits);
+            if (!origin.scope.empty()) root.title = title;
+            result.items.push_back(std::move(root));
+        }
+        auto titleOrder = [&](bool descending) {
+            std::stable_sort(result.items.begin(), result.items.end(), [&](const auto& a, const auto& b) {
+                return descending ? Lower(b.title) < Lower(a.title) : Lower(a.title) < Lower(b.title);
+            });
+        };
+        if (q.sort == 5 || q.sort == 6) titleOrder(q.sort == 6);
+        if (q.limit && result.items.size() > uint64_t(q.limit)) result.items.resize(q.limit);
+        if (q.sort == 1 || q.sort == 2) titleOrder(q.sort == 2);
+        // These are sorted/filtered presentations, so Open All must use their
+        // displayed URLs rather than reread the underlying folder's raw order.
+        std::function<void(BookmarkNode&)> transient = [&](auto& node) {
+            if (!node.folder) return;
+            node.id = 0;
+            for (auto& child : node.children) transient(child);
+        };
+        for (auto& node : result.items) transient(node);
+        return result;
+    }
     std::map<std::string, const BookmarkNode*> saved;
     std::vector<const BookmarkNode*> ordered;
     std::map<int64_t, size_t> positions;
@@ -356,36 +497,9 @@ BookmarkQueryResult QueryBookmarks(std::string_view url, const Bookmarks& bookma
             return {{}, "This smart folder's time range cannot be represented."};
         auto& parents = filter.parents;
         for (const auto& [legacy, reference] : clause.parents) {
-            std::string guid = reference;
-            int64_t numeric = 0;
-            if (legacy) {
-                if (reference == "BOOKMARKS_MENU") guid = "menu________";
-                else if (reference == "TOOLBAR") guid = "toolbar_____";
-                else if (reference == "UNFILED_BOOKMARKS") guid = "unfiled_____";
-                else if (reference == "PLACES_ROOT") guid = "root________";
-                else if (reference == "MOBILE_BOOKMARKS") guid = "mobile______";
-                else {
-                    auto parsed = std::from_chars(reference.data(), reference.data() + reference.size(), numeric);
-                    if (parsed.ec != std::errc() || parsed.ptr != reference.data() + reference.size() || numeric <= 0)
-                        return {{}, "Invalid folder reference: " + reference + "."};
-                    guid.clear();
-                }
-            }
-            const BookmarkNode* found = nullptr;
-            bool ambiguous = false;
-            std::function<void(const BookmarkNode&)> locate = [&](const BookmarkNode& node) {
-                if (!node.folder) return;
-                bool matches = false;
-                if (!origin.scope.empty()) matches = node.origin.scope == origin.scope
-                    && (numeric ? node.origin.id == numeric : node.origin.guid == guid);
-                else matches = (guid == "toolbar_____" && node.id == kBookmarksBarFolder)
-                    || (guid == "unfiled_____" && node.id == kOtherBookmarksFolder);
-                if (matches) { if (found) ambiguous = true; else found = &node; }
-                for (const auto& child : node.children) locate(child);
-            };
-            locate(bookmarks.Bar()); locate(bookmarks.Other());
-            if (ambiguous) return {{}, "This smart folder's target is ambiguous: " + reference + "."};
-            if (!found) return {{}, "This smart folder's target is missing or was not imported: " + reference + "."};
+            std::string error;
+            const auto* found = ResolveFolder(bookmarks, origin, legacy, reference, error);
+            if (!found) return {{}, error};
             parents.push_back(found);
         }
         if (!parents.empty() && !simpleFolder) {

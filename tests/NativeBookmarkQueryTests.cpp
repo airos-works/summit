@@ -2,6 +2,7 @@
 #define main SummitCloseHarnessEntry
 #include "ModernCloseTests.cpp"
 #undef main
+#include <sstream>
 
 int main(int argc, char** argv)
 {
@@ -93,6 +94,14 @@ int main(int argc, char** argv)
             Send(window, summit::kOpenBookmarkFolder, id);
             Require(Wait([&] { return Count(State(window)) == before + std::atoi(argv[5]); }),
                 "Open All evaluates current query results");
+        } else if (mode == "transient-open-all") {
+            const auto before = Count(State(window));
+            BMessage open(summit::kOpenBookmarkFolder); open.AddInt64("id", 0);
+            std::istringstream input(argv[5]); std::string url; int count = 0;
+            while (std::getline(input, url)) if (!url.empty()) { open.AddString("url", url.c_str()); ++count; }
+            Require(count>0 && count<=50, "transient folder action has bounded displayed URLs");
+            Require(window.SendMessage(&open)==B_OK, "dispatch native transient folder Open All");
+            Require(Wait([&] { return Count(State(window))==before+count; }), "transient Open All opens each displayed page");
         } else if (mode == "clear-history") {
             BMessage clear(summit::kClearHistoryReply); clear.AddInt32("which", 1);
             Require(window.SendMessage(&clear) == B_OK, "deliver confirmed native clear-history action for owned profile");

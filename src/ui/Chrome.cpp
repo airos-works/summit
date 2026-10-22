@@ -1095,13 +1095,13 @@ BookmarkButton BookmarkButtons(const Bookmarks& bookmarks, const std::vector<Pag
         Bookmarks bookmarks;
         std::vector<PageRecord> history;
         BookmarkButton Button(const BookmarkNode& node, std::vector<std::string> ancestors,
-            const std::shared_ptr<const Snapshot>& owner) const
+            const std::shared_ptr<const Snapshot>& owner, bool expandQueries = true) const
         {
             BookmarkButton button{node.id, node.url, node.title, nullptr, node.folder, {}};
             button.separator = node.separator;
-            if (IsBookmarkQueryURL(node.url)) {
+            if (IsBookmarkQueryURL(node.url) && (expandQueries || IsBookmarkFolderQueryURL(node.url))) {
                 button.folder = true;
-                button.queryContents = [owner, node, ancestors = std::move(ancestors)] {
+                button.queryContents = [owner, node, ancestors = std::move(ancestors), expandQueries] {
                     BookmarkButton expanded{node.id, node.url, node.title, nullptr, true, {}};
                     const auto identity = node.url + "\n" + node.origin.scope;
                     if (ancestors.size() >= 8 || std::find(ancestors.begin(), ancestors.end(), identity) != ancestors.end()) {
@@ -1112,14 +1112,14 @@ BookmarkButton BookmarkButtons(const Bookmarks& bookmarks, const std::vector<Pag
                     auto result = QueryBookmarks(node.url, owner->bookmarks, owner->history, node.origin);
                     expanded.emptyMessage = result.error;
                     for (size_t index = 0; index < result.items.size(); ++index) {
-                        auto child = owner->Button(result.items[index], path, owner);
+                        auto child = owner->Button(result.items[index], path, owner, expandQueries && result.expandQueries);
                         if (result.visitTimes.size() == result.items.size())
                             child.title = (child.title.empty() ? child.url : child.title) + " — " + FormatBookmarkVisitTime(result.visitTimes[index]);
                         expanded.children.push_back(std::move(child));
                     }
                     return expanded;
                 };
-            } else for (const auto& child : node.children) button.children.push_back(Button(child, ancestors, owner));
+            } else for (const auto& child : node.children) button.children.push_back(Button(child, ancestors, owner, expandQueries));
             return button;
         }
     };

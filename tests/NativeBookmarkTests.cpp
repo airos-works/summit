@@ -413,6 +413,64 @@ public:
         Check(individual.Count() == 1 && individual.Find(individualQuery)->children.empty()
             && individual.Find(individualQuery)->title == "Visits", "visit timestamps never alter saved bookmark data");
 
+        Bookmarks roots;
+        BookmarkNode rootsImport{0, "Roots", "", true, 0, {}};
+        rootsImport.origin = {"native-roots", "root________", 1};
+        for (const auto* guid : {"toolbar_____", "menu________", "unfiled_____", "mobile______"}) {
+            BookmarkNode folder{0, guid, "", true, 0, {}};
+            folder.origin = {"native-roots", guid, int64_t(rootsImport.children.size()+2)};
+            rootsImport.children.push_back(std::move(folder));
+        }
+        auto& rootToolbar = rootsImport.children[0];
+        rootToolbar.children = {{0, "Z page", "https://roots.test/z", false, 0, {}},
+            {0, "A page", "https://roots.test/a", false, 0, {}},
+            {0, "History query", "place:sort=4", false, 0, {}},
+            {0, "Folder shortcut", "place:parent=unfiled_____", false, 0, {}}};
+        for (size_t i=0; i<rootToolbar.children.size(); ++i)
+            rootToolbar.children[i].origin = {"native-roots", "", int64_t(i+10)};
+        BookmarkNode rootsQuery{0, "Root query", "place:type=8&sort=2", false, 0, {}};
+        rootsQuery.origin = {"native-roots", "root_query__", 90};
+        rootsImport.children[1].children.push_back(rootsQuery);
+        Check(roots.Import(rootsImport, "Native roots").Changed(), "native root fixture imports source identities");
+        const auto rootQueryID = roots.FindURL(rootsQuery.url)->id;
+        auto rootButtons = std::make_shared<const BookmarkButton>(BookmarkButtons(roots, {}, *roots.Find(rootQueryID)).queryContents());
+        Check(rootButtons->children.size()==3 && rootButtons->children[0].title=="Other Bookmarks"
+            && rootButtons->children[1].title=="Bookmarks Toolbar", "virtual roots use localized root titles and descending order");
+        BMenu rootMenu("Roots"); AddBookmarkItems(&rootMenu, rootButtons, *rootButtons, BMessenger(this));
+        Check(rootMenu.CountItems()==3 && rootMenu.ItemAt(1)->Submenu(), "native root result exposes real submenus");
+        BMenu rootPages("Root pages"); AddBookmarkItems(&rootPages, rootButtons, rootButtons->children[1], BMessenger(this));
+        const auto* rootsAll = rootPages.ItemAt(rootPages.CountItems()-1)->Message();
+        const char* firstRootURL=nullptr;
+        Check(rootsAll && rootsAll->GetInt64("id",-1)==0 && rootsAll->FindString("url",0,&firstRootURL)==B_OK
+            && std::string(firstRootURL)=="https://roots.test/z", "root Open All embeds displayed URLs instead of a persistent folder ID");
+        BMenu emptyRoot("Other"); AddBookmarkItems(&emptyRoot, rootButtons, rootButtons->children[0], BMessenger(this));
+        Check(emptyRoot.CountItems()==1 && !emptyRoot.ItemAt(0)->IsEnabled(), "empty virtual roots remain visible as empty submenus");
+        Check(roots.Edit(rootQueryID,"Root query","place:type=8&expandQueries=0"), "native root query can disable nested query expansion");
+        auto unexpandedRoots = BookmarkButtons(roots, {}, *roots.Find(rootQueryID)).queryContents();
+        const auto& historyLink = unexpandedRoots.children[0].children[2];
+        const auto& folderLink = unexpandedRoots.children[0].children[3];
+        Check(!historyLink.folder && !historyLink.queryContents && historyLink.url=="place:sort=4",
+            "disabled saved-query expansion leaves a normal native action");
+        Check(folderLink.folder && folderLink.queryContents && folderLink.queryContents().children.empty(),
+            "folder shortcuts still expand with expandQueries disabled");
+        Check(roots.Edit(rootQueryID,"Root query","place:type=8&excludeItems=1&excludeQueries=1"), "native root exclusions can be edited");
+        auto excludedRoots = BookmarkButtons(roots, {}, *roots.Find(rootQueryID)).queryContents();
+        Check(excludedRoots.children[0].children.size()==1 && excludedRoots.children[0].children[0].title=="Folder shortcut",
+            "root exclusions hide pages and searches but preserve folder links");
+        Check(rootButtons->children[1].children.size()==4 && roots.Find(rootQueryID)->children.empty(),
+            "root snapshots remain immutable and never replace the stored query");
+        Check(rootButtons->children[2].children[0].queryContents().emptyMessage.find("circular")!=std::string::npos,
+            "a root view containing its own saved query stops circular native expansion");
+        const auto unfiledRootID = roots.Other().children[0].children[2].id;
+        Check(roots.Add({"place:sort=8", "Nested history"},unfiledRootID)>0,
+            "nested saved query can be added to the shortcut target");
+        Check(roots.Edit(rootQueryID,"Root query","place:type=8&expandQueries=0"),
+            "root query can restore disabled expansion after exclusion checks");
+        const auto nestedExpansion = BookmarkButtons(roots, {}, *roots.Find(rootQueryID)).queryContents()
+            .children[0].children[3].queryContents();
+        Check(nestedExpansion.children.size()==1 && !nestedExpansion.children[0].folder && !nestedExpansion.children[0].queryContents,
+            "disabled query expansion propagates through an expandable folder shortcut");
+
         Bookmarks scoped;
         for (const auto* scope : {"first", "second"}) {
             BookmarkNode imported{0, "", "", true, 0, {}};
