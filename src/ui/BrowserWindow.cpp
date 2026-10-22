@@ -1807,7 +1807,8 @@ void BrowserWindow::FinishCloseTab(int64 id)
 }
 void BrowserWindow::Navigate(const std::string& text)
 {
-    auto address = ResolveAddress(text);
+    const auto keyword = fShared->Read([&](const Profile& profile) { return profile.bookmarks.ResolveKeyword(text); });
+    auto address = keyword ? Address{keyword->url, keyword->error, false} : ResolveAddress(text);
     if (!address.error.empty()) { ShowError(address.error); return; }
     if (IsExternalScheme(URLScheme(address.url))) {
         if (auto* tab = ActiveTab()) fProtocolHandlers->Open(address.url, tab->id, tab->url);
@@ -1825,7 +1826,17 @@ void BrowserWindow::Navigate(const std::string& text)
                 NavigationTraceBegin(0, "navigation");
             NavigationTrace("LoadURL %s", LoadableURL(address.url).c_str());
         }
-        tab->view->LoadURL(LoadableURL(address.url).c_str());
+        if (keyword && keyword->post) {
+#if SUMMIT_MODERN_WEBKIT
+            if (tab->view->LoadForm(address.url.c_str(), keyword->postData.c_str()) != B_OK) {
+                ShowError("The bookmark's search request could not be opened.");
+                return;
+            }
+#else
+            ShowError("POST bookmark searches require Summit's modern engine.");
+            return;
+#endif
+        } else tab->view->LoadURL(LoadableURL(address.url).c_str());
         NavigationTrace("LoadURL returned");
         tab->pageRevision = fPagesRevision;
     }
@@ -1877,7 +1888,8 @@ void BrowserWindow::AddressModified()
     fAddressTyped = text;
     fAddressShown = text;
     fAutofill = { };
-    if (forward) {
+    const auto keyword = fShared->Read([&](const Profile& profile) { return profile.bookmarks.ResolveKeyword(text); });
+    if (forward && !keyword) {
         const int64 now = std::time(nullptr);
         fAutofill = fShared->Read([&](const Profile& profile) {
             return AutofillAddress(profile.history, profile.bookmarks.Pages(), text, now);
@@ -1904,13 +1916,24 @@ void BrowserWindow::ShowSuggestions(const std::string& typed)
     std::vector<SuggestionRow> rows;
     // The first row is what Enter does with the text as it stands.
     const auto address = ResolveAddress(typed);
+    const auto keyword = fShared->Read([&](const Profile& profile) { return profile.bookmarks.ResolveKeyword(typed); });
+    if (keyword && !keyword->error.empty()) { HideSuggestions(); return; }
     SuggestionRow search;
     search.kind = SuggestionRow::Kind::Search;
     search.title = Trim(typed);
     search.detail = std::string("Search with ") + CurrentSearchEngine().name;
     search.url = SearchURL(typed);
     search.fill = typed;
-    if (!fAutofill.Empty()) {
+    if (keyword) {
+        SuggestionRow row;
+        row.kind = SuggestionRow::Kind::Bookmark;
+        row.title = keyword->title.empty() ? ShortAddress(keyword->url) : keyword->title;
+        row.detail = "Bookmark shortcut · " + ShortAddress(keyword->url);
+        // Keep the shortcut text so selection/click also submits its POST data.
+        row.url = typed;
+        row.fill = typed;
+        rows.push_back(std::move(row));
+    } else if (!fAutofill.Empty()) {
         SuggestionRow visit;
         visit.kind = SuggestionRow::Kind::Visit;
         visit.title = ShortAddress(fAutofill.url);
@@ -3179,6 +3202,8 @@ void BrowserWindow::BookmarkEdited(const BMessage& message)
     const char* tag = nullptr;
     for (int32 i = 0; message.FindString("tag", i, &tag) == B_OK; ++i) metadata.tags.emplace_back(tag);
     const bool hasMetadata = message.HasString("description");
+    const bool hasKeywords = message.HasString("keywords");
+    if (hasKeywords) metadata.keywords = EditBookmarkKeywords({}, message.GetString("keywords", ""));
     const char* status = nullptr;
     fShared->Change([&](Profile& profile) -> uint32 {
         auto& bookmarks = profile.bookmarks;
@@ -3203,7 +3228,10 @@ void BrowserWindow::BookmarkEdited(const BMessage& message)
             }
             target = existing->id;
         }
-        if (!bookmarks.Find(target)) return 0;
+        const auto* node = bookmarks.Find(target);
+        if (!node) return 0;
+        metadata.keywords = hasKeywords ? EditBookmarkKeywords(node->metadata.keywords, message.GetString("keywords", ""))
+            : node->metadata.keywords;
         bool changed = bookmarks.Edit(target, title, url);
         if (hasMetadata) changed = bookmarks.SetMetadata(target, metadata) || changed;
         if (const auto* parent = bookmarks.Parent(target); parent && parent->id != folder)
@@ -3281,10 +3309,11 @@ bool BrowserWindow::BookmarkPageRequest(Tab& tab, const std::string& source, con
                 return 0;
             }
             changed = bookmarks.Edit(link->id, title.empty() ? (node->folder ? "Untitled Folder" : address) : title, address);
-            if (link->hasDescription || link->hasTags) {
+            if (link->hasDescription || link->hasTags || link->hasKeywords) {
                 auto metadata = node->metadata;
                 if (link->hasDescription) metadata.description = link->description;
                 if (link->hasTags) metadata.tags = ParseBookmarkTags(link->tags);
+                if (link->hasKeywords) metadata.keywords = EditBookmarkKeywords(metadata.keywords, link->keywords);
                 changed = bookmarks.SetMetadata(link->id, std::move(metadata)) || changed;
             }
             if (link->folder && bookmarks.Parent(link->id)->id != link->folder)

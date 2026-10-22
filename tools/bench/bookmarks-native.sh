@@ -17,7 +17,7 @@ SUMMIT_BOOKMARK_FLAGS=(-std=c++23 -O1 -g -ffunction-sections -fdata-sections -fv
     -Wno-multichar -DSUMMIT_MODERN_WEBKIT=1 -DBUILDING_HAIKU__=1 -Isrc -Ivendor
     "-I${WEBKIT_INCLUDE_DIR:-/boot/system/develop/headers}")
 SUMMIT_BOOKMARK_SOURCES=()
-for SUMMIT_BOOKMARK_UNIT in Bookmarks BookmarkIO Profile Address Favicon Zoom Protocol UserAgent Spelling TranslationModels PageLanguage InternalPages; do
+for SUMMIT_BOOKMARK_UNIT in Bookmarks BookmarkIO BookmarkKeywords Profile Address Favicon Zoom Protocol UserAgent Spelling TranslationModels PageLanguage InternalPages; do
     SUMMIT_BOOKMARK_SOURCES+=("src/core/$SUMMIT_BOOKMARK_UNIT.cpp")
 done
 for SUMMIT_BOOKMARK_UNIT in Chrome BookmarkImport BookmarkEditor SharedProfile; do

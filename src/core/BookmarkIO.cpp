@@ -175,6 +175,30 @@ int64_t AttributeTime(const Tag& tag, const char* name)
 BookmarkMetadata AttributeMetadata(const Tag& tag)
 {
     BookmarkMetadata metadata;
+    if (tag.name == "a") {
+        if (auto keyword = tag.attributes.find("shortcuturl"); keyword != tag.attributes.end()) {
+            BookmarkKeyword item{keyword->second, {}, {}};
+            if (auto post = tag.attributes.find("post_data"); post != tag.attributes.end()) item.postData = post->second;
+            if (auto charset = tag.attributes.find("last_charset"); charset != tag.attributes.end()) item.charset = charset->second;
+            metadata.keywords.push_back(std::move(item));
+        }
+        // Firefox's standard attributes hold one shortcut. Preserve all aliases
+        // and their distinct request templates in a Summit export/reimport.
+        if (auto keywords = tag.attributes.find("summit_keywords"); keywords != tag.attributes.end()) {
+            auto values = nlohmann::json::parse(keywords->second, nullptr, false);
+            if (values.is_array()) {
+                metadata.keywords.clear();
+                for (const auto& value : values) {
+                    if (!value.is_object() || !value.contains("name") || !value["name"].is_string()) continue;
+                    BookmarkKeyword item{value["name"].get<std::string>(), {}, {}};
+                    if (value.contains("postData") && value["postData"].is_string()) item.postData = value["postData"].get<std::string>();
+                    if (value.contains("charset") && value["charset"].is_string()) item.charset = value["charset"].get<std::string>();
+                    metadata.keywords.push_back(std::move(item));
+                    if (metadata.keywords.size() == kMaxBookmarkKeywords) break;
+                }
+            }
+        }
+    }
     // TAGS is a plain comma-separated list in Firefox's format. Our extra
     // attribute preserves tag names containing commas during a round trip.
     if (auto tags = tag.attributes.find("summit_tags"); tags != tag.attributes.end()) {
@@ -632,9 +656,30 @@ bool ReadFirefoxPlaces(const std::filesystem::path& places, const std::string& s
             }
         }
         std::map<int64_t, PlacesRow*> byID;
+        std::map<std::string, std::vector<BookmarkKeyword>> keywords;
+        size_t keywordTables = 0;
+        if (!database.Query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'moz_keywords'",
+                [&](void*) { ++keywordTables; }, error)) return false;
+        if (keywordTables && !database.Query("SELECT k.keyword, p.url, IFNULL(k.post_data, '') FROM moz_keywords k "
+                "JOIN moz_places p ON p.id = k.place_id ORDER BY k.id LIMIT 100000", [&](void* item) {
+                    auto& aliases = keywords[database.Text(item, 1)];
+                    if (aliases.size() < kMaxBookmarkKeywords)
+                        aliases.push_back({database.Text(item, 0), database.Text(item, 2), {}});
+                }, error)) return false;
+        size_t charsetTables = 0;
+        if (!database.Query("SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('moz_annos', 'moz_anno_attributes')",
+                [&](void*) { ++charsetTables; }, error)) return false;
+        if (charsetTables == 2 && !database.Query("SELECT p.url, IFNULL(a.content, '') FROM moz_annos a "
+                "JOIN moz_anno_attributes n ON n.id = a.anno_attribute_id JOIN moz_places p ON p.id = a.place_id "
+                "WHERE n.name = 'URIProperties/characterSet' ORDER BY a.id LIMIT 100000", [&](void* item) {
+                    if (auto aliases = keywords.find(database.Text(item, 0)); aliases != keywords.end())
+                        for (auto& keyword : aliases->second) keyword.charset = database.Text(item, 1);
+                }, error)) return false;
         for (auto& row : rows) {
             byID[row.id] = &row;
             if (auto found = tags.find(row.url); found != tags.end()) row.metadata.tags = found->second;
+            if (row.type == 1)
+                if (auto found = keywords.find(row.url); found != keywords.end()) row.metadata.keywords = found->second;
         }
         // Descriptions were item annotations in older Firefox profiles. Newer
         // profiles may omit these tables altogether; neither is required.
@@ -763,10 +808,21 @@ bool ReadImport(const std::filesystem::path& path, const BookmarkImportOptions& 
 namespace {
 std::string WriteMetadata(const BookmarkNode& node)
 {
-    if (node.metadata.tags.empty()) return {};
+    std::string attributes;
+    if (!node.folder && !node.metadata.keywords.empty()) {
+        const auto& first = node.metadata.keywords.front();
+        attributes = " SHORTCUTURL=\"" + EscapeHTML(first.name) + "\"";
+        if (!first.postData.empty()) attributes += " POST_DATA=\"" + EscapeHTML(first.postData) + "\"";
+        if (!first.charset.empty()) attributes += " LAST_CHARSET=\"" + EscapeHTML(first.charset) + "\"";
+        auto aliases = nlohmann::json::array();
+        for (const auto& keyword : node.metadata.keywords)
+            aliases.push_back({{"name", keyword.name}, {"postData", keyword.postData}, {"charset", keyword.charset}});
+        attributes += " SUMMIT_KEYWORDS=\"" + EscapeHTML(aliases.dump()) + "\"";
+    }
+    if (node.metadata.tags.empty()) return attributes;
     std::string tags;
     for (const auto& tag : node.metadata.tags) tags += (tags.empty() ? "" : ",") + tag;
-    return " TAGS=\"" + EscapeHTML(tags) + "\" SUMMIT_TAGS=\""
+    return attributes + " TAGS=\"" + EscapeHTML(tags) + "\" SUMMIT_TAGS=\""
         + EscapeHTML(nlohmann::json(node.metadata.tags).dump()) + "\"";
 }
 

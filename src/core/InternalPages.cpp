@@ -259,7 +259,7 @@ for (const item of document.querySelectorAll('.item.folder')) showFolder(item, o
 
 function visit(item, query) {
   const row = ownRow(item);
-  const own = !query || [row.dataset.title, row.dataset.url, row.dataset.tags, row.dataset.description]
+  const own = !query || [row.dataset.title, row.dataset.url, row.dataset.tags, row.dataset.description, row.dataset.keywords]
     .filter(Boolean).join(' ').toLowerCase().includes(query);
   if (!item.classList.contains('folder')) { item.hidden = !own; return own; }
   let inside = false;
@@ -356,6 +356,7 @@ function edit(item) {
   if (!folder) fields.push(field('Address', 'url', row.dataset.url, true));
   fields.push(folderChooser(item, item.parentElement.dataset.folder));
   fields.push(field('Tags', 'tags', row.dataset.tags || ''));
+  if (!folder) fields.push(field('Keywords', 'keywords', row.dataset.keywords || ''));
   fields.push(field('Description', 'description', row.dataset.description || '', false, true));
   const form = editor(fields, 'Save', values => go('save', Object.assign({ id: item.dataset.id }, values)),
     () => { row.hidden = false; });
@@ -474,7 +475,7 @@ const char* kBookmarkTools = "<span class=\"tools\"><button class=\"tool\" type=
 std::string MetadataAttributes(const BookmarkNode& node)
 {
     return " data-tags=\"" + EscapeHTML(BookmarkTagsText(node.metadata.tags)) + "\" data-description=\""
-        + EscapeHTML(node.metadata.description) + "\"";
+        + EscapeHTML(node.metadata.description) + "\" data-keywords=\"" + EscapeHTML(BookmarkKeywordsText(node.metadata.keywords)) + "\"";
 }
 
 std::string MetadataSummary(const BookmarkNode& node)
@@ -482,6 +483,7 @@ std::string MetadataSummary(const BookmarkNode& node)
     if (node.metadata.Empty()) return {};
     std::string text = BookmarkTagsText(node.metadata.tags);
     if (!node.metadata.description.empty()) text += (text.empty() ? "" : "\n") + node.metadata.description;
+    if (!node.metadata.keywords.empty()) text += (text.empty() ? "" : "\n") + std::string("Keywords: ") + BookmarkKeywordsText(node.metadata.keywords);
     return "<span class=\"metadata\">" + EscapeHTML(text) + "</span>";
 }
 
@@ -576,6 +578,7 @@ std::optional<BookmarkPageLink> ParseBookmarkPageLink(std::string_view url)
         else if (name == "url") { link.url = PercentDecode(value); link.hasURL = true; }
         else if (name == "description") { link.description = PercentDecode(value); link.hasDescription = true; }
         else if (name == "tags") { link.tags = PercentDecode(value); link.hasTags = true; }
+        else if (name == "keywords") { link.keywords = PercentDecode(value); link.hasKeywords = true; }
     }
     if (link.token.empty() || link.token != BookmarkPageToken(link.token)) return std::nullopt;
     return link;

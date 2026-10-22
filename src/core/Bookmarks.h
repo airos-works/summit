@@ -2,21 +2,43 @@
 #include "PageRecord.h"
 #include <cstdint>
 #include <limits>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
 
 namespace summit {
+struct BookmarkKeyword {
+    std::string name;
+    // Firefox's stored POST_DATA template (possibly escaped), empty for GET.
+    std::string postData;
+    std::string charset;
+    bool operator==(const BookmarkKeyword& other) const
+        { return name == other.name && postData == other.postData && charset == other.charset; }
+};
+struct BookmarkNavigation {
+    std::string url, postData, title, error;
+    bool post = false;
+};
 struct BookmarkMetadata {
     std::string description;
     std::vector<std::string> tags;
-    bool Empty() const { return description.empty() && tags.empty(); }
-    bool operator==(const BookmarkMetadata& other) const { return description == other.description && tags == other.tags; }
+    std::vector<BookmarkKeyword> keywords = {};
+    bool Empty() const { return description.empty() && tags.empty() && keywords.empty(); }
+    bool operator==(const BookmarkMetadata& other) const
+        { return description == other.description && tags == other.tags && keywords == other.keywords; }
 };
 constexpr size_t kMaxBookmarkDescription = 16384;
 constexpr size_t kMaxBookmarkTags = 100;
 constexpr size_t kMaxBookmarkTagLength = 256;
+constexpr size_t kMaxBookmarkKeywords = 16;
+constexpr size_t kMaxBookmarkKeywordLength = 256;
+constexpr size_t kMaxBookmarkPostData = 65536;
 BookmarkMetadata NormalizeBookmarkMetadata(BookmarkMetadata metadata);
+std::string BookmarkKeywordsText(const std::vector<BookmarkKeyword>& keywords);
+// Existing names keep their request data; new/renamed aliases use the first
+// shortcut's request, so renaming a POST shortcut does not turn it into GET.
+std::vector<BookmarkKeyword> EditBookmarkKeywords(const std::vector<BookmarkKeyword>& existing, std::string_view text);
 // Comma-separated tags for the editors. Quotes and doubled quotes preserve
 // commas and quotes inside a tag; these are not the Netscape TAGS syntax.
 std::vector<std::string> ParseBookmarkTags(std::string_view text);
@@ -97,6 +119,9 @@ public:
     const BookmarkNode* Parent(int64_t id, size_t* index = nullptr) const;
     // The first bookmark of that address.
     const BookmarkNode* FindURL(const std::string& url) const;
+    // A known shortcut, including any binding error, or nullopt for normal
+    // address/search handling. Explicit addresses are never interpreted here.
+    std::optional<BookmarkNavigation> ResolveKeyword(std::string_view input) const;
     bool Contains(const std::string& url) const { return FindURL(url) != nullptr; }
     // Whether a bookmark of that address is on the bar itself (not in a folder there).
     bool OnBar(const std::string& url) const;

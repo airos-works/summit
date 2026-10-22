@@ -36,6 +36,7 @@ private:
     BTextControl* fName = nullptr;
     BTextControl* fAddress = nullptr;
     BTextControl* fTags = nullptr;
+    BTextControl* fKeywords = nullptr;
     BTextView* fDescription = nullptr;
     BMenuField* fFolder = nullptr;
 };

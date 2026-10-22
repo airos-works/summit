@@ -83,12 +83,25 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
     def do_GET(self):
+        self.respond()
+
+    def do_POST(self):
+        self.respond(self.rfile.read(int(self.headers.get('Content-Length', '0'))).decode('utf-8'))
+
+    def respond(self, form_data=None):
         global active
         with lock:
             if self.path == '/rotate' and self.server is plain:
                 active = 1
             events.append({'tls': self.server is secure, 'path': self.path,
-                           'host': self.headers.get('Host'), 'certificate': active})
+                           'host': self.headers.get('Host'), 'certificate': active,
+                           'method': self.command, 'body': form_data, 'content_type': self.headers.get('Content-Type')})
+        if self.path in ('/post-redirect307', '/post-redirect303'):
+            self.send_response(307 if self.path.endswith('307') else 303)
+            self.send_header('Location', self.path.replace('redirect', 'redirected'))
+            self.send_header('Content-Length', '0')
+            self.end_headers()
+            return
         body = ('<!doctype html><title>Certificate fixture ' + self.path + '</title>'
                 '<p>Native certificate decision fixture.</p>').encode()
         self.send_response(200)
@@ -199,6 +212,17 @@ try:
     if not a.legacy_library:
         check(sum(event['tls'] and event['path'] == '/after-reload' for event in events) == 1,
               'stopped and reloaded failures stay blocked until the explicit current approval')
+        submitted = [event for event in events if event['path'] == '/post-approval']
+        check(len(submitted) == 1 and submitted[0]['method'] == 'POST'
+              and submitted[0]['body'] == 'q=caf%C3%A9%20%26%20tea&fixed=1'
+              and submitted[0]['content_type'] == 'application/x-www-form-urlencoded',
+              'certificate approval retries the exact POST body and content type once')
+        check(any(e['path'] == '/post-empty' and e['method'] == 'POST' and e['body'] == '' for e in events),
+              'empty request body does not change POST into GET')
+        check(any(e['path'] == '/post-redirected307' and e['method'] == 'POST'
+                  and e['body'] == 'keep=exact%2Bbytes' for e in events), '307 redirect preserves POST bytes')
+        check(any(e['path'] == '/post-redirected303' and e['method'] == 'GET'
+                  and e['body'] is None for e in events), '303 redirect changes POST to GET')
     accepted = (('/ui-continue', '/ui-reuse', '/held-continue') if a.legacy_library
                 else ('/reuse', '/host-scope', '/rotated', '/after-closed'))
     check(all(any(e['tls'] and e['path'] == path for e in events)

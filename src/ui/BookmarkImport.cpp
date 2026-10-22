@@ -183,7 +183,7 @@ ImportOutcome ImportBookmarksFrom(SharedProfile& shared, const std::filesystem::
         text = "Nothing new to import: every bookmark from " + imported.source + " is bookmarked already.";
     else if (!result.updated && (found || imported.history.empty())) text = "There were no new bookmarks to import from " + imported.source + ".";
     if (result.updated)
-        text += (text.empty() ? "" : " ") + std::string("Updated tags and descriptions on ")
+        text += (text.empty() ? "" : " ") + std::string("Updated bookmark metadata on ")
             + Count(result.updated, "existing item", "existing items") + ".";
     if (result.Changed() && result.duplicates)
         text += " " + std::to_string(result.duplicates) + (result.duplicates == 1 ? " was already bookmarked." : " were already bookmarked.");

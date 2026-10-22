@@ -403,12 +403,31 @@ int main()
             && profile.history[1].visits == 3);
         CHECK(profile.ImportHistory(imported.history) == 0);
 
+        CHECK(MakeDatabase(sqlite, places, R"(
+            CREATE TABLE moz_keywords (id INTEGER PRIMARY KEY, keyword TEXT, place_id INTEGER, post_data TEXT);
+            INSERT INTO moz_keywords VALUES (1, ' MOZ ', 1, NULL),
+                (2, 'addons', 2, 'q%3D%25s%26from%3Dbookmark'), (3, 'extensions', 2, 'search=%s');
+        )"));
+        CHECK(ReadImport(places, options, imported, error));
+        toolbar = Child(imported.bookmarks, "Bookmarks Toolbar");
+        CHECK(toolbar->children[0].metadata.keywords.size() == 1 && toolbar->children[0].metadata.keywords[0].name == "moz");
+        CHECK(toolbar->children[1].metadata.keywords.size() == 2);
+        CHECK(toolbar->children[1].metadata.keywords[0].postData == "q%3D%25s%26from%3Dbookmark");
+        CHECK(toolbar->children[1].metadata.keywords[1].postData == "search=%s");
+        Bookmarks shortcuts;
+        shortcuts.Import(imported.bookmarks, "Firefox");
+        CHECK(shortcuts.ResolveKeyword("MOZ")->url == "https://www.mozilla.org/");
+        CHECK(shortcuts.ResolveKeyword("addons café & tea")->postData == "q=caf%C3%A9%20%26%20tea&from=bookmark");
+        CHECK(shortcuts.ResolveKeyword("extensions theme")->postData == "search=theme");
+
         // Old Firefox descriptions are optional item annotations. Tags are
         // URL associations under the tags root, not ordinary imported folders.
         CHECK(MakeDatabase(sqlite, places, R"(
             CREATE TABLE moz_anno_attributes (id INTEGER PRIMARY KEY, name TEXT);
             CREATE TABLE moz_items_annos (id INTEGER PRIMARY KEY, item_id INTEGER, anno_attribute_id INTEGER, content TEXT);
-            INSERT INTO moz_anno_attributes VALUES (1, 'bookmarkProperties/description'), (2, 'unrelated');
+            INSERT INTO moz_anno_attributes VALUES (1, 'bookmarkProperties/description'), (2, 'unrelated'), (3, 'URIProperties/characterSet');
+            CREATE TABLE moz_annos (id INTEGER PRIMARY KEY, place_id INTEGER, anno_attribute_id INTEGER, content TEXT);
+            INSERT INTO moz_annos VALUES (1, 2, 3, 'ISO-8859-1');
             INSERT INTO moz_items_annos VALUES (1, 11, 1, 'Mozilla notes'), (2, 12, 1, 'Folder notes'), (3, 13, 2, 'Ignored');
             INSERT INTO moz_bookmarks VALUES (18, 2, NULL, 4, 1, 'tag, comma', 0, 'i'),
                 (19, 1, 1, 18, 0, NULL, 0, 'j'), (20, 1, 5, 18, 1, NULL, 0, 'k');
@@ -416,6 +435,7 @@ int main()
         CHECK(ReadImport(places, options, imported, error));
         toolbar = Child(imported.bookmarks, "Bookmarks Toolbar");
         CHECK(toolbar->children[0].metadata.description == "Mozilla notes");
+        CHECK(toolbar->children[1].metadata.keywords[0].charset == "ISO-8859-1");
         CHECK((toolbar->children[0].metadata.tags == std::vector<std::string>{"x", "tag, comma"}));
         CHECK(Child(*toolbar, "Nested")->metadata.description == "Folder notes");
         CHECK(Child(*toolbar, "Nested")->children[0].metadata.description.empty());
@@ -547,6 +567,114 @@ int main()
         CHECK(updated.folder == 0 && updated.foldersAdded == 0 && marks.FolderCount() == kMaxBookmarkFolders);
         CHECK(marks.Find(id)->metadata == metadata.children.back().metadata && marks.Find(id)->title == "Keep my title");
         CHECK(!marks.Import(metadata, "No room for this folder").Changed());
+    }
+
+    // Keyword aliases retain their request templates through imports and edits.
+    {
+        BookmarkNode source;
+        std::string error;
+        CHECK(ParseNetscapeBookmarks(R"(<DL>
+            <DT><A HREF="https://search.example/?q=%s&amp;raw=%S" SHORTCUTURL=" Find " TAGS="search">Find</A>
+            <DT><A HREF="https://post.example/search" SHORTCUTURL="post" POST_DATA="q%3D%25s%26fixed%3Da%2520b">POST</A>
+            <DT><A HREF="https://post.example/search" SHORTCUTURL="raw" POST_DATA="q=%S">Alias</A>
+            <DT><A HREF="https://legacy.example/?q=%s" SHORTCUTURL="legacy" LAST_CHARSET="ISO-8859-1">Legacy</A>
+            </DL>)", source, error));
+        CHECK(source.children[0].metadata.keywords[0].name == "find");
+        Profile profile;
+        auto imported = profile.bookmarks.Import(source, "Imported");
+        CHECK(imported.added == 3 && imported.duplicates == 1);
+        const auto* post = profile.bookmarks.FindURL("https://post.example/search");
+        CHECK(post->metadata.keywords.size() == 2);
+        const auto aliases = post->metadata.keywords;
+        CHECK(BookmarkKeywordsText(aliases) == "post, raw");
+        const auto edited = EditBookmarkKeywords(aliases, "POST, added");
+        CHECK(edited.size() == 2 && edited[0] == aliases[0] && edited[1].name == "added" && edited[1].postData == aliases[0].postData);
+        CHECK(EditBookmarkKeywords(aliases, "renamed")[0].postData == aliases[0].postData);
+        const auto resolved = profile.bookmarks.ResolveKeyword("FiNd café & tea");
+        CHECK(resolved && resolved->error.empty() && !resolved->post);
+        CHECK(resolved->url == "https://search.example/?q=caf%C3%A9%20%26%20tea&raw=café & tea");
+        CHECK(profile.bookmarks.ResolveKeyword("post café & tea")->postData == "q=caf%C3%A9%20%26%20tea&fixed=a%20b");
+        CHECK(profile.bookmarks.ResolveKeyword("raw a+b&c")->postData == "q=a+b&c");
+        CHECK(profile.bookmarks.ResolveKeyword("legacy café")->url == "https://legacy.example/?q=caf%E9");
+        CHECK(!profile.bookmarks.ResolveKeyword("missing text"));
+        CHECK(!profile.bookmarks.ResolveKeyword("https://post.example/search"));
+        CHECK(!profile.bookmarks.ResolveKeyword("post\ntext"));
+        CHECK(profile.bookmarks.ResolveKeyword("post")->postData == "q=&fixed=a%20b");
+        CHECK(profile.bookmarks.ResolveKeyword("find %S")->url == "https://search.example/?q=%25S&raw=%S");
+        CHECK(profile.bookmarks.ResolveKeyword("post a!'()*")->postData == "q=a!'()*&fixed=a%20b");
+        const auto path = directory / "keywords.json";
+        CHECK(profile.Save(path, error));
+        auto loaded = Profile::Load(path, error);
+        CHECK(error.empty() && loaded.bookmarks.FindURL(post->url)->metadata.keywords == aliases);
+        CHECK(loaded.bookmarks.ResolveKeyword("post two words")->postData == "q=two%20words&fixed=a%20b");
+        const auto html = WriteNetscapeBookmarks(profile.bookmarks);
+        CHECK(html.find("SHORTCUTURL=\"post\" POST_DATA=\"q%3D%25s%26fixed%3Da%2520b\"") != std::string::npos);
+        CHECK(html.find("LAST_CHARSET=\"ISO-8859-1\"") != std::string::npos && html.find("SUMMIT_KEYWORDS=") != std::string::npos);
+        BookmarkNode parsed;
+        CHECK(ParseNetscapeBookmarks(html, parsed, error));
+        Bookmarks round;
+        round.Import(parsed, "Round trip");
+        CHECK(round.FindURL(post->url)->metadata.keywords == aliases);
+        CHECK(round.ResolveKeyword("raw exact")->postData == "q=exact");
+        CHECK(round.ResolveKeyword("legacy café")->url == "https://legacy.example/?q=caf%E9");
+        CHECK(!profile.bookmarks.Import(source, "Imported").Changed());
+        source.children[1].metadata.keywords.push_back({"new", "different=%s", {}});
+        const auto enriched = profile.bookmarks.Import(source, "Imported");
+        CHECK(enriched.Changed() && enriched.updated == 1 && !enriched.added);
+        CHECK(profile.bookmarks.ResolveKeyword("new text")->postData == "different=text");
+        const auto page = RenderBookmarksPage(profile.bookmarks, nullptr, "ab");
+        CHECK(page.find("data-keywords=\"post, raw, new\"") != std::string::npos);
+        auto link = ParseBookmarkPageLink("summit-bookmarks:save?token=ab&id=3&keywords=post%2Cnew");
+        CHECK(link && link->hasKeywords && link->keywords == "post,new");
+    }
+
+    // Fixed shortcuts, conflicts, legacy escapes, charset selection and bounds.
+    {
+        Bookmarks marks;
+        const auto id = marks.Add({"https://fixed.example/", "Fixed"}, kOtherBookmarksFolder);
+        auto set = [&](std::string url, std::string post = "", std::string charset = "") {
+            marks.Edit(id, "Shortcut", url);
+            BookmarkMetadata metadata;
+            metadata.keywords = {{"key", post, charset}};
+            marks.SetMetadata(id, metadata);
+        };
+        set("https://fixed.example/");
+        CHECK(marks.ResolveKeyword("KEY")->url == "https://fixed.example/");
+        CHECK(!marks.ResolveKeyword("key ignored"));
+        set("https://fixed.example/?q=%s&mozcharset=ISO-8859-1");
+        CHECK(marks.ResolveKeyword("key café")->url == "https://fixed.example/?q=caf%E9");
+        set("https://fixed.example/?q=%s", "", "unknown-charset");
+        CHECK(marks.ResolveKeyword("key café")->url == "https://fixed.example/?q=caf%C3%A9");
+        set("https://fixed.example/", "query=%s&accent=%E9&face=%uD83D%uDE00&bad=%QZ");
+        CHECK(marks.ResolveKeyword("key test")->postData == "query=test&accent=é&face=😀&bad=%QZ");
+        set("https://fixed.example/", "constant=literal%20data");
+        CHECK(marks.ResolveKeyword("key")->post && marks.ResolveKeyword("key")->postData == "constant=literal%20data");
+        CHECK(!marks.ResolveKeyword("key ignored"));
+        set("https://fixed.example/", "q=%s&nul=%00");
+        CHECK(!marks.ResolveKeyword("key test")->error.empty());
+        set("file:///boot/home/test", "q=%s");
+        CHECK(!marks.ResolveKeyword("key test")->error.empty());
+        set("https://fixed.example/?q=%s");
+        const auto other = marks.Add({"https://other.example/", "Other"}, kBookmarksBarFolder);
+        marks.SetMetadata(other, marks.Find(id)->metadata);
+        CHECK(!marks.ResolveKeyword("key text")->error.empty());
+        marks.SetMetadata(other, {});
+        CHECK(marks.ResolveKeyword("key text")->error.empty());
+        std::string huge = "https://fixed.example/?q=";
+        for (int i = 0; i < 10000; ++i) huge += "%s";
+        set(huge);
+        CHECK(!marks.ResolveKeyword("key " + std::string(1000, 'x'))->error.empty());
+        set("https://fixed.example/", std::string(10000, 'x') + "%s");
+        CHECK(marks.ResolveKeyword("key " + std::string(60000, 'x'))->postData.size() == 70000);
+        BookmarkMetadata metadata;
+        metadata.keywords = {{" UPPER ", "x=%s", {}}, {"upper", "do-not-replace=%s", {}}, {"bad name", {}, {}},
+            {std::string(kMaxBookmarkKeywordLength + 1, 'x'), {}, {}}, {"huge", std::string(kMaxBookmarkPostData + 1, 'x'), {}}};
+        auto normalized = NormalizeBookmarkMetadata(metadata);
+        CHECK(normalized.keywords.size() == 1 && normalized.keywords[0].name == "upper" && normalized.keywords[0].postData == "x=%s");
+        metadata.keywords.clear();
+        for (size_t i = 0; i <= kMaxBookmarkKeywords; ++i) metadata.keywords.push_back({"key" + std::to_string(i), {}, {}});
+        CHECK(NormalizeBookmarkMetadata(metadata).keywords.size() == kMaxBookmarkKeywords);
+        CHECK(EditBookmarkKeywords({}, std::string(kMaxBookmarkKeywordLength + 1, 'x')).empty());
     }
 
     // Metadata survives parsing, merge, editing, profile save and HTML export.

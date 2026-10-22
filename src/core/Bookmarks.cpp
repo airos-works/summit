@@ -33,10 +33,28 @@ BookmarkMetadata NormalizeBookmarkMetadata(BookmarkMetadata metadata)
         if (tags.size() == kMaxBookmarkTags) break;
     }
     metadata.tags = std::move(tags);
+    std::vector<BookmarkKeyword> keywords;
+    seen.clear();
+    for (auto keyword : metadata.keywords) {
+        while (!keyword.name.empty() && std::isspace(static_cast<unsigned char>(keyword.name.back()))) keyword.name.pop_back();
+        const auto start = keyword.name.find_first_not_of(" \t\r\n\f\v");
+        if (start == std::string::npos) continue;
+        keyword.name.erase(0, start);
+        // Do not truncate names or request templates into a different shortcut.
+        if (keyword.name.size() > kMaxBookmarkKeywordLength || keyword.postData.size() > kMaxBookmarkPostData
+            || keyword.charset.size() > 128 || keyword.postData.find('\0') != std::string::npos
+            || std::any_of(keyword.name.begin(), keyword.name.end(), [](unsigned char c) { return c <= 32 || c == 127; })
+            || std::any_of(keyword.charset.begin(), keyword.charset.end(), [](unsigned char c) { return c <= 32 || c == 127; }))
+            continue;
+        for (char& c : keyword.name) if (c >= 'A' && c <= 'Z') c += 'a' - 'A';
+        if (seen.insert(keyword.name).second) keywords.push_back(std::move(keyword));
+        if (keywords.size() == kMaxBookmarkKeywords) break;
+    }
+    metadata.keywords = std::move(keywords);
     return metadata;
 }
 
-std::vector<std::string> ParseBookmarkTags(std::string_view text)
+static std::vector<std::string> CommaList(std::string_view text)
 {
     BookmarkMetadata metadata;
     std::string tag;
@@ -52,7 +70,12 @@ std::vector<std::string> ParseBookmarkTags(std::string_view text)
         } else tag += c;
     }
     metadata.tags.push_back(std::move(tag));
-    return NormalizeBookmarkMetadata(std::move(metadata)).tags;
+    return metadata.tags;
+}
+
+std::vector<std::string> ParseBookmarkTags(std::string_view text)
+{
+    return NormalizeBookmarkMetadata({{}, CommaList(text)}).tags;
 }
 
 std::string BookmarkTagsText(const std::vector<std::string>& tags)
@@ -66,6 +89,29 @@ std::string BookmarkTagsText(const std::vector<std::string>& tags)
         text += '"';
     }
     return text;
+}
+
+std::string BookmarkKeywordsText(const std::vector<BookmarkKeyword>& keywords)
+{
+    std::vector<std::string> names;
+    for (const auto& keyword : keywords) names.push_back(keyword.name);
+    return BookmarkTagsText(names);
+}
+
+std::vector<BookmarkKeyword> EditBookmarkKeywords(const std::vector<BookmarkKeyword>& existing, std::string_view text)
+{
+    BookmarkMetadata metadata;
+    for (const auto& name : CommaList(text)) metadata.keywords.push_back({name, {}, {}});
+    metadata = NormalizeBookmarkMetadata(std::move(metadata));
+    for (auto& keyword : metadata.keywords) {
+        const auto found = std::find_if(existing.begin(), existing.end(), [&](const auto& saved) { return saved.name == keyword.name; });
+        if (found != existing.end()) keyword = *found;
+        else if (!existing.empty()) {
+            keyword.postData = existing.front().postData;
+            keyword.charset = existing.front().charset;
+        }
+    }
+    return metadata.keywords;
 }
 
 static bool StartsWithLower(const std::string& text, const char* prefix)
@@ -404,6 +450,7 @@ void MergeMetadata(const BookmarkNode& from, BookmarkNode& into, ImportState& st
     auto metadata = into.metadata;
     if (metadata.description.empty()) metadata.description = from.metadata.description;
     metadata.tags.insert(metadata.tags.end(), from.metadata.tags.begin(), from.metadata.tags.end());
+    metadata.keywords.insert(metadata.keywords.end(), from.metadata.keywords.begin(), from.metadata.keywords.end());
     metadata = NormalizeBookmarkMetadata(std::move(metadata));
     if (!(into.metadata == metadata)) {
         into.metadata = std::move(metadata);

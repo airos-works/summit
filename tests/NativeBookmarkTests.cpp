@@ -124,7 +124,7 @@ public:
         { std::ofstream file(metadataFile); file << "<DL><DT><A HREF='https://metadata.example/' TAGS='first,second'>Other title</A>"
             "<DD>Imported description</DL>"; }
         result = ImportBookmarksFrom(*fShared, metadataFile, false);
-        Check(result.ok && result.bookmarks == 0 && result.message.find("Updated tags and descriptions") != std::string::npos,
+        Check(result.ok && result.bookmarks == 0 && result.message.find("Updated bookmark metadata") != std::string::npos,
             "metadata-only import reports an update");
         Check(fShared->Save(error), "metadata-only import saved");
         loaded = Profile::Load(profilePath, error);
@@ -139,18 +139,22 @@ public:
         fields.title = "Editor test";
         fields.url = "https://metadata.example/";
         fields.metadata = {"Original\nnotes", {"one", "comma, tag"}};
+        fields.metadata.keywords = {{"search", "q=%s", {}}};
         fields.folders = {{kOtherBookmarksFolder, 0, "Other Bookmarks"}};
         auto* editor = new BookmarkEditor(fields, BMessenger(this), BRect(0, 0, 800, 600));
         fEditor = BMessenger(editor);
         auto* tags = dynamic_cast<BTextControl*>(editor->FindView("tags"));
         auto* description = dynamic_cast<BTextView*>(editor->FindView("description"));
+        auto* keywords = dynamic_cast<BTextControl*>(editor->FindView("keywords"));
         auto* save = dynamic_cast<BButton*>(editor->FindView("save"));
         Check(tags && description && save, "native editor exposes tags and a multiline description");
+        Check(keywords && std::string(keywords->Text()) == "search", "native editor shows imported shortcut names");
         if (tags && description && save) {
             Check(ParseBookmarkTags(tags->Text()) == fields.metadata.tags && description->Text() == fields.metadata.description,
                 "native editor shows imported metadata without losing commas or newlines");
             tags->SetText("one, \"comma, tag\", \"quote\"\"tag\"");
             description->SetText("Edited\nsecond line");
+            if (keywords) keywords->SetText("search, alias");
             save->Invoke();
         } else editor->PostMessage(B_QUIT_REQUESTED);
         editor->Run();
@@ -195,6 +199,7 @@ public:
         if (message->what == kProfileChanged) {
             if (message->GetUInt32("changes", 0) & SharedProfile::kBookmarksChanged) ++fNotifications;
         } else if (message->what == kBookmarkEdited) {
+            Check(std::string(message->GetString("keywords", "")) == "search, alias", "native Save carries edited shortcut names");
             Check(std::string(message->GetString("description", "")) == "Edited\nsecond line",
                 "native Save retains the edited multiline description");
             std::vector<std::string> tags;

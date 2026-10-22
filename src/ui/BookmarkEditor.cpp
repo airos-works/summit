@@ -61,6 +61,10 @@ BookmarkEditor::BookmarkEditor(const Fields& fields, BMessenger target, BRect ow
     if (!folder) fAddress = new BTextControl("address", "Address:", fields.url.c_str(), nullptr);
     fTags = new BTextControl("tags", "Tags:", BookmarkTagsText(fields.metadata.tags).c_str(), nullptr);
     fTags->SetToolTip("Separate tags with commas. Quote a tag that contains a comma.");
+    if (!folder) {
+        fKeywords = new BTextControl("keywords", "Keywords:", BookmarkKeywordsText(fields.metadata.keywords).c_str(), nullptr);
+        fKeywords->SetToolTip("Shortcuts to type in the address bar, separated by commas. New names use the first shortcut's search request.");
+    }
     fDescription = new BTextView("description");
     fDescription->SetText(fields.metadata.description.c_str());
     fDescription->SetExplicitMinSize(BSize(300, 64));
@@ -95,6 +99,10 @@ BookmarkEditor::BookmarkEditor(const Fields& fields, BMessenger target, BRect ow
     grid->AddItem(fFolder->CreateMenuBarLayoutItem(), 1, row++);
     grid->AddItem(fTags->CreateLabelLayoutItem(), 0, row);
     grid->AddItem(fTags->CreateTextViewLayoutItem(), 1, row++);
+    if (fKeywords) {
+        grid->AddItem(fKeywords->CreateLabelLayoutItem(), 0, row);
+        grid->AddItem(fKeywords->CreateTextViewLayoutItem(), 1, row++);
+    }
     grid->AddView(new BStringView("description-label", "Description:"), 0, row);
     grid->AddView(description, 1, row++);
     // Delete sits at the left, away from Save.
@@ -137,6 +145,7 @@ void BookmarkEditor::Save()
     edited.AddInt64("folder", parent);
     edited.AddString("description", fDescription->Text());
     for (const auto& tag : ParseBookmarkTags(fTags->Text())) edited.AddString("tag", tag.c_str());
+    if (fKeywords) edited.AddString("keywords", fKeywords->Text());
     fTarget.SendMessage(&edited);
     Quit();
 }

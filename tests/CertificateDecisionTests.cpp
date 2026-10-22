@@ -99,9 +99,10 @@ private:
         Require(false, label);
     }
     BMessage State() { std::lock_guard guard(mutex); return state; }
-    uint64 Failure(const std::string& url, const std::string& fingerprint)
+    uint64 Failure(const std::string& url, const std::string& fingerprint, const char* formData = nullptr)
     {
-        view->LoadURL(url.c_str());
+        if (formData) Require(view->LoadForm(url.c_str(), formData) == B_OK, "native form request queued");
+        else view->LoadURL(url.c_str());
         Wait([&] {
             auto snapshot = State();
             return std::string(snapshot.GetString("loadOutcome", "")) == "failed"
@@ -178,6 +179,21 @@ private:
         view->ContinueAfterCertificateError(generation); Loaded(otherHost + "/after-closed");
         Recreate(true);
         Failure(otherHost + "/fresh-context", fingerprintB);
+        Require(view->LoadForm("file:///boot/home/test", "q=x") == B_BAD_VALUE,
+            "form navigation rejects non-HTTP destinations");
+        Require(view->LoadForm(nullptr, "q=x") == B_BAD_VALUE && view->LoadForm(plain.c_str(), nullptr) == B_BAD_VALUE,
+            "form navigation rejects missing arguments");
+        const std::string oversized(1024 * 1024 + 1, 'x');
+        Require(view->LoadForm(plain.c_str(), oversized.c_str()) == B_BAD_VALUE, "form navigation bounds request data");
+        generation = Failure(secure + "/post-approval", fingerprintB, "q=caf%C3%A9%20%26%20tea&fixed=1");
+        view->ContinueAfterCertificateError(generation);
+        Loaded(secure + "/post-approval");
+        Require(view->LoadForm((plain + "/post-empty").c_str(), "") == B_OK, "empty form remains a POST");
+        Loaded(plain + "/post-empty");
+        Require(view->LoadForm((plain + "/post-redirect307").c_str(), "keep=exact%2Bbytes") == B_OK, "307 form navigation queued");
+        Loaded(plain + "/post-redirected307");
+        Require(view->LoadForm((plain + "/post-redirect303").c_str(), "drop=body") == B_OK, "303 form navigation queued");
+        Loaded(plain + "/post-redirected303");
     }
     std::string plain, secure, bundle, gate, fingerprintA, fingerprintB;
     std::shared_ptr<BWebKitContext> context;

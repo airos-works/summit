@@ -1870,6 +1870,11 @@ private:
                 json result = {{"id", item.id}, {"title", item.title}};
                 if (!item.metadata.description.empty()) result["description"] = item.metadata.description;
                 if (!item.metadata.tags.empty()) result["tags"] = item.metadata.tags;
+                if (!item.metadata.keywords.empty()) {
+                    result["keywords"] = json::array();
+                    for (const auto& keyword : item.metadata.keywords)
+                        result["keywords"].push_back({{"name", keyword.name}, {"postData", keyword.postData}, {"charset", keyword.charset}});
+                }
                 if (item.separator) result["separator"] = true;
                 else if (!item.folder) result["url"] = item.url;
                 else {

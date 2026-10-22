@@ -65,6 +65,11 @@ static json EncodeBookmarks(const std::vector<BookmarkNode>& nodes)
         if (node.added) item["added"] = node.added;
         if (!node.metadata.description.empty()) item["description"] = node.metadata.description;
         if (!node.metadata.tags.empty()) item["tags"] = node.metadata.tags;
+        if (!node.folder && !node.separator && !node.metadata.keywords.empty()) {
+            item["keywords"] = json::array();
+            for (const auto& keyword : node.metadata.keywords)
+                item["keywords"].push_back({{"name", keyword.name}, {"postData", keyword.postData}, {"charset", keyword.charset}});
+        }
         result.push_back(std::move(item));
     }
     return result;
@@ -105,6 +110,18 @@ static void DecodeBookmarks(const json& value, BookmarkNode& folder, size_t dept
                 for (const auto& tag : *tags) {
                     if (tag.is_string()) node.metadata.tags.push_back(tag.get<std::string>());
                     if (node.metadata.tags.size() == kMaxBookmarkTags) break;
+                }
+            }
+            if (!node.folder) {
+                if (auto keywords = item.find("keywords"); keywords != item.end() && keywords->is_array()) {
+                    for (const auto& keyword : *keywords) {
+                        if (!keyword.is_object() || !keyword.contains("name") || !keyword["name"].is_string()) continue;
+                        BookmarkKeyword value{keyword["name"].get<std::string>(), {}, {}};
+                        if (keyword.contains("postData") && keyword["postData"].is_string()) value.postData = keyword["postData"].get<std::string>();
+                        if (keyword.contains("charset") && keyword["charset"].is_string()) value.charset = keyword["charset"].get<std::string>();
+                        node.metadata.keywords.push_back(std::move(value));
+                        if (node.metadata.keywords.size() == kMaxBookmarkKeywords) break;
+                    }
                 }
             }
             node.metadata = NormalizeBookmarkMetadata(std::move(node.metadata));

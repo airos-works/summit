@@ -85454,10 +85454,10 @@ index 0000000000000000000000000000000000000000..d28a6cad6339adf79b155cf974e85bfd
 +
 diff --git a/Source/WebKit/UIProcess/API/haiku/WebKitView.cpp b/Source/WebKit/UIProcess/API/haiku/WebKitView.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..0447a557fdc236517af3f367f36226fbd3b4628e
+index 0000000000000000000000000000000000000000..cfed966ea3a8d84ec0317ee4a924ece382b0e531
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/API/haiku/WebKitView.cpp
-@@ -0,0 +1,1426 @@
+@@ -0,0 +1,1441 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#include "config.h"
@@ -86027,6 +86027,21 @@ index 0000000000000000000000000000000000000000..0447a557fdc236517af3f367f36226fb
 +}
 +
 +void BWebKitView::LoadURL(const char* url) { SendCommand(viewLoadHaiku, url); }
++status_t BWebKitView::LoadForm(const char* url, const char* formData)
++{
++    if (m_status != B_OK)
++        return m_status;
++    if (!url || !formData || strlen(url) > 65536 || strlen(formData) > 1024 * 1024
++        || (strncasecmp(url, "https://", 8) && strncasecmp(url, "http://", 7)))
++        return B_BAD_VALUE;
++    BMessage message(viewLoadHaiku);
++    if (message.AddString("url", url) != B_OK || message.AddString("formData", formData) != B_OK)
++        return B_NO_MEMORY;
++    ++m_state->findRequestIdentifier;
++    ++m_state->nativeDropRequest;
++    dispatchViewMessageHaiku(m_state, std::move(message));
++    return B_OK;
++}
 +void BWebKitView::ContinueAfterCertificateError(uint64 expectedGeneration)
 +{
 +    if (m_status != B_OK)
@@ -86886,10 +86901,10 @@ index 0000000000000000000000000000000000000000..0447a557fdc236517af3f367f36226fb
 +}
 diff --git a/Source/WebKit/UIProcess/API/haiku/WebKitView.h b/Source/WebKit/UIProcess/API/haiku/WebKitView.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..fdf8b216e22c9e81f768f4b040fe1933a5951118
+index 0000000000000000000000000000000000000000..3760ae102fa344908c3352f232841f3063908930
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/API/haiku/WebKitView.h
-@@ -0,0 +1,427 @@
+@@ -0,0 +1,431 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#pragma once
@@ -87100,6 +87115,10 @@ index 0000000000000000000000000000000000000000..fdf8b216e22c9e81f768f4b040fe1933
 +    ~BWebKitView() override;
 +    status_t InitCheck() const;
 +    void LoadURL(const char*);
++    // Navigate with application/x-www-form-urlencoded POST data, for a saved
++    // search shortcut. HTTP(S) only, at most 1 MiB of UTF-8/escaped form data.
++    // An empty body is still a POST. Callable from any thread.
++    status_t LoadForm(const char* url, const char* formData);
 +    // After explicit user approval of a certificate failure reported in
 +    // B_WEBKIT_STATE_CHANGED, trust that exact host/leaf certificate for this
 +    // view's context session and retry its failed URL. expectedGeneration is
@@ -118622,10 +118641,10 @@ index 0000000000000000000000000000000000000000..c9a119d02f85b7c5ad8fe9153bfc9604
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/WebView.cpp b/Source/WebKit/UIProcess/haiku/WebView.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..c82191437ac14a49af030cb514522237807c3a9b
+index 0000000000000000000000000000000000000000..88a5525db585ed6ce077a7925a06492c7b4b18b1
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/WebView.cpp
-@@ -0,0 +1,3081 @@
+@@ -0,0 +1,3096 @@
 +/*
 + * Copyright (C) 2013 Intel Corporation. All rights reserved.
 + *
@@ -118744,6 +118763,7 @@ index 0000000000000000000000000000000000000000..c82191437ac14a49af030cb514522237
 +#include <WebCore/DOMPasteAccess.h>
 +#include <WebCore/ResourceError.h>
 +#include <WebCore/ResourceRequest.h>
++#include <WebCore/FormData.h>
 +#include "AuthenticationChallengeDisposition.h"
 +#include "AuthenticationChallengeProxy.h"
 +#include "AuthenticationDecisionListener.h"
@@ -118971,6 +118991,7 @@ index 0000000000000000000000000000000000000000..c82191437ac14a49af030cb514522237
 +    load.errorCode = 0;
 +    load.errorProvisional = false;
 +    load.errorCertificate = std::nullopt;
++    load.errorRequest = std::nullopt;
 +}
 +
 +// What a user needs to see of a server certificate that failed verification:
@@ -119112,7 +119133,7 @@ index 0000000000000000000000000000000000000000..c82191437ac14a49af030cb514522237
 +}
 +
 +static void failLoadHaiku(const std::shared_ptr<WebViewStateHaiku>& state,
-+    const URL& requestURL, const ResourceError& error, bool provisional)
++    const URL& requestURL, const ResourceError& error, bool provisional, const ResourceRequest* request = nullptr)
 +{
 +    auto& load = state->load;
 +    load.pending = false;
@@ -119134,6 +119155,8 @@ index 0000000000000000000000000000000000000000..c82191437ac14a49af030cb514522237
 +        load.errorURL = (error.failingURL().isEmpty() ? requestURL : error.failingURL()).string();
 +        load.errorProvisional = provisional;
 +        if (error.isCertificationVerificationError()) {
++            if (request && request->url().string() == load.errorURL)
++                load.errorRequest = *request;
 +            // The challenge that rejected the certificate described it; the
 +            // error only says that verification failed.
 +            auto host = URL { load.errorURL }.host().toString();
@@ -119663,7 +119686,7 @@ index 0000000000000000000000000000000000000000..c82191437ac14a49af030cb514522237
 +        if (isMainFrameHaiku(frame, &page))
 +            SUMMIT_NAV_TRACE("provisional load failed (%d %s)", error.errorCode(), error.localizedDescription().utf8().legacyCStringPointer());
 +        if (auto state = m_state.lock(); state && isMainFrameHaiku(frame, &page) && matchesLoadHaiku(*state, navigation))
-+            failLoadHaiku(state, requestURL, error, true);
++            failLoadHaiku(state, requestURL, error, true, &navigation->currentRequest());
 +        // An uncommitted failure without a Navigation ID has no document
 +        // identity. Do not attribute it to a newer same-URL request.
 +    }
@@ -119673,7 +119696,7 @@ index 0000000000000000000000000000000000000000..c82191437ac14a49af030cb514522237
 +    {
 +        if (auto state = m_state.lock(); state && isMainFrameHaiku(frame, &page)
 +            && (matchesLoadHaiku(*state, navigation) || (!navigation && matchesUnidentifiedDocument(*state, page, frame))))
-+            failLoadHaiku(state, requestURL, error, false);
++            failLoadHaiku(state, requestURL, error, false, navigation ? &navigation->currentRequest() : nullptr);
 +    }
 +
 +    void didFinishNavigation(WebPageProxy& page, API::Navigation* navigation, API::Object*) override
@@ -120798,6 +120821,7 @@ index 0000000000000000000000000000000000000000..c82191437ac14a49af030cb514522237
 +    case viewContinueCertificateHaiku:
 +    case viewLoadHaiku: {
 +        URL url;
++        std::optional<ResourceRequest> retryRequest;
 +        if (message.what == viewContinueCertificateHaiku) {
 +            // Validation, trust and retry share the engine thread with all
 +            // navigation. Never rely on a host's possibly stale state copy.
@@ -120814,19 +120838,29 @@ index 0000000000000000000000000000000000000000..c82191437ac14a49af030cb514522237
 +                || certificate.sha256.isEmpty())
 +                break;
 +            m_state->context->allowServerCertificate(certificate.host, certificate.sha256);
++            retryRequest = load.errorRequest;
 +            ++m_state->findRequestIdentifier;
 +            ++m_state->nativeDropRequest;
 +        } else
 +            url = URL { String::fromUTF8(message.FindString("url")) };
++        const char* formData = message.GetString("formData", nullptr);
++        if (formData && (!url.protocolIsInHTTPFamily() || strlen(formData) > 1024 * 1024))
++            break;
 +        if (url.isValid()) {
-+            auto fragmentDocument = url.hasFragmentIdentifier()
++            ResourceRequest request = retryRequest ? WTF::move(*retryRequest) : ResourceRequest(URL { url });
++            if (formData) {
++                request.setHTTPMethod("POST"_s);
++                request.setHTTPContentType("application/x-www-form-urlencoded"_s);
++                request.setHTTPBody(FormData::create(std::span { reinterpret_cast<const uint8_t*>(formData), strlen(formData) }));
++            }
++            auto fragmentDocument = request.httpMethod() == "GET"_s && url.hasFragmentIdentifier()
 +                && equalIgnoringFragmentIdentifier(url, m_page->pageLoadState().url())
 +                ? m_state->documentIdentifier : std::nullopt;
 +            String fragmentURL = fragmentDocument ? url.string() : String();
 +            navigationChangedHaiku(m_state);
 +            beginUnidentifiedLoadHaiku(m_state);
 +            const bigtime_t started = system_time();
-+            RefPtr navigation = m_page->loadRequest(ResourceRequest(WTF::move(url)));
++            RefPtr navigation = m_page->loadRequest(WTF::move(request));
 +            SUMMIT_NAV_TRACE("loadRequest took %.1f ms (navigation %llu, web process %d)", (system_time() - started) / 1000.0,
 +                navigation ? static_cast<unsigned long long>(navigation->navigationID().toUInt64()) : 0ULL, m_page->legacyMainFrameProcess().processID());
 +            trackLoadHaiku(m_state, navigation.get());
@@ -122446,10 +122480,10 @@ index 0000000000000000000000000000000000000000..3670bf654afeab72d15d457060553c36
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/WebViewStateHaiku.h b/Source/WebKit/UIProcess/haiku/WebViewStateHaiku.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..ac0d66cd73464e122c25be1b8534138988086164
+index 0000000000000000000000000000000000000000..7225d4e5b639c642a7ae5fee2ef42322d5decf60
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/WebViewStateHaiku.h
-@@ -0,0 +1,224 @@
+@@ -0,0 +1,226 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#pragma once
@@ -122460,6 +122494,7 @@ index 0000000000000000000000000000000000000000..ac0d66cd73464e122c25be1b85341389
 +#include <Rect.h>
 +#include <WebCore/IntPoint.h>
 +#include <WebCore/NavigationIdentifier.h>
++#include <WebCore/ResourceRequest.h>
 +#include <WebCore/ScriptExecutionContextIdentifier.h>
 +#include <atomic>
 +#include <memory>
@@ -122616,6 +122651,7 @@ index 0000000000000000000000000000000000000000..ac0d66cd73464e122c25be1b85341389
 +            double validUntil { 0 };
 +        };
 +        std::optional<Certificate> errorCertificate;
++        std::optional<WebCore::ResourceRequest> errorRequest;
 +        // Keep the last successful load in every snapshot so a dropped
 +        // progress notification cannot turn a failed load into a visit.
 +        uint64_t successSequence { 0 };

@@ -23,9 +23,15 @@ separators and folders nested up to 32 deep. No engine change.
   Work") and offers **Edit Bookmark…**; for a page that is not bookmarked it
   offers Add to Bookmarks Bar, Add to Bookmarks and **Add to Folder…**.
 - **The bookmark editor** (Edit Bookmark…, Add to Folder…, the bar's Edit… and
-  Edit Folder…, New Folder…) has Name, Address, Tags, a multiline Description,
+  Edit Folder…, New Folder…) has Name, Address, Tags, Keywords, a multiline Description,
   and a Folder menu that shows the folders indented by depth. Separate tags
   with commas; quote a tag containing a comma, doubling any quote inside it.
+  Keywords are address-field shortcuts, also separated by commas. For example,
+  a bookmark of `https://example.com/search?q=%s` with keyword `find` makes
+  `find two words` open that site's search. A fixed URL can have a keyword too.
+  Existing keyword names retain their request data; new or renamed aliases
+  inherit the first keyword's request, including POST data and character set.
+  Folders do not have keywords.
   An address typed
   without a scheme gets `https://`. **Delete** removes the bookmark; deleting
   a folder that has bookmarks in it asks first ("Delete the folder “Work” and
@@ -52,9 +58,9 @@ separators and folders nested up to 32 deep. No engine change.
   its page instead of the empty file.
 - **The Bookmarks tab** (`summit:bookmarks`, Alt+B) shows both folders as a
   tree. Folders open and close (the page remembers which while the tab
-  lives); the search field matches titles, addresses, tags and descriptions with the folders they are
+  lives); the search field matches titles, addresses, tags, descriptions and keywords with the folders they are
   in, and a matching folder with everything in it. Bookmark and folder rows have **Edit**,
-  which turns it into a form (Name, Address, Folder, Tags, Description) saved with Enter
+  which turns it into a form (Name, Address, Folder, Tags, Keywords, Description) saved with Enter
   or Save, and **Delete**. Rows are dragged with the mouse: before or after
   another row, or onto a folder's row to go inside it. **New Folder…**,
   **Import…** and **Export…** are at the top.
@@ -72,7 +78,7 @@ separators and folders nested up to 32 deep. No engine change.
   Bookmarks go into a folder **Imported from WebPositive** (Firefox, Chrome,
   …; for an HTML file from another browser its file name) in Other Bookmarks,
   with their folders. Addresses that are bookmarked already keep their existing
-  title and location, gain new tags, and receive a description only if they have
+  title and location, gain new tags and keyword aliases, and receive a description only if they have
   none. Importing again adds only what is new; folders left empty by duplicates are not made,
   and an "Imported from …" folder that exists is filled again (its folders of
   the same name merged). javascript: bookmarklets and Firefox's `place:`
@@ -108,7 +114,7 @@ separators and folders nested up to 32 deep. No engine change.
   by an older build) is read from the flat list. Unusable tree entries are
   dropped rather than failing the profile. Separators are saved with
   `"separator": true` and no address; older builds ignore them.
-  Optional `description` and `tags` fields preserve metadata in the tree;
+  Optional `description`, `tags` and `keywords` fields preserve metadata in the tree;
   older builds ignore these fields, and saving with one loses them.
 - **Formats** are `src/core/BookmarkIO.{h,cpp}`: a tolerant Netscape HTML
   reader (`<DL>`/`<DT>`/`<H3>`/`<A>`/`<HR>`, entities, quoted or bare attributes,
@@ -150,6 +156,34 @@ separators and folders nested up to 32 deep. No engine change.
   the folder allowance is full; repeat imports with identical metadata do
   neither. Duplicate URLs are resolved by
   stable node IDs so growing folder vectors cannot invalidate merge targets.
+- **Keywords** come from HTML `SHORTCUTURL`, `POST_DATA` and `LAST_CHARSET`,
+  or Firefox's `moz_keywords` URL associations and optional character-set
+  annotations. Multiple aliases can have different POST templates for one URL;
+  all are kept. Export writes the first alias in the standard HTML attributes
+  and all aliases in `SUMMIT_KEYWORDS` JSON, preserving them on a Summit round
+  trip. Other browsers see the first alias through the standard attributes.
+  Each bookmark keeps up to 16 aliases, with names up to 256 bytes and POST
+  templates up to 64 KiB. Invalid or oversized entries are omitted rather than
+  truncated into a different shortcut. Import keeps existing data when the
+  same URL and keyword already exist.
+- **Shortcut navigation** (`src/core/BookmarkKeywords.cpp`) follows
+  [Firefox's keyword binding rules](https://github.com/mozilla-firefox/firefox/blob/main/toolkit/modules/KeywordUtils.sys.mjs):
+  `%s` substitutes escaped search text, `%S` substitutes raw text, and escaped
+  POST templates are decoded before parameter binding. A fixed shortcut with
+  extra text falls back to normal address/search handling. `mozcharset` and
+  imported character sets select the parameter encoding; unavailable or failed
+  conversions fall back to UTF-8. Haiku uses its installed `libiconv.so.2`.
+  ASCII keyword letters are case-insensitive; non-ASCII names currently need
+  the imported spelling. Conflicting names assigned to different requests
+  produce an error asking the user to edit them, rather than selecting an
+  arbitrary bookmark. Expansions are bounded before allocating large results.
+  Selecting a suggestion retains the shortcut input so POST data is preserved.
+- **POST shortcut requests** use the modern engine's `BWebKitView::LoadForm`,
+  with `application/x-www-form-urlencoded` and HTTP(S) destinations. The engine
+  retains its normal navigation, redirect and history behavior. An approved
+  certificate retry retains the failed request's method and body; an empty
+  form body remains POST. Legacy Summit builds show an explicit unsupported
+  message for POST shortcuts. GET shortcuts use the existing URL loader.
 - **History import** (`Profile::ImportHistory`) adds pages history does not
   have, keeps the later visit and larger count of pages both have, and keeps
   the 2000 most recent. WebPositive's `BrowsingHistory` (a flattened message
@@ -188,6 +222,34 @@ separators and folders nested up to 32 deep. No engine change.
   [mcp.md](mcp.md)).
 
 ## Testing
+
+The keyword follow-up passes **295 bookmark checks** on both the host and
+native airOS, the host core suite, and **33 native UI checks**. HTML and Firefox
+imports, multiple aliases, profile/export round trips, metadata-only merges,
+editing and renaming, UTF-8/legacy encodings, raw and escaped substitutions,
+fixed shortcuts, conflicts and request bounds are covered.
+
+`tests/NativeBookmarkKeywordTests.cpp` passes **82 assertions** against the
+full browser: real address-field keys, the first suggestion's retained input,
+arrow selection, GET and POST navigation, and the native bookmark editor's
+Save action. A separate **19 full-browser/fixture checks** verify inline
+editing/filtering, saved profile and HTML output, and the exact requests
+received by a loopback server. All five expected POST requests arrive once
+with the correct bytes and content type, including after each editor saves
+and when using a new alias. The saved Bookmarks view was rendered by WebCore
+and visually inspected. All **660 frozen source/runtime hashes** are unchanged;
+the browser exits zero with no owned helpers or crash events across the
+complete log interval.
+
+`tests/CertificateDecisionTests.cpp` and `tools/test-certificate-decisions.py`
+pass **64 native checks and 10 runner assertions** with this engine. They
+verify that certificate approval retains the exact POST request, empty bodies
+remain POST, 307 redirects retain the body, 303 redirects become GET, and
+invalid/stale certificate approvals stay ineffective. The probe exits normally,
+75 hashes remain unchanged, and its complete crash-log interval is clean.
+These are isolated airOS candidate runs; published-package and stock-Haiku
+keyword acceptance have not been performed. Full results and provenance:
+[`bookmark-keywords-native-2026-10-22.json`](bookmark-keywords-native-2026-10-22.json).
 
 The tag/description follow-up passes **237 bookmark checks** on the host and
 native airOS, the host core suite, and **31 native UI checks**. It covers

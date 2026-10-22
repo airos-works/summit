@@ -7,7 +7,7 @@ find_package(OpenSSL REQUIRED COMPONENTS Crypto)
 file(STRINGS ${CMAKE_SOURCE_DIR}/vendor/cld2/sources.list SUMMIT_CLD2_SOURCES)
 list(TRANSFORM SUMMIT_CLD2_SOURCES PREPEND "vendor/cld2/")
 add_library(summit_cld2 STATIC ${SUMMIT_CLD2_SOURCES})
-add_library(summit_core src/core/Address.cpp src/core/Protocol.cpp src/core/Profile.cpp src/core/Bookmarks.cpp src/core/BookmarkIO.cpp src/core/ExtensionCatalog.cpp src/core/ExtensionIdentity.cpp src/core/ExtensionStore.cpp
+add_library(summit_core src/core/Address.cpp src/core/Protocol.cpp src/core/Profile.cpp src/core/Bookmarks.cpp src/core/BookmarkIO.cpp src/core/BookmarkKeywords.cpp src/core/ExtensionCatalog.cpp src/core/ExtensionIdentity.cpp src/core/ExtensionStore.cpp
     src/core/ExtensionShortcut.cpp src/core/ExtensionUpdate.cpp src/core/UserAgent.cpp
     src/core/ExtensionPackage.cpp src/core/StoreOffer.cpp src/core/DownloadText.cpp src/core/DownloadHistory.cpp src/core/Favicon.cpp src/core/InternalPages.cpp src/core/Zoom.cpp src/core/Suggest.cpp src/core/DevTools.cpp src/core/DevToolsFormat.cpp src/core/DevToolsElements.cpp src/core/PageSource.cpp
     src/core/Mcp.cpp src/core/McpHttp.cpp src/core/McpInspector.cpp src/core/WebAppManifest.cpp src/core/UpdateCheck.cpp src/core/Spelling.cpp src/core/PageLanguage.cpp src/core/TranslationModels.cpp src/core/LoadError.cpp src/core/ProfileLock.cpp)
