@@ -10367,6 +10367,72 @@ index 0000000000000000000000000000000000000000..2c20205753574d55df3541bf00934968
 +} // namespace WebCore
 +
 +#endif // PLATFORM(HAIKU)
+diff --git a/Source/WebCore/bindings/js/ScriptController.cpp b/Source/WebCore/bindings/js/ScriptController.cpp
+index 7a84d14d26456ba43f25368f1f5c492aed49416b..4c1031ea9451a24734b415160eebc8fc92e2cdb1 100644
+--- a/Source/WebCore/bindings/js/ScriptController.cpp
++++ b/Source/WebCore/bindings/js/ScriptController.cpp
+@@ -856,7 +856,7 @@ bool ScriptController::canExecuteScripts(ReasonForCallingCanExecuteScripts reaso
+     return m_frame->loader().client().allowScript(m_frame->settings().isScriptEnabled());
+ }
+ 
+-void ScriptController::executeJavaScriptURL(const URL& url, const NavigationAction& action, bool& didReplaceDocument)
++void ScriptController::executeJavaScriptURL(const URL& url, const NavigationAction& action, bool& didReplaceDocument, JavaScriptURLSource source)
+ {
+     ASSERT(url.protocolIsJavaScript());
+ 
+@@ -881,23 +881,24 @@ void ScriptController::executeJavaScriptURL(const URL& url, const NavigationActi
+     VM& vm = globalObject->vm();
+     auto throwScope = DECLARE_THROW_SCOPE(vm);
+ 
+-    auto preNavigationCheckHolder = requireTrustedTypesForPreNavigationCheckPasses(*scriptExecutionContext, url.string());
+-    if (preNavigationCheckHolder.hasException()) {
+-        TRY_CLEAR_EXCEPTION(throwScope, void());
+-        return;
++    String preNavigationCheckURLString = url.string();
++    if (source == JavaScriptURLSource::Page) {
++        auto preNavigationCheckHolder = requireTrustedTypesForPreNavigationCheckPasses(*scriptExecutionContext, preNavigationCheckURLString);
++        if (preNavigationCheckHolder.hasException()) {
++            TRY_CLEAR_EXCEPTION(throwScope, void());
++            return;
++        }
++        preNavigationCheckURLString = preNavigationCheckHolder.releaseReturnValue();
++        if (preNavigationCheckURLString.isNull())
++            return;
++        if (!protect(ownerDocument->contentSecurityPolicy())->allowJavaScriptURLs(ownerDocument->url().string(), eventHandlerPosition().m_line, preNavigationCheckURLString, nullptr))
++            return;
+     }
+ 
+-    auto preNavigationCheckURLString = preNavigationCheckHolder.releaseReturnValue();
+-    if (preNavigationCheckURLString.isNull())
+-        return;
+-
+-    if (!protect(ownerDocument->contentSecurityPolicy())->allowJavaScriptURLs(ownerDocument->url().string(), eventHandlerPosition().m_line, preNavigationCheckURLString, nullptr))
+-        return;
+-
+     const int javascriptSchemeLength = sizeof("javascript:") - 1;
+     String decodedURL = PAL::decodeURLEscapeSequences(preNavigationCheckURLString);
+     // FIXME: This probably needs to figure out if the origin is considered tainted.
+-    auto result = executeScriptIgnoringException(decodedURL.substring(javascriptSchemeLength), JSC::SourceTaintedOrigin::Untainted);
++    auto result = executeScriptIgnoringException(decodedURL.substring(javascriptSchemeLength), JSC::SourceTaintedOrigin::Untainted, source == JavaScriptURLSource::Bookmarklet);
+     RELEASE_ASSERT(&vm == &jsWindowProxy(mainThreadNormalWorldSingleton()).window()->vm());
+ 
+     // If executing script caused this frame to be removed from the page, we
+diff --git a/Source/WebCore/bindings/js/ScriptController.h b/Source/WebCore/bindings/js/ScriptController.h
+index 634518740e889229f7a90f816a2ffeba581d090f..01d18af371478f2f9a79f4bdd0baa5df8b9bd534 100644
+--- a/Source/WebCore/bindings/js/ScriptController.h
++++ b/Source/WebCore/bindings/js/ScriptController.h
+@@ -113,7 +113,10 @@ public:
+     JSC::JSValue evaluateInWorldIgnoringException(const ScriptSourceCode&, DOMWrapperWorld&);
+ 
+     // This asserts that URL argument is a JavaScript URL.
+-    void executeJavaScriptURL(const URL&, const NavigationAction&, bool& didReplaceDocument);
++    enum class JavaScriptURLSource : bool { Page, Bookmarklet };
++    // Bookmarklet is reserved for an explicit browser-chrome activation. It
++    // skips the page's inline-script policy, without changing that policy.
++    WEBCORE_EXPORT void executeJavaScriptURL(const URL&, const NavigationAction&, bool& didReplaceDocument, JavaScriptURLSource = JavaScriptURLSource::Page);
+ 
+     static uint64_t NODELETE scriptExecutionCount();
+ 
 diff --git a/Source/WebCore/bindings/js/WebCoreBuiltinNames.h b/Source/WebCore/bindings/js/WebCoreBuiltinNames.h
 index 6d3962f03ae12aa4f41c8cba628877c5efa76bba..5645f65468b0812a430edf678da69f56028b8bc9 100644
 --- a/Source/WebCore/bindings/js/WebCoreBuiltinNames.h
@@ -86901,10 +86967,10 @@ index 0000000000000000000000000000000000000000..cfed966ea3a8d84ec0317ee4a924ece3
 +}
 diff --git a/Source/WebKit/UIProcess/API/haiku/WebKitView.h b/Source/WebKit/UIProcess/API/haiku/WebKitView.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..3760ae102fa344908c3352f232841f3063908930
+index 0000000000000000000000000000000000000000..e22bf062f23d1d74b8b633845e9be5481cfdeaf4
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/API/haiku/WebKitView.h
-@@ -0,0 +1,431 @@
+@@ -0,0 +1,436 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#pragma once
@@ -87119,6 +87185,11 @@ index 0000000000000000000000000000000000000000..3760ae102fa344908c3352f232841f30
 +    // search shortcut. HTTP(S) only, at most 1 MiB of UTF-8/escaped form data.
 +    // An empty body is still a POST. Callable from any thread.
 +    status_t LoadForm(const char* url, const char* formData);
++    // Explicit user activation of a saved javascript: bookmark on the current
++    // HTTP(S) or file document. The host must exclude its privileged pages.
++    // Both processes reject a changed document; this never starts a load for
++    // a script with no string completion. Replies use B_WEBKIT_JAVASCRIPT_RESULT.
++    void RunBookmarklet(const char* url, BMessenger reply, uint64 identifier, uint64 expectedGeneration);
 +    // After explicit user approval of a certificate failure reported in
 +    // B_WEBKIT_STATE_CHANGED, trust that exact host/leaf certificate for this
 +    // view's context session and retry its failed URL. expectedGeneration is
@@ -87338,10 +87409,10 @@ index 0000000000000000000000000000000000000000..3760ae102fa344908c3352f232841f30
 +};
 diff --git a/Source/WebKit/UIProcess/API/haiku/WebKitViewEmbedding.cpp b/Source/WebKit/UIProcess/API/haiku/WebKitViewEmbedding.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..e9940106cf29d8eae8140742945e6eba4ce5fde5
+index 0000000000000000000000000000000000000000..79138d7686f68ab292991a1fb0da994de47d6cde
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/API/haiku/WebKitViewEmbedding.cpp
-@@ -0,0 +1,1044 @@
+@@ -0,0 +1,1076 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +// BWebKitView's embedding interfaces (WebKitEmbedding.h): user scripts,
@@ -87954,6 +88025,38 @@ index 0000000000000000000000000000000000000000..e9940106cf29d8eae8140742945e6eba
 +{
 +    WTF::RunLoop::mainSingleton().dispatch([identifier] {
 +        answerAuthenticationHaiku(identifier, AuthenticationAnswerHaiku::Cancel, { }, { }, false);
++    });
++}
++
++void BWebKitView::RunBookmarklet(const char* source, BMessenger reply, uint64 identifier, uint64 expectedGeneration)
++{
++    BMessage message(B_WEBKIT_JAVASCRIPT_RESULT);
++    message.AddUInt64("identifier", identifier);
++    message.AddUInt64("generation", expectedGeneration);
++    if (m_status != B_OK || !source || strlen(source) > 65536 || strncasecmp(source, "javascript:", 11)) {
++        message.AddString("error", "Invalid bookmarklet");
++        reply.SendMessage(&message, static_cast<BHandler*>(nullptr), 0);
++        return;
++    }
++    RunLoop::mainSingleton().dispatch([state = m_state, source = copyTextHaiku(source), reply, message = WTF::move(message), expectedGeneration]() mutable {
++        message.AddMessenger("view", viewOfStateHaiku(state));
++        RefPtr page = pageHaiku(state);
++        RefPtr frame = page ? page->mainFrame() : nullptr;
++        URL url { stringHaiku(source) };
++        if (!page || !frame || !page->hasRunningProcess() || !expectedGeneration
++            || state->load.generation != expectedGeneration || state->load.pending || !state->documentIdentifier
++            || !url.protocolIsJavaScript()) {
++            message.AddString("error", "The document changed or is still loading");
++            reply.SendMessage(&message, static_cast<BHandler*>(nullptr), 0);
++            return;
++        }
++        Ref process = frame->process();
++        process->sendWithAsyncReply(Messages::WebPage::RunBookmarkletHaiku(url, *state->documentIdentifier),
++            [reply, message = WTF::move(message)](String&& error) mutable {
++                if (!error.isEmpty()) addStringHaiku(message, "error", error);
++                else message.AddBool("result", true);
++                reply.SendMessage(&message, static_cast<BHandler*>(nullptr), 0);
++            }, page->webPageIDInProcess(process));
 +    });
 +}
 +
@@ -147740,7 +147843,7 @@ index 11766a98414863026a09ccea0dbbdd432db4444f..4a9d7da063d7f392f03f53452fa7fd2c
          m_textManipulationIncludesSubframes = false;
      else if (m_textManipulationIncludesSubframes)
 diff --git a/Source/WebKit/WebProcess/WebPage/WebPage.h b/Source/WebKit/WebProcess/WebPage/WebPage.h
-index 5dfb080fb516a2c8bd2ec72245babd8c28d926bf..cd8431481235351296cdef83670b77f027f8fa71 100644
+index 5dfb080fb516a2c8bd2ec72245babd8c28d926bf..8540ae6d1afede7b80fa565e17df1c8a4c5caf26 100644
 --- a/Source/WebKit/WebProcess/WebPage/WebPage.h
 +++ b/Source/WebKit/WebProcess/WebPage/WebPage.h
 @@ -25,6 +25,10 @@
@@ -147754,7 +147857,7 @@ index 5dfb080fb516a2c8bd2ec72245babd8c28d926bf..cd8431481235351296cdef83670b77f0
  #include "APIObject.h"
  #include "MessageReceiver.h"
  #include "MessageSender.h"
-@@ -925,6 +929,23 @@ public:
+@@ -925,6 +929,24 @@ public:
      bool suspendForProcessSwap();
  
      void sendSetWindowFrame(const WebCore::FloatRect&);
@@ -147774,11 +147877,12 @@ index 5dfb080fb516a2c8bd2ec72245babd8c28d926bf..cd8431481235351296cdef83670b77f0
 +    void setPictureInPictureSizeHaiku(WebCore::IntSize);
 +    void pictureInPictureCommandHaiku(String&& command);
 +    void exitPictureInPictureHaiku();
++    void runBookmarkletHaiku(URL&&, WebCore::ScriptExecutionContextIdentifier, CompletionHandler<void(String&&)>&&);
 +#endif
  
      double textZoomFactor() const;
      void didSetTextZoomFactor(double);
-@@ -1906,7 +1927,7 @@ public:
+@@ -1906,7 +1928,7 @@ public:
  #if ENABLE(WK_WEB_EXTENSIONS)
      WebExtensionControllerProxy* webExtensionControllerProxy() const
      {
@@ -147787,7 +147891,7 @@ index 5dfb080fb516a2c8bd2ec72245babd8c28d926bf..cd8431481235351296cdef83670b77f0
          return m_webExtensionController.get();
  #else
          return nullptr;
-@@ -2534,6 +2555,10 @@ private:
+@@ -2534,6 +2556,10 @@ private:
      void runJavaScript(WebFrame*, RunJavaScriptParameters&&, ContentWorldIdentifier, bool, CompletionHandler<void(RunJavaScriptResult&&)>&&);
      void runJavaScriptInFrameInScriptWorld(RunJavaScriptParameters&&, std::optional<WebCore::FrameIdentifier>, const ContentWorldData&, bool, CompletionHandler<void(RunJavaScriptResult&&)>&&);
      void clearContentWorld(ContentWorldIdentifier, CompletionHandler<void()>&&);
@@ -147798,7 +147902,7 @@ index 5dfb080fb516a2c8bd2ec72245babd8c28d926bf..cd8431481235351296cdef83670b77f0
      void getAccessibilityTreeData(CompletionHandler<void(const std::optional<IPC::SharedBufferReference>&)>&&);
      void updateRenderingWithForcedRepaint(CompletionHandler<void()>&&);
      void takeSnapshot(WebCore::IntRect snapshotRect, WebCore::IntSize bitmapSize, SnapshotOptions, CompletionHandler<void(std::optional<ImageBufferBackendHandle>&&, WebCore::Headroom)>&&);
-@@ -3087,8 +3112,12 @@ private:
+@@ -3087,8 +3113,12 @@ private:
  
      const Ref<WebUserContentController> m_userContentController;
  
@@ -147814,7 +147918,7 @@ index 5dfb080fb516a2c8bd2ec72245babd8c28d926bf..cd8431481235351296cdef83670b77f0
  
      const UniqueRef<WebScreenOrientationManager> m_screenOrientationManager;
 diff --git a/Source/WebKit/WebProcess/WebPage/WebPage.messages.in b/Source/WebKit/WebProcess/WebPage/WebPage.messages.in
-index 483df2ae00809b454f95152d8d8bb462a150fe22..12a0cbc5b49debc0ed9b6ca2020f0df6524dcc82 100644
+index 483df2ae00809b454f95152d8d8bb462a150fe22..62002b90cf45d28ad36ee3b6f6d7beb10b2806dc 100644
 --- a/Source/WebKit/WebProcess/WebPage/WebPage.messages.in
 +++ b/Source/WebKit/WebProcess/WebPage/WebPage.messages.in
 @@ -288,6 +288,10 @@ messages -> WebPage WantsAsyncDispatchMessage {
@@ -147828,11 +147932,12 @@ index 483df2ae00809b454f95152d8d8bb462a150fe22..12a0cbc5b49debc0ed9b6ca2020f0df6
  
      ClearContentWorld(WebKit::ContentWorldIdentifier worldIdentifier) -> ()
  
-@@ -549,6 +553,13 @@ messages -> WebPage WantsAsyncDispatchMessage {
+@@ -549,6 +553,14 @@ messages -> WebPage WantsAsyncDispatchMessage {
  #endif
      DrawToPDF(std::optional<WebCore::FloatRect> rect, bool allowTransparentBackground) -> (RefPtr<WebCore::SharedBuffer> data)
  #endif
 +#if PLATFORM(HAIKU)
++    RunBookmarkletHaiku(URL url, WebCore::ScriptExecutionContextIdentifier documentIdentifier) -> (String error)
 +    EnterPictureInPictureHaiku(String token, String target, WebCore::IntSize size)
 +    SetPictureInPictureSizeHaiku(WebCore::IntSize size)
 +    PictureInPictureCommandHaiku(String command)
@@ -147842,7 +147947,7 @@ index 483df2ae00809b454f95152d8d8bb462a150fe22..12a0cbc5b49debc0ed9b6ca2020f0df6
  #if PLATFORM(GTK)
      DrawPagesForPrinting(WebCore::FrameIdentifier frameID, struct WebKit::PrintInfo printInfo) -> (std::optional<WebCore::SharedMemory::Handle> data, WebCore::ResourceError error)
      DrawPagesForPrintingDuringDOMPrintOperation(WebCore::FrameIdentifier frameID, struct WebKit::PrintInfo printInfo) -> (std::optional<WebCore::SharedMemory::Handle> data, WebCore::ResourceError error) AllowedWhenWaitingForSyncReplyDuringUnboundedIPC
-@@ -631,6 +642,9 @@ messages -> WebPage WantsAsyncDispatchMessage {
+@@ -631,6 +643,9 @@ messages -> WebPage WantsAsyncDispatchMessage {
      SetWritingSuggestion(String text, struct WebKit::EditingRange selectionRange)
      ConfirmCompositionAsync()
  #endif
@@ -149558,10 +149663,10 @@ index 0000000000000000000000000000000000000000..7459ce25f180160a1c12431c73926a1f
 +
 diff --git a/Source/WebKit/WebProcess/WebPage/haiku/WebPageHaiku.cpp b/Source/WebKit/WebProcess/WebPage/haiku/WebPageHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..b0d2148b1d326e34fa51891e3b3768e0b12cafbf
+index 0000000000000000000000000000000000000000..637470ce160054f77c68542075ff8d03e4888fb5
 --- /dev/null
 +++ b/Source/WebKit/WebProcess/WebPage/haiku/WebPageHaiku.cpp
-@@ -0,0 +1,531 @@
+@@ -0,0 +1,552 @@
 +/*
 + * Copyright (C) 2014 Haiku, inc.
 + *
@@ -149605,6 +149710,9 @@ index 0000000000000000000000000000000000000000..b0d2148b1d326e34fa51891e3b3768e0
 +#include <WebCore/KeyboardEvent.h>
 +#include <WebCore/LocalFrame.h>
 +#include <WebCore/LocalFrameInlines.h>
++#include <WebCore/FrameLoader.h>
++#include <WebCore/NavigationAction.h>
++#include <WebCore/ScriptController.h>
 +#include <WebCore/NotImplemented.h>
 +#include <WebCore/Page.h>
 +#include <WebCore/PDFJSDocument.h>
@@ -149897,6 +150005,24 @@ index 0000000000000000000000000000000000000000..b0d2148b1d326e34fa51891e3b3768e0
 +void WebPage::exitPictureInPictureHaiku()
 +{
 +    endPictureInPictureHaiku(identifier().toUInt64(), false);
++}
++
++void WebPage::runBookmarkletHaiku(URL&& url, ScriptExecutionContextIdentifier expectedDocument, CompletionHandler<void(String&&)>&& completion)
++{
++    RefPtr frame = m_mainFrame->coreLocalFrame();
++    RefPtr document = frame ? frame->document() : nullptr;
++    if (!document || document->identifier() != expectedDocument || frame->loader().provisionalDocumentLoader())
++        return completion("The document changed"_s);
++    if (!url.isValid() || !url.protocolIsJavaScript() || url.string().length() > 65536
++        || (!document->url().protocolIsInHTTPFamily() && !document->url().protocolIsFile())
++        || document->isSandboxed(SandboxFlag::Scripts) || !frame->settings().isScriptEnabled())
++        return completion("Bookmarklets cannot run on this page"_s);
++    NavigationAction action { *document, ResourceRequest { URL { url } }, InitiatedByMainFrame::Yes, true };
++    bool replaced = false;
++    // Use WebCore's percent decoding, main-world completion and document
++    // replacement, with browser activation rather than a page link's CSP.
++    protect(frame->script())->executeJavaScriptURL(url, action, replaced, ScriptController::JavaScriptURLSource::Bookmarklet);
++    completion({ });
 +}
 +
 +void WebPage::drawPagesForPrintingHaiku(FrameIdentifier frameID, const PrintInfo& printInfo, uint32_t first, uint32_t count, float rasterScale, bool printBackgrounds,

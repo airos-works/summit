@@ -1113,7 +1113,7 @@ void AddBookmarkItems(BMenu* menu, std::shared_ptr<const BookmarkButton> root, c
         auto* item = NewPageMenuItem(BookmarkLabel(child).c_str(), open, child.menuIcon);
         item->SetTarget(target);
         menu->AddItem(item);
-        bookmarks = true;
+        bookmarks = bookmarks || !IsBookmarkletURL(child.url);
     }
     if (folder.children.empty()) {
         auto* empty = new BMenuItem("(Empty)", nullptr);
@@ -1474,7 +1474,8 @@ void BookmarksBar::ShowContextMenu(int32 index, BPoint where)
     } else {
         const auto& item = Items()[index];
         menu->AddItem(new BMenuItem("Open", BookmarkMessage(kOpenBookmark, item.url)));
-        menu->AddItem(new BMenuItem("Open in New Tab", BookmarkMessage(kOpenBookmark, item.url, true)));
+        if (!IsBookmarkletURL(item.url))
+            menu->AddItem(new BMenuItem("Open in New Tab", BookmarkMessage(kOpenBookmark, item.url, true)));
         menu->AddSeparatorItem();
         menu->AddItem(new BMenuItem("Edit…", NodeMessage(kEditBookmark, "id", item.id)));
         menu->AddItem(new BMenuItem("Remove from Bookmarks Bar", BookmarkMessage(kRemoveFromBookmarksBar, item.url)));

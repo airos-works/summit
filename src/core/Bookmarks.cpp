@@ -1,4 +1,5 @@
 #include "Bookmarks.h"
+#include "Address.h"
 #include <algorithm>
 #include <cctype>
 #include <ctime>
@@ -124,7 +125,20 @@ static bool StartsWithLower(const std::string& text, const char* prefix)
 bool IsBookmarkableURL(const std::string& url)
 {
     if (url.empty() || url.size() > 65536 || url.find('\0') != std::string::npos) return false;
-    return StartsWithLower(url, "https://") || StartsWithLower(url, "http://") || StartsWithLower(url, "file://");
+    return StartsWithLower(url, "https://") || StartsWithLower(url, "http://") || StartsWithLower(url, "file://") || IsBookmarkletURL(url);
+}
+
+bool IsBookmarkletURL(const std::string& url)
+{
+    return url.size() <= 65536 && url.find('\0') == std::string::npos && StartsWithLower(url, "javascript:");
+}
+
+std::string NormalizeBookmarkAddress(std::string_view text)
+{
+    auto url = Trim(text);
+    if (!url.empty() && url.find("://") == std::string::npos && !StartsWithLower(url, "file:") && !StartsWithLower(url, "javascript:"))
+        url = "https://" + url;
+    return url;
 }
 
 size_t CountBookmarks(const BookmarkNode& folder)

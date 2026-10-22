@@ -122,10 +122,9 @@ void BookmarkEditor::Save()
     std::string title = Trim(fName->Text());
     std::string url = fAddress ? Trim(fAddress->Text()) : std::string();
     if (!folder) {
-        // An address typed without its scheme is a web address.
-        if (!url.empty() && url.find("://") == std::string::npos && url.rfind("file:", 0) != 0) url = "https://" + url;
+        url = NormalizeBookmarkAddress(url);
         if (!IsBookmarkableURL(url)) {
-            auto* alert = new BAlert("Edit Bookmark", "Bookmarks keep web addresses (https://…) and files (file://…).",
+            auto* alert = new BAlert("Edit Bookmark", "Bookmarks keep web addresses (https://…), files (file://…) and bookmarklets (javascript:…).",
                 "OK", nullptr, nullptr, B_WIDTH_AS_USUAL, B_WARNING_ALERT);
             alert->SetShortcut(0, B_ESCAPE);
             alert->Go(nullptr);

@@ -369,7 +369,7 @@ int main()
         CHECK(profile.ForgetVisitsSince(now - 3600) == 0 && profile.history.size() == 1);
     }
     Bookmarks marks;
-    CHECK(marks.Add({"https://x.example/", "X"}, kBookmarksBarFolder) && !marks.Add({"javascript:bad", "J"}, kOtherBookmarksFolder));
+    CHECK(marks.Add({"https://x.example/", "X"}, kBookmarksBarFolder) && !marks.Add({"data:text/html,bad", "J"}, kOtherBookmarksFolder));
     CHECK(marks.AddFolder(kOtherBookmarksFolder, "Reading"));
     auto bookmarksHTML = RenderBookmarksPage(marks,
         [](const std::string&) { return std::string("data:image/png;base64,\"evil"); }, "abc123");

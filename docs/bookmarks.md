@@ -3,7 +3,9 @@
 Added 19 October 2026 for [issue #69](https://github.com/jmgasper/summit/issues/69).
 Summit's bookmarks used to be a flat list with a "bar" flag; they are now two
 folders, **Bookmarks Bar** and **Other Bookmarks**, that hold bookmarks,
-separators and folders nested up to 32 deep. No engine change.
+separators and folders nested up to 32 deep. The original folder support
+required no engine change; bookmarklet execution uses the modern engine API
+added on 22 October 2026 for #110.
 
 ## What the user sees
 
@@ -36,6 +38,15 @@ separators and folders nested up to 32 deep. No engine change.
   without a scheme gets `https://`. **Delete** removes the bookmark; deleting
   a folder that has bookmarks in it asks first ("Delete the folder “Work” and
   the 12 bookmarks in it?").
+- **Bookmarklets** are saved `javascript:` addresses. Import or edit one as
+  a bookmark, then select it from the Bookmarks menu or bar while viewing a
+  webpage. A saved keyword can run it too. It acts on the selected page;
+  Open All in Tabs skips scripts, and scripts have no Open in New Tab command.
+  The Bookmarks tab shows an inert entry with editing controls and instructions
+  to run it on a webpage. Ordinary address-field input still rejects raw
+  `javascript:` URLs. Execution requires the modern engine and an HTTP(S) or
+  local-file document; internal pages, error pages, Reader Mode, loading pages
+  and documents that disable scripts cannot run bookmarklets.
 - **Imported separators** retain their positions. Menus show native separator
   lines, the bar shows vertical lines, and the Bookmarks tab shows draggable
   separator rows with Delete. A separator on the bar can be dragged or removed
@@ -81,8 +92,8 @@ separators and folders nested up to 32 deep. No engine change.
   title and location, gain new tags and keyword aliases, and receive a description only if they have
   none. Importing again adds only what is new; folders left empty by duplicates are not made,
   and an "Imported from …" folder that exists is filled again (its folders of
-  the same name merged). javascript: bookmarklets and Firefox's `place:`
-  queries are counted and left out. Empty folders present in the source are
+  the same name merged). Bookmarklets retain their script source and metadata;
+  Firefox's `place:` queries are counted and left out. Empty folders present in the source are
   kept, including imports containing no addresses. The window reports added
   bookmarks, folders and separators, updated metadata, skipped addresses, and imported history.
 - **File › Export Bookmarks…** saves `bookmarks.html` (Netscape bookmarks
@@ -178,6 +189,18 @@ separators and folders nested up to 32 deep. No engine change.
   produce an error asking the user to edit them, rather than selecting an
   arbitrary bookmark. Expansions are bounded before allocating large results.
   Selecting a suggestion retains the shortcut input so POST data is preserved.
+- **Bookmarklet execution** uses `BWebKitView::RunBookmarklet`, carrying the
+  selected tab's navigation generation and the renderer's document identifier.
+  Both processes reject a changed document. WebCore executes the decoded
+  source in the page's main world with a user gesture. A string completion
+  replaces the document as HTML at the same URL without adding history;
+  other results leave the document in place. Explicit browser activation
+  bypasses the JavaScript URL's CSP/Trusted Types pre-navigation checks, while
+  the document's policy still applies to page links and injected scripts.
+  Sandbox restrictions and the script-enabled setting remain enforced.
+  Script addresses are bounded to 64 KiB and reject embedded NULs. Ordinary
+  URL suggestions omit them; their deliberately assigned keywords remain
+  available. Bookmarklet POST requests are rejected.
 - **POST shortcut requests** use the modern engine's `BWebKitView::LoadForm`,
   with `application/x-www-form-urlencoded` and HTTP(S) destinations. The engine
   retains its normal navigation, redirect and history behavior. An approved
@@ -208,8 +231,8 @@ separators and folders nested up to 32 deep. No engine change.
 - **Menus**: the window copies the bookmarks into `BookmarkButton` trees
   (`src/ui/Chrome.h`); `BookmarkFolderMenu` fills a submenu from its copy in
   `AttachedToWindow`, on the menu's own thread, so nothing there touches the
-  profile or the window's icon cache. Only the bar's own buttons have site
-  icons.
+  profile or the window's icon cache. The copied menu entries carry their
+  cached site icons, as do the bar's buttons (follow-up `fe98c85`).
 - **Drags** carry `summit:url`, `summit:title` and `summit:bookmark` (the
   node id, for moves) or `summit:tab`, plus what Tracker's negotiated drop
   needs (`be:actions` B_COPY_TARGET, `be:types` B_FILE_MIME_TYPE,
@@ -222,6 +245,41 @@ separators and folders nested up to 32 deep. No engine change.
   [mcp.md](mcp.md)).
 
 ## Testing
+
+The bookmarklet follow-up passes **327 bookmark checks** on both the host and
+native airOS, the host core suite, and **38 native UI checks**. These cover HTML,
+Chrome JSON and Firefox SQLite import, profile/export round trips, script
+address validation, editing, keyword binding and native menu construction.
+
+`tests/BookmarkletTests.cpp` and `tools/test-bookmarklets.py` pass **62 native
+checks and 3 runner assertions** against the candidate engine. They verify
+UTF-8 percent decoding, main-world changes, user activation, non-string and
+string completion, exceptions, stale generations and document replacement,
+CSP preservation for page links and injected scripts, and script-disabled
+sandbox rejection. All four candidate engine images are verified as loaded;
+all **75 frozen hashes** remain unchanged. The process exits normally with no
+helpers or crash events across the complete log interval.
+
+`tests/NativeBookmarkletActivationTests.cpp` passes **48 assertions** in the
+full browser, including actual bar clicks, address-field keyword entry,
+native editor Save, background-tab isolation, internal-page rejection and
+Open All skipping scripts. A further **20 browser/fixture checks** cover
+import, inline editing, persisted profile and HTML, exactly-once page requests,
+and lifecycle/provenance. The saved Bookmarks page was rendered by WebCore and
+visually inspected. All **660 frozen source/runtime hashes** remain unchanged;
+the browser exits zero, leaves no helpers and has a clean complete crash-log
+interval. These runs use an isolated airOS candidate. Stock-Haiku and published
+package acceptance, local-file execution, native menu clicks and the native
+editor's visual layout were not checked in this run. Results and provenance:
+[`bookmarklets-native-2026-10-22.json`](bookmarklets-native-2026-10-22.json).
+
+Run the execution probe on Haiku with `tools/test-bookmarklets.py --probe
+/path/to/BookmarkletTests --bundle /path/to/lib/summit-webkit --images-helper
+/path/to/NativeLoadedImages --output /path/to/new-result-directory`. Build
+`tests/BookmarkletTests.cpp` against the candidate engine's headers and
+`libWebKit`, with `-std=c++23 -Ivendor -lWebKit -lbe -lnetwork`. The probe includes
+the helpers in `tests/ModernPDFTests.cpp`; compile only the bookmarklet source.
+The runner serves its fixtures on loopback and uses a private browser context.
 
 The keyword follow-up passes **295 bookmark checks** on both the host and
 native airOS, the host core suite, and **33 native UI checks**. HTML and Firefox
@@ -344,13 +402,13 @@ engine, profile `p-bm`):
 
 ## Not done
 
-- Keywords are not imported; Firefox's
-  smart folders (`place:` queries) and bookmarklets are skipped.
+- Firefox's smart folders (`place:` queries) are skipped. Keywords and
+  bookmarklets are supported by the 22 October #110 follow-ups.
 - ~~Exporting and importing back leaves out empty folders.~~ Done 20 October
   (#110): a folder empty in the file is imported (one only duplicates filled is
   still left out), and the HTML reader drops the browsers' own root folders
   (`PERSONAL_TOOLBAR_FOLDER`, `UNFILED_BOOKMARKS_FOLDER`) when they are empty,
   so an export with an empty bar does not come back with an empty "Bookmarks Bar".
-- The Bookmarks menu shows no site icons.
-- Opening a bookmark file with Summit from Tracker (Open With) was not tried
-  on the X399; dropping one on the bar was.
+- Tracker's Open With delivery was checked on the X399 on 20 October: a Haiku
+  bookmark file delivered through `B_REFS_RECEIVED` opens its address in a new
+  tab. This updates the original 19 October test limitation above.

@@ -115,6 +115,7 @@ static constexpr uint32 kStoreItemResolved = 'stir';
 static constexpr uint64 kPictureInPictureQuery = uint64(1) << 61;
 // The page script of Install as App… (#75).
 static constexpr uint64 kWebAppQuery = (uint64(1) << 61) + 1;
+static constexpr uint64 kBookmarkletQuery = (uint64(1) << 61) + 2;
 // Every 20 seconds while the current tab asks for the screen to stay on.
 static constexpr uint32 kKeepScreenAwake = 'kawk';
 static constexpr bigtime_t kKeepScreenAwakeInterval = 20000000;
@@ -522,7 +523,7 @@ private:
 
 static bool Bookmarkable(const std::string& url)
 {
-    return url.rfind("https://", 0) == 0 || url.rfind("http://", 0) == 0 || url.rfind("file://", 0) == 0;
+    return IsBookmarkableURL(url);
 }
 // Menu labels are cut at a character boundary; BMenu does not truncate.
 static std::string MenuLabel(const PageRecord& page)
@@ -563,9 +564,7 @@ static const std::string& BookmarkPageSecret()
 // An address typed without its scheme is a web address.
 static std::string BookmarkAddress(const std::string& typed)
 {
-    std::string url = Trim(typed);
-    if (!url.empty() && url.find("://") == std::string::npos && url.rfind("file:", 0) != 0) url = "https://" + url;
-    return url;
+    return NormalizeBookmarkAddress(typed);
 }
 static bool FindDownloads(BPath& path, std::string& error)
 {
@@ -1805,11 +1804,38 @@ void BrowserWindow::FinishCloseTab(int64 id)
         return;
     }
 }
+void BrowserWindow::RunBookmarklet(const std::string& url)
+{
+    auto* tab = ActiveTab();
+    if (!IsBookmarkletURL(url)) return;
+    // Internal pages have a summit: stored URL even though the engine loads
+    // generated files. Never give a saved script their browser privileges.
+    if (!tab || !Bookmarkable(tab->url) || IsBookmarkletURL(tab->url) || tab->loading) {
+        fStatus->SetText("Open a webpage before running this bookmarklet.");
+        return;
+    }
+#if SUMMIT_MODERN_WEBKIT
+    if (tab->processExited || tab->errorView || tab->readerActive || !tab->loadError.empty() || !tab->loadGeneration) {
+        fStatus->SetText("This page cannot run bookmarklets.");
+        return;
+    }
+    HideSuggestions();
+    fAddressTyped.clear();
+    fAddressShown = DisplayURL(tab->ShownURL());
+    fAddress->SetText(fAddressShown.c_str());
+    tab->view->MakeFocus(true);
+    tab->view->RunBookmarklet(url.c_str(), BMessenger(this), kBookmarkletQuery, tab->loadGeneration);
+    fStatus->SetText("Running bookmarklet…");
+#else
+    fStatus->SetText("Bookmarklets require Summit's modern engine.");
+#endif
+}
 void BrowserWindow::Navigate(const std::string& text)
 {
     const auto keyword = fShared->Read([&](const Profile& profile) { return profile.bookmarks.ResolveKeyword(text); });
     auto address = keyword ? Address{keyword->url, keyword->error, false} : ResolveAddress(text);
     if (!address.error.empty()) { ShowError(address.error); return; }
+    if (keyword && IsBookmarkletURL(address.url)) { RunBookmarklet(address.url); return; }
     if (IsExternalScheme(URLScheme(address.url))) {
         if (auto* tab = ActiveTab()) fProtocolHandlers->Open(address.url, tab->id, tab->url);
         return;
@@ -3305,7 +3331,7 @@ bool BrowserWindow::BookmarkPageRequest(Tab& tab, const std::string& source, con
             const auto* node = bookmarks.Find(link->id);
             if (!node || !bookmarks.Parent(link->id)) return 0;
             if (!node->folder && !IsBookmarkableURL(address)) {
-                status = "Not saved: bookmarks keep web addresses (https://…) and files (file://…).";
+                status = "Not saved: bookmarks keep web addresses (https://…), files (file://…) and bookmarklets (javascript:…).";
                 return 0;
             }
             changed = bookmarks.Edit(link->id, title.empty() ? (node->folder ? "Untitled Folder" : address) : title, address);
@@ -3821,6 +3847,13 @@ void BrowserWindow::MessageReceived(BMessage* message)
         case kTranslationStatus: TranslationStatus(*message); break;
         case kTranslationTick: TranslationTick(); break;
         case B_WEBKIT_JAVASCRIPT_RESULT:
+            if (message->GetUInt64("identifier", 0) == kBookmarkletQuery) {
+                BMessenger view;
+                if (tab && message->FindMessenger("view", &view) == B_OK && view == BMessenger(tab->view)
+                    && message->GetUInt64("generation", 0) == tab->loadGeneration)
+                    fStatus->SetText(message->GetString("error", "Bookmarklet finished."));
+                break;
+            }
             if (TranslationResult(*message)) break;
             if (message->GetUInt64("identifier", 0) == kWebAppQuery) {
                 InstallWebAppResult(*message);
@@ -4046,6 +4079,13 @@ void BrowserWindow::MessageReceived(BMessage* message)
         case kOpenBookmark: {
             const char* url = nullptr;
             if (message->FindString("url", &url) != B_OK || !url) break;
+            if (IsBookmarkletURL(url)) {
+                // This message is also used by history and tab-strip drops.
+                // Only a deliberately saved bookmark may run a script.
+                if (fShared->Read([&](const Profile& profile) { return profile.bookmarks.Contains(url); }))
+                    RunBookmarklet(url);
+                break;
+            }
             if (message->GetBool("new_tab", false)) CreateTab(url);
             else Navigate(url);
             break;
@@ -4150,7 +4190,7 @@ void BrowserWindow::MessageReceived(BMessage* message)
                 std::vector<std::string> urls;
                 if (const auto* folder = profile.bookmarks.Find(id))
                     for (const auto& child : folder->children)
-                        if (!child.folder && !child.separator && urls.size() < 50) urls.push_back(child.url);
+                        if (!child.folder && !child.separator && !IsBookmarkletURL(child.url) && urls.size() < 50) urls.push_back(child.url);
                 return urls;
             });
             for (size_t i = 0; i < urls.size(); ++i) CreateTab(urls[i], i == 0);

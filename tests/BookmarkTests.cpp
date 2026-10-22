@@ -66,7 +66,7 @@ int main()
         const auto c = marks.Add({"https://c.example/", "C"}, work);
         const auto d = marks.Add({"https://d.example/", "D"}, kOtherBookmarksFolder);
         CHECK(a && b && work && c && d && marks.Count() == 4 && marks.FolderCount() == 1);
-        CHECK(!marks.Add({"javascript:alert(1)", "J"}, kOtherBookmarksFolder) && !marks.Add({"https://x.example/", "X"}, 999));
+        CHECK(!marks.Add({"data:text/html,bad", "J"}, kOtherBookmarksFolder) && !marks.Add({"https://x.example/", "X"}, 999));
         CHECK(!marks.Add({"https://x.example/", "X"}, a));
         CHECK(Titles(marks.Bar()) == "A,B,Work/" && Titles(marks.Other()) == "D");
         // The flat list: the bar's first, those on the bar itself marked.
@@ -95,7 +95,7 @@ int main()
         folders = marks.Folders(work);
         CHECK(folders.size() == 2 && folders[1].id == kOtherBookmarksFolder);
         CHECK(marks.Edit(c, "See", "https://see.example/") && marks.Find(c)->url == "https://see.example/");
-        CHECK(!marks.Edit(c, "See", "https://see.example/") && !marks.Edit(c, "Bad", "javascript:x"));
+        CHECK(!marks.Edit(c, "See", "https://see.example/") && !marks.Edit(c, "Bad", "data:text/html,x"));
         CHECK(marks.Edit(work, "Job", "ignored") && marks.Find(work)->title == "Job" && marks.Find(work)->url.empty());
         CHECK(!marks.Edit(kBookmarksBarFolder, "Renamed", ""));
         CHECK(marks.Add({"https://b.example/", "B again"}, inner));
@@ -140,7 +140,7 @@ int main()
         CHECK(error.empty() && Titles(loaded.bookmarks.Bar()) == "One,Three" && Titles(loaded.bookmarks.Other()) == "Two");
         // Unusable tree entries are dropped instead of failing the profile.
         { std::ofstream out(path); out << R"({"version":1,"tabs":[],"selected":0,"history":[],"bookmarks":[],"bookmarkTree":)"
-            R"json({"bar":[{"title":"Bad","url":"javascript:void(0)"},{"title":"Good","url":"https://good.example/"},7,)json"
+            R"json({"bar":[{"title":"Bad","url":"data:text/html,bad"},{"title":"Good","url":"https://good.example/"},7,)json"
             R"({"url":"https://untitled.example/"},{"title":"Folder","children":"nonsense"}],"other":{}}})"; }
         loaded = Profile::Load(path, error);
         CHECK(error.empty() && Titles(loaded.bookmarks.Bar()) == "Good,Folder/" && loaded.bookmarks.Other().children.empty());
@@ -831,6 +831,78 @@ int main()
         CHECK(link->folder == 2 && link->id == 4);
         link = ParseBookmarkPageLink("summit-bookmarks:save?token=ab&id=4&title=100%");
         CHECK(link && link->title == "100%" && !link->hasURL);
+    }
+
+    // Bookmarklets remain source text through import, both editors' address
+    // normalization, profile persistence and export. The manager never runs
+    // that text as one of its own links.
+    {
+        const std::string script = "JaVaScRiPt:void(document.title='Café & <test> %25')";
+        CHECK(IsBookmarkletURL(script) && IsBookmarkableURL(script));
+        CHECK(IsBookmarkletURL("javascript:") && !IsBookmarkletURL("javascriptx:alert(1)"));
+        CHECK(!IsBookmarkletURL(std::string("javascript:x\0y", 14)));
+        CHECK(!IsBookmarkableURL("javascript:" + std::string(65536, 'x')));
+        CHECK(NormalizeBookmarkAddress("  " + script + "  ") == script);
+        CHECK(NormalizeBookmarkAddress("example.com") == "https://example.com");
+        CHECK(NormalizeBookmarkAddress("FILE:///boot/home/a.html") == "FILE:///boot/home/a.html");
+        Profile profile;
+        auto& marks = profile.bookmarks;
+        const auto id = marks.Add({script, "Mark <page>"}, kBookmarksBarFolder);
+        CHECK(id && marks.Count() == 1 && marks.Pages()[0].url == script);
+        CHECK(marks.SetMetadata(id, {"A bookmarklet", {"tools"}, {{"mark", "", ""}}}));
+        CHECK(marks.ResolveKeyword("mark") && marks.ResolveKeyword("mark")->url == script && marks.ResolveKeyword("mark")->error.empty());
+        CHECK(!marks.ResolveKeyword(script));
+        const auto html = WriteNetscapeBookmarks(marks);
+        BookmarkNode imported;
+        std::string error;
+        CHECK(ParseNetscapeBookmarks(html, imported, error));
+        Bookmarks fresh;
+        const auto importedResult = fresh.Import(imported, "Imported");
+        CHECK(importedResult.added == 1 && importedResult.unsupported == 0);
+        CHECK(fresh.FindURL(script) && fresh.FindURL(script)->metadata == marks.Find(id)->metadata);
+        CHECK(fresh.Import(imported, "Imported").duplicates == 1 && fresh.Count() == 1);
+        const auto path = directory / "bookmarklets.json";
+        CHECK(profile.Save(path, error));
+        const auto loaded = Profile::Load(path, error);
+        CHECK(error.empty() && loaded.bookmarks.FindURL(script) && loaded.bookmarks.OnBar(script));
+        CHECK(loaded.bookmarks.FindURL(script)->metadata == marks.Find(id)->metadata);
+        const auto manager = RenderBookmarksPage(marks, nullptr, "ab12");
+        CHECK(manager.find("href=\"JaVaScRiPt:") == std::string::npos && manager.find("href=\"javascript:") == std::string::npos);
+        CHECK(manager.find("Bookmarklet — run on a webpage") != std::string::npos);
+        CHECK(manager.find("Mark &lt;page&gt;") != std::string::npos && manager.find("data-url=\"JaVaScRiPt:") != std::string::npos);
+        CHECK(marks.Edit(id, "Changed", "javascript:void(window.changed=1)") && marks.Count() == 1);
+        CHECK(marks.Move(id, kOtherBookmarksFolder, kBookmarkEnd) && !marks.OnBar("javascript:void(window.changed=1)"));
+        const auto parameter = marks.Add({"javascript:void(window.term='%s')", "Parameterized"}, kBookmarksBarFolder);
+        CHECK(marks.SetMetadata(parameter, {{}, {}, {{"term", "", ""}}}));
+        const auto bound = marks.ResolveKeyword("term café & tea");
+        CHECK(bound && bound->error.empty() && bound->url == "javascript:void(window.term='caf%C3%A9%20%26%20tea')");
+        CHECK(marks.SetMetadata(parameter, {{}, {}, {{"term", "q=%s", ""}}}));
+        CHECK(!marks.ResolveKeyword("term x")->error.empty());
+        BookmarkNode chrome;
+        const auto chromeSource = nlohmann::json{{"roots", {{"bookmark_bar", {{"type", "folder"}, {"children", nlohmann::json::array({{{"type", "url"}, {"name", "Chrome script"}, {"url", script}}})}}}}}};
+        CHECK(ParseChromeBookmarks(chromeSource.dump(), chrome, error));
+        Bookmarks chromeMarks;
+        CHECK(chromeMarks.Import(chrome, "Chrome").added == 1 && chromeMarks.Contains(script));
+
+        const auto db = directory / "bookmarklets.sqlite";
+        if (MakeDatabase(sqlite, db, R"(
+            CREATE TABLE moz_places (id INTEGER PRIMARY KEY, url TEXT, title TEXT);
+            CREATE TABLE moz_bookmarks (id INTEGER PRIMARY KEY, type INTEGER, fk INTEGER, parent INTEGER, position INTEGER, title TEXT, dateAdded INTEGER, guid TEXT);
+            INSERT INTO moz_places VALUES(1, 'javascript:void(window.firefox=1)', 'Firefox script');
+            INSERT INTO moz_bookmarks VALUES(1,2,NULL,0,0,'',0,'root________'), (2,2,NULL,1,0,'Menu',0,'menu________'), (3,1,1,2,0,'Firefox script',1700000000000000,'bookmark____');
+            CREATE TABLE moz_keywords (id INTEGER PRIMARY KEY, keyword TEXT, place_id INTEGER, post_data TEXT);
+            INSERT INTO moz_keywords VALUES(1,'fx',1,NULL);
+        )")) {
+            BookmarkImportOptions options;
+            options.sqliteLibrary = sqlite;
+            options.history = false;
+            ImportedBookmarks firefox;
+            CHECK(ReadImport(db, options, firefox, error));
+            Bookmarks firefoxMarks;
+            CHECK(firefoxMarks.Import(firefox.bookmarks, "Firefox").added == 1);
+            const auto fx = firefoxMarks.ResolveKeyword("fx");
+            CHECK(fx && fx->url == "javascript:void(window.firefox=1)" && fx->error.empty());
+        }
     }
 
     std::filesystem::remove_all(directory);

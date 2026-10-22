@@ -135,9 +135,18 @@ public:
         result = ImportBookmarksFrom(*fShared, metadataFile, false);
         Check(result.ok && result.message.find("Updated") == std::string::npos, "identical metadata reimport changes nothing");
 
+        const auto scriptFile = fDirectory / "bookmarklet.html";
+        { std::ofstream file(scriptFile); file << "<DL><DT><A HREF='javascript:void(window.saved=1)'>Script</A></DL>"; }
+        result = ImportBookmarksFrom(*fShared, scriptFile, false);
+        Check(result.ok && result.bookmarks == 1 && result.message.find("could not be kept") == std::string::npos,
+            "native import accepts a bookmarklet without an unsupported-address warning");
+        Check(fShared->Save(error), "bookmarklet import saved");
+        loaded = Profile::Load(profilePath, error);
+        Check(error.empty() && loaded.bookmarks.Contains("javascript:void(window.saved=1)"), "native bookmarklet import survives reopening");
+
         BookmarkEditor::Fields fields;
         fields.title = "Editor test";
-        fields.url = "https://metadata.example/";
+        fields.url = "JaVaScRiPt:void(document.title='Edited')";
         fields.metadata = {"Original\nnotes", {"one", "comma, tag"}};
         fields.metadata.keywords = {{"search", "q=%s", {}}};
         fields.folders = {{kOtherBookmarksFolder, 0, "Other Bookmarks"}};
@@ -173,6 +182,16 @@ public:
         BMenu emptyMenu("Separators");
         AddBookmarkItems(&emptyMenu, onlySeparators, *onlySeparators, BMessenger(this));
         Check(emptyMenu.CountItems() == 2, "separator-only menu offers no Open All command");
+        auto scripts = std::make_shared<BookmarkButton>();
+        scripts->folder = true;
+        BookmarkButton script;
+        script.url = "javascript:void(window.menu=1)";
+        script.title = "Bookmarklet";
+        scripts->children.push_back(script);
+        BMenu scriptMenu("Scripts");
+        AddBookmarkItems(&scriptMenu, scripts, *scripts, BMessenger(this));
+        Check(scriptMenu.CountItems() == 1 && scriptMenu.ItemAt(0)->Message()
+            && scriptMenu.ItemAt(0)->Message()->what == kOpenBookmark, "bookmarklet-only folder has activation but no Open All");
 
         BBitmap bitmap(BRect(0, 0, 399, 27), B_RGB32, true);
         const bool locked = bitmap.InitCheck() == B_OK && bitmap.Lock();
@@ -199,6 +218,8 @@ public:
         if (message->what == kProfileChanged) {
             if (message->GetUInt32("changes", 0) & SharedProfile::kBookmarksChanged) ++fNotifications;
         } else if (message->what == kBookmarkEdited) {
+            Check(std::string(message->GetString("url", "")) == "JaVaScRiPt:void(document.title='Edited')",
+                "native editor saves bookmarklet source without adding https");
             Check(std::string(message->GetString("keywords", "")) == "search, alias", "native Save carries edited shortcut names");
             Check(std::string(message->GetString("description", "")) == "Edited\nsecond line",
                 "native Save retains the edited multiline description");
@@ -216,7 +237,7 @@ public:
     void Pulse() override
     {
         if (fDone && !fWindow.IsValid() && fEditorDone && !fEditor.IsValid()) {
-            Check(fNotifications == 4, "only changed imports notify the browser windows");
+            Check(fNotifications == 5, "only changed imports notify the browser windows");
             fShared.reset();
             std::printf("%d native checks, %d failures\n", checks, failures);
             PostMessage(B_QUIT_REQUESTED);

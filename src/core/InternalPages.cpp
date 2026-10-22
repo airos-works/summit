@@ -511,8 +511,9 @@ void BookmarkItems(PageWriter& writer, const std::vector<BookmarkNode>& nodes)
             writer.Raw("</div></div>\n");
             continue;
         }
-        const bool link = IsBookmarkableURL(node.url);
-        auto shown = node.url;
+        const bool bookmarklet = IsBookmarkletURL(node.url);
+        const bool link = IsBookmarkableURL(node.url) && !bookmarklet;
+        auto shown = bookmarklet ? std::string("Bookmarklet — run on a webpage from the Bookmarks menu or bar.") : node.url;
         if (auto scheme = shown.find("://"); scheme != std::string::npos) shown.erase(0, scheme + 3);
         writer.Raw("<div class=\"item\" data-id=\"" + id + "\"><div class=\"row\" data-title=\"" + EscapeHTML(node.title)
             + "\" data-url=\"" + EscapeHTML(node.url) + "\"" + MetadataAttributes(node) + ">");

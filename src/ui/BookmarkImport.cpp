@@ -189,7 +189,7 @@ ImportOutcome ImportBookmarksFrom(SharedProfile& shared, const std::filesystem::
         text += " " + std::to_string(result.duplicates) + (result.duplicates == 1 ? " was already bookmarked." : " were already bookmarked.");
     if (result.unsupported)
         text += " " + Count(result.unsupported, "bookmark", "bookmarks") + " could not be kept: Summit bookmarks web "
-            "addresses and files (not javascript: bookmarklets or searches).";
+            "addresses, files and javascript: bookmarklets (not saved Firefox place: searches).";
     if (result.overLimit)
         text += " Some items did not fit: Summit keeps at most " + std::to_string(kMaxBookmarks) + " bookmarks, "
             + std::to_string(kMaxBookmarkFolders) + " folders and " + std::to_string(kMaxBookmarkSeparators) + " separators.";

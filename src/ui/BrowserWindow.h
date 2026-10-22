@@ -437,6 +437,7 @@ private:
     void ReplaceTabView(const Tab& tab, const std::string& url);
 #endif
     void Navigate(const std::string& text);
+    void RunBookmarklet(const std::string& url);
     // Address field type-ahead: the typed site is completed in the field and
     // matching pages are listed under it (core/Suggest.h, AddressSuggestions.h).
     void AddressModified();
