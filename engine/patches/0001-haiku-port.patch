@@ -5140,7 +5140,7 @@ index fb688cc015cd74b8fa16c7073b3a0c9f61f4aee2..4eee13adc7844b818bb6e27103cc16a1
  
  enum class UTextProviderContext {
 diff --git a/Source/WebCore/CMakeLists.txt b/Source/WebCore/CMakeLists.txt
-index 68eeee74effd53dd2134f8dd2f34a03e78c0eb46..a1143f47f4645a691d075d1cf6acced6ee9cdc6c 100644
+index 68eeee74effd53dd2134f8dd2f34a03e78c0eb46..cb9d7fec5cb9328fa5b4baeee960eab5d6e02ef4 100644
 --- a/Source/WebCore/CMakeLists.txt
 +++ b/Source/WebCore/CMakeLists.txt
 @@ -75,6 +75,7 @@ set(WebCore_PRIVATE_INCLUDE_DIRECTORIES
@@ -5244,7 +5244,7 @@ index 68eeee74effd53dd2134f8dd2f34a03e78c0eb46..a1143f47f4645a691d075d1cf6acced6
      page/NavigatorCookies.idl
      page/NavigatorGlobalPrivacyControl.idl
      page/NavigatorID.idl
-@@ -2206,6 +2213,55 @@ if (USE_APPLE_INTERNAL_SDK)
+@@ -2206,6 +2213,61 @@ if (USE_APPLE_INTERNAL_SDK)
      )
  endif ()
  
@@ -5271,9 +5271,15 @@ index 68eeee74effd53dd2134f8dd2f34a03e78c0eb46..a1143f47f4645a691d075d1cf6acced6
 +        Modules/webusb/USBRecipient.idl
 +        Modules/webusb/USBRequestType.idl
 +        Modules/webusb/USBTransferStatus.idl
++        Modules/webhid/HID.idl
++        Modules/webhid/HIDConnectionEvent.idl
++        Modules/webhid/HIDDevice.idl
++        Modules/webhid/HIDDeviceFilter.idl
++        Modules/webhid/HIDDeviceRequestOptions.idl
++        Modules/webhid/HIDInputReportEvent.idl
 +    )
-+    list(APPEND WebCore_SUPPLEMENTAL_IDL_FILES Modules/webusb/Navigator+USB.idl)
-+    list(APPEND WebCore_PRIVATE_INCLUDE_DIRECTORIES "${WEBCORE_DIR}/Modules/webusb")
++    list(APPEND WebCore_SUPPLEMENTAL_IDL_FILES Modules/webusb/Navigator+USB.idl Modules/webhid/Navigator+HID.idl)
++    list(APPEND WebCore_PRIVATE_INCLUDE_DIRECTORIES "${WEBCORE_DIR}/Modules/webusb" "${WEBCORE_DIR}/Modules/webhid")
 +endif ()
 +
 +if (ENABLE_WEB_BLUETOOTH)
@@ -5300,7 +5306,7 @@ index 68eeee74effd53dd2134f8dd2f34a03e78c0eb46..a1143f47f4645a691d075d1cf6acced6
  set(WebCore_IDL_FILES
      ${WebCore_NON_SVG_IDL_FILES}
      ${WebCore_SVG_IDL_FILES}
-@@ -3269,6 +3325,19 @@ list(APPEND WebCore_SOURCES ${WebCore_DERIVED_SOURCES_DIR}/Namespace.cpp)
+@@ -3269,6 +3331,19 @@ list(APPEND WebCore_SOURCES ${WebCore_DERIVED_SOURCES_DIR}/Namespace.cpp)
  
  WEBKIT_COMPUTE_SOURCES(WebCore)
  
@@ -5320,7 +5326,7 @@ index 68eeee74effd53dd2134f8dd2f34a03e78c0eb46..a1143f47f4645a691d075d1cf6acced6
  WEBKIT_DEFINE_SUBTARGET_WITH_PREFIX(WebCore WebCoreJSBindings
      PREFIX WebCoreJSBindingsPrefix.h
      PREFIX_LANGUAGES CXX
-@@ -3299,6 +3368,7 @@ WEBKIT_DEFINE_SUBTARGET_WITH_PREFIX(WebCore WebCoreAVFoundation
+@@ -3299,6 +3374,7 @@ WEBKIT_DEFINE_SUBTARGET_WITH_PREFIX(WebCore WebCoreAVFoundation
  WEBKIT_ADD_PREFIX_HEADER(WebCore WebCorePrefix.h PREFIX_LANGUAGES CXX OBJCXX)
  
  list(APPEND WebCore_PRIVATE_FRAMEWORK_HEADERS
@@ -7460,6 +7466,811 @@ index 0000000000000000000000000000000000000000..aeebe3c9455a656d658d90ae8ce86efc
 +dictionary ValueEventInit : EventInit {
 +    any value = null;
 +};
+diff --git a/Source/WebCore/Modules/webhid/HID.cpp b/Source/WebCore/Modules/webhid/HID.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..2149ba8bc0cc03e7a96fa7037f006a4c2de57285
+--- /dev/null
++++ b/Source/WebCore/Modules/webhid/HID.cpp
+@@ -0,0 +1,224 @@
++/* Copyright (C) 2026 Summit contributors. SPDX-License-Identifier: BSD-2-Clause */
++#include "config.h"
++#if ENABLE(WEBUSB)
++#include "HID.h"
++#include "ContextDestructionObserverInlines.h"
++#include "Document.h"
++#include "EventNames.h"
++#include "EventTargetInlines.h"
++#include "HIDConnectionEvent.h"
++#include "HIDInputReportEvent.h"
++#include "JSDOMConvertInterface.h"
++#include "JSDOMConvertSequences.h"
++#include "JSDOMPromiseDeferred.h"
++#include "JSHIDDevice.h"
++#include "LocalDOMWindow.h"
++#include "USB.h"
++#include <wtf/TZoneMallocInlines.h>
++
++namespace WebCore {
++WTF_MAKE_TZONE_ALLOCATED_IMPL(HID);
++WTF_MAKE_TZONE_ALLOCATED_IMPL(HIDConnectionEvent);
++WTF_MAKE_TZONE_ALLOCATED_IMPL(HIDInputReportEvent);
++
++Ref<HID> HID::create(Document& document)
++{
++    auto result = adoptRef(*new HID(document));
++    result->suspendIfNeeded();
++    return result;
++}
++HID::HID(Document& document)
++    : ActiveDOMObject(&document), m_pollTimer(*this, &HID::pollDevices) { }
++HID::~HID() = default;
++Document* HID::document() const { return dynamicDowncast<Document>(scriptExecutionContext()); }
++
++void HID::perform(Document* document, Ref<JSON::Object>&& arguments, Vector<uint8_t>&& bytes, Completion&& completion)
++{
++    // The same document checks, request channel and browser-side origin
++    // policy as WebUSB.
++    arguments->setString("api"_s, "hid"_s);
++    USB::perform(document, WTF::move(arguments), WTF::move(bytes), WTF::move(completion));
++}
++
++Ref<HIDDevice> HID::device(Ref<JSON::Object>&& data)
++{
++    m_devices.removeIf([&](auto& entry) {
++        if (!entry.value->forgotten())
++            return false;
++        m_connected.remove(entry.key);
++        return true;
++    });
++    auto id = data->getString("id"_s);
++    if (!m_stopped && !m_pollTimer.isActive())
++        m_pollTimer.startRepeating(2_s);
++    if (auto it = m_devices.find(id); it != m_devices.end()) {
++        it->value->update(WTF::move(data));
++        return it->value.copyRef();
++    }
++    auto value = HIDDevice::create(*document(), WTF::move(data));
++    m_devices.add(id, value.copyRef());
++    return value;
++}
++
++Vector<Ref<HIDDevice>> HID::devices(const JSON::Object& result)
++{
++    Vector<Ref<HIDDevice>> list;
++    if (auto values = result.getArray("devices"_s)) {
++        for (auto& value : *values) {
++            auto data = value->asObject();
++            if (!data || data->getString("id"_s).isEmpty())
++                continue;
++            auto item = device(data.releaseNonNull());
++            m_connected.add(item->identifier());
++            list.append(WTF::move(item));
++        }
++    }
++    return list;
++}
++
++void HID::getDevices(DOMPromiseDeferred<IDLSequence<IDLInterface<HIDDevice>>>&& promise)
++{
++    auto args = JSON::Object::create();
++    args->setString("operation"_s, "getDevices"_s);
++    perform(document(), WTF::move(args), { }, [this, protectedThis = Ref { *this }, promise = WTF::move(promise)](auto&& response, auto&&) mutable {
++        if (response.hasException()) {
++            promise.reject(response.releaseException());
++            return;
++        }
++        if (m_stopped) {
++            promise.resolve({ });
++            return;
++        }
++        promise.resolve(devices(response.releaseReturnValue()));
++    });
++}
++
++static RefPtr<JSON::Array> filtersJSON(const Vector<HIDDeviceFilter>& filters)
++{
++    if (filters.size() > 64)
++        return nullptr;
++    auto result = JSON::Array::create();
++    for (auto& filter : filters) {
++        // A filter needs at least one member; a product needs its vendor and
++        // a usage its usage page.
++        if ((!filter.vendorId && !filter.productId && !filter.usagePage && !filter.usage)
++            || (filter.productId && !filter.vendorId) || (filter.usage && !filter.usagePage)
++            || (filter.vendorId && *filter.vendorId > 0xffff))
++            return nullptr;
++        auto value = JSON::Object::create();
++        if (filter.vendorId) value->setInteger("vendorId"_s, *filter.vendorId);
++        if (filter.productId) value->setInteger("productId"_s, *filter.productId);
++        if (filter.usagePage) value->setInteger("usagePage"_s, *filter.usagePage);
++        if (filter.usage) value->setInteger("usage"_s, *filter.usage);
++        result->pushObject(WTF::move(value));
++    }
++    return result;
++}
++
++void HID::requestDevice(HIDDeviceRequestOptions&& options, DOMPromiseDeferred<IDLSequence<IDLInterface<HIDDevice>>>&& promise)
++{
++    auto filters = filtersJSON(options.filters);
++    auto exclusions = filtersJSON(options.exclusionFilters);
++    if (!filters || !exclusions) {
++        promise.reject(ExceptionCode::TypeError, "Invalid HID device filter"_s);
++        return;
++    }
++    RefPtr doc = document();
++    if (!doc || !doc->window() || !doc->window()->hasTransientActivation()) {
++        promise.reject(ExceptionCode::SecurityError, "Choosing a HID device requires a user gesture"_s);
++        return;
++    }
++    auto args = JSON::Object::create();
++    args->setString("operation"_s, "requestDevice"_s);
++    args->setArray("filters"_s, filters.releaseNonNull());
++    args->setArray("exclusionFilters"_s, exclusions.releaseNonNull());
++    perform(doc.get(), WTF::move(args), { }, [this, protectedThis = Ref { *this }, promise = WTF::move(promise)](auto&& response, auto&&) mutable {
++        if (response.hasException()) {
++            promise.reject(response.releaseException());
++            return;
++        }
++        if (m_stopped) {
++            promise.resolve({ });
++            return;
++        }
++        promise.resolve(devices(response.releaseReturnValue()));
++    });
++}
++
++void HID::eventListenersDidChange()
++{
++    bool listening = hasEventListeners(eventNames().connectEvent) || hasEventListeners(eventNames().disconnectEvent);
++    if (listening && !m_stopped && !m_pollTimer.isActive())
++        m_pollTimer.startRepeating(2_s);
++    else if (!listening && m_devices.isEmpty())
++        m_pollTimer.stop();
++}
++bool HID::virtualHasPendingActivity() const
++{
++    if (m_stopped)
++        return false;
++    if (hasEventListeners())
++        return true;
++    return std::ranges::any_of(m_devices.values(), [](auto& device) { return device->opened(); });
++}
++void HID::suspend(ReasonForSuspension) { m_pollTimer.stop(); }
++void HID::resume() { eventListenersDidChange(); }
++void HID::stop()
++{
++    m_stopped = true;
++    m_pollTimer.stop();
++    for (auto& entry : m_devices)
++        entry.value->disconnected();
++    m_connected.clear();
++    // The browser process independently closes devices when a page navigates
++    // or closes.
++}
++void HID::pollDevices()
++{
++    if (m_polling || m_stopped)
++        return;
++    m_polling = true;
++    auto args = JSON::Object::create();
++    args->setString("operation"_s, "getDevices"_s);
++    perform(document(), WTF::move(args), { }, [this, protectedThis = Ref { *this }](auto&& response, auto&&) mutable {
++        m_polling = false;
++        if (response.hasException() || m_stopped)
++            return;
++        HashSet<String> connected;
++        Vector<Ref<Event>> events;
++        auto result = response.releaseReturnValue();
++        if (auto values = result->getArray("devices"_s)) {
++            for (auto& value : *values) {
++                auto data = value->asObject();
++                if (!data || data->getString("id"_s).isEmpty())
++                    continue;
++                auto item = device(data.releaseNonNull());
++                auto id = item->identifier();
++                connected.add(id);
++                if (!m_connected.contains(id)) {
++                    HIDConnectionEvent::Init init { { }, item.copyRef() };
++                    events.append(HIDConnectionEvent::create(eventNames().connectEvent, WTF::move(init), Event::IsTrusted::Yes));
++                }
++            }
++        }
++        for (auto& id : m_connected) {
++            if (connected.contains(id))
++                continue;
++            if (auto it = m_devices.find(id); it != m_devices.end()) {
++                it->value->disconnected();
++                HIDConnectionEvent::Init init { { }, it->value.copyRef() };
++                events.append(HIDConnectionEvent::create(eventNames().disconnectEvent, WTF::move(init), Event::IsTrusted::Yes));
++            }
++        }
++        m_connected = WTF::move(connected);
++        // A listener may navigate or stop this object. Finish updating the
++        // device map before invoking page code, and iterate a separate list.
++        for (auto& event : events) {
++            if (m_stopped)
++                break;
++            dispatchEvent(event);
++        }
++    });
++}
++} // namespace WebCore
++#endif
+diff --git a/Source/WebCore/Modules/webhid/HID.h b/Source/WebCore/Modules/webhid/HID.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..d92d43db381c0e34685a9b6358b3c7d77fbf12de
+--- /dev/null
++++ b/Source/WebCore/Modules/webhid/HID.h
+@@ -0,0 +1,54 @@
++/* Copyright (C) 2026 Summit contributors. SPDX-License-Identifier: BSD-2-Clause */
++#pragma once
++#if ENABLE(WEBUSB)
++#include "ActiveDOMObject.h"
++#include "EventTarget.h"
++#include "EventTargetInterfaces.h"
++#include "HIDDevice.h"
++#include "HIDDeviceRequestOptions.h"
++#include "IDLTypes.h"
++#include "JSDOMPromiseDeferredForward.h"
++#include "Timer.h"
++#include <wtf/CompletionHandler.h>
++#include <wtf/HashMap.h>
++#include <wtf/text/StringHash.h>
++
++namespace WebCore {
++// navigator.hid. Requests go to the browser process's WebUSB broker, which
++// owns the devices ("api": "hid").
++class HID final : public RefCounted<HID>, public EventTarget, public ActiveDOMObject {
++    WTF_MAKE_TZONE_ALLOCATED(HID);
++public:
++    static Ref<HID> create(Document&);
++    ~HID();
++    void ref() const final { RefCounted::ref(); }
++    void deref() const final { RefCounted::deref(); }
++    USING_CAN_MAKE_WEAKPTR(EventTarget);
++    ScriptExecutionContext* scriptExecutionContext() const final { return ActiveDOMObject::scriptExecutionContext(); }
++    void getDevices(DOMPromiseDeferred<IDLSequence<IDLInterface<HIDDevice>>>&&);
++    void requestDevice(HIDDeviceRequestOptions&&, DOMPromiseDeferred<IDLSequence<IDLInterface<HIDDevice>>>&&);
++    using Completion = CompletionHandler<void(ExceptionOr<Ref<JSON::Object>>&&, Vector<uint8_t>&&)>;
++    static void perform(Document*, Ref<JSON::Object>&&, Vector<uint8_t>&&, Completion&&);
++private:
++    explicit HID(Document&);
++    EventTargetInterfaceType eventTargetInterface() const final { return EventTargetInterfaceType::HID; }
++    void refEventTarget() final { ref(); }
++    void derefEventTarget() final { deref(); }
++    void stop() final;
++    void suspend(ReasonForSuspension) final;
++    void resume() final;
++    void eventListenersDidChange() final;
++    bool virtualHasPendingActivity() const final;
++    void pollDevices();
++    Ref<HIDDevice> device(Ref<JSON::Object>&&);
++    Vector<Ref<HIDDevice>> devices(const JSON::Object&);
++    Document* document() const;
++    Timer m_pollTimer;
++    HashMap<String, Ref<HIDDevice>> m_devices;
++    HashSet<String> m_connected;
++    bool m_polling { false };
++    bool m_stopped { false };
++};
++} // namespace WebCore
++SPECIALIZE_TYPE_TRAITS_EVENTTARGET(HID)
++#endif
+diff --git a/Source/WebCore/Modules/webhid/HID.idl b/Source/WebCore/Modules/webhid/HID.idl
+new file mode 100644
+index 0000000000000000000000000000000000000000..9840ee4a21d9b194ba14c2db7f9a7ceba16fd4c1
+--- /dev/null
++++ b/Source/WebCore/Modules/webhid/HID.idl
+@@ -0,0 +1,8 @@
++/* Copyright (C) 2026 Summit contributors. SPDX-License-Identifier: BSD-2-Clause */
++[Conditional=WEBUSB, Exposed=Window, SecureContext, ActiveDOMObject]
++interface HID : EventTarget {
++    attribute EventHandler onconnect;
++    attribute EventHandler ondisconnect;
++    Promise<sequence<HIDDevice>> getDevices();
++    Promise<sequence<HIDDevice>> requestDevice(HIDDeviceRequestOptions options);
++};
+diff --git a/Source/WebCore/Modules/webhid/HIDConnectionEvent.h b/Source/WebCore/Modules/webhid/HIDConnectionEvent.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..42461afc6f316c25a9aedb5977c3ceb8275fed06
+--- /dev/null
++++ b/Source/WebCore/Modules/webhid/HIDConnectionEvent.h
+@@ -0,0 +1,20 @@
++/* Copyright (C) 2026 Summit contributors. SPDX-License-Identifier: BSD-2-Clause */
++#pragma once
++#if ENABLE(WEBUSB)
++#include "Event.h"
++#include "HIDDevice.h"
++namespace WebCore {
++class HIDConnectionEvent final : public Event {
++    WTF_MAKE_TZONE_ALLOCATED(HIDConnectionEvent);
++public:
++    struct Init : EventInit { Ref<HIDDevice> device; };
++    static Ref<HIDConnectionEvent> create(const AtomString& type, Init&& init, IsTrusted trusted = IsTrusted::No)
++    { return adoptRef(*new HIDConnectionEvent(type, WTF::move(init), trusted)); }
++    HIDDevice& device() const { return m_device; }
++private:
++    HIDConnectionEvent(const AtomString& type, Init&& init, IsTrusted trusted)
++        : Event(EventInterfaceType::HIDConnectionEvent, type, WTF::move(init), trusted), m_device(WTF::move(init.device)) { }
++    Ref<HIDDevice> m_device;
++};
++}
++#endif
+diff --git a/Source/WebCore/Modules/webhid/HIDConnectionEvent.idl b/Source/WebCore/Modules/webhid/HIDConnectionEvent.idl
+new file mode 100644
+index 0000000000000000000000000000000000000000..8f10cc4692c73806627e2891dc743e60da3f01f2
+--- /dev/null
++++ b/Source/WebCore/Modules/webhid/HIDConnectionEvent.idl
+@@ -0,0 +1,9 @@
++/* Copyright (C) 2026 Summit contributors. SPDX-License-Identifier: BSD-2-Clause */
++[Conditional=WEBUSB, Exposed=Window, SecureContext]
++interface HIDConnectionEvent : Event {
++    constructor([AtomString] DOMString type, HIDConnectionEventInit eventInitDict);
++    [SameObject] readonly attribute HIDDevice device;
++};
++dictionary HIDConnectionEventInit : EventInit {
++    required HIDDevice device;
++};
+diff --git a/Source/WebCore/Modules/webhid/HIDDevice.cpp b/Source/WebCore/Modules/webhid/HIDDevice.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..b3422e11fafa99793a6a3f3f7eae2a841afcd980
+--- /dev/null
++++ b/Source/WebCore/Modules/webhid/HIDDevice.cpp
+@@ -0,0 +1,240 @@
++/* Copyright (C) 2026 Summit contributors. SPDX-License-Identifier: BSD-2-Clause */
++#include "config.h"
++#if ENABLE(WEBUSB)
++#include "HIDDevice.h"
++#include "ContextDestructionObserverInlines.h"
++#include "Document.h"
++#include "EventNames.h"
++#include "EventTargetInlines.h"
++#include "HID.h"
++#include "HIDInputReportEvent.h"
++#include "JSDOMConvertBufferSource.h"
++#include "JSDOMPromiseDeferred.h"
++#include <JavaScriptCore/ArrayBuffer.h>
++#include <JavaScriptCore/JSONObject.h>
++#include <JavaScriptCore/ObjectConstructor.h>
++#include <JavaScriptCore/TopExceptionScope.h>
++#include <wtf/TZoneMallocInlines.h>
++
++namespace WebCore {
++WTF_MAKE_TZONE_ALLOCATED_IMPL(HIDDevice);
++
++static constexpr size_t maximumReportLength = 65536;
++
++Ref<HIDDevice> HIDDevice::create(Document& document, Ref<JSON::Object>&& data)
++{
++    auto result = adoptRef(*new HIDDevice(document, WTF::move(data)));
++    result->suspendIfNeeded();
++    return result;
++}
++HIDDevice::HIDDevice(Document& document, Ref<JSON::Object>&& data)
++    : ActiveDOMObject(&document), m_data(WTF::move(data))
++{
++    m_identifier = m_data->getString("id"_s);
++    if (auto collections = m_data->getArray("collections"_s))
++        m_collections = collections->toJSONString();
++    else
++        m_collections = "[]"_s;
++}
++HIDDevice::~HIDDevice() = default;
++Document* HIDDevice::document() const { return dynamicDowncast<Document>(scriptExecutionContext()); }
++
++static uint16_t number(const JSON::Object& data, ASCIILiteral key)
++{
++    auto value = data.getInteger(key).value_or(0);
++    return value < 0 || value > 65535 ? 0 : value;
++}
++uint16_t HIDDevice::vendorId() const { return number(m_data, "vendorId"_s); }
++uint16_t HIDDevice::productId() const { return number(m_data, "productId"_s); }
++String HIDDevice::productName() const
++{
++    auto name = m_data->getString("productName"_s);
++    return name.isNull() ? emptyString() : name;
++}
++
++JSC::JSValue HIDDevice::collections(JSC::JSGlobalObject& globalObject) const
++{
++    // Built once per wrapper (the attribute is cached) from the descriptor
++    // the browser process parsed, then frozen as a FrozenArray would be.
++    auto& vm = globalObject.vm();
++    auto scope = DECLARE_TOP_EXCEPTION_SCOPE(vm);
++    auto value = JSC::JSONParse(&globalObject, m_collections);
++    if (scope.exception() || !value.isObject()) {
++        scope.clearException();
++        value = JSC::JSONParse(&globalObject, "[]"_s);
++        scope.clearException();
++        return value;
++    }
++    JSC::objectConstructorFreeze(&globalObject, asObject(value));
++    scope.clearException();
++    return value;
++}
++
++void HIDDevice::update(Ref<JSON::Object>&& data)
++{
++    // The same interface: the collections never change.
++    m_data = WTF::move(data);
++}
++
++void HIDDevice::disconnected()
++{
++    m_opened = false;
++    ++m_generation;
++}
++
++Ref<JSON::Object> HIDDevice::arguments(ASCIILiteral operation) const
++{
++    auto result = JSON::Object::create();
++    result->setString("operation"_s, operation);
++    result->setString("id"_s, m_identifier);
++    return result;
++}
++
++void HIDDevice::changeState(ASCIILiteral operation, DOMPromiseDeferred<void>&& promise)
++{
++    bool opening = operation == "open"_s;
++    if (m_busy) {
++        promise.reject(ExceptionCode::InvalidStateError, "A HID open or close is still pending"_s);
++        return;
++    }
++    if ((opening && m_opened) || (operation == "close"_s && !m_opened)) {
++        promise.resolve();
++        return;
++    }
++    m_busy = true;
++    if (!opening) {
++        // Closing ends input at once; the browser answers a pending receive.
++        m_opened = false;
++        ++m_generation;
++    }
++    HID::perform(document(), arguments(operation), { },
++        [this, protectedThis = Ref { *this }, opening, operation, promise = WTF::move(promise)](auto&& response, auto&&) mutable {
++            m_busy = false;
++            if (response.hasException()) {
++                promise.reject(response.releaseException());
++                return;
++            }
++            if (operation == "forget"_s)
++                m_forgotten = true;
++            if (opening && !m_stopped) {
++                m_opened = true;
++                ++m_generation;
++                receive();
++            }
++            promise.resolve();
++        });
++}
++void HIDDevice::open(DOMPromiseDeferred<void>&& promise) { changeState("open"_s, WTF::move(promise)); }
++void HIDDevice::close(DOMPromiseDeferred<void>&& promise) { changeState("close"_s, WTF::move(promise)); }
++void HIDDevice::forget(DOMPromiseDeferred<void>&& promise) { changeState("forget"_s, WTF::move(promise)); }
++
++void HIDDevice::send(ASCIILiteral operation, uint8_t reportId, BufferSource&& data, DOMPromiseDeferred<void>&& promise)
++{
++    if (!m_opened) {
++        promise.reject(ExceptionCode::InvalidStateError, "The HID device is not open"_s);
++        return;
++    }
++    if (data.byteLength() > maximumReportLength) {
++        promise.reject(ExceptionCode::TypeError, "The HID report is too long"_s);
++        return;
++    }
++    auto args = arguments(operation);
++    args->setInteger("reportId"_s, reportId);
++    HID::perform(document(), WTF::move(args), Vector<uint8_t>(data.span()), [promise = WTF::move(promise)](auto&& response, auto&&) mutable {
++        if (response.hasException()) {
++            promise.reject(response.releaseException());
++            return;
++        }
++        promise.resolve();
++    });
++}
++void HIDDevice::sendReport(uint8_t reportId, BufferSource&& data, DOMPromiseDeferred<void>&& promise)
++{
++    send("sendReport"_s, reportId, WTF::move(data), WTF::move(promise));
++}
++void HIDDevice::sendFeatureReport(uint8_t reportId, BufferSource&& data, DOMPromiseDeferred<void>&& promise)
++{
++    send("sendFeatureReport"_s, reportId, WTF::move(data), WTF::move(promise));
++}
++void HIDDevice::receiveFeatureReport(uint8_t reportId, DOMPromiseDeferred<IDLDataView>&& promise)
++{
++    if (!m_opened) {
++        promise.reject(ExceptionCode::InvalidStateError, "The HID device is not open"_s);
++        return;
++    }
++    auto args = arguments("receiveFeatureReport"_s);
++    args->setInteger("reportId"_s, reportId);
++    HID::perform(document(), WTF::move(args), { }, [promise = WTF::move(promise)](auto&& response, auto&& bytes) mutable {
++        if (response.hasException()) {
++            promise.reject(response.releaseException());
++            return;
++        }
++        auto view = JSC::DataView::create(JSC::ArrayBuffer::create(bytes.span()), 0, bytes.size());
++        promise.resolve(view.get());
++    });
++}
++
++// While open, one request waits in the browser process for input reports.
++void HIDDevice::receive()
++{
++    if (m_receiving || !m_opened || m_stopped)
++        return;
++    m_receiving = true;
++    auto generation = m_generation;
++    HID::perform(document(), arguments("receive"_s), { },
++        [this, protectedThis = Ref { *this }, generation](auto&& response, auto&& bytes) mutable {
++            m_receiving = false;
++            if (m_stopped || !m_opened || generation != m_generation)
++                return;
++            if (response.hasException()) {
++                // The device went away or the browser closed it.
++                if (response.exception().code() == ExceptionCode::NotFoundError || response.exception().code() == ExceptionCode::InvalidStateError
++                    || response.exception().code() == ExceptionCode::SecurityError || response.exception().code() == ExceptionCode::AbortError) {
++                    disconnected();
++                    return;
++                }
++                receive();
++                return;
++            }
++            auto result = response.releaseReturnValue();
++            Vector<Ref<Event>> events;
++            if (auto reports = result->getArray("reports"_s)) {
++                size_t offset = 0;
++                for (auto& value : *reports) {
++                    auto report = value->asObject();
++                    if (!report)
++                        break;
++                    auto reportId = report->getInteger("reportId"_s).value_or(-1);
++                    auto length = report->getInteger("length"_s).value_or(-1);
++                    if (reportId < 0 || reportId > 255 || length < 0 || size_t(length) > bytes.size() - offset)
++                        break;
++                    auto buffer = JSC::ArrayBuffer::create(bytes.span().subspan(offset, length));
++                    offset += length;
++                    events.append(HIDInputReportEvent::create(eventNames().inputreportEvent, *this, reportId,
++                        JSC::DataView::create(WTF::move(buffer), 0, length)));
++                }
++            }
++            // Ask for more before running page code, which may close this.
++            receive();
++            for (auto& event : events) {
++                if (m_stopped || generation != m_generation)
++                    break;
++                dispatchEvent(event);
++            }
++        });
++}
++
++bool HIDDevice::virtualHasPendingActivity() const
++{
++    // An open device delivers input reports to its listeners.
++    return !m_stopped && (m_opened || m_busy);
++}
++
++void HIDDevice::stop()
++{
++    m_stopped = true;
++    m_opened = false;
++    ++m_generation;
++}
++} // namespace WebCore
++#endif
+diff --git a/Source/WebCore/Modules/webhid/HIDDevice.h b/Source/WebCore/Modules/webhid/HIDDevice.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..241f46cb8e2f84a4a009e87d2185185c306b7f6a
+--- /dev/null
++++ b/Source/WebCore/Modules/webhid/HIDDevice.h
+@@ -0,0 +1,72 @@
++/* Copyright (C) 2026 Summit contributors. SPDX-License-Identifier: BSD-2-Clause */
++#pragma once
++#if ENABLE(WEBUSB)
++#include "ActiveDOMObject.h"
++#include "BufferSource.h"
++#include "EventTarget.h"
++#include "EventTargetInterfaces.h"
++#include "IDLTypes.h"
++#include "JSDOMPromiseDeferredForward.h"
++#include <wtf/JSONValues.h>
++#include <wtf/WeakPtr.h>
++
++namespace JSC {
++class JSGlobalObject;
++class JSValue;
++}
++
++namespace WebCore {
++class Document;
++
++class HIDDevice final : public RefCounted<HIDDevice>, public EventTarget, public ActiveDOMObject {
++    WTF_MAKE_TZONE_ALLOCATED(HIDDevice);
++public:
++    static Ref<HIDDevice> create(Document&, Ref<JSON::Object>&&);
++    ~HIDDevice();
++    void ref() const final { RefCounted::ref(); }
++    void deref() const final { RefCounted::deref(); }
++    USING_CAN_MAKE_WEAKPTR(EventTarget);
++    ScriptExecutionContext* scriptExecutionContext() const final { return ActiveDOMObject::scriptExecutionContext(); }
++
++    bool opened() const { return m_opened; }
++    uint16_t vendorId() const;
++    uint16_t productId() const;
++    String productName() const;
++    JSC::JSValue collections(JSC::JSGlobalObject&) const;
++    String identifier() const { return m_identifier; }
++    bool forgotten() const { return m_forgotten; }
++    void update(Ref<JSON::Object>&&);
++    void disconnected();
++
++    void open(DOMPromiseDeferred<void>&&);
++    void close(DOMPromiseDeferred<void>&&);
++    void forget(DOMPromiseDeferred<void>&&);
++    void sendReport(uint8_t reportId, BufferSource&&, DOMPromiseDeferred<void>&&);
++    void sendFeatureReport(uint8_t reportId, BufferSource&&, DOMPromiseDeferred<void>&&);
++    void receiveFeatureReport(uint8_t reportId, DOMPromiseDeferred<IDLDataView>&&);
++
++private:
++    HIDDevice(Document&, Ref<JSON::Object>&&);
++    EventTargetInterfaceType eventTargetInterface() const final { return EventTargetInterfaceType::HIDDevice; }
++    void refEventTarget() final { ref(); }
++    void derefEventTarget() final { deref(); }
++    void stop() final;
++    bool virtualHasPendingActivity() const final;
++    Document* document() const;
++    Ref<JSON::Object> arguments(ASCIILiteral operation) const;
++    void changeState(ASCIILiteral operation, DOMPromiseDeferred<void>&&);
++    void send(ASCIILiteral operation, uint8_t reportId, BufferSource&&, DOMPromiseDeferred<void>&&);
++    void receive();
++    Ref<JSON::Object> m_data;
++    String m_identifier;
++    String m_collections;
++    uint64_t m_generation { 0 };
++    bool m_opened { false };
++    bool m_busy { false };
++    bool m_receiving { false };
++    bool m_forgotten { false };
++    bool m_stopped { false };
++};
++} // namespace WebCore
++SPECIALIZE_TYPE_TRAITS_EVENTTARGET(HIDDevice)
++#endif
+diff --git a/Source/WebCore/Modules/webhid/HIDDevice.idl b/Source/WebCore/Modules/webhid/HIDDevice.idl
+new file mode 100644
+index 0000000000000000000000000000000000000000..45fccf2bc07c93b0f44a9b3dc030a575a0267400
+--- /dev/null
++++ b/Source/WebCore/Modules/webhid/HIDDevice.idl
+@@ -0,0 +1,17 @@
++/* Copyright (C) 2026 Summit contributors. SPDX-License-Identifier: BSD-2-Clause */
++[Conditional=WEBUSB, Exposed=Window, SecureContext, ActiveDOMObject]
++interface HIDDevice : EventTarget {
++    attribute EventHandler oninputreport;
++    readonly attribute boolean opened;
++    readonly attribute unsigned short vendorId;
++    readonly attribute unsigned short productId;
++    readonly attribute DOMString productName;
++    // A frozen array of HIDCollectionInfo dictionaries.
++    [CallWith=CurrentGlobalObject, CachedAttribute] readonly attribute any collections;
++    Promise<undefined> open();
++    Promise<undefined> close();
++    Promise<undefined> forget();
++    Promise<undefined> sendReport([EnforceRange] octet reportId, BufferSource data);
++    Promise<undefined> sendFeatureReport([EnforceRange] octet reportId, BufferSource data);
++    Promise<DataView> receiveFeatureReport([EnforceRange] octet reportId);
++};
+diff --git a/Source/WebCore/Modules/webhid/HIDDeviceFilter.h b/Source/WebCore/Modules/webhid/HIDDeviceFilter.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..ebb2a9b9ade79e687d405e3beb8b0a17bf934c8f
+--- /dev/null
++++ b/Source/WebCore/Modules/webhid/HIDDeviceFilter.h
+@@ -0,0 +1,11 @@
++/* Copyright (C) 2026 Summit contributors. SPDX-License-Identifier: BSD-2-Clause */
++#pragma once
++#include <optional>
++namespace WebCore {
++struct HIDDeviceFilter {
++    std::optional<uint32_t> vendorId;
++    std::optional<uint16_t> productId;
++    std::optional<uint16_t> usagePage;
++    std::optional<uint16_t> usage;
++};
++}
+diff --git a/Source/WebCore/Modules/webhid/HIDDeviceFilter.idl b/Source/WebCore/Modules/webhid/HIDDeviceFilter.idl
+new file mode 100644
+index 0000000000000000000000000000000000000000..c71e9e924495481268df75eab56339b706374ddf
+--- /dev/null
++++ b/Source/WebCore/Modules/webhid/HIDDeviceFilter.idl
+@@ -0,0 +1,7 @@
++/* Copyright (C) 2026 Summit contributors. SPDX-License-Identifier: BSD-2-Clause */
++dictionary HIDDeviceFilter {
++    [EnforceRange] unsigned long vendorId;
++    [EnforceRange] unsigned short productId;
++    [EnforceRange] unsigned short usagePage;
++    [EnforceRange] unsigned short usage;
++};
+diff --git a/Source/WebCore/Modules/webhid/HIDDeviceRequestOptions.h b/Source/WebCore/Modules/webhid/HIDDeviceRequestOptions.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..b54193b87ad872c166404fdd8164918384c6fcbe
+--- /dev/null
++++ b/Source/WebCore/Modules/webhid/HIDDeviceRequestOptions.h
+@@ -0,0 +1,10 @@
++/* Copyright (C) 2026 Summit contributors. SPDX-License-Identifier: BSD-2-Clause */
++#pragma once
++#include "HIDDeviceFilter.h"
++#include <wtf/Vector.h>
++namespace WebCore {
++struct HIDDeviceRequestOptions {
++    Vector<HIDDeviceFilter> filters;
++    Vector<HIDDeviceFilter> exclusionFilters;
++};
++}
+diff --git a/Source/WebCore/Modules/webhid/HIDDeviceRequestOptions.idl b/Source/WebCore/Modules/webhid/HIDDeviceRequestOptions.idl
+new file mode 100644
+index 0000000000000000000000000000000000000000..e56c1c0950b80199a0ac0b00ce731511122d155f
+--- /dev/null
++++ b/Source/WebCore/Modules/webhid/HIDDeviceRequestOptions.idl
+@@ -0,0 +1,5 @@
++/* Copyright (C) 2026 Summit contributors. SPDX-License-Identifier: BSD-2-Clause */
++dictionary HIDDeviceRequestOptions {
++    required sequence<HIDDeviceFilter> filters;
++    sequence<HIDDeviceFilter> exclusionFilters = [];
++};
+diff --git a/Source/WebCore/Modules/webhid/HIDInputReportEvent.h b/Source/WebCore/Modules/webhid/HIDInputReportEvent.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..7bdae58137e92ae5f5de8f53598ae9e74c291e49
+--- /dev/null
++++ b/Source/WebCore/Modules/webhid/HIDInputReportEvent.h
+@@ -0,0 +1,25 @@
++/* Copyright (C) 2026 Summit contributors. SPDX-License-Identifier: BSD-2-Clause */
++#pragma once
++#if ENABLE(WEBUSB)
++#include "Event.h"
++#include "HIDDevice.h"
++#include <JavaScriptCore/DataView.h>
++namespace WebCore {
++class HIDInputReportEvent final : public Event {
++    WTF_MAKE_TZONE_ALLOCATED(HIDInputReportEvent);
++public:
++    static Ref<HIDInputReportEvent> create(const AtomString& type, HIDDevice& device, uint8_t reportId, Ref<JSC::DataView>&& data)
++    { return adoptRef(*new HIDInputReportEvent(type, device, reportId, WTF::move(data))); }
++    HIDDevice& device() const { return m_device; }
++    uint8_t reportId() const { return m_reportId; }
++    JSC::DataView& data() const { return m_data; }
++private:
++    HIDInputReportEvent(const AtomString& type, HIDDevice& device, uint8_t reportId, Ref<JSC::DataView>&& data)
++        : Event(EventInterfaceType::HIDInputReportEvent, type, CanBubble::No, IsCancelable::No)
++        , m_device(device), m_reportId(reportId), m_data(WTF::move(data)) { }
++    Ref<HIDDevice> m_device;
++    uint8_t m_reportId;
++    Ref<JSC::DataView> m_data;
++};
++}
++#endif
+diff --git a/Source/WebCore/Modules/webhid/HIDInputReportEvent.idl b/Source/WebCore/Modules/webhid/HIDInputReportEvent.idl
+new file mode 100644
+index 0000000000000000000000000000000000000000..47e31ff0077ca65d7ba95f8f2234fe4d7452a264
+--- /dev/null
++++ b/Source/WebCore/Modules/webhid/HIDInputReportEvent.idl
+@@ -0,0 +1,7 @@
++/* Copyright (C) 2026 Summit contributors. SPDX-License-Identifier: BSD-2-Clause */
++[Conditional=WEBUSB, Exposed=Window, SecureContext]
++interface HIDInputReportEvent : Event {
++    [SameObject] readonly attribute HIDDevice device;
++    readonly attribute octet reportId;
++    [CachedAttribute] readonly attribute DataView data;
++};
+diff --git a/Source/WebCore/Modules/webhid/Navigator+HID.idl b/Source/WebCore/Modules/webhid/Navigator+HID.idl
+new file mode 100644
+index 0000000000000000000000000000000000000000..8366de63811528120da6ed4ae7133e3d594432b8
+--- /dev/null
++++ b/Source/WebCore/Modules/webhid/Navigator+HID.idl
+@@ -0,0 +1,6 @@
++/* Copyright (C) 2026 Summit contributors. SPDX-License-Identifier: BSD-2-Clause */
++// WebHID (https://wicg.github.io/webhid/) shares the native USB broker.
++[Conditional=WEBUSB]
++partial interface Navigator {
++    [SecureContext, SameObject] readonly attribute HID hid;
++};
 diff --git a/Source/WebCore/Modules/webusb/Navigator+USB.idl b/Source/WebCore/Modules/webusb/Navigator+USB.idl
 new file mode 100644
 index 0000000000000000000000000000000000000000..5317e62f9b5e744486d130bdcfab2cdbdcde8532
@@ -9144,7 +9955,7 @@ index 0000000000000000000000000000000000000000..48e19a5957df4c1ae60378dd9a84cbe4
 +/* Copyright (C) 2026 Summit contributors. SPDX-License-Identifier: BSD-2-Clause */
 +enum USBTransferStatus { "ok", "stall", "babble" };
 diff --git a/Source/WebCore/PlatformHaiku.cmake b/Source/WebCore/PlatformHaiku.cmake
-index 16a88804a1baa39ccdd9fc2870b6e2524d941298..ec56049a044dbd3133c241ab8d2755349cbf56ca 100644
+index 16a88804a1baa39ccdd9fc2870b6e2524d941298..01070b5e57b7f0fe5592b529d9e9315fcc06b658 100644
 --- a/Source/WebCore/PlatformHaiku.cmake
 +++ b/Source/WebCore/PlatformHaiku.cmake
 @@ -1,52 +1,369 @@
@@ -9523,7 +10334,7 @@ index 16a88804a1baa39ccdd9fc2870b6e2524d941298..ec56049a044dbd3133c241ab8d275534
    textencoding
    translation
    ${WEBP_LIBRARIES}
-@@ -61,6 +378,242 @@ list(APPEND WebCore_SYSTEM_INCLUDE_DIRECTORIES
+@@ -61,6 +378,244 @@ list(APPEND WebCore_SYSTEM_INCLUDE_DIRECTORIES
    ${SQLITE_INCLUDE_DIR}
    ${WEBP_INCLUDE_DIRS}
    ${ZLIB_INCLUDE_DIRS}
@@ -9738,6 +10549,8 @@ index 16a88804a1baa39ccdd9fc2870b6e2524d941298..ec56049a044dbd3133c241ab8d275534
 +        Modules/webusb/USBDevice.cpp
 +        Modules/webusb/USBDescriptors.cpp
 +        Modules/webusb/USBTransferResultCustom.cpp
++        Modules/webhid/HID.cpp
++        Modules/webhid/HIDDevice.cpp
 +    )
 +endif ()
 +
@@ -12262,26 +13075,29 @@ index 366a96640f8fa0e9532ff00855ed36ec0b5eeb2b..f3e096bf2779a964470a1a0aae570003
      auto listenerCounts = eventListenerCounts(document, event);
  
 diff --git a/Source/WebCore/dom/EventInterfaces.in b/Source/WebCore/dom/EventInterfaces.in
-index 677f2e8a4fb88f674f1542b6dbf72e8316739ed4..fe405439137ef39125f38983c52c7ad762a55b66 100644
+index 677f2e8a4fb88f674f1542b6dbf72e8316739ed4..e8f5938b5a9e4b26b3a4d2ef26526fb4034bfa7e 100644
 --- a/Source/WebCore/dom/EventInterfaces.in
 +++ b/Source/WebCore/dom/EventInterfaces.in
-@@ -112,3 +112,6 @@ NotificationEvent conditional=NOTIFICATION_EVENT
+@@ -112,3 +112,8 @@ NotificationEvent conditional=NOTIFICATION_EVENT
  ContentVisibilityAutoStateChangeEvent
  GPUUncapturedErrorEvent
  CanvasPaintEvent
 +USBConnectionEvent conditional=WEBUSB
++HIDConnectionEvent conditional=WEBUSB
++HIDInputReportEvent conditional=WEBUSB
 +
 +ValueEvent conditional=WEB_BLUETOOTH
 diff --git a/Source/WebCore/dom/EventNames.json b/Source/WebCore/dom/EventNames.json
-index 444e32e4b5800f31c5a3f07e8dd21fdf0478c717..9a5bceab9e0ab5b76785ce0c1b1ecff51ebd76cd 100644
+index 444e32e4b5800f31c5a3f07e8dd21fdf0478c717..37cf9c0cb2ae53ab809594e3bc0ab3e89bf8ed57 100644
 --- a/Source/WebCore/dom/EventNames.json
 +++ b/Source/WebCore/dom/EventNames.json
-@@ -325,6 +325,9 @@
+@@ -325,6 +325,10 @@
      "webkitmouseforcewillbegin": { },
      "webkitneedkey": { },
      "webkitnetworkinfochange": { },
 +    "availabilitychanged": { },
 +    "gattserverdisconnected": { },
++    "inputreport": { },
 +    "characteristicvaluechanged": { },
      "webkitplaybacktargetavailabilitychanged": { },
      "webkitpresentationmodechanged": { },
@@ -12334,14 +13150,16 @@ index 508b64bf39d2074357445b343e1056b1c3212411..f22828d4fdd11099e38c6161892e61b7
  
          if (registeredListener->isPassive())
 diff --git a/Source/WebCore/dom/EventTargetFactory.in b/Source/WebCore/dom/EventTargetFactory.in
-index ec7469a0b5888a4dd43f47151aac29b04c467e61..fe2d8ad0aa3ce52ab5b00a4be5eeb73cdab3e33f 100644
+index ec7469a0b5888a4dd43f47151aac29b04c467e61..e8580d1222bae215e59759333901824e40efc4eb 100644
 --- a/Source/WebCore/dom/EventTargetFactory.in
 +++ b/Source/WebCore/dom/EventTargetFactory.in
-@@ -88,3 +88,9 @@ WebXRLayer conditional=WEBXR
+@@ -88,3 +88,11 @@ WebXRLayer conditional=WEBXR
  WebXRSession conditional=WEBXR
  WebXRSpace conditional=WEBXR
  WebXRSystem conditional=WEBXR
 +USB conditional=WEBUSB
++HID conditional=WEBUSB
++HIDDevice conditional=WEBUSB
 +
 +Bluetooth conditional=WEB_BLUETOOTH
 +BluetoothDevice conditional=WEB_BLUETOOTH
@@ -15954,14 +16772,15 @@ index db1d2f70cc288d3aeb23ed983ef66d1e40bd7925..2f67a74ae3c418ad0933a09431cb193c
  
  void LocalFrameViewLayoutContext::runOrScheduleAsynchronousTasks(bool canDeferUpdateLayerPositions)
 diff --git a/Source/WebCore/page/Navigator.cpp b/Source/WebCore/page/Navigator.cpp
-index 580290f2eb014b56a3c58a86b56ac06b260ec644..913e0856f3a8169822e150030ffec710205b6749 100644
+index 580290f2eb014b56a3c58a86b56ac06b260ec644..9742008c954d8c7bf356a1133c2da9baf12af1dd 100644
 --- a/Source/WebCore/page/Navigator.cpp
 +++ b/Source/WebCore/page/Navigator.cpp
-@@ -22,9 +22,17 @@
+@@ -22,9 +22,18 @@
  
  #include "config.h"
  #include "Navigator.h"
 +#if ENABLE(WEBUSB)
++#include "HID.h"
 +#include "USB.h"
 +#endif
 +#if ENABLE(WEB_BLUETOOTH)
@@ -15975,7 +16794,7 @@ index 580290f2eb014b56a3c58a86b56ac06b260ec644..913e0856f3a8169822e150030ffec710
  #include "CookieJar.h"
  #include "DOMMimeType.h"
  #include "DOMMimeTypeArray.h"
-@@ -65,6 +73,23 @@
+@@ -65,6 +74,29 @@
  #include <wtf/WeakPtr.h>
  
  namespace WebCore {
@@ -15985,6 +16804,12 @@ index 580290f2eb014b56a3c58a86b56ac06b260ec644..913e0856f3a8169822e150030ffec710
 +    if (!m_usb)
 +        m_usb = USB::create(*document());
 +    return *m_usb;
++}
++HID& Navigator::hid()
++{
++    if (!m_hid)
++        m_hid = HID::create(*document());
++    return *m_hid;
 +}
 +#endif
 +#if ENABLE(WEB_BLUETOOTH)
@@ -15999,7 +16824,7 @@ index 580290f2eb014b56a3c58a86b56ac06b260ec644..913e0856f3a8169822e150030ffec710
  
  WTF_MAKE_TZONE_ALLOCATED_IMPL(Navigator);
  
-@@ -130,6 +155,52 @@ bool Navigator::onLine() const
+@@ -130,6 +162,52 @@ bool Navigator::onLine() const
      return platformStrategies()->loaderStrategy()->isOnLine();
  }
  
@@ -16053,7 +16878,7 @@ index 580290f2eb014b56a3c58a86b56ac06b260ec644..913e0856f3a8169822e150030ffec710
  {
      if (data.url.isNull())
 diff --git a/Source/WebCore/page/Navigator.h b/Source/WebCore/page/Navigator.h
-index 2bc6da74d65fd64bd3439c4abde54d71542c73fc..ed044ca14eabab8479bfc0e5e2590afe5ecc5672 100644
+index 2bc6da74d65fd64bd3439c4abde54d71542c73fc..f41d66544ad58635a32341b5bd66cbee130c34ce 100644
 --- a/Source/WebCore/page/Navigator.h
 +++ b/Source/WebCore/page/Navigator.h
 @@ -19,6 +19,7 @@
@@ -16064,12 +16889,13 @@ index 2bc6da74d65fd64bd3439c4abde54d71542c73fc..ed044ca14eabab8479bfc0e5e2590afe
  #include <WebCore/LocalDOMWindowProperty.h>
  #include <WebCore/NavigatorBase.h>
  #include <WebCore/ScriptWrappable.h>
-@@ -36,6 +37,12 @@ class DOMPluginArray;
+@@ -36,6 +37,13 @@ class DOMPluginArray;
  class Page;
  class ShareDataReader;
  class NavigatorUAData;
 +#if ENABLE(WEBUSB)
 +class USB;
++class HID;
 +#endif
 +#if ENABLE(WEB_BLUETOOTH)
 +class Bluetooth;
@@ -16077,7 +16903,7 @@ index 2bc6da74d65fd64bd3439c4abde54d71542c73fc..ed044ca14eabab8479bfc0e5e2590afe
  
  class Navigator final
      : public NavigatorBase
-@@ -59,9 +66,19 @@ public:
+@@ -59,9 +67,20 @@ public:
      String platform() const final;
      void userAgentChanged();
      bool onLine() const final;
@@ -16090,6 +16916,7 @@ index 2bc6da74d65fd64bd3439c4abde54d71542c73fc..ed044ca14eabab8479bfc0e5e2590afe
      NavigatorUAData& userAgentData() const;
 +#if ENABLE(WEBUSB)
 +    USB& usb();
++    HID& hid();
 +#endif
 +#if ENABLE(WEB_BLUETOOTH)
 +    Bluetooth& bluetooth();
@@ -16097,12 +16924,13 @@ index 2bc6da74d65fd64bd3439c4abde54d71542c73fc..ed044ca14eabab8479bfc0e5e2590afe
      
  #if ENABLE(NAVIGATOR_STANDALONE)
      bool NODELETE standalone() const;
-@@ -94,5 +111,11 @@ private:
+@@ -94,5 +113,12 @@ private:
      mutable String m_platform;
      mutable RefPtr<NavigatorUAData> m_navigatorUAData;
      const RefPtr<GPU> m_gpuForWebGPU;
 +#if ENABLE(WEBUSB)
 +    RefPtr<USB> m_usb;
++    RefPtr<HID> m_hid;
 +#endif
 +#if ENABLE(WEB_BLUETOOTH)
 +    RefPtr<Bluetooth> m_bluetooth;
@@ -75840,10 +76668,10 @@ index 0000000000000000000000000000000000000000..abdba4dff009ff314eecd9f825a128aa
 +} // namespace WebKit
 diff --git a/Source/WebKit/PlatformHaiku.cmake b/Source/WebKit/PlatformHaiku.cmake
 new file mode 100644
-index 0000000000000000000000000000000000000000..3954cf68a3f8e0bbc0b283c47a8692b42c8781ab
+index 0000000000000000000000000000000000000000..b59101026a0ed3b071b73e6e9a5ed2c1ea740b1f
 --- /dev/null
 +++ b/Source/WebKit/PlatformHaiku.cmake
-@@ -0,0 +1,509 @@
+@@ -0,0 +1,511 @@
 +include(Headers.cmake)
 +include(Platform/Curl.cmake)
 +
@@ -76339,6 +77167,8 @@ index 0000000000000000000000000000000000000000..3954cf68a3f8e0bbc0b283c47a8692b4
 +    list(APPEND WebKit_SOURCES
 +        UIProcess/haiku/usb/USBDeviceSessionHaiku.cpp
 +        UIProcess/haiku/usb/WebUSBBrokerHaiku.cpp
++        UIProcess/haiku/usb/HIDDeviceHaiku.cpp
++        UIProcess/haiku/usb/WebHIDBrokerHaiku.cpp
 +    )
 +    list(APPEND WebKit_PRIVATE_INCLUDE_DIRECTORIES "${WEBKIT_DIR}/UIProcess/haiku/usb")
 +    list(APPEND WebKit_LIBRARIES device)
@@ -116808,7 +117638,7 @@ index 0000000000000000000000000000000000000000..a1df802a24259059253fe0d7e648aee7
 +};
 diff --git a/Source/WebKit/UIProcess/haiku/SitePermissionsHaiku.cpp b/Source/WebKit/UIProcess/haiku/SitePermissionsHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..a37bf6a11f987b147dea21e383060f6fafb8d902
+index 0000000000000000000000000000000000000000..e45c032e6b24926e167bb0fa374bac5d1902dcd2
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/SitePermissionsHaiku.cpp
 @@ -0,0 +1,510 @@
@@ -117125,7 +117955,7 @@ index 0000000000000000000000000000000000000000..a37bf6a11f987b147dea21e383060f6f
 +}
 +
 +void SitePermissionsHaiku::requestUSB(const String& origin, const BMessenger& view,
-+    Vector<std::pair<String, String>>&& devices, MediaCompletion&& completion)
++    Vector<std::pair<String, String>>&& devices, MediaCompletion&& completion, ASCIILiteral permission)
 +{
 +    ASSERT(RunLoop::isMain());
 +    if (m_shutdown || !m_listener.IsValid() || origin.isEmpty() || origin == "null"_s || devices.isEmpty()) {
@@ -117135,7 +117965,7 @@ index 0000000000000000000000000000000000000000..a37bf6a11f987b147dea21e383060f6f
 +    const uint64_t identifier = ++m_lastRequest;
 +    BMessage message(B_WEBKIT_PERMISSION_REQUESTED);
 +    message.AddUInt64("identifier", identifier);
-+    message.AddString("permission", "usb");
++    message.AddString("permission", permission.characters());
 +    message.AddString("origin", origin.utf8().legacyCStringPointer());
 +    message.AddBool("private", m_private);
 +    if (view.IsValid())
@@ -117324,10 +118154,10 @@ index 0000000000000000000000000000000000000000..a37bf6a11f987b147dea21e383060f6f
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/SitePermissionsHaiku.h b/Source/WebKit/UIProcess/haiku/SitePermissionsHaiku.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..726ae50d03c2b79e267235162e2c4f68b283f9c2
+index 0000000000000000000000000000000000000000..58f92b8c69e65a3c2db89f286d6ac98b2ae0f5b9
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/SitePermissionsHaiku.h
-@@ -0,0 +1,112 @@
+@@ -0,0 +1,113 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#pragma once
@@ -117391,7 +118221,8 @@ index 0000000000000000000000000000000000000000..726ae50d03c2b79e267235162e2c4f68
 +    };
 +    using MediaCompletion = CompletionHandler<void(bool allowed, const String& deviceId)>;
 +    void requestMedia(const String& origin, const BMessenger& view, MediaRequest&&, MediaCompletion&&);
-+    void requestUSB(const String& origin, const BMessenger& view, Vector<std::pair<String, String>>&& devices, MediaCompletion&&);
++    // permission is "usb", or "hid" for a WebHID chooser.
++    void requestUSB(const String& origin, const BMessenger& view, Vector<std::pair<String, String>>&& devices, MediaCompletion&&, ASCIILiteral permission = "usb"_s);
 +    void requestBluetooth(const String& origin, const BMessenger& view, Vector<std::pair<String, String>>&& devices, MediaCompletion&&);
 +    void cancelBluetoothRequests(const BMessenger& view);
 +    // navigator.permissions.query(): granted, denied or prompt.
@@ -124051,6 +124882,1097 @@ index 0000000000000000000000000000000000000000..e29f83d0a7d6a1f92d91248555491515
 +};
 +}
 +#endif
+diff --git a/Source/WebKit/UIProcess/haiku/usb/HIDDeviceHaiku.cpp b/Source/WebKit/UIProcess/haiku/usb/HIDDeviceHaiku.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..22bb375542546fb1a74b8a159672554aa0cac533
+--- /dev/null
++++ b/Source/WebKit/UIProcess/haiku/usb/HIDDeviceHaiku.cpp
+@@ -0,0 +1,675 @@
++/* Copyright (C) 2026 Summit contributors. SPDX-License-Identifier: BSD-2-Clause */
++#include "config.h"
++#include "HIDDeviceHaiku.h"
++
++#include <USBKit.h>
++#include <cstring>
++#include <dirent.h>
++#include <fcntl.h>
++#include <map>
++#include <optional>
++#include <sys/ioctl.h>
++#include <sys/stat.h>
++#include <unistd.h>
++
++namespace WebKit::HIDHaiku {
++namespace {
++
++// The stable prefix of Haiku's usb_raw.h ABI (MIT, Haiku Inc. 2006-2008), as
++// used by WebUSB (USBDeviceSessionHaiku.cpp).
++constexpr uint32_t getVersion = 0x1000;
++constexpr uint32_t controlTransferCommand = 0x4000;
++constexpr uint32_t interruptTransferCommand = 0x4001;
++struct RawControl {
++    status_t status;
++    uint8_t requestType;
++    uint8_t request;
++    uint16_t value;
++    uint16_t index;
++    uint16_t length;
++    void* data;
++};
++struct RawTransfer {
++    status_t status;
++    uint32_t interfaceIndex;
++    uint32_t endpointIndex;
++    void* data;
++    size_t length;
++};
++constexpr status_t rawSuccess = 0;
++constexpr status_t rawStalled = 3;
++
++constexpr uint8_t hidClass = 3;
++constexpr uint8_t hidDescriptorType = 0x21;
++constexpr uint16_t reportDescriptorValue = 0x2200;
++constexpr size_t maximumDescriptorLength = 4096;
++constexpr size_t maximumReportLength = 4096;
++constexpr bigtime_t operationDeadline = 5000000;
++
++bool validPath(const std::string& path)
++{
++    constexpr std::string_view prefix = "/dev/bus/usb/";
++    if (!path.starts_with(prefix) || path.size() > 256)
++        return false;
++    auto rest = std::string_view(path).substr(prefix.size());
++    if (rest.empty() || rest.front() == '/' || rest.back() == '/')
++        return false;
++    for (char c : rest) {
++        if ((c < '0' || c > '9') && c != '/' && c != 'h' && c != 'u' && c != 'b')
++            return false;
++    }
++    return rest.find("//") == std::string_view::npos;
++}
++
++void listDevices(const std::string& path, unsigned depth, std::vector<std::string>& result)
++{
++    if (depth > 8 || result.size() >= 128)
++        return;
++    auto* dir = opendir(path.c_str());
++    if (!dir)
++        return;
++    while (auto* entry = readdir(dir)) {
++        if (entry->d_name[0] == '.')
++            continue;
++        auto child = path + '/' + entry->d_name;
++        if (!validPath(child))
++            continue;
++        struct stat st;
++        if (lstat(child.c_str(), &st) || S_ISLNK(st.st_mode))
++            continue;
++        if (S_ISDIR(st.st_mode))
++            listDevices(child, depth + 1, result);
++        else
++            result.push_back(std::move(child));
++        if (result.size() >= 128)
++            break;
++    }
++    closedir(dir);
++}
++
++std::string safeString(const char* text)
++{
++    if (!text)
++        return { };
++    return std::string(text, strnlen(text, 1024));
++}
++
++std::optional<size_t> reportDescriptorLength(const BUSBInterface& interface)
++{
++    alignas(usb_descriptor) uint8_t buffer[256];
++    for (uint32_t i = 0; i < 16; ++i) {
++        std::memset(buffer, 0, sizeof(buffer));
++        auto* descriptor = reinterpret_cast<usb_descriptor*>(buffer);
++        if (interface.OtherDescriptorAt(i, descriptor, sizeof(buffer)) != B_OK)
++            break;
++        uint8_t length = buffer[0];
++        if (buffer[1] != hidDescriptorType || length < 9)
++            continue;
++        // bcdHID, bCountryCode, bNumDescriptors, then (bDescriptorType,
++        // wDescriptorLength) pairs; the report descriptor is type 0x22.
++        unsigned count = buffer[5];
++        for (unsigned d = 0; d < count && 6 + d * 3 + 2 < length; ++d) {
++            if (buffer[6 + d * 3] == 0x22)
++                return buffer[7 + d * 3] | (buffer[8 + d * 3] << 8);
++        }
++    }
++    return std::nullopt;
++}
++
++std::string identityOf(const BUSBDevice& device, const struct stat& st)
++{
++    // As for WebUSB: length-delimited serial, and the device node so that a
++    // serial-less device reattached at the same address is a new device.
++    auto serial = safeString(device.SerialNumberString());
++    return std::to_string(device.VendorID()) + ":" + std::to_string(device.ProductID()) + ":"
++        + std::to_string(device.Version()) + ":" + std::to_string(serial.size()) + ":" + serial
++        + ":" + std::to_string(st.st_dev) + ":" + std::to_string(st.st_ino);
++}
++
++// The interfaces of one device, read once per device node.
++std::vector<Interface> describe(const std::string& path, const struct stat& st)
++{
++    std::vector<Interface> result;
++    BUSBDevice device(path.c_str());
++    if (device.InitCheck() != B_OK || !device.VendorID())
++        return result;
++    auto* configuration = device.ActiveConfiguration();
++    if (!configuration || configuration->CountInterfaces() > 128)
++        return result;
++    std::string identity;
++    std::string product;
++    for (uint32_t i = 0; i < configuration->CountInterfaces(); ++i) {
++        auto* interface = configuration->InterfaceAt(i);
++        if (!interface || interface->Class() != hidClass)
++            continue;
++        // Boot keyboards and mice are protected whatever they describe.
++        if (interface->Subclass() == 1 && (interface->Protocol() == 1 || interface->Protocol() == 2))
++            continue;
++        auto length = reportDescriptorLength(*interface);
++        if (!length || !*length || *length > maximumDescriptorLength)
++            continue;
++        std::vector<uint8_t> bytes(*length);
++        auto number = interface->Descriptor()->interface_number;
++        auto read = device.ControlTransfer(USB_REQTYPE_INTERFACE_IN | USB_REQTYPE_STANDARD, USB_REQUEST_GET_DESCRIPTOR,
++            reportDescriptorValue, number, bytes.size(), bytes.data());
++        if (read <= 0)
++            continue;
++        bytes.resize(read);
++        auto descriptor = parseReportDescriptor(bytes);
++        if (!descriptor || !eligible(*descriptor))
++            continue;
++        if (identity.empty()) {
++            identity = identityOf(device, st);
++            product = safeString(device.ProductString());
++        }
++        Interface value;
++        value.path = path;
++        value.identity = identity;
++        value.number = number;
++        value.vendorId = device.VendorID();
++        value.productId = device.ProductID();
++        value.product = product;
++        value.descriptor = std::move(*descriptor);
++        result.push_back(std::move(value));
++    }
++    return result;
++}
++
++// Raw USB waits can only be interrupted by killing the calling thread. Run
++// just the ioctl in its own thread, as WebUSB does: the kernel cancels the
++// queued transfer before unwinding and the caller joins before reusing the
++// buffers.
++struct Call {
++    int fd { -1 };
++    uint32_t operation { 0 };
++    void* command { nullptr };
++    size_t size { 0 };
++    sem_id done { -1 };
++    std::atomic<bool> returned { false };
++    bool failed { false };
++    thread_id thread { -1 };
++};
++
++int32 callEntry(void* data)
++{
++    auto& call = *static_cast<Call*>(data);
++    call.failed = ioctl(call.fd, call.operation, call.command, call.size) != 0;
++    call.returned.store(true);
++    release_sem(call.done);
++    return 0;
++}
++
++bool startCall(Call& call)
++{
++    call.thread = spawn_thread(callEntry, "WebHID transfer", B_NORMAL_PRIORITY, &call);
++    if (call.thread < B_OK)
++        return false;
++    if (resume_thread(call.thread) != B_OK) {
++        kill_thread(call.thread);
++        status_t ignored;
++        wait_for_thread(call.thread, &ignored);
++        return false;
++    }
++    return true;
++}
++
++// Ends a call that may still be waiting; returns whether its ioctl returned.
++bool finishCall(Call& call)
++{
++    if (call.thread < B_OK)
++        return false;
++    if (!call.returned.load())
++        kill_thread(call.thread);
++    status_t ignored;
++    wait_for_thread(call.thread, &ignored);
++    call.thread = -1;
++    return call.returned.load();
++}
++
++} // namespace
++
++std::vector<Interface> enumerateInterfaces()
++{
++    // Reading a report descriptor is a control transfer: do it once for each
++    // device node. A device node is never reused for a different device
++    // without being removed first.
++    static std::mutex cacheLock;
++    static std::map<std::string, std::vector<Interface>> cache;
++    std::vector<std::string> paths;
++    listDevices("/dev/bus/usb", 0, paths);
++    std::map<std::string, std::vector<Interface>> current;
++    std::vector<Interface> result;
++    for (auto& path : paths) {
++        struct stat st;
++        if (lstat(path.c_str(), &st) || S_ISLNK(st.st_mode))
++            continue;
++        auto key = path + ':' + std::to_string(st.st_dev) + ':' + std::to_string(st.st_ino);
++        std::vector<Interface> interfaces;
++        bool known = false;
++        {
++            std::lock_guard lock(cacheLock);
++            auto found = cache.find(key);
++            if (found != cache.end()) {
++                interfaces = found->second;
++                known = true;
++            }
++        }
++        if (!known)
++            interfaces = describe(path, st);
++        current[key] = interfaces;
++        result.insert(result.end(), interfaces.begin(), interfaces.end());
++    }
++    {
++        std::lock_guard lock(cacheLock);
++        cache = std::move(current);
++    }
++    return result;
++}
++
++struct Connection::State {
++    int fd { -1 };
++    std::string path;
++    uint8_t interfaceNumber { 0 };
++    uint32_t interfaceIndex { 0 };
++    std::optional<uint32_t> inputEndpoint;
++    std::optional<uint32_t> outputEndpoint;
++    Descriptor descriptor;
++    size_t inputLength { 0 };
++    InputHandler input;
++    sem_id event { -1 };
++
++    struct Operation {
++        int kind { 0 };
++        uint8_t reportId { 0 };
++        std::vector<uint8_t> data;
++        Completion completion;
++    };
++    std::mutex lock;
++    std::deque<Operation> operations;
++    bool closing { false };
++    bool gone { false };
++
++    void run();
++    Error perform(Operation&);
++    Error control(bool input, uint8_t request, uint16_t value, std::vector<uint8_t>& data);
++    Error interruptOut(const std::vector<uint8_t>& data);
++    bool closingNow()
++    {
++        std::lock_guard locker(lock);
++        return closing;
++    }
++};
++
++enum { SendReport, SendFeatureReport, ReceiveFeatureReport };
++
++std::shared_ptr<Connection> Connection::open(const Interface& approved, InputHandler&& input, Error& error)
++{
++    error = Error::None;
++    if (!validPath(approved.path) || !eligible(approved.descriptor)) {
++        error = Error::Security;
++        return nullptr;
++    }
++    struct stat before;
++    if (lstat(approved.path.c_str(), &before) || S_ISLNK(before.st_mode)) {
++        error = Error::NotFound;
++        return nullptr;
++    }
++    BUSBDevice device(approved.path.c_str());
++    if (device.InitCheck() != B_OK || identityOf(device, before) != approved.identity) {
++        error = Error::NotFound;
++        return nullptr;
++    }
++    auto* configuration = device.ActiveConfiguration();
++    const BUSBInterface* interface = nullptr;
++    for (uint32_t i = 0; configuration && i < configuration->CountInterfaces(); ++i) {
++        auto* candidate = configuration->InterfaceAt(i);
++        if (candidate && candidate->Descriptor()->interface_number == approved.number && candidate->Class() == hidClass)
++            interface = candidate;
++    }
++    if (!interface) {
++        error = Error::NotFound;
++        return nullptr;
++    }
++    auto state = std::make_shared<State>();
++    state->path = approved.path;
++    state->interfaceNumber = approved.number;
++    state->interfaceIndex = interface->Index();
++    state->descriptor = approved.descriptor;
++    for (uint32_t e = 0; e < interface->CountEndpoints(); ++e) {
++        auto* endpoint = interface->EndpointAt(e);
++        if (!endpoint || !endpoint->IsInterrupt())
++            continue;
++        if (endpoint->IsInput() && !state->inputEndpoint)
++            state->inputEndpoint = e;
++        else if (endpoint->IsOutput() && !state->outputEndpoint)
++            state->outputEndpoint = e;
++    }
++    // Ask for exactly the largest report: a transfer of a report that fills
++    // whole packets ends only when that many bytes have arrived.
++    size_t inputLength = state->descriptor.maximumReportLength(ReportType::Input);
++    if (inputLength && state->descriptor.usesReportIds)
++        ++inputLength;
++    if (!inputLength || inputLength > maximumReportLength)
++        state->inputEndpoint.reset();
++    state->inputLength = inputLength;
++
++    int fd = ::open(approved.path.c_str(), O_RDWR | O_CLOEXEC | O_NOFOLLOW);
++    if (fd < 0) {
++        error = Error::NotFound;
++        return nullptr;
++    }
++    struct stat opened;
++    status_t version = 0;
++    if (fstat(fd, &opened) || opened.st_dev != before.st_dev || opened.st_ino != before.st_ino) {
++        ::close(fd);
++        error = Error::NotFound;
++        return nullptr;
++    }
++    if (ioctl(fd, getVersion, &version, sizeof(version)) || (version != 0x14 && version != 0x15)) {
++        ::close(fd);
++        error = Error::NotSupported;
++        return nullptr;
++    }
++    state->fd = fd;
++    state->input = std::move(input);
++    state->event = create_sem(0, "WebHID device");
++    if (state->event < B_OK) {
++        ::close(fd);
++        error = Error::Network;
++        return nullptr;
++    }
++    auto* owner = new std::shared_ptr<State>(state);
++    auto thread = spawn_thread([](void* data) -> int32 {
++        std::unique_ptr<std::shared_ptr<State>> state(static_cast<std::shared_ptr<State>*>(data));
++        (*state)->run();
++        return 0;
++    }, "WebHID device", B_NORMAL_PRIORITY, owner);
++    if (thread < B_OK || resume_thread(thread) != B_OK) {
++        if (thread >= B_OK)
++            kill_thread(thread);
++        delete owner;
++        ::close(fd);
++        delete_sem(state->event);
++        error = Error::Network;
++        return nullptr;
++    }
++    return std::shared_ptr<Connection>(new Connection(std::move(state)));
++}
++
++Connection::Connection(std::shared_ptr<State> state)
++    : m_state(std::move(state)) { }
++Connection::~Connection() { close(); }
++
++void Connection::close()
++{
++    {
++        std::lock_guard lock(m_state->lock);
++        if (m_state->closing)
++            return;
++        m_state->closing = true;
++    }
++    release_sem(m_state->event);
++}
++
++void Connection::enqueue(int kind, uint8_t reportId, std::vector<uint8_t>&& data, Completion&& completion)
++{
++    {
++        std::lock_guard lock(m_state->lock);
++        if (!m_state->closing && !m_state->gone && m_state->operations.size() < 64) {
++            m_state->operations.push_back({ kind, reportId, std::move(data), std::move(completion) });
++            release_sem(m_state->event);
++            return;
++        }
++    }
++    completion(m_state->gone ? Error::NotFound : Error::InvalidState, { });
++}
++
++void Connection::sendReport(uint8_t reportId, std::vector<uint8_t>&& data, Completion&& completion)
++{
++    enqueue(SendReport, reportId, std::move(data), std::move(completion));
++}
++void Connection::sendFeatureReport(uint8_t reportId, std::vector<uint8_t>&& data, Completion&& completion)
++{
++    enqueue(SendFeatureReport, reportId, std::move(data), std::move(completion));
++}
++void Connection::receiveFeatureReport(uint8_t reportId, Completion&& completion)
++{
++    enqueue(ReceiveFeatureReport, reportId, { }, std::move(completion));
++}
++
++void Connection::State::run()
++{
++    struct Read {
++        Call call;
++        RawTransfer transfer { };
++        std::vector<uint8_t> buffer;
++    };
++    std::unique_ptr<Read> read;
++    unsigned failures = 0;
++    auto deliver = [&](Read& done) {
++        bool ok = !done.call.failed && done.transfer.status == rawSuccess;
++        if (done.call.failed) {
++            // The device was removed or the handle is no longer usable.
++            std::lock_guard locker(lock);
++            gone = true;
++        }
++        if (!ok) {
++            ++failures;
++            return;
++        }
++        failures = 0;
++        size_t length = std::min(done.transfer.length, done.buffer.size());
++        if (!length)
++            return;
++        uint8_t reportId = 0;
++        size_t offset = 0;
++        if (descriptor.usesReportIds) {
++            reportId = done.buffer[0];
++            offset = 1;
++        }
++        input(reportId, std::vector<uint8_t>(done.buffer.begin() + offset, done.buffer.begin() + length), false);
++    };
++    auto stopRead = [&] {
++        if (!read)
++            return;
++        if (finishCall(read->call))
++            deliver(*read);
++        read.reset();
++    };
++
++    for (;;) {
++        std::optional<Operation> operation;
++        bool deviceGone;
++        {
++            std::lock_guard locker(lock);
++            if (closing)
++                break;
++            if (!operations.empty()) {
++                operation = std::move(operations.front());
++                operations.pop_front();
++            }
++            deviceGone = gone;
++        }
++        if (operation) {
++            stopRead();
++            auto error = perform(*operation);
++            if (error == Error::NotFound) {
++                std::lock_guard locker(lock);
++                gone = true;
++            }
++            operation->completion(error, std::move(operation->data));
++            continue;
++        }
++        if (deviceGone) {
++            stopRead();
++            input(0, { }, true);
++            // Fail what arrives later until the broker closes this.
++            for (;;) {
++                acquire_sem(event);
++                std::deque<Operation> failed;
++                {
++                    std::lock_guard locker(lock);
++                    if (closing)
++                        break;
++                    failed.swap(operations);
++                }
++                for (auto& item : failed)
++                    item.completion(Error::NotFound, { });
++            }
++            break;
++        }
++        if (inputEndpoint && !read) {
++            if (failures > 32) {
++                // A stalled or misbehaving input endpoint: try again later
++                // without spinning.
++                if (acquire_sem_etc(event, 1, B_RELATIVE_TIMEOUT, 250000) == B_OK)
++                    continue;
++                failures = 16;
++            } else if (failures)
++                snooze(2000);
++            read = std::make_unique<Read>();
++            read->buffer.resize(inputLength);
++            read->transfer.status = rawSuccess;
++            read->transfer.interfaceIndex = interfaceIndex;
++            read->transfer.endpointIndex = *inputEndpoint;
++            read->transfer.data = read->buffer.data();
++            read->transfer.length = read->buffer.size();
++            read->call.fd = fd;
++            read->call.operation = interruptTransferCommand;
++            read->call.command = &read->transfer;
++            read->call.size = sizeof(read->transfer);
++            read->call.done = event;
++            if (!startCall(read->call)) {
++                read.reset();
++                ++failures;
++                continue;
++            }
++        }
++        acquire_sem(event);
++        if (read && read->call.returned.load()) {
++            finishCall(read->call);
++            deliver(*read);
++            read.reset();
++        }
++    }
++    stopRead();
++    std::deque<Operation> remaining;
++    {
++        std::lock_guard locker(lock);
++        remaining.swap(operations);
++    }
++    for (auto& item : remaining)
++        item.completion(Error::Abort, { });
++    ::close(fd);
++    fd = -1;
++    delete_sem(event);
++    event = -1;
++}
++
++Error Connection::State::perform(Operation& operation)
++{
++    auto type = operation.kind == SendReport ? ReportType::Output : ReportType::Feature;
++    // Numbered reports need an ID and unnumbered ones must not have one.
++    if (!operation.reportId != !descriptor.usesReportIds)
++        return Error::NotSupported;
++    auto length = descriptor.reportLength(type, operation.reportId);
++    if (operation.kind != ReceiveFeatureReport) {
++        if (!length || operation.data.size() > *length)
++            return Error::NotSupported;
++        // Devices expect whole reports: pad short ones, as other hosts do.
++        operation.data.resize(*length, 0);
++        // Numbered reports are sent with their ID in front.
++        if (operation.reportId)
++            operation.data.insert(operation.data.begin(), operation.reportId);
++        if (operation.kind == SendReport && outputEndpoint) {
++            auto error = interruptOut(operation.data);
++            operation.data.clear();
++            return error;
++        }
++        auto error = control(false, 0x09, uint16_t((operation.kind == SendReport ? 0x0200 : 0x0300) | operation.reportId), operation.data);
++        operation.data.clear();
++        return error;
++    }
++    if (!length)
++        return Error::NotSupported;
++    operation.data.assign(*length + (operation.reportId ? 1 : 0), 0);
++    // As in other browsers, a numbered feature report keeps its ID as the
++    // first byte.
++    return control(true, 0x01, uint16_t(0x0300 | operation.reportId), operation.data);
++}
++
++Error Connection::State::control(bool input, uint8_t request, uint16_t value, std::vector<uint8_t>& data)
++{
++    RawControl command { };
++    command.status = rawSuccess;
++    // Class request to the interface: SET_REPORT (0x21) or GET_REPORT (0xa1).
++    command.requestType = input ? 0xa1 : 0x21;
++    command.request = request;
++    command.value = value;
++    command.index = interfaceNumber;
++    command.length = data.size();
++    command.data = data.data();
++    Call call;
++    call.fd = fd;
++    call.operation = controlTransferCommand;
++    call.command = &command;
++    call.size = sizeof(command);
++    call.done = create_sem(0, "WebHID control");
++    if (call.done < B_OK)
++        return Error::Network;
++    if (!startCall(call)) {
++        delete_sem(call.done);
++        return Error::Network;
++    }
++    auto deadline = system_time() + operationDeadline;
++    while (!call.returned.load() && system_time() < deadline && !closingNow())
++        acquire_sem_etc(call.done, 1, B_RELATIVE_TIMEOUT, 100000);
++    bool returned = finishCall(call);
++    delete_sem(call.done);
++    if (!returned)
++        return closingNow() ? Error::Abort : Error::Network;
++    if (call.failed)
++        return Error::NotFound;
++    if (command.status == rawStalled)
++        return Error::NotSupported;
++    if (command.status != rawSuccess)
++        return Error::Network;
++    if (input)
++        data.resize(std::min<size_t>(command.length, data.size()));
++    return Error::None;
++}
++
++Error Connection::State::interruptOut(const std::vector<uint8_t>& data)
++{
++    RawTransfer transfer { };
++    std::vector<uint8_t> buffer = data;
++    transfer.status = rawSuccess;
++    transfer.interfaceIndex = interfaceIndex;
++    transfer.endpointIndex = *outputEndpoint;
++    transfer.data = buffer.data();
++    transfer.length = buffer.size();
++    Call call;
++    call.fd = fd;
++    call.operation = interruptTransferCommand;
++    call.command = &transfer;
++    call.size = sizeof(transfer);
++    call.done = create_sem(0, "WebHID output");
++    if (call.done < B_OK)
++        return Error::Network;
++    if (!startCall(call)) {
++        delete_sem(call.done);
++        return Error::Network;
++    }
++    auto deadline = system_time() + operationDeadline;
++    while (!call.returned.load() && system_time() < deadline && !closingNow())
++        acquire_sem_etc(call.done, 1, B_RELATIVE_TIMEOUT, 100000);
++    bool returned = finishCall(call);
++    delete_sem(call.done);
++    if (!returned)
++        return closingNow() ? Error::Abort : Error::Network;
++    if (call.failed)
++        return Error::NotFound;
++    return transfer.status == rawSuccess ? Error::None : Error::Network;
++}
++
++} // namespace WebKit::HIDHaiku
+diff --git a/Source/WebKit/UIProcess/haiku/usb/HIDDeviceHaiku.h b/Source/WebKit/UIProcess/haiku/usb/HIDDeviceHaiku.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..3389f4812ecc2e18d685f2b4982f8ce4a4dc4cd1
+--- /dev/null
++++ b/Source/WebKit/UIProcess/haiku/usb/HIDDeviceHaiku.h
+@@ -0,0 +1,66 @@
++/* Copyright (C) 2026 Summit contributors. SPDX-License-Identifier: BSD-2-Clause */
++#pragma once
++
++#include "HIDReportDescriptorHaiku.h"
++#include <OS.h>
++#include <atomic>
++#include <deque>
++#include <functional>
++#include <memory>
++#include <mutex>
++#include <string>
++#include <vector>
++
++namespace WebKit::HIDHaiku {
++
++// One HID interface of a USB device: what WebHID calls a device.
++struct Interface {
++    // These two fields never cross the renderer IPC boundary.
++    std::string path;
++    std::string identity;
++    uint8_t number { 0 };
++    uint16_t vendorId { 0 };
++    uint16_t productId { 0 };
++    std::string product;
++    Descriptor descriptor;
++};
++
++// Lists the HID interfaces a web page may be offered (see eligible()). The
++// report descriptors of devices already seen are cached. Call on a worker.
++std::vector<Interface> enumerateInterfaces();
++
++enum class Error { None, NotFound, Security, InvalidState, Network, NotSupported, Abort };
++
++// An open HID interface. A device thread owns the raw USB handle. It keeps an
++// interrupt transfer pending for input reports and interrupts it to send
++// output and feature reports: Haiku's raw USB driver holds the device for the
++// whole of a transfer, so they could not otherwise be sent while waiting.
++class Connection final {
++public:
++    using Completion = std::function<void(Error, std::vector<uint8_t>&&)>;
++    // Called on the device thread. An empty report with gone=true means the
++    // device has gone away and nothing more will be read.
++    using InputHandler = std::function<void(uint8_t reportId, std::vector<uint8_t>&&, bool gone)>;
++
++    // Blocking: call on a worker. Verifies that the interface is still the one
++    // approved.
++    static std::shared_ptr<Connection> open(const Interface& approved, InputHandler&&, Error&);
++    ~Connection();
++
++    // Completions are called on the device thread, in order, each exactly once.
++    void sendReport(uint8_t reportId, std::vector<uint8_t>&&, Completion&&);
++    void sendFeatureReport(uint8_t reportId, std::vector<uint8_t>&&, Completion&&);
++    void receiveFeatureReport(uint8_t reportId, Completion&&);
++    // Safe from any thread except the device thread. Returns at once: pending
++    // operations complete with Error::Abort and the device thread exits.
++    void close();
++
++    struct State;
++
++private:
++    explicit Connection(std::shared_ptr<State>);
++    void enqueue(int kind, uint8_t reportId, std::vector<uint8_t>&&, Completion&&);
++    std::shared_ptr<State> m_state;
++};
++
++} // namespace WebKit::HIDHaiku
+diff --git a/Source/WebKit/UIProcess/haiku/usb/HIDReportDescriptorHaiku.h b/Source/WebKit/UIProcess/haiku/usb/HIDReportDescriptorHaiku.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..ec126b75192cfe38c42c8b536562266ed7ecf060
+--- /dev/null
++++ b/Source/WebKit/UIProcess/haiku/usb/HIDReportDescriptorHaiku.h
+@@ -0,0 +1,332 @@
++/* Copyright (C) 2026 Summit contributors. SPDX-License-Identifier: BSD-2-Clause */
++#pragma once
++
++// A HID report descriptor parser for WebHID (HID 1.11, section 6.2.2). It has
++// no platform dependencies so that it can be tested on its own. Descriptors
++// come from devices: every count and depth is bounded.
++
++#include <algorithm>
++#include <cstdint>
++#include <map>
++#include <optional>
++#include <span>
++#include <utility>
++#include <vector>
++
++namespace WebKit::HIDHaiku {
++
++struct ReportItem {
++    bool isAbsolute { true };
++    bool isArray { false };
++    bool isBufferedBytes { false };
++    bool isConstant { false };
++    bool isLinear { true };
++    bool isRange { false };
++    bool isVolatile { false };
++    bool hasNull { false };
++    bool hasPreferredState { true };
++    bool wrap { false };
++    std::vector<uint32_t> usages;
++    uint32_t usageMinimum { 0 };
++    uint32_t usageMaximum { 0 };
++    uint16_t reportSize { 0 };
++    uint16_t reportCount { 0 };
++    int8_t unitExponent { 0 };
++    uint8_t unitSystem { 0 };
++    // Length, mass, time, temperature, current, luminous intensity.
++    int8_t unitFactors[6] { };
++    int32_t logicalMinimum { 0 };
++    int32_t logicalMaximum { 0 };
++    int32_t physicalMinimum { 0 };
++    int32_t physicalMaximum { 0 };
++};
++
++struct Report {
++    uint8_t id { 0 };
++    std::vector<ReportItem> items;
++};
++
++struct Collection {
++    uint16_t usagePage { 0 };
++    uint16_t usage { 0 };
++    uint8_t type { 0 };
++    std::vector<Collection> children;
++    std::vector<Report> inputReports;
++    std::vector<Report> outputReports;
++    std::vector<Report> featureReports;
++};
++
++enum class ReportType : uint8_t { Input, Output, Feature };
++
++struct Descriptor {
++    // The top-level collections.
++    std::vector<Collection> collections;
++    bool usesReportIds { false };
++    // Report lengths in bits, by type and report ID.
++    std::map<std::pair<ReportType, uint8_t>, uint32_t> reportBits;
++
++    // Bytes of a report without its report ID prefix, or nullopt if the
++    // descriptor does not define it.
++    std::optional<size_t> reportLength(ReportType type, uint8_t id) const
++    {
++        auto found = reportBits.find({ type, id });
++        if (found == reportBits.end())
++            return std::nullopt;
++        return (found->second + 7) / 8;
++    }
++    size_t maximumReportLength(ReportType type) const
++    {
++        size_t result = 0;
++        for (auto& [key, bits] : reportBits) {
++            if (key.first == type)
++                result = std::max<size_t>(result, (bits + 7) / 8);
++        }
++        return result;
++    }
++};
++
++namespace Detail {
++
++constexpr unsigned maximumDepth = 32;
++constexpr unsigned maximumItems = 8192;
++constexpr unsigned maximumUsages = 1024;
++constexpr unsigned maximumGlobalStack = 16;
++constexpr uint32_t maximumReportBits = 65536 * 8;
++
++struct GlobalState {
++    uint16_t usagePage { 0 };
++    int32_t logicalMinimum { 0 };
++    int32_t logicalMaximum { 0 };
++    int32_t physicalMinimum { 0 };
++    int32_t physicalMaximum { 0 };
++    int8_t unitExponent { 0 };
++    uint32_t unit { 0 };
++    uint16_t reportSize { 0 };
++    uint8_t reportId { 0 };
++    uint16_t reportCount { 0 };
++};
++
++struct LocalState {
++    std::vector<uint32_t> usages;
++    std::optional<uint32_t> usageMinimum;
++    std::optional<uint32_t> usageMaximum;
++};
++
++inline uint32_t unsignedValue(std::span<const uint8_t> data)
++{
++    uint32_t value = 0;
++    for (size_t i = 0; i < data.size(); ++i)
++        value |= uint32_t(data[i]) << (8 * i);
++    return value;
++}
++
++inline int32_t signedValue(std::span<const uint8_t> data)
++{
++    uint32_t value = unsignedValue(data);
++    switch (data.size()) {
++    case 1: return int8_t(value);
++    case 2: return int16_t(value);
++    case 4: return int32_t(value);
++    default: return 0;
++    }
++}
++
++inline uint32_t extendedUsage(std::span<const uint8_t> data, uint16_t page)
++{
++    uint32_t value = unsignedValue(data);
++    // A four-byte usage carries its own usage page.
++    return data.size() == 4 ? value : (uint32_t(page) << 16) | (value & 0xffff);
++}
++
++inline int8_t nibble(uint32_t value, unsigned index)
++{
++    int8_t result = (value >> (index * 4)) & 15;
++    return result > 7 ? result - 16 : result;
++}
++
++inline void addReport(std::vector<Report>& reports, uint8_t id, ReportItem&& item)
++{
++    auto found = std::find_if(reports.begin(), reports.end(), [&](auto& report) { return report.id == id; });
++    if (found == reports.end()) {
++        reports.push_back({ id, { } });
++        found = reports.end() - 1;
++    }
++    found->items.push_back(std::move(item));
++}
++
++} // namespace Detail
++
++inline std::optional<Descriptor> parseReportDescriptor(std::span<const uint8_t> bytes)
++{
++    using namespace Detail;
++    if (bytes.empty() || bytes.size() > 65536)
++        return std::nullopt;
++    Descriptor descriptor;
++    GlobalState global;
++    std::vector<GlobalState> globalStack;
++    LocalState local;
++    // The innermost open collection is the last; the outermost the first.
++    std::vector<Collection> open;
++    unsigned items = 0;
++    size_t position = 0;
++    while (position < bytes.size()) {
++        if (++items > maximumItems)
++            return std::nullopt;
++        uint8_t prefix = bytes[position++];
++        if (prefix == 0xfe) {
++            // A long item: no long item tags are defined, skip its data.
++            if (position + 2 > bytes.size())
++                return std::nullopt;
++            size_t size = bytes[position];
++            position += 2 + size;
++            if (position > bytes.size())
++                return std::nullopt;
++            continue;
++        }
++        static constexpr size_t sizes[] = { 0, 1, 2, 4 };
++        size_t size = sizes[prefix & 3];
++        if (position + size > bytes.size())
++            return std::nullopt;
++        auto data = bytes.subspan(position, size);
++        position += size;
++        uint8_t type = (prefix >> 2) & 3;
++        uint8_t tag = prefix >> 4;
++        if (type == 0) {
++            // Main items.
++            if (tag == 0x8 || tag == 0x9 || tag == 0xb) {
++                if (open.empty())
++                    return std::nullopt;
++                uint32_t flags = unsignedValue(data);
++                ReportItem item;
++                item.isConstant = flags & 1;
++                item.isArray = !(flags & 2);
++                item.isAbsolute = !(flags & 4);
++                item.wrap = flags & 8;
++                item.isLinear = !(flags & 16);
++                item.hasPreferredState = !(flags & 32);
++                item.hasNull = flags & 64;
++                item.isVolatile = tag != 0x8 && (flags & 128);
++                item.isBufferedBytes = flags & 256;
++                if (local.usageMinimum && local.usageMaximum) {
++                    item.isRange = true;
++                    item.usageMinimum = *local.usageMinimum;
++                    item.usageMaximum = *local.usageMaximum;
++                } else
++                    item.usages = local.usages;
++                item.reportSize = global.reportSize;
++                item.reportCount = global.reportCount;
++                item.unitExponent = global.unitExponent;
++                item.unitSystem = global.unit & 15;
++                for (unsigned i = 0; i < 6; ++i)
++                    item.unitFactors[i] = nibble(global.unit, i + 1);
++                item.logicalMinimum = global.logicalMinimum;
++                item.logicalMaximum = global.logicalMaximum;
++                item.physicalMinimum = global.physicalMinimum;
++                item.physicalMaximum = global.physicalMaximum;
++                auto reportType = tag == 0x8 ? ReportType::Input : tag == 0x9 ? ReportType::Output : ReportType::Feature;
++                auto& bits = descriptor.reportBits[{ reportType, global.reportId }];
++                bits += uint32_t(global.reportSize) * global.reportCount;
++                if (bits > maximumReportBits)
++                    return std::nullopt;
++                auto& collection = open.back();
++                auto& reports = reportType == ReportType::Input ? collection.inputReports
++                    : reportType == ReportType::Output ? collection.outputReports : collection.featureReports;
++                addReport(reports, global.reportId, std::move(item));
++            } else if (tag == 0xa) {
++                if (open.size() >= maximumDepth)
++                    return std::nullopt;
++                Collection collection;
++                uint32_t usage = !local.usages.empty() ? local.usages.front()
++                    : local.usageMinimum ? *local.usageMinimum : uint32_t(global.usagePage) << 16;
++                collection.usagePage = usage >> 16;
++                collection.usage = usage & 0xffff;
++                collection.type = unsignedValue(data);
++                open.push_back(std::move(collection));
++            } else if (tag == 0xc) {
++                if (open.empty())
++                    return std::nullopt;
++                auto collection = std::move(open.back());
++                open.pop_back();
++                if (open.empty())
++                    descriptor.collections.push_back(std::move(collection));
++                else
++                    open.back().children.push_back(std::move(collection));
++            }
++            local = { };
++        } else if (type == 1) {
++            // Global items.
++            switch (tag) {
++            case 0x0: global.usagePage = unsignedValue(data); break;
++            case 0x1: global.logicalMinimum = signedValue(data); break;
++            case 0x2: global.logicalMaximum = signedValue(data); break;
++            case 0x3: global.physicalMinimum = signedValue(data); break;
++            case 0x4: global.physicalMaximum = signedValue(data); break;
++            case 0x5: global.unitExponent = nibble(unsignedValue(data), 0); break;
++            case 0x6: global.unit = unsignedValue(data); break;
++            case 0x7: global.reportSize = std::min<uint32_t>(unsignedValue(data), 0xffff); break;
++            case 0x8:
++                global.reportId = unsignedValue(data);
++                if (!global.reportId)
++                    return std::nullopt;
++                descriptor.usesReportIds = true;
++                break;
++            case 0x9: global.reportCount = std::min<uint32_t>(unsignedValue(data), 0xffff); break;
++            case 0xa:
++                if (globalStack.size() >= maximumGlobalStack)
++                    return std::nullopt;
++                globalStack.push_back(global);
++                break;
++            case 0xb:
++                if (globalStack.empty())
++                    return std::nullopt;
++                global = globalStack.back();
++                globalStack.pop_back();
++                break;
++            default: break;
++            }
++        } else if (type == 2) {
++            // Local items. Designators, strings and delimiters are not exposed.
++            switch (tag) {
++            case 0x0:
++                if (local.usages.size() >= maximumUsages)
++                    return std::nullopt;
++                local.usages.push_back(extendedUsage(data, global.usagePage));
++                break;
++            case 0x1: local.usageMinimum = extendedUsage(data, global.usagePage); break;
++            case 0x2: local.usageMaximum = extendedUsage(data, global.usagePage); break;
++            default: break;
++            }
++        } else
++            return std::nullopt;
++    }
++    // Tolerate a missing final End Collection, as other hosts do.
++    while (!open.empty()) {
++        auto collection = std::move(open.back());
++        open.pop_back();
++        if (open.empty())
++            descriptor.collections.push_back(std::move(collection));
++        else
++            open.back().children.push_back(std::move(collection));
++    }
++    if (descriptor.collections.empty())
++        return std::nullopt;
++    return descriptor;
++}
++
++// Whether a web page may use this interface. Keyboards, pointers and
++// security keys are protected by WebHID. Haiku's usb_hid driver also reads
++// every interface it has a protocol handler for (generic desktop, keyboard,
++// consumer and digitizer collections) and the raw USB driver cannot reserve
++// an interface against it: input reports would be split between the two.
++inline bool protectedUsagePage(uint16_t page)
++{
++    return page == 0x01 || page == 0x07 || page == 0x0c || page == 0x0d || page == 0xf1d0;
++}
++
++inline bool eligible(const Descriptor& descriptor)
++{
++    return !descriptor.collections.empty() && std::none_of(descriptor.collections.begin(), descriptor.collections.end(),
++        [](auto& collection) { return protectedUsagePage(collection.usagePage); });
++}
++
++} // namespace WebKit::HIDHaiku
 diff --git a/Source/WebKit/UIProcess/haiku/usb/USBDevicePolicyHaiku.h b/Source/WebKit/UIProcess/haiku/usb/USBDevicePolicyHaiku.h
 new file mode 100644
 index 0000000000000000000000000000000000000000..fece383da7906574b8bfdcaf6a877c1f7c2a99ad
@@ -124914,17 +126836,686 @@ index 0000000000000000000000000000000000000000..437da04334f6bfcba7e473b160dea1e7
 +};
 +
 +} // namespace WebKit::USBHaiku
+diff --git a/Source/WebKit/UIProcess/haiku/usb/WebHIDBrokerHaiku.cpp b/Source/WebKit/UIProcess/haiku/usb/WebHIDBrokerHaiku.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..d21a2835abd0fa82a3da3714738fd3b9c1a275ea
+--- /dev/null
++++ b/Source/WebKit/UIProcess/haiku/usb/WebHIDBrokerHaiku.cpp
+@@ -0,0 +1,593 @@
++/* Copyright (C) 2026 Summit contributors. SPDX-License-Identifier: BSD-2-Clause */
++#include "config.h"
++#if ENABLE(WEBUSB)
++#include "WebHIDBrokerHaiku.h"
++#include "SitePermissionsHaiku.h"
++#include <wtf/NeverDestroyed.h>
++#include <wtf/RunLoop.h>
++#include <wtf/HexNumber.h>
++#include <wtf/UUID.h>
++#include <wtf/text/MakeString.h>
++#include <unordered_map>
++
++namespace WebKit {
++using namespace HIDHaiku;
++
++// Main-thread ownership spans normal and private browsing contexts.
++static auto& openInterfaces()
++{
++    static NeverDestroyed<std::unordered_map<std::string, std::weak_ptr<Connection>>> interfaces;
++    return interfaces.get();
++}
++static std::string interfaceKey(const Interface& device)
++{
++    return device.path + '#' + std::to_string(device.number);
++}
++static String hidError(ASCIILiteral name, ASCIILiteral message)
++{
++    auto object = JSON::Object::create();
++    object->setString("error"_s, name);
++    object->setString("message"_s, message);
++    return object->toJSONString();
++}
++static ASCIILiteral errorName(Error error)
++{
++    switch (error) {
++    case Error::None: return ""_s;
++    case Error::NotFound: return "NotFoundError"_s;
++    case Error::Security: return "SecurityError"_s;
++    case Error::InvalidState: return "InvalidStateError"_s;
++    case Error::Network: return "NetworkError"_s;
++    case Error::NotSupported: return "NotAllowedError"_s;
++    case Error::Abort: return "AbortError"_s;
++    }
++    return "NetworkError"_s;
++}
++static String fromUTF8(const std::string& string)
++{
++    return String::fromUTF8ReplacingInvalidSequences(std::span(reinterpret_cast<const char8_t*>(string.data()), string.size()));
++}
++
++static ASCIILiteral unitSystem(uint8_t value)
++{
++    switch (value) {
++    case 0: return "none"_s;
++    case 1: return "si-linear"_s;
++    case 2: return "si-rotation"_s;
++    case 3: return "english-linear"_s;
++    case 4: return "english-rotation"_s;
++    case 15: return "vendor-defined"_s;
++    default: return "reserved"_s;
++    }
++}
++
++static Ref<JSON::Array> reportsJSON(const std::vector<Report>& reports)
++{
++    auto result = JSON::Array::create();
++    for (auto& report : reports) {
++        auto object = JSON::Object::create();
++        object->setInteger("reportId"_s, report.id);
++        auto items = JSON::Array::create();
++        for (auto& item : report.items) {
++            auto value = JSON::Object::create();
++            value->setBoolean("isAbsolute"_s, item.isAbsolute);
++            value->setBoolean("isArray"_s, item.isArray);
++            value->setBoolean("isBufferedBytes"_s, item.isBufferedBytes);
++            value->setBoolean("isConstant"_s, item.isConstant);
++            value->setBoolean("isLinear"_s, item.isLinear);
++            value->setBoolean("isRange"_s, item.isRange);
++            value->setBoolean("isVolatile"_s, item.isVolatile);
++            value->setBoolean("hasNull"_s, item.hasNull);
++            value->setBoolean("hasPreferredState"_s, item.hasPreferredState);
++            value->setBoolean("wrap"_s, item.wrap);
++            auto usages = JSON::Array::create();
++            for (auto usage : item.usages)
++                usages->pushDouble(usage);
++            value->setArray("usages"_s, WTF::move(usages));
++            value->setDouble("usageMinimum"_s, item.usageMinimum);
++            value->setDouble("usageMaximum"_s, item.usageMaximum);
++            value->setInteger("reportSize"_s, item.reportSize);
++            value->setInteger("reportCount"_s, item.reportCount);
++            value->setInteger("unitExponent"_s, item.unitExponent);
++            value->setString("unitSystem"_s, unitSystem(item.unitSystem));
++            static constexpr ASCIILiteral factors[] = {
++                "unitFactorLengthExponent"_s, "unitFactorMassExponent"_s, "unitFactorTimeExponent"_s,
++                "unitFactorTemperatureExponent"_s, "unitFactorCurrentExponent"_s, "unitFactorLuminousIntensityExponent"_s,
++            };
++            for (unsigned i = 0; i < 6; ++i)
++                value->setInteger(factors[i], item.unitFactors[i]);
++            value->setInteger("logicalMinimum"_s, item.logicalMinimum);
++            value->setInteger("logicalMaximum"_s, item.logicalMaximum);
++            value->setInteger("physicalMinimum"_s, item.physicalMinimum);
++            value->setInteger("physicalMaximum"_s, item.physicalMaximum);
++            value->setArray("strings"_s, JSON::Array::create());
++            items->pushObject(WTF::move(value));
++        }
++        object->setArray("items"_s, WTF::move(items));
++        result->pushObject(WTF::move(object));
++    }
++    return result;
++}
++
++static Ref<JSON::Array> collectionsJSON(const std::vector<Collection>& collections)
++{
++    auto result = JSON::Array::create();
++    for (auto& collection : collections) {
++        auto object = JSON::Object::create();
++        object->setInteger("usagePage"_s, collection.usagePage);
++        object->setInteger("usage"_s, collection.usage);
++        object->setInteger("type"_s, collection.type);
++        object->setArray("children"_s, collectionsJSON(collection.children));
++        object->setArray("inputReports"_s, reportsJSON(collection.inputReports));
++        object->setArray("outputReports"_s, reportsJSON(collection.outputReports));
++        object->setArray("featureReports"_s, reportsJSON(collection.featureReports));
++        result->pushObject(WTF::move(object));
++    }
++    return result;
++}
++
++static Ref<JSON::Object> deviceJSON(const Interface& device, const String& token)
++{
++    auto object = JSON::Object::create();
++    object->setString("id"_s, token);
++    object->setInteger("vendorId"_s, device.vendorId);
++    object->setInteger("productId"_s, device.productId);
++    object->setString("productName"_s, fromUTF8(device.product));
++    object->setArray("collections"_s, collectionsJSON(device.descriptor.collections));
++    return object;
++}
++
++struct Filter {
++    std::optional<uint16_t> vendorId;
++    std::optional<uint16_t> productId;
++    std::optional<uint16_t> usagePage;
++    std::optional<uint16_t> usage;
++};
++
++static std::optional<Vector<Filter>> readFilters(const JSON::Object& arguments, ASCIILiteral key)
++{
++    auto array = arguments.getArray(key);
++    if (!array || array->length() > 64)
++        return std::nullopt;
++    Vector<Filter> result;
++    for (auto& value : *array) {
++        auto object = value->asObject();
++        if (!object)
++            return std::nullopt;
++        Filter filter;
++        bool valid = true;
++        auto number = [&](ASCIILiteral key, std::optional<uint16_t>& target) {
++            if (!object->getValue(key))
++                return;
++            auto value = object->getInteger(key);
++            if (!value || *value < 0 || *value > 65535)
++                valid = false;
++            else
++                target = *value;
++        };
++        number("vendorId"_s, filter.vendorId);
++        number("productId"_s, filter.productId);
++        number("usagePage"_s, filter.usagePage);
++        number("usage"_s, filter.usage);
++        if (!valid || (filter.productId && !filter.vendorId) || (filter.usage && !filter.usagePage))
++            return std::nullopt;
++        result.append(filter);
++    }
++    return result;
++}
++
++static bool matches(const Interface& device, const Filter& filter)
++{
++    if ((filter.vendorId && *filter.vendorId != device.vendorId) || (filter.productId && *filter.productId != device.productId))
++        return false;
++    if (!filter.usagePage)
++        return true;
++    return std::any_of(device.descriptor.collections.begin(), device.descriptor.collections.end(), [&](auto& collection) {
++        return collection.usagePage == *filter.usagePage && (!filter.usage || collection.usage == *filter.usage);
++    });
++}
++
++static bool sameInterface(const Interface& a, const Interface& b)
++{
++    return a.path == b.path && a.identity == b.identity && a.number == b.number;
++}
++
++std::shared_ptr<WebHIDBrokerHaiku> WebHIDBrokerHaiku::create(std::shared_ptr<SitePermissionsHaiku> permissions, Ref<WorkQueue>&& queue)
++{
++    return std::shared_ptr<WebHIDBrokerHaiku>(new WebHIDBrokerHaiku(std::move(permissions), WTF::move(queue)));
++}
++WebHIDBrokerHaiku::WebHIDBrokerHaiku(std::shared_ptr<SitePermissionsHaiku> permissions, Ref<WorkQueue>&& queue)
++    : m_permissions(std::move(permissions)), m_queue(WTF::move(queue)) { }
++WebHIDBrokerHaiku::~WebHIDBrokerHaiku() { shutdown(); }
++
++void WebHIDBrokerHaiku::enumerate(const String& origin, const BMessenger& view, Ref<JSON::Object>&& args,
++    std::function<bool()>&& isCurrent, Completion&& completion)
++{
++    bool choosing = args->getString("operation"_s) == "requestDevice"_s;
++    if (!choosing && std::none_of(m_grants.begin(), m_grants.end(), [&](auto& grant) { return grant.value->origin == origin; })) {
++        // An unapproved origin learns nothing from probing the bus.
++        completion("{\"devices\":[]}"_s, { });
++        return;
++    }
++    auto include = choosing ? readFilters(args, "filters"_s) : std::optional { Vector<Filter> { } };
++    auto exclude = choosing ? readFilters(args, "exclusionFilters"_s) : std::optional { Vector<Filter> { } };
++    if (!include || !exclude) {
++        completion(hidError("TypeError"_s, "Invalid HID device filter"_s), { });
++        return;
++    }
++    if (m_enumerations >= 4) {
++        completion(hidError("InvalidStateError"_s, "A HID enumeration is already pending"_s), { });
++        return;
++    }
++    ++m_enumerations;
++    m_queue->dispatch([self = shared_from_this(), origin = origin.isolatedCopy(), view, choosing, include = WTF::move(*include),
++        exclude = WTF::move(*exclude), isCurrent = std::move(isCurrent), completion = WTF::move(completion)]() mutable {
++        auto devices = enumerateInterfaces();
++        std::erase_if(devices, [&](auto& device) {
++            return (!include.isEmpty() && std::none_of(include.begin(), include.end(), [&](auto& filter) { return matches(device, filter); }))
++                || std::any_of(exclude.begin(), exclude.end(), [&](auto& filter) { return matches(device, filter); });
++        });
++        RunLoop::mainSingleton().dispatch([self, origin = origin.isolatedCopy(), view, choosing, devices = std::move(devices),
++            isCurrent = std::move(isCurrent), completion = WTF::move(completion)]() mutable {
++            --self->m_enumerations;
++            if (self->m_shutdown || !isCurrent()) {
++                completion(hidError("AbortError"_s, "The HID document was closed"_s), { });
++                return;
++            }
++            if (!choosing) {
++                auto result = JSON::Object::create();
++                auto list = JSON::Array::create();
++                for (auto& grant : self->m_grants) {
++                    if (grant.value->origin != origin)
++                        continue;
++                    auto found = std::find_if(devices.begin(), devices.end(), [&](auto& device) { return sameInterface(device, grant.value->device); });
++                    if (found != devices.end())
++                        list->pushObject(deviceJSON(*found, grant.key));
++                    else if (!grant.value->gone) {
++                        grant.value->gone = true;
++                        self->closeGrant(*grant.value);
++                    }
++                }
++                result->setArray("devices"_s, WTF::move(list));
++                completion(result->toJSONString(), { });
++                return;
++            }
++            // Offer physical devices; a choice grants each of their matching
++            // interfaces, as other browsers do.
++            std::vector<std::vector<Interface>> groups;
++            for (auto& device : devices) {
++                auto group = std::find_if(groups.begin(), groups.end(), [&](auto& group) {
++                    return group.front().path == device.path && group.front().identity == device.identity;
++                });
++                if (group == groups.end())
++                    groups.push_back({ device });
++                else
++                    group->push_back(device);
++            }
++            if (groups.empty()) {
++                completion(hidError("NotFoundError"_s, "No eligible HID device matches these filters"_s), { });
++                return;
++            }
++            Vector<std::pair<String, String>> choices;
++            Vector<String> tokens;
++            for (auto& group : groups) {
++                auto token = WTF::UUID::createVersion4().toString();
++                auto& first = group.front();
++                auto label = first.product.empty() ? makeString("HID device "_s, hex(first.vendorId, 4), ':', hex(first.productId, 4))
++                    : fromUTF8(first.product);
++                // Never let device strings insert new lines in the permission UI.
++                label = makeStringByReplacingAll(makeStringByReplacingAll(label, '\n', ' '), '\r', ' ');
++                choices.append({ token, label });
++                tokens.append(token);
++            }
++            self->m_permissions->requestUSB(origin, view, WTF::move(choices),
++                [self, origin, groups = std::move(groups), tokens = WTF::move(tokens), isCurrent = std::move(isCurrent),
++                    completion = WTF::move(completion)](bool allowed, const String& selected) mutable {
++                    if (self->m_shutdown || !isCurrent()) {
++                        completion(hidError("AbortError"_s, "The HID document was closed"_s), { });
++                        return;
++                    }
++                    auto index = tokens.find(selected);
++                    if (!allowed || index == notFound || index >= groups.size()) {
++                        // WebHID resolves with no devices when nothing is chosen.
++                        completion("{\"devices\":[]}"_s, { });
++                        return;
++                    }
++                    auto result = JSON::Object::create();
++                    auto list = JSON::Array::create();
++                    for (auto& device : groups[index]) {
++                        String token;
++                        for (auto& grant : self->m_grants) {
++                            if (grant.value->origin == origin && sameInterface(grant.value->device, device)) {
++                                token = grant.key;
++                                grant.value->gone = false;
++                                break;
++                            }
++                        }
++                        if (token.isEmpty()) {
++                            if (self->m_grants.size() >= 256) {
++                                completion(hidError("NotAllowedError"_s, "Too many HID device grants"_s), { });
++                                return;
++                            }
++                            token = WTF::UUID::createVersion4().toString();
++                            auto grant = std::make_unique<Grant>();
++                            grant->origin = origin;
++                            grant->device = device;
++                            self->m_grants.add(token, WTF::move(grant));
++                        }
++                        list->pushObject(deviceJSON(device, token));
++                    }
++                    result->setArray("devices"_s, WTF::move(list));
++                    completion(result->toJSONString(), { });
++                }, "hid"_s);
++        });
++    });
++}
++
++void WebHIDBrokerHaiku::request(uint64_t page, const String& owner, const String& origin, const BMessenger& view,
++    Ref<JSON::Object>&& args, Vector<uint8_t>&& bytes, std::function<bool()>&& isCurrent, Completion&& completion)
++{
++    ASSERT(RunLoop::isMain());
++    if (m_shutdown || !isCurrent()) {
++        completion(hidError("AbortError"_s, "The HID document was closed"_s), { });
++        return;
++    }
++    auto op = args->getString("operation"_s);
++    if (op == "getDevices"_s || op == "requestDevice"_s) {
++        if (!bytes.isEmpty()) {
++            completion(hidError("TypeError"_s, "Invalid HID enumeration"_s), { });
++            return;
++        }
++        enumerate(origin, view, WTF::move(args), std::move(isCurrent), WTF::move(completion));
++        return;
++    }
++    auto token = args->getString("id"_s);
++    auto found = m_grants.find(token);
++    if (found == m_grants.end() || found->value->origin != origin) {
++        completion(hidError("SecurityError"_s, "This origin has no grant for the HID device"_s), { });
++        return;
++    }
++    auto& grant = *found->value;
++    if (op == "forget"_s) {
++        if (grant.connection && grant.owner != owner) {
++            completion(hidError("InvalidStateError"_s, "The HID device is in use"_s), { });
++            return;
++        }
++        closeGrant(grant);
++        m_grants.remove(found);
++        completion("{}"_s, { });
++        return;
++    }
++    if (op == "open"_s) {
++        open(token, grant, owner, page, WTF::move(completion));
++        return;
++    }
++    if ((grant.connection || grant.opening) && grant.owner != owner) {
++        completion(hidError("InvalidStateError"_s, "Another document is using this HID device"_s), { });
++        return;
++    }
++    if (op == "close"_s) {
++        closeGrant(grant);
++        completion("{}"_s, { });
++        return;
++    }
++    if (!grant.connection) {
++        completion(hidError("InvalidStateError"_s, "The HID device is not open"_s), { });
++        return;
++    }
++    if (op == "receive"_s) {
++        receive(grant, WTF::move(completion));
++        return;
++    }
++    auto reportId = args->getInteger("reportId"_s);
++    if (!reportId || *reportId < 0 || *reportId > 255 || bytes.size() > 65536) {
++        completion(hidError("TypeError"_s, "Invalid HID report"_s), { });
++        return;
++    }
++    if (grant.pending >= 64) {
++        completion(hidError("InvalidStateError"_s, "Too many HID operations are pending"_s), { });
++        return;
++    }
++    auto shared = std::make_shared<Completion>(WTF::move(completion));
++    auto done = [weak = weak_from_this(), connectionId = grant.connectionId, shared](Error error, std::vector<uint8_t>&& data) {
++        RunLoop::mainSingleton().dispatch([weak, connectionId, shared, error, data = std::move(data)]() mutable {
++            auto self = weak.lock();
++            if (self) {
++                for (auto& grant : self->m_grants) {
++                    if (grant.value->connectionId == connectionId && grant.value->pending)
++                        --grant.value->pending;
++                }
++            }
++            if (error != Error::None) {
++                (*shared)(hidError(errorName(error), error == Error::NotSupported
++                    ? "The device does not support this HID report"_s : "The HID report could not be transferred"_s), { });
++                return;
++            }
++            (*shared)("{}"_s, Vector<uint8_t>(std::span<const uint8_t>(data)));
++        });
++    };
++    ++grant.pending;
++    if (op == "sendReport"_s)
++        grant.connection->sendReport(*reportId, std::vector<uint8_t>(bytes.begin(), bytes.end()), std::move(done));
++    else if (op == "sendFeatureReport"_s)
++        grant.connection->sendFeatureReport(*reportId, std::vector<uint8_t>(bytes.begin(), bytes.end()), std::move(done));
++    else if (op == "receiveFeatureReport"_s && bytes.isEmpty())
++        grant.connection->receiveFeatureReport(*reportId, std::move(done));
++    else {
++        --grant.pending;
++        (*shared)(hidError("TypeError"_s, "Invalid HID operation"_s), { });
++    }
++}
++
++void WebHIDBrokerHaiku::open(const String& token, Grant& grant, const String& owner, uint64_t page, Completion&& completion)
++{
++    if (grant.gone) {
++        completion(hidError("NotFoundError"_s, "The HID device is no longer connected"_s), { });
++        return;
++    }
++    if ((grant.connection || grant.opening) && grant.owner != owner) {
++        completion(hidError("InvalidStateError"_s, "Another document is using this HID device"_s), { });
++        return;
++    }
++    if (grant.connection || grant.opening) {
++        // open() on an open device resolves; another document may not share it.
++        completion(grant.connection ? "{}"_s : hidError("InvalidStateError"_s, "The HID device is being opened"_s), { });
++        return;
++    }
++    auto key = interfaceKey(grant.device);
++    if (auto existing = openInterfaces().find(key); existing != openInterfaces().end() && !existing->second.expired()) {
++        completion(hidError("InvalidStateError"_s, "Another page is using this HID device"_s), { });
++        return;
++    }
++    grant.opening = true;
++    grant.owner = owner;
++    grant.page = page;
++    grant.connectionId = ++m_lastId;
++    auto connectionId = grant.connectionId;
++    Connection::InputHandler input = [weak = weak_from_this(), connectionId](uint8_t reportId, std::vector<uint8_t>&& data, bool gone) {
++        RunLoop::mainSingleton().dispatch([weak, connectionId, reportId, data = std::move(data), gone]() mutable {
++            if (auto self = weak.lock())
++                self->input(connectionId, reportId, Vector<uint8_t>(std::span<const uint8_t>(data)), gone);
++        });
++    };
++    m_queue->dispatch([self = shared_from_this(), token = token.isolatedCopy(), device = grant.device, connectionId,
++        input = std::move(input), completion = WTF::move(completion)]() mutable {
++        Error error;
++        auto connection = Connection::open(device, std::move(input), error);
++        RunLoop::mainSingleton().dispatch([self, token = token.isolatedCopy(), connectionId, connection = std::move(connection), error,
++            completion = WTF::move(completion)]() mutable {
++            auto found = self->m_grants.find(token);
++            if (self->m_shutdown || found == self->m_grants.end() || found->value->connectionId != connectionId || !found->value->opening) {
++                if (connection)
++                    connection->close();
++                completion(hidError("AbortError"_s, "The HID device was closed"_s), { });
++                return;
++            }
++            auto& grant = *found->value;
++            grant.opening = false;
++            if (!connection) {
++                grant.owner = { };
++                grant.page = 0;
++                completion(hidError(errorName(error), "The HID device could not be opened"_s), { });
++                return;
++            }
++            grant.connection = std::move(connection);
++            openInterfaces()[interfaceKey(grant.device)] = grant.connection;
++            completion("{}"_s, { });
++        });
++    });
++}
++
++void WebHIDBrokerHaiku::receive(Grant& grant, Completion&& completion)
++{
++    if (grant.waiting)
++        answerWaiting(grant);
++    grant.waiting = makeUnique<Completion>(WTF::move(completion));
++    grant.waitingId = ++m_lastId;
++    if (!grant.reports.isEmpty() || grant.gone) {
++        answerWaiting(grant);
++        return;
++    }
++    // Answer an idle wait now and then, so that a page that went away without
++    // closing the device does not keep a request here for ever.
++    RunLoop::mainSingleton().dispatchAfter(2_s, [weak = weak_from_this(), connectionId = grant.connectionId, waitingId = grant.waitingId] {
++        auto self = weak.lock();
++        if (!self)
++            return;
++        for (auto& grant : self->m_grants) {
++            if (grant.value->connectionId == connectionId && grant.value->waiting && grant.value->waitingId == waitingId)
++                self->answerWaiting(*grant.value);
++        }
++    });
++}
++
++void WebHIDBrokerHaiku::answerWaiting(Grant& grant)
++{
++    auto waiting = std::exchange(grant.waiting, nullptr);
++    if (!waiting)
++        return;
++    if (grant.reports.isEmpty() && grant.gone) {
++        (*waiting)(hidError("NotFoundError"_s, "The HID device is no longer connected"_s), { });
++        return;
++    }
++    auto result = JSON::Object::create();
++    auto list = JSON::Array::create();
++    Vector<uint8_t> bytes;
++    while (!grant.reports.isEmpty() && list->length() < 64 && bytes.size() < 65536) {
++        auto report = grant.reports.takeFirst();
++        grant.reportBytes -= report.second.size();
++        auto item = JSON::Object::create();
++        item->setInteger("reportId"_s, report.first);
++        item->setInteger("length"_s, report.second.size());
++        list->pushObject(WTF::move(item));
++        bytes.appendVector(report.second);
++    }
++    result->setArray("reports"_s, WTF::move(list));
++    (*waiting)(result->toJSONString(), WTF::move(bytes));
++}
++
++void WebHIDBrokerHaiku::input(uint64_t connectionId, uint8_t reportId, Vector<uint8_t>&& data, bool gone)
++{
++    ASSERT(RunLoop::isMain());
++    for (auto& entry : m_grants) {
++        auto& grant = *entry.value;
++        if (grant.connectionId != connectionId || !grant.connection)
++            continue;
++        if (gone)
++            grant.gone = true;
++        else {
++            // A page that stops reading loses its oldest reports.
++            while (!grant.reports.isEmpty() && (grant.reports.size() >= 1024 || grant.reportBytes + data.size() > 1024 * 1024)) {
++                grant.reportBytes -= grant.reports.first().second.size();
++                grant.reports.removeFirst();
++            }
++            grant.reportBytes += data.size();
++            grant.reports.append({ reportId, WTF::move(data) });
++        }
++        if (grant.waiting)
++            answerWaiting(grant);
++        return;
++    }
++}
++
++void WebHIDBrokerHaiku::closeGrant(Grant& grant)
++{
++    if (auto connection = std::exchange(grant.connection, nullptr)) {
++        auto key = interfaceKey(grant.device);
++        if (auto found = openInterfaces().find(key); found != openInterfaces().end() && found->second.lock() == connection)
++            openInterfaces().erase(found);
++        connection->close();
++    }
++    // Answers that arrive from the device thread no longer match a grant.
++    grant.connectionId = ++m_lastId;
++    grant.opening = false;
++    grant.owner = { };
++    grant.page = 0;
++    grant.pending = 0;
++    grant.reports.clear();
++    grant.reportBytes = 0;
++    if (auto waiting = std::exchange(grant.waiting, nullptr))
++        (*waiting)(hidError("InvalidStateError"_s, "The HID device was closed"_s), { });
++}
++
++void WebHIDBrokerHaiku::cancelPage(uint64_t page)
++{
++    ASSERT(RunLoop::isMain());
++    for (auto& grant : m_grants) {
++        if (grant.value->page == page)
++            closeGrant(*grant.value);
++    }
++}
++
++void WebHIDBrokerHaiku::shutdown()
++{
++    ASSERT(RunLoop::isMain());
++    if (m_shutdown)
++        return;
++    m_shutdown = true;
++    for (auto& grant : m_grants)
++        closeGrant(*grant.value);
++    m_grants.clear();
++}
++} // namespace WebKit
++#endif
+diff --git a/Source/WebKit/UIProcess/haiku/usb/WebHIDBrokerHaiku.h b/Source/WebKit/UIProcess/haiku/usb/WebHIDBrokerHaiku.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..dbe546b6669300076a64bd58b03bc4fbf7c5705b
+--- /dev/null
++++ b/Source/WebKit/UIProcess/haiku/usb/WebHIDBrokerHaiku.h
+@@ -0,0 +1,63 @@
++/* Copyright (C) 2026 Summit contributors. SPDX-License-Identifier: BSD-2-Clause */
++#pragma once
++#if ENABLE(WEBUSB)
++#include "HIDDeviceHaiku.h"
++#include <Messenger.h>
++#include <functional>
++#include <memory>
++#include <wtf/CompletionHandler.h>
++#include <wtf/Deque.h>
++#include <wtf/HashMap.h>
++#include <wtf/JSONValues.h>
++#include <wtf/WorkQueue.h>
++#include <wtf/text/StringHash.h>
++
++namespace WebKit {
++class SitePermissionsHaiku;
++
++// WebHID. It shares the WebUSB broker's request channel ("api": "hid") and
++// its rules: the browser process owns the devices, and paths, identities and
++// unapproved devices never reach a web process. Grants last for this
++// browsing context; private contexts get their own broker.
++class WebHIDBrokerHaiku final : public std::enable_shared_from_this<WebHIDBrokerHaiku> {
++public:
++    using Completion = CompletionHandler<void(String&&, Vector<uint8_t>&&)>;
++    static std::shared_ptr<WebHIDBrokerHaiku> create(std::shared_ptr<SitePermissionsHaiku>, Ref<WorkQueue>&&);
++    ~WebHIDBrokerHaiku();
++    void request(uint64_t page, const String& owner, const String& origin, const BMessenger&,
++        Ref<JSON::Object>&&, Vector<uint8_t>&&, std::function<bool()>&& isCurrent, Completion&&);
++    void cancelPage(uint64_t page);
++    void shutdown();
++private:
++    WebHIDBrokerHaiku(std::shared_ptr<SitePermissionsHaiku>, Ref<WorkQueue>&&);
++    struct Grant {
++        String origin;
++        HIDHaiku::Interface device;
++        String owner;
++        uint64_t page { 0 };
++        std::shared_ptr<HIDHaiku::Connection> connection;
++        uint64_t connectionId { 0 };
++        bool opening { false };
++        bool gone { false };
++        unsigned pending { 0 };
++        Deque<std::pair<uint8_t, Vector<uint8_t>>> reports;
++        size_t reportBytes { 0 };
++        // A pending "receive": answered when input arrives or after a while.
++        std::unique_ptr<Completion> waiting;
++        uint64_t waitingId { 0 };
++    };
++    void enumerate(const String& origin, const BMessenger&, Ref<JSON::Object>&&, std::function<bool()>&&, Completion&&);
++    void open(const String& token, Grant&, const String& owner, uint64_t page, Completion&&);
++    void receive(Grant&, Completion&&);
++    void input(uint64_t connectionId, uint8_t reportId, Vector<uint8_t>&&, bool gone);
++    void answerWaiting(Grant&);
++    void closeGrant(Grant&);
++    const std::shared_ptr<SitePermissionsHaiku> m_permissions;
++    const Ref<WorkQueue> m_queue;
++    HashMap<String, std::unique_ptr<Grant>> m_grants;
++    uint64_t m_lastId { 0 };
++    unsigned m_enumerations { 0 };
++    bool m_shutdown { false };
++};
++}
++#endif
 diff --git a/Source/WebKit/UIProcess/haiku/usb/WebUSBBrokerHaiku.cpp b/Source/WebKit/UIProcess/haiku/usb/WebUSBBrokerHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..dfbe819bd91f5a24def28c1e5e534f1936987c96
+index 0000000000000000000000000000000000000000..f7282a7e520df19d4c257e3ce72c4707fa9f79cd
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/usb/WebUSBBrokerHaiku.cpp
-@@ -0,0 +1,486 @@
+@@ -0,0 +1,493 @@
 +/* Copyright (C) 2026 Summit contributors. SPDX-License-Identifier: BSD-2-Clause */
 +#include "config.h"
 +#if ENABLE(WEBUSB)
 +#include "WebUSBBrokerHaiku.h"
 +#include "SitePermissionsHaiku.h"
++#include "WebHIDBrokerHaiku.h"
 +#include <wtf/NeverDestroyed.h>
 +#include <wtf/RunLoop.h>
 +#include <wtf/UUID.h>
@@ -125070,7 +127661,7 @@ index 0000000000000000000000000000000000000000..dfbe819bd91f5a24def28c1e5e534f19
 +    return std::shared_ptr<WebUSBBrokerHaiku>(new WebUSBBrokerHaiku(std::move(permissions)));
 +}
 +WebUSBBrokerHaiku::WebUSBBrokerHaiku(std::shared_ptr<SitePermissionsHaiku> permissions)
-+    : m_permissions(std::move(permissions)), m_queue(usbQueue()) { }
++    : m_permissions(permissions), m_queue(usbQueue()), m_hid(WebHIDBrokerHaiku::create(std::move(permissions), usbQueue())) { }
 +WebUSBBrokerHaiku::~WebUSBBrokerHaiku() { shutdown(); }
 +
 +void WebUSBBrokerHaiku::enumerate(uint64_t page, const String& owner, const String& origin, const BMessenger& view,
@@ -125272,6 +127863,10 @@ index 0000000000000000000000000000000000000000..dfbe819bd91f5a24def28c1e5e534f19
 +        completion(usbError("TypeError"_s, "Invalid USB request"_s), { });
 +        return;
 +    }
++    if (args->getString("api"_s) == "hid"_s) {
++        m_hid->request(page, owner, origin, view, args.releaseNonNull(), WTF::move(bytes), std::move(isCurrent), WTF::move(completion));
++        return;
++    }
 +    auto op = args->getString("operation"_s);
 +    if (op == "getDevices"_s || op == "requestDevice"_s) {
 +        if (!bytes.isEmpty()) {
@@ -125389,6 +127984,7 @@ index 0000000000000000000000000000000000000000..dfbe819bd91f5a24def28c1e5e534f19
 +void WebUSBBrokerHaiku::cancelPage(uint64_t page)
 +{
 +    ASSERT(RunLoop::isMain());
++    m_hid->cancelPage(page);
 +    for (auto& grant : m_grants) {
 +        if (grant.value.page == page)
 +            closeGrant(grant.value);
@@ -125400,6 +127996,7 @@ index 0000000000000000000000000000000000000000..dfbe819bd91f5a24def28c1e5e534f19
 +    if (m_shutdown)
 +        return;
 +    m_shutdown = true;
++    m_hid->shutdown();
 +    for (auto& grant : m_grants)
 +        closeGrant(grant.value);
 +    m_grants.clear();
@@ -125408,10 +128005,10 @@ index 0000000000000000000000000000000000000000..dfbe819bd91f5a24def28c1e5e534f19
 +#endif
 diff --git a/Source/WebKit/UIProcess/haiku/usb/WebUSBBrokerHaiku.h b/Source/WebKit/UIProcess/haiku/usb/WebUSBBrokerHaiku.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..9b1755f7d42debc3a50c35cced1ff3b9d9760bec
+index 0000000000000000000000000000000000000000..1c0727fa23ca440ace4a93b1f1841affa1c62506
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/usb/WebUSBBrokerHaiku.h
-@@ -0,0 +1,50 @@
+@@ -0,0 +1,52 @@
 +/* Copyright (C) 2026 Summit contributors. SPDX-License-Identifier: BSD-2-Clause */
 +#pragma once
 +#if ENABLE(WEBUSB)
@@ -125427,6 +128024,7 @@ index 0000000000000000000000000000000000000000..9b1755f7d42debc3a50c35cced1ff3b9
 +
 +namespace WebKit {
 +class SitePermissionsHaiku;
++class WebHIDBrokerHaiku;
 +
 +// The browser process owns all device capabilities. Paths, serial identifiers
 +// of unapproved devices and native USB handles never reach the web process.
@@ -125456,6 +128054,7 @@ index 0000000000000000000000000000000000000000..9b1755f7d42debc3a50c35cced1ff3b9
 +    void closeGrant(Grant&);
 +    const std::shared_ptr<SitePermissionsHaiku> m_permissions;
 +    const Ref<WorkQueue> m_queue;
++    const std::shared_ptr<WebHIDBrokerHaiku> m_hid;
 +    HashMap<String, Grant> m_grants;
 +    bool m_shutdown { false };
 +    unsigned m_enumerations { 0 };

@@ -21,6 +21,7 @@ engine and the private dependency closure.
 | #27 OffscreenCanvas | Main-thread and worker 2D, WebGL and WebGL2 | 28/28 checks, including concurrent GPU rendering, placeholder presentation and transferred ImageBitmap pixels |
 | #28 Custom schemes | Recommended native apps, application selection and website handlers | 18/18 API validation checks; approved website round trip 19/19; native argument delivery, remembering, cancellation, stale replies, removal and private isolation |
 | #29 WebUSB | Window bindings, native chooser, origin grants and native transfer backend | 54/54 browser checks; 550 policy checks; native protected-device and closed-session guards; real chooser click returns NotFoundError with no eligible devices |
+| #122 WebHID | `navigator.hid` with a native chooser, origin grants, input/output/feature reports and connection events over the WebUSB broker | 48 descriptor parser checks (`tests/HIDDescriptorTests.cpp`, devices from the Framework laptop); VIA test on the Keychron Q6 pending |
 | #30 Toolbar icons | Native scalable HVIF toolbar resources | All normal/disabled icon variants and complete native toolbar visually checked |
 
 Five consecutive OffscreenCanvas and image-codec runs pass with no new crash
@@ -85,22 +86,48 @@ USB's permissions-policy value is included in IPC serialization, and transfer
 result constructors preserve their supplied DataView objects through GC-traced
 attribute caches.
 
-**VIA keyboard configuration (#122) requires WebHID, which is not implemented.**
-On 21 October 2026 the current native browser reproduced VIA's "USB Detection
-Error" on `https://www.usevia.app/` in a fresh profile: the page was a secure
-context, `typeof navigator.usb` was `"object"`, and `typeof navigator.hid` was
-`"undefined"`. The error also appeared without a keyboard attached. VIA's
-[device implementation](https://github.com/the-via/app/blob/935106a990af39bdd1ade881c02366eac486240d/src/shims/node-hid.ts)
-uses `navigator.hid.getDevices()` / `requestDevice()`, filters HID collections
-by usage page `0xff60` and usage `0x61`, then uses output reports and
-`inputreport` events. Its UI explicitly requires a WebHID-capable browser.
-The WebUSB implementation above does not provide those interfaces.
+**WebHID (#122).** VIA (`https://www.usevia.app/`) configures QMK keyboards
+through WebHID, not WebUSB: it filters devices for a collection with usage page
+`0xff60` and usage `0x61`, sends 32-byte output reports and waits for
+`inputreport` events ([its shim](https://github.com/the-via/app/blob/935106a990af39bdd1ade881c02366eac486240d/src/shims/node-hid.ts)).
+On 21 October 2026 `navigator.hid` was undefined and VIA showed "USB Detection
+Error". Summit now implements WebHID on the WebUSB broker:
 
-The remaining work is a WebHID implementation with HID report/collection
-parsing, a native chooser, origin grants, report transfers and connection
-events, followed by validation with a VIA keyboard. WebUSB's protected HID
-class checks remain necessary; relaxing them would neither implement
-`navigator.hid` nor provide WebHID's collection-level access rules.
+- `navigator.hid` (`getDevices`, `requestDevice`, `connect`/`disconnect`) and
+  `HIDDevice` (`open`, `close`, `forget`, `sendReport`, `sendFeatureReport`,
+  `receiveFeatureReport`, `inputreport`, `collections`) in
+  `Source/WebCore/Modules/webhid`. Requests use the WebUSB request channel
+  with `"api": "hid"`, so the same document, secure-context, same-origin and
+  user-activation checks apply in both processes.
+- The browser process (`UIProcess/haiku/usb/WebHIDBrokerHaiku.cpp`) lists the
+  HID interfaces of USB devices, reads and parses each report descriptor once
+  (`HIDReportDescriptorHaiku.h`, tested by `tests/HIDDescriptorTests.cpp`),
+  asks with a native chooser ("Connect HID Device"; a choice grants each
+  matching interface of that device for the browsing session) and owns the
+  open devices. Paths and identities never reach the web process.
+- One HID interface is one WebHID device. An interface is offered only when
+  none of its top-level collections is on the generic desktop, keyboard,
+  consumer, digitizer or FIDO usage pages: WebHID protects keyboards, pointers
+  and security keys, and Haiku's `usb_hid` driver reads every interface it has
+  a protocol handler for. The raw USB driver cannot reserve an interface, so
+  the two would split input reports. QMK's raw HID interface, other vendor
+  interfaces and feature-report devices qualify.
+- `HIDDeviceHaiku.cpp`: a device thread keeps one interrupt-in transfer of the
+  largest input report pending. `usb_raw` holds a device for the whole of a
+  transfer and only killing the waiting thread interrupts it, so the thread
+  kills that transfer (as WebUSB's deadline does) to send an output report
+  (interrupt-out endpoint, else SET_REPORT) or a feature report (SET/GET_REPORT)
+  and then queues the next. A device that is not polled keeps its report, so
+  replies are not lost. Short reports are padded to the descriptor's length;
+  numbered feature reports keep their ID as the first byte, as in other
+  browsers. This works with stock Haiku's `usb_raw` too.
+- Input reaches the page through a waiting request: the browser answers it as
+  soon as reports arrive (up to 64 at a time) or after two seconds. A page that
+  stops reading loses its oldest reports beyond 1024 (or 1 MiB).
+
+Limits: HID over Bluetooth, worker exposure and `HIDDevice` in dedicated
+workers are not implemented; gamepads and other generic desktop collections
+are not offered (they belong to `usb_hid`).
 
 Toolbar icons are native HVIF resources rendered at the display scale, with
 BControl's pressed and disabled variants. Back, Forward, Stop and Home come
