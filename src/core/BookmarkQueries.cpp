@@ -81,7 +81,7 @@ struct Clause {
 
 struct Query {
     int64_t source = 0, sort = 0, type = 0, limit = 0;
-    bool excludeQueries = false, excludeItems = false;
+    bool excludeQueries = false, excludeItems = false, expandQueries = true;
     std::string error;
     // Legacy Places OR separates conditions; presentation options are global.
     std::vector<Clause> clauses{1};
@@ -138,6 +138,7 @@ Query Parse(std::string_view url)
         else if (name == "endTimeRef") number(clause.endRef, 0, 2);
         else if (name == "excludeQueries") flag(q.excludeQueries);
         else if (name == "excludeItems") flag(q.excludeItems);
+        else if (name == "expandQueries") flag(q.expandQueries);
         else if (name == "!tags") flag(clause.notTags);
         else if (name == "onlyBookmarked") flag(clause.onlyBookmarked);
         else if (name == "domainIsHost") flag(clause.domainIsHost);
@@ -154,7 +155,7 @@ Query Parse(std::string_view url)
             std::string tag; text(tag);
             if (std::find(clause.tags.begin(), clause.tags.end(), tag) == clause.tags.end()) clause.tags.push_back(std::move(tag));
         } else if (name == "OR") q.clauses.emplace_back();
-        else if (name == "expandQueries" || name == "asyncEnabled") {
+        else if (name == "asyncEnabled") {
             bool ignored = false; flag(ignored); // Presentation/scheduling, not membership.
         } else if (name == "includeHidden" || name == "originalTitle") {
             bool enabled = false; flag(enabled);
@@ -162,13 +163,24 @@ Query Parse(std::string_view url)
         } else q.error = "This smart folder uses a query clause Summit does not yet support: " + std::string(name) + ".";
         if (!q.error.empty()) break;
     }
-    if (q.error.empty() && q.type != 0 && q.type != 6)
+    if (q.error.empty() && q.type != 0 && q.type != 4 && q.type != 6)
         q.error = "This smart folder's result grouping is not yet supported.";
     if (q.error.empty() && q.sort != 0 && q.sort != 1 && q.sort != 2 && q.sort != 3 && q.sort != 4
         && q.sort != 5 && q.sort != 6 && q.sort != 7 && q.sort != 8 && q.sort != 11 && q.sort != 12
         && q.sort != 13 && q.sort != 14 && q.sort != 17 && q.sort != 18)
         q.error = "This smart folder's sort order requires data Summit does not yet retain.";
     if (q.type == 6 || std::any_of(q.clauses.begin(), q.clauses.end(), [](const auto& c) { return !c.parents.empty(); })) q.source = 1;
+    if (q.error.empty() && q.type == 4) {
+        const auto& c = q.clauses.front();
+        // Places creates history containers even with queryType=1. Additional
+        // filters have different SQL/container semantics from ordinary searches;
+        // support only the verified complete time-range form for now.
+        if (q.clauses.size() != 1 || c.minVisits >= 0 || c.maxVisits >= 0 || c.onlyBookmarked
+            || !c.terms.empty() || !c.uri.empty() || !c.tags.empty() || !c.parents.empty()
+            || c.HasBegin() != c.HasEnd() || (c.hasDomain && !c.HasBegin()))
+            q.error = "Site grouping currently supports an unfiltered history query or a complete visit-time range, optionally restricted by domain.";
+        q.source = 0;
+    }
     return q;
 }
 
@@ -365,20 +377,60 @@ BookmarkQueryResult QueryBookmarks(std::string_view url, const Bookmarks& bookma
             const bool descending = !(mode % 2);
             auto less = [&](const auto& x, const auto& y) { return descending ? y < x : x < y; };
             switch (mode) {
-                case 1: case 2: return less(Lower(a.node.title.empty() ? a.node.url : a.node.title), Lower(b.node.title.empty() ? b.node.url : b.node.title));
-                case 3: case 4: return less(date(a), date(b));
+                case 1: case 2:
+                    if (q.type == 4) {
+                        if (Lower(a.node.title) == Lower(b.node.title)) return less(a.node.url, b.node.url);
+                        return less(Lower(a.node.title), Lower(b.node.title));
+                    }
+                    return less(Lower(a.node.title.empty() ? a.node.url : a.node.title), Lower(b.node.title.empty() ? b.node.url : b.node.title));
+                case 3: case 4:
+                    if (q.type == 4 && date(a) == date(b)) return less(Lower(a.node.title), Lower(b.node.title));
+                    return less(date(a), date(b));
                 case 5: case 6: return less(a.node.url, b.node.url);
-                case 7: case 8: return less(count(a), count(b));
-                case 11: case 12: return less(a.node.added, b.node.added);
+                case 7: case 8:
+                    if (q.type == 4 && count(a) == count(b)) return less(date(a), date(b));
+                    return less(count(a), count(b));
+                case 11: case 12:
+                    if (q.type == 4 && a.node.added == b.node.added) return less(Lower(a.node.title), Lower(b.node.title));
+                    return less(a.node.added, b.node.added);
                 case 13: case 14:
                     if (a.node.modified != b.node.modified) return less(a.node.modified, b.node.modified);
                     if (Lower(a.node.title) != Lower(b.node.title)) return less(Lower(a.node.title), Lower(b.node.title));
                     return less(positions[a.node.id], positions[b.node.id]);
-                case 17: case 18: return less(BookmarkTagsText(a.node.metadata.tags), BookmarkTagsText(b.node.metadata.tags));
+                case 17: case 18:
+                    if (q.type == 4 && a.node.metadata.tags == b.node.metadata.tags) {
+                        if (Lower(a.node.title) == Lower(b.node.title)) return less(a.node.url, b.node.url);
+                        return less(Lower(a.node.title), Lower(b.node.title));
+                    }
+                    return less(BookmarkTagsText(a.node.metadata.tags), BookmarkTagsText(b.node.metadata.tags));
                 default: return false;
             }
         });
     };
+    if (q.type == 4) {
+        if (q.excludeQueries) return result;
+        sort(q.sort); // The limit belongs to the containers, never their children.
+        std::map<std::string, BookmarkNode> groups;
+        for (auto& entry : matches) {
+            auto host = Lower(Host(entry.node.url));
+            if (host.empty() && Lower(entry.node.url.substr(0, 5)) != "file:") continue;
+            auto& group = groups[host];
+            group.folder = true;
+            group.title = host.empty() ? "(local files)" : host;
+            if (!q.excludeItems && q.expandQueries) group.children.push_back(std::move(entry.node));
+        }
+        for (auto& [host, group] : groups) result.items.push_back(std::move(group));
+        // Places' SQL orders site URIs before LIMIT. Title sorts run after
+        // LIMIT; date/count/metadata columns on site containers are null.
+        if (q.sort == 6) std::reverse(result.items.begin(), result.items.end());
+        if (q.limit && result.items.size() > uint64_t(q.limit)) result.items.resize(q.limit);
+        if (q.sort == 1 || q.sort == 2) {
+            std::stable_sort(result.items.begin(), result.items.end(), [&](const auto& a, const auto& b) {
+                return q.sort == 1 ? Lower(a.title) < Lower(b.title) : Lower(b.title) < Lower(a.title);
+            });
+        }
+        return result;
+    }
     if (q.type == 6) {
         // Tags are containers, with URL results beneath them. Do not persist
         // the expansion or recursively evaluate saved queries here.

@@ -275,6 +275,7 @@ Examples supported by this implementation:
 | `place:queryType=1&tag=work` | Bookmarks tagged `work` |
 | `place:queryType=1&terms=reading` | Bookmarks whose title, address or tags contain `reading` |
 | `place:type=6&sort=1` | Tag folders containing their bookmarked pages |
+| `place:type=4&sort=1` | Retained history grouped by exact host, with pages sorted by title |
 | `place:parent=toolbar_____` | The referenced toolbar's direct folder tree |
 | `place:folder=10` | A legacy numeric reference to folder 10 in the imported database |
 
@@ -282,8 +283,8 @@ Other implemented filters include exact URI, domain (optionally exact host),
 inclusive visit-time ranges, visit-count bounds, multiple required or excluded tags, bookmarked-only history,
 and exclusion of queries or ordinary items. Sorts include title, address,
 last visit, visit count, bookmark addition/modification times and tags. A zero result limit
-means no additional query limit. Title sorting with a limit first selects the
-most recently visited matches. Menus evaluate an immutable snapshot on opening;
+means no additional query limit. For ordinary page queries, title sorting with
+a limit first selects the most recently visited matches. Menus evaluate an immutable snapshot on opening;
 profile changes replace the snapshot for subsequent menus. Circular query
 expansion stops at a repeated query in its source scope or eight nested queries. Tag expansion
 is bounded to 10,000 page memberships.
@@ -413,12 +414,54 @@ which support saved multi-query URLs from older profiles.
 
 **This does not complete Firefox smart-folder compatibility or #110.** Folder
 references and visit-time ranges are implemented for retained data; visit transitions,
-annotations, frecency sorts and other result groupings remain
+annotations, frecency sorts, date/other groupings and more complex grouped filters remain
 unsupported. Such queries stay saved and show an explicit explanation, with no
 broader substitute results. Query history is limited to Summit's retained 2,000
 pages; Firefox frecency is not stored. Text matching uses
 ASCII case folding, and tag names match exactly, rather than Firefox's full
 locale-aware collation. Parameterized query keywords are not supported.
+
+### History grouped by site
+
+`place:type=4&sort=1` displays retained history in host folders, with pages
+sorted by title within each folder. Subdomains are separate hosts; scheme and
+port do not split a host. Local files use a `(local files)` folder. These are
+live, transient results in the query page and native bookmark menus. A host's
+native **Open All in Tabs** action carries its page URLs, without creating a
+saved folder. New visits, history imports and clearing history update the query.
+Only the original `place:` URL is saved or exported.
+
+The result limit applies to host folders, not their children. As in Firefox,
+title sorting happens after choosing the limited set of hosts: with
+`sort=2&maxResults=2`, the first two hosts in the underlying ascending host order
+are displayed in reverse title order. URI sorting (`sort=5/6`) orders host
+containers before limiting. Date, visit-count and metadata sorts order pages
+inside each host; they leave the host folders in their natural order. With
+`sort=0`, child order follows Summit's retained history order; Firefox's
+unspecified order depends on its database insertion order.
+
+Site queries accept an inclusive time range with both `beginTime` and `endTime`,
+including relative references, optionally combined with `domain` and
+`domainIsHost`. An earlier retained visit can qualify a page even after a newer
+visit falls outside that range. `queryType=1` still produces history containers,
+as Firefox does for this result type. `excludeQueries=1` hides the generated
+folders; `excludeItems=1` or `expandQueries=0` leaves them empty.
+
+Grouped text/tag/URI/bookmark-only filters, visit-count conditions, folder
+references, legacy OR groups and one-sided time bounds remain unsupported and
+show an explanation. Firefox's site SQL and subsequent container filtering do
+not apply these conditions like an ordinary page search; Summit does not
+substitute a broader search for an unsupported grouped query. Date and
+date/site groupings (`type=3/5`) remain unsupported too.
+
+The ordering and supported membership cases were compared with the official
+Firefox 158.0.1 Linux release, using an isolated generated history profile.
+The checked-in [oracle fixture](../tests/fixtures/bookmarks/site-query-firefox158.json)
+contains 38 result trees, with the exact input visits and source revision.
+The implementation follows the release's
+[site query builder](https://hg.mozilla.org/releases/mozilla-release/raw-file/48a735cc74a7e6d730f9bf59c3de58f750287a23/toolkit/components/places/nsNavHistory.cpp)
+and [result sorting](https://hg.mozilla.org/releases/mozilla-release/raw-file/48a735cc74a7e6d730f9bf59c3de58f750287a23/toolkit/components/places/nsNavHistoryResult.cpp),
+subject to Summit's retained-history and ASCII-collation limits described above.
 
 The result pages use separate files per query so Back can restore the preceding
 view. Their addresses map to the internal Bookmarks page, and their actions use
@@ -427,6 +470,22 @@ are never handed to the web engine. Query pages show bookmarklets as inert
 entries with instructions to run them from the bar or menu.
 
 ## Testing
+
+The site-query follow-up passes **483 site-query checks**, including **38
+Firefox oracle result trees**, on the host and native airOS. The existing core
+and bookmark/query suites also pass; all seven bookmark/query suites pass
+AddressSanitizer and UndefinedBehaviorSanitizer. Native UI coverage is **77
+checks**, including host submenus, transient Open All URLs and stable snapshots.
+
+The full browser passes **136 checks and 179 native action assertions**.
+It exercises the previous query cases plus HTML/SQLite site queries, native
+activation, newly imported host folders appearing in an open query, child
+navigation, host limits, earlier visits, unsupported filters, export/reimport
+and history clearing. The site page was visually inspected. All **693 frozen
+hashes** remain unchanged, all four engine images loaded, and the browser exits
+normally with no helpers or crash events across a complete log interval. The
+owned RAM filesystem was unmounted after scanning all 42 native teams.
+Evidence: [`bookmark-site-queries-native-2026-10-22.json`](bookmark-site-queries-native-2026-10-22.json).
 
 The combined-query follow-up passes **63 OR-query checks** on host and native
 airOS, plus **384 host core**, **328 bookmark**, **97 general query**, **70

@@ -324,6 +324,33 @@ public:
         Check(modified.Remove(datedA) && BookmarkButtons(modified, {}, *modified.Find(combinedQuery)).queryContents().children[0].title == "Changed B",
             "removing a match lets the other combined-query branch supply the result");
 
+        const auto siteQuery = queries.Add({"place:type=4&sort=1", "Sites"}, kBookmarksBarFolder);
+        visits.push_back({"https://one.test/second", "Another one", 400, false, 2});
+        auto siteButtons = std::make_shared<const BookmarkButton>(BookmarkButtons(queries, visits, *queries.Find(siteQuery)));
+        BMenu siteMenu("Sites");
+        AddBookmarkItems(&siteMenu, siteButtons, *siteButtons, BMessenger(this));
+        Check(siteMenu.CountItems() == 2 && siteMenu.ItemAt(0)->Submenu() && siteMenu.ItemAt(1)->Submenu(),
+            "site query exposes native host submenus without a root Open All");
+        auto expandedSites = siteButtons->queryContents();
+        BMenu hostItems("one.test");
+        AddBookmarkItems(&hostItems, siteButtons, expandedSites.children[0], BMessenger(this));
+        auto* hostMenu = &hostItems;
+        Check(std::string(siteMenu.ItemAt(0)->Label()) == "one.test" && hostMenu->CountItems() == 4,
+            "host submenu includes both history pages and Open All");
+        if (hostMenu && hostMenu->CountItems() == 4) {
+            Check(std::string(hostMenu->ItemAt(0)->Message()->GetString("url", "")) == "https://one.test/second",
+                "site result carries its actual page URL in title order");
+            const auto* all = hostMenu->ItemAt(3)->Message();
+            Check(all && all->GetInt64("id", 0) == 0 && all->CountNames(B_STRING_TYPE) == 1
+                && std::string(all->GetString("url", "")) == "https://one.test/second",
+                "transient host Open All embeds URLs instead of a persisted folder ID");
+        }
+        visits.push_back({"https://new.test/", "New site", 500, false, 1});
+        Check(BookmarkButtons(queries, visits, *queries.Find(siteQuery)).queryContents().children.size() == 3
+            && siteButtons->queryContents().children.size() == 2,
+            "site membership refresh leaves an open native menu snapshot intact");
+        Check(queries.Find(siteQuery)->children.empty(), "native site expansion never persists generated folders");
+
         Bookmarks scoped;
         for (const auto* scope : {"first", "second"}) {
             BookmarkNode imported{0, "", "", true, 0, {}};
