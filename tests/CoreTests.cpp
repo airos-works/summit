@@ -347,7 +347,7 @@ int main()
         CHECK(profile.Visit({"https://daily.example/", "Daily"}, now - 2 * 86400) && profile.Visit({"https://daily.example/", "Daily"}, now - 86400));
         CHECK(profile.Visit({"https://daily.example/", "Daily"}, now - 7200) && profile.Visit({"https://daily.example/", "Daily"}, now - 60));
         CHECK(profile.Visit({"https://once.example/", "Once"}, now - 600));
-        CHECK(profile.history.size() == 2 && profile.history[1].earlier.size() == 2 && profile.history[1].visits == 4);
+        CHECK(profile.history.size() == 2 && profile.history[0].earlier.size() == 2 && profile.history[0].visits == 4);
         auto grouped = GroupHistoryByDay(profile.history, now);
         CHECK(grouped.size() == 3 && grouped[0].visits.size() == 2 && grouped[1].label == "Yesterday" && grouped[2].visits.size() == 1);
         CHECK(grouped[1].visits[0].page->url == "https://daily.example/" && grouped[1].visits[0].time == now - 86400);
@@ -357,13 +357,13 @@ int main()
         std::string error;
         CHECK(profile.Save(folder / "profile.json", error));
         auto loaded = Profile::Load(folder / "profile.json", error);
-        CHECK(error.empty() && loaded.history.size() == 2 && loaded.history[1].earlier == profile.history[1].earlier);
+        CHECK(error.empty() && loaded.history.size() == 2 && loaded.history[0].earlier == profile.history[0].earlier);
         std::filesystem::remove_all(folder);
         // The last hour: once.example goes, daily.example falls back to its
-        // last visit of an earlier day (earlier visits of today are not kept).
+        // earlier visit today; the older days remain too.
         CHECK(profile.ForgetVisitsSince(now - 3600) == 2);
-        CHECK(profile.history.size() == 1 && profile.history[0].visited == now - 86400 && profile.history[0].earlier.size() == 1);
-        CHECK(profile.ForgetVisitsSince(now - 30 * 86400) == 2 && profile.history.empty());
+        CHECK(profile.history.size() == 1 && profile.history[0].visited == now - 7200 && profile.history[0].earlier.size() == 2);
+        CHECK(profile.ForgetVisitsSince(now - 30 * 86400) == 3 && profile.history.empty());
         // Pages from before visits had times stay.
         profile.history.push_back({"https://old.example/", "Old"});
         CHECK(profile.ForgetVisitsSince(now - 3600) == 0 && profile.history.size() == 1);

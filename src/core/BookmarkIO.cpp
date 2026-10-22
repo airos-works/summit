@@ -1,4 +1,5 @@
 #include "BookmarkIO.h"
+#include "HistoryVisits.h"
 #include "Address.h"
 #include "BookmarkQueries.h"
 #include <nlohmann/json.hpp>
@@ -649,6 +650,36 @@ void PlacesFolder(const std::map<int64_t, std::vector<const PlacesRow*>>& childr
 }
 
 int64_t Seconds(int64_t microseconds) { return microseconds > 0 ? microseconds / 1000000 : 0; }
+
+// Exported/older databases may omit visit rows. Their last-visit summary still
+// survives; complete databases supply exact recent times and older daily samples.
+bool ReadVisitTimes(SQLite& database, bool firefox, const std::map<int64_t, size_t>& pages,
+    std::vector<PageRecord>& history, std::string& error)
+{
+    const std::string table = firefox ? "moz_historyvisits" : "visits";
+    bool available = false;
+    if (!database.Query(("SELECT 1 FROM sqlite_master WHERE type='table' AND name='" + table + "'").c_str(),
+            [&](void*) { available = true; }, error)) return false;
+    for (auto [id, index] : pages) {
+        auto times = HistoryVisitTimes(history[index]);
+        if (available) {
+            const std::string column = firefox ? "visit_date" : "visit_time";
+            const std::string where = " FROM " + table + " WHERE " + (firefox ? "place_id" : "url") + "=" + std::to_string(id);
+            auto read = [&](void* row) {
+                auto time = database.Int(row, 0);
+                if (!firefox) time = time > kWindowsEpochSeconds * 1000000 ? time - kWindowsEpochSeconds * 1000000 : 0;
+                if (time > 0) times.push_back(time);
+            };
+            const auto recent = "SELECT " + column + where + " ORDER BY " + column + " DESC LIMIT " + std::to_string(kRecentHistoryVisits);
+            const auto epochSeconds = column + "/1000000" + (firefox ? "" : "-" + std::to_string(kWindowsEpochSeconds));
+            const auto daily = "SELECT MAX(" + column + ")" + where + " GROUP BY date(" + epochSeconds
+                + ", 'unixepoch', 'localtime') ORDER BY 1 DESC LIMIT " + std::to_string(kMaxEarlierVisits + 1);
+            if (!database.Query(recent.c_str(), read, error) || !database.Query(daily.c_str(), read, error)) return false;
+        }
+        SetHistoryVisitTimes(history[index], std::move(times));
+    }
+    return true;
+}
 }
 
 bool ReadFirefoxPlaces(const std::filesystem::path& places, const std::string& sqliteLibrary, BookmarkNode* folder,
@@ -745,13 +776,20 @@ bool ReadFirefoxPlaces(const std::filesystem::path& places, const std::string& s
     }
     if (history) {
         history->clear();
-        if (!database.Query("SELECT url, IFNULL(title, ''), visit_count, IFNULL(last_visit_date, 0) FROM moz_places "
+        std::map<int64_t, size_t> pages;
+        if (!database.Query("SELECT url, IFNULL(title, ''), visit_count, IFNULL(last_visit_date, 0), id FROM moz_places "
                 "WHERE visit_count > 0 AND hidden = 0 AND last_visit_date IS NOT NULL ORDER BY last_visit_date DESC LIMIT 2000",
                 [&](void* row) {
+                    pages.emplace(database.Int(row, 4), history->size());
                     history->push_back({database.Text(row, 0), database.Text(row, 1), Seconds(database.Int(row, 3)), false,
                         static_cast<int>(std::clamp<int64_t>(database.Int(row, 2), 0, 1000000))});
+                    history->back().visitTimes = {database.Int(row, 3)};
                 }, error)) {
             error = "The history in this places.sqlite could not be read: " + error;
+            return false;
+        }
+        if (!ReadVisitTimes(database, true, pages, *history, error)) {
+            error = "The visits in this places.sqlite could not be read: " + error;
             return false;
         }
     }
@@ -765,14 +803,23 @@ bool ReadChromeHistory(const std::filesystem::path& historyFile, const std::stri
     SQLite database(sqliteLibrary);
     if (!copy.Make(historyFile, error) || !database.Open(copy.Path(), error)) return false;
     history.clear();
-    if (!database.Query("SELECT url, IFNULL(title, ''), visit_count, last_visit_time FROM urls "
+    std::map<int64_t, size_t> pages;
+    if (!database.Query("SELECT url, IFNULL(title, ''), visit_count, last_visit_time, id FROM urls "
             "WHERE hidden = 0 AND visit_count > 0 ORDER BY last_visit_time DESC LIMIT 2000",
             [&](void* row) {
-                const int64_t seconds = database.Int(row, 3) / 1000000 - kWindowsEpochSeconds;
+                const int64_t raw = database.Int(row, 3);
+                const int64_t micros = raw > kWindowsEpochSeconds * 1000000 ? raw - kWindowsEpochSeconds * 1000000 : 0;
+                const int64_t seconds = micros / 1000000;
+                pages.emplace(database.Int(row, 4), history.size());
                 history.push_back({database.Text(row, 0), database.Text(row, 1), seconds > 0 ? seconds : 0, false,
                     static_cast<int>(std::clamp<int64_t>(database.Int(row, 2), 0, 1000000))});
+                history.back().visitTimes = {micros};
             }, error)) {
         error = "This History database could not be read: " + error;
+        return false;
+    }
+    if (!ReadVisitTimes(database, false, pages, history, error)) {
+        error = "The visits in this History database could not be read: " + error;
         return false;
     }
     return true;

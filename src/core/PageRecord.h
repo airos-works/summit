@@ -20,6 +20,9 @@ struct PageRecord {
     // newest first (kMaxEarlierVisits at most), so that History lists it
     // under each of those days.
     std::vector<int64_t> earlier {};
+    // History: retained individual visits, in microseconds since the epoch.
+    // Newest first; older profiles have only the second-resolution summaries.
+    std::vector<int64_t> visitTimes {};
 };
 constexpr size_t kMaxEarlierVisits = 60;
 }

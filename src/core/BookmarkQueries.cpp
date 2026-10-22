@@ -2,6 +2,7 @@
 #include "Address.h"
 #include <algorithm>
 #include <charconv>
+#include <ctime>
 #include <functional>
 #include <map>
 #include <set>
@@ -64,6 +65,9 @@ bool Decode(std::string_view text, std::string& into)
 
 struct Query {
     int64_t source = 0, sort = 0, type = 0, limit = 0, minVisits = -1, maxVisits = -1;
+    int64_t begin = 0, end = 0, beginRef = 0, endRef = 0;
+    bool HasBegin() const { return begin || beginRef; }
+    bool HasEnd() const { return end || endRef; }
     bool excludeQueries = false, excludeItems = false, notTags = false, onlyBookmarked = false, domainIsHost = false;
     bool hasDomain = false;
     std::string terms, domain, uri, error;
@@ -107,6 +111,10 @@ Query Parse(std::string_view url)
         else if (name == "maxResults") number(q.limit, 0, UINT32_MAX);
         else if (name == "minVisits") number(q.minVisits, -1, INT32_MAX);
         else if (name == "maxVisits") number(q.maxVisits, -1, INT32_MAX);
+        else if (name == "beginTime") number(q.begin, INT64_MIN, INT64_MAX);
+        else if (name == "endTime") number(q.end, INT64_MIN, INT64_MAX);
+        else if (name == "beginTimeRef") number(q.beginRef, 0, 2);
+        else if (name == "endTimeRef") number(q.endRef, 0, 2);
         else if (name == "excludeQueries") flag(q.excludeQueries);
         else if (name == "excludeItems") flag(q.excludeItems);
         else if (name == "!tags") flag(q.notTags);
@@ -149,12 +157,34 @@ struct Entry {
 }
 
 BookmarkQueryResult QueryBookmarks(std::string_view url, const Bookmarks& bookmarks, const std::vector<PageRecord>& history,
-    const BookmarkOrigin& origin)
+    const BookmarkOrigin& origin, int64_t now)
 {
     const auto q = Parse(url);
     BookmarkQueryResult result;
     result.error = q.error;
     if (!result.error.empty()) return result;
+    auto resolveTime = [&](int64_t offset, int64_t reference, int64_t& time) {
+        int64_t base = 0;
+        if (reference == 2) base = now;
+        else if (reference == 1) {
+            std::time_t seconds = now / 1000000;
+            std::tm local {};
+            if (!localtime_r(&seconds, &local)) return false;
+            local.tm_hour = local.tm_min = local.tm_sec = 0;
+            local.tm_isdst = -1; // Midnight can have a different DST offset.
+            const auto midnight = std::mktime(&local);
+            if (midnight == std::time_t(-1) || midnight > INT64_MAX / 1000000 || midnight < INT64_MIN / 1000000)
+                return false;
+            base = int64_t(midnight) * 1000000;
+        }
+        if ((offset > 0 && base > INT64_MAX - offset) || (offset < 0 && base < INT64_MIN - offset)) return false;
+        time = base + offset;
+        return true;
+    };
+    int64_t begin = INT64_MIN, end = INT64_MAX;
+    if ((q.HasBegin() && !resolveTime(q.begin, q.beginRef, begin))
+        || (q.HasEnd() && !resolveTime(q.end, q.endRef, end)))
+        return {{}, "This smart folder's time range cannot be represented."};
     std::map<std::string, const PageRecord*> visits;
     for (const auto& page : history) visits.emplace(page.url, &page);
     std::map<std::string, const BookmarkNode*> saved;
@@ -201,7 +231,7 @@ BookmarkQueryResult QueryBookmarks(std::string_view url, const Bookmarks& bookma
         parents.push_back(found);
     }
     const bool simpleFolder = parents.size() == 1 && q.terms.empty() && !q.hasDomain && q.uri.empty()
-        && q.tags.empty() && !q.limit && q.type == 0;
+        && q.tags.empty() && !q.limit && q.type == 0 && !q.HasBegin() && !q.HasEnd();
     std::set<int64_t> allowed;
     if (!parents.empty() && !simpleFolder) {
         // Firefox's constrained parent queries search descendants. Its simple
@@ -231,12 +261,18 @@ BookmarkQueryResult QueryBookmarks(std::string_view url, const Bookmarks& bookma
         if (query && q.excludeQueries) {
             const auto nested = Parse(node.url);
             folderShortcut = nested.error.empty() && nested.parents.size() == 1 && nested.terms.empty()
-                && !nested.hasDomain && nested.uri.empty() && nested.tags.empty() && !nested.limit && nested.type == 0;
+                && !nested.hasDomain && nested.uri.empty() && nested.tags.empty() && !nested.limit && nested.type == 0
+                && !nested.HasBegin() && !nested.HasEnd();
         }
         if ((query && q.excludeQueries && !folderShortcut) || (!query && q.excludeItems && q.type == 0)
             || (q.onlyBookmarked && !saved.count(node.url))) return;
         const int count = visit ? std::max(1, visit->visits) : 0;
         if ((q.minVisits >= 0 && count < q.minVisits) || (q.maxVisits >= 0 && count > q.maxVisits)) return;
+        if (q.HasBegin() || q.HasEnd()) {
+            if (!visit) return;
+            const auto times = HistoryVisitTimes(*visit);
+            if (std::none_of(times.begin(), times.end(), [&](int64_t t) { return t >= begin && t <= end; })) return;
+        }
         if (!q.uri.empty() && node.url != q.uri) return;
         if (q.hasDomain) {
             auto host = Lower(Host(node.url)), domain = Lower(q.domain);
@@ -274,7 +310,8 @@ BookmarkQueryResult QueryBookmarks(std::string_view url, const Bookmarks& bookma
             accept(node, &page);
         }
     }
-    auto date = [](const Entry& e) { return e.visit ? e.visit->visited : int64_t(0); };
+    auto date = [](const Entry& e) { return e.visit ? (e.visit->visitTimes.empty()
+        ? HistoryMicroseconds(e.visit->visited) : e.visit->visitTimes.front()) : int64_t(0); };
     auto count = [](const Entry& e) { return e.visit ? std::max(1, e.visit->visits) : 0; };
     auto sort = [&](int64_t mode) {
         if (!mode) return;

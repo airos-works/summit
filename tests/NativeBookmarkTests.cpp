@@ -1,5 +1,7 @@
 #include "core/Bookmarks.h"
 #include "core/Profile.h"
+#include "core/HistoryVisits.h"
+#include <dlfcn.h>
 #include "ui/BookmarkImport.h"
 #include "ui/BookmarkEditor.h"
 #include "ui/Chrome.h"
@@ -31,6 +33,20 @@ void Check(bool pass, const char* name)
     std::printf("%s %s\n", pass ? "PASS" : "FAIL", name);
     std::fflush(stdout);
 }
+static bool SQL(const std::string& library, const std::filesystem::path& path, const std::string& sql)
+{
+    void* handle = dlopen(library.c_str(), RTLD_NOW);
+    if (!handle) return false;
+    auto open = reinterpret_cast<int (*)(const char*, void**)>(dlsym(handle, "sqlite3_open"));
+    auto exec = reinterpret_cast<int (*)(void*, const char*, void*, void*, char**)>(dlsym(handle, "sqlite3_exec"));
+    auto close = reinterpret_cast<int (*)(void*)>(dlsym(handle, "sqlite3_close"));
+    void* database = nullptr;
+    const bool ok = open && exec && close && open(path.c_str(), &database) == 0 && exec(database, sql.c_str(), nullptr, nullptr, nullptr) == 0;
+    if (database) close(database);
+    dlclose(handle);
+    return ok;
+}
+
 std::shared_ptr<BookmarkButton> Snapshot()
 {
     auto root = std::make_shared<BookmarkButton>();
@@ -194,6 +210,31 @@ public:
         Check(scriptMenu.CountItems() == 1 && scriptMenu.ItemAt(0)->Message()
             && scriptMenu.ItemAt(0)->Message()->what == kOpenBookmark, "bookmarklet-only folder has activation but no Open All");
 
+        const auto historyFile = fDirectory / "History";
+        std::string sqlite = "libsqlite3.so.0";
+        if (const char* library = std::getenv("SUMMIT_TEST_SQLITE")) sqlite = library;
+        Check(SQL(sqlite, historyFile, R"(
+            CREATE TABLE urls(id INTEGER PRIMARY KEY,url TEXT,title TEXT,visit_count INTEGER,hidden INTEGER,last_visit_time INTEGER);
+            CREATE TABLE visits(id INTEGER PRIMARY KEY,url INTEGER,visit_time INTEGER);
+            INSERT INTO urls VALUES(1,'https://visits.test/','Imported',2,0,13344473600000123);
+            INSERT INTO visits VALUES(1,1,13344473600000123),(2,1,13344470000000000);
+        )"), "native history import fixture created");
+        fShared->Change([](Profile& profile) -> uint32 {
+            profile.Visit({"https://visits.test/", "Local"}, 1600000000);
+            return SharedProfile::kHistoryChanged;
+        });
+        Check(fShared->Save(error), "initial history saved before repeat-page import");
+        result = ImportBookmarksFrom(*fShared, historyFile, true);
+        Check(result.ok && !result.history && result.message.find("Updated visits") != std::string::npos,
+            "additional visits import reports an update without adding a URL");
+        Check(fShared->Save(error), "history-only update can be saved");
+        loaded = Profile::Load(profilePath, error);
+        Check(error.empty() && loaded.history.size() == 1 && loaded.history.front().visitTimes.size() == 3
+            && loaded.history.front().visitTimes.front() == 1700000000000123,
+            "additional microsecond visits survive native import and profile reopen");
+        result = ImportBookmarksFrom(*fShared, historyFile, true);
+        Check(result.ok && !result.history, "repeating a history-only import is idempotent");
+
         Bookmarks queries;
         const auto popular = queries.Add({"place:sort=8&maxResults=2", "Most visited"}, kBookmarksBarFolder);
         std::vector<PageRecord> visits{{"https://one.test/", "One", 100, false, 1}, {"https://two.test/", "Two", 200, false, 8}};
@@ -229,6 +270,21 @@ public:
             "native smart menus stop circular query expansion");
         Check(queries.Find(popular)->children.empty() && queries.Count() == 3,
             "native menu expansion does not save derived bookmarks");
+
+        SetHistoryVisitTimes(visits[0], {300000000, 100000000});
+        SetHistoryVisitTimes(visits[1], {200000000});
+        const auto timed = queries.Add({"place:beginTime=99999999&endTime=100000000", "Earlier visit"}, kBookmarksBarFolder);
+        auto timeButtons = std::make_shared<const BookmarkButton>(BookmarkButtons(queries, visits, *queries.Find(timed)));
+        BMenu timeMenu("Earlier visit");
+        AddBookmarkItems(&timeMenu, timeButtons, *timeButtons, BMessenger(this));
+        Check(timeMenu.CountItems() == 3 && std::string(timeMenu.ItemAt(0)->Label()) == "One",
+            "native time query matches an earlier visit rather than the latest visit");
+        Check(timeMenu.ItemAt(2)->Message()->GetInt64("id", 0) == timed,
+            "time query Open All retains the saved query identity");
+        SetHistoryVisitTimes(visits[0], {300000000});
+        auto clearedTimes = BookmarkButtons(queries, visits, *queries.Find(timed)).queryContents();
+        Check(clearedTimes.children.empty() && !timeButtons->queryContents().children.empty(),
+            "time query changes with retained visits without changing an open snapshot");
 
         Bookmarks scoped;
         for (const auto* scope : {"first", "second"}) {
@@ -281,6 +337,7 @@ public:
     {
         if (message->what == kProfileChanged) {
             if (message->GetUInt32("changes", 0) & SharedProfile::kBookmarksChanged) ++fNotifications;
+            if (message->GetUInt32("changes", 0) & SharedProfile::kHistoryChanged) ++fHistoryNotifications;
         } else if (message->what == kBookmarkEdited) {
             Check(std::string(message->GetString("url", "")) == "JaVaScRiPt:void(document.title='Edited')",
                 "native editor saves bookmarklet source without adding https");
@@ -302,6 +359,7 @@ public:
     {
         if (fDone && !fWindow.IsValid() && fEditorDone && !fEditor.IsValid()) {
             Check(fNotifications == 5, "only changed imports notify the browser windows");
+            Check(fHistoryNotifications == 2, "additional visits notify windows once; identical reimport does not");
             fShared.reset();
             std::printf("%d native checks, %d failures\n", checks, failures);
             PostMessage(B_QUIT_REQUESTED);
@@ -318,6 +376,7 @@ private:
     BMessenger fWindow;
     BMessenger fEditor;
     int fNotifications = 0;
+    int fHistoryNotifications = 0;
     bool fDone = false;
     bool fEditorDone = false;
     bigtime_t fStarted = 0;

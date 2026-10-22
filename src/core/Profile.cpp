@@ -1,4 +1,5 @@
 #include "Profile.h"
+#include "HistoryVisits.h"
 #include "UserAgent.h"
 #include "Address.h"
 #include "Zoom.h"
@@ -25,6 +26,7 @@ static json Encode(const std::vector<PageRecord>& pages)
         if (page.visited) item["visited"] = page.visited;
         if (page.visits > 1) item["visits"] = page.visits;
         if (!page.earlier.empty()) item["earlier"] = page.earlier;
+        if (!page.visitTimes.empty()) item["visitTimes"] = page.visitTimes;
         if (page.bar) item["bar"] = true;
         result.push_back(std::move(item));
     }
@@ -48,6 +50,16 @@ static std::vector<PageRecord> Decode(const json& value, size_t limit)
                 if (page.earlier.size() >= kMaxEarlierVisits) break;
                 if (time.is_number_integer() && time.get<int64_t>() > 0) page.earlier.push_back(time.get<int64_t>());
             }
+        }
+        if (auto times = item.find("visitTimes"); times != item.end()) {
+            if (!times->is_array() || times->size() > kMaxHistoryVisitTimes)
+                throw std::runtime_error("Invalid history visit list");
+            for (const auto& time : *times) {
+                if (!time.is_number_integer() || (time.is_number_unsigned() && time.get<uint64_t>() > uint64_t(INT64_MAX)))
+                    throw std::runtime_error("Invalid history visit time");
+                page.visitTimes.push_back(time.get<int64_t>());
+            }
+            SetHistoryVisitTimes(page, HistoryVisitTimes(page));
         }
         pages.push_back(std::move(page));
     }
@@ -515,56 +527,49 @@ bool Profile::Save(const std::filesystem::path& path, std::string& error, int64_
     } catch (const std::exception&) { }
     return true;
 }
-// Local calendar days, to keep one visit of each.
-static int64_t LocalDay(int64_t time)
-{
-    std::time_t seconds = static_cast<std::time_t>(time);
-    std::tm local {};
-    localtime_r(&seconds, &local);
-    return (local.tm_year + 1900) * 1000 + local.tm_yday;
-}
-bool Profile::Visit(const PageRecord& page, int64_t now)
+static bool RecordVisit(Profile& profile, const PageRecord& page, int64_t micros)
 {
     if (page.url.rfind("https://", 0) != 0 && page.url.rfind("http://", 0) != 0) return false;
     int visits = 0;
-    std::vector<int64_t> earlier;
+    std::vector<int64_t> times;
+    auto& history = profile.history;
     history.erase(std::remove_if(history.begin(), history.end(), [&](const auto& old) {
         if (old.url != page.url) return false;
         visits = std::max(visits, std::max(1, old.visits));
-        // The last visit of another day stays, so the page is listed then too.
-        earlier = old.earlier;
-        if (old.visited > 0 && LocalDay(old.visited) != LocalDay(now)) earlier.insert(earlier.begin(), old.visited);
+        auto oldTimes = HistoryVisitTimes(old);
+        times.insert(times.end(), oldTimes.begin(), oldTimes.end());
         return true;
     }), history.end());
-    if (earlier.size() > kMaxEarlierVisits) earlier.resize(kMaxEarlierVisits);
+    times.push_back(micros);
     history.insert(history.begin(), page);
-    history.front().visited = now;
-    history.front().visits = std::min(visits + 1, 1000000);
-    history.front().earlier = std::move(earlier);
-    history.front().bar = false;
+    auto& record = history.front();
+    SetHistoryVisitTimes(record, std::move(times));
+    record.visits = std::min(visits + 1, 1000000);
+    record.bar = false;
+    std::stable_sort(history.begin(), history.end(), [](const auto& a, const auto& b) { return a.visited > b.visited; });
     if (history.size() > 2000) history.resize(2000);
     return true;
+}
+bool Profile::Visit(const PageRecord& page)
+{
+    return RecordVisit(*this, page, HistoryNowMicroseconds());
+}
+bool Profile::Visit(const PageRecord& page, int64_t now)
+{
+    return RecordVisit(*this, page, HistoryMicroseconds(now));
 }
 size_t Profile::ForgetVisitsSince(int64_t since)
 {
     size_t forgotten = 0;
     history.erase(std::remove_if(history.begin(), history.end(), [&](PageRecord& page) {
-        auto& earlier = page.earlier;
-        const size_t before = earlier.size();
-        earlier.erase(std::remove_if(earlier.begin(), earlier.end(), [&](int64_t time) { return time >= since; }), earlier.end());
-        int removed = static_cast<int>(before - earlier.size());
-        // Pages kept from before visits had times (0) are older than any range.
-        if (page.visited >= since) {
-            ++removed;
-            if (earlier.empty()) {
-                forgotten += removed;
-                return true;
-            }
-            // The page's latest visit before then becomes its last one.
-            page.visited = earlier.front();
-            earlier.erase(earlier.begin());
-        }
+        auto times = HistoryVisitTimes(page);
+        const size_t before = times.size();
+        times.erase(std::remove_if(times.begin(), times.end(), [&](int64_t time) { return time / 1000000 >= since; }), times.end());
+        const int removed = static_cast<int>(before - times.size());
+        if (!removed) return false; // Unknown legacy dates remain unknown.
         forgotten += removed;
+        if (times.empty()) return true;
+        SetHistoryVisitTimes(page, std::move(times));
         page.visits = std::max(1, page.visits - removed);
         return false;
     }), history.end());
@@ -579,33 +584,43 @@ void Profile::AddBookmark(const PageRecord& page, bool bar)
     }
     bookmarks.Add(page, bar ? kBookmarksBarFolder : kOtherBookmarksFolder, kBookmarkEnd, std::time(nullptr));
 }
-size_t Profile::ImportHistory(const std::vector<PageRecord>& pages)
+size_t Profile::ImportHistory(const std::vector<PageRecord>& pages, bool* changed)
 {
+    if (changed) *changed = false;
     std::map<std::string, size_t> known;
     for (size_t i = 0; i < history.size(); ++i) known.emplace(history[i].url, i);
     std::set<std::string> addedURLs;
+    bool updated = false;
     for (const auto& page : pages) {
         if (page.url.rfind("https://", 0) != 0 && page.url.rfind("http://", 0) != 0) continue;
         if (page.url.size() > 65536 || page.title.size() > 65536 || page.url.find('\0') != std::string::npos) continue;
         if (auto found = known.find(page.url); found != known.end()) {
             // A page visited in both keeps the later visit and the larger count.
             auto& existing = history[found->second];
-            existing.visited = std::max(existing.visited, page.visited);
-            existing.visits = std::min(std::max(existing.visits, page.visits), 1000000);
+            const auto before = existing;
+            auto times = HistoryVisitTimes(existing);
+            auto importedTimes = HistoryVisitTimes(page);
+            times.insert(times.end(), importedTimes.begin(), importedTimes.end());
+            SetHistoryVisitTimes(existing, std::move(times));
+            existing.visits = std::clamp(std::max(existing.visits, page.visits), 0, 1000000);
             if (existing.title.empty()) existing.title = page.title;
+            updated |= before.visited != existing.visited || before.visits != existing.visits
+                || before.title != existing.title || before.earlier != existing.earlier || before.visitTimes != existing.visitTimes;
             continue;
         }
         PageRecord record{page.url, page.title, page.visited, false, std::clamp(page.visits, 0, 1000000)};
+        SetHistoryVisitTimes(record, HistoryVisitTimes(page));
         known.emplace(record.url, history.size());
         addedURLs.insert(record.url);
         history.push_back(std::move(record));
     }
-    if (addedURLs.empty()) return 0;
+    if (!updated && addedURLs.empty()) return 0;
     std::stable_sort(history.begin(), history.end(), [](const PageRecord& a, const PageRecord& b) { return a.visited > b.visited; });
     if (history.size() > 2000) history.resize(2000);
     // Count only the imported pages that were kept.
     size_t kept = 0;
     for (const auto& page : history) kept += addedURLs.count(page.url);
+    if (changed) *changed = updated || kept;
     return kept;
 }
 }

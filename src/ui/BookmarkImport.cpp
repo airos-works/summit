@@ -153,14 +153,15 @@ ImportOutcome ImportBookmarksFrom(SharedProfile& shared, const std::filesystem::
     if (history && imported.source == "WebPositive") ReadWebPositiveHistory(imported.history);
     const std::string folderTitle = "Imported from " + imported.source;
     BookmarkImportResult result;
+    bool historyChanged = false;
     const size_t found = CountBookmarks(imported.bookmarks);
     shared.Change([&](Profile& profile) -> uint32 {
         uint32 changes = 0;
         result = profile.bookmarks.Import(imported.bookmarks, folderTitle, std::time(nullptr));
         if (result.Changed()) changes |= SharedProfile::kBookmarksChanged;
         if (history) {
-            outcome.history = profile.ImportHistory(imported.history);
-            if (outcome.history) changes |= SharedProfile::kHistoryChanged;
+            outcome.history = profile.ImportHistory(imported.history, &historyChanged);
+            if (historyChanged) changes |= SharedProfile::kHistoryChanged;
         }
         return changes;
     });
@@ -194,6 +195,7 @@ ImportOutcome ImportBookmarksFrom(SharedProfile& shared, const std::filesystem::
         text += " Some items did not fit: Summit keeps at most " + std::to_string(kMaxBookmarks) + " bookmarks, "
             + std::to_string(kMaxBookmarkFolders) + " folders and " + std::to_string(kMaxBookmarkSeparators) + " separators.";
     if (history && outcome.history) text += (text.empty() ? "" : " ") + std::string("Added ") + Count(outcome.history, "page", "pages") + " to History.";
+    else if (historyChanged) text += (text.empty() ? "" : " ") + std::string("Updated visits for pages already in History.");
     else if (history && !imported.history.empty()) text += (text.empty() ? "" : " ") + std::string("History already had every page visited there.");
     outcome.message = text;
     return outcome;

@@ -83,7 +83,7 @@ int main()
         "place:terms=%zz", "place:terms=%", "place:terms=%2", "place:sort=999999999999999999999999999999"}) {
         const auto result = query(invalid); CHECK(result.items.empty() && !result.error.empty());
     }
-    for (const auto* unsupported : {"place:parent=unknown", "place:folder=3", "place:beginTimeRef=1", "place:transition=2",
+    for (const auto* unsupported : {"place:parent=unknown", "place:folder=3", "place:transition=2",
         "place:OR", "place:annotation=test", "place:includeHidden=1", "place:originalTitle=1", "place:type=3", "place:sort=14", "place:sort=22"}) {
         const auto result = query(unsupported); CHECK(result.items.empty() && !result.error.empty());
     }

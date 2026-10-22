@@ -17,7 +17,7 @@ SUMMIT_BOOKMARK_FLAGS=(-std=c++23 -O1 -g -ffunction-sections -fdata-sections -fv
     -Wno-multichar -DSUMMIT_MODERN_WEBKIT=1 -DBUILDING_HAIKU__=1 -Isrc -Ivendor
     "-I${WEBKIT_INCLUDE_DIR:-/boot/system/develop/headers}")
 SUMMIT_BOOKMARK_SOURCES=()
-for SUMMIT_BOOKMARK_UNIT in Bookmarks BookmarkIO BookmarkKeywords BookmarkQueries Profile Address Favicon Zoom Protocol UserAgent Spelling TranslationModels PageLanguage InternalPages; do
+for SUMMIT_BOOKMARK_UNIT in Bookmarks BookmarkIO BookmarkKeywords BookmarkQueries HistoryVisits Profile Address Favicon Zoom Protocol UserAgent Spelling TranslationModels PageLanguage InternalPages; do
     SUMMIT_BOOKMARK_SOURCES+=("src/core/$SUMMIT_BOOKMARK_UNIT.cpp")
 done
 for SUMMIT_BOOKMARK_UNIT in Chrome BookmarkImport BookmarkEditor SharedProfile; do
@@ -29,9 +29,9 @@ for SUMMIT_BOOKMARK_SOURCE in "${SUMMIT_BOOKMARK_SOURCES[@]}"; do
     "${SUMMIT_BOOKMARK_COMPILER[@]}" "${SUMMIT_BOOKMARK_CPPFLAGS[@]}" "${SUMMIT_BOOKMARK_FLAGS[@]}" -c "$SUMMIT_BOOKMARK_SOURCE" -o "$SUMMIT_BOOKMARK_OBJECT"
     SUMMIT_BOOKMARK_OBJECTS+=("$SUMMIT_BOOKMARK_OBJECT")
 done
-for SUMMIT_BOOKMARK_TEST in BookmarkTests BookmarkQueryTests BookmarkFolderQueryTests NativeBookmarkTests; do
+for SUMMIT_BOOKMARK_TEST in BookmarkTests BookmarkQueryTests BookmarkFolderQueryTests BookmarkTimeQueryTests NativeBookmarkTests; do
     "${SUMMIT_BOOKMARK_COMPILER[@]}" "${SUMMIT_BOOKMARK_CPPFLAGS[@]}" "${SUMMIT_BOOKMARK_FLAGS[@]}" \
         "tests/$SUMMIT_BOOKMARK_TEST.cpp" "${SUMMIT_BOOKMARK_OBJECTS[@]}" "${SUMMIT_BOOKMARK_LDFLAGS[@]}" \
         -Wl,--gc-sections -lbe -ltracker -ltranslation -lcrypto -lnetwork -o "$SUMMIT_BOOKMARK_OUTPUT/$SUMMIT_BOOKMARK_TEST"
 done
-echo "Built $SUMMIT_BOOKMARK_OUTPUT/BookmarkTests, BookmarkQueryTests, BookmarkFolderQueryTests and NativeBookmarkTests"
+echo "Built $SUMMIT_BOOKMARK_OUTPUT/BookmarkTests, BookmarkQueryTests, BookmarkFolderQueryTests, BookmarkTimeQueryTests and NativeBookmarkTests"

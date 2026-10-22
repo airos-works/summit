@@ -279,7 +279,7 @@ Examples supported by this implementation:
 | `place:folder=10` | A legacy numeric reference to folder 10 in the imported database |
 
 Other implemented filters include exact URI, domain (optionally exact host),
-visit-count bounds, multiple required or excluded tags, bookmarked-only history,
+inclusive visit-time ranges, visit-count bounds, multiple required or excluded tags, bookmarked-only history,
 and exclusion of queries or ordinary items. Sorts include title, address,
 last visit, visit count, bookmark addition time and tags. A zero result limit
 means no additional query limit. Title sorting with a limit first selects the
@@ -315,12 +315,46 @@ arbitrary folder references. Such queries remain saved with an unresolved
 target explanation; they are never redirected to similarly named Summit
 folders. Import `places.sqlite` when folder references must be resolved.
 
+### Visit-time ranges
+
+`beginTime` and `endTime` use microseconds since the Unix epoch, with inclusive
+bounds. `beginTimeRef` and `endTimeRef` select the epoch (`0`, the default),
+local midnight today (`1`), or the current time (`2`). For example,
+`place:beginTimeRef=2&beginTime=-3600000000` finds pages visited in the last
+hour. Each opening resolves relative times again. Local-midnight calculations
+use the timezone offset at midnight, including daylight-saving transitions.
+A zero time with reference `0` means no bound; a zero offset from today or now
+still constrains the query. Invalid references and overflowing offsets produce
+an explanation instead of wrapping into another date.
+
+A page matches when **any retained visit** falls within the interval, even if
+it was also visited later. Date sorting still uses the page's latest visit.
+Time constraints also turn a one-parent folder shortcut into a search through
+that folder's descendants, as in Firefox's
+[query implementation](https://github.com/mozilla-firefox/firefox/blob/main/toolkit/components/places/nsNavHistory.cpp).
+
+Summit records new visits at microsecond precision. Firefox `moz_historyvisits`
+and Chrome `visits` imports retain exact timestamps, including multiple visits
+on the same day. Profiles retain up to 128 recent individual timestamps per
+page, plus the last visit on each of up to 60 earlier local days; at most 188
+timestamps per page. Existing profiles and databases without visit tables can
+only contribute the second-resolution times they already retained. Unrecorded
+or expired visits cannot be reconstructed; unknown dates do not match a time
+constraint. This retention limit applies within the existing 2,000-page limit.
+
+Importing additional visits to an existing URL merges and saves those times,
+notifies browser windows and refreshes an open history query. Reimporting the
+same visits is idempotent. Clearing a time range removes matching retained
+visits and preserves earlier visits on the same day, when available. Saving
+and reopening the profile preserves the remaining timestamps and daily History
+entries.
+
 **This does not complete Firefox smart-folder compatibility or #110.** Folder
-references are implemented for retained database identities; time ranges, visit transitions, OR clauses,
+references and visit-time ranges are implemented for retained data; visit transitions, OR clauses,
 annotations, modification-time/frecency sorts and other result groupings remain
 unsupported. Such queries stay saved and show an explicit explanation, with no
 broader substitute results. Query history is limited to Summit's retained 2,000
-pages; individual visits and Firefox frecency are not stored. Text matching uses
+pages; Firefox frecency is not stored. Text matching uses
 ASCII case folding, and tag names match exactly, rather than Firefox's full
 locale-aware collation. Parameterized query keywords are not supported.
 
@@ -331,6 +365,29 @@ are never handed to the web engine. Query pages show bookmarklets as inert
 entries with instructions to run them from the bar or menu.
 
 ## Testing
+
+The visit-time follow-up passes **88 time-query checks** on host and native
+airOS, along with **384 host core**, **328 bookmark**, **99 general query** and
+**70 folder-query** checks. Native UI coverage increases to **62 checks**,
+including additional-visit import notifications, saved timestamps and time-query
+menus. The core, bookmark and time suites also pass AddressSanitizer and
+UndefinedBehaviorSanitizer. Tests cover inclusive microsecond bounds, relative
+times, DST midnight, fractional-hour zones, same-day history clearing, profile
+round trips, both SQLite formats, repeat import and the full 2,000-page retention
+limit.
+
+The final full-browser run passes **73 browser checks and 112 native action
+assertions**. Real navigation records timestamps; importing an older visit for
+an existing URL refreshes an open time query and saves the data; clearing history
+removes its matches. The rendered imported-visit result was visually inspected.
+All **682 frozen hashes** remained unchanged, all four engine images were
+verified as loaded, and the browser exited normally without helpers or crash
+events across a complete log interval. The owned RAM filesystem was removed
+after scanning all 42 teams. An earlier run with concurrent stress tests timed
+out on one window request and lacked complete crash-log coverage; it is not
+counted as acceptance. Exact artifacts, source hashes, validation corrections
+and retention limits are recorded in
+[`bookmark-time-queries-native-2026-10-22.json`](bookmark-time-queries-native-2026-10-22.json).
 
 The folder-reference follow-up adds **70 folder-query checks** on host and
 native airOS. The existing **328 bookmark**, **100 general query** and **384

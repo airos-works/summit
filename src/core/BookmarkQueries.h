@@ -1,5 +1,6 @@
 #pragma once
 #include "Bookmarks.h"
+#include "HistoryVisits.h"
 
 namespace summit {
 // Saved Firefox Places searches. Results are transient: only the query URL is
@@ -10,5 +11,5 @@ struct BookmarkQueryResult {
     std::string error;
 };
 BookmarkQueryResult QueryBookmarks(std::string_view url, const Bookmarks& bookmarks,
-    const std::vector<PageRecord>& history, const BookmarkOrigin& origin = {});
+    const std::vector<PageRecord>& history, const BookmarkOrigin& origin = {}, int64_t now = HistoryNowMicroseconds());
 }

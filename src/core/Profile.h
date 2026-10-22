@@ -121,7 +121,8 @@ struct Profile {
     // The copies Save() keeps, newest first.
     static std::vector<std::filesystem::path> Backups(const std::filesystem::path& path);
     // Records a visit to an http(s) page; returns false for other pages.
-    bool Visit(const PageRecord& page, int64_t now = std::time(nullptr));
+    bool Visit(const PageRecord& page);
+    bool Visit(const PageRecord& page, int64_t now);
     // Forgets the visits from since (seconds since the epoch) on, and the
     // pages visited only then; returns how many visits went.
     size_t ForgetVisitsSince(int64_t since);
@@ -131,7 +132,7 @@ struct Profile {
     bool RemoveBookmark(const std::string& url) { return bookmarks.RemoveURL(url); }
     // Adds pages visited in another browser that history does not have yet,
     // keeping the most recent 2000 pages; returns how many were added.
-    size_t ImportHistory(const std::vector<PageRecord>& pages);
+    size_t ImportHistory(const std::vector<PageRecord>& pages, bool* changed = nullptr);
     // Remembers a trusted certificate (host names compare without case); false
     // when that host already had it.
     bool TrustCertificate(const TrustedCertificate&);
