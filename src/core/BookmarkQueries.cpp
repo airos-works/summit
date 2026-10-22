@@ -63,17 +63,37 @@ bool Decode(std::string_view text, std::string& into)
     return true;
 }
 
-struct Query {
-    int64_t source = 0, sort = 0, type = 0, limit = 0, minVisits = -1, maxVisits = -1;
+struct Clause {
+    int64_t minVisits = -1, maxVisits = -1;
     int64_t begin = 0, end = 0, beginRef = 0, endRef = 0;
     bool HasBegin() const { return begin || beginRef; }
     bool HasEnd() const { return end || endRef; }
-    bool excludeQueries = false, excludeItems = false, notTags = false, onlyBookmarked = false, domainIsHost = false;
+    bool notTags = false, onlyBookmarked = false, domainIsHost = false;
     bool hasDomain = false;
-    std::string terms, domain, uri, error;
+    std::string terms, domain, uri;
     std::vector<std::string> tags;
     std::vector<std::pair<bool, std::string>> parents; // legacy numeric/symbolic folder, or GUID parent
+    bool HasConditions(bool bookmarkQuery) const {
+        return minVisits >= 0 || maxVisits >= 0 || HasBegin() || HasEnd() || hasDomain || !uri.empty()
+            || !terms.empty() || !tags.empty() || !parents.empty() || (onlyBookmarked && !bookmarkQuery);
+    }
 };
+
+struct Query {
+    int64_t source = 0, sort = 0, type = 0, limit = 0;
+    bool excludeQueries = false, excludeItems = false;
+    std::string error;
+    // Legacy Places OR separates conditions; presentation options are global.
+    std::vector<Clause> clauses{1};
+};
+
+bool SimpleFolder(const Query& query)
+{
+    if (query.clauses.size() != 1) return false;
+    const auto& clause = query.clauses.front();
+    return clause.parents.size() == 1 && clause.terms.empty() && !clause.hasDomain && clause.uri.empty()
+        && clause.tags.empty() && !query.limit && query.type == 0 && !clause.HasBegin() && !clause.HasEnd();
+}
 
 Query Parse(std::string_view url)
 {
@@ -105,34 +125,36 @@ Query Parse(std::string_view url)
         auto text = [&](std::string& into) {
             if (!Decode(value, into)) q.error = "Invalid escaped text in " + std::string(name) + ".";
         };
+        auto& clause = q.clauses.back();
         if (name == "queryType") number(q.source, 0, 1);
         else if (name == "sort") number(q.sort, 0, 22);
         else if (name == "type") number(q.type, 0, 9);
         else if (name == "maxResults") number(q.limit, 0, UINT32_MAX);
-        else if (name == "minVisits") number(q.minVisits, -1, INT32_MAX);
-        else if (name == "maxVisits") number(q.maxVisits, -1, INT32_MAX);
-        else if (name == "beginTime") number(q.begin, INT64_MIN, INT64_MAX);
-        else if (name == "endTime") number(q.end, INT64_MIN, INT64_MAX);
-        else if (name == "beginTimeRef") number(q.beginRef, 0, 2);
-        else if (name == "endTimeRef") number(q.endRef, 0, 2);
+        else if (name == "minVisits") number(clause.minVisits, -1, INT32_MAX);
+        else if (name == "maxVisits") number(clause.maxVisits, -1, INT32_MAX);
+        else if (name == "beginTime") number(clause.begin, INT64_MIN, INT64_MAX);
+        else if (name == "endTime") number(clause.end, INT64_MIN, INT64_MAX);
+        else if (name == "beginTimeRef") number(clause.beginRef, 0, 2);
+        else if (name == "endTimeRef") number(clause.endRef, 0, 2);
         else if (name == "excludeQueries") flag(q.excludeQueries);
         else if (name == "excludeItems") flag(q.excludeItems);
-        else if (name == "!tags") flag(q.notTags);
-        else if (name == "onlyBookmarked") flag(q.onlyBookmarked);
-        else if (name == "domainIsHost") flag(q.domainIsHost);
-        else if (name == "domain") { text(q.domain); q.hasDomain = true; }
-        else if (name == "uri") text(q.uri);
-        else if (name == "terms") text(q.terms);
+        else if (name == "!tags") flag(clause.notTags);
+        else if (name == "onlyBookmarked") flag(clause.onlyBookmarked);
+        else if (name == "domainIsHost") flag(clause.domainIsHost);
+        else if (name == "domain") { text(clause.domain); clause.hasDomain = true; }
+        else if (name == "uri") text(clause.uri);
+        else if (name == "terms") text(clause.terms);
         else if (name == "parent" || name == "folder") {
             std::string parent; text(parent);
             if (parent.empty() || parent.size() > 128) q.error = "Invalid folder reference.";
-            else if (std::find(q.parents.begin(), q.parents.end(), std::pair{name == "folder", parent}) == q.parents.end())
-                q.parents.emplace_back(name == "folder", std::move(parent));
+            else if (std::find(clause.parents.begin(), clause.parents.end(), std::pair{name == "folder", parent}) == clause.parents.end())
+                clause.parents.emplace_back(name == "folder", std::move(parent));
         }
         else if (name == "tag") {
             std::string tag; text(tag);
-            if (std::find(q.tags.begin(), q.tags.end(), tag) == q.tags.end()) q.tags.push_back(std::move(tag));
-        } else if (name == "expandQueries" || name == "asyncEnabled") {
+            if (std::find(clause.tags.begin(), clause.tags.end(), tag) == clause.tags.end()) clause.tags.push_back(std::move(tag));
+        } else if (name == "OR") q.clauses.emplace_back();
+        else if (name == "expandQueries" || name == "asyncEnabled") {
             bool ignored = false; flag(ignored); // Presentation/scheduling, not membership.
         } else if (name == "includeHidden" || name == "originalTitle") {
             bool enabled = false; flag(enabled);
@@ -146,7 +168,7 @@ Query Parse(std::string_view url)
         && q.sort != 5 && q.sort != 6 && q.sort != 7 && q.sort != 8 && q.sort != 11 && q.sort != 12
         && q.sort != 13 && q.sort != 14 && q.sort != 17 && q.sort != 18)
         q.error = "This smart folder's sort order requires data Summit does not yet retain.";
-    if (q.type == 6 || !q.parents.empty()) q.source = 1;
+    if (q.type == 6 || std::any_of(q.clauses.begin(), q.clauses.end(), [](const auto& c) { return !c.parents.empty(); })) q.source = 1;
     return q;
 }
 
@@ -181,10 +203,6 @@ BookmarkQueryResult QueryBookmarks(std::string_view url, const Bookmarks& bookma
         time = base + offset;
         return true;
     };
-    int64_t begin = INT64_MIN, end = INT64_MAX;
-    if ((q.HasBegin() && !resolveTime(q.begin, q.beginRef, begin))
-        || (q.HasEnd() && !resolveTime(q.end, q.endRef, end)))
-        return {{}, "This smart folder's time range cannot be represented."};
     std::map<std::string, const PageRecord*> visits;
     for (const auto& page : history) visits.emplace(page.url, &page);
     std::map<std::string, const BookmarkNode*> saved;
@@ -199,62 +217,80 @@ BookmarkQueryResult QueryBookmarks(std::string_view url, const Bookmarks& bookma
         }
     };
     collect(bookmarks.Bar()); collect(bookmarks.Other());
-    std::vector<const BookmarkNode*> parents;
-    for (const auto& [legacy, reference] : q.parents) {
-        std::string guid = reference;
-        int64_t numeric = 0;
-        if (legacy) {
-            if (reference == "BOOKMARKS_MENU") guid = "menu________";
-            else if (reference == "TOOLBAR") guid = "toolbar_____";
-            else if (reference == "UNFILED_BOOKMARKS") guid = "unfiled_____";
-            else if (reference == "PLACES_ROOT") guid = "root________";
-            else if (reference == "MOBILE_BOOKMARKS") guid = "mobile______";
-            else {
-                auto parsed = std::from_chars(reference.data(), reference.data() + reference.size(), numeric);
-                if (parsed.ec != std::errc() || parsed.ptr != reference.data() + reference.size() || numeric <= 0)
-                    return {{}, "Invalid folder reference: " + reference + "."};
-                guid.clear();
+    struct PreparedClause {
+        const Clause* condition;
+        int64_t begin = INT64_MIN, end = INT64_MAX;
+        std::vector<const BookmarkNode*> parents;
+        std::set<int64_t> allowed;
+        std::vector<std::string> terms;
+    };
+    const bool simpleFolder = SimpleFolder(q);
+    std::vector<PreparedClause> filters;
+    const bool constrained = std::any_of(q.clauses.begin(), q.clauses.end(), [&](const auto& clause) {
+        return clause.HasConditions(q.source == 1);
+    });
+    for (const auto& clause : q.clauses) {
+        // The legacy Places SQL builder omits empty branches when any branch
+        // has conditions. Keep the original branch count for folder shortcuts.
+        if (constrained && !clause.HasConditions(q.source == 1)) continue;
+        PreparedClause filter{&clause, INT64_MIN, INT64_MAX, {}, {}, {}};
+        if ((clause.HasBegin() && !resolveTime(clause.begin, clause.beginRef, filter.begin))
+            || (clause.HasEnd() && !resolveTime(clause.end, clause.endRef, filter.end)))
+            return {{}, "This smart folder's time range cannot be represented."};
+        auto& parents = filter.parents;
+        for (const auto& [legacy, reference] : clause.parents) {
+            std::string guid = reference;
+            int64_t numeric = 0;
+            if (legacy) {
+                if (reference == "BOOKMARKS_MENU") guid = "menu________";
+                else if (reference == "TOOLBAR") guid = "toolbar_____";
+                else if (reference == "UNFILED_BOOKMARKS") guid = "unfiled_____";
+                else if (reference == "PLACES_ROOT") guid = "root________";
+                else if (reference == "MOBILE_BOOKMARKS") guid = "mobile______";
+                else {
+                    auto parsed = std::from_chars(reference.data(), reference.data() + reference.size(), numeric);
+                    if (parsed.ec != std::errc() || parsed.ptr != reference.data() + reference.size() || numeric <= 0)
+                        return {{}, "Invalid folder reference: " + reference + "."};
+                    guid.clear();
+                }
             }
+            const BookmarkNode* found = nullptr;
+            bool ambiguous = false;
+            std::function<void(const BookmarkNode&)> locate = [&](const BookmarkNode& node) {
+                if (!node.folder) return;
+                bool matches = false;
+                if (!origin.scope.empty()) matches = node.origin.scope == origin.scope
+                    && (numeric ? node.origin.id == numeric : node.origin.guid == guid);
+                else matches = (guid == "toolbar_____" && node.id == kBookmarksBarFolder)
+                    || (guid == "unfiled_____" && node.id == kOtherBookmarksFolder);
+                if (matches) { if (found) ambiguous = true; else found = &node; }
+                for (const auto& child : node.children) locate(child);
+            };
+            locate(bookmarks.Bar()); locate(bookmarks.Other());
+            if (ambiguous) return {{}, "This smart folder's target is ambiguous: " + reference + "."};
+            if (!found) return {{}, "This smart folder's target is missing or was not imported: " + reference + "."};
+            parents.push_back(found);
         }
-        const BookmarkNode* found = nullptr;
-        bool ambiguous = false;
-        std::function<void(const BookmarkNode&)> locate = [&](const BookmarkNode& node) {
-            if (!node.folder) return;
-            bool matches = false;
-            if (!origin.scope.empty()) matches = node.origin.scope == origin.scope
-                && (numeric ? node.origin.id == numeric : node.origin.guid == guid);
-            else matches = (guid == "toolbar_____" && node.id == kBookmarksBarFolder)
-                || (guid == "unfiled_____" && node.id == kOtherBookmarksFolder);
-            if (matches) { if (found) ambiguous = true; else found = &node; }
-            for (const auto& child : node.children) locate(child);
-        };
-        locate(bookmarks.Bar()); locate(bookmarks.Other());
-        if (ambiguous) return {{}, "This smart folder's target is ambiguous: " + reference + "."};
-        if (!found) return {{}, "This smart folder's target is missing or was not imported: " + reference + "."};
-        parents.push_back(found);
-    }
-    const bool simpleFolder = parents.size() == 1 && q.terms.empty() && !q.hasDomain && q.uri.empty()
-        && q.tags.empty() && !q.limit && q.type == 0 && !q.HasBegin() && !q.HasEnd();
-    std::set<int64_t> allowed;
-    if (!parents.empty() && !simpleFolder) {
-        // Firefox's constrained parent queries search descendants. Its simple
-        // one-parent shortcut instead exposes the direct ordered folder tree.
-        std::function<void(const BookmarkNode&)> descend = [&](const BookmarkNode& folder) {
-            for (const auto& child : folder.children) {
-                if (child.folder) descend(child);
-                else if (!child.separator) allowed.insert(child.id);
-            }
-        };
-        for (const auto* parent : parents) descend(*parent);
-    }
-    std::vector<std::string> terms;
-    auto text = Lower(q.terms);
-    for (size_t start = 0; start < text.size();) {
-        start = text.find_first_not_of(" \t\r\n", start);
-        if (start == std::string::npos) break;
-        auto end = text.find_first_of(" \t\r\n", start);
-        terms.push_back(text.substr(start, end - start));
-        start = end;
+        if (!parents.empty() && !simpleFolder) {
+            // Firefox's constrained parent queries search descendants. Its simple
+            // one-parent shortcut instead exposes the direct ordered folder tree.
+            std::function<void(const BookmarkNode&)> descend = [&](const BookmarkNode& folder) {
+                for (const auto& child : folder.children) {
+                    if (child.folder) descend(child);
+                    else if (!child.separator) filter.allowed.insert(child.id);
+                }
+            };
+            for (const auto* parent : parents) descend(*parent);
+        }
+        auto text = Lower(clause.terms);
+        for (size_t start = 0; start < text.size();) {
+            start = text.find_first_not_of(" \t\r\n", start);
+            if (start == std::string::npos) break;
+            auto end = text.find_first_of(" \t\r\n", start);
+            filter.terms.push_back(text.substr(start, end - start));
+            start = end;
+        }
+        filters.push_back(std::move(filter));
     }
     std::vector<Entry> matches;
     auto accept = [&](const BookmarkNode& node, const PageRecord* visit) {
@@ -263,35 +299,40 @@ BookmarkQueryResult QueryBookmarks(std::string_view url, const Bookmarks& bookma
         bool folderShortcut = false;
         if (query && q.excludeQueries) {
             const auto nested = Parse(node.url);
-            folderShortcut = nested.error.empty() && nested.parents.size() == 1 && nested.terms.empty()
-                && !nested.hasDomain && nested.uri.empty() && nested.tags.empty() && !nested.limit && nested.type == 0
-                && !nested.HasBegin() && !nested.HasEnd();
+            folderShortcut = nested.error.empty() && SimpleFolder(nested);
         }
-        if ((query && q.excludeQueries && !folderShortcut) || (!query && q.excludeItems && q.type == 0)
-            || (q.onlyBookmarked && !saved.count(node.url))) return;
+        if ((query && q.excludeQueries && !folderShortcut) || (!query && q.excludeItems && q.type == 0)) return;
         const int count = visit ? std::max(1, visit->visits) : 0;
-        if ((q.minVisits >= 0 && count < q.minVisits) || (q.maxVisits >= 0 && count > q.maxVisits)) return;
-        if (q.HasBegin() || q.HasEnd()) {
-            if (!visit) return;
-            const auto times = HistoryVisitTimes(*visit);
-            if (std::none_of(times.begin(), times.end(), [&](int64_t t) { return t >= begin && t <= end; })) return;
-        }
-        if (!q.uri.empty() && node.url != q.uri) return;
-        if (q.hasDomain) {
-            auto host = Lower(Host(node.url)), domain = Lower(q.domain);
-            if (host != domain && (q.domainIsHost || domain.empty() || host.size() <= domain.size()
-                || host.compare(host.size() - domain.size(), domain.size(), domain) || host[host.size() - domain.size() - 1] != '.')) return;
-        }
         const auto search = Lower(node.title + " " + node.url + " " + BookmarkTagsText(node.metadata.tags));
-        for (const auto& term : terms) if (search.find(term) == std::string::npos) return;
-        for (const auto& tag : q.tags) {
-            const bool has = std::find(node.metadata.tags.begin(), node.metadata.tags.end(), tag) != node.metadata.tags.end();
-            if (has == q.notTags) return;
+        for (const auto& filter : filters) {
+            const auto& clause = *filter.condition;
+            if (!simpleFolder && !filter.parents.empty() && !filter.allowed.count(node.id)) continue;
+            if (clause.onlyBookmarked && !saved.count(node.url)) continue;
+            if ((clause.minVisits >= 0 && count < clause.minVisits) || (clause.maxVisits >= 0 && count > clause.maxVisits)) continue;
+            if (clause.HasBegin() || clause.HasEnd()) {
+                if (!visit) continue;
+                const auto times = HistoryVisitTimes(*visit);
+                if (std::none_of(times.begin(), times.end(), [&](int64_t t) { return t >= filter.begin && t <= filter.end; })) continue;
+            }
+            if (!clause.uri.empty() && node.url != clause.uri) continue;
+            if (clause.hasDomain) {
+                auto host = Lower(Host(node.url)), domain = Lower(clause.domain);
+                if (host != domain && (clause.domainIsHost || domain.empty() || host.size() <= domain.size()
+                    || host.compare(host.size() - domain.size(), domain.size(), domain) || host[host.size() - domain.size() - 1] != '.')) continue;
+            }
+            if (std::any_of(filter.terms.begin(), filter.terms.end(), [&](const auto& term) { return search.find(term) == std::string::npos; })) continue;
+            if (std::any_of(clause.tags.begin(), clause.tags.end(), [&](const auto& tag) {
+                    const bool has = std::find(node.metadata.tags.begin(), node.metadata.tags.end(), tag) != node.metadata.tags.end();
+                    return has == clause.notTags;
+                })) continue;
+            // Each candidate is visited once. Overlapping OR branches cannot
+            // duplicate it, while distinct bookmarks sharing a URL remain distinct.
+            matches.push_back({node, visit});
+            return;
         }
-        matches.push_back({node, visit});
     };
     if (simpleFolder) {
-        for (const auto& node : parents.front()->children) {
+        for (const auto& node : filters.front().parents.front()->children) {
             const bool query = IsBookmarkQueryURL(node.url);
             if (node.folder || node.separator) {
                 if (!node.separator || (!q.excludeItems && !q.sort)) matches.push_back({node, nullptr});
@@ -305,7 +346,6 @@ BookmarkQueryResult QueryBookmarks(std::string_view url, const Bookmarks& bookma
             // General Places bookmark queries exclude saved queries; simple
             // folder shortcuts above retain them in their direct hierarchy.
             if (IsBookmarkQueryURL(node->url)) continue;
-            if (!parents.empty() && !allowed.count(node->id)) continue;
             auto found = visits.find(node->url);
             accept(*node, found == visits.end() ? nullptr : found->second);
         }

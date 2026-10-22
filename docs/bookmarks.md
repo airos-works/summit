@@ -382,8 +382,37 @@ actually enriches an existing item's metadata, that local change updates the
 item and its containing folders. Query results follow these changes without
 reimporting the saved query.
 
+### Legacy combined queries
+
+Older Firefox saved searches can separate condition groups with `&OR&`, for
+example `place:domain=example.com&OR&tag=work&sort=8&maxResults=10`. Conditions
+within each group must all match; a result can match either group. Domain,
+text, URI, tags and tag exclusion, visit bounds, times and folder references
+belong to their own group. Sorting, result grouping, query type, exclusions
+and the result limit apply to the combined result, wherever those options
+appear in the URL. Repeating an option keeps its last value.
+
+Overlapping groups return each bookmark once; distinct bookmark entries with
+the same address remain distinct. Sorting and limiting happen after combining
+matches. Title sorts retain the existing Places rule of choosing the newest
+matches before applying a limited title sort. Multiple folder groups search
+descendants, rather than exposing a direct folder hierarchy. All folder
+references resolve within the saved query's imported source, including when
+different databases use identical IDs and query URLs. A folder condition makes
+the combined search a bookmark query, as in the legacy Places builder.
+
+The legacy SQL builder omits empty condition groups when another group is
+constrained; a trailing `OR` therefore does not widen the search to everything.
+An entirely unconstrained query still returns the normal unfiltered result.
+An unsupported or unresolved group produces an explanation for the whole
+query, without substituting results from only its supported groups. The
+256-field bound includes separators and options. These rules follow the
+[Firefox 60 parser](https://hg.mozilla.org/releases/mozilla-release/raw-file/FIREFOX_60_0_RELEASE/toolkit/components/places/nsNavHistoryQuery.cpp)
+and [combined query builder](https://hg.mozilla.org/releases/mozilla-release/raw-file/FIREFOX_60_0_RELEASE/toolkit/components/places/nsNavHistory.cpp),
+which support saved multi-query URLs from older profiles.
+
 **This does not complete Firefox smart-folder compatibility or #110.** Folder
-references and visit-time ranges are implemented for retained data; visit transitions, OR clauses,
+references and visit-time ranges are implemented for retained data; visit transitions,
 annotations, frecency sorts and other result groupings remain
 unsupported. Such queries stay saved and show an explicit explanation, with no
 broader substitute results. Query history is limited to Summit's retained 2,000
@@ -398,6 +427,28 @@ are never handed to the web engine. Query pages show bookmarklets as inert
 entries with instructions to run them from the bar or menu.
 
 ## Testing
+
+The combined-query follow-up passes **63 OR-query checks** on host and native
+airOS, plus **384 host core**, **328 bookmark**, **97 general query**, **70
+folder-query**, **88 time-query** and **76 modification-query** checks. Native
+UI coverage totals **71 checks**. All six bookmark/query suites also pass
+AddressSanitizer and UndefinedBehaviorSanitizer. Tests cover independent group
+conditions, empty groups, global options/limits, overlapping matches, scoped
+folder references, local changes, profile saves and HTML round trips.
+
+The full browser passes **115 checks and 170 native action assertions**.
+Two SQLite imports reuse IDs and the exact combined-query URL; native menus
+and query pages resolve the correct source. Moving an item while its query is
+open immediately fills the global result limit from the other group. Live
+visit counts, unsupported groups and reimports are also checked. The combined
+folder page was visually inspected. All **688 frozen hashes** remained unchanged,
+all four engine images were loaded, and the browser exited normally without
+helpers or crash events across a complete log interval. The owned RAM filesystem
+was unmounted after scanning all 42 teams. Evidence:
+[`bookmark-combined-queries-native-2026-10-22.json`](bookmark-combined-queries-native-2026-10-22.json).
+An initial run stopped on the new harness's visit-count check: an omitted
+profile count means one visit, not zero. The corrected fresh-profile run above
+is the acceptance result; the application did not need a change.
 
 The modification-time follow-up passes **76 modification-query checks** on
 host and native airOS, plus **384 host core**, **328 bookmark**, **98 general

@@ -308,6 +308,22 @@ public:
         Check(!modified.Edit(datedB, "Changed B", "https://modified.test/b") && modified.Find(datedB)->modified == editTime,
             "saving an unchanged bookmark does not rewrite its modification date");
 
+        const auto combinedQuery = modified.Add({"place:queryType=1&terms=Dated&OR&terms=Changed&sort=14&maxResults=1", "Combined"}, kBookmarksBarFolder);
+        auto combinedButtons = std::make_shared<const BookmarkButton>(BookmarkButtons(modified, {}, *modified.Find(combinedQuery)));
+        BMenu combinedMenu("Combined");
+        AddBookmarkItems(&combinedMenu, combinedButtons, *combinedButtons, BMessenger(this));
+        Check(combinedMenu.CountItems() == 3 && std::string(combinedMenu.ItemAt(0)->Label()) == "Changed B",
+            "combined native query applies sorting and limit across both branches");
+        Check(combinedButtons->queryContents().children.size() == 1,
+            "combined native query has one result after the global limit");
+        const auto datedA = modified.FindURL("https://modified.test/a")->id;
+        Check(modified.Edit(datedA, "Changed A", "https://modified.test/a"), "combined query fixture changes through native bookmark model");
+        auto changedCombined = BookmarkButtons(modified, {}, *modified.Find(combinedQuery)).queryContents();
+        Check(changedCombined.children[0].title == "Changed A" && combinedButtons->queryContents().children[0].title == "Changed B",
+            "combined native query refresh preserves the already-open snapshot");
+        Check(modified.Remove(datedA) && BookmarkButtons(modified, {}, *modified.Find(combinedQuery)).queryContents().children[0].title == "Changed B",
+            "removing a match lets the other combined-query branch supply the result");
+
         Bookmarks scoped;
         for (const auto* scope : {"first", "second"}) {
             BookmarkNode imported{0, "", "", true, 0, {}};
