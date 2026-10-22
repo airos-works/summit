@@ -11,6 +11,42 @@ annotations and form appearances remain visible. Printing is not offered by
 this integration. A server response with `Content-Disposition: attachment`
 continues to use Summit's download manager directly.
 
+## PDF printing baseline (#110, 22 October 2026)
+
+The published `8224d7a` airOS x86_64 engine (`20261021.2246`) reproduces
+the outstanding printing defect. Its viewer opens the three-page fixture,
+but `DrawPagesForPrinting()` returns one page for both PDF and raster output.
+Requesting page two returns no pixels. The print button is hidden and the
+viewer reports that printing is unsupported.
+
+The final native baseline passes 15 diagnostic assertions and exits normally
+with no helpers left, unchanged input/runtime hashes, and no fresh debugger
+event. A separate pypdf 6.19.0 read verifies that the source has three pages
+and the output has one. Its extracted text includes the viewer's **Page
+Width** control. The raster shows the toolbar and a clipped first page:
+
+![Existing PDF print output includes the toolbar and clips page one](pdf-printing-baseline-2026-10-22.png)
+
+[`pdf-printing-baseline-2026-10-22.json`](pdf-printing-baseline-2026-10-22.json)
+records the measurements and native runtime provenance. This is a reproduction,
+not printing acceptance; #110's PDF printing item remains open.
+
+`tests/ModernPDFPrintTests.cpp` calls the public native print API and saves
+`printed.pdf`, raster pages, and `observed.json` into an owned output directory.
+It accepts `URL OUTPUT_DIRECTORY ENGINE_BUNDLE INVENTORY_GATE baseline|candidate`.
+Serve the generated three-page fixture over loopback, compile with the matching
+engine headers and `-lWebKit -lbe -lnetwork`, and use an isolated engine/profile.
+After it reports `PDF_PRINT_READY`, inspect its loaded libraries and create the
+inventory-gate file to continue. The explicit `baseline` mode asserts the
+current defect; `candidate` requires an available print button and all three
+document pages and will fail on the current engine. Pixel correctness and
+native PrintKit spooling still need acceptance with the implementation.
+
+Simply unhiding the buttons is insufficient: the bundled PDF.js print service
+cleans up its prepared pages after its native print call returns, while Summit
+opens the native print dialog asynchronously. The implementation must preserve
+the document render state until the print job consumes its requested pages.
+
 ## Response and resource handling
 
 The top-level PDF stays at its original URL, preserving navigation, history,
