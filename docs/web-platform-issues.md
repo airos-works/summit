@@ -21,7 +21,7 @@ engine and the private dependency closure.
 | #27 OffscreenCanvas | Main-thread and worker 2D, WebGL and WebGL2 | 28/28 checks, including concurrent GPU rendering, placeholder presentation and transferred ImageBitmap pixels |
 | #28 Custom schemes | Recommended native apps, application selection and website handlers | 18/18 API validation checks; approved website round trip 19/19; native argument delivery, remembering, cancellation, stale replies, removal and private isolation |
 | #29 WebUSB | Window bindings, native chooser, origin grants and native transfer backend | 54/54 browser checks; 550 policy checks; native protected-device and closed-session guards; real chooser click returns NotFoundError with no eligible devices |
-| #122 WebHID | `navigator.hid` with a native chooser, origin grants, input/output/feature reports and connection events over the WebUSB broker | 48 descriptor parser checks (`tests/HIDDescriptorTests.cpp`, devices from the Framework laptop); VIA test on the Keychron Q6 pending |
+| #122 WebHID | `navigator.hid` with a native chooser, origin grants, input/output/feature reports and connection events over the WebUSB broker | 48 descriptor parser checks (`tests/HIDDescriptorTests.cpp`, devices from the Framework laptop); VIA configures the Keychron Q6 on the Framework laptop (checked by the reporter, 23 October) |
 | #30 Toolbar icons | Native scalable HVIF toolbar resources | All normal/disabled icon variants and complete native toolbar visually checked |
 
 Five consecutive OffscreenCanvas and image-codec runs pass with no new crash
