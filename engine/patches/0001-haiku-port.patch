@@ -72961,7 +72961,7 @@ index 5a8bebfa4fb03b8ed66afe52ec6ea95d97a987ac..7595c5866ece87286d0992e64c684ede
 +#endif
  }
 diff --git a/Source/WebKit/NetworkProcess/NetworkResourceLoader.cpp b/Source/WebKit/NetworkProcess/NetworkResourceLoader.cpp
-index 0ecf172b29e1ba69a2573c3de5351f86e5a4ef0e..393f799d0c25af8667598250c8ccd6f9fb552e09 100644
+index 0ecf172b29e1ba69a2573c3de5351f86e5a4ef0e..a9d215316d92279636662d4af8ae9b1e7608495b 100644
 --- a/Source/WebKit/NetworkProcess/NetworkResourceLoader.cpp
 +++ b/Source/WebKit/NetworkProcess/NetworkResourceLoader.cpp
 @@ -115,6 +115,14 @@
@@ -73367,7 +73367,22 @@ index 0ecf172b29e1ba69a2573c3de5351f86e5a4ef0e..393f799d0c25af8667598250c8ccd6f9
          if (shouldSendResourceLoadMessages() && !newRequest.isNull())
              protect(connectionToWebProcess().networkProcess())->parentProcessConnection()->send(Messages::NetworkProcessProxy::ResourceLoadDidPerformHTTPRedirection(webPageProxyID(), resourceLoadInfo(), m_redirectResponse, newRequest), 0);
  
-@@ -2344,6 +2668,12 @@ void NetworkResourceLoader::tryStoreAsCacheEntry()
+@@ -2334,6 +2658,14 @@ void NetworkResourceLoader::sendBuffer(const FragmentedSharedBuffer& buffer)
+ 
+ void NetworkResourceLoader::tryStoreAsCacheEntry()
+ {
++#if PLATFORM(HAIKU)
++    // Responses made in this process (a blocking webRequest listener's
++    // surrogate) have no network load and are never cached.
++    if (!m_networkLoad) {
++        LOADER_RELEASE_LOG("tryStoreAsCacheEntry: Not storing cache entry because there is no network load");
++        return;
++    }
++#endif
+     if (!canUseCache(m_networkLoad->currentRequest())) {
+         LOADER_RELEASE_LOG("tryStoreAsCacheEntry: Not storing cache entry because request is not eligible");
+         return;
+@@ -2344,6 +2676,12 @@ void NetworkResourceLoader::tryStoreAsCacheEntry()
      }
  
      if (isCrossOriginPrefetch()) {
@@ -93582,7 +93597,7 @@ index 65b9841a9d4469a699b92c47435fecaaaa034d77..0361d615767169f4af1a6c192853c93e
  
      OptionSet<ModifierFlags> modifierFlags() const { return !m_activationKey.isEmpty() ? m_modifierFlags : OptionSet<ModifierFlags> { }; }
 diff --git a/Source/WebKit/UIProcess/Extensions/WebExtensionContext.cpp b/Source/WebKit/UIProcess/Extensions/WebExtensionContext.cpp
-index 8947f24ec9866c39f206aab464ec21c5d4213b95..f5caeb2ad71876437ee2c475d31e23fa30627cb3 100644
+index 8947f24ec9866c39f206aab464ec21c5d4213b95..4a25fb9c13f242120e3c3111695273c291b90a46 100644
 --- a/Source/WebKit/UIProcess/Extensions/WebExtensionContext.cpp
 +++ b/Source/WebKit/UIProcess/Extensions/WebExtensionContext.cpp
 @@ -34,11 +34,24 @@
@@ -94104,18 +94119,30 @@ index 8947f24ec9866c39f206aab464ec21c5d4213b95..f5caeb2ad71876437ee2c475d31e23fa
      if (tab && permission == WebExtensionPermission::tabs()) {
          if (tab->extensionHasTemporaryPermission())
              return PermissionState::GrantedExplicitly;
-@@ -869,6 +1252,10 @@ WebExtensionContext::PermissionState WebExtensionContext::permissionState(const
+@@ -867,8 +1250,21 @@ WebExtensionContext::PermissionState WebExtensionContext::permissionState(const
+     return PermissionState::Unknown;
+ }
  
- WebExtensionContext::PermissionState WebExtensionContext::permissionState(const URL& url, WebExtensionTab* tab, OptionSet<PermissionStateOptions> options)
+-WebExtensionContext::PermissionState WebExtensionContext::permissionState(const URL& url, WebExtensionTab* tab, OptionSet<PermissionStateOptions> options)
++WebExtensionContext::PermissionState WebExtensionContext::permissionState(const URL& requestedURL, WebExtensionTab* tab, OptionSet<PermissionStateOptions> options)
  {
 +#if PLATFORM(HAIKU)
 +    if (tab && (tab->extensionContext() != this || !tab->isOpen() || !tab->extensionHasAccess()))
 +        return PermissionState::Unknown;
++    // Access to a host covers its WebSocket connections, as in Chrome
++    // (blocking webRequest sees them, #103).
++    URL url = requestedURL;
++    if (url.protocolIs("ws"_s))
++        url.setProtocol("http"_s);
++    else if (url.protocolIs("wss"_s))
++        url.setProtocol("https"_s);
++#else
++    const URL& url = requestedURL;
 +#endif
      if (url.isEmpty())
          return PermissionState::Unknown;
  
-@@ -881,11 +1268,16 @@ WebExtensionContext::PermissionState WebExtensionContext::permissionState(const
+@@ -881,11 +1277,16 @@ WebExtensionContext::PermissionState WebExtensionContext::permissionState(const
      if (url.protocolIsFile() && !m_hasAccessToFileURLs)
          return PermissionState::Unknown;
  
@@ -94132,7 +94159,7 @@ index 8947f24ec9866c39f206aab464ec21c5d4213b95..f5caeb2ad71876437ee2c475d31e23fa
  
      bool skipRequestedPermissions = options.contains(PermissionStateOptions::SkipRequestedPermissions);
  
-@@ -1001,6 +1393,10 @@ WebExtensionContext::PermissionState WebExtensionContext::permissionState(const
+@@ -1001,6 +1402,10 @@ WebExtensionContext::PermissionState WebExtensionContext::permissionState(const
  
  WebExtensionContext::PermissionState WebExtensionContext::permissionState(const WebExtensionMatchPattern& pattern, WebExtensionTab* tab, OptionSet<PermissionStateOptions> options)
  {
@@ -94143,7 +94170,7 @@ index 8947f24ec9866c39f206aab464ec21c5d4213b95..f5caeb2ad71876437ee2c475d31e23fa
      if (!pattern.isValid())
          return PermissionState::Unknown;
  
-@@ -1013,11 +1409,15 @@ WebExtensionContext::PermissionState WebExtensionContext::permissionState(const
+@@ -1013,11 +1418,15 @@ WebExtensionContext::PermissionState WebExtensionContext::permissionState(const
      if (!pattern.matchesAllURLs() && pattern.scheme() == "file"_s && !m_hasAccessToFileURLs)
          return PermissionState::Unknown;
  
@@ -94159,7 +94186,7 @@ index 8947f24ec9866c39f206aab464ec21c5d4213b95..f5caeb2ad71876437ee2c475d31e23fa
  
      // Access the maps here to remove any expired entries, and only do it once for this call.
      auto& grantedPermissionMatchPatterns = this->grantedPermissionMatchPatterns();
-@@ -1433,6 +1833,19 @@ void WebExtensionContext::addInjectedContent(const InjectedContentVector& inject
+@@ -1433,6 +1842,19 @@ void WebExtensionContext::addInjectedContent(const InjectedContentVector& inject
              }
          }
  
@@ -94179,7 +94206,7 @@ index 8947f24ec9866c39f206aab464ec21c5d4213b95..f5caeb2ad71876437ee2c475d31e23fa
          for (auto& styleSheetPath : injectedContentData.styleSheetPaths) {
              auto styleSheetStringResult = extension->resourceStringForPath(styleSheetPath, WebExtension::CacheResult::Yes);
              if (!styleSheetStringResult) {
-@@ -1615,6 +2028,16 @@ bool WebExtensionContext::purgeMatchedRulesFromBefore(const WallTime& startTime)
+@@ -1615,6 +2037,16 @@ bool WebExtensionContext::purgeMatchedRulesFromBefore(const WallTime& startTime)
  
  void WebExtensionContext::addDeclarativeNetRequestRules(WebUserContentControllerProxy& controllerProxy)
  {
@@ -94196,7 +94223,7 @@ index 8947f24ec9866c39f206aab464ec21c5d4213b95..f5caeb2ad71876437ee2c475d31e23fa
      API::ContentRuleListStore::defaultStoreSingleton().lookupContentRuleListFile(declarativeNetRequestContentRuleListFilePath(), uniqueIdentifier().isolatedCopy(), [this, protectedThis = Ref { *this }, controllerProxy = Ref { controllerProxy }](RefPtr<API::ContentRuleList> ruleList, std::error_code) {
          if (!ruleList)
              return;
-@@ -1625,10 +2048,17 @@ void WebExtensionContext::addDeclarativeNetRequestRules(WebUserContentController
+@@ -1625,10 +2057,17 @@ void WebExtensionContext::addDeclarativeNetRequestRules(WebUserContentController
  
          controllerProxy->addContentRuleList(*ruleList, m_baseURL);
      });
@@ -94214,7 +94241,7 @@ index 8947f24ec9866c39f206aab464ec21c5d4213b95..f5caeb2ad71876437ee2c475d31e23fa
      API::ContentRuleListStore::defaultStoreSingleton().lookupContentRuleListFile(declarativeNetRequestContentRuleListFilePath(), uniqueIdentifier().isolatedCopy(), [this, protectedThis = Ref { *this }](RefPtr<API::ContentRuleList> ruleList, std::error_code) {
          if (!ruleList)
              return;
-@@ -1640,6 +2070,7 @@ void WebExtensionContext::addDeclarativeNetRequestRulesToPrivateUserContentContr
+@@ -1640,6 +2079,7 @@ void WebExtensionContext::addDeclarativeNetRequestRulesToPrivateUserContentContr
          for (Ref controller : extensionController()->allPrivateUserContentControllers())
              controller->addContentRuleList(*ruleList, m_baseURL);
      });
@@ -94222,7 +94249,7 @@ index 8947f24ec9866c39f206aab464ec21c5d4213b95..f5caeb2ad71876437ee2c475d31e23fa
  }
  
  static HashMap<WebExtensionContextIdentifier, WeakRef<WebExtensionContext>>& NODELETE webExtensionContexts()
-@@ -1660,7 +2091,15 @@ WebExtensionContext::WebExtensionContext()
+@@ -1660,7 +2100,15 @@ WebExtensionContext::WebExtensionContext()
  }
  
  #if !USE(GLIB)
@@ -94239,7 +94266,7 @@ index 8947f24ec9866c39f206aab464ec21c5d4213b95..f5caeb2ad71876437ee2c475d31e23fa
  #endif
  
  WebExtensionContextIdentifier WebExtensionContext::privilegedIdentifier() const
-@@ -1686,6 +2125,9 @@ WebExtensionContextParameters WebExtensionContext::parameters(IncludePrivilegedI
+@@ -1686,6 +2134,9 @@ WebExtensionContextParameters WebExtensionContext::parameters(IncludePrivilegedI
          includePrivilegedIdentifier == IncludePrivilegedIdentifier::Yes ? std::optional(privilegedIdentifier()) : std::nullopt,
          baseURL(),
          uniqueIdentifier(),
@@ -94249,7 +94276,7 @@ index 8947f24ec9866c39f206aab464ec21c5d4213b95..f5caeb2ad71876437ee2c475d31e23fa
          unsupportedAPIs(),
          m_grantedPermissions,
          extension->serializeLocalization(),
-@@ -1798,9 +2240,17 @@ void WebExtensionContext::loadBackgroundContent(CompletionHandler<void(RefPtr<AP
+@@ -1798,9 +2249,17 @@ void WebExtensionContext::loadBackgroundContent(CompletionHandler<void(RefPtr<AP
          return;
      }
  
@@ -94270,7 +94297,7 @@ index 8947f24ec9866c39f206aab464ec21c5d4213b95..f5caeb2ad71876437ee2c475d31e23fa
      });
  }
  
-@@ -2003,6 +2453,128 @@ Ref<WebExtensionRegisteredScriptsSQLiteStore> WebExtensionContext::registeredCon
+@@ -2003,6 +2462,128 @@ Ref<WebExtensionRegisteredScriptsSQLiteStore> WebExtensionContext::registeredCon
      return *m_registeredContentScriptsStorage;
  }
  
