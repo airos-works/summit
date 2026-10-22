@@ -3790,7 +3790,8 @@ void BrowserWindow::MessageReceived(BMessage* message)
         case B_WEBKIT_RESPONSIVENESS_CHANGED: ResponsivenessChanged(*message); break;
         case B_WEBKIT_PRINT_REQUESTED: {
             BMessenger view;
-            if (message->FindMessenger("view", &view) == B_OK && FindTab(view) == ActiveTab()) PrintPage();
+            if (message->FindMessenger("view", &view) == B_OK && FindTab(view) == ActiveTab())
+                PrintPage(message->GetUInt64("frame_identifier", 0), message->GetUInt64("generation", 0));
             break;
         }
         case B_WEBKIT_PRINT_PAGES: PrintPagesReceived(*message); break;
@@ -3802,9 +3803,10 @@ void BrowserWindow::MessageReceived(BMessage* message)
             BMessenger reply;
             auto* target = FindTabByID(message->GetInt64("tab", 0));
             if (message->FindMessenger("reply", &reply) != B_OK) break;
-            if (!target || target->processExited) {
+            if (!target || target->processExited || target->loading || target->loadGeneration != message->GetUInt64("generation", 0)) {
                 BMessage failed(B_WEBKIT_PRINT_PAGES);
-                failed.AddString("error", "The tab is gone.");
+                failed.AddUInt64("identifier", message->GetUInt64("identifier", 0));
+                failed.AddString("error", "The document changed or the tab closed.");
                 reply.SendMessage(&failed);
                 break;
             }
@@ -3812,7 +3814,8 @@ void BrowserWindow::MessageReceived(BMessage* message)
             BRect margins;
             message->FindSize("paper", &paper);
             message->FindRect("margins", &margins);
-            target->view->DrawPagesForPrinting(reply, message->GetUInt64("identifier", 0), paper.width, paper.height, margins,
+            target->view->DrawFramePagesForPrinting(reply, message->GetUInt64("identifier", 0),
+                message->GetUInt64("frame_identifier", 0), message->GetUInt64("generation", 0), paper.width, paper.height, margins,
                 1, message->GetInt32("first", 0), message->GetInt32("count", 1), message->GetFloat("scale", 2), false);
             break;
         }

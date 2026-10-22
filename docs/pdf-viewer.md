@@ -7,9 +7,52 @@ search, outlines, and downloading the original PDF. Password-protected PDFs
 prompt for their password. Damaged or empty files display an error in the viewer.
 
 This is a reader: PDF JavaScript and annotation editing are disabled. Existing
-annotations and form appearances remain visible. Printing is not offered by
-this integration. A server response with `Content-Disposition: attachment`
+annotations and form appearances remain visible. The print buttons and
+File → Print print the PDF's document pages. A server response with `Content-Disposition: attachment`
 continues to use Summit's download manager directly.
+
+## Native PDF printing (#110, 22 October 2026)
+
+Printing uses the PDF already loaded by the viewer, including its decrypted
+contents after a password has been supplied. PDF.js renders the requested pages
+serially into a private canvas. The engine fits each page, preserving its aspect
+and intrinsic rotation, into the chosen paper and margins. It leaves the visible
+page, zoom and scroll position alone. The toolbar request retains its frame
+identity, so an embedded PDF prints its own pages. Print jobs reject a changed
+navigation, invalid ranges and excessive allocations; suspended renders time out
+after 30 seconds and release their document references.
+
+The existing `DrawPagesForPrinting()` entry point remains available. The new
+`DrawFramePagesForPrinting()` also accepts the requesting frame and expected
+load generation. Ordinary HTML continues through the existing print layout.
+PDF output from this print API contains rasterized pages at 200 dpi; the native
+printer path uses its selected resolution, capped at 200 dpi. Use the viewer's
+download action to save the original PDF with its text and vector content.
+
+The isolated airOS x86_64 engine passes **69 native assertions** covering all
+three pages, exact page-range and toolbar pixel equality, overflowed ranges,
+stale and unknown frames, allocation rejection, repeated printing, embedded PDFs,
+locked/unlocked and invalid PDFs, HTML pagination, and navigation during a
+deliberately suspended render. The complete browser also prints three pages
+through both File → Print and a native pointer click on the PDF toolbar.
+Haiku's Preview driver reports **“of 3 Pages”** for both jobs. Each spool decodes
+to three page pictures, with the form value, footer and landscape page intact:
+
+![Three PDF pages decoded from the native toolbar print spool](pdf-printing-native-2026-10-22.png)
+
+An independent MuPDF comparison of the direct raster output has mean absolute
+RGB differences below 2.1/255 on each page. The form appearance was also inspected
+in the native spool; MuPDF's `show_pdf_page` comparison omits widgets. The final
+probe and full browser exit normally, leave no helpers, and preserve their
+input/runtime hashes, with complete crash-log intervals and no debugger events.
+[The native record](pdf-printing-native-2026-10-22.json) includes the engine,
+runtime hashes, print spool measurements and development failures.
+
+`tests/NativePDFPrintSpoolTests.cpp` decodes the three-page fixture's native spool
+into PPM images (`SPOOL_FILE OUTPUT_DIRECTORY`, link with `-lbe`). This acceptance
+uses Haiku's Preview driver; a physical printer and PDF Writer were not tested.
+The workstation's BFS failed one large artifact copy with `EFBIG`; the repeated
+toolbar spool was streamed to the host and hash-verified before closing Preview.
 
 ## PDF printing baseline (#110, 22 October 2026)
 
@@ -28,8 +71,7 @@ Width** control. The raster shows the toolbar and a clipped first page:
 ![Existing PDF print output includes the toolbar and clips page one](pdf-printing-baseline-2026-10-22.png)
 
 [`pdf-printing-baseline-2026-10-22.json`](pdf-printing-baseline-2026-10-22.json)
-records the measurements and native runtime provenance. This is a reproduction,
-not printing acceptance; #110's PDF printing item remains open.
+records the measurements and native runtime provenance before the fix.
 
 `tests/ModernPDFPrintTests.cpp` calls the public native print API and saves
 `printed.pdf`, raster pages, and `observed.json` into an owned output directory.
@@ -38,14 +80,15 @@ Serve the generated three-page fixture over loopback, compile with the matching
 engine headers and `-lWebKit -lbe -lnetwork`, and use an isolated engine/profile.
 After it reports `PDF_PRINT_READY`, inspect its loaded libraries and create the
 inventory-gate file to continue. The explicit `baseline` mode asserts the
-current defect; `candidate` requires an available print button and all three
-document pages and will fail on the current engine. Pixel correctness and
-native PrintKit spooling still need acceptance with the implementation.
+old defect; `candidate` exercises the corrected API and lifecycle checks above.
+Use the probe from baseline commit `4c79c3b` when compiling against the old
+engine, whose public API predates `DrawFramePagesForPrinting()`.
 
 Simply unhiding the buttons is insufficient: the bundled PDF.js print service
 cleans up its prepared pages after its native print call returns, while Summit
-opens the native print dialog asynchronously. The implementation must preserve
-the document render state until the print job consumes its requested pages.
+opens the native print dialog asynchronously. The Haiku integration captures the
+native print entry point before PDF.js replaces it and keeps independent render
+state for each native request until its pages have been consumed.
 
 ## Response and resource handling
 

@@ -576,13 +576,13 @@ void BrowserWindow::PasswordBarAnswer(const BMessage& message)
     RefreshNoticeBar();
 }
 
-void BrowserWindow::PrintPage()
+void BrowserWindow::PrintPage(uint64 frameIdentifier, uint64 expectedGeneration)
 {
     auto* tab = ActiveTab();
-    if (!tab || tab->processExited) return;
+    if (!tab || tab->processExited || tab->loading || (expectedGeneration && expectedGeneration != tab->loadGeneration)) return;
     // The print job runs on its own thread: the printer's dialogs wait for
     // the user, the pages come from the engine one at a time.
-    PrintJob::Start(tab->id, tab->title, DisplayURL(tab->url), BMessenger(this));
+    PrintJob::Start(tab->id, tab->title, DisplayURL(tab->url), BMessenger(this), frameIdentifier, tab->loadGeneration);
 }
 
 void BrowserWindow::SaveAsPDF()

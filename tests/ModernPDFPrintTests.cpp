@@ -29,6 +29,7 @@ public:
         if(message->what==B_WEBKIT_INSPECTOR_MESSAGES)return;
         if(message->what==B_WEBKIT_STATE_CHANGED){std::lock_guard lock(mutex);state=*message;return;}
         if(message->what==B_WEBKIT_PRINT_PAGES){std::lock_guard lock(mutex);replies[message->GetUInt64("identifier",0)]=*message;return;}
+        if(message->what==B_WEBKIT_PRINT_REQUESTED){std::lock_guard lock(mutex);printRequest=*message;++printRequests;return;}
         BApplication::MessageReceived(message);
     }
     void Pulse() override
@@ -46,9 +47,10 @@ private:
         auto until=system_time()+timeout;
         while(system_time()<until){if(f()){Require(true,label);return;}snooze(50000);}Require(false,label);
     }
-    BMessage Print(uint64 id,float raster,uint32 first,uint32 count)
+    BMessage Print(uint64 id,float raster,uint32 first,uint32 count,uint64 frame=0,uint64 generation=0)
     {
-        view->DrawPagesForPrinting(BMessenger(this),id,595,842,BRect(36,36,36,36),1,first,count,raster,true);
+        if(frame||generation)view->DrawFramePagesForPrinting(BMessenger(this),id,frame,generation,595,842,BRect(36,36,36,36),1,first,count,raster,true);
+        else view->DrawPagesForPrinting(BMessenger(this),id,595,842,BRect(36,36,36,36),1,first,count,raster,true);
         Wait([&]{std::lock_guard lock(mutex);return replies.contains(id);},"native print request returns",60000000);
         std::lock_guard lock(mutex);return replies.at(id);
     }
@@ -64,6 +66,8 @@ private:
         result["viewerPages"]=inspector.Evaluate("PDFViewerApplication.pdfDocument.numPages",viewer);
         result["toolbarPrintDisplay"]=inspector.Evaluate("getComputedStyle(document.getElementById('printButton')).display",viewer);
         result["supportsPrinting"]=inspector.Evaluate("PDFViewerApplication.supportsPrinting",viewer);
+        const std::string viewState="JSON.stringify([PDFViewerApplication.page,PDFViewerApplication.pdfViewer.currentScaleValue,document.getElementById('viewerContainer').scrollTop,document.getElementById('viewerContainer').scrollLeft])";
+        const auto before=inspector.Evaluate(viewState,viewer);
         std::puts("PDF_PRINT_READY");std::fflush(stdout);
         Wait([&]{return std::filesystem::exists(gate);},"runtime inventory gate",180000000);
         auto pdf=Print(1,0,0,1000);
@@ -94,6 +98,78 @@ private:
         } else {
             Require(result["toolbarPrintDisplay"]!="none"&&result["supportsPrinting"].get<bool>(),"PDF viewer offers printing");
             Require(result["nativePDFPageCount"]==3&&result["nativeRasterPageCount"]==3&&rasterPages==3&&result["secondPageCount"]==3&&result["secondPageHasData"].get<bool>(),"native printing includes all three document pages");
+            const void* rangePixels=nullptr;ssize_t rangeSize=0;
+            Require(raster.FindData("page",B_RAW_TYPE,1,&data,&size)==B_OK
+                &&beyond.FindData("page",B_RAW_TYPE,&rangePixels,&rangeSize)==B_OK
+                &&size==rangeSize&&!std::memcmp(data,rangePixels,size),"page range matches the second full-document raster exactly");
+            auto end=Print(4,1,3,1);
+            Require(end.GetInt32("pageCount",0)==3&&!end.HasData("page",B_RAW_TYPE)&&!end.HasString("error"),"range past the last PDF page reports the document count without data");
+            auto huge=Print(5,1,2,UINT32_MAX);
+            Require(huge.GetInt32("pageCount",0)==3&&huge.HasData("page",B_RAW_TYPE),"overflowing requested range is clamped to the remaining PDF page");
+            Require(inspector.Evaluate(viewState,viewer)==before,"printing preserves viewer page, zoom and scroll position");
+            Require(inspector.Evaluate("document.querySelectorAll('canvas[id^=summit-native-print-]').length",viewer)==0,"completed jobs release their private print canvases");
+            inspector.Evaluate("document.getElementById('printButton').click();true",viewer);
+            Wait([&]{std::lock_guard lock(mutex);return printRequests>0;},"PDF toolbar requests native printing");
+            uint64 frame,generation;
+            {std::lock_guard lock(mutex);frame=printRequest.GetUInt64("frame_identifier",0);generation=printRequest.GetUInt64("generation",0);}
+            Require(frame&&generation,"toolbar request identifies its frame and load generation");
+            auto toolbar=Print(6,1,1,1,frame,generation);
+            Require(toolbar.GetInt32("pageCount",0)==3&&toolbar.HasData("page",B_RAW_TYPE),"toolbar frame prints the PDF document instead of the viewer HTML");
+            Require(toolbar.FindData("page",B_RAW_TYPE,&data,&size)==B_OK&&size==rangeSize&&!std::memcmp(data,rangePixels,size),"toolbar and File Print paths render the same second PDF page");
+            auto stale=Print(7,1,0,1,frame,generation+100);
+            Require(stale.HasString("error")&&!stale.HasData("page",B_RAW_TYPE),"stale document generation is rejected");
+            auto wrongFrame=Print(8,1,0,1,UINT64_MAX-1,generation);
+            Require(wrongFrame.HasString("error"),"an unknown frame is rejected");
+            auto empty=Print(9,1,0,0);
+            Require(empty.HasString("error"),"an empty page range is rejected");
+            auto oversized=Print(10,10000,0,1);
+            Require(oversized.HasString("error"),"an excessive raster allocation is rejected");
+            auto repeated=Print(11,1,1,1);
+            Require(repeated.FindData("page",B_RAW_TYPE,&data,&size)==B_OK&&size==rangeSize&&!std::memcmp(data,rangePixels,size),"printing recovers after rejected requests without changing the output");
+            Require(inspector.Evaluate("document.querySelectorAll('canvas[id^=summit-native-print-]').length",viewer)==0,"failed and repeated jobs leave no print canvases");
+            auto navigate=[&](const char* path) {
+                const auto target=url.substr(0,url.find_last_of('/'))+path;
+                view->LoadURL(target.c_str());
+                Wait([&]{std::lock_guard lock(mutex);return state.GetString("url","")==target&&!state.GetBool("loading",true);},"next print fixture navigation completes");
+            };
+            navigate("/embedded.html");
+            Wait([&]{viewer=inspector.Viewer();return viewer&&inspector.Evaluate("PDFViewerApplication.pdfDocument?.numPages",viewer)==3;},"embedded PDF finishes loading");
+            {std::lock_guard lock(mutex);printRequests=0;}
+            inspector.Evaluate("document.getElementById('printButton').click();true",viewer);
+            Wait([&]{std::lock_guard lock(mutex);return printRequests>0;},"embedded PDF toolbar requests native printing");
+            {std::lock_guard lock(mutex);frame=printRequest.GetUInt64("frame_identifier",0);generation=printRequest.GetUInt64("generation",0);}
+            auto embedded=Print(12,1,1,1,frame,generation);
+            Require(embedded.GetInt32("pageCount",0)==3&&embedded.FindData("page",B_RAW_TYPE,&data,&size)==B_OK
+                &&size==rangeSize&&!std::memcmp(data,rangePixels,size),"embedded PDF toolbar prints its PDF rather than the containing HTML page");
+            navigate("/password.pdf");
+            Wait([&]{viewer=inspector.Viewer();return viewer&&inspector.Evaluate("document.getElementById('passwordDialog').open",viewer)==true;},"encrypted PDF asks for its password");
+            auto locked=Print(13,1,0,1);
+            Require(locked.HasString("error"),"locked PDF fails printing without a stalled callback");
+            inspector.Evaluate("document.getElementById('password').value='summit-test';document.getElementById('passwordSubmit').click();true",viewer);
+            Wait([&]{return inspector.Evaluate("PDFViewerApplication.pdfDocument?.numPages",viewer)==3;},"encrypted PDF opens with the supplied fixture password");
+            auto decrypted=Print(14,1,1,1);
+            Require(decrypted.GetInt32("pageCount",0)==3&&decrypted.FindData("page",B_RAW_TYPE,&data,&size)==B_OK
+                &&size==rangeSize&&!std::memcmp(data,rangePixels,size),"printing uses the already-decrypted PDF and preserves form appearances");
+            navigate("/invalid.pdf");
+            Wait([&]{viewer=inspector.Viewer();return viewer&&inspector.Evaluate("!!document.getElementById('summit-pdf-error')",viewer)==true;},"invalid PDF reports its viewer error");
+            Require(Print(15,1,0,1).HasString("error"),"invalid PDF returns a print error");
+            navigate("/html.html");
+            auto html=Print(16,1,0,3);
+            Require(html.GetInt32("pageCount",0)==3&&html.HasData("page",B_RAW_TYPE),"ordinary HTML still prints three CSS-paginated pages");
+            Require(html.FindData("page",B_RAW_TYPE,&data,&size)==B_OK,"HTML raster exists");
+            auto* pixel=static_cast<const uint8*>(data)+(60*html.GetInt32("width",0)+60)*4;
+            Require(pixel[2]>240&&pixel[1]<20&&pixel[0]<20,"ordinary HTML print output contains the first red page");
+            navigate("/fixture.pdf");
+            Wait([&]{viewer=inspector.Viewer();return viewer&&inspector.Evaluate("PDFViewerApplication.pdfViewer.getPageView(0)?.renderingState===3",viewer)==true;},"PDF reload finishes before the navigation-cancellation check");
+            inspector.Evaluate("window.__heldPrint=false;PDFViewerApplication.pdfDocument.getPage=()=>{window.__heldPrint=true;return new Promise(()=>{});};true",viewer);
+            view->DrawPagesForPrinting(BMessenger(this),17,595,842,BRect(36,36,36,36),1,0,1,1,true);
+            Wait([&]{return inspector.Evaluate("window.__heldPrint",viewer)==true;},"print request reaches the deliberately suspended PDF render");
+            navigate("/html.html");
+            Wait([&]{std::lock_guard lock(mutex);return replies.contains(17);},"navigation releases the pending print request within its timeout",45000000);
+            {std::lock_guard lock(mutex);Require(replies.at(17).HasString("error")&&!replies.at(17).HasData("page",B_RAW_TYPE),"navigation cancels the old PDF job instead of printing the replacement document");}
+            auto afterCancel=Print(18,1,0,1);
+            Require(afterCancel.GetInt32("pageCount",0)==3&&afterCancel.HasData("page",B_RAW_TYPE),"HTML printing still works after cancelling a pending PDF render");
+            result["extendedChecks"]="ranges, toolbar, generation, allocation, repeat, embedded PDF, encrypted PDF, invalid PDF, HTML, pending-render navigation cancellation";
         }
         std::ofstream(output+"/observed.json")<<result.dump(2)<<'\n';
         std::printf("PDF_PRINT_OBSERVED %s\n",result.dump().c_str());
@@ -101,6 +177,7 @@ private:
     std::string url,output,bundle,gate;bool baseline;
     BWindow* window=nullptr;BWebKitView* view=nullptr;std::shared_ptr<BWebKitContext> context;
     std::shared_ptr<BWebKitInspectorSession> session;std::thread worker;std::mutex mutex;BMessage state;std::map<uint64,BMessage> replies;
+    BMessage printRequest;unsigned printRequests=0;
     std::atomic<bool> failed=false,done=false;bool finished=false;bigtime_t closing=0;
 };
 int main(int argc,char**argv)

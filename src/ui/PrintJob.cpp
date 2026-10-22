@@ -69,9 +69,9 @@ private:
     std::string fHeader, fDate, fFooter, fNumber;
 };
 
-void PrintJob::Start(int64 tab, const std::string& title, const std::string& url, BMessenger window)
+void PrintJob::Start(int64 tab, const std::string& title, const std::string& url, BMessenger window, uint64 frameIdentifier, uint64 generation)
 {
-    auto* job = new PrintJob(tab, title, url, window);
+    auto* job = new PrintJob(tab, title, url, window, frameIdentifier, generation);
     job->Run();
     job->PostMessage(kBegin);
 }
@@ -97,8 +97,8 @@ void PrintJob::ConfigurePage()
     }).detach();
 }
 
-PrintJob::PrintJob(int64 tab, const std::string& title, const std::string& url, BMessenger window)
-    : BLooper("print job"), fTab(tab), fTitle(title), fURL(url), fWindow(window)
+PrintJob::PrintJob(int64 tab, const std::string& title, const std::string& url, BMessenger window, uint64 frameIdentifier, uint64 generation)
+    : BLooper("print job"), fTab(tab), fFrameIdentifier(frameIdentifier), fGeneration(generation), fTitle(title), fURL(url), fWindow(window)
 {
     char date[64] = "";
     const std::time_t now = std::time(nullptr);
@@ -155,6 +155,8 @@ void PrintJob::RequestPage()
 {
     BMessage request(kPrintPagesRequest);
     request.AddInt64("tab", fTab);
+    request.AddUInt64("frame_identifier", fFrameIdentifier);
+    request.AddUInt64("generation", fGeneration);
     request.AddMessenger("reply", BMessenger(this));
     request.AddUInt64("identifier", sNextIdentifier++);
     request.AddSize("paper", BSize(fPrintable.Width(), fPrintable.Height()));

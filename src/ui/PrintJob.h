@@ -18,20 +18,23 @@ class PrintPageView;
 // page's title, address, date and number in its margins.
 class PrintJob : public BLooper {
 public:
-    static void Start(int64 tab, const std::string& title, const std::string& url, BMessenger window);
+    static void Start(int64 tab, const std::string& title, const std::string& url, BMessenger window,
+        uint64 frameIdentifier, uint64 generation);
     // Paper for Save as PDF: the size the last print job used, else A4.
     static BSize DefaultPaper();
     // Page Setup… from the File menu (on a thread of its own).
     static void ConfigurePage();
     void MessageReceived(BMessage* message) override;
 private:
-    PrintJob(int64 tab, const std::string& title, const std::string& url, BMessenger window);
+    PrintJob(int64 tab, const std::string& title, const std::string& url, BMessenger window,
+        uint64 frameIdentifier, uint64 generation);
     ~PrintJob() override;
     void Begin();
     void RequestPage();
     void PageReceived(BMessage* message);
     void Finish(bool commit);
     int64 fTab;
+    uint64 fFrameIdentifier, fGeneration;
     std::string fTitle, fURL, fDate;
     BMessenger fWindow;
     std::unique_ptr<BPrintJob> fJob;

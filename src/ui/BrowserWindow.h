@@ -552,7 +552,7 @@ private:
     void RefreshNoticeBar();
     void ResponsivenessChanged(const BMessage& message);
     void ProcessExitReason(Tab& tab, const std::string& reason);
-    void PrintPage();
+    void PrintPage(uint64 frameIdentifier = 0, uint64 expectedGeneration = 0);
     void SaveAsPDF();
     void SaveAsPDFChosen(const BMessage& message);
     void PrintPagesReceived(BMessage& message);

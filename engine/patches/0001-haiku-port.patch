@@ -5825,12 +5825,15 @@ index 760bb8b038ff94fd34ff200228a0313fe243d092..15403102944c94a1de88e5dcda4b20e5
  }
 diff --git a/Source/WebCore/Modules/pdfjs-extras/haiku/configuration.js b/Source/WebCore/Modules/pdfjs-extras/haiku/configuration.js
 new file mode 100644
-index 0000000000000000000000000000000000000000..883aa898608405f49a1ef2f74bf09e759a00c024
+index 0000000000000000000000000000000000000000..2318cc01cb14b1762cf7ba809c645ccab595911a
 --- /dev/null
 +++ b/Source/WebCore/Modules/pdfjs-extras/haiku/configuration.js
-@@ -0,0 +1,20 @@
+@@ -0,0 +1,23 @@
 +/* Copyright (C) 2026 air/OS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +// Installed in the viewer's head, before viewer.mjs starts the application.
++// PDF.js replaces window.print with a service that assumes a synchronous
++// native dialog. Keep the browser entry point for Haiku's asynchronous host.
++Object.defineProperty(window, 'summitNativePDFPrint', {value: window.print.bind(window)});
 +document.addEventListener('webviewerloaded', () => {
 +    PDFViewerApplicationOptions.setAll({
 +        disablePreferences: true,
@@ -5844,20 +5847,70 @@ index 0000000000000000000000000000000000000000..883aa898608405f49a1ef2f74bf09e75
 +        enableSignatureEditor: false,
 +        enableSplitMerge: false,
 +        supportsIntegratedFind: false,
-+        supportsPrinting: false,
++        supportsPrinting: true,
 +        externalLinkTarget: 4,
 +        sidebarViewOnLoad: 0
 +    });
 +}, { once: true });
 diff --git a/Source/WebCore/Modules/pdfjs-extras/haiku/content-script.js b/Source/WebCore/Modules/pdfjs-extras/haiku/content-script.js
 new file mode 100644
-index 0000000000000000000000000000000000000000..1fcf3df99e86cc0b3741c0417dda4e49746c17d7
+index 0000000000000000000000000000000000000000..fabe8043823d63e494b0b79c93a04927083b1cf1
 --- /dev/null
 +++ b/Source/WebCore/Modules/pdfjs-extras/haiku/content-script.js
-@@ -0,0 +1,31 @@
+@@ -0,0 +1,81 @@
 +/* Copyright (C) 2026 air/OS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +// PDFJSDocument posts its already-authorized response bytes to this frame.
 +// No second fetch, no cross-origin proxy and no PDF-provided JavaScript.
++// Native printing renders only the requested pages, independently of the
++// visible viewer and PDF.js's synchronous print-service lifetime.
++(() => {
++    const jobs = new Map();
++    Object.defineProperty(window, 'summitPDFPrint', {value: Object.freeze({
++        async begin(token) {
++            const pdf = PDFViewerApplication.pdfDocument;
++            if (!pdf || !PDFViewerApplication.pdfViewer.printingAllowed || jobs.has(token))
++                throw new Error('This PDF is not ready for printing.');
++            const canvas = document.createElement('canvas');
++            canvas.id = token;
++            canvas.hidden = true;
++            document.body.append(canvas);
++            jobs.set(token, {pdf, canvas, task: null});
++            return pdf.numPages;
++        },
++        async render(token, number, maxWidth, maxHeight) {
++            const job = jobs.get(token);
++            if (!job || job.pdf !== PDFViewerApplication.pdfDocument || job.task)
++                throw new Error('The PDF changed while printing.');
++            const page = await job.pdf.getPage(number);
++            if (jobs.get(token) !== job)
++                throw new Error('Printing was cancelled.');
++            const natural = page.getViewport({scale: 1});
++            const viewport = page.getViewport({scale: Math.min(maxWidth / natural.width, maxHeight / natural.height)});
++            job.canvas.width = Math.max(1, Math.ceil(viewport.width));
++            job.canvas.height = Math.max(1, Math.ceil(viewport.height));
++            const context = job.canvas.getContext('2d', {alpha: false, willReadFrequently: true});
++            if (!context) throw new Error('The PDF print canvas could not be created.');
++            job.task = page.render({canvasContext: context, viewport, intent: 'print', annotationMode: 1});
++            try { await job.task.promise; }
++            finally { job.task = null; }
++            if (jobs.get(token) !== job || job.pdf !== PDFViewerApplication.pdfDocument)
++                throw new Error('The PDF changed while printing.');
++            return true;
++        },
++        release(token) {
++            const job = jobs.get(token);
++            if (!job) return;
++            jobs.delete(token);
++            job.task?.cancel();
++            job.canvas.width = job.canvas.height = 0;
++            job.canvas.remove();
++        }
++    })});
++    PDFViewerApplication.initializedPromise.then(() => {
++        window.print = window.summitNativePDFPrint;
++    });
++})();
++
 +window.addEventListener('message', event => {
 +    if (event.source !== window || !event.data || event.data.message !== 'open-pdf'
 +        || !(event.data.data instanceof ArrayBuffer)) return;
@@ -5888,13 +5941,13 @@ index 0000000000000000000000000000000000000000..1fcf3df99e86cc0b3741c0417dda4e49
 +});
 diff --git a/Source/WebCore/Modules/pdfjs-extras/haiku/style.css b/Source/WebCore/Modules/pdfjs-extras/haiku/style.css
 new file mode 100644
-index 0000000000000000000000000000000000000000..fc11d58359011913363661487800c8881b5abb1d
+index 0000000000000000000000000000000000000000..6d04dc37fb0fc9f820a19116f1ee3f6628dc41b7
 --- /dev/null
 +++ b/Source/WebCore/Modules/pdfjs-extras/haiku/style.css
 @@ -0,0 +1,15 @@
 +/* Copyright (C) 2026 air/OS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +/* Viewing, navigation, zoom, search and saving; editing is disabled in code. */
-+#openFile, #secondaryOpenFile, #printButton, #secondaryPrint,
++#openFile, #secondaryOpenFile,
 +#editorModeButtons, #editorModeSeparator, #editorUndoBar { display: none !important; }
 +#summit-pdf-error {
 +    box-sizing: border-box;
@@ -12681,7 +12734,7 @@ index d9eeaba6fb3ea26aa4364647e6be838d737f0064..bfbf4641e6873f156615dc62388d385c
      bool isValidFormat(OptionSet<DateTimeFormatValidationResults>) const final;
      String formatDateTimeFieldsState(const DateTimeFieldsState&) const final;
 diff --git a/Source/WebCore/html/PDFJSDocument.cpp b/Source/WebCore/html/PDFJSDocument.cpp
-index 5687e406392df54a0347dfe15637b733df318f3b..77650182a799e5cb82a516ac0ba82544d3f8e85e 100644
+index 5687e406392df54a0347dfe15637b733df318f3b..7aeba37ab8b4894bdc79b5657fa6392e5be2a247 100644
 --- a/Source/WebCore/html/PDFJSDocument.cpp
 +++ b/Source/WebCore/html/PDFJSDocument.cpp
 @@ -51,6 +51,9 @@
@@ -12694,11 +12747,16 @@ index 5687e406392df54a0347dfe15637b733df318f3b..77650182a799e5cb82a516ac0ba82544
  #include <wtf/TZoneMallocInlines.h>
  
  namespace WebCore {
-@@ -148,6 +151,18 @@ Ref<DocumentParser> PDFJSDocument::createParser()
+@@ -148,6 +151,23 @@ Ref<DocumentParser> PDFJSDocument::createParser()
      return PDFJSDocumentParser::create(*this);
  }
  
 +#if PLATFORM(HAIKU)
++LocalFrame* PDFJSDocument::viewerFrame() const
++{
++    return m_iframe ? dynamicDowncast<LocalFrame>(m_iframe->contentFrame()) : nullptr;
++}
++
 +static String pdfFilenameHaiku(PDFJSDocument& document)
 +{
 +    String filename;
@@ -12713,7 +12771,7 @@ index 5687e406392df54a0347dfe15637b733df318f3b..77650182a799e5cb82a516ac0ba82544
  void PDFJSDocument::createDocumentStructure()
  {
      // Description of parameters:
-@@ -158,6 +173,12 @@ void PDFJSDocument::createDocumentStructure()
+@@ -158,6 +178,12 @@ void PDFJSDocument::createDocumentStructure()
  
      frame()->injectUserScripts(UserScriptInjectionTime::DocumentStart);
  
@@ -12726,7 +12784,7 @@ index 5687e406392df54a0347dfe15637b733df318f3b..77650182a799e5cb82a516ac0ba82544
      Ref body = HTMLBodyElement::create(*this);
      body->setAttribute(styleAttr, "margin: 0px;height: 100vh;"_s);
      rootElement->appendChild(body);
-@@ -180,6 +201,11 @@ void PDFJSDocument::updateDuringParsing()
+@@ -180,6 +206,11 @@ void PDFJSDocument::updateDuringParsing()
  
  void PDFJSDocument::finishedParsing()
  {
@@ -12738,7 +12796,7 @@ index 5687e406392df54a0347dfe15637b733df318f3b..77650182a799e5cb82a516ac0ba82544
      ASSERT(m_iframe);
      m_isFinishedParsing = true;
      if (m_isContentScriptLoaded)
-@@ -194,6 +220,10 @@ void PDFJSDocument::postMessageToIframe(const String& name, JSC::JSObject* data)
+@@ -194,6 +225,10 @@ void PDFJSDocument::postMessageToIframe(const String& name, JSC::JSObject* data)
  
      JSC::JSObject* message = JSC::constructEmptyObject(globalObject);
      message->putDirect(vm, vm.propertyNames->message, JSC::jsNontrivialString(vm, name));
@@ -12749,7 +12807,7 @@ index 5687e406392df54a0347dfe15637b733df318f3b..77650182a799e5cb82a516ac0ba82544
      if (data)
          message->putDirect(vm, JSC::Identifier::fromString(vm, "data"_s), data);
  
-@@ -215,6 +245,16 @@ void PDFJSDocument::sendPDFArrayBuffer()
+@@ -215,6 +250,16 @@ void PDFJSDocument::sendPDFArrayBuffer()
  {
      auto* documentLoader = loader();
      ASSERT(documentLoader);
@@ -12766,7 +12824,7 @@ index 5687e406392df54a0347dfe15637b733df318f3b..77650182a799e5cb82a516ac0ba82544
      if (auto mainResourceData = documentLoader->mainResourceData()) {
          if (auto arrayBuffer = mainResourceData->tryCreateArrayBuffer()) {
              auto& vm = globalObject()->vm();
-@@ -223,6 +263,7 @@ void PDFJSDocument::sendPDFArrayBuffer()
+@@ -223,6 +268,7 @@ void PDFJSDocument::sendPDFArrayBuffer()
              postMessageToIframe("open-pdf"_s, dataObject);
          }
      }
@@ -12774,7 +12832,7 @@ index 5687e406392df54a0347dfe15637b733df318f3b..77650182a799e5cb82a516ac0ba82544
  }
  
  void PDFJSDocument::finishLoadingPDF()
-@@ -250,6 +291,8 @@ void PDFJSDocument::injectStyleAndContentScript()
+@@ -250,6 +296,8 @@ void PDFJSDocument::injectStyleAndContentScript()
      link->setAttribute(hrefAttr, "webkit-pdfjs-viewer://pdfjs/extras/cocoa/style.css"_s);
  #elif PLATFORM(GTK) || PLATFORM(WPE)
      link->setAttribute(hrefAttr, "webkit-pdfjs-viewer://pdfjs/extras/adwaita/style.css"_s);
@@ -12783,7 +12841,7 @@ index 5687e406392df54a0347dfe15637b733df318f3b..77650182a799e5cb82a516ac0ba82544
  #endif
      contentDocument->head()->appendChild(link);
  
-@@ -257,7 +300,11 @@ void PDFJSDocument::injectStyleAndContentScript()
+@@ -257,7 +305,11 @@ void PDFJSDocument::injectStyleAndContentScript()
      m_script = HTMLScriptElement::create(scriptTag, *contentDocument, false);
      ASSERT(m_listener);
      m_script->addEventListener(eventNames().loadEvent, *m_listener);
@@ -12795,6 +12853,20 @@ index 5687e406392df54a0347dfe15637b733df318f3b..77650182a799e5cb82a516ac0ba82544
      contentDocument->body()->appendChild(*m_script);
  
      m_injectedStyleAndScript = true;
+diff --git a/Source/WebCore/html/PDFJSDocument.h b/Source/WebCore/html/PDFJSDocument.h
+index a9fbbce2092bc854d3dd72e278353e3b7ca93530..a6d159d54154ee82b97eb1430420ddaf37aff32e 100644
+--- a/Source/WebCore/html/PDFJSDocument.h
++++ b/Source/WebCore/html/PDFJSDocument.h
+@@ -56,6 +56,9 @@ public:
+ 
+     bool isFinishedParsing() const { return m_isFinishedParsing; }
+     void setContentScriptLoaded(bool loaded) { m_isContentScriptLoaded = loaded; }
++#if PLATFORM(HAIKU)
++    WEBCORE_EXPORT LocalFrame* viewerFrame() const;
++#endif
+ 
+ private:
+     PDFJSDocument(LocalFrame&, const URL&);
 diff --git a/Source/WebCore/html/PermissionsPolicy.cpp b/Source/WebCore/html/PermissionsPolicy.cpp
 index 5d09d06405a00f502001362cffe9cae2d699b212..7332277ffe3be46dde15c1ebb2f54d36340f6024 100644
 --- a/Source/WebCore/html/PermissionsPolicy.cpp
@@ -75557,10 +75629,10 @@ index 0000000000000000000000000000000000000000..abdba4dff009ff314eecd9f825a128aa
 +} // namespace WebKit
 diff --git a/Source/WebKit/PlatformHaiku.cmake b/Source/WebKit/PlatformHaiku.cmake
 new file mode 100644
-index 0000000000000000000000000000000000000000..1640178cfebfd3d583866e12f71c83c21fb563ee
+index 0000000000000000000000000000000000000000..3954cf68a3f8e0bbc0b283c47a8692b42c8781ab
 --- /dev/null
 +++ b/Source/WebKit/PlatformHaiku.cmake
-@@ -0,0 +1,508 @@
+@@ -0,0 +1,509 @@
 +include(Headers.cmake)
 +include(Platform/Curl.cmake)
 +
@@ -75705,6 +75777,7 @@ index 0000000000000000000000000000000000000000..1640178cfebfd3d583866e12f71c83c2
 +    WebProcess/Extensions/Bindings/JSWebExtensionWrapper.cpp
 +    WebProcess/InjectedBundle/haiku/InjectedBundleHaiku.cpp
 +    WebProcess/WebPage/haiku/WebPageHaiku.cpp
++    WebProcess/WebPage/haiku/PDFPrintingHaiku.cpp
 +    WebProcess/haiku/WebProcessDiagnosticsHaiku.cpp
 +    WebProcess/haiku/WebProcessHaiku.cpp
 +    WebProcess/haiku/WebProcessMainHaiku.cpp
@@ -86813,10 +86886,10 @@ index 0000000000000000000000000000000000000000..0447a557fdc236517af3f367f36226fb
 +}
 diff --git a/Source/WebKit/UIProcess/API/haiku/WebKitView.h b/Source/WebKit/UIProcess/API/haiku/WebKitView.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..152e1fdbc7287bed3d00a9f4ecfec0552112f22f
+index 0000000000000000000000000000000000000000..fdf8b216e22c9e81f768f4b040fe1933a5951118
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/API/haiku/WebKitView.h
-@@ -0,0 +1,422 @@
+@@ -0,0 +1,427 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#pragma once
@@ -86979,7 +87052,8 @@ index 0000000000000000000000000000000000000000..152e1fdbc7287bed3d00a9f4ecfec055
 +    // The pointer moved on to or off a link. Fields: "view", "url" (empty when
 +    // it left the link), optional "title".
 +    B_WEBKIT_LINK_HOVERED = 'wlhv',
-+    // The page called window.print(). Fields: "view", "main_frame" (bool).
++    // The page called window.print(). Fields: "view", "main_frame" (bool),
++    // "frame_identifier", "generation" (uint64, requesting frame/load).
 +    B_WEBKIT_PRINT_REQUESTED = 'wprq',
 +    // The answer to DrawPagesForPrinting: "identifier" (uint64), "pageCount"
 +    // (int32, every page of the layout), "first" (int32), and either "pdf"
@@ -87092,6 +87166,10 @@ index 0000000000000000000000000000000000000000..152e1fdbc7287bed3d00a9f4ecfec055
 +    // B_WEBKIT_PRINT_PAGES to reply. Any thread.
 +    void DrawPagesForPrinting(BMessenger reply, uint64 identifier, float paperWidth, float paperHeight,
 +        BRect margins, float scale, uint32 first, uint32 count, float rasterScale, bool backgrounds);
++    // As above, for the frame from B_WEBKIT_PRINT_REQUESTED (0 = main frame).
++    // Reject a changed load generation (0 = current generation).
++    void DrawFramePagesForPrinting(BMessenger reply, uint64 identifier, uint64 frameIdentifier, uint64 expectedGeneration,
++        float paperWidth, float paperHeight, BRect margins, float scale, uint32 first, uint32 count, float rasterScale, bool backgrounds);
 +    // Picture in Picture: the page's <video data-summit-pip="token"> (a
 +    // number; in any frame) sends its pictures, fitted into size, to target.
 +    // The video gets enterpictureinpicture and, when it ends,
@@ -87241,10 +87319,10 @@ index 0000000000000000000000000000000000000000..152e1fdbc7287bed3d00a9f4ecfec055
 +};
 diff --git a/Source/WebKit/UIProcess/API/haiku/WebKitViewEmbedding.cpp b/Source/WebKit/UIProcess/API/haiku/WebKitViewEmbedding.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..ffff468c5270958ddb1ce347711cc1a26847ba32
+index 0000000000000000000000000000000000000000..e9940106cf29d8eae8140742945e6eba4ce5fde5
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/API/haiku/WebKitViewEmbedding.cpp
-@@ -0,0 +1,1028 @@
+@@ -0,0 +1,1044 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +// BWebKitView's embedding interfaces (WebKitEmbedding.h): user scripts,
@@ -87614,23 +87692,34 @@ index 0000000000000000000000000000000000000000..ffff468c5270958ddb1ce347711cc1a2
 +void BWebKitView::DrawPagesForPrinting(BMessenger reply, uint64 identifier, float paperWidth, float paperHeight,
 +    BRect margins, float scale, uint32 first, uint32 count, float rasterScale, bool backgrounds)
 +{
++    DrawFramePagesForPrinting(reply, identifier, 0, 0, paperWidth, paperHeight, margins, scale, first, count, rasterScale, backgrounds);
++}
++
++void BWebKitView::DrawFramePagesForPrinting(BMessenger reply, uint64 identifier, uint64 frameIdentifier, uint64 expectedGeneration,
++    float paperWidth, float paperHeight, BRect margins, float scale, uint32 first, uint32 count, float rasterScale, bool backgrounds)
++{
 +    auto fail = [reply, identifier](const char* error) mutable {
 +        BMessage message(B_WEBKIT_PRINT_PAGES);
 +        message.AddUInt64("identifier", identifier);
 +        message.AddString("error", error);
 +        reply.SendMessage(&message, static_cast<BHandler*>(nullptr), 0);
 +    };
-+    if (m_status != B_OK || !(paperWidth > 0) || !(paperHeight > 0) || !(scale > 0)) {
++    if (m_status != B_OK || !count || !(paperWidth > 0) || !(paperHeight > 0) || !(scale > 0)
++        || !std::isfinite(paperWidth) || !std::isfinite(paperHeight) || !std::isfinite(scale) || !std::isfinite(rasterScale)
++        || !std::isfinite(margins.left) || !std::isfinite(margins.top) || !std::isfinite(margins.right) || !std::isfinite(margins.bottom)
++        || (frameIdentifier && !FrameIdentifier::isValidIdentifier(frameIdentifier))) {
 +        fail("The page cannot be printed");
 +        return;
 +    }
-+    WTF::RunLoop::mainSingleton().dispatch([state = m_state, reply, identifier, paperWidth, paperHeight, margins, scale, first, count, rasterScale, backgrounds, fail]() mutable {
++    WTF::RunLoop::mainSingleton().dispatch([state = m_state, reply, identifier, frameIdentifier, expectedGeneration, paperWidth, paperHeight, margins, scale, first, count, rasterScale, backgrounds, fail]() mutable {
 +        auto* page = pageHaiku(state);
-+        RefPtr frame = page ? page->mainFrame() : nullptr;
-+        if (!page || !frame || !page->hasRunningProcess()) {
++        RefPtr frame = frameIdentifier ? WebFrameProxy::webFrame(FrameIdentifier { frameIdentifier }) : (page ? page->mainFrame() : nullptr);
++        if (!page || !frame || frame->page() != page || !page->hasRunningProcess() || state->load.pending
++            || (expectedGeneration && state->load.generation != expectedGeneration)) {
 +            fail("The page cannot be printed");
 +            return;
 +        }
++        const auto generation = state->load.generation;
 +        // Points to CSS pixels: the web process lays pages out in pixels.
 +        constexpr float pixelsPerPoint = 96.0f / 72.0f;
 +        const float left = std::max(0.0f, margins.left), top = std::max(0.0f, margins.top);
@@ -87641,8 +87730,13 @@ index 0000000000000000000000000000000000000000..ffff468c5270958ddb1ce347711cc1a2
 +        info.availablePaperHeight = std::max(36.0f, paperHeight - top - bottom) * pixelsPerPoint / scale;
 +        info.margin = WebCore::FloatBoxExtent(top * pixelsPerPoint / scale, right * pixelsPerPoint / scale,
 +            bottom * pixelsPerPoint / scale, left * pixelsPerPoint / scale);
-+        protect(page->legacyMainFrameProcess())->sendWithAsyncReply(Messages::WebPage::DrawPagesForPrintingHaiku(frame->frameID(), info, first, count, rasterScale, backgrounds),
-+            [reply, identifier, first, rasterScale, fail](std::optional<WebCore::SharedMemory::Handle>&& handle, uint32_t pageCount, WebCore::IntSize size) mutable {
++        Ref process = frame->process();
++        process->sendWithAsyncReply(Messages::WebPage::DrawPagesForPrintingHaiku(frame->frameID(), info, first, count, rasterScale, backgrounds),
++            [state, generation, reply, identifier, first, rasterScale, fail](std::optional<WebCore::SharedMemory::Handle>&& handle, uint32_t pageCount, WebCore::IntSize size) mutable {
++                if (state->closed || state->load.pending || state->load.generation != generation) {
++                    fail("The document changed while printing");
++                    return;
++                }
 +                RefPtr memory = handle ? WebCore::SharedMemory::map(WTF::move(*handle), WebCore::SharedMemory::Protection::ReadOnly) : nullptr;
 +                if (!memory) {
 +                    if (pageCount && first >= pageCount) {
@@ -87671,7 +87765,7 @@ index 0000000000000000000000000000000000000000..ffff468c5270958ddb1ce347711cc1a2
 +                        message.AddData("page", B_RAW_TYPE, bytes.data() + offset, pageBytes, false);
 +                }
 +                reply.SendMessage(&message, static_cast<BHandler*>(nullptr), 0);
-+            }, page->webPageIDInMainFrameProcess());
++            }, page->webPageIDInProcess(process));
 +    });
 +}
 +
@@ -118528,10 +118622,10 @@ index 0000000000000000000000000000000000000000..c9a119d02f85b7c5ad8fe9153bfc9604
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/WebView.cpp b/Source/WebKit/UIProcess/haiku/WebView.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..e88d7e0ac211fa70e3bccbfe5b4790001dd136ee
+index 0000000000000000000000000000000000000000..c82191437ac14a49af030cb514522237807c3a9b
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/WebView.cpp
-@@ -0,0 +1,3079 @@
+@@ -0,0 +1,3081 @@
 +/*
 + * Copyright (C) 2013 Intel Corporation. All rights reserved.
 + *
@@ -119779,6 +119873,8 @@ index 0000000000000000000000000000000000000000..e88d7e0ac211fa70e3bccbfe5b479000
 +        if (auto state = m_state.lock(); state && !state->closed && m_hostsNewPages) {
 +            BMessage message(B_WEBKIT_PRINT_REQUESTED);
 +            message.AddBool("main_frame", frame.isMainFrame());
++            message.AddUInt64("frame_identifier", frame.frameID().toUInt64());
++            message.AddUInt64("generation", state->load.generation);
 +            sendToHostHaiku(state, message);
 +        }
 +        completion();
@@ -149082,6 +149178,284 @@ index 0000000000000000000000000000000000000000..0a859b269a8f116614dff645d60315b9
 +} // namespace WebKit
 +
 +#endif // USE(TEXTURE_MAPPER)
+diff --git a/Source/WebKit/WebProcess/WebPage/haiku/PDFPrintingHaiku.cpp b/Source/WebKit/WebProcess/WebPage/haiku/PDFPrintingHaiku.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..d8b93a6f24b7a0a71ee3c0df6db28cc5439bfb83
+--- /dev/null
++++ b/Source/WebKit/WebProcess/WebPage/haiku/PDFPrintingHaiku.cpp
+@@ -0,0 +1,252 @@
++#include "config.h"
++#if ENABLE(PDFJS)
++#include "PDFPrintingHaiku.h"
++
++#include "PrintInfo.h"
++#include <JavaScriptCore/JSLock.h>
++#include <WebCore/CommonVM.h>
++#include <WebCore/DOMWrapperWorld.h>
++#include <WebCore/DocumentPage.h>
++#include <WebCore/FrameDestructionObserverInlines.h>
++#include <WebCore/HTMLCanvasElement.h>
++#include <WebCore/JSDOMBinding.h>
++#include <WebCore/LocalFrame.h>
++#include <WebCore/LocalFrameInlines.h>
++#include <WebCore/NativeImage.h>
++#include <WebCore/PDFJSDocument.h>
++#include <WebCore/RunJavaScriptParameters.h>
++#include <WebCore/ScriptController.h>
++#include <WebCore/SharedBuffer.h>
++#include <skia/core/SkCanvas.h>
++#include <skia/core/SkImage.h>
++#include <skia/core/SkStream.h>
++#include <skia/core/SkSurface.h>
++#include <skia/docs/SkPDFDocument.h>
++#include <skia/docs/SkPDFJpegHelpers.h>
++#include <wtf/RunLoop.h>
++#include <wtf/text/MakeString.h>
++#include <cmath>
++#include <memory>
++
++namespace WebKit {
++using namespace WebCore;
++
++namespace {
++// The viewer already owns the authorized/decrypted PDF. Render one requested
++// page at a time in its private canvas, without changing the visible viewer or
++// depending on PDF.js's synchronous window.print service. Only the bundled
++// viewer executes these scripts; no PDF content is evaluated as JavaScript.
++class PDFPrintJob : public std::enable_shared_from_this<PDFPrintJob> {
++public:
++    using Completion = CompletionHandler<void(std::optional<SharedMemoryHandle>&&, uint32_t, IntSize)>;
++
++    PDFPrintJob(PDFJSDocument& document, const PrintInfo& info, uint32_t first, uint32_t count, float rasterScale, Completion&& completion)
++        : m_document(&document)
++        , m_frame(document.viewerFrame())
++        , m_viewer(m_frame ? m_frame->document() : nullptr)
++        , m_first(first), m_count(count), m_next(first), m_rasterScale(rasterScale)
++        , m_completion(WTF::move(completion))
++    {
++        static uint64_t nextToken;
++        m_token = makeString("summit-native-print-"_s, ++nextToken);
++        const double points = 0.75 * info.pageSetupScaleFactor;
++        m_width = (info.availablePaperWidth + info.margin.left() + info.margin.right()) * points;
++        m_height = (info.availablePaperHeight + info.margin.top() + info.margin.bottom()) * points;
++        m_left = info.margin.left() * points;
++        m_top = info.margin.top() * points;
++        m_contentWidth = info.availablePaperWidth * points;
++        m_contentHeight = info.availablePaperHeight * points;
++    }
++
++    void start()
++    {
++        m_timer = std::make_unique<RunLoop::Timer>(RunLoop::mainSingleton(), "PDFPrintJob timeout"_s, [weak = weak_from_this()] {
++            if (auto job = weak.lock())
++                job->finish(false);
++        });
++        if (!isCurrent() || !m_count || !validSize(m_width, m_height) || !validSize(m_contentWidth, m_contentHeight)
++            || !std::isfinite(m_rasterScale)) {
++            finish(false);
++            return;
++        }
++        evaluate(makeString("return window.summitPDFPrint.begin('"_s, m_token, "');"_s), [self = shared_from_this()](ValueOrException result) {
++            if (!self->m_completion)
++                return;
++            if (!self->isCurrent() || !result || !result->isNumber() || result->asNumber() < 1 || result->asNumber() > INT_MAX
++                || result->asNumber() != std::floor(result->asNumber())) {
++                self->finish(false);
++                return;
++            }
++            self->m_pageCount = result->asNumber();
++            if (self->m_first >= self->m_pageCount) {
++                self->finish(true);
++                return;
++            }
++            self->m_end = self->m_first + std::min(self->m_count, self->m_pageCount - self->m_first);
++            if (!self->prepareOutput()) {
++                self->finish(false);
++                return;
++            }
++            self->renderNext();
++        });
++    }
++
++private:
++    static bool validSize(double width, double height)
++    {
++        return std::isfinite(width) && std::isfinite(height) && width > 0 && height > 0 && width <= 32768 && height <= 32768;
++    }
++
++    bool isCurrent() const
++    {
++        return m_document && m_document->frame() && m_document->frame()->page()
++            && m_document->frame()->document() == m_document && m_document->viewerFrame() == m_frame
++            && m_frame && m_viewer && m_frame->document() == m_viewer
++            && m_viewer->url().protocolIs("webkit-pdfjs-viewer"_s);
++    }
++
++    void evaluate(String&& source, CompletionHandler<void(ValueOrException)>&& callback)
++    {
++        m_timer->startOneShot(30_s);
++        JSC::JSLockHolder lock(commonVM());
++        WebCore::RunJavaScriptParameters parameters { WTF::move(source), JSC::SourceTaintedOrigin::Untainted, { },
++            RunAsAsyncFunction::Yes, ArgumentMap { }, ForceUserGesture::No, RemoveTransientActivation::No };
++        m_frame->script().executeAsynchronousUserAgentScriptInWorld(mainThreadNormalWorldSingleton(), WTF::move(parameters), WTF::move(callback));
++    }
++
++    bool prepareOutput()
++    {
++        const double outputScale = m_rasterScale > 0 ? m_rasterScale : 1;
++        if (!validSize(m_width * outputScale, m_height * outputScale))
++            return false;
++        m_size = IntSize(std::ceil(m_width * outputScale), std::ceil(m_height * outputScale));
++        m_renderScale = m_rasterScale > 0 ? m_rasterScale : 200.0 / 72;
++        const double renderWidth = std::ceil(m_contentWidth * m_renderScale);
++        const double renderHeight = std::ceil(m_contentHeight * m_renderScale);
++        if (!validSize(renderWidth, renderHeight) || renderWidth * renderHeight * 4 > (64u << 20))
++            return false;
++        if (m_rasterScale > 0) {
++            m_pageBytes = static_cast<size_t>(m_size.width()) * m_size.height() * 4;
++            if (m_pageBytes > (512u << 20) / (m_end - m_first))
++                return false;
++            m_memory = SharedMemory::allocate(m_pageBytes * (m_end - m_first));
++            return !!m_memory;
++        }
++        SkPDF::Metadata metadata;
++        auto title = m_document->title().utf8();
++        metadata.fTitle = SkString(title.legacyCStringPointer());
++        metadata.fCreator = SkString("Summit");
++        metadata.jpegDecoder = SkPDF::JPEG::Decode;
++        metadata.jpegEncoder = SkPDF::JPEG::Encode;
++        m_pdf = SkPDF::MakeDocument(&m_stream, metadata);
++        return !!m_pdf;
++    }
++
++    void renderNext()
++    {
++        if (!isCurrent()) {
++            finish(false);
++            return;
++        }
++        evaluate(makeString("return window.summitPDFPrint.render('"_s, m_token, "',"_s, m_next + 1, ","_s,
++            static_cast<unsigned>(std::ceil(m_contentWidth * m_renderScale)), ","_s,
++            static_cast<unsigned>(std::ceil(m_contentHeight * m_renderScale)), ");"_s), [self = shared_from_this()](ValueOrException result) {
++            if (!self->m_completion)
++                return;
++            if (!self->isCurrent() || !result || !result->isTrue() || !self->copyPage()) {
++                self->finish(false);
++                return;
++            }
++            if (++self->m_next == self->m_end)
++                self->finish(true);
++            else
++                self->renderNext();
++        });
++    }
++
++    bool copyPage()
++    {
++        RefPtr canvasElement = dynamicDowncast<HTMLCanvasElement>(m_viewer->getElementById(AtomString(m_token)));
++        RefPtr image = canvasElement ? canvasElement->copyNativeImage() : nullptr;
++        if (!image || !image->platformImage())
++            return false;
++        auto native = image->platformImage();
++        const double fit = std::min(m_contentWidth / native->width(), m_contentHeight / native->height());
++        const float width = native->width() * fit, height = native->height() * fit;
++        const auto destination = SkRect::MakeXYWH(m_left + (m_contentWidth - width) / 2, m_top + (m_contentHeight - height) / 2, width, height);
++        sk_sp<SkSurface> surface;
++        SkCanvas* canvas;
++        if (m_rasterScale > 0) {
++            surface = SkSurfaces::WrapPixels(SkImageInfo::MakeN32Premul(m_size.width(), m_size.height()),
++                m_memory->mutableSpan().subspan(m_pageBytes * (m_next - m_first)).data(), m_size.width() * 4);
++            if (!surface)
++                return false;
++            canvas = surface->getCanvas();
++            canvas->clear(SK_ColorWHITE);
++            canvas->scale(m_rasterScale, m_rasterScale);
++        } else {
++            canvas = m_pdf->beginPage(m_width, m_height);
++            if (!canvas)
++                return false;
++        }
++        canvas->drawImageRect(native, destination, SkSamplingOptions(SkFilterMode::kLinear));
++        if (m_pdf)
++            m_pdf->endPage();
++        // Bound the accumulated PDF stream as well as each rendered canvas.
++        return m_stream.bytesWritten() <= (512u << 20);
++    }
++
++    void finish(bool success)
++    {
++        if (!m_completion)
++            return;
++        auto completion = WTF::move(m_completion);
++        if (m_timer)
++            m_timer->stop();
++        std::optional<SharedMemoryHandle> handle;
++        if (success && m_pdf) {
++            m_pdf->close();
++            if (m_stream.bytesWritten() <= (512u << 20)) {
++                auto data = SharedBuffer::create(m_stream.detachAsData());
++                m_memory = SharedMemory::copyBuffer(data.get());
++            }
++        }
++        if (success && m_memory)
++            handle = m_memory->createHandle(SharedMemory::Protection::ReadOnly);
++        if (isCurrent()) {
++            JSC::JSLockHolder lock(commonVM());
++            WebCore::RunJavaScriptParameters parameters { makeString("window.summitPDFPrint?.release('"_s, m_token, "');"_s),
++                JSC::SourceTaintedOrigin::Untainted, { }, RunAsAsyncFunction::No, std::nullopt, ForceUserGesture::No, RemoveTransientActivation::No };
++            m_frame->script().executeAsynchronousUserAgentScriptInWorld(mainThreadNormalWorldSingleton(), WTF::move(parameters), [](ValueOrException) { });
++        }
++        m_pdf = nullptr;
++        m_memory = nullptr;
++        m_document = nullptr;
++        m_viewer = nullptr;
++        m_frame = nullptr;
++        completion(WTF::move(handle), success ? m_pageCount : 0, m_size);
++    }
++
++    RefPtr<PDFJSDocument> m_document;
++    RefPtr<LocalFrame> m_frame;
++    RefPtr<Document> m_viewer;
++    String m_token;
++    uint32_t m_first, m_count, m_next, m_end { 0 }, m_pageCount { 0 };
++    float m_rasterScale;
++    double m_width, m_height, m_left, m_top, m_contentWidth, m_contentHeight, m_renderScale { 1 };
++    IntSize m_size;
++    size_t m_pageBytes { 0 };
++    RefPtr<SharedMemory> m_memory;
++    SkDynamicMemoryWStream m_stream;
++    sk_sp<SkDocument> m_pdf;
++    Completion m_completion;
++    std::unique_ptr<RunLoop::Timer> m_timer;
++};
++}
++
++void drawPDFPagesForPrintingHaiku(PDFJSDocument& document, const PrintInfo& info, uint32_t first, uint32_t count, float rasterScale, PDFPrintJob::Completion&& completion)
++{
++    std::make_shared<PDFPrintJob>(document, info, first, count, rasterScale, WTF::move(completion))->start();
++}
++}
++#endif // ENABLE(PDFJS)
+diff --git a/Source/WebKit/WebProcess/WebPage/haiku/PDFPrintingHaiku.h b/Source/WebKit/WebProcess/WebPage/haiku/PDFPrintingHaiku.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..8cb39ec913ad47863aa235c0418fa6d18b8de811
+--- /dev/null
++++ b/Source/WebKit/WebProcess/WebPage/haiku/PDFPrintingHaiku.h
+@@ -0,0 +1,14 @@
++#pragma once
++
++#include <WebCore/IntSize.h>
++#include <WebCore/SharedMemory.h>
++#include <wtf/CompletionHandler.h>
++
++namespace WebCore { class PDFJSDocument; }
++
++namespace WebKit {
++struct PrintInfo;
++
++void drawPDFPagesForPrintingHaiku(WebCore::PDFJSDocument&, const PrintInfo&, uint32_t first, uint32_t count, float rasterScale,
++    CompletionHandler<void(std::optional<WebCore::SharedMemoryHandle>&&, uint32_t, WebCore::IntSize)>&&);
++}
 diff --git a/Source/WebKit/WebProcess/WebPage/haiku/WebInspectorHaiku.cpp b/Source/WebKit/WebProcess/WebPage/haiku/WebInspectorHaiku.cpp
 new file mode 100644
 index 0000000000000000000000000000000000000000..7459ce25f180160a1c12431c73926a1f023968e2
@@ -149148,10 +149522,10 @@ index 0000000000000000000000000000000000000000..7459ce25f180160a1c12431c73926a1f
 +
 diff --git a/Source/WebKit/WebProcess/WebPage/haiku/WebPageHaiku.cpp b/Source/WebKit/WebProcess/WebPage/haiku/WebPageHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..fa653ec792568be1f8f5abd60c4ac11c6f870b9f
+index 0000000000000000000000000000000000000000..b0d2148b1d326e34fa51891e3b3768e0b12cafbf
 --- /dev/null
 +++ b/Source/WebKit/WebProcess/WebPage/haiku/WebPageHaiku.cpp
-@@ -0,0 +1,512 @@
+@@ -0,0 +1,531 @@
 +/*
 + * Copyright (C) 2014 Haiku, inc.
 + *
@@ -149182,6 +149556,7 @@ index 0000000000000000000000000000000000000000..fa653ec792568be1f8f5abd60c4ac11c
 +#include "EditingCommandsHaiku.h"
 +#include "StartupTraceHaiku.h"
 +#include "PrintInfo.h"
++#include "PDFPrintingHaiku.h"
 +#include "WebFrame.h"
 +#include "WebProcess.h"
 +
@@ -149196,6 +149571,7 @@ index 0000000000000000000000000000000000000000..fa653ec792568be1f8f5abd60c4ac11c
 +#include <WebCore/LocalFrameInlines.h>
 +#include <WebCore/NotImplemented.h>
 +#include <WebCore/Page.h>
++#include <WebCore/PDFJSDocument.h>
 +#include <WebCore/PlatformKeyboardEvent.h>
 +#include <WebCore/Settings.h>
 +#include <WebCore/UserAgent.h>
@@ -149495,6 +149871,23 @@ index 0000000000000000000000000000000000000000..fa653ec792568be1f8f5abd60c4ac11c
 +        completion(std::nullopt, 0, { });
 +        return;
 +    }
++#if ENABLE(PDFJS)
++    RefPtr webFrame = WebProcess::singleton().webFrame(frameID);
++    RefPtr frame = webFrame ? webFrame->coreLocalFrame() : nullptr;
++    RefPtr document = frame ? frame->document() : nullptr;
++    RefPtr pdf = dynamicDowncast<PDFJSDocument>(document);
++    if (!pdf && frame) {
++        // The PDF toolbar calls window.print from the bundled viewer iframe.
++        RefPtr parent = dynamicDowncast<LocalFrame>(frame->tree().parent());
++        if (RefPtr parentPDF = parent ? dynamicDowncast<PDFJSDocument>(parent->document()) : nullptr;
++            parentPDF && parentPDF->viewerFrame() == frame)
++            pdf = WTF::move(parentPDF);
++    }
++    if (pdf) {
++        drawPDFPagesForPrintingHaiku(*pdf, printInfo, first, count, rasterScale, WTF::move(completion));
++        return;
++    }
++#endif
 +    // PrintInfo holds the paper's printable area and margins in CSS pixels
 +    // (the host converts its points), so that pages are laid out as wide as
 +    // in other browsers; pages are drawn on paper measured in points.
