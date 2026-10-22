@@ -109,3 +109,31 @@ The popup shell's **Try again** step remains part of the observed public flow;
 this change does not alter popup handling. The native screen blanker made the
 available screenshot black, so page and native-control observations, rather
 than that screenshot, support the baseline findings.
+
+## Camera preview stuck: `screen.orientation` (23 October 2026)
+
+On the Framework laptop (its Realtek laptop camera) with the `20261022.2026`
+build, `zoom.us/test` → **Join from browser** → **Try again** opened the
+prejoin page, which asked for the camera and microphone. After **Allow** the
+microphone worked but the camera button kept spinning and no preview
+appeared. The page's console showed `Unhandled Promise Rejection: TypeError:
+undefined is not an object (evaluating 'screen.orientation.type')` from
+`js_media.min.js`: Zoom's camera start reads `screen.orientation`, and the
+Screen Orientation API was off on Haiku (`defaultShouldEnableScreenOrientationAPI`
+returned false outside Apple platforms).
+
+Defining `screen.orientation` before the page's scripts ran (an inspector
+bootstrap script reporting `landscape-primary`, angle 0) made the preview
+appear at once. The engine now enables the API on Haiku: a desktop reports
+`landscape-primary`, as on the Mac, and `lock()` stays unavailable.
+
+Two notes for retests:
+
+- The web-app shell opens the meeting with `window.open` while it loads, which
+  the pop-up blocker stops (Chrome blocks it as well; the click that led there
+  was on the previous page). Zoom's **Try again**, Summit's **Open Pop-up** or
+  **Always Allow** for `app.zoom.us` open it.
+- After the fix the console still showed `TypeError: null is not an object
+  (evaluating 'bh.Update_SelfVideo_Texture')` repeated from a worker, although
+  the preview played. Whether it affects sending video in a meeting is not
+  established.
