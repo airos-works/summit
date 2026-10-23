@@ -39,6 +39,7 @@
 #include <ControlLook.h>
 #include <Screen.h>
 #include <Application.h>
+#include <atomic>
 #include <CardLayout.h>
 #include <Entry.h>
 #include <FilePanel.h>
@@ -589,6 +590,19 @@ std::atomic<int32> sOpenWindows { 0 };
 }
 int32 BrowserWindow::CountOpenWindows() { return sOpenWindows.load(); }
 
+#if SUMMIT_MODERN_WEBKIT
+// View › Caret Browsing: shared by every window, not saved (#118).
+static std::atomic<bool> sCaretBrowsing { false };
+
+static void ApplyCaretBrowsing(BWebKitView* view)
+{
+    if (!view) return;
+    BMessage settings;
+    settings.AddBool("caretBrowsing", sCaretBrowsing);
+    view->SetPageSettings(settings);
+}
+#endif
+
 static BRect DefaultWindowFrame(const BrowserWindowOptions& options)
 {
     BRect frame = options.frame.IsValid() ? options.frame
@@ -750,6 +764,10 @@ BrowserWindow::BrowserWindow(std::shared_ptr<SharedProfile> profile, std::string
     AddShortcut('+', B_SHIFT_KEY, new BMessage(kZoomIn));
     AddShortcut('=', 0, new BMessage(kZoomIn));
 #if SUMMIT_MODERN_WEBKIT
+    // F7, as in Firefox and Chrome; a menu shortcut cannot be a function key.
+    fCaretBrowsingItem = new BMenuItem("Caret Browsing (F7)", new BMessage(kToggleCaretBrowsing));
+    fCaretBrowsingItem->SetMarked(sCaretBrowsing);
+    view->AddItem(fCaretBrowsingItem);
     view->AddSeparatorItem();
     AddItem(view, "View Page Source", kViewPageSource, 'U');
     AddItem(view, "Picture in Picture", kPictureInPicture, 'P', B_SHIFT_KEY);
@@ -1270,6 +1288,7 @@ void BrowserWindow::CreateTab(const std::string& input, bool select, BWebView* a
         fail("Could not create the web page: " + std::string(std::strerror(status)));
         return;
     }
+    if (sCaretBrowsing) ApplyCaretBrowsing(webView);
 #else
     auto* webView = adopted ? adopted : new BWebView("web-page");
 #endif
@@ -2454,6 +2473,12 @@ void BrowserWindow::DispatchMessage(BMessage* message, BHandler* handler)
         // (a link, or a full-screen button, needed a second click, #95). The
         // button is down until its mouse-up.
         message->ReplaceInt32("buttons", fMouseButtons);
+    }
+    if (message && message->what == B_KEY_DOWN && message->GetString("bytes", "")[0] == B_FUNCTION_KEY
+        && message->GetInt32("key", 0) == B_F7_KEY
+        && !(message->GetInt32("modifiers", 0) & (B_SHIFT_KEY | B_COMMAND_KEY | B_CONTROL_KEY | B_OPTION_KEY))) {
+        PostMessage(kToggleCaretBrowsing);
+        return;
     }
     if (fFullScreenTab && message && message->what == B_KEY_DOWN
         && message->GetString("bytes", "")[0] == B_ESCAPE) {
@@ -4026,6 +4051,19 @@ void BrowserWindow::MessageReceived(BMessage* message)
             break;
         }
         case kSpellingCommand: SpellingCommand(*message); break;
+#if SUMMIT_MODERN_WEBKIT
+        case kToggleCaretBrowsing:
+            // One setting for the whole browser, for this session (#118).
+            sCaretBrowsing = !sCaretBrowsing;
+            for (int32 i = 0; BWindow* window = be_app->WindowAt(i); ++i) {
+                if (dynamic_cast<BrowserWindow*>(window)) window->PostMessage(kApplyCaretBrowsing);
+            }
+            break;
+        case kApplyCaretBrowsing:
+            for (auto& tab : fTabs) ApplyCaretBrowsing(tab.view);
+            if (fCaretBrowsingItem) fCaretBrowsingItem->SetMarked(sCaretBrowsing);
+            break;
+#endif
         case kToggleZoomTextOnly:
             fShared->Change([](Profile& profile) -> uint32 {
                 profile.zoomTextOnly = !profile.zoomTextOnly;

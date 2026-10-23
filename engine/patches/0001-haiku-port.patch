@@ -88423,10 +88423,10 @@ index 0000000000000000000000000000000000000000..cfed966ea3a8d84ec0317ee4a924ece3
 +}
 diff --git a/Source/WebKit/UIProcess/API/haiku/WebKitView.h b/Source/WebKit/UIProcess/API/haiku/WebKitView.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..02d8ef97eca4e210651076dec1248230da1ddccb
+index 0000000000000000000000000000000000000000..ae8c931461d97da0c19756483f2a06a745b140c4
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/API/haiku/WebKitView.h
-@@ -0,0 +1,439 @@
+@@ -0,0 +1,440 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#pragma once
@@ -88769,7 +88769,8 @@ index 0000000000000000000000000000000000000000..02d8ef97eca4e210651076dec1248230
 +    // standardFont, serifFont, sansSerifFont, fixedFont (nonempty UTF-8 strings),
 +    // standardFontSize, fixedFontSize (int32 CSS pixels, 1..512),
 +    // javascriptEnabled (bool), userAgent (UTF-8 string; empty restores the
-+    // engine default). Unknown fields, wrong types and invalid values reject
++    // engine default), minimumFontSize (int32 CSS pixels, 0..72; 0 is none),
++    // caretBrowsing (bool: a movable caret in page text). Unknown fields, wrong types and invalid values reject
 +    // the whole update. B_OK means queued; a closed view ignores it. Any thread.
 +    // Disabling JavaScript affects page scripts; host inspection remains available.
 +    status_t SetPageSettings(const BMessage&);
@@ -88868,10 +88869,10 @@ index 0000000000000000000000000000000000000000..02d8ef97eca4e210651076dec1248230
 +};
 diff --git a/Source/WebKit/UIProcess/API/haiku/WebKitViewEmbedding.cpp b/Source/WebKit/UIProcess/API/haiku/WebKitViewEmbedding.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..79138d7686f68ab292991a1fb0da994de47d6cde
+index 0000000000000000000000000000000000000000..cd970d4f228410089c358a0537e061122afb2fb5
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/API/haiku/WebKitViewEmbedding.cpp
-@@ -0,0 +1,1076 @@
+@@ -0,0 +1,1082 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +// BWebKitView's embedding interfaces (WebKitEmbedding.h): user scripts,
@@ -89644,7 +89645,8 @@ index 0000000000000000000000000000000000000000..79138d7686f68ab292991a1fb0da994d
 +        { "standardFont", B_STRING_TYPE }, { "serifFont", B_STRING_TYPE },
 +        { "sansSerifFont", B_STRING_TYPE }, { "fixedFont", B_STRING_TYPE },
 +        { "standardFontSize", B_INT32_TYPE }, { "fixedFontSize", B_INT32_TYPE },
-+        { "javascriptEnabled", B_BOOL_TYPE }, { "userAgent", B_STRING_TYPE }
++        { "javascriptEnabled", B_BOOL_TYPE }, { "userAgent", B_STRING_TYPE },
++        { "minimumFontSize", B_INT32_TYPE }, { "caretBrowsing", B_BOOL_TYPE }
 +    };
 +    int32 supplied = 0;
 +    for (const auto& field : fields) {
@@ -89661,7 +89663,8 @@ index 0000000000000000000000000000000000000000..79138d7686f68ab292991a1fb0da994d
 +                return B_BAD_VALUE;
 +        } else if (type == B_INT32_TYPE) {
 +            int32 value = settings.GetInt32(field.name, 0);
-+            if (value < 1 || value > 512)
++            bool minimum = !strcmp(field.name, "minimumFontSize");
++            if (value < (minimum ? 0 : 1) || value > (minimum ? 72 : 512))
 +                return B_BAD_VALUE;
 +        }
 +    }
@@ -89694,6 +89697,10 @@ index 0000000000000000000000000000000000000000..79138d7686f68ab292991a1fb0da994d
 +    bool enabled;
 +    if (settings.FindBool("javascriptEnabled", &enabled) == B_OK)
 +        preferences->setJavaScriptEnabled(enabled);
++    if (settings.FindInt32("minimumFontSize", &size) == B_OK)
++        preferences->setMinimumFontSize(size);
++    if (settings.FindBool("caretBrowsing", &enabled) == B_OK)
++        preferences->setCaretBrowsingEnabled(enabled);
 +    page.setPreferences(preferences);
 +    if (settings.FindString("userAgent", &value) == B_OK)
 +        page.setCustomUserAgent(String::fromUTF8(value));
