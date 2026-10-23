@@ -24,8 +24,10 @@ async function setup() {
             matches: ['https://example.com/*'],
             runAt: 'document_end',
             js: [{code: `
-                document.querySelector('h1').textContent = 'Changed by a user script';
                 document.documentElement.dataset.heading = 'ran';
+                const heading = document.querySelector('h1, p');
+                if (heading)
+                    heading.textContent = 'Changed by a user script';
                 chrome.runtime.sendMessage({ran: 'heading', href: location.href});`}],
         },
         // Globs: the first never matches, the second matches unless ?skip.

@@ -72320,6 +72320,39 @@ index 004110288068340109f3dd98a57123c0779675aa..e468ceb71c006aaf5a037d127c3d6669
      Promise<ImageBufferResourceLimits> getImageBufferResourceLimits();
  
      undefined setTopDocumentURLForQuirks(DOMString urlString);
+diff --git a/Source/WebCore/workers/WorkerEventLoop.cpp b/Source/WebCore/workers/WorkerEventLoop.cpp
+index b130dc66c27654dca57ad9079f68ced99236463f..36ca34b34ab50465b5699b2b5659ab151f167b2b 100644
+--- a/Source/WebCore/workers/WorkerEventLoop.cpp
++++ b/Source/WebCore/workers/WorkerEventLoop.cpp
+@@ -30,6 +30,8 @@
+ #include "Microtasks.h"
+ #include "WorkerOrWorkletGlobalScope.h"
+ #include "WorkerOrWorkletThread.h"
++#include <JavaScriptCore/VM.h>
++#include <wtf/MainThread.h>
+ 
+ namespace WebCore {
+ 
+@@ -54,6 +56,19 @@ void WorkerEventLoop::scheduleToRun()
+     // Post this task with a special event mode, so that it can be separated from other
+     // kinds of tasks so that queued microtasks can run even if other tasks are ignored.
+     globalScope->postTaskForMode([eventLoop = Ref { *this }] (ScriptExecutionContext& context) {
++#if PLATFORM(HAIKU)
++        // A worker on the main thread (an extension's service worker) cycles
++        // the main run loop for synchronous loads such as importScripts(),
++        // with its script still on the stack. Run its tasks and microtasks
++        // once that script has returned: a microtask checkpoint needs an
++        // empty JavaScript stack, and Tampermonkey registers its event
++        // listeners until its first microtask runs. A cycle only runs work
++        // queued before it began, so posting again cannot spin.
++        if (isMainThread() && context.vm().entryScope) {
++            eventLoop->scheduleToRun();
++            return;
++        }
++#endif
+         eventLoop->run(context.vm());
+     }, WorkerEventLoop::taskMode());
+ }
 diff --git a/Source/WebCore/workers/WorkerRunLoop.cpp b/Source/WebCore/workers/WorkerRunLoop.cpp
 index 9a6c5c95b12253c3aa3ff94b63b71153ed2742b3..b2926db31e84022eb9d21dc8b4215e4d9e6236b8 100644
 --- a/Source/WebCore/workers/WorkerRunLoop.cpp

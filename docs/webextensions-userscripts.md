@@ -46,6 +46,15 @@ and `userScripts` sees only them.
   this is enough for its `GM_*` calls; an extension that listens only to
   `onUserScriptMessage` would not hear its scripts. `configureWorld({csp})`
   is not applied.
+- **Service worker startup.** Summit runs extension service workers on the
+  main thread, and `importScripts()` cycles the main run loop while the
+  worker's script is still running. That cycle used to run the worker's
+  event loop, microtasks included, so a promise callback ran before the
+  script reached its next line. Tampermonkey sets a "still starting" flag
+  that its first microtask clears, and registers `tabs.onUpdated` after
+  `importScripts()`: it failed with "listener can only be registered during
+  startup". `WorkerEventLoop::scheduleToRun()` now posts the run again while
+  JavaScript is on the stack.
 - The extension bindings generator now renames static callbacks whose
   JavaScript names are C++ keywords (`register` → `registerCallback`).
 
@@ -58,7 +67,7 @@ for `https://example.com/*`). Install it (Extensions › Add extension…, or
 | Check | Expected |
 | --- | --- |
 | background console | `registered heading:USER_SCRIPT:1 glob-miss:USER_SCRIPT:1 glob-hit:USER_SCRIPT:1 main-world:MAIN:1` |
-| `https://example.com/` heading | `Changed by a user script`; the worker logs `message {"ran":"heading",…}` |
+| `https://example.com/` first heading or paragraph | `Changed by a user script`; the worker logs `message {"ran":"heading",…}` |
 | `document.documentElement.dataset` on `https://example.com/` | `heading: ran`, `globHit: ran`, no `globMiss` |
 | on `https://example.com/?skip` | no `globHit` |
 | `window.summitUserScriptMainWorld` (page console) | `page` |
