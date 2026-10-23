@@ -181,7 +181,10 @@ the window moves or resizes. `windows.update()` with any of them sends
 `B_WEBKIT_BROWSER_SET_WINDOW_FRAME` (missing members are NaN and kept); the
 browser moves and resizes the window within its size limits. `windows.create()`
 still ignores geometry, and `windows.onBoundsChanged` is not fired. Fixture:
-`tests/fixtures/extensions/window-geometry` (open `https://example.com/?geometry`).
+`tests/fixtures/extensions/window-geometry` (open `https://example.com/?geometry`). Verified on
+the X399 (24 Oct, geo106 build): 75,65 1121×681 → update to 120,90 900×640 →
+width only 1000×640 → restored 75,65 1121×681, matching the window's real
+frame (`hey … get Frame of Window 0`); width 0 rejected.
 
 ## Duplicate (#106)
 
