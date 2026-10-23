@@ -96,9 +96,10 @@ is where content-script errors appear.
    context was rejected. It maps to editable fields; other browsers' contexts
    for surfaces Summit lacks (`bookmark`, `tools_menu`, `launcher`) are ignored
    when a supported context accompanies them.
-7. `webNavigation.onCreatedNavigationTarget` — event object absent. Registered
-   together with `onHistoryStateUpdated`, `onReferenceFragmentUpdated` and
-   `onTabReplaced`; they are not dispatched yet.
+7. `webNavigation.onCreatedNavigationTarget` — fired since #106 (see
+   [webextensions-webnavigation.md](webextensions-webnavigation.md)), as are
+   `onHistoryStateUpdated` and `onReferenceFragmentUpdated`; `onTabReplaced`
+   never fires.
 8. `runtime.getBrowserInfo` (Firefox only), `runtime.onSuspend`,
    `onSuspendCanceled`, `onUpdateAvailable`, `requestUpdateCheck`,
    `webRequest.handlerBehaviorChanged`, `idle.*`, `management.getSelf/getAll`.
