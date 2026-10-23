@@ -552,6 +552,9 @@ private:
     void HistoryCommand(const BMessage& message, uint64 identifier);
     // An extension's chrome.bookmarks call (B_WEBKIT_BROWSER_BOOKMARKS).
     void BookmarksCommand(const BMessage& message, uint64 identifier);
+    // An extension's chrome.search call (B_WEBKIT_BROWSER_SEARCH): searches in
+    // tab (the one named, else the active one), a new tab or a new window.
+    void SearchCommand(const BMessage& message, uint64 identifier, Tab* tab);
     // Tells extensions how the bookmarks changed since the last report
     // (bookmarks.onCreated and the rest), whoever changed them. Windows call
     // it when the bookmarks change; the first report only remembers them.

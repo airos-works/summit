@@ -2315,6 +2315,7 @@ void BrowserWindow::BrowserCommand(const BMessage& message)
             return;
         case B_WEBKIT_BROWSER_HISTORY: HistoryCommand(message, identifier); return;
         case B_WEBKIT_BROWSER_BOOKMARKS: BookmarksCommand(message, identifier); return;
+        case B_WEBKIT_BROWSER_SEARCH: SearchCommand(message, identifier, tab); return;
         case B_WEBKIT_BROWSER_SET_WINDOW_STATE: {
             const std::string state = message.GetString("state", "");
             if (state == "minimized") Minimize(true);
