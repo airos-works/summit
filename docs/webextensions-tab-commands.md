@@ -149,7 +149,8 @@ agreeing, then `onUpdated {pinned: false}` after unpinning.
 `<html lang>`, else a `Content-Language` `<meta>` (first entry), else `"und"`.
 Chrome guesses from the text instead; Summit has no language detector. It runs
 a short script in a nameless world of the tab's main frame and needs access to
-the tab (host permission or `activeTab`).
+the tab (host permission or `activeTab`). Verified on the X399 (24 Oct, dl106 build): `en` for
+`https://example.com/` (`<html lang="en">`).
 
 ## Reload without the cache (#106)
 
