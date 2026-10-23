@@ -1320,6 +1320,7 @@ struct BookmarkEntry {
     int64_t parent = 0;
     size_t index = 0;
     std::string title, url;
+    // Without children; a removed folder's are put together from the others.
     nlohmann::json node;
 };
 using BookmarkEntries = std::map<int64_t, BookmarkEntry>;
@@ -1332,10 +1333,24 @@ static BookmarkEntries BookmarkSnapshot(const Bookmarks& bookmarks)
     BookmarkEntries entries;
     for (const auto* folder : {&bookmarks.Bar(), &bookmarks.Other()}) {
         EachBookmark(*folder, [&](const BookmarkNode& node, int64_t parent, size_t index) {
-            entries[node.id] = {parent, index, node.title, node.url, BookmarkJSON(node, parent, index, 64)};
+            entries[node.id] = {parent, index, node.title, node.url, BookmarkJSON(node, parent, index, 0)};
         });
     }
     return entries;
+}
+
+// A node of entries with its children, as onRemoved reports a folder.
+static nlohmann::json BookmarkTreeJSON(const BookmarkEntries& entries, const std::multimap<int64_t, int64_t>& children, int64_t id)
+{
+    auto node = entries.at(id).node;
+    if (node.value("type", std::string()) != "folder") return node;
+    std::vector<int64_t> inside;
+    for (auto [it, end] = children.equal_range(id); it != end; ++it) inside.push_back(it->second);
+    std::sort(inside.begin(), inside.end(), [&](int64_t a, int64_t b) { return entries.at(a).index < entries.at(b).index; });
+    auto list = nlohmann::json::array();
+    for (auto child : inside) list.push_back(BookmarkTreeJSON(entries, children, child));
+    node["children"] = std::move(list);
+    return node;
 }
 
 void BrowserWindow::ReportBookmarkChanges()
@@ -1353,9 +1368,15 @@ void BrowserWindow::ReportBookmarkChanges()
         }
         const auto& before = *sReportedBookmarks;
         // Removed: only the top of a removed folder, as in Chrome.
+        std::optional<std::multimap<int64_t, int64_t>> children;
         for (const auto& [id, entry] : before) {
             if (now.contains(id) || (before.contains(entry.parent) && !now.contains(entry.parent))) continue;
-            events.emplace_back("removed", id, nlohmann::json({{"parentId", std::to_string(entry.parent)}, {"index", entry.index}, {"node", entry.node}}));
+            if (!children) {
+                children.emplace();
+                for (const auto& [child, item] : before) children->emplace(item.parent, child);
+            }
+            events.emplace_back("removed", id, nlohmann::json({{"parentId", std::to_string(entry.parent)}, {"index", entry.index},
+                {"node", BookmarkTreeJSON(before, *children, id)}}));
         }
         // Moved: a new folder, or out of order with the siblings that stayed
         // (those off the longest run kept in their old order).
@@ -1392,9 +1413,7 @@ void BrowserWindow::ReportBookmarkChanges()
         for (const auto& [id, entry] : now) {
             auto old = before.find(id);
             if (old == before.end()) {
-                auto node = entry.node;
-                node.erase("children");
-                events.emplace_back("created", id, std::move(node));
+                events.emplace_back("created", id, entry.node);
             } else if (old->second.title != entry.title || old->second.url != entry.url) {
                 nlohmann::json info = {{"title", entry.title}};
                 if (!entry.url.empty()) info["url"] = entry.url;
