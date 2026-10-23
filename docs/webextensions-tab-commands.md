@@ -169,7 +169,8 @@ settings steps passed too (`automatic/per-origin/1`; `manual` rejected).
 Summit's tab strip has one selection, its active tab. `tabs.update({highlighted:
 true})` activates the tab (unless `active: false`); `highlighted: false` is
 accepted and changes nothing, since the active tab stays highlighted, as in
-Chrome. It used to reject.
+Chrome. It used to reject. Verified on the X399 (24 Oct, hl106 build): the
+update resolved and the tab stayed active and highlighted.
 
 ## Duplicate (#106)
 
