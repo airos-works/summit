@@ -38,6 +38,14 @@
 #include <nlohmann/json.hpp>
 #include <algorithm>
 #include <cstring>
+#include <ctime>
+#include <functional>
+#include <map>
+#include <mutex>
+#include <optional>
+#include <set>
+#include <sstream>
+#include <tuple>
 #include <thread>
 
 namespace summit {
@@ -827,6 +835,300 @@ void BrowserWindow::HistoryCommand(const BMessage& message, uint64 identifier)
     (void)message;
     RespondToCommand(identifier, B_NOT_SUPPORTED);
 #endif
+}
+
+// chrome.bookmarks (#106). The root "0" holds the bookmarks bar ("1") and
+// Other Bookmarks ("2"), as in Chrome; separators are reported with
+// Firefox's type "separator" so indexes match Summit's folders.
+static nlohmann::json BookmarkJSON(const BookmarkNode& node, int64_t parent, size_t index, int depth)
+{
+    nlohmann::json item = {
+        {"id", std::to_string(node.id)},
+        {"parentId", std::to_string(parent)},
+        {"index", index},
+        {"title", node.separator ? std::string() : node.title},
+        {"dateAdded", node.added * 1000.0},
+        {"type", node.separator ? "separator" : node.folder ? "folder" : "bookmark"},
+    };
+    if (node.folder) {
+        if (node.id == kBookmarksBarFolder) item["folderType"] = "bookmarks-bar";
+        else if (node.id == kOtherBookmarksFolder) item["folderType"] = "other";
+        if (node.modified) item["dateGroupModified"] = node.modified / 1000.0;
+        if (depth) {
+            auto children = nlohmann::json::array();
+            for (size_t i = 0; i < node.children.size(); ++i)
+                children.push_back(BookmarkJSON(node.children[i], node.id, i, depth - 1));
+            item["children"] = std::move(children);
+        }
+    } else if (!node.separator)
+        item["url"] = node.url;
+    return item;
+}
+
+static nlohmann::json BookmarkRootJSON(const Bookmarks& bookmarks, int depth)
+{
+    nlohmann::json root = {{"id", "0"}, {"title", ""}, {"dateAdded", 0}, {"type", "folder"}};
+    if (depth)
+        root["children"] = {BookmarkJSON(bookmarks.Bar(), 0, 0, depth - 1), BookmarkJSON(bookmarks.Other(), 0, 1, depth - 1)};
+    return root;
+}
+
+// A node and where it is; the root and the two fixed folders have parent 0.
+static std::optional<nlohmann::json> FindBookmarkJSON(const Bookmarks& bookmarks, int64_t id, int depth)
+{
+    if (!id) return BookmarkRootJSON(bookmarks, depth);
+    const auto* node = bookmarks.Find(id);
+    if (!node) return std::nullopt;
+    size_t index = 0;
+    const auto* parent = bookmarks.Parent(id, &index);
+    if (!parent) index = id == kBookmarksBarFolder ? 0 : 1;
+    return BookmarkJSON(*node, parent ? parent->id : 0, index, depth);
+}
+
+static std::optional<int64_t> BookmarkID(const std::string& text)
+{
+    if (text.empty() || text.size() > 18 || !std::all_of(text.begin(), text.end(), [](unsigned char c) { return std::isdigit(c); }))
+        return std::nullopt;
+    return std::stoll(text);
+}
+
+static std::string LowerText(std::string text)
+{
+    std::transform(text.begin(), text.end(), text.begin(), [](unsigned char c) { return std::tolower(c); });
+    return text;
+}
+
+static void EachBookmark(const BookmarkNode& folder, const std::function<void(const BookmarkNode&, int64_t, size_t)>& visit)
+{
+    for (size_t i = 0; i < folder.children.size(); ++i) {
+        visit(folder.children[i], folder.id, i);
+        if (folder.children[i].folder) EachBookmark(folder.children[i], visit);
+    }
+}
+
+void BrowserWindow::BookmarksCommand(const BMessage& message, uint64 identifier)
+{
+    const std::string method = message.GetString("method", "");
+    const auto arguments = nlohmann::json::parse(message.GetString("arguments", "{}"), nullptr, false);
+    if (arguments.is_discarded() || !arguments.is_object()) { RespondToCommand(identifier, B_BAD_VALUE); return; }
+    auto respond = [&](const nlohmann::json& data) {
+        fWebKitContext->RespondToBrowserCommandWithData(identifier, B_OK, data.dump().c_str());
+    };
+    auto fail = [&](const char* error) {
+        fWebKitContext->RespondToBrowserCommandWithData(identifier, B_BAD_VALUE, "null", error);
+    };
+    auto argument = [&](const char* key) { return BookmarkID(arguments.value(key, std::string())); };
+    const auto id = argument("id");
+    if (method == "getTree") {
+        respond(nlohmann::json::array({fShared->Read([](const Profile& profile) { return BookmarkRootJSON(profile.bookmarks, 64); })}));
+    } else if (method == "get" || method == "getChildren" || method == "getSubTree") {
+        std::vector<int64_t> ids;
+        if (method == "get") {
+            for (const auto& value : arguments.value("ids", nlohmann::json::array())) {
+                const auto parsed = value.is_string() ? BookmarkID(value.get<std::string>()) : std::nullopt;
+                if (!parsed) { fail("Can't find bookmark for id."); return; }
+                ids.push_back(*parsed);
+            }
+        } else if (id)
+            ids.push_back(*id);
+        auto items = nlohmann::json::array();
+        bool found = !ids.empty();
+        fShared->Read([&](const Profile& profile) {
+            for (auto each : ids) {
+                auto item = FindBookmarkJSON(profile.bookmarks, each, method == "get" ? 0 : method == "getChildren" ? 1 : 64);
+                if (!item) { found = false; return; }
+                if (method == "getChildren") items = item->value("children", nlohmann::json::array());
+                else items.push_back(std::move(*item));
+            }
+        });
+        if (!found) fail("Can't find bookmark for id.");
+        else respond(items);
+    } else if (method == "getRecent") {
+        const size_t count = static_cast<size_t>(std::clamp(arguments.value("numberOfItems", 1.0), 1.0, 100000.0));
+        std::vector<std::pair<int64_t, nlohmann::json>> found;
+        fShared->Read([&](const Profile& profile) {
+            for (const auto* folder : {&profile.bookmarks.Bar(), &profile.bookmarks.Other()}) {
+                EachBookmark(*folder, [&](const BookmarkNode& node, int64_t parent, size_t index) {
+                    if (!node.folder && !node.separator) found.emplace_back(node.added, BookmarkJSON(node, parent, index, 0));
+                });
+            }
+        });
+        std::stable_sort(found.begin(), found.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+        auto items = nlohmann::json::array();
+        for (size_t i = 0; i < found.size() && i < count; ++i) items.push_back(std::move(found[i].second));
+        respond(items);
+    } else if (method == "search") {
+        // Every word of query in the title or address; url and title match exactly.
+        std::vector<std::string> words;
+        {
+            std::istringstream stream(LowerText(arguments.value("query", std::string())));
+            for (std::string word; stream >> word;) words.push_back(word);
+        }
+        const bool byURL = arguments.contains("url"), byTitle = arguments.contains("title");
+        const std::string url = arguments.value("url", std::string()), title = arguments.value("title", std::string());
+        auto items = nlohmann::json::array();
+        fShared->Read([&](const Profile& profile) {
+            for (const auto* folder : {&profile.bookmarks.Bar(), &profile.bookmarks.Other()}) {
+                EachBookmark(*folder, [&](const BookmarkNode& node, int64_t parent, size_t index) {
+                    if (node.separator || (byURL && (node.folder || node.url != url)) || (byTitle && node.title != title)) return;
+                    if (!words.empty()) {
+                        const std::string haystack = LowerText(node.title + "\n" + node.url);
+                        for (const auto& word : words)
+                            if (haystack.find(word) == std::string::npos) return;
+                    }
+                    if (words.empty() && !byURL && !byTitle) return;
+                    items.push_back(BookmarkJSON(node, parent, index, 0));
+                });
+            }
+        });
+        respond(items);
+    } else if (method == "create" || method == "move" || method == "update" || method == "remove" || method == "removeTree") {
+        if (method != "create" && !id) { fail("Can't find bookmark for id."); return; }
+        const char* error = nullptr;
+        int64_t target = id.value_or(0);
+        const size_t index = arguments.contains("index") ? static_cast<size_t>(arguments.value("index", 0.0)) : kBookmarkEnd;
+        fShared->Change([&](Profile& profile) -> uint32 {
+            auto& bookmarks = profile.bookmarks;
+            const auto* node = target ? bookmarks.Find(target) : nullptr;
+            if (method != "create" && !node) { error = "Can't find bookmark for id."; return 0; }
+            const bool fixed = target == kBookmarksBarFolder || target == kOtherBookmarksFolder;
+            if (method == "create") {
+                const auto parent = arguments.contains("parentId") ? argument("parentId") : std::optional<int64_t>(kOtherBookmarksFolder);
+                const auto* folder = parent ? bookmarks.Find(*parent) : nullptr;
+                if (!folder || !folder->folder) { error = "Can't find parent bookmark for id."; return 0; }
+                const std::string title = arguments.value("title", std::string());
+                if (arguments.contains("url")) {
+                    const std::string url = arguments.value("url", std::string());
+                    if (!IsBookmarkableURL(url)) { error = "Invalid URL."; return 0; }
+                    target = bookmarks.Add({url, title}, *parent, index, std::time(nullptr));
+                } else
+                    target = bookmarks.AddFolder(*parent, title, index, std::time(nullptr));
+                if (!target) { error = "Can't create the bookmark: the folder is full."; return 0; }
+                return SharedProfile::kBookmarksChanged;
+            }
+            if (fixed) { error = "Can't modify the root bookmark folders."; return 0; }
+            if (method == "move") {
+                const auto parent = arguments.contains("parentId") ? argument("parentId") : std::nullopt;
+                const auto* current = bookmarks.Parent(target);
+                const int64_t folder = parent.value_or(current ? current->id : 0);
+                const auto* destination = bookmarks.Find(folder);
+                if (!destination || !destination->folder) { error = "Can't find parent bookmark for id."; return 0; }
+                for (int64_t inside = folder; inside; ) {
+                    if (inside == target) { error = "Can't move a folder into itself."; return 0; }
+                    const auto* up = bookmarks.Parent(inside);
+                    inside = up ? up->id : 0;
+                }
+                return bookmarks.Move(target, folder, index) ? SharedProfile::kBookmarksChanged : 0;
+            }
+            if (method == "update") {
+                std::string url = arguments.value("url", node->url);
+                if (node->folder && arguments.contains("url")) { error = "Can't set URL of a bookmark folder."; return 0; }
+                if (!node->folder && !IsBookmarkableURL(url)) { error = "Invalid URL."; return 0; }
+                return bookmarks.Edit(target, arguments.value("title", node->title), url) ? SharedProfile::kBookmarksChanged : 0;
+            }
+            if (method == "remove" && node->folder && !node->children.empty()) { error = "Can't remove non-empty folder (use recursive to force)."; return 0; }
+            return bookmarks.Remove(target) ? SharedProfile::kBookmarksChanged : 0;
+        }, BMessenger(this));
+        if (error) { fail(error); return; }
+        // Extensions hear of the change before the answer arrives, as in Chrome.
+        ReportBookmarkChanges();
+        if (method == "remove" || method == "removeTree") { respond(nullptr); return; }
+        auto item = fShared->Read([&](const Profile& profile) { return FindBookmarkJSON(profile.bookmarks, target, 0); });
+        respond(item ? *item : nlohmann::json());
+    } else
+        RespondToCommand(identifier, B_NOT_SUPPORTED);
+}
+
+// What extensions see of each node, for comparing two states of the bookmarks.
+struct BookmarkEntry {
+    int64_t parent = 0;
+    size_t index = 0;
+    std::string title, url;
+    nlohmann::json node;
+};
+using BookmarkEntries = std::map<int64_t, BookmarkEntry>;
+static std::mutex sBookmarkReportLock;
+static std::optional<BookmarkEntries> sReportedBookmarks;
+static const SharedProfile* sReportedProfile = nullptr;
+
+static BookmarkEntries BookmarkSnapshot(const Bookmarks& bookmarks)
+{
+    BookmarkEntries entries;
+    for (const auto* folder : {&bookmarks.Bar(), &bookmarks.Other()}) {
+        EachBookmark(*folder, [&](const BookmarkNode& node, int64_t parent, size_t index) {
+            entries[node.id] = {parent, index, node.title, node.url, BookmarkJSON(node, parent, index, 64)};
+        });
+    }
+    return entries;
+}
+
+void BrowserWindow::ReportBookmarkChanges()
+{
+    // Private windows can use a context of their own; the main one reports.
+    if (fPrivate) return;
+    std::vector<std::tuple<const char*, int64_t, nlohmann::json>> events;
+    {
+        std::lock_guard lock(sBookmarkReportLock);
+        auto now = fShared->Read([](const Profile& profile) { return BookmarkSnapshot(profile.bookmarks); });
+        if (!sReportedBookmarks || sReportedProfile != fShared.get()) {
+            sReportedBookmarks = std::move(now);
+            sReportedProfile = fShared.get();
+            return;
+        }
+        const auto& before = *sReportedBookmarks;
+        // Removed: only the top of a removed folder, as in Chrome.
+        for (const auto& [id, entry] : before) {
+            if (now.contains(id) || (before.contains(entry.parent) && !now.contains(entry.parent))) continue;
+            events.emplace_back("removed", id, nlohmann::json({{"parentId", std::to_string(entry.parent)}, {"index", entry.index}, {"node", entry.node}}));
+        }
+        // Moved: a new folder, or out of order with the siblings that stayed
+        // (those off the longest run kept in their old order).
+        std::map<int64_t, std::vector<int64_t>> stayed;
+        for (const auto& [id, entry] : now) {
+            auto old = before.find(id);
+            if (old == before.end()) continue;
+            if (old->second.parent != entry.parent)
+                events.emplace_back("moved", id, nlohmann::json({{"parentId", std::to_string(entry.parent)}, {"index", entry.index},
+                    {"oldParentId", std::to_string(old->second.parent)}, {"oldIndex", old->second.index}}));
+            else
+                stayed[entry.parent].push_back(id);
+        }
+        for (auto& [parent, ids] : stayed) {
+            std::sort(ids.begin(), ids.end(), [&](int64_t a, int64_t b) { return now.at(a).index < now.at(b).index; });
+            // Longest increasing run of old indexes, by patience sorting.
+            std::vector<size_t> tails, previous(ids.size(), SIZE_MAX), tailAt;
+            for (size_t i = 0; i < ids.size(); ++i) {
+                const size_t old = before.at(ids[i]).index;
+                auto at = std::lower_bound(tails.begin(), tails.end(), old) - tails.begin();
+                if (at == static_cast<ptrdiff_t>(tails.size())) { tails.push_back(old); tailAt.push_back(i); }
+                else { tails[at] = old; tailAt[at] = i; }
+                if (at) previous[i] = tailAt[at - 1];
+            }
+            std::set<size_t> kept;
+            for (size_t i = tailAt.empty() ? SIZE_MAX : tailAt.back(); i != SIZE_MAX; i = previous[i]) kept.insert(i);
+            for (size_t i = 0; i < ids.size(); ++i) {
+                if (kept.contains(i)) continue;
+                const auto& entry = now.at(ids[i]);
+                events.emplace_back("moved", ids[i], nlohmann::json({{"parentId", std::to_string(parent)}, {"index", entry.index},
+                    {"oldParentId", std::to_string(parent)}, {"oldIndex", before.at(ids[i]).index}}));
+            }
+        }
+        for (const auto& [id, entry] : now) {
+            auto old = before.find(id);
+            if (old == before.end()) {
+                auto node = entry.node;
+                node.erase("children");
+                events.emplace_back("created", id, std::move(node));
+            } else if (old->second.title != entry.title || old->second.url != entry.url) {
+                nlohmann::json info = {{"title", entry.title}};
+                if (!entry.url.empty()) info["url"] = entry.url;
+                events.emplace_back("changed", id, std::move(info));
+            }
+        }
+        sReportedBookmarks = std::move(now);
+    }
+    for (const auto& [event, id, info] : events)
+        fWebKitContext->NotifyBookmarksChanged(event, std::to_string(id).c_str(), info.dump().c_str());
 }
 
 }

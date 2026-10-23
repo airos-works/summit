@@ -694,6 +694,10 @@ BrowserWindow::BrowserWindow(std::shared_ptr<SharedProfile> profile, std::string
         });
     }
 #endif
+#if SUMMIT_MODERN_WEBKIT
+    // The bookmarks to compare the first change with.
+    ReportBookmarkChanges();
+#endif
     std::tie(fBookmarksBarVisible, fInterfaceStyle) = fShared->Read([](const Profile& profile) {
         return std::make_pair(profile.showBookmarksBar, profile.interfaceStyle);
     });
@@ -2310,6 +2314,7 @@ void BrowserWindow::BrowserCommand(const BMessage& message)
             RespondToCommand(identifier, B_OK);
             return;
         case B_WEBKIT_BROWSER_HISTORY: HistoryCommand(message, identifier); return;
+        case B_WEBKIT_BROWSER_BOOKMARKS: BookmarksCommand(message, identifier); return;
         case B_WEBKIT_BROWSER_SET_WINDOW_STATE: {
             const std::string state = message.GetString("state", "");
             if (state == "minimized") Minimize(true);
@@ -2832,6 +2837,9 @@ void BrowserWindow::ProfileChanged(const BMessage& message)
         for (auto& tab : fTabs) UpdateStoreOffer(tab);
 #endif
     if (changes & SharedProfile::kBookmarksChanged) {
+#if SUMMIT_MODERN_WEBKIT
+        ReportBookmarkChanges();
+#endif
         PagesChanged();
         RefreshBookmarks();
         RefreshChrome();

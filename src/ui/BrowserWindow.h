@@ -550,6 +550,12 @@ private:
     void RecordVisit(const PageRecord& visit);
     // An extension's chrome.history call (B_WEBKIT_BROWSER_HISTORY).
     void HistoryCommand(const BMessage& message, uint64 identifier);
+    // An extension's chrome.bookmarks call (B_WEBKIT_BROWSER_BOOKMARKS).
+    void BookmarksCommand(const BMessage& message, uint64 identifier);
+    // Tells extensions how the bookmarks changed since the last report
+    // (bookmarks.onCreated and the rest), whoever changed them. Windows call
+    // it when the bookmarks change; the first report only remembers them.
+    void ReportBookmarkChanges();
     void ToggleTabMute(int64 id);
     // Hands tab id to target (another window), which adopts its live view.
     void DetachTab(int64 id, const BMessenger& target);
