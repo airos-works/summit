@@ -7,6 +7,10 @@ in page text: the arrow keys move it, Shift-arrows select, and links and form
 fields under it can be activated. The setting is shared by every window and
 lasts for the session; it is not saved.
 
+Verified on the X399 (23 Oct, cext build): on example.com, Shift-Right four
+times after a click selected nothing with caret browsing off, and "Tamp" after
+F7.
+
 The browser sends `caretBrowsing` to each tab through
 `BWebKitView::SetPageSettings()`, which sets WebKit's `CaretBrowsingEnabled`
 preference for that page. New tabs get the current state when they are made.

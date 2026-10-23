@@ -20,7 +20,7 @@ today; hard-coding the scheme does not.
 - Changing an installed extension's address would orphan that data
   (Tampermonkey keeps its scripts there).
 
-## Change (branch cext, 23 Oct; built and tested: not yet)
+## Change (cext, 23 Oct)
 
 1. **New installs only.** When a context is loaded for the first time (no
    `LastSeenBaseURL`) and its `runtime.id` is a Chrome ID, give it the base URL
@@ -63,3 +63,14 @@ website data from one origin to the other), and Firefox's
   `IsExternalScheme` know the scheme. `main.cpp` still holds back only
   `webkit-extension:` tabs of a restored session until extensions load
   (`main.cpp` has uncommitted #110 work).
+
+## Verified (X399, cext build 4c6edf0, fresh profile)
+
+- Tampermonkey 5.5.1 from its Chrome Web Store CRX loads at
+  `chrome-extension://dhdgffkkebhmkfjojejmpbldmpobfkfo/`; an unsigned zip
+  (local `summit-pkg-…` ID) stays at `webkit-extension://<uuid>/`.
+- Opening a `.user.js` link shows Tampermonkey's installer with the script's
+  details; Install adds it and closes the tab. On `https://example.com/` the
+  script ran and its `GM_setValue` counter went 1, 2.
+- After quitting and restarting Summit both extensions kept their addresses,
+  and the script ran again with its stored count (4).
