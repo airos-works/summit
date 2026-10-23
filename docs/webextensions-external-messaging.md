@@ -29,3 +29,11 @@ its ports would have to span two contexts.
 `lbemamlibomhdpkllpeodnmpommkhbdl`), `closed` (admits one other ID; key fixes
 `dbjglklidijppgkmdpjggbmfnbmnghnb`) and `sender`, which three seconds after it
 starts messages both and a missing ID. Install the receivers first.
+
+Verified on the X399 (24 Oct, xmsg106 build): the receiver's
+`onMessageExternal` got `{"hello":"receiver"}` from the sender's ID and its
+reply reached the sender; the closed receiver and the missing ID rejected with
+"Receiving end does not exist". The first build delivered the message to
+`onMessage`, because the web process treated only web pages as external
+senders; a sender with another extension ID now counts too. The userScripts
+fixture's messages to its own extension still reach `onMessage`.
