@@ -30,3 +30,8 @@ main-frame navigation to a `chromiumapp.org` host, and the tab's removal
 the browser to its `?redirect=` with `?code=42` (one line of script, for
 example `location.href = new URLSearchParams(location.search).get('redirect')
 + '?code=42'`); the server-redirect step uses httpbin.org.
+
+Verified on the X399 (24 Oct, id106 build): the script redirect answered
+`…chromiumapp.org/cb?code=42`, the httpbin.org server redirect `?code=7`,
+`interactive: false` and a window closed by the extension were refused, and
+the sign-in windows closed.
