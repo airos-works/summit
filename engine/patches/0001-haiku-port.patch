@@ -95710,7 +95710,7 @@ index 0000000000000000000000000000000000000000..b5a17393623897b91dee01412b7ae904
 +
 +#endif // ENABLE(WK_WEB_EXTENSIONS)
 diff --git a/Source/WebKit/UIProcess/Extensions/WebExtensionController.cpp b/Source/WebKit/UIProcess/Extensions/WebExtensionController.cpp
-index 2072e4a99372133e90eda56b3ba1bcc496705af0..abb5c210981219156c52f5cc9275d3cb69956ad5 100644
+index 2072e4a99372133e90eda56b3ba1bcc496705af0..45f3c7ccdfaed87a8b89427a5458fe6537d87440 100644
 --- a/Source/WebKit/UIProcess/Extensions/WebExtensionController.cpp
 +++ b/Source/WebKit/UIProcess/Extensions/WebExtensionController.cpp
 @@ -30,6 +30,10 @@
@@ -95824,7 +95824,7 @@ index 2072e4a99372133e90eda56b3ba1bcc496705af0..abb5c210981219156c52f5cc9275d3cb
      if (!unloadResult)
          return makeUnexpected(unloadResult.error());
  
-@@ -249,12 +266,18 @@ void WebExtensionController::addPage(WebPageProxy& page)
+@@ -249,12 +266,19 @@ void WebExtensionController::addPage(WebPageProxy& page)
      Ref controller = page.userContentController();
      bool isOwnStore = !dataStore->isPersistent() && (&dataStore.get() == &m_configuration->defaultWebsiteDataStore());
      addUserContentController(controller, (dataStore->isPersistent() || isOwnStore) ? ForPrivateBrowsing::No : ForPrivateBrowsing::Yes);
@@ -95839,11 +95839,12 @@ index 2072e4a99372133e90eda56b3ba1bcc496705af0..abb5c210981219156c52f5cc9275d3cb
      m_pages.remove(page);
 +#if PLATFORM(HAIKU)
 +    m_navigationTargetSourcesHaiku.remove(page.identifier());
++    m_openerPagesHaiku.remove(page.identifier());
 +#endif
  
      Ref pool = page.configuration().processPool();
      removeProcessPool(pool);
-@@ -267,6 +290,9 @@ void WebExtensionController::removePage(WebPageProxy& page)
+@@ -267,6 +291,9 @@ void WebExtensionController::removePage(WebPageProxy& page)
  
      for (Ref context : m_extensionContexts)
          context->removePage(page);
@@ -95853,7 +95854,7 @@ index 2072e4a99372133e90eda56b3ba1bcc496705af0..abb5c210981219156c52f5cc9275d3cb
  }
  
  void WebExtensionController::addProcessPool(WebProcessPool& processPool)
-@@ -406,14 +432,55 @@ void WebExtensionController::didFailLoadForFrame(WebPageProxyIdentifier pageID,
+@@ -406,14 +433,57 @@ void WebExtensionController::didFailLoadForFrame(WebPageProxyIdentifier pageID,
          context->didFailLoadForFrame(pageID, frameParameters, timestamp);
  }
  
@@ -95875,6 +95876,8 @@ index 2072e4a99372133e90eda56b3ba1bcc496705af0..abb5c210981219156c52f5cc9275d3cb
 +void WebExtensionController::didCreateNavigationTargetHaiku(WebPageProxyIdentifier page, NavigationTargetSourceHaiku&& source)
 +{
 +    // Each context reports it when the browser's tab list first shows the page.
++    if (source.sourcePage)
++        m_openerPagesHaiku.set(page, *source.sourcePage);
 +    m_navigationTargetSourcesHaiku.set(page, WTF::move(source));
 +}
 +
@@ -95910,7 +95913,7 @@ index 2072e4a99372133e90eda56b3ba1bcc496705af0..abb5c210981219156c52f5cc9275d3cb
  RefPtr<WebExtensionContext> WebExtensionController::extensionContext(const WebExtension& extension) const
  {
      for (auto& context : m_extensionContexts) {
-@@ -465,6 +532,42 @@ String WebExtensionController::stateFilePath(const String& uniqueIdentifier) con
+@@ -465,6 +535,42 @@ String WebExtensionController::stateFilePath(const String& uniqueIdentifier) con
      return FileSystem::pathByAppendingComponent(storageDirectory(uniqueIdentifier), WebExtensionContext::stateFileName());
  }
  
@@ -95954,7 +95957,7 @@ index 2072e4a99372133e90eda56b3ba1bcc496705af0..abb5c210981219156c52f5cc9275d3cb
  {
      HashSet<String> origins;
 diff --git a/Source/WebKit/UIProcess/Extensions/WebExtensionController.h b/Source/WebKit/UIProcess/Extensions/WebExtensionController.h
-index 7ec330ea503fa362051ba6c5f8fe4c263ffe2390..64066a80a18dc867418cf714469ccec0dcc34d72 100644
+index 7ec330ea503fa362051ba6c5f8fe4c263ffe2390..6d53ea7f981cf14848943f2f2bce147655c2da17 100644
 --- a/Source/WebKit/UIProcess/Extensions/WebExtensionController.h
 +++ b/Source/WebKit/UIProcess/Extensions/WebExtensionController.h
 @@ -45,6 +45,7 @@
@@ -96026,7 +96029,7 @@ index 7ec330ea503fa362051ba6c5f8fe4c263ffe2390..64066a80a18dc867418cf714469ccec0
  
      template<typename T>
      void sendToAllProcesses(const T& message, const ObjectIdentifierGenericBase& destinationID);
-@@ -191,6 +218,25 @@ public:
+@@ -191,6 +218,33 @@ public:
      void resourceLoadDidReceiveChallenge(WebPageProxyIdentifier, const ResourceLoadInfo&, const WebCore::AuthenticationChallenge&);
      void resourceLoadDidReceiveResponse(WebPageProxyIdentifier, const ResourceLoadInfo&, const WebCore::ResourceResponse&);
      void resourceLoadDidCompleteWithError(WebPageProxyIdentifier, const ResourceLoadInfo&, const WebCore::ResourceResponse&, const WebCore::ResourceError&);
@@ -96047,12 +96050,20 @@ index 7ec330ea503fa362051ba6c5f8fe4c263ffe2390..64066a80a18dc867418cf714469ccec0
 +    void didCreateNavigationTargetHaiku(WebPageProxyIdentifier page, NavigationTargetSourceHaiku&&);
 +    // tabs.onUpdated for a main-frame title change.
 +    void didChangePageTitleHaiku(WebPageProxyIdentifier);
++    // Tab.openerTabId: the page that opened a page (links, window.open(),
++    // tabs.create() with openerTabId), while both are open.
++    void setOpenerPageHaiku(WebPageProxyIdentifier page, WebPageProxyIdentifier opener) { m_openerPagesHaiku.set(page, opener); }
++    std::optional<WebPageProxyIdentifier> openerPageHaiku(WebPageProxyIdentifier page) const
++    {
++        auto entry = m_openerPagesHaiku.find(page);
++        return entry == m_openerPagesHaiku.end() ? std::nullopt : std::optional { entry->value };
++    }
 +    const NavigationTargetSourceHaiku* navigationTargetSourceHaiku(WebPageProxyIdentifier page) const;
 +#endif
  
  #if ENABLE(CONTENT_EXTENSIONS)
      void resourceLoadWasBlockedByContentRuleList(WebPageProxyIdentifier, const WebExtensionContentRuleListBlockedLoadInfo&);
-@@ -266,17 +312,31 @@ private:
+@@ -266,17 +320,32 @@ private:
          {
              // FIXME: <https://webkit.org/b/267514> Add support for changeInfo.
  
@@ -96082,6 +96093,7 @@ index 7ec330ea503fa362051ba6c5f8fe4c263ffe2390..64066a80a18dc867418cf714469ccec0
 +    std::shared_ptr<BrowserCommandBrokerHaiku> m_nativeBrowserCommands;
 +    std::unique_ptr<WebExtensionDownloadsHaiku> m_nativeDownloads;
 +    HashMap<WebPageProxyIdentifier, NavigationTargetSourceHaiku> m_navigationTargetSourcesHaiku;
++    HashMap<WebPageProxyIdentifier, WebPageProxyIdentifier> m_openerPagesHaiku;
 +#endif
  
  #if PLATFORM(COCOA)
@@ -102152,10 +102164,10 @@ index 0000000000000000000000000000000000000000..ef935e9aa0104dc22308026565130ac3
 +#endif // ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
 diff --git a/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextAPITabCommandsHaiku.cpp b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextAPITabCommandsHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..36c3432b6847962545f9008a12248b18c6cb2ece
+index 0000000000000000000000000000000000000000..e396019d96c1e0f215d4d8e72b9cca692f3d258f
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextAPITabCommandsHaiku.cpp
-@@ -0,0 +1,614 @@
+@@ -0,0 +1,621 @@
 +/*
 + * Copyright (C) 2023-2024 Apple Inc. All rights reserved.
 + *
@@ -102289,7 +102301,12 @@ index 0000000000000000000000000000000000000000..36c3432b6847962545f9008a12248b18
 +        return;
 +    }
 +
-+    sendNativeBrowserCommand(WTF::move(message), apiName, [this, protectedThis = Ref { *this }, muted = parameters.muted.value_or(false), completionHandler = WTF::move(completionHandler)](NativeBrowserCommandResult&& result) mutable {
++    std::optional<WebPageProxyIdentifier> openerPage;
++    if (parentTab) {
++        if (RefPtr page = parentTab->nativePage())
++            openerPage = page->identifier();
++    }
++    sendNativeBrowserCommand(WTF::move(message), apiName, [this, protectedThis = Ref { *this }, muted = parameters.muted.value_or(false), openerPage, completionHandler = WTF::move(completionHandler)](NativeBrowserCommandResult&& result) mutable {
 +        if (!result) {
 +            completionHandler(makeUnexpected(result.error()));
 +            return;
@@ -102302,6 +102319,8 @@ index 0000000000000000000000000000000000000000..36c3432b6847962545f9008a12248b18
 +            completionHandler(toWebExtensionError(apiName, nullString(), "the browser did not report the new tab"_s));
 +            return;
 +        }
++        if (RefPtr controller = this->extensionController(); controller && openerPage)
++            controller->setOpenerPageHaiku(result->first(), *openerPage);
 +
 +        if (!newTab->extensionHasAccess()) {
 +            completionHandler({ });
@@ -111069,10 +111088,10 @@ index 0000000000000000000000000000000000000000..029910e12b8031241ae2543d66cb4245
 +#endif // ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
 diff --git a/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionTabHaiku.cpp b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionTabHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..c23b7b030947e188ae91976a81e74d9803850960
+index 0000000000000000000000000000000000000000..21959e76092fa8fa769468c43c34aed8ac6b2ca7
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionTabHaiku.cpp
-@@ -0,0 +1,242 @@
+@@ -0,0 +1,248 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#include "config.h"
@@ -111288,6 +111307,12 @@ index 0000000000000000000000000000000000000000..c23b7b030947e188ae91976a81e74d98
 +        // from tab.cookieStoreId, else from Chrome's "0"/"1". Neither matched
 +        // Summit's storeIds, so cookies of open tabs were treated as unused.
 +        result.cookieStoreIdentifier = webExtensionCookieStoreIdentifier(page->websiteDataStore().sessionID());
++        if (RefPtr controller = m_extensionContext->extensionController()) {
++            if (auto openerPage = controller->openerPageHaiku(page->identifier())) {
++                if (RefPtr opener = m_extensionContext->getTab(*openerPage); opener && opener->extensionHasAccess())
++                    result.parentTabIdentifier = opener->identifier();
++            }
++        }
 +    }
 +    result.pinned = false; // The native browser has no pinned-tab state yet.
 +    return result;

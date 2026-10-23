@@ -131,8 +131,13 @@ implemented. Fixture: `tests/fixtures/extensions/tab-zoom` (open
 `tabs.duplicate()` opens a new tab at the original's address, after it (or at
 `index`), active unless `active: false`, with the original as its opener. It
 goes through the same `OPEN_TAB` command as `tabs.create()`. Unlike Chrome,
-the copy does not get the original's back/forward list, and its `openerTabId`
-is not reported (Summit's tab parameters carry no opener yet).
+the copy does not get the original's back/forward list.
+
+`openerTabId` (since opener106): the controller remembers which page opened
+which, from `WebPageProxy::createNewPage()` (links with `target`,
+`window.open()`) and from `tabs.create()` with `openerTabId` (and so
+`tabs.duplicate()`), while both pages are open. A tab reports its opener's
+identifier when the extension can see the opener.
 
 Verified on the X399 (23 Oct, zoom106 build 538d837) with
 `tests/fixtures/extensions/tab-zoom`: `getZoom` 1, then 1.5 after
