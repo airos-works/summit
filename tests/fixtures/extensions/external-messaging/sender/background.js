@@ -14,4 +14,14 @@ setTimeout(async () => {
             log(`${name} rejected: ${error.message}`);
         }
     }
+    // A port: two pings, then "bye"; the receiver disconnects.
+    const port = chrome.runtime.connect(RECEIVER, { name: 'fixture' });
+    port.onMessage.addListener(message => log(`port got ${message}`));
+    port.onDisconnect.addListener(() => log(`port disconnected${chrome.runtime.lastError ? ': ' + chrome.runtime.lastError.message : ''}`));
+    port.postMessage('ping 1');
+    port.postMessage('ping 2');
+    setTimeout(() => port.postMessage('bye'), 1500);
+    // The closed receiver refuses the connection.
+    const closed = chrome.runtime.connect(CLOSED, { name: 'refused' });
+    closed.onDisconnect.addListener(() => log(`closed port disconnected${chrome.runtime.lastError ? ': ' + chrome.runtime.lastError.message : ''}`));
 }, 3000);

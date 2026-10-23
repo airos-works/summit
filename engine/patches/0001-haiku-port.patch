@@ -90668,10 +90668,10 @@ index 0000000000000000000000000000000000000000..063b88f1c58b2e628a568392d5bd1a5d
 +#endif // ENABLE(WK_WEB_EXTENSIONS)
 diff --git a/Source/WebKit/UIProcess/Extensions/API/WebExtensionContextAPIPort.cpp b/Source/WebKit/UIProcess/Extensions/API/WebExtensionContextAPIPort.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..30ff0323e3adc237d6eb939e9571aecec71f63ab
+index 0000000000000000000000000000000000000000..bbf2bf8e3db1ac02fdb3d696f4a256c89b1327ca
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/API/WebExtensionContextAPIPort.cpp
-@@ -0,0 +1,312 @@
+@@ -0,0 +1,324 @@
 +/*
 + * Copyright (C) 2023 Apple Inc. All rights reserved.
 + *
@@ -90908,6 +90908,14 @@ index 0000000000000000000000000000000000000000..30ff0323e3adc237d6eb939e9571aece
 +    RELEASE_LOG_DEBUG(Extensions, "Sending disconnect event for port channel %{public}llu in %" PUBLIC_LOG_STRING " world", channelIdentifier.toUInt64(), toDebugString(targetContentWorldType).utf8().legacyCStringPointer());
 +
 +    if (targetContentWorldType == WebExtensionContentWorldType::Native) {
++#if PLATFORM(HAIKU)
++        // This side's ports of a bridged channel are gone: the other
++        // extension's end disconnects too.
++        if (m_portBridgesHaiku.contains(channelIdentifier)) {
++            bridgedPeerDisconnectedHaiku(channelIdentifier);
++            return;
++        }
++#endif
 +        if (RefPtr nativePort = m_nativePortMap.get(channelIdentifier))
 +            nativePort->reportDisconnection(errorMessage ? WebExtensionMessagePort::Error { { WebExtensionMessagePort::ErrorType::Unknown, *errorMessage } } : std::nullopt);
 +        return;
@@ -90947,6 +90955,10 @@ index 0000000000000000000000000000000000000000..30ff0323e3adc237d6eb939e9571aece
 +        return;
 +
 +    case WebExtensionContentWorldType::Native:
++#if PLATFORM(HAIKU)
++        if (relayBridgedPortMessageHaiku(channelIdentifier, messageJSON))
++            return;
++#endif
 +#if PLATFORM(COCOA) || PLATFORM(HAIKU)
 +        dispatchNativePortMessage(channelIdentifier, messageJSON);
 +#endif
@@ -90986,10 +90998,10 @@ index 0000000000000000000000000000000000000000..30ff0323e3adc237d6eb939e9571aece
 +#endif // ENABLE(WK_WEB_EXTENSIONS)
 diff --git a/Source/WebKit/UIProcess/Extensions/API/WebExtensionContextAPIRuntime.cpp b/Source/WebKit/UIProcess/Extensions/API/WebExtensionContextAPIRuntime.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..b9c4867afdc7e4522ede24111777423404280dfa
+index 0000000000000000000000000000000000000000..68a9853ad6a961100ce7a1a137fb0f61e9865365
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/API/WebExtensionContextAPIRuntime.cpp
-@@ -0,0 +1,386 @@
+@@ -0,0 +1,488 @@
 +/*
 + * Copyright (C) 2023-2024 Apple Inc. All rights reserved.
 + *
@@ -91112,6 +91124,101 @@ index 0000000000000000000000000000000000000000..b9c4867afdc7e4522ede241117774234
 +}
 +
 +#if PLATFORM(HAIKU)
++void WebExtensionContext::connectToExtensionHaiku(const String& extensionID, WebExtensionPortChannelIdentifier channelIdentifier, const String& name, const WebExtensionMessageSenderParameters& senderParameters, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&& completionHandler)
++{
++    static constexpr auto apiName = "runtime.connect()"_s;
++    const auto localWorld = senderParameters.contentWorldType;
++    constexpr auto bridgeWorld = WebExtensionContentWorldType::Native;
++
++    // The sender's port (its web process aims it at the Native world).
++    addPorts(localWorld, bridgeWorld, channelIdentifier, { senderParameters.pageProxyIdentifier });
++
++    RefPtr controller = extensionController();
++    RefPtr destination = controller ? controller->extensionContext(extensionID) : nullptr;
++    if (!destination || !destination->isLoaded() || !protect(destination->extension())->acceptsExternalMessagesFrom(uniqueIdentifier())) {
++        // The page reports the error and disconnects its port.
++        completionHandler(toWebExtensionError(apiName, nullString(), "Could not establish connection. Receiving end does not exist."_s));
++        return;
++    }
++
++    // The bridge is this side's far end until the other side disconnects.
++    m_ports.add({ bridgeWorld, channelIdentifier });
++    m_portBridgesHaiku.set(channelIdentifier, PortBridgeHaiku { *destination, localWorld });
++    destination->acceptBridgedConnectHaiku(*this, channelIdentifier, name, senderParameters);
++    completionHandler({ });
++}
++
++void WebExtensionContext::acceptBridgedConnectHaiku(WebExtensionContext& source, WebExtensionPortChannelIdentifier channelIdentifier, const String& name, const WebExtensionMessageSenderParameters& senderParameters)
++{
++    constexpr auto bridgeWorld = WebExtensionContentWorldType::Native;
++    constexpr auto localWorld = WebExtensionContentWorldType::Main;
++
++    m_ports.add({ bridgeWorld, channelIdentifier });
++    m_portBridgesHaiku.set(channelIdentifier, PortBridgeHaiku { source, localWorld });
++
++    WebExtensionMessageSenderParameters completeSenderParameters = senderParameters;
++    completeSenderParameters.extensionUniqueIdentifier = source.uniqueIdentifier();
++    // Tab identifiers are this extension's own.
++    if (RefPtr tab = getTab(senderParameters.pageProxyIdentifier))
++        completeSenderParameters.tabParameters = tab->parameters();
++    else
++        completeSenderParameters.tabParameters = std::nullopt;
++    // The receiving ports post to the bridge.
++    completeSenderParameters.contentWorldType = bridgeWorld;
++
++    constexpr auto eventType = WebExtensionEventListenerType::RuntimeOnConnectExternal;
++    wakeUpBackgroundContentIfNecessaryToFireEvents({ eventType }, [=, this, protectedThis = Ref { *this }]() mutable {
++        auto mainWorldProcesses = processes(eventType, localWorld);
++        if (mainWorldProcesses.isEmpty()) {
++            bridgedPeerDisconnectedHaiku(channelIdentifier);
++            return;
++        }
++        auto handledCount = Box<size_t>::create(0);
++        size_t totalExpected = mainWorldProcesses.size();
++        for (auto& process : mainWorldProcesses) {
++            process->sendWithAsyncReply(Messages::WebExtensionContextProxy::DispatchRuntimeConnectEvent(localWorld, channelIdentifier, name, std::nullopt, completeSenderParameters, false), [=, this, protectedThis = Ref { *this }](HashCountedSet<WebPageProxyIdentifier>&& addedPortCounts) mutable {
++                addPorts(localWorld, bridgeWorld, channelIdentifier, WTF::move(addedPortCounts));
++                fireQueuedPortMessageEventsIfNeeded(localWorld, channelIdentifier);
++                if (++*handledCount < totalExpected)
++                    return;
++                // No listener kept a port: the sender's port disconnects.
++                if (!openPortCount(localWorld, channelIdentifier))
++                    bridgedPeerDisconnectedHaiku(channelIdentifier);
++            }, identifier());
++        }
++    });
++}
++
++bool WebExtensionContext::relayBridgedPortMessageHaiku(WebExtensionPortChannelIdentifier channelIdentifier, const String& messageJSON)
++{
++    auto bridge = m_portBridgesHaiku.find(channelIdentifier);
++    if (bridge == m_portBridgesHaiku.end())
++        return false;
++    RefPtr peer = bridge->value.peer.get();
++    if (!peer)
++        return true;
++    auto peerBridge = peer->m_portBridgesHaiku.find(channelIdentifier);
++    if (peerBridge == peer->m_portBridgesHaiku.end())
++        return true;
++    // Queued there until the far port exists. Gestures do not cross extensions.
++    peer->portPostMessage(WebExtensionContentWorldType::Native, peerBridge->value.localWorld, std::nullopt, channelIdentifier, messageJSON, false);
++    return true;
++}
++
++void WebExtensionContext::bridgedPeerDisconnectedHaiku(WebExtensionPortChannelIdentifier channelIdentifier)
++{
++    auto entry = m_portBridgesHaiku.find(channelIdentifier);
++    if (entry == m_portBridgesHaiku.end())
++        return;
++    auto bridge = entry->value;
++    m_portBridgesHaiku.remove(entry);
++    m_ports.removeAll({ WebExtensionContentWorldType::Native, channelIdentifier });
++    firePortDisconnectEventIfNeeded(WebExtensionContentWorldType::Native, bridge.localWorld, channelIdentifier);
++    clearQueuedPortMessages(bridge.localWorld, channelIdentifier);
++    if (RefPtr peer = bridge.peer.get(); peer && peer->m_portBridgesHaiku.contains(channelIdentifier))
++        peer->bridgedPeerDisconnectedHaiku(channelIdentifier);
++}
++
 +void WebExtensionContext::receiveExternalRuntimeMessageHaiku(const String& senderIdentifier, const String& messageJSON, const WebExtensionMessageSenderParameters& senderParameters, CompletionHandler<void(std::expected<String, WebExtensionError>&&)>&& completionHandler)
 +{
 +    WebExtensionMessageSenderParameters completeSenderParameters = senderParameters;
@@ -91151,6 +91258,13 @@ index 0000000000000000000000000000000000000000..b9c4867afdc7e4522ede241117774234
 +void WebExtensionContext::runtimeConnect(const String& extensionID, WebExtensionPortChannelIdentifier channelIdentifier, const String& name, const WebExtensionMessageSenderParameters& senderParameters, bool userGesture, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&& completionHandler)
 +{
 +    static constexpr auto apiName = "runtime.connect()"_s;
++
++#if PLATFORM(HAIKU)
++    if (!extensionID.isEmpty() && uniqueIdentifier() != extensionID) {
++        connectToExtensionHaiku(extensionID, channelIdentifier, name, senderParameters, WTF::move(completionHandler));
++        return;
++    }
++#endif
 +
 +    const auto sourceContentWorldType = senderParameters.contentWorldType;
 +    constexpr auto targetContentWorldType = WebExtensionContentWorldType::Main;
@@ -94743,7 +94857,7 @@ index 8947f24ec9866c39f206aab464ec21c5d4213b95..b36f80023077ec3bc5680f7214a823a4
  
  #endif // ENABLE(WK_WEB_EXTENSIONS)
 diff --git a/Source/WebKit/UIProcess/Extensions/WebExtensionContext.h b/Source/WebKit/UIProcess/Extensions/WebExtensionContext.h
-index 5f8454dd5897a49ffba794e50fb04b7257ad2291..1bd6f1621e985dafdf45da13648a6aa77e10c7ba 100644
+index 5f8454dd5897a49ffba794e50fb04b7257ad2291..ac088893072e68cd8f900b8913d3444bc144c30a 100644
 --- a/Source/WebKit/UIProcess/Extensions/WebExtensionContext.h
 +++ b/Source/WebKit/UIProcess/Extensions/WebExtensionContext.h
 @@ -40,6 +40,9 @@
@@ -95198,7 +95312,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..1bd6f1621e985dafdf45da13648a6aa7
      void removeNativePort(WebExtensionMessagePort&);
      unsigned openPortCount(WebExtensionContentWorldType, WebExtensionPortChannelIdentifier);
      bool isPortConnected(WebExtensionContentWorldType sourceContentWorldType, WebExtensionContentWorldType targetContentWorldType, WebExtensionPortChannelIdentifier);
-@@ -1030,13 +1231,17 @@ private:
+@@ -1030,13 +1231,27 @@ private:
      void firePortMessageEventsIfNeeded(WebExtensionContentWorldType, std::optional<WebPageProxyIdentifier>, WebExtensionPortChannelIdentifier, const String& messageJSON, bool userGesture);
      void fireQueuedPortMessageEventsIfNeeded(WebExtensionContentWorldType, WebExtensionPortChannelIdentifier);
      void sendQueuedNativePortMessagesIfNeeded(WebExtensionPortChannelIdentifier);
@@ -95213,11 +95327,21 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..1bd6f1621e985dafdf45da13648a6aa7
 +#if PLATFORM(HAIKU)
 +    // runtime.onMessageExternal for a message from another extension.
 +    void receiveExternalRuntimeMessageHaiku(const String& senderIdentifier, const String& messageJSON, const WebExtensionMessageSenderParameters&, CompletionHandler<void(std::expected<String, WebExtensionError>&&)>&&);
++    // runtime.connect between extensions: each context's end of the port
++    // is bridged through its Native world to the other context.
++    void connectToExtensionHaiku(const String& extensionID, WebExtensionPortChannelIdentifier, const String& name, const WebExtensionMessageSenderParameters&, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
++    void acceptBridgedConnectHaiku(WebExtensionContext& source, WebExtensionPortChannelIdentifier, const String& name, const WebExtensionMessageSenderParameters&);
++    bool relayBridgedPortMessageHaiku(WebExtensionPortChannelIdentifier, const String& messageJSON);
++    void bridgedPeerDisconnectedHaiku(WebExtensionPortChannelIdentifier);
++    struct PortBridgeHaiku {
++        WeakPtr<WebExtensionContext> peer;
++        WebExtensionContentWorldType localWorld;
++    };
 +#endif
      void runtimeConnect(const String& extensionID, WebExtensionPortChannelIdentifier, const String& name, const WebExtensionMessageSenderParameters&, bool userGesture, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
      void runtimeSendNativeMessage(const String& applicationID, const String& messageJSON, CompletionHandler<void(std::expected<String, WebExtensionError>&&)>&&);
      void runtimeConnectNative(const String& applicationID, WebExtensionPortChannelIdentifier, WebPageProxyIdentifier, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
-@@ -1055,6 +1260,15 @@ private:
+@@ -1055,6 +1270,15 @@ private:
      void scriptingGetRegisteredScripts(const Vector<String>&, CompletionHandler<void(std::expected<Vector<WebExtensionRegisteredScriptParameters>, WebExtensionError>&&)>&&);
      void scriptingUnregisterContentScripts(const Vector<String>&, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
      bool createInjectedContentForScripts(const Vector<WebExtensionRegisteredScriptParameters>&, WebExtensionDynamicScripts::WebExtensionRegisteredScript::FirstTimeRegistration, DynamicInjectedContentsMap&, NSString *callingAPIName, NSString **errorMessage);
@@ -95233,7 +95357,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..1bd6f1621e985dafdf45da13648a6aa7
  
      // Sidebar APIs
  #if ENABLE(WK_WEB_EXTENSIONS_SIDEBAR)
-@@ -1103,6 +1317,9 @@ private:
+@@ -1103,6 +1327,9 @@ private:
      void tabsSetZoom(WebPageProxyIdentifier, std::optional<WebExtensionTabIdentifier>, double, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
      void tabsMove(Vector<WebExtensionTabIdentifier>, std::optional<WebExtensionWindowIdentifier>, double, CompletionHandler<void(std::expected<Vector<WebExtensionTabParameters>, WebExtensionError>&&)>&&);
      void tabsRemove(Vector<WebExtensionTabIdentifier>, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
@@ -95243,7 +95367,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..1bd6f1621e985dafdf45da13648a6aa7
      void tabsExecuteScript(WebPageProxyIdentifier, std::optional<WebExtensionTabIdentifier>, const WebExtensionScriptInjectionParameters&, bool userGesture, CompletionHandler<void(std::expected<Vector<WebExtensionScriptInjectionResultParameters>, WebExtensionError>&&)>&&);
      void tabsInsertCSS(WebPageProxyIdentifier, std::optional<WebExtensionTabIdentifier>, const WebExtensionScriptInjectionParameters&, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
      void tabsRemoveCSS(WebPageProxyIdentifier, std::optional<WebExtensionTabIdentifier>, const WebExtensionScriptInjectionParameters&, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
-@@ -1133,8 +1350,20 @@ private:
+@@ -1133,8 +1360,20 @@ private:
      void fireWindowsEventIfNeeded(WebExtensionEventListenerType, std::optional<WebExtensionWindowParameters>);
  
      // webRequest support.
@@ -95266,7 +95390,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..1bd6f1621e985dafdf45da13648a6aa7
  
      // IPC::MessageReceiver.
      void didReceiveMessage(IPC::Connection&, IPC::Decoder&) override;
-@@ -1151,6 +1380,13 @@ private:
+@@ -1151,6 +1390,13 @@ private:
      RetainPtr<NSMutableDictionary> m_state;
  #elif ENABLE(2022_GLIB_API)
      GRefPtr<GKeyFile> m_state;
@@ -95280,7 +95404,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..1bd6f1621e985dafdf45da13648a6aa7
  #endif
      Vector<Ref<API::Error>> m_errors;
  
-@@ -1169,6 +1405,15 @@ private:
+@@ -1169,6 +1415,15 @@ private:
  
      RefPtr<API::ContentWorld> m_contentScriptWorld;
  
@@ -95296,7 +95420,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..1bd6f1621e985dafdf45da13648a6aa7
      PermissionsMap m_grantedPermissions;
      PermissionsMap m_deniedPermissions;
  
-@@ -1194,6 +1439,14 @@ private:
+@@ -1194,6 +1449,14 @@ private:
      EventListenerTypeCountedSet m_backgroundContentEventListeners;
      EventListenerTypeFrameMap m_eventListenerFrames;
  
@@ -95311,7 +95435,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..1bd6f1621e985dafdf45da13648a6aa7
      bool m_shouldFireStartupEvent { false };
      InstallReason m_installReason { InstallReason::None };
      String m_previousVersion;
-@@ -1216,6 +1469,16 @@ private:
+@@ -1216,6 +1479,16 @@ private:
  #elif ENABLE(2022_GLIB_API)
      GRefPtr<WebKitWebView> m_backgroundWebView;
      GWeakPtr<WebKitWebExtensionContext> m_delegate;
@@ -95328,7 +95452,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..1bd6f1621e985dafdf45da13648a6aa7
  #endif
      Variant<std::monostate, Ref<ProcessThrottlerActivity>, Ref<ProcessActivityGroup>> m_backgroundWebViewActivity;
      RefPtr<API::Error> m_backgroundContentLoadError;
-@@ -1237,6 +1500,7 @@ private:
+@@ -1237,6 +1510,7 @@ private:
      HashMap<Ref<WebExtensionMatchPattern>, UserScriptVector> m_injectedScriptsPerPatternMap;
      HashMap<Ref<WebExtensionMatchPattern>, UserStyleSheetVector> m_injectedStyleSheetsPerPatternMap;
  
@@ -95336,13 +95460,16 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..1bd6f1621e985dafdf45da13648a6aa7
      HashMap<String, Ref<WebExtensionDynamicScripts::WebExtensionRegisteredScript>> m_registeredScriptsMap;
      RefPtr<WebExtensionRegisteredScriptsSQLiteStore> m_registeredContentScriptsStorage;
  
-@@ -1256,11 +1520,17 @@ private:
+@@ -1256,11 +1530,20 @@ private:
  #endif // ENABLE(WK_WEB_EXTENSIONS_SIDEBAR)
  
      PortCountedSet m_ports;
 -    PageProxyIdentifierPortMap m_pagePortMap;
 +    WebExtensionPagePortMap m_pagePortMap;
      PortQueuedMessageMap m_portQueuedMessages;
++#if PLATFORM(HAIKU)
++    HashMap<WebExtensionPortChannelIdentifier, PortBridgeHaiku> m_portBridgesHaiku;
++#endif
      NativePortMap m_nativePortMap;
  
      mutable WindowIdentifierMap m_windowMap;
@@ -95355,7 +95482,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..1bd6f1621e985dafdf45da13648a6aa7
      mutable WindowIdentifierVector m_windowOrderVector;
      mutable std::optional<WebExtensionWindowIdentifier> m_focusedWindowIdentifier;
  
-@@ -1276,6 +1546,12 @@ private:
+@@ -1276,6 +1559,12 @@ private:
      bool m_populatedCommands { false };
  
      String m_declarativeNetRequestContentRuleListFilePath;
@@ -95368,7 +95495,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..1bd6f1621e985dafdf45da13648a6aa7
      DeclarativeNetRequestMatchedRuleVector m_matchedRules;
      RefPtr<WebExtensionDeclarativeNetRequestSQLiteStore> m_declarativeNetRequestDynamicRulesStore;
      RefPtr<WebExtensionDeclarativeNetRequestSQLiteStore> m_declarativeNetRequestSessionRulesStore;
-@@ -1283,6 +1559,9 @@ private:
+@@ -1283,6 +1572,9 @@ private:
      HashSet<double> m_sessionRulesIDs;
      HashSet<double> m_dynamicRulesIDs;
  
@@ -95378,7 +95505,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..1bd6f1621e985dafdf45da13648a6aa7
      MenuItemMap m_menuItems;
      MenuItemVector m_mainMenuItems;
  
-@@ -1300,12 +1579,16 @@ private:
+@@ -1300,12 +1592,16 @@ private:
          String message;
  #if PLATFORM(COCOA)
          RetainPtr<id> argument;
@@ -95395,7 +95522,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..1bd6f1621e985dafdf45da13648a6aa7
  
      Deque<TestMessage> m_testMessageQueue;
      Deque<TestMessage> m_testStartedQueue;
-@@ -1315,6 +1598,8 @@ private:
+@@ -1315,6 +1611,8 @@ private:
      void sendQueuedTestMessagesIfNeeded(WebExtensionEventListenerType);
  #if PLATFORM(COCOA)
      void addTestMessageToQueue(const String& message, id argument, WebExtensionEventListenerType);
@@ -137583,7 +137710,7 @@ index 0000000000000000000000000000000000000000..413f2e16107bcca192b92268f84c4d3d
 +SPECIALIZE_TYPE_TRAITS_WEB_EXTENSION(WebExtensionAPIPrivacySetting, privacySetting);
 +#endif
 diff --git a/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIRuntime.cpp b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIRuntime.cpp
-index 81412a7ab5e7f5845d4d19a813c2552c1cf361d6..144f6c99557cfbf649e5da5753d6d3f5cc2c1c3d 100644
+index 81412a7ab5e7f5845d4d19a813c2552c1cf361d6..ec65a9b46b92da70dc7e5261a109c39a07eb4563 100644
 --- a/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIRuntime.cpp
 +++ b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIRuntime.cpp
 @@ -30,6 +30,8 @@
@@ -137796,15 +137923,25 @@ index 81412a7ab5e7f5845d4d19a813c2552c1cf361d6..144f6c99557cfbf649e5da5753d6d3f5
  }
  
  RefPtr<WebExtensionAPIPort> WebExtensionAPIRuntime::connect(WebPageProxyIdentifier webPageProxyIdentifier, WebFrame& frame, JSContextRef context, const String& extensionID, RefPtr<JSON::Value> options, String& outExceptionString)
-@@ -362,7 +475,6 @@ RefPtr<WebExtensionAPIPort> WebExtensionAPIRuntime::connect(WebPageProxyIdentifi
+@@ -360,9 +473,15 @@ RefPtr<WebExtensionAPIPort> WebExtensionAPIRuntime::connect(WebPageProxyIdentifi
+         documentIdentifier.value(),
+     };
  
-     Ref port = WebExtensionAPIPort::create(*this, webPageProxyIdentifier, WebExtensionContentWorldType::Main, resolvedName);
+-    Ref port = WebExtensionAPIPort::create(*this, webPageProxyIdentifier, WebExtensionContentWorldType::Main, resolvedName);
++    auto targetContentWorldType = WebExtensionContentWorldType::Main;
++#if PLATFORM(HAIKU)
++    // Another extension: the UI process bridges the port through the Native
++    // world to that extension's context.
++    if (!extensionID.isEmpty() && extensionID != extensionContext().uniqueIdentifier())
++        targetContentWorldType = WebExtensionContentWorldType::Native;
++#endif
++    Ref port = WebExtensionAPIPort::create(*this, webPageProxyIdentifier, targetContentWorldType, resolvedName);
  
 -#if PLATFORM(COCOA)
      bool userGesture = WebCore::UserGestureIndicator::processingUserGesture();
      WebProcess::singleton().sendWithAsyncReply(Messages::WebExtensionContext::RuntimeConnect(extensionID, port->channelIdentifier(), resolvedName, senderParameters, userGesture), [=, this, protectedThis = Ref { *this }, globalContext = JSRetainPtr { JSContextGetGlobalContext(context) }](std::expected<void, WebExtensionError>&& result) {
          if (result)
-@@ -371,7 +483,6 @@ RefPtr<WebExtensionAPIPort> WebExtensionAPIRuntime::connect(WebPageProxyIdentifi
+@@ -371,7 +490,6 @@ RefPtr<WebExtensionAPIPort> WebExtensionAPIRuntime::connect(WebPageProxyIdentifi
          port->setError(globalContext.get(), protect(runtime())->reportError(result.error(), globalContext.get()));
          port->disconnect();
      }, extensionContext().identifier());
@@ -137812,7 +137949,7 @@ index 81412a7ab5e7f5845d4d19a813c2552c1cf361d6..144f6c99557cfbf649e5da5753d6d3f5
  
      return port;
  }
-@@ -380,7 +491,7 @@ void WebExtensionAPIRuntime::sendNativeMessage(WebFrame& frame, const String& ap
+@@ -380,7 +498,7 @@ void WebExtensionAPIRuntime::sendNativeMessage(WebFrame& frame, const String& ap
  {
      // Documentation: https://developer.mozilla.org/docs/Mozilla/Add-ons/WebExtensions/API/runtime/sendNativeMessage
  
@@ -137821,7 +137958,7 @@ index 81412a7ab5e7f5845d4d19a813c2552c1cf361d6..144f6c99557cfbf649e5da5753d6d3f5
      WebProcess::singleton().sendWithAsyncReply(Messages::WebExtensionContext::RuntimeSendNativeMessage(applicationID, messageJSON), [protectedThis = Ref { *this }, callback = WTF::move(callback)](std::expected<String, WebExtensionError>&& result) {
          if (!result) {
              callback->reportError(result.error());
-@@ -389,6 +500,12 @@ void WebExtensionAPIRuntime::sendNativeMessage(WebFrame& frame, const String& ap
+@@ -389,6 +507,12 @@ void WebExtensionAPIRuntime::sendNativeMessage(WebFrame& frame, const String& ap
  
          callback->call(fromJSON(callback->globalContext(), JSON::Value::parseJSON(result.value())));
      }, extensionContext().identifier());
@@ -137834,7 +137971,7 @@ index 81412a7ab5e7f5845d4d19a813c2552c1cf361d6..144f6c99557cfbf649e5da5753d6d3f5
  #endif
  }
  
-@@ -398,7 +515,9 @@ RefPtr<WebExtensionAPIPort> WebExtensionAPIRuntime::connectNative(WebPageProxyId
+@@ -398,7 +522,9 @@ RefPtr<WebExtensionAPIPort> WebExtensionAPIRuntime::connectNative(WebPageProxyId
  
      Ref port = WebExtensionAPIPort::create(*this, webPageProxyIdentifier, WebExtensionContentWorldType::Native, applicationID);
  
@@ -137845,7 +137982,7 @@ index 81412a7ab5e7f5845d4d19a813c2552c1cf361d6..144f6c99557cfbf649e5da5753d6d3f5
      WebProcess::singleton().sendWithAsyncReply(Messages::WebExtensionContext::RuntimeConnectNative(applicationID, port->channelIdentifier(), webPageProxyIdentifier), [=, this, protectedThis = Ref { *this }, globalContext = JSRetainPtr { JSContextGetGlobalContext(context) }](std::expected<void, WebExtensionError>&& result) {
          if (result)
              return;
-@@ -406,6 +525,12 @@ RefPtr<WebExtensionAPIPort> WebExtensionAPIRuntime::connectNative(WebPageProxyId
+@@ -406,6 +532,12 @@ RefPtr<WebExtensionAPIPort> WebExtensionAPIRuntime::connectNative(WebPageProxyId
          port->setError(globalContext.get(), protect(runtime())->reportError(result.error(), globalContext.get()));
          port->disconnect();
      }, extensionContext().identifier());
@@ -137858,7 +137995,7 @@ index 81412a7ab5e7f5845d4d19a813c2552c1cf361d6..144f6c99557cfbf649e5da5753d6d3f5
  #endif
  
      return port;
-@@ -446,7 +571,6 @@ void WebExtensionAPIWebPageRuntime::sendMessage(WebPage& page, WebFrame& frame,
+@@ -446,7 +578,6 @@ void WebExtensionAPIWebPageRuntime::sendMessage(WebPage& page, WebFrame& frame,
          return;
      }
  
@@ -137866,7 +138003,7 @@ index 81412a7ab5e7f5845d4d19a813c2552c1cf361d6..144f6c99557cfbf649e5da5753d6d3f5
      WebProcess::singleton().sendWithAsyncReply(Messages::WebExtensionContext::RuntimeWebPageSendMessage(extensionID, messageJSON, senderParameters), [protectedThis = Ref { *this }, callback = WTF::move(callback)](std::expected<String, WebExtensionError>&& result) {
          if (!result) {
              callback->call();
-@@ -455,7 +579,6 @@ void WebExtensionAPIWebPageRuntime::sendMessage(WebPage& page, WebFrame& frame,
+@@ -455,7 +586,6 @@ void WebExtensionAPIWebPageRuntime::sendMessage(WebPage& page, WebFrame& frame,
  
          callback->call(fromJSON(callback->globalContext(), JSON::Value::parseJSON(result.value())));
      }, destinationExtensionContext->identifier());
@@ -137874,7 +138011,7 @@ index 81412a7ab5e7f5845d4d19a813c2552c1cf361d6..144f6c99557cfbf649e5da5753d6d3f5
  }
  
  RefPtr<WebExtensionAPIPort> WebExtensionAPIWebPageRuntime::connect(WebPage& page, WebFrame& frame, JSContextRef context, const String& extensionID, RefPtr<JSON::Value> options, String& outExceptionString)
-@@ -490,9 +613,7 @@ RefPtr<WebExtensionAPIPort> WebExtensionAPIWebPageRuntime::connect(WebPage& page
+@@ -490,9 +620,7 @@ RefPtr<WebExtensionAPIPort> WebExtensionAPIWebPageRuntime::connect(WebPage& page
          Ref port = WebExtensionAPIPort::create(*this, resolvedName);
  
          callAfterRandomDelay([=]() {
@@ -137884,7 +138021,7 @@ index 81412a7ab5e7f5845d4d19a813c2552c1cf361d6..144f6c99557cfbf649e5da5753d6d3f5
          });
  
          return port;
-@@ -500,7 +621,6 @@ RefPtr<WebExtensionAPIPort> WebExtensionAPIWebPageRuntime::connect(WebPage& page
+@@ -500,7 +628,6 @@ RefPtr<WebExtensionAPIPort> WebExtensionAPIWebPageRuntime::connect(WebPage& page
  
      Ref port = WebExtensionAPIPort::create(contentWorldType(), protect(runtime()), *destinationExtensionContext, page.webPageProxyIdentifier(), WebExtensionContentWorldType::Main, resolvedName);
  
@@ -137892,7 +138029,7 @@ index 81412a7ab5e7f5845d4d19a813c2552c1cf361d6..144f6c99557cfbf649e5da5753d6d3f5
      WebProcess::singleton().sendWithAsyncReply(Messages::WebExtensionContext::RuntimeWebPageConnect(extensionID, port->channelIdentifier(), resolvedName, senderParameters), [=, this, protectedThis = Ref { *this }, globalContext = JSRetainPtr { JSContextGetGlobalContext(context) }](std::expected<void, WebExtensionError>&& result) {
          if (result)
              return;
-@@ -508,7 +628,6 @@ RefPtr<WebExtensionAPIPort> WebExtensionAPIWebPageRuntime::connect(WebPage& page
+@@ -508,7 +635,6 @@ RefPtr<WebExtensionAPIPort> WebExtensionAPIWebPageRuntime::connect(WebPage& page
          port->setError(globalContext.get(), protect(runtime())->reportError(result.error(), globalContext.get()));
          port->disconnect();
      }, destinationExtensionContext->identifier());
@@ -137900,7 +138037,7 @@ index 81412a7ab5e7f5845d4d19a813c2552c1cf361d6..144f6c99557cfbf649e5da5753d6d3f5
  
      return port;
  }
-@@ -573,6 +692,24 @@ WebExtensionAPIEvent& WebExtensionAPIRuntime::onMessageExternal()
+@@ -573,6 +699,24 @@ WebExtensionAPIEvent& WebExtensionAPIRuntime::onMessageExternal()
      return *m_onMessageExternal;
  }
  
@@ -137925,7 +138062,7 @@ index 81412a7ab5e7f5845d4d19a813c2552c1cf361d6..144f6c99557cfbf649e5da5753d6d3f5
  bool WebExtensionContextProxy::matchesTarget(WebFrame& frame, const std::optional<WebExtensionMessageTargetParameters>& targetParameters)
  {
      if (!targetParameters)
-@@ -599,6 +736,125 @@ bool WebExtensionContextProxy::matchesTarget(WebFrame& frame, const std::optiona
+@@ -599,6 +743,125 @@ bool WebExtensionContextProxy::matchesTarget(WebFrame& frame, const std::optiona
      return true;
  }
  
@@ -138051,7 +138188,7 @@ index 81412a7ab5e7f5845d4d19a813c2552c1cf361d6..144f6c99557cfbf649e5da5753d6d3f5
  void WebExtensionContextProxy::dispatchRuntimeMessageEvent(WebExtensionContentWorldType contentWorldType, const String& messageJSON, const std::optional<WebExtensionMessageTargetParameters>& targetParameters, const WebExtensionMessageSenderParameters& senderParameters, bool userGesture, CompletionHandler<void(String&& replyJSON)>&& completionHandler)
  {
      switch (contentWorldType) {
-@@ -606,11 +862,11 @@ void WebExtensionContextProxy::dispatchRuntimeMessageEvent(WebExtensionContentWo
+@@ -606,11 +869,11 @@ void WebExtensionContextProxy::dispatchRuntimeMessageEvent(WebExtensionContentWo
  #if ENABLE(INSPECTOR_EXTENSIONS)
      case WebExtensionContentWorldType::Inspector:
  #endif
@@ -138065,7 +138202,22 @@ index 81412a7ab5e7f5845d4d19a813c2552c1cf361d6..144f6c99557cfbf649e5da5753d6d3f5
          return;
  
      case WebExtensionContentWorldType::Native:
-@@ -715,7 +971,7 @@ void WebExtensionContextProxy::dispatchRuntimeInstalledEvent(WebExtensionContext
+@@ -641,7 +904,13 @@ void WebExtensionContextProxy::internalDispatchRuntimeConnectEvent(WebExtensionC
+             return;
+ 
+         WebExtensionAPIEvent::ListenerVector listeners;
+-        if (sourceContentWorldType == WebExtensionContentWorldType::WebPage)
++        bool external = sourceContentWorldType == WebExtensionContentWorldType::WebPage;
++#if PLATFORM(HAIKU)
++        // A port from another extension (runtime.connect(id, ...)).
++        if (senderParameters.extensionUniqueIdentifier && *senderParameters.extensionUniqueIdentifier != uniqueIdentifier())
++            external = true;
++#endif
++        if (external)
+             listeners = namespaceObject.runtime().onConnectExternal().listeners();
+         else
+             listeners = namespaceObject.runtime().onConnect().listeners();
+@@ -715,7 +984,7 @@ void WebExtensionContextProxy::dispatchRuntimeInstalledEvent(WebExtensionContext
  
      details->setString(reasonKey, toWebAPI(installReason));
  
