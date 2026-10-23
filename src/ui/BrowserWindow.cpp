@@ -1687,6 +1687,13 @@ void BrowserWindow::WebKitCloseCommitted(const BMessage& message)
             fStatus->SetText("Close cancelled");
             return;
         }
+#if SUMMIT_MODERN_WEBKIT
+        {
+            std::vector<PageRecord> closed;
+            for (const auto& tab : fTabs) closed.push_back({tab.url, tab.title});
+            RecordClosedSession(closed, closed.size() > 1, 0);
+        }
+#endif
         for (auto& tab : fTabs) {
             tab.view->RemoveSelf();
             delete tab.view;
@@ -1788,6 +1795,9 @@ void BrowserWindow::FinishCloseTab(int64 id)
         auto* webView = fTabs[i].view;
         fClosedTabs.push_back({fTabs[i].url, fTabs[i].title});
         if (fClosedTabs.size() > 25) fClosedTabs.erase(fClosedTabs.begin());
+#if SUMMIT_MODERN_WEBKIT
+        RecordClosedSession({fClosedTabs.back()}, false, i);
+#endif
 #if !SUMMIT_MODERN_WEBKIT
         if (selected) SetCurrentWebView(nullptr);
 #endif
@@ -2317,6 +2327,7 @@ void BrowserWindow::BrowserCommand(const BMessage& message)
         case B_WEBKIT_BROWSER_BOOKMARKS: BookmarksCommand(message, identifier); return;
         case B_WEBKIT_BROWSER_SEARCH: SearchCommand(message, identifier, tab); return;
         case B_WEBKIT_BROWSER_BROWSING_DATA: BrowsingDataCommand(message, identifier); return;
+        case B_WEBKIT_BROWSER_SESSIONS: SessionsCommand(message, identifier); return;
         case B_WEBKIT_BROWSER_SET_WINDOW_STATE: {
             const std::string state = message.GetString("state", "");
             if (state == "minimized") Minimize(true);
@@ -4445,7 +4456,14 @@ void BrowserWindow::MessageReceived(BMessage* message)
                 SelectTab(fTabs[(i + (message->what == kNextTab ? 1 : fTabs.size() - 1)) % fTabs.size()].id); break;
             } break;
         case kReopenTab:
-            if (!fClosedTabs.empty()) { auto page = fClosedTabs.back(); fClosedTabs.pop_back(); CreateTab(page.url); } break;
+            if (!fClosedTabs.empty()) {
+                auto page = fClosedTabs.back();
+                fClosedTabs.pop_back();
+#if SUMMIT_MODERN_WEBKIT
+                ForgetClosedSessionTab(page.url);
+#endif
+                CreateTab(page.url);
+            } break;
         case kOpenFile:
             if (!fOpenPanel) {
                 BMessenger target(this);

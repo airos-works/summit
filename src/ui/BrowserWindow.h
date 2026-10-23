@@ -559,6 +559,13 @@ private:
     // and the context's answers to the removals it asked for.
     void BrowsingDataCommand(const BMessage& message, uint64 identifier);
     void BrowsingDataReply(const BMessage& message);
+    // An extension's chrome.sessions call (B_WEBKIT_BROWSER_SESSIONS).
+    void SessionsCommand(const BMessage& message, uint64 identifier);
+    // Remembers a closed tab, or a closed window's tabs, for
+    // sessions.getRecentlyClosed (not of private windows).
+    void RecordClosedSession(const std::vector<PageRecord>& tabs, bool window, size_t index);
+    // Reopen Closed Tab took url back.
+    void ForgetClosedSessionTab(const std::string& url);
     // Tells extensions how the bookmarks changed since the last report
     // (bookmarks.onCreated and the rest), whoever changed them. Windows call
     // it when the bookmarks change; the first report only remembers them.

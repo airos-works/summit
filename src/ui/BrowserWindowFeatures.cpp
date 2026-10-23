@@ -1199,6 +1199,122 @@ void BrowserWindow::BrowsingDataReply(const BMessage& message)
     fWebKitContext->RemoveWebsiteDataOfSites(types, sites, BMessenger(this), id);
 }
 
+// chrome.sessions (#106): the tabs and windows closed while Summit runs,
+// newest last, shared by all windows.
+struct ClosedSession {
+    int64 id = 0;
+    int64 time = 0;
+    std::vector<PageRecord> tabs;
+    bool window = false;
+    size_t index = 0;
+};
+static std::mutex sClosedSessionsLock;
+static std::vector<ClosedSession> sClosedSessions;
+static int64 sNextClosedSession = 0;
+constexpr size_t kMaxClosedSessions = 25;
+
+static nlohmann::json SessionJSON(const ClosedSession& session)
+{
+    auto tab = [&](const PageRecord& page, size_t index, int64 id) {
+        return nlohmann::json({{"sessionId", std::to_string(id)}, {"url", page.url}, {"title", page.title},
+            {"index", index}, {"windowId", -1}, {"active", false}, {"highlighted", false}, {"selected", false},
+            {"pinned", false}, {"incognito", false}, {"discarded", false}, {"autoDiscardable", true}, {"groupId", -1}});
+    };
+    nlohmann::json result = {{"lastModified", session.time}};
+    if (!session.window) {
+        if (!session.tabs.empty()) result["tab"] = tab(session.tabs.front(), session.index, session.id);
+        return result;
+    }
+    auto tabs = nlohmann::json::array();
+    for (size_t i = 0; i < session.tabs.size(); ++i) {
+        // A window's tabs are restored with it; their ids are the window's.
+        auto item = tab(session.tabs[i], i, session.id);
+        item.erase("sessionId");
+        tabs.push_back(std::move(item));
+    }
+    result["window"] = {{"sessionId", std::to_string(session.id)}, {"tabs", std::move(tabs)}, {"type", "normal"},
+        {"state", "normal"}, {"focused", false}, {"incognito", false}, {"alwaysOnTop", false}};
+    return result;
+}
+
+void BrowserWindow::RecordClosedSession(const std::vector<PageRecord>& tabs, bool window, size_t index)
+{
+    if (fPrivate || fPopup) return;
+    std::vector<PageRecord> kept;
+    for (const auto& page : tabs)
+        if (!page.url.empty() && page.url != "about:blank") kept.push_back(page);
+    if (kept.empty()) return;
+    window = window && kept.size() > 1;
+    {
+        std::lock_guard lock(sClosedSessionsLock);
+        sClosedSessions.push_back({++sNextClosedSession, static_cast<int64>(std::time(nullptr)), std::move(kept), window, index});
+        if (sClosedSessions.size() > kMaxClosedSessions) sClosedSessions.erase(sClosedSessions.begin());
+    }
+    fWebKitContext->NotifySessionsChanged();
+}
+
+void BrowserWindow::ForgetClosedSessionTab(const std::string& url)
+{
+    {
+        std::lock_guard lock(sClosedSessionsLock);
+        auto found = std::find_if(sClosedSessions.rbegin(), sClosedSessions.rend(), [&](const ClosedSession& session) {
+            return !session.window && session.tabs.front().url == url;
+        });
+        if (found == sClosedSessions.rend()) return;
+        sClosedSessions.erase(std::next(found).base());
+    }
+    fWebKitContext->NotifySessionsChanged();
+}
+
+void BrowserWindow::SessionsCommand(const BMessage& message, uint64 identifier)
+{
+    const std::string method = message.GetString("method", "");
+    const auto arguments = nlohmann::json::parse(message.GetString("arguments", "{}"), nullptr, false);
+    if (arguments.is_discarded() || !arguments.is_object()) { RespondToCommand(identifier, B_BAD_VALUE); return; }
+    auto respond = [&](const nlohmann::json& data) {
+        fWebKitContext->RespondToBrowserCommandWithData(identifier, B_OK, data.dump().c_str());
+    };
+    const std::string wanted = arguments.value("sessionId", std::string());
+    auto matches = [&](const ClosedSession& session) { return wanted.empty() || std::to_string(session.id) == wanted; };
+    if (method == "getRecentlyClosed") {
+        const size_t limit = static_cast<size_t>(std::clamp(arguments.value("maxResults", 25.0), 0.0, 25.0));
+        auto sessions = nlohmann::json::array();
+        std::lock_guard lock(sClosedSessionsLock);
+        for (auto it = sClosedSessions.rbegin(); it != sClosedSessions.rend() && sessions.size() < limit; ++it)
+            sessions.push_back(SessionJSON(*it));
+        respond(sessions);
+        return;
+    }
+    if (method != "restore" && method != "forget") { RespondToCommand(identifier, B_NOT_SUPPORTED); return; }
+    std::optional<ClosedSession> taken;
+    {
+        std::lock_guard lock(sClosedSessionsLock);
+        auto found = std::find_if(sClosedSessions.rbegin(), sClosedSessions.rend(), matches);
+        if (found != sClosedSessions.rend()) {
+            taken = *found;
+            sClosedSessions.erase(std::next(found).base());
+        }
+    }
+    if (!taken) {
+        fWebKitContext->RespondToBrowserCommandWithData(identifier, B_BAD_VALUE, "null",
+            wanted.empty() ? "There are no recently closed sessions." : "Could not find a session with that id.");
+        return;
+    }
+    fWebKitContext->NotifySessionsChanged();
+    if (method == "forget") { respond(nullptr); return; }
+    std::vector<std::string> urls;
+    for (const auto& page : taken->tabs) urls.push_back(page.url);
+    if (taken->window) RequestNewWindow(urls, false);
+    else {
+        // Reopen Closed Tab no longer offers it.
+        auto reopen = std::find_if(fClosedTabs.rbegin(), fClosedTabs.rend(), [&](const PageRecord& page) { return page.url == urls.front(); });
+        if (reopen != fClosedTabs.rend()) fClosedTabs.erase(std::next(reopen).base());
+        CreateTab(urls.front(), true);
+    }
+    taken->time = static_cast<int64>(std::time(nullptr));
+    respond(SessionJSON(*taken));
+}
+
 // What extensions see of each node, for comparing two states of the bookmarks.
 struct BookmarkEntry {
     int64_t parent = 0;
