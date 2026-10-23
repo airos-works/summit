@@ -78817,10 +78817,10 @@ index e1e00f448cdfe28b28e6ac184bdb9025666411de..bbe23d2c25f24c8c9031515e563fee8b
  
  [Nested] enum class WebKit::WebExtension::InjectionTime : uint8_t {
 diff --git a/Source/WebKit/Shared/Extensions/WebExtensionEventListenerType.h b/Source/WebKit/Shared/Extensions/WebExtensionEventListenerType.h
-index c6ffb3e89eeaffe26af5d76690da641e7b65c4c0..5529517fded6ee2b38272615dbae29b2fafe27b5 100644
+index c6ffb3e89eeaffe26af5d76690da641e7b65c4c0..6244890d16f5c0afdbeaffa6d04ecbba6498c3e2 100644
 --- a/Source/WebKit/Shared/Extensions/WebExtensionEventListenerType.h
 +++ b/Source/WebKit/Shared/Extensions/WebExtensionEventListenerType.h
-@@ -99,11 +99,63 @@ enum class WebExtensionEventListenerType : uint8_t {
+@@ -99,11 +99,66 @@ enum class WebExtensionEventListenerType : uint8_t {
      WindowsOnCreated,
      WindowsOnFocusChanged,
      WindowsOnRemoved,
@@ -78841,6 +78841,7 @@ index c6ffb3e89eeaffe26af5d76690da641e7b65c4c0..5529517fded6ee2b38272615dbae29b2
 +    WebNavigationOnTabReplaced,
 +    DownloadsOnErased,
 +    TabsOnZoomChange,
++    WindowsOnBoundsChanged,
 +#endif
  };
  
@@ -78880,15 +78881,17 @@ index c6ffb3e89eeaffe26af5d76690da641e7b65c4c0..5529517fded6ee2b38272615dbae29b2
 +        return "onErased"_s;
 +    case WebExtensionEventListenerType::TabsOnZoomChange:
 +        return "onZoomChange"_s;
++    case WebExtensionEventListenerType::WindowsOnBoundsChanged:
++        return "onBoundsChanged"_s;
 +#endif
      case WebExtensionEventListenerType::Unknown:
          return nullString();
      case WebExtensionEventListenerType::ActionOnClicked:
 diff --git a/Source/WebKit/Shared/Extensions/WebExtensionEventListenerType.serialization.in b/Source/WebKit/Shared/Extensions/WebExtensionEventListenerType.serialization.in
-index 66271809620c823d465be4cee34c1806ab422cbe..ef8a2f71c1650ab393393fbfed0559cf16e1fdcf 100644
+index 66271809620c823d465be4cee34c1806ab422cbe..7cca342f436423808bdd41b3c0c4e490b3e4ff00 100644
 --- a/Source/WebKit/Shared/Extensions/WebExtensionEventListenerType.serialization.in
 +++ b/Source/WebKit/Shared/Extensions/WebExtensionEventListenerType.serialization.in
-@@ -90,6 +90,24 @@ enum class WebKit::WebExtensionEventListenerType : uint8_t {
+@@ -90,6 +90,25 @@ enum class WebKit::WebExtensionEventListenerType : uint8_t {
      WindowsOnCreated,
      WindowsOnFocusChanged,
      WindowsOnRemoved,
@@ -78909,6 +78912,7 @@ index 66271809620c823d465be4cee34c1806ab422cbe..ef8a2f71c1650ab393393fbfed0559cf
 +    WebNavigationOnTabReplaced,
 +    DownloadsOnErased,
 +    TabsOnZoomChange,
++    WindowsOnBoundsChanged,
 +#endif
  };
  
@@ -85806,10 +85810,10 @@ index 0000000000000000000000000000000000000000..9e9fa7eb3b8f9a9d0bc3f49bd45ced2d
 +}
 diff --git a/Source/WebKit/UIProcess/API/haiku/WebKitContext.h b/Source/WebKit/UIProcess/API/haiku/WebKitContext.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..9477a0778c23177a33391ef522f0aff55c7ea647
+index 0000000000000000000000000000000000000000..0da3a25fb7033aa1e32da91d4f5a244bbd382fb1
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/API/haiku/WebKitContext.h
-@@ -0,0 +1,473 @@
+@@ -0,0 +1,474 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#pragma once
@@ -85885,7 +85889,8 @@ index 0000000000000000000000000000000000000000..9477a0778c23177a33391ef522f0aff5
 +//   GO_BACK / GO_FORWARD  view.
 +//   OPEN_WINDOW    repeated url (may be absent), repeated view for existing
 +//                  tabs to adopt (hosts may answer B_NOT_SUPPORTED), focused
-+//                  (bool), type ("normal"/"popup"), state, private (bool).
++//                  (bool), type ("normal"/"popup"), state, private (bool),
++//                  optional left, top, width, height (double; NaN: host's choice).
 +//   CLOSE_WINDOW / FOCUS_WINDOW  window, window_identifier.
 +//   SET_WINDOW_STATE  window, state ("normal", "minimized", "maximized",
 +//                  "fullscreen").
@@ -96061,7 +96066,7 @@ index 2072e4a99372133e90eda56b3ba1bcc496705af0..0a7895a6e80d62a1cc8075b72a461a8b
  {
      HashSet<String> origins;
 diff --git a/Source/WebKit/UIProcess/Extensions/WebExtensionController.h b/Source/WebKit/UIProcess/Extensions/WebExtensionController.h
-index 7ec330ea503fa362051ba6c5f8fe4c263ffe2390..17550d3a6eaf9d006a922736085e1385ad17ae6e 100644
+index 7ec330ea503fa362051ba6c5f8fe4c263ffe2390..8e843b8763f27e98dfc99ee0c006f15ea0f16381 100644
 --- a/Source/WebKit/UIProcess/Extensions/WebExtensionController.h
 +++ b/Source/WebKit/UIProcess/Extensions/WebExtensionController.h
 @@ -45,6 +45,7 @@
@@ -96169,7 +96174,7 @@ index 7ec330ea503fa362051ba6c5f8fe4c263ffe2390..17550d3a6eaf9d006a922736085e1385
  
  #if ENABLE(CONTENT_EXTENSIONS)
      void resourceLoadWasBlockedByContentRuleList(WebPageProxyIdentifier, const WebExtensionContentRuleListBlockedLoadInfo&);
-@@ -266,17 +322,32 @@ private:
+@@ -266,17 +322,34 @@ private:
          {
              // FIXME: <https://webkit.org/b/267514> Add support for changeInfo.
  
@@ -96200,6 +96205,8 @@ index 7ec330ea503fa362051ba6c5f8fe4c263ffe2390..17550d3a6eaf9d006a922736085e1385
 +    std::unique_ptr<WebExtensionDownloadsHaiku> m_nativeDownloads;
 +    HashMap<WebPageProxyIdentifier, NavigationTargetSourceHaiku> m_navigationTargetSourcesHaiku;
 +    HashMap<WebPageProxyIdentifier, WebPageProxyIdentifier> m_openerPagesHaiku;
++    // windows.onBoundsChanged: windows moved or resized in the last 100 ms.
++    Vector<uint64_t> m_pendingBoundsWindowsHaiku;
 +#endif
  
  #if PLATFORM(COCOA)
@@ -102289,10 +102296,10 @@ index 0000000000000000000000000000000000000000..ef935e9aa0104dc22308026565130ac3
 +#endif // ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
 diff --git a/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextAPITabCommandsHaiku.cpp b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextAPITabCommandsHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..c00dd86face56582cc0a9efcc4972935044ee88c
+index 0000000000000000000000000000000000000000..7ffd11d767484aa741b85e76f261b777c7402a9b
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextAPITabCommandsHaiku.cpp
-@@ -0,0 +1,694 @@
+@@ -0,0 +1,700 @@
 +/*
 + * Copyright (C) 2023-2024 Apple Inc. All rights reserved.
 + *
@@ -102864,6 +102871,12 @@ index 0000000000000000000000000000000000000000..c00dd86face56582cc0a9efcc4972935
 +        && message.AddBool("private", profileIsPrivate) == B_OK
 +        && message.AddString("type", popup ? "popup" : "normal") == B_OK
 +        && message.AddString("state", stateName(creationParameters.state.value_or(WebExtensionWindow::State::Normal))) == B_OK;
++    // left, top, width, height (NaN: the host's choice).
++    if (complete && creationParameters.frame) {
++        auto& frame = *creationParameters.frame;
++        complete = message.AddDouble("left", frame.location().x()) == B_OK && message.AddDouble("top", frame.location().y()) == B_OK
++            && message.AddDouble("width", frame.size().width()) == B_OK && message.AddDouble("height", frame.size().height()) == B_OK;
++    }
 +
 +    if (creationParameters.tabs) {
 +        for (auto& tabParameters : creationParameters.tabs.value()) {
@@ -106525,10 +106538,10 @@ index 0000000000000000000000000000000000000000..a5f9aae43990067335545cb019b2e4f0
 +#endif // ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
 diff --git a/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionControllerHaiku.cpp b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionControllerHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..08b73bfff19f6bb112bca58e58318c96e3644cf9
+index 0000000000000000000000000000000000000000..4b70547af826839a0384209881f738b10f37feb0
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionControllerHaiku.cpp
-@@ -0,0 +1,92 @@
+@@ -0,0 +1,126 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#include "config.h"
@@ -106542,6 +106555,8 @@ index 0000000000000000000000000000000000000000..08b73bfff19f6bb112bca58e58318c96
 +#include "APIWebsitePolicies.h"
 +#include "ExtensionPermissionPromptHaiku.h"
 +#include "WebExtensionContext.h"
++#include "WebExtensionContextProxyMessages.h"
++#include "WebExtensionWindow.h"
 +#include "WebExtensionMatchPattern.h"
 +#include "WebExtensionPermission.h"
 +
@@ -106554,6 +106569,38 @@ index 0000000000000000000000000000000000000000..08b73bfff19f6bb112bca58e58318c96
 +    // Page configurations, the native SDK and loaded extension contexts share
 +    // this controller's host state without retaining native windows or pages.
 +    m_nativeBrowserTabs = std::make_shared<BrowserTabRegistryHaiku>();
++    m_nativeBrowserTabs->setFrameObserver([weakThis = WeakPtr { *this }](uint64_t windowIdentifier) {
++        RefPtr controller = weakThis.get();
++        if (!controller)
++            return;
++        // A drag reports every step: report the window once it has settled
++        // for 100 ms.
++        bool scheduled = !controller->m_pendingBoundsWindowsHaiku.isEmpty();
++        if (!controller->m_pendingBoundsWindowsHaiku.contains(windowIdentifier))
++            controller->m_pendingBoundsWindowsHaiku.append(windowIdentifier);
++        if (scheduled)
++            return;
++        RunLoop::mainSingleton().dispatchAfter(100_ms, [weakThis] {
++            RefPtr controller = weakThis.get();
++            if (!controller)
++                return;
++            auto windows = std::exchange(controller->m_pendingBoundsWindowsHaiku, { });
++            constexpr auto type = WebExtensionEventListenerType::WindowsOnBoundsChanged;
++            for (Ref context : controller->extensionContexts()) {
++                if (!context->isLoaded())
++                    continue;
++                for (auto identifier : windows) {
++                    RefPtr window = context->getOrCreateNativeWindow(identifier);
++                    if (!window || !window->extensionHasAccess())
++                        continue;
++                    context->wakeUpBackgroundContentIfNecessaryToFireEvents({ type }, [context, window, type] {
++                        if (window->extensionHasAccess())
++                            context->sendToProcessesForEvent(type, Messages::WebExtensionContextProxy::DispatchWindowsEvent(type, window->parameters()));
++                    });
++                }
++            }
++        });
++    });
 +    m_nativeBrowserTabs->setPinnedObserver([weakThis = WeakPtr { *this }](WebPageProxyIdentifier page) {
 +        RefPtr controller = weakThis.get();
 +        if (!controller)
@@ -114485,10 +114532,10 @@ index 0000000000000000000000000000000000000000..308e29a9828a8db24fb9a796881ea165
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/BrowserTabRegistryHaiku.cpp b/Source/WebKit/UIProcess/haiku/BrowserTabRegistryHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..99456897ea8804fabc28040c43d91bd46818a412
+index 0000000000000000000000000000000000000000..37253b88b4840324027e64c2906f06b1feab2a2c
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/BrowserTabRegistryHaiku.cpp
-@@ -0,0 +1,181 @@
+@@ -0,0 +1,191 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#include "config.h"
@@ -114585,9 +114632,19 @@ index 0000000000000000000000000000000000000000..99456897ea8804fabc28040c43d91bd4
 +void BrowserTabRegistryHaiku::setFrame(const BMessenger& window, BRect frame)
 +{
 +    ASSERT(isMainThread());
++    if (auto previous = this->frame(window); previous && *previous == frame)
++        return;
 +    // Forget closed windows' frames.
 +    m_frames.removeAllMatching([&](auto& entry) { return entry.first == window || !entry.first.IsValid(); });
 +    m_frames.append({ window, frame });
++    if (!m_frameObserver)
++        return;
++    for (auto& registered : m_windows) {
++        if (registered.messenger == window) {
++            m_frameObserver(registered.identifier);
++            break;
++        }
++    }
 +}
 +
 +std::optional<BRect> BrowserTabRegistryHaiku::frame(const BMessenger& window) const
@@ -114672,10 +114729,10 @@ index 0000000000000000000000000000000000000000..99456897ea8804fabc28040c43d91bd4
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/BrowserTabRegistryHaiku.h b/Source/WebKit/UIProcess/haiku/BrowserTabRegistryHaiku.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..e47cf8b5cb6f57d24a9e64d0c8afca1a854142ec
+index 0000000000000000000000000000000000000000..3f92dfc3539f3452d47442eb4dc6ea05f9c8c08e
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/BrowserTabRegistryHaiku.h
-@@ -0,0 +1,72 @@
+@@ -0,0 +1,76 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#pragma once
@@ -114727,7 +114784,10 @@ index 0000000000000000000000000000000000000000..e47cf8b5cb6f57d24a9e64d0c8afca1a
 +    void setPinnedObserver(PinnedObserver observer) { m_pinnedObserver = WTF::move(observer); }
 +    void setPinned(WebPageProxyIdentifier, bool pinned);
 +    bool isPinned(WebPageProxyIdentifier identifier) const { return m_pinnedPages.contains(identifier); }
-+    // Window frames (screen coordinates) as the browser reports them.
++    // Window frames (screen coordinates) as the browser reports them. The
++    // frame observer hears of each registered window whose frame changed.
++    using FrameObserver = std::function<void(uint64_t windowIdentifier)>;
++    void setFrameObserver(FrameObserver observer) { m_frameObserver = WTF::move(observer); }
 +    void setFrame(const BMessenger& window, BRect frame);
 +    std::optional<BRect> frame(const BMessenger& window) const;
 +
@@ -114742,6 +114802,7 @@ index 0000000000000000000000000000000000000000..e47cf8b5cb6f57d24a9e64d0c8afca1a
 +    PinnedObserver m_pinnedObserver;
 +    Vector<WebPageProxyIdentifier> m_pinnedPages;
 +    Vector<std::pair<BMessenger, BRect>> m_frames;
++    FrameObserver m_frameObserver;
 +    Vector<Window> m_windows;
 +    std::optional<uint64_t> m_focusedWindow;
 +    uint64_t m_nextWindowIdentifier { 1 };
@@ -142029,10 +142090,10 @@ index a81d859b2cf12338df656bfe866549760217a324..9086ad01f4b2069b1bfe7065325b5e98
  } // namespace WebKit
 diff --git a/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIWindows.cpp b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIWindows.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..1636d5b22f88069d8fadeecbbe58cbca7d1ccf28
+index 0000000000000000000000000000000000000000..38fff069075b2397a591b0b53f4e0e1ef9c19b06
 --- /dev/null
 +++ b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIWindows.cpp
-@@ -0,0 +1,237 @@
+@@ -0,0 +1,255 @@
 +/*
 + * Copyright (C) 2023 Apple Inc. All rights reserved.
 + *
@@ -142235,6 +142296,15 @@ index 0000000000000000000000000000000000000000..1636d5b22f88069d8fadeecbbe58cbca
 +        m_onFocusChanged = WebExtensionAPIWindowsEvent::create(*this, WebExtensionEventListenerType::WindowsOnFocusChanged);
 +    return *m_onFocusChanged;
 +}
++#if PLATFORM(HAIKU)
++WebExtensionAPIWindowsEvent& WebExtensionAPIWindows::onBoundsChanged()
++{
++    if (!m_onBoundsChanged)
++        m_onBoundsChanged = WebExtensionAPIWindowsEvent::create(*this, WebExtensionEventListenerType::WindowsOnBoundsChanged);
++    return *m_onBoundsChanged;
++}
++#endif
++
 +void WebExtensionContextProxy::dispatchWindowsEvent(WebExtensionEventListenerType type, const std::optional<WebExtensionWindowParameters>& window)
 +{
 +    if (window && (!window->identifier || !window->type))
@@ -142263,6 +142333,15 @@ index 0000000000000000000000000000000000000000..1636d5b22f88069d8fadeecbbe58cbca
 +                return Protected<JSValueRef>(context, JSValueMakeNumber(context, window ? toWebAPI(*window->identifier) : WebExtensionWindowConstants::None));
 +            });
 +            break;
++#if PLATFORM(HAIKU)
++        case WebExtensionEventListenerType::WindowsOnBoundsChanged:
++            if (window) {
++                windows.onBoundsChanged().invokeListenersWithArgumentFactory(filter, [&](JSGlobalContextRef context) {
++                    return Protected<JSValueRef>(context, toWebAPI(context, *window));
++                });
++            }
++            break;
++#endif
 +        default:
 +            ASSERT_NOT_REACHED();
 +        }
@@ -142271,7 +142350,7 @@ index 0000000000000000000000000000000000000000..1636d5b22f88069d8fadeecbbe58cbca
 +}
 +#endif
 diff --git a/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIWindows.h b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIWindows.h
-index 049a6d8f79059eb35a8a5de7743761fc79cf430f..1b9e59d4f3b22c341d7bcb2f3d568af1037b928d 100644
+index 049a6d8f79059eb35a8a5de7743761fc79cf430f..362de3c53fcc4e90925687ac87828ae24823b5e7 100644
 --- a/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIWindows.h
 +++ b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIWindows.h
 @@ -33,6 +33,7 @@
@@ -142302,7 +142381,7 @@ index 049a6d8f79059eb35a8a5de7743761fc79cf430f..1b9e59d4f3b22c341d7bcb2f3d568af1
  
      void createWindow(NSDictionary *data, Ref<WebExtensionCallbackHandler>&&, NSString **outExceptionString);
  
-@@ -61,6 +69,8 @@ public:
+@@ -61,17 +69,23 @@ public:
      void update(double windowID, NSDictionary *info, Ref<WebExtensionCallbackHandler>&&, NSString **outExceptionString);
      void remove(double windowID, Ref<WebExtensionCallbackHandler>&&, NSString **outExceptionString);
  
@@ -142311,7 +142390,14 @@ index 049a6d8f79059eb35a8a5de7743761fc79cf430f..1b9e59d4f3b22c341d7bcb2f3d568af1
      double windowIdentifierNone() const { return WebExtensionWindowConstants::None; }
      double windowIdentifierCurrent() const { return WebExtensionWindowConstants::Current; }
  
-@@ -72,6 +82,7 @@ private:
+     WebExtensionAPIWindowsEvent& onCreated();
+     WebExtensionAPIWindowsEvent& onRemoved();
+     WebExtensionAPIWindowsEvent& onFocusChanged();
++#if PLATFORM(HAIKU)
++    WebExtensionAPIWindowsEvent& onBoundsChanged();
++#endif
+ 
+ private:
      friend class WebExtensionAPITabs;
      friend class WebExtensionAPIWindowsEvent;
  
@@ -142319,21 +142405,23 @@ index 049a6d8f79059eb35a8a5de7743761fc79cf430f..1b9e59d4f3b22c341d7bcb2f3d568af1
      static bool parsePopulateTabs(NSDictionary *, PopulateTabs&, NSString *sourceKey, NSString **outExceptionString);
      static bool parseWindowTypesFilter(NSDictionary *, OptionSet<WindowTypeFilter>&, NSString *sourceKey, NSString **outExceptionString);
      static bool parseWindowTypeFilter(NSString *, OptionSet<WindowTypeFilter>&, NSString *sourceKey, NSString **outExceptionString);
-@@ -79,10 +90,11 @@ private:
+@@ -79,9 +93,13 @@ private:
      bool parseWindowCreateOptions(NSDictionary *, WebExtensionWindowParameters&, NSString *sourceKey, NSString **outExceptionString);
      static bool parseWindowUpdateOptions(NSDictionary *, WebExtensionWindowParameters&, NSString *sourceKey, NSString **outExceptionString);
  
 -    const RefPtr<WebExtensionAPIWindowsEvent> m_onCreated;
 -    const RefPtr<WebExtensionAPIWindowsEvent> m_onRemoved;
 -    const RefPtr<WebExtensionAPIWindowsEvent> m_onFocusChanged;
- #endif
++#endif
 +
 +    RefPtr<WebExtensionAPIWindowsEvent> m_onCreated;
 +    RefPtr<WebExtensionAPIWindowsEvent> m_onRemoved;
 +    RefPtr<WebExtensionAPIWindowsEvent> m_onFocusChanged;
++#if PLATFORM(HAIKU)
++    RefPtr<WebExtensionAPIWindowsEvent> m_onBoundsChanged;
+ #endif
  };
  
- bool isValid(std::optional<WebExtensionWindowIdentifier>, NSString **outExceptionString);
 diff --git a/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIWindowsEvent.cpp b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIWindowsEvent.cpp
 new file mode 100644
 index 0000000000000000000000000000000000000000..bac2687254efab60ec3752a61349cc10de48ee75
@@ -145767,7 +145855,7 @@ index f0efde6095b7d12c7cf85dbaf1034a08d319432d..ba2c9b5e95ece1e7b82f4c1b5c1b35e0
      boolean hasListener([CallbackHandler] function listener);
  
 diff --git a/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPIWindows.idl b/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPIWindows.idl
-index 771d6e1a5deb305bf1644bc6ad23771dd17cb1a5..9b9941b87ce3e6d838f27efb9489e5371af9f04a 100644
+index 771d6e1a5deb305bf1644bc6ad23771dd17cb1a5..c5e87f4a533021edb6067b6717eef19ab4d98d3b 100644
 --- a/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPIWindows.idl
 +++ b/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPIWindows.idl
 @@ -79,18 +79,19 @@ dictionary WebExtensionWindowUpdateInfo {
@@ -145797,6 +145885,13 @@ index 771d6e1a5deb305bf1644bc6ad23771dd17cb1a5..9b9941b87ce3e6d838f27efb9489e537
  
      [ImplementedAs=windowIdentifierNone] readonly attribute double WINDOW_ID_NONE;
      [ImplementedAs=windowIdentifierCurrent] readonly attribute double WINDOW_ID_CURRENT;
+@@ -98,5 +99,6 @@ dictionary WebExtensionWindowUpdateInfo {
+     readonly attribute WebExtensionAPIWindowsEvent onCreated;
+     readonly attribute WebExtensionAPIWindowsEvent onRemoved;
+     readonly attribute WebExtensionAPIWindowsEvent onFocusChanged;
++    [Platform=HAIKU] readonly attribute WebExtensionAPIWindowsEvent onBoundsChanged;
+ 
+ };
 diff --git a/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPIWindowsEvent.idl b/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPIWindowsEvent.idl
 index d7751fadf02bf7a0dc7542d087b546d5e4bc2606..cb5bbc0220fffec20c931603020f9186b8f95eb9 100644
 --- a/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPIWindowsEvent.idl

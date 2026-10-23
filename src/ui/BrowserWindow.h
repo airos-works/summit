@@ -377,6 +377,8 @@ private:
     // Zooms the current page one step in (> 0) or out (< 0), or back to 100% (0).
     // Zooms the tab and remembers the zoom for its site (its other tabs follow).
     void SetTabZoom(Tab& tab, double zoom);
+    // Moves/resizes the window to a browser command's left/top/width/height.
+    void ApplyCommandFrame(const BMessage& message);
     void ChangeZoom(int direction);
     void ShowZoom();
     void ShowSearchEngine();

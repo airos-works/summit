@@ -180,7 +180,10 @@ window's frame (screen pixels, without the window border) with
 the window moves or resizes. `windows.update()` with any of them sends
 `B_WEBKIT_BROWSER_SET_WINDOW_FRAME` (missing members are NaN and kept); the
 browser moves and resizes the window within its size limits. `windows.create()`
-still ignores geometry, and `windows.onBoundsChanged` is not fired. Fixture:
+passes the geometry with `OPEN_WINDOW`, and the new window applies it the same
+way (`BrowserWindow::ApplyCommandFrame`). `windows.onBoundsChanged` fires once a
+window has stopped moving or resizing for 100 ms (the browser reports every
+step of a drag). Fixture:
 `tests/fixtures/extensions/window-geometry` (open `https://example.com/?geometry`). Verified on
 the X399 (24 Oct, geo106 build): 75,65 1121×681 → update to 120,90 900×640 →
 width only 1000×640 → restored 75,65 1121×681, matching the window's real
@@ -212,7 +215,7 @@ the range error.
 
 `tabs.move`,
 `tabs.toggleReaderMode`, `tabs.captureVisibleTab`, `tabs.getSelected`,
-`tabs.onMoved`, `openerTabId` on `tabs.update`, geometry in `windows.create`, `maximized`/`fullscreen`
+`tabs.onMoved`, `openerTabId` on `tabs.update`, `maximized`/`fullscreen`
 in Summit, `scripting` in the main world, and real
 native messaging hosts. Navigating an ordinary tab to an extension page (or the
 reverse) is refused by Summit because the two use different view types.
