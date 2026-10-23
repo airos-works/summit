@@ -18,6 +18,7 @@ chrome.tabs.onUpdated.addListener(async (tabId, change, tab) => {
         const copy = await chrome.tabs.duplicate(tabId);
         log(`duplicate ${copy.url} index ${copy.index} after ${tab.index} opener ${copy.openerTabId === tabId}`);
         await chrome.tabs.remove(copy.id);
+        log(`detectLanguage ${await chrome.tabs.detectLanguage(tabId)}`);
         const settings = await chrome.tabs.getZoomSettings(tabId);
         log(`getZoomSettings ${settings.mode}/${settings.scope}/${settings.defaultZoomFactor}`);
         await chrome.tabs.setZoomSettings(tabId, { mode: 'automatic', scope: 'per-origin' });

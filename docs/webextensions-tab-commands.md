@@ -143,6 +143,14 @@ on the X399 (24 Oct, pin106 build ca81f4b): `pinned=false`, then after
 `update({pinned: true})` an `onUpdated {pinned: true}` and `get`/`query`
 agreeing, then `onUpdated {pinned: false}` after unpinning.
 
+## Detect language (#106)
+
+`tabs.detectLanguage()` returns the language the page declares: its
+`<html lang>`, else a `Content-Language` `<meta>` (first entry), else `"und"`.
+Chrome guesses from the text instead; Summit has no language detector. It runs
+a short script in a nameless world of the tab's main frame and needs access to
+the tab (host permission or `activeTab`).
+
 ## Reload without the cache (#106)
 
 `tabs.reload({bypassCache: true})` sends `RELOAD_TAB` with `bypass_cache`; the
@@ -179,7 +187,7 @@ the range error.
 
 ## Not implemented
 
-`tabs.move`, `tabs.detectLanguage`,
+`tabs.move`,
 `tabs.toggleReaderMode`, `tabs.captureVisibleTab`, `tabs.getSelected`,
 `tabs.onMoved`, `openerTabId` on `tabs.update`, window geometry
 (`left/top/width/height` are validated and dropped), `maximized`/`fullscreen`
