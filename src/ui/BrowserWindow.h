@@ -555,6 +555,10 @@ private:
     // An extension's chrome.search call (B_WEBKIT_BROWSER_SEARCH): searches in
     // tab (the one named, else the active one), a new tab or a new window.
     void SearchCommand(const BMessage& message, uint64 identifier, Tab* tab);
+    // An extension's chrome.browsingData call (B_WEBKIT_BROWSER_BROWSING_DATA),
+    // and the context's answers to the removals it asked for.
+    void BrowsingDataCommand(const BMessage& message, uint64 identifier);
+    void BrowsingDataReply(const BMessage& message);
     // Tells extensions how the bookmarks changed since the last report
     // (bookmarks.onCreated and the rest), whoever changed them. Windows call
     // it when the bookmarks change; the first report only remembers them.
@@ -724,6 +728,16 @@ private:
     int32 fWindowMenuFixed = 0;
     std::vector<Tab> fTabs;
     std::vector<PageRecord> fClosedTabs;
+#if SUMMIT_MODERN_WEBKIT
+    // browsingData removals waiting for the context, by request identifier.
+    struct BrowsingDataRequest {
+        uint64 command = 0;
+        uint32 types = 0;
+        std::vector<std::string> hosts, excludeHosts;
+    };
+    std::map<uint64, BrowsingDataRequest> fBrowsingDataRequests;
+    uint64 fNextBrowsingDataRequest = 0;
+#endif
     int64 fNextID = 1;
     int64 fSelected = 0;
     TabStrip* fTabStrip;

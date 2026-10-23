@@ -5,6 +5,7 @@
 // spelling (#66), saved passwords (#67) and printing (#65).
 #include "BrowserWindow.h"
 #include "Chrome.h"
+#include "DownloadList.h"
 #include "FeatureMessages.h"
 #include "Messages.h"
 #include "NoticeBar.h"
@@ -34,6 +35,7 @@
 #include <Screen.h>
 #include <StringView.h>
 #include <TextControl.h>
+#include <WebKit/WebKitEmbedding.h>
 #include <WebKit/WebKitInfo.h>
 #include <nlohmann/json.hpp>
 #include <algorithm>
@@ -1088,6 +1090,113 @@ void BrowserWindow::SearchCommand(const BMessage& message, uint64 identifier, Ta
         tab->pageRevision = fPagesRevision;
     }
     fWebKitContext->RespondToBrowserCommandWithData(identifier, B_OK, "null");
+}
+
+// chrome.browsingData (#106), removed as Preferences › History and Data does.
+// Site filters work on whole sites (registrable domains), as Summit's data list
+// names them.
+void BrowserWindow::BrowsingDataCommand(const BMessage& message, uint64 identifier)
+{
+    const std::string method = message.GetString("method", "");
+    const auto arguments = nlohmann::json::parse(message.GetString("arguments", "{}"), nullptr, false);
+    if (arguments.is_discarded() || !arguments.is_object()) { RespondToCommand(identifier, B_BAD_VALUE); return; }
+    auto fail = [&](const char* error) {
+        fWebKitContext->RespondToBrowserCommandWithData(identifier, B_BAD_VALUE, "null", error);
+    };
+    static const std::map<std::string, uint32> kSiteData {
+        {"cookies", B_WEBKIT_DATA_COOKIES}, {"cache", B_WEBKIT_DATA_CACHE}, {"appcache", B_WEBKIT_DATA_CACHE},
+        {"localStorage", B_WEBKIT_DATA_LOCAL_STORAGE}, {"indexedDB", B_WEBKIT_DATA_INDEXED_DB},
+        {"serviceWorkers", B_WEBKIT_DATA_SERVICE_WORKERS}, {"cacheStorage", B_WEBKIT_DATA_SERVICE_WORKERS},
+    };
+    if (method == "settings") {
+        // Summit keeps no form data; passwords are removed in Passwords only.
+        nlohmann::json removable = nlohmann::json::object(), none = nlohmann::json::object();
+        for (const char* type : {"appcache", "cache", "cacheStorage", "cookies", "downloads", "fileSystems", "formData", "history",
+                 "indexedDB", "localStorage", "passwords", "pluginData", "serviceWorkers", "webSQL"}) {
+            removable[type] = std::strcmp(type, "passwords") != 0;
+            none[type] = false;
+        }
+        fWebKitContext->RespondToBrowserCommandWithData(identifier, B_OK, nlohmann::json({{"options", {{"since", 0}}},
+            {"dataToRemove", none}, {"dataRemovalPermitted", removable}}).dump().c_str());
+        return;
+    }
+    if (method != "remove") { RespondToCommand(identifier, B_NOT_SUPPORTED); return; }
+    BrowsingDataRequest request { identifier };
+    bool history = false, downloads = false;
+    for (const auto& type : arguments.value("types", nlohmann::json::array())) {
+        const std::string name = type.is_string() ? type.get<std::string>() : std::string();
+        if (name == "passwords") { fail("Removing passwords is not supported; use Summit's Passwords."); return; }
+        if (auto found = kSiteData.find(name); found != kSiteData.end()) request.types |= found->second;
+        history |= name == "history";
+        downloads |= name == "downloads";
+    }
+    for (const auto& host : arguments.value("hosts", nlohmann::json::array()))
+        if (host.is_string()) request.hosts.push_back(host);
+    for (const auto& host : arguments.value("excludeHosts", nlohmann::json::array()))
+        if (host.is_string()) request.excludeHosts.push_back(host);
+    const bool filtered = !request.hosts.empty() || !request.excludeHosts.empty();
+    if (filtered && (history || downloads)) { fail("Origin filters only apply to cookies, caches and site storage."); return; }
+    const int64 since = static_cast<int64>(arguments.value("since", 0.0) / 1000);
+    // Storage keeps no times: what changed since then is that of the sites
+    // visited since, so read them before the history goes.
+    std::set<std::string> visited;
+    if (since > 0 && request.types && !filtered) visited = fShared->HostsVisitedSince(since);
+    if (history) {
+        if (since > 0) fShared->ForgetHistorySince(since, BMessenger());
+        else {
+            fShared->ClearHistory(BMessenger());
+            fWebKitContext->NotifyHistoryChanged("removed", nlohmann::json({{"allHistory", true}, {"urls", nlohmann::json::array()}}).dump().c_str());
+        }
+    }
+    if (downloads) DownloadList::Default().ClearFinished(false);
+    if (!request.types) { fWebKitContext->RespondToBrowserCommandWithData(identifier, B_OK, "null"); return; }
+    const uint64 id = ++fNextBrowsingDataRequest;
+    const uint32 types = request.types;
+    fBrowsingDataRequests[id] = std::move(request);
+    if (filtered)
+        fWebKitContext->FetchWebsiteDataSizes(types, BMessenger(this), id);
+    else if (since > 0)
+        fWebKitContext->RemoveWebsiteDataSince(types, since, std::vector<std::string>(visited.begin(), visited.end()), BMessenger(this), id);
+    else
+        fWebKitContext->RemoveWebsiteData(types, BMessenger(this), id);
+}
+
+void BrowserWindow::BrowsingDataReply(const BMessage& message)
+{
+    auto found = fBrowsingDataRequests.find(message.GetUInt64("identifier", 0));
+    if (found == fBrowsingDataRequests.end()) return;
+    const uint64 id = found->first;
+    auto request = found->second;
+    fBrowsingDataRequests.erase(found);
+    if (const char* error = nullptr; message.FindString("error", &error) == B_OK) {
+        fWebKitContext->RespondToBrowserCommandWithData(request.command, B_ERROR, "null", error);
+        return;
+    }
+    if (message.what == B_WEBKIT_WEBSITE_DATA_REMOVED) {
+        fWebKitContext->RespondToBrowserCommandWithData(request.command, B_OK, "null");
+        return;
+    }
+    // The sizes: the sites the filter names (a host is in a site when it is
+    // the site or under it).
+    auto inSite = [](const std::string& host, const std::string& site) {
+        return host == site || (host.size() > site.size() && host.compare(host.size() - site.size(), site.size(), site) == 0
+            && host[host.size() - site.size() - 1] == '.');
+    };
+    std::vector<std::string> sites;
+    const char* site = nullptr;
+    for (int32 i = 0; message.FindString("site", i, &site) == B_OK; ++i) {
+        auto named = [&](const std::vector<std::string>& hosts) {
+            return std::any_of(hosts.begin(), hosts.end(), [&](const std::string& host) { return inSite(host, site); });
+        };
+        if (request.hosts.empty() ? !named(request.excludeHosts) : named(request.hosts)) sites.push_back(site);
+    }
+    if (sites.empty()) {
+        fWebKitContext->RespondToBrowserCommandWithData(request.command, B_OK, "null");
+        return;
+    }
+    const uint32 types = request.types;
+    fBrowsingDataRequests[id] = std::move(request);
+    fWebKitContext->RemoveWebsiteDataOfSites(types, sites, BMessenger(this), id);
 }
 
 // What extensions see of each node, for comparing two states of the bookmarks.

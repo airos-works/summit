@@ -2316,6 +2316,7 @@ void BrowserWindow::BrowserCommand(const BMessage& message)
         case B_WEBKIT_BROWSER_HISTORY: HistoryCommand(message, identifier); return;
         case B_WEBKIT_BROWSER_BOOKMARKS: BookmarksCommand(message, identifier); return;
         case B_WEBKIT_BROWSER_SEARCH: SearchCommand(message, identifier, tab); return;
+        case B_WEBKIT_BROWSER_BROWSING_DATA: BrowsingDataCommand(message, identifier); return;
         case B_WEBKIT_BROWSER_SET_WINDOW_STATE: {
             const std::string state = message.GetString("state", "");
             if (state == "minimized") Minimize(true);
@@ -3752,6 +3753,7 @@ void BrowserWindow::MessageReceived(BMessage* message)
 #if SUMMIT_MODERN_WEBKIT
         case B_WEBKIT_EXTENSION_ACTIONS_CHANGED: RefreshExtensionActions(); break;
         case B_WEBKIT_BROWSER_COMMAND: case B_WEBKIT_BROWSER_COMMAND_CANCELLED: BrowserCommand(*message); break;
+        case B_WEBKIT_WEBSITE_DATA_SIZES: case B_WEBKIT_WEBSITE_DATA_REMOVED: BrowsingDataReply(*message); break;
         case B_WEBKIT_EXTENSION_ACTIONS: ExtensionActionsReceived(*message); break;
         case kActivateExtensionAction: ActivateExtensionAction(*message); break;
         case kPreloadExtensionAction: PreloadExtensionAction(*message); break;
