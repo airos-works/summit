@@ -1,6 +1,7 @@
 #include "BrowserWindow.h"
 #if SUMMIT_MODERN_WEBKIT
 #include "ExtensionShortcuts.h"
+#include "core/Protocol.h"
 #endif
 #include "ProtocolHandlers.h"
 #include "ExtensionTiming.h"
@@ -1250,7 +1251,7 @@ void BrowserWindow::CreateTab(const std::string& input, bool select, BWebView* a
         return;
     }
 #if SUMMIT_MODERN_WEBKIT
-    const bool extensionPage = !newPage && address.url.starts_with("webkit-extension:");
+    const bool extensionPage = !newPage && summit::IsExtensionPageURL(address.url);
     if (extensionPage && !extensionIdentifier) {
         // The application owns the live extension catalog. Resolve its current
         // origin and create the privileged view on WebKit's application thread.
@@ -2308,8 +2309,8 @@ void BrowserWindow::BrowserCommand(const BMessage& message)
             if (!address.error.empty()) { RespondToCommand(identifier, B_BAD_VALUE, { }, address.error.c_str()); return; }
             // Extension pages need the privileged view that CreateTab makes;
             // an ordinary web view cannot become one.
-            const bool extensionPage = address.url.starts_with("webkit-extension:");
-            const bool extensionTab = tab->url.starts_with("webkit-extension:");
+            const bool extensionPage = summit::IsExtensionPageURL(address.url);
+            const bool extensionTab = summit::IsExtensionPageURL(tab->url);
             if (extensionPage != extensionTab || (extensionPage
                 && address.url.substr(0, address.url.find('/', 19)) != tab->url.substr(0, tab->url.find('/', 19)))) {
                 // The page needs the other kind of view: replace the tab's view in place.

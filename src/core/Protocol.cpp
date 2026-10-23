@@ -30,8 +30,12 @@ bool IsExternalScheme(std::string_view scheme)
 {
     if (URLScheme(std::string(scheme) + ':') != scheme) return false;
     constexpr std::array blocked {"http", "https", "file", "about", "data", "blob", "javascript",
-        "webkit-extension", "summit", "filesystem", "view-source"};
+        "webkit-extension", "chrome-extension", "summit", "filesystem", "view-source"};
     return std::find(blocked.begin(), blocked.end(), scheme) == blocked.end();
+}
+bool IsExtensionPageURL(std::string_view url)
+{
+    return url.starts_with("webkit-extension:") || url.starts_with("chrome-extension:");
 }
 bool IsWebHandlerScheme(std::string_view scheme)
 {

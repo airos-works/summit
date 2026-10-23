@@ -5,6 +5,7 @@
 // Also the media document that takes a load over (#95).
 #include "BrowserWindow.h"
 #include "FeatureMessages.h"
+#include "core/Protocol.h"
 #include "SharedProfile.h"
 #include "core/LoadError.h"
 #include <Button.h>
@@ -177,7 +178,7 @@ void BrowserWindow::UpdateLoadErrorView(Tab& tab)
     const bool question = tab.certificate && tab.certificate->generation == tab.loadGeneration
         && !tab.certificate->host.empty() && !tab.certificate->sha256.empty();
     const bool crashed = tab.processExited || tab.crashView;
-    if (failure != LoadFailure::None && !question && !crashed && !tab.loadErrorURL.starts_with("webkit-extension:")) {
+    if (failure != LoadFailure::None && !question && !crashed && !summit::IsExtensionPageURL(tab.loadErrorURL)) {
         if (tab.errorGeneration == tab.loadGeneration) {
             if (tab.errorView) static_cast<LoadErrorView*>(tab.errorView)->SetLoading(tab.loading);
             else {

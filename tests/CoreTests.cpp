@@ -182,6 +182,11 @@ int main()
     CHECK(URLScheme("1mail:bad").empty() && URLScheme("mail to:bad").empty());
     CHECK(URLScheme("mailto:bad\naddress").empty());
     CHECK(!IsExternalScheme("javascript") && !IsExternalScheme("https") && !IsExternalScheme("file"));
+    CHECK(!IsExternalScheme("chrome-extension") && !IsExternalScheme("webkit-extension"));
+    CHECK(IsExtensionPageURL("chrome-extension://abcdefghijklmnopabcdefghijklmnop/ask.html")
+        && IsExtensionPageURL("webkit-extension://abc/page.html") && !IsExtensionPageURL("https://chrome-extension.example/"));
+    CHECK(ResolveAddress("chrome-extension://abcdefghijklmnopabcdefghijklmnop/ask.html?aid=1").url
+        == "chrome-extension://abcdefghijklmnopabcdefghijklmnop/ask.html?aid=1");
     CHECK(IsExternalScheme("haiku-app") && IsWebHandlerScheme("mailto") && IsWebHandlerScheme("web+demo"));
     CHECK(!IsWebHandlerScheme("https") && !IsWebHandlerScheme("web+") && !IsWebHandlerScheme("web+demo1"));
     CHECK(ProtocolOrigin("HTTPS://MAIL.Example:443/path?q=%s") == "https://mail.example");

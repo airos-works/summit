@@ -1,6 +1,7 @@
 #include "ExtensionInstaller.h"
 #if SUMMIT_MODERN_WEBKIT
 #include "core/ExtensionIdentity.h"
+#include "core/Protocol.h"
 #include "core/ExtensionUpdate.h"
 #include "ExtensionStoreDownload.h"
 #include <WebKit/WebKitContext.h>
@@ -253,7 +254,7 @@ void ExtensionInstaller::MessageReceived(BMessage* message)
             || field(*message, "installation_identifier") != fDraft->entry.package
             || message->FindUInt64("installation_order", &installationOrder) != B_OK
             || installationOrder != fDraft->entry.installationOrder
-            || !fDraft->baseURL.starts_with("webkit-extension://")) {
+            || !summit::IsExtensionPageURL(fDraft->baseURL)) {
             Rollback("The loaded extension did not match the approved package.");
             return;
         }

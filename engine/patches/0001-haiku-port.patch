@@ -73868,7 +73868,7 @@ index be40151510176ea4e881fd41af8f79ab6ab6a306..b5fdd6e41375e8108fb406089992f8e5
      if (metaData.headerHash != computeSHA1(headerData, salt)) {
          LOG(NetworkCacheStorage, "(NetworkProcess) header checksum mismatch");
 diff --git a/Source/WebKit/NetworkProcess/curl/NetworkDataTaskCurl.cpp b/Source/WebKit/NetworkProcess/curl/NetworkDataTaskCurl.cpp
-index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..390ff50c3b21b4490339985779299878dd9388a8 100644
+index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..5de061567b6da7d6c11819716c3532a64372b338 100644
 --- a/Source/WebKit/NetworkProcess/curl/NetworkDataTaskCurl.cpp
 +++ b/Source/WebKit/NetworkProcess/curl/NetworkDataTaskCurl.cpp
 @@ -36,11 +36,14 @@
@@ -74111,7 +74111,7 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..390ff50c3b21b4490339985779299878
 +    const auto& firstParty = request.firstPartyForCookies();
 +    if (request.isSameSiteUnspecified())
 +        sameSiteInfo.isSameSite = firstParty.isEmpty() || areRegistrableDomainsEqual(firstParty, request.url());
-+    if (firstParty.protocolIs("webkit-extension"_s))
++    if (firstParty.protocolIs("webkit-extension"_s) || firstParty.protocolIs("chrome-extension"_s))
 +        sameSiteInfo.isSameSite = true;
 +#endif
 +    return sameSiteInfo;
@@ -84677,7 +84677,7 @@ index 0000000000000000000000000000000000000000..574ed16658f0c14b1aa2e63208e990b8
 +#define WEBKIT_ENGINE_VERSION_HAIKU "@WebKit_HAIKU_MAJOR_VERSION@.@WebKit_HAIKU_MINOR_VERSION@.@WebKit_HAIKU_TINY_VERSION@"
 diff --git a/Source/WebKit/UIProcess/API/haiku/WebKitContext.cpp b/Source/WebKit/UIProcess/API/haiku/WebKitContext.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..fb7a4e1a0fc55b6e68bf44cb9939cdff9d05b241
+index 0000000000000000000000000000000000000000..5ed4048db9f4162af3e4ada0a5933323879f01cd
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/API/haiku/WebKitContext.cpp
 @@ -0,0 +1,1064 @@
@@ -85523,7 +85523,7 @@ index 0000000000000000000000000000000000000000..fb7a4e1a0fc55b6e68bf44cb9939cdff
 +static bool websiteRecordWithoutExtensionsHaiku(WebKit::WebsiteDataRecord& record)
 +{
 +    record.origins.removeIf([](const WebCore::SecurityOriginData& origin) {
-+        return origin.protocol() == "webkit-extension"_s;
++        return (origin.protocol() == "webkit-extension"_s || origin.protocol() == "chrome-extension"_s);
 +    });
 +    return !record.origins.isEmpty() || !record.cookieHostNames.isEmpty();
 +}
@@ -85650,7 +85650,7 @@ index 0000000000000000000000000000000000000000..fb7a4e1a0fc55b6e68bf44cb9939cdff
 +            Vector<WebKit::WebsiteDataRecord> removable;
 +            for (auto& record : records) {
 +                record.origins.removeIf([&](const WebCore::SecurityOriginData& origin) {
-+                    return origin.protocol() == "webkit-extension"_s
++                    return (origin.protocol() == "webkit-extension"_s || origin.protocol() == "chrome-extension"_s)
 +                        || !domains.contains(WebCore::RegistrableDomain::uncheckedCreateFromHost(origin.host()).string());
 +                });
 +                if (!record.origins.isEmpty())
@@ -85728,7 +85728,7 @@ index 0000000000000000000000000000000000000000..fb7a4e1a0fc55b6e68bf44cb9939cdff
 +            Vector<WebKit::WebsiteDataRecord> removable;
 +            for (auto& record : records) {
 +                record.origins.removeIf([](const WebCore::SecurityOriginData& origin) {
-+                    return origin.protocol() == "webkit-extension"_s;
++                    return (origin.protocol() == "webkit-extension"_s || origin.protocol() == "chrome-extension"_s);
 +                });
 +                if (!record.origins.isEmpty())
 +                    removable.append(WTF::move(record));
@@ -95704,7 +95704,7 @@ index 0000000000000000000000000000000000000000..b5a17393623897b91dee01412b7ae904
 +
 +#endif // ENABLE(WK_WEB_EXTENSIONS)
 diff --git a/Source/WebKit/UIProcess/Extensions/WebExtensionController.cpp b/Source/WebKit/UIProcess/Extensions/WebExtensionController.cpp
-index 2072e4a99372133e90eda56b3ba1bcc496705af0..54444046465cc78a333c893f2df21520816d57d8 100644
+index 2072e4a99372133e90eda56b3ba1bcc496705af0..abb5c210981219156c52f5cc9275d3cb69956ad5 100644
 --- a/Source/WebKit/UIProcess/Extensions/WebExtensionController.cpp
 +++ b/Source/WebKit/UIProcess/Extensions/WebExtensionController.cpp
 @@ -30,6 +30,10 @@
@@ -95847,7 +95847,7 @@ index 2072e4a99372133e90eda56b3ba1bcc496705af0..54444046465cc78a333c893f2df21520
  }
  
  void WebExtensionController::addProcessPool(WebProcessPool& processPool)
-@@ -406,13 +432,54 @@ void WebExtensionController::didFailLoadForFrame(WebPageProxyIdentifier pageID,
+@@ -406,14 +432,55 @@ void WebExtensionController::didFailLoadForFrame(WebPageProxyIdentifier pageID,
          context->didFailLoadForFrame(pageID, frameParameters, timestamp);
  }
  
@@ -95891,19 +95891,20 @@ index 2072e4a99372133e90eda56b3ba1bcc496705af0..54444046465cc78a333c893f2df21520
      for (Ref context : m_extensionContexts)
          context->cookiesDidChange(cookieStore);
 +#endif
-+}
-+
+ }
+ 
 +#if PLATFORM(HAIKU) && USE(CURL)
 +void WebExtensionController::cookiesDidChange(API::HTTPCookieStore& cookieStore, const Vector<WebCore::CookieChange>& changes)
 +{
 +    for (Ref context : m_extensionContexts)
 +        context->cookiesDidChange(cookieStore, changes);
- }
++}
 +#endif
- 
++
  RefPtr<WebExtensionContext> WebExtensionController::extensionContext(const WebExtension& extension) const
  {
-@@ -465,6 +532,31 @@ String WebExtensionController::stateFilePath(const String& uniqueIdentifier) con
+     for (auto& context : m_extensionContexts) {
+@@ -465,6 +532,42 @@ String WebExtensionController::stateFilePath(const String& uniqueIdentifier) con
      return FileSystem::pathByAppendingComponent(storageDirectory(uniqueIdentifier), WebExtensionContext::stateFileName());
  }
  
@@ -95914,8 +95915,19 @@ index 2072e4a99372133e90eda56b3ba1bcc496705af0..54444046465cc78a333c893f2df21520
 +        return;
 +
 +    URL lastSeenBaseURL;
-+    if (!WebExtensionContext::readLastBaseURLFromState(stateFilePath(context.uniqueIdentifier()), lastSeenBaseURL))
-+        return;
++    if (!WebExtensionContext::readLastBaseURLFromState(stateFilePath(context.uniqueIdentifier()), lastSeenBaseURL)) {
++        // First load. An extension with a Chrome ID gets Chrome's page
++        // addresses: Chrome builds compare URLs with chrome-extension://<id>/.
++        // Installed extensions keep their recorded address, which their
++        // stored data belongs to.
++        auto& identifier = context.uniqueIdentifier();
++        bool chromeIdentifier = identifier.length() == 32;
++        for (unsigned i = 0; chromeIdentifier && i < identifier.length(); ++i)
++            chromeIdentifier = identifier[i] >= 'a' && identifier[i] <= 'p';
++        if (!chromeIdentifier)
++            return;
++        lastSeenBaseURL = URL { makeString("chrome-extension://"_s, identifier, '/') };
++    }
 +
 +    if (!WebExtensionContext::isURLForAnyExtension(lastSeenBaseURL))
 +        return;
@@ -96362,7 +96374,7 @@ index 0000000000000000000000000000000000000000..f502b06cc156ab3cff205b7da53353f4
 +
 +#endif // ENABLE(WK_WEB_EXTENSIONS)
 diff --git a/Source/WebKit/UIProcess/Extensions/WebExtensionMatchPattern.cpp b/Source/WebKit/UIProcess/Extensions/WebExtensionMatchPattern.cpp
-index 4e97a0bde16b11e50f0a066169659c14a6bd80d9..5366d9604693957959145e76ea8dcfb2dbb73c9d 100644
+index 4e97a0bde16b11e50f0a066169659c14a6bd80d9..c6e6409a475b26a8745be4143a0ccf7892bc7f86 100644
 --- a/Source/WebKit/UIProcess/Extensions/WebExtensionMatchPattern.cpp
 +++ b/Source/WebKit/UIProcess/Extensions/WebExtensionMatchPattern.cpp
 @@ -28,9 +28,6 @@
@@ -96375,7 +96387,41 @@ index 4e97a0bde16b11e50f0a066169659c14a6bd80d9..5366d9604693957959145e76ea8dcfb2
  #include <WebCore/LocalizedStrings.h>
  #include <WebCore/PublicSuffixStore.h>
  #include <wtf/HashMap.h>
-@@ -92,21 +89,6 @@ static HashMap<String, RefPtr<WebExtensionMatchPattern>>& NODELETE patternCache(
+@@ -50,19 +47,33 @@ static constexpr ASCIILiteral allHostsAndSchemesPattern = "*://*/*"_s;
+ 
+ WebExtensionMatchPattern::URLSchemeSet& WebExtensionMatchPattern::extensionSchemes()
+ {
++#if PLATFORM(HAIKU)
++    // chrome-extension: pages of Chrome-ID extensions installed since 23 Oct
++    // 2026 (WebExtensionController::restoreNativeBaseURL).
++    static MainRunLoopNeverDestroyed<URLSchemeSet> schemes = std::initializer_list<String> { "webkit-extension"_s, "chrome-extension"_s };
++#else
+     static MainRunLoopNeverDestroyed<URLSchemeSet> schemes = std::initializer_list<String> { "webkit-extension"_s };
++#endif
+     return schemes;
+ }
+ 
+ WebExtensionMatchPattern::URLSchemeSet& WebExtensionMatchPattern::validSchemes()
+ {
++#if PLATFORM(HAIKU)
++    static MainRunLoopNeverDestroyed<URLSchemeSet> schemes = std::initializer_list<String> { "*"_s, "http"_s, "https"_s, "file"_s, "ftp"_s, "webkit-extension"_s, "chrome-extension"_s };
++#else
+     static MainRunLoopNeverDestroyed<URLSchemeSet> schemes = std::initializer_list<String> { "*"_s, "http"_s, "https"_s, "file"_s, "ftp"_s, "webkit-extension"_s };
++#endif
+     return schemes;
+ }
+ 
+ WebExtensionMatchPattern::URLSchemeSet& WebExtensionMatchPattern::supportedSchemes()
+ {
++#if PLATFORM(HAIKU)
++    static MainRunLoopNeverDestroyed<URLSchemeSet> schemes = std::initializer_list<String> { "*"_s, "http"_s, "https"_s, "webkit-extension"_s, "chrome-extension"_s };
++#else
+     static MainRunLoopNeverDestroyed<URLSchemeSet> schemes = std::initializer_list<String> { "*"_s, "http"_s, "https"_s, "webkit-extension"_s };
++#endif
+     return schemes;
+ }
+ 
+@@ -92,21 +103,6 @@ static HashMap<String, RefPtr<WebExtensionMatchPattern>>& NODELETE patternCache(
      return cache;
  }
  
@@ -96397,7 +96443,7 @@ index 4e97a0bde16b11e50f0a066169659c14a6bd80d9..5366d9604693957959145e76ea8dcfb2
  bool WebExtensionMatchPattern::isWebExtensionURL(const URL& url)
  {
      if (!url.isValid())
-@@ -368,10 +350,22 @@ bool WebExtensionMatchPattern::isValidScheme(String scheme)
+@@ -368,10 +364,22 @@ bool WebExtensionMatchPattern::isValidScheme(String scheme)
      return !scheme.isEmpty() && validSchemes().contains(scheme);
  }
  
@@ -121122,7 +121168,7 @@ index 0000000000000000000000000000000000000000..c9a119d02f85b7c5ad8fe9153bfc9604
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/WebView.cpp b/Source/WebKit/UIProcess/haiku/WebView.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..88a5525db585ed6ce077a7925a06492c7b4b18b1
+index 0000000000000000000000000000000000000000..e5ba78e3ddf4b42f328129fe2422891aee0e3a90
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/WebView.cpp
 @@ -0,0 +1,3096 @@
@@ -121906,7 +121952,7 @@ index 0000000000000000000000000000000000000000..88a5525db585ed6ce077a7925a06492c
 +        } decisionTrace { traceMainFrame };
 +        const bool external = url.isValid() && !url.protocolIsInHTTPFamily() && !url.protocolIsFile()
 +            && !url.protocolIsAbout() && !url.protocolIsData() && !url.protocolIsBlob()
-+            && !url.protocolIsJavaScript() && !url.protocolIs("webkit-extension"_s)
++            && !url.protocolIsJavaScript() && !url.protocolIs("webkit-extension"_s) && !url.protocolIs("chrome-extension"_s)
 +            && !page.urlSchemeHandlerForScheme(url.protocol());
 +        if (external) {
 +            // Hand the link to the browser, which validates the source tab
@@ -154867,7 +154913,7 @@ index 0000000000000000000000000000000000000000..637470ce160054f77c68542075ff8d03
 +
 +} // namespace WebKit
 diff --git a/Source/WebKit/WebProcess/WebProcess.cpp b/Source/WebKit/WebProcess/WebProcess.cpp
-index 413f8bc09ce0a2d3591b203f12addc32584b9f6e..1fae341b33a38658f87e0b121cde3a26df57a678 100644
+index 413f8bc09ce0a2d3591b203f12addc32584b9f6e..16f8b6abeff342e6dbc74e32508d23ef8178d45c 100644
 --- a/Source/WebKit/WebProcess/WebProcess.cpp
 +++ b/Source/WebKit/WebProcess/WebProcess.cpp
 @@ -300,6 +300,36 @@ static const Seconds nonVisibleProcessEarlyMemoryCleanupDelay { 10_s };
@@ -154895,7 +154941,7 @@ index 413f8bc09ce0a2d3591b203f12addc32584b9f6e..1fae341b33a38658f87e0b121cde3a26
 +    for (auto& page : pages.values()) {
 +        if (page->isVisible() || page->activityState().containsAny({ WebCore::ActivityState::IsAudible, WebCore::ActivityState::IsCapturingMedia })
 +            || (page->corePage() && page->corePage()->contentSecurityPolicyModeForExtension() != WebCore::ContentSecurityPolicyModeForExtension::None)
-+            || page->mainWebFrame().url().protocolIs("webkit-extension"_s)) {
++            || page->mainWebFrame().url().protocolIs("webkit-extension"_s) || page->mainWebFrame().url().protocolIs("chrome-extension"_s)) {
 +            background = false;
 +            break;
 +        }

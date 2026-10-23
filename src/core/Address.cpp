@@ -101,7 +101,7 @@ Address ResolveAddress(std::string_view input)
     if (colon != std::string::npos && (slash == std::string::npos || colon < slash) && !port && !local) {
         auto scheme = text.substr(0, colon);
         std::transform(scheme.begin(), scheme.end(), scheme.begin(), [](unsigned char c) { return std::tolower(c); });
-        if (scheme == "http" || scheme == "https" || scheme == "file" || scheme == "webkit-extension")
+        if (scheme == "http" || scheme == "https" || scheme == "file" || scheme == "webkit-extension" || scheme == "chrome-extension")
             return {scheme + text.substr(colon), {}, false};
         if (text == "about:blank") return {text, {}, false};
         if (scheme == "summit") {

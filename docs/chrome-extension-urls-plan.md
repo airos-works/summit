@@ -1,4 +1,4 @@
-# `chrome-extension://` page addresses (plan, #106)
+# `chrome-extension://` page addresses (#106)
 
 Chrome builds of some extensions compare addresses with
 `chrome-extension://<runtime.id>/`. Tampermonkey's Chrome build trusts a
@@ -20,7 +20,7 @@ today; hard-coding the scheme does not.
 - Changing an installed extension's address would orphan that data
   (Tampermonkey keeps its scripts there).
 
-## Plan
+## Change (branch cext, 23 Oct; built and tested: not yet)
 
 1. **New installs only.** When a context is loaded for the first time (no
    `LastSeenBaseURL`) and its `runtime.id` is a Chrome ID, give it the base URL
@@ -48,3 +48,18 @@ today; hard-coding the scheme does not.
 Moving an installed extension to the new address (it would need copying its
 website data from one origin to the other), and Firefox's
 `moz-extension://` (Firefox builds compare with `runtime.getURL`).
+
+## As implemented
+
+- `WebExtensionController::restoreNativeBaseURL()`: no recorded base URL and
+  a 32-letter `a`–`p` identifier → `chrome-extension://<id>/`.
+- `chrome-extension` is in `extensionSchemes()`, `validSchemes()` and
+  `supportedSchemes()` (Haiku only); the curl cookie rule treats it as
+  same-site like `webkit-extension`; the website-data filters in
+  `WebKitContext.cpp`, the external-link test in `WebView.cpp` and the
+  web-process priority test accept it.
+- Browser: `summit::IsExtensionPageURL()` (`src/core/Protocol.*`) is used by
+  the tab, navigation, load-error and installer checks; `ResolveAddress` and
+  `IsExternalScheme` know the scheme. `main.cpp` still holds back only
+  `webkit-extension:` tabs of a restored session until extensions load
+  (`main.cpp` has uncommitted #110 work).
