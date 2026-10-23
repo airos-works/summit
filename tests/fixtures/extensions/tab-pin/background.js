@@ -16,6 +16,8 @@ chrome.tabs.onUpdated.addListener(async (tabId, change, tab) => {
         await chrome.tabs.update(tabId, { pinned: false });
         await new Promise(resolve => setTimeout(resolve, 500));
         log(`after unpin get=${(await chrome.tabs.get(tabId)).pinned}`);
+        const highlighted = await chrome.tabs.update(tabId, { highlighted: false });
+        log(`update({highlighted: false}) resolved, still active=${highlighted.active} highlighted=${highlighted.highlighted}`);
     } catch (error) {
         log(`error ${error.message}`);
     }

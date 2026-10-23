@@ -164,6 +164,13 @@ top-level page, so the difference shows in subresources (from origin, not the
 memory cache) rather than in the page request. The tab-zoom fixture's zoom
 settings steps passed too (`automatic/per-origin/1`; `manual` rejected).
 
+## Highlighting (#106)
+
+Summit's tab strip has one selection, its active tab. `tabs.update({highlighted:
+true})` activates the tab (unless `active: false`); `highlighted: false` is
+accepted and changes nothing, since the active tab stays highlighted, as in
+Chrome. It used to reject.
+
 ## Duplicate (#106)
 
 `tabs.duplicate()` opens a new tab at the original's address, after it (or at
