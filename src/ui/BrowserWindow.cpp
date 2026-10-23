@@ -2309,6 +2309,7 @@ void BrowserWindow::BrowserCommand(const BMessage& message)
             ApplyCommandFrame(message);
             RespondToCommand(identifier, B_OK);
             return;
+        case B_WEBKIT_BROWSER_HISTORY: HistoryCommand(message, identifier); return;
         case B_WEBKIT_BROWSER_SET_WINDOW_STATE: {
             const std::string state = message.GetString("state", "");
             if (state == "minimized") Minimize(true);
@@ -5436,11 +5437,8 @@ void BrowserWindow::WebKitStateChanged(const BMessage& message)
             const auto stored = StoredURL(successURL);
             const PageRecord visit { stored, successTitle };
             // Private windows leave no history.
-            if (!fPrivate && tab->readerURL != successURL) {
-                fShared->Change([&](Profile& profile) -> uint32 {
-                    return profile.Visit(visit) ? SharedProfile::kHistoryChanged : 0;
-                }, BMessenger(this), false);
-            }
+            if (!fPrivate && tab->readerURL != successURL)
+                RecordVisit(visit);
             internalPageLoaded = stored == kHistoryPage || stored == kBookmarksPage;
         }
     }
@@ -5871,9 +5869,7 @@ void BrowserWindow::LoadFinished(const BString& url, BWebView* view)
         tab->url = StoredURL(url);
         UpdateBookmarkQueryLocation(*tab, url);
         const PageRecord visit { tab->url, tab->title };
-        fShared->Change([&](Profile& profile) -> uint32 {
-            return profile.Visit(visit) ? SharedProfile::kHistoryChanged : 0;
-        }, BMessenger(this), false);
+        RecordVisit(visit);
         RefreshInternalPage(*tab);
     }
     RefreshChrome();

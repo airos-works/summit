@@ -319,9 +319,7 @@ bool BrowserWindow::MediaTookOverLoad(Tab& tab, const BMessage& message, uint64 
     const char* title = message.GetString("title", "");
     if (!fPrivate) {
         const PageRecord visit { url, *title ? title : url };
-        fShared->Change([&](Profile& profile) -> uint32 {
-            return profile.Visit(visit) ? uint32(SharedProfile::kHistoryChanged) : 0;
-        }, BMessenger(this), false);
+        RecordVisit(visit);
     }
     return true;
 }

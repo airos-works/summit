@@ -545,6 +545,11 @@ private:
     void PageScriptMessage(BMessage& message);
     void MoveTabTo(int64 id, size_t index);
     void SetTabPinned(int64 id, bool pinned);
+    // Records a visit in the profile's history; outside private windows,
+    // extensions hear of it (history.onVisited).
+    void RecordVisit(const PageRecord& visit);
+    // An extension's chrome.history call (B_WEBKIT_BROWSER_HISTORY).
+    void HistoryCommand(const BMessage& message, uint64 identifier);
     void ToggleTabMute(int64 id);
     // Hands tab id to target (another window), which adopts its live view.
     void DetachTab(int64 id, const BMessenger& target);

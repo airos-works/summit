@@ -18,6 +18,7 @@
 #include "core/WebAppManifest.h"
 #include "core/Address.h"
 #include "core/Bookmarks.h"
+#include "core/HistoryVisits.h"
 #include "core/Protocol.h"
 #include <Alert.h>
 #include <Application.h>
@@ -695,5 +696,138 @@ void BrowserWindow::WebAppInstalled(const BMessage& message)
     open.AddString("id", app.id.c_str());
     be_app->PostMessage(&open);
 }
+
+// chrome.history (#106). Times are milliseconds since the epoch, as in Chrome.
+static nlohmann::json HistoryItemJSON(const PageRecord& page)
+{
+    const auto times = HistoryVisitTimes(page);
+    const double last = times.empty() ? page.visited * 1000.0 : times.front() / 1000.0;
+    return {
+        {"id", std::to_string(std::hash<std::string>()(page.url))},
+        {"url", page.url},
+        {"title", page.title},
+        {"lastVisitTime", last},
+        {"visitCount", HistoryVisitCount(page)},
+        {"typedCount", 0},
+    };
+}
+
+void BrowserWindow::RecordVisit(const PageRecord& visit)
+{
+    std::optional<PageRecord> recorded;
+    fShared->Change([&](Profile& profile) -> uint32 {
+        if (!profile.Visit(visit)) return 0;
+        for (const auto& page : profile.history) {
+            if (page.url == visit.url) { recorded = page; break; }
+        }
+        return SharedProfile::kHistoryChanged;
+    }, BMessenger(this), false);
+#if SUMMIT_MODERN_WEBKIT
+    if (recorded && !fPrivate) fWebKitContext->NotifyHistoryChanged("visited", HistoryItemJSON(*recorded).dump().c_str());
+#endif
+}
+
+void BrowserWindow::HistoryCommand(const BMessage& message, uint64 identifier)
+{
+#if SUMMIT_MODERN_WEBKIT
+    const std::string method = message.GetString("method", "");
+    const auto arguments = nlohmann::json::parse(message.GetString("arguments", "{}"), nullptr, false);
+    if (arguments.is_discarded() || !arguments.is_object()) { RespondToCommand(identifier, B_BAD_VALUE); return; }
+    auto respond = [&](const nlohmann::json& data) {
+        fWebKitContext->RespondToBrowserCommandWithData(identifier, B_OK, data.dump().c_str());
+    };
+    auto removed = [&](bool all, const std::vector<std::string>& urls) {
+        if (all || !urls.empty())
+            fWebKitContext->NotifyHistoryChanged("removed", nlohmann::json({{"allHistory", all}, {"urls", urls}}).dump().c_str());
+    };
+    const double now = HistoryNowMicroseconds() / 1000.0;
+    if (method == "search") {
+        std::string text = arguments.value("text", std::string());
+        std::transform(text.begin(), text.end(), text.begin(), [](unsigned char c) { return std::tolower(c); });
+        // Chrome's defaults: the last 24 hours, at most 100 items.
+        const double start = arguments.value("startTime", now - 24 * 3600 * 1000.0);
+        const double end = arguments.value("endTime", now);
+        const size_t limit = static_cast<size_t>(std::clamp(arguments.value("maxResults", 100.0), 0.0, 100000.0));
+        auto items = nlohmann::json::array();
+        fShared->Read([&](const Profile& profile) {
+            for (const auto& page : profile.history) {
+                if (items.size() >= limit) break;
+                auto item = HistoryItemJSON(page);
+                const double last = item["lastVisitTime"];
+                if (last < start || last > end) continue;
+                if (!text.empty()) {
+                    std::string haystack = page.url + "\n" + page.title;
+                    std::transform(haystack.begin(), haystack.end(), haystack.begin(), [](unsigned char c) { return std::tolower(c); });
+                    if (haystack.find(text) == std::string::npos) continue;
+                }
+                items.push_back(std::move(item));
+            }
+        });
+        respond(items);
+    } else if (method == "getVisits") {
+        const std::string url = arguments.value("url", std::string());
+        auto visits = nlohmann::json::array();
+        fShared->Read([&](const Profile& profile) {
+            for (const auto& page : profile.history) {
+                if (page.url != url) continue;
+                const auto id = std::to_string(std::hash<std::string>()(page.url));
+                for (auto time : HistoryVisitTimes(page))
+                    visits.push_back({{"id", id}, {"visitId", std::to_string(time)}, {"visitTime", time / 1000.0}, {"referringVisitId", "0"}, {"transition", "link"}, {"isLocal", true}});
+                if (visits.empty() && page.visited)
+                    visits.push_back({{"id", id}, {"visitId", std::to_string(page.visited)}, {"visitTime", page.visited * 1000.0}, {"referringVisitId", "0"}, {"transition", "link"}, {"isLocal", true}});
+                break;
+            }
+        });
+        respond(visits);
+    } else if (method == "addUrl") {
+        PageRecord page { arguments.value("url", std::string()), arguments.value("title", std::string()) };
+        if (page.url.empty()) { RespondToCommand(identifier, B_BAD_VALUE); return; }
+        std::optional<PageRecord> recorded;
+        const double time = arguments.value("visitTime", now);
+        fShared->Change([&](Profile& profile) -> uint32 {
+            if (!profile.Visit(page, static_cast<int64_t>(time / 1000))) return 0;
+            for (const auto& entry : profile.history) {
+                if (entry.url == page.url) { recorded = entry; break; }
+            }
+            return SharedProfile::kHistoryChanged;
+        }, BMessenger(this), false);
+        if (recorded) fWebKitContext->NotifyHistoryChanged("visited", HistoryItemJSON(*recorded).dump().c_str());
+        respond(nullptr);
+    } else if (method == "deleteUrl") {
+        const std::string url = arguments.value("url", std::string());
+        bool erased = false;
+        fShared->Change([&](Profile& profile) -> uint32 {
+            erased = std::erase_if(profile.history, [&](const PageRecord& page) { return page.url == url; }) > 0;
+            return erased ? SharedProfile::kHistoryChanged : 0;
+        }, BMessenger(this), false);
+        if (erased) removed(false, { url });
+        respond(nullptr);
+    } else if (method == "deleteRange") {
+        // Pages last visited in the range; their earlier visits go with them.
+        const double start = arguments.value("startTime", 0.0), end = arguments.value("endTime", 0.0);
+        std::vector<std::string> urls;
+        fShared->Change([&](Profile& profile) -> uint32 {
+            std::erase_if(profile.history, [&](const PageRecord& page) {
+                const double last = HistoryItemJSON(page)["lastVisitTime"];
+                if (last < start || last > end) return false;
+                urls.push_back(page.url);
+                return true;
+            });
+            return urls.empty() ? 0 : SharedProfile::kHistoryChanged;
+        }, BMessenger(this), false);
+        removed(false, urls);
+        respond(nullptr);
+    } else if (method == "deleteAll") {
+        fShared->ClearHistory(BMessenger(this));
+        removed(true, { });
+        respond(nullptr);
+    } else
+        RespondToCommand(identifier, B_NOT_SUPPORTED);
+#else
+    (void)message;
+    RespondToCommand(identifier, B_NOT_SUPPORTED);
+#endif
+}
+
 }
 #endif
