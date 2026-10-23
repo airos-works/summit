@@ -85747,10 +85747,10 @@ index 0000000000000000000000000000000000000000..5ed4048db9f4162af3e4ada0a5933323
 +}
 diff --git a/Source/WebKit/UIProcess/API/haiku/WebKitContext.h b/Source/WebKit/UIProcess/API/haiku/WebKitContext.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..72bab1c11dab43735c106b1d3c85c5901d5e4e7c
+index 0000000000000000000000000000000000000000..bffefde70478f798a63cfe158e23c410d4946c2f
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/API/haiku/WebKitContext.h
-@@ -0,0 +1,456 @@
+@@ -0,0 +1,459 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#pragma once
@@ -85832,6 +85832,8 @@ index 0000000000000000000000000000000000000000..72bab1c11dab43735c106b1d3c85c590
 +//                  "fullscreen").
 +//   MOVE_TAB       view, window, index (int32; -1: after the last tab). Moves
 +//                  the tab within its own window.
++//   SET_ZOOM       view, window, zoom (double: 0.25..5, or 0 for the default).
++//                  The host zooms the tab as its own zoom commands would.
 +// Answer every command exactly once with RespondToBrowserCommand, after the
 +// change is visible through SetBrowserWindowTabs. CANCELLED (identifier only)
 +// tells the host the engine stopped waiting: the deadline passed, the extension
@@ -85853,7 +85855,8 @@ index 0000000000000000000000000000000000000000..72bab1c11dab43735c106b1d3c85c590
 +    B_WEBKIT_BROWSER_CLOSE_WINDOW,
 +    B_WEBKIT_BROWSER_FOCUS_WINDOW,
 +    B_WEBKIT_BROWSER_SET_WINDOW_STATE,
-+    B_WEBKIT_BROWSER_MOVE_TAB
++    B_WEBKIT_BROWSER_MOVE_TAB,
++    B_WEBKIT_BROWSER_SET_ZOOM
 +};
 +
 +// Site permissions: what pages may ask the user for, and the services that
@@ -95194,10 +95197,10 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..803a37159985c02ed1da8405f17744c0
  };
  
 diff --git a/Source/WebKit/UIProcess/Extensions/WebExtensionContext.messages.in b/Source/WebKit/UIProcess/Extensions/WebExtensionContext.messages.in
-index 6581f34180846663e2a8be51064e43c2d8173b64..ec5b6c0e567b80330d5b32763e0cf01a21b5f68b 100644
+index 6581f34180846663e2a8be51064e43c2d8173b64..9d63e7dcd570dd2a02d1da22f16312ea279e4daf 100644
 --- a/Source/WebKit/UIProcess/Extensions/WebExtensionContext.messages.in
 +++ b/Source/WebKit/UIProcess/Extensions/WebExtensionContext.messages.in
-@@ -31,10 +31,127 @@
+@@ -31,10 +31,129 @@
      DispatchedTo=UI
  ]
  messages -> WebExtensionContext {
@@ -95232,6 +95235,8 @@ index 6581f34180846663e2a8be51064e43c2d8173b64..ec5b6c0e567b80330d5b32763e0cf01a
 +    [Validator=isLoadedAndPrivilegedMessage] TabsCreate(std::optional<WebKit::WebPageProxyIdentifier> webPageProxyIdentifier, WebKit::WebExtensionTabParameters creationParameters) -> (std::expected<std::optional<WebKit::WebExtensionTabParameters>, WebKit::WebExtensionError> result)
 +    [Validator=isLoadedAndPrivilegedMessage] TabsUpdate(WebKit::WebPageProxyIdentifier webPageProxyIdentifier, std::optional<WebKit::WebExtensionTabIdentifier> tabIdentifier, WebKit::WebExtensionTabParameters updateParameters) -> (std::expected<std::optional<WebKit::WebExtensionTabParameters>, WebKit::WebExtensionError> result)
 +    [Validator=isLoadedAndPrivilegedMessage] TabsReload(WebKit::WebPageProxyIdentifier webPageProxyIdentifier, std::optional<WebKit::WebExtensionTabIdentifier> tabIdentifier, enum:bool WebKit::ReloadFromOrigin reloadFromOrigin) -> (std::expected<void, WebKit::WebExtensionError> result)
++    [Validator=isLoadedAndPrivilegedMessage] TabsGetZoom(WebKit::WebPageProxyIdentifier webPageProxyIdentifier, std::optional<WebKit::WebExtensionTabIdentifier> tabIdentifier) -> (std::expected<double, WebKit::WebExtensionError> result)
++    [Validator=isLoadedAndPrivilegedMessage] TabsSetZoom(WebKit::WebPageProxyIdentifier webPageProxyIdentifier, std::optional<WebKit::WebExtensionTabIdentifier> tabIdentifier, double zoomFactor) -> (std::expected<void, WebKit::WebExtensionError> result)
 +    [Validator=isLoadedAndPrivilegedMessage] TabsGoBack(WebKit::WebPageProxyIdentifier webPageProxyIdentifier, std::optional<WebKit::WebExtensionTabIdentifier> tabIdentifier) -> (std::expected<void, WebKit::WebExtensionError> result)
 +    [Validator=isLoadedAndPrivilegedMessage] TabsGoForward(WebKit::WebPageProxyIdentifier webPageProxyIdentifier, std::optional<WebKit::WebExtensionTabIdentifier> tabIdentifier) -> (std::expected<void, WebKit::WebExtensionError> result)
 +    [Validator=isLoadedAndPrivilegedMessage] TabsRemove(Vector<WebKit::WebExtensionTabIdentifier> tabIdentifiers) -> (std::expected<void, WebKit::WebExtensionError> result)
@@ -95326,7 +95331,7 @@ index 6581f34180846663e2a8be51064e43c2d8173b64..ec5b6c0e567b80330d5b32763e0cf01a
      // Action APIs
      [Validator=isActionMessageAllowed] ActionGetTitle(std::optional<WebKit::WebExtensionWindowIdentifier> windowIdentifier, std::optional<WebKit::WebExtensionTabIdentifier> tabIdentifier) -> (std::expected<String, WebKit::WebExtensionError> result)
      [Validator=isActionMessageAllowed] ActionSetTitle(std::optional<WebKit::WebExtensionWindowIdentifier> windowIdentifier, std::optional<WebKit::WebExtensionTabIdentifier> tabIdentifier, String title) -> (std::expected<void, WebKit::WebExtensionError> result)
-@@ -48,6 +165,33 @@ messages -> WebExtensionContext {
+@@ -48,6 +167,33 @@ messages -> WebExtensionContext {
      [Validator=isActionMessageAllowed] ActionSetEnabled(std::optional<WebKit::WebExtensionTabIdentifier> tabIdentifier, bool enabled) -> (std::expected<void, WebKit::WebExtensionError> result)
  #endif
  
@@ -95360,7 +95365,7 @@ index 6581f34180846663e2a8be51064e43c2d8173b64..ec5b6c0e567b80330d5b32763e0cf01a
      // Alarms APIs
      [Validator=isAlarmsMessageAllowed] AlarmsCreate(String name, Seconds initialInterval, Seconds repeatInterval) -> ()
      [Validator=isAlarmsMessageAllowed] AlarmsGet(String name) -> (struct std::optional<WebKit::WebExtensionAlarmParameters> alarmInfo)
-@@ -71,9 +215,6 @@ messages -> WebExtensionContext {
+@@ -71,9 +217,6 @@ messages -> WebExtensionContext {
      [Validator=isBookmarksMessageAllowed] BookmarksRemoveTree(String bookmarkId) -> (std::expected<void, WebKit::WebExtensionError> result)
  #endif // ENABLE(WK_WEB_EXTENSIONS_BOOKMARKS)
  
@@ -95370,7 +95375,7 @@ index 6581f34180846663e2a8be51064e43c2d8173b64..ec5b6c0e567b80330d5b32763e0cf01a
      // Cookies APIs
      [Validator=isCookiesMessageAllowed] CookiesGet(std::optional<PAL::SessionID> sessionID, String name, URL url) -> (std::expected<std::optional<WebKit::WebExtensionCookieParameters>, WebKit::WebExtensionError> result)
      [Validator=isCookiesMessageAllowed] CookiesGetAll(std::optional<PAL::SessionID> sessionID, URL url, struct WebKit::WebExtensionCookieFilterParameters filterParameters) -> (std::expected<Vector<WebKit::WebExtensionCookieParameters>, WebKit::WebExtensionError> result)
-@@ -100,8 +241,6 @@ messages -> WebExtensionContext {
+@@ -100,8 +243,6 @@ messages -> WebExtensionContext {
  #endif
  
      // Event APIs
@@ -95379,7 +95384,7 @@ index 6581f34180846663e2a8be51064e43c2d8173b64..ec5b6c0e567b80330d5b32763e0cf01a
  
      // Extensions APIs
      [Validator=isLoaded] ExtensionIsAllowedIncognitoAccess() -> (bool result)
-@@ -134,20 +273,10 @@ messages -> WebExtensionContext {
+@@ -134,20 +275,10 @@ messages -> WebExtensionContext {
      [Validator=isLoaded] PermissionsRequest(HashSet<String> permissions, HashSet<String> origins) -> (bool success)
      [Validator=isLoaded] PermissionsRemove(HashSet<String> permissions, HashSet<String> origins) -> (bool success)
  
@@ -95400,7 +95405,7 @@ index 6581f34180846663e2a8be51064e43c2d8173b64..ec5b6c0e567b80330d5b32763e0cf01a
  
      // Scripting APIs
      [Validator=isScriptingMessageAllowed] ScriptingExecuteScript(WebKit::WebExtensionScriptInjectionParameters parameters, bool userGesture) -> (std::expected<Vector<WebKit::WebExtensionScriptInjectionResultParameters>, WebKit::WebExtensionError> result)
-@@ -174,15 +303,6 @@ messages -> WebExtensionContext {
+@@ -174,15 +305,6 @@ messages -> WebExtensionContext {
      [Validator=isSidebarMessageAllowed] SidebarGetActionClickBehavior() -> (std::expected<WebKit::WebExtensionActionClickBehavior, WebKit::WebExtensionError> result)
  #endif // ENABLE(WK_WEB_EXTENSIONS_SIDEBAR)
  
@@ -95416,7 +95421,7 @@ index 6581f34180846663e2a8be51064e43c2d8173b64..ec5b6c0e567b80330d5b32763e0cf01a
      // Tabs APIs
      [Validator=isLoadedAndPrivilegedMessage] TabsCreate(std::optional<WebKit::WebPageProxyIdentifier> webPageProxyIdentifier, WebKit::WebExtensionTabParameters creationParameters) -> (std::expected<std::optional<WebKit::WebExtensionTabParameters>, WebKit::WebExtensionError> result)
      [Validator=isLoadedAndPrivilegedMessage] TabsUpdate(WebKit::WebPageProxyIdentifier webPageProxyIdentifier, std::optional<WebKit::WebExtensionTabIdentifier> tabIdentifier, WebKit::WebExtensionTabParameters updateParameters) -> (std::expected<std::optional<WebKit::WebExtensionTabParameters>, WebKit::WebExtensionError> result)
-@@ -207,8 +327,6 @@ messages -> WebExtensionContext {
+@@ -207,8 +329,6 @@ messages -> WebExtensionContext {
      [Validator=isLoadedAndPrivilegedMessage] TabsRemoveCSS(WebKit::WebPageProxyIdentifier webPageProxyIdentifier, std::optional<WebKit::WebExtensionTabIdentifier> tabIdentifier, WebKit::WebExtensionScriptInjectionParameters parameters) -> (std::expected<void, WebKit::WebExtensionError> result)
  
      // WebNavigation APIs
@@ -102146,10 +102151,10 @@ index 0000000000000000000000000000000000000000..ef935e9aa0104dc22308026565130ac3
 +#endif // ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
 diff --git a/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextAPITabCommandsHaiku.cpp b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextAPITabCommandsHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..7dc05b82a0060c56c88348222914d9cfdc58cdfa
+index 0000000000000000000000000000000000000000..0e50191166dac52f3fadb0cd31cc191fe97a6f24
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextAPITabCommandsHaiku.cpp
-@@ -0,0 +1,574 @@
+@@ -0,0 +1,594 @@
 +/*
 + * Copyright (C) 2023-2024 Apple Inc. All rights reserved.
 + *
@@ -102464,6 +102469,26 @@ index 0000000000000000000000000000000000000000..7dc05b82a0060c56c88348222914d9cf
 +    }
 +
 +    tab->reload(reloadFromOrigin, WTF::move(completionHandler));
++}
++
++void WebExtensionContext::tabsGetZoom(WebPageProxyIdentifier webPageProxyIdentifier, std::optional<WebExtensionTabIdentifier> tabIdentifier, CompletionHandler<void(std::expected<double, WebExtensionError>&&)>&& completionHandler)
++{
++    RefPtr tab = getTab(webPageProxyIdentifier, tabIdentifier, IncludeExtensionViews::Yes);
++    if (!tab) {
++        completionHandler(toWebExtensionError("tabs.getZoom()"_s, nullString(), "tab not found"_s));
++        return;
++    }
++    completionHandler(tab->zoomFactor());
++}
++
++void WebExtensionContext::tabsSetZoom(WebPageProxyIdentifier webPageProxyIdentifier, std::optional<WebExtensionTabIdentifier> tabIdentifier, double zoomFactor, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&& completionHandler)
++{
++    RefPtr tab = getTab(webPageProxyIdentifier, tabIdentifier, IncludeExtensionViews::Yes);
++    if (!tab) {
++        completionHandler(toWebExtensionError("tabs.setZoom()"_s, nullString(), "tab not found"_s));
++        return;
++    }
++    tab->setZoomFactor(zoomFactor, WTF::move(completionHandler));
 +}
 +
 +void WebExtensionContext::tabsGoBack(WebPageProxyIdentifier webPageProxyIdentifier, std::optional<WebExtensionTabIdentifier> tabIdentifier, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&& completionHandler)
@@ -110743,10 +110768,10 @@ index 0000000000000000000000000000000000000000..33513664e83e2f9b8cae80550e474ac2
 +#endif // ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
 diff --git a/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionTabCommandsHaiku.cpp b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionTabCommandsHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..053f8728c6beaf911f39870214542cde3d296238
+index 0000000000000000000000000000000000000000..029910e12b8031241ae2543d66cb4245495ff7d4
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionTabCommandsHaiku.cpp
-@@ -0,0 +1,261 @@
+@@ -0,0 +1,274 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#include "config.h"
@@ -110900,6 +110925,19 @@ index 0000000000000000000000000000000000000000..053f8728c6beaf911f39870214542cde
 +{
 +    sendTabCommand(*this, B_WEBKIT_BROWSER_RELOAD_TAB, "tabs.reload()"_s, [fromOrigin](BMessage& message) {
 +        return message.AddBool("bypass_cache", fromOrigin == ReloadFromOrigin::Yes) == B_OK;
++    }, WTF::move(completion));
++}
++
++double WebExtensionTab::zoomFactor() const
++{
++    RefPtr page = nativePage();
++    return page && isValid() ? page->pageZoomFactor() : 1;
++}
++
++void WebExtensionTab::setZoomFactor(double zoomFactor, VoidCompletion&& completion)
++{
++    sendTabCommand(*this, B_WEBKIT_BROWSER_SET_ZOOM, "tabs.setZoom()"_s, [zoomFactor](BMessage& message) {
++        return message.AddDouble("zoom", zoomFactor) == B_OK;
 +    }, WTF::move(completion));
 +}
 +
@@ -138730,10 +138768,10 @@ index d7868f1e4addc61cb897e875bab3a9dcf88efd76..641099c3a542b56479e6eecdb50d493c
  } // namespace WebKit
 diff --git a/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPITabs.cpp b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPITabs.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..1e45c56df8ab69013762f1ba38c9b81a20546c5b
+index 0000000000000000000000000000000000000000..4a01f40f07f0e45281d8de3e3a9484dd8ceb2b2e
 --- /dev/null
 +++ b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPITabs.cpp
-@@ -0,0 +1,733 @@
+@@ -0,0 +1,770 @@
 +/*
 + * Copyright (C) 2023 Apple Inc. All rights reserved.
 + *
@@ -139106,6 +139144,43 @@ index 0000000000000000000000000000000000000000..1e45c56df8ab69013762f1ba38c9b81a
 +        }, extensionContext().identifier());
 +}
 +
++void WebExtensionAPITabs::getZoom(WebPageProxyIdentifier page, double tabID, Ref<WebExtensionCallbackHandler>&& callback, String& exception)
++{
++    // Documentation: https://developer.mozilla.org/docs/Mozilla/Add-ons/WebExtensions/API/tabs/getZoom
++
++    std::optional<WebExtensionTabIdentifier> tab;
++    if (!parseOptionalTabIdentifier(tabID, tab, exception))
++        return;
++    WebProcess::singleton().sendWithAsyncReply(Messages::WebExtensionContext::TabsGetZoom(page, tab),
++        [protectedThis = Ref { *this }, callback = WTF::move(callback)](std::expected<double, WebExtensionError>&& result) {
++            if (!result) {
++                callback->reportError(result.error());
++                return;
++            }
++            auto context = callback->globalContext();
++            Protected<JSValueRef> value(context, JSValueMakeNumber(context, *result));
++            callback->call(value.get());
++        }, extensionContext().identifier());
++}
++
++void WebExtensionAPITabs::setZoom(WebPageProxyIdentifier page, double tabID, double zoomFactor, Ref<WebExtensionCallbackHandler>&& callback, String& exception)
++{
++    // Documentation: https://developer.mozilla.org/docs/Mozilla/Add-ons/WebExtensions/API/tabs/setZoom
++
++    std::optional<WebExtensionTabIdentifier> tab;
++    if (!parseOptionalTabIdentifier(tabID, tab, exception))
++        return;
++    // 0 restores the default; otherwise Chrome's range.
++    if (!std::isfinite(zoomFactor) || (zoomFactor && (zoomFactor < 0.25 || zoomFactor > 5))) {
++        exception = toErrorString(nullString(), "zoomFactor"_s, "it must be 0, or between 0.25 and 5"_s);
++        return;
++    }
++    WebProcess::singleton().sendWithAsyncReply(Messages::WebExtensionContext::TabsSetZoom(page, tab, zoomFactor),
++        [protectedThis = Ref { *this }, callback = WTF::move(callback)](std::expected<void, WebExtensionError>&& result) {
++            callWithVoid(callback.get(), WTF::move(result));
++        }, extensionContext().identifier());
++}
++
 +void WebExtensionAPITabs::goBack(WebPageProxyIdentifier page, double tabID, Ref<WebExtensionCallbackHandler>&& callback, String& exception)
 +{
 +    // Documentation: https://developer.mozilla.org/docs/Mozilla/Add-ons/WebExtensions/API/tabs/goBack
@@ -139468,10 +139543,10 @@ index 0000000000000000000000000000000000000000..1e45c56df8ab69013762f1ba38c9b81a
 +}
 +#endif
 diff --git a/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPITabs.h b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPITabs.h
-index de0fbb5429a8ed531f265a73c467871e082e4977..943261d4d04dab54c319c08ad6246c18700198ab 100644
+index de0fbb5429a8ed531f265a73c467871e082e4977..4022f292415f851bec68cf809acbf1a61626eb15 100644
 --- a/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPITabs.h
 +++ b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPITabs.h
-@@ -49,15 +49,50 @@ class WebExtensionAPITabs : public WebExtensionAPIObject, public JSWebExtensionW
+@@ -49,15 +49,54 @@ class WebExtensionAPITabs : public WebExtensionAPIObject, public JSWebExtensionW
      WEB_EXTENSION_DECLARE_JS_WRAPPER_CLASS(WebExtensionAPITabs, tabs, tabs);
  
  public:
@@ -139506,6 +139581,10 @@ index de0fbb5429a8ed531f265a73c467871e082e4977..943261d4d04dab54c319c08ad6246c18
 +    void removeCSS(WebPageProxyIdentifier page, double tabID, RefPtr<JSON::Value> options, Ref<WebExtensionCallbackHandler>&& callback, String& exception);
 +    void captureVisibleTab(WebPageProxyIdentifier page, double windowID, RefPtr<JSON::Value> options, Ref<WebExtensionCallbackHandler>&& callback, String& exception);
 +    void move(JSContextRef, JSValueRef tabIDs, RefPtr<JSON::Value> properties, Ref<WebExtensionCallbackHandler>&& callback, String& exception);
++#if PLATFORM(HAIKU)
++    void getZoom(WebPageProxyIdentifier page, double tabID, Ref<WebExtensionCallbackHandler>&& callback, String& exception);
++    void setZoom(WebPageProxyIdentifier page, double tabID, double zoomFactor, Ref<WebExtensionCallbackHandler>&& callback, String& exception);
++#endif
 +#if PLATFORM(COCOA)
 +    void getSelected(WebPageProxyIdentifier page, double windowID, Ref<WebExtensionCallbackHandler>&& callback, String& exception);
 +    void duplicate(double tabID, RefPtr<JSON::Value> properties, Ref<WebExtensionCallbackHandler>&& callback, String& exception);
@@ -139524,7 +139603,7 @@ index de0fbb5429a8ed531f265a73c467871e082e4977..943261d4d04dab54c319c08ad6246c18
      void getSelected(WebPageProxyIdentifier, double windowID, Ref<WebExtensionCallbackHandler>&&, NSString **outExceptionString);
  
      void duplicate(double tabID, NSDictionary *properties, Ref<WebExtensionCallbackHandler>&&, NSString **outExceptionString);
-@@ -83,17 +118,6 @@ public:
+@@ -83,17 +122,6 @@ public:
      void insertCSS(WebPageProxyIdentifier, double tabID, NSDictionary *options, Ref<WebExtensionCallbackHandler>&&, NSString **outExceptionString);
      void removeCSS(WebPageProxyIdentifier, double tabID, NSDictionary *options, Ref<WebExtensionCallbackHandler>&&, NSString **outExceptionString);
  
@@ -139542,7 +139621,7 @@ index de0fbb5429a8ed531f265a73c467871e082e4977..943261d4d04dab54c319c08ad6246c18
  
  private:
      bool parseTabCreateOptions(NSDictionary *, WebExtensionTabParameters&, NSString *sourceKey, NSString **outExceptionString);
-@@ -105,16 +129,18 @@ private:
+@@ -105,16 +133,18 @@ private:
      static bool parseConnectOptions(NSDictionary *, std::optional<String>& name, WebExtensionMessageTargetParameters&, NSString *sourceKey, NSString **outExceptionString);
      static bool parseScriptOptions(NSDictionary *, WebExtensionScriptInjectionParameters&, NSString **outExceptionString);
  
@@ -143764,10 +143843,22 @@ index 566901ed1e1b5d89a4b164941b8b8b7deb3761d0..0d275dddf9768f5d8e5f71da7fcb9aa7
  inline JSValueRef toJSValueRefOrJSNull(JSContextRef context, RefPtr<JSON::Object> value)
  {
 diff --git a/Source/WebKit/WebProcess/Extensions/Bindings/Scripts/CodeGeneratorExtensions.pm b/Source/WebKit/WebProcess/Extensions/Bindings/Scripts/CodeGeneratorExtensions.pm
-index db1f3438b6d53c9f026dee88eb481963982bfc88..45a59e0eab7d7bda5d8b65fdcd84ba30e5de6f34 100644
+index db1f3438b6d53c9f026dee88eb481963982bfc88..3507b7a7134d313a39f65caaa366f7e687aeb451 100644
 --- a/Source/WebKit/WebProcess/Extensions/Bindings/Scripts/CodeGeneratorExtensions.pm
 +++ b/Source/WebKit/WebProcess/Extensions/Bindings/Scripts/CodeGeneratorExtensions.pm
-@@ -226,7 +226,7 @@ EOF
+@@ -158,7 +158,10 @@ sub platformString
+     my ($node) = @_;
+     my $platform = $node->extendedAttributes->{"Platform"};
+     return "" unless $platform;
+-    return "PLATFORM($platform)";
++    # Platform=COCOA|HAIKU: any of them.
++    my @platforms = split(/\|/, $platform);
++    return "PLATFORM($platform)" if @platforms == 1;
++    return "(" . join(" || ", map { "PLATFORM($_)" } @platforms) . ")";
+ }
+ 
+ sub _generateHeaderFile
+@@ -226,7 +229,7 @@ EOF
  
              push(@contents, "#if ${platformString}\n") if $platformString;
              push(@contents, "#if ${conditionalString}\n") if $conditionalString;
@@ -143776,7 +143867,7 @@ index db1f3438b6d53c9f026dee88eb481963982bfc88..45a59e0eab7d7bda5d8b65fdcd84ba30
              push(@contents, "    static bool setProperty(JSContextRef, JSObjectRef, JSStringRef, JSValueRef, JSValueRef*);\n") if $function->extendedAttributes->{"SetProperty"};
              push(@contents, "    static JSValueRef getProperty(JSContextRef, JSObjectRef, JSStringRef, JSValueRef*);\n") if $function->extendedAttributes->{"GetProperty"};
              push(@contents, "    static bool deleteProperty(JSContextRef, JSObjectRef, JSStringRef, JSValueRef*);\n") if $function->extendedAttributes->{"DeleteProperty"};
-@@ -464,7 +464,7 @@ EOF
+@@ -464,7 +467,7 @@ EOF
  
              push(@contents, "\n");
  
@@ -143785,7 +143876,7 @@ index db1f3438b6d53c9f026dee88eb481963982bfc88..45a59e0eab7d7bda5d8b65fdcd84ba30
              my $call = _callString($idlType, $function, 1);
  
              my $defaultEarlyReturnValue = "JSValueMakeUndefined(context)";
-@@ -475,7 +475,7 @@ EOF
+@@ -475,7 +478,7 @@ EOF
              my $isDeletePropertyFunction = defined $function->extendedAttributes->{"DeleteProperty"};
              my $isPropertyFunction = $isSetPropertyFunction || $isGetPropertyFunction || $isDeletePropertyFunction;
  
@@ -143794,7 +143885,7 @@ index db1f3438b6d53c9f026dee88eb481963982bfc88..45a59e0eab7d7bda5d8b65fdcd84ba30
              push(@contents, <<EOF) if $conditionalString;
  #if ${conditionalString}
  EOF
-@@ -494,11 +494,24 @@ EOF
+@@ -494,11 +497,24 @@ EOF
                  push(@contents, $functionSignature);
              }
  
@@ -143820,7 +143911,7 @@ index db1f3438b6d53c9f026dee88eb481963982bfc88..45a59e0eab7d7bda5d8b65fdcd84ba30
          return ${defaultEarlyReturnValue};
  
      RELEASE_LOG_DEBUG(Extensions, "Called function ${call} (%" PUBLIC_LOG "lu %" PUBLIC_LOG_STRING ") in %" PUBLIC_LOG_STRING " world", argumentCount, argumentCount == 1 ? "argument" : "arguments", toDebugString(impl->contentWorldType()).utf8());
-@@ -528,6 +541,7 @@ EOF
+@@ -528,6 +544,7 @@ EOF
  
              foreach my $parameter (@specifiedParameters) {
                  $self->_includeHeaders(\%contentsIncludes, $parameter->type, $parameter);
@@ -143828,7 +143919,7 @@ index db1f3438b6d53c9f026dee88eb481963982bfc88..45a59e0eab7d7bda5d8b65fdcd84ba30
                  $optionalArgumentCount++ if $parameter->extendedAttributes->{"Optional"};
                  $needsPage = 1 if $parameter->extendedAttributes->{"CallbackHandler"} && $interface->extendedAttributes->{"NeedsPageWithCallbackHandler"};
                  $needsPageIdentifier = 1 if $parameter->extendedAttributes->{"CallbackHandler"} && $interface->extendedAttributes->{"NeedsPageIdentifierWithCallbackHandler"};
-@@ -1477,7 +1491,9 @@ sub _javaScriptTypeCondition
+@@ -1477,7 +1494,9 @@ sub _javaScriptTypeCondition
      $nullOrUndefined = " || JSValueIsNull(context, ${argument}) || JSValueIsUndefined(context, ${argument})" if $signature->extendedAttributes->{"Optional"};
  
      return "isDictionary(context, ${argument}) || JSValueIsString(context, ${argument})${nullOrUndefined}" if $idlTypeName eq "any" && $signature->extendedAttributes->{"NSObject"} && $signature->extendedAttributes->{"DOMString"};
@@ -143838,7 +143929,7 @@ index db1f3438b6d53c9f026dee88eb481963982bfc88..45a59e0eab7d7bda5d8b65fdcd84ba30
      return "isDictionary(context, ${argument})${nullOrUndefined}" if $idlTypeName eq "any" && ($signature->extendedAttributes->{"NSDictionary"} || $signature->extendedAttributes->{"JSONValue"});
      return "JSValueIsObject(context, ${argument})${nullOrUndefined}" if $idlTypeName eq "any" && $signature->extendedAttributes->{"NSObject"};
      return "JSValueIsObject(context, ${argument})${nullOrUndefined}" if $idlTypeName eq "any" && !$signature->extendedAttributes->{"ValuesAllowed"};
-@@ -1485,6 +1501,7 @@ sub _javaScriptTypeCondition
+@@ -1485,6 +1504,7 @@ sub _javaScriptTypeCondition
      return "JSValueIsBoolean(context, ${argument})${nullOrUndefined}" if $idlTypeName eq "boolean";
      return "JSValueIsArray(context, ${argument})${nullOrUndefined}" if $idlTypeName eq "array";
      return "JSValueIsString(context, ${argument})${nullOrUndefined}" if $$self{codeGenerator}->IsStringType($idlType);
@@ -143846,7 +143937,7 @@ index db1f3438b6d53c9f026dee88eb481963982bfc88..45a59e0eab7d7bda5d8b65fdcd84ba30
      return "JSValueIsNumber(context, ${argument})${nullOrUndefined}"  if $$self{codeGenerator}->IsPrimitiveType($idlType);
      return $argument;
  }
-@@ -1539,6 +1556,7 @@ sub _platformTypeConstructor
+@@ -1539,6 +1559,7 @@ sub _platformTypeConstructor
          return "toNSDictionary(context, $argumentName, NullValuePolicy::Allowed, ValuePolicy::StopAtTopLevel)" if $signature->extendedAttributes->{"NSDictionary"} && $signature->extendedAttributes->{"NSDictionary"} eq "StopAtTopLevel";
          return "toNSDictionary(context, $argumentName, NullValuePolicy::Allowed)" if $signature->extendedAttributes->{"NSDictionary"} && $signature->extendedAttributes->{"NSDictionary"} eq "NullAllowed";
          return "toNSDictionary(context, $argumentName, NullValuePolicy::NotAllowed)" if $signature->extendedAttributes->{"NSDictionary"};
@@ -143854,7 +143945,7 @@ index db1f3438b6d53c9f026dee88eb481963982bfc88..45a59e0eab7d7bda5d8b65fdcd84ba30
          return "toJSONValue(context, $argumentName, NullValuePolicy::Allowed, ValuePolicy::StopAtTopLevel)" if $signature->extendedAttributes->{"JSONValue"} && $signature->extendedAttributes->{"JSONValue"} eq "StopAtTopLevel";
          return "toJSONValue(context, $argumentName, NullValuePolicy::Allowed)" if $signature->extendedAttributes->{"JSONValue"} && $signature->extendedAttributes->{"JSONValue"} eq "NullAllowed";
          return "toJSONValue(context, $argumentName, NullValuePolicy::NotAllowed)" if $signature->extendedAttributes->{"JSONValue"};
-@@ -1563,6 +1581,7 @@ sub _platformTypeConstructor
+@@ -1563,6 +1584,7 @@ sub _platformTypeConstructor
      return "[NSURL URLWithString:toString(context, $argumentName, $nullStringPolicy).createNSString().get()]" if !$interface->extendedAttributes->{"UseCPPAPI"} && $$self{codeGenerator}->IsStringType($idlType) && $signature->extendedAttributes->{"URL"};
      return "URL { toString(context, $argumentName, $nullStringPolicy) }" if $interface->extendedAttributes->{"UseCPPAPI"} && $$self{codeGenerator}->IsStringType($idlType) && $signature->extendedAttributes->{"URL"};
      return "toString(context, $argumentName, $nullStringPolicy)" if $$self{codeGenerator}->IsStringType($idlType);
@@ -143862,7 +143953,7 @@ index db1f3438b6d53c9f026dee88eb481963982bfc88..45a59e0eab7d7bda5d8b65fdcd84ba30
      return "JSValueToNumber(context, $argumentName, nullptr)" if $$self{codeGenerator}->IsPrimitiveType($idlType);
      return "to" . _implementationClassName($idlType) . "(context, $argumentName)";
  }
-@@ -1663,6 +1682,15 @@ sub _setterName
+@@ -1663,6 +1685,15 @@ sub _setterName
      return "set" . $$self{codeGenerator}->WK_ucfirst($name);
  }
  
@@ -143878,7 +143969,7 @@ index db1f3438b6d53c9f026dee88eb481963982bfc88..45a59e0eab7d7bda5d8b65fdcd84ba30
  sub _staticFunctionsGetterImplementation
  {
      my ($self, $interface) = @_;
-@@ -1674,10 +1702,11 @@ sub _staticFunctionsGetterImplementation
+@@ -1674,10 +1705,11 @@ sub _staticFunctionsGetterImplementation
          my @attributes = ();
          push(@attributes, "kJSPropertyAttributeDontEnum") if $_->extendedAttributes->{"DontEnum"};
          my $jsproperties = scalar @attributes == 0 ? "kJSPropertyAttributeNone" : join(" | ", @attributes);
@@ -143893,7 +143984,7 @@ index db1f3438b6d53c9f026dee88eb481963982bfc88..45a59e0eab7d7bda5d8b65fdcd84ba30
      };
  
      my @initializers = map(&$mapFunction, @{$interface->operations});
-@@ -1927,11 +1956,11 @@ EOF
+@@ -1927,11 +1959,11 @@ EOF
              my $condition = "JSStringIsEqualToUTF8CString(propertyName, \"${name}\")" if $hasMainWorldOnlyProperties and !$hasDynamicProperties;
              $condition = &$generateCondition($function, "JSStringIsEqualToUTF8CString(propertyName, \"${name}\")") if $hasDynamicProperties;
  
@@ -144993,7 +145084,7 @@ index 866d70a2cdbbe9cfbd525c7be21d6c21db2dfa1a..090b11c6a852e779e830487dcaed3958
      readonly attribute WebExtensionAPIEvent onChanged;
  
 diff --git a/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPITabs.idl b/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPITabs.idl
-index a744e37f5fd4c546a27627a69573d8eeb454312b..f18ae9012320a7e6f6cab3d978692515562a2b23 100644
+index a744e37f5fd4c546a27627a69573d8eeb454312b..310d6d15bd4e28976153a2527615e19253940c46 100644
 --- a/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPITabs.idl
 +++ b/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPITabs.idl
 @@ -69,42 +69,43 @@ dictionary WebExtensionTabCreateProperties {
@@ -145035,8 +145126,8 @@ index a744e37f5fd4c546a27627a69573d8eeb454312b..f18ae9012320a7e6f6cab3d978692515
  
 -    [RaisesException, NeedsPageIdentifier] void getZoom([Optional] double tabID, [Optional, CallbackHandler] function callback);
 -    [RaisesException, NeedsPageIdentifier] void setZoom([Optional] double tabID, double zoomFactor, [Optional, CallbackHandler] function callback);
-+    [Platform=COCOA, RaisesStringException, NeedsPageIdentifier] void getZoom([Optional] double tabID, [Optional, CallbackHandler] function callback);
-+    [Platform=COCOA, RaisesStringException, NeedsPageIdentifier] void setZoom([Optional] double tabID, double zoomFactor, [Optional, CallbackHandler] function callback);
++    [Platform=COCOA|HAIKU, RaisesStringException, NeedsPageIdentifier] void getZoom([Optional] double tabID, [Optional, CallbackHandler] function callback);
++    [Platform=COCOA|HAIKU, RaisesStringException, NeedsPageIdentifier] void setZoom([Optional] double tabID, double zoomFactor, [Optional, CallbackHandler] function callback);
  
 -    [RaisesException, NeedsPageIdentifier] void detectLanguage([Optional] double tabID, [Optional, CallbackHandler] function callback);
 +    [Platform=COCOA, RaisesStringException, NeedsPageIdentifier] void detectLanguage([Optional] double tabID, [Optional, CallbackHandler] function callback);

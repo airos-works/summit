@@ -115,9 +115,20 @@ never a hang): no listener â†’ "it is not implemented"; no answer within 30 s â†
 - Failures of extension-requested tabs are reported to the extension, not shown
   as alerts.
 
+## Zoom (#106)
+
+`tabs.getZoom()` reads the tab's page zoom. `tabs.setZoom()` sends
+`B_WEBKIT_BROWSER_SET_ZOOM` (`zoom`: 0.25 to 5, or 0 for the default) to the
+browser, which zooms the tab the way its own zoom commands do: the zoom
+indicator shows it and the zoom is remembered for the site, so the site's other
+tabs follow (`BrowserWindow::SetTabZoom`). Values outside that range throw.
+`tabs.onZoomChange` and `getZoomSettings`/`setZoomSettings` are not
+implemented. Fixture: `tests/fixtures/extensions/tab-zoom` (open
+`https://example.com/?zoom`).
+
 ## Not implemented
 
-`tabs.duplicate`, `tabs.move`, `tabs.getZoom/setZoom`, `tabs.detectLanguage`,
+`tabs.duplicate`, `tabs.move`, `tabs.detectLanguage`,
 `tabs.toggleReaderMode`, `tabs.captureVisibleTab`, `tabs.getSelected`,
 `tabs.onMoved`, pinned tabs, `openerTabId` on `tabs.update`, window geometry
 (`left/top/width/height` are validated and dropped), `maximized`/`fullscreen`

@@ -375,6 +375,8 @@ private:
     // Gives the tab its site's remembered zoom when its site changed.
     void ApplySiteZoom(Tab&);
     // Zooms the current page one step in (> 0) or out (< 0), or back to 100% (0).
+    // Zooms the tab and remembers the zoom for its site (its other tabs follow).
+    void SetTabZoom(Tab& tab, double zoom);
     void ChangeZoom(int direction);
     void ShowZoom();
     void ShowSearchEngine();

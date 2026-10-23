@@ -2284,6 +2284,14 @@ void BrowserWindow::BrowserCommand(const BMessage& message)
     }
     if (!tab) { RespondToCommand(identifier, B_ENTRY_NOT_FOUND, { }, "The tab is not open in this window."); return; }
     switch (command) {
+        case B_WEBKIT_BROWSER_SET_ZOOM: {
+            // tabs.setZoom(): 0 is the default zoom.
+            const double zoom = message.GetDouble("zoom", -1);
+            if (!(zoom == 0 || (zoom >= 0.25 && zoom <= 5))) { RespondToCommand(identifier, B_BAD_VALUE, { }, "The zoom is out of range."); return; }
+            SetTabZoom(*tab, zoom ? zoom : 1.0);
+            RespondToCommand(identifier, B_OK);
+            return;
+        }
         case B_WEBKIT_BROWSER_ACTIVATE_TAB:
             if (fClosingWindow) { RespondToCommand(identifier, B_BUSY, { }, "The window is closing."); return; }
             SelectTab(tab->id);
@@ -2954,15 +2962,18 @@ void BrowserWindow::ChangeZoom(int direction)
     }
     if (!direction) tab->view->ResetZoomFactor();
 #endif
-    const double zoom = direction ? NextZoomLevel(tab->pageZoom, direction) : 1.0;
-    if (std::fabs(zoom - tab->pageZoom) >= 0.001) {
-        tab->view->SetZoomFactor(zoom);
-        tab->pageZoom = zoom;
+    SetTabZoom(*tab, direction ? NextZoomLevel(tab->pageZoom, direction) : 1.0);
+}
+void BrowserWindow::SetTabZoom(Tab& tab, double zoom)
+{
+    if (std::fabs(zoom - tab.pageZoom) >= 0.001) {
+        tab.view->SetZoomFactor(zoom);
+        tab.pageZoom = zoom;
     }
     // Remembered for the site; its other tabs follow (ProfileChanged).
-    tab->zoomKey = ZoomKey(tab->url);
-    fShared->SetSiteZoom(tab->zoomKey, zoom, fPrivate, BMessenger(this));
-    ShowZoom();
+    tab.zoomKey = ZoomKey(tab.url);
+    fShared->SetSiteZoom(tab.zoomKey, zoom, fPrivate, BMessenger(this));
+    if (&tab == ActiveTab()) ShowZoom();
 }
 void BrowserWindow::ShowZoom()
 {
