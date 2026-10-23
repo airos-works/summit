@@ -78817,10 +78817,10 @@ index e1e00f448cdfe28b28e6ac184bdb9025666411de..bbe23d2c25f24c8c9031515e563fee8b
  
  [Nested] enum class WebKit::WebExtension::InjectionTime : uint8_t {
 diff --git a/Source/WebKit/Shared/Extensions/WebExtensionEventListenerType.h b/Source/WebKit/Shared/Extensions/WebExtensionEventListenerType.h
-index c6ffb3e89eeaffe26af5d76690da641e7b65c4c0..c71dbdcfb65137fa950b35451b2415e1466a0b2f 100644
+index c6ffb3e89eeaffe26af5d76690da641e7b65c4c0..5529517fded6ee2b38272615dbae29b2fafe27b5 100644
 --- a/Source/WebKit/Shared/Extensions/WebExtensionEventListenerType.h
 +++ b/Source/WebKit/Shared/Extensions/WebExtensionEventListenerType.h
-@@ -99,11 +99,60 @@ enum class WebExtensionEventListenerType : uint8_t {
+@@ -99,11 +99,63 @@ enum class WebExtensionEventListenerType : uint8_t {
      WindowsOnCreated,
      WindowsOnFocusChanged,
      WindowsOnRemoved,
@@ -78840,6 +78840,7 @@ index c6ffb3e89eeaffe26af5d76690da641e7b65c4c0..c71dbdcfb65137fa950b35451b2415e1
 +    WebNavigationOnReferenceFragmentUpdated,
 +    WebNavigationOnTabReplaced,
 +    DownloadsOnErased,
++    TabsOnZoomChange,
 +#endif
  };
  
@@ -78877,15 +78878,17 @@ index c6ffb3e89eeaffe26af5d76690da641e7b65c4c0..c71dbdcfb65137fa950b35451b2415e1
 +        return "onTabReplaced"_s;
 +    case WebExtensionEventListenerType::DownloadsOnErased:
 +        return "onErased"_s;
++    case WebExtensionEventListenerType::TabsOnZoomChange:
++        return "onZoomChange"_s;
 +#endif
      case WebExtensionEventListenerType::Unknown:
          return nullString();
      case WebExtensionEventListenerType::ActionOnClicked:
 diff --git a/Source/WebKit/Shared/Extensions/WebExtensionEventListenerType.serialization.in b/Source/WebKit/Shared/Extensions/WebExtensionEventListenerType.serialization.in
-index 66271809620c823d465be4cee34c1806ab422cbe..e9d89039281cc773b82b234c08613a17bd758e89 100644
+index 66271809620c823d465be4cee34c1806ab422cbe..ef8a2f71c1650ab393393fbfed0559cf16e1fdcf 100644
 --- a/Source/WebKit/Shared/Extensions/WebExtensionEventListenerType.serialization.in
 +++ b/Source/WebKit/Shared/Extensions/WebExtensionEventListenerType.serialization.in
-@@ -90,6 +90,23 @@ enum class WebKit::WebExtensionEventListenerType : uint8_t {
+@@ -90,6 +90,24 @@ enum class WebKit::WebExtensionEventListenerType : uint8_t {
      WindowsOnCreated,
      WindowsOnFocusChanged,
      WindowsOnRemoved,
@@ -78905,6 +78908,7 @@ index 66271809620c823d465be4cee34c1806ab422cbe..e9d89039281cc773b82b234c08613a17
 +    WebNavigationOnReferenceFragmentUpdated,
 +    WebNavigationOnTabReplaced,
 +    DownloadsOnErased,
++    TabsOnZoomChange,
 +#endif
  };
  
@@ -95727,10 +95731,16 @@ index 0000000000000000000000000000000000000000..b5a17393623897b91dee01412b7ae904
 +
 +#endif // ENABLE(WK_WEB_EXTENSIONS)
 diff --git a/Source/WebKit/UIProcess/Extensions/WebExtensionController.cpp b/Source/WebKit/UIProcess/Extensions/WebExtensionController.cpp
-index 2072e4a99372133e90eda56b3ba1bcc496705af0..45f3c7ccdfaed87a8b89427a5458fe6537d87440 100644
+index 2072e4a99372133e90eda56b3ba1bcc496705af0..0a7895a6e80d62a1cc8075b72a461a8b2605a12d 100644
 --- a/Source/WebKit/UIProcess/Extensions/WebExtensionController.cpp
 +++ b/Source/WebKit/UIProcess/Extensions/WebExtensionController.cpp
-@@ -30,6 +30,10 @@
+@@ -25,11 +25,16 @@
+ 
+ #include "config.h"
+ #include "WebExtensionController.h"
++#include "WebExtensionContextProxyMessages.h"
+ 
+ #if ENABLE(WK_WEB_EXTENSIONS)
  
  #include "APIError.h"
  #include "Logging.h"
@@ -95741,7 +95751,7 @@ index 2072e4a99372133e90eda56b3ba1bcc496705af0..45f3c7ccdfaed87a8b89427a5458fe65
  #include "WebExtensionContextMessages.h"
  #include "WebExtensionControllerMessages.h"
  #include "WebExtensionControllerParameters.h"
-@@ -42,20 +46,13 @@
+@@ -42,20 +47,13 @@
  #include <wtf/HashMap.h>
  #include <wtf/NeverDestroyed.h>
  
@@ -95763,7 +95773,7 @@ index 2072e4a99372133e90eda56b3ba1bcc496705af0..45f3c7ccdfaed87a8b89427a5458fe65
      processPool.addMessageReceiver(Messages::WebExtensionContext::messageReceiverName(), context.identifier(), context);
      processPool.addMessageReceiver(Messages::WebExtensionContext::messageReceiverName(), context.privilegedIdentifier(), context);
  #else
-@@ -66,7 +63,7 @@ static void addContextMessageReceivers(WebProcessPool& processPool, WebExtension
+@@ -66,7 +64,7 @@ static void addContextMessageReceivers(WebProcessPool& processPool, WebExtension
  
  static void removeContextMessageReceivers(WebProcessPool& processPool, WebExtensionContext& context)
  {
@@ -95772,7 +95782,7 @@ index 2072e4a99372133e90eda56b3ba1bcc496705af0..45f3c7ccdfaed87a8b89427a5458fe65
      processPool.removeMessageReceiver(Messages::WebExtensionContext::messageReceiverName(), context.identifier());
      processPool.removeMessageReceiver(Messages::WebExtensionContext::messageReceiverName(), context.privilegedIdentifier());
  #else
-@@ -96,22 +93,27 @@ WebExtensionController::WebExtensionController(Ref<WebExtensionControllerConfigu
+@@ -96,22 +94,27 @@ WebExtensionController::WebExtensionController(Ref<WebExtensionControllerConfigu
  
      // A freshly created extension controller will be used to determine if the startup event
      // should be fired for any loaded extensions during a brief time window. Start a timer
@@ -95805,7 +95815,7 @@ index 2072e4a99372133e90eda56b3ba1bcc496705af0..45f3c7ccdfaed87a8b89427a5458fe65
      // Unload first, since closing extension pages can call removePage(), which removes the message
      // receiver and process pool when no other pages use the same process pool.
      unloadAll();
-@@ -148,6 +150,15 @@ WebExtensionController::WebProcessProxySet WebExtensionController::allProcesses(
+@@ -148,6 +151,15 @@ WebExtensionController::WebProcessProxySet WebExtensionController::allProcesses(
  
  std::expected<bool, RefPtr<API::Error>> WebExtensionController::load(WebExtensionContext& extensionContext)
  {
@@ -95821,7 +95831,7 @@ index 2072e4a99372133e90eda56b3ba1bcc496705af0..45f3c7ccdfaed87a8b89427a5458fe65
      if (!m_extensionContexts.add(extensionContext)) {
          RELEASE_LOG_ERROR(Extensions, "Extension context already loaded");
          return makeUnexpected(extensionContext.createError(WebExtensionContext::Error::AlreadyLoaded));
-@@ -187,6 +198,9 @@ std::expected<bool, RefPtr<API::Error>> WebExtensionController::load(WebExtensio
+@@ -187,6 +199,9 @@ std::expected<bool, RefPtr<API::Error>> WebExtensionController::load(WebExtensio
          return makeUnexpected(loadResult.error());
      }
  
@@ -95831,7 +95841,7 @@ index 2072e4a99372133e90eda56b3ba1bcc496705af0..45f3c7ccdfaed87a8b89427a5458fe65
      return true;
  }
  
-@@ -209,6 +223,9 @@ std::expected<bool, RefPtr<API::Error>> WebExtensionController::unload(WebExtens
+@@ -209,6 +224,9 @@ std::expected<bool, RefPtr<API::Error>> WebExtensionController::unload(WebExtens
          removeContextMessageReceivers(processPool, extensionContext);
  
      auto unloadResult = extensionContext.unload();
@@ -95841,7 +95851,7 @@ index 2072e4a99372133e90eda56b3ba1bcc496705af0..45f3c7ccdfaed87a8b89427a5458fe65
      if (!unloadResult)
          return makeUnexpected(unloadResult.error());
  
-@@ -249,12 +266,19 @@ void WebExtensionController::addPage(WebPageProxy& page)
+@@ -249,12 +267,19 @@ void WebExtensionController::addPage(WebPageProxy& page)
      Ref controller = page.userContentController();
      bool isOwnStore = !dataStore->isPersistent() && (&dataStore.get() == &m_configuration->defaultWebsiteDataStore());
      addUserContentController(controller, (dataStore->isPersistent() || isOwnStore) ? ForPrivateBrowsing::No : ForPrivateBrowsing::Yes);
@@ -95861,7 +95871,7 @@ index 2072e4a99372133e90eda56b3ba1bcc496705af0..45f3c7ccdfaed87a8b89427a5458fe65
  
      Ref pool = page.configuration().processPool();
      removeProcessPool(pool);
-@@ -267,6 +291,9 @@ void WebExtensionController::removePage(WebPageProxy& page)
+@@ -267,6 +292,9 @@ void WebExtensionController::removePage(WebPageProxy& page)
  
      for (Ref context : m_extensionContexts)
          context->removePage(page);
@@ -95871,7 +95881,7 @@ index 2072e4a99372133e90eda56b3ba1bcc496705af0..45f3c7ccdfaed87a8b89427a5458fe65
  }
  
  void WebExtensionController::addProcessPool(WebProcessPool& processPool)
-@@ -406,14 +433,57 @@ void WebExtensionController::didFailLoadForFrame(WebPageProxyIdentifier pageID,
+@@ -406,13 +434,69 @@ void WebExtensionController::didFailLoadForFrame(WebPageProxyIdentifier pageID,
          context->didFailLoadForFrame(pageID, frameParameters, timestamp);
  }
  
@@ -95887,6 +95897,19 @@ index 2072e4a99372133e90eda56b3ba1bcc496705af0..45f3c7ccdfaed87a8b89427a5458fe65
 +    for (Ref context : m_extensionContexts) {
 +        if (RefPtr tab = context->getTab(page))
 +            context->didChangeTabProperties(*tab, { WebExtensionTab::ChangedProperties::Title });
++    }
++}
++
++void WebExtensionController::didChangePageZoomHaiku(WebPageProxyIdentifier page, double oldZoomFactor, double newZoomFactor)
++{
++    constexpr auto type = WebExtensionEventListenerType::TabsOnZoomChange;
++    for (Ref context : m_extensionContexts) {
++        RefPtr tab = context->getTab(page);
++        if (!tab || !tab->extensionHasAccess())
++            continue;
++        context->wakeUpBackgroundContentIfNecessaryToFireEvents({ type }, [context, tabIdentifier = tab->identifier(), oldZoomFactor, newZoomFactor] {
++            context->sendToProcessesForEvent(type, Messages::WebExtensionContextProxy::DispatchTabsZoomChangeEventHaiku(tabIdentifier, oldZoomFactor, newZoomFactor));
++        });
 +    }
 +}
 +
@@ -95917,20 +95940,19 @@ index 2072e4a99372133e90eda56b3ba1bcc496705af0..45f3c7ccdfaed87a8b89427a5458fe65
      for (Ref context : m_extensionContexts)
          context->cookiesDidChange(cookieStore);
 +#endif
- }
- 
++}
++
 +#if PLATFORM(HAIKU) && USE(CURL)
 +void WebExtensionController::cookiesDidChange(API::HTTPCookieStore& cookieStore, const Vector<WebCore::CookieChange>& changes)
 +{
 +    for (Ref context : m_extensionContexts)
 +        context->cookiesDidChange(cookieStore, changes);
-+}
+ }
 +#endif
-+
+ 
  RefPtr<WebExtensionContext> WebExtensionController::extensionContext(const WebExtension& extension) const
  {
-     for (auto& context : m_extensionContexts) {
-@@ -465,6 +535,42 @@ String WebExtensionController::stateFilePath(const String& uniqueIdentifier) con
+@@ -465,6 +549,42 @@ String WebExtensionController::stateFilePath(const String& uniqueIdentifier) con
      return FileSystem::pathByAppendingComponent(storageDirectory(uniqueIdentifier), WebExtensionContext::stateFileName());
  }
  
@@ -95974,7 +95996,7 @@ index 2072e4a99372133e90eda56b3ba1bcc496705af0..45f3c7ccdfaed87a8b89427a5458fe65
  {
      HashSet<String> origins;
 diff --git a/Source/WebKit/UIProcess/Extensions/WebExtensionController.h b/Source/WebKit/UIProcess/Extensions/WebExtensionController.h
-index 7ec330ea503fa362051ba6c5f8fe4c263ffe2390..6d53ea7f981cf14848943f2f2bce147655c2da17 100644
+index 7ec330ea503fa362051ba6c5f8fe4c263ffe2390..17550d3a6eaf9d006a922736085e1385ad17ae6e 100644
 --- a/Source/WebKit/UIProcess/Extensions/WebExtensionController.h
 +++ b/Source/WebKit/UIProcess/Extensions/WebExtensionController.h
 @@ -45,6 +45,7 @@
@@ -96046,7 +96068,7 @@ index 7ec330ea503fa362051ba6c5f8fe4c263ffe2390..6d53ea7f981cf14848943f2f2bce1476
  
      template<typename T>
      void sendToAllProcesses(const T& message, const ObjectIdentifierGenericBase& destinationID);
-@@ -191,6 +218,33 @@ public:
+@@ -191,6 +218,35 @@ public:
      void resourceLoadDidReceiveChallenge(WebPageProxyIdentifier, const ResourceLoadInfo&, const WebCore::AuthenticationChallenge&);
      void resourceLoadDidReceiveResponse(WebPageProxyIdentifier, const ResourceLoadInfo&, const WebCore::ResourceResponse&);
      void resourceLoadDidCompleteWithError(WebPageProxyIdentifier, const ResourceLoadInfo&, const WebCore::ResourceResponse&, const WebCore::ResourceError&);
@@ -96067,6 +96089,8 @@ index 7ec330ea503fa362051ba6c5f8fe4c263ffe2390..6d53ea7f981cf14848943f2f2bce1476
 +    void didCreateNavigationTargetHaiku(WebPageProxyIdentifier page, NavigationTargetSourceHaiku&&);
 +    // tabs.onUpdated for a main-frame title change.
 +    void didChangePageTitleHaiku(WebPageProxyIdentifier);
++    // tabs.onZoomChange.
++    void didChangePageZoomHaiku(WebPageProxyIdentifier, double oldZoomFactor, double newZoomFactor);
 +    // Tab.openerTabId: the page that opened a page (links, window.open(),
 +    // tabs.create() with openerTabId), while both are open.
 +    void setOpenerPageHaiku(WebPageProxyIdentifier page, WebPageProxyIdentifier opener) { m_openerPagesHaiku.set(page, opener); }
@@ -96080,7 +96104,7 @@ index 7ec330ea503fa362051ba6c5f8fe4c263ffe2390..6d53ea7f981cf14848943f2f2bce1476
  
  #if ENABLE(CONTENT_EXTENSIONS)
      void resourceLoadWasBlockedByContentRuleList(WebPageProxyIdentifier, const WebExtensionContentRuleListBlockedLoadInfo&);
-@@ -266,17 +320,32 @@ private:
+@@ -266,17 +322,32 @@ private:
          {
              // FIXME: <https://webkit.org/b/267514> Add support for changeInfo.
  
@@ -112579,7 +112603,7 @@ index f0a894576a62be24a8e7e5b8009d63128b210aa7..85264fa2c360e44d115c8604754c9e0c
  #if ENABLE(WEBDRIVER_BIDI)
          if (RefPtr page = m_page.get()) {
 diff --git a/Source/WebKit/UIProcess/WebPageProxy.cpp b/Source/WebKit/UIProcess/WebPageProxy.cpp
-index abc66b25d5be6d2b961364268f19eb3762ab2c3a..e1ee6472d57d9595d1f8e462209cf8b0f84399f7 100644
+index abc66b25d5be6d2b961364268f19eb3762ab2c3a..acbdbe78c3e45c009a142aa4579cdb0334a88df8 100644
 --- a/Source/WebKit/UIProcess/WebPageProxy.cpp
 +++ b/Source/WebKit/UIProcess/WebPageProxy.cpp
 @@ -65,7 +65,9 @@
@@ -112833,7 +112857,18 @@ index abc66b25d5be6d2b961364268f19eb3762ab2c3a..e1ee6472d57d9595d1f8e462209cf8b0
  }
  
  void WebPageProxy::resumeActiveDOMObjectsAndAnimations()
-@@ -8333,6 +8445,13 @@ void WebPageProxy::setDevicePostureType(WebCore::DevicePostureType type)
+@@ -7152,6 +7264,10 @@ void WebPageProxy::setPageZoomFactor(double zoomFactor)
+ 
+     closeOverlayedViews();
+ 
++#if ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
++    if (RefPtr controller = webExtensionController(); controller && m_pageZoomFactor != zoomFactor)
++        controller->didChangePageZoomHaiku(identifier(), m_pageZoomFactor, zoomFactor);
++#endif
+     m_pageZoomFactor = zoomFactor;
+ 
+     if (!hasRunningProcess())
+@@ -8333,6 +8449,13 @@ void WebPageProxy::setDevicePostureType(WebCore::DevicePostureType type)
  
  void WebPageProxy::preferencesDidChange()
  {
@@ -112847,7 +112882,7 @@ index abc66b25d5be6d2b961364268f19eb3762ab2c3a..e1ee6472d57d9595d1f8e462209cf8b0
      if (!hasRunningProcess())
          return;
  
-@@ -8372,7 +8491,7 @@ void WebPageProxy::didCreateSubframe(FrameIdentifier parentID, FrameIdentifier n
+@@ -8372,7 +8495,7 @@ void WebPageProxy::didCreateSubframe(FrameIdentifier parentID, FrameIdentifier n
  
  void WebPageProxy::didDestroyFrame(IPC::Connection& connection, FrameIdentifier frameID)
  {
@@ -112856,7 +112891,7 @@ index abc66b25d5be6d2b961364268f19eb3762ab2c3a..e1ee6472d57d9595d1f8e462209cf8b0
      protect(protect(websiteDataStore())->authenticatorManager())->cancelRequest(webPageIDInMainFrameProcess(), frameID);
  #endif
      if (RefPtr automationSession = m_configuration->processPool().automationSession())
-@@ -8831,7 +8950,7 @@ void WebPageProxy::didStartProvisionalLoadForFrameShared(Ref<WebProcessProxy>&&
+@@ -8831,7 +8954,7 @@ void WebPageProxy::didStartProvisionalLoadForFrameShared(Ref<WebProcessProxy>&&
          m_navigationClient->didStartProvisionalLoadForFrame(*this, WTF::move(request), WTF::move(frameInfo));
      }
  
@@ -112865,7 +112900,7 @@ index abc66b25d5be6d2b961364268f19eb3762ab2c3a..e1ee6472d57d9595d1f8e462209cf8b0
      protect(protect(websiteDataStore())->authenticatorManager())->cancelRequest(m_webPageID, frameID);
  #endif
  }
-@@ -8862,6 +8981,10 @@ void WebPageProxy::didExplicitOpenForFrame(IPC::Connection& connection, FrameIde
+@@ -8862,6 +8985,10 @@ void WebPageProxy::didExplicitOpenForFrame(IPC::Connection& connection, FrameIde
          process->didCommitMeaningfulProvisionalLoad();
  
      pageLoadState->commitChanges();
@@ -112876,7 +112911,7 @@ index abc66b25d5be6d2b961364268f19eb3762ab2c3a..e1ee6472d57d9595d1f8e462209cf8b0
  }
  
  void WebPageProxy::didReceiveServerRedirectForProvisionalLoadForFrame(IPC::Connection& connection, FrameIdentifier frameID, std::optional<WebCore::NavigationIdentifier> navigationID, ResourceRequest&& request, const UserData& userData)
-@@ -9899,6 +10022,44 @@ void WebPageProxy::didFailLoadForFrame(IPC::Connection& connection, FrameIdentif
+@@ -9899,6 +10026,44 @@ void WebPageProxy::didFailLoadForFrame(IPC::Connection& connection, FrameIdentif
      }
  }
  
@@ -112921,7 +112956,7 @@ index abc66b25d5be6d2b961364268f19eb3762ab2c3a..e1ee6472d57d9595d1f8e462209cf8b0
  void WebPageProxy::didSameDocumentNavigationForFrame(IPC::Connection& connection, FrameIdentifier frameID, std::optional<WebCore::NavigationIdentifier> navigationID, SameDocumentNavigationType navigationType, URL&& url, const UserData& userData)
  {
      RefPtr protectedPageClient { pageClient() };
-@@ -9939,6 +10100,9 @@ void WebPageProxy::didSameDocumentNavigationForFrame(IPC::Connection& connection
+@@ -9939,6 +10104,9 @@ void WebPageProxy::didSameDocumentNavigationForFrame(IPC::Connection& connection
      }
  
      protectedPageLoadState->clearPendingAPIRequest(transaction);
@@ -112931,7 +112966,7 @@ index abc66b25d5be6d2b961364268f19eb3762ab2c3a..e1ee6472d57d9595d1f8e462209cf8b0
      frame->didSameDocumentNavigation(WTF::move(url));
  
      protectedPageLoadState->commitChanges();
-@@ -9994,6 +10158,9 @@ void WebPageProxy::didSameDocumentNavigationForFrameViaJS(IPC::Connection& conne
+@@ -9994,6 +10162,9 @@ void WebPageProxy::didSameDocumentNavigationForFrameViaJS(IPC::Connection& conne
      }
  
      protectedPageLoadState->clearPendingAPIRequest(transaction);
@@ -112941,7 +112976,7 @@ index abc66b25d5be6d2b961364268f19eb3762ab2c3a..e1ee6472d57d9595d1f8e462209cf8b0
      frame->didSameDocumentNavigation(WTF::move(url));
  
      protectedPageLoadState->commitChanges();
-@@ -10142,6 +10309,10 @@ void WebPageProxy::didReceiveTitleForFrame(IPC::Connection& connection, FrameIde
+@@ -10142,6 +10313,10 @@ void WebPageProxy::didReceiveTitleForFrame(IPC::Connection& connection, FrameIde
  
      if (frame->isMainFrame()) {
          protectedPageLoadState->setTitle(transaction, String { title });
@@ -112952,7 +112987,7 @@ index abc66b25d5be6d2b961364268f19eb3762ab2c3a..e1ee6472d57d9595d1f8e462209cf8b0
          // FIXME: Ideally we'd enable this on iPhone as well but this currently regresses PLT.
          bool deviceClassIsSmallScreen = false;
  #if PLATFORM(IOS_FAMILY)
-@@ -11308,7 +11479,7 @@ void WebPageProxy::contentRuleListMatchedRule(WebCore::ContentRuleListMatchedRul
+@@ -11308,7 +11483,7 @@ void WebPageProxy::contentRuleListMatchedRule(WebCore::ContentRuleListMatchedRul
  #if ENABLE(WK_WEB_EXTENSIONS) && ENABLE(CONTENT_EXTENSIONS)
  void WebPageProxy::contentRuleListDidBlockLoad(WebExtensionContentRuleListBlockedLoadInfo&& info)
  {
@@ -112961,7 +112996,7 @@ index abc66b25d5be6d2b961364268f19eb3762ab2c3a..e1ee6472d57d9595d1f8e462209cf8b0
      if (RefPtr webExtensionController = this->webExtensionController())
          webExtensionController->resourceLoadWasBlockedByContentRuleList(identifier(), WTF::move(info));
  #endif
-@@ -11497,6 +11668,9 @@ void WebPageProxy::createNewPage(IPC::Connection& connection, WindowFeatures&& w
+@@ -11497,6 +11672,9 @@ void WebPageProxy::createNewPage(IPC::Connection& connection, WindowFeatures&& w
          shouldOpenExternalURLsPolicy = navigationActionData.shouldOpenExternalURLsPolicy,
          openedBlobURL,
          wantsNoOpener = windowFeatures.wantsNoOpener()
@@ -112971,7 +113006,7 @@ index abc66b25d5be6d2b961364268f19eb3762ab2c3a..e1ee6472d57d9595d1f8e462209cf8b0
      ] (RefPtr<WebPageProxy> newPage) mutable {
  
  #if PLATFORM(MAC)
-@@ -11515,6 +11689,17 @@ void WebPageProxy::createNewPage(IPC::Connection& connection, WindowFeatures&& w
+@@ -11515,6 +11693,17 @@ void WebPageProxy::createNewPage(IPC::Connection& connection, WindowFeatures&& w
              pageClient->dismissAnyOpenPicker();
  
          newPage->setOpenedByDOM();
@@ -112989,7 +113024,7 @@ index abc66b25d5be6d2b961364268f19eb3762ab2c3a..e1ee6472d57d9595d1f8e462209cf8b0
  
          if (openerAppInitiatedState)
              newPage->m_lastNavigationWasAppInitiated = *openerAppInitiatedState;
-@@ -11757,8 +11942,12 @@ void WebPageProxy::closePage()
+@@ -11757,8 +11946,12 @@ void WebPageProxy::closePage()
          return;
  
      WEBPAGEPROXY_RELEASE_LOG(Process, "closePage:");
@@ -113002,7 +113037,7 @@ index abc66b25d5be6d2b961364268f19eb3762ab2c3a..e1ee6472d57d9595d1f8e462209cf8b0
      m_uiClient->close(this);
  }
  
-@@ -12762,6 +12951,9 @@ void WebPageProxy::didChangeIntrinsicContentSize(const IntSize& intrinsicContent
+@@ -12762,6 +12955,9 @@ void WebPageProxy::didChangeIntrinsicContentSize(const IntSize& intrinsicContent
  #if USE(APPKIT)
      if (RefPtr pageClient = this->pageClient())
          pageClient->intrinsicContentSizeDidChange(intrinsicContentSize);
@@ -113012,7 +113047,7 @@ index abc66b25d5be6d2b961364268f19eb3762ab2c3a..e1ee6472d57d9595d1f8e462209cf8b0
  #endif
  }
  
-@@ -12936,7 +13128,7 @@ WebInspectorUIProxy* WebPageProxy::inspector() const
+@@ -12936,7 +13132,7 @@ WebInspectorUIProxy* WebPageProxy::inspector() const
      return m_inspector.get();
  }
  
@@ -113021,7 +113056,7 @@ index abc66b25d5be6d2b961364268f19eb3762ab2c3a..e1ee6472d57d9595d1f8e462209cf8b0
  static bool isParentFrameMainFrame(const ResourceLoadInfo& loadInfo, WebFrameProxy* mainFrame)
  {
      return loadInfo.parentFrameID && mainFrame && *loadInfo.parentFrameID == mainFrame->frameID();
-@@ -12945,7 +13137,7 @@ static bool isParentFrameMainFrame(const ResourceLoadInfo& loadInfo, WebFramePro
+@@ -12945,7 +13141,7 @@ static bool isParentFrameMainFrame(const ResourceLoadInfo& loadInfo, WebFramePro
  
  void WebPageProxy::resourceLoadDidSendRequest(ResourceLoadInfo&& loadInfo, WebCore::ResourceRequest&& request)
  {
@@ -113030,7 +113065,7 @@ index abc66b25d5be6d2b961364268f19eb3762ab2c3a..e1ee6472d57d9595d1f8e462209cf8b0
      if (RefPtr webExtensionController = this->webExtensionController()) {
          loadInfo.parentFrameIsMainFrame = isParentFrameMainFrame(loadInfo, mainFrame());
          webExtensionController->resourceLoadDidSendRequest(identifier(), loadInfo, request);
-@@ -12958,7 +13150,7 @@ void WebPageProxy::resourceLoadDidSendRequest(ResourceLoadInfo&& loadInfo, WebCo
+@@ -12958,7 +13154,7 @@ void WebPageProxy::resourceLoadDidSendRequest(ResourceLoadInfo&& loadInfo, WebCo
  
  void WebPageProxy::resourceLoadDidPerformHTTPRedirection(ResourceLoadInfo&& loadInfo, WebCore::ResourceResponse&& response, WebCore::ResourceRequest&& request)
  {
@@ -113039,7 +113074,7 @@ index abc66b25d5be6d2b961364268f19eb3762ab2c3a..e1ee6472d57d9595d1f8e462209cf8b0
      if (RefPtr webExtensionController = this->webExtensionController()) {
          loadInfo.parentFrameIsMainFrame = isParentFrameMainFrame(loadInfo, mainFrame());
          webExtensionController->resourceLoadDidPerformHTTPRedirection(identifier(), loadInfo, response, request);
-@@ -12971,7 +13163,7 @@ void WebPageProxy::resourceLoadDidPerformHTTPRedirection(ResourceLoadInfo&& load
+@@ -12971,7 +13167,7 @@ void WebPageProxy::resourceLoadDidPerformHTTPRedirection(ResourceLoadInfo&& load
  
  void WebPageProxy::resourceLoadDidReceiveChallenge(ResourceLoadInfo&& loadInfo, WebCore::AuthenticationChallenge&& challenge)
  {
@@ -113048,7 +113083,7 @@ index abc66b25d5be6d2b961364268f19eb3762ab2c3a..e1ee6472d57d9595d1f8e462209cf8b0
      if (RefPtr webExtensionController = this->webExtensionController()) {
          loadInfo.parentFrameIsMainFrame = isParentFrameMainFrame(loadInfo, mainFrame());
          webExtensionController->resourceLoadDidReceiveChallenge(identifier(), loadInfo, challenge);
-@@ -12984,7 +13176,7 @@ void WebPageProxy::resourceLoadDidReceiveChallenge(ResourceLoadInfo&& loadInfo,
+@@ -12984,7 +13180,7 @@ void WebPageProxy::resourceLoadDidReceiveChallenge(ResourceLoadInfo&& loadInfo,
  
  void WebPageProxy::resourceLoadDidReceiveResponse(ResourceLoadInfo&& loadInfo, WebCore::ResourceResponse&& response)
  {
@@ -113057,7 +113092,7 @@ index abc66b25d5be6d2b961364268f19eb3762ab2c3a..e1ee6472d57d9595d1f8e462209cf8b0
      if (RefPtr webExtensionController = this->webExtensionController()) {
          loadInfo.parentFrameIsMainFrame = isParentFrameMainFrame(loadInfo, mainFrame());
          webExtensionController->resourceLoadDidReceiveResponse(identifier(), loadInfo, response);
-@@ -12997,7 +13189,7 @@ void WebPageProxy::resourceLoadDidReceiveResponse(ResourceLoadInfo&& loadInfo, W
+@@ -12997,7 +13193,7 @@ void WebPageProxy::resourceLoadDidReceiveResponse(ResourceLoadInfo&& loadInfo, W
  
  void WebPageProxy::resourceLoadDidCompleteWithError(ResourceLoadInfo&& loadInfo, WebCore::ResourceResponse&& response, WebCore::ResourceError&& error)
  {
@@ -113066,7 +113101,7 @@ index abc66b25d5be6d2b961364268f19eb3762ab2c3a..e1ee6472d57d9595d1f8e462209cf8b0
      if (RefPtr webExtensionController = this->webExtensionController()) {
          loadInfo.parentFrameIsMainFrame = isParentFrameMainFrame(loadInfo, mainFrame());
          webExtensionController->resourceLoadDidCompleteWithError(identifier(), loadInfo, response, error);
-@@ -13976,6 +14168,20 @@ void WebPageProxy::checkSpellingOfString(const String& text, CompletionHandler<v
+@@ -13976,6 +14172,20 @@ void WebPageProxy::checkSpellingOfString(const String& text, CompletionHandler<v
      completionHandler(misspellingLocation, misspellingLength);
  }
  
@@ -113087,7 +113122,7 @@ index abc66b25d5be6d2b961364268f19eb3762ab2c3a..e1ee6472d57d9595d1f8e462209cf8b0
  void WebPageProxy::checkGrammarOfString(const String& text, CompletionHandler<void(Vector<WebCore::GrammarDetail>&&, int32_t badGrammarLocation, int32_t badGrammarLength)>&& completionHandler)
  {
      Vector<GrammarDetail> grammarDetails;
-@@ -14815,7 +15021,7 @@ void WebPageProxy::resetState(ResetStateReason resetStateReason)
+@@ -14815,7 +15025,7 @@ void WebPageProxy::resetState(ResetStateReason resetStateReason)
      resetSpeechSynthesizer();
  #endif
  
@@ -113096,7 +113131,7 @@ index abc66b25d5be6d2b961364268f19eb3762ab2c3a..e1ee6472d57d9595d1f8e462209cf8b0
      protect(protect(websiteDataStore())->authenticatorManager())->cancelRequest(m_webPageID, std::nullopt);
  #endif
  
-@@ -15092,6 +15298,9 @@ WebPageCreationParameters WebPageProxy::creationParameters(WebProcessProxy& proc
+@@ -15092,6 +15302,9 @@ WebPageCreationParameters WebPageProxy::creationParameters(WebProcessProxy& proc
      parameters.pageLength = m_pageLength;
      parameters.gapBetweenPages = m_gapBetweenPages;
      parameters.userAgent = userAgent();
@@ -113106,7 +113141,7 @@ index abc66b25d5be6d2b961364268f19eb3762ab2c3a..e1ee6472d57d9595d1f8e462209cf8b0
      parameters.canRunBeforeUnloadConfirmPanel = m_uiClient->canRunBeforeUnloadConfirmPanel();
      parameters.canRunModal = m_canRunModal;
      parameters.deviceScaleFactor = deviceScaleFactor();
-@@ -15270,9 +15479,9 @@ WebPageCreationParameters WebPageProxy::creationParameters(WebProcessProxy& proc
+@@ -15270,9 +15483,9 @@ WebPageCreationParameters WebPageProxy::creationParameters(WebProcessProxy& proc
      parameters.hasResourceLoadClient = !!m_resourceLoadClient;
      parameters.portsForUpgradingInsecureSchemeForTesting = m_configuration->portsForUpgradingInsecureSchemeForTesting();
  
@@ -113119,7 +113154,7 @@ index abc66b25d5be6d2b961364268f19eb3762ab2c3a..e1ee6472d57d9595d1f8e462209cf8b0
  
      if (RefPtr weakWebExtensionController = m_weakWebExtensionController.get())
          parameters.webExtensionControllerParameters = weakWebExtensionController->parameters(m_configuration, process);
-@@ -19004,7 +19213,13 @@ void WebPageProxy::decidePolicyForSOAuthorizationLoad(const String& extension, C
+@@ -19004,7 +19217,13 @@ void WebPageProxy::decidePolicyForSOAuthorizationLoad(const String& extension, C
  #if ENABLE(WEB_AUTHN)
  void WebPageProxy::setMockWebAuthenticationConfiguration(MockWebAuthenticationConfiguration&& configuration)
  {
@@ -138879,10 +138914,10 @@ index d7868f1e4addc61cb897e875bab3a9dcf88efd76..641099c3a542b56479e6eecdb50d493c
  } // namespace WebKit
 diff --git a/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPITabs.cpp b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPITabs.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..3b1a3e74c6a8fbe15632c9aade3e7df6d96418ad
+index 0000000000000000000000000000000000000000..6375001065f6b9ced97bc32c0e75efbc930a4758
 --- /dev/null
 +++ b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPITabs.cpp
-@@ -0,0 +1,809 @@
+@@ -0,0 +1,833 @@
 +/*
 + * Copyright (C) 2023 Apple Inc. All rights reserved.
 + *
@@ -139584,6 +139619,30 @@ index 0000000000000000000000000000000000000000..3b1a3e74c6a8fbe15632c9aade3e7df6
 +    return *m_onUpdated;
 +}
 +
++WebExtensionAPIEvent& WebExtensionAPITabs::onZoomChange()
++{
++    if (!m_onZoomChange)
++        m_onZoomChange = WebExtensionAPIEvent::create(*this, WebExtensionEventListenerType::TabsOnZoomChange);
++    return *m_onZoomChange;
++}
++
++void WebExtensionContextProxy::dispatchTabsZoomChangeEventHaiku(WebExtensionTabIdentifier tab, double oldZoomFactor, double newZoomFactor)
++{
++    // Summit's zoom is remembered per site, as Chrome's default automatic,
++    // per-origin mode.
++    auto details = JSON::Object::create();
++    details->setDouble("tabId"_s, toWebAPI(tab));
++    details->setDouble("oldZoomFactor"_s, oldZoomFactor);
++    details->setDouble("newZoomFactor"_s, newZoomFactor);
++    auto settings = JSON::Object::create();
++    settings->setString("mode"_s, "automatic"_s);
++    settings->setString("scope"_s, "per-origin"_s);
++    settings->setDouble("defaultZoomFactor"_s, 1);
++    details->setObject("zoomSettings"_s, WTF::move(settings));
++    auto json = details->toJSONString();
++    enumerateNamespaceObjects([&](auto& object) { object.tabs().onZoomChange().invokeListenersWithJSONArguments({ json }); });
++}
++
 +void WebExtensionContextProxy::dispatchTabsCreatedEvent(const WebExtensionTabParameters& tab)
 +{
 +    enumerateNamespaceObjects([&](auto& object) {
@@ -139693,10 +139752,10 @@ index 0000000000000000000000000000000000000000..3b1a3e74c6a8fbe15632c9aade3e7df6
 +}
 +#endif
 diff --git a/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPITabs.h b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPITabs.h
-index de0fbb5429a8ed531f265a73c467871e082e4977..21b78ca889100a3e00283d5bf566d05eaad76ab8 100644
+index de0fbb5429a8ed531f265a73c467871e082e4977..259e3c32c648bfb830347cf0ae2e78ef3ae4387f 100644
 --- a/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPITabs.h
 +++ b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPITabs.h
-@@ -49,15 +49,55 @@ class WebExtensionAPITabs : public WebExtensionAPIObject, public JSWebExtensionW
+@@ -49,15 +49,58 @@ class WebExtensionAPITabs : public WebExtensionAPIObject, public JSWebExtensionW
      WEB_EXTENSION_DECLARE_JS_WRAPPER_CLASS(WebExtensionAPITabs, tabs, tabs);
  
  public:
@@ -139713,6 +139772,9 @@ index de0fbb5429a8ed531f265a73c467871e082e4977..21b78ca889100a3e00283d5bf566d05e
 +    WebExtensionAPIEvent& onRemoved();
 +    WebExtensionAPIEvent& onReplaced();
 +    WebExtensionAPIEvent& onUpdated();
++#if PLATFORM(HAIKU)
++    WebExtensionAPIEvent& onZoomChange();
++#endif
 +
 +    void query(WebPageProxyIdentifier page, RefPtr<JSON::Value> info, Ref<WebExtensionCallbackHandler>&& callback, String& exception);
 +    void get(double tabID, Ref<WebExtensionCallbackHandler>&& callback, String& exception);
@@ -139754,7 +139816,7 @@ index de0fbb5429a8ed531f265a73c467871e082e4977..21b78ca889100a3e00283d5bf566d05e
      void getSelected(WebPageProxyIdentifier, double windowID, Ref<WebExtensionCallbackHandler>&&, NSString **outExceptionString);
  
      void duplicate(double tabID, NSDictionary *properties, Ref<WebExtensionCallbackHandler>&&, NSString **outExceptionString);
-@@ -83,17 +123,6 @@ public:
+@@ -83,17 +126,6 @@ public:
      void insertCSS(WebPageProxyIdentifier, double tabID, NSDictionary *options, Ref<WebExtensionCallbackHandler>&&, NSString **outExceptionString);
      void removeCSS(WebPageProxyIdentifier, double tabID, NSDictionary *options, Ref<WebExtensionCallbackHandler>&&, NSString **outExceptionString);
  
@@ -139772,7 +139834,7 @@ index de0fbb5429a8ed531f265a73c467871e082e4977..21b78ca889100a3e00283d5bf566d05e
  
  private:
      bool parseTabCreateOptions(NSDictionary *, WebExtensionTabParameters&, NSString *sourceKey, NSString **outExceptionString);
-@@ -105,16 +134,18 @@ private:
+@@ -105,15 +137,20 @@ private:
      static bool parseConnectOptions(NSDictionary *, std::optional<String>& name, WebExtensionMessageTargetParameters&, NSString *sourceKey, NSString **outExceptionString);
      static bool parseScriptOptions(NSDictionary *, WebExtensionScriptInjectionParameters&, NSString **outExceptionString);
  
@@ -139786,7 +139848,7 @@ index de0fbb5429a8ed531f265a73c467871e082e4977..21b78ca889100a3e00283d5bf566d05e
 -    const RefPtr<WebExtensionAPIEvent> m_onReplaced;
 -    const RefPtr<WebExtensionAPIEvent> m_onUpdated;
 +
- #endif
++#endif
 +private:
 +    RefPtr<WebExtensionAPIEvent> m_onActivated;
 +    RefPtr<WebExtensionAPIEvent> m_onAttached;
@@ -139797,9 +139859,11 @@ index de0fbb5429a8ed531f265a73c467871e082e4977..21b78ca889100a3e00283d5bf566d05e
 +    RefPtr<WebExtensionAPIEvent> m_onRemoved;
 +    RefPtr<WebExtensionAPIEvent> m_onReplaced;
 +    RefPtr<WebExtensionAPIEvent> m_onUpdated;
++#if PLATFORM(HAIKU)
++    RefPtr<WebExtensionAPIEvent> m_onZoomChange;
+ #endif
  };
  
- bool isValid(std::optional<WebExtensionTabIdentifier>, NSString **outExceptionString);
 diff --git a/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPITest.cpp b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPITest.cpp
 index eb4d57b0aa5359e56ff413fec44a826db7045831..426fb3c90d2df66bb62e3eb2d02aecdb7bcc570b 100644
 --- a/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPITest.cpp
@@ -145235,7 +145299,7 @@ index 866d70a2cdbbe9cfbd525c7be21d6c21db2dfa1a..090b11c6a852e779e830487dcaed3958
      readonly attribute WebExtensionAPIEvent onChanged;
  
 diff --git a/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPITabs.idl b/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPITabs.idl
-index a744e37f5fd4c546a27627a69573d8eeb454312b..c9687fc5ea17d6e58c6e8c6bd42c5567bd748642 100644
+index a744e37f5fd4c546a27627a69573d8eeb454312b..1b1fb9f38a8707e55fa4ae87a465bf3bc27eaa06 100644
 --- a/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPITabs.idl
 +++ b/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPITabs.idl
 @@ -69,42 +69,43 @@ dictionary WebExtensionTabCreateProperties {
@@ -145303,6 +145367,13 @@ index a744e37f5fd4c546a27627a69573d8eeb454312b..c9687fc5ea17d6e58c6e8c6bd42c5567
  
      [ImplementedAs=tabIdentifierNone] readonly attribute double TAB_ID_NONE;
  
+@@ -117,5 +118,6 @@ dictionary WebExtensionTabCreateProperties {
+     readonly attribute WebExtensionAPIEvent onRemoved;
+     readonly attribute WebExtensionAPIEvent onReplaced;
+     readonly attribute WebExtensionAPIEvent onUpdated;
++    [Platform=HAIKU] readonly attribute WebExtensionAPIEvent onZoomChange;
+ 
+ };
 diff --git a/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPIUserScripts.idl b/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPIUserScripts.idl
 new file mode 100644
 index 0000000000000000000000000000000000000000..7c4cec960f8fbd8c7042b75473dc820684d4ea95
@@ -145745,7 +145816,7 @@ index 2b2ff5395e73b7978dc8b610d62ffe835fc1a886..443a5b3005437f3a7ec05ce7b4eca60d
  
  #endif // ENABLE(WK_WEB_EXTENSIONS)
 diff --git a/Source/WebKit/WebProcess/Extensions/WebExtensionContextProxy.h b/Source/WebKit/WebProcess/Extensions/WebExtensionContextProxy.h
-index d6d7467a810b4fa585e99e9ad58711f17a7084bf..dd275f308e6987606132d1fdc52044e53826742e 100644
+index d6d7467a810b4fa585e99e9ad58711f17a7084bf..f81cd9a1fe5a1953080c732cf756de54beec6d94 100644
 --- a/Source/WebKit/WebProcess/Extensions/WebExtensionContextProxy.h
 +++ b/Source/WebKit/WebProcess/Extensions/WebExtensionContextProxy.h
 @@ -41,9 +41,12 @@
@@ -145845,7 +145916,7 @@ index d6d7467a810b4fa585e99e9ad58711f17a7084bf..dd275f308e6987606132d1fdc52044e5
      void internalDispatchRuntimeConnectEvent(WebExtensionContentWorldType, WebExtensionPortChannelIdentifier, const String& name, const std::optional<WebExtensionMessageTargetParameters>&, const WebExtensionMessageSenderParameters&, bool userGesture, CompletionHandler<void(HashCountedSet<WebPageProxyIdentifier>&&)>&&);
      void dispatchRuntimeMessageEvent(WebExtensionContentWorldType, const String& messageJSON, const std::optional<WebExtensionMessageTargetParameters>&, const WebExtensionMessageSenderParameters&, bool userGesture, CompletionHandler<void(String&& replyJSON)>&&);
      void dispatchRuntimeConnectEvent(WebExtensionContentWorldType, WebExtensionPortChannelIdentifier, const String& name, const std::optional<WebExtensionMessageTargetParameters>&, const WebExtensionMessageSenderParameters&, bool userGesture, CompletionHandler<void(HashCountedSet<WebPageProxyIdentifier>&&)>&&);
-@@ -229,6 +269,9 @@ private:
+@@ -229,8 +269,14 @@ private:
      void dispatchStorageChangedEvent(const Vector<String>& onChangedJSON, WebExtensionDataType, WebExtensionContentWorldType);
  
      // Tabs
@@ -145854,8 +145925,13 @@ index d6d7467a810b4fa585e99e9ad58711f17a7084bf..dd275f308e6987606132d1fdc52044e5
 +#endif
      void dispatchTabsCreatedEvent(const WebExtensionTabParameters&);
      void dispatchTabsUpdatedEvent(const WebExtensionTabParameters&, const WebExtensionTabParameters& changedParameters);
++#if PLATFORM(HAIKU)
++    void dispatchTabsZoomChangeEventHaiku(WebExtensionTabIdentifier, double oldZoomFactor, double newZoomFactor);
++#endif
      void dispatchTabsReplacedEvent(WebExtensionTabIdentifier replacedTabIdentifier, WebExtensionTabIdentifier newTabIdentifier);
-@@ -246,14 +289,22 @@ private:
+     void dispatchTabsDetachedEvent(WebExtensionTabIdentifier, WebExtensionWindowIdentifier oldWindowIdentifier, uint64_t oldIndex);
+     void dispatchTabsMovedEvent(WebExtensionTabIdentifier, WebExtensionWindowIdentifier, uint64_t oldIndex, uint64_t newIndex);
+@@ -246,14 +292,22 @@ private:
  
      // Web Navigation
      void dispatchWebNavigationEvent(WebExtensionEventListenerType, WebExtensionTabIdentifier, const WebExtensionFrameParameters&, WallTime);
@@ -145884,7 +145960,7 @@ index d6d7467a810b4fa585e99e9ad58711f17a7084bf..dd275f308e6987606132d1fdc52044e5
  
      // Windows
      void dispatchWindowsEvent(WebExtensionEventListenerType, const std::optional<WebExtensionWindowParameters>&);
-@@ -275,8 +326,17 @@ private:
+@@ -275,8 +329,17 @@ private:
      mutable PermissionsMap m_grantedPermissions;
      mutable WallTime m_nextGrantedPermissionsExpirationDate { WallTime::nan() };
      RefPtr<WebCore::DOMWrapperWorld> m_contentScriptWorld;
@@ -145903,7 +145979,7 @@ index d6d7467a810b4fa585e99e9ad58711f17a7084bf..dd275f308e6987606132d1fdc52044e5
      WeakPtr<WebPage> m_offscreenPage;
  #endif
 diff --git a/Source/WebKit/WebProcess/Extensions/WebExtensionContextProxy.messages.in b/Source/WebKit/WebProcess/Extensions/WebExtensionContextProxy.messages.in
-index 6ffe6eabe189601f01839e2fe9d4ae0e2850b0b3..88023a323de0c25293b1eeb2fed682eb9eab9472 100644
+index 6ffe6eabe189601f01839e2fe9d4ae0e2850b0b3..21957c850d45439626180749628ed7410b523a88 100644
 --- a/Source/WebKit/WebProcess/Extensions/WebExtensionContextProxy.messages.in
 +++ b/Source/WebKit/WebProcess/Extensions/WebExtensionContextProxy.messages.in
 @@ -41,7 +41,12 @@ messages -> WebExtensionContextProxy {
@@ -145957,7 +146033,17 @@ index 6ffe6eabe189601f01839e2fe9d4ae0e2850b0b3..88023a323de0c25293b1eeb2fed682eb
      DispatchRuntimeConnectEvent(WebKit::WebExtensionContentWorldType contentWorldType, WebKit::WebExtensionPortChannelIdentifier channelIdentifier, String name, struct std::optional<WebKit::WebExtensionMessageTargetParameters> targetParameters, struct WebKit::WebExtensionMessageSenderParameters senderParameters, bool userGesture) -> (HashCountedSet<WebKit::WebPageProxyIdentifier> addedPortCounts)
      DispatchRuntimeInstalledEvent(enum:uint8_t WebKit::WebExtensionContextInstallReason installReason, String previousVersion)
      DispatchRuntimeStartupEvent()
-@@ -114,14 +137,20 @@ messages -> WebExtensionContextProxy {
+@@ -99,6 +122,9 @@ messages -> WebExtensionContextProxy {
+     // Tabs Events
+     DispatchTabsCreatedEvent(WebKit::WebExtensionTabParameters tabParameters)
+     DispatchTabsUpdatedEvent(WebKit::WebExtensionTabParameters tabParameters, WebKit::WebExtensionTabParameters changedParameters)
++#if PLATFORM(HAIKU)
++    DispatchTabsZoomChangeEventHaiku(WebKit::WebExtensionTabIdentifier tab, double oldZoomFactor, double newZoomFactor)
++#endif
+     DispatchTabsReplacedEvent(WebKit::WebExtensionTabIdentifier replacedTabIdentifier, WebKit::WebExtensionTabIdentifier newTabIdentifier)
+     DispatchTabsDetachedEvent(WebKit::WebExtensionTabIdentifier tabIdentifier, WebKit::WebExtensionWindowIdentifier oldWindowIdentifier, uint64_t oldIndex)
+     DispatchTabsMovedEvent(WebKit::WebExtensionTabIdentifier tabIdentifier, WebKit::WebExtensionWindowIdentifier windowIdentifier, uint64_t oldIndex, uint64_t newIndex)
+@@ -114,14 +140,20 @@ messages -> WebExtensionContextProxy {
  
      // Web Navigation
      DispatchWebNavigationEvent(WebKit::WebExtensionEventListenerType type, WebKit::WebExtensionTabIdentifier tabID, struct WebKit::WebExtensionFrameParameters frameParamaters, WallTime timestamp)

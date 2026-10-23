@@ -2,6 +2,7 @@
 // read the zoom back, restore the default and read it again, then duplicate
 // the tab and close the copy. One console line per step: "[tab-zoom] ...".
 const log = message => console.log(`[tab-zoom] ${message}`);
+chrome.tabs.onZoomChange.addListener(change => log(`onZoomChange ${change.tabId} ${change.oldZoomFactor} -> ${change.newZoomFactor} ${change.zoomSettings.mode}/${change.zoomSettings.scope}`));
 chrome.tabs.onUpdated.addListener(async (tabId, change, tab) => {
     if (change.status !== 'complete' || !tab.url || !tab.url.startsWith('https://example.com/?zoom') || tab.openerTabId)
         return;
