@@ -183,7 +183,10 @@ browser moves and resizes the window within its size limits. `windows.create()`
 passes the geometry with `OPEN_WINDOW`, and the new window applies it the same
 way (`BrowserWindow::ApplyCommandFrame`). `windows.onBoundsChanged` fires once a
 window has stopped moving or resizing for 100 ms (the browser reports every
-step of a drag). Fixture:
+step of a drag). Verified on the X399 (24 Oct, geo2 build): `onBoundsChanged`
+reported 120,90 900×640 after the update and one event for the width change and
+restore that followed within 100 ms; `windows.create` with 200,150 700×500
+opened a window of exactly that frame. Fixture:
 `tests/fixtures/extensions/window-geometry` (open `https://example.com/?geometry`). Verified on
 the X399 (24 Oct, geo106 build): 75,65 1121×681 → update to 120,90 900×640 →
 width only 1000×640 → restored 75,65 1121×681, matching the window's real
