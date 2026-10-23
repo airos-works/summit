@@ -76,3 +76,22 @@ for `https://example.com/*`). Install it (Extensions › Add extension…, or
 Then install Tampermonkey (Chrome Web Store build), add a script with
 `// @match https://example.com/*` that changes the heading and calls
 `GM_setValue`/`GM_getValue`, and check it runs and keeps its value.
+
+## Tampermonkey
+
+Tampermonkey 5.5.1 (Chrome Web Store build) needed two more fixes:
+
+- the service worker startup above, and
+- **`regexFilter` with alternatives.** It installs scripts by redirecting
+  `*.user.js` pages to its installer with declarativeNetRequest session rules
+  such as `^[^?#]*\.(?:user|tamper)\.js…` and `…(?:$|\?|\#)`. WebCore's
+  content-rule compiler has no `|`, so every such rule was rejected (`dNr:` in
+  its log) and `.user.js` links showed the source. Summit now expands a
+  regexFilter's alternatives into separate patterns of one rule (capturing
+  groups kept, non-capturing ones inlined), and `regexSubstitution` still
+  matches the whole expression (the redirect carries it as `regex-filter`).
+  Alternatives inside a quantified group, such as `(a|b)+`, are still
+  rejected.
+
+`excludedTabIds` (Tampermonkey uses it to let a tab show a script's source)
+is still unsupported: Summit's rules have no tab conditions.

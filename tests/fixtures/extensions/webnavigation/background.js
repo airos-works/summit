@@ -11,7 +11,7 @@ function record(name, details) {
             delete entry[key];
     }
     log.push(entry);
-    console.log(name, JSON.stringify(entry));
+    console.log(`${name} ${JSON.stringify(entry)}`);
     chrome.storage.local.set({ log });
 }
 for (const name of ['onBeforeNavigate', 'onCommitted', 'onDOMContentLoaded', 'onCompleted', 'onHistoryStateUpdated', 'onReferenceFragmentUpdated', 'onCreatedNavigationTarget'])

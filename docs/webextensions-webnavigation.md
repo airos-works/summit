@@ -30,10 +30,9 @@ those sites (SponsorBlock, Vimium, many content filters) listen to
 - **New tabs.** `WebPageProxy::createNewPage()` gives the controller the
   source page, frame and URL of each page it creates. Every context reports
   it just after `tabs.onCreated`, when the browser's tab list first shows the
-  page. That is later than in Chrome, where `onCreatedNavigationTarget` comes
-  before the new tab's `onBeforeNavigate`. The extension needs access to the
-  new tab's URL. The source tab only has to be one the extension can see (not
-  a private tab it is kept out of).
+  page; as in Chrome, that is before the new tab's `onBeforeNavigate`. The
+  extension needs access to the new tab's URL. The source tab only has to be
+  one the extension can see (not a private tab it is kept out of).
 
 ## Test recipe
 
@@ -50,3 +49,6 @@ click both "target" controls, and then open the extension's `log.html`.
 | `pushState` / `replaceState` | `onHistoryStateUpdated page.html?pushed`, then `?replaced` |
 | `history.back()` / `forward()` | `onHistoryStateUpdated page.html#one`, then `?replaced` |
 | `target="_blank"` link, `window.open()` button | `onCreatedNavigationTarget target.html` (and `target.html?opened`) with the page's tab as `sourceTabId` and `sourceFrameId` 0, then the new tab's load events |
+
+Verified on the X399 (23 Oct, wn106 build 18c07bd): all 25 entries as above,
+the frame's identifier the same in its load and `pushState` events.

@@ -11344,6 +11344,27 @@ index 859675692c5509380db2e4cf10fb91d5f10be9e7..f257e6a89ec3a2916327335e8b57c34d
      mutable DFABytecodeInterpreter::Actions m_cachedFrameURLActions;
  
      Vector<uint64_t> m_universalActions;
+diff --git a/Source/WebCore/contentextensions/ContentExtensionActions.cpp b/Source/WebCore/contentextensions/ContentExtensionActions.cpp
+index 28e1ca585c4d5343f7b3407397752fbfd048ebde..f65d6cdd97b4b77e399145bda86818104cc740f5 100644
+--- a/Source/WebCore/contentextensions/ContentExtensionActions.cpp
++++ b/Source/WebCore/contentextensions/ContentExtensionActions.cpp
+@@ -295,8 +295,15 @@ std::expected<RedirectAction, std::error_code> RedirectAction::parse(const JSON:
+         return RedirectAction { ExtensionPathAction { WTF::move(extensionPath) } };
+     }
+ 
+-    if (auto regexSubstitution = redirect->getString("regex-substitution"_s); !!regexSubstitution)
++    if (auto regexSubstitution = redirect->getString("regex-substitution"_s); !!regexSubstitution) {
++#if PLATFORM(HAIKU)
++        // Summit's declarativeNetRequest splits a regexFilter with alternatives
++        // into several url-filters and gives the whole expression here.
++        if (auto regexFilter = redirect->getString("regex-filter"_s); !!regexFilter)
++            return RedirectAction { RegexSubstitutionAction { WTF::move(regexSubstitution), WTF::move(regexFilter) } };
++#endif
+         return RedirectAction { RegexSubstitutionAction { WTF::move(regexSubstitution), urlFilter } };
++    }
+ 
+     if (auto transform = redirect->getObject("transform"_s)) {
+         auto parsedTransform = URLTransformAction::parse(*transform);
 diff --git a/Source/WebCore/contentextensions/ContentExtensionCompiler.cpp b/Source/WebCore/contentextensions/ContentExtensionCompiler.cpp
 index 576a1d54820fd497996d0bd512d1fd8403e768bd..5dd26d3fdc2ff2f69778f6338ad8c8db04fd4961 100644
 --- a/Source/WebCore/contentextensions/ContentExtensionCompiler.cpp
@@ -102047,10 +102068,10 @@ index 0000000000000000000000000000000000000000..ef935e9aa0104dc22308026565130ac3
 +#endif // ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
 diff --git a/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextAPITabCommandsHaiku.cpp b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextAPITabCommandsHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..7075a9e51371a32250e2ff4e80d29137b1b997c3
+index 0000000000000000000000000000000000000000..7dc05b82a0060c56c88348222914d9cfdc58cdfa
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextAPITabCommandsHaiku.cpp
-@@ -0,0 +1,545 @@
+@@ -0,0 +1,574 @@
 +/*
 + * Copyright (C) 2023-2024 Apple Inc. All rights reserved.
 + *
@@ -102412,27 +102433,56 @@ index 0000000000000000000000000000000000000000..7075a9e51371a32250e2ff4e80d29137
 +        return;
 +    }
 +
-+    // One command names every tab, so the host can close them together and
-+    // answer once instead of interleaving several close handshakes.
-+    BMessage message(B_WEBKIT_BROWSER_COMMAND);
-+    bool complete = message.AddUInt32("command", B_WEBKIT_BROWSER_CLOSE_TABS) == B_OK;
++    // A command goes to one window, which closes only its own tabs: one
++    // command per window, each naming all of its tabs so the window closes
++    // them together and answers once.
++    Vector<std::pair<Ref<WebExtensionWindow>, Vector<Ref<WebExtensionTab>>>> windows;
 +    for (auto& tab : tabs) {
 +        RefPtr window = tab->window();
-+        complete = complete && window && addNativeBrowserCommandTab(message, tab) && addNativeBrowserCommandWindow(message, *window);
-+    }
-+    if (!complete) {
-+        completionHandler(toWebExtensionError(apiName, nullString(), "a tab is not available in the browser"_s));
-+        return;
-+    }
-+
-+    sendNativeBrowserCommand(WTF::move(message), apiName, [completionHandler = WTF::move(completionHandler)](NativeBrowserCommandResult&& result) mutable {
-+        if (!result) {
-+            completionHandler(makeUnexpected(result.error()));
++        if (!window) {
++            completionHandler(toWebExtensionError(apiName, nullString(), "a tab is not available in the browser"_s));
 +            return;
 +        }
++        auto index = windows.findIf([&](auto& candidate) { return candidate.first.ptr() == window.get(); });
++        if (index == notFound)
++            windows.append({ window.releaseNonNull(), { tab } });
++        else
++            windows[index].second.append(tab);
++    }
++    // BMessage has its own operator new, so Vector cannot hold it directly.
++    Vector<std::unique_ptr<BMessage>> messages;
++    for (auto& [window, windowTabs] : windows) {
++        auto message = std::make_unique<BMessage>(B_WEBKIT_BROWSER_COMMAND);
++        bool complete = message->AddUInt32("command", B_WEBKIT_BROWSER_CLOSE_TABS) == B_OK && addNativeBrowserCommandWindow(*message, window);
++        for (auto& tab : windowTabs)
++            complete = complete && addNativeBrowserCommandTab(*message, tab);
++        if (!complete) {
++            completionHandler(toWebExtensionError(apiName, nullString(), "a tab is not available in the browser"_s));
++            return;
++        }
++        messages.append(WTF::move(message));
++    }
 +
-+        completionHandler({ });
-+    });
++    // Answered once every window has; the first failure is reported.
++    struct Pending : RefCounted<Pending> {
++        CompletionHandler<void(std::expected<void, WebExtensionError>&&)> completion;
++        std::optional<WebExtensionError> error;
++        ~Pending()
++        {
++            if (error)
++                completion(makeUnexpected(WTF::move(*error)));
++            else
++                completion({ });
++        }
++    };
++    Ref pending = adoptRef(*new Pending);
++    pending->completion = WTF::move(completionHandler);
++    for (auto& message : messages) {
++        sendNativeBrowserCommand(WTF::move(*message), apiName, [pending](NativeBrowserCommandResult&& result) {
++            if (!result && !pending->error)
++                pending->error = result.error();
++        });
++    }
 +}
 +
 +void WebExtensionContext::windowsCreate(const WebExtensionWindowParameters& creationParameters, CompletionHandler<void(std::expected<std::optional<WebExtensionWindowParameters>, WebExtensionError>&&)>&& completionHandler)
@@ -106669,10 +106719,10 @@ index 0000000000000000000000000000000000000000..3782c3ce8537852e5840002a582790e5
 +#endif
 diff --git a/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionDeclarativeNetRequestRulesHaiku.cpp b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionDeclarativeNetRequestRulesHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..d2395ab91191f23ab3c82f2335ceaa104159380e
+index 0000000000000000000000000000000000000000..f1daff8fee5cdd36628983b640f1a7ca2f54f877
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionDeclarativeNetRequestRulesHaiku.cpp
-@@ -0,0 +1,460 @@
+@@ -0,0 +1,467 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +#include "config.h"
 +#include "WebExtensionDeclarativeNetRequestRulesHaiku.h"
@@ -106922,6 +106972,13 @@ index 0000000000000000000000000000000000000000..d2395ab91191f23ab3c82f2335ceaa10
 +    auto types = resourceTypes(*condition);
 +    if (!types)
 +        return makeUnexpected(types.error());
++
++    // A regexFilter expanded into several patterns: the substitution still
++    // matches the URL against the whole expression.
++    if (webKitAction && filter->regularExpression && filter->patterns.size() > 1) {
++        if (auto redirect = webKitAction->getObject("redirect"_s); redirect && redirect->getValue("regex-substitution"_s))
++            redirect->setString("regex-filter"_s, condition->getString("regexFilter"_s));
++    }
 +
 +    Ref trigger = JSON::Object::create();
 +    trigger->setString("url-filter"_s, filter->patterns[0]);
@@ -107175,10 +107232,10 @@ index 0000000000000000000000000000000000000000..18fd33de5d86931832fb8b3bcb4d9ac0
 +#endif
 diff --git a/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionDeclarativeNetRequestURLFilter.cpp b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionDeclarativeNetRequestURLFilter.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..a2360934964a5b796cc9a8ca998474ebb0fbbe31
+index 0000000000000000000000000000000000000000..ec21a8418e7156fc6548be9b3e4290d4ecf28203
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionDeclarativeNetRequestURLFilter.cpp
-@@ -0,0 +1,205 @@
+@@ -0,0 +1,317 @@
 +/*
 + * Copyright (C) 2026 KunanyiOS contributors.
 + * SPDX-License-Identifier: BSD-2-Clause
@@ -107191,11 +107248,115 @@ index 0000000000000000000000000000000000000000..a2360934964a5b796cc9a8ca998474eb
 +
 +#include <WebCore/CombinedURLFilters.h>
 +#include <WebCore/URLFilterParser.h>
++#include <functional>
 +#include <wtf/ASCIICType.h>
 +#include <wtf/text/MakeString.h>
 +#include <wtf/text/StringBuilder.h>
 +
 +namespace WebKit {
++
++// WebCore's filter compiler has no alternation, but a filter may have several
++// patterns (a union). Expands each '|' of a regexFilter into whole patterns:
++// "^a(?:$|\\?)" becomes "^a$" and "^a\\?". Capturing groups stay (numbering is
++// unchanged); non-capturing ones are inlined, since "(?:$)" is rejected as a
++// misplaced end of line. Gives up (nullopt) on alternatives inside a
++// quantified group, which are not a union of whole patterns, and past
++// maximumCount patterns.
++static std::optional<Vector<String>> expandRegexAlternatives(StringView expression, size_t maximumCount)
++{
++    size_t position = 0;
++    std::function<std::optional<Vector<String>>(bool)> alternatives;
++    // One alternative: concatenated items up to '|' or ')' (not consumed).
++    auto sequence = [&](bool inGroup) -> std::optional<Vector<String>> {
++        Vector<String> results { emptyString() };
++        auto appendToAll = [&](StringView text) {
++            for (auto& result : results)
++                result = makeString(result, text);
++        };
++        while (position < expression.length()) {
++            auto character = expression[position];
++            if (character == '|' || (character == ')' && inGroup))
++                break;
++            if (character == '\\') {
++                appendToAll(expression.substring(position, std::min<size_t>(2, expression.length() - position)));
++                position += 2;
++                continue;
++            }
++            if (character == '[') {
++                size_t end = position + 1;
++                if (end < expression.length() && expression[end] == '^')
++                    ++end;
++                if (end < expression.length() && expression[end] == ']')
++                    ++end;
++                while (end < expression.length() && expression[end] != ']')
++                    end += expression[end] == '\\' ? 2 : 1;
++                end = std::min<size_t>(end + 1, expression.length());
++                appendToAll(expression.substring(position, end - position));
++                position = end;
++                continue;
++            }
++            if (character != '(') {
++                appendToAll(expression.substring(position, 1));
++                ++position;
++                continue;
++            }
++            // A group: "(", "(?:" or an assertion/named group kept as written.
++            size_t prefixLength = 1;
++            if (expression.substring(position).startsWith("(?:"_s))
++                prefixLength = 3;
++            else if (expression.substring(position).startsWith("(?"_s))
++                prefixLength = 2;
++            auto prefix = expression.substring(position, prefixLength);
++            position += prefixLength;
++            auto inner = alternatives(true);
++            if (!inner || position >= expression.length() || expression[position] != ')')
++                return std::nullopt;
++            ++position;
++            size_t quantifierStart = position;
++            if (position < expression.length() && (expression[position] == '*' || expression[position] == '+' || expression[position] == '?')) {
++                ++position;
++            } else if (position < expression.length() && expression[position] == '{') {
++                while (position < expression.length() && expression[position] != '}')
++                    ++position;
++                position = std::min<size_t>(position + 1, expression.length());
++            }
++            if (position < expression.length() && position > quantifierStart && expression[position] == '?')
++                ++position; // lazy
++            auto quantifier = expression.substring(quantifierStart, position - quantifierStart);
++            if (inner->size() > 1 && (!quantifier.isEmpty() || prefixLength == 2))
++                return std::nullopt;
++            bool inline_ = prefixLength == 3 && quantifier.isEmpty();
++            Vector<String> combined;
++            for (auto& result : results) {
++                for (auto& option : *inner) {
++                    combined.append(inline_ ? makeString(result, option) : makeString(result, prefix, option, ')', quantifier));
++                    if (combined.size() > maximumCount)
++                        return std::nullopt;
++                }
++            }
++            results = WTF::move(combined);
++        }
++        return results;
++    };
++    alternatives = [&](bool inGroup) -> std::optional<Vector<String>> {
++        Vector<String> results;
++        while (true) {
++            auto options = sequence(inGroup);
++            if (!options)
++                return std::nullopt;
++            results.appendVector(WTF::move(*options));
++            if (results.size() > maximumCount)
++                return std::nullopt;
++            if (position >= expression.length() || expression[position] != '|')
++                return results;
++            ++position;
++        }
++    };
++    auto results = alternatives(false);
++    if (!results || position != expression.length())
++        return std::nullopt;
++    return results;
++}
 +
 +std::expected<WebExtensionDeclarativeNetRequestURLFilter, String> WebExtensionDeclarativeNetRequestURLFilter::parse(const JSON::Object& condition, WebExtensionDeclarativeNetRequestURLFilterLimits limits)
 +{
@@ -107258,7 +107419,15 @@ index 0000000000000000000000000000000000000000..a2360934964a5b796cc9a8ca998474eb
 +                }
 +            }
 +        }
-+        if (!append(regexFilter ? WTF::move(input) : String(".*"_s)))
++        if (regexFilter && StringView(input).contains('|')) {
++            auto expanded = expandRegexAlternatives(input, limits.maximumPatternCount);
++            if (!expanded)
++                return makeUnexpected("Alternatives ('|') in regexFilter are supported only outside quantified groups."_s);
++            for (auto& pattern : *expanded) {
++                if (!append(WTF::move(pattern)))
++                    return makeUnexpected(limitError);
++            }
++        } else if (!append(regexFilter ? WTF::move(input) : String(".*"_s)))
 +            return makeUnexpected(limitError);
 +    } else {
 +        if (input.startsWith("||*"_s))

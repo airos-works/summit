@@ -107,7 +107,9 @@ never a hang): no listener â†’ "it is not implemented"; no answer within 30 s â†
   blocking a looper. The command succeeds when every tab is gone and fails with
   "The tab was kept open." when the user stays on a page or a window close is
   cancelled. A prompt left open past the deadline rejects the promise while the
-  close itself may still complete.
+  close itself may still complete. Tabs in several windows get one command per
+  window (a window closes only its own tabs); the call succeeds when all of
+  them have, and otherwise reports the first failure.
 - Extension pages open in the privileged extension view through the existing
   application-thread path; the command identifier travels with that request.
 - Failures of extension-requested tabs are reported to the extension, not shown
