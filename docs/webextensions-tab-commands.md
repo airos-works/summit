@@ -134,7 +134,10 @@ implemented. Fixture: `tests/fixtures/extensions/tab-zoom` (open
 `B_WEBKIT_BROWSER_SET_PINNED`, which the browser handles like its tab menu's
 Pin Tab (the tab moves to the pinned group). `tabs.create({pinned: true})`
 pins the new tab once it exists, and `tabs.query({pinned})` filters by it.
-Fixture: `tests/fixtures/extensions/tab-pin` (open `https://example.com/?pin`).
+Fixture: `tests/fixtures/extensions/tab-pin` (open `https://example.com/?pin`). Verified
+on the X399 (24 Oct, pin106 build ca81f4b): `pinned=false`, then after
+`update({pinned: true})` an `onUpdated {pinned: true}` and `get`/`query`
+agreeing, then `onUpdated {pinned: false}` after unpinning.
 
 ## Duplicate (#106)
 
