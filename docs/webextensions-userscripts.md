@@ -79,7 +79,7 @@ Then install Tampermonkey (Chrome Web Store build), add a script with
 
 ## Tampermonkey
 
-Tampermonkey 5.5.1 (Chrome Web Store build) needed three more fixes:
+Tampermonkey 5.5.1 (Chrome Web Store build) needed four more fixes:
 
 - the service worker startup above, and
 - **`regexFilter` with alternatives.** It installs scripts by redirecting
@@ -102,6 +102,16 @@ Tampermonkey 5.5.1 (Chrome Web Store build) needed three more fixes:
   them applied. It now uses the same test as the API
   (`nativeDeclarativeNetRequestAllowed()`: either permission, the second with
   access to all URLs).
+
+- **`tabs.onUpdated`.** Summit never fired it: on Cocoa the browser reports
+  tab changes, and Summit's browser did not. Tampermonkey opens its installer
+  when a tab on its `script_installation.php` page reports `status:
+  "complete"`. The engine now reports `Loading` and `URL` changes from
+  main-frame loads (start, commit, finish, failure), `URL` from same-document
+  navigations and `Title` from title changes
+  (`WebExtensionContextAPIEvent.cpp`, `WebPageProxy::didReceiveTitleForFrame`).
+  Changes within 25 ms arrive as one event, so a quick load can report only
+  `status: "complete"`.
 
 `excludedTabIds` (Tampermonkey uses it to let a tab show a script's source)
 is still unsupported: Summit's rules have no tab conditions.
