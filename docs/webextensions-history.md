@@ -35,3 +35,9 @@ milliseconds since the epoch.
 
 `tests/fixtures/extensions/history/`: install it, open
 `https://example.com/?history`, and read the `[history]` lines.
+
+Verified on the X399 (24 Oct, hist106 build): visiting the page fired
+`onVisited`; `search` found it (title, visit count 1); `getVisits` returned
+one visit; `addUrl` fired `onVisited` and was found; `deleteUrl` fired
+`onVisitRemoved` and the search then found nothing; an invalid URL was
+rejected. `deleteAll` and `deleteRange` were not exercised.
