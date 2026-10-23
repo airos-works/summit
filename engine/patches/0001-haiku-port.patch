@@ -137583,7 +137583,7 @@ index 0000000000000000000000000000000000000000..413f2e16107bcca192b92268f84c4d3d
 +SPECIALIZE_TYPE_TRAITS_WEB_EXTENSION(WebExtensionAPIPrivacySetting, privacySetting);
 +#endif
 diff --git a/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIRuntime.cpp b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIRuntime.cpp
-index 81412a7ab5e7f5845d4d19a813c2552c1cf361d6..769db259c842a1d13dfc4182e8a126b17186182e 100644
+index 81412a7ab5e7f5845d4d19a813c2552c1cf361d6..144f6c99557cfbf649e5da5753d6d3f5cc2c1c3d 100644
 --- a/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIRuntime.cpp
 +++ b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIRuntime.cpp
 @@ -30,6 +30,8 @@
@@ -137925,7 +137925,7 @@ index 81412a7ab5e7f5845d4d19a813c2552c1cf361d6..769db259c842a1d13dfc4182e8a126b1
  bool WebExtensionContextProxy::matchesTarget(WebFrame& frame, const std::optional<WebExtensionMessageTargetParameters>& targetParameters)
  {
      if (!targetParameters)
-@@ -599,6 +736,119 @@ bool WebExtensionContextProxy::matchesTarget(WebFrame& frame, const std::optiona
+@@ -599,6 +736,125 @@ bool WebExtensionContextProxy::matchesTarget(WebFrame& frame, const std::optiona
      return true;
  }
  
@@ -137951,7 +137951,13 @@ index 81412a7ab5e7f5845d4d19a813c2552c1cf361d6..769db259c842a1d13dfc4182e8a126b1
 +            return;
 +
 +        WebExtensionAPIEvent::ListenerVector listeners;
-+        if (sourceContentWorldType == WebExtensionContentWorldType::WebPage)
++        bool external = sourceContentWorldType == WebExtensionContentWorldType::WebPage;
++#if PLATFORM(HAIKU)
++        // A message from another extension (runtime.sendMessage(id, ...)).
++        if (senderParameters.extensionUniqueIdentifier && *senderParameters.extensionUniqueIdentifier != uniqueIdentifier())
++            external = true;
++#endif
++        if (external)
 +            listeners = protect(namespaceObject.runtime())->onMessageExternal().listeners();
 +        else
 +            listeners = protect(namespaceObject.runtime())->onMessage().listeners();
@@ -138045,7 +138051,7 @@ index 81412a7ab5e7f5845d4d19a813c2552c1cf361d6..769db259c842a1d13dfc4182e8a126b1
  void WebExtensionContextProxy::dispatchRuntimeMessageEvent(WebExtensionContentWorldType contentWorldType, const String& messageJSON, const std::optional<WebExtensionMessageTargetParameters>& targetParameters, const WebExtensionMessageSenderParameters& senderParameters, bool userGesture, CompletionHandler<void(String&& replyJSON)>&& completionHandler)
  {
      switch (contentWorldType) {
-@@ -606,11 +856,11 @@ void WebExtensionContextProxy::dispatchRuntimeMessageEvent(WebExtensionContentWo
+@@ -606,11 +862,11 @@ void WebExtensionContextProxy::dispatchRuntimeMessageEvent(WebExtensionContentWo
  #if ENABLE(INSPECTOR_EXTENSIONS)
      case WebExtensionContentWorldType::Inspector:
  #endif
@@ -138059,7 +138065,7 @@ index 81412a7ab5e7f5845d4d19a813c2552c1cf361d6..769db259c842a1d13dfc4182e8a126b1
          return;
  
      case WebExtensionContentWorldType::Native:
-@@ -715,7 +965,7 @@ void WebExtensionContextProxy::dispatchRuntimeInstalledEvent(WebExtensionContext
+@@ -715,7 +971,7 @@ void WebExtensionContextProxy::dispatchRuntimeInstalledEvent(WebExtensionContext
  
      details->setString(reasonKey, toWebAPI(installReason));
  
