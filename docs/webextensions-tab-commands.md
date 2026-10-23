@@ -147,7 +147,13 @@ agreeing, then `onUpdated {pinned: false}` after unpinning.
 
 `tabs.reload({bypassCache: true})` sends `RELOAD_TAB` with `bypass_cache`; the
 browser calls the new `BWebKitView::ReloadFromOrigin()`, which reloads with
-WebCore's `ReloadOption::FromOrigin`.
+WebCore's `ReloadOption::FromOrigin`. Verified on the X399 (24 Oct, rl106
+build) against a header-logging server: the bypassing reload sent
+`Cache-Control: no-cache` and `Pragma: no-cache` without `If-Modified-Since` /
+`If-None-Match`. Summit's ordinary reload sent the same headers for that
+top-level page, so the difference shows in subresources (from origin, not the
+memory cache) rather than in the page request. The tab-zoom fixture's zoom
+settings steps passed too (`automatic/per-origin/1`; `manual` rejected).
 
 ## Duplicate (#106)
 
