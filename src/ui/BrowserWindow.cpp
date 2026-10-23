@@ -1001,7 +1001,10 @@ BrowserWindow::BrowserWindow(std::shared_ptr<SharedProfile> profile, std::string
             for (const auto& page : options.session.tabs) { fRestoringTitle = page.title; CreateTab(page.url, false); }
             fRestoringSession = false;
             fRestoringTitle.clear();
-            for (size_t i = 0; i < std::min(options.session.pinned, fTabs.size()); ++i) fTabs[i].pinned = true;
+            for (size_t i = 0; i < std::min(options.session.pinned, fTabs.size()); ++i) {
+                fTabs[i].pinned = true;
+                fWebKitContext->SetBrowserTabPinned(fTabs[i].view, true);
+            }
 #else
             for (const auto& page : options.session.tabs) CreateTab(page.url, false);
 #endif
@@ -2284,6 +2287,11 @@ void BrowserWindow::BrowserCommand(const BMessage& message)
     }
     if (!tab) { RespondToCommand(identifier, B_ENTRY_NOT_FOUND, { }, "The tab is not open in this window."); return; }
     switch (command) {
+        case B_WEBKIT_BROWSER_SET_PINNED:
+            // tabs.update({pinned}): as the tab menu's Pin Tab.
+            SetTabPinned(tab->id, message.GetBool("pinned", false));
+            RespondToCommand(identifier, B_OK);
+            return;
         case B_WEBKIT_BROWSER_SET_ZOOM: {
             // tabs.setZoom(): 0 is the default zoom.
             const double zoom = message.GetDouble("zoom", -1);

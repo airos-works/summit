@@ -244,6 +244,10 @@ void BrowserWindow::SetTabPinned(int64 id, bool pinned)
     auto* tab = FindTabByID(id);
     if (!tab || tab->pinned == pinned) return;
     tab->pinned = pinned;
+#if SUMMIT_MODERN_WEBKIT
+    // Extensions see it as Tab.pinned.
+    fWebKitContext->SetBrowserTabPinned(tab->view, pinned);
+#endif
     size_t count = 0;
     for (const auto& candidate : fTabs) if (candidate.pinned && candidate.id != id) ++count;
     // A newly pinned tab goes after the pinned ones; an unpinned one first

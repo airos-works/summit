@@ -126,6 +126,16 @@ tabs follow (`BrowserWindow::SetTabZoom`). Values outside that range throw.
 implemented. Fixture: `tests/fixtures/extensions/tab-zoom` (open
 `https://example.com/?zoom`).
 
+## Pinned tabs (#106)
+
+`Tab.pinned` is the browser's own pinned state: Summit reports each change with
+`BWebKitContext::SetBrowserTabPinned()` (Pin Tab, restored sessions), and
+`tabs.onUpdated` reports `{pinned}`. `tabs.update({pinned})` sends
+`B_WEBKIT_BROWSER_SET_PINNED`, which the browser handles like its tab menu's
+Pin Tab (the tab moves to the pinned group). `tabs.create({pinned: true})`
+pins the new tab once it exists, and `tabs.query({pinned})` filters by it.
+Fixture: `tests/fixtures/extensions/tab-pin` (open `https://example.com/?pin`).
+
 ## Duplicate (#106)
 
 `tabs.duplicate()` opens a new tab at the original's address, after it (or at
@@ -152,7 +162,7 @@ the range error.
 
 `tabs.move`, `tabs.detectLanguage`,
 `tabs.toggleReaderMode`, `tabs.captureVisibleTab`, `tabs.getSelected`,
-`tabs.onMoved`, pinned tabs, `openerTabId` on `tabs.update`, window geometry
+`tabs.onMoved`, `openerTabId` on `tabs.update`, window geometry
 (`left/top/width/height` are validated and dropped), `maximized`/`fullscreen`
 in Summit, cache-bypassing reload in Summit (`bypassCache` reloads normally:
 `BWebKitView` has no such call yet), `scripting` in the main world, and real

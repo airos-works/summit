@@ -84677,10 +84677,10 @@ index 0000000000000000000000000000000000000000..574ed16658f0c14b1aa2e63208e990b8
 +#define WEBKIT_ENGINE_VERSION_HAIKU "@WebKit_HAIKU_MAJOR_VERSION@.@WebKit_HAIKU_MINOR_VERSION@.@WebKit_HAIKU_TINY_VERSION@"
 diff --git a/Source/WebKit/UIProcess/API/haiku/WebKitContext.cpp b/Source/WebKit/UIProcess/API/haiku/WebKitContext.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..5ed4048db9f4162af3e4ada0a5933323879f01cd
+index 0000000000000000000000000000000000000000..af01092762602f8b48169b622c7b18019f2fc862
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/API/haiku/WebKitContext.cpp
-@@ -0,0 +1,1064 @@
+@@ -0,0 +1,1075 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#include "config.h"
@@ -85370,6 +85370,17 @@ index 0000000000000000000000000000000000000000..5ed4048db9f4162af3e4ada0a5933323
 +    });
 +}
 +
++void BWebKitContext::SetBrowserTabPinned(BWebKitView* view, bool pinned)
++{
++    if (m_status != B_OK || !view)
++        return;
++    WTF::RunLoop::mainSingleton().dispatch([context = m_context, state = view->m_state, pinned] {
++        if (state->context != context || state->closed || !state->client || !state->client->page())
++            return;
++        context->browserTabs()->setPinned(state->client->page()->identifier(), pinned);
++    });
++}
++
 +void BWebKitContext::AllowServerCertificate(const char* host, const char* sha256)
 +{
 +    if (m_status != B_OK || !host || !*host || !sha256 || !*sha256)
@@ -85747,10 +85758,10 @@ index 0000000000000000000000000000000000000000..5ed4048db9f4162af3e4ada0a5933323
 +}
 diff --git a/Source/WebKit/UIProcess/API/haiku/WebKitContext.h b/Source/WebKit/UIProcess/API/haiku/WebKitContext.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..bffefde70478f798a63cfe158e23c410d4946c2f
+index 0000000000000000000000000000000000000000..42809c711e0189040d44eed62eb18f18da426347
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/API/haiku/WebKitContext.h
-@@ -0,0 +1,459 @@
+@@ -0,0 +1,465 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#pragma once
@@ -85834,6 +85845,8 @@ index 0000000000000000000000000000000000000000..bffefde70478f798a63cfe158e23c410
 +//                  the tab within its own window.
 +//   SET_ZOOM       view, window, zoom (double: 0.25..5, or 0 for the default).
 +//                  The host zooms the tab as its own zoom commands would.
++//   SET_PINNED     view, window, pinned (bool). The host pins or unpins the
++//                  tab and reports it with SetBrowserTabPinned.
 +// Answer every command exactly once with RespondToBrowserCommand, after the
 +// change is visible through SetBrowserWindowTabs. CANCELLED (identifier only)
 +// tells the host the engine stopped waiting: the deadline passed, the extension
@@ -85856,7 +85869,8 @@ index 0000000000000000000000000000000000000000..bffefde70478f798a63cfe158e23c410
 +    B_WEBKIT_BROWSER_FOCUS_WINDOW,
 +    B_WEBKIT_BROWSER_SET_WINDOW_STATE,
 +    B_WEBKIT_BROWSER_MOVE_TAB,
-+    B_WEBKIT_BROWSER_SET_ZOOM
++    B_WEBKIT_BROWSER_SET_ZOOM,
++    B_WEBKIT_BROWSER_SET_PINNED
 +};
 +
 +// Site permissions: what pages may ask the user for, and the services that
@@ -85949,6 +85963,9 @@ index 0000000000000000000000000000000000000000..bffefde70478f798a63cfe158e23c410
 +    // success window_identifier, tab_count and active_index (-1 for none).
 +    void SetBrowserWindowTabs(const BMessenger& window, const std::vector<BWebKitView*>&,
 +        BWebKitView* activeView, bool focused, const BMessenger& reply = BMessenger(), uint64 identifier = 0);
++    // Whether a tab is pinned in the browser (extensions' Tab.pinned). Any
++    // thread; a closed view is ignored.
++    void SetBrowserTabPinned(BWebKitView*, bool pinned);
 +
 +    // Configure on the application thread. A local listener receives
 +    // B_WEBKIT_BROWSER_COMMAND requests; an invalid messenger clears it and
@@ -102164,10 +102181,10 @@ index 0000000000000000000000000000000000000000..ef935e9aa0104dc22308026565130ac3
 +#endif // ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
 diff --git a/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextAPITabCommandsHaiku.cpp b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextAPITabCommandsHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..e396019d96c1e0f215d4d8e72b9cca692f3d258f
+index 0000000000000000000000000000000000000000..24213c5a458908f9e0ab9db1f5f7e2cb0cbba25f
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextAPITabCommandsHaiku.cpp
-@@ -0,0 +1,621 @@
+@@ -0,0 +1,634 @@
 +/*
 + * Copyright (C) 2023-2024 Apple Inc. All rights reserved.
 + *
@@ -102262,7 +102279,7 @@ index 0000000000000000000000000000000000000000..e396019d96c1e0f215d4d8e72b9cca69
 +        return;
 +    }
 +
-+    // `pinned: true` is ignored (no pinned tabs in Summit); see WebExtensionTab::setPinned().
++    // `pinned: true` pins the new tab once the browser has made it.
 +
 +    if (parameters.showingReaderMode.value_or(false)) {
 +        completionHandler(toWebExtensionError(apiName, nullString(), "it is not implemented for 'openInReaderMode' set to `true`"_s));
@@ -102306,7 +102323,7 @@ index 0000000000000000000000000000000000000000..e396019d96c1e0f215d4d8e72b9cca69
 +        if (RefPtr page = parentTab->nativePage())
 +            openerPage = page->identifier();
 +    }
-+    sendNativeBrowserCommand(WTF::move(message), apiName, [this, protectedThis = Ref { *this }, muted = parameters.muted.value_or(false), openerPage, completionHandler = WTF::move(completionHandler)](NativeBrowserCommandResult&& result) mutable {
++    sendNativeBrowserCommand(WTF::move(message), apiName, [this, protectedThis = Ref { *this }, muted = parameters.muted.value_or(false), pinned = parameters.pinned.value_or(false), openerPage, completionHandler = WTF::move(completionHandler)](NativeBrowserCommandResult&& result) mutable {
 +        if (!result) {
 +            completionHandler(makeUnexpected(result.error()));
 +            return;
@@ -102324,6 +102341,19 @@ index 0000000000000000000000000000000000000000..e396019d96c1e0f215d4d8e72b9cca69
 +
 +        if (!newTab->extensionHasAccess()) {
 +            completionHandler({ });
++            return;
++        }
++
++        if (pinned) {
++            newTab->setPinned(true, [newTab, muted, completionHandler = WTF::move(completionHandler)](std::expected<void, WebExtensionError>&&) mutable {
++                if (!muted) {
++                    completionHandler({ newTab->parameters() });
++                    return;
++                }
++                newTab->mute([newTab, completionHandler = WTF::move(completionHandler)](std::expected<void, WebExtensionError>&&) mutable {
++                    completionHandler({ newTab->parameters() });
++                });
++            });
 +            return;
 +        }
 +
@@ -102933,7 +102963,7 @@ index 0000000000000000000000000000000000000000..df528e83c3b65c609416b3b57eb367b1
 +#endif
 diff --git a/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextAPITabsHaiku.cpp b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextAPITabsHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..2e6da8abcfb089f7a4598cf702317be8507ef107
+index 0000000000000000000000000000000000000000..cecbf733452cdbac5c28d27921c54f2fe63e3900
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextAPITabsHaiku.cpp
 @@ -0,0 +1,332 @@
@@ -103113,7 +103143,7 @@ index 0000000000000000000000000000000000000000..2e6da8abcfb089f7a4598cf702317be8
 +                || (query.audible && *query.audible != nativePage->isPlayingAudio())
 +                || (query.discarded && *query.discarded != tab->isDiscarded())
 +                || (query.muted && *query.muted != nativePage->isAudioMuted())
-+                || (query.pinned && *query.pinned))
++                || (query.pinned && *query.pinned != tab->isPinned()))
 +                continue;
 +            // The tabs permission exposes metadata, not website execution or
 +            // network access. Keep that separate from the host access check.
@@ -106327,10 +106357,10 @@ index 0000000000000000000000000000000000000000..a5f9aae43990067335545cb019b2e4f0
 +#endif // ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
 diff --git a/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionControllerHaiku.cpp b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionControllerHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..25600e412c2690295ad0faf8ac058b3816647210
+index 0000000000000000000000000000000000000000..08b73bfff19f6bb112bca58e58318c96e3644cf9
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionControllerHaiku.cpp
-@@ -0,0 +1,83 @@
+@@ -0,0 +1,92 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#include "config.h"
@@ -106356,6 +106386,15 @@ index 0000000000000000000000000000000000000000..25600e412c2690295ad0faf8ac058b38
 +    // Page configurations, the native SDK and loaded extension contexts share
 +    // this controller's host state without retaining native windows or pages.
 +    m_nativeBrowserTabs = std::make_shared<BrowserTabRegistryHaiku>();
++    m_nativeBrowserTabs->setPinnedObserver([weakThis = WeakPtr { *this }](WebPageProxyIdentifier page) {
++        RefPtr controller = weakThis.get();
++        if (!controller)
++            return;
++        for (Ref context : controller->extensionContexts()) {
++            if (RefPtr tab = context->getTab(page))
++                context->didChangeTabProperties(*tab, { WebExtensionTab::ChangedProperties::Pinned });
++        }
++    });
 +    m_nativeBrowserTabs->setObserver([weakThis = WeakPtr { *this }](const auto& before, const auto& after) {
 +        RefPtr controller = weakThis.get();
 +        if (!controller)
@@ -110808,10 +110847,10 @@ index 0000000000000000000000000000000000000000..33513664e83e2f9b8cae80550e474ac2
 +#endif // ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
 diff --git a/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionTabCommandsHaiku.cpp b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionTabCommandsHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..029910e12b8031241ae2543d66cb4245495ff7d4
+index 0000000000000000000000000000000000000000..705ee813c55affee54748e42b6ac4ab8c2dad868
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionTabCommandsHaiku.cpp
-@@ -0,0 +1,274 @@
+@@ -0,0 +1,275 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#include "config.h"
@@ -110819,6 +110858,7 @@ index 0000000000000000000000000000000000000000..029910e12b8031241ae2543d66cb4245
 +
 +#if ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
 +
++#include "BrowserTabRegistryHaiku.h"
 +#include "WebExtensionContext.h"
 +#include "WebExtensionUtilities.h"
 +#include "WebExtensionWindow.h"
@@ -110882,18 +110922,18 @@ index 0000000000000000000000000000000000000000..029910e12b8031241ae2543d66cb4245
 +
 +bool WebExtensionTab::isPinned() const
 +{
-+    return false;
++    // The browser reports its pinned tabs (BWebKitContext::SetBrowserTabPinned).
++    RefPtr page = nativePage();
++    RefPtr context = m_extensionContext.get();
++    RefPtr controller = context ? context->extensionController() : nullptr;
++    return page && isValid() && controller && controller->nativeBrowserTabs()->isPinned(page->identifier());
 +}
 +
-+void WebExtensionTab::setPinned(bool, VoidCompletion&& completion)
++void WebExtensionTab::setPinned(bool pinned, VoidCompletion&& completion)
 +{
-+    // Summit's tab strip has no pinned tabs. Treat pinning as a presentation
-+    // hint, as browsers without pinning do, instead of failing the whole
-+    // update: OneTab restores a saved pinned tab with
-+    // `await tabs.update(id, { pinned: true })` inside its restore loop, and
-+    // a rejection there abandoned the remaining tabs. The tab reports
-+    // `pinned: false`.
-+    completion({ });
++    sendTabCommand(*this, B_WEBKIT_BROWSER_SET_PINNED, "tabs.update()"_s, [pinned](BMessage& message) {
++        return message.AddBool("pinned", pinned) == B_OK;
++    }, WTF::move(completion));
 +}
 +
 +bool WebExtensionTab::isPlayingAudio() const
@@ -111088,10 +111128,10 @@ index 0000000000000000000000000000000000000000..029910e12b8031241ae2543d66cb4245
 +#endif // ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
 diff --git a/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionTabHaiku.cpp b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionTabHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..21959e76092fa8fa769468c43c34aed8ac6b2ca7
+index 0000000000000000000000000000000000000000..78d029711bd98e75c2a88d74ee8a0885f6a304ac
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionTabHaiku.cpp
-@@ -0,0 +1,248 @@
+@@ -0,0 +1,250 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#include "config.h"
@@ -111314,7 +111354,7 @@ index 0000000000000000000000000000000000000000..21959e76092fa8fa769468c43c34aed8
 +            }
 +        }
 +    }
-+    result.pinned = false; // The native browser has no pinned-tab state yet.
++    result.pinned = isPinned();
 +    return result;
 +}
 +
@@ -111332,6 +111372,8 @@ index 0000000000000000000000000000000000000000..21959e76092fa8fa769468c43c34aed8
 +        result.title = hasPermission ? title() : nullString();
 +    if (properties.contains(ChangedProperties::Loading))
 +        result.loading = !isLoadingComplete();
++    if (properties.contains(ChangedProperties::Pinned))
++        result.pinned = isPinned();
 +    if (properties.contains(ChangedProperties::Muted))
 +        result.muted = isMuted();
 +    return result;
@@ -114247,10 +114289,10 @@ index 0000000000000000000000000000000000000000..308e29a9828a8db24fb9a796881ea165
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/BrowserTabRegistryHaiku.cpp b/Source/WebKit/UIProcess/haiku/BrowserTabRegistryHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..d8e729f0e77e4a0bc2a26211662f0c00d9b6af48
+index 0000000000000000000000000000000000000000..011dd51f451b6ed7f1230bf2fc2e3b95f0872083
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/BrowserTabRegistryHaiku.cpp
-@@ -0,0 +1,149 @@
+@@ -0,0 +1,163 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#include "config.h"
@@ -114344,9 +114386,23 @@ index 0000000000000000000000000000000000000000..d8e729f0e77e4a0bc2a26211662f0c00
 +    return identifier;
 +}
 +
++void BrowserTabRegistryHaiku::setPinned(WebPageProxyIdentifier identifier, bool pinned)
++{
++    ASSERT(isMainThread());
++    if (pinned == isPinned(identifier))
++        return;
++    if (pinned)
++        m_pinnedPages.append(identifier);
++    else
++        m_pinnedPages.removeFirst(identifier);
++    if (m_pinnedObserver)
++        m_pinnedObserver(identifier);
++}
++
 +void BrowserTabRegistryHaiku::removePage(WebPageProxyIdentifier identifier)
 +{
 +    ASSERT(isMainThread());
++    m_pinnedPages.removeFirst(identifier);
 +    auto windows = m_windows;
 +    for (auto& window : windows) {
 +        window.pages.removeFirst(identifier);
@@ -114402,10 +114458,10 @@ index 0000000000000000000000000000000000000000..d8e729f0e77e4a0bc2a26211662f0c00
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/BrowserTabRegistryHaiku.h b/Source/WebKit/UIProcess/haiku/BrowserTabRegistryHaiku.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..c9ce1c3634ecf86e8225245d70df7d8820bf199f
+index 0000000000000000000000000000000000000000..ef4e2b8a7d53119d5d179c3a9ba9f6cc81a90263
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/BrowserTabRegistryHaiku.h
-@@ -0,0 +1,58 @@
+@@ -0,0 +1,67 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#pragma once
@@ -114450,6 +114506,13 @@ index 0000000000000000000000000000000000000000..c9ce1c3634ecf86e8225245d70df7d88
 +    void removePage(WebPageProxyIdentifier);
 +    void clear();
 +
++    // The browser's pinned tabs. A page leaves the set when it closes.
++    // The pinned observer hears of each change.
++    using PinnedObserver = std::function<void(WebPageProxyIdentifier)>;
++    void setPinnedObserver(PinnedObserver observer) { m_pinnedObserver = WTF::move(observer); }
++    void setPinned(WebPageProxyIdentifier, bool pinned);
++    bool isPinned(WebPageProxyIdentifier identifier) const { return m_pinnedPages.contains(identifier); }
++
 +    Vector<Window> windows() const;
 +    std::optional<Window> window(uint64_t) const;
 +    std::optional<Tab> tab(WebPageProxyIdentifier) const;
@@ -114458,6 +114521,8 @@ index 0000000000000000000000000000000000000000..c9ce1c3634ecf86e8225245d70df7d88
 +private:
 +    void publish(Vector<Window>&&, std::optional<uint64_t> focusedWindow);
 +    Observer m_observer;
++    PinnedObserver m_pinnedObserver;
++    Vector<WebPageProxyIdentifier> m_pinnedPages;
 +    Vector<Window> m_windows;
 +    std::optional<uint64_t> m_focusedWindow;
 +    uint64_t m_nextWindowIdentifier { 1 };
