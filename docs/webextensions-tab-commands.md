@@ -125,7 +125,9 @@ tabs follow (`BrowserWindow::SetTabZoom`). Values outside that range throw.
 `tabs.onZoomChange` reports every page zoom change of a tab the extension can
 see (from `WebPageProxy::setPageZoomFactor`), with `zoomSettings`
 `{mode: "automatic", scope: "per-origin"}`, which is how Summit remembers zoom.
-`getZoomSettings`/`setZoomSettings` are not implemented. Fixture: `tests/fixtures/extensions/tab-zoom` (open
+Verified on the X399 (24 Oct, zc106 build): `onZoomChange` fired 1 → 1.5 and
+1.5 → 1 with `automatic/per-origin`. `getZoomSettings`/`setZoomSettings` are
+not implemented. Fixture: `tests/fixtures/extensions/tab-zoom` (open
 `https://example.com/?zoom`).
 
 ## Pinned tabs (#106)
