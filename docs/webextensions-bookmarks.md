@@ -43,3 +43,9 @@ Summit does not keep as bookmarks (`data:` and the like) are refused.
 
 `tests/fixtures/extensions/bookmarks/`: install it and read the
 `[bookmarks]` lines; then edit bookmarks in Summit to see the events.
+
+Verified on the X399 (24 Oct, bm106 build 7a9f7fe): every call above,
+including `search('text')` and `get(id)`, the four events, the refusals (a
+non-empty folder, renaming the bar, moving a folder into itself, a `data:`
+address, a missing id) and `onCreated` for a page bookmarked with
+Bookmarks › Bookmark This Page.

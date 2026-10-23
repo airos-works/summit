@@ -39,3 +39,9 @@ history and downloads itself and site data with the context's
 
 `tests/fixtures/extensions/browsing-data/`: install it and read the
 `[browsingData]` lines.
+
+Verified on the X399 (24 Oct, bm106 build) with cookies on example.com and
+example.org: `origins`, `excludeOrigins`, `hostnames` and `since` each
+removed exactly the expected cookies; `removeHistory`, `settings` and the
+refusals (passwords, filtered history, both filters, unknown type) behaved
+as above.

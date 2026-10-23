@@ -29,3 +29,8 @@ changes with `BWebKitContext::NotifySessionsChanged`.
 
 `tests/fixtures/extensions/sessions/`: install it and read the `[sessions]`
 lines.
+
+Verified on the X399 (24 Oct, bm106 build): a closed tab was listed and
+restored, tab and window values were set, read and removed, `onChanged`
+fired for the close and the restore, and missing sessions and tabs were
+refused.

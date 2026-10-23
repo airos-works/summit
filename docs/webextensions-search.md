@@ -24,3 +24,7 @@ builds the address from the engine's prefix and answers with
 ## Fixture
 
 `tests/fixtures/extensions/search/`: install it and read the `[search]` lines.
+
+Verified on the X399 (24 Oct, bm106 build): `get`, `query` in a new tab,
+`search` with Bing in a named tab, and the refusals (unknown engine, bad
+disposition, missing tab, empty text).
