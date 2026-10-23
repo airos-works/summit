@@ -106719,7 +106719,7 @@ index 0000000000000000000000000000000000000000..3782c3ce8537852e5840002a582790e5
 +#endif
 diff --git a/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionDeclarativeNetRequestRulesHaiku.cpp b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionDeclarativeNetRequestRulesHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..f1daff8fee5cdd36628983b640f1a7ca2f54f877
+index 0000000000000000000000000000000000000000..47d8cf25121a129d03ca0bf544ab7c4b464c70f0
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionDeclarativeNetRequestRulesHaiku.cpp
 @@ -0,0 +1,467 @@
@@ -106973,9 +106973,9 @@ index 0000000000000000000000000000000000000000..f1daff8fee5cdd36628983b640f1a7ca
 +    if (!types)
 +        return makeUnexpected(types.error());
 +
-+    // A regexFilter expanded into several patterns: the substitution still
-+    // matches the URL against the whole expression.
-+    if (webKitAction && filter->regularExpression && filter->patterns.size() > 1) {
++    // A regexFilter rewritten for WebCore: the substitution still matches the
++    // URL against the expression as written (its group numbers).
++    if (webKitAction && filter->regularExpression && filter->patterns != Vector<String> { condition->getString("regexFilter"_s) }) {
 +        if (auto redirect = webKitAction->getObject("redirect"_s); redirect && redirect->getValue("regex-substitution"_s))
 +            redirect->setString("regex-filter"_s, condition->getString("regexFilter"_s));
 +    }
@@ -107232,10 +107232,10 @@ index 0000000000000000000000000000000000000000..18fd33de5d86931832fb8b3bcb4d9ac0
 +#endif
 diff --git a/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionDeclarativeNetRequestURLFilter.cpp b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionDeclarativeNetRequestURLFilter.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..ec21a8418e7156fc6548be9b3e4290d4ecf28203
+index 0000000000000000000000000000000000000000..8e3d8270ebb7c0f2a475a1e3f9f85c1ef1ebd858
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionDeclarativeNetRequestURLFilter.cpp
-@@ -0,0 +1,317 @@
+@@ -0,0 +1,372 @@
 +/*
 + * Copyright (C) 2026 KunanyiOS contributors.
 + * SPDX-License-Identifier: BSD-2-Clause
@@ -107252,37 +107252,121 @@ index 0000000000000000000000000000000000000000..ec21a8418e7156fc6548be9b3e4290d4
 +#include <wtf/ASCIICType.h>
 +#include <wtf/text/MakeString.h>
 +#include <wtf/text/StringBuilder.h>
++#include <wtf/text/StringToIntegerConversion.h>
 +
 +namespace WebKit {
 +
-+// WebCore's filter compiler has no alternation, but a filter may have several
-+// patterns (a union). Expands each '|' of a regexFilter into whole patterns:
-+// "^a(?:$|\\?)" becomes "^a$" and "^a\\?". Capturing groups stay (numbering is
-+// unchanged); non-capturing ones are inlined, since "(?:$)" is rejected as a
-+// misplaced end of line. Gives up (nullopt) on alternatives inside a
-+// quantified group, which are not a union of whole patterns, and past
-+// maximumCount patterns.
-+static std::optional<Vector<String>> expandRegexAlternatives(StringView expression, size_t maximumCount)
++// WebCore's filter compiler has no alternation and no counted repetition,
++// but a filter may have several patterns (a union). Rewrites a regexFilter
++// into patterns it accepts, matching the same URLs:
++// - each '|' becomes whole patterns: "^a(?:$|\?)" gives "^a$" and "^a\?".
++//   Capturing groups stay; non-capturing ones are inlined, since "(?:$)" is
++//   rejected as a misplaced end of line;
++// - "x{m,n}" becomes m copies of x and n - m of "x?" ("x{m,}": then "x*").
++// Gives up (nullopt) on alternatives inside a quantified group, which are not
++// a union of whole patterns, on repetitions above 32, and past maximumCount
++// patterns. Group numbers may change; only the patterns use the result.
++static std::optional<Vector<String>> rewriteRegexForContentRules(StringView expression, size_t maximumCount)
 +{
++    constexpr unsigned maximumRepetition = 32;
 +    size_t position = 0;
++    // A counted quantifier at position: {m}, {m,} or {m,n} (nullopt: none).
++    // Anything else, such as a lone '{', is a literal, as in JavaScript.
++    auto countedQuantifier = [&]() -> std::optional<std::pair<unsigned, std::optional<unsigned>>> {
++        if (position >= expression.length() || expression[position] != '{')
++            return std::nullopt;
++        size_t end = expression.find('}', position);
++        if (end == notFound)
++            return std::nullopt;
++        auto body = expression.substring(position + 1, end - position - 1);
++        size_t comma = body.find(',');
++        auto minimum = parseInteger<unsigned>(comma == notFound ? body : body.left(comma));
++        if (!minimum)
++            return std::nullopt;
++        std::optional<unsigned> maximum = *minimum;
++        if (comma != notFound) {
++            auto rest = body.substring(comma + 1);
++            if (rest.isEmpty())
++                maximum = std::nullopt;
++            else if (!(maximum = parseInteger<unsigned>(rest)) || *maximum < *minimum)
++                return std::nullopt;
++        }
++        position = end + 1;
++        if (position < expression.length() && expression[position] == '?')
++            ++position; // lazy: the same URLs match
++        return std::pair { *minimum, maximum };
++    };
++    auto repeat = [&](StringView atom, unsigned minimum, std::optional<unsigned> maximum) -> std::optional<String> {
++        if (minimum > maximumRepetition || (maximum && *maximum > maximumRepetition))
++            return std::nullopt;
++        StringBuilder builder;
++        for (unsigned i = 0; i < minimum; ++i)
++            builder.append(atom);
++        if (!maximum)
++            builder.append(atom, '*');
++        else {
++            for (unsigned i = minimum; i < *maximum; ++i)
++                builder.append(atom, '?');
++        }
++        return builder.toString();
++    };
++
 +    std::function<std::optional<Vector<String>>(bool)> alternatives;
 +    // One alternative: concatenated items up to '|' or ')' (not consumed).
 +    auto sequence = [&](bool inGroup) -> std::optional<Vector<String>> {
 +        Vector<String> results { emptyString() };
-+        auto appendToAll = [&](StringView text) {
-+            for (auto& result : results)
-+                result = makeString(result, text);
-+        };
 +        while (position < expression.length()) {
 +            auto character = expression[position];
 +            if (character == '|' || (character == ')' && inGroup))
 +                break;
-+            if (character == '\\') {
-+                appendToAll(expression.substring(position, std::min<size_t>(2, expression.length() - position)));
-+                position += 2;
++            if (character == '(') {
++                // A group: "(", "(?:" or an assertion/named group kept as written.
++                size_t prefixLength = 1;
++                if (expression.substring(position).startsWith("(?:"_s))
++                    prefixLength = 3;
++                else if (expression.substring(position).startsWith("(?"_s))
++                    prefixLength = 2;
++                auto prefix = expression.substring(position, prefixLength);
++                position += prefixLength;
++                auto inner = alternatives(true);
++                if (!inner || position >= expression.length() || expression[position] != ')')
++                    return std::nullopt;
++                ++position;
++                auto counted = countedQuantifier();
++                size_t quantifierStart = position;
++                if (!counted && position < expression.length() && (expression[position] == '*' || expression[position] == '+' || expression[position] == '?')) {
++                    ++position;
++                    if (position < expression.length() && expression[position] == '?')
++                        ++position; // lazy
++                }
++                auto quantifier = expression.substring(quantifierStart, position - quantifierStart);
++                bool quantified = counted || !quantifier.isEmpty();
++                if (inner->size() > 1 && (quantified || prefixLength == 2))
++                    return std::nullopt;
++                Vector<String> combined;
++                for (auto& result : results) {
++                    for (auto& option : *inner) {
++                        if (prefixLength == 3 && !quantified)
++                            combined.append(makeString(result, option));
++                        else if (counted) {
++                            auto repeated = repeat(makeString(prefix, option, ')'), counted->first, counted->second);
++                            if (!repeated)
++                                return std::nullopt;
++                            combined.append(makeString(result, *repeated));
++                        } else
++                            combined.append(makeString(result, prefix, option, ')', quantifier));
++                        if (combined.size() > maximumCount)
++                            return std::nullopt;
++                    }
++                }
++                results = WTF::move(combined);
 +                continue;
 +            }
-+            if (character == '[') {
++            // A single atom: an escape, a character class or a character.
++            size_t atomStart = position;
++            if (character == '\\')
++                position = std::min<size_t>(position + 2, expression.length());
++            else if (character == '[') {
 +                size_t end = position + 1;
 +                if (end < expression.length() && expression[end] == '^')
 +                    ++end;
@@ -107290,51 +107374,22 @@ index 0000000000000000000000000000000000000000..ec21a8418e7156fc6548be9b3e4290d4
 +                    ++end;
 +                while (end < expression.length() && expression[end] != ']')
 +                    end += expression[end] == '\\' ? 2 : 1;
-+                end = std::min<size_t>(end + 1, expression.length());
-+                appendToAll(expression.substring(position, end - position));
-+                position = end;
-+                continue;
-+            }
-+            if (character != '(') {
-+                appendToAll(expression.substring(position, 1));
++                position = std::min<size_t>(end + 1, expression.length());
++            } else
 +                ++position;
-+                continue;
-+            }
-+            // A group: "(", "(?:" or an assertion/named group kept as written.
-+            size_t prefixLength = 1;
-+            if (expression.substring(position).startsWith("(?:"_s))
-+                prefixLength = 3;
-+            else if (expression.substring(position).startsWith("(?"_s))
-+                prefixLength = 2;
-+            auto prefix = expression.substring(position, prefixLength);
-+            position += prefixLength;
-+            auto inner = alternatives(true);
-+            if (!inner || position >= expression.length() || expression[position] != ')')
-+                return std::nullopt;
-+            ++position;
-+            size_t quantifierStart = position;
-+            if (position < expression.length() && (expression[position] == '*' || expression[position] == '+' || expression[position] == '?')) {
-+                ++position;
-+            } else if (position < expression.length() && expression[position] == '{') {
-+                while (position < expression.length() && expression[position] != '}')
-+                    ++position;
-+                position = std::min<size_t>(position + 1, expression.length());
-+            }
-+            if (position < expression.length() && position > quantifierStart && expression[position] == '?')
-+                ++position; // lazy
-+            auto quantifier = expression.substring(quantifierStart, position - quantifierStart);
-+            if (inner->size() > 1 && (!quantifier.isEmpty() || prefixLength == 2))
-+                return std::nullopt;
-+            bool inline_ = prefixLength == 3 && quantifier.isEmpty();
-+            Vector<String> combined;
-+            for (auto& result : results) {
-+                for (auto& option : *inner) {
-+                    combined.append(inline_ ? makeString(result, option) : makeString(result, prefix, option, ')', quantifier));
-+                    if (combined.size() > maximumCount)
++            auto atom = expression.substring(atomStart, position - atomStart);
++            String text = atom.toString();
++            // Assertions take no quantifier; a '{' after them stays literal.
++            if (character != '^' && character != '$') {
++                if (auto counted = countedQuantifier()) {
++                    auto repeated = repeat(atom, counted->first, counted->second);
++                    if (!repeated)
 +                        return std::nullopt;
++                    text = WTF::move(*repeated);
 +                }
 +            }
-+            results = WTF::move(combined);
++            for (auto& result : results)
++                result = makeString(result, text);
 +        }
 +        return results;
 +    };
@@ -107419,10 +107474,10 @@ index 0000000000000000000000000000000000000000..ec21a8418e7156fc6548be9b3e4290d4
 +                }
 +            }
 +        }
-+        if (regexFilter && StringView(input).contains('|')) {
-+            auto expanded = expandRegexAlternatives(input, limits.maximumPatternCount);
++        if (regexFilter && (StringView(input).contains('|') || StringView(input).contains('{'))) {
++            auto expanded = rewriteRegexForContentRules(input, limits.maximumPatternCount);
 +            if (!expanded)
-+                return makeUnexpected("Alternatives ('|') in regexFilter are supported only outside quantified groups."_s);
++                return makeUnexpected("regexFilter supports alternatives ('|') only outside quantified groups, and repetition counts up to 32."_s);
 +            for (auto& pattern : *expanded) {
 +                if (!append(WTF::move(pattern)))
 +                    return makeUnexpected(limitError);

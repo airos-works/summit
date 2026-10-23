@@ -85,13 +85,15 @@ Tampermonkey 5.5.1 (Chrome Web Store build) needed two more fixes:
 - **`regexFilter` with alternatives.** It installs scripts by redirecting
   `*.user.js` pages to its installer with declarativeNetRequest session rules
   such as `^[^?#]*\.(?:user|tamper)\.js…` and `…(?:$|\?|\#)`. WebCore's
-  content-rule compiler has no `|`, so every such rule was rejected (`dNr:` in
-  its log) and `.user.js` links showed the source. Summit now expands a
-  regexFilter's alternatives into separate patterns of one rule (capturing
-  groups kept, non-capturing ones inlined), and `regexSubstitution` still
-  matches the whole expression (the redirect carries it as `regex-filter`).
-  Alternatives inside a quantified group, such as `(a|b)+`, are still
-  rejected.
+  content-rule compiler has no `|` and no counted repetition (its site rules
+  use `[0-9]{1,9}`), and one bad rule fails the whole call, so no rule was
+  added (`dNr:` in its log) and `.user.js` links showed the source. Summit
+  now rewrites a regexFilter into patterns WebCore accepts, matching the same
+  URLs: alternatives become separate patterns of one rule (capturing groups
+  kept, non-capturing ones inlined), and `x{m,n}` becomes m copies of `x` and
+  n - m of `x?`. `regexSubstitution` still matches the expression as written
+  (the redirect carries it as `regex-filter`). Alternatives inside a
+  quantified group, such as `(a|b)+`, and counts above 32 are still rejected.
 
 `excludedTabIds` (Tampermonkey uses it to let a tab show a script's source)
 is still unsupported: Summit's rules have no tab conditions.
