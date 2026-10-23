@@ -131,7 +131,14 @@ implemented. Fixture: `tests/fixtures/extensions/tab-zoom` (open
 `tabs.duplicate()` opens a new tab at the original's address, after it (or at
 `index`), active unless `active: false`, with the original as its opener. It
 goes through the same `OPEN_TAB` command as `tabs.create()`. Unlike Chrome,
-the copy does not get the original's back/forward list.
+the copy does not get the original's back/forward list, and its `openerTabId`
+is not reported (Summit's tab parameters carry no opener yet).
+
+Verified on the X399 (23 Oct, zoom106 build 538d837) with
+`tests/fixtures/extensions/tab-zoom`: `getZoom` 1, then 1.5 after
+`setZoom(1.5)`, 1 after `setZoom(0)`; `duplicate` opened the same address at
+index 2 after the original at 1, and removing it worked; `setZoom(9)` threw
+the range error.
 
 ## Not implemented
 
