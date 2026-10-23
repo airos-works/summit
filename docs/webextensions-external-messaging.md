@@ -20,8 +20,13 @@ hands the message to the receiver's
 `receiveExternalRuntimeMessageHaiku`, which wakes its background and
 dispatches `RuntimeOnMessageExternal`.
 
-`runtime.connect(extensionId)` to another extension is not implemented yet:
-its ports would have to span two contexts.
+`runtime.connect(extensionId)` to another extension is not implemented yet.
+A web page's `connect` to an extension runs entirely in the receiving
+extension's context (both port ends are counted there, and the page's web
+process posts its port messages to that context). Between two extensions each
+end's web process posts to its own extension's context, so the controller
+would have to relay port messages, disconnects and port counts between the
+two contexts by channel identifier.
 
 ## Fixture
 
