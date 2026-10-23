@@ -126,9 +126,16 @@ tabs follow (`BrowserWindow::SetTabZoom`). Values outside that range throw.
 implemented. Fixture: `tests/fixtures/extensions/tab-zoom` (open
 `https://example.com/?zoom`).
 
+## Duplicate (#106)
+
+`tabs.duplicate()` opens a new tab at the original's address, after it (or at
+`index`), active unless `active: false`, with the original as its opener. It
+goes through the same `OPEN_TAB` command as `tabs.create()`. Unlike Chrome,
+the copy does not get the original's back/forward list.
+
 ## Not implemented
 
-`tabs.duplicate`, `tabs.move`, `tabs.detectLanguage`,
+`tabs.move`, `tabs.detectLanguage`,
 `tabs.toggleReaderMode`, `tabs.captureVisibleTab`, `tabs.getSelected`,
 `tabs.onMoved`, pinned tabs, `openerTabId` on `tabs.update`, window geometry
 (`left/top/width/height` are validated and dropped), `maximized`/`fullscreen`
