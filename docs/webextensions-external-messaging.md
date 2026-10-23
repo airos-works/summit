@@ -40,6 +40,14 @@ Native worlds (`connectToExtensionHaiku`, `acceptBridgedConnectHaiku`):
 - When one side's ports are all gone, the bridge is taken down and the other
   side's ports get `onDisconnect`.
 
+Verified on the X399 (24 Oct, xconn106 build): `onConnectExternal` got the
+port with the sender's ID; "ping 1" and "ping 2", posted right after
+`connect`, were answered; after "bye" the receiver disconnected and the
+sender's `onDisconnect` fired. A port to the closed receiver disconnected at
+once, but without setting `runtime.lastError` in `onDisconnect` (Chrome sets
+"Could not establish connection. Receiving end does not exist."; the error is
+reported to the console instead).
+
 ## Fixture
 
 `tests/fixtures/extensions/external-messaging/`: `receiver` (key fixes its ID,
