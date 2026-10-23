@@ -137,7 +137,10 @@ the copy does not get the original's back/forward list.
 which, from `WebPageProxy::createNewPage()` (links with `target`,
 `window.open()`) and from `tabs.create()` with `openerTabId` (and so
 `tabs.duplicate()`), while both pages are open. A tab reports its opener's
-identifier when the extension can see the opener.
+identifier when the extension can see the opener. Verified on the X399 (24 Oct,
+opener106 build): a `target="_blank"` tab reported its page's tab as opener,
+`tabs.duplicate()`'s copy reported the original, and tabs the browser opened
+itself reported none.
 
 Verified on the X399 (23 Oct, zoom106 build 538d837) with
 `tests/fixtures/extensions/tab-zoom`: `getZoom` 1, then 1.5 after
