@@ -172,6 +172,17 @@ accepted and changes nothing, since the active tab stays highlighted, as in
 Chrome. It used to reject. Verified on the X399 (24 Oct, hl106 build): the
 update resolved and the tab stayed active and highlighted.
 
+## Window geometry (#106)
+
+Windows report `left`, `top`, `width` and `height`: the browser reports each
+window's frame (screen pixels, without the window border) with
+`BWebKitContext::SetBrowserWindowFrame()` when it publishes its tabs and when
+the window moves or resizes. `windows.update()` with any of them sends
+`B_WEBKIT_BROWSER_SET_WINDOW_FRAME` (missing members are NaN and kept); the
+browser moves and resizes the window within its size limits. `windows.create()`
+still ignores geometry, and `windows.onBoundsChanged` is not fired. Fixture:
+`tests/fixtures/extensions/window-geometry` (open `https://example.com/?geometry`).
+
 ## Duplicate (#106)
 
 `tabs.duplicate()` opens a new tab at the original's address, after it (or at
@@ -198,8 +209,7 @@ the range error.
 
 `tabs.move`,
 `tabs.toggleReaderMode`, `tabs.captureVisibleTab`, `tabs.getSelected`,
-`tabs.onMoved`, `openerTabId` on `tabs.update`, window geometry
-(`left/top/width/height` are validated and dropped), `maximized`/`fullscreen`
+`tabs.onMoved`, `openerTabId` on `tabs.update`, geometry in `windows.create`, `maximized`/`fullscreen`
 in Summit, `scripting` in the main world, and real
 native messaging hosts. Navigating an ordinary tab to an extension page (or the
 reverse) is refused by Summit because the two use different view types.

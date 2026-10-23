@@ -80244,10 +80244,10 @@ index 1b2c6a3f188d1c0063753c2c46e1ba2d5446f244..2febefa22dad34aaa2099ac1e101f3c1
      std::optional<bool> muted;
 diff --git a/Source/WebKit/Shared/Extensions/WebExtensionTabCommandParser.cpp b/Source/WebKit/Shared/Extensions/WebExtensionTabCommandParser.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..5a5647388b92232cb6467acae2b40fb4b14da6ab
+index 0000000000000000000000000000000000000000..6432aa028b04c7400320005bd9265ff57eb70db8
 --- /dev/null
 +++ b/Source/WebKit/Shared/Extensions/WebExtensionTabCommandParser.cpp
-@@ -0,0 +1,410 @@
+@@ -0,0 +1,419 @@
 +/*
 + * Copyright (C) 2022-2024 Apple Inc. All rights reserved.
 + *
@@ -80280,6 +80280,7 @@ index 0000000000000000000000000000000000000000..5a5647388b92232cb6467acae2b40fb4
 +#include "WebExtensionFrameIdentifier.h"
 +#include "WebExtensionUtilities.h"
 +#include <cmath>
++#include <limits>
 +#include <wtf/UUID.h>
 +
 +namespace WebKit {
@@ -80563,14 +80564,22 @@ index 0000000000000000000000000000000000000000..5a5647388b92232cb6467acae2b40fb4
 +        parameters.focused = **focused;
 +
 +    bool hasFrame = false;
++    double frame[4];
++    int index = 0;
 +    for (auto key : { "left"_s, "top"_s, "width"_s, "height"_s }) {
 +        auto value = numberMember(object, key);
 +        if (!value)
 +            return makeUnexpected(value.error());
 +        hasFrame |= value->has_value();
++        frame[index++] = value->value_or(std::numeric_limits<double>::quiet_NaN());
 +    }
 +    if (hasFrame && parameters.state && *parameters.state != WebExtensionWindow::State::Normal)
 +        return invalid(sourceKey, "when 'top', 'left', 'width', or 'height' are specified, 'state' must specify 'normal'"_s);
++    if ((!std::isnan(frame[2]) && frame[2] < 1) || (!std::isnan(frame[3]) && frame[3] < 1))
++        return invalid(sourceKey, "'width' and 'height' must be positive"_s);
++    // Unspecified members are NaN: the window keeps them.
++    if (hasFrame)
++        parameters.frame = WebCore::DoubleRect({ frame[0], frame[1] }, { frame[2], frame[3] });
 +    return { };
 +}
 +
@@ -81965,6 +81974,32 @@ index 0000000000000000000000000000000000000000..ae77185b54c4197c81349f5c763212ce
 +
 +}
 +#endif
+diff --git a/Source/WebKit/Shared/Extensions/WebExtensionWindow.serialization.in b/Source/WebKit/Shared/Extensions/WebExtensionWindow.serialization.in
+index f92449e928171652335a82a33028a371127e1266..481168a285f64bcd95d8e9674ebf6834853f25b1 100644
+--- a/Source/WebKit/Shared/Extensions/WebExtensionWindow.serialization.in
++++ b/Source/WebKit/Shared/Extensions/WebExtensionWindow.serialization.in
+@@ -32,7 +32,7 @@ struct WebKit::WebExtensionWindowParameters {
+ 
+     std::optional<Vector<WebKit::WebExtensionTabParameters>> tabs;
+ 
+-#if PLATFORM(COCOA)
++#if PLATFORM(COCOA) || PLATFORM(HAIKU)
+     std::optional<WebCore::DoubleRect> frame;
+ #endif
+ 
+diff --git a/Source/WebKit/Shared/Extensions/WebExtensionWindowParameters.h b/Source/WebKit/Shared/Extensions/WebExtensionWindowParameters.h
+index 22cf8229b21e9131e12ae213f39ad7017399ff10..87fd2fc14362cdfdcc87e688ccdbec64d0b4d338 100644
+--- a/Source/WebKit/Shared/Extensions/WebExtensionWindowParameters.h
++++ b/Source/WebKit/Shared/Extensions/WebExtensionWindowParameters.h
+@@ -43,7 +43,7 @@ struct WebExtensionWindowParameters {
+ 
+     std::optional<Vector<WebExtensionTabParameters>> tabs;
+ 
+-#if PLATFORM(COCOA)
++#if PLATFORM(COCOA) || PLATFORM(HAIKU)
+     std::optional<WebCore::DoubleRect> frame;
+ #endif
+ 
 diff --git a/Source/WebKit/Shared/Extensions/WebExtensionWindowQueryParser.cpp b/Source/WebKit/Shared/Extensions/WebExtensionWindowQueryParser.cpp
 new file mode 100644
 index 0000000000000000000000000000000000000000..7ded5959169d34ca20177e7a6ab8bd60d2c2105a
@@ -84681,10 +84716,10 @@ index 0000000000000000000000000000000000000000..574ed16658f0c14b1aa2e63208e990b8
 +#define WEBKIT_ENGINE_VERSION_HAIKU "@WebKit_HAIKU_MAJOR_VERSION@.@WebKit_HAIKU_MINOR_VERSION@.@WebKit_HAIKU_TINY_VERSION@"
 diff --git a/Source/WebKit/UIProcess/API/haiku/WebKitContext.cpp b/Source/WebKit/UIProcess/API/haiku/WebKitContext.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..af01092762602f8b48169b622c7b18019f2fc862
+index 0000000000000000000000000000000000000000..9e9fa7eb3b8f9a9d0bc3f49bd45ced2dcea772e2
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/API/haiku/WebKitContext.cpp
-@@ -0,0 +1,1075 @@
+@@ -0,0 +1,1084 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#include "config.h"
@@ -85385,6 +85420,15 @@ index 0000000000000000000000000000000000000000..af01092762602f8b48169b622c7b1801
 +    });
 +}
 +
++void BWebKitContext::SetBrowserWindowFrame(const BMessenger& window, BRect frame)
++{
++    if (m_status != B_OK || !window.IsValid() || !frame.IsValid())
++        return;
++    WTF::RunLoop::mainSingleton().dispatch([context = m_context, window, frame] {
++        context->browserTabs()->setFrame(window, frame);
++    });
++}
++
 +void BWebKitContext::AllowServerCertificate(const char* host, const char* sha256)
 +{
 +    if (m_status != B_OK || !host || !*host || !sha256 || !*sha256)
@@ -85762,10 +85806,10 @@ index 0000000000000000000000000000000000000000..af01092762602f8b48169b622c7b1801
 +}
 diff --git a/Source/WebKit/UIProcess/API/haiku/WebKitContext.h b/Source/WebKit/UIProcess/API/haiku/WebKitContext.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..42809c711e0189040d44eed62eb18f18da426347
+index 0000000000000000000000000000000000000000..9477a0778c23177a33391ef522f0aff55c7ea647
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/API/haiku/WebKitContext.h
-@@ -0,0 +1,465 @@
+@@ -0,0 +1,473 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#pragma once
@@ -85851,6 +85895,9 @@ index 0000000000000000000000000000000000000000..42809c711e0189040d44eed62eb18f18
 +//                  The host zooms the tab as its own zoom commands would.
 +//   SET_PINNED     view, window, pinned (bool). The host pins or unpins the
 +//                  tab and reports it with SetBrowserTabPinned.
++//   SET_WINDOW_FRAME  window, left, top, width, height (double; NaN keeps
++//                  that member). The host moves or resizes the window and
++//                  reports the result with SetBrowserWindowFrame.
 +// Answer every command exactly once with RespondToBrowserCommand, after the
 +// change is visible through SetBrowserWindowTabs. CANCELLED (identifier only)
 +// tells the host the engine stopped waiting: the deadline passed, the extension
@@ -85874,7 +85921,8 @@ index 0000000000000000000000000000000000000000..42809c711e0189040d44eed62eb18f18
 +    B_WEBKIT_BROWSER_SET_WINDOW_STATE,
 +    B_WEBKIT_BROWSER_MOVE_TAB,
 +    B_WEBKIT_BROWSER_SET_ZOOM,
-+    B_WEBKIT_BROWSER_SET_PINNED
++    B_WEBKIT_BROWSER_SET_PINNED,
++    B_WEBKIT_BROWSER_SET_WINDOW_FRAME
 +};
 +
 +// Site permissions: what pages may ask the user for, and the services that
@@ -85970,6 +86018,10 @@ index 0000000000000000000000000000000000000000..42809c711e0189040d44eed62eb18f18
 +    // Whether a tab is pinned in the browser (extensions' Tab.pinned). Any
 +    // thread; a closed view is ignored.
 +    void SetBrowserTabPinned(BWebKitView*, bool pinned);
++    // A browser window's frame in screen coordinates (extensions'
++    // Window.left/top/width/height). Report it when the window is shown,
++    // moved or resized. Any thread.
++    void SetBrowserWindowFrame(const BMessenger& window, BRect frame);
 +
 +    // Configure on the application thread. A local listener receives
 +    // B_WEBKIT_BROWSER_COMMAND requests; an invalid messenger clears it and
@@ -97103,10 +97155,18 @@ index 0000000000000000000000000000000000000000..4e033e185f8037949a47bf5ed7ca4d54
 +
 +#endif // ENABLE(WK_WEB_EXTENSIONS)
 diff --git a/Source/WebKit/UIProcess/Extensions/WebExtensionWindow.h b/Source/WebKit/UIProcess/Extensions/WebExtensionWindow.h
-index ff0fa9cab59b530b8b46c0a1e83b15a31712f123..e84ad27243e34b5e8a635b437b18d7b96d7fa354 100644
+index ff0fa9cab59b530b8b46c0a1e83b15a31712f123..cd54593d15970435ffe32c9dc987d209c6c040c5 100644
 --- a/Source/WebKit/UIProcess/Extensions/WebExtensionWindow.h
 +++ b/Source/WebKit/UIProcess/Extensions/WebExtensionWindow.h
-@@ -76,6 +76,11 @@ public:
+@@ -28,6 +28,7 @@
+ #if ENABLE(WK_WEB_EXTENSIONS)
+ 
+ #include "WebExtensionError.h"
++#include <WebCore/DoubleRect.h>
+ #include "WebExtensionWindowIdentifier.h"
+ #include "WebPageProxyIdentifier.h"
+ #include <wtf/Identified.h>
+@@ -76,6 +77,11 @@ public:
      }
  
      explicit WebExtensionWindow(const WebExtensionContext&, WKWebExtensionWindow*);
@@ -97118,7 +97178,18 @@ index ff0fa9cab59b530b8b46c0a1e83b15a31712f123..e84ad27243e34b5e8a635b437b18d7b9
  
      enum class Type : uint8_t {
          Normal,
-@@ -149,6 +154,9 @@ public:
+@@ -123,6 +129,10 @@ public:
+     bool isFocused() const;
+     bool isFrontmost() const;
+     void focus(CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
++#if PLATFORM(HAIKU)
++    // left, top, width, height in screen pixels; NaN keeps a member.
++    void setFrameHaiku(WebCore::DoubleRect, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
++#endif
+ 
+     bool isPrivate() const;
+ 
+@@ -149,6 +159,9 @@ public:
  
  private:
      WeakPtr<WebExtensionContext> m_extensionContext;
@@ -102218,10 +102289,10 @@ index 0000000000000000000000000000000000000000..ef935e9aa0104dc22308026565130ac3
 +#endif // ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
 diff --git a/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextAPITabCommandsHaiku.cpp b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextAPITabCommandsHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..90bc7eacd792efea5835e51356d0dabf9cd383b2
+index 0000000000000000000000000000000000000000..c00dd86face56582cc0a9efcc4972935044ee88c
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextAPITabCommandsHaiku.cpp
-@@ -0,0 +1,683 @@
+@@ -0,0 +1,694 @@
 +/*
 + * Copyright (C) 2023-2024 Apple Inc. All rights reserved.
 + *
@@ -102875,19 +102946,30 @@ index 0000000000000000000000000000000000000000..90bc7eacd792efea5835e51356d0dabf
 +            return;
 +        }
 +
-+        updateFocus(window, updateParameters, [window, completionHandler = WTF::move(completionHandler)](std::expected<void, WebExtensionError>&& focusResult) mutable {
-+            if (!focusResult) {
-+                completionHandler(makeUnexpected(focusResult.error()));
++        auto continueWithFocus = [window, updateParameters, updateFocus = WTF::move(updateFocus), completionHandler = WTF::move(completionHandler)](std::expected<void, WebExtensionError>&& frameResult) mutable {
++            if (!frameResult) {
++                completionHandler(makeUnexpected(frameResult.error()));
 +                return;
 +            }
++            updateFocus(window, updateParameters, [window, completionHandler = WTF::move(completionHandler)](std::expected<void, WebExtensionError>&& focusResult) mutable {
++                if (!focusResult) {
++                    completionHandler(makeUnexpected(focusResult.error()));
++                    return;
++                }
 +
-+            if (!window->isOpen() || !window->extensionHasAccess()) {
-+                completionHandler(toWebExtensionError(apiName, nullString(), "window not found"_s));
-+                return;
-+            }
++                if (!window->isOpen() || !window->extensionHasAccess()) {
++                    completionHandler(toWebExtensionError(apiName, nullString(), "window not found"_s));
++                    return;
++                }
 +
-+            completionHandler(window->parameters());
-+        });
++                completionHandler(window->parameters());
++            });
++        };
++        // Geometry after the state ('normal' is required with it), before focus.
++        if (updateParameters.frame)
++            window->setFrameHaiku(*updateParameters.frame, WTF::move(continueWithFocus));
++        else
++            continueWithFocus({ });
 +    });
 +}
 +
@@ -110933,10 +111015,10 @@ index 0000000000000000000000000000000000000000..33513664e83e2f9b8cae80550e474ac2
 +#endif // ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
 diff --git a/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionTabCommandsHaiku.cpp b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionTabCommandsHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..61ea1e156fb3293f16e5fd888ac499d09e324d68
+index 0000000000000000000000000000000000000000..8744cc44a7354f3983ba0cee7d768cd7cef77a3f
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionTabCommandsHaiku.cpp
-@@ -0,0 +1,277 @@
+@@ -0,0 +1,285 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#include "config.h"
@@ -111198,6 +111280,14 @@ index 0000000000000000000000000000000000000000..61ea1e156fb3293f16e5fd888ac499d0
 +            break;
 +        }
 +        return message.AddString("state", name) == B_OK;
++    }, WTF::move(completion));
++}
++
++void WebExtensionWindow::setFrameHaiku(WebCore::DoubleRect frame, VoidCompletion&& completion)
++{
++    sendWindowCommand(*this, B_WEBKIT_BROWSER_SET_WINDOW_FRAME, "windows.update()"_s, [frame](BMessage& message) {
++        return message.AddDouble("left", frame.location().x()) == B_OK && message.AddDouble("top", frame.location().y()) == B_OK
++            && message.AddDouble("width", frame.size().width()) == B_OK && message.AddDouble("height", frame.size().height()) == B_OK;
 +    }, WTF::move(completion));
 +}
 +
@@ -111718,10 +111808,10 @@ index 0000000000000000000000000000000000000000..769a2d9242a9a3966bbf75bfc378522e
 +#endif // ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
 diff --git a/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionWindowHaiku.cpp b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionWindowHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..d3fe26ed95a984bb5e0373bbbec7c96d3406617f
+index 0000000000000000000000000000000000000000..8da1b845da1300f7c38906d661aa9fb13e42b5db
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionWindowHaiku.cpp
-@@ -0,0 +1,134 @@
+@@ -0,0 +1,141 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#include "config.h"
@@ -111842,6 +111932,13 @@ index 0000000000000000000000000000000000000000..d3fe26ed95a984bb5e0373bbbec7c96d
 +        return result;
 +    result.focused = isFocused();
 +    result.privateBrowsing = isPrivate();
++    if (RefPtr context = m_extensionContext.get()) {
++        if (RefPtr controller = context->extensionController()) {
++            auto window = controller->nativeBrowserTabs()->window(m_nativeWindowIdentifier);
++            if (auto frame = window ? controller->nativeBrowserTabs()->frame(window->messenger) : std::nullopt)
++                result.frame = WebCore::DoubleRect({ frame->left, frame->top }, { frame->Width() + 1, frame->Height() + 1 });
++        }
++    }
 +    if (populateTabs == PopulateTabs::Yes) {
 +        Vector<WebExtensionTabParameters> parameters;
 +        for (auto& tab : tabs()) {
@@ -114388,10 +114485,10 @@ index 0000000000000000000000000000000000000000..308e29a9828a8db24fb9a796881ea165
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/BrowserTabRegistryHaiku.cpp b/Source/WebKit/UIProcess/haiku/BrowserTabRegistryHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..011dd51f451b6ed7f1230bf2fc2e3b95f0872083
+index 0000000000000000000000000000000000000000..99456897ea8804fabc28040c43d91bd46818a412
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/BrowserTabRegistryHaiku.cpp
-@@ -0,0 +1,163 @@
+@@ -0,0 +1,181 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#include "config.h"
@@ -114485,6 +114582,24 @@ index 0000000000000000000000000000000000000000..011dd51f451b6ed7f1230bf2fc2e3b95
 +    return identifier;
 +}
 +
++void BrowserTabRegistryHaiku::setFrame(const BMessenger& window, BRect frame)
++{
++    ASSERT(isMainThread());
++    // Forget closed windows' frames.
++    m_frames.removeAllMatching([&](auto& entry) { return entry.first == window || !entry.first.IsValid(); });
++    m_frames.append({ window, frame });
++}
++
++std::optional<BRect> BrowserTabRegistryHaiku::frame(const BMessenger& window) const
++{
++    ASSERT(isMainThread());
++    for (auto& entry : m_frames) {
++        if (entry.first == window)
++            return entry.second;
++    }
++    return std::nullopt;
++}
++
 +void BrowserTabRegistryHaiku::setPinned(WebPageProxyIdentifier identifier, bool pinned)
 +{
 +    ASSERT(isMainThread());
@@ -114557,16 +114672,17 @@ index 0000000000000000000000000000000000000000..011dd51f451b6ed7f1230bf2fc2e3b95
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/BrowserTabRegistryHaiku.h b/Source/WebKit/UIProcess/haiku/BrowserTabRegistryHaiku.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..ef4e2b8a7d53119d5d179c3a9ba9f6cc81a90263
+index 0000000000000000000000000000000000000000..e47cf8b5cb6f57d24a9e64d0c8afca1a854142ec
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/BrowserTabRegistryHaiku.h
-@@ -0,0 +1,67 @@
+@@ -0,0 +1,72 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#pragma once
 +
 +#include "WebPageProxyIdentifier.h"
 +#include <Messenger.h>
++#include <Rect.h>
 +#include <functional>
 +#include <SupportDefs.h>
 +#include <wtf/Vector.h>
@@ -114611,6 +114727,9 @@ index 0000000000000000000000000000000000000000..ef4e2b8a7d53119d5d179c3a9ba9f6cc
 +    void setPinnedObserver(PinnedObserver observer) { m_pinnedObserver = WTF::move(observer); }
 +    void setPinned(WebPageProxyIdentifier, bool pinned);
 +    bool isPinned(WebPageProxyIdentifier identifier) const { return m_pinnedPages.contains(identifier); }
++    // Window frames (screen coordinates) as the browser reports them.
++    void setFrame(const BMessenger& window, BRect frame);
++    std::optional<BRect> frame(const BMessenger& window) const;
 +
 +    Vector<Window> windows() const;
 +    std::optional<Window> window(uint64_t) const;
@@ -114622,6 +114741,7 @@ index 0000000000000000000000000000000000000000..ef4e2b8a7d53119d5d179c3a9ba9f6cc
 +    Observer m_observer;
 +    PinnedObserver m_pinnedObserver;
 +    Vector<WebPageProxyIdentifier> m_pinnedPages;
++    Vector<std::pair<BMessenger, BRect>> m_frames;
 +    Vector<Window> m_windows;
 +    std::optional<uint64_t> m_focusedWindow;
 +    uint64_t m_nextWindowIdentifier { 1 };
@@ -143893,10 +144013,10 @@ index 0000000000000000000000000000000000000000..4a70ba007eb5858d0e26eb8ab5e4438d
 +#endif // ENABLE(WK_WEB_EXTENSIONS)
 diff --git a/Source/WebKit/WebProcess/Extensions/Bindings/JSWebExtensionWindowParameters.cpp b/Source/WebKit/WebProcess/Extensions/Bindings/JSWebExtensionWindowParameters.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..294b0dce6bfcf6618ea5ecdce88c105616bfc9b0
+index 0000000000000000000000000000000000000000..4058e83ae8f4d2f74ce3fc5cfaef7efa224ca5df
 --- /dev/null
 +++ b/Source/WebKit/WebProcess/Extensions/Bindings/JSWebExtensionWindowParameters.cpp
-@@ -0,0 +1,51 @@
+@@ -0,0 +1,57 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +#include "config.h"
 +#include "JSWebExtensionWindowParameters.h"
@@ -143927,6 +144047,12 @@ index 0000000000000000000000000000000000000000..294b0dce6bfcf6618ea5ecdce88c1056
 +        case WebExtensionWindow::State::Maximized: set("state"_s, stringValue("maximized"_s)); break;
 +        case WebExtensionWindow::State::Fullscreen: set("state"_s, stringValue("fullscreen"_s)); break;
 +        }
++    }
++    if (parameters.frame) {
++        set("left"_s, JSValueMakeNumber(context, parameters.frame->location().x()));
++        set("top"_s, JSValueMakeNumber(context, parameters.frame->location().y()));
++        set("width"_s, JSValueMakeNumber(context, parameters.frame->size().width()));
++        set("height"_s, JSValueMakeNumber(context, parameters.frame->size().height()));
 +    }
 +    if (parameters.focused)
 +        set("focused"_s, JSValueMakeBoolean(context, *parameters.focused));

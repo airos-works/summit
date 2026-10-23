@@ -1897,12 +1897,18 @@ void BrowserWindow::FrameMoved(BPoint where)
 {
     BrowserWindowBase::FrameMoved(where);
     HideSuggestions();
+#if SUMMIT_MODERN_WEBKIT
+    fWebKitContext->SetBrowserWindowFrame(BMessenger(this), Frame());
+#endif
 }
 
 void BrowserWindow::FrameResized(float width, float height)
 {
     BrowserWindowBase::FrameResized(width, height);
     HideSuggestions();
+#if SUMMIT_MODERN_WEBKIT
+    fWebKitContext->SetBrowserWindowFrame(BMessenger(this), Frame());
+#endif
 }
 
 void BrowserWindow::AddressModified()
@@ -2124,6 +2130,8 @@ void BrowserWindow::SyncBrowserWindow()
         views.push_back(tab.view);
     auto* active = ActiveTab();
     fWebKitContext->SetBrowserWindowTabs(BMessenger(this), views, active ? active->view : nullptr, IsActive());
+    // Extensions' Window.left/top/width/height.
+    if (!views.empty()) fWebKitContext->SetBrowserWindowFrame(BMessenger(this), Frame());
     // Registration is dispatched to the application looper. A queued window
     // invalidation also works during construction on the application thread.
     if (fExtensionsEnabled) PostMessage(B_WEBKIT_EXTENSION_ACTIONS_CHANGED);
@@ -2275,6 +2283,25 @@ void BrowserWindow::BrowserCommand(const BMessage& message)
             Activate(true);
             RespondToCommand(identifier, B_OK);
             return;
+        case B_WEBKIT_BROWSER_SET_WINDOW_FRAME: {
+            // windows.update({left, top, width, height}); NaN keeps a member.
+            if (IsMinimized()) Minimize(false);
+            BRect frame = Frame();
+            const double left = message.GetDouble("left", NAN), top = message.GetDouble("top", NAN);
+            const double width = message.GetDouble("width", NAN), height = message.GetDouble("height", NAN);
+            if (!std::isnan(left) || !std::isnan(top))
+                MoveTo(std::isnan(left) ? frame.left : static_cast<float>(left), std::isnan(top) ? frame.top : static_cast<float>(top));
+            if (!std::isnan(width) || !std::isnan(height)) {
+                float minWidth, maxWidth, minHeight, maxHeight;
+                GetSizeLimits(&minWidth, &maxWidth, &minHeight, &maxHeight);
+                const float w = std::isnan(width) ? frame.Width() : std::clamp(static_cast<float>(width) - 1, minWidth, maxWidth);
+                const float h = std::isnan(height) ? frame.Height() : std::clamp(static_cast<float>(height) - 1, minHeight, maxHeight);
+                ResizeTo(w, h);
+            }
+            fWebKitContext->SetBrowserWindowFrame(BMessenger(this), Frame());
+            RespondToCommand(identifier, B_OK);
+            return;
+        }
         case B_WEBKIT_BROWSER_SET_WINDOW_STATE: {
             const std::string state = message.GetString("state", "");
             if (state == "minimized") Minimize(true);
