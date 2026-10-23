@@ -93689,7 +93689,7 @@ index 65b9841a9d4469a699b92c47435fecaaaa034d77..0361d615767169f4af1a6c192853c93e
  
      OptionSet<ModifierFlags> modifierFlags() const { return !m_activationKey.isEmpty() ? m_modifierFlags : OptionSet<ModifierFlags> { }; }
 diff --git a/Source/WebKit/UIProcess/Extensions/WebExtensionContext.cpp b/Source/WebKit/UIProcess/Extensions/WebExtensionContext.cpp
-index 8947f24ec9866c39f206aab464ec21c5d4213b95..4a25fb9c13f242120e3c3111695273c291b90a46 100644
+index 8947f24ec9866c39f206aab464ec21c5d4213b95..b36f80023077ec3bc5680f7214a823a4221019a0 100644
 --- a/Source/WebKit/UIProcess/Extensions/WebExtensionContext.cpp
 +++ b/Source/WebKit/UIProcess/Extensions/WebExtensionContext.cpp
 @@ -34,11 +34,24 @@
@@ -94298,12 +94298,14 @@ index 8947f24ec9866c39f206aab464ec21c5d4213b95..4a25fb9c13f242120e3c3111695273c2
          for (auto& styleSheetPath : injectedContentData.styleSheetPaths) {
              auto styleSheetStringResult = extension->resourceStringForPath(styleSheetPath, WebExtension::CacheResult::Yes);
              if (!styleSheetStringResult) {
-@@ -1615,6 +2037,16 @@ bool WebExtensionContext::purgeMatchedRulesFromBefore(const WallTime& startTime)
+@@ -1615,6 +2037,18 @@ bool WebExtensionContext::purgeMatchedRulesFromBefore(const WallTime& startTime)
  
  void WebExtensionContext::addDeclarativeNetRequestRules(WebUserContentControllerProxy& controllerProxy)
  {
 +#if PLATFORM(HAIKU)
-+    if (!isLoaded() || !m_nativeDNRRules || !hasPermission(WebExtensionPermission::declarativeNetRequest()))
++    // Host-access-only extensions (Tampermonkey, 1Password) included: their
++    // rules were compiled but never reached a page.
++    if (!isLoaded() || !m_nativeDNRRules || !nativeDeclarativeNetRequestAllowed())
 +        return;
 +    for (Ref controller : userContentControllers()) {
 +        if (controller.ptr() == &controllerProxy) {
@@ -94315,7 +94317,7 @@ index 8947f24ec9866c39f206aab464ec21c5d4213b95..4a25fb9c13f242120e3c3111695273c2
      API::ContentRuleListStore::defaultStoreSingleton().lookupContentRuleListFile(declarativeNetRequestContentRuleListFilePath(), uniqueIdentifier().isolatedCopy(), [this, protectedThis = Ref { *this }, controllerProxy = Ref { controllerProxy }](RefPtr<API::ContentRuleList> ruleList, std::error_code) {
          if (!ruleList)
              return;
-@@ -1625,10 +2057,17 @@ void WebExtensionContext::addDeclarativeNetRequestRules(WebUserContentController
+@@ -1625,10 +2059,17 @@ void WebExtensionContext::addDeclarativeNetRequestRules(WebUserContentController
  
          controllerProxy->addContentRuleList(*ruleList, m_baseURL);
      });
@@ -94325,7 +94327,7 @@ index 8947f24ec9866c39f206aab464ec21c5d4213b95..4a25fb9c13f242120e3c3111695273c2
  void WebExtensionContext::addDeclarativeNetRequestRulesToPrivateUserContentControllers()
  {
 +#if PLATFORM(HAIKU)
-+    if (!isLoaded() || !hasAccessToPrivateData() || !m_nativeDNRRules || !hasPermission(WebExtensionPermission::declarativeNetRequest()))
++    if (!isLoaded() || !hasAccessToPrivateData() || !m_nativeDNRRules || !nativeDeclarativeNetRequestAllowed())
 +        return;
 +    for (Ref controller : extensionController()->allPrivateUserContentControllers())
 +        controller->addContentRuleList(*m_nativeDNRRules, m_baseURL);
@@ -94333,7 +94335,7 @@ index 8947f24ec9866c39f206aab464ec21c5d4213b95..4a25fb9c13f242120e3c3111695273c2
      API::ContentRuleListStore::defaultStoreSingleton().lookupContentRuleListFile(declarativeNetRequestContentRuleListFilePath(), uniqueIdentifier().isolatedCopy(), [this, protectedThis = Ref { *this }](RefPtr<API::ContentRuleList> ruleList, std::error_code) {
          if (!ruleList)
              return;
-@@ -1640,6 +2079,7 @@ void WebExtensionContext::addDeclarativeNetRequestRulesToPrivateUserContentContr
+@@ -1640,6 +2081,7 @@ void WebExtensionContext::addDeclarativeNetRequestRulesToPrivateUserContentContr
          for (Ref controller : extensionController()->allPrivateUserContentControllers())
              controller->addContentRuleList(*ruleList, m_baseURL);
      });
@@ -94341,7 +94343,7 @@ index 8947f24ec9866c39f206aab464ec21c5d4213b95..4a25fb9c13f242120e3c3111695273c2
  }
  
  static HashMap<WebExtensionContextIdentifier, WeakRef<WebExtensionContext>>& NODELETE webExtensionContexts()
-@@ -1660,7 +2100,15 @@ WebExtensionContext::WebExtensionContext()
+@@ -1660,7 +2102,15 @@ WebExtensionContext::WebExtensionContext()
  }
  
  #if !USE(GLIB)
@@ -94358,7 +94360,7 @@ index 8947f24ec9866c39f206aab464ec21c5d4213b95..4a25fb9c13f242120e3c3111695273c2
  #endif
  
  WebExtensionContextIdentifier WebExtensionContext::privilegedIdentifier() const
-@@ -1686,6 +2134,9 @@ WebExtensionContextParameters WebExtensionContext::parameters(IncludePrivilegedI
+@@ -1686,6 +2136,9 @@ WebExtensionContextParameters WebExtensionContext::parameters(IncludePrivilegedI
          includePrivilegedIdentifier == IncludePrivilegedIdentifier::Yes ? std::optional(privilegedIdentifier()) : std::nullopt,
          baseURL(),
          uniqueIdentifier(),
@@ -94368,7 +94370,7 @@ index 8947f24ec9866c39f206aab464ec21c5d4213b95..4a25fb9c13f242120e3c3111695273c2
          unsupportedAPIs(),
          m_grantedPermissions,
          extension->serializeLocalization(),
-@@ -1798,9 +2249,17 @@ void WebExtensionContext::loadBackgroundContent(CompletionHandler<void(RefPtr<AP
+@@ -1798,9 +2251,17 @@ void WebExtensionContext::loadBackgroundContent(CompletionHandler<void(RefPtr<AP
          return;
      }
  
@@ -94389,7 +94391,7 @@ index 8947f24ec9866c39f206aab464ec21c5d4213b95..4a25fb9c13f242120e3c3111695273c2
      });
  }
  
-@@ -2003,6 +2462,128 @@ Ref<WebExtensionRegisteredScriptsSQLiteStore> WebExtensionContext::registeredCon
+@@ -2003,6 +2464,128 @@ Ref<WebExtensionRegisteredScriptsSQLiteStore> WebExtensionContext::registeredCon
      return *m_registeredContentScriptsStorage;
  }
  

@@ -79,7 +79,7 @@ Then install Tampermonkey (Chrome Web Store build), add a script with
 
 ## Tampermonkey
 
-Tampermonkey 5.5.1 (Chrome Web Store build) needed two more fixes:
+Tampermonkey 5.5.1 (Chrome Web Store build) needed three more fixes:
 
 - the service worker startup above, and
 - **`regexFilter` with alternatives.** It installs scripts by redirecting
@@ -94,6 +94,14 @@ Tampermonkey 5.5.1 (Chrome Web Store build) needed two more fixes:
   n - m of `x?`. `regexSubstitution` still matches the expression as written
   (the redirect carries it as `regex-filter`). Alternatives inside a
   quantified group, such as `(a|b)+`, and counts above 32 are still rejected.
+
+- **Host-access-only rules.** Tampermonkey asks for
+  `declarativeNetRequestWithHostAccess`, not `declarativeNetRequest`. Its rules
+  were accepted and compiled, but `WebExtensionContext::addDeclarativeNetRequestRules()`
+  attached a rule list to pages only for `declarativeNetRequest`, so none of
+  them applied. It now uses the same test as the API
+  (`nativeDeclarativeNetRequestAllowed()`: either permission, the second with
+  access to all URLs).
 
 `excludedTabIds` (Tampermonkey uses it to let a tab show a script's source)
 is still unsupported: Summit's rules have no tab conditions.
