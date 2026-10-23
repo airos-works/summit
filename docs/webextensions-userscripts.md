@@ -115,3 +115,13 @@ Tampermonkey 5.5.1 (Chrome Web Store build) needed four more fixes:
 
 `excludedTabIds` (Tampermonkey uses it to let a tab show a script's source)
 is still unsupported: Summit's rules have no tab conditions.
+
+**Status (23 Oct, dnrhost build ce09dcd, laptop):** a `.user.js` link now
+redirects to Tampermonkey's `script_installation.php`, `tabs.onUpdated`
+reports it complete, and Tampermonkey opens its installer (`ask.html`). The
+installer stays blank: its first `runtime.sendMessage` gets no answer.
+Tampermonkey's Chrome build trusts a sender only if its URL starts with
+`chrome-extension://<runtime.id>/` (`T.INTERNAL_PAGE_PROTOCOLS`), and Summit's
+extension pages are `webkit-extension://<uuid>/`. Installing scripts needs the
+`chrome-extension://` alias listed in #106. Until then, scripts can be added
+from Tampermonkey's dashboard (Utilities, or a new script).
