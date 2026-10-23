@@ -126,8 +126,8 @@ tabs follow (`BrowserWindow::SetTabZoom`). Values outside that range throw.
 see (from `WebPageProxy::setPageZoomFactor`), with `zoomSettings`
 `{mode: "automatic", scope: "per-origin"}`, which is how Summit remembers zoom.
 Verified on the X399 (24 Oct, zc106 build): `onZoomChange` fired 1 → 1.5 and
-1.5 → 1 with `automatic/per-origin`. `getZoomSettings`/`setZoomSettings` are
-not implemented. Fixture: `tests/fixtures/extensions/tab-zoom` (open
+1.5 → 1 with `automatic/per-origin`. `getZoomSettings()` reports that mode (default zoom 1); `setZoomSettings()`
+accepts it and rejects any other mode or scope. Fixture: `tests/fixtures/extensions/tab-zoom` (open
 `https://example.com/?zoom`).
 
 ## Pinned tabs (#106)
@@ -142,6 +142,12 @@ Fixture: `tests/fixtures/extensions/tab-pin` (open `https://example.com/?pin`). 
 on the X399 (24 Oct, pin106 build ca81f4b): `pinned=false`, then after
 `update({pinned: true})` an `onUpdated {pinned: true}` and `get`/`query`
 agreeing, then `onUpdated {pinned: false}` after unpinning.
+
+## Reload without the cache (#106)
+
+`tabs.reload({bypassCache: true})` sends `RELOAD_TAB` with `bypass_cache`; the
+browser calls the new `BWebKitView::ReloadFromOrigin()`, which reloads with
+WebCore's `ReloadOption::FromOrigin`.
 
 ## Duplicate (#106)
 
@@ -171,8 +177,7 @@ the range error.
 `tabs.toggleReaderMode`, `tabs.captureVisibleTab`, `tabs.getSelected`,
 `tabs.onMoved`, `openerTabId` on `tabs.update`, window geometry
 (`left/top/width/height` are validated and dropped), `maximized`/`fullscreen`
-in Summit, cache-bypassing reload in Summit (`bypassCache` reloads normally:
-`BWebKitView` has no such call yet), `scripting` in the main world, and real
+in Summit, `scripting` in the main world, and real
 native messaging hosts. Navigating an ordinary tab to an extension page (or the
 reverse) is refused by Summit because the two use different view types.
 

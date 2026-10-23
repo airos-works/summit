@@ -2342,9 +2342,9 @@ void BrowserWindow::BrowserCommand(const BMessage& message)
             return;
         }
         case B_WEBKIT_BROWSER_RELOAD_TAB:
-            // The view has no cache-bypassing reload yet; bypass_cache reloads normally.
             if (!PrepareTabNavigation(*tab)) { RespondToCommand(identifier, B_BUSY, { }, "The tab is closing."); return; }
-            tab->view->Reload();
+            if (message.GetBool("bypass_cache", false)) tab->view->ReloadFromOrigin();
+            else tab->view->Reload();
             RespondToCommand(identifier, B_OK);
             return;
         case B_WEBKIT_BROWSER_GO_BACK: case B_WEBKIT_BROWSER_GO_FORWARD: {

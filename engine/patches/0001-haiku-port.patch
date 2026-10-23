@@ -87000,10 +87000,10 @@ index 0000000000000000000000000000000000000000..d28a6cad6339adf79b155cf974e85bfd
 +
 diff --git a/Source/WebKit/UIProcess/API/haiku/WebKitView.cpp b/Source/WebKit/UIProcess/API/haiku/WebKitView.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..cfed966ea3a8d84ec0317ee4a924ece382b0e531
+index 0000000000000000000000000000000000000000..c63a67bb5f773f6dc25af58f7b1ac241ad347c37
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/API/haiku/WebKitView.cpp
-@@ -0,0 +1,1441 @@
+@@ -0,0 +1,1451 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#include "config.h"
@@ -87613,6 +87613,16 @@ index 0000000000000000000000000000000000000000..cfed966ea3a8d84ec0317ee4a924ece3
 +void BWebKitView::GoBack() { SendCommand(viewBackHaiku); }
 +void BWebKitView::GoForward() { SendCommand(viewForwardHaiku); }
 +void BWebKitView::Reload() { SendCommand(viewReloadHaiku); }
++void BWebKitView::ReloadFromOrigin()
++{
++    if (m_status != B_OK)
++        return;
++    ++m_state->findRequestIdentifier;
++    ++m_state->nativeDropRequest;
++    BMessage message(viewReloadHaiku);
++    message.AddBool("from_origin", true);
++    dispatchViewMessageHaiku(m_state, std::move(message));
++}
 +void BWebKitView::Stop() { SendCommand(viewStopHaiku); }
 +void BWebKitView::ExitFullScreen() { SendCommand(viewExitFullScreenHaiku); }
 +void BWebKitView::CompleteFullScreenRequest(uint64 request, bool accepted)
@@ -88447,10 +88457,10 @@ index 0000000000000000000000000000000000000000..cfed966ea3a8d84ec0317ee4a924ece3
 +}
 diff --git a/Source/WebKit/UIProcess/API/haiku/WebKitView.h b/Source/WebKit/UIProcess/API/haiku/WebKitView.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..ae8c931461d97da0c19756483f2a06a745b140c4
+index 0000000000000000000000000000000000000000..a2cccd2d1f26eca0db1bd658797fabbdd572225a
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/API/haiku/WebKitView.h
-@@ -0,0 +1,440 @@
+@@ -0,0 +1,442 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#pragma once
@@ -88696,6 +88706,8 @@ index 0000000000000000000000000000000000000000..ae8c931461d97da0c19756483f2a06a7
 +    void GoBack();
 +    void GoForward();
 +    void Reload();
++    // Reloads without the cache (Shift-reload; tabs.reload({bypassCache})).
++    void ReloadFromOrigin();
 +    void Stop();
 +    void CompleteFullScreenRequest(uint64 request, bool accepted);
 +    // The host's Escape key or tab switch: ask the DOM fullscreen manager to exit.
@@ -121352,10 +121364,10 @@ index 0000000000000000000000000000000000000000..c9a119d02f85b7c5ad8fe9153bfc9604
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/WebView.cpp b/Source/WebKit/UIProcess/haiku/WebView.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..e5ba78e3ddf4b42f328129fe2422891aee0e3a90
+index 0000000000000000000000000000000000000000..5038797ba8064cde6d64a31a80b3b939a17a22c9
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/WebView.cpp
-@@ -0,0 +1,3096 @@
+@@ -0,0 +1,3099 @@
 +/*
 + * Copyright (C) 2013 Intel Corporation. All rights reserved.
 + *
@@ -123617,7 +123629,10 @@ index 0000000000000000000000000000000000000000..e5ba78e3ddf4b42f328129fe2422891a
 +    case viewReloadHaiku: {
 +        navigationChangedHaiku(m_state);
 +        beginUnidentifiedLoadHaiku(m_state);
-+        RefPtr navigation = m_page->reload({ });
++        OptionSet<WebCore::ReloadOption> options;
++        if (message.GetBool("from_origin", false))
++            options.add(WebCore::ReloadOption::FromOrigin);
++        RefPtr navigation = m_page->reload(options);
 +        trackLoadHaiku(m_state, navigation.get());
 +        rememberNativeNavigationHaiku(*m_state, WTF::move(navigation));
 +        notifyState();
@@ -138914,10 +138929,10 @@ index d7868f1e4addc61cb897e875bab3a9dcf88efd76..641099c3a542b56479e6eecdb50d493c
  } // namespace WebKit
 diff --git a/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPITabs.cpp b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPITabs.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..6375001065f6b9ced97bc32c0e75efbc930a4758
+index 0000000000000000000000000000000000000000..dfc9cd6849385c3695b304031904bd234b1044f0
 --- /dev/null
 +++ b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPITabs.cpp
-@@ -0,0 +1,833 @@
+@@ -0,0 +1,876 @@
 +/*
 + * Copyright (C) 2023 Apple Inc. All rights reserved.
 + *
@@ -139348,6 +139363,49 @@ index 0000000000000000000000000000000000000000..6375001065f6b9ced97bc32c0e75efbc
 +        }, extensionContext().identifier());
 +}
 +
++// Summit has one zoom mode: remembered per site, applied by the browser.
++static Ref<JSON::Object> summitZoomSettings()
++{
++    Ref settings = JSON::Object::create();
++    settings->setString("mode"_s, "automatic"_s);
++    settings->setString("scope"_s, "per-origin"_s);
++    settings->setDouble("defaultZoomFactor"_s, 1);
++    return settings;
++}
++
++void WebExtensionAPITabs::getZoomSettings(double tabID, Ref<WebExtensionCallbackHandler>&& callback, String& exception)
++{
++    // Documentation: https://developer.mozilla.org/docs/Mozilla/Add-ons/WebExtensions/API/tabs/getZoomSettings
++
++    std::optional<WebExtensionTabIdentifier> tab;
++    if (!parseOptionalTabIdentifier(tabID, tab, exception))
++        return;
++    auto context = callback->globalContext();
++    Protected<JSValueRef> value(context, fromJSON(context, RefPtr<JSON::Value> { summitZoomSettings() }));
++    callback->call(value.get());
++}
++
++void WebExtensionAPITabs::setZoomSettings(double tabID, RefPtr<JSON::Value> zoomSettings, Ref<WebExtensionCallbackHandler>&& callback, String& exception)
++{
++    // Documentation: https://developer.mozilla.org/docs/Mozilla/Add-ons/WebExtensions/API/tabs/setZoomSettings
++
++    std::optional<WebExtensionTabIdentifier> tab;
++    if (!parseOptionalTabIdentifier(tabID, tab, exception))
++        return;
++    RefPtr object = zoomSettings ? zoomSettings->asObject() : nullptr;
++    if (!object) {
++        exception = toErrorString(nullString(), "zoomSettings"_s, "an object is expected"_s);
++        return;
++    }
++    auto mode = object->getString("mode"_s);
++    auto scope = object->getString("scope"_s);
++    if ((!mode.isNull() && mode != "automatic"_s) || (!scope.isNull() && scope != "per-origin"_s)) {
++        callback->reportError("tabs.setZoomSettings(): Summit's zoom is always 'automatic' and 'per-origin'."_s);
++        return;
++    }
++    callback->call();
++}
++
 +void WebExtensionAPITabs::setZoom(WebPageProxyIdentifier page, double tabID, double zoomFactor, Ref<WebExtensionCallbackHandler>&& callback, String& exception)
 +{
 +    // Documentation: https://developer.mozilla.org/docs/Mozilla/Add-ons/WebExtensions/API/tabs/setZoom
@@ -139752,10 +139810,10 @@ index 0000000000000000000000000000000000000000..6375001065f6b9ced97bc32c0e75efbc
 +}
 +#endif
 diff --git a/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPITabs.h b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPITabs.h
-index de0fbb5429a8ed531f265a73c467871e082e4977..259e3c32c648bfb830347cf0ae2e78ef3ae4387f 100644
+index de0fbb5429a8ed531f265a73c467871e082e4977..27d8e44aab9d16c175cc93d09f65b570d27fbd9c 100644
 --- a/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPITabs.h
 +++ b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPITabs.h
-@@ -49,15 +49,58 @@ class WebExtensionAPITabs : public WebExtensionAPIObject, public JSWebExtensionW
+@@ -49,15 +49,60 @@ class WebExtensionAPITabs : public WebExtensionAPIObject, public JSWebExtensionW
      WEB_EXTENSION_DECLARE_JS_WRAPPER_CLASS(WebExtensionAPITabs, tabs, tabs);
  
  public:
@@ -139797,6 +139855,8 @@ index de0fbb5429a8ed531f265a73c467871e082e4977..259e3c32c648bfb830347cf0ae2e78ef
 +    void duplicate(double tabID, RefPtr<JSON::Value> properties, Ref<WebExtensionCallbackHandler>&& callback, String& exception);
 +    void getZoom(WebPageProxyIdentifier page, double tabID, Ref<WebExtensionCallbackHandler>&& callback, String& exception);
 +    void setZoom(WebPageProxyIdentifier page, double tabID, double zoomFactor, Ref<WebExtensionCallbackHandler>&& callback, String& exception);
++    void getZoomSettings(double tabID, Ref<WebExtensionCallbackHandler>&& callback, String& exception);
++    void setZoomSettings(double tabID, RefPtr<JSON::Value> zoomSettings, Ref<WebExtensionCallbackHandler>&& callback, String& exception);
 +#endif
 +#if PLATFORM(COCOA)
 +    void getSelected(WebPageProxyIdentifier page, double windowID, Ref<WebExtensionCallbackHandler>&& callback, String& exception);
@@ -139816,7 +139876,7 @@ index de0fbb5429a8ed531f265a73c467871e082e4977..259e3c32c648bfb830347cf0ae2e78ef
      void getSelected(WebPageProxyIdentifier, double windowID, Ref<WebExtensionCallbackHandler>&&, NSString **outExceptionString);
  
      void duplicate(double tabID, NSDictionary *properties, Ref<WebExtensionCallbackHandler>&&, NSString **outExceptionString);
-@@ -83,17 +126,6 @@ public:
+@@ -83,17 +128,6 @@ public:
      void insertCSS(WebPageProxyIdentifier, double tabID, NSDictionary *options, Ref<WebExtensionCallbackHandler>&&, NSString **outExceptionString);
      void removeCSS(WebPageProxyIdentifier, double tabID, NSDictionary *options, Ref<WebExtensionCallbackHandler>&&, NSString **outExceptionString);
  
@@ -139834,7 +139894,7 @@ index de0fbb5429a8ed531f265a73c467871e082e4977..259e3c32c648bfb830347cf0ae2e78ef
  
  private:
      bool parseTabCreateOptions(NSDictionary *, WebExtensionTabParameters&, NSString *sourceKey, NSString **outExceptionString);
-@@ -105,15 +137,20 @@ private:
+@@ -105,15 +139,20 @@ private:
      static bool parseConnectOptions(NSDictionary *, std::optional<String>& name, WebExtensionMessageTargetParameters&, NSString *sourceKey, NSString **outExceptionString);
      static bool parseScriptOptions(NSDictionary *, WebExtensionScriptInjectionParameters&, NSString **outExceptionString);
  
@@ -145299,10 +145359,10 @@ index 866d70a2cdbbe9cfbd525c7be21d6c21db2dfa1a..090b11c6a852e779e830487dcaed3958
      readonly attribute WebExtensionAPIEvent onChanged;
  
 diff --git a/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPITabs.idl b/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPITabs.idl
-index a744e37f5fd4c546a27627a69573d8eeb454312b..1b1fb9f38a8707e55fa4ae87a465bf3bc27eaa06 100644
+index a744e37f5fd4c546a27627a69573d8eeb454312b..e0a248a5444a7f7c34a86e028c4edc25ee570557 100644
 --- a/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPITabs.idl
 +++ b/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPITabs.idl
-@@ -69,42 +69,43 @@ dictionary WebExtensionTabCreateProperties {
+@@ -69,42 +69,45 @@ dictionary WebExtensionTabCreateProperties {
  
  [
      Conditional=WK_WEB_EXTENSIONS,
@@ -145342,6 +145402,8 @@ index a744e37f5fd4c546a27627a69573d8eeb454312b..1b1fb9f38a8707e55fa4ae87a465bf3b
 -    [RaisesException, NeedsPageIdentifier] void getZoom([Optional] double tabID, [Optional, CallbackHandler] function callback);
 -    [RaisesException, NeedsPageIdentifier] void setZoom([Optional] double tabID, double zoomFactor, [Optional, CallbackHandler] function callback);
 +    [Platform=COCOA|HAIKU, RaisesStringException, NeedsPageIdentifier] void getZoom([Optional] double tabID, [Optional, CallbackHandler] function callback);
++    [Platform=HAIKU, RaisesStringException] void getZoomSettings([Optional] double tabID, [Optional, CallbackHandler] function callback);
++    [Platform=HAIKU, RaisesStringException] void setZoomSettings([Optional] double tabID, [JSONValue] any zoomSettings, [Optional, CallbackHandler] function callback);
 +    [Platform=COCOA|HAIKU, RaisesStringException, NeedsPageIdentifier] void setZoom([Optional] double tabID, double zoomFactor, [Optional, CallbackHandler] function callback);
  
 -    [RaisesException, NeedsPageIdentifier] void detectLanguage([Optional] double tabID, [Optional, CallbackHandler] function callback);
@@ -145367,7 +145429,7 @@ index a744e37f5fd4c546a27627a69573d8eeb454312b..1b1fb9f38a8707e55fa4ae87a465bf3b
  
      [ImplementedAs=tabIdentifierNone] readonly attribute double TAB_ID_NONE;
  
-@@ -117,5 +118,6 @@ dictionary WebExtensionTabCreateProperties {
+@@ -117,5 +120,6 @@ dictionary WebExtensionTabCreateProperties {
      readonly attribute WebExtensionAPIEvent onRemoved;
      readonly attribute WebExtensionAPIEvent onReplaced;
      readonly attribute WebExtensionAPIEvent onUpdated;
