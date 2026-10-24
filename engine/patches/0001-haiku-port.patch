@@ -3248,7 +3248,7 @@ index 679b31f339a04bb1a8633f5d8b149701c17b43e5..69cada4c1dfff257dd46b09a01ee0442
  endif ()
  
 diff --git a/Source/WTF/Scripts/Preferences/UnifiedWebPreferences.yaml b/Source/WTF/Scripts/Preferences/UnifiedWebPreferences.yaml
-index b6d135a1282843e5d5c81d4a56a6e6cd4d46379d..53438028082d386e4138dba515a4896751d2d039 100644
+index b6d135a1282843e5d5c81d4a56a6e6cd4d46379d..935a315cb7bc205192864fb05b6723b78638e6df 100644
 --- a/Source/WTF/Scripts/Preferences/UnifiedWebPreferences.yaml
 +++ b/Source/WTF/Scripts/Preferences/UnifiedWebPreferences.yaml
 @@ -522,6 +522,9 @@ AsyncClipboardAPIEnabled:
@@ -3421,6 +3421,29 @@ index b6d135a1282843e5d5c81d4a56a6e6cd4d46379d..53438028082d386e4138dba515a48967
      WebCore: StorageBlockingPolicy::AllowAll
    sharedPreferenceForWebProcess: true
  
+@@ -7089,6 +7127,8 @@ WebCodecsAudioEnabled:
+   humanReadableDescription: "Enable WebCodecs Audio API"
+   condition: ENABLE(WEB_CODECS)
+   defaultValue:
++    # Haiku has no WebCodecs audio codecs yet (WebCodecsHaiku.cpp is video).
++    "PLATFORM(HAIKU)": false
+     default: true
+     WebKitLegacy: false
+ 
+@@ -7126,11 +7166,13 @@ WebCodecsVideoEnabled:
+   defaultValue:
+     "USE(LIBWEBRTC) && PLATFORM(COCOA)": WebKit::defaultPeerConnectionEnabledAvailable()
+     "USE(GSTREAMER)": true
++    "PLATFORM(HAIKU)": true
+     default: false
+     WebKitLegacy: false
+     WebCore:
+       "PLATFORM(COCOA)": true
+       "USE(GSTREAMER)": true
++      "PLATFORM(HAIKU)": true
+       default: false
+   disableInLockdownMode: true
+   sharedPreferenceForWebProcess: true
 diff --git a/Source/WTF/Scripts/generate-unified-source-bundles.py b/Source/WTF/Scripts/generate-unified-source-bundles.py
 index b05a9e9f30d4f91dad1bad6ae5a29b878ceb9387..f4376e3f7ef35322584ce9086fe83a07642e38c0 100644
 --- a/Source/WTF/Scripts/generate-unified-source-bundles.py
@@ -9955,10 +9978,10 @@ index 0000000000000000000000000000000000000000..48e19a5957df4c1ae60378dd9a84cbe4
 +/* Copyright (C) 2026 Summit contributors. SPDX-License-Identifier: BSD-2-Clause */
 +enum USBTransferStatus { "ok", "stall", "babble" };
 diff --git a/Source/WebCore/PlatformHaiku.cmake b/Source/WebCore/PlatformHaiku.cmake
-index 16a88804a1baa39ccdd9fc2870b6e2524d941298..01070b5e57b7f0fe5592b529d9e9315fcc06b658 100644
+index 16a88804a1baa39ccdd9fc2870b6e2524d941298..49195efbe49baa6dfb3b922f148f1565c6a3ff5b 100644
 --- a/Source/WebCore/PlatformHaiku.cmake
 +++ b/Source/WebCore/PlatformHaiku.cmake
-@@ -1,52 +1,369 @@
+@@ -1,52 +1,370 @@
 +include(platform/Haiku.cmake)
  include(platform/ImageDecoders.cmake)
  include(platform/OpenSSL.cmake)
@@ -10274,6 +10297,7 @@ index 16a88804a1baa39ccdd9fc2870b6e2524d941298..01070b5e57b7f0fe5592b529d9e9315f
 +        platform/mediastream/haiku/HaikuVoiceProcessing.cpp
 +        platform/mediastream/libwebrtc/haiku/LibWebRTCH264DecoderHaiku.cpp
 +        platform/mediastream/libwebrtc/haiku/LibWebRTCHaiku.cpp
++        platform/mediastream/libwebrtc/haiku/WebCodecsHaiku.cpp
 +    )
 +    if (ENABLE_MEDIA_RECORDER)
 +        list(APPEND WebCore_SOURCES
@@ -10334,7 +10358,7 @@ index 16a88804a1baa39ccdd9fc2870b6e2524d941298..01070b5e57b7f0fe5592b529d9e9315f
    textencoding
    translation
    ${WEBP_LIBRARIES}
-@@ -61,6 +378,244 @@ list(APPEND WebCore_SYSTEM_INCLUDE_DIRECTORIES
+@@ -61,6 +379,244 @@ list(APPEND WebCore_SYSTEM_INCLUDE_DIRECTORIES
    ${SQLITE_INCLUDE_DIR}
    ${WEBP_INCLUDE_DIRS}
    ${ZLIB_INCLUDE_DIRS}
@@ -18579,6 +18603,32 @@ index bb996f17aa1c975e1453fff46b016faaac0a44d3..11e2bf6a2333c636e6806fd19a8e8602
  
  #if HAVE(DISPLAY_LINK)
      // ScrollingTree
+diff --git a/Source/WebCore/platform/AudioDecoder.cpp b/Source/WebCore/platform/AudioDecoder.cpp
+index 681e921599cf269f7ebd1481d542f0cd60fdf615..a38d0a687f9699a6d883a0b3c4527db295d9b3f2 100644
+--- a/Source/WebCore/platform/AudioDecoder.cpp
++++ b/Source/WebCore/platform/AudioDecoder.cpp
+@@ -82,7 +82,7 @@ Ref<AudioDecoder::CreatePromise> AudioDecoder::create(const String& codecName, c
+     UNUSED_PARAM(config);
+     UNUSED_PARAM(outputCallback);
+ 
+-    return CreatePromise::createAndReject("Not supported"_s));
++    return CreatePromise::createAndReject("Not supported"_s);
+ #endif
+ }
+ 
+diff --git a/Source/WebCore/platform/AudioEncoder.cpp b/Source/WebCore/platform/AudioEncoder.cpp
+index d53a42e0d8d043a03b0e15942d4aeee69bd403a0..15091a8c05fd0eefd12527fc9a12cde70070276a 100644
+--- a/Source/WebCore/platform/AudioEncoder.cpp
++++ b/Source/WebCore/platform/AudioEncoder.cpp
+@@ -51,7 +51,7 @@ Ref<AudioEncoder::CreatePromise> AudioEncoder::create(const String& codecName, c
+     UNUSED_PARAM(descriptionCallback);
+     UNUSED_PARAM(outputCallback);
+ 
+-    return CreatePromise::createAndReject("Not supported"_s));
++    return CreatePromise::createAndReject("Not supported"_s);
+ #endif
+ }
+ 
 diff --git a/Source/WebCore/platform/CookieChange.h b/Source/WebCore/platform/CookieChange.h
 new file mode 100644
 index 0000000000000000000000000000000000000000..a20566ed620a8f242de49978ae98d3ae48b110e0
@@ -19764,6 +19814,56 @@ index 08ef6a3e6069a8b6e04415fb6aff9c0ac913edad..6a8c253bb948c09de8cc32dd21748dde
      m_shouldBreakFireLoopForRenderingUpdate = false;
  
      updateSharedTimer();
+diff --git a/Source/WebCore/platform/VideoDecoder.cpp b/Source/WebCore/platform/VideoDecoder.cpp
+index dc26f99e707b8ebfc5a6d77ecc6b702350667049..35960ca35bdbcff3420e7a6cf551959ed103959a 100644
+--- a/Source/WebCore/platform/VideoDecoder.cpp
++++ b/Source/WebCore/platform/VideoDecoder.cpp
+@@ -35,6 +35,10 @@
+ #include "VideoDecoderGStreamer.h"
+ #endif
+ 
++#if ENABLE(WEB_CODECS) && USE(LIBWEBRTC) && PLATFORM(HAIKU)
++#include "WebCodecsHaiku.h"
++#endif
++
+ #include <wtf/UniqueRef.h>
+ #include <wtf/text/WTFString.h>
+ 
+@@ -111,6 +115,9 @@ void VideoDecoder::createLocalDecoder(const String& codecName, const Config& con
+ #elif USE(GSTREAMER)
+     GStreamerVideoDecoder::create(codecName, config, WTF::move(callback), WTF::move(outputCallback));
+     return;
++#elif ENABLE(WEB_CODECS) && USE(LIBWEBRTC) && PLATFORM(HAIKU)
++    createLibWebRTCVideoDecoderHaiku(codecName, config, WTF::move(callback), WTF::move(outputCallback));
++    return;
+ #else
+     UNUSED_PARAM(codecName);
+     UNUSED_PARAM(config);
+diff --git a/Source/WebCore/platform/VideoEncoder.cpp b/Source/WebCore/platform/VideoEncoder.cpp
+index 380bf1b516a0d24e66284d0a11fa0106ca216adc..526a29f831eb010607ba35aa8defa2d0e77a61f8 100644
+--- a/Source/WebCore/platform/VideoEncoder.cpp
++++ b/Source/WebCore/platform/VideoEncoder.cpp
+@@ -36,6 +36,10 @@
+ #include "VideoEncoderGStreamer.h"
+ #endif
+ 
++#if ENABLE(WEB_CODECS) && USE(LIBWEBRTC) && PLATFORM(HAIKU)
++#include "WebCodecsHaiku.h"
++#endif
++
+ namespace WebCore {
+ 
+ VideoEncoder::CreatorFunction VideoEncoder::s_customCreator = nullptr;
+@@ -85,6 +89,9 @@ void VideoEncoder::createLocalEncoder(const String& codecName, const Config& con
+ #elif USE(GSTREAMER)
+     GStreamerVideoEncoder::create(codecName, config, WTF::move(callback), WTF::move(descriptionCallback), WTF::move(outputCallback));
+     return;
++#elif ENABLE(WEB_CODECS) && USE(LIBWEBRTC) && PLATFORM(HAIKU)
++    createLibWebRTCVideoEncoderHaiku(codecName, config, WTF::move(callback), WTF::move(descriptionCallback), WTF::move(outputCallback));
++    return;
+ #else
+     UNUSED_PARAM(codecName);
+     UNUSED_PARAM(config);
 diff --git a/Source/WebCore/platform/VideoFrame.cpp b/Source/WebCore/platform/VideoFrame.cpp
 index 423db07dd43dea3b02f525149cff6389c3f2b929..1133a8c8c376fa132fe497e7f1b0e0263b269ca6 100644
 --- a/Source/WebCore/platform/VideoFrame.cpp
@@ -60543,6 +60643,614 @@ index 0000000000000000000000000000000000000000..05c75290c9156bc056bd72c22f91991a
 +} // namespace WebCore
 +
 +#endif // USE(LIBWEBRTC) && PLATFORM(HAIKU)
+diff --git a/Source/WebCore/platform/mediastream/libwebrtc/haiku/WebCodecsHaiku.cpp b/Source/WebCore/platform/mediastream/libwebrtc/haiku/WebCodecsHaiku.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..1e061a80bd307d4df3f7819560f9467d7c0a47a1
+--- /dev/null
++++ b/Source/WebCore/platform/mediastream/libwebrtc/haiku/WebCodecsHaiku.cpp
+@@ -0,0 +1,559 @@
++/*
++ * Copyright (C) 2026 Summit contributors.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE AUTHORS ``AS IS'' AND ANY EXPRESS OR
++ * IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
++ * OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
++ */
++
++#include "config.h"
++#include "WebCodecsHaiku.h"
++
++#if ENABLE(WEB_CODECS) && USE(LIBWEBRTC) && PLATFORM(HAIKU)
++
++#include "LibWebRTCH264DecoderHaiku.h"
++#include "LibWebRTCHaiku.h"
++#include "Logging.h"
++#include "VideoFrameHaiku.h"
++#include <wtf/HashMap.h>
++#include <wtf/Lock.h>
++#include <wtf/WorkQueue.h>
++#include <wtf/text/MakeString.h>
++#include <wtf/text/StringToIntegerConversion.h>
++
++WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_BEGIN
++#include <webrtc/api/environment/environment_factory.h>
++#include <webrtc/api/video/encoded_image.h>
++#include <webrtc/api/video/video_frame.h>
++#include <webrtc/api/video_codecs/sdp_video_format.h>
++#include <webrtc/api/video_codecs/video_decoder.h>
++#include <webrtc/api/video_codecs/video_decoder_factory.h>
++#include <webrtc/api/video_codecs/video_encoder.h>
++#include <webrtc/api/video_codecs/video_encoder_factory.h>
++#include <webrtc/modules/video_coding/include/video_error_codes.h>
++#include <webrtc/rtc_base/cpu_info.h>
++WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_END
++
++namespace WebCore {
++
++// The libwebrtc format of a WebCodecs codec string, if it is one we have.
++static std::optional<webrtc::SdpVideoFormat> sdpFormatForCodec(const String& codec)
++{
++    if (codec == "vp8"_s)
++        return webrtc::SdpVideoFormat("VP8");
++    if (codec.startsWith("vp09.00"_s))
++        return webrtc::SdpVideoFormat("VP9", { { "profile-id", "0" } });
++    if (codec.startsWith("vp09.02"_s))
++        return webrtc::SdpVideoFormat("VP9", { { "profile-id", "2" } });
++    // avc1.PPCCLL: profile, constraints and level, in hexadecimal.
++    if ((codec.startsWith("avc1."_s) || codec.startsWith("avc3."_s)) && codec.length() == 11) {
++        auto profileLevel = codec.substring(5).convertToASCIILowercase();
++        if (!parseInteger<uint32_t>(profileLevel, 16))
++            return std::nullopt;
++        return webrtc::SdpVideoFormat("H264", {
++            { "profile-level-id", profileLevel.utf8().toStdString() },
++            { "packetization-mode", "1" },
++            { "level-asymmetry-allowed", "1" },
++        });
++    }
++    return std::nullopt;
++}
++
++static bool isH264(const webrtc::SdpVideoFormat& format)
++{
++    return format.name == "H264";
++}
++
++static const std::array<uint8_t, 4> startCode { 0, 0, 0, 1 };
++
++// An avcC record (ISO 14496-15): the NAL length size and the parameter sets.
++struct AVCConfiguration {
++    unsigned lengthSize { 4 };
++    Vector<uint8_t> parameterSets; // Annex B
++};
++
++static std::optional<AVCConfiguration> parseAVCConfiguration(std::span<const uint8_t> record)
++{
++    if (record.size() < 7 || record[0] != 1)
++        return std::nullopt;
++    AVCConfiguration configuration;
++    configuration.lengthSize = (record[4] & 3) + 1;
++    size_t offset = 5;
++    for (int list = 0; list < 2; ++list) {
++        if (offset >= record.size())
++            return std::nullopt;
++        unsigned count = list ? record[offset] : record[offset] & 0x1f;
++        ++offset;
++        for (unsigned i = 0; i < count; ++i) {
++            if (offset + 2 > record.size())
++                return std::nullopt;
++            size_t length = (record[offset] << 8) | record[offset + 1];
++            offset += 2;
++            if (offset + length > record.size())
++                return std::nullopt;
++            configuration.parameterSets.append(std::span { startCode });
++            configuration.parameterSets.append(record.subspan(offset, length));
++            offset += length;
++        }
++    }
++    return configuration;
++}
++
++// Length-prefixed NAL units (WebCodecs' "avc" format) as Annex B.
++static std::optional<Vector<uint8_t>> annexBFromAVC(std::span<const uint8_t> data, const AVCConfiguration& configuration, bool keyFrame)
++{
++    Vector<uint8_t> result;
++    if (keyFrame)
++        result.append(configuration.parameterSets.span());
++    size_t offset = 0;
++    while (offset < data.size()) {
++        if (offset + configuration.lengthSize > data.size())
++            return std::nullopt;
++        size_t length = 0;
++        for (unsigned i = 0; i < configuration.lengthSize; ++i)
++            length = (length << 8) | data[offset + i];
++        offset += configuration.lengthSize;
++        if (!length || offset + length > data.size())
++            return std::nullopt;
++        result.append(std::span { startCode });
++        result.append(data.subspan(offset, length));
++        offset += length;
++    }
++    return result;
++}
++
++// The NAL units of an Annex B stream.
++static Vector<std::span<const uint8_t>> annexBUnits(std::span<const uint8_t> data)
++{
++    Vector<std::span<const uint8_t>> units;
++    size_t start = std::numeric_limits<size_t>::max();
++    for (size_t i = 0; i + 2 < data.size(); ++i) {
++        if (data[i] || data[i + 1] || data[i + 2] != 1)
++            continue;
++        if (start != std::numeric_limits<size_t>::max()) {
++            size_t end = i;
++            if (end > start && !data[end - 1])
++                --end;
++            units.append(data.subspan(start, end - start));
++        }
++        start = i + 3;
++        i += 2;
++    }
++    if (start < data.size())
++        units.append(data.subspan(start));
++    return units;
++}
++
++// Decoding.
++
++namespace {
++
++class InternalDecoderHaiku final : public ThreadSafeRefCounted<InternalDecoderHaiku>, public webrtc::DecodedImageCallback {
++public:
++    static RefPtr<InternalDecoderHaiku> create(const webrtc::SdpVideoFormat& format, const VideoDecoder::Config& config, VideoDecoder::OutputCallback&& outputCallback)
++    {
++        std::optional<AVCConfiguration> avc;
++        if (isH264(format) && !config.description.isEmpty()) {
++            avc = parseAVCConfiguration(config.description.span());
++            if (!avc)
++                return nullptr;
++        }
++        auto factory = createVideoDecoderFactoryHaiku();
++        auto decoder = factory ? factory->Create(webrtc::EnvironmentFactory().Create(), format) : nullptr;
++        if (!decoder)
++            return nullptr;
++        webrtc::VideoDecoder::Settings settings;
++        settings.set_number_of_cores(webrtc::cpu_info::DetectNumberOfCores());
++        if (config.width && config.height)
++            settings.set_max_render_resolution({ static_cast<int>(config.width), static_cast<int>(config.height) });
++        if (!decoder->Configure(settings))
++            return nullptr;
++        Ref result = adoptRef(*new InternalDecoderHaiku(WTF::move(decoder), WTF::move(avc), config, WTF::move(outputCallback)));
++        result->m_decoder->RegisterDecodeCompleteCallback(result.ptr());
++        return result;
++    }
++
++    ~InternalDecoderHaiku()
++    {
++        m_decoder->RegisterDecodeCompleteCallback(nullptr);
++        m_decoder->Release();
++    }
++
++    Ref<VideoDecoder::DecodePromise> decode(VideoEncodedData&& frame)
++    {
++        assertIsCurrent(m_queue.get());
++        if (m_isClosed)
++            return VideoDecoder::DecodePromise::createAndReject("The decoder is closed"_s);
++        auto data = frame.data->span();
++        std::optional<Vector<uint8_t>> converted;
++        if (m_avc) {
++            converted = annexBFromAVC(data, *m_avc, frame.isKeyFrame);
++            if (!converted)
++                return VideoDecoder::DecodePromise::createAndReject("The H.264 chunk is not in the configured length-prefixed format"_s);
++            data = converted->span();
++        }
++        // The RTP timestamp names the chunk, so decoders that hold pictures
++        // back still label them with the chunk's own time.
++        uint32_t label = ++m_nextLabel;
++        m_pending.set(label, std::pair { frame.timestamp, frame.duration });
++        if (m_pending.size() > 64)
++            m_pending.remove(label - 64);
++        webrtc::EncodedImage image;
++        image.SetEncodedData(webrtc::EncodedImageBuffer::Create(data.data(), data.size()));
++        image._frameType = frame.isKeyFrame ? webrtc::VideoFrameType::kVideoFrameKey : webrtc::VideoFrameType::kVideoFrameDelta;
++        image.SetRtpTimestamp(label);
++        auto error = m_decoder->Decode(image, false, 0);
++        if (error && (error != WEBRTC_VIDEO_CODEC_NO_OUTPUT || m_treatNoOutputAsError))
++            return VideoDecoder::DecodePromise::createAndReject(makeString("Decoding failed with error "_s, error));
++        return VideoDecoder::DecodePromise::createAndResolve();
++    }
++
++    void close() { m_isClosed = true; }
++    WorkQueue& queue() { return m_queue.get(); }
++
++private:
++    InternalDecoderHaiku(std::unique_ptr<webrtc::VideoDecoder>&& decoder, std::optional<AVCConfiguration>&& avc, const VideoDecoder::Config& config, VideoDecoder::OutputCallback&& outputCallback)
++        : m_decoder(WTF::move(decoder))
++        , m_avc(WTF::move(avc))
++        , m_outputCallback(WTF::move(outputCallback))
++        , m_colorSpace(config.colorSpace)
++        , m_treatNoOutputAsError(config.noOutputAsError == VideoDecoder::TreatNoOutputAsError::Yes)
++        , m_queue(WorkQueue::create("WebCodecs video decoder"_s))
++    {
++    }
++
++    int32_t Decoded(webrtc::VideoFrame& frame) final
++    {
++        if (m_isClosed)
++            return 0;
++        auto timing = m_pending.take(frame.rtp_timestamp());
++        PlatformVideoColorSpace colorSpace = m_colorSpace.value_or(PlatformVideoColorSpace { PlatformVideoColorPrimaries::Bt709, PlatformVideoTransferCharacteristics::Bt709, PlatformVideoMatrixCoefficients::Bt709, false });
++        Ref<VideoFrame> videoFrame = videoFrameFromWebRTCBuffer(frame.video_frame_buffer(), MediaTime(timing.first, 1000000), VideoFrame::Rotation::None, WTF::move(colorSpace));
++        m_outputCallback(VideoDecoder::DecodedFrame { WTF::move(videoFrame), timing.first, timing.second });
++        return 0;
++    }
++
++    std::unique_ptr<webrtc::VideoDecoder> m_decoder;
++    const std::optional<AVCConfiguration> m_avc;
++    VideoDecoder::OutputCallback m_outputCallback;
++    const std::optional<PlatformVideoColorSpace> m_colorSpace;
++    const bool m_treatNoOutputAsError;
++    const Ref<WorkQueue> m_queue;
++    HashMap<uint32_t, std::pair<int64_t, std::optional<uint64_t>>, IntHash<uint32_t>, WTF::UnsignedWithZeroKeyHashTraits<uint32_t>> m_pending;
++    uint32_t m_nextLabel { 0 };
++    bool m_isClosed { false };
++};
++
++class VideoDecoderHaiku final : public VideoDecoder {
++public:
++    static Ref<VideoDecoderHaiku> create(Ref<InternalDecoderHaiku>&& decoder) { return adoptRef(*new VideoDecoderHaiku(WTF::move(decoder))); }
++
++private:
++    explicit VideoDecoderHaiku(Ref<InternalDecoderHaiku>&& decoder)
++        : m_decoder(WTF::move(decoder))
++    {
++    }
++
++    Ref<DecodePromise> decode(VideoEncodedData&& frame) final
++    {
++        return invokeAsync(m_decoder->queue(), [frame = WTF::move(frame).isolatedCopy(), decoder = m_decoder] mutable {
++            return decoder->decode(WTF::move(frame));
++        });
++    }
++
++    Ref<GenericPromise> flush() final
++    {
++        // The decoders output each picture as its chunk is decoded.
++        return invokeAsync(m_decoder->queue(), [] { return GenericPromise::createAndResolve(); });
++    }
++
++    void reset() final { m_decoder->close(); }
++    void close() final { m_decoder->close(); }
++
++    const Ref<InternalDecoderHaiku> m_decoder;
++};
++
++} // namespace
++
++void createLibWebRTCVideoDecoderHaiku(const String& codecName, const VideoDecoder::Config& config, VideoDecoder::CreateCallback&& callback, VideoDecoder::OutputCallback&& outputCallback)
++{
++    auto format = sdpFormatForCodec(codecName);
++    RefPtr decoder = format ? InternalDecoderHaiku::create(*format, config, WTF::move(outputCallback)) : nullptr;
++    if (!decoder) {
++        callback(makeUnexpected("Not supported"_s));
++        return;
++    }
++    callback(Ref<VideoDecoder> { VideoDecoderHaiku::create(decoder.releaseNonNull()) });
++}
++
++// Encoding.
++
++namespace {
++
++static constexpr double defaultFrameRate = 30;
++
++class InternalEncoderHaiku final : public ThreadSafeRefCounted<InternalEncoderHaiku>, public webrtc::EncodedImageCallback {
++public:
++    static RefPtr<InternalEncoderHaiku> create(const String& codecName, const webrtc::SdpVideoFormat& format, const VideoEncoder::Config& config, VideoEncoder::DescriptionCallback&& descriptionCallback, VideoEncoder::OutputCallback&& outputCallback)
++    {
++        if (!config.width || !config.height || config.width > 8192 || config.height > 8192)
++            return nullptr;
++        auto factory = createVideoEncoderFactoryHaiku();
++        auto encoder = factory ? factory->Create(webrtc::EnvironmentFactory().Create(), format) : nullptr;
++        if (!encoder)
++            return nullptr;
++        webrtc::VideoCodec codec;
++        codec.width = config.width;
++        codec.height = config.height;
++        codec.maxFramerate = 100;
++        unsigned temporalLayers = 1;
++        switch (config.scalabilityMode) {
++        case VideoEncoder::ScalabilityMode::L1T1:
++            codec.SetScalabilityMode(webrtc::ScalabilityMode::kL1T1);
++            break;
++        case VideoEncoder::ScalabilityMode::L1T2:
++            temporalLayers = 2;
++            codec.SetScalabilityMode(webrtc::ScalabilityMode::kL1T2);
++            break;
++        case VideoEncoder::ScalabilityMode::L1T3:
++            temporalLayers = 3;
++            codec.SetScalabilityMode(webrtc::ScalabilityMode::kL1T3);
++            break;
++        }
++        if (format.name == "VP8") {
++            codec.codecType = webrtc::kVideoCodecVP8;
++            codec.VP8()->numberOfTemporalLayers = temporalLayers;
++        } else if (format.name == "VP9") {
++            codec.codecType = webrtc::kVideoCodecVP9;
++            codec.VP9()->numberOfSpatialLayers = 1;
++        } else {
++            if (temporalLayers > 1)
++                return nullptr;
++            codec.codecType = webrtc::kVideoCodecH264;
++        }
++        auto bitRate = config.bitRate ? config.bitRate : 3 * config.width * config.height;
++        codec.startBitrate = bitRate / 1000;
++        codec.maxBitrate = bitRate / 1000;
++        constexpr int maximumPayloadSize = 1440;
++        if (encoder->InitEncode(&codec, webrtc::VideoEncoder::Settings { webrtc::VideoEncoder::Capabilities { true }, static_cast<int>(webrtc::cpu_info::DetectNumberOfCores()), maximumPayloadSize }))
++            return nullptr;
++        Ref result = adoptRef(*new InternalEncoderHaiku(codecName, WTF::move(encoder), isH264(format), temporalLayers > 1, config, WTF::move(descriptionCallback), WTF::move(outputCallback)));
++        result->m_encoder->RegisterEncodeCompleteCallback(result.ptr());
++        result->setRates(0, 0);
++        return result;
++    }
++
++    ~InternalEncoderHaiku()
++    {
++        m_encoder->RegisterEncodeCompleteCallback(nullptr);
++        m_encoder->Release();
++    }
++
++    Ref<VideoEncoder::EncodePromise> encode(VideoEncoder::RawFrame&& rawFrame, bool shouldGenerateKeyFrame)
++    {
++        assertIsCurrent(m_queue.get());
++        if (m_isClosed)
++            return VideoEncoder::EncodePromise::createAndReject("The encoder is closed"_s);
++        RefPtr frame = dynamicDowncast<VideoFrameHaiku>(rawFrame.frame.get());
++        if (frame && frame->size() != IntSize(m_config.width, m_config.height))
++            frame = frame->resizedTo({ static_cast<int>(m_config.width), static_cast<int>(m_config.height) });
++        auto buffer = frame ? webRTCBufferFromVideoFrame(*frame) : nullptr;
++        if (!buffer)
++            return VideoEncoder::EncodePromise::createAndReject("The frame cannot be encoded"_s);
++        // libwebrtc wants positive, increasing times.
++        if (rawFrame.timestamp + m_timestampOffset <= 0)
++            m_timestampOffset = 1 - rawFrame.timestamp;
++        m_timestamp = rawFrame.timestamp;
++        m_duration = rawFrame.duration;
++        webrtc::VideoFrame videoFrame { buffer, webrtc::kVideoRotation_0, rawFrame.timestamp + m_timestampOffset };
++        std::vector<webrtc::VideoFrameType> frameTypes { (shouldGenerateKeyFrame || !m_hasEncoded) ? webrtc::VideoFrameType::kVideoFrameKey : webrtc::VideoFrameType::kVideoFrameDelta };
++        auto error = m_encoder->Encode(videoFrame, &frameTypes);
++        if (error)
++            return VideoEncoder::EncodePromise::createAndReject(makeString("Encoding failed with error "_s, error));
++        m_hasEncoded = true;
++        return VideoEncoder::EncodePromise::createAndResolve();
++    }
++
++    void setRates(uint64_t bitRate, double frameRate)
++    {
++        if (bitRate)
++            m_config.bitRate = bitRate;
++        if (frameRate)
++            m_config.frameRate = frameRate;
++        auto total = m_config.bitRate ? m_config.bitRate : 3 * m_config.width * m_config.height;
++        webrtc::VideoBitrateAllocation allocation;
++        switch (m_config.scalabilityMode) {
++        case VideoEncoder::ScalabilityMode::L1T1:
++            allocation.SetBitrate(0, 0, total);
++            break;
++        case VideoEncoder::ScalabilityMode::L1T2:
++            allocation.SetBitrate(0, 0, total * 0.6);
++            allocation.SetBitrate(0, 1, total * 0.4);
++            break;
++        case VideoEncoder::ScalabilityMode::L1T3:
++            allocation.SetBitrate(0, 0, total * 0.5);
++            allocation.SetBitrate(0, 1, total * 0.2);
++            allocation.SetBitrate(0, 2, total * 0.3);
++            break;
++        }
++        m_encoder->SetRates({ allocation, m_config.frameRate ? m_config.frameRate : defaultFrameRate });
++    }
++
++    void close() { m_isClosed = true; }
++    WorkQueue& queue() { return m_queue.get(); }
++
++private:
++    InternalEncoderHaiku(const String& codecName, std::unique_ptr<webrtc::VideoEncoder>&& encoder, bool h264, bool temporalLayers, const VideoEncoder::Config& config, VideoEncoder::DescriptionCallback&& descriptionCallback, VideoEncoder::OutputCallback&& outputCallback)
++        : m_codecName(codecName.isolatedCopy())
++        , m_encoder(WTF::move(encoder))
++        , m_isH264(h264)
++        , m_hasTemporalLayers(temporalLayers)
++        , m_config(config)
++        , m_descriptionCallback(WTF::move(descriptionCallback))
++        , m_outputCallback(WTF::move(outputCallback))
++        , m_queue(WorkQueue::create("WebCodecs video encoder"_s))
++    {
++    }
++
++    // H.264 in WebCodecs' default "avc" format: length-prefixed NAL units,
++    // with the parameter sets in an avcC description.
++    Vector<uint8_t> avcFromAnnexB(std::span<const uint8_t> data, std::optional<Vector<uint8_t>>& description)
++    {
++        Vector<uint8_t> result;
++        std::span<const uint8_t> sps, pps;
++        for (auto unit : annexBUnits(data)) {
++            if (unit.empty())
++                continue;
++            auto type = unit[0] & 0x1f;
++            if (type == 7) {
++                sps = unit;
++                continue;
++            }
++            if (type == 8) {
++                pps = unit;
++                continue;
++            }
++            uint32_t length = unit.size();
++            result.appendList({ static_cast<uint8_t>(length >> 24), static_cast<uint8_t>(length >> 16), static_cast<uint8_t>(length >> 8), static_cast<uint8_t>(length) });
++            result.append(unit);
++        }
++        if (sps.size() >= 4 && !pps.empty()) {
++            Vector<uint8_t> record { 1, sps[1], sps[2], sps[3], 0xff, 0xe1, static_cast<uint8_t>(sps.size() >> 8), static_cast<uint8_t>(sps.size()) };
++            record.append(sps);
++            record.appendList({ static_cast<uint8_t>(1), static_cast<uint8_t>(pps.size() >> 8), static_cast<uint8_t>(pps.size()) });
++            record.append(pps);
++            if (record != m_lastDescription) {
++                m_lastDescription = record;
++                description = WTF::move(record);
++            }
++        }
++        return result;
++    }
++
++    Result OnEncodedImage(const webrtc::EncodedImage& image, const webrtc::CodecSpecificInfo*) final
++    {
++        if (m_isClosed)
++            return Result { Result::OK };
++        auto data = unsafeMakeSpan(image.data(), image.size());
++        std::optional<Vector<uint8_t>> description;
++        Vector<uint8_t> bytes = m_isH264 && !m_config.useAnnexB ? avcFromAnnexB(data, description) : Vector<uint8_t> { data };
++        std::optional<unsigned> temporalIndex;
++        if (m_hasTemporalLayers) {
++            if (auto index = image.TemporalIndex())
++                temporalIndex = *index;
++        }
++        if (m_needsDescription || description) {
++            m_needsDescription = false;
++            VideoEncoder::ActiveConfiguration configuration;
++            configuration.codec = m_codecName;
++            configuration.visibleWidth = m_config.width;
++            configuration.visibleHeight = m_config.height;
++            configuration.description = WTF::move(description);
++            configuration.colorSpace = PlatformVideoColorSpace { PlatformVideoColorPrimaries::Bt709, PlatformVideoTransferCharacteristics::Bt709, PlatformVideoMatrixCoefficients::Bt709, false };
++            m_descriptionCallback(WTF::move(configuration));
++        }
++        m_outputCallback({ WTF::move(bytes), image._frameType == webrtc::VideoFrameType::kVideoFrameKey, m_timestamp, m_duration, temporalIndex });
++        return Result { Result::OK };
++    }
++
++    void OnFrameDropped(uint32_t, int, bool) final { }
++
++    const String m_codecName;
++    std::unique_ptr<webrtc::VideoEncoder> m_encoder;
++    const bool m_isH264;
++    const bool m_hasTemporalLayers;
++    VideoEncoder::Config m_config;
++    VideoEncoder::DescriptionCallback m_descriptionCallback;
++    VideoEncoder::OutputCallback m_outputCallback;
++    const Ref<WorkQueue> m_queue;
++    Vector<uint8_t> m_lastDescription;
++    int64_t m_timestamp { 0 };
++    int64_t m_timestampOffset { 0 };
++    std::optional<uint64_t> m_duration;
++    bool m_hasEncoded { false };
++    bool m_needsDescription { true };
++    bool m_isClosed { false };
++};
++
++class VideoEncoderHaiku final : public VideoEncoder {
++public:
++    static Ref<VideoEncoderHaiku> create(Ref<InternalEncoderHaiku>&& encoder) { return adoptRef(*new VideoEncoderHaiku(WTF::move(encoder))); }
++
++private:
++    explicit VideoEncoderHaiku(Ref<InternalEncoderHaiku>&& encoder)
++        : m_encoder(WTF::move(encoder))
++    {
++    }
++
++    Ref<EncodePromise> encode(RawFrame&& frame, bool shouldGenerateKeyFrame) final
++    {
++        return invokeAsync(m_encoder->queue(), [frame = WTF::move(frame), shouldGenerateKeyFrame, encoder = m_encoder] mutable {
++            return encoder->encode(WTF::move(frame), shouldGenerateKeyFrame);
++        });
++    }
++
++    Ref<GenericPromise> setRates(uint64_t bitRate, double frameRate) final
++    {
++        return invokeAsync(m_encoder->queue(), [encoder = m_encoder, bitRate, frameRate] {
++            encoder->setRates(bitRate, frameRate);
++            return GenericPromise::createAndResolve();
++        });
++    }
++
++    Ref<GenericPromise> flush() final
++    {
++        // The encoders output each frame as it is encoded.
++        return invokeAsync(m_encoder->queue(), [] { return GenericPromise::createAndResolve(); });
++    }
++
++    void reset() final { m_encoder->close(); }
++    void close() final { m_encoder->close(); }
++
++    const Ref<InternalEncoderHaiku> m_encoder;
++};
++
++} // namespace
++
++void createLibWebRTCVideoEncoderHaiku(const String& codecName, const VideoEncoder::Config& config, VideoEncoder::CreateCallback&& callback, VideoEncoder::DescriptionCallback&& descriptionCallback, VideoEncoder::OutputCallback&& outputCallback)
++{
++    auto format = sdpFormatForCodec(codecName);
++    RefPtr encoder = format ? InternalEncoderHaiku::create(codecName, *format, config, WTF::move(descriptionCallback), WTF::move(outputCallback)) : nullptr;
++    if (!encoder) {
++        callback(makeUnexpected("Not supported"_s));
++        return;
++    }
++    callback(Ref<VideoEncoder> { VideoEncoderHaiku::create(encoder.releaseNonNull()) });
++}
++
++} // namespace WebCore
++
++#endif // ENABLE(WEB_CODECS) && USE(LIBWEBRTC) && PLATFORM(HAIKU)
+diff --git a/Source/WebCore/platform/mediastream/libwebrtc/haiku/WebCodecsHaiku.h b/Source/WebCore/platform/mediastream/libwebrtc/haiku/WebCodecsHaiku.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..9fb270264e381a79396b53a577bdfa1fef7c8ce2
+--- /dev/null
++++ b/Source/WebCore/platform/mediastream/libwebrtc/haiku/WebCodecsHaiku.h
+@@ -0,0 +1,37 @@
++/*
++ * Copyright (C) 2026 Summit contributors.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE AUTHORS ``AS IS'' AND ANY EXPRESS OR
++ * IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
++ * OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
++ */
++
++#pragma once
++
++#if ENABLE(WEB_CODECS) && USE(LIBWEBRTC) && PLATFORM(HAIKU)
++
++#include "VideoDecoder.h"
++#include "VideoEncoder.h"
++
++namespace WebCore {
++
++// WebCodecs' VideoDecoder and VideoEncoder on the codecs WebRTC uses here
++// (createVideoDecoderFactoryHaiku, createVideoEncoderFactoryHaiku): VP8 and
++// VP9 through libvpx, H.264 decoding through FFmpeg and encoding through
++// OpenH264 when the system has them. Codecs they lack fail to be created,
++// which isConfigSupported() reports.
++void createLibWebRTCVideoDecoderHaiku(const String& codecName, const VideoDecoder::Config&, VideoDecoder::CreateCallback&&, VideoDecoder::OutputCallback&&);
++void createLibWebRTCVideoEncoderHaiku(const String& codecName, const VideoEncoder::Config&, VideoEncoder::CreateCallback&&, VideoEncoder::DescriptionCallback&&, VideoEncoder::OutputCallback&&);
++
++} // namespace WebCore
++
++#endif // ENABLE(WEB_CODECS) && USE(LIBWEBRTC) && PLATFORM(HAIKU)
 diff --git a/Source/WebCore/platform/mock/MockRealtimeAudioSource.cpp b/Source/WebCore/platform/mock/MockRealtimeAudioSource.cpp
 index cca01352478b8a8c8469c3894f53f1d6dc44982f..c9dcb540876c4f5f6e6e96ae60a7bb5e7141d9ea 100644
 --- a/Source/WebCore/platform/mock/MockRealtimeAudioSource.cpp
@@ -175087,10 +175795,10 @@ index 359c3765d3a41ba1c6cfdb6b44fa292cc7811a0d..18a4d1524bbb7a68b2bec420d013fd89
  endif ()
 diff --git a/Source/cmake/OptionsHaiku.cmake b/Source/cmake/OptionsHaiku.cmake
 new file mode 100644
-index 0000000000000000000000000000000000000000..7abaa97a38d5a7dfd978d14919314c72a4eb83bd
+index 0000000000000000000000000000000000000000..c9b6ef81637833de2854c327ae711ddf8710402f
 --- /dev/null
 +++ b/Source/cmake/OptionsHaiku.cmake
-@@ -0,0 +1,380 @@
+@@ -0,0 +1,383 @@
 +include(GNUInstallDirs)
 +include(VersioningUtils)
 +
@@ -175176,6 +175884,9 @@ index 0000000000000000000000000000000000000000..7abaa97a38d5a7dfd978d14919314c72
 +WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_MEDIA_STREAM PUBLIC ON)
 +WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_MEDIA_RECORDER PRIVATE ON)
 +WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_WEB_RTC PRIVATE ON)
++# WebCodecs (VideoDecoder, VideoEncoder, VideoFrame...) on WebRTC's codecs
++# (platform/mediastream/libwebrtc/haiku/WebCodecsHaiku.cpp); no audio codecs yet.
++WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_WEB_CODECS PRIVATE ON)
 +WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_MEMORY_SAMPLER PUBLIC ON)
 +WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_MHTML PRIVATE ON)
 +# OffscreenCanvas, as on GTK and WPE: pages use it for off-thread drawing and

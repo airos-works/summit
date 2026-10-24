@@ -250,8 +250,7 @@ codecs both directions have); Summit calls Chromium (VP8 and VP9).
 ## Not done yet
 
 - System audio capture (sharing what the computer plays).
-- WebCodecs (WebKit's are Cocoa's or GStreamer's; Zoom's web client uses
-  them when present).
+- WebCodecs audio (video WebCodecs is in [webcodecs.md](webcodecs.md)).
 - `devicechange` when a camera is plugged in: the Media Kit sends no notice,
   so the change is announced only the next time a page lists the devices.
 - Not yet tried in a real Zoom or Teams meeting (they need accounts or

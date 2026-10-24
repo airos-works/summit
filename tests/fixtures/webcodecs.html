@@ -1,0 +1,87 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>WebCodecs fixture</title>
+<!-- WebCodecs round trip (#112): for each codec, isConfigSupported, then
+     encode six canvas frames of known colours, decode the chunks and check the
+     decoded pictures' middle pixel. Results: #result (JSON) and the page. -->
+<canvas id="source" width="320" height="240"></canvas>
+<canvas id="check" width="320" height="240"></canvas>
+<pre id="log"></pre>
+<pre id="result"></pre>
+<script>
+const colours = [[255, 0, 0], [0, 255, 0], [0, 0, 255], [255, 255, 0], [0, 255, 255], [255, 0, 255]];
+const codecs = [
+    { name: 'VP8', codec: 'vp8' },
+    { name: 'VP9', codec: 'vp09.00.10.08' },
+    { name: 'H.264 (avc)', codec: 'avc1.42001f', avc: { format: 'avc' } },
+    { name: 'H.264 (annexb)', codec: 'avc1.42001f', avc: { format: 'annexb' } },
+];
+const log = text => { document.getElementById('log').textContent += text + '\n'; };
+const close = (a, b) => a.every((value, i) => Math.abs(value - b[i]) < 40);
+
+async function roundTrip({ name, codec, avc }) {
+    const config = { codec, width: 320, height: 240, bitrate: 1_000_000, framerate: 30 };
+    if (avc)
+        config.avc = avc;
+    const encodeSupport = await VideoEncoder.isConfigSupported(config);
+    const decodeSupport = await VideoDecoder.isConfigSupported({ codec, codedWidth: 320, codedHeight: 240 });
+    if (!encodeSupport.supported || !decodeSupport.supported)
+        return { name, encode: encodeSupport.supported, decode: decodeSupport.supported };
+    const chunks = [];
+    let decoderConfig;
+    const encoder = new VideoEncoder({
+        output: (chunk, metadata) => {
+            if (metadata && metadata.decoderConfig)
+                decoderConfig = metadata.decoderConfig;
+            chunks.push(chunk);
+        },
+        error: error => log(`${name} encoder error: ${error.message}`),
+    });
+    encoder.configure(config);
+    const source = document.getElementById('source').getContext('2d');
+    for (let i = 0; i < colours.length; ++i) {
+        source.fillStyle = `rgb(${colours[i].join(',')})`;
+        source.fillRect(0, 0, 320, 240);
+        const frame = new VideoFrame(document.getElementById('source'), { timestamp: i * 33333 });
+        encoder.encode(frame, { keyFrame: i === 0 });
+        frame.close();
+    }
+    await encoder.flush();
+    encoder.close();
+
+    const decoded = [];
+    const check = document.getElementById('check').getContext('2d', { willReadFrequently: true });
+    const decoder = new VideoDecoder({
+        output: frame => {
+            check.drawImage(frame, 0, 0, 320, 240);
+            decoded.push({ timestamp: frame.timestamp, pixel: Array.from(check.getImageData(160, 120, 1, 1).data.slice(0, 3)) });
+            frame.close();
+        },
+        error: error => log(`${name} decoder error: ${error.message}`),
+    });
+    decoder.configure(decoderConfig || { codec, codedWidth: 320, codedHeight: 240 });
+    for (const chunk of chunks)
+        decoder.decode(chunk);
+    await decoder.flush();
+    decoder.close();
+    const matches = decoded.filter((entry, i) => close(entry.pixel, colours[i] || [])).length;
+    return { name, encode: true, decode: true, chunks: chunks.length, keyFrames: chunks.filter(chunk => chunk.type === 'key').length,
+        description: !!(decoderConfig && decoderConfig.description), decoded: decoded.length, matches,
+        timestamps: decoded.map(entry => entry.timestamp).join(',') };
+}
+
+(async () => {
+    const results = { webCodecs: typeof VideoEncoder === 'function' && typeof VideoDecoder === 'function', audio: typeof AudioEncoder === 'function', codecs: [] };
+    if (results.webCodecs) {
+        for (const codec of codecs) {
+            try {
+                results.codecs.push(await roundTrip(codec));
+            } catch (error) {
+                results.codecs.push({ name: codec.name, error: error.message });
+            }
+        }
+    }
+    document.getElementById('result').textContent = JSON.stringify(results);
+    log(JSON.stringify(results, null, 1));
+})();
+</script>
