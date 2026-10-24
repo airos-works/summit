@@ -20940,10 +20940,10 @@ index 0000000000000000000000000000000000000000..cdab62bfd95bf644f740fce9f74b4813
 +#endif // PLATFORM(HAIKU)
 diff --git a/Source/WebCore/platform/audio/haiku/WebCodecsAudioHaiku.cpp b/Source/WebCore/platform/audio/haiku/WebCodecsAudioHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..78fa754a6858ccf5d2cd4109d32b3acbac01ffd9
+index 0000000000000000000000000000000000000000..d6fb9faa85281d5361468c6b2cd0b6b63a56744d
 --- /dev/null
 +++ b/Source/WebCore/platform/audio/haiku/WebCodecsAudioHaiku.cpp
-@@ -0,0 +1,360 @@
+@@ -0,0 +1,737 @@
 +/*
 + * Copyright (C) 2026 Summit contributors.
 + *
@@ -20967,7 +20967,13 @@ index 0000000000000000000000000000000000000000..78fa754a6858ccf5d2cd4109d32b3acb
 +#if ENABLE(WEB_CODECS) && PLATFORM(HAIKU) && USE(LIBWEBRTC)
 +
 +#include "WebCodecsAudioDataAlgorithms.h"
++#include <dlfcn.h>
 +#include <opus.h>
++#include <wtf/Deque.h>
++
++WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_BEGIN
++#include <webrtc/common_audio/resampler/include/push_resampler.h>
++WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_END
 +#include <wtf/StdLibExtras.h>
 +#include <wtf/WorkQueue.h>
 +#include <wtf/text/MakeString.h>
@@ -21056,9 +21062,166 @@ index 0000000000000000000000000000000000000000..78fa754a6858ccf5d2cd4109d32b3acb
 +    return rate == 8000 || rate == 12000 || rate == 16000 || rate == 24000 || rate == 48000;
 +}
 +
++// Other rates (44.1 kHz above all) go through libopus at 48 kHz: resampled in
++// 10 ms pieces for encoding, and decoded as 48 kHz audio, as WebCodecs allows.
++static bool isResampledOpusRate(uint64_t rate)
++{
++    return !isOpusSampleRate(rate) && rate >= 8000 && rate <= 192000 && !(rate % 100);
++}
++
++static unsigned opusCodecRate(uint64_t rate)
++{
++    return isOpusSampleRate(rate) ? rate : 48000;
++}
++
++// AAC and MP3 through FFmpeg (libavcodec), loaded when first needed, as for
++// WebRTC's H.264 (LibWebRTCH264DecoderHaiku.cpp): only functions are looked
++// up, and only the leading members of AVPacket and AVFrame are used.
++namespace {
++
++struct AVPacketPrefix {
++    void* buf;
++    int64_t pts;
++    int64_t dts;
++    uint8_t* data;
++    int size;
++};
++
++struct AVFramePrefix {
++    uint8_t* data[8];
++    int linesize[8];
++    uint8_t** extendedData;
++    int width;
++    int height;
++    int sampleCount;
++    int format;
++};
++
++// AVSampleFormat values, unchanged since FFmpeg 1.
++enum : int { sampleU8, sampleS16, sampleS32, sampleFloat, sampleDouble, sampleU8Planar, sampleS16Planar, sampleS32Planar, sampleFloatPlanar, sampleDoublePlanar };
++
++constexpr int averrorEAGAIN = EDOM > 0 ? -EAGAIN : EAGAIN;
++
++struct FFmpegAudio {
++    void* (*findDecoderByName)(const char*);
++    void* (*allocContext)(const void*);
++    int (*open)(void*, const void*, void**);
++    void (*freeContext)(void**);
++    void* (*allocPacket)();
++    void (*freePacket)(void**);
++    int (*sendPacket)(void*, const void*);
++    int (*receiveFrame)(void*, void*);
++    void* (*allocFrame)();
++    void (*freeFrame)(void**);
++    void (*flushBuffers)(void*);
++
++    static const FFmpegAudio* load()
++    {
++        static const FFmpegAudio* loaded = [] () -> const FFmpegAudio* {
++            void* avcodec = nullptr;
++            for (const char* name : { "libavcodec.so.62", "libavcodec.so.61", "libavcodec.so.60", "libavcodec.so.59", "libavcodec.so.58" }) {
++                if ((avcodec = dlopen(name, RTLD_NOW | RTLD_LOCAL)))
++                    break;
++            }
++            void* avutil = nullptr;
++            for (const char* name : { "libavutil.so.60", "libavutil.so.59", "libavutil.so.58", "libavutil.so.57", "libavutil.so.56" }) {
++                if ((avutil = dlopen(name, RTLD_NOW | RTLD_LOCAL)))
++                    break;
++            }
++            if (!avcodec || !avutil)
++                return nullptr;
++            auto* ffmpeg = new FFmpegAudio;
++            bool complete = true;
++            auto find = [&](void* library, const char* name) {
++                void* symbol = dlsym(library, name);
++                complete = complete && symbol;
++                return symbol;
++            };
++            ffmpeg->findDecoderByName = reinterpret_cast<void* (*)(const char*)>(find(avcodec, "avcodec_find_decoder_by_name"));
++            ffmpeg->allocContext = reinterpret_cast<void* (*)(const void*)>(find(avcodec, "avcodec_alloc_context3"));
++            ffmpeg->open = reinterpret_cast<int (*)(void*, const void*, void**)>(find(avcodec, "avcodec_open2"));
++            ffmpeg->freeContext = reinterpret_cast<void (*)(void**)>(find(avcodec, "avcodec_free_context"));
++            ffmpeg->allocPacket = reinterpret_cast<void* (*)()>(find(avcodec, "av_packet_alloc"));
++            ffmpeg->freePacket = reinterpret_cast<void (*)(void**)>(find(avcodec, "av_packet_free"));
++            ffmpeg->sendPacket = reinterpret_cast<int (*)(void*, const void*)>(find(avcodec, "avcodec_send_packet"));
++            ffmpeg->receiveFrame = reinterpret_cast<int (*)(void*, void*)>(find(avcodec, "avcodec_receive_frame"));
++            ffmpeg->allocFrame = reinterpret_cast<void* (*)()>(find(avutil, "av_frame_alloc"));
++            ffmpeg->freeFrame = reinterpret_cast<void (*)(void**)>(find(avutil, "av_frame_free"));
++            ffmpeg->flushBuffers = reinterpret_cast<void (*)(void*)>(find(avcodec, "avcodec_flush_buffers"));
++            if (!complete) {
++                delete ffmpeg;
++                return nullptr;
++            }
++            return ffmpeg;
++        }();
++        return loaded;
++    }
++};
++
++} // namespace
++
++static bool isAACCodec(StringView codec)
++{
++    return codec == "mp4a.40.2"_s || codec == "mp4a.40.02"_s || codec == "mp4a.40.5"_s || codec == "mp4a.40.05"_s || codec == "mp4a.40.29"_s;
++}
++
++// FFmpeg's decoder for a WebCodecs audio codec string.
++static const char* ffmpegDecoderName(StringView codec)
++{
++    if (isAACCodec(codec))
++        return "aac";
++    if (codec == "mp3"_s)
++        return "mp3float";
++    return nullptr;
++}
++
 +bool isWebCodecsAudioCodecSupportedHaiku(StringView codec)
 +{
-+    return codec == "opus"_s;
++    if (codec == "opus"_s)
++        return true;
++    auto* name = ffmpegDecoderName(codec);
++    auto* ffmpeg = name ? FFmpegAudio::load() : nullptr;
++    return ffmpeg && ffmpeg->findDecoderByName(name);
++}
++
++// An AudioSpecificConfig (ISO 14496-3) as the fields of an ADTS header: the
++// profile, sampling frequency index and channel configuration.
++struct ADTSFields {
++    unsigned profile { 1 };
++    unsigned frequencyIndex { 4 };
++    unsigned channelConfiguration { 2 };
++};
++
++static std::optional<ADTSFields> adtsFieldsFromAudioSpecificConfig(std::span<const uint8_t> config)
++{
++    if (config.size() < 2)
++        return std::nullopt;
++    uint32_t bits = (config[0] << 8) | config[1];
++    unsigned objectType = bits >> 11;
++    unsigned frequencyIndex = (bits >> 7) & 0xf;
++    unsigned channels = (bits >> 3) & 0xf;
++    // An explicit frequency, or HE-AAC's core: ADTS can name only the 13 table
++    // rates and AAC LC (the decoder finds SBR and PS itself).
++    if (frequencyIndex == 15 || objectType == 31 || !channels || channels > 7)
++        return std::nullopt;
++    if (objectType != 2 && objectType != 5 && objectType != 29)
++        return std::nullopt;
++    return ADTSFields { 1, frequencyIndex, channels };
++}
++
++static Vector<uint8_t> adtsFrame(const ADTSFields& fields, std::span<const uint8_t> payload)
++{
++    size_t length = payload.size() + 7;
++    Vector<uint8_t> frame {
++        0xff, 0xf1,
++        static_cast<uint8_t>((fields.profile << 6) | (fields.frequencyIndex << 2) | (fields.channelConfiguration >> 2)),
++        static_cast<uint8_t>(((fields.channelConfiguration & 3) << 6) | (length >> 11)),
++        static_cast<uint8_t>(length >> 3),
++        static_cast<uint8_t>(((length & 7) << 5) | 0x1f),
++        0xfc,
++    };
++    frame.append(payload);
++    return frame;
 +}
 +
 +// The 19-byte identification header (RFC 7845) a decoder may be given.
@@ -21076,10 +21239,10 @@ index 0000000000000000000000000000000000000000..78fa754a6858ccf5d2cd4109d32b3acb
 +public:
 +    static RefPtr<OpusAudioDecoderHaiku> create(const AudioDecoder::Config& config, OutputCallback&& outputCallback)
 +    {
-+        if (!isOpusSampleRate(config.sampleRate) || !config.numberOfChannels || config.numberOfChannels > 2)
++        if ((!isOpusSampleRate(config.sampleRate) && !isResampledOpusRate(config.sampleRate)) || !config.numberOfChannels || config.numberOfChannels > 2)
 +            return nullptr;
 +        int error = OPUS_OK;
-+        auto* decoder = opus_decoder_create(config.sampleRate, config.numberOfChannels, &error);
++        auto* decoder = opus_decoder_create(opusCodecRate(config.sampleRate), config.numberOfChannels, &error);
 +        if (!decoder || error != OPUS_OK)
 +            return nullptr;
 +        return adoptRef(*new OpusAudioDecoderHaiku(decoder, config, WTF::move(outputCallback)));
@@ -21093,7 +21256,7 @@ index 0000000000000000000000000000000000000000..78fa754a6858ccf5d2cd4109d32b3acb
 +private:
 +    OpusAudioDecoderHaiku(OpusDecoder* decoder, const AudioDecoder::Config& config, OutputCallback&& outputCallback)
 +        : m_decoder(decoder)
-+        , m_sampleRate(config.sampleRate)
++        , m_sampleRate(opusCodecRate(config.sampleRate))
 +        , m_channels(config.numberOfChannels)
 +        , m_outputCallback(WTF::move(outputCallback))
 +        , m_queue(WorkQueue::create("WebCodecs Opus decoder"_s))
@@ -21146,11 +21309,183 @@ index 0000000000000000000000000000000000000000..78fa754a6858ccf5d2cd4109d32b3acb
 +    std::atomic<bool> m_isClosed { false };
 +};
 +
++class FFmpegAudioDecoderHaiku final : public AudioDecoder {
++public:
++    static RefPtr<FFmpegAudioDecoderHaiku> create(const String& codec, const AudioDecoder::Config& config, OutputCallback&& outputCallback)
++    {
++        auto* name = ffmpegDecoderName(codec);
++        auto* ffmpeg = name ? FFmpegAudio::load() : nullptr;
++        auto* decoder = ffmpeg ? ffmpeg->findDecoderByName(name) : nullptr;
++        if (!decoder || !config.sampleRate || !config.numberOfChannels || config.numberOfChannels > 8)
++            return nullptr;
++        std::optional<ADTSFields> adts;
++        if (isAACCodec(codec) && !config.description.isEmpty()) {
++            adts = adtsFieldsFromAudioSpecificConfig(config.description.span());
++            if (!adts)
++                return nullptr;
++        }
++        void* context = ffmpeg->allocContext(decoder);
++        if (!context || ffmpeg->open(context, decoder, nullptr) < 0) {
++            ffmpeg->freeContext(&context);
++            return nullptr;
++        }
++        return adoptRef(*new FFmpegAudioDecoderHaiku(*ffmpeg, context, adts, config, WTF::move(outputCallback)));
++    }
++
++    ~FFmpegAudioDecoderHaiku()
++    {
++        m_ffmpeg.freeFrame(&m_frame);
++        m_ffmpeg.freePacket(&m_packet);
++        m_ffmpeg.freeContext(&m_context);
++    }
++
++private:
++    FFmpegAudioDecoderHaiku(const FFmpegAudio& ffmpeg, void* context, std::optional<ADTSFields> adts, const AudioDecoder::Config& config, OutputCallback&& outputCallback)
++        : m_ffmpeg(ffmpeg)
++        , m_context(context)
++        , m_packet(ffmpeg.allocPacket())
++        , m_frame(ffmpeg.allocFrame())
++        , m_adts(adts)
++        , m_sampleRate(config.sampleRate)
++        , m_channels(config.numberOfChannels)
++        , m_outputCallback(WTF::move(outputCallback))
++        , m_queue(WorkQueue::create("WebCodecs FFmpeg audio decoder"_s))
++    {
++    }
++
++    Ref<DecodePromise> decode(AudioEncodedData&& chunk) final
++    {
++        return invokeAsync(m_queue.get(), [protectedThis = Ref { *this }, chunk = WTF::move(chunk).isolatedCopy()] mutable {
++            return protectedThis->decodeOnQueue(WTF::move(chunk));
++        });
++    }
++
++    Ref<DecodePromise> decodeOnQueue(AudioEncodedData&& chunk)
++    {
++        if (m_isClosed)
++            return DecodePromise::createAndReject("The decoder is closed"_s);
++        if (!m_packet || !m_frame)
++            return DecodePromise::createAndReject("Out of memory"_s);
++        auto data = chunk.data->span();
++        Vector<uint8_t> framed;
++        if (m_adts) {
++            framed = adtsFrame(*m_adts, data);
++            data = framed.span();
++        }
++        // The decoders give one block of samples a packet, in order.
++        m_timestamps.append(chunk.timestamp);
++        auto* packet = static_cast<AVPacketPrefix*>(m_packet);
++        packet->data = const_cast<uint8_t*>(data.data());
++        packet->size = data.size();
++        int result = m_ffmpeg.sendPacket(m_context, m_packet);
++        packet->data = nullptr;
++        packet->size = 0;
++        if (result < 0 && result != averrorEAGAIN)
++            return DecodePromise::createAndReject(makeString("Audio decoding failed with error "_s, result));
++        receive();
++        return DecodePromise::createAndResolve();
++    }
++
++    void receive()
++    {
++        while (m_ffmpeg.receiveFrame(m_context, m_frame) >= 0) {
++            auto* frame = static_cast<AVFramePrefix*>(m_frame);
++            int64_t timestamp = m_timestamps.isEmpty() ? m_nextTimestamp : m_timestamps.takeFirst();
++            if (RefPtr data = audioData(*frame, timestamp)) {
++                m_nextTimestamp = timestamp + data->duration().value_or(0);
++                m_outputCallback(DecodedData { data.releaseNonNull() });
++            }
++        }
++    }
++
++    RefPtr<PlatformRawAudioDataHaiku> audioData(const AVFramePrefix& frame, int64_t timestamp)
++    {
++        size_t samples = std::max(frame.sampleCount, 0);
++        bool planar = frame.format >= sampleU8Planar;
++        // A planar frame has one plane a channel; a packed one, the channels configured.
++        size_t channels = m_channels;
++        if (planar) {
++            channels = 0;
++            while (channels < 8 && frame.data[channels])
++                ++channels;
++        }
++        if (!samples || !channels)
++            return nullptr;
++        size_t sampleSize = 0;
++        AudioSampleFormat format;
++        switch (frame.format) {
++        case sampleU8: case sampleU8Planar: sampleSize = 1; format = planar ? AudioSampleFormat::U8Planar : AudioSampleFormat::U8; break;
++        case sampleS16: case sampleS16Planar: sampleSize = 2; format = planar ? AudioSampleFormat::S16Planar : AudioSampleFormat::S16; break;
++        case sampleS32: case sampleS32Planar: sampleSize = 4; format = planar ? AudioSampleFormat::S32Planar : AudioSampleFormat::S32; break;
++        case sampleFloat: case sampleFloatPlanar: case sampleDouble: case sampleDoublePlanar:
++            sampleSize = 4;
++            format = planar ? AudioSampleFormat::F32Planar : AudioSampleFormat::F32;
++            break;
++        default:
++            return nullptr;
++        }
++        bool isDouble = frame.format == sampleDouble || frame.format == sampleDoublePlanar;
++        Vector<uint8_t> bytes(samples * channels * sampleSize);
++        auto copyPlane = [&](const uint8_t* source, size_t values, size_t destinationOffset) {
++            if (isDouble) {
++                auto* doubles = reinterpret_cast<const double*>(source);
++                for (size_t i = 0; i < values; ++i) {
++                    float value = doubles[i];
++                    memcpy(bytes.mutableSpan().data() + destinationOffset + i * 4, &value, 4);
++                }
++            } else
++                memcpy(bytes.mutableSpan().data() + destinationOffset, source, values * sampleSize);
++        };
++        if (planar) {
++            for (size_t channel = 0; channel < channels; ++channel)
++                copyPlane(frame.data[channel], samples, channel * samples * sampleSize);
++        } else
++            copyPlane(frame.data[0], samples * channels, 0);
++        return PlatformRawAudioDataHaiku::create(SharedBuffer::create(WTF::move(bytes)), format, m_sampleRate, timestamp, samples, channels);
++    }
++
++    Ref<GenericPromise> flush() final
++    {
++        return invokeAsync(m_queue.get(), [protectedThis = Ref { *this }] {
++            // A null packet drains the decoder; flushing its buffers lets it
++            // take packets again.
++            protectedThis->m_ffmpeg.sendPacket(protectedThis->m_context, nullptr);
++            protectedThis->receive();
++            protectedThis->m_ffmpeg.flushBuffers(protectedThis->m_context);
++            protectedThis->m_timestamps.clear();
++            return GenericPromise::createAndResolve();
++        });
++    }
++
++    void reset() final
++    {
++        m_queue->dispatch([protectedThis = Ref { *this }] {
++            protectedThis->m_ffmpeg.flushBuffers(protectedThis->m_context);
++            protectedThis->m_timestamps.clear();
++        });
++    }
++
++    void close() final { m_isClosed = true; }
++
++    const FFmpegAudio& m_ffmpeg;
++    void* m_context;
++    void* m_packet;
++    void* m_frame;
++    const std::optional<ADTSFields> m_adts;
++    const unsigned m_sampleRate;
++    const unsigned m_channels;
++    OutputCallback m_outputCallback;
++    const Ref<WorkQueue> m_queue;
++    Deque<int64_t> m_timestamps;
++    int64_t m_nextTimestamp { 0 };
++    std::atomic<bool> m_isClosed { false };
++};
++
 +class OpusAudioEncoderHaiku final : public AudioEncoder {
 +public:
 +    static RefPtr<OpusAudioEncoderHaiku> create(const AudioEncoder::Config& config, DescriptionCallback&& descriptionCallback, OutputCallback&& outputCallback)
 +    {
-+        if (!isOpusSampleRate(config.sampleRate) || !config.numberOfChannels || config.numberOfChannels > 2)
++        if ((!isOpusSampleRate(config.sampleRate) && !isResampledOpusRate(config.sampleRate)) || !config.numberOfChannels || config.numberOfChannels > 2)
 +            return nullptr;
 +        auto opusConfig = config.opusConfig.value_or(OpusConfig { });
 +        if (opusConfig.isOggBitStream)
@@ -21160,7 +21495,8 @@ index 0000000000000000000000000000000000000000..78fa754a6858ccf5d2cd4109d32b3acb
 +        if (std::ranges::find(durations, opusConfig.frameDuration) == durations.end())
 +            return nullptr;
 +        int error = OPUS_OK;
-+        auto* encoder = opus_encoder_create(config.sampleRate, config.numberOfChannels, OPUS_APPLICATION_AUDIO, &error);
++        unsigned codecRate = opusCodecRate(config.sampleRate);
++        auto* encoder = opus_encoder_create(codecRate, config.numberOfChannels, OPUS_APPLICATION_AUDIO, &error);
 +        if (!encoder || error != OPUS_OK)
 +            return nullptr;
 +        opus_encoder_ctl(encoder, OPUS_SET_BITRATE(config.bitRate ? static_cast<opus_int32>(config.bitRate) : OPUS_AUTO));
@@ -21170,7 +21506,7 @@ index 0000000000000000000000000000000000000000..78fa754a6858ccf5d2cd4109d32b3acb
 +        opus_encoder_ctl(encoder, OPUS_SET_PACKET_LOSS_PERC(static_cast<opus_int32>(std::min<size_t>(opusConfig.packetlossperc, 100))));
 +        opus_encoder_ctl(encoder, OPUS_SET_INBAND_FEC(opusConfig.useinbandfec ? 1 : 0));
 +        opus_encoder_ctl(encoder, OPUS_SET_DTX(opusConfig.usedtx ? 1 : 0));
-+        size_t frameSize = config.sampleRate * opusConfig.frameDuration / 1000000;
++        size_t frameSize = codecRate * opusConfig.frameDuration / 1000000;
 +        return adoptRef(*new OpusAudioEncoderHaiku(encoder, config, frameSize, WTF::move(descriptionCallback), WTF::move(outputCallback)));
 +    }
 +
@@ -21184,6 +21520,7 @@ index 0000000000000000000000000000000000000000..78fa754a6858ccf5d2cd4109d32b3acb
 +        : m_encoder(encoder)
 +        , m_config(config)
 +        , m_frameSize(frameSize)
++        , m_codecRate(opusCodecRate(config.sampleRate))
 +        , m_descriptionCallback(WTF::move(descriptionCallback))
 +        , m_outputCallback(WTF::move(outputCallback))
 +        , m_queue(WorkQueue::create("WebCodecs Opus encoder"_s))
@@ -21207,16 +21544,43 @@ index 0000000000000000000000000000000000000000..78fa754a6858ccf5d2cd4109d32b3acb
 +        size_t frames = audio->numberOfFrames();
 +        size_t channels = m_config.numberOfChannels;
 +        // Times count from the first sample still waiting.
-+        if (m_pending.isEmpty())
++        if (m_pending.isEmpty() && m_input.isEmpty())
 +            m_pendingTimestamp = frame.timestamp;
-+        size_t start = m_pending.size();
-+        m_pending.grow(start + frames * channels);
-+        audio->copyTo(asMutableByteSpan(m_pending.mutableSpan().subspan(start)), AudioSampleFormat::F32, 0, 0, frames, frames * channels);
++        auto& destination = m_codecRate == m_config.sampleRate ? m_pending : m_input;
++        size_t start = destination.size();
++        destination.grow(start + frames * channels);
++        audio->copyTo(asMutableByteSpan(destination.mutableSpan().subspan(start)), AudioSampleFormat::F32, 0, 0, frames, frames * channels);
++        resampleInput(false);
 +        while (m_pending.size() >= m_frameSize * channels) {
 +            if (auto error = encodePacket())
 +                return EncodePromise::createAndReject(WTF::move(*error));
 +        }
 +        return EncodePromise::createAndResolve();
++    }
++
++    // The input in whole 10 ms pieces (padded with silence when finishing),
++    // at the codec's rate.
++    void resampleInput(bool finishing)
++    {
++        if (m_codecRate == m_config.sampleRate)
++            return;
++        size_t channels = m_config.numberOfChannels;
++        size_t inputPiece = m_config.sampleRate / 100;
++        size_t outputPiece = m_codecRate / 100;
++        if (finishing && m_input.size() % (inputPiece * channels))
++            m_input.grow(m_input.size() + inputPiece * channels - m_input.size() % (inputPiece * channels));
++        if (!m_resampler)
++            m_resampler = std::make_unique<webrtc::PushResampler<float>>(inputPiece, outputPiece, channels);
++        size_t consumed = 0;
++        while (m_input.size() - consumed >= inputPiece * channels) {
++            size_t start = m_pending.size();
++            m_pending.grow(start + outputPiece * channels);
++            m_resampler->Resample(webrtc::InterleavedView<const float>(m_input.span().subspan(consumed).data(), inputPiece, channels),
++                webrtc::InterleavedView<float>(m_pending.mutableSpan().subspan(start).data(), outputPiece, channels));
++            consumed += inputPiece * channels;
++        }
++        if (consumed)
++            m_input.removeAt(0, consumed);
 +    }
 +
 +    std::optional<String> encodePacket()
@@ -21240,7 +21604,7 @@ index 0000000000000000000000000000000000000000..78fa754a6858ccf5d2cd4109d32b3acb
 +            configuration.description = opusHead(channels, preSkip, m_config.sampleRate);
 +            m_descriptionCallback(WTF::move(configuration));
 +        }
-+        uint64_t duration = m_frameSize * 1000000 / m_config.sampleRate;
++        uint64_t duration = m_frameSize * 1000000 / m_codecRate;
 +        m_outputCallback({ WTF::move(packet), true, m_pendingTimestamp, duration });
 +        m_pending.removeAt(0, m_frameSize * channels);
 +        m_pendingTimestamp += duration;
@@ -21251,7 +21615,10 @@ index 0000000000000000000000000000000000000000..78fa754a6858ccf5d2cd4109d32b3acb
 +    {
 +        return invokeAsync(m_queue.get(), [protectedThis = Ref { *this }] {
 +            // The rest, padded with silence to a whole packet.
++            protectedThis->resampleInput(true);
 +            auto& pending = protectedThis->m_pending;
++            while (pending.size() >= protectedThis->m_frameSize * protectedThis->m_config.numberOfChannels && !protectedThis->m_isClosed)
++                protectedThis->encodePacket();
 +            if (!pending.isEmpty() && !protectedThis->m_isClosed) {
 +                pending.grow(protectedThis->m_frameSize * protectedThis->m_config.numberOfChannels);
 +                protectedThis->encodePacket();
@@ -21265,6 +21632,8 @@ index 0000000000000000000000000000000000000000..78fa754a6858ccf5d2cd4109d32b3acb
 +    {
 +        m_queue->dispatch([protectedThis = Ref { *this }] {
 +            protectedThis->m_pending.clear();
++            protectedThis->m_input.clear();
++            protectedThis->m_resampler = nullptr;
 +            opus_encoder_ctl(protectedThis->m_encoder, OPUS_RESET_STATE);
 +        });
 +    }
@@ -21274,10 +21643,14 @@ index 0000000000000000000000000000000000000000..78fa754a6858ccf5d2cd4109d32b3acb
 +    OpusEncoder* const m_encoder;
 +    const AudioEncoder::Config m_config;
 +    const size_t m_frameSize;
++    // libopus's rate: the configured one, or 48 kHz with the input resampled.
++    const unsigned m_codecRate;
 +    DescriptionCallback m_descriptionCallback;
 +    OutputCallback m_outputCallback;
 +    const Ref<WorkQueue> m_queue;
 +    Vector<float> m_pending;
++    Vector<float> m_input;
++    std::unique_ptr<webrtc::PushResampler<float>> m_resampler;
 +    int64_t m_pendingTimestamp { 0 };
 +    bool m_hasDescribed { false };
 +    std::atomic<bool> m_isClosed { false };
@@ -21287,7 +21660,11 @@ index 0000000000000000000000000000000000000000..78fa754a6858ccf5d2cd4109d32b3acb
 +
 +Ref<AudioDecoder::CreatePromise> createWebCodecsAudioDecoderHaiku(const String& codec, const AudioDecoder::Config& config, AudioDecoder::OutputCallback&& outputCallback)
 +{
-+    RefPtr decoder = codec == "opus"_s ? OpusAudioDecoderHaiku::create(config, WTF::move(outputCallback)) : nullptr;
++    RefPtr<AudioDecoder> decoder;
++    if (codec == "opus"_s)
++        decoder = OpusAudioDecoderHaiku::create(config, WTF::move(outputCallback));
++    else
++        decoder = FFmpegAudioDecoderHaiku::create(codec, config, WTF::move(outputCallback));
 +    if (!decoder)
 +        return AudioDecoder::CreatePromise::createAndReject("Not supported"_s);
 +    return AudioDecoder::CreatePromise::createAndResolve(decoder.releaseNonNull());

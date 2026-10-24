@@ -1,0 +1,93 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>WebCodecs audio files fixture</title>
+<!-- AudioDecoder with FFmpeg's codecs (#112). Next to this page: tone.aac
+     (ADTS) and tone.mp3, a 440 Hz stereo tone, for example
+       ffmpeg -f lavfi -i sine=frequency=440:sample_rate=48000:duration=0.25 -ac 2 -c:a aac -f adts tone.aac
+       ffmpeg -f lavfi -i sine=frequency=440:sample_rate=48000:duration=0.25 -ac 2 -c:a libmp3lame -write_xing 0 -id3v2_version 0 tone.mp3
+     It decodes the ADTS frames as they are, the raw AAC frames with an
+     AudioSpecificConfig made from the ADTS header, and the MP3 frames, and
+     reports frames, format and RMS (about 0.35 for a full-scale tone at 0.5
+     amplitude; FFmpeg's sine source is 1/8 scale, about 0.088). Result: #result. -->
+<pre id="result"></pre>
+<script>
+function adtsFrames(bytes) {
+    const frames = [];
+    for (let offset = 0; offset + 7 <= bytes.length;) {
+        if (bytes[offset] !== 0xff || (bytes[offset + 1] & 0xf0) !== 0xf0)
+            break;
+        const headerLength = (bytes[offset + 1] & 1) ? 7 : 9;
+        const length = ((bytes[offset + 3] & 3) << 11) | (bytes[offset + 4] << 3) | (bytes[offset + 5] >> 5);
+        frames.push({ header: bytes.subarray(offset, offset + 7), payload: bytes.subarray(offset + headerLength, offset + length), whole: bytes.subarray(offset, offset + length) });
+        offset += length;
+    }
+    return frames;
+}
+
+function audioSpecificConfig(header) {
+    const objectType = (header[2] >> 6) + 1;
+    const frequencyIndex = (header[2] >> 2) & 0xf;
+    const channels = ((header[2] & 1) << 2) | (header[3] >> 6);
+    return new Uint8Array([(objectType << 3) | (frequencyIndex >> 1), ((frequencyIndex & 1) << 7) | (channels << 3)]);
+}
+
+function mp3Frames(bytes) {
+    const bitrates = [0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320];
+    const rates = [44100, 48000, 32000];
+    const frames = [];
+    for (let offset = 0; offset + 4 <= bytes.length;) {
+        if (bytes[offset] !== 0xff || (bytes[offset + 1] & 0xe0) !== 0xe0)
+            break;
+        const bitrate = bitrates[bytes[offset + 2] >> 4] * 1000;
+        const rate = rates[(bytes[offset + 2] >> 2) & 3];
+        const padding = (bytes[offset + 2] >> 1) & 1;
+        const length = Math.floor(144 * bitrate / rate) + padding;
+        if (!length)
+            break;
+        frames.push(bytes.subarray(offset, offset + length));
+        offset += length;
+    }
+    return frames;
+}
+
+async function decode(name, config, chunks) {
+    const support = await AudioDecoder.isConfigSupported(config);
+    if (!support.supported)
+        return { name, supported: false };
+    let frames = 0, sumSquares = 0, format, errors = 0;
+    const decoder = new AudioDecoder({
+        output: data => {
+            format = data.format;
+            const plane = new Float32Array(data.numberOfFrames);
+            data.copyTo(plane, { planeIndex: 0, format: 'f32-planar' });
+            for (const value of plane)
+                sumSquares += value * value;
+            frames += data.numberOfFrames;
+            data.close();
+        },
+        error: () => ++errors,
+    });
+    decoder.configure(config);
+    chunks.forEach((data, i) => decoder.decode(new EncodedAudioChunk({ type: 'key', timestamp: i * 21333, data })));
+    await decoder.flush();
+    decoder.close();
+    return { name, supported: true, chunks: chunks.length, frames, format, errors, rms: Math.round(1000 * Math.sqrt(sumSquares / Math.max(frames, 1))) / 1000 };
+}
+
+(async () => {
+    const results = [];
+    try {
+        const aac = new Uint8Array(await (await fetch('tone.aac')).arrayBuffer());
+        const frames = adtsFrames(aac);
+        results.push(await decode('AAC (ADTS)', { codec: 'mp4a.40.2', sampleRate: 48000, numberOfChannels: 2 }, frames.map(frame => frame.whole)));
+        results.push(await decode('AAC (raw + description)', { codec: 'mp4a.40.2', sampleRate: 48000, numberOfChannels: 2, description: audioSpecificConfig(frames[0].header) }, frames.map(frame => frame.payload)));
+        const mp3 = new Uint8Array(await (await fetch('tone.mp3')).arrayBuffer());
+        results.push(await decode('MP3', { codec: 'mp3', sampleRate: 48000, numberOfChannels: 2 }, mp3Frames(mp3)));
+        results.push({ name: 'FLAC', supported: (await AudioDecoder.isConfigSupported({ codec: 'flac', sampleRate: 48000, numberOfChannels: 2 })).supported });
+        results.push({ name: 'Opus 44.1 kHz encode', supported: (await AudioEncoder.isConfigSupported({ codec: 'opus', sampleRate: 44100, numberOfChannels: 2 })).supported });
+    } catch (error) {
+        results.push({ error: error.message });
+    }
+    document.getElementById('result').textContent = JSON.stringify(results);
+})();
+</script>

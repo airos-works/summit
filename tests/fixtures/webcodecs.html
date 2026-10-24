@@ -73,8 +73,8 @@ async function roundTrip({ name, codec, avc }) {
 
 // One second of a 440 Hz tone (amplitude 0.5) as 48 kHz stereo f32-planar
 // AudioData, through Opus and back: chunk count, decoded frames and loudness.
-async function audioRoundTrip() {
-    const rate = 48000, channels = 2, chunkFrames = 480;
+async function audioRoundTrip(rate) {
+    const channels = 2, chunkFrames = rate / 100;
     const config = { codec: 'opus', sampleRate: rate, numberOfChannels: channels, bitrate: 96000 };
     const encodeSupport = await AudioEncoder.isConfigSupported(config);
     const decodeSupport = await AudioDecoder.isConfigSupported({ codec: 'opus', sampleRate: rate, numberOfChannels: channels });
@@ -101,10 +101,11 @@ async function audioRoundTrip() {
     }
     await encoder.flush();
     encoder.close();
-    let frames = 0, sumSquares = 0, format;
+    let frames = 0, sumSquares = 0, format, decodedRate;
     const decoder = new AudioDecoder({
         output: data => {
             format = data.format;
+            decodedRate = data.sampleRate;
             const plane = new Float32Array(data.numberOfFrames);
             data.copyTo(plane, { planeIndex: 0, format: 'f32-planar' });
             for (const value of plane)
@@ -120,7 +121,7 @@ async function audioRoundTrip() {
     await decoder.flush();
     decoder.close();
     return { encode: true, decode: true, chunks: chunks.length, description: !!(decoderConfig && decoderConfig.description),
-        frames, format, rms: Math.round(1000 * Math.sqrt(sumSquares / Math.max(frames, 1))) / 1000 };
+        frames, format, rms: Math.round(1000 * Math.sqrt(sumSquares / Math.max(frames, 1))) / 1000, decodedRate };
 }
 
 (async () => {
@@ -136,7 +137,9 @@ async function audioRoundTrip() {
     }
     if (results.audio) {
         try {
-            results.opus = await audioRoundTrip();
+            results.opus = await audioRoundTrip(48000);
+            // 44.1 kHz goes through libopus at 48 kHz.
+            results.opus44 = await audioRoundTrip(44100);
         } catch (error) {
             results.opus = { error: error.message };
         }

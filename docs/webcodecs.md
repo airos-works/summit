@@ -16,12 +16,19 @@ is missing fails to be created. H.264 comes in both WebCodecs formats:
 encoder and decoder runs on its own work queue in the web process.
 
 Audio: `AudioData` (kept in the page's sample format, converted on
-`copyTo`) and Opus through libopus (`AudioEncoder` at 8–48 kHz, mono or
-stereo, 2.5–60 ms packets, the OpusHead as `description`; `AudioDecoder`
-giving `f32` samples). Other audio codecs (AAC, MP3, FLAC, Vorbis, PCM)
-report unsupported.
+`copyTo`); Opus through libopus (`AudioEncoder` mono or stereo, 2.5–60 ms
+packets, the OpusHead as `description`; `AudioDecoder` giving `f32`
+samples), at libopus's rates (8, 12, 16, 24, 48 kHz) and at other rates
+that are whole hundreds of hertz (44.1 kHz above all): encoding resamples
+to 48 kHz in 10 ms pieces (libwebrtc's `PushResampler`), decoding gives
+48 kHz audio. AAC (`mp4a.40.2`, `.5`, `.29`) and MP3 are decoded through
+FFmpeg when the system has it, loaded as WebRTC's H.264 decoder loads it:
+AAC chunks with an `AudioSpecificConfig` description get ADTS headers made
+from it (FFmpeg's AAC decoder then needs no extradata), and without one they
+are taken as ADTS. AAC and MP3 encoding, FLAC, Vorbis and PCM report
+unsupported.
 
-Not yet: AAC and the other audio codecs, AV1 and HEVC, hardware
+Not yet: AAC/MP3 encoding, FLAC and Vorbis, AV1 and HEVC, hardware
 decoders (NVDEC, Cedar) and flushing pictures a decoder holds back (WebRTC's
 decoders return each picture with its chunk, so B-frame streams may lose
 their last pictures).
@@ -45,8 +52,10 @@ chunk's timestamp through the RTP timestamp. `ENABLE_WEB_CODECS` is on in
 ## Fixture
 
 `tests/fixtures/webcodecs.html`: encodes six coloured canvas frames with
-each codec, decodes them and checks the middle pixel; the JSON result is in
-`#result`.
+each codec, decodes them and checks the middle pixel, and sends a second of
+tone through Opus at 48 and 44.1 kHz; the JSON result is in `#result`.
+`tests/fixtures/webcodecs-audio-files.html` decodes AAC (ADTS, and raw with
+a description) and MP3 files made with ffmpeg (the page says how).
 
 Verified on the X399 (24 Oct, wc112 build): VP8, VP9, H.264 `avc` (with
 its avcC description) and H.264 `annexb` each encoded six canvas frames
