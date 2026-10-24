@@ -6,10 +6,12 @@
 #include "ExtensionStoreDownload.h"
 #include <WebKit/WebKitContext.h>
 #include <MessageRunner.h>
+#include <OS.h>
 #include <nlohmann/json.hpp>
 #include <algorithm>
 #include <atomic>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <set>
 #include <stdexcept>
@@ -141,6 +143,14 @@ bool ExtensionInstaller::BeginImport(const std::filesystem::path& source, std::o
     Changed();
     return true;
 }
+// Two minutes to check or start an extension, 30 s to stop one;
+// SUMMIT_EXTENSION_REPLY_DEADLINE_MS overrides both (for tests).
+static bigtime_t PendingDeadline(uint32 operation)
+{
+    if (const char* deadline = getenv("SUMMIT_EXTENSION_REPLY_DEADLINE_MS"); deadline && atoll(deadline) > 0)
+        return atoll(deadline) * 1000;
+    return operation == B_WEBKIT_EXTENSION_UNLOADED ? 30000000 : 120000000;
+}
 void ExtensionInstaller::Poll()
 {
     if (fWork && fWork->finished.load(std::memory_order_acquire)) {
@@ -153,13 +163,34 @@ void ExtensionInstaller::Poll()
         fDraft->expectedIdentity = std::move(work->expectedIdentity);
         fDraft->storeName = std::move(work->storeName);
         fStatus = "Checking extension requirements…";
-        fPending = B_WEBKIT_EXTENSION_PACKAGE_PREPARED;
+        Await(B_WEBKIT_EXTENSION_PACKAGE_PREPARED);
         auto status = fContext->PrepareExtension(fDraft->package->Path().c_str(), BMessenger(this), ++fRequest);
         if (status != B_OK) Finish(std::strerror(status));
         else Changed();
     }
+    if (fPending && system_time() - fPendingSince > PendingDeadline(fPending)) PendingTimedOut();
     bool pending = HasPendingWork();
     if (pending != fHadWork) { fHadWork = pending; Changed(); }
+}
+void ExtensionInstaller::Await(uint32 operation)
+{
+    fPending = operation;
+    fPendingSince = system_time();
+}
+void ExtensionInstaller::PendingTimedOut()
+{
+    // The engine never answered (a lost reply, a hung web process): give up
+    // as a failure would, so the manager is usable again. A late answer no
+    // longer matches fPending and is ignored.
+    const auto operation = std::exchange(fPending, 0);
+    constexpr const char* lost = "The browser engine did not answer in time.";
+    if (operation == B_WEBKIT_EXTENSION_PACKAGE_PREPARED) {
+        fContext->CancelExtensionPreparation(fRequest);
+        Finish(fCancelled ? "Installation cancelled." : lost);
+    } else if (operation == B_WEBKIT_EXTENSION_LOADED)
+        Rollback(fCancelled ? "Installation cancelled." : lost);   // it may have loaded after all
+    else
+        RetainUnsavedRuntime(fDraft->rollbackError + " The temporary runtime could not be stopped: " + lost);
 }
 void ExtensionInstaller::Finish(std::string status)
 {
@@ -206,7 +237,7 @@ void ExtensionInstaller::Approve(uint64 generation, bool allowFiles, bool allowP
         if (allowFiles || origin.compare(0, 5, "file:") != 0) options.origins.push_back(origin);
     options.allowFileURLs = allowFiles;
     options.allowPrivateBrowsing = allowPrivate;
-    fPending = B_WEBKIT_EXTENSION_LOADED;
+    Await(B_WEBKIT_EXTENSION_LOADED);
     fStatus = "Installing extension…";
     auto status = fContext->LoadPreparedExtension(fDraft->token.c_str(), options, installation, BMessenger(this), ++fRequest);
     if (status != B_OK) Finish(std::strerror(status));
@@ -221,7 +252,7 @@ void ExtensionInstaller::RetainUnsavedRuntime(std::string reason)
 void ExtensionInstaller::Rollback(std::string reason)
 {
     fDraft->rollbackError = std::move(reason);
-    fPending = B_WEBKIT_EXTENSION_UNLOADED;
+    Await(B_WEBKIT_EXTENSION_UNLOADED);
     auto status = fContext->UnloadExtension(fDraft->entry.identifier.c_str(), BMessenger(this), ++fRequest);
     if (status != B_OK) RetainUnsavedRuntime(fDraft->rollbackError + " Could not stop the temporary runtime: " + std::strerror(status));
 }

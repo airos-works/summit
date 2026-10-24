@@ -39,6 +39,9 @@ private:
     void Finish(std::string);
     void Rollback(std::string);
     void RetainUnsavedRuntime(std::string);
+    // fPending is sent; Poll gives up on it after its deadline.
+    void Await(uint32 operation);
+    void PendingTimedOut();
     std::shared_ptr<BWebKitContext> fContext;
     ExtensionCatalog fCatalog;
     std::filesystem::path fDownloadRoot;
@@ -51,6 +54,7 @@ private:
     std::string fStatus;
     uint64 fGeneration = 0, fRequest = 0;
     uint32 fPending = 0;
+    bigtime_t fPendingSince = 0;
     bool fStopping = false, fCancelled = false, fHadWork = false;
 };
 }

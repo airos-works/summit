@@ -47,8 +47,14 @@ declared identities are rejected before activation. See
 [identity behavior and tests](extension-identity.md), including mixed-manifest
 precedence. Safari bundle import, XPI signatures/store authentication,
 remaining action APIs and broad extension API compatibility remain
-unfinished. A lost SDK reply has no operation deadline yet; cancellation after
-submitting a load also needs further native integration coverage.
+unfinished. An installation gives up when the engine doesn't answer: two
+minutes to check or start the extension, 30 s to stop a rolled-back one
+(`ExtensionInstaller::PendingTimedOut`; a start that times out is rolled back,
+as it may have started late). The manager shows "The browser engine did not
+answer in time." and can install again. `SUMMIT_EXTENSION_REPLY_DEADLINE_MS`
+shortens the deadlines for tests. Updates, enabling, disabling and removal
+have no deadline yet; cancellation after submitting a load also needs further
+native integration coverage.
 
 Live [toolbar actions and real extension popups](modern-extension-actions.md)
 are now connected to installed extensions. Their integrated tests also exercise
