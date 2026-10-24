@@ -657,6 +657,8 @@ private:
     BMenuItem* fSpellingItem = nullptr;
     BMenuItem* fZoomTextOnlyItem = nullptr;
     BMenuItem* fCaretBrowsingItem = nullptr;
+    BMenuItem* fReducedMotionItem = nullptr;
+    BMenuItem* fIncreasedContrastItem = nullptr;
     // Save as PDF: the chosen file, waiting for the pages.
     std::unique_ptr<BFilePanel> fPDFPanel;
     std::map<uint64, std::string> fPDFTargets;

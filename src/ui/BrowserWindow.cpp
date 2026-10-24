@@ -593,14 +593,19 @@ std::atomic<int32> sOpenWindows { 0 };
 int32 BrowserWindow::CountOpenWindows() { return sOpenWindows.load(); }
 
 #if SUMMIT_MODERN_WEBKIT
-// View › Caret Browsing: shared by every window, not saved (#118).
-static std::atomic<bool> sCaretBrowsing { false };
+// View › Caret Browsing, Reduce Motion and Increase Contrast: shared by
+// every window, not saved (#118).
+static std::atomic<bool> sCaretBrowsing { false }, sReducedMotion { false }, sIncreasedContrast { false };
 
-static void ApplyCaretBrowsing(BWebKitView* view)
+static bool AccessibilityAidsOn() { return sCaretBrowsing || sReducedMotion || sIncreasedContrast; }
+
+static void ApplyAccessibilityAids(BWebKitView* view)
 {
     if (!view) return;
     BMessage settings;
     settings.AddBool("caretBrowsing", sCaretBrowsing);
+    settings.AddBool("reducedMotion", sReducedMotion);
+    settings.AddBool("increasedContrast", sIncreasedContrast);
     view->SetPageSettings(settings);
 }
 #endif
@@ -778,6 +783,13 @@ BrowserWindow::BrowserWindow(std::shared_ptr<SharedProfile> profile, std::string
     fCaretBrowsingItem = new BMenuItem("Caret Browsing (F7)", new BMessage(kToggleCaretBrowsing));
     fCaretBrowsingItem->SetMarked(sCaretBrowsing);
     view->AddItem(fCaretBrowsingItem);
+    // Pages' prefers-reduced-motion and prefers-contrast media queries.
+    fReducedMotionItem = new BMenuItem("Reduce Motion", new BMessage(kToggleReducedMotion));
+    fReducedMotionItem->SetMarked(sReducedMotion);
+    view->AddItem(fReducedMotionItem);
+    fIncreasedContrastItem = new BMenuItem("Increase Contrast", new BMessage(kToggleIncreasedContrast));
+    fIncreasedContrastItem->SetMarked(sIncreasedContrast);
+    view->AddItem(fIncreasedContrastItem);
     view->AddSeparatorItem();
     AddItem(view, "View Page Source", kViewPageSource, 'U');
     AddItem(view, "Picture in Picture", kPictureInPicture, 'P', B_SHIFT_KEY);
@@ -1301,7 +1313,7 @@ void BrowserWindow::CreateTab(const std::string& input, bool select, BWebView* a
         fail("Could not create the web page: " + std::string(std::strerror(status)));
         return;
     }
-    if (sCaretBrowsing) ApplyCaretBrowsing(webView);
+    if (AccessibilityAidsOn()) ApplyAccessibilityAids(webView);
 #else
     auto* webView = adopted ? adopted : new BWebView("web-page");
 #endif
@@ -1401,7 +1413,7 @@ std::string BrowserWindow::DiscardTab(int64 id)
         delete webView;
         return "Could not create the unloaded page.";
     }
-    if (sCaretBrowsing) ApplyCaretBrowsing(webView);
+    if (AccessibilityAidsOn()) ApplyAccessibilityAids(webView);
     webView->SetExplicitMinSize(fPopup ? BSize(160, 100) : BSize(320, 200));
     webView->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNLIMITED));
     if (!IsDefaultZoom(tab->pageZoom)) webView->SetZoomFactor(tab->pageZoom);
@@ -4287,15 +4299,22 @@ void BrowserWindow::MessageReceived(BMessage* message)
         case kSpellingCommand: SpellingCommand(*message); break;
 #if SUMMIT_MODERN_WEBKIT
         case kToggleCaretBrowsing:
+        case kToggleReducedMotion:
+        case kToggleIncreasedContrast: {
             // One setting for the whole browser, for this session (#118).
-            sCaretBrowsing = !sCaretBrowsing;
+            auto& aid = message->what == kToggleCaretBrowsing ? sCaretBrowsing
+                : message->what == kToggleReducedMotion ? sReducedMotion : sIncreasedContrast;
+            aid = !aid;
             for (int32 i = 0; BWindow* window = be_app->WindowAt(i); ++i) {
-                if (dynamic_cast<BrowserWindow*>(window)) window->PostMessage(kApplyCaretBrowsing);
+                if (dynamic_cast<BrowserWindow*>(window)) window->PostMessage(kApplyAccessibilityAids);
             }
             break;
-        case kApplyCaretBrowsing:
-            for (auto& tab : fTabs) ApplyCaretBrowsing(tab.view);
+        }
+        case kApplyAccessibilityAids:
+            for (auto& tab : fTabs) ApplyAccessibilityAids(tab.view);
             if (fCaretBrowsingItem) fCaretBrowsingItem->SetMarked(sCaretBrowsing);
+            if (fReducedMotionItem) fReducedMotionItem->SetMarked(sReducedMotion);
+            if (fIncreasedContrastItem) fIncreasedContrastItem->SetMarked(sIncreasedContrast);
             break;
 #endif
         case kToggleZoomTextOnly:

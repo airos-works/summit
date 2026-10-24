@@ -22,7 +22,29 @@ none), which sets WebKit's `MinimumFontSize`. Preferences does not offer it
 yet: it needs a profile setting, and `src/core/Profile.*` has uncommitted
 download-history work (#110) in the main checkout.
 
+## Reduce Motion and Increase Contrast
+
+View › Reduce Motion makes pages match `prefers-reduced-motion: reduce`, and
+View › Increase Contrast `prefers-contrast: more`, so sites that offer calmer
+or higher-contrast styles use them. Like caret browsing they are shared by
+every window, last for the session and reach new tabs when they are made;
+saving them waits for the same profile work as the minimum font size.
+Haiku has no system setting for either, so with them off pages see
+`no-preference`.
+
+`SetPageSettings()` takes `reducedMotion` and `increasedContrast`, which set
+WebKit's `ForcedPrefersReducedMotionAccessibilityValue` and
+`ForcedPrefersContrastAccessibilityValue` to On (off: System). Those were
+WebCore-only settings (Internals and the inspector's overrides); Summit
+moved them to `UnifiedWebPreferences.yaml` so a page's preferences carry
+them, with `SettingsBase::accessibilitySettingsChanged` re-evaluating the
+media queries when they change. The inspector's user-preference overrides
+last until the page's preferences change again.
+
+Test page: `tests/fixtures/prefers-media.html` shows what the media queries
+match.
+
 ## Still to do
 
-Forced colours / high contrast, `prefers-reduced-motion` from a setting, and an
-accessibility tree turned on only when asked for (developer tools, MCP).
+Forced colours (`forced-colors: active`, which WebKit does not render), and
+an accessibility tree turned on only when asked for (developer tools, MCP).
