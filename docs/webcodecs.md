@@ -40,3 +40,11 @@ chunk's timestamp through the RTP timestamp. `ENABLE_WEB_CODECS` is on in
 `tests/fixtures/webcodecs.html`: encodes six coloured canvas frames with
 each codec, decodes them and checks the middle pixel; the JSON result is in
 `#result`.
+
+Verified on the X399 (24 Oct, wc112 build): VP8, VP9, H.264 `avc` (with
+its avcC description) and H.264 `annexb` each encoded six canvas frames
+(one key frame), decoded six pictures with the chunks' timestamps, and
+`AudioEncoder` stayed hidden. That build tagged decoded pictures BT.709,
+so colours came back shifted (red as 255/26/1); with BT.601, as the follow-up
+makes the default, every colour came back within 3 of the source on both
+VP8 and H.264.

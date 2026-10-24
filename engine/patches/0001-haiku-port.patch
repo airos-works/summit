@@ -60645,10 +60645,10 @@ index 0000000000000000000000000000000000000000..05c75290c9156bc056bd72c22f91991a
 +#endif // USE(LIBWEBRTC) && PLATFORM(HAIKU)
 diff --git a/Source/WebCore/platform/mediastream/libwebrtc/haiku/WebCodecsHaiku.cpp b/Source/WebCore/platform/mediastream/libwebrtc/haiku/WebCodecsHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..1e061a80bd307d4df3f7819560f9467d7c0a47a1
+index 0000000000000000000000000000000000000000..1d36bc7da3efbb37f60bd9b425e2643b9eb4b38a
 --- /dev/null
 +++ b/Source/WebCore/platform/mediastream/libwebrtc/haiku/WebCodecsHaiku.cpp
-@@ -0,0 +1,559 @@
+@@ -0,0 +1,568 @@
 +/*
 + * Copyright (C) 2026 Summit contributors.
 + *
@@ -60717,6 +60717,13 @@ index 0000000000000000000000000000000000000000..1e061a80bd307d4df3f7819560f9467d
 +        });
 +    }
 +    return std::nullopt;
++}
++
++// The colour space of I420 pictures converted from Haiku's RGB frames
++// (webRTCBufferFromVideoFrame), as WebRTC's outgoing pictures are tagged.
++static PlatformVideoColorSpace rec601ColorSpace()
++{
++    return { PlatformVideoColorPrimaries::Smpte170m, PlatformVideoTransferCharacteristics::Smpte170m, PlatformVideoMatrixCoefficients::Smpte170m, false };
 +}
 +
 +static bool isH264(const webrtc::SdpVideoFormat& format)
@@ -60887,7 +60894,9 @@ index 0000000000000000000000000000000000000000..1e061a80bd307d4df3f7819560f9467d
 +        if (m_isClosed)
 +            return 0;
 +        auto timing = m_pending.take(frame.rtp_timestamp());
-+        PlatformVideoColorSpace colorSpace = m_colorSpace.value_or(PlatformVideoColorSpace { PlatformVideoColorPrimaries::Bt709, PlatformVideoTransferCharacteristics::Bt709, PlatformVideoMatrixCoefficients::Bt709, false });
++        // Without a colour space from the page, pictures are BT.601, as VP8
++        // defines and as Haiku's frames are converted to I420 for encoding.
++        PlatformVideoColorSpace colorSpace = m_colorSpace.value_or(rec601ColorSpace());
 +        Ref<VideoFrame> videoFrame = videoFrameFromWebRTCBuffer(frame.video_frame_buffer(), MediaTime(timing.first, 1000000), VideoFrame::Rotation::None, WTF::move(colorSpace));
 +        m_outputCallback(VideoDecoder::DecodedFrame { WTF::move(videoFrame), timing.first, timing.second });
 +        return 0;
@@ -61129,7 +61138,7 @@ index 0000000000000000000000000000000000000000..1e061a80bd307d4df3f7819560f9467d
 +            configuration.visibleWidth = m_config.width;
 +            configuration.visibleHeight = m_config.height;
 +            configuration.description = WTF::move(description);
-+            configuration.colorSpace = PlatformVideoColorSpace { PlatformVideoColorPrimaries::Bt709, PlatformVideoTransferCharacteristics::Bt709, PlatformVideoMatrixCoefficients::Bt709, false };
++            configuration.colorSpace = rec601ColorSpace();
 +            m_descriptionCallback(WTF::move(configuration));
 +        }
 +        m_outputCallback({ WTF::move(bytes), image._frameType == webrtc::VideoFrameType::kVideoFrameKey, m_timestamp, m_duration, temporalIndex });
