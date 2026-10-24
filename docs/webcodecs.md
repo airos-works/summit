@@ -47,4 +47,5 @@ its avcC description) and H.264 `annexb` each encoded six canvas frames
 `AudioEncoder` stayed hidden. That build tagged decoded pictures BT.709,
 so colours came back shifted (red as 255/26/1); with BT.601, as the follow-up
 makes the default, every colour came back within 3 of the source on both
-VP8 and H.264.
+VP8 and H.264. The main build (90a6581) matched all six colours with every
+codec.
