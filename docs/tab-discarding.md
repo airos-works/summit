@@ -53,3 +53,8 @@ true` and the tabs' addresses; `tabs.query({discarded: true})` listed their
 titles; the least recently used tab was chosen without an id; selecting one
 loaded it again (`status: complete`); the shown tab and a missing tab were
 refused; the tab strip kept the unloaded tabs' titles.
+
+Unloading by itself was checked on the X399 (24 Oct, au116 build) with
+`SUMMIT_UNLOAD_BELOW_MIB=10000000 SUMMIT_UNLOAD_AFTER_S=20`: three
+background tabs were unloaded within 95 s, one a check, the shown tab kept
+its page and the unloaded ones their titles.
