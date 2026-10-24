@@ -107,12 +107,22 @@ class CancellableMenu final : public BPopUpMenu {
 public:
     CancellableMenu(const char* name, std::shared_ptr<std::atomic<bool>> cancelled);
     ~CancellableMenu() override;
+    // Sent to target when the menu opens (with "menu", a messenger to it) and
+    // when it goes (closed, chosen or not).
+    void SetNotices(const BMessenger& target, const BMessage& opened, const BMessage& closed)
+        { fNoticeTarget = target; fOpenedNotice = opened; fClosedNotice = closed; }
+    // Runs, in the menu's own thread, for a kMenuRefresh message sent to it.
+    void SetRefreshHook(std::function<void(BMenu*, const BMessage&)> hook) { fRefreshHook = std::move(hook); }
+    static constexpr uint32 kMenuRefresh = 'cmrf';
     void AttachedToWindow() override;
     void DetachedFromWindow() override;
     void MessageReceived(BMessage* message) override;
 private:
     std::shared_ptr<std::atomic<bool>> fCancelled;
     std::unique_ptr<BMessageRunner> fTimer;
+    BMessenger fNoticeTarget;
+    BMessage fOpenedNotice, fClosedNotice;
+    std::function<void(BMenu*, const BMessage&)> fRefreshHook;
 };
 // capturing: the page uses the camera, microphone or a screen (a red dot).
 // pinned: a small tab with only the icon, at the start of the strip.

@@ -392,6 +392,15 @@ private:
     void UpdateWindowList();
 #if SUMMIT_MODERN_WEBKIT
     void ShowPageContextMenu(const BMessage&);
+    // The menus API's items at the end of a page menu, refreshed while it is
+    // open (menus.refresh), and the menu's closing (menus.onHidden).
+    static void AddExtensionMenuItems(BMenu* menu, const BMessage& message, BHandler* target);
+    void RefreshPageMenuExtensions(const BMessage& message);
+    void PageMenuOpened(const BMessage& message);
+    void PageMenuClosed(const BMessage& message);
+    BMessenger fPageMenu;
+    int64 fPageMenuTab = 0;
+    uint64 fPageMenuSerial = 0;
     // Opens the current tab's Developer Tools, or brings them forward;
     // panel ("elements", "network"...) chooses what they show. request's
     // "pick" starts the element picker, its "inspect" (a point of the page

@@ -15,6 +15,9 @@ constexpr uint32 kToggleTabMute = 'tmut';
 constexpr uint32 kDiscardTab = 'tdsc';
 // Every 30 s: unload a long-unseen tab when memory is low (#116).
 constexpr uint32 kCheckMemory = 'tmem';
+// The page's context menu went ("serial" names it).
+constexpr uint32 kPageMenuClosed = 'pgmc';
+constexpr uint32 kPageMenuOpened = 'pgmo';
 constexpr uint32 kPinTab = 'tpin';
 constexpr uint32 kMoveTab = 'tmov';
 constexpr uint32 kTabDragOut = 'tdro';

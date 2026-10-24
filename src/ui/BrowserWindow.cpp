@@ -4803,6 +4803,9 @@ void BrowserWindow::MessageReceived(BMessage* message)
             IconLoaded(*message);
             break;
         case B_WEBKIT_CONTEXT_MENU: ShowPageContextMenu(*message); break;
+        case B_WEBKIT_CONTEXT_MENU_EXTENSIONS: RefreshPageMenuExtensions(*message); break;
+        case kPageMenuOpened: PageMenuOpened(*message); break;
+        case kPageMenuClosed: PageMenuClosed(*message); break;
         case B_WEBKIT_NEW_PAGE_REQUESTED: NewPageRequested(*message); break;
         case B_WEBKIT_LINK_OPEN_REQUESTED: LinkOpenRequested(*message); break;
         case B_WEBKIT_LINK_HOVERED: LinkHovered(*message); break;
@@ -5045,7 +5048,11 @@ void BrowserWindow::ShowPageContextMenu(const BMessage& message)
     BPoint where;
     if (message.FindMessenger("view", &sender) != B_OK || message.FindPoint("where", &where) != B_OK) return;
     auto* tab = FindTab(sender);
-    if (!tab || tab->id != fSelected) return;
+    if (!tab) return;
+    if (tab->id != fSelected) {
+        tab->view->ContextMenuClosed();
+        return;
+    }
     const std::string link = message.GetString("link_url", "");
     const std::string image = message.GetString("image_url", "");
     const std::string media = message.GetString("media_url", "");
@@ -5202,8 +5209,32 @@ void BrowserWindow::ShowPageContextMenu(const BMessage& message)
     inspect->AddString("panel", "elements");
     inspect->AddPoint("inspect", where);
     menu->AddItem(new BMenuItem("Inspect Element", inspect));
+    // Extensions' items come last, so menus.refresh can replace them in the
+    // menu's own thread (the window learns its messenger when it opens).
+    const int32 extensionsStart = menu->CountItems();
+    AddExtensionMenuItems(menu, message, this);
+    fPageMenu = BMessenger();
+    fPageMenuTab = tab->id;
+    BMessage opened(kPageMenuOpened), closed(kPageMenuClosed);
+    opened.AddUInt64("serial", ++fPageMenuSerial);
+    closed.AddUInt64("serial", fPageMenuSerial);
+    menu->SetNotices(BMessenger(this), opened, closed);
+    menu->SetRefreshHook([extensionsStart, target = BMessenger(this)](BMenu* open, const BMessage& refreshed) {
+        while (open->CountItems() > extensionsStart) delete open->RemoveItem(extensionsStart);
+        BLooper* looper = nullptr;
+        auto* handler = target.Target(&looper);
+        AddExtensionMenuItems(open, refreshed, handler ? handler : looper);
+    });
+    menu->SetTargetForItems(this);
+    menu->SetAsyncAutoDestruct(true);
+    menu->Go(tab->view->ConvertToScreen(where), true, false, true);
+}
+
+void BrowserWindow::AddExtensionMenuItems(BMenu* menu, const BMessage& message, BHandler* target)
+{
     // Items extensions add with the menus API, under the extension's name
     // unless it has just one (as Safari shows them).
+    auto separate = [menu] { if (menu->CountItems() && !dynamic_cast<BSeparatorItem*>(menu->ItemAt(menu->CountItems() - 1))) menu->AddSeparatorItem(); };
     std::function<void(BMenu*, const BMessage&)> addExtensionItems = [&](BMenu* into, const BMessage& from) {
         BMessage entry;
         for (int32 i = 0; from.FindMessage("item", i, &entry) == B_OK; ++i) {
@@ -5218,7 +5249,7 @@ void BrowserWindow::ShowPageContextMenu(const BMessage& message)
                 auto* invocation = new BMessage(kExtensionMenuItem);
                 invocation->AddUInt64("token", entry.GetUInt64("token", 0));
                 item = new BMenuItem(title.c_str(), invocation);
-                item->SetTarget(this);
+                item->SetTarget(target);
                 item->SetMarked(entry.GetBool("checkable", false) && entry.GetBool("checked", false));
             }
             item->SetEnabled(entry.GetBool("enabled", true));
@@ -5238,9 +5269,32 @@ void BrowserWindow::ShowPageContextMenu(const BMessage& message)
             menu->AddItem(new BMenuItem(submenu));
         }
     }
-    menu->SetTargetForItems(this);
-    menu->SetAsyncAutoDestruct(true);
-    menu->Go(tab->view->ConvertToScreen(where), true, false, true);
+    for (int32 i = 0; i < menu->CountItems(); ++i)
+        if (!menu->ItemAt(i)->Target()) menu->ItemAt(i)->SetTarget(target);
+}
+
+void BrowserWindow::RefreshPageMenuExtensions(const BMessage& message)
+{
+    // menus.refresh while the page's menu is open: its extension items
+    // again, rebuilt by the menu itself (a gone menu's messenger fails).
+    BMessenger sender;
+    auto* tab = message.FindMessenger("view", &sender) == B_OK ? FindTab(sender) : nullptr;
+    if (!tab || fPageMenuTab != tab->id || !fPageMenu.IsValid()) return;
+    BMessage refresh(message);
+    refresh.what = CancellableMenu::kMenuRefresh;
+    fPageMenu.SendMessage(&refresh);
+}
+
+void BrowserWindow::PageMenuOpened(const BMessage& message)
+{
+    if (message.GetUInt64("serial", 0) == fPageMenuSerial) message.FindMessenger("menu", &fPageMenu);
+}
+
+void BrowserWindow::PageMenuClosed(const BMessage& message)
+{
+    if (message.GetUInt64("serial", 0) != fPageMenuSerial) return;
+    fPageMenu = BMessenger();
+    if (auto* tab = FindTabByID(fPageMenuTab)) tab->view->ContextMenuClosed();
 }
 
 // The inspector's name for the tab's page, which a session that is not the

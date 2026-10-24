@@ -488,12 +488,20 @@ CancellableMenu::CancellableMenu(const char* name, std::shared_ptr<std::atomic<b
         return static_cast<std::atomic<bool>*>(state)->load();
     }, fCancelled.get());
 }
-CancellableMenu::~CancellableMenu() = default;
+CancellableMenu::~CancellableMenu()
+{
+    if (fNoticeTarget.IsValid()) fNoticeTarget.SendMessage(&fClosedNotice);
+}
 void CancellableMenu::AttachedToWindow()
 {
     BPopUpMenu::AttachedToWindow();
     BMessage tick('cmnt');
     fTimer = std::make_unique<BMessageRunner>(BMessenger(this), &tick, 50000);
+    if (fNoticeTarget.IsValid() && fOpenedNotice.what) {
+        BMessage opened(fOpenedNotice);
+        opened.AddMessenger("menu", BMessenger(this));
+        fNoticeTarget.SendMessage(&opened);
+    }
 }
 void CancellableMenu::DetachedFromWindow()
 {
@@ -506,6 +514,10 @@ void CancellableMenu::MessageReceived(BMessage* message)
         // The tracking hook is not consulted while the menu waits for the
         // mouse; Escape wakes it (as the extension actions menu does).
         if (fCancelled->load()) { const char escape = B_ESCAPE; KeyDown(&escape, 1); }
+        return;
+    }
+    if (message->what == kMenuRefresh) {
+        if (fRefreshHook) fRefreshHook(this, *message);
         return;
     }
     BPopUpMenu::MessageReceived(message);

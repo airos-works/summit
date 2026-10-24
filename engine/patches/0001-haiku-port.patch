@@ -80425,10 +80425,10 @@ index e1e00f448cdfe28b28e6ac184bdb9025666411de..bbe23d2c25f24c8c9031515e563fee8b
  
  [Nested] enum class WebKit::WebExtension::InjectionTime : uint8_t {
 diff --git a/Source/WebKit/Shared/Extensions/WebExtensionEventListenerType.h b/Source/WebKit/Shared/Extensions/WebExtensionEventListenerType.h
-index c6ffb3e89eeaffe26af5d76690da641e7b65c4c0..0e417234e1c57d559fefbe05630939950c8c503c 100644
+index c6ffb3e89eeaffe26af5d76690da641e7b65c4c0..f44e2cd91f602e5e5c680c9b2b8fd0d87368a257 100644
 --- a/Source/WebKit/Shared/Extensions/WebExtensionEventListenerType.h
 +++ b/Source/WebKit/Shared/Extensions/WebExtensionEventListenerType.h
-@@ -99,11 +99,87 @@ enum class WebExtensionEventListenerType : uint8_t {
+@@ -99,11 +99,93 @@ enum class WebExtensionEventListenerType : uint8_t {
      WindowsOnCreated,
      WindowsOnFocusChanged,
      WindowsOnRemoved,
@@ -80457,6 +80457,8 @@ index c6ffb3e89eeaffe26af5d76690da641e7b65c4c0..0e417234e1c57d559fefbe0563093995
 +    BookmarksOnChanged,
 +    BookmarksOnMoved,
 +    SessionsOnChanged,
++    MenusOnShown,
++    MenusOnHidden,
 +#endif
  };
  
@@ -80512,15 +80514,19 @@ index c6ffb3e89eeaffe26af5d76690da641e7b65c4c0..0e417234e1c57d559fefbe0563093995
 +        return "onMoved"_s;
 +    case WebExtensionEventListenerType::SessionsOnChanged:
 +        return "onChanged"_s;
++    case WebExtensionEventListenerType::MenusOnShown:
++        return "onShown"_s;
++    case WebExtensionEventListenerType::MenusOnHidden:
++        return "onHidden"_s;
 +#endif
      case WebExtensionEventListenerType::Unknown:
          return nullString();
      case WebExtensionEventListenerType::ActionOnClicked:
 diff --git a/Source/WebKit/Shared/Extensions/WebExtensionEventListenerType.serialization.in b/Source/WebKit/Shared/Extensions/WebExtensionEventListenerType.serialization.in
-index 66271809620c823d465be4cee34c1806ab422cbe..d02a617c4f510608eee0a7284e5c5d27a2e6dbf8 100644
+index 66271809620c823d465be4cee34c1806ab422cbe..a554e9ef3241b33354fad882d1dd8ac0e2030810 100644
 --- a/Source/WebKit/Shared/Extensions/WebExtensionEventListenerType.serialization.in
 +++ b/Source/WebKit/Shared/Extensions/WebExtensionEventListenerType.serialization.in
-@@ -90,6 +90,32 @@ enum class WebKit::WebExtensionEventListenerType : uint8_t {
+@@ -90,6 +90,34 @@ enum class WebKit::WebExtensionEventListenerType : uint8_t {
      WindowsOnCreated,
      WindowsOnFocusChanged,
      WindowsOnRemoved,
@@ -80549,6 +80555,8 @@ index 66271809620c823d465be4cee34c1806ab422cbe..d02a617c4f510608eee0a7284e5c5d27
 +    BookmarksOnChanged,
 +    BookmarksOnMoved,
 +    SessionsOnChanged,
++    MenusOnShown,
++    MenusOnHidden,
 +#endif
  };
  
@@ -88904,10 +88912,10 @@ index 0000000000000000000000000000000000000000..d28a6cad6339adf79b155cf974e85bfd
 +
 diff --git a/Source/WebKit/UIProcess/API/haiku/WebKitView.cpp b/Source/WebKit/UIProcess/API/haiku/WebKitView.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..c63a67bb5f773f6dc25af58f7b1ac241ad347c37
+index 0000000000000000000000000000000000000000..cd4bc7529d812074c6e5915950a4f39551b5fe06
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/API/haiku/WebKitView.cpp
-@@ -0,0 +1,1451 @@
+@@ -0,0 +1,1467 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#include "config.h"
@@ -89420,6 +89428,22 @@ index 0000000000000000000000000000000000000000..c63a67bb5f773f6dc25af58f7b1ac241
 +        return;
 +    WTF::RunLoop::mainSingleton().dispatch([newPageRequest] {
 +        declineNewPageHaiku(newPageRequest);
++    });
++}
++
++void BWebKitView::ContextMenuClosed()
++{
++    if (!webKitInitializedHaiku || InitCheck() != B_OK)
++        return;
++    WTF::RunLoop::mainSingleton().dispatch([state = m_state] {
++#if ENABLE(WK_WEB_EXTENSIONS)
++        if (state->closed || !state->client)
++            return;
++        if (RefPtr page = state->client->page())
++            contextMenuClosedHaiku(*page);
++#else
++        UNUSED_PARAM(state);
++#endif
 +    });
 +}
 +
@@ -90361,10 +90385,10 @@ index 0000000000000000000000000000000000000000..c63a67bb5f773f6dc25af58f7b1ac241
 +}
 diff --git a/Source/WebKit/UIProcess/API/haiku/WebKitView.h b/Source/WebKit/UIProcess/API/haiku/WebKitView.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..a2cccd2d1f26eca0db1bd658797fabbdd572225a
+index 0000000000000000000000000000000000000000..f1281c6d2945f9acb7954cbdc59fcb4c38376220
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/API/haiku/WebKitView.h
-@@ -0,0 +1,442 @@
+@@ -0,0 +1,449 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#pragma once
@@ -90515,6 +90539,11 @@ index 0000000000000000000000000000000000000000..a2cccd2d1f26eca0db1bd658797fabbd
 +    // PerformContextMenuExtensionItem), nested "item"s (a submenu) or
 +    // "separator".
 +    B_WEBKIT_CONTEXT_MENU = 'wctx',
++    // While that menu is open, an extension rebuilt its items (menus.refresh):
++    // fields "view" and the "extension" messages, as for B_WEBKIT_CONTEXT_MENU;
++    // the host replaces the menu's extension items with them. Call
++    // ContextMenuClosed() when the menu closes (menus.onHidden).
++    B_WEBKIT_CONTEXT_MENU_EXTENSIONS = 'wcme',
 +    // A page asked for a new page: window.open(), or a link or form with a
 +    // target. Fields: "view" (the opener), "identifier" (uint64), "url" (may be
 +    // about:blank), "popup" (bool: the page asked for a sized pop-up window),
@@ -90575,6 +90604,8 @@ index 0000000000000000000000000000000000000000..a2cccd2d1f26eca0db1bd658797fabbd
 +    // Runs an extension item chosen from the last B_WEBKIT_CONTEXT_MENU, as
 +    // a user action. Tokens of older menus are ignored. Any thread.
 +    static void PerformContextMenuExtensionItem(uint64 token);
++    // The host closed the menu of the last B_WEBKIT_CONTEXT_MENU, chosen or not.
++    void ContextMenuClosed();
 +    ~BWebKitView() override;
 +    status_t InitCheck() const;
 +    void LoadURL(const char*);
@@ -96716,7 +96747,7 @@ index 8947f24ec9866c39f206aab464ec21c5d4213b95..b36f80023077ec3bc5680f7214a823a4
  
  #endif // ENABLE(WK_WEB_EXTENSIONS)
 diff --git a/Source/WebKit/UIProcess/Extensions/WebExtensionContext.h b/Source/WebKit/UIProcess/Extensions/WebExtensionContext.h
-index 5f8454dd5897a49ffba794e50fb04b7257ad2291..2c1c5518d2e2c10aa87af8f4b62c1c9822d03c0a 100644
+index 5f8454dd5897a49ffba794e50fb04b7257ad2291..5a60bb1688a0be64eb36f62beea126e727acd431 100644
 --- a/Source/WebKit/UIProcess/Extensions/WebExtensionContext.h
 +++ b/Source/WebKit/UIProcess/Extensions/WebExtensionContext.h
 @@ -40,6 +40,9 @@
@@ -96976,7 +97007,19 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..2c1c5518d2e2c10aa87af8f4b62c1c98
      void resetCommands();
  
  #if TARGET_OS_IPHONE
-@@ -638,6 +775,10 @@ public:
+@@ -611,6 +748,11 @@ public:
+     NSArray *platformMenuItems(const WebExtensionTab&) const;
+ 
+     const MenuItemVector& mainMenuItems() const LIFETIME_BOUND { return m_mainMenuItems; }
++#if PLATFORM(HAIKU)
++    // menus.onShown and onHidden, when the host shows and closes a context menu (WebView.cpp).
++    void fireMenusShownEventHaiku(const String& infoJSON, const std::optional<WebExtensionTabParameters>&);
++    void fireMenusHiddenEventHaiku();
++#endif
+     WebExtensionMenuItem* menuItem(const String& identifier) const;
+     void performMenuItem(WebExtensionMenuItem&, const WebExtensionMenuItemContextParameters&, UserTriggered = UserTriggered::No);
+ 
+@@ -638,6 +780,10 @@ public:
      void sendTestFinished(id argument);
      void reloadBackgroundContentForTesting();
      void unloadBackgroundContentForTesting();
@@ -96987,7 +97030,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..2c1c5518d2e2c10aa87af8f4b62c1c98
  #endif
  
      URL backgroundContentURL();
-@@ -646,6 +787,11 @@ public:
+@@ -646,6 +792,11 @@ public:
  #if ENABLE(WK_WEB_EXTENSIONS_OFFSCREEN) && PLATFORM(COCOA)
      WKWebView *offscreenWebView() const { return m_offscreenWebView.get(); }
      bool isOffscreenWebView(WKWebView *webView) const { return webView == m_offscreenWebView; }
@@ -96999,7 +97042,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..2c1c5518d2e2c10aa87af8f4b62c1c98
  #endif
      bool safeToLoadBackgroundContent() const { return m_safeToLoadBackgroundContent; }
  
-@@ -664,6 +810,7 @@ public:
+@@ -664,6 +815,7 @@ public:
      void runOpenPanel(WKWebView *, WKOpenPanelParameters *, void (^)(NSArray *));
  #endif
  
@@ -97007,7 +97050,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..2c1c5518d2e2c10aa87af8f4b62c1c98
  #if PLATFORM(COCOA)
      void sendNativeMessage(const String& applicationID, id message, CompletionHandler<void(std::expected<RetainPtr<id>, WebExtensionError>&&)>&&);
  #endif
-@@ -709,7 +856,11 @@ public:
+@@ -709,7 +861,11 @@ public:
  
      WebsiteDataStore* websiteDataStore(std::optional<PAL::SessionID> = std::nullopt) const;
  
@@ -97019,7 +97062,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..2c1c5518d2e2c10aa87af8f4b62c1c98
  
      void loadBackgroundContent(CompletionHandler<void(RefPtr<API::Error>)>&&);
  
-@@ -758,11 +909,18 @@ private:
+@@ -758,11 +914,18 @@ private:
  #if PLATFORM(COCOA)
      NSDictionary *currentState() const;
      NSDictionary *readStateFromStorage();
@@ -97039,7 +97082,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..2c1c5518d2e2c10aa87af8f4b62c1c98
  
      void loadStorageAccessLevelsFromStorage();
      void saveStorageAccessLevelsToStorage();
-@@ -771,6 +929,10 @@ private:
+@@ -771,6 +934,10 @@ private:
      void moveLocalStorageIfNeeded(const URL& previousBaseURL, CompletionHandler<void()>&&);
      void removeStaleExtensionWebsiteData();
  
@@ -97050,7 +97093,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..2c1c5518d2e2c10aa87af8f4b62c1c98
      void permissionsDidChange(PermissionNotification, const PermissionsSet&);
      void permissionsDidChange(PermissionNotification, const MatchPatternSet&);
  
-@@ -806,6 +968,7 @@ private:
+@@ -806,6 +973,7 @@ private:
      void saveBackgroundPageListenersToStorage();
  
      void performTasksAfterBackgroundContentLoads();
@@ -97058,7 +97101,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..2c1c5518d2e2c10aa87af8f4b62c1c98
  
  #ifdef NDEBUG
      // This is method is a no-op in release builds since it has a performance impact with little benefit to release builds.
-@@ -854,6 +1017,9 @@ private:
+@@ -854,6 +1022,9 @@ private:
      void loadDeclarativeNetRequestRules(CompletionHandler<void(bool)>&&);
      void compileDeclarativeNetRequestRules(NSDictionary *, CompletionHandler<void(bool)>&&);
      void unloadDeclarativeNetRequestState();
@@ -97068,7 +97111,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..2c1c5518d2e2c10aa87af8f4b62c1c98
      String declarativeNetRequestContentRuleListFilePath();
  
      // Updating user content controllers with new rules.
-@@ -892,6 +1058,12 @@ private:
+@@ -892,6 +1063,12 @@ private:
      Ref<WebExtensionStorageSQLiteStore> syncStorageStore();
  
      void fetchCookies(WebsiteDataStore&, const URL&, const WebExtensionCookieFilterParameters&, CompletionHandler<void(std::expected<Vector<WebExtensionCookieParameters>, WebExtensionError>&&)>&&);
@@ -97081,7 +97124,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..2c1c5518d2e2c10aa87af8f4b62c1c98
  
      // Action APIs
      bool isActionMessageAllowed(IPC::Decoder&);
-@@ -903,6 +1075,10 @@ private:
+@@ -903,6 +1080,10 @@ private:
      void actionOpenPopup(WebPageProxyIdentifier, std::optional<WebExtensionWindowIdentifier>, std::optional<WebExtensionTabIdentifier>, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
      void actionGetBadgeText(std::optional<WebExtensionWindowIdentifier>, std::optional<WebExtensionTabIdentifier>, CompletionHandler<void(std::expected<String, WebExtensionError>&&)>&&);
      void actionSetBadgeText(std::optional<WebExtensionWindowIdentifier>, std::optional<WebExtensionTabIdentifier>, const String& text, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
@@ -97092,7 +97135,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..2c1c5518d2e2c10aa87af8f4b62c1c98
      void actionGetEnabled(std::optional<WebExtensionWindowIdentifier>, std::optional<WebExtensionTabIdentifier>, CompletionHandler<void(std::expected<bool, WebExtensionError>&&)>&&);
      void actionSetEnabled(std::optional<WebExtensionTabIdentifier>, bool enabled, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
      void fireActionClickedEventIfNeeded(WebExtensionTab*);
-@@ -934,6 +1110,11 @@ private:
+@@ -934,6 +1115,11 @@ private:
      // Commands APIs
      bool isCommandsMessageAllowed(IPC::Decoder&);
      void commandsGetAll(CompletionHandler<void(Vector<WebExtensionCommandParameters>)>&&);
@@ -97104,7 +97147,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..2c1c5518d2e2c10aa87af8f4b62c1c98
      void fireCommandEventIfNeeded(const WebExtensionCommand&, WebExtensionTab*);
      void fireCommandChangedEventIfNeeded(const WebExtensionCommand&, const String& oldShortcut);
  
-@@ -944,7 +1125,9 @@ private:
+@@ -944,7 +1130,9 @@ private:
      void cookiesSet(std::optional<PAL::SessionID>, const WebExtensionCookieParameters&, CompletionHandler<void(std::expected<std::optional<WebExtensionCookieParameters>, WebExtensionError>&&)>&&);
      void cookiesRemove(std::optional<PAL::SessionID>, const String& name, const URL&, CompletionHandler<void(std::expected<std::optional<WebExtensionCookieParameters>, WebExtensionError>&&)>&&);
      void cookiesGetAllCookieStores(CompletionHandler<void(std::expected<HashMap<PAL::SessionID, Vector<WebExtensionTabIdentifier>>, WebExtensionError>&&)>&&);
@@ -97114,7 +97157,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..2c1c5518d2e2c10aa87af8f4b62c1c98
  
      // DeclarativeNetRequest APIs
      bool isDeclarativeNetRequestMessageAllowed(IPC::Decoder&);
-@@ -960,6 +1143,27 @@ private:
+@@ -960,6 +1148,27 @@ private:
      void declarativeNetRequestUpdateDynamicRules(String&& rulesToAddJSON, Vector<double>&& ruleIDsToDelete, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
      void declarativeNetRequestGetSessionRules(Vector<double>&& filter, CompletionHandler<void(std::expected<String, WebExtensionError>&&)>&&);
      void declarativeNetRequestUpdateSessionRules(String&& rulesToAddJSON, Vector<double>&& ruleIDsToDelete, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
@@ -97142,7 +97185,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..2c1c5518d2e2c10aa87af8f4b62c1c98
  
  #if ENABLE(INSPECTOR_EXTENSIONS)
      // DevTools APIs
-@@ -975,12 +1179,20 @@ private:
+@@ -975,12 +1184,22 @@ private:
  
      // Extension APIs
      void extensionIsAllowedIncognitoAccess(CompletionHandler<void(bool)>&&);
@@ -97159,11 +97202,13 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..2c1c5518d2e2c10aa87af8f4b62c1c98
 +    void menusCreateWithCallback(const WebExtensionMenuItemParameters&, bool explicitIdentifier, const std::optional<WTF::UUID>&, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
 +    void menusUpdateWithCallback(const String&, const WebExtensionMenuItemParameters&, bool callbackSpecified, const std::optional<WTF::UUID>&, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
 +    void removeMenusClickHandlers(const Vector<WTF::UUID>&);
++    // menus.refresh: the open context menu's items again (WebView.cpp).
++    void menusRefreshHaiku(CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
 +#endif
      void menusCreate(const WebExtensionMenuItemParameters&, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
      void menusUpdate(const String& identifier, const WebExtensionMenuItemParameters&, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
      void menusRemove(const String& identifier, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
-@@ -1009,9 +1221,18 @@ private:
+@@ -1009,9 +1228,18 @@ private:
  
      // Permissions APIs
      void permissionsGetAll(CompletionHandler<void(Vector<String>&& permissions, Vector<String>&& origins)>&&);
@@ -97182,7 +97227,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..2c1c5518d2e2c10aa87af8f4b62c1c98
      void firePermissionsEventListenerIfNecessary(WebExtensionEventListenerType, const PermissionsSet&, const MatchPatternSet&);
  
      // Port APIs
-@@ -1021,7 +1242,7 @@ private:
+@@ -1021,7 +1249,7 @@ private:
      void disconnectPortsForPage(WebPageProxy&);
      void addPorts(WebExtensionContentWorldType sourceContentWorldType, WebExtensionContentWorldType targetContentWorldType, WebExtensionPortChannelIdentifier, HashCountedSet<WebPageProxyIdentifier>&&);
      void removePort(WebExtensionContentWorldType sourceContentWorldType, WebExtensionContentWorldType targetContentWorldType, WebExtensionPortChannelIdentifier, WebPageProxyIdentifier);
@@ -97191,7 +97236,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..2c1c5518d2e2c10aa87af8f4b62c1c98
      void removeNativePort(WebExtensionMessagePort&);
      unsigned openPortCount(WebExtensionContentWorldType, WebExtensionPortChannelIdentifier);
      bool isPortConnected(WebExtensionContentWorldType sourceContentWorldType, WebExtensionContentWorldType targetContentWorldType, WebExtensionPortChannelIdentifier);
-@@ -1030,13 +1251,27 @@ private:
+@@ -1030,13 +1258,27 @@ private:
      void firePortMessageEventsIfNeeded(WebExtensionContentWorldType, std::optional<WebPageProxyIdentifier>, WebExtensionPortChannelIdentifier, const String& messageJSON, bool userGesture);
      void fireQueuedPortMessageEventsIfNeeded(WebExtensionContentWorldType, WebExtensionPortChannelIdentifier);
      void sendQueuedNativePortMessagesIfNeeded(WebExtensionPortChannelIdentifier);
@@ -97220,7 +97265,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..2c1c5518d2e2c10aa87af8f4b62c1c98
      void runtimeConnect(const String& extensionID, WebExtensionPortChannelIdentifier, const String& name, const WebExtensionMessageSenderParameters&, bool userGesture, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
      void runtimeSendNativeMessage(const String& applicationID, const String& messageJSON, CompletionHandler<void(std::expected<String, WebExtensionError>&&)>&&);
      void runtimeConnectNative(const String& applicationID, WebExtensionPortChannelIdentifier, WebPageProxyIdentifier, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
-@@ -1055,6 +1290,15 @@ private:
+@@ -1055,6 +1297,15 @@ private:
      void scriptingGetRegisteredScripts(const Vector<String>&, CompletionHandler<void(std::expected<Vector<WebExtensionRegisteredScriptParameters>, WebExtensionError>&&)>&&);
      void scriptingUnregisterContentScripts(const Vector<String>&, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
      bool createInjectedContentForScripts(const Vector<WebExtensionRegisteredScriptParameters>&, WebExtensionDynamicScripts::WebExtensionRegisteredScript::FirstTimeRegistration, DynamicInjectedContentsMap&, NSString *callingAPIName, NSString **errorMessage);
@@ -97236,7 +97281,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..2c1c5518d2e2c10aa87af8f4b62c1c98
  
      // Sidebar APIs
  #if ENABLE(WK_WEB_EXTENSIONS_SIDEBAR)
-@@ -1088,6 +1332,9 @@ private:
+@@ -1088,6 +1339,9 @@ private:
      void tabsCreate(std::optional<WebPageProxyIdentifier>, const WebExtensionTabParameters&, CompletionHandler<void(std::expected<std::optional<WebExtensionTabParameters>, WebExtensionError>&&)>&&);
      void tabsUpdate(WebPageProxyIdentifier, std::optional<WebExtensionTabIdentifier>, const WebExtensionTabParameters&, CompletionHandler<void(std::expected<std::optional<WebExtensionTabParameters>, WebExtensionError>&&)>&&);
      void tabsDuplicate(WebExtensionTabIdentifier, const WebExtensionTabParameters&, CompletionHandler<void(std::expected<std::optional<WebExtensionTabParameters>, WebExtensionError>&&)>&&);
@@ -97246,7 +97291,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..2c1c5518d2e2c10aa87af8f4b62c1c98
      void tabsGet(WebExtensionTabIdentifier, CompletionHandler<void(std::expected<std::optional<WebExtensionTabParameters>, WebExtensionError>&&)>&&);
      void tabsGetCurrent(WebPageProxyIdentifier, CompletionHandler<void(std::expected<std::optional<WebExtensionTabParameters>, WebExtensionError>&&)>&&);
      void tabsQuery(WebPageProxyIdentifier, const WebExtensionTabQueryParameters&, CompletionHandler<void(std::expected<Vector<WebExtensionTabParameters>, WebExtensionError>&&)>&&);
-@@ -1103,6 +1350,9 @@ private:
+@@ -1103,6 +1357,9 @@ private:
      void tabsSetZoom(WebPageProxyIdentifier, std::optional<WebExtensionTabIdentifier>, double, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
      void tabsMove(Vector<WebExtensionTabIdentifier>, std::optional<WebExtensionWindowIdentifier>, double, CompletionHandler<void(std::expected<Vector<WebExtensionTabParameters>, WebExtensionError>&&)>&&);
      void tabsRemove(Vector<WebExtensionTabIdentifier>, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
@@ -97256,7 +97301,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..2c1c5518d2e2c10aa87af8f4b62c1c98
      void tabsExecuteScript(WebPageProxyIdentifier, std::optional<WebExtensionTabIdentifier>, const WebExtensionScriptInjectionParameters&, bool userGesture, CompletionHandler<void(std::expected<Vector<WebExtensionScriptInjectionResultParameters>, WebExtensionError>&&)>&&);
      void tabsInsertCSS(WebPageProxyIdentifier, std::optional<WebExtensionTabIdentifier>, const WebExtensionScriptInjectionParameters&, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
      void tabsRemoveCSS(WebPageProxyIdentifier, std::optional<WebExtensionTabIdentifier>, const WebExtensionScriptInjectionParameters&, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
-@@ -1133,8 +1383,20 @@ private:
+@@ -1133,8 +1390,20 @@ private:
      void fireWindowsEventIfNeeded(WebExtensionEventListenerType, std::optional<WebExtensionWindowParameters>);
  
      // webRequest support.
@@ -97279,7 +97324,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..2c1c5518d2e2c10aa87af8f4b62c1c98
  
      // IPC::MessageReceiver.
      void didReceiveMessage(IPC::Connection&, IPC::Decoder&) override;
-@@ -1145,12 +1407,31 @@ private:
+@@ -1145,12 +1414,31 @@ private:
  
      mutable Markable<WebExtensionContextIdentifier> m_privilegedIdentifier;
  
@@ -97311,7 +97356,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..2c1c5518d2e2c10aa87af8f4b62c1c98
  #endif
      Vector<Ref<API::Error>> m_errors;
  
-@@ -1169,6 +1450,15 @@ private:
+@@ -1169,6 +1457,15 @@ private:
  
      RefPtr<API::ContentWorld> m_contentScriptWorld;
  
@@ -97327,7 +97372,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..2c1c5518d2e2c10aa87af8f4b62c1c98
      PermissionsMap m_grantedPermissions;
      PermissionsMap m_deniedPermissions;
  
-@@ -1194,6 +1484,14 @@ private:
+@@ -1194,6 +1491,14 @@ private:
      EventListenerTypeCountedSet m_backgroundContentEventListeners;
      EventListenerTypeFrameMap m_eventListenerFrames;
  
@@ -97342,7 +97387,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..2c1c5518d2e2c10aa87af8f4b62c1c98
      bool m_shouldFireStartupEvent { false };
      InstallReason m_installReason { InstallReason::None };
      String m_previousVersion;
-@@ -1216,6 +1514,16 @@ private:
+@@ -1216,6 +1521,16 @@ private:
  #elif ENABLE(2022_GLIB_API)
      GRefPtr<WebKitWebView> m_backgroundWebView;
      GWeakPtr<WebKitWebExtensionContext> m_delegate;
@@ -97359,7 +97404,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..2c1c5518d2e2c10aa87af8f4b62c1c98
  #endif
      Variant<std::monostate, Ref<ProcessThrottlerActivity>, Ref<ProcessActivityGroup>> m_backgroundWebViewActivity;
      RefPtr<API::Error> m_backgroundContentLoadError;
-@@ -1237,6 +1545,7 @@ private:
+@@ -1237,6 +1552,7 @@ private:
      HashMap<Ref<WebExtensionMatchPattern>, UserScriptVector> m_injectedScriptsPerPatternMap;
      HashMap<Ref<WebExtensionMatchPattern>, UserStyleSheetVector> m_injectedStyleSheetsPerPatternMap;
  
@@ -97367,7 +97412,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..2c1c5518d2e2c10aa87af8f4b62c1c98
      HashMap<String, Ref<WebExtensionDynamicScripts::WebExtensionRegisteredScript>> m_registeredScriptsMap;
      RefPtr<WebExtensionRegisteredScriptsSQLiteStore> m_registeredContentScriptsStorage;
  
-@@ -1256,11 +1565,20 @@ private:
+@@ -1256,11 +1572,20 @@ private:
  #endif // ENABLE(WK_WEB_EXTENSIONS_SIDEBAR)
  
      PortCountedSet m_ports;
@@ -97389,7 +97434,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..2c1c5518d2e2c10aa87af8f4b62c1c98
      mutable WindowIdentifierVector m_windowOrderVector;
      mutable std::optional<WebExtensionWindowIdentifier> m_focusedWindowIdentifier;
  
-@@ -1276,6 +1594,12 @@ private:
+@@ -1276,6 +1601,12 @@ private:
      bool m_populatedCommands { false };
  
      String m_declarativeNetRequestContentRuleListFilePath;
@@ -97402,7 +97447,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..2c1c5518d2e2c10aa87af8f4b62c1c98
      DeclarativeNetRequestMatchedRuleVector m_matchedRules;
      RefPtr<WebExtensionDeclarativeNetRequestSQLiteStore> m_declarativeNetRequestDynamicRulesStore;
      RefPtr<WebExtensionDeclarativeNetRequestSQLiteStore> m_declarativeNetRequestSessionRulesStore;
-@@ -1283,6 +1607,9 @@ private:
+@@ -1283,6 +1614,9 @@ private:
      HashSet<double> m_sessionRulesIDs;
      HashSet<double> m_dynamicRulesIDs;
  
@@ -97412,7 +97457,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..2c1c5518d2e2c10aa87af8f4b62c1c98
      MenuItemMap m_menuItems;
      MenuItemVector m_mainMenuItems;
  
-@@ -1300,12 +1627,16 @@ private:
+@@ -1300,12 +1634,16 @@ private:
          String message;
  #if PLATFORM(COCOA)
          RetainPtr<id> argument;
@@ -97429,7 +97474,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..2c1c5518d2e2c10aa87af8f4b62c1c98
  
      Deque<TestMessage> m_testMessageQueue;
      Deque<TestMessage> m_testStartedQueue;
-@@ -1315,6 +1646,8 @@ private:
+@@ -1315,6 +1653,8 @@ private:
      void sendQueuedTestMessagesIfNeeded(WebExtensionEventListenerType);
  #if PLATFORM(COCOA)
      void addTestMessageToQueue(const String& message, id argument, WebExtensionEventListenerType);
@@ -97439,10 +97484,10 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..2c1c5518d2e2c10aa87af8f4b62c1c98
  };
  
 diff --git a/Source/WebKit/UIProcess/Extensions/WebExtensionContext.messages.in b/Source/WebKit/UIProcess/Extensions/WebExtensionContext.messages.in
-index 6581f34180846663e2a8be51064e43c2d8173b64..8792fa78755887c3a6990b271d21e95a128e8af4 100644
+index 6581f34180846663e2a8be51064e43c2d8173b64..c8b2a388e74b69778ad1ab42b5ee9a8e98913984 100644
 --- a/Source/WebKit/UIProcess/Extensions/WebExtensionContext.messages.in
 +++ b/Source/WebKit/UIProcess/Extensions/WebExtensionContext.messages.in
-@@ -31,10 +31,140 @@
+@@ -31,10 +31,141 @@
      DispatchedTo=UI
  ]
  messages -> WebExtensionContext {
@@ -97538,6 +97583,7 @@ index 6581f34180846663e2a8be51064e43c2d8173b64..8792fa78755887c3a6990b271d21e95a
 +    [Validator=isMenusMessageAllowed] MenusUpdateWithCallback(String identifier, struct WebKit::WebExtensionMenuItemParameters parameters, bool callbackSpecified, std::optional<WTF::UUID> callbackIdentifier) -> (std::expected<void, WebKit::WebExtensionError> result)
 +    [Validator=isMenusMessageAllowed] MenusRemove(String identifier) -> (std::expected<void, WebKit::WebExtensionError> result)
 +    [Validator=isMenusMessageAllowed] MenusRemoveAll() -> (std::expected<void, WebKit::WebExtensionError> result)
++    [Validator=isMenusMessageAllowed] MenusRefreshHaiku() -> (std::expected<void, WebKit::WebExtensionError> result)
 +#endif
      // Runtime Error Reporting
      [Validator=isLoaded] DidEncounterScriptError(String message, String sourceURL, uint32_t lineNumber, uint32_t columnNumber, WebKit::WebExtensionContentWorldType worldType)
@@ -97584,7 +97630,7 @@ index 6581f34180846663e2a8be51064e43c2d8173b64..8792fa78755887c3a6990b271d21e95a
      // Action APIs
      [Validator=isActionMessageAllowed] ActionGetTitle(std::optional<WebKit::WebExtensionWindowIdentifier> windowIdentifier, std::optional<WebKit::WebExtensionTabIdentifier> tabIdentifier) -> (std::expected<String, WebKit::WebExtensionError> result)
      [Validator=isActionMessageAllowed] ActionSetTitle(std::optional<WebKit::WebExtensionWindowIdentifier> windowIdentifier, std::optional<WebKit::WebExtensionTabIdentifier> tabIdentifier, String title) -> (std::expected<void, WebKit::WebExtensionError> result)
-@@ -48,6 +178,33 @@ messages -> WebExtensionContext {
+@@ -48,6 +179,33 @@ messages -> WebExtensionContext {
      [Validator=isActionMessageAllowed] ActionSetEnabled(std::optional<WebKit::WebExtensionTabIdentifier> tabIdentifier, bool enabled) -> (std::expected<void, WebKit::WebExtensionError> result)
  #endif
  
@@ -97618,7 +97664,7 @@ index 6581f34180846663e2a8be51064e43c2d8173b64..8792fa78755887c3a6990b271d21e95a
      // Alarms APIs
      [Validator=isAlarmsMessageAllowed] AlarmsCreate(String name, Seconds initialInterval, Seconds repeatInterval) -> ()
      [Validator=isAlarmsMessageAllowed] AlarmsGet(String name) -> (struct std::optional<WebKit::WebExtensionAlarmParameters> alarmInfo)
-@@ -71,9 +228,6 @@ messages -> WebExtensionContext {
+@@ -71,9 +229,6 @@ messages -> WebExtensionContext {
      [Validator=isBookmarksMessageAllowed] BookmarksRemoveTree(String bookmarkId) -> (std::expected<void, WebKit::WebExtensionError> result)
  #endif // ENABLE(WK_WEB_EXTENSIONS_BOOKMARKS)
  
@@ -97628,7 +97674,7 @@ index 6581f34180846663e2a8be51064e43c2d8173b64..8792fa78755887c3a6990b271d21e95a
      // Cookies APIs
      [Validator=isCookiesMessageAllowed] CookiesGet(std::optional<PAL::SessionID> sessionID, String name, URL url) -> (std::expected<std::optional<WebKit::WebExtensionCookieParameters>, WebKit::WebExtensionError> result)
      [Validator=isCookiesMessageAllowed] CookiesGetAll(std::optional<PAL::SessionID> sessionID, URL url, struct WebKit::WebExtensionCookieFilterParameters filterParameters) -> (std::expected<Vector<WebKit::WebExtensionCookieParameters>, WebKit::WebExtensionError> result)
-@@ -100,8 +254,6 @@ messages -> WebExtensionContext {
+@@ -100,8 +255,6 @@ messages -> WebExtensionContext {
  #endif
  
      // Event APIs
@@ -97637,7 +97683,7 @@ index 6581f34180846663e2a8be51064e43c2d8173b64..8792fa78755887c3a6990b271d21e95a
  
      // Extensions APIs
      [Validator=isLoaded] ExtensionIsAllowedIncognitoAccess() -> (bool result)
-@@ -134,20 +286,10 @@ messages -> WebExtensionContext {
+@@ -134,20 +287,10 @@ messages -> WebExtensionContext {
      [Validator=isLoaded] PermissionsRequest(HashSet<String> permissions, HashSet<String> origins) -> (bool success)
      [Validator=isLoaded] PermissionsRemove(HashSet<String> permissions, HashSet<String> origins) -> (bool success)
  
@@ -97658,7 +97704,7 @@ index 6581f34180846663e2a8be51064e43c2d8173b64..8792fa78755887c3a6990b271d21e95a
  
      // Scripting APIs
      [Validator=isScriptingMessageAllowed] ScriptingExecuteScript(WebKit::WebExtensionScriptInjectionParameters parameters, bool userGesture) -> (std::expected<Vector<WebKit::WebExtensionScriptInjectionResultParameters>, WebKit::WebExtensionError> result)
-@@ -174,15 +316,6 @@ messages -> WebExtensionContext {
+@@ -174,15 +317,6 @@ messages -> WebExtensionContext {
      [Validator=isSidebarMessageAllowed] SidebarGetActionClickBehavior() -> (std::expected<WebKit::WebExtensionActionClickBehavior, WebKit::WebExtensionError> result)
  #endif // ENABLE(WK_WEB_EXTENSIONS_SIDEBAR)
  
@@ -97674,7 +97720,7 @@ index 6581f34180846663e2a8be51064e43c2d8173b64..8792fa78755887c3a6990b271d21e95a
      // Tabs APIs
      [Validator=isLoadedAndPrivilegedMessage] TabsCreate(std::optional<WebKit::WebPageProxyIdentifier> webPageProxyIdentifier, WebKit::WebExtensionTabParameters creationParameters) -> (std::expected<std::optional<WebKit::WebExtensionTabParameters>, WebKit::WebExtensionError> result)
      [Validator=isLoadedAndPrivilegedMessage] TabsUpdate(WebKit::WebPageProxyIdentifier webPageProxyIdentifier, std::optional<WebKit::WebExtensionTabIdentifier> tabIdentifier, WebKit::WebExtensionTabParameters updateParameters) -> (std::expected<std::optional<WebKit::WebExtensionTabParameters>, WebKit::WebExtensionError> result)
-@@ -207,8 +340,6 @@ messages -> WebExtensionContext {
+@@ -207,8 +341,6 @@ messages -> WebExtensionContext {
      [Validator=isLoadedAndPrivilegedMessage] TabsRemoveCSS(WebKit::WebPageProxyIdentifier webPageProxyIdentifier, std::optional<WebKit::WebExtensionTabIdentifier> tabIdentifier, WebKit::WebExtensionScriptInjectionParameters parameters) -> (std::expected<void, WebKit::WebExtensionError> result)
  
      // WebNavigation APIs
@@ -102666,10 +102712,10 @@ index 0000000000000000000000000000000000000000..dba529aeaef3ae858adc12f39f58b722
 +#endif
 diff --git a/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextAPIMenusHaiku.cpp b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextAPIMenusHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..4050ed60fd171b33faa8719d0d6a2819bf45c9f3
+index 0000000000000000000000000000000000000000..bc7a60086538e088545ef120f59eef87003fbcdd
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextAPIMenusHaiku.cpp
-@@ -0,0 +1,298 @@
+@@ -0,0 +1,321 @@
 +/*
 + * Copyright (C) 2023-2024 Apple Inc. All rights reserved.
 + *
@@ -102706,6 +102752,7 @@ index 0000000000000000000000000000000000000000..4050ed60fd171b33faa8719d0d6a2819
 +#include "WebExtensionMenuItemTree.h"
 +#include "WebExtensionPermission.h"
 +#include "WebExtensionUtilities.h"
++#include "WebViewStateHaiku.h"
 +namespace WebKit {
 +static bool hasMenuPermission(WebExtensionContext& context)
 +{
@@ -102735,6 +102782,28 @@ index 0000000000000000000000000000000000000000..4050ed60fd171b33faa8719d0d6a2819
 +{
 +    Ref extension = context.extension();
 +    return extension->hasBackgroundContent() && !extension->backgroundContentIsPersistent();
++}
++
++void WebExtensionContext::menusRefreshHaiku(CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&& completion)
++{
++    refreshExtensionMenusHaiku(*this);
++    completion({ });
++}
++
++void WebExtensionContext::fireMenusShownEventHaiku(const String& infoJSON, const std::optional<WebExtensionTabParameters>& tab)
++{
++    constexpr auto type = WebExtensionEventListenerType::MenusOnShown;
++    wakeUpBackgroundContentIfNecessaryToFireEvents({ type }, [this, protectedThis = Ref { *this }, infoJSON = infoJSON.isolatedCopy(), tab] {
++        sendToProcessesForEvent(type, Messages::WebExtensionContextProxy::DispatchMenusShownEventHaiku(infoJSON, tab));
++    });
++}
++
++void WebExtensionContext::fireMenusHiddenEventHaiku()
++{
++    constexpr auto type = WebExtensionEventListenerType::MenusOnHidden;
++    wakeUpBackgroundContentIfNecessaryToFireEvents({ type }, [this, protectedThis = Ref { *this }] {
++        sendToProcessesForEvent(type, Messages::WebExtensionContextProxy::DispatchMenusHiddenEventHaiku());
++    });
 +}
 +
 +void WebExtensionContext::removeMenusClickHandlers(const Vector<WTF::UUID>& identifiers)
@@ -124582,10 +124651,10 @@ index 0000000000000000000000000000000000000000..c9a119d02f85b7c5ad8fe9153bfc9604
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/WebView.cpp b/Source/WebKit/UIProcess/haiku/WebView.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..e1677574a5d39c325c556f630f3014d41572aa3d
+index 0000000000000000000000000000000000000000..8451371e2ca06902dd61952a06da3dcab868832c
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/WebView.cpp
-@@ -0,0 +1,3109 @@
+@@ -0,0 +1,3208 @@
 +/*
 + * Copyright (C) 2013 Intel Corporation. All rights reserved.
 + *
@@ -127405,12 +127474,13 @@ index 0000000000000000000000000000000000000000..e1677574a5d39c325c556f630f3014d4
 +}
 +
 +static void addExtensionMenuItemsHaiku(BMessage& into, WebExtensionContext& context, const WebExtensionMenuItem::MenuItemVector& items,
-+    const WebExtensionMenuItemContextParameters& parameters)
++    const WebExtensionMenuItemContextParameters& parameters, Ref<JSON::Array>& shownIdentifiers)
 +{
 +    static uint64_t lastToken;
 +    for (const auto& item : items) {
 +        if (!item->isVisible() || !item->matches(parameters))
 +            continue;
++        shownIdentifiers->pushString(item->identifier());
 +        BMessage entry;
 +        if (item->type() == WebExtensionMenuItemType::Separator) {
 +            entry.AddBool("separator", true);
@@ -127423,7 +127493,7 @@ index 0000000000000000000000000000000000000000..e1677574a5d39c325c556f630f3014d4
 +        entry.AddBool("checkable", isCheckedType(item->type()));
 +        entry.AddBool("checked", item->isChecked());
 +        if (!item->submenuItems().isEmpty())
-+            addExtensionMenuItemsHaiku(entry, context, item->submenuItems(), parameters);
++            addExtensionMenuItemsHaiku(entry, context, item->submenuItems(), parameters, shownIdentifiers);
 +        else {
 +            const uint64_t token = ++lastToken;
 +            extensionMenuChoicesHaiku().emplace(token, ExtensionMenuChoiceHaiku { &context, item, parameters });
@@ -127433,9 +127503,67 @@ index 0000000000000000000000000000000000000000..e1677574a5d39c325c556f630f3014d4
 +    }
 +}
 +
++// The open context menu, for menus.refresh and menus.onHidden: what it was
++// made for and the extensions told of it (menus.onShown).
++struct ShownExtensionMenuHaiku {
++    std::weak_ptr<WebViewStateHaiku> state;
++    WeakPtr<WebPageProxy> page;
++    ContextMenuContextData context;
++    FrameInfoData frame;
++    Vector<WeakPtr<WebExtensionContext>> shown;
++};
++
++static std::optional<ShownExtensionMenuHaiku>& shownExtensionMenuHaiku()
++{
++    static NeverDestroyed<std::optional<ShownExtensionMenuHaiku>> menu;
++    return menu.get();
++}
++
++// menus.onShown's info: what the menu was opened on (Firefox's OnShowData).
++static String extensionMenuShownInfoHaiku(WebPageProxy& page, const WebExtensionMenuItemContextParameters& parameters, Ref<JSON::Array>&& menuIdentifiers)
++{
++    Ref info = JSON::Object::create();
++    info->setArray("menuIds"_s, WTF::move(menuIdentifiers));
++    Ref contexts = JSON::Array::create();
++    contexts->pushString("all"_s);
++    static constexpr std::array<std::pair<WebExtensionMenuItemContextType, ASCIILiteral>, 8> names { {
++        { WebExtensionMenuItemContextType::Page, "page"_s }, { WebExtensionMenuItemContextType::Frame, "frame"_s },
++        { WebExtensionMenuItemContextType::Selection, "selection"_s }, { WebExtensionMenuItemContextType::Link, "link"_s },
++        { WebExtensionMenuItemContextType::Editable, "editable"_s }, { WebExtensionMenuItemContextType::Image, "image"_s },
++        { WebExtensionMenuItemContextType::Video, "video"_s }, { WebExtensionMenuItemContextType::Audio, "audio"_s },
++    } };
++    for (auto& [type, name] : names) {
++        if (parameters.types.contains(type))
++            contexts->pushString(name);
++    }
++    info->setArray("contexts"_s, WTF::move(contexts));
++    info->setBoolean("editable"_s, parameters.editable);
++    if (parameters.frameIdentifier)
++        info->setDouble("frameId"_s, toWebAPI(*parameters.frameIdentifier));
++    info->setString("pageUrl"_s, page.pageLoadState().activeURL().string());
++    if (!parameters.frameURL.isEmpty())
++        info->setString("frameUrl"_s, parameters.frameURL.string());
++    if (!parameters.linkURL.isEmpty()) {
++        info->setString("linkUrl"_s, parameters.linkURL.string());
++        info->setString("linkText"_s, parameters.linkText);
++    }
++    if (!parameters.sourceURL.isEmpty()) {
++        info->setString("srcUrl"_s, parameters.sourceURL.string());
++        info->setString("mediaType"_s, parameters.types.contains(WebExtensionMenuItemContextType::Image) ? "image"_s
++            : parameters.types.contains(WebExtensionMenuItemContextType::Audio) ? "audio"_s : "video"_s);
++    }
++    if (!parameters.selectionString.isEmpty())
++        info->setString("selectionText"_s, parameters.selectionString);
++    info->setString("viewType"_s, "tab"_s);
++    return info->toJSONString();
++}
++
 +// As WebExtensionContext::addItemsToContextMenu on macOS: the clicked
-+// element's contexts, for every loaded extension allowed on this page.
-+static void addExtensionMenusHaiku(BMessage& message, WebPageProxy& page, const ContextMenuContextData& contextData, const FrameInfoData& fallbackFrame)
++// element's contexts, for every loaded extension allowed on this page. When
++// shown (the menu opens), each is told with menus.onShown, items or not, as
++// Firefox does so that it can add some.
++static void addExtensionMenusHaiku(BMessage& message, WebPageProxy& page, const ContextMenuContextData& contextData, const FrameInfoData& fallbackFrame,
++    Vector<WeakPtr<WebExtensionContext>>* shown = nullptr)
 +{
 +    extensionMenuChoicesHaiku().clear();
 +    RefPtr controller = page.webExtensionController();
@@ -127444,7 +127572,7 @@ index 0000000000000000000000000000000000000000..e1677574a5d39c325c556f630f3014d4
 +    const auto& hitTest = contextData.webHitTestResultData();
 +    const FrameInfoData& frame = hitTest && hitTest->frameInfo ? *hitTest->frameInfo : fallbackFrame;
 +    for (Ref context : controller->extensionContexts()) {
-+        if (!context->isLoaded() || context->mainMenuItems().isEmpty()
++        if (!context->isLoaded()
 +            || !(context->hasPermission(WebExtensionPermission::menus()) || context->hasPermission(WebExtensionPermission::contextMenus())))
 +            continue;
 +        WebExtensionMenuItemContextParameters parameters;
@@ -127483,11 +127611,45 @@ index 0000000000000000000000000000000000000000..e1677574a5d39c325c556f630f3014d4
 +        if (parameters.types.isEmpty())
 +            parameters.types.add(isMainFrameHaiku(frame, &page) ? WebExtensionMenuItemContextType::Page : WebExtensionMenuItemContextType::Frame);
 +        BMessage extension;
-+        addExtensionMenuItemsHaiku(extension, context, context->mainMenuItems(), parameters);
++        Ref shownIdentifiers = JSON::Array::create();
++        addExtensionMenuItemsHaiku(extension, context, context->mainMenuItems(), parameters, shownIdentifiers);
 +        if (extension.HasMessage("item")) {
 +            addTextHaiku(extension, "name", protect(context->extension())->displayShortName());
 +            message.AddMessage("extension", &extension);
 +        }
++        if (shown && context->hasPermission(WebExtensionPermission::menus())) {
++            shown->append(context.get());
++            context->fireMenusShownEventHaiku(extensionMenuShownInfoHaiku(page, parameters, WTF::move(shownIdentifiers)), tab ? std::optional { tab->parameters() } : std::nullopt);
++        }
++    }
++}
++
++void refreshExtensionMenusHaiku(WebExtensionContext& context)
++{
++    ASSERT(RunLoop::isMain());
++    auto& menu = shownExtensionMenuHaiku();
++    if (!menu || !menu->shown.containsIf([&](auto& item) { return item.get() == &context; }))
++        return;
++    RefPtr page = menu->page.get();
++    auto state = menu->state.lock();
++    if (!page || page->isClosed() || !state || state->closed)
++        return;
++    BMessage message(B_WEBKIT_CONTEXT_MENU_EXTENSIONS);
++    addExtensionMenusHaiku(message, *page, menu->context, menu->frame);
++    sendToHostHaiku(state, message);
++}
++
++void contextMenuClosedHaiku(WebPageProxy& page)
++{
++    ASSERT(RunLoop::isMain());
++    auto& menu = shownExtensionMenuHaiku();
++    if (!menu || menu->page.get() != &page)
++        return;
++    auto shown = WTF::move(menu->shown);
++    menu.reset();
++    for (auto& weakContext : shown) {
++        if (RefPtr context = weakContext.get(); context && context->isLoaded())
++            context->fireMenusHiddenEventHaiku();
 +    }
 +}
 +
@@ -127562,8 +127724,14 @@ index 0000000000000000000000000000000000000000..e1677574a5d39c325c556f630f3014d4
 +                    spellingMenuFramesHaiku().insert_or_assign(page->identifier().toUInt64(), m_frameInfo);
 +            }
 +#if ENABLE(WK_WEB_EXTENSIONS)
-+            if (RefPtr page = this->page())
-+                addExtensionMenusHaiku(message, *page, m_context, m_frameInfo);
++            if (RefPtr page = this->page()) {
++                // A menu replaces the last one, which closed first.
++                if (auto& last = shownExtensionMenuHaiku(); last && last->page)
++                    contextMenuClosedHaiku(*last->page);
++                ShownExtensionMenuHaiku shown { m_state, *page, m_context, m_frameInfo, { } };
++                addExtensionMenusHaiku(message, *page, m_context, m_frameInfo, &shown.shown);
++                shownExtensionMenuHaiku() = WTF::move(shown);
++            }
 +#endif
 +            sendToHostHaiku(state, message);
 +        }
@@ -128435,10 +128603,10 @@ index 0000000000000000000000000000000000000000..3670bf654afeab72d15d457060553c36
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/WebViewStateHaiku.h b/Source/WebKit/UIProcess/haiku/WebViewStateHaiku.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..7225d4e5b639c642a7ae5fee2ef42322d5decf60
+index 0000000000000000000000000000000000000000..b2945258d1674302b0bcb47785cd25ab0bb058a4
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/WebViewStateHaiku.h
-@@ -0,0 +1,226 @@
+@@ -0,0 +1,233 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#pragma once
@@ -128660,6 +128828,13 @@ index 0000000000000000000000000000000000000000..7225d4e5b639c642a7ae5fee2ef42322
 +void answerAuthenticationHaiku(uint64_t identifier, AuthenticationAnswerHaiku, const String& user, const String& password, bool forSession);
 +// Main thread only. Runs an extension item of the last B_WEBKIT_CONTEXT_MENU.
 +void performExtensionMenuItemHaiku(uint64_t token);
++#if ENABLE(WK_WEB_EXTENSIONS)
++class WebExtensionContext;
++// menus.refresh: sends the open context menu's extension items again
++// (B_WEBKIT_CONTEXT_MENU_EXTENSIONS); menus.onHidden when the host closes it.
++void refreshExtensionMenusHaiku(WebExtensionContext&);
++void contextMenuClosedHaiku(WebPageProxy&);
++#endif
 +// Main thread only. BWebKitView::PerformSpellingCommand for page's last
 +// context menu on a misspelt word.
 +void performSpellingCommandHaiku(WebPageProxy&, uint32_t command, const String& word);
@@ -139508,10 +139683,10 @@ index 0000000000000000000000000000000000000000..57debcdd843e0cbc0487bcad1de299f3
 +#endif
 diff --git a/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIMenus.cpp b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIMenus.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..6ab7cd3aa32d24e70c7ef6d58d8c2d8b0efb5955
+index 0000000000000000000000000000000000000000..d407539754a675b1110bf4326467659e8ca7c8a5
 --- /dev/null
 +++ b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIMenus.cpp
-@@ -0,0 +1,152 @@
+@@ -0,0 +1,184 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +#include "config.h"
 +#include "WebExtensionAPIMenus.h"
@@ -139638,6 +139813,38 @@ index 0000000000000000000000000000000000000000..6ab7cd3aa32d24e70c7ef6d58d8c2d8b
 +        m_onClicked = WebExtensionAPIEvent::create(*this, WebExtensionEventListenerType::MenusOnClicked);
 +    return *m_onClicked;
 +}
++WebExtensionAPIEvent& WebExtensionAPIMenus::onShown()
++{
++    if (!m_onShown)
++        m_onShown = WebExtensionAPIEvent::create(*this, WebExtensionEventListenerType::MenusOnShown);
++    return *m_onShown;
++}
++WebExtensionAPIEvent& WebExtensionAPIMenus::onHidden()
++{
++    if (!m_onHidden)
++        m_onHidden = WebExtensionAPIEvent::create(*this, WebExtensionEventListenerType::MenusOnHidden);
++    return *m_onHidden;
++}
++void WebExtensionAPIMenus::refresh(Ref<WebExtensionCallbackHandler>&& callback)
++{
++    WebProcess::singleton().sendWithAsyncReply(Messages::WebExtensionContext::MenusRefreshHaiku(),
++        [protectedThis = Ref { *this }, callback = WTF::move(callback)](std::expected<void, WebExtensionError>&& result) { finishMenuRequest(callback.get(), result); }, extensionContext().identifier());
++}
++void WebExtensionContextProxy::dispatchMenusShownEventHaiku(const String& infoJSON, const std::optional<WebExtensionTabParameters>& tab)
++{
++    enumerateNamespaceObjects([&](auto& object) {
++        object.menus().onShown().template invokeListenersWithArgumentFactory<2>([&](JSGlobalContextRef context) -> std::array<Protected<JSValueRef>, 2> {
++            return { Protected<JSValueRef>(context, fromJSON(context, JSON::Value::parseJSON(infoJSON))),
++                Protected<JSValueRef>(context, tab ? toWebAPI(context, *tab) : JSValueMakeUndefined(context)) };
++        });
++    });
++}
++void WebExtensionContextProxy::dispatchMenusHiddenEventHaiku()
++{
++    enumerateNamespaceObjects([&](auto& object) {
++        object.menus().onHidden().invokeListeners();
++    });
++}
 +void WebExtensionContextProxy::dispatchMenusClickedEvent(const WebExtensionMenuItemParameters& parameters, bool wasChecked, const WebExtensionMenuItemContextParameters& details, const std::optional<WebExtensionTabParameters>& tab, const std::optional<WTF::UUID>& token)
 +{
 +    if (!hasPermission("menus"_s) && !hasPermission("contextMenus"_s))
@@ -139665,10 +139872,10 @@ index 0000000000000000000000000000000000000000..6ab7cd3aa32d24e70c7ef6d58d8c2d8b
 +}
 +#endif
 diff --git a/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIMenus.h b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIMenus.h
-index 8f99137471c0c991d6ec6d0f865f7e0ccc282ce1..575ecdd802c55256d56d1b48851180350abf2367 100644
+index 8f99137471c0c991d6ec6d0f865f7e0ccc282ce1..5f5011123e144b226f5136b40ebad739c30d47d3 100644
 --- a/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIMenus.h
 +++ b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIMenus.h
-@@ -31,16 +31,30 @@
+@@ -31,16 +31,35 @@
  #include "WebExtensionAPIEvent.h"
  #include "WebExtensionAPIObject.h"
  #include "WebExtensionMenuItemParameters.h"
@@ -139692,6 +139899,11 @@ index 8f99137471c0c991d6ec6d0f865f7e0ccc282ce1..575ecdd802c55256d56d1b4885118035
 +    void remove(JSContextRef, JSValueRef identifier, Ref<WebExtensionCallbackHandler>&&, String& exception);
 +    void removeAll(Ref<WebExtensionCallbackHandler>&&);
 +    WebExtensionAPIEvent& onClicked();
++#if PLATFORM(HAIKU)
++    WebExtensionAPIEvent& onShown();
++    WebExtensionAPIEvent& onHidden();
++    void refresh(Ref<WebExtensionCallbackHandler>&&);
++#endif
 +    double actionMenuTopLevelLimit() const { return webExtensionActionMenuItemTopLevelLimit; }
 +#if PLATFORM(HAIKU)
 +    ~WebExtensionAPIMenus();
@@ -139699,7 +139911,7 @@ index 8f99137471c0c991d6ec6d0f865f7e0ccc282ce1..575ecdd802c55256d56d1b4885118035
  #if PLATFORM(COCOA)
      using ClickHandlerMap = HashMap<String, Ref<WebExtensionCallbackHandler>>;
  
-@@ -48,11 +62,6 @@ public:
+@@ -48,11 +67,6 @@ public:
      void update(WebPage&, WebFrame&, id identifier, NSDictionary *properties, Ref<WebExtensionCallbackHandler>&&, NSString **outExceptionString);
  
      void remove(id identifier, Ref<WebExtensionCallbackHandler>&&, NSString **outExceptionString);
@@ -139711,7 +139923,7 @@ index 8f99137471c0c991d6ec6d0f865f7e0ccc282ce1..575ecdd802c55256d56d1b4885118035
  
      const ClickHandlerMap& clickHandlers() const LIFETIME_BOUND { return m_clickHandlerMap; }
  
-@@ -61,9 +70,14 @@ private:
+@@ -61,9 +75,18 @@ private:
      bool parseCreateAndUpdateProperties(ForUpdate, NSDictionary *, const URL& baseURL, std::optional<WebExtensionMenuItemParameters>&, RefPtr<WebExtensionCallbackHandler>&, NSString **outExceptionString);
  
      Markable<WebCore::FrameIdentifier> m_frameIdentifier;
@@ -139720,6 +139932,10 @@ index 8f99137471c0c991d6ec6d0f865f7e0ccc282ce1..575ecdd802c55256d56d1b4885118035
  #endif
 +private:
 +    RefPtr<WebExtensionAPIEvent> m_onClicked;
++#if PLATFORM(HAIKU)
++    RefPtr<WebExtensionAPIEvent> m_onShown;
++    RefPtr<WebExtensionAPIEvent> m_onHidden;
++#endif
 +#if PLATFORM(HAIKU)
 +    RefPtr<WebExtensionMenuClickHandlerStore> ensureClickHandlerStore(JSContextRef, WebFrame&, String& exception);
 +    Vector<Ref<WebExtensionMenuClickHandlerStore>> m_clickHandlerStores;
@@ -149766,10 +149982,10 @@ index 0000000000000000000000000000000000000000..09fd2e03b8a4c8d27f4ad4244a850456
 +    readonly attribute WebExtensionAPIEvent onUninstalled;
 +};
 diff --git a/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPIMenus.idl b/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPIMenus.idl
-index 2868b8c1b322da84dda89344451196e063c4264d..adf8a12013a530323b5c8e07befc9155d63fce62 100644
+index 2868b8c1b322da84dda89344451196e063c4264d..701eab20681dee6d7595f0a57f9df7c7dcc1c3df 100644
 --- a/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPIMenus.idl
 +++ b/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPIMenus.idl
-@@ -65,12 +65,13 @@ dictionary WebExtensionMenuItemProperties {
+@@ -65,16 +65,23 @@ dictionary WebExtensionMenuItemProperties {
  [
      Conditional=WK_WEB_EXTENSIONS,
      MainWorldOnly,
@@ -149786,6 +150002,16 @@ index 2868b8c1b322da84dda89344451196e063c4264d..adf8a12013a530323b5c8e07befc9155
      [ReturnsPromiseWhenCallbackIsOmitted] void removeAll([Optional, CallbackHandler] function callback);
  
      readonly attribute WebExtensionAPIEvent onClicked;
+ 
++    // Firefox's: the context menu opened and closed, and its items rebuilt
++    // while it is open.
++    [Platform=HAIKU] readonly attribute WebExtensionAPIEvent onShown;
++    [Platform=HAIKU] readonly attribute WebExtensionAPIEvent onHidden;
++    [Platform=HAIKU, ReturnsPromiseWhenCallbackIsOmitted] void refresh([Optional, CallbackHandler] function callback);
++
+     [ImplementedAs=actionMenuTopLevelLimit] readonly attribute double ACTION_MENU_TOP_LEVEL_LIMIT;
+ 
+ };
 diff --git a/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPINamespace.idl b/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPINamespace.idl
 index cf3a76d37a4d9379d4191ac666ba4bc97bd9013d..01a3d1b09be9aab3073490582eb61684df06e5d3 100644
 --- a/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPINamespace.idl
@@ -150748,7 +150974,7 @@ index 2b2ff5395e73b7978dc8b610d62ffe835fc1a886..443a5b3005437f3a7ec05ce7b4eca60d
  
  #endif // ENABLE(WK_WEB_EXTENSIONS)
 diff --git a/Source/WebKit/WebProcess/Extensions/WebExtensionContextProxy.h b/Source/WebKit/WebProcess/Extensions/WebExtensionContextProxy.h
-index d6d7467a810b4fa585e99e9ad58711f17a7084bf..1f2e6c8f60fb3fdc7f5bfa3e1ab04be08efed1aa 100644
+index d6d7467a810b4fa585e99e9ad58711f17a7084bf..0e9af1cee81eb2d12e6f2dbec33e08e863d03392 100644
 --- a/Source/WebKit/WebProcess/Extensions/WebExtensionContextProxy.h
 +++ b/Source/WebKit/WebProcess/Extensions/WebExtensionContextProxy.h
 @@ -41,9 +41,12 @@
@@ -150848,7 +151074,7 @@ index d6d7467a810b4fa585e99e9ad58711f17a7084bf..1f2e6c8f60fb3fdc7f5bfa3e1ab04be0
      void internalDispatchRuntimeConnectEvent(WebExtensionContentWorldType, WebExtensionPortChannelIdentifier, const String& name, const std::optional<WebExtensionMessageTargetParameters>&, const WebExtensionMessageSenderParameters&, bool userGesture, CompletionHandler<void(HashCountedSet<WebPageProxyIdentifier>&&)>&&);
      void dispatchRuntimeMessageEvent(WebExtensionContentWorldType, const String& messageJSON, const std::optional<WebExtensionMessageTargetParameters>&, const WebExtensionMessageSenderParameters&, bool userGesture, CompletionHandler<void(String&& replyJSON)>&&);
      void dispatchRuntimeConnectEvent(WebExtensionContentWorldType, WebExtensionPortChannelIdentifier, const String& name, const std::optional<WebExtensionMessageTargetParameters>&, const WebExtensionMessageSenderParameters&, bool userGesture, CompletionHandler<void(HashCountedSet<WebPageProxyIdentifier>&&)>&&);
-@@ -229,8 +269,17 @@ private:
+@@ -229,8 +269,19 @@ private:
      void dispatchStorageChangedEvent(const Vector<String>& onChangedJSON, WebExtensionDataType, WebExtensionContentWorldType);
  
      // Tabs
@@ -150862,11 +151088,13 @@ index d6d7467a810b4fa585e99e9ad58711f17a7084bf..1f2e6c8f60fb3fdc7f5bfa3e1ab04be0
 +    void dispatchHistoryEventHaiku(WebExtensionEventListenerType, const String& json);
 +    void dispatchBookmarksEventHaiku(WebExtensionEventListenerType, const String& identifier, const String& infoJSON);
 +    void dispatchSessionsChangedEventHaiku();
++    void dispatchMenusShownEventHaiku(const String& infoJSON, const std::optional<WebExtensionTabParameters>&);
++    void dispatchMenusHiddenEventHaiku();
 +#endif
      void dispatchTabsReplacedEvent(WebExtensionTabIdentifier replacedTabIdentifier, WebExtensionTabIdentifier newTabIdentifier);
      void dispatchTabsDetachedEvent(WebExtensionTabIdentifier, WebExtensionWindowIdentifier oldWindowIdentifier, uint64_t oldIndex);
      void dispatchTabsMovedEvent(WebExtensionTabIdentifier, WebExtensionWindowIdentifier, uint64_t oldIndex, uint64_t newIndex);
-@@ -246,14 +295,22 @@ private:
+@@ -246,14 +297,22 @@ private:
  
      // Web Navigation
      void dispatchWebNavigationEvent(WebExtensionEventListenerType, WebExtensionTabIdentifier, const WebExtensionFrameParameters&, WallTime);
@@ -150895,7 +151123,7 @@ index d6d7467a810b4fa585e99e9ad58711f17a7084bf..1f2e6c8f60fb3fdc7f5bfa3e1ab04be0
  
      // Windows
      void dispatchWindowsEvent(WebExtensionEventListenerType, const std::optional<WebExtensionWindowParameters>&);
-@@ -275,8 +332,17 @@ private:
+@@ -275,8 +334,17 @@ private:
      mutable PermissionsMap m_grantedPermissions;
      mutable WallTime m_nextGrantedPermissionsExpirationDate { WallTime::nan() };
      RefPtr<WebCore::DOMWrapperWorld> m_contentScriptWorld;
@@ -150914,7 +151142,7 @@ index d6d7467a810b4fa585e99e9ad58711f17a7084bf..1f2e6c8f60fb3fdc7f5bfa3e1ab04be0
      WeakPtr<WebPage> m_offscreenPage;
  #endif
 diff --git a/Source/WebKit/WebProcess/Extensions/WebExtensionContextProxy.messages.in b/Source/WebKit/WebProcess/Extensions/WebExtensionContextProxy.messages.in
-index 6ffe6eabe189601f01839e2fe9d4ae0e2850b0b3..58a97119170ce35fe767c70d341ebef33550493c 100644
+index 6ffe6eabe189601f01839e2fe9d4ae0e2850b0b3..e0a83afcc1dde31111191e490fcca8521fa8324b 100644
 --- a/Source/WebKit/WebProcess/Extensions/WebExtensionContextProxy.messages.in
 +++ b/Source/WebKit/WebProcess/Extensions/WebExtensionContextProxy.messages.in
 @@ -41,7 +41,12 @@ messages -> WebExtensionContextProxy {
@@ -150968,7 +151196,7 @@ index 6ffe6eabe189601f01839e2fe9d4ae0e2850b0b3..58a97119170ce35fe767c70d341ebef3
      DispatchRuntimeConnectEvent(WebKit::WebExtensionContentWorldType contentWorldType, WebKit::WebExtensionPortChannelIdentifier channelIdentifier, String name, struct std::optional<WebKit::WebExtensionMessageTargetParameters> targetParameters, struct WebKit::WebExtensionMessageSenderParameters senderParameters, bool userGesture) -> (HashCountedSet<WebKit::WebPageProxyIdentifier> addedPortCounts)
      DispatchRuntimeInstalledEvent(enum:uint8_t WebKit::WebExtensionContextInstallReason installReason, String previousVersion)
      DispatchRuntimeStartupEvent()
-@@ -99,6 +122,12 @@ messages -> WebExtensionContextProxy {
+@@ -99,6 +122,14 @@ messages -> WebExtensionContextProxy {
      // Tabs Events
      DispatchTabsCreatedEvent(WebKit::WebExtensionTabParameters tabParameters)
      DispatchTabsUpdatedEvent(WebKit::WebExtensionTabParameters tabParameters, WebKit::WebExtensionTabParameters changedParameters)
@@ -150977,11 +151205,13 @@ index 6ffe6eabe189601f01839e2fe9d4ae0e2850b0b3..58a97119170ce35fe767c70d341ebef3
 +    DispatchHistoryEventHaiku(WebKit::WebExtensionEventListenerType type, String json)
 +    DispatchBookmarksEventHaiku(WebKit::WebExtensionEventListenerType type, String identifier, String infoJSON)
 +    DispatchSessionsChangedEventHaiku()
++    DispatchMenusShownEventHaiku(String infoJSON, std::optional<WebKit::WebExtensionTabParameters> tab)
++    DispatchMenusHiddenEventHaiku()
 +#endif
      DispatchTabsReplacedEvent(WebKit::WebExtensionTabIdentifier replacedTabIdentifier, WebKit::WebExtensionTabIdentifier newTabIdentifier)
      DispatchTabsDetachedEvent(WebKit::WebExtensionTabIdentifier tabIdentifier, WebKit::WebExtensionWindowIdentifier oldWindowIdentifier, uint64_t oldIndex)
      DispatchTabsMovedEvent(WebKit::WebExtensionTabIdentifier tabIdentifier, WebKit::WebExtensionWindowIdentifier windowIdentifier, uint64_t oldIndex, uint64_t newIndex)
-@@ -114,14 +143,20 @@ messages -> WebExtensionContextProxy {
+@@ -114,14 +145,20 @@ messages -> WebExtensionContextProxy {
  
      // Web Navigation
      DispatchWebNavigationEvent(WebKit::WebExtensionEventListenerType type, WebKit::WebExtensionTabIdentifier tabID, struct WebKit::WebExtensionFrameParameters frameParamaters, WallTime timestamp)
