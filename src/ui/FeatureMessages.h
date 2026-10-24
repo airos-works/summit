@@ -13,6 +13,8 @@ namespace summit {
 constexpr uint32 kToggleTabMute = 'tmut';
 // Unload tab "id" until it is selected again (#116).
 constexpr uint32 kDiscardTab = 'tdsc';
+// Every 30 s: unload a long-unseen tab when memory is low (#116).
+constexpr uint32 kCheckMemory = 'tmem';
 constexpr uint32 kPinTab = 'tpin';
 constexpr uint32 kMoveTab = 'tmov';
 constexpr uint32 kTabDragOut = 'tdro';

@@ -697,6 +697,10 @@ BrowserWindow::BrowserWindow(std::shared_ptr<SharedProfile> profile, std::string
 #if SUMMIT_MODERN_WEBKIT
     // The bookmarks to compare the first change with.
     ReportBookmarkChanges();
+    {
+        BMessage check(kCheckMemory);
+        fMemoryCheck = std::make_unique<BMessageRunner>(BMessenger(this), &check, 30000000);
+    }
 #endif
     std::tie(fBookmarksBarVisible, fInterfaceStyle) = fShared->Read([](const Profile& profile) {
         return std::make_pair(profile.showBookmarksBar, profile.interfaceStyle);
@@ -1313,6 +1317,7 @@ void BrowserWindow::CreateTab(const std::string& input, bool select, BWebView* a
     created.title = address.url == "summit:home" ? "Start Page" : address.url == kHistoryPage ? "History"
         : address.url == kBookmarksPage ? "Bookmarks" : "Loading…";
     created.pageRevision = fPagesRevision;
+    created.lastSelected = system_time();
     AttachPageView(created, webView, extensionPage);
     // As in other browsers, a restored session's tabs wait to be selected
     // before they load: a window of fifteen tabs would otherwise start fifteen
@@ -1434,6 +1439,36 @@ BrowserWindow::Tab* BrowserWindow::LeastRecentlyUsedTab()
         if (!chosen || tab.lastSelected < chosen->lastSelected) chosen = &tab;
     }
     return chosen;
+}
+
+void BrowserWindow::UnloadTabsIfMemoryIsLow()
+{
+    // Low: less than a tenth of the memory, and at least 512 MiB, is left.
+    // SUMMIT_UNLOAD_BELOW_MIB and SUMMIT_UNLOAD_AFTER_S change the limit and
+    // how long a tab must have been behind (default five minutes); 0 for
+    // either turns this off.
+    auto setting = [](const char* name, int64 fallback) {
+        const char* value = std::getenv(name);
+        return value && *value ? std::strtoll(value, nullptr, 10) : fallback;
+    };
+    system_info info;
+    if (get_system_info(&info) != B_OK) return;
+    const int64 total = static_cast<int64>(info.max_pages) * B_PAGE_SIZE;
+    const int64 below = setting("SUMMIT_UNLOAD_BELOW_MIB", std::max<int64>(512, total / 10 / (1024 * 1024))) * 1024 * 1024;
+    const int64 after = setting("SUMMIT_UNLOAD_AFTER_S", 300) * 1000000;
+    if (below <= 0 || after <= 0 || static_cast<int64>(info.free_memory) >= below) return;
+    // One tab a check, the longest unseen first, as long as memory stays low.
+    std::vector<Tab*> candidates;
+    for (auto& tab : fTabs)
+        if (tab.id != fSelected && tab.deferredURL.empty() && system_time() - tab.lastSelected >= after) candidates.push_back(&tab);
+    std::sort(candidates.begin(), candidates.end(), [](const Tab* a, const Tab* b) { return a->lastSelected < b->lastSelected; });
+    for (auto* tab : candidates) {
+        const std::string title = tab->title;
+        if (DiscardTab(tab->id).empty()) {
+            fStatus->SetText(("Unloaded “" + title + "” to free memory; it loads again when you select it.").c_str());
+            return;
+        }
+    }
 }
 
 void BrowserWindow::ReplaceTabView(const Tab& tab, const std::string& url)
@@ -4145,6 +4180,7 @@ void BrowserWindow::MessageReceived(BMessage* message)
         }
         case kPictureInPictureCommand: PictureInPictureCommand(*message); break;
         case kToggleTabMute: ToggleTabMute(message->GetInt64("id", fSelected)); break;
+        case kCheckMemory: UnloadTabsIfMemoryIsLow(); break;
         case kDiscardTab:
             if (const auto error = DiscardTab(message->GetInt64("id", 0)); !error.empty()) fStatus->SetText(error.c_str());
             break;

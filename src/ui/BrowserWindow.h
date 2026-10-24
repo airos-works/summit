@@ -450,6 +450,8 @@ private:
     // or empty.
     std::string DiscardTab(int64 id);
     Tab* LeastRecentlyUsedTab();
+    // Unloads the longest-unseen background tab when the system is short of memory.
+    void UnloadTabsIfMemoryIsLow();
 #endif
     void Navigate(const std::string& text);
     void RunBookmarklet(const std::string& url);
@@ -718,6 +720,7 @@ private:
     void UpdateKeepScreenAwake();
     void KeepScreenAwake();
     std::unique_ptr<BMessageRunner> fKeepAwakeTimer;
+    std::unique_ptr<BMessageRunner> fMemoryCheck;
 #endif
     void SetBookmarksBarVisible(bool visible);
     std::string HomeAddress() const;

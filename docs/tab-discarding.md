@@ -29,8 +29,15 @@ engine's tab registry (`BrowserTabRegistryHaiku::setDiscarded`), which
 `TabsDiscardHaiku`, forwarded as a `B_WEBKIT_BROWSER_DISCARD_TAB` browser
 command answered with the new view.
 
-Not done yet: unloading by itself under memory pressure or after a tab has
-been in the background a long time.
+- **By itself when memory is low:** every 30 s each window checks the
+  system's free memory; below a tenth of the total (and at least 512 MiB) it
+  unloads its background tab unseen the longest, if that has been at least
+  five minutes, one tab a check while memory stays low, and says so in the
+  status line. `SUMMIT_UNLOAD_BELOW_MIB` and `SUMMIT_UNLOAD_AFTER_S` change
+  the limit and the five minutes; 0 for either turns it off.
+
+Not done yet: a preference for it, and unloading after a long time in the
+background regardless of memory.
 
 ## Fixture
 
