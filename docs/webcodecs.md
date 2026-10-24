@@ -56,3 +56,11 @@ so colours came back shifted (red as 255/26/1); with BT.601, as the follow-up
 makes the default, every colour came back within 3 of the source on both
 VP8 and H.264. The main build (90a6581) matched all six colours with every
 codec.
+
+Audio verified on the X399 (25 Oct, wa112 build): a second of 440 Hz stereo
+tone went through Opus as 50 packets with an OpusHead description and came
+back as 48 000 `f32` frames with an RMS of 0.352 (0.354 expected). `AudioData`
+copies in its own format are exact; interleaved `s16` converted correctly
+to `f32` and `s16` planes and to `u8`, with frame offsets. AAC reports
+unsupported, and so does Opus at 44.1 kHz (libopus runs at 8–48 kHz rates
+only; there is no resampling yet).
