@@ -33,3 +33,7 @@ change; a background tab was refused; an unloaded tab reported `status:
 "unloaded"`. Summit's article test also accepts example.com. (`isArticle`
 stayed true in Reader view only after a fix that was not re-run on the
 device.)
+
+Verified on the X399 (25 Oct, fx106 build): `tabs.create({url:
+"https://en.wikipedia.org/wiki/BeOS", openInReaderMode: true})` gave a tab
+with `isArticle: true` and `isInReaderMode: true` once it had loaded.

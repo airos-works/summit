@@ -116,6 +116,11 @@ To go back: `pkgman install` the three packages from
 `/boot/home/summit/package-backups` (haikuwebkit, haikuwebkit_devel,
 summit_webkit-1.10.0-3) and uninstall summit_webkitlegacy.
 
+Verified on the X399 (25 Oct, fx106 engine, shim built on the device): a
+`BWebView` program reading from its own thread got the German fixture's
+text from `InnerText()`, the live DOM from `AsMarkup()` and the served
+source from `FrameSource()`; `SetEditable(true)` reported editable.
+
 ## Not done
 
 - Proxy configuration and per-page storage paths remain unapplied.

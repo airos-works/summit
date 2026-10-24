@@ -44,6 +44,12 @@ last until the page's preferences change again.
 Test page: `tests/fixtures/prefers-media.html` shows what the media queries
 match.
 
+Verified on the X399 (25 Oct, fx106 build), toggled with the menu items'
+messages: Reduce Motion turned the page's `prefers-reduced-motion` to
+`reduce` live (its animation stopped) and back; Increase Contrast turned
+`prefers-contrast` to `more` (black background) and back, and a tab opened
+meanwhile matched `more` too.
+
 ## Still to do
 
 Forced colours (`forced-colors: active`, which WebKit does not render), and

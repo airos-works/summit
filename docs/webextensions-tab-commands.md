@@ -149,6 +149,10 @@ Chrome's Manifest V2 `tabs.getSelected(windowId?)` gives the active tab of the
 window (default: the current one), as `tabs.query({active: true, windowId})`
 does, using WebKit's Cocoa version. Manifest V3 extensions don't get it, as in
 Chrome. Fixture: `tests/fixtures/extensions/tab-get-selected`.
+Verified on the X399 (25 Oct, lf113 build): the callback and promise forms
+and `getSelected(windowId)` gave the same tab as `tabs.query({active: true,
+currentWindow: true})`. An invalid window id is treated as the current
+window rather than refused.
 
 ## Detect language (#106)
 

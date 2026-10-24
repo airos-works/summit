@@ -52,7 +52,10 @@ minutes to check or start the extension, 30 s to stop a rolled-back one
 (`ExtensionInstaller::PendingTimedOut`; a start that times out is rolled back,
 as it may have started late). The manager shows "The browser engine did not
 answer in time." and can install again. `SUMMIT_EXTENSION_REPLY_DEADLINE_MS`
-shortens the deadlines for tests. Updates, enabling, disabling and removal
+shortens the deadlines for tests. Verified on the X399 (25 Oct, fx106
+build) with a 1 ms deadline: installing Tampermonkey stopped with that
+message and the manager stayed usable; a tiny fixture still installed, as its
+replies came before the installer's 100 ms check. Updates, enabling, disabling and removal
 have no deadline yet; cancellation after submitting a load also needs further
 native integration coverage.
 

@@ -41,3 +41,8 @@ item reads "Shown N times, on …" while the menu is open (set in onShown,
 then `menus.refresh()`), and `[menus]` console lines (also
 `globalThis.events` in the background page) log onShown, the refresh and
 onHidden.
+
+Verified on the X399 (25 Oct, fx106 build): a right-click on example.org fired
+onShown with `menuIds: ["count"]`, `contexts: ["all", "page"]`, `frameId: 0`
+and the page and tab; the open menu then showed the item's new title, "Shown
+1 times, on all,page", and MCP `press_key escape` closed it, firing onHidden.
