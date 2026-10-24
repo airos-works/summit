@@ -84760,10 +84760,10 @@ index 0000000000000000000000000000000000000000..574ed16658f0c14b1aa2e63208e990b8
 +#define WEBKIT_ENGINE_VERSION_HAIKU "@WebKit_HAIKU_MAJOR_VERSION@.@WebKit_HAIKU_MINOR_VERSION@.@WebKit_HAIKU_TINY_VERSION@"
 diff --git a/Source/WebKit/UIProcess/API/haiku/WebKitContext.cpp b/Source/WebKit/UIProcess/API/haiku/WebKitContext.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..48c34d6bee92edf2b6297beaa83211d917414c1a
+index 0000000000000000000000000000000000000000..48b8920fc78dfde4fed228ed8e2bf3829c04d8a8
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/API/haiku/WebKitContext.cpp
-@@ -0,0 +1,1151 @@
+@@ -0,0 +1,1154 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#include "config.h"
@@ -85465,14 +85465,17 @@ index 0000000000000000000000000000000000000000..48c34d6bee92edf2b6297beaa83211d9
 +    });
 +}
 +
-+void BWebKitContext::SetBrowserTabDiscarded(BWebKitView* view, bool discarded)
++void BWebKitContext::SetBrowserTabDiscarded(BWebKitView* view, bool discarded, const char* url, const char* title)
 +{
 +    if (m_status != B_OK || !view)
 +        return;
-+    WTF::RunLoop::mainSingleton().dispatch([context = m_context, state = view->m_state, discarded] {
++    std::optional<WebKit::BrowserTabRegistryHaiku::DiscardedTab> tab;
++    if (discarded)
++        tab = WebKit::BrowserTabRegistryHaiku::DiscardedTab { String::fromUTF8(url ? url : "").isolatedCopy(), String::fromUTF8(title ? title : "").isolatedCopy() };
++    WTF::RunLoop::mainSingleton().dispatch([context = m_context, state = view->m_state, tab = WTF::move(tab)]() mutable {
 +        if (state->context != context || state->closed || !state->client || !state->client->page())
 +            return;
-+        context->browserTabs()->setDiscarded(state->client->page()->identifier(), discarded);
++        context->browserTabs()->setDiscarded(state->client->page()->identifier(), WTF::move(tab));
 +    });
 +}
 +
@@ -85917,10 +85920,10 @@ index 0000000000000000000000000000000000000000..48c34d6bee92edf2b6297beaa83211d9
 +}
 diff --git a/Source/WebKit/UIProcess/API/haiku/WebKitContext.h b/Source/WebKit/UIProcess/API/haiku/WebKitContext.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..0bf475ea1efc02408214d0b061fab10714fecc80
+index 0000000000000000000000000000000000000000..2a676648c30c8864bf2ed260207630a98afb6654
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/API/haiku/WebKitContext.h
-@@ -0,0 +1,548 @@
+@@ -0,0 +1,549 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#pragma once
@@ -86185,9 +86188,10 @@ index 0000000000000000000000000000000000000000..0bf475ea1efc02408214d0b061fab107
 +    // thread; a closed view is ignored.
 +    void SetBrowserTabPinned(BWebKitView*, bool pinned);
 +    // Whether a tab's page is unloaded until it is selected (Tab.discarded):
-+    // a tab DISCARD_TAB replaced, or one of a restored session not yet shown.
-+    // Any thread; a closed view is ignored.
-+    void SetBrowserTabDiscarded(BWebKitView*, bool discarded);
++    // a tab DISCARD_TAB replaced, or one of a restored session not yet shown,
++    // and the address and title extensions see for it until then. Any
++    // thread; a closed view is ignored.
++    void SetBrowserTabDiscarded(BWebKitView*, bool discarded, const char* url = nullptr, const char* title = nullptr);
 +    // A browser window's frame in screen coordinates (extensions'
 +    // Window.left/top/width/height). Report it when the window is shown,
 +    // moved or resized. Any thread.
@@ -112558,10 +112562,10 @@ index 0000000000000000000000000000000000000000..8744cc44a7354f3983ba0cee7d768cd7
 +#endif // ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
 diff --git a/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionTabHaiku.cpp b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionTabHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..b6208cb6a17b9b2eed5590fefd95380b8e72bb21
+index 0000000000000000000000000000000000000000..3d421e2caa1fe7c6cd12f60af3631767d9e71a2c
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionTabHaiku.cpp
-@@ -0,0 +1,252 @@
+@@ -0,0 +1,267 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#include "config.h"
@@ -112722,16 +112726,31 @@ index 0000000000000000000000000000000000000000..b6208cb6a17b9b2eed5590fefd95380b
 +
 +bool WebExtensionTab::isSelected() const { return isActive(); }
 +
++// What an unloaded tab shows until it loads (BWebKitContext::SetBrowserTabDiscarded).
++static const BrowserTabRegistryHaiku::DiscardedTab* discardedTabHaiku(const WebExtensionContext* context, const WebPageProxy& page)
++{
++    RefPtr controller = context ? context->extensionController() : nullptr;
++    return controller ? controller->nativeBrowserTabs()->discardedTab(page.identifier()) : nullptr;
++}
++
 +String WebExtensionTab::title() const
 +{
 +    RefPtr page = nativePage();
-+    return page && isValid() ? page->pageLoadState().title() : nullString();
++    if (!page || !isValid())
++        return nullString();
++    if (auto* discarded = discardedTabHaiku(m_extensionContext.get(), *page); discarded && page->pageLoadState().activeURL().isEmpty())
++        return discarded->title;
++    return page->pageLoadState().title();
 +}
 +
 +URL WebExtensionTab::url() const
 +{
 +    RefPtr page = nativePage();
-+    return page && isValid() ? page->pageLoadState().activeURL() : URL { };
++    if (!page || !isValid())
++        return URL { };
++    if (auto* discarded = discardedTabHaiku(m_extensionContext.get(), *page); discarded && page->pageLoadState().activeURL().isEmpty())
++        return URL { discarded->url };
++    return page->pageLoadState().activeURL();
 +}
 +
 +URL WebExtensionTab::pendingURL() const
@@ -115741,7 +115760,7 @@ index 0000000000000000000000000000000000000000..00672589a5ae1fd82ae159dca56f9a01
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/BrowserTabRegistryHaiku.cpp b/Source/WebKit/UIProcess/haiku/BrowserTabRegistryHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..5db70e5a30eb2b1d45f1043b2d2c3906e34f8874
+index 0000000000000000000000000000000000000000..2e29abad4892cc666f00b19025a1506ab74ef516
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/BrowserTabRegistryHaiku.cpp
 @@ -0,0 +1,192 @@
@@ -115883,7 +115902,7 @@ index 0000000000000000000000000000000000000000..5db70e5a30eb2b1d45f1043b2d2c3906
 +{
 +    ASSERT(isMainThread());
 +    m_pinnedPages.removeFirst(identifier);
-+    m_discardedPages.removeFirst(identifier);
++    m_discardedPages.remove(identifier);
 +    auto windows = m_windows;
 +    for (auto& window : windows) {
 +        window.pages.removeFirst(identifier);
@@ -115939,10 +115958,10 @@ index 0000000000000000000000000000000000000000..5db70e5a30eb2b1d45f1043b2d2c3906
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/BrowserTabRegistryHaiku.h b/Source/WebKit/UIProcess/haiku/BrowserTabRegistryHaiku.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..09afb7d3959b101397767742075e27d066a40ded
+index 0000000000000000000000000000000000000000..60e2c123bd13746cefde2ccf628d805672d7fd48
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/BrowserTabRegistryHaiku.h
-@@ -0,0 +1,84 @@
+@@ -0,0 +1,95 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#pragma once
@@ -115994,13 +116013,24 @@ index 0000000000000000000000000000000000000000..09afb7d3959b101397767742075e27d0
 +    void setPinnedObserver(PinnedObserver observer) { m_pinnedObserver = WTF::move(observer); }
 +    void setPinned(WebPageProxyIdentifier, bool pinned);
 +    bool isPinned(WebPageProxyIdentifier identifier) const { return m_pinnedPages.contains(identifier); }
-+    // The browser's unloaded tabs (Tab.discarded), which load when selected.
-+    void setDiscarded(WebPageProxyIdentifier identifier, bool discarded)
++    // The browser's unloaded tabs (Tab.discarded), which load when selected,
++    // with the address and title they show until then.
++    struct DiscardedTab {
++        String url, title;
++    };
++    void setDiscarded(WebPageProxyIdentifier identifier, std::optional<DiscardedTab> discarded)
 +    {
-+        if (discarded != isDiscarded(identifier))
-+            discarded ? m_discardedPages.append(identifier) : void(m_discardedPages.removeFirst(identifier));
++        if (discarded)
++            m_discardedPages.set(identifier, WTF::move(*discarded));
++        else
++            m_discardedPages.remove(identifier);
 +    }
 +    bool isDiscarded(WebPageProxyIdentifier identifier) const { return m_discardedPages.contains(identifier); }
++    const DiscardedTab* discardedTab(WebPageProxyIdentifier identifier) const
++    {
++        auto entry = m_discardedPages.find(identifier);
++        return entry == m_discardedPages.end() ? nullptr : &entry->value;
++    }
 +    // Window frames (screen coordinates) as the browser reports them. The
 +    // frame observer hears of each registered window whose frame changed.
 +    using FrameObserver = std::function<void(uint64_t windowIdentifier)>;
@@ -116018,7 +116048,7 @@ index 0000000000000000000000000000000000000000..09afb7d3959b101397767742075e27d0
 +    Observer m_observer;
 +    PinnedObserver m_pinnedObserver;
 +    Vector<WebPageProxyIdentifier> m_pinnedPages;
-+    Vector<WebPageProxyIdentifier> m_discardedPages;
++    HashMap<WebPageProxyIdentifier, DiscardedTab> m_discardedPages;
 +    Vector<std::pair<BMessenger, BRect>> m_frames;
 +    FrameObserver m_frameObserver;
 +    Vector<Window> m_windows;

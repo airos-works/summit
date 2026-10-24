@@ -1,7 +1,7 @@
 // Opens three background tabs, unloads them with tabs.discard, lists the
 // unloaded ones, unloads the least recently used tab, selects one to load it
-// again and checks the refusals. Waits 20 s before the discards so memory can
-// be read first. One console line per step: "[discard] ...".
+// again and checks the refusals. Waits 12 s before the discards so memory can
+// be read first (a service worker idle for 30 s stops, so the waits stay short). One console line per step: "[discard] ...".
 const log = message => console.log(`[discard] ${message}`);
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
 const step = async (name, run) => {
@@ -17,7 +17,7 @@ const step = async (name, run) => {
     await step('open', async () => {
         for (const url of urls)
             tabs.push(await chrome.tabs.create({ url, active: false }));
-        await wait(20000);
+        await wait(12000);
         return tabs.map(tab => `${tab.id}:${tab.discarded}`).join(' ');
     });
     await step('discard', async () => {
@@ -34,7 +34,6 @@ const step = async (name, run) => {
         const after = await chrome.tabs.discard();
         return `${after.url} discarded=${after.discarded}`;
     });
-    await wait(10000);
     await step('activate', async () => {
         const [first] = await chrome.tabs.query({ discarded: true });
         await chrome.tabs.update(first.id, { active: true });

@@ -1321,7 +1321,7 @@ void BrowserWindow::CreateTab(const std::string& input, bool select, BWebView* a
     if (deferred) {
         created.deferredURL = LoadableURL(address.url);
         if (!fRestoringTitle.empty()) created.title = fRestoringTitle;
-        fWebKitContext->SetBrowserTabDiscarded(webView, true);
+        fWebKitContext->SetBrowserTabDiscarded(webView, true, address.url.c_str(), created.title.c_str());
     }
     // The site's remembered zoom is set before its page loads.
     created.zoomKey = ZoomKey(address.url);
@@ -1419,7 +1419,7 @@ std::string BrowserWindow::DiscardTab(int64 id)
     tab->certificate.reset();
     tab->connectionCertificate.MakeEmpty();
     tab->softwareRendering = false;
-    fWebKitContext->SetBrowserTabDiscarded(webView, true);
+    fWebKitContext->SetBrowserTabDiscarded(webView, true, tab->url.c_str(), tab->title.c_str());
     if (auto* active = ActiveTab()) fCards->SetVisibleItem(fCards->IndexOfView(active->view));
     SyncBrowserWindow();
     RefreshChrome();
@@ -5500,7 +5500,8 @@ void BrowserWindow::WebKitStateChanged(const BMessage& message)
         UpdateBookmarkQueryLocation(*tab, value);
         ApplySiteZoom(*tab);
     }
-    if (message.FindString("title", &value) == B_OK && value) {
+    // An unloaded tab keeps the title it had until its page loads.
+    if (message.FindString("title", &value) == B_OK && value && (*value || tab->deferredURL.empty())) {
         const auto before = tab->title;
         tab->title = *value ? value : tab->url == "summit:home" ? "Start Page" : tab->url;
         if (tab->title != before && tab->devTools.IsValid()) {
