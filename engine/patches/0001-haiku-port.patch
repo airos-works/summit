@@ -21016,10 +21016,10 @@ index 0000000000000000000000000000000000000000..cdab62bfd95bf644f740fce9f74b4813
 +#endif // PLATFORM(HAIKU)
 diff --git a/Source/WebCore/platform/audio/haiku/WebCodecsAudioHaiku.cpp b/Source/WebCore/platform/audio/haiku/WebCodecsAudioHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..d6fb9faa85281d5361468c6b2cd0b6b63a56744d
+index 0000000000000000000000000000000000000000..346997bb93522aa1af22f86ac7c5f3141ab043c3
 --- /dev/null
 +++ b/Source/WebCore/platform/audio/haiku/WebCodecsAudioHaiku.cpp
-@@ -0,0 +1,737 @@
+@@ -0,0 +1,1048 @@
 +/*
 + * Copyright (C) 2026 Summit contributors.
 + *
@@ -21191,6 +21191,26 @@ index 0000000000000000000000000000000000000000..d6fb9faa85281d5361468c6b2cd0b6b6
 +    void (*freeFrame)(void**);
 +    void (*flushBuffers)(void*);
 +
++    // Encoding, when the libraries are FFmpeg 6 or 8: AVFrame's channel
++    // layout and sample rate are past the prefix, at offsets of those
++    // versions (libavutil 58 and 60); the codec context is set up through
++    // AVOptions.
++    bool canEncode { false };
++    size_t frameChannelLayoutOffset { 0 };
++    size_t frameSampleRateOffset { 0 };
++    void* (*findEncoderByName)(const char*);
++    int (*sendFrame)(void*, const void*);
++    int (*receivePacket)(void*, void*);
++    void (*unrefPacket)(void*);
++    int (*setOptionInt)(void*, const char*, int64_t, int);
++    int (*setOptionSampleFormat)(void*, const char*, int, int);
++    int (*setOptionChannelLayout)(void*, const char*, const void*, int);
++    int (*getOptionInt)(void*, const char*, int, int64_t*);
++    void (*defaultChannelLayout)(void*, int);
++    void (*uninitChannelLayout)(void*);
++    int (*frameGetBuffer)(void*, int);
++    void (*unrefFrame)(void*);
++
 +    static const FFmpegAudio* load()
 +    {
 +        static const FFmpegAudio* loaded = [] () -> const FFmpegAudio* {
@@ -21228,6 +21248,33 @@ index 0000000000000000000000000000000000000000..d6fb9faa85281d5361468c6b2cd0b6b6
 +                delete ffmpeg;
 +                return nullptr;
 +            }
++            auto* avcodecVersion = reinterpret_cast<unsigned (*)()>(dlsym(avcodec, "avcodec_version"));
++            auto* avutilVersion = reinterpret_cast<unsigned (*)()>(dlsym(avutil, "avutil_version"));
++            unsigned avcodecMajor = avcodecVersion ? avcodecVersion() >> 16 : 0;
++            unsigned avutilMajor = avutilVersion ? avutilVersion() >> 16 : 0;
++            if (avcodecMajor == 60 && avutilMajor == 58) {
++                ffmpeg->frameChannelLayoutOffset = 448;
++                ffmpeg->frameSampleRateOffset = 208;
++            } else if (avcodecMajor == 62 && avutilMajor == 60) {
++                ffmpeg->frameChannelLayoutOffset = 384;
++                ffmpeg->frameSampleRateOffset = 180;
++            }
++            if (ffmpeg->frameChannelLayoutOffset) {
++                complete = true;
++                ffmpeg->findEncoderByName = reinterpret_cast<void* (*)(const char*)>(find(avcodec, "avcodec_find_encoder_by_name"));
++                ffmpeg->sendFrame = reinterpret_cast<int (*)(void*, const void*)>(find(avcodec, "avcodec_send_frame"));
++                ffmpeg->receivePacket = reinterpret_cast<int (*)(void*, void*)>(find(avcodec, "avcodec_receive_packet"));
++                ffmpeg->unrefPacket = reinterpret_cast<void (*)(void*)>(find(avcodec, "av_packet_unref"));
++                ffmpeg->setOptionInt = reinterpret_cast<int (*)(void*, const char*, int64_t, int)>(find(avutil, "av_opt_set_int"));
++                ffmpeg->setOptionSampleFormat = reinterpret_cast<int (*)(void*, const char*, int, int)>(find(avutil, "av_opt_set_sample_fmt"));
++                ffmpeg->setOptionChannelLayout = reinterpret_cast<int (*)(void*, const char*, const void*, int)>(find(avutil, "av_opt_set_chlayout"));
++                ffmpeg->getOptionInt = reinterpret_cast<int (*)(void*, const char*, int, int64_t*)>(find(avutil, "av_opt_get_int"));
++                ffmpeg->defaultChannelLayout = reinterpret_cast<void (*)(void*, int)>(find(avutil, "av_channel_layout_default"));
++                ffmpeg->uninitChannelLayout = reinterpret_cast<void (*)(void*)>(find(avutil, "av_channel_layout_uninit"));
++                ffmpeg->frameGetBuffer = reinterpret_cast<int (*)(void*, int)>(find(avutil, "av_frame_get_buffer"));
++                ffmpeg->unrefFrame = reinterpret_cast<void (*)(void*)>(find(avutil, "av_frame_unref"));
++                ffmpeg->canEncode = complete;
++            }
 +            return ffmpeg;
 +        }();
 +        return loaded;
@@ -21258,6 +21305,49 @@ index 0000000000000000000000000000000000000000..d6fb9faa85281d5361468c6b2cd0b6b6
 +    auto* name = ffmpegDecoderName(codec);
 +    auto* ffmpeg = name ? FFmpegAudio::load() : nullptr;
 +    return ffmpeg && ffmpeg->findDecoderByName(name);
++}
++
++// FFmpeg's encoder for a WebCodecs audio codec string: AAC LC (FFmpeg's own)
++// and MP3 (LAME), when the libraries have them.
++static const char* ffmpegEncoderName(StringView codec)
++{
++    if (codec == "mp4a.40.2"_s || codec == "mp4a.40.02"_s)
++        return "aac";
++    if (codec == "mp3"_s)
++        return "libmp3lame";
++    return nullptr;
++}
++
++// ISO 14496-3's sampling frequency index, or 15 for a rate not in its table.
++static unsigned aacFrequencyIndex(unsigned sampleRate)
++{
++    static constexpr std::array rates { 96000u, 88200u, 64000u, 48000u, 44100u, 32000u, 24000u, 22050u, 16000u, 12000u, 11025u, 8000u, 7350u };
++    auto found = std::ranges::find(rates, sampleRate);
++    return found == rates.end() ? 15 : found - rates.begin();
++}
++
++// An AAC LC AudioSpecificConfig: the description of a raw AAC stream.
++static Vector<uint8_t> aacAudioSpecificConfig(unsigned sampleRate, unsigned channels)
++{
++    unsigned frequencyIndex = aacFrequencyIndex(sampleRate);
++    unsigned channelConfiguration = channels == 8 ? 7 : channels;
++    uint64_t bits = 2;
++    unsigned length = 5;
++    auto append = [&](uint64_t value, unsigned count) {
++        bits = (bits << count) | value;
++        length += count;
++    };
++    append(frequencyIndex, 4);
++    if (frequencyIndex == 15)
++        append(sampleRate, 24);
++    append(channelConfiguration, 4);
++    append(0, 3); // 1024-sample frames, no core coder, no extension.
++    unsigned padded = (length + 7) / 8 * 8;
++    bits <<= padded - length;
++    Vector<uint8_t> config;
++    for (unsigned shift = padded; shift; shift -= 8)
++        config.append(static_cast<uint8_t>(bits >> (shift - 8)));
++    return config;
 +}
 +
 +// An AudioSpecificConfig (ISO 14496-3) as the fields of an ADTS header: the
@@ -21732,6 +21822,223 @@ index 0000000000000000000000000000000000000000..d6fb9faa85281d5361468c6b2cd0b6b6
 +    std::atomic<bool> m_isClosed { false };
 +};
 +
++class FFmpegAudioEncoderHaiku final : public AudioEncoder {
++public:
++    static RefPtr<FFmpegAudioEncoderHaiku> create(const String& codec, const AudioEncoder::Config& config, DescriptionCallback&& descriptionCallback, OutputCallback&& outputCallback)
++    {
++        auto* name = ffmpegEncoderName(codec);
++        auto* ffmpeg = name ? FFmpegAudio::load() : nullptr;
++        if (!ffmpeg || !ffmpeg->canEncode || !config.sampleRate || !config.numberOfChannels || config.numberOfChannels > 8)
++            return nullptr;
++        bool isAAC = isAACCodec(codec);
++        // ADTS headers can name only the table's rates and up to 7 channels.
++        if (isAAC && config.isAacADTS.value_or(false) && (aacFrequencyIndex(config.sampleRate) == 15 || config.numberOfChannels > 7))
++            return nullptr;
++        RefPtr encoder = adoptRef(*new FFmpegAudioEncoderHaiku(*ffmpeg, name, isAAC, config, WTF::move(descriptionCallback), WTF::move(outputCallback)));
++        if (!encoder->openContext())
++            return nullptr;
++        return encoder;
++    }
++
++    ~FFmpegAudioEncoderHaiku()
++    {
++        m_ffmpeg.freeFrame(&m_frame);
++        m_ffmpeg.freePacket(&m_packet);
++        m_ffmpeg.freeContext(&m_context);
++    }
++
++private:
++    FFmpegAudioEncoderHaiku(const FFmpegAudio& ffmpeg, const char* name, bool isAAC, const AudioEncoder::Config& config, DescriptionCallback&& descriptionCallback, OutputCallback&& outputCallback)
++        : m_ffmpeg(ffmpeg)
++        , m_name(name)
++        , m_isAAC(isAAC)
++        , m_isADTS(isAAC && config.isAacADTS.value_or(false))
++        , m_config(config)
++        , m_packet(ffmpeg.allocPacket())
++        , m_frame(ffmpeg.allocFrame())
++        , m_descriptionCallback(WTF::move(descriptionCallback))
++        , m_outputCallback(WTF::move(outputCallback))
++        , m_queue(WorkQueue::create("WebCodecs FFmpeg audio encoder"_s))
++    {
++    }
++
++    // A context for the configuration: planar float samples, the default
++    // channel layout for the channel count.
++    bool openContext()
++    {
++        m_ffmpeg.freeContext(&m_context);
++        auto* encoder = m_ffmpeg.findEncoderByName(m_name);
++        if (!encoder || !m_packet || !m_frame || !(m_context = m_ffmpeg.allocContext(encoder)))
++            return false;
++        alignas(8) std::array<uint8_t, 64> layout { };
++        m_ffmpeg.defaultChannelLayout(layout.data(), m_config.numberOfChannels);
++        bool configured = m_ffmpeg.setOptionInt(m_context, "ar", m_config.sampleRate, 0) >= 0
++            && m_ffmpeg.setOptionSampleFormat(m_context, "sample_fmt", sampleFloatPlanar, 0) >= 0
++            && m_ffmpeg.setOptionChannelLayout(m_context, "ch_layout", layout.data(), 0) >= 0
++            && (!m_config.bitRate || m_ffmpeg.setOptionInt(m_context, "b", m_config.bitRate, 0) >= 0);
++        m_ffmpeg.uninitChannelLayout(layout.data());
++        int64_t frameSize = 0;
++        if (!configured || m_ffmpeg.open(m_context, encoder, nullptr) < 0
++            || m_ffmpeg.getOptionInt(m_context, "frame_size", 0, &frameSize) < 0 || frameSize <= 0 || frameSize > 65536) {
++            m_ffmpeg.freeContext(&m_context);
++            return false;
++        }
++        m_frameSize = frameSize;
++        m_samplesSent = 0;
++        return true;
++    }
++
++    Ref<EncodePromise> encode(RawFrame&& frame) final
++    {
++        return invokeAsync(m_queue.get(), [protectedThis = Ref { *this }, frame = WTF::move(frame)] mutable {
++            return protectedThis->encodeOnQueue(WTF::move(frame));
++        });
++    }
++
++    Ref<EncodePromise> encodeOnQueue(RawFrame&& frame)
++    {
++        if (m_isClosed)
++            return EncodePromise::createAndReject("The encoder is closed"_s);
++        if (!m_context && !openContext())
++            return EncodePromise::createAndReject("The encoder could not be started again"_s);
++        RefPtr audio = frame.frame;
++        if (!audio || audio->numberOfChannels() != m_config.numberOfChannels || audio->sampleRate() != m_config.sampleRate)
++            return EncodePromise::createAndReject("The audio does not match the encoder's channels and sample rate"_s);
++        size_t frames = audio->numberOfFrames();
++        size_t channels = m_config.numberOfChannels;
++        if (!m_hasTimestamp) {
++            m_hasTimestamp = true;
++            m_firstTimestamp = frame.timestamp;
++        }
++        size_t start = m_pending.size();
++        m_pending.grow(start + frames * channels);
++        audio->copyTo(asMutableByteSpan(m_pending.mutableSpan().subspan(start)), AudioSampleFormat::F32, 0, 0, frames, frames * channels);
++        while (m_pending.size() >= m_frameSize * channels) {
++            if (auto error = sendFrame(m_frameSize))
++                return EncodePromise::createAndReject(WTF::move(*error));
++        }
++        return EncodePromise::createAndResolve();
++    }
++
++    // The first samples waiting, as one frame (shorter only when finishing).
++    std::optional<String> sendFrame(size_t samples)
++    {
++        size_t channels = m_config.numberOfChannels;
++        auto* frame = static_cast<AVFramePrefix*>(m_frame);
++        auto* bytes = static_cast<uint8_t*>(m_frame);
++        m_ffmpeg.unrefFrame(m_frame);
++        frame->sampleCount = samples;
++        frame->format = sampleFloatPlanar;
++        m_ffmpeg.defaultChannelLayout(bytes + m_ffmpeg.frameChannelLayoutOffset, channels);
++        int sampleRate = m_config.sampleRate;
++        memcpy(bytes + m_ffmpeg.frameSampleRateOffset, &sampleRate, sizeof(sampleRate));
++        if (m_ffmpeg.frameGetBuffer(m_frame, 0) < 0)
++            return "Out of memory"_s;
++        for (size_t channel = 0; channel < channels; ++channel) {
++            auto* plane = reinterpret_cast<float*>(frame->data[channel]);
++            for (size_t i = 0; i < samples; ++i)
++                plane[i] = m_pending[i * channels + channel];
++        }
++        // pts, in samples (the encoder's time base): the same offset in FFmpeg 6 and 8.
++        int64_t pts = m_samplesSent;
++        memcpy(bytes + 136, &pts, sizeof(pts));
++        int result = m_ffmpeg.sendFrame(m_context, m_frame);
++        m_ffmpeg.unrefFrame(m_frame);
++        if (result < 0)
++            return makeString("Audio encoding failed with error "_s, result);
++        m_samplesSent += samples;
++        m_pending.removeAt(0, std::min(m_pending.size(), samples * channels));
++        receivePackets();
++        return std::nullopt;
++    }
++
++    void receivePackets()
++    {
++        while (m_ffmpeg.receivePacket(m_context, m_packet) >= 0) {
++            auto* packet = static_cast<AVPacketPrefix*>(m_packet);
++            Vector<uint8_t> data(std::span<const uint8_t> { packet->data, static_cast<size_t>(std::max(packet->size, 0)) });
++            int64_t pts = std::max<int64_t>(packet->pts, 0);
++            m_ffmpeg.unrefPacket(m_packet);
++            if (data.isEmpty())
++                continue;
++            describeIfNeeded();
++            if (m_isADTS) {
++                ADTSFields fields { 1, aacFrequencyIndex(m_config.sampleRate), static_cast<unsigned>(m_config.numberOfChannels) };
++                data = adtsFrame(fields, data.span());
++            }
++            int64_t timestamp = m_firstTimestamp + pts * 1000000 / static_cast<int64_t>(m_config.sampleRate);
++            uint64_t duration = m_frameSize * 1000000 / m_config.sampleRate;
++            m_outputCallback({ WTF::move(data), true, timestamp, duration });
++        }
++    }
++
++    void describeIfNeeded()
++    {
++        if (m_hasDescribed)
++            return;
++        m_hasDescribed = true;
++        ActiveConfiguration configuration;
++        configuration.codec = m_isAAC ? "mp4a.40.2"_s : "mp3"_s;
++        configuration.sampleRate = m_config.sampleRate;
++        configuration.numberOfChannels = m_config.numberOfChannels;
++        if (m_config.bitRate)
++            configuration.bitrate = m_config.bitRate;
++        if (m_isAAC && !m_isADTS)
++            configuration.description = aacAudioSpecificConfig(m_config.sampleRate, m_config.numberOfChannels);
++        m_descriptionCallback(WTF::move(configuration));
++    }
++
++    Ref<GenericPromise> flush() final
++    {
++        return invokeAsync(m_queue.get(), [protectedThis = Ref { *this }] {
++            // The rest as a short last frame, then the encoder drained: it
++            // takes no more frames, so the next encode starts a new context.
++            auto& encoder = protectedThis.get();
++            if (encoder.m_context && !encoder.m_isClosed) {
++                size_t channels = encoder.m_config.numberOfChannels;
++                if (!encoder.m_pending.isEmpty())
++                    encoder.sendFrame(encoder.m_pending.size() / channels);
++                encoder.m_ffmpeg.sendFrame(encoder.m_context, nullptr);
++                encoder.receivePackets();
++                encoder.m_ffmpeg.freeContext(&encoder.m_context);
++            }
++            encoder.m_pending.clear();
++            encoder.m_hasTimestamp = false;
++            return GenericPromise::createAndResolve();
++        });
++    }
++
++    void reset() final
++    {
++        m_queue->dispatch([protectedThis = Ref { *this }] {
++            protectedThis->m_pending.clear();
++            protectedThis->m_hasTimestamp = false;
++            protectedThis->m_ffmpeg.freeContext(&protectedThis->m_context);
++        });
++    }
++
++    void close() final { m_isClosed = true; }
++
++    const FFmpegAudio& m_ffmpeg;
++    const char* const m_name;
++    const bool m_isAAC;
++    const bool m_isADTS;
++    const AudioEncoder::Config m_config;
++    void* m_context { nullptr };
++    void* m_packet;
++    void* m_frame;
++    size_t m_frameSize { 0 };
++    int64_t m_samplesSent { 0 };
++    DescriptionCallback m_descriptionCallback;
++    OutputCallback m_outputCallback;
++    const Ref<WorkQueue> m_queue;
++    Vector<float> m_pending;
++    int64_t m_firstTimestamp { 0 };
++    bool m_hasTimestamp { false };
++    bool m_hasDescribed { false };
++    std::atomic<bool> m_isClosed { false };
++};
++
 +} // namespace
 +
 +Ref<AudioDecoder::CreatePromise> createWebCodecsAudioDecoderHaiku(const String& codec, const AudioDecoder::Config& config, AudioDecoder::OutputCallback&& outputCallback)
@@ -21748,7 +22055,11 @@ index 0000000000000000000000000000000000000000..d6fb9faa85281d5361468c6b2cd0b6b6
 +
 +Ref<AudioEncoder::CreatePromise> createWebCodecsAudioEncoderHaiku(const String& codec, const AudioEncoder::Config& config, AudioEncoder::DescriptionCallback&& descriptionCallback, AudioEncoder::OutputCallback&& outputCallback)
 +{
-+    RefPtr encoder = codec == "opus"_s ? OpusAudioEncoderHaiku::create(config, WTF::move(descriptionCallback), WTF::move(outputCallback)) : nullptr;
++    RefPtr<AudioEncoder> encoder;
++    if (codec == "opus"_s)
++        encoder = OpusAudioEncoderHaiku::create(config, WTF::move(descriptionCallback), WTF::move(outputCallback));
++    else
++        encoder = FFmpegAudioEncoderHaiku::create(codec, config, WTF::move(descriptionCallback), WTF::move(outputCallback));
 +    if (!encoder)
 +        return AudioEncoder::CreatePromise::createAndReject("Not supported"_s);
 +    return AudioEncoder::CreatePromise::createAndResolve(encoder.releaseNonNull());
