@@ -11,6 +11,8 @@ namespace summit {
 // along the strip). kTabDragOut: tab "id" was dropped at "where" (a screen
 // point) outside the strip.
 constexpr uint32 kToggleTabMute = 'tmut';
+// Unload tab "id" until it is selected again (#116).
+constexpr uint32 kDiscardTab = 'tdsc';
 constexpr uint32 kPinTab = 'tpin';
 constexpr uint32 kMoveTab = 'tmov';
 constexpr uint32 kTabDragOut = 'tdro';

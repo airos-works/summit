@@ -1313,16 +1313,7 @@ void BrowserWindow::CreateTab(const std::string& input, bool select, BWebView* a
     created.title = address.url == "summit:home" ? "Start Page" : address.url == kHistoryPage ? "History"
         : address.url == kBookmarksPage ? "Bookmarks" : "Loading…";
     created.pageRevision = fPagesRevision;
-    created.messenger = BMessenger(webView);
-    created.frames = new FrameHistory();
-    webView->AddFilter(created.frames);
-    webView->SetURLSchemeHandler("summit-reader", BMessenger(this));
-    if (!extensionPage) AddPageScripts(webView);
-    // Sites that ask for a name and password get a sign-in sheet (#87).
-    if (!extensionPage) webView->SetAuthenticationRequests(true);
-    webView->SetCustomUserAgent(fShared->Read([](const Profile& profile) {
-        return FindUserAgentPreset(profile.userAgent).agent;
-    }));
+    AttachPageView(created, webView, extensionPage);
     // As in other browsers, a restored session's tabs wait to be selected
     // before they load: a window of fifteen tabs would otherwise start fifteen
     // page loads and web processes at once, with only one of them on screen.
@@ -1330,6 +1321,7 @@ void BrowserWindow::CreateTab(const std::string& input, bool select, BWebView* a
     if (deferred) {
         created.deferredURL = LoadableURL(address.url);
         if (!fRestoringTitle.empty()) created.title = fRestoringTitle;
+        fWebKitContext->SetBrowserTabDiscarded(webView, true);
     }
     // The site's remembered zoom is set before its page loads.
     created.zoomKey = ZoomKey(address.url);
@@ -1369,6 +1361,81 @@ void BrowserWindow::CreateTab(const std::string& input, bool select, BWebView* a
 #endif
 }
 #if SUMMIT_MODERN_WEBKIT
+void BrowserWindow::AttachPageView(Tab& tab, BWebKitView* webView, bool extensionPage)
+{
+    tab.view = webView;
+    tab.messenger = BMessenger(webView);
+    tab.frames = new FrameHistory();
+    webView->AddFilter(tab.frames);
+    webView->SetURLSchemeHandler("summit-reader", BMessenger(this));
+    if (!extensionPage) AddPageScripts(webView);
+    // Sites that ask for a name and password get a sign-in sheet (#87).
+    if (!extensionPage) webView->SetAuthenticationRequests(true);
+    webView->SetCustomUserAgent(fShared->Read([](const Profile& profile) {
+        return FindUserAgentPreset(profile.userAgent).agent;
+    }));
+}
+
+std::string BrowserWindow::DiscardTab(int64 id)
+{
+    auto* tab = FindTabByID(id);
+    if (!tab) return "The tab is not in this window.";
+    if (!tab->deferredURL.empty()) return { };
+    // What a page would lose, or the user would notice, stays loaded.
+    if (id == fSelected) return "The tab is shown.";
+    if (tab->playingAudio || tab->capturingCamera || tab->capturingMicrophone || tab->capturingScreen || tab->keepScreenAwake)
+        return "The tab plays sound, captures or keeps the screen on.";
+    if (tab->url.empty() || tab->url.starts_with("summit:") || summit::IsExtensionPageURL(tab->url) || !Bookmarkable(tab->url))
+        return "The tab does not show a web page.";
+    if (tab->closeQueued || tab->closeRequested || tab->devTools.IsValid() || tab->crashView || tab->errorView
+        || tab->readerActive || fPictureInPictureTab == id || fFullScreenTab == id)
+        return "The tab is busy.";
+    auto* webView = new BWebKitView(BRect(0, 0, 319, 199), "web-page", BMessenger(this), B_FOLLOW_ALL, fWebKitContext);
+    if (webView->InitCheck() != B_OK) {
+        delete webView;
+        return "Could not create the unloaded page.";
+    }
+    if (sCaretBrowsing) ApplyCaretBrowsing(webView);
+    webView->SetExplicitMinSize(fPopup ? BSize(160, 100) : BSize(320, 200));
+    webView->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNLIMITED));
+    if (!IsDefaultZoom(tab->pageZoom)) webView->SetZoomFactor(tab->pageZoom);
+    // The new view takes the old one's card; the old page and its process go.
+    auto* old = tab->view;
+    fCards->AddView(fCards->IndexOfView(old), webView);
+    CancelTranslation(*tab);
+    DropTabAuthentications(id);
+    old->RemoveSelf();
+    delete old;
+    AttachPageView(*tab, webView, false);
+    // It keeps its address, title and icon; its back and forward lists go.
+    tab->deferredURL = LoadableURL(tab->url);
+    tab->loading = tab->back = tab->forward = false;
+    tab->progress = 0;
+    tab->processID = 0;
+    tab->pageIdentifier = 0;
+    tab->processExited = tab->unresponsive = tab->waitedForPage = false;
+    tab->readerAvailable = false;
+    tab->translation = { };
+    tab->certificate.reset();
+    tab->connectionCertificate.MakeEmpty();
+    tab->softwareRendering = false;
+    fWebKitContext->SetBrowserTabDiscarded(webView, true);
+    if (auto* active = ActiveTab()) fCards->SetVisibleItem(fCards->IndexOfView(active->view));
+    SyncBrowserWindow();
+    RefreshChrome();
+    return { };
+}
+
+BrowserWindow::Tab* BrowserWindow::LeastRecentlyUsedTab()
+{
+    Tab* chosen = nullptr;
+    for (auto& tab : fTabs) {
+        if (tab.id == fSelected || !tab.deferredURL.empty() || tab.playingAudio || tab.url.starts_with("summit:")) continue;
+        if (!chosen || tab.lastSelected < chosen->lastSelected) chosen = &tab;
+    }
+    return chosen;
+}
+
 void BrowserWindow::ReplaceTabView(const Tab& tab, const std::string& url)
 {
     int32 index = -1;
@@ -1417,8 +1484,11 @@ void BrowserWindow::SelectTab(int64 id, bool forClose)
         fTabs[i].view->WebPage()->ResendNotifications();
 #else
         ShowTabStatus(fTabs[i]);
-        if (!fRestoringSession && !fTabs[i].deferredURL.empty())
+        if (!fRestoringSession && !fTabs[i].deferredURL.empty()) {
             fTabs[i].view->LoadURL(std::exchange(fTabs[i].deferredURL, {}).c_str());
+            fWebKitContext->SetBrowserTabDiscarded(fTabs[i].view, false);
+        }
+        if (!forClose) fTabs[i].lastSelected = system_time();
         if (!forClose && !fRestoringSession && fTabs[i].certificate && !fTabs[i].certificate->asked)
             AskAboutCertificate(fTabs[i]);
         ShowAuthenticationPrompt();
@@ -2328,6 +2398,16 @@ void BrowserWindow::BrowserCommand(const BMessage& message)
         case B_WEBKIT_BROWSER_SEARCH: SearchCommand(message, identifier, tab); return;
         case B_WEBKIT_BROWSER_BROWSING_DATA: BrowsingDataCommand(message, identifier); return;
         case B_WEBKIT_BROWSER_SESSIONS: SessionsCommand(message, identifier); return;
+        case B_WEBKIT_BROWSER_DISCARD_TAB: {
+            // tabs.discard: the named tab, else the least recently used one.
+            Tab* target = message.HasMessenger("view") ? tab : LeastRecentlyUsedTab();
+            if (!target) { RespondToCommand(identifier, B_NOT_ALLOWED, { }, "There is no tab to discard."); return; }
+            const int64 id = target->id;
+            if (const auto error = DiscardTab(id); !error.empty()) { RespondToCommand(identifier, B_NOT_ALLOWED, { }, error.c_str()); return; }
+            target = FindTabByID(id);
+            RespondToCommand(identifier, B_OK, {target->view});
+            return;
+        }
         case B_WEBKIT_BROWSER_SET_WINDOW_STATE: {
             const std::string state = message.GetString("state", "");
             if (state == "minimized") Minimize(true);
@@ -2913,6 +2993,10 @@ void BrowserWindow::ShowTabMenu(const BMessage& message)
     pin->Message()->AddBool("pinned", !(clicked && clicked->pinned));
     menu->AddItem(pin);
     menu->AddItem(item(clicked && clicked->audioMuted ? "Unmute Tab" : "Mute Tab", kToggleTabMute));
+    // Frees what the page holds; it loads again when selected (#116).
+    auto* unload = item("Unload Tab", kDiscardTab);
+    unload->SetEnabled(clicked && id != fSelected && clicked->deferredURL.empty());
+    menu->AddItem(unload);
 #endif
     auto* move = item("Move Tab to New Window", kMoveTabToNewWindow);
     move->SetEnabled(fTabs.size() > 1);
@@ -3898,6 +3982,7 @@ void BrowserWindow::MessageReceived(BMessage* message)
                 if (!PrepareTabNavigation(*target)) break;
                 if (!target->deferredURL.empty()) {
                     target->view->LoadURL(std::exchange(target->deferredURL, {}).c_str());
+                    fWebKitContext->SetBrowserTabDiscarded(target->view, false);
                     break;
                 }
 #endif
@@ -4060,6 +4145,9 @@ void BrowserWindow::MessageReceived(BMessage* message)
         }
         case kPictureInPictureCommand: PictureInPictureCommand(*message); break;
         case kToggleTabMute: ToggleTabMute(message->GetInt64("id", fSelected)); break;
+        case kDiscardTab:
+            if (const auto error = DiscardTab(message->GetInt64("id", 0)); !error.empty()) fStatus->SetText(error.c_str());
+            break;
         case kPinTab: SetTabPinned(message->GetInt64("id", fSelected), message->GetBool("pinned", true)); break;
         case kMoveTab: MoveTabTo(message->GetInt64("id", 0), static_cast<size_t>(std::max<int32>(0, message->GetInt32("index", 0)))); break;
         case kTabDragOut: {

@@ -84760,10 +84760,10 @@ index 0000000000000000000000000000000000000000..574ed16658f0c14b1aa2e63208e990b8
 +#define WEBKIT_ENGINE_VERSION_HAIKU "@WebKit_HAIKU_MAJOR_VERSION@.@WebKit_HAIKU_MINOR_VERSION@.@WebKit_HAIKU_TINY_VERSION@"
 diff --git a/Source/WebKit/UIProcess/API/haiku/WebKitContext.cpp b/Source/WebKit/UIProcess/API/haiku/WebKitContext.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..1568d5cd31e8b9434cc20d73ceb522a65ac35c54
+index 0000000000000000000000000000000000000000..48c34d6bee92edf2b6297beaa83211d917414c1a
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/API/haiku/WebKitContext.cpp
-@@ -0,0 +1,1140 @@
+@@ -0,0 +1,1151 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#include "config.h"
@@ -85465,6 +85465,17 @@ index 0000000000000000000000000000000000000000..1568d5cd31e8b9434cc20d73ceb522a6
 +    });
 +}
 +
++void BWebKitContext::SetBrowserTabDiscarded(BWebKitView* view, bool discarded)
++{
++    if (m_status != B_OK || !view)
++        return;
++    WTF::RunLoop::mainSingleton().dispatch([context = m_context, state = view->m_state, discarded] {
++        if (state->context != context || state->closed || !state->client || !state->client->page())
++            return;
++        context->browserTabs()->setDiscarded(state->client->page()->identifier(), discarded);
++    });
++}
++
 +void BWebKitContext::SetBrowserTabPinned(BWebKitView* view, bool pinned)
 +{
 +    if (m_status != B_OK || !view)
@@ -85906,10 +85917,10 @@ index 0000000000000000000000000000000000000000..1568d5cd31e8b9434cc20d73ceb522a6
 +}
 diff --git a/Source/WebKit/UIProcess/API/haiku/WebKitContext.h b/Source/WebKit/UIProcess/API/haiku/WebKitContext.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..f934b3903f75027e97b5af5f4cd75047645259b0
+index 0000000000000000000000000000000000000000..0bf475ea1efc02408214d0b061fab10714fecc80
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/API/haiku/WebKitContext.h
-@@ -0,0 +1,537 @@
+@@ -0,0 +1,548 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#pragma once
@@ -85994,6 +86005,12 @@ index 0000000000000000000000000000000000000000..f934b3903f75027e97b5af5f4cd75047
 +//                  the tab within its own window.
 +//   SET_ZOOM       view, window, zoom (double: 0.25..5, or 0 for the default).
 +//                  The host zooms the tab as its own zoom commands would.
++//   DISCARD_TAB    optional view and window (absent: the host chooses its
++//                  least recently used background tab). The host unloads the
++//                  tab's page into a new, unloaded view that loads when the
++//                  tab is selected, reports it with SetBrowserTabDiscarded and
++//                  answers with that view; B_NOT_ALLOWED with an error when
++//                  the tab cannot be unloaded (it is shown, plays sound...).
 +//   SET_PINNED     view, window, pinned (bool). The host pins or unpins the
 +//                  tab and reports it with SetBrowserTabPinned.
 +//   SET_WINDOW_FRAME  window, left, top, width, height (double; NaN keeps
@@ -86070,7 +86087,8 @@ index 0000000000000000000000000000000000000000..f934b3903f75027e97b5af5f4cd75047
 +    B_WEBKIT_BROWSER_BOOKMARKS,
 +    B_WEBKIT_BROWSER_SEARCH,
 +    B_WEBKIT_BROWSER_BROWSING_DATA,
-+    B_WEBKIT_BROWSER_SESSIONS
++    B_WEBKIT_BROWSER_SESSIONS,
++    B_WEBKIT_BROWSER_DISCARD_TAB
 +};
 +
 +// Site permissions: what pages may ask the user for, and the services that
@@ -86166,6 +86184,10 @@ index 0000000000000000000000000000000000000000..f934b3903f75027e97b5af5f4cd75047
 +    // Whether a tab is pinned in the browser (extensions' Tab.pinned). Any
 +    // thread; a closed view is ignored.
 +    void SetBrowserTabPinned(BWebKitView*, bool pinned);
++    // Whether a tab's page is unloaded until it is selected (Tab.discarded):
++    // a tab DISCARD_TAB replaced, or one of a restored session not yet shown.
++    // Any thread; a closed view is ignored.
++    void SetBrowserTabDiscarded(BWebKitView*, bool discarded);
 +    // A browser window's frame in screen coordinates (extensions'
 +    // Window.left/top/width/height). Report it when the window is shown,
 +    // moved or resized. Any thread.
@@ -95028,7 +95050,7 @@ index 8947f24ec9866c39f206aab464ec21c5d4213b95..b36f80023077ec3bc5680f7214a823a4
  
  #endif // ENABLE(WK_WEB_EXTENSIONS)
 diff --git a/Source/WebKit/UIProcess/Extensions/WebExtensionContext.h b/Source/WebKit/UIProcess/Extensions/WebExtensionContext.h
-index 5f8454dd5897a49ffba794e50fb04b7257ad2291..1c5b95e9167c698500ffc567fe80bf59b11fbd8b 100644
+index 5f8454dd5897a49ffba794e50fb04b7257ad2291..2c1c5518d2e2c10aa87af8f4b62c1c9822d03c0a 100644
 --- a/Source/WebKit/UIProcess/Extensions/WebExtensionContext.h
 +++ b/Source/WebKit/UIProcess/Extensions/WebExtensionContext.h
 @@ -40,6 +40,9 @@
@@ -95548,7 +95570,17 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..1c5b95e9167c698500ffc567fe80bf59
  
      // Sidebar APIs
  #if ENABLE(WK_WEB_EXTENSIONS_SIDEBAR)
-@@ -1103,6 +1347,9 @@ private:
+@@ -1088,6 +1332,9 @@ private:
+     void tabsCreate(std::optional<WebPageProxyIdentifier>, const WebExtensionTabParameters&, CompletionHandler<void(std::expected<std::optional<WebExtensionTabParameters>, WebExtensionError>&&)>&&);
+     void tabsUpdate(WebPageProxyIdentifier, std::optional<WebExtensionTabIdentifier>, const WebExtensionTabParameters&, CompletionHandler<void(std::expected<std::optional<WebExtensionTabParameters>, WebExtensionError>&&)>&&);
+     void tabsDuplicate(WebExtensionTabIdentifier, const WebExtensionTabParameters&, CompletionHandler<void(std::expected<std::optional<WebExtensionTabParameters>, WebExtensionError>&&)>&&);
++#if PLATFORM(HAIKU)
++    void tabsDiscardHaiku(std::optional<WebExtensionTabIdentifier>, CompletionHandler<void(std::expected<std::optional<WebExtensionTabParameters>, WebExtensionError>&&)>&&);
++#endif
+     void tabsGet(WebExtensionTabIdentifier, CompletionHandler<void(std::expected<std::optional<WebExtensionTabParameters>, WebExtensionError>&&)>&&);
+     void tabsGetCurrent(WebPageProxyIdentifier, CompletionHandler<void(std::expected<std::optional<WebExtensionTabParameters>, WebExtensionError>&&)>&&);
+     void tabsQuery(WebPageProxyIdentifier, const WebExtensionTabQueryParameters&, CompletionHandler<void(std::expected<Vector<WebExtensionTabParameters>, WebExtensionError>&&)>&&);
+@@ -1103,6 +1350,9 @@ private:
      void tabsSetZoom(WebPageProxyIdentifier, std::optional<WebExtensionTabIdentifier>, double, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
      void tabsMove(Vector<WebExtensionTabIdentifier>, std::optional<WebExtensionWindowIdentifier>, double, CompletionHandler<void(std::expected<Vector<WebExtensionTabParameters>, WebExtensionError>&&)>&&);
      void tabsRemove(Vector<WebExtensionTabIdentifier>, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
@@ -95558,7 +95590,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..1c5b95e9167c698500ffc567fe80bf59
      void tabsExecuteScript(WebPageProxyIdentifier, std::optional<WebExtensionTabIdentifier>, const WebExtensionScriptInjectionParameters&, bool userGesture, CompletionHandler<void(std::expected<Vector<WebExtensionScriptInjectionResultParameters>, WebExtensionError>&&)>&&);
      void tabsInsertCSS(WebPageProxyIdentifier, std::optional<WebExtensionTabIdentifier>, const WebExtensionScriptInjectionParameters&, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
      void tabsRemoveCSS(WebPageProxyIdentifier, std::optional<WebExtensionTabIdentifier>, const WebExtensionScriptInjectionParameters&, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
-@@ -1133,8 +1380,20 @@ private:
+@@ -1133,8 +1383,20 @@ private:
      void fireWindowsEventIfNeeded(WebExtensionEventListenerType, std::optional<WebExtensionWindowParameters>);
  
      // webRequest support.
@@ -95581,7 +95613,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..1c5b95e9167c698500ffc567fe80bf59
  
      // IPC::MessageReceiver.
      void didReceiveMessage(IPC::Connection&, IPC::Decoder&) override;
-@@ -1145,12 +1404,31 @@ private:
+@@ -1145,12 +1407,31 @@ private:
  
      mutable Markable<WebExtensionContextIdentifier> m_privilegedIdentifier;
  
@@ -95613,7 +95645,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..1c5b95e9167c698500ffc567fe80bf59
  #endif
      Vector<Ref<API::Error>> m_errors;
  
-@@ -1169,6 +1447,15 @@ private:
+@@ -1169,6 +1450,15 @@ private:
  
      RefPtr<API::ContentWorld> m_contentScriptWorld;
  
@@ -95629,7 +95661,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..1c5b95e9167c698500ffc567fe80bf59
      PermissionsMap m_grantedPermissions;
      PermissionsMap m_deniedPermissions;
  
-@@ -1194,6 +1481,14 @@ private:
+@@ -1194,6 +1484,14 @@ private:
      EventListenerTypeCountedSet m_backgroundContentEventListeners;
      EventListenerTypeFrameMap m_eventListenerFrames;
  
@@ -95644,7 +95676,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..1c5b95e9167c698500ffc567fe80bf59
      bool m_shouldFireStartupEvent { false };
      InstallReason m_installReason { InstallReason::None };
      String m_previousVersion;
-@@ -1216,6 +1511,16 @@ private:
+@@ -1216,6 +1514,16 @@ private:
  #elif ENABLE(2022_GLIB_API)
      GRefPtr<WebKitWebView> m_backgroundWebView;
      GWeakPtr<WebKitWebExtensionContext> m_delegate;
@@ -95661,7 +95693,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..1c5b95e9167c698500ffc567fe80bf59
  #endif
      Variant<std::monostate, Ref<ProcessThrottlerActivity>, Ref<ProcessActivityGroup>> m_backgroundWebViewActivity;
      RefPtr<API::Error> m_backgroundContentLoadError;
-@@ -1237,6 +1542,7 @@ private:
+@@ -1237,6 +1545,7 @@ private:
      HashMap<Ref<WebExtensionMatchPattern>, UserScriptVector> m_injectedScriptsPerPatternMap;
      HashMap<Ref<WebExtensionMatchPattern>, UserStyleSheetVector> m_injectedStyleSheetsPerPatternMap;
  
@@ -95669,7 +95701,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..1c5b95e9167c698500ffc567fe80bf59
      HashMap<String, Ref<WebExtensionDynamicScripts::WebExtensionRegisteredScript>> m_registeredScriptsMap;
      RefPtr<WebExtensionRegisteredScriptsSQLiteStore> m_registeredContentScriptsStorage;
  
-@@ -1256,11 +1562,20 @@ private:
+@@ -1256,11 +1565,20 @@ private:
  #endif // ENABLE(WK_WEB_EXTENSIONS_SIDEBAR)
  
      PortCountedSet m_ports;
@@ -95691,7 +95723,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..1c5b95e9167c698500ffc567fe80bf59
      mutable WindowIdentifierVector m_windowOrderVector;
      mutable std::optional<WebExtensionWindowIdentifier> m_focusedWindowIdentifier;
  
-@@ -1276,6 +1591,12 @@ private:
+@@ -1276,6 +1594,12 @@ private:
      bool m_populatedCommands { false };
  
      String m_declarativeNetRequestContentRuleListFilePath;
@@ -95704,7 +95736,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..1c5b95e9167c698500ffc567fe80bf59
      DeclarativeNetRequestMatchedRuleVector m_matchedRules;
      RefPtr<WebExtensionDeclarativeNetRequestSQLiteStore> m_declarativeNetRequestDynamicRulesStore;
      RefPtr<WebExtensionDeclarativeNetRequestSQLiteStore> m_declarativeNetRequestSessionRulesStore;
-@@ -1283,6 +1604,9 @@ private:
+@@ -1283,6 +1607,9 @@ private:
      HashSet<double> m_sessionRulesIDs;
      HashSet<double> m_dynamicRulesIDs;
  
@@ -95714,7 +95746,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..1c5b95e9167c698500ffc567fe80bf59
      MenuItemMap m_menuItems;
      MenuItemVector m_mainMenuItems;
  
-@@ -1300,12 +1624,16 @@ private:
+@@ -1300,12 +1627,16 @@ private:
          String message;
  #if PLATFORM(COCOA)
          RetainPtr<id> argument;
@@ -95731,7 +95763,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..1c5b95e9167c698500ffc567fe80bf59
  
      Deque<TestMessage> m_testMessageQueue;
      Deque<TestMessage> m_testStartedQueue;
-@@ -1315,6 +1643,8 @@ private:
+@@ -1315,6 +1646,8 @@ private:
      void sendQueuedTestMessagesIfNeeded(WebExtensionEventListenerType);
  #if PLATFORM(COCOA)
      void addTestMessageToQueue(const String& message, id argument, WebExtensionEventListenerType);
@@ -95741,10 +95773,10 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..1c5b95e9167c698500ffc567fe80bf59
  };
  
 diff --git a/Source/WebKit/UIProcess/Extensions/WebExtensionContext.messages.in b/Source/WebKit/UIProcess/Extensions/WebExtensionContext.messages.in
-index 6581f34180846663e2a8be51064e43c2d8173b64..1724f9c6ec44371454fdb68c941d65109601ca05 100644
+index 6581f34180846663e2a8be51064e43c2d8173b64..e0c65c9853aeb47506c4e749b439375fd794e586 100644
 --- a/Source/WebKit/UIProcess/Extensions/WebExtensionContext.messages.in
 +++ b/Source/WebKit/UIProcess/Extensions/WebExtensionContext.messages.in
-@@ -31,10 +31,138 @@
+@@ -31,10 +31,139 @@
      DispatchedTo=UI
  ]
  messages -> WebExtensionContext {
@@ -95788,6 +95820,7 @@ index 6581f34180846663e2a8be51064e43c2d8173b64..1724f9c6ec44371454fdb68c941d6510
 +    [Validator=isLoadedAndPrivilegedMessage] SearchQueryHaiku(String method, String argumentsJSON, std::optional<WebKit::WebExtensionTabIdentifier> tabIdentifier) -> (std::expected<String, WebKit::WebExtensionError> result)
 +    [Validator=isLoadedAndPrivilegedMessage] TabsDetectLanguage(WebKit::WebPageProxyIdentifier webPageProxyIdentifier, std::optional<WebKit::WebExtensionTabIdentifier> tabIdentifier) -> (std::expected<String, WebKit::WebExtensionError> result)
 +    [Validator=isLoadedAndPrivilegedMessage] TabsDuplicate(WebKit::WebExtensionTabIdentifier tabIdentifier, WebKit::WebExtensionTabParameters creationParameters) -> (std::expected<std::optional<WebKit::WebExtensionTabParameters>, WebKit::WebExtensionError> result)
++    [Validator=isLoadedAndPrivilegedMessage] TabsDiscardHaiku(std::optional<WebKit::WebExtensionTabIdentifier> tabIdentifier) -> (std::expected<std::optional<WebKit::WebExtensionTabParameters>, WebKit::WebExtensionError> result)
 +    [Validator=isLoadedAndPrivilegedMessage] TabsGetZoom(WebKit::WebPageProxyIdentifier webPageProxyIdentifier, std::optional<WebKit::WebExtensionTabIdentifier> tabIdentifier) -> (std::expected<double, WebKit::WebExtensionError> result)
 +    [Validator=isLoadedAndPrivilegedMessage] TabsSetZoom(WebKit::WebPageProxyIdentifier webPageProxyIdentifier, std::optional<WebKit::WebExtensionTabIdentifier> tabIdentifier, double zoomFactor) -> (std::expected<void, WebKit::WebExtensionError> result)
 +    [Validator=isLoadedAndPrivilegedMessage] TabsGoBack(WebKit::WebPageProxyIdentifier webPageProxyIdentifier, std::optional<WebKit::WebExtensionTabIdentifier> tabIdentifier) -> (std::expected<void, WebKit::WebExtensionError> result)
@@ -95884,7 +95917,7 @@ index 6581f34180846663e2a8be51064e43c2d8173b64..1724f9c6ec44371454fdb68c941d6510
      // Action APIs
      [Validator=isActionMessageAllowed] ActionGetTitle(std::optional<WebKit::WebExtensionWindowIdentifier> windowIdentifier, std::optional<WebKit::WebExtensionTabIdentifier> tabIdentifier) -> (std::expected<String, WebKit::WebExtensionError> result)
      [Validator=isActionMessageAllowed] ActionSetTitle(std::optional<WebKit::WebExtensionWindowIdentifier> windowIdentifier, std::optional<WebKit::WebExtensionTabIdentifier> tabIdentifier, String title) -> (std::expected<void, WebKit::WebExtensionError> result)
-@@ -48,6 +176,33 @@ messages -> WebExtensionContext {
+@@ -48,6 +177,33 @@ messages -> WebExtensionContext {
      [Validator=isActionMessageAllowed] ActionSetEnabled(std::optional<WebKit::WebExtensionTabIdentifier> tabIdentifier, bool enabled) -> (std::expected<void, WebKit::WebExtensionError> result)
  #endif
  
@@ -95918,7 +95951,7 @@ index 6581f34180846663e2a8be51064e43c2d8173b64..1724f9c6ec44371454fdb68c941d6510
      // Alarms APIs
      [Validator=isAlarmsMessageAllowed] AlarmsCreate(String name, Seconds initialInterval, Seconds repeatInterval) -> ()
      [Validator=isAlarmsMessageAllowed] AlarmsGet(String name) -> (struct std::optional<WebKit::WebExtensionAlarmParameters> alarmInfo)
-@@ -71,9 +226,6 @@ messages -> WebExtensionContext {
+@@ -71,9 +227,6 @@ messages -> WebExtensionContext {
      [Validator=isBookmarksMessageAllowed] BookmarksRemoveTree(String bookmarkId) -> (std::expected<void, WebKit::WebExtensionError> result)
  #endif // ENABLE(WK_WEB_EXTENSIONS_BOOKMARKS)
  
@@ -95928,7 +95961,7 @@ index 6581f34180846663e2a8be51064e43c2d8173b64..1724f9c6ec44371454fdb68c941d6510
      // Cookies APIs
      [Validator=isCookiesMessageAllowed] CookiesGet(std::optional<PAL::SessionID> sessionID, String name, URL url) -> (std::expected<std::optional<WebKit::WebExtensionCookieParameters>, WebKit::WebExtensionError> result)
      [Validator=isCookiesMessageAllowed] CookiesGetAll(std::optional<PAL::SessionID> sessionID, URL url, struct WebKit::WebExtensionCookieFilterParameters filterParameters) -> (std::expected<Vector<WebKit::WebExtensionCookieParameters>, WebKit::WebExtensionError> result)
-@@ -100,8 +252,6 @@ messages -> WebExtensionContext {
+@@ -100,8 +253,6 @@ messages -> WebExtensionContext {
  #endif
  
      // Event APIs
@@ -95937,7 +95970,7 @@ index 6581f34180846663e2a8be51064e43c2d8173b64..1724f9c6ec44371454fdb68c941d6510
  
      // Extensions APIs
      [Validator=isLoaded] ExtensionIsAllowedIncognitoAccess() -> (bool result)
-@@ -134,20 +284,10 @@ messages -> WebExtensionContext {
+@@ -134,20 +285,10 @@ messages -> WebExtensionContext {
      [Validator=isLoaded] PermissionsRequest(HashSet<String> permissions, HashSet<String> origins) -> (bool success)
      [Validator=isLoaded] PermissionsRemove(HashSet<String> permissions, HashSet<String> origins) -> (bool success)
  
@@ -95958,7 +95991,7 @@ index 6581f34180846663e2a8be51064e43c2d8173b64..1724f9c6ec44371454fdb68c941d6510
  
      // Scripting APIs
      [Validator=isScriptingMessageAllowed] ScriptingExecuteScript(WebKit::WebExtensionScriptInjectionParameters parameters, bool userGesture) -> (std::expected<Vector<WebKit::WebExtensionScriptInjectionResultParameters>, WebKit::WebExtensionError> result)
-@@ -174,15 +314,6 @@ messages -> WebExtensionContext {
+@@ -174,15 +315,6 @@ messages -> WebExtensionContext {
      [Validator=isSidebarMessageAllowed] SidebarGetActionClickBehavior() -> (std::expected<WebKit::WebExtensionActionClickBehavior, WebKit::WebExtensionError> result)
  #endif // ENABLE(WK_WEB_EXTENSIONS_SIDEBAR)
  
@@ -95974,7 +96007,7 @@ index 6581f34180846663e2a8be51064e43c2d8173b64..1724f9c6ec44371454fdb68c941d6510
      // Tabs APIs
      [Validator=isLoadedAndPrivilegedMessage] TabsCreate(std::optional<WebKit::WebPageProxyIdentifier> webPageProxyIdentifier, WebKit::WebExtensionTabParameters creationParameters) -> (std::expected<std::optional<WebKit::WebExtensionTabParameters>, WebKit::WebExtensionError> result)
      [Validator=isLoadedAndPrivilegedMessage] TabsUpdate(WebKit::WebPageProxyIdentifier webPageProxyIdentifier, std::optional<WebKit::WebExtensionTabIdentifier> tabIdentifier, WebKit::WebExtensionTabParameters updateParameters) -> (std::expected<std::optional<WebKit::WebExtensionTabParameters>, WebKit::WebExtensionError> result)
-@@ -207,8 +338,6 @@ messages -> WebExtensionContext {
+@@ -207,8 +339,6 @@ messages -> WebExtensionContext {
      [Validator=isLoadedAndPrivilegedMessage] TabsRemoveCSS(WebKit::WebPageProxyIdentifier webPageProxyIdentifier, std::optional<WebKit::WebExtensionTabIdentifier> tabIdentifier, WebKit::WebExtensionScriptInjectionParameters parameters) -> (std::expected<void, WebKit::WebExtensionError> result)
  
      // WebNavigation APIs
@@ -103143,10 +103176,10 @@ index 0000000000000000000000000000000000000000..ef935e9aa0104dc22308026565130ac3
 +#endif // ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
 diff --git a/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextAPITabCommandsHaiku.cpp b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextAPITabCommandsHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..7ffd11d767484aa741b85e76f261b777c7402a9b
+index 0000000000000000000000000000000000000000..835894b160766b6e1a9f1de256c4dece0b460a5e
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextAPITabCommandsHaiku.cpp
-@@ -0,0 +1,700 @@
+@@ -0,0 +1,735 @@
 +/*
 + * Copyright (C) 2023-2024 Apple Inc. All rights reserved.
 + *
@@ -103506,6 +103539,41 @@ index 0000000000000000000000000000000000000000..7ffd11d767484aa741b85e76f261b777
 +    creation.active = parameters.active.value_or(true);
 +    creation.parentTabIdentifier = tab->identifier();
 +    tabsCreate(std::nullopt, creation, WTF::move(completionHandler));
++}
++
++void WebExtensionContext::tabsDiscardHaiku(std::optional<WebExtensionTabIdentifier> tabIdentifier, CompletionHandler<void(std::expected<std::optional<WebExtensionTabParameters>, WebExtensionError>&&)>&& completionHandler)
++{
++    // The browser unloads the page into a new, unloaded view, so the tab's
++    // identifier changes, as in Chrome.
++    static constexpr auto apiName = "tabs.discard()"_s;
++    BMessage message(B_WEBKIT_BROWSER_COMMAND);
++    bool complete = message.AddUInt32("command", B_WEBKIT_BROWSER_DISCARD_TAB) == B_OK;
++    if (tabIdentifier) {
++        RefPtr tab = getTab(*tabIdentifier);
++        if (!tab || !tab->extensionHasAccess()) {
++            completionHandler(toWebExtensionError(apiName, nullString(), "tab not found"_s));
++            return;
++        }
++        complete = complete && addNativeBrowserCommandTab(message, *tab);
++        if (RefPtr window = complete ? tab->window() : nullptr)
++            complete = addNativeBrowserCommandWindow(message, *window);
++    }
++    if (!complete) {
++        completionHandler(toWebExtensionError(apiName, nullString(), "the tab is not available in the browser"_s));
++        return;
++    }
++    sendNativeBrowserCommand(WTF::move(message), apiName, [this, protectedThis = Ref { *this }, completionHandler = WTF::move(completionHandler)](NativeBrowserCommandResult&& result) mutable {
++        if (!result) {
++            completionHandler(makeUnexpected(result.error()));
++            return;
++        }
++        RefPtr tab = result->isEmpty() ? nullptr : getOrCreateNativeTab(result->first());
++        if (!tab) {
++            completionHandler(toWebExtensionError(apiName, nullString(), "the browser did not report the unloaded tab"_s));
++            return;
++        }
++        completionHandler(tab->extensionHasAccess() ? std::optional(tab->parameters()) : std::nullopt);
++    });
 +}
 +
 +void WebExtensionContext::tabsDetectLanguage(WebPageProxyIdentifier webPageProxyIdentifier, std::optional<WebExtensionTabIdentifier> tabIdentifier, CompletionHandler<void(std::expected<String, WebExtensionError>&&)>&& completionHandler)
@@ -112490,10 +112558,10 @@ index 0000000000000000000000000000000000000000..8744cc44a7354f3983ba0cee7d768cd7
 +#endif // ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
 diff --git a/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionTabHaiku.cpp b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionTabHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..78d029711bd98e75c2a88d74ee8a0885f6a304ac
+index 0000000000000000000000000000000000000000..b6208cb6a17b9b2eed5590fefd95380b8e72bb21
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionTabHaiku.cpp
-@@ -0,0 +1,250 @@
+@@ -0,0 +1,252 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#include "config.h"
@@ -112680,9 +112748,11 @@ index 0000000000000000000000000000000000000000..78d029711bd98e75c2a88d74ee8a0885
 +
 +bool WebExtensionTab::isDiscarded() const
 +{
-+    // The native browser owns each open tab's page for its entire lifetime.
-+    // Hiding a tab does not discard it; there is no unload-and-restore path yet.
-+    return false;
++    // The browser reports its unloaded tabs (BWebKitContext::SetBrowserTabDiscarded).
++    RefPtr page = nativePage();
++    RefPtr context = m_extensionContext.get();
++    RefPtr controller = context ? context->extensionController() : nullptr;
++    return page && isValid() && controller && controller->nativeBrowserTabs()->isDiscarded(page->identifier());
 +}
 +
 +WebExtensionTabParameters WebExtensionTab::parameters() const
@@ -115671,10 +115741,10 @@ index 0000000000000000000000000000000000000000..00672589a5ae1fd82ae159dca56f9a01
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/BrowserTabRegistryHaiku.cpp b/Source/WebKit/UIProcess/haiku/BrowserTabRegistryHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..37253b88b4840324027e64c2906f06b1feab2a2c
+index 0000000000000000000000000000000000000000..5db70e5a30eb2b1d45f1043b2d2c3906e34f8874
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/BrowserTabRegistryHaiku.cpp
-@@ -0,0 +1,191 @@
+@@ -0,0 +1,192 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#include "config.h"
@@ -115813,6 +115883,7 @@ index 0000000000000000000000000000000000000000..37253b88b4840324027e64c2906f06b1
 +{
 +    ASSERT(isMainThread());
 +    m_pinnedPages.removeFirst(identifier);
++    m_discardedPages.removeFirst(identifier);
 +    auto windows = m_windows;
 +    for (auto& window : windows) {
 +        window.pages.removeFirst(identifier);
@@ -115868,10 +115939,10 @@ index 0000000000000000000000000000000000000000..37253b88b4840324027e64c2906f06b1
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/BrowserTabRegistryHaiku.h b/Source/WebKit/UIProcess/haiku/BrowserTabRegistryHaiku.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..3f92dfc3539f3452d47442eb4dc6ea05f9c8c08e
+index 0000000000000000000000000000000000000000..09afb7d3959b101397767742075e27d066a40ded
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/BrowserTabRegistryHaiku.h
-@@ -0,0 +1,76 @@
+@@ -0,0 +1,84 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#pragma once
@@ -115923,6 +115994,13 @@ index 0000000000000000000000000000000000000000..3f92dfc3539f3452d47442eb4dc6ea05
 +    void setPinnedObserver(PinnedObserver observer) { m_pinnedObserver = WTF::move(observer); }
 +    void setPinned(WebPageProxyIdentifier, bool pinned);
 +    bool isPinned(WebPageProxyIdentifier identifier) const { return m_pinnedPages.contains(identifier); }
++    // The browser's unloaded tabs (Tab.discarded), which load when selected.
++    void setDiscarded(WebPageProxyIdentifier identifier, bool discarded)
++    {
++        if (discarded != isDiscarded(identifier))
++            discarded ? m_discardedPages.append(identifier) : void(m_discardedPages.removeFirst(identifier));
++    }
++    bool isDiscarded(WebPageProxyIdentifier identifier) const { return m_discardedPages.contains(identifier); }
 +    // Window frames (screen coordinates) as the browser reports them. The
 +    // frame observer hears of each registered window whose frame changed.
 +    using FrameObserver = std::function<void(uint64_t windowIdentifier)>;
@@ -115940,6 +116018,7 @@ index 0000000000000000000000000000000000000000..3f92dfc3539f3452d47442eb4dc6ea05
 +    Observer m_observer;
 +    PinnedObserver m_pinnedObserver;
 +    Vector<WebPageProxyIdentifier> m_pinnedPages;
++    Vector<WebPageProxyIdentifier> m_discardedPages;
 +    Vector<std::pair<BMessenger, BRect>> m_frames;
 +    FrameObserver m_frameObserver;
 +    Vector<Window> m_windows;
@@ -141647,10 +141726,10 @@ index d7868f1e4addc61cb897e875bab3a9dcf88efd76..641099c3a542b56479e6eecdb50d493c
  } // namespace WebKit
 diff --git a/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPITabs.cpp b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPITabs.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..268962298db52e897d005204692ae8cc166fd03b
+index 0000000000000000000000000000000000000000..3dbbfcc2bf0dc388237f89c4980f67d7b6aa9425
 --- /dev/null
 +++ b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPITabs.cpp
-@@ -0,0 +1,895 @@
+@@ -0,0 +1,909 @@
 +/*
 + * Copyright (C) 2023 Apple Inc. All rights reserved.
 + *
@@ -142057,6 +142136,20 @@ index 0000000000000000000000000000000000000000..268962298db52e897d005204692ae8cc
 +        }
 +    }
 +    WebProcess::singleton().sendWithAsyncReply(Messages::WebExtensionContext::TabsDuplicate(*tab, parameters),
++        [protectedThis = Ref { *this }, callback = WTF::move(callback)](std::expected<std::optional<WebExtensionTabParameters>, WebExtensionError>&& result) {
++            callWithTab(callback.get(), WTF::move(result));
++        }, extensionContext().identifier());
++}
++
++void WebExtensionAPITabs::discard(double tabID, Ref<WebExtensionCallbackHandler>&& callback, String& exception)
++{
++    // Documentation: https://developer.chrome.com/docs/extensions/reference/api/tabs#method-discard
++    // Without a tab the browser unloads its least recently used background tab.
++
++    std::optional<WebExtensionTabIdentifier> tab;
++    if (!parseOptionalTabIdentifier(tabID, tab, exception))
++        return;
++    WebProcess::singleton().sendWithAsyncReply(Messages::WebExtensionContext::TabsDiscardHaiku(tab),
 +        [protectedThis = Ref { *this }, callback = WTF::move(callback)](std::expected<std::optional<WebExtensionTabParameters>, WebExtensionError>&& result) {
 +            callWithTab(callback.get(), WTF::move(result));
 +        }, extensionContext().identifier());
@@ -142547,10 +142640,10 @@ index 0000000000000000000000000000000000000000..268962298db52e897d005204692ae8cc
 +}
 +#endif
 diff --git a/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPITabs.h b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPITabs.h
-index de0fbb5429a8ed531f265a73c467871e082e4977..5bbf4184547d8aabddf80e63076f470c15a7ae7b 100644
+index de0fbb5429a8ed531f265a73c467871e082e4977..369c4e2e550335e4abde7bec7d74ebc700ff9acb 100644
 --- a/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPITabs.h
 +++ b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPITabs.h
-@@ -49,15 +49,61 @@ class WebExtensionAPITabs : public WebExtensionAPIObject, public JSWebExtensionW
+@@ -49,15 +49,62 @@ class WebExtensionAPITabs : public WebExtensionAPIObject, public JSWebExtensionW
      WEB_EXTENSION_DECLARE_JS_WRAPPER_CLASS(WebExtensionAPITabs, tabs, tabs);
  
  public:
@@ -142595,6 +142688,7 @@ index de0fbb5429a8ed531f265a73c467871e082e4977..5bbf4184547d8aabddf80e63076f470c
 +    void detectLanguage(WebPageProxyIdentifier page, double tabID, Ref<WebExtensionCallbackHandler>&& callback, String& exception);
 +    void getZoomSettings(double tabID, Ref<WebExtensionCallbackHandler>&& callback, String& exception);
 +    void setZoomSettings(double tabID, RefPtr<JSON::Value> zoomSettings, Ref<WebExtensionCallbackHandler>&& callback, String& exception);
++    void discard(double tabID, Ref<WebExtensionCallbackHandler>&& callback, String& exception);
 +#endif
 +#if PLATFORM(COCOA)
 +    void getSelected(WebPageProxyIdentifier page, double windowID, Ref<WebExtensionCallbackHandler>&& callback, String& exception);
@@ -142614,7 +142708,7 @@ index de0fbb5429a8ed531f265a73c467871e082e4977..5bbf4184547d8aabddf80e63076f470c
      void getSelected(WebPageProxyIdentifier, double windowID, Ref<WebExtensionCallbackHandler>&&, NSString **outExceptionString);
  
      void duplicate(double tabID, NSDictionary *properties, Ref<WebExtensionCallbackHandler>&&, NSString **outExceptionString);
-@@ -83,17 +129,6 @@ public:
+@@ -83,17 +130,6 @@ public:
      void insertCSS(WebPageProxyIdentifier, double tabID, NSDictionary *options, Ref<WebExtensionCallbackHandler>&&, NSString **outExceptionString);
      void removeCSS(WebPageProxyIdentifier, double tabID, NSDictionary *options, Ref<WebExtensionCallbackHandler>&&, NSString **outExceptionString);
  
@@ -142632,7 +142726,7 @@ index de0fbb5429a8ed531f265a73c467871e082e4977..5bbf4184547d8aabddf80e63076f470c
  
  private:
      bool parseTabCreateOptions(NSDictionary *, WebExtensionTabParameters&, NSString *sourceKey, NSString **outExceptionString);
-@@ -105,15 +140,20 @@ private:
+@@ -105,15 +141,20 @@ private:
      static bool parseConnectOptions(NSDictionary *, std::optional<String>& name, WebExtensionMessageTargetParameters&, NSString *sourceKey, NSString **outExceptionString);
      static bool parseScriptOptions(NSDictionary *, WebExtensionScriptInjectionParameters&, NSString **outExceptionString);
  
@@ -148344,10 +148438,10 @@ index 866d70a2cdbbe9cfbd525c7be21d6c21db2dfa1a..090b11c6a852e779e830487dcaed3958
      readonly attribute WebExtensionAPIEvent onChanged;
  
 diff --git a/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPITabs.idl b/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPITabs.idl
-index a744e37f5fd4c546a27627a69573d8eeb454312b..f5421d3b007db62e023534b23af28dde2868c2e6 100644
+index a744e37f5fd4c546a27627a69573d8eeb454312b..ad23b5c8e6d140eb48aadc16855bbc1e28e937a0 100644
 --- a/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPITabs.idl
 +++ b/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPITabs.idl
-@@ -69,42 +69,45 @@ dictionary WebExtensionTabCreateProperties {
+@@ -69,42 +69,46 @@ dictionary WebExtensionTabCreateProperties {
  
  [
      Conditional=WK_WEB_EXTENSIONS,
@@ -148387,6 +148481,7 @@ index a744e37f5fd4c546a27627a69573d8eeb454312b..f5421d3b007db62e023534b23af28dde
 -    [RaisesException, NeedsPageIdentifier] void getZoom([Optional] double tabID, [Optional, CallbackHandler] function callback);
 -    [RaisesException, NeedsPageIdentifier] void setZoom([Optional] double tabID, double zoomFactor, [Optional, CallbackHandler] function callback);
 +    [Platform=COCOA|HAIKU, RaisesStringException, NeedsPageIdentifier] void getZoom([Optional] double tabID, [Optional, CallbackHandler] function callback);
++    [Platform=HAIKU, RaisesStringException] void discard([Optional] double tabID, [Optional, CallbackHandler] function callback);
 +    [Platform=HAIKU, RaisesStringException] void getZoomSettings([Optional] double tabID, [Optional, CallbackHandler] function callback);
 +    [Platform=HAIKU, RaisesStringException] void setZoomSettings([Optional] double tabID, [JSONValue] any zoomSettings, [Optional, CallbackHandler] function callback);
 +    [Platform=COCOA|HAIKU, RaisesStringException, NeedsPageIdentifier] void setZoom([Optional] double tabID, double zoomFactor, [Optional, CallbackHandler] function callback);
@@ -148414,7 +148509,7 @@ index a744e37f5fd4c546a27627a69573d8eeb454312b..f5421d3b007db62e023534b23af28dde
  
      [ImplementedAs=tabIdentifierNone] readonly attribute double TAB_ID_NONE;
  
-@@ -117,5 +120,6 @@ dictionary WebExtensionTabCreateProperties {
+@@ -117,5 +121,6 @@ dictionary WebExtensionTabCreateProperties {
      readonly attribute WebExtensionAPIEvent onRemoved;
      readonly attribute WebExtensionAPIEvent onReplaced;
      readonly attribute WebExtensionAPIEvent onUpdated;

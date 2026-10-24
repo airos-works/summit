@@ -206,6 +206,8 @@ private:
         bigtime_t loadStartedAt = 0, loadFinishedAt = 0;
         // A restored background tab loads this when it is first selected.
         std::string deferredURL;
+        // system_time() when the tab was last selected, for choosing which to unload.
+        bigtime_t lastSelected = 0;
         // The tab's Developer Tools window, while it is open.
         BMessenger devTools { };
         // The last load failed because the server's certificate failed
@@ -441,6 +443,13 @@ private:
     void CloseTab(int64 id);
 #if SUMMIT_MODERN_WEBKIT
     void ReplaceTabView(const Tab& tab, const std::string& url);
+    // Gives tab a page view: its filters, scheme handler, scripts and agent.
+    void AttachPageView(Tab& tab, BWebKitView* webView, bool extensionPage);
+    // Unloads a background tab into a new view that loads its address when
+    // the tab is selected (tabs.discard, Unload Tab). The reason it cannot,
+    // or empty.
+    std::string DiscardTab(int64 id);
+    Tab* LeastRecentlyUsedTab();
 #endif
     void Navigate(const std::string& text);
     void RunBookmarklet(const std::string& url);
