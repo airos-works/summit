@@ -59,5 +59,19 @@ int main()
     check(PageNeedsTranslation(DetectPageLanguage(samples[6].second), "zh_TW"), "different Chinese writing system");
     check(!PageNeedsTranslation(DetectPageLanguage(samples[0].second), ""), "unknown target");
     check(!PageNeedsTranslation(DetectPageLanguage("Bonjour"), "en"), "uncertain text has no offer");
+
+    const auto german = DetectTextLanguages(samples[1].second);
+    check(german.reliable && !german.languages.empty() && german.languages[0].first == "de", "detectLanguage German");
+    const auto bilingual = DetectTextLanguages(samples[0].second + "\n" + samples[3].second);
+    check(bilingual.languages.size() >= 2 && (bilingual.languages[0].first == "en" || bilingual.languages[0].first == "es")
+        && (bilingual.languages[1].first == "en" || bilingual.languages[1].first == "es"), "detectLanguage lists both languages");
+    check(DetectTextLanguages("").languages.empty() && !DetectTextLanguages("").reliable, "detectLanguage empty text");
+    check(DetectTextLanguages(samples[1].second + "\xff").languages.empty(), "detectLanguage invalid UTF-8");
+    std::string longGerman;
+    while (longGerman.size() <= kPageLanguageSampleLimit) longGerman += samples[1].second;
+    check(DetectTextLanguages(longGerman).languages.at(0).first == "de", "detectLanguage keeps the start of a long text");
+    std::string longJapanese;
+    while (longJapanese.size() <= kPageLanguageSampleLimit) longJapanese += samples[5].second;
+    check(!DetectTextLanguages(longJapanese).languages.empty(), "detectLanguage cuts a long text between characters");
     std::cout << checks << " page language checks passed\n";
 }

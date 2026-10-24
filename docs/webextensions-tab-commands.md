@@ -146,8 +146,10 @@ agreeing, then `onUpdated {pinned: false}` after unpinning.
 ## Detect language (#106)
 
 `tabs.detectLanguage()` returns the language the page declares: its
-`<html lang>`, else a `Content-Language` `<meta>` (first entry), else `"und"`.
-Chrome guesses from the text instead; Summit has no language detector. It runs
+`<html lang>`, else a `Content-Language` `<meta>` (first entry). A page that
+declares neither has its text (the first 20,000 characters) read by the
+detector `i18n.detectLanguage` uses (CLD2, `DETECT_LANGUAGE`), as Chrome
+does: its main language when CLD2 is sure, else `"und"`. It runs
 a short script in a nameless world of the tab's main frame and needs access to
 the tab (host permission or `activeTab`). Verified on the X399 (24 Oct, dl106 build): `en` for
 `https://example.com/` (`<html lang="en">`).

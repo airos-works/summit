@@ -34,6 +34,7 @@
 #include "core/InternalPages.h"
 #include "core/Suggest.h"
 #include "core/Zoom.h"
+#include "core/PageLanguage.h"
 #include <Alert.h>
 #include <Bitmap.h>
 #include <Clipboard.h>
@@ -2433,6 +2434,16 @@ void BrowserWindow::BrowserCommand(const BMessage& message)
         case B_WEBKIT_BROWSER_SEARCH: SearchCommand(message, identifier, tab); return;
         case B_WEBKIT_BROWSER_BROWSING_DATA: BrowsingDataCommand(message, identifier); return;
         case B_WEBKIT_BROWSER_SESSIONS: SessionsCommand(message, identifier); return;
+        case B_WEBKIT_BROWSER_DETECT_LANGUAGE: {
+            // i18n.detectLanguage, with the detector page translation uses.
+            const auto detected = DetectTextLanguages(message.GetString("text", ""));
+            auto languages = nlohmann::json::array();
+            for (const auto& [language, percentage] : detected.languages)
+                languages.push_back({{"language", language}, {"percentage", percentage}});
+            const nlohmann::json answer = {{"isReliable", detected.reliable}, {"languages", languages}};
+            fWebKitContext->RespondToBrowserCommandWithData(identifier, B_OK, answer.dump().c_str());
+            return;
+        }
         case B_WEBKIT_BROWSER_SET_READER: {
             // tabs.toggleReaderMode: Reader view starts from the shown tab.
             const bool active = message.GetBool("active", true);

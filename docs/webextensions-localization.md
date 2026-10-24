@@ -114,8 +114,16 @@ Remaining work includes additional locale-selection/fallback runs and unmodified
 published extensions.
 The shared dollar behavior also needs a cross-browser review: consecutive runs
 currently use Chrome's one-escape-per-run behavior, while unmatched text retains
-WebKit's behavior. Cocoa compilation and runtime remain unverified. `detectLanguage`
-still needs a real detector; it is absent from the pinned WebKit API implementation.
+WebKit's behavior. Cocoa compilation and runtime remain unverified.
+
+`i18n.detectLanguage(text)` (absent from the pinned WebKit API) is answered by
+the browser: a `DETECT_LANGUAGE` browser command, which Summit answers with the
+CLD2 detector page translation uses (`summit::DetectTextLanguages`, the first
+64 KiB of the text). It gives Firefox's `{isReliable, languages: [{language,
+percentage}]}`: up to three languages, most of the text first, with CLD2's
+codes (`zh-Hant` for traditional Chinese), and no languages for text without
+one. Content scripts may call it too. Fixture:
+`tests/fixtures/extensions/detect-language`.
 
 The first browser result is
 `.vm/modern-extension-localization-67e8e2b23940ec3768e781ff/result.json`.

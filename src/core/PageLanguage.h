@@ -2,6 +2,7 @@
 #include <cstddef>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace summit {
@@ -16,6 +17,16 @@ struct PageLanguage {
 // Oversized and malformed input is rejected; callers should bound extraction.
 inline constexpr size_t kPageLanguageSampleLimit = 65536;
 PageLanguage DetectPageLanguage(std::string_view text);
+
+// i18n.detectLanguage: CLD2's languages of any text (up to three, most of
+// the text first, with CLD2's codes as Firefox gives them) and whether CLD2
+// is sure. Text past kPageLanguageSampleLimit is ignored; invalid UTF-8 and
+// text without a language give none.
+struct TextLanguages {
+    bool reliable = false;
+    std::vector<std::pair<std::string, int>> languages;
+};
+TextLanguages DetectTextLanguages(std::string_view text);
 
 // A language key for comparing detected text to a system locale. Regions are
 // ignored, except for Chinese's separately detected writing systems. Accepts

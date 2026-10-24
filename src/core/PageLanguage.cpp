@@ -81,6 +81,31 @@ PageLanguage DetectPageLanguage(std::string_view text)
     return result;
 }
 
+TextLanguages DetectTextLanguages(std::string_view text)
+{
+    TextLanguages result;
+    if (text.size() > kPageLanguageSampleLimit) {
+        // Cut at a character boundary, not inside a UTF-8 sequence.
+        size_t end = kPageLanguageSampleLimit;
+        while (end > 0 && (static_cast<unsigned char>(text[end]) & 0xc0) == 0x80) --end;
+        text = text.substr(0, end);
+    }
+    if (text.empty()) return result;
+    CLD2::Language languages[3];
+    int percentages[3];
+    double scores[3];
+    bool reliable = false;
+    int textBytes = 0, validBytes = 0;
+    auto language = CLD2::ExtDetectLanguageSummaryCheckUTF8(text.data(), static_cast<int>(text.size()),
+        true, nullptr, 0, languages, percentages, scores, nullptr, &textBytes, &reliable, &validBytes);
+    if (validBytes != static_cast<int>(text.size()) || language == CLD2::UNKNOWN_LANGUAGE) return result;
+    for (size_t i = 0; i < 3; ++i)
+        if (languages[i] != CLD2::UNKNOWN_LANGUAGE && percentages[i] > 0)
+            result.languages.emplace_back(CLD2::LanguageCode(languages[i]), percentages[i]);
+    result.reliable = reliable && !result.languages.empty();
+    return result;
+}
+
 std::string PreferredPageLanguage(const std::vector<std::string>& preferred)
 {
     return preferred.empty() ? std::string() : PageLanguageKey(preferred.front());
