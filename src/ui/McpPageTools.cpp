@@ -34,6 +34,10 @@ using mcp::ToolResult;
 
 const char* kTabArgument = "Tab as the tabs tool names it (\"WINDOW.TAB\", or TAB in the front window); "
     "omitted: the front window's selected tab";
+// Instead of a tab: an extension's background page (started if it is not
+// running), as the extensions tool names it.
+const char* kExtensionArgument = "Instead of tab: an extension's background page, by the identifier or baseURL the "
+    "extensions tool gives (its background is started when it is not running)";
 
 struct PageConnection {
     std::string id;
@@ -141,8 +145,56 @@ std::string PageTarget(const BMessenger& window, const std::string& id)
     return { };
 }
 
+// A session on an extension's background page (the extensions tool's
+// identifier or base URL), through the front window's engine context.
+std::shared_ptr<PageConnection> ConnectExtension(const std::string& extension)
+{
+    const std::string id = "extension:" + extension;
+    {
+        std::lock_guard lock(sLock);
+        if (auto found = sByTab.find(id); found != sByTab.end()) return found->second;
+    }
+    McpTabRef ref = McpResolveTab(Json::object());
+    std::shared_ptr<BWebKitContext> context;
+    if (ref.window.LockTargetWithTimeout(3000000) != B_OK)
+        throw ToolError("the window could not be locked within 3 s: its thread is busy or hung");
+    BLooper* looper = nullptr;
+    ref.window.Target(&looper);
+    if (auto* browser = dynamic_cast<BrowserWindow*>(looper)) context = browser->McpWebKitContext();
+    if (looper) looper->Unlock();
+    if (!context) throw ToolError("no browser window has an engine context");
+    const BMessenger pump = Pump();
+    auto connection = std::make_shared<PageConnection>();
+    connection->id = id;
+    connection->window = ref.window;
+    connection->attachedAt = system_time();
+    {
+        std::lock_guard lock(sLock);
+        connection->identifier = sNextIdentifier++;
+    }
+    connection->session = BWebKitInspectorSession::CreateForExtension(*context, extension.c_str(), pump, connection->identifier);
+    if (!connection->session) throw ToolError("the engine made no inspector session for extension " + extension);
+    std::vector<std::string> outgoing;
+    {
+        std::lock_guard lock(sLock);
+        if (auto found = sByTab.find(id); found != sByTab.end()) return found->second;
+        sByIdentifier[connection->identifier] = connection;
+        sByTab[id] = connection;
+        connection->channel.Start();
+        outgoing = connection->channel.TakeOutgoing();
+    }
+    BMessage ready(B_WEBKIT_INSPECTOR_MESSAGES);
+    ready.AddUInt64("identifier", connection->identifier);
+    if (pump.SendMessage(&ready, static_cast<BHandler*>(nullptr), 1000000) != B_OK)
+        throw ToolError("the inspector message pump could not be reached");
+    Flush(*connection, std::move(outgoing));
+    return connection;
+}
+
 std::shared_ptr<PageConnection> Connect(const Json& arguments)
 {
+    if (const std::string extension = mcp::StringArgument(arguments, "extension", ""); !extension.empty())
+        return ConnectExtension(extension);
     McpTabRef ref = McpResolveTab(arguments);
     const int64 tab = ConcreteTab(ref);
     const std::string id = std::to_string(ref.windowKey) + "." + std::to_string(tab);
@@ -401,7 +453,7 @@ void RegisterMcpPageTools(mcp::Server& server, const std::shared_ptr<McpContext>
         "API such as $$ and copy) and returns the value: by value when it serializes as JSON, awaited when it is "
         "a promise, else the engine's description; exceptions are reported. Statements are fine; the last "
         "expression's value is returned.",
-        Schema().String("expression", "JavaScript", true).String("tab", kTabArgument)
+        Schema().String("expression", "JavaScript", true).String("tab", kTabArgument).String("extension", kExtensionArgument)
             .Integer("timeout_ms", "How long to wait (default 15000)").Boolean("user_gesture", "Run as if the user clicked")
             .Integer("max_bytes", "Most of the value returned (default 100000)"),
         [](const Json& arguments) {
@@ -419,7 +471,7 @@ void RegisterMcpPageTools(mcp::Server& server, const std::shared_ptr<McpContext>
         "messages), with source locations and stacks for errors, kept from the first page tool call on that tab. "
         "reload=true reloads the page and waits (wait_ms, default 4000) to catch its load. since: the last serial "
         "of a previous call.",
-        Schema().String("tab", kTabArgument).Integer("since", "Only entries after this serial")
+        Schema().String("tab", kTabArgument).String("extension", kExtensionArgument).Integer("since", "Only entries after this serial")
             .Enum("level", "Lowest level shown (default debug: all)", {"debug", "log", "info", "warning", "error"})
             .String("filter", "Text or glob on the message").Integer("limit", "Most entries (default 200)")
             .Boolean("reload", "Reload the page first").Integer("wait_ms", "Wait before reading").Boolean("clear", "Forget the entries afterwards"),

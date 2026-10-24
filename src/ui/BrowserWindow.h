@@ -128,6 +128,8 @@ public:
     // Runs function with the page view of the tab (with the window locked);
     // false when the window has no such tab. tab 0: the selected one.
     bool McpWithView(int64 tab, const std::function<void(BWebKitView&)>& function);
+    // The engine context of the window's pages (MCP tools for extension background pages).
+    std::shared_ptr<BWebKitContext> McpWebKitContext() const { return fWebKitContext; }
 #if SUMMIT_MODERN_WEBKIT
     void DirectConnected(direct_buffer_info* info) override;
     // Whether app_server killed the window's direct daemon thread, which it

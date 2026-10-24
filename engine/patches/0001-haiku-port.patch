@@ -87529,10 +87529,10 @@ index 0000000000000000000000000000000000000000..dc2f4d4fdb07966241e673bd4e49b9e8
 +}
 diff --git a/Source/WebKit/UIProcess/API/haiku/WebKitContext.h b/Source/WebKit/UIProcess/API/haiku/WebKitContext.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..086ff6821aad41ffbc94fbc4b93cc9ae376b6549
+index 0000000000000000000000000000000000000000..bbbc261da4236fd5559d21c6345d7e50508e4136
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/API/haiku/WebKitContext.h
-@@ -0,0 +1,558 @@
+@@ -0,0 +1,560 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#pragma once
@@ -88088,6 +88088,8 @@ index 0000000000000000000000000000000000000000..086ff6821aad41ffbc94fbc4b93cc9ae
 +private:
 +    friend class BWebKitView;
 +    std::shared_ptr<WebKit::WebViewContextHaiku> m_context;
++    // Inspector sessions of extension background pages.
++    friend class BWebKitInspectorSession;
 +    status_t m_status { B_NO_INIT };
 +    const bool m_private;
 +};
@@ -88524,10 +88526,10 @@ index 0000000000000000000000000000000000000000..22ab42571717f32300ebb36a55b10011
 +WK_EXPORT const char* BWebKitSourceRevision();
 diff --git a/Source/WebKit/UIProcess/API/haiku/WebKitInspector.cpp b/Source/WebKit/UIProcess/API/haiku/WebKitInspector.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..c4bb3a33bd4f0939699c9f8b1fad19e672cecbc4
+index 0000000000000000000000000000000000000000..06b0e46432afa6394390bc7a01d14013c2f57db8
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/API/haiku/WebKitInspector.cpp
-@@ -0,0 +1,198 @@
+@@ -0,0 +1,234 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +// BWebKitInspectorSession (WebKitInspector.h): a Web Inspector protocol
@@ -88536,7 +88538,11 @@ index 0000000000000000000000000000000000000000..c4bb3a33bd4f0939699c9f8b1fad19e6
 +#include "config.h"
 +#include "WebKitInspector.h"
 +
++#include "WebExtensionContext.h"
++#include "WebExtensionController.h"
++#include "WebKitContext.h"
 +#include "WebKitView.h"
++#include "WebViewContextHaiku.h"
 +#include "WebPageInspectorController.h"
 +#include "WebPageProxy.h"
 +#include "WebPreferences.h"
@@ -88641,6 +88647,20 @@ index 0000000000000000000000000000000000000000..c4bb3a33bd4f0939699c9f8b1fad19e6
 +    RefPtr<WebPreferences> preferences;
 +};
 +
++// Connects the session to the page; the WebKit main thread.
++static void connectSessionHaiku(BWebKitInspectorSession::State& state, WebPageProxy& page)
++{
++    if (page.isClosed() || state.channel)
++        return;
++    // Without them the page's console messages stay in the web process.
++    state.preferences = page.preferences();
++    if (sessionsOfPreferencesHaiku().add(state.preferences.get(), 0).iterator->value++ == 0)
++        state.preferences->setDeveloperExtrasEnabled(true);
++    state.channel = makeUnique<InspectorChannelHaiku>(state.queue);
++    state.page = page;
++    page.inspectorController().connectFrontend(*state.channel);
++}
++
 +std::shared_ptr<BWebKitInspectorSession> BWebKitInspectorSession::Create(BWebKitView& view, BMessenger target, uint64 identifier)
 +{
 +    auto state = std::make_shared<State>();
@@ -88652,16 +88672,34 @@ index 0000000000000000000000000000000000000000..c4bb3a33bd4f0939699c9f8b1fad19e6
 +    WTF::RunLoop::mainSingleton().dispatch([state] {
 +        if (state->view->closed || !state->view->client)
 +            return;
-+        RefPtr page = state->view->client->page();
-+        if (!page || page->isClosed())
++        if (RefPtr page = state->view->client->page())
++            connectSessionHaiku(*state, *page);
++    });
++    return session;
++}
++
++std::shared_ptr<BWebKitInspectorSession> BWebKitInspectorSession::CreateForExtension(BWebKitContext& context, const char* extension, BMessenger target, uint64 identifier)
++{
++    auto state = std::make_shared<State>();
++    state->queue = std::make_shared<InspectorQueueHaiku>(target, identifier);
++    std::shared_ptr<BWebKitInspectorSession> session(new BWebKitInspectorSession(state));
++    if (context.m_status != B_OK || !extension || !*extension)
++        return session;
++    WTF::RunLoop::mainSingleton().dispatch([state, webContext = context.m_context, name = String::fromUTF8(extension).isolatedCopy()] {
++        Ref controller = webContext->extensionController();
++        RefPtr extensionContext = controller->extensionContext(name);
++        if (!extensionContext)
++            extensionContext = controller->extensionContext(URL { name });
++        if (!extensionContext || !extensionContext->isLoaded())
 +            return;
-+        // Without them the page's console messages stay in the web process.
-+        state->preferences = page->preferences();
-+        if (sessionsOfPreferencesHaiku().add(state->preferences.get(), 0).iterator->value++ == 0)
-+            state->preferences->setDeveloperExtrasEnabled(true);
-+        state->channel = makeUnique<InspectorChannelHaiku>(state->queue);
-+        state->page = *page;
-+        page->inspectorController().connectFrontend(*state->channel);
++        auto attach = [state, extensionContext] {
++            if (RefPtr page = extensionContext->backgroundWebView())
++                connectSessionHaiku(*state, *page);
++        };
++        if (extensionContext->backgroundWebView())
++            attach();
++        else
++            extensionContext->wakeUpBackgroundContentIfNecessary(WTF::move(attach));
 +    });
 +    return session;
 +}
@@ -88728,10 +88766,10 @@ index 0000000000000000000000000000000000000000..c4bb3a33bd4f0939699c9f8b1fad19e6
 +}
 diff --git a/Source/WebKit/UIProcess/API/haiku/WebKitInspector.h b/Source/WebKit/UIProcess/API/haiku/WebKitInspector.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..cd17cca289e4efa0c8a8169961869d6a469666eb
+index 0000000000000000000000000000000000000000..62263c2e72b3e1d79a0967d6c08599216eb0b2b7
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/API/haiku/WebKitInspector.h
-@@ -0,0 +1,57 @@
+@@ -0,0 +1,63 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#pragma once
@@ -88742,6 +88780,7 @@ index 0000000000000000000000000000000000000000..cd17cca289e4efa0c8a8169961869d6a
 +#include <string>
 +#include <vector>
 +
++class BWebKitContext;
 +class BWebKitView;
 +
 +enum : uint32 {
@@ -88772,6 +88811,11 @@ index 0000000000000000000000000000000000000000..cd17cca289e4efa0c8a8169961869d6a
 +public:
 +    // Any thread. The view must be alive during the call only.
 +    static std::shared_ptr<BWebKitInspectorSession> Create(BWebKitView&, BMessenger target, uint64 identifier = 0);
++    // The same, connected to the background page of an extension of the
++    // context, named by its unique identifier or base URL; the background is
++    // started when it is not running. The session stays unconnected when the
++    // extension is not loaded or has no background. Any thread.
++    static std::shared_ptr<BWebKitInspectorSession> CreateForExtension(BWebKitContext&, const char* extension, BMessenger target, uint64 identifier = 0);
 +    ~BWebKitInspectorSession();
 +    // Queues a protocol message for the page. Any thread.
 +    void Send(const char* message);

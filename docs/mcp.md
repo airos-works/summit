@@ -215,8 +215,12 @@ stack in the JavaScript interpreter under `Runtime.evaluate`.
 - A blanked desktop captures black (`screenshot` says when `screen_blanker`
   runs); frames put straight into the screen (direct present) are not kept for
   `page_frame`.
-- Extension background pages are not views, so the page tools cannot attach to
-  them; their console is in `logs`.
+- Extension background pages are reached with `extension` (the identifier or
+  `baseURL` the `extensions` tool gives) in place of `tab`, by `evaluate` and
+  `console` (`BWebKitInspectorSession::CreateForExtension`, which starts a
+  background that is not running). A Manifest V3 service worker runs in the
+  background's generated page, whose own world is what `evaluate` reaches.
+  Extension console output is also in `logs`.
 - Most `SUMMIT_*` switches are read once when a process starts:
   `set_environment` applies to processes started afterwards
   (`restart_process`).
