@@ -73,3 +73,10 @@ copies in its own format are exact; interleaved `s16` converted correctly
 to `f32` and `s16` planes and to `u8`, with frame offsets. AAC reports
 unsupported, and so does Opus at 44.1 kHz (libopus runs at 8–48 kHz rates
 only; there is no resampling yet).
+
+AAC, MP3 and 44.1 kHz Opus verified on the X399 (25 Oct, wf112 build):
+ffmpeg-made 0.25 s tone files decoded to 13 312 AAC frames (both as ADTS
+and as raw frames with an AudioSpecificConfig) and 13 824 MP3 frames, with
+RMS 0.059 and 0.055, the same sample counts and levels ffmpeg's own decoder
+gives; a second of 44.1 kHz tone went through Opus as 50 packets and came
+back as 48 000 frames at 48 kHz with RMS 0.352.
