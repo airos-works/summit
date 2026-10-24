@@ -2,9 +2,10 @@
  * Copyright 2026 Summit contributors. Distributed under the terms of the MIT License.
  *
  * BWebFrame on Summit's engine: the page's main frame. The engine runs pages
- * in other processes, so what needs their document (its text, its source,
- * whether it can be edited) is not available through this object; the
- * editing commands go to the page.
+ * in other processes: what needs their document (its text, its markup, its
+ * source) is asked of the page with a script and waited for, so it is empty
+ * when called from the application thread (which the answer needs) or when
+ * the page does not answer in time. The editing commands go to the page.
  */
 #include "Private.h"
 
@@ -33,6 +34,22 @@ EngineView(const WebFramePrivate* data)
 {
 	return data != nullptr ? data->view : nullptr;
 }
+
+
+// The result of an asynchronous script, or an empty string.
+static BString
+AskPage(const WebFramePrivate* data, const char* source)
+{
+	BString result;
+	if (SummitLegacy::EvaluateAndWait(EngineView(data), source, result, 10000000) != B_OK)
+		result.Truncate(0);
+	return result;
+}
+
+
+static const char* const kMarkupScript =
+	"return (document.doctype ? '<!DOCTYPE ' + document.doctype.name + '>\\n' : '')"
+	" + document.documentElement.outerHTML;";
 
 
 void
@@ -133,7 +150,12 @@ BWebFrame::ScrollPosition()
 BString
 BWebFrame::FrameSource() const
 {
-	return BString();
+	// As the server sent it (from the cache, as BWebPage::SendPageSource
+	// does), else the markup as it stands.
+	BString script("try { const response = await fetch(location.href, { cache: 'force-cache' });"
+		" if (response.ok) return await response.text(); } catch (error) { }");
+	script << kMarkupScript;
+	return AskPage(fData, script.String());
 }
 
 
@@ -174,14 +196,14 @@ BWebFrame::IsTransparent() const
 BString
 BWebFrame::InnerText() const
 {
-	return BString();
+	return AskPage(fData, "return document.body ? document.body.innerText : '';");
 }
 
 
 BString
 BWebFrame::AsMarkup() const
 {
-	return BString();
+	return AskPage(fData, kMarkupScript);
 }
 
 
@@ -246,6 +268,10 @@ void
 BWebFrame::SetEditable(bool editable)
 {
 	fIsEditable = editable;
+	// The whole document, as HaikuWebKit's editable frames were.
+	if (BWebKitView* view = EngineView(fData))
+		view->EvaluateJavaScript(editable ? "document.designMode = 'on';" : "document.designMode = 'off';",
+			BMessenger(), 0);
 }
 
 

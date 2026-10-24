@@ -21,7 +21,7 @@ classes, implemented on Summit's engine API (`BWebKitView`,
 | Context menu | The engine leaves the menu to its host; the old engine drew its own. `BWebView` shows one: open link or image in a new tab, copy its address, download it, cut/copy/paste, back/forward/reload. |
 | `BWebDownload` | The engine reports downloads to a handler of the application looper, which makes `BWebDownload` objects and sends `B_DOWNLOAD_ADDED` to the download listener. The engine starts saving at once (to the Desktop); `Start(folder)` moves the file into the application's folder when it is complete. `B_DOWNLOAD_STARTED`, `B_DOWNLOAD_PROGRESS` and a synchronous `B_DOWNLOAD_REMOVED` follow as before; the file gets its `META:url` and MIME type. |
 | `BWebSettings` | `SetPersistentStoragePath()` chooses where the engine keeps the application's website data: `<path>/WebKit` (WebPositive: `~/config/settings/WebPositive/WebKit`). `SendIconForURL()` answers from the site icons the engine reported. `Apply()` publishes font and JavaScript settings, with application defaults and per-page overrides. `SetUserAgent()` adds the same control for the user agent. Proxy settings remain unapplied. See [settings behavior and acceptance](legacy-settings-2026-10-22.md). |
-| `BWebFrame` | The main frame: address, title, editing commands, zoom, find. What needs the document itself (its text, its source, editing it) is not available, because the page runs in another process. |
+| `BWebFrame` | The main frame: address, title, editing commands, zoom, find. `InnerText()`, `AsMarkup()` and `FrameSource()` ask the page with a script and wait for it (up to 10 s), so like `GetContentsAsMHTML()` they answer only off the application thread (empty on it, or when the page does not answer); `FrameSource()` is the source from the cache as `SendPageSource()` gets it. `SetEditable()` switches the document's `designMode`, for the page shown then (a new page starts not editable). There is no frame tree. |
 | `SendPageSource()` | The source as the server sent it (from the cache), or the page's markup. |
 | `GetContentsAsMHTML()` | A MIME archive of the document's markup as it stands, with a `<base>` so that its links and pictures still lead to the site. Waits for the engine; it cannot be called on the application thread. |
 | `WebKitInfo` | "Summit" and the engine's versions. |
@@ -122,8 +122,8 @@ summit_webkit-1.10.0-3) and uninstall summit_webkitlegacy.
   Font, JavaScript and user-agent settings pass native `BWebView` acceptance;
   installed stock WebPositive also passes font Apply/Revert and restart checks.
   See [settings acceptance](legacy-settings-2026-10-22.md).
-- `BWebFrame`'s document access (`InnerText()`, `AsMarkup()`,
-  `FrameSource()`) and the frame tree.
+- `BWebFrame`'s frame tree (subframes), and its document access on the
+  application thread (it needs that thread to answer).
 - Web Inspector for BWebView programs (`SetInspectorView()` is kept, unused).
 - HTTP NTLM, proxy requests and persistent Remember acceptance remain untested.
   Certificate questions pass native airOS lifetime checks and two complete
