@@ -57,3 +57,11 @@ thread and writes on a work queue with `SIGPIPE` blocked. Ports are
 `tests/fixtures/extensions/native-messaging/`: copy `host/summit.echo.json`
 and `host/summit_echo.py` to `~/config/settings/Summit/NativeMessagingHosts/`,
 install the extension and read the `[native]` lines.
+
+Verified on the X399 (24 Oct, nm106 build): `sendNativeMessage` answered
+with the host's reply (arguments: the manifest path and the add-on ID), a
+`connectNative` port got two replies and disconnected with "Native host has
+exited." when the host quit, a reply over 1 MB, a missing host and a name
+with `..` were refused, and no host was left running. A Summit started
+without `PATH` cannot run `#!/bin/env python3` hosts (the host inherits
+Summit's environment).
