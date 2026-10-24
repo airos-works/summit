@@ -221,6 +221,8 @@ private:
         std::optional<CertificateProblem> certificate { };
         BMessage connectionCertificate;
         bool readerAvailable = false, readerActive = false, readerExtracting = false;
+        // What extensions were last told (SetBrowserTabReader): available, active.
+        std::pair<bool, bool> reportedReader { false, false };
         uint64 readerProbedGeneration = 0, readerRequest = 0, readerGeneration = 0;
         std::string readerRequestURL, readerSource, readerURL, readerHTML;
         // Older in-memory previews reopen their original web page when the

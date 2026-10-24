@@ -9,8 +9,9 @@ waited this way; unloading puts a loaded tab back in that state.
 - **Unload Tab** in a tab's menu.
 - `tabs.discard(tabId?)` for extensions (Chrome's form): without a tab,
   the least recently selected background tab. The tab gets a new id, as in
-  Chrome; `Tab.discarded` and `tabs.query({discarded})` report unloaded
-  tabs, restored-session tabs included.
+  Chrome; `Tab.discarded` (and `status: "unloaded"`) and
+  `tabs.query({discarded})` report unloaded tabs, restored-session tabs
+  included.
 
 Not unloaded: the shown tab, tabs playing sound, capturing the camera,
 microphone or screen or keeping the screen on, Summit's own pages and

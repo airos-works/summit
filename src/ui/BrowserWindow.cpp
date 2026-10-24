@@ -2433,6 +2433,17 @@ void BrowserWindow::BrowserCommand(const BMessage& message)
         case B_WEBKIT_BROWSER_SEARCH: SearchCommand(message, identifier, tab); return;
         case B_WEBKIT_BROWSER_BROWSING_DATA: BrowsingDataCommand(message, identifier); return;
         case B_WEBKIT_BROWSER_SESSIONS: SessionsCommand(message, identifier); return;
+        case B_WEBKIT_BROWSER_SET_READER: {
+            // tabs.toggleReaderMode: Reader view starts from the shown tab.
+            const bool active = message.GetBool("active", true);
+            if (!tab || tab->id != fSelected) { RespondToCommand(identifier, B_NOT_ALLOWED, { }, "Reader view can only be switched for the shown tab."); return; }
+            if (active != tab->readerActive) {
+                if (active && !tab->readerAvailable) { RespondToCommand(identifier, B_NOT_ALLOWED, { }, "The page has no article for Reader view."); return; }
+                ToggleReader();
+            }
+            RespondToCommand(identifier, B_OK);
+            return;
+        }
         case B_WEBKIT_BROWSER_DISCARD_TAB: {
             // tabs.discard: the named tab, else the least recently used one.
             Tab* target = message.HasMessenger("view") ? tab : LeastRecentlyUsedTab();
@@ -2856,6 +2867,14 @@ void BrowserWindow::WindowActivated(bool active)
 void BrowserWindow::RefreshChrome()
 {
 #if SUMMIT_MODERN_WEBKIT
+    // Extensions' Tab.isArticle and isInReaderMode, when they change.
+    for (auto& tab : fTabs) {
+        const std::pair reader { tab.readerAvailable && !tab.processExited && tab.loadError.empty(), tab.readerActive };
+        if (tab.reportedReader != reader) {
+            tab.reportedReader = reader;
+            fWebKitContext->SetBrowserTabReader(tab.view, reader.first, reader.second);
+        }
+    }
     const auto* active = ActiveTab();
     static_cast<AddressControl*>(fAddress)->SetReader(active && !active->processExited
         && active->loadError.empty() && (active->readerActive || active->readerAvailable),
