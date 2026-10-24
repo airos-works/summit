@@ -31,7 +31,9 @@ the codec string to an `SdpVideoFormat` and create libwebrtc's codec from
 cross with `videoFrameFromWebRTCBuffer`/`webRTCBufferFromVideoFrame`
 (`LibWebRTCHaiku.cpp`, no copy for I420). Decoded pictures keep their
 chunk's timestamp through the RTP timestamp. `ENABLE_WEB_CODECS` is on in
-`OptionsHaiku.cmake`; `WebCodecsVideoEnabled` defaults to true on Haiku.
+`OptionsHaiku.cmake` and in the released engines' cache
+(`engine/arm64/rpi4-gl/init-cache-rtc.cmake`, which forces every option);
+`WebCodecsVideoEnabled` defaults to true on Haiku.
 
 ## Fixture
 
