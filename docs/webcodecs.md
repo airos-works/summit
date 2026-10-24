@@ -15,8 +15,13 @@ is missing fails to be created. H.264 comes in both WebCodecs formats:
 `description`, which the encoder's first output carries) and `annexb`. Each
 encoder and decoder runs on its own work queue in the web process.
 
-Not yet: the audio side (`AudioEncoder`, `AudioDecoder`, `AudioData` stay
-off: `WebCodecsAudioEnabled` is false on Haiku), AV1 and HEVC, hardware
+Audio: `AudioData` (kept in the page's sample format, converted on
+`copyTo`) and Opus through libopus (`AudioEncoder` at 8–48 kHz, mono or
+stereo, 2.5–60 ms packets, the OpusHead as `description`; `AudioDecoder`
+giving `f32` samples). Other audio codecs (AAC, MP3, FLAC, Vorbis, PCM)
+report unsupported.
+
+Not yet: AAC and the other audio codecs, AV1 and HEVC, hardware
 decoders (NVDEC, Cedar) and flushing pictures a decoder holds back (WebRTC's
 decoders return each picture with its chunk, so B-frame streams may lose
 their last pictures).
@@ -27,7 +32,9 @@ their last pictures).
 `createLibWebRTCVideoDecoderHaiku`/`createLibWebRTCVideoEncoderHaiku` (from
 `VideoDecoder::createLocalDecoder`/`VideoEncoder::createLocalEncoder`) map
 the codec string to an `SdpVideoFormat` and create libwebrtc's codec from
-`createVideoDecoderFactoryHaiku`/`createVideoEncoderFactoryHaiku`. Pictures
+`createVideoDecoderFactoryHaiku`/`createVideoEncoderFactoryHaiku`; audio is
+`WebCore/platform/audio/haiku/WebCodecsAudioHaiku.cpp`
+(`PlatformRawAudioDataHaiku`, Opus). Pictures
 cross with `videoFrameFromWebRTCBuffer`/`webRTCBufferFromVideoFrame`
 (`LibWebRTCHaiku.cpp`, no copy for I420). Decoded pictures keep their
 chunk's timestamp through the RTP timestamp. `ENABLE_WEB_CODECS` is on in

@@ -3248,7 +3248,7 @@ index 679b31f339a04bb1a8633f5d8b149701c17b43e5..69cada4c1dfff257dd46b09a01ee0442
  endif ()
  
 diff --git a/Source/WTF/Scripts/Preferences/UnifiedWebPreferences.yaml b/Source/WTF/Scripts/Preferences/UnifiedWebPreferences.yaml
-index b6d135a1282843e5d5c81d4a56a6e6cd4d46379d..935a315cb7bc205192864fb05b6723b78638e6df 100644
+index b6d135a1282843e5d5c81d4a56a6e6cd4d46379d..74c333a284f6b437b76d2becc90e80778e19abe8 100644
 --- a/Source/WTF/Scripts/Preferences/UnifiedWebPreferences.yaml
 +++ b/Source/WTF/Scripts/Preferences/UnifiedWebPreferences.yaml
 @@ -522,6 +522,9 @@ AsyncClipboardAPIEnabled:
@@ -3421,16 +3421,7 @@ index b6d135a1282843e5d5c81d4a56a6e6cd4d46379d..935a315cb7bc205192864fb05b6723b7
      WebCore: StorageBlockingPolicy::AllowAll
    sharedPreferenceForWebProcess: true
  
-@@ -7089,6 +7127,8 @@ WebCodecsAudioEnabled:
-   humanReadableDescription: "Enable WebCodecs Audio API"
-   condition: ENABLE(WEB_CODECS)
-   defaultValue:
-+    # Haiku has no WebCodecs audio codecs yet (WebCodecsHaiku.cpp is video).
-+    "PLATFORM(HAIKU)": false
-     default: true
-     WebKitLegacy: false
- 
-@@ -7126,11 +7166,13 @@ WebCodecsVideoEnabled:
+@@ -7126,11 +7164,13 @@ WebCodecsVideoEnabled:
    defaultValue:
      "USE(LIBWEBRTC) && PLATFORM(COCOA)": WebKit::defaultPeerConnectionEnabledAvailable()
      "USE(GSTREAMER)": true
@@ -9978,10 +9969,10 @@ index 0000000000000000000000000000000000000000..48e19a5957df4c1ae60378dd9a84cbe4
 +/* Copyright (C) 2026 Summit contributors. SPDX-License-Identifier: BSD-2-Clause */
 +enum USBTransferStatus { "ok", "stall", "babble" };
 diff --git a/Source/WebCore/PlatformHaiku.cmake b/Source/WebCore/PlatformHaiku.cmake
-index 16a88804a1baa39ccdd9fc2870b6e2524d941298..49195efbe49baa6dfb3b922f148f1565c6a3ff5b 100644
+index 16a88804a1baa39ccdd9fc2870b6e2524d941298..93f64b848e3d3f24469b9b71a07d41f6e04a5e39 100644
 --- a/Source/WebCore/PlatformHaiku.cmake
 +++ b/Source/WebCore/PlatformHaiku.cmake
-@@ -1,52 +1,370 @@
+@@ -1,52 +1,371 @@
 +include(platform/Haiku.cmake)
  include(platform/ImageDecoders.cmake)
  include(platform/OpenSSL.cmake)
@@ -10298,6 +10289,7 @@ index 16a88804a1baa39ccdd9fc2870b6e2524d941298..49195efbe49baa6dfb3b922f148f1565
 +        platform/mediastream/libwebrtc/haiku/LibWebRTCH264DecoderHaiku.cpp
 +        platform/mediastream/libwebrtc/haiku/LibWebRTCHaiku.cpp
 +        platform/mediastream/libwebrtc/haiku/WebCodecsHaiku.cpp
++        platform/audio/haiku/WebCodecsAudioHaiku.cpp
 +    )
 +    if (ENABLE_MEDIA_RECORDER)
 +        list(APPEND WebCore_SOURCES
@@ -10358,7 +10350,7 @@ index 16a88804a1baa39ccdd9fc2870b6e2524d941298..49195efbe49baa6dfb3b922f148f1565
    textencoding
    translation
    ${WEBP_LIBRARIES}
-@@ -61,6 +379,244 @@ list(APPEND WebCore_SYSTEM_INCLUDE_DIRECTORIES
+@@ -61,6 +380,244 @@ list(APPEND WebCore_SYSTEM_INCLUDE_DIRECTORIES
    ${SQLITE_INCLUDE_DIR}
    ${WEBP_INCLUDE_DIRS}
    ${ZLIB_INCLUDE_DIRS}
@@ -18604,10 +18596,37 @@ index bb996f17aa1c975e1453fff46b016faaac0a44d3..11e2bf6a2333c636e6806fd19a8e8602
  #if HAVE(DISPLAY_LINK)
      // ScrollingTree
 diff --git a/Source/WebCore/platform/AudioDecoder.cpp b/Source/WebCore/platform/AudioDecoder.cpp
-index 681e921599cf269f7ebd1481d542f0cd60fdf615..a38d0a687f9699a6d883a0b3c4527db295d9b3f2 100644
+index 681e921599cf269f7ebd1481d542f0cd60fdf615..d61f9b7e01825026220a163c5bdd1e9129186fde 100644
 --- a/Source/WebCore/platform/AudioDecoder.cpp
 +++ b/Source/WebCore/platform/AudioDecoder.cpp
-@@ -82,7 +82,7 @@ Ref<AudioDecoder::CreatePromise> AudioDecoder::create(const String& codecName, c
+@@ -38,6 +38,10 @@
+ #include "GStreamerRegistryScanner.h"
+ #endif
+ 
++#if PLATFORM(HAIKU) && USE(LIBWEBRTC)
++#include "WebCodecsAudioHaiku.h"
++#endif
++
+ #include <wtf/UniqueRef.h>
+ #include <wtf/text/WTFString.h>
+ 
+@@ -60,6 +64,8 @@ bool AudioDecoder::isCodecSupported(const StringView& codec)
+     result = scanner.isCodecSupported(GStreamerRegistryScanner::Configuration::Decoding, codec.toString());
+ #elif USE(AVFOUNDATION)
+     result = !!AudioDecoderCocoa::isCodecSupported(codec);
++#elif PLATFORM(HAIKU) && USE(LIBWEBRTC)
++    result = isWebCodecsAudioCodecSupportedHaiku(codec);
+ #endif
+ 
+     return result;
+@@ -77,12 +83,14 @@ Ref<AudioDecoder::CreatePromise> AudioDecoder::create(const String& codecName, c
+     return promise;
+ #elif USE(AVFOUNDATION)
+     return AudioDecoderCocoa::create(codecName, config, WTF::move(outputCallback));
++#elif PLATFORM(HAIKU) && USE(LIBWEBRTC)
++    return createWebCodecsAudioDecoderHaiku(codecName, config, WTF::move(outputCallback));
+ #else
+     UNUSED_PARAM(codecName);
      UNUSED_PARAM(config);
      UNUSED_PARAM(outputCallback);
  
@@ -18617,10 +18636,27 @@ index 681e921599cf269f7ebd1481d542f0cd60fdf615..a38d0a687f9699a6d883a0b3c4527db2
  }
  
 diff --git a/Source/WebCore/platform/AudioEncoder.cpp b/Source/WebCore/platform/AudioEncoder.cpp
-index d53a42e0d8d043a03b0e15942d4aeee69bd403a0..15091a8c05fd0eefd12527fc9a12cde70070276a 100644
+index d53a42e0d8d043a03b0e15942d4aeee69bd403a0..8cecc47f3f00d42c1f727f265b4ec1d4018e8947 100644
 --- a/Source/WebCore/platform/AudioEncoder.cpp
 +++ b/Source/WebCore/platform/AudioEncoder.cpp
-@@ -51,7 +51,7 @@ Ref<AudioEncoder::CreatePromise> AudioEncoder::create(const String& codecName, c
+@@ -35,6 +35,8 @@
+ #include "AudioEncoderGStreamer.h"
+ #elif USE(AVFOUNDATION)
+ #include "AudioEncoderCocoa.h"
++#elif PLATFORM(HAIKU) && USE(LIBWEBRTC)
++#include "WebCodecsAudioHaiku.h"
+ #endif
+ 
+ namespace WebCore {
+@@ -45,13 +47,15 @@ Ref<AudioEncoder::CreatePromise> AudioEncoder::create(const String& codecName, c
+     return GStreamerAudioEncoder::create(codecName, config, WTF::move(descriptionCallback), WTF::move(outputCallback));
+ #elif USE(AVFOUNDATION)
+     return AudioEncoderCocoa::create(codecName, config, WTF::move(descriptionCallback), WTF::move(outputCallback));
++#elif PLATFORM(HAIKU) && USE(LIBWEBRTC)
++    return createWebCodecsAudioEncoderHaiku(codecName, config, WTF::move(descriptionCallback), WTF::move(outputCallback));
+ #else
+     UNUSED_PARAM(codecName);
+     UNUSED_PARAM(config);
      UNUSED_PARAM(descriptionCallback);
      UNUSED_PARAM(outputCallback);
  
@@ -20099,6 +20135,20 @@ index 1835cf7389565b0209dce5e50358e9216276d959..39ad60cde7672d8283b5c88588ac565f
      };
  
      virtual Kind kind() const { return Kind::None; }
+diff --git a/Source/WebCore/platform/audio/PlatformRawAudioData.cpp b/Source/WebCore/platform/audio/PlatformRawAudioData.cpp
+index ec42b6cb8b0de398c4a2502d92e0990d54fdc710..a5a9a8f8f5248242b4d1391ad6de81f310862f4b 100644
+--- a/Source/WebCore/platform/audio/PlatformRawAudioData.cpp
++++ b/Source/WebCore/platform/audio/PlatformRawAudioData.cpp
+@@ -29,7 +29,8 @@
+ 
+ namespace WebCore {
+ 
+-#if !USE(GSTREAMER) && !USE(AVFOUNDATION)
++// Haiku: platform/audio/haiku/WebCodecsAudioHaiku.cpp.
++#if !USE(GSTREAMER) && !USE(AVFOUNDATION) && !(PLATFORM(HAIKU) && USE(LIBWEBRTC))
+ RefPtr<PlatformRawAudioData> PlatformRawAudioData::create(Ref<SharedBuffer>&&, AudioSampleFormat, float, int64_t, size_t, size_t)
+ {
+     notImplemented();
 diff --git a/Source/WebCore/platform/audio/haiku/AudioBusHaiku.cpp b/Source/WebCore/platform/audio/haiku/AudioBusHaiku.cpp
 new file mode 100644
 index 0000000000000000000000000000000000000000..eb1a0e5adf95cb4d23f35b1ea7ebf290c2fe1fa5
@@ -20888,6 +20938,458 @@ index 0000000000000000000000000000000000000000..cdab62bfd95bf644f740fce9f74b4813
 +SPECIALIZE_TYPE_TRAITS_END()
 +
 +#endif // PLATFORM(HAIKU)
+diff --git a/Source/WebCore/platform/audio/haiku/WebCodecsAudioHaiku.cpp b/Source/WebCore/platform/audio/haiku/WebCodecsAudioHaiku.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..78fa754a6858ccf5d2cd4109d32b3acbac01ffd9
+--- /dev/null
++++ b/Source/WebCore/platform/audio/haiku/WebCodecsAudioHaiku.cpp
+@@ -0,0 +1,360 @@
++/*
++ * Copyright (C) 2026 Summit contributors.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE AUTHORS ``AS IS'' AND ANY EXPRESS OR
++ * IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
++ * OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
++ */
++
++#include "config.h"
++#include "WebCodecsAudioHaiku.h"
++
++#if ENABLE(WEB_CODECS) && PLATFORM(HAIKU) && USE(LIBWEBRTC)
++
++#include "WebCodecsAudioDataAlgorithms.h"
++#include <opus.h>
++#include <wtf/StdLibExtras.h>
++#include <wtf/WorkQueue.h>
++#include <wtf/text/MakeString.h>
++
++namespace WebCore {
++
++// AudioData.
++
++std::optional<uint64_t> PlatformRawAudioDataHaiku::duration() const
++{
++    if (!m_sampleRate)
++        return std::nullopt;
++    return m_numberOfFrames * 1000000 / m_sampleRate;
++}
++
++RefPtr<PlatformRawAudioData> PlatformRawAudioData::create(Ref<SharedBuffer>&& data, AudioSampleFormat format, float sampleRate, int64_t timestamp, size_t numberOfFrames, size_t numberOfChannels)
++{
++    // WebCodecsAudioData checks that the buffer holds every sample.
++    return PlatformRawAudioDataHaiku::create(WTF::move(data), format, sampleRate, timestamp, numberOfFrames, numberOfChannels);
++}
++
++void PlatformRawAudioData::copyTo(std::span<uint8_t> destination, AudioSampleFormat format, size_t planeIndex, std::optional<size_t> frameOffset, std::optional<size_t>, unsigned long copyElementCount)
++{
++    // computeCopyElementCount (WebCodecsAudioDataAlgorithms) checks the arguments.
++    auto& audio = downcast<PlatformRawAudioDataHaiku>(*this);
++    auto sourceFormat = audio.format();
++    auto bytes = audio.bytes();
++    size_t channels = numberOfChannels();
++    size_t frames = numberOfFrames();
++    size_t offset = std::min(frameOffset.value_or(0), frames);
++    size_t sampleSize = computeBytesPerSample(sourceFormat);
++    bool sourceInterleaved = isAudioSampleFormatInterleaved(sourceFormat);
++
++    // The same samples: a copy (planar and interleaved mono are the same).
++    if (sourceFormat == format || (audioSampleElementFormat(sourceFormat) == audioSampleElementFormat(format) && channels == 1)) {
++        size_t frameSize = sourceInterleaved ? sampleSize * channels : sampleSize;
++        size_t start = (sourceInterleaved ? 0 : planeIndex * frames * sampleSize) + offset * frameSize;
++        size_t length = copyElementCount * sampleSize;
++        RELEASE_ASSERT(start + length <= bytes.size() && length <= destination.size());
++        memcpySpan(destination, bytes.subspan(start, length));
++        return;
++    }
++
++    auto convert = [&](PlaneData planes) {
++        if (isAudioSampleFormatInterleaved(format)) {
++            copyToInterleaved(WTF::move(planes), destination, format, copyElementCount);
++            return;
++        }
++        WTF::switchOn(audioElementSpan(format, destination), [&]<typename D>(std::span<D> target) {
++            switchOn(planes, [&](auto& source) {
++                if (planeIndex >= source.size() || source[planeIndex].size() < copyElementCount || target.size() < copyElementCount)
++                    return;
++                for (size_t i = 0; i < copyElementCount; ++i)
++                    target[i] = convertAudioSample<D>(source[planeIndex][i]);
++            });
++        });
++    };
++
++    // The source's planes from the offset on; interleaved samples are
++    // separated first.
++    auto mutableBytes = unsafeMakeSpan(const_cast<uint8_t*>(bytes.data()), bytes.size());
++    WTF::switchOn(audioElementSpan(sourceFormat, mutableBytes), [&]<typename S>(std::span<S> samples) {
++        size_t count = frames - offset;
++        Vector<Vector<S>> separated;
++        Vector<std::span<S>> planes;
++        if (sourceInterleaved) {
++            separated.resize(channels);
++            for (size_t channel = 0; channel < channels; ++channel) {
++                separated[channel].resize(count);
++                for (size_t frame = 0; frame < count; ++frame)
++                    separated[channel][frame] = samples[(offset + frame) * channels + channel];
++                planes.append(separated[channel].mutableSpan());
++            }
++        } else {
++            for (size_t channel = 0; channel < channels; ++channel)
++                planes.append(samples.subspan(channel * frames + offset, count));
++        }
++        convert(PlaneData { WTF::move(planes) });
++    });
++}
++
++// Opus.
++
++static bool isOpusSampleRate(uint64_t rate)
++{
++    return rate == 8000 || rate == 12000 || rate == 16000 || rate == 24000 || rate == 48000;
++}
++
++bool isWebCodecsAudioCodecSupportedHaiku(StringView codec)
++{
++    return codec == "opus"_s;
++}
++
++// The 19-byte identification header (RFC 7845) a decoder may be given.
++static Vector<uint8_t> opusHead(unsigned channels, unsigned preSkip, unsigned sampleRate)
++{
++    return { 'O', 'p', 'u', 's', 'H', 'e', 'a', 'd', 1, static_cast<uint8_t>(channels),
++        static_cast<uint8_t>(preSkip), static_cast<uint8_t>(preSkip >> 8),
++        static_cast<uint8_t>(sampleRate), static_cast<uint8_t>(sampleRate >> 8), static_cast<uint8_t>(sampleRate >> 16), static_cast<uint8_t>(sampleRate >> 24),
++        0, 0, 0 };
++}
++
++namespace {
++
++class OpusAudioDecoderHaiku final : public AudioDecoder {
++public:
++    static RefPtr<OpusAudioDecoderHaiku> create(const AudioDecoder::Config& config, OutputCallback&& outputCallback)
++    {
++        if (!isOpusSampleRate(config.sampleRate) || !config.numberOfChannels || config.numberOfChannels > 2)
++            return nullptr;
++        int error = OPUS_OK;
++        auto* decoder = opus_decoder_create(config.sampleRate, config.numberOfChannels, &error);
++        if (!decoder || error != OPUS_OK)
++            return nullptr;
++        return adoptRef(*new OpusAudioDecoderHaiku(decoder, config, WTF::move(outputCallback)));
++    }
++
++    ~OpusAudioDecoderHaiku()
++    {
++        opus_decoder_destroy(m_decoder);
++    }
++
++private:
++    OpusAudioDecoderHaiku(OpusDecoder* decoder, const AudioDecoder::Config& config, OutputCallback&& outputCallback)
++        : m_decoder(decoder)
++        , m_sampleRate(config.sampleRate)
++        , m_channels(config.numberOfChannels)
++        , m_outputCallback(WTF::move(outputCallback))
++        , m_queue(WorkQueue::create("WebCodecs Opus decoder"_s))
++    {
++    }
++
++    Ref<DecodePromise> decode(AudioEncodedData&& chunk) final
++    {
++        return invokeAsync(m_queue.get(), [protectedThis = Ref { *this }, chunk = WTF::move(chunk).isolatedCopy()] mutable {
++            return protectedThis->decodeOnQueue(WTF::move(chunk));
++        });
++    }
++
++    Ref<DecodePromise> decodeOnQueue(AudioEncodedData&& chunk)
++    {
++        if (m_isClosed)
++            return DecodePromise::createAndReject("The decoder is closed"_s);
++        // At most 120 ms a packet.
++        constexpr int maximumFrames = 5760;
++        Vector<float> pcm(maximumFrames * m_channels);
++        auto data = chunk.data->span();
++        int frames = opus_decode_float(m_decoder, data.data(), data.size(), pcm.mutableSpan().data(), maximumFrames, 0);
++        if (frames < 0)
++            return DecodePromise::createAndReject(makeString("Opus decoding failed: "_s, String::fromLatin1(opus_strerror(frames))));
++        pcm.shrink(frames * m_channels);
++        auto buffer = SharedBuffer::create(asBytes(pcm.span()));
++        m_outputCallback(DecodedData { PlatformRawAudioDataHaiku::create(WTF::move(buffer), AudioSampleFormat::F32, m_sampleRate, chunk.timestamp, frames, m_channels) });
++        return DecodePromise::createAndResolve();
++    }
++
++    Ref<GenericPromise> flush() final
++    {
++        return invokeAsync(m_queue.get(), [] { return GenericPromise::createAndResolve(); });
++    }
++
++    void reset() final
++    {
++        m_queue->dispatch([protectedThis = Ref { *this }] {
++            opus_decoder_ctl(protectedThis->m_decoder, OPUS_RESET_STATE);
++        });
++    }
++
++    void close() final { m_isClosed = true; }
++
++    OpusDecoder* const m_decoder;
++    const unsigned m_sampleRate;
++    const unsigned m_channels;
++    OutputCallback m_outputCallback;
++    const Ref<WorkQueue> m_queue;
++    std::atomic<bool> m_isClosed { false };
++};
++
++class OpusAudioEncoderHaiku final : public AudioEncoder {
++public:
++    static RefPtr<OpusAudioEncoderHaiku> create(const AudioEncoder::Config& config, DescriptionCallback&& descriptionCallback, OutputCallback&& outputCallback)
++    {
++        if (!isOpusSampleRate(config.sampleRate) || !config.numberOfChannels || config.numberOfChannels > 2)
++            return nullptr;
++        auto opusConfig = config.opusConfig.value_or(OpusConfig { });
++        if (opusConfig.isOggBitStream)
++            return nullptr;
++        // 2.5, 5, 10, 20, 40 or 60 ms a packet.
++        static constexpr std::array durations { 2500, 5000, 10000, 20000, 40000, 60000 };
++        if (std::ranges::find(durations, opusConfig.frameDuration) == durations.end())
++            return nullptr;
++        int error = OPUS_OK;
++        auto* encoder = opus_encoder_create(config.sampleRate, config.numberOfChannels, OPUS_APPLICATION_AUDIO, &error);
++        if (!encoder || error != OPUS_OK)
++            return nullptr;
++        opus_encoder_ctl(encoder, OPUS_SET_BITRATE(config.bitRate ? static_cast<opus_int32>(config.bitRate) : OPUS_AUTO));
++        opus_encoder_ctl(encoder, OPUS_SET_VBR(config.bitRateMode == BitrateMode::Constant ? 0 : 1));
++        if (opusConfig.complexity)
++            opus_encoder_ctl(encoder, OPUS_SET_COMPLEXITY(static_cast<opus_int32>(std::min<size_t>(*opusConfig.complexity, 10))));
++        opus_encoder_ctl(encoder, OPUS_SET_PACKET_LOSS_PERC(static_cast<opus_int32>(std::min<size_t>(opusConfig.packetlossperc, 100))));
++        opus_encoder_ctl(encoder, OPUS_SET_INBAND_FEC(opusConfig.useinbandfec ? 1 : 0));
++        opus_encoder_ctl(encoder, OPUS_SET_DTX(opusConfig.usedtx ? 1 : 0));
++        size_t frameSize = config.sampleRate * opusConfig.frameDuration / 1000000;
++        return adoptRef(*new OpusAudioEncoderHaiku(encoder, config, frameSize, WTF::move(descriptionCallback), WTF::move(outputCallback)));
++    }
++
++    ~OpusAudioEncoderHaiku()
++    {
++        opus_encoder_destroy(m_encoder);
++    }
++
++private:
++    OpusAudioEncoderHaiku(OpusEncoder* encoder, const AudioEncoder::Config& config, size_t frameSize, DescriptionCallback&& descriptionCallback, OutputCallback&& outputCallback)
++        : m_encoder(encoder)
++        , m_config(config)
++        , m_frameSize(frameSize)
++        , m_descriptionCallback(WTF::move(descriptionCallback))
++        , m_outputCallback(WTF::move(outputCallback))
++        , m_queue(WorkQueue::create("WebCodecs Opus encoder"_s))
++    {
++    }
++
++    Ref<EncodePromise> encode(RawFrame&& frame) final
++    {
++        return invokeAsync(m_queue.get(), [protectedThis = Ref { *this }, frame = WTF::move(frame)] mutable {
++            return protectedThis->encodeOnQueue(WTF::move(frame));
++        });
++    }
++
++    Ref<EncodePromise> encodeOnQueue(RawFrame&& frame)
++    {
++        if (m_isClosed)
++            return EncodePromise::createAndReject("The encoder is closed"_s);
++        RefPtr audio = frame.frame;
++        if (!audio || audio->numberOfChannels() != m_config.numberOfChannels || audio->sampleRate() != m_config.sampleRate)
++            return EncodePromise::createAndReject("The audio does not match the encoder's channels and sample rate"_s);
++        size_t frames = audio->numberOfFrames();
++        size_t channels = m_config.numberOfChannels;
++        // Times count from the first sample still waiting.
++        if (m_pending.isEmpty())
++            m_pendingTimestamp = frame.timestamp;
++        size_t start = m_pending.size();
++        m_pending.grow(start + frames * channels);
++        audio->copyTo(asMutableByteSpan(m_pending.mutableSpan().subspan(start)), AudioSampleFormat::F32, 0, 0, frames, frames * channels);
++        while (m_pending.size() >= m_frameSize * channels) {
++            if (auto error = encodePacket())
++                return EncodePromise::createAndReject(WTF::move(*error));
++        }
++        return EncodePromise::createAndResolve();
++    }
++
++    std::optional<String> encodePacket()
++    {
++        size_t channels = m_config.numberOfChannels;
++        Vector<uint8_t> packet(4000);
++        int length = opus_encode_float(m_encoder, m_pending.span().data(), m_frameSize, packet.mutableSpan().data(), packet.size());
++        if (length < 0)
++            return makeString("Opus encoding failed: "_s, String::fromLatin1(opus_strerror(length)));
++        packet.shrink(length);
++        if (!m_hasDescribed) {
++            m_hasDescribed = true;
++            opus_int32 preSkip = 0;
++            opus_encoder_ctl(m_encoder, OPUS_GET_LOOKAHEAD(&preSkip));
++            ActiveConfiguration configuration;
++            configuration.codec = "opus"_s;
++            configuration.sampleRate = m_config.sampleRate;
++            configuration.numberOfChannels = channels;
++            if (m_config.bitRate)
++                configuration.bitrate = m_config.bitRate;
++            configuration.description = opusHead(channels, preSkip, m_config.sampleRate);
++            m_descriptionCallback(WTF::move(configuration));
++        }
++        uint64_t duration = m_frameSize * 1000000 / m_config.sampleRate;
++        m_outputCallback({ WTF::move(packet), true, m_pendingTimestamp, duration });
++        m_pending.removeAt(0, m_frameSize * channels);
++        m_pendingTimestamp += duration;
++        return std::nullopt;
++    }
++
++    Ref<GenericPromise> flush() final
++    {
++        return invokeAsync(m_queue.get(), [protectedThis = Ref { *this }] {
++            // The rest, padded with silence to a whole packet.
++            auto& pending = protectedThis->m_pending;
++            if (!pending.isEmpty() && !protectedThis->m_isClosed) {
++                pending.grow(protectedThis->m_frameSize * protectedThis->m_config.numberOfChannels);
++                protectedThis->encodePacket();
++            }
++            pending.clear();
++            return GenericPromise::createAndResolve();
++        });
++    }
++
++    void reset() final
++    {
++        m_queue->dispatch([protectedThis = Ref { *this }] {
++            protectedThis->m_pending.clear();
++            opus_encoder_ctl(protectedThis->m_encoder, OPUS_RESET_STATE);
++        });
++    }
++
++    void close() final { m_isClosed = true; }
++
++    OpusEncoder* const m_encoder;
++    const AudioEncoder::Config m_config;
++    const size_t m_frameSize;
++    DescriptionCallback m_descriptionCallback;
++    OutputCallback m_outputCallback;
++    const Ref<WorkQueue> m_queue;
++    Vector<float> m_pending;
++    int64_t m_pendingTimestamp { 0 };
++    bool m_hasDescribed { false };
++    std::atomic<bool> m_isClosed { false };
++};
++
++} // namespace
++
++Ref<AudioDecoder::CreatePromise> createWebCodecsAudioDecoderHaiku(const String& codec, const AudioDecoder::Config& config, AudioDecoder::OutputCallback&& outputCallback)
++{
++    RefPtr decoder = codec == "opus"_s ? OpusAudioDecoderHaiku::create(config, WTF::move(outputCallback)) : nullptr;
++    if (!decoder)
++        return AudioDecoder::CreatePromise::createAndReject("Not supported"_s);
++    return AudioDecoder::CreatePromise::createAndResolve(decoder.releaseNonNull());
++}
++
++Ref<AudioEncoder::CreatePromise> createWebCodecsAudioEncoderHaiku(const String& codec, const AudioEncoder::Config& config, AudioEncoder::DescriptionCallback&& descriptionCallback, AudioEncoder::OutputCallback&& outputCallback)
++{
++    RefPtr encoder = codec == "opus"_s ? OpusAudioEncoderHaiku::create(config, WTF::move(descriptionCallback), WTF::move(outputCallback)) : nullptr;
++    if (!encoder)
++        return AudioEncoder::CreatePromise::createAndReject("Not supported"_s);
++    return AudioEncoder::CreatePromise::createAndResolve(encoder.releaseNonNull());
++}
++
++} // namespace WebCore
++
++#endif // ENABLE(WEB_CODECS) && PLATFORM(HAIKU) && USE(LIBWEBRTC)
+diff --git a/Source/WebCore/platform/audio/haiku/WebCodecsAudioHaiku.h b/Source/WebCore/platform/audio/haiku/WebCodecsAudioHaiku.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..af200583f1d6d2b6bd596753cf9d52cbd309bb1a
+--- /dev/null
++++ b/Source/WebCore/platform/audio/haiku/WebCodecsAudioHaiku.h
+@@ -0,0 +1,80 @@
++/*
++ * Copyright (C) 2026 Summit contributors.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE AUTHORS ``AS IS'' AND ANY EXPRESS OR
++ * IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
++ * OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
++ */
++
++#pragma once
++
++#if ENABLE(WEB_CODECS) && PLATFORM(HAIKU)
++
++#include "AudioDecoder.h"
++#include "AudioEncoder.h"
++#include "AudioSampleFormat.h"
++#include "PlatformRawAudioData.h"
++#include "SharedBuffer.h"
++
++namespace WebCore {
++
++// WebCodecs' AudioData: the samples in the format the page gave (so a copy
++// in that format is exact), converted when another format is asked for.
++class PlatformRawAudioDataHaiku final : public PlatformRawAudioData {
++public:
++    static Ref<PlatformRawAudioDataHaiku> create(Ref<SharedBuffer>&& data, AudioSampleFormat format, float sampleRate, int64_t timestamp, size_t numberOfFrames, size_t numberOfChannels)
++    {
++        return adoptRef(*new PlatformRawAudioDataHaiku(WTF::move(data), format, sampleRate, timestamp, numberOfFrames, numberOfChannels));
++    }
++
++    constexpr MediaPlatformType platformType() const final { return MediaPlatformType::Haiku; }
++    AudioSampleFormat format() const final { return m_format; }
++    size_t sampleRate() const final { return m_sampleRate; }
++    size_t numberOfChannels() const final { return m_numberOfChannels; }
++    size_t numberOfFrames() const final { return m_numberOfFrames; }
++    std::optional<uint64_t> duration() const final;
++    int64_t timestamp() const final { return m_timestamp; }
++    size_t memoryCost() const final { return m_data->size(); }
++
++    std::span<const uint8_t> bytes() const { return m_data->span(); }
++
++private:
++    PlatformRawAudioDataHaiku(Ref<SharedBuffer>&& data, AudioSampleFormat format, float sampleRate, int64_t timestamp, size_t numberOfFrames, size_t numberOfChannels)
++        : m_data(WTF::move(data))
++        , m_format(format)
++        , m_sampleRate(sampleRate)
++        , m_timestamp(timestamp)
++        , m_numberOfFrames(numberOfFrames)
++        , m_numberOfChannels(numberOfChannels)
++    {
++    }
++
++    const Ref<SharedBuffer> m_data;
++    const AudioSampleFormat m_format;
++    const size_t m_sampleRate;
++    const int64_t m_timestamp;
++    const size_t m_numberOfFrames;
++    const size_t m_numberOfChannels;
++};
++
++// Opus through libopus (the copy in the libwebrtc tree MediaRecorder uses).
++bool isWebCodecsAudioCodecSupportedHaiku(StringView codec);
++Ref<AudioDecoder::CreatePromise> createWebCodecsAudioDecoderHaiku(const String& codec, const AudioDecoder::Config&, AudioDecoder::OutputCallback&&);
++Ref<AudioEncoder::CreatePromise> createWebCodecsAudioEncoderHaiku(const String& codec, const AudioEncoder::Config&, AudioEncoder::DescriptionCallback&&, AudioEncoder::OutputCallback&&);
++
++} // namespace WebCore
++
++SPECIALIZE_TYPE_TRAITS_BEGIN(WebCore::PlatformRawAudioDataHaiku)
++static bool isType(const WebCore::PlatformRawAudioData& data) { return data.platformType() == WebCore::MediaPlatformType::Haiku; }
++SPECIALIZE_TYPE_TRAITS_END()
++
++#endif // ENABLE(WEB_CODECS) && PLATFORM(HAIKU)
 diff --git a/Source/WebCore/platform/bluetooth/haiku/BluetoothATTClientHaiku.cpp b/Source/WebCore/platform/bluetooth/haiku/BluetoothATTClientHaiku.cpp
 new file mode 100644
 index 0000000000000000000000000000000000000000..62efe2bc95db02703e878b09c8d94a35c6f7d5cc

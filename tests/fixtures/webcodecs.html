@@ -3,7 +3,8 @@
 <title>WebCodecs fixture</title>
 <!-- WebCodecs round trip (#112): for each codec, isConfigSupported, then
      encode six canvas frames of known colours, decode the chunks and check the
-     decoded pictures' middle pixel. Results: #result (JSON) and the page. -->
+     decoded pictures' middle pixel; and a second of tone through Opus (the RMS
+     of a 0.5 sine is about 0.354). Results: #result (JSON) and the page. -->
 <canvas id="source" width="320" height="240"></canvas>
 <canvas id="check" width="320" height="240"></canvas>
 <pre id="log"></pre>
@@ -70,6 +71,58 @@ async function roundTrip({ name, codec, avc }) {
         timestamps: decoded.map(entry => entry.timestamp).join(',') };
 }
 
+// One second of a 440 Hz tone (amplitude 0.5) as 48 kHz stereo f32-planar
+// AudioData, through Opus and back: chunk count, decoded frames and loudness.
+async function audioRoundTrip() {
+    const rate = 48000, channels = 2, chunkFrames = 480;
+    const config = { codec: 'opus', sampleRate: rate, numberOfChannels: channels, bitrate: 96000 };
+    const encodeSupport = await AudioEncoder.isConfigSupported(config);
+    const decodeSupport = await AudioDecoder.isConfigSupported({ codec: 'opus', sampleRate: rate, numberOfChannels: channels });
+    if (!encodeSupport.supported || !decodeSupport.supported)
+        return { encode: encodeSupport.supported, decode: decodeSupport.supported };
+    const chunks = [];
+    let decoderConfig;
+    const encoder = new AudioEncoder({
+        output: (chunk, metadata) => {
+            if (metadata && metadata.decoderConfig)
+                decoderConfig = metadata.decoderConfig;
+            chunks.push(chunk);
+        },
+        error: error => log(`audio encoder error: ${error.message}`),
+    });
+    encoder.configure(config);
+    for (let start = 0; start < rate; start += chunkFrames) {
+        const samples = new Float32Array(chunkFrames * channels);
+        for (let i = 0; i < chunkFrames; ++i)
+            samples[i] = samples[chunkFrames + i] = 0.5 * Math.sin(2 * Math.PI * 440 * (start + i) / rate);
+        const data = new AudioData({ format: 'f32-planar', sampleRate: rate, numberOfFrames: chunkFrames, numberOfChannels: channels, timestamp: start * 1e6 / rate, data: samples });
+        encoder.encode(data);
+        data.close();
+    }
+    await encoder.flush();
+    encoder.close();
+    let frames = 0, sumSquares = 0, format;
+    const decoder = new AudioDecoder({
+        output: data => {
+            format = data.format;
+            const plane = new Float32Array(data.numberOfFrames);
+            data.copyTo(plane, { planeIndex: 0, format: 'f32-planar' });
+            for (const value of plane)
+                sumSquares += value * value;
+            frames += data.numberOfFrames;
+            data.close();
+        },
+        error: error => log(`audio decoder error: ${error.message}`),
+    });
+    decoder.configure(decoderConfig || { codec: 'opus', sampleRate: rate, numberOfChannels: channels });
+    for (const chunk of chunks)
+        decoder.decode(chunk);
+    await decoder.flush();
+    decoder.close();
+    return { encode: true, decode: true, chunks: chunks.length, description: !!(decoderConfig && decoderConfig.description),
+        frames, format, rms: Math.round(1000 * Math.sqrt(sumSquares / Math.max(frames, 1))) / 1000 };
+}
+
 (async () => {
     const results = { webCodecs: typeof VideoEncoder === 'function' && typeof VideoDecoder === 'function', audio: typeof AudioEncoder === 'function', codecs: [] };
     if (results.webCodecs) {
@@ -79,6 +132,13 @@ async function roundTrip({ name, codec, avc }) {
             } catch (error) {
                 results.codecs.push({ name: codec.name, error: error.message });
             }
+        }
+    }
+    if (results.audio) {
+        try {
+            results.opus = await audioRoundTrip();
+        } catch (error) {
+            results.opus = { error: error.message };
         }
     }
     document.getElementById('result').textContent = JSON.stringify(results);
