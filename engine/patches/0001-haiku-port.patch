@@ -101262,10 +101262,10 @@ index 0000000000000000000000000000000000000000..4050ed60fd171b33faa8719d0d6a2819
 +#endif
 diff --git a/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextAPINativeMessagingHaiku.cpp b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextAPINativeMessagingHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..6ec6d01c147f0dc7baba80d5fdc666ef70c7e14f
+index 0000000000000000000000000000000000000000..3109944707689f7b54119045a3aa8ef5308b62ae
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextAPINativeMessagingHaiku.cpp
-@@ -0,0 +1,48 @@
+@@ -0,0 +1,380 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#include "config.h"
@@ -101273,25 +101273,328 @@ index 0000000000000000000000000000000000000000..6ec6d01c147f0dc7baba80d5fdc666ef
 +
 +#if ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
 +
++#include "WebExtension.h"
++#include "WebExtensionMessagePort.h"
++#include "WebExtensionPermission.h"
 +#include "WebExtensionUtilities.h"
++#include <FindDirectory.h>
++#include <csignal>
++#include <fcntl.h>
++#include <spawn.h>
++#include <sys/wait.h>
++#include <unistd.h>
++#include <wtf/FileSystem.h>
++#include <wtf/JSONValues.h>
++#include <wtf/Lock.h>
++#include <wtf/RunLoop.h>
++#include <wtf/Threading.h>
++#include <wtf/WorkQueue.h>
++#include <wtf/text/MakeString.h>
 +
-+// The native browser has no registry of native messaging hosts yet, so every
-+// application is unknown. Answer the way Firefox does for a missing host instead
-+// of leaving the caller without a reply: sendNativeMessage() rejects, and a
-+// connectNative() port disconnects with runtime.lastError and port.error set.
++extern char** environ;
++
++// Native messaging hosts, as in Chrome and Firefox: a JSON manifest names the
++// host's program, which Summit starts with pipes for its standard input and
++// output. Each message is a 32-bit length in native byte order followed by
++// that many bytes of UTF-8 JSON. Manifests are <name>.json in
++// Summit/NativeMessagingHosts under the user's settings and the user's and
++// system's data directories (packaged and non-packaged).
 +
 +namespace WebKit {
 +
-+static String missingNativeApplicationError(const String& applicationID)
++// Chrome's limit for a message from the host; messages to it are capped too.
++static constexpr uint32_t maximumMessageFromHost = 1024 * 1024;
++static constexpr size_t maximumMessageToHost = 64 * 1024 * 1024;
++
++static String nativeHostErrorText(const String& applicationID)
 +{
 +    // Extension script may only see printable text it supplied itself.
 +    auto name = applicationID.contains('\0') ? emptyString() : applicationID.left(256);
 +    return makeString("No such native application "_s, name);
 +}
 +
-+void WebExtensionContext::runtimeSendNativeMessage(const String& applicationID, const String&, CompletionHandler<void(std::expected<String, WebExtensionError>&&)>&& completionHandler)
++static bool isValidNativeHostName(const String& name)
 +{
-+    completionHandler(makeUnexpected(missingNativeApplicationError(applicationID)));
++    if (name.isEmpty() || name.length() > 255 || name.startsWith('.') || name.endsWith('.') || name.contains(".."_s))
++        return false;
++    return name.containsOnly<[](char16_t c) { return isASCIIAlphanumeric(c) || c == '_' || c == '.'; }>();
++}
++
++struct NativeHostLaunchHaiku {
++    String program;
++    Vector<String> arguments;
++};
++
++// The host's manifest, if one allows this extension.
++static std::optional<NativeHostLaunchHaiku> findNativeHostHaiku(WebExtensionContext& context, const String& name)
++{
++    if (!isValidNativeHostName(name))
++        return std::nullopt;
++    static constexpr std::array directories { B_USER_SETTINGS_DIRECTORY, B_USER_NONPACKAGED_DATA_DIRECTORY, B_USER_DATA_DIRECTORY,
++        B_SYSTEM_NONPACKAGED_DATA_DIRECTORY, B_SYSTEM_DATA_DIRECTORY };
++    // The extension as Chrome (its origin) and Firefox (its add-on ID) name it.
++    auto origin = makeString(context.baseURL().protocol(), "://"_s, context.baseURL().host(), '/');
++    String geckoID;
++    if (RefPtr manifest = protect(context.extension())->manifestObject()) {
++        for (auto key : { "browser_specific_settings"_s, "applications"_s }) {
++            if (RefPtr settings = manifest->getObject(key); settings && geckoID.isEmpty()) {
++                if (RefPtr gecko = settings->getObject("gecko"_s))
++                    geckoID = gecko->getString("id"_s);
++            }
++        }
++    }
++    for (auto directory : directories) {
++        char base[B_PATH_NAME_LENGTH];
++        if (find_directory(directory, -1, false, base, sizeof(base)) != B_OK)
++            continue;
++        auto path = makeString(String::fromUTF8(base), "/Summit/NativeMessagingHosts/"_s, name, ".json"_s);
++        auto contents = FileSystem::readEntireFile(path);
++        if (!contents || contents->size() > 1024 * 1024)
++            continue;
++        RefPtr value = JSON::Value::parseJSON(String::fromUTF8(contents->span()));
++        RefPtr manifest = value ? value->asObject() : nullptr;
++        if (!manifest || manifest->getString("name"_s) != name || manifest->getString("type"_s) != "stdio"_s)
++            continue;
++        auto program = manifest->getString("path"_s);
++        if (program.isEmpty())
++            continue;
++        if (!program.startsWith('/'))
++            program = FileSystem::pathByAppendingComponent(FileSystem::parentPath(path), program);
++        auto allowed = [&](ASCIILiteral key, const String& identity) {
++            RefPtr list = manifest->getArray(key);
++            if (!list || identity.isEmpty())
++                return false;
++            for (auto& entry : *list) {
++                if (entry->asString() == identity)
++                    return true;
++            }
++            return false;
++        };
++        // Chrome passes the caller's origin; Firefox the manifest and the add-on ID.
++        if (allowed("allowed_origins"_s, origin))
++            return NativeHostLaunchHaiku { program, { origin } };
++        if (allowed("allowed_extensions"_s, geckoID))
++            return NativeHostLaunchHaiku { program, { path, geckoID } };
++        if (allowed("allowed_extensions"_s, context.uniqueIdentifier()))
++            return NativeHostLaunchHaiku { program, { path, context.uniqueIdentifier() } };
++        // The first manifest found for a name decides, as in Chrome.
++        return std::nullopt;
++    }
++    return std::nullopt;
++}
++
++// A running host. Messages and its exit are reported on the main thread.
++class NativeMessagingHostHaiku : public ThreadSafeRefCounted<NativeMessagingHostHaiku> {
++public:
++    using MessageHandler = Function<void(String&&)>;
++    using ExitHandler = Function<void(String&&)>;
++
++    static RefPtr<NativeMessagingHostHaiku> launch(const NativeHostLaunchHaiku& launch)
++    {
++        int input[2], output[2];
++        if (pipe(input))
++            return nullptr;
++        if (pipe(output)) {
++            close(input[0]);
++            close(input[1]);
++            return nullptr;
++        }
++        // The browser's ends stay out of the host and of other programs.
++        fcntl(input[1], F_SETFD, FD_CLOEXEC);
++        fcntl(output[0], F_SETFD, FD_CLOEXEC);
++        posix_spawn_file_actions_t actions;
++        posix_spawn_file_actions_init(&actions);
++        posix_spawn_file_actions_adddup2(&actions, input[0], STDIN_FILENO);
++        posix_spawn_file_actions_adddup2(&actions, output[1], STDOUT_FILENO);
++        posix_spawn_file_actions_addclose(&actions, input[0]);
++        posix_spawn_file_actions_addclose(&actions, output[1]);
++        auto program = launch.program.utf8();
++        Vector<UTF8CString> arguments { program };
++        for (auto& argument : launch.arguments)
++            arguments.append(argument.utf8());
++        Vector<char*> argv;
++        for (auto& argument : arguments)
++            argv.append(const_cast<char*>(argument.legacyCStringPointer()));
++        argv.append(nullptr);
++        pid_t pid = -1;
++        int result = posix_spawn(&pid, program.legacyCStringPointer(), &actions, nullptr, argv.mutableSpan().data(), environ);
++        posix_spawn_file_actions_destroy(&actions);
++        close(input[0]);
++        close(output[1]);
++        if (result) {
++            close(input[1]);
++            close(output[0]);
++            return nullptr;
++        }
++        return adoptRef(*new NativeMessagingHostHaiku(pid, input[1], output[0]));
++    }
++
++    ~NativeMessagingHostHaiku()
++    {
++        if (m_input >= 0)
++            close(m_input);
++    }
++
++    // Starts reading; call once, on the main thread.
++    void start(MessageHandler&& messageHandler, ExitHandler&& exitHandler)
++    {
++        ASSERT(isMainThread());
++        m_messageHandler = WTF::move(messageHandler);
++        m_exitHandler = WTF::move(exitHandler);
++        Thread::create("Native messaging host"_s, [protectedThis = Ref { *this }] {
++            protectedThis->read();
++        })->detach();
++    }
++
++    void send(const String& messageJSON)
++    {
++        ASSERT(isMainThread());
++        auto message = messageJSON.utf8();
++        if (m_input < 0 || message.length() > maximumMessageToHost)
++            return;
++        m_writer->dispatch([protectedThis = Ref { *this }, message = WTF::move(message)] {
++            // A host that has gone must not end the browser.
++            sigset_t pipeSignal;
++            sigemptyset(&pipeSignal);
++            sigaddset(&pipeSignal, SIGPIPE);
++            pthread_sigmask(SIG_BLOCK, &pipeSignal, nullptr);
++            Locker locker { protectedThis->m_inputLock };
++            int fd = protectedThis->m_input;
++            uint32_t length = message.length();
++            if (fd < 0 || !writeAll(fd, std::as_bytes(std::span { &length, 1 })) || !writeAll(fd, std::as_bytes(message.span())))
++                return;
++        });
++    }
++
++    // Closes its input, which asks it to finish, and ends it if it does not.
++    void terminate()
++    {
++        ASSERT(isMainThread());
++        m_messageHandler = nullptr;
++        m_exitHandler = nullptr;
++        m_writer->dispatch([protectedThis = Ref { *this }] {
++            Locker locker { protectedThis->m_inputLock };
++            if (protectedThis->m_input >= 0) {
++                close(protectedThis->m_input);
++                protectedThis->m_input = -1;
++            }
++        });
++        RunLoop::mainSingleton().dispatchAfter(2_s, [protectedThis = Ref { *this }] {
++            if (!protectedThis->m_exited)
++                kill(protectedThis->m_pid, SIGTERM);
++        });
++    }
++
++private:
++    NativeMessagingHostHaiku(pid_t pid, int input, int output)
++        : m_pid(pid)
++        , m_input(input)
++        , m_output(output)
++        , m_writer(WorkQueue::create("Native messaging host writer"_s))
++    {
++    }
++
++    static bool writeAll(int fd, std::span<const std::byte> data)
++    {
++        while (!data.empty()) {
++            ssize_t written = write(fd, data.data(), data.size());
++            if (written < 0 && errno == EINTR)
++                continue;
++            if (written <= 0)
++                return false;
++            data = data.subspan(written);
++        }
++        return true;
++    }
++
++    static bool readAll(int fd, std::span<std::byte> data)
++    {
++        while (!data.empty()) {
++            ssize_t got = ::read(fd, data.data(), data.size());
++            if (got < 0 && errno == EINTR)
++                continue;
++            if (got <= 0)
++                return false;
++            data = data.subspan(got);
++        }
++        return true;
++    }
++
++    void read()
++    {
++        String error = "Native host has exited."_s;
++        while (true) {
++            uint32_t length = 0;
++            if (!readAll(m_output, std::as_writable_bytes(std::span { &length, 1 })))
++                break;
++            if (length > maximumMessageFromHost) {
++                error = "The native host sent a message over the 1 MB limit."_s;
++                kill(m_pid, SIGTERM);
++                break;
++            }
++            Vector<uint8_t> payload(length);
++            if (!readAll(m_output, std::as_writable_bytes(payload.mutableSpan())))
++                break;
++            RunLoop::mainSingleton().dispatch([protectedThis = Ref { *this }, message = String::fromUTF8(payload.span()).isolatedCopy()]() mutable {
++                if (protectedThis->m_messageHandler)
++                    protectedThis->m_messageHandler(WTF::move(message));
++            });
++        }
++        close(m_output);
++        int status = 0;
++        while (waitpid(m_pid, &status, 0) < 0 && errno == EINTR) { }
++        RunLoop::mainSingleton().dispatch([protectedThis = Ref { *this }, error = error.isolatedCopy()]() mutable {
++            protectedThis->m_exited = true;
++            if (auto handler = std::exchange(protectedThis->m_exitHandler, nullptr))
++                handler(WTF::move(error));
++            protectedThis->m_messageHandler = nullptr;
++        });
++    }
++
++    pid_t m_pid;
++    Lock m_inputLock;
++    int m_input WTF_GUARDED_BY_LOCK(m_inputLock);
++    int m_output;
++    const Ref<WorkQueue> m_writer;
++    MessageHandler m_messageHandler;
++    ExitHandler m_exitHandler;
++    bool m_exited { false };
++};
++
++static std::optional<String> nativeMessagingRefusalHaiku(WebExtensionContext& context)
++{
++    if (!context.hasPermission(WebExtensionPermission::nativeMessaging()))
++        return "The extension does not have the nativeMessaging permission."_s;
++    return std::nullopt;
++}
++
++void WebExtensionContext::runtimeSendNativeMessage(const String& applicationID, const String& messageJSON, CompletionHandler<void(std::expected<String, WebExtensionError>&&)>&& completionHandler)
++{
++    if (auto refusal = nativeMessagingRefusalHaiku(*this)) {
++        completionHandler(makeUnexpected(*refusal));
++        return;
++    }
++    auto launch = findNativeHostHaiku(*this, applicationID);
++    RefPtr host = launch ? NativeMessagingHostHaiku::launch(*launch) : nullptr;
++    if (!host) {
++        completionHandler(makeUnexpected(nativeHostErrorText(applicationID)));
++        return;
++    }
++    // One message and the first reply; then the host is asked to finish.
++    auto completion = Box<CompletionHandler<void(std::expected<String, WebExtensionError>&&)>>::create(WTF::move(completionHandler));
++    host->start([host = Ref { *host }, completion](String&& reply) {
++        if (!*completion)
++            return;
++        if (!JSON::Value::parseJSON(reply))
++            (*completion)(makeUnexpected(String { "The native host sent a message that is not valid JSON."_s }));
++        else
++            (*completion)(WTF::move(reply));
++        host->terminate();
++    }, [completion](String&& error) {
++        if (*completion)
++            (*completion)(makeUnexpected(WTF::move(error)));
++    });
++    host->send(messageJSON);
 +}
 +
 +void WebExtensionContext::runtimeConnectNative(const String& applicationID, WebExtensionPortChannelIdentifier channelIdentifier, WebPageProxyIdentifier pageProxyIdentifier, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&& completionHandler)
@@ -101302,13 +101605,42 @@ index 0000000000000000000000000000000000000000..6ec6d01c147f0dc7baba80d5fdc666ef
 +    // Add 1 for the starting port here so disconnect will balance with a decrement.
 +    addPorts(sourceContentWorldType, targetContentWorldType, channelIdentifier, { pageProxyIdentifier });
 +
-+    // The port itself was created; the missing host is reported through it.
++    // The port itself was created; a missing or refused host is reported through it.
 +    completionHandler({ });
 +
-+    // No native endpoint will ever join this channel. Tell the page's port now,
-+    // with the reason, and drop anything it already queued for the host.
-+    firePortDisconnectEventIfNeeded(targetContentWorldType, sourceContentWorldType, channelIdentifier, missingNativeApplicationError(applicationID));
-+    clearQueuedPortMessages(targetContentWorldType, channelIdentifier);
++    auto refusal = nativeMessagingRefusalHaiku(*this);
++    auto launch = refusal ? std::nullopt : findNativeHostHaiku(*this, applicationID);
++    RefPtr host = launch ? NativeMessagingHostHaiku::launch(*launch) : nullptr;
++    if (!host) {
++        // No native endpoint will join this channel. Tell the page's port now,
++        // with the reason, and drop anything it already queued for the host.
++        firePortDisconnectEventIfNeeded(targetContentWorldType, sourceContentWorldType, channelIdentifier, refusal.value_or(nativeHostErrorText(applicationID)));
++        clearQueuedPortMessages(targetContentWorldType, channelIdentifier);
++        return;
++    }
++
++    Ref nativePort = WebExtensionMessagePort::create(*this, applicationID, channelIdentifier);
++    // The extension's messages go to the host; its disconnect ends the host.
++    nativePort->setMessageHandler(createSharedTask<void(const String&)>([host = Ref { *host }](const String& messageJSON) {
++        host->send(messageJSON);
++    }));
++    nativePort->setDisconnectHandler(createSharedTask<void(WebExtensionMessagePort::Error)>([host = Ref { *host }](WebExtensionMessagePort::Error) {
++        host->terminate();
++    }));
++    host->start([weakPort = WeakPtr { nativePort.get() }](String&& messageJSON) {
++        if (RefPtr port = weakPort.get())
++            port->sendMessage(messageJSON);
++    }, [weakPort = WeakPtr { nativePort.get() }](String&& error) {
++        if (RefPtr port = weakPort.get())
++            port->disconnect({ { WebExtensionMessagePort::ErrorType::Unknown, WTF::move(error) } });
++    });
++    if (!addNativePort(nativePort)) {
++        host->terminate();
++        firePortDisconnectEventIfNeeded(targetContentWorldType, sourceContentWorldType, channelIdentifier, nativeHostErrorText(applicationID));
++        clearQueuedPortMessages(targetContentWorldType, channelIdentifier);
++        return;
++    }
++    sendQueuedNativePortMessagesIfNeeded(channelIdentifier);
 +}
 +
 +} // namespace WebKit
