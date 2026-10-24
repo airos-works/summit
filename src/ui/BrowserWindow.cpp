@@ -2280,6 +2280,7 @@ void BrowserWindow::TabOpenedForCommand(uint64 command, Tab* tab, const std::str
     if (found == fOpenCommands.end()) return; // The engine stopped waiting.
     if (tab) {
         found->views.push_back(tab->view);
+        tab->openInReader = found->reader;
         if (found->window) fExtensionWindowTabs[found->extension].push_back(tab->id);
     } else if (found->error.empty()) found->error = error;
     if (found->pending && --found->pending) return;
@@ -2350,6 +2351,7 @@ void BrowserWindow::OpenTabsForCommand(const BMessage& message, uint64 identifie
     command.identifier = identifier;
     command.window = window;
     command.extension = message.GetString("extension_identifier", "");
+    command.reader = !window && message.GetBool("reader", false);
     std::vector<std::string> urls;
     const char* url = nullptr;
     for (int32 i = 0; message.FindString("url", i, &url) == B_OK; ++i) urls.push_back(url);
@@ -5913,6 +5915,11 @@ void BrowserWindow::ReaderResult(const BMessage& message)
     const std::string value = message.GetString("result", "");
     if (!extracting) {
         tab->readerAvailable = !message.HasString("error") && value == "true";
+        // The first check answers openInReaderMode, article or not.
+        if (std::exchange(tab->openInReader, false) && tab->readerAvailable && tab->id == fSelected && !tab->readerActive) {
+            ToggleReader();
+            return;
+        }
         RefreshChrome();
         return;
     }

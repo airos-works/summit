@@ -225,6 +225,9 @@ private:
         bool readerAvailable = false, readerActive = false, readerExtracting = false;
         // What extensions were last told (SetBrowserTabReader): available, active.
         std::pair<bool, bool> reportedReader { false, false };
+        // Opened by tabs.create({openInReaderMode}): show Reader view when the
+        // first page's article check succeeds (the tab shown by then).
+        bool openInReader = false;
         uint64 readerProbedGeneration = 0, readerRequest = 0, readerGeneration = 0;
         std::string readerRequestURL, readerSource, readerURL, readerHTML;
         // Older in-memory previews reopen their original web page when the
@@ -517,6 +520,8 @@ private:
         std::vector<BWebKitView*> views;
         std::string error;
         bool window = false;
+        // tabs.create({openInReaderMode}): Reader view once an article is found.
+        bool reader = false;
         std::string extension;
     };
     struct CloseCommand {

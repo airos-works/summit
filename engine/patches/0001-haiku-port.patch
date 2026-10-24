@@ -87561,10 +87561,10 @@ index 0000000000000000000000000000000000000000..dc2f4d4fdb07966241e673bd4e49b9e8
 +}
 diff --git a/Source/WebKit/UIProcess/API/haiku/WebKitContext.h b/Source/WebKit/UIProcess/API/haiku/WebKitContext.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..4d0ac06343f878bc8c3e91b1c4ce89de433dc559
+index 0000000000000000000000000000000000000000..c963f9cfb11a1316199e8d76938f9f27cd484621
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/API/haiku/WebKitContext.h
-@@ -0,0 +1,565 @@
+@@ -0,0 +1,567 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#pragma once
@@ -87631,7 +87631,9 @@ index 0000000000000000000000000000000000000000..4d0ac06343f878bc8c3e91b1c4ce89de
 +// messenger given to SetBrowserWindowTabs plus window_identifier (uint64).
 +//   OPEN_TAB       optional url (absent: the host's new-tab page), active (bool),
 +//                  index (int32, -1 appends), optional window/window_identifier
-+//                  (absent: host's choice), optional opener view/page.
++//                  (absent: host's choice), optional opener view/page, optional
++//                  reader (bool, Firefox's openInReaderMode: show the page in
++//                  Reader view when it has an article).
 +//   CLOSE_TABS     repeated view/page_identifier and parallel window entries.
 +//                  Succeeds only when every named tab was closed; a user who
 +//                  keeps a tab open through beforeunload answers B_CANCELED.
@@ -104963,10 +104965,10 @@ index 0000000000000000000000000000000000000000..ef935e9aa0104dc22308026565130ac3
 +#endif // ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
 diff --git a/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextAPITabCommandsHaiku.cpp b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextAPITabCommandsHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..7b8aa6513a12a993776d94c42007ce0751453bad
+index 0000000000000000000000000000000000000000..b6b273328f9cd72c2836b1bf5ab75bbcac8ce642
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextAPITabCommandsHaiku.cpp
-@@ -0,0 +1,766 @@
+@@ -0,0 +1,764 @@
 +/*
 + * Copyright (C) 2023-2024 Apple Inc. All rights reserved.
 + *
@@ -105067,12 +105069,8 @@ index 0000000000000000000000000000000000000000..7b8aa6513a12a993776d94c42007ce07
 +        return;
 +    }
 +
-+    // `pinned: true` pins the new tab once the browser has made it.
-+
-+    if (parameters.showingReaderMode.value_or(false)) {
-+        completionHandler(toWebExtensionError(apiName, nullString(), "it is not implemented for 'openInReaderMode' set to `true`"_s));
-+        return;
-+    }
++    // `pinned: true` pins the new tab once the browser has made it;
++    // `openInReaderMode: true` asks the browser for Reader view (OPEN_TAB's reader).
 +
 +    RefPtr window = getWindow(parameters.windowIdentifier.value_or(WebExtensionWindowConstants::CurrentIdentifier), webPageProxyIdentifier);
 +    if (parameters.windowIdentifier && !window) {
@@ -105095,6 +105093,8 @@ index 0000000000000000000000000000000000000000..7b8aa6513a12a993776d94c42007ce07
 +        && message.AddInt32("index", parameters.index ? static_cast<int32>(std::min<uint64_t>(*parameters.index, std::numeric_limits<int32>::max())) : -1) == B_OK;
 +    if (complete && parameters.url)
 +        complete = message.AddString("url", parameters.url->string().utf8().legacyCStringPointer()) == B_OK;
++    if (complete && parameters.showingReaderMode.value_or(false))
++        complete = message.AddBool("reader", true) == B_OK;
 +    // Without an accessible window the host chooses where the tab opens.
 +    if (complete && window)
 +        complete = addNativeBrowserCommandWindow(message, *window);

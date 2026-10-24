@@ -7,7 +7,11 @@ the shown tab (Firefox's API), and tabs report Firefox's `isArticle`
 
 Reader view is switched only for the shown tab, as Summit's own button does;
 a background tab, or a page without an article, is refused.
-`tabs.create({openInReaderMode: true})` is not supported yet.
+`tabs.create({openInReaderMode: true})` (Firefox) opens the tab and shows it
+in Reader view when Summit's article check on its first page succeeds and the
+tab is shown by then (`OPEN_TAB`'s `reader`; `BrowserWindow`'s
+`Tab::openInReader`). A page without an article, or a background tab, just
+loads.
 
 ## How
 

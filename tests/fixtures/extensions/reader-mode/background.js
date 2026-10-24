@@ -35,4 +35,9 @@ chrome.tabs.onUpdated.addListener((id, change) => {
     });
     await step('background tab (must fail)', () => chrome.tabs.toggleReaderMode(other.id));
     await step('unloaded status', async () => (await chrome.tabs.discard(other.id)).status);
+    await step('openInReaderMode', async () => {
+        const opened = await chrome.tabs.create({ url: 'https://en.wikipedia.org/wiki/Haiku_(operating_system)', active: true, openInReaderMode: true });
+        await wait(10000);
+        return `isInReaderMode=${(await chrome.tabs.get(opened.id)).isInReaderMode}`;
+    });
 })();
