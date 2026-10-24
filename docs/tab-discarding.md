@@ -37,3 +37,12 @@ been in the background a long time.
 `tests/fixtures/extensions/tab-discard/`: install it, read memory during the
 first 20 s (three loaded background tabs) and after the discards, and read
 the `[discard]` lines.
+
+Verified on the X399 (24 Oct, td116 build): unloading three loaded
+background tabs (Wikipedia, haiku-os.org, example.org) let their web
+processes exit, and Summit's resident memory went from 490 to 236 MiB
+(about 85 MiB a tab). `tabs.discard` answered with new ids, `discarded:
+true` and the tabs' addresses; `tabs.query({discarded: true})` listed their
+titles; the least recently used tab was chosen without an id; selecting one
+loaded it again (`status: complete`); the shown tab and a missing tab were
+refused; the tab strip kept the unloaded tabs' titles.
