@@ -224,3 +224,9 @@ stack in the JavaScript interpreter under `Runtime.evaluate`.
 - Most `SUMMIT_*` switches are read once when a process starts:
   `set_environment` applies to processes started afterwards
   (`restart_process`).
+
+On 25 October 2026 (X399, mx120 build), `evaluate` with `extension` read the
+background-page fixture's global (`tests/fixtures/extensions/background-page`)
+from its `_generated_background_page.html` and called `chrome.runtime`;
+`console` then listed a message logged after the session attached. An
+unknown extension times out with a hint to check the `extensions` tool.

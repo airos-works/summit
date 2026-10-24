@@ -277,8 +277,10 @@ Json Command(PageConnection& connection, const std::string& method, const Json& 
     while (!connection.channel.Answered(id)) {
         if (sChanged.wait_until(lock, deadline) == std::cv_status::timeout && !connection.channel.Answered(id)) {
             const bool target = !connection.channel.PageTarget().empty();
+            const bool extension = connection.id.starts_with("extension:");
             throw ToolError(method + ": the page did not answer within " + std::to_string(timeout / 1000) + " ms"
                 + (target ? " (its web process may be busy or hung: see threads and engine_report)"
+                    : extension ? " (no background page: check the extensions tool for the identifier, that the extension is enabled and that it has a background)"
                     : " (no page target yet: the page may be loading in a new process)"));
         }
     }
