@@ -1,5 +1,6 @@
-// Opens an article, switches Reader view on and off and checks the refusals
-// and an unloaded tab's status. One console line per step: "[reader] ...".
+// Opens an article, switches Reader view on and off and checks the refusal
+// for a background tab and an unloaded tab's status (Summit's article test
+// accepts even example.com, so there is no page without an article here). One console line per step: "[reader] ...".
 const log = message => console.log(`[reader] ${message}`);
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
 const step = async (name, run) => {
@@ -34,9 +35,4 @@ chrome.tabs.onUpdated.addListener((id, change) => {
     });
     await step('background tab (must fail)', () => chrome.tabs.toggleReaderMode(other.id));
     await step('unloaded status', async () => (await chrome.tabs.discard(other.id)).status);
-    await step('no article (must fail)', async () => {
-        const plain = await chrome.tabs.create({ url: 'https://example.com/', active: true });
-        await wait(4000);
-        return chrome.tabs.toggleReaderMode(plain.id);
-    });
 })();

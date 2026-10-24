@@ -2869,7 +2869,8 @@ void BrowserWindow::RefreshChrome()
 #if SUMMIT_MODERN_WEBKIT
     // Extensions' Tab.isArticle and isInReaderMode, when they change.
     for (auto& tab : fTabs) {
-        const std::pair reader { tab.readerAvailable && !tab.processExited && tab.loadError.empty(), tab.readerActive };
+        // A page in Reader view is still an article.
+        const std::pair reader { (tab.readerAvailable || tab.readerActive) && !tab.processExited && tab.loadError.empty(), tab.readerActive };
         if (tab.reportedReader != reader) {
             tab.reportedReader = reader;
             fWebKitContext->SetBrowserTabReader(tab.view, reader.first, reader.second);

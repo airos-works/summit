@@ -21,3 +21,11 @@ which `BrowserWindow::ToggleReader` answers.
 
 `tests/fixtures/extensions/reader-mode/`: install it and read the `[reader]`
 lines.
+
+Verified on the X399 (24 Oct, rm106 build): a Wikipedia article reported
+`isArticle: true`; `toggleReaderMode` switched Reader view on
+(`isInReaderMode: true`) and off again, `tabs.onUpdated` reporting each
+change; a background tab was refused; an unloaded tab reported `status:
+"unloaded"`. Summit's article test also accepts example.com. (`isArticle`
+stayed true in Reader view only after a fix that was not re-run on the
+device.)
