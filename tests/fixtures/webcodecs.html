@@ -3,7 +3,7 @@
 <title>WebCodecs fixture</title>
 <!-- WebCodecs round trip (#112): for each codec, isConfigSupported, then
      encode six canvas frames of known colours, decode the chunks and check the
-     decoded pictures' middle pixel; and a second of tone through Opus (the RMS
+     decoded pictures' middle pixel; and a second of tone through Opus, AAC and MP3 (the RMS
      of a 0.5 sine is about 0.354). Results: #result (JSON) and the page. -->
 <canvas id="source" width="320" height="240"></canvas>
 <canvas id="check" width="320" height="240"></canvas>
@@ -71,13 +71,14 @@ async function roundTrip({ name, codec, avc }) {
         timestamps: decoded.map(entry => entry.timestamp).join(',') };
 }
 
-// One second of a 440 Hz tone (amplitude 0.5) as 48 kHz stereo f32-planar
-// AudioData, through Opus and back: chunk count, decoded frames and loudness.
-async function audioRoundTrip(rate) {
+// One second of a 440 Hz tone (amplitude 0.5) as stereo f32-planar AudioData,
+// through an encoder (default Opus; extra: e.g. { aac: { format: 'adts' } })
+// and back: chunk count, decoded frames and loudness.
+async function audioRoundTrip(rate, codec = 'opus', extra = {}) {
     const channels = 2, chunkFrames = rate / 100;
-    const config = { codec: 'opus', sampleRate: rate, numberOfChannels: channels, bitrate: 96000 };
+    const config = { codec, sampleRate: rate, numberOfChannels: channels, bitrate: 128000, ...extra };
     const encodeSupport = await AudioEncoder.isConfigSupported(config);
-    const decodeSupport = await AudioDecoder.isConfigSupported({ codec: 'opus', sampleRate: rate, numberOfChannels: channels });
+    const decodeSupport = await AudioDecoder.isConfigSupported({ codec, sampleRate: rate, numberOfChannels: channels });
     if (!encodeSupport.supported || !decodeSupport.supported)
         return { encode: encodeSupport.supported, decode: decodeSupport.supported };
     const chunks = [];
@@ -115,7 +116,7 @@ async function audioRoundTrip(rate) {
         },
         error: error => log(`audio decoder error: ${error.message}`),
     });
-    decoder.configure(decoderConfig || { codec: 'opus', sampleRate: rate, numberOfChannels: channels });
+    decoder.configure(decoderConfig || { codec, sampleRate: rate, numberOfChannels: channels });
     for (const chunk of chunks)
         decoder.decode(chunk);
     await decoder.flush();
@@ -142,6 +143,14 @@ async function audioRoundTrip(rate) {
             results.opus44 = await audioRoundTrip(44100);
         } catch (error) {
             results.opus = { error: error.message };
+        }
+        // AAC LC (raw with a description, and ADTS) and MP3, through FFmpeg.
+        for (const [name, rate, codec, extra] of [['aac', 48000, 'mp4a.40.2', {}], ['aacADTS', 44100, 'mp4a.40.2', { aac: { format: 'adts' } }], ['mp3', 44100, 'mp3', {}]]) {
+            try {
+                results[name] = await audioRoundTrip(rate, codec, extra);
+            } catch (error) {
+                results[name] = { error: error.message };
+            }
         }
     }
     document.getElementById('result').textContent = JSON.stringify(results);

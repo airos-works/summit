@@ -25,10 +25,17 @@ to 48 kHz in 10 ms pieces (libwebrtc's `PushResampler`), decoding gives
 FFmpeg when the system has it, loaded as WebRTC's H.264 decoder loads it:
 AAC chunks with an `AudioSpecificConfig` description get ADTS headers made
 from it (FFmpeg's AAC decoder then needs no extradata), and without one they
-are taken as ADTS. AAC and MP3 encoding, FLAC, Vorbis and PCM report
-unsupported.
+are taken as ADTS. AAC LC (`mp4a.40.2`) and MP3 are encoded through
+FFmpeg too (its own AAC encoder and LAME), with FFmpeg 6 or 8 (libavcodec
+60 or 62): the codec context is set up with AVOptions, and the two `AVFrame`
+fields past the prefix the decoders use (`ch_layout`, `sample_rate`) are at
+those versions' offsets, so other versions report unsupported. AAC gives raw
+frames with an `AudioSpecificConfig` as `description`, or ADTS frames with
+`aac: { format: "adts" }` (table rates, up to 7 channels); after `flush()`
+the next frame starts a new encoder. HE-AAC encoding, FLAC, Vorbis and PCM
+report unsupported.
 
-Not yet: AAC/MP3 encoding, FLAC and Vorbis, AV1 and HEVC, hardware
+Not yet: HE-AAC encoding, FLAC and Vorbis, AV1 and HEVC, hardware
 decoders (NVDEC, Cedar) and flushing pictures a decoder holds back (WebRTC's
 decoders return each picture with its chunk, so B-frame streams may lose
 their last pictures).
