@@ -78470,10 +78470,10 @@ index 0000000000000000000000000000000000000000..abdba4dff009ff314eecd9f825a128aa
 +} // namespace WebKit
 diff --git a/Source/WebKit/PlatformHaiku.cmake b/Source/WebKit/PlatformHaiku.cmake
 new file mode 100644
-index 0000000000000000000000000000000000000000..6e3f4d6e974cb352775db55daa7f63d89174df5e
+index 0000000000000000000000000000000000000000..d5f7490bcafecc9990feef37777f27cbbdf52718
 --- /dev/null
 +++ b/Source/WebKit/PlatformHaiku.cmake
-@@ -0,0 +1,525 @@
+@@ -0,0 +1,527 @@
 +include(Headers.cmake)
 +include(Platform/Curl.cmake)
 +
@@ -78901,6 +78901,7 @@ index 0000000000000000000000000000000000000000..6e3f4d6e974cb352775db55daa7f63d8
 +        WebProcess/Extensions/Interfaces/WebExtensionAPISearch
 +        WebProcess/Extensions/Interfaces/WebExtensionAPIBrowsingData
 +        WebProcess/Extensions/Interfaces/WebExtensionAPISessions
++        WebProcess/Extensions/Interfaces/WebExtensionAPITabGroups
 +        WebProcess/Extensions/Interfaces/WebExtensionAPIIdentity
 +    )
 +    # The scripting and declarativeNetRequest namespaces use the C++ bindings here, not the Objective-C ones.
@@ -78937,6 +78938,7 @@ index 0000000000000000000000000000000000000000..6e3f4d6e974cb352775db55daa7f63d8
 +        WebProcess/Extensions/API/WebExtensionAPISearch.cpp
 +        WebProcess/Extensions/API/WebExtensionAPIBrowsingData.cpp
 +        WebProcess/Extensions/API/WebExtensionAPISessions.cpp
++        WebProcess/Extensions/API/WebExtensionAPITabGroups.cpp
 +        WebProcess/Extensions/API/WebExtensionAPIIdentity.cpp
 +    )
 +endif ()
@@ -80425,10 +80427,10 @@ index e1e00f448cdfe28b28e6ac184bdb9025666411de..bbe23d2c25f24c8c9031515e563fee8b
  
  [Nested] enum class WebKit::WebExtension::InjectionTime : uint8_t {
 diff --git a/Source/WebKit/Shared/Extensions/WebExtensionEventListenerType.h b/Source/WebKit/Shared/Extensions/WebExtensionEventListenerType.h
-index c6ffb3e89eeaffe26af5d76690da641e7b65c4c0..f44e2cd91f602e5e5c680c9b2b8fd0d87368a257 100644
+index c6ffb3e89eeaffe26af5d76690da641e7b65c4c0..d67b42cd3f185a120392f0e6da499ddfb9194235 100644
 --- a/Source/WebKit/Shared/Extensions/WebExtensionEventListenerType.h
 +++ b/Source/WebKit/Shared/Extensions/WebExtensionEventListenerType.h
-@@ -99,11 +99,93 @@ enum class WebExtensionEventListenerType : uint8_t {
+@@ -99,11 +99,105 @@ enum class WebExtensionEventListenerType : uint8_t {
      WindowsOnCreated,
      WindowsOnFocusChanged,
      WindowsOnRemoved,
@@ -80459,6 +80461,10 @@ index c6ffb3e89eeaffe26af5d76690da641e7b65c4c0..f44e2cd91f602e5e5c680c9b2b8fd0d8
 +    SessionsOnChanged,
 +    MenusOnShown,
 +    MenusOnHidden,
++    TabGroupsOnCreated,
++    TabGroupsOnUpdated,
++    TabGroupsOnRemoved,
++    TabGroupsOnMoved,
 +#endif
  };
  
@@ -80518,15 +80524,23 @@ index c6ffb3e89eeaffe26af5d76690da641e7b65c4c0..f44e2cd91f602e5e5c680c9b2b8fd0d8
 +        return "onShown"_s;
 +    case WebExtensionEventListenerType::MenusOnHidden:
 +        return "onHidden"_s;
++    case WebExtensionEventListenerType::TabGroupsOnCreated:
++        return "onCreated"_s;
++    case WebExtensionEventListenerType::TabGroupsOnUpdated:
++        return "onUpdated"_s;
++    case WebExtensionEventListenerType::TabGroupsOnRemoved:
++        return "onRemoved"_s;
++    case WebExtensionEventListenerType::TabGroupsOnMoved:
++        return "onMoved"_s;
 +#endif
      case WebExtensionEventListenerType::Unknown:
          return nullString();
      case WebExtensionEventListenerType::ActionOnClicked:
 diff --git a/Source/WebKit/Shared/Extensions/WebExtensionEventListenerType.serialization.in b/Source/WebKit/Shared/Extensions/WebExtensionEventListenerType.serialization.in
-index 66271809620c823d465be4cee34c1806ab422cbe..a554e9ef3241b33354fad882d1dd8ac0e2030810 100644
+index 66271809620c823d465be4cee34c1806ab422cbe..e1be2e71e75ee7d1c34a95f30ce4c58079e9c47f 100644
 --- a/Source/WebKit/Shared/Extensions/WebExtensionEventListenerType.serialization.in
 +++ b/Source/WebKit/Shared/Extensions/WebExtensionEventListenerType.serialization.in
-@@ -90,6 +90,34 @@ enum class WebKit::WebExtensionEventListenerType : uint8_t {
+@@ -90,6 +90,38 @@ enum class WebKit::WebExtensionEventListenerType : uint8_t {
      WindowsOnCreated,
      WindowsOnFocusChanged,
      WindowsOnRemoved,
@@ -80557,6 +80571,10 @@ index 66271809620c823d465be4cee34c1806ab422cbe..a554e9ef3241b33354fad882d1dd8ac0
 +    SessionsOnChanged,
 +    MenusOnShown,
 +    MenusOnHidden,
++    TabGroupsOnCreated,
++    TabGroupsOnUpdated,
++    TabGroupsOnRemoved,
++    TabGroupsOnMoved,
 +#endif
  };
  
@@ -82390,10 +82408,10 @@ index 1f05b9ffedaafd11d7971241deb7c1417a55a2e5..84932e03d986305269a5f8e859cf0581
      std::optional<bool> muted;
 diff --git a/Source/WebKit/Shared/Extensions/WebExtensionTabQueryParser.cpp b/Source/WebKit/Shared/Extensions/WebExtensionTabQueryParser.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..b9f80683b2b9ae7cf0a3862997b491c9bd600ab1
+index 0000000000000000000000000000000000000000..9ec1d00678b5f96218a1b92b9b2ced4ea952468d
 --- /dev/null
 +++ b/Source/WebKit/Shared/Extensions/WebExtensionTabQueryParser.cpp
-@@ -0,0 +1,121 @@
+@@ -0,0 +1,127 @@
 +/*
 + * Copyright (C) 2023 Apple Inc. All rights reserved.
 + *
@@ -82471,6 +82489,12 @@ index 0000000000000000000000000000000000000000..b9f80683b2b9ae7cf0a3862997b491c9
 +            result.windowIdentifier = number && *number <= 9007199254740991.0 ? toWebExtensionWindowIdentifier(*number) : std::nullopt;
 +            if (!isValid(result.windowIdentifier))
 +                return makeUnexpected("windowId must be a valid window identifier"_s);
++        } else if (key == "groupId"_s) {
++            // No tab is in a group (WebExtensionAPITabGroups): only
++            // TAB_GROUP_ID_NONE matches, and it matches every tab.
++            auto number = value->asDouble();
++            if (!number || *number != -1)
++                return makeUnexpected("there are no tab groups; groupId can only be tabGroups.TAB_GROUP_ID_NONE (-1)"_s);
 +        } else if (key == "status"_s) {
 +            auto status = value->asString();
 +            if (status != "loading"_s && status != "complete"_s)
@@ -95513,7 +95537,7 @@ index 713a395f6fda1c50c694eef6181a23349c9b5fb2..d6419587d5402f01e573eb5f7335695a
  } // namespace WebExtensionDynamicScripts
  
 diff --git a/Source/WebKit/UIProcess/Extensions/WebExtension.cpp b/Source/WebKit/UIProcess/Extensions/WebExtension.cpp
-index 5ee894425eae1d1ba27e29aba5928af432d98095..eb8e9c457ce78928253551fb0d1c3144aad42969 100644
+index 5ee894425eae1d1ba27e29aba5928af432d98095..4ea54606cfbf6c020aa8d3b1c682adafeda10531 100644
 --- a/Source/WebKit/UIProcess/Extensions/WebExtension.cpp
 +++ b/Source/WebKit/UIProcess/Extensions/WebExtension.cpp
 @@ -48,6 +48,10 @@
@@ -95614,7 +95638,7 @@ index 5ee894425eae1d1ba27e29aba5928af432d98095..eb8e9c457ce78928253551fb0d1c3144
          if (mimeTypePosition != notFound)
              return path.substring(dataPrefix.length(), mimeTypePosition - dataPrefix.length());
          return defaultMIMEType();
-@@ -1642,6 +1674,25 @@ const WebExtension::PermissionsSet& WebExtension::supportedPermissions()
+@@ -1642,6 +1674,27 @@ const WebExtension::PermissionsSet& WebExtension::supportedPermissions()
          WebExtensionPermission::contextMenus(), WebExtensionPermission::cookies(), WebExtensionPermission::declarativeNetRequest(), WebExtensionPermission::declarativeNetRequestFeedback(),
          WebExtensionPermission::declarativeNetRequestWithHostAccess(), WebExtensionPermission::menus(), WebExtensionPermission::nativeMessaging(), WebExtensionPermission::notifications(), WebExtensionPermission::scripting(),
          WebExtensionPermission::storage(), WebExtensionPermission::tabs(), WebExtensionPermission::unlimitedStorage(), WebExtensionPermission::webNavigation(), WebExtensionPermission::webRequest(),
@@ -95634,13 +95658,15 @@ index 5ee894425eae1d1ba27e29aba5928af432d98095..eb8e9c457ce78928253551fb0d1c3144
 +        "browsingData"_s,
 +        // chrome.sessions, with the browser's recently closed tabs and windows.
 +        "sessions"_s,
++        // chrome.tabGroups: Summit has no tab groups, so there are none.
++        "tabGroups"_s,
 +        // identity.launchWebAuthFlow and getRedirectURL.
 +        "identity"_s,
 +#endif
  #if ENABLE(WK_WEB_EXTENSIONS_SIDEBAR)
          WebExtensionPermission::sidePanel(),
  #endif
-@@ -1679,6 +1730,16 @@ const WebExtension::MatchPatternSet& WebExtension::optionalPermissionMatchPatter
+@@ -1679,6 +1732,16 @@ const WebExtension::MatchPatternSet& WebExtension::optionalPermissionMatchPatter
      return m_optionalPermissionMatchPatterns;
  }
  
@@ -95657,7 +95683,7 @@ index 5ee894425eae1d1ba27e29aba5928af432d98095..eb8e9c457ce78928253551fb0d1c3144
  const WebExtension::MatchPatternSet& WebExtension::externallyConnectableMatchPatterns()
  {
      populateExternallyConnectableIfNeeded();
-@@ -1723,6 +1784,9 @@ void WebExtension::populateExternallyConnectableIfNeeded()
+@@ -1723,6 +1786,9 @@ void WebExtension::populateExternallyConnectableIfNeeded()
      RefPtr externallyConnectableObject = manifestObject->getObject(externallyConnectableManifestKey);
      if (!externallyConnectableObject)
          return;
@@ -95667,7 +95693,7 @@ index 5ee894425eae1d1ba27e29aba5928af432d98095..eb8e9c457ce78928253551fb0d1c3144
  
      if (!externallyConnectableObject->size()) {
          recordError(createError(Error::InvalidExternallyConnectable));
-@@ -1756,6 +1820,10 @@ void WebExtension::populateExternallyConnectableIfNeeded()
+@@ -1756,6 +1822,10 @@ void WebExtension::populateExternallyConnectableIfNeeded()
          extensionIDs = filterObjects(*extensionIDs, [](auto& value) {
              return !value.asString().isEmpty();
          });
@@ -95678,7 +95704,7 @@ index 5ee894425eae1d1ba27e29aba5928af432d98095..eb8e9c457ce78928253551fb0d1c3144
      }
  
      if (shouldReportError || (m_externallyConnectableMatchPatterns.isEmpty() && (!extensionIDs || (extensionIDs && !extensionIDs->length()))))
-@@ -2216,6 +2284,12 @@ using ModifierFlags = WebExtension::ModifierFlags;
+@@ -2216,6 +2286,12 @@ using ModifierFlags = WebExtension::ModifierFlags;
  
  static bool parseCommandShortcut(const String& shortcut, OptionSet<ModifierFlags>& modifierFlags, String& key)
  {
@@ -95691,7 +95717,7 @@ index 5ee894425eae1d1ba27e29aba5928af432d98095..eb8e9c457ce78928253551fb0d1c3144
      modifierFlags = { };
      key = emptyString();
  
-@@ -2300,6 +2374,7 @@ static bool parseCommandShortcut(const String& shortcut, OptionSet<ModifierFlags
+@@ -2300,6 +2376,7 @@ static bool parseCommandShortcut(const String& shortcut, OptionSet<ModifierFlags
          return false;
  
      return true;
@@ -95699,7 +95725,7 @@ index 5ee894425eae1d1ba27e29aba5928af432d98095..eb8e9c457ce78928253551fb0d1c3144
  }
  
  void WebExtension::populateCommandsIfNeeded()
-@@ -2355,6 +2430,13 @@ void WebExtension::populateCommandsIfNeeded()
+@@ -2355,6 +2432,13 @@ void WebExtension::populateCommandsIfNeeded()
  
              // Descriptions are required for standard commands, but are optional for action commands.
              auto description = commandObject->getString(commandsDescriptionKeyManifestKey);
@@ -95713,7 +95739,7 @@ index 5ee894425eae1d1ba27e29aba5928af432d98095..eb8e9c457ce78928253551fb0d1c3144
              if (description.isEmpty() && !isActionCommand) {
                  error = WEB_UI_STRING("Empty or invalid `description` in the `commands` manifest entry.", "WKWebExtensionErrorInvalidManifestEntry description for invalid command description");
                  continue;
-@@ -2368,11 +2450,30 @@ void WebExtension::populateCommandsIfNeeded()
+@@ -2368,11 +2452,30 @@ void WebExtension::populateCommandsIfNeeded()
  
              commandData.description = description;
  
@@ -95745,7 +95771,7 @@ index 5ee894425eae1d1ba27e29aba5928af432d98095..eb8e9c457ce78928253551fb0d1c3144
                  const auto linuxPlatform = "linux"_s;
  #endif
                  const auto defaultPlatform = "default"_s;
-@@ -2382,7 +2483,7 @@ void WebExtension::populateCommandsIfNeeded()
+@@ -2382,7 +2485,7 @@ void WebExtension::populateCommandsIfNeeded()
                  platformShortcut = !suggestedKeyObject->getString(macPlatform).isEmpty() ? suggestedKeyObject->getString(macPlatform) : suggestedKeyObject->getString(iosPlatform);
  #elif PLATFORM(IOS_FAMILY)
                  platformShortcut = !suggestedKeyObject->getString(iosPlatform).isEmpty() ? suggestedKeyObject->getString(iosPlatform) : suggestedKeyObject->getString(macPlatform);
@@ -140024,7 +140050,7 @@ index 8f99137471c0c991d6ec6d0f865f7e0ccc282ce1..5f5011123e144b226f5136b40ebad739
  
  } // namespace WebKit
 diff --git a/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPINamespace.cpp b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPINamespace.cpp
-index cdf7b6ed9b22a11f8ebdce34e1755607c892c4d1..29cf1170f89879579c05c56b18d1ee49319f3cff 100644
+index cdf7b6ed9b22a11f8ebdce34e1755607c892c4d1..30645b24757d0c59ad2b8459d9464862e4ca331b 100644
 --- a/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPINamespace.cpp
 +++ b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPINamespace.cpp
 @@ -32,7 +32,7 @@
@@ -140195,7 +140221,7 @@ index cdf7b6ed9b22a11f8ebdce34e1755607c892c4d1..29cf1170f89879579c05c56b18d1ee49
  
  #if ENABLE(WK_WEB_EXTENSIONS_OFFSCREEN)
  WebExtensionAPIOffscreen& WebExtensionAPINamespace::offscreen()
-@@ -244,16 +274,108 @@ WebExtensionAPIOffscreen& WebExtensionAPINamespace::offscreen()
+@@ -244,16 +274,117 @@ WebExtensionAPIOffscreen& WebExtensionAPINamespace::offscreen()
  }
  #endif
  
@@ -140219,8 +140245,8 @@ index cdf7b6ed9b22a11f8ebdce34e1755607c892c4d1..29cf1170f89879579c05c56b18d1ee49
 +    if (!m_idle)
 +        lazyInitialize(m_idle, WebExtensionAPIIdle::create(*this));
 +    return *m_idle;
-+}
-+
+ }
+ 
 +WebExtensionAPIManagement& WebExtensionAPINamespace::management()
 +{
 +    if (!m_management)
@@ -140240,8 +140266,8 @@ index cdf7b6ed9b22a11f8ebdce34e1755607c892c4d1..29cf1170f89879579c05c56b18d1ee49
 +    if (!m_privacy)
 +        lazyInitialize(m_privacy, WebExtensionAPIPrivacy::create(*this));
 +    return *m_privacy;
- }
- 
++}
++
 +WebExtensionAPIHistory& WebExtensionAPINamespace::history()
 +{
 +    // Documentation: https://developer.chrome.com/docs/extensions/reference/api/history
@@ -140287,6 +140313,15 @@ index cdf7b6ed9b22a11f8ebdce34e1755607c892c4d1..29cf1170f89879579c05c56b18d1ee49
 +    return *m_sessions;
 +}
 +
++WebExtensionAPITabGroups& WebExtensionAPINamespace::tabGroups()
++{
++    // Documentation: https://developer.chrome.com/docs/extensions/reference/api/tabGroups
++
++    if (!m_tabGroups)
++        lazyInitialize(m_tabGroups, WebExtensionAPITabGroups::create(*this));
++    return *m_tabGroups;
++}
++
 +WebExtensionAPIIdentity& WebExtensionAPINamespace::identity()
 +{
 +    // Documentation: https://developer.chrome.com/docs/extensions/reference/api/identity
@@ -140309,7 +140344,7 @@ index cdf7b6ed9b22a11f8ebdce34e1755607c892c4d1..29cf1170f89879579c05c56b18d1ee49
  WebExtensionAPIPermissions& WebExtensionAPINamespace::permissions()
  {
      // Documentation: https://developer.mozilla.org/docs/Mozilla/Add-ons/WebExtensions/API/permissions
-@@ -286,6 +408,7 @@ WebExtensionAPIScripting& WebExtensionAPINamespace::scripting()
+@@ -286,6 +417,7 @@ WebExtensionAPIScripting& WebExtensionAPINamespace::scripting()
      return *m_scripting;
  }
  
@@ -140317,24 +140352,24 @@ index cdf7b6ed9b22a11f8ebdce34e1755607c892c4d1..29cf1170f89879579c05c56b18d1ee49
  #if ENABLE(WK_WEB_EXTENSIONS_SIDEBAR)
  WebExtensionAPISidePanel& WebExtensionAPINamespace::sidePanel()
  {
-@@ -320,15 +443,8 @@ WebExtensionAPIBookmarks& WebExtensionAPINamespace::bookmarks()
+@@ -320,15 +452,8 @@ WebExtensionAPIBookmarks& WebExtensionAPINamespace::bookmarks()
  }
  #endif
  
 -WebExtensionAPIStorage& WebExtensionAPINamespace::storage()
 -{
 -    // Documentation: https://developer.mozilla.org/docs/Mozilla/Add-ons/WebExtensions/API/storage
- 
+-
 -    if (!m_storage)
 -        lazyInitialize(m_storage, WebExtensionAPIStorage::create(*this));
--
+ 
 -    return *m_storage;
 -}
 +#endif
  
  WebExtensionAPITabs& WebExtensionAPINamespace::tabs()
  {
-@@ -339,27 +455,15 @@ WebExtensionAPITabs& WebExtensionAPINamespace::tabs()
+@@ -339,27 +464,15 @@ WebExtensionAPITabs& WebExtensionAPINamespace::tabs()
  
      return *m_tabs;
  }
@@ -140367,7 +140402,7 @@ index cdf7b6ed9b22a11f8ebdce34e1755607c892c4d1..29cf1170f89879579c05c56b18d1ee49
  }
  
  WebExtensionAPIWebNavigation& WebExtensionAPINamespace::webNavigation()
-@@ -381,7 +485,28 @@ WebExtensionAPIWebRequest& WebExtensionAPINamespace::webRequest()
+@@ -381,7 +494,28 @@ WebExtensionAPIWebRequest& WebExtensionAPINamespace::webRequest()
  
      return *m_webRequest;
  }
@@ -140398,10 +140433,10 @@ index cdf7b6ed9b22a11f8ebdce34e1755607c892c4d1..29cf1170f89879579c05c56b18d1ee49
  } // namespace WebKit
  
 diff --git a/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPINamespace.h b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPINamespace.h
-index fc3e8017564cf29eb647731205e00dc8500dd13d..d5427ebe48b5d59b5cff4cf61b918308ebab6445 100644
+index fc3e8017564cf29eb647731205e00dc8500dd13d..0482e0ea032aa685b09d0b2cd51fe1dcea08d38d 100644
 --- a/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPINamespace.h
 +++ b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPINamespace.h
-@@ -45,6 +45,20 @@
+@@ -45,6 +45,21 @@
  #include "WebExtensionAPIObject.h"
  #include "WebExtensionAPIOffscreen.h"
  #include "WebExtensionAPIPermissions.h"
@@ -140417,12 +140452,13 @@ index fc3e8017564cf29eb647731205e00dc8500dd13d..d5427ebe48b5d59b5cff4cf61b918308
 +#include "WebExtensionAPISearch.h"
 +#include "WebExtensionAPIBrowsingData.h"
 +#include "WebExtensionAPISessions.h"
++#include "WebExtensionAPITabGroups.h"
 +#include "WebExtensionAPIIdentity.h"
 +#endif
  #include "WebExtensionAPIRuntime.h"
  #include "WebExtensionAPIScripting.h"
  #include "WebExtensionAPISidePanel.h"
-@@ -66,33 +80,45 @@ class WebExtensionAPINamespace : public WebExtensionAPIObject, public JSWebExten
+@@ -66,33 +81,46 @@ class WebExtensionAPINamespace : public WebExtensionAPIObject, public JSWebExten
  
  public:
      bool isPropertyAllowed(const ASCIILiteral& propertyName, WebPage*);
@@ -140468,6 +140504,7 @@ index fc3e8017564cf29eb647731205e00dc8500dd13d..d5427ebe48b5d59b5cff4cf61b918308
 +    WebExtensionAPISearch& search();
 +    WebExtensionAPIBrowsingData& browsingData();
 +    WebExtensionAPISessions& sessions();
++    WebExtensionAPITabGroups& tabGroups();
 +    WebExtensionAPIIdentity& identity();
  #endif
      WebExtensionAPIRuntime& runtime() const final;
@@ -140477,7 +140514,7 @@ index fc3e8017564cf29eb647731205e00dc8500dd13d..d5427ebe48b5d59b5cff4cf61b918308
  #if ENABLE(WK_WEB_EXTENSIONS_SIDEBAR)
      WebExtensionAPISidePanel& sidePanel();
      WebExtensionAPISidebarAction& sidebarAction();
-@@ -100,15 +126,13 @@ public:
+@@ -100,15 +128,13 @@ public:
  #if ENABLE(WK_WEB_EXTENSIONS_BOOKMARKS)
      WebExtensionAPIBookmarks& bookmarks();
  #endif
@@ -140497,7 +140534,7 @@ index fc3e8017564cf29eb647731205e00dc8500dd13d..d5427ebe48b5d59b5cff4cf61b918308
  
  private:
      const RefPtr<WebExtensionAPIAction> m_action;
-@@ -127,7 +151,21 @@ private:
+@@ -127,7 +153,22 @@ private:
  #if ENABLE(WK_WEB_EXTENSIONS_OFFSCREEN)
      const RefPtr<WebExtensionAPIOffscreen> m_offscreen;
  #endif
@@ -140515,6 +140552,7 @@ index fc3e8017564cf29eb647731205e00dc8500dd13d..d5427ebe48b5d59b5cff4cf61b918308
 +    RefPtr<WebExtensionAPISearch> m_search;
 +    RefPtr<WebExtensionAPIBrowsingData> m_browsingData;
 +    RefPtr<WebExtensionAPISessions> m_sessions;
++    RefPtr<WebExtensionAPITabGroups> m_tabGroups;
 +    RefPtr<WebExtensionAPIIdentity> m_identity;
 +#endif
      mutable RefPtr<WebExtensionAPIRuntime> m_runtime;
@@ -143787,12 +143825,139 @@ index d7868f1e4addc61cb897e875bab3a9dcf88efd76..641099c3a542b56479e6eecdb50d493c
  };
  
  } // namespace WebKit
+diff --git a/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPITabGroups.cpp b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPITabGroups.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..3a4d2fe757c1cfcb86308dcea8784914c1bbe40b
+--- /dev/null
++++ b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPITabGroups.cpp
+@@ -0,0 +1,71 @@
++/* Copyright (C) 2026 Summit contributors. SPDX-License-Identifier: BSD-2-Clause */
++#include "config.h"
++#include "WebExtensionAPITabGroups.h"
++
++#if ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
++
++#include "WebExtensionEventListenerType.h"
++#include "WebExtensionUtilities.h"
++#include <wtf/text/MakeString.h>
++
++namespace WebKit {
++
++// Chrome's text for a group that does not exist.
++static String noGroupError(double groupId)
++{
++    return makeString("No group with id: "_s, String::number(groupId), "."_s);
++}
++
++void WebExtensionAPITabGroups::get(double groupId, Ref<WebExtensionCallbackHandler>&& callback)
++{
++    callback->reportError(noGroupError(groupId));
++}
++
++void WebExtensionAPITabGroups::query(RefPtr<JSON::Value>, Ref<WebExtensionCallbackHandler>&& callback)
++{
++    auto context = callback->globalContext();
++    Protected<JSObjectRef> groups(context, JSObjectMakeArray(context, 0, nullptr, nullptr));
++    callback->call(groups.get());
++}
++
++void WebExtensionAPITabGroups::update(double groupId, RefPtr<JSON::Value>, Ref<WebExtensionCallbackHandler>&& callback)
++{
++    callback->reportError(noGroupError(groupId));
++}
++
++void WebExtensionAPITabGroups::move(double groupId, RefPtr<JSON::Value>, Ref<WebExtensionCallbackHandler>&& callback)
++{
++    callback->reportError(noGroupError(groupId));
++}
++
++WebExtensionAPIEvent& WebExtensionAPITabGroups::onCreated()
++{
++    if (!m_onCreated)
++        m_onCreated = WebExtensionAPIEvent::create(*this, WebExtensionEventListenerType::TabGroupsOnCreated);
++    return *m_onCreated;
++}
++
++WebExtensionAPIEvent& WebExtensionAPITabGroups::onUpdated()
++{
++    if (!m_onUpdated)
++        m_onUpdated = WebExtensionAPIEvent::create(*this, WebExtensionEventListenerType::TabGroupsOnUpdated);
++    return *m_onUpdated;
++}
++
++WebExtensionAPIEvent& WebExtensionAPITabGroups::onRemoved()
++{
++    if (!m_onRemoved)
++        m_onRemoved = WebExtensionAPIEvent::create(*this, WebExtensionEventListenerType::TabGroupsOnRemoved);
++    return *m_onRemoved;
++}
++
++WebExtensionAPIEvent& WebExtensionAPITabGroups::onMoved()
++{
++    if (!m_onMoved)
++        m_onMoved = WebExtensionAPIEvent::create(*this, WebExtensionEventListenerType::TabGroupsOnMoved);
++    return *m_onMoved;
++}
++
++} // namespace WebKit
++
++#endif // ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
+diff --git a/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPITabGroups.h b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPITabGroups.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..53f3d5d0e7d0737a767f292c7972464c183b2622
+--- /dev/null
++++ b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPITabGroups.h
+@@ -0,0 +1,44 @@
++/* Copyright (C) 2026 Summit contributors. SPDX-License-Identifier: BSD-2-Clause */
++#pragma once
++
++#if ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
++
++#include "JSWebExtensionAPITabGroups.h"
++#include "WebExtensionAPIEvent.h"
++#include "WebExtensionAPIObject.h"
++#include <wtf/JSONValues.h>
++
++namespace WebKit {
++
++// chrome.tabGroups. Summit has no tab groups, so it answers as Chrome does
++// for a window without any: no groups, and every tab's groupId is
++// TAB_GROUP_ID_NONE. Extensions that look for the namespace (Sidebery, Tree
++// Style Tab) start instead of failing.
++class WebExtensionAPITabGroups : public WebExtensionAPIObject, public JSWebExtensionWrappable {
++    WEB_EXTENSION_DECLARE_JS_WRAPPER_CLASS(WebExtensionAPITabGroups, tabGroups, tabGroups);
++
++public:
++    double tabGroupIdentifierNone() const { return -1; }
++
++    void get(double groupId, Ref<WebExtensionCallbackHandler>&&);
++    void query(RefPtr<JSON::Value> queryInfo, Ref<WebExtensionCallbackHandler>&&);
++    void update(double groupId, RefPtr<JSON::Value> updateProperties, Ref<WebExtensionCallbackHandler>&&);
++    void move(double groupId, RefPtr<JSON::Value> moveProperties, Ref<WebExtensionCallbackHandler>&&);
++
++    WebExtensionAPIEvent& onCreated();
++    WebExtensionAPIEvent& onUpdated();
++    WebExtensionAPIEvent& onRemoved();
++    WebExtensionAPIEvent& onMoved();
++
++private:
++    RefPtr<WebExtensionAPIEvent> m_onCreated;
++    RefPtr<WebExtensionAPIEvent> m_onUpdated;
++    RefPtr<WebExtensionAPIEvent> m_onRemoved;
++    RefPtr<WebExtensionAPIEvent> m_onMoved;
++};
++
++} // namespace WebKit
++
++SPECIALIZE_TYPE_TRAITS_WEB_EXTENSION(WebExtensionAPITabGroups, tabGroups);
++
++#endif // ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
 diff --git a/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPITabs.cpp b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPITabs.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..2865ed886d3e615aca75eb74b0e6e3489dcb2af1
+index 0000000000000000000000000000000000000000..66cf12c7195bd20e2ccd6cc6e38c4893d7a0a97e
 --- /dev/null
 +++ b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPITabs.cpp
-@@ -0,0 +1,950 @@
+@@ -0,0 +1,974 @@
 +/*
 + * Copyright (C) 2023 Apple Inc. All rights reserved.
 + *
@@ -143975,6 +144140,30 @@ index 0000000000000000000000000000000000000000..2865ed886d3e615aca75eb74b0e6e348
 +    Ref context = extensionContext();
 +    return (name == "executeScript"_s || name == "insertCSS"_s || name == "removeCSS"_s || name == "getSelected"_s) && isForMainWorld()
 +        && !context->supportsManifestVersion(3) && !context->isUnsupportedAPI(propertyPath(), name);
++}
++
++// Summit has no tab groups (WebExtensionAPITabGroups): no tab can be put in
++// one, and every tab is already out of one.
++void WebExtensionAPITabs::group(RefPtr<JSON::Value> options, Ref<WebExtensionCallbackHandler>&& callback, String& exception)
++{
++    if (!options || !options->asObject()) {
++        exception = toErrorString(nullString(), "options"_s, "an object is expected"_s);
++        return;
++    }
++    callback->reportError("Summit has no tab groups."_s);
++}
++
++void WebExtensionAPITabs::ungroup(RefPtr<JSON::Value> tabIds, Ref<WebExtensionCallbackHandler>&& callback, String& exception)
++{
++    RefPtr array = tabIds ? tabIds->asArray() : nullptr;
++    bool valid = tabIds && (tabIds->asDouble() || (array && array->length()));
++    for (size_t i = 0; valid && array && i < array->length(); ++i)
++        valid = !!array->get(i)->asDouble();
++    if (!valid) {
++        exception = toErrorString(nullString(), "tabIds"_s, "a tab identifier or a non-empty array of them is expected"_s);
++        return;
++    }
++    callback->call();
 +}
 +
 +void WebExtensionAPITabs::getSelected(WebPageProxyIdentifier page, double windowID, Ref<WebExtensionCallbackHandler>&& callback, String& exception)
@@ -144744,10 +144933,10 @@ index 0000000000000000000000000000000000000000..2865ed886d3e615aca75eb74b0e6e348
 +}
 +#endif
 diff --git a/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPITabs.h b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPITabs.h
-index de0fbb5429a8ed531f265a73c467871e082e4977..694df2923b49f51e6d33e1fcc1a3a7b320c27fed 100644
+index de0fbb5429a8ed531f265a73c467871e082e4977..775291b290d05b7ea91fcd9241c4bf6031e9f0ee 100644
 --- a/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPITabs.h
 +++ b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPITabs.h
-@@ -49,15 +49,64 @@ class WebExtensionAPITabs : public WebExtensionAPIObject, public JSWebExtensionW
+@@ -49,15 +49,66 @@ class WebExtensionAPITabs : public WebExtensionAPIObject, public JSWebExtensionW
      WEB_EXTENSION_DECLARE_JS_WRAPPER_CLASS(WebExtensionAPITabs, tabs, tabs);
  
  public:
@@ -144795,6 +144984,8 @@ index de0fbb5429a8ed531f265a73c467871e082e4977..694df2923b49f51e6d33e1fcc1a3a7b3
 +    void setZoomSettings(double tabID, RefPtr<JSON::Value> zoomSettings, Ref<WebExtensionCallbackHandler>&& callback, String& exception);
 +    void discard(double tabID, Ref<WebExtensionCallbackHandler>&& callback, String& exception);
 +    void toggleReaderMode(WebPageProxyIdentifier page, double tabID, Ref<WebExtensionCallbackHandler>&& callback, String& exception);
++    void group(RefPtr<JSON::Value> options, Ref<WebExtensionCallbackHandler>&& callback, String& exception);
++    void ungroup(RefPtr<JSON::Value> tabIds, Ref<WebExtensionCallbackHandler>&& callback, String& exception);
 +#endif
 +#if PLATFORM(COCOA)
 +    void getSelected(WebPageProxyIdentifier page, double windowID, Ref<WebExtensionCallbackHandler>&& callback, String& exception);
@@ -144814,7 +145005,7 @@ index de0fbb5429a8ed531f265a73c467871e082e4977..694df2923b49f51e6d33e1fcc1a3a7b3
      void getSelected(WebPageProxyIdentifier, double windowID, Ref<WebExtensionCallbackHandler>&&, NSString **outExceptionString);
  
      void duplicate(double tabID, NSDictionary *properties, Ref<WebExtensionCallbackHandler>&&, NSString **outExceptionString);
-@@ -83,17 +132,6 @@ public:
+@@ -83,17 +134,6 @@ public:
      void insertCSS(WebPageProxyIdentifier, double tabID, NSDictionary *options, Ref<WebExtensionCallbackHandler>&&, NSString **outExceptionString);
      void removeCSS(WebPageProxyIdentifier, double tabID, NSDictionary *options, Ref<WebExtensionCallbackHandler>&&, NSString **outExceptionString);
  
@@ -144832,7 +145023,7 @@ index de0fbb5429a8ed531f265a73c467871e082e4977..694df2923b49f51e6d33e1fcc1a3a7b3
  
  private:
      bool parseTabCreateOptions(NSDictionary *, WebExtensionTabParameters&, NSString *sourceKey, NSString **outExceptionString);
-@@ -105,15 +143,20 @@ private:
+@@ -105,15 +145,20 @@ private:
      static bool parseConnectOptions(NSDictionary *, std::optional<String>& name, WebExtensionMessageTargetParameters&, NSString *sourceKey, NSString **outExceptionString);
      static bool parseScriptOptions(NSDictionary *, WebExtensionScriptInjectionParameters&, NSString **outExceptionString);
  
@@ -148634,10 +148825,10 @@ index 0000000000000000000000000000000000000000..3fccfb9706567fbfb0a94c08e5ee419c
 +#endif // ENABLE(WK_WEB_EXTENSIONS)
 diff --git a/Source/WebKit/WebProcess/Extensions/Bindings/JSWebExtensionTabParameters.cpp b/Source/WebKit/WebProcess/Extensions/Bindings/JSWebExtensionTabParameters.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..2fd634d09ab7aa467f192d943bb98fda43358957
+index 0000000000000000000000000000000000000000..84e09641694090e956413700d2c7a8b6296d2d20
 --- /dev/null
 +++ b/Source/WebKit/WebProcess/Extensions/Bindings/JSWebExtensionTabParameters.cpp
-@@ -0,0 +1,103 @@
+@@ -0,0 +1,106 @@
 +/*
 + * Copyright (C) 2023 Apple Inc. All rights reserved.
 + *
@@ -148729,6 +148920,9 @@ index 0000000000000000000000000000000000000000..2fd634d09ab7aa467f192d943bb98fda
 +#if PLATFORM(HAIKU)
 +    if (parameters.cookieStoreIdentifier && !parameters.cookieStoreIdentifier->isEmpty())
 +        set("cookieStoreId"_s, stringValue(*parameters.cookieStoreIdentifier));
++    // Chrome's tabGroups.TAB_GROUP_ID_NONE: Summit has no tab groups.
++    if (parameters.identifier)
++        set("groupId"_s, JSValueMakeNumber(context, -1));
 +#endif
 +    if (parameters.readerModeAvailable)
 +        set("isArticle"_s, JSValueMakeBoolean(context, parameters.readerModeAvailable.value()));
@@ -150130,10 +150324,10 @@ index 2868b8c1b322da84dda89344451196e063c4264d..701eab20681dee6d7595f0a57f9df7c7
  
  };
 diff --git a/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPINamespace.idl b/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPINamespace.idl
-index cf3a76d37a4d9379d4191ac666ba4bc97bd9013d..01a3d1b09be9aab3073490582eb61684df06e5d3 100644
+index cf3a76d37a4d9379d4191ac666ba4bc97bd9013d..f5aae4070bdb08ae0c4f59cdaf1ae22c2824d794 100644
 --- a/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPINamespace.idl
 +++ b/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPINamespace.idl
-@@ -33,57 +33,73 @@
+@@ -33,57 +33,74 @@
      * in the offscreen web view context) - and automatically grant it in WebExtensionAPINamespace::isPropertyAllowed.
      */
  
@@ -150203,6 +150397,7 @@ index cf3a76d37a4d9379d4191ac666ba4bc97bd9013d..01a3d1b09be9aab3073490582eb61684
 +    [MainWorldOnly, Dynamic, Platform=HAIKU] readonly attribute WebExtensionAPISearch search;
 +    [MainWorldOnly, Dynamic, Platform=HAIKU] readonly attribute WebExtensionAPIBrowsingData browsingData;
 +    [MainWorldOnly, Dynamic, Platform=HAIKU] readonly attribute WebExtensionAPISessions sessions;
++    [MainWorldOnly, Dynamic, Platform=HAIKU] readonly attribute WebExtensionAPITabGroups tabGroups;
 +    [MainWorldOnly, Dynamic, Platform=HAIKU] readonly attribute WebExtensionAPIIdentity identity;
  
      [MainWorldOnly, Dynamic, Platform=COCOA, Conditional=WK_WEB_EXTENSIONS_SIDEBAR] readonly attribute WebExtensionAPISidebarAction sidebarAction;
@@ -150563,11 +150758,45 @@ index 866d70a2cdbbe9cfbd525c7be21d6c21db2dfa1a..090b11c6a852e779e830487dcaed3958
  
      readonly attribute WebExtensionAPIEvent onChanged;
  
+diff --git a/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPITabGroups.idl b/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPITabGroups.idl
+new file mode 100644
+index 0000000000000000000000000000000000000000..4339312630921e576f504561f8cb1c37917ad0c6
+--- /dev/null
++++ b/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPITabGroups.idl
+@@ -0,0 +1,28 @@
++/*
++ * Copyright (C) 2026 Summit contributors.
++ * SPDX-License-Identifier: BSD-2-Clause
++ */
++
++// chrome.tabGroups (and Firefox's), for a browser without tab groups: there
++// are none to get, query, update or move, and the events never fire.
++// https://developer.chrome.com/docs/extensions/reference/api/tabGroups
++[
++    Conditional=WK_WEB_EXTENSIONS,
++    MainWorldOnly,
++    ReturnsPromiseWhenCallbackIsOmitted,
++    UseCPPAPI,
++] interface WebExtensionAPITabGroups {
++
++    [ImplementedAs=tabGroupIdentifierNone] readonly attribute double TAB_GROUP_ID_NONE;
++
++    void get(double groupId, [Optional, CallbackHandler] function callback);
++    void query([Optional, JSONValue] any queryInfo, [Optional, CallbackHandler] function callback);
++    void update(double groupId, [Optional, JSONValue] any updateProperties, [Optional, CallbackHandler] function callback);
++    void move(double groupId, [Optional, JSONValue] any moveProperties, [Optional, CallbackHandler] function callback);
++
++    readonly attribute WebExtensionAPIEvent onCreated;
++    readonly attribute WebExtensionAPIEvent onUpdated;
++    readonly attribute WebExtensionAPIEvent onRemoved;
++    readonly attribute WebExtensionAPIEvent onMoved;
++
++};
 diff --git a/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPITabs.idl b/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPITabs.idl
-index a744e37f5fd4c546a27627a69573d8eeb454312b..3d953c88a0566d68c474a7596f7bc948359849a2 100644
+index a744e37f5fd4c546a27627a69573d8eeb454312b..ac9bf1b337930ae5e406826144795edbd0f77f6f 100644
 --- a/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPITabs.idl
 +++ b/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPITabs.idl
-@@ -69,42 +69,46 @@ dictionary WebExtensionTabCreateProperties {
+@@ -69,42 +69,48 @@ dictionary WebExtensionTabCreateProperties {
  
  [
      Conditional=WK_WEB_EXTENSIONS,
@@ -150607,6 +150836,8 @@ index a744e37f5fd4c546a27627a69573d8eeb454312b..3d953c88a0566d68c474a7596f7bc948
 -    [RaisesException, NeedsPageIdentifier] void getZoom([Optional] double tabID, [Optional, CallbackHandler] function callback);
 -    [RaisesException, NeedsPageIdentifier] void setZoom([Optional] double tabID, double zoomFactor, [Optional, CallbackHandler] function callback);
 +    [Platform=COCOA|HAIKU, RaisesStringException, NeedsPageIdentifier] void getZoom([Optional] double tabID, [Optional, CallbackHandler] function callback);
++    [Platform=HAIKU, RaisesStringException] void group([JSONValue] any options, [Optional, CallbackHandler] function callback);
++    [Platform=HAIKU, RaisesStringException] void ungroup([JSONValue] any tabIds, [Optional, CallbackHandler] function callback);
 +    [Platform=HAIKU, RaisesStringException] void discard([Optional] double tabID, [Optional, CallbackHandler] function callback);
 +    [Platform=HAIKU, RaisesStringException] void getZoomSettings([Optional] double tabID, [Optional, CallbackHandler] function callback);
 +    [Platform=HAIKU, RaisesStringException] void setZoomSettings([Optional] double tabID, [JSONValue] any zoomSettings, [Optional, CallbackHandler] function callback);
@@ -150635,7 +150866,7 @@ index a744e37f5fd4c546a27627a69573d8eeb454312b..3d953c88a0566d68c474a7596f7bc948
  
      [ImplementedAs=tabIdentifierNone] readonly attribute double TAB_ID_NONE;
  
-@@ -117,5 +121,6 @@ dictionary WebExtensionTabCreateProperties {
+@@ -117,5 +123,6 @@ dictionary WebExtensionTabCreateProperties {
      readonly attribute WebExtensionAPIEvent onRemoved;
      readonly attribute WebExtensionAPIEvent onReplaced;
      readonly attribute WebExtensionAPIEvent onUpdated;

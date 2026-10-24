@@ -59,6 +59,7 @@ const char* PermissionDescription(const char* permission)
         { "tabs", "See open tabs and their addresses" },
         { "history", "Read and change browsing history" },
         { "bookmarks", "Read and change bookmarks" },
+        { "tabGroups", "See and manage tab groups" },
         { "downloads", "Manage downloads" },
         { "cookies", "Access cookies on permitted sites" },
         { "clipboardRead", "Read the clipboard" },
