@@ -143789,10 +143789,10 @@ index d7868f1e4addc61cb897e875bab3a9dcf88efd76..641099c3a542b56479e6eecdb50d493c
  } // namespace WebKit
 diff --git a/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPITabs.cpp b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPITabs.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..adc29dfa1d310fd69e478c4ec7b8508881f39e1d
+index 0000000000000000000000000000000000000000..2865ed886d3e615aca75eb74b0e6e3489dcb2af1
 --- /dev/null
 +++ b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPITabs.cpp
-@@ -0,0 +1,922 @@
+@@ -0,0 +1,950 @@
 +/*
 + * Copyright (C) 2023 Apple Inc. All rights reserved.
 + *
@@ -143971,10 +143971,38 @@ index 0000000000000000000000000000000000000000..adc29dfa1d310fd69e478c4ec7b85088
 +bool WebExtensionAPITabs::isPropertyAllowed(const ASCIILiteral& name, WebPage*)
 +{
 +    // The dynamic tabs functions are the injection calls Manifest V3 replaced
-+    // with the scripting namespace.
++    // with the scripting namespace, and getSelected, which tabs.query replaced.
 +    Ref context = extensionContext();
-+    return (name == "executeScript"_s || name == "insertCSS"_s || name == "removeCSS"_s) && isForMainWorld()
++    return (name == "executeScript"_s || name == "insertCSS"_s || name == "removeCSS"_s || name == "getSelected"_s) && isForMainWorld()
 +        && !context->supportsManifestVersion(3) && !context->isUnsupportedAPI(propertyPath(), name);
++}
++
++void WebExtensionAPITabs::getSelected(WebPageProxyIdentifier page, double windowID, Ref<WebExtensionCallbackHandler>&& callback, String& exception)
++{
++    // Documentation: https://developer.mozilla.org/docs/Mozilla/Add-ons/WebExtensions/API/tabs/getSelected
++    // The active tab of the window (default: the current one), as Cocoa does.
++    auto window = toWebExtensionWindowIdentifier(windowID);
++    if (window && !isValid(window)) {
++        exception = "'windowId' value is invalid, because it is not a valid window identifier."_s;
++        return;
++    }
++    WebExtensionTabQueryParameters parameters;
++    parameters.windowIdentifier = window.value_or(WebExtensionWindowConstants::CurrentIdentifier);
++    parameters.active = true;
++    WebProcess::singleton().sendWithAsyncReply(Messages::WebExtensionContext::TabsQuery(page, WTF::move(parameters)),
++        [protectedThis = Ref { *this }, callback = WTF::move(callback)](std::expected<Vector<WebExtensionTabParameters>, WebExtensionError>&& result) {
++            if (!result) {
++                callback->reportError(result.error());
++                return;
++            }
++            if (result->isEmpty()) {
++                callback->call();
++                return;
++            }
++            auto context = callback->globalContext();
++            Protected<JSValueRef> tab(context, toWebAPI(context, result->first()));
++            callback->call(tab.get());
++        }, extensionContext().identifier());
 +}
 +
 +// An omitted, undefined or null tab identifier selects the calling context's
@@ -144716,10 +144744,10 @@ index 0000000000000000000000000000000000000000..adc29dfa1d310fd69e478c4ec7b85088
 +}
 +#endif
 diff --git a/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPITabs.h b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPITabs.h
-index de0fbb5429a8ed531f265a73c467871e082e4977..37e2f98731ee4fba2f9c21fc6e01976538c5430b 100644
+index de0fbb5429a8ed531f265a73c467871e082e4977..694df2923b49f51e6d33e1fcc1a3a7b320c27fed 100644
 --- a/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPITabs.h
 +++ b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPITabs.h
-@@ -49,15 +49,63 @@ class WebExtensionAPITabs : public WebExtensionAPIObject, public JSWebExtensionW
+@@ -49,15 +49,64 @@ class WebExtensionAPITabs : public WebExtensionAPIObject, public JSWebExtensionW
      WEB_EXTENSION_DECLARE_JS_WRAPPER_CLASS(WebExtensionAPITabs, tabs, tabs);
  
  public:
@@ -144758,6 +144786,7 @@ index de0fbb5429a8ed531f265a73c467871e082e4977..37e2f98731ee4fba2f9c21fc6e019765
 +    void captureVisibleTab(WebPageProxyIdentifier page, double windowID, RefPtr<JSON::Value> options, Ref<WebExtensionCallbackHandler>&& callback, String& exception);
 +    void move(JSContextRef, JSValueRef tabIDs, RefPtr<JSON::Value> properties, Ref<WebExtensionCallbackHandler>&& callback, String& exception);
 +#if PLATFORM(HAIKU)
++    void getSelected(WebPageProxyIdentifier page, double windowID, Ref<WebExtensionCallbackHandler>&& callback, String& exception);
 +    void duplicate(double tabID, RefPtr<JSON::Value> properties, Ref<WebExtensionCallbackHandler>&& callback, String& exception);
 +    void getZoom(WebPageProxyIdentifier page, double tabID, Ref<WebExtensionCallbackHandler>&& callback, String& exception);
 +    void setZoom(WebPageProxyIdentifier page, double tabID, double zoomFactor, Ref<WebExtensionCallbackHandler>&& callback, String& exception);
@@ -144785,7 +144814,7 @@ index de0fbb5429a8ed531f265a73c467871e082e4977..37e2f98731ee4fba2f9c21fc6e019765
      void getSelected(WebPageProxyIdentifier, double windowID, Ref<WebExtensionCallbackHandler>&&, NSString **outExceptionString);
  
      void duplicate(double tabID, NSDictionary *properties, Ref<WebExtensionCallbackHandler>&&, NSString **outExceptionString);
-@@ -83,17 +131,6 @@ public:
+@@ -83,17 +132,6 @@ public:
      void insertCSS(WebPageProxyIdentifier, double tabID, NSDictionary *options, Ref<WebExtensionCallbackHandler>&&, NSString **outExceptionString);
      void removeCSS(WebPageProxyIdentifier, double tabID, NSDictionary *options, Ref<WebExtensionCallbackHandler>&&, NSString **outExceptionString);
  
@@ -144803,7 +144832,7 @@ index de0fbb5429a8ed531f265a73c467871e082e4977..37e2f98731ee4fba2f9c21fc6e019765
  
  private:
      bool parseTabCreateOptions(NSDictionary *, WebExtensionTabParameters&, NSString *sourceKey, NSString **outExceptionString);
-@@ -105,15 +142,20 @@ private:
+@@ -105,15 +143,20 @@ private:
      static bool parseConnectOptions(NSDictionary *, std::optional<String>& name, WebExtensionMessageTargetParameters&, NSString *sourceKey, NSString **outExceptionString);
      static bool parseScriptOptions(NSDictionary *, WebExtensionScriptInjectionParameters&, NSString **outExceptionString);
  
@@ -150535,7 +150564,7 @@ index 866d70a2cdbbe9cfbd525c7be21d6c21db2dfa1a..090b11c6a852e779e830487dcaed3958
      readonly attribute WebExtensionAPIEvent onChanged;
  
 diff --git a/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPITabs.idl b/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPITabs.idl
-index a744e37f5fd4c546a27627a69573d8eeb454312b..f6a32a601b5ec624f05d1bcc474872053f49b0bc 100644
+index a744e37f5fd4c546a27627a69573d8eeb454312b..3d953c88a0566d68c474a7596f7bc948359849a2 100644
 --- a/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPITabs.idl
 +++ b/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPITabs.idl
 @@ -69,42 +69,46 @@ dictionary WebExtensionTabCreateProperties {
@@ -150557,7 +150586,7 @@ index a744e37f5fd4c546a27627a69573d8eeb454312b..f6a32a601b5ec624f05d1bcc47487205
 +    [RaisesStringException] void get(double tabID, [Optional, CallbackHandler] function callback);
      [NeedsPageIdentifier] void getCurrent([Optional, CallbackHandler] function callback);
 -    [RaisesException, Dynamic, NeedsPageIdentifier] void getSelected([Optional] double windowID, [Optional, CallbackHandler] function callback);
-+    [Platform=COCOA, RaisesStringException, Dynamic, NeedsPageIdentifier] void getSelected([Optional] double windowID, [Optional, CallbackHandler] function callback);
++    [Platform=COCOA|HAIKU, RaisesStringException, Dynamic, NeedsPageIdentifier] void getSelected([Optional] double windowID, [Optional, CallbackHandler] function callback);
  
 -    [RaisesException] void duplicate(double tabID, [Optional, NSDictionary] any properties, [Optional, CallbackHandler] function callback);
 -    [RaisesException, NeedsPageIdentifier] void update([Optional] double tabID, [NSDictionary] any properties, [Optional, CallbackHandler] function callback);

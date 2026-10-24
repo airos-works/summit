@@ -143,6 +143,13 @@ on the X399 (24 Oct, pin106 build ca81f4b): `pinned=false`, then after
 `update({pinned: true})` an `onUpdated {pinned: true}` and `get`/`query`
 agreeing, then `onUpdated {pinned: false}` after unpinning.
 
+## Selected tab (#106)
+
+Chrome's Manifest V2 `tabs.getSelected(windowId?)` gives the active tab of the
+window (default: the current one), as `tabs.query({active: true, windowId})`
+does, using WebKit's Cocoa version. Manifest V3 extensions don't get it, as in
+Chrome. Fixture: `tests/fixtures/extensions/tab-get-selected`.
+
 ## Detect language (#106)
 
 `tabs.detectLanguage()` returns the language the page declares: its
