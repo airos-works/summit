@@ -29,6 +29,11 @@ to the view's owner as `B_WEBKIT_CONTEXT_MENU_EXTENSIONS`.
 when it closes), and the menu replaces its extension items in its own
 thread. When it closes, `BWebKitView::ContextMenuClosed` fires onHidden.
 
+`menus.refresh()` called before the menu has opened (the usual case: onShown
+fires while Summit builds the menu) is kept and applied when it opens.
+Summit's MCP `press_key escape` closes an open page menu, so a test can see
+onHidden.
+
 ## Fixture
 
 `tests/fixtures/extensions/menus-shown/`: right-click a page. The fixture's

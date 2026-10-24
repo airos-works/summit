@@ -516,6 +516,11 @@ void CancellableMenu::MessageReceived(BMessage* message)
         if (fCancelled->load()) { const char escape = B_ESCAPE; KeyDown(&escape, 1); }
         return;
     }
+    if (message->what == kMenuCancel) {
+        const char escape = B_ESCAPE;
+        KeyDown(&escape, 1);
+        return;
+    }
     if (message->what == kMenuRefresh) {
         if (fRefreshHook) fRefreshHook(this, *message);
         return;

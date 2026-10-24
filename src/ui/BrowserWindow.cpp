@@ -5228,6 +5228,8 @@ void BrowserWindow::ShowPageContextMenu(const BMessage& message)
     AddExtensionMenuItems(menu, message, this);
     fPageMenu = BMessenger();
     fPageMenuTab = tab->id;
+    fPageMenuShowing = true;
+    fPendingMenuRefresh = BMessage();
     BMessage opened(kPageMenuOpened), closed(kPageMenuClosed);
     opened.AddUInt64("serial", ++fPageMenuSerial);
     closed.AddUInt64("serial", fPageMenuSerial);
@@ -5292,21 +5294,28 @@ void BrowserWindow::RefreshPageMenuExtensions(const BMessage& message)
     // again, rebuilt by the menu itself (a gone menu's messenger fails).
     BMessenger sender;
     auto* tab = message.FindMessenger("view", &sender) == B_OK ? FindTab(sender) : nullptr;
-    if (!tab || fPageMenuTab != tab->id || !fPageMenu.IsValid()) return;
+    if (!tab || fPageMenuTab != tab->id || !fPageMenuShowing) return;
     BMessage refresh(message);
     refresh.what = CancellableMenu::kMenuRefresh;
-    fPageMenu.SendMessage(&refresh);
+    // onShown listeners usually answer before the menu has opened: the
+    // refresh waits for it (PageMenuOpened).
+    if (!fPageMenu.IsValid()) fPendingMenuRefresh = refresh;
+    else fPageMenu.SendMessage(&refresh);
 }
 
 void BrowserWindow::PageMenuOpened(const BMessage& message)
 {
-    if (message.GetUInt64("serial", 0) == fPageMenuSerial) message.FindMessenger("menu", &fPageMenu);
+    if (message.GetUInt64("serial", 0) != fPageMenuSerial || message.FindMessenger("menu", &fPageMenu) != B_OK) return;
+    if (fPendingMenuRefresh.what) fPageMenu.SendMessage(&fPendingMenuRefresh);
+    fPendingMenuRefresh = BMessage();
 }
 
 void BrowserWindow::PageMenuClosed(const BMessage& message)
 {
     if (message.GetUInt64("serial", 0) != fPageMenuSerial) return;
     fPageMenu = BMessenger();
+    fPageMenuShowing = false;
+    fPendingMenuRefresh = BMessage();
     if (auto* tab = FindTabByID(fPageMenuTab)) tab->view->ContextMenuClosed();
 }
 

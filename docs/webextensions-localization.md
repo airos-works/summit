@@ -155,3 +155,13 @@ their saved hashes. A new diagnostic bundle was built, synced and verified
 before the decisive runtime run. Recovery evidence is in
 `.vm/css-resolve-vm-recovery.json`; the invalid bundle has not been repaired or
 represented as verified.
+
+Verified on the X399 (25 Oct, lf113 build): `i18n.detectLanguage` gave `de`
+(99 %, reliable) for German, `en` and `ja` for English and Japanese text,
+from a content script too, and `tabs.detectLanguage` gave `de` for
+`tests/fixtures/detect-language.html` (no `lang`). That run showed the
+fixture's own non-ASCII strings garbled: extension resources were served
+without a charset, so a Manifest V2 generated background page read its
+scripts as windows-1252. Extension text (HTML, scripts, CSS, JSON, XML) is
+now served as UTF-8, as in Chrome and Firefox
+(`WebExtensionURLSchemeHandlerHaiku.cpp`).

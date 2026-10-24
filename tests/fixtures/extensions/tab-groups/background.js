@@ -22,7 +22,7 @@ async function settle(name, promise) {
     const tabs = await chrome.tabs.query({});
     log("groupIds", [...new Set(tabs.map((tab) => tab.groupId))]);
     await settle("query ungrouped", chrome.tabs.query({groupId: -1}).then((found) => found.length === tabs.length));
-    await settle("query group 3", chrome.tabs.query({groupId: 3}));
+    await settle("query group 3", chrome.tabs.query({groupId: 3}));   // []
     await settle("group", chrome.tabs.group({tabIds: tabs[0].id}));
     await settle("ungroup", chrome.tabs.ungroup(tabs[0].id).then(() => "ok"));
 })();

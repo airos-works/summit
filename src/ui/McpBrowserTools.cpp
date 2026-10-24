@@ -370,7 +370,7 @@ void RegisterMcpBrowserTools(mcp::Server& server, const std::shared_ptr<McpConte
         }, false});
     server.Add({"press_key",
         "Presses a key in a tab's page: enter, tab, escape, backspace, delete, space, left/right/up/down, home, "
-        "end, pageup, pagedown, f1-f12 or one character, with modifiers.",
+        "end, pageup, pagedown, f1-f12 or one character, with modifiers. Escape closes the page's open context menu, if any.",
         Schema().String("key", "Key name", true).String("tab", kTabArgument).StringArray("modifiers", "shift, control, command, option")
             .Boolean("activate", "Select the tab and raise the window first"),
         [input](const Json& arguments) {

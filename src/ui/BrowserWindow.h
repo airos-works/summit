@@ -402,6 +402,8 @@ private:
     void PageMenuOpened(const BMessage& message);
     void PageMenuClosed(const BMessage& message);
     BMessenger fPageMenu;
+    bool fPageMenuShowing = false;
+    BMessage fPendingMenuRefresh;
     int64 fPageMenuTab = 0;
     uint64 fPageMenuSerial = 0;
     // Opens the current tab's Developer Tools, or brings them forward;

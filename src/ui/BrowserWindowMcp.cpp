@@ -2,6 +2,7 @@
 // The browser window's part of the MCP server (McpService.h): its tabs, their
 // pages and input, answered with the window locked.
 #include "BrowserWindow.h"
+#include "Chrome.h"
 #include "FrameHistory.h"
 #include "McpService.h"
 #include "Messages.h"
@@ -300,6 +301,12 @@ std::string BrowserWindow::McpRequest(const std::string& text)
                 std::transform(name.begin(), name.end(), name.begin(), [](unsigned char c) { return std::tolower(c); });
                 const NamedKey* named = nullptr;
                 for (const auto& candidate : kKeys) if (name == candidate.name) named = &candidate;
+                if (name == "escape" && fPageMenu.IsValid()) {
+                    // The page's context menu has the keyboard, as it would
+                    // for a real Escape.
+                    fPageMenu.SendMessage(CancellableMenu::kMenuCancel);
+                    return json{{"tab", tabName(*tab)}, {"sent", "escape to the context menu"}}.dump();
+                }
                 if (named) {
                     const std::string bytes(1, named->byte);
                     key(bytes, named->code, named->byte);

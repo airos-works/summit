@@ -114,6 +114,8 @@ public:
     // Runs, in the menu's own thread, for a kMenuRefresh message sent to it.
     void SetRefreshHook(std::function<void(BMenu*, const BMessage&)> hook) { fRefreshHook = std::move(hook); }
     static constexpr uint32 kMenuRefresh = 'cmrf';
+    // Closes the menu as Escape does (an MCP press_key escape).
+    static constexpr uint32 kMenuCancel = 'cmcn';
     void AttachedToWindow() override;
     void DetachedFromWindow() override;
     void MessageReceived(BMessage* message) override;
