@@ -699,6 +699,47 @@ static void TestObjectTree()
     commands = Sent(session);
     CHECK(commands.size() == 1 && commands[0].method == "IndexedDB.clearObjectStore" && commands[0].parameters["objectStoreName"] == "notes");
 
+    // Network: Disable cache, blocking and replay.
+    Sent(session);
+    session.SetCacheDisabled(true);
+    commands = Sent(session);
+    CHECK(Find(commands, "Network.setResourceCachingDisabled") && Find(commands, "Network.setResourceCachingDisabled")->parameters["disabled"] == true);
+    session.BlockURL("ads.example");
+    commands = Sent(session);
+    CHECK(Find(commands, "Network.setInterceptionEnabled") && Find(commands, "Network.addInterception")
+        && Find(commands, "Network.addInterception")->parameters["url"] == "ads.example" && session.BlockedURLs().size() == 1);
+    session.Receive(Event("page-1", "Network.requestIntercepted", {{"requestId", "r9"}, {"request", {{"url", "https://ADS.example/x.js"}}}}));
+    session.Receive(Event("page-1", "Network.requestIntercepted", {{"requestId", "r10"}, {"request", {{"url", "https://example.com/app.js"}}}}));
+    commands = Sent(session);
+    CHECK(Find(commands, "Network.interceptRequestWithError") && Find(commands, "Network.interceptRequestWithError")->parameters["requestId"] == "r9"
+        && Find(commands, "Network.interceptContinue") && Find(commands, "Network.interceptContinue")->parameters["requestId"] == "r10");
+    session.UnblockAll();
+    commands = Sent(session);
+    CHECK(Find(commands, "Network.removeInterception") && session.BlockedURLs().empty());
+    // A new process of the page is set up the same way.
+    session.Receive(TargetCreated("page-2"));
+    commands = Sent(session);
+    CHECK(Find(commands, "Network.setResourceCachingDisabled") && !Find(commands, "Network.addInterception"));
+    session.SetCacheDisabled(false);
+    Sent(session);
+    // Replay: the request again with fetch() from the page, without the headers a page cannot set.
+    session.Receive(Event("page-2", "Network.requestWillBeSent", {{"requestId", "p1"}, {"loaderId", "l"}, {"frameId", "f"},
+        {"documentURL", "https://example.com/"}, {"timestamp", 1.0}, {"type", "Fetch"},
+        {"request", {{"url", "https://example.com/api"}, {"method", "POST"}, {"postData", "{\"q\":1}"},
+            {"headers", {{"Content-Type", "application/json"}, {"Cookie", "a=b"}, {"X-Token", "t"}}}}}}));
+    session.TakeChanges();
+    const auto serial = session.Requests().back().serial;
+    CHECK(session.Replay(serial));
+    commands = Sent(session);
+    {
+        const auto* replay = Find(commands, "Runtime.evaluate");
+        const auto expression = replay ? replay->parameters["expression"].get<std::string>() : std::string();
+        CHECK(replay && replay->target == "page-2" && expression.find("fetch(\"https://example.com/api\"") == 0
+            && expression.find("\"X-Token\":\"t\"") != std::string::npos && expression.find("Cookie") == std::string::npos
+            && expression.find("\"method\":\"POST\"") != std::string::npos && expression.find("\"body\"") != std::string::npos);
+    }
+    CHECK(!session.Replay(999999));
+
     // Messages of a socket the tools never saw open are not news.
     session.Receive(Event("page-1", "Network.webSocketFrameReceived", {{"requestId", "ws9"}, {"timestamp", 1.0},
         {"response", {{"opcode", 1}, {"payloadData", "x"}, {"payloadLength", 1}}}}));

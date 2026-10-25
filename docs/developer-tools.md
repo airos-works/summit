@@ -134,14 +134,22 @@ sort and resize; the line under the list counts the requests and their bytes.
 
 Above the list: **Clear**, **Preserve log**, a menu of types (all, fetch and
 XHR, documents, style sheets, scripts, images, fonts, other), a filter on
-the address, **Copy as cURL** (the selected request as a `curl` command
-line: method, headers and body, each argument in single quotes; HTTP/2's
-pseudo-headers and `Content-Length` left out) and **Export HAR…** (the
+the address, **Disable cache** (everything comes from the network while
+the tools are open: `Network.setResourceCachingDisabled`), the **Request**
+menu and **Export HAR…**. The Request menu has **Copy as cURL** (the
+selected request as a `curl` command line: method, headers and body, each
+argument in single quotes; HTTP/2's pseudo-headers and `Content-Length` left
+out), **Replay** (the request again from the page with `fetch()`: its
+method, body and the headers a page may set; it appears as a new row),
+**Block** its address (without the query; requests to it fail while the
+tools are open, through `Network.addInterception`; the summary counts the
+blocked addresses) and **Unblock All**; and **Export HAR…** (the
 requests listed, in their order, as an HTTP Archive 1.2 file named after the
 page's host: headers, query, posted data, the response bodies the tools have
 read, sizes, timings as wait and receive). Test actions: `copy-curl`,
-`export-har PATH`; the state's `network.curl` is the selected request's
-command.
+`export-har PATH`, `disable-cache on|off`, `replay`, `block-url PART`,
+`unblock-all`; the state's `network.curl` is the selected request's command,
+`cacheDisabled` and `blocked` the rest.
 
 Selecting a request shows three tabs below the list:
 
