@@ -738,11 +738,26 @@ static void TestExports()
     get.bodyState = BodyState::Loaded;
     get.body = "hello";
     get.remoteAddress = "93.184.216.34:443";
+    get.timing.known = true;
+    get.timing.dnsStart = 1;
+    get.timing.dnsEnd = 6;
+    get.timing.connectStart = 6;
+    get.timing.tlsStart = 20;
+    get.timing.connectEnd = 50;
+    get.timing.requestStart = 50.5;
+    get.timing.responseStart = 200;
+    {
+        const auto described = DescribeHeaders(get).text;
+        CHECK(described.find("Timing") != std::string::npos && described.find("DNS lookup: 5.0 ms") != std::string::npos
+            && described.find("Connecting: 14 ms") != std::string::npos && described.find("TLS: 30 ms") != std::string::npos
+            && described.find("Waiting (to the first byte): 150 ms") != std::string::npos
+            && described.find("Receiving: 250 ms") != std::string::npos);
+    }
     const auto har = json::parse(HarArchive({&get, &post, nullptr}, "0.1.0"));
     CHECK(har["log"]["version"] == "1.2" && har["log"]["creator"]["name"] == "Summit" && har["log"]["entries"].size() == 2);
     const auto& first = har["log"]["entries"][0];
-    CHECK(first["startedDateTime"] == "2026-09-21T14:13:20.500Z" && first["time"] == 500 && first["timings"]["wait"] == 250
-        && first["timings"]["receive"] == 250);
+    CHECK(first["startedDateTime"] == "2026-09-21T14:13:20.500Z" && first["time"] == 500 && first["timings"]["wait"] == 149.5
+        && first["timings"]["receive"] == 250 && first["timings"]["dns"] == 5 && first["timings"]["connect"] == 44 && first["timings"]["ssl"] == 30);
     CHECK(first["request"]["httpVersion"] == "HTTP/2" && first["request"]["queryString"].size() == 2
         && first["request"]["queryString"][1]["value"] == "it's" && first["request"]["headers"].size() == 3);
     CHECK(first["response"]["status"] == 200 && first["response"]["content"]["text"] == "hello" && first["response"]["bodySize"] == 120

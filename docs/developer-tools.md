@@ -146,8 +146,11 @@ command.
 Selecting a request shows three tabs below the list:
 
 - **Headers**: address, method, status, type, remote address, protocol,
-  size, when and how long; then the response's headers and the request's
-  (as they went over the network, so with the cookies and the user agent).
+  size, when and how long; where the time went (DNS lookup, connecting,
+  TLS, waiting for the first byte, receiving; a reused connection has no
+  lookup or connecting) from the response's timing; then the response's
+  headers and the request's (as they went over the network, so with the
+  cookies and the user agent). HAR exports carry the same phases.
 - **Request**: the body that was sent, if any.
 - **Response**: what the server answered.
 - **Messages**: for a WebSocket (a row of its own from when it opens, type
