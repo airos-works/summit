@@ -1008,6 +1008,49 @@ static void TestStorage()
     CHECK(!session.FindArea(StorageKind::Session, "https://example.com"));
     session.Receive(Event("page-1", "DOMStorage.domStorageItemsCleared", {{"storageId", local}}));
     CHECK(session.FindArea(StorageKind::Local, "https://example.com")->items.empty());
+
+    // Cache Storage: the page's caches, read by a script whose promise is
+    // awaited; a frame's origin is not reachable.
+    session.TakeChanges();
+    session.LoadStorage(StorageKind::CacheStorage, "https://ads.example");
+    CHECK(Sent(session).empty() && !session.FindArea(StorageKind::CacheStorage, "https://ads.example")->error.empty());
+    session.LoadStorage(StorageKind::CacheStorage, "https://example.com");
+    commands = Sent(session);
+    CHECK(commands.size() == 1 && commands[0].method == "Runtime.evaluate"
+        && commands[0].parameters["expression"].get<std::string>().find("caches.keys()") != std::string::npos);
+    session.Receive(Reply("page-1", commands[0].id, {{"result", {{"type", "object"}, {"subtype", "promise"}, {"objectId", "{\"p\":1}"}}}}));
+    commands = Sent(session);
+    CHECK(commands.size() == 1 && commands[0].method == "Runtime.awaitPromise" && commands[0].parameters["promiseObjectId"] == "{\"p\":1}"
+        && commands[0].parameters["returnByValue"] == true);
+    CHECK(session.FindArea(StorageKind::CacheStorage, "https://example.com")->waiting);
+    session.Receive(Reply("page-1", commands[0].id, {{"result", {{"type", "object"}, {"value", json::array({
+        {{"cache", "v1"}, {"url", "https://example.com/app.js"}, {"method", "GET"}, {"status", 200}, {"statusText", "OK"}, {"type", "basic"},
+            {"headers", json::array({json::array({"content-length", "42"}), json::array({"content-type", "text/javascript"})})}},
+        {{"cache", "v1"}, {"url", "https://cdn.example/font.woff2"}, {"method", "GET"}, {"status", 0}, {"statusText", ""}, {"type", "opaque"},
+            {"headers", json::array()}}})}}}, {"wasThrown", false}}));
+    const auto* caches = session.FindArea(StorageKind::CacheStorage, "https://example.com");
+    CHECK(caches && caches->loaded && !caches->waiting && caches->items.size() == 2 && caches->items[0].key == "v1 › https://example.com/app.js"
+        && caches->items[0].value.rfind("200 OK · text/javascript · 42 B\n", 0) == 0 && caches->items[1].value == "(opaque)");
+    // Deleting a response: its request in its cache, then the area again.
+    session.RemoveStorageItem(StorageKind::CacheStorage, "https://example.com", "v1 › https://example.com/app.js");
+    commands = Sent(session);
+    CHECK(commands.size() == 1 && commands[0].parameters["expression"].get<std::string>().find("caches.open(\"v1\")") != std::string::npos
+        && commands[0].parameters["expression"].get<std::string>().find("\"https://example.com/app.js\"") != std::string::npos);
+    session.Receive(Reply("page-1", commands[0].id, {{"result", {{"type", "object"}, {"objectId", "{\"p\":2}"}}}}));
+    commands = Sent(session);
+    CHECK(commands.size() == 1 && commands[0].method == "Runtime.awaitPromise");
+    session.Receive(Reply("page-1", commands[0].id, {{"result", {{"type", "boolean"}, {"value", true}}}, {"wasThrown", false}}));
+    commands = Sent(session);
+    CHECK(commands.size() == 1 && commands[0].method == "Runtime.evaluate"
+        && commands[0].parameters["expression"].get<std::string>().find("caches.keys()") != std::string::npos);
+    // A page that is not a secure context throws.
+    session.Receive(Reply("page-1", commands[0].id, {{"result", {{"type", "object"}, {"objectId", "{\"p\":3}"}}}}));
+    commands = Sent(session);
+    session.Receive(Reply("page-1", commands[0].id, {{"result", {{"type", "object"}, {"subtype", "error"},
+        {"description", "Error: This page cannot use Cache Storage"}}}, {"wasThrown", true}}));
+    caches = session.FindArea(StorageKind::CacheStorage, "https://example.com");
+    CHECK(caches->loaded && caches->items.empty() && caches->error == "Error: This page cannot use Cache Storage");
+    session.TakeChanges();
     session.TakeChanges();
 
     // Changing an area asks the page, then reads it again.

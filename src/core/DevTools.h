@@ -191,10 +191,14 @@ struct LevelFilter {
 
 // The Storage panel: the local and session storage of the origins of the
 // page's frames, and the cookies the page's addresses are sent.
-// IndexedDB areas are object stores, named by IndexedDBStore().
-enum class StorageKind { Local, Session, Cookies, IndexedDB };
+// IndexedDB areas are object stores, named by IndexedDBStore(). The Cache
+// Storage area is the page's own origin's (its frames' are not reachable),
+// read with the page's caches object.
+enum class StorageKind { Local, Session, Cookies, IndexedDB, CacheStorage };
 struct StorageItem {
     std::string key, value;
+    // A cached response's cache and request.
+    std::string cache, url, method;
 };
 struct Cookie {
     std::string name, value, domain, path;
@@ -371,6 +375,8 @@ public:
     void LoadDatabases(const std::string& origin);
     const OriginDatabases* Databases(const std::string& origin) const;
     static constexpr int kIndexedDBPage = 200;
+    // The Cache Storage area's responses: the first of them.
+    static constexpr size_t kCacheEntries = 1000;
     // Sets a cookie as given (Page.setCookie), then reads the cookies again.
     // A partitioned one stays in its partition.
     void SetCookie(const Cookie& cookie);
@@ -384,11 +390,12 @@ private:
     friend struct ProtocolReader;
     struct Pending {
         enum Kind { Body, Evaluation, Storage, StorageEdit, Frames, Elements, Properties, OwnProperties, DatabaseNames, Database,
-            ScriptSource, SetBreakpoint, Other };
+            ScriptSource, SetBreakpoint, CachePromise, Other };
         Kind kind;
         uint64_t serial;
         // Storage and StorageEdit: the area; Frames: the target asked;
-        // Properties: the object.
+        // Properties: the object. CachePromise: a Cache Storage read
+        // (serial 0) or change (1) whose promise is to be awaited.
         StorageKind storage = StorageKind::Local;
         std::string origin;
     };
@@ -410,6 +417,8 @@ private:
     void ReleaseBodies();
     StorageArea* Area(StorageKind kind, const std::string& origin, bool create = false);
     void StorageEdit(StorageKind kind, const std::string& origin, const std::string& method, const std::string& parametersJSON);
+    // Runs a Cache Storage script in the page and awaits its promise.
+    void CacheScript(const std::string& origin, const std::string& expression, bool edit);
     void SetOrigins(std::vector<std::string> origins);
     void AddOrigin(const std::string& origin);
     std::string StorageID(StorageKind kind, const std::string& origin) const;

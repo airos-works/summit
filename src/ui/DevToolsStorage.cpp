@@ -48,7 +48,7 @@ std::string CookieID(const Cookie& cookie) { return cookie.ID(); }
 const char* KindName(StorageKind kind)
 {
     return kind == StorageKind::Local ? "local" : kind == StorageKind::Session ? "session"
-        : kind == StorageKind::IndexedDB ? "indexeddb" : "cookies";
+        : kind == StorageKind::IndexedDB ? "indexeddb" : kind == StorageKind::CacheStorage ? "cache" : "cookies";
 }
 
 BView* Placeholder(const char* text)
@@ -273,6 +273,15 @@ void StoragePanel::RebuildAreas()
             }
         }
     }
+    // Cache Storage: the page's own origin's (Session::LoadStorage).
+    auto* caches = new AreaItem("Cache Storage", StorageKind::CacheStorage, { }, false);
+    caches->SetExpanded(true);
+    fAreas->AddItem(caches);
+    if (!origins.empty()) {
+        auto* item = new AreaItem(origins.front().c_str(), StorageKind::CacheStorage, origins.front(), true, 1);
+        fAreas->AddItem(item);
+        if (fHasArea && fKind == StorageKind::CacheStorage && fOrigin == origins.front()) selected = item;
+    }
     auto* cookies = new AreaItem("Cookies", StorageKind::Cookies, { }, true);
     fAreas->AddItem(cookies);
     if (fHasArea && fKind == StorageKind::Cookies) selected = cookies;
@@ -433,10 +442,12 @@ void StoragePanel::Fill()
     // Cookies are edited by name and value too.
     fKey->SetLabel(cookies ? "Name:" : "Key:");
     fSave->SetLabel(cookies ? "Save Cookie" : "Save Item");
-    // An object store's entries are read, and cleared as a whole.
+    // An object store's entries are read, and cleared as a whole; cached
+    // responses are read and deleted.
+    const bool cached = fHasArea && fKind == StorageKind::CacheStorage;
     fDelete->SetEnabled(area && area->loaded && !indexed);
     fClear->SetEnabled(area && area->loaded);
-    fSave->SetEnabled(fHasArea && !indexed);
+    fSave->SetEnabled(fHasArea && !indexed && !cached);
     auto* list = cookies ? fCookies : fItems;
     // Rows are made again: an area holds at most a few thousand items.
     fItems->Clear();
@@ -490,7 +501,7 @@ void StoragePanel::Fill()
     else if (!area || (area->waiting && !area->loaded)) summary = "Reading…";
     else {
         const char* noun = cookies ? (total == 1 ? " cookie" : " cookies") : indexed ? (total == 1 ? " entry" : " entries")
-            : (total == 1 ? " item" : " items");
+            : cached ? (total == 1 ? " response" : " responses") : (total == 1 ? " item" : " items");
         summary = std::to_string(total) + noun + " · " + FormatBytes(area->Bytes());
         if (shown != total) summary += " · " + std::to_string(shown) + " shown";
         if (!area->error.empty()) summary += " · " + area->error;
@@ -504,6 +515,7 @@ void StoragePanel::ShowItem()
     const auto* area = Area();
     if (!area || fSelected.empty()) {
         fValue->ShowNote(fHasArea ? (fKind == StorageKind::Cookies ? "Select a cookie to see or change its value, or type a name and a value below to add one."
+            : fKind == StorageKind::CacheStorage ? "Select a response to see its status and headers."
             : "Select an item to see its value, or type a key and a value below to add one.") : "");
         return;
     }
@@ -542,12 +554,17 @@ bool StoragePanel::Command(const std::string& action, const std::string& argumen
             std::replace(area.begin(), area.end(), '|', '\n');
             SelectArea(StorageKind::IndexedDB, area);
         }
+        else if (kind == "cache") {
+            const auto& origins = fSession.StorageOrigins();
+            if (origins.empty()) error = "The page keeps no storage";
+            else SelectArea(StorageKind::CacheStorage, origin.empty() ? origins.front() : origin);
+        }
         else if (kind == "local" || kind == "session") {
             const auto& origins = fSession.StorageOrigins();
             const auto chosen = origin.empty() && !origins.empty() ? origins.front() : origin;
             if (std::find(origins.begin(), origins.end(), chosen) == origins.end()) error = "The page has no such origin";
             else SelectArea(kind == "local" ? StorageKind::Local : StorageKind::Session, chosen);
-        } else error = "Choose local, session, indexeddb or cookies";
+        } else error = "Choose local, session, indexeddb, cache or cookies";
         RebuildAreas();
     } else if (action == "storage-refresh") {
         Load(true);

@@ -649,6 +649,21 @@ struct ProtocolReader {
                 session.ReleaseBodies();
             }
             session.BodyChanged(*request);
+        } else if (pending.kind == Session::Pending::CachePromise) {
+            const auto objectId = Text(Member(Member(result, "result"), "objectId"));
+            if (error.empty() && !Flag(Member(result, "wasThrown")) && !objectId.empty()) {
+                session.SendToTarget(session.fPageTarget, "Runtime.awaitPromise", "{\"promiseObjectId\":" + Quoted(objectId)
+                    + ",\"returnByValue\":true}", pending.serial ? Session::Pending::StorageEdit : Session::Pending::Storage);
+                auto& awaited = session.fPending.rbegin()->second;
+                awaited.storage = StorageKind::CacheStorage;
+                awaited.origin = pending.origin;
+                return;
+            }
+            auto* area = session.Area(StorageKind::CacheStorage, pending.origin, true);
+            area->waiting = false;
+            area->loaded = true;
+            area->error = !error.empty() ? error : Text(Member(Member(result, "result"), "description"));
+            session.fChanges.storage = true;
         } else if (pending.kind == Session::Pending::Storage) {
             auto* area = session.Area(pending.storage, pending.origin);
             if (!area) return;
@@ -657,7 +672,42 @@ struct ProtocolReader {
             area->error = error;
             area->items.clear();
             area->cookies.clear();
-            if (pending.storage == StorageKind::Cookies) {
+            if (pending.storage == StorageKind::CacheStorage) {
+                // Runtime.awaitPromise: the script's value, or what it threw.
+                const auto& value = Member(result, "result");
+                if (Flag(Member(result, "wasThrown"))) area->error = Text(Member(value, "description"));
+                else if (const auto& entries = Member(value, "value"); entries.is_array()) {
+                    for (const auto& entry : entries) {
+                        StorageItem item;
+                        item.cache = Text(Member(entry, "cache"));
+                        item.url = Text(Member(entry, "url"));
+                        item.method = Text(Member(entry, "method"));
+                        item.key = item.cache + " › " + (item.method == "GET" ? std::string() : item.method + " ") + item.url;
+                        const auto status = static_cast<int>(Number(Member(entry, "status")));
+                        const auto type = Text(Member(entry, "type"));
+                        std::string headers, contentType, length;
+                        if (const auto& list = Member(entry, "headers"); list.is_array()) {
+                            for (const auto& header : list) {
+                                if (!header.is_array() || header.size() < 2) continue;
+                                const auto name = Text(header[0]), text = Text(header[1]);
+                                if (name == "content-type") contentType = text;
+                                if (name == "content-length") length = text;
+                                headers += "\n" + name + ": " + text;
+                            }
+                        }
+                        // An opaque response (another origin's, without CORS)
+                        // shows nothing of itself.
+                        item.value = type == "opaque" ? std::string("(opaque)") : std::to_string(status) + " "
+                            + Text(Member(entry, "statusText"));
+                        if (!contentType.empty()) item.value += " · " + contentType;
+                        if (!length.empty()) item.value += " · " + length + " B";
+                        item.value += headers;
+                        area->items.push_back(std::move(item));
+                    }
+                    if (area->items.size() >= Session::kCacheEntries)
+                        area->error = "The first " + std::to_string(Session::kCacheEntries) + " responses are shown.";
+                }
+            } else if (pending.storage == StorageKind::Cookies) {
                 if (const auto& cookies = Member(result, "cookies"); cookies.is_array()) {
                     for (const auto& item : cookies) {
                         Cookie cookie;
@@ -1487,6 +1537,25 @@ void Session::LoadStorage(StorageKind kind, const std::string& origin)
         return;
     }
     area->waiting = true;
+    if (kind == StorageKind::CacheStorage) {
+        area->waiting = false;
+        if (fOrigins.empty() || origin != fOrigins.front()) {
+            area->loaded = true;
+            area->error = "Only the page's own origin's caches can be read.";
+            fChanges.storage = true;
+            return;
+        }
+        // The first kCacheEntries responses, with their requests' caches.
+        CacheScript(origin, "(async () => { if (!self.caches) throw new Error('This page cannot use Cache Storage (it is not a "
+            "secure context).'); const out = []; for (const name of await caches.keys()) { const cache = await caches.open(name); "
+            "for (const request of (await cache.keys()).slice(0, " + std::to_string(kCacheEntries) + " - out.length)) { "
+            "const response = await cache.match(request); out.push({cache: name, url: request.url, method: request.method, "
+            "status: response ? response.status : 0, statusText: response ? response.statusText : '', type: response ? "
+            "response.type : '', headers: response ? [...response.headers] : []}); } if (out.length >= " + std::to_string(kCacheEntries)
+            + ") break; } return out; })()", false);
+        area->waiting = true;
+        return;
+    }
     if (kind == StorageKind::IndexedDB) {
         // "origin\ndatabase\nstore".
         const auto first = origin.find('\n'), second = first == std::string::npos ? first : origin.find('\n', first + 1);
@@ -1516,9 +1585,19 @@ void Session::StorageEdit(StorageKind kind, const std::string& origin, const std
     pending.origin = kind == StorageKind::Cookies ? std::string() : origin;
 }
 
+void Session::CacheScript(const std::string& origin, const std::string& expression, bool edit)
+{
+    if (fPageTarget.empty()) return;
+    SendToTarget(fPageTarget, "Runtime.evaluate", json{{"expression", expression}, {"objectGroup", "summit-storage"},
+        {"doNotPauseOnExceptionsAndMuteConsole", true}}.dump(), Pending::CachePromise, edit ? 1 : 0);
+    auto& pending = fPending.rbegin()->second;
+    pending.storage = StorageKind::CacheStorage;
+    pending.origin = origin;
+}
+
 void Session::SetStorageItem(StorageKind kind, const std::string& origin, const std::string& key, const std::string& value)
 {
-    if (kind == StorageKind::Cookies) return;
+    if (kind == StorageKind::Cookies || kind == StorageKind::CacheStorage || kind == StorageKind::IndexedDB) return;
     StorageEdit(kind, origin, "DOMStorage.setDOMStorageItem",
         "{\"storageId\":" + StorageID(kind, origin) + ",\"key\":" + Quoted(key) + ",\"value\":" + Quoted(value) + "}");
 }
@@ -1526,12 +1605,27 @@ void Session::SetStorageItem(StorageKind kind, const std::string& origin, const 
 void Session::RemoveStorageItem(StorageKind kind, const std::string& origin, const std::string& key)
 {
     if (kind == StorageKind::Cookies) return;
+    if (kind == StorageKind::CacheStorage) {
+        const auto* area = FindArea(kind, origin);
+        if (!area) return;
+        for (const auto& item : area->items) {
+            if (item.key != key) continue;
+            CacheScript(origin, "caches.open(" + Quoted(item.cache) + ").then(cache => cache.delete(new Request(" + Quoted(item.url)
+                + ", {method: " + Quoted(item.method) + "})))", true);
+            return;
+        }
+        return;
+    }
     StorageEdit(kind, origin, "DOMStorage.removeDOMStorageItem",
         "{\"storageId\":" + StorageID(kind, origin) + ",\"key\":" + Quoted(key) + "}");
 }
 
 void Session::ClearStorage(StorageKind kind, const std::string& origin)
 {
+    if (kind == StorageKind::CacheStorage) {
+        CacheScript(origin, "caches.keys().then(names => Promise.all(names.map(name => caches.delete(name))))", true);
+        return;
+    }
     if (kind == StorageKind::IndexedDB) {
         const auto first = origin.find('\n'), second = first == std::string::npos ? first : origin.find('\n', first + 1);
         if (second == std::string::npos) return;
