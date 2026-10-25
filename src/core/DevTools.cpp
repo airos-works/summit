@@ -428,6 +428,59 @@ struct ProtocolReader {
         entry.objects.push_back({Shortened(Render(object, false), 120), Text(Member(object, "objectId"))});
     }
 
+    // Network.webSocket*: the socket is a request of its own, its messages
+    // kept with it.
+    static void WebSocket(Session& session, const std::string& target, const std::string& method, const json& parameters)
+    {
+        const auto id = Text(Member(parameters, "requestId"));
+        if (id.empty()) return;
+        auto* request = session.Find(target, id);
+        if (method == "Network.webSocketCreated") {
+            if (!request) request = &session.Add(target, id);
+            request->webSocket = true;
+            request->type = "WebSocket";
+            request->method = "GET";
+            request->url = Text(Member(parameters, "url"));
+            if (const auto& initiator = Member(parameters, "initiator"); initiator.is_object()) request->initiator = Initiator(initiator);
+            session.Changed(*request);
+            return;
+        }
+        if (!request || !request->webSocket) return;
+        const double time = Number(Member(parameters, "timestamp"));
+        if (method == "Network.webSocketWillSendHandshakeRequest") {
+            request->requestHeaders = Headers(Member(Member(parameters, "request"), "headers"));
+            request->started = time;
+            request->wallTime = Number(Member(parameters, "walltime"));
+        } else if (method == "Network.webSocketHandshakeResponseReceived") {
+            const auto& response = Member(parameters, "response");
+            request->hasResponse = true;
+            request->status = static_cast<int>(Number(Member(response, "status")));
+            request->statusText = Text(Member(response, "statusText"));
+            request->responseHeaders = Headers(Member(response, "headers"));
+            request->responded = time;
+        } else if (method == "Network.webSocketFrameReceived" || method == "Network.webSocketFrameSent" || method == "Network.webSocketFrameError") {
+            SocketFrame frame;
+            frame.sent = method == "Network.webSocketFrameSent";
+            frame.error = method == "Network.webSocketFrameError";
+            frame.time = time;
+            if (frame.error) frame.data = Text(Member(parameters, "errorMessage"));
+            else {
+                const auto& payload = Member(parameters, "response");
+                frame.opcode = static_cast<int>(Number(Member(payload, "opcode"), 1));
+                frame.data = Shortened(Text(Member(payload, "payloadData")), 64 * 1024);
+                frame.length = Count(Member(payload, "payloadLength"));
+                request->size += frame.length;
+            }
+            if (request->frames.size() >= Request::kMaximumFrames) request->frames.pop_front();
+            request->frames.push_back(std::move(frame));
+            session.fChanges.bodies.push_back(request->serial);
+        } else if (method == "Network.webSocketClosed") {
+            request->finished = true;
+            request->ended = time;
+        }
+        session.Changed(*request);
+    }
+
     static void MessageAdded(Session& session, const json& message)
     {
         const auto type = Text(Member(message, "type"));
@@ -830,6 +883,7 @@ void Session::FromTarget(const std::string& target, std::string_view text)
     else if (method == "Network.loadingFinished") ProtocolReader::LoadingFinished(*this, target, parameters);
     else if (method == "Network.loadingFailed") ProtocolReader::LoadingFailed(*this, target, parameters);
     else if (method == "Network.requestServedFromMemoryCache") ProtocolReader::ServedFromMemoryCache(*this, target, parameters);
+    else if (method.rfind("Network.webSocket", 0) == 0) ProtocolReader::WebSocket(*this, target, method, parameters);
     else if (method == "Console.messageAdded") ProtocolReader::MessageAdded(*this, Member(parameters, "message"));
     else if (method == "Console.messageRepeatCountUpdated") {
         for (auto entry = fEntries.rbegin(); entry != fEntries.rend(); ++entry) {
@@ -1212,6 +1266,29 @@ void Session::AddOrigin(const std::string& origin)
     if (!KeepsStorage(origin) || std::find(fOrigins.begin(), fOrigins.end(), origin) != fOrigins.end()) return;
     fOrigins.push_back(origin);
     fChanges.origins = true;
+}
+
+StyledText DescribeFrames(const Request& request)
+{
+    StyledText text;
+    if (request.frames.empty()) {
+        text.Add(request.finished ? "The socket closed without messages." : "No messages yet.", TextStyle::Muted);
+        return text;
+    }
+    for (const auto& frame : request.frames) {
+        if (!text.text.empty()) text.Add("\n");
+        char when[32];
+        std::snprintf(when, sizeof when, "+%.3f s", request.started > 0 ? std::max(0.0, frame.time - request.started) : 0.0);
+        text.Add(frame.error ? "✕ " : frame.sent ? "↑ " : "↓ ", frame.error ? TextStyle::Error : frame.sent ? TextStyle::Good : TextStyle::Name);
+        text.Add(std::string(when) + "  ", TextStyle::Muted);
+        if (frame.error) text.Add(frame.data, TextStyle::Error);
+        else if (frame.opcode == 1) text.Add(frame.data);
+        else {
+            const char* kind = frame.opcode == 2 ? "binary" : frame.opcode == 8 ? "close" : frame.opcode == 9 ? "ping" : frame.opcode == 10 ? "pong" : "frame";
+            text.Add("(" + std::string(kind) + ", " + std::to_string(frame.length) + (frame.length == 1 ? " byte)" : " bytes)"), TextStyle::Muted);
+        }
+    }
+    return text;
 }
 
 StyledText DescribeHeaders(const Request& request)

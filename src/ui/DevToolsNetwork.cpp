@@ -399,6 +399,10 @@ NetworkPanel::NetworkPanel(Session& session, DevToolsHost& host)
     tab(headers, "Headers");
     tab(fRequestBody, "Request");
     tab(fResponseBody, "Response");
+    fMessages = new SourceView("messages", false, false);
+    auto* messages = new BGroupView("Messages", B_VERTICAL, 0);
+    messages->AddChild(fMessages);
+    tab(messages, "Messages");
     auto* placeholder = new BStringView("placeholder", "Select a request to see its headers and its response.");
     placeholder->SetAlignment(B_ALIGN_CENTER);
     placeholder->SetHighUIColor(B_PANEL_TEXT_COLOR, B_DARKEN_2_TINT);
@@ -569,8 +573,9 @@ bool NetworkPanel::Command(const std::string& action, const std::string& argumen
         } else error = "No request shown has that in its address";
         Select(chosen);
     } else if (action == "detail") {
-        const int32 tab = argument == "headers" ? 0 : argument == "request" ? 1 : argument == "response" ? 2 : -1;
-        if (tab < 0) error = "The details are headers, request and response";
+        const int32 tab = argument == "headers" ? 0 : argument == "request" ? 1 : argument == "response" ? 2
+            : argument == "messages" ? 3 : -1;
+        if (tab < 0) error = "The details are headers, request, response and messages";
         else fDetails->Select(tab);
     } else if (action == "format") fResponseBody->SetFormatted(on);
     else if (action == "wrap") fResponseBody->SetWrapped(on);
@@ -590,7 +595,7 @@ std::string NetworkPanel::StateJSON()
     for (int32 i = 0; i < fList->CountRows(); ++i) shown.push_back(static_cast<Row*>(fList->RowAt(i))->serial);
     json state = {{"preserve", fPreserve->Value() == B_CONTROL_ON}, {"filter", fFilter->Text()}, {"types", fCategory},
         {"shown", shown}, {"selected", fSelected}, {"summary", fSummary->Text()}, {"detail", fDetails->Selection()},
-        {"detailShown", fDetailCards->VisibleIndex() == 1}, {"headers", fHeaders->Text()},
+        {"detailShown", fDetailCards->VisibleIndex() == 1}, {"headers", fHeaders->Text()}, {"messages", fMessages->Text()},
         {"curl", [&] { const auto* request = fSession.FindRequest(fSelected); return request ? CurlCommand(*request) : std::string(); }()},
         {"request", json::parse(fRequestBody->StateJSON())}, {"response", json::parse(fResponseBody->StateJSON())}};
     return state.dump(-1, ' ', false, json::error_handler_t::replace);
@@ -678,7 +683,10 @@ void NetworkPanel::Apply(const Changes& changes)
         ShowSummary();
     }
     if (std::find(changes.bodies.begin(), changes.bodies.end(), fSelected) != changes.bodies.end()) {
-        if (const auto* request = fSession.FindRequest(fSelected)) ShowBody(*request);
+        if (const auto* request = fSession.FindRequest(fSelected)) {
+            ShowBody(*request);
+            ShowFrames(*request);
+        }
     }
 }
 
@@ -695,11 +703,29 @@ void NetworkPanel::ShowSelection()
     if (request->hasRequestBody) fRequestBody->ShowBody(request->requestBody, HeaderValue(request->requestHeaders, "content-type"));
     else fRequestBody->ShowNote("This request has no body.");
     ShowBody(*request);
+    ShowFrames(*request);
     fDetailCards->SetVisibleItem(static_cast<int32>(1));
+}
+
+void NetworkPanel::ShowFrames(const Request& request)
+{
+    if (!request.webSocket) {
+        if (!fMessages->Text().empty()) fMessages->SetStyled(StyledText { });
+        return;
+    }
+    // The latest message in view, as it arrives.
+    const auto described = DescribeFrames(request);
+    if (described.text == fMessages->Text()) return;
+    fMessages->SetStyled(described);
+    fMessages->SendMessage(SCI_SCROLLTOEND);
 }
 
 void NetworkPanel::ShowBody(const Request& request)
 {
+    if (request.webSocket) {
+        fResponseBody->ShowNote("A WebSocket: its messages are in Messages.");
+        return;
+    }
     switch (request.bodyState) {
         case BodyState::Loaded: fResponseBody->ShowBody(request.body, request.mimeType); break;
         case BodyState::Waiting: fResponseBody->ShowNote("Loading…"); break;

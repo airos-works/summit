@@ -642,6 +642,32 @@ static void TestObjectTree()
     cookie.name.clear();
     session.SetCookie(cookie);
     CHECK(!Find(Sent(session), "Page.setCookie"));
+
+    // A WebSocket and its messages.
+    session.TakeChanges();
+    session.Receive(Event("page-1", "Network.webSocketCreated", {{"requestId", "ws1"}, {"url", "wss://example.com/live"}}));
+    session.Receive(Event("page-1", "Network.webSocketWillSendHandshakeRequest", {{"requestId", "ws1"}, {"timestamp", 100.0},
+        {"walltime", 1790000000.0}, {"request", {{"headers", {{"Upgrade", "websocket"}}}}}}));
+    session.Receive(Event("page-1", "Network.webSocketHandshakeResponseReceived", {{"requestId", "ws1"}, {"timestamp", 100.1},
+        {"response", {{"status", 101}, {"statusText", "Switching Protocols"}, {"headers", {{"Upgrade", "websocket"}}}}}}));
+    session.Receive(Event("page-1", "Network.webSocketFrameSent", {{"requestId", "ws1"}, {"timestamp", 100.5},
+        {"response", {{"opcode", 1}, {"mask", true}, {"payloadData", "hello"}, {"payloadLength", 5}}}}));
+    session.Receive(Event("page-1", "Network.webSocketFrameReceived", {{"requestId", "ws1"}, {"timestamp", 101.25},
+        {"response", {{"opcode", 2}, {"mask", false}, {"payloadData", "AAEC"}, {"payloadLength", 3}}}}));
+    session.Receive(Event("page-1", "Network.webSocketFrameError", {{"requestId", "ws1"}, {"timestamp", 102.0}, {"errorMessage", "bad frame"}}));
+    session.Receive(Event("page-1", "Network.webSocketClosed", {{"requestId", "ws1"}, {"timestamp", 103.0}}));
+    {
+        const auto changes = session.TakeChanges();
+        CHECK(!changes.requests.empty() && changes.bodies.size() == 3);
+        const auto& socket = session.Requests().back();
+        CHECK(socket.webSocket && socket.type == "WebSocket" && socket.url == "wss://example.com/live" && socket.status == 101
+            && socket.finished && socket.frames.size() == 3 && socket.size == 8 && socket.requestHeaders.size() == 1);
+        CHECK_TEXT(DescribeFrames(socket).text, "↑ +0.500 s  hello\n↓ +1.250 s  (binary, 3 bytes)\n✕ +2.000 s  bad frame");
+    }
+    // Messages of a socket the tools never saw open are not news.
+    session.Receive(Event("page-1", "Network.webSocketFrameReceived", {{"requestId", "ws9"}, {"timestamp", 1.0},
+        {"response", {{"opcode", 1}, {"payloadData", "x"}, {"payloadLength", 1}}}}));
+    CHECK(session.TakeChanges().bodies.empty());
 }
 
 // Copy as cURL and HAR export.

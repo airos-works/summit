@@ -144,6 +144,11 @@ Selecting a request shows three tabs below the list:
   (as they went over the network, so with the cookies and the user agent).
 - **Request**: the body that was sent, if any.
 - **Response**: what the server answered.
+- **Messages**: for a WebSocket (a row of its own from when it opens, type
+  WebSocket, status 101), each message as it comes: ↑ sent or ↓ received,
+  the time since the socket opened, the text (binary, close, ping and pong
+  frames by their size), and errors on the socket; the latest 2000 are kept.
+  Test action: `detail messages`; the state's `network.messages` is the text.
 
 Bodies are shown in the fixed font and coloured by what they are. **JSON,
 XML and HTML are laid out for reading** while *Format* is ticked; untick it to
