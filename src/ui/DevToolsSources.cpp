@@ -21,10 +21,48 @@ constexpr uint32 kScriptSelected = 'dsss', kFrameSelected = 'dsfs', kPauseResume
 constexpr int kBreakpointMargin = 2;
 enum { kBreakpointMark = 1, kPausedMark = 2, kPausedLine = 3 };
 
+// A place in a script's document as a place in its own text, and back.
+SourcePosition Relative(const Script& script, int line, int column)
+{
+    const int relative = line - script.startLine;
+    return {relative, relative == 0 ? std::max(column - script.startColumn, 0) : column};
+}
+SourcePosition Absolute(const Script& script, SourcePosition place)
+{
+    return {script.startLine + place.line, place.line == 0 ? script.startColumn + place.column : place.column};
+}
+
+// The last part of an original source's address, for labels.
+std::string ShortName(const std::string& address)
+{
+    auto path = address.substr(0, address.find_first_of("?#"));
+    const auto scheme = path.find("://");
+    if (scheme != std::string::npos) {
+        const auto slash = path.find('/', scheme + 3);
+        path = slash == std::string::npos ? std::string() : path.substr(slash + 1);
+    }
+    while (path.rfind("./", 0) == 0) path.erase(0, 2);
+    return path.empty() ? address : path;
+}
+
+// An original source of a mapped script is listed as "SCRIPT#INDEX".
+bool OriginalEntry(const std::string& entry, std::string& scriptId, int& index)
+{
+    const auto hash = entry.find('#');
+    if (hash == std::string::npos) return false;
+    scriptId = entry.substr(0, hash);
+    index = std::atoi(entry.c_str() + hash + 1);
+    return true;
+}
+
 std::string FrameLabel(const Session& session, const DebugFrame& frame)
 {
     const auto* script = session.FindScript(frame.scriptId);
-    const auto where = script ? script->Place(frame.line + 1) : std::string("?");
+    auto where = script ? script->Place(frame.line + 1) : std::string("?");
+    // Where it is in the original source, when the script has a map.
+    if (script && script->map)
+        if (const auto* original = script->map->Original(Relative(*script, frame.line, frame.column)))
+            where = ShortName(script->map->sources[original->source]) + ":" + std::to_string(original->line + 1);
     return (frame.function.empty() ? std::string("(anonymous)") : frame.function) + "  " + where;
 }
 }
@@ -156,7 +194,12 @@ void SourcesPanel::SetShown(bool shown)
     fHost.Sync();
 }
 
-const Script* SourcesPanel::Selected() const { return fSession.FindScript(fSelectedScript); }
+const Script* SourcesPanel::Selected() const
+{
+    std::string scriptId;
+    int index = 0;
+    return fSession.FindScript(OriginalEntry(fSelectedScript, scriptId, index) ? scriptId : fSelectedScript);
+}
 
 void SourcesPanel::MessageReceived(BMessage* message)
 {
@@ -191,8 +234,11 @@ void SourcesPanel::MessageReceived(BMessage* message)
 
 void SourcesPanel::Apply(const Changes& changes)
 {
-    if (changes.scripts) RebuildScripts();
-    if (std::find(changes.sources.begin(), changes.sources.end(), fSelectedScript) != changes.sources.end()) ShowSource();
+    // A source map read adds its sources to the list.
+    if (changes.scripts || !changes.sources.empty()) RebuildScripts();
+    if (const auto* script = Selected();
+        script && std::find(changes.sources.begin(), changes.sources.end(), script->id) != changes.sources.end())
+        ShowSource();
     if (changes.debugger) ShowPause();
     if (!changes.properties.empty()) fScopes->Answered(changes.properties);
 }
@@ -208,15 +254,26 @@ void SourcesPanel::RebuildScripts()
         shown.push_back(&script);
     }
     std::stable_sort(shown.begin(), shown.end(), [](const Script* a, const Script* b) { return a->Label() < b->Label(); });
-    std::vector<std::string> ids;
-    for (const auto* script : shown) ids.push_back(script->id);
+    // Each script, then the original sources its map names.
+    std::vector<std::string> ids, labels;
+    for (const auto* script : shown) {
+        ids.push_back(script->id);
+        labels.push_back(script->Label());
+        if (fShownOnce && !script->sourceMapURL.empty()) fSession.LoadSourceMap(script->id);
+        if (!script->map) continue;
+        for (size_t i = 0; i < script->map->sources.size(); ++i) {
+            ids.push_back(script->id + "#" + std::to_string(i));
+            labels.push_back("    ↳ " + ShortName(script->map->sources[i]));
+        }
+    }
+    fHost.Sync();
     if (ids == fScriptIDs) return;
     fScriptIDs = std::move(ids);
     for (int32 i = fScripts->CountItems() - 1; i >= 0; --i) delete fScripts->RemoveItem(i);
     int32 selected = -1;
-    for (size_t i = 0; i < shown.size(); ++i) {
-        fScripts->AddItem(new BStringItem(shown[i]->Label().c_str()));
-        if (shown[i]->id == fSelectedScript) selected = static_cast<int32>(i);
+    for (size_t i = 0; i < fScriptIDs.size(); ++i) {
+        fScripts->AddItem(new BStringItem(labels[i].c_str()));
+        if (fScriptIDs[i] == fSelectedScript) selected = static_cast<int32>(i);
     }
     if (selected >= 0) fScripts->Select(selected);
     else if (!Selected()) {
@@ -229,7 +286,9 @@ void SourcesPanel::RebuildScripts()
 void SourcesPanel::SelectScript(const std::string& id)
 {
     fSelectedScript = id;
-    fSession.LoadScriptSource(id);
+    std::string scriptId;
+    int index = 0;
+    fSession.LoadScriptSource(OriginalEntry(id, scriptId, index) ? scriptId : id);
     fHost.Sync();
     ShowSource();
 }
@@ -238,6 +297,16 @@ void SourcesPanel::ShowSource()
 {
     const auto* script = Selected();
     if (!script) return;
+    // An original source: the map's text of it.
+    if (const int original = OriginalIndex(); original >= 0) {
+        fPrettyPrint->SetEnabled(false);
+        if (!script->map || original >= static_cast<int>(script->map->sources.size())) return;
+        fCode->SetSource(script->map->hasContent[original] ? script->map->contents[original]
+            : "The source map has no text of " + script->map->sources[original] + ".", script->map->hasContent[original] ? "cpp" : "null");
+        ShowMarkers();
+        return;
+    }
+    fPrettyPrint->SetEnabled(true);
     if (!script->sourceLoaded) {
         fCode->SetSource("Loading…", "null");
         return;
@@ -262,7 +331,14 @@ void SourcesPanel::ShowSource()
     ShowMarkers();
 }
 
-bool SourcesPanel::Pretty() const { return fPrettyPrint->Value() == B_CONTROL_ON; }
+bool SourcesPanel::Pretty() const { return fPrettyPrint->Value() == B_CONTROL_ON && OriginalIndex() < 0; }
+
+int SourcesPanel::OriginalIndex() const
+{
+    std::string scriptId;
+    int index = 0;
+    return OriginalEntry(fSelectedScript, scriptId, index) ? index : -1;
+}
 
 const PrettyScript& SourcesPanel::Formatted(const Script& script)
 {
@@ -275,28 +351,36 @@ const PrettyScript& SourcesPanel::Formatted(const Script& script)
     return found->second;
 }
 
-// A place in the document (a frame's or a breakpoint's) as a line shown.
+// A place in the document (a frame's or a breakpoint's) as a line shown;
+// -1 when it is not in the original source shown.
 int SourcesPanel::ShownLine(const Script& script, int line, int column)
 {
-    const int relative = line - script.startLine;
-    if (!Pretty()) return relative;
-    const int relativeColumn = relative == 0 ? std::max(column - script.startColumn, 0) : column;
-    return Formatted(script).LineOf({relative, relativeColumn});
+    const auto relative = Relative(script, line, column);
+    if (const int original = OriginalIndex(); original >= 0) {
+        const auto* mapping = script.map ? script.map->Original(relative) : nullptr;
+        return mapping && mapping->source == original ? mapping->line : -1;
+    }
+    if (!Pretty()) return relative.line;
+    return Formatted(script).LineOf(relative);
 }
 
 SourcePosition SourcesPanel::DocumentPlace(const Script& script, int shownLine)
 {
+    if (const int original = OriginalIndex(); original >= 0) {
+        if (!script.map) return {-1, 0};
+        const auto generated = script.map->Generated(original, shownLine);
+        return generated.line < 0 ? generated : Absolute(script, generated);
+    }
     if (!Pretty()) return {script.startLine + shownLine, 0};
     const auto& starts = Formatted(script).starts;
     if (shownLine < 0 || shownLine >= static_cast<int>(starts.size())) return {-1, 0};
-    const auto start = starts[shownLine];
-    return {script.startLine + start.line, start.line == 0 ? script.startColumn + start.column : start.column};
+    return Absolute(script, starts[shownLine]);
 }
 
 void SourcesPanel::ShowMarkers()
 {
     const auto* script = Selected();
-    if (!script || !script->sourceLoaded) return;
+    if (!script || (!script->sourceLoaded && OriginalIndex() < 0)) return;
     // Lines of an inline script count from its document's start.
     std::vector<int> lines;
     for (const auto& breakpoint : fSession.Breakpoints())
@@ -305,13 +389,14 @@ void SourcesPanel::ShowMarkers()
     const auto& state = fSession.Debugger();
     if (state.paused && fFrame >= 0 && fFrame < static_cast<int>(state.frames.size()) && state.frames[fFrame].scriptId == script->id)
         paused = ShownLine(*script, state.frames[fFrame].line, state.frames[fFrame].column);
+    lines.erase(std::remove(lines.begin(), lines.end(), -1), lines.end());
     fCode->Mark(lines, paused);
 }
 
 void SourcesPanel::ToggleBreakpoint(int line)
 {
     const auto* script = Selected();
-    if (!script || script->url.empty() || !script->sourceLoaded) return;
+    if (!script || script->url.empty() || (!script->sourceLoaded && OriginalIndex() < 0)) return;
     // One shown on this line is cleared; else one is set where it starts.
     for (const auto& breakpoint : fSession.Breakpoints()) {
         if (breakpoint.url != script->url || ShownLine(*script, breakpoint.line, breakpoint.column) != line) continue;
@@ -356,10 +441,16 @@ void SourcesPanel::SelectFrame(int index)
     fSession.SelectDebugFrame(index);
     if (fFrames->CurrentSelection() != index) fFrames->Select(index);
     const auto& frame = state.frames[index];
-    // Its script is shown, at the paused line.
-    if (frame.scriptId != fSelectedScript && fSession.FindScript(frame.scriptId)) {
-        fSelectedScript = frame.scriptId;
-        if (const auto found = std::find(fScriptIDs.begin(), fScriptIDs.end(), frame.scriptId); found != fScriptIDs.end())
+    // Its script is shown, at the paused line: its original source when its
+    // map has the place and the text.
+    std::string entry = frame.scriptId;
+    if (const auto* script = fSession.FindScript(frame.scriptId); script && script->map)
+        if (const auto* original = script->map->Original(Relative(*script, frame.line, frame.column));
+            original && script->map->hasContent[original->source])
+            entry = frame.scriptId + "#" + std::to_string(original->source);
+    if (entry != fSelectedScript && fSession.FindScript(frame.scriptId)) {
+        fSelectedScript = entry;
+        if (const auto found = std::find(fScriptIDs.begin(), fScriptIDs.end(), entry); found != fScriptIDs.end())
             fScripts->Select(static_cast<int32>(found - fScriptIDs.begin()));
         fSession.LoadScriptSource(frame.scriptId);
         fHost.Sync();
@@ -386,6 +477,19 @@ bool SourcesPanel::Command(const std::string& action, const std::string& argumen
     if (verb == "open") {
         // The first script whose name or address contains the argument.
         for (const auto& id : fScriptIDs) {
+            std::string scriptId;
+            int index = 0;
+            if (OriginalEntry(id, scriptId, index)) {
+                // An original source, by its address.
+                const auto* script = fSession.FindScript(scriptId);
+                if (script && script->map && index < static_cast<int>(script->map->sources.size())
+                    && script->map->sources[index].find(argument) != std::string::npos) {
+                    fScripts->Select(static_cast<int32>(std::find(fScriptIDs.begin(), fScriptIDs.end(), id) - fScriptIDs.begin()));
+                    SelectScript(id);
+                    return true;
+                }
+                continue;
+            }
             const auto* script = fSession.FindScript(id);
             if (script && (script->Label().find(argument) != std::string::npos || script->url.find(argument) != std::string::npos)) {
                 fScripts->Select(static_cast<int32>(std::find(fScriptIDs.begin(), fScriptIDs.end(), id) - fScriptIDs.begin()));
@@ -420,14 +524,16 @@ std::string SourcesPanel::StateJSON()
     using nlohmann::json;
     const auto& state = fSession.Debugger();
     json scripts = json::array(), breakpoints = json::array(), frames = json::array();
-    for (const auto& id : fScriptIDs)
-        if (const auto* script = fSession.FindScript(id)) scripts.push_back(script->Label());
+    for (int32 i = 0; i < fScripts->CountItems(); ++i) scripts.push_back(static_cast<BStringItem*>(fScripts->ItemAt(i))->Text());
     for (const auto& breakpoint : fSession.Breakpoints())
         breakpoints.push_back(breakpoint.url + ":" + std::to_string(breakpoint.line + 1)
             + (breakpoint.column ? ":" + std::to_string(breakpoint.column + 1) : std::string()) + (breakpoint.resolved ? "" : " (unresolved)"));
     for (const auto& frame : state.frames) frames.push_back(FrameLabel(fSession, frame));
     const auto* script = Selected();
+    const int original = OriginalIndex();
     json result = {{"enabled", state.enabled}, {"scripts", scripts}, {"selected", script ? script->Label() : std::string()},
+        {"original", original >= 0 && script && script->map && original < static_cast<int>(script->map->sources.size())
+            ? script->map->sources[original] : std::string()}, {"mapError", script ? script->mapError : std::string()},
         {"sourceLoaded", script && script->sourceLoaded}, {"lines", script && script->sourceLoaded ? fCode->Lines() : 0},
         {"breakpoints", breakpoints}, {"paused", state.paused}, {"reason", state.reason}, {"frames", frames}, {"frame", fFrame},
         {"scopes", fScopes->Rows()}, {"status", fStatus->Text()}, {"pretty", Pretty()}, {"pausedLine", fCode->PausedLine()},

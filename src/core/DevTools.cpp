@@ -511,6 +511,7 @@ struct ProtocolReader {
             script.startLine = static_cast<int>(Number(Member(parameters, "startLine")));
             script.startColumn = static_cast<int>(Number(Member(parameters, "startColumn")));
             script.contentScript = Flag(Member(parameters, "isContentScript"));
+            script.sourceMapURL = Text(Member(parameters, "sourceMapURL"));
             if (script.id.empty()) return;
             session.fScripts[script.id] = std::move(script);
             session.fChanges.scripts = true;
@@ -751,6 +752,14 @@ struct ProtocolReader {
             script.source = Text(Member(result, "scriptSource"));
             script.sourceError = error;
             session.fChanges.sources.push_back(script.id);
+        } else if (pending.kind == Session::Pending::SourceMap) {
+            const auto found = session.fScripts.find(pending.origin);
+            if (found == session.fScripts.end()) return;
+            const auto status = static_cast<int>(Number(Member(result, "status")));
+            if (!error.empty() || (status && (status < 200 || status >= 300)))
+                session.MapRead(found->second, { }, !error.empty() ? error : "The server answered " + std::to_string(status) + ".");
+            else session.MapRead(found->second, Text(Member(result, "content")), { });
+            session.fChanges.sources.push_back(found->first);
         } else if (pending.kind == Session::Pending::SetBreakpoint) {
             for (auto& breakpoint : session.fBreakpoints) {
                 if (breakpoint.url + '\n' + std::to_string(breakpoint.line) + ':' + std::to_string(breakpoint.column) != pending.origin) continue;
@@ -806,6 +815,7 @@ struct ProtocolReader {
                     for (const auto& child : children) walk(child);
             };
             walk(Member(result, "frameTree"));
+            session.fMainFrame = Text(Member(Member(Member(result, "frameTree"), "frame"), "id"));
             session.SetOrigins(std::move(origins));
         } else if (pending.kind == Session::Pending::Evaluation) {
             if (!error.empty()) {
@@ -1039,6 +1049,61 @@ void Session::LoadScriptSource(const std::string& id)
     found->second.sourceWaiting = true;
     SendToTarget(fPageTarget, "Debugger.getScriptSource", "{\"scriptId\":" + Quoted(id) + "}", Pending::ScriptSource);
     fPending.rbegin()->second.origin = id;
+}
+
+void Session::LoadSourceMap(const std::string& id)
+{
+    auto found = fScripts.find(id);
+    if (found == fScripts.end()) return;
+    auto& script = found->second;
+    if (script.sourceMapURL.empty() || script.mapLoaded || script.mapWaiting || fPageTarget.empty()) return;
+    const auto address = ResolveAddress(script.url, script.sourceMapURL);
+    if (address.rfind("data:", 0) == 0) {
+        // data:application/json;base64,… or percent-encoded JSON.
+        const auto comma = address.find(',');
+        std::string text;
+        if (comma == std::string::npos) MapRead(script, { }, "The map's data: address has no data.");
+        else if (address.substr(0, comma).find(";base64") != std::string::npos) {
+            if (DecodeBase64(std::string_view(address).substr(comma + 1), text)) MapRead(script, text, { });
+            else MapRead(script, { }, "The map's data: address is not base64.");
+        } else {
+            for (size_t i = comma + 1; i < address.size(); ++i) {
+                const auto hex = [](char c) { return c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1; };
+                if (address[i] == '%' && i + 2 < address.size() && hex(address[i + 1]) >= 0 && hex(address[i + 2]) >= 0) {
+                    text += static_cast<char>(hex(address[i + 1]) * 16 + hex(address[i + 2]));
+                    i += 2;
+                } else text += address[i];
+            }
+            MapRead(script, text, { });
+        }
+        fChanges.sources.push_back(id);
+        return;
+    }
+    if (fMainFrame.empty()) {
+        MapRead(script, { }, "The page's frame is not known yet.");
+        fChanges.sources.push_back(id);
+        return;
+    }
+    script.mapWaiting = true;
+    SendToTarget(fPageTarget, "Network.loadResource", "{\"frameId\":" + Quoted(fMainFrame) + ",\"url\":" + Quoted(address) + "}",
+        Pending::SourceMap);
+    fPending.rbegin()->second.origin = id;
+}
+
+void Session::MapRead(Script& script, const std::string& text, const std::string& error)
+{
+    script.mapWaiting = false;
+    script.mapLoaded = true;
+    script.mapError = error;
+    script.map.reset();
+    if (!error.empty()) return;
+    auto map = std::make_shared<SourceMap>();
+    std::string parseError;
+    // An inline (data:) map's sources are relative to the script.
+    auto base = ResolveAddress(script.url, script.sourceMapURL);
+    if (base.rfind("data:", 0) == 0) base = script.url;
+    if (ParseSourceMap(text, base, *map, parseError)) script.map = std::move(map);
+    else script.mapError = parseError;
 }
 
 void Session::SendBreakpoint(const std::string& target, Breakpoint& breakpoint)

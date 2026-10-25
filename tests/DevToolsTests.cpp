@@ -97,6 +97,44 @@ static void TestScripts()
     CHECK_TEXT(FormatJavaScript("a=1;// one\n/* two */\nb=2").text, "a = 1;\n// one\n/* two */\nb = 2\n");
 }
 
+static void TestSourceMaps()
+{
+    CHECK(ResolveAddress("https://a.example/js/app.min.js", "app.min.js.map") == "https://a.example/js/app.min.js.map");
+    CHECK(ResolveAddress("https://a.example/js/app.min.js", "../src/app.ts") == "https://a.example/src/app.ts");
+    CHECK(ResolveAddress("https://a.example/js/app.min.js", "/maps/x.map") == "https://a.example/maps/x.map");
+    CHECK(ResolveAddress("https://a.example/js/app.min.js", "//cdn.example/x.map") == "https://cdn.example/x.map");
+    CHECK(ResolveAddress("https://a.example/js/app.min.js", "webpack:///./src/a.js") == "webpack:///./src/a.js");
+    CHECK(ResolveAddress("https://a.example/js/app.min.js?v=2", "./b/../c.js") == "https://a.example/js/c.js");
+    // Two sources; "AAAA" is 0,0,0,0. Line 0: col 0 -> a.ts 0:0, col 9 ->
+    // a.ts 1:2 ("SACE": +9, +0, +1, +2); line 1: col 0 -> b.ts 0:0 ("ACCA"
+    // after the line break: col 0, source +1, line -1, col -2).
+    SourceMap map;
+    std::string error;
+    CHECK(ParseSourceMap(R"({"version":3,"sourceRoot":"src","sources":["a.ts","b.ts"],"sourcesContent":["let a = 1;\n  f(a);",null],)"
+        R"("names":[],"mappings":"AAAA,SACE;ACDF"})", "https://a.example/js/app.min.js.map", map, error));
+    CHECK(map.sources.size() == 2 && map.sources[0] == "https://a.example/js/src/a.ts" && map.hasContent[0] && !map.hasContent[1]
+        && map.contents[0].find("f(a)") != std::string::npos);
+    CHECK(map.mappings.size() == 3);
+    const auto* first = map.Original({0, 4});
+    const auto* second = map.Original({0, 12});
+    const auto* third = map.Original({1, 3});
+    CHECK(first && first->source == 0 && first->line == 0 && first->column == 0);
+    CHECK(second && second->source == 0 && second->line == 1 && second->column == 2);
+    CHECK(third && third->source == 1 && third->line == 0);
+    CHECK(!map.Original({2, 0}));
+    const auto generated = map.Generated(0, 1);
+    CHECK(generated.line == 0 && generated.column == 9);
+    // A line with no mapping slides to the next one that has.
+    CHECK(map.Generated(1, 0).line == 1 && map.Generated(0, 5).line == -1);
+    // An index map's section is offset.
+    SourceMap index;
+    CHECK(ParseSourceMap(R"({"version":3,"sections":[{"offset":{"line":10,"column":0},"map":{"version":3,"sources":["c.js"],"mappings":"AAAA"}}]})",
+        "https://a.example/m.map", index, error) && index.mappings.size() == 1 && index.mappings[0].generatedLine == 10
+        && index.sources[0] == "https://a.example/c.js");
+    CHECK(!ParseSourceMap("not json", "x", index, error) && !error.empty());
+    CHECK(ParseSourceMap(")]}'\n{\"version\":3,\"sources\":[],\"mappings\":\"\"}", "x", index, error));
+}
+
 static void TestXML()
 {
     CHECK_TEXT(FormatXML("<?xml version=\"1.0\"?><root><item id=\"1\">One</item><item id=\"2\"/><empty></empty>"
@@ -958,6 +996,34 @@ static void TestDebugger()
         && session.Breakpoints().size() == 1);
     session.Receive(Event("page-2", "Debugger.globalObjectCleared", json::object()));
     CHECK(session.Scripts().empty() && session.TakeChanges().scripts);
+
+    // Source maps: read in the page's main frame, or from a data: address.
+    Session mapped;
+    mapped.Start();
+    mapped.Receive(TargetCreated("page-1"));
+    commands = Sent(mapped);
+    const auto* tree = Find(commands, "Page.getResourceTree");
+    mapped.Receive(FromTarget("page-1", {{"id", tree->id}, {"result", {{"frameTree", {{"frame", {{"id", "0.1"},
+        {"securityOrigin", "https://a.example"}}}}}}}}));
+    mapped.Receive(Event("page-1", "Debugger.scriptParsed", {{"scriptId", "9"}, {"url", "https://a.example/js/app.min.js"},
+        {"startLine", 0}, {"sourceMapURL", "app.min.js.map"}}));
+    mapped.Receive(Event("page-1", "Debugger.scriptParsed", {{"scriptId", "10"}, {"url", "https://a.example/inline.js"}, {"startLine", 0},
+        {"sourceMapURL", "data:application/json;base64,eyJ2ZXJzaW9uIjozLCJzb3VyY2VzIjpbImkudHMiXSwibWFwcGluZ3MiOiJBQUFBIn0="}}));
+    Sent(mapped);
+    mapped.TakeChanges();
+    mapped.LoadSourceMap("9");
+    mapped.LoadSourceMap("9");
+    commands = Sent(mapped);
+    CHECK(commands.size() == 1 && commands[0].method == "Network.loadResource" && commands[0].parameters["frameId"] == "0.1"
+        && commands[0].parameters["url"] == "https://a.example/js/app.min.js.map");
+    mapped.Receive(FromTarget("page-1", {{"id", commands[0].id}, {"result", {{"content",
+        "{\"version\":3,\"sources\":[\"../src/app.ts\"],\"sourcesContent\":[\"x\"],\"mappings\":\"AAAA\"}"},
+        {"mimeType", "application/json"}, {"status", 200}}}}));
+    const auto* app = mapped.FindScript("9");
+    CHECK(app->mapLoaded && app->map && app->map->sources[0] == "https://a.example/src/app.ts" && app->mapError.empty());
+    CHECK(mapped.TakeChanges().sources == std::vector<std::string>({"9"}));
+    mapped.LoadSourceMap("10");
+    CHECK(Sent(mapped).empty() && mapped.FindScript("10")->map && mapped.FindScript("10")->map->sources[0] == "https://a.example/i.ts");
 }
 
 static void TestHeaders()
@@ -1777,6 +1843,7 @@ int main()
     TestKinds();
     TestJSON();
     TestScripts();
+    TestSourceMaps();
     TestXML();
     TestHTML();
     TestHelpers();

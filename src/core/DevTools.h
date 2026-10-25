@@ -5,6 +5,7 @@
 #include <deque>
 #include <functional>
 #include <map>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -117,6 +118,12 @@ struct Script {
     // Asked for with getScriptSource; empty until then.
     bool sourceLoaded = false, sourceWaiting = false;
     std::string source, sourceError;
+    // Its source map's address (from the script's sourceMappingURL), once
+    // read the map, or why it could not be.
+    std::string sourceMapURL;
+    bool mapLoaded = false, mapWaiting = false;
+    std::shared_ptr<const SourceMap> map;
+    std::string mapError;
     // "app.js", or "(inline) page.html:12" for a script in a document.
     std::string Label() const;
     // "app.js:12" for a line from 1.
@@ -337,6 +344,9 @@ public:
     const std::map<std::string, Script>& Scripts() const { return fScripts; }
     const Script* FindScript(const std::string& id) const;
     void LoadScriptSource(const std::string& id);
+    // Reads a script's source map (Network.loadResource, as Web Inspector
+    // does; a data: map here); it comes with Changes::sources.
+    void LoadSourceMap(const std::string& id);
     // A breakpoint at a line (from 0) of every script with that address.
     void SetBreakpoint(const std::string& url, int line, int column = 0);
     void RemoveBreakpoint(const std::string& url, int line, int column = 0);
@@ -397,7 +407,7 @@ private:
     friend struct ProtocolReader;
     struct Pending {
         enum Kind { Body, Evaluation, Storage, StorageEdit, Frames, Elements, Properties, OwnProperties, DatabaseNames, Database,
-            ScriptSource, SetBreakpoint, CachePromise, Other };
+            ScriptSource, SetBreakpoint, CachePromise, SourceMap, Other };
         Kind kind;
         uint64_t serial;
         // Storage and StorageEdit: the area; Frames: the target asked;
@@ -438,6 +448,8 @@ private:
     std::map<std::string, bool> fTargets;
     std::string fPageTarget, fPageURL;
     std::vector<std::string> fOrigins;
+    // The page's main frame, which source maps are read in.
+    std::string fMainFrame;
     std::map<std::pair<StorageKind, std::string>, StorageArea> fAreas;
     std::map<std::string, ObjectProperties> fProperties;
     std::map<std::string, OriginDatabases> fDatabases;
@@ -445,6 +457,7 @@ private:
     std::vector<Breakpoint> fBreakpoints;
     DebuggerState fDebugger;
     void SendBreakpoint(const std::string& target, Breakpoint& breakpoint);
+    void MapRead(Script& script, const std::string& text, const std::string& error);
     DOMModel fDOM;
     std::vector<DOMModel::Command> fHeldDOM;
     std::vector<std::string> fOutgoing;

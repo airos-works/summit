@@ -237,6 +237,17 @@ with `columnNumber`), and the paused line and breakpoints are marked on the
 lines that show them. Checked on plotly, d3, axe and KaTeX's minified
 builds: the output parses (`node --check`) and has the same tokens.
 
+**Source maps**: a script with a `sourceMappingURL` has its map read
+(`Network.loadResource` in the page's main frame, as Web Inspector does; a
+`data:` map is decoded here), and the original sources it names are listed
+under it (`↳ src/app.ts`), with the text the map carries
+(`sourcesContent`). A breakpoint on an original line is set at that line's
+first generated place; the paused line, the breakpoints and the call stack
+(`add  src/app.ts:12`) show the original places, and a pause in a mapped
+script opens its original source. The map parser (`ParseSourceMap`, index
+maps' sections too) agrees with Mozilla's `source-map` on Dexie's map
+(16362 mappings). Sources the map has no text of are named but not shown.
+
 **Breakpoints**: a click in the margin beside a line sets one (a red dot)
 or clears it. Breakpoints belong to the script's address and line, so they
 hold across reloads and in every process of the page.
@@ -638,7 +649,8 @@ is started again.
 - Network requests from before the tools were opened (as in other
   browsers). Console messages are kept: developer extras are on for every
   page (`SUMMIT_DEVELOPER_EXTRAS=0` turns that off).
-- Timelines (`ENABLE(RESOURCE_USAGE)` is off). In Sources: source maps. In Storage: partitioned cookies, and Cache Storage of
+- Timelines (`ENABLE(RESOURCE_USAGE)` is off). In Sources: an original source the map carries no text of is not
+  fetched. In Storage: partitioned cookies, and Cache Storage of
   frames from other sites. Network throttling is Cocoa-only in WebKit.
 - Elements › Accessibility shows the selected element's role, name and
   states, asked for only while that tab is shown; accessibility, which this
