@@ -31,7 +31,7 @@ namespace {
 constexpr uint32 kPickToggled = 'deps', kSearchRun = 'desr', kSearchPrevious = 'desp', kSearchNext = 'desn',
     kStyleFilterChanged = 'desf', kComputedFilterChanged = 'decf', kComputedAllChanged = 'deca', kEditDone = 'deed',
     kTreeCommand = 'detc', kStyleCommand = 'dest', kApplyHTML = 'deah', kSideTabChanged = 'deat', kForceMenu = 'defm',
-    kForcePseudo = 'defp', kSearchTyped = 'deft', kSearchSettled = 'dess';
+    kForcePseudo = 'defp', kSearchTyped = 'deft', kSearchSettled = 'dess', kNewRuleButton = 'denr';
 // What :hov can force on an element, as other browsers offer.
 constexpr const char* kPseudoClasses[] = {"active", "focus", "focus-visible", "focus-within", "hover", "visited"};
 // The side's tabs: Styles, Computed, Accessibility, Event Listeners.
@@ -56,9 +56,11 @@ enum TreeAction {
     kScrollIntoView, kDeleteNode, kUndo, kRedo
 };
 // What the styles' menu does.
-enum StyleAction { kEditDeclaration, kToggleDeclaration, kDeleteDeclaration, kAddDeclaration, kCopyDeclaration, kCopyRule, kShowSource };
+enum StyleAction { kEditDeclaration, kToggleDeclaration, kDeleteDeclaration, kAddDeclaration, kCopyDeclaration, kCopyRule, kShowSource,
+    kEditSelector, kNewRule };
 // What an editor in place edits ("kind").
-enum EditKind { kEditingAttributes, kAddingAttribute, kEditingTag, kEditingText, kEditingDeclaration, kAddingDeclaration };
+enum EditKind { kEditingAttributes, kAddingAttribute, kEditingTag, kEditingText, kEditingDeclaration, kAddingDeclaration,
+    kEditingSelector };
 // What a node's outer HTML was asked for.
 enum { kForCopy = 1, kForEdit = 2 };
 enum { kComputedName, kComputedValue };
@@ -824,6 +826,9 @@ public:
                 break;
             case Line::Header:
                 if (where.x >= fLocationLeft && Openable(block)) Command(kShowSource, line.block, -1);
+                // On the selector it is edited; after it, a declaration is added.
+                else if (clicks == 2 && block.SelectorEditable() && where.x < 10 + StringWidth(block.selector.c_str()))
+                    Command(kEditSelector, line.block, -1);
                 else if (clicks == 2 && block.Editable()) Command(kAddDeclaration, line.block, -1);
                 break;
             case Line::Close:
@@ -860,7 +865,9 @@ public:
                     || blocks[block].selector != message->GetString("selector", ""))
                     break;
                 const std::string text = message->GetString("text", "");
-                if (message->GetInt32("kind", -1) == kAddingDeclaration) fDOM.AddDeclaration(block, text);
+                if (message->GetInt32("kind", -1) == kEditingSelector) {
+                    if (Trimmed(text) != message->GetString("was", "")) fDOM.SetRuleSelector(block, text);
+                } else if (message->GetInt32("kind", -1) == kAddingDeclaration) fDOM.AddDeclaration(block, text);
                 else {
                     const auto index = static_cast<size_t>(message->GetInt32("declaration", -1));
                     if (index < blocks[block].declarations.size()
@@ -877,6 +884,12 @@ public:
 
     void Command(int32 action, int block, int declaration)
     {
+        if (action == kNewRule) {
+            // An empty rule for the selected element, to be filled in.
+            if (fDOM.Selected()) fDOM.AddRule(fDOM.Selector(fDOM.Selected()));
+            fHost.Sync();
+            return;
+        }
         const auto& blocks = fDOM.Styles().blocks;
         if (block < 0 || block >= static_cast<int>(blocks.size())) return;
         const auto& style = blocks[block];
@@ -908,6 +921,21 @@ public:
                 const auto was = action == kAddDeclaration ? std::string() : DeclarationText(style.declarations[declaration]);
                 done.AddString("was", was.c_str());
                 Edit(line, kCheckRight + 2, done, was);
+                return;
+            }
+            case kEditSelector: {
+                if (!style.SelectorEditable()) break;
+                int line = -1;
+                for (size_t i = 0; i < fLines.size() && line < 0; ++i)
+                    if (fLines[i].block == block && fLines[i].kind == Line::Header) line = static_cast<int>(i);
+                if (line < 0) break;
+                BMessage done(kEditDone);
+                done.AddInt32("node", fDOM.Styles().node);
+                done.AddInt32("kind", kEditingSelector);
+                done.AddInt32("block", block);
+                done.AddString("selector", style.selector.c_str());
+                done.AddString("was", style.selector.c_str());
+                Edit(line, 8, done, style.selector);
                 return;
             }
             case kCopyDeclaration:
@@ -1062,6 +1090,8 @@ private:
             add("Copy Declaration", kCopyDeclaration);
         }
         add("Add Declaration", kAddDeclaration, block.Editable());
+        add("Edit Selector", kEditSelector, block.SelectorEditable());
+        add("New Style Rule", kNewRule, fDOM.Selected() != 0);
         add("Copy Rule", kCopyRule);
         add("Show in Style Sheet", kShowSource, Openable(block));
         menu->SetTargetForItems(this);
@@ -1268,6 +1298,8 @@ ElementsPanel::ElementsPanel(Session& session, DevToolsHost& host)
     fStyleFilter->SetToolTip("Show declarations whose property or value contains this");
     fForce = new BButton("force", ":hov", new BMessage(kForceMenu));
     fForce->SetToolTip("Force :hover, :focus and other states on the selected element");
+    fNewRule = new BButton("new-rule", "+", new BMessage(kNewRuleButton));
+    fNewRule->SetToolTip("New style rule for the selected element");
     fStyles = new Styles(*this, session.DOM(), host);
     auto* stylesScroll = new BScrollView("styles-scroll", fStyles, 0, true, true, B_NO_BORDER);
     auto* stylesTab = new BGroupView(B_VERTICAL, 0);
@@ -1275,6 +1307,7 @@ ElementsPanel::ElementsPanel(Session& session, DevToolsHost& host)
         .AddGroup(B_HORIZONTAL, 6).SetInsets(6, 4, 6, 4)
             .Add(fStyleFilter)
             .Add(fForce)
+            .Add(fNewRule)
         .End()
         .Add(stylesScroll, 1);
 
@@ -1355,7 +1388,7 @@ void ElementsPanel::AttachedToWindow()
     BView::AttachedToWindow();
     AdoptParentColors();
     for (BControl* control : std::initializer_list<BControl*> {fPick, fSearch, fSearchPrevious, fSearchNext, fStyleFilter,
-        fComputedSearch, fComputedAll})
+        fForce, fNewRule, fComputedSearch, fComputedAll})
         control->SetTarget(this);
 }
 
@@ -1422,6 +1455,7 @@ void ElementsPanel::MessageReceived(BMessage* message)
             fHost.Sync();
             break;
         case kStyleFilterChanged: fStyles->SetFilter(fStyleFilter->Text()); break;
+        case kNewRuleButton: fStyles->Command(kNewRule, -1, -1); break;
         case kForceMenu: {
             const auto forced = dom.ForcedPseudoClasses(dom.Selected());
             auto* menu = new BPopUpMenu("force", false, false);
@@ -1685,6 +1719,8 @@ bool ElementsPanel::Command(const std::string& action, const std::string& argume
     else if (verb == "add") dom.AddDeclaration(static_cast<size_t>(number(0)), rest(1));
     else if (verb == "source") dom.RequestSheetSource(static_cast<size_t>(number(0)));
     else if (verb == "refresh") dom.RefreshStyles();
+    else if (verb == "selector") dom.SetRuleSelector(static_cast<size_t>(number(0)), rest(1));
+    else if (verb == "new-rule") dom.AddRule(argument.empty() ? dom.Selector(dom.Selected()) : argument);
     else if (verb == "force") {
         // "hover,focus", or "" for none, on the selected element.
         std::vector<std::string> classes;

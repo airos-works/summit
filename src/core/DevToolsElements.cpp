@@ -422,7 +422,11 @@ struct DOMReader {
                 if (auto label = GroupingLabel(grouping); !label.empty()) block.groupings.push_back(std::move(label));
         const auto& style = Member(rule, "style");
         // The browser's own rules cannot be changed.
-        if (block.origin != "user-agent") ReadStyleID(style, block);
+        if (block.origin != "user-agent") {
+            ReadStyleID(style, block);
+            if (const auto& id = Member(rule, "ruleId"); id.is_object() && Text(Member(id, "styleSheetId")) == block.styleSheetId)
+                block.ruleOrdinal = Member(id, "ordinal").is_number() ? Integer(Member(id, "ordinal")) : -1;
+        }
         // A <style>'s rules count their lines from its start, the document's from the top.
         if (const auto sheet = model.fSheets.find(block.styleSheetId); block.line > 0 && sheet != model.fSheets.end() && sheet->second.inlined)
             block.line += sheet->second.startLine;
@@ -906,6 +910,29 @@ struct DOMReader {
                 if (failed) changes.notice = "The style could not be changed: " + error;
                 model.RefreshStyles();
                 break;
+            case Pending::RuleFrame: {
+                // The main frame, for the inspector style sheet.
+                const auto frame = Text(Member(Member(Member(result, "frameTree"), "frame"), "id"));
+                if (failed || frame.empty()) {
+                    changes.notice = "No rule could be added: the page has no frame";
+                    break;
+                }
+                const auto tag = model.Send("CSS.createStyleSheet", "{\"frameId\":" + Quoted(frame) + "}", Pending::RuleSheet);
+                model.fPending[tag].text = pending.text;
+                break;
+            }
+            case Pending::RuleSheet:
+                model.fInspectorSheet = Text(Member(result, "styleSheetId"));
+                if (failed || model.fInspectorSheet.empty()) {
+                    changes.notice = "No rule could be added: " + (error.empty() ? std::string("no style sheet") : error);
+                    break;
+                }
+                model.AddRule(pending.text);
+                break;
+            case Pending::AddRule:
+                if (failed) changes.notice = "The rule could not be added: " + error;
+                model.RefreshStyles();
+                break;
             case Pending::Edit:
             case Pending::Remove:
                 if (failed) {
@@ -1047,6 +1074,8 @@ void DOMModel::Reset(bool forgetAgents)
     fExpanded.clear();
     fAfterRemoval.clear();
     fForced.clear();
+    // A new document has none of the old one's style sheets.
+    fInspectorSheet.clear();
     fDocument = fSelected = fHighlighted = 0;
     fDocumentWaiting = false;
     fStyles = { };
@@ -1549,6 +1578,26 @@ std::vector<std::string> DOMModel::ForcedPseudoClasses(int id) const
 {
     const auto found = fForced.find(id);
     return found == fForced.end() ? std::vector<std::string>() : found->second;
+}
+
+void DOMModel::SetRuleSelector(size_t block, const std::string& selector)
+{
+    if (block >= fStyles.blocks.size() || !fStyles.blocks[block].SelectorEditable() || Trim(selector).empty()) return;
+    const auto& style = fStyles.blocks[block];
+    Send("CSS.setRuleSelector", "{\"ruleId\":{\"styleSheetId\":" + Quoted(style.styleSheetId) + ",\"ordinal\":"
+        + std::to_string(style.ruleOrdinal) + "},\"selector\":" + Quoted(Trim(selector)) + "}", Pending::SetStyle);
+}
+
+void DOMModel::AddRule(const std::string& selector)
+{
+    if (Trim(selector).empty()) return;
+    if (fInspectorSheet.empty()) {
+        const auto tag = Send("Page.getResourceTree", "{}", Pending::RuleFrame);
+        fPending[tag].text = Trim(selector);
+        return;
+    }
+    Send("CSS.addRule", "{\"styleSheetId\":" + Quoted(fInspectorSheet) + ",\"selector\":" + Quoted(Trim(selector)) + "}",
+        Pending::AddRule);
 }
 
 void DOMModel::RefreshStyles()

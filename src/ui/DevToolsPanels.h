@@ -220,6 +220,7 @@ private:
     BTextControl* fStyleFilter;
     // :hov: the pseudo-classes forced on the selected element.
     BButton* fForce;
+    BButton* fNewRule;
     Styles* fStyles;
     BoxModel* fBox;
     BTextControl* fComputedSearch;
