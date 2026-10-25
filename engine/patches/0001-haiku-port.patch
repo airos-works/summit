@@ -14759,6 +14759,51 @@ index 630b8da74fe0d770a34b573e653a7ca05b1a117e..86acd08e780d52d13ee4bcf10c144203
      if (CheckedPtr canvasAgent = enabledCanvasAgent(canvasRenderingContext))
          canvasAgent->recordAction(canvasRenderingContext, WTF::move(name), WTF::move(arguments));
  }
+diff --git a/Source/WebCore/inspector/agents/InspectorDOMAgent.cpp b/Source/WebCore/inspector/agents/InspectorDOMAgent.cpp
+index 1a5ead7c375ea03f06a07f854b2faa7ac1461172..521f7ca4351569157be07b9145b8c90c2960cb8c 100644
+--- a/Source/WebCore/inspector/agents/InspectorDOMAgent.cpp
++++ b/Source/WebCore/inspector/agents/InspectorDOMAgent.cpp
+@@ -350,6 +350,13 @@ void InspectorDOMAgent::didCreateFrontendAndBackend()
+ 
+ void InspectorDOMAgent::willDestroyFrontendAndBackend(Inspector::DisconnectReason)
+ {
++#if PLATFORM(HAIKU)
++    // Haiku has no assistive technology to keep it on for: accessibility the
++    // inspector turned on costs every page of the process time on each
++    // change, so it goes when the tools do (in this process only).
++    if (std::exchange(m_enabledAccessibility, false))
++        AXObjectCache::disableAccessibilityForTesting();
++#endif
+     m_history.reset();
+     m_domEditor.reset();
+     m_nodeToFocus = nullptr;
+@@ -2235,6 +2242,11 @@ void InspectorDOMAgent::processAccessibilityChildren(AXCoreObject& axObject, JSO
+ 
+ Ref<Inspector::Protocol::DOM::AccessibilityProperties> InspectorDOMAgent::buildObjectForAccessibilityProperties(Node& node)
+ {
++#if PLATFORM(HAIKU)
++    // On only while asked for: switched off again when this session ends.
++    if (!AXObjectCache::accessibilityEnabled())
++        m_enabledAccessibility = true;
++#endif
+     WebCore::AXObjectCache::enableAccessibility();
+ 
+     RefPtr<Node> activeDescendantNode;
+diff --git a/Source/WebCore/inspector/agents/InspectorDOMAgent.h b/Source/WebCore/inspector/agents/InspectorDOMAgent.h
+index 3cd89189e8efc226e076b0210496d1f0a753e950..12532d039be8ba6abaa3ce0d326d5b3ee265f9f2 100644
+--- a/Source/WebCore/inspector/agents/InspectorDOMAgent.h
++++ b/Source/WebCore/inspector/agents/InspectorDOMAgent.h
+@@ -297,6 +297,10 @@ private:
+     SearchResults m_searchResults;
+     const std::unique_ptr<RevalidateStyleAttributeTask> m_revalidateStyleAttrTask;
+     RefPtr<Node> m_nodeToFocus;
++#if PLATFORM(HAIKU)
++    // This session turned accessibility on (buildObjectForAccessibilityProperties).
++    bool m_enabledAccessibility { false };
++#endif
+     RefPtr<Node> m_mousedOverNode;
+     RefPtr<Node> m_inspectedNode;
+     std::unique_ptr<InspectorOverlay::Highlight::Config> m_inspectModeHighlightConfig;
 diff --git a/Source/WebCore/inspector/agents/InspectorMemoryAgent.cpp b/Source/WebCore/inspector/agents/InspectorMemoryAgent.cpp
 index 37ff7e2ba390b97a381b4792a60700c457a8584f..d17f362a44cb1556c31b1c15832eafea70bb8a07 100644
 --- a/Source/WebCore/inspector/agents/InspectorMemoryAgent.cpp

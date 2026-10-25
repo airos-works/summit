@@ -1111,6 +1111,21 @@ static void TestElementStyles()
     const auto& styles = dom.Styles();
     CHECK(styles.node == 5 && styles.blocks.size() == 4);
     CHECK(styles.blocks[0].kind == StyleBlock::Inline && styles.blocks[0].Editable() && styles.blocks[0].declarations.empty());
+    // Accessibility (#118): asked for the selected element only when wanted;
+    // role and label first, then its states, arrays as node counts.
+    take();
+    dom.RequestAccessibility();
+    take();
+    CHECK(tags.count("DOM.getAccessibilityPropertiesForNode"));
+    answer(tags["DOM.getAccessibilityPropertiesForNode"], {{"properties", {{"exists", true}, {"label", "Main"}, {"role", "main"},
+        {"ignored", false}, {"childNodeIds", json::array({6, 7})}, {"headingLevel", 2}}}});
+    CHECK(dom.TakeChanges().accessibility);
+    const auto& accessibility = dom.Accessibility().properties;
+    CHECK(dom.Accessibility().node == 5 && dom.Accessibility().error.empty() && accessibility.size() == 6
+        && accessibility[0] == std::make_pair(std::string("role"), std::string("main"))
+        && accessibility[1] == std::make_pair(std::string("label"), std::string("Main"))
+        && std::count(accessibility.begin(), accessibility.end(), std::make_pair(std::string("childNodeIds"), std::string("2 nodes")))
+        && std::count(accessibility.begin(), accessibility.end(), std::make_pair(std::string("headingLevel"), std::string("2"))));
     // The author's rule: what it says, and where.
     const auto& own = styles.blocks[1];
     CHECK(own.Editable() && own.declarations.size() == 2 && own.declarations[1].text == "color:#333" && own.Location() == "example.com:9"

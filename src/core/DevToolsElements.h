@@ -121,6 +121,17 @@ struct NodeStyles {
     BoxModel box;
 };
 
+// The selected element's accessibility properties, from
+// DOM.getAccessibilityPropertiesForNode: role, label and states, as text.
+// Asking turns accessibility on in the page's process until the tools
+// close (the engine turns it off then on Haiku), so it is asked for only
+// while the Accessibility tab shows.
+struct NodeAccessibility {
+    int node = 0;
+    std::string error;
+    std::vector<std::pair<std::string, std::string>> properties;
+};
+
 struct DOMChanges {
     // The lines of the tree must be made again.
     bool tree = false;
@@ -132,6 +143,8 @@ struct DOMChanges {
     bool picked = false;
     // OuterHTML() or Source() arrived.
     bool outerHTML = false, source = false;
+    // Accessibility() arrived.
+    bool accessibility = false;
     // What went wrong with something asked of the page.
     std::string notice;
     bool Any() const
@@ -231,6 +244,9 @@ public:
     // (TakeCommands() asks for them).
     bool StylesWaiting() const;
     void RefreshStyles();
+    // Asks for the selected element's accessibility properties.
+    void RequestAccessibility();
+    const NodeAccessibility& Accessibility() const { return fAccessibility; }
     void ToggleDeclaration(size_t block, size_t index);
     // Empty text removes the declaration.
     void EditDeclaration(size_t block, size_t index, const std::string& text);
@@ -278,7 +294,7 @@ private:
     struct Pending {
         enum Kind {
             Ignore, Document, Children, ExpandAll, Attributes, Matched, Inline, Computed, Resolve, Box, SetStyle, Edit,
-            TagName, Remove, Search, SearchResults, RequestNode, Evaluate, Path, OuterHTML, SheetText, Properties
+            TagName, Remove, Search, SearchResults, RequestNode, Evaluate, Path, OuterHTML, SheetText, Properties, Accessibility
         };
         Kind kind;
         int node = 0;
@@ -312,6 +328,7 @@ private:
     double fPointX = 0, fPointY = 0;
 
     NodeStyles fStyles, fNextStyles;
+    NodeAccessibility fAccessibility;
     int fStylesOutstanding = 0;
     bool fStylesStale = false;
     double fStylesStarted = 0;

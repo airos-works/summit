@@ -29,7 +29,22 @@ using namespace devtools;
 namespace {
 constexpr uint32 kPickToggled = 'deps', kSearchRun = 'desr', kSearchPrevious = 'desp', kSearchNext = 'desn',
     kStyleFilterChanged = 'desf', kComputedFilterChanged = 'decf', kComputedAllChanged = 'deca', kEditDone = 'deed',
-    kTreeCommand = 'detc', kStyleCommand = 'dest', kApplyHTML = 'deah';
+    kTreeCommand = 'detc', kStyleCommand = 'dest', kApplyHTML = 'deah', kSideTabChanged = 'deat';
+// The side's tabs: Styles, Computed, Accessibility.
+enum { kStylesTab, kComputedTab, kAccessibilityTab };
+
+// Tells the panel when another of the side's tabs is shown.
+class SideTabs final : public BTabView {
+public:
+    explicit SideTabs(BHandler* panel) : BTabView("side", B_WIDTH_FROM_LABEL), fPanel(panel) { }
+    void Select(int32 index) override
+    {
+        BTabView::Select(index);
+        if (Window()) Window()->PostMessage(kSideTabChanged, fPanel);
+    }
+private:
+    BHandler* fPanel;
+};
 // What the tree's menu does ("command").
 enum TreeAction {
     kEditAttributes, kAddAttribute, kEditTag, kEditText, kEditHTML, kCopyHTML, kCopySelector, kExpandAll, kCollapseAll,
@@ -1273,17 +1288,24 @@ ElementsPanel::ElementsPanel(Session& session, DevToolsHost& host)
         .End()
         .Add(fComputed, 1);
 
-    fSide = new BTabView("side", B_WIDTH_FROM_LABEL);
+    fSide = new SideTabs(this);
     fSide->SetBorder(B_NO_BORDER);
     const auto add = [this](BView* view, const char* label) {
         auto* tab = new BTab();
         fSide->AddTab(view, tab);
         tab->SetLabel(label);
     };
+    // The role and name assistive technology would be given, and the states.
+    fAccessibility = new BColumnListView("accessibility", 0, B_NO_BORDER);
+    fAccessibility->AddColumn(new BStringColumn("Property", 190, 60, 1000, B_TRUNCATE_END), kComputedName);
+    fAccessibility->AddColumn(new BStringColumn("Value", 260, 60, 4000, B_TRUNCATE_END), kComputedValue);
+    fAccessibility->SetSortingEnabled(false);
     stylesTab->SetName("Styles");
     computedTab->SetName("Computed");
+    fAccessibility->SetName("Accessibility");
     add(stylesTab, "Styles");
     add(computedTab, "Computed");
+    add(fAccessibility, "Accessibility");
 
     auto* split = new BSplitView(B_HORIZONTAL, 2);
     split->SetCollapsible(false);
@@ -1373,6 +1395,7 @@ void ElementsPanel::MessageReceived(BMessage* message)
         case kStyleFilterChanged: fStyles->SetFilter(fStyleFilter->Text()); break;
         case kComputedFilterChanged:
         case kComputedAllChanged: ShowComputed(); break;
+        case kSideTabChanged: AskAccessibility(); break;
         case kApplyHTML:
             dom.SetOuterHTML(message->GetInt32("node", 0), message->GetString("html", ""));
             fHost.Sync();
@@ -1395,7 +1418,9 @@ void ElementsPanel::Apply(const Changes& changes)
     if (what.styles || what.selection) {
         ShowStyles();
         ShowComputed();
+        AskAccessibility();
     }
+    if (what.accessibility) ShowAccessibility();
     if (what.search) ShowSearch();
     if (what.picking) ShowPicking();
     if (what.picked) fPicked = true;
@@ -1443,6 +1468,28 @@ void ElementsPanel::ShowComputed()
         row->SetField(new BStringField(value.c_str()), kComputedValue);
         fComputed->AddRow(row);
     }
+}
+
+void ElementsPanel::AskAccessibility()
+{
+    fAccessibility->Clear();
+    if (fSide->Selection() == kAccessibilityTab) fSession.DOM().RequestAccessibility();
+}
+
+void ElementsPanel::ShowAccessibility()
+{
+    const auto& dom = fSession.DOM();
+    const auto& accessibility = dom.Accessibility();
+    fAccessibility->Clear();
+    if (accessibility.node != dom.Selected()) return;
+    auto add = [&](const std::string& name, const std::string& value) {
+        auto* row = new BRow();
+        row->SetField(new BStringField(name.c_str()), kComputedName);
+        row->SetField(new BStringField(value.c_str()), kComputedValue);
+        fAccessibility->AddRow(row);
+    };
+    if (!accessibility.error.empty()) add("error", accessibility.error);
+    for (const auto& [name, value] : accessibility.properties) add(name, value);
 }
 
 void ElementsPanel::ShowSearch()
@@ -1543,7 +1590,7 @@ bool ElementsPanel::Command(const std::string& action, const std::string& argume
     } else if (verb == "computed-all") {
         fComputedAll->SetValue(argument == "on" ? B_CONTROL_ON : B_CONTROL_OFF);
         ShowComputed();
-    } else if (verb == "tab") fSide->Select(argument == "computed" ? 1 : 0);
+    } else if (verb == "tab") fSide->Select(argument == "computed" ? kComputedTab : argument == "accessibility" ? kAccessibilityTab : kStylesTab);
     else if (verb == "edit-line") {
         // Opens the tree's editor as a double click does.
         fTree->Command(argument == "tag" ? kEditTag : argument == "text" ? kEditText : argument == "add-attribute" ? kAddAttribute
@@ -1594,6 +1641,12 @@ std::string ElementsPanel::StateJSON()
             {"shown", fSearchCount->Text()}}},
         {"styles", {{"node", styles.node}, {"loading", dom.StylesLoading()}, {"error", styles.error}, {"blocks", blocks}}},
         {"computed", computed}, {"computedShown", fComputed->CountRows()}, {"box", boxes}, {"crumbs", fCrumbs->Text()},
+        {"sideTab", fSide->Selection()}, {"accessibility", [&] {
+            json properties = json::object();
+            for (const auto& [name, value] : dom.Accessibility().properties) properties[name] = value;
+            return json {{"node", dom.Accessibility().node}, {"error", dom.Accessibility().error}, {"properties", properties},
+                {"shown", fAccessibility->CountRows()}};
+        }()},
         {"notice", fNotice->Text()}, {"outerHTML", dom.OuterHTML().html.substr(0, 4000)}, {"source", {{"title", dom.Source().title},
             {"line", dom.Source().line}, {"size", dom.Source().text.size()}, {"error", dom.Source().error}}}};
     return state.dump(-1, ' ', false, json::error_handler_t::replace);

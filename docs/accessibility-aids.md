@@ -58,7 +58,18 @@ messages: Reduce Motion turned the page's `prefers-reduced-motion` to
 `prefers-contrast` to `more` (black background) and back, and a tab opened
 meanwhile matched `more` too.
 
+## The accessibility tree, on demand
+
+WebKit builds its accessibility tree only once something asks for it, and
+then keeps it for every page of the web process, at a cost on each change.
+On Haiku nothing asks except the developer tools: Elements › Accessibility
+shows the selected element's role, name (label) and states
+(`DOM.getAccessibilityPropertiesForNode`), asked for only while that tab is
+shown, and the MCP `inspector` tool can send the same command. When the
+inspector session that turned accessibility on ends (the tools close), the
+engine turns it off again in that process (`InspectorDOMAgent`,
+`PLATFORM(HAIKU)`): there is no assistive technology to keep it on for.
+
 ## Still to do
 
-Forced colours (`forced-colors: active`, which WebKit does not render), and
-an accessibility tree turned on only when asked for (developer tools, MCP).
+Forced colours (`forced-colors: active`, which WebKit does not render).

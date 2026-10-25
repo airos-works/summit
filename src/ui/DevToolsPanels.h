@@ -190,6 +190,9 @@ private:
     void ShowSelection();
     void ShowStyles();
     void ShowComputed();
+    // The Accessibility tab: asked for only while it shows.
+    void AskAccessibility();
+    void ShowAccessibility();
     void ShowSearch();
     void ShowPicking();
     void Notice(const std::string& text);
@@ -213,6 +216,7 @@ private:
     BTextControl* fComputedSearch;
     BCheckBox* fComputedAll;
     BColumnListView* fComputed;
+    BColumnListView* fAccessibility;
 };
 
 class ConsolePanel : public BView {

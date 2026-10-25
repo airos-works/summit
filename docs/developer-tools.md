@@ -510,6 +510,10 @@ is started again.
 - Sources and the debugger, timelines. In Storage: IndexedDB, the cache
   API, editing a cookie (only deleting), and a cookie's partition. The
   session carries the whole protocol, so they need panels, not engine work.
+- Elements › Accessibility shows the selected element's role, name and
+  states, asked for only while that tab is shown; accessibility, which this
+  turns on in the web process, goes off again when the tools close (the
+  engine does that on Haiku; see `docs/accessibility-aids.md`).
 - In Elements: the highlight's label (tag, size and role). Asking for it
   (`showInfo`) turns on accessibility in the web process, and this port's
   accessibility notifications then crash it: `postPlatformNotification` in

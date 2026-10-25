@@ -743,6 +743,32 @@ struct DOMReader {
             return;
         switch (pending.kind) {
             case Pending::Ignore: break;
+            case Pending::Accessibility: {
+                if (pending.node != model.fSelected) break;
+                NodeAccessibility accessibility;
+                accessibility.node = pending.node;
+                accessibility.error = failed ? (error.empty() ? std::string("The page did not answer") : error) : std::string();
+                // Role and label first, then the states the element has.
+                const auto& properties = Member(result, "properties");
+                std::vector<std::pair<std::string, std::string>> rest;
+                if (properties.is_object()) {
+                    for (const auto& [key, value] : properties.items()) {
+                        std::string text;
+                        if (value.is_string()) text = value.get<std::string>();
+                        else if (value.is_boolean()) text = value.get<bool>() ? "true" : "false";
+                        else if (value.is_number()) text = value.dump();
+                        else if (value.is_array()) text = std::to_string(value.size()) + (value.size() == 1 ? " node" : " nodes");
+                        else continue;
+                        if (key == "role" || key == "label") accessibility.properties.emplace_back(key, text);
+                        else rest.emplace_back(key, text);
+                    }
+                }
+                std::sort(accessibility.properties.begin(), accessibility.properties.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+                accessibility.properties.insert(accessibility.properties.end(), rest.begin(), rest.end());
+                model.fAccessibility = std::move(accessibility);
+                changes.accessibility = true;
+                break;
+            }
             case Pending::Properties:
                 if (const auto& properties = Member(result, "cssProperties"); properties.is_array()) {
                     for (const auto& property : properties) {
@@ -1479,6 +1505,14 @@ void DOMModel::RefreshStyles()
     if (!fSelected) return;
     if (fStylesOutstanding) fStylesStale = true;
     else StartStyles();
+}
+
+void DOMModel::RequestAccessibility()
+{
+    if (!fSelected) return;
+    fAccessibility = { };
+    fAccessibility.node = fSelected;
+    Send("DOM.getAccessibilityPropertiesForNode", "{\"nodeId\":" + std::to_string(fSelected) + "}", Pending::Accessibility, fSelected);
 }
 
 void DOMModel::ToggleDeclaration(size_t block, size_t index)
