@@ -391,6 +391,9 @@ profile, and a closed private session's listener stops recording. So
 `place:transition=7` and the library's Downloads link show Summit's
 downloads as well as imported ones. Tests: `DownloadVisitTests` (host and
 native), `NativeDownloadHistoryTests`, `NativeDownloadVisitBrowserTests`.
+Verified on the X399 (25 Oct, pf118 build): a download in a normal window
+was saved as a history entry titled with the file's name, 0 visits and one
+transition-7 visit; a download from a private window left no entry.
 
 Reimporting known types for an existing timestamp updates and saves history,
 notifies windows and refreshes open queries without adding another URL or visit.

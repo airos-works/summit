@@ -24,6 +24,11 @@ profile (`minimumFontSize`) and applies to every tab at once.
 `SetPageSettings()` takes it as `minimumFontSize` (CSS pixels, 0 to 72; 0 is
 none), which sets WebKit's `MinimumFontSize`.
 
+Saved settings verified on the X399 (25 Oct, pf118 build): a smallest text
+size of 14 sent as Preferences sends it raised a 6 px paragraph to 14 px at
+once; View › Reduce Motion matched `prefers-reduced-motion: reduce`; after
+quitting, `profile.json` held both, and on restart the page had them again.
+
 ## Reduce Motion and Increase Contrast
 
 View › Reduce Motion makes pages match `prefers-reduced-motion: reduce`, and
