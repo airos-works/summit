@@ -70,6 +70,13 @@ inspector session that turned accessibility on ends (the tools close), the
 engine turns it off again in that process (`InspectorDOMAgent`,
 `PLATFORM(HAIKU)`): there is no assistive technology to keep it on for.
 
+Verified on the X399 (25 Oct, ax118b build) with a test page: the tab
+showed a button as role `button`, label "Mute", pressed; a checkbox as
+`checkbox`, "Remember me", checked; an `h2` as `heading` level 2; a `<nav
+aria-label>` as `navigation` "Primary". After the tools closed, renaming
+the heading and removing and adding elements (what crashed the web
+process before 19 Oct's fix) left it running.
+
 ## Still to do
 
 Forced colours (`forced-colors: active`, which WebKit does not render).
