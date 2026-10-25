@@ -87,6 +87,12 @@ ones lilac, a visible focus ring, no background pictures; images and video
 are left alone. It is a user style sheet of `!important` rules, set with
 the engine's new `BWebKitView::SetUserStyleSheet()` (one sheet for the
 views sharing a configuration, replaced or removed as a whole).
+Text a page dims with `opacity` stays dimmed, as with Firefox's override.
+
+Verified on the X399 (25 Oct, oc118 build): on example.org the body went
+from black on transparent with blue links to white on black with yellow
+links, back again when turned off, and a tab opened while it was on had
+it.
 
 ## Still to do
 
