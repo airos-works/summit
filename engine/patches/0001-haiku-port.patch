@@ -87338,10 +87338,10 @@ index 0000000000000000000000000000000000000000..574ed16658f0c14b1aa2e63208e990b8
 +#define WEBKIT_ENGINE_VERSION_HAIKU "@WebKit_HAIKU_MAJOR_VERSION@.@WebKit_HAIKU_MINOR_VERSION@.@WebKit_HAIKU_TINY_VERSION@"
 diff --git a/Source/WebKit/UIProcess/API/haiku/WebKitContext.cpp b/Source/WebKit/UIProcess/API/haiku/WebKitContext.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..dc2f4d4fdb07966241e673bd4e49b9e833039166
+index 0000000000000000000000000000000000000000..cb5a90b5008dad92e54aa9b5bcebc9bf303365cb
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/API/haiku/WebKitContext.cpp
-@@ -0,0 +1,1167 @@
+@@ -0,0 +1,1176 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#include "config.h"
@@ -88134,6 +88134,15 @@ index 0000000000000000000000000000000000000000..dc2f4d4fdb07966241e673bd4e49b9e8
 +    });
 +}
 +
++void BWebKitContext::SetExtensionActionAnchor(const BMessenger& window, BRect button)
++{
++    if (m_status != B_OK || !window.IsValid() || !button.IsValid())
++        return;
++    WTF::RunLoop::mainSingleton().dispatch([context = m_context, window, button] {
++        context->browserTabs()->setActionAnchor(window, button);
++    });
++}
++
 +void BWebKitContext::AllowServerCertificate(const char* host, const char* sha256)
 +{
 +    if (m_status != B_OK || !host || !*host || !sha256 || !*sha256)
@@ -88511,10 +88520,10 @@ index 0000000000000000000000000000000000000000..dc2f4d4fdb07966241e673bd4e49b9e8
 +}
 diff --git a/Source/WebKit/UIProcess/API/haiku/WebKitContext.h b/Source/WebKit/UIProcess/API/haiku/WebKitContext.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..ed7fb9c62fbc5b6ad2160a0af9bd82092c3654ec
+index 0000000000000000000000000000000000000000..43e5ca353f75ebfccdeda7e2fcd4f137a17ab037
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/API/haiku/WebKitContext.h
-@@ -0,0 +1,576 @@
+@@ -0,0 +1,582 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#pragma once
@@ -88810,6 +88819,12 @@ index 0000000000000000000000000000000000000000..ed7fb9c62fbc5b6ad2160a0af9bd8209
 +    // Window.left/top/width/height). Report it when the window is shown,
 +    // moved or resized. Any thread.
 +    void SetBrowserWindowFrame(const BMessenger& window, BRect frame);
++    // The toolbar button (screen coordinates) the next extension action popup
++    // of window opens under, right-aligned with it, or above it near the
++    // screen's bottom: report it before ActivateExtensionAction and
++    // PreloadExtensionAction. Without one the popup opens at the top right of
++    // the window's page. Any thread.
++    void SetExtensionActionAnchor(const BMessenger& window, BRect button);
 +    // Extensions' history.onVisited ("visited", a HistoryItem object) and
 +    // history.onVisitRemoved ("removed", {allHistory, urls}), as JSON. Report
 +    // visits and removals of the browser's history, not of private windows.
@@ -100681,10 +100696,10 @@ index b9eb05c62a8aade37bb75b1a196fd114b3bfebd7..1759a9c1a598de8bd22c7d09ec631189
  #endif // ENABLE(WK_WEB_EXTENSIONS)
 diff --git a/Source/WebKit/UIProcess/Extensions/haiku/ExtensionActionPopupHaiku.cpp b/Source/WebKit/UIProcess/Extensions/haiku/ExtensionActionPopupHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..0bdae19c1422a6db977fc42449b32b5b8d1cd1fc
+index 0000000000000000000000000000000000000000..ea97181dd366147497d70a654a2b8b6aab8dc0e0
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/haiku/ExtensionActionPopupHaiku.cpp
-@@ -0,0 +1,551 @@
+@@ -0,0 +1,553 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +#include "config.h"
 +#include "FrameInfoHaiku.h"
@@ -100857,9 +100872,11 @@ index 0000000000000000000000000000000000000000..0bdae19c1422a6db977fc42449b32b5b
 +        fail("The extension popup has no native browser window."_s);
 +        return false;
 +    }
-+    // Anchor at the browser content's top-right corner, below the toolbar.
++    // Under the action's toolbar button, as the browser reported it; else at
++    // the browser content's top-right corner, below the toolbar.
 +    auto size = pageClient->viewSize();
-+    auto anchor = pageClient->rootViewToScreen(WebCore::IntPoint { std::max(0, size.width() - 1), 0 });
++    auto corner = pageClient->rootViewToScreen(WebCore::IntPoint { std::max(0, size.width() - 1), 0 });
++    auto anchor = controller->nativeBrowserTabs()->actionAnchor(nativeWindow->messenger).value_or(BRect(corner.x(), corner.y(), corner.x(), corner.y()));
 +    SUMMIT_EXTENSION_TIMING("popup start: anchor ready");
 +    m_state->client = WebView::createForExtensionPopup(m_state, configuration.releaseNonNull());
 +    m_page = m_state->client->page();
@@ -100886,7 +100903,7 @@ index 0000000000000000000000000000000000000000..0bdae19c1422a6db977fc42449b32b5b
 +            popup->contentSizeChanged(size);
 +    });
 +    auto title = m_action->label().utf8();
-+    m_native = std::make_unique<NativeExtensionPopupHaiku>(nativeWindow->messenger, BRect(anchor.x(), anchor.y(), anchor.x(), anchor.y()),
++    m_native = std::make_unique<NativeExtensionPopupHaiku>(nativeWindow->messenger, anchor,
 +        std::string(title.legacyCStringPointer(), title.length()), [state = m_state](BRect frame) -> BView* {
 +            if (state->closed)
 +                return nullptr;
@@ -119209,10 +119226,10 @@ index 0000000000000000000000000000000000000000..00672589a5ae1fd82ae159dca56f9a01
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/BrowserTabRegistryHaiku.cpp b/Source/WebKit/UIProcess/haiku/BrowserTabRegistryHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..ddf88e093185cadb8c4b1933d12a4c399555195c
+index 0000000000000000000000000000000000000000..c4a2852569d79d2d40152d715e269816ec825bdd
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/BrowserTabRegistryHaiku.cpp
-@@ -0,0 +1,193 @@
+@@ -0,0 +1,211 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#include "config.h"
@@ -119324,6 +119341,24 @@ index 0000000000000000000000000000000000000000..ddf88e093185cadb8c4b1933d12a4c39
 +    }
 +}
 +
++void BrowserTabRegistryHaiku::setActionAnchor(const BMessenger& window, BRect button)
++{
++    ASSERT(isMainThread());
++    // Forget closed windows' anchors.
++    m_actionAnchors.removeAllMatching([&](auto& entry) { return entry.first == window || !entry.first.IsValid(); });
++    m_actionAnchors.append({ window, button });
++}
++
++std::optional<BRect> BrowserTabRegistryHaiku::actionAnchor(const BMessenger& window) const
++{
++    ASSERT(isMainThread());
++    for (auto& [messenger, button] : m_actionAnchors) {
++        if (messenger == window)
++            return button;
++    }
++    return std::nullopt;
++}
++
 +std::optional<BRect> BrowserTabRegistryHaiku::frame(const BMessenger& window) const
 +{
 +    ASSERT(isMainThread());
@@ -119408,10 +119443,10 @@ index 0000000000000000000000000000000000000000..ddf88e093185cadb8c4b1933d12a4c39
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/BrowserTabRegistryHaiku.h b/Source/WebKit/UIProcess/haiku/BrowserTabRegistryHaiku.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..a4fa619721fe6d0780ffd7e5b382c99143d66595
+index 0000000000000000000000000000000000000000..8610660363e02511ad8b10626c85b78cdf3fd04d
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/BrowserTabRegistryHaiku.h
-@@ -0,0 +1,113 @@
+@@ -0,0 +1,117 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#pragma once
@@ -119504,6 +119539,9 @@ index 0000000000000000000000000000000000000000..a4fa619721fe6d0780ffd7e5b382c991
 +    void setFrameObserver(FrameObserver observer) { m_frameObserver = WTF::move(observer); }
 +    void setFrame(const BMessenger& window, BRect frame);
 +    std::optional<BRect> frame(const BMessenger& window) const;
++    // The button a window's next action popup opens under (screen coordinates).
++    void setActionAnchor(const BMessenger& window, BRect button);
++    std::optional<BRect> actionAnchor(const BMessenger& window) const;
 +
 +    Vector<Window> windows() const;
 +    std::optional<Window> window(uint64_t) const;
@@ -119518,6 +119556,7 @@ index 0000000000000000000000000000000000000000..a4fa619721fe6d0780ffd7e5b382c991
 +    HashMap<WebPageProxyIdentifier, DiscardedTab> m_discardedPages;
 +    HashMap<WebPageProxyIdentifier, ReaderState> m_readerPages;
 +    Vector<std::pair<BMessenger, BRect>> m_frames;
++    Vector<std::pair<BMessenger, BRect>> m_actionAnchors;
 +    FrameObserver m_frameObserver;
 +    Vector<Window> m_windows;
 +    std::optional<uint64_t> m_focusedWindow;
