@@ -107,7 +107,9 @@ private:
     BCheckBox* fPreserve;
     BTextControl* fFilter;
     BMenuField* fTypes;
-    BButton* fCopyCurl;
+    // Copy as cURL, Replay, Block This Address, Unblock All.
+    BButton* fRequestMenu;
+    BCheckBox* fDisableCache;
     BButton* fExportHar;
     std::unique_ptr<BFilePanel> fHarPanel;
     BColumnListView* fList;

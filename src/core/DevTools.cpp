@@ -860,7 +860,68 @@ void Session::TargetCreated(const std::string& target, bool provisional, bool pa
     SendToTarget(target, "Page.getResourceTree", "{}", Pending::Frames);
     fPending.rbegin()->second.origin = target;
     if (fPreserveRequests) SendToTarget(target, "Network.setClearResourceDataOnNavigate", "{\"clearResourceDataOnNavigate\":false}");
+    ApplyNetworkSettings(target);
     if (paused) Send("Target.resume", "{\"targetId\":" + Quoted(target) + "}");
+}
+
+void Session::ApplyNetworkSettings(const std::string& target)
+{
+    if (fCacheDisabled) SendToTarget(target, "Network.setResourceCachingDisabled", "{\"disabled\":true}");
+    if (fBlocked.empty()) return;
+    SendToTarget(target, "Network.setInterceptionEnabled", "{\"enabled\":true}");
+    for (const auto& pattern : fBlocked)
+        SendToTarget(target, "Network.addInterception", "{\"url\":" + Quoted(pattern) + ",\"stage\":\"request\",\"caseSensitive\":false,\"isRegex\":false}");
+}
+
+void Session::SetCacheDisabled(bool disabled)
+{
+    if (fCacheDisabled == disabled) return;
+    fCacheDisabled = disabled;
+    for (const auto& [target, provisional] : fTargets)
+        SendToTarget(target, "Network.setResourceCachingDisabled", disabled ? "{\"disabled\":true}" : "{\"disabled\":false}");
+}
+
+void Session::BlockURL(const std::string& pattern)
+{
+    if (pattern.empty() || std::find(fBlocked.begin(), fBlocked.end(), pattern) != fBlocked.end()) return;
+    fBlocked.push_back(pattern);
+    for (const auto& [target, provisional] : fTargets) {
+        if (fBlocked.size() == 1) SendToTarget(target, "Network.setInterceptionEnabled", "{\"enabled\":true}");
+        SendToTarget(target, "Network.addInterception", "{\"url\":" + Quoted(pattern) + ",\"stage\":\"request\",\"caseSensitive\":false,\"isRegex\":false}");
+    }
+}
+
+void Session::UnblockAll()
+{
+    if (fBlocked.empty()) return;
+    for (const auto& [target, provisional] : fTargets) {
+        for (const auto& pattern : fBlocked)
+            SendToTarget(target, "Network.removeInterception", "{\"url\":" + Quoted(pattern) + ",\"stage\":\"request\",\"caseSensitive\":false,\"isRegex\":false}");
+        SendToTarget(target, "Network.setInterceptionEnabled", "{\"enabled\":false}");
+    }
+    fBlocked.clear();
+}
+
+bool Session::Replay(uint64_t serial)
+{
+    const auto* request = FindRequest(serial);
+    if (!request || fPageTarget.empty() || request->url.rfind("http", 0) != 0 || request->webSocket) return false;
+    // The headers a page cannot set (fetch() would refuse or replace them).
+    const auto forbidden = [](std::string name) {
+        for (auto& c : name) if (c >= 'A' && c <= 'Z') c = static_cast<char>(c + 32);
+        static const char* const names[] = {"host", "cookie", "cookie2", "content-length", "connection", "origin", "referer", "user-agent",
+            "accept-encoding", "accept-charset", "date", "dnt", "expect", "keep-alive", "te", "trailer", "transfer-encoding", "upgrade", "via"};
+        return name.empty() || name[0] == ':' || name.rfind("sec-", 0) == 0 || name.rfind("proxy-", 0) == 0
+            || std::any_of(std::begin(names), std::end(names), [&](const char* forbidden) { return name == forbidden; });
+    };
+    json headers = json::object();
+    for (const auto& header : request->requestHeaders)
+        if (!forbidden(header.name)) headers[header.name] = header.value;
+    json options = {{"method", request->method.empty() ? "GET" : request->method}, {"headers", headers}, {"credentials", "include"}};
+    if (request->hasRequestBody && request->method != "GET" && request->method != "HEAD") options["body"] = request->requestBody;
+    const auto expression = "fetch(" + Quoted(request->url) + ", " + Dump(options) + ").catch(() => { })";
+    SendToTarget(fPageTarget, "Runtime.evaluate", "{\"expression\":" + Quoted(expression) + ",\"objectGroup\":\"replay\"}");
+    return true;
 }
 
 void Session::TargetDestroyed(const std::string& target)
@@ -936,6 +997,18 @@ void Session::FromTarget(const std::string& target, std::string_view text)
     else if (method == "Network.loadingFailed") ProtocolReader::LoadingFailed(*this, target, parameters);
     else if (method == "Network.requestServedFromMemoryCache") ProtocolReader::ServedFromMemoryCache(*this, target, parameters);
     else if (method.rfind("Network.webSocket", 0) == 0) ProtocolReader::WebSocket(*this, target, method, parameters);
+    else if (method == "Network.requestIntercepted") {
+        // Blocked if its address has a blocked part; on its way otherwise.
+        const auto id = Text(Member(parameters, "requestId"));
+        auto url = Text(Member(Member(parameters, "request"), "url"));
+        for (auto& c : url) if (c >= 'A' && c <= 'Z') c = static_cast<char>(c + 32);
+        const bool blocked = std::any_of(fBlocked.begin(), fBlocked.end(), [&](std::string pattern) {
+            for (auto& c : pattern) if (c >= 'A' && c <= 'Z') c = static_cast<char>(c + 32);
+            return url.find(pattern) != std::string::npos;
+        });
+        if (blocked) SendToTarget(target, "Network.interceptRequestWithError", "{\"requestId\":" + Quoted(id) + ",\"errorType\":\"General\"}");
+        else SendToTarget(target, "Network.interceptContinue", "{\"requestId\":" + Quoted(id) + ",\"stage\":\"request\"}");
+    }
     else if (method == "Console.messageAdded") ProtocolReader::MessageAdded(*this, Member(parameters, "message"));
     else if (method == "Console.messageRepeatCountUpdated") {
         for (auto entry = fEntries.rbegin(); entry != fEntries.rend(); ++entry) {

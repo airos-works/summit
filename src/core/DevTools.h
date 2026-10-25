@@ -280,6 +280,18 @@ public:
     void RequestBody(uint64_t serial);
     // Runs an expression in the page, as typed into the console.
     void Evaluate(const std::string& expression);
+    // Network: the cache off while the tools are open
+    // (Network.setResourceCachingDisabled), in every process of the page.
+    void SetCacheDisabled(bool disabled);
+    bool CacheDisabled() const { return fCacheDisabled; }
+    // Requests whose address contains one of these fail while the tools are
+    // open (Network.addInterception, then interceptRequestWithError).
+    void BlockURL(const std::string& pattern);
+    void UnblockAll();
+    const std::vector<std::string>& BlockedURLs() const { return fBlocked; }
+    // Sends the request again from the page (fetch() with its method, body
+    // and the headers a page may set), as other browsers' replay does.
+    bool Replay(uint64_t serial);
     // Asks the page for an object's properties (once; they come with
     // Changes::properties), and what it answered so far, else null.
     void LoadProperties(const std::string& objectId);
@@ -366,7 +378,9 @@ private:
     static uint64_t FirstCommand();
     uint64_t fNextSerial = 1, fNextCommand = FirstCommand(), fBodyBytes = 0;
     int fGroupDepth = 0;
-    bool fPreserveRequests = false, fPreserveConsole = false;
+    bool fPreserveRequests = false, fPreserveConsole = false, fCacheDisabled = false;
+    std::vector<std::string> fBlocked;
+    void ApplyNetworkSettings(const std::string& target);
 };
 
 // General facts, then response and request headers, for the Headers tab.

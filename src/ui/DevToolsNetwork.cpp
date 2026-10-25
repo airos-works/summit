@@ -35,7 +35,8 @@ using namespace devtools;
 namespace {
 constexpr uint32 kFormatToggled = 'dbfm', kWrapToggled = 'dbwr', kCopyBody = 'dbcp', kClearRequests = 'dncl',
     kPreserveRequests = 'dnpr', kFilterRequests = 'dnfl', kTypeChosen = 'dnty', kRequestSelected = 'dnsl', kCopyCurl = 'dncu',
-    kExportHar = 'dnhx', kHarChosen = 'dnhc';
+    kExportHar = 'dnhx', kHarChosen = 'dnhc', kRequestMenu = 'dnrm', kReplay = 'dnrp', kBlockURL = 'dnbk', kUnblockAll = 'dnub',
+    kDisableCache = 'dndc';
 
 // "0.1.0", the browser's version for a HAR's creator.
 std::string ApplicationVersion()
@@ -360,9 +361,10 @@ NetworkPanel::NetworkPanel(Session& session, DevToolsHost& host)
     }
     fTypes = new BMenuField("types", nullptr, types);
     fTypes->SetExplicitMaxSize(BSize(be_plain_font->StringWidth("Fetch and XHR") + 60, B_SIZE_UNSET));
-    fCopyCurl = new BButton("copy-curl", "Copy as cURL", new BMessage(kCopyCurl));
-    fCopyCurl->SetToolTip("Copy the selected request as a curl command");
-    fCopyCurl->SetEnabled(false);
+    fRequestMenu = new BButton("request-menu", "Request ▾", new BMessage(kRequestMenu));
+    fRequestMenu->SetToolTip("Copy the selected request as a curl command, send it again, or block its address");
+    fDisableCache = new BCheckBox("disable-cache", "Disable cache", new BMessage(kDisableCache));
+    fDisableCache->SetToolTip("Load everything from the network while the tools are open");
     fExportHar = new BButton("export-har", "Export HAR…", new BMessage(kExportHar));
     fExportHar->SetToolTip("Save the requests listed as an HTTP Archive (.har)");
     fList = new BColumnListView("requests", 0, B_NO_BORDER);
@@ -425,7 +427,8 @@ NetworkPanel::NetworkPanel(Session& session, DevToolsHost& host)
             .AddStrut(8)
             .Add(fTypes)
             .Add(fFilter, 1)
-            .Add(fCopyCurl)
+            .Add(fDisableCache)
+            .Add(fRequestMenu)
             .Add(fExportHar)
         .End()
         .AddSplit(split, 1)
@@ -449,7 +452,8 @@ void NetworkPanel::AttachedToWindow()
     fFilter->SetTarget(this);
     fTypes->Menu()->SetTargetForItems(this);
     fList->SetTarget(this);
-    fCopyCurl->SetTarget(this);
+    fRequestMenu->SetTarget(this);
+    fDisableCache->SetTarget(this);
     fExportHar->SetTarget(this);
 }
 
@@ -477,6 +481,50 @@ void NetworkPanel::MessageReceived(BMessage* message)
             break;
         case kCopyCurl:
             if (const auto* request = fSession.FindRequest(fSelected)) CopyToClipboard(CurlCommand(*request));
+            break;
+        case kRequestMenu: {
+            const auto* request = fSession.FindRequest(fSelected);
+            auto* menu = new BPopUpMenu("request", false, false);
+            const auto add = [&](const std::string& label, uint32 what, bool enabled) {
+                auto* item = new BMenuItem(label.c_str(), new BMessage(what));
+                item->SetEnabled(enabled);
+                menu->AddItem(item);
+            };
+            add("Copy as cURL", kCopyCurl, request);
+            add("Replay", kReplay, request && !request->webSocket && request->url.rfind("http", 0) == 0);
+            menu->AddSeparatorItem();
+            // Blocked by its address without the query, so its variants are too.
+            const auto address = request ? request->url.substr(0, request->url.find_first_of("?#")) : std::string();
+            const auto scheme = address.find("://");
+            auto shown = scheme == std::string::npos ? address : address.substr(scheme + 3);
+            if (shown.size() > 60) shown = shown.substr(0, 59) + "…";
+            add(shown.empty() ? std::string("Block This Address") : "Block " + shown, kBlockURL, !address.empty());
+            const auto blocked = fSession.BlockedURLs().size();
+            add(blocked ? "Unblock All (" + std::to_string(blocked) + ")" : std::string("Unblock All"), kUnblockAll, blocked);
+            menu->SetTargetForItems(this);
+            menu->SetAsyncAutoDestruct(true);
+            const auto frame = fRequestMenu->ConvertToScreen(fRequestMenu->Bounds());
+            menu->Go(frame.LeftBottom() + BPoint(0, 1), true, false, frame, true);
+            break;
+        }
+        case kReplay:
+            if (fSession.Replay(fSelected)) fHost.Sync();
+            break;
+        case kBlockURL:
+            if (const auto* request = fSession.FindRequest(fSelected)) {
+                fSession.BlockURL(request->url.substr(0, request->url.find_first_of("?#")));
+                fHost.Sync();
+                ShowSummary();
+            }
+            break;
+        case kUnblockAll:
+            fSession.UnblockAll();
+            fHost.Sync();
+            ShowSummary();
+            break;
+        case kDisableCache:
+            fSession.SetCacheDisabled(fDisableCache->Value() == B_CONTROL_ON);
+            fHost.Sync();
             break;
         case kExportHar: {
             if (!fHarPanel) {
@@ -528,7 +576,6 @@ bool NetworkPanel::ExportHar(const std::string& path, std::string& error) const
 void NetworkPanel::Select(Row* row)
 {
     const uint64 selected = row ? row->serial : 0;
-    fCopyCurl->SetEnabled(selected != 0);
     if (selected == fSelected) return;
     fSelected = selected;
     ShowSelection();
@@ -580,7 +627,22 @@ bool NetworkPanel::Command(const std::string& action, const std::string& argumen
     } else if (action == "format") fResponseBody->SetFormatted(on);
     else if (action == "wrap") fResponseBody->SetWrapped(on);
     else if (action == "copy") fResponseBody->CopyShown();
-    else if (action == "copy-curl") {
+    else if (action == "disable-cache") {
+        fDisableCache->SetValue(on ? B_CONTROL_ON : B_CONTROL_OFF);
+        fSession.SetCacheDisabled(on);
+        fHost.Sync();
+    } else if (action == "block-url") {
+        fSession.BlockURL(argument);
+        fHost.Sync();
+        ShowSummary();
+    } else if (action == "unblock-all") {
+        fSession.UnblockAll();
+        fHost.Sync();
+        ShowSummary();
+    } else if (action == "replay") {
+        if (!fSession.Replay(fSelected)) error = "No request that can be sent again is selected";
+        fHost.Sync();
+    } else if (action == "copy-curl") {
         if (const auto* request = fSession.FindRequest(fSelected)) CopyToClipboard(CurlCommand(*request));
         else error = "No request is selected";
     } else if (action == "export-har") ExportHar(argument, error);
@@ -597,6 +659,7 @@ std::string NetworkPanel::StateJSON()
         {"shown", shown}, {"selected", fSelected}, {"summary", fSummary->Text()}, {"detail", fDetails->Selection()},
         {"detailShown", fDetailCards->VisibleIndex() == 1}, {"headers", fHeaders->Text()}, {"messages", fMessages->Text()},
         {"curl", [&] { const auto* request = fSession.FindRequest(fSelected); return request ? CurlCommand(*request) : std::string(); }()},
+        {"cacheDisabled", fSession.CacheDisabled()}, {"blocked", fSession.BlockedURLs()},
         {"request", json::parse(fRequestBody->StateJSON())}, {"response", json::parse(fResponseBody->StateJSON())}};
     return state.dump(-1, ' ', false, json::error_handler_t::replace);
 }
@@ -744,7 +807,10 @@ void NetworkPanel::ShowBody(const Request& request)
 
 void NetworkPanel::ShowSummary()
 {
-    fSummary->SetText(SummarizeRequests(fSession.Requests(), fRows.size()).c_str());
+    auto summary = SummarizeRequests(fSession.Requests(), fRows.size());
+    if (const auto blocked = fSession.BlockedURLs().size())
+        summary += " · " + std::to_string(blocked) + (blocked == 1 ? " address blocked" : " addresses blocked");
+    fSummary->SetText(summary.c_str());
 }
 }
 #endif
