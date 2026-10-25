@@ -56,7 +56,8 @@ in it at once, and after a reload the node that was selected is found again.
   border and margin in Web Inspector's colours. (Without Web Inspector's
   label of tag, size and role: see [Not done](#not-done).)
 - **Finding** (Alt+F, or the *Find* field): text, a CSS selector or an
-  XPath; Enter selects the next match ("2 of 7"), Shift+Enter the one before.
+  XPath, found as it is typed (once typing pauses for 0.3 s); Enter selects
+  the next match ("2 of 7"), Shift+Enter the one before.
 - **Editing**: a double click on an element's attributes edits them all as
   text (`id="main" class="note"`: those left out are removed); on the tag
   name renames the element; on a text or a comment edits it. Enter keeps the
@@ -74,7 +75,7 @@ in it at once, and after a reload the node that was selected is found again.
   on the element under the pointer (inside frames of the page's own site and
   open shadow roots too).
 
-On the right, two tabs for the selected element:
+On the right, tabs for the selected element:
 
 - **Styles**: its `element.style` (which takes new declarations), the rules
   that match it from the strongest down with `@media` and the like above
@@ -102,6 +103,14 @@ On the right, two tabs for the selected element:
   `position` offsets around them for a positioned element) and the computed
   value of the properties the element's rules set or it inherits; *Show all*
   lists all of them. *Filter* as above.
+- **Accessibility**: the role and label assistive technology is given, then
+  the element's states (asked for only while the tab shows).
+- **Event Listeners**: the listeners its events reach, its own first, then
+  those of the elements above it, the document and `window`
+  (`DOM.getEventListenersForNode`): event, where it is registered, the
+  handler's name (and script and line when known), and capture or bubble,
+  once, passive, an `on…` attribute, or switched off. Test action:
+  `elements-tab listeners`; the state's `elements.listeners` lists them.
 
 
 ### Network

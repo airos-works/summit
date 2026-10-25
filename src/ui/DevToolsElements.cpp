@@ -8,6 +8,7 @@
 #include <GroupView.h>
 #include <LayoutBuilder.h>
 #include <MenuItem.h>
+#include <MessageRunner.h>
 #include <PopUpMenu.h>
 #include <ScrollBar.h>
 #include <ScrollView.h>
@@ -30,11 +31,12 @@ namespace {
 constexpr uint32 kPickToggled = 'deps', kSearchRun = 'desr', kSearchPrevious = 'desp', kSearchNext = 'desn',
     kStyleFilterChanged = 'desf', kComputedFilterChanged = 'decf', kComputedAllChanged = 'deca', kEditDone = 'deed',
     kTreeCommand = 'detc', kStyleCommand = 'dest', kApplyHTML = 'deah', kSideTabChanged = 'deat', kForceMenu = 'defm',
-    kForcePseudo = 'defp';
+    kForcePseudo = 'defp', kSearchTyped = 'deft', kSearchSettled = 'dess';
 // What :hov can force on an element, as other browsers offer.
 constexpr const char* kPseudoClasses[] = {"active", "focus", "focus-visible", "focus-within", "hover", "visited"};
-// The side's tabs: Styles, Computed, Accessibility.
-enum { kStylesTab, kComputedTab, kAccessibilityTab };
+// The side's tabs: Styles, Computed, Accessibility, Event Listeners.
+enum { kStylesTab, kComputedTab, kAccessibilityTab, kListenersTab };
+enum { kListenerEvent, kListenerNode, kListenerHandler, kListenerOptions };
 
 // Tells the panel when another of the side's tabs is shown.
 class SideTabs final : public BTabView {
@@ -1239,6 +1241,7 @@ ElementsPanel::ElementsPanel(Session& session, DevToolsHost& host)
     fPick->SetToolTip("Choose an element by pointing at it in the page (Shift+Alt+C)");
     fSearch = new BTextControl("search", "Find:", "", new BMessage(kSearchRun));
     fSearch->TextView()->SetExplicitMinSize(BSize(160, B_SIZE_UNSET));
+    fSearch->SetModificationMessage(new BMessage(kSearchTyped));
     fSearch->SetToolTip("Text, a CSS selector or an XPath; Enter finds the next match (Alt+F)");
     fSearchCount = new BStringView("search-count", "");
     fSearchCount->SetExplicitMinSize(BSize(be_plain_font->StringWidth("0000 of 0000"), B_SIZE_UNSET));
@@ -1306,12 +1309,21 @@ ElementsPanel::ElementsPanel(Session& session, DevToolsHost& host)
     fAccessibility->AddColumn(new BStringColumn("Property", 190, 60, 1000, B_TRUNCATE_END), kComputedName);
     fAccessibility->AddColumn(new BStringColumn("Value", 260, 60, 4000, B_TRUNCATE_END), kComputedValue);
     fAccessibility->SetSortingEnabled(false);
+    // The listeners its events reach: its own, then those of the nodes above it.
+    fListeners = new BColumnListView("listeners", 0, B_NO_BORDER);
+    fListeners->AddColumn(new BStringColumn("Event", 110, 40, 400, B_TRUNCATE_END), kListenerEvent);
+    fListeners->AddColumn(new BStringColumn("On", 150, 40, 1000, B_TRUNCATE_END), kListenerNode);
+    fListeners->AddColumn(new BStringColumn("Handler", 150, 40, 1000, B_TRUNCATE_END), kListenerHandler);
+    fListeners->AddColumn(new BStringColumn("Options", 160, 40, 1000, B_TRUNCATE_END), kListenerOptions);
+    fListeners->SetSortingEnabled(false);
     stylesTab->SetName("Styles");
     computedTab->SetName("Computed");
     fAccessibility->SetName("Accessibility");
+    fListeners->SetName("Event Listeners");
     add(stylesTab, "Styles");
     add(computedTab, "Computed");
     add(fAccessibility, "Accessibility");
+    add(fListeners, "Event Listeners");
 
     auto* split = new BSplitView(B_HORIZONTAL, 2);
     split->SetCollapsible(false);
@@ -1392,6 +1404,17 @@ void ElementsPanel::MessageReceived(BMessage* message)
             fHost.Sync();
             break;
         }
+        case kSearchTyped:
+            // Find as the text is typed, once the typing pauses.
+            fSearchTimer = std::make_unique<BMessageRunner>(BMessenger(this), BMessage(kSearchSettled), 300000, 1);
+            break;
+        case kSearchSettled:
+            fSearchTimer.reset();
+            if (fSearch->Text() != dom.SearchQuery()) {
+                dom.Search(fSearch->Text());
+                fHost.Sync();
+            }
+            break;
         case kSearchPrevious:
         case kSearchNext:
             if (fSearch->Text() != dom.SearchQuery()) dom.Search(fSearch->Text());
@@ -1457,6 +1480,7 @@ void ElementsPanel::Apply(const Changes& changes)
         AskAccessibility();
     }
     if (what.accessibility) ShowAccessibility();
+    if (what.listeners) ShowListeners();
     if (what.search) ShowSearch();
     if (what.picking) ShowPicking();
     if (what.picked) fPicked = true;
@@ -1518,8 +1542,39 @@ void ElementsPanel::ShowComputed()
 
 void ElementsPanel::AskAccessibility()
 {
+    // Each side tab that asks the page is asked for when it shows.
     fAccessibility->Clear();
+    fListeners->Clear();
     if (fSide->Selection() == kAccessibilityTab) fSession.DOM().RequestAccessibility();
+    if (fSide->Selection() == kListenersTab) fSession.DOM().RequestListeners();
+}
+
+void ElementsPanel::ShowListeners()
+{
+    const auto& dom = fSession.DOM();
+    const auto& listeners = dom.Listeners();
+    fListeners->Clear();
+    if (listeners.node != dom.Selected()) return;
+    const auto add = [&](const std::string& event, const std::string& node, const std::string& handler, const std::string& options) {
+        auto* row = new BRow();
+        row->SetField(new BStringField(event.c_str()), kListenerEvent);
+        row->SetField(new BStringField(node.c_str()), kListenerNode);
+        row->SetField(new BStringField(handler.c_str()), kListenerHandler);
+        row->SetField(new BStringField(options.c_str()), kListenerOptions);
+        fListeners->AddRow(row);
+    };
+    if (!listeners.error.empty()) add("error", listeners.error, "", "");
+    else if (listeners.listeners.empty()) add("No listeners", "", "", "");
+    for (const auto& listener : listeners.listeners) {
+        std::string options = listener.capture ? "capture" : "bubble";
+        if (listener.once) options += ", once";
+        if (listener.passive) options += ", passive";
+        if (listener.attribute) options += ", attribute";
+        if (listener.disabled) options += ", disabled";
+        auto handler = listener.handler;
+        if (!listener.location.empty()) handler += " (" + listener.location + ")";
+        add(listener.type, listener.node, handler, options);
+    }
 }
 
 void ElementsPanel::ShowAccessibility()
@@ -1647,7 +1702,8 @@ bool ElementsPanel::Command(const std::string& action, const std::string& argume
     } else if (verb == "computed-all") {
         fComputedAll->SetValue(argument == "on" ? B_CONTROL_ON : B_CONTROL_OFF);
         ShowComputed();
-    } else if (verb == "tab") fSide->Select(argument == "computed" ? kComputedTab : argument == "accessibility" ? kAccessibilityTab : kStylesTab);
+    } else if (verb == "tab") fSide->Select(argument == "computed" ? kComputedTab : argument == "accessibility" ? kAccessibilityTab
+        : argument == "listeners" ? kListenersTab : kStylesTab);
     else if (verb == "edit-line") {
         // Opens the tree's editor as a double click does.
         fTree->Command(argument == "tag" ? kEditTag : argument == "text" ? kEditText : argument == "add-attribute" ? kAddAttribute
@@ -1699,7 +1755,12 @@ std::string ElementsPanel::StateJSON()
             {"shown", fSearchCount->Text()}}},
         {"styles", {{"node", styles.node}, {"loading", dom.StylesLoading()}, {"error", styles.error}, {"blocks", blocks}}},
         {"computed", computed}, {"computedShown", fComputed->CountRows()}, {"box", boxes}, {"crumbs", fCrumbs->Text()},
-        {"sideTab", fSide->Selection()}, {"accessibility", [&] {
+        {"sideTab", fSide->Selection()}, {"listeners", [&] {
+            json rows = json::array();
+            for (const auto& listener : dom.Listeners().listeners)
+                rows.push_back(listener.type + " on " + listener.node + ": " + listener.handler + (listener.capture ? " (capture)" : ""));
+            return json {{"node", dom.Listeners().node}, {"error", dom.Listeners().error}, {"rows", rows}, {"shown", fListeners->CountRows()}};
+        }()}, {"accessibility", [&] {
             json properties = json::object();
             for (const auto& [name, value] : dom.Accessibility().properties) properties[name] = value;
             return json {{"node", dom.Accessibility().node}, {"error", dom.Accessibility().error}, {"properties", properties},

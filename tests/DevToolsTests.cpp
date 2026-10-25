@@ -1240,6 +1240,21 @@ static void TestElementStyles()
     dom.SetForcedPseudoClasses(5, {});
     take();
     CHECK(dom.ForcedPseudoClasses(5).empty());
+    // Event listeners of the selected element and above it.
+    dom.RequestListeners();
+    take();
+    CHECK(tags.count("DOM.getEventListenersForNode"));
+    answer(tags["DOM.getEventListenersForNode"], {{"listeners", json::array({
+        {{"type", "click"}, {"useCapture", false}, {"isAttribute", false}, {"nodeId", 5}, {"handlerName", "onClick"},
+            {"location", {{"scriptId", "7"}, {"lineNumber", 11}, {"columnNumber", 2}}}, {"once", true}},
+        {{"type", "load"}, {"useCapture", true}, {"isAttribute", true}, {"onWindow", true}, {"passive", true}}})}});
+    CHECK(dom.TakeChanges().listeners);
+    const auto& listeners = dom.Listeners();
+    CHECK(listeners.node == 5 && listeners.error.empty() && listeners.listeners.size() == 2);
+    CHECK(listeners.listeners[0].type == "click" && listeners.listeners[0].handler == "onClick" && listeners.listeners[0].once
+        && !listeners.listeners[0].capture && listeners.listeners[0].location == "script 7, line 12" && !listeners.listeners[0].node.empty());
+    CHECK(listeners.listeners[1].node == "window" && listeners.listeners[1].capture && listeners.listeners[1].attribute
+        && listeners.listeners[1].passive && listeners.listeners[1].handler == "(anonymous)");
 }
 
 static void TestPageSource()
