@@ -9,6 +9,7 @@
 
 class BMessageRunner;
 class BTabView;
+class BButton;
 class BWebKitInspectorSession;
 
 namespace summit {
@@ -32,8 +33,14 @@ public:
     void SetInspector(std::shared_ptr<BWebKitInspectorSession> inspector, const std::string& pageTarget = { });
     void MessageReceived(BMessage* message) override;
     bool QuitRequested() override;
+    // Whether new tools open docked: as the last ones were left.
+    static bool DockedByDefault();
 
 private:
+    // Docked under the browser's page (kDeveloperToolsDock), or a window of
+    // its own again.
+    void Dock(const BMessage& place);
+    void Undock();
     void Sync() override;
     void DispatchMessage(BMessage* message, BHandler* handler) override;
     // Tells the panels which one is shown, when that changed.
@@ -55,6 +62,10 @@ private:
     SourcesPanel* fSources;
     PerformancePanel* fPerformance;
     int32 fShownPanel = -1;
+    BButton* fDockButton;
+    bool fDocked = false;
+    BWindow* fDockOwner = nullptr;
+    BRect fUndockedFrame;
     bool fSyncing = false;
     bool fOverflowShown = false;
     // SUMMIT_DEVTOOLS_TRACE=1: requests and messages also go to standard error.
