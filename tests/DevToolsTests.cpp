@@ -625,6 +625,53 @@ static void TestObjectTree()
     CHECK(!session.Properties("{\"id\":7}"));
 }
 
+// Copy as cURL and HAR export.
+static void TestExports()
+{
+    Request get;
+    get.url = "https://example.com/a?x=1&y=it's";
+    get.method = "GET";
+    get.requestHeaders = {{"Accept", "text/html"}, {":authority", "example.com"}, {"Cookie", "a=b'c"}};
+    CHECK_TEXT(CurlCommand(get), "curl 'https://example.com/a?x=1&y=it'\\''s' \\\n  -H 'Accept: text/html' \\\n  -H 'Cookie: a=b'\\''c'");
+    Request post;
+    post.url = "https://example.com/api";
+    post.method = "POST";
+    post.hasRequestBody = true;
+    post.requestBody = "{\"q\":1}";
+    post.requestHeaders = {{"Content-Type", "application/json"}, {"Content-Length", "7"}};
+    CHECK_TEXT(CurlCommand(post), "curl 'https://example.com/api' \\\n  -H 'Content-Type: application/json' \\\n  --data-raw '{\"q\":1}'");
+    Request put = post;
+    put.method = "PUT";
+    CHECK(CurlCommand(put).find("-X 'PUT'") != std::string::npos);
+
+    get.status = 200;
+    get.statusText = "OK";
+    get.protocol = "h2";
+    get.mimeType = "text/html";
+    get.responseHeaders = {{"Content-Type", "text/html"}};
+    get.started = 10;
+    get.responded = 10.25;
+    get.ended = 10.5;
+    get.wallTime = 1790000000.5;
+    get.size = 5;
+    get.transferred = 120;
+    get.bodyState = BodyState::Loaded;
+    get.body = "hello";
+    get.remoteAddress = "93.184.216.34:443";
+    const auto har = json::parse(HarArchive({&get, &post, nullptr}, "0.1.0"));
+    CHECK(har["log"]["version"] == "1.2" && har["log"]["creator"]["name"] == "Summit" && har["log"]["entries"].size() == 2);
+    const auto& first = har["log"]["entries"][0];
+    CHECK(first["startedDateTime"] == "2026-09-21T14:13:20.500Z" && first["time"] == 500 && first["timings"]["wait"] == 250
+        && first["timings"]["receive"] == 250);
+    CHECK(first["request"]["httpVersion"] == "HTTP/2" && first["request"]["queryString"].size() == 2
+        && first["request"]["queryString"][1]["value"] == "it's" && first["request"]["headers"].size() == 3);
+    CHECK(first["response"]["status"] == 200 && first["response"]["content"]["text"] == "hello" && first["response"]["bodySize"] == 120
+        && first["serverIPAddress"] == "93.184.216.34:443");
+    const auto& second = har["log"]["entries"][1];
+    CHECK(second["request"]["postData"]["mimeType"] == "application/json" && second["request"]["postData"]["text"] == "{\"q\":1}"
+        && !second["response"]["content"].contains("text"));
+}
+
 static void TestHeaders()
 {
     Session session;
@@ -1383,6 +1430,7 @@ int main()
     TestPageSource();
     TestConsole();
     TestObjectTree();
+    TestExports();
     TestHeaders();
     TestKinds();
     TestJSON();

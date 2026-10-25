@@ -1289,4 +1289,97 @@ std::string ConsoleMessageText(std::string_view messageJSON)
 {
     return MessageText(json::parse(messageJSON, nullptr, false));
 }
+
+// 'text' for a POSIX shell: a quote ends, is escaped and opens again.
+static std::string ShellQuoted(const std::string& text)
+{
+    std::string quoted = "'";
+    for (const char c : text) {
+        if (c == '\'') quoted += "'\\''";
+        else quoted += c;
+    }
+    return quoted + "'";
+}
+
+std::string CurlCommand(const Request& request)
+{
+    std::string command = "curl " + ShellQuoted(request.url);
+    const bool body = request.hasRequestBody;
+    if (!request.method.empty() && request.method != "GET" && !(request.method == "POST" && body))
+        command += " \\\n  -X " + ShellQuoted(request.method);
+    for (const auto& header : request.requestHeaders) {
+        // HTTP/2's pseudo-headers are curl's own; the length follows the body.
+        if (header.name.empty() || header.name[0] == ':' || header.name == "Content-Length" || header.name == "content-length") continue;
+        command += " \\\n  -H " + ShellQuoted(header.name + ": " + header.value);
+    }
+    if (body) command += " \\\n  --data-raw " + ShellQuoted(request.requestBody);
+    return command;
+}
+
+std::string HarArchive(const std::vector<const Request*>& requests, const std::string& version)
+{
+    const auto headers = [](const std::vector<Header>& list) {
+        json array = json::array();
+        for (const auto& header : list) array.push_back({{"name", header.name}, {"value", header.value}});
+        return array;
+    };
+    const auto isoTime = [](double seconds) {
+        if (seconds <= 0) return std::string("1970-01-01T00:00:00.000Z");
+        const auto whole = static_cast<std::time_t>(seconds);
+        std::tm utc { };
+        gmtime_r(&whole, &utc);
+        char buffer[40];
+        std::snprintf(buffer, sizeof buffer, "%04d-%02d-%02dT%02d:%02d:%02d.%03dZ", utc.tm_year + 1900, utc.tm_mon + 1, utc.tm_mday,
+            utc.tm_hour, utc.tm_min, utc.tm_sec, static_cast<int>((seconds - static_cast<double>(whole)) * 1000) % 1000);
+        return std::string(buffer);
+    };
+    const auto milliseconds = [](double from, double to) { return from >= 0 && to >= from ? std::round((to - from) * 1e5) / 100 : -1.0; };
+    json entries = json::array();
+    for (const auto* request : requests) {
+        if (!request) continue;
+        const auto httpVersion = request->protocol.empty() ? std::string("HTTP/1.1")
+            : request->protocol == "h2" ? std::string("HTTP/2") : request->protocol;
+        json queries = json::array();
+        if (const auto question = request->url.find('?'); question != std::string::npos) {
+            auto query = request->url.substr(question + 1);
+            query = query.substr(0, query.find('#'));
+            for (size_t from = 0; from <= query.size() && !query.empty();) {
+                const auto end = std::min(query.find('&', from), query.size());
+                const auto part = query.substr(from, end - from);
+                const auto equals = part.find('=');
+                if (!part.empty()) queries.push_back({{"name", part.substr(0, equals)}, {"value", equals == std::string::npos ? "" : part.substr(equals + 1)}});
+                from = end + 1;
+            }
+        }
+        json sent = {{"method", request->method.empty() ? "GET" : request->method}, {"url", request->url}, {"httpVersion", httpVersion},
+            {"headers", headers(request->requestHeaders)}, {"queryString", queries}, {"cookies", json::array()}, {"headersSize", -1},
+            {"bodySize", request->hasRequestBody ? static_cast<int64_t>(request->requestBody.size()) : 0}};
+        if (request->hasRequestBody) {
+            std::string type;
+            for (const auto& header : request->requestHeaders)
+                if (header.name == "Content-Type" || header.name == "content-type") type = header.value;
+            sent["postData"] = {{"mimeType", type}, {"text", ValidUTF8(request->requestBody)}};
+        }
+        json content = {{"size", static_cast<int64_t>(request->size)}, {"mimeType", request->mimeType}};
+        if (request->bodyState == BodyState::Loaded) content["text"] = ValidUTF8(request->body);
+        std::string location;
+        for (const auto& header : request->responseHeaders)
+            if (header.name == "Location" || header.name == "location") location = header.value;
+        json received = {{"status", request->failed ? 0 : request->status}, {"statusText", request->statusText}, {"httpVersion", httpVersion},
+            {"headers", headers(request->responseHeaders)}, {"cookies", json::array()}, {"content", content}, {"redirectURL", location},
+            {"headersSize", -1}, {"bodySize", request->transferred ? static_cast<int64_t>(request->transferred) : -1}};
+        const auto wait = milliseconds(request->started, request->responded);
+        const auto receive = milliseconds(request->responded, request->ended);
+        const auto total = milliseconds(request->started, request->ended);
+        json entry = {{"startedDateTime", isoTime(request->wallTime)}, {"time", std::max(0.0, total)}, {"request", sent},
+            {"response", received}, {"cache", json::object()},
+            {"timings", {{"send", 0}, {"wait", std::max(0.0, wait)}, {"receive", std::max(0.0, receive)}}}};
+        if (!request->remoteAddress.empty()) entry["serverIPAddress"] = request->remoteAddress;
+        if (request->failed && !request->error.empty()) entry["comment"] = request->error;
+        entries.push_back(std::move(entry));
+    }
+    json archive = {{"log", {{"version", "1.2"}, {"creator", {{"name", "Summit"}, {"version", version}}}, {"pages", json::array()},
+        {"entries", entries}}}};
+    return archive.dump(2, ' ', false, json::error_handler_t::replace);
+}
 }

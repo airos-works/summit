@@ -2,7 +2,14 @@
 #include "DevToolsPanels.h"
 #include <interface/ColumnListView.h>
 #include <interface/ColumnTypes.h>
+#include <AppFileInfo.h>
+#include <Application.h>
 #include <Bitmap.h>
+#include <Entry.h>
+#include <File.h>
+#include <FilePanel.h>
+#include <Path.h>
+#include <Roster.h>
 #include <Button.h>
 #include <CardLayout.h>
 #include <CheckBox.h>
@@ -20,13 +27,27 @@
 #include <TranslationUtils.h>
 #include <nlohmann/json.hpp>
 #include <algorithm>
+#include <fstream>
 #include <memory>
 
 namespace summit {
 using namespace devtools;
 namespace {
 constexpr uint32 kFormatToggled = 'dbfm', kWrapToggled = 'dbwr', kCopyBody = 'dbcp', kClearRequests = 'dncl',
-    kPreserveRequests = 'dnpr', kFilterRequests = 'dnfl', kTypeChosen = 'dnty', kRequestSelected = 'dnsl';
+    kPreserveRequests = 'dnpr', kFilterRequests = 'dnfl', kTypeChosen = 'dnty', kRequestSelected = 'dnsl', kCopyCurl = 'dncu',
+    kExportHar = 'dnhx', kHarChosen = 'dnhc';
+
+// "0.1.0", the browser's version for a HAR's creator.
+std::string ApplicationVersion()
+{
+    app_info info;
+    version_info version { };
+    if (!be_app || be_app->GetAppInfo(&info) != B_OK) return { };
+    BFile file(&info.ref, B_READ_ONLY);
+    BAppFileInfo fileInfo(&file);
+    if (fileInfo.InitCheck() != B_OK || fileInfo.GetVersionInfo(&version, B_APP_VERSION_KIND) != B_OK) return { };
+    return version.short_info;
+}
 // Bodies over this are shown as they came: laying them out would hold the window up.
 constexpr size_t kLargestFormatted = 32 * 1024 * 1024;
 
@@ -339,6 +360,11 @@ NetworkPanel::NetworkPanel(Session& session, DevToolsHost& host)
     }
     fTypes = new BMenuField("types", nullptr, types);
     fTypes->SetExplicitMaxSize(BSize(be_plain_font->StringWidth("Fetch and XHR") + 60, B_SIZE_UNSET));
+    fCopyCurl = new BButton("copy-curl", "Copy as cURL", new BMessage(kCopyCurl));
+    fCopyCurl->SetToolTip("Copy the selected request as a curl command");
+    fCopyCurl->SetEnabled(false);
+    fExportHar = new BButton("export-har", "Export HAR…", new BMessage(kExportHar));
+    fExportHar->SetToolTip("Save the requests listed as an HTTP Archive (.har)");
     fList = new BColumnListView("requests", 0, B_NO_BORDER);
     fList->AddColumn(new Column("Name", 250, false, B_TRUNCATE_MIDDLE), kName);
     fList->AddColumn(new Column("Status", 80, false), kStatus);
@@ -395,6 +421,8 @@ NetworkPanel::NetworkPanel(Session& session, DevToolsHost& host)
             .AddStrut(8)
             .Add(fTypes)
             .Add(fFilter, 1)
+            .Add(fCopyCurl)
+            .Add(fExportHar)
         .End()
         .AddSplit(split, 1)
             .AddGroup(B_VERTICAL, 0, 1)
@@ -417,6 +445,8 @@ void NetworkPanel::AttachedToWindow()
     fFilter->SetTarget(this);
     fTypes->Menu()->SetTargetForItems(this);
     fList->SetTarget(this);
+    fCopyCurl->SetTarget(this);
+    fExportHar->SetTarget(this);
 }
 
 void NetworkPanel::MessageReceived(BMessage* message)
@@ -441,14 +471,60 @@ void NetworkPanel::MessageReceived(BMessage* message)
             fCategory = message->GetInt32("category", 0);
             Rebuild();
             break;
+        case kCopyCurl:
+            if (const auto* request = fSession.FindRequest(fSelected)) CopyToClipboard(CurlCommand(*request));
+            break;
+        case kExportHar: {
+            if (!fHarPanel) {
+                BMessenger target(this);
+                fHarPanel = std::make_unique<BFilePanel>(B_SAVE_PANEL, &target, nullptr, 0, false, new BMessage(kHarChosen));
+            }
+            // Named after the page's host, as other browsers do.
+            Request page;
+            page.url = fSession.PageURL();
+            std::string name = page.Host();
+            if (name.empty()) name = "requests";
+            fHarPanel->SetSaveText((name + ".har").c_str());
+            fHarPanel->Window()->SetTitle("Summit: Export HAR");
+            fHarPanel->Show();
+            break;
+        }
+        case kHarChosen: {
+            entry_ref directory;
+            const char* name = nullptr;
+            if (message->FindRef("directory", &directory) != B_OK || message->FindString("name", &name) != B_OK) break;
+            BPath path(&directory);
+            if (path.InitCheck() != B_OK || path.Append(name) != B_OK) break;
+            std::string error;
+            if (!ExportHar(path.Path(), error)) fSummary->SetText(error.c_str());
+            break;
+        }
         case kRequestSelected: Select(static_cast<Row*>(fList->CurrentSelection())); break;
         default: BView::MessageReceived(message);
     }
 }
 
+std::vector<const Request*> NetworkPanel::ShownRequests() const
+{
+    std::vector<const Request*> requests;
+    for (int32 i = 0; i < fList->CountRows(); ++i)
+        if (const auto* request = fSession.FindRequest(static_cast<Row*>(fList->RowAt(i))->serial)) requests.push_back(request);
+    return requests;
+}
+
+bool NetworkPanel::ExportHar(const std::string& path, std::string& error) const
+{
+    std::ofstream file(path, std::ios::binary | std::ios::trunc);
+    file << HarArchive(ShownRequests(), ApplicationVersion());
+    file.close();
+    if (!file) error = "The archive could not be written to " + path;
+    return !!file;
+}
+
 void NetworkPanel::Select(Row* row)
 {
     const uint64 selected = row ? row->serial : 0;
+    fCopyCurl->SetEnabled(selected != 0);
     if (selected == fSelected) return;
     fSelected = selected;
     ShowSelection();
@@ -499,6 +575,10 @@ bool NetworkPanel::Command(const std::string& action, const std::string& argumen
     } else if (action == "format") fResponseBody->SetFormatted(on);
     else if (action == "wrap") fResponseBody->SetWrapped(on);
     else if (action == "copy") fResponseBody->CopyShown();
+    else if (action == "copy-curl") {
+        if (const auto* request = fSession.FindRequest(fSelected)) CopyToClipboard(CurlCommand(*request));
+        else error = "No request is selected";
+    } else if (action == "export-har") ExportHar(argument, error);
     else return false;
     return true;
 }
@@ -511,6 +591,7 @@ std::string NetworkPanel::StateJSON()
     json state = {{"preserve", fPreserve->Value() == B_CONTROL_ON}, {"filter", fFilter->Text()}, {"types", fCategory},
         {"shown", shown}, {"selected", fSelected}, {"summary", fSummary->Text()}, {"detail", fDetails->Selection()},
         {"detailShown", fDetailCards->VisibleIndex() == 1}, {"headers", fHeaders->Text()},
+        {"curl", [&] { const auto* request = fSession.FindRequest(fSelected); return request ? CurlCommand(*request) : std::string(); }()},
         {"request", json::parse(fRequestBody->StateJSON())}, {"response", json::parse(fResponseBody->StateJSON())}};
     return state.dump(-1, ' ', false, json::error_handler_t::replace);
 }
