@@ -151,8 +151,8 @@ does, using WebKit's Cocoa version. Manifest V3 extensions don't get it, as in
 Chrome. Fixture: `tests/fixtures/extensions/tab-get-selected`.
 Verified on the X399 (25 Oct, lf113 build): the callback and promise forms
 and `getSelected(windowId)` gave the same tab as `tabs.query({active: true,
-currentWindow: true})`. An invalid window id is treated as the current
-window rather than refused.
+currentWindow: true})`. An invalid window id was treated as the current
+window; it is refused since (as in Chrome).
 
 ## Detect language (#106)
 
