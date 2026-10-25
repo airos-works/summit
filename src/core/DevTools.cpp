@@ -1152,7 +1152,15 @@ bool Session::Replay(uint64_t serial)
 void Session::TargetDestroyed(const std::string& target)
 {
     fTargets.erase(target);
-    if (fPageTarget == target) fPageTarget.clear();
+    if (fPageTarget == target) {
+        fPageTarget.clear();
+        // Its scripts went with it (a process that ended sends no
+        // Debugger.globalObjectCleared).
+        fScripts.clear();
+        fDebugger.paused = false;
+        fDebugger.frames.clear();
+        fChanges.scripts = fChanges.debugger = true;
+    }
     for (auto& request : fRequests) {
         if (request.target != target) continue;
         // What the page had not finished, it never will.
