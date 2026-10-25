@@ -30,7 +30,7 @@
 //                                             panel, select, detail, format, wrap, copy,
 //                                             clear-network, preserve-network, filter-network,
 //                                             types, clear-console, preserve-console, levels,
-//                                             filter-console, evaluate
+//                                             filter-console, evaluate, inspect, expand
 //   summitctl --team ID closewindow           closes the window (--window N) like its close box
 //   summitctl --team ID search ENGINE          Preferences' search engine (duckduckgo, google, bing)
 //   summitctl --team ID style haiku|safari     Preferences' appearance

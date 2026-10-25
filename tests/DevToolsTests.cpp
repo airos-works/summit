@@ -568,6 +568,63 @@ static void TestConsole()
     CHECK(many.Entries().size() == Session::kMaximumEntries && many.Entries().front().text == "5" && many.TakeChanges().consoleReset);
 }
 
+// The Console's object tree: objects of messages and results, and their
+// properties as the page answers.
+static void TestObjectTree()
+{
+    Session session;
+    session.Start();
+    session.Receive(TargetCreated("page-1"));
+    Sent(session);
+    const json point = {{"type", "object"}, {"className", "Object"}, {"description", "Object"}, {"objectId", "{\"id\":7}"}};
+    session.Receive(Event("page-1", "Console.messageAdded", {{"message", Message("log", "x",
+        {{"parameters", {Value("point"), point, Value(nullptr), {{"type", "object"}, {"subtype", "null"}, {"objectId", "{\"id\":8}"}}}}})}}));
+    const auto& entries = session.Entries();
+    CHECK(entries.size() == 1 && entries[0].objects.size() == 1 && entries[0].objects[0].objectId == "{\"id\":7}"
+        && entries[0].objects[0].label == "Object");
+    session.TakeChanges();
+
+    session.LoadProperties("{\"id\":7}");
+    auto commands = Sent(session);
+    CHECK(commands.size() == 1 && commands[0].method == "Runtime.getDisplayableProperties"
+        && commands[0].parameters["objectId"] == "{\"id\":7}" && commands[0].target == "page-1");
+    // Asked once.
+    session.LoadProperties("{\"id\":7}");
+    CHECK(Sent(session).empty());
+    const auto* properties = session.Properties("{\"id\":7}");
+    CHECK(properties && !properties->loaded);
+    session.Receive(FromTarget("page-1", {{"id", commands[0].id}, {"result", {
+        {"properties", {
+            {{"name", "x"}, {"value", Value(3)}, {"isOwn", true}},
+            {{"name", "child"}, {"value", {{"type", "object"}, {"description", "Point"}, {"objectId", "{\"id\":9}"}}}, {"isOwn", true}},
+            {{"name", "size"}, {"get", {{"type", "function"}, {"objectId", "{\"id\":10}"}}}}}},
+        {"internalProperties", {{{"name", "Prototype"}, {"value", {{"type", "object"}, {"description", "Object"}, {"objectId", "{\"id\":11}"}}}}}}}}}));
+    auto changes = session.TakeChanges();
+    CHECK(changes.properties.size() == 1 && changes.properties[0] == "{\"id\":7}" && changes.Any());
+    properties = session.Properties("{\"id\":7}");
+    CHECK(properties && properties->loaded && properties->error.empty() && properties->items.size() == 4);
+    CHECK(properties->items[0].name == "x" && properties->items[0].value == "3" && properties->items[0].objectId.empty());
+    CHECK(properties->items[1].name == "child" && properties->items[1].value == "Point" && properties->items[1].objectId == "{\"id\":9}");
+    CHECK(properties->items[2].name == "size" && properties->items[2].value == "(…)" && properties->items[2].objectId.empty());
+    CHECK(properties->items[3].name == "[[Prototype]]" && properties->items[3].objectId == "{\"id\":11}");
+
+    // An object the page no longer has.
+    session.LoadProperties("{\"id\":99}");
+    commands = Sent(session);
+    session.Receive(FromTarget("page-1", {{"id", commands[0].id}, {"error", {{"message", "Could not find object with given id"}}}}));
+    properties = session.Properties("{\"id\":99}");
+    CHECK(properties && properties->loaded && !properties->error.empty() && properties->items.empty());
+
+    // A result of the console's input has its object too.
+    session.Evaluate("({a: 1})");
+    commands = Sent(session);
+    session.Receive(FromTarget("page-1", {{"id", commands[0].id}, {"result", {{"result", point}, {"wasThrown", false}}}}));
+    CHECK(entries.back().kind == EntryKind::Result && entries.back().objects.size() == 1);
+    // Clearing the console forgets what was looked into.
+    session.ClearConsole();
+    CHECK(!session.Properties("{\"id\":7}"));
+}
+
 static void TestHeaders()
 {
     Session session;
@@ -1254,6 +1311,7 @@ int main()
     TestElementStyles();
     TestPageSource();
     TestConsole();
+    TestObjectTree();
     TestHeaders();
     TestKinds();
     TestJSON();

@@ -414,6 +414,20 @@ struct ProtocolReader {
         request.finished = true;
     }
 
+    // A value with properties to look into (not null, not a primitive).
+    static bool HasProperties(const json& object)
+    {
+        const auto type = Text(Member(object, "type"));
+        return (type == "object" || type == "function") && Text(Member(object, "subtype")) != "null"
+            && !Text(Member(object, "objectId")).empty();
+    }
+
+    static void AddObject(ConsoleEntry& entry, const json& object)
+    {
+        if (!HasProperties(object) || entry.objects.size() >= 16) return;
+        entry.objects.push_back({Shortened(Render(object, false), 120), Text(Member(object, "objectId"))});
+    }
+
     static void MessageAdded(Session& session, const json& message)
     {
         const auto type = Text(Member(message, "type"));
@@ -440,6 +454,9 @@ struct ProtocolReader {
         entry.column = static_cast<int>(Number(Member(message, "column")));
         entry.repeat = std::max(1, static_cast<int>(Number(Member(message, "repeatCount"), 1)));
         entry.time = Number(Member(message, "timestamp"));
+        if (const auto& parameters = Member(message, "parameters"); parameters.is_array()) {
+            for (const auto& parameter : parameters) AddObject(entry, parameter);
+        }
         if (level == Level::Error || level == Level::Warning || type == "trace" || type == "assert")
             entry.stack = StackText(Member(message, "stackTrace"));
         if (entry.url.empty()) {
@@ -564,8 +581,31 @@ struct ProtocolReader {
                 return;
             }
             const bool thrown = Flag(Member(result, "wasThrown"));
-            session.AddEntry(EntryKind::Result, thrown ? Level::Error : Level::Log,
+            auto& entry = session.AddEntry(EntryKind::Result, thrown ? Level::Error : Level::Log,
                 Shortened(Render(Member(result, "result"), false), kValueLength));
+            AddObject(entry, Member(result, "result"));
+        } else if (pending.kind == Session::Pending::Properties) {
+            auto& properties = session.fProperties[pending.origin];
+            properties.loaded = true;
+            properties.error = error;
+            properties.items.clear();
+            const auto add = [&](const json& property, bool internal) {
+                ObjectProperty item;
+                item.name = Text(Member(property, "name"));
+                if (internal) item.name = "[[" + item.name + "]]";
+                const auto& value = Member(property, "value");
+                if (value.is_object()) {
+                    item.value = Shortened(Render(value, false), kValueLength);
+                    if (HasProperties(value)) item.objectId = Text(Member(value, "objectId"));
+                } else if (Member(property, "get").is_object() || Member(property, "set").is_object())
+                    item.value = "(…)";
+                properties.items.push_back(std::move(item));
+            };
+            if (const auto& list = Member(result, "properties"); list.is_array())
+                for (const auto& property : list) add(property, false);
+            if (const auto& list = Member(result, "internalProperties"); list.is_array())
+                for (const auto& property : list) add(property, true);
+            session.fChanges.properties.push_back(pending.origin);
         }
     }
 };
@@ -944,9 +984,28 @@ void Session::ClearRequests()
     fChanges.requestsReset = true;
 }
 
+void Session::LoadProperties(const std::string& objectId)
+{
+    if (objectId.empty() || fPageTarget.empty() || fProperties.count(objectId)) return;
+    // The page forgets its objects when it moves on; a log kept across pages
+    // must not grow this without end.
+    if (fProperties.size() >= 2000) fProperties.clear();
+    fProperties[objectId];
+    SendToTarget(fPageTarget, "Runtime.getDisplayableProperties", "{\"objectId\":" + Quoted(objectId) + ",\"generatePreview\":true}",
+        Pending::Properties);
+    fPending.rbegin()->second.origin = objectId;
+}
+
+const ObjectProperties* Session::Properties(const std::string& objectId) const
+{
+    const auto found = fProperties.find(objectId);
+    return found == fProperties.end() ? nullptr : &found->second;
+}
+
 void Session::ClearConsole()
 {
     fEntries.clear();
+    fProperties.clear();
     fGroupDepth = 0;
     fChanges.consoleReset = true;
     fChanges.consoleAdded = 0;

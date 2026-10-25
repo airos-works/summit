@@ -14,6 +14,7 @@ class BColumnListView;
 class BMenuField;
 class BOutlineListView;
 class BRow;
+class BSplitView;
 class BStringView;
 class BTabView;
 class BTextControl;
@@ -232,7 +233,10 @@ public:
 
 private:
     class Log;
+    class ObjectTree;
     bool Shows(const devtools::ConsoleEntry& entry) const;
+    // Shows the objects of the entry (its serial) in the object tree.
+    void Inspect(uint64 serial);
     void Rebuild();
     void ShowCounts();
     devtools::Session& fSession;
@@ -252,6 +256,8 @@ private:
     BTextControl* fFilter;
     BStringView* fCounts;
     Log* fLog;
+    BSplitView* fSplit;
+    ObjectTree* fObjects;
     BTextControl* fInput;
 };
 }
