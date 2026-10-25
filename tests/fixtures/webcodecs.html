@@ -78,7 +78,10 @@ async function audioRoundTrip(rate, codec = 'opus', extra = {}) {
     const channels = 2, chunkFrames = rate / 100;
     const config = { codec, sampleRate: rate, numberOfChannels: channels, bitrate: 128000, ...extra };
     const encodeSupport = await AudioEncoder.isConfigSupported(config);
-    const decodeSupport = await AudioDecoder.isConfigSupported({ codec, sampleRate: rate, numberOfChannels: channels });
+    // FLAC and Vorbis decoders need the description the encoder gives: their
+    // support is asked again with it below.
+    const needsDescription = codec == 'flac' || codec == 'vorbis';
+    const decodeSupport = needsDescription ? { supported: true } : await AudioDecoder.isConfigSupported({ codec, sampleRate: rate, numberOfChannels: channels });
     if (!encodeSupport.supported || !decodeSupport.supported)
         return { encode: encodeSupport.supported, decode: decodeSupport.supported };
     const chunks = [];
@@ -116,6 +119,8 @@ async function audioRoundTrip(rate, codec = 'opus', extra = {}) {
         },
         error: error => log(`audio decoder error: ${error.message}`),
     });
+    if (needsDescription && !(await AudioDecoder.isConfigSupported(decoderConfig || { codec, sampleRate: rate, numberOfChannels: channels })).supported)
+        return { encode: true, decode: false, chunks: chunks.length, description: !!(decoderConfig && decoderConfig.description) };
     decoder.configure(decoderConfig || { codec, sampleRate: rate, numberOfChannels: channels });
     for (const chunk of chunks)
         decoder.decode(chunk);

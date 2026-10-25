@@ -149,3 +149,8 @@ second of tone through `AudioEncoder` and back (100 chunks, RMS 0.353–0.355
 against 0.354); a quarter second of FLAC (3 frames, 12000 samples, `s16`)
 and Ogg Vorbis (14 packets, `f32-planar`) decoded without errors at the
 same loudness as the AAC and MP3 files.
+
+FLAC and Vorbis encoding verified on the X399 (25 Oct, fv112 build): a
+second of tone at 48 kHz through `AudioEncoder` and back came out as 11 FLAC
+chunks (48000 frames, `s16`, RMS 0.354: lossless at 16 bits) and 49 Vorbis
+chunks (RMS 0.354), each decoder configured with the encoder's description.
