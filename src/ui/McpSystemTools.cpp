@@ -4,6 +4,7 @@
 // reports and the environment (McpService.h). None of them needs a looper of
 // Summit's, so they answer while the browser hangs.
 #include "McpService.h"
+#include <WebKit/WebKitDiagnostics.h>
 #include <Directory.h>
 #include <Entry.h>
 #include <FindDirectory.h>
@@ -695,9 +696,23 @@ void RegisterMcpSystemTools(mcp::Server& server, const std::shared_ptr<McpContex
                 } catch (const std::exception&) {
                 }
             }
+            // The spare web process the engine keeps ready would take the
+            // tabs, with the environment it started with: end it first.
+            Json spares = Json::array();
+            if (role == "web") {
+                const Json engine = Json::parse(BWebKitDiagnostics(2000000), nullptr, false);
+                const Json* processes = engine.is_object() && engine.contains("processes") ? &engine["processes"] : nullptr;
+                if (processes && processes->contains("webProcesses"))
+                    for (const auto& process : (*processes)["webProcesses"]) {
+                        const team_id spare = process.value("team", -1);
+                        if (!process.value("prewarmed", false) || spare <= 0 || spare == team) continue;
+                        if (kill_team(spare) == B_OK) spares.push_back(spare);
+                    }
+            }
             const status_t status = kill_team(team);
             if (status != B_OK) throw ToolError(std::string("could not end it: ") + std::strerror(status));
-            mcplog::Note("Summit MCP: ended team " + std::to_string(team) + " (" + role + ")");
+            mcplog::Note("Summit MCP: ended team " + std::to_string(team) + " (" + role + ")"
+                + (spares.empty() ? std::string() : ", and the spare web process " + spares.dump()));
             // The views hear of the exit first; a reload before that would go
             // to the dying process.
             team_info gone;
@@ -709,7 +724,7 @@ void RegisterMcpSystemTools(mcp::Server& server, const std::shared_ptr<McpContex
                 } catch (const std::exception&) {
                 }
             }
-            return ToolResult::Data({{"ended", team}, {"role", role}, {"reloadedTabs", reloaded},
+            return ToolResult::Data({{"ended", team}, {"role", role}, {"reloadedTabs", reloaded}, {"endedSpares", spares},
                 {"note", role == "web" ? "Its tabs load again in a new web process (see tabs for the new team)."
                     : "The engine starts a new one when it is needed."}});
         }, true, true});
