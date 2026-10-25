@@ -90,3 +90,9 @@ and as raw frames with an AudioSpecificConfig) and 13 824 MP3 frames, with
 RMS 0.059 and 0.055, the same sample counts and levels ffmpeg's own decoder
 gives; a second of 44.1 kHz tone went through Opus as 50 packets and came
 back as 48 000 frames at 48 kHz with RMS 0.352.
+
+AAC and MP3 encoding verified on the X399 (25 Oct, ac112 build, FFmpeg 8
+libraries): a second of 440 Hz tone went through `AudioEncoder` and back
+through `AudioDecoder` as AAC at 48 kHz with a description (48 chunks, RMS
+0.349), AAC ADTS at 44.1 kHz (45 chunks, 0.345) and MP3 at 44.1 kHz (40
+chunks, 0.329: LAME pads with silence); the tone's RMS is 0.354.
