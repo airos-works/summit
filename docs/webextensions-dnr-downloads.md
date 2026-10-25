@@ -155,9 +155,15 @@ Limits:
 
 - The history lasts only for the session and is not persisted.
 - `filename` subdirectories are flattened to the last path component.
-- Existing files are never overwritten. Every `conflictAction` behaves like
-  `uniquify`.
-- `saveAs` is accepted but no dialog is shown.
+- `saveAs: true` asks where to save in a save panel (the engine's
+  `B_WEBKIT_DOWNLOAD_DESTINATION`, answered with
+  `BWebKitContext::SetDownloadDestination`; the panel's folder and name start
+  at the download folder and the requested name). Cancelling the panel
+  cancels the download (`USER_CANCELED`). `conflictAction: "overwrite"`
+  writes over a file of that name in the download folder (never one another
+  download is writing), `"prompt"` asks with the panel only when the name is
+  taken, and `"uniquify"` (the default) picks a free name. A file saved
+  outside the download folder cannot be resumed from where it stopped.
 - `setUiOptions` is absent.
 - A download the browser resumes after its partial file was dropped (a
   server without byte ranges) starts a new item.

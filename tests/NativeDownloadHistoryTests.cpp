@@ -28,7 +28,7 @@ int main()
             else { ++titles; profile.SetDownloadTitle(change->url, change->started, change->title); }
         }
     };
-    DownloadListener normal(false, receive), privateSession(true, receive), newPrivateSession(true, receive);
+    DownloadListener normal(false, {}, receive), privateSession(true, {}, receive), newPrivateSession(true, {}, receive);
     BMessage start(B_WEBKIT_DOWNLOAD_STARTED);
     start.AddUInt64("identifier", 1);
     start.AddString("url", "https://downloads.test/original");
