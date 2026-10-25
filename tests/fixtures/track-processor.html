@@ -2,7 +2,7 @@
 <meta charset="utf-8">
 <title>MediaStreamTrack processing</title>
 <!-- WebKit's worker-side mediacapture-transform (#112, #126): the camera's
-     track goes to a worker, MediaStreamTrackProcessor reads VideoFrames,
+     track (or an animated canvas's) goes to a worker, MediaStreamTrackProcessor reads VideoFrames,
      and a VideoTrackGenerator sends them back to a <video>. #result (JSON):
      frames read, their size and format, and the returned video's size. No
      picture is kept; the video element is hidden. -->
@@ -35,7 +35,21 @@ onmessage = async ({ data: { track } }) => {
     const result = { windowProcessor: typeof MediaStreamTrackProcessor, windowGenerator: typeof VideoTrackGenerator };
     const show = () => document.getElementById('result').textContent = JSON.stringify(result);
     try {
-        const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 } });
+        // The camera, or an animated canvas when there is none.
+        let stream;
+        try {
+            stream = await navigator.mediaDevices.getUserMedia({ video: true });
+            result.source = 'camera';
+        } catch (error) {
+            const canvas = document.createElement('canvas');
+            canvas.width = 320;
+            canvas.height = 240;
+            const context = canvas.getContext('2d');
+            let n = 0;
+            setInterval(() => { context.fillStyle = `hsl(${(n += 7) % 360} 80% 50%)`; context.fillRect(0, 0, 320, 240); }, 33);
+            stream = canvas.captureStream(30);
+            result.source = 'canvas (' + error.name + ')';
+        }
         const track = stream.getVideoTracks()[0];
         const worker = new Worker(URL.createObjectURL(new Blob([workerSource])));
         const video = document.getElementById('back');
