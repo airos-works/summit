@@ -157,7 +157,8 @@ Implementation:
 Limits:
 
 - The history lasts only for the session and is not persisted.
-- `filename` subdirectories are flattened to the last path component.
+- A `filename` with folders (`reports/2026/a.csv`) is saved in those folders
+  of the download directory, made as needed (each folder name made safe).
 - `saveAs: true` asks where to save in a save panel (the engine's
   `B_WEBKIT_DOWNLOAD_DESTINATION`, answered with
   `BWebKitContext::SetDownloadDestination`; the panel's folder and name start
@@ -167,7 +168,10 @@ Limits:
   download is writing), `"prompt"` asks with the panel only when the name is
   taken, and `"uniquify"` (the default) picks a free name. A file saved
   outside the download folder cannot be resumed from where it stopped.
-- `setUiOptions` is absent.
+- `setUiOptions({enabled})` (with the `downloads.ui` permission, as in
+  Chrome) turns the browser's own download UI off and on: while any loaded
+  extension has it off, a new download neither opens the downloads panel
+  nor shows its status text. An extension that unloads lets it show again.
 - A download the browser resumes after its partial file was dropped (a
   server without byte ranges) starts a new item.
 - `bytesReceived` updates are visible through `search`, not through

@@ -4965,6 +4965,8 @@ void BrowserWindow::MessageReceived(BMessage* message)
                     fSaveAsDownloads[identifier] = target->second;
                     fSaveAsTargets.erase(target);
                 }
+            // A download manager extension turned this off (downloads.setUiOptions).
+            if (fShared->DownloadUIHidden()) break;
             fStatus->SetText("Downloading to your Downloads folder…");
             // As in Firefox, a download started here shows the panel.
             if (IsActive() && !fDownloadsPanel.IsValid() && fDownloadsButton

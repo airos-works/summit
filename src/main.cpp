@@ -2029,6 +2029,12 @@ private:
         };
         if (fQuitting) { fail("The browser is quitting."); return; }
         const uint32 command = message->GetUInt32("command", 0);
+        if (command == B_WEBKIT_BROWSER_DOWNLOADS_UI) {
+            // downloads.setUiOptions: the whole browser's, no window needed.
+            if (fShared) fShared->SetDownloadUIHidden(message->GetString("extension_identifier", ""), !message->GetBool("enabled", true));
+            if (fWebKitContext && identifier) fWebKitContext->RespondToBrowserCommandWithData(identifier, B_OK, "null");
+            return;
+        }
         if (command == B_WEBKIT_BROWSER_OPEN_WINDOW) {
             summit::BrowserWindowOptions options;
             options.empty = true;
@@ -2175,6 +2181,10 @@ private:
                 if (entry.loaded && !entry.sidebarURL.empty())
                     sidebars.push_back({entry.installation.identifier, entry.sidebarTitle, entry.sidebarURL});
             fShared->SetExtensionSidebars(std::move(sidebars));
+            std::set<std::string> loaded;
+            for (const auto& entry : fExtensions->Entries())
+                if (entry.loaded) loaded.insert(entry.installation.identifier);
+            fShared->KeepDownloadUIHiddenBy(loaded);
             // For the cards on store pages: Install, or Manage when installed.
             std::map<std::string, summit::SharedProfile::InstalledExtensionInfo> installed;
             for (const auto& entry : fExtensions->Entries())
