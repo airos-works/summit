@@ -338,6 +338,8 @@ private:
     // Pretty printing: the shown text of a script, and moving between a
     // shown line and a place in the page's document.
     bool Pretty() const;
+    // The original source shown (of the selected script's map), or -1.
+    int OriginalIndex() const;
     const devtools::PrettyScript& Formatted(const devtools::Script& script);
     int ShownLine(const devtools::Script& script, int line, int column);
     devtools::SourcePosition DocumentPlace(const devtools::Script& script, int shownLine);

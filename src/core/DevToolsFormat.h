@@ -69,6 +69,31 @@ struct PrettyScript {
 };
 PrettyScript FormatJavaScript(std::string_view source);
 
+// A source map (version 3, index maps' sections too): which place in an
+// original source each place of a generated script came from.
+struct SourceMapping {
+    int generatedLine = 0, generatedColumn = 0, source = -1, line = 0, column = 0;
+};
+struct SourceMap {
+    // The original sources' addresses (resolved against the map's) and,
+    // when the map carries it, their text.
+    std::vector<std::string> sources, contents;
+    std::vector<bool> hasContent;
+    // By generated place.
+    std::vector<SourceMapping> mappings;
+    // Where a generated place came from: the last mapping on its line at or
+    // before it; null when its line has none.
+    const SourceMapping* Original(SourcePosition generated) const;
+    // The first generated place of an original line (or of the next line
+    // that has one, as breakpoints slide); line -1 when there is none.
+    SourcePosition Generated(int source, int line) const;
+};
+// False with error set when the text is not a source map.
+bool ParseSourceMap(std::string_view text, const std::string& mapURL, SourceMap& out, std::string& error);
+// An address relative to a base one (RFC 3986's common cases: absolute,
+// //host, /path, path with ./ and ../, ?query, #fragment).
+std::string ResolveAddress(const std::string& base, const std::string& relative);
+
 // "512 B", "1.4 KB", "2.31 MB".
 std::string FormatBytes(uint64_t bytes);
 // "120 ms", "1.24 s", "2.1 min"; empty for a negative duration.

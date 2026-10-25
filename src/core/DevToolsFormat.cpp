@@ -1097,4 +1097,183 @@ PrettyScript FormatJavaScript(std::string_view source)
     newline();
     return result;
 }
+
+std::string ResolveAddress(const std::string& base, const std::string& relative)
+{
+    const auto scheme = relative.find(':');
+    if (scheme != std::string::npos && scheme > 0 && relative.find_first_of("/?#") > scheme) return relative;
+    const auto baseScheme = base.find("://");
+    if (relative.rfind("//", 0) == 0) return base.substr(0, base.find(':') + 1) + relative;
+    if (baseScheme == std::string::npos) return relative;
+    const auto pathStart = base.find('/', baseScheme + 3);
+    const std::string origin = base.substr(0, pathStart);
+    std::string basePath = pathStart == std::string::npos ? "/" : base.substr(pathStart);
+    basePath = basePath.substr(0, basePath.find_first_of("?#"));
+    if (relative.empty()) return base;
+    if (relative[0] == '#') return base.substr(0, base.find('#')) + relative;
+    if (relative[0] == '?') return origin + basePath + relative;
+    std::string path = relative[0] == '/' ? relative : basePath.substr(0, basePath.rfind('/') + 1) + relative;
+    std::string tail;
+    if (const auto query = path.find_first_of("?#"); query != std::string::npos) {
+        tail = path.substr(query);
+        path.erase(query);
+    }
+    // . and .. segments.
+    std::vector<std::string> segments;
+    size_t start = 1;
+    while (start <= path.size()) {
+        auto end = path.find('/', start);
+        if (end == std::string::npos) end = path.size();
+        const auto segment = path.substr(start, end - start);
+        const bool last = end == path.size();
+        if (segment == "..") {
+            if (!segments.empty()) segments.pop_back();
+            if (last) segments.push_back("");
+        } else if (segment == ".") {
+            if (last) segments.push_back("");
+        } else segments.push_back(segment);
+        start = end + 1;
+    }
+    std::string resolved = origin;
+    for (const auto& segment : segments) resolved += "/" + segment;
+    if (segments.empty()) resolved += "/";
+    return resolved + tail;
+}
+
+namespace {
+bool ParseMapObject(const nlohmann::json& map, const std::string& mapURL, SourceMap& out, int lineOffset, int columnOffset, std::string& error)
+{
+    using nlohmann::json;
+    if (const auto sections = map.find("sections"); sections != map.end() && sections->is_array()) {
+        for (const auto& section : *sections) {
+            const auto offset = section.value("offset", json::object());
+            const auto inner = section.find("map");
+            if (inner == section.end() || !inner->is_object()) continue;
+            if (!ParseMapObject(*inner, mapURL, out, lineOffset + offset.value("line", 0), offset.value("line", 0) ? 0 : columnOffset + offset.value("column", 0), error))
+                return false;
+        }
+        return true;
+    }
+    const auto mappings = map.find("mappings");
+    if (map.value("version", 0) != 3 || mappings == map.end() || !mappings->is_string()) {
+        error = "Not a version 3 source map.";
+        return false;
+    }
+    const int first = static_cast<int>(out.sources.size());
+    std::string root = map.value("sourceRoot", std::string());
+    if (!root.empty() && root.back() != '/') root += '/';
+    const auto sources = map.value("sources", json::array());
+    const auto contents = map.value("sourcesContent", json::array());
+    for (size_t i = 0; i < sources.size(); ++i) {
+        out.sources.push_back(ResolveAddress(mapURL, root + (sources[i].is_string() ? sources[i].get<std::string>() : std::string())));
+        const bool has = i < contents.size() && contents[i].is_string();
+        out.contents.push_back(has ? contents[i].get<std::string>() : std::string());
+        out.hasContent.push_back(has);
+    }
+    // Base64 VLQ: fields relative to the previous segment's (the generated
+    // column to the previous on the same line).
+    static int8_t digits[256];
+    static bool ready = false;
+    if (!ready) {
+        std::fill(std::begin(digits), std::end(digits), int8_t(-1));
+        const char* alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        for (int i = 0; i < 64; ++i) digits[static_cast<unsigned char>(alphabet[i])] = static_cast<int8_t>(i);
+        ready = true;
+    }
+    const auto& text = mappings->get_ref<const std::string&>();
+    int line = lineOffset, source = 0, originalLine = 0, originalColumn = 0;
+    int column = 0;
+    size_t i = 0;
+    while (i <= text.size()) {
+        if (i == text.size()) break;
+        if (text[i] == ';') {
+            ++line;
+            column = 0;
+            ++i;
+            continue;
+        }
+        if (text[i] == ',') {
+            ++i;
+            continue;
+        }
+        int fields[5] = { };
+        int count = 0;
+        while (i < text.size() && text[i] != ',' && text[i] != ';') {
+            int value = 0, shift = 0;
+            bool more = true;
+            while (more) {
+                if (i >= text.size()) break;
+                const int digit = digits[static_cast<unsigned char>(text[i++])];
+                if (digit < 0) {
+                    error = "The map's mappings are not valid.";
+                    return false;
+                }
+                more = digit & 32;
+                value |= (digit & 31) << shift;
+                shift += 5;
+                if (shift > 30) {
+                    error = "The map's mappings are not valid.";
+                    return false;
+                }
+            }
+            const int decoded = (value & 1) ? -(value >> 1) : (value >> 1);
+            if (count < 5) fields[count] = decoded;
+            ++count;
+        }
+        column += fields[0];
+        if (count >= 4) {
+            source += fields[1];
+            originalLine += fields[2];
+            originalColumn += fields[3];
+            if (source >= 0 && first + source < static_cast<int>(out.sources.size()))
+                out.mappings.push_back({line, column + (line == lineOffset ? columnOffset : 0), first + source, originalLine, originalColumn});
+        }
+    }
+    return true;
+}
+}
+
+bool ParseSourceMap(std::string_view text, const std::string& mapURL, SourceMap& out, std::string& error)
+{
+    out = SourceMap();
+    // A map may start with )]}' to keep it from being run as a script.
+    if (text.substr(0, 4) == ")]}'") text.remove_prefix(text.find('\n') == std::string_view::npos ? text.size() : text.find('\n') + 1);
+    const auto map = nlohmann::json::parse(text, nullptr, false);
+    if (!map.is_object()) {
+        error = "The source map is not JSON.";
+        return false;
+    }
+    if (!ParseMapObject(map, mapURL, out, 0, 0, error)) return false;
+    std::stable_sort(out.mappings.begin(), out.mappings.end(), [](const SourceMapping& a, const SourceMapping& b) {
+        return a.generatedLine != b.generatedLine ? a.generatedLine < b.generatedLine : a.generatedColumn < b.generatedColumn;
+    });
+    return true;
+}
+
+const SourceMapping* SourceMap::Original(SourcePosition generated) const
+{
+    auto found = std::upper_bound(mappings.begin(), mappings.end(), generated, [](const SourcePosition& place, const SourceMapping& mapping) {
+        return place.line != mapping.generatedLine ? place.line < mapping.generatedLine : place.column < mapping.generatedColumn;
+    });
+    if (found == mappings.begin()) return nullptr;
+    --found;
+    return found->generatedLine == generated.line ? &*found : nullptr;
+}
+
+SourcePosition SourceMap::Generated(int source, int line) const
+{
+    // The nearest original line at or after the one asked for; of its
+    // mappings, the first generated place.
+    int bestLine = -1;
+    SourcePosition best { -1, 0 };
+    for (const auto& mapping : mappings) {
+        if (mapping.source != source || mapping.line < line) continue;
+        const SourcePosition place { mapping.generatedLine, mapping.generatedColumn };
+        if (bestLine < 0 || mapping.line < bestLine || (mapping.line == bestLine && place < best)) {
+            bestLine = mapping.line;
+            best = place;
+        }
+    }
+    return best;
+}
 }
