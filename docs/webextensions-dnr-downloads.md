@@ -86,8 +86,11 @@ Limits:
   platform".
 - `testMatchOutcome` and `onRuleMatchedDebug` are absent (Chrome offers them
   to unpacked extensions only).
-- `MAX_NUMBER_OF_REGEX_RULES` is reported but not enforced. Dynamic and session
-  rules share one limit of 30000.
+- `MAX_NUMBER_OF_REGEX_RULES` (1000) is enforced for the dynamic rules and
+  for the session rules, each, as in Chrome (static rulesets are not
+  checked). Dynamic and session rules share one limit of 30000, counted once
+  (upstream WebKit counted a kind's own rules twice, so more than half the
+  limit in dynamic rules blocked any addition; fixed 26 Oct).
 
 ## downloads
 
