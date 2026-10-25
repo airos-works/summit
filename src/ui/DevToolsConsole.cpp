@@ -384,8 +384,9 @@ private:
         }
         if (!properties->error.empty()) AddUnder(new BStringItem(("Not available: " + properties->error).c_str()), item);
         else if (properties->items.empty()) AddUnder(new BStringItem("No properties"), item);
-        for (const auto& property : properties->items)
-            AddObject(property.name + ": " + property.value, property.objectId, item);
+        // AddUnder puts each first under its row: last property first.
+        for (auto property = properties->items.rbegin(); property != properties->items.rend(); ++property)
+            AddObject(property->name + ": " + property->value, property->objectId, item);
         Invalidate();
     }
     Session& fSession;

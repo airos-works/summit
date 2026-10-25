@@ -47,7 +47,7 @@ std::string ApplicationVersion()
     BFile file(&info.ref, B_READ_ONLY);
     BAppFileInfo fileInfo(&file);
     if (fileInfo.InitCheck() != B_OK || fileInfo.GetVersionInfo(&version, B_APP_VERSION_KIND) != B_OK) return { };
-    return version.short_info;
+    return std::to_string(version.major) + "." + std::to_string(version.middle) + "." + std::to_string(version.minor);
 }
 // Bodies over this are shown as they came: laying them out would hold the window up.
 constexpr size_t kLargestFormatted = 32 * 1024 * 1024;

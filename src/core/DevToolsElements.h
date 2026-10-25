@@ -142,6 +142,8 @@ struct NodeAccessibility {
 struct NodeListener {
     std::string type, node, handler, location;
     bool capture = false, once = false, passive = false, attribute = false, disabled = false;
+    // The selected element's own (not one above it).
+    bool own = false;
 };
 struct NodeListeners {
     int node = 0;

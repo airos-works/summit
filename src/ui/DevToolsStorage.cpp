@@ -47,7 +47,8 @@ std::string CookieID(const Cookie& cookie) { return cookie.ID(); }
 
 const char* KindName(StorageKind kind)
 {
-    return kind == StorageKind::Local ? "local" : kind == StorageKind::Session ? "session" : "cookies";
+    return kind == StorageKind::Local ? "local" : kind == StorageKind::Session ? "session"
+        : kind == StorageKind::IndexedDB ? "indexeddb" : "cookies";
 }
 
 BView* Placeholder(const char* text)
@@ -275,6 +276,16 @@ void StoragePanel::RebuildAreas()
     auto* cookies = new AreaItem("Cookies", StorageKind::Cookies, { }, true);
     fAreas->AddItem(cookies);
     if (fHasArea && fKind == StorageKind::Cookies) selected = cookies;
+    // An object store chosen before its origin's databases were read stays
+    // chosen while they are.
+    if (fHasArea && !selected && fKind == StorageKind::IndexedDB && fOrigin.find('\n') != std::string::npos) {
+        const auto origin = fOrigin.substr(0, fOrigin.find('\n'));
+        const auto* databases = fSession.Databases(origin);
+        if (std::find(origins.begin(), origins.end(), origin) != origins.end() && (!databases || !databases->loaded)) {
+            if (!databases) fSession.LoadDatabases(origin);
+            return;
+        }
+    }
     if (fHasArea && !selected) {
         // The page no longer has the origin that was shown.
         fHasArea = false;
@@ -344,8 +355,9 @@ void StoragePanel::MessageReceived(BMessage* message)
     }
 }
 
-// The selected cookie with the name and value typed (renaming replaces it),
-// or with none selected a new session cookie for the page's host.
+// The selected cookie with the value typed; another name adds a cookie like
+// it (as Save Item adds an item); with none selected, a new session cookie
+// for the page's host.
 void StoragePanel::SaveCookie()
 {
     const auto* area = Area();
@@ -368,7 +380,6 @@ void StoragePanel::SaveCookie()
     }
     cookie.name = fKey->Text();
     cookie.value = fNewValue->Text();
-    if (selected && selected->name != cookie.name) fSession.DeleteCookie(*selected);
     fSession.SetCookie(cookie);
     fSelected = CookieID(cookie);
     fHost.Sync();

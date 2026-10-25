@@ -797,9 +797,12 @@ struct DOMReader {
                         if (const auto& location = Member(item, "location"); location.is_object())
                             listener.location = "script " + Text(Member(location, "scriptId")) + ", line "
                                 + std::to_string(static_cast<int>(Number(Member(location, "lineNumber"))) + 1);
+                        listener.own = Integer(Member(item, "nodeId")) == pending.node;
                         listeners.listeners.push_back(std::move(listener));
                     }
                 }
+                // The element's own first, then those of the nodes above it.
+                std::stable_partition(listeners.listeners.begin(), listeners.listeners.end(), [](const NodeListener& listener) { return listener.own; });
                 model.fListeners = std::move(listeners);
                 changes.listeners = true;
                 break;
