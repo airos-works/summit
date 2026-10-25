@@ -186,8 +186,9 @@ void SourcesPanel::RebuildScripts()
     const bool all = fContentScripts->Value() == B_CONTROL_ON;
     std::vector<const Script*> shown;
     for (const auto& [id, script] : fSession.Scripts()) {
-        // The page's own: not what extensions and the browser add, nor eval()'s.
-        if (!all && (script.contentScript || script.url.empty())) continue;
+        // The page's own: not what extensions and the browser add
+        // (user-script:N), nor eval()'s.
+        if (!all && (script.contentScript || script.url.empty() || script.url.rfind("user-script:", 0) == 0)) continue;
         shown.push_back(&script);
     }
     std::stable_sort(shown.begin(), shown.end(), [](const Script* a, const Script* b) { return a->Label() < b->Label(); });
