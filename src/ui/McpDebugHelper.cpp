@@ -108,8 +108,9 @@ public:
         while (get_next_image_info(team, &cookie, &image) == B_OK)
             fText.push_back({addr_t(image.text), addr_t(image.text) + addr_t(image.text_size)});
         // JavaScript and the engine's generated code, when the process writes
-        // JITDump files (JSC_useJITDump=1).
-        const char* directory = std::getenv("SUMMIT_JIT_DUMP_DIRECTORY");
+        // JITDump files (JSC_useJITDump=1), where JavaScriptCore puts them:
+        // this helper has Summit's environment, as the web processes do.
+        const char* directory = std::getenv("JSC_jitDumpDirectory");
         fJit.Load(directory && *directory ? directory : "/tmp", team);
     }
     ~Symbols()
@@ -140,7 +141,10 @@ public:
             const char* slash = std::strrchr(image, '/');
             char offset[32];
             std::snprintf(offset, sizeof(offset), "+0x%lx", static_cast<unsigned long>(address - addr_t(base)));
-            text = (*symbol ? Demangle(symbol) : std::string("?")) + (base ? offset : "") + " (" + (slash ? slash + 1 : image) + ")";
+            // Past the end of the symbol before it: a function the image does
+            // not export (its own, hidden ones), not that symbol.
+            const std::string named = !*symbol ? std::string("?") : exact ? Demangle(symbol) : "unexported code after " + Demangle(symbol);
+            text = named + (base ? offset : "") + " (" + (slash ? slash + 1 : image) + ")";
         } else {
             char hex[32];
             std::snprintf(hex, sizeof(hex), "0x%lx", static_cast<unsigned long>(address));
