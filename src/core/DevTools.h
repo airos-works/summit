@@ -71,6 +71,14 @@ struct Request {
     // The body's bytes once Loaded.
     std::string body;
     std::string bodyError;
+    // Phases of the request in milliseconds from when it was fetched
+    // (Response.timing); negative where unknown or not done (a reused
+    // connection has no DNS lookup or connecting).
+    struct Timing {
+        bool known = false;
+        double dnsStart = -1, dnsEnd = -1, connectStart = -1, connectEnd = -1, tlsStart = -1, requestStart = -1,
+            responseStart = -1, responseEnd = -1;
+    } timing;
     // A WebSocket's messages, the latest kMaximumFrames.
     bool webSocket = false;
     std::deque<SocketFrame> frames;

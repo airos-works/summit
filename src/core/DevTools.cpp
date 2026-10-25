@@ -273,6 +273,19 @@ void ReadResponse(Request& request, const json& response)
     request.mimeType = Text(Member(response, "mimeType"));
     request.source = Text(Member(response, "source"));
     request.responseHeaders = Headers(Member(response, "headers"));
+    if (const auto& timing = Member(response, "timing"); timing.is_object()) {
+        auto& phases = request.timing;
+        phases.known = true;
+        const auto read = [&](const char* key) { return Member(timing, key).is_number() ? Member(timing, key).get<double>() : -1.0; };
+        phases.dnsStart = read("domainLookupStart");
+        phases.dnsEnd = read("domainLookupEnd");
+        phases.connectStart = read("connectStart");
+        phases.connectEnd = read("connectEnd");
+        phases.tlsStart = read("secureConnectionStart");
+        phases.requestStart = read("requestStart");
+        phases.responseStart = read("responseStart");
+        phases.responseEnd = read("responseEnd");
+    }
     // What went over the network, which has more than the page asked for.
     if (const auto& sent = Member(response, "requestHeaders"); sent.is_object() && !sent.empty())
         request.requestHeaders = Headers(sent);
@@ -1426,6 +1439,30 @@ StyledText DescribeHeaders(const Request& request)
             time += " (" + FormatDuration(request.responded - request.started) + " to the first byte)";
         row("Time", time);
     }
+    // Where the time went, as other browsers' timing views show it.
+    if (const auto& phases = request.timing; phases.known) {
+        const auto span = [](double from, double to) { return from >= 0 && to >= from ? to - from : -1.0; };
+        const auto milliseconds = [](double value) {
+            char text[32];
+            std::snprintf(text, sizeof text, value < 10 ? "%.1f ms" : "%.0f ms", value);
+            return std::string(text);
+        };
+        std::vector<std::pair<const char*, double>> steps;
+        steps.push_back({"DNS lookup", span(phases.dnsStart, phases.dnsEnd)});
+        if (phases.tlsStart >= 0) {
+            steps.push_back({"Connecting", span(phases.connectStart, phases.tlsStart)});
+            steps.push_back({"TLS", span(phases.tlsStart, phases.connectEnd)});
+        } else steps.push_back({"Connecting", span(phases.connectStart, phases.connectEnd)});
+        steps.push_back({"Waiting (to the first byte)", span(phases.requestStart, phases.responseStart)});
+        // The body: from the response's start to the end of the request.
+        if (request.responded >= 0 && request.ended >= request.responded)
+            steps.push_back({"Receiving", (request.ended - request.responded) * 1000});
+        if (std::any_of(steps.begin(), steps.end(), [](const auto& step) { return step.second >= 0; })) {
+            title("Timing");
+            for (const auto& [name, value] : steps)
+                if (value >= 0) row(name, milliseconds(value));
+        }
+    }
     const auto headers = [&](const char* name, const std::vector<Header>& list) {
         if (list.empty()) return;
         title(std::string(name) + " (" + std::to_string(list.size()) + ")");
@@ -1540,9 +1577,17 @@ std::string HarArchive(const std::vector<const Request*>& requests, const std::s
         const auto wait = milliseconds(request->started, request->responded);
         const auto receive = milliseconds(request->responded, request->ended);
         const auto total = milliseconds(request->started, request->ended);
+        json timings = {{"send", 0}, {"wait", std::max(0.0, wait)}, {"receive", std::max(0.0, receive)}};
+        if (const auto& phases = request->timing; phases.known) {
+            // HAR: -1 for what did not happen.
+            const auto span = [](double from, double to) { return from >= 0 && to >= from ? std::round((to - from) * 100) / 100 : -1.0; };
+            timings["dns"] = span(phases.dnsStart, phases.dnsEnd);
+            timings["connect"] = span(phases.connectStart, phases.connectEnd);
+            timings["ssl"] = span(phases.tlsStart, phases.connectEnd);
+            if (const auto waited = span(phases.requestStart, phases.responseStart); waited >= 0) timings["wait"] = waited;
+        }
         json entry = {{"startedDateTime", isoTime(request->wallTime)}, {"time", std::max(0.0, total)}, {"request", sent},
-            {"response", received}, {"cache", json::object()},
-            {"timings", {{"send", 0}, {"wait", std::max(0.0, wait)}, {"receive", std::max(0.0, receive)}}}};
+            {"response", received}, {"cache", json::object()}, {"timings", timings}};
         if (!request->remoteAddress.empty()) entry["serverIPAddress"] = request->remoteAddress;
         if (request->failed && !request->error.empty()) entry["comment"] = request->error;
         entries.push_back(std::move(entry));
