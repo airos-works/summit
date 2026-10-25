@@ -160,3 +160,8 @@ FLAC and Vorbis encoding verified on the X399 (25 Oct, fv112 build): a
 second of tone at 48 kHz through `AudioEncoder` and back came out as 11 FLAC
 chunks (48000 frames, `s16`, RMS 0.354: lossless at 16 bits) and 49 Vorbis
 chunks (RMS 0.354), each decoder configured with the encoder's description.
+
+AV1 and HEVC verified on the X399 (25 Oct, av112 build): the *Video
+Decoding and Display* sample decoded its whole 1280×720 video as AV1
+(`av01.0.05M.08`, 314 fps) and HEVC (`hvc1.1.6.L93.90`, 312 fps), the last
+pictures drawn as H.264's were (about 390 colours in a 64×36 copy).
