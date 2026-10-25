@@ -19,9 +19,11 @@ the current browser tab. Popups close when their action becomes invalid, the
 active tab changes, the extension unloads, or the browser closes. The popup
 opens under its toolbar button, right-aligned with it (above it near the
 bottom of the screen); an action in the overflow menu opens under the
-overflow button. The window reports the button before activating or
-preloading the action (`BWebKitContext::SetExtensionActionAnchor`); without
-a report the popup opens at the top right of the page.
+overflow button, and so does one the extension opens itself
+(`action.openPopup()`). The window reports each extension's button
+(`BWebKitContext::SetExtensionActionAnchor`) when the toolbar changes, the
+window moves or resizes, and before activating or preloading an action;
+without a report the popup opens at the top right of the page.
 
 ## Public SDK and lifetime
 

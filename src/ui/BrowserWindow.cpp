@@ -2116,6 +2116,7 @@ void BrowserWindow::FrameMoved(BPoint where)
     HideSuggestions();
 #if SUMMIT_MODERN_WEBKIT
     fWebKitContext->SetBrowserWindowFrame(BMessenger(this), Frame());
+    ReportExtensionAnchors();
 #endif
 }
 
@@ -2125,6 +2126,7 @@ void BrowserWindow::FrameResized(float width, float height)
     HideSuggestions();
 #if SUMMIT_MODERN_WEBKIT
     fWebKitContext->SetBrowserWindowFrame(BMessenger(this), Frame());
+    ReportExtensionAnchors();
 #endif
 }
 
@@ -2727,6 +2729,8 @@ void BrowserWindow::ExtensionActionsReceived(const BMessage& message)
     if (fExtensionActionState.empty()) {
         if (!fExtensionActions->IsHidden(fExtensionActions)) fExtensionActions->Hide();
     } else if (fExtensionActions->IsHidden(fExtensionActions)) fExtensionActions->Show();
+    // A popup the extension opens itself (openPopup) opens under its button too.
+    ReportExtensionAnchors();
 }
 
 void BrowserWindow::ActivateExtensionAction(const BMessage& message)
@@ -2738,7 +2742,7 @@ void BrowserWindow::ActivateExtensionAction(const BMessage& message)
     const auto load = message.GetUInt64("load_identifier", 0);
     const auto page = message.GetUInt64("page_identifier", 0);
     SUMMIT_EXTENSION_TIMING("action button of %s clicked", identity);
-    AnchorExtensionPopup(identity);
+    ReportExtensionAnchors();
     const auto status = fWebKitContext->ActivateExtensionAction(identity, BMessenger(this), load, page,
         BMessenger(this), ++fExtensionActionInvocation);
     if (status != B_OK) {
@@ -2869,21 +2873,24 @@ void BrowserWindow::PreloadExtensionAction(const BMessage& message)
     const char* identity = nullptr;
     if (message.FindString("extension_identifier", &identity) != B_OK || !message.GetBool("has_popup", false)) return;
     SUMMIT_EXTENSION_TIMING("action button of %s hovered", identity);
-    AnchorExtensionPopup(identity);
+    ReportExtensionAnchors();
     fWebKitContext->PreloadExtensionAction(identity, BMessenger(this), message.GetUInt64("load_identifier", 0),
         message.GetUInt64("page_identifier", 0));
 }
 
-void BrowserWindow::AnchorExtensionPopup(const char* identity)
+void BrowserWindow::ReportExtensionAnchors()
 {
-    BView* button = fExtensionActionsOverflow;
-    for (size_t i = 0; i < fExtensionActionButtons.size() && i < fExtensionActionState.size(); ++i) {
-        if (!std::strcmp(fExtensionActionState[i].GetString("extension_identifier", ""), identity)) {
-            button = fExtensionActionButtons[i];
-            break;
-        }
+    if (!fExtensionsEnabled || !fExtensionActions) return;
+    // Where the buttons are now, laid out.
+    Layout(false);
+    for (size_t i = 0; i < fExtensionActionState.size(); ++i) {
+        const char* identity = fExtensionActionState[i].GetString("extension_identifier", "");
+        if (!*identity) continue;
+        // An action in the overflow menu opens under the overflow button.
+        BView* button = i < fExtensionActionButtons.size() ? static_cast<BView*>(fExtensionActionButtons[i]) : fExtensionActionsOverflow;
+        const bool shown = button && !button->IsHidden();
+        fWebKitContext->SetExtensionActionAnchor(BMessenger(this), identity, shown ? button->ConvertToScreen(button->Bounds()) : BRect());
     }
-    if (button && !button->IsHidden(button)) fWebKitContext->SetExtensionActionAnchor(BMessenger(this), button->ConvertToScreen(button->Bounds()));
 }
 
 void BrowserWindow::ShowExtensionActionMenu(const BMessage& message)
