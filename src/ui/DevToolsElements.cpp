@@ -1395,7 +1395,10 @@ void ElementsPanel::MessageReceived(BMessage* message)
         case kStyleFilterChanged: fStyles->SetFilter(fStyleFilter->Text()); break;
         case kComputedFilterChanged:
         case kComputedAllChanged: ShowComputed(); break;
-        case kSideTabChanged: AskAccessibility(); break;
+        case kSideTabChanged:
+            AskAccessibility();
+            fHost.Sync();
+            break;
         case kApplyHTML:
             dom.SetOuterHTML(message->GetInt32("node", 0), message->GetString("html", ""));
             fHost.Sync();
