@@ -143,6 +143,9 @@ struct DebuggerState {
     // "breakpoint", "exception", "DebuggerStatement", "other"...
     std::string reason;
     std::vector<DebugFrame> frames;
+    // The frame the Sources panel shows, which the console evaluates in
+    // while paused.
+    int selectedFrame = 0;
 };
 
 // An object a console entry shows (an argument, a result) that the
@@ -337,6 +340,8 @@ public:
     void RemoveBreakpoint(const std::string& url, int line);
     const std::vector<Breakpoint>& Breakpoints() const { return fBreakpoints; }
     const DebuggerState& Debugger() const { return fDebugger; }
+    // The paused frame the console evaluates in.
+    void SelectDebugFrame(int index) { fDebugger.selectedFrame = index; }
     // "pause", "resume", "stepOver", "stepInto", "stepOut".
     void DebuggerCommand(const std::string& command);
     // Network: the cache off while the tools are open

@@ -892,12 +892,21 @@ static void TestDebugger()
             && state.frames[0].function == "tick" && state.frames[0].line == 1 && state.frames[0].scopes.size() == 2
             && state.frames[0].scopes[0].type == "local" && state.frames[0].scopes[0].objectId == "s1" && state.frames[0].thisObjectId == "t1");
     }
+    // The console evaluates in the chosen frame while paused.
+    session.SelectDebugFrame(1);
+    session.Evaluate("x + 1");
+    commands = Sent(session);
+    CHECK(commands.size() == 1 && commands[0].method == "Debugger.evaluateOnCallFrame" && commands[0].parameters["callFrameId"] == "f2"
+        && commands[0].parameters["expression"] == "x + 1");
     session.DebuggerCommand("stepOver");
     session.DebuggerCommand("evaluate");
     commands = Sent(session);
     CHECK(commands.size() == 1 && commands[0].method == "Debugger.stepOver" && commands[0].target == "page-2");
     session.Receive(Event("page-2", "Debugger.resumed", json::object()));
     CHECK(!session.Debugger().paused && session.Debugger().frames.empty());
+    session.Evaluate("x + 1");
+    commands = Sent(session);
+    CHECK(commands.size() == 1 && commands[0].method == "Runtime.evaluate");
 
     // Removing a breakpoint uses its id; a new page forgets its scripts.
     session.RemoveBreakpoint("https://example.com/app.js", 20);

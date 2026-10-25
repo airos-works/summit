@@ -522,6 +522,7 @@ struct ProtocolReader {
             state.paused = true;
             state.reason = Text(Member(parameters, "reason"));
             state.frames.clear();
+            state.selectedFrame = 0;
             if (const auto& frames = Member(parameters, "callFrames"); frames.is_array()) {
                 for (const auto& item : frames) {
                     DebugFrame frame;
@@ -1461,6 +1462,15 @@ void Session::Evaluate(const std::string& expression)
     AddEntry(EntryKind::Input, Level::Log, expression);
     if (fPageTarget.empty()) {
         AddEntry(EntryKind::Result, Level::Error, "The page is not there to run this.");
+        return;
+    }
+    // Paused: in the chosen frame, with its local variables, as in other
+    // browsers.
+    if (fDebugger.paused && !fDebugger.frames.empty()) {
+        const auto index = std::clamp(fDebugger.selectedFrame, 0, static_cast<int>(fDebugger.frames.size()) - 1);
+        SendToTarget(fPageTarget, "Debugger.evaluateOnCallFrame", "{\"callFrameId\":" + Quoted(fDebugger.frames[index].callFrameId)
+            + ",\"expression\":" + Quoted(expression) + ",\"objectGroup\":\"console\",\"includeCommandLineAPI\":true,\"generatePreview\":true}",
+            Pending::Evaluation);
         return;
     }
     SendToTarget(fPageTarget, "Runtime.evaluate", "{\"expression\":" + Quoted(expression)

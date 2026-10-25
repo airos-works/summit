@@ -285,6 +285,7 @@ void SourcesPanel::SelectFrame(int index)
     const auto& state = fSession.Debugger();
     if (index < 0 || index >= static_cast<int>(state.frames.size())) return;
     fFrame = index;
+    fSession.SelectDebugFrame(index);
     if (fFrames->CurrentSelection() != index) fFrames->Select(index);
     const auto& frame = state.frames[index];
     // Its script is shown, at the paused line.
