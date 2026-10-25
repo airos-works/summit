@@ -35,10 +35,16 @@ from FFmpeg 6.1's and 8.0's headers and were checked against the X399's
 libraries (both encoders open with 1024/1152-sample frames and encode). AAC gives raw
 frames with an `AudioSpecificConfig` as `description`, or ADTS frames with
 `aac: { format: "adts" }` (table rates, up to 7 channels); after `flush()`
-the next frame starts a new encoder. HE-AAC encoding, FLAC, Vorbis and PCM
-report unsupported.
+the next frame starts a new encoder. HE-AAC encoding reports unsupported.
 
-Not yet: HE-AAC encoding, FLAC and Vorbis, AV1 and HEVC, and hardware
+PCM (`pcm-u8`, `-s16`, `-s24`, `-s32`, `-f32`, `alaw`, `ulaw`) is decoded and
+encoded in the engine (G.711 as ITU-T's reference expands and compresses
+it; 24-bit decodes to 32-bit AudioData). FLAC and Vorbis are decoded
+through FFmpeg with the description (FLAC's `fLaC` and metadata blocks,
+Vorbis's three Xiph-laced headers) as the codec context's extradata, at
+FFmpeg 6's and 8's offsets; FLAC and Vorbis encoding report unsupported.
+
+Not yet: HE-AAC, FLAC and Vorbis encoding, AV1 and HEVC, and hardware
 decoders (NVDEC, Cedar).
 
 H.264 with B-frames: libavcodec gives pictures in presentation order,

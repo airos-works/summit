@@ -21025,10 +21025,10 @@ index 0000000000000000000000000000000000000000..cdab62bfd95bf644f740fce9f74b4813
 +#endif // PLATFORM(HAIKU)
 diff --git a/Source/WebCore/platform/audio/haiku/WebCodecsAudioHaiku.cpp b/Source/WebCore/platform/audio/haiku/WebCodecsAudioHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..9ded7d7cbc9417d522a09daaaedbf7f4ed12a4a5
+index 0000000000000000000000000000000000000000..99e7ba3c7db76da44eac6956ad460379618d963b
 --- /dev/null
 +++ b/Source/WebCore/platform/audio/haiku/WebCodecsAudioHaiku.cpp
-@@ -0,0 +1,1051 @@
+@@ -0,0 +1,1369 @@
 +/*
 + * Copyright (C) 2026 Summit contributors.
 + *
@@ -21209,6 +21209,10 @@ index 0000000000000000000000000000000000000000..9ded7d7cbc9417d522a09daaaedbf7f4
 +    size_t frameChannelLayoutOffset { 0 };
 +    size_t frameSampleRateOffset { 0 };
 +    size_t contextSampleFormatOffset { 0 };
++    // AVCodecContext::extradata and extradata_size: FLAC's and Vorbis's
++    // headers (the WebCodecs description), for those versions only.
++    size_t contextExtradataOffset { 0 };
++    void* (*mallocz)(size_t) { nullptr };
 +    void* (*findEncoderByName)(const char*);
 +    int (*sendFrame)(void*, const void*);
 +    int (*receivePacket)(void*, void*);
@@ -21266,12 +21270,17 @@ index 0000000000000000000000000000000000000000..9ded7d7cbc9417d522a09daaaedbf7f4
 +                ffmpeg->frameChannelLayoutOffset = 448;
 +                ffmpeg->frameSampleRateOffset = 208;
 +                ffmpeg->contextSampleFormatOffset = 360;
++                ffmpeg->contextExtradataOffset = 88;
 +            } else if (avcodecMajor == 62 && avutilMajor == 60) {
 +                ffmpeg->frameChannelLayoutOffset = 384;
 +                ffmpeg->frameSampleRateOffset = 180;
 +                ffmpeg->contextSampleFormatOffset = 348;
++                ffmpeg->contextExtradataOffset = 72;
 +            }
 +            if (ffmpeg->frameChannelLayoutOffset) {
++                ffmpeg->mallocz = reinterpret_cast<void* (*)(size_t)>(dlsym(avutil, "av_mallocz"));
++                if (!ffmpeg->mallocz)
++                    ffmpeg->contextExtradataOffset = 0;
 +                complete = true;
 +                ffmpeg->findEncoderByName = reinterpret_cast<void* (*)(const char*)>(find(avcodec, "avcodec_find_encoder_by_name"));
 +                ffmpeg->sendFrame = reinterpret_cast<int (*)(void*, const void*)>(find(avcodec, "avcodec_send_frame"));
@@ -21306,15 +21315,115 @@ index 0000000000000000000000000000000000000000..9ded7d7cbc9417d522a09daaaedbf7f4
 +        return "aac";
 +    if (codec == "mp3"_s)
 +        return "mp3float";
++    if (codec == "flac"_s)
++        return "flac";
++    if (codec == "vorbis"_s)
++        return "vorbis";
 +    return nullptr;
++}
++
++// FLAC and Vorbis decoders need their headers (the description) as extradata.
++static bool needsExtradata(StringView codec)
++{
++    return codec == "flac"_s || codec == "vorbis"_s;
++}
++
++// WebCodecs' PCM codecs (https://w3c.github.io/webcodecs/pcm_codec_registration.html):
++// interleaved little-endian samples, A-law and mu-law bytes.
++enum class PCMCodec : uint8_t { U8, S16, S24, S32, F32, ALaw, MuLaw };
++
++static std::optional<PCMCodec> pcmCodec(StringView codec)
++{
++    if (codec == "pcm-u8"_s)
++        return PCMCodec::U8;
++    if (codec == "pcm-s16"_s)
++        return PCMCodec::S16;
++    if (codec == "pcm-s24"_s)
++        return PCMCodec::S24;
++    if (codec == "pcm-s32"_s)
++        return PCMCodec::S32;
++    if (codec == "pcm-f32"_s)
++        return PCMCodec::F32;
++    if (codec == "alaw"_s)
++        return PCMCodec::ALaw;
++    if (codec == "ulaw"_s)
++        return PCMCodec::MuLaw;
++    return std::nullopt;
++}
++
++static size_t pcmSampleSize(PCMCodec codec)
++{
++    switch (codec) {
++    case PCMCodec::U8: case PCMCodec::ALaw: case PCMCodec::MuLaw: return 1;
++    case PCMCodec::S16: return 2;
++    case PCMCodec::S24: return 3;
++    case PCMCodec::S32: case PCMCodec::F32: return 4;
++    }
++    return 1;
++}
++
++// G.711, as ITU-T's reference code expands and compresses it.
++static int16_t aLawToLinear(uint8_t value)
++{
++    value ^= 0x55;
++    int segment = (value & 0x70) >> 4;
++    int sample = (value & 0x0f) << 4;
++    sample += segment ? 0x108 : 8;
++    if (segment > 1)
++        sample <<= segment - 1;
++    return (value & 0x80) ? sample : -sample;
++}
++
++static int16_t muLawToLinear(uint8_t value)
++{
++    value = ~value;
++    int sample = (((value & 0x0f) << 3) + 0x84) << ((value & 0x70) >> 4);
++    return (value & 0x80) ? 0x84 - sample : sample - 0x84;
++}
++
++static uint8_t linearToALaw(int16_t sample)
++{
++    int value = sample >> 3;
++    uint8_t mask = value >= 0 ? 0xd5 : 0x55;
++    if (value < 0)
++        value = -value - 1;
++    static constexpr std::array<int, 8> ends { 0x1f, 0x3f, 0x7f, 0xff, 0x1ff, 0x3ff, 0x7ff, 0xfff };
++    int segment = 0;
++    while (segment < 8 && value > ends[segment])
++        ++segment;
++    if (segment == 8)
++        return 0x7f ^ mask;
++    uint8_t result = segment << 4;
++    result |= segment < 2 ? (value >> 1) & 0x0f : (value >> segment) & 0x0f;
++    return result ^ mask;
++}
++
++static uint8_t linearToMuLaw(int16_t sample)
++{
++    int value = sample >> 2;
++    uint8_t mask = 0xff;
++    if (value < 0) {
++        value = -value;
++        mask = 0x7f;
++    }
++    value = std::min(value, 8159) + 0x21;
++    static constexpr std::array<int, 8> ends { 0x3f, 0x7f, 0xff, 0x1ff, 0x3ff, 0x7ff, 0xfff, 0x1fff };
++    int segment = 0;
++    while (segment < 8 && value > ends[segment])
++        ++segment;
++    if (segment == 8)
++        return 0x7f ^ mask;
++    return ((segment << 4) | ((value >> (segment + 1)) & 0x0f)) ^ mask;
 +}
 +
 +bool isWebCodecsAudioCodecSupportedHaiku(StringView codec)
 +{
-+    if (codec == "opus"_s)
++    if (codec == "opus"_s || pcmCodec(codec))
 +        return true;
 +    auto* name = ffmpegDecoderName(codec);
 +    auto* ffmpeg = name ? FFmpegAudio::load() : nullptr;
++    if (ffmpeg && needsExtradata(codec) && !ffmpeg->contextExtradataOffset)
++        return false;
 +    return ffmpeg && ffmpeg->findDecoderByName(name);
 +}
 +
@@ -21502,7 +21611,27 @@ index 0000000000000000000000000000000000000000..9ded7d7cbc9417d522a09daaaedbf7f4
 +                return nullptr;
 +        }
 +        void* context = ffmpeg->allocContext(decoder);
-+        if (!context || ffmpeg->open(context, decoder, nullptr) < 0) {
++        if (!context)
++            return nullptr;
++        if (needsExtradata(codec)) {
++            // Freed with the context; FFmpeg's readers may look 64 bytes past the end.
++            auto& description = config.description;
++            if (description.isEmpty() || description.size() > 1 << 20 || !ffmpeg->contextExtradataOffset) {
++                ffmpeg->freeContext(&context);
++                return nullptr;
++            }
++            auto* extradata = static_cast<uint8_t*>(ffmpeg->mallocz(description.size() + 64));
++            if (!extradata) {
++                ffmpeg->freeContext(&context);
++                return nullptr;
++            }
++            memcpy(extradata, description.span().data(), description.size());
++            int size = description.size();
++            auto* bytes = static_cast<uint8_t*>(context);
++            memcpy(bytes + ffmpeg->contextExtradataOffset, &extradata, sizeof(extradata));
++            memcpy(bytes + ffmpeg->contextExtradataOffset + sizeof(extradata), &size, sizeof(size));
++        }
++        if (ffmpeg->open(context, decoder, nullptr) < 0) {
 +            ffmpeg->freeContext(&context);
 +            return nullptr;
 +        }
@@ -21833,6 +21962,191 @@ index 0000000000000000000000000000000000000000..9ded7d7cbc9417d522a09daaaedbf7f4
 +    std::atomic<bool> m_isClosed { false };
 +};
 +
++// PCM chunks as AudioData in the nearest sample format: 24-bit as 32-bit,
++// A-law and mu-law expanded to 16-bit.
++class PCMAudioDecoderHaiku final : public AudioDecoder {
++public:
++    static RefPtr<PCMAudioDecoderHaiku> create(PCMCodec codec, const AudioDecoder::Config& config, OutputCallback&& outputCallback)
++    {
++        if (!config.sampleRate || !config.numberOfChannels || config.numberOfChannels > 32)
++            return nullptr;
++        return adoptRef(*new PCMAudioDecoderHaiku(codec, config, WTF::move(outputCallback)));
++    }
++
++private:
++    PCMAudioDecoderHaiku(PCMCodec codec, const AudioDecoder::Config& config, OutputCallback&& outputCallback)
++        : m_codec(codec)
++        , m_sampleRate(config.sampleRate)
++        , m_channels(config.numberOfChannels)
++        , m_outputCallback(WTF::move(outputCallback))
++        , m_queue(WorkQueue::create("WebCodecs PCM decoder"_s))
++    {
++    }
++
++    Ref<DecodePromise> decode(AudioEncodedData&& chunk) final
++    {
++        return invokeAsync(m_queue.get(), [protectedThis = Ref { *this }, chunk = WTF::move(chunk).isolatedCopy()] mutable {
++            return protectedThis->decodeOnQueue(WTF::move(chunk));
++        });
++    }
++
++    Ref<DecodePromise> decodeOnQueue(AudioEncodedData&& chunk)
++    {
++        if (m_isClosed)
++            return DecodePromise::createAndReject("The decoder is closed"_s);
++        auto data = chunk.data->span();
++        size_t frameSize = pcmSampleSize(m_codec) * m_channels;
++        if (data.size() % frameSize)
++            return DecodePromise::createAndReject("The chunk does not hold whole frames"_s);
++        size_t frames = data.size() / frameSize;
++        size_t samples = frames * m_channels;
++        if (!frames)
++            return DecodePromise::createAndResolve();
++        Vector<uint8_t> bytes;
++        AudioSampleFormat format;
++        switch (m_codec) {
++        case PCMCodec::U8: format = AudioSampleFormat::U8; bytes = data; break;
++        case PCMCodec::S16: format = AudioSampleFormat::S16; bytes = data; break;
++        case PCMCodec::S32: format = AudioSampleFormat::S32; bytes = data; break;
++        case PCMCodec::F32: format = AudioSampleFormat::F32; bytes = data; break;
++        case PCMCodec::S24:
++            format = AudioSampleFormat::S32;
++            bytes.grow(samples * 4);
++            for (size_t i = 0; i < samples; ++i) {
++                int32_t value = static_cast<int32_t>((data[i * 3] << 8) | (data[i * 3 + 1] << 16) | (static_cast<uint32_t>(data[i * 3 + 2]) << 24));
++                memcpy(bytes.mutableSpan().data() + i * 4, &value, 4);
++            }
++            break;
++        case PCMCodec::ALaw:
++        case PCMCodec::MuLaw:
++            format = AudioSampleFormat::S16;
++            bytes.grow(samples * 2);
++            for (size_t i = 0; i < samples; ++i) {
++                int16_t value = m_codec == PCMCodec::ALaw ? aLawToLinear(data[i]) : muLawToLinear(data[i]);
++                memcpy(bytes.mutableSpan().data() + i * 2, &value, 2);
++            }
++            break;
++        }
++        m_outputCallback(DecodedData { PlatformRawAudioDataHaiku::create(SharedBuffer::create(WTF::move(bytes)), format, m_sampleRate, chunk.timestamp, frames, m_channels) });
++        return DecodePromise::createAndResolve();
++    }
++
++    Ref<GenericPromise> flush() final
++    {
++        return invokeAsync(m_queue.get(), [] { return GenericPromise::createAndResolve(); });
++    }
++
++    void reset() final { }
++    void close() final { m_isClosed = true; }
++
++    const PCMCodec m_codec;
++    const unsigned m_sampleRate;
++    const unsigned m_channels;
++    OutputCallback m_outputCallback;
++    const Ref<WorkQueue> m_queue;
++    std::atomic<bool> m_isClosed { false };
++};
++
++// AudioData as PCM chunks, one a frame of input.
++class PCMAudioEncoderHaiku final : public AudioEncoder {
++public:
++    static RefPtr<PCMAudioEncoderHaiku> create(PCMCodec codec, const String& codecName, const AudioEncoder::Config& config, DescriptionCallback&& descriptionCallback, OutputCallback&& outputCallback)
++    {
++        if (!config.sampleRate || !config.numberOfChannels || config.numberOfChannels > 32)
++            return nullptr;
++        return adoptRef(*new PCMAudioEncoderHaiku(codec, codecName, config, WTF::move(descriptionCallback), WTF::move(outputCallback)));
++    }
++
++private:
++    PCMAudioEncoderHaiku(PCMCodec codec, const String& codecName, const AudioEncoder::Config& config, DescriptionCallback&& descriptionCallback, OutputCallback&& outputCallback)
++        : m_codec(codec)
++        , m_codecName(codecName.isolatedCopy())
++        , m_config(config)
++        , m_descriptionCallback(WTF::move(descriptionCallback))
++        , m_outputCallback(WTF::move(outputCallback))
++        , m_queue(WorkQueue::create("WebCodecs PCM encoder"_s))
++    {
++    }
++
++    Ref<EncodePromise> encode(RawFrame&& frame) final
++    {
++        return invokeAsync(m_queue.get(), [protectedThis = Ref { *this }, frame = WTF::move(frame)] mutable {
++            return protectedThis->encodeOnQueue(WTF::move(frame));
++        });
++    }
++
++    Ref<EncodePromise> encodeOnQueue(RawFrame&& frame)
++    {
++        if (m_isClosed)
++            return EncodePromise::createAndReject("The encoder is closed"_s);
++        RefPtr audio = frame.frame;
++        if (!audio || audio->numberOfChannels() != m_config.numberOfChannels || audio->sampleRate() != m_config.sampleRate)
++            return EncodePromise::createAndReject("The audio does not match the encoder's channels and sample rate"_s);
++        size_t frames = audio->numberOfFrames();
++        size_t samples = frames * m_config.numberOfChannels;
++        Vector<uint8_t> data;
++        auto copy = [&](AudioSampleFormat format, size_t size) {
++            data.grow(samples * size);
++            audio->copyTo(data.mutableSpan(), format, 0, 0, frames, samples);
++        };
++        switch (m_codec) {
++        case PCMCodec::U8: copy(AudioSampleFormat::U8, 1); break;
++        case PCMCodec::S16: copy(AudioSampleFormat::S16, 2); break;
++        case PCMCodec::S32: copy(AudioSampleFormat::S32, 4); break;
++        case PCMCodec::F32: copy(AudioSampleFormat::F32, 4); break;
++        case PCMCodec::S24: {
++            Vector<int32_t> wide(samples);
++            audio->copyTo(asMutableByteSpan(wide.mutableSpan()), AudioSampleFormat::S32, 0, 0, frames, samples);
++            data.grow(samples * 3);
++            for (size_t i = 0; i < samples; ++i) {
++                uint32_t value = static_cast<uint32_t>(wide[i]);
++                data[i * 3] = value >> 8;
++                data[i * 3 + 1] = value >> 16;
++                data[i * 3 + 2] = value >> 24;
++            }
++            break;
++        }
++        case PCMCodec::ALaw:
++        case PCMCodec::MuLaw: {
++            Vector<int16_t> linear(samples);
++            audio->copyTo(asMutableByteSpan(linear.mutableSpan()), AudioSampleFormat::S16, 0, 0, frames, samples);
++            data.grow(samples);
++            for (size_t i = 0; i < samples; ++i)
++                data[i] = m_codec == PCMCodec::ALaw ? linearToALaw(linear[i]) : linearToMuLaw(linear[i]);
++            break;
++        }
++        }
++        if (!m_hasDescribed) {
++            m_hasDescribed = true;
++            ActiveConfiguration configuration;
++            configuration.codec = m_codecName;
++            configuration.sampleRate = m_config.sampleRate;
++            configuration.numberOfChannels = m_config.numberOfChannels;
++            m_descriptionCallback(WTF::move(configuration));
++        }
++        uint64_t duration = frames * 1000000 / m_config.sampleRate;
++        m_outputCallback({ WTF::move(data), true, frame.timestamp, duration });
++        return EncodePromise::createAndResolve();
++    }
++
++    Ref<GenericPromise> flush() final
++    {
++        return invokeAsync(m_queue.get(), [] { return GenericPromise::createAndResolve(); });
++    }
++
++    void reset() final { }
++    void close() final { m_isClosed = true; }
++
++    const PCMCodec m_codec;
++    const String m_codecName;
++    const AudioEncoder::Config m_config;
++    DescriptionCallback m_descriptionCallback;
++    OutputCallback m_outputCallback;
++    const Ref<WorkQueue> m_queue;
++    bool m_hasDescribed { false };
++    std::atomic<bool> m_isClosed { false };
++};
++
 +class FFmpegAudioEncoderHaiku final : public AudioEncoder {
 +public:
 +    static RefPtr<FFmpegAudioEncoderHaiku> create(const String& codec, const AudioEncoder::Config& config, DescriptionCallback&& descriptionCallback, OutputCallback&& outputCallback)
@@ -22058,6 +22372,8 @@ index 0000000000000000000000000000000000000000..9ded7d7cbc9417d522a09daaaedbf7f4
 +    RefPtr<AudioDecoder> decoder;
 +    if (codec == "opus"_s)
 +        decoder = OpusAudioDecoderHaiku::create(config, WTF::move(outputCallback));
++    else if (auto pcm = pcmCodec(codec))
++        decoder = PCMAudioDecoderHaiku::create(*pcm, config, WTF::move(outputCallback));
 +    else
 +        decoder = FFmpegAudioDecoderHaiku::create(codec, config, WTF::move(outputCallback));
 +    if (!decoder)
@@ -22070,6 +22386,8 @@ index 0000000000000000000000000000000000000000..9ded7d7cbc9417d522a09daaaedbf7f4
 +    RefPtr<AudioEncoder> encoder;
 +    if (codec == "opus"_s)
 +        encoder = OpusAudioEncoderHaiku::create(config, WTF::move(descriptionCallback), WTF::move(outputCallback));
++    else if (auto pcm = pcmCodec(codec))
++        encoder = PCMAudioEncoderHaiku::create(*pcm, codec, config, WTF::move(descriptionCallback), WTF::move(outputCallback));
 +    else
 +        encoder = FFmpegAudioEncoderHaiku::create(codec, config, WTF::move(descriptionCallback), WTF::move(outputCallback));
 +    if (!encoder)
