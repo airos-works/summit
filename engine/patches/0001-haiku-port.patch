@@ -61017,10 +61017,10 @@ index 0000000000000000000000000000000000000000..873c9f72583dcd3f0d9de5d72f91e3c4
 +#endif
 diff --git a/Source/WebCore/platform/mediastream/libwebrtc/haiku/LibWebRTCH264DecoderHaiku.cpp b/Source/WebCore/platform/mediastream/libwebrtc/haiku/LibWebRTCH264DecoderHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..fe63dd94ce6c1feb1af8df4dcd6b21d7e953fdd6
+index 0000000000000000000000000000000000000000..ffbec5658a085a44fcf2607c76de4ed47912dd49
 --- /dev/null
 +++ b/Source/WebCore/platform/mediastream/libwebrtc/haiku/LibWebRTCH264DecoderHaiku.cpp
-@@ -0,0 +1,356 @@
+@@ -0,0 +1,374 @@
 +/*
 + * Copyright (C) 2026 Summit contributors.
 + *
@@ -61117,6 +61117,7 @@ index 0000000000000000000000000000000000000000..fe63dd94ce6c1feb1af8df4dcd6b21d7
 +    void* (*allocFrame)();
 +    void (*freeFrame)(void**);
 +    int (*setOptionInt)(void*, const char*, int64_t, int);
++    void (*flushBuffers)(void*);
 +
 +    static const FFmpeg* load()
 +    {
@@ -61155,6 +61156,7 @@ index 0000000000000000000000000000000000000000..fe63dd94ce6c1feb1af8df4dcd6b21d7
 +            ffmpeg->allocFrame = reinterpret_cast<void* (*)()>(find(avutil, "av_frame_alloc"));
 +            ffmpeg->freeFrame = reinterpret_cast<void (*)(void**)>(find(avutil, "av_frame_free"));
 +            ffmpeg->setOptionInt = reinterpret_cast<int (*)(void*, const char*, int64_t, int)>(find(avutil, "av_opt_set_int"));
++            ffmpeg->flushBuffers = reinterpret_cast<void (*)(void*)>(find(avcodec, "avcodec_flush_buffers"));
 +            if (!complete || !ffmpeg->findDecoderByName("h264")) {
 +                fprintf(stderr, "Summit: libavcodec has no usable H.264 decoder; WebRTC offers no H.264\n");
 +                delete ffmpeg;
@@ -61199,8 +61201,14 @@ index 0000000000000000000000000000000000000000..fe63dd94ce6c1feb1af8df4dcd6b21d7
 +    {
 +        if (!m_context || !m_callback)
 +            return WEBRTC_VIDEO_CODEC_UNINITIALIZED;
-+        if (!image.data() || !image.size())
-+            return WEBRTC_VIDEO_CODEC_ERR_PARAMETER;
++        // An empty image drains the pictures the decoder holds back
++        // (WebCodecs' flush()); afterwards it takes chunks again.
++        if (!image.data() || !image.size()) {
++            m_ffmpeg.sendPacket(m_context, nullptr);
++            deliverFrames(image);
++            m_ffmpeg.flushBuffers(m_context);
++            return WEBRTC_VIDEO_CODEC_OK;
++        }
 +
 +        auto* packet = static_cast<AVPacketPrefix*>(m_packet);
 +        packet->data = const_cast<uint8_t*>(image.data());
@@ -61211,20 +61219,30 @@ index 0000000000000000000000000000000000000000..fe63dd94ce6c1feb1af8df4dcd6b21d7
 +        packet->size = 0;
 +        if (status < 0 && status != averrorEAGAIN)
 +            return WEBRTC_VIDEO_CODEC_ERROR;
++        deliverFrames(image);
++        return WEBRTC_VIDEO_CODEC_OK;
++    }
 +
++    // Pictures come out in presentation order, B-frames held back until
++    // their references are decoded: each keeps the RTP timestamp of its own
++    // chunk, which libavcodec carries as the pts (AVFrame::pts, at the same
++    // offset since FFmpeg 4).
++    void deliverFrames(const webrtc::EncodedImage& image)
++    {
 +        while (m_ffmpeg.receiveFrame(m_context, m_frame) >= 0) {
 +            auto* frame = static_cast<AVFramePrefix*>(m_frame);
++            int64_t pts = 0;
++            memcpy(&pts, static_cast<uint8_t*>(m_frame) + 136, sizeof(pts));
 +            auto buffer = toI420(*frame);
 +            if (!buffer)
 +                continue;
 +            auto output = webrtc::VideoFrame::Builder()
 +                .set_video_frame_buffer(buffer)
-+                .set_rtp_timestamp(image.RtpTimestamp())
++                .set_rtp_timestamp(pts >= 0 && pts <= UINT32_MAX ? static_cast<uint32_t>(pts) : image.RtpTimestamp())
 +                .set_color_space(image.ColorSpace())
 +                .build();
 +            m_callback->Decoded(output, std::nullopt, std::nullopt);
 +        }
-+        return WEBRTC_VIDEO_CODEC_OK;
 +    }
 +
 +    int32_t RegisterDecodeCompleteCallback(webrtc::DecodedImageCallback* callback) final
@@ -61923,10 +61941,10 @@ index 0000000000000000000000000000000000000000..05c75290c9156bc056bd72c22f91991a
 +#endif // USE(LIBWEBRTC) && PLATFORM(HAIKU)
 diff --git a/Source/WebCore/platform/mediastream/libwebrtc/haiku/WebCodecsHaiku.cpp b/Source/WebCore/platform/mediastream/libwebrtc/haiku/WebCodecsHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..1d36bc7da3efbb37f60bd9b425e2643b9eb4b38a
+index 0000000000000000000000000000000000000000..e05fd7039527e6f9da6568847aa99d3ae626b264
 --- /dev/null
 +++ b/Source/WebCore/platform/mediastream/libwebrtc/haiku/WebCodecsHaiku.cpp
-@@ -0,0 +1,568 @@
+@@ -0,0 +1,581 @@
 +/*
 + * Copyright (C) 2026 Summit contributors.
 + *
@@ -62153,6 +62171,17 @@ index 0000000000000000000000000000000000000000..1d36bc7da3efbb37f60bd9b425e2643b
 +        return VideoDecoder::DecodePromise::createAndResolve();
 +    }
 +
++    // Pictures a decoder holds back (H.264 B-frames) come out now; decoders
++    // that hold none ignore the empty image.
++    void drain()
++    {
++        assertIsCurrent(m_queue.get());
++        if (m_isClosed)
++            return;
++        webrtc::EncodedImage image;
++        m_decoder->Decode(image, false, 0);
++    }
++
 +    void close() { m_isClosed = true; }
 +    WorkQueue& queue() { return m_queue.get(); }
 +
@@ -62210,8 +62239,10 @@ index 0000000000000000000000000000000000000000..1d36bc7da3efbb37f60bd9b425e2643b
 +
 +    Ref<GenericPromise> flush() final
 +    {
-+        // The decoders output each picture as its chunk is decoded.
-+        return invokeAsync(m_decoder->queue(), [] { return GenericPromise::createAndResolve(); });
++        return invokeAsync(m_decoder->queue(), [decoder = m_decoder] {
++            decoder->drain();
++            return GenericPromise::createAndResolve();
++        });
 +    }
 +
 +    void reset() final { m_decoder->close(); }

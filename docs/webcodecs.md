@@ -38,10 +38,16 @@ frames with an `AudioSpecificConfig` as `description`, or ADTS frames with
 the next frame starts a new encoder. HE-AAC encoding, FLAC, Vorbis and PCM
 report unsupported.
 
-Not yet: HE-AAC encoding, FLAC and Vorbis, AV1 and HEVC, hardware
-decoders (NVDEC, Cedar) and flushing pictures a decoder holds back (WebRTC's
-decoders return each picture with its chunk, so B-frame streams may lose
-their last pictures).
+Not yet: HE-AAC encoding, FLAC and Vorbis, AV1 and HEVC, and hardware
+decoders (NVDEC, Cedar).
+
+H.264 with B-frames: libavcodec gives pictures in presentation order,
+holding B-frames back until their references are decoded. The decoder used
+to label each picture with the chunk just sent in, so a B-frame stream's
+pictures carried decode-order timestamps (the W3C audio/video player then
+stuck on one frame); each picture now keeps its own chunk's label (the pts
+libavcodec carries through), and `flush()` drains the pictures still held
+back (an empty image to the WebRTC decoder).
 
 ## How
 
