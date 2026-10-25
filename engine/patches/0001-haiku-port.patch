@@ -57,6 +57,38 @@ index 0fc3038d8aad73bd021fabef77a46da9e102f5f5..e4be61da48bfa7f2757022f826efc834
  #else
  #error "The cacheFlush support is missing on this platform."
  #endif
+diff --git a/Source/JavaScriptCore/assembler/PerfLog.cpp b/Source/JavaScriptCore/assembler/PerfLog.cpp
+index a67d34d5c646c301725794e391264cd1ff05bc72..d0dbf8e9da2d75670708c7ec5ccda089cd7bc5ea 100644
+--- a/Source/JavaScriptCore/assembler/PerfLog.cpp
++++ b/Source/JavaScriptCore/assembler/PerfLog.cpp
+@@ -168,7 +168,16 @@ PerfLog::PerfLog()
+ {
+     {
+         m_file = FileSystem::createDumpFile(makeString("jit-"_s, ProfilerSupport::getCurrentThreadID(), "-"_s, WTF::getCurrentProcessID()), ".dump"_s, String { Options::jitDumpDirectory() });
++#if OS(HAIKU)
++        // A directory that is not there (JSC_jitDumpDirectory is often set
++        // by hand) ends the dump, not the process.
++        if (!m_file) {
++            WTFLogAlways("JITDump: cannot create a dump file in %s; no JIT code is recorded", Options::jitDumpDirectory() ? reinterpret_cast<const char*>(Options::jitDumpDirectory()) : "/tmp");
++            return;
++        }
++#else
+         RELEASE_ASSERT(m_file);
++#endif
+ 
+         if (Options::useIRDump())
+             m_irDumpDirectory = UTF8CString { Options::irDumpDirectory() };
+@@ -195,6 +204,10 @@ PerfLog::PerfLog()
+ 
+ void PerfLog::write(const AbstractLocker&, std::span<const uint8_t> data)
+ {
++#if OS(HAIKU)
++    if (!m_file)
++        return;
++#endif
+     auto result = m_file.write(data);
+     RELEASE_ASSERT(result && *result == data.size());
+ }
 diff --git a/Source/JavaScriptCore/bytecode/Repatch.cpp b/Source/JavaScriptCore/bytecode/Repatch.cpp
 index 23f8850157acb464dde1c495bdc734d970f24667..8fb41a97bd38263f491f8de10670534bdbb13355 100644
 --- a/Source/JavaScriptCore/bytecode/Repatch.cpp

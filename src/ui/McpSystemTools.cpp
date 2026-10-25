@@ -21,6 +21,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <map>
 #include <sstream>
@@ -666,6 +667,12 @@ void RegisterMcpSystemTools(mcp::Server& server, const std::shared_ptr<McpContex
             const std::string before = previous ? previous : "";
             if (value.empty()) unsetenv(name.c_str());
             else setenv(name.c_str(), value.c_str(), 1);
+            // JavaScriptCore writes its JITDump files there and records
+            // nothing when it cannot.
+            if (name == "JSC_jitDumpDirectory" && !value.empty()) {
+                std::error_code ignored;
+                std::filesystem::create_directories(value, ignored);
+            }
             mcplog::Note("Summit MCP: environment " + name + "=" + value);
             return ToolResult::Data({{"name", name}, {"value", value}, {"previous", before},
                 {"appliesTo", "engine processes started from now on (restart_process a tab's web process)"}});
