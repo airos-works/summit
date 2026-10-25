@@ -21,9 +21,20 @@ them (`ExtensionController::Entry`) and publishes the list
 thread with `BWebKitContext::CreateExtensionView` and hands it to the
 window (`BrowserWindow::ShowSidebar`), as it does for extension tabs.
 
-Not yet: the `sidebarAction` API (open, close, toggle, setPanel...), so an
-extension cannot open its own sidebar; remembering the open sidebar across
-restarts.
+## sidebarAction
+
+Firefox's `sidebarAction` is there for an extension with a
+`sidebar_action`: `open()`, `close()`, `toggle()` and `isOpen()` act on its
+sidebar in the window named (`windowId`, or a `tabId`'s window), else the
+front window; `setPanel`/`getPanel` and `setTitle`/`getTitle` change and
+read the page and title for that window (null goes back to the manifest's;
+a panel must be a page of the extension), the open sidebar following at
+once; `setIcon` is accepted (the pane shows no icon). Each call is a
+`SIDEBAR` browser command (`BrowserWindow::SidebarCommand`). `open()` needs
+no user gesture here, unlike Firefox.
+
+Not yet: remembering the open sidebar across restarts, and Chrome's
+`sidePanel` API (its panel opens from View › Sidebar).
 
 ## Fixture
 

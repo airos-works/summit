@@ -2533,6 +2533,7 @@ void BrowserWindow::BrowserCommand(const BMessage& message)
         case B_WEBKIT_BROWSER_SEARCH: SearchCommand(message, identifier, tab); return;
         case B_WEBKIT_BROWSER_BROWSING_DATA: BrowsingDataCommand(message, identifier); return;
         case B_WEBKIT_BROWSER_SESSIONS: SessionsCommand(message, identifier); return;
+        case B_WEBKIT_BROWSER_SIDEBAR: SidebarCommand(message, identifier); return;
         case B_WEBKIT_BROWSER_DETECT_LANGUAGE: {
             // i18n.detectLanguage, with the detector page translation uses.
             const auto detected = DetectTextLanguages(message.GetString("text", ""));
@@ -3271,6 +3272,61 @@ void BrowserWindow::ShowSidebar(const std::string& extension, const std::string&
     fSidebarTitle->SetText(title.c_str());
     if (fSidebar->IsHidden(fSidebar)) fSidebar->Show();
     view->LoadURL(url.c_str());
+}
+
+std::pair<std::string, std::string> BrowserWindow::SidebarPage(const std::string& extension) const
+{
+    std::pair<std::string, std::string> page;
+    for (const auto& sidebar : fShared->ExtensionSidebars())
+        if (sidebar.identifier == extension) page = {sidebar.url, sidebar.title};
+    if (auto found = fSidebarOverrides.find(extension); found != fSidebarOverrides.end()) {
+        if (!found->second.first.empty()) page.first = found->second.first;
+        if (!found->second.second.empty()) page.second = found->second.second;
+    }
+    return page;
+}
+
+void BrowserWindow::SidebarCommand(const BMessage& message, uint64 identifier)
+{
+    const std::string method = message.GetString("method", ""), extension = message.GetString("extension_identifier", "");
+    const auto arguments = nlohmann::json::parse(message.GetString("arguments", "{}"), nullptr, false);
+    if (!arguments.is_object() || extension.empty()) { RespondToCommand(identifier, B_BAD_VALUE); return; }
+    auto answer = [&](const nlohmann::json& value) { fWebKitContext->RespondToBrowserCommandWithData(identifier, B_OK, value.dump().c_str()); };
+    const bool shown = fSidebarExtension == extension;
+    if (fPrivate || fPopup) {
+        // No sidebar in private windows and pop-ups.
+        if (method == "isOpen") answer(false);
+        else RespondToCommand(identifier, B_NOT_ALLOWED, { }, "This window has no sidebar.");
+        return;
+    }
+    auto [url, title] = SidebarPage(extension);
+    if (method == "open" || (method == "toggle" && !shown)) {
+        if (url.empty()) { RespondToCommand(identifier, B_NOT_ALLOWED, { }, "The extension has no sidebar panel."); return; }
+        if (!shown) {
+            BMessage open(kOpenSidebarOnApp);
+            open.AddMessenger("window", BMessenger(this));
+            open.AddString("identifier", extension.c_str());
+            open.AddString("url", url.c_str());
+            open.AddString("title", title.c_str());
+            be_app->PostMessage(&open);
+        }
+        answer(nullptr);
+    } else if (method == "close" || method == "toggle") {
+        if (shown) CloseSidebar();
+        answer(nullptr);
+    } else if (method == "isOpen") answer(shown);
+    else if (method == "getPanel") answer(url);
+    else if (method == "getTitle") answer(title);
+    else if (method == "setPanel" || method == "setTitle") {
+        const char* key = method == "setPanel" ? "panel" : "title";
+        const auto value = arguments.contains(key) && arguments[key].is_string() ? arguments[key].get<std::string>() : std::string();
+        auto& overrides = fSidebarOverrides[extension];
+        (method == "setPanel" ? overrides.first : overrides.second) = value;
+        const auto [newURL, newTitle] = SidebarPage(extension);
+        if (shown && method == "setPanel" && fSidebarView) fSidebarView->LoadURL(newURL.c_str());
+        if (shown && method == "setTitle") fSidebarTitle->SetText(newTitle.c_str());
+        answer(nullptr);
+    } else RespondToCommand(identifier, B_NOT_SUPPORTED);
 }
 
 void BrowserWindow::CloseSidebar()
@@ -4437,11 +4493,12 @@ void BrowserWindow::MessageReceived(BMessage* message)
         case kToggleSidebar: {
             const std::string identifier = message->GetString("identifier", "");
             if (identifier == fSidebarExtension) { CloseSidebar(); break; }
+            const auto [url, title] = SidebarPage(identifier);
             BMessage open(kOpenSidebarOnApp);
             open.AddMessenger("window", BMessenger(this));
             open.AddString("identifier", identifier.c_str());
-            open.AddString("url", message->GetString("url", ""));
-            open.AddString("title", message->GetString("title", ""));
+            open.AddString("url", url.empty() ? message->GetString("url", "") : url.c_str());
+            open.AddString("title", title.empty() ? message->GetString("title", "") : title.c_str());
             be_app->PostMessage(&open);
             break;
         }

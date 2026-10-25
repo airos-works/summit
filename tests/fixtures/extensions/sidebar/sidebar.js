@@ -2,7 +2,7 @@
 // how many there are (what a test reads).
 async function show() {
     const tabs = await browser.tabs.query({ currentWindow: true });
-    document.getElementById("count").textContent = `${tabs.length} tabs`;
+    document.getElementById("count").textContent = `${tabs.length} tabs${location.search}`;
     const list = document.getElementById("tabs");
     list.replaceChildren(...tabs.map((tab) => {
         const item = document.createElement("li");

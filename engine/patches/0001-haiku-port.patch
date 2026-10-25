@@ -79389,10 +79389,10 @@ index 0000000000000000000000000000000000000000..abdba4dff009ff314eecd9f825a128aa
 +} // namespace WebKit
 diff --git a/Source/WebKit/PlatformHaiku.cmake b/Source/WebKit/PlatformHaiku.cmake
 new file mode 100644
-index 0000000000000000000000000000000000000000..d5f7490bcafecc9990feef37777f27cbbdf52718
+index 0000000000000000000000000000000000000000..54817a7aeee664c87b553a54cdfcf5175a079837
 --- /dev/null
 +++ b/Source/WebKit/PlatformHaiku.cmake
-@@ -0,0 +1,527 @@
+@@ -0,0 +1,529 @@
 +include(Headers.cmake)
 +include(Platform/Curl.cmake)
 +
@@ -79821,6 +79821,7 @@ index 0000000000000000000000000000000000000000..d5f7490bcafecc9990feef37777f27cb
 +        WebProcess/Extensions/Interfaces/WebExtensionAPIBrowsingData
 +        WebProcess/Extensions/Interfaces/WebExtensionAPISessions
 +        WebProcess/Extensions/Interfaces/WebExtensionAPITabGroups
++        WebProcess/Extensions/Interfaces/WebExtensionAPISidebarActionHaiku
 +        WebProcess/Extensions/Interfaces/WebExtensionAPIIdentity
 +    )
 +    # The scripting and declarativeNetRequest namespaces use the C++ bindings here, not the Objective-C ones.
@@ -79858,6 +79859,7 @@ index 0000000000000000000000000000000000000000..d5f7490bcafecc9990feef37777f27cb
 +        WebProcess/Extensions/API/WebExtensionAPIBrowsingData.cpp
 +        WebProcess/Extensions/API/WebExtensionAPISessions.cpp
 +        WebProcess/Extensions/API/WebExtensionAPITabGroups.cpp
++        WebProcess/Extensions/API/WebExtensionAPISidebarActionHaiku.cpp
 +        WebProcess/Extensions/API/WebExtensionAPIIdentity.cpp
 +    )
 +endif ()
@@ -88481,10 +88483,10 @@ index 0000000000000000000000000000000000000000..dc2f4d4fdb07966241e673bd4e49b9e8
 +}
 diff --git a/Source/WebKit/UIProcess/API/haiku/WebKitContext.h b/Source/WebKit/UIProcess/API/haiku/WebKitContext.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..75a425bc23d2d4e704d33c0f6f041e06d8d0ff66
+index 0000000000000000000000000000000000000000..ed7fb9c62fbc5b6ad2160a0af9bd82092c3654ec
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/API/haiku/WebKitContext.h
-@@ -0,0 +1,569 @@
+@@ -0,0 +1,576 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#pragma once
@@ -88581,6 +88583,12 @@ index 0000000000000000000000000000000000000000..75a425bc23d2d4e704d33c0f6f041e06
 +//                  in Reader view or leaves it, reporting the change with
 +//                  SetBrowserTabReader; B_NOT_ALLOWED with an error when it
 +//                  cannot (no article, or not the shown tab).
++//   SIDEBAR        method, arguments (a JSON object), optional window, for
++//                  sidebarAction: "open", "close", "toggle" (the extension's
++//                  sidebar in the window, answer null), "isOpen" (true or
++//                  false), "setPanel" {panel (absolute URL, or null for the
++//                  default)}, "getPanel" (the URL), "setTitle" {title (null:
++//                  the default)}, "getTitle" (the title).
 +//   DETECT_LANGUAGE  text (UTF-8), for i18n.detectLanguage and tabs.detectLanguage
 +//                  on a page that declares no language. Answer with JSON
 +//                  {isReliable, languages: [{language, percentage}]}, at most
@@ -88664,7 +88672,8 @@ index 0000000000000000000000000000000000000000..75a425bc23d2d4e704d33c0f6f041e06
 +    B_WEBKIT_BROWSER_SESSIONS,
 +    B_WEBKIT_BROWSER_DISCARD_TAB,
 +    B_WEBKIT_BROWSER_SET_READER,
-+    B_WEBKIT_BROWSER_DETECT_LANGUAGE
++    B_WEBKIT_BROWSER_DETECT_LANGUAGE,
++    B_WEBKIT_BROWSER_SIDEBAR
 +};
 +
 +// Site permissions: what pages may ask the user for, and the services that
@@ -97741,7 +97750,7 @@ index 8947f24ec9866c39f206aab464ec21c5d4213b95..b36f80023077ec3bc5680f7214a823a4
  
  #endif // ENABLE(WK_WEB_EXTENSIONS)
 diff --git a/Source/WebKit/UIProcess/Extensions/WebExtensionContext.h b/Source/WebKit/UIProcess/Extensions/WebExtensionContext.h
-index 5f8454dd5897a49ffba794e50fb04b7257ad2291..94f3f2697363216e8fb8445e86853fd6a9ba822c 100644
+index 5f8454dd5897a49ffba794e50fb04b7257ad2291..9123f6cb63c2ba7de5274c7fd07332bcd1f2c04c 100644
 --- a/Source/WebKit/UIProcess/Extensions/WebExtensionContext.h
 +++ b/Source/WebKit/UIProcess/Extensions/WebExtensionContext.h
 @@ -40,6 +40,9 @@
@@ -97929,7 +97938,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..94f3f2697363216e8fb8445e86853fd6
  
      RefPtr<WebExtensionLocalization> localization();
  
-@@ -505,6 +584,57 @@ public:
+@@ -505,6 +584,59 @@ public:
  
      void removePage(WebPageProxy&);
  
@@ -97964,6 +97973,8 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..94f3f2697363216e8fb8445e86853fd6
 +    void bookmarksQueryHaiku(const String& method, const String& argumentsJSON, CompletionHandler<void(std::expected<String, WebExtensionError>&&)>&&);
 +    // chrome.search: one SEARCH browser command per call, naming the tab when given.
 +    void searchQueryHaiku(const String& method, const String& argumentsJSON, std::optional<WebExtensionTabIdentifier>, CompletionHandler<void(std::expected<String, WebExtensionError>&&)>&&);
++    // sidebarAction: one SIDEBAR browser command per call.
++    void sidebarActionHaiku(const String& method, const String& argumentsJSON, CompletionHandler<void(std::expected<String, WebExtensionError>&&)>&&);
 +    // i18n.detectLanguage: one DETECT_LANGUAGE browser command per call.
 +    void i18nDetectLanguageHaiku(const String& text, CompletionHandler<void(std::expected<String, WebExtensionError>&&)>&&);
 +    // chrome.browsingData: one BROWSING_DATA browser command per call.
@@ -97987,7 +97998,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..94f3f2697363216e8fb8445e86853fd6
      Ref<WebExtensionWindow> getOrCreateWindow(WKWebExtensionWindow *) const;
      RefPtr<WebExtensionWindow> getWindow(WebExtensionWindowIdentifier, std::optional<WebPageProxyIdentifier> = std::nullopt, IgnoreExtensionAccess = IgnoreExtensionAccess::No) const;
      void forgetWindow(WebExtensionWindowIdentifier) const;
-@@ -546,6 +676,10 @@ public:
+@@ -546,6 +678,10 @@ public:
      void didCommitLoadForFrame(WebPageProxyIdentifier, const WebExtensionFrameParameters&, WallTime);
      void didFinishLoadForFrame(WebPageProxyIdentifier, const WebExtensionFrameParameters&, WallTime);
      void didFailLoadForFrame(WebPageProxyIdentifier, const WebExtensionFrameParameters&, WallTime);
@@ -97998,7 +98009,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..94f3f2697363216e8fb8445e86853fd6
  
      void resourceLoadDidSendRequest(WebPageProxyIdentifier, const ResourceLoadInfo&, const WebCore::ResourceRequest&);
      void resourceLoadDidPerformHTTPRedirection(WebPageProxyIdentifier, const ResourceLoadInfo&, const WebCore::ResourceResponse&, const WebCore::ResourceRequest&);
-@@ -597,6 +731,12 @@ public:
+@@ -597,6 +733,12 @@ public:
      const CommandsVector& commands();
      WebExtensionCommand* command(const String& identifier);
      void performCommand(WebExtensionCommand&, UserTriggered = UserTriggered::No);
@@ -98011,7 +98022,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..94f3f2697363216e8fb8445e86853fd6
      void resetCommands();
  
  #if TARGET_OS_IPHONE
-@@ -611,6 +751,11 @@ public:
+@@ -611,6 +753,11 @@ public:
      NSArray *platformMenuItems(const WebExtensionTab&) const;
  
      const MenuItemVector& mainMenuItems() const LIFETIME_BOUND { return m_mainMenuItems; }
@@ -98023,7 +98034,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..94f3f2697363216e8fb8445e86853fd6
      WebExtensionMenuItem* menuItem(const String& identifier) const;
      void performMenuItem(WebExtensionMenuItem&, const WebExtensionMenuItemContextParameters&, UserTriggered = UserTriggered::No);
  
-@@ -638,6 +783,10 @@ public:
+@@ -638,6 +785,10 @@ public:
      void sendTestFinished(id argument);
      void reloadBackgroundContentForTesting();
      void unloadBackgroundContentForTesting();
@@ -98034,7 +98045,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..94f3f2697363216e8fb8445e86853fd6
  #endif
  
      URL backgroundContentURL();
-@@ -646,6 +795,11 @@ public:
+@@ -646,6 +797,11 @@ public:
  #if ENABLE(WK_WEB_EXTENSIONS_OFFSCREEN) && PLATFORM(COCOA)
      WKWebView *offscreenWebView() const { return m_offscreenWebView.get(); }
      bool isOffscreenWebView(WKWebView *webView) const { return webView == m_offscreenWebView; }
@@ -98046,7 +98057,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..94f3f2697363216e8fb8445e86853fd6
  #endif
      bool safeToLoadBackgroundContent() const { return m_safeToLoadBackgroundContent; }
  
-@@ -664,6 +818,7 @@ public:
+@@ -664,6 +820,7 @@ public:
      void runOpenPanel(WKWebView *, WKOpenPanelParameters *, void (^)(NSArray *));
  #endif
  
@@ -98054,7 +98065,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..94f3f2697363216e8fb8445e86853fd6
  #if PLATFORM(COCOA)
      void sendNativeMessage(const String& applicationID, id message, CompletionHandler<void(std::expected<RetainPtr<id>, WebExtensionError>&&)>&&);
  #endif
-@@ -709,7 +864,11 @@ public:
+@@ -709,7 +866,11 @@ public:
  
      WebsiteDataStore* websiteDataStore(std::optional<PAL::SessionID> = std::nullopt) const;
  
@@ -98066,7 +98077,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..94f3f2697363216e8fb8445e86853fd6
  
      void loadBackgroundContent(CompletionHandler<void(RefPtr<API::Error>)>&&);
  
-@@ -758,11 +917,18 @@ private:
+@@ -758,11 +919,18 @@ private:
  #if PLATFORM(COCOA)
      NSDictionary *currentState() const;
      NSDictionary *readStateFromStorage();
@@ -98086,7 +98097,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..94f3f2697363216e8fb8445e86853fd6
  
      void loadStorageAccessLevelsFromStorage();
      void saveStorageAccessLevelsToStorage();
-@@ -771,6 +937,10 @@ private:
+@@ -771,6 +939,10 @@ private:
      void moveLocalStorageIfNeeded(const URL& previousBaseURL, CompletionHandler<void()>&&);
      void removeStaleExtensionWebsiteData();
  
@@ -98097,7 +98108,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..94f3f2697363216e8fb8445e86853fd6
      void permissionsDidChange(PermissionNotification, const PermissionsSet&);
      void permissionsDidChange(PermissionNotification, const MatchPatternSet&);
  
-@@ -806,6 +976,7 @@ private:
+@@ -806,6 +978,7 @@ private:
      void saveBackgroundPageListenersToStorage();
  
      void performTasksAfterBackgroundContentLoads();
@@ -98105,7 +98116,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..94f3f2697363216e8fb8445e86853fd6
  
  #ifdef NDEBUG
      // This is method is a no-op in release builds since it has a performance impact with little benefit to release builds.
-@@ -854,6 +1025,9 @@ private:
+@@ -854,6 +1027,9 @@ private:
      void loadDeclarativeNetRequestRules(CompletionHandler<void(bool)>&&);
      void compileDeclarativeNetRequestRules(NSDictionary *, CompletionHandler<void(bool)>&&);
      void unloadDeclarativeNetRequestState();
@@ -98115,7 +98126,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..94f3f2697363216e8fb8445e86853fd6
      String declarativeNetRequestContentRuleListFilePath();
  
      // Updating user content controllers with new rules.
-@@ -892,6 +1066,12 @@ private:
+@@ -892,6 +1068,12 @@ private:
      Ref<WebExtensionStorageSQLiteStore> syncStorageStore();
  
      void fetchCookies(WebsiteDataStore&, const URL&, const WebExtensionCookieFilterParameters&, CompletionHandler<void(std::expected<Vector<WebExtensionCookieParameters>, WebExtensionError>&&)>&&);
@@ -98128,7 +98139,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..94f3f2697363216e8fb8445e86853fd6
  
      // Action APIs
      bool isActionMessageAllowed(IPC::Decoder&);
-@@ -903,6 +1083,10 @@ private:
+@@ -903,6 +1085,10 @@ private:
      void actionOpenPopup(WebPageProxyIdentifier, std::optional<WebExtensionWindowIdentifier>, std::optional<WebExtensionTabIdentifier>, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
      void actionGetBadgeText(std::optional<WebExtensionWindowIdentifier>, std::optional<WebExtensionTabIdentifier>, CompletionHandler<void(std::expected<String, WebExtensionError>&&)>&&);
      void actionSetBadgeText(std::optional<WebExtensionWindowIdentifier>, std::optional<WebExtensionTabIdentifier>, const String& text, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
@@ -98139,7 +98150,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..94f3f2697363216e8fb8445e86853fd6
      void actionGetEnabled(std::optional<WebExtensionWindowIdentifier>, std::optional<WebExtensionTabIdentifier>, CompletionHandler<void(std::expected<bool, WebExtensionError>&&)>&&);
      void actionSetEnabled(std::optional<WebExtensionTabIdentifier>, bool enabled, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
      void fireActionClickedEventIfNeeded(WebExtensionTab*);
-@@ -934,6 +1118,11 @@ private:
+@@ -934,6 +1120,11 @@ private:
      // Commands APIs
      bool isCommandsMessageAllowed(IPC::Decoder&);
      void commandsGetAll(CompletionHandler<void(Vector<WebExtensionCommandParameters>)>&&);
@@ -98151,7 +98162,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..94f3f2697363216e8fb8445e86853fd6
      void fireCommandEventIfNeeded(const WebExtensionCommand&, WebExtensionTab*);
      void fireCommandChangedEventIfNeeded(const WebExtensionCommand&, const String& oldShortcut);
  
-@@ -944,7 +1133,9 @@ private:
+@@ -944,7 +1135,9 @@ private:
      void cookiesSet(std::optional<PAL::SessionID>, const WebExtensionCookieParameters&, CompletionHandler<void(std::expected<std::optional<WebExtensionCookieParameters>, WebExtensionError>&&)>&&);
      void cookiesRemove(std::optional<PAL::SessionID>, const String& name, const URL&, CompletionHandler<void(std::expected<std::optional<WebExtensionCookieParameters>, WebExtensionError>&&)>&&);
      void cookiesGetAllCookieStores(CompletionHandler<void(std::expected<HashMap<PAL::SessionID, Vector<WebExtensionTabIdentifier>>, WebExtensionError>&&)>&&);
@@ -98161,7 +98172,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..94f3f2697363216e8fb8445e86853fd6
  
      // DeclarativeNetRequest APIs
      bool isDeclarativeNetRequestMessageAllowed(IPC::Decoder&);
-@@ -960,6 +1151,27 @@ private:
+@@ -960,6 +1153,27 @@ private:
      void declarativeNetRequestUpdateDynamicRules(String&& rulesToAddJSON, Vector<double>&& ruleIDsToDelete, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
      void declarativeNetRequestGetSessionRules(Vector<double>&& filter, CompletionHandler<void(std::expected<String, WebExtensionError>&&)>&&);
      void declarativeNetRequestUpdateSessionRules(String&& rulesToAddJSON, Vector<double>&& ruleIDsToDelete, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
@@ -98189,7 +98200,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..94f3f2697363216e8fb8445e86853fd6
  
  #if ENABLE(INSPECTOR_EXTENSIONS)
      // DevTools APIs
-@@ -975,12 +1187,22 @@ private:
+@@ -975,12 +1189,22 @@ private:
  
      // Extension APIs
      void extensionIsAllowedIncognitoAccess(CompletionHandler<void(bool)>&&);
@@ -98212,7 +98223,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..94f3f2697363216e8fb8445e86853fd6
      void menusCreate(const WebExtensionMenuItemParameters&, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
      void menusUpdate(const String& identifier, const WebExtensionMenuItemParameters&, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
      void menusRemove(const String& identifier, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
-@@ -1009,9 +1231,18 @@ private:
+@@ -1009,9 +1233,18 @@ private:
  
      // Permissions APIs
      void permissionsGetAll(CompletionHandler<void(Vector<String>&& permissions, Vector<String>&& origins)>&&);
@@ -98231,7 +98242,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..94f3f2697363216e8fb8445e86853fd6
      void firePermissionsEventListenerIfNecessary(WebExtensionEventListenerType, const PermissionsSet&, const MatchPatternSet&);
  
      // Port APIs
-@@ -1021,7 +1252,7 @@ private:
+@@ -1021,7 +1254,7 @@ private:
      void disconnectPortsForPage(WebPageProxy&);
      void addPorts(WebExtensionContentWorldType sourceContentWorldType, WebExtensionContentWorldType targetContentWorldType, WebExtensionPortChannelIdentifier, HashCountedSet<WebPageProxyIdentifier>&&);
      void removePort(WebExtensionContentWorldType sourceContentWorldType, WebExtensionContentWorldType targetContentWorldType, WebExtensionPortChannelIdentifier, WebPageProxyIdentifier);
@@ -98240,7 +98251,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..94f3f2697363216e8fb8445e86853fd6
      void removeNativePort(WebExtensionMessagePort&);
      unsigned openPortCount(WebExtensionContentWorldType, WebExtensionPortChannelIdentifier);
      bool isPortConnected(WebExtensionContentWorldType sourceContentWorldType, WebExtensionContentWorldType targetContentWorldType, WebExtensionPortChannelIdentifier);
-@@ -1030,13 +1261,27 @@ private:
+@@ -1030,13 +1263,27 @@ private:
      void firePortMessageEventsIfNeeded(WebExtensionContentWorldType, std::optional<WebPageProxyIdentifier>, WebExtensionPortChannelIdentifier, const String& messageJSON, bool userGesture);
      void fireQueuedPortMessageEventsIfNeeded(WebExtensionContentWorldType, WebExtensionPortChannelIdentifier);
      void sendQueuedNativePortMessagesIfNeeded(WebExtensionPortChannelIdentifier);
@@ -98269,7 +98280,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..94f3f2697363216e8fb8445e86853fd6
      void runtimeConnect(const String& extensionID, WebExtensionPortChannelIdentifier, const String& name, const WebExtensionMessageSenderParameters&, bool userGesture, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
      void runtimeSendNativeMessage(const String& applicationID, const String& messageJSON, CompletionHandler<void(std::expected<String, WebExtensionError>&&)>&&);
      void runtimeConnectNative(const String& applicationID, WebExtensionPortChannelIdentifier, WebPageProxyIdentifier, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
-@@ -1055,6 +1300,15 @@ private:
+@@ -1055,6 +1302,15 @@ private:
      void scriptingGetRegisteredScripts(const Vector<String>&, CompletionHandler<void(std::expected<Vector<WebExtensionRegisteredScriptParameters>, WebExtensionError>&&)>&&);
      void scriptingUnregisterContentScripts(const Vector<String>&, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
      bool createInjectedContentForScripts(const Vector<WebExtensionRegisteredScriptParameters>&, WebExtensionDynamicScripts::WebExtensionRegisteredScript::FirstTimeRegistration, DynamicInjectedContentsMap&, NSString *callingAPIName, NSString **errorMessage);
@@ -98285,7 +98296,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..94f3f2697363216e8fb8445e86853fd6
  
      // Sidebar APIs
  #if ENABLE(WK_WEB_EXTENSIONS_SIDEBAR)
-@@ -1088,6 +1342,9 @@ private:
+@@ -1088,6 +1344,9 @@ private:
      void tabsCreate(std::optional<WebPageProxyIdentifier>, const WebExtensionTabParameters&, CompletionHandler<void(std::expected<std::optional<WebExtensionTabParameters>, WebExtensionError>&&)>&&);
      void tabsUpdate(WebPageProxyIdentifier, std::optional<WebExtensionTabIdentifier>, const WebExtensionTabParameters&, CompletionHandler<void(std::expected<std::optional<WebExtensionTabParameters>, WebExtensionError>&&)>&&);
      void tabsDuplicate(WebExtensionTabIdentifier, const WebExtensionTabParameters&, CompletionHandler<void(std::expected<std::optional<WebExtensionTabParameters>, WebExtensionError>&&)>&&);
@@ -98295,7 +98306,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..94f3f2697363216e8fb8445e86853fd6
      void tabsGet(WebExtensionTabIdentifier, CompletionHandler<void(std::expected<std::optional<WebExtensionTabParameters>, WebExtensionError>&&)>&&);
      void tabsGetCurrent(WebPageProxyIdentifier, CompletionHandler<void(std::expected<std::optional<WebExtensionTabParameters>, WebExtensionError>&&)>&&);
      void tabsQuery(WebPageProxyIdentifier, const WebExtensionTabQueryParameters&, CompletionHandler<void(std::expected<Vector<WebExtensionTabParameters>, WebExtensionError>&&)>&&);
-@@ -1103,6 +1360,9 @@ private:
+@@ -1103,6 +1362,9 @@ private:
      void tabsSetZoom(WebPageProxyIdentifier, std::optional<WebExtensionTabIdentifier>, double, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
      void tabsMove(Vector<WebExtensionTabIdentifier>, std::optional<WebExtensionWindowIdentifier>, double, CompletionHandler<void(std::expected<Vector<WebExtensionTabParameters>, WebExtensionError>&&)>&&);
      void tabsRemove(Vector<WebExtensionTabIdentifier>, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
@@ -98305,7 +98316,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..94f3f2697363216e8fb8445e86853fd6
      void tabsExecuteScript(WebPageProxyIdentifier, std::optional<WebExtensionTabIdentifier>, const WebExtensionScriptInjectionParameters&, bool userGesture, CompletionHandler<void(std::expected<Vector<WebExtensionScriptInjectionResultParameters>, WebExtensionError>&&)>&&);
      void tabsInsertCSS(WebPageProxyIdentifier, std::optional<WebExtensionTabIdentifier>, const WebExtensionScriptInjectionParameters&, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
      void tabsRemoveCSS(WebPageProxyIdentifier, std::optional<WebExtensionTabIdentifier>, const WebExtensionScriptInjectionParameters&, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
-@@ -1133,8 +1393,20 @@ private:
+@@ -1133,8 +1395,20 @@ private:
      void fireWindowsEventIfNeeded(WebExtensionEventListenerType, std::optional<WebExtensionWindowParameters>);
  
      // webRequest support.
@@ -98328,7 +98339,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..94f3f2697363216e8fb8445e86853fd6
  
      // IPC::MessageReceiver.
      void didReceiveMessage(IPC::Connection&, IPC::Decoder&) override;
-@@ -1145,12 +1417,31 @@ private:
+@@ -1145,12 +1419,31 @@ private:
  
      mutable Markable<WebExtensionContextIdentifier> m_privilegedIdentifier;
  
@@ -98360,7 +98371,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..94f3f2697363216e8fb8445e86853fd6
  #endif
      Vector<Ref<API::Error>> m_errors;
  
-@@ -1169,6 +1460,15 @@ private:
+@@ -1169,6 +1462,15 @@ private:
  
      RefPtr<API::ContentWorld> m_contentScriptWorld;
  
@@ -98376,7 +98387,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..94f3f2697363216e8fb8445e86853fd6
      PermissionsMap m_grantedPermissions;
      PermissionsMap m_deniedPermissions;
  
-@@ -1194,6 +1494,14 @@ private:
+@@ -1194,6 +1496,14 @@ private:
      EventListenerTypeCountedSet m_backgroundContentEventListeners;
      EventListenerTypeFrameMap m_eventListenerFrames;
  
@@ -98391,7 +98402,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..94f3f2697363216e8fb8445e86853fd6
      bool m_shouldFireStartupEvent { false };
      InstallReason m_installReason { InstallReason::None };
      String m_previousVersion;
-@@ -1216,6 +1524,16 @@ private:
+@@ -1216,6 +1526,16 @@ private:
  #elif ENABLE(2022_GLIB_API)
      GRefPtr<WebKitWebView> m_backgroundWebView;
      GWeakPtr<WebKitWebExtensionContext> m_delegate;
@@ -98408,7 +98419,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..94f3f2697363216e8fb8445e86853fd6
  #endif
      Variant<std::monostate, Ref<ProcessThrottlerActivity>, Ref<ProcessActivityGroup>> m_backgroundWebViewActivity;
      RefPtr<API::Error> m_backgroundContentLoadError;
-@@ -1237,6 +1555,7 @@ private:
+@@ -1237,6 +1557,7 @@ private:
      HashMap<Ref<WebExtensionMatchPattern>, UserScriptVector> m_injectedScriptsPerPatternMap;
      HashMap<Ref<WebExtensionMatchPattern>, UserStyleSheetVector> m_injectedStyleSheetsPerPatternMap;
  
@@ -98416,7 +98427,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..94f3f2697363216e8fb8445e86853fd6
      HashMap<String, Ref<WebExtensionDynamicScripts::WebExtensionRegisteredScript>> m_registeredScriptsMap;
      RefPtr<WebExtensionRegisteredScriptsSQLiteStore> m_registeredContentScriptsStorage;
  
-@@ -1256,11 +1575,20 @@ private:
+@@ -1256,11 +1577,20 @@ private:
  #endif // ENABLE(WK_WEB_EXTENSIONS_SIDEBAR)
  
      PortCountedSet m_ports;
@@ -98438,7 +98449,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..94f3f2697363216e8fb8445e86853fd6
      mutable WindowIdentifierVector m_windowOrderVector;
      mutable std::optional<WebExtensionWindowIdentifier> m_focusedWindowIdentifier;
  
-@@ -1276,6 +1604,12 @@ private:
+@@ -1276,6 +1606,12 @@ private:
      bool m_populatedCommands { false };
  
      String m_declarativeNetRequestContentRuleListFilePath;
@@ -98451,7 +98462,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..94f3f2697363216e8fb8445e86853fd6
      DeclarativeNetRequestMatchedRuleVector m_matchedRules;
      RefPtr<WebExtensionDeclarativeNetRequestSQLiteStore> m_declarativeNetRequestDynamicRulesStore;
      RefPtr<WebExtensionDeclarativeNetRequestSQLiteStore> m_declarativeNetRequestSessionRulesStore;
-@@ -1283,6 +1617,9 @@ private:
+@@ -1283,6 +1619,9 @@ private:
      HashSet<double> m_sessionRulesIDs;
      HashSet<double> m_dynamicRulesIDs;
  
@@ -98461,7 +98472,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..94f3f2697363216e8fb8445e86853fd6
      MenuItemMap m_menuItems;
      MenuItemVector m_mainMenuItems;
  
-@@ -1300,12 +1637,16 @@ private:
+@@ -1300,12 +1639,16 @@ private:
          String message;
  #if PLATFORM(COCOA)
          RetainPtr<id> argument;
@@ -98478,7 +98489,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..94f3f2697363216e8fb8445e86853fd6
  
      Deque<TestMessage> m_testMessageQueue;
      Deque<TestMessage> m_testStartedQueue;
-@@ -1315,6 +1656,8 @@ private:
+@@ -1315,6 +1658,8 @@ private:
      void sendQueuedTestMessagesIfNeeded(WebExtensionEventListenerType);
  #if PLATFORM(COCOA)
      void addTestMessageToQueue(const String& message, id argument, WebExtensionEventListenerType);
@@ -98488,10 +98499,10 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..94f3f2697363216e8fb8445e86853fd6
  };
  
 diff --git a/Source/WebKit/UIProcess/Extensions/WebExtensionContext.messages.in b/Source/WebKit/UIProcess/Extensions/WebExtensionContext.messages.in
-index 6581f34180846663e2a8be51064e43c2d8173b64..e9b2a361e671f15109fd8a71e84d624592871314 100644
+index 6581f34180846663e2a8be51064e43c2d8173b64..cd39b5ad2bff37e23d98128b5180081a68e6ee2f 100644
 --- a/Source/WebKit/UIProcess/Extensions/WebExtensionContext.messages.in
 +++ b/Source/WebKit/UIProcess/Extensions/WebExtensionContext.messages.in
-@@ -31,10 +31,143 @@
+@@ -31,10 +31,144 @@
      DispatchedTo=UI
  ]
  messages -> WebExtensionContext {
@@ -98533,6 +98544,7 @@ index 6581f34180846663e2a8be51064e43c2d8173b64..e9b2a361e671f15109fd8a71e84d6245
 +    [Validator=isLoadedAndPrivilegedMessage] SessionsValueHaiku(uint8_t operation, std::optional<WebKit::WebExtensionTabIdentifier> tabIdentifier, std::optional<WebKit::WebExtensionWindowIdentifier> windowIdentifier, String key, String valueJSON) -> (std::expected<String, WebKit::WebExtensionError> result)
 +    [Validator=isLoadedAndPrivilegedMessage] BrowsingDataQueryHaiku(String method, String argumentsJSON) -> (std::expected<String, WebKit::WebExtensionError> result)
 +    [Validator=isLoadedAndPrivilegedMessage] SearchQueryHaiku(String method, String argumentsJSON, std::optional<WebKit::WebExtensionTabIdentifier> tabIdentifier) -> (std::expected<String, WebKit::WebExtensionError> result)
++    [Validator=isLoadedAndPrivilegedMessage] SidebarActionHaiku(String method, String argumentsJSON) -> (std::expected<String, WebKit::WebExtensionError> result)
 +    // i18n.detectLanguage, from any extension script (content scripts too).
 +    [Validator=isLoaded] I18nDetectLanguageHaiku(String text) -> (std::expected<String, WebKit::WebExtensionError> result)
 +    [Validator=isLoadedAndPrivilegedMessage] TabsDetectLanguage(WebKit::WebPageProxyIdentifier webPageProxyIdentifier, std::optional<WebKit::WebExtensionTabIdentifier> tabIdentifier) -> (std::expected<String, WebKit::WebExtensionError> result)
@@ -98636,7 +98648,7 @@ index 6581f34180846663e2a8be51064e43c2d8173b64..e9b2a361e671f15109fd8a71e84d6245
      // Action APIs
      [Validator=isActionMessageAllowed] ActionGetTitle(std::optional<WebKit::WebExtensionWindowIdentifier> windowIdentifier, std::optional<WebKit::WebExtensionTabIdentifier> tabIdentifier) -> (std::expected<String, WebKit::WebExtensionError> result)
      [Validator=isActionMessageAllowed] ActionSetTitle(std::optional<WebKit::WebExtensionWindowIdentifier> windowIdentifier, std::optional<WebKit::WebExtensionTabIdentifier> tabIdentifier, String title) -> (std::expected<void, WebKit::WebExtensionError> result)
-@@ -48,6 +181,33 @@ messages -> WebExtensionContext {
+@@ -48,6 +182,33 @@ messages -> WebExtensionContext {
      [Validator=isActionMessageAllowed] ActionSetEnabled(std::optional<WebKit::WebExtensionTabIdentifier> tabIdentifier, bool enabled) -> (std::expected<void, WebKit::WebExtensionError> result)
  #endif
  
@@ -98670,7 +98682,7 @@ index 6581f34180846663e2a8be51064e43c2d8173b64..e9b2a361e671f15109fd8a71e84d6245
      // Alarms APIs
      [Validator=isAlarmsMessageAllowed] AlarmsCreate(String name, Seconds initialInterval, Seconds repeatInterval) -> ()
      [Validator=isAlarmsMessageAllowed] AlarmsGet(String name) -> (struct std::optional<WebKit::WebExtensionAlarmParameters> alarmInfo)
-@@ -71,9 +231,6 @@ messages -> WebExtensionContext {
+@@ -71,9 +232,6 @@ messages -> WebExtensionContext {
      [Validator=isBookmarksMessageAllowed] BookmarksRemoveTree(String bookmarkId) -> (std::expected<void, WebKit::WebExtensionError> result)
  #endif // ENABLE(WK_WEB_EXTENSIONS_BOOKMARKS)
  
@@ -98680,7 +98692,7 @@ index 6581f34180846663e2a8be51064e43c2d8173b64..e9b2a361e671f15109fd8a71e84d6245
      // Cookies APIs
      [Validator=isCookiesMessageAllowed] CookiesGet(std::optional<PAL::SessionID> sessionID, String name, URL url) -> (std::expected<std::optional<WebKit::WebExtensionCookieParameters>, WebKit::WebExtensionError> result)
      [Validator=isCookiesMessageAllowed] CookiesGetAll(std::optional<PAL::SessionID> sessionID, URL url, struct WebKit::WebExtensionCookieFilterParameters filterParameters) -> (std::expected<Vector<WebKit::WebExtensionCookieParameters>, WebKit::WebExtensionError> result)
-@@ -100,8 +257,6 @@ messages -> WebExtensionContext {
+@@ -100,8 +258,6 @@ messages -> WebExtensionContext {
  #endif
  
      // Event APIs
@@ -98689,7 +98701,7 @@ index 6581f34180846663e2a8be51064e43c2d8173b64..e9b2a361e671f15109fd8a71e84d6245
  
      // Extensions APIs
      [Validator=isLoaded] ExtensionIsAllowedIncognitoAccess() -> (bool result)
-@@ -134,20 +289,10 @@ messages -> WebExtensionContext {
+@@ -134,20 +290,10 @@ messages -> WebExtensionContext {
      [Validator=isLoaded] PermissionsRequest(HashSet<String> permissions, HashSet<String> origins) -> (bool success)
      [Validator=isLoaded] PermissionsRemove(HashSet<String> permissions, HashSet<String> origins) -> (bool success)
  
@@ -98710,7 +98722,7 @@ index 6581f34180846663e2a8be51064e43c2d8173b64..e9b2a361e671f15109fd8a71e84d6245
  
      // Scripting APIs
      [Validator=isScriptingMessageAllowed] ScriptingExecuteScript(WebKit::WebExtensionScriptInjectionParameters parameters, bool userGesture) -> (std::expected<Vector<WebKit::WebExtensionScriptInjectionResultParameters>, WebKit::WebExtensionError> result)
-@@ -174,15 +319,6 @@ messages -> WebExtensionContext {
+@@ -174,15 +320,6 @@ messages -> WebExtensionContext {
      [Validator=isSidebarMessageAllowed] SidebarGetActionClickBehavior() -> (std::expected<WebKit::WebExtensionActionClickBehavior, WebKit::WebExtensionError> result)
  #endif // ENABLE(WK_WEB_EXTENSIONS_SIDEBAR)
  
@@ -98726,7 +98738,7 @@ index 6581f34180846663e2a8be51064e43c2d8173b64..e9b2a361e671f15109fd8a71e84d6245
      // Tabs APIs
      [Validator=isLoadedAndPrivilegedMessage] TabsCreate(std::optional<WebKit::WebPageProxyIdentifier> webPageProxyIdentifier, WebKit::WebExtensionTabParameters creationParameters) -> (std::expected<std::optional<WebKit::WebExtensionTabParameters>, WebKit::WebExtensionError> result)
      [Validator=isLoadedAndPrivilegedMessage] TabsUpdate(WebKit::WebPageProxyIdentifier webPageProxyIdentifier, std::optional<WebKit::WebExtensionTabIdentifier> tabIdentifier, WebKit::WebExtensionTabParameters updateParameters) -> (std::expected<std::optional<WebKit::WebExtensionTabParameters>, WebKit::WebExtensionError> result)
-@@ -207,8 +343,6 @@ messages -> WebExtensionContext {
+@@ -207,8 +344,6 @@ messages -> WebExtensionContext {
      [Validator=isLoadedAndPrivilegedMessage] TabsRemoveCSS(WebKit::WebPageProxyIdentifier webPageProxyIdentifier, std::optional<WebKit::WebExtensionTabIdentifier> tabIdentifier, WebKit::WebExtensionScriptInjectionParameters parameters) -> (std::expected<void, WebKit::WebExtensionError> result)
  
      // WebNavigation APIs
@@ -107893,10 +107905,10 @@ index 0000000000000000000000000000000000000000..99532b95636c27ebefb3884399e8eaff
 +#endif // ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
 diff --git a/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextBrowserCommandsHaiku.cpp b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextBrowserCommandsHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..0d48adf1f82c865ea416764a078645495dcf3628
+index 0000000000000000000000000000000000000000..03975c5e2457185196079b37059c6c9eb6dec286
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextBrowserCommandsHaiku.cpp
-@@ -0,0 +1,587 @@
+@@ -0,0 +1,643 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#include "config.h"
@@ -108014,6 +108026,62 @@ index 0000000000000000000000000000000000000000..0d48adf1f82c865ea416764a07864549
 +        "create"_s, "move"_s, "update"_s, "remove"_s, "removeTree"_s };
 +    if (auto message = nativeNamespaceQueryHaiku(*this, B_WEBKIT_BROWSER_BOOKMARKS, "bookmarks"_s, methods, method, argumentsJSON, apiName, completion))
 +        sendNativeBrowserQueryHaiku(WTF::move(*message), apiName, WTF::move(completion));
++}
++
++void WebExtensionContext::sidebarActionHaiku(const String& method, const String& argumentsJSON, CompletionHandler<void(std::expected<String, WebExtensionError>&&)>&& completion)
++{
++    auto apiName = makeString("sidebarAction."_s, method, "()"_s);
++    static constexpr std::array methods { "open"_s, "close"_s, "toggle"_s, "isOpen"_s, "setPanel"_s, "getPanel"_s, "setTitle"_s, "getTitle"_s };
++    RefPtr manifest = protect(extension())->manifestObject();
++    if (std::ranges::find(methods, method) == methods.end() || !manifest || !manifest->getObject("sidebar_action"_s)) {
++        completion(toWebExtensionError(apiName, nullString(), "the extension has no sidebar_action"_s));
++        return;
++    }
++    RefPtr arguments = JSON::Value::parseJSON(argumentsJSON);
++    RefPtr object = arguments ? arguments->asObject() : nullptr;
++    if (!object) {
++        completion(toWebExtensionError(apiName, "details"_s, "an object is expected"_s));
++        return;
++    }
++    // A panel is a page of the extension (null resets it to the default).
++    if (RefPtr panel = object->getValue("panel"_s); panel && panel->type() != JSON::Value::Type::Null) {
++        URL url { baseURL(), panel->asString() };
++        if (panel->asString().isEmpty() || !url.isValid() || url.protocol() != baseURL().protocol() || url.host() != baseURL().host()) {
++            completion(toWebExtensionError(apiName, "panel"_s, "it is not a page of the extension"_s));
++            return;
++        }
++        object->setString("panel"_s, url.string());
++    }
++    BMessage message(B_WEBKIT_BROWSER_COMMAND);
++    if (message.AddUInt32("command", B_WEBKIT_BROWSER_SIDEBAR) != B_OK || message.AddString("method", method.utf8().legacyCStringPointer()) != B_OK
++        || message.AddString("arguments", object->toJSONString().utf8().legacyCStringPointer()) != B_OK) {
++        completion(toWebExtensionError(apiName, nullString(), "out of memory"_s));
++        return;
++    }
++    // The window named, or the window of the tab named (the browser keeps
++    // one sidebar a window); otherwise the host's front window.
++    RefPtr<WebExtensionWindow> window;
++    if (auto windowId = object->getDouble("windowId"_s)) {
++        auto identifier = toWebExtensionWindowIdentifier(*windowId);
++        window = identifier ? getWindow(*identifier) : nullptr;
++        if (!window) {
++            completion(toWebExtensionError(apiName, "windowId"_s, "window not found"_s));
++            return;
++        }
++    } else if (auto tabId = object->getDouble("tabId"_s)) {
++        auto identifier = toWebExtensionTabIdentifier(*tabId);
++        RefPtr tab = identifier ? getTab(*identifier) : nullptr;
++        window = tab ? tab->window() : nullptr;
++        if (!window) {
++            completion(toWebExtensionError(apiName, "tabId"_s, "tab not found"_s));
++            return;
++        }
++    }
++    if (window && !addNativeBrowserCommandWindow(message, *window)) {
++        completion(toWebExtensionError(apiName, nullString(), "the window is not available in the browser"_s));
++        return;
++    }
++    sendNativeBrowserQueryHaiku(WTF::move(message), apiName, WTF::move(completion));
 +}
 +
 +void WebExtensionContext::i18nDetectLanguageHaiku(const String& text, CompletionHandler<void(std::expected<String, WebExtensionError>&&)>&& completion)
@@ -141046,7 +141114,7 @@ index 8f99137471c0c991d6ec6d0f865f7e0ccc282ce1..5f5011123e144b226f5136b40ebad739
  
  } // namespace WebKit
 diff --git a/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPINamespace.cpp b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPINamespace.cpp
-index cdf7b6ed9b22a11f8ebdce34e1755607c892c4d1..30645b24757d0c59ad2b8459d9464862e4ca331b 100644
+index cdf7b6ed9b22a11f8ebdce34e1755607c892c4d1..b957e8322f251dfae53aff726c0b0a34f239a241 100644
 --- a/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPINamespace.cpp
 +++ b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPINamespace.cpp
 @@ -32,7 +32,7 @@
@@ -141086,11 +141154,14 @@ index cdf7b6ed9b22a11f8ebdce34e1755607c892c4d1..30645b24757d0c59ad2b8459d9464862
  #if ENABLE(WK_WEB_EXTENSIONS_NOTIFICATIONS)
      if (name == "notifications"_s)
          return (extensionContext->inTestingMode() || (page && page->corePage() && page->corePage()->settings().webExtensionNotificationsEnabled())) && extensionContext->hasPermission("notifications"_s);
-@@ -116,6 +127,11 @@ bool WebExtensionAPINamespace::isPropertyAllowed(const ASCIILiteral& name, WebPa
+@@ -116,6 +127,14 @@ bool WebExtensionAPINamespace::isPropertyAllowed(const ASCIILiteral& name, WebPa
          return page && page->corePage() && page->corePage()->settings().webExtensionSidebarEnabled() && doesDictionaryExist(extensionContext->manifest(), "sidebar_action"_s, true);
  #endif // ENABLE(WK_WEB_EXTENSIONS_SIDEBAR)
  
 +#if PLATFORM(HAIKU)
++    // Firefox's sidebarAction, for an extension with a sidebar_action.
++    if (name == "sidebarAction"_s)
++        return doesDictionaryExist(extensionContext->manifest(), "sidebar_action"_s, true);
 +    if (name == "menus"_s || name == "contextMenus"_s)
 +        return extensionContext->hasPermission("menus"_s) || extensionContext->hasPermission("contextMenus"_s);
 +#endif
@@ -141098,7 +141169,7 @@ index cdf7b6ed9b22a11f8ebdce34e1755607c892c4d1..30645b24757d0c59ad2b8459d9464862
      if (name == "storage"_s)
          return extensionContext->hasPermission(name) || extensionContext->hasPermission("unlimitedStorage"_s);
  
-@@ -127,7 +143,6 @@ bool WebExtensionAPINamespace::isPropertyAllowed(const ASCIILiteral& name, WebPa
+@@ -127,7 +146,6 @@ bool WebExtensionAPINamespace::isPropertyAllowed(const ASCIILiteral& name, WebPa
      return extensionContext->hasPermission(name);
  }
  
@@ -141106,7 +141177,7 @@ index cdf7b6ed9b22a11f8ebdce34e1755607c892c4d1..30645b24757d0c59ad2b8459d9464862
  WebExtensionAPIAction& WebExtensionAPINamespace::action()
  {
      // Documentation: https://developer.mozilla.org/docs/Mozilla/Add-ons/WebExtensions/API/action
-@@ -137,7 +152,6 @@ WebExtensionAPIAction& WebExtensionAPINamespace::action()
+@@ -137,7 +155,6 @@ WebExtensionAPIAction& WebExtensionAPINamespace::action()
  
      return *m_action;
  }
@@ -141114,7 +141185,7 @@ index cdf7b6ed9b22a11f8ebdce34e1755607c892c4d1..30645b24757d0c59ad2b8459d9464862
  
  WebExtensionAPIAlarms& WebExtensionAPINamespace::alarms()
  {
-@@ -149,7 +163,6 @@ WebExtensionAPIAlarms& WebExtensionAPINamespace::alarms()
+@@ -149,7 +166,6 @@ WebExtensionAPIAlarms& WebExtensionAPINamespace::alarms()
      return *m_alarms;
  }
  
@@ -141122,7 +141193,7 @@ index cdf7b6ed9b22a11f8ebdce34e1755607c892c4d1..30645b24757d0c59ad2b8459d9464862
  WebExtensionAPICommands& WebExtensionAPINamespace::commands()
  {
      // Documentation: https://developer.mozilla.org/docs/Mozilla/Add-ons/WebExtensions/API/commands
-@@ -160,6 +173,16 @@ WebExtensionAPICommands& WebExtensionAPINamespace::commands()
+@@ -160,6 +176,16 @@ WebExtensionAPICommands& WebExtensionAPINamespace::commands()
      return *m_commands;
  }
  
@@ -141139,7 +141210,7 @@ index cdf7b6ed9b22a11f8ebdce34e1755607c892c4d1..30645b24757d0c59ad2b8459d9464862
  WebExtensionAPICookies& WebExtensionAPINamespace::cookies()
  {
      // Documentation: https://developer.mozilla.org/docs/Mozilla/Add-ons/WebExtensions/API/cookies
-@@ -170,6 +193,27 @@ WebExtensionAPICookies& WebExtensionAPINamespace::cookies()
+@@ -170,6 +196,27 @@ WebExtensionAPICookies& WebExtensionAPINamespace::cookies()
      return *m_cookies;
  }
  
@@ -141167,7 +141238,7 @@ index cdf7b6ed9b22a11f8ebdce34e1755607c892c4d1..30645b24757d0c59ad2b8459d9464862
  WebExtensionAPIDeclarativeNetRequest& WebExtensionAPINamespace::declarativeNetRequest()
  {
      // Documentation: https://developer.mozilla.org/docs/Mozilla/Add-ons/WebExtensions/API/declarativeNetRequest
-@@ -180,6 +224,7 @@ WebExtensionAPIDeclarativeNetRequest& WebExtensionAPINamespace::declarativeNetRe
+@@ -180,6 +227,7 @@ WebExtensionAPIDeclarativeNetRequest& WebExtensionAPINamespace::declarativeNetRe
      return *m_declarativeNetRequest;
  }
  
@@ -141175,7 +141246,7 @@ index cdf7b6ed9b22a11f8ebdce34e1755607c892c4d1..30645b24757d0c59ad2b8459d9464862
  #if ENABLE(INSPECTOR_EXTENSIONS)
  WebExtensionAPIDevTools& WebExtensionAPINamespace::devtools()
  {
-@@ -202,35 +247,20 @@ WebExtensionAPIDOM& WebExtensionAPINamespace::dom()
+@@ -202,35 +250,20 @@ WebExtensionAPIDOM& WebExtensionAPINamespace::dom()
      return *m_dom;
  }
  
@@ -141217,7 +141288,7 @@ index cdf7b6ed9b22a11f8ebdce34e1755607c892c4d1..30645b24757d0c59ad2b8459d9464862
  
  #if ENABLE(WK_WEB_EXTENSIONS_OFFSCREEN)
  WebExtensionAPIOffscreen& WebExtensionAPINamespace::offscreen()
-@@ -244,16 +274,117 @@ WebExtensionAPIOffscreen& WebExtensionAPINamespace::offscreen()
+@@ -244,16 +277,126 @@ WebExtensionAPIOffscreen& WebExtensionAPINamespace::offscreen()
  }
  #endif
  
@@ -141241,8 +141312,8 @@ index cdf7b6ed9b22a11f8ebdce34e1755607c892c4d1..30645b24757d0c59ad2b8459d9464862
 +    if (!m_idle)
 +        lazyInitialize(m_idle, WebExtensionAPIIdle::create(*this));
 +    return *m_idle;
- }
- 
++}
++
 +WebExtensionAPIManagement& WebExtensionAPINamespace::management()
 +{
 +    if (!m_management)
@@ -141271,8 +141342,8 @@ index cdf7b6ed9b22a11f8ebdce34e1755607c892c4d1..30645b24757d0c59ad2b8459d9464862
 +    if (!m_history)
 +        lazyInitialize(m_history, WebExtensionAPIHistory::create(*this));
 +    return *m_history;
-+}
-+
+ }
+ 
 +WebExtensionAPIBookmarksHaiku& WebExtensionAPINamespace::bookmarks()
 +{
 +    // Documentation: https://developer.chrome.com/docs/extensions/reference/api/bookmarks
@@ -141309,6 +141380,15 @@ index cdf7b6ed9b22a11f8ebdce34e1755607c892c4d1..30645b24757d0c59ad2b8459d9464862
 +    return *m_sessions;
 +}
 +
++WebExtensionAPISidebarActionHaiku& WebExtensionAPINamespace::sidebarAction()
++{
++    // Documentation: https://developer.mozilla.org/docs/Mozilla/Add-ons/WebExtensions/API/sidebarAction
++
++    if (!m_sidebarActionHaiku)
++        lazyInitialize(m_sidebarActionHaiku, WebExtensionAPISidebarActionHaiku::create(*this));
++    return *m_sidebarActionHaiku;
++}
++
 +WebExtensionAPITabGroups& WebExtensionAPINamespace::tabGroups()
 +{
 +    // Documentation: https://developer.chrome.com/docs/extensions/reference/api/tabGroups
@@ -141340,7 +141420,7 @@ index cdf7b6ed9b22a11f8ebdce34e1755607c892c4d1..30645b24757d0c59ad2b8459d9464862
  WebExtensionAPIPermissions& WebExtensionAPINamespace::permissions()
  {
      // Documentation: https://developer.mozilla.org/docs/Mozilla/Add-ons/WebExtensions/API/permissions
-@@ -286,6 +417,7 @@ WebExtensionAPIScripting& WebExtensionAPINamespace::scripting()
+@@ -286,6 +429,7 @@ WebExtensionAPIScripting& WebExtensionAPINamespace::scripting()
      return *m_scripting;
  }
  
@@ -141348,29 +141428,29 @@ index cdf7b6ed9b22a11f8ebdce34e1755607c892c4d1..30645b24757d0c59ad2b8459d9464862
  #if ENABLE(WK_WEB_EXTENSIONS_SIDEBAR)
  WebExtensionAPISidePanel& WebExtensionAPINamespace::sidePanel()
  {
-@@ -320,15 +452,8 @@ WebExtensionAPIBookmarks& WebExtensionAPINamespace::bookmarks()
+@@ -320,15 +464,8 @@ WebExtensionAPIBookmarks& WebExtensionAPINamespace::bookmarks()
  }
  #endif
  
 -WebExtensionAPIStorage& WebExtensionAPINamespace::storage()
 -{
 -    // Documentation: https://developer.mozilla.org/docs/Mozilla/Add-ons/WebExtensions/API/storage
--
+ 
 -    if (!m_storage)
 -        lazyInitialize(m_storage, WebExtensionAPIStorage::create(*this));
- 
+-
 -    return *m_storage;
 -}
 +#endif
  
  WebExtensionAPITabs& WebExtensionAPINamespace::tabs()
  {
-@@ -339,27 +464,15 @@ WebExtensionAPITabs& WebExtensionAPINamespace::tabs()
+@@ -339,27 +476,15 @@ WebExtensionAPITabs& WebExtensionAPINamespace::tabs()
  
      return *m_tabs;
  }
 -#endif
--
+ 
 -WebExtensionAPITest& WebExtensionAPINamespace::test()
 -{
 -    // Documentation: None (Testing Only)
@@ -141380,7 +141460,7 @@ index cdf7b6ed9b22a11f8ebdce34e1755607c892c4d1..30645b24757d0c59ad2b8459d9464862
 -
 -    return *m_test;
 -}
- 
+-
 -#if PLATFORM(COCOA)
 -WebExtensionAPIWindows& WebExtensionAPINamespace::windows()
 +WebExtensionAPIStorage& WebExtensionAPINamespace::storage()
@@ -141398,7 +141478,7 @@ index cdf7b6ed9b22a11f8ebdce34e1755607c892c4d1..30645b24757d0c59ad2b8459d9464862
  }
  
  WebExtensionAPIWebNavigation& WebExtensionAPINamespace::webNavigation()
-@@ -381,7 +494,28 @@ WebExtensionAPIWebRequest& WebExtensionAPINamespace::webRequest()
+@@ -381,7 +506,28 @@ WebExtensionAPIWebRequest& WebExtensionAPINamespace::webRequest()
  
      return *m_webRequest;
  }
@@ -141429,10 +141509,10 @@ index cdf7b6ed9b22a11f8ebdce34e1755607c892c4d1..30645b24757d0c59ad2b8459d9464862
  } // namespace WebKit
  
 diff --git a/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPINamespace.h b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPINamespace.h
-index fc3e8017564cf29eb647731205e00dc8500dd13d..0482e0ea032aa685b09d0b2cd51fe1dcea08d38d 100644
+index fc3e8017564cf29eb647731205e00dc8500dd13d..93000c6fc8fe99bc4dcf59439549baa56357bfe6 100644
 --- a/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPINamespace.h
 +++ b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPINamespace.h
-@@ -45,6 +45,21 @@
+@@ -45,6 +45,22 @@
  #include "WebExtensionAPIObject.h"
  #include "WebExtensionAPIOffscreen.h"
  #include "WebExtensionAPIPermissions.h"
@@ -141449,12 +141529,13 @@ index fc3e8017564cf29eb647731205e00dc8500dd13d..0482e0ea032aa685b09d0b2cd51fe1dc
 +#include "WebExtensionAPIBrowsingData.h"
 +#include "WebExtensionAPISessions.h"
 +#include "WebExtensionAPITabGroups.h"
++#include "WebExtensionAPISidebarActionHaiku.h"
 +#include "WebExtensionAPIIdentity.h"
 +#endif
  #include "WebExtensionAPIRuntime.h"
  #include "WebExtensionAPIScripting.h"
  #include "WebExtensionAPISidePanel.h"
-@@ -66,33 +81,46 @@ class WebExtensionAPINamespace : public WebExtensionAPIObject, public JSWebExten
+@@ -66,33 +82,47 @@ class WebExtensionAPINamespace : public WebExtensionAPIObject, public JSWebExten
  
  public:
      bool isPropertyAllowed(const ASCIILiteral& propertyName, WebPage*);
@@ -141501,6 +141582,7 @@ index fc3e8017564cf29eb647731205e00dc8500dd13d..0482e0ea032aa685b09d0b2cd51fe1dc
 +    WebExtensionAPIBrowsingData& browsingData();
 +    WebExtensionAPISessions& sessions();
 +    WebExtensionAPITabGroups& tabGroups();
++    WebExtensionAPISidebarActionHaiku& sidebarAction();
 +    WebExtensionAPIIdentity& identity();
  #endif
      WebExtensionAPIRuntime& runtime() const final;
@@ -141510,7 +141592,7 @@ index fc3e8017564cf29eb647731205e00dc8500dd13d..0482e0ea032aa685b09d0b2cd51fe1dc
  #if ENABLE(WK_WEB_EXTENSIONS_SIDEBAR)
      WebExtensionAPISidePanel& sidePanel();
      WebExtensionAPISidebarAction& sidebarAction();
-@@ -100,15 +128,13 @@ public:
+@@ -100,15 +130,13 @@ public:
  #if ENABLE(WK_WEB_EXTENSIONS_BOOKMARKS)
      WebExtensionAPIBookmarks& bookmarks();
  #endif
@@ -141530,7 +141612,7 @@ index fc3e8017564cf29eb647731205e00dc8500dd13d..0482e0ea032aa685b09d0b2cd51fe1dc
  
  private:
      const RefPtr<WebExtensionAPIAction> m_action;
-@@ -127,7 +153,22 @@ private:
+@@ -127,7 +155,23 @@ private:
  #if ENABLE(WK_WEB_EXTENSIONS_OFFSCREEN)
      const RefPtr<WebExtensionAPIOffscreen> m_offscreen;
  #endif
@@ -141549,6 +141631,7 @@ index fc3e8017564cf29eb647731205e00dc8500dd13d..0482e0ea032aa685b09d0b2cd51fe1dc
 +    RefPtr<WebExtensionAPIBrowsingData> m_browsingData;
 +    RefPtr<WebExtensionAPISessions> m_sessions;
 +    RefPtr<WebExtensionAPITabGroups> m_tabGroups;
++    RefPtr<WebExtensionAPISidebarActionHaiku> m_sidebarActionHaiku;
 +    RefPtr<WebExtensionAPIIdentity> m_identity;
 +#endif
      mutable RefPtr<WebExtensionAPIRuntime> m_runtime;
@@ -144287,6 +144370,157 @@ index 0000000000000000000000000000000000000000..f72e378f403c99c90458e63a52a1919a
 +} // namespace WebKit
 +
 +SPECIALIZE_TYPE_TRAITS_WEB_EXTENSION(WebExtensionAPISessions, sessions);
++
++#endif // ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
+diff --git a/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPISidebarActionHaiku.cpp b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPISidebarActionHaiku.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..75b440b467b379ad25df691620e4d47405ce421d
+--- /dev/null
++++ b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPISidebarActionHaiku.cpp
+@@ -0,0 +1,103 @@
++/* Copyright (C) 2026 Summit contributors. SPDX-License-Identifier: BSD-2-Clause */
++#include "config.h"
++#include "WebExtensionAPISidebarActionHaiku.h"
++
++#if ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
++
++#include "MessageSenderInlines.h"
++#include "WebExtensionContextMessages.h"
++#include "WebExtensionContextProxy.h"
++#include "WebExtensionUtilities.h"
++#include "WebProcess.h"
++
++namespace WebKit {
++
++// details: tabId, windowId (Firefox), and the method's own member. The
++// answer is JSON: null, a boolean or a string.
++void WebExtensionAPISidebarActionHaiku::send(const String& method, RefPtr<JSON::Value> details, bool detailsRequired, Ref<WebExtensionCallbackHandler>&& callback, String& exception)
++{
++    RefPtr object = details ? details->asObject() : nullptr;
++    if ((details && details->type() != JSON::Value::Type::Null && !object) || (detailsRequired && !object)) {
++        exception = toErrorString(nullString(), "details"_s, "an object is expected"_s);
++        return;
++    }
++    Ref arguments = object ? object.releaseNonNull() : JSON::Object::create();
++    for (auto key : { "tabId"_s, "windowId"_s }) {
++        if (RefPtr value = arguments->getValue(key); value && value->type() != JSON::Value::Type::Null && !value->asDouble()) {
++            exception = toErrorString(nullString(), key, "a number is expected"_s);
++            return;
++        }
++    }
++    WebProcess::singleton().sendWithAsyncReply(Messages::WebExtensionContext::SidebarActionHaiku(method, arguments->toJSONString()),
++        [protectedThis = Ref { *this }, callback = WTF::move(callback)](std::expected<String, WebExtensionError>&& result) {
++            if (!result) {
++                callback->reportError(result.error());
++                return;
++            }
++            if (result->isEmpty() || *result == "null"_s) {
++                callback->call();
++                return;
++            }
++            auto context = callback->globalContext();
++            Protected<JSValueRef> value(context, fromJSON(context, JSON::Value::parseJSON(*result)));
++            callback->call(value.get());
++        }, extensionContext().identifier());
++}
++
++void WebExtensionAPISidebarActionHaiku::open(Ref<WebExtensionCallbackHandler>&& callback)
++{
++    String ignored;
++    send("open"_s, nullptr, false, WTF::move(callback), ignored);
++}
++
++void WebExtensionAPISidebarActionHaiku::close(Ref<WebExtensionCallbackHandler>&& callback)
++{
++    String ignored;
++    send("close"_s, nullptr, false, WTF::move(callback), ignored);
++}
++
++void WebExtensionAPISidebarActionHaiku::toggle(Ref<WebExtensionCallbackHandler>&& callback)
++{
++    String ignored;
++    send("toggle"_s, nullptr, false, WTF::move(callback), ignored);
++}
++
++void WebExtensionAPISidebarActionHaiku::isOpen(RefPtr<JSON::Value> details, Ref<WebExtensionCallbackHandler>&& callback, String& exception)
++{
++    send("isOpen"_s, details, false, WTF::move(callback), exception);
++}
++
++void WebExtensionAPISidebarActionHaiku::setPanel(RefPtr<JSON::Value> details, Ref<WebExtensionCallbackHandler>&& callback, String& exception)
++{
++    send("setPanel"_s, details, true, WTF::move(callback), exception);
++}
++
++void WebExtensionAPISidebarActionHaiku::getPanel(RefPtr<JSON::Value> details, Ref<WebExtensionCallbackHandler>&& callback, String& exception)
++{
++    send("getPanel"_s, details, false, WTF::move(callback), exception);
++}
++
++void WebExtensionAPISidebarActionHaiku::setTitle(RefPtr<JSON::Value> details, Ref<WebExtensionCallbackHandler>&& callback, String& exception)
++{
++    send("setTitle"_s, details, true, WTF::move(callback), exception);
++}
++
++void WebExtensionAPISidebarActionHaiku::getTitle(RefPtr<JSON::Value> details, Ref<WebExtensionCallbackHandler>&& callback, String& exception)
++{
++    send("getTitle"_s, details, false, WTF::move(callback), exception);
++}
++
++void WebExtensionAPISidebarActionHaiku::setIcon(RefPtr<JSON::Value> details, Ref<WebExtensionCallbackHandler>&& callback, String& exception)
++{
++    // The sidebar shows no icon; the call is accepted, as a no-op.
++    RefPtr object = details ? details->asObject() : nullptr;
++    if (!object) {
++        exception = toErrorString(nullString(), "details"_s, "an object is expected"_s);
++        return;
++    }
++    callback->call();
++}
++
++} // namespace WebKit
++
++#endif // ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
+diff --git a/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPISidebarActionHaiku.h b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPISidebarActionHaiku.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..a2ce3ad2fd366c5438475e19d817cb41cae7b5e4
+--- /dev/null
++++ b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPISidebarActionHaiku.h
+@@ -0,0 +1,36 @@
++/* Copyright (C) 2026 Summit contributors. SPDX-License-Identifier: BSD-2-Clause */
++#pragma once
++
++#if ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
++
++#include "JSWebExtensionAPISidebarActionHaiku.h"
++#include "WebExtensionAPIObject.h"
++#include <wtf/JSONValues.h>
++
++namespace WebKit {
++
++// Firefox's sidebarAction. The browser keeps the sidebar: each call becomes a
++// SidebarActionHaiku message, forwarded as a SIDEBAR browser command.
++class WebExtensionAPISidebarActionHaiku : public WebExtensionAPIObject, public JSWebExtensionWrappable {
++    WEB_EXTENSION_DECLARE_JS_WRAPPER_CLASS(WebExtensionAPISidebarActionHaiku, sidebarActionHaiku, sidebarAction);
++
++public:
++    void open(Ref<WebExtensionCallbackHandler>&&);
++    void close(Ref<WebExtensionCallbackHandler>&&);
++    void toggle(Ref<WebExtensionCallbackHandler>&&);
++    void isOpen(RefPtr<JSON::Value> details, Ref<WebExtensionCallbackHandler>&&, String& outExceptionString);
++    void setPanel(RefPtr<JSON::Value> details, Ref<WebExtensionCallbackHandler>&&, String& outExceptionString);
++    void getPanel(RefPtr<JSON::Value> details, Ref<WebExtensionCallbackHandler>&&, String& outExceptionString);
++    void setTitle(RefPtr<JSON::Value> details, Ref<WebExtensionCallbackHandler>&&, String& outExceptionString);
++    void getTitle(RefPtr<JSON::Value> details, Ref<WebExtensionCallbackHandler>&&, String& outExceptionString);
++    void setIcon(RefPtr<JSON::Value> details, Ref<WebExtensionCallbackHandler>&&, String& outExceptionString);
++
++private:
++    void send(const String& method, RefPtr<JSON::Value> details, bool detailsRequired, Ref<WebExtensionCallbackHandler>&&, String& exception);
++};
++
++} // namespace WebKit
++
++SPECIALIZE_TYPE_TRAITS_WEB_EXTENSION(WebExtensionAPISidebarActionHaiku, sidebarActionHaiku);
 +
 +#endif // ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
 diff --git a/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIStorage.cpp b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIStorage.cpp
@@ -151326,10 +151560,10 @@ index 2868b8c1b322da84dda89344451196e063c4264d..701eab20681dee6d7595f0a57f9df7c7
  
  };
 diff --git a/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPINamespace.idl b/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPINamespace.idl
-index cf3a76d37a4d9379d4191ac666ba4bc97bd9013d..f5aae4070bdb08ae0c4f59cdaf1ae22c2824d794 100644
+index cf3a76d37a4d9379d4191ac666ba4bc97bd9013d..a08f2cdfa281ef3d0906e2ca18b13bdf9b0a64a1 100644
 --- a/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPINamespace.idl
 +++ b/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPINamespace.idl
-@@ -33,57 +33,74 @@
+@@ -33,57 +33,75 @@
      * in the offscreen web view context) - and automatically grant it in WebExtensionAPINamespace::isPropertyAllowed.
      */
  
@@ -151400,6 +151634,7 @@ index cf3a76d37a4d9379d4191ac666ba4bc97bd9013d..f5aae4070bdb08ae0c4f59cdaf1ae22c
 +    [MainWorldOnly, Dynamic, Platform=HAIKU] readonly attribute WebExtensionAPIBrowsingData browsingData;
 +    [MainWorldOnly, Dynamic, Platform=HAIKU] readonly attribute WebExtensionAPISessions sessions;
 +    [MainWorldOnly, Dynamic, Platform=HAIKU] readonly attribute WebExtensionAPITabGroups tabGroups;
++    [MainWorldOnly, Dynamic, Platform=HAIKU] readonly attribute WebExtensionAPISidebarActionHaiku sidebarAction;
 +    [MainWorldOnly, Dynamic, Platform=HAIKU] readonly attribute WebExtensionAPIIdentity identity;
  
      [MainWorldOnly, Dynamic, Platform=COCOA, Conditional=WK_WEB_EXTENSIONS_SIDEBAR] readonly attribute WebExtensionAPISidebarAction sidebarAction;
@@ -151708,6 +151943,39 @@ index 0000000000000000000000000000000000000000..ed91a292403b8c8a801980427f08bb3d
 +    [RaisesStringException] void removeWindowValue(double windowId, DOMString key, [Optional, CallbackHandler] function callback);
 +
 +    readonly attribute WebExtensionAPIEvent onChanged;
++
++};
+diff --git a/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPISidebarActionHaiku.idl b/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPISidebarActionHaiku.idl
+new file mode 100644
+index 0000000000000000000000000000000000000000..750fa6af6df7688613caf64101235a0c7216a144
+--- /dev/null
++++ b/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPISidebarActionHaiku.idl
+@@ -0,0 +1,27 @@
++/*
++ * Copyright (C) 2026 Summit contributors.
++ * SPDX-License-Identifier: BSD-2-Clause
++ */
++
++// Firefox's sidebarAction, for the sidebar the browser shows beside its pages
++// (View › Sidebar): opening and closing it, and its panel and title.
++// https://developer.mozilla.org/docs/Mozilla/Add-ons/WebExtensions/API/sidebarAction
++[
++    Conditional=WK_WEB_EXTENSIONS,
++    MainWorldOnly,
++    ReturnsPromiseWhenCallbackIsOmitted,
++    UseCPPAPI,
++] interface WebExtensionAPISidebarActionHaiku {
++
++    void open([Optional, CallbackHandler] function callback);
++    void close([Optional, CallbackHandler] function callback);
++    void toggle([Optional, CallbackHandler] function callback);
++    [RaisesStringException] void isOpen([Optional, JSONValue] any details, [Optional, CallbackHandler] function callback);
++
++    [RaisesStringException] void setPanel([JSONValue] any details, [Optional, CallbackHandler] function callback);
++    [RaisesStringException] void getPanel([Optional, JSONValue] any details, [Optional, CallbackHandler] function callback);
++    [RaisesStringException] void setTitle([JSONValue] any details, [Optional, CallbackHandler] function callback);
++    [RaisesStringException] void getTitle([Optional, JSONValue] any details, [Optional, CallbackHandler] function callback);
++    [RaisesStringException] void setIcon([JSONValue] any details, [Optional, CallbackHandler] function callback);
 +
 +};
 diff --git a/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPIStorage.idl b/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPIStorage.idl
