@@ -2738,6 +2738,7 @@ void BrowserWindow::ActivateExtensionAction(const BMessage& message)
     const auto load = message.GetUInt64("load_identifier", 0);
     const auto page = message.GetUInt64("page_identifier", 0);
     SUMMIT_EXTENSION_TIMING("action button of %s clicked", identity);
+    AnchorExtensionPopup(identity);
     const auto status = fWebKitContext->ActivateExtensionAction(identity, BMessenger(this), load, page,
         BMessenger(this), ++fExtensionActionInvocation);
     if (status != B_OK) {
@@ -2868,8 +2869,21 @@ void BrowserWindow::PreloadExtensionAction(const BMessage& message)
     const char* identity = nullptr;
     if (message.FindString("extension_identifier", &identity) != B_OK || !message.GetBool("has_popup", false)) return;
     SUMMIT_EXTENSION_TIMING("action button of %s hovered", identity);
+    AnchorExtensionPopup(identity);
     fWebKitContext->PreloadExtensionAction(identity, BMessenger(this), message.GetUInt64("load_identifier", 0),
         message.GetUInt64("page_identifier", 0));
+}
+
+void BrowserWindow::AnchorExtensionPopup(const char* identity)
+{
+    BView* button = fExtensionActionsOverflow;
+    for (size_t i = 0; i < fExtensionActionButtons.size() && i < fExtensionActionState.size(); ++i) {
+        if (!std::strcmp(fExtensionActionState[i].GetString("extension_identifier", ""), identity)) {
+            button = fExtensionActionButtons[i];
+            break;
+        }
+    }
+    if (button && !button->IsHidden(button)) fWebKitContext->SetExtensionActionAnchor(BMessenger(this), button->ConvertToScreen(button->Bounds()));
 }
 
 void BrowserWindow::ShowExtensionActionMenu(const BMessage& message)

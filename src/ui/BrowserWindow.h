@@ -570,6 +570,9 @@ private:
     // keys are not one, or Summit uses them.
     bool RunExtensionShortcut(const BMessage& keyDown);
     void PreloadExtensionAction(const BMessage&);
+    // Tells the engine which button an extension's popup opens under: its
+    // toolbar button, or the overflow button when it is in the overflow menu.
+    void AnchorExtensionPopup(const char* identity);
 public:
     void DispatchMessage(BMessage*, BHandler*) override;
 private:

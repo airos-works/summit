@@ -17,8 +17,11 @@ floating window. The page has the extension's origin, CSP, privileged APIs and
 storage. An action without a popup dispatches its real `onClicked` event with
 the current browser tab. Popups close when their action becomes invalid, the
 active tab changes, the extension unloads, or the browser closes. The popup
-currently anchors below the toolbar at the content's right edge; anchoring
-directly to the individual button remains work.
+opens under its toolbar button, right-aligned with it (above it near the
+bottom of the screen); an action in the overflow menu opens under the
+overflow button. The window reports the button before activating or
+preloading the action (`BWebKitContext::SetExtensionActionAnchor`); without
+a report the popup opens at the top right of the page.
 
 ## Public SDK and lifetime
 
@@ -155,7 +158,7 @@ binary/launcher digests and unchanged source/support fingerprints. Copy log:
 
 These fixtures prove the listed action paths, not arbitrary Chrome, Firefox or
 Safari extension compatibility. MV3/service workers, remaining action APIs,
-badge alpha/theme rendering coverage, dynamic icon changes, direct button anchoring, overflow pointer input,
+badge alpha/theme rendering coverage, dynamic icon changes, overflow pointer input,
 private contexts, multi-window behavior and a real extension corpus need more
 implementation or runtime coverage. Active-tab permission transitions, popup
 navigation/CSP rejection, modal dialogs, renderer failure and permission
