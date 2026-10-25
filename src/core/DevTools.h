@@ -259,6 +259,9 @@ public:
     void RemoveStorageItem(StorageKind kind, const std::string& origin, const std::string& key);
     void ClearStorage(StorageKind kind, const std::string& origin);
     void DeleteCookie(const Cookie& cookie);
+    // Sets a cookie as given (Page.setCookie), then reads the cookies again.
+    // A partitioned one stays in its partition.
+    void SetCookie(const Cookie& cookie);
 
     // The Elements panel's model of the page's DOM and styles; its commands
     // go to the page with the session's.

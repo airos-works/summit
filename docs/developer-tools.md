@@ -205,7 +205,11 @@ from other sites), and **Cookies**. Choosing one shows it on the right:
 - **Cookies**: every cookie the page's addresses are sent, HttpOnly ones
   included: name, value, domain, path, when it expires (*Session* for those
   that end with the session), size, HttpOnly, Secure and SameSite. The
-  selected cookie's value is shown below.
+  selected cookie's value is shown below, and its *Name* and *Value* fill
+  the fields under it: **Save Cookie** sets it with what they say (a new
+  name replaces the cookie), keeping its domain, path, expiry and flags
+  (`Page.setCookie`); with no cookie selected it adds a session cookie for
+  the page's host, Secure on an https page.
 
 **Refresh** reads the storage again, **Delete** removes the selected item or
 cookie, **Clear All** removes every item of the storage shown, or every

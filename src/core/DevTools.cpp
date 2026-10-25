@@ -1153,6 +1153,17 @@ void Session::ClearStorage(StorageKind kind, const std::string& origin)
         for (const auto cookie : area->cookies) DeleteCookie(cookie);
 }
 
+void Session::SetCookie(const Cookie& cookie)
+{
+    if (cookie.name.empty() || cookie.domain.empty()) return;
+    json set = {{"name", cookie.name}, {"value", cookie.value}, {"domain", cookie.domain},
+        {"path", cookie.path.empty() ? std::string("/") : cookie.path}, {"session", cookie.session || cookie.expires <= 0},
+        {"expires", cookie.session ? 0.0 : cookie.expires}, {"httpOnly", cookie.httpOnly}, {"secure", cookie.secure},
+        {"sameSite", cookie.sameSite.empty() ? std::string("Lax") : cookie.sameSite}};
+    if (!cookie.partitionKey.empty()) set["partitionKey"] = cookie.partitionKey;
+    StorageEdit(StorageKind::Cookies, { }, "Page.setCookie", json{{"cookie", set}}.dump());
+}
+
 void Session::DeleteCookie(const Cookie& cookie)
 {
     if (!cookie.partitionKey.empty()) {
