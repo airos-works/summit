@@ -661,11 +661,13 @@ private:
     BMenuItem* fCaretBrowsingItem = nullptr;
     BMenuItem* fReducedMotionItem = nullptr;
     BMenuItem* fIncreasedContrastItem = nullptr;
+    BMenuItem* fOverrideColorsItem = nullptr;
 public:
     // The profile's accessibility aids, as this window's tabs have them.
     struct AccessibilityAids {
         bool caretBrowsing = false, reduceMotion = false, increaseContrast = false;
         int minimumFontSize = 0;
+        bool overrideColors = false;
         bool operator==(const AccessibilityAids&) const = default;
     };
 private:

@@ -91336,10 +91336,10 @@ index 0000000000000000000000000000000000000000..cd4bc7529d812074c6e5915950a4f395
 +}
 diff --git a/Source/WebKit/UIProcess/API/haiku/WebKitView.h b/Source/WebKit/UIProcess/API/haiku/WebKitView.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..0cfc301b19eabc1532a916028068f887eefe0378
+index 0000000000000000000000000000000000000000..b68ffffc38d023b7aa8e7a52eee3200591bb2778
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/API/haiku/WebKitView.h
-@@ -0,0 +1,452 @@
+@@ -0,0 +1,457 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#pragma once
@@ -91661,6 +91661,11 @@ index 0000000000000000000000000000000000000000..0cfc301b19eabc1532a916028068f887
 +    // Embedding: see WebKitEmbedding.h. Scripts run in the pages' own world.
 +    void AddUserScript(const char* source, bool atDocumentStart = true, bool allFrames = true);
 +    void RemoveAllUserScripts();
++    // A style sheet applied, as the user's, to every page of the views that
++    // share this view's configuration (Summit's windows do): a user
++    // preference such as overriding the pages' colours. It replaces the one
++    // set before; null or empty removes it. Any thread.
++    void SetUserStyleSheet(const char* source);
 +    // Offers window.webkit.messageHandlers.<name> to the view's pages; their
 +    // messages reach target as B_WEBKIT_SCRIPT_MESSAGE.
 +    void AddScriptMessageHandler(const char* name, BMessenger target);
@@ -91794,10 +91799,10 @@ index 0000000000000000000000000000000000000000..0cfc301b19eabc1532a916028068f887
 +};
 diff --git a/Source/WebKit/UIProcess/API/haiku/WebKitViewEmbedding.cpp b/Source/WebKit/UIProcess/API/haiku/WebKitViewEmbedding.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..12c5b97a0a7089cfac2e9080d8217d1a797d21f9
+index 0000000000000000000000000000000000000000..18e1686fee4925f1206504e4b6c02930bd380ce2
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/API/haiku/WebKitViewEmbedding.cpp
-@@ -0,0 +1,1089 @@
+@@ -0,0 +1,1113 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +// BWebKitView's embedding interfaces (WebKitEmbedding.h): user scripts,
@@ -91816,6 +91821,7 @@ index 0000000000000000000000000000000000000000..12c5b97a0a7089cfac2e9080d8217d1a
 +#include "APIPageConfiguration.h"
 +#include "APIString.h"
 +#include "APIUserScript.h"
++#include "APIUserStyleSheet.h"
 +#include "FrameInfoData.h"
 +#include "InjectUserScriptImmediately.h"
 +#include "JavaScriptEvaluationResult.h"
@@ -92334,6 +92340,29 @@ index 0000000000000000000000000000000000000000..12c5b97a0a7089cfac2e9080d8217d1a
 +            allFrames ? UserContentInjectedFrames::InjectInAllFrames : UserContentInjectedFrames::InjectInTopFrameOnly };
 +        Ref userScript = API::UserScript::create(WTF::move(script), API::ContentWorld::pageContentWorldSingleton());
 +        page->configuration().userContentController().addUserScript(userScript.get(), InjectUserScriptImmediately::No);
++    });
++}
++
++void BWebKitView::SetUserStyleSheet(const char* source)
++{
++    if (m_status != B_OK)
++        return;
++    WTF::RunLoop::mainSingleton().dispatch([state = m_state, source = copyTextHaiku(source ? source : "")] {
++        auto* page = pageHaiku(state);
++        if (!page)
++            return;
++        // One sheet a content controller, so other style sheets stay.
++        static NeverDestroyed<HashMap<Ref<WebUserContentControllerProxy>, Ref<API::UserStyleSheet>>> sheets;
++        Ref controller = page->configuration().userContentController();
++        if (auto old = sheets->take(controller))
++            controller->removeUserStyleSheet(*old);
++        String text = stringHaiku(source);
++        if (text.isEmpty())
++            return;
++        Ref sheet = API::UserStyleSheet::create(WebCore::UserStyleSheet { text, URL { }, { }, { }, UserContentInjectedFrames::InjectInAllFrames,
++            UserContentMatchParentFrame::Never, WebCore::UserStyleLevel::User }, API::ContentWorld::pageContentWorldSingleton());
++        controller->addUserStyleSheet(sheet.get());
++        sheets->set(WTF::move(controller), WTF::move(sheet));
 +    });
 +}
 +

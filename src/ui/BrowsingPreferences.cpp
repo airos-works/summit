@@ -61,6 +61,7 @@ BrowsingPreferences::BrowsingPreferences(BMessenger owner, const std::string& au
     fCaretBrowsing = aid("caret-browsing", "Move through pages with a text cursor (caret browsing, F7)", "caret_browsing", aids.caretBrowsing);
     fReduceMotion = aid("reduce-motion", "Ask sites to reduce motion and animation", "reduce_motion", aids.reduceMotion);
     fIncreaseContrast = aid("increase-contrast", "Ask sites for more contrast", "increase_contrast", aids.increaseContrast);
+    fOverrideColors = aid("override-colors", "Override the colours pages choose (light text on black)", "override_colors", aids.overrideColors);
     auto* sizes = new BPopUpMenu("minimum-font-size");
     for (int size : kMinimumFontSizes) {
         auto* message = new BMessage(minimumFontChosen);
@@ -155,6 +156,7 @@ BrowsingPreferences::BrowsingPreferences(BMessenger owner, const std::string& au
             .Add(fCaretBrowsing)
             .Add(fReduceMotion)
             .Add(fIncreaseContrast)
+            .Add(fOverrideColors)
             .AddGroup(B_HORIZONTAL, 0).Add(fMinimumFontSize).AddGlue().End()
         .End()
         .AddStrut(6)
@@ -192,7 +194,8 @@ void BrowsingPreferences::ShowState(const BMessage& state)
 {
     bool value = false;
     for (auto [name, box] : { std::pair { "caret_browsing", fCaretBrowsing }, std::pair { "reduce_motion", fReduceMotion },
-            std::pair { "increase_contrast", fIncreaseContrast }, std::pair { "unload_when_memory_is_low", fUnload } })
+            std::pair { "increase_contrast", fIncreaseContrast }, std::pair { "unload_when_memory_is_low", fUnload },
+            std::pair { "override_colors", fOverrideColors } })
         if (state.FindBool(name, &value) == B_OK) box->SetValue(value ? B_CONTROL_ON : B_CONTROL_OFF);
     int32 size = 0;
     if (state.FindInt32("minimum_font_size", &size) == B_OK)
@@ -206,7 +209,8 @@ void BrowsingPreferences::AttachedToWindow()
     // The controls talk to this tab, not to the window.
     for (BView* view : { static_cast<BView*>(fSpelling), static_cast<BView*>(fSavePasswords),
             static_cast<BView*>(fShow), static_cast<BView*>(fRemove), static_cast<BView*>(fCaretBrowsing),
-            static_cast<BView*>(fReduceMotion), static_cast<BView*>(fIncreaseContrast), static_cast<BView*>(fUnload) })
+            static_cast<BView*>(fReduceMotion), static_cast<BView*>(fIncreaseContrast), static_cast<BView*>(fOverrideColors),
+            static_cast<BView*>(fUnload) })
         if (auto* control = dynamic_cast<BControl*>(view)) control->SetTarget(this);
     for (const char* name : { "import-passwords", "export-passwords" })
         if (auto* button = dynamic_cast<BButton*>(FindView(name))) button->SetTarget(this);

@@ -62,6 +62,9 @@ struct Profile {
     // Preferences › Browsing's minimum font size (CSS pixels, 0 for none).
     bool caretBrowsing = false, reduceMotion = false, increaseContrast = false;
     int minimumFontSize = 0;
+    // View › Override Page Colours: pages drawn in high-contrast colours of
+    // the browser's choosing, whatever their style sheets say.
+    bool overrideColors = false;
     // Preferences › Browsing: unload long-unseen background tabs when memory
     // is low (#116).
     bool unloadWhenMemoryIsLow = true;
