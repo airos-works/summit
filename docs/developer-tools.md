@@ -179,6 +179,11 @@ menu (Copy, Copy All, Select All) work on every text.
 
 ### Console
 
+Messages a page logs before the tools are opened are kept for them, as other
+browsers do: Summit turns on the page's developer extras from the start
+(WebKit keeps console messages only while they are on;
+`SUMMIT_DEVELOPER_EXTRAS=0` keeps them off until the tools or MCP attach).
+
 The page's messages in the fixed font, **coloured by severity**: errors in
 bold red on a red tint, warnings in amber on a yellow tint, information in
 blue, debug messages in grey, `console.log()` in the text colour. Each has a
