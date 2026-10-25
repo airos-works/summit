@@ -170,10 +170,11 @@ report](resource-usage-2026-10-22.md).
   running team it lists no stacks, and the web process it reported on exited.
   **JIT code** (JavaScript, the engine's thunks) has no image: it is named
   `Baseline: render#AbCd+0x1c (JIT)` from JavaScriptCore's JITDump files
-  when the process writes them. **Not usable yet:** with `JSC_useJITDump=1`
-  a web process stops at start (`RELEASE_ASSERT` in
-  `WTF::initializeMainThread`: a thread exists before the main one is set
-  up; X399, 26 Oct, #120). Turn them on for a tab with
+  when the process writes them. (Before 26 Oct a process with
+  `JSC_useJITDump=1` stopped at start: `JSC::initialize()` started JITDump's
+  writer thread before the main thread was WTF's first, which
+  `initializeMainThread` asserts; `InitializeWebKit2` now registers the main
+  thread first on Haiku.) Turn them on for a tab with
   `set_environment` `JSC_useJITDump=1` and `JSC_jitDumpDirectory=/tmp`, then
   `restart_process` (the files, `jit-THREAD-PROCESS.dump`, are read from
   `/tmp`, or `SUMMIT_JIT_DUMP_DIRECTORY`; delete them afterwards: they hold

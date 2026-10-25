@@ -14746,6 +14746,24 @@ index b97bb426b97dd304a71a440a86935cebec723ec1..fb28702d73ac98d46356446468f6c9d3
      RefPtr<ImageBuffer> imageBuffer;
      // FIXME: When texImage2D is passed an HTMLVideoElement, implementations
      // interoperably use the native RGB color values of the video frame (e.g.
+diff --git a/Source/WebCore/inspector/CommandLineAPIModule.cpp b/Source/WebCore/inspector/CommandLineAPIModule.cpp
+index dd239696fdd09e20d7a0bc1e20508125552043d4..85702e154d0bd01f2e2d03b4cf81bbc0a441a786 100644
+--- a/Source/WebCore/inspector/CommandLineAPIModule.cpp
++++ b/Source/WebCore/inspector/CommandLineAPIModule.cpp
+@@ -63,6 +63,13 @@ JSValue CommandLineAPIModule::host(InjectedScriptManager* injectedScriptManager,
+     // CommandLineAPIModule should only ever be used by a WebInjectedScriptManager.
+     auto* pageInjectedScriptManager = downcast<WebInjectedScriptManager>(injectedScriptManager);
+     RefPtr commandLineAPIHost = pageInjectedScriptManager->commandLineAPIHost();
++#if PLATFORM(HAIKU)
++    // No inspector client (a message for a page whose frontend has not
++    // connected, after its web process was restarted): no command line API
++    // rather than a null host.
++    if (!commandLineAPIHost)
++        return JSC::jsUndefined();
++#endif
+     ASSERT(commandLineAPIHost);
+ 
+     JSDOMGlobalObject* globalObject = downcast<JSDOMGlobalObject>(lexicalGlobalObject);
 diff --git a/Source/WebCore/inspector/InspectorCanvasArguments.h b/Source/WebCore/inspector/InspectorCanvasArguments.h
 index 18de0e6c6de219c62c0f67c86a43931084a0a9bc..94889a2d4b3dd7f7a1798745cddfb32a864d423a 100644
 --- a/Source/WebCore/inspector/InspectorCanvasArguments.h
@@ -84997,6 +85015,32 @@ index f5d465ab8f8ce8096c4b19592c4020f62bcd6e69..1ea6f0eb4f0622453c8d899c7755aaa2
  #include "WebKeyboardEvent.h"
  #include <WebCore/WindowsKeyboardCodes.h>
  #include <wtf/TZoneMallocInlines.h>
+diff --git a/Source/WebKit/Shared/WebKit2Initialize.cpp b/Source/WebKit/Shared/WebKit2Initialize.cpp
+index 2491bb904241c49b98c3edea26385b6fafca8be7..dbac6f51764c0af692c3a12610f6a2c6bdb470b3 100644
+--- a/Source/WebKit/Shared/WebKit2Initialize.cpp
++++ b/Source/WebKit/Shared/WebKit2Initialize.cpp
+@@ -32,6 +32,7 @@
+ #include <wtf/MainThread.h>
+ #include <wtf/RefCounted.h>
+ #include <wtf/RunLoop.h>
++#include <wtf/Threading.h>
+ 
+ namespace WebKit {
+ 
+@@ -39,6 +40,13 @@ namespace WebKit {
+ 
+ void InitializeWebKit2()
+ {
++#if PLATFORM(HAIKU)
++    // The main thread is WTF's first thread (initializeMainThread asserts
++    // it): JSC::initialize() can start one first, as JITDump's writer queue
++    // does (JSC_useJITDump=1 stopped every process at start).
++    WTF::initialize();
++    WTF::Thread::currentSingleton();
++#endif
+     JSC::initialize();
+     WTF::initializeMainThread();
+     WebCore::initializeCommonAtomStrings();
 diff --git a/Source/WebKit/Shared/WebPageCreationParameters.h b/Source/WebKit/Shared/WebPageCreationParameters.h
 index 4176a80ce8e77f5e2ed82b4f39796a6de91d48ca..f8b82a6b80896017e3bb9ae46349bac63529ccba 100644
 --- a/Source/WebKit/Shared/WebPageCreationParameters.h
@@ -89567,10 +89611,10 @@ index 0000000000000000000000000000000000000000..22ab42571717f32300ebb36a55b10011
 +WK_EXPORT const char* BWebKitSourceRevision();
 diff --git a/Source/WebKit/UIProcess/API/haiku/WebKitInspector.cpp b/Source/WebKit/UIProcess/API/haiku/WebKitInspector.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..06b0e46432afa6394390bc7a01d14013c2f57db8
+index 0000000000000000000000000000000000000000..bf440c31976b3f8075b21dac39c458e555c54dbb
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/API/haiku/WebKitInspector.cpp
-@@ -0,0 +1,234 @@
+@@ -0,0 +1,245 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +// BWebKitInspectorSession (WebKitInspector.h): a Web Inspector protocol
@@ -89677,6 +89721,14 @@ index 0000000000000000000000000000000000000000..06b0e46432afa6394390bc7a01d14013
 +    return sessions;
 +}
 +
++// The preferences whose developer extras a session turned on (they were off):
++// they go off again with the last session.
++HashSet<WebPreferences*>& extrasTurnedOnHaiku()
++{
++    static NeverDestroyed<HashSet<WebPreferences*>> turnedOn;
++    return turnedOn;
++}
++
 +} // namespace
 +
 +struct BWebKitInspectorSession::State {
@@ -89695,8 +89747,10 @@ index 0000000000000000000000000000000000000000..06b0e46432afa6394390bc7a01d14013
 +        return;
 +    // Without them the page's console messages stay in the web process.
 +    state.preferences = page.preferences();
-+    if (sessionsOfPreferencesHaiku().add(state.preferences.get(), 0).iterator->value++ == 0)
++    if (sessionsOfPreferencesHaiku().add(state.preferences.get(), 0).iterator->value++ == 0 && !state.preferences->developerExtrasEnabled()) {
++        extrasTurnedOnHaiku().add(state.preferences.get());
 +        state.preferences->setDeveloperExtrasEnabled(true);
++    }
 +    state.channel = makeUnique<InspectorChannelHaiku>(state.queue);
 +    state.page = page;
 +    page.inspectorController().connectFrontend(*state.channel);
@@ -89762,7 +89816,8 @@ index 0000000000000000000000000000000000000000..06b0e46432afa6394390bc7a01d14013
 +        auto& sessions = sessionsOfPreferencesHaiku();
 +        if (auto found = sessions.find(state->preferences.get()); found != sessions.end() && !--found->value) {
 +            sessions.remove(found);
-+            state->preferences->setDeveloperExtrasEnabled(false);
++            if (extrasTurnedOnHaiku().remove(state->preferences.get()))
++                state->preferences->setDeveloperExtrasEnabled(false);
 +        }
 +        state->preferences = nullptr;
 +    });
@@ -126540,10 +126595,10 @@ index 0000000000000000000000000000000000000000..c9a119d02f85b7c5ad8fe9153bfc9604
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/WebView.cpp b/Source/WebKit/UIProcess/haiku/WebView.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..768278bf4602c61c12383fa82288708df28bc4fb
+index 0000000000000000000000000000000000000000..29bb65e231a8cdbc077bba3ce09ab432b501e169
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/WebView.cpp
-@@ -0,0 +1,3215 @@
+@@ -0,0 +1,3220 @@
 +/*
 + * Copyright (C) 2013 Intel Corporation. All rights reserved.
 + *
@@ -128289,6 +128344,11 @@ index 0000000000000000000000000000000000000000..768278bf4602c61c12383fa82288708d
 +    configuration->preferences().setInvisibleAutoplayNotPermitted(!pauseInvisible || std::strcmp(pauseInvisible, "0"));
 +    // Block pop-ups: window.open() needs a click or key press, as in other browsers.
 +    configuration->preferences().setJavaScriptCanOpenWindowsAutomatically(false);
++    // Developer extras keep a page's console messages (and failed loads) for
++    // developer tools opened later, as other browsers' tools show them;
++    // SUMMIT_DEVELOPER_EXTRAS=0 keeps them off until the tools attach.
++    const char* developerExtras = getenv("SUMMIT_DEVELOPER_EXTRAS");
++    configuration->preferences().setDeveloperExtrasEnabled(!developerExtras || std::strcmp(developerExtras, "0"));
 +    // Connections opened before they are needed: for <link rel=preconnect>
 +    // and Link: headers naming the hosts a page will load from (the network
 +    // process also opens one to the page being navigated to while its web
