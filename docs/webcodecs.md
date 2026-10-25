@@ -42,9 +42,13 @@ encoded in the engine (G.711 as ITU-T's reference expands and compresses
 it; 24-bit decodes to 32-bit AudioData). FLAC and Vorbis are decoded
 through FFmpeg with the description (FLAC's `fLaC` and metadata blocks,
 Vorbis's three Xiph-laced headers) as the codec context's extradata, at
-FFmpeg 6's and 8's offsets; FLAC and Vorbis encoding report unsupported.
+FFmpeg 6's and 8's offsets. They are encoded through FFmpeg too (its FLAC
+encoder, from 16-bit samples, and libvorbis): the description is read from
+the encoder's extradata (FLAC's STREAMINFO given a `fLaC` start and block
+header; Vorbis's headers as they are), and `flac: { compressLevel }` sets
+FFmpeg's compression level.
 
-Not yet: HE-AAC, FLAC and Vorbis encoding, AV1 and HEVC, and hardware
+Not yet: HE-AAC encoding, AV1 and HEVC, and hardware
 decoders (NVDEC, Cedar).
 
 H.264 with B-frames: libavcodec gives pictures in presentation order,
