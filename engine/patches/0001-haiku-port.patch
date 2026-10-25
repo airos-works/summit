@@ -98115,7 +98115,7 @@ index 8947f24ec9866c39f206aab464ec21c5d4213b95..b36f80023077ec3bc5680f7214a823a4
  
  #endif // ENABLE(WK_WEB_EXTENSIONS)
 diff --git a/Source/WebKit/UIProcess/Extensions/WebExtensionContext.h b/Source/WebKit/UIProcess/Extensions/WebExtensionContext.h
-index 5f8454dd5897a49ffba794e50fb04b7257ad2291..891f39ea5bd22f329d3d43e8f48070b227735c32 100644
+index 5f8454dd5897a49ffba794e50fb04b7257ad2291..50eabd674ecd0d136f1d5f16bdfc055026cca87a 100644
 --- a/Source/WebKit/UIProcess/Extensions/WebExtensionContext.h
 +++ b/Source/WebKit/UIProcess/Extensions/WebExtensionContext.h
 @@ -40,6 +40,9 @@
@@ -98660,7 +98660,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..891f39ea5bd22f329d3d43e8f48070b2
      void runtimeConnect(const String& extensionID, WebExtensionPortChannelIdentifier, const String& name, const WebExtensionMessageSenderParameters&, bool userGesture, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
      void runtimeSendNativeMessage(const String& applicationID, const String& messageJSON, CompletionHandler<void(std::expected<String, WebExtensionError>&&)>&&);
      void runtimeConnectNative(const String& applicationID, WebExtensionPortChannelIdentifier, WebPageProxyIdentifier, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
-@@ -1055,6 +1310,15 @@ private:
+@@ -1055,6 +1310,18 @@ private:
      void scriptingGetRegisteredScripts(const Vector<String>&, CompletionHandler<void(std::expected<Vector<WebExtensionRegisteredScriptParameters>, WebExtensionError>&&)>&&);
      void scriptingUnregisterContentScripts(const Vector<String>&, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
      bool createInjectedContentForScripts(const Vector<WebExtensionRegisteredScriptParameters>&, WebExtensionDynamicScripts::WebExtensionRegisteredScript::FirstTimeRegistration, DynamicInjectedContentsMap&, NSString *callingAPIName, NSString **errorMessage);
@@ -98672,11 +98672,14 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..891f39ea5bd22f329d3d43e8f48070b2
 +    void executeNativeScriptSources(WebPageProxy&, API::ContentWorld& contentScriptWorld, bool mainWorld, const WebExtensionTabScriptTarget&, const URL& authorizedURL, WebExtensionDynamicScripts::SourcePairs&&, size_t index, bool userGesture, CompletionHandler<void(WebExtensionTabScriptExecutionResult&&)>&&);
 +    void insertNativeCSS(WebExtensionTab*, const WebExtensionScriptInjectionParameters&, const String& apiName, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
 +    void removeNativeCSS(WebExtensionTab*, const WebExtensionScriptInjectionParameters&, const String& apiName, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
++    // insertCSS / removeCSS for frames other than the top one, or documents:
++    // in each target document (ChangeExtensionTabStyleSheets).
++    void changeNativeCSSInFrames(WebExtensionTab&, WebPageProxy&, const WebExtensionScriptInjectionParameters&, WebExtensionDynamicScripts::SourcePairs&&, bool remove, const String& apiName, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
 +#endif
  
      // Sidebar APIs
  #if ENABLE(WK_WEB_EXTENSIONS_SIDEBAR)
-@@ -1088,6 +1352,9 @@ private:
+@@ -1088,6 +1355,9 @@ private:
      void tabsCreate(std::optional<WebPageProxyIdentifier>, const WebExtensionTabParameters&, CompletionHandler<void(std::expected<std::optional<WebExtensionTabParameters>, WebExtensionError>&&)>&&);
      void tabsUpdate(WebPageProxyIdentifier, std::optional<WebExtensionTabIdentifier>, const WebExtensionTabParameters&, CompletionHandler<void(std::expected<std::optional<WebExtensionTabParameters>, WebExtensionError>&&)>&&);
      void tabsDuplicate(WebExtensionTabIdentifier, const WebExtensionTabParameters&, CompletionHandler<void(std::expected<std::optional<WebExtensionTabParameters>, WebExtensionError>&&)>&&);
@@ -98686,7 +98689,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..891f39ea5bd22f329d3d43e8f48070b2
      void tabsGet(WebExtensionTabIdentifier, CompletionHandler<void(std::expected<std::optional<WebExtensionTabParameters>, WebExtensionError>&&)>&&);
      void tabsGetCurrent(WebPageProxyIdentifier, CompletionHandler<void(std::expected<std::optional<WebExtensionTabParameters>, WebExtensionError>&&)>&&);
      void tabsQuery(WebPageProxyIdentifier, const WebExtensionTabQueryParameters&, CompletionHandler<void(std::expected<Vector<WebExtensionTabParameters>, WebExtensionError>&&)>&&);
-@@ -1103,6 +1370,9 @@ private:
+@@ -1103,6 +1373,9 @@ private:
      void tabsSetZoom(WebPageProxyIdentifier, std::optional<WebExtensionTabIdentifier>, double, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
      void tabsMove(Vector<WebExtensionTabIdentifier>, std::optional<WebExtensionWindowIdentifier>, double, CompletionHandler<void(std::expected<Vector<WebExtensionTabParameters>, WebExtensionError>&&)>&&);
      void tabsRemove(Vector<WebExtensionTabIdentifier>, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
@@ -98696,7 +98699,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..891f39ea5bd22f329d3d43e8f48070b2
      void tabsExecuteScript(WebPageProxyIdentifier, std::optional<WebExtensionTabIdentifier>, const WebExtensionScriptInjectionParameters&, bool userGesture, CompletionHandler<void(std::expected<Vector<WebExtensionScriptInjectionResultParameters>, WebExtensionError>&&)>&&);
      void tabsInsertCSS(WebPageProxyIdentifier, std::optional<WebExtensionTabIdentifier>, const WebExtensionScriptInjectionParameters&, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
      void tabsRemoveCSS(WebPageProxyIdentifier, std::optional<WebExtensionTabIdentifier>, const WebExtensionScriptInjectionParameters&, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
-@@ -1133,8 +1403,20 @@ private:
+@@ -1133,8 +1406,20 @@ private:
      void fireWindowsEventIfNeeded(WebExtensionEventListenerType, std::optional<WebExtensionWindowParameters>);
  
      // webRequest support.
@@ -98719,7 +98722,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..891f39ea5bd22f329d3d43e8f48070b2
  
      // IPC::MessageReceiver.
      void didReceiveMessage(IPC::Connection&, IPC::Decoder&) override;
-@@ -1145,12 +1427,31 @@ private:
+@@ -1145,12 +1430,31 @@ private:
  
      mutable Markable<WebExtensionContextIdentifier> m_privilegedIdentifier;
  
@@ -98751,7 +98754,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..891f39ea5bd22f329d3d43e8f48070b2
  #endif
      Vector<Ref<API::Error>> m_errors;
  
-@@ -1169,6 +1470,15 @@ private:
+@@ -1169,6 +1473,15 @@ private:
  
      RefPtr<API::ContentWorld> m_contentScriptWorld;
  
@@ -98767,7 +98770,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..891f39ea5bd22f329d3d43e8f48070b2
      PermissionsMap m_grantedPermissions;
      PermissionsMap m_deniedPermissions;
  
-@@ -1194,6 +1504,14 @@ private:
+@@ -1194,6 +1507,14 @@ private:
      EventListenerTypeCountedSet m_backgroundContentEventListeners;
      EventListenerTypeFrameMap m_eventListenerFrames;
  
@@ -98782,7 +98785,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..891f39ea5bd22f329d3d43e8f48070b2
      bool m_shouldFireStartupEvent { false };
      InstallReason m_installReason { InstallReason::None };
      String m_previousVersion;
-@@ -1216,6 +1534,16 @@ private:
+@@ -1216,6 +1537,16 @@ private:
  #elif ENABLE(2022_GLIB_API)
      GRefPtr<WebKitWebView> m_backgroundWebView;
      GWeakPtr<WebKitWebExtensionContext> m_delegate;
@@ -98799,7 +98802,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..891f39ea5bd22f329d3d43e8f48070b2
  #endif
      Variant<std::monostate, Ref<ProcessThrottlerActivity>, Ref<ProcessActivityGroup>> m_backgroundWebViewActivity;
      RefPtr<API::Error> m_backgroundContentLoadError;
-@@ -1237,6 +1565,7 @@ private:
+@@ -1237,6 +1568,7 @@ private:
      HashMap<Ref<WebExtensionMatchPattern>, UserScriptVector> m_injectedScriptsPerPatternMap;
      HashMap<Ref<WebExtensionMatchPattern>, UserStyleSheetVector> m_injectedStyleSheetsPerPatternMap;
  
@@ -98807,7 +98810,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..891f39ea5bd22f329d3d43e8f48070b2
      HashMap<String, Ref<WebExtensionDynamicScripts::WebExtensionRegisteredScript>> m_registeredScriptsMap;
      RefPtr<WebExtensionRegisteredScriptsSQLiteStore> m_registeredContentScriptsStorage;
  
-@@ -1256,11 +1585,20 @@ private:
+@@ -1256,11 +1588,20 @@ private:
  #endif // ENABLE(WK_WEB_EXTENSIONS_SIDEBAR)
  
      PortCountedSet m_ports;
@@ -98829,7 +98832,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..891f39ea5bd22f329d3d43e8f48070b2
      mutable WindowIdentifierVector m_windowOrderVector;
      mutable std::optional<WebExtensionWindowIdentifier> m_focusedWindowIdentifier;
  
-@@ -1276,6 +1614,26 @@ private:
+@@ -1276,6 +1617,26 @@ private:
      bool m_populatedCommands { false };
  
      String m_declarativeNetRequestContentRuleListFilePath;
@@ -98856,7 +98859,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..891f39ea5bd22f329d3d43e8f48070b2
      DeclarativeNetRequestMatchedRuleVector m_matchedRules;
      RefPtr<WebExtensionDeclarativeNetRequestSQLiteStore> m_declarativeNetRequestDynamicRulesStore;
      RefPtr<WebExtensionDeclarativeNetRequestSQLiteStore> m_declarativeNetRequestSessionRulesStore;
-@@ -1283,6 +1641,9 @@ private:
+@@ -1283,6 +1644,9 @@ private:
      HashSet<double> m_sessionRulesIDs;
      HashSet<double> m_dynamicRulesIDs;
  
@@ -98866,7 +98869,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..891f39ea5bd22f329d3d43e8f48070b2
      MenuItemMap m_menuItems;
      MenuItemVector m_mainMenuItems;
  
-@@ -1300,12 +1661,16 @@ private:
+@@ -1300,12 +1664,16 @@ private:
          String message;
  #if PLATFORM(COCOA)
          RetainPtr<id> argument;
@@ -98883,7 +98886,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..891f39ea5bd22f329d3d43e8f48070b2
  
      Deque<TestMessage> m_testMessageQueue;
      Deque<TestMessage> m_testStartedQueue;
-@@ -1315,6 +1680,8 @@ private:
+@@ -1315,6 +1683,8 @@ private:
      void sendQueuedTestMessagesIfNeeded(WebExtensionEventListenerType);
  #if PLATFORM(COCOA)
      void addTestMessageToQueue(const String& message, id argument, WebExtensionEventListenerType);
@@ -105886,10 +105889,10 @@ index 0000000000000000000000000000000000000000..87f9f3f91adb4d6506770a637f90eca0
 +#endif
 diff --git a/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextAPIScriptingHaiku.cpp b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextAPIScriptingHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..ef935e9aa0104dc22308026565130ac382d5d76b
+index 0000000000000000000000000000000000000000..b1a9c244eddfba7b0b369b8576656c224339fcda
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextAPIScriptingHaiku.cpp
-@@ -0,0 +1,742 @@
+@@ -0,0 +1,832 @@
 +/*
 + * Copyright (C) 2023-2024 Apple Inc. All rights reserved.
 + *
@@ -106069,6 +106072,22 @@ index 0000000000000000000000000000000000000000..ef935e9aa0104dc22308026565130ac3
 +    }
 +}
 +
++// frameIds naming more than the top frame, or documentIds: the CSS goes to
++// those documents (the UserContentController's sheets can only be for the
++// top frame or every frame).
++static bool targetsSpecificFrames(const WebExtensionScriptInjectionParameters& parameters)
++{
++    if (parameters.documentIdentifiers)
++        return true;
++    if (!parameters.frameIdentifiers)
++        return false;
++    for (auto& identifier : *parameters.frameIdentifiers) {
++        if (!isMainFrame(identifier) && identifier.toUInt64())
++            return true;
++    }
++    return false;
++}
++
 +static WebCore::UserContentInjectedFrames nativeInjectedFrames(const WebExtensionScriptInjectionParameters& parameters)
 +{
 +    // FIXME: <https://webkit.org/b/262491> There is currently no way to inject CSS in specific frames based on ID's. If 'frameIds' is passed, default to the main frame.
@@ -106099,8 +106118,78 @@ index 0000000000000000000000000000000000000000..ef935e9aa0104dc22308026565130ac3
 +        return;
 +    }
 +
++    if (targetsSpecificFrames(parameters)) {
++        changeNativeCSSInFrames(*tab, *page, parameters, WTF::move(*styleSheets), false, apiName, WTF::move(completionHandler));
++        return;
++    }
 +    injectNativeStyleSheets(*styleSheets, *page, Ref { *m_contentScriptWorld }, parameters.styleLevel, nativeInjectedFrames(parameters), nativeStyleSheetAllowlist(*this, *tab), *this);
 +    completionHandler({ });
++}
++
++void WebExtensionContext::changeNativeCSSInFrames(WebExtensionTab& tab, WebPageProxy& page, const WebExtensionScriptInjectionParameters& parameters, SourcePairs&& styleSheets, bool remove, const String& apiName, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&& completion)
++{
++    page.getAllFrames([this, protectedThis = Ref { *this }, tab = Ref { tab }, page = Ref { page }, parameters, styleSheets = WTF::move(styleSheets), remove, apiName, completion = WTF::move(completion)](std::optional<FrameTreeNodeData>&& frames) mutable {
++        if (!frames || !tab->isOpen() || tab->nativePage() != page.ptr() || !frameTreeMatchesPageHaiku(*frames, page)) {
++            completion(toWebExtensionError(apiName, nullString(), "the target document is unavailable"_s));
++            return;
++        }
++        Vector<WebExtensionTabScriptTarget> targets;
++        auto capture = [&](const WebExtensionTabScriptParameters& selection) -> std::optional<String> {
++            auto captured = captureWebExtensionTabScriptTargets(*frames, page->identifier(), selection);
++            if (!captured)
++                return captured.error();
++            for (auto& target : *captured) {
++                if (!targets.containsIf([&](auto& existing) { return existing.documents.last().frameIdentifier == target.documents.last().frameIdentifier; }))
++                    targets.append(WTF::move(target));
++            }
++            return std::nullopt;
++        };
++        std::optional<String> captureError;
++        if (parameters.documentIdentifiers) {
++            for (auto& documentIdentifier : *parameters.documentIdentifiers) {
++                WebExtensionTabScriptParameters selection;
++                selection.documentIdentifier = documentIdentifier;
++                if ((captureError = capture(selection)))
++                    break;
++            }
++        } else if (parameters.frameIdentifiers) {
++            for (auto& frameIdentifier : *parameters.frameIdentifiers) {
++                WebExtensionTabScriptParameters selection;
++                selection.frameIdentifier = frameIdentifier;
++                if ((captureError = capture(selection)))
++                    break;
++            }
++        }
++        if (captureError || targets.isEmpty()) {
++            completion(toWebExtensionError(apiName, nullString(), captureError.value_or("the requested frame or document was not found"_s)));
++            return;
++        }
++        Vector<std::pair<String, URL>> sheets;
++        for (auto& sheet : styleSheets)
++            sheets.append({ sheet.first, sheet.second });
++        auto failure = Box<std::optional<String>>::create();
++        Ref aggregator = MainRunLoopCallbackAggregator::create([failure, apiName, completion = WTF::move(completion)]() mutable {
++            if (*failure)
++                completion(toWebExtensionError(apiName, nullString(), **failure));
++            else
++                completion({ });
++        });
++        for (auto& target : targets) {
++            auto url = webExtensionTabScriptPermissionURL(target, false);
++            // Adding needs access to the frame; removing never does.
++            if (!remove && (!url || (url->protocolIs("file"_s) && !hasAccessToFileURLs()) || !hasPermission(*url, tab.ptr(), { }))) {
++                *failure = "this extension does not have access to this frame"_s;
++                continue;
++            }
++            auto frameIdentifier = target.documents.last().frameIdentifier;
++            Ref process = page->processContainingFrame(frameIdentifier);
++            process->sendWithAsyncReply(Messages::WebPage::ChangeExtensionTabStyleSheets(identifier(), target, url.value_or(URL { }), sheets,
++                parameters.styleLevel == WebCore::UserStyleLevel::Author, remove), [failure, aggregator](std::optional<String>&& error) {
++                if (error && !*failure)
++                    *failure = WTF::move(error);
++            }, page->webPageIDInProcess(process));
++        }
++    });
 +}
 +
 +void WebExtensionContext::removeNativeCSS(WebExtensionTab* tab, const WebExtensionScriptInjectionParameters& parameters, const String& apiName, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&& completionHandler)
@@ -106119,6 +106208,10 @@ index 0000000000000000000000000000000000000000..ef935e9aa0104dc22308026565130ac3
 +        return;
 +    }
 +
++    if (targetsSpecificFrames(parameters)) {
++        changeNativeCSSInFrames(*tab, *page, parameters, WTF::move(*styleSheets), true, apiName, WTF::move(completionHandler));
++        return;
++    }
 +    removeNativeStyleSheets(*styleSheets, *page, nativeInjectedFrames(parameters), *this);
 +    completionHandler({ });
 +}
@@ -154937,10 +155030,10 @@ index 0000000000000000000000000000000000000000..ef414274ea6c550c9f912275911eb033
 +#endif // ENABLE(WK_WEB_EXTENSIONS)
 diff --git a/Source/WebKit/WebProcess/Extensions/WebExtensionTabScriptExecution.cpp b/Source/WebKit/WebProcess/Extensions/WebExtensionTabScriptExecution.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..82f5d981b2f9e3657454ee1f636e1ad688472855
+index 0000000000000000000000000000000000000000..de642c85af4f9ca565a224af91947695b33f1018
 --- /dev/null
 +++ b/Source/WebKit/WebProcess/Extensions/WebExtensionTabScriptExecution.cpp
-@@ -0,0 +1,261 @@
+@@ -0,0 +1,308 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +#include "config.h"
 +#include "WebExtensionTabScriptExecution.h"
@@ -154961,6 +155054,8 @@ index 0000000000000000000000000000000000000000..82f5d981b2f9e3657454ee1f636e1ad6
 +#include <JavaScriptCore/JSPromise.h>
 +#include <WebCore/CommonVM.h>
 +#include <WebCore/Document.h>
++#include <WebCore/UserStyleSheet.h>
++#include <WebCore/ExtensionStyleSheets.h>
 +#include <WebCore/JSDOMPromise.h>
 +#include <WebCore/JSDOMWindowBase.h>
 +#include <WebCore/LocalFrame.h>
@@ -155183,6 +155278,51 @@ index 0000000000000000000000000000000000000000..82f5d981b2f9e3657454ee1f636e1ad6
 +    CompletionHandler<void(std::expected<WebExtensionTabScriptTarget, String>&&)> m_readyCompletion;
 +    CompletionHandler<void(WebExtensionTabScriptExecutionResult&&)> m_resultCompletion;
 +};
++
++void WebPage::changeExtensionTabStyleSheets(WebExtensionContextIdentifier context, const WebExtensionTabScriptTarget& target, const URL& authorizedURL, Vector<std::pair<String, URL>>&& styleSheets, bool authorLevel, bool remove, CompletionHandler<void(std::optional<String>&&)>&& completion)
++{
++    RefPtr extension = WebExtensionContextProxy::get(context);
++    RefPtr controller = webExtensionControllerProxy();
++    if (!extension || !controller || controller->extensionContext(extension->uniqueIdentifier()) != extension) {
++        completion("the extension was unloaded"_s);
++        return;
++    }
++    auto tree = mainWebFrame().frameTreeData();
++    auto current = tree ? refreshWebExtensionTabScriptTarget(target, *tree) : std::expected<WebExtensionTabScriptTarget, String> { makeUnexpected("the target document is unavailable"_s) };
++    if (!current) {
++        completion(current.error());
++        return;
++    }
++    // Removing needs no access (the extension may have lost it since); adding
++    // does, to the document as it was authorized.
++    if (!remove) {
++        auto permissionURL = webExtensionTabScriptPermissionURL(*current, false);
++        if (!permissionURL || *permissionURL != authorizedURL) {
++            completion("the document URL changed after authorization"_s);
++            return;
++        }
++    }
++    RefPtr frame = current->documents.isEmpty() ? nullptr : WebProcess::singleton().webFrame(current->documents.last().frameIdentifier);
++    RefPtr coreFrame = frame ? frame->coreLocalFrame() : nullptr;
++    RefPtr document = coreFrame ? coreFrame->document() : nullptr;
++    if (!document) {
++        completion("style sheets cannot be added to this document"_s);
++        return;
++    }
++    auto& sheets = document->extensionStyleSheets();
++    for (auto& [source, url] : styleSheets) {
++        // A sheet is removed by its address: the same CSS gets the same one.
++        URL sheetURL = url;
++        sheetURL.setFragmentIdentifier(makeString("summit-css-"_s, source.hash()));
++        UserStyleSheet sheet { source, sheetURL, Vector<String> { }, Vector<String> { }, UserContentInjectedFrames::InjectInTopFrameOnly,
++            UserContentMatchParentFrame::Never, authorLevel ? UserStyleLevel::Author : UserStyleLevel::User, std::nullopt };
++        if (remove)
++            sheets.removePageSpecificUserStyleSheet(sheet);
++        else
++            sheets.injectPageSpecificUserStyleSheet(sheet);
++    }
++    completion(std::nullopt);
++}
 +
 +void WebPage::waitForExtensionTabScript(WebExtensionContextIdentifier context, ContentWorldIdentifier world, const WebExtensionTabScriptTarget& target, WebExtensionTabScriptRunAt runAt, CompletionHandler<void(std::expected<WebExtensionTabScriptTarget, String>&&)>&& completion)
 +{
@@ -160982,7 +161122,7 @@ index 11766a98414863026a09ccea0dbbdd432db4444f..4a9d7da063d7f392f03f53452fa7fd2c
          m_textManipulationIncludesSubframes = false;
      else if (m_textManipulationIncludesSubframes)
 diff --git a/Source/WebKit/WebProcess/WebPage/WebPage.h b/Source/WebKit/WebProcess/WebPage/WebPage.h
-index 5dfb080fb516a2c8bd2ec72245babd8c28d926bf..8540ae6d1afede7b80fa565e17df1c8a4c5caf26 100644
+index 5dfb080fb516a2c8bd2ec72245babd8c28d926bf..836e271cc822bd48fcb67aeb6bc46e47b095eed6 100644
 --- a/Source/WebKit/WebProcess/WebPage/WebPage.h
 +++ b/Source/WebKit/WebProcess/WebPage/WebPage.h
 @@ -25,6 +25,10 @@
@@ -161030,18 +161170,21 @@ index 5dfb080fb516a2c8bd2ec72245babd8c28d926bf..8540ae6d1afede7b80fa565e17df1c8a
          return m_webExtensionController.get();
  #else
          return nullptr;
-@@ -2534,6 +2556,10 @@ private:
+@@ -2534,6 +2556,13 @@ private:
      void runJavaScript(WebFrame*, RunJavaScriptParameters&&, ContentWorldIdentifier, bool, CompletionHandler<void(RunJavaScriptResult&&)>&&);
      void runJavaScriptInFrameInScriptWorld(RunJavaScriptParameters&&, std::optional<WebCore::FrameIdentifier>, const ContentWorldData&, bool, CompletionHandler<void(RunJavaScriptResult&&)>&&);
      void clearContentWorld(ContentWorldIdentifier, CompletionHandler<void()>&&);
 +#if ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
 +    void waitForExtensionTabScript(WebExtensionContextIdentifier, ContentWorldIdentifier, const WebExtensionTabScriptTarget&, WebExtensionTabScriptRunAt, CompletionHandler<void(std::expected<WebExtensionTabScriptTarget, String>&&)>&&);
 +    void executeExtensionTabScript(WebExtensionContextIdentifier, const ContentWorldData&, const WebExtensionTabScriptTarget&, const URL& authorizedURL, bool matchAboutBlank, const String& source, const URL& sourceURL, bool userGesture, CompletionHandler<void(WebExtensionTabScriptExecutionResult&&)>&&);
++    // scripting.insertCSS / removeCSS with frameIds or documentIds: the style
++    // sheets of one frame's document (WebCore has no frame-specific user sheets).
++    void changeExtensionTabStyleSheets(WebExtensionContextIdentifier, const WebExtensionTabScriptTarget&, const URL& authorizedURL, Vector<std::pair<String, URL>>&& styleSheets, bool authorLevel, bool remove, CompletionHandler<void(std::optional<String>&&)>&&);
 +#endif
      void getAccessibilityTreeData(CompletionHandler<void(const std::optional<IPC::SharedBufferReference>&)>&&);
      void updateRenderingWithForcedRepaint(CompletionHandler<void()>&&);
      void takeSnapshot(WebCore::IntRect snapshotRect, WebCore::IntSize bitmapSize, SnapshotOptions, CompletionHandler<void(std::optional<ImageBufferBackendHandle>&&, WebCore::Headroom)>&&);
-@@ -3087,8 +3113,12 @@ private:
+@@ -3087,8 +3116,12 @@ private:
  
      const Ref<WebUserContentController> m_userContentController;
  
@@ -161057,21 +161200,22 @@ index 5dfb080fb516a2c8bd2ec72245babd8c28d926bf..8540ae6d1afede7b80fa565e17df1c8a
  
      const UniqueRef<WebScreenOrientationManager> m_screenOrientationManager;
 diff --git a/Source/WebKit/WebProcess/WebPage/WebPage.messages.in b/Source/WebKit/WebProcess/WebPage/WebPage.messages.in
-index 483df2ae00809b454f95152d8d8bb462a150fe22..62002b90cf45d28ad36ee3b6f6d7beb10b2806dc 100644
+index 483df2ae00809b454f95152d8d8bb462a150fe22..b1c1237262a266c5121094a24242981148e0f813 100644
 --- a/Source/WebKit/WebProcess/WebPage/WebPage.messages.in
 +++ b/Source/WebKit/WebProcess/WebPage/WebPage.messages.in
-@@ -288,6 +288,10 @@ messages -> WebPage WantsAsyncDispatchMessage {
+@@ -288,6 +288,11 @@ messages -> WebPage WantsAsyncDispatchMessage {
  #endif
  
      RunJavaScriptInFrameInScriptWorld(struct WebKit::RunJavaScriptParameters parameters, std::optional<WebCore::FrameIdentifier> frameID, struct WebKit::ContentWorldData world, bool wantsResult) -> (std::expected<WebKit::JavaScriptEvaluationResult, std::optional<WebCore::ExceptionDetails>> result)
 +#if ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
 +    WaitForExtensionTabScript(WebKit::WebExtensionContextIdentifier contextIdentifier, WebKit::ContentWorldIdentifier worldIdentifier, struct WebKit::WebExtensionTabScriptTarget target, enum:uint8_t WebKit::WebExtensionTabScriptRunAt runAt) -> (std::expected<WebKit::WebExtensionTabScriptTarget, String> result)
 +    ExecuteExtensionTabScript(WebKit::WebExtensionContextIdentifier contextIdentifier, struct WebKit::ContentWorldData world, struct WebKit::WebExtensionTabScriptTarget target, URL authorizedURL, bool matchAboutBlank, String source, URL sourceURL, bool userGesture) -> (std::expected<RefPtr<WebCore::SerializedScriptValue>, String> result)
++    ChangeExtensionTabStyleSheets(WebKit::WebExtensionContextIdentifier contextIdentifier, struct WebKit::WebExtensionTabScriptTarget target, URL authorizedURL, Vector<std::pair<String, URL>> styleSheets, bool authorLevel, bool remove) -> (std::optional<String> error)
 +#endif
  
      ClearContentWorld(WebKit::ContentWorldIdentifier worldIdentifier) -> ()
  
-@@ -549,6 +553,14 @@ messages -> WebPage WantsAsyncDispatchMessage {
+@@ -549,6 +554,14 @@ messages -> WebPage WantsAsyncDispatchMessage {
  #endif
      DrawToPDF(std::optional<WebCore::FloatRect> rect, bool allowTransparentBackground) -> (RefPtr<WebCore::SharedBuffer> data)
  #endif
@@ -161086,7 +161230,7 @@ index 483df2ae00809b454f95152d8d8bb462a150fe22..62002b90cf45d28ad36ee3b6f6d7beb1
  #if PLATFORM(GTK)
      DrawPagesForPrinting(WebCore::FrameIdentifier frameID, struct WebKit::PrintInfo printInfo) -> (std::optional<WebCore::SharedMemory::Handle> data, WebCore::ResourceError error)
      DrawPagesForPrintingDuringDOMPrintOperation(WebCore::FrameIdentifier frameID, struct WebKit::PrintInfo printInfo) -> (std::optional<WebCore::SharedMemory::Handle> data, WebCore::ResourceError error) AllowedWhenWaitingForSyncReplyDuringUnboundedIPC
-@@ -631,6 +643,9 @@ messages -> WebPage WantsAsyncDispatchMessage {
+@@ -631,6 +644,9 @@ messages -> WebPage WantsAsyncDispatchMessage {
      SetWritingSuggestion(String text, struct WebKit::EditingRange selectionRange)
      ConfirmCompositionAsync()
  #endif
