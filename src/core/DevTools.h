@@ -145,7 +145,8 @@ struct LevelFilter {
 
 // The Storage panel: the local and session storage of the origins of the
 // page's frames, and the cookies the page's addresses are sent.
-enum class StorageKind { Local, Session, Cookies };
+// IndexedDB areas are object stores, named by IndexedDBStore().
+enum class StorageKind { Local, Session, Cookies, IndexedDB };
 struct StorageItem {
     std::string key, value;
 };
@@ -164,6 +165,21 @@ struct Cookie {
     // "Session", or the date and time it expires.
     std::string ExpiresLabel() const;
 };
+// An origin's IndexedDB databases and their object stores, once asked.
+struct IndexedDatabase {
+    std::string name;
+    double version = 0;
+    std::vector<std::string> stores;
+};
+struct OriginDatabases {
+    bool loaded = false, waiting = false;
+    std::string error;
+    std::vector<IndexedDatabase> databases;
+    size_t outstanding = 0;
+};
+// The area of an object store: "origin\ndatabase\nstore".
+std::string IndexedDBStore(const std::string& origin, const std::string& database, const std::string& store);
+
 struct StorageArea {
     StorageKind kind = StorageKind::Local;
     std::string origin;
@@ -274,6 +290,12 @@ public:
     void RemoveStorageItem(StorageKind kind, const std::string& origin, const std::string& key);
     void ClearStorage(StorageKind kind, const std::string& origin);
     void DeleteCookie(const Cookie& cookie);
+    // Asks for an origin's IndexedDB databases and their object stores (they
+    // come with Changes::origins); an object store's entries are an area
+    // (LoadStorage with IndexedDBStore()), the first kIndexedDBPage of them.
+    void LoadDatabases(const std::string& origin);
+    const OriginDatabases* Databases(const std::string& origin) const;
+    static constexpr int kIndexedDBPage = 200;
     // Sets a cookie as given (Page.setCookie), then reads the cookies again.
     // A partitioned one stays in its partition.
     void SetCookie(const Cookie& cookie);
@@ -286,7 +308,7 @@ public:
 private:
     friend struct ProtocolReader;
     struct Pending {
-        enum Kind { Body, Evaluation, Storage, StorageEdit, Frames, Elements, Properties, Other };
+        enum Kind { Body, Evaluation, Storage, StorageEdit, Frames, Elements, Properties, DatabaseNames, Database, Other };
         Kind kind;
         uint64_t serial;
         // Storage and StorageEdit: the area; Frames: the target asked;
@@ -326,6 +348,7 @@ private:
     std::vector<std::string> fOrigins;
     std::map<std::pair<StorageKind, std::string>, StorageArea> fAreas;
     std::map<std::string, ObjectProperties> fProperties;
+    std::map<std::string, OriginDatabases> fDatabases;
     DOMModel fDOM;
     std::vector<DOMModel::Command> fHeldDOM;
     std::vector<std::string> fOutgoing;

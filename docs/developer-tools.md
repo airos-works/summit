@@ -197,9 +197,16 @@ levels are ticked.
 
 ### Storage
 
-The left of the tab lists **Local Storage** and **Session Storage**, each with
-the origins of the page's frames (the page's own first, then those of frames
-from other sites), and **Cookies**. Choosing one shows it on the right:
+The left of the tab lists **Local Storage**, **Session Storage** and
+**IndexedDB**, each with the origins of the page's frames (the page's own
+first, then those of frames from other sites), and **Cookies**. Choosing an
+IndexedDB origin asks for its databases (`IndexedDB.requestDatabaseNames`,
+`requestDatabase`); their object stores then appear under it as
+*database › store*, and choosing one lists its first 200 entries, key and
+value as the Console shows them (`IndexedDB.requestData`); **Clear All**
+empties the store (`IndexedDB.clearObjectStore`). Test action:
+`storage-select indexeddb ORIGIN` or `indexeddb ORIGIN|DATABASE|STORE`.
+Choosing one shows it on the right:
 
 - **Storage**: a row for each key, with its value on one line. The selected
   item's value is shown whole below the list, in the same viewer as a
