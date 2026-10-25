@@ -14,6 +14,14 @@ class BButton;
 class BStringView;
 
 namespace summit {
+// Preferences › Browsing › Accessibility (#118; the first three are also in
+// the View menu) and Memory (#116).
+struct BrowsingAids {
+    bool caretBrowsing = false, reduceMotion = false, increaseContrast = false;
+    int minimumFontSize = 0;
+    bool unloadWhenMemoryIsLow = true;
+};
+
 // Preferences › Browsing (#66, #67, #70): media that play by themselves,
 // spell checking, and saved passwords (PasswordStore.h) with import and
 // export. Changes go to the application as kPreferencesChanged.
@@ -23,8 +31,10 @@ public:
     // language; dictionaries: those installed.
     BrowsingPreferences(BMessenger owner, const std::string& autoplay, bool spellChecking, const std::string& spellingLanguage,
         const std::vector<std::string>& dictionaries, bool savePasswords,
-        const std::vector<std::tuple<std::string, std::string, std::string>>& webApps);
+        const std::vector<std::tuple<std::string, std::string, std::string>>& webApps, const BrowsingAids& aids);
     ~BrowsingPreferences() override;
+    // The application's kPreferencesState: settings changed elsewhere (View menu).
+    void ShowState(const BMessage& state);
     void AttachedToWindow() override;
     void MessageReceived(BMessage* message) override;
 private:
@@ -41,6 +51,11 @@ private:
     BButton* fRemove;
     BColumnListView* fApps;
     BButton* fRemoveApp;
+    BCheckBox* fCaretBrowsing;
+    BCheckBox* fReduceMotion;
+    BCheckBox* fIncreaseContrast;
+    BMenuField* fMinimumFontSize;
+    BCheckBox* fUnload;
     std::vector<std::string> fAppIDs;
     std::unique_ptr<BFilePanel> fPanel;
 };

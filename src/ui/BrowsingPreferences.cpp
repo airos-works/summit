@@ -19,6 +19,7 @@
 #include <StringView.h>
 #include <Window.h>
 #include <algorithm>
+#include <array>
 #include <fstream>
 #include <optional>
 #include <sstream>
@@ -29,7 +30,8 @@ namespace {
 constexpr uint32 autoplayChosen = 'bpau', spellingToggled = 'bpsp', passwordsToggled = 'bppw',
     accountSelected = 'bpas', showPassword = 'bpsh', removeAccount = 'bprm', importPasswords = 'bpim',
     exportPasswords = 'bpex', importChosen = 'bpic', exportChosen = 'bpec', accountsRead = 'bpar',
-    appSelected = 'bpap', removeApp = 'bpra', spellingLanguageChosen = 'bpsl';
+    appSelected = 'bpap', removeApp = 'bpra', spellingLanguageChosen = 'bpsl', aidToggled = 'bpai', minimumFontChosen = 'bpmf';
+constexpr std::array<int, 10> kMinimumFontSizes { 0, 9, 10, 11, 12, 14, 16, 18, 20, 24 };
 BStringView* Title(const char* name, const char* text)
 {
     auto* title = new BStringView(name, text);
@@ -46,9 +48,38 @@ BStringView* Hint(const char* name, const char* text)
 
 BrowsingPreferences::BrowsingPreferences(BMessenger owner, const std::string& autoplay, bool spellChecking,
     const std::string& spellingLanguage, const std::vector<std::string>& dictionaries, bool savePasswords,
-    const std::vector<std::tuple<std::string, std::string, std::string>>& webApps)
+    const std::vector<std::tuple<std::string, std::string, std::string>>& webApps, const BrowsingAids& aids)
     : BGroupView("Browsing", B_VERTICAL, 8), fOwner(owner)
 {
+    auto aid = [](const char* name, const char* label, const char* field, bool value) {
+        auto* message = new BMessage(aidToggled);
+        message->AddString("field", field);
+        auto* box = new BCheckBox(name, label, message);
+        box->SetValue(value ? B_CONTROL_ON : B_CONTROL_OFF);
+        return box;
+    };
+    fCaretBrowsing = aid("caret-browsing", "Move through pages with a text cursor (caret browsing, F7)", "caret_browsing", aids.caretBrowsing);
+    fReduceMotion = aid("reduce-motion", "Ask sites to reduce motion and animation", "reduce_motion", aids.reduceMotion);
+    fIncreaseContrast = aid("increase-contrast", "Ask sites for more contrast", "increase_contrast", aids.increaseContrast);
+    auto* sizes = new BPopUpMenu("minimum-font-size");
+    for (int size : kMinimumFontSizes) {
+        auto* message = new BMessage(minimumFontChosen);
+        message->AddInt32("size", size);
+        auto* item = new BMenuItem(size ? (std::to_string(size) + " pixels").c_str() : "None", message);
+        item->SetMarked(size == aids.minimumFontSize);
+        sizes->AddItem(item);
+    }
+    if (!sizes->FindMarked()) {
+        // A size set by hand in the profile.
+        auto* message = new BMessage(minimumFontChosen);
+        message->AddInt32("size", aids.minimumFontSize);
+        auto* item = new BMenuItem((std::to_string(aids.minimumFontSize) + " pixels").c_str(), message);
+        item->SetMarked(true);
+        sizes->AddItem(item);
+    }
+    fMinimumFontSize = new BMenuField("minimum-font-size", "Smallest text size:", sizes);
+    fUnload = aid("unload-tabs", "Unload tabs left in the background for 5 minutes when memory runs low", "unload_when_memory_is_low",
+        aids.unloadWhenMemoryIsLow);
     auto* choices = new BPopUpMenu("autoplay");
     for (const auto& [value, label] : std::initializer_list<std::pair<const char*, const char*>> {
             {"allow", "Allow audio and video"}, {"block-audio", "Block audio (video without sound plays)"},
@@ -119,6 +150,20 @@ BrowsingPreferences::BrowsingPreferences(BMessenger owner, const std::string& au
             .Add(fSpellingInfo)
         .End()
         .AddStrut(6)
+        .Add(Title("accessibility-title", "Accessibility"))
+        .AddGroup(B_VERTICAL, 6).SetInsets(12, 0, 0, 0)
+            .Add(fCaretBrowsing)
+            .Add(fReduceMotion)
+            .Add(fIncreaseContrast)
+            .AddGroup(B_HORIZONTAL, 0).Add(fMinimumFontSize).AddGlue().End()
+        .End()
+        .AddStrut(6)
+        .Add(Title("memory-title", "Memory"))
+        .AddGroup(B_VERTICAL, 6).SetInsets(12, 0, 0, 0)
+            .Add(fUnload)
+            .Add(Hint("memory-hint", "An unloaded tab keeps its place and loads again when you select it."))
+        .End()
+        .AddStrut(6)
         .Add(Title("passwords-title", "Passwords"))
         .AddGroup(B_VERTICAL, 6).SetInsets(12, 0, 0, 0)
             .Add(fSavePasswords)
@@ -143,17 +188,31 @@ BrowsingPreferences::BrowsingPreferences(BMessenger owner, const std::string& au
 
 BrowsingPreferences::~BrowsingPreferences() = default;
 
+void BrowsingPreferences::ShowState(const BMessage& state)
+{
+    bool value = false;
+    for (auto [name, box] : { std::pair { "caret_browsing", fCaretBrowsing }, std::pair { "reduce_motion", fReduceMotion },
+            std::pair { "increase_contrast", fIncreaseContrast }, std::pair { "unload_when_memory_is_low", fUnload } })
+        if (state.FindBool(name, &value) == B_OK) box->SetValue(value ? B_CONTROL_ON : B_CONTROL_OFF);
+    int32 size = 0;
+    if (state.FindInt32("minimum_font_size", &size) == B_OK)
+        for (int32 i = 0; auto* item = fMinimumFontSize->Menu()->ItemAt(i); ++i)
+            if (item->Message() && item->Message()->GetInt32("size", -1) == size) item->SetMarked(true);
+}
+
 void BrowsingPreferences::AttachedToWindow()
 {
     BGroupView::AttachedToWindow();
     // The controls talk to this tab, not to the window.
     for (BView* view : { static_cast<BView*>(fSpelling), static_cast<BView*>(fSavePasswords),
-            static_cast<BView*>(fShow), static_cast<BView*>(fRemove) })
+            static_cast<BView*>(fShow), static_cast<BView*>(fRemove), static_cast<BView*>(fCaretBrowsing),
+            static_cast<BView*>(fReduceMotion), static_cast<BView*>(fIncreaseContrast), static_cast<BView*>(fUnload) })
         if (auto* control = dynamic_cast<BControl*>(view)) control->SetTarget(this);
     for (const char* name : { "import-passwords", "export-passwords" })
         if (auto* button = dynamic_cast<BButton*>(FindView(name))) button->SetTarget(this);
     fAutoplay->Menu()->SetTargetForItems(this);
     fSpellingLanguage->Menu()->SetTargetForItems(this);
+    fMinimumFontSize->Menu()->SetTargetForItems(this);
     fAccounts->SetTarget(this);
     fApps->SetTarget(this);
     fRemoveApp->SetTarget(this);
@@ -230,6 +289,18 @@ void BrowsingPreferences::MessageReceived(BMessage* message)
         return;
     }
     case spellingToggled: Send("spell_checking", fSpelling->Value() == B_CONTROL_ON); return;
+    case aidToggled: {
+        BControl* source = nullptr;
+        if (message->FindPointer("source", reinterpret_cast<void**>(&source)) == B_OK && source)
+            Send(message->GetString("field", ""), source->Value() == B_CONTROL_ON);
+        return;
+    }
+    case minimumFontChosen: {
+        BMessage changed(kPreferencesChanged);
+        changed.AddInt32("minimum_font_size", message->GetInt32("size", 0));
+        fOwner.SendMessage(&changed);
+        return;
+    }
     case spellingLanguageChosen: {
         BMessage changed(kPreferencesChanged);
         changed.AddString("spelling_language", message->GetString("language", ""));

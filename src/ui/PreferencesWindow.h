@@ -1,4 +1,5 @@
 #pragma once
+#include "BrowsingPreferences.h"
 #include <Messenger.h>
 #include <Window.h>
 #include <filesystem>
@@ -47,6 +48,8 @@ struct PreferencesState {
     // Installed web apps: name and start address, by identifier.
     std::vector<std::tuple<std::string, std::string, std::string>> webApps;
     std::string userAgent = "default";
+    // Preferences › Browsing › Accessibility and Memory.
+    BrowsingAids aids;
 };
 // Edit › Preferences…. One window for the application; changes apply to every
 // browser window as they are made and are saved in the profile.

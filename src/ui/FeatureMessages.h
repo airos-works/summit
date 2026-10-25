@@ -57,12 +57,11 @@ constexpr uint32 kSpellingCommand = 'splc';
 constexpr uint32 kToggleSpellChecking = 'spck';
 // View › Zoom Text Only (Profile::zoomTextOnly).
 constexpr uint32 kToggleZoomTextOnly = 'ztxt';
-// View › Caret Browsing (F7), Reduce Motion and Increase Contrast, for every
-// window: the toggles, then each window's update of its tabs.
+// View › Caret Browsing (F7), Reduce Motion and Increase Contrast: the
+// toggles of the profile's settings, which every window then applies.
 constexpr uint32 kToggleCaretBrowsing = 'crbt';
 constexpr uint32 kToggleReducedMotion = 'rdmt';
 constexpr uint32 kToggleIncreasedContrast = 'incn';
-constexpr uint32 kApplyAccessibilityAids = 'crba';
 // The password bar's answers: "tab", "which" (0 save, 1 never for the site,
 // 2 not now).
 constexpr uint32 kPasswordBarAnswer = 'pwba';

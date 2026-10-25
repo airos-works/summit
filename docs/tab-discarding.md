@@ -37,8 +37,13 @@ command answered with the new view.
   status line. `SUMMIT_UNLOAD_BELOW_MIB` and `SUMMIT_UNLOAD_AFTER_S` change
   the limit and the five minutes; 0 for either turns it off.
 
-Not done yet: a preference for it, and unloading after a long time in the
-background regardless of memory.
+Preferences › Browsing › Memory has a switch for it ("Unload tabs left in
+the background for 5 minutes when memory runs low", on by default; the
+profile's `unloadWhenMemoryIsLow`); the environment variables still
+override the limits.
+
+Not done yet: unloading after a long time in the background regardless of
+memory.
 
 ## Fixture
 

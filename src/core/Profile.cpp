@@ -221,6 +221,11 @@ Profile Profile::Load(const std::filesystem::path& path, std::string& error)
         if (auto agent = j.find("userAgent"); agent != j.end() && agent->is_string())
             profile.userAgent = FindUserAgentPreset(agent->get<std::string>()).id;
         if (auto text = j.find("zoomTextOnly"); text != j.end() && text->is_boolean()) profile.zoomTextOnly = text->get<bool>();
+        for (auto [name, field] : { std::pair { "caretBrowsing", &profile.caretBrowsing }, std::pair { "reduceMotion", &profile.reduceMotion },
+                std::pair { "increaseContrast", &profile.increaseContrast }, std::pair { "unloadWhenMemoryIsLow", &profile.unloadWhenMemoryIsLow } })
+            if (auto value = j.find(name); value != j.end() && value->is_boolean()) *field = value->get<bool>();
+        if (auto size = j.find("minimumFontSize"); size != j.end() && size->is_number_integer())
+            profile.minimumFontSize = std::clamp(size->get<int>(), 0, 72);
         if (auto language = j.find("spellingLanguage"); language != j.end() && language->is_string() && language->get<std::string>().size() < 64)
             profile.spellingLanguage = language->get<std::string>();
         if (auto restore = j.find("restoreSession"); restore != j.end()) profile.restoreSession = restore->get<bool>();
@@ -510,7 +515,9 @@ bool Profile::Save(const std::filesystem::path& path, std::string& error, int64_
             {"bookmarkTree", {{"bar", EncodeBookmarks(bookmarks.Bar().children)}, {"other", EncodeBookmarks(bookmarks.Other().children)},
                 {"barModified", bookmarks.Bar().modified}, {"otherModified", bookmarks.Other().modified}}},
             {"history", Encode(history)},
-            {"homeURL", homeURL}, {"showBookmarksBar", showBookmarksBar}, {"zoomTextOnly", zoomTextOnly}, {"spellingLanguage", spellingLanguage}, {"restoreSession", restoreSession},
+            {"homeURL", homeURL}, {"showBookmarksBar", showBookmarksBar}, {"zoomTextOnly", zoomTextOnly},
+            {"caretBrowsing", caretBrowsing}, {"reduceMotion", reduceMotion}, {"increaseContrast", increaseContrast},
+            {"minimumFontSize", minimumFontSize}, {"unloadWhenMemoryIsLow", unloadWhenMemoryIsLow}, {"spellingLanguage", spellingLanguage}, {"restoreSession", restoreSession},
             {"savePasswords", savePasswords}, {"passwordNever", passwordNever}, {"spellChecking", spellChecking},
             {"autoplay", autoplay}, {"userAgent", FindUserAgentPreset(userAgent).id}, {"webApps", [&] {
                 json apps = json::array();

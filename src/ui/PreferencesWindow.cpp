@@ -325,7 +325,7 @@ PreferencesWindow::PreferencesWindow(BMessenger owner, const PreferencesState& s
     fTabs->AddTab(general);
 #if SUMMIT_MODERN_WEBKIT
     fTabs->AddTab(new BrowsingPreferences(fOwner, state.autoplay, state.spellChecking, state.spellingLanguage, state.dictionaries,
-        state.savePasswords, state.webApps));
+        state.savePasswords, state.webApps, state.aids));
     auto* compatibility = new BGroupView("Compatibility", B_VERTICAL, 10);
     auto* agents = new BPopUpMenu("user-agents");
     for (const auto& preset : UserAgentPresets()) {
@@ -747,6 +747,9 @@ void PreferencesWindow::MessageReceived(BMessage* message)
                     && message->FindString("protocol_target", i, &target) == B_OK; ++i) entries.emplace_back(scheme, target);
                 ShowProtocolHandlers(entries);
             }
+#if SUMMIT_MODERN_WEBKIT
+            if (auto* browsing = dynamic_cast<BrowsingPreferences*>(FindView("Browsing"))) browsing->ShowState(*message);
+#endif
             // The browser changed a setting (the current page, or View › Bookmarks Bar).
             const char* home = nullptr;
             if (message->FindString("home_url", &home) == B_OK && home && Trim(fHome->Text()) != home) {
