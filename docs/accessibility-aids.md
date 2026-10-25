@@ -77,6 +77,19 @@ aria-label>` as `navigation` "Primary". After the tools closed, renaming
 the heading and removing and adding elements (what crashed the web
 process before 19 Oct's fix) left it running.
 
+## Override Page Colours
+
+View › Override Page Colours (also in Preferences › Browsing ›
+Accessibility, saved as `overrideColors`) draws every page in the
+browser's high-contrast colours, as Firefox's "Override the colours
+specified by the page" does: light text on black, links yellow and visited
+ones lilac, a visible focus ring, no background pictures; images and video
+are left alone. It is a user style sheet of `!important` rules, set with
+the engine's new `BWebKitView::SetUserStyleSheet()` (one sheet for the
+views sharing a configuration, replaced or removed as a whole).
+
 ## Still to do
 
-Forced colours (`forced-colors: active`, which WebKit does not render).
+The `forced-colors: active` media query: WebKit has no forced-colours
+mode (it always answers `none`), so pages cannot tell that their colours
+are overridden.

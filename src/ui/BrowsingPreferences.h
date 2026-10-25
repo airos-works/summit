@@ -20,6 +20,7 @@ struct BrowsingAids {
     bool caretBrowsing = false, reduceMotion = false, increaseContrast = false;
     int minimumFontSize = 0;
     bool unloadWhenMemoryIsLow = true;
+    bool overrideColors = false;
 };
 
 // Preferences › Browsing (#66, #67, #70): media that play by themselves,
@@ -54,6 +55,7 @@ private:
     BCheckBox* fCaretBrowsing;
     BCheckBox* fReduceMotion;
     BCheckBox* fIncreaseContrast;
+    BCheckBox* fOverrideColors;
     BMenuField* fMinimumFontSize;
     BCheckBox* fUnload;
     std::vector<std::string> fAppIDs;

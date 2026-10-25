@@ -598,9 +598,21 @@ int32 BrowserWindow::CountOpenWindows() { return sOpenWindows.load(); }
 static BrowserWindow::AccessibilityAids ReadAccessibilityAids(SharedProfile& shared)
 {
     return shared.Read([](const Profile& profile) {
-        return BrowserWindow::AccessibilityAids { profile.caretBrowsing, profile.reduceMotion, profile.increaseContrast, profile.minimumFontSize };
+        return BrowserWindow::AccessibilityAids { profile.caretBrowsing, profile.reduceMotion, profile.increaseContrast, profile.minimumFontSize,
+            profile.overrideColors };
     });
 }
+
+// View › Override Page Colours: white text on black, links yellow (visited
+// lilac), no background pictures; images and video are left as they are.
+static constexpr const char* kOverrideColorsStyle =
+    "*, *::before, *::after { background-color: #000 !important; color: #fff !important; border-color: #ccc !important;"
+    " background-image: none !important; text-shadow: none !important; box-shadow: none !important;"
+    " outline-color: #fff !important; caret-color: #fff !important; }"
+    " a:link, a:link * { color: #ffe066 !important; } a:visited, a:visited * { color: #d4b8ff !important; }"
+    " :focus-visible { outline: 2px solid #ffe066 !important; }"
+    " ::selection { background-color: #fff !important; color: #000 !important; }"
+    " img, video, canvas, svg, picture, iframe { background-color: transparent !important; }";
 
 static void ApplyAccessibilityAids(BWebKitView* view, const BrowserWindow::AccessibilityAids& aids)
 {
@@ -611,6 +623,7 @@ static void ApplyAccessibilityAids(BWebKitView* view, const BrowserWindow::Acces
     settings.AddBool("increasedContrast", aids.increaseContrast);
     settings.AddInt32("minimumFontSize", std::clamp(aids.minimumFontSize, 0, 72));
     view->SetPageSettings(settings);
+    view->SetUserStyleSheet(aids.overrideColors ? kOverrideColorsStyle : nullptr);
 }
 #endif
 
@@ -795,6 +808,9 @@ BrowserWindow::BrowserWindow(std::shared_ptr<SharedProfile> profile, std::string
     fIncreasedContrastItem = new BMenuItem("Increase Contrast", new BMessage(kToggleIncreasedContrast));
     fIncreasedContrastItem->SetMarked(fAids.increaseContrast);
     view->AddItem(fIncreasedContrastItem);
+    fOverrideColorsItem = new BMenuItem("Override Page Colours", new BMessage(kToggleOverrideColors));
+    fOverrideColorsItem->SetMarked(fAids.overrideColors);
+    view->AddItem(fOverrideColorsItem);
     view->AddSeparatorItem();
     AddItem(view, "View Page Source", kViewPageSource, 'U');
     AddItem(view, "Picture in Picture", kPictureInPicture, 'P', B_SHIFT_KEY);
@@ -3034,6 +3050,7 @@ void BrowserWindow::ProfileChanged(const BMessage& message)
             if (fCaretBrowsingItem) fCaretBrowsingItem->SetMarked(fAids.caretBrowsing);
             if (fReducedMotionItem) fReducedMotionItem->SetMarked(fAids.reduceMotion);
             if (fIncreasedContrastItem) fIncreasedContrastItem->SetMarked(fAids.increaseContrast);
+            if (fOverrideColorsItem) fOverrideColorsItem->SetMarked(fAids.overrideColors);
         }
 #endif
 #if SUMMIT_MODERN_WEBKIT
@@ -4316,13 +4333,14 @@ void BrowserWindow::MessageReceived(BMessage* message)
 #if SUMMIT_MODERN_WEBKIT
         case kToggleCaretBrowsing:
         case kToggleReducedMotion:
-        case kToggleIncreasedContrast: {
+        case kToggleIncreasedContrast:
+        case kToggleOverrideColors: {
             // One saved setting for the whole browser (#118): every window
             // applies it when the profile tells it of the change.
             const uint32 what = message->what;
             fShared->Change([what](Profile& profile) -> uint32 {
-                bool& aid = what == kToggleCaretBrowsing ? profile.caretBrowsing
-                    : what == kToggleReducedMotion ? profile.reduceMotion : profile.increaseContrast;
+                bool& aid = what == kToggleCaretBrowsing ? profile.caretBrowsing : what == kToggleReducedMotion ? profile.reduceMotion
+                    : what == kToggleIncreasedContrast ? profile.increaseContrast : profile.overrideColors;
                 aid = !aid;
                 return SharedProfile::kSettingsChanged;
             });

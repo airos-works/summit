@@ -722,7 +722,8 @@ public:
             // Preferences › Browsing › Accessibility (#118) and Memory (#116).
             std::vector<std::pair<const char*, bool summit::Profile::*>> flags {
                 { "caret_browsing", &summit::Profile::caretBrowsing }, { "reduce_motion", &summit::Profile::reduceMotion },
-                { "increase_contrast", &summit::Profile::increaseContrast }, { "unload_when_memory_is_low", &summit::Profile::unloadWhenMemoryIsLow } };
+                { "increase_contrast", &summit::Profile::increaseContrast }, { "unload_when_memory_is_low", &summit::Profile::unloadWhenMemoryIsLow },
+                { "override_colors", &summit::Profile::overrideColors } };
             int32 minimumFontSize = 0;
             const bool hasMinimumFontSize = message->FindInt32("minimum_font_size", &minimumFontSize) == B_OK
                 && minimumFontSize >= 0 && minimumFontSize <= 72;
@@ -1715,7 +1716,7 @@ private:
         state.spellingLanguage = fShared->Read([](const summit::Profile& profile) { return profile.spellingLanguage; });
         state.aids = fShared->Read([](const summit::Profile& profile) {
             return summit::BrowsingAids { profile.caretBrowsing, profile.reduceMotion, profile.increaseContrast,
-                profile.minimumFontSize, profile.unloadWhenMemoryIsLow };
+                profile.minimumFontSize, profile.unloadWhenMemoryIsLow, profile.overrideColors };
         });
         state.dictionaries = summit::SpellingDictionaries(SpellingDirectories());
         fShared->Read([&](const summit::Profile& profile) {
@@ -1784,6 +1785,7 @@ private:
             state.AddBool("increase_contrast", profile.increaseContrast);
             state.AddInt32("minimum_font_size", profile.minimumFontSize);
             state.AddBool("unload_when_memory_is_low", profile.unloadWhenMemoryIsLow);
+            state.AddBool("override_colors", profile.overrideColors);
             AddSitePermissions(state, profile);
             state.AddBool("has_protocol_handlers", true);
             for (const auto& [scheme, handler] : profile.protocolHandlers) {

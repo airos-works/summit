@@ -222,7 +222,8 @@ Profile Profile::Load(const std::filesystem::path& path, std::string& error)
             profile.userAgent = FindUserAgentPreset(agent->get<std::string>()).id;
         if (auto text = j.find("zoomTextOnly"); text != j.end() && text->is_boolean()) profile.zoomTextOnly = text->get<bool>();
         for (auto [name, field] : { std::pair { "caretBrowsing", &profile.caretBrowsing }, std::pair { "reduceMotion", &profile.reduceMotion },
-                std::pair { "increaseContrast", &profile.increaseContrast }, std::pair { "unloadWhenMemoryIsLow", &profile.unloadWhenMemoryIsLow } })
+                std::pair { "increaseContrast", &profile.increaseContrast }, std::pair { "unloadWhenMemoryIsLow", &profile.unloadWhenMemoryIsLow },
+                std::pair { "overrideColors", &profile.overrideColors } })
             if (auto value = j.find(name); value != j.end() && value->is_boolean()) *field = value->get<bool>();
         if (auto size = j.find("minimumFontSize"); size != j.end() && size->is_number_integer())
             profile.minimumFontSize = std::clamp(size->get<int>(), 0, 72);
@@ -517,7 +518,7 @@ bool Profile::Save(const std::filesystem::path& path, std::string& error, int64_
             {"history", Encode(history)},
             {"homeURL", homeURL}, {"showBookmarksBar", showBookmarksBar}, {"zoomTextOnly", zoomTextOnly},
             {"caretBrowsing", caretBrowsing}, {"reduceMotion", reduceMotion}, {"increaseContrast", increaseContrast},
-            {"minimumFontSize", minimumFontSize}, {"unloadWhenMemoryIsLow", unloadWhenMemoryIsLow}, {"spellingLanguage", spellingLanguage}, {"restoreSession", restoreSession},
+            {"minimumFontSize", minimumFontSize}, {"unloadWhenMemoryIsLow", unloadWhenMemoryIsLow}, {"overrideColors", overrideColors}, {"spellingLanguage", spellingLanguage}, {"restoreSession", restoreSession},
             {"savePasswords", savePasswords}, {"passwordNever", passwordNever}, {"spellChecking", spellChecking},
             {"autoplay", autoplay}, {"userAgent", FindUserAgentPreset(userAgent).id}, {"webApps", [&] {
                 json apps = json::array();

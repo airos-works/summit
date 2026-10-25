@@ -62,6 +62,7 @@ constexpr uint32 kToggleZoomTextOnly = 'ztxt';
 constexpr uint32 kToggleCaretBrowsing = 'crbt';
 constexpr uint32 kToggleReducedMotion = 'rdmt';
 constexpr uint32 kToggleIncreasedContrast = 'incn';
+constexpr uint32 kToggleOverrideColors = 'ovcl';
 // The password bar's answers: "tab", "which" (0 save, 1 never for the site,
 // 2 not now).
 constexpr uint32 kPasswordBarAnswer = 'pwba';
