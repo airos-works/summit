@@ -88579,10 +88579,10 @@ index 0000000000000000000000000000000000000000..b20795b1082e9bd87cd2084aab1def14
 +}
 diff --git a/Source/WebKit/UIProcess/API/haiku/WebKitContext.h b/Source/WebKit/UIProcess/API/haiku/WebKitContext.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..f3852c8066b1610f92b95dad648d21f891fe2aee
+index 0000000000000000000000000000000000000000..8bed6738bc698e3f3b3c9ee8f0b6177921590284
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/API/haiku/WebKitContext.h
-@@ -0,0 +1,595 @@
+@@ -0,0 +1,600 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#pragma once
@@ -88693,6 +88693,10 @@ index 0000000000000000000000000000000000000000..f3852c8066b1610f92b95dad648d21f8
 +//                  false), "setPanel" {panel (absolute URL, or null for the
 +//                  default)}, "getPanel" (the URL), "setTitle" {title (null:
 +//                  the default)}, "getTitle" (the title).
++//   DOWNLOADS_UI   enabled (bool), for downloads.setUiOptions: whether the
++//                  browser shows its own download UI (a download manager
++//                  extension turns it off). Kept per extension (its
++//                  extension_identifier) while it is loaded. Answer null.
 +//   DETECT_LANGUAGE  text (UTF-8), for i18n.detectLanguage and tabs.detectLanguage
 +//                  on a page that declares no language. Answer with JSON
 +//                  {isReliable, languages: [{language, percentage}]}, at most
@@ -88777,7 +88781,8 @@ index 0000000000000000000000000000000000000000..f3852c8066b1610f92b95dad648d21f8
 +    B_WEBKIT_BROWSER_DISCARD_TAB,
 +    B_WEBKIT_BROWSER_SET_READER,
 +    B_WEBKIT_BROWSER_DETECT_LANGUAGE,
-+    B_WEBKIT_BROWSER_SIDEBAR
++    B_WEBKIT_BROWSER_SIDEBAR,
++    B_WEBKIT_BROWSER_DOWNLOADS_UI
 +};
 +
 +// Site permissions: what pages may ask the user for, and the services that
@@ -96635,7 +96640,7 @@ index 713a395f6fda1c50c694eef6181a23349c9b5fb2..d6419587d5402f01e573eb5f7335695a
  } // namespace WebExtensionDynamicScripts
  
 diff --git a/Source/WebKit/UIProcess/Extensions/WebExtension.cpp b/Source/WebKit/UIProcess/Extensions/WebExtension.cpp
-index 5ee894425eae1d1ba27e29aba5928af432d98095..90ba089b5ce0bd5a6940f2a0a8ed89827475c3fa 100644
+index 5ee894425eae1d1ba27e29aba5928af432d98095..3ca21ff79eccacc243bd1514aa728e924dd4d2be 100644
 --- a/Source/WebKit/UIProcess/Extensions/WebExtension.cpp
 +++ b/Source/WebKit/UIProcess/Extensions/WebExtension.cpp
 @@ -48,6 +48,10 @@
@@ -96736,7 +96741,7 @@ index 5ee894425eae1d1ba27e29aba5928af432d98095..90ba089b5ce0bd5a6940f2a0a8ed8982
          if (mimeTypePosition != notFound)
              return path.substring(dataPrefix.length(), mimeTypePosition - dataPrefix.length());
          return defaultMIMEType();
-@@ -1642,6 +1674,29 @@ const WebExtension::PermissionsSet& WebExtension::supportedPermissions()
+@@ -1642,6 +1674,30 @@ const WebExtension::PermissionsSet& WebExtension::supportedPermissions()
          WebExtensionPermission::contextMenus(), WebExtensionPermission::cookies(), WebExtensionPermission::declarativeNetRequest(), WebExtensionPermission::declarativeNetRequestFeedback(),
          WebExtensionPermission::declarativeNetRequestWithHostAccess(), WebExtensionPermission::menus(), WebExtensionPermission::nativeMessaging(), WebExtensionPermission::notifications(), WebExtensionPermission::scripting(),
          WebExtensionPermission::storage(), WebExtensionPermission::tabs(), WebExtensionPermission::unlimitedStorage(), WebExtensionPermission::webNavigation(), WebExtensionPermission::webRequest(),
@@ -96760,13 +96765,14 @@ index 5ee894425eae1d1ba27e29aba5928af432d98095..90ba089b5ce0bd5a6940f2a0a8ed8982
 +        "tabGroups"_s,
 +        // identity.launchWebAuthFlow and getRedirectURL.
 +        "identity"_s,
-+        // downloads.open, as in Chrome and Firefox.
++        // downloads.open, as in Chrome and Firefox; downloads.ui for setUiOptions.
 +        "downloads.open"_s,
++        "downloads.ui"_s,
 +#endif
  #if ENABLE(WK_WEB_EXTENSIONS_SIDEBAR)
          WebExtensionPermission::sidePanel(),
  #endif
-@@ -1679,6 +1734,16 @@ const WebExtension::MatchPatternSet& WebExtension::optionalPermissionMatchPatter
+@@ -1679,6 +1735,16 @@ const WebExtension::MatchPatternSet& WebExtension::optionalPermissionMatchPatter
      return m_optionalPermissionMatchPatterns;
  }
  
@@ -96783,7 +96789,7 @@ index 5ee894425eae1d1ba27e29aba5928af432d98095..90ba089b5ce0bd5a6940f2a0a8ed8982
  const WebExtension::MatchPatternSet& WebExtension::externallyConnectableMatchPatterns()
  {
      populateExternallyConnectableIfNeeded();
-@@ -1723,6 +1788,9 @@ void WebExtension::populateExternallyConnectableIfNeeded()
+@@ -1723,6 +1789,9 @@ void WebExtension::populateExternallyConnectableIfNeeded()
      RefPtr externallyConnectableObject = manifestObject->getObject(externallyConnectableManifestKey);
      if (!externallyConnectableObject)
          return;
@@ -96793,7 +96799,7 @@ index 5ee894425eae1d1ba27e29aba5928af432d98095..90ba089b5ce0bd5a6940f2a0a8ed8982
  
      if (!externallyConnectableObject->size()) {
          recordError(createError(Error::InvalidExternallyConnectable));
-@@ -1756,6 +1824,10 @@ void WebExtension::populateExternallyConnectableIfNeeded()
+@@ -1756,6 +1825,10 @@ void WebExtension::populateExternallyConnectableIfNeeded()
          extensionIDs = filterObjects(*extensionIDs, [](auto& value) {
              return !value.asString().isEmpty();
          });
@@ -96804,7 +96810,7 @@ index 5ee894425eae1d1ba27e29aba5928af432d98095..90ba089b5ce0bd5a6940f2a0a8ed8982
      }
  
      if (shouldReportError || (m_externallyConnectableMatchPatterns.isEmpty() && (!extensionIDs || (extensionIDs && !extensionIDs->length()))))
-@@ -2216,6 +2288,12 @@ using ModifierFlags = WebExtension::ModifierFlags;
+@@ -2216,6 +2289,12 @@ using ModifierFlags = WebExtension::ModifierFlags;
  
  static bool parseCommandShortcut(const String& shortcut, OptionSet<ModifierFlags>& modifierFlags, String& key)
  {
@@ -96817,7 +96823,7 @@ index 5ee894425eae1d1ba27e29aba5928af432d98095..90ba089b5ce0bd5a6940f2a0a8ed8982
      modifierFlags = { };
      key = emptyString();
  
-@@ -2300,6 +2378,7 @@ static bool parseCommandShortcut(const String& shortcut, OptionSet<ModifierFlags
+@@ -2300,6 +2379,7 @@ static bool parseCommandShortcut(const String& shortcut, OptionSet<ModifierFlags
          return false;
  
      return true;
@@ -96825,7 +96831,7 @@ index 5ee894425eae1d1ba27e29aba5928af432d98095..90ba089b5ce0bd5a6940f2a0a8ed8982
  }
  
  void WebExtension::populateCommandsIfNeeded()
-@@ -2355,6 +2434,13 @@ void WebExtension::populateCommandsIfNeeded()
+@@ -2355,6 +2435,13 @@ void WebExtension::populateCommandsIfNeeded()
  
              // Descriptions are required for standard commands, but are optional for action commands.
              auto description = commandObject->getString(commandsDescriptionKeyManifestKey);
@@ -96839,7 +96845,7 @@ index 5ee894425eae1d1ba27e29aba5928af432d98095..90ba089b5ce0bd5a6940f2a0a8ed8982
              if (description.isEmpty() && !isActionCommand) {
                  error = WEB_UI_STRING("Empty or invalid `description` in the `commands` manifest entry.", "WKWebExtensionErrorInvalidManifestEntry description for invalid command description");
                  continue;
-@@ -2368,11 +2454,30 @@ void WebExtension::populateCommandsIfNeeded()
+@@ -2368,11 +2455,30 @@ void WebExtension::populateCommandsIfNeeded()
  
              commandData.description = description;
  
@@ -96871,7 +96877,7 @@ index 5ee894425eae1d1ba27e29aba5928af432d98095..90ba089b5ce0bd5a6940f2a0a8ed8982
                  const auto linuxPlatform = "linux"_s;
  #endif
                  const auto defaultPlatform = "default"_s;
-@@ -2382,7 +2487,7 @@ void WebExtension::populateCommandsIfNeeded()
+@@ -2382,7 +2488,7 @@ void WebExtension::populateCommandsIfNeeded()
                  platformShortcut = !suggestedKeyObject->getString(macPlatform).isEmpty() ? suggestedKeyObject->getString(macPlatform) : suggestedKeyObject->getString(iosPlatform);
  #elif PLATFORM(IOS_FAMILY)
                  platformShortcut = !suggestedKeyObject->getString(iosPlatform).isEmpty() ? suggestedKeyObject->getString(iosPlatform) : suggestedKeyObject->getString(macPlatform);
@@ -103638,10 +103644,10 @@ index 0000000000000000000000000000000000000000..b65198f18ad933a41fc572597b401c39
 +#endif // ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
 diff --git a/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextAPIDownloadsHaiku.cpp b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextAPIDownloadsHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..d328a711056507c672e639d3b91eeb8cd23ca8c7
+index 0000000000000000000000000000000000000000..7481ef11c776a7933604fa66b8d9a57daae8201f
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextAPIDownloadsHaiku.cpp
-@@ -0,0 +1,441 @@
+@@ -0,0 +1,467 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +#include "config.h"
 +#include "WebExtensionContext.h"
@@ -103653,6 +103659,7 @@ index 0000000000000000000000000000000000000000..d328a711056507c672e639d3b91eeb8c
 +#include "WebExtensionPermission.h"
 +#include "WebExtensionUtilities.h"
 +#include "WebPageProxy.h"
++#include "WebKitContext.h"
 +#include <Bitmap.h>
 +#include <BitmapStream.h>
 +#include <DataIO.h>
@@ -103754,9 +103761,7 @@ index 0000000000000000000000000000000000000000..d328a711056507c672e639d3b91eeb8c
 +    String filename;
 +    if (RefPtr value = member("filename"_s)) {
 +        filename = value->asString();
-+        // Chrome and Firefox reject absolute paths and back-references. The
-+        // native registry has one flat destination directory, so a relative
-+        // path contributes its last component only.
++        // Chrome and Firefox reject absolute paths and back-references.
 +        if (filename.isEmpty() || filename.startsWith('/') || filename.contains('\0') || filename.contains('\\')) {
 +            fail("filename"_s, "it must be a non-empty relative path"_s);
 +            return;
@@ -103767,8 +103772,8 @@ index 0000000000000000000000000000000000000000..d328a711056507c672e639d3b91eeb8c
 +                return;
 +            }
 +        }
-+        filename = filename.substring(filename.reverseFind('/') + 1);
-+        if (filename.isEmpty()) {
++        // Folders in it are made in the download directory, as in Chrome.
++        if (filename.endsWith('/')) {
 +            fail("filename"_s, "it must name a file"_s);
 +            return;
 +        }
@@ -103989,10 +103994,37 @@ index 0000000000000000000000000000000000000000..d328a711056507c672e639d3b91eeb8c
 +void WebExtensionContext::downloadsItemAction(String&& action, double downloadIdentifier, String&& optionsJSON, CompletionHandler<void(std::expected<String, WebExtensionError>&&)>&& completionHandler)
 +{
 +    // Documentation: https://developer.chrome.com/docs/extensions/reference/api/downloads
-+    static constexpr ASCIILiteral actions[] { "pause"_s, "resume"_s, "open"_s, "removeFile"_s, "acceptDanger"_s, "getFileIcon"_s };
++    static constexpr ASCIILiteral actions[] { "pause"_s, "resume"_s, "open"_s, "removeFile"_s, "acceptDanger"_s, "getFileIcon"_s, "setUiOptions"_s };
 +    auto known = std::ranges::find(actions, action);
 +    if (known == std::end(actions)) {
 +        completionHandler(toWebExtensionError("downloads"_s, nullString(), "the action is not supported"_s));
++        return;
++    }
++    if (action == "setUiOptions"_s) {
++        // Chrome's downloads.ui permission; the browser keeps it per extension.
++        static constexpr auto apiName = "downloads.setUiOptions()"_s;
++        RefPtr options = parseObject(optionsJSON);
++        RefPtr enabled = options ? options->getValue("enabled"_s) : nullptr;
++        if (!hasPermission("downloads.ui"_s)) {
++            completionHandler(toWebExtensionError(apiName, nullString(), "it requires the 'downloads.ui' permission"_s));
++            return;
++        }
++        if (!enabled || !enabled->asBoolean()) {
++            completionHandler(toWebExtensionError(apiName, "options"_s, "it must have a boolean 'enabled'"_s));
++            return;
++        }
++        BMessage message(B_WEBKIT_BROWSER_COMMAND);
++        if (message.AddUInt32("command", B_WEBKIT_BROWSER_DOWNLOADS_UI) != B_OK || message.AddBool("enabled", *enabled->asBoolean()) != B_OK) {
++            completionHandler(toWebExtensionError(apiName, nullString(), "out of memory"_s));
++            return;
++        }
++        sendNativeBrowserQueryHaiku(WTF::move(message), apiName, [completionHandler = WTF::move(completionHandler)](std::expected<String, WebExtensionError>&& result) mutable {
++            if (!result) {
++                completionHandler(makeUnexpected(result.error()));
++                return;
++            }
++            completionHandler(String { emptyString() });
++        });
 +        return;
 +    }
 +    auto apiName = makeString("downloads."_s, *known, "()"_s);
@@ -119941,10 +119973,10 @@ index 0000000000000000000000000000000000000000..4bacf045a2c597f0e182667aa572dc93
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/DownloadRegistryHaiku.cpp b/Source/WebKit/UIProcess/haiku/DownloadRegistryHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..626cd6f9596afec83c02b275cb317ba3ad1b54bc
+index 0000000000000000000000000000000000000000..48085e4c0aa01054425859cd40ad8b8322c618c4
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/DownloadRegistryHaiku.cpp
-@@ -0,0 +1,735 @@
+@@ -0,0 +1,758 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#include "config.h"
@@ -120221,7 +120253,11 @@ index 0000000000000000000000000000000000000000..626cd6f9596afec83c02b275cb317ba3
 +    if (path.isEmpty())
 +        return B_OK;
 +    // Only a file directly in the download directory, as every destination is.
-+    if (FileSystem::parentPath(path) != m_directory || FileSystem::pathFileName(path).isEmpty())
++    // Only a file in the download directory or a folder of it (an
++    // extension's filename can name folders), as every destination is.
++    auto parent = FileSystem::parentPath(path);
++    bool inside = parent == m_directory || (parent.startsWith(makeString(m_directory, '/')) && !path.contains("/../"_s) && !path.contains("/./"_s));
++    if (!inside || FileSystem::pathFileName(path).isEmpty())
 +        return B_BAD_VALUE;
 +    for (const auto& [identifier, other] : m_downloads) {
 +        if (other->destination == path)
@@ -120270,9 +120306,23 @@ index 0000000000000000000000000000000000000000..626cd6f9596afec83c02b275cb317ba3
 +            existing->requestedFilename = requestedFilename;
 +        return;
 +    }
-+    auto item = std::make_unique<Entry>(download, m_listener, m_directory);
++    // "folder/name.txt": the folders, each made a safe name, are made in the
++    // download directory when the download starts writing.
++    auto directory = m_directory;
++    auto filename = requestedFilename;
++    if (!m_directory.isEmpty() && filename.contains('/')) {
++        auto parts = filename.split('/');
++        filename = parts.isEmpty() ? String() : parts.takeLast();
++        for (auto& part : parts) {
++            if (part.isEmpty())
++                continue;
++            auto folder = String::fromUTF8(sanitizedDownloadFilename(BString(part.utf8().legacyCStringPointer())).String());
++            directory = FileSystem::pathByAppendingComponent(directory, folder);
++        }
++    }
++    auto item = std::make_unique<Entry>(download, m_listener, directory);
 +    item->view = view;
-+    item->requestedFilename = requestedFilename;
++    item->requestedFilename = filename;
 +    item->choice = choice;
 +    if (resume)
 +        item->continues = resume->continues;
@@ -120439,6 +120489,11 @@ index 0000000000000000000000000000000000000000..626cd6f9596afec83c02b275cb317ba3
 +        return;
 +    }
 +    auto suggested = item->requestedFilename.isEmpty() ? filename : item->requestedFilename;
++    if (item->destination.isEmpty() && item->directory != m_directory && !FileSystem::makeAllDirectories(item->directory)) {
++        completion(AllowOverwrite::No, { });
++        requestCancel(identifier, B_WEBKIT_DOWNLOAD_FAILED, B_IO_ERROR, "Could not make the download's folder"_s);
++        return;
++    }
 +    if (item->destination.isEmpty() && item->choice != Destination::Unique) {
 +        auto name = String::fromUTF8(sanitizedDownloadFilename(BString(suggested.utf8().legacyCStringPointer())).String());
 +        auto named = FileSystem::pathByAppendingComponent(item->directory, name);
@@ -140242,10 +140297,10 @@ index a6dd4d40c24fd042e8a76a249cae9ff862f06dbf..d96349a81c1c018d1534e9d08b9b259a
      void getEnabledRulesets(Ref<WebExtensionCallbackHandler>&&);
 diff --git a/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIDownloads.cpp b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIDownloads.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..4052934aff0d9704cec7b40fcc6fd01924365663
+index 0000000000000000000000000000000000000000..1652caa91b53d3460b38ffac0956d8a3624db20d
 --- /dev/null
 +++ b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIDownloads.cpp
-@@ -0,0 +1,230 @@
+@@ -0,0 +1,244 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +#include "config.h"
 +#include "WebExtensionAPIDownloads.h"
@@ -140387,6 +140442,20 @@ index 0000000000000000000000000000000000000000..4052934aff0d9704cec7b40fcc6fd019
 +    itemAction("acceptDanger"_s, downloadIdentifier, { }, WTF::move(callback), outExceptionString);
 +}
 +
++void WebExtensionAPIDownloads::setUiOptions(RefPtr<JSON::Value> options, Ref<WebExtensionCallbackHandler>&& callback, String& outExceptionString)
++{
++    RefPtr object = options ? options->asObject() : nullptr;
++    if (!object || !object->getValue("enabled"_s) || !object->getValue("enabled"_s)->asBoolean()) {
++        outExceptionString = toErrorString(nullString(), "options"_s, "it must be an object with a boolean 'enabled'"_s);
++        return;
++    }
++    // No download: the UI process takes the options from the JSON.
++    WebProcess::singleton().sendWithAsyncReply(Messages::WebExtensionContext::DownloadsItemAction("setUiOptions"_s, 0, object->toJSONString()),
++        [protectedThis = Ref { *this }, callback = WTF::move(callback)](std::expected<String, WebExtensionError>&& result) {
++            replyWithVoid(callback, result ? std::expected<void, WebExtensionError> { } : makeUnexpected(result.error()));
++        }, extensionContext().identifier());
++}
++
 +void WebExtensionAPIDownloads::getFileIcon(double downloadIdentifier, RefPtr<JSON::Value> options, Ref<WebExtensionCallbackHandler>&& callback, String& outExceptionString)
 +{
 +    if (options && !options->asObject()) {
@@ -140478,10 +140547,10 @@ index 0000000000000000000000000000000000000000..4052934aff0d9704cec7b40fcc6fd019
 +#endif // ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
 diff --git a/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIDownloads.h b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIDownloads.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..eeadc080173eb78d59297bb065b1505cedfe5e63
+index 0000000000000000000000000000000000000000..984ba69a376c8639a149e104158ce0ce8df05b5f
 --- /dev/null
 +++ b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIDownloads.h
-@@ -0,0 +1,42 @@
+@@ -0,0 +1,43 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +#pragma once
 +#if ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
@@ -140504,6 +140573,7 @@ index 0000000000000000000000000000000000000000..eeadc080173eb78d59297bb065b1505c
 +    void resume(double downloadIdentifier, Ref<WebExtensionCallbackHandler>&&, String& outExceptionString);
 +    void removeFile(double downloadIdentifier, Ref<WebExtensionCallbackHandler>&&, String& outExceptionString);
 +    void acceptDanger(double downloadIdentifier, Ref<WebExtensionCallbackHandler>&&, String& outExceptionString);
++    void setUiOptions(RefPtr<JSON::Value> options, Ref<WebExtensionCallbackHandler>&&, String& outExceptionString);
 +    void getFileIcon(double downloadIdentifier, RefPtr<JSON::Value> options, Ref<WebExtensionCallbackHandler>&&, String& outExceptionString);
 +    void show(double downloadIdentifier, Ref<WebExtensionCallbackHandler>&&, String& outExceptionString);
 +    void showDefaultFolder(Ref<WebExtensionCallbackHandler>&&);
@@ -152226,10 +152296,10 @@ index c5c670a8a637222faa2bc0d1313ac4f8d9063550..8901b24bab2ce05be780d2c9100f2c2c
  };
 diff --git a/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPIDownloads.idl b/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPIDownloads.idl
 new file mode 100644
-index 0000000000000000000000000000000000000000..2bb7ef7ae5017a9c4d9829488735a4309937eb39
+index 0000000000000000000000000000000000000000..dfdc20bbb1883bb0407539007a90fecef638cb25
 --- /dev/null
 +++ b/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPIDownloads.idl
-@@ -0,0 +1,26 @@
+@@ -0,0 +1,27 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +[
@@ -152248,6 +152318,7 @@ index 0000000000000000000000000000000000000000..2bb7ef7ae5017a9c4d9829488735a430
 +    [RaisesStringException] void resume(double downloadId, [Optional, CallbackHandler] function callback);
 +    [RaisesStringException] void removeFile(double downloadId, [Optional, CallbackHandler] function callback);
 +    [RaisesStringException] void acceptDanger(double downloadId, [Optional, CallbackHandler] function callback);
++    [RaisesStringException] void setUiOptions([JSONValue] any options, [Optional, CallbackHandler] function callback);
 +    [RaisesStringException] void getFileIcon(double downloadId, [Optional, JSONValue] any options, [Optional, CallbackHandler] function callback);
 +    [RaisesStringException] void show(double downloadId, [Optional, CallbackHandler] function callback);
 +    void showDefaultFolder([Optional, CallbackHandler] function callback);

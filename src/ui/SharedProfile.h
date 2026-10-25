@@ -122,6 +122,25 @@ public:
         std::lock_guard lock(fMutex);
         return fExtensionSidebars;
     }
+    // Loaded extensions that turned the browser's download UI off
+    // (downloads.setUiOptions): no panel or status text for new downloads
+    // while any has. Not saved; an extension that unloads leaves the set.
+    void SetDownloadUIHidden(const std::string& extension, bool hidden)
+    {
+        std::lock_guard lock(fMutex);
+        if (hidden) fDownloadUIHiddenBy.insert(extension);
+        else fDownloadUIHiddenBy.erase(extension);
+    }
+    void KeepDownloadUIHiddenBy(const std::set<std::string>& loaded)
+    {
+        std::lock_guard lock(fMutex);
+        std::erase_if(fDownloadUIHiddenBy, [&](const std::string& extension) { return !loaded.count(extension); });
+    }
+    bool DownloadUIHidden() const
+    {
+        std::lock_guard lock(fMutex);
+        return !fDownloadUIHiddenBy.empty();
+    }
     // The installed extensions by identifier, which the application keeps up
     // to date (a change is announced as kExtensionsInstalledChanged). Not saved.
     void SetInstalledExtensions(std::map<std::string, InstalledExtensionInfo>);
@@ -158,6 +177,7 @@ private:
     int64_t fRestoredTime = 0;
     std::string fNewTabOverride;
     std::vector<ExtensionSidebar> fExtensionSidebars;
+    std::set<std::string> fDownloadUIHiddenBy;
     std::map<std::string, InstalledExtensionInfo> fInstalledExtensions;
     std::map<std::string, double> fPrivateZoom;
     bool fWritable = true;

@@ -21,6 +21,10 @@ globalThis.checks = {
     // saveAs shows a save panel; conflictAction "overwrite" reuses the name,
     // "prompt" asks when it is taken, "uniquify" (the default) numbers it.
     small: (options = {}) => browser.downloads.download({ url: "http://127.0.0.1:8798/dnr.html", filename: "summit-downloads-small.html", ...options }),
+    // A filename with folders: made in the download folder.
+    folder: () => checks.small({ filename: "summit-fixture/inner/small.html" }),
+    // The browser's own download UI off and on (downloads.ui).
+    ui: (enabled) => browser.downloads.setUiOptions({ enabled }),
     // Start, pause after a second, check it stays paused, resume and wait
     // for the end: what each step saw.
     async pauseAndResume() {
