@@ -4975,6 +4975,7 @@ void BrowserWindow::MessageReceived(BMessage* message)
             break;
         }
         case B_WEBKIT_DOWNLOAD_PROGRESS: {
+            if (fShared->DownloadUIHidden()) break;
             uint64 current = 0;
             message->FindUInt64("current_size", &current);
             std::string status = "Downloaded " + std::to_string(current / 1024) + " KiB";
@@ -4991,6 +4992,7 @@ void BrowserWindow::MessageReceived(BMessage* message)
             fDownloads.erase(identifier);
             message->FindUInt32("result", &result);
             if (fSaveAsDownloads.contains(identifier)) DownloadFinishedForSave(*message);
+            else if (fShared->DownloadUIHidden()) break;
             else if (result == B_WEBKIT_DOWNLOAD_SUCCEEDED)
                 fStatus->SetText("Download complete — open Downloads to view the file");
             else if (result == B_WEBKIT_DOWNLOAD_CANCELLED)
