@@ -5678,9 +5678,9 @@ void BrowserWindow::PlaceDockedDeveloperTools()
     const bool show = active && active->devTools.IsValid() && active->devToolsDocked && !fClosingWindow && !IsHidden() && !IsMinimized();
     if (show && fDock->IsHidden(fDock)) {
         fDock->Show();
-        // Room for the tools: about a third of the page's height.
-        fPageSplit->SetItemWeight(0, 0.65f, false);
-        fPageSplit->SetItemWeight(1, 0.35f, true);
+        // Room for the tools: about two fifths of the page's height.
+        fPageSplit->SetItemWeight(0, 0.6f, false);
+        fPageSplit->SetItemWeight(1, 0.4f, true);
         Layout(true);
     } else if (!show && !fDock->IsHidden(fDock)) {
         fDock->Hide();

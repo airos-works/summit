@@ -22,6 +22,20 @@ shows nothing until it asks for something again; reload it to see everything
 it loads. The Elements panel is the exception: it reads the page's document
 as it is when the panel is first shown.
 
+### Docking
+
+**Dock** (top right of the tools, or Shift+Alt+D) puts the tools under the
+page in their browser window; **Undock** gives them their own window back
+where it was, and new tools open as the last ones were left. The browser
+window keeps a slot under its pages (`DockSlot`, in a vertical split whose
+divider sets its height) while the selected tab's tools are docked. The
+tools stay a window of their own (their session and panels run on their own
+thread), made borderless and floating over that browser window only
+(`B_FLOATING_SUBSET_WINDOW_FEEL`), and are placed over the slot whenever it,
+the browser window or the selected tab changes (`kDeveloperToolsDock`).
+Another tab's docked tools are hidden until their tab is selected. Test
+action: `dock on|off`; the state has `docked`, `hidden` and `frame`.
+
 ### View Page Source
 
 **View › View Page Source** (Alt+U, or *View Page Source* in a page's context
@@ -690,4 +704,3 @@ is started again.
   dragging nodes, and the box model of other than the selected element.
 - The highlight needs accelerated compositing; a page drawn in software has
   none.
-- Docking inside the browser window: the tools are a window of their own.

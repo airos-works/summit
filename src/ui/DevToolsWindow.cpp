@@ -128,6 +128,9 @@ void DevToolsWindow::Dock(const BMessage& place)
         SetLook(B_NO_BORDER_WINDOW_LOOK);
         SetFeel(B_FLOATING_SUBSET_WINDOW_FEEL);
         AddToSubset(owner);
+        // The dock sets the size: the panels' minimum would otherwise make
+        // the window taller than the dock (and cover the window's bottom).
+        SetFlags(Flags() & ~B_AUTO_UPDATE_SIZE_LIMITS);
         SetSizeLimits(100, 100000, 60, 100000);
         fDockButton->SetLabel("Undock");
     }
@@ -149,6 +152,7 @@ void DevToolsWindow::Undock()
     SetLook(B_DOCUMENT_WINDOW_LOOK);
     SetFeel(B_NORMAL_WINDOW_FEEL);
     SetSizeLimits(560, 10000, 360, 10000);
+    SetFlags(Flags() | B_AUTO_UPDATE_SIZE_LIMITS);
     if (fUndockedFrame.IsValid()) {
         MoveTo(fUndockedFrame.LeftTop());
         ResizeTo(fUndockedFrame.Width(), fUndockedFrame.Height());
