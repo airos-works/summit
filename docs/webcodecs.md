@@ -96,3 +96,16 @@ libraries): a second of 440 Hz tone went through `AudioEncoder` and back
 through `AudioDecoder` as AAC at 48 kHz with a description (48 chunks, RMS
 0.349), AAC ADTS at 44.1 kHz (45 chunks, 0.345) and MP3 at 44.1 kHz (40
 chunks, 0.329: LAME pads with silence); the tone's RMS is 0.354.
+
+## W3C samples
+
+The [WebCodecs samples](https://w3c.github.io/webcodecs/samples/) on the
+X399 (25 Oct, ac112 build): *Video Decoding and Display* decoded all frames
+of its 1280×720 MP4 as H.264 (295 fps), VP8 (349 fps) and VP9 (453 fps) and
+drew them to the canvas. *Audio Video Player* needs cross-origin isolation:
+from github.io (no COOP/COEP headers) it cannot run in any browser, and
+served from `localhost` with the headers (`node server.js`, or a small
+Python server) it stopped at "Loading…" because `SharedArrayBuffer` was
+missing although the page was `crossOriginIsolated`. The engine turned on
+JSC's `useSharedArrayBuffer` for cross-origin isolated web processes only
+on GTK and WPE; Haiku now does too (`WebProcess.cpp`).
