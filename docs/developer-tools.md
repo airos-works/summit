@@ -24,17 +24,18 @@ as it is when the panel is first shown.
 
 ### Docking
 
-**Dock** (top right of the tools, or Shift+Alt+D) puts the tools under the
-page in their browser window; **Undock** gives them their own window back
-where it was, and new tools open as the last ones were left. The browser
-window keeps a slot under its pages (`DockSlot`, in a vertical split whose
-divider sets its height) while the selected tab's tools are docked. The
+**Dock Below** and **Dock Right** (top right of the tools) put the tools
+under or beside the page in their browser window; **Undock** gives them
+their own window back where it was, and Shift+Alt+D docks (where they last
+were) or undocks. New tools open as the last ones were left. The browser
+window keeps a slot under its pages or beside them (`DockSlot`, in a split
+whose divider sets its size) while the selected tab's tools are docked. The
 tools stay a window of their own (their session and panels run on their own
 thread), made borderless and floating over that browser window only
 (`B_FLOATING_SUBSET_WINDOW_FEEL`), and are placed over the slot whenever it,
 the browser window or the selected tab changes (`kDeveloperToolsDock`).
 Another tab's docked tools are hidden until their tab is selected. Test
-action: `dock on|off`; the state has `docked`, `hidden` and `frame`.
+action: `dock on|right|off`; the state has `docked`, `hidden` and `frame`.
 
 ### View Page Source
 
