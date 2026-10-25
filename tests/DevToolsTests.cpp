@@ -304,6 +304,22 @@ static void TestSession()
     CHECK(session.Requests()[5].status == 200 && redirect.status == 301);
     changes = session.TakeChanges();
     CHECK(changes.requests.size() == 2 && changes.requests[0] == redirect.serial);
+    // Timing: WebKit's 0 is what did not happen (no TLS on http; nothing
+    // at all for what a cache answered).
+    session.Receive(Event("page-1", "Network.responseReceived", {{"requestId", "0.5"}, {"frameId", "f1"}, {"loaderId", "L1"},
+        {"timestamp", 12.2}, {"type", "XHR"}, {"response", {{"url", "ignored"}, {"status", 200}, {"statusText", "OK"},
+            {"headers", json::object()}, {"mimeType", "application/json"}, {"source", "network"},
+            {"timing", {{"domainLookupStart", 0}, {"domainLookupEnd", 1}, {"connectStart", 1}, {"connectEnd", 3}, {"secureConnectionStart", 0},
+                {"requestStart", 3}, {"responseStart", 8}, {"responseEnd", 9}}}}}}));
+    CHECK(session.Requests()[5].timing.known && session.Requests()[5].timing.tlsStart < 0);
+    CHECK(DescribeHeaders(session.Requests()[5]).text.find("TLS") == std::string::npos
+        && DescribeHeaders(session.Requests()[5]).text.find("Connecting: 2.0 ms") != std::string::npos);
+    session.Receive(Event("page-1", "Network.responseReceived", {{"requestId", "0.5"}, {"frameId", "f1"}, {"loaderId", "L1"},
+        {"timestamp", 12.2}, {"type", "XHR"}, {"response", {{"url", "ignored"}, {"status", 200}, {"statusText", "OK"},
+            {"headers", json::object()}, {"mimeType", "application/json"}, {"source", "disk-cache"},
+            {"timing", {{"domainLookupStart", 0}, {"connectStart", 0}, {"secureConnectionStart", 0}, {"requestStart", 0}, {"responseStart", 0}}}}}}));
+    CHECK(!session.Requests()[5].timing.known);
+    session.TakeChanges();
 
     // What the memory cache served, and a response to a request never seen.
     session.Receive(Event("page-1", "Network.requestServedFromMemoryCache", {{"requestId", "0.6"}, {"frameId", "f1"}, {"loaderId", "L1"},
@@ -713,7 +729,8 @@ static void TestObjectTree()
     session.BlockURL("ads.example");
     commands = Sent(session);
     CHECK(Find(commands, "Network.setInterceptionEnabled") && Find(commands, "Network.addInterception")
-        && Find(commands, "Network.addInterception")->parameters["url"] == "ads.example" && session.BlockedURLs().size() == 1);
+        && Find(commands, "Network.addInterception")->parameters["url"] == "ads\\.example"
+        && Find(commands, "Network.addInterception")->parameters["isRegex"] == true && session.BlockedURLs().size() == 1);
     session.Receive(Event("page-1", "Network.requestIntercepted", {{"requestId", "r9"}, {"request", {{"url", "https://ADS.example/x.js"}}}}));
     session.Receive(Event("page-1", "Network.requestIntercepted", {{"requestId", "r10"}, {"request", {{"url", "https://example.com/app.js"}}}}));
     commands = Sent(session);
