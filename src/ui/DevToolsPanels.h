@@ -90,6 +90,7 @@ private:
     void Fill(Row& row, const devtools::Request& request);
     void ShowSelection();
     void ShowBody(const devtools::Request& request);
+    void ShowFrames(const devtools::Request& request);
     void ShowSummary();
     bool AtEnd() const;
     // The requests listed, in the list's order (HAR export).
@@ -116,6 +117,7 @@ private:
     SourceView* fHeaders;
     BodyView* fRequestBody;
     BodyView* fResponseBody;
+    SourceView* fMessages;
 };
 
 // Local and session storage of the page's origins, and its cookies: read

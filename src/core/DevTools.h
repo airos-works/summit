@@ -31,6 +31,17 @@ enum class BodyState {
 };
 
 // One request. A redirect ends its entry and starts another.
+// A WebSocket message, or an error on the socket.
+struct SocketFrame {
+    bool sent = false, error = false;
+    // 1 text, 2 binary (data then is base64), 8 close, 9 ping, 10 pong.
+    int opcode = 1;
+    std::string data;
+    uint64_t length = 0;
+    // On the page's clock.
+    double time = 0;
+};
+
 struct Request {
     uint64_t serial = 0;
     // The protocol's request, target (page process), loader (document) and frame.
@@ -60,6 +71,10 @@ struct Request {
     // The body's bytes once Loaded.
     std::string body;
     std::string bodyError;
+    // A WebSocket's messages, the latest kMaximumFrames.
+    bool webSocket = false;
+    std::deque<SocketFrame> frames;
+    static constexpr size_t kMaximumFrames = 2000;
 
     // What the list calls it: the last part of the path with the query, or the host.
     std::string Name() const;
@@ -325,6 +340,9 @@ private:
 
 // General facts, then response and request headers, for the Headers tab.
 StyledText DescribeHeaders(const Request& request);
+// A WebSocket's messages, one a line: ↑ sent or ↓ received, the time since
+// the socket opened, then the text (binary ones by their size).
+StyledText DescribeFrames(const Request& request);
 // "12 requests · 1.4 MB transferred · 3.2 MB of resources".
 std::string SummarizeRequests(const std::deque<Request>& requests, size_t shown);
 // The request as a curl command line (Copy as cURL): its method, headers and
