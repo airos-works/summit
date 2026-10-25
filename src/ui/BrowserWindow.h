@@ -476,6 +476,12 @@ private:
     std::string DiscardTab(int64 id);
 #if SUMMIT_MODERN_WEBKIT
     void CloseSidebar();
+    // An extension's sidebarAction call (B_WEBKIT_BROWSER_SIDEBAR).
+    void SidebarCommand(const BMessage& message, uint64 identifier);
+    // The panel and title an extension's sidebar has here: its manifest's,
+    // or what sidebarAction.setPanel and setTitle made them in this window.
+    std::pair<std::string, std::string> SidebarPage(const std::string& extension) const;
+    std::map<std::string, std::pair<std::string, std::string>> fSidebarOverrides;
     BSplitView* fContentSplit = nullptr;
     BGroupView* fSidebar = nullptr;
     BStringView* fSidebarTitle = nullptr;
