@@ -4,13 +4,18 @@
 #include <CheckBox.h>
 #include <LayoutBuilder.h>
 #include <MessageFilter.h>
+#include <OutlineListView.h>
+#include <ScrollView.h>
+#include <SplitView.h>
 #include <StringView.h>
 #include <TextControl.h>
 #include <Window.h>
 #include <nlohmann/json.hpp>
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <ctime>
+#include <functional>
 
 namespace summit {
 using namespace devtools;
@@ -112,7 +117,23 @@ public:
         SendMessage(SCI_EOLANNOTATIONCLEARALL);
         SendMessage(SCI_SETSCROLLWIDTH, 1);
         fStarts.clear();
+        fSerials.clear();
         fLastStyle = kLogStyle;
+    }
+    // Clicking (or moving the caret) into an entry tells which one.
+    void SetSelected(std::function<void(uint64)> selected) { fSelected = std::move(selected); }
+    void NotificationReceived(SCNotification* notification) override
+    {
+        SourceView::NotificationReceived(notification);
+        if (notification->nmhdr.code != SCN_UPDATEUI || !(notification->updated & SC_UPDATE_SELECTION) || !fSelected
+            || fStarts.empty()) return;
+        const auto caret = SendMessage(SCI_GETCURRENTPOS);
+        const auto found = std::upper_bound(fStarts.begin(), fStarts.end(), caret);
+        if (found == fStarts.begin()) return;
+        const auto serial = fSerials[static_cast<size_t>(found - fStarts.begin() - 1)];
+        if (serial == fSelectedSerial) return;
+        fSelectedSerial = serial;
+        fSelected(serial);
     }
     void Append(const ConsoleEntry& entry)
     {
@@ -143,6 +164,7 @@ public:
         if (SendMessage(SCI_GETLENGTH) > 0) Add("\n", fLastStyle);
         const auto start = SendMessage(SCI_GETLENGTH);
         fStarts.push_back(start);
+        fSerials.push_back(entry.serial);
         Add(text, style);
         if (!entry.stack.empty()) {
             std::string stack;
@@ -171,6 +193,7 @@ public:
         if (fStarts.empty()) return;
         const auto start = fStarts.back();
         fStarts.pop_back();
+        fSerials.pop_back();
         const auto first = SendMessage(SCI_LINEFROMPOSITION, start), last = SendMessage(SCI_GETLINECOUNT) - 1;
         // What is attached to a line would move to the line before it.
         for (auto line = first; line <= last; ++line) {
@@ -242,7 +265,131 @@ private:
         SendMessage(SCI_SETSTYLING, text.size(), style);
     }
     std::vector<sptr_t> fStarts;
+    std::vector<uint64> fSerials;
+    std::function<void(uint64)> fSelected;
+    uint64 fSelectedSerial = 0;
     int fLastStyle = kLogStyle;
+};
+
+// The objects of the chosen entry as a tree: expanding one asks the page for
+// its properties, and each property that is an object can be expanded in turn.
+class ConsolePanel::ObjectTree : public BOutlineListView {
+public:
+    ObjectTree(Session& session, DevToolsHost& host)
+        : BOutlineListView("objects", B_SINGLE_SELECTION_LIST), fSession(session), fHost(host)
+    {
+    }
+    void Show(const ConsoleEntry& entry)
+    {
+        Clear();
+        for (const auto& object : entry.objects) AddObject(object.label, object.objectId, nullptr);
+        // One object opens at once, as in other browsers' consoles.
+        if (entry.objects.size() == 1) Open(static_cast<Item*>(FullListItemAt(0)));
+    }
+    void Clear()
+    {
+        for (int32 i = FullListCountItems() - 1; i >= 0; --i) delete FullListItemAt(i);
+        MakeEmpty();
+    }
+    // The page answered for these objects.
+    void Answered(const std::vector<std::string>& objects)
+    {
+        for (const auto& objectId : objects) {
+            for (int32 i = 0; i < FullListCountItems(); ++i) {
+                auto* item = dynamic_cast<Item*>(FullListItemAt(i));
+                if (item && item->objectId == objectId && item->requested && !item->filled) Fill(item);
+            }
+        }
+    }
+    // Expands the first shown row whose text starts with prefix (tests).
+    bool OpenRow(const std::string& prefix)
+    {
+        for (int32 i = 0; i < CountItems(); ++i) {
+            auto* item = dynamic_cast<Item*>(ItemAt(i));
+            if (item && std::string(item->Text()).rfind(prefix, 0) == 0 && !item->objectId.empty()) {
+                Open(item);
+                return true;
+            }
+        }
+        return false;
+    }
+    // The rows shown, indented by depth.
+    std::vector<std::string> Rows()
+    {
+        std::vector<std::string> rows;
+        for (int32 i = 0; i < CountItems(); ++i) {
+            auto* item = static_cast<BStringItem*>(ItemAt(i));
+            rows.push_back(std::string(item->OutlineLevel() * 2, ' ') + item->Text());
+        }
+        return rows;
+    }
+    void MouseDown(BPoint where) override
+    {
+        BOutlineListView::MouseDown(where);
+        LoadExpanded();
+    }
+    void KeyDown(const char* bytes, int32 count) override
+    {
+        BOutlineListView::KeyDown(bytes, count);
+        LoadExpanded();
+    }
+
+private:
+    struct Item : BStringItem {
+        Item(const std::string& text, uint32 level, std::string object)
+            : BStringItem(text.c_str(), level, false), objectId(std::move(object))
+        {
+        }
+        std::string objectId;
+        bool requested = false, filled = false;
+    };
+    void AddObject(const std::string& text, const std::string& objectId, Item* parent)
+    {
+        auto* item = new Item(text, parent ? parent->OutlineLevel() + 1 : 0, objectId);
+        if (parent) AddUnder(item, parent);
+        else AddItem(item);
+        // A row to open: its properties come when it is.
+        if (!objectId.empty()) AddUnder(new BStringItem("Loading…"), item);
+    }
+    void Open(Item* item)
+    {
+        if (!item) return;
+        Expand(item);
+        LoadExpanded();
+    }
+    void LoadExpanded()
+    {
+        for (int32 i = 0; i < FullListCountItems(); ++i) {
+            auto* item = dynamic_cast<Item*>(FullListItemAt(i));
+            if (!item || !item->IsExpanded() || item->requested || item->objectId.empty()) continue;
+            item->requested = true;
+            if (const auto* known = fSession.Properties(item->objectId); known && known->loaded) Fill(item);
+            else {
+                fSession.LoadProperties(item->objectId);
+                fHost.Sync();
+            }
+        }
+    }
+    void Fill(Item* item)
+    {
+        const auto* properties = fSession.Properties(item->objectId);
+        if (!properties || !properties->loaded) return;
+        item->filled = true;
+        // In place of "Loading…".
+        while (CountItemsUnder(item, true) > 0) {
+            auto* child = EachItemUnder(item, true, [](BListItem* row, void*) { return row; }, nullptr);
+            if (!child) break;
+            RemoveItem(child);
+            delete child;
+        }
+        if (!properties->error.empty()) AddUnder(new BStringItem(("Not available: " + properties->error).c_str()), item);
+        else if (properties->items.empty()) AddUnder(new BStringItem("No properties"), item);
+        for (const auto& property : properties->items)
+            AddObject(property.name + ": " + property.value, property.objectId, item);
+        Invalidate();
+    }
+    Session& fSession;
+    DevToolsHost& fHost;
 };
 
 ConsolePanel::ConsolePanel(Session& session, DevToolsHost& host)
@@ -272,6 +419,15 @@ ConsolePanel::ConsolePanel(Session& session, DevToolsHost& host)
     fCounts->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNSET));
     fCounts->SetHighUIColor(B_PANEL_TEXT_COLOR, B_DARKEN_2_TINT);
     fLog = new Log();
+    fLog->SetSelected([this](uint64 serial) { Inspect(serial); });
+    fObjects = new ObjectTree(session, host);
+    auto* objects = new BScrollView("objects scroll", fObjects, 0, true, true, B_NO_BORDER);
+    fSplit = new BSplitView(B_HORIZONTAL, 0);
+    BLayoutBuilder::Split<>(fSplit)
+        .Add(fLog, 3)
+        .Add(objects, 1);
+    fSplit->SetCollapsible(true);
+    fSplit->SetItemCollapsed(1, true);
     fInput = new BTextControl("input", "›", "", new BMessage(kEvaluate));
     fInput->SetToolTip("Run JavaScript in the page");
     fInput->TextView()->SetFontAndColor(be_fixed_font);
@@ -287,7 +443,7 @@ ConsolePanel::ConsolePanel(Session& session, DevToolsHost& host)
             .Add(fDebug)
             .Add(fFilter, 1)
         .End()
-        .Add(fLog, 1)
+        .Add(fSplit, 1)
         .AddGroup(B_HORIZONTAL, 0).SetInsets(8, 3, 8, 3)
             .Add(fCounts)
         .End()
@@ -369,6 +525,15 @@ bool ConsolePanel::Command(const std::string& action, const std::string& argumen
         fInput->SetText(argument.c_str());
         BMessage evaluate(kEvaluate);
         MessageReceived(&evaluate);
+    } else if (action == "inspect") {
+        // The entry's position in the log, from 0, or the last for "last".
+        const auto& entries = fSession.Entries();
+        if (entries.empty()) return false;
+        const size_t index = argument == "last" ? entries.size() - 1 : std::strtoul(argument.c_str(), nullptr, 10);
+        if (index >= entries.size()) return false;
+        Inspect(entries[index].serial);
+    } else if (action == "expand") {
+        if (!fObjects->OpenRow(argument)) return false;
     } else return false;
     return true;
 }
@@ -380,7 +545,7 @@ std::string ConsolePanel::StateJSON()
     if (text.size() > 256 * 1024) text.erase(0, text.size() - 256 * 1024);
     json state = {{"preserve", fPreserve->Value() == B_CONTROL_ON}, {"filter", fFilter->Text()},
         {"levels", {{"errors", fLevels.errors}, {"warnings", fLevels.warnings}, {"info", fLevels.info}, {"debug", fLevels.debug}}},
-        {"shown", fLog->Count()}, {"counts", fCounts->Text()}, {"text", text}};
+        {"shown", fLog->Count()}, {"counts", fCounts->Text()}, {"text", text}, {"objects", fObjects->Rows()}};
     return state.dump(-1, ' ', false, json::error_handler_t::replace);
 }
 
@@ -414,9 +579,22 @@ void ConsolePanel::Rebuild()
     ShowCounts();
 }
 
+void ConsolePanel::Inspect(uint64 serial)
+{
+    for (const auto& entry : fSession.Entries()) {
+        if (entry.serial != serial) continue;
+        if (entry.objects.empty()) return;
+        fObjects->Show(entry);
+        if (fSplit->IsItemCollapsed(1)) fSplit->SetItemCollapsed(1, false);
+        return;
+    }
+}
+
 void ConsolePanel::Apply(const Changes& changes)
 {
+    if (!changes.properties.empty()) fObjects->Answered(changes.properties);
     if (changes.consoleReset) {
+        fObjects->Clear();
         Rebuild();
         return;
     }

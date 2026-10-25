@@ -141,6 +141,17 @@ arrays are shown by their preview (`{id: 7, name: "Ann", …}`), `%s`, `%d`,
 `%o` and the rest are substituted, a repeated message is counted (`×3`) and
 the members of a `console.group()` are indented.
 
+Clicking a message or result that shows objects opens them in a **tree** to
+the right of the log (a single object opens at once). Opening a row asks the
+page for that object's properties (`Runtime.getDisplayableProperties`):
+each shows its value as the log would, an object can be opened in turn,
+getters show `(…)` and internal slots such as `[[Prototype]]` and
+`[[Entries]]` are listed after the object's own. An object the page has let
+go of (after it moved on) says so. The tree pane can be dragged narrower or
+collapsed. Test actions: `devtools-do inspect N|last` (the Nth entry from 0)
+and `devtools-do expand TEXT` (the first row starting with TEXT); the state's
+`console.objects` lists the rows shown, indented by depth.
+
 Above the log: **Clear**, **Preserve log**, a check box for each level to
 show (**Errors**, **Warnings**, **Info**, which is `console.info()` and
 `console.log()`, and **Debug**) and a filter on the text. The line under the

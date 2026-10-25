@@ -84,6 +84,12 @@ enum class EntryKind {
     Result
 };
 
+// An object a console entry shows (an argument, a result) that the
+// Console's object tree can look into.
+struct ConsoleObject {
+    std::string label, objectId;
+};
+
 struct ConsoleEntry {
     uint64_t serial = 0;
     EntryKind kind = EntryKind::Message;
@@ -99,8 +105,21 @@ struct ConsoleEntry {
     int repeat = 1;
     // Seconds since 1970, or 0.
     double time = 0;
+    std::vector<ConsoleObject> objects;
     // "app.js:12:5", or empty.
     std::string Location() const;
+};
+
+// An object's properties as the page answered (Runtime.getDisplayableProperties):
+// each with its value as the console shows it and, for an object value, the
+// object to look into next.
+struct ObjectProperty {
+    std::string name, value, objectId;
+};
+struct ObjectProperties {
+    bool loaded = false;
+    std::string error;
+    std::vector<ObjectProperty> items;
 };
 
 // Which console levels are shown. console.log() counts as information.
@@ -158,7 +177,7 @@ struct Changes {
     bool Any() const
     {
         return requestsReset || consoleReset || consoleAdded || consoleLastChanged || !requests.empty() || !bodies.empty()
-            || origins || storage || elements;
+            || origins || storage || elements || !properties.empty();
     }
     // The page's origins (StorageOrigins()) changed; a storage area or the
     // cookies changed or were answered.
@@ -166,6 +185,8 @@ struct Changes {
     bool storage = false;
     // The Elements panel's model changed: DOM().TakeChanges() says how.
     bool elements = false;
+    // Objects whose properties arrived (Properties()).
+    std::vector<std::string> properties;
 };
 
 // Text with the parts of it that are drawn differently.
@@ -220,6 +241,10 @@ public:
     void RequestBody(uint64_t serial);
     // Runs an expression in the page, as typed into the console.
     void Evaluate(const std::string& expression);
+    // Asks the page for an object's properties (once; they come with
+    // Changes::properties), and what it answered so far, else null.
+    void LoadProperties(const std::string& objectId);
+    const ObjectProperties* Properties(const std::string& objectId) const;
 
     // Origins of the page's frames that can keep storage, the page's first.
     const std::vector<std::string>& StorageOrigins() const { return fOrigins; }
@@ -243,10 +268,11 @@ public:
 private:
     friend struct ProtocolReader;
     struct Pending {
-        enum Kind { Body, Evaluation, Storage, StorageEdit, Frames, Elements, Other };
+        enum Kind { Body, Evaluation, Storage, StorageEdit, Frames, Elements, Properties, Other };
         Kind kind;
         uint64_t serial;
-        // Storage and StorageEdit: the area; Frames: the target asked.
+        // Storage and StorageEdit: the area; Frames: the target asked;
+        // Properties: the object.
         StorageKind storage = StorageKind::Local;
         std::string origin;
     };
@@ -281,6 +307,7 @@ private:
     std::string fPageTarget, fPageURL;
     std::vector<std::string> fOrigins;
     std::map<std::pair<StorageKind, std::string>, StorageArea> fAreas;
+    std::map<std::string, ObjectProperties> fProperties;
     DOMModel fDOM;
     std::vector<DOMModel::Command> fHeldDOM;
     std::vector<std::string> fOutgoing;
