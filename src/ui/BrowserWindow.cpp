@@ -586,6 +586,27 @@ static void AddItem(BMenu* menu, const char* label, uint32 what, char key = 0, u
 // Every browser window, for the Window menu. Each window keeps its own entry
 // up to date; any window thread may read the list.
 namespace {
+#if SUMMIT_MODERN_WEBKIT
+// The slot under the pages that docked Developer Tools are placed over: it
+// says when it moves or changes size (the split's divider, the window).
+constexpr uint32 kDockSlotChanged = 'dkch';
+class DockSlot final : public BView {
+public:
+    DockSlot() : BView("devtools-dock", B_FRAME_EVENTS)
+    {
+        SetViewUIColor(B_PANEL_BACKGROUND_COLOR);
+        SetExplicitMinSize(BSize(B_SIZE_UNSET, 120));
+    }
+    void FrameMoved(BPoint) override { Changed(); }
+    void FrameResized(float, float) override { Changed(); }
+
+private:
+    void Changed()
+    {
+        if (Window()) Window()->PostMessage(kDockSlotChanged);
+    }
+};
+#endif
 struct WindowEntry { BMessenger window; uint64 key; std::string title; };
 std::mutex sWindowListLock;
 std::vector<WindowEntry> sWindowList;
@@ -978,7 +999,10 @@ BrowserWindow::BrowserWindow(std::shared_ptr<SharedProfile> profile, std::string
 #if SUMMIT_MODERN_WEBKIT
         .AddSplit(B_HORIZONTAL, 0, 1.0f).GetSplitView(&fContentSplit)
             .Add(fSidebar, 0.25f)
-            .Add(fPages, 0.75f)
+            .AddSplit(B_VERTICAL, 0, 0.75f).GetSplitView(&fPageSplit)
+                .Add(fPages, 0.65f)
+                .Add(fDock = new DockSlot(), 0.35f)
+            .End()
         .End()
 #else
         .Add(fPages, 1)
@@ -987,6 +1011,7 @@ BrowserWindow::BrowserWindow(std::shared_ptr<SharedProfile> profile, std::string
     fLayout = static_cast<BGroupLayout*>(GetLayout());
 #if SUMMIT_MODERN_WEBKIT
     fNoticeBar->Hide();
+    fDock->Hide();
 #endif
 #if SUMMIT_MODERN_WEBKIT
     fFullScreenNotice = new BStringView("fullscreen-notice", "");
@@ -1635,6 +1660,8 @@ void BrowserWindow::SelectTab(int64 id, bool forClose)
 #endif
         RefreshInternalPage(fTabs[i]);
 #if SUMMIT_MODERN_WEBKIT
+        // The dock shows this tab's tools, if they are docked.
+        PlaceDockedDeveloperTools();
         SyncBrowserWindow();
         RefreshNoticeBar();
         UpdateKeepScreenAwake();
@@ -2115,6 +2142,7 @@ void BrowserWindow::FrameMoved(BPoint where)
     BrowserWindowBase::FrameMoved(where);
     HideSuggestions();
 #if SUMMIT_MODERN_WEBKIT
+    PlaceDockedDeveloperTools();
     fWebKitContext->SetBrowserWindowFrame(BMessenger(this), Frame());
     ReportExtensionAnchors();
 #endif
@@ -2125,6 +2153,7 @@ void BrowserWindow::FrameResized(float width, float height)
     BrowserWindowBase::FrameResized(width, height);
     HideSuggestions();
 #if SUMMIT_MODERN_WEBKIT
+    PlaceDockedDeveloperTools();
     fWebKitContext->SetBrowserWindowFrame(BMessenger(this), Frame());
     ReportExtensionAnchors();
 #endif
@@ -5111,9 +5140,31 @@ void BrowserWindow::MessageReceived(BMessage* message)
         case kDeveloperToolsClosed: {
             BMessenger window;
             if (message->FindMessenger("window", &window) != B_OK) break;
-            for (auto& open : fTabs) if (open.devTools == window) open.devTools = BMessenger();
+            for (auto& open : fTabs)
+                if (open.devTools == window) {
+                    open.devTools = BMessenger();
+                    open.devToolsDocked = false;
+                }
+            PlaceDockedDeveloperTools();
             break;
         }
+        case kDockDeveloperTools: {
+            const int64 id = message->GetInt64("tab", -1);
+            const bool docked = message->GetBool("docked", false);
+            for (auto& open : fTabs) {
+                if (open.id != id || !open.devTools.IsValid()) continue;
+                open.devToolsDocked = docked;
+                // A window let go is told so; a docked one where it goes.
+                if (!docked) {
+                    BMessage place(kDeveloperToolsDock);
+                    place.AddBool("docked", false);
+                    open.devTools.SendMessage(&place);
+                }
+            }
+            PlaceDockedDeveloperTools();
+            break;
+        }
+        case kDockSlotChanged: PlaceDockedDeveloperTools(); break;
         case kCopyText: {
             const char* text = nullptr;
             if (message->FindString("text", &text) != B_OK || !be_clipboard->Lock()) break;
@@ -5602,6 +5653,9 @@ void BrowserWindow::ShowDeveloperTools(const char* panel, const BMessage* reques
     tab->devTools = BMessenger(window);
     if (!show.IsEmpty()) window->PostMessage(&show);
     window->Show();
+    // Docked if the tools were last docked.
+    tab->devToolsDocked = DevToolsWindow::DockedByDefault();
+    PlaceDockedDeveloperTools();
 }
 
 void BrowserWindow::ShowPageSource()
@@ -5612,6 +5666,36 @@ void BrowserWindow::ShowPageSource()
     window->FetchPageSource(BWebKitInspectorSession::Create(*tab->view, BMessenger(window), static_cast<uint64>(tab->id)),
         PageTarget(tab->pageIdentifier));
     window->Show();
+}
+
+// The dock under the pages is shown while the selected tab's tools are
+// docked; those tools are placed over it, and other tabs' docked tools are
+// hidden until their tab is selected.
+void BrowserWindow::PlaceDockedDeveloperTools()
+{
+    if (!fDock || !fPageSplit) return;
+    const auto* active = ActiveTab();
+    const bool show = active && active->devTools.IsValid() && active->devToolsDocked && !fClosingWindow && !IsHidden() && !IsMinimized();
+    if (show && fDock->IsHidden(fDock)) {
+        fDock->Show();
+        // Room for the tools: about a third of the page's height.
+        fPageSplit->SetItemWeight(0, 0.65f, false);
+        fPageSplit->SetItemWeight(1, 0.35f, true);
+        Layout(true);
+    } else if (!show && !fDock->IsHidden(fDock)) {
+        fDock->Hide();
+        Layout(true);
+    }
+    for (auto& tab : fTabs) {
+        if (!tab.devTools.IsValid() || !tab.devToolsDocked) continue;
+        BMessage place(kDeveloperToolsDock);
+        const bool here = show && &tab == active;
+        place.AddBool("docked", true);
+        place.AddBool("shown", here);
+        place.AddPointer("owner", this);
+        if (here) place.AddRect("frame", fDock->ConvertToScreen(fDock->Bounds()));
+        tab.devTools.SendMessage(&place);
+    }
 }
 
 void BrowserWindow::CloseDeveloperTools(Tab& tab, bool wait)

@@ -217,8 +217,10 @@ private:
         std::string deferredURL;
         // system_time() when the tab was last selected, for choosing which to unload.
         bigtime_t lastSelected = 0;
-        // The tab's Developer Tools window, while it is open.
+        // The tab's Developer Tools window, while it is open, and whether it
+        // is docked under the page.
         BMessenger devTools { };
+        bool devToolsDocked = false;
         // The last load failed because the server's certificate failed
         // verification: what the warning shows and what Continue trusts.
         struct CertificateProblem {
@@ -483,6 +485,10 @@ private:
     std::pair<std::string, std::string> SidebarPage(const std::string& extension) const;
     std::map<std::string, std::pair<std::string, std::string>> fSidebarOverrides;
     BSplitView* fContentSplit = nullptr;
+    // Docked Developer Tools: the slot under the pages they are placed over.
+    BSplitView* fPageSplit = nullptr;
+    BView* fDock = nullptr;
+    void PlaceDockedDeveloperTools();
     BGroupView* fSidebar = nullptr;
     BStringView* fSidebarTitle = nullptr;
     BWebKitView* fSidebarView = nullptr;

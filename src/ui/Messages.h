@@ -229,6 +229,12 @@ constexpr uint32 kExtensionMenuItem = 'exmi';
 constexpr uint32 kShowDeveloperTools = 'dvtl';
 constexpr uint32 kDeveloperToolsClosed = 'dvtc';
 constexpr uint32 kDeveloperToolsPage = 'dvtp';
+// Docking: the tools ask their browser window to dock them under the page or
+// to let them go (kDockDeveloperTools: "tab", "docked"); the window says
+// where the dock is on screen and whether its tab is shown (kDeveloperToolsDock:
+// "docked", "frame", "shown", "owner" a BWindow* for AddToSubset).
+constexpr uint32 kDockDeveloperTools = 'dvdk';
+constexpr uint32 kDeveloperToolsDock = 'dvdp';
 // View › View Page Source: the current page's HTML as the server sent it.
 constexpr uint32 kViewPageSource = 'vpsr';
 // Drives a Developer Tools window as its controls do and reports what it

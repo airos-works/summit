@@ -2,6 +2,7 @@
 #include "DevToolsWindow.h"
 #include "Messages.h"
 #include <WebKit/WebKitInspector.h>
+#include <Button.h>
 #include <LayoutBuilder.h>
 #include <MessageRunner.h>
 #include <Screen.h>
@@ -15,9 +16,11 @@
 namespace summit {
 using namespace devtools;
 namespace {
-constexpr uint32 kPulse = 'dvpu', kTogglePicker = 'dvpk', kFocusSearch = 'dvfs';
-// Where the last Developer Tools window was, for the next one.
+constexpr uint32 kPulse = 'dvpu', kTogglePicker = 'dvpk', kFocusSearch = 'dvfs', kToggleDock = 'dvtd';
+// Where the last Developer Tools window was, for the next one, and whether it
+// was docked.
 BRect sLastFrame;
+bool sDocked = false;
 
 BRect FrameBeside(BRect browser)
 {
@@ -81,13 +84,20 @@ DevToolsWindow::DevToolsWindow(BMessenger owner, int64 tab, const std::string& p
     add(fStorage, "Storage");
     add(fSources, "Sources");
     add(fPerformance, "Performance");
+    fDockButton = new BButton("dock", "Dock", new BMessage(kToggleDock));
+    fDockButton->SetToolTip("Show the tools under the page in the browser window, or in a window of their own");
     BLayoutBuilder::Group<>(this, B_VERTICAL, 0)
-        .SetInsets(0, 4, 0, 0)
+        .AddGroup(B_HORIZONTAL, 0).SetInsets(4, 2, 4, 0)
+            .AddGlue()
+            .Add(fDockButton)
+        .End()
         .Add(fTabs);
     SetSizeLimits(560, 10000, 360, 10000);
     // The element picker, as in other browsers; Alt+F finds in the tree.
     AddShortcut('C', B_SHIFT_KEY, new BMessage(kTogglePicker));
     AddShortcut('F', 0, new BMessage(kFocusSearch));
+    // Docks or undocks, as the button does.
+    AddShortcut('D', B_SHIFT_KEY, new BMessage(kToggleDock));
 }
 
 DevToolsWindow::~DevToolsWindow() = default;
@@ -103,9 +113,54 @@ void DevToolsWindow::SetInspector(std::shared_ptr<BWebKitInspectorSession> inspe
     fPulse = std::make_unique<BMessageRunner>(BMessenger(this), &pulse, 500000);
 }
 
+bool DevToolsWindow::DockedByDefault() { return sDocked; }
+
+void DevToolsWindow::Dock(const BMessage& place)
+{
+    BWindow* owner = nullptr;
+    if (place.FindPointer("owner", reinterpret_cast<void**>(&owner)) != B_OK || !owner) return;
+    if (!fDocked || fDockOwner != owner) {
+        if (!fDocked) fUndockedFrame = Frame();
+        if (fDockOwner && fDockOwner != owner) RemoveFromSubset(fDockOwner);
+        fDocked = true;
+        fDockOwner = owner;
+        // Over the browser window's dock, above that window only.
+        SetLook(B_NO_BORDER_WINDOW_LOOK);
+        SetFeel(B_FLOATING_SUBSET_WINDOW_FEEL);
+        AddToSubset(owner);
+        SetSizeLimits(100, 100000, 60, 100000);
+        fDockButton->SetLabel("Undock");
+    }
+    BRect frame;
+    const bool shown = place.GetBool("shown", false) && place.FindRect("frame", &frame) == B_OK && frame.IsValid();
+    if (shown) {
+        MoveTo(frame.LeftTop());
+        ResizeTo(frame.Width(), frame.Height());
+        if (IsHidden()) Show();
+    } else if (!IsHidden()) Hide();
+}
+
+void DevToolsWindow::Undock()
+{
+    if (!fDocked) return;
+    fDocked = false;
+    if (fDockOwner) RemoveFromSubset(fDockOwner);
+    fDockOwner = nullptr;
+    SetLook(B_DOCUMENT_WINDOW_LOOK);
+    SetFeel(B_NORMAL_WINDOW_FEEL);
+    SetSizeLimits(560, 10000, 360, 10000);
+    if (fUndockedFrame.IsValid()) {
+        MoveTo(fUndockedFrame.LeftTop());
+        ResizeTo(fUndockedFrame.Width(), fUndockedFrame.Height());
+    }
+    fDockButton->SetLabel("Dock");
+    if (IsHidden()) Show();
+    Activate();
+}
+
 bool DevToolsWindow::QuitRequested()
 {
-    sLastFrame = Frame();
+    sLastFrame = fDocked && fUndockedFrame.IsValid() ? fUndockedFrame : Frame();
     fPulse.reset();
     // The page's highlight and picker go with the tools, whoever else is
     // connected to it.
@@ -132,6 +187,19 @@ void DevToolsWindow::MessageReceived(BMessage* message)
             Drain();
             // Styles the page changed are read again a moment later.
             if (fSession.DOM().StylesWaiting()) Sync();
+            break;
+        case kToggleDock: {
+            // The browser window places docked tools; it is asked.
+            sDocked = !fDocked;
+            BMessage dock(kDockDeveloperTools);
+            dock.AddInt64("tab", fTab);
+            dock.AddBool("docked", !fDocked);
+            fOwner.SendMessage(&dock);
+            break;
+        }
+        case kDeveloperToolsDock:
+            if (message->GetBool("docked", false)) Dock(*message);
+            else Undock();
             break;
         case kTogglePicker:
             fTabs->Select(kElementsPanel);
@@ -191,6 +259,12 @@ void DevToolsWindow::Command(const BMessage& message, BMessage& reply)
     if (action == "panel") {
         fTabs->Select(PanelIndex(argument.c_str()));
         PanelShown();
+    } else if (action == "dock") {
+        // "on" or "off", as the button does (the browser window answers).
+        if ((argument == "on") != fDocked) {
+            BMessage toggle(kToggleDock);
+            MessageReceived(&toggle);
+        }
     } else if (action != "state" && !fElements->Command(action, argument, error) && !fNetwork->Command(action, argument, error)
         && !fConsole->Command(action, argument, error) && !fStorage->Command(action, argument, error)
         && !fSources->Command(action, argument, error) && !fPerformance->Command(action, argument, error))
@@ -225,7 +299,8 @@ std::string DevToolsWindow::StateJSON()
         {"requests", requests}, {"entries", entries}, {"elements", json::parse(fElements->StateJSON())},
         {"network", json::parse(fNetwork->StateJSON())}, {"console", json::parse(fConsole->StateJSON())},
         {"storage", json::parse(fStorage->StateJSON())}, {"sources", json::parse(fSources->StateJSON())},
-        {"performance", json::parse(fPerformance->StateJSON())}};
+        {"performance", json::parse(fPerformance->StateJSON())}, {"docked", fDocked}, {"hidden", IsHidden()},
+        {"frame", {Frame().left, Frame().top, Frame().right, Frame().bottom}}};
     return state.dump(-1, ' ', false, json::error_handler_t::replace);
 }
 
