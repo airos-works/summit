@@ -1,8 +1,10 @@
 // declarativeNetRequest.getMatchedRules for the MCP evaluate tool. Open
 // http://127.0.0.1:8798/dnr.html (the downloads-control fixture's serve.py):
 // it loads summit-dnr-match-blocked.png (rule 1 blocks it) and
-// summit-dnr-match-allowed.png (rule 2 allows it, above rule 1).
+// summit-dnr-match-allowed.png (rule 2 allows it, above rule 1). Matches are
+// recorded from the first getMatchedRules call on, so it is made at start.
 const dnr = browser.declarativeNetRequest;
+dnr.getMatchedRules().catch(() => { });
 
 globalThis.checks = {
     all: () => dnr.getMatchedRules(),

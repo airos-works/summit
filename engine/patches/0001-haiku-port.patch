@@ -97823,7 +97823,7 @@ index 8947f24ec9866c39f206aab464ec21c5d4213b95..b36f80023077ec3bc5680f7214a823a4
  
  #endif // ENABLE(WK_WEB_EXTENSIONS)
 diff --git a/Source/WebKit/UIProcess/Extensions/WebExtensionContext.h b/Source/WebKit/UIProcess/Extensions/WebExtensionContext.h
-index 5f8454dd5897a49ffba794e50fb04b7257ad2291..213f1a8f1b9859c791f3ef93d0846caf25654ac0 100644
+index 5f8454dd5897a49ffba794e50fb04b7257ad2291..03a9877db18e32bc6a442fa8fe858940a51cfb0d 100644
 --- a/Source/WebKit/UIProcess/Extensions/WebExtensionContext.h
 +++ b/Source/WebKit/UIProcess/Extensions/WebExtensionContext.h
 @@ -40,6 +40,9 @@
@@ -98537,7 +98537,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..213f1a8f1b9859c791f3ef93d0846caf
      mutable WindowIdentifierVector m_windowOrderVector;
      mutable std::optional<WebExtensionWindowIdentifier> m_focusedWindowIdentifier;
  
-@@ -1276,6 +1614,21 @@ private:
+@@ -1276,6 +1614,23 @@ private:
      bool m_populatedCommands { false };
  
      String m_declarativeNetRequestContentRuleListFilePath;
@@ -98555,11 +98555,13 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..213f1a8f1b9859c791f3ef93d0846caf
 +        WallTime timeStamp;
 +    };
 +    Deque<DeclarativeNetRequestMatchHaiku> m_declarativeNetRequestMatchesHaiku;
++    // getMatchedRules was called: the rules report their matches from then on.
++    bool m_declarativeNetRequestReportsMatchesHaiku { false };
 +#endif
      DeclarativeNetRequestMatchedRuleVector m_matchedRules;
      RefPtr<WebExtensionDeclarativeNetRequestSQLiteStore> m_declarativeNetRequestDynamicRulesStore;
      RefPtr<WebExtensionDeclarativeNetRequestSQLiteStore> m_declarativeNetRequestSessionRulesStore;
-@@ -1283,6 +1636,9 @@ private:
+@@ -1283,6 +1638,9 @@ private:
      HashSet<double> m_sessionRulesIDs;
      HashSet<double> m_dynamicRulesIDs;
  
@@ -98569,7 +98571,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..213f1a8f1b9859c791f3ef93d0846caf
      MenuItemMap m_menuItems;
      MenuItemVector m_mainMenuItems;
  
-@@ -1300,12 +1656,16 @@ private:
+@@ -1300,12 +1658,16 @@ private:
          String message;
  #if PLATFORM(COCOA)
          RetainPtr<id> argument;
@@ -98586,7 +98588,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..213f1a8f1b9859c791f3ef93d0846caf
  
      Deque<TestMessage> m_testMessageQueue;
      Deque<TestMessage> m_testStartedQueue;
-@@ -1315,6 +1675,8 @@ private:
+@@ -1315,6 +1677,8 @@ private:
      void sendQueuedTestMessagesIfNeeded(WebExtensionEventListenerType);
  #if PLATFORM(COCOA)
      void addTestMessageToQueue(const String& message, id argument, WebExtensionEventListenerType);
@@ -103322,10 +103324,10 @@ index 0000000000000000000000000000000000000000..6cd58c82f5b76b28c25f4c2f63575e90
 +#endif
 diff --git a/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextAPIDeclarativeNetRequestHaiku.cpp b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextAPIDeclarativeNetRequestHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..fc5599706f40d4a124f9b511dc6f0afc4d110a4a
+index 0000000000000000000000000000000000000000..b65198f18ad933a41fc572597b401c3977d55ee1
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextAPIDeclarativeNetRequestHaiku.cpp
-@@ -0,0 +1,246 @@
+@@ -0,0 +1,253 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +#include "config.h"
 +#include "WebExtensionContext.h"
@@ -103540,6 +103542,13 @@ index 0000000000000000000000000000000000000000..fc5599706f40d4a124f9b511dc6f0afc
 +    if (!feedback && tab && !tab->extensionHasTemporaryPermission()) {
 +        completionHandler(toWebExtensionError(apiName, nullString(), "the 'activeTab' permission has not been granted by the user for the tab"_s));
 +        return;
++    }
++
++    // The first call starts the recording: the rules are compiled again to
++    // report their matches.
++    if (!m_declarativeNetRequestReportsMatchesHaiku) {
++        m_declarativeNetRequestReportsMatchesHaiku = true;
++        loadDeclarativeNetRequestRules([](bool) { });
 +    }
 +
 +    auto oldest = WallTime::now() - declarativeNetRequestMatchLifetime;
@@ -109131,10 +109140,10 @@ index 0000000000000000000000000000000000000000..7fe0a057f869a7ea735d3118f5242dce
 +#endif // ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
 diff --git a/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextDeclarativeNetRequestHaiku.cpp b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextDeclarativeNetRequestHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..47b68175b39579794296b3f0c92ae23e96479320
+index 0000000000000000000000000000000000000000..907964666e7c1f046148e787d284017174a35e4d
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextDeclarativeNetRequestHaiku.cpp
-@@ -0,0 +1,219 @@
+@@ -0,0 +1,222 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +#include "config.h"
 +#include "WebExtensionContext.h"
@@ -109279,8 +109288,11 @@ index 0000000000000000000000000000000000000000..47b68175b39579794296b3f0c92ae23e
 +            length += json.length();
 +            sources->append({ ruleset.rulesetID, WTF::move(json) });
 +        }
-+        // getMatchedRules answers extensions with either permission (Chrome's).
-+        bool reportMatchedRules = hasPermission(WebExtensionPermission::declarativeNetRequestFeedback()) || hasPermission(WebExtensionPermission::activeTab());
++        // Rules that report their matches cannot share WebCore's merged
++        // actions, so they are tagged only once the extension has asked for
++        // its matched rules (and may: either permission, as in Chrome).
++        bool reportMatchedRules = m_declarativeNetRequestReportsMatchesHaiku
++            && (hasPermission(WebExtensionPermission::declarativeNetRequestFeedback()) || hasPermission(WebExtensionPermission::activeTab()));
 +        translateRules(WTF::move(*sources), reportMatchedRules, [this, protectedThis = Ref { *this }, current, fail, completion = WTF::move(completion)](Translation&& translation) mutable {
 +            if (!current()) { completion(false); return; }
 +            if (!translation) { fail(translation.error()); completion(false); return; }
