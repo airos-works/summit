@@ -221,6 +221,8 @@ private:
         // is docked under the page.
         BMessenger devTools { };
         bool devToolsDocked = false;
+        // 0 under the page, 1 beside it.
+        int32 devToolsDockSide = 0;
         // The last load failed because the server's certificate failed
         // verification: what the warning shows and what Continue trusts.
         struct CertificateProblem {
@@ -488,6 +490,7 @@ private:
     // Docked Developer Tools: the slot under the pages they are placed over.
     BSplitView* fPageSplit = nullptr;
     BView* fDock = nullptr;
+    BView* fSideDock = nullptr;
     void PlaceDockedDeveloperTools();
     BGroupView* fSidebar = nullptr;
     BStringView* fSidebarTitle = nullptr;

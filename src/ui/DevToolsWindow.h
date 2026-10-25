@@ -35,12 +35,15 @@ public:
     bool QuitRequested() override;
     // Whether new tools open docked: as the last ones were left.
     static bool DockedByDefault();
+    // 0 under the page, 1 beside it.
+    static int32 DockSideByDefault();
 
 private:
     // Docked under the browser's page (kDeveloperToolsDock), or a window of
     // its own again.
     void Dock(const BMessage& place);
     void Undock();
+    void UpdateDockButtons(int32 side);
     void Sync() override;
     void DispatchMessage(BMessage* message, BHandler* handler) override;
     // Tells the panels which one is shown, when that changed.
@@ -63,6 +66,8 @@ private:
     PerformancePanel* fPerformance;
     int32 fShownPanel = -1;
     BButton* fDockButton;
+    BButton* fDockRightButton;
+    BButton* fUndockButton;
     bool fDocked = false;
     BWindow* fDockOwner = nullptr;
     BRect fUndockedFrame;

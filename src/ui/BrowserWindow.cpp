@@ -592,10 +592,11 @@ namespace {
 constexpr uint32 kDockSlotChanged = 'dkch';
 class DockSlot final : public BView {
 public:
-    DockSlot() : BView("devtools-dock", B_FRAME_EVENTS)
+    // Under the pages (a height) or beside them (a width).
+    explicit DockSlot(bool beside = false) : BView(beside ? "devtools-dock-side" : "devtools-dock", B_FRAME_EVENTS)
     {
         SetViewUIColor(B_PANEL_BACKGROUND_COLOR);
-        SetExplicitMinSize(BSize(B_SIZE_UNSET, 120));
+        SetExplicitMinSize(beside ? BSize(240, B_SIZE_UNSET) : BSize(B_SIZE_UNSET, 120));
     }
     void FrameMoved(BPoint) override { Changed(); }
     void FrameResized(float, float) override { Changed(); }
@@ -1003,6 +1004,7 @@ BrowserWindow::BrowserWindow(std::shared_ptr<SharedProfile> profile, std::string
                 .Add(fPages, 0.65f)
                 .Add(fDock = new DockSlot(), 0.35f)
             .End()
+            .Add(fSideDock = new DockSlot(true), 0.3f)
         .End()
 #else
         .Add(fPages, 1)
@@ -1012,6 +1014,7 @@ BrowserWindow::BrowserWindow(std::shared_ptr<SharedProfile> profile, std::string
 #if SUMMIT_MODERN_WEBKIT
     fNoticeBar->Hide();
     fDock->Hide();
+    fSideDock->Hide();
 #endif
 #if SUMMIT_MODERN_WEBKIT
     fFullScreenNotice = new BStringView("fullscreen-notice", "");
@@ -5154,6 +5157,7 @@ void BrowserWindow::MessageReceived(BMessage* message)
             for (auto& open : fTabs) {
                 if (open.id != id || !open.devTools.IsValid()) continue;
                 open.devToolsDocked = docked;
+                open.devToolsDockSide = message->GetInt32("side", 0) == 1 ? 1 : 0;
                 // A window let go is told so; a docked one where it goes.
                 if (!docked) {
                     BMessage place(kDeveloperToolsDock);
@@ -5653,8 +5657,9 @@ void BrowserWindow::ShowDeveloperTools(const char* panel, const BMessage* reques
     tab->devTools = BMessenger(window);
     if (!show.IsEmpty()) window->PostMessage(&show);
     window->Show();
-    // Docked if the tools were last docked.
+    // Docked if the tools were last docked, where they were.
     tab->devToolsDocked = DevToolsWindow::DockedByDefault();
+    tab->devToolsDockSide = DevToolsWindow::DockSideByDefault();
     PlaceDockedDeveloperTools();
 }
 
@@ -5673,27 +5678,40 @@ void BrowserWindow::ShowPageSource()
 // hidden until their tab is selected.
 void BrowserWindow::PlaceDockedDeveloperTools()
 {
-    if (!fDock || !fPageSplit) return;
+    if (!fDock || !fSideDock || !fPageSplit || !fContentSplit) return;
     const auto* active = ActiveTab();
     const bool show = active && active->devTools.IsValid() && active->devToolsDocked && !fClosingWindow && !IsHidden() && !IsMinimized();
-    if (show && fDock->IsHidden(fDock)) {
+    const int32 side = show ? active->devToolsDockSide : -1;
+    // The slot of the side the tools are on is shown, the other hidden.
+    bool changed = false;
+    if (side == 0 && fDock->IsHidden(fDock)) {
         fDock->Show();
         // Room for the tools: about two fifths of the page's height.
         fPageSplit->SetItemWeight(0, 0.6f, false);
         fPageSplit->SetItemWeight(1, 0.4f, true);
-        Layout(true);
-    } else if (!show && !fDock->IsHidden(fDock)) {
+        changed = true;
+    } else if (side != 0 && !fDock->IsHidden(fDock)) {
         fDock->Hide();
-        Layout(true);
+        changed = true;
     }
+    if (side == 1 && fSideDock->IsHidden(fSideDock)) {
+        fSideDock->Show();
+        changed = true;
+    } else if (side != 1 && !fSideDock->IsHidden(fSideDock)) {
+        fSideDock->Hide();
+        changed = true;
+    }
+    if (changed) Layout(true);
+    BView* slot = side == 1 ? fSideDock : fDock;
     for (auto& tab : fTabs) {
         if (!tab.devTools.IsValid() || !tab.devToolsDocked) continue;
         BMessage place(kDeveloperToolsDock);
         const bool here = show && &tab == active;
         place.AddBool("docked", true);
         place.AddBool("shown", here);
+        place.AddInt32("side", tab.devToolsDockSide);
         place.AddPointer("owner", this);
-        if (here) place.AddRect("frame", fDock->ConvertToScreen(fDock->Bounds()));
+        if (here) place.AddRect("frame", slot->ConvertToScreen(slot->Bounds()));
         tab.devTools.SendMessage(&place);
     }
 }

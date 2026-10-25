@@ -16,11 +16,20 @@
 namespace summit {
 using namespace devtools;
 namespace {
-constexpr uint32 kPulse = 'dvpu', kTogglePicker = 'dvpk', kFocusSearch = 'dvfs', kToggleDock = 'dvtd';
+constexpr uint32 kPulse = 'dvpu', kTogglePicker = 'dvpk', kFocusSearch = 'dvfs', kToggleDock = 'dvtd', kDockTo = 'dvdt';
 // Where the last Developer Tools window was, for the next one, and whether it
 // was docked.
 BRect sLastFrame;
 bool sDocked = false;
+// Where docked tools go: 0 under the page, 1 beside it.
+int32 sDockSide = 0;
+
+BMessage* DockMessage(int32 side)
+{
+    auto* message = new BMessage(kDockTo);
+    message->AddInt32("side", side);
+    return message;
+}
 
 BRect FrameBeside(BRect browser)
 {
@@ -84,12 +93,19 @@ DevToolsWindow::DevToolsWindow(BMessenger owner, int64 tab, const std::string& p
     add(fStorage, "Storage");
     add(fSources, "Sources");
     add(fPerformance, "Performance");
-    fDockButton = new BButton("dock", "Dock", new BMessage(kToggleDock));
-    fDockButton->SetToolTip("Show the tools under the page in the browser window, or in a window of their own");
+    fDockButton = new BButton("dock", "Dock Below", DockMessage(0));
+    fDockButton->SetToolTip("Show the tools under the page in the browser window");
+    fDockRightButton = new BButton("dock-right", "Dock Right", DockMessage(1));
+    fDockRightButton->SetToolTip("Show the tools beside the page in the browser window");
+    fUndockButton = new BButton("undock", "Undock", DockMessage(-1));
+    fUndockButton->SetToolTip("Show the tools in a window of their own");
+    fUndockButton->SetEnabled(false);
     BLayoutBuilder::Group<>(this, B_VERTICAL, 0)
-        .AddGroup(B_HORIZONTAL, 0).SetInsets(4, 2, 4, 0)
+        .AddGroup(B_HORIZONTAL, 4).SetInsets(4, 2, 4, 0)
             .AddGlue()
             .Add(fDockButton)
+            .Add(fDockRightButton)
+            .Add(fUndockButton)
         .End()
         .Add(fTabs);
     SetSizeLimits(560, 10000, 360, 10000);
@@ -114,6 +130,15 @@ void DevToolsWindow::SetInspector(std::shared_ptr<BWebKitInspectorSession> inspe
 }
 
 bool DevToolsWindow::DockedByDefault() { return sDocked; }
+int32 DevToolsWindow::DockSideByDefault() { return sDockSide; }
+
+// The buttons of the places the tools are not in.
+void DevToolsWindow::UpdateDockButtons(int32 side)
+{
+    fDockButton->SetEnabled(side != 0);
+    fDockRightButton->SetEnabled(side != 1);
+    fUndockButton->SetEnabled(side >= 0);
+}
 
 void DevToolsWindow::Dock(const BMessage& place)
 {
@@ -132,8 +157,8 @@ void DevToolsWindow::Dock(const BMessage& place)
         // the window taller than the dock (and cover the window's bottom).
         SetFlags(Flags() & ~B_AUTO_UPDATE_SIZE_LIMITS);
         SetSizeLimits(100, 100000, 60, 100000);
-        fDockButton->SetLabel("Undock");
     }
+    UpdateDockButtons(place.GetInt32("side", 0));
     BRect frame;
     const bool shown = place.GetBool("shown", false) && place.FindRect("frame", &frame) == B_OK && frame.IsValid();
     if (shown) {
@@ -157,7 +182,7 @@ void DevToolsWindow::Undock()
         MoveTo(fUndockedFrame.LeftTop());
         ResizeTo(fUndockedFrame.Width(), fUndockedFrame.Height());
     }
-    fDockButton->SetLabel("Dock");
+    UpdateDockButtons(-1);
     if (IsHidden()) Show();
     Activate();
 }
@@ -192,12 +217,18 @@ void DevToolsWindow::MessageReceived(BMessage* message)
             // Styles the page changed are read again a moment later.
             if (fSession.DOM().StylesWaiting()) Sync();
             break;
-        case kToggleDock: {
-            // The browser window places docked tools; it is asked.
-            sDocked = !fDocked;
+        case kToggleDock:
+        case kDockTo: {
+            // -1 undocks, 0 docks under the page, 1 beside it; the shortcut
+            // undocks, or docks where the tools last were. The browser window
+            // places docked tools; it is asked.
+            const int32 side = message->what == kToggleDock ? (fDocked ? -1 : sDockSide) : message->GetInt32("side", -1);
+            sDocked = side >= 0;
+            if (side >= 0) sDockSide = side;
             BMessage dock(kDockDeveloperTools);
             dock.AddInt64("tab", fTab);
-            dock.AddBool("docked", !fDocked);
+            dock.AddBool("docked", side >= 0);
+            dock.AddInt32("side", std::max<int32>(side, 0));
             fOwner.SendMessage(&dock);
             break;
         }
@@ -264,11 +295,10 @@ void DevToolsWindow::Command(const BMessage& message, BMessage& reply)
         fTabs->Select(PanelIndex(argument.c_str()));
         PanelShown();
     } else if (action == "dock") {
-        // "on" or "off", as the button does (the browser window answers).
-        if ((argument == "on") != fDocked) {
-            BMessage toggle(kToggleDock);
-            MessageReceived(&toggle);
-        }
+        // "on" (under the page), "right" or "off", as the buttons do (the
+        // browser window answers).
+        std::unique_ptr<BMessage> dock(DockMessage(argument == "off" ? -1 : argument == "right" ? 1 : 0));
+        MessageReceived(dock.get());
     } else if (action != "state" && !fElements->Command(action, argument, error) && !fNetwork->Command(action, argument, error)
         && !fConsole->Command(action, argument, error) && !fStorage->Command(action, argument, error)
         && !fSources->Command(action, argument, error) && !fPerformance->Command(action, argument, error))
@@ -303,7 +333,7 @@ std::string DevToolsWindow::StateJSON()
         {"requests", requests}, {"entries", entries}, {"elements", json::parse(fElements->StateJSON())},
         {"network", json::parse(fNetwork->StateJSON())}, {"console", json::parse(fConsole->StateJSON())},
         {"storage", json::parse(fStorage->StateJSON())}, {"sources", json::parse(fSources->StateJSON())},
-        {"performance", json::parse(fPerformance->StateJSON())}, {"docked", fDocked}, {"hidden", IsHidden()},
+        {"performance", json::parse(fPerformance->StateJSON())}, {"docked", fDocked}, {"dockSide", sDockSide}, {"hidden", IsHidden()},
         {"frame", {Frame().left, Frame().top, Frame().right, Frame().bottom}}};
     return state.dump(-1, ' ', false, json::error_handler_t::replace);
 }
