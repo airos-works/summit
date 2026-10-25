@@ -395,7 +395,11 @@ struct ProtocolReader {
             request->transferred = Count(Member(metrics, "responseBodyBytesReceived")) + Count(Member(metrics, "responseHeaderBytesReceived"));
         if (const auto decoded = Count(Member(metrics, "responseBodyDecodedSize"))) request->size = decoded;
         session.Changed(*request);
-        if ((request->type == "XHR" || request->type == "Fetch" || request->type == "Document")
+        // Read now, while the page's process has it: a navigation that
+        // changes process leaves no one to ask. Kept across navigations
+        // (Preserve log), scripts and style sheets are read too.
+        const bool kept = session.fPreserveRequests && (request->type == "Script" || request->type == "Stylesheet");
+        if ((request->type == "XHR" || request->type == "Fetch" || request->type == "Document" || kept)
             && request->size && request->size <= Session::kEagerBody && !request->redirected)
             session.RequestBody(request->serial);
     }
