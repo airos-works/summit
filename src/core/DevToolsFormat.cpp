@@ -2,6 +2,7 @@
 #include <nlohmann/json.hpp>
 #include <algorithm>
 #include <cstdio>
+#include <functional>
 #include <initializer_list>
 #include <vector>
 
@@ -751,6 +752,349 @@ std::string ValidUTF8(std::string_view text)
         result.append(text.substr(i, length));
         i += length;
     }
+    return result;
+}
+
+namespace {
+enum class ScriptToken { Word, String, Template, Regex, LineComment, BlockComment, Punctuator };
+struct ScriptPiece {
+    ScriptToken kind;
+    std::string_view text;
+    SourcePosition at;
+    // A line break came before it in the source (for comments).
+    bool afterBreak = false;
+};
+
+bool IsWordChar(char c)
+{
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '$'
+        || static_cast<unsigned char>(c) >= 0x80 || c == '\\';
+}
+
+bool Is(std::string_view text, std::initializer_list<std::string_view> names)
+{
+    for (const auto name : names)
+        if (text == name) return true;
+    return false;
+}
+
+// After these a / starts a regular expression, not a division.
+bool RegexMayFollow(const ScriptPiece* previous)
+{
+    if (!previous) return true;
+    if (previous->kind == ScriptToken::Word)
+        return Is(previous->text, {"return", "typeof", "instanceof", "in", "of", "new", "delete", "void", "throw", "case", "do", "else",
+            "yield", "await"});
+    if (previous->kind == ScriptToken::Punctuator) return !Is(previous->text, {")", "]"});
+    return false;
+}
+
+std::vector<ScriptPiece> TokenizeScript(std::string_view source)
+{
+    std::vector<ScriptPiece> pieces;
+    size_t i = 0;
+    int line = 0;
+    size_t lineStart = 0;
+    bool sawBreak = false;
+    int last = -1;
+    const auto advanceTo = [&](size_t end) {
+        for (size_t k = i; k < end && k < source.size(); ++k)
+            if (source[k] == '\n') {
+                ++line;
+                lineStart = k + 1;
+            }
+        i = std::min(end, source.size());
+    };
+    // A string or template from i (the opening quote); returns its end.
+    std::function<size_t(size_t)> skipTemplate;
+    const auto skipString = [&](size_t from) {
+        const char quote = source[from];
+        size_t k = from + 1;
+        while (k < source.size() && source[k] != quote && source[k] != '\n') k += source[k] == '\\' ? 2 : 1;
+        return std::min(k + 1, source.size());
+    };
+    skipTemplate = [&](size_t from) {
+        size_t k = from + 1;
+        while (k < source.size() && source[k] != '`') {
+            if (source[k] == '\\') { k += 2; continue; }
+            if (source[k] == '$' && k + 1 < source.size() && source[k + 1] == '{') {
+                // An expression: braces, strings and templates inside it.
+                int depth = 1;
+                k += 2;
+                while (k < source.size() && depth) {
+                    const char c = source[k];
+                    if (c == '\'' || c == '"') k = skipString(k);
+                    else if (c == '`') k = skipTemplate(k);
+                    else {
+                        if (c == '{') ++depth;
+                        else if (c == '}') --depth;
+                        ++k;
+                    }
+                }
+                continue;
+            }
+            ++k;
+        }
+        return std::min(k + 1, source.size());
+    };
+    while (i < source.size()) {
+        const char c = source[i];
+        if (c == '\n' || c == ' ' || c == '\t' || c == '\r' || c == '\f' || c == '\v') {
+            if (c == '\n') sawBreak = true;
+            advanceTo(i + 1);
+            continue;
+        }
+        const SourcePosition at { line, static_cast<int>(i - lineStart) };
+        size_t end = i + 1;
+        ScriptToken kind = ScriptToken::Punctuator;
+        if (c == '/' && i + 1 < source.size() && source[i + 1] == '/') {
+            kind = ScriptToken::LineComment;
+            end = source.find('\n', i);
+            if (end == std::string_view::npos) end = source.size();
+        } else if (c == '/' && i + 1 < source.size() && source[i + 1] == '*') {
+            kind = ScriptToken::BlockComment;
+            end = source.find("*/", i + 2);
+            end = end == std::string_view::npos ? source.size() : end + 2;
+        } else if (c == '\'' || c == '"') {
+            kind = ScriptToken::String;
+            end = skipString(i);
+        } else if (c == '`') {
+            kind = ScriptToken::Template;
+            end = skipTemplate(i);
+        } else if (c == '/' && RegexMayFollow(last < 0 ? nullptr : &pieces[last])) {
+            kind = ScriptToken::Regex;
+            size_t k = i + 1;
+            bool inClass = false;
+            while (k < source.size() && source[k] != '\n' && (inClass || source[k] != '/')) {
+                if (source[k] == '\\') ++k;
+                else if (source[k] == '[') inClass = true;
+                else if (source[k] == ']') inClass = false;
+                ++k;
+            }
+            ++k;
+            while (k < source.size() && IsWordChar(source[k])) ++k;
+            end = std::min(k, source.size());
+        } else if (IsWordChar(c) || (c == '.' && i + 1 < source.size() && source[i + 1] >= '0' && source[i + 1] <= '9')) {
+            kind = ScriptToken::Word;
+            size_t k = i;
+            const bool number = (c >= '0' && c <= '9') || c == '.';
+            while (k < source.size() && (IsWordChar(source[k]) || (number && (source[k] == '.'
+                || ((source[k] == '+' || source[k] == '-') && (Lower(source[k - 1]) == 'e') && !(k >= 2 && Lower(source[k - 2]) == 'x'))))))
+                k += source[k] == '\\' ? 2 : 1;
+            end = std::min(k, source.size());
+        } else {
+            static const std::string_view operators[] = {">>>=", "...", "===", "!==", "**=", "<<=", ">>=", ">>>", "&&=", "||=", "?\x3f=",
+                "=>", "==", "!=", "<=", ">=", "&&", "||", "?\x3f", "?.", "++", "--", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "<<",
+                ">>", "**"};
+            for (const auto op : operators)
+                if (source.substr(i, op.size()) == op) {
+                    end = i + op.size();
+                    break;
+                }
+        }
+        pieces.push_back({kind, source.substr(i, end - i), at, sawBreak});
+        sawBreak = false;
+        if (kind != ScriptToken::LineComment && kind != ScriptToken::BlockComment) last = static_cast<int>(pieces.size()) - 1;
+        advanceTo(end);
+    }
+    return pieces;
+}
+}
+
+int PrettyScript::LineOf(SourcePosition position) const
+{
+    if (starts.empty()) return 0;
+    // The last line starting at or before the place.
+    auto found = std::upper_bound(starts.begin(), starts.end(), position);
+    if (found == starts.begin()) return 0;
+    return static_cast<int>(found - starts.begin()) - 1;
+}
+
+PrettyScript FormatJavaScript(std::string_view source)
+{
+    PrettyScript result;
+    const auto pieces = TokenizeScript(source);
+    std::string line;
+    int indent = 0;
+    bool lineHasToken = false;
+    const auto newline = [&]() {
+        if (!lineHasToken) return;
+        while (!line.empty() && line.back() == ' ') line.pop_back();
+        result.text += line;
+        result.text += '\n';
+        line.clear();
+        lineHasToken = false;
+    };
+    const auto put = [&](const ScriptPiece& piece) {
+        if (!lineHasToken) {
+            line.assign(static_cast<size_t>(std::max(indent, 0)) * 4, ' ');
+            result.starts.push_back(piece.at);
+            lineHasToken = true;
+        }
+        line += piece.text;
+        // A template or comment over several lines: each of its lines
+        // starts where that line of it is in the source.
+        for (size_t k = piece.text.find('\n'), lines = 1; k != std::string_view::npos; k = piece.text.find('\n', k + 1), ++lines)
+            result.starts.push_back({piece.at.line + static_cast<int>(lines), 0});
+    };
+    const auto space = [&]() {
+        if (lineHasToken && !line.empty() && line.back() != ' ') line += ' ';
+    };
+    static const std::initializer_list<std::string_view> binary = {"=", "==", "===", "!=", "!==", "+=", "-=", "*=", "/=", "%=", "&=",
+        "|=", "^=", "<<=", ">>=", ">>>=", "**=", "&&=", "||=", "?\x3f=", "&&", "||", "?\x3f", "?", "=>", "<", ">", "<=", ">=", "+", "-",
+        "*", "/", "%", "|", "&", "^", "<<", ">>", ">>>", "**"};
+    // The parentheses of a for statement's head, where ; does not end a line.
+    std::vector<bool> parens;
+    // Braces: whether each holds a switch's cases, and whether a case of it
+    // is open (its statements are a level deeper).
+    struct Brace { bool switchBody = false, caseOpen = false; };
+    std::vector<Brace> braces;
+    bool forPending = false, casePending = false;
+    // The previous token was an operator used between two operands (a
+    // unary + or - is not, and stays with what follows).
+    bool lastBinary = false;
+    // Open conditionals (?) at each bracket level.
+    std::vector<int> ternaries(1, 0);
+    const ScriptPiece* previous = nullptr;
+    for (size_t index = 0; index < pieces.size(); ++index) {
+        const auto& piece = pieces[index];
+        const ScriptPiece* next = nullptr;
+        for (size_t k = index + 1; k < pieces.size(); ++k)
+            if (pieces[k].kind != ScriptToken::LineComment && pieces[k].kind != ScriptToken::BlockComment) {
+                next = &pieces[k];
+                break;
+            }
+        const auto text = piece.text;
+        // What came before can be a left operand: a value, a name or a
+        // closing bracket, not a keyword such as return.
+        const bool operand = previous && ((previous->kind == ScriptToken::Word && !Is(previous->text, {"return", "typeof", "instanceof",
+            "in", "of", "new", "delete", "void", "throw", "case", "do", "else", "yield", "await"}))
+            || (previous->kind != ScriptToken::Word && previous->kind != ScriptToken::Punctuator) || Is(previous->text, {")", "]", "}"}));
+        switch (piece.kind) {
+        case ScriptToken::LineComment:
+            if (piece.afterBreak) newline();
+            else space();
+            put(piece);
+            newline();
+            continue;
+        case ScriptToken::BlockComment:
+            if (piece.afterBreak) newline();
+            else space();
+            put(piece);
+            if (piece.afterBreak) newline();
+            continue;
+        case ScriptToken::Word:
+        case ScriptToken::String:
+        case ScriptToken::Template:
+        case ScriptToken::Regex:
+            // A space after a word, a closing bracket, a comma or a binary
+            // operator after an operand; none after an opening bracket, a
+            // dot or a unary operator.
+            if (previous && (previous->kind != ScriptToken::Punctuator || Is(previous->text, {")", "]", "}", ","}) || (Is(previous->text, binary) && lastBinary))
+                && !(previous->kind == ScriptToken::Punctuator && Is(previous->text, {"(", "[", ".", "?.", "!", "~", "++", "--", "..."})))
+                space();
+            if (piece.kind == ScriptToken::Word && (text == "case" || text == "default") && !braces.empty() && braces.back().switchBody
+                && !(next && next->text == "(")) {
+                if (braces.back().caseOpen) --indent;
+                braces.back().caseOpen = false;
+                newline();
+                casePending = true;
+            }
+            put(piece);
+            if (piece.kind == ScriptToken::Word && text == "for") forPending = true;
+            break;
+        case ScriptToken::Punctuator:
+            if (text == "{") {
+                const bool switchBody = previous && previous->text == ")" && [&] {
+                    // switch (…) {: find the matching ( and the word before it.
+                    int depth = 0;
+                    for (size_t k = index; k-- > 0;) {
+                        if (pieces[k].text == ")") ++depth;
+                        else if (pieces[k].text == "(" && !--depth) return k > 0 && pieces[k - 1].text == "switch";
+                    }
+                    return false;
+                }();
+                if (lineHasToken && previous && !Is(previous->text, {"(", "[", "{"})) space();
+                put(piece);
+                ternaries.push_back(0);
+                braces.push_back({switchBody, false});
+                if (next && next->text == "}") break;
+                ++indent;
+                newline();
+            } else if (text == "}") {
+                const bool empty = previous && previous->text == "{";
+                if (!empty) {
+                    if (!braces.empty() && braces.back().caseOpen) --indent;
+                    --indent;
+                    newline();
+                }
+                put(piece);
+                if (!braces.empty()) braces.pop_back();
+                if (ternaries.size() > 1) ternaries.pop_back();
+                if (next && (Is(next->text, {")", ",", ";", ".", "?.", "(", "]", ":"}) || Is(next->text, {"else", "catch", "finally", "while"})
+                    || (next->kind == ScriptToken::Punctuator && Is(next->text, binary)))) {
+                    if (next->kind == ScriptToken::Word) space();
+                } else newline();
+            } else if (text == ";") {
+                put(piece);
+                if (!parens.empty() && parens.back()) space();
+                else newline();
+            } else if (text == ",") {
+                put(piece);
+                space();
+            } else if (text == "(") {
+                if (previous && previous->kind == ScriptToken::Word
+                    && Is(previous->text, {"if", "for", "while", "switch", "catch", "with", "return", "typeof", "await", "yield", "of", "in"}))
+                    space();
+                else if (previous && previous->kind == ScriptToken::Punctuator && (Is(previous->text, binary) || previous->text == ","))
+                    space();
+                put(piece);
+                ternaries.push_back(0);
+                parens.push_back(forPending);
+                forPending = false;
+            } else if (text == ")") {
+                put(piece);
+                if (!parens.empty()) parens.pop_back();
+                if (ternaries.size() > 1) ternaries.pop_back();
+            } else if (text == "[") {
+                if (previous && previous->kind == ScriptToken::Punctuator && (Is(previous->text, binary) || previous->text == ",")) space();
+                put(piece);
+            } else if (text == ":") {
+                // A conditional's : is spaced as its ? is.
+                if (!ternaries.empty() && ternaries.back() > 0) {
+                    --ternaries.back();
+                    space();
+                }
+                put(piece);
+                if (casePending && !braces.empty()) {
+                    // The case's statements, a level deeper, end at the next
+                    // case or the switch's brace.
+                    casePending = false;
+                    braces.back().caseOpen = true;
+                    ++indent;
+                    newline();
+                } else space();
+            } else if (Is(text, binary) && operand) {
+                if (text == "?") ++ternaries.back();
+                space();
+                put(piece);
+                space();
+                lastBinary = true;
+                previous = &piece;
+                continue;
+            } else {
+                // Unary operators, ., ?., ...: no space after; a space before
+                // a prefix one that follows a word (return -x) or an operator.
+                const bool prefix = Is(text, {"!", "~", "+", "-", "..."}) || (Is(text, {"++", "--"}) && !operand);
+                if (prefix && previous && (previous->kind == ScriptToken::Word || previous->text == "," || Is(previous->text, binary))) space();
+                put(piece);
+            }
+            break;
+        }
+        lastBinary = false;
+        previous = &piece;
+    }
+    newline();
     return result;
 }
 }

@@ -2,6 +2,7 @@
 #include <cstdint>
 #include <string>
 #include <string_view>
+#include <vector>
 
 // Formatting for the developer tools: what a response body is, and how it is
 // laid out for reading. Nothing here needs Haiku; tests/DevToolsTests.cpp
@@ -50,6 +51,23 @@ std::string FormatXML(std::string_view text);
 // that are re-indented but not otherwise touched, and pre and textarea
 // contents that are not touched at all.
 std::string FormatHTML(std::string_view text);
+
+// A script laid out for reading (the Sources tab's pretty printing): a
+// statement or block per line, four spaces per level, tokens untouched. Each
+// line remembers where its first token was in the source, so breakpoints and
+// the paused line can move between the two.
+struct SourcePosition {
+    int line = 0, column = 0;
+    bool operator<(const SourcePosition& other) const { return line != other.line ? line < other.line : column < other.column; }
+};
+struct PrettyScript {
+    std::string text;
+    // Of each line of text, its first token's place in the source.
+    std::vector<SourcePosition> starts;
+    // The line of text showing a place in the source.
+    int LineOf(SourcePosition position) const;
+};
+PrettyScript FormatJavaScript(std::string_view source);
 
 // "512 B", "1.4 KB", "2.31 MB".
 std::string FormatBytes(uint64_t bytes);

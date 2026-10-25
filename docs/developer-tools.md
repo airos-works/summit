@@ -227,6 +227,16 @@ document is `(inline) page.html:12`); *Extension scripts* also lists what
 extensions and the browser add to pages and `eval()` code. Choosing one
 shows its source, coloured, with line numbers.
 
+**Pretty print** lays a script out a statement or block per line, four
+spaces a level, without changing a token (`FormatJavaScript` in
+`src/core/DevToolsFormat.cpp`); it is on by itself for a minified script (a
+line over 500 characters) until it is chosen by hand. Each shown line knows
+where its first token is in the source, so a breakpoint set on a shown line
+is set at that line and column of the page's script (`setBreakpointByUrl`
+with `columnNumber`), and the paused line and breakpoints are marked on the
+lines that show them. Checked on plotly, d3, axe and KaTeX's minified
+builds: the output parses (`node --check`) and has the same tokens.
+
 **Breakpoints**: a click in the margin beside a line sets one (a red dot)
 or clears it. Breakpoints belong to the script's address and line, so they
 hold across reloads and in every process of the page.
@@ -248,7 +258,7 @@ Console's objects are. **Resume**, **Step Over**, **Step Into** and **Step
 Out** move on.
 
 Test actions: `sources-open PART`, `sources-break LINE` (from 1, toggles, in
-the selected script), `sources-pause`, `sources-resume`, `sources-step
+the selected script as shown), `sources-pretty on|off`, `sources-pause`, `sources-resume`, `sources-step
 over|into|out`, `sources-frame N`, `sources-expand TEXT`,
 `sources-content-scripts on|off`; the state's `sources` has the scripts,
 breakpoints, frames and scope rows.
@@ -628,8 +638,7 @@ is started again.
 - Network requests from before the tools were opened (as in other
   browsers). Console messages are kept: developer extras are on for every
   page (`SUMMIT_DEVELOPER_EXTRAS=0` turns that off).
-- Timelines (`ENABLE(RESOURCE_USAGE)` is off). In Sources: pretty printing
-  and source maps. In Storage: partitioned cookies, and Cache Storage of
+- Timelines (`ENABLE(RESOURCE_USAGE)` is off). In Sources: source maps. In Storage: partitioned cookies, and Cache Storage of
   frames from other sites. Network throttling is Cocoa-only in WebKit.
 - Elements › Accessibility shows the selected element's role, name and
   states, asked for only while that tab is shown; accessibility, which this
