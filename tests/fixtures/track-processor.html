@@ -1,0 +1,57 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>MediaStreamTrack processing</title>
+<!-- WebKit's worker-side mediacapture-transform (#112, #126): the camera's
+     track goes to a worker, MediaStreamTrackProcessor reads VideoFrames,
+     and a VideoTrackGenerator sends them back to a <video>. #result (JSON):
+     frames read, their size and format, and the returned video's size. No
+     picture is kept; the video element is hidden. -->
+<video id="back" autoplay muted playsinline style="display: none"></video>
+<pre id="result"></pre>
+<script>
+const workerSource = `
+onmessage = async ({ data: { track } }) => {
+    try {
+        const processor = new MediaStreamTrackProcessor({ track });
+        const generator = new VideoTrackGenerator();
+        postMessage({ generated: generator.track }, [generator.track]);
+        const reader = processor.readable.getReader();
+        const writer = generator.writable.getWriter();
+        let frames = 0, first;
+        const started = performance.now();
+        while (frames < 90) {
+            const { value: frame, done } = await reader.read();
+            if (done) break;
+            if (!first) first = { codedWidth: frame.codedWidth, codedHeight: frame.codedHeight, format: frame.format, timestamp: frame.timestamp };
+            ++frames;
+            await writer.write(frame);
+        }
+        postMessage({ frames, first, fps: Math.round(frames * 1000 / (performance.now() - started)) });
+    } catch (error) {
+        postMessage({ error: String(error) });
+    }
+};`;
+(async () => {
+    const result = { windowProcessor: typeof MediaStreamTrackProcessor, windowGenerator: typeof VideoTrackGenerator };
+    const show = () => document.getElementById('result').textContent = JSON.stringify(result);
+    try {
+        const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 } });
+        const track = stream.getVideoTracks()[0];
+        const worker = new Worker(URL.createObjectURL(new Blob([workerSource])));
+        const video = document.getElementById('back');
+        worker.onmessage = ({ data }) => {
+            if (data.generated) {
+                video.srcObject = new MediaStream([data.generated]);
+                return;
+            }
+            Object.assign(result, data, { returnedVideo: [video.videoWidth, video.videoHeight] });
+            track.stop();
+            show();
+        };
+        worker.postMessage({ track }, [track]);
+    } catch (error) {
+        result.error = String(error);
+        show();
+    }
+})();
+</script>

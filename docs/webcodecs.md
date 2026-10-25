@@ -109,3 +109,11 @@ Python server) it stopped at "Loading…" because `SharedArrayBuffer` was
 missing although the page was `crossOriginIsolated`. The engine turned on
 JSC's `useSharedArrayBuffer` for cross-origin isolated web processes only
 on GTK and WPE; Haiku now does too (`WebProcess.cpp`).
+
+*Encode and Decode in a Worker* needs Chrome's `MediaStreamTrackProcessor`
+and `MediaStreamTrackGenerator` in the window, which WebKit (Safari too)
+does not have; WebKit's mediacapture-transform is worker-only
+(`MediaStreamTrackProcessor` and `VideoTrackGenerator` in dedicated workers).
+That was off outside Cocoa (`MediaStreamTrackProcessingEnabled`); it is on
+for Haiku now, for video-effect pipelines that read camera frames in a
+worker (backgrounds, #126). Test page: `tests/fixtures/track-processor.html`.
