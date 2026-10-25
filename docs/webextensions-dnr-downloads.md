@@ -65,10 +65,24 @@ Limits:
   rule (`modifyHeaders` with request and response headers, plus
   `requestDomains`) therefore rejects. 1Password catches the rejection, logs
   "proceeding without it" and continues.
-- `getMatchedRules` and `setExtensionActionOptions` reject the promise with
-  "not supported on this platform". The native path does not report which
-  rules matched.
-- `testMatchOutcome` and `onRuleMatchedDebug` are absent.
+- `getMatchedRules({tabId, minTimeStamp})` answers Chrome's
+  `{rulesMatchedInfo: [{rule: {ruleId, rulesetId}, tabId, timeStamp}]}` for
+  the last five minutes (at most 10000 matches an extension), static,
+  dynamic (`_dynamic`) and session (`_session`) rules alike, allow rules
+  included. With `declarativeNetRequestFeedback` it answers for every tab;
+  with only `activeTab`, for the tabs the user granted it. The translated
+  rules carry their ids (`_identifier`, `_rulesetIdentifier`) when the
+  extension has either permission, so WebCore reports each match
+  (`ContentRuleListMatchedRule`, through `WebPageProxy` to the extension);
+  WebCore's parser puts the report of an allow rule (a stop action) before
+  it. Loads that are not a tab's (a background page's fetches) are not
+  recorded. A permission granted later takes effect with the next rule update
+  or start. Fixture: `tests/fixtures/extensions/dnr-matched/` (open
+  `http://127.0.0.1:8798/dnr.html` from the downloads-control `serve.py`).
+- `setExtensionActionOptions` rejects the promise with "not supported on this
+  platform".
+- `testMatchOutcome` and `onRuleMatchedDebug` are absent (Chrome offers them
+  to unpacked extensions only).
 - `MAX_NUMBER_OF_REGEX_RULES` is reported but not enforced. Dynamic and session
   rules share one limit of 30000.
 

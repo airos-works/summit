@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 # serve.py [PORT]: /slow.bin, 8 MiB of a repeating pattern sent at about
 # 1 MiB a second, with Accept-Ranges, an ETag and Range answers (206), for
-# the downloads-control fixture's pause and resume.
+# the downloads-control fixture's pause and resume. /dnr.html loads the
+# images the dnr-matched fixture's rules match (each answers 404).
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import time
@@ -14,6 +15,16 @@ class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
     def do_GET(self):
+        if self.path == "/dnr.html":
+            body = (b"<!doctype html><title>DNR matched rules</title>"
+                    b"<img src=/summit-dnr-match-blocked.png><img src=/summit-dnr-match-allowed.png>"
+                    b"<img src=/summit-dnr-session.png>")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if self.path != "/slow.bin":
             self.send_error(404)
             return

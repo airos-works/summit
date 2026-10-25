@@ -11476,7 +11476,7 @@ index 576a1d54820fd497996d0bd512d1fd8403e768bd..5dd26d3fdc2ff2f69778f6338ad8c8db
                  break;
              case ActionCondition::IfTopURL:
 diff --git a/Source/WebCore/contentextensions/ContentExtensionParser.cpp b/Source/WebCore/contentextensions/ContentExtensionParser.cpp
-index 0b614af13497a4930c9ee4b8d550d9aaf8b3c041..301b6707f84836ec212abe1859ab33c10f42c415 100644
+index 0b614af13497a4930c9ee4b8d550d9aaf8b3c041..878a021abfa512351c4c8ede46d598396c28c865 100644
 --- a/Source/WebCore/contentextensions/ContentExtensionParser.cpp
 +++ b/Source/WebCore/contentextensions/ContentExtensionParser.cpp
 @@ -130,6 +130,15 @@ static std::expected<Trigger, std::error_code> loadTrigger(const JSON::Object& r
@@ -11512,6 +11512,34 @@ index 0b614af13497a4930c9ee4b8d550d9aaf8b3c041..301b6707f84836ec212abe1859ab33c1
      trigger.checkValidity();
      return trigger;
  }
+@@ -344,14 +363,22 @@ static std::expected<Vector<ContentExtensionRule>, std::error_code> loadEncodedR
+             continue;
+         if (!rule->has_value())
+             return makeUnexpected(rule->error());
+-        ruleList.append(WTF::move(rule->value()));
+ 
+         auto ruleIdentifier = loadRuleIdentifier(*ruleObject);
+-        if (!ruleIdentifier)
+-            continue;
+-        if (!ruleIdentifier->has_value())
++        if (ruleIdentifier && !ruleIdentifier->has_value())
+             return makeUnexpected(ruleIdentifier->error());
+-        ruleList.append(WTF::move(ruleIdentifier->value()));
++#if PLATFORM(HAIKU)
++        // A rule that stops the ones after it (a declarativeNetRequest allow
++        // rule) is reported before it, or it would stop its own report too.
++        if (ruleIdentifier && std::holds_alternative<IgnoreFollowingRulesAction>(rule->value().action().data())) {
++            ruleList.append(WTF::move(ruleIdentifier->value()));
++            ruleList.append(WTF::move(rule->value()));
++            continue;
++        }
++#endif
++        ruleList.append(WTF::move(rule->value()));
++        if (ruleIdentifier)
++            ruleList.append(WTF::move(ruleIdentifier->value()));
+     }
+ 
+     return ruleList;
 diff --git a/Source/WebCore/contentextensions/ContentExtensionRule.cpp b/Source/WebCore/contentextensions/ContentExtensionRule.cpp
 index 8e27cad3e1ce325dd129b27bfac78bc1e565a171..edfbe0dda9f6f8fe151356ab52468382355db4c8 100644
 --- a/Source/WebCore/contentextensions/ContentExtensionRule.cpp
@@ -97752,7 +97780,7 @@ index 8947f24ec9866c39f206aab464ec21c5d4213b95..b36f80023077ec3bc5680f7214a823a4
  
  #endif // ENABLE(WK_WEB_EXTENSIONS)
 diff --git a/Source/WebKit/UIProcess/Extensions/WebExtensionContext.h b/Source/WebKit/UIProcess/Extensions/WebExtensionContext.h
-index 5f8454dd5897a49ffba794e50fb04b7257ad2291..3da408ff67862a693ec6c5034bdf643120c2dd69 100644
+index 5f8454dd5897a49ffba794e50fb04b7257ad2291..213f1a8f1b9859c791f3ef93d0846caf25654ac0 100644
 --- a/Source/WebKit/UIProcess/Extensions/WebExtensionContext.h
 +++ b/Source/WebKit/UIProcess/Extensions/WebExtensionContext.h
 @@ -40,6 +40,9 @@
@@ -98067,7 +98095,18 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..3da408ff67862a693ec6c5034bdf6431
  #if PLATFORM(COCOA)
      void sendNativeMessage(const String& applicationID, id message, CompletionHandler<void(std::expected<RetainPtr<id>, WebExtensionError>&&)>&&);
  #endif
-@@ -709,7 +866,11 @@ public:
+@@ -674,6 +831,10 @@ public:
+     void addDeclarativeNetRequestRules(WebUserContentControllerProxy&);
+ 
+     bool handleContentRuleListNotificationForTab(WebExtensionTab&, const URL&, WebCore::ContentRuleListResults::Result);
++#if PLATFORM(HAIKU)
++    // A rule of this extension's declarativeNetRequest matched a load (getMatchedRules).
++    void declarativeNetRequestRuleMatchedHaiku(WebExtensionTab&, double ruleIdentifier, const String& rulesetIdentifier, const URL&);
++#endif
+     void incrementActionCountForTab(WebExtensionTab&, ssize_t incrementAmount);
+ 
+ #if ENABLE(DNR_ON_RULE_MATCHED_DEBUG)
+@@ -709,7 +870,11 @@ public:
  
      WebsiteDataStore* websiteDataStore(std::optional<PAL::SessionID> = std::nullopt) const;
  
@@ -98079,7 +98118,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..3da408ff67862a693ec6c5034bdf6431
  
      void loadBackgroundContent(CompletionHandler<void(RefPtr<API::Error>)>&&);
  
-@@ -758,11 +919,18 @@ private:
+@@ -758,11 +923,18 @@ private:
  #if PLATFORM(COCOA)
      NSDictionary *currentState() const;
      NSDictionary *readStateFromStorage();
@@ -98099,7 +98138,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..3da408ff67862a693ec6c5034bdf6431
  
      void loadStorageAccessLevelsFromStorage();
      void saveStorageAccessLevelsToStorage();
-@@ -771,6 +939,10 @@ private:
+@@ -771,6 +943,10 @@ private:
      void moveLocalStorageIfNeeded(const URL& previousBaseURL, CompletionHandler<void()>&&);
      void removeStaleExtensionWebsiteData();
  
@@ -98110,7 +98149,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..3da408ff67862a693ec6c5034bdf6431
      void permissionsDidChange(PermissionNotification, const PermissionsSet&);
      void permissionsDidChange(PermissionNotification, const MatchPatternSet&);
  
-@@ -806,6 +978,7 @@ private:
+@@ -806,6 +982,7 @@ private:
      void saveBackgroundPageListenersToStorage();
  
      void performTasksAfterBackgroundContentLoads();
@@ -98118,7 +98157,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..3da408ff67862a693ec6c5034bdf6431
  
  #ifdef NDEBUG
      // This is method is a no-op in release builds since it has a performance impact with little benefit to release builds.
-@@ -854,6 +1027,9 @@ private:
+@@ -854,6 +1031,9 @@ private:
      void loadDeclarativeNetRequestRules(CompletionHandler<void(bool)>&&);
      void compileDeclarativeNetRequestRules(NSDictionary *, CompletionHandler<void(bool)>&&);
      void unloadDeclarativeNetRequestState();
@@ -98128,7 +98167,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..3da408ff67862a693ec6c5034bdf6431
      String declarativeNetRequestContentRuleListFilePath();
  
      // Updating user content controllers with new rules.
-@@ -892,6 +1068,12 @@ private:
+@@ -892,6 +1072,12 @@ private:
      Ref<WebExtensionStorageSQLiteStore> syncStorageStore();
  
      void fetchCookies(WebsiteDataStore&, const URL&, const WebExtensionCookieFilterParameters&, CompletionHandler<void(std::expected<Vector<WebExtensionCookieParameters>, WebExtensionError>&&)>&&);
@@ -98141,7 +98180,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..3da408ff67862a693ec6c5034bdf6431
  
      // Action APIs
      bool isActionMessageAllowed(IPC::Decoder&);
-@@ -903,6 +1085,10 @@ private:
+@@ -903,6 +1089,10 @@ private:
      void actionOpenPopup(WebPageProxyIdentifier, std::optional<WebExtensionWindowIdentifier>, std::optional<WebExtensionTabIdentifier>, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
      void actionGetBadgeText(std::optional<WebExtensionWindowIdentifier>, std::optional<WebExtensionTabIdentifier>, CompletionHandler<void(std::expected<String, WebExtensionError>&&)>&&);
      void actionSetBadgeText(std::optional<WebExtensionWindowIdentifier>, std::optional<WebExtensionTabIdentifier>, const String& text, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
@@ -98152,7 +98191,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..3da408ff67862a693ec6c5034bdf6431
      void actionGetEnabled(std::optional<WebExtensionWindowIdentifier>, std::optional<WebExtensionTabIdentifier>, CompletionHandler<void(std::expected<bool, WebExtensionError>&&)>&&);
      void actionSetEnabled(std::optional<WebExtensionTabIdentifier>, bool enabled, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
      void fireActionClickedEventIfNeeded(WebExtensionTab*);
-@@ -934,6 +1120,11 @@ private:
+@@ -934,6 +1124,11 @@ private:
      // Commands APIs
      bool isCommandsMessageAllowed(IPC::Decoder&);
      void commandsGetAll(CompletionHandler<void(Vector<WebExtensionCommandParameters>)>&&);
@@ -98164,7 +98203,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..3da408ff67862a693ec6c5034bdf6431
      void fireCommandEventIfNeeded(const WebExtensionCommand&, WebExtensionTab*);
      void fireCommandChangedEventIfNeeded(const WebExtensionCommand&, const String& oldShortcut);
  
-@@ -944,7 +1135,9 @@ private:
+@@ -944,7 +1139,9 @@ private:
      void cookiesSet(std::optional<PAL::SessionID>, const WebExtensionCookieParameters&, CompletionHandler<void(std::expected<std::optional<WebExtensionCookieParameters>, WebExtensionError>&&)>&&);
      void cookiesRemove(std::optional<PAL::SessionID>, const String& name, const URL&, CompletionHandler<void(std::expected<std::optional<WebExtensionCookieParameters>, WebExtensionError>&&)>&&);
      void cookiesGetAllCookieStores(CompletionHandler<void(std::expected<HashMap<PAL::SessionID, Vector<WebExtensionTabIdentifier>>, WebExtensionError>&&)>&&);
@@ -98174,7 +98213,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..3da408ff67862a693ec6c5034bdf6431
  
      // DeclarativeNetRequest APIs
      bool isDeclarativeNetRequestMessageAllowed(IPC::Decoder&);
-@@ -960,6 +1153,29 @@ private:
+@@ -960,6 +1157,31 @@ private:
      void declarativeNetRequestUpdateDynamicRules(String&& rulesToAddJSON, Vector<double>&& ruleIDsToDelete, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
      void declarativeNetRequestGetSessionRules(Vector<double>&& filter, CompletionHandler<void(std::expected<String, WebExtensionError>&&)>&&);
      void declarativeNetRequestUpdateSessionRules(String&& rulesToAddJSON, Vector<double>&& ruleIDsToDelete, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
@@ -98184,6 +98223,8 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..3da408ff67862a693ec6c5034bdf6431
 +    // declarativeNetRequestWithHostAccess gets them when it may access every URL,
 +    // where host-limited enforcement would change nothing.
 +    bool nativeDeclarativeNetRequestAllowed();
++    // getMatchedRules({tabId, minTimeStamp}): Chrome's {rulesMatchedInfo} as JSON.
++    void declarativeNetRequestGetMatchedRulesHaiku(String&& filterJSON, CompletionHandler<void(std::expected<String, WebExtensionError>&&)>&&);
 +    std::expected<void, WebExtensionError> validateNativeDeclarativeNetRequestUpdate(const String& apiName, const JSON::Array& rulesToAdd, const Vector<double>& ruleIDsToDelete, bool session);
 +    void saveDeclarativeNetRequestRulesetStateToStorage(const HashMap<String, bool>&);
 +
@@ -98204,7 +98245,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..3da408ff67862a693ec6c5034bdf6431
  
  #if ENABLE(INSPECTOR_EXTENSIONS)
      // DevTools APIs
-@@ -975,12 +1191,22 @@ private:
+@@ -975,12 +1197,22 @@ private:
  
      // Extension APIs
      void extensionIsAllowedIncognitoAccess(CompletionHandler<void(bool)>&&);
@@ -98227,7 +98268,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..3da408ff67862a693ec6c5034bdf6431
      void menusCreate(const WebExtensionMenuItemParameters&, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
      void menusUpdate(const String& identifier, const WebExtensionMenuItemParameters&, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
      void menusRemove(const String& identifier, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
-@@ -1009,9 +1235,18 @@ private:
+@@ -1009,9 +1241,18 @@ private:
  
      // Permissions APIs
      void permissionsGetAll(CompletionHandler<void(Vector<String>&& permissions, Vector<String>&& origins)>&&);
@@ -98246,7 +98287,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..3da408ff67862a693ec6c5034bdf6431
      void firePermissionsEventListenerIfNecessary(WebExtensionEventListenerType, const PermissionsSet&, const MatchPatternSet&);
  
      // Port APIs
-@@ -1021,7 +1256,7 @@ private:
+@@ -1021,7 +1262,7 @@ private:
      void disconnectPortsForPage(WebPageProxy&);
      void addPorts(WebExtensionContentWorldType sourceContentWorldType, WebExtensionContentWorldType targetContentWorldType, WebExtensionPortChannelIdentifier, HashCountedSet<WebPageProxyIdentifier>&&);
      void removePort(WebExtensionContentWorldType sourceContentWorldType, WebExtensionContentWorldType targetContentWorldType, WebExtensionPortChannelIdentifier, WebPageProxyIdentifier);
@@ -98255,7 +98296,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..3da408ff67862a693ec6c5034bdf6431
      void removeNativePort(WebExtensionMessagePort&);
      unsigned openPortCount(WebExtensionContentWorldType, WebExtensionPortChannelIdentifier);
      bool isPortConnected(WebExtensionContentWorldType sourceContentWorldType, WebExtensionContentWorldType targetContentWorldType, WebExtensionPortChannelIdentifier);
-@@ -1030,13 +1265,27 @@ private:
+@@ -1030,13 +1271,27 @@ private:
      void firePortMessageEventsIfNeeded(WebExtensionContentWorldType, std::optional<WebPageProxyIdentifier>, WebExtensionPortChannelIdentifier, const String& messageJSON, bool userGesture);
      void fireQueuedPortMessageEventsIfNeeded(WebExtensionContentWorldType, WebExtensionPortChannelIdentifier);
      void sendQueuedNativePortMessagesIfNeeded(WebExtensionPortChannelIdentifier);
@@ -98284,7 +98325,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..3da408ff67862a693ec6c5034bdf6431
      void runtimeConnect(const String& extensionID, WebExtensionPortChannelIdentifier, const String& name, const WebExtensionMessageSenderParameters&, bool userGesture, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
      void runtimeSendNativeMessage(const String& applicationID, const String& messageJSON, CompletionHandler<void(std::expected<String, WebExtensionError>&&)>&&);
      void runtimeConnectNative(const String& applicationID, WebExtensionPortChannelIdentifier, WebPageProxyIdentifier, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
-@@ -1055,6 +1304,15 @@ private:
+@@ -1055,6 +1310,15 @@ private:
      void scriptingGetRegisteredScripts(const Vector<String>&, CompletionHandler<void(std::expected<Vector<WebExtensionRegisteredScriptParameters>, WebExtensionError>&&)>&&);
      void scriptingUnregisterContentScripts(const Vector<String>&, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
      bool createInjectedContentForScripts(const Vector<WebExtensionRegisteredScriptParameters>&, WebExtensionDynamicScripts::WebExtensionRegisteredScript::FirstTimeRegistration, DynamicInjectedContentsMap&, NSString *callingAPIName, NSString **errorMessage);
@@ -98300,7 +98341,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..3da408ff67862a693ec6c5034bdf6431
  
      // Sidebar APIs
  #if ENABLE(WK_WEB_EXTENSIONS_SIDEBAR)
-@@ -1088,6 +1346,9 @@ private:
+@@ -1088,6 +1352,9 @@ private:
      void tabsCreate(std::optional<WebPageProxyIdentifier>, const WebExtensionTabParameters&, CompletionHandler<void(std::expected<std::optional<WebExtensionTabParameters>, WebExtensionError>&&)>&&);
      void tabsUpdate(WebPageProxyIdentifier, std::optional<WebExtensionTabIdentifier>, const WebExtensionTabParameters&, CompletionHandler<void(std::expected<std::optional<WebExtensionTabParameters>, WebExtensionError>&&)>&&);
      void tabsDuplicate(WebExtensionTabIdentifier, const WebExtensionTabParameters&, CompletionHandler<void(std::expected<std::optional<WebExtensionTabParameters>, WebExtensionError>&&)>&&);
@@ -98310,7 +98351,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..3da408ff67862a693ec6c5034bdf6431
      void tabsGet(WebExtensionTabIdentifier, CompletionHandler<void(std::expected<std::optional<WebExtensionTabParameters>, WebExtensionError>&&)>&&);
      void tabsGetCurrent(WebPageProxyIdentifier, CompletionHandler<void(std::expected<std::optional<WebExtensionTabParameters>, WebExtensionError>&&)>&&);
      void tabsQuery(WebPageProxyIdentifier, const WebExtensionTabQueryParameters&, CompletionHandler<void(std::expected<Vector<WebExtensionTabParameters>, WebExtensionError>&&)>&&);
-@@ -1103,6 +1364,9 @@ private:
+@@ -1103,6 +1370,9 @@ private:
      void tabsSetZoom(WebPageProxyIdentifier, std::optional<WebExtensionTabIdentifier>, double, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
      void tabsMove(Vector<WebExtensionTabIdentifier>, std::optional<WebExtensionWindowIdentifier>, double, CompletionHandler<void(std::expected<Vector<WebExtensionTabParameters>, WebExtensionError>&&)>&&);
      void tabsRemove(Vector<WebExtensionTabIdentifier>, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
@@ -98320,7 +98361,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..3da408ff67862a693ec6c5034bdf6431
      void tabsExecuteScript(WebPageProxyIdentifier, std::optional<WebExtensionTabIdentifier>, const WebExtensionScriptInjectionParameters&, bool userGesture, CompletionHandler<void(std::expected<Vector<WebExtensionScriptInjectionResultParameters>, WebExtensionError>&&)>&&);
      void tabsInsertCSS(WebPageProxyIdentifier, std::optional<WebExtensionTabIdentifier>, const WebExtensionScriptInjectionParameters&, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
      void tabsRemoveCSS(WebPageProxyIdentifier, std::optional<WebExtensionTabIdentifier>, const WebExtensionScriptInjectionParameters&, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
-@@ -1133,8 +1397,20 @@ private:
+@@ -1133,8 +1403,20 @@ private:
      void fireWindowsEventIfNeeded(WebExtensionEventListenerType, std::optional<WebExtensionWindowParameters>);
  
      // webRequest support.
@@ -98343,7 +98384,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..3da408ff67862a693ec6c5034bdf6431
  
      // IPC::MessageReceiver.
      void didReceiveMessage(IPC::Connection&, IPC::Decoder&) override;
-@@ -1145,12 +1421,31 @@ private:
+@@ -1145,12 +1427,31 @@ private:
  
      mutable Markable<WebExtensionContextIdentifier> m_privilegedIdentifier;
  
@@ -98375,7 +98416,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..3da408ff67862a693ec6c5034bdf6431
  #endif
      Vector<Ref<API::Error>> m_errors;
  
-@@ -1169,6 +1464,15 @@ private:
+@@ -1169,6 +1470,15 @@ private:
  
      RefPtr<API::ContentWorld> m_contentScriptWorld;
  
@@ -98391,7 +98432,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..3da408ff67862a693ec6c5034bdf6431
      PermissionsMap m_grantedPermissions;
      PermissionsMap m_deniedPermissions;
  
-@@ -1194,6 +1498,14 @@ private:
+@@ -1194,6 +1504,14 @@ private:
      EventListenerTypeCountedSet m_backgroundContentEventListeners;
      EventListenerTypeFrameMap m_eventListenerFrames;
  
@@ -98406,7 +98447,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..3da408ff67862a693ec6c5034bdf6431
      bool m_shouldFireStartupEvent { false };
      InstallReason m_installReason { InstallReason::None };
      String m_previousVersion;
-@@ -1216,6 +1528,16 @@ private:
+@@ -1216,6 +1534,16 @@ private:
  #elif ENABLE(2022_GLIB_API)
      GRefPtr<WebKitWebView> m_backgroundWebView;
      GWeakPtr<WebKitWebExtensionContext> m_delegate;
@@ -98423,7 +98464,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..3da408ff67862a693ec6c5034bdf6431
  #endif
      Variant<std::monostate, Ref<ProcessThrottlerActivity>, Ref<ProcessActivityGroup>> m_backgroundWebViewActivity;
      RefPtr<API::Error> m_backgroundContentLoadError;
-@@ -1237,6 +1559,7 @@ private:
+@@ -1237,6 +1565,7 @@ private:
      HashMap<Ref<WebExtensionMatchPattern>, UserScriptVector> m_injectedScriptsPerPatternMap;
      HashMap<Ref<WebExtensionMatchPattern>, UserStyleSheetVector> m_injectedStyleSheetsPerPatternMap;
  
@@ -98431,7 +98472,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..3da408ff67862a693ec6c5034bdf6431
      HashMap<String, Ref<WebExtensionDynamicScripts::WebExtensionRegisteredScript>> m_registeredScriptsMap;
      RefPtr<WebExtensionRegisteredScriptsSQLiteStore> m_registeredContentScriptsStorage;
  
-@@ -1256,11 +1579,20 @@ private:
+@@ -1256,11 +1585,20 @@ private:
  #endif // ENABLE(WK_WEB_EXTENSIONS_SIDEBAR)
  
      PortCountedSet m_ports;
@@ -98453,7 +98494,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..3da408ff67862a693ec6c5034bdf6431
      mutable WindowIdentifierVector m_windowOrderVector;
      mutable std::optional<WebExtensionWindowIdentifier> m_focusedWindowIdentifier;
  
-@@ -1276,6 +1608,12 @@ private:
+@@ -1276,6 +1614,21 @@ private:
      bool m_populatedCommands { false };
  
      String m_declarativeNetRequestContentRuleListFilePath;
@@ -98462,11 +98503,20 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..3da408ff67862a693ec6c5034bdf6431
 +    RefPtr<API::ContentRuleList> m_nativeDNRRules;
 +    String m_nativeDNRRuleFile;
 +    size_t m_nativeDNRStaticRuleCount { 0 };
++    // The rules that matched in the last five minutes (getMatchedRules).
++    struct DeclarativeNetRequestMatchHaiku {
++        double ruleIdentifier;
++        String rulesetIdentifier;
++        WebExtensionTabIdentifier tabIdentifier;
++        URL url;
++        WallTime timeStamp;
++    };
++    Deque<DeclarativeNetRequestMatchHaiku> m_declarativeNetRequestMatchesHaiku;
 +#endif
      DeclarativeNetRequestMatchedRuleVector m_matchedRules;
      RefPtr<WebExtensionDeclarativeNetRequestSQLiteStore> m_declarativeNetRequestDynamicRulesStore;
      RefPtr<WebExtensionDeclarativeNetRequestSQLiteStore> m_declarativeNetRequestSessionRulesStore;
-@@ -1283,6 +1621,9 @@ private:
+@@ -1283,6 +1636,9 @@ private:
      HashSet<double> m_sessionRulesIDs;
      HashSet<double> m_dynamicRulesIDs;
  
@@ -98476,7 +98526,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..3da408ff67862a693ec6c5034bdf6431
      MenuItemMap m_menuItems;
      MenuItemVector m_mainMenuItems;
  
-@@ -1300,12 +1641,16 @@ private:
+@@ -1300,12 +1656,16 @@ private:
          String message;
  #if PLATFORM(COCOA)
          RetainPtr<id> argument;
@@ -98493,7 +98543,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..3da408ff67862a693ec6c5034bdf6431
  
      Deque<TestMessage> m_testMessageQueue;
      Deque<TestMessage> m_testStartedQueue;
-@@ -1315,6 +1660,8 @@ private:
+@@ -1315,6 +1675,8 @@ private:
      void sendQueuedTestMessagesIfNeeded(WebExtensionEventListenerType);
  #if PLATFORM(COCOA)
      void addTestMessageToQueue(const String& message, id argument, WebExtensionEventListenerType);
@@ -98503,7 +98553,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..3da408ff67862a693ec6c5034bdf6431
  };
  
 diff --git a/Source/WebKit/UIProcess/Extensions/WebExtensionContext.messages.in b/Source/WebKit/UIProcess/Extensions/WebExtensionContext.messages.in
-index 6581f34180846663e2a8be51064e43c2d8173b64..458f09c6fb4c8f2ca790cfaf9524d4456a60082e 100644
+index 6581f34180846663e2a8be51064e43c2d8173b64..0827c9f3fa076baf0b08d3a7c6658b5c055731a1 100644
 --- a/Source/WebKit/UIProcess/Extensions/WebExtensionContext.messages.in
 +++ b/Source/WebKit/UIProcess/Extensions/WebExtensionContext.messages.in
 @@ -31,10 +31,144 @@
@@ -98652,7 +98702,7 @@ index 6581f34180846663e2a8be51064e43c2d8173b64..458f09c6fb4c8f2ca790cfaf9524d445
      // Action APIs
      [Validator=isActionMessageAllowed] ActionGetTitle(std::optional<WebKit::WebExtensionWindowIdentifier> windowIdentifier, std::optional<WebKit::WebExtensionTabIdentifier> tabIdentifier) -> (std::expected<String, WebKit::WebExtensionError> result)
      [Validator=isActionMessageAllowed] ActionSetTitle(std::optional<WebKit::WebExtensionWindowIdentifier> windowIdentifier, std::optional<WebKit::WebExtensionTabIdentifier> tabIdentifier, String title) -> (std::expected<void, WebKit::WebExtensionError> result)
-@@ -48,6 +182,34 @@ messages -> WebExtensionContext {
+@@ -48,6 +182,35 @@ messages -> WebExtensionContext {
      [Validator=isActionMessageAllowed] ActionSetEnabled(std::optional<WebKit::WebExtensionTabIdentifier> tabIdentifier, bool enabled) -> (std::expected<void, WebKit::WebExtensionError> result)
  #endif
  
@@ -98673,6 +98723,7 @@ index 6581f34180846663e2a8be51064e43c2d8173b64..458f09c6fb4c8f2ca790cfaf9524d445
 +    [Validator=isDeclarativeNetRequestMessageAllowed] DeclarativeNetRequestGetSessionRules(Vector<double> ruleIDs) -> (std::expected<String, WebKit::WebExtensionError> result)
 +    [Validator=isDeclarativeNetRequestMessageAllowed] DeclarativeNetRequestUpdateSessionRules(String rulesToAddJSON, Vector<double> ruleIdsToRemove) -> (std::expected<void, WebKit::WebExtensionError> result)
 +    [Validator=isDeclarativeNetRequestMessageAllowed] DeclarativeNetRequestGetAvailableStaticRuleCount() -> (double count)
++    [Validator=isDeclarativeNetRequestMessageAllowed] DeclarativeNetRequestGetMatchedRulesHaiku(String filterJSON) -> (std::expected<String, WebKit::WebExtensionError> result)
 +
 +    // Downloads APIs
 +    [Validator=isDownloadsMessageAllowed] DownloadsDownload(WebKit::WebPageProxyIdentifier webPageProxyIdentifier, String optionsJSON) -> (std::expected<double, WebKit::WebExtensionError> result)
@@ -98687,7 +98738,7 @@ index 6581f34180846663e2a8be51064e43c2d8173b64..458f09c6fb4c8f2ca790cfaf9524d445
      // Alarms APIs
      [Validator=isAlarmsMessageAllowed] AlarmsCreate(String name, Seconds initialInterval, Seconds repeatInterval) -> ()
      [Validator=isAlarmsMessageAllowed] AlarmsGet(String name) -> (struct std::optional<WebKit::WebExtensionAlarmParameters> alarmInfo)
-@@ -71,9 +233,6 @@ messages -> WebExtensionContext {
+@@ -71,9 +234,6 @@ messages -> WebExtensionContext {
      [Validator=isBookmarksMessageAllowed] BookmarksRemoveTree(String bookmarkId) -> (std::expected<void, WebKit::WebExtensionError> result)
  #endif // ENABLE(WK_WEB_EXTENSIONS_BOOKMARKS)
  
@@ -98697,7 +98748,7 @@ index 6581f34180846663e2a8be51064e43c2d8173b64..458f09c6fb4c8f2ca790cfaf9524d445
      // Cookies APIs
      [Validator=isCookiesMessageAllowed] CookiesGet(std::optional<PAL::SessionID> sessionID, String name, URL url) -> (std::expected<std::optional<WebKit::WebExtensionCookieParameters>, WebKit::WebExtensionError> result)
      [Validator=isCookiesMessageAllowed] CookiesGetAll(std::optional<PAL::SessionID> sessionID, URL url, struct WebKit::WebExtensionCookieFilterParameters filterParameters) -> (std::expected<Vector<WebKit::WebExtensionCookieParameters>, WebKit::WebExtensionError> result)
-@@ -100,8 +259,6 @@ messages -> WebExtensionContext {
+@@ -100,8 +260,6 @@ messages -> WebExtensionContext {
  #endif
  
      // Event APIs
@@ -98706,7 +98757,7 @@ index 6581f34180846663e2a8be51064e43c2d8173b64..458f09c6fb4c8f2ca790cfaf9524d445
  
      // Extensions APIs
      [Validator=isLoaded] ExtensionIsAllowedIncognitoAccess() -> (bool result)
-@@ -134,20 +291,10 @@ messages -> WebExtensionContext {
+@@ -134,20 +292,10 @@ messages -> WebExtensionContext {
      [Validator=isLoaded] PermissionsRequest(HashSet<String> permissions, HashSet<String> origins) -> (bool success)
      [Validator=isLoaded] PermissionsRemove(HashSet<String> permissions, HashSet<String> origins) -> (bool success)
  
@@ -98727,7 +98778,7 @@ index 6581f34180846663e2a8be51064e43c2d8173b64..458f09c6fb4c8f2ca790cfaf9524d445
  
      // Scripting APIs
      [Validator=isScriptingMessageAllowed] ScriptingExecuteScript(WebKit::WebExtensionScriptInjectionParameters parameters, bool userGesture) -> (std::expected<Vector<WebKit::WebExtensionScriptInjectionResultParameters>, WebKit::WebExtensionError> result)
-@@ -174,15 +321,6 @@ messages -> WebExtensionContext {
+@@ -174,15 +322,6 @@ messages -> WebExtensionContext {
      [Validator=isSidebarMessageAllowed] SidebarGetActionClickBehavior() -> (std::expected<WebKit::WebExtensionActionClickBehavior, WebKit::WebExtensionError> result)
  #endif // ENABLE(WK_WEB_EXTENSIONS_SIDEBAR)
  
@@ -98743,7 +98794,7 @@ index 6581f34180846663e2a8be51064e43c2d8173b64..458f09c6fb4c8f2ca790cfaf9524d445
      // Tabs APIs
      [Validator=isLoadedAndPrivilegedMessage] TabsCreate(std::optional<WebKit::WebPageProxyIdentifier> webPageProxyIdentifier, WebKit::WebExtensionTabParameters creationParameters) -> (std::expected<std::optional<WebKit::WebExtensionTabParameters>, WebKit::WebExtensionError> result)
      [Validator=isLoadedAndPrivilegedMessage] TabsUpdate(WebKit::WebPageProxyIdentifier webPageProxyIdentifier, std::optional<WebKit::WebExtensionTabIdentifier> tabIdentifier, WebKit::WebExtensionTabParameters updateParameters) -> (std::expected<std::optional<WebKit::WebExtensionTabParameters>, WebKit::WebExtensionError> result)
-@@ -207,8 +345,6 @@ messages -> WebExtensionContext {
+@@ -207,8 +346,6 @@ messages -> WebExtensionContext {
      [Validator=isLoadedAndPrivilegedMessage] TabsRemoveCSS(WebKit::WebPageProxyIdentifier webPageProxyIdentifier, std::optional<WebKit::WebExtensionTabIdentifier> tabIdentifier, WebKit::WebExtensionScriptInjectionParameters parameters) -> (std::expected<void, WebKit::WebExtensionError> result)
  
      // WebNavigation APIs
@@ -99349,7 +99400,7 @@ index 2072e4a99372133e90eda56b3ba1bcc496705af0..7b45379d6ecffb74bdae6949796f3811
  {
      HashSet<String> origins;
 diff --git a/Source/WebKit/UIProcess/Extensions/WebExtensionController.h b/Source/WebKit/UIProcess/Extensions/WebExtensionController.h
-index 7ec330ea503fa362051ba6c5f8fe4c263ffe2390..1dfe31db845708dd93db666767c5dd3ce4c9524a 100644
+index 7ec330ea503fa362051ba6c5f8fe4c263ffe2390..de45a97b71227a4853d6f07109193e43a69ce238 100644
 --- a/Source/WebKit/UIProcess/Extensions/WebExtensionController.h
 +++ b/Source/WebKit/UIProcess/Extensions/WebExtensionController.h
 @@ -45,6 +45,7 @@
@@ -99360,8 +99411,16 @@ index 7ec330ea503fa362051ba6c5f8fe4c263ffe2390..1dfe31db845708dd93db666767c5dd3c
  #include <wtf/Identified.h>
  #include <wtf/RunLoop.h>
  #include <wtf/TZoneMallocInlines.h>
-@@ -66,6 +67,11 @@ class WebsitePolicies;
+@@ -64,8 +65,19 @@ class NavigationAction;
+ class WebsitePolicies;
+ }
  
++#if PLATFORM(HAIKU)
++namespace WebCore {
++struct ContentRuleListMatchedRule;
++}
++#endif
++
  namespace WebKit {
  
 +class BrowserCommandBrokerHaiku;
@@ -99372,7 +99431,7 @@ index 7ec330ea503fa362051ba6c5f8fe4c263ffe2390..1dfe31db845708dd93db666767c5dd3c
  class ContextMenuContextData;
  class WebExtensionContext;
  class WebExtensionDataRecord;
-@@ -73,6 +79,9 @@ class WebPageProxy;
+@@ -73,6 +85,9 @@ class WebPageProxy;
  class WebProcessPool;
  class WebsiteDataStore;
  struct WebExtensionContentRuleListBlockedLoadInfo;
@@ -99382,7 +99441,7 @@ index 7ec330ea503fa362051ba6c5f8fe4c263ffe2390..1dfe31db845708dd93db666767c5dd3c
  struct WebExtensionControllerParameters;
  struct WebExtensionFrameParameters;
  
-@@ -113,6 +122,13 @@ public:
+@@ -113,6 +128,13 @@ public:
      enum class ForPrivateBrowsing { No, Yes };
  
      WebExtensionControllerConfiguration& configuration() const LIFETIME_BOUND { return m_configuration.get(); }
@@ -99396,7 +99455,7 @@ index 7ec330ea503fa362051ba6c5f8fe4c263ffe2390..1dfe31db845708dd93db666767c5dd3c
      WebExtensionControllerParameters parameters(const API::PageConfiguration&, WebProcessProxy& destinationProcess) const;
  
      bool operator==(const WebExtensionController& other) const { return (this == &other); }
-@@ -135,6 +151,14 @@ public:
+@@ -135,6 +157,14 @@ public:
      std::expected<bool, RefPtr<API::Error>> load(WebExtensionContext&);
      std::expected<bool, RefPtr<API::Error>> unload(WebExtensionContext&);
  
@@ -99411,7 +99470,7 @@ index 7ec330ea503fa362051ba6c5f8fe4c263ffe2390..1dfe31db845708dd93db666767c5dd3c
      void unloadAll();
  
      void dispatchDidLoad(WebExtensionContext&);
-@@ -163,6 +187,9 @@ public:
+@@ -163,6 +193,9 @@ public:
      WebExtensionSet extensions() const;
  
      void cookiesDidChange(API::HTTPCookieStore&);
@@ -99421,7 +99480,7 @@ index 7ec330ea503fa362051ba6c5f8fe4c263ffe2390..1dfe31db845708dd93db666767c5dd3c
  
      template<typename T>
      void sendToAllProcesses(const T& message, const ObjectIdentifierGenericBase& destinationID);
-@@ -191,6 +218,44 @@ public:
+@@ -191,6 +224,46 @@ public:
      void resourceLoadDidReceiveChallenge(WebPageProxyIdentifier, const ResourceLoadInfo&, const WebCore::AuthenticationChallenge&);
      void resourceLoadDidReceiveResponse(WebPageProxyIdentifier, const ResourceLoadInfo&, const WebCore::ResourceResponse&);
      void resourceLoadDidCompleteWithError(WebPageProxyIdentifier, const ResourceLoadInfo&, const WebCore::ResourceResponse&, const WebCore::ResourceError&);
@@ -99429,6 +99488,8 @@ index 7ec330ea503fa362051ba6c5f8fe4c263ffe2390..1dfe31db845708dd93db666767c5dd3c
 +    // Blocking webRequest (UIProcess/Extensions/haiku/WebExtensionControllerWebRequestBlockingHaiku.cpp).
 +    void decideWebRequestHaiku(WebPageProxyIdentifier, uint8_t phase, ResourceLoadInfo&&, WebCore::ResourceRequest&&, std::optional<WebCore::ResourceResponse>&&, std::optional<WebCore::AuthenticationChallenge>&&, CompletionHandler<void(WebExtensionWebRequestGateResultHaiku&&)>&&);
 +    void updateWebRequestBlockingPhasesHaiku();
++    // A declarativeNetRequest rule matched a load of the page (WebCore's report).
++    void declarativeNetRequestRuleMatchedHaiku(WebPageProxyIdentifier, const WebCore::ContentRuleListMatchedRule&);
 +
 +    // webNavigation.onHistoryStateUpdated / onReferenceFragmentUpdated, and the
 +    // source of a page opened by another page (onCreatedNavigationTarget).
@@ -99466,7 +99527,7 @@ index 7ec330ea503fa362051ba6c5f8fe4c263ffe2390..1dfe31db845708dd93db666767c5dd3c
  
  #if ENABLE(CONTENT_EXTENSIONS)
      void resourceLoadWasBlockedByContentRuleList(WebPageProxyIdentifier, const WebExtensionContentRuleListBlockedLoadInfo&);
-@@ -266,17 +331,34 @@ private:
+@@ -266,17 +339,34 @@ private:
          {
              // FIXME: <https://webkit.org/b/267514> Add support for changeInfo.
  
@@ -103215,15 +103276,20 @@ index 0000000000000000000000000000000000000000..6cd58c82f5b76b28c25f4c2f63575e90
 +#endif
 diff --git a/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextAPIDeclarativeNetRequestHaiku.cpp b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextAPIDeclarativeNetRequestHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..730115dae41130579faaec07972c4c97e19600b1
+index 0000000000000000000000000000000000000000..fc5599706f40d4a124f9b511dc6f0afc4d110a4a
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextAPIDeclarativeNetRequestHaiku.cpp
-@@ -0,0 +1,146 @@
+@@ -0,0 +1,246 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +#include "config.h"
 +#include "WebExtensionContext.h"
 +#if ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
 +#include "WebExtensionConstants.h"
++#include "WebExtensionController.h"
++#include "WebExtensionTab.h"
++#include <WebCore/ContentRuleListMatchedRule.h>
++#include <cmath>
++#include <wtf/JSONValues.h>
 +#include "WebExtensionDeclarativeNetRequestRulesHaiku.h"
 +#include "WebExtensionPermission.h"
 +#include "WebExtensionUtilities.h"
@@ -103360,6 +103426,101 @@ index 0000000000000000000000000000000000000000..730115dae41130579faaec07972c4c97
 +        ++index;
 +    }
 +    return { };
++}
++
++// Chrome keeps the rules matched in the last five minutes for getMatchedRules.
++static constexpr Seconds declarativeNetRequestMatchLifetime = 5_min;
++static constexpr size_t maximumDeclarativeNetRequestMatches = 10000;
++
++void WebExtensionController::declarativeNetRequestRuleMatchedHaiku(WebPageProxyIdentifier pageIdentifier, const WebCore::ContentRuleListMatchedRule& matchedRule)
++{
++    // The rule list's identifier is the extension's unique identifier.
++    auto& extensionIdentifier = matchedRule.rule.extensionId;
++    if (!extensionIdentifier)
++        return;
++    for (Ref context : m_extensionContexts) {
++        if (context->uniqueIdentifier() != *extensionIdentifier)
++            continue;
++        // Not in a tab the extension cannot see (a private window it is not allowed in).
++        if (RefPtr tab = context->getTab(pageIdentifier))
++            context->declarativeNetRequestRuleMatchedHaiku(*tab, matchedRule.rule.ruleId, matchedRule.rule.rulesetId, URL { matchedRule.request.url });
++        return;
++    }
++}
++
++void WebExtensionContext::declarativeNetRequestRuleMatchedHaiku(WebExtensionTab& tab, double ruleIdentifier, const String& rulesetIdentifier, const URL& url)
++{
++    auto now = WallTime::now();
++    auto& matches = m_declarativeNetRequestMatchesHaiku;
++    while (!matches.isEmpty() && (matches.size() >= maximumDeclarativeNetRequestMatches || matches.first().timeStamp < now - declarativeNetRequestMatchLifetime))
++        matches.removeFirst();
++    matches.append({ ruleIdentifier, rulesetIdentifier, tab.identifier(), url, now });
++}
++
++void WebExtensionContext::declarativeNetRequestGetMatchedRulesHaiku(String&& filterJSON, CompletionHandler<void(std::expected<String, WebExtensionError>&&)>&& completionHandler)
++{
++    static constexpr auto apiName = "declarativeNetRequest.getMatchedRules()"_s;
++    RefPtr filterValue = JSON::Value::parseJSON(filterJSON);
++    RefPtr filter = filterValue ? filterValue->asObject() : nullptr;
++    if (!filter) {
++        completionHandler(toWebExtensionError(apiName, "filter"_s, "it must be an object"_s));
++        return;
++    }
++    std::optional<WebExtensionTabIdentifier> tabIdentifier;
++    if (RefPtr value = filter->getValue("tabId"_s)) {
++        auto number = value->asDouble();
++        tabIdentifier = number ? toWebExtensionTabIdentifier(*number) : std::nullopt;
++        if (!tabIdentifier) {
++            completionHandler(toWebExtensionError(apiName, "tabId"_s, "it must be a tab identifier"_s));
++            return;
++        }
++    }
++    std::optional<double> minimumTime;
++    if (RefPtr value = filter->getValue("minTimeStamp"_s)) {
++        minimumTime = value->asDouble();
++        if (!minimumTime || !std::isfinite(*minimumTime)) {
++            completionHandler(toWebExtensionError(apiName, "minTimeStamp"_s, "it must be a number"_s));
++            return;
++        }
++    }
++    RefPtr tab = tabIdentifier ? getTab(*tabIdentifier) : nullptr;
++    if (tabIdentifier && !tab) {
++        completionHandler(toWebExtensionError(apiName, "tabId"_s, "tab not found"_s));
++        return;
++    }
++    // Without declarativeNetRequestFeedback, activeTab answers for the tabs
++    // the user granted it, as in Chrome.
++    bool feedback = hasPermission(WebExtensionPermission::declarativeNetRequestFeedback());
++    if (!feedback && tab && !tab->extensionHasTemporaryPermission()) {
++        completionHandler(toWebExtensionError(apiName, nullString(), "the 'activeTab' permission has not been granted by the user for the tab"_s));
++        return;
++    }
++
++    auto oldest = WallTime::now() - declarativeNetRequestMatchLifetime;
++    Ref matched = JSON::Array::create();
++    for (auto& match : m_declarativeNetRequestMatchesHaiku) {
++        if (match.timeStamp < oldest || (tabIdentifier && match.tabIdentifier != *tabIdentifier))
++            continue;
++        double milliseconds = std::floor(match.timeStamp.secondsSinceEpoch().milliseconds());
++        if (minimumTime && milliseconds < *minimumTime)
++            continue;
++        if (!feedback) {
++            RefPtr matchTab = getTab(match.tabIdentifier);
++            if (!matchTab || !matchTab->extensionHasTemporaryPermission())
++                continue;
++        }
++        Ref rule = JSON::Object::create();
++        rule->setDouble("ruleId"_s, match.ruleIdentifier);
++        rule->setString("rulesetId"_s, match.rulesetIdentifier);
++        Ref info = JSON::Object::create();
++        info->setObject("rule"_s, WTF::move(rule));
++        info->setDouble("tabId"_s, toWebAPI(match.tabIdentifier));
++        info->setDouble("timeStamp"_s, milliseconds);
++        matched->pushObject(WTF::move(info));
++    }
++    Ref result = JSON::Object::create();
++    result->setArray("rulesMatchedInfo"_s, WTF::move(matched));
++    completionHandler(result->toJSONString());
 +}
 +
 +} // namespace WebKit
@@ -108913,10 +109074,10 @@ index 0000000000000000000000000000000000000000..7fe0a057f869a7ea735d3118f5242dce
 +#endif // ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
 diff --git a/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextDeclarativeNetRequestHaiku.cpp b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextDeclarativeNetRequestHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..32202d239937e9839bc2d6b18463317aec38ab13
+index 0000000000000000000000000000000000000000..47b68175b39579794296b3f0c92ae23e96479320
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextDeclarativeNetRequestHaiku.cpp
-@@ -0,0 +1,217 @@
+@@ -0,0 +1,219 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +#include "config.h"
 +#include "WebExtensionContext.h"
@@ -108946,7 +109107,7 @@ index 0000000000000000000000000000000000000000..32202d239937e9839bc2d6b18463317a
 +    if (!path.isEmpty())
 +        API::ContentRuleListStore::defaultStoreSingleton().removeContentRuleListFile(WTF::move(path), [](std::error_code) { });
 +}
-+void translateRules(Vector<RulesetSource>&& input, CompletionHandler<void(Translation&&)>&& completion)
++void translateRules(Vector<RulesetSource>&& input, bool reportMatchedRules, CompletionHandler<void(Translation&&)>&& completion)
 +{
 +    static NeverDestroyed<Ref<WorkQueue>> queue(WorkQueue::create("WebKit DNR translation"_s));
 +    Vector<RulesetSource> sources;
@@ -108954,7 +109115,7 @@ index 0000000000000000000000000000000000000000..32202d239937e9839bc2d6b18463317a
 +        sources.append({ source.identifier.isolatedCopy(), source.json.isolatedCopy() });
 +    // The completion owns engine references on main. Move it through this
 +    // worker without invoking or copying it, and destroy it only on main.
-+    queue.get()->dispatch([sources = WTF::move(sources), completion = WTF::move(completion)]() mutable {
++    queue.get()->dispatch([sources = WTF::move(sources), reportMatchedRules, completion = WTF::move(completion)]() mutable {
 +        auto translate = [&]() -> Translation {
 +            Vector<WebExtensionDeclarativeNetRequestRulesetHaiku> rulesets;
 +            size_t length = 0;
@@ -108969,7 +109130,7 @@ index 0000000000000000000000000000000000000000..32202d239937e9839bc2d6b18463317a
 +                bool isStatic = source.identifier != sessionRulesetID && source.identifier != dynamicRulesetID;
 +                rulesets.append({ source.identifier, array.releaseNonNull(), isStatic });
 +            }
-+            return translateDeclarativeNetRequestRulesHaiku(rulesets);
++            return translateDeclarativeNetRequestRulesHaiku(rulesets, { }, reportMatchedRules);
 +        };
 +        auto result = translate();
 +        if (result && result->skippedRuleCount)
@@ -109061,7 +109222,9 @@ index 0000000000000000000000000000000000000000..32202d239937e9839bc2d6b18463317a
 +            length += json.length();
 +            sources->append({ ruleset.rulesetID, WTF::move(json) });
 +        }
-+        translateRules(WTF::move(*sources), [this, protectedThis = Ref { *this }, current, fail, completion = WTF::move(completion)](Translation&& translation) mutable {
++        // getMatchedRules answers extensions with either permission (Chrome's).
++        bool reportMatchedRules = hasPermission(WebExtensionPermission::declarativeNetRequestFeedback()) || hasPermission(WebExtensionPermission::activeTab());
++        translateRules(WTF::move(*sources), reportMatchedRules, [this, protectedThis = Ref { *this }, current, fail, completion = WTF::move(completion)](Translation&& translation) mutable {
 +            if (!current()) { completion(false); return; }
 +            if (!translation) { fail(translation.error()); completion(false); return; }
 +            auto sessionIDs = translation->identifiers.take(String(sessionRulesetID));
@@ -111302,10 +111465,10 @@ index 0000000000000000000000000000000000000000..3782c3ce8537852e5840002a582790e5
 +#endif
 diff --git a/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionDeclarativeNetRequestRulesHaiku.cpp b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionDeclarativeNetRequestRulesHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..47d8cf25121a129d03ca0bf544ab7c4b464c70f0
+index 0000000000000000000000000000000000000000..3581b8f078b76795025ac6dc514d3f3647f4cac4
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionDeclarativeNetRequestRulesHaiku.cpp
-@@ -0,0 +1,467 @@
+@@ -0,0 +1,477 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +#include "config.h"
 +#include "WebExtensionDeclarativeNetRequestRulesHaiku.h"
@@ -111443,6 +111606,7 @@ index 0000000000000000000000000000000000000000..47d8cf25121a129d03ca0bf544ab7c4b
 +    size_t declaration;
 +    Vector<Ref<JSON::Object>> triggers; // a union: every trigger carries the same action
 +    RefPtr<JSON::Object> action; // WebKit action for redirect / modify-headers
++    size_t ruleset { 0 }; // index of its ruleset
 +};
 +
 +std::expected<Ref<JSON::Object>, String> redirectAction(const JSON::Object& input)
@@ -111666,7 +111830,7 @@ index 0000000000000000000000000000000000000000..47d8cf25121a129d03ca0bf544ab7c4b
 +} // namespace
 +
 +std::expected<WebExtensionDeclarativeNetRequestTranslationHaiku, String> translateDeclarativeNetRequestRulesHaiku(
-+    const Vector<WebExtensionDeclarativeNetRequestRulesetHaiku>& rulesets, WebExtensionDeclarativeNetRequestLimitsHaiku limits)
++    const Vector<WebExtensionDeclarativeNetRequestRulesetHaiku>& rulesets, WebExtensionDeclarativeNetRequestLimitsHaiku limits, bool reportMatchedRules)
 +{
 +    WebExtensionDeclarativeNetRequestTranslationHaiku result;
 +    Vector<Rule> rules;
@@ -111693,6 +111857,7 @@ index 0000000000000000000000000000000000000000..47d8cf25121a129d03ca0bf544ab7c4b
 +            }
 +            if (!identifiers.add(parsed->identifier).isNewEntry)
 +                return makeUnexpected(makeString("Duplicate rule id in ruleset "_s, ruleset.identifier));
++            parsed->ruleset = &ruleset - rulesets.begin();
 +            rules.append(WTF::move(*parsed));
 +        }
 +        result.identifiers.add(ruleset.identifier, WTF::move(identifiers));
@@ -111706,8 +111871,13 @@ index 0000000000000000000000000000000000000000..47d8cf25121a129d03ca0bf544ab7c4b
 +    });
 +    Ref output = JSON::Array::create();
 +    size_t outputLength = 2;
-+    auto append = [&](const JSON::Object& trigger, Ref<JSON::Object>&& action) -> bool {
++    // reported: the rule whose match WebCore reports with this item.
++    auto append = [&](const JSON::Object& trigger, Ref<JSON::Object>&& action, const Rule* reported = nullptr) -> bool {
 +        Ref item = JSON::Object::create();
++        if (reported && reportMatchedRules) {
++            item->setDouble("_identifier"_s, reported->identifier);
++            item->setString("_rulesetIdentifier"_s, rulesets[reported->ruleset].identifier);
++        }
 +        Ref triggerCopy = JSON::Object::create();
 +        for (auto& entry : trigger)
 +            triggerCopy->setValue(entry.key, entry.value.copyRef());
@@ -111736,14 +111906,14 @@ index 0000000000000000000000000000000000000000..47d8cf25121a129d03ca0bf544ab7c4b
 +            bool appended = true;
 +            switch (rule.kind) {
 +            case Kind::Block:
-+                appended = append(trigger, simpleAction("block"_s));
++                appended = append(trigger, simpleAction("block"_s), &rule);
 +                break;
 +            case Kind::UpgradeScheme:
-+                appended = append(trigger, simpleAction("make-https"_s));
++                appended = append(trigger, simpleAction("make-https"_s), &rule);
 +                break;
 +            case Kind::Redirect:
 +            case Kind::ModifyHeaders:
-+                appended = append(trigger, copyAction(*rule.action));
++                appended = append(trigger, copyAction(*rule.action), &rule);
 +                break;
 +            case Kind::Allow:
 +            case Kind::AllowAllRequests:
@@ -111760,8 +111930,11 @@ index 0000000000000000000000000000000000000000..47d8cf25121a129d03ca0bf544ab7c4b
 +            // no rule at all (uBlock Origin Lite's surrogate redirects rank above
 +            // its blocks, so ad scripts loaded). Chrome skips such a rule and the
 +            // next one applies.
++            // An allow rule is only its stop action, which reports it (WebCore
++            // puts the report of a stop action before it).
++            bool allows = rule.kind == Kind::Allow || rule.kind == Kind::AllowAllRequests;
 +            if (rule.kind != Kind::ModifyHeaders && rule.kind != Kind::Redirect
-+                && !append(trigger, simpleAction("ignore-following-rules"_s)))
++                && !append(trigger, simpleAction("ignore-following-rules"_s), allows ? &rule : nullptr))
 +                return makeUnexpected("Native DNR translation size limit exceeded."_s);
 +        }
 +    }
@@ -111775,10 +111948,10 @@ index 0000000000000000000000000000000000000000..47d8cf25121a129d03ca0bf544ab7c4b
 +#endif
 diff --git a/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionDeclarativeNetRequestRulesHaiku.h b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionDeclarativeNetRequestRulesHaiku.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..18fd33de5d86931832fb8b3bcb4d9ac0f9fd6966
+index 0000000000000000000000000000000000000000..8d4d2bc0dc95964aee2cfe24f20638cc3301a868
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionDeclarativeNetRequestRulesHaiku.h
-@@ -0,0 +1,34 @@
+@@ -0,0 +1,37 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +#pragma once
 +#if ENABLE(WK_WEB_EXTENSIONS) && ENABLE(CONTENT_EXTENSIONS)
@@ -111809,8 +111982,11 @@ index 0000000000000000000000000000000000000000..18fd33de5d86931832fb8b3bcb4d9ac0
 +// Every input rule is validated. Unsupported actions/conditions fail the whole
 +// translation, except in rulesets marked skipUnsupportedRules, where such rules
 +// are counted and left out. Callers retain the previous rule list on error.
++// reportMatchedRules tags each rule with its id and ruleset ("_identifier",
++// "_rulesetIdentifier"), so WebCore reports the rules that match a load
++// (ContentRuleListMatchedRule, for declarativeNetRequest.getMatchedRules).
 +std::expected<WebExtensionDeclarativeNetRequestTranslationHaiku, String> translateDeclarativeNetRequestRulesHaiku(
-+    const Vector<WebExtensionDeclarativeNetRequestRulesetHaiku>&, WebExtensionDeclarativeNetRequestLimitsHaiku = { });
++    const Vector<WebExtensionDeclarativeNetRequestRulesetHaiku>&, WebExtensionDeclarativeNetRequestLimitsHaiku = { }, bool reportMatchedRules = false);
 +} // namespace WebKit
 +#endif
 diff --git a/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionDeclarativeNetRequestURLFilter.cpp b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionDeclarativeNetRequestURLFilter.cpp
@@ -117299,7 +117475,7 @@ index f0a894576a62be24a8e7e5b8009d63128b210aa7..85264fa2c360e44d115c8604754c9e0c
  #if ENABLE(WEBDRIVER_BIDI)
          if (RefPtr page = m_page.get()) {
 diff --git a/Source/WebKit/UIProcess/WebPageProxy.cpp b/Source/WebKit/UIProcess/WebPageProxy.cpp
-index abc66b25d5be6d2b961364268f19eb3762ab2c3a..acbdbe78c3e45c009a142aa4579cdb0334a88df8 100644
+index abc66b25d5be6d2b961364268f19eb3762ab2c3a..7043f79d3d7764051a20d988de2f683c50160b28 100644
 --- a/Source/WebKit/UIProcess/WebPageProxy.cpp
 +++ b/Source/WebKit/UIProcess/WebPageProxy.cpp
 @@ -65,7 +65,9 @@
@@ -117683,7 +117859,18 @@ index abc66b25d5be6d2b961364268f19eb3762ab2c3a..acbdbe78c3e45c009a142aa4579cdb03
          // FIXME: Ideally we'd enable this on iPhone as well but this currently regresses PLT.
          bool deviceClassIsSmallScreen = false;
  #if PLATFORM(IOS_FAMILY)
-@@ -11308,7 +11483,7 @@ void WebPageProxy::contentRuleListMatchedRule(WebCore::ContentRuleListMatchedRul
+@@ -11301,6 +11476,10 @@ void WebPageProxy::contentRuleListNotification(URL&& url, ContentRuleListResults
+ 
+ void WebPageProxy::contentRuleListMatchedRule(WebCore::ContentRuleListMatchedRule&& matchedRule)
+ {
++#if ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
++    if (RefPtr webExtensionController = this->webExtensionController())
++        webExtensionController->declarativeNetRequestRuleMatchedHaiku(identifier(), matchedRule);
++#endif
+     m_navigationClient->contentRuleListMatchedRule(*this, WTF::move(matchedRule));
+ }
+ #endif
+@@ -11308,7 +11487,7 @@ void WebPageProxy::contentRuleListMatchedRule(WebCore::ContentRuleListMatchedRul
  #if ENABLE(WK_WEB_EXTENSIONS) && ENABLE(CONTENT_EXTENSIONS)
  void WebPageProxy::contentRuleListDidBlockLoad(WebExtensionContentRuleListBlockedLoadInfo&& info)
  {
@@ -117692,7 +117879,7 @@ index abc66b25d5be6d2b961364268f19eb3762ab2c3a..acbdbe78c3e45c009a142aa4579cdb03
      if (RefPtr webExtensionController = this->webExtensionController())
          webExtensionController->resourceLoadWasBlockedByContentRuleList(identifier(), WTF::move(info));
  #endif
-@@ -11497,6 +11672,9 @@ void WebPageProxy::createNewPage(IPC::Connection& connection, WindowFeatures&& w
+@@ -11497,6 +11676,9 @@ void WebPageProxy::createNewPage(IPC::Connection& connection, WindowFeatures&& w
          shouldOpenExternalURLsPolicy = navigationActionData.shouldOpenExternalURLsPolicy,
          openedBlobURL,
          wantsNoOpener = windowFeatures.wantsNoOpener()
@@ -117702,7 +117889,7 @@ index abc66b25d5be6d2b961364268f19eb3762ab2c3a..acbdbe78c3e45c009a142aa4579cdb03
      ] (RefPtr<WebPageProxy> newPage) mutable {
  
  #if PLATFORM(MAC)
-@@ -11515,6 +11693,17 @@ void WebPageProxy::createNewPage(IPC::Connection& connection, WindowFeatures&& w
+@@ -11515,6 +11697,17 @@ void WebPageProxy::createNewPage(IPC::Connection& connection, WindowFeatures&& w
              pageClient->dismissAnyOpenPicker();
  
          newPage->setOpenedByDOM();
@@ -117720,7 +117907,7 @@ index abc66b25d5be6d2b961364268f19eb3762ab2c3a..acbdbe78c3e45c009a142aa4579cdb03
  
          if (openerAppInitiatedState)
              newPage->m_lastNavigationWasAppInitiated = *openerAppInitiatedState;
-@@ -11757,8 +11946,12 @@ void WebPageProxy::closePage()
+@@ -11757,8 +11950,12 @@ void WebPageProxy::closePage()
          return;
  
      WEBPAGEPROXY_RELEASE_LOG(Process, "closePage:");
@@ -117733,7 +117920,7 @@ index abc66b25d5be6d2b961364268f19eb3762ab2c3a..acbdbe78c3e45c009a142aa4579cdb03
      m_uiClient->close(this);
  }
  
-@@ -12762,6 +12955,9 @@ void WebPageProxy::didChangeIntrinsicContentSize(const IntSize& intrinsicContent
+@@ -12762,6 +12959,9 @@ void WebPageProxy::didChangeIntrinsicContentSize(const IntSize& intrinsicContent
  #if USE(APPKIT)
      if (RefPtr pageClient = this->pageClient())
          pageClient->intrinsicContentSizeDidChange(intrinsicContentSize);
@@ -117743,7 +117930,7 @@ index abc66b25d5be6d2b961364268f19eb3762ab2c3a..acbdbe78c3e45c009a142aa4579cdb03
  #endif
  }
  
-@@ -12936,7 +13132,7 @@ WebInspectorUIProxy* WebPageProxy::inspector() const
+@@ -12936,7 +13136,7 @@ WebInspectorUIProxy* WebPageProxy::inspector() const
      return m_inspector.get();
  }
  
@@ -117752,7 +117939,7 @@ index abc66b25d5be6d2b961364268f19eb3762ab2c3a..acbdbe78c3e45c009a142aa4579cdb03
  static bool isParentFrameMainFrame(const ResourceLoadInfo& loadInfo, WebFrameProxy* mainFrame)
  {
      return loadInfo.parentFrameID && mainFrame && *loadInfo.parentFrameID == mainFrame->frameID();
-@@ -12945,7 +13141,7 @@ static bool isParentFrameMainFrame(const ResourceLoadInfo& loadInfo, WebFramePro
+@@ -12945,7 +13145,7 @@ static bool isParentFrameMainFrame(const ResourceLoadInfo& loadInfo, WebFramePro
  
  void WebPageProxy::resourceLoadDidSendRequest(ResourceLoadInfo&& loadInfo, WebCore::ResourceRequest&& request)
  {
@@ -117761,7 +117948,7 @@ index abc66b25d5be6d2b961364268f19eb3762ab2c3a..acbdbe78c3e45c009a142aa4579cdb03
      if (RefPtr webExtensionController = this->webExtensionController()) {
          loadInfo.parentFrameIsMainFrame = isParentFrameMainFrame(loadInfo, mainFrame());
          webExtensionController->resourceLoadDidSendRequest(identifier(), loadInfo, request);
-@@ -12958,7 +13154,7 @@ void WebPageProxy::resourceLoadDidSendRequest(ResourceLoadInfo&& loadInfo, WebCo
+@@ -12958,7 +13158,7 @@ void WebPageProxy::resourceLoadDidSendRequest(ResourceLoadInfo&& loadInfo, WebCo
  
  void WebPageProxy::resourceLoadDidPerformHTTPRedirection(ResourceLoadInfo&& loadInfo, WebCore::ResourceResponse&& response, WebCore::ResourceRequest&& request)
  {
@@ -117770,7 +117957,7 @@ index abc66b25d5be6d2b961364268f19eb3762ab2c3a..acbdbe78c3e45c009a142aa4579cdb03
      if (RefPtr webExtensionController = this->webExtensionController()) {
          loadInfo.parentFrameIsMainFrame = isParentFrameMainFrame(loadInfo, mainFrame());
          webExtensionController->resourceLoadDidPerformHTTPRedirection(identifier(), loadInfo, response, request);
-@@ -12971,7 +13167,7 @@ void WebPageProxy::resourceLoadDidPerformHTTPRedirection(ResourceLoadInfo&& load
+@@ -12971,7 +13171,7 @@ void WebPageProxy::resourceLoadDidPerformHTTPRedirection(ResourceLoadInfo&& load
  
  void WebPageProxy::resourceLoadDidReceiveChallenge(ResourceLoadInfo&& loadInfo, WebCore::AuthenticationChallenge&& challenge)
  {
@@ -117779,7 +117966,7 @@ index abc66b25d5be6d2b961364268f19eb3762ab2c3a..acbdbe78c3e45c009a142aa4579cdb03
      if (RefPtr webExtensionController = this->webExtensionController()) {
          loadInfo.parentFrameIsMainFrame = isParentFrameMainFrame(loadInfo, mainFrame());
          webExtensionController->resourceLoadDidReceiveChallenge(identifier(), loadInfo, challenge);
-@@ -12984,7 +13180,7 @@ void WebPageProxy::resourceLoadDidReceiveChallenge(ResourceLoadInfo&& loadInfo,
+@@ -12984,7 +13184,7 @@ void WebPageProxy::resourceLoadDidReceiveChallenge(ResourceLoadInfo&& loadInfo,
  
  void WebPageProxy::resourceLoadDidReceiveResponse(ResourceLoadInfo&& loadInfo, WebCore::ResourceResponse&& response)
  {
@@ -117788,7 +117975,7 @@ index abc66b25d5be6d2b961364268f19eb3762ab2c3a..acbdbe78c3e45c009a142aa4579cdb03
      if (RefPtr webExtensionController = this->webExtensionController()) {
          loadInfo.parentFrameIsMainFrame = isParentFrameMainFrame(loadInfo, mainFrame());
          webExtensionController->resourceLoadDidReceiveResponse(identifier(), loadInfo, response);
-@@ -12997,7 +13193,7 @@ void WebPageProxy::resourceLoadDidReceiveResponse(ResourceLoadInfo&& loadInfo, W
+@@ -12997,7 +13197,7 @@ void WebPageProxy::resourceLoadDidReceiveResponse(ResourceLoadInfo&& loadInfo, W
  
  void WebPageProxy::resourceLoadDidCompleteWithError(ResourceLoadInfo&& loadInfo, WebCore::ResourceResponse&& response, WebCore::ResourceError&& error)
  {
@@ -117797,7 +117984,7 @@ index abc66b25d5be6d2b961364268f19eb3762ab2c3a..acbdbe78c3e45c009a142aa4579cdb03
      if (RefPtr webExtensionController = this->webExtensionController()) {
          loadInfo.parentFrameIsMainFrame = isParentFrameMainFrame(loadInfo, mainFrame());
          webExtensionController->resourceLoadDidCompleteWithError(identifier(), loadInfo, response, error);
-@@ -13976,6 +14172,20 @@ void WebPageProxy::checkSpellingOfString(const String& text, CompletionHandler<v
+@@ -13976,6 +14176,20 @@ void WebPageProxy::checkSpellingOfString(const String& text, CompletionHandler<v
      completionHandler(misspellingLocation, misspellingLength);
  }
  
@@ -117818,7 +118005,7 @@ index abc66b25d5be6d2b961364268f19eb3762ab2c3a..acbdbe78c3e45c009a142aa4579cdb03
  void WebPageProxy::checkGrammarOfString(const String& text, CompletionHandler<void(Vector<WebCore::GrammarDetail>&&, int32_t badGrammarLocation, int32_t badGrammarLength)>&& completionHandler)
  {
      Vector<GrammarDetail> grammarDetails;
-@@ -14815,7 +15025,7 @@ void WebPageProxy::resetState(ResetStateReason resetStateReason)
+@@ -14815,7 +15029,7 @@ void WebPageProxy::resetState(ResetStateReason resetStateReason)
      resetSpeechSynthesizer();
  #endif
  
@@ -117827,7 +118014,7 @@ index abc66b25d5be6d2b961364268f19eb3762ab2c3a..acbdbe78c3e45c009a142aa4579cdb03
      protect(protect(websiteDataStore())->authenticatorManager())->cancelRequest(m_webPageID, std::nullopt);
  #endif
  
-@@ -15092,6 +15302,9 @@ WebPageCreationParameters WebPageProxy::creationParameters(WebProcessProxy& proc
+@@ -15092,6 +15306,9 @@ WebPageCreationParameters WebPageProxy::creationParameters(WebProcessProxy& proc
      parameters.pageLength = m_pageLength;
      parameters.gapBetweenPages = m_gapBetweenPages;
      parameters.userAgent = userAgent();
@@ -117837,7 +118024,7 @@ index abc66b25d5be6d2b961364268f19eb3762ab2c3a..acbdbe78c3e45c009a142aa4579cdb03
      parameters.canRunBeforeUnloadConfirmPanel = m_uiClient->canRunBeforeUnloadConfirmPanel();
      parameters.canRunModal = m_canRunModal;
      parameters.deviceScaleFactor = deviceScaleFactor();
-@@ -15270,9 +15483,9 @@ WebPageCreationParameters WebPageProxy::creationParameters(WebProcessProxy& proc
+@@ -15270,9 +15487,9 @@ WebPageCreationParameters WebPageProxy::creationParameters(WebProcessProxy& proc
      parameters.hasResourceLoadClient = !!m_resourceLoadClient;
      parameters.portsForUpgradingInsecureSchemeForTesting = m_configuration->portsForUpgradingInsecureSchemeForTesting();
  
@@ -117850,7 +118037,7 @@ index abc66b25d5be6d2b961364268f19eb3762ab2c3a..acbdbe78c3e45c009a142aa4579cdb03
  
      if (RefPtr weakWebExtensionController = m_weakWebExtensionController.get())
          parameters.webExtensionControllerParameters = weakWebExtensionController->parameters(m_configuration, process);
-@@ -19004,7 +19217,13 @@ void WebPageProxy::decidePolicyForSOAuthorizationLoad(const String& extension, C
+@@ -19004,7 +19221,13 @@ void WebPageProxy::decidePolicyForSOAuthorizationLoad(const String& extension, C
  #if ENABLE(WEB_AUTHN)
  void WebPageProxy::setMockWebAuthenticationConfiguration(MockWebAuthenticationConfiguration&& configuration)
  {
@@ -139441,10 +139628,10 @@ index a6c9a4b3fc592dee39df64fe02694034820a8510..a9812ee585ef238c75d32d8017e4e632
  } // namespace WebKit
 diff --git a/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIDeclarativeNetRequest.cpp b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIDeclarativeNetRequest.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..ce336350a329b2ca540ab09b150bd4e3e2afe21e
+index 0000000000000000000000000000000000000000..7ab0dc495bc8db0f9143039e023ac242d0872669
 --- /dev/null
 +++ b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIDeclarativeNetRequest.cpp
-@@ -0,0 +1,290 @@
+@@ -0,0 +1,302 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +#include "config.h"
 +#include "WebExtensionAPIDeclarativeNetRequest.h"
@@ -139646,15 +139833,27 @@ index 0000000000000000000000000000000000000000..ce336350a329b2ca540ab09b150bd4e3
 +    getRules(true, WTF::move(filter), WTF::move(callback), outExceptionString);
 +}
 +
-+void WebExtensionAPIDeclarativeNetRequest::getMatchedRules(RefPtr<JSON::Value>, Ref<WebExtensionCallbackHandler>&& callback, String& outExceptionString)
++void WebExtensionAPIDeclarativeNetRequest::getMatchedRules(RefPtr<JSON::Value> filter, Ref<WebExtensionCallbackHandler>&& callback, String& outExceptionString)
 +{
 +    Ref extensionContext = this->extensionContext();
 +    if (!extensionContext->hasPermission("declarativeNetRequestFeedback"_s) && !extensionContext->hasPermission("activeTab"_s)) {
 +        outExceptionString = toErrorString(nullString(), nullString(), "either the 'declarativeNetRequestFeedback' or 'activeTab' permission is required"_s);
 +        return;
 +    }
-+    // The native content-rule path does not report which rule matched a load.
-+    callback->reportError("declarativeNetRequest.getMatchedRules() is not supported on this platform."_s);
++    if (filter && filter->type() != JSON::Value::Type::Null && !filter->asObject()) {
++        outExceptionString = toErrorString(nullString(), "filter"_s, "it must be an object"_s);
++        return;
++    }
++    // WebCore reports each matching rule (the rules carry their ids); the UI
++    // process keeps the last five minutes of them.
++    String filterJSON = filter && filter->asObject() ? filter->toJSONString() : String("{}"_s);
++    WebProcess::singleton().sendWithAsyncReply(Messages::WebExtensionContext::DeclarativeNetRequestGetMatchedRulesHaiku(filterJSON), [protectedThis = Ref { *this }, callback = WTF::move(callback)](std::expected<String, WebExtensionError>&& result) {
++        if (!result) {
++            callback->reportError(result.error());
++            return;
++        }
++        callback->call(fromJSON(callback->globalContext(), JSON::Value::parseJSON(result.value())));
++    }, extensionContext->identifier());
 +}
 +
 +void WebExtensionAPIDeclarativeNetRequest::isRegexSupported(RefPtr<JSON::Value> options, Ref<WebExtensionCallbackHandler>&& callback, String& outExceptionString)
