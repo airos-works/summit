@@ -168,6 +168,14 @@ report](resource-usage-2026-10-22.md).
   addresses found on the stack; names come from libdebug and the libraries'
   exported symbols. Haiku's `Debugger --save-report` was tried first: on a
   running team it lists no stacks, and the web process it reported on exited.
+  **JIT code** (JavaScript, the engine's thunks) has no image: it is named
+  `Baseline: render#AbCd+0x1c (JIT)` from JavaScriptCore's JITDump files
+  when the process writes them. Turn them on for a tab with
+  `set_environment` `JSC_useJITDump=1` and `JSC_jitDumpDirectory=/tmp`, then
+  `restart_process` (the files, `jit-THREAD-PROCESS.dump`, are read from
+  `/tmp`, or `SUMMIT_JIT_DUMP_DIRECTORY`; delete them afterwards: they hold
+  the generated code too). Reader: `src/core/JitDump.h`, host test
+  `tests/JitDumpTests.cpp`.
 - **Log.** When the server starts, Summit's stderr becomes a pipe that a
   thread copies to where it went before and into memory (8 MiB, 40000
   lines). Engine processes started afterwards inherit it, so their traces and

@@ -6,6 +6,7 @@
 // browser's own team as well as its engine processes, and nothing stays
 // attached when it is done. The debugger API and libdebug (symbols, stack
 // frames) are Haiku's; libdebug is opened at run time, as on a stock system.
+#include "core/JitDump.h"
 #include <OS.h>
 #include <debugger.h>
 #include <image.h>
@@ -106,6 +107,10 @@ public:
         image_info image;
         while (get_next_image_info(team, &cookie, &image) == B_OK)
             fText.push_back({addr_t(image.text), addr_t(image.text) + addr_t(image.text_size)});
+        // JavaScript and the engine's generated code, when the process writes
+        // JITDump files (JSC_useJITDump=1).
+        const char* directory = std::getenv("SUMMIT_JIT_DUMP_DIRECTORY");
+        fJit.Load(directory && *directory ? directory : "/tmp", team);
     }
     ~Symbols()
     {
@@ -125,7 +130,12 @@ public:
         char symbol[1024] = "", image[B_PATH_NAME_LENGTH] = "";
         void* base = nullptr;
         bool exact = false;
-        if (fLookup && sDebug.lookupAddress(fLookup, reinterpret_cast<void*>(address), &base, symbol, sizeof(symbol), image,
+        const auto* jit = InText(address) ? nullptr : fJit.Find(address);
+        if (jit) {
+            char offset[32];
+            std::snprintf(offset, sizeof(offset), "+0x%lx", static_cast<unsigned long>(address - jit->start));
+            text = jit->name + offset + " (JIT)";
+        } else if (fLookup && sDebug.lookupAddress(fLookup, reinterpret_cast<void*>(address), &base, symbol, sizeof(symbol), image,
                 sizeof(image), &exact) == B_OK) {
             const char* slash = std::strrchr(image, '/');
             char offset[32];
@@ -157,6 +167,7 @@ public:
 private:
     SymbolLookup* fLookup = nullptr;
     std::vector<std::pair<addr_t, addr_t>> fText;
+    summit::JitCodeMap fJit;
     std::map<addr_t, std::string> fNames;
 };
 

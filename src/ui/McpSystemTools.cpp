@@ -520,7 +520,9 @@ void RegisterMcpSystemTools(mcp::Server& server, const std::shared_ptr<McpContex
         "short debugger process, and says where the CPU goes: functions by samples where they were running "
         "(self), functions anywhere on the sampled stacks (inclusive, with depth > 1), libraries, and each busy "
         "thread with its top functions. Works on this browser's own team too. Use with processes/threads to "
-        "find which team and thread is busy first; names come from exported symbols.",
+        "find which team and thread is busy first; names come from exported symbols. JavaScript and other JIT code "
+        "is named \"name (JIT)\" when the process writes JITDump files: set_environment JSC_useJITDump=1 and "
+        "JSC_jitDumpDirectory=/tmp, then restart_process the tab's web process.",
         Schema().Integer("team", "Team id (default this browser)").String("tab", "A tab, for its web process")
             .Number("seconds", "Sampling time (0.1-60, default 3)").Integer("interval_us", "Sampling interval (default 1000)")
             .Integer("depth", "Return addresses per sample (1-64, default 12)").String("filter", "Glob on thread names (default all)"),
