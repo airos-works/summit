@@ -17,6 +17,10 @@ globalThis.checks = {
     removeFile: (id) => browser.downloads.removeFile(id),
     acceptDanger: (id) => browser.downloads.acceptDanger(id).then(() => "accepted", (error) => error.message),
     icon: (id, size) => browser.downloads.getFileIcon(id, size ? { size } : {}),
+    // A small file (serve.py's /dnr.html) with Chrome's destination options:
+    // saveAs shows a save panel; conflictAction "overwrite" reuses the name,
+    // "prompt" asks when it is taken, "uniquify" (the default) numbers it.
+    small: (options = {}) => browser.downloads.download({ url: "http://127.0.0.1:8798/dnr.html", filename: "summit-downloads-small.html", ...options }),
     // Start, pause after a second, check it stays paused, resume and wait
     // for the end: what each step saw.
     async pauseAndResume() {

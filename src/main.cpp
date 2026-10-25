@@ -1218,7 +1218,7 @@ private:
 #if SUMMIT_MODERN_WEBKIT
     status_t ListenForDownloads(const std::shared_ptr<BWebKitContext>& context, bool privateBrowsing)
     {
-        auto listener = std::make_unique<summit::DownloadListener>(privateBrowsing,
+        auto listener = std::make_unique<summit::DownloadListener>(privateBrowsing, context,
             [this](const BMessage& message, bool isPrivate, bool active) { DownloadReceived(message, isPrivate, active); });
         AddHandler(listener.get());
         const auto status = context->SetDownloadListener(BMessenger(listener.get()));

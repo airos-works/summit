@@ -87338,10 +87338,10 @@ index 0000000000000000000000000000000000000000..574ed16658f0c14b1aa2e63208e990b8
 +#define WEBKIT_ENGINE_VERSION_HAIKU "@WebKit_HAIKU_MAJOR_VERSION@.@WebKit_HAIKU_MINOR_VERSION@.@WebKit_HAIKU_TINY_VERSION@"
 diff --git a/Source/WebKit/UIProcess/API/haiku/WebKitContext.cpp b/Source/WebKit/UIProcess/API/haiku/WebKitContext.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..cb5a90b5008dad92e54aa9b5bcebc9bf303365cb
+index 0000000000000000000000000000000000000000..4fb26a0893becafac7e3ce76a301ef00319f39ca
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/API/haiku/WebKitContext.cpp
-@@ -0,0 +1,1176 @@
+@@ -0,0 +1,1188 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#include "config.h"
@@ -87884,6 +87884,18 @@ index 0000000000000000000000000000000000000000..cb5a90b5008dad92e54aa9b5bcebc9bf
 +        return;
 +    WTF::RunLoop::mainSingleton().dispatch([context = m_context] {
 +        context->downloads()->pauseAll();
++    });
++}
++
++void BWebKitContext::SetDownloadDestination(uint64 identifier, const char* path)
++{
++    if (m_status != B_OK || !identifier)
++        return;
++    auto chosen = String::fromUTF8(path ? path : "");
++    if (path && *path && chosen.isNull())
++        chosen = emptyString();
++    WTF::RunLoop::mainSingleton().dispatch([context = m_context, identifier, chosen = WTF::move(chosen).isolatedCopy()] {
++        context->downloads()->setDestination(identifier, chosen);
 +    });
 +}
 +
@@ -88520,10 +88532,10 @@ index 0000000000000000000000000000000000000000..cb5a90b5008dad92e54aa9b5bcebc9bf
 +}
 diff --git a/Source/WebKit/UIProcess/API/haiku/WebKitContext.h b/Source/WebKit/UIProcess/API/haiku/WebKitContext.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..43e5ca353f75ebfccdeda7e2fcd4f137a17ab037
+index 0000000000000000000000000000000000000000..cc312bc21c427b27c76e7b3782b346f884a8ab4d
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/API/haiku/WebKitContext.h
-@@ -0,0 +1,582 @@
+@@ -0,0 +1,592 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#pragma once
@@ -88562,6 +88574,12 @@ index 0000000000000000000000000000000000000000..43e5ca353f75ebfccdeda7e2fcd4f137
 +    B_WEBKIT_DOWNLOAD_STARTED = 'wdst',
 +    B_WEBKIT_DOWNLOAD_PROGRESS = 'wdpr',
 +    B_WEBKIT_DOWNLOAD_FINISHED = 'wdfn',
++    // A download that asks where to save it (an extension's downloads.download
++    // with saveAs, or conflictAction "prompt" when the file exists), before
++    // it writes anything: identifier (uint64), suggested_filename and
++    // directory (strings), url and view (messenger) when known. Answer with
++    // SetDownloadDestination; the transfer waits until then.
++    B_WEBKIT_DOWNLOAD_DESTINATION = 'wdds',
 +    B_WEBKIT_BROWSER_WINDOW_UPDATED = 'wbwu',
 +    B_WEBKIT_EXTENSION_PACKAGE_PREPARED = 'wepk',
 +    B_WEBKIT_EXTENSION_PACKAGE_DISCARDED = 'wepd',
@@ -89034,6 +89052,10 @@ index 0000000000000000000000000000000000000000..43e5ca353f75ebfccdeda7e2fcd4f137
 +    // for any other, to view's window when view is valid.
 +    status_t ResumeDownload(const char* url, const char* path, const char* validator, int64 expectedSize,
 +        const BMessenger& view, uint64* identifier);
++    // The answer to B_WEBKIT_DOWNLOAD_DESTINATION: an absolute path in an
++    // existing folder (written over if it exists, as the user chose), or
++    // nullptr to cancel the download (FINISHED with result CANCELLED). Any thread.
++    void SetDownloadDestination(uint64 identifier, const char* path);
 +    // Query on the application thread after queued view commands have drained.
 +    // Keep its RunLoop and this context alive until cancellation replies finish.
 +    bool HasPendingDownloads() const;
@@ -103545,14 +103567,15 @@ index 0000000000000000000000000000000000000000..fc5599706f40d4a124f9b511dc6f0afc
 +#endif // ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
 diff --git a/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextAPIDownloadsHaiku.cpp b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextAPIDownloadsHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..3aff4f5e1085e2dcc57a5dd0f5629b6621136079
+index 0000000000000000000000000000000000000000..d328a711056507c672e639d3b91eeb8cd23ca8c7
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextAPIDownloadsHaiku.cpp
-@@ -0,0 +1,432 @@
+@@ -0,0 +1,441 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +#include "config.h"
 +#include "WebExtensionContext.h"
 +#if ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
++#include "DownloadRegistryHaiku.h"
 +#include "WebExtensionContextProxyMessages.h"
 +#include "WebExtensionController.h"
 +#include "WebExtensionDownloadsHaiku.h"
@@ -103680,14 +103703,20 @@ index 0000000000000000000000000000000000000000..3aff4f5e1085e2dcc57a5dd0f5629b66
 +        }
 +    }
 +
++    // Where it goes: a free name (uniquify), the name itself (overwrite), or
++    // the user chooses in a save panel: when the name is taken (prompt) or
++    // always (saveAs).
++    auto destination = DownloadRegistryHaiku::Destination::Unique;
 +    if (RefPtr value = member("conflictAction"_s)) {
 +        auto action = value->asString();
-+        // Existing files are never overwritten and no prompt is shown; every
-+        // action receives a unique name.
 +        if (action != "uniquify"_s && action != "overwrite"_s && action != "prompt"_s) {
 +            fail("conflictAction"_s, "it must be 'uniquify', 'overwrite' or 'prompt'"_s);
 +            return;
 +        }
++        if (action == "overwrite"_s)
++            destination = DownloadRegistryHaiku::Destination::Overwrite;
++        else if (action == "prompt"_s)
++            destination = DownloadRegistryHaiku::Destination::Prompt;
 +    }
 +    for (auto key : { "saveAs"_s, "allowHttpErrors"_s }) {
 +        if (RefPtr value = member(key); value && !value->asBoolean()) {
@@ -103695,6 +103724,8 @@ index 0000000000000000000000000000000000000000..3aff4f5e1085e2dcc57a5dd0f5629b66
 +            return;
 +        }
 +    }
++    if (RefPtr value = member("saveAs"_s); value && *value->asBoolean())
++        destination = DownloadRegistryHaiku::Destination::Ask;
 +    if (RefPtr value = member("incognito"_s)) {
 +        auto incognito = value->asBoolean();
 +        if (!incognito) {
@@ -103760,7 +103791,7 @@ index 0000000000000000000000000000000000000000..3aff4f5e1085e2dcc57a5dd0f5629b66
 +        return;
 +    }
 +
-+    auto result = controller->nativeDownloads().start(*this, *initiatingPage, WTF::move(request), filename);
++    auto result = controller->nativeDownloads().start(*this, *initiatingPage, WTF::move(request), filename, static_cast<uint8_t>(destination));
 +    if (!result) {
 +        fail(nullString(), result.error());
 +        return;
@@ -112430,7 +112461,7 @@ index 0000000000000000000000000000000000000000..271b3a38b4570d6f84669706d5c1beb8
 +#endif
 diff --git a/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionDownloadsHaiku.cpp b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionDownloadsHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..13702e72c61f3a72ac26930a1ed028583e9b6339
+index 0000000000000000000000000000000000000000..8da98a1c50757d4d8d7a3ad9b782337a1feb6fb1
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionDownloadsHaiku.cpp
 @@ -0,0 +1,778 @@
@@ -112542,7 +112573,7 @@ index 0000000000000000000000000000000000000000..13702e72c61f3a72ac26930a1ed02858
 +    return registry ? registry->directory() : String();
 +}
 +
-+std::expected<uint64_t, String> WebExtensionDownloadsHaiku::start(WebExtensionContext& context, WebPageProxy& page, WebCore::ResourceRequest&& request, const String& filename)
++std::expected<uint64_t, String> WebExtensionDownloadsHaiku::start(WebExtensionContext& context, WebPageProxy& page, WebCore::ResourceRequest&& request, const String& filename, uint8_t destination)
 +{
 +    ASSERT(RunLoop::isMain());
 +    auto registry = m_registry.lock();
@@ -112561,7 +112592,7 @@ index 0000000000000000000000000000000000000000..13702e72c61f3a72ac26930a1ed02858
 +    m_initiators.set(identifier, Initiator { context.uniqueIdentifier(), extension->displayName() });
 +    // Registration notifies Started synchronously, which records the item and
 +    // fires onCreated before the caller's promise resolves.
-+    registry->registerDownload(download.get(), { }, filename);
++    registry->registerDownload(download.get(), { }, filename, nullptr, static_cast<DownloadRegistryHaiku::Destination>(destination));
 +    m_initiators.remove(identifier);
 +    if (!m_items.contains(identifier))
 +        return makeUnexpected("The download could not be started"_s);
@@ -113214,10 +113245,10 @@ index 0000000000000000000000000000000000000000..13702e72c61f3a72ac26930a1ed02858
 +#endif // ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
 diff --git a/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionDownloadsHaiku.h b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionDownloadsHaiku.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..c3c8f4b60b701f65b2ba878e3ac72201d87ea65a
+index 0000000000000000000000000000000000000000..f6a9446d830210049b2ea3420c9e0bbfdda86904
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionDownloadsHaiku.h
-@@ -0,0 +1,119 @@
+@@ -0,0 +1,120 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +#pragma once
 +#if ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
@@ -113261,7 +113292,8 @@ index 0000000000000000000000000000000000000000..c3c8f4b60b701f65b2ba878e3ac72201
 +    void attach(const std::shared_ptr<DownloadRegistryHaiku>&, bool incognito, Resumer&& = nullptr);
 +    void shutdown();
 +
-+    std::expected<uint64_t, String> start(WebExtensionContext&, WebPageProxy&, WebCore::ResourceRequest&&, const String& filename);
++    // destination: a DownloadRegistryHaiku::Destination.
++    std::expected<uint64_t, String> start(WebExtensionContext&, WebPageProxy&, WebCore::ResourceRequest&&, const String& filename, uint8_t destination);
 +    std::expected<Ref<JSON::Array>, String> search(const JSON::Object& query) const;
 +    std::expected<Vector<uint64_t>, String> erase(const JSON::Object& query);
 +    std::expected<void, String> cancel(uint64_t identifier);
@@ -119810,10 +119842,10 @@ index 0000000000000000000000000000000000000000..4bacf045a2c597f0e182667aa572dc93
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/DownloadRegistryHaiku.cpp b/Source/WebKit/UIProcess/haiku/DownloadRegistryHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..9486a2b8e61c79b2484756c0547ac7abd29b3795
+index 0000000000000000000000000000000000000000..626cd6f9596afec83c02b275cb317ba3ad1b54bc
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/DownloadRegistryHaiku.cpp
-@@ -0,0 +1,668 @@
+@@ -0,0 +1,735 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#include "config.h"
@@ -119997,6 +120029,9 @@ index 0000000000000000000000000000000000000000..9486a2b8e61c79b2484756c0547ac7ab
 +    std::optional<Resume> resume;
 +    std::optional<uint64_t> resumedFrom;
 +    uint64_t continues { 0 };
++    Destination choice { Destination::Unique };
++    // The engine's question while the host chooses a destination.
++    CompletionHandler<void(AllowOverwrite, String)> pendingDestination;
 +    bool restarted { false };
 +    bool answered { false };
 +    String validator;
@@ -120124,7 +120159,8 @@ index 0000000000000000000000000000000000000000..9486a2b8e61c79b2484756c0547ac7ab
 +    m_observer = WTF::move(observer);
 +}
 +
-+void DownloadRegistryHaiku::registerDownload(DownloadProxy& download, const BMessenger& view, const String& requestedFilename, const Resume* resume)
++void DownloadRegistryHaiku::registerDownload(DownloadProxy& download, const BMessenger& view, const String& requestedFilename, const Resume* resume,
++    Destination choice)
 +{
 +    ASSERT(RunLoop::isMain());
 +    auto identifier = download.downloadID().toUInt64();
@@ -120138,6 +120174,7 @@ index 0000000000000000000000000000000000000000..9486a2b8e61c79b2484756c0547ac7ab
 +    auto item = std::make_unique<Entry>(download, m_listener, m_directory);
 +    item->view = view;
 +    item->requestedFilename = requestedFilename;
++    item->choice = choice;
 +    if (resume)
 +        item->continues = resume->continues;
 +    if (resume && !resume->path.isEmpty()) {
@@ -120302,8 +120339,25 @@ index 0000000000000000000000000000000000000000..9486a2b8e61c79b2484756c0547ac7ab
 +        completion(AllowOverwrite::Yes, item->destination);
 +        return;
 +    }
++    auto suggested = item->requestedFilename.isEmpty() ? filename : item->requestedFilename;
++    if (item->destination.isEmpty() && item->choice != Destination::Unique) {
++        auto name = String::fromUTF8(sanitizedDownloadFilename(BString(suggested.utf8().legacyCStringPointer())).String());
++        auto named = FileSystem::pathByAppendingComponent(item->directory, name);
++        bool taken = FileSystem::fileExists(named);
++        bool reserved = std::ranges::any_of(m_downloads, [&](auto& other) { return other.second.get() != item && other.second->destination == named; });
++        if (item->choice == Destination::Ask || (item->choice == Destination::Prompt && (taken || reserved))) {
++            if (askDestination(*item, name, WTF::move(completion)))
++                return;
++        } else if (item->choice == Destination::Overwrite && !reserved && !name.isEmpty()) {
++            // As asked (Chrome's conflictAction "overwrite"); never a file
++            // another download of this browser is writing.
++            item->destination = named;
++            completion(AllowOverwrite::Yes, item->destination);
++            return;
++        }
++    }
 +    if (item->destination.isEmpty())
-+        item->destination = chooseDestination(*item, item->requestedFilename.isEmpty() ? filename : item->requestedFilename);
++        item->destination = chooseDestination(*item, suggested);
 +    if (item->destination.isEmpty()) {
 +        completion(AllowOverwrite::No, { });
 +        requestCancel(identifier, B_WEBKIT_DOWNLOAD_FAILED, B_IO_ERROR, "Could not choose an unused download destination"_s);
@@ -120312,6 +120366,46 @@ index 0000000000000000000000000000000000000000..9486a2b8e61c79b2484756c0547ac7ab
 +    // The NetworkProcess performs the actual O_EXCL open; a competing external
 +    // creation fails safely. Never pre-create this path or permit overwrite.
 +    completion(AllowOverwrite::No, item->destination);
++}
++
++bool DownloadRegistryHaiku::askDestination(Entry& item, const String& suggestedFilename, CompletionHandler<void(AllowOverwrite, String)>&& completion)
++{
++    BMessage message(B_WEBKIT_DOWNLOAD_DESTINATION);
++    auto add = [&](const char* key, const String& value) {
++        return message.AddString(key, value.isEmpty() ? "" : value.utf8().legacyCStringPointer()) == B_OK;
++    };
++    if (message.AddUInt64("identifier", item.download->downloadID().toUInt64()) != B_OK
++        || !add("suggested_filename", suggestedFilename) || !add("directory", item.directory)
++        || !add("url", item.responseURL.isEmpty() ? item.download->request().url().string() : item.responseURL)
++        || (item.view.IsValid() && message.AddMessenger("view", item.view) != B_OK))
++        return false;
++    item.pendingDestination = WTF::move(completion);
++    if (item.target.SendMessage(&message, static_cast<BHandler*>(nullptr), 0) == B_OK)
++        return true;
++    // No one to ask: the caller picks a free name.
++    completion = std::exchange(item.pendingDestination, nullptr);
++    return false;
++}
++
++void DownloadRegistryHaiku::setDestination(uint64_t identifier, const String& path)
++{
++    ASSERT(RunLoop::isMain());
++    auto* item = entry(identifier);
++    if (!item || !item->pendingDestination)
++        return;
++    if (path.isEmpty()) {
++        requestCancel(identifier, B_WEBKIT_DOWNLOAD_CANCELLED, B_CANCELED, "Download cancelled"_s);
++        return;
++    }
++    auto folder = FileSystem::parentPath(path);
++    if (!path.startsWith('/') || FileSystem::pathFileName(path).isEmpty() || !FileSystem::fileTypeFollowingSymlinks(folder)
++        || *FileSystem::fileTypeFollowingSymlinks(folder) != FileSystem::FileType::Directory) {
++        requestCancel(identifier, B_WEBKIT_DOWNLOAD_FAILED, B_BAD_VALUE, "The chosen destination is not in a folder"_s);
++        return;
++    }
++    item->destination = path;
++    // The user chose this file, knowing it may exist.
++    std::exchange(item->pendingDestination, nullptr)(AllowOverwrite::Yes, path);
 +}
 +
 +void DownloadRegistryHaiku::didCreateDestination(DownloadProxy& download, const String& path)
@@ -120359,6 +120453,8 @@ index 0000000000000000000000000000000000000000..9486a2b8e61c79b2484756c0547ac7ab
 +        return;
 +    auto item = std::move(found->second);
 +    m_downloads.erase(found);
++    if (auto pending = std::exchange(item->pendingDestination, nullptr))
++        pending(AllowOverwrite::No, { });
 +    // The network process leaves an incomplete file where it was: a paused
 +    // download continues in it, so may a failed one if the host wants that.
 +    if (item->ownsFile && !item->destination.isEmpty() && result != B_WEBKIT_DOWNLOAD_SUCCEEDED) {
@@ -120429,6 +120525,9 @@ index 0000000000000000000000000000000000000000..9486a2b8e61c79b2484756c0547ac7ab
 +        return;
 +    item->cancelling = true;
 +    item->keepFile = keepFile;
++    // A download waiting for its destination writes nothing.
++    if (auto pending = std::exchange(item->pendingDestination, nullptr))
++        pending(AllowOverwrite::No, { });
 +    item->cancelResult = result;
 +    item->cancelError = error;
 +    item->cancelDescription = description;
@@ -120484,10 +120583,10 @@ index 0000000000000000000000000000000000000000..9486a2b8e61c79b2484756c0547ac7ab
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/DownloadRegistryHaiku.h b/Source/WebKit/UIProcess/haiku/DownloadRegistryHaiku.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..d5793a4d7ccb0aefa20f0596bd9c22c95419b545
+index 0000000000000000000000000000000000000000..0c9d1d39fd419389852498aa1b949c53c21a5468
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/DownloadRegistryHaiku.h
-@@ -0,0 +1,111 @@
+@@ -0,0 +1,121 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#pragma once
@@ -120567,9 +120666,17 @@ index 0000000000000000000000000000000000000000..d5793a4d7ccb0aefa20f0596bd9c22c9
 +    // empty for a download that never had a file.
 +    status_t prepareResume(const String& path, const String& validator, int64_t expectedSize, Resume&) const;
 +
++    // Where a new download goes: a free name in the download directory
++    // (Unique), the name even if a file has it (Overwrite), the host asks the
++    // user when a file has the name (Prompt) or always (Ask:
++    // B_WEBKIT_DOWNLOAD_DESTINATION, answered by setDestination).
++    enum class Destination : uint8_t { Unique, Overwrite, Prompt, Ask };
 +    // requestedFilename, when not empty, replaces the engine's suggested name.
 +    // It is sanitized and uniquified like every other destination.
-+    void registerDownload(DownloadProxy&, const BMessenger& = { }, const String& requestedFilename = { }, const Resume* = nullptr);
++    void registerDownload(DownloadProxy&, const BMessenger& = { }, const String& requestedFilename = { }, const Resume* = nullptr,
++        Destination = Destination::Unique);
++    // The host's answer to B_WEBKIT_DOWNLOAD_DESTINATION; an empty path cancels.
++    void setDestination(uint64_t, const String& path);
 +    // One observer (the native extension downloads bridge). Null clears it.
 +    void setObserver(Function<void(const DownloadRegistryEventHaiku&)>&&);
 +    const String& directory() const { return m_directory; }
@@ -120589,6 +120696,8 @@ index 0000000000000000000000000000000000000000..d5793a4d7ccb0aefa20f0596bd9c22c9
 +    void finish(uint64_t, uint32_t result, const String& domain = { }, int32_t error = 0, const String& description = { });
 +    status_t notify(Entry&, uint32_t what, uint32_t result = 0, const String& domain = { }, int32_t error = 0, const String& description = { });
 +    String chooseDestination(const Entry&, const String&) const;
++    // Asks the host where to save the download; false when it cannot be asked.
++    bool askDestination(Entry&, const String& suggestedFilename, CompletionHandler<void(AllowOverwrite, String)>&&);
 +
 +    BMessenger m_listener;
 +    Function<void(const DownloadRegistryEventHaiku&)> m_observer;
