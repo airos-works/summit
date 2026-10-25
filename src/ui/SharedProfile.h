@@ -107,6 +107,21 @@ public:
         std::lock_guard lock(fMutex);
         return fNewTabOverride;
     }
+    // The loaded extensions' sidebars (View › Sidebar), which the application
+    // keeps up to date. Not saved.
+    struct ExtensionSidebar {
+        std::string identifier, title, url;
+    };
+    void SetExtensionSidebars(std::vector<ExtensionSidebar> sidebars)
+    {
+        std::lock_guard lock(fMutex);
+        fExtensionSidebars = std::move(sidebars);
+    }
+    std::vector<ExtensionSidebar> ExtensionSidebars() const
+    {
+        std::lock_guard lock(fMutex);
+        return fExtensionSidebars;
+    }
     // The installed extensions by identifier, which the application keeps up
     // to date (a change is announced as kExtensionsInstalledChanged). Not saved.
     void SetInstalledExtensions(std::map<std::string, InstalledExtensionInfo>);
@@ -142,6 +157,7 @@ private:
     std::filesystem::path fRestoredFrom, fDamagedCopy;
     int64_t fRestoredTime = 0;
     std::string fNewTabOverride;
+    std::vector<ExtensionSidebar> fExtensionSidebars;
     std::map<std::string, InstalledExtensionInfo> fInstalledExtensions;
     std::map<std::string, double> fPrivateZoom;
     bool fWritable = true;

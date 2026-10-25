@@ -285,6 +285,8 @@ void ExtensionController::CommitUpdate(const BMessage& loaded)
     entry.loaded = true;
     entry.baseURL = field(loaded, "base_url");
     entry.newTabURL = field(loaded, "new_tab_url");
+    entry.sidebarURL = field(loaded, "sidebar_url");
+    entry.sidebarTitle = field(loaded, "sidebar_title");
     entry.notice = field(loaded, "recovered");
     entry.error.clear();
     std::string error;
@@ -376,6 +378,8 @@ void ExtensionController::MessageReceived(BMessage* message)
             entry.loaded = true;
             entry.baseURL = field(*message, "base_url");
             entry.newTabURL = field(*message, "new_tab_url");
+            entry.sidebarURL = field(*message, "sidebar_url");
+            entry.sidebarTitle = field(*message, "sidebar_title");
             fToken.clear();
         }
         DiscardToken();
@@ -452,6 +456,8 @@ void ExtensionController::MessageReceived(BMessage* message)
     SUMMIT_EXTENSION_TIMING("%s %s", pending == Pending::Load ? "loaded" : "unloaded", entry.installation.identifier.c_str());
     entry.baseURL = entry.loaded ? field(*message, "base_url") : std::string();
     entry.newTabURL = entry.loaded ? field(*message, "new_tab_url") : std::string();
+    entry.sidebarURL = entry.loaded ? field(*message, "sidebar_url") : std::string();
+    entry.sidebarTitle = entry.loaded ? field(*message, "sidebar_title") : std::string();
     entry.error.clear();
     if (entry.loaded) {
         entry.notice = field(*message, "recovered");

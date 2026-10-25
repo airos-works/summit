@@ -20,6 +20,8 @@
 #include <vector>
 
 class BCardLayout;
+class BSplitView;
+class BStringView;
 class BFilePanel;
 class BGroupLayout;
 class BStatusBar;
@@ -90,6 +92,11 @@ public:
 #endif
     uint64 Key() const { return fKey; }
     bool IsPrivate() const { return fPrivate; }
+#if SUMMIT_MODERN_WEBKIT
+    // View › Sidebar: an extension's sidebar page beside the tabs. Called on
+    // the application thread with the window locked (kOpenSidebarOnApp).
+    void ShowSidebar(const std::string& extension, const std::string& url, const std::string& title);
+#endif
     // Closing, or quitting with Summit: no new menus.
     bool IsClosing() const
     {
@@ -467,6 +474,14 @@ private:
     // the tab is selected (tabs.discard, Unload Tab). The reason it cannot,
     // or empty.
     std::string DiscardTab(int64 id);
+#if SUMMIT_MODERN_WEBKIT
+    void CloseSidebar();
+    BSplitView* fContentSplit = nullptr;
+    BGroupView* fSidebar = nullptr;
+    BStringView* fSidebarTitle = nullptr;
+    BWebKitView* fSidebarView = nullptr;
+    std::string fSidebarExtension;
+#endif
     Tab* LeastRecentlyUsedTab();
     // Unloads the longest-unseen background tab when the system is short of memory.
     void UnloadTabsIfMemoryIsLow();
