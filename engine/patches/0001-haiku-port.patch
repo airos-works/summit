@@ -39484,10 +39484,10 @@ index 0000000000000000000000000000000000000000..53bdd111326959b7957f2e6bc5c35eb9
 +#endif
 diff --git a/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaikuMSE.cpp b/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaikuMSE.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..653c3dcefc38ab8ad646b2a6fba5fe8e3e44767b
+index 0000000000000000000000000000000000000000..3c9b1ac409205125b4b5b28112af0e2b26d33a55
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaikuMSE.cpp
-@@ -0,0 +1,3151 @@
+@@ -0,0 +1,3171 @@
 +/*
 + * Copyright (C) 2026 Summit contributors.
 + *
@@ -41836,6 +41836,7 @@ index 0000000000000000000000000000000000000000..653c3dcefc38ab8ad646b2a6fba5fe8e
 +    if (auto previous = std::exchange(m_seekPromise, std::nullopt))
 +        previous->reject(PlatformMediaError::Cancelled);
 +    m_pendingSeek = target;
++    ++m_seekGeneration;
 +    m_seekPromise.emplace(PlatformMediaError::Cancelled);
 +    auto promise = m_seekPromise->promise();
 +    if (m_dash) {
@@ -41876,12 +41877,31 @@ index 0000000000000000000000000000000000000000..653c3dcefc38ab8ad646b2a6fba5fe8e
 +            MSE_TRACE("seek settled at %.3f\n", seekTime.toDouble());
 +            protectedThis->m_pendingSeek.reset();
 +            protectedThis->m_clock.set(toMicroseconds(seekTime));
-+            if (auto seekPromise = std::exchange(protectedThis->m_seekPromise, std::nullopt))
-+                seekPromise->resolve(seekTime);
 +            protectedThis->updatePlaybackState();
++            // "seeked" once the picture there is shown, not when its samples
++            // are queued: a page that draws the video (a thumbnail, a frame
++            // grab) would get the picture from before the seek.
++            protectedThis->resolveSeekWhenShown(seekTime, protectedThis->m_seekGeneration, MonotonicTime::now());
 +        });
 +    });
 +    return promise;
++}
++
++void MediaPlayerPrivateHaikuMSE::resolveSeekWhenShown(MediaTime seekTime, unsigned generation, MonotonicTime since)
++{
++    if (generation != m_seekGeneration || !m_seekPromise)
++        return;
++    // Give up waiting after a second in case no picture comes (no decoder).
++    if (hasVideo() && m_videoRenderer && !m_videoRenderer->hasFrameSinceFlush() && MonotonicTime::now() - since < 1_s) {
++        RunLoop::mainSingleton().dispatchAfter(10_ms, [weakThis = WeakPtr { *this }, seekTime, generation, since] {
++            if (RefPtr protectedThis = weakThis.get())
++                protectedThis->resolveSeekWhenShown(seekTime, generation, since);
++        });
++        return;
++    }
++    MSE_TRACE("seek shown at %.3f after %.1f ms\n", seekTime.toDouble(), (MonotonicTime::now() - since).milliseconds());
++    if (auto seekPromise = std::exchange(m_seekPromise, std::nullopt))
++        seekPromise->resolve(seekTime);
 +}
 +
 +void MediaPlayerPrivateHaikuMSE::setVolume(float volume)
@@ -42641,10 +42661,10 @@ index 0000000000000000000000000000000000000000..653c3dcefc38ab8ad646b2a6fba5fe8e
 +#endif // ENABLE(MEDIA_SOURCE)
 diff --git a/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaikuMSE.h b/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaikuMSE.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..be761bfc668c62f4a24c60f22e85d97e41eed2d2
+index 0000000000000000000000000000000000000000..c31c88c61341d5bc7dc45cd5925fbe308d82f13c
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaikuMSE.h
-@@ -0,0 +1,419 @@
+@@ -0,0 +1,422 @@
 +/*
 + * Copyright (C) 2026 Summit contributors.
 + *
@@ -42887,6 +42907,7 @@ index 0000000000000000000000000000000000000000..be761bfc668c62f4a24c60f22e85d97e
 +    bool hasAudio() const final;
 +    void setPageIsVisible(bool) final { }
 +    Ref<MediaTimePromise> seekToTarget(const SeekTarget&) final;
++    void resolveSeekWhenShown(MediaTime, unsigned generation, MonotonicTime since);
 +    MediaTime currentTime() const final;
 +    bool timeIsProgressing() const final;
 +    MediaTime duration() const final;
@@ -42954,6 +42975,8 @@ index 0000000000000000000000000000000000000000..be761bfc668c62f4a24c60f22e85d97e
 +    MediaTime m_duration { MediaTime::invalidTime() };
 +    std::optional<SeekTarget> m_pendingSeek;
 +    std::optional<MediaTimePromise::AutoRejectProducer> m_seekPromise;
++    // Seeks so far: a seek resolves once its picture is shown, unless a newer one came.
++    unsigned m_seekGeneration { 0 };
 +    MediaPlayer::NetworkState m_networkState { MediaPlayer::NetworkState::Empty };
 +    bool m_paused { true };
 +    bool m_stalled { false };
