@@ -48,8 +48,14 @@ the encoder's extradata (FLAC's STREAMINFO given a `fLaC` start and block
 header; Vorbis's headers as they are), and `flac: { compressLevel }` sets
 FFmpeg's compression level.
 
-Not yet: HE-AAC encoding, AV1 and HEVC, and hardware
-decoders (NVDEC, Cedar).
+AV1 (`av01.*`, through dav1d) and HEVC (`hev1.*`/`hvc1.*`, FFmpeg's
+decoder, `hvcC` descriptions turned into Annex B as `avcC` ones are) are
+decoded through FFmpeg, by the same decoder H.264 uses (named for each;
+neither is offered to WebRTC). WebKit's `WebCodecsAV1Enabled` and
+`WebCodecsHEVCEnabled` are on for Haiku. They are not encoded.
+
+Not yet: HE-AAC, AV1 and HEVC encoding, and hardware decoders (NVDEC,
+Cedar).
 
 H.264 with B-frames: libavcodec gives pictures in presentation order,
 holding B-frames back until their references are decoded. The decoder used
