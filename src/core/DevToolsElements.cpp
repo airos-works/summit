@@ -1553,6 +1553,75 @@ void DOMModel::StylesArrived()
     fChanges.styles = true;
 }
 
+std::optional<std::array<uint8_t, 4>> ParseCSSColor(const std::string& value)
+{
+    auto text = LowerCase(Trim(value));
+    if (text.empty()) return std::nullopt;
+    const auto hexDigit = [](char c) -> int {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        return -1;
+    };
+    if (text[0] == '#') {
+        const auto digits = text.substr(1);
+        if (std::any_of(digits.begin(), digits.end(), [&](char c) { return hexDigit(c) < 0; })) return std::nullopt;
+        std::array<uint8_t, 4> color {0, 0, 0, 255};
+        if (digits.size() == 3 || digits.size() == 4) {
+            for (size_t i = 0; i < digits.size(); ++i) color[i] = static_cast<uint8_t>(hexDigit(digits[i]) * 17);
+            return color;
+        }
+        if (digits.size() == 6 || digits.size() == 8) {
+            for (size_t i = 0; i < digits.size() / 2; ++i)
+                color[i] = static_cast<uint8_t>(hexDigit(digits[2 * i]) * 16 + hexDigit(digits[2 * i + 1]));
+            return color;
+        }
+        return std::nullopt;
+    }
+    if (text.rfind("rgb(", 0) == 0 || text.rfind("rgba(", 0) == 0) {
+        const auto open = text.find('('), close = text.rfind(')');
+        if (close == std::string::npos || close < open) return std::nullopt;
+        auto inner = text.substr(open + 1, close - open - 1);
+        std::replace(inner.begin(), inner.end(), ',', ' ');
+        std::replace(inner.begin(), inner.end(), '/', ' ');
+        std::vector<std::string> parts;
+        for (size_t from = 0; from < inner.size();) {
+            const auto start = inner.find_first_not_of(' ', from);
+            if (start == std::string::npos) break;
+            const auto end = std::min(inner.find(' ', start), inner.size());
+            parts.push_back(inner.substr(start, end - start));
+            from = end;
+        }
+        if (parts.size() != 3 && parts.size() != 4) return std::nullopt;
+        std::array<uint8_t, 4> color {0, 0, 0, 255};
+        for (size_t i = 0; i < parts.size(); ++i) {
+            char* end = nullptr;
+            const double number = std::strtod(parts[i].c_str(), &end);
+            if (end == parts[i].c_str()) return std::nullopt;
+            const bool percent = *end == '%';
+            const double scaled = percent ? number / 100 * 255 : i < 3 ? number : number * 255;
+            color[i] = static_cast<uint8_t>(std::clamp(std::round(scaled), 0.0, 255.0));
+        }
+        return color;
+    }
+    static const std::map<std::string, std::array<uint8_t, 4>> named = {
+        {"transparent", {0, 0, 0, 0}}, {"black", {0, 0, 0, 255}}, {"white", {255, 255, 255, 255}}, {"red", {255, 0, 0, 255}},
+        {"green", {0, 128, 0, 255}}, {"blue", {0, 0, 255, 255}}, {"yellow", {255, 255, 0, 255}}, {"orange", {255, 165, 0, 255}},
+        {"purple", {128, 0, 128, 255}}, {"gray", {128, 128, 128, 255}}, {"grey", {128, 128, 128, 255}}, {"silver", {192, 192, 192, 255}},
+        {"maroon", {128, 0, 0, 255}}, {"navy", {0, 0, 128, 255}}, {"teal", {0, 128, 128, 255}}, {"olive", {128, 128, 0, 255}},
+        {"lime", {0, 255, 0, 255}}, {"aqua", {0, 255, 255, 255}}, {"cyan", {0, 255, 255, 255}}, {"fuchsia", {255, 0, 255, 255}},
+        {"magenta", {255, 0, 255, 255}}};
+    if (const auto found = named.find(text); found != named.end()) return found->second;
+    return std::nullopt;
+}
+
+std::string CSSColorText(const std::array<uint8_t, 4>& color)
+{
+    char text[16];
+    if (color[3] == 255) std::snprintf(text, sizeof text, "#%02x%02x%02x", color[0], color[1], color[2]);
+    else std::snprintf(text, sizeof text, "#%02x%02x%02x%02x", color[0], color[1], color[2], color[3]);
+    return text;
+}
+
 std::string DOMModel::ComputedValue(const std::string& property) const
 {
     // The list is sorted by name.

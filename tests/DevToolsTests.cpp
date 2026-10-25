@@ -1196,6 +1196,14 @@ static void TestElements()
 
 static void TestElementStyles()
 {
+    // Colours, for the swatches and the picker.
+    using Color = std::array<uint8_t, 4>;
+    CHECK(ParseCSSColor("#fff") == Color({255, 255, 255, 255}) && ParseCSSColor(" #FF000080 ") == Color({255, 0, 0, 128}));
+    CHECK(ParseCSSColor("rgb(51, 51, 51)") == Color({51, 51, 51, 255}) && ParseCSSColor("rgba(0,0,0,0.5)") == Color({0, 0, 0, 128}));
+    CHECK(ParseCSSColor("rgb(100% 0% 0% / 50%)") == Color({255, 0, 0, 128}) && ParseCSSColor("Navy") == Color({0, 0, 128, 255}));
+    CHECK(!ParseCSSColor("var(--x)") && !ParseCSSColor("#ggg") && !ParseCSSColor("12px") && !ParseCSSColor("rgb(1,2)"));
+    CHECK(CSSColorText({255, 0, 0, 255}) == "#ff0000" && CSSColorText({0, 0, 0, 128}) == "#00000080");
+
     // Blocks as shown: the element's own from the strongest, then inherited.
     StyleBlock inlined, rule, weak, agent, parent;
     inlined.kind = StyleBlock::Inline;
