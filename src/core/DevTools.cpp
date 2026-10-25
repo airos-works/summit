@@ -285,6 +285,10 @@ void ReadResponse(Request& request, const json& response)
         phases.requestStart = read("requestStart");
         phases.responseStart = read("responseStart");
         phases.responseEnd = read("responseEnd");
+        // WebKit sends 0 for what did not happen: no TLS on http, and no
+        // phases at all for what a cache answered.
+        if (phases.tlsStart <= 0) phases.tlsStart = -1;
+        if (phases.responseStart <= 0) phases.known = false;
     }
     // What went over the network, which has more than the page asked for.
     if (const auto& sent = Member(response, "requestHeaders"); sent.is_object() && !sent.empty())
@@ -1021,13 +1025,27 @@ void Session::DebuggerCommand(const std::string& command)
     SendToTarget(fPageTarget, "Debugger." + command, "{}");
 }
 
+namespace {
+// What blocks addresses with pattern in them: WebKit's plain patterns match
+// only a whole address, so an escaped regular expression.
+std::string Interception(const std::string& pattern)
+{
+    std::string expression;
+    for (const char c : pattern) {
+        if (std::strchr("\\^$.|?*+()[]{}/", c)) expression += '\\';
+        expression += c;
+    }
+    return "{\"url\":" + Quoted(expression) + ",\"stage\":\"request\",\"caseSensitive\":false,\"isRegex\":true}";
+}
+}
+
 void Session::ApplyNetworkSettings(const std::string& target)
 {
     if (fCacheDisabled) SendToTarget(target, "Network.setResourceCachingDisabled", "{\"disabled\":true}");
     if (fBlocked.empty()) return;
     SendToTarget(target, "Network.setInterceptionEnabled", "{\"enabled\":true}");
     for (const auto& pattern : fBlocked)
-        SendToTarget(target, "Network.addInterception", "{\"url\":" + Quoted(pattern) + ",\"stage\":\"request\",\"caseSensitive\":false,\"isRegex\":false}");
+        SendToTarget(target, "Network.addInterception", Interception(pattern));
 }
 
 void Session::SetCacheDisabled(bool disabled)
@@ -1044,7 +1062,7 @@ void Session::BlockURL(const std::string& pattern)
     fBlocked.push_back(pattern);
     for (const auto& [target, provisional] : fTargets) {
         if (fBlocked.size() == 1) SendToTarget(target, "Network.setInterceptionEnabled", "{\"enabled\":true}");
-        SendToTarget(target, "Network.addInterception", "{\"url\":" + Quoted(pattern) + ",\"stage\":\"request\",\"caseSensitive\":false,\"isRegex\":false}");
+        SendToTarget(target, "Network.addInterception", Interception(pattern));
     }
 }
 
@@ -1053,7 +1071,7 @@ void Session::UnblockAll()
     if (fBlocked.empty()) return;
     for (const auto& [target, provisional] : fTargets) {
         for (const auto& pattern : fBlocked)
-            SendToTarget(target, "Network.removeInterception", "{\"url\":" + Quoted(pattern) + ",\"stage\":\"request\",\"caseSensitive\":false,\"isRegex\":false}");
+            SendToTarget(target, "Network.removeInterception", Interception(pattern));
         SendToTarget(target, "Network.setInterceptionEnabled", "{\"enabled\":false}");
     }
     fBlocked.clear();
