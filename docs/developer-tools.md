@@ -217,6 +217,32 @@ levels are ticked.
 
 ![The Console: messages coloured by severity](screenshots/developer-tools-console.png)
 
+### Sources
+
+The page's scripts and a debugger, from the inspector's `Debugger` domain,
+which is turned on the first time the tab is shown (it costs the page
+something). On the left, the page's scripts by name (`app.js`; a script in a
+document is `(inline) page.html:12`); *Extension scripts* also lists what
+extensions and the browser add to pages and `eval()` code. Choosing one
+shows its source, coloured, with line numbers.
+
+**Breakpoints**: a click in the margin beside a line sets one (a red dot)
+or clears it. Breakpoints belong to the script's address and line, so they
+hold across reloads and in every process of the page.
+
+**Paused** (at a breakpoint, a `debugger` statement, or **Pause**): the
+status says why and where, the paused line is marked, the right shows the
+call stack (choosing a frame shows its script and line) and that frame's
+scopes as an object tree (local, closure, global, `this`), opened as the
+Console's objects are. **Resume**, **Step Over**, **Step Into** and **Step
+Out** move on.
+
+Test actions: `sources-open PART`, `sources-break LINE` (from 1, toggles, in
+the selected script), `sources-pause`, `sources-resume`, `sources-step
+over|into|out`, `sources-frame N`, `sources-expand TEXT`,
+`sources-content-scripts on|off`; the state's `sources` has the scripts,
+breakpoints, frames and scope rows.
+
 ### Storage
 
 The left of the tab lists **Local Storage**, **Session Storage** and

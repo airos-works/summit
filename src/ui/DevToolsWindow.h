@@ -52,6 +52,7 @@ private:
     NetworkPanel* fNetwork;
     ConsolePanel* fConsole;
     StoragePanel* fStorage;
+    SourcesPanel* fSources;
     int32 fShownPanel = -1;
     bool fSyncing = false;
     bool fOverflowShown = false;

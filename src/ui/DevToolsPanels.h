@@ -2,6 +2,7 @@
 #if SUMMIT_MODERN_WEBKIT
 #include "SourceView.h"
 #include "core/DevTools.h"
+#include <OutlineListView.h>
 #include <View.h>
 #include <map>
 #include <memory>
@@ -13,9 +14,9 @@ class BCardLayout;
 class BCheckBox;
 class BColumnListView;
 class BFilePanel;
+class BListView;
 class BMenuField;
 class BMessageRunner;
-class BOutlineListView;
 class BRow;
 class BSplitView;
 class BStringView;
@@ -33,6 +34,35 @@ public:
     virtual void Sync() = 0;
 protected:
     ~DevToolsHost() = default;
+};
+
+// Objects as a tree: opening a row asks the page for the object's properties
+// (Runtime.getDisplayableProperties), and an object property opens in turn.
+// The Console shows an entry's objects in one, the Sources panel a paused
+// frame's scopes (DevToolsConsole.cpp).
+class ObjectTree : public BOutlineListView {
+public:
+    ObjectTree(devtools::Session& session, DevToolsHost& host);
+    // Rows for these objects; a single one opens at once.
+    void ShowObjects(const std::vector<devtools::ConsoleObject>& objects);
+    void Clear();
+    // The page answered for these objects.
+    void Answered(const std::vector<std::string>& objects);
+    // Opens the first shown row whose text starts with prefix (tests).
+    bool OpenRow(const std::string& prefix);
+    // The rows shown, indented by depth.
+    std::vector<std::string> Rows();
+    void MouseDown(BPoint where) override;
+    void KeyDown(const char* bytes, int32 count) override;
+
+private:
+    struct Item;
+    void AddObject(const std::string& text, const std::string& objectId, Item* parent);
+    void Open(Item* item);
+    void LoadExpanded();
+    void Fill(Item* item);
+    devtools::Session& fSession;
+    DevToolsHost& fHost;
 };
 
 // A request's or response's body: formatted when it is JSON, XML or HTML,
@@ -255,7 +285,6 @@ public:
 
 private:
     class Log;
-    class ObjectTree;
     bool Shows(const devtools::ConsoleEntry& entry) const;
     // Shows the objects of the entry (its serial) in the object tree.
     void Inspect(uint64 serial);
@@ -281,6 +310,47 @@ private:
     BSplitView* fSplit;
     ObjectTree* fObjects;
     BTextControl* fInput;
+};
+
+// The page's scripts, their breakpoints, and the call stack and scopes while
+// the page is paused (the inspector's Debugger domain, DevToolsSources.cpp).
+// The debugger is turned on when the panel is first shown.
+class SourcesPanel : public BView {
+public:
+    SourcesPanel(devtools::Session& session, DevToolsHost& host);
+    void AttachedToWindow() override;
+    void MessageReceived(BMessage* message) override;
+    void Apply(const devtools::Changes& changes);
+    void SetShown(bool shown);
+    bool Command(const std::string& action, const std::string& argument, std::string& error);
+    std::string StateJSON();
+
+private:
+    class Code;
+    void RebuildScripts();
+    void SelectScript(const std::string& id);
+    void ShowSource();
+    void ShowMarkers();
+    void ShowPause();
+    void SelectFrame(int index);
+    void ToggleBreakpoint(int line);
+    const devtools::Script* Selected() const;
+    devtools::Session& fSession;
+    DevToolsHost& fHost;
+    std::string fSelectedScript;
+    std::vector<std::string> fScriptIDs;
+    int fFrame = -1;
+    bool fShownOnce = false;
+    BButton* fPauseResume;
+    BButton* fStepOver;
+    BButton* fStepInto;
+    BButton* fStepOut;
+    BCheckBox* fContentScripts;
+    BStringView* fStatus;
+    BListView* fScripts;
+    Code* fCode;
+    BListView* fFrames;
+    ObjectTree* fScopes;
 };
 }
 #endif

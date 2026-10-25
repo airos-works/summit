@@ -494,6 +494,60 @@ struct ProtocolReader {
         session.Changed(*request);
     }
 
+    // Debugger.*: the page's scripts and where it is paused.
+    static void DebuggerEvent(Session& session, const std::string& target, const std::string& method, const json& parameters)
+    {
+        if (target != session.fPageTarget) return;
+        auto& state = session.fDebugger;
+        if (method == "Debugger.scriptParsed") {
+            Script script;
+            script.id = Text(Member(parameters, "scriptId"));
+            script.url = Text(Member(parameters, "sourceURL"));
+            if (script.url.empty()) script.url = Text(Member(parameters, "url"));
+            script.startLine = static_cast<int>(Number(Member(parameters, "startLine")));
+            script.contentScript = Flag(Member(parameters, "isContentScript"));
+            if (script.id.empty()) return;
+            session.fScripts[script.id] = std::move(script);
+            session.fChanges.scripts = true;
+        } else if (method == "Debugger.globalObjectCleared") {
+            session.fScripts.clear();
+            state.paused = false;
+            state.frames.clear();
+            session.fChanges.scripts = session.fChanges.debugger = true;
+        } else if (method == "Debugger.paused") {
+            state.paused = true;
+            state.reason = Text(Member(parameters, "reason"));
+            state.frames.clear();
+            if (const auto& frames = Member(parameters, "callFrames"); frames.is_array()) {
+                for (const auto& item : frames) {
+                    DebugFrame frame;
+                    frame.callFrameId = Text(Member(item, "callFrameId"));
+                    frame.function = Text(Member(item, "functionName"));
+                    const auto& location = Member(item, "location");
+                    frame.scriptId = Text(Member(location, "scriptId"));
+                    frame.line = static_cast<int>(Number(Member(location, "lineNumber")));
+                    frame.column = static_cast<int>(Number(Member(location, "columnNumber")));
+                    frame.thisObjectId = Text(Member(Member(item, "this"), "objectId"));
+                    if (const auto& scopes = Member(item, "scopeChain"); scopes.is_array()) {
+                        for (const auto& scope : scopes)
+                            frame.scopes.push_back({Text(Member(scope, "type")), Text(Member(scope, "name")), Text(Member(Member(scope, "object"), "objectId"))});
+                    }
+                    state.frames.push_back(std::move(frame));
+                }
+            }
+            session.fChanges.debugger = true;
+        } else if (method == "Debugger.resumed") {
+            state.paused = false;
+            state.frames.clear();
+            session.fChanges.debugger = true;
+        } else if (method == "Debugger.breakpointResolved") {
+            const auto id = Text(Member(parameters, "breakpointId"));
+            for (auto& breakpoint : session.fBreakpoints)
+                if (breakpoint.id == id) breakpoint.resolved = true;
+            session.fChanges.debugger = true;
+        }
+    }
+
     static void MessageAdded(Session& session, const json& message)
     {
         const auto type = Text(Member(message, "type"));
@@ -631,6 +685,22 @@ struct ProtocolReader {
                 }
             }
             session.fChanges.storage = true;
+        } else if (pending.kind == Session::Pending::ScriptSource) {
+            const auto found = session.fScripts.find(pending.origin);
+            if (found == session.fScripts.end()) return;
+            auto& script = found->second;
+            script.sourceWaiting = false;
+            script.sourceLoaded = true;
+            script.source = Text(Member(result, "scriptSource"));
+            script.sourceError = error;
+            session.fChanges.sources.push_back(script.id);
+        } else if (pending.kind == Session::Pending::SetBreakpoint) {
+            for (auto& breakpoint : session.fBreakpoints) {
+                if (breakpoint.url + '\n' + std::to_string(breakpoint.line) != pending.origin) continue;
+                if (const auto id = Text(Member(result, "breakpointId")); !id.empty()) breakpoint.id = id;
+                if (const auto& locations = Member(result, "locations"); locations.is_array() && !locations.empty()) breakpoint.resolved = true;
+            }
+            session.fChanges.debugger = true;
         } else if (pending.kind == Session::Pending::DatabaseNames) {
             auto& databases = session.fDatabases[pending.origin];
             databases.waiting = false;
@@ -861,7 +931,82 @@ void Session::TargetCreated(const std::string& target, bool provisional, bool pa
     fPending.rbegin()->second.origin = target;
     if (fPreserveRequests) SendToTarget(target, "Network.setClearResourceDataOnNavigate", "{\"clearResourceDataOnNavigate\":false}");
     ApplyNetworkSettings(target);
+    if (fDebugger.enabled) {
+        SendToTarget(target, "Debugger.enable", "{}");
+        for (auto& breakpoint : fBreakpoints) SendBreakpoint(target, breakpoint);
+    }
     if (paused) Send("Target.resume", "{\"targetId\":" + Quoted(target) + "}");
+}
+
+std::string Script::Label() const
+{
+    if (url.empty()) return "(anonymous " + id + ")";
+    // A script in a document starts after the document's first line.
+    return startLine > 0 ? "(inline) " + Location(url, startLine + 1, 0) : Location(url, 0, 0);
+}
+
+std::string Script::Place(int line) const
+{
+    return url.empty() ? "(anonymous):" + std::to_string(line) : Location(url, line, 0);
+}
+
+const Script* Session::FindScript(const std::string& id) const
+{
+    const auto found = fScripts.find(id);
+    return found == fScripts.end() ? nullptr : &found->second;
+}
+
+void Session::EnableDebugger()
+{
+    if (fDebugger.enabled) return;
+    fDebugger.enabled = true;
+    for (const auto& [target, provisional] : fTargets) SendToTarget(target, "Debugger.enable", "{}");
+}
+
+void Session::LoadScriptSource(const std::string& id)
+{
+    auto found = fScripts.find(id);
+    if (found == fScripts.end() || found->second.sourceLoaded || found->second.sourceWaiting || fPageTarget.empty()) return;
+    found->second.sourceWaiting = true;
+    SendToTarget(fPageTarget, "Debugger.getScriptSource", "{\"scriptId\":" + Quoted(id) + "}", Pending::ScriptSource);
+    fPending.rbegin()->second.origin = id;
+}
+
+void Session::SendBreakpoint(const std::string& target, Breakpoint& breakpoint)
+{
+    SendToTarget(target, "Debugger.setBreakpointByUrl", "{\"lineNumber\":" + std::to_string(breakpoint.line) + ",\"url\":"
+        + Quoted(breakpoint.url) + "}", Pending::SetBreakpoint);
+    fPending.rbegin()->second.origin = breakpoint.url + '\n' + std::to_string(breakpoint.line);
+}
+
+void Session::SetBreakpoint(const std::string& url, int line)
+{
+    if (url.empty() || line < 0) return;
+    if (std::any_of(fBreakpoints.begin(), fBreakpoints.end(), [&](const Breakpoint& known) { return known.url == url && known.line == line; }))
+        return;
+    fBreakpoints.push_back({url, line, { }, false});
+    if (fDebugger.enabled)
+        for (const auto& [target, provisional] : fTargets) SendBreakpoint(target, fBreakpoints.back());
+    fChanges.debugger = true;
+}
+
+void Session::RemoveBreakpoint(const std::string& url, int line)
+{
+    const auto found = std::find_if(fBreakpoints.begin(), fBreakpoints.end(), [&](const Breakpoint& known) { return known.url == url && known.line == line; });
+    if (found == fBreakpoints.end()) return;
+    // WebKit names a breakpoint by address, line and column.
+    const auto id = found->id.empty() ? url + ':' + std::to_string(line) + ":0" : found->id;
+    if (fDebugger.enabled)
+        for (const auto& [target, provisional] : fTargets) SendToTarget(target, "Debugger.removeBreakpoint", "{\"breakpointId\":" + Quoted(id) + "}");
+    fBreakpoints.erase(found);
+    fChanges.debugger = true;
+}
+
+void Session::DebuggerCommand(const std::string& command)
+{
+    static const char* const commands[] = {"pause", "resume", "stepOver", "stepInto", "stepOut"};
+    if (fPageTarget.empty() || std::none_of(std::begin(commands), std::end(commands), [&](const char* known) { return command == known; })) return;
+    SendToTarget(fPageTarget, "Debugger." + command, "{}");
 }
 
 void Session::ApplyNetworkSettings(const std::string& target)
@@ -997,6 +1142,7 @@ void Session::FromTarget(const std::string& target, std::string_view text)
     else if (method == "Network.loadingFailed") ProtocolReader::LoadingFailed(*this, target, parameters);
     else if (method == "Network.requestServedFromMemoryCache") ProtocolReader::ServedFromMemoryCache(*this, target, parameters);
     else if (method.rfind("Network.webSocket", 0) == 0) ProtocolReader::WebSocket(*this, target, method, parameters);
+    else if (method.rfind("Debugger.", 0) == 0) ProtocolReader::DebuggerEvent(*this, target, method, parameters);
     else if (method == "Network.requestIntercepted") {
         // Blocked if its address has a blocked part; on its way otherwise.
         const auto id = Text(Member(parameters, "requestId"));
