@@ -111,7 +111,9 @@ public:
         // JITDump files (JSC_useJITDump=1), where JavaScriptCore puts them:
         // this helper has Summit's environment, as the web processes do.
         const char* directory = std::getenv("JSC_jitDumpDirectory");
-        fJit.Load(directory && *directory ? directory : "/tmp", team);
+        fJitDirectory = directory && *directory ? directory : "/tmp";
+        fTeam = team;
+        LoadJit();
     }
     ~Symbols()
     {
@@ -131,7 +133,14 @@ public:
         char symbol[1024] = "", image[B_PATH_NAME_LENGTH] = "";
         void* base = nullptr;
         bool exact = false;
-        const auto* jit = InText(address) ? nullptr : fJit.Find(address);
+        const bool inText = InText(address);
+        const auto* jit = inText ? nullptr : fJit.Find(address);
+        // Code compiled since the dumps were read (while sampling): read them
+        // again, at most every quarter second, and name again what was not.
+        if (!inText && !jit && system_time() - fJitLoadedAt > 250000) {
+            LoadJit();
+            jit = fJit.Find(address);
+        }
         if (jit) {
             char offset[32];
             std::snprintf(offset, sizeof(offset), "+0x%lx", static_cast<unsigned long>(address - jit->start));
@@ -149,8 +158,17 @@ public:
             char hex[32];
             std::snprintf(hex, sizeof(hex), "0x%lx", static_cast<unsigned long>(address));
             text = hex;
+            if (!inText) fUnnamed.push_back(address);
         }
         return fNames[address] = text;
+    }
+    void LoadJit()
+    {
+        fJit = summit::JitCodeMap();
+        fJit.Load(fJitDirectory, fTeam);
+        fJitLoadedAt = system_time();
+        for (const addr_t address : fUnnamed) fNames.erase(address);
+        fUnnamed.clear();
     }
     // The function alone, for counting samples.
     std::string Function(addr_t address)
@@ -172,6 +190,11 @@ private:
     SymbolLookup* fLookup = nullptr;
     std::vector<std::pair<addr_t, addr_t>> fText;
     summit::JitCodeMap fJit;
+    std::string fJitDirectory;
+    team_id fTeam = -1;
+    bigtime_t fJitLoadedAt = 0;
+    // Addresses outside every image that no dump named yet.
+    std::vector<addr_t> fUnnamed;
     std::map<addr_t, std::string> fNames;
 };
 
