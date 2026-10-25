@@ -155746,6 +155746,71 @@ index 0000000000000000000000000000000000000000..7342ae978b799129ac64d60995021667
 +{
 +}
 +}
+diff --git a/Source/WebKit/WebProcess/Inspector/WebInspectorBackendClient.cpp b/Source/WebKit/WebProcess/Inspector/WebInspectorBackendClient.cpp
+index b3ea7fd151b4d02d1bf1c2f252a17b64b25cb9d5..e4152fff4a9d7ba262109ae61fcbf47e765fc684 100644
+--- a/Source/WebKit/WebProcess/Inspector/WebInspectorBackendClient.cpp
++++ b/Source/WebKit/WebProcess/Inspector/WebInspectorBackendClient.cpp
+@@ -26,6 +26,11 @@
+ #include "config.h"
+ #include "WebInspectorBackendClient.h"
+ 
++#if PLATFORM(HAIKU)
++#include <cstdlib>
++#include <cstring>
++#endif
++
+ #include "DrawingArea.h"
+ #include "WebInspectorBackend.h"
+ #include "WebPage.h"
+@@ -159,12 +164,34 @@ void WebInspectorBackendClient::didResizeMainFrame(LocalFrame*)
+         inspector->updateDockingAvailability();
+ }
+ 
++#if PLATFORM(HAIKU)
++// The page is painted without a layer tree (NonCompositedFrameRenderer):
++// compositing is off, or SUMMIT_COORDINATED_COMPOSITING=0 turned it off, as
++// DrawingAreaCoordinatedGraphics decides. The highlight's page overlay is
++// then never drawn; WebPage::drawRect draws the highlight instead.
++static bool paintsWithoutCompositingHaiku(WebPage& page)
++{
++    static const bool compositingOff = [] {
++        const char* value = getenv("SUMMIT_COORDINATED_COMPOSITING");
++        return value && !strcmp(value, "0");
++    }();
++    return compositingOff || !page.corePage()->settings().acceleratedCompositingEnabled();
++}
++#endif
++
+ void WebInspectorBackendClient::highlight()
+ {
+     RefPtr page = m_page.get();
+     if (!page)
+         return;
+ 
++#if PLATFORM(HAIKU)
++    if (paintsWithoutCompositingHaiku(*page)) {
++        page->drawingArea()->setNeedsDisplay();
++        return;
++    }
++#endif
++
+     if (!page->corePage()->settings().acceleratedCompositingEnabled()) {
+ #if PLATFORM(GTK) || PLATFORM(WIN) || PLATFORM(PLAYSTATION) || PLATFORM(WPE)
+         // FIXME: It can be optimized by marking only highlighted rect dirty.
+@@ -198,6 +225,13 @@ void WebInspectorBackendClient::hideHighlight()
+     if (!page)
+         return;
+ 
++#if PLATFORM(HAIKU)
++    if (paintsWithoutCompositingHaiku(*page)) {
++        page->drawingArea()->setNeedsDisplay();
++        return;
++    }
++#endif
++
+ #if PLATFORM(GTK) || PLATFORM(WIN) || PLATFORM(PLAYSTATION) || PLATFORM(WPE)
+     if (!page->corePage()->settings().acceleratedCompositingEnabled()) {
+         // FIXME: It can be optimized by marking only highlighted rect dirty.
 diff --git a/Source/WebKit/WebProcess/Network/WebLoaderStrategy.cpp b/Source/WebKit/WebProcess/Network/WebLoaderStrategy.cpp
 index e3e30a5f161e08445ed6085d5b5cef2b9fcfd038..e78ae2da3d528ab3d437a836c4998ebdb93e609d 100644
 --- a/Source/WebKit/WebProcess/Network/WebLoaderStrategy.cpp
@@ -161032,7 +161097,7 @@ index ef7265c051a15504903ee0421ca40f29d7b47b9c..a8aeff45e3fcdd7b4142cf5751ed95f0
      const std::unique_ptr<WebCore::WheelEventDeltaFilter> m_recentWheelEventDeltaFilter;
  #if ENABLE(IOS_TOUCH_EVENTS)
 diff --git a/Source/WebKit/WebProcess/WebPage/WebPage.cpp b/Source/WebKit/WebProcess/WebPage/WebPage.cpp
-index 11766a98414863026a09ccea0dbbdd432db4444f..4a9d7da063d7f392f03f53452fa7fd2c0a87bc11 100644
+index 11766a98414863026a09ccea0dbbdd432db4444f..f2fff14291a8a863f62408d7515d45b21fcf4a38 100644
 --- a/Source/WebKit/WebProcess/WebPage/WebPage.cpp
 +++ b/Source/WebKit/WebProcess/WebPage/WebPage.cpp
 @@ -505,7 +505,7 @@
@@ -161084,7 +161149,23 @@ index 11766a98414863026a09ccea0dbbdd432db4444f..4a9d7da063d7f392f03f53452fa7fd2c
      completionHandler(coreFrame->loader().shouldClose());
  }
  
-@@ -4997,7 +5007,17 @@ void WebPage::setUserAgent(String&& userAgent)
+@@ -2937,6 +2947,15 @@ void WebPage::drawRect(GraphicsContext& graphicsContext, const IntRect& rect)
+ 
+     protect(m_mainFrame->coreLocalFrame()->view())->paint(graphicsContext, rect);
+ 
++#if PLATFORM(HAIKU)
++    // Only pages painted without a layer tree come here: the inspector's
++    // highlight is drawn over them, as its page overlay would be.
++    if (m_page->inspectorController().enabled() && m_page->inspectorController().shouldShowOverlay()) {
++        graphicsContext.beginTransparencyLayer(1);
++        m_page->inspectorController().drawHighlight(graphicsContext);
++        graphicsContext.endTransparencyLayer();
++    }
++#endif
+ #if PLATFORM(GTK) || PLATFORM(WIN) || PLATFORM(PLAYSTATION) || PLATFORM(WPE)
+     if (!m_page->settings().acceleratedCompositingEnabled() && m_page->inspectorController().enabled() && m_page->inspectorController().shouldShowOverlay()) {
+         graphicsContext.beginTransparencyLayer(1);
+@@ -4997,7 +5016,17 @@ void WebPage::setUserAgent(String&& userAgent)
  
  void WebPage::setHasCustomUserAgent(bool hasCustomUserAgent)
  {
@@ -161102,7 +161183,7 @@ index 11766a98414863026a09ccea0dbbdd432db4444f..4a9d7da063d7f392f03f53452fa7fd2c
  }
  
  void WebPage::suspendActiveDOMObjectsAndAnimations()
-@@ -5461,7 +5481,7 @@ void WebPage::updatePreferences(const WebPreferencesStore& store)
+@@ -5461,7 +5490,7 @@ void WebPage::updatePreferences(const WebPreferencesStore& store)
  
      updateSettingsGenerated(store, settings);
  
@@ -161111,7 +161192,7 @@ index 11766a98414863026a09ccea0dbbdd432db4444f..4a9d7da063d7f392f03f53452fa7fd2c
      if (!settings.acceleratedCompositingEnabled()) {
          WEBPAGE_RELEASE_LOG(Layers, "updatePreferences: acceleratedCompositingEnabled setting was false. WebKit cannot function in this mode; changing setting to true");
          settings.setAcceleratedCompositingEnabled(true);
-@@ -8450,6 +8470,13 @@ void WebPage::didCommitLoad(WebFrame* frame)
+@@ -8450,6 +8479,13 @@ void WebPage::didCommitLoad(WebFrame* frame)
      dismissVolumetricScenesForDetachedElements();
  #endif
  
