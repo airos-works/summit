@@ -623,6 +623,25 @@ static void TestObjectTree()
     // Clearing the console forgets what was looked into.
     session.ClearConsole();
     CHECK(!session.Properties("{\"id\":7}"));
+
+    // Storage: a cookie is set as given; a session one has no expiry.
+    Sent(session);
+    Cookie cookie;
+    cookie.name = "theme";
+    cookie.value = "dark";
+    cookie.domain = "example.com";
+    cookie.session = true;
+    cookie.secure = true;
+    session.SetCookie(cookie);
+    commands = Sent(session);
+    const auto* set = Find(commands, "Page.setCookie");
+    CHECK(set && set->parameters["cookie"]["name"] == "theme" && set->parameters["cookie"]["value"] == "dark"
+        && set->parameters["cookie"]["path"] == "/" && set->parameters["cookie"]["session"] == true
+        && set->parameters["cookie"]["expires"] == 0 && set->parameters["cookie"]["sameSite"] == "Lax"
+        && !set->parameters["cookie"].contains("partitionKey"));
+    cookie.name.clear();
+    session.SetCookie(cookie);
+    CHECK(!Find(Sent(session), "Page.setCookie"));
 }
 
 // Copy as cURL and HAR export.

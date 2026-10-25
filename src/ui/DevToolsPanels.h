@@ -141,6 +141,7 @@ private:
     void Fill();
     void ShowItem();
     void Delete();
+    void SaveCookie();
     const devtools::StorageArea* Area() const;
     devtools::Session& fSession;
     DevToolsHost& fHost;

@@ -299,6 +299,10 @@ void StoragePanel::MessageReceived(BMessage* message)
             break;
         }
         case kSaveItem: {
+            if (fHasArea && fKind == StorageKind::Cookies && *fKey->Text()) {
+                SaveCookie();
+                break;
+            }
             if (!fHasArea || fKind == StorageKind::Cookies || !*fKey->Text()) break;
             fSelected = fKey->Text();
             fSession.SetStorageItem(fKind, fOrigin, fKey->Text(), fNewValue->Text());
@@ -307,6 +311,36 @@ void StoragePanel::MessageReceived(BMessage* message)
         }
         default: BView::MessageReceived(message);
     }
+}
+
+// The selected cookie with the name and value typed (renaming replaces it),
+// or with none selected a new session cookie for the page's host.
+void StoragePanel::SaveCookie()
+{
+    const auto* area = Area();
+    if (!area) return;
+    Cookie cookie;
+    const Cookie* selected = nullptr;
+    for (const auto& known : area->cookies)
+        if (CookieID(known) == fSelected) selected = &known;
+    if (selected) cookie = *selected;
+    else {
+        Request page;
+        page.url = fSession.PageURL();
+        cookie.domain = page.Host();
+        if (const auto colon = cookie.domain.find(':'); colon != std::string::npos) cookie.domain.erase(colon);
+        cookie.path = "/";
+        cookie.session = true;
+        cookie.secure = page.url.rfind("https:", 0) == 0;
+        cookie.sameSite = "Lax";
+        if (cookie.domain.empty()) return;
+    }
+    cookie.name = fKey->Text();
+    cookie.value = fNewValue->Text();
+    if (selected && selected->name != cookie.name) fSession.DeleteCookie(*selected);
+    fSession.SetCookie(cookie);
+    fSelected = CookieID(cookie);
+    fHost.Sync();
 }
 
 void StoragePanel::Delete()
@@ -338,13 +372,12 @@ void StoragePanel::Fill()
     const auto* area = Area();
     const bool cookies = fHasArea && fKind == StorageKind::Cookies;
     fTables->SetVisibleItem(static_cast<int32>(!fHasArea ? 2 : cookies ? kTableCookies : kTableItems));
-    if (fEditor->IsHidden(fEditor) != cookies) {
-        if (cookies) fEditor->Hide();
-        else fEditor->Show();
-    }
+    // Cookies are edited by name and value too.
+    fKey->SetLabel(cookies ? "Name:" : "Key:");
+    fSave->SetLabel(cookies ? "Save Cookie" : "Save Item");
     fDelete->SetEnabled(area && area->loaded);
     fClear->SetEnabled(area && area->loaded);
-    fSave->SetEnabled(fHasArea && !cookies);
+    fSave->SetEnabled(fHasArea);
     auto* list = cookies ? fCookies : fItems;
     // Rows are made again: an area holds at most a few thousand items.
     fItems->Clear();
@@ -410,7 +443,7 @@ void StoragePanel::ShowItem()
 {
     const auto* area = Area();
     if (!area || fSelected.empty()) {
-        fValue->ShowNote(fHasArea ? (fKind == StorageKind::Cookies ? "Select a cookie to see its value."
+        fValue->ShowNote(fHasArea ? (fKind == StorageKind::Cookies ? "Select a cookie to see or change its value, or type a name and a value below to add one."
             : "Select an item to see its value, or type a key and a value below to add one.") : "");
         return;
     }
@@ -418,6 +451,9 @@ void StoragePanel::ShowItem()
         for (const auto& cookie : area->cookies) {
             if (CookieID(cookie) != fSelected) continue;
             fValue->ShowBody(cookie.value, "text/plain");
+            // Save Item changes it.
+            if (fKey->Text() != cookie.name) fKey->SetText(cookie.name.c_str());
+            if (fNewValue->Text() != cookie.value) fNewValue->SetText(cookie.value.c_str());
             return;
         }
     } else {
