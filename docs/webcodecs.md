@@ -123,3 +123,12 @@ does not have; WebKit's mediacapture-transform is worker-only
 That was off outside Cocoa (`MediaStreamTrackProcessingEnabled`); it is on
 for Haiku now, for video-effect pipelines that read camera frames in a
 worker (backgrounds, #126). Test page: `tests/fixtures/track-processor.html`.
+
+Verified on the X399 (25 Oct, sab112 build): the *Audio Video Player*
+sample, served from `localhost` with COOP/COEP, plays Big Buck Bunny's H.264
+video in step with its AAC audio (the picture advanced between screenshots
+2 s apart); `tests/fixtures/track-processor.html` read 90 frames (320×240
+BGRA, 28 fps) from a canvas track in a worker and played them back through
+a `VideoTrackGenerator` (the X399 had no camera then); the fixture's
+VP8/VP9/H.264 round trips still decoded exactly 6 frames each after
+`flush()`.
