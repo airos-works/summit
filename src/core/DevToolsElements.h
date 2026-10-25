@@ -93,12 +93,15 @@ struct StyleBlock {
     // What CSS.setStyleText needs; empty for what cannot be edited.
     std::string styleSheetId;
     int ordinal = -1;
+    // The rule's own (CSS.setRuleSelector); -1 for what is not a rule of the page.
+    int ruleOrdinal = -1;
     // The ancestor whose style this is, for inherited blocks; 0 for the node's own.
     int inheritedFrom = 0;
     // "::before" for the rules of a pseudo element.
     std::string pseudo;
     std::vector<Declaration> declarations;
     bool Editable() const { return !styleSheetId.empty() && ordinal >= 0; }
+    bool SelectorEditable() const { return kind == Rule && !styleSheetId.empty() && ruleOrdinal >= 0; }
     // "style.css:12", "user agent style sheet", or empty.
     std::string Location() const;
 };
@@ -262,6 +265,12 @@ public:
     // "focus"...), as if it were hovered or focused; its styles are read
     // again. The page forgets them when the tools close or it moves on.
     void SetForcedPseudoClasses(int id, std::vector<std::string> classes);
+    // Changes a rule's selector (CSS.setRuleSelector), then reads the styles again.
+    void SetRuleSelector(size_t block, const std::string& selector);
+    // Adds an empty rule for selector to the page's inspector style sheet
+    // (made for the main frame the first time: CSS.createStyleSheet), as other
+    // browsers' New Style Rule does; the styles are read again.
+    void AddRule(const std::string& selector);
     std::vector<std::string> ForcedPseudoClasses(int id) const;
     // Asks for the selected element's accessibility properties.
     void RequestAccessibility();
@@ -316,7 +325,8 @@ private:
     struct Pending {
         enum Kind {
             Ignore, Document, Children, ExpandAll, Attributes, Matched, Inline, Computed, Resolve, Box, SetStyle, Edit,
-            TagName, Remove, Search, SearchResults, RequestNode, Evaluate, Path, OuterHTML, SheetText, Properties, Accessibility, Listeners
+            TagName, Remove, Search, SearchResults, RequestNode, Evaluate, Path, OuterHTML, SheetText, Properties, Accessibility, Listeners,
+            RuleFrame, RuleSheet, AddRule
         };
         Kind kind;
         int node = 0;
@@ -353,6 +363,8 @@ private:
     NodeStyles fStyles, fNextStyles;
     NodeAccessibility fAccessibility;
     NodeListeners fListeners;
+    // The inspector style sheet New Style Rule adds to, once made.
+    std::string fInspectorSheet;
     int fStylesOutstanding = 0;
     bool fStylesStale = false;
     double fStylesStarted = 0;

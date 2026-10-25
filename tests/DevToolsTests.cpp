@@ -1240,6 +1240,44 @@ static void TestElementStyles()
     dom.SetForcedPseudoClasses(5, {});
     take();
     CHECK(dom.ForcedPseudoClasses(5).empty());
+    // The author's rule's selector is changed; the browser's cannot be.
+    {
+        const auto& blocks = dom.Styles().blocks;
+        size_t authorBlock = blocks.size(), agentBlock = blocks.size();
+        for (size_t i = 0; i < blocks.size(); ++i) {
+            if (blocks[i].origin == "author" && blocks[i].SelectorEditable()) authorBlock = std::min(authorBlock, i);
+            if (blocks[i].origin == "user-agent") agentBlock = i;
+        }
+        CHECK(authorBlock < blocks.size() && agentBlock < blocks.size() && !blocks[agentBlock].SelectorEditable());
+        take();
+        dom.SetRuleSelector(authorBlock, "  body.page  ");
+        dom.SetRuleSelector(agentBlock, "html");
+        const auto commands = take();
+        CHECK(commands.size() == 1 && commands[0].method == "CSS.setRuleSelector"
+            && json::parse(commands[0].parameters) == json({{"ruleId", {{"styleSheetId", "1"}, {"ordinal", 1}}}, {"selector", "body.page"}}));
+    }
+    // New Style Rule: the main frame, its inspector style sheet, then the rule;
+    // the sheet is made once.
+    dom.AddRule("div#main");
+    take();
+    CHECK(tags.count("Page.getResourceTree"));
+    answer(tags["Page.getResourceTree"], {{"frameTree", {{"frame", {{"id", "frame-1"}}}}}});
+    {
+        const auto commands = take();
+        CHECK(commands.size() == 1 && commands[0].method == "CSS.createStyleSheet"
+            && json::parse(commands[0].parameters)["frameId"] == "frame-1");
+        answer(commands[0].tag, {{"styleSheetId", "9"}});
+    }
+    {
+        const auto commands = take();
+        CHECK(commands.size() == 1 && commands[0].method == "CSS.addRule"
+            && json::parse(commands[0].parameters) == json({{"styleSheetId", "9"}, {"selector", "div#main"}}));
+    }
+    dom.AddRule("p");
+    {
+        const auto commands = take();
+        CHECK(commands.size() == 1 && commands[0].method == "CSS.addRule" && json::parse(commands[0].parameters)["styleSheetId"] == "9");
+    }
     // Event listeners of the selected element and above it.
     dom.RequestListeners();
     take();
