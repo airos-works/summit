@@ -1119,7 +1119,10 @@ static void TestElementStyles()
     CHECK(tags.count("DOM.getAccessibilityPropertiesForNode"));
     answer(tags["DOM.getAccessibilityPropertiesForNode"], {{"properties", {{"exists", true}, {"label", "Main"}, {"role", "main"},
         {"ignored", false}, {"childNodeIds", json::array({6, 7})}, {"headingLevel", 2}}}});
-    CHECK(dom.TakeChanges().accessibility);
+    {
+        const auto changes = dom.TakeChanges();
+        CHECK(changes.accessibility && changes.Any());
+    }
     const auto& accessibility = dom.Accessibility().properties;
     CHECK(dom.Accessibility().node == 5 && dom.Accessibility().error.empty() && accessibility.size() == 6
         && accessibility[0] == std::make_pair(std::string("role"), std::string("main"))

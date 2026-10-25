@@ -149,7 +149,7 @@ struct DOMChanges {
     std::string notice;
     bool Any() const
     {
-        return tree || nodes || selection || styles || search || picking || picked || outerHTML || source || !notice.empty();
+        return tree || nodes || selection || styles || search || picking || picked || outerHTML || source || accessibility || !notice.empty();
     }
 };
 
