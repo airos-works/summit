@@ -383,8 +383,8 @@ public:
 private:
     friend struct ProtocolReader;
     struct Pending {
-        enum Kind { Body, Evaluation, Storage, StorageEdit, Frames, Elements, Properties, DatabaseNames, Database, ScriptSource,
-            SetBreakpoint, Other };
+        enum Kind { Body, Evaluation, Storage, StorageEdit, Frames, Elements, Properties, OwnProperties, DatabaseNames, Database,
+            ScriptSource, SetBreakpoint, Other };
         Kind kind;
         uint64_t serial;
         // Storage and StorageEdit: the area; Frames: the target asked;

@@ -42,7 +42,7 @@ enum { kElementsPanel, kNetworkPanel, kConsolePanel, kStoragePanel, kSourcesPane
 
 int32 PanelIndex(const char* name)
 {
-    for (int32 i = 0; i < 4; ++i)
+    for (int32 i = 0; i < static_cast<int32>(std::size(kPanels)); ++i)
         if (!std::strcmp(name, kPanels[i])) return i;
     return kElementsPanel;
 }

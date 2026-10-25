@@ -759,7 +759,14 @@ struct ProtocolReader {
             auto& entry = session.AddEntry(EntryKind::Result, thrown ? Level::Error : Level::Log,
                 Shortened(Render(Member(result, "result"), false), kValueLength));
             AddObject(entry, Member(result, "result"));
-        } else if (pending.kind == Session::Pending::Properties) {
+        } else if (pending.kind == Session::Pending::Properties || pending.kind == Session::Pending::OwnProperties) {
+            if (!error.empty() && pending.kind == Session::Pending::Properties) {
+                // Scope objects have no displayable properties: their own.
+                session.SendToTarget(session.fPageTarget, "Runtime.getProperties", "{\"objectId\":" + Quoted(pending.origin)
+                    + ",\"ownProperties\":true,\"generatePreview\":true}", Session::Pending::OwnProperties);
+                session.fPending.rbegin()->second.origin = pending.origin;
+                return;
+            }
             auto& properties = session.fProperties[pending.origin];
             properties.loaded = true;
             properties.error = error;
@@ -933,6 +940,7 @@ void Session::TargetCreated(const std::string& target, bool provisional, bool pa
     ApplyNetworkSettings(target);
     if (fDebugger.enabled) {
         SendToTarget(target, "Debugger.enable", "{}");
+        SendToTarget(target, "Debugger.setBreakpointsActive", "{\"active\":true}");
         for (auto& breakpoint : fBreakpoints) SendBreakpoint(target, breakpoint);
     }
     if (paused) Send("Target.resume", "{\"targetId\":" + Quoted(target) + "}");
@@ -960,7 +968,11 @@ void Session::EnableDebugger()
 {
     if (fDebugger.enabled) return;
     fDebugger.enabled = true;
-    for (const auto& [target, provisional] : fTargets) SendToTarget(target, "Debugger.enable", "{}");
+    for (const auto& [target, provisional] : fTargets) {
+        SendToTarget(target, "Debugger.enable", "{}");
+        // Breakpoints start inactive in WebKit.
+        SendToTarget(target, "Debugger.setBreakpointsActive", "{\"active\":true}");
+    }
 }
 
 void Session::LoadScriptSource(const std::string& id)

@@ -612,6 +612,12 @@ static void TestObjectTree()
     session.LoadProperties("{\"id\":99}");
     commands = Sent(session);
     session.Receive(FromTarget("page-1", {{"id", commands[0].id}, {"error", {{"message", "Could not find object with given id"}}}}));
+    // Asked again for its own properties (what a scope object answers).
+    commands = Sent(session);
+    CHECK(commands.size() == 1 && commands[0].method == "Runtime.getProperties");
+    properties = session.Properties("{\"id\":99}");
+    CHECK(properties && !properties->loaded);
+    session.Receive(FromTarget("page-1", {{"id", commands[0].id}, {"error", {{"message", "Could not find object with given id"}}}}));
     properties = session.Properties("{\"id\":99}");
     CHECK(properties && properties->loaded && !properties->error.empty() && properties->items.empty());
 
