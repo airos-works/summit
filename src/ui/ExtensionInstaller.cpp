@@ -69,7 +69,7 @@ struct ExtensionInstaller::ImportWork {
 struct ExtensionInstaller::Draft {
     std::unique_ptr<StagedExtensionPackage> package;
     InstalledExtension entry;
-    std::string token, body, baseURL, newTabURL, rollbackError, expectedIdentity, storeName;
+    std::string token, body, baseURL, newTabURL, sidebarURL, sidebarTitle, rollbackError, expectedIdentity, storeName;
     std::vector<std::string> permissions, origins;
     bool ready = false, loaded = false;
 };
@@ -246,7 +246,7 @@ void ExtensionInstaller::Approve(uint64 generation, bool allowFiles, bool allowP
 void ExtensionInstaller::RetainUnsavedRuntime(std::string reason)
 {
     // An unload failure must remain visible and owned by normal app shutdown.
-    if (fLoaded) fLoaded(fDraft->entry, fDraft->baseURL, reason, false, fDraft->newTabURL);
+    if (fLoaded) fLoaded(fDraft->entry, fDraft->baseURL, reason, false, fDraft->newTabURL, fDraft->sidebarURL, fDraft->sidebarTitle);
     Finish(std::move(reason));
 }
 void ExtensionInstaller::Rollback(std::string reason)
@@ -279,6 +279,8 @@ void ExtensionInstaller::MessageReceived(BMessage* message)
         fDraft->token.clear();
         fDraft->baseURL = field(*message, "base_url");
         fDraft->newTabURL = field(*message, "new_tab_url");
+        fDraft->sidebarURL = field(*message, "sidebar_url");
+        fDraft->sidebarTitle = field(*message, "sidebar_title");
         uint64 installationOrder = 0;
         if (field(*message, "extension_identifier") != fDraft->entry.identifier
             || field(*message, "fingerprint") != fDraft->entry.fingerprint
@@ -292,7 +294,7 @@ void ExtensionInstaller::MessageReceived(BMessage* message)
         if (fStopping || fCancelled) { Rollback("Installation cancelled."); return; }
         std::string error;
         if (!fCatalog.Install(*fDraft->package, fDraft->entry, error)) { Rollback("Could not save the installation: " + error); return; }
-        if (fLoaded) fLoaded(fDraft->entry, fDraft->baseURL, {}, true, fDraft->newTabURL);
+        if (fLoaded) fLoaded(fDraft->entry, fDraft->baseURL, {}, true, fDraft->newTabURL, fDraft->sidebarURL, fDraft->sidebarTitle);
         Finish("Extension installed.");
         return;
     }

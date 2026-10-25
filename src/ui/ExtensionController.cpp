@@ -86,10 +86,11 @@ bool ExtensionController::IsReady() const
     return fStarted && !fStopping && fCatalogError.empty() && fIndex == fEntries.size() && !HasPendingWork();
 }
 void ExtensionController::AddLoaded(InstalledExtension entry, std::string baseURL, std::string error, bool installed,
-    std::string newTabURL)
+    std::string newTabURL, std::string sidebarURL, std::string sidebarTitle)
 {
     // The app serializes installer operations with this controller.
-    fEntries.push_back({ std::move(entry), true, std::move(baseURL), std::move(error), installed, std::move(newTabURL), { } });
+    fEntries.push_back({ std::move(entry), true, std::move(baseURL), std::move(error), installed, std::move(newTabURL),
+        std::move(sidebarURL), std::move(sidebarTitle), { } });
     if (!fStopping) fIndex = fEntries.size();
     Changed();
     if (fStopping) Next();

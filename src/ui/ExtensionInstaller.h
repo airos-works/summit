@@ -16,7 +16,8 @@ std::string ExtensionDisplayText(std::string);
 class ExtensionInstaller final : public BHandler {
 public:
     // entry, base URL, error, installed, new-tab override URL
-    using Loaded = std::function<void(InstalledExtension, std::string, std::string, bool, std::string)>;
+    // The entry, base URL, error, installed, then the new tab page and the sidebar's page and title.
+    using Loaded = std::function<void(InstalledExtension, std::string, std::string, bool, std::string, std::string, std::string)>;
     ExtensionInstaller(std::shared_ptr<BWebKitContext>, std::filesystem::path, Loaded, std::function<void()> changed);
     ~ExtensionInstaller() override;
     void Start();

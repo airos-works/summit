@@ -14,3 +14,8 @@ async function show() {
 }
 for (const event of ["onCreated", "onRemoved", "onUpdated", "onActivated"]) browser.tabs[event].addListener(show);
 show();
+// The background page asks what the panel shows ({sidebar: "state"}).
+browser.runtime.onMessage.addListener((message) => {
+    if (message?.sidebar === "state")
+        return Promise.resolve({ count: document.getElementById("count").textContent, url: location.href, width: innerWidth, height: innerHeight });
+});

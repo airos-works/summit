@@ -39,4 +39,17 @@ Not yet: remembering the open sidebar across restarts, and Chrome's
 ## Fixture
 
 `tests/fixtures/extensions/sidebar/`: a sidebar that lists the window's
-tabs, kept up to date (`#count` gives how many).
+tabs, kept up to date (`#count` gives how many). Its background page has
+`checks` for the MCP `evaluate` tool (`{"extension": ID, ...}`): `open`,
+`close`, `toggle`, `isOpen`, `panel`, `title`, `rename(title)`,
+`retarget()` (the panel with `?second`) and `shown()`, which asks the open
+panel what it shows (`#count`, address and size).
+
+Verified on the X399 (25 Oct): `open()` showed the panel (278×503 beside
+the pages) listing the window's 3 tabs, 4 once a tab was opened;
+`isOpen()` followed `open`, `close` and `toggle`; `setPanel` moved the open
+panel to `sidebar.html?second` and `getPanel` answered it; `setTitle`/
+`getTitle` round-tripped; View › Sidebar's item (`sbtg` with the
+extension's identifier) and Close Sidebar (`sbcl`) opened and closed it.
+An extension installed while Summit runs had no sidebar until a restart:
+the installer did not pass the sidebar on (fixed with this change).

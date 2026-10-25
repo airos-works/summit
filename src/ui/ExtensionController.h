@@ -57,7 +57,7 @@ public:
     // What went wrong when an extension was last removed, or empty.
     const std::string& RemovalError() const { return fRemovalError; }
     void AddLoaded(InstalledExtension, std::string baseURL, std::string error = {}, bool installed = true,
-        std::string newTabURL = {});
+        std::string newTabURL = {}, std::string sidebarURL = {}, std::string sidebarTitle = {});
 private:
     enum class Pending { None, Prepare, Load, Unload, RemoveData };
     enum class Operation { None, Enable, Disable, Remove, Update };

@@ -347,8 +347,10 @@ public:
             AddHandler(fExtensions.get());
             fExtensions->Start();
             fInstaller = std::make_unique<summit::ExtensionInstaller>(fWebKitContext, fProfile / "Extensions",
-                [this](summit::InstalledExtension entry, std::string baseURL, std::string error, bool installed, std::string newTabURL) {
-                    fExtensions->AddLoaded(std::move(entry), std::move(baseURL), std::move(error), installed, std::move(newTabURL));
+                [this](summit::InstalledExtension entry, std::string baseURL, std::string error, bool installed, std::string newTabURL,
+                    std::string sidebarURL, std::string sidebarTitle) {
+                    fExtensions->AddLoaded(std::move(entry), std::move(baseURL), std::move(error), installed, std::move(newTabURL),
+                        std::move(sidebarURL), std::move(sidebarTitle));
                 }, [this] { RefreshExtensions(); });
             AddHandler(fInstaller.get());
             fInstaller->Start();
