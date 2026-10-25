@@ -302,10 +302,13 @@ void BrowserWindow::TabDraggedOut(int64 id, BPoint where)
     be_app->PostMessage(&transfer);
 }
 
-void BrowserWindow::DetachTab(int64 id, const BMessenger& target)
+void BrowserWindow::DetachTab(int64 id, const BMessenger& target, int32 index, uint64 command)
 {
     auto found = std::find_if(fTabs.begin(), fTabs.end(), [&](const Tab& tab) { return tab.id == id; });
-    if (found == fTabs.end() || fClosingWindow || found->closeQueued || found->closeRequested || found->closeApproved) return;
+    if (found == fTabs.end() || fClosingWindow || found->closeQueued || found->closeRequested || found->closeApproved) {
+        if (command) RespondToCommand(command, B_BUSY, { }, "The tab is closing.");
+        return;
+    }
     if (fFullScreenTab == id) ExitPageFullScreen();
     if (fPictureInPictureTab == id && fPictureInPicture.IsValid()) fPictureInPicture.SendMessage(B_QUIT_REQUESTED);
     DropTabAuthentications(id);
@@ -328,7 +331,8 @@ void BrowserWindow::DetachTab(int64 id, const BMessenger& target)
     moved->messenger = BMessenger();
     BMessage adopt(kAdoptTab);
     adopt.AddPointer("tab", moved);
-    adopt.AddInt32("index", -1);
+    adopt.AddInt32("index", index);
+    if (command) adopt.AddUInt64("command", command);
     if (target.SendMessage(&adopt) != B_OK) {
         // The other window went away: keep the tab here.
         fCards->AddView(moved->view);
@@ -336,6 +340,7 @@ void BrowserWindow::DetachTab(int64 id, const BMessenger& target)
         fTabs.push_back(std::move(*moved));
         delete moved;
         RefreshChrome();
+        if (command) RespondToCommand(command, B_BAD_VALUE, { }, "The window is gone.");
         return;
     }
     if (fTabs.empty()) {
@@ -357,9 +362,11 @@ void BrowserWindow::AdoptTab(BMessage& message)
     Tab* adopted = nullptr;
     if (message.FindPointer("tab", reinterpret_cast<void**>(&adopted)) != B_OK || !adopted) return;
     std::unique_ptr<Tab> tab(adopted);
+    const uint64 command = message.GetUInt64("command", 0);
     if (fClosingWindow) {
         // Too late for this window: the page closes with it.
         delete tab->view;
+        if (command) RespondToCommand(command, B_BUSY, { }, "The window is closing.");
         return;
     }
     tab->id = fNextID++;
@@ -370,7 +377,20 @@ void BrowserWindow::AdoptTab(BMessage& message)
     size_t pinned = 0;
     while (pinned < fTabs.size() && fTabs[pinned].pinned) ++pinned;
     const int64 id = tab->id;
-    fTabs.insert(tab->pinned ? fTabs.begin() + pinned : fTabs.end(), std::move(*tab));
+    // An extension's move puts it where asked, pinned tabs staying first.
+    const int32 index = message.GetInt32("index", -1);
+    size_t position = tab->pinned ? pinned : fTabs.size();
+    if (index >= 0) position = tab->pinned ? std::min<size_t>(index, pinned) : std::clamp<size_t>(index, pinned, fTabs.size());
+    fTabs.insert(fTabs.begin() + position, std::move(*tab));
+    if (command) {
+        // The extension moved it: this window is not brought forward.
+        if (IsHidden()) Show();
+        SyncBrowserWindow();
+        RefreshChrome();
+        SaveSession();
+        RespondToCommand(command, B_OK);
+        return;
+    }
     SelectTab(id);
     if (IsHidden()) Show();
     Activate();
