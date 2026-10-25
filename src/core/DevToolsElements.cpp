@@ -1015,6 +1015,7 @@ void DOMModel::Reset(bool forgetAgents)
     fNodes.clear();
     fExpanded.clear();
     fAfterRemoval.clear();
+    fForced.clear();
     fDocument = fSelected = fHighlighted = 0;
     fDocumentWaiting = false;
     fStyles = { };
@@ -1499,6 +1500,25 @@ bool DOMModel::IsInheritable(const std::string& property) const
 }
 
 bool DOMModel::Declared(const std::string& property) const { return fDeclared.count(LowerCase(property)) > 0; }
+
+void DOMModel::SetForcedPseudoClasses(int id, std::vector<std::string> classes)
+{
+    if (!Find(id)) return;
+    std::sort(classes.begin(), classes.end());
+    classes.erase(std::unique(classes.begin(), classes.end()), classes.end());
+    std::string list;
+    for (const auto& name : classes) list += (list.empty() ? "" : ",") + Quoted(name);
+    Send("CSS.forcePseudoState", "{\"nodeId\":" + std::to_string(id) + ",\"forcedPseudoClasses\":[" + list + "]}");
+    if (classes.empty()) fForced.erase(id);
+    else fForced[id] = std::move(classes);
+    if (id == fSelected) RefreshStyles();
+}
+
+std::vector<std::string> DOMModel::ForcedPseudoClasses(int id) const
+{
+    const auto found = fForced.find(id);
+    return found == fForced.end() ? std::vector<std::string>() : found->second;
+}
 
 void DOMModel::RefreshStyles()
 {

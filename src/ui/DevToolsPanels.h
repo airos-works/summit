@@ -189,6 +189,7 @@ private:
     class BoxModel;
     class HTMLEditor;
     void ShowSelection();
+    void ShowForced();
     void ShowStyles();
     void ShowComputed();
     // The Accessibility tab: asked for only while it shows.
@@ -212,6 +213,8 @@ private:
     BStringView* fNotice;
     BTabView* fSide;
     BTextControl* fStyleFilter;
+    // :hov: the pseudo-classes forced on the selected element.
+    BButton* fForce;
     Styles* fStyles;
     BoxModel* fBox;
     BTextControl* fComputedSearch;

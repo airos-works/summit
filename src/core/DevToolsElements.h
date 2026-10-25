@@ -244,6 +244,11 @@ public:
     // (TakeCommands() asks for them).
     bool StylesWaiting() const;
     void RefreshStyles();
+    // Pseudo-classes forced on an element (CSS.forcePseudoState: "hover",
+    // "focus"...), as if it were hovered or focused; its styles are read
+    // again. The page forgets them when the tools close or it moves on.
+    void SetForcedPseudoClasses(int id, std::vector<std::string> classes);
+    std::vector<std::string> ForcedPseudoClasses(int id) const;
     // Asks for the selected element's accessibility properties.
     void RequestAccessibility();
     const NodeAccessibility& Accessibility() const { return fAccessibility; }
@@ -321,6 +326,7 @@ private:
     std::set<int> fExpanded;
     // Where the selection goes when the node it names is removed.
     std::map<int, int> fAfterRemoval;
+    std::map<int, std::vector<std::string>> fForced;
     // The selection to find again in the next document, and how often to try.
     std::string fRestorePath;
     int fRestoreTries = 0;

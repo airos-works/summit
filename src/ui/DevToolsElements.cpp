@@ -29,7 +29,10 @@ using namespace devtools;
 namespace {
 constexpr uint32 kPickToggled = 'deps', kSearchRun = 'desr', kSearchPrevious = 'desp', kSearchNext = 'desn',
     kStyleFilterChanged = 'desf', kComputedFilterChanged = 'decf', kComputedAllChanged = 'deca', kEditDone = 'deed',
-    kTreeCommand = 'detc', kStyleCommand = 'dest', kApplyHTML = 'deah', kSideTabChanged = 'deat';
+    kTreeCommand = 'detc', kStyleCommand = 'dest', kApplyHTML = 'deah', kSideTabChanged = 'deat', kForceMenu = 'defm',
+    kForcePseudo = 'defp';
+// What :hov can force on an element, as other browsers offer.
+constexpr const char* kPseudoClasses[] = {"active", "focus", "focus-visible", "focus-within", "hover", "visited"};
 // The side's tabs: Styles, Computed, Accessibility.
 enum { kStylesTab, kComputedTab, kAccessibilityTab };
 
@@ -1260,12 +1263,15 @@ ElementsPanel::ElementsPanel(Session& session, DevToolsHost& host)
     fStyleFilter = new BTextControl("style-filter", "Filter:", "", nullptr);
     fStyleFilter->SetModificationMessage(new BMessage(kStyleFilterChanged));
     fStyleFilter->SetToolTip("Show declarations whose property or value contains this");
+    fForce = new BButton("force", ":hov", new BMessage(kForceMenu));
+    fForce->SetToolTip("Force :hover, :focus and other states on the selected element");
     fStyles = new Styles(*this, session.DOM(), host);
     auto* stylesScroll = new BScrollView("styles-scroll", fStyles, 0, true, true, B_NO_BORDER);
     auto* stylesTab = new BGroupView(B_VERTICAL, 0);
     BLayoutBuilder::Group<>(stylesTab)
-        .AddGroup(B_HORIZONTAL, 0).SetInsets(6, 4, 6, 4)
+        .AddGroup(B_HORIZONTAL, 6).SetInsets(6, 4, 6, 4)
             .Add(fStyleFilter)
+            .Add(fForce)
         .End()
         .Add(stylesScroll, 1);
 
@@ -1393,6 +1399,33 @@ void ElementsPanel::MessageReceived(BMessage* message)
             fHost.Sync();
             break;
         case kStyleFilterChanged: fStyles->SetFilter(fStyleFilter->Text()); break;
+        case kForceMenu: {
+            const auto forced = dom.ForcedPseudoClasses(dom.Selected());
+            auto* menu = new BPopUpMenu("force", false, false);
+            for (const char* name : kPseudoClasses) {
+                auto* choose = new BMessage(kForcePseudo);
+                choose->AddString("class", name);
+                auto* item = new BMenuItem((std::string(":") + name).c_str(), choose);
+                item->SetMarked(std::find(forced.begin(), forced.end(), name) != forced.end());
+                item->SetEnabled(dom.Selected() != 0);
+                menu->AddItem(item);
+            }
+            menu->SetTargetForItems(this);
+            menu->SetAsyncAutoDestruct(true);
+            const auto frame = fForce->ConvertToScreen(fForce->Bounds());
+            menu->Go(frame.LeftBottom() + BPoint(0, 1), true, false, frame, true);
+            break;
+        }
+        case kForcePseudo: {
+            const std::string name = message->GetString("class", "");
+            auto forced = dom.ForcedPseudoClasses(dom.Selected());
+            if (const auto found = std::find(forced.begin(), forced.end(), name); found != forced.end()) forced.erase(found);
+            else forced.push_back(name);
+            dom.SetForcedPseudoClasses(dom.Selected(), std::move(forced));
+            ShowForced();
+            fHost.Sync();
+            break;
+        }
         case kComputedFilterChanged:
         case kComputedAllChanged: ShowComputed(); break;
         case kSideTabChanged:
@@ -1447,6 +1480,16 @@ void ElementsPanel::ShowSelection()
     const auto& dom = fSession.DOM();
     fCrumbs->SetText(dom.Breadcrumbs(dom.Selected()).c_str());
     fNotice->SetText("");
+    ShowForced();
+}
+
+void ElementsPanel::ShowForced()
+{
+    // The button says what is forced on the selected element.
+    std::string label;
+    for (const auto& name : fSession.DOM().ForcedPseudoClasses(fSession.DOM().Selected())) label += ":" + name + " ";
+    if (!label.empty()) label.pop_back();
+    fForce->SetLabel(label.empty() ? ":hov" : label.c_str());
 }
 
 void ElementsPanel::ShowStyles()
@@ -1587,6 +1630,17 @@ bool ElementsPanel::Command(const std::string& action, const std::string& argume
     else if (verb == "add") dom.AddDeclaration(static_cast<size_t>(number(0)), rest(1));
     else if (verb == "source") dom.RequestSheetSource(static_cast<size_t>(number(0)));
     else if (verb == "refresh") dom.RefreshStyles();
+    else if (verb == "force") {
+        // "hover,focus", or "" for none, on the selected element.
+        std::vector<std::string> classes;
+        for (size_t from = 0; from < argument.size();) {
+            const auto end = std::min(argument.find(',', from), argument.size());
+            if (end > from) classes.push_back(argument.substr(from, end - from));
+            from = end + 1;
+        }
+        dom.SetForcedPseudoClasses(dom.Selected(), std::move(classes));
+        ShowForced();
+    }
     else if (verb == "filter") {
         fStyleFilter->SetText(argument.c_str());
         fStyles->SetFilter(argument);
@@ -1636,7 +1690,8 @@ std::string ElementsPanel::StateJSON()
         {"padding", {box.padding[0], box.padding[1], box.padding[2], box.padding[3]}}};
     const auto* selected = dom.Find(dom.Selected());
     json selection = selected ? json {{"id", selected->id}, {"label", selected->Label()}, {"breadcrumbs", dom.Breadcrumbs(selected->id)},
-        {"attributes", dom.AttributesText(selected->id)}, {"selector", dom.Selector(selected->id)}} : json(nullptr);
+        {"attributes", dom.AttributesText(selected->id)}, {"selector", dom.Selector(selected->id)},
+        {"forced", dom.ForcedPseudoClasses(selected->id)}} : json(nullptr);
     json state = {{"shown", fShown}, {"enabled", dom.Enabled()}, {"loaded", dom.Loaded()}, {"nodes", dom.NodeCount()},
         {"lines", fTree->Count()}, {"tree", fTree->Lines(300)}, {"selected", selection}, {"picking", dom.Picking()},
         {"editing", fTree->Editing() ? "tree" : fStyles->Editing() ? "styles" : ""},
