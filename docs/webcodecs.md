@@ -169,3 +169,8 @@ AV1 and HEVC verified on the X399 (25 Oct, av112 build): the *Video
 Decoding and Display* sample decoded its whole 1280×720 video as AV1
 (`av01.0.05M.08`, 314 fps) and HEVC (`hvc1.1.6.L93.90`, 312 fps), the last
 pictures drawn as H.264's were (about 390 colours in a 64×36 copy).
+
+HE-AAC encoding verified on the X399 (25 Oct, he112 build, FFmpeg 8 with
+FDK): a second of 48 kHz tone round-tripped as HE-AAC (26 chunks of 2048
+samples, RMS 0.333), HE-AAC v2 (27 chunks, 0.326) and HE-AAC in ADTS (26
+chunks, 0.333); the lower RMS is the encoder's priming delay.
