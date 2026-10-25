@@ -93230,7 +93230,7 @@ index 558bc4dbcebf1af98a2fc3b744d3b390b68a56f1..24ce837888d94fcea6d0e960a4af01db
      UpdateAcceleratedCompositingMode(uint64_t backingStoreStateID, WebKit::LayerTreeContext context)
      DidFirstLayerFlush(uint64_t backingStoreStateID, WebKit::LayerTreeContext context)
 diff --git a/Source/WebKit/UIProcess/Extensions/API/WebExtensionContextAPIDeclarativeNetRequest.cpp b/Source/WebKit/UIProcess/Extensions/API/WebExtensionContextAPIDeclarativeNetRequest.cpp
-index e317863095c8bd9d804cfa22e8d9a1aa7e420d0d..1b42ca0f6bf40e13cbce5742111dbb67e492ea26 100644
+index e317863095c8bd9d804cfa22e8d9a1aa7e420d0d..d57f6bc2951e88f5275912b760913a32ec364978 100644
 --- a/Source/WebKit/UIProcess/Extensions/API/WebExtensionContextAPIDeclarativeNetRequest.cpp
 +++ b/Source/WebKit/UIProcess/Extensions/API/WebExtensionContextAPIDeclarativeNetRequest.cpp
 @@ -30,12 +30,43 @@
@@ -93314,7 +93314,7 @@ index e317863095c8bd9d804cfa22e8d9a1aa7e420d0d..1b42ca0f6bf40e13cbce5742111dbb67
  
      Ref rulesToAdd = JSON::Array::create();
      if (!rulesToAddJSON.isEmpty()) {
-@@ -184,7 +227,16 @@ void WebExtensionContext::declarativeNetRequestUpdateDynamicRules(String&& rules
+@@ -184,11 +227,26 @@ void WebExtensionContext::declarativeNetRequestUpdateDynamicRules(String&& rules
          return;
      }
  
@@ -93328,11 +93328,21 @@ index e317863095c8bd9d804cfa22e8d9a1aa7e420d0d..1b42ca0f6bf40e13cbce5742111dbb67
 +    }
 +#endif
 +
++#if PLATFORM(HAIKU)
++    UNUSED_VARIABLE(existingRulesToDelete);
++#else
++    // Upstream adds this kind's count twice; Haiku's validation above counts
++    // both kinds once.
 +    auto updatedDynamicRulesCount = m_dynamicRulesIDs.size() + rulesToAdd->length() - existingRulesToDelete;
      if (updatedDynamicRulesCount + m_dynamicRulesIDs.size() > webExtensionDeclarativeNetRequestMaximumNumberOfDynamicAndSessionRules) {
          completionHandler(toWebExtensionError(apiName, nullString(), "Failed to add dynamic rules. Maximum number of dynamic and session rules exceeded."_s));
          return;
-@@ -235,6 +287,15 @@ void WebExtensionContext::declarativeNetRequestUpdateSessionRules(String&& rules
+     }
++#endif
+ 
+     updateDeclarativeNetRequestRulesInStorage(declarativeNetRequestDynamicRulesStore(), "dynamic"_s, apiName, rulesToAdd, ruleIDsToDelete, WTF::move(completionHandler));
+ }
+@@ -235,11 +293,24 @@ void WebExtensionContext::declarativeNetRequestUpdateSessionRules(String&& rules
          return;
      }
  
@@ -93345,9 +93355,18 @@ index e317863095c8bd9d804cfa22e8d9a1aa7e420d0d..1b42ca0f6bf40e13cbce5742111dbb67
 +    }
 +#endif
 +
++#if !PLATFORM(HAIKU)
++    // Upstream adds this kind's count twice; Haiku's validation above counts
++    // both kinds once.
      auto updatedSessionRulesCount = m_sessionRulesIDs.size() + rulesToAdd->length() - ruleIDsToDelete.size();
      if (updatedSessionRulesCount + m_sessionRulesIDs.size() > webExtensionDeclarativeNetRequestMaximumNumberOfDynamicAndSessionRules) {
          completionHandler(toWebExtensionError(apiName, nullString(), "Failed to add session rules. Maximum number of dynamic and session rules exceeded."_s));
+         return;
+     }
++#endif
+ 
+     updateDeclarativeNetRequestRulesInStorage(declarativeNetRequestSessionRulesStore(), "session"_s, apiName, rulesToAdd, ruleIDsToDelete, WTF::move(completionHandler));
+ }
 diff --git a/Source/WebKit/UIProcess/Extensions/API/WebExtensionContextAPIEvent.cpp b/Source/WebKit/UIProcess/Extensions/API/WebExtensionContextAPIEvent.cpp
 new file mode 100644
 index 0000000000000000000000000000000000000000..063b88f1c58b2e628a568392d5bd1a5d81158e83
@@ -97884,7 +97903,7 @@ index 8947f24ec9866c39f206aab464ec21c5d4213b95..b36f80023077ec3bc5680f7214a823a4
  
  #endif // ENABLE(WK_WEB_EXTENSIONS)
 diff --git a/Source/WebKit/UIProcess/Extensions/WebExtensionContext.h b/Source/WebKit/UIProcess/Extensions/WebExtensionContext.h
-index 5f8454dd5897a49ffba794e50fb04b7257ad2291..03a9877db18e32bc6a442fa8fe858940a51cfb0d 100644
+index 5f8454dd5897a49ffba794e50fb04b7257ad2291..891f39ea5bd22f329d3d43e8f48070b227735c32 100644
 --- a/Source/WebKit/UIProcess/Extensions/WebExtensionContext.h
 +++ b/Source/WebKit/UIProcess/Extensions/WebExtensionContext.h
 @@ -40,6 +40,9 @@
@@ -98598,7 +98617,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..03a9877db18e32bc6a442fa8fe858940
      mutable WindowIdentifierVector m_windowOrderVector;
      mutable std::optional<WebExtensionWindowIdentifier> m_focusedWindowIdentifier;
  
-@@ -1276,6 +1614,23 @@ private:
+@@ -1276,6 +1614,26 @@ private:
      bool m_populatedCommands { false };
  
      String m_declarativeNetRequestContentRuleListFilePath;
@@ -98607,6 +98626,9 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..03a9877db18e32bc6a442fa8fe858940
 +    RefPtr<API::ContentRuleList> m_nativeDNRRules;
 +    String m_nativeDNRRuleFile;
 +    size_t m_nativeDNRStaticRuleCount { 0 };
++    // Rules with a regexFilter, for MAX_NUMBER_OF_REGEX_RULES (counted per kind, as in Chrome).
++    HashSet<double> m_sessionRegexRulesIDsHaiku;
++    HashSet<double> m_dynamicRegexRulesIDsHaiku;
 +    // The rules that matched in the last five minutes (getMatchedRules).
 +    struct DeclarativeNetRequestMatchHaiku {
 +        double ruleIdentifier;
@@ -98622,7 +98644,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..03a9877db18e32bc6a442fa8fe858940
      DeclarativeNetRequestMatchedRuleVector m_matchedRules;
      RefPtr<WebExtensionDeclarativeNetRequestSQLiteStore> m_declarativeNetRequestDynamicRulesStore;
      RefPtr<WebExtensionDeclarativeNetRequestSQLiteStore> m_declarativeNetRequestSessionRulesStore;
-@@ -1283,6 +1638,9 @@ private:
+@@ -1283,6 +1641,9 @@ private:
      HashSet<double> m_sessionRulesIDs;
      HashSet<double> m_dynamicRulesIDs;
  
@@ -98632,7 +98654,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..03a9877db18e32bc6a442fa8fe858940
      MenuItemMap m_menuItems;
      MenuItemVector m_mainMenuItems;
  
-@@ -1300,12 +1658,16 @@ private:
+@@ -1300,12 +1661,16 @@ private:
          String message;
  #if PLATFORM(COCOA)
          RetainPtr<id> argument;
@@ -98649,7 +98671,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..03a9877db18e32bc6a442fa8fe858940
  
      Deque<TestMessage> m_testMessageQueue;
      Deque<TestMessage> m_testStartedQueue;
-@@ -1315,6 +1677,8 @@ private:
+@@ -1315,6 +1680,8 @@ private:
      void sendQueuedTestMessagesIfNeeded(WebExtensionEventListenerType);
  #if PLATFORM(COCOA)
      void addTestMessageToQueue(const String& message, id argument, WebExtensionEventListenerType);
@@ -103385,10 +103407,10 @@ index 0000000000000000000000000000000000000000..6cd58c82f5b76b28c25f4c2f63575e90
 +#endif
 diff --git a/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextAPIDeclarativeNetRequestHaiku.cpp b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextAPIDeclarativeNetRequestHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..b65198f18ad933a41fc572597b401c3977d55ee1
+index 0000000000000000000000000000000000000000..ff52852c190ff31c0b4253fd0215665efc6f0252
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextAPIDeclarativeNetRequestHaiku.cpp
-@@ -0,0 +1,253 @@
+@@ -0,0 +1,268 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +#include "config.h"
 +#include "WebExtensionContext.h"
@@ -103507,6 +103529,21 @@ index 0000000000000000000000000000000000000000..b65198f18ad933a41fc572597b401c39
 +    auto otherCount = session ? m_dynamicRulesIDs.size() : m_sessionRulesIDs.size();
 +    if (remaining.size() + rulesToAdd.length() + otherCount > webExtensionDeclarativeNetRequestMaximumNumberOfDynamicAndSessionRules)
 +        return toWebExtensionError(apiName, nullString(), "Maximum number of dynamic and session rules exceeded"_s);
++
++    // Chrome's MAX_NUMBER_OF_REGEX_RULES, for the dynamic and the session
++    // rules each.
++    auto regexRemaining = session ? m_sessionRegexRulesIDsHaiku : m_dynamicRegexRulesIDsHaiku;
++    for (auto identifier : ruleIDsToDelete)
++        regexRemaining.remove(identifier);
++    size_t regexCount = regexRemaining.size();
++    for (Ref rule : rulesToAdd) {
++        RefPtr object = rule->asObject();
++        RefPtr condition = object ? object->getObject("condition"_s) : nullptr;
++        if (condition && condition->find("regexFilter"_s) != condition->end())
++            ++regexCount;
++    }
++    if (regexCount > webExtensionDeclarativeNetRequestMaximumNumberOfRegexRules)
++        return toWebExtensionError(apiName, nullString(), "Maximum number of regular expression rules exceeded"_s);
 +
 +    // Translate each rule alone with the translator the loader uses. A rule
 +    // passes only if the native content-rule path can enforce it as written.
@@ -109227,10 +109264,10 @@ index 0000000000000000000000000000000000000000..7fe0a057f869a7ea735d3118f5242dce
 +#endif // ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
 diff --git a/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextDeclarativeNetRequestHaiku.cpp b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextDeclarativeNetRequestHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..907964666e7c1f046148e787d284017174a35e4d
+index 0000000000000000000000000000000000000000..61c456bfdd5f669b31e08c99b0f1d9517de58302
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextDeclarativeNetRequestHaiku.cpp
-@@ -0,0 +1,222 @@
+@@ -0,0 +1,245 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +#include "config.h"
 +#include "WebExtensionContext.h"
@@ -109255,6 +109292,20 @@ index 0000000000000000000000000000000000000000..907964666e7c1f046148e787d2840171
 +constexpr size_t maximumSourceLength = 64 * 1024 * 1024;
 +constexpr auto sessionRulesetID = "_session"_s;
 +constexpr auto dynamicRulesetID = "_dynamic"_s;
++// The rules of a stored list that match with a regular expression.
++HashSet<double> regexRuleIDs(const JSON::Array& rules)
++{
++    HashSet<double> identifiers;
++    for (Ref rule : rules) {
++        RefPtr object = rule->asObject();
++        RefPtr condition = object ? object->getObject("condition"_s) : nullptr;
++        auto identifier = object ? object->getDouble("id"_s) : std::nullopt;
++        if (condition && identifier && condition->find("regexFilter"_s) != condition->end())
++            identifiers.add(*identifier);
++    }
++    return identifiers;
++}
++struct RegexRuleIDs { HashSet<double> session, dynamic; };
 +void discardRuleFile(String path)
 +{
 +    if (!path.isEmpty())
@@ -109350,7 +109401,8 @@ index 0000000000000000000000000000000000000000..907964666e7c1f046148e787d2840171
 +    };
 +    auto sources = std::make_shared<Vector<RulesetSource>>();
 +    auto readError = std::make_shared<String>();
-+    auto loadStatic = [this, protectedThis = Ref { *this }, current, fail, sources, readError, completion = WTF::move(completion)]() mutable {
++    auto regexIDs = std::make_shared<RegexRuleIDs>();
++    auto loadStatic = [this, protectedThis = Ref { *this }, current, fail, sources, readError, regexIDs, completion = WTF::move(completion)]() mutable {
 +        if (!current()) { completion(false); return; }
 +        if (!readError->isEmpty()) { fail(*readError); completion(false); return; }
 +        size_t length = 0;
@@ -109380,7 +109432,7 @@ index 0000000000000000000000000000000000000000..907964666e7c1f046148e787d2840171
 +        // its matched rules (and may: either permission, as in Chrome).
 +        bool reportMatchedRules = m_declarativeNetRequestReportsMatchesHaiku
 +            && (hasPermission(WebExtensionPermission::declarativeNetRequestFeedback()) || hasPermission(WebExtensionPermission::activeTab()));
-+        translateRules(WTF::move(*sources), reportMatchedRules, [this, protectedThis = Ref { *this }, current, fail, completion = WTF::move(completion)](Translation&& translation) mutable {
++        translateRules(WTF::move(*sources), reportMatchedRules, [this, protectedThis = Ref { *this }, current, fail, regexIDs, completion = WTF::move(completion)](Translation&& translation) mutable {
 +            if (!current()) { completion(false); return; }
 +            if (!translation) { fail(translation.error()); completion(false); return; }
 +            auto sessionIDs = translation->identifiers.take(String(sessionRulesetID));
@@ -109393,6 +109445,8 @@ index 0000000000000000000000000000000000000000..907964666e7c1f046148e787d2840171
 +                m_nativeDNRRules = nullptr;
 +                m_sessionRulesIDs = WTF::move(sessionIDs);
 +                m_dynamicRulesIDs = WTF::move(dynamicIDs);
++                m_sessionRegexRulesIDsHaiku = WTF::move(regexIDs->session);
++                m_dynamicRegexRulesIDsHaiku = WTF::move(regexIDs->dynamic);
 +                m_nativeDNRStaticRuleCount = staticRuleCount;
 +                auto oldFile = std::exchange(m_nativeDNRRuleFile, { });
 +                if (oldFile.isEmpty()) { completion(true); return; }
@@ -109409,7 +109463,7 @@ index 0000000000000000000000000000000000000000..907964666e7c1f046148e787d2840171
 +            String path = makeString(basePath, '.', WTF::UUID::createVersion4().toString());
 +            API::ContentRuleListStore::defaultStoreSingleton().compileContentRuleListFile(String(path), uniqueIdentifier().isolatedCopy(), WTF::move(translation->json),
 +                WebCore::ContentExtensions::CSSSelectorsAllowed::No,
-+                [this, protectedThis = Ref { *this }, current, fail, path, staticRuleCount, sessionIDs = WTF::move(sessionIDs), dynamicIDs = WTF::move(dynamicIDs), completion = WTF::move(completion)](RefPtr<API::ContentRuleList> rules, std::error_code error) mutable {
++                [this, protectedThis = Ref { *this }, current, fail, path, staticRuleCount, sessionIDs = WTF::move(sessionIDs), dynamicIDs = WTF::move(dynamicIDs), regexIDs, completion = WTF::move(completion)](RefPtr<API::ContentRuleList> rules, std::error_code error) mutable {
 +                    if (!current() || error || !rules) {
 +                        discardRuleFile(path);
 +                        if (current())
@@ -109421,6 +109475,8 @@ index 0000000000000000000000000000000000000000..907964666e7c1f046148e787d2840171
 +                    m_nativeDNRRules = rules;
 +                    m_sessionRulesIDs = WTF::move(sessionIDs);
 +                    m_dynamicRulesIDs = WTF::move(dynamicIDs);
++                    m_sessionRegexRulesIDsHaiku = WTF::move(regexIDs->session);
++                    m_dynamicRegexRulesIDsHaiku = WTF::move(regexIDs->dynamic);
 +                    m_nativeDNRStaticRuleCount = staticRuleCount;
 +                    for (Ref controller : userContentControllers())
 +                        controller->addContentRuleList(*rules, m_baseURL);
@@ -109429,25 +109485,29 @@ index 0000000000000000000000000000000000000000..907964666e7c1f046148e787d2840171
 +                });
 +        });
 +    };
-+    auto loadDynamic = [this, protectedThis = Ref { *this }, current, sources, readError, loadStatic = WTF::move(loadStatic)]() mutable {
++    auto loadDynamic = [this, protectedThis = Ref { *this }, current, sources, readError, regexIDs, loadStatic = WTF::move(loadStatic)]() mutable {
 +        if (!current() || !readError->isEmpty()) { loadStatic(); return; }
 +        declarativeNetRequestDynamicRulesStore()->getRulesWithRuleIDs({ },
-+            [current, sources, readError, loadStatic = WTF::move(loadStatic)](RefPtr<JSON::Array> rules, const String& error) mutable {
++            [current, sources, readError, regexIDs, loadStatic = WTF::move(loadStatic)](RefPtr<JSON::Array> rules, const String& error) mutable {
 +                if (!current()) { loadStatic(); return; }
 +                if (!error.isEmpty() || !rules) {
 +                    *readError = error.isEmpty() ? "Dynamic DNR rules could not be read."_s : error;
-+                } else
++                } else {
 +                    sources->append({ String(dynamicRulesetID), rules->toJSONString() });
++                    regexIDs->dynamic = regexRuleIDs(*rules);
++                }
 +                loadStatic();
 +            });
 +    };
 +    declarativeNetRequestSessionRulesStore()->getRulesWithRuleIDs({ },
-+        [current, sources, readError, loadDynamic = WTF::move(loadDynamic)](RefPtr<JSON::Array> rules, const String& error) mutable {
++        [current, sources, readError, regexIDs, loadDynamic = WTF::move(loadDynamic)](RefPtr<JSON::Array> rules, const String& error) mutable {
 +            if (!current()) { loadDynamic(); return; }
 +            if (!error.isEmpty() || !rules) {
 +                *readError = error.isEmpty() ? "Session DNR rules could not be read."_s : error;
-+            } else
++            } else {
 +                sources->append({ String(sessionRulesetID), rules->toJSONString() });
++                regexIDs->session = regexRuleIDs(*rules);
++            }
 +            loadDynamic();
 +        });
 +}
