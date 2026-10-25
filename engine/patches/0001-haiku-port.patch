@@ -5545,6 +5545,22 @@ index c424513ac3cc46ddae67093a2dbec79247eca790..05bb32fe096a2f2c37b8921107d8cb6b
      auto request = MediaKeySystemRequest::create(document, keySystem, WTF::move(promise));
      request->setAllowCallback([keySystem, supportedConfigurations = WTF::move(supportedConfigurations), weakDocument = WeakPtr { document }, logger = WTF::move(logger), identifier = WTF::move(identifier)](String&& mediaKeysHashSalt, RefPtr<DeferredPromise>&& promise) mutable {
          RefPtr document = weakDocument.get();
+diff --git a/Source/WebCore/Modules/entriesapi/FileSystemDirectoryReader.cpp b/Source/WebCore/Modules/entriesapi/FileSystemDirectoryReader.cpp
+index c4793687ab376298ecbab3c6e63721da469f70c3..a29db149ea87952d7d26e39954a82c0075d0fa54 100644
+--- a/Source/WebCore/Modules/entriesapi/FileSystemDirectoryReader.cpp
++++ b/Source/WebCore/Modules/entriesapi/FileSystemDirectoryReader.cpp
+@@ -87,7 +87,10 @@ void FileSystemDirectoryReader::readEntries(ScriptExecutionContext& context, Ref
+     m_isReading = true;
+     callOnMainThread([context = Ref { context }, successCallback = WTF::move(successCallback), errorCallback = WTF::move(errorCallback), pendingActivity = makePendingActivity(*this)]() mutable {
+         pendingActivity->object().m_isReading = false;
+-        protect(pendingActivity->object().m_directory->filesystem())->listDirectory(context, pendingActivity->object().m_directory, [successCallback = WTF::move(successCallback), errorCallback = WTF::move(errorCallback), pendingActivity = WTF::move(pendingActivity)](ExceptionOr<Vector<Ref<FileSystemEntry>>>&& result) mutable {
++        // Taken before the completion moves pendingActivity: a call's
++        // arguments are made in no set order (GCC makes the completion first).
++        Ref directory = pendingActivity->object().m_directory;
++        protect(directory->filesystem())->listDirectory(context, directory, [successCallback = WTF::move(successCallback), errorCallback = WTF::move(errorCallback), pendingActivity = WTF::move(pendingActivity)](ExceptionOr<Vector<Ref<FileSystemEntry>>>&& result) mutable {
+             RefPtr document = pendingActivity->object().document();
+             if (result.hasException()) {
+                 pendingActivity->object().m_error = result.releaseException();
 diff --git a/Source/WebCore/Modules/identity/CredentialRequestCoordinator.cpp b/Source/WebCore/Modules/identity/CredentialRequestCoordinator.cpp
 index 2cfba92b71804f74b83bc3f44b56a3600b7adfd6..cd068dcdb035adee28647318bf137c1b2e23e029 100644
 --- a/Source/WebCore/Modules/identity/CredentialRequestCoordinator.cpp
@@ -75066,6 +75082,24 @@ index 9a6c5c95b12253c3aa3ff94b63b71153ed2742b3..b2926db31e84022eb9d21dc8b4215e4d
  #endif
  
      if (predicate.isDefaultMode() && m_sharedTimer->isActive())
+diff --git a/Source/WebCore/workers/service/server/SWServer.cpp b/Source/WebCore/workers/service/server/SWServer.cpp
+index 65ab11f1136e96a9892fa84f393b078cc4272bcb..bf49e7910d1bca339c223dce72d258c9ddb6e465 100644
+--- a/Source/WebCore/workers/service/server/SWServer.cpp
++++ b/Source/WebCore/workers/service/server/SWServer.cpp
+@@ -679,7 +679,12 @@ void SWServer::scheduleJob(ServiceWorkerJobData&& jobData)
+         ASSERT(protectedThis->m_connections.contains(jobData.connectionIdentifier()) || jobData.connectionIdentifier() == Process::identifier());
+ 
+         auto registrationKey = jobData.registrationKey();
+-        protectedThis->validateRegistrationDomain(WebCore::RegistrableDomain(jobData.topOrigin), jobData.type, protectedThis->m_scopeToRegistrationMap.contains(registrationKey), [weakThis = WTF::move(weakThis), jobData = WTF::move(jobData)] (bool isValid) mutable {
++        // Read before the completion moves jobData: a call's arguments are
++        // made in no set order (GCC makes the completion first).
++        WebCore::RegistrableDomain topDomain { jobData.topOrigin };
++        auto jobType = jobData.type;
++        bool hasRegistration = protectedThis->m_scopeToRegistrationMap.contains(registrationKey);
++        protectedThis->validateRegistrationDomain(WTF::move(topDomain), jobType, hasRegistration, [weakThis = WTF::move(weakThis), jobData = WTF::move(jobData)] (bool isValid) mutable {
+             RefPtr protectedThis = weakThis.get();
+             if (!protectedThis)
+                 return;
 diff --git a/Source/WebInspectorUI/UserInterface/Models/CookieStorageObject.js b/Source/WebInspectorUI/UserInterface/Models/CookieStorageObject.js
 index 02a8ac8d66a39a7bff0c763cd949c6117d1fc06d..f8797faf845920f113421854b78c5e3bb002dd6c 100644
 --- a/Source/WebInspectorUI/UserInterface/Models/CookieStorageObject.js
@@ -75680,7 +75714,7 @@ index 5a8bebfa4fb03b8ed66afe52ec6ea95d97a987ac..7595c5866ece87286d0992e64c684ede
 +#endif
  }
 diff --git a/Source/WebKit/NetworkProcess/NetworkResourceLoader.cpp b/Source/WebKit/NetworkProcess/NetworkResourceLoader.cpp
-index 0ecf172b29e1ba69a2573c3de5351f86e5a4ef0e..a9d215316d92279636662d4af8ae9b1e7608495b 100644
+index 0ecf172b29e1ba69a2573c3de5351f86e5a4ef0e..147cd3ec5dd899801109fbbc99e4142788d1bfd4 100644
 --- a/Source/WebKit/NetworkProcess/NetworkResourceLoader.cpp
 +++ b/Source/WebKit/NetworkProcess/NetworkResourceLoader.cpp
 @@ -115,6 +115,14 @@
@@ -76023,7 +76057,20 @@ index 0ecf172b29e1ba69a2573c3de5351f86e5a4ef0e..a9d215316d92279636662d4af8ae9b1e
  std::optional<Seconds> NetworkResourceLoader::validateCacheEntryForMaxAgeCapValidation(const ResourceRequest& request, const ResourceRequest& redirectRequest, const ResourceResponse& redirectResponse)
  {
      bool existingCacheEntryMatchesNewResponse = false;
-@@ -2057,6 +2339,15 @@ void NetworkResourceLoader::restartNetworkLoad(WebCore::ResourceRequest&& newReq
+@@ -1856,7 +2138,11 @@ void NetworkResourceLoader::continueWillSendRedirectedRequestAfterContentFilteri
+ {
+     // A redirect never reaches didReceiveResponse, so this hop needs its own check, judged against the
+     // connection that served the 302 rather than the one the request started on.
+-    checkLocalNetworkAccess(redirectRequest, redirectRequest.url(), redirectResponse.ipAddressSpace(), [this, protectedThis = Ref { *this }, request = WTF::move(request), redirectRequest = WTF::move(redirectRequest), redirectResponse = WTF::move(redirectResponse), isFromServiceWorker, completionHandler = WTF::move(completionHandler)](std::optional<ResourceError> localNetworkAccessError) mutable {
++    // The check gets a copy: the completion moves redirectRequest, which the
++    // check would otherwise read moved-from (with GCC even before it ran).
++    auto checkedRequest = redirectRequest;
++    auto connectionAddressSpace = redirectResponse.ipAddressSpace();
++    checkLocalNetworkAccess(checkedRequest, checkedRequest.url(), connectionAddressSpace, [this, protectedThis = Ref { *this }, request = WTF::move(request), redirectRequest = WTF::move(redirectRequest), redirectResponse = WTF::move(redirectResponse), isFromServiceWorker, completionHandler = WTF::move(completionHandler)](std::optional<ResourceError> localNetworkAccessError) mutable {
+         if (localNetworkAccessError) {
+             LOADER_RELEASE_LOG_ERROR("willSendRedirectedRequest: Blocked by Local Network Access check");
+             didFailLoading(*localNetworkAccessError);
+@@ -2057,6 +2343,15 @@ void NetworkResourceLoader::restartNetworkLoad(WebCore::ResourceRequest&& newReq
  
      completionHandler({ });
  
@@ -76039,7 +76086,7 @@ index 0ecf172b29e1ba69a2573c3de5351f86e5a4ef0e..a9d215316d92279636662d4af8ae9b1e
      if (!newRequest.isEmpty())
          startNetworkLoad(WTF::move(newRequest), FirstLoad::No);
  }
-@@ -2146,6 +2437,18 @@ void NetworkResourceLoader::continueWillSendRequest(ResourceRequest&& newRequest
+@@ -2146,6 +2441,18 @@ void NetworkResourceLoader::continueWillSendRequest(ResourceRequest&& newRequest
          LOG(NetworkCache, "(NetworkProcess) Retrieving cached redirect");
          LOADER_RELEASE_LOG("continueWillSendRequest: m_isWaitingContinueWillSendRequestForCachedRedirect was set");
  
@@ -76058,7 +76105,7 @@ index 0ecf172b29e1ba69a2573c3de5351f86e5a4ef0e..a9d215316d92279636662d4af8ae9b1e
          if (canUseCachedRedirect(newRequest))
              retrieveCacheEntry(newRequest);
          else
-@@ -2156,6 +2459,27 @@ void NetworkResourceLoader::continueWillSendRequest(ResourceRequest&& newRequest
+@@ -2156,6 +2463,27 @@ void NetworkResourceLoader::continueWillSendRequest(ResourceRequest&& newRequest
      if (m_networkLoad) {
          LOADER_RELEASE_LOG("continueWillSendRequest: Telling NetworkLoad to proceed with the redirect");
  
@@ -76086,7 +76133,7 @@ index 0ecf172b29e1ba69a2573c3de5351f86e5a4ef0e..a9d215316d92279636662d4af8ae9b1e
          if (shouldSendResourceLoadMessages() && !newRequest.isNull())
              protect(connectionToWebProcess().networkProcess())->parentProcessConnection()->send(Messages::NetworkProcessProxy::ResourceLoadDidPerformHTTPRedirection(webPageProxyID(), resourceLoadInfo(), m_redirectResponse, newRequest), 0);
  
-@@ -2334,6 +2658,14 @@ void NetworkResourceLoader::sendBuffer(const FragmentedSharedBuffer& buffer)
+@@ -2334,6 +2662,14 @@ void NetworkResourceLoader::sendBuffer(const FragmentedSharedBuffer& buffer)
  
  void NetworkResourceLoader::tryStoreAsCacheEntry()
  {
@@ -76101,7 +76148,7 @@ index 0ecf172b29e1ba69a2573c3de5351f86e5a4ef0e..a9d215316d92279636662d4af8ae9b1e
      if (!canUseCache(m_networkLoad->currentRequest())) {
          LOADER_RELEASE_LOG("tryStoreAsCacheEntry: Not storing cache entry because request is not eligible");
          return;
-@@ -2344,6 +2676,12 @@ void NetworkResourceLoader::tryStoreAsCacheEntry()
+@@ -2344,6 +2680,12 @@ void NetworkResourceLoader::tryStoreAsCacheEntry()
      }
  
      if (isCrossOriginPrefetch()) {
@@ -92045,10 +92092,10 @@ index 0000000000000000000000000000000000000000..b68ffffc38d023b7aa8e7a52eee32005
 +};
 diff --git a/Source/WebKit/UIProcess/API/haiku/WebKitViewEmbedding.cpp b/Source/WebKit/UIProcess/API/haiku/WebKitViewEmbedding.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..18e1686fee4925f1206504e4b6c02930bd380ce2
+index 0000000000000000000000000000000000000000..f55612b1c150782f7198f90398f55f310eb00f77
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/API/haiku/WebKitViewEmbedding.cpp
-@@ -0,0 +1,1113 @@
+@@ -0,0 +1,1117 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +// BWebKitView's embedding interfaces (WebKitEmbedding.h): user scripts,
@@ -92747,7 +92794,11 @@ index 0000000000000000000000000000000000000000..18e1686fee4925f1206504e4b6c02930
 +        WebKit::RunJavaScriptParameters parameters {
 +            WTF::move(*string),
 +            JSC::SourceTaintedOrigin::Untainted,
-+            URL { },
++            // The browser's own script, not the page's: without an address
++            // WebCore names it after the document, so the inspector listed
++            // it as one of the page's scripts and breakpoints on the page's
++            // address bound into it.
++            URL { "user-script:summit"_s },
 +            asAsyncFunction ? RunAsAsyncFunction::Yes : RunAsAsyncFunction::No,
 +            // An async function needs an (empty) argument list: ScriptController
 +            // iterates it unconditionally, as callAsyncJavaScript passes one.
@@ -92815,7 +92866,7 @@ index 0000000000000000000000000000000000000000..18e1686fee4925f1206504e4b6c02930
 +                state->inspectionWorld = API::ContentWorld::createNamelessWorld({ ContentWorldOption::DisableLegacyBuiltinOverrides });
 +            return *state->inspectionWorld;
 +        }();
-+        WebKit::RunJavaScriptParameters parameters { WTF::move(*string), JSC::SourceTaintedOrigin::Untainted, URL { },
++        WebKit::RunJavaScriptParameters parameters { WTF::move(*string), JSC::SourceTaintedOrigin::Untainted, URL { "user-script:summit"_s },
 +            RunAsAsyncFunction::No, std::nullopt, ForceUserGesture::No, RemoveTransientActivation::No };
 +        page->runJavaScriptInFrameInScriptWorld(WTF::move(parameters), std::nullopt, world, true,
 +            [state, world, message = WTF::move(message), reply, expectedGeneration](auto&& result) mutable {
@@ -94912,6 +94963,22 @@ index 0000000000000000000000000000000000000000..06e0edb16921b6b4de36743b57e1e73a
 +} // namespace WebKit
 +
 +#endif // ENABLE(WK_WEB_EXTENSIONS)
+diff --git a/Source/WebKit/UIProcess/Extensions/API/WebExtensionContextAPIStorage.cpp b/Source/WebKit/UIProcess/Extensions/API/WebExtensionContextAPIStorage.cpp
+index 1a507c778ac462b5054cba989576494682fc861f..b9e13fb4e5f3c7e26839f3543ea62397358c3e64 100644
+--- a/Source/WebKit/UIProcess/Extensions/API/WebExtensionContextAPIStorage.cpp
++++ b/Source/WebKit/UIProcess/Extensions/API/WebExtensionContextAPIStorage.cpp
+@@ -122,7 +122,10 @@ void WebExtensionContext::storageSet(WebPageProxyIdentifier webPageProxyIdentifi
+     }
+ 
+     Ref storage = storageForType(dataType);
+-    storage->getStorageSizeForAllKeys(data, [this, protectedThis = Ref { *this }, callingAPIName, dataType, data = WTF::move(data), completionHandler = WTF::move(completionHandler)](size_t size, int numberOfKeys, HashMap<String, String> existingKeysAndValues, const String& errorMessage) mutable {
++    // Copied first: GCC makes the completion (which moves data) before the
++    // first argument, and the quota was then checked without the new data.
++    auto additionalData = data;
++    storage->getStorageSizeForAllKeys(WTF::move(additionalData), [this, protectedThis = Ref { *this }, callingAPIName, dataType, data = WTF::move(data), completionHandler = WTF::move(completionHandler)](size_t size, int numberOfKeys, HashMap<String, String> existingKeysAndValues, const String& errorMessage) mutable {
+         if (!errorMessage.isEmpty()) {
+             completionHandler(toWebExtensionError(callingAPIName, nullString(), errorMessage));
+             return;
 diff --git a/Source/WebKit/UIProcess/Extensions/API/WebExtensionContextAPIWebNavigation.cpp b/Source/WebKit/UIProcess/Extensions/API/WebExtensionContextAPIWebNavigation.cpp
 new file mode 100644
 index 0000000000000000000000000000000000000000..d2b533a9e2910ceba00356de494e5783cac3b51c
@@ -99929,10 +99996,24 @@ index 0000000000000000000000000000000000000000..492cd7b9622d443909f19ceec277ac2c
 +
 +#endif // ENABLE(WK_WEB_EXTENSIONS)
 diff --git a/Source/WebKit/UIProcess/Extensions/WebExtensionDeclarativeNetRequestSQLiteStore.cpp b/Source/WebKit/UIProcess/Extensions/WebExtensionDeclarativeNetRequestSQLiteStore.cpp
-index cce62c8f08ed179e214c76a5272ac5f73a256823..9365cedde065d5494d979f82965b99b6977c0c5e 100644
+index cce62c8f08ed179e214c76a5272ac5f73a256823..6c6efb534d9bfc94358322c480e6aecc29c54ddd 100644
 --- a/Source/WebKit/UIProcess/Extensions/WebExtensionDeclarativeNetRequestSQLiteStore.cpp
 +++ b/Source/WebKit/UIProcess/Extensions/WebExtensionDeclarativeNetRequestSQLiteStore.cpp
-@@ -312,6 +312,7 @@ SchemaVersion WebExtensionDeclarativeNetRequestSQLiteStore::migrateToCurrentSche
+@@ -57,7 +57,12 @@ static Vector<String> ruleIdMapToString(Vector<double> ruleIDs)
+ 
+ void WebExtensionDeclarativeNetRequestSQLiteStore::updateRulesByRemovingIDs(Vector<double> ruleIDs, Ref<JSON::Array> rules, CompletionHandler<void(const String& errorMessage)>&& completionHandler)
+ {
+-    deleteRules(ruleIDs, [protectedThis = Ref { *this }, ruleIDs = WTF::move(ruleIDs), rules = WTF::move(rules), completionHandler = WTF::move(completionHandler)](const String& errorMessage) mutable {
++    // The IDs are copied before the completion moves them: the order in
++    // which a call's arguments are made is unspecified, and GCC made the
++    // completion first, so the rules to remove were none and removals did
++    // nothing.
++    auto ruleIDsToDelete = ruleIDs;
++    deleteRules(WTF::move(ruleIDsToDelete), [protectedThis = Ref { *this }, ruleIDs = WTF::move(ruleIDs), rules = WTF::move(rules), completionHandler = WTF::move(completionHandler)](const String& errorMessage) mutable {
+         if (!errorMessage.isEmpty()) {
+             completionHandler(errorMessage);
+             return;
+@@ -312,6 +317,7 @@ SchemaVersion WebExtensionDeclarativeNetRequestSQLiteStore::migrateToCurrentSche
  {
      assertIsCurrent(queue());
  
@@ -99940,7 +100021,7 @@ index cce62c8f08ed179e214c76a5272ac5f73a256823..9365cedde065d5494d979f82965b99b6
      auto currentDatabaseSchemaVersion = databaseSchemaVersion();
      if (currentDatabaseSchemaVersion == 1) {
          // We need to migrate existing data to the format understood by the new C++ SQLite Store parser
-@@ -324,6 +325,8 @@ SchemaVersion WebExtensionDeclarativeNetRequestSQLiteStore::migrateToCurrentSche
+@@ -324,6 +330,8 @@ SchemaVersion WebExtensionDeclarativeNetRequestSQLiteStore::migrateToCurrentSche
          setDatabaseSchemaVersion(currentDeclarativeNetRequestSchemaVersion);
          return currentDeclarativeNetRequestSchemaVersion;
      }
