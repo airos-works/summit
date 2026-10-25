@@ -138,3 +138,10 @@ BGRA, 28 fps) from a canvas track in a worker and played them back through
 a `VideoTrackGenerator` (the X399 had no camera then); the fixture's
 VP8/VP9/H.264 round trips still decoded exactly 6 frames each after
 `flush()`.
+
+PCM, FLAC and Vorbis verified on the X399 (25 Oct, pcm112 build): `pcm-u8`,
+`-s16`, `-s24`, `-s32`, `-f32` (48 kHz) and `alaw`/`ulaw` (8 kHz) each took a
+second of tone through `AudioEncoder` and back (100 chunks, RMS 0.353–0.355
+against 0.354); a quarter second of FLAC (3 frames, 12000 samples, `s16`)
+and Ogg Vorbis (14 packets, `f32-planar`) decoded without errors at the
+same loudness as the AAC and MP3 files.
