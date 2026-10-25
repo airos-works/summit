@@ -21016,10 +21016,10 @@ index 0000000000000000000000000000000000000000..cdab62bfd95bf644f740fce9f74b4813
 +#endif // PLATFORM(HAIKU)
 diff --git a/Source/WebCore/platform/audio/haiku/WebCodecsAudioHaiku.cpp b/Source/WebCore/platform/audio/haiku/WebCodecsAudioHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..346997bb93522aa1af22f86ac7c5f3141ab043c3
+index 0000000000000000000000000000000000000000..9ded7d7cbc9417d522a09daaaedbf7f4ed12a4a5
 --- /dev/null
 +++ b/Source/WebCore/platform/audio/haiku/WebCodecsAudioHaiku.cpp
-@@ -0,0 +1,1048 @@
+@@ -0,0 +1,1051 @@
 +/*
 + * Copyright (C) 2026 Summit contributors.
 + *
@@ -21193,17 +21193,18 @@ index 0000000000000000000000000000000000000000..346997bb93522aa1af22f86ac7c5f314
 +
 +    // Encoding, when the libraries are FFmpeg 6 or 8: AVFrame's channel
 +    // layout and sample rate are past the prefix, at offsets of those
-+    // versions (libavutil 58 and 60); the codec context is set up through
-+    // AVOptions.
++    // versions (libavutil 58 and 60), as is the codec context's sample
++    // format (no AVOption sets it); the rest of the context is set up
++    // through AVOptions.
 +    bool canEncode { false };
 +    size_t frameChannelLayoutOffset { 0 };
 +    size_t frameSampleRateOffset { 0 };
++    size_t contextSampleFormatOffset { 0 };
 +    void* (*findEncoderByName)(const char*);
 +    int (*sendFrame)(void*, const void*);
 +    int (*receivePacket)(void*, void*);
 +    void (*unrefPacket)(void*);
 +    int (*setOptionInt)(void*, const char*, int64_t, int);
-+    int (*setOptionSampleFormat)(void*, const char*, int, int);
 +    int (*setOptionChannelLayout)(void*, const char*, const void*, int);
 +    int (*getOptionInt)(void*, const char*, int, int64_t*);
 +    void (*defaultChannelLayout)(void*, int);
@@ -21255,9 +21256,11 @@ index 0000000000000000000000000000000000000000..346997bb93522aa1af22f86ac7c5f314
 +            if (avcodecMajor == 60 && avutilMajor == 58) {
 +                ffmpeg->frameChannelLayoutOffset = 448;
 +                ffmpeg->frameSampleRateOffset = 208;
++                ffmpeg->contextSampleFormatOffset = 360;
 +            } else if (avcodecMajor == 62 && avutilMajor == 60) {
 +                ffmpeg->frameChannelLayoutOffset = 384;
 +                ffmpeg->frameSampleRateOffset = 180;
++                ffmpeg->contextSampleFormatOffset = 348;
 +            }
 +            if (ffmpeg->frameChannelLayoutOffset) {
 +                complete = true;
@@ -21266,7 +21269,6 @@ index 0000000000000000000000000000000000000000..346997bb93522aa1af22f86ac7c5f314
 +                ffmpeg->receivePacket = reinterpret_cast<int (*)(void*, void*)>(find(avcodec, "avcodec_receive_packet"));
 +                ffmpeg->unrefPacket = reinterpret_cast<void (*)(void*)>(find(avcodec, "av_packet_unref"));
 +                ffmpeg->setOptionInt = reinterpret_cast<int (*)(void*, const char*, int64_t, int)>(find(avutil, "av_opt_set_int"));
-+                ffmpeg->setOptionSampleFormat = reinterpret_cast<int (*)(void*, const char*, int, int)>(find(avutil, "av_opt_set_sample_fmt"));
 +                ffmpeg->setOptionChannelLayout = reinterpret_cast<int (*)(void*, const char*, const void*, int)>(find(avutil, "av_opt_set_chlayout"));
 +                ffmpeg->getOptionInt = reinterpret_cast<int (*)(void*, const char*, int, int64_t*)>(find(avutil, "av_opt_get_int"));
 +                ffmpeg->defaultChannelLayout = reinterpret_cast<void (*)(void*, int)>(find(avutil, "av_channel_layout_default"));
@@ -21872,8 +21874,9 @@ index 0000000000000000000000000000000000000000..346997bb93522aa1af22f86ac7c5f314
 +            return false;
 +        alignas(8) std::array<uint8_t, 64> layout { };
 +        m_ffmpeg.defaultChannelLayout(layout.data(), m_config.numberOfChannels);
++        int sampleFormat = sampleFloatPlanar;
++        memcpy(static_cast<uint8_t*>(m_context) + m_ffmpeg.contextSampleFormatOffset, &sampleFormat, sizeof(sampleFormat));
 +        bool configured = m_ffmpeg.setOptionInt(m_context, "ar", m_config.sampleRate, 0) >= 0
-+            && m_ffmpeg.setOptionSampleFormat(m_context, "sample_fmt", sampleFloatPlanar, 0) >= 0
 +            && m_ffmpeg.setOptionChannelLayout(m_context, "ch_layout", layout.data(), 0) >= 0
 +            && (!m_config.bitRate || m_ffmpeg.setOptionInt(m_context, "b", m_config.bitRate, 0) >= 0);
 +        m_ffmpeg.uninitChannelLayout(layout.data());
@@ -144366,10 +144369,10 @@ index 0000000000000000000000000000000000000000..53f3d5d0e7d0737a767f292c7972464c
 +#endif // ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
 diff --git a/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPITabs.cpp b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPITabs.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..5f021b3eb93c79d2888a6bcb0eda8719b74de067
+index 0000000000000000000000000000000000000000..fefdf65aaa75bd8a8b50cb525e2cdeed85d7e85f
 --- /dev/null
 +++ b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPITabs.cpp
-@@ -0,0 +1,979 @@
+@@ -0,0 +1,980 @@
 +/*
 + * Copyright (C) 2023 Apple Inc. All rights reserved.
 + *
@@ -144588,7 +144591,8 @@ index 0000000000000000000000000000000000000000..5f021b3eb93c79d2888a6bcb0eda8719
 +    // Documentation: https://developer.mozilla.org/docs/Mozilla/Add-ons/WebExtensions/API/tabs/getSelected
 +    // The active tab of the window (default: the current one), as Cocoa does.
 +    auto window = toWebExtensionWindowIdentifier(windowID);
-+    if (window && !isValid(window)) {
++    bool omitted = std::isnan(windowID) || !windowID;
++    if ((!omitted && !window) || (window && !isValid(window))) {
 +        exception = "'windowId' value is invalid, because it is not a valid window identifier."_s;
 +        return;
 +    }

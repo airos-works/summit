@@ -27,9 +27,12 @@ AAC chunks with an `AudioSpecificConfig` description get ADTS headers made
 from it (FFmpeg's AAC decoder then needs no extradata), and without one they
 are taken as ADTS. AAC LC (`mp4a.40.2`) and MP3 are encoded through
 FFmpeg too (its own AAC encoder and LAME), with FFmpeg 6 or 8 (libavcodec
-60 or 62): the codec context is set up with AVOptions, and the two `AVFrame`
-fields past the prefix the decoders use (`ch_layout`, `sample_rate`) are at
-those versions' offsets, so other versions report unsupported. AAC gives raw
+60 or 62): the codec context is set up with AVOptions, except its sample
+format (no AVOption sets it), which like the two `AVFrame` fields past the
+prefix the decoders use (`ch_layout`, `sample_rate`) is written at those
+versions' offsets, so other versions report unsupported. The offsets came
+from FFmpeg 6.1's and 8.0's headers and were checked against the X399's
+libraries (both encoders open with 1024/1152-sample frames and encode). AAC gives raw
 frames with an `AudioSpecificConfig` as `description`, or ADTS frames with
 `aac: { format: "adts" }` (table rates, up to 7 channels); after `flush()`
 the next frame starts a new encoder. HE-AAC encoding, FLAC, Vorbis and PCM
