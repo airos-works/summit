@@ -3,8 +3,9 @@
 Added 30 September 2026. The first pass (morning): what a page asks of the
 network, and what it writes to its console. The Storage tab (afternoon): the
 page's local and session storage and its cookies. The Elements panel and
-View Page Source followed on 19 October 2026 (issue #76). Sources with a
-debugger, and timelines, are not part of it (see [Not done](#not-done)).
+View Page Source followed on 19 October 2026 (issue #76), Sources with a
+JavaScript debugger and Cache Storage on 26 October (#108). Timelines are not
+part of it (see [Not done](#not-done)).
 
 ![The Elements panel: the DOM tree and the selected heading's rules](screenshots/developer-tools-elements.png)
 
@@ -230,6 +231,15 @@ shows its source, coloured, with line numbers.
 or clears it. Breakpoints belong to the script's address and line, so they
 hold across reloads and in every process of the page.
 
+WebKit starts with breakpoints inactive, so the tab turns them on
+(`Debugger.setBreakpointsActive`) when it turns the debugger on; scope
+objects, which have no displayable properties, are read with
+`Runtime.getProperties`. A pause holds the page's main thread in the
+engine's nested loop (`PageDebugger::runEventLoopWhilePaused`), which on
+Haiku waits for the next message instead of ending when none is waiting
+(26 Oct: before that, the page ran on at once while the tab showed it
+paused).
+
 **Paused** (at a breakpoint, a `debugger` statement, or **Pause**): the
 status says why and where, the paused line is marked, the right shows the
 call stack (choosing a frame shows its script and line) and that frame's
@@ -254,6 +264,15 @@ IndexedDB origin asks for its databases (`IndexedDB.requestDatabaseNames`,
 value as the Console shows them (`IndexedDB.requestData`); **Clear All**
 empties the store (`IndexedDB.clearObjectStore`). Test action:
 `storage-select indexeddb ORIGIN` or `indexeddb ORIGIN|DATABASE|STORE`.
+**Cache Storage** lists the page's own origin: every response its caches
+keep (the first 1000), as *cache › address* (with the method when it is not
+GET), its status, type and size, and its headers below. WebKit's inspector
+has no domain for it, so the page's `caches` object is read with
+`Runtime.evaluate` and `Runtime.awaitPromise`; frames from other sites are
+not reachable that way, and a page that is not a secure context (plain http
+other than localhost) has no caches. **Delete** removes the response from
+its cache, **Clear All** deletes the caches. Test action: `storage-select
+cache [ORIGIN]`.
 Choosing one shows it on the right:
 
 - **Storage**: a row for each key, with its value on one line. The selected
@@ -606,13 +625,12 @@ is started again.
 
 ## Not done
 
-- Messages and requests from before the tools were opened. The engine keeps
-  console messages for an inspector only while developer extras are on, and
-  they are on only while tools are open, so that pages nobody inspects pay
-  nothing.
-- Sources and the debugger, timelines. In Storage: IndexedDB, the cache
-  API, editing a cookie (only deleting), and a cookie's partition. The
-  session carries the whole protocol, so they need panels, not engine work.
+- Network requests from before the tools were opened (as in other
+  browsers). Console messages are kept: developer extras are on for every
+  page (`SUMMIT_DEVELOPER_EXTRAS=0` turns that off).
+- Timelines (`ENABLE(RESOURCE_USAGE)` is off). In Sources: pretty printing
+  and source maps. In Storage: partitioned cookies, and Cache Storage of
+  frames from other sites. Network throttling is Cocoa-only in WebKit.
 - Elements › Accessibility shows the selected element's role, name and
   states, asked for only while that tab is shown; accessibility, which this
   turns on in the web process, goes off again when the tools close (the
@@ -628,17 +646,8 @@ is started again.
   engine has `!` there since 19 October (5e48736); the label stays off
   because accessibility for the whole web process costs time on every change
   of the page.
-- Also in Elements: editing a selector or adding a rule, forcing `:hover`
-  and the like, event listeners, CSS variables' values, colour pickers,
-  the hovered node selected in the tree while picking, dragging nodes, and
-  the box model of other than the selected element. A tree being edited
-  stays where it was when the page's changes move the line. Find runs on
-  Enter, not as it is typed.
+- In Elements: the hovered node selected in the tree while picking,
+  dragging nodes, and the box model of other than the selected element.
 - The highlight needs accelerated compositing; a page drawn in software has
   none.
-- Web sockets' frames, request timing broken down (DNS, connect, TLS),
-  throttling, blocking and replaying requests, copy as cURL, HAR export.
-- Expanding an object in the console: previews are shown, not trees.
-- Docking the tools in the browser window.
-- The bodies of an earlier page after a navigation that changed process, for
-  anything that had not been fetched by then.
+- Docking inside the browser window: the tools are a window of their own.
