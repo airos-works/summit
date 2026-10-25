@@ -19,6 +19,7 @@
 #include "ui/ExtensionUpdater.h"
 #if SUMMIT_MODERN_WEBKIT
 #include "ui/DownloadList.h"
+#include "ui/DownloadListener.h"
 #include "ui/McpService.h"
 #include "ui/SitePermissions.h"
 #include "ui/BookmarkImport.h"
@@ -77,6 +78,7 @@ static constexpr const char* kRestoreSessionArgument = "--restore-session";
 // (BWebKitContext::ExtensionNotificationClicked).
 static constexpr const char* kExtensionNotificationClickArgument = "--summit-extension-notification-click";
 static constexpr uint32 kExtensionNotificationChoice = 'senc';
+static constexpr uint32 kReleaseDownloadContexts = 'srdc';
 
 class SummitApp : public BApplication {
 public:
@@ -241,7 +243,7 @@ public:
             StartupError("Could not open the WebKit profile: " + std::string(std::strerror(fWebKitContext->InitCheck())));
             return;
         }
-        initialization = fWebKitContext->SetDownloadListener(BMessenger(this));
+        initialization = ListenForDownloads(fWebKitContext, false);
         if (initialization != B_OK) {
             StartupError("Could not initialize downloads: " + std::string(std::strerror(initialization)));
             return;
@@ -385,6 +387,10 @@ public:
     {
 #if SUMMIT_MODERN_WEBKIT
         if (summit::HandleTranslationContextMessage(message)) return;
+        if (message->what == kReleaseDownloadContexts) {
+            ReleaseRetiredPrivateContexts();
+            return;
+        }
 #endif
         // Summit started again without arguments (its icon) while quitting.
         if (message->what == B_SILENT_RELAUNCH && fQuitting) {
@@ -550,32 +556,8 @@ public:
         }
         if (message->what == B_WEBKIT_DOWNLOAD_STARTED || message->what == B_WEBKIT_DOWNLOAD_PROGRESS
             || message->what == B_WEBKIT_DOWNLOAD_FINISHED) {
-            // The application remains the listener while closing windows and
-            // draining cancellation replies on the WebKit main loop. Each
-            // download is reported to the window whose page started it.
-            const uint64 identifier = message->GetUInt64("identifier", 0);
-            BMessenger target;
-            if (auto found = fDownloads.find(identifier); found != fDownloads.end()) target = found->second;
-            if (!target.IsValid()) {
-                BMessenger view;
-                if (message->FindMessenger("view", &view) == B_OK) target = WindowOf(view);
-            }
-            if (!target.IsValid() && !fWindows.empty()) target = FrontWindow();
-            // The downloads button and panel of every window show it; private
-            // windows only their own.
-            const bool privateDownload = std::any_of(fWindows.begin(), fWindows.end(), [&](const WindowRecord& window) {
-                return window.messenger == target && window.privateBrowsing;
-            });
-            summit::DownloadList::Default().Update(*message, privateDownload);
-            if (message->what == B_WEBKIT_DOWNLOAD_FINISHED
-                && message->GetUInt32("result", B_WEBKIT_DOWNLOAD_FAILED) == B_WEBKIT_DOWNLOAD_SUCCEEDED)
-                if (const char* path = message->GetString("path", nullptr); path && *path)
-                    // Its type, for its icon and the application that opens it (in the background).
-                    update_mime_info(path, false, false, B_UPDATE_MIME_INFO_NO_FORCE);
-            if (message->what == B_WEBKIT_DOWNLOAD_FINISHED) fDownloads.erase(identifier);
-            else if (identifier) fDownloads[identifier] = target;
-            if (target.IsValid()) target.SendMessage(message);
-            if (message->what == B_WEBKIT_DOWNLOAD_FINISHED) ReleaseRetiredPrivateContexts();
+            // Only a context's listener can identify the source and lifetime
+            // of a download. Untagged application messages have neither.
             return;
         }
         if (message->what == summit::kDownloadQuitReply) {
@@ -1115,6 +1097,10 @@ public:
         // application has left the registrar (RunApplication), so that a new
         // start does not wait on a slow disk.
         SUMMIT_QUIT_TRACE("the application quits");
+#if SUMMIT_MODERN_WEBKIT
+        for (const auto& item : fDownloadListeners) RemoveHandler(item.second.get());
+        fDownloadListeners.clear();
+#endif
         return true;
     }
     void QuitForShutdown(BMessage* request)
@@ -1196,6 +1182,62 @@ private:
         OpenWindow(options);
     }
 #if SUMMIT_MODERN_WEBKIT
+    status_t ListenForDownloads(const std::shared_ptr<BWebKitContext>& context, bool privateBrowsing)
+    {
+        auto listener = std::make_unique<summit::DownloadListener>(privateBrowsing,
+            [this](const BMessage& message, bool isPrivate, bool active) { DownloadReceived(message, isPrivate, active); });
+        AddHandler(listener.get());
+        const auto status = context->SetDownloadListener(BMessenger(listener.get()));
+        if (status != B_OK) { RemoveHandler(listener.get()); return status; }
+        fDownloadListeners.emplace(context.get(), std::move(listener));
+        return B_OK;
+    }
+    void DownloadReceived(const BMessage& message, bool privateBrowsing, bool active)
+    {
+        // Cleanup runs on a later application turn, after this listener's
+        // callback has returned. A retired private context cannot repopulate
+        // either the public profile or a newer private session.
+        if (message.what == B_WEBKIT_DOWNLOAD_FINISHED) PostMessage(kReleaseDownloadContexts);
+        if (!active) return;
+        const uint64 identifier = message.GetUInt64("identifier", 0);
+        if (!identifier) return;
+        BMessenger target;
+        if (auto found = fDownloads.find(identifier); found != fDownloads.end()) target = found->second;
+        if (!target.IsValid()) {
+            BMessenger view;
+            if (message.FindMessenger("view", &view) == B_OK) target = WindowOf(view);
+        }
+        // A view may already have closed, or a background extension may have
+        // started this download. Choose a window only in its own context.
+        if (std::none_of(fWindows.begin(), fWindows.end(), [&](const WindowRecord& window) {
+                return window.messenger == target && window.privateBrowsing == privateBrowsing;
+            })) {
+            target = BMessenger();
+            for (const auto& window : fWindows) if (window.privateBrowsing == privateBrowsing) {
+                target = window.messenger;
+                break;
+            }
+        }
+        if (auto change = summit::DownloadList::Default().Update(message, privateBrowsing); change && fShared) {
+            fShared->Change([&](summit::Profile& profile) -> uint32 {
+                const bool changed = change->newVisit
+                    ? profile.VisitDownload({change->url, change->title}, change->started)
+                    : profile.SetDownloadTitle(change->url, change->started, change->title);
+                return changed ? uint32(summit::SharedProfile::kHistoryChanged) : 0;
+            }, BMessenger(), false);
+            fShared->SaveSoon();
+        }
+        if (message.what == B_WEBKIT_DOWNLOAD_FINISHED
+            && message.GetUInt32("result", B_WEBKIT_DOWNLOAD_FAILED) == B_WEBKIT_DOWNLOAD_SUCCEEDED)
+            if (const char* path = message.GetString("path", nullptr); path && *path)
+                update_mime_info(path, false, false, B_UPDATE_MIME_INFO_NO_FORCE);
+        if (message.what == B_WEBKIT_DOWNLOAD_FINISHED) fDownloads.erase(identifier);
+        else fDownloads[identifier] = target;
+        if (target.IsValid()) {
+            BMessage forwarded(message);
+            target.SendMessage(&forwarded);
+        }
+    }
     // One private context serves every private window, as one private session
     // does in other browsers. It lives until the last private window closes.
     std::shared_ptr<BWebKitContext> PrivateContext()
@@ -1204,7 +1246,7 @@ private:
         // Its pages are served by the normal profile's extensions: those
         // allowed in private windows work there with their own saved data.
         auto context = std::make_shared<BWebKitContext>(fWebKitContext);
-        if (context->InitCheck() != B_OK || context->SetDownloadListener(BMessenger(this)) != B_OK) return nullptr;
+        if (context->InitCheck() != B_OK || ListenForDownloads(context, true) != B_OK) return nullptr;
         context->SetKeepFailedDownloads(true);
         TrustSavedCertificates(*context);
         // Saved site permissions apply in private windows too; what is
@@ -1406,15 +1448,17 @@ private:
     {
         fShared->ClearPrivateSession();
 #if SUMMIT_MODERN_WEBKIT
+        if (fPrivateContext) fDownloadListeners.at(fPrivateContext.get())->Deactivate();
+        for (const auto& entry : summit::DownloadList::Default().Entries(true)) fDownloads.erase(entry.engine);
         summit::DownloadList::Default().ForgetPrivate();
         if (!fPrivateContext) return;
         // Its cookies, cache and storage are only in memory: releasing the
         // context forgets them. Downloads still running are cancelled first.
         if (fPrivateContext->HasPendingDownloads()) {
             fPrivateContext->CancelAllDownloads();
-            fRetiredPrivateContexts.push_back(std::move(fPrivateContext));
         }
-        fPrivateContext.reset();
+        fRetiredPrivateContexts.push_back(std::move(fPrivateContext));
+        ReleaseRetiredPrivateContexts();
 #endif
     }
     // What quitting would cost the downloads in progress, to ask about it
@@ -1466,8 +1510,13 @@ private:
     void ReleaseRetiredPrivateContexts()
     {
 #if SUMMIT_MODERN_WEBKIT
-        std::erase_if(fRetiredPrivateContexts, [](const std::shared_ptr<BWebKitContext>& context) {
-            return !context->HasPendingDownloads();
+        std::erase_if(fRetiredPrivateContexts, [this](const std::shared_ptr<BWebKitContext>& context) {
+            if (context->HasPendingDownloads()) return false;
+            if (auto found = fDownloadListeners.find(context.get()); found != fDownloadListeners.end()) {
+                RemoveHandler(found->second.get());
+                fDownloadListeners.erase(found);
+            }
+            return true;
         });
 #endif
     }
@@ -2216,6 +2265,7 @@ private:
     std::shared_ptr<BWebKitContext> fPrivateContext;
     // Closed private sessions whose downloads are still being cancelled.
     std::vector<std::shared_ptr<BWebKitContext>> fRetiredPrivateContexts;
+    std::map<BWebKitContext*, std::unique_ptr<summit::DownloadListener>> fDownloadListeners;
     std::vector<BMessage> fPendingExtensionTabs;
     std::map<uint64, uint32> fDataRequests;
     uint64 fNextDataRequest = 0;

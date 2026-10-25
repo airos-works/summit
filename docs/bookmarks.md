@@ -379,6 +379,19 @@ saves distinguish a known zero from an older unknown count, which retains its
 existing one-visit fallback. Count filters and ordering use the known value.
 Summit's aggregate navigation counter retains its existing behavior.
 
+Summit's own downloads are history visits too, as in Firefox: starting a
+download in a normal window records a download visit (transition 7) of its
+original address, which does not add to the page's visit count, keeps an
+existing title and otherwise takes the file's name once it is known
+(`Profile::VisitDownload`, `SetDownloadTitle`). Resuming a download in the
+same session adds no second visit. Private windows' downloads are not
+recorded: each engine context has its own download listener
+(`DownloadListener`), so a private download can never reach the public
+profile, and a closed private session's listener stops recording. So
+`place:transition=7` and the library's Downloads link show Summit's
+downloads as well as imported ones. Tests: `DownloadVisitTests` (host and
+native), `NativeDownloadHistoryTests`, `NativeDownloadVisitBrowserTests`.
+
 Reimporting known types for an existing timestamp updates and saves history,
 notifies windows and refreshes open queries without adding another URL or visit.
 Repeated imports are idempotent. Sources reporting different types at the same

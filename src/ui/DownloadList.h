@@ -39,6 +39,10 @@ public:
         double rate = 0;
         bigtime_t sampleTime = 0;
         uint64 sampleBytes = 0;
+        // Session-only history bookkeeping: resuming this entry does not add
+        // another visit. A resume after restarting Summit starts a new visit.
+        int64_t historyStarted = 0;
+        bool historyRecorded = false, historyTitlePending = false;
         DownloadStatus Status() const;
         // Paused, or failed with its partial file: Resume (or Restart) continues it.
         bool CanContinue() const;
@@ -56,7 +60,13 @@ public:
     void Open(const std::filesystem::path& file);
     // A B_WEBKIT_DOWNLOAD_* notification. A new download takes
     // privateBrowsing; later ones keep what it was.
-    void Update(const BMessage& notification, bool privateBrowsing);
+    struct HistoryChange {
+        std::string url, title;
+        int64_t started = 0; // microseconds
+        bool newVisit = false;
+    };
+    // A public download may add a visit or fill its initially missing title.
+    std::optional<HistoryChange> Update(const BMessage& notification, bool privateBrowsing);
     std::vector<Entry> Entries(bool privateBrowsing) const;
     std::optional<Entry> Find(uint64 identifier) const;
     Summary Summarize(bool privateBrowsing) const;

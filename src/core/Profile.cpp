@@ -550,11 +550,13 @@ bool Profile::Save(const std::filesystem::path& path, std::string& error, int64_
     } catch (const std::exception&) { }
     return true;
 }
-static bool RecordVisit(Profile& profile, const PageRecord& page, int64_t micros)
+static bool RecordVisit(Profile& profile, const PageRecord& page, int64_t micros, bool download = false)
 {
     if (page.url.rfind("https://", 0) != 0 && page.url.rfind("http://", 0) != 0) return false;
+    if (page.url.size() > 65536 || page.title.size() > 65536 || page.url.find('\0') != std::string::npos) return false;
     int visits = 0;
     bool countKnown = false;
+    std::string oldTitle;
     std::vector<int64_t> times;
     std::vector<std::pair<int64_t, uint32_t>> transitions;
     auto& history = profile.history;
@@ -562,6 +564,7 @@ static bool RecordVisit(Profile& profile, const PageRecord& page, int64_t micros
         if (old.url != page.url) return false;
         visits = std::max(visits, HistoryVisitCount(old));
         countKnown |= old.visitCountKnown;
+        if (oldTitle.empty()) oldTitle = old.title;
         auto oldTimes = HistoryVisitTimes(old);
         times.insert(times.end(), oldTimes.begin(), oldTimes.end());
         transitions.insert(transitions.end(), old.visitTransitions.begin(), old.visitTransitions.end());
@@ -570,10 +573,12 @@ static bool RecordVisit(Profile& profile, const PageRecord& page, int64_t micros
     times.push_back(micros);
     history.insert(history.begin(), page);
     auto& record = history.front();
+    if (download && !oldTitle.empty()) record.title = std::move(oldTitle);
+    if (download) transitions.emplace_back(micros, 7);
     record.visitTransitions = std::move(transitions);
     SetHistoryVisitTimes(record, std::move(times));
-    record.visits = std::min(visits + 1, 1000000);
-    record.visitCountKnown = countKnown;
+    record.visits = std::min(visits + (download ? 0 : 1), 1000000);
+    record.visitCountKnown = countKnown || download;
     record.bar = false;
     std::stable_sort(history.begin(), history.end(), [](const auto& a, const auto& b) { return a.visited > b.visited; });
     if (history.size() > 2000) history.resize(2000);
@@ -586,6 +591,22 @@ bool Profile::Visit(const PageRecord& page)
 bool Profile::Visit(const PageRecord& page, int64_t now)
 {
     return RecordVisit(*this, page, HistoryMicroseconds(now));
+}
+bool Profile::VisitDownload(const PageRecord& page, int64_t startedMicros)
+{
+    return startedMicros > 0 && RecordVisit(*this, page, startedMicros, true);
+}
+bool Profile::SetDownloadTitle(const std::string& url, int64_t startedMicros, const std::string& filename)
+{
+    if (filename.empty() || filename.size() > 65536) return false;
+    for (auto& page : history) {
+        if (page.url != url || !page.title.empty()) continue;
+        if (std::find(page.visitTransitions.begin(), page.visitTransitions.end(), std::pair<int64_t, uint32_t>{startedMicros, 7})
+            == page.visitTransitions.end()) continue;
+        page.title = filename;
+        return true;
+    }
+    return false;
 }
 size_t Profile::ForgetVisitsSince(int64_t since)
 {
