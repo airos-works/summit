@@ -32,6 +32,21 @@ public:
     }
 };
 
+// A number of a summary (one that is missing or not a number is 0: a
+// recording's records come from the page and must not throw).
+double Number(const json& object, const char* key)
+{
+    if (!object.is_object()) return 0;
+    const auto found = object.find(key);
+    return found != object.end() && found->is_number() ? found->get<double>() : 0;
+}
+std::string Text(const json& object, const char* key)
+{
+    if (!object.is_object()) return { };
+    const auto found = object.find(key);
+    return found != object.end() && found->is_string() ? found->get<std::string>() : std::string();
+}
+
 std::string Milliseconds(double value)
 {
     char text[32];
@@ -43,16 +58,16 @@ std::string Milliseconds(double value)
 // where it is, the script, the timer, the event.
 std::string What(const json& entry)
 {
-    const auto data = entry.value("data", json::object());
+    const auto data = entry.is_object() && entry.contains("data") && entry["data"].is_object() ? entry["data"] : json::object();
     std::string what;
     const auto text = [&](const char* key) { return data.contains(key) && data[key].is_string() ? data[key].get<std::string>() : std::string(); };
     if (const auto type = text("type"); !type.empty()) what = type;
     if (const auto name = text("functionName"); !name.empty()) what += (what.empty() ? "" : " ") + name;
     if (const auto url = text("url"); !url.empty()) {
         what += (what.empty() ? "" : " ") + url.substr(url.rfind('/') == std::string::npos ? 0 : url.rfind('/') + 1);
-        if (data.contains("lineNumber") && data["lineNumber"].is_number()) what += ":" + std::to_string(data["lineNumber"].get<int>());
+        if (data.contains("lineNumber") && data["lineNumber"].is_number()) what += ":" + std::to_string(static_cast<int>(Number(data, "lineNumber")));
     }
-    if (data.contains("timerId") && data["timerId"].is_number()) what += (what.empty() ? "timer " : " timer ") + std::to_string(data["timerId"].get<int>());
+    if (data.contains("timerId") && data["timerId"].is_number()) what += (what.empty() ? "timer " : " timer ") + std::to_string(static_cast<int>(Number(data, "timerId")));
     if (what.empty() && entry.contains("stack") && entry["stack"].is_array() && !entry["stack"].empty() && entry["stack"][0].is_string())
         what = entry["stack"][0].get<std::string>();
     return what;
@@ -161,14 +176,22 @@ void PerformancePanel::Show()
     }
     std::vector<json> records;
     records.reserve(texts.size());
-    for (const auto& text : texts) records.push_back(json::parse(text, nullptr, false));
-    const auto summary = mcp::SummarizeTimeline(records, 200);
+    for (const auto& text : texts)
+        if (auto record = json::parse(text, nullptr, false); record.is_object()) records.push_back(std::move(record));
+    json summary;
+    try {
+        summary = mcp::SummarizeTimeline(records, 200);
+    } catch (const std::exception& error) {
+        fStatus->SetText((std::string("The recording could not be read: ") + error.what()).c_str());
+        return;
+    }
     for (const auto& type : summary.value("byType", json::array())) {
+        if (!type.is_object()) continue;
         auto* row = new BRow();
-        row->SetField(new BStringField(type.value("type", std::string("?")).c_str()), kTypeName);
-        row->SetField(new BStringField(std::to_string(type.value("count", 0)).c_str()), kTypeCount);
-        row->SetField(new BStringField(Milliseconds(type.value("totalMs", 0.0)).c_str()), kTypeTotal);
-        row->SetField(new BStringField(Milliseconds(type.value("longestMs", 0.0)).c_str()), kTypeLongest);
+        row->SetField(new BStringField(Text(type, "type").c_str()), kTypeName);
+        row->SetField(new BStringField(std::to_string(static_cast<long long>(Number(type, "count"))).c_str()), kTypeCount);
+        row->SetField(new BStringField(Milliseconds(Number(type, "totalMs")).c_str()), kTypeTotal);
+        row->SetField(new BStringField(Milliseconds(Number(type, "longestMs")).c_str()), kTypeLongest);
         fTypes->AddRow(row);
     }
     const auto longest = summary.value("longest", json::array());
@@ -177,23 +200,24 @@ void PerformancePanel::Show()
         fLongest.push_back(entry.dump(2));
         auto* row = new Row();
         row->index = static_cast<int>(i);
-        row->SetField(new BStringField(Milliseconds(entry.value("atMs", 0.0)).c_str()), kRecordAt);
-        row->SetField(new BStringField(entry.value("type", std::string("?")).c_str()), kRecordType);
-        row->SetField(new BStringField(Milliseconds(entry.value("durationMs", 0.0)).c_str()), kRecordDuration);
+        row->SetField(new BStringField(Milliseconds(Number(entry, "atMs")).c_str()), kRecordAt);
+        row->SetField(new BStringField(Text(entry, "type").c_str()), kRecordType);
+        row->SetField(new BStringField(Milliseconds(Number(entry, "durationMs")).c_str()), kRecordDuration);
         row->SetField(new BStringField(What(entry).c_str()), kRecordWhat);
         std::string inside;
-        for (const auto& [type, ms] : entry.value("childrenMs", json::object()).items())
-            inside += (inside.empty() ? "" : ", ") + type + " " + Milliseconds(ms.get<double>());
+        if (const auto children = entry.find("childrenMs"); children != entry.end() && children->is_object())
+            for (const auto& [type, ms] : children->items())
+                inside += (inside.empty() ? "" : ", ") + type + " " + Milliseconds(ms.is_number() ? ms.get<double>() : 0);
         row->SetField(new BStringField(inside.c_str()), kRecordInside);
         fRecords->AddRow(row);
     }
     // The span, how busy the main thread was, and the frames drawn.
-    std::string status = std::to_string(records.size()) + " records over " + Milliseconds(summary.value("spanMs", 0.0)) + " ms";
+    std::string status = std::to_string(records.size()) + " records over " + Milliseconds(Number(summary, "spanMs")) + " ms";
     if (summary.contains("mainThreadBusyPercent"))
-        status += " · main thread busy " + Milliseconds(summary["mainThreadBusyPercent"].get<double>()) + "%";
-    if (const auto frames = summary.value("renderingFrames", json::object()); !frames.empty())
-        status += " · " + std::to_string(frames.value("count", 0)) + " frames, median " + Milliseconds(frames.value("medianMs", 0.0))
-            + " ms, 95th percentile " + Milliseconds(frames.value("p95Ms", 0.0)) + " ms";
+        status += " · main thread busy " + Milliseconds(Number(summary, "mainThreadBusyPercent")) + "%";
+    if (const auto frames = summary.find("renderingFrames"); frames != summary.end() && frames->is_object())
+        status += " · " + std::to_string(static_cast<long long>(Number(*frames, "count"))) + " frames, median " + Milliseconds(Number(*frames, "medianMs"))
+            + " ms, 95th percentile " + Milliseconds(Number(*frames, "p95Ms")) + " ms";
     if (texts.size() >= Session::kTimelineRecords) status += " · the first " + std::to_string(Session::kTimelineRecords) + " records";
     fStatus->SetText(status.c_str());
     fDetail->ShowNote("Select a record to see its data and where it came from.");
