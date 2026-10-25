@@ -5,6 +5,7 @@
 #include <interface/ColumnTypes.h>
 #include <Button.h>
 #include <CheckBox.h>
+#include <ColorControl.h>
 #include <GroupView.h>
 #include <LayoutBuilder.h>
 #include <MenuItem.h>
@@ -31,7 +32,43 @@ namespace {
 constexpr uint32 kPickToggled = 'deps', kSearchRun = 'desr', kSearchPrevious = 'desp', kSearchNext = 'desn',
     kStyleFilterChanged = 'desf', kComputedFilterChanged = 'decf', kComputedAllChanged = 'deca', kEditDone = 'deed',
     kTreeCommand = 'detc', kStyleCommand = 'dest', kApplyHTML = 'deah', kSideTabChanged = 'deat', kForceMenu = 'defm',
-    kForcePseudo = 'defp', kSearchTyped = 'deft', kSearchSettled = 'dess', kNewRuleButton = 'denr';
+    kForcePseudo = 'defp', kSearchTyped = 'deft', kSearchSettled = 'dess', kNewRuleButton = 'denr', kColorChosen = 'decc';
+// A colour value's picker: OK sets the declaration to the colour chosen (its
+// alpha kept), Cancel or closing leaves it.
+class ColorPicker : public BWindow {
+public:
+    ColorPicker(BMessenger target, BMessage chosen, std::array<uint8_t, 4> color, BPoint where)
+        : BWindow(BRect(where, where + BPoint(300, 120)), "Colour", B_FLOATING_WINDOW_LOOK, B_FLOATING_APP_WINDOW_FEEL,
+            B_NOT_ZOOMABLE | B_NOT_RESIZABLE | B_AUTO_UPDATE_SIZE_LIMITS | B_CLOSE_ON_ESCAPE),
+          fTarget(target), fChosen(std::move(chosen)), fAlpha(color[3])
+    {
+        fControl = new BColorControl(BPoint(0, 0), B_CELLS_32x8, 6, "colour");
+        fControl->SetValue(rgb_color {color[0], color[1], color[2], 255});
+        auto* ok = new BButton("ok", "OK", new BMessage(B_OK));
+        auto* cancel = new BButton("cancel", "Cancel", new BMessage(B_QUIT_REQUESTED));
+        BLayoutBuilder::Group<>(this, B_VERTICAL, 8).SetInsets(10)
+            .Add(fControl)
+            .AddGroup(B_HORIZONTAL, 8).AddGlue().Add(cancel).Add(ok).End();
+        SetDefaultButton(ok);
+    }
+    void MessageReceived(BMessage* message) override
+    {
+        if (message->what != B_OK) {
+            BWindow::MessageReceived(message);
+            return;
+        }
+        const rgb_color color = fControl->ValueAsColor();
+        fChosen.AddString("color", CSSColorText({color.red, color.green, color.blue, fAlpha}).c_str());
+        fTarget.SendMessage(&fChosen);
+        Quit();
+    }
+
+private:
+    BMessenger fTarget;
+    BMessage fChosen;
+    uint8 fAlpha;
+    BColorControl* fControl;
+};
 // What :hov can force on an element, as other browsers offer.
 constexpr const char* kPseudoClasses[] = {"active", "focus", "focus-visible", "focus-within", "hover", "visited"};
 // The side's tabs: Styles, Computed, Accessibility, Event Listeners.
@@ -743,6 +780,7 @@ public:
             ScrollTo(0, 0);
         }
         fLines.clear();
+        fSwatches.clear();
         fWidest = 0;
         const auto* node = fDOM.Find(fDOM.Selected());
         const auto note = [&](const std::string& text) { fLines.push_back({Line::Note, -1, -1, text}); };
@@ -821,6 +859,11 @@ public:
         }
         switch (line.kind) {
             case Line::Declaration:
+                if (const auto swatch = fSwatches.find(index); swatch != fSwatches.end() && swatch->second.Contains(where)
+                    && block.Editable() && block.declarations[line.declaration].enabled) {
+                    OpenPicker(line.block, line.declaration, ConvertToScreen(swatch->second.LeftBottom()));
+                    break;
+                }
                 if (block.Editable() && where.x < kCheckRight) Command(kToggleDeclaration, line.block, line.declaration);
                 else if (clicks == 2 && block.Editable()) Command(kEditDeclaration, line.block, line.declaration);
                 break;
@@ -854,6 +897,20 @@ public:
             case kStyleCommand:
                 Command(message->GetInt32("command", -1), message->GetInt32("block", -1), message->GetInt32("declaration", -1));
                 break;
+            case kColorChosen: {
+                // As an edit: made only where it was begun.
+                const auto& blocks = fDOM.Styles().blocks;
+                const auto block = static_cast<size_t>(message->GetInt32("block", -1));
+                const auto index = static_cast<size_t>(message->GetInt32("declaration", -1));
+                if (message->GetInt32("node", 0) != fDOM.Styles().node || block >= blocks.size()
+                    || blocks[block].selector != message->GetString("selector", "") || index >= blocks[block].declarations.size())
+                    break;
+                const auto& declaration = blocks[block].declarations[index];
+                fDOM.EditDeclaration(block, index, declaration.name + ": " + message->GetString("color", "")
+                    + (declaration.important ? " !important" : ""));
+                fHost.Sync();
+                break;
+            }
             case kEditDone: {
                 const bool commit = EditorDone(*message);
                 if (fRebuildWaiting && !Editing()) Rebuild();
@@ -880,6 +937,20 @@ public:
             }
             default: LineView::MessageReceived(message);
         }
+    }
+
+    void OpenPicker(int block, int declaration, BPoint where)
+    {
+        const auto& style = fDOM.Styles().blocks[block];
+        auto color = ParseCSSColor(style.declarations[declaration].value);
+        if (!color) color = ParseCSSColor(fDOM.ComputedValue(style.declarations[declaration].name));
+        if (!color) return;
+        BMessage chosen(kColorChosen);
+        chosen.AddInt32("node", fDOM.Styles().node);
+        chosen.AddInt32("block", block);
+        chosen.AddInt32("declaration", declaration);
+        chosen.AddString("selector", style.selector.c_str());
+        (new ColorPicker(BMessenger(this), chosen, *color, where))->Show();
     }
 
     void Command(int32 action, int block, int declaration)
@@ -1045,6 +1116,23 @@ private:
                 DrawString(declaration.name.c_str(), BPoint(start, baseline));
                 SetHighColor(value);
                 DrawString(": ");
+                // A colour has its swatch; a click on it opens the picker.
+                auto color = ParseCSSColor(declaration.value);
+                if (!color && !block.inheritedFrom && declaration.value.find("var(") != std::string::npos)
+                    color = ParseCSSColor(fDOM.ComputedValue(declaration.name));
+                if (color) {
+                    const float x = PenLocation().x;
+                    const BRect swatch(x + 1, frame.top + (fLineHeight - 10) / 2, x + 10, frame.top + (fLineHeight - 10) / 2 + 9);
+                    SetDrawingMode(B_OP_ALPHA);
+                    SetHighColor(rgb_color {(*color)[0], (*color)[1], (*color)[2], (*color)[3]});
+                    FillRect(swatch);
+                    SetDrawingMode(B_OP_COPY);
+                    SetHighColor(palette.muted);
+                    StrokeRect(swatch);
+                    fSwatches[index] = swatch.InsetByCopy(-2, -2);
+                    MovePenTo(x + 14, baseline);
+                    SetHighColor(value);
+                } else fSwatches.erase(index);
                 DrawString(declaration.value.c_str());
                 if (declaration.important) {
                     SetHighColor(struck ? palette.muted : palette.keyword);
@@ -1112,6 +1200,8 @@ private:
     std::vector<Line> fLines;
     std::string fFilter;
     float fWidest = 0, fLocationLeft = 1e9;
+    // The colour swatches drawn, by line.
+    std::map<int, BRect> fSwatches;
     int fHover = -1, fShownNode = 0;
     bool fRebuildWaiting = false;
 };

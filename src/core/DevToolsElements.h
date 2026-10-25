@@ -2,6 +2,8 @@
 #include <cstdint>
 #include <map>
 #include <set>
+#include <array>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -181,6 +183,11 @@ void MarkOverridden(std::vector<StyleBlock>& blocks, const std::map<std::string,
 // replaced (empty text removes it), or a new one added at the end.
 enum class StyleEdit { Toggle, Replace, Add };
 std::string EditStyleText(const StyleBlock& block, size_t index, StyleEdit edit, const std::string& text = { });
+// A CSS colour value (#rgb, #rrggbbaa, rgb()/rgba() with numbers or
+// percentages, the basic named colours) as red, green, blue, alpha; empty
+// for anything else. CSSColorText writes one back as #rrggbb(aa).
+std::optional<std::array<uint8_t, 4>> ParseCSSColor(const std::string& value);
+std::string CSSColorText(const std::array<uint8_t, 4>& color);
 
 class DOMModel {
 public:

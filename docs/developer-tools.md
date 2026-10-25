@@ -94,6 +94,10 @@ On the right, tabs for the selected element:
   *Filter* shows the declarations whose property or value contains a text.
   A declaration of the element's own rules that uses `var()` shows what it
   came to after it, in grey (`color: var(--text); = rgb(51, 51, 51)`).
+  A colour (`#36c`, `rgb()`, `rgba()`, the basic names, or a `var()` that
+  comes to one) has a swatch before it; clicking the swatch of a declaration
+  that can be changed opens a colour picker whose OK sets it (as `#rrggbb`,
+  keeping its alpha and `!important`).
   A double click on a rule's selector edits it (`CSS.setRuleSelector`; the
   page's own rules only), and **+** (or New Style Rule in the secondary
   button's menu) adds an empty rule for the selected element's selector to
