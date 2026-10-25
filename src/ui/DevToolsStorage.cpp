@@ -485,7 +485,9 @@ void StoragePanel::Fill()
             auto* row = new Row();
             row->id = item.key;
             row->SetField(new BStringField(OneLine(item.key).c_str()), kItemKey);
-            row->SetField(new BStringField(OneLine(item.value).c_str()), kItemValue);
+            // A cached response's headers are shown below, when it is chosen.
+            const auto shownValue = fKind == StorageKind::CacheStorage ? item.value.substr(0, item.value.find('\n')) : item.value;
+            row->SetField(new BStringField(OneLine(shownValue).c_str()), kItemValue);
             fItems->AddRow(row);
             if (row->id == fSelected) selected = row;
             ++shown;

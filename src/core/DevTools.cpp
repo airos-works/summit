@@ -698,8 +698,9 @@ struct ProtocolReader {
                         }
                         // An opaque response (another origin's, without CORS)
                         // shows nothing of itself.
-                        item.value = type == "opaque" ? std::string("(opaque)") : std::to_string(status) + " "
-                            + Text(Member(entry, "statusText"));
+                        const auto statusText = Text(Member(entry, "statusText"));
+                        item.value = type == "opaque" ? std::string("(opaque)")
+                            : std::to_string(status) + (statusText.empty() ? std::string() : " " + statusText);
                         if (!contentType.empty()) item.value += " · " + contentType;
                         if (!length.empty()) item.value += " · " + length + " B";
                         item.value += headers;
