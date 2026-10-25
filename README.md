@@ -43,12 +43,12 @@ Install with `pkgman install <file>`, or copy the file into `/boot/system/packag
 <!-- airos-ci:haiku-builds:start -->
 ## Latest Haiku builds
 
-Built automatically by air/OS CI from commit `09d47f0` on 2026-10-24 ([all files](https://github.com/jmgasper/summit/releases/tag/latest-haiku)).
+Built automatically by air/OS CI from commit `9cc2765` on 2026-10-25 ([all files](https://github.com/jmgasper/summit/releases/tag/latest-haiku)).
 
 | Architecture | Package |
 |---|---|
-| x86_64 | [summit-0.1.0.git20261024.2243-1-x86_64.hpkg](https://github.com/jmgasper/summit/releases/download/latest-haiku/summit-0.1.0.git20261024.2243-1-x86_64.hpkg) |
-| x86_64 | [summit_webkit-1.10.1.git20261024.2243-1-x86_64.hpkg](https://github.com/jmgasper/summit/releases/download/latest-haiku/summit_webkit-1.10.1.git20261024.2243-1-x86_64.hpkg) |
+| x86_64 | [summit-0.1.0.git20261025.0009-1-x86_64.hpkg](https://github.com/jmgasper/summit/releases/download/latest-haiku/summit-0.1.0.git20261025.0009-1-x86_64.hpkg) |
+| x86_64 | [summit_webkit-1.10.1.git20261025.0009-1-x86_64.hpkg](https://github.com/jmgasper/summit/releases/download/latest-haiku/summit_webkit-1.10.1.git20261025.0009-1-x86_64.hpkg) |
 
 For a stock Haiku installation, not air/OS. Install the packages together with `pkgman install ./<file>...`, which also installs what they need from HaikuPorts. Haiku SDK: the R1/beta6 release (r1~beta6_hrev59866_79), not air/OS.
 <!-- airos-ci:haiku-builds:end -->
