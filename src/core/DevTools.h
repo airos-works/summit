@@ -324,6 +324,11 @@ private:
 StyledText DescribeHeaders(const Request& request);
 // "12 requests · 1.4 MB transferred · 3.2 MB of resources".
 std::string SummarizeRequests(const std::deque<Request>& requests, size_t shown);
+// The request as a curl command line (Copy as cURL): its method, headers and
+// body, each argument in single quotes.
+std::string CurlCommand(const Request& request);
+// Requests as an HTTP Archive (HAR 1.2), with the bodies the tools have.
+std::string HarArchive(const std::vector<const Request*>& requests, const std::string& version);
 // A console message's text from the protocol's message object (its text, or
 // its parameters with their previews), exposed for tests.
 std::string ConsoleMessageText(std::string_view messageJSON);

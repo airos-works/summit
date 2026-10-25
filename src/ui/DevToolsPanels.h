@@ -12,6 +12,7 @@ class BButton;
 class BCardLayout;
 class BCheckBox;
 class BColumnListView;
+class BFilePanel;
 class BMenuField;
 class BMessageRunner;
 class BOutlineListView;
@@ -91,6 +92,9 @@ private:
     void ShowBody(const devtools::Request& request);
     void ShowSummary();
     bool AtEnd() const;
+    // The requests listed, in the list's order (HAR export).
+    std::vector<const devtools::Request*> ShownRequests() const;
+    bool ExportHar(const std::string& path, std::string& error) const;
     devtools::Session& fSession;
     DevToolsHost& fHost;
     std::map<uint64, Row*> fRows;
@@ -102,6 +106,9 @@ private:
     BCheckBox* fPreserve;
     BTextControl* fFilter;
     BMenuField* fTypes;
+    BButton* fCopyCurl;
+    BButton* fExportHar;
+    std::unique_ptr<BFilePanel> fHarPanel;
     BColumnListView* fList;
     BStringView* fSummary;
     BCardLayout* fDetailCards;
