@@ -14764,6 +14764,42 @@ index dd239696fdd09e20d7a0bc1e20508125552043d4..85702e154d0bd01f2e2d03b4cf81bbc0
      ASSERT(commandLineAPIHost);
  
      JSDOMGlobalObject* globalObject = downcast<JSDOMGlobalObject>(lexicalGlobalObject);
+diff --git a/Source/WebCore/inspector/FrameDebugger.cpp b/Source/WebCore/inspector/FrameDebugger.cpp
+index f844837ce076934cd0d9bfd96d0e768e45b8fa1a..ee818902ec10c8d0194e4e007b22a2d0e77d3808 100644
+--- a/Source/WebCore/inspector/FrameDebugger.cpp
++++ b/Source/WebCore/inspector/FrameDebugger.cpp
+@@ -44,6 +44,10 @@
+ #include <wtf/RunLoop.h>
+ #include <wtf/TZoneMallocInlines.h>
+ 
++#if PLATFORM(HAIKU)
++#include <OS.h>
++#endif
++
+ #if PLATFORM(IOS_FAMILY)
+ #include "WebCoreThreadInternal.h"
+ #endif
+@@ -217,7 +221,19 @@ void FrameDebugger::setJavaScriptPaused(LocalFrame& frame, bool paused)
+     }
+ }
+ 
+-#if !PLATFORM(MAC)
++#if PLATFORM(HAIKU)
++bool FrameDebugger::platformShouldContinueRunningEventLoopWhilePaused()
++{
++    // Haiku's RunLoop::cycle() says Stop when no work is waiting (a worker's
++    // loop relies on that), not that the loop was stopped: ending the pause
++    // there let the page run on at once while the frontend saw it paused,
++    // and step, resume and evaluate went unanswered. Wait for the next work
++    // instead, until the debugger continues.
++    if (RunLoop::cycle() == RunLoop::CycleResult::Stop)
++        snooze(2000);
++    return true;
++}
++#elif !PLATFORM(MAC)
+ bool FrameDebugger::platformShouldContinueRunningEventLoopWhilePaused()
+ {
+     return RunLoop::cycle() != RunLoop::CycleResult::Stop;
 diff --git a/Source/WebCore/inspector/InspectorCanvasArguments.h b/Source/WebCore/inspector/InspectorCanvasArguments.h
 index 18de0e6c6de219c62c0f67c86a43931084a0a9bc..94889a2d4b3dd7f7a1798745cddfb32a864d423a 100644
 --- a/Source/WebCore/inspector/InspectorCanvasArguments.h
@@ -14805,6 +14841,42 @@ index 630b8da74fe0d770a34b573e653a7ca05b1a117e..86acd08e780d52d13ee4bcf10c144203
      if (CheckedPtr canvasAgent = enabledCanvasAgent(canvasRenderingContext))
          canvasAgent->recordAction(canvasRenderingContext, WTF::move(name), WTF::move(arguments));
  }
+diff --git a/Source/WebCore/inspector/PageDebugger.cpp b/Source/WebCore/inspector/PageDebugger.cpp
+index e9309777e4633bb4fa6189b6e81c82e0176214d0..01f1c78166f0d34a89f2aa308e8998d1fc3a2d19 100644
+--- a/Source/WebCore/inspector/PageDebugger.cpp
++++ b/Source/WebCore/inspector/PageDebugger.cpp
+@@ -48,6 +48,10 @@
+ #include <wtf/StdLibExtras.h>
+ #include <wtf/TZoneMallocInlines.h>
+ 
++#if PLATFORM(HAIKU)
++#include <OS.h>
++#endif
++
+ #if PLATFORM(IOS_FAMILY)
+ #include "WebCoreThreadInternal.h"
+ #endif
+@@ -201,7 +205,19 @@ void PageDebugger::setJavaScriptPaused(LocalFrame& frame, bool paused)
+     }
+ }
+ 
+-#if !PLATFORM(MAC)
++#if PLATFORM(HAIKU)
++bool PageDebugger::platformShouldContinueRunningEventLoopWhilePaused()
++{
++    // Haiku's RunLoop::cycle() says Stop when no work is waiting (a worker's
++    // loop relies on that), not that the loop was stopped: ending the pause
++    // there let the page run on at once while the frontend saw it paused,
++    // and step, resume and evaluate went unanswered. Wait for the next work
++    // instead, until the debugger continues.
++    if (RunLoop::cycle() == RunLoop::CycleResult::Stop)
++        snooze(2000);
++    return true;
++}
++#elif !PLATFORM(MAC)
+ bool PageDebugger::platformShouldContinueRunningEventLoopWhilePaused()
+ {
+     return RunLoop::cycle() != RunLoop::CycleResult::Stop;
 diff --git a/Source/WebCore/inspector/agents/InspectorDOMAgent.cpp b/Source/WebCore/inspector/agents/InspectorDOMAgent.cpp
 index 1a5ead7c375ea03f06a07f854b2faa7ac1461172..521f7ca4351569157be07b9145b8c90c2960cb8c 100644
 --- a/Source/WebCore/inspector/agents/InspectorDOMAgent.cpp
