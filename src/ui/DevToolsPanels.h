@@ -4,6 +4,7 @@
 #include "core/DevTools.h"
 #include <View.h>
 #include <map>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -12,6 +13,7 @@ class BCardLayout;
 class BCheckBox;
 class BColumnListView;
 class BMenuField;
+class BMessageRunner;
 class BOutlineListView;
 class BRow;
 class BSplitView;
@@ -194,6 +196,7 @@ private:
     void ShowComputed();
     // The Accessibility tab: asked for only while it shows.
     void AskAccessibility();
+    void ShowListeners();
     void ShowAccessibility();
     void ShowSearch();
     void ShowPicking();
@@ -205,6 +208,8 @@ private:
     std::string fComputedFilter;
     BButton* fPick;
     BTextControl* fSearch;
+    // Finds a moment after the last key typed into fSearch.
+    std::unique_ptr<BMessageRunner> fSearchTimer;
     BStringView* fSearchCount;
     BButton* fSearchPrevious;
     BButton* fSearchNext;
@@ -221,6 +226,7 @@ private:
     BCheckBox* fComputedAll;
     BColumnListView* fComputed;
     BColumnListView* fAccessibility;
+    BColumnListView* fListeners;
 };
 
 class ConsolePanel : public BView {

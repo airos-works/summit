@@ -132,6 +132,18 @@ struct NodeAccessibility {
     std::vector<std::pair<std::string, std::string>> properties;
 };
 
+// The event listeners of the selected element and of the nodes above it
+// that its events reach (DOM.getEventListenersForNode), nearest first.
+struct NodeListener {
+    std::string type, node, handler, location;
+    bool capture = false, once = false, passive = false, attribute = false, disabled = false;
+};
+struct NodeListeners {
+    int node = 0;
+    std::string error;
+    std::vector<NodeListener> listeners;
+};
+
 struct DOMChanges {
     // The lines of the tree must be made again.
     bool tree = false;
@@ -145,11 +157,13 @@ struct DOMChanges {
     bool outerHTML = false, source = false;
     // Accessibility() arrived.
     bool accessibility = false;
+    // Listeners() arrived.
+    bool listeners = false;
     // What went wrong with something asked of the page.
     std::string notice;
     bool Any() const
     {
-        return tree || nodes || selection || styles || search || picking || picked || outerHTML || source || accessibility || !notice.empty();
+        return tree || nodes || selection || styles || search || picking || picked || outerHTML || source || accessibility || listeners || !notice.empty();
     }
 };
 
@@ -252,6 +266,9 @@ public:
     // Asks for the selected element's accessibility properties.
     void RequestAccessibility();
     const NodeAccessibility& Accessibility() const { return fAccessibility; }
+    // Asks for the selected element's event listeners.
+    void RequestListeners();
+    const NodeListeners& Listeners() const { return fListeners; }
     void ToggleDeclaration(size_t block, size_t index);
     // Empty text removes the declaration.
     void EditDeclaration(size_t block, size_t index, const std::string& text);
@@ -299,7 +316,7 @@ private:
     struct Pending {
         enum Kind {
             Ignore, Document, Children, ExpandAll, Attributes, Matched, Inline, Computed, Resolve, Box, SetStyle, Edit,
-            TagName, Remove, Search, SearchResults, RequestNode, Evaluate, Path, OuterHTML, SheetText, Properties, Accessibility
+            TagName, Remove, Search, SearchResults, RequestNode, Evaluate, Path, OuterHTML, SheetText, Properties, Accessibility, Listeners
         };
         Kind kind;
         int node = 0;
@@ -335,6 +352,7 @@ private:
 
     NodeStyles fStyles, fNextStyles;
     NodeAccessibility fAccessibility;
+    NodeListeners fListeners;
     int fStylesOutstanding = 0;
     bool fStylesStale = false;
     double fStylesStarted = 0;

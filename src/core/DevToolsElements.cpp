@@ -769,6 +769,37 @@ struct DOMReader {
                 changes.accessibility = true;
                 break;
             }
+            case Pending::Listeners: {
+                if (pending.node != model.fSelected) break;
+                NodeListeners listeners;
+                listeners.node = pending.node;
+                listeners.error = failed ? (error.empty() ? std::string("The page did not answer") : error) : std::string();
+                if (const auto& list = Member(result, "listeners"); list.is_array()) {
+                    for (const auto& item : list) {
+                        NodeListener listener;
+                        listener.type = Text(Member(item, "type"));
+                        listener.capture = Flag(Member(item, "useCapture"));
+                        listener.once = Flag(Member(item, "once"));
+                        listener.passive = Flag(Member(item, "passive"));
+                        listener.attribute = Flag(Member(item, "isAttribute"));
+                        listener.disabled = Flag(Member(item, "disabled"));
+                        listener.handler = Text(Member(item, "handlerName"));
+                        if (listener.handler.empty()) listener.handler = "(anonymous)";
+                        if (Flag(Member(item, "onWindow"))) listener.node = "window";
+                        else if (const auto& id = Member(item, "nodeId"); id.is_number()) {
+                            const auto* node = model.Find(id.get<int>());
+                            listener.node = node ? node->Label() : "node " + std::to_string(id.get<int>());
+                        }
+                        if (const auto& location = Member(item, "location"); location.is_object())
+                            listener.location = "script " + Text(Member(location, "scriptId")) + ", line "
+                                + std::to_string(static_cast<int>(Number(Member(location, "lineNumber"))) + 1);
+                        listeners.listeners.push_back(std::move(listener));
+                    }
+                }
+                model.fListeners = std::move(listeners);
+                changes.listeners = true;
+                break;
+            }
             case Pending::Properties:
                 if (const auto& properties = Member(result, "cssProperties"); properties.is_array()) {
                     for (const auto& property : properties) {
@@ -1525,6 +1556,14 @@ void DOMModel::RefreshStyles()
     if (!fSelected) return;
     if (fStylesOutstanding) fStylesStale = true;
     else StartStyles();
+}
+
+void DOMModel::RequestListeners()
+{
+    fListeners = { };
+    fListeners.node = fSelected;
+    if (!fSelected) return;
+    Send("DOM.getEventListenersForNode", "{\"nodeId\":" + std::to_string(fSelected) + "}", Pending::Listeners, fSelected);
 }
 
 void DOMModel::RequestAccessibility()
