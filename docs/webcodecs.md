@@ -35,7 +35,11 @@ from FFmpeg 6.1's and 8.0's headers and were checked against the X399's
 libraries (both encoders open with 1024/1152-sample frames and encode). AAC gives raw
 frames with an `AudioSpecificConfig` as `description`, or ADTS frames with
 `aac: { format: "adts" }` (table rates, up to 7 channels); after `flush()`
-the next frame starts a new encoder. HE-AAC encoding reports unsupported.
+the next frame starts a new encoder. HE-AAC (`mp4a.40.5`) and HE-AAC v2
+(`mp4a.40.29`, stereo) are encoded by Fraunhofer's FDK (`libfdk_aac`) when
+FFmpeg has it, from 16-bit samples: raw frames with FFmpeg's global header
+flag, the encoder's AudioSpecificConfig (explicit SBR signalling) as the
+description, or FDK's own ADTS frames.
 
 PCM (`pcm-u8`, `-s16`, `-s24`, `-s32`, `-f32`, `alaw`, `ulaw`) is decoded and
 encoded in the engine (G.711 as ITU-T's reference expands and compresses
@@ -54,8 +58,8 @@ decoded through FFmpeg, by the same decoder H.264 uses (named for each;
 neither is offered to WebRTC). WebKit's `WebCodecsAV1Enabled` and
 `WebCodecsHEVCEnabled` are on for Haiku. They are not encoded.
 
-Not yet: HE-AAC, AV1 and HEVC encoding, and hardware decoders (NVDEC,
-Cedar).
+Not yet: AV1 and HEVC encoding (the system FFmpeg has no encoder for
+either), and hardware decoders (NVDEC, Cedar).
 
 H.264 with B-frames: libavcodec gives pictures in presentation order,
 holding B-frames back until their references are decoded. The decoder used

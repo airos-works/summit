@@ -21043,10 +21043,10 @@ index 0000000000000000000000000000000000000000..cdab62bfd95bf644f740fce9f74b4813
 +#endif // PLATFORM(HAIKU)
 diff --git a/Source/WebCore/platform/audio/haiku/WebCodecsAudioHaiku.cpp b/Source/WebCore/platform/audio/haiku/WebCodecsAudioHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..19aa5c71c85014c0c5cd13d8a1b6cbb64500aea8
+index 0000000000000000000000000000000000000000..212fd4d52a906cf7c1cd457c94c31baf449ddf61
 --- /dev/null
 +++ b/Source/WebCore/platform/audio/haiku/WebCodecsAudioHaiku.cpp
-@@ -0,0 +1,1408 @@
+@@ -0,0 +1,1424 @@
 +/*
 + * Copyright (C) 2026 Summit contributors.
 + *
@@ -21238,6 +21238,7 @@ index 0000000000000000000000000000000000000000..19aa5c71c85014c0c5cd13d8a1b6cbb6
 +    int (*setOptionInt)(void*, const char*, int64_t, int);
 +    int (*setOptionChannelLayout)(void*, const char*, const void*, int);
 +    int (*getOptionInt)(void*, const char*, int, int64_t*);
++    int (*setOption)(void*, const char*, const char*, int) { nullptr };
 +    void (*defaultChannelLayout)(void*, int);
 +    void (*uninitChannelLayout)(void*);
 +    int (*frameGetBuffer)(void*, int);
@@ -21307,6 +21308,7 @@ index 0000000000000000000000000000000000000000..19aa5c71c85014c0c5cd13d8a1b6cbb6
 +                ffmpeg->setOptionInt = reinterpret_cast<int (*)(void*, const char*, int64_t, int)>(find(avutil, "av_opt_set_int"));
 +                ffmpeg->setOptionChannelLayout = reinterpret_cast<int (*)(void*, const char*, const void*, int)>(find(avutil, "av_opt_set_chlayout"));
 +                ffmpeg->getOptionInt = reinterpret_cast<int (*)(void*, const char*, int, int64_t*)>(find(avutil, "av_opt_get_int"));
++                ffmpeg->setOption = reinterpret_cast<int (*)(void*, const char*, const char*, int)>(find(avutil, "av_opt_set"));
 +                ffmpeg->defaultChannelLayout = reinterpret_cast<void (*)(void*, int)>(find(avutil, "av_channel_layout_default"));
 +                ffmpeg->uninitChannelLayout = reinterpret_cast<void (*)(void*)>(find(avutil, "av_channel_layout_uninit"));
 +                ffmpeg->frameGetBuffer = reinterpret_cast<int (*)(void*, int)>(find(avutil, "av_frame_get_buffer"));
@@ -21446,12 +21448,14 @@ index 0000000000000000000000000000000000000000..19aa5c71c85014c0c5cd13d8a1b6cbb6
 +}
 +
 +// FFmpeg's encoder for a WebCodecs audio codec string: AAC LC and FLAC
-+// (FFmpeg's own), MP3 (LAME) and Vorbis (libvorbis), when the libraries
-+// have them.
++// (FFmpeg's own), HE-AAC (v1 and v2, Fraunhofer's FDK), MP3 (LAME) and
++// Vorbis (libvorbis), when the libraries have them.
 +static const char* ffmpegEncoderName(StringView codec)
 +{
 +    if (codec == "mp4a.40.2"_s || codec == "mp4a.40.02"_s)
 +        return "aac";
++    if (codec == "mp4a.40.5"_s || codec == "mp4a.40.05"_s || codec == "mp4a.40.29"_s)
++        return "libfdk_aac";
 +    if (codec == "mp3"_s)
 +        return "libmp3lame";
 +    if (codec == "flac"_s)
@@ -22185,6 +22189,9 @@ index 0000000000000000000000000000000000000000..19aa5c71c85014c0c5cd13d8a1b6cbb6
 +        // ADTS headers can name only the table's rates and up to 7 channels.
 +        if (isAAC && config.isAacADTS.value_or(false) && (aacFrequencyIndex(config.sampleRate) == 15 || config.numberOfChannels > 7))
 +            return nullptr;
++        // HE-AAC v2 (parametric stereo) is stereo only.
++        if (codec == "mp4a.40.29"_s && config.numberOfChannels != 2)
++            return nullptr;
 +        RefPtr encoder = adoptRef(*new FFmpegAudioEncoderHaiku(*ffmpeg, name, codec, isAAC, config, WTF::move(descriptionCallback), WTF::move(outputCallback)));
 +        if (!encoder->openContext())
 +            return nullptr;
@@ -22202,9 +22209,10 @@ index 0000000000000000000000000000000000000000..19aa5c71c85014c0c5cd13d8a1b6cbb6
 +    FFmpegAudioEncoderHaiku(const FFmpegAudio& ffmpeg, const char* name, const String& codec, bool isAAC, const AudioEncoder::Config& config, DescriptionCallback&& descriptionCallback, OutputCallback&& outputCallback)
 +        : m_ffmpeg(ffmpeg)
 +        , m_name(name)
-+        , m_codec(isAAC ? "mp4a.40.2"_s : codec.isolatedCopy())
++        , m_codec(codec == "mp4a.40.02"_s ? "mp4a.40.2"_s : codec == "mp4a.40.05"_s ? "mp4a.40.5"_s : codec.isolatedCopy())
 +        , m_isAAC(isAAC)
 +        , m_isFLAC(codec == "flac"_s)
++        , m_isFDK(!strcmp(name, "libfdk_aac"))
 +        , m_isADTS(isAAC && config.isAacADTS.value_or(false))
 +        , m_config(config)
 +        , m_packet(ffmpeg.allocPacket())
@@ -22226,12 +22234,16 @@ index 0000000000000000000000000000000000000000..19aa5c71c85014c0c5cd13d8a1b6cbb6
 +            return false;
 +        alignas(8) std::array<uint8_t, 64> layout { };
 +        m_ffmpeg.defaultChannelLayout(layout.data(), m_config.numberOfChannels);
-+        int sampleFormat = m_isFLAC ? sampleS16 : sampleFloatPlanar;
++        int sampleFormat = isPackedS16() ? sampleS16 : sampleFloatPlanar;
 +        memcpy(static_cast<uint8_t*>(m_context) + m_ffmpeg.contextSampleFormatOffset, &sampleFormat, sizeof(sampleFormat));
 +        bool configured = m_ffmpeg.setOptionInt(m_context, "ar", m_config.sampleRate, 0) >= 0
 +            && m_ffmpeg.setOptionChannelLayout(m_context, "ch_layout", layout.data(), 0) >= 0
 +            && (!m_config.bitRate || m_isFLAC || m_ffmpeg.setOptionInt(m_context, "b", m_config.bitRate, 0) >= 0)
-+            && (!m_isFLAC || !m_config.flacConfig || m_ffmpeg.setOptionInt(m_context, "compression_level", std::min<size_t>(m_config.flacConfig->compressLevel, 12), 0) >= 0);
++            && (!m_isFLAC || !m_config.flacConfig || m_ffmpeg.setOptionInt(m_context, "compression_level", std::min<size_t>(m_config.flacConfig->compressLevel, 12), 0) >= 0)
++            // FDK: the HE profile (FF_PROFILE_AAC_HE, _HE_V2); raw frames with
++            // the AudioSpecificConfig as extradata, or its own ADTS frames.
++            && (!m_isFDK || m_ffmpeg.setOptionInt(m_context, "profile", m_codec == "mp4a.40.29"_s ? 28 : 4, 0) >= 0)
++            && (!m_isFDK || m_isADTS || m_ffmpeg.setOption(m_context, "flags", "+global_header", 0) >= 0);
 +        m_ffmpeg.uninitChannelLayout(layout.data());
 +        int64_t frameSize = 0;
 +        if (!configured || m_ffmpeg.open(m_context, encoder, nullptr) < 0
@@ -22284,13 +22296,13 @@ index 0000000000000000000000000000000000000000..19aa5c71c85014c0c5cd13d8a1b6cbb6
 +        auto* bytes = static_cast<uint8_t*>(m_frame);
 +        m_ffmpeg.unrefFrame(m_frame);
 +        frame->sampleCount = samples;
-+        frame->format = m_isFLAC ? sampleS16 : sampleFloatPlanar;
++        frame->format = isPackedS16() ? sampleS16 : sampleFloatPlanar;
 +        m_ffmpeg.defaultChannelLayout(bytes + m_ffmpeg.frameChannelLayoutOffset, channels);
 +        int sampleRate = m_config.sampleRate;
 +        memcpy(bytes + m_ffmpeg.frameSampleRateOffset, &sampleRate, sizeof(sampleRate));
 +        if (m_ffmpeg.frameGetBuffer(m_frame, 0) < 0)
 +            return "Out of memory"_s;
-+        if (m_isFLAC) {
++        if (isPackedS16()) {
 +            auto* packed = reinterpret_cast<int16_t*>(frame->data[0]);
 +            for (size_t i = 0; i < samples * channels; ++i)
 +                packed[i] = static_cast<int16_t>(std::lround(std::clamp(m_pending[i], -1.0f, 1.0f) * 32767));
@@ -22324,7 +22336,7 @@ index 0000000000000000000000000000000000000000..19aa5c71c85014c0c5cd13d8a1b6cbb6
 +            if (data.isEmpty())
 +                continue;
 +            describeIfNeeded();
-+            if (m_isADTS) {
++            if (m_isADTS && !m_isFDK) {
 +                ADTSFields fields { 1, aacFrequencyIndex(m_config.sampleRate), static_cast<unsigned>(m_config.numberOfChannels) };
 +                data = adtsFrame(fields, data.span());
 +            }
@@ -22345,9 +22357,9 @@ index 0000000000000000000000000000000000000000..19aa5c71c85014c0c5cd13d8a1b6cbb6
 +        configuration.numberOfChannels = m_config.numberOfChannels;
 +        if (m_config.bitRate)
 +            configuration.bitrate = m_config.bitRate;
-+        if (m_isAAC && !m_isADTS)
++        if (m_isAAC && !m_isADTS && !m_isFDK)
 +            configuration.description = aacAudioSpecificConfig(m_config.sampleRate, m_config.numberOfChannels);
-+        else if (m_ffmpeg.contextExtradataOffset && m_context && !m_isAAC) {
++        else if (m_ffmpeg.contextExtradataOffset && m_context && (!m_isAAC || (m_isFDK && !m_isADTS))) {
 +            // The encoder's headers: Vorbis's are already Xiph-laced, FLAC's
 +            // is the STREAMINFO block, which the description gives as a
 +            // native FLAC stream's start ("fLaC", the last block's header).
@@ -22403,8 +22415,12 @@ index 0000000000000000000000000000000000000000..19aa5c71c85014c0c5cd13d8a1b6cbb6
 +    const FFmpegAudio& m_ffmpeg;
 +    const char* const m_name;
 +    const String m_codec;
++    // FLAC's and FDK's samples are 16-bit interleaved.
++    bool isPackedS16() const { return m_isFLAC || m_isFDK; }
++
 +    const bool m_isAAC;
 +    const bool m_isFLAC;
++    const bool m_isFDK;
 +    const bool m_isADTS;
 +    const AudioEncoder::Config m_config;
 +    void* m_context { nullptr };
