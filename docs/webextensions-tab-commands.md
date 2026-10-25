@@ -227,10 +227,19 @@ Verified on the X399 (23 Oct, zoom106 build 538d837) with
 index 2 after the original at 1, and removing it worked; `setZoom(9)` threw
 the range error.
 
+## tabs.move
+
+`tabs.move(ids, {index, windowId})` sends `MOVE_TAB` for each tab in turn:
+within its window the host reorders its tab list; with another `windowId`
+(`target_window` in the command) the host moves the tab's page view into
+that window at `index` (as dragging a tab between windows does: the page
+keeps its state), pinned tabs staying first, without bringing that window
+forward, and the window that takes the tab answers once it is there. A
+window left without tabs closes. Tabs cannot move between private and normal
+windows (each has its own session), as in Chrome.
+
 ## Not implemented
 
-`tabs.move`,
-`tabs.toggleReaderMode`, `tabs.captureVisibleTab`, `tabs.getSelected`,
 `tabs.onMoved`, `openerTabId` on `tabs.update`, `maximized`/`fullscreen`
 in Summit, `scripting` in the main world, and real
 native messaging hosts. Navigating an ordinary tab to an extension page (or the

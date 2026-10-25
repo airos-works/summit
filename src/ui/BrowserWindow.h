@@ -627,7 +627,9 @@ private:
     void ReportBookmarkChanges();
     void ToggleTabMute(int64 id);
     // Hands tab id to target (another window), which adopts its live view.
-    void DetachTab(int64 id, const BMessenger& target);
+    // command: an extension's tabs.move, answered by the window that takes
+    // the tab once it is there (at index; -1 after the last).
+    void DetachTab(int64 id, const BMessenger& target, int32 index = -1, uint64 command = 0);
     void AdoptTab(BMessage& message);
     void TabDraggedOut(int64 id, BPoint where);
     // The page area shows the crash view of a tab whose process ended.

@@ -2599,8 +2599,13 @@ void BrowserWindow::BrowserCommand(const BMessage& message)
             return;
         case B_WEBKIT_BROWSER_MOVE_TAB: {
             if (fClosingWindow) { RespondToCommand(identifier, B_BUSY, { }, "The window is closing."); return; }
-            // Only the tab list changes order; each page view stays in its card.
             const int32 index = message.GetInt32("index", -1);
+            // Into another window: its page view goes there (as dragging does).
+            if (BMessenger target; message.FindMessenger("target_window", &target) == B_OK && target != BMessenger(this)) {
+                DetachTab(tab->id, target, index, identifier);
+                return;
+            }
+            // Only the tab list changes order; each page view stays in its card.
             auto moving = std::find_if(fTabs.begin(), fTabs.end(), [&](const Tab& candidate) { return candidate.id == tab->id; });
             Tab moved = std::move(*moving);
             fTabs.erase(moving);
