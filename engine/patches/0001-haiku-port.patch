@@ -96509,7 +96509,7 @@ index 713a395f6fda1c50c694eef6181a23349c9b5fb2..d6419587d5402f01e573eb5f7335695a
  } // namespace WebExtensionDynamicScripts
  
 diff --git a/Source/WebKit/UIProcess/Extensions/WebExtension.cpp b/Source/WebKit/UIProcess/Extensions/WebExtension.cpp
-index 5ee894425eae1d1ba27e29aba5928af432d98095..4ea54606cfbf6c020aa8d3b1c682adafeda10531 100644
+index 5ee894425eae1d1ba27e29aba5928af432d98095..90ba089b5ce0bd5a6940f2a0a8ed89827475c3fa 100644
 --- a/Source/WebKit/UIProcess/Extensions/WebExtension.cpp
 +++ b/Source/WebKit/UIProcess/Extensions/WebExtension.cpp
 @@ -48,6 +48,10 @@
@@ -96610,7 +96610,7 @@ index 5ee894425eae1d1ba27e29aba5928af432d98095..4ea54606cfbf6c020aa8d3b1c682adaf
          if (mimeTypePosition != notFound)
              return path.substring(dataPrefix.length(), mimeTypePosition - dataPrefix.length());
          return defaultMIMEType();
-@@ -1642,6 +1674,27 @@ const WebExtension::PermissionsSet& WebExtension::supportedPermissions()
+@@ -1642,6 +1674,29 @@ const WebExtension::PermissionsSet& WebExtension::supportedPermissions()
          WebExtensionPermission::contextMenus(), WebExtensionPermission::cookies(), WebExtensionPermission::declarativeNetRequest(), WebExtensionPermission::declarativeNetRequestFeedback(),
          WebExtensionPermission::declarativeNetRequestWithHostAccess(), WebExtensionPermission::menus(), WebExtensionPermission::nativeMessaging(), WebExtensionPermission::notifications(), WebExtensionPermission::scripting(),
          WebExtensionPermission::storage(), WebExtensionPermission::tabs(), WebExtensionPermission::unlimitedStorage(), WebExtensionPermission::webNavigation(), WebExtensionPermission::webRequest(),
@@ -96634,11 +96634,13 @@ index 5ee894425eae1d1ba27e29aba5928af432d98095..4ea54606cfbf6c020aa8d3b1c682adaf
 +        "tabGroups"_s,
 +        // identity.launchWebAuthFlow and getRedirectURL.
 +        "identity"_s,
++        // downloads.open, as in Chrome and Firefox.
++        "downloads.open"_s,
 +#endif
  #if ENABLE(WK_WEB_EXTENSIONS_SIDEBAR)
          WebExtensionPermission::sidePanel(),
  #endif
-@@ -1679,6 +1732,16 @@ const WebExtension::MatchPatternSet& WebExtension::optionalPermissionMatchPatter
+@@ -1679,6 +1734,16 @@ const WebExtension::MatchPatternSet& WebExtension::optionalPermissionMatchPatter
      return m_optionalPermissionMatchPatterns;
  }
  
@@ -96655,7 +96657,7 @@ index 5ee894425eae1d1ba27e29aba5928af432d98095..4ea54606cfbf6c020aa8d3b1c682adaf
  const WebExtension::MatchPatternSet& WebExtension::externallyConnectableMatchPatterns()
  {
      populateExternallyConnectableIfNeeded();
-@@ -1723,6 +1786,9 @@ void WebExtension::populateExternallyConnectableIfNeeded()
+@@ -1723,6 +1788,9 @@ void WebExtension::populateExternallyConnectableIfNeeded()
      RefPtr externallyConnectableObject = manifestObject->getObject(externallyConnectableManifestKey);
      if (!externallyConnectableObject)
          return;
@@ -96665,7 +96667,7 @@ index 5ee894425eae1d1ba27e29aba5928af432d98095..4ea54606cfbf6c020aa8d3b1c682adaf
  
      if (!externallyConnectableObject->size()) {
          recordError(createError(Error::InvalidExternallyConnectable));
-@@ -1756,6 +1822,10 @@ void WebExtension::populateExternallyConnectableIfNeeded()
+@@ -1756,6 +1824,10 @@ void WebExtension::populateExternallyConnectableIfNeeded()
          extensionIDs = filterObjects(*extensionIDs, [](auto& value) {
              return !value.asString().isEmpty();
          });
@@ -96676,7 +96678,7 @@ index 5ee894425eae1d1ba27e29aba5928af432d98095..4ea54606cfbf6c020aa8d3b1c682adaf
      }
  
      if (shouldReportError || (m_externallyConnectableMatchPatterns.isEmpty() && (!extensionIDs || (extensionIDs && !extensionIDs->length()))))
-@@ -2216,6 +2286,12 @@ using ModifierFlags = WebExtension::ModifierFlags;
+@@ -2216,6 +2288,12 @@ using ModifierFlags = WebExtension::ModifierFlags;
  
  static bool parseCommandShortcut(const String& shortcut, OptionSet<ModifierFlags>& modifierFlags, String& key)
  {
@@ -96689,7 +96691,7 @@ index 5ee894425eae1d1ba27e29aba5928af432d98095..4ea54606cfbf6c020aa8d3b1c682adaf
      modifierFlags = { };
      key = emptyString();
  
-@@ -2300,6 +2376,7 @@ static bool parseCommandShortcut(const String& shortcut, OptionSet<ModifierFlags
+@@ -2300,6 +2378,7 @@ static bool parseCommandShortcut(const String& shortcut, OptionSet<ModifierFlags
          return false;
  
      return true;
@@ -96697,7 +96699,7 @@ index 5ee894425eae1d1ba27e29aba5928af432d98095..4ea54606cfbf6c020aa8d3b1c682adaf
  }
  
  void WebExtension::populateCommandsIfNeeded()
-@@ -2355,6 +2432,13 @@ void WebExtension::populateCommandsIfNeeded()
+@@ -2355,6 +2434,13 @@ void WebExtension::populateCommandsIfNeeded()
  
              // Descriptions are required for standard commands, but are optional for action commands.
              auto description = commandObject->getString(commandsDescriptionKeyManifestKey);
@@ -96711,7 +96713,7 @@ index 5ee894425eae1d1ba27e29aba5928af432d98095..4ea54606cfbf6c020aa8d3b1c682adaf
              if (description.isEmpty() && !isActionCommand) {
                  error = WEB_UI_STRING("Empty or invalid `description` in the `commands` manifest entry.", "WKWebExtensionErrorInvalidManifestEntry description for invalid command description");
                  continue;
-@@ -2368,11 +2452,30 @@ void WebExtension::populateCommandsIfNeeded()
+@@ -2368,11 +2454,30 @@ void WebExtension::populateCommandsIfNeeded()
  
              commandData.description = description;
  
@@ -96743,7 +96745,7 @@ index 5ee894425eae1d1ba27e29aba5928af432d98095..4ea54606cfbf6c020aa8d3b1c682adaf
                  const auto linuxPlatform = "linux"_s;
  #endif
                  const auto defaultPlatform = "default"_s;
-@@ -2382,7 +2485,7 @@ void WebExtension::populateCommandsIfNeeded()
+@@ -2382,7 +2487,7 @@ void WebExtension::populateCommandsIfNeeded()
                  platformShortcut = !suggestedKeyObject->getString(macPlatform).isEmpty() ? suggestedKeyObject->getString(macPlatform) : suggestedKeyObject->getString(iosPlatform);
  #elif PLATFORM(IOS_FAMILY)
                  platformShortcut = !suggestedKeyObject->getString(iosPlatform).isEmpty() ? suggestedKeyObject->getString(iosPlatform) : suggestedKeyObject->getString(macPlatform);
@@ -97750,7 +97752,7 @@ index 8947f24ec9866c39f206aab464ec21c5d4213b95..b36f80023077ec3bc5680f7214a823a4
  
  #endif // ENABLE(WK_WEB_EXTENSIONS)
 diff --git a/Source/WebKit/UIProcess/Extensions/WebExtensionContext.h b/Source/WebKit/UIProcess/Extensions/WebExtensionContext.h
-index 5f8454dd5897a49ffba794e50fb04b7257ad2291..9123f6cb63c2ba7de5274c7fd07332bcd1f2c04c 100644
+index 5f8454dd5897a49ffba794e50fb04b7257ad2291..3da408ff67862a693ec6c5034bdf643120c2dd69 100644
 --- a/Source/WebKit/UIProcess/Extensions/WebExtensionContext.h
 +++ b/Source/WebKit/UIProcess/Extensions/WebExtensionContext.h
 @@ -40,6 +40,9 @@
@@ -98172,7 +98174,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..9123f6cb63c2ba7de5274c7fd07332bc
  
      // DeclarativeNetRequest APIs
      bool isDeclarativeNetRequestMessageAllowed(IPC::Decoder&);
-@@ -960,6 +1153,27 @@ private:
+@@ -960,6 +1153,29 @@ private:
      void declarativeNetRequestUpdateDynamicRules(String&& rulesToAddJSON, Vector<double>&& ruleIDsToDelete, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
      void declarativeNetRequestGetSessionRules(Vector<double>&& filter, CompletionHandler<void(std::expected<String, WebExtensionError>&&)>&&);
      void declarativeNetRequestUpdateSessionRules(String&& rulesToAddJSON, Vector<double>&& ruleIDsToDelete, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
@@ -98193,6 +98195,8 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..9123f6cb63c2ba7de5274c7fd07332bc
 +    void downloadsErase(String&& queryJSON, CompletionHandler<void(std::expected<String, WebExtensionError>&&)>&&);
 +    void downloadsShow(double downloadIdentifier, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
 +    void downloadsShowDefaultFolder(CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
++    // pause, resume, open, removeFile, acceptDanger and getFileIcon; the result is JSON, or empty.
++    void downloadsItemAction(String&& action, double downloadIdentifier, String&& optionsJSON, CompletionHandler<void(std::expected<String, WebExtensionError>&&)>&&);
 +public:
 +    void fireDownloadsEventIfNeeded(WebExtensionEventListenerType, const String& argumentJSON);
 +private:
@@ -98200,7 +98204,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..9123f6cb63c2ba7de5274c7fd07332bc
  
  #if ENABLE(INSPECTOR_EXTENSIONS)
      // DevTools APIs
-@@ -975,12 +1189,22 @@ private:
+@@ -975,12 +1191,22 @@ private:
  
      // Extension APIs
      void extensionIsAllowedIncognitoAccess(CompletionHandler<void(bool)>&&);
@@ -98223,7 +98227,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..9123f6cb63c2ba7de5274c7fd07332bc
      void menusCreate(const WebExtensionMenuItemParameters&, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
      void menusUpdate(const String& identifier, const WebExtensionMenuItemParameters&, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
      void menusRemove(const String& identifier, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
-@@ -1009,9 +1233,18 @@ private:
+@@ -1009,9 +1235,18 @@ private:
  
      // Permissions APIs
      void permissionsGetAll(CompletionHandler<void(Vector<String>&& permissions, Vector<String>&& origins)>&&);
@@ -98242,7 +98246,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..9123f6cb63c2ba7de5274c7fd07332bc
      void firePermissionsEventListenerIfNecessary(WebExtensionEventListenerType, const PermissionsSet&, const MatchPatternSet&);
  
      // Port APIs
-@@ -1021,7 +1254,7 @@ private:
+@@ -1021,7 +1256,7 @@ private:
      void disconnectPortsForPage(WebPageProxy&);
      void addPorts(WebExtensionContentWorldType sourceContentWorldType, WebExtensionContentWorldType targetContentWorldType, WebExtensionPortChannelIdentifier, HashCountedSet<WebPageProxyIdentifier>&&);
      void removePort(WebExtensionContentWorldType sourceContentWorldType, WebExtensionContentWorldType targetContentWorldType, WebExtensionPortChannelIdentifier, WebPageProxyIdentifier);
@@ -98251,7 +98255,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..9123f6cb63c2ba7de5274c7fd07332bc
      void removeNativePort(WebExtensionMessagePort&);
      unsigned openPortCount(WebExtensionContentWorldType, WebExtensionPortChannelIdentifier);
      bool isPortConnected(WebExtensionContentWorldType sourceContentWorldType, WebExtensionContentWorldType targetContentWorldType, WebExtensionPortChannelIdentifier);
-@@ -1030,13 +1263,27 @@ private:
+@@ -1030,13 +1265,27 @@ private:
      void firePortMessageEventsIfNeeded(WebExtensionContentWorldType, std::optional<WebPageProxyIdentifier>, WebExtensionPortChannelIdentifier, const String& messageJSON, bool userGesture);
      void fireQueuedPortMessageEventsIfNeeded(WebExtensionContentWorldType, WebExtensionPortChannelIdentifier);
      void sendQueuedNativePortMessagesIfNeeded(WebExtensionPortChannelIdentifier);
@@ -98280,7 +98284,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..9123f6cb63c2ba7de5274c7fd07332bc
      void runtimeConnect(const String& extensionID, WebExtensionPortChannelIdentifier, const String& name, const WebExtensionMessageSenderParameters&, bool userGesture, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
      void runtimeSendNativeMessage(const String& applicationID, const String& messageJSON, CompletionHandler<void(std::expected<String, WebExtensionError>&&)>&&);
      void runtimeConnectNative(const String& applicationID, WebExtensionPortChannelIdentifier, WebPageProxyIdentifier, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
-@@ -1055,6 +1302,15 @@ private:
+@@ -1055,6 +1304,15 @@ private:
      void scriptingGetRegisteredScripts(const Vector<String>&, CompletionHandler<void(std::expected<Vector<WebExtensionRegisteredScriptParameters>, WebExtensionError>&&)>&&);
      void scriptingUnregisterContentScripts(const Vector<String>&, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
      bool createInjectedContentForScripts(const Vector<WebExtensionRegisteredScriptParameters>&, WebExtensionDynamicScripts::WebExtensionRegisteredScript::FirstTimeRegistration, DynamicInjectedContentsMap&, NSString *callingAPIName, NSString **errorMessage);
@@ -98296,7 +98300,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..9123f6cb63c2ba7de5274c7fd07332bc
  
      // Sidebar APIs
  #if ENABLE(WK_WEB_EXTENSIONS_SIDEBAR)
-@@ -1088,6 +1344,9 @@ private:
+@@ -1088,6 +1346,9 @@ private:
      void tabsCreate(std::optional<WebPageProxyIdentifier>, const WebExtensionTabParameters&, CompletionHandler<void(std::expected<std::optional<WebExtensionTabParameters>, WebExtensionError>&&)>&&);
      void tabsUpdate(WebPageProxyIdentifier, std::optional<WebExtensionTabIdentifier>, const WebExtensionTabParameters&, CompletionHandler<void(std::expected<std::optional<WebExtensionTabParameters>, WebExtensionError>&&)>&&);
      void tabsDuplicate(WebExtensionTabIdentifier, const WebExtensionTabParameters&, CompletionHandler<void(std::expected<std::optional<WebExtensionTabParameters>, WebExtensionError>&&)>&&);
@@ -98306,7 +98310,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..9123f6cb63c2ba7de5274c7fd07332bc
      void tabsGet(WebExtensionTabIdentifier, CompletionHandler<void(std::expected<std::optional<WebExtensionTabParameters>, WebExtensionError>&&)>&&);
      void tabsGetCurrent(WebPageProxyIdentifier, CompletionHandler<void(std::expected<std::optional<WebExtensionTabParameters>, WebExtensionError>&&)>&&);
      void tabsQuery(WebPageProxyIdentifier, const WebExtensionTabQueryParameters&, CompletionHandler<void(std::expected<Vector<WebExtensionTabParameters>, WebExtensionError>&&)>&&);
-@@ -1103,6 +1362,9 @@ private:
+@@ -1103,6 +1364,9 @@ private:
      void tabsSetZoom(WebPageProxyIdentifier, std::optional<WebExtensionTabIdentifier>, double, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
      void tabsMove(Vector<WebExtensionTabIdentifier>, std::optional<WebExtensionWindowIdentifier>, double, CompletionHandler<void(std::expected<Vector<WebExtensionTabParameters>, WebExtensionError>&&)>&&);
      void tabsRemove(Vector<WebExtensionTabIdentifier>, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
@@ -98316,7 +98320,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..9123f6cb63c2ba7de5274c7fd07332bc
      void tabsExecuteScript(WebPageProxyIdentifier, std::optional<WebExtensionTabIdentifier>, const WebExtensionScriptInjectionParameters&, bool userGesture, CompletionHandler<void(std::expected<Vector<WebExtensionScriptInjectionResultParameters>, WebExtensionError>&&)>&&);
      void tabsInsertCSS(WebPageProxyIdentifier, std::optional<WebExtensionTabIdentifier>, const WebExtensionScriptInjectionParameters&, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
      void tabsRemoveCSS(WebPageProxyIdentifier, std::optional<WebExtensionTabIdentifier>, const WebExtensionScriptInjectionParameters&, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
-@@ -1133,8 +1395,20 @@ private:
+@@ -1133,8 +1397,20 @@ private:
      void fireWindowsEventIfNeeded(WebExtensionEventListenerType, std::optional<WebExtensionWindowParameters>);
  
      // webRequest support.
@@ -98339,7 +98343,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..9123f6cb63c2ba7de5274c7fd07332bc
  
      // IPC::MessageReceiver.
      void didReceiveMessage(IPC::Connection&, IPC::Decoder&) override;
-@@ -1145,12 +1419,31 @@ private:
+@@ -1145,12 +1421,31 @@ private:
  
      mutable Markable<WebExtensionContextIdentifier> m_privilegedIdentifier;
  
@@ -98371,7 +98375,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..9123f6cb63c2ba7de5274c7fd07332bc
  #endif
      Vector<Ref<API::Error>> m_errors;
  
-@@ -1169,6 +1462,15 @@ private:
+@@ -1169,6 +1464,15 @@ private:
  
      RefPtr<API::ContentWorld> m_contentScriptWorld;
  
@@ -98387,7 +98391,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..9123f6cb63c2ba7de5274c7fd07332bc
      PermissionsMap m_grantedPermissions;
      PermissionsMap m_deniedPermissions;
  
-@@ -1194,6 +1496,14 @@ private:
+@@ -1194,6 +1498,14 @@ private:
      EventListenerTypeCountedSet m_backgroundContentEventListeners;
      EventListenerTypeFrameMap m_eventListenerFrames;
  
@@ -98402,7 +98406,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..9123f6cb63c2ba7de5274c7fd07332bc
      bool m_shouldFireStartupEvent { false };
      InstallReason m_installReason { InstallReason::None };
      String m_previousVersion;
-@@ -1216,6 +1526,16 @@ private:
+@@ -1216,6 +1528,16 @@ private:
  #elif ENABLE(2022_GLIB_API)
      GRefPtr<WebKitWebView> m_backgroundWebView;
      GWeakPtr<WebKitWebExtensionContext> m_delegate;
@@ -98419,7 +98423,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..9123f6cb63c2ba7de5274c7fd07332bc
  #endif
      Variant<std::monostate, Ref<ProcessThrottlerActivity>, Ref<ProcessActivityGroup>> m_backgroundWebViewActivity;
      RefPtr<API::Error> m_backgroundContentLoadError;
-@@ -1237,6 +1557,7 @@ private:
+@@ -1237,6 +1559,7 @@ private:
      HashMap<Ref<WebExtensionMatchPattern>, UserScriptVector> m_injectedScriptsPerPatternMap;
      HashMap<Ref<WebExtensionMatchPattern>, UserStyleSheetVector> m_injectedStyleSheetsPerPatternMap;
  
@@ -98427,7 +98431,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..9123f6cb63c2ba7de5274c7fd07332bc
      HashMap<String, Ref<WebExtensionDynamicScripts::WebExtensionRegisteredScript>> m_registeredScriptsMap;
      RefPtr<WebExtensionRegisteredScriptsSQLiteStore> m_registeredContentScriptsStorage;
  
-@@ -1256,11 +1577,20 @@ private:
+@@ -1256,11 +1579,20 @@ private:
  #endif // ENABLE(WK_WEB_EXTENSIONS_SIDEBAR)
  
      PortCountedSet m_ports;
@@ -98449,7 +98453,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..9123f6cb63c2ba7de5274c7fd07332bc
      mutable WindowIdentifierVector m_windowOrderVector;
      mutable std::optional<WebExtensionWindowIdentifier> m_focusedWindowIdentifier;
  
-@@ -1276,6 +1606,12 @@ private:
+@@ -1276,6 +1608,12 @@ private:
      bool m_populatedCommands { false };
  
      String m_declarativeNetRequestContentRuleListFilePath;
@@ -98462,7 +98466,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..9123f6cb63c2ba7de5274c7fd07332bc
      DeclarativeNetRequestMatchedRuleVector m_matchedRules;
      RefPtr<WebExtensionDeclarativeNetRequestSQLiteStore> m_declarativeNetRequestDynamicRulesStore;
      RefPtr<WebExtensionDeclarativeNetRequestSQLiteStore> m_declarativeNetRequestSessionRulesStore;
-@@ -1283,6 +1619,9 @@ private:
+@@ -1283,6 +1621,9 @@ private:
      HashSet<double> m_sessionRulesIDs;
      HashSet<double> m_dynamicRulesIDs;
  
@@ -98472,7 +98476,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..9123f6cb63c2ba7de5274c7fd07332bc
      MenuItemMap m_menuItems;
      MenuItemVector m_mainMenuItems;
  
-@@ -1300,12 +1639,16 @@ private:
+@@ -1300,12 +1641,16 @@ private:
          String message;
  #if PLATFORM(COCOA)
          RetainPtr<id> argument;
@@ -98489,7 +98493,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..9123f6cb63c2ba7de5274c7fd07332bc
  
      Deque<TestMessage> m_testMessageQueue;
      Deque<TestMessage> m_testStartedQueue;
-@@ -1315,6 +1658,8 @@ private:
+@@ -1315,6 +1660,8 @@ private:
      void sendQueuedTestMessagesIfNeeded(WebExtensionEventListenerType);
  #if PLATFORM(COCOA)
      void addTestMessageToQueue(const String& message, id argument, WebExtensionEventListenerType);
@@ -98499,7 +98503,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..9123f6cb63c2ba7de5274c7fd07332bc
  };
  
 diff --git a/Source/WebKit/UIProcess/Extensions/WebExtensionContext.messages.in b/Source/WebKit/UIProcess/Extensions/WebExtensionContext.messages.in
-index 6581f34180846663e2a8be51064e43c2d8173b64..cd39b5ad2bff37e23d98128b5180081a68e6ee2f 100644
+index 6581f34180846663e2a8be51064e43c2d8173b64..458f09c6fb4c8f2ca790cfaf9524d4456a60082e 100644
 --- a/Source/WebKit/UIProcess/Extensions/WebExtensionContext.messages.in
 +++ b/Source/WebKit/UIProcess/Extensions/WebExtensionContext.messages.in
 @@ -31,10 +31,144 @@
@@ -98648,7 +98652,7 @@ index 6581f34180846663e2a8be51064e43c2d8173b64..cd39b5ad2bff37e23d98128b5180081a
      // Action APIs
      [Validator=isActionMessageAllowed] ActionGetTitle(std::optional<WebKit::WebExtensionWindowIdentifier> windowIdentifier, std::optional<WebKit::WebExtensionTabIdentifier> tabIdentifier) -> (std::expected<String, WebKit::WebExtensionError> result)
      [Validator=isActionMessageAllowed] ActionSetTitle(std::optional<WebKit::WebExtensionWindowIdentifier> windowIdentifier, std::optional<WebKit::WebExtensionTabIdentifier> tabIdentifier, String title) -> (std::expected<void, WebKit::WebExtensionError> result)
-@@ -48,6 +182,33 @@ messages -> WebExtensionContext {
+@@ -48,6 +182,34 @@ messages -> WebExtensionContext {
      [Validator=isActionMessageAllowed] ActionSetEnabled(std::optional<WebKit::WebExtensionTabIdentifier> tabIdentifier, bool enabled) -> (std::expected<void, WebKit::WebExtensionError> result)
  #endif
  
@@ -98677,12 +98681,13 @@ index 6581f34180846663e2a8be51064e43c2d8173b64..cd39b5ad2bff37e23d98128b5180081a
 +    [Validator=isDownloadsMessageAllowed] DownloadsErase(String queryJSON) -> (std::expected<String, WebKit::WebExtensionError> result)
 +    [Validator=isDownloadsMessageAllowed] DownloadsShow(double downloadIdentifier) -> (std::expected<void, WebKit::WebExtensionError> result)
 +    [Validator=isDownloadsMessageAllowed] DownloadsShowDefaultFolder() -> (std::expected<void, WebKit::WebExtensionError> result)
++    [Validator=isDownloadsMessageAllowed] DownloadsItemAction(String action, double downloadIdentifier, String optionsJSON) -> (std::expected<String, WebKit::WebExtensionError> result)
 +#endif
 +
      // Alarms APIs
      [Validator=isAlarmsMessageAllowed] AlarmsCreate(String name, Seconds initialInterval, Seconds repeatInterval) -> ()
      [Validator=isAlarmsMessageAllowed] AlarmsGet(String name) -> (struct std::optional<WebKit::WebExtensionAlarmParameters> alarmInfo)
-@@ -71,9 +232,6 @@ messages -> WebExtensionContext {
+@@ -71,9 +233,6 @@ messages -> WebExtensionContext {
      [Validator=isBookmarksMessageAllowed] BookmarksRemoveTree(String bookmarkId) -> (std::expected<void, WebKit::WebExtensionError> result)
  #endif // ENABLE(WK_WEB_EXTENSIONS_BOOKMARKS)
  
@@ -98692,7 +98697,7 @@ index 6581f34180846663e2a8be51064e43c2d8173b64..cd39b5ad2bff37e23d98128b5180081a
      // Cookies APIs
      [Validator=isCookiesMessageAllowed] CookiesGet(std::optional<PAL::SessionID> sessionID, String name, URL url) -> (std::expected<std::optional<WebKit::WebExtensionCookieParameters>, WebKit::WebExtensionError> result)
      [Validator=isCookiesMessageAllowed] CookiesGetAll(std::optional<PAL::SessionID> sessionID, URL url, struct WebKit::WebExtensionCookieFilterParameters filterParameters) -> (std::expected<Vector<WebKit::WebExtensionCookieParameters>, WebKit::WebExtensionError> result)
-@@ -100,8 +258,6 @@ messages -> WebExtensionContext {
+@@ -100,8 +259,6 @@ messages -> WebExtensionContext {
  #endif
  
      // Event APIs
@@ -98701,7 +98706,7 @@ index 6581f34180846663e2a8be51064e43c2d8173b64..cd39b5ad2bff37e23d98128b5180081a
  
      // Extensions APIs
      [Validator=isLoaded] ExtensionIsAllowedIncognitoAccess() -> (bool result)
-@@ -134,20 +290,10 @@ messages -> WebExtensionContext {
+@@ -134,20 +291,10 @@ messages -> WebExtensionContext {
      [Validator=isLoaded] PermissionsRequest(HashSet<String> permissions, HashSet<String> origins) -> (bool success)
      [Validator=isLoaded] PermissionsRemove(HashSet<String> permissions, HashSet<String> origins) -> (bool success)
  
@@ -98722,7 +98727,7 @@ index 6581f34180846663e2a8be51064e43c2d8173b64..cd39b5ad2bff37e23d98128b5180081a
  
      // Scripting APIs
      [Validator=isScriptingMessageAllowed] ScriptingExecuteScript(WebKit::WebExtensionScriptInjectionParameters parameters, bool userGesture) -> (std::expected<Vector<WebKit::WebExtensionScriptInjectionResultParameters>, WebKit::WebExtensionError> result)
-@@ -174,15 +320,6 @@ messages -> WebExtensionContext {
+@@ -174,15 +321,6 @@ messages -> WebExtensionContext {
      [Validator=isSidebarMessageAllowed] SidebarGetActionClickBehavior() -> (std::expected<WebKit::WebExtensionActionClickBehavior, WebKit::WebExtensionError> result)
  #endif // ENABLE(WK_WEB_EXTENSIONS_SIDEBAR)
  
@@ -98738,7 +98743,7 @@ index 6581f34180846663e2a8be51064e43c2d8173b64..cd39b5ad2bff37e23d98128b5180081a
      // Tabs APIs
      [Validator=isLoadedAndPrivilegedMessage] TabsCreate(std::optional<WebKit::WebPageProxyIdentifier> webPageProxyIdentifier, WebKit::WebExtensionTabParameters creationParameters) -> (std::expected<std::optional<WebKit::WebExtensionTabParameters>, WebKit::WebExtensionError> result)
      [Validator=isLoadedAndPrivilegedMessage] TabsUpdate(WebKit::WebPageProxyIdentifier webPageProxyIdentifier, std::optional<WebKit::WebExtensionTabIdentifier> tabIdentifier, WebKit::WebExtensionTabParameters updateParameters) -> (std::expected<std::optional<WebKit::WebExtensionTabParameters>, WebKit::WebExtensionError> result)
-@@ -207,8 +344,6 @@ messages -> WebExtensionContext {
+@@ -207,8 +345,6 @@ messages -> WebExtensionContext {
      [Validator=isLoadedAndPrivilegedMessage] TabsRemoveCSS(WebKit::WebPageProxyIdentifier webPageProxyIdentifier, std::optional<WebKit::WebExtensionTabIdentifier> tabIdentifier, WebKit::WebExtensionScriptInjectionParameters parameters) -> (std::expected<void, WebKit::WebExtensionError> result)
  
      // WebNavigation APIs
@@ -103362,10 +103367,10 @@ index 0000000000000000000000000000000000000000..730115dae41130579faaec07972c4c97
 +#endif // ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
 diff --git a/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextAPIDownloadsHaiku.cpp b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextAPIDownloadsHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..df5f15285326a8eb497c5b7717e53659c931e46e
+index 0000000000000000000000000000000000000000..3aff4f5e1085e2dcc57a5dd0f5629b6621136079
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextAPIDownloadsHaiku.cpp
-@@ -0,0 +1,316 @@
+@@ -0,0 +1,432 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +#include "config.h"
 +#include "WebExtensionContext.h"
@@ -103376,12 +103381,20 @@ index 0000000000000000000000000000000000000000..df5f15285326a8eb497c5b7717e53659
 +#include "WebExtensionPermission.h"
 +#include "WebExtensionUtilities.h"
 +#include "WebPageProxy.h"
++#include <Bitmap.h>
++#include <BitmapStream.h>
++#include <DataIO.h>
 +#include <Entry.h>
++#include <Node.h>
++#include <NodeInfo.h>
 +#include <Roster.h>
++#include <TranslatorFormats.h>
++#include <TranslatorRoster.h>
 +#include <WebCore/FormData.h>
 +#include <WebCore/HTTPParsers.h>
 +#include <WebCore/ResourceRequest.h>
 +#include <wtf/FileSystem.h>
++#include <wtf/text/Base64.h>
 +#include <wtf/text/MakeString.h>
 +
 +namespace WebKit {
@@ -103667,6 +103680,114 @@ index 0000000000000000000000000000000000000000..df5f15285326a8eb497c5b7717e53659
 +        return;
 +    }
 +    completionHandler({ });
++}
++
++// The file's Tracker icon as a PNG data: URL.
++static std::expected<String, String> fileIconURL(const String& path, int size)
++{
++    BNode node(path.utf8().legacyCStringPointer());
++    BNodeInfo info(&node);
++    if (node.InitCheck() != B_OK || info.InitCheck() != B_OK)
++        return makeUnexpected("The downloaded file no longer exists"_s);
++    auto* bitmap = new BBitmap(BRect(0, 0, size - 1, size - 1), B_RGBA32);
++    if (bitmap->InitCheck() != B_OK || info.GetTrackerIcon(bitmap, static_cast<icon_size>(size)) != B_OK) {
++        delete bitmap;
++        return makeUnexpected("The file has no icon"_s);
++    }
++    BBitmapStream stream(bitmap);
++    BMallocIO png;
++    auto* roster = BTranslatorRoster::Default();
++    auto status = roster ? roster->Translate(&stream, nullptr, nullptr, &png, B_PNG_FORMAT) : B_NO_INIT;
++    stream.DetachBitmap(&bitmap);
++    delete bitmap;
++    if (status != B_OK || !png.BufferLength())
++        return makeUnexpected("The icon could not be encoded"_s);
++    std::span bytes { static_cast<const uint8_t*>(png.Buffer()), png.BufferLength() };
++    return makeString("data:image/png;base64,"_s, base64EncodeToString(bytes));
++}
++
++void WebExtensionContext::downloadsItemAction(String&& action, double downloadIdentifier, String&& optionsJSON, CompletionHandler<void(std::expected<String, WebExtensionError>&&)>&& completionHandler)
++{
++    // Documentation: https://developer.chrome.com/docs/extensions/reference/api/downloads
++    static constexpr ASCIILiteral actions[] { "pause"_s, "resume"_s, "open"_s, "removeFile"_s, "acceptDanger"_s, "getFileIcon"_s };
++    auto known = std::ranges::find(actions, action);
++    if (known == std::end(actions)) {
++        completionHandler(toWebExtensionError("downloads"_s, nullString(), "the action is not supported"_s));
++        return;
++    }
++    auto apiName = makeString("downloads."_s, *known, "()"_s);
++    RefPtr controller = extensionController();
++    auto identifier = toDownloadIdentifier(downloadIdentifier);
++    if (!controller || !identifier) {
++        completionHandler(toWebExtensionError(apiName, "downloadId"_s, "it is not a valid download identifier"_s));
++        return;
++    }
++    auto& downloads = controller->nativeDownloads();
++    auto reply = [&](std::expected<void, String>&& result) {
++        if (!result) {
++            completionHandler(toWebExtensionError(apiName, nullString(), result.error()));
++            return;
++        }
++        completionHandler(String { emptyString() });
++    };
++
++    if (action == "pause"_s)
++        return reply(downloads.pause(*identifier));
++    if (action == "resume"_s)
++        return reply(downloads.resume(*identifier));
++    if (action == "removeFile"_s)
++        return reply(downloads.removeFile(*identifier));
++    if (action == "acceptDanger"_s)
++        return reply(downloads.acceptDanger(*identifier));
++
++    if (action == "open"_s) {
++        // Chrome and Firefox ask for this permission besides "downloads".
++        if (!hasPermission("downloads.open"_s)) {
++            completionHandler(toWebExtensionError(apiName, nullString(), "it requires the 'downloads.open' permission"_s));
++            return;
++        }
++        auto path = downloads.completedFile(*identifier);
++        if (!path) {
++            completionHandler(toWebExtensionError(apiName, nullString(), path.error()));
++            return;
++        }
++        // The file opens in its preferred application, as from Tracker.
++        BEntry entry(path->utf8().legacyCStringPointer());
++        entry_ref reference;
++        auto status = entry.GetRef(&reference);
++        if (status == B_OK)
++            status = be_roster->Launch(&reference);
++        if (status != B_OK && status != B_ALREADY_RUNNING) {
++            completionHandler(toWebExtensionError(apiName, nullString(), "the file could not be opened"_s));
++            return;
++        }
++        completionHandler(String { emptyString() });
++        return;
++    }
++
++    // getFileIcon({size}): 16 or 32 pixels, 32 by default.
++    int size = 32;
++    if (RefPtr options = parseObject(optionsJSON)) {
++        if (RefPtr value = options->getValue("size"_s)) {
++            auto number = value->asDouble();
++            if (!number || (*number != 16 && *number != 32)) {
++                completionHandler(toWebExtensionError(apiName, "size"_s, "it must be 16 or 32"_s));
++                return;
++            }
++            size = static_cast<int>(*number);
++        }
++    }
++    auto path = downloads.pathForShow(*identifier);
++    if (!path) {
++        completionHandler(toWebExtensionError(apiName, nullString(), path.error()));
++        return;
++    }
++    auto icon = fileIconURL(*path, size);
++    if (!icon) {
++        completionHandler(toWebExtensionError(apiName, nullString(), icon.error()));
++        return;
++    }
++    completionHandler(JSON::Value::create(*icon)->toJSONString());
 +}
 +
 +void WebExtensionContext::fireDownloadsEventIfNeeded(WebExtensionEventListenerType type, const String& argumentJSON)
@@ -112116,10 +112237,10 @@ index 0000000000000000000000000000000000000000..271b3a38b4570d6f84669706d5c1beb8
 +#endif
 diff --git a/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionDownloadsHaiku.cpp b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionDownloadsHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..a53f53b623699097b5ce5ccf4027721f29298021
+index 0000000000000000000000000000000000000000..13702e72c61f3a72ac26930a1ed028583e9b6339
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionDownloadsHaiku.cpp
-@@ -0,0 +1,568 @@
+@@ -0,0 +1,778 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +#include "config.h"
 +#include "WebExtensionDownloadsHaiku.h"
@@ -112139,14 +112260,17 @@ index 0000000000000000000000000000000000000000..a53f53b623699097b5ce5ccf4027721f
 +#include <WebCore/ResourceRequest.h>
 +#include <algorithm>
 +#include <cmath>
++#include <cstring>
 +#include <ctime>
 +#include <sys/stat.h>
 +#include <tuple>
 +#include <wtf/DateMath.h>
++#include <wtf/FileSystem.h>
 +#include <wtf/RunLoop.h>
 +#include <wtf/TZoneMallocInlines.h>
 +#include <wtf/text/MakeString.h>
 +#include <wtf/text/StringToIntegerConversion.h>
++#include <wtf/URL.h>
 +
 +namespace WebKit {
 +
@@ -112195,12 +112319,13 @@ index 0000000000000000000000000000000000000000..a53f53b623699097b5ce5ccf4027721f
 +    shutdown();
 +}
 +
-+void WebExtensionDownloadsHaiku::attach(const std::shared_ptr<DownloadRegistryHaiku>& registry, bool incognito)
++void WebExtensionDownloadsHaiku::attach(const std::shared_ptr<DownloadRegistryHaiku>& registry, bool incognito, Resumer&& resumer)
 +{
 +    ASSERT(RunLoop::isMain());
 +    shutdown();
 +    m_registry = registry;
 +    m_incognito = incognito;
++    m_resumer = WTF::move(resumer);
 +    if (!registry)
 +        return;
 +    // The controller owns this object and clears the observer before destroying it.
@@ -112213,6 +112338,7 @@ index 0000000000000000000000000000000000000000..a53f53b623699097b5ce5ccf4027721f
 +void WebExtensionDownloadsHaiku::shutdown()
 +{
 +    ASSERT(RunLoop::isMain());
++    m_resumer = nullptr;
 +    if (auto registry = std::exchange(m_registry, { }).lock())
 +        registry->setObserver(nullptr);
 +}
@@ -112265,8 +112391,8 @@ index 0000000000000000000000000000000000000000..a53f53b623699097b5ce5ccf4027721f
 +    if (item.endTime)
 +        object->setString("endTime"_s, isoTime(*item.endTime));
 +    object->setString("state"_s, item.state);
-+    object->setBoolean("paused"_s, false);
-+    object->setBoolean("canResume"_s, false);
++    object->setBoolean("paused"_s, item.paused);
++    object->setBoolean("canResume"_s, item.canResume);
 +    if (!item.error.isEmpty())
 +        object->setString("error"_s, item.error);
 +    object->setDouble("bytesReceived"_s, static_cast<double>(item.bytesReceived));
@@ -112301,6 +112427,35 @@ index 0000000000000000000000000000000000000000..a53f53b623699097b5ce5ccf4027721f
 +    delta.setObject(key, WTF::move(change));
 +}
 +
++static void addBooleanDelta(JSON::Object& delta, ASCIILiteral key, bool previous, bool current)
++{
++    if (previous == current)
++        return;
++    Ref change = JSON::Object::create();
++    change->setBoolean("previous"_s, previous);
++    change->setBoolean("current"_s, current);
++    delta.setObject(key, WTF::move(change));
++}
++
++// Only HTTP transfers can be asked again (from where they stopped, or afresh).
++static bool canContinue(const String& url)
++{
++    return URL { url }.protocolIsInHTTPFamily();
++}
++
++auto WebExtensionDownloadsHaiku::itemForEngine(uint64_t engine) -> Item*
++{
++    auto found = m_items.find(m_resumed.getOptional(engine).value_or(engine));
++    return found == m_items.end() ? nullptr : &found->value;
++}
++
++auto WebExtensionDownloadsHaiku::transfer(const Item& item) -> Transfer&
++{
++    return m_transfers.ensure(item.identifier, [&] {
++        return Transfer { item.identifier, { }, false };
++    }).iterator->value;
++}
++
 +void WebExtensionDownloadsHaiku::observe(const DownloadRegistryEventHaiku& event)
 +{
 +    ASSERT(RunLoop::isMain());
@@ -112309,8 +112464,34 @@ index 0000000000000000000000000000000000000000..a53f53b623699097b5ce5ccf4027721f
 +        return;
 +
 +    if (event.type == DownloadRegistryEventHaiku::Type::Started) {
-+        if (m_items.contains(identifier))
++        if (m_items.contains(identifier) || m_resumed.contains(identifier))
 +            return;
++        // A resumed download continues its paused item: resume() starting it,
++        // or the browser continuing the item's partial file.
++        Item* continued = nullptr;
++        if (m_resuming) {
++            auto resuming = m_items.find(m_resuming);
++            continued = resuming == m_items.end() ? nullptr : &resuming->value;
++        } else if (event.resumed && !event.path.isEmpty()) {
++            for (auto& entry : m_items) {
++                if (entry.value.paused && entry.value.filename == event.path) {
++                    continued = &entry.value;
++                    break;
++                }
++            }
++        }
++        if (continued) {
++            auto previous = *continued;
++            m_resumed.set(identifier, continued->identifier);
++            transfer(*continued) = { identifier, { }, false };
++            continued->paused = false;
++            continued->bytesReceived = event.currentSize;
++            if (!event.path.isEmpty())
++                continued->filename = event.path;
++            continued->exists = fileExists(continued->filename);
++            dispatchChanges(previous, *continued);
++            return;
++        }
 +        Item item;
 +        item.identifier = identifier;
 +        item.order = ++m_nextOrder;
@@ -112328,15 +112509,18 @@ index 0000000000000000000000000000000000000000..a53f53b623699097b5ce5ccf4027721f
 +        }
 +        auto json = toJSON(item)->toJSONString();
 +        m_items.set(identifier, WTF::move(item));
++        m_transfers.set(identifier, Transfer { identifier, { }, false });
 +        dispatch(WebExtensionEventListenerType::DownloadsOnCreated, json);
 +        return;
 +    }
 +
-+    auto found = m_items.find(identifier);
-+    // Erased items stay erased; late notifications for them are ignored.
-+    if (found == m_items.end())
++    auto* found = itemForEngine(identifier);
++    // Erased items stay erased; late notifications for them are ignored, as
++    // are those of a transfer the item no longer follows.
++    if (!found || transfer(*found).engine != identifier)
 +        return;
-+    auto& item = found->value;
++    auto& item = *found;
++    auto& itemTransfer = transfer(item);
 +    auto previous = item;
 +
 +    item.bytesReceived = event.currentSize;
@@ -112346,27 +112530,52 @@ index 0000000000000000000000000000000000000000..a53f53b623699097b5ce5ccf4027721f
 +        item.finalURL = event.finalURL;
 +    if (!event.mimeType.isEmpty())
 +        item.mimeType = event.mimeType;
++    if (!event.validator.isEmpty())
++        itemTransfer.validator = event.validator;
 +    if (event.expectedSize >= 0)
 +        item.totalBytes = event.expectedSize;
 +
++    bool resumeNow = false;
 +    if (event.type == DownloadRegistryEventHaiku::Type::Finished) {
-+        item.endTime = WallTime::now();
-+        if (event.result == B_WEBKIT_DOWNLOAD_SUCCEEDED) {
-+            item.state = stateComplete;
-+            item.fileSize = static_cast<int64_t>(event.currentSize);
-+            if (item.totalBytes < 0)
-+                item.totalBytes = item.fileSize;
++        m_resumed.remove(identifier);
++        if (event.result == B_WEBKIT_DOWNLOAD_PAUSED) {
++            // Paused, by the browser or pause(): still in progress, as in Chrome.
++            item.paused = true;
++            item.canResume = canContinue(item.url);
 +            item.exists = fileExists(item.filename);
++            resumeNow = std::exchange(itemTransfer.resumeWhenPaused, false) && item.canResume;
 +        } else {
-+            item.state = stateInterrupted;
-+            // The registry removes partial files on failure and cancellation.
-+            item.error = event.result == B_WEBKIT_DOWNLOAD_CANCELLED ? "USER_CANCELED"_s
-+                : item.filename.isEmpty() && event.error == B_IO_ERROR ? "FILE_FAILED"_s : "NETWORK_FAILED"_s;
-+            item.exists = fileExists(item.filename);
++            item.paused = item.canResume = itemTransfer.resumeWhenPaused = false;
++            item.endTime = WallTime::now();
++            if (event.result == B_WEBKIT_DOWNLOAD_SUCCEEDED) {
++                item.state = stateComplete;
++                item.fileSize = static_cast<int64_t>(event.currentSize);
++                if (item.totalBytes < 0)
++                    item.totalBytes = item.fileSize;
++                item.exists = fileExists(item.filename);
++            } else {
++                item.state = stateInterrupted;
++                // The registry removes partial files on failure and cancellation.
++                item.error = event.result == B_WEBKIT_DOWNLOAD_CANCELLED ? "USER_CANCELED"_s
++                    : item.filename.isEmpty() && event.error == B_IO_ERROR ? "FILE_FAILED"_s : "NETWORK_FAILED"_s;
++                item.exists = fileExists(item.filename);
++            }
 +        }
 +    } else if (!item.filename.isEmpty() && previous.filename.isEmpty())
 +        item.exists = true;
 +
++    dispatchChanges(previous, item);
++    if (resumeNow) {
++        // Not from within the registry's notification.
++        RunLoop::mainSingleton().dispatch([weakController = m_controller, itemIdentifier = item.identifier] {
++            if (RefPtr controller = weakController.get())
++                std::ignore = controller->nativeDownloads().resume(itemIdentifier);
++        });
++    }
++}
++
++void WebExtensionDownloadsHaiku::dispatchChanges(const Item& previous, const Item& item)
++{
 +    // Documentation: https://developer.chrome.com/docs/extensions/reference/api/downloads#type-DownloadDelta
 +    Ref delta = JSON::Object::create();
 +    addStringDelta(delta, "url"_s, previous.url, item.url);
@@ -112379,16 +112588,13 @@ index 0000000000000000000000000000000000000000..a53f53b623699097b5ce5ccf4027721f
 +        addStringDelta(delta, "endTime"_s, { }, isoTime(*item.endTime));
 +    addNumberDelta(delta, "totalBytes"_s, previous.totalBytes, item.totalBytes);
 +    addNumberDelta(delta, "fileSize"_s, previous.fileSize, item.fileSize);
-+    if (previous.exists != item.exists) {
-+        Ref change = JSON::Object::create();
-+        change->setBoolean("previous"_s, previous.exists);
-+        change->setBoolean("current"_s, item.exists);
-+        delta->setObject("exists"_s, WTF::move(change));
-+    }
++    addBooleanDelta(delta, "exists"_s, previous.exists, item.exists);
++    addBooleanDelta(delta, "paused"_s, previous.paused, item.paused);
++    addBooleanDelta(delta, "canResume"_s, previous.canResume, item.canResume);
 +    // bytesReceived is not part of a DownloadDelta; progress alone is silent.
 +    if (!delta->size())
 +        return;
-+    delta->setDouble("id"_s, static_cast<double>(identifier));
++    delta->setDouble("id"_s, static_cast<double>(item.identifier));
 +    dispatch(WebExtensionEventListenerType::DownloadsOnChanged, delta->toJSONString());
 +}
 +
@@ -112573,7 +112779,7 @@ index 0000000000000000000000000000000000000000..a53f53b623699097b5ce5ccf4027721f
 +            continue;
 +        if (exists && item.exists != *exists)
 +            continue;
-+        if ((paused && *paused) || (incognito && *incognito != m_incognito) || (!danger.isNull() && danger != "safe"_s))
++        if ((paused && *paused != item.paused) || (incognito && *incognito != m_incognito) || (!danger.isNull() && danger != "safe"_s))
 +            continue;
 +        auto numberMatches = [&](const NumberFilter& filter) {
 +            double actual = filter.field == NumberField::BytesReceived ? static_cast<double>(item.bytesReceived)
@@ -112656,30 +112862,155 @@ index 0000000000000000000000000000000000000000..a53f53b623699097b5ce5ccf4027721f
 +    // later notifications no longer reach extensions.
 +    for (auto identifier : identifiers) {
 +        m_items.remove(identifier);
++        m_transfers.remove(identifier);
++        m_resumed.removeIf([&](auto& entry) { return entry.value == identifier; });
 +        dispatch(WebExtensionEventListenerType::DownloadsOnErased, String::number(identifier));
 +    }
 +    return identifiers;
++}
++
++static String noSuchDownload(uint64_t identifier)
++{
++    return makeString("No download with the identifier "_s, identifier, " exists"_s);
 +}
 +
 +std::expected<void, String> WebExtensionDownloadsHaiku::cancel(uint64_t identifier)
 +{
 +    auto found = m_items.find(identifier);
 +    if (found == m_items.end())
-+        return makeUnexpected(makeString("No download with the identifier "_s, identifier, " exists"_s));
++        return makeUnexpected(noSuchDownload(identifier));
++    auto& item = found->value;
 +    // Cancelling a finished download is not an error.
-+    if (found->value.state != stateInProgress)
++    if (item.state != stateInProgress)
 +        return { };
 +    auto registry = m_registry.lock();
-+    if (registry && registry->isActive(identifier))
-+        registry->cancel(identifier);
++    auto& itemTransfer = transfer(item);
++    if (registry && registry->isActive(itemTransfer.engine)) {
++        itemTransfer.resumeWhenPaused = false;
++        registry->cancel(itemTransfer.engine);
++        return { };
++    }
++    if (!item.paused)
++        return { };
++    // A paused download has no transfer to stop: it ends here, without its partial file.
++    auto previous = item;
++    if (fileExists(item.filename))
++        FileSystem::deleteFile(item.filename);
++    item.state = stateInterrupted;
++    item.error = "USER_CANCELED"_s;
++    item.endTime = WallTime::now();
++    item.paused = item.canResume = false;
++    item.exists = fileExists(item.filename);
++    dispatchChanges(previous, item);
 +    return { };
++}
++
++std::expected<void, String> WebExtensionDownloadsHaiku::pause(uint64_t identifier)
++{
++    auto found = m_items.find(identifier);
++    if (found == m_items.end())
++        return makeUnexpected(noSuchDownload(identifier));
++    auto& item = found->value;
++    if (item.state != stateInProgress)
++        return makeUnexpected("The download is not in progress"_s);
++    auto& itemTransfer = transfer(item);
++    itemTransfer.resumeWhenPaused = false;
++    if (item.paused)
++        return { };
++    auto registry = m_registry.lock();
++    if (!registry || !registry->isActive(itemTransfer.engine))
++        return makeUnexpected("The download is not in progress"_s);
++    if (!canContinue(item.url))
++        return makeUnexpected("This download cannot be paused"_s);
++    // Paused now, as Chrome reports it at once; the transfer stops shortly
++    // and its partial file stays for resume().
++    auto previous = item;
++    item.paused = true;
++    item.canResume = true;
++    dispatchChanges(previous, item);
++    registry->pause(itemTransfer.engine);
++    return { };
++}
++
++std::expected<void, String> WebExtensionDownloadsHaiku::resume(uint64_t identifier)
++{
++    auto found = m_items.find(identifier);
++    if (found == m_items.end())
++        return makeUnexpected(noSuchDownload(identifier));
++    auto& item = found->value;
++    if (item.state != stateInProgress || !item.paused || !item.canResume)
++        return makeUnexpected("The download is not paused"_s);
++    auto registry = m_registry.lock();
++    if (auto& itemTransfer = transfer(item); registry && registry->isActive(itemTransfer.engine)) {
++        // Still stopping: it continues once it has.
++        itemTransfer.resumeWhenPaused = true;
++        return { };
++    }
++    return startResume(item);
++}
++
++auto WebExtensionDownloadsHaiku::startResume(Item& item) -> std::expected<void, String>
++{
++    if (!m_resumer)
++        return makeUnexpected("Downloads cannot be resumed in this browser context"_s);
++    auto itemIdentifier = item.identifier;
++    uint64_t created = 0;
++    m_resuming = itemIdentifier;
++    auto& itemTransfer = transfer(item);
++    auto status = m_resumer(item.url, fileExists(item.filename) ? item.filename : String(), itemTransfer.validator, item.totalBytes, itemTransfer.engine, created);
++    m_resuming = 0;
++    if (status != B_OK)
++        return makeUnexpected(makeString("The download could not be resumed ("_s, String::fromUTF8(strerror(status)), ')'));
++    // The Started notification linked the new transfer to the item.
++    auto* resumed = itemForEngine(created);
++    if (!resumed || resumed->identifier != itemIdentifier)
++        return makeUnexpected("The download could not be resumed"_s);
++    return { };
++}
++
++std::expected<void, String> WebExtensionDownloadsHaiku::removeFile(uint64_t identifier)
++{
++    auto found = m_items.find(identifier);
++    if (found == m_items.end())
++        return makeUnexpected(noSuchDownload(identifier));
++    auto& item = found->value;
++    if (item.state != stateComplete)
++        return makeUnexpected("The download is not complete"_s);
++    if (!fileExists(item.filename))
++        return makeUnexpected("The downloaded file has already been removed"_s);
++    if (!FileSystem::deleteFile(item.filename))
++        return makeUnexpected("The downloaded file could not be removed"_s);
++    auto previous = item;
++    item.exists = false;
++    dispatchChanges(previous, item);
++    return { };
++}
++
++std::expected<String, String> WebExtensionDownloadsHaiku::completedFile(uint64_t identifier) const
++{
++    auto found = m_items.find(identifier);
++    if (found == m_items.end())
++        return makeUnexpected(noSuchDownload(identifier));
++    if (found->value.state != stateComplete)
++        return makeUnexpected("The download is not complete"_s);
++    if (!fileExists(found->value.filename))
++        return makeUnexpected("The downloaded file no longer exists"_s);
++    return found->value.filename;
++}
++
++std::expected<void, String> WebExtensionDownloadsHaiku::acceptDanger(uint64_t identifier) const
++{
++    if (!m_items.contains(identifier))
++        return makeUnexpected(noSuchDownload(identifier));
++    // Summit marks no download dangerous ("danger": "safe").
++    return makeUnexpected("The download is not dangerous"_s);
 +}
 +
 +std::expected<String, String> WebExtensionDownloadsHaiku::pathForShow(uint64_t identifier) const
 +{
 +    auto found = m_items.find(identifier);
 +    if (found == m_items.end())
-+        return makeUnexpected(makeString("No download with the identifier "_s, identifier, " exists"_s));
++        return makeUnexpected(noSuchDownload(identifier));
 +    if (found->value.filename.isEmpty())
 +        return makeUnexpected("The download has no file yet"_s);
 +    return found->value.filename;
@@ -112690,10 +113021,10 @@ index 0000000000000000000000000000000000000000..a53f53b623699097b5ce5ccf4027721f
 +#endif // ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
 diff --git a/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionDownloadsHaiku.h b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionDownloadsHaiku.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..87388e7f5f83641e04309ca1343360977ac984d6
+index 0000000000000000000000000000000000000000..c3c8f4b60b701f65b2ba878e3ac72201d87ea65a
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionDownloadsHaiku.h
-@@ -0,0 +1,88 @@
+@@ -0,0 +1,119 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +#pragma once
 +#if ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
@@ -112701,6 +113032,7 @@ index 0000000000000000000000000000000000000000..87388e7f5f83641e04309ca134336097
 +#include <expected>
 +#include <memory>
 +#include <optional>
++#include <wtf/Function.h>
 +#include <wtf/HashMap.h>
 +#include <wtf/JSONValues.h>
 +#include <wtf/TZoneMalloc.h>
@@ -112730,14 +113062,23 @@ index 0000000000000000000000000000000000000000..87388e7f5f83641e04309ca134336097
 +    explicit WebExtensionDownloadsHaiku(WebExtensionController&);
 +    ~WebExtensionDownloadsHaiku();
 +
-+    void attach(const std::shared_ptr<DownloadRegistryHaiku>&, bool incognito);
++    // Starts a download continuing a paused one (WebViewContextHaiku::resumeDownload):
++    // url, path, validator, expected size, the download it continues, the new identifier.
++    using Resumer = Function<status_t(const String&, const String&, const String&, int64_t, uint64_t, uint64_t&)>;
++    void attach(const std::shared_ptr<DownloadRegistryHaiku>&, bool incognito, Resumer&& = nullptr);
 +    void shutdown();
 +
 +    std::expected<uint64_t, String> start(WebExtensionContext&, WebPageProxy&, WebCore::ResourceRequest&&, const String& filename);
 +    std::expected<Ref<JSON::Array>, String> search(const JSON::Object& query) const;
 +    std::expected<Vector<uint64_t>, String> erase(const JSON::Object& query);
 +    std::expected<void, String> cancel(uint64_t identifier);
++    std::expected<void, String> pause(uint64_t identifier);
++    std::expected<void, String> resume(uint64_t identifier);
++    std::expected<void, String> removeFile(uint64_t identifier);
 +    std::expected<String, String> pathForShow(uint64_t identifier) const;
++    // A complete download's file, for open() and getFileIcon().
++    std::expected<String, String> completedFile(uint64_t identifier) const;
++    std::expected<void, String> acceptDanger(uint64_t identifier) const;
 +    String directory() const;
 +
 +    // Registry notifications, delivered on the WTF main RunLoop.
@@ -112759,8 +113100,19 @@ index 0000000000000000000000000000000000000000..87388e7f5f83641e04309ca134336097
 +        int64_t totalBytes { -1 };
 +        int64_t fileSize { -1 };
 +        bool exists { false };
++        bool paused { false };
++        bool canResume { false };
 +        String byExtensionIdentifier;
 +        String byExtensionName;
++    };
++    // Kept beside the item (whose size HashMap bounds).
++    struct Transfer {
++        // The download transferring for the item now, or last: its first
++        // identifier, or a resumed one's.
++        uint64_t engine { 0 };
++        String validator;
++        // Resume once the transfer has stopped (resume() during a pause).
++        bool resumeWhenPaused { false };
 +    };
 +    struct Initiator {
 +        String identifier;
@@ -112768,6 +113120,10 @@ index 0000000000000000000000000000000000000000..87388e7f5f83641e04309ca134336097
 +    };
 +
 +    void dispatch(WebExtensionEventListenerType, const String& argumentJSON);
++    void dispatchChanges(const Item& previous, const Item&);
++    std::expected<void, String> startResume(Item&);
++    Item* itemForEngine(uint64_t engine);
++    Transfer& transfer(const Item&);
 +    Ref<JSON::Object> toJSON(const Item&) const;
 +    std::expected<Vector<const Item*>, String> query(const JSON::Object&) const;
 +
@@ -112777,6 +113133,12 @@ index 0000000000000000000000000000000000000000..87388e7f5f83641e04309ca134336097
 +    uint64_t m_nextOrder { 0 };
 +    HashMap<uint64_t, Item> m_items;
 +    HashMap<uint64_t, Initiator> m_initiators;
++    HashMap<uint64_t, Transfer> m_transfers;
++    // A resumed download's identifier -> the item it continues.
++    HashMap<uint64_t, uint64_t> m_resumed;
++    // The item resume() is starting: its Started notification comes synchronously.
++    uint64_t m_resuming { 0 };
++    Resumer m_resumer;
 +};
 +
 +} // namespace WebKit
@@ -119222,10 +119584,10 @@ index 0000000000000000000000000000000000000000..4bacf045a2c597f0e182667aa572dc93
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/DownloadRegistryHaiku.cpp b/Source/WebKit/UIProcess/haiku/DownloadRegistryHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..187f107ab945107268ef80443ca14ef5c64bcf28
+index 0000000000000000000000000000000000000000..9486a2b8e61c79b2484756c0547ac7abd29b3795
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/DownloadRegistryHaiku.cpp
-@@ -0,0 +1,661 @@
+@@ -0,0 +1,668 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#include "config.h"
@@ -119408,6 +119770,7 @@ index 0000000000000000000000000000000000000000..187f107ab945107268ef80443ca14ef5
 +    bool partial { false };
 +    std::optional<Resume> resume;
 +    std::optional<uint64_t> resumedFrom;
++    uint64_t continues { 0 };
 +    bool restarted { false };
 +    bool answered { false };
 +    String validator;
@@ -119549,6 +119912,8 @@ index 0000000000000000000000000000000000000000..187f107ab945107268ef80443ca14ef5
 +    auto item = std::make_unique<Entry>(download, m_listener, m_directory);
 +    item->view = view;
 +    item->requestedFilename = requestedFilename;
++    if (resume)
++        item->continues = resume->continues;
 +    if (resume && !resume->path.isEmpty()) {
 +        item->resume = *resume;
 +        item->destination = resume->path;
@@ -119583,6 +119948,8 @@ index 0000000000000000000000000000000000000000..187f107ab945107268ef80443ca14ef5
 +        event.result = result;
 +        event.error = error;
 +        event.errorDescription = description;
++        event.validator = item.validator;
++        event.resumed = item.resume.has_value();
 +        m_observer(event);
 +    }
 +    BMessage message(what);
@@ -119609,6 +119976,8 @@ index 0000000000000000000000000000000000000000..187f107ab945107268ef80443ca14ef5
 +        append(message.AddUInt64("resumed_from", *item.resumedFrom));
 +    if (item.restarted)
 +        append(message.AddBool("restarted", true));
++    if (item.continues)
++        append(message.AddUInt64("continues", item.continues));
 +    if (item.view.IsValid())
 +        append(message.AddMessenger("view", item.view));
 +    if (what == B_WEBKIT_DOWNLOAD_FINISHED) {
@@ -119889,10 +120258,10 @@ index 0000000000000000000000000000000000000000..187f107ab945107268ef80443ca14ef5
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/DownloadRegistryHaiku.h b/Source/WebKit/UIProcess/haiku/DownloadRegistryHaiku.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..aa491ceab24cb6fb32d217e1126a955960182df7
+index 0000000000000000000000000000000000000000..d5793a4d7ccb0aefa20f0596bd9c22c95419b545
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/DownloadRegistryHaiku.h
-@@ -0,0 +1,104 @@
+@@ -0,0 +1,111 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#pragma once
@@ -119931,6 +120300,10 @@ index 0000000000000000000000000000000000000000..aa491ceab24cb6fb32d217e1126a9559
 +    uint32_t result { 0 };
 +    int32_t error { 0 };
 +    String errorDescription;
++    // What a later resume sends as If-Range, once the server has answered.
++    String validator;
++    // The download continues a partial file (BWebKitContext::ResumeDownload).
++    bool resumed { false };
 +};
 +
 +// Every method and all engine references are confined to the application's
@@ -119960,6 +120333,9 @@ index 0000000000000000000000000000000000000000..aa491ceab24cb6fb32d217e1126a9559
 +        uint64_t offset { 0 };
 +        bool hasValidator { false };
 +        int64_t expectedSize { -1 };
++        // The identifier of the download this one continues, when known; the
++        // host learns it from the notifications' "continues" field.
++        uint64_t continues { 0 };
 +    };
 +    // Checks a host's partial file and fills resume (its offset); path may be
 +    // empty for a download that never had a file.
@@ -129006,10 +129382,10 @@ index 0000000000000000000000000000000000000000..768278bf4602c61c12383fa82288708d
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/WebViewContextHaiku.cpp b/Source/WebKit/UIProcess/haiku/WebViewContextHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..8efcfe3e8441d6bb04bcd33ca81b8777dd49d3eb
+index 0000000000000000000000000000000000000000..ea23addfdb6e3d6a9bbcc180c761c6220128db58
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/WebViewContextHaiku.cpp
-@@ -0,0 +1,386 @@
+@@ -0,0 +1,391 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#include "config.h"
@@ -129089,7 +129465,11 @@ index 0000000000000000000000000000000000000000..8efcfe3e8441d6bb04bcd33ca81b8777
 +#if ENABLE(WK_WEB_EXTENSIONS)
 +    // Extensions with the downloads permission observe and start this
 +    // context's downloads; a private context keeps its own separate history.
-+    m_extensionController->nativeDownloads().attach(m_downloads, !m_dataStore->isPersistent());
++    // Their resume() continues a paused download as the host's would.
++    m_extensionController->nativeDownloads().attach(m_downloads, !m_dataStore->isPersistent(),
++        [this](const String& url, const String& path, const String& validator, int64_t expectedSize, uint64_t continues, uint64_t& identifier) {
++            return resumeDownload(url, path, validator, expectedSize, { }, identifier, continues);
++        });
 +#endif
 +}
 +
@@ -129369,7 +129749,7 @@ index 0000000000000000000000000000000000000000..8efcfe3e8441d6bb04bcd33ca81b8777
 +}
 +
 +status_t WebViewContextHaiku::resumeDownload(const String& address, const String& path, const String& validator, int64_t expectedSize,
-+    const BMessenger& view, uint64_t& identifier)
++    const BMessenger& view, uint64_t& identifier, uint64_t continues)
 +{
 +    ASSERT(RunLoop::isMain());
 +    URL url { address };
@@ -129383,6 +129763,7 @@ index 0000000000000000000000000000000000000000..8efcfe3e8441d6bb04bcd33ca81b8777
 +    DownloadRegistryHaiku::Resume resume;
 +    if (auto status = m_downloads->prepareResume(path, validator, expectedSize, resume); status != B_OK)
 +        return status;
++    resume.continues = continues;
 +    WebCore::ResourceRequest request(WTF::move(url));
 +    if (resume.offset) {
 +        request.setHTTPHeaderField(WebCore::HTTPHeaderName::Range, makeString("bytes="_s, resume.offset, '-'));
@@ -129398,10 +129779,10 @@ index 0000000000000000000000000000000000000000..8efcfe3e8441d6bb04bcd33ca81b8777
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/WebViewContextHaiku.h b/Source/WebKit/UIProcess/haiku/WebViewContextHaiku.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..c813148502167e9c7b2bd0c604a56ce4b9e1c869
+index 0000000000000000000000000000000000000000..b252c8d4a269799df95e145e4f9183d7e0b0f05e
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/WebViewContextHaiku.h
-@@ -0,0 +1,113 @@
+@@ -0,0 +1,114 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#pragma once
@@ -129462,8 +129843,9 @@ index 0000000000000000000000000000000000000000..c813148502167e9c7b2bd0c604a56ce4
 +    void download(WebPageProxy&, const WebCore::ResourceRequest&, const BMessenger&);
 +    // BWebKitContext::ResumeDownload: a download with no page that continues
 +    // the partial file at path (or starts afresh). Application thread.
++    // continues, when known, names the download it carries on.
 +    status_t resumeDownload(const String& url, const String& path, const String& validator, int64_t expectedSize,
-+        const BMessenger& view, uint64_t& identifier);
++        const BMessenger& view, uint64_t& identifier, uint64_t continues = 0);
 +    // Notifications and location: requests, the host's decisions, providers.
 +    const std::shared_ptr<SitePermissionsHaiku>& sitePermissions() const { return m_sitePermissions; }
 +#if ENABLE(WEBUSB)
@@ -139409,10 +139791,10 @@ index a6dd4d40c24fd042e8a76a249cae9ff862f06dbf..d96349a81c1c018d1534e9d08b9b259a
      void getEnabledRulesets(Ref<WebExtensionCallbackHandler>&&);
 diff --git a/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIDownloads.cpp b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIDownloads.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..238649e9435738318777c23ed1e5c04afb8a16fc
+index 0000000000000000000000000000000000000000..4052934aff0d9704cec7b40fcc6fd01924365663
 --- /dev/null
 +++ b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIDownloads.cpp
-@@ -0,0 +1,190 @@
+@@ -0,0 +1,230 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +#include "config.h"
 +#include "WebExtensionAPIDownloads.h"
@@ -139512,15 +139894,55 @@ index 0000000000000000000000000000000000000000..238649e9435738318777c23ed1e5c04a
 +    }, extensionContext().identifier());
 +}
 +
-+void WebExtensionAPIDownloads::open(double downloadIdentifier, Ref<WebExtensionCallbackHandler>&& callback, String& outExceptionString)
++void WebExtensionAPIDownloads::itemAction(ASCIILiteral action, double downloadIdentifier, const String& optionsJSON, Ref<WebExtensionCallbackHandler>&& callback, String& outExceptionString)
 +{
 +    if (!isValidDownloadIdentifier(downloadIdentifier)) {
 +        outExceptionString = toErrorString(nullString(), "downloadId"_s, "it must be a non-negative integer"_s);
 +        return;
 +    }
-+    // Opening a file launches its preferred application. That needs the
-+    // separate downloads.open permission and a user-gesture policy first.
-+    callback->reportError("downloads.open() is not supported on this platform."_s);
++    WebProcess::singleton().sendWithAsyncReply(Messages::WebExtensionContext::DownloadsItemAction(action, downloadIdentifier, optionsJSON), [protectedThis = Ref { *this }, callback = WTF::move(callback)](std::expected<String, WebExtensionError>&& result) {
++        // Only getFileIcon() answers with a value.
++        if (result && result->isEmpty()) {
++            callback->call();
++            return;
++        }
++        replyWithJSON(callback, WTF::move(result));
++    }, extensionContext().identifier());
++}
++
++void WebExtensionAPIDownloads::open(double downloadIdentifier, Ref<WebExtensionCallbackHandler>&& callback, String& outExceptionString)
++{
++    // The UI process checks for the downloads.open permission.
++    itemAction("open"_s, downloadIdentifier, { }, WTF::move(callback), outExceptionString);
++}
++
++void WebExtensionAPIDownloads::pause(double downloadIdentifier, Ref<WebExtensionCallbackHandler>&& callback, String& outExceptionString)
++{
++    itemAction("pause"_s, downloadIdentifier, { }, WTF::move(callback), outExceptionString);
++}
++
++void WebExtensionAPIDownloads::resume(double downloadIdentifier, Ref<WebExtensionCallbackHandler>&& callback, String& outExceptionString)
++{
++    itemAction("resume"_s, downloadIdentifier, { }, WTF::move(callback), outExceptionString);
++}
++
++void WebExtensionAPIDownloads::removeFile(double downloadIdentifier, Ref<WebExtensionCallbackHandler>&& callback, String& outExceptionString)
++{
++    itemAction("removeFile"_s, downloadIdentifier, { }, WTF::move(callback), outExceptionString);
++}
++
++void WebExtensionAPIDownloads::acceptDanger(double downloadIdentifier, Ref<WebExtensionCallbackHandler>&& callback, String& outExceptionString)
++{
++    itemAction("acceptDanger"_s, downloadIdentifier, { }, WTF::move(callback), outExceptionString);
++}
++
++void WebExtensionAPIDownloads::getFileIcon(double downloadIdentifier, RefPtr<JSON::Value> options, Ref<WebExtensionCallbackHandler>&& callback, String& outExceptionString)
++{
++    if (options && !options->asObject()) {
++        outExceptionString = toErrorString(nullString(), "options"_s, "it must be an object"_s);
++        return;
++    }
++    itemAction("getFileIcon"_s, downloadIdentifier, options ? options->toJSONString() : String(), WTF::move(callback), outExceptionString);
 +}
 +
 +void WebExtensionAPIDownloads::show(double downloadIdentifier, Ref<WebExtensionCallbackHandler>&& callback, String& outExceptionString)
@@ -139605,10 +140027,10 @@ index 0000000000000000000000000000000000000000..238649e9435738318777c23ed1e5c04a
 +#endif // ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
 diff --git a/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIDownloads.h b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIDownloads.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..c46ec0f2277661fe29632d805b6d436954bd3c52
+index 0000000000000000000000000000000000000000..eeadc080173eb78d59297bb065b1505cedfe5e63
 --- /dev/null
 +++ b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIDownloads.h
-@@ -0,0 +1,35 @@
+@@ -0,0 +1,42 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +#pragma once
 +#if ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
@@ -139627,6 +140049,11 @@ index 0000000000000000000000000000000000000000..c46ec0f2277661fe29632d805b6d4369
 +    void cancel(double downloadIdentifier, Ref<WebExtensionCallbackHandler>&&, String& outExceptionString);
 +    void erase(RefPtr<JSON::Value> query, Ref<WebExtensionCallbackHandler>&&, String& outExceptionString);
 +    void open(double downloadIdentifier, Ref<WebExtensionCallbackHandler>&&, String& outExceptionString);
++    void pause(double downloadIdentifier, Ref<WebExtensionCallbackHandler>&&, String& outExceptionString);
++    void resume(double downloadIdentifier, Ref<WebExtensionCallbackHandler>&&, String& outExceptionString);
++    void removeFile(double downloadIdentifier, Ref<WebExtensionCallbackHandler>&&, String& outExceptionString);
++    void acceptDanger(double downloadIdentifier, Ref<WebExtensionCallbackHandler>&&, String& outExceptionString);
++    void getFileIcon(double downloadIdentifier, RefPtr<JSON::Value> options, Ref<WebExtensionCallbackHandler>&&, String& outExceptionString);
 +    void show(double downloadIdentifier, Ref<WebExtensionCallbackHandler>&&, String& outExceptionString);
 +    void showDefaultFolder(Ref<WebExtensionCallbackHandler>&&);
 +
@@ -139637,6 +140064,8 @@ index 0000000000000000000000000000000000000000..c46ec0f2277661fe29632d805b6d4369
 +    void dispatchEvent(WebExtensionEventListenerType, const String& argumentJSON);
 +
 +private:
++    void itemAction(ASCIILiteral action, double downloadIdentifier, const String& optionsJSON, Ref<WebExtensionCallbackHandler>&&, String& outExceptionString);
++
 +    RefPtr<WebExtensionAPIEvent> m_onCreated;
 +    RefPtr<WebExtensionAPIEvent> m_onChanged;
 +    RefPtr<WebExtensionAPIEvent> m_onErased;
@@ -151346,10 +151775,10 @@ index c5c670a8a637222faa2bc0d1313ac4f8d9063550..8901b24bab2ce05be780d2c9100f2c2c
  };
 diff --git a/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPIDownloads.idl b/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPIDownloads.idl
 new file mode 100644
-index 0000000000000000000000000000000000000000..b8fcf6b82f27178c878e3e55c5696a5954a22666
+index 0000000000000000000000000000000000000000..2bb7ef7ae5017a9c4d9829488735a4309937eb39
 --- /dev/null
 +++ b/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPIDownloads.idl
-@@ -0,0 +1,21 @@
+@@ -0,0 +1,26 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +[
@@ -151364,6 +151793,11 @@ index 0000000000000000000000000000000000000000..b8fcf6b82f27178c878e3e55c5696a59
 +    [RaisesStringException] void cancel(double downloadId, [Optional, CallbackHandler] function callback);
 +    [RaisesStringException] void erase([JSONValue] any query, [Optional, CallbackHandler] function callback);
 +    [RaisesStringException] void open(double downloadId, [Optional, CallbackHandler] function callback);
++    [RaisesStringException] void pause(double downloadId, [Optional, CallbackHandler] function callback);
++    [RaisesStringException] void resume(double downloadId, [Optional, CallbackHandler] function callback);
++    [RaisesStringException] void removeFile(double downloadId, [Optional, CallbackHandler] function callback);
++    [RaisesStringException] void acceptDanger(double downloadId, [Optional, CallbackHandler] function callback);
++    [RaisesStringException] void getFileIcon(double downloadId, [Optional, JSONValue] any options, [Optional, CallbackHandler] function callback);
 +    [RaisesStringException] void show(double downloadId, [Optional, CallbackHandler] function callback);
 +    void showDefaultFolder([Optional, CallbackHandler] function callback);
 +

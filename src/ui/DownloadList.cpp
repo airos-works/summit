@@ -9,6 +9,7 @@
 #include <sstream>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <utility>
 
 namespace summit {
 namespace {
@@ -112,6 +113,23 @@ std::optional<DownloadList::HistoryChange> DownloadList::Update(const BMessage& 
     {
         std::lock_guard lock(fMutex);
         auto entry = std::find_if(fEntries.begin(), fEntries.end(), [&](const Entry& item) { return item.engine == engine; });
+        if (const uint64 continues = message.GetUInt64("continues", 0);
+            message.what == B_WEBKIT_DOWNLOAD_STARTED && entry == fEntries.end() && continues) {
+            // An extension resumed a paused entry (downloads.resume()).
+            entry = std::find_if(fEntries.begin(), fEntries.end(), [&](const Entry& item) {
+                return item.lastEngine == continues && item.state == DownloadStatus::State::Paused;
+            });
+            if (entry != fEntries.end()) {
+                entry->engine = engine;
+                entry->state = DownloadStatus::State::Active;
+                entry->error.clear();
+                entry->interrupted = entry->partial = entry->restarted = entry->unseen = false;
+                entry->rate = 0;
+                entry->sampleTime = 0;
+                entry->finished = 0;
+                save = true;
+            }
+        }
         if (message.what == B_WEBKIT_DOWNLOAD_STARTED && entry == fEntries.end()) {
             Entry item;
             item.identifier = ++fLastIdentifier;
@@ -185,7 +203,7 @@ std::optional<DownloadList::HistoryChange> DownloadList::Update(const BMessage& 
                 unlink(entry->path.c_str());
                 entry->partial = false;
             }
-            entry->engine = 0;
+            entry->lastEngine = std::exchange(entry->engine, 0);
             entry->finished = std::time(nullptr);
             entry->rate = 0;
             entry->unseen = entry->state == DownloadStatus::State::Succeeded || entry->state == DownloadStatus::State::Failed;
