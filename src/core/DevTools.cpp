@@ -1055,6 +1055,18 @@ void Session::LoadScriptSource(const std::string& id)
     fPending.rbegin()->second.origin = id;
 }
 
+void Session::RecordTimeline(bool on)
+{
+    if (on == fTimelineRecording || fPageTarget.empty()) return;
+    fTimelineRecording = on;
+    if (on) {
+        fTimelineRecords.clear();
+        // Five frames of each record's stack say where its work came from.
+        SendToTarget(fPageTarget, "Timeline.start", "{\"maxCallStackDepth\":5}");
+    } else SendToTarget(fPageTarget, "Timeline.stop", "{}");
+    fChanges.timeline = true;
+}
+
 void Session::LoadSourceMap(const std::string& id)
 {
     auto found = fScripts.find(id);
@@ -1235,6 +1247,11 @@ void Session::TargetDestroyed(const std::string& target)
         fDebugger.paused = false;
         fDebugger.frames.clear();
         fChanges.scripts = fChanges.debugger = true;
+        // A recording ends with its page.
+        if (fTimelineRecording) {
+            fTimelineRecording = false;
+            fChanges.timeline = true;
+        }
     }
     for (auto& request : fRequests) {
         if (request.target != target) continue;
@@ -1317,6 +1334,13 @@ void Session::FromTarget(const std::string& target, std::string_view text)
         });
         if (blocked) SendToTarget(target, "Network.interceptRequestWithError", "{\"requestId\":" + Quoted(id) + ",\"errorType\":\"General\"}");
         else SendToTarget(target, "Network.interceptContinue", "{\"requestId\":" + Quoted(id) + ",\"stage\":\"request\"}");
+    }
+    else if (method == "Timeline.eventRecorded" && target == fPageTarget && fTimelineRecording) {
+        if (fTimelineRecords.size() < kTimelineRecords) fTimelineRecords.push_back(Member(parameters, "record").dump());
+        fChanges.timeline = true;
+    } else if (method == "Timeline.recordingStopped" && target == fPageTarget && fTimelineRecording) {
+        fTimelineRecording = false;
+        fChanges.timeline = true;
     }
     else if (method == "Console.messageAdded") ProtocolReader::MessageAdded(*this, Member(parameters, "message"));
     else if (method == "Console.messageRepeatCountUpdated") {

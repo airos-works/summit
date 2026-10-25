@@ -115,7 +115,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Haiku")
         src/ui/ExtensionStoreDownload.cpp src/ui/CertificateInfoWindow.cpp src/ui/ReaderMode.cpp src/ui/PageTranslation.cpp src/ui/BrowserWindowTranslation.cpp
         src/ui/ProtocolHandlers.cpp src/ui/FaviconCache.cpp src/ui/PreferencesWindow.cpp src/ui/DefaultBrowser.cpp src/ui/SharedProfile.cpp src/ui/DirectWindowRescue.cpp
         src/ui/AddressSuggestions.cpp src/ui/SitePermissions.cpp src/ui/Location.cpp
-        src/ui/SourceView.cpp src/ui/DevToolsWindow.cpp src/ui/DevToolsNetwork.cpp src/ui/DevToolsConsole.cpp src/ui/DevToolsStorage.cpp src/ui/DevToolsElements.cpp src/ui/DevToolsSources.cpp src/ui/PageSourceWindow.cpp
+        src/ui/SourceView.cpp src/ui/DevToolsWindow.cpp src/ui/DevToolsNetwork.cpp src/ui/DevToolsConsole.cpp src/ui/DevToolsStorage.cpp src/ui/DevToolsElements.cpp src/ui/DevToolsSources.cpp src/ui/DevToolsPerformance.cpp src/ui/PageSourceWindow.cpp
         src/ui/BrowserWindowMcp.cpp src/ui/McpService.cpp src/ui/McpLog.cpp src/ui/McpBrowserTools.cpp src/ui/McpSystemTools.cpp
         src/ui/McpPageTools.cpp src/ui/McpEngineTools.cpp src/ui/McpDebugHelper.cpp src/ui/UpdateChecker.cpp)
     target_include_directories(Summit PRIVATE ${SUMMIT_WEBKIT_INCLUDE_DIR} /boot/system/develop/headers/private/netservices)

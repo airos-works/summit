@@ -270,7 +270,7 @@ struct Changes {
     bool Any() const
     {
         return requestsReset || consoleReset || consoleAdded || consoleLastChanged || !requests.empty() || !bodies.empty()
-            || origins || storage || elements || !properties.empty() || scripts || debugger || !sources.empty();
+            || origins || storage || elements || !properties.empty() || scripts || debugger || !sources.empty() || timeline;
     }
     // The page's origins (StorageOrigins()) changed; a storage area or the
     // cookies changed or were answered.
@@ -284,6 +284,8 @@ struct Changes {
     // breakpoints or the pause changed.
     bool scripts = false, debugger = false;
     std::vector<std::string> sources;
+    // The Performance tab's recording started, stopped or grew.
+    bool timeline = false;
 };
 
 // Text with the parts of it that are drawn differently.
@@ -352,6 +354,12 @@ public:
     void RemoveBreakpoint(const std::string& url, int line, int column = 0);
     const std::vector<Breakpoint>& Breakpoints() const { return fBreakpoints; }
     const DebuggerState& Debugger() const { return fDebugger; }
+    // The Performance tab: a recording of the page's main-thread work (the
+    // inspector's Timeline), each record as JSON as the page sent it.
+    void RecordTimeline(bool on);
+    bool TimelineRecording() const { return fTimelineRecording; }
+    const std::vector<std::string>& TimelineRecords() const { return fTimelineRecords; }
+    static constexpr size_t kTimelineRecords = 100000;
     // The paused frame the console evaluates in.
     void SelectDebugFrame(int index) { fDebugger.selectedFrame = index; }
     // "pause", "resume", "stepOver", "stepInto", "stepOut".
@@ -450,6 +458,8 @@ private:
     std::vector<std::string> fOrigins;
     // The page's main frame, which source maps are read in.
     std::string fMainFrame;
+    bool fTimelineRecording = false;
+    std::vector<std::string> fTimelineRecords;
     std::map<std::pair<StorageKind, std::string>, StorageArea> fAreas;
     std::map<std::string, ObjectProperties> fProperties;
     std::map<std::string, OriginDatabases> fDatabases;

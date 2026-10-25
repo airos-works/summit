@@ -53,6 +53,7 @@ private:
     ConsolePanel* fConsole;
     StoragePanel* fStorage;
     SourcesPanel* fSources;
+    PerformancePanel* fPerformance;
     int32 fShownPanel = -1;
     bool fSyncing = false;
     bool fOverflowShown = false;

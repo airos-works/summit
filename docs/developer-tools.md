@@ -1,4 +1,4 @@
-# Developer tools: Elements, Network, Console, Storage and page source
+# Developer tools: Elements, Network, Console, Storage, Sources, Performance and page source
 
 Added 30 September 2026. The first pass (morning): what a page asks of the
 network, and what it writes to its console. The Storage tab (afternoon): the
@@ -273,6 +273,24 @@ the selected script as shown), `sources-pretty on|off`, `sources-pause`, `source
 over|into|out`, `sources-frame N`, `sources-expand TEXT`,
 `sources-content-scripts on|off`; the state's `sources` has the scripts,
 breakpoints, frames and scope rows.
+
+### Performance
+
+**Record**, use the page, **Stop**: the inspector's `Timeline` records
+what the page's main thread did meanwhile (`Timeline.start` with five stack
+frames a record; `Timeline.eventRecorded`). The top table is time by kind
+of work (script evaluation, function calls, timers, events, style, layout,
+painting, rendering frames), with the nested records counted in their
+parents. Below it are the 200 longest records: when they started, how long
+they took, what they were about (the function and its script and line, the
+timer, the event) and what was inside them by kind. Selecting one shows
+its whole summary, stack included. The status line has the span, how busy
+the main thread was, and the frames drawn (median and 95th percentile).
+The summary is the MCP `timeline` tool's (`SummarizeTimeline` in
+`src/core/McpInspector.cpp`). WebKit's `ScriptProfiler`, `Memory` and
+`CPUProfiler` domains are not used: the last two are compiled out on Haiku
+(`ENABLE(RESOURCE_USAGE)` off). Test actions: `performance-record`,
+`performance-stop`; the state's `performance` has the tables.
 
 ### Storage
 
@@ -649,7 +667,8 @@ is started again.
 - Network requests from before the tools were opened (as in other
   browsers). Console messages are kept: developer extras are on for every
   page (`SUMMIT_DEVELOPER_EXTRAS=0` turns that off).
-- Timelines (`ENABLE(RESOURCE_USAGE)` is off). In Sources: an original source the map carries no text of is not
+- A flame chart or per-frame view in Performance (it has tables), and
+  memory and CPU-usage timelines (`ENABLE(RESOURCE_USAGE)` is off). In Sources: an original source the map carries no text of is not
   fetched. In Storage: partitioned cookies, and Cache Storage of
   frames from other sites. Network throttling is Cocoa-only in WebKit.
 - Elements › Accessibility shows the selected element's role, name and

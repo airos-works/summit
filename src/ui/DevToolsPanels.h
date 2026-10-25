@@ -315,6 +315,36 @@ private:
 // The page's scripts, their breakpoints, and the call stack and scopes while
 // the page is paused (the inspector's Debugger domain, DevToolsSources.cpp).
 // The debugger is turned on when the panel is first shown.
+// Performance: a recording of the page's main-thread work (the inspector's
+// Timeline): time by kind of work, the longest records with what was in
+// them and where they came from, and the frames drawn
+// (DevToolsPerformance.cpp).
+class PerformancePanel : public BView {
+public:
+    PerformancePanel(devtools::Session& session, DevToolsHost& host);
+    void AttachedToWindow() override;
+    void MessageReceived(BMessage* message) override;
+    void Apply(const devtools::Changes& changes);
+    bool Command(const std::string& action, const std::string& argument, std::string& error);
+    std::string StateJSON();
+
+private:
+    class Row;
+    void Show();
+    void ShowStatus();
+    void ShowRecord();
+    devtools::Session& fSession;
+    DevToolsHost& fHost;
+    bool fWasRecording = false;
+    // The longest records' summaries, as JSON, by row.
+    std::vector<std::string> fLongest;
+    BButton* fRecord;
+    BStringView* fStatus;
+    BColumnListView* fTypes;
+    BColumnListView* fRecords;
+    BodyView* fDetail;
+};
+
 class SourcesPanel : public BView {
 public:
     SourcesPanel(devtools::Session& session, DevToolsHost& host);

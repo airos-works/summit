@@ -37,8 +37,8 @@ BRect FrameBeside(BRect browser)
 }
 
 // The tabs, in their order.
-const char* const kPanels[] = {"elements", "network", "console", "storage", "sources"};
-enum { kElementsPanel, kNetworkPanel, kConsolePanel, kStoragePanel, kSourcesPanel };
+const char* const kPanels[] = {"elements", "network", "console", "storage", "sources", "performance"};
+enum { kElementsPanel, kNetworkPanel, kConsolePanel, kStoragePanel, kSourcesPanel, kPerformancePanel };
 
 int32 PanelIndex(const char* name)
 {
@@ -67,6 +67,7 @@ DevToolsWindow::DevToolsWindow(BMessenger owner, int64 tab, const std::string& p
     fConsole = new ConsolePanel(fSession, *this);
     fStorage = new StoragePanel(fSession, *this);
     fSources = new SourcesPanel(fSession, *this);
+    fPerformance = new PerformancePanel(fSession, *this);
     fTabs = new BTabView("panels", B_WIDTH_FROM_LABEL);
     fTabs->SetBorder(B_NO_BORDER);
     const auto add = [this](BView* panel, const char* label) {
@@ -79,6 +80,7 @@ DevToolsWindow::DevToolsWindow(BMessenger owner, int64 tab, const std::string& p
     add(fConsole, "Console");
     add(fStorage, "Storage");
     add(fSources, "Sources");
+    add(fPerformance, "Performance");
     BLayoutBuilder::Group<>(this, B_VERTICAL, 0)
         .SetInsets(0, 4, 0, 0)
         .Add(fTabs);
@@ -191,7 +193,7 @@ void DevToolsWindow::Command(const BMessage& message, BMessage& reply)
         PanelShown();
     } else if (action != "state" && !fElements->Command(action, argument, error) && !fNetwork->Command(action, argument, error)
         && !fConsole->Command(action, argument, error) && !fStorage->Command(action, argument, error)
-        && !fSources->Command(action, argument, error))
+        && !fSources->Command(action, argument, error) && !fPerformance->Command(action, argument, error))
         error = "Unknown action";
     Drain();
     if (!error.empty()) reply.AddString("error", error.c_str());
@@ -222,7 +224,8 @@ std::string DevToolsWindow::StateJSON()
     json state = {{"title", Title()}, {"panel", kPanels[std::clamp<int32>(fTabs->Selection(), 0, std::size(kPanels) - 1)]}, {"page", fSession.PageURL()},
         {"requests", requests}, {"entries", entries}, {"elements", json::parse(fElements->StateJSON())},
         {"network", json::parse(fNetwork->StateJSON())}, {"console", json::parse(fConsole->StateJSON())},
-        {"storage", json::parse(fStorage->StateJSON())}, {"sources", json::parse(fSources->StateJSON())}};
+        {"storage", json::parse(fStorage->StateJSON())}, {"sources", json::parse(fSources->StateJSON())},
+        {"performance", json::parse(fPerformance->StateJSON())}};
     return state.dump(-1, ' ', false, json::error_handler_t::replace);
 }
 
@@ -292,6 +295,7 @@ void DevToolsWindow::Sync()
         fConsole->Apply(changes);
         fStorage->Apply(changes);
         fSources->Apply(changes);
+        fPerformance->Apply(changes);
     }
     fSyncing = false;
     // An element chosen in the page is shown.
