@@ -136,10 +136,17 @@ int main(int argc, char** argv)
             std::ifstream saved(std::filesystem::path(argv[5]) / "profile.json");
             const json profile = json::parse(saved, nullptr, false);
             Require(profile.is_object() && profile.contains("history"), "download test saves native browsing history");
-            bool downloadVisited = false;
-            for (const auto& page : profile["history"])
-                downloadVisited |= page.value("url", std::string()).find("/download?case=") != std::string::npos;
-            Require(!downloadVisited, "download URLs are not recorded as successful page visits");
+            size_t downloadVisits = 0;
+            for (const auto& page : profile["history"]) {
+                const auto url = page.value("url", std::string());
+                if (url.find("/download?") == std::string::npos) continue;
+                Require(page.value("visits", -1) == 0 && page.value("visitCountKnown", false),
+                    "downloads do not increment the successful page visit count");
+                Require(page.contains("visitTransitions") && page["visitTransitions"].size() == 1
+                    && page["visitTransitions"][0][1] == 7, "download start retains its distinct history transition");
+                ++downloadVisits;
+            }
+            Require(downloadVisits == 2, "completed and cancelled downloads each retain one start visit");
         }
         // Remove only our completed fixture after verifying its content again.
         std::ifstream stream(complete, std::ios::binary);

@@ -123,6 +123,12 @@ struct Profile {
     // Records a visit to an http(s) page; returns false for other pages.
     bool Visit(const PageRecord& page);
     bool Visit(const PageRecord& page, int64_t now);
+    // A download is a history visit of its original URL, but does not add to
+    // the page's visit count. Keep an existing title; otherwise use filename.
+    // The caller supplies the start time in microseconds, once per download.
+    bool VisitDownload(const PageRecord& page, int64_t startedMicros);
+    // The destination name may arrive later. Never recreate cleared history.
+    bool SetDownloadTitle(const std::string& url, int64_t startedMicros, const std::string& filename);
     // Forgets the visits from since (seconds since the epoch) on, and the
     // pages visited only then; returns how many visits went.
     size_t ForgetVisitsSince(int64_t since);

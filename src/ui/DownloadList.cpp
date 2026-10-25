@@ -1,5 +1,6 @@
 #include "DownloadList.h"
 #if SUMMIT_MODERN_WEBKIT
+#include "core/HistoryVisits.h"
 #include <WebKit/WebKitContext.h>
 #include <Message.h>
 #include <algorithm>
@@ -101,11 +102,13 @@ void DownloadList::Open(const std::filesystem::path& file)
     Announce();
 }
 
-void DownloadList::Update(const BMessage& message, bool privateBrowsing)
+std::optional<DownloadList::HistoryChange> DownloadList::Update(const BMessage& message, bool privateBrowsing)
 {
     const uint64 engine = message.GetUInt64("identifier", 0);
-    if (!engine) return;
+    if (!engine) return {};
     bool save = false;
+    bool persist = false;
+    std::optional<HistoryChange> history;
     {
         std::lock_guard lock(fMutex);
         auto entry = std::find_if(fEntries.begin(), fEntries.end(), [&](const Entry& item) { return item.engine == engine; });
@@ -121,7 +124,9 @@ void DownloadList::Update(const BMessage& message, bool privateBrowsing)
         }
         // Updates for downloads that were taken off the list (a private
         // session that ended) are not news.
-        if (entry == fEntries.end() || entry->state != DownloadStatus::State::Active) return;
+        if (entry == fEntries.end() || entry->state != DownloadStatus::State::Active) return {};
+        persist = !entry->privateBrowsing;
+        if (!entry->historyStarted) entry->historyStarted = HistoryNowMicroseconds();
         auto text = [&](const char* key, std::string& field) {
             const char* value = message.GetString(key, nullptr);
             if (value && *value && field != value) {
@@ -133,6 +138,17 @@ void DownloadList::Update(const BMessage& message, bool privateBrowsing)
         text("request_url", entry->requestURL);
         text("path", entry->path);
         text("filename", entry->filename);
+        if (persist) {
+            const auto& url = entry->requestURL.empty() ? entry->url : entry->requestURL;
+            if (!entry->historyRecorded && !url.empty()) {
+                entry->historyRecorded = true;
+                entry->historyTitlePending = entry->filename.empty();
+                history = HistoryChange{url, entry->filename, entry->historyStarted, true};
+            } else if (entry->historyTitlePending && !entry->filename.empty()) {
+                entry->historyTitlePending = false;
+                history = HistoryChange{url, entry->filename, entry->historyStarted, false};
+            }
+        }
         // What resuming needs, once the server has answered.
         if (const char* validator = nullptr; message.FindString("validator", &validator) == B_OK && entry->validator != validator) {
             entry->validator = validator;
@@ -182,8 +198,9 @@ void DownloadList::Update(const BMessage& message, bool privateBrowsing)
             save = true;
         }
     }
-    if (save && !privateBrowsing) Save();
+    if (save && persist) Save();
     Announce();
+    return history;
 }
 
 std::vector<DownloadList::Entry> DownloadList::Entries(bool privateBrowsing) const
