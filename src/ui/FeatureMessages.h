@@ -63,6 +63,12 @@ constexpr uint32 kToggleCaretBrowsing = 'crbt';
 constexpr uint32 kToggleReducedMotion = 'rdmt';
 constexpr uint32 kToggleIncreasedContrast = 'incn';
 constexpr uint32 kToggleOverrideColors = 'ovcl';
+// View › Sidebar: show an extension's sidebar ("identifier", "url",
+// "title"; the one shown again closes it), close it, and the application's
+// part, which makes the extension's view ("window" too).
+constexpr uint32 kToggleSidebar = 'sbtg';
+constexpr uint32 kCloseSidebar = 'sbcl';
+constexpr uint32 kOpenSidebarOnApp = 'sboa';
 // The password bar's answers: "tab", "which" (0 save, 1 never for the site,
 // 2 not now).
 constexpr uint32 kPasswordBarAnswer = 'pwba';

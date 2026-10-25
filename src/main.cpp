@@ -945,6 +945,19 @@ public:
             return;
         }
 #endif
+#if SUMMIT_MODERN_WEBKIT
+        if (message->what == summit::kOpenSidebarOnApp) {
+            // The extension's view is made on WebKit's application thread, with
+            // the window locked, as an extension tab's is.
+            BMessenger target;
+            if (message->FindMessenger("window", &target) != B_OK || !target.LockTarget()) return;
+            BLooper* looper = nullptr;
+            if (auto* window = dynamic_cast<summit::BrowserWindow*>(target.Target(&looper)))
+                window->ShowSidebar(message->GetString("identifier", ""), message->GetString("url", ""), message->GetString("title", ""));
+            if (looper) looper->Unlock();
+            return;
+        }
+#endif
         if (message->what == summit::kCreateTabOnApp) {
 #if SUMMIT_MODERN_WEBKIT
             // A restored session asks for its extension pages before their
@@ -2155,6 +2168,11 @@ private:
                 }
             }
             fShared->SetNewTabOverride(std::move(newTab));
+            std::vector<summit::SharedProfile::ExtensionSidebar> sidebars;
+            for (const auto& entry : fExtensions->Entries())
+                if (entry.loaded && !entry.sidebarURL.empty())
+                    sidebars.push_back({entry.installation.identifier, entry.sidebarTitle, entry.sidebarURL});
+            fShared->SetExtensionSidebars(std::move(sidebars));
             // For the cards on store pages: Install, or Manage when installed.
             std::map<std::string, summit::SharedProfile::InstalledExtensionInfo> installed;
             for (const auto& entry : fExtensions->Entries())

@@ -21,6 +21,8 @@ public:
         bool installed = true;
         // chrome_url_overrides.newtab of the loaded extension, as an absolute URL.
         std::string newTabURL;
+        // sidebar_action's (or side_panel's) page and title, for View › Sidebar.
+        std::string sidebarURL, sidebarTitle;
         // How the engine started it again when its saved state was damaged.
         std::string notice;
     };

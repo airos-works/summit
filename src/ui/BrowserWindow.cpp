@@ -59,6 +59,7 @@
 #include <PopUpMenu.h>
 #include <PropertyInfo.h>
 #include <Roster.h>
+#include <SplitView.h>
 #include <StatusBar.h>
 #include <StringView.h>
 #include <TextControl.h>
@@ -627,6 +628,44 @@ static void ApplyAccessibilityAids(BWebKitView* view, const BrowserWindow::Acces
 }
 #endif
 
+#if SUMMIT_MODERN_WEBKIT
+// View › Sidebar: the loaded extensions' sidebars, read when it opens, the
+// one shown marked; and Close Sidebar.
+class SidebarMenu final : public BMenu {
+public:
+    SidebarMenu(std::shared_ptr<SharedProfile> shared, std::function<std::string()> shown)
+        : BMenu("Sidebar"), fShared(std::move(shared)), fShown(std::move(shown)) { }
+    void AttachedToWindow() override
+    {
+        RemoveItems(0, CountItems(), true);
+        const std::string shown = fShown();
+        for (const auto& sidebar : fShared->ExtensionSidebars()) {
+            auto* message = new BMessage(kToggleSidebar);
+            message->AddString("identifier", sidebar.identifier.c_str());
+            message->AddString("url", sidebar.url.c_str());
+            message->AddString("title", sidebar.title.c_str());
+            auto* item = new BMenuItem(sidebar.title.c_str(), message);
+            item->SetMarked(sidebar.identifier == shown);
+            AddItem(item);
+        }
+        if (!CountItems()) {
+            auto* none = new BMenuItem("No extension has a sidebar", nullptr);
+            none->SetEnabled(false);
+            AddItem(none);
+        }
+        AddSeparatorItem();
+        auto* close = new BMenuItem("Close Sidebar", new BMessage(kCloseSidebar));
+        close->SetEnabled(!shown.empty());
+        AddItem(close);
+        SetTargetForItems(Window());
+        BMenu::AttachedToWindow();
+    }
+private:
+    std::shared_ptr<SharedProfile> fShared;
+    std::function<std::string()> fShown;
+};
+#endif
+
 static BRect DefaultWindowFrame(const BrowserWindowOptions& options)
 {
     BRect frame = options.frame.IsValid() ? options.frame
@@ -812,6 +851,8 @@ BrowserWindow::BrowserWindow(std::shared_ptr<SharedProfile> profile, std::string
     fOverrideColorsItem->SetMarked(fAids.overrideColors);
     view->AddItem(fOverrideColorsItem);
     view->AddSeparatorItem();
+    // Extensions' sidebars (Firefox's sidebar_action), listed when opened.
+    if (!fPrivate && !fPopup) view->AddItem(new SidebarMenu(fShared, [this] { return fSidebarExtension; }));
     AddItem(view, "View Page Source", kViewPageSource, 'U');
     AddItem(view, "Picture in Picture", kPictureInPicture, 'P', B_SHIFT_KEY);
     auto* translation = new BMessage(kTranslatePage);
@@ -914,13 +955,34 @@ BrowserWindow::BrowserWindow(std::shared_ptr<SharedProfile> profile, std::string
     fStatusProgress->Hide();
 #if SUMMIT_MODERN_WEBKIT
     fNoticeBar = new NoticeBar();
+    // The sidebar: its title and a close button over the extension's page.
+    fSidebar = new BGroupView("sidebar", B_VERTICAL, 0);
+    fSidebarTitle = new BStringView("sidebar-title", "");
+    fSidebarTitle->SetFont(be_bold_font);
+    fSidebarTitle->SetTruncation(B_TRUNCATE_END);
+    fSidebarTitle->SetExplicitMinSize(BSize(60, B_SIZE_UNSET));
+    fSidebarTitle->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNSET));
+    auto* closeSidebar = new BButton("sidebar-close", "×", new BMessage(kCloseSidebar));
+    closeSidebar->SetToolTip("Close the sidebar");
+    closeSidebar->SetFlat(true);
+    BLayoutBuilder::Group<>(fSidebar)
+        .AddGroup(B_HORIZONTAL, 4).SetInsets(8, 2, 2, 2).Add(fSidebarTitle, 1).Add(closeSidebar).End();
+    fSidebar->SetExplicitMinSize(BSize(180, B_SIZE_UNSET));
+    fSidebar->Hide();
 #endif
     BLayoutBuilder::Group<>(this, B_VERTICAL, 0)
         .Add(menu).Add(fToolbar).Add(fBookmarksBar).Add(fTabStrip).Add(fProgress)
 #if SUMMIT_MODERN_WEBKIT
         .Add(fNoticeBar)
 #endif
+#if SUMMIT_MODERN_WEBKIT
+        .AddSplit(B_HORIZONTAL, 0, 1.0f).GetSplitView(&fContentSplit)
+            .Add(fSidebar, 0.25f)
+            .Add(fPages, 0.75f)
+        .End()
+#else
         .Add(fPages, 1)
+#endif
         .Add(fFindBar).Add(statusLine);
     fLayout = static_cast<BGroupLayout*>(GetLayout());
 #if SUMMIT_MODERN_WEBKIT
@@ -3185,6 +3247,42 @@ std::string BrowserWindow::HomeAddress() const
     const auto home = fShared->Read([](const Profile& profile) { return profile.homeURL; });
     return home.empty() ? "summit:home" : home;
 }
+#if SUMMIT_MODERN_WEBKIT
+void BrowserWindow::ShowSidebar(const std::string& extension, const std::string& url, const std::string& title)
+{
+    if (fClosingWindow || extension.empty() || url.empty()) return;
+    CloseSidebar();
+    status_t status = B_ERROR;
+    auto* view = fWebKitContext->CreateExtensionView(BRect(0, 0, 179, 199), "sidebar-page", extension.c_str(), BMessenger(this), &status);
+    if (view && view->InitCheck() != B_OK) {
+        status = view->InitCheck();
+        delete std::exchange(view, nullptr);
+    }
+    if (!view) {
+        fStatus->SetText(("Could not open the sidebar: " + std::string(std::strerror(status))).c_str());
+        return;
+    }
+    view->SetExplicitMinSize(BSize(160, 100));
+    view->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNLIMITED));
+    if (fAids != AccessibilityAids { }) ApplyAccessibilityAids(view, fAids);
+    fSidebar->GetLayout()->AddView(view);
+    fSidebarView = view;
+    fSidebarExtension = extension;
+    fSidebarTitle->SetText(title.c_str());
+    if (fSidebar->IsHidden(fSidebar)) fSidebar->Show();
+    view->LoadURL(url.c_str());
+}
+
+void BrowserWindow::CloseSidebar()
+{
+    if (!fSidebarView) return;
+    fSidebarView->RemoveSelf();
+    delete std::exchange(fSidebarView, nullptr);
+    fSidebarExtension.clear();
+    if (!fSidebar->IsHidden(fSidebar)) fSidebar->Hide();
+}
+#endif
+
 std::string BrowserWindow::NewTabAddress() const
 {
     // Private windows open the private browsing page; extensions do not run there.
@@ -3789,10 +3887,15 @@ bool BrowserWindow::SetPageFullScreen(int64 tab, bool enter)
         fSuggestions->Hide();
         for (int32 i = 0; i < fLayout->CountItems(); ++i) {
             auto* view = fLayout->ItemAt(i)->View();
-            if (view && view != fPages && view != fFullScreenNotice && !view->IsHidden(view)) {
+            if (view && view != fPages && view != fFullScreenNotice && view != fContentSplit && !view->IsHidden(view)) {
                 fFullScreenHidden.push_back(view);
                 view->Hide();
             }
+        }
+        // The page alone: the sidebar beside it goes too.
+        if (fSidebar && !fSidebar->IsHidden(fSidebar)) {
+            fFullScreenHidden.push_back(fSidebar);
+            fSidebar->Hide();
         }
         SetLook(B_NO_BORDER_WINDOW_LOOK);
         SetWindowFlags(this, Flags() | B_NOT_MOVABLE | B_NOT_RESIZABLE);
@@ -4331,6 +4434,18 @@ void BrowserWindow::MessageReceived(BMessage* message)
         }
         case kSpellingCommand: SpellingCommand(*message); break;
 #if SUMMIT_MODERN_WEBKIT
+        case kToggleSidebar: {
+            const std::string identifier = message->GetString("identifier", "");
+            if (identifier == fSidebarExtension) { CloseSidebar(); break; }
+            BMessage open(kOpenSidebarOnApp);
+            open.AddMessenger("window", BMessenger(this));
+            open.AddString("identifier", identifier.c_str());
+            open.AddString("url", message->GetString("url", ""));
+            open.AddString("title", message->GetString("title", ""));
+            be_app->PostMessage(&open);
+            break;
+        }
+        case kCloseSidebar: CloseSidebar(); break;
         case kToggleCaretBrowsing:
         case kToggleReducedMotion:
         case kToggleIncreasedContrast:
@@ -5474,6 +5589,8 @@ void BrowserWindow::NewPageRequested(const BMessage& message)
     BMessenger sender;
     message.FindMessenger("view", &sender);
     auto* opener = FindTab(sender);
+    // The sidebar's pages open theirs as the shown tab would.
+    if (!opener && fSidebarView && sender == BMessenger(fSidebarView)) opener = ActiveTab();
     const std::string url = message.GetString("url", "about:blank");
     const int32 modifiers = message.GetInt32("modifiers", 0);
     const int32 button = message.GetInt32("button", 0);

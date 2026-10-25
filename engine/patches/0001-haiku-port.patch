@@ -88481,10 +88481,10 @@ index 0000000000000000000000000000000000000000..dc2f4d4fdb07966241e673bd4e49b9e8
 +}
 diff --git a/Source/WebKit/UIProcess/API/haiku/WebKitContext.h b/Source/WebKit/UIProcess/API/haiku/WebKitContext.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..c963f9cfb11a1316199e8d76938f9f27cd484621
+index 0000000000000000000000000000000000000000..75a425bc23d2d4e704d33c0f6f041e06d8d0ff66
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/API/haiku/WebKitContext.h
-@@ -0,0 +1,567 @@
+@@ -0,0 +1,569 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#pragma once
@@ -88856,7 +88856,9 @@ index 0000000000000000000000000000000000000000..c963f9cfb11a1316199e8d76938f9f27
 +        const BMessenger& reply, uint64 identifier);
 +    // The host obtains these values from its saved installation catalog.
 +    // LOADED also reports installation_identifier and installation_order, and
-+    // new_tab_url when the manifest overrides the new tab page.
++    // new_tab_url when the manifest overrides the new tab page, and
++    // sidebar_url and sidebar_title when it has a sidebar (Firefox's
++    // sidebar_action, Chrome's side_panel), for CreateExtensionView.
 +    status_t LoadPreparedExtension(const char* token, const BWebKitExtensionLoadOptions&,
 +        const BWebKitExtensionInstallation&, const BMessenger& reply, uint64 identifier);
 +    // Create on the application thread after an extension has loaded. This
@@ -120070,10 +120072,10 @@ index 0000000000000000000000000000000000000000..f61939d10995397e88877a36905238be
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/ExtensionPackageRegistryHaiku.cpp b/Source/WebKit/UIProcess/haiku/ExtensionPackageRegistryHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..360fa56fa88df0955ee851a1b3f2e0fdb677de69
+index 0000000000000000000000000000000000000000..a593520e8b8bb829af0bc9d0f94d272316eea8a4
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/ExtensionPackageRegistryHaiku.cpp
-@@ -0,0 +1,913 @@
+@@ -0,0 +1,934 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +#include "config.h"
 +#include "ExtensionPackageRegistryHaiku.h"
@@ -120571,6 +120573,27 @@ index 0000000000000000000000000000000000000000..360fa56fa88df0955ee851a1b3f2e0fd
 +    // chrome_url_overrides.newtab (Momentum, Tabliss, ...): the host opens this page for new tabs.
 +    if (auto newTab = context->overrideNewTabPageURL(); error == B_OK && newTab.isValid())
 +        error = details.AddString("new_tab_url", newTab.string().utf8().legacyCStringPointer());
++    // sidebar_action.default_panel (Firefox's sidebars: Tree Style Tab,
++    // Sidebery) or Chrome's side_panel.default_path: the host can show it
++    // beside the pages, with its title.
++    if (RefPtr manifest = extension->manifestObject(); error == B_OK && manifest) {
++        String path, title;
++        if (RefPtr sidebar = manifest->getObject("sidebar_action"_s)) {
++            path = sidebar->getString("default_panel"_s);
++            title = sidebar->getString("default_title"_s);
++        } else if (RefPtr panel = manifest->getObject("side_panel"_s))
++            path = panel->getString("default_path"_s);
++        if (RefPtr localization = context->localization(); localization && !title.isEmpty())
++            title = localization->localizedStringForString(title);
++        if (title.isEmpty())
++            title = extension->displayName();
++        URL url { context->baseURL(), path };
++        if (!path.isEmpty() && url.isValid() && url.protocol() == context->baseURL().protocol() && url.host() == context->baseURL().host()) {
++            error = details.AddString("sidebar_url", url.string().utf8().legacyCStringPointer());
++            if (error == B_OK)
++                error = details.AddString("sidebar_title", title.utf8().legacyCStringPointer());
++        }
++    }
 +    if (recovery && error == B_OK)
 +        error = details.AddString("recovered", recovery);
 +    auto delivered = error == B_OK ? respond(B_OK) : error;
