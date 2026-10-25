@@ -93,7 +93,27 @@ to an extension only if it has that permission.
   `incognito`, the byte-count filters, start and end time filters (ISO string
   or milliseconds), `limit` and `orderBy`. Unknown keys reject the promise.
 - `cancel(id)` cancels an active download. Cancelling a download that has
-  already finished is not an error.
+  already finished is not an error; cancelling a paused one removes its
+  partial file.
+- `pause(id)` stops an HTTP(S) download and keeps its partial file: it stays
+  `in_progress` with `paused: true` and `canResume: true` (at once, as in
+  Chrome). The browser's own Pause, and quitting, look the same.
+  `resume(id)` continues it under the same ID: from where it stopped, with
+  `Range`/`If-Range`, or afresh if the server cannot. Resuming while the
+  pause is still stopping the transfer resumes once it has. `onChanged`
+  reports `paused` and `canResume`, and `search({paused})` filters on them.
+  The downloads panel keeps one row (the new transfer names the one it
+  continues: `continues` in the engine's notifications). A download the
+  browser resumes from its panel stays the extension's same item when its
+  partial file was kept.
+- `open(id)` opens a complete download's file in its preferred application,
+  as Tracker would. It needs the `downloads.open` permission, as in Chrome
+  and Firefox; no user gesture is required.
+- `removeFile(id)` deletes a complete download's file and reports
+  `exists: false`.
+- `getFileIcon(id, {size})` answers the file's Tracker icon (16 or 32
+  pixels, 32 by default) as a PNG `data:` URL.
+- `acceptDanger(id)` always rejects: Summit marks no download dangerous.
 - `erase(query)` removes entries from the history only, fires `onErased` and
   returns the erased IDs.
 - `show(id)` opens the file's folder in Tracker. `showDefaultFolder()` opens the
@@ -124,10 +144,9 @@ Limits:
 - Existing files are never overwritten. Every `conflictAction` behaves like
   `uniquify`.
 - `saveAs` is accepted but no dialog is shown.
-- `open()` rejects: it would need the `downloads.open` permission and a
-  user-gesture policy.
-- `pause`, `resume`, `getFileIcon`, `removeFile`, `acceptDanger` and
-  `setUiOptions` are absent.
+- `setUiOptions` is absent.
+- A download the browser resumes after its partial file was dropped (a
+  server without byte ranges) starts a new item.
 - `bytesReceived` updates are visible through `search`, not through
   `onChanged`, as in Chrome.
 - `download()` rejects until a browser window has set the download directory.
@@ -154,3 +173,15 @@ with a persistent background page, the `declarativeNetRequest`, `downloads` and
      reason.
 5. Open `http://127.0.0.1:8765/`. The session, dynamic and static probes must
    show BLOCKED, and the control probe must show LOADED.
+
+## Pause, resume and the file actions
+
+Fixture: `tests/fixtures/extensions/downloads-control/` (an MV2 extension
+with `downloads` and `downloads.open`) and its `serve.py`, which sends
+`/slow.bin` (8 MiB at about 1 MiB a second, byte ranges, an ETag) from
+`127.0.0.1:8798`. With Summit's MCP server, evaluate in the extension's
+background page (`{"extension": ID, ...}`): `checks.pauseAndResume()` starts
+the download, pauses it, checks that it stops growing, resumes it and waits
+for the end; `checks.icon(id, 16)`, `checks.open(id)`,
+`checks.removeFile(id)` and `checks.acceptDanger(id)` act on the result, and
+`events` holds every `onChanged` delta.

@@ -30,6 +30,9 @@ public:
         uint64 identifier = 0;
         // The engine's download while one runs, else 0.
         uint64 engine = 0;
+        // The last one, once it has stopped: an extension's downloads.resume()
+        // starts a download that "continues" it.
+        uint64 lastEngine = 0;
         bool privateBrowsing = false;
         // Finished since its window's panel was last open: the button shows a dot.
         bool unseen = false;
