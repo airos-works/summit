@@ -661,6 +661,15 @@ private:
     BMenuItem* fCaretBrowsingItem = nullptr;
     BMenuItem* fReducedMotionItem = nullptr;
     BMenuItem* fIncreasedContrastItem = nullptr;
+public:
+    // The profile's accessibility aids, as this window's tabs have them.
+    struct AccessibilityAids {
+        bool caretBrowsing = false, reduceMotion = false, increaseContrast = false;
+        int minimumFontSize = 0;
+        bool operator==(const AccessibilityAids&) const = default;
+    };
+private:
+    AccessibilityAids fAids;
     // Save as PDF: the chosen file, waiting for the pages.
     std::unique_ptr<BFilePanel> fPDFPanel;
     std::map<uint64, std::string> fPDFTargets;

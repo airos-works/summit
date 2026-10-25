@@ -593,19 +593,23 @@ std::atomic<int32> sOpenWindows { 0 };
 int32 BrowserWindow::CountOpenWindows() { return sOpenWindows.load(); }
 
 #if SUMMIT_MODERN_WEBKIT
-// View › Caret Browsing, Reduce Motion and Increase Contrast: shared by
-// every window, not saved (#118).
-static std::atomic<bool> sCaretBrowsing { false }, sReducedMotion { false }, sIncreasedContrast { false };
+// View › Caret Browsing, Reduce Motion and Increase Contrast, and the
+// minimum font size from Preferences: the profile's, for every tab (#118).
+static BrowserWindow::AccessibilityAids ReadAccessibilityAids(SharedProfile& shared)
+{
+    return shared.Read([](const Profile& profile) {
+        return BrowserWindow::AccessibilityAids { profile.caretBrowsing, profile.reduceMotion, profile.increaseContrast, profile.minimumFontSize };
+    });
+}
 
-static bool AccessibilityAidsOn() { return sCaretBrowsing || sReducedMotion || sIncreasedContrast; }
-
-static void ApplyAccessibilityAids(BWebKitView* view)
+static void ApplyAccessibilityAids(BWebKitView* view, const BrowserWindow::AccessibilityAids& aids)
 {
     if (!view) return;
     BMessage settings;
-    settings.AddBool("caretBrowsing", sCaretBrowsing);
-    settings.AddBool("reducedMotion", sReducedMotion);
-    settings.AddBool("increasedContrast", sIncreasedContrast);
+    settings.AddBool("caretBrowsing", aids.caretBrowsing);
+    settings.AddBool("reducedMotion", aids.reduceMotion);
+    settings.AddBool("increasedContrast", aids.increaseContrast);
+    settings.AddInt32("minimumFontSize", std::clamp(aids.minimumFontSize, 0, 72));
     view->SetPageSettings(settings);
 }
 #endif
@@ -781,14 +785,15 @@ BrowserWindow::BrowserWindow(std::shared_ptr<SharedProfile> profile, std::string
 #if SUMMIT_MODERN_WEBKIT
     // F7, as in Firefox and Chrome; a menu shortcut cannot be a function key.
     fCaretBrowsingItem = new BMenuItem("Caret Browsing (F7)", new BMessage(kToggleCaretBrowsing));
-    fCaretBrowsingItem->SetMarked(sCaretBrowsing);
+    fAids = ReadAccessibilityAids(*fShared);
+    fCaretBrowsingItem->SetMarked(fAids.caretBrowsing);
     view->AddItem(fCaretBrowsingItem);
     // Pages' prefers-reduced-motion and prefers-contrast media queries.
     fReducedMotionItem = new BMenuItem("Reduce Motion", new BMessage(kToggleReducedMotion));
-    fReducedMotionItem->SetMarked(sReducedMotion);
+    fReducedMotionItem->SetMarked(fAids.reduceMotion);
     view->AddItem(fReducedMotionItem);
     fIncreasedContrastItem = new BMenuItem("Increase Contrast", new BMessage(kToggleIncreasedContrast));
-    fIncreasedContrastItem->SetMarked(sIncreasedContrast);
+    fIncreasedContrastItem->SetMarked(fAids.increaseContrast);
     view->AddItem(fIncreasedContrastItem);
     view->AddSeparatorItem();
     AddItem(view, "View Page Source", kViewPageSource, 'U');
@@ -1313,7 +1318,7 @@ void BrowserWindow::CreateTab(const std::string& input, bool select, BWebView* a
         fail("Could not create the web page: " + std::string(std::strerror(status)));
         return;
     }
-    if (AccessibilityAidsOn()) ApplyAccessibilityAids(webView);
+    if (fAids != AccessibilityAids { }) ApplyAccessibilityAids(webView, fAids);
 #else
     auto* webView = adopted ? adopted : new BWebView("web-page");
 #endif
@@ -1413,7 +1418,7 @@ std::string BrowserWindow::DiscardTab(int64 id)
         delete webView;
         return "Could not create the unloaded page.";
     }
-    if (AccessibilityAidsOn()) ApplyAccessibilityAids(webView);
+    if (fAids != AccessibilityAids { }) ApplyAccessibilityAids(webView, fAids);
     webView->SetExplicitMinSize(fPopup ? BSize(160, 100) : BSize(320, 200));
     webView->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNLIMITED));
     if (!IsDefaultZoom(tab->pageZoom)) webView->SetZoomFactor(tab->pageZoom);
@@ -1456,6 +1461,8 @@ BrowserWindow::Tab* BrowserWindow::LeastRecentlyUsedTab()
 
 void BrowserWindow::UnloadTabsIfMemoryIsLow()
 {
+    // Preferences › Browsing can turn this off.
+    if (!fShared->Read([](const Profile& profile) { return profile.unloadWhenMemoryIsLow; })) return;
     // Low: less than a tenth of the memory, and at least 512 MiB, is left.
     // SUMMIT_UNLOAD_BELOW_MIB and SUMMIT_UNLOAD_AFTER_S change the limit and
     // how long a tab must have been behind (default five minutes); 0 for
@@ -3021,6 +3028,15 @@ void BrowserWindow::ProfileChanged(const BMessage& message)
     if (changes & SharedProfile::kSettingsChanged) {
         ShowSearchEngine();
 #if SUMMIT_MODERN_WEBKIT
+        if (const auto aids = ReadAccessibilityAids(*fShared); aids != fAids) {
+            fAids = aids;
+            for (auto& tab : fTabs) ApplyAccessibilityAids(tab.view, fAids);
+            if (fCaretBrowsingItem) fCaretBrowsingItem->SetMarked(fAids.caretBrowsing);
+            if (fReducedMotionItem) fReducedMotionItem->SetMarked(fAids.reduceMotion);
+            if (fIncreasedContrastItem) fIncreasedContrastItem->SetMarked(fAids.increaseContrast);
+        }
+#endif
+#if SUMMIT_MODERN_WEBKIT
         const char* agent = fShared->Read([](const Profile& profile) { return FindUserAgentPreset(profile.userAgent).agent; });
         for (auto& tab : fTabs) tab.view->SetCustomUserAgent(agent);
 #endif
@@ -4301,21 +4317,17 @@ void BrowserWindow::MessageReceived(BMessage* message)
         case kToggleCaretBrowsing:
         case kToggleReducedMotion:
         case kToggleIncreasedContrast: {
-            // One setting for the whole browser, for this session (#118).
-            auto& aid = message->what == kToggleCaretBrowsing ? sCaretBrowsing
-                : message->what == kToggleReducedMotion ? sReducedMotion : sIncreasedContrast;
-            aid = !aid;
-            for (int32 i = 0; BWindow* window = be_app->WindowAt(i); ++i) {
-                if (dynamic_cast<BrowserWindow*>(window)) window->PostMessage(kApplyAccessibilityAids);
-            }
+            // One saved setting for the whole browser (#118): every window
+            // applies it when the profile tells it of the change.
+            const uint32 what = message->what;
+            fShared->Change([what](Profile& profile) -> uint32 {
+                bool& aid = what == kToggleCaretBrowsing ? profile.caretBrowsing
+                    : what == kToggleReducedMotion ? profile.reduceMotion : profile.increaseContrast;
+                aid = !aid;
+                return SharedProfile::kSettingsChanged;
+            });
             break;
         }
-        case kApplyAccessibilityAids:
-            for (auto& tab : fTabs) ApplyAccessibilityAids(tab.view);
-            if (fCaretBrowsingItem) fCaretBrowsingItem->SetMarked(sCaretBrowsing);
-            if (fReducedMotionItem) fReducedMotionItem->SetMarked(sReducedMotion);
-            if (fIncreasedContrastItem) fIncreasedContrastItem->SetMarked(sIncreasedContrast);
-            break;
 #endif
         case kToggleZoomTextOnly:
             fShared->Change([](Profile& profile) -> uint32 {

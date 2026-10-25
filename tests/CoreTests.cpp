@@ -496,6 +496,10 @@ int main()
     profile.showBookmarksBar = false;
     CHECK(profile.restoreSession);
     profile.restoreSession = false;
+    CHECK(!profile.caretBrowsing && !profile.reduceMotion && !profile.increaseContrast && !profile.minimumFontSize && profile.unloadWhenMemoryIsLow);
+    profile.reduceMotion = profile.increaseContrast = true;
+    profile.minimumFontSize = 14;
+    profile.unloadWhenMemoryIsLow = false;
     CHECK(profile.Save(path, error) && error.empty());
     auto loaded = Profile::Load(path, error);
     CHECK(error.empty() && loaded.windows.size() == 2 && loaded.windows[0].tabs.size() == 2 && loaded.windows[0].selected == 1);
@@ -507,6 +511,7 @@ int main()
     CHECK(loaded.history.front().visits == 2 && loaded.history.back().visits == 0);
     CHECK(loaded.bookmarks.Count() == 2 && loaded.bookmarks.Pages()[0].bar && loaded.bookmarks.Pages()[0].url == "https://bar.example/");
     CHECK(loaded.homeURL == "https://home.example/" && !loaded.showBookmarksBar && !loaded.restoreSession);
+    CHECK(!loaded.caretBrowsing && loaded.reduceMotion && loaded.increaseContrast && loaded.minimumFontSize == 14 && !loaded.unloadWhenMemoryIsLow);
     CHECK(loaded.sitePermissions.size() == 4 && loaded.sitePermissions["notifications"].size() == 1
         && loaded.sitePermissions["notifications"]["https://github.com"]
         && !loaded.sitePermissions["geolocation"]["https://maps.example:8443"]

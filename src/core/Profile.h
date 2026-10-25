@@ -57,6 +57,14 @@ struct Profile {
     std::string spellingLanguage;
     // View › Zoom Text Only: zooming changes the text's size, not the page's.
     bool zoomTextOnly = false;
+    // Accessibility aids (#118): View › Caret Browsing (F7), Reduce Motion
+    // (prefers-reduced-motion) and Increase Contrast (prefers-contrast), and
+    // Preferences › Browsing's minimum font size (CSS pixels, 0 for none).
+    bool caretBrowsing = false, reduceMotion = false, increaseContrast = false;
+    int minimumFontSize = 0;
+    // Preferences › Browsing: unload long-unseen background tabs when memory
+    // is low (#116).
+    bool unloadWhenMemoryIsLow = true;
     // Whether Summit starts with the windows and tabs open when it last quit
     // (or the system shut down), where they were; otherwise with one window.
     bool restoreSession = true;

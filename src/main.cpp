@@ -719,8 +719,26 @@ public:
             const bool hasSavePasswords = message->FindBool("save_passwords", &savePasswords) == B_OK;
             bool checkForUpdates = true;
             const bool hasCheckForUpdates = message->FindBool("check_for_updates", &checkForUpdates) == B_OK;
+            // Preferences › Browsing › Accessibility (#118) and Memory (#116).
+            std::vector<std::pair<const char*, bool summit::Profile::*>> flags {
+                { "caret_browsing", &summit::Profile::caretBrowsing }, { "reduce_motion", &summit::Profile::reduceMotion },
+                { "increase_contrast", &summit::Profile::increaseContrast }, { "unload_when_memory_is_low", &summit::Profile::unloadWhenMemoryIsLow } };
+            int32 minimumFontSize = 0;
+            const bool hasMinimumFontSize = message->FindInt32("minimum_font_size", &minimumFontSize) == B_OK
+                && minimumFontSize >= 0 && minimumFontSize <= 72;
             fShared->Change([&](summit::Profile& profile) -> uint32 {
                 bool changed = false;
+                for (const auto& [name, field] : flags) {
+                    bool value = false;
+                    if (message->FindBool(name, &value) == B_OK && profile.*field != value) {
+                        profile.*field = value;
+                        changed = true;
+                    }
+                }
+                if (hasMinimumFontSize && profile.minimumFontSize != minimumFontSize) {
+                    profile.minimumFontSize = minimumFontSize;
+                    changed = true;
+                }
                 if (hasCheckForUpdates && profile.checkForUpdates != checkForUpdates) {
                     profile.checkForUpdates = checkForUpdates;
                     changed = true;
@@ -1695,6 +1713,10 @@ private:
         state.webKitDirectory = fProfile / "WebKit";
         state.userAgent = fShared->Read([](const summit::Profile& profile) { return profile.userAgent; });
         state.spellingLanguage = fShared->Read([](const summit::Profile& profile) { return profile.spellingLanguage; });
+        state.aids = fShared->Read([](const summit::Profile& profile) {
+            return summit::BrowsingAids { profile.caretBrowsing, profile.reduceMotion, profile.increaseContrast,
+                profile.minimumFontSize, profile.unloadWhenMemoryIsLow };
+        });
         state.dictionaries = summit::SpellingDictionaries(SpellingDirectories());
         fShared->Read([&](const summit::Profile& profile) {
             for (const auto& app : profile.webApps) state.webApps.emplace_back(app.id, app.name, app.startURL);
@@ -1757,6 +1779,11 @@ private:
             state.AddBool("mcp_local_only", profile.mcpLocalOnly);
             state.AddBool("check_for_updates", profile.checkForUpdates);
             state.AddInt64("last_update_check", profile.lastUpdateCheck);
+            state.AddBool("caret_browsing", profile.caretBrowsing);
+            state.AddBool("reduce_motion", profile.reduceMotion);
+            state.AddBool("increase_contrast", profile.increaseContrast);
+            state.AddInt32("minimum_font_size", profile.minimumFontSize);
+            state.AddBool("unload_when_memory_is_low", profile.unloadWhenMemoryIsLow);
             AddSitePermissions(state, profile);
             state.AddBool("has_protocol_handlers", true);
             for (const auto& [scheme, handler] : profile.protocolHandlers) {
