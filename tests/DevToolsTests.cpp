@@ -997,6 +997,24 @@ static void TestDebugger()
     session.Receive(Event("page-2", "Debugger.globalObjectCleared", json::object()));
     CHECK(session.Scripts().empty() && session.TakeChanges().scripts);
 
+    // The Performance tab's recording: Timeline records while it records.
+    {
+        Session timeline;
+        timeline.Start();
+        timeline.Receive(TargetCreated("page-1"));
+        Sent(timeline);
+        timeline.Receive(Event("page-1", "Timeline.eventRecorded", {{"record", {{"type", "Layout"}}}}));
+        CHECK(timeline.TimelineRecords().empty());
+        timeline.RecordTimeline(true);
+        commands = Sent(timeline);
+        CHECK(commands.size() == 1 && commands[0].method == "Timeline.start" && commands[0].parameters["maxCallStackDepth"] == 5);
+        timeline.Receive(Event("page-1", "Timeline.eventRecorded", {{"record", {{"type", "TimerFire"}, {"startTime", 1.0}, {"endTime", 1.5}}}}));
+        CHECK(timeline.TimelineRecords().size() == 1 && timeline.TimelineRecords()[0].find("TimerFire") != std::string::npos
+            && timeline.TakeChanges().timeline);
+        timeline.RecordTimeline(false);
+        CHECK(Sent(timeline)[0].method == "Timeline.stop" && !timeline.TimelineRecording() && timeline.TimelineRecords().size() == 1);
+    }
+
     // Source maps: read in the page's main frame, or from a data: address.
     Session mapped;
     mapped.Start();
