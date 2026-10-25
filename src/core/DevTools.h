@@ -112,7 +112,7 @@ enum class EntryKind {
 struct Script {
     std::string id, url;
     // Of an inline script, in its document, from 0.
-    int startLine = 0;
+    int startLine = 0, startColumn = 0;
     bool contentScript = false;
     // Asked for with getScriptSource; empty until then.
     bool sourceLoaded = false, sourceWaiting = false;
@@ -125,6 +125,8 @@ struct Script {
 struct Breakpoint {
     std::string url;
     int line = 0; // from 0
+    // From 0: where on the line (a pretty-printed line of a minified script).
+    int column = 0;
     std::string id;
     bool resolved = false;
 };
@@ -336,8 +338,8 @@ public:
     const Script* FindScript(const std::string& id) const;
     void LoadScriptSource(const std::string& id);
     // A breakpoint at a line (from 0) of every script with that address.
-    void SetBreakpoint(const std::string& url, int line);
-    void RemoveBreakpoint(const std::string& url, int line);
+    void SetBreakpoint(const std::string& url, int line, int column = 0);
+    void RemoveBreakpoint(const std::string& url, int line, int column = 0);
     const std::vector<Breakpoint>& Breakpoints() const { return fBreakpoints; }
     const DebuggerState& Debugger() const { return fDebugger; }
     // The paused frame the console evaluates in.

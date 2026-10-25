@@ -509,6 +509,7 @@ struct ProtocolReader {
             script.url = Text(Member(parameters, "sourceURL"));
             if (script.url.empty()) script.url = Text(Member(parameters, "url"));
             script.startLine = static_cast<int>(Number(Member(parameters, "startLine")));
+            script.startColumn = static_cast<int>(Number(Member(parameters, "startColumn")));
             script.contentScript = Flag(Member(parameters, "isContentScript"));
             if (script.id.empty()) return;
             session.fScripts[script.id] = std::move(script);
@@ -752,7 +753,7 @@ struct ProtocolReader {
             session.fChanges.sources.push_back(script.id);
         } else if (pending.kind == Session::Pending::SetBreakpoint) {
             for (auto& breakpoint : session.fBreakpoints) {
-                if (breakpoint.url + '\n' + std::to_string(breakpoint.line) != pending.origin) continue;
+                if (breakpoint.url + '\n' + std::to_string(breakpoint.line) + ':' + std::to_string(breakpoint.column) != pending.origin) continue;
                 if (const auto id = Text(Member(result, "breakpointId")); !id.empty()) breakpoint.id = id;
                 if (const auto& locations = Member(result, "locations"); locations.is_array() && !locations.empty()) breakpoint.resolved = true;
             }
@@ -1042,28 +1043,31 @@ void Session::LoadScriptSource(const std::string& id)
 
 void Session::SendBreakpoint(const std::string& target, Breakpoint& breakpoint)
 {
-    SendToTarget(target, "Debugger.setBreakpointByUrl", "{\"lineNumber\":" + std::to_string(breakpoint.line) + ",\"url\":"
+    SendToTarget(target, "Debugger.setBreakpointByUrl", "{\"lineNumber\":" + std::to_string(breakpoint.line)
+        + (breakpoint.column ? ",\"columnNumber\":" + std::to_string(breakpoint.column) : std::string()) + ",\"url\":"
         + Quoted(breakpoint.url) + "}", Pending::SetBreakpoint);
-    fPending.rbegin()->second.origin = breakpoint.url + '\n' + std::to_string(breakpoint.line);
+    fPending.rbegin()->second.origin = breakpoint.url + '\n' + std::to_string(breakpoint.line) + ':' + std::to_string(breakpoint.column);
 }
 
-void Session::SetBreakpoint(const std::string& url, int line)
+void Session::SetBreakpoint(const std::string& url, int line, int column)
 {
-    if (url.empty() || line < 0) return;
-    if (std::any_of(fBreakpoints.begin(), fBreakpoints.end(), [&](const Breakpoint& known) { return known.url == url && known.line == line; }))
+    if (url.empty() || line < 0 || column < 0) return;
+    if (std::any_of(fBreakpoints.begin(), fBreakpoints.end(),
+            [&](const Breakpoint& known) { return known.url == url && known.line == line && known.column == column; }))
         return;
-    fBreakpoints.push_back({url, line, { }, false});
+    fBreakpoints.push_back({url, line, column, { }, false});
     if (fDebugger.enabled)
         for (const auto& [target, provisional] : fTargets) SendBreakpoint(target, fBreakpoints.back());
     fChanges.debugger = true;
 }
 
-void Session::RemoveBreakpoint(const std::string& url, int line)
+void Session::RemoveBreakpoint(const std::string& url, int line, int column)
 {
-    const auto found = std::find_if(fBreakpoints.begin(), fBreakpoints.end(), [&](const Breakpoint& known) { return known.url == url && known.line == line; });
+    const auto found = std::find_if(fBreakpoints.begin(), fBreakpoints.end(),
+        [&](const Breakpoint& known) { return known.url == url && known.line == line && known.column == column; });
     if (found == fBreakpoints.end()) return;
     // WebKit names a breakpoint by address, line and column.
-    const auto id = found->id.empty() ? url + ':' + std::to_string(line) + ":0" : found->id;
+    const auto id = found->id.empty() ? url + ':' + std::to_string(line) + ':' + std::to_string(column) : found->id;
     if (fDebugger.enabled)
         for (const auto& [target, provisional] : fTargets) SendToTarget(target, "Debugger.removeBreakpoint", "{\"breakpointId\":" + Quoted(id) + "}");
     fBreakpoints.erase(found);

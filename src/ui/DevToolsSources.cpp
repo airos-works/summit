@@ -16,7 +16,7 @@ namespace summit {
 using namespace devtools;
 namespace {
 constexpr uint32 kScriptSelected = 'dsss', kFrameSelected = 'dsfs', kPauseResume = 'dspr', kStepOver = 'dsso', kStepInto = 'dssi',
-    kStepOut = 'dssu', kContentScriptsChanged = 'dscs';
+    kStepOut = 'dssu', kContentScriptsChanged = 'dscs', kPrettyChanged = 'dspp';
 // The margin of breakpoints and the markers in it; the paused line's background.
 constexpr int kBreakpointMargin = 2;
 enum { kBreakpointMark = 1, kPausedMark = 2, kPausedLine = 3 };
@@ -64,6 +64,15 @@ public:
         }
     }
     int Lines() { return static_cast<int>(SendMessage(SCI_GETLINECOUNT)); }
+    // For the state: shown lines from 1 with a marker.
+    int PausedLine() { const auto line = SendMessage(SCI_MARKERNEXT, 0, 1 << kPausedMark); return line < 0 ? 0 : static_cast<int>(line) + 1; }
+    std::vector<int> BreakpointLines()
+    {
+        std::vector<int> lines;
+        for (auto line = SendMessage(SCI_MARKERNEXT, 0, 1 << kBreakpointMark); line >= 0; line = SendMessage(SCI_MARKERNEXT, line + 1, 1 << kBreakpointMark))
+            lines.push_back(static_cast<int>(line) + 1);
+        return lines;
+    }
 
 protected:
     void ApplyPalette() override
@@ -95,6 +104,8 @@ SourcesPanel::SourcesPanel(Session& session, DevToolsHost& host)
     fStepOut = new BButton("step-out", "Step Out", new BMessage(kStepOut));
     fContentScripts = new BCheckBox("content-scripts", "Extension scripts", new BMessage(kContentScriptsChanged));
     fContentScripts->SetToolTip("List the scripts extensions and the browser add to pages");
+    fPrettyPrint = new BCheckBox("pretty-print", "Pretty print", new BMessage(kPrettyChanged));
+    fPrettyPrint->SetToolTip("Lay the script out a statement per line (breakpoints and the paused line follow)");
     fStatus = new BStringView("status", "");
     fStatus->SetTruncation(B_TRUNCATE_END);
     fStatus->SetExplicitMinSize(BSize(40, B_SIZE_UNSET));
@@ -119,6 +130,7 @@ SourcesPanel::SourcesPanel(Session& session, DevToolsHost& host)
             .Add(fStepInto)
             .Add(fStepOut)
             .Add(fStatus, 1)
+            .Add(fPrettyPrint)
             .Add(fContentScripts)
         .End()
         .Add(split, 1);
@@ -129,7 +141,7 @@ void SourcesPanel::AttachedToWindow()
 {
     BView::AttachedToWindow();
     AdoptParentColors();
-    for (BControl* control : std::initializer_list<BControl*> {fPauseResume, fStepOver, fStepInto, fStepOut, fContentScripts})
+    for (BControl* control : std::initializer_list<BControl*> {fPauseResume, fStepOver, fStepInto, fStepOut, fContentScripts, fPrettyPrint})
         control->SetTarget(this);
     fScripts->SetTarget(this);
     fFrames->SetTarget(this);
@@ -169,6 +181,10 @@ void SourcesPanel::MessageReceived(BMessage* message)
             fHost.Sync();
             break;
         case kContentScriptsChanged: RebuildScripts(); break;
+        case kPrettyChanged:
+            fPrettyChosen = true;
+            ShowSource();
+            break;
         default: BView::MessageReceived(message);
     }
 }
@@ -226,8 +242,55 @@ void SourcesPanel::ShowSource()
         fCode->SetSource("Loading…", "null");
         return;
     }
-    fCode->SetSource(script->sourceError.empty() ? script->source : "The source is not available: " + script->sourceError, "cpp");
+    if (!script->sourceError.empty()) {
+        fCode->SetSource("The source is not available: " + script->sourceError, "null");
+        return;
+    }
+    // A minified script (a line longer than a screen) is laid out, unless
+    // pretty printing was chosen by hand.
+    if (!fPrettyChosen) {
+        bool minified = false;
+        for (size_t start = 0; start < script->source.size() && !minified;) {
+            const auto end = script->source.find('\n', start);
+            minified = (end == std::string::npos ? script->source.size() : end) - start > 500;
+            if (end == std::string::npos) break;
+            start = end + 1;
+        }
+        fPrettyPrint->SetValue(minified ? B_CONTROL_ON : B_CONTROL_OFF);
+    }
+    fCode->SetSource(Pretty() ? Formatted(*script).text : script->source, "cpp");
     ShowMarkers();
+}
+
+bool SourcesPanel::Pretty() const { return fPrettyPrint->Value() == B_CONTROL_ON; }
+
+const PrettyScript& SourcesPanel::Formatted(const Script& script)
+{
+    auto found = fFormatted.find(script.id);
+    if (found == fFormatted.end()) {
+        // Scripts of pages long gone are not kept.
+        if (fFormatted.size() > 32) fFormatted.clear();
+        found = fFormatted.emplace(script.id, FormatJavaScript(script.source)).first;
+    }
+    return found->second;
+}
+
+// A place in the document (a frame's or a breakpoint's) as a line shown.
+int SourcesPanel::ShownLine(const Script& script, int line, int column)
+{
+    const int relative = line - script.startLine;
+    if (!Pretty()) return relative;
+    const int relativeColumn = relative == 0 ? std::max(column - script.startColumn, 0) : column;
+    return Formatted(script).LineOf({relative, relativeColumn});
+}
+
+SourcePosition SourcesPanel::DocumentPlace(const Script& script, int shownLine)
+{
+    if (!Pretty()) return {script.startLine + shownLine, 0};
+    const auto& starts = Formatted(script).starts;
+    if (shownLine < 0 || shownLine >= static_cast<int>(starts.size())) return {-1, 0};
+    const auto start = starts[shownLine];
+    return {script.startLine + start.line, start.line == 0 ? script.startColumn + start.column : start.column};
 }
 
 void SourcesPanel::ShowMarkers()
@@ -237,11 +300,11 @@ void SourcesPanel::ShowMarkers()
     // Lines of an inline script count from its document's start.
     std::vector<int> lines;
     for (const auto& breakpoint : fSession.Breakpoints())
-        if (breakpoint.url == script->url) lines.push_back(breakpoint.line - script->startLine);
+        if (breakpoint.url == script->url) lines.push_back(ShownLine(*script, breakpoint.line, breakpoint.column));
     int paused = -1;
     const auto& state = fSession.Debugger();
     if (state.paused && fFrame >= 0 && fFrame < static_cast<int>(state.frames.size()) && state.frames[fFrame].scriptId == script->id)
-        paused = state.frames[fFrame].line - script->startLine;
+        paused = ShownLine(*script, state.frames[fFrame].line, state.frames[fFrame].column);
     fCode->Mark(lines, paused);
 }
 
@@ -249,12 +312,17 @@ void SourcesPanel::ToggleBreakpoint(int line)
 {
     const auto* script = Selected();
     if (!script || script->url.empty() || !script->sourceLoaded) return;
-    const int documentLine = line + script->startLine;
-    const auto& breakpoints = fSession.Breakpoints();
-    const bool set = std::any_of(breakpoints.begin(), breakpoints.end(),
-        [&](const Breakpoint& breakpoint) { return breakpoint.url == script->url && breakpoint.line == documentLine; });
-    if (set) fSession.RemoveBreakpoint(script->url, documentLine);
-    else fSession.SetBreakpoint(script->url, documentLine);
+    // One shown on this line is cleared; else one is set where it starts.
+    for (const auto& breakpoint : fSession.Breakpoints()) {
+        if (breakpoint.url != script->url || ShownLine(*script, breakpoint.line, breakpoint.column) != line) continue;
+        fSession.RemoveBreakpoint(breakpoint.url, breakpoint.line, breakpoint.column);
+        fHost.Sync();
+        ShowMarkers();
+        return;
+    }
+    const auto place = DocumentPlace(*script, line);
+    if (place.line < 0) return;
+    fSession.SetBreakpoint(script->url, place.line, place.column);
     fHost.Sync();
     ShowMarkers();
 }
@@ -336,6 +404,10 @@ bool SourcesPanel::Command(const std::string& action, const std::string& argumen
     } else if (verb == "frame") SelectFrame(std::atoi(argument.c_str()));
     else if (verb == "expand") {
         if (!fScopes->OpenRow(argument)) error = "No such row";
+    } else if (verb == "pretty") {
+        fPrettyPrint->SetValue(argument == "on" ? B_CONTROL_ON : B_CONTROL_OFF);
+        fPrettyChosen = true;
+        ShowSource();
     } else if (verb == "content-scripts") {
         fContentScripts->SetValue(argument == "on" ? B_CONTROL_ON : B_CONTROL_OFF);
         RebuildScripts();
@@ -351,13 +423,15 @@ std::string SourcesPanel::StateJSON()
     for (const auto& id : fScriptIDs)
         if (const auto* script = fSession.FindScript(id)) scripts.push_back(script->Label());
     for (const auto& breakpoint : fSession.Breakpoints())
-        breakpoints.push_back(breakpoint.url + ":" + std::to_string(breakpoint.line + 1) + (breakpoint.resolved ? "" : " (unresolved)"));
+        breakpoints.push_back(breakpoint.url + ":" + std::to_string(breakpoint.line + 1)
+            + (breakpoint.column ? ":" + std::to_string(breakpoint.column + 1) : std::string()) + (breakpoint.resolved ? "" : " (unresolved)"));
     for (const auto& frame : state.frames) frames.push_back(FrameLabel(fSession, frame));
     const auto* script = Selected();
     json result = {{"enabled", state.enabled}, {"scripts", scripts}, {"selected", script ? script->Label() : std::string()},
         {"sourceLoaded", script && script->sourceLoaded}, {"lines", script && script->sourceLoaded ? fCode->Lines() : 0},
         {"breakpoints", breakpoints}, {"paused", state.paused}, {"reason", state.reason}, {"frames", frames}, {"frame", fFrame},
-        {"scopes", fScopes->Rows()}, {"status", fStatus->Text()}};
+        {"scopes", fScopes->Rows()}, {"status", fStatus->Text()}, {"pretty", Pretty()}, {"pausedLine", fCode->PausedLine()},
+        {"breakpointLines", fCode->BreakpointLines()}};
     return result.dump(-1, ' ', false, json::error_handler_t::replace);
 }
 }

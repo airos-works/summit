@@ -64,6 +64,39 @@ static void TestJSON()
     CHECK(FormatBody(BodyKind::CSS, "a{}").text == "a{}" && !FormatBody(BodyKind::CSS, "a{}").formatted);
 }
 
+static void TestScripts()
+{
+    // Pretty printing: tokens untouched, a statement or block per line, and
+    // where each line's first token is in the source.
+    const auto pretty = FormatJavaScript("function f(a,b){if(a>-1){return-a}else{return`x${a+1}`}}var r=/a\\/b/g,d=x/2;"
+        "switch(a){case 1:b++;break;default:b--}for(var i=0;i<2;i++){}");
+    CHECK_TEXT(pretty.text,
+        "function f(a, b) {\n"
+        "    if (a > -1) {\n"
+        "        return -a\n"
+        "    } else {\n"
+        "        return `x${a+1}`\n"
+        "    }\n"
+        "}\n"
+        "var r = /a\\/b/g, d = x / 2;\n"
+        "switch (a) {\n"
+        "    case 1:\n"
+        "        b++;\n"
+        "        break;\n"
+        "    default:\n"
+        "        b--\n"
+        "}\n"
+        "for (var i = 0; i < 2; i++) {}\n");
+    CHECK(pretty.starts.size() == 16 && pretty.starts[1].line == 0 && pretty.starts[1].column == 16);
+    // A place in the source, on the line that shows it.
+    CHECK(pretty.LineOf({0, 0}) == 0 && pretty.LineOf({0, 16}) == 1 && pretty.LineOf({0, 20}) == 1 && pretty.LineOf({0, 28}) == 2);
+    // A template over two lines keeps its second line's place.
+    const auto lines = FormatJavaScript("a=`one\ntwo`;b=1");
+    CHECK(lines.text == "a = `one\ntwo`;\nb = 1\n" && lines.starts.size() == 3 && lines.starts[1].line == 1 && lines.starts[2].column == 5);
+    // Comments stay where they were: on their own line or after code.
+    CHECK_TEXT(FormatJavaScript("a=1;// one\n/* two */\nb=2").text, "a = 1;\n// one\n/* two */\nb = 2\n");
+}
+
 static void TestXML()
 {
     CHECK_TEXT(FormatXML("<?xml version=\"1.0\"?><root><item id=\"1\">One</item><item id=\"2\"/><empty></empty>"
@@ -853,6 +886,16 @@ static void TestDebugger()
     session.Receive(FromTarget("page-1", {{"id", set->id}, {"result", {{"breakpointId", "https://example.com/app.js:20:0"},
         {"locations", {{{"scriptId", "5"}, {"lineNumber", 20}, {"columnNumber", 4}}}}}}}));
     CHECK(session.Breakpoints()[1].resolved && session.Breakpoints()[1].id == "https://example.com/app.js:20:0");
+    // A place on a long line (a pretty-printed minified script's) has its
+    // column, and is removed by it.
+    session.SetBreakpoint("https://example.com/app.min.js", 0, 1234);
+    commands = Sent(session);
+    set = Find(commands, "Debugger.setBreakpointByUrl");
+    CHECK(set && set->parameters["lineNumber"] == 0 && set->parameters["columnNumber"] == 1234);
+    session.RemoveBreakpoint("https://example.com/app.min.js", 0, 1234);
+    commands = Sent(session);
+    CHECK(Find(commands, "Debugger.removeBreakpoint")
+        && Find(commands, "Debugger.removeBreakpoint")->parameters["breakpointId"] == "https://example.com/app.min.js:0:1234");
     // A new process of the page gets the debugger and every breakpoint.
     session.Receive(TargetCreated("page-2"));
     commands = Sent(session);
@@ -1733,6 +1776,7 @@ int main()
     TestHeaders();
     TestKinds();
     TestJSON();
+    TestScripts();
     TestXML();
     TestHTML();
     TestHelpers();

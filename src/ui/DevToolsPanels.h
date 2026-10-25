@@ -335,6 +335,16 @@ private:
     void SelectFrame(int index);
     void ToggleBreakpoint(int line);
     const devtools::Script* Selected() const;
+    // Pretty printing: the shown text of a script, and moving between a
+    // shown line and a place in the page's document.
+    bool Pretty() const;
+    const devtools::PrettyScript& Formatted(const devtools::Script& script);
+    int ShownLine(const devtools::Script& script, int line, int column);
+    devtools::SourcePosition DocumentPlace(const devtools::Script& script, int shownLine);
+    std::map<std::string, devtools::PrettyScript> fFormatted;
+    // Pretty printing follows each script (on for minified ones) until it
+    // is chosen by hand.
+    bool fPrettyChosen = false;
     devtools::Session& fSession;
     DevToolsHost& fHost;
     std::string fSelectedScript;
@@ -346,6 +356,7 @@ private:
     BButton* fStepInto;
     BButton* fStepOut;
     BCheckBox* fContentScripts;
+    BCheckBox* fPrettyPrint;
     BStringView* fStatus;
     BListView* fScripts;
     Code* fCode;
