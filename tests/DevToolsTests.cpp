@@ -1222,6 +1222,24 @@ static void TestElementStyles()
     commands = take();
     CHECK(commands.size() == 1 && json::parse(commands[0].parameters)["text"] == "color: red;"
         && json::parse(commands[0].parameters)["styleId"]["styleSheetId"] == "5");
+    // :hov forces states on the selected element and reads its styles again.
+    take();
+    dom.SetForcedPseudoClasses(5, {"hover", "focus", "hover"});
+    {
+        const auto commands = take();
+        const auto* forced = [&]() -> const DOMModel::Command* {
+            for (const auto& command : commands) if (command.method == "CSS.forcePseudoState") return &command;
+            return nullptr;
+        }();
+        CHECK(forced && json::parse(forced->parameters) == json({{"nodeId", 5}, {"forcedPseudoClasses", {"focus", "hover"}}}));
+        CHECK(tags.count("CSS.getMatchedStylesForNode") || dom.StylesLoading());
+    }
+    CHECK((dom.ForcedPseudoClasses(5) == std::vector<std::string> {"focus", "hover"}) && dom.ForcedPseudoClasses(6).empty());
+    dom.SetForcedPseudoClasses(99, {"hover"});
+    CHECK(dom.ForcedPseudoClasses(99).empty());
+    dom.SetForcedPseudoClasses(5, {});
+    take();
+    CHECK(dom.ForcedPseudoClasses(5).empty());
 }
 
 static void TestPageSource()

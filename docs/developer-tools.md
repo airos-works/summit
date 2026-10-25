@@ -91,6 +91,11 @@ On the right, two tabs for the selected element:
   rule's first or last line adds a declaration. The page repaints at once:
   this is the page's style sheet being changed, as other browsers do it.
   *Filter* shows the declarations whose property or value contains a text.
+  **:hov** forces `:active`, `:focus`, `:focus-visible`, `:focus-within`,
+  `:hover` or `:visited` on the selected element (`CSS.forcePseudoState`):
+  the page draws it in that state and its rules for it are listed; the
+  button shows what is forced (`:hover :focus`). The page forgets them when
+  the tools close or it moves on.
   The secondary button also has Copy Declaration, Copy Rule and Show in Style
   Sheet.
 - **Computed**: the box model (margin, border, padding and content, with the
@@ -426,7 +431,8 @@ are not installed. `BColumnListView` is the system's static
   `elements-undo`, `elements-redo`, `elements-scroll`, `elements-toggle
   BLOCK,DECLARATION`, `elements-edit BLOCK,DECLARATION,TEXT`, `elements-add
   BLOCK,TEXT`, `elements-source BLOCK`, `elements-refresh`, `elements-filter
-  TEXT`, `elements-computed-all on|off`, `elements-tab styles|computed`,
+  TEXT`, `elements-force hover,focus` (none for an empty text),
+  `elements-computed-all on|off`, `elements-tab styles|computed`,
   and for the editors in place `elements-edit-line
   attributes|add-attribute|tag|text` (as a double click on the selected
   line), `elements-edit-style BLOCK,DECLARATION`, `elements-add-style BLOCK`,
