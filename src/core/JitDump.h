@@ -46,11 +46,12 @@ public:
             const auto start = file.tellg();
             uint32_t record[4] = { };
             if (!file.read(reinterpret_cast<char*>(record), sizeof(record)) || record[1] < sizeof(record)) break;
-            if (record[0] == kCodeLoad && record[1] > sizeof(record) + 40) {
-                uint64_t fields[5] = { };
+            if (record[0] == kCodeLoad && record[1] > sizeof(record) + 8 + 32) {
+                uint64_t fields[4] = { };
                 uint32_t ids[2] = { };
                 if (!file.read(reinterpret_cast<char*>(ids), sizeof(ids)) || !file.read(reinterpret_cast<char*>(fields), sizeof(fields))) break;
-                // vma, code address, code size, index; then the name.
+                // Process and thread; vma, code address, code size, index;
+                // then the name ("JSC-DFG: tick#AbCdEf").
                 JitCode code;
                 code.start = fields[1];
                 code.size = fields[2];
