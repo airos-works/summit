@@ -5,6 +5,8 @@
      (ADTS) and tone.mp3, a 440 Hz stereo tone, for example
        ffmpeg -f lavfi -i sine=frequency=440:sample_rate=48000:duration=0.25 -ac 2 -c:a aac -f adts tone.aac
        ffmpeg -f lavfi -i sine=frequency=440:sample_rate=48000:duration=0.25 -ac 2 -c:a libmp3lame -write_xing 0 -id3v2_version 0 tone.mp3
+     and tone.flac and tone.ogg (Vorbis), made the same way with -c:a flac and
+     -c:a libvorbis (their headers become the description).
      It decodes the ADTS frames as they are, the raw AAC frames with an
      AudioSpecificConfig made from the ADTS header, and the MP3 frames, and
      reports frames, format and RMS (about 0.35 for a full-scale tone at 0.5
@@ -50,6 +52,54 @@ function mp3Frames(bytes) {
     return frames;
 }
 
+// A native FLAC file: "fLaC" and its metadata blocks (the description), then
+// frames, split at their sync codes.
+function flacParts(bytes) {
+    let offset = 4, last = false;
+    while (!last) {
+        last = !!(bytes[offset] & 0x80);
+        offset += 4 + ((bytes[offset + 1] << 16) | (bytes[offset + 2] << 8) | bytes[offset + 3]);
+    }
+    const starts = [];
+    for (let i = offset; i + 1 < bytes.length; ++i)
+        if (bytes[i] == 0xff && (bytes[i + 1] & 0xfe) == 0xf8)
+            starts.push(i);
+    return { description: bytes.slice(0, offset), frames: starts.map((start, i) => bytes.slice(start, starts[i + 1] || bytes.length)) };
+}
+
+// An Ogg Vorbis file's packets: the three headers, Xiph-laced, are the
+// description; the rest are the chunks.
+function vorbisParts(bytes) {
+    const packets = [];
+    let current = [];
+    for (let offset = 0; offset + 27 <= bytes.length;) {
+        const segments = bytes[offset + 26];
+        let data = offset + 27 + segments;
+        for (let i = 0; i < segments; ++i) {
+            const size = bytes[offset + 27 + i];
+            current.push(bytes.slice(data, data + size));
+            data += size;
+            if (size < 255) {
+                const length = current.reduce((sum, part) => sum + part.length, 0);
+                const packet = new Uint8Array(length);
+                let at = 0;
+                for (const part of current) { packet.set(part, at); at += part.length; }
+                packets.push(packet);
+                current = [];
+            }
+        }
+        offset = data;
+    }
+    const lace = n => { const out = []; while (n >= 255) { out.push(255); n -= 255; } out.push(n); return out; };
+    const headers = packets.slice(0, 3);
+    const prefix = [2, ...lace(headers[0].length), ...lace(headers[1].length)];
+    const description = new Uint8Array(prefix.length + headers.reduce((sum, h) => sum + h.length, 0));
+    description.set(prefix);
+    let at = prefix.length;
+    for (const header of headers) { description.set(header, at); at += header.length; }
+    return { description, frames: packets.slice(3) };
+}
+
 async function decode(name, config, chunks) {
     const support = await AudioDecoder.isConfigSupported(config);
     if (!support.supported)
@@ -83,7 +133,10 @@ async function decode(name, config, chunks) {
         results.push(await decode('AAC (raw + description)', { codec: 'mp4a.40.2', sampleRate: 48000, numberOfChannels: 2, description: audioSpecificConfig(frames[0].header) }, frames.map(frame => frame.payload)));
         const mp3 = new Uint8Array(await (await fetch('tone.mp3')).arrayBuffer());
         results.push(await decode('MP3', { codec: 'mp3', sampleRate: 48000, numberOfChannels: 2 }, mp3Frames(mp3)));
-        results.push({ name: 'FLAC', supported: (await AudioDecoder.isConfigSupported({ codec: 'flac', sampleRate: 48000, numberOfChannels: 2 })).supported });
+        const flac = flacParts(new Uint8Array(await (await fetch('tone.flac')).arrayBuffer()));
+        results.push(await decode('FLAC', { codec: 'flac', sampleRate: 48000, numberOfChannels: 2, description: flac.description }, flac.frames));
+        const vorbis = vorbisParts(new Uint8Array(await (await fetch('tone.ogg')).arrayBuffer()));
+        results.push(await decode('Vorbis', { codec: 'vorbis', sampleRate: 48000, numberOfChannels: 2, description: vorbis.description }, vorbis.frames));
         results.push({ name: 'Opus 44.1 kHz encode', supported: (await AudioEncoder.isConfigSupported({ codec: 'opus', sampleRate: 44100, numberOfChannels: 2 })).supported });
     } catch (error) {
         results.push({ error: error.message });
