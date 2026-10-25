@@ -603,6 +603,14 @@ struct ProtocolReader {
                         area->cookies.push_back(std::move(cookie));
                     }
                 }
+            } else if (const auto& entries = Member(result, "objectStoreDataEntries"); entries.is_array()) {
+                // Keys and values as the console shows them.
+                for (const auto& entry : entries) {
+                    const auto& key = Member(entry, "key").is_object() ? Member(entry, "key") : Member(entry, "primaryKey");
+                    area->items.push_back({Shortened(Render(key, false), kValueLength), Shortened(Render(Member(entry, "value"), false), 64 * 1024)});
+                }
+                if (Flag(Member(result, "hasMore")))
+                    area->error = "The first " + std::to_string(Session::kIndexedDBPage) + " entries are shown.";
             } else if (const auto& entries = Member(result, "entries"); entries.is_array()) {
                 for (const auto& entry : entries) {
                     if (!entry.is_array() || entry.size() < 2) continue;
@@ -610,6 +618,37 @@ struct ProtocolReader {
                 }
             }
             session.fChanges.storage = true;
+        } else if (pending.kind == Session::Pending::DatabaseNames) {
+            auto& databases = session.fDatabases[pending.origin];
+            databases.waiting = false;
+            databases.error = error;
+            databases.databases.clear();
+            databases.outstanding = 0;
+            if (const auto& names = Member(result, "databaseNames"); names.is_array()) {
+                for (const auto& name : names) {
+                    if (!name.is_string()) continue;
+                    databases.databases.push_back({name.get<std::string>(), 0, { }});
+                    ++databases.outstanding;
+                    session.SendToTarget(session.fPageTarget, "IndexedDB.requestDatabase", "{\"securityOrigin\":" + Quoted(pending.origin)
+                        + ",\"databaseName\":" + Quoted(name.get<std::string>()) + "}", Session::Pending::Database);
+                    session.fPending.rbegin()->second.origin = pending.origin + '\n' + name.get<std::string>();
+                }
+            }
+            databases.loaded = !databases.outstanding;
+            session.fChanges.origins = true;
+        } else if (pending.kind == Session::Pending::Database) {
+            const auto newline = pending.origin.find('\n');
+            const auto origin = pending.origin.substr(0, newline), name = pending.origin.substr(newline + 1);
+            auto& databases = session.fDatabases[origin];
+            for (auto& database : databases.databases) {
+                if (database.name != name) continue;
+                const auto& described = Member(result, "databaseWithObjectStores");
+                database.version = Number(Member(described, "version"));
+                if (const auto& stores = Member(described, "objectStores"); stores.is_array())
+                    for (const auto& store : stores) database.stores.push_back(Text(Member(store, "name")));
+            }
+            if (databases.outstanding && !--databases.outstanding) databases.loaded = true;
+            session.fChanges.origins = true;
         } else if (pending.kind == Session::Pending::StorageEdit) {
             // Read the area again: the page may have changed more than was asked.
             if (!error.empty()) {
@@ -1155,6 +1194,27 @@ std::string Session::StorageID(StorageKind kind, const std::string& origin) cons
     return "{\"securityOrigin\":" + Quoted(origin) + ",\"isLocalStorage\":" + (kind == StorageKind::Local ? "true" : "false") + "}";
 }
 
+std::string IndexedDBStore(const std::string& origin, const std::string& database, const std::string& store)
+{
+    return origin + '\n' + database + '\n' + store;
+}
+
+void Session::LoadDatabases(const std::string& origin)
+{
+    auto& databases = fDatabases[origin];
+    if (databases.waiting || fPageTarget.empty()) return;
+    databases.waiting = true;
+    SendToTarget(fPageTarget, "IndexedDB.enable", "{}");
+    SendToTarget(fPageTarget, "IndexedDB.requestDatabaseNames", "{\"securityOrigin\":" + Quoted(origin) + "}", Pending::DatabaseNames);
+    fPending.rbegin()->second.origin = origin;
+}
+
+const OriginDatabases* Session::Databases(const std::string& origin) const
+{
+    const auto found = fDatabases.find(origin);
+    return found == fDatabases.end() ? nullptr : &found->second;
+}
+
 void Session::LoadStorage(StorageKind kind, const std::string& origin)
 {
     auto* area = Area(kind, origin, true);
@@ -1165,7 +1225,18 @@ void Session::LoadStorage(StorageKind kind, const std::string& origin)
         return;
     }
     area->waiting = true;
-    if (kind == StorageKind::Cookies)
+    if (kind == StorageKind::IndexedDB) {
+        // "origin\ndatabase\nstore".
+        const auto first = origin.find('\n'), second = first == std::string::npos ? first : origin.find('\n', first + 1);
+        if (second == std::string::npos) {
+            area->waiting = false;
+            return;
+        }
+        SendToTarget(fPageTarget, "IndexedDB.requestData", "{\"securityOrigin\":" + Quoted(origin.substr(0, first))
+            + ",\"databaseName\":" + Quoted(origin.substr(first + 1, second - first - 1)) + ",\"objectStoreName\":"
+            + Quoted(origin.substr(second + 1)) + ",\"indexName\":\"\",\"skipCount\":0,\"pageSize\":" + std::to_string(kIndexedDBPage) + "}",
+            Pending::Storage);
+    } else if (kind == StorageKind::Cookies)
         SendToTarget(fPageTarget, "Page.getCookies", "{}", Pending::Storage);
     else
         SendToTarget(fPageTarget, "DOMStorage.getDOMStorageItems", "{\"storageId\":" + StorageID(kind, origin) + "}", Pending::Storage);
@@ -1199,6 +1270,14 @@ void Session::RemoveStorageItem(StorageKind kind, const std::string& origin, con
 
 void Session::ClearStorage(StorageKind kind, const std::string& origin)
 {
+    if (kind == StorageKind::IndexedDB) {
+        const auto first = origin.find('\n'), second = first == std::string::npos ? first : origin.find('\n', first + 1);
+        if (second == std::string::npos) return;
+        StorageEdit(kind, origin, "IndexedDB.clearObjectStore", "{\"securityOrigin\":" + Quoted(origin.substr(0, first))
+            + ",\"databaseName\":" + Quoted(origin.substr(first + 1, second - first - 1)) + ",\"objectStoreName\":"
+            + Quoted(origin.substr(second + 1)) + "}");
+        return;
+    }
     if (kind != StorageKind::Cookies) {
         StorageEdit(kind, origin, "DOMStorage.clearDOMStorageItems", "{\"storageId\":" + StorageID(kind, origin) + "}");
         return;
@@ -1255,6 +1334,8 @@ void Session::SetOrigins(std::vector<std::string> origins)
             || std::find(fOrigins.begin(), fOrigins.end(), area->first.second) == fOrigins.end();
         area = gone ? fAreas.erase(area) : std::next(area);
     }
+    // The databases are asked for again when looked at.
+    fDatabases.clear();
     for (auto item = fPending.begin(); item != fPending.end();)
         item = item->second.kind == Pending::Storage && !FindArea(item->second.storage, item->second.origin)
             ? fPending.erase(item) : std::next(item);

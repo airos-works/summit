@@ -664,6 +664,41 @@ static void TestObjectTree()
             && socket.finished && socket.frames.size() == 3 && socket.size == 8 && socket.requestHeaders.size() == 1);
         CHECK_TEXT(DescribeFrames(socket).text, "↑ +0.500 s  hello\n↓ +1.250 s  (binary, 3 bytes)\n✕ +2.000 s  bad frame");
     }
+    // IndexedDB: an origin's databases, their stores, then a store's entries.
+    Sent(session);
+    session.LoadDatabases("https://example.com");
+    commands = Sent(session);
+    const auto* names = Find(commands, "IndexedDB.requestDatabaseNames");
+    CHECK(Find(commands, "IndexedDB.enable") && names && names->parameters["securityOrigin"] == "https://example.com");
+    session.Receive(FromTarget("page-1", {{"id", names->id}, {"result", {{"databaseNames", {"app", "cache"}}}}}));
+    commands = Sent(session);
+    CHECK(commands.size() == 2 && commands[0].method == "IndexedDB.requestDatabase" && commands[0].parameters["databaseName"] == "app");
+    CHECK(session.Databases("https://example.com") && !session.Databases("https://example.com")->loaded);
+    session.Receive(FromTarget("page-1", {{"id", commands[0].id}, {"result", {{"databaseWithObjectStores", {{"name", "app"}, {"version", 3},
+        {"objectStores", {{{"name", "notes"}, {"keyPath", {{"type", "string"}, {"string", "id"}}}, {"autoIncrement", false}, {"indexes", json::array()}}}}}}}}}));
+    session.Receive(FromTarget("page-1", {{"id", commands[1].id}, {"result", {{"databaseWithObjectStores", {{"name", "cache"}, {"version", 1},
+        {"objectStores", json::array()}}}}}}));
+    {
+        const auto* databases = session.Databases("https://example.com");
+        CHECK(databases && databases->loaded && databases->databases.size() == 2 && databases->databases[0].stores == std::vector<std::string> {"notes"}
+            && databases->databases[0].version == 3 && session.TakeChanges().origins);
+    }
+    const auto store = IndexedDBStore("https://example.com", "app", "notes");
+    session.LoadStorage(StorageKind::IndexedDB, store);
+    commands = Sent(session);
+    CHECK(commands.size() == 1 && commands[0].method == "IndexedDB.requestData" && commands[0].parameters["objectStoreName"] == "notes"
+        && commands[0].parameters["databaseName"] == "app" && commands[0].parameters["pageSize"] == Session::kIndexedDBPage);
+    session.Receive(FromTarget("page-1", {{"id", commands[0].id}, {"result", {{"objectStoreDataEntries", {
+        {{"key", Value(1)}, {"primaryKey", Value(1)}, {"value", Value("first note")}}}}, {"hasMore", true}}}}));
+    {
+        const auto* area = session.FindArea(StorageKind::IndexedDB, store);
+        CHECK(area && area->loaded && area->items.size() == 1 && area->items[0].key == "1" && area->items[0].value == "\"first note\""
+            && !area->error.empty());
+    }
+    session.ClearStorage(StorageKind::IndexedDB, store);
+    commands = Sent(session);
+    CHECK(commands.size() == 1 && commands[0].method == "IndexedDB.clearObjectStore" && commands[0].parameters["objectStoreName"] == "notes");
+
     // Messages of a socket the tools never saw open are not news.
     session.Receive(Event("page-1", "Network.webSocketFrameReceived", {{"requestId", "ws9"}, {"timestamp", 1.0},
         {"response", {{"opcode", 1}, {"payloadData", "x"}, {"payloadLength", 1}}}}));

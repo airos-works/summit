@@ -215,9 +215,20 @@ void StoragePanel::SetShown(bool shown)
     }
 }
 
+// An IndexedDB origin (not one of its object stores): its databases.
+static bool IsDatabasesArea(StorageKind kind, const std::string& origin)
+{
+    return kind == StorageKind::IndexedDB && origin.find('\n') == std::string::npos;
+}
+
 void StoragePanel::Load(bool again)
 {
     if (!fShown || !fHasArea) return;
+    if (IsDatabasesArea(fKind, fOrigin)) {
+        const auto* databases = fSession.Databases(fOrigin);
+        if (again || !databases || (!databases->loaded && !databases->waiting)) fSession.LoadDatabases(fOrigin);
+        return;
+    }
     const auto* area = Area();
     if (again || !area || (!area->loaded && !area->waiting)) fSession.LoadStorage(fKind, fOrigin);
 }
@@ -239,6 +250,26 @@ void StoragePanel::RebuildAreas()
             auto* item = new AreaItem(origin.c_str(), kind, origin, true, 1);
             fAreas->AddItem(item);
             if (fHasArea && fKind == kind && fOrigin == origin) selected = item;
+        }
+    }
+    // IndexedDB: an origin's databases are asked for when it is chosen; then
+    // their object stores are listed under it.
+    auto* indexed = new AreaItem("IndexedDB", StorageKind::IndexedDB, { }, false);
+    indexed->SetExpanded(true);
+    fAreas->AddItem(indexed);
+    for (const auto& origin : origins) {
+        auto* item = new AreaItem(origin.c_str(), StorageKind::IndexedDB, origin, true, 1);
+        fAreas->AddItem(item);
+        if (fHasArea && fKind == StorageKind::IndexedDB && fOrigin == origin) selected = item;
+        const auto* databases = fSession.Databases(origin);
+        if (!databases || !databases->loaded) continue;
+        for (const auto& database : databases->databases) {
+            for (const auto& store : database.stores) {
+                const auto key = IndexedDBStore(origin, database.name, store);
+                auto* storeItem = new AreaItem((database.name + " › " + store).c_str(), StorageKind::IndexedDB, key, true, 2);
+                fAreas->AddItem(storeItem);
+                if (fHasArea && fKind == StorageKind::IndexedDB && fOrigin == key) selected = storeItem;
+            }
         }
     }
     auto* cookies = new AreaItem("Cookies", StorageKind::Cookies, { }, true);
@@ -371,13 +402,30 @@ void StoragePanel::Fill()
 {
     const auto* area = Area();
     const bool cookies = fHasArea && fKind == StorageKind::Cookies;
+    const bool indexed = fHasArea && fKind == StorageKind::IndexedDB;
+    if (indexed && IsDatabasesArea(fKind, fOrigin)) {
+        // An origin: its databases are listed under it in the areas.
+        fTables->SetVisibleItem(static_cast<int32>(2));
+        const auto* databases = fSession.Databases(fOrigin);
+        size_t stores = 0;
+        if (databases)
+            for (const auto& database : databases->databases) stores += database.stores.size();
+        fSummary->SetText(!databases || !databases->loaded ? "Reading…" : !databases->error.empty() ? databases->error.c_str()
+            : databases->databases.empty() ? "This origin has no IndexedDB databases."
+            : (std::to_string(databases->databases.size()) + (databases->databases.size() == 1 ? " database · " : " databases · ")
+                + std::to_string(stores) + (stores == 1 ? " object store: choose it on the left." : " object stores: choose one on the left.")).c_str());
+        for (auto* control : std::initializer_list<BControl*> {fDelete, fClear, fSave}) control->SetEnabled(false);
+        fValue->ShowNote("");
+        return;
+    }
     fTables->SetVisibleItem(static_cast<int32>(!fHasArea ? 2 : cookies ? kTableCookies : kTableItems));
     // Cookies are edited by name and value too.
     fKey->SetLabel(cookies ? "Name:" : "Key:");
     fSave->SetLabel(cookies ? "Save Cookie" : "Save Item");
-    fDelete->SetEnabled(area && area->loaded);
+    // An object store's entries are read, and cleared as a whole.
+    fDelete->SetEnabled(area && area->loaded && !indexed);
     fClear->SetEnabled(area && area->loaded);
-    fSave->SetEnabled(fHasArea);
+    fSave->SetEnabled(fHasArea && !indexed);
     auto* list = cookies ? fCookies : fItems;
     // Rows are made again: an area holds at most a few thousand items.
     fItems->Clear();
@@ -430,7 +478,8 @@ void StoragePanel::Fill()
     if (!fHasArea) summary = fSession.StorageOrigins().empty() ? "This page keeps no storage of its own." : "";
     else if (!area || (area->waiting && !area->loaded)) summary = "Reading…";
     else {
-        const char* noun = cookies ? (total == 1 ? " cookie" : " cookies") : (total == 1 ? " item" : " items");
+        const char* noun = cookies ? (total == 1 ? " cookie" : " cookies") : indexed ? (total == 1 ? " entry" : " entries")
+            : (total == 1 ? " item" : " items");
         summary = std::to_string(total) + noun + " · " + FormatBytes(area->Bytes());
         if (shown != total) summary += " · " + std::to_string(shown) + " shown";
         if (!area->error.empty()) summary += " · " + area->error;
@@ -476,12 +525,18 @@ bool StoragePanel::Command(const std::string& action, const std::string& argumen
         const auto kind = argument.substr(0, space);
         const auto origin = space == std::string::npos ? std::string() : argument.substr(space + 1);
         if (kind == "cookies") SelectArea(StorageKind::Cookies, { });
+        else if (kind == "indexeddb") {
+            // "indexeddb ORIGIN" or "indexeddb ORIGIN|DATABASE|STORE".
+            auto area = origin;
+            std::replace(area.begin(), area.end(), '|', '\n');
+            SelectArea(StorageKind::IndexedDB, area);
+        }
         else if (kind == "local" || kind == "session") {
             const auto& origins = fSession.StorageOrigins();
             const auto chosen = origin.empty() && !origins.empty() ? origins.front() : origin;
             if (std::find(origins.begin(), origins.end(), chosen) == origins.end()) error = "The page has no such origin";
             else SelectArea(kind == "local" ? StorageKind::Local : StorageKind::Session, chosen);
-        } else error = "Choose local, session or cookies";
+        } else error = "Choose local, session, indexeddb or cookies";
         RebuildAreas();
     } else if (action == "storage-refresh") {
         Load(true);
