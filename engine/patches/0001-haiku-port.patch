@@ -37091,10 +37091,10 @@ index 0000000000000000000000000000000000000000..1a59f5ca77ca81301993268bcdee2f36
 +} // namespace WebCore
 diff --git a/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaiku.cpp b/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..5438cae6ac710aad9a42f667e240cfb885c4e5ee
+index 0000000000000000000000000000000000000000..56265bda84474df57e28194c4cacd5fdd8693da2
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaiku.cpp
-@@ -0,0 +1,2076 @@
+@@ -0,0 +1,2089 @@
 +/*
 + * Copyright (C) 2014-2016 Haiku, Inc.
 + *
@@ -37126,6 +37126,7 @@ index 0000000000000000000000000000000000000000..5438cae6ac710aad9a42f667e240cfb8
 +#endif
 +#include "ColorSpace.h"
 +#include "MediaPlayerPrivateHaiku.h"
++#include "VideoPlaybackQualityMetrics.h"
 +#include "VideoFrameMetadata.h"
 +
 +#include <mutex>
@@ -37938,6 +37939,14 @@ index 0000000000000000000000000000000000000000..5438cae6ac710aad9a42f667e240cfb8
 +}
 +#endif
 +
++std::optional<VideoPlaybackQualityMetrics> MediaPlayerPrivate::videoPlaybackQualityMetrics()
++{
++    if (!m_videoTrack && !m_presentedFrames)
++        return std::nullopt;
++    unsigned total = m_presentedFrames;
++    return VideoPlaybackQualityMetrics { total, std::min<unsigned>(m_replacedFrames, total), 0, 0, 0 };
++}
++
 +std::optional<VideoFrameMetadata> MediaPlayerPrivate::videoFrameMetadata()
 +{
 +    unsigned presented = m_presentedFrames;
@@ -38039,6 +38048,10 @@ index 0000000000000000000000000000000000000000..5438cae6ac710aad9a42f667e240cfb8
 +        if (!player)
 +            return;
 +        unsigned generation = player->m_videoFrameGeneration;
++        // Frames decoded since the last repaint, but the newest, were never
++        // shown: getVideoPlaybackQuality() counts them as dropped.
++        if (unsigned shown = player->m_lastShownGeneration.exchange(generation); shown && generation > shown + 1)
++            player->m_replacedFrames += generation - shown - 1;
 +        if (mediaFrameTraceEnabled()) {
 +            unsigned sequence = player->m_frameTraceSequence;
 +            bigtime_t decodedAt = player->m_lastFrameTraceDecodedAt;
@@ -39173,10 +39186,10 @@ index 0000000000000000000000000000000000000000..5438cae6ac710aad9a42f667e240cfb8
 +#endif
 diff --git a/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaiku.h b/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaiku.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..0eeca0723092ea14bc51cbe9c3c50b692239a0f8
+index 0000000000000000000000000000000000000000..53bdd111326959b7957f2e6bc5c35eb9623d035d
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaiku.h
-@@ -0,0 +1,287 @@
+@@ -0,0 +1,292 @@
 +/*
 + * Copyright (C) 2014 Haiku, Inc.
 + *
@@ -39310,6 +39323,8 @@ index 0000000000000000000000000000000000000000..0eeca0723092ea14bc51cbe9c3c50b69
 +#endif
 +        // requestVideoFrameCallback: a frame that was not reported yet.
 +        std::optional<VideoFrameMetadata> videoFrameMetadata() override;
++        // Frames decoded, and those a newer one replaced before a repaint showed them.
++        std::optional<VideoPlaybackQualityMetrics> videoPlaybackQualityMetrics() final;
 +#if USE(COORDINATED_GRAPHICS) && USE(TEXTURE_MAPPER) && USE(SKIA)
 +        // Decoded frames go straight to the compositor, so a busy page thread
 +        // does not hold them back.
@@ -39352,6 +39367,9 @@ index 0000000000000000000000000000000000000000..0eeca0723092ea14bc51cbe9c3c50b69
 +        Vector<sk_sp<SkData>> m_readerBuffers;
 +#endif
 +        std::atomic<unsigned> m_presentedFrames { 0 };
++        // The generation the last repaint showed, and frames never shown.
++        std::atomic<unsigned> m_lastShownGeneration { 0 };
++        std::atomic<unsigned> m_replacedFrames { 0 };
 +        std::atomic<bigtime_t> m_presentedFrameTime { 0 };
 +        unsigned m_lastMetadataFrames { 0 };
 +#if USE(COORDINATED_GRAPHICS) && USE(TEXTURE_MAPPER) && USE(SKIA)
