@@ -271,127 +271,127 @@ private:
     int fLastStyle = kLogStyle;
 };
 
-// The objects of the chosen entry as a tree: expanding one asks the page for
-// its properties, and each property that is an object can be expanded in turn.
-class ConsolePanel::ObjectTree : public BOutlineListView {
-public:
-    ObjectTree(Session& session, DevToolsHost& host)
-        : BOutlineListView("objects", B_SINGLE_SELECTION_LIST), fSession(session), fHost(host)
-    {
-    }
-    void Show(const ConsoleEntry& entry)
-    {
-        Clear();
-        for (const auto& object : entry.objects) AddObject(object.label, object.objectId, nullptr);
-        // One object opens at once, as in other browsers' consoles.
-        if (entry.objects.size() == 1) Open(static_cast<Item*>(FullListItemAt(0)));
-    }
-    void Clear()
-    {
-        for (int32 i = FullListCountItems() - 1; i >= 0; --i) delete FullListItemAt(i);
-        MakeEmpty();
-    }
-    // The page answered for these objects.
-    void Answered(const std::vector<std::string>& objects)
-    {
-        for (const auto& objectId : objects) {
-            for (int32 i = 0; i < FullListCountItems(); ++i) {
-                auto* item = dynamic_cast<Item*>(FullListItemAt(i));
-                if (item && item->objectId == objectId && item->requested && !item->filled) Fill(item);
-            }
-        }
-    }
-    // Expands the first shown row whose text starts with prefix (tests).
-    bool OpenRow(const std::string& prefix)
-    {
-        for (int32 i = 0; i < CountItems(); ++i) {
-            auto* item = dynamic_cast<Item*>(ItemAt(i));
-            if (item && std::string(item->Text()).rfind(prefix, 0) == 0 && !item->objectId.empty()) {
-                Open(item);
-                return true;
-            }
-        }
-        return false;
-    }
-    // The rows shown, indented by depth.
-    std::vector<std::string> Rows()
-    {
-        std::vector<std::string> rows;
-        for (int32 i = 0; i < CountItems(); ++i) {
-            auto* item = static_cast<BStringItem*>(ItemAt(i));
-            rows.push_back(std::string(item->OutlineLevel() * 2, ' ') + item->Text());
-        }
-        return rows;
-    }
-    void MouseDown(BPoint where) override
-    {
-        BOutlineListView::MouseDown(where);
-        LoadExpanded();
-    }
-    void KeyDown(const char* bytes, int32 count) override
-    {
-        BOutlineListView::KeyDown(bytes, count);
-        LoadExpanded();
-    }
+ObjectTree::ObjectTree(Session& session, DevToolsHost& host)
+    : BOutlineListView("objects", B_SINGLE_SELECTION_LIST), fSession(session), fHost(host)
+{
+}
 
-private:
-    struct Item : BStringItem {
-        Item(const std::string& text, uint32 level, std::string object)
-            : BStringItem(text.c_str(), level, false), objectId(std::move(object))
-        {
-        }
-        std::string objectId;
-        bool requested = false, filled = false;
-    };
-    void AddObject(const std::string& text, const std::string& objectId, Item* parent)
+struct ObjectTree::Item : BStringItem {
+    Item(const std::string& text, uint32 level, std::string object)
+        : BStringItem(text.c_str(), level, false), objectId(std::move(object))
     {
-        auto* item = new Item(text, parent ? parent->OutlineLevel() + 1 : 0, objectId);
-        if (parent) AddUnder(item, parent);
-        else AddItem(item);
-        // A row to open: its properties come when it is.
-        if (!objectId.empty()) AddUnder(new BStringItem("Loading…"), item);
     }
-    void Open(Item* item)
-    {
-        if (!item) return;
-        Expand(item);
-        LoadExpanded();
-    }
-    void LoadExpanded()
-    {
+    std::string objectId;
+    bool requested = false, filled = false;
+};
+
+void ObjectTree::ShowObjects(const std::vector<ConsoleObject>& objects)
+{
+    Clear();
+    for (const auto& object : objects) AddObject(object.label, object.objectId, nullptr);
+    // One object opens at once, as in other browsers' consoles.
+    if (objects.size() == 1) Open(static_cast<Item*>(FullListItemAt(0)));
+}
+
+void ObjectTree::Clear()
+{
+    for (int32 i = FullListCountItems() - 1; i >= 0; --i) delete FullListItemAt(i);
+    MakeEmpty();
+}
+
+void ObjectTree::Answered(const std::vector<std::string>& objects)
+{
+    for (const auto& objectId : objects) {
         for (int32 i = 0; i < FullListCountItems(); ++i) {
             auto* item = dynamic_cast<Item*>(FullListItemAt(i));
-            if (!item || !item->IsExpanded() || item->requested || item->objectId.empty()) continue;
-            item->requested = true;
-            if (const auto* known = fSession.Properties(item->objectId); known && known->loaded) Fill(item);
-            else {
-                fSession.LoadProperties(item->objectId);
-                fHost.Sync();
-            }
+            if (item && item->objectId == objectId && item->requested && !item->filled) Fill(item);
         }
     }
-    void Fill(Item* item)
-    {
-        const auto* properties = fSession.Properties(item->objectId);
-        if (!properties || !properties->loaded) return;
-        item->filled = true;
-        // In place of "Loading…".
-        while (CountItemsUnder(item, true) > 0) {
-            auto* child = EachItemUnder(item, true, [](BListItem* row, void*) { return row; }, nullptr);
-            if (!child) break;
-            RemoveItem(child);
-            delete child;
+}
+
+bool ObjectTree::OpenRow(const std::string& prefix)
+{
+    for (int32 i = 0; i < CountItems(); ++i) {
+        auto* item = dynamic_cast<Item*>(ItemAt(i));
+        if (item && std::string(item->Text()).rfind(prefix, 0) == 0 && !item->objectId.empty()) {
+            Open(item);
+            return true;
         }
-        if (!properties->error.empty()) AddUnder(new BStringItem(("Not available: " + properties->error).c_str()), item);
-        else if (properties->items.empty()) AddUnder(new BStringItem("No properties"), item);
-        // AddUnder puts each first under its row: last property first.
-        for (auto property = properties->items.rbegin(); property != properties->items.rend(); ++property)
-            AddObject(property->name + ": " + property->value, property->objectId, item);
-        Invalidate();
     }
-    Session& fSession;
-    DevToolsHost& fHost;
-};
+    return false;
+}
+
+std::vector<std::string> ObjectTree::Rows()
+{
+    std::vector<std::string> rows;
+    for (int32 i = 0; i < CountItems(); ++i) {
+        auto* item = static_cast<BStringItem*>(ItemAt(i));
+        rows.push_back(std::string(item->OutlineLevel() * 2, ' ') + item->Text());
+    }
+    return rows;
+}
+
+void ObjectTree::MouseDown(BPoint where)
+{
+    BOutlineListView::MouseDown(where);
+    LoadExpanded();
+}
+
+void ObjectTree::KeyDown(const char* bytes, int32 count)
+{
+    BOutlineListView::KeyDown(bytes, count);
+    LoadExpanded();
+}
+
+void ObjectTree::AddObject(const std::string& text, const std::string& objectId, Item* parent)
+{
+    auto* item = new Item(text, parent ? parent->OutlineLevel() + 1 : 0, objectId);
+    if (parent) AddUnder(item, parent);
+    else AddItem(item);
+    // A row to open: its properties come when it is.
+    if (!objectId.empty()) AddUnder(new BStringItem("Loading…"), item);
+}
+
+void ObjectTree::Open(Item* item)
+{
+    if (!item) return;
+    Expand(item);
+    LoadExpanded();
+}
+
+void ObjectTree::LoadExpanded()
+{
+    for (int32 i = 0; i < FullListCountItems(); ++i) {
+        auto* item = dynamic_cast<Item*>(FullListItemAt(i));
+        if (!item || !item->IsExpanded() || item->requested || item->objectId.empty()) continue;
+        item->requested = true;
+        if (const auto* known = fSession.Properties(item->objectId); known && known->loaded) Fill(item);
+        else {
+            fSession.LoadProperties(item->objectId);
+            fHost.Sync();
+        }
+    }
+}
+
+void ObjectTree::Fill(Item* item)
+{
+    const auto* properties = fSession.Properties(item->objectId);
+    if (!properties || !properties->loaded) return;
+    item->filled = true;
+    // In place of "Loading…".
+    while (CountItemsUnder(item, true) > 0) {
+        auto* child = EachItemUnder(item, true, [](BListItem* row, void*) { return row; }, nullptr);
+        if (!child) break;
+        RemoveItem(child);
+        delete child;
+    }
+    if (!properties->error.empty()) AddUnder(new BStringItem(("Not available: " + properties->error).c_str()), item);
+    else if (properties->items.empty()) AddUnder(new BStringItem("No properties"), item);
+    // AddUnder puts each first under its row: last property first.
+    for (auto property = properties->items.rbegin(); property != properties->items.rend(); ++property)
+        AddObject(property->name + ": " + property->value, property->objectId, item);
+    Invalidate();
+}
 
 ConsolePanel::ConsolePanel(Session& session, DevToolsHost& host)
     : BView("Console", 0), fSession(session), fHost(host)
@@ -585,7 +585,7 @@ void ConsolePanel::Inspect(uint64 serial)
     for (const auto& entry : fSession.Entries()) {
         if (entry.serial != serial) continue;
         if (entry.objects.empty()) return;
-        fObjects->Show(entry);
+        fObjects->ShowObjects(entry.objects);
         if (fSplit->IsItemCollapsed(1)) fSplit->SetItemCollapsed(1, false);
         return;
     }

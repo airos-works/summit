@@ -808,6 +808,83 @@ static void TestExports()
         && !second["response"]["content"].contains("text"));
 }
 
+// The Sources panel's debugger.
+static void TestDebugger()
+{
+    Session session;
+    session.Start();
+    session.Receive(TargetCreated("page-1"));
+    Sent(session);
+    // Breakpoints wait for the debugger; then go to every process.
+    session.SetBreakpoint("https://example.com/app.js", 11);
+    CHECK(!Find(Sent(session), "Debugger.setBreakpointByUrl") && session.Breakpoints().size() == 1);
+    session.EnableDebugger();
+    auto commands = Sent(session);
+    CHECK(Find(commands, "Debugger.enable") && !Find(commands, "Debugger.setBreakpointByUrl"));
+    session.EnableDebugger();
+    CHECK(Sent(session).empty());
+    session.SetBreakpoint("https://example.com/app.js", 20);
+    commands = Sent(session);
+    const auto* set = Find(commands, "Debugger.setBreakpointByUrl");
+    CHECK(set && set->parameters["lineNumber"] == 20 && set->parameters["url"] == "https://example.com/app.js");
+    session.Receive(FromTarget("page-1", {{"id", set->id}, {"result", {{"breakpointId", "https://example.com/app.js:20:0"},
+        {"locations", {{{"scriptId", "5"}, {"lineNumber", 20}, {"columnNumber", 4}}}}}}}));
+    CHECK(session.Breakpoints()[1].resolved && session.Breakpoints()[1].id == "https://example.com/app.js:20:0");
+    // A new process of the page gets the debugger and every breakpoint.
+    session.Receive(TargetCreated("page-2"));
+    commands = Sent(session);
+    CHECK(Find(commands, "Debugger.enable") && std::count_if(commands.begin(), commands.end(),
+        [](const Command& command) { return command.method == "Debugger.setBreakpointByUrl"; }) == 2);
+
+    // Scripts as they are parsed, then their source.
+    session.TakeChanges();
+    session.Receive(Event("page-2", "Debugger.scriptParsed", {{"scriptId", "5"}, {"url", "https://example.com/app.js"}, {"startLine", 0}}));
+    session.Receive(Event("page-2", "Debugger.scriptParsed", {{"scriptId", "6"}, {"url", "https://example.com/"}, {"startLine", 9}}));
+    session.Receive(Event("page-2", "Debugger.scriptParsed", {{"scriptId", "7"}, {"url", ""}, {"isContentScript", true}}));
+    CHECK(session.TakeChanges().scripts && session.Scripts().size() == 3);
+    CHECK(session.FindScript("5")->Label() == "app.js" && session.FindScript("6")->Label().rfind("(inline) ", 0) == 0
+        && session.FindScript("6")->Label().find(":10") != std::string::npos && session.FindScript("7")->contentScript);
+    session.LoadScriptSource("5");
+    commands = Sent(session);
+    const auto* source = Find(commands, "Debugger.getScriptSource");
+    CHECK(source && source->parameters["scriptId"] == "5" && source->target == "page-2");
+    session.LoadScriptSource("5");
+    CHECK(Sent(session).empty());
+    session.Receive(FromTarget("page-2", {{"id", source->id}, {"result", {{"scriptSource", "function tick() {\n  return 1;\n}"}}}}));
+    {
+        const auto changes = session.TakeChanges();
+        CHECK(changes.sources.size() == 1 && changes.sources[0] == "5" && session.FindScript("5")->sourceLoaded
+            && session.FindScript("5")->source.find("tick") != std::string::npos);
+    }
+
+    // Paused: the frames with their scopes; stepping; resumed.
+    session.Receive(Event("page-2", "Debugger.paused", {{"reason", "Breakpoint"}, {"callFrames", {
+        {{"callFrameId", "f1"}, {"functionName", "tick"}, {"location", {{"scriptId", "5"}, {"lineNumber", 1}, {"columnNumber", 2}}},
+            {"scopeChain", {{{"type", "local"}, {"object", {{"type", "object"}, {"objectId", "s1"}}}},
+                {{"type", "global"}, {"object", {{"type", "object"}, {"objectId", "s2"}}}}}}, {"this", {{"type", "object"}, {"objectId", "t1"}}}},
+        {{"callFrameId", "f2"}, {"functionName", ""}, {"location", {{"scriptId", "6"}, {"lineNumber", 12}, {"columnNumber", 0}}}, {"scopeChain", json::array()}}}}}));
+    {
+        const auto& state = session.Debugger();
+        CHECK(session.TakeChanges().debugger && state.paused && state.reason == "Breakpoint" && state.frames.size() == 2
+            && state.frames[0].function == "tick" && state.frames[0].line == 1 && state.frames[0].scopes.size() == 2
+            && state.frames[0].scopes[0].type == "local" && state.frames[0].scopes[0].objectId == "s1" && state.frames[0].thisObjectId == "t1");
+    }
+    session.DebuggerCommand("stepOver");
+    session.DebuggerCommand("evaluate");
+    commands = Sent(session);
+    CHECK(commands.size() == 1 && commands[0].method == "Debugger.stepOver" && commands[0].target == "page-2");
+    session.Receive(Event("page-2", "Debugger.resumed", json::object()));
+    CHECK(!session.Debugger().paused && session.Debugger().frames.empty());
+
+    // Removing a breakpoint uses its id; a new page forgets its scripts.
+    session.RemoveBreakpoint("https://example.com/app.js", 20);
+    commands = Sent(session);
+    CHECK(Find(commands, "Debugger.removeBreakpoint") && Find(commands, "Debugger.removeBreakpoint")->parameters["breakpointId"] == "https://example.com/app.js:20:0"
+        && session.Breakpoints().size() == 1);
+    session.Receive(Event("page-2", "Debugger.globalObjectCleared", json::object()));
+    CHECK(session.Scripts().empty() && session.TakeChanges().scripts);
+}
+
 static void TestHeaders()
 {
     Session session;
@@ -1577,6 +1654,7 @@ int main()
     TestConsole();
     TestObjectTree();
     TestExports();
+    TestDebugger();
     TestHeaders();
     TestKinds();
     TestJSON();

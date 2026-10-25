@@ -107,6 +107,44 @@ enum class EntryKind {
     Result
 };
 
+// The Sources panel's debugger: the page's scripts, breakpoints by address
+// and line, and where the page is paused.
+struct Script {
+    std::string id, url;
+    // Of an inline script, in its document, from 0.
+    int startLine = 0;
+    bool contentScript = false;
+    // Asked for with getScriptSource; empty until then.
+    bool sourceLoaded = false, sourceWaiting = false;
+    std::string source, sourceError;
+    // "app.js", or "(inline) page.html:12" for a script in a document.
+    std::string Label() const;
+    // "app.js:12" for a line from 1.
+    std::string Place(int line) const;
+};
+struct Breakpoint {
+    std::string url;
+    int line = 0; // from 0
+    std::string id;
+    bool resolved = false;
+};
+struct DebugScope {
+    // "global", "local", "closure", "with", "catch", "block"...
+    std::string type, name, objectId;
+};
+struct DebugFrame {
+    std::string callFrameId, function, scriptId;
+    int line = 0, column = 0;
+    std::vector<DebugScope> scopes;
+    std::string thisObjectId;
+};
+struct DebuggerState {
+    bool enabled = false, paused = false;
+    // "breakpoint", "exception", "DebuggerStatement", "other"...
+    std::string reason;
+    std::vector<DebugFrame> frames;
+};
+
 // An object a console entry shows (an argument, a result) that the
 // Console's object tree can look into.
 struct ConsoleObject {
@@ -216,7 +254,7 @@ struct Changes {
     bool Any() const
     {
         return requestsReset || consoleReset || consoleAdded || consoleLastChanged || !requests.empty() || !bodies.empty()
-            || origins || storage || elements || !properties.empty();
+            || origins || storage || elements || !properties.empty() || scripts || debugger || !sources.empty();
     }
     // The page's origins (StorageOrigins()) changed; a storage area or the
     // cookies changed or were answered.
@@ -226,6 +264,10 @@ struct Changes {
     bool elements = false;
     // Objects whose properties arrived (Properties()).
     std::vector<std::string> properties;
+    // The debugger: scripts found or forgotten, a script's source arrived,
+    // breakpoints or the pause changed.
+    bool scripts = false, debugger = false;
+    std::vector<std::string> sources;
 };
 
 // Text with the parts of it that are drawn differently.
@@ -280,6 +322,19 @@ public:
     void RequestBody(uint64_t serial);
     // Runs an expression in the page, as typed into the console.
     void Evaluate(const std::string& expression);
+    // The debugger, turned on when the Sources panel is first shown
+    // (Debugger.enable, in every process of the page).
+    void EnableDebugger();
+    const std::map<std::string, Script>& Scripts() const { return fScripts; }
+    const Script* FindScript(const std::string& id) const;
+    void LoadScriptSource(const std::string& id);
+    // A breakpoint at a line (from 0) of every script with that address.
+    void SetBreakpoint(const std::string& url, int line);
+    void RemoveBreakpoint(const std::string& url, int line);
+    const std::vector<Breakpoint>& Breakpoints() const { return fBreakpoints; }
+    const DebuggerState& Debugger() const { return fDebugger; }
+    // "pause", "resume", "stepOver", "stepInto", "stepOut".
+    void DebuggerCommand(const std::string& command);
     // Network: the cache off while the tools are open
     // (Network.setResourceCachingDisabled), in every process of the page.
     void SetCacheDisabled(bool disabled);
@@ -328,7 +383,8 @@ public:
 private:
     friend struct ProtocolReader;
     struct Pending {
-        enum Kind { Body, Evaluation, Storage, StorageEdit, Frames, Elements, Properties, DatabaseNames, Database, Other };
+        enum Kind { Body, Evaluation, Storage, StorageEdit, Frames, Elements, Properties, DatabaseNames, Database, ScriptSource,
+            SetBreakpoint, Other };
         Kind kind;
         uint64_t serial;
         // Storage and StorageEdit: the area; Frames: the target asked;
@@ -369,6 +425,10 @@ private:
     std::map<std::pair<StorageKind, std::string>, StorageArea> fAreas;
     std::map<std::string, ObjectProperties> fProperties;
     std::map<std::string, OriginDatabases> fDatabases;
+    std::map<std::string, Script> fScripts;
+    std::vector<Breakpoint> fBreakpoints;
+    DebuggerState fDebugger;
+    void SendBreakpoint(const std::string& target, Breakpoint& breakpoint);
     DOMModel fDOM;
     std::vector<DOMModel::Command> fHeldDOM;
     std::vector<std::string> fOutgoing;
