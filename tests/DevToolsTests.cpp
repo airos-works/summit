@@ -1349,6 +1349,8 @@ static void TestElementStyles()
     commands = take();
     CHECK(commands.size() == 1 && json::parse(commands[0].parameters)["text"] == "color: red;"
         && json::parse(commands[0].parameters)["styleId"]["styleSheetId"] == "5");
+    // A property's computed value, for what var() comes to.
+    CHECK(dom.ComputedValue("width") == "480px" && dom.ComputedValue("color") == "rgb(51, 51, 51)" && dom.ComputedValue("--none").empty());
     // :hov forces states on the selected element and reads its styles again.
     take();
     dom.SetForcedPseudoClasses(5, {"hover", "focus", "hover"});

@@ -1553,6 +1553,15 @@ void DOMModel::StylesArrived()
     fChanges.styles = true;
 }
 
+std::string DOMModel::ComputedValue(const std::string& property) const
+{
+    // The list is sorted by name.
+    const auto& computed = fStyles.computed;
+    const auto found = std::lower_bound(computed.begin(), computed.end(), property,
+        [](const auto& entry, const std::string& name) { return entry.first < name; });
+    return found != computed.end() && found->first == property ? found->second : std::string();
+}
+
 bool DOMModel::IsInheritable(const std::string& property) const
 {
     if (property.rfind("--", 0) == 0) return true;

@@ -92,6 +92,8 @@ On the right, tabs for the selected element:
   rule's first or last line adds a declaration. The page repaints at once:
   this is the page's style sheet being changed, as other browsers do it.
   *Filter* shows the declarations whose property or value contains a text.
+  A declaration of the element's own rules that uses `var()` shows what it
+  came to after it, in grey (`color: var(--text); = rgb(51, 51, 51)`).
   A double click on a rule's selector edits it (`CSS.setRuleSelector`; the
   page's own rules only), and **+** (or New Style Rule in the secondary
   button's menu) adds an empty rule for the selected element's selector to

@@ -265,6 +265,9 @@ public:
     // "focus"...), as if it were hovered or focused; its styles are read
     // again. The page forgets them when the tools close or it moves on.
     void SetForcedPseudoClasses(int id, std::vector<std::string> classes);
+    // The selected element's computed value of a property (custom ones
+    // included), or empty.
+    std::string ComputedValue(const std::string& property) const;
     // Changes a rule's selector (CSS.setRuleSelector), then reads the styles again.
     void SetRuleSelector(size_t block, const std::string& selector);
     // Adds an empty rule for selector to the page's inspector style sheet

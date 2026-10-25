@@ -1052,6 +1052,13 @@ private:
                 }
                 SetHighColor(value);
                 DrawString(";");
+                // What var() came to on this element, as other browsers show it.
+                if (!struck && !block.inheritedFrom && declaration.value.find("var(") != std::string::npos) {
+                    if (const auto resolved = fDOM.ComputedValue(declaration.name); !resolved.empty() && resolved != declaration.value) {
+                        SetHighColor(palette.muted);
+                        DrawString(("  = " + resolved).c_str());
+                    }
+                }
                 if (struck) {
                     const float end = PenLocation().x;
                     SetHighColor(Mix(palette.muted, palette.background, .2f));
