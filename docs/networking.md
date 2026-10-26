@@ -94,6 +94,52 @@ a response: otherwise the page's next request goes out on that connection,
 and a `POST` sent on it fails (curl cannot send its body again). That, not the
 streams, made an earlier run look as if chunked responses never ended.
 
+## Connections after a network change (#129)
+
+### What the user sees
+
+When a VPN disconnects, or the machine leaves one network for another while
+staying online, pages on hosts Summit already had connections to load again
+within seconds. Before, every new request to such a host went onto the old
+HTTP/2 connection, waited the 300 s a response may take to start and failed,
+and the next one did the same, until Summit was restarted.
+
+### How it works
+
+- Haiku's TCP never fails an established connection whose local address was
+  removed (jmgasper/haiku#41), and libcurl keeps such a connection in its
+  pool. The offline handling above does not apply: another interface is
+  still up.
+- On every network change the notifier (`NetworkStateNotifierHaiku.cpp`)
+  also keeps the local addresses of the interfaces that count for being
+  online, and the ones seen before that have gone since (until they come
+  back). It logs `Summit net: the local address A went away`.
+- Every socket libcurl opens for a connection is registered
+  (`CURLOPT_OPENSOCKETFUNCTION` and `CURLOPT_CLOSESOCKETFUNCTION` set in the
+  `CurlHandle` constructor, `CurlContext.cpp`). Those whose local address
+  went away are ended: each socket is replaced under its descriptor
+  (`dup2`) with one end of a socket pair whose other end is closed, which
+  reads as ended at once, and the curl workers are woken
+  (`curl_multi_wakeup`). libcurl fails what was on them, drops them from its
+  pool and later closes the replacement: `Summit net: closed N connections
+  whose local address went away`. `shutdown(SHUT_RDWR)` is not enough on
+  Haiku: its TCP sends the FIN and then waits for the peer's, which a dead
+  connection never sends (seen on the X399: the request stayed in
+  `fin-wait2` until the server answered). WebSockets close the same way, and pages
+  reconnect them.
+- A GET, HEAD or OPTIONS that failed on such a connection before any of its
+  response came is sent again once on a fresh connection
+  (`CurlRequest::retryOnFreshConnectionHaiku`, which also does the HTTP/2
+  error retries).
+- A request the page set no timeout for that gets no response in 300 s
+  closes its connection (found by its local address and port), so the
+  requests after it do not wait on it too, and a GET, HEAD or OPTIONS is
+  sent once more on a fresh connection. A request with a timeout of its own
+  just fails.
+- Not covered: a connection whose route changed while its local address
+  stays (a full-tunnel VPN connecting) is left alone; it fails at the 300 s
+  limit above and is closed then.
+
 ## SameSite cookies (#92)
 
 ### What the user sees
