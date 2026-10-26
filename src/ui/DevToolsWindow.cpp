@@ -101,11 +101,12 @@ DevToolsWindow::DevToolsWindow(BMessenger owner, int64 tab, const std::string& p
     fUndockButton->SetToolTip("Show the tools in a window of their own");
     fUndockButton->SetEnabled(false);
     BLayoutBuilder::Group<>(this, B_VERTICAL, 0)
+        // On the left: a narrow dock clips the tools' right side.
         .AddGroup(B_HORIZONTAL, 4).SetInsets(4, 2, 4, 0)
-            .AddGlue()
             .Add(fDockButton)
             .Add(fDockRightButton)
             .Add(fUndockButton)
+            .AddGlue()
         .End()
         .Add(fTabs);
     SetSizeLimits(560, 10000, 360, 10000);

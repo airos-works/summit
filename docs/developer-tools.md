@@ -24,7 +24,7 @@ as it is when the panel is first shown.
 
 ### Docking
 
-**Dock Below** and **Dock Right** (top right of the tools) put the tools
+**Dock Below** and **Dock Right** (top left of the tools) put the tools
 under or beside the page in their browser window; **Undock** gives them
 their own window back where it was, and Shift+Alt+D docks (where they last
 were) or undocks. New tools open as the last ones were left. The browser

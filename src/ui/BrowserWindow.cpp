@@ -596,7 +596,7 @@ public:
     explicit DockSlot(bool beside = false) : BView(beside ? "devtools-dock-side" : "devtools-dock", B_FRAME_EVENTS)
     {
         SetViewUIColor(B_PANEL_BACKGROUND_COLOR);
-        SetExplicitMinSize(beside ? BSize(240, B_SIZE_UNSET) : BSize(B_SIZE_UNSET, 120));
+        SetExplicitMinSize(beside ? BSize(320, B_SIZE_UNSET) : BSize(B_SIZE_UNSET, 120));
     }
     void FrameMoved(BPoint) override { Changed(); }
     void FrameResized(float, float) override { Changed(); }
@@ -1004,7 +1004,7 @@ BrowserWindow::BrowserWindow(std::shared_ptr<SharedProfile> profile, std::string
                 .Add(fPages, 0.65f)
                 .Add(fDock = new DockSlot(), 0.35f)
             .End()
-            .Add(fSideDock = new DockSlot(true), 0.3f)
+            .Add(fSideDock = new DockSlot(true), 0.4f)
         .End()
 #else
         .Add(fPages, 1)
