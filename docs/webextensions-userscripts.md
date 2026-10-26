@@ -100,8 +100,9 @@ Tampermonkey 5.5.1 (Chrome Web Store build) needed four more fixes:
   were accepted and compiled, but `WebExtensionContext::addDeclarativeNetRequestRules()`
   attached a rule list to pages only for `declarativeNetRequest`, so none of
   them applied. It now uses the same test as the API
-  (`nativeDeclarativeNetRequestAllowed()`: either permission, the second with
-  access to all URLs).
+  (`nativeDeclarativeNetRequestAllowed()`: either permission). Since 27 Oct
+  rules of an extension without access to all URLs apply only to requests to
+  the hosts it may access (`webextensions-dnr-downloads.md`).
 
 - **`tabs.onUpdated`.** Summit never fired it: on Cocoa the browser reports
   tab changes, and Summit's browser did not. Tampermonkey opens its installer
