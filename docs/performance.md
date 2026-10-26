@@ -986,6 +986,32 @@ animations and later class changes render pixel-identical either way
 (`www/animstate.html` in the session's test kit). `SUMMIT_SKIP_STILL_ANIMATIONS=0`
 invalidates on every tick again.
 
+Animations far out of view no longer restyle in every frame. With the
+finished ones left alone, linear.app's home page at rest still spent 12-13 %
+of its main thread restyling (592-653 ms of style in 6 s): 84 running
+animations, all of elements below the fold (75 `steps()` opacity dots of SVG
+grids, three background sweeps and three transforms of `::after` boxes). As
+in Firefox, a tick of an animation whose target (an element or its
+pseudo-element) is out of view by more than a quarter of the view (at least
+200 px) leaves its style alone when it changes only how the target is
+painted (opacity, colours, background position, SVG fill, stroke and stop
+colours); a transform, which can move the target into view, restyles it every
+200 ms instead of every frame; anything else (layout, filters, shadows)
+ticks as before. Held-back targets are restyled when they come near the view
+(`LocalFrameView::viewportContentsChanged`, after scrolling, layout or
+style), when a script reads computed style (`Style::Extractor`), and for
+transforms when a script asks where an element is (the callers of
+`Document::updateLayoutIfDimensionsOutOfDate`: `getBoundingClientRect`,
+`offsetTop` and the like). linear.app at rest on the X399, same build: 13 %
+busy and 653 ms of style with `SUMMIT_THROTTLE_OFFSCREEN_ANIMATIONS=0`, 3.1 %
+and 99 ms with it. A test page of 300 off-screen `steps()` opacity dots and
+three background sweeps: 27 % busy before, 2.3 % after; scrolled to, they
+animate (frames differ) and `getComputedStyle` read off screen gives the
+current values. Three off-screen `::after` sweeps: 7 records in 6 s, and they
+animate when scrolled to. A box whose transform carries it from 3000 px down
+into view arrives on time, and `getBoundingClientRect` polled every 250 ms
+followed it exactly (2757 px at 505 ms, 2756 expected).
+
 Filtered and masked layers get surfaces of steadier sizes. A layer with a
 filter or mask is drawn through a surface the size of its part in view; as
 the page scrolled that size changed in every frame, and each new size was a
