@@ -1403,6 +1403,33 @@ static void TestElements()
     CHECK(dom.Expandable(4) && !dom.Find(4)->childrenKnown);
     CHECK_TEXT(Joined(dom.DescribeRow({4, 1, false})), "<head>…</head>");
 
+    // Dragging a node in the tree: into an element or before a child of
+    // it; never into itself, under itself, into a text node, nor the
+    // document element, nor where it already is.
+    Sent(session);
+    CHECK(dom.Move(8, 5, 6));
+    commands = Sent(session);
+    const auto* move = Find(commands, "DOM.moveTo");
+    CHECK(move && move->parameters["nodeId"] == 8 && move->parameters["targetNodeId"] == 5
+        && move->parameters["insertBeforeNodeId"] == 6 && Find(commands, "DOM.markUndoableState"));
+    const auto moveId = move ? move->id : 0;
+    CHECK(dom.Move(6, 9, 0));
+    commands = Sent(session);
+    CHECK(Find(commands, "DOM.moveTo") && !Find(commands, "DOM.moveTo")->parameters.contains("insertBeforeNodeId"));
+    CHECK(!dom.Move(5, 6, 0) && !dom.Move(5, 5, 0) && !dom.Move(6, 7, 0) && !dom.Move(3, 5, 0) && !dom.Move(9, 5, 0)
+        && !dom.Move(10, 5, 8));
+    CHECK(Sent(session).empty());
+    int dropParent = 0, dropBefore = 0;
+    CHECK(dom.DropTarget({10, 2, false}, 1, &dropParent, &dropBefore) && dropParent == 5 && dropBefore == 8);
+    CHECK(dom.DropTarget({10, 2, false}, -1, &dropParent, &dropBefore) && dropParent == 5 && dropBefore == 10);
+    CHECK(dom.DropTarget({9, 2, false}, 0, &dropParent, &dropBefore) && dropParent == 9 && dropBefore == 0);
+    CHECK(dom.DropTarget({9, 2, false}, 1, &dropParent, &dropBefore) && dropParent == 5 && dropBefore == 0);
+    CHECK(dom.DropTarget({5, 1, true}, -1, &dropParent, &dropBefore) && dropParent == 5 && dropBefore == 0);
+    CHECK(!dom.DropTarget({7, 3, false}, 0, &dropParent, &dropBefore));
+    // The answer selects the node where it went.
+    session.Receive(Reply("page-1", moveId, {{"nodeId", 8}}));
+    CHECK(dom.Selected() == 8);
+
     // A node removed: the selection in it moves to the node after it.
     dom.Select(10);
     Sent(session);

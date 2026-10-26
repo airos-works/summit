@@ -242,6 +242,14 @@ public:
     void SetTagName(int id, const std::string& name);
     void SetOuterHTML(int id, const std::string& html);
     void Remove(int id);
+    // Moves the node into parent, before the child before (0: last), as
+    // dragging it in the tree does (DOM.moveTo). False when that cannot be:
+    // into itself or a node under it, into a node that is not an element,
+    // or the document element anywhere.
+    bool Move(int id, int parent, int before);
+    // Where a node dropped at row would go: before it (zone -1), into it as
+    // its last child (0), after it (1). False when it cannot go there.
+    bool DropTarget(const TreeRow& row, int zone, int* parent, int* before) const;
     void Undo();
     void Redo();
     void ScrollIntoView(int id);
@@ -337,7 +345,7 @@ private:
     struct Pending {
         enum Kind {
             Ignore, Document, Children, ExpandAll, Attributes, Matched, Inline, Computed, Resolve, Box, SetStyle, Edit,
-            TagName, Remove, Search, SearchResults, RequestNode, Evaluate, Path, OuterHTML, SheetText, Properties, Accessibility, Listeners,
+            TagName, Move, Remove, Search, SearchResults, RequestNode, Evaluate, Path, OuterHTML, SheetText, Properties, Accessibility, Listeners,
             RuleFrame, RuleSheet, AddRule
         };
         Kind kind;

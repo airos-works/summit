@@ -78,7 +78,14 @@ in it at once, and after a reload the node that was selected is found again.
   text (`id="main" class="note"`: those left out are removed); on the tag
   name renames the element; on a text or a comment edits it. Enter keeps the
   change, Escape drops it, clicking elsewhere keeps it. **Delete** (or
-  Backspace) removes the selected node and selects the next one. The
+  Backspace) removes the selected node and selects the next one.
+  **Dragging** a line moves its node: dropped on the upper part of a line it
+  goes before that node, on the lower part after it, and in the middle into
+  it as its last child (on a closing tag: into that element, or after it); a
+  line or a box shows where while dragging. A node cannot go into itself or
+  a node under it, into a text node or an empty element such as `img`, and
+  the document element stays where it is. The moved node is selected, and
+  Undo puts it back. Test action: `elements-move NODE,PARENT[,BEFORE]`. The
   secondary button's menu also has Add Attribute, Edit as HTML (the node's
   outer HTML in an editor; Apply replaces it in the page), Copy Outer HTML
   (also Alt+C), Copy Selector, Expand All, Collapse All, Scroll into View,
@@ -492,7 +499,7 @@ page (WebProcess)          UIProcess                          browser
     them again too, at most every 0.3 s.
   - Edits are `DOM.setAttributesAsText` (after `DOM.removeAttribute` for the
     attributes no longer in the text), `setNodeValue`, `setNodeName`,
-    `setOuterHTML` and `removeNode`, each followed by
+    `setOuterHTML`, `removeNode` and `moveTo`, each followed by
     `DOM.markUndoableState` so that `DOM.undo` and `DOM.redo` step through
     them. Find is `DOM.performSearch` and `DOM.getSearchResults`.
   - The highlight is `DOM.highlightNode` with Web Inspector's colours
@@ -727,5 +734,10 @@ is started again.
   engine has `!` there since 19 October (5e48736); the label stays off
   because accessibility for the whole web process costs time on every change
   of the page.
-- In Elements: the hovered node selected in the tree while picking,
-  dragging nodes, and the box model of other than the selected element.
+- In Elements: the hovered node selected in the tree while picking (WebKit
+  sends no event for the node under the pointer), and the box model of
+  other than the selected element. Moving nodes was checked on the X399
+  through `elements-move` (the same `DOMModel::Move` a drop calls: an item
+  moved before its first sibling and another into a `div`, a list refused
+  into its own item, two Undos restoring the page); dragging with a real
+  pointer was not, as the machine takes no synthetic pointer input.

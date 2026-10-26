@@ -944,6 +944,7 @@ struct DOMReader {
                 }
                 break;
             case Pending::TagName:
+            case Pending::Move:
                 if (failed) changes.notice = error;
                 else if (const int id = Integer(Member(result, "nodeId")); model.Find(id)) {
                     model.Reveal(id);
@@ -1814,6 +1815,55 @@ void DOMModel::Remove(int id)
     fAfterRemoval[id] = after;
     Send("DOM.removeNode", "{\"nodeId\":" + std::to_string(id) + "}", Pending::Remove, id);
     Send("DOM.markUndoableState", "{}");
+}
+
+bool DOMModel::Move(int id, int parent, int before)
+{
+    const auto* node = Find(id);
+    const auto* into = Find(parent);
+    if (!node || !into || id == fDocument || node->parent == fDocument || !into->IsElement() || IsVoid(into->Tag())) return false;
+    // Not into itself or anything under it.
+    for (const auto* above = into; above; above = Find(above->parent))
+        if (above->id == id) return false;
+    if (before == id) return false;
+    if (before && std::find(into->children.begin(), into->children.end(), before) == into->children.end()) return false;
+    // Already there.
+    if (node->parent == parent) {
+        const auto& siblings = into->children;
+        const auto at = std::find(siblings.begin(), siblings.end(), id);
+        if (at != siblings.end() && ((before && at + 1 != siblings.end() && *(at + 1) == before) || (!before && at + 1 == siblings.end())))
+            return false;
+    }
+    std::string parameters = "{\"nodeId\":" + std::to_string(id) + ",\"targetNodeId\":" + std::to_string(parent);
+    if (before) parameters += ",\"insertBeforeNodeId\":" + std::to_string(before);
+    Send("DOM.moveTo", parameters + "}", Pending::Move, id);
+    Send("DOM.markUndoableState", "{}");
+    return true;
+}
+
+bool DOMModel::DropTarget(const TreeRow& row, int zone, int* parent, int* before) const
+{
+    const auto* node = Find(row.node);
+    if (!node) return false;
+    // A closing tag: into the element as its last child, or after it.
+    if (row.closing && zone < 0) zone = 0;
+    if (zone == 0) {
+        if (!node->IsElement() || IsVoid(node->Tag())) return false;
+        *parent = node->id;
+        *before = 0;
+        return true;
+    }
+    const auto* above = Find(node->parent);
+    if (!above || !above->IsElement()) return false;
+    *parent = above->id;
+    if (zone < 0) {
+        *before = node->id;
+        return true;
+    }
+    const auto& siblings = above->children;
+    const auto at = std::find(siblings.begin(), siblings.end(), node->id);
+    *before = at != siblings.end() && at + 1 != siblings.end() ? *(at + 1) : 0;
+    return true;
 }
 
 void DOMModel::Undo() { Send("DOM.undo", "{}", Pending::Edit); }

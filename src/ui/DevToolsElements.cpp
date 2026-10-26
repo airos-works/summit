@@ -32,7 +32,8 @@ namespace {
 constexpr uint32 kPickToggled = 'deps', kSearchRun = 'desr', kSearchPrevious = 'desp', kSearchNext = 'desn',
     kStyleFilterChanged = 'desf', kComputedFilterChanged = 'decf', kComputedAllChanged = 'deca', kEditDone = 'deed',
     kTreeCommand = 'detc', kStyleCommand = 'dest', kApplyHTML = 'deah', kSideTabChanged = 'deat', kForceMenu = 'defm',
-    kForcePseudo = 'defp', kSearchTyped = 'deft', kSearchSettled = 'dess', kNewRuleButton = 'denr', kColorChosen = 'decc';
+    kForcePseudo = 'defp', kSearchTyped = 'deft', kSearchSettled = 'dess', kNewRuleButton = 'denr', kColorChosen = 'decc',
+    kNodeDrag = 'dend';
 // A colour value's picker: OK sets the declaration to the colour chosen (its
 // alpha kept), Cancel or closing leaves it.
 class ColorPicker : public BWindow {
@@ -421,11 +422,38 @@ public:
         fDOM.Select(row.node);
         fHost.Sync();
         if (clicks == 2 && !row.closing) EditAt(index, where.x);
+        else {
+            // Dragging the line moves the node.
+            fPressed = index;
+            fPressedAt = where;
+        }
+    }
+
+    void MouseUp(BPoint where) override
+    {
+        LineView::MouseUp(where);
+        fPressed = -1;
     }
 
     void MouseMoved(BPoint where, uint32 transit, const BMessage* dragged) override
     {
         LineView::MouseMoved(where, transit, dragged);
+        if (dragged && dragged->what == kNodeDrag) {
+            ShowDrop(transit == B_EXITED_VIEW || transit == B_OUTSIDE_VIEW ? -1 : LineAt(where), where);
+            return;
+        }
+        if (fPressed >= 0 && fPressed < static_cast<int>(fRows.size()) && std::hypot(where.x - fPressedAt.x, where.y - fPressedAt.y) > 5) {
+            int32 buttons = 0;
+            if (const auto* message = Window()->CurrentMessage()) message->FindInt32("buttons", &buttons);
+            const int node = fRows[fPressed].node;
+            fPressed = -1;
+            if ((buttons & B_PRIMARY_MOUSE_BUTTON) && node != fDOM.Document()) {
+                BMessage drag(kNodeDrag);
+                drag.AddInt32("node", node);
+                DragMessage(&drag, LineFrame(OpenRow(node)));
+                return;
+            }
+        }
         const int index = transit == B_EXITED_VIEW || transit == B_OUTSIDE_VIEW ? -1 : LineAt(where);
         if (index == fHover) return;
         if (fHover >= 0) Invalidate(LineFrame(fHover));
@@ -486,6 +514,16 @@ public:
 
     void MessageReceived(BMessage* message) override
     {
+        if (message->what == kNodeDrag && message->WasDropped()) {
+            const BPoint where = ConvertFromScreen(message->DropPoint());
+            const int index = LineAt(where);
+            ShowDrop(-1, where);
+            int parent = 0, before = 0;
+            if (index >= 0 && fDOM.DropTarget(fRows[index], DropZone(index, where), &parent, &before)
+                && fDOM.Move(message->GetInt32("node", 0), parent, before))
+                fHost.Sync();
+            return;
+        }
         switch (message->what) {
             case kTreeCommand: Command(message->GetInt32("command", -1), message->GetInt32("node", 0)); break;
             case kEditDone: {
@@ -699,6 +737,40 @@ private:
             DrawString(text.c_str(), BPoint(x, baseline));
             x += StringWidth(text.c_str());
         }
+        // Where a dragged node would go: a line before or after this one,
+        // or a box around it for into it.
+        if (index == fDropIndex) {
+            SetHighColor(palette.accent);
+            const float left = kMargin + row.depth * kIndent;
+            if (fDropZone == 0) StrokeRect(BRect(left, frame.top, frame.right - 2, frame.bottom));
+            else {
+                const float y = fDropZone < 0 ? frame.top : frame.bottom;
+                FillRect(BRect(left, y - 1, frame.right - 2, y));
+            }
+        }
+    }
+
+    // Before (-1), into (0) or after (1) the line, by where in it the
+    // pointer is.
+    int DropZone(int index, BPoint where) const
+    {
+        const float fraction = (where.y - LineFrame(index).top) / fLineHeight;
+        return fraction < .3f ? -1 : fraction > .7f ? 1 : 0;
+    }
+
+    void ShowDrop(int index, BPoint where)
+    {
+        int zone = 0, parent = 0, before = 0;
+        if (index >= 0) {
+            zone = DropZone(index, where);
+            if (fRows[index].closing && zone < 0) zone = 0;
+            if (!fDOM.DropTarget(fRows[index], zone, &parent, &before)) index = -1;
+        }
+        if (index == fDropIndex && zone == fDropZone) return;
+        if (fDropIndex >= 0 && fDropIndex < static_cast<int>(fRows.size())) Invalidate(LineFrame(fDropIndex));
+        fDropIndex = index;
+        fDropZone = zone;
+        if (index >= 0) Invalidate(LineFrame(index));
     }
 
     void ShowMenu(int node, BPoint screen)
@@ -746,6 +818,10 @@ private:
     std::vector<TreeRow> fRows;
     float fWidest = 0;
     int fHover = -1, fCursor = -1;
+    // The line pressed, for dragging its node, and where a dragged node
+    // would be dropped.
+    int fPressed = -1, fDropIndex = -1, fDropZone = 0;
+    BPoint fPressedAt;
     bool fKeepCursor = false;
 };
 
@@ -1808,6 +1884,12 @@ bool ElementsPanel::Command(const std::string& action, const std::string& argume
     else if (verb == "copy-html") dom.RequestOuterHTML(dom.Selected(), kForCopy);
     else if (verb == "edit-html") dom.RequestOuterHTML(dom.Selected(), kForEdit);
     else if (verb == "delete") dom.Remove(dom.Selected());
+    // "move NODE,PARENT[,BEFORE]": as dropping NODE into PARENT before the
+    // child BEFORE (or last) does.
+    else if (verb == "move") {
+        if (!dom.Move(static_cast<int>(number(0)), static_cast<int>(number(1)), static_cast<int>(std::max(0L, number(2)))))
+            error = "The node cannot be moved there";
+    }
     else if (verb == "undo") dom.Undo();
     else if (verb == "redo") dom.Redo();
     else if (verb == "scroll") dom.ScrollIntoView(dom.Selected());
