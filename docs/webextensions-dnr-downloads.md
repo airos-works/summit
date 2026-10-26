@@ -84,8 +84,21 @@ Limits:
   call `checks.all()` once first).
 - `setExtensionActionOptions` rejects the promise with "not supported on this
   platform".
-- `testMatchOutcome` and `onRuleMatchedDebug` are absent (Chrome offers them
-  to unpacked extensions only).
+- `testMatchOutcome({url, type, method, initiator, tabId})` answers
+  `{matchedRules: [{ruleId, rulesetId}]}`: the UI process runs the
+  extension's compiled rules (`m_nativeDNRRules`) on the request with
+  WebCore's `ContentExtensionsBackend::actionsForResourceLoad`, as for a
+  load (the request's own address as the page's for `main_frame`, else the
+  initiator's), and returns the rules whose report actions matched; an
+  allow rule of higher priority leaves out the rules below it, as in
+  Chrome. The first call has the rules compiled again to report their ids
+  (as `getMatchedRules` does). It needs `declarativeNetRequestFeedback`
+  (Chrome offers it to unpacked extensions only; Summit to every extension
+  with the permission). Checked on the X399 with `dnr-matched.zip`: a
+  matching image gave rule 1, the allowed one only rule 2, a script of that
+  name and another image nothing, and an invalid address an error.
+- `onRuleMatchedDebug` is absent (Chrome offers it to unpacked extensions
+  only).
 - `MAX_NUMBER_OF_REGEX_RULES` (1000) is enforced for the dynamic rules and
   for the session rules, each, as in Chrome (static rulesets are not
   checked). Dynamic and session rules share one limit of 30000, counted once
