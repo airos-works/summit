@@ -65558,20 +65558,129 @@ index 0000000000000000000000000000000000000000..6b5fc0f78f205ca35494521f2ebefe65
 +
 +} // namespace WebCore
 diff --git a/Source/WebCore/platform/network/curl/CurlContext.cpp b/Source/WebCore/platform/network/curl/CurlContext.cpp
-index 2e6a2537f3e283d7cb7f2081c8549f0256ee4e71..e98e0f5f0cec52b7d22e1bbba2f3c350772b4183 100644
+index 2e6a2537f3e283d7cb7f2081c8549f0256ee4e71..219c862fcd4ac333d680f4eaf4858cdd96d541ea 100644
 --- a/Source/WebCore/platform/network/curl/CurlContext.cpp
 +++ b/Source/WebCore/platform/network/curl/CurlContext.cpp
-@@ -27,6 +27,9 @@
+@@ -27,6 +27,17 @@
  #include "config.h"
  #include "CurlContext.h"
  
 +#include <cstdlib>
 +#include <cstring>
++#if PLATFORM(HAIKU)
++#include <arpa/inet.h>
++#include <fcntl.h>
++#include <netinet/in.h>
++#include <sys/socket.h>
++#include <unistd.h>
++#include <wtf/Lock.h>
++#endif
 +
  #if USE(CURL)
  #include "CertificateInfo.h"
  #include "CurlRequestScheduler.h"
-@@ -503,7 +506,15 @@ void CurlHandle::enableHttp()
+@@ -289,6 +300,89 @@ CURLMsg* CurlMultiHandle::readInfo(int& messagesInQueue)
+     return curl_multi_info_read(m_multiHandle, &messagesInQueue);
+ }
+ 
++#if PLATFORM(HAIKU)
++// The connections' sockets, for closing those whose local address went away
++// (NetworkStateNotifierHaiku.cpp): Haiku's TCP never fails them, and libcurl
++// would keep sending requests on them. A connection closes its socket with
++// the callback of the transfer that opened it, after that transfer may be
++// gone: the callbacks take no data.
++static Lock connectionSocketsLockHaiku;
++static Vector<curl_socket_t>& connectionSocketsHaiku() WTF_REQUIRES_LOCK(connectionSocketsLockHaiku)
++{
++    static NeverDestroyed<Vector<curl_socket_t>> sockets;
++    return sockets;
++}
++
++static curl_socket_t openSocketHaiku(void*, curlsocktype purpose, struct curl_sockaddr* address)
++{
++    // As libcurl opens them, not inherited by programs started.
++    curl_socket_t socket = ::socket(address->family, address->socktype, address->protocol);
++    if (socket != CURL_SOCKET_BAD)
++        fcntl(socket, F_SETFD, FD_CLOEXEC);
++    if (socket != CURL_SOCKET_BAD && purpose == CURLSOCKTYPE_IPCXN && (address->family == AF_INET || address->family == AF_INET6)) {
++        Locker locker { connectionSocketsLockHaiku };
++        connectionSocketsHaiku().append(socket);
++    }
++    return socket;
++}
++
++static int closeSocketHaiku(void*, curl_socket_t socket)
++{
++    {
++        Locker locker { connectionSocketsLockHaiku };
++        connectionSocketsHaiku().removeFirst(socket);
++    }
++    return ::close(socket);
++}
++
++static String socketAddressHaiku(const sockaddr_storage& address, int* port)
++{
++    char text[INET6_ADDRSTRLEN] = { };
++    if (address.ss_family == AF_INET) {
++        auto& inet = reinterpret_cast<const sockaddr_in&>(address);
++        inet_ntop(AF_INET, &inet.sin_addr, text, sizeof(text));
++        if (port)
++            *port = ntohs(inet.sin_port);
++    } else if (address.ss_family == AF_INET6) {
++        auto& inet6 = reinterpret_cast<const sockaddr_in6&>(address);
++        inet_ntop(AF_INET6, &inet6.sin6_addr, text, sizeof(text));
++        if (port)
++            *port = ntohs(inet6.sin6_port);
++    }
++    return String::fromLatin1(text);
++}
++
++// Shuts down the connections from the local address (and port, unless 0):
++// libcurl sees them end, fails what was on them and leaves them out of its
++// pool. Returns how many there were.
++static unsigned closeConnectionsHaiku(const Function<bool(const String&, int)>& matches)
++{
++    unsigned closed = 0;
++    Locker locker { connectionSocketsLockHaiku };
++    for (auto socket : connectionSocketsHaiku()) {
++        sockaddr_storage address { };
++        socklen_t length = sizeof(address);
++        if (getsockname(socket, reinterpret_cast<sockaddr*>(&address), &length))
++            continue;
++        int port = 0;
++        if (matches(socketAddressHaiku(address, &port), port) && !::shutdown(socket, SHUT_RDWR))
++            ++closed;
++    }
++    return closed;
++}
++
++void closeConnectionsFromHaiku(const Vector<String>& addresses)
++{
++    if (auto closed = closeConnectionsHaiku([&](const String& address, int) { return addresses.contains(address); }))
++        fprintf(stderr, "Summit net: closed %u connection%s whose local address went away\n", closed, closed == 1 ? "" : "s");
++}
++
++bool closeConnectionFromHaiku(const String& address, int port)
++{
++    return port && closeConnectionsHaiku([&](const String& socketAddress, int socketPort) { return socketPort == port && socketAddress == address; });
++}
++#endif
++
+ // CurlHandle -------------------------------------------------
+ 
+ CurlHandle::CurlHandle()
+@@ -297,6 +391,10 @@ CurlHandle::CurlHandle()
+     curl_easy_setopt(m_handle, CURLOPT_ERRORBUFFER, m_errorBuffer);
+     curl_easy_setopt(m_handle, CURLOPT_NOSIGNAL, 1L);
+     curl_easy_setopt(m_handle, CURLOPT_COOKIEFILE, nullptr);
++#if PLATFORM(HAIKU)
++    curl_easy_setopt(m_handle, CURLOPT_OPENSOCKETFUNCTION, openSocketHaiku);
++    curl_easy_setopt(m_handle, CURLOPT_CLOSESOCKETFUNCTION, closeSocketHaiku);
++#endif
+ 
+     enableShareHandle();
+     enableAcceptEncoding();
+@@ -503,7 +601,15 @@ void CurlHandle::enableHttp()
      if (m_url.protocolIs("https"_s) && (isHttp2Enabled || isHttp3Enabled)) {
          // The appropriate HTTP version is selected based on ALPN, Alt-Svc, etc.
          curl_easy_setopt(m_handle, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_NONE);
@@ -65587,7 +65696,7 @@ index 2e6a2537f3e283d7cb7f2081c8549f0256ee4e71..e98e0f5f0cec52b7d22e1bbba2f3c350
  #if LIBCURL_VERSION_NUM <= 0x075500
          curl_easy_setopt(m_handle, CURLOPT_SSL_ENABLE_ALPN, 1L);
          curl_easy_setopt(m_handle, CURLOPT_SSL_ENABLE_NPN, 0L);
-@@ -563,6 +574,21 @@ void CurlHandle::enableAltSvc()
+@@ -563,6 +669,21 @@ void CurlHandle::enableAltSvc()
      if (CurlContext::singleton().alternativeServicesStorageFile().isEmpty())
          return;
  
@@ -65972,7 +66081,7 @@ index 0000000000000000000000000000000000000000..da71c185bfa5f93bf68ba7a513f48393
 +
 +#endif
 diff --git a/Source/WebCore/platform/network/curl/CurlRequest.cpp b/Source/WebCore/platform/network/curl/CurlRequest.cpp
-index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..fd45b98fd3d105c2450f00356baf096e5bc7fcc1 100644
+index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..0bed95b573ad1117b82f361a140976974d332ad8 100644
 --- a/Source/WebCore/platform/network/curl/CurlRequest.cpp
 +++ b/Source/WebCore/platform/network/curl/CurlRequest.cpp
 @@ -36,19 +36,411 @@
@@ -66548,7 +66657,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..fd45b98fd3d105c2450f00356baf096e
 +        curl_easy_setopt(m_curlHandle->handle(), CURLOPT_PREREQFUNCTION, willSendRequestCallbackHaiku);
 +        curl_easy_setopt(m_curlHandle->handle(), CURLOPT_PREREQDATA, this);
 +    }
-+    if (m_http2RetriesHaiku) {
++    if (m_http2RetriesHaiku || m_deadConnectionRetriedHaiku) {
 +        curl_easy_setopt(m_curlHandle->handle(), CURLOPT_FRESH_CONNECT, 1L);
 +        if (m_http2RetriesHaiku > 1)
 +            curl_easy_setopt(m_curlHandle->handle(), CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_1_1);
@@ -66699,7 +66808,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..fd45b98fd3d105c2450f00356baf096e
 +        m_completed = true;
 +        return;
 +    }
-+    if (retryAfterHttp2ErrorHaiku(result))
++    if (retryOnFreshConnectionHaiku(result))
 +        return;
 +#endif
 +
@@ -66738,29 +66847,64 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..fd45b98fd3d105c2450f00356baf096e
  
          CertificateInfo certificateInfo;
          if (auto info = m_curlHandle->certificateInfo())
-@@ -503,13 +1089,51 @@ void CurlRequest::didCompleteTransfer(CURLcode result)
+@@ -503,13 +1089,86 @@ void CurlRequest::didCompleteTransfer(CURLcode result)
      }
  }
  
 +#if PLATFORM(HAIKU)
-+// A request that failed in the HTTP/2 layer before any of its response came
-+// ("Error in the HTTP2 framing layer": a server's GOAWAY raced it, or the
-+// connection's framing broke) is sent again without telling the page, as
-+// other browsers do: once on a fresh connection, then once over HTTP/1.1.
++// From NetworkStateNotifierHaiku.cpp and CurlContext.cpp.
++bool isGoneLocalAddressHaiku(const String&);
++bool closeConnectionFromHaiku(const String& address, int port);
++
++// A request that failed before any of its response came is sent again
++// without telling the page, as other browsers do, when it failed:
++// - in the HTTP/2 layer ("Error in the HTTP2 framing layer": a server's
++//   GOAWAY raced it, or the connection's framing broke): once on a fresh
++//   connection, then once over HTTP/1.1;
++// - on a connection whose local address went away (a VPN disconnected, a
++//   network was left; NetworkStateNotifierHaiku.cpp closed it), once on a
++//   fresh connection;
++// - with no response in responseStartTimeoutHaiku: its connection is most
++//   likely dead, and Haiku's TCP would never say so. It is closed, so that
++//   the next requests do not wait on it too, and the request is sent once
++//   more on a fresh one.
 +// Only requests that can be sent twice: GET, HEAD and OPTIONS.
-+bool CurlRequest::retryAfterHttp2ErrorHaiku(CURLcode result)
++bool CurlRequest::retryOnFreshConnectionHaiku(CURLcode result)
 +{
-+    if (result != CURLE_HTTP2 && result != CURLE_HTTP2_STREAM)
++    if (result == CURLE_OK || !m_curlHandle)
 +        return false;
-+    if (m_preconnectOnlyHaiku || m_http2RetriesHaiku >= 2 || m_didReceiveResponse || m_response.statusCode || m_totalReceivedSize || m_multipartHandle)
++    if (m_preconnectOnlyHaiku || m_didReceiveResponse || m_response.statusCode || m_totalReceivedSize || m_multipartHandle)
 +        return false;
 +    const auto& method = m_request.httpMethod();
 +    if (method != "GET"_s && method != "HEAD"_s && method != "OPTIONS"_s)
 +        return false;
 +
-+    ++m_http2RetriesHaiku;
-+    fprintf(stderr, "Summit net: %s from %s; sending the request again %s\n", curl_easy_strerror(result),
-+        m_request.url().host().utf8().legacyCStringPointer(), m_http2RetriesHaiku == 1 ? "on a fresh connection" : "over HTTP/1.1");
++    char* localAddress = nullptr;
++    long localPort = 0;
++    curl_easy_getinfo(m_curlHandle->handle(), CURLINFO_LOCAL_IP, &localAddress);
++    curl_easy_getinfo(m_curlHandle->handle(), CURLINFO_LOCAL_PORT, &localPort);
++    auto local = String::fromLatin1(localAddress ? localAddress : "");
++    const auto host = m_request.url().host().utf8();
++    if (result == CURLE_HTTP2 || result == CURLE_HTTP2_STREAM) {
++        if (m_http2RetriesHaiku >= 2)
++            return false;
++        ++m_http2RetriesHaiku;
++        fprintf(stderr, "Summit net: %s from %s; sending the request again %s\n", curl_easy_strerror(result),
++            host.legacyCStringPointer(), m_http2RetriesHaiku == 1 ? "on a fresh connection" : "over HTTP/1.1");
++    } else if (m_deadConnectionRetriedHaiku)
++        return false;
++    else if (!local.isEmpty() && isGoneLocalAddressHaiku(local)) {
++        m_deadConnectionRetriedHaiku = true;
++        fprintf(stderr, "Summit net: %s from %s on a connection from %s, which went away; sending the request again on a fresh connection\n",
++            curl_easy_strerror(result), host.legacyCStringPointer(), localAddress);
++    } else if (result == CURLE_OPERATION_TIMEDOUT && m_usesDefaultTimeoutHaiku) {
++        m_deadConnectionRetriedHaiku = true;
++        bool closed = closeConnectionFromHaiku(local, static_cast<int>(localPort));
++        fprintf(stderr, "Summit net: no response from %s in %.0f s; %ssending the request again on a fresh connection\n",
++            host.legacyCStringPointer(), responseStartTimeoutHaiku.seconds(), closed ? "closed its connection, " : "");
++    } else
++        return false;
++
 +    finalizeTransfer();
 +    m_response = CurlResponse { };
 +    m_requestHeaderSize = 0;
@@ -66790,7 +66934,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..fd45b98fd3d105c2450f00356baf096e
      m_formDataStream.clean();
      m_multipartHandle = nullptr;
      m_curlHandle = nullptr;
-@@ -632,6 +1256,88 @@ void CurlRequest::completeDidReceiveResponse()
+@@ -632,6 +1291,88 @@ void CurlRequest::completeDidReceiveResponse()
          responseCompletionHandler();
  }
  
@@ -66879,7 +67023,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..fd45b98fd3d105c2450f00356baf096e
  NetworkLoadMetrics CurlRequest::networkLoadMetrics()
  {
      ASSERT(m_curlHandle);
-@@ -653,6 +1359,57 @@ NetworkLoadMetrics CurlRequest::networkLoadMetrics()
+@@ -653,6 +1394,57 @@ NetworkLoadMetrics CurlRequest::networkLoadMetrics()
      return WTF::move(*networkLoadMetrics);
  }
  
@@ -66938,7 +67082,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..fd45b98fd3d105c2450f00356baf096e
  {
      for (const auto& header : m_response.headers) {
 diff --git a/Source/WebCore/platform/network/curl/CurlRequest.h b/Source/WebCore/platform/network/curl/CurlRequest.h
-index 3b060605bbff32f845804a848610eca23dea834c..0319c9a6646dfbdec1e54e1b8c52eb769bd2e782 100644
+index 3b060605bbff32f845804a848610eca23dea834c..e5947fa61a2354f149d3901db669dcdddb6b7d26 100644
 --- a/Source/WebCore/platform/network/curl/CurlRequest.h
 +++ b/Source/WebCore/platform/network/curl/CurlRequest.h
 @@ -32,16 +32,21 @@
@@ -67044,12 +67188,12 @@ index 3b060605bbff32f845804a848610eca23dea834c..0319c9a6646dfbdec1e54e1b8c52eb76
 +#if PLATFORM(HAIKU)
 +    static int willSendRequestCallbackHaiku(void*, char*, char*, int, int);
 +    static int progressCallbackHaiku(void*, curl_off_t, curl_off_t, curl_off_t, curl_off_t);
-+    bool retryAfterHttp2ErrorHaiku(CURLcode);
++    bool retryOnFreshConnectionHaiku(CURLcode);
 +#endif
  
  
      CurlRequestClient* m_client { };
-@@ -149,23 +190,62 @@ private:
+@@ -149,23 +190,65 @@ private:
      bool m_shouldDisableServerTrustEvaluation { false };
      CurlHandle::LocalhostAlias m_localhostAlias { CurlHandle::LocalhostAlias::Disable };
  
@@ -67102,8 +67246,11 @@ index 3b060605bbff32f845804a848610eca23dea834c..0319c9a6646dfbdec1e54e1b8c52eb76
 +    bool m_preconnectedHaiku { false };
 +    bool m_preconnectedMultiplexedHaiku { false };
 +    // Times this request was sent again after an HTTP/2 error
-+    // (retryAfterHttp2ErrorHaiku): 1 on a fresh connection, 2 over HTTP/1.1.
++    // (retryOnFreshConnectionHaiku): 1 on a fresh connection, 2 over HTTP/1.1.
 +    unsigned m_http2RetriesHaiku { 0 };
++    // Sent again after failing on a dead connection: one whose local address
++    // went away, or one that brought no response in time.
++    bool m_deadConnectionRetriedHaiku { false };
 +    // The page set no timeout (setupTransfer); for progressCallbackHaiku,
 +    // on the worker thread: the bytes moved so far, and when they last did.
 +    bool m_usesDefaultTimeoutHaiku { false };
@@ -70407,10 +70554,10 @@ index 0000000000000000000000000000000000000000..d2a6d10f61944390e0c50fd1eadfce9b
 +#endif /* !HAIKUFORMDATASTREAM_H */
 diff --git a/Source/WebCore/platform/network/haiku/NetworkStateNotifierHaiku.cpp b/Source/WebCore/platform/network/haiku/NetworkStateNotifierHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..b87c9a0de1f3beff1075549a0f989cfd458e1953
+index 0000000000000000000000000000000000000000..8079c7f9604b419a7cf1a0a7c26eb204434512c8
 --- /dev/null
 +++ b/Source/WebCore/platform/network/haiku/NetworkStateNotifierHaiku.cpp
-@@ -0,0 +1,185 @@
+@@ -0,0 +1,249 @@
 +/*
 + * Copyright (C) 2008 Apple Inc. All Rights Reserved.
 + *
@@ -70451,8 +70598,10 @@ index 0000000000000000000000000000000000000000..b87c9a0de1f3beff1075549a0f989cfd
 +#include <ifaddrs.h>
 +#include <net/if.h>
 +#include <netinet/in.h>
++#include <wtf/Lock.h>
 +#include <wtf/MainThread.h>
 +#include <wtf/MonotonicTime.h>
++#include <wtf/NeverDestroyed.h>
 +#include <wtf/RunLoop.h>
 +#include <wtf/Vector.h>
 +#include <wtf/text/StringView.h>
@@ -70510,35 +70659,97 @@ index 0000000000000000000000000000000000000000..b87c9a0de1f3beff1075549a0f989cfd
 +}
 +
 +// Online: an interface other than loopback is up, has a link (IFF_LINK: a
-+// cable, or a joined wireless network) and an address.
-+static bool isOnLineHaiku()
++// cable, or a joined wireless network) and an address. Collects those
++// addresses; false when the interfaces cannot be read.
++static bool readLocalAddressesHaiku(Vector<String>& addresses)
 +{
 +    struct ifaddrs* interfaces = nullptr;
 +    if (getifaddrs(&interfaces) || !interfaces)
-+        return true; // Unknown: do not stop pages that might work.
++        return false;
 +    auto ignored = ignoredInterfaces();
-+    bool online = false;
-+    for (auto* entry = interfaces; entry && !online; entry = entry->ifa_next) {
++    for (auto* entry = interfaces; entry; entry = entry->ifa_next) {
 +        if (!entry->ifa_addr || !entry->ifa_name || (entry->ifa_flags & IFF_LOOPBACK)
 +            || (entry->ifa_flags & (IFF_UP | IFF_LINK)) != (IFF_UP | IFF_LINK))
 +            continue;
-+        if (isUsableAddress(*entry->ifa_addr) && !ignored.contains(String::fromLatin1(entry->ifa_name)))
-+            online = true;
++        if (!isUsableAddress(*entry->ifa_addr) || ignored.contains(String::fromLatin1(entry->ifa_name)))
++            continue;
++        char text[INET6_ADDRSTRLEN] = { };
++        if (entry->ifa_addr->sa_family == AF_INET)
++            inet_ntop(AF_INET, &reinterpret_cast<const sockaddr_in*>(entry->ifa_addr)->sin_addr, text, sizeof(text));
++        else
++            inet_ntop(AF_INET6, &reinterpret_cast<const sockaddr_in6*>(entry->ifa_addr)->sin6_addr, text, sizeof(text));
++        auto address = String::fromLatin1(text);
++        if (!address.isEmpty() && !addresses.contains(address))
++            addresses.append(WTF::move(address));
 +    }
 +    freeifaddrs(interfaces);
-+    return online;
++    return true;
++}
++
++// Shuts down the connections from these addresses (CurlContext.cpp).
++void closeConnectionsFromHaiku(const Vector<String>&);
++
++// The local addresses last seen, and those seen before that have gone since
++// (until they come back). A connection from a gone one is dead, though
++// Haiku's TCP never says so: when a VPN disconnects, or a network is left
++// for another one. CurlRequest.cpp asks, to send a request that failed on
++// one again.
++static Lock localAddressesLockHaiku;
++static Vector<String>& localAddressesHaiku() WTF_REQUIRES_LOCK(localAddressesLockHaiku)
++{
++    static NeverDestroyed<Vector<String>> addresses;
++    return addresses;
++}
++static Vector<String>& goneLocalAddressesHaiku() WTF_REQUIRES_LOCK(localAddressesLockHaiku)
++{
++    static NeverDestroyed<Vector<String>> addresses;
++    return addresses;
++}
++
++bool isGoneLocalAddressHaiku(const String& address)
++{
++    Locker locker { localAddressesLockHaiku };
++    return goneLocalAddressesHaiku().contains(address);
++}
++
++static void noteLocalAddressesHaiku(Vector<String>&& addresses)
++{
++    Vector<String> gone;
++    {
++        Locker locker { localAddressesLockHaiku };
++        for (auto& address : localAddressesHaiku()) {
++            if (!addresses.contains(address))
++                gone.append(address);
++        }
++        auto& goneBefore = goneLocalAddressesHaiku();
++        goneBefore.removeAllMatching([&](auto& address) { return addresses.contains(address); });
++        for (auto& address : gone) {
++            if (!goneBefore.contains(address))
++                goneBefore.append(address);
++        }
++        localAddressesHaiku() = WTF::move(addresses);
++    }
++    if (gone.isEmpty())
++        return;
++    for (auto& address : gone)
++        std::fprintf(stderr, "Summit net: the local address %s went away\n", address.utf8().legacyCStringPointer());
++    closeConnectionsFromHaiku(gone);
 +}
 +
 +void NetworkStateNotifier::updateStateWithoutNotifying()
 +{
 +    bool wasOnLine = m_isOnLine.value_or(true);
-+    m_isOnLine = isOnLineHaiku();
++    Vector<String> addresses;
++    bool known = readLocalAddressesHaiku(addresses);
++    m_isOnLine = !known || !addresses.isEmpty(); // Unknown: do not stop pages that might work.
 +    if (wasOnLine && !*m_isOnLine)
 +        networkLostAtHaiku = MonotonicTime::now().secondsSinceEpoch().seconds();
 +    else if (*m_isOnLine)
 +        networkLostAtHaiku = 0;
 +    if (wasOnLine != *m_isOnLine)
 +        std::fprintf(stderr, "Summit: the network is %s\n", *m_isOnLine ? "back" : "gone");
++    if (known)
++        noteLocalAddressesHaiku(WTF::move(addresses));
 +}
 +
 +// The network stack's notifications (start_watching_network) arrive at this
