@@ -421,7 +421,7 @@ private:
     friend struct ProtocolReader;
     struct Pending {
         enum Kind { Body, Evaluation, Storage, StorageEdit, Frames, Elements, Properties, OwnProperties, DatabaseNames, Database,
-            ScriptSource, SetBreakpoint, CachePromise, SourceMap, Other };
+            ScriptSource, SetBreakpoint, CachePromise, SourceMap, RuntimeEnable, Other };
         Kind kind;
         uint64_t serial;
         // Storage and StorageEdit: the area; Frames: the target asked;
@@ -464,6 +464,14 @@ private:
     std::vector<std::string> fOrigins;
     // The page's main frame, which source maps are read in.
     std::string fMainFrame;
+    // For the Cache Storage of frames from other origins, read in their own
+    // script context: a frame of each origin, each frame's context
+    // (Runtime.executionContextCreated, once Runtime is enabled), and the
+    // origins waiting for theirs.
+    std::map<std::string, std::string> fFrameOfOrigin;
+    std::map<std::string, int> fContextOfFrame;
+    bool fRuntimeEnabled = false;
+    std::vector<std::string> fCachesWaitingForContext;
     bool fTimelineRecording = false;
     std::vector<std::string> fTimelineRecords;
     std::map<std::pair<StorageKind, std::string>, StorageArea> fAreas;

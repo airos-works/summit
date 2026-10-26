@@ -351,13 +351,19 @@ IndexedDB origin asks for its databases (`IndexedDB.requestDatabaseNames`,
 value as the Console shows them (`IndexedDB.requestData`); **Clear All**
 empties the store (`IndexedDB.clearObjectStore`). Test action:
 `storage-select indexeddb ORIGIN` or `indexeddb ORIGIN|DATABASE|STORE`.
-**Cache Storage** lists the page's own origin: every response its caches
-keep (the first 1000), as *cache › address* (with the method when it is not
-GET), its status, type and size, and its headers below. WebKit's inspector
-has no domain for it, so the page's `caches` object is read with
-`Runtime.evaluate` and `Runtime.awaitPromise`; frames from other sites are
-not reachable that way, and a page that is not a secure context (plain http
-other than localhost) has no caches. **Delete** removes the response from
+**Cache Storage** lists the origins of the page's frames: every response
+an origin's caches keep (the first 1000), as *cache › address* (with the
+method when it is not GET), its status, type and size, and its headers
+below. WebKit's inspector has no domain for it, so the `caches` object is
+read with `Runtime.evaluate` and `Runtime.awaitPromise`: the page's own in
+the page, another origin's in a frame of that origin, in that frame's own
+script context (`contextId`; Runtime is enabled for the contexts the first
+time one is needed, and `Runtime.executionContextCreated` tells them). What a
+frame from another site keeps is its own partition under this page, as the
+frame sees it. A frame that is not a secure context (plain http other than
+localhost) has no caches. Checked on the X399 with a page on
+`localhost:8811` and a frame from `127.0.0.1:8811`: the page's one response
+and the frame's two listed, and one of the frame's deleted. **Delete** removes the response from
 its cache, **Clear All** deletes the caches. Test action: `storage-select
 cache [ORIGIN]`.
 Choosing one shows it on the right:
@@ -717,8 +723,7 @@ is started again.
   page (`SUMMIT_DEVELOPER_EXTRAS=0` turns that off).
 - A per-frame view in Performance, and
   memory and CPU-usage timelines (`ENABLE(RESOURCE_USAGE)` is off). In Sources: an original source the map carries no text of is not
-  fetched. In Storage: partitioned cookies, and Cache Storage of
-  frames from other sites.
+  fetched. In Storage: partitioned cookies.
 - Elements › Accessibility shows the selected element's role, name and
   states, asked for only while that tab is shown; accessibility, which this
   turns on in the web process, goes off again when the tools close (the

@@ -1153,14 +1153,42 @@ static void TestStorage()
     session.Receive(Event("page-1", "DOMStorage.domStorageItemsCleared", {{"storageId", local}}));
     CHECK(session.FindArea(StorageKind::Local, "https://example.com")->items.empty());
 
-    // Cache Storage: the page's caches, read by a script whose promise is
-    // awaited; a frame's origin is not reachable.
+    // Cache Storage: each origin's caches, read by a script whose promise is
+    // awaited. Another origin's are read in its frame's own script context,
+    // which Runtime (enabled once) tells; an origin no frame has is not.
     session.TakeChanges();
+    session.LoadStorage(StorageKind::CacheStorage, "https://gone.example");
+    CHECK(Sent(session).empty() && !session.FindArea(StorageKind::CacheStorage, "https://gone.example")->error.empty());
     session.LoadStorage(StorageKind::CacheStorage, "https://ads.example");
-    CHECK(Sent(session).empty() && !session.FindArea(StorageKind::CacheStorage, "https://ads.example")->error.empty());
+    commands = Sent(session);
+    CHECK(commands.size() == 1 && commands[0].method == "Runtime.enable"
+        && session.FindArea(StorageKind::CacheStorage, "https://ads.example")->waiting);
+    const auto runtimeEnable = commands[0].id;
+    session.LoadStorage(StorageKind::CacheStorage, "https://ads.example");
+    CHECK(Sent(session).empty());
+    session.Receive(Event("page-1", "Runtime.executionContextCreated", {{"context", {{"id", 7}, {"type", "user"}, {"frameId", "f2"}}}}));
+    CHECK(Sent(session).empty());
+    session.Receive(Event("page-1", "Runtime.executionContextCreated", {{"context", {{"id", 3}, {"type", "normal"}, {"frameId", "f2"}}}}));
+    commands = Sent(session);
+    CHECK(commands.size() == 1 && commands[0].method == "Runtime.evaluate" && commands[0].parameters["contextId"] == 3
+        && commands[0].parameters["expression"].get<std::string>().find("caches.keys()") != std::string::npos);
+    session.Receive(Reply("page-1", runtimeEnable, json::object()));
+    CHECK(session.FindArea(StorageKind::CacheStorage, "https://ads.example")->error.empty());
+    session.Receive(Reply("page-1", commands[0].id, {{"result", {{"type", "object"}, {"objectId", "{\"p\":9}"}}}}));
+    commands = Sent(session);
+    session.Receive(Reply("page-1", commands[0].id, {{"result", {{"type", "object"}, {"value", json::array({
+        {{"cache", "ads"}, {"url", "https://ads.example/pixel.gif"}, {"method", "GET"}, {"status", 200}, {"statusText", "OK"},
+            {"type", "basic"}, {"headers", json::array()}}})}}}, {"wasThrown", false}}));
+    CHECK(session.FindArea(StorageKind::CacheStorage, "https://ads.example")->items.size() == 1);
+    // Read again: in the context it has, without enabling Runtime again.
+    session.LoadStorage(StorageKind::CacheStorage, "https://ads.example");
+    commands = Sent(session);
+    CHECK(commands.size() == 1 && commands[0].method == "Runtime.evaluate" && commands[0].parameters["contextId"] == 3);
+    session.Receive(Reply("page-1", commands[0].id, {{"result", {{"type", "object"}, {"objectId", "{\"p\":10}"}}}}));
+    Sent(session);
     session.LoadStorage(StorageKind::CacheStorage, "https://example.com");
     commands = Sent(session);
-    CHECK(commands.size() == 1 && commands[0].method == "Runtime.evaluate"
+    CHECK(commands.size() == 1 && commands[0].method == "Runtime.evaluate" && !commands[0].parameters.contains("contextId")
         && commands[0].parameters["expression"].get<std::string>().find("caches.keys()") != std::string::npos);
     session.Receive(Reply("page-1", commands[0].id, {{"result", {{"type", "object"}, {"subtype", "promise"}, {"objectId", "{\"p\":1}"}}}}));
     commands = Sent(session);

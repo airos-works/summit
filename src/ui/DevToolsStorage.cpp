@@ -273,14 +273,15 @@ void StoragePanel::RebuildAreas()
             }
         }
     }
-    // Cache Storage: the page's own origin's (Session::LoadStorage).
+    // Cache Storage: of each origin of the page's frames, read in a frame of
+    // it (Session::LoadStorage).
     auto* caches = new AreaItem("Cache Storage", StorageKind::CacheStorage, { }, false);
     caches->SetExpanded(true);
     fAreas->AddItem(caches);
-    if (!origins.empty()) {
-        auto* item = new AreaItem(origins.front().c_str(), StorageKind::CacheStorage, origins.front(), true, 1);
+    for (const auto& origin : origins) {
+        auto* item = new AreaItem(origin.c_str(), StorageKind::CacheStorage, origin, true, 1);
         fAreas->AddItem(item);
-        if (fHasArea && fKind == StorageKind::CacheStorage && fOrigin == origins.front()) selected = item;
+        if (fHasArea && fKind == StorageKind::CacheStorage && fOrigin == origin) selected = item;
     }
     auto* cookies = new AreaItem("Cookies", StorageKind::Cookies, { }, true);
     fAreas->AddItem(cookies);

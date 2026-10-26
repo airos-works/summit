@@ -809,12 +809,24 @@ struct ProtocolReader {
                 session.fChanges.storage = true;
             }
             session.LoadStorage(pending.storage, pending.origin);
+        } else if (pending.kind == Session::Pending::RuntimeEnable) {
+            // The contexts there are were told before this answer: an origin
+            // still waiting has no frame whose scripts can be reached.
+            for (const auto& origin : std::exchange(session.fCachesWaitingForContext, { })) {
+                auto* area = session.Area(StorageKind::CacheStorage, origin, true);
+                area->waiting = false;
+                area->loaded = true;
+                area->error = !error.empty() ? error : "The frame of this origin cannot be reached.";
+                session.fChanges.storage = true;
+            }
         } else if (pending.kind == Session::Pending::Frames) {
             if (pending.origin != session.fPageTarget) return;
             std::vector<std::string> origins;
+            session.fFrameOfOrigin.clear();
             std::function<void(const json&)> walk = [&](const json& tree) {
                 const auto origin = Text(Member(Member(tree, "frame"), "securityOrigin"));
                 if (std::find(origins.begin(), origins.end(), origin) == origins.end()) origins.push_back(origin);
+                session.fFrameOfOrigin.emplace(origin, Text(Member(Member(tree, "frame"), "id")));
                 if (const auto& children = Member(tree, "childFrames"); children.is_array())
                     for (const auto& child : children) walk(child);
             };
@@ -1292,8 +1304,10 @@ void Session::TargetCommitted(const std::string& previous, const std::string& ta
     fTargets[target] = false;
     fPageTarget = target;
     if (previous == target) return;
-    // The DOM the panel knew is the other process's.
+    // The DOM the panel knew is the other process's, and its script contexts.
     fHeldDOM.clear();
+    fContextOfFrame.clear();
+    fRuntimeEnabled = false;
     fDOM.TargetChanged();
     SendToTarget(target, "Page.getResourceTree", "{}", Pending::Frames);
     fPending.rbegin()->second.origin = target;
@@ -1381,11 +1395,31 @@ void Session::FromTarget(const std::string& target, std::string_view text)
     } else if (method == "Page.frameNavigated") {
         const auto& frame = Member(parameters, "frame");
         if (Member(frame, "parentId").is_string() && !Text(Member(frame, "parentId")).empty()) {
-            if (target == fPageTarget) AddOrigin(Text(Member(frame, "securityOrigin")));
+            if (target == fPageTarget) {
+                AddOrigin(Text(Member(frame, "securityOrigin")));
+                fFrameOfOrigin.emplace(Text(Member(frame, "securityOrigin")), Text(Member(frame, "id")));
+            }
             return;
         }
         Navigated(target, Text(Member(frame, "loaderId")), Text(Member(frame, "url")));
         if (target == fPageTarget || fPageTarget.empty()) SetOrigins({Text(Member(frame, "securityOrigin"))});
+    } else if (method == "Runtime.executionContextCreated" && target == fPageTarget) {
+        // A frame's own scripts' context (not an extension's or the inspector's).
+        const auto& context = Member(parameters, "context");
+        if (Text(Member(context, "type")) == "normal" || Flag(Member(context, "isPageContext"))) {
+            const auto frame = Text(Member(context, "frameId"));
+            fContextOfFrame[frame] = static_cast<int>(Number(Member(context, "id")));
+            auto waiting = std::move(fCachesWaitingForContext);
+            fCachesWaitingForContext.clear();
+            for (const auto& origin : waiting) {
+                const auto found = fFrameOfOrigin.find(origin);
+                if (found != fFrameOfOrigin.end() && found->second == frame) {
+                    Area(StorageKind::CacheStorage, origin, true)->waiting = false;
+                    LoadStorage(StorageKind::CacheStorage, origin);
+                } else
+                    fCachesWaitingForContext.push_back(origin);
+            }
+        }
     } else if (method.rfind("DOMStorage.", 0) == 0)
         ProtocolReader::StorageChanged(*this, method, parameters);
     else if (method == "Page.loadEventFired" && target == fPageTarget) {
@@ -1670,11 +1704,26 @@ void Session::LoadStorage(StorageKind kind, const std::string& origin)
     area->waiting = true;
     if (kind == StorageKind::CacheStorage) {
         area->waiting = false;
-        if (fOrigins.empty() || origin != fOrigins.front()) {
+        if (fOrigins.empty() || std::find(fOrigins.begin(), fOrigins.end(), origin) == fOrigins.end()) {
             area->loaded = true;
-            area->error = "Only the page's own origin's caches can be read.";
+            area->error = "No frame of the page has this origin.";
             fChanges.storage = true;
             return;
+        }
+        // Another origin's caches are read in a frame of it, in its own
+        // script context, which Runtime tells once enabled.
+        if (origin != fOrigins.front()) {
+            const auto frame = fFrameOfOrigin.find(origin);
+            if (frame == fFrameOfOrigin.end() || !fContextOfFrame.count(frame->second)) {
+                if (std::find(fCachesWaitingForContext.begin(), fCachesWaitingForContext.end(), origin) == fCachesWaitingForContext.end())
+                    fCachesWaitingForContext.push_back(origin);
+                if (!fRuntimeEnabled) {
+                    fRuntimeEnabled = true;
+                    SendToTarget(fPageTarget, "Runtime.enable", "{}", Pending::RuntimeEnable);
+                }
+                area->waiting = true;
+                return;
+            }
         }
         // The first kCacheEntries responses, with their requests' caches.
         CacheScript(origin, "(async () => { if (!self.caches) throw new Error('This page cannot use Cache Storage (it is not a "
@@ -1719,8 +1768,14 @@ void Session::StorageEdit(StorageKind kind, const std::string& origin, const std
 void Session::CacheScript(const std::string& origin, const std::string& expression, bool edit)
 {
     if (fPageTarget.empty()) return;
-    SendToTarget(fPageTarget, "Runtime.evaluate", json{{"expression", expression}, {"objectGroup", "summit-storage"},
-        {"doNotPauseOnExceptionsAndMuteConsole", true}}.dump(), Pending::CachePromise, edit ? 1 : 0);
+    json parameters = {{"expression", expression}, {"objectGroup", "summit-storage"}, {"doNotPauseOnExceptionsAndMuteConsole", true}};
+    // Another origin's: in its frame.
+    if (!fOrigins.empty() && origin != fOrigins.front()) {
+        const auto frame = fFrameOfOrigin.find(origin);
+        const auto context = frame == fFrameOfOrigin.end() ? fContextOfFrame.end() : fContextOfFrame.find(frame->second);
+        if (context != fContextOfFrame.end()) parameters["contextId"] = context->second;
+    }
+    SendToTarget(fPageTarget, "Runtime.evaluate", parameters.dump(), Pending::CachePromise, edit ? 1 : 0);
     auto& pending = fPending.rbegin()->second;
     pending.storage = StorageKind::CacheStorage;
     pending.origin = origin;
