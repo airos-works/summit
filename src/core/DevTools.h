@@ -359,6 +359,11 @@ public:
     void RecordTimeline(bool on);
     bool TimelineRecording() const { return fTimelineRecording; }
     const std::vector<std::string>& TimelineRecords() const { return fTimelineRecords; }
+    // While recording, the web process's CPU use (percent of one core) and
+    // memory (bytes, all categories), each with its time on the timeline's
+    // clock (CPUProfiler and Memory tracking: ENABLE(RESOURCE_USAGE)).
+    const std::vector<std::pair<double, double>>& TimelineCPU() const { return fTimelineCPU; }
+    const std::vector<std::pair<double, double>>& TimelineMemory() const { return fTimelineMemory; }
     static constexpr size_t kTimelineRecords = 100000;
     // The paused frame the console evaluates in.
     void SelectDebugFrame(int index) { fDebugger.selectedFrame = index; }
@@ -474,6 +479,7 @@ private:
     std::vector<std::string> fCachesWaitingForContext;
     bool fTimelineRecording = false;
     std::vector<std::string> fTimelineRecords;
+    std::vector<std::pair<double, double>> fTimelineCPU, fTimelineMemory;
     std::map<std::pair<StorageKind, std::string>, StorageArea> fAreas;
     std::map<std::string, ObjectProperties> fProperties;
     std::map<std::string, OriginDatabases> fDatabases;

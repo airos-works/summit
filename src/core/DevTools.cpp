@@ -1073,9 +1073,20 @@ void Session::RecordTimeline(bool on)
     fTimelineRecording = on;
     if (on) {
         fTimelineRecords.clear();
+        fTimelineCPU.clear();
+        fTimelineMemory.clear();
         // Five frames of each record's stack say where its work came from.
         SendToTarget(fPageTarget, "Timeline.start", "{\"maxCallStackDepth\":5}");
-    } else SendToTarget(fPageTarget, "Timeline.stop", "{}");
+        // The process's CPU and memory meanwhile, a sample about every 500 ms.
+        SendToTarget(fPageTarget, "CPUProfiler.startTracking", "{}");
+        SendToTarget(fPageTarget, "Memory.enable", "{}");
+        SendToTarget(fPageTarget, "Memory.startTracking", "{}");
+    } else {
+        SendToTarget(fPageTarget, "Timeline.stop", "{}");
+        SendToTarget(fPageTarget, "CPUProfiler.stopTracking", "{}");
+        SendToTarget(fPageTarget, "Memory.stopTracking", "{}");
+        SendToTarget(fPageTarget, "Memory.disable", "{}");
+    }
     fChanges.timeline = true;
 }
 
@@ -1370,6 +1381,15 @@ void Session::FromTarget(const std::string& target, std::string_view text)
     } else if (method == "Timeline.recordingStopped" && target == fPageTarget && fTimelineRecording) {
         fTimelineRecording = false;
         fChanges.timeline = true;
+    } else if (method == "CPUProfiler.trackingUpdate" && target == fPageTarget && fTimelineRecording) {
+        const auto& event = Member(parameters, "event");
+        fTimelineCPU.emplace_back(Number(Member(event, "timestamp")), Number(Member(event, "usage")));
+    } else if (method == "Memory.trackingUpdate" && target == fPageTarget && fTimelineRecording) {
+        const auto& event = Member(parameters, "event");
+        double total = 0;
+        if (const auto& categories = Member(event, "categories"); categories.is_array())
+            for (const auto& category : categories) total += Number(Member(category, "size"));
+        fTimelineMemory.emplace_back(Number(Member(event, "timestamp")), total);
     }
     else if (method == "Console.messageAdded") ProtocolReader::MessageAdded(*this, Member(parameters, "message"));
     else if (method == "Console.messageRepeatCountUpdated") {

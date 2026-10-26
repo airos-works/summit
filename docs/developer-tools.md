@@ -315,7 +315,13 @@ green, the rest grey) and labelled where there is room; the wheel zooms
 where the pointer is, dragging moves along, **Zoom to Fit** shows the whole
 recording again, hovering a box tells its kind, what it was about and its
 time, and clicking one shows the record (without its children, which are
-counted) below. Under it, the table on the left is time by kind
+counted) below. Above the records two strips show the web process's CPU use
+(percent of one core, on a scale of at least 100 %) and its memory (all
+categories, up to its peak), a sample about every half second
+(`CPUProfiler.startTracking` and `Memory.startTracking` while recording,
+`ENABLE(RESOURCE_USAGE)` with `ResourceUsageThreadHaiku`); the status line
+adds the average and peak CPU and the memory range. Other tabs of the same
+web process count in them too. Under it, the table on the left is time by kind
 of work (script evaluation, function calls, timers, events, style, layout,
 painting, rendering frames), with the nested records counted in their
 parents. On the right are the 200 longest records: when they started, how long
@@ -324,9 +330,7 @@ timer, the event) and what was inside them by kind. Selecting one shows
 its whole summary, stack included. The status line has the span, how busy
 the main thread was, and the frames drawn (median and 95th percentile).
 The summary is the MCP `timeline` tool's (`SummarizeTimeline` in
-`src/core/McpInspector.cpp`). WebKit's `ScriptProfiler`, `Memory` and
-`CPUProfiler` domains are not used: the last two are compiled out on Haiku
-(`ENABLE(RESOURCE_USAGE)` off). Test actions: `performance-record`,
+`src/core/McpInspector.cpp`). WebKit's `ScriptProfiler` domain is not used. Test actions: `performance-record`,
 `performance-stop`, `performance-flame-select longest|N`,
 `performance-flame-zoom "FACTOR X"`, `performance-flame-fit`; the state's
 `performance` has the tables and `flame` (boxes, depth, the span and the
@@ -721,8 +725,7 @@ is started again.
 - Network requests from before the tools were opened (as in other
   browsers). Console messages are kept: developer extras are on for every
   page (`SUMMIT_DEVELOPER_EXTRAS=0` turns that off).
-- A per-frame view in Performance, and
-  memory and CPU-usage timelines (`ENABLE(RESOURCE_USAGE)` is off). In Sources: an original source the map carries no text of is not
+- A per-frame view in Performance (`ENABLE(RESOURCE_USAGE)` is off). In Sources: an original source the map carries no text of is not
   fetched. In Storage: partitioned cookies.
 - Elements › Accessibility shows the selected element's role, name and
   states, asked for only while that tab is shown; accessibility, which this

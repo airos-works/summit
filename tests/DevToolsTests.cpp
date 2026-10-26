@@ -1015,12 +1015,26 @@ static void TestDebugger()
         CHECK(timeline.TimelineRecords().empty());
         timeline.RecordTimeline(true);
         commands = Sent(timeline);
-        CHECK(commands.size() == 1 && commands[0].method == "Timeline.start" && commands[0].parameters["maxCallStackDepth"] == 5);
+        CHECK(commands.size() == 4 && commands[0].method == "Timeline.start" && commands[0].parameters["maxCallStackDepth"] == 5
+            && Find(commands, "CPUProfiler.startTracking") && Find(commands, "Memory.enable") && Find(commands, "Memory.startTracking"));
         timeline.Receive(Event("page-1", "Timeline.eventRecorded", {{"record", {{"type", "TimerFire"}, {"startTime", 1.0}, {"endTime", 1.5}}}}));
         CHECK(timeline.TimelineRecords().size() == 1 && timeline.TimelineRecords()[0].find("TimerFire") != std::string::npos
             && timeline.TakeChanges().timeline);
+        // The process's CPU and memory, on the records' clock.
+        timeline.Receive(Event("page-1", "CPUProfiler.trackingUpdate", {{"event", {{"timestamp", 1.2}, {"usage", 37.5}, {"threads", json::array()}}}}));
+        timeline.Receive(Event("page-1", "Memory.trackingUpdate", {{"event", {{"timestamp", 1.25}, {"categories", json::array({
+            {{"type", "javascript"}, {"size", 1048576}}, {{"type", "layers"}, {"size", 2097152}}})}}}}));
+        CHECK(timeline.TimelineCPU().size() == 1 && timeline.TimelineCPU()[0] == std::make_pair(1.2, 37.5)
+            && timeline.TimelineMemory().size() == 1 && timeline.TimelineMemory()[0].second == 3145728);
         timeline.RecordTimeline(false);
-        CHECK(Sent(timeline)[0].method == "Timeline.stop" && !timeline.TimelineRecording() && timeline.TimelineRecords().size() == 1);
+        commands = Sent(timeline);
+        CHECK(commands[0].method == "Timeline.stop" && Find(commands, "CPUProfiler.stopTracking") && Find(commands, "Memory.stopTracking")
+            && Find(commands, "Memory.disable") && !timeline.TimelineRecording() && timeline.TimelineRecords().size() == 1);
+        // Samples after the recording are not kept; a new one starts afresh.
+        timeline.Receive(Event("page-1", "CPUProfiler.trackingUpdate", {{"event", {{"timestamp", 2.0}, {"usage", 5}}}}));
+        CHECK(timeline.TimelineCPU().size() == 1);
+        timeline.RecordTimeline(true);
+        CHECK(timeline.TimelineCPU().empty() && timeline.TimelineMemory().empty());
     }
 
     // Source maps: read in the page's main frame, or from a data: address.

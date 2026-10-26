@@ -94,9 +94,14 @@ public:
         SetExplicitMinSize(BSize(200, 90));
     }
 
-    void SetRecords(std::vector<json>&& records)
+    // The records, and the process's CPU use and memory meanwhile (time on
+    // the records' clock, value), drawn as two strips over them.
+    void SetRecords(std::vector<json>&& records, std::vector<std::pair<double, double>> cpu = { },
+        std::vector<std::pair<double, double>> memory = { })
     {
         fRecords = std::move(records);
+        fCPU = std::move(cpu);
+        fMemory = std::move(memory);
         fBoxes.clear();
         fSelected = fHover = -1;
         fOrigin = INFINITY;
@@ -177,7 +182,12 @@ public:
 
     json State() const
     {
+        double cpuPeak = 0, memoryPeak = 0;
+        for (const auto& sample : fCPU) cpuPeak = std::max(cpuPeak, sample.second);
+        for (const auto& sample : fMemory) memoryPeak = std::max(memoryPeak, sample.second);
         json state = {{"boxes", fBoxes.size()}, {"depth", fDepth}, {"spanMs", std::round(fSpan * 10000) / 10},
+            {"cpuSamples", fCPU.size()}, {"cpuPeakPercent", std::round(cpuPeak * 10) / 10},
+            {"memorySamples", fMemory.size()}, {"memoryPeakMiB", std::round(memoryPeak / 1048576 * 10) / 10},
             {"viewMs", {std::round(fViewStart * 10000) / 10, std::round(fViewEnd * 10000) / 10}}, {"selected", nullptr}};
         if (fSelected >= 0) {
             const auto& box = fBoxes[fSelected];
@@ -202,6 +212,7 @@ public:
         font.GetHeight(&height);
         const float lineHeight = std::ceil(height.ascent + height.descent);
         const float axis = lineHeight + 6, row = lineHeight + 4;
+        const float boxesTop = BoxesTop(axis);
         if (fBoxes.empty()) {
             SetHighColor(palette.muted);
             DrawString("Record, use the page, then Stop: its main thread's records appear here.", BPoint(8, axis));
@@ -224,10 +235,42 @@ public:
             SetHighColor(palette.muted);
             DrawString(label, BPoint(x + 3, height.ascent + 2));
         }
+        // CPU (percent of a core, at least 100) and memory, as areas.
+        float stripTop = axis + 1;
+        const auto strip = [&](const std::vector<std::pair<double, double>>& samples, rgb_color color, const std::string& label, double ceiling) {
+            if (samples.empty()) return;
+            const BRect band(bounds.left, stripTop, bounds.right, stripTop + kStripHeight - 1);
+            SetHighColor(palette.Tint(color, .12f));
+            FillRect(band);
+            std::vector<BPoint> points;
+            points.emplace_back(BPoint(bounds.left, band.bottom));
+            for (const auto& [time, value] : samples) {
+                const float x = static_cast<float>((time - fOrigin - fViewStart) * scale);
+                const float y = band.bottom - static_cast<float>(std::clamp(value / ceiling, 0.0, 1.0)) * (kStripHeight - 3);
+                if (points.size() == 1) points.emplace_back(BPoint(x, band.bottom));
+                points.emplace_back(BPoint(x, y));
+            }
+            points.emplace_back(BPoint(points.back().x, band.bottom));
+            SetHighColor(palette.Tint(color, palette.dark ? .6f : .5f));
+            FillPolygon(points.data(), static_cast<int32>(points.size()));
+            SetHighColor(palette.muted);
+            DrawString(label.c_str(), BPoint(bounds.left + 3, band.top + height.ascent + 1));
+            stripTop += kStripHeight + 1;
+        };
+        if (!fCPU.empty()) {
+            double peak = 0;
+            for (const auto& sample : fCPU) peak = std::max(peak, sample.second);
+            strip(fCPU, {230, 120, 60, 255}, "CPU (peak " + Milliseconds(peak) + " %)", std::max(100.0, peak));
+        }
+        if (!fMemory.empty()) {
+            double peak = 0;
+            for (const auto& sample : fMemory) peak = std::max(peak, sample.second);
+            strip(fMemory, {70, 140, 210, 255}, "Memory (peak " + Milliseconds(peak / 1048576) + " MiB)", peak);
+        }
         for (size_t i = 0; i < fBoxes.size(); ++i) {
             const auto& box = fBoxes[i];
             if (box.end < fViewStart || box.start > fViewEnd) continue;
-            BRect frame((box.start - fViewStart) * scale, axis + 1 + box.depth * row, (box.end - fViewStart) * scale, axis + box.depth * row + row - 1);
+            BRect frame((box.start - fViewStart) * scale, boxesTop + box.depth * row, (box.end - fViewStart) * scale, boxesTop + box.depth * row + row - 2);
             if (frame.top > update.bottom || frame.bottom < update.top) continue;
             frame.left = std::max(frame.left, bounds.left - 1);
             frame.right = std::min(std::max(frame.right, frame.left + 1), bounds.right + 1);
@@ -347,8 +390,9 @@ private:
         font.SetSize(std::max(9.f, be_plain_font->Size() * .85f));
         font.GetHeight(&height);
         const float lineHeight = std::ceil(height.ascent + height.descent), axis = lineHeight + 6, row = lineHeight + 4;
-        if (where.y < axis) return -1;
-        const int depth = static_cast<int>((where.y - axis) / row);
+        const float top = BoxesTop(axis);
+        if (where.y < top) return -1;
+        const int depth = static_cast<int>((where.y - top) / row);
         const double length = fViewEnd - fViewStart, perPixel = length / std::max(1.f, Bounds().Width());
         const double at = fViewStart + where.x * perPixel;
         // A box at least a pixel wide, so that a thin one can be hit.
@@ -363,6 +407,14 @@ private:
         return found;
     }
 
+    // Where the records start: under the time axis and the CPU and memory
+    // strips there are.
+    static constexpr float kStripHeight = 28;
+    float BoxesTop(float axis) const
+    {
+        return axis + 1 + (fCPU.empty() ? 0 : kStripHeight + 1) + (fMemory.empty() ? 0 : kStripHeight + 1);
+    }
+
     void Clamp()
     {
         const double length = fViewEnd - fViewStart;
@@ -372,6 +424,7 @@ private:
     }
 
     std::vector<json> fRecords;
+    std::vector<std::pair<double, double>> fCPU, fMemory;
     std::vector<Box> fBoxes;
     double fOrigin = 0, fSpan = 0, fViewStart = 0, fViewEnd = 1, fPressedStart = 0;
     int fDepth = 0, fSelected = -1, fHover = -1;
@@ -532,10 +585,26 @@ void PerformancePanel::ShowRecording()
     if (const auto frames = summary.find("renderingFrames"); frames != summary.end() && frames->is_object())
         status += " · " + std::to_string(static_cast<long long>(Number(*frames, "count"))) + " frames, median " + Milliseconds(Number(*frames, "medianMs"))
             + " ms, 95th percentile " + Milliseconds(Number(*frames, "p95Ms")) + " ms";
+    if (const auto& cpu = fSession.TimelineCPU(); !cpu.empty()) {
+        double total = 0, peak = 0;
+        for (const auto& sample : cpu) {
+            total += sample.second;
+            peak = std::max(peak, sample.second);
+        }
+        status += " · CPU " + Milliseconds(total / cpu.size()) + " % on average, " + Milliseconds(peak) + " % at most";
+    }
+    if (const auto& memory = fSession.TimelineMemory(); !memory.empty()) {
+        double least = memory.front().second, most = least;
+        for (const auto& sample : memory) {
+            least = std::min(least, sample.second);
+            most = std::max(most, sample.second);
+        }
+        status += " · memory " + Milliseconds(least / 1048576) + "–" + Milliseconds(most / 1048576) + " MiB";
+    }
     if (texts.size() >= Session::kTimelineRecords) status += " · the first " + std::to_string(Session::kTimelineRecords) + " records";
     fStatus->SetText(status.c_str());
     fDetail->ShowNote("Select a record to see its data and where it came from.");
-    fFlame->SetRecords(std::move(records));
+    fFlame->SetRecords(std::move(records), fSession.TimelineCPU(), fSession.TimelineMemory());
 }
 
 void PerformancePanel::ShowFlameRecord()
