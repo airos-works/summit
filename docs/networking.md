@@ -241,6 +241,21 @@ Returned cookies, removal receipts and `onChanged` events include the key.
 Host permissions and private-store restrictions still apply, including to
 wildcard queries. See the [Chrome cookies API](https://developer.chrome.com/docs/extensions/reference/api/cookies).
 
+`cookies.getPartitionKey({tabId, frameId, documentId})` answers the partition
+a frame's partitioned cookies go to, `{partitionKey: {topLevelSite,
+hasCrossSiteAncestor}}`: the tab's top-level site, and whether a frame of
+another site lies between it and the frame (this store keys partitions by
+top-level site alone, so the bit is reported, not used). `tabId` is
+required; the frame is the main frame unless `frameId` or `documentId` names
+another, and the extension needs access to its address. `cookies.set`
+accepts Chrome's `sameSite: "unspecified"` (a cookie without the
+attribute), as cookie editors send when they set again cookies Chrome
+exported; it is stored with the store's default policy and needs no
+`Secure`. Checked on the X399 with `cookies-samesite.zip`: a cookie set
+with `"unspecified"`, the partition key of an example.com tab
+(`https://example.com`, no cross-site ancestor), and errors for no `tabId`,
+an unknown frame and an unknown SameSite value.
+
 The key here is the top-level site. Chrome's additional `hasCrossSiteAncestor`
 dimension and `cookies.getPartitionKey` are not implemented; unsupported
 partition fields fail explicitly instead of silently broadening a query.
