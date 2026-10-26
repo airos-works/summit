@@ -180,7 +180,19 @@ Implementation:
 
 Limits:
 
-- The history lasts only for the session and is not persisted.
+- The history is kept across launches (as in Chrome and Firefox), in
+  `DownloadsHistory.json` of the extension storage directory (written beside
+  it and moved over it after each change extensions hear of; the newest 5000
+  items). A private context's is not saved. Items have their own identifiers,
+  continuing from the last launch's, as the engine's download identifiers
+  start again each launch. A download still transferring when Summit quit
+  (quitting pauses it and keeps its partial file) is paused and resumable
+  on the next launch; one whose file is gone, or not over HTTP, is
+  interrupted with `USER_SHUTDOWN`. Before 27 Oct the history lasted for the
+  session only. Checked on the X399 with `downloads-control.zip`: a complete,
+  a paused and a running download kept their identifiers after a restart,
+  the running one resumed from its partial file (8 MiB, the bytes intact), a
+  new download got the next identifier, and `erase` was saved.
 - A `filename` with folders (`reports/2026/a.csv`) is saved in those folders
   of the download directory, made as needed (each folder name made safe).
 - `saveAs: true` asks where to save in a save panel (the engine's

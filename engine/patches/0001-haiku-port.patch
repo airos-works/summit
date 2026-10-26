@@ -114762,10 +114762,10 @@ index 0000000000000000000000000000000000000000..271b3a38b4570d6f84669706d5c1beb8
 +#endif
 diff --git a/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionDownloadsHaiku.cpp b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionDownloadsHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..8da98a1c50757d4d8d7a3ad9b782337a1feb6fb1
+index 0000000000000000000000000000000000000000..23694c1511cb9ec39aef1e2536d0fb6fa84ea8b8
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionDownloadsHaiku.cpp
-@@ -0,0 +1,778 @@
+@@ -0,0 +1,939 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +#include "config.h"
 +#include "WebExtensionDownloadsHaiku.h"
@@ -114806,6 +114806,8 @@ index 0000000000000000000000000000000000000000..8da98a1c50757d4d8d7a3ad9b782337a
 +static constexpr auto stateInterrupted = "interrupted"_s;
 +static constexpr auto stateComplete = "complete"_s;
 +static constexpr size_t defaultSearchLimit = 1000;
++// The newest items the saved history keeps.
++static constexpr size_t maximumSavedItems = 5000;
 +
 +WebExtensionDownloadsHaiku& WebExtensionController::nativeDownloads()
 +{
@@ -114853,6 +114855,8 @@ index 0000000000000000000000000000000000000000..8da98a1c50757d4d8d7a3ad9b782337a
 +    m_resumer = WTF::move(resumer);
 +    if (!registry)
 +        return;
++    if (!m_lastIdentifier)
++        loadHistory();
 +    // The controller owns this object and clears the observer before destroying it.
 +    registry->setObserver([weakController = m_controller](const DownloadRegistryEventHaiku& event) {
 +        if (RefPtr controller = weakController.get())
@@ -114866,6 +114870,154 @@ index 0000000000000000000000000000000000000000..8da98a1c50757d4d8d7a3ad9b782337a
 +    m_resumer = nullptr;
 +    if (auto registry = std::exchange(m_registry, { }).lock())
 +        registry->setObserver(nullptr);
++    if (m_saveScheduled)
++        saveHistory();
++}
++
++static bool canContinue(const String& url);
++
++// Kept across launches, as Chrome and Firefox keep theirs.
++String WebExtensionDownloadsHaiku::historyPath() const
++{
++    RefPtr controller = m_controller.get();
++    if (!controller || m_incognito || !controller->configuration().storageIsPersistent())
++        return { };
++    return FileSystem::pathByAppendingComponent(controller->configuration().storageDirectory(), "DownloadsHistory.json"_s);
++}
++
++void WebExtensionDownloadsHaiku::loadHistory()
++{
++    auto path = historyPath();
++    if (path.isEmpty())
++        return;
++    auto contents = FileSystem::readEntireFile(path);
++    if (!contents)
++        return;
++    RefPtr value = JSON::Value::parseJSON(String::fromUTF8(contents->span()));
++    RefPtr object = value ? value->asObject() : nullptr;
++    RefPtr items = object ? object->getArray("items"_s) : nullptr;
++    if (!items)
++        return;
++    auto number = [](const JSON::Object& entry, ASCIILiteral key, double fallback) {
++        auto result = entry.getDouble(key);
++        return result && std::isfinite(*result) ? *result : fallback;
++    };
++    auto string = [](const JSON::Object& entry, ASCIILiteral key) {
++        auto result = entry.getString(key);
++        return result.isNull() ? emptyString() : result;
++    };
++    m_lastIdentifier = static_cast<uint64_t>(std::max(0.0, number(*object, "lastIdentifier"_s, 0)));
++    for (Ref itemValue : *items) {
++        RefPtr entry = itemValue->asObject();
++        if (!entry)
++            continue;
++        double identifier = number(*entry, "id"_s, 0);
++        if (identifier < 1 || identifier > 9007199254740991.0 || std::trunc(identifier) != identifier)
++            continue;
++        Item item;
++        item.identifier = static_cast<uint64_t>(identifier);
++        item.state = string(*entry, "state"_s);
++        if (m_items.contains(item.identifier) || (item.state != stateInProgress && item.state != stateInterrupted && item.state != stateComplete))
++            continue;
++        item.order = static_cast<uint64_t>(std::max(0.0, number(*entry, "order"_s, 0)));
++        item.url = string(*entry, "url"_s);
++        item.finalURL = string(*entry, "finalUrl"_s);
++        item.filename = string(*entry, "filename"_s);
++        item.mimeType = string(*entry, "mime"_s);
++        item.startTime = WallTime::fromRawSeconds(number(*entry, "startTime"_s, 0) / 1000);
++        if (auto endTime = entry->getDouble("endTime"_s); endTime && std::isfinite(*endTime))
++            item.endTime = WallTime::fromRawSeconds(*endTime / 1000);
++        item.error = string(*entry, "error"_s);
++        item.bytesReceived = static_cast<uint64_t>(std::max(0.0, number(*entry, "bytesReceived"_s, 0)));
++        item.totalBytes = static_cast<int64_t>(number(*entry, "totalBytes"_s, -1));
++        item.fileSize = static_cast<int64_t>(number(*entry, "fileSize"_s, -1));
++        item.byExtensionIdentifier = string(*entry, "byExtensionId"_s);
++        item.byExtensionName = string(*entry, "byExtensionName"_s);
++        item.exists = fileExists(item.filename);
++        if (item.state == stateInProgress) {
++            // Its transfer ended with the last launch. Quitting pauses a
++            // download, keeping its partial file, so one that can continue is
++            // paused; any other was interrupted by the shutdown.
++            item.paused = item.canResume = item.exists && canContinue(item.url);
++            if (item.paused) {
++                struct stat info;
++                if (!stat(item.filename.utf8().legacyCStringPointer(), &info))
++                    item.bytesReceived = static_cast<uint64_t>(info.st_size);
++            } else {
++                item.state = stateInterrupted;
++                item.error = "USER_SHUTDOWN"_s;
++            }
++        }
++        m_lastIdentifier = std::max(m_lastIdentifier, item.identifier);
++        m_nextOrder = std::max(m_nextOrder, item.order);
++        m_transfers.set(item.identifier, Transfer { 0, string(*entry, "validator"_s), false });
++        m_items.set(item.identifier, WTF::move(item));
++    }
++}
++
++void WebExtensionDownloadsHaiku::scheduleSave()
++{
++    if (m_incognito || m_saveScheduled)
++        return;
++    m_saveScheduled = true;
++    // Once for the changes of this turn of the run loop.
++    RunLoop::mainSingleton().dispatch([weakController = m_controller] {
++        RefPtr controller = weakController.get();
++        if (controller && controller->nativeDownloads().m_saveScheduled)
++            controller->nativeDownloads().saveHistory();
++    });
++}
++
++void WebExtensionDownloadsHaiku::saveHistory()
++{
++    m_saveScheduled = false;
++    auto path = historyPath();
++    if (path.isEmpty())
++        return;
++    Vector<const Item*> items;
++    for (auto& entry : m_items)
++        items.append(&entry.value);
++    std::ranges::sort(items, [](const Item* a, const Item* b) { return a->order < b->order; });
++    if (items.size() > maximumSavedItems)
++        items.removeAt(0, items.size() - maximumSavedItems);
++
++    Ref array = JSON::Array::create();
++    for (auto* item : items) {
++        Ref entry = JSON::Object::create();
++        entry->setDouble("id"_s, static_cast<double>(item->identifier));
++        entry->setDouble("order"_s, static_cast<double>(item->order));
++        entry->setString("url"_s, item->url);
++        entry->setString("finalUrl"_s, item->finalURL);
++        entry->setString("filename"_s, item->filename);
++        entry->setString("mime"_s, item->mimeType);
++        entry->setDouble("startTime"_s, item->startTime.secondsSinceEpoch().milliseconds());
++        if (item->endTime)
++            entry->setDouble("endTime"_s, item->endTime->secondsSinceEpoch().milliseconds());
++        entry->setString("state"_s, item->state);
++        if (!item->error.isEmpty())
++            entry->setString("error"_s, item->error);
++        entry->setDouble("bytesReceived"_s, static_cast<double>(item->bytesReceived));
++        entry->setDouble("totalBytes"_s, static_cast<double>(item->totalBytes));
++        entry->setDouble("fileSize"_s, static_cast<double>(item->fileSize));
++        if (!item->byExtensionIdentifier.isEmpty()) {
++            entry->setString("byExtensionId"_s, item->byExtensionIdentifier);
++            entry->setString("byExtensionName"_s, item->byExtensionName);
++        }
++        if (auto found = m_transfers.find(item->identifier); found != m_transfers.end() && !found->value.validator.isEmpty())
++            entry->setString("validator"_s, found->value.validator);
++        array->pushObject(WTF::move(entry));
++    }
++    Ref object = JSON::Object::create();
++    object->setInteger("version"_s, 1);
++    object->setDouble("lastIdentifier"_s, static_cast<double>(m_lastIdentifier));
++    object->setArray("items"_s, WTF::move(array));
++
++    // Written beside it and moved over it, so a crash never leaves half a file.
++    FileSystem::makeAllDirectories(FileSystem::parentPath(path));
++    auto temporaryPath = makeString(path, ".new"_s);
++    auto json = object->toJSONString().utf8();
++    if (!FileSystem::overwriteEntireFile(temporaryPath, byteCast<uint8_t>(json.span())) || !FileSystem::moveFile(temporaryPath, path))
++        FileSystem::deleteFile(temporaryPath);
 +}
 +
 +String WebExtensionDownloadsHaiku::directory() const
@@ -114888,16 +115040,18 @@ index 0000000000000000000000000000000000000000..8da98a1c50757d4d8d7a3ad9b782337a
 +    // a blob created by the calling page remains readable by the transfer.
 +    Ref pool = page.configuration().processPool();
 +    Ref download = pool->download(page.websiteDataStore(), &page, request, std::nullopt, filename);
-+    auto identifier = download->downloadID().toUInt64();
++    auto engine = download->downloadID().toUInt64();
 +    Ref extension = context.extension();
-+    m_initiators.set(identifier, Initiator { context.uniqueIdentifier(), extension->displayName() });
++    m_initiators.set(engine, Initiator { context.uniqueIdentifier(), extension->displayName() });
 +    // Registration notifies Started synchronously, which records the item and
 +    // fires onCreated before the caller's promise resolves.
 +    registry->registerDownload(download.get(), { }, filename, nullptr, static_cast<DownloadRegistryHaiku::Destination>(destination));
-+    m_initiators.remove(identifier);
-+    if (!m_items.contains(identifier))
-+        return makeUnexpected("The download could not be started"_s);
-+    return identifier;
++    m_initiators.remove(engine);
++    for (auto& entry : m_transfers) {
++        if (engine && entry.value.engine == engine)
++            return entry.key;
++    }
++    return makeUnexpected("The download could not be started"_s);
 +}
 +
 +Ref<JSON::Object> WebExtensionDownloadsHaiku::toJSON(const Item& item) const
@@ -114970,14 +115124,17 @@ index 0000000000000000000000000000000000000000..8da98a1c50757d4d8d7a3ad9b782337a
 +
 +auto WebExtensionDownloadsHaiku::itemForEngine(uint64_t engine) -> Item*
 +{
-+    auto found = m_items.find(m_resumed.getOptional(engine).value_or(engine));
++    auto itemIdentifier = engine ? m_engineItems.getOptional(engine) : std::nullopt;
++    if (!itemIdentifier)
++        return nullptr;
++    auto found = m_items.find(*itemIdentifier);
 +    return found == m_items.end() ? nullptr : &found->value;
 +}
 +
 +auto WebExtensionDownloadsHaiku::transfer(const Item& item) -> Transfer&
 +{
 +    return m_transfers.ensure(item.identifier, [&] {
-+        return Transfer { item.identifier, { }, false };
++        return Transfer { 0, { }, false };
 +    }).iterator->value;
 +}
 +
@@ -114989,7 +115146,7 @@ index 0000000000000000000000000000000000000000..8da98a1c50757d4d8d7a3ad9b782337a
 +        return;
 +
 +    if (event.type == DownloadRegistryEventHaiku::Type::Started) {
-+        if (m_items.contains(identifier) || m_resumed.contains(identifier))
++        if (m_engineItems.contains(identifier))
 +            return;
 +        // A resumed download continues its paused item: resume() starting it,
 +        // or the browser continuing the item's partial file.
@@ -115007,7 +115164,7 @@ index 0000000000000000000000000000000000000000..8da98a1c50757d4d8d7a3ad9b782337a
 +        }
 +        if (continued) {
 +            auto previous = *continued;
-+            m_resumed.set(identifier, continued->identifier);
++            m_engineItems.set(identifier, continued->identifier);
 +            transfer(*continued) = { identifier, { }, false };
 +            continued->paused = false;
 +            continued->bytesReceived = event.currentSize;
@@ -115018,7 +115175,7 @@ index 0000000000000000000000000000000000000000..8da98a1c50757d4d8d7a3ad9b782337a
 +            return;
 +        }
 +        Item item;
-+        item.identifier = identifier;
++        item.identifier = ++m_lastIdentifier;
 +        item.order = ++m_nextOrder;
 +        item.url = event.url;
 +        item.finalURL = event.finalURL;
@@ -115033,8 +115190,10 @@ index 0000000000000000000000000000000000000000..8da98a1c50757d4d8d7a3ad9b782337a
 +            item.byExtensionName = initiator->name;
 +        }
 +        auto json = toJSON(item)->toJSONString();
-+        m_items.set(identifier, WTF::move(item));
-+        m_transfers.set(identifier, Transfer { identifier, { }, false });
++        auto itemIdentifier = item.identifier;
++        m_items.set(itemIdentifier, WTF::move(item));
++        m_transfers.set(itemIdentifier, Transfer { identifier, { }, false });
++        m_engineItems.set(identifier, itemIdentifier);
 +        dispatch(WebExtensionEventListenerType::DownloadsOnCreated, json);
 +        return;
 +    }
@@ -115062,7 +115221,7 @@ index 0000000000000000000000000000000000000000..8da98a1c50757d4d8d7a3ad9b782337a
 +
 +    bool resumeNow = false;
 +    if (event.type == DownloadRegistryEventHaiku::Type::Finished) {
-+        m_resumed.remove(identifier);
++        m_engineItems.remove(identifier);
 +        if (event.result == B_WEBKIT_DOWNLOAD_PAUSED) {
 +            // Paused, by the browser or pause(): still in progress, as in Chrome.
 +            item.paused = true;
@@ -115125,6 +115284,8 @@ index 0000000000000000000000000000000000000000..8da98a1c50757d4d8d7a3ad9b782337a
 +
 +void WebExtensionDownloadsHaiku::dispatch(WebExtensionEventListenerType type, const String& argumentJSON)
 +{
++    // Every change an extension hears of is one to keep.
++    scheduleSave();
 +    RefPtr controller = m_controller.get();
 +    if (!controller)
 +        return;
@@ -115388,7 +115549,7 @@ index 0000000000000000000000000000000000000000..8da98a1c50757d4d8d7a3ad9b782337a
 +    for (auto identifier : identifiers) {
 +        m_items.remove(identifier);
 +        m_transfers.remove(identifier);
-+        m_resumed.removeIf([&](auto& entry) { return entry.value == identifier; });
++        m_engineItems.removeIf([&](auto& entry) { return entry.value == identifier; });
 +        dispatch(WebExtensionEventListenerType::DownloadsOnErased, String::number(identifier));
 +    }
 +    return identifiers;
@@ -115410,7 +115571,7 @@ index 0000000000000000000000000000000000000000..8da98a1c50757d4d8d7a3ad9b782337a
 +        return { };
 +    auto registry = m_registry.lock();
 +    auto& itemTransfer = transfer(item);
-+    if (registry && registry->isActive(itemTransfer.engine)) {
++    if (registry && itemTransfer.engine && registry->isActive(itemTransfer.engine)) {
 +        itemTransfer.resumeWhenPaused = false;
 +        registry->cancel(itemTransfer.engine);
 +        return { };
@@ -115443,7 +115604,7 @@ index 0000000000000000000000000000000000000000..8da98a1c50757d4d8d7a3ad9b782337a
 +    if (item.paused)
 +        return { };
 +    auto registry = m_registry.lock();
-+    if (!registry || !registry->isActive(itemTransfer.engine))
++    if (!registry || !itemTransfer.engine || !registry->isActive(itemTransfer.engine))
 +        return makeUnexpected("The download is not in progress"_s);
 +    if (!canContinue(item.url))
 +        return makeUnexpected("This download cannot be paused"_s);
@@ -115466,7 +115627,7 @@ index 0000000000000000000000000000000000000000..8da98a1c50757d4d8d7a3ad9b782337a
 +    if (item.state != stateInProgress || !item.paused || !item.canResume)
 +        return makeUnexpected("The download is not paused"_s);
 +    auto registry = m_registry.lock();
-+    if (auto& itemTransfer = transfer(item); registry && registry->isActive(itemTransfer.engine)) {
++    if (auto& itemTransfer = transfer(item); registry && itemTransfer.engine && registry->isActive(itemTransfer.engine)) {
 +        // Still stopping: it continues once it has.
 +        itemTransfer.resumeWhenPaused = true;
 +        return { };
@@ -115546,10 +115707,10 @@ index 0000000000000000000000000000000000000000..8da98a1c50757d4d8d7a3ad9b782337a
 +#endif // ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
 diff --git a/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionDownloadsHaiku.h b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionDownloadsHaiku.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..f6a9446d830210049b2ea3420c9e0bbfdda86904
+index 0000000000000000000000000000000000000000..dd010f0028f4cf215671a84e68e63dcd07ff4f80
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionDownloadsHaiku.h
-@@ -0,0 +1,120 @@
+@@ -0,0 +1,130 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +#pragma once
 +#if ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
@@ -115579,8 +115740,9 @@ index 0000000000000000000000000000000000000000..f6a9446d830210049b2ea3420c9e0bbf
 +// Bridges the context-owned native download registry to the downloads
 +// extension API. It observes every download of its browser context (as other
 +// browsers expose them to extensions with the "downloads" permission) and keeps
-+// a history for the lifetime of the controller; the history is not persisted.
-+// Confined to the WTF main RunLoop.
++// a history, saved in the controller's storage directory (not for a private
++// context) and read again on the next launch. Items have their own identifiers,
++// as the engine's start again each launch. Confined to the WTF main RunLoop.
 +class WebExtensionDownloadsHaiku final {
 +    WTF_MAKE_TZONE_ALLOCATED(WebExtensionDownloadsHaiku);
 +public:
@@ -115634,7 +115796,7 @@ index 0000000000000000000000000000000000000000..f6a9446d830210049b2ea3420c9e0bbf
 +    // Kept beside the item (whose size HashMap bounds).
 +    struct Transfer {
 +        // The download transferring for the item now, or last: its first
-+        // identifier, or a resumed one's.
++        // identifier, or a resumed one's (0 for an item of an earlier launch).
 +        uint64_t engine { 0 };
 +        String validator;
 +        // Resume once the transfer has stopped (resume() during a pause).
@@ -115652,16 +115814,25 @@ index 0000000000000000000000000000000000000000..f6a9446d830210049b2ea3420c9e0bbf
 +    Transfer& transfer(const Item&);
 +    Ref<JSON::Object> toJSON(const Item&) const;
 +    std::expected<Vector<const Item*>, String> query(const JSON::Object&) const;
++    String historyPath() const;
++    void loadHistory();
++    void scheduleSave();
++    void saveHistory();
 +
 +    WeakPtr<WebExtensionController> m_controller;
 +    std::weak_ptr<DownloadRegistryHaiku> m_registry;
 +    bool m_incognito { false };
 +    uint64_t m_nextOrder { 0 };
++    uint64_t m_lastIdentifier { 0 };
++    // By item identifier.
 +    HashMap<uint64_t, Item> m_items;
++    // By the engine's download identifier.
 +    HashMap<uint64_t, Initiator> m_initiators;
++    // By item identifier.
 +    HashMap<uint64_t, Transfer> m_transfers;
-+    // A resumed download's identifier -> the item it continues.
-+    HashMap<uint64_t, uint64_t> m_resumed;
++    // A transferring download's identifier (its first, or a resumed one's) -> its item.
++    HashMap<uint64_t, uint64_t> m_engineItems;
++    bool m_saveScheduled { false };
 +    // The item resume() is starting: its Started notification comes synchronously.
 +    uint64_t m_resuming { 0 };
 +    Resumer m_resumer;
