@@ -105,6 +105,29 @@ Limits:
   with the permission). Checked on the X399 with `dnr-matched.zip`: a
   matching image gave rule 1, the allowed one only rule 2, a script of that
   name and another image nothing, and an invalid address an error.
+- Session rules may name tabs, as in Chrome: `tabIds` (only those tabs;
+  -1 for requests that are not a tab's) or `excludedTabIds` (every tab but
+  those). Dynamic rules with either are rejected (`tabIds and excludedTabIds
+  are only allowed in session rules`), as are an empty `tabIds` and both
+  together; static rules with them are skipped. WebCore's rules have no tab
+  condition, so each tab a rule names gets its own copy of the rule list
+  (`translateDeclarativeNetRequestRulesHaiku(..., tab)`: the rules as they
+  apply in that tab), compiled after the shared list; tabs no rule names
+  share the list without the `tabIds` rules. The lists keep the extension's
+  identifier, so the right one replaces the shared one in the tab's page
+  (`attachNativeDeclarativeNetRequestRules`: each page has its own user
+  content controller; a controller that pages of several tabs share gets the
+  shared list), again when tabs change. Priorities across all the
+  extension's rules hold, as each page has one list. A tab named only by
+  rules gets an empty list (no rules). `testMatchOutcome` uses the list of
+  its `tabId` (-1 when not given). Checked on the X399 with `dnr-tab.zip`
+  and `dnrtab.html` (two images marked `summit-dnr-tab` and
+  `summit-dnr-excl`): with rule 1 `tabIds: [A]` and rule 2
+  `excludedTabIds: [A]`, tab A lost the first image and tab B the second; a
+  tab opened afterwards behaved as B; naming the new tab in both rules moved
+  them to it; only `tabIds` rules left other tabs untouched; clearing the
+  rules brought every image back; `testMatchOutcome` gave rule 1 for A and
+  rule 2 for B and for -1.
 - `onRuleMatchedDebug` is absent (Chrome offers it to unpacked extensions
   only).
 - `MAX_NUMBER_OF_REGEX_RULES` (1000) is enforced for the dynamic rules and

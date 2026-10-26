@@ -115,7 +115,8 @@ Tampermonkey 5.5.1 (Chrome Web Store build) needed four more fixes:
   `status: "complete"`.
 
 `excludedTabIds` (Tampermonkey uses it to let a tab show a script's source)
-is still unsupported: Summit's rules have no tab conditions.
+works since 27 Oct: each tab a session rule names gets its own rule list
+(`webextensions-dnr-downloads.md`).
 
 **Status (23 Oct, cext build 4c6edf0, X399):** Tampermonkey installed from
 its Chrome Web Store CRX installs `.user.js` scripts: the link opens its

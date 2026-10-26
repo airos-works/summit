@@ -98789,7 +98789,7 @@ index 65b9841a9d4469a699b92c47435fecaaaa034d77..0361d615767169f4af1a6c192853c93e
  
      OptionSet<ModifierFlags> modifierFlags() const { return !m_activationKey.isEmpty() ? m_modifierFlags : OptionSet<ModifierFlags> { }; }
 diff --git a/Source/WebKit/UIProcess/Extensions/WebExtensionContext.cpp b/Source/WebKit/UIProcess/Extensions/WebExtensionContext.cpp
-index 8947f24ec9866c39f206aab464ec21c5d4213b95..b36f80023077ec3bc5680f7214a823a4221019a0 100644
+index 8947f24ec9866c39f206aab464ec21c5d4213b95..3e5e7c7a1277f52019ece5c67a1665107627ba7a 100644
 --- a/Source/WebKit/UIProcess/Extensions/WebExtensionContext.cpp
 +++ b/Source/WebKit/UIProcess/Extensions/WebExtensionContext.cpp
 @@ -34,11 +34,24 @@
@@ -99405,11 +99405,11 @@ index 8947f24ec9866c39f206aab464ec21c5d4213b95..b36f80023077ec3bc5680f7214a823a4
 +#if PLATFORM(HAIKU)
 +    // Host-access-only extensions (Tampermonkey, 1Password) included: their
 +    // rules were compiled but never reached a page.
-+    if (!isLoaded() || !m_nativeDNRRules || !nativeDeclarativeNetRequestAllowed())
++    if (!isLoaded() || (!m_nativeDNRRules && m_nativeDNRTabRules.isEmpty()) || !nativeDeclarativeNetRequestAllowed())
 +        return;
 +    for (Ref controller : userContentControllers()) {
 +        if (controller.ptr() == &controllerProxy) {
-+            controllerProxy.addContentRuleList(*m_nativeDNRRules, m_baseURL);
++            attachNativeDeclarativeNetRequestRules(controllerProxy);
 +            break;
 +        }
 +    }
@@ -99427,10 +99427,10 @@ index 8947f24ec9866c39f206aab464ec21c5d4213b95..b36f80023077ec3bc5680f7214a823a4
  void WebExtensionContext::addDeclarativeNetRequestRulesToPrivateUserContentControllers()
  {
 +#if PLATFORM(HAIKU)
-+    if (!isLoaded() || !hasAccessToPrivateData() || !m_nativeDNRRules || !nativeDeclarativeNetRequestAllowed())
++    if (!isLoaded() || !hasAccessToPrivateData() || (!m_nativeDNRRules && m_nativeDNRTabRules.isEmpty()) || !nativeDeclarativeNetRequestAllowed())
 +        return;
 +    for (Ref controller : extensionController()->allPrivateUserContentControllers())
-+        controller->addContentRuleList(*m_nativeDNRRules, m_baseURL);
++        attachNativeDeclarativeNetRequestRules(controller);
 +#else
      API::ContentRuleListStore::defaultStoreSingleton().lookupContentRuleListFile(declarativeNetRequestContentRuleListFilePath(), uniqueIdentifier().isolatedCopy(), [this, protectedThis = Ref { *this }](RefPtr<API::ContentRuleList> ruleList, std::error_code) {
          if (!ruleList)
@@ -99621,7 +99621,7 @@ index 8947f24ec9866c39f206aab464ec21c5d4213b95..b36f80023077ec3bc5680f7214a823a4
  
  #endif // ENABLE(WK_WEB_EXTENSIONS)
 diff --git a/Source/WebKit/UIProcess/Extensions/WebExtensionContext.h b/Source/WebKit/UIProcess/Extensions/WebExtensionContext.h
-index 5f8454dd5897a49ffba794e50fb04b7257ad2291..a54af2ac3744edcc0b9e24ab6622908ab3e9dc4e 100644
+index 5f8454dd5897a49ffba794e50fb04b7257ad2291..0c442e89de071cdc7ed87869b15a372b8bf9fe41 100644
 --- a/Source/WebKit/UIProcess/Extensions/WebExtensionContext.h
 +++ b/Source/WebKit/UIProcess/Extensions/WebExtensionContext.h
 @@ -40,6 +40,9 @@
@@ -99998,17 +99998,24 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..a54af2ac3744edcc0b9e24ab6622908a
  
  #ifdef NDEBUG
      // This is method is a no-op in release builds since it has a performance impact with little benefit to release builds.
-@@ -854,6 +1031,9 @@ private:
+@@ -854,6 +1031,16 @@ private:
      void loadDeclarativeNetRequestRules(CompletionHandler<void(bool)>&&);
      void compileDeclarativeNetRequestRules(NSDictionary *, CompletionHandler<void(bool)>&&);
      void unloadDeclarativeNetRequestState();
 +#if PLATFORM(HAIKU)
 +    void clearNativeDeclarativeNetRequestRules();
++    // Gives the controller the rules of its page's tab: that tab's own list
++    // when session rules name it (tabIds, excludedTabIds), else the list of
++    // every other tab.
++    void attachNativeDeclarativeNetRequestRules(WebUserContentControllerProxy&);
++    // The tab (-1: none) of the pages that use the controller; none when
++    // pages of several tabs share it.
++    std::optional<double> tabForUserContentControllerHaiku(WebUserContentControllerProxy&) const;
 +#endif
      String declarativeNetRequestContentRuleListFilePath();
  
      // Updating user content controllers with new rules.
-@@ -892,6 +1072,15 @@ private:
+@@ -892,6 +1079,15 @@ private:
      Ref<WebExtensionStorageSQLiteStore> syncStorageStore();
  
      void fetchCookies(WebsiteDataStore&, const URL&, const WebExtensionCookieFilterParameters&, CompletionHandler<void(std::expected<Vector<WebExtensionCookieParameters>, WebExtensionError>&&)>&&);
@@ -100024,7 +100031,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..a54af2ac3744edcc0b9e24ab6622908a
  
      // Action APIs
      bool isActionMessageAllowed(IPC::Decoder&);
-@@ -903,6 +1092,10 @@ private:
+@@ -903,6 +1099,10 @@ private:
      void actionOpenPopup(WebPageProxyIdentifier, std::optional<WebExtensionWindowIdentifier>, std::optional<WebExtensionTabIdentifier>, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
      void actionGetBadgeText(std::optional<WebExtensionWindowIdentifier>, std::optional<WebExtensionTabIdentifier>, CompletionHandler<void(std::expected<String, WebExtensionError>&&)>&&);
      void actionSetBadgeText(std::optional<WebExtensionWindowIdentifier>, std::optional<WebExtensionTabIdentifier>, const String& text, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
@@ -100035,7 +100042,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..a54af2ac3744edcc0b9e24ab6622908a
      void actionGetEnabled(std::optional<WebExtensionWindowIdentifier>, std::optional<WebExtensionTabIdentifier>, CompletionHandler<void(std::expected<bool, WebExtensionError>&&)>&&);
      void actionSetEnabled(std::optional<WebExtensionTabIdentifier>, bool enabled, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
      void fireActionClickedEventIfNeeded(WebExtensionTab*);
-@@ -934,6 +1127,11 @@ private:
+@@ -934,6 +1134,11 @@ private:
      // Commands APIs
      bool isCommandsMessageAllowed(IPC::Decoder&);
      void commandsGetAll(CompletionHandler<void(Vector<WebExtensionCommandParameters>)>&&);
@@ -100047,7 +100054,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..a54af2ac3744edcc0b9e24ab6622908a
      void fireCommandEventIfNeeded(const WebExtensionCommand&, WebExtensionTab*);
      void fireCommandChangedEventIfNeeded(const WebExtensionCommand&, const String& oldShortcut);
  
-@@ -944,7 +1142,9 @@ private:
+@@ -944,7 +1149,9 @@ private:
      void cookiesSet(std::optional<PAL::SessionID>, const WebExtensionCookieParameters&, CompletionHandler<void(std::expected<std::optional<WebExtensionCookieParameters>, WebExtensionError>&&)>&&);
      void cookiesRemove(std::optional<PAL::SessionID>, const String& name, const URL&, CompletionHandler<void(std::expected<std::optional<WebExtensionCookieParameters>, WebExtensionError>&&)>&&);
      void cookiesGetAllCookieStores(CompletionHandler<void(std::expected<HashMap<PAL::SessionID, Vector<WebExtensionTabIdentifier>>, WebExtensionError>&&)>&&);
@@ -100057,15 +100064,14 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..a54af2ac3744edcc0b9e24ab6622908a
  
      // DeclarativeNetRequest APIs
      bool isDeclarativeNetRequestMessageAllowed(IPC::Decoder&);
-@@ -960,6 +1160,34 @@ private:
+@@ -960,6 +1167,33 @@ private:
      void declarativeNetRequestUpdateDynamicRules(String&& rulesToAddJSON, Vector<double>&& ruleIDsToDelete, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
      void declarativeNetRequestGetSessionRules(Vector<double>&& filter, CompletionHandler<void(std::expected<String, WebExtensionError>&&)>&&);
      void declarativeNetRequestUpdateSessionRules(String&& rulesToAddJSON, Vector<double>&& ruleIDsToDelete, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
 +#if PLATFORM(HAIKU)
 +    void declarativeNetRequestGetAvailableStaticRuleCount(CompletionHandler<void(double)>&&);
 +    // Native content rules enforce DNR for the whole browser. An extension with only
-+    // declarativeNetRequestWithHostAccess gets them when it may access every URL,
-+    // where host-limited enforcement would change nothing.
++    // declarativeNetRequestWithHostAccess gets them limited to its hosts.
 +    bool nativeDeclarativeNetRequestAllowed();
 +    // getMatchedRules({tabId, minTimeStamp}): Chrome's {rulesMatchedInfo} as JSON.
 +    void declarativeNetRequestGetMatchedRulesHaiku(String&& filterJSON, CompletionHandler<void(std::expected<String, WebExtensionError>&&)>&&);
@@ -100092,7 +100098,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..a54af2ac3744edcc0b9e24ab6622908a
  
  #if ENABLE(INSPECTOR_EXTENSIONS)
      // DevTools APIs
-@@ -975,12 +1203,22 @@ private:
+@@ -975,12 +1209,22 @@ private:
  
      // Extension APIs
      void extensionIsAllowedIncognitoAccess(CompletionHandler<void(bool)>&&);
@@ -100115,7 +100121,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..a54af2ac3744edcc0b9e24ab6622908a
      void menusCreate(const WebExtensionMenuItemParameters&, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
      void menusUpdate(const String& identifier, const WebExtensionMenuItemParameters&, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
      void menusRemove(const String& identifier, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
-@@ -1009,9 +1247,18 @@ private:
+@@ -1009,9 +1253,18 @@ private:
  
      // Permissions APIs
      void permissionsGetAll(CompletionHandler<void(Vector<String>&& permissions, Vector<String>&& origins)>&&);
@@ -100134,7 +100140,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..a54af2ac3744edcc0b9e24ab6622908a
      void firePermissionsEventListenerIfNecessary(WebExtensionEventListenerType, const PermissionsSet&, const MatchPatternSet&);
  
      // Port APIs
-@@ -1021,7 +1268,7 @@ private:
+@@ -1021,7 +1274,7 @@ private:
      void disconnectPortsForPage(WebPageProxy&);
      void addPorts(WebExtensionContentWorldType sourceContentWorldType, WebExtensionContentWorldType targetContentWorldType, WebExtensionPortChannelIdentifier, HashCountedSet<WebPageProxyIdentifier>&&);
      void removePort(WebExtensionContentWorldType sourceContentWorldType, WebExtensionContentWorldType targetContentWorldType, WebExtensionPortChannelIdentifier, WebPageProxyIdentifier);
@@ -100143,7 +100149,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..a54af2ac3744edcc0b9e24ab6622908a
      void removeNativePort(WebExtensionMessagePort&);
      unsigned openPortCount(WebExtensionContentWorldType, WebExtensionPortChannelIdentifier);
      bool isPortConnected(WebExtensionContentWorldType sourceContentWorldType, WebExtensionContentWorldType targetContentWorldType, WebExtensionPortChannelIdentifier);
-@@ -1030,13 +1277,27 @@ private:
+@@ -1030,13 +1283,27 @@ private:
      void firePortMessageEventsIfNeeded(WebExtensionContentWorldType, std::optional<WebPageProxyIdentifier>, WebExtensionPortChannelIdentifier, const String& messageJSON, bool userGesture);
      void fireQueuedPortMessageEventsIfNeeded(WebExtensionContentWorldType, WebExtensionPortChannelIdentifier);
      void sendQueuedNativePortMessagesIfNeeded(WebExtensionPortChannelIdentifier);
@@ -100172,7 +100178,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..a54af2ac3744edcc0b9e24ab6622908a
      void runtimeConnect(const String& extensionID, WebExtensionPortChannelIdentifier, const String& name, const WebExtensionMessageSenderParameters&, bool userGesture, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
      void runtimeSendNativeMessage(const String& applicationID, const String& messageJSON, CompletionHandler<void(std::expected<String, WebExtensionError>&&)>&&);
      void runtimeConnectNative(const String& applicationID, WebExtensionPortChannelIdentifier, WebPageProxyIdentifier, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
-@@ -1055,6 +1316,18 @@ private:
+@@ -1055,6 +1322,18 @@ private:
      void scriptingGetRegisteredScripts(const Vector<String>&, CompletionHandler<void(std::expected<Vector<WebExtensionRegisteredScriptParameters>, WebExtensionError>&&)>&&);
      void scriptingUnregisterContentScripts(const Vector<String>&, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
      bool createInjectedContentForScripts(const Vector<WebExtensionRegisteredScriptParameters>&, WebExtensionDynamicScripts::WebExtensionRegisteredScript::FirstTimeRegistration, DynamicInjectedContentsMap&, NSString *callingAPIName, NSString **errorMessage);
@@ -100191,7 +100197,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..a54af2ac3744edcc0b9e24ab6622908a
  
      // Sidebar APIs
  #if ENABLE(WK_WEB_EXTENSIONS_SIDEBAR)
-@@ -1088,6 +1361,9 @@ private:
+@@ -1088,6 +1367,9 @@ private:
      void tabsCreate(std::optional<WebPageProxyIdentifier>, const WebExtensionTabParameters&, CompletionHandler<void(std::expected<std::optional<WebExtensionTabParameters>, WebExtensionError>&&)>&&);
      void tabsUpdate(WebPageProxyIdentifier, std::optional<WebExtensionTabIdentifier>, const WebExtensionTabParameters&, CompletionHandler<void(std::expected<std::optional<WebExtensionTabParameters>, WebExtensionError>&&)>&&);
      void tabsDuplicate(WebExtensionTabIdentifier, const WebExtensionTabParameters&, CompletionHandler<void(std::expected<std::optional<WebExtensionTabParameters>, WebExtensionError>&&)>&&);
@@ -100201,7 +100207,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..a54af2ac3744edcc0b9e24ab6622908a
      void tabsGet(WebExtensionTabIdentifier, CompletionHandler<void(std::expected<std::optional<WebExtensionTabParameters>, WebExtensionError>&&)>&&);
      void tabsGetCurrent(WebPageProxyIdentifier, CompletionHandler<void(std::expected<std::optional<WebExtensionTabParameters>, WebExtensionError>&&)>&&);
      void tabsQuery(WebPageProxyIdentifier, const WebExtensionTabQueryParameters&, CompletionHandler<void(std::expected<Vector<WebExtensionTabParameters>, WebExtensionError>&&)>&&);
-@@ -1103,6 +1379,9 @@ private:
+@@ -1103,6 +1385,9 @@ private:
      void tabsSetZoom(WebPageProxyIdentifier, std::optional<WebExtensionTabIdentifier>, double, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
      void tabsMove(Vector<WebExtensionTabIdentifier>, std::optional<WebExtensionWindowIdentifier>, double, CompletionHandler<void(std::expected<Vector<WebExtensionTabParameters>, WebExtensionError>&&)>&&);
      void tabsRemove(Vector<WebExtensionTabIdentifier>, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
@@ -100211,7 +100217,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..a54af2ac3744edcc0b9e24ab6622908a
      void tabsExecuteScript(WebPageProxyIdentifier, std::optional<WebExtensionTabIdentifier>, const WebExtensionScriptInjectionParameters&, bool userGesture, CompletionHandler<void(std::expected<Vector<WebExtensionScriptInjectionResultParameters>, WebExtensionError>&&)>&&);
      void tabsInsertCSS(WebPageProxyIdentifier, std::optional<WebExtensionTabIdentifier>, const WebExtensionScriptInjectionParameters&, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
      void tabsRemoveCSS(WebPageProxyIdentifier, std::optional<WebExtensionTabIdentifier>, const WebExtensionScriptInjectionParameters&, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
-@@ -1133,8 +1412,20 @@ private:
+@@ -1133,8 +1418,20 @@ private:
      void fireWindowsEventIfNeeded(WebExtensionEventListenerType, std::optional<WebExtensionWindowParameters>);
  
      // webRequest support.
@@ -100234,7 +100240,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..a54af2ac3744edcc0b9e24ab6622908a
  
      // IPC::MessageReceiver.
      void didReceiveMessage(IPC::Connection&, IPC::Decoder&) override;
-@@ -1145,12 +1436,31 @@ private:
+@@ -1145,12 +1442,31 @@ private:
  
      mutable Markable<WebExtensionContextIdentifier> m_privilegedIdentifier;
  
@@ -100266,7 +100272,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..a54af2ac3744edcc0b9e24ab6622908a
  #endif
      Vector<Ref<API::Error>> m_errors;
  
-@@ -1169,6 +1479,15 @@ private:
+@@ -1169,6 +1485,15 @@ private:
  
      RefPtr<API::ContentWorld> m_contentScriptWorld;
  
@@ -100282,7 +100288,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..a54af2ac3744edcc0b9e24ab6622908a
      PermissionsMap m_grantedPermissions;
      PermissionsMap m_deniedPermissions;
  
-@@ -1194,6 +1513,14 @@ private:
+@@ -1194,6 +1519,14 @@ private:
      EventListenerTypeCountedSet m_backgroundContentEventListeners;
      EventListenerTypeFrameMap m_eventListenerFrames;
  
@@ -100297,7 +100303,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..a54af2ac3744edcc0b9e24ab6622908a
      bool m_shouldFireStartupEvent { false };
      InstallReason m_installReason { InstallReason::None };
      String m_previousVersion;
-@@ -1216,6 +1543,16 @@ private:
+@@ -1216,6 +1549,16 @@ private:
  #elif ENABLE(2022_GLIB_API)
      GRefPtr<WebKitWebView> m_backgroundWebView;
      GWeakPtr<WebKitWebExtensionContext> m_delegate;
@@ -100314,7 +100320,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..a54af2ac3744edcc0b9e24ab6622908a
  #endif
      Variant<std::monostate, Ref<ProcessThrottlerActivity>, Ref<ProcessActivityGroup>> m_backgroundWebViewActivity;
      RefPtr<API::Error> m_backgroundContentLoadError;
-@@ -1237,6 +1574,7 @@ private:
+@@ -1237,6 +1580,7 @@ private:
      HashMap<Ref<WebExtensionMatchPattern>, UserScriptVector> m_injectedScriptsPerPatternMap;
      HashMap<Ref<WebExtensionMatchPattern>, UserStyleSheetVector> m_injectedStyleSheetsPerPatternMap;
  
@@ -100322,7 +100328,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..a54af2ac3744edcc0b9e24ab6622908a
      HashMap<String, Ref<WebExtensionDynamicScripts::WebExtensionRegisteredScript>> m_registeredScriptsMap;
      RefPtr<WebExtensionRegisteredScriptsSQLiteStore> m_registeredContentScriptsStorage;
  
-@@ -1256,11 +1594,20 @@ private:
+@@ -1256,11 +1600,20 @@ private:
  #endif // ENABLE(WK_WEB_EXTENSIONS_SIDEBAR)
  
      PortCountedSet m_ports;
@@ -100344,7 +100350,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..a54af2ac3744edcc0b9e24ab6622908a
      mutable WindowIdentifierVector m_windowOrderVector;
      mutable std::optional<WebExtensionWindowIdentifier> m_focusedWindowIdentifier;
  
-@@ -1276,6 +1623,26 @@ private:
+@@ -1276,6 +1629,30 @@ private:
      bool m_populatedCommands { false };
  
      String m_declarativeNetRequestContentRuleListFilePath;
@@ -100352,6 +100358,10 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..a54af2ac3744edcc0b9e24ab6622908a
 +    uint64_t m_nativeDNRLoadGeneration { 0 };
 +    RefPtr<API::ContentRuleList> m_nativeDNRRules;
 +    String m_nativeDNRRuleFile;
++    // The rules of each tab that session rules name (tabIds, excludedTabIds),
++    // for its pages instead of m_nativeDNRRules (null: no rules apply there).
++    HashMap<double, RefPtr<API::ContentRuleList>> m_nativeDNRTabRules;
++    Vector<String> m_nativeDNRTabRuleFiles;
 +    size_t m_nativeDNRStaticRuleCount { 0 };
 +    // Rules with a regexFilter, for MAX_NUMBER_OF_REGEX_RULES (counted per kind, as in Chrome).
 +    HashSet<double> m_sessionRegexRulesIDsHaiku;
@@ -100371,7 +100381,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..a54af2ac3744edcc0b9e24ab6622908a
      DeclarativeNetRequestMatchedRuleVector m_matchedRules;
      RefPtr<WebExtensionDeclarativeNetRequestSQLiteStore> m_declarativeNetRequestDynamicRulesStore;
      RefPtr<WebExtensionDeclarativeNetRequestSQLiteStore> m_declarativeNetRequestSessionRulesStore;
-@@ -1283,6 +1650,9 @@ private:
+@@ -1283,6 +1660,9 @@ private:
      HashSet<double> m_sessionRulesIDs;
      HashSet<double> m_dynamicRulesIDs;
  
@@ -100381,7 +100391,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..a54af2ac3744edcc0b9e24ab6622908a
      MenuItemMap m_menuItems;
      MenuItemVector m_mainMenuItems;
  
-@@ -1300,12 +1670,16 @@ private:
+@@ -1300,12 +1680,16 @@ private:
          String message;
  #if PLATFORM(COCOA)
          RetainPtr<id> argument;
@@ -100398,7 +100408,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..a54af2ac3744edcc0b9e24ab6622908a
  
      Deque<TestMessage> m_testMessageQueue;
      Deque<TestMessage> m_testStartedQueue;
-@@ -1315,6 +1689,8 @@ private:
+@@ -1315,6 +1699,8 @@ private:
      void sendQueuedTestMessagesIfNeeded(WebExtensionEventListenerType);
  #if PLATFORM(COCOA)
      void addTestMessageToQueue(const String& message, id argument, WebExtensionEventListenerType);
@@ -105235,10 +105245,10 @@ index 0000000000000000000000000000000000000000..3998cffe6e607ec3c376ccce7afd9b94
 +#endif
 diff --git a/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextAPIDeclarativeNetRequestHaiku.cpp b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextAPIDeclarativeNetRequestHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..132ffbe412470b2f7e6e5471597cfcaab3a82e02
+index 0000000000000000000000000000000000000000..0e0f056add4c510960c4b6cc1ffa54b694666867
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextAPIDeclarativeNetRequestHaiku.cpp
-@@ -0,0 +1,399 @@
+@@ -0,0 +1,415 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +#include "config.h"
 +#include "WebExtensionContext.h"
@@ -105383,6 +105393,13 @@ index 0000000000000000000000000000000000000000..132ffbe412470b2f7e6e5471597cfcaa
 +    HashSet<double> added;
 +    size_t index = 0;
 +    for (Ref rule : rulesToAdd) {
++        // Chrome: only session rules may name tabs.
++        if (!session) {
++            RefPtr object = rule->asObject();
++            RefPtr condition = object ? object->getObject("condition"_s) : nullptr;
++            if (condition && (condition->getValue("tabIds"_s) || condition->getValue("excludedTabIds"_s)))
++                return toWebExtensionError(apiName, nullString(), makeString("Rule at index "_s, index, " is invalid: tabIds and excludedTabIds are only allowed in session rules"_s));
++        }
 +        Ref single = JSON::Array::create();
 +        single->pushValue(rule.copyRef());
 +        Vector<WebExtensionDeclarativeNetRequestRulesetHaiku> rulesets;
@@ -105582,25 +105599,34 @@ index 0000000000000000000000000000000000000000..132ffbe412470b2f7e6e5471597cfcaa
 +            return;
 +        }
 +    }
++    // Chrome: -1, a request that is not a tab's, unless given.
++    double tab = -1;
 +    if (RefPtr value = request->getValue("tabId"_s)) {
 +        auto number = value->asDouble();
 +        if (!number || (*number != -1 && !toWebExtensionTabIdentifier(*number))) {
 +            completionHandler(toWebExtensionError(apiName, "tabId"_s, "it must be a tab identifier"_s));
 +            return;
 +        }
++        tab = *number;
 +    }
 +
 +    // The rules as they run for loads: the main frame's own address for a
 +    // main_frame request, else the initiator's (or the request's) as the
 +    // page's and the frame's.
-+    auto test = [weakThis = WeakPtr { *this }, url = WTF::move(url), initiator = WTF::move(initiator), type = *type, method,
++    auto test = [weakThis = WeakPtr { *this }, url = WTF::move(url), initiator = WTF::move(initiator), type = *type, method, tab,
 +        completionHandler = WTF::move(completionHandler)] mutable {
 +        RefPtr protectedThis = weakThis.get();
 +        Ref matched = JSON::Array::create();
-+        if (protectedThis && protectedThis->m_nativeDNRRules) {
++        // The rules of that tab when session rules name it.
++        RefPtr<API::ContentRuleList> rules = protectedThis ? protectedThis->m_nativeDNRRules : nullptr;
++        if (protectedThis) {
++            if (auto found = protectedThis->m_nativeDNRTabRules.find(tab); found != protectedThis->m_nativeDNRTabRules.end())
++                rules = found->value;
++        }
++        if (rules) {
 +            using namespace WebCore::ContentExtensions;
 +            ContentExtensionsBackend backend;
-+            Ref<WebCore::ContentExtensions::CompiledContentExtension> compiled = const_cast<WebCompiledContentRuleList&>(protectedThis->m_nativeDNRRules->compiledRuleList());
++            Ref<WebCore::ContentExtensions::CompiledContentExtension> compiled = const_cast<WebCompiledContentRuleList&>(rules->compiledRuleList());
 +            backend.addContentExtension("declarativeNetRequest"_s, WTF::move(compiled), { }, ContentExtension::ShouldCompileCSS::No);
 +            URL document = type == ResourceType::TopDocument || !initiator.isValid() ? url : initiator;
 +            WebCore::ContentExtensions::ResourceLoadInfo info { url, document, document, type, type == ResourceType::TopDocument, method };
@@ -110426,10 +110452,10 @@ index 0000000000000000000000000000000000000000..99532b95636c27ebefb3884399e8eaff
 +#endif // ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
 diff --git a/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextBrowserCommandsHaiku.cpp b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextBrowserCommandsHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..03975c5e2457185196079b37059c6c9eb6dec286
+index 0000000000000000000000000000000000000000..4d62a34b8a62cb5b4cce30308d7dd94ea3496cbc
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextBrowserCommandsHaiku.cpp
-@@ -0,0 +1,643 @@
+@@ -0,0 +1,649 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#include "config.h"
@@ -110937,6 +110963,12 @@ index 0000000000000000000000000000000000000000..03975c5e2457185196079b37059c6c9e
 +        return;
 +    bool allowed = controller->configuration().defaultWebsiteDataStore().isPersistent() || hasAccessToPrivateData();
 +
++    // A page now in a tab that session rules name gets that tab's rules.
++    if (!m_nativeDNRTabRules.isEmpty() && nativeDeclarativeNetRequestAllowed()) {
++        for (Ref userContentController : userContentControllers())
++            attachNativeDeclarativeNetRequestRules(userContentController);
++    }
++
 +    HashMap<WebPageProxyIdentifier, size_t> previousIndexes;
 +    for (size_t index = 0; index < before.size(); ++index)
 +        previousIndexes.set(before[index].page, index);
@@ -111313,10 +111345,10 @@ index 0000000000000000000000000000000000000000..7fe0a057f869a7ea735d3118f5242dce
 +#endif // ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
 diff --git a/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextDeclarativeNetRequestHaiku.cpp b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextDeclarativeNetRequestHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..90046b1b9f25f7c16523cd8ff5064e92fc3a5e90
+index 0000000000000000000000000000000000000000..744517398d2c7807c2854bfb7f79c77e21543e12
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextDeclarativeNetRequestHaiku.cpp
-@@ -0,0 +1,298 @@
+@@ -0,0 +1,427 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +#include "config.h"
 +#include "WebExtensionContext.h"
@@ -111325,8 +111357,11 @@ index 0000000000000000000000000000000000000000..90046b1b9f25f7c16523cd8ff5064e92
 +#include "APIContentRuleListStore.h"
 +#include "APIData.h"
 +#include "WebExtensionConstants.h"
++#include "WebExtensionController.h"
 +#include "WebExtensionDeclarativeNetRequestRulesHaiku.h"
 +#include "WebExtensionPermission.h"
++#include "WebExtensionTab.h"
++#include "WebPageProxy.h"
 +#include "WebUserContentControllerProxy.h"
 +#include <wtf/NeverDestroyed.h>
 +#include <wtf/RunLoop.h>
@@ -111421,7 +111456,7 @@ index 0000000000000000000000000000000000000000..90046b1b9f25f7c16523cd8ff5064e92
 +            pattern = pattern.isolatedCopy();
 +    }
 +    queue.get()->dispatch([sources = WTF::move(sources), reportMatchedRules, hostAccessPatterns = WTF::move(hostAccessPatterns), completion = WTF::move(completion)]() mutable {
-+        auto translate = [&]() -> Translation {
++        auto translate = [&](std::optional<double> tab) -> Translation {
 +            Vector<WebExtensionDeclarativeNetRequestRulesetHaiku> rulesets;
 +            size_t length = 0;
 +            for (auto& source : sources) {
@@ -111435,9 +111470,18 @@ index 0000000000000000000000000000000000000000..90046b1b9f25f7c16523cd8ff5064e92
 +                bool isStatic = source.identifier != sessionRulesetID && source.identifier != dynamicRulesetID;
 +                rulesets.append({ source.identifier, array.releaseNonNull(), isStatic });
 +            }
-+            return translateDeclarativeNetRequestRulesHaiku(rulesets, { }, reportMatchedRules, hostAccessPatterns);
++            return translateDeclarativeNetRequestRulesHaiku(rulesets, { }, reportMatchedRules, hostAccessPatterns, tab);
 +        };
-+        auto result = translate();
++        auto result = translate(std::nullopt);
++        // A list for each tab session rules name, with the rules that apply there.
++        for (size_t index = 0; result && index < result->tabs.size(); ++index) {
++            auto tab = result->tabs[index];
++            auto tabResult = translate(tab);
++            if (!tabResult)
++                result = makeUnexpected(tabResult.error());
++            else // A null list: no rules apply in that tab.
++                result->tabRules.append({ tab, tabResult->ruleCount ? WTF::move(tabResult->json) : String() });
++        }
 +        if (result && result->skippedRuleCount)
 +            WTFLogAlways("Web Extension DNR: %zu static rules use conditions or actions this platform cannot enforce and were not loaded.", result->skippedRuleCount);
 +        Translation isolated = makeUnexpected(nullString());
@@ -111447,6 +111491,8 @@ index 0000000000000000000000000000000000000000..90046b1b9f25f7c16523cd8ff5064e92
 +            WebExtensionDeclarativeNetRequestTranslationHaiku value;
 +            value.json = result->json.isolatedCopy();
 +            value.ruleCount = result->ruleCount;
++            for (auto& [tab, json] : result->tabRules)
++                value.tabRules.append({ tab, json.isolatedCopy() });
 +            for (auto& entry : result->identifiers)
 +                value.identifiers.add(entry.key.isolatedCopy(), WTF::move(entry.value));
 +            isolated = WTF::move(value);
@@ -111456,7 +111502,85 @@ index 0000000000000000000000000000000000000000..90046b1b9f25f7c16523cd8ff5064e92
 +        });
 +    });
 +}
++using TabRuleLists = std::pair<HashMap<double, RefPtr<API::ContentRuleList>>, Vector<String>>;
++
++struct TabRulesCompilation {
++    String basePath;
++    String identifier;
++    Vector<std::pair<double, String>> pending;
++    TabRuleLists lists;
++    CompletionHandler<void(std::optional<TabRuleLists>&&)> completion;
++};
++
++// Compiles each tab's rules (to unique paths beside basePath), one after another.
++void compileTabRules(std::shared_ptr<TabRulesCompilation> state)
++{
++    if (state->pending.isEmpty()) {
++        state->completion(WTF::move(state->lists));
++        return;
++    }
++    auto [tab, json] = state->pending.takeLast();
++    if (json.isNull()) {
++        state->lists.first.set(tab, nullptr);
++        compileTabRules(WTF::move(state));
++        return;
++    }
++    String path = makeString(state->basePath, ".tab."_s, WTF::UUID::createVersion4().toString());
++    API::ContentRuleListStore::defaultStoreSingleton().compileContentRuleListFile(String(path), state->identifier.isolatedCopy(), WTF::move(json),
++        WebCore::ContentExtensions::CSSSelectorsAllowed::No,
++        [state, tab, path](RefPtr<API::ContentRuleList> rules, std::error_code error) mutable {
++            if (error || !rules) {
++                discardRuleFile(path);
++                for (auto& file : state->lists.second)
++                    discardRuleFile(file);
++                state->completion(std::nullopt);
++                return;
++            }
++            state->lists.first.set(tab, WTF::move(rules));
++            state->lists.second.append(path);
++            compileTabRules(WTF::move(state));
++        });
++}
 +} // namespace
++
++std::optional<double> WebExtensionContext::tabForUserContentControllerHaiku(WebUserContentControllerProxy& controller) const
++{
++    RefPtr extensionController = this->extensionController();
++    if (!extensionController)
++        return std::nullopt;
++    std::optional<double> result;
++    for (Ref page : extensionController->allPages()) {
++        if (&page->configuration().userContentController() != &controller)
++            continue;
++        RefPtr tab = getTab(page->identifier());
++        double identifier = tab ? toWebAPI(tab->identifier()) : -1;
++        if (result && *result != identifier)
++            return std::nullopt;
++        result = identifier;
++    }
++    return result;
++}
++
++void WebExtensionContext::attachNativeDeclarativeNetRequestRules(WebUserContentControllerProxy& controller)
++{
++    RefPtr rules = m_nativeDNRRules;
++    if (!m_nativeDNRTabRules.isEmpty()) {
++        if (auto tab = tabForUserContentControllerHaiku(controller)) {
++            if (auto found = m_nativeDNRTabRules.find(*tab); found != m_nativeDNRTabRules.end())
++                rules = found->value;
++        }
++    }
++    auto& current = controller.contentExtensionRules();
++    auto existing = current.find(uniqueIdentifier());
++    if (!rules) {
++        if (existing != current.end())
++            controller.removeContentRuleList(uniqueIdentifier());
++        return;
++    }
++    if (existing != current.end() && existing->value.first.ptr() == rules.get())
++        return;
++    controller.addContentRuleList(*rules, m_baseURL);
++}
 +
 +void WebExtensionContext::clearNativeDeclarativeNetRequestRules()
 +{
@@ -111464,8 +111588,11 @@ index 0000000000000000000000000000000000000000..90046b1b9f25f7c16523cd8ff5064e92
 +    RELEASE_ASSERT(++m_nativeDNRLoadGeneration);
 +    removeDeclarativeNetRequestRules();
 +    m_nativeDNRRules = nullptr;
++    m_nativeDNRTabRules.clear();
 +    m_nativeDNRStaticRuleCount = 0;
 +    discardRuleFile(std::exchange(m_nativeDNRRuleFile, { }));
++    for (auto& file : std::exchange(m_nativeDNRTabRuleFiles, { }))
++        discardRuleFile(file);
 +}
 +
 +bool WebExtensionContext::nativeDeclarativeNetRequestAllowed()
@@ -111542,9 +111669,12 @@ index 0000000000000000000000000000000000000000..90046b1b9f25f7c16523cd8ff5064e92
 +            size_t staticRuleCount = 0;
 +            for (auto& entry : translation->identifiers)
 +                staticRuleCount += entry.value.size();
-+            if (!translation->ruleCount) {
++            if (!translation->ruleCount && translation->tabRules.isEmpty()) {
 +                removeDeclarativeNetRequestRules();
 +                m_nativeDNRRules = nullptr;
++                m_nativeDNRTabRules.clear();
++                for (auto& file : std::exchange(m_nativeDNRTabRuleFiles, { }))
++                    discardRuleFile(file);
 +                m_sessionRulesIDs = WTF::move(sessionIDs);
 +                m_dynamicRulesIDs = WTF::move(dynamicIDs);
 +                m_sessionRegexRulesIDsHaiku = WTF::move(regexIDs->session);
@@ -111562,28 +111692,59 @@ index 0000000000000000000000000000000000000000..90046b1b9f25f7c16523cd8ff5064e92
 +            if (basePath.isEmpty()) { fail("DNR rule cache directory is unavailable."_s); completion(false); return; }
 +            // Every compilation owns a unique path. A stale completion can
 +            // neither overwrite nor delete a newer load's compiled rule file.
++            // Then each tab session rules name gets its own copy of the rules.
++            auto finish = [this, protectedThis = Ref { *this }, current, fail, staticRuleCount, sessionIDs = WTF::move(sessionIDs), dynamicIDs = WTF::move(dynamicIDs), regexIDs, completion = WTF::move(completion)](RefPtr<API::ContentRuleList> rules, String path, std::optional<TabRuleLists>&& tabLists) mutable {
++                if (!current() || !tabLists) {
++                    discardRuleFile(path);
++                    if (tabLists) {
++                        for (auto& file : tabLists->second)
++                            discardRuleFile(file);
++                    }
++                    if (current())
++                        fail("DNR rules could not be compiled; the previous rules remain installed."_s);
++                    completion(false);
++                    return;
++                }
++                auto oldFile = std::exchange(m_nativeDNRRuleFile, path);
++                auto oldTabFiles = std::exchange(m_nativeDNRTabRuleFiles, WTF::move(tabLists->second));
++                m_nativeDNRRules = WTF::move(rules);
++                m_nativeDNRTabRules = WTF::move(tabLists->first);
++                m_sessionRulesIDs = WTF::move(sessionIDs);
++                m_dynamicRulesIDs = WTF::move(dynamicIDs);
++                m_sessionRegexRulesIDsHaiku = WTF::move(regexIDs->session);
++                m_dynamicRegexRulesIDsHaiku = WTF::move(regexIDs->dynamic);
++                m_nativeDNRStaticRuleCount = staticRuleCount;
++                for (Ref controller : userContentControllers())
++                    attachNativeDeclarativeNetRequestRules(controller);
++                discardRuleFile(WTF::move(oldFile));
++                for (auto& file : oldTabFiles)
++                    discardRuleFile(file);
++                completion(true);
++            };
++            auto compileTabs = [basePath, identifier = uniqueIdentifier(), tabRules = WTF::move(translation->tabRules), finish = WTF::move(finish)](RefPtr<API::ContentRuleList> rules, String path, bool failed) mutable {
++                if (failed) {
++                    finish(nullptr, WTF::move(path), std::nullopt);
++                    return;
++                }
++                auto state = std::make_shared<TabRulesCompilation>();
++                state->basePath = WTF::move(basePath);
++                state->identifier = WTF::move(identifier);
++                state->pending = WTF::move(tabRules);
++                state->completion = [rules = WTF::move(rules), path = WTF::move(path), finish = WTF::move(finish)](std::optional<TabRuleLists>&& lists) mutable {
++                    finish(WTF::move(rules), WTF::move(path), WTF::move(lists));
++                };
++                compileTabRules(WTF::move(state));
++            };
++            // Only rules for named tabs: no list for the others.
++            if (!translation->ruleCount) {
++                compileTabs(nullptr, { }, false);
++                return;
++            }
 +            String path = makeString(basePath, '.', WTF::UUID::createVersion4().toString());
 +            API::ContentRuleListStore::defaultStoreSingleton().compileContentRuleListFile(String(path), uniqueIdentifier().isolatedCopy(), WTF::move(translation->json),
 +                WebCore::ContentExtensions::CSSSelectorsAllowed::No,
-+                [this, protectedThis = Ref { *this }, current, fail, path, staticRuleCount, sessionIDs = WTF::move(sessionIDs), dynamicIDs = WTF::move(dynamicIDs), regexIDs, completion = WTF::move(completion)](RefPtr<API::ContentRuleList> rules, std::error_code error) mutable {
-+                    if (!current() || error || !rules) {
-+                        discardRuleFile(path);
-+                        if (current())
-+                            fail("DNR rules could not be compiled; the previous rules remain installed."_s);
-+                        completion(false);
-+                        return;
-+                    }
-+                    auto oldFile = std::exchange(m_nativeDNRRuleFile, path);
-+                    m_nativeDNRRules = rules;
-+                    m_sessionRulesIDs = WTF::move(sessionIDs);
-+                    m_dynamicRulesIDs = WTF::move(dynamicIDs);
-+                    m_sessionRegexRulesIDsHaiku = WTF::move(regexIDs->session);
-+                    m_dynamicRegexRulesIDsHaiku = WTF::move(regexIDs->dynamic);
-+                    m_nativeDNRStaticRuleCount = staticRuleCount;
-+                    for (Ref controller : userContentControllers())
-+                        controller->addContentRuleList(*rules, m_baseURL);
-+                    discardRuleFile(WTF::move(oldFile));
-+                    completion(true);
++                [current, path, compileTabs = WTF::move(compileTabs)](RefPtr<API::ContentRuleList> rules, std::error_code error) mutable {
++                    compileTabs(WTF::move(rules), path, !current() || error || !rules);
 +                });
 +        });
 +    };
@@ -113786,10 +113947,10 @@ index 0000000000000000000000000000000000000000..3782c3ce8537852e5840002a582790e5
 +#endif
 diff --git a/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionDeclarativeNetRequestRulesHaiku.cpp b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionDeclarativeNetRequestRulesHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..ccfc3f640f7978ad891e30deea48998a5cfbe2fe
+index 0000000000000000000000000000000000000000..2e1d3f0f7919ae93a55ec629bd739011ed9205c2
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionDeclarativeNetRequestRulesHaiku.cpp
-@@ -0,0 +1,499 @@
+@@ -0,0 +1,549 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +#include "config.h"
 +#include "WebExtensionDeclarativeNetRequestRulesHaiku.h"
@@ -113928,7 +114089,31 @@ index 0000000000000000000000000000000000000000..ccfc3f640f7978ad891e30deea48998a
 +    Vector<Ref<JSON::Object>> triggers; // a union: every trigger carries the same action
 +    RefPtr<JSON::Object> action; // WebKit action for redirect / modify-headers
 +    size_t ruleset { 0 }; // index of its ruleset
++    // Chrome's tabIds and excludedTabIds (session rules only; -1: requests
++    // that are not a tab's).
++    std::optional<Vector<double>> tabIds;
++    std::optional<Vector<double>> excludedTabIds;
 +};
++
++std::expected<std::optional<Vector<double>>, String> tabIdentifiers(const JSON::Object& condition, ASCIILiteral key)
++{
++    RefPtr value = condition.getValue(key);
++    if (!value)
++        return std::nullopt;
++    RefPtr array = value->asArray();
++    if (!array)
++        return makeUnexpected(makeString(key, " must be an array of tab ids."_s));
++    Vector<double> identifiers;
++    for (auto& entry : *array) {
++        auto number = entry->asDouble();
++        if (!number || *number < -1 || *number > 9007199254740991.0 || std::trunc(*number) != *number)
++            return makeUnexpected(makeString(key, " must be an array of tab ids."_s));
++        identifiers.append(*number);
++    }
++    if (identifiers.isEmpty() && key == "tabIds"_s)
++        return makeUnexpected("tabIds must not be empty."_s);
++    return identifiers;
++}
 +
 +std::expected<Ref<JSON::Object>, String> redirectAction(const JSON::Object& input)
 +{
@@ -114031,9 +114216,17 @@ index 0000000000000000000000000000000000000000..ccfc3f640f7978ad891e30deea48998a
 +
 +    if (auto valid = checkKeys(*condition, { "urlFilter"_s, "regexFilter"_s, "isUrlFilterCaseSensitive"_s, "resourceTypes"_s, "excludedResourceTypes"_s,
 +        "domainType"_s, "initiatorDomains"_s, "excludedInitiatorDomains"_s, "domains"_s, "excludedDomains"_s,
-+        "requestDomains"_s, "excludedRequestDomains"_s, "requestMethods"_s }, "condition"_s); !valid)
++        "requestDomains"_s, "excludedRequestDomains"_s, "requestMethods"_s, "tabIds"_s, "excludedTabIds"_s }, "condition"_s); !valid)
 +        return makeUnexpected(valid.error());
-+    // Summit has no per-tab rules and no response-header matching.
++    auto tabIds = tabIdentifiers(*condition, "tabIds"_s);
++    if (!tabIds)
++        return makeUnexpected(tabIds.error());
++    auto excludedTabIds = tabIdentifiers(*condition, "excludedTabIds"_s);
++    if (!excludedTabIds)
++        return makeUnexpected(excludedTabIds.error());
++    if (*tabIds && *excludedTabIds)
++        return makeUnexpected("tabIds and excludedTabIds cannot be combined."_s);
++    // Summit has no response-header matching.
 +    auto filter = WebExtensionDeclarativeNetRequestURLFilter::parse(*condition);
 +    if (!filter)
 +        return makeUnexpected(filter.error());
@@ -114146,14 +114339,15 @@ index 0000000000000000000000000000000000000000..ccfc3f640f7978ad891e30deea48998a
 +    } else
 +        triggers.append(WTF::move(trigger));
 +
-+    return Rule { *identifier, *priority, kind, declaration, WTF::move(triggers), WTF::move(webKitAction) };
++    return Rule { *identifier, *priority, kind, declaration, WTF::move(triggers), WTF::move(webKitAction), 0, WTF::move(*tabIds), WTF::move(*excludedTabIds) };
 +}
 +} // namespace
 +
 +std::expected<WebExtensionDeclarativeNetRequestTranslationHaiku, String> translateDeclarativeNetRequestRulesHaiku(
 +    const Vector<WebExtensionDeclarativeNetRequestRulesetHaiku>& rulesets, WebExtensionDeclarativeNetRequestLimitsHaiku limits, bool reportMatchedRules,
-+    const std::optional<Vector<String>>& hostAccessPatterns)
++    const std::optional<Vector<String>>& hostAccessPatterns, std::optional<double> tab)
 +{
++    HashSet<double> tabs;
 +    // A host-access-only extension's rules apply to requests to its hosts:
 +    // one more URL-condition group, which must hold with the rule's own.
 +    auto restrictToHosts = [&](JSON::Object& trigger) {
@@ -114194,6 +114388,21 @@ index 0000000000000000000000000000000000000000..ccfc3f640f7978ad891e30deea48998a
 +            if (!identifiers.add(parsed->identifier).isNewEntry)
 +                return makeUnexpected(makeString("Duplicate rule id in ruleset "_s, ruleset.identifier));
 +            parsed->ruleset = &ruleset - rulesets.begin();
++            if (parsed->tabIds || parsed->excludedTabIds) {
++                // Chrome allows them only in session rules (the API checks
++                // dynamic ones): a static rule with them is invalid.
++                if (ruleset.skipUnsupportedRules) {
++                    ++result.skippedRuleCount;
++                    continue;
++                }
++                for (auto identifier : parsed->tabIds ? *parsed->tabIds : *parsed->excludedTabIds)
++                    tabs.add(identifier);
++                // This list is for the tab, or (none) for every tab no rule names.
++                bool applies = parsed->tabIds ? tab && parsed->tabIds->contains(*tab)
++                    : !tab || !parsed->excludedTabIds->contains(*tab);
++                if (!applies)
++                    continue;
++            }
 +            if (hostAccessPatterns) {
 +                // No hosts: the rule applies nowhere (its id still counts).
 +                if (hostAccessPatterns->isEmpty())
@@ -114282,6 +114491,8 @@ index 0000000000000000000000000000000000000000..ccfc3f640f7978ad891e30deea48998a
 +        }
 +    }
 +    result.ruleCount = rules.size();
++    result.tabs = copyToVector(tabs);
++    std::ranges::sort(result.tabs);
 +    result.json = output->toJSONString();
 +    if (result.json.length() > limits.maximumOutputLength)
 +        return makeUnexpected("Native DNR translation size limit exceeded."_s);
@@ -114291,10 +114502,10 @@ index 0000000000000000000000000000000000000000..ccfc3f640f7978ad891e30deea48998a
 +#endif
 diff --git a/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionDeclarativeNetRequestRulesHaiku.h b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionDeclarativeNetRequestRulesHaiku.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..a59bc3bab3d6920452a38711ac0660c93f53aacf
+index 0000000000000000000000000000000000000000..0f993a3ea37214e2900ba8aac5501b3591e97a2e
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionDeclarativeNetRequestRulesHaiku.h
-@@ -0,0 +1,43 @@
+@@ -0,0 +1,51 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +#pragma once
 +#if ENABLE(WK_WEB_EXTENSIONS) && ENABLE(CONTENT_EXTENSIONS)
@@ -114316,6 +114527,10 @@ index 0000000000000000000000000000000000000000..a59bc3bab3d6920452a38711ac0660c9
 +struct WebExtensionDeclarativeNetRequestTranslationHaiku {
 +    String json;
 +    HashMap<String, HashSet<double>> identifiers;
++    // The tabs the rules name in tabIds and excludedTabIds (-1: no tab).
++    Vector<double> tabs;
++    // The JSON of each of those tabs' rules (WebExtensionContext's loader).
++    Vector<std::pair<double, String>> tabRules;
 +    size_t ruleCount { 0 };
 +    size_t skippedRuleCount { 0 };
 +};
@@ -114333,9 +114548,13 @@ index 0000000000000000000000000000000000000000..a59bc3bab3d6920452a38711ac0660c9
 +// every URL): the request-URL patterns of the hosts the extension may act
 +// on; every rule then applies only to requests to them, and to none when
 +// there are none. Without it the rules apply everywhere.
++// tab: the rules as they apply in that tab (-1: to requests of no tab), for
++// one of the tabs that rules name in tabIds or excludedTabIds (session rules
++// only; static ones with them are skipped). Without it, as they apply in
++// every tab no rule names: rules with tabIds are left out.
 +std::expected<WebExtensionDeclarativeNetRequestTranslationHaiku, String> translateDeclarativeNetRequestRulesHaiku(
 +    const Vector<WebExtensionDeclarativeNetRequestRulesetHaiku>&, WebExtensionDeclarativeNetRequestLimitsHaiku = { }, bool reportMatchedRules = false,
-+    const std::optional<Vector<String>>& hostAccessPatterns = std::nullopt);
++    const std::optional<Vector<String>>& hostAccessPatterns = std::nullopt, std::optional<double> tab = std::nullopt);
 +} // namespace WebKit
 +#endif
 diff --git a/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionDeclarativeNetRequestURLFilter.cpp b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionDeclarativeNetRequestURLFilter.cpp
