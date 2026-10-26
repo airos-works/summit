@@ -1005,6 +1005,34 @@ static void TestDebugger()
     session.Receive(Event("page-2", "Debugger.globalObjectCleared", json::object()));
     CHECK(session.Scripts().empty() && session.TakeChanges().scripts);
 
+    // Kept logs: an image's body is read as it finishes, while the page's
+    // process has it; not kept, it waits until asked.
+    {
+        Session kept;
+        kept.Start();
+        kept.Receive(TargetCreated("page-1"));
+        Sent(kept);
+        kept.SetPreserveRequests(true);
+        Sent(kept);
+        Ask(kept, "page-1", "1", "https://example.com/logo.png", "L1", "Image", 1);
+        Respond(kept, "page-1", "1", "L1", "Image", 200, "image/png", 1.1);
+        Finish(kept, "page-1", "1", 1.2, 5000);
+        auto sent = Sent(kept);
+        CHECK(Find(sent, "Network.getResponseBody") && Find(sent, "Network.getResponseBody")->parameters["requestId"] == "1");
+        // From the memory cache too.
+        kept.Receive(Event("page-1", "Network.requestServedFromMemoryCache", {{"requestId", "3"}, {"frameId", "f1"}, {"loaderId", "L1"},
+            {"documentURL", "https://example.com/"}, {"timestamp", 1.5}, {"resource", {{"url", "https://example.com/icon.svg"}, {"type", "Image"},
+            {"bodySize", 300}, {"response", {{"status", 200}, {"mimeType", "image/svg+xml"}, {"headers", json::object()}}}}}}));
+        sent = Sent(kept);
+        CHECK(Find(sent, "Network.getResponseBody") && Find(sent, "Network.getResponseBody")->parameters["requestId"] == "3");
+        kept.SetPreserveRequests(false);
+        Sent(kept);
+        Ask(kept, "page-1", "2", "https://example.com/photo.jpg", "L1", "Image", 2);
+        Respond(kept, "page-1", "2", "L1", "Image", 200, "image/jpeg", 2.1);
+        Finish(kept, "page-1", "2", 2.2, 5000);
+        CHECK(!Find(Sent(kept), "Network.getResponseBody"));
+    }
+
     // The Performance tab's recording: Timeline records while it records.
     {
         Session timeline;

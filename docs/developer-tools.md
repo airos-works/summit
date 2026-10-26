@@ -417,7 +417,13 @@ With it, nothing is removed: the requests of the pages before stay in the
 list, and the console marks where the page changed (*Navigated to …*). The
 page is also told to keep the bodies of what it loaded, so that a response of
 an earlier page can still be read, as long as the navigation stayed in the
-same process. `console.clear()` does not clear a console that is kept.
+same process. For a navigation to another process (another site), the bodies
+of documents, XHR and fetch responses, scripts, style sheets and images (each
+up to 2 MiB, those from the memory cache too) are read as they finish, while
+the page's process has them. Checked on the X399: after going from a
+Wikipedia article to github.com, 14 of its 15 images could still be read
+(not the favicon, which the engine loads for itself). `console.clear()` does
+not clear a console that is kept.
 
 The two check boxes are independent, and **Clear** empties its own panel at
 any time.

@@ -397,8 +397,10 @@ struct ProtocolReader {
         session.Changed(*request);
         // Read now, while the page's process has it: a navigation that
         // changes process leaves no one to ask. Kept across navigations
-        // (Preserve log), scripts and style sheets are read too.
-        const bool kept = session.fPreserveRequests && (request->type == "Script" || request->type == "Stylesheet");
+        // (Preserve log), scripts, style sheets and images are read too
+        // (each up to kEagerBody, all within kBodyBudget).
+        const bool kept = session.fPreserveRequests
+            && (request->type == "Script" || request->type == "Stylesheet" || request->type == "Image");
         if ((request->type == "XHR" || request->type == "Fetch" || request->type == "Document" || kept)
             && request->size && request->size <= Session::kEagerBody && !request->redirected)
             session.RequestBody(request->serial);
@@ -433,6 +435,11 @@ struct ProtocolReader {
         request.source = "memory-cache";
         request.size = Count(Member(resource, "bodySize"));
         request.finished = true;
+        // Kept across navigations, read now as LoadingFinished does (the
+        // memory cache may not say its size).
+        if (session.fPreserveRequests && (request.type == "Script" || request.type == "Stylesheet" || request.type == "Image")
+            && request.size <= Session::kEagerBody)
+            session.RequestBody(request.serial);
     }
 
     // A value with properties to look into (not null, not a primitive).
