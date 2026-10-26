@@ -197,6 +197,8 @@ bool DevToolsWindow::QuitRequested()
     if (fInspector) {
         fSession.DOM().SetPicking(false);
         fSession.DOM().HideHighlight();
+        // Throttling is the whole profile's: it ends with the tools.
+        fSession.SetThrottling(0, 0);
         for (const auto& message : fSession.TakeOutgoing()) fInspector->Send(message.c_str());
     }
     // The page stops reporting when its session ends.

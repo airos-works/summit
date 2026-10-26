@@ -150,7 +150,11 @@ sort and resize; the line under the list counts the requests and their bytes.
 
 Above the list: **Clear**, **Preserve log**, a menu of types (all, fetch and
 XHR, documents, style sheets, scripts, images, fonts, other), a filter on
-the address, **Disable cache** (everything comes from the network while
+the address, **Throttling** (No throttling, Fast 4G, Fast 3G, Slow 3G, as
+Chrome's presets: `Network.setEmulatedConditions`, which WebKit enables on
+Haiku since 26 October; the network process paces and delays responses
+itself, for every page of the profile, and closing the tools lifts it; test
+action `throttle NAME|off`), **Disable cache** (everything comes from the network while
 the tools are open: `Network.setResourceCachingDisabled`), the **Request**
 menu and **Export HAR…**. The Request menu has **Copy as cURL** (the
 selected request as a `curl` command line: method, headers and body, each
@@ -685,7 +689,7 @@ is started again.
 - A flame chart or per-frame view in Performance (it has tables), and
   memory and CPU-usage timelines (`ENABLE(RESOURCE_USAGE)` is off). In Sources: an original source the map carries no text of is not
   fetched. In Storage: partitioned cookies, and Cache Storage of
-  frames from other sites. Network throttling is Cocoa-only in WebKit.
+  frames from other sites.
 - Elements › Accessibility shows the selected element's role, name and
   states, asked for only while that tab is shown; accessibility, which this
   turns on in the web process, goes off again when the tools close (the

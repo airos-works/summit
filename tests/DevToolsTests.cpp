@@ -814,6 +814,14 @@ static void TestObjectTree()
     session.Receive(TargetCreated("page-2"));
     commands = Sent(session);
     CHECK(Find(commands, "Network.setResourceCachingDisabled") && !Find(commands, "Network.addInterception"));
+    // Throttling goes to the page, and to a new process of it; none lifts it.
+    session.SetThrottling(50000, 2000);
+    commands = Sent(session);
+    CHECK(Find(commands, "Network.setEmulatedConditions") && Find(commands, "Network.setEmulatedConditions")->parameters["bandwidth"] == 50000
+        && Find(commands, "Network.setEmulatedConditions")->parameters["latency"] == 2000 && session.Throttled());
+    session.SetThrottling(0, 0);
+    commands = Sent(session);
+    CHECK(Find(commands, "Network.setEmulatedConditions")->parameters["bandwidth"] == 0 && !session.Throttled());
     session.SetCacheDisabled(false);
     Sent(session);
     // Replay: the request again with fetch() from the page, without the headers a page cannot set.

@@ -368,6 +368,12 @@ public:
     // (Network.setResourceCachingDisabled), in every process of the page.
     void SetCacheDisabled(bool disabled);
     bool CacheDisabled() const { return fCacheDisabled; }
+    // Network throttling (Network.setEmulatedConditions): bytes a second
+    // and a round-trip delay in milliseconds; 0 for none. WebKit applies it
+    // to the network session, every page of the profile, so it is lifted
+    // when the tools close.
+    void SetThrottling(uint64_t bytesPerSecond, int latencyMilliseconds);
+    bool Throttled() const { return fThrottleBandwidth || fThrottleLatency; }
     // Requests whose address contains one of these fail while the tools are
     // open (Network.addInterception, then interceptRequestWithError).
     void BlockURL(const std::string& pattern);
@@ -478,6 +484,8 @@ private:
     uint64_t fNextSerial = 1, fNextCommand = FirstCommand(), fBodyBytes = 0;
     int fGroupDepth = 0;
     bool fPreserveRequests = false, fPreserveConsole = false, fCacheDisabled = false;
+    uint64_t fThrottleBandwidth = 0;
+    int fThrottleLatency = 0;
     std::vector<std::string> fBlocked;
     void ApplyNetworkSettings(const std::string& target);
 };

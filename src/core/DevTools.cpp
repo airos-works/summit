@@ -1179,10 +1179,25 @@ std::string Interception(const std::string& pattern)
 void Session::ApplyNetworkSettings(const std::string& target)
 {
     if (fCacheDisabled) SendToTarget(target, "Network.setResourceCachingDisabled", "{\"disabled\":true}");
+    if (Throttled())
+        SendToTarget(target, "Network.setEmulatedConditions", "{\"bandwidth\":" + std::to_string(fThrottleBandwidth) + ",\"latency\":"
+            + std::to_string(fThrottleLatency) + "}");
     if (fBlocked.empty()) return;
     SendToTarget(target, "Network.setInterceptionEnabled", "{\"enabled\":true}");
     for (const auto& pattern : fBlocked)
         SendToTarget(target, "Network.addInterception", Interception(pattern));
+}
+
+void Session::SetThrottling(uint64_t bytesPerSecond, int latencyMilliseconds)
+{
+    latencyMilliseconds = std::max(0, latencyMilliseconds);
+    if (bytesPerSecond == fThrottleBandwidth && latencyMilliseconds == fThrottleLatency) return;
+    fThrottleBandwidth = bytesPerSecond;
+    fThrottleLatency = latencyMilliseconds;
+    // The page target is enough: the conditions are the network session's.
+    if (!fPageTarget.empty())
+        SendToTarget(fPageTarget, "Network.setEmulatedConditions", "{\"bandwidth\":" + std::to_string(bytesPerSecond) + ",\"latency\":"
+            + std::to_string(latencyMilliseconds) + "}");
 }
 
 void Session::SetCacheDisabled(bool disabled)
