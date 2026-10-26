@@ -140,6 +140,7 @@ private:
     // Copy as cURL, Replay, Block This Address, Unblock All.
     BButton* fRequestMenu;
     BCheckBox* fDisableCache;
+    BMenuField* fThrottling;
     BButton* fExportHar;
     std::unique_ptr<BFilePanel> fHarPanel;
     BColumnListView* fList;

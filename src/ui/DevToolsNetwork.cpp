@@ -19,6 +19,7 @@
 #include <MenuField.h>
 #include <MenuItem.h>
 #include <PopUpMenu.h>
+#include <tuple>
 #include <ScrollBar.h>
 #include <SplitView.h>
 #include <StringView.h>
@@ -36,7 +37,7 @@ namespace {
 constexpr uint32 kFormatToggled = 'dbfm', kWrapToggled = 'dbwr', kCopyBody = 'dbcp', kClearRequests = 'dncl',
     kPreserveRequests = 'dnpr', kFilterRequests = 'dnfl', kTypeChosen = 'dnty', kRequestSelected = 'dnsl', kCopyCurl = 'dncu',
     kExportHar = 'dnhx', kHarChosen = 'dnhc', kRequestMenu = 'dnrm', kReplay = 'dnrp', kBlockURL = 'dnbk', kUnblockAll = 'dnub',
-    kDisableCache = 'dndc';
+    kDisableCache = 'dndc', kThrottle = 'dnth';
 
 // "0.1.0", the browser's version for a HAR's creator.
 std::string ApplicationVersion()
@@ -363,6 +364,20 @@ NetworkPanel::NetworkPanel(Session& session, DevToolsHost& host)
     fTypes->SetExplicitMaxSize(BSize(be_plain_font->StringWidth("Fetch and XHR") + 60, B_SIZE_UNSET));
     fRequestMenu = new BButton("request-menu", "Request ▾", new BMessage(kRequestMenu));
     fRequestMenu->SetToolTip("Copy the selected request as a curl command, send it again, or block its address");
+    // Chrome's presets: bytes a second down, round-trip delay.
+    auto* throttles = new BPopUpMenu("throttling");
+    for (const auto& [label, bandwidth, latency] : {std::tuple { "No throttling", 0, 0 }, std::tuple { "Fast 4G", 1125000, 170 },
+             std::tuple { "Fast 3G", 180000, 563 }, std::tuple { "Slow 3G", 50000, 2000 }}) {
+        auto* message = new BMessage(kThrottle);
+        message->AddInt64("bandwidth", bandwidth);
+        message->AddInt32("latency", latency);
+        auto* item = new BMenuItem(label, message);
+        if (!bandwidth) item->SetMarked(true);
+        throttles->AddItem(item);
+    }
+    fThrottling = new BMenuField("throttling", nullptr, throttles);
+    fThrottling->SetToolTip("Slow the network down as on a mobile connection (every page of this profile, while the tools are open)");
+    fThrottling->SetExplicitMaxSize(BSize(be_plain_font->StringWidth("No throttling") + 60, B_SIZE_UNSET));
     fDisableCache = new BCheckBox("disable-cache", "Disable cache", new BMessage(kDisableCache));
     fDisableCache->SetToolTip("Load everything from the network while the tools are open");
     fExportHar = new BButton("export-har", "Export HAR…", new BMessage(kExportHar));
@@ -428,6 +443,7 @@ NetworkPanel::NetworkPanel(Session& session, DevToolsHost& host)
             .Add(fTypes)
             .Add(fFilter, 1)
             .Add(fDisableCache)
+            .Add(fThrottling)
             .Add(fRequestMenu)
             .Add(fExportHar)
         .End()
@@ -524,6 +540,10 @@ void NetworkPanel::MessageReceived(BMessage* message)
             break;
         case kDisableCache:
             fSession.SetCacheDisabled(fDisableCache->Value() == B_CONTROL_ON);
+            fHost.Sync();
+            break;
+        case kThrottle:
+            fSession.SetThrottling(static_cast<uint64_t>(message->GetInt64("bandwidth", 0)), message->GetInt32("latency", 0));
             fHost.Sync();
             break;
         case kExportHar: {
@@ -627,7 +647,16 @@ bool NetworkPanel::Command(const std::string& action, const std::string& argumen
     } else if (action == "format") fResponseBody->SetFormatted(on);
     else if (action == "wrap") fResponseBody->SetWrapped(on);
     else if (action == "copy") fResponseBody->CopyShown();
-    else if (action == "disable-cache") {
+    else if (action == "throttle") {
+        // A preset's name ("Slow 3G"), or "off".
+        auto* item = fThrottling->Menu()->FindItem(argument == "off" ? "No throttling" : argument.c_str());
+        if (!item) error = "No such throttling preset";
+        else {
+            item->SetMarked(true);
+            fSession.SetThrottling(static_cast<uint64_t>(item->Message()->GetInt64("bandwidth", 0)), item->Message()->GetInt32("latency", 0));
+            fHost.Sync();
+        }
+    } else if (action == "disable-cache") {
         fDisableCache->SetValue(on ? B_CONTROL_ON : B_CONTROL_OFF);
         fSession.SetCacheDisabled(on);
         fHost.Sync();
@@ -656,7 +685,7 @@ std::string NetworkPanel::StateJSON()
     json shown = json::array();
     for (int32 i = 0; i < fList->CountRows(); ++i) shown.push_back(static_cast<Row*>(fList->RowAt(i))->serial);
     json state = {{"preserve", fPreserve->Value() == B_CONTROL_ON}, {"filter", fFilter->Text()}, {"types", fCategory},
-        {"shown", shown}, {"selected", fSelected}, {"summary", fSummary->Text()}, {"detail", fDetails->Selection()},
+        {"shown", shown}, {"selected", fSelected}, {"summary", fSummary->Text()}, {"throttling", fSession.Throttled()}, {"detail", fDetails->Selection()},
         {"detailShown", fDetailCards->VisibleIndex() == 1}, {"headers", fHeaders->Text()}, {"messages", fMessages->Text()},
         {"curl", [&] { const auto* request = fSession.FindRequest(fSelected); return request ? CurlCommand(*request) : std::string(); }()},
         {"cacheDisabled", fSession.CacheDisabled()}, {"blocked", fSession.BlockedURLs()},
