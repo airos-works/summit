@@ -76628,7 +76628,7 @@ index be40151510176ea4e881fd41af8f79ab6ab6a306..b5fdd6e41375e8108fb406089992f8e5
      if (metaData.headerHash != computeSHA1(headerData, salt)) {
          LOG(NetworkCacheStorage, "(NetworkProcess) header checksum mismatch");
 diff --git a/Source/WebKit/NetworkProcess/curl/NetworkDataTaskCurl.cpp b/Source/WebKit/NetworkProcess/curl/NetworkDataTaskCurl.cpp
-index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..5de061567b6da7d6c11819716c3532a64372b338 100644
+index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..425134836eae767ff481c5400b33eaf8d61b5a7d 100644
 --- a/Source/WebKit/NetworkProcess/curl/NetworkDataTaskCurl.cpp
 +++ b/Source/WebKit/NetworkProcess/curl/NetworkDataTaskCurl.cpp
 @@ -36,11 +36,14 @@
@@ -76672,7 +76672,7 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..5de061567b6da7d6c11819716c3532a6
  NetworkDataTaskCurl::NetworkDataTaskCurl(NetworkSession& session, NetworkDataTaskClient& client, const NetworkLoadParameters& parameters)
      : NetworkDataTask(session, client, parameters.request, parameters.storedCredentialsPolicy, parameters.shouldClearReferrerOnHTTPSToHTTPRedirect, parameters.isMainFrameNavigation, parameters.isInitiatedByDedicatedWorker)
      , m_frameID(parameters.webFrameID)
-@@ -79,11 +96,20 @@ NetworkDataTaskCurl::NetworkDataTaskCurl(NetworkSession& session, NetworkDataTas
+@@ -79,11 +96,26 @@ NetworkDataTaskCurl::NetworkDataTaskCurl(NetworkSession& session, NetworkDataTas
          blockCookies();
      restrictRequestReferrerToOriginIfNeeded(request);
  
@@ -76689,11 +76689,17 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..5de061567b6da7d6c11819716c3532a6
          m_curlRequest->setUserPass(m_initialCredential.user(), m_initialCredential.password());
          m_curlRequest->setAuthenticationScheme(ProtectionSpace::AuthenticationScheme::HTTPBasic);
      }
++#if ENABLE(INSPECTOR_NETWORK_THROTTLING)
++    // Emulated latency (Web Inspector throttling) holds the request back
++    // until resume(): started here, it would be sent at once.
++    if (m_session->emulatedConditions().second > 0_s)
++        m_curlRequest->suspend();
++#endif
 +    m_curlRequest->start();
  }
  
  NetworkDataTaskCurl::~NetworkDataTaskCurl()
-@@ -101,6 +127,15 @@ void NetworkDataTaskCurl::resume()
+@@ -101,6 +133,15 @@ void NetworkDataTaskCurl::resume()
  
      if (m_curlRequest)
          m_curlRequest->resume();
@@ -76709,7 +76715,7 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..5de061567b6da7d6c11819716c3532a6
  }
  
  void NetworkDataTaskCurl::cancel()
-@@ -113,8 +148,15 @@ void NetworkDataTaskCurl::cancel()
+@@ -113,8 +154,15 @@ void NetworkDataTaskCurl::cancel()
      if (m_curlRequest)
          m_curlRequest->cancel();
  
@@ -76726,7 +76732,7 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..5de061567b6da7d6c11819716c3532a6
  }
  
  void NetworkDataTaskCurl::invalidateAndCancel()
-@@ -132,7 +174,12 @@ NetworkDataTask::State NetworkDataTaskCurl::state() const
+@@ -132,7 +180,12 @@ NetworkDataTask::State NetworkDataTaskCurl::state() const
  
  Ref<CurlRequest> NetworkDataTaskCurl::createCurlRequest(ResourceRequest&& request, RequestStatus status)
  {
@@ -76740,7 +76746,7 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..5de061567b6da7d6c11819716c3532a6
          appendCookieHeader(request);
  
      // Creates a CurlRequest in suspended state.
-@@ -142,6 +189,10 @@ Ref<CurlRequest> NetworkDataTaskCurl::createCurlRequest(ResourceRequest&& reques
+@@ -142,6 +195,10 @@ Ref<CurlRequest> NetworkDataTaskCurl::createCurlRequest(ResourceRequest&& reques
  
      if (m_session->networkProcess().localhostAliasesForTesting().contains<StringViewHashTranslator>(curlRequest->resourceRequest().url().host()))
          curlRequest->enableLocalhostAlias();
@@ -76751,7 +76757,7 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..5de061567b6da7d6c11819716c3532a6
  
      return curlRequest;
  }
-@@ -168,7 +219,7 @@ void NetworkDataTaskCurl::curlDidReceiveResponse(CurlRequest& request, CurlRespo
+@@ -168,7 +225,7 @@ void NetworkDataTaskCurl::curlDidReceiveResponse(CurlRequest& request, CurlRespo
  
      handleCookieHeaders(request.resourceRequest(), receivedResponse);
  
@@ -76760,7 +76766,7 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..5de061567b6da7d6c11819716c3532a6
          willPerformHTTPRedirection();
          return;
      }
-@@ -236,13 +287,22 @@ void NetworkDataTaskCurl::curlDidFailWithError(CurlRequest& request, ResourceErr
+@@ -236,13 +293,22 @@ void NetworkDataTaskCurl::curlDidFailWithError(CurlRequest& request, ResourceErr
      if (state() == State::Canceling || state() == State::Completed || (!m_client && !isDownload()))
          return;
  
@@ -76784,7 +76790,7 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..5de061567b6da7d6c11819716c3532a6
          if (m_client)
              m_client->didCompleteWithError(resourceError);
          else {
-@@ -256,22 +316,6 @@ void NetworkDataTaskCurl::curlDidFailWithError(CurlRequest& request, ResourceErr
+@@ -256,22 +322,6 @@ void NetworkDataTaskCurl::curlDidFailWithError(CurlRequest& request, ResourceErr
      m_client->didCompleteWithError(resourceError);
  }
  
@@ -76807,7 +76813,7 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..5de061567b6da7d6c11819716c3532a6
  bool NetworkDataTaskCurl::shouldRedirectAsGET(const ResourceRequest& request, bool crossOrigin)
  {
      if (request.httpMethod() == "GET"_s || request.httpMethod() == "HEAD"_s)
-@@ -307,6 +351,30 @@ void NetworkDataTaskCurl::invokeDidReceiveResponse()
+@@ -307,6 +357,30 @@ void NetworkDataTaskCurl::invokeDidReceiveResponse()
              invalidateAndCancel();
              break;
          case PolicyAction::Download: {
@@ -76838,7 +76844,7 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..5de061567b6da7d6c11819716c3532a6
              m_downloadDestinationFile = FileSystem::openFile(m_pendingDownloadLocation, FileSystem::FileOpenMode::Truncate, FileSystem::FileAccessPermission::All, { }, !m_allowOverwriteDownload);
              if (!m_downloadDestinationFile) {
                  if (m_client)
-@@ -409,6 +477,7 @@ void NetworkDataTaskCurl::willPerformHTTPRedirection()
+@@ -409,6 +483,7 @@ void NetworkDataTaskCurl::willPerformHTTPRedirection()
              m_curlRequest->setUserPass(m_initialCredential.user(), m_initialCredential.password());
              m_curlRequest->setAuthenticationScheme(ProtectionSpace::AuthenticationScheme::HTTPBasic);
          }
@@ -76846,7 +76852,7 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..5de061567b6da7d6c11819716c3532a6
  
          if (m_state != State::Suspended) {
              m_state = State::Suspended;
-@@ -531,6 +600,7 @@ void NetworkDataTaskCurl::restartWithCredential(const ProtectionSpace& protectio
+@@ -531,6 +606,7 @@ void NetworkDataTaskCurl::restartWithCredential(const ProtectionSpace& protectio
      m_curlRequest->setUserPass(credential.user(), credential.password());
      if (shouldDisableServerTrustEvaluation)
          m_curlRequest->disableServerTrustEvaluation();
@@ -76854,7 +76860,7 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..5de061567b6da7d6c11819716c3532a6
  
      if (m_state != State::Suspended) {
          m_state = State::Suspended;
-@@ -538,11 +608,30 @@ void NetworkDataTaskCurl::restartWithCredential(const ProtectionSpace& protectio
+@@ -538,11 +614,30 @@ void NetworkDataTaskCurl::restartWithCredential(const ProtectionSpace& protectio
      }
  }
  
@@ -76886,7 +76892,7 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..5de061567b6da7d6c11819716c3532a6
          if (!cookieHeaderField.isEmpty())
              request.addHTTPHeaderField(HTTPHeaderName::Cookie, cookieHeaderField);
      }
-@@ -552,10 +641,24 @@ void NetworkDataTaskCurl::handleCookieHeaders(const WebCore::ResourceRequest& re
+@@ -552,10 +647,24 @@ void NetworkDataTaskCurl::handleCookieHeaders(const WebCore::ResourceRequest& re
  {
      static constexpr auto setCookieHeader = "set-cookie: "_s;
  
