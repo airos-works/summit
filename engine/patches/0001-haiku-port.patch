@@ -10076,10 +10076,10 @@ index 0000000000000000000000000000000000000000..48e19a5957df4c1ae60378dd9a84cbe4
 +/* Copyright (C) 2026 Summit contributors. SPDX-License-Identifier: BSD-2-Clause */
 +enum USBTransferStatus { "ok", "stall", "babble" };
 diff --git a/Source/WebCore/PlatformHaiku.cmake b/Source/WebCore/PlatformHaiku.cmake
-index 16a88804a1baa39ccdd9fc2870b6e2524d941298..93f64b848e3d3f24469b9b71a07d41f6e04a5e39 100644
+index 16a88804a1baa39ccdd9fc2870b6e2524d941298..09a201c4a18f054908c942ab22b352bab5e33af4 100644
 --- a/Source/WebCore/PlatformHaiku.cmake
 +++ b/Source/WebCore/PlatformHaiku.cmake
-@@ -1,52 +1,371 @@
+@@ -1,52 +1,373 @@
 +include(platform/Haiku.cmake)
  include(platform/ImageDecoders.cmake)
  include(platform/OpenSSL.cmake)
@@ -10268,6 +10268,8 @@ index 16a88804a1baa39ccdd9fc2870b6e2524d941298..93f64b848e3d3f24469b9b71a07d41f6
 +  # Adwaita is the theme the other Skia ports use and paints through
 +  # GraphicsContext alone, so it works whatever is behind the context.
 +  include(platform/Adwaita.cmake)
++  # Adwaita's form controls draw Haiku's (BControlLook) where they can (#114).
++  list(APPEND WebCore_SOURCES platform/graphics/haiku/ControlLookHaiku.cpp)
 +else ()
 +  list(APPEND WebCore_SOURCES
 +  platform/graphics/haiku/BitmapImageHaiku.cpp
@@ -10457,7 +10459,7 @@ index 16a88804a1baa39ccdd9fc2870b6e2524d941298..93f64b848e3d3f24469b9b71a07d41f6
    textencoding
    translation
    ${WEBP_LIBRARIES}
-@@ -61,6 +380,244 @@ list(APPEND WebCore_SYSTEM_INCLUDE_DIRECTORIES
+@@ -61,6 +382,244 @@ list(APPEND WebCore_SYSTEM_INCLUDE_DIRECTORIES
    ${SQLITE_INCLUDE_DIR}
    ${WEBP_INCLUDE_DIRS}
    ${ZLIB_INCLUDE_DIRS}
@@ -26570,6 +26572,120 @@ index f136ce76f7b7e4f840e58d213e05d7b5f44cf5fd..1b337115b6b6e868c639770bf11f5244
      MediaTime findSeekTimeForTargetTime(const MediaTime& targetTime, const MediaTime& negativeThreshold, const MediaTime& positiveThreshold);
      int64_t removeCodedFrames(const MediaTime& start, const MediaTime& end, const MediaTime& currentTime);
      PlatformTimeRanges removeSamples(const DecodeOrderSampleMap::MapType&, ASCIILiteral);
+diff --git a/Source/WebCore/platform/graphics/adwaita/ButtonControlAdwaita.cpp b/Source/WebCore/platform/graphics/adwaita/ButtonControlAdwaita.cpp
+index 66a20213ebdf576b14def9aedd5d1b4e879f8f2e..a4f6aff2ecd7fc24d9ab6844a581f23f8cfbaee3 100644
+--- a/Source/WebCore/platform/graphics/adwaita/ButtonControlAdwaita.cpp
++++ b/Source/WebCore/platform/graphics/adwaita/ButtonControlAdwaita.cpp
+@@ -28,6 +28,10 @@
+ #include "config.h"
+ #include "ButtonControlAdwaita.h"
+ 
++#if PLATFORM(HAIKU) && USE(SKIA)
++#include "ControlLookHaiku.h"
++#endif
++
+ #include "GraphicsContextStateSaver.h"
+ 
+ #if USE(THEME_ADWAITA)
+@@ -42,6 +46,11 @@ ButtonControlAdwaita::ButtonControlAdwaita(ControlPart& part, ControlFactoryAdwa
+ 
+ void ButtonControlAdwaita::draw(GraphicsContext& graphicsContext, const FloatRoundedRect& borderRect, float deviceScaleFactor, const ControlStyle& style)
+ {
++#if PLATFORM(HAIKU) && USE(SKIA)
++    // As Haiku applications draw them (#114).
++    if (paintControlLookHaiku(graphicsContext, ControlLookPartHaiku::Button, borderRect.rect(), deviceScaleFactor, style))
++        return;
++#endif
+     drawButton(graphicsContext, borderRect, deviceScaleFactor, style);
+ }
+ 
+diff --git a/Source/WebCore/platform/graphics/adwaita/MenuListAdwaita.cpp b/Source/WebCore/platform/graphics/adwaita/MenuListAdwaita.cpp
+index bd5f330af7837b3052f6fd3e805b24eab39b6b60..10ae377bab047c4421581e485027703db1090ccf 100644
+--- a/Source/WebCore/platform/graphics/adwaita/MenuListAdwaita.cpp
++++ b/Source/WebCore/platform/graphics/adwaita/MenuListAdwaita.cpp
+@@ -28,6 +28,10 @@
+ #include "config.h"
+ #include "MenuListAdwaita.h"
+ 
++#if PLATFORM(HAIKU) && USE(SKIA)
++#include "ControlLookHaiku.h"
++#endif
++
+ #include "ButtonControlAdwaita.h"
+ #include "GraphicsContextStateSaver.h"
+ 
+@@ -43,6 +47,11 @@ MenuListAdwaita::MenuListAdwaita(ControlPart& part, ControlFactoryAdwaita& contr
+ 
+ void MenuListAdwaita::draw(GraphicsContext& graphicsContext, const FloatRoundedRect& borderRect, float deviceScaleFactor, const ControlStyle& style)
+ {
++#if PLATFORM(HAIKU) && USE(SKIA)
++    // As Haiku applications draw a menu field, its arrow included (#114).
++    if (paintControlLookHaiku(graphicsContext, ControlLookPartHaiku::MenuList, borderRect.rect(), deviceScaleFactor, style))
++        return;
++#endif
+     GraphicsContextStateSaver stateSaver(graphicsContext);
+ 
+     ButtonControlAdwaita::drawButton(graphicsContext, borderRect, deviceScaleFactor, style);
+diff --git a/Source/WebCore/platform/graphics/adwaita/TextFieldAdwaita.cpp b/Source/WebCore/platform/graphics/adwaita/TextFieldAdwaita.cpp
+index eb9985b0665cc16c151639780a1cfb71cc318d3d..013ac68508a1da168de44fff0a3e6c7e35daabaa 100644
+--- a/Source/WebCore/platform/graphics/adwaita/TextFieldAdwaita.cpp
++++ b/Source/WebCore/platform/graphics/adwaita/TextFieldAdwaita.cpp
+@@ -28,6 +28,10 @@
+ #include "config.h"
+ #include "TextFieldAdwaita.h"
+ 
++#if PLATFORM(HAIKU) && USE(SKIA)
++#include "ControlLookHaiku.h"
++#endif
++
+ #include "GraphicsContextStateSaver.h"
+ 
+ #if USE(THEME_ADWAITA)
+@@ -40,8 +44,15 @@ TextFieldAdwaita::TextFieldAdwaita(ControlPart& part, ControlFactoryAdwaita& con
+ {
+ }
+ 
+-void TextFieldAdwaita::draw(GraphicsContext& graphicsContext, const FloatRoundedRect& borderRect, float /*deviceScaleFactor*/, const ControlStyle& style)
++void TextFieldAdwaita::draw(GraphicsContext& graphicsContext, const FloatRoundedRect& borderRect, float deviceScaleFactor, const ControlStyle& style)
+ {
++#if PLATFORM(HAIKU) && USE(SKIA)
++    // As Haiku applications draw a text control (#114).
++    if (paintControlLookHaiku(graphicsContext, ControlLookPartHaiku::TextField, borderRect.rect(), deviceScaleFactor, style))
++        return;
++#else
++    UNUSED_PARAM(deviceScaleFactor);
++#endif
+     GraphicsContextStateSaver stateSaver(graphicsContext);
+ 
+     SRGBA<uint8_t> textFieldBackgroundColor;
+diff --git a/Source/WebCore/platform/graphics/adwaita/ToggleButtonAdwaita.cpp b/Source/WebCore/platform/graphics/adwaita/ToggleButtonAdwaita.cpp
+index 44e75200a66d6215bcf347014d908eafcd10c313..554c8182a4df91339ef278fc6e4a9d42c17a5641 100644
+--- a/Source/WebCore/platform/graphics/adwaita/ToggleButtonAdwaita.cpp
++++ b/Source/WebCore/platform/graphics/adwaita/ToggleButtonAdwaita.cpp
+@@ -28,6 +28,10 @@
+ #include "config.h"
+ #include "ToggleButtonAdwaita.h"
+ 
++#if PLATFORM(HAIKU) && USE(SKIA)
++#include "ControlLookHaiku.h"
++#endif
++
+ #if USE(THEME_ADWAITA)
+ 
+ #include "ColorBlending.h"
+@@ -43,6 +47,12 @@ ToggleButtonAdwaita::ToggleButtonAdwaita(ControlPart& part, ControlFactoryAdwait
+ 
+ void ToggleButtonAdwaita::draw(GraphicsContext& graphicsContext, const FloatRoundedRect& borderRect, float deviceScaleFactor, const ControlStyle& style)
+ {
++#if PLATFORM(HAIKU) && USE(SKIA)
++    // As Haiku applications draw them (#114).
++    if (paintControlLookHaiku(graphicsContext, m_owningPart.get()->type() == StyleAppearance::Checkbox ? ControlLookPartHaiku::Checkbox : ControlLookPartHaiku::Radio,
++        borderRect.rect(), deviceScaleFactor, style))
++        return;
++#endif
+     if (m_owningPart.get()->type() == StyleAppearance::Checkbox)
+         drawCheckbox(graphicsContext, borderRect, deviceScaleFactor, style);
+     else
 diff --git a/Source/WebCore/platform/graphics/angle/GraphicsContextGLANGLE.h b/Source/WebCore/platform/graphics/angle/GraphicsContextGLANGLE.h
 index b4fef2439283f4d3c986638ec2e8f3f85bd3d859..878fa143757c2d28a14135f3e448e2703d372a38 100644
 --- a/Source/WebCore/platform/graphics/angle/GraphicsContextGLANGLE.h
@@ -29154,6 +29270,356 @@ index 0000000000000000000000000000000000000000..7d495c04b64af928f0525ca51be51686
 +}
 +
 +}
+diff --git a/Source/WebCore/platform/graphics/haiku/ControlLookHaiku.cpp b/Source/WebCore/platform/graphics/haiku/ControlLookHaiku.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..0535498e4122f7a4351583e6f543fad44067dd44
+--- /dev/null
++++ b/Source/WebCore/platform/graphics/haiku/ControlLookHaiku.cpp
+@@ -0,0 +1,285 @@
++/*
++ * Copyright (C) 2026 Haiku, Inc.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS'' AND ANY EXPRESS OR
++ * IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
++ * OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
++ * IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT,
++ * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
++ * NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
++ * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
++ * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
++ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
++ * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include "config.h"
++#include "ControlLookHaiku.h"
++
++#if PLATFORM(HAIKU) && USE(SKIA)
++
++#include "ControlStyle.h"
++#include "FloatRect.h"
++#include "GraphicsContext.h"
++#include "NativeImage.h"
++#include <Application.h>
++#include <Bitmap.h>
++#include <ControlLook.h>
++#include <View.h>
++#include <cmath>
++#include <cstdlib>
++#include <cstring>
++#include <private/interface/DefaultColors.h>
++#include <wtf/HashMap.h>
++#include <wtf/NeverDestroyed.h>
++#include <wtf/Vector.h>
++#include <wtf/text/MakeString.h>
++#include <wtf/text/StringHash.h>
++WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_BEGIN
++#include <skia/core/SkData.h>
++#include <skia/core/SkImage.h>
++WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_END
++
++namespace WebCore {
++
++// The largest control drawn, in device pixels: bigger ones (a text area
++// filling the page) are left to Adwaita.
++static constexpr int maximumWidth = 4096;
++static constexpr int maximumHeight = 1024;
++// Looks kept; when full, the cache starts again.
++static constexpr unsigned maximumCachedLooks = 512;
++
++static bool controlLookEnabled()
++{
++    static const bool enabled = [] {
++        const char* value = getenv("SUMMIT_HAIKU_CONTROLS");
++        return !value || strcmp(value, "0");
++    }();
++    return enabled && be_app && be_control_look;
++}
++
++// A system colour as the page's colour scheme wants it: dark for a page that
++// asks for dark when the system is light, and the other way round.
++static rgb_color systemColor(color_which which, bool dark)
++{
++    bool systemIsDark = ui_color(B_DOCUMENT_BACKGROUND_COLOR).Brightness() < 127;
++    if (dark != systemIsDark)
++        return BPrivate::GetSystemColor(which, dark);
++    return ui_color(which);
++}
++
++static uint32 flagsFor(ControlLookPartHaiku part, const ControlStyle& style)
++{
++    uint32 flags = BControlLook::B_BLEND_FRAME;
++    auto states = style.states;
++    if (!states.contains(ControlStyle::State::Enabled))
++        flags |= BControlLook::B_DISABLED;
++    // As Adwaita's: the page's focused control, whether its window is
++    // active or not.
++    if (states.contains(ControlStyle::State::Focused))
++        flags |= BControlLook::B_FOCUSED;
++    if (states.contains(ControlStyle::State::Hovered))
++        flags |= BControlLook::B_HOVER;
++    switch (part) {
++    case ControlLookPartHaiku::Button:
++        if (states.contains(ControlStyle::State::Pressed))
++            flags |= BControlLook::B_ACTIVATED;
++        if (states.contains(ControlStyle::State::Default))
++            flags |= BControlLook::B_DEFAULT_BUTTON;
++        break;
++    case ControlLookPartHaiku::Checkbox:
++    case ControlLookPartHaiku::Radio:
++        if (states.contains(ControlStyle::State::Indeterminate))
++            flags |= BControlLook::B_PARTIALLY_ACTIVATED;
++        else if (states.contains(ControlStyle::State::Checked))
++            flags |= BControlLook::B_ACTIVATED;
++        if (states.contains(ControlStyle::State::Pressed))
++            flags |= BControlLook::B_CLICKED;
++        break;
++    case ControlLookPartHaiku::MenuList:
++        if (states.contains(ControlStyle::State::Pressed))
++            flags |= BControlLook::B_ACTIVATED;
++        break;
++    case ControlLookPartHaiku::TextField:
++        if (states.contains(ControlStyle::State::ReadOnly))
++            flags |= BControlLook::B_DISABLED;
++        break;
++    }
++    return flags;
++}
++
++// An offscreen bitmap app_server draws BControlLook's controls into, grown as
++// larger ones come.
++class ControlLookSurfaceHaiku {
++public:
++    bool ensure(int width, int height)
++    {
++        if (m_bitmap && width <= m_width && height <= m_height)
++            return true;
++        width = std::max(width, m_width);
++        height = std::max(height, m_height);
++        auto bitmap = std::make_unique<BBitmap>(BRect(0, 0, width - 1, height - 1), B_BITMAP_ACCEPTS_VIEWS, B_RGBA32);
++        if (bitmap->InitCheck() != B_OK)
++            return false;
++        auto* view = new BView(bitmap->Bounds(), "control look", B_FOLLOW_NONE, B_WILL_DRAW);
++        bitmap->AddChild(view);
++        m_bitmap = WTF::move(bitmap);
++        m_view = view;
++        m_width = width;
++        m_height = height;
++        return true;
++    }
++
++    BBitmap& bitmap() { return *m_bitmap; }
++    BView& view() { return *m_view; }
++
++private:
++    std::unique_ptr<BBitmap> m_bitmap;
++    BView* m_view { nullptr };
++    int m_width { 0 };
++    int m_height { 0 };
++};
++
++static ControlLookSurfaceHaiku& surface()
++{
++    static NeverDestroyed<ControlLookSurfaceHaiku> surface;
++    return surface;
++}
++
++static void drawPart(BView& view, ControlLookPartHaiku part, BRect rect, uint32 flags, bool dark, rgb_color background)
++{
++    rgb_color base = systemColor(B_CONTROL_BACKGROUND_COLOR, dark);
++    switch (part) {
++    case ControlLookPartHaiku::Button:
++        be_control_look->DrawButtonFrame(&view, rect, rect, base, background, flags);
++        be_control_look->DrawButtonBackground(&view, rect, rect, base, flags);
++        break;
++    case ControlLookPartHaiku::Checkbox:
++        be_control_look->DrawCheckBox(&view, rect, rect, base, flags);
++        break;
++    case ControlLookPartHaiku::Radio:
++        be_control_look->DrawRadioButton(&view, rect, rect, base, flags);
++        break;
++    case ControlLookPartHaiku::TextField: {
++        // As BTextControl: the border on the panel colour, then the text
++        // view's document colour inside it.
++        BRect inside = rect;
++        be_control_look->DrawTextControlBorder(&view, inside, rect, systemColor(B_PANEL_BACKGROUND_COLOR, dark), flags);
++        view.SetHighColor(systemColor(B_DOCUMENT_BACKGROUND_COLOR, dark));
++        view.FillRect(inside);
++        break;
++    }
++    case ControlLookPartHaiku::MenuList:
++        be_control_look->DrawMenuFieldFrame(&view, rect, rect, base, background, flags);
++        be_control_look->DrawMenuFieldBackground(&view, rect, rect, base, true, flags);
++        break;
++    }
++}
++
++// The control as an image of width × height device pixels: drawn once on
++// black and once on white, which gives each pixel's coverage whatever
++// app_server blends, and the colour over black is the premultiplied colour.
++static RefPtr<NativeImage> renderPart(ControlLookPartHaiku part, uint32 flags, bool dark, int width, int height)
++{
++    auto& target = surface();
++    if (!target.ensure(width, height))
++        return nullptr;
++    BBitmap& bitmap = target.bitmap();
++    BView& view = target.view();
++    const size_t rowBytes = width * 4;
++    Vector<uint8_t> overBlack(rowBytes * height), overWhite(rowBytes * height);
++    for (int pass = 0; pass < 2; ++pass) {
++        rgb_color background = pass ? make_color(255, 255, 255) : make_color(0, 0, 0);
++        if (!bitmap.Lock())
++            return nullptr;
++        view.SetDrawingMode(B_OP_COPY);
++        view.SetHighColor(background);
++        view.FillRect(BRect(0, 0, width - 1, height - 1));
++        view.SetLowColor(background);
++        view.PushState();
++        // In device pixels, as Haiku draws its controls larger with a larger
++        // font: the frames stay one pixel wide (scaling the view instead
++        // breaks BControlLook's check marks).
++        drawPart(view, part, BRect(0, 0, width - 1, height - 1), flags, dark, background);
++        view.PopState();
++        view.Sync();
++        auto* bits = static_cast<const uint8_t*>(bitmap.Bits());
++        auto& pixels = pass ? overWhite : overBlack;
++        for (int y = 0; y < height; ++y)
++            memcpy(pixels.mutableSpan().data() + y * rowBytes, bits + y * bitmap.BytesPerRow(), rowBytes);
++        bitmap.Unlock();
++    }
++    // B_RGBA32 is B, G, R, A in memory, as Skia's BGRA.
++    auto data = SkData::MakeUninitialized(rowBytes * height);
++    auto* out = static_cast<uint8_t*>(data->writable_data());
++    for (size_t i = 0; i < rowBytes * height; i += 4) {
++        int spread = (overWhite[i] - overBlack[i]) + (overWhite[i + 1] - overBlack[i + 1]) + (overWhite[i + 2] - overBlack[i + 2]);
++        int alpha = std::clamp(255 - spread / 3, 0, 255);
++        for (int c = 0; c < 3; ++c)
++            out[i + c] = std::min<int>(overBlack[i + c], alpha);
++        out[i + 3] = alpha;
++    }
++    auto info = SkImageInfo::Make(width, height, kBGRA_8888_SkColorType, kPremul_SkAlphaType);
++    return NativeImage::create(SkImages::RasterFromData(info, WTF::move(data), rowBytes));
++}
++
++bool paintControlLookHaiku(GraphicsContext& context, ControlLookPartHaiku part, const FloatRect& rect, float deviceScaleFactor, const ControlStyle& style)
++{
++    if (!controlLookEnabled() || rect.isEmpty() || context.paintingDisabled())
++        return false;
++    float scale = std::max(1.f, deviceScaleFactor);
++    // A check box or radio button is square, in the middle of its box.
++    FloatRect box = rect;
++    if (part == ControlLookPartHaiku::Checkbox || part == ControlLookPartHaiku::Radio) {
++        float side = std::min(box.width(), box.height());
++        box = FloatRect(box.x() + (box.width() - side) / 2, box.y() + (box.height() - side) / 2, side, side);
++    }
++    // Whole CSS pixels, so that the control's edges stay sharp.
++    FloatSize size(std::max(1.f, std::round(box.width())), std::max(1.f, std::round(box.height())));
++    int width = static_cast<int>(std::ceil(size.width() * scale));
++    int height = static_cast<int>(std::ceil(size.height() * scale));
++    if (width > maximumWidth || height > maximumHeight)
++        return false;
++    bool dark = style.states.contains(ControlStyle::State::DarkAppearance);
++    uint32 flags = flagsFor(part, style);
++    // The system colours are part of the look: a change of them in
++    // Appearance makes new ones.
++    rgb_color base = systemColor(B_CONTROL_BACKGROUND_COLOR, dark);
++    rgb_color document = systemColor(B_DOCUMENT_BACKGROUND_COLOR, dark);
++    rgb_color mark = systemColor(B_CONTROL_MARK_COLOR, dark);
++    auto colorKey = [](rgb_color color) {
++        return (static_cast<unsigned>(color.red) << 16) | (static_cast<unsigned>(color.green) << 8) | color.blue;
++    };
++    auto key = makeString(static_cast<unsigned>(part), ':', flags, ':', width, 'x', height, ':', scale, ':', dark ? 'd' : 'l', ':',
++        colorKey(base), ':', colorKey(document), ':', colorKey(mark));
++
++    static NeverDestroyed<HashMap<String, RefPtr<NativeImage>>> looks;
++    auto found = looks->find(key);
++    RefPtr<NativeImage> image;
++    if (found != looks->end())
++        image = found->value;
++    else {
++        image = renderPart(part, flags, dark, width, height);
++        if (!image)
++            return false;
++        if (looks->size() >= maximumCachedLooks)
++            looks->clear();
++        looks->add(key, image);
++    }
++    FloatRect destination(box.location(), size);
++    context.drawNativeImage(*image, destination, FloatRect(0, 0, width, height));
++    return true;
++}
++
++} // namespace WebCore
++
++#endif
+diff --git a/Source/WebCore/platform/graphics/haiku/ControlLookHaiku.h b/Source/WebCore/platform/graphics/haiku/ControlLookHaiku.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..25b087f521219fd0f6ff9c51e51c4ed2b4b97716
+--- /dev/null
++++ b/Source/WebCore/platform/graphics/haiku/ControlLookHaiku.h
+@@ -0,0 +1,53 @@
++/*
++ * Copyright (C) 2026 Haiku, Inc.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS'' AND ANY EXPRESS OR
++ * IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
++ * OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
++ * IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT,
++ * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
++ * NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
++ * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
++ * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
++ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
++ * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#pragma once
++
++#if PLATFORM(HAIKU) && USE(SKIA)
++
++namespace WebCore {
++
++class FloatRect;
++class GraphicsContext;
++struct ControlStyle;
++
++// The form controls Haiku applications draw with BControlLook (#114).
++enum class ControlLookPartHaiku : uint8_t {
++    Button,
++    Checkbox,
++    Radio,
++    TextField,
++    MenuList,
++};
++
++// Draws the part as a Haiku application draws that control, into the
++// context: BControlLook paints it into an offscreen bitmap (once per look and
++// size, kept in a cache), which is drawn as an image. False when it cannot be
++// (no app_server, turned off with SUMMIT_HAIKU_CONTROLS=0): the caller then
++// draws Adwaita's.
++bool paintControlLookHaiku(GraphicsContext&, ControlLookPartHaiku, const FloatRect&, float deviceScaleFactor, const ControlStyle&);
++
++} // namespace WebCore
++
++#endif
 diff --git a/Source/WebCore/platform/graphics/haiku/CoordinatedPlatformLayerBufferPlanesHaiku.h b/Source/WebCore/platform/graphics/haiku/CoordinatedPlatformLayerBufferPlanesHaiku.h
 new file mode 100644
 index 0000000000000000000000000000000000000000..c9d2dfa9db20e380902df27d9151847dcb795274
