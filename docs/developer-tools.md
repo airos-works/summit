@@ -154,7 +154,11 @@ the address, **Throttling** (No throttling, Fast 4G, Fast 3G, Slow 3G, as
 Chrome's presets: `Network.setEmulatedConditions`, which WebKit enables on
 Haiku since 26 October; the network process paces and delays responses
 itself, for every page of the profile, and closing the tools lifts it; test
-action `throttle NAME|off`), **Disable cache** (everything comes from the network while
+action `throttle NAME|off`. The latency is applied by not starting a
+request until it has passed: the curl task, which started its transfer as
+it was made, now starts suspended while there is one. Checked on the X399
+with Slow 3G: a 300-byte and a 737-byte fetch took 2054 and 2053 ms, 100 KB
+took 4055 ms (2 s, then 50 KB/s), and 5 ms with throttling off), **Disable cache** (everything comes from the network while
 the tools are open: `Network.setResourceCachingDisabled`), the **Request**
 menu and **Export HAR…**. The Request menu has **Copy as cURL** (the
 selected request as a `curl` command line: method, headers and body, each

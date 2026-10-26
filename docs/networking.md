@@ -140,6 +140,19 @@ and the next one did the same, until Summit was restarted.
   stays (a full-tunnel VPN connecting) is left alone; it fails at the 300 s
   limit above and is closed then.
 
+Checked on the X399, which has a wired (192.168.1.247) and a wireless
+(192.168.1.176) interface, with the wired one made to go away through the
+test hook above while the wireless one kept it online. With a request
+pending on a test server on the build host (answering after 25 s, over
+HTTP/1.1) and one to `https://httpbin.org/delay/8`, the change closed 3
+connections 2 s later; both requests were sent again on fresh connections and
+the page got both answers (at 28.1 s and 12.2 s), with no error. A
+network change that removed no address left a pending 15 s request alone
+(answered at 15.0 s). A request whose server held it past 300 s was sent
+again then, on a new connection, and answered at once (300.0 s). With both
+interfaces left out, the network was gone and both addresses went away, as
+before.
+
 ## SameSite cookies (#92)
 
 ### What the user sees
