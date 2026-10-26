@@ -26626,6 +26626,110 @@ index bd5f330af7837b3052f6fd3e805b24eab39b6b60..10ae377bab047c4421581e485027703d
      GraphicsContextStateSaver stateSaver(graphicsContext);
  
      ButtonControlAdwaita::drawButton(graphicsContext, borderRect, deviceScaleFactor, style);
+diff --git a/Source/WebCore/platform/graphics/adwaita/ProgressBarAdwaita.cpp b/Source/WebCore/platform/graphics/adwaita/ProgressBarAdwaita.cpp
+index 1fe3b08cdba4882033c22efe1763ccdd6aa873aa..355896c8f9ff10fea5b2b319a30e662d6831da49 100644
+--- a/Source/WebCore/platform/graphics/adwaita/ProgressBarAdwaita.cpp
++++ b/Source/WebCore/platform/graphics/adwaita/ProgressBarAdwaita.cpp
+@@ -28,6 +28,10 @@
+ #include "config.h"
+ #include "ProgressBarAdwaita.h"
+ 
++#if PLATFORM(HAIKU) && USE(SKIA)
++#include "ControlLookHaiku.h"
++#endif
++
+ #include "GraphicsContextStateSaver.h"
+ #include "ProgressBarPart.h"
+ #include <wtf/MonotonicTime.h>
+@@ -48,8 +52,18 @@ static double currentAnimationProgress(Seconds animationStartTime)
+     return fmod((MonotonicTime::now().secondsSinceEpoch() - animationStartTime).seconds(), duration.seconds()) / duration.seconds();
+ }
+ 
+-void ProgressBarAdwaita::draw(GraphicsContext& graphicsContext, const FloatRoundedRect& borderRect, float /*deviceScaleFactor*/, const ControlStyle& style)
++void ProgressBarAdwaita::draw(GraphicsContext& graphicsContext, const FloatRoundedRect& borderRect, float deviceScaleFactor, const ControlStyle& style)
+ {
++#if PLATFORM(HAIKU) && USE(SKIA)
++    // A determinate one as BStatusBar's (#114); Adwaita's animation shows an
++    // indeterminate one, and a vertical one stays Adwaita's.
++    if (Ref part = owningProgressBarPart(); part->position() >= 0 && !style.states.contains(ControlStyle::State::VerticalWritingMode)
++        && !style.states.contains(ControlStyle::State::InlineFlippedWritingMode)
++        && paintControlLookHaiku(graphicsContext, ControlLookPartHaiku::ProgressBar, borderRect.rect(), deviceScaleFactor, style, part->position()))
++        return;
++#else
++    UNUSED_PARAM(deviceScaleFactor);
++#endif
+     GraphicsContextStateSaver stateSaver(graphicsContext);
+ 
+     SRGBA<uint8_t> progressBarBackgroundColor;
+diff --git a/Source/WebCore/platform/graphics/adwaita/SliderThumbAdwaita.cpp b/Source/WebCore/platform/graphics/adwaita/SliderThumbAdwaita.cpp
+index 11678e43fb56368aa32ac0e036cd449f23fff4b9..f0cf743628cf1e526b4df0384b09ffd4b6e24faf 100644
+--- a/Source/WebCore/platform/graphics/adwaita/SliderThumbAdwaita.cpp
++++ b/Source/WebCore/platform/graphics/adwaita/SliderThumbAdwaita.cpp
+@@ -28,6 +28,10 @@
+ #include "config.h"
+ #include "SliderThumbAdwaita.h"
+ 
++#if PLATFORM(HAIKU) && USE(SKIA)
++#include "ControlLookHaiku.h"
++#endif
++
+ #include "GraphicsContextStateSaver.h"
+ 
+ #if USE(THEME_ADWAITA)
+@@ -40,8 +44,16 @@ SliderThumbAdwaita::SliderThumbAdwaita(ControlPart& part, ControlFactoryAdwaita&
+ {
+ }
+ 
+-void SliderThumbAdwaita::draw(GraphicsContext& graphicsContext, const FloatRoundedRect& borderRect, float /*deviceScaleFactor*/, const ControlStyle& style)
++void SliderThumbAdwaita::draw(GraphicsContext& graphicsContext, const FloatRoundedRect& borderRect, float deviceScaleFactor, const ControlStyle& style)
+ {
++#if PLATFORM(HAIKU) && USE(SKIA)
++    // As BSlider's thumb (#114).
++    if (paintControlLookHaiku(graphicsContext, m_owningPart.get()->type() == StyleAppearance::SliderThumbVertical ? ControlLookPartHaiku::SliderThumbVertical
++        : ControlLookPartHaiku::SliderThumbHorizontal, borderRect.rect(), deviceScaleFactor, style))
++        return;
++#else
++    UNUSED_PARAM(deviceScaleFactor);
++#endif
+     GraphicsContextStateSaver stateSaver(graphicsContext);
+ 
+     SRGBA<uint8_t> sliderThumbBackgroundColor;
+diff --git a/Source/WebCore/platform/graphics/adwaita/SliderTrackAdwaita.cpp b/Source/WebCore/platform/graphics/adwaita/SliderTrackAdwaita.cpp
+index 4d5225fda2b2fb14c836e797c0595a39e94478ce..fb257e46bc882bb7baa1b46d6f91477a81d16866 100644
+--- a/Source/WebCore/platform/graphics/adwaita/SliderTrackAdwaita.cpp
++++ b/Source/WebCore/platform/graphics/adwaita/SliderTrackAdwaita.cpp
+@@ -28,6 +28,10 @@
+ #include "config.h"
+ #include "SliderTrackAdwaita.h"
+ 
++#if PLATFORM(HAIKU) && USE(SKIA)
++#include "ControlLookHaiku.h"
++#endif
++
+ #include "GraphicsContextStateSaver.h"
+ 
+ #if USE(THEME_ADWAITA)
+@@ -40,9 +44,19 @@ SliderTrackAdwaita::SliderTrackAdwaita(ControlPart& part, ControlFactoryAdwaita&
+ {
+ }
+ 
+-void SliderTrackAdwaita::draw(GraphicsContext& graphicsContext, const FloatRoundedRect& borderRect, float /*deviceScaleFactor*/, const ControlStyle& style)
++void SliderTrackAdwaita::draw(GraphicsContext& graphicsContext, const FloatRoundedRect& borderRect, float deviceScaleFactor, const ControlStyle& style)
+ {
+     Ref sliderTrackPart = owningSliderTrackPart();
++#if PLATFORM(HAIKU) && USE(SKIA)
++    // As BSlider's bar (#114); the tick marks of a datalist as Adwaita's.
++    if (paintControlLookHaiku(graphicsContext, sliderTrackPart->type() == StyleAppearance::SliderHorizontal ? ControlLookPartHaiku::SliderTrackHorizontal
++        : ControlLookPartHaiku::SliderTrackVertical, borderRect.rect(), deviceScaleFactor, style, sliderTrackPart->thumbPosition())) {
++        sliderTrackPart->drawTicks(graphicsContext, borderRect.rect(), style);
++        return;
++    }
++#else
++    UNUSED_PARAM(deviceScaleFactor);
++#endif
+     GraphicsContextStateSaver stateSaver(graphicsContext);
+ 
+     FloatRect rect = borderRect.rect();
 diff --git a/Source/WebCore/platform/graphics/adwaita/TextFieldAdwaita.cpp b/Source/WebCore/platform/graphics/adwaita/TextFieldAdwaita.cpp
 index eb9985b0665cc16c151639780a1cfb71cc318d3d..013ac68508a1da168de44fff0a3e6c7e35daabaa 100644
 --- a/Source/WebCore/platform/graphics/adwaita/TextFieldAdwaita.cpp
@@ -29272,10 +29376,10 @@ index 0000000000000000000000000000000000000000..7d495c04b64af928f0525ca51be51686
 +}
 diff --git a/Source/WebCore/platform/graphics/haiku/ControlLookHaiku.cpp b/Source/WebCore/platform/graphics/haiku/ControlLookHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..0535498e4122f7a4351583e6f543fad44067dd44
+index 0000000000000000000000000000000000000000..2b2bf0dcac51c3dd0182aee68a6004fd5ef3af12
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/haiku/ControlLookHaiku.cpp
-@@ -0,0 +1,285 @@
+@@ -0,0 +1,342 @@
 +/*
 + * Copyright (C) 2026 Haiku, Inc.
 + *
@@ -29345,8 +29449,6 @@ index 0000000000000000000000000000000000000000..0535498e4122f7a4351583e6f543fad4
 +    return enabled && be_app && be_control_look;
 +}
 +
-+// A system colour as the page's colour scheme wants it: dark for a page that
-+// asks for dark when the system is light, and the other way round.
 +static rgb_color systemColor(color_which which, bool dark)
 +{
 +    bool systemIsDark = ui_color(B_DOCUMENT_BACKGROUND_COLOR).Brightness() < 127;
@@ -29391,6 +29493,15 @@ index 0000000000000000000000000000000000000000..0535498e4122f7a4351583e6f543fad4
 +        if (states.contains(ControlStyle::State::ReadOnly))
 +            flags |= BControlLook::B_DISABLED;
 +        break;
++    case ControlLookPartHaiku::SliderThumbHorizontal:
++    case ControlLookPartHaiku::SliderThumbVertical:
++        if (states.contains(ControlStyle::State::Pressed))
++            flags |= BControlLook::B_ACTIVATED;
++        break;
++    case ControlLookPartHaiku::SliderTrackHorizontal:
++    case ControlLookPartHaiku::SliderTrackVertical:
++    case ControlLookPartHaiku::ProgressBar:
++        break;
 +    }
 +    return flags;
 +}
@@ -29433,7 +29544,11 @@ index 0000000000000000000000000000000000000000..0535498e4122f7a4351583e6f543fad4
 +    return surface;
 +}
 +
-+static void drawPart(BView& view, ControlLookPartHaiku part, BRect rect, uint32 flags, bool dark, rgb_color background)
++// A slider's bar is this thin (as Adwaita's track), across the middle of
++// its box, in CSS pixels.
++static constexpr float sliderBarThickness = 6;
++
++static void drawPart(BView& view, ControlLookPartHaiku part, BRect rect, uint32 flags, bool dark, rgb_color background, double value, float scale)
 +{
 +    rgb_color base = systemColor(B_CONTROL_BACKGROUND_COLOR, dark);
 +    switch (part) {
@@ -29460,13 +29575,50 @@ index 0000000000000000000000000000000000000000..0535498e4122f7a4351583e6f543fad4
 +        be_control_look->DrawMenuFieldFrame(&view, rect, rect, base, background, flags);
 +        be_control_look->DrawMenuFieldBackground(&view, rect, rect, base, true, flags);
 +        break;
++    case ControlLookPartHaiku::SliderTrackHorizontal:
++    case ControlLookPartHaiku::SliderTrackVertical: {
++        // As BSlider's bar, filled up to the thumb as one that uses a fill
++        // colour.
++        bool horizontal = part == ControlLookPartHaiku::SliderTrackHorizontal;
++        float thickness = std::round(sliderBarThickness * scale);
++        BRect bar = rect;
++        if (horizontal) {
++            bar.top = std::floor((rect.top + rect.bottom - thickness) / 2);
++            bar.bottom = bar.top + thickness - 1;
++        } else {
++            bar.left = std::floor((rect.left + rect.right - thickness) / 2);
++            bar.right = bar.left + thickness - 1;
++        }
++        rgb_color barColor = tint_color(systemColor(B_PANEL_BACKGROUND_COLOR, dark), B_DARKEN_4_TINT);
++        rgb_color fillColor = systemColor(B_CONTROL_HIGHLIGHT_COLOR, dark);
++        // A vertical one fills from the bottom.
++        float position = horizontal ? value : 1 - value;
++        be_control_look->DrawSliderBar(&view, bar, rect, base, horizontal ? fillColor : barColor, horizontal ? barColor : fillColor,
++            position, flags, horizontal ? B_HORIZONTAL : B_VERTICAL);
++        break;
++    }
++    case ControlLookPartHaiku::SliderThumbHorizontal:
++    case ControlLookPartHaiku::SliderThumbVertical:
++        be_control_look->DrawSliderThumb(&view, rect, rect, base, flags,
++            part == ControlLookPartHaiku::SliderThumbHorizontal ? B_HORIZONTAL : B_VERTICAL);
++        break;
++    case ControlLookPartHaiku::ProgressBar:
++        // As BStatusBar's.
++        be_control_look->DrawStatusBar(&view, rect, rect, systemColor(B_PANEL_BACKGROUND_COLOR, dark),
++            systemColor(B_STATUS_BAR_COLOR, dark), rect.left + rect.Width() * value);
++        break;
 +    }
 +}
 +
-+// The control as an image of width × height device pixels: drawn once on
-+// black and once on white, which gives each pixel's coverage whatever
++rgb_color systemColorHaiku(int which, bool dark)
++{
++    return systemColor(static_cast<color_which>(which), dark);
++}
++
++// An image of width × height device pixels of what draw paints: drawn once
++// on black and once on white, which gives each pixel's coverage whatever
 +// app_server blends, and the colour over black is the premultiplied colour.
-+static RefPtr<NativeImage> renderPart(ControlLookPartHaiku part, uint32 flags, bool dark, int width, int height)
++static RefPtr<NativeImage> render(int width, int height, const Function<void(BView&, BRect, rgb_color)>& draw)
 +{
 +    auto& target = surface();
 +    if (!target.ensure(width, height))
@@ -29487,7 +29639,7 @@ index 0000000000000000000000000000000000000000..0535498e4122f7a4351583e6f543fad4
 +        // In device pixels, as Haiku draws its controls larger with a larger
 +        // font: the frames stay one pixel wide (scaling the view instead
 +        // breaks BControlLook's check marks).
-+        drawPart(view, part, BRect(0, 0, width - 1, height - 1), flags, dark, background);
++        draw(view, BRect(0, 0, width - 1, height - 1), background);
 +        view.PopState();
 +        view.Sync();
 +        auto* bits = static_cast<const uint8_t*>(bitmap.Bits());
@@ -29510,52 +29662,61 @@ index 0000000000000000000000000000000000000000..0535498e4122f7a4351583e6f543fad4
 +    return NativeImage::create(SkImages::RasterFromData(info, WTF::move(data), rowBytes));
 +}
 +
-+bool paintControlLookHaiku(GraphicsContext& context, ControlLookPartHaiku part, const FloatRect& rect, float deviceScaleFactor, const ControlStyle& style)
++bool paintWithControlLookHaiku(GraphicsContext& context, const FloatRect& rect, float deviceScaleFactor, const String& look,
++    const Function<void(BView&, BRect, rgb_color)>& draw)
 +{
 +    if (!controlLookEnabled() || rect.isEmpty() || context.paintingDisabled())
 +        return false;
 +    float scale = std::max(1.f, deviceScaleFactor);
-+    // A check box or radio button is square, in the middle of its box.
-+    FloatRect box = rect;
-+    if (part == ControlLookPartHaiku::Checkbox || part == ControlLookPartHaiku::Radio) {
-+        float side = std::min(box.width(), box.height());
-+        box = FloatRect(box.x() + (box.width() - side) / 2, box.y() + (box.height() - side) / 2, side, side);
-+    }
 +    // Whole CSS pixels, so that the control's edges stay sharp.
-+    FloatSize size(std::max(1.f, std::round(box.width())), std::max(1.f, std::round(box.height())));
++    FloatSize size(std::max(1.f, std::round(rect.width())), std::max(1.f, std::round(rect.height())));
 +    int width = static_cast<int>(std::ceil(size.width() * scale));
 +    int height = static_cast<int>(std::ceil(size.height() * scale));
 +    if (width > maximumWidth || height > maximumHeight)
 +        return false;
-+    bool dark = style.states.contains(ControlStyle::State::DarkAppearance);
-+    uint32 flags = flagsFor(part, style);
-+    // The system colours are part of the look: a change of them in
-+    // Appearance makes new ones.
-+    rgb_color base = systemColor(B_CONTROL_BACKGROUND_COLOR, dark);
-+    rgb_color document = systemColor(B_DOCUMENT_BACKGROUND_COLOR, dark);
-+    rgb_color mark = systemColor(B_CONTROL_MARK_COLOR, dark);
-+    auto colorKey = [](rgb_color color) {
-+        return (static_cast<unsigned>(color.red) << 16) | (static_cast<unsigned>(color.green) << 8) | color.blue;
-+    };
-+    auto key = makeString(static_cast<unsigned>(part), ':', flags, ':', width, 'x', height, ':', scale, ':', dark ? 'd' : 'l', ':',
-+        colorKey(base), ':', colorKey(document), ':', colorKey(mark));
-+
++    auto key = makeString(look, ':', width, 'x', height);
 +    static NeverDestroyed<HashMap<String, RefPtr<NativeImage>>> looks;
-+    auto found = looks->find(key);
 +    RefPtr<NativeImage> image;
-+    if (found != looks->end())
++    if (auto found = looks->find(key); found != looks->end())
 +        image = found->value;
 +    else {
-+        image = renderPart(part, flags, dark, width, height);
++        image = render(width, height, draw);
 +        if (!image)
 +            return false;
 +        if (looks->size() >= maximumCachedLooks)
 +            looks->clear();
 +        looks->add(key, image);
 +    }
-+    FloatRect destination(box.location(), size);
-+    context.drawNativeImage(*image, destination, FloatRect(0, 0, width, height));
++    context.drawNativeImage(*image, FloatRect(rect.location(), size), FloatRect(0, 0, width, height));
 +    return true;
++}
++
++bool paintControlLookHaiku(GraphicsContext& context, ControlLookPartHaiku part, const FloatRect& rect, float deviceScaleFactor, const ControlStyle& style, double value)
++{
++    value = std::clamp(value, 0.0, 1.0);
++    // A check box or radio button is square, in the middle of its box.
++    FloatRect box = rect;
++    if (part == ControlLookPartHaiku::Checkbox || part == ControlLookPartHaiku::Radio) {
++        float side = std::min(box.width(), box.height());
++        box = FloatRect(box.x() + (box.width() - side) / 2, box.y() + (box.height() - side) / 2, side, side);
++    }
++    bool dark = style.states.contains(ControlStyle::State::DarkAppearance);
++    uint32 flags = flagsFor(part, style);
++    // The system colours are part of the look: a change of them in
++    // Appearance makes new ones.
++    auto colorKey = [&](color_which which) {
++        auto color = systemColor(which, dark);
++        return (static_cast<unsigned>(color.red) << 16) | (static_cast<unsigned>(color.green) << 8) | color.blue;
++    };
++    auto look = makeString("control:"_s, static_cast<unsigned>(part), ':', flags, ':', dark ? 'd' : 'l', ':',
++        colorKey(B_CONTROL_BACKGROUND_COLOR), ':', colorKey(B_DOCUMENT_BACKGROUND_COLOR), ':', colorKey(B_CONTROL_MARK_COLOR), ':',
++        colorKey(B_PANEL_BACKGROUND_COLOR), ':', colorKey(B_CONTROL_HIGHLIGHT_COLOR), ':', colorKey(B_STATUS_BAR_COLOR), ':',
++        // The value to a thousandth: a different fill is a different look.
++        static_cast<unsigned>(std::round(value * 1000)));
++    float scale = std::max(1.f, deviceScaleFactor);
++    return paintWithControlLookHaiku(context, box, deviceScaleFactor, look, [&](BView& view, BRect bounds, rgb_color background) {
++        drawPart(view, part, bounds, flags, dark, background, value, scale);
++    });
 +}
 +
 +} // namespace WebCore
@@ -29563,10 +29724,10 @@ index 0000000000000000000000000000000000000000..0535498e4122f7a4351583e6f543fad4
 +#endif
 diff --git a/Source/WebCore/platform/graphics/haiku/ControlLookHaiku.h b/Source/WebCore/platform/graphics/haiku/ControlLookHaiku.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..25b087f521219fd0f6ff9c51e51c4ed2b4b97716
+index 0000000000000000000000000000000000000000..971a983ebbd1995de9822a95bf3ae16cbec9927a
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/haiku/ControlLookHaiku.h
-@@ -0,0 +1,53 @@
+@@ -0,0 +1,78 @@
 +/*
 + * Copyright (C) 2026 Haiku, Inc.
 + *
@@ -29595,6 +29756,13 @@ index 0000000000000000000000000000000000000000..25b087f521219fd0f6ff9c51e51c4ed2
 +
 +#if PLATFORM(HAIKU) && USE(SKIA)
 +
++#include <wtf/Function.h>
++#include <wtf/text/WTFString.h>
++
++class BRect;
++class BView;
++struct rgb_color;
++
 +namespace WebCore {
 +
 +class FloatRect;
@@ -29608,14 +29776,32 @@ index 0000000000000000000000000000000000000000..25b087f521219fd0f6ff9c51e51c4ed2
 +    Radio,
 +    TextField,
 +    MenuList,
++    SliderTrackHorizontal,
++    SliderTrackVertical,
++    SliderThumbHorizontal,
++    SliderThumbVertical,
++    ProgressBar,
 +};
 +
 +// Draws the part as a Haiku application draws that control, into the
 +// context: BControlLook paints it into an offscreen bitmap (once per look and
 +// size, kept in a cache), which is drawn as an image. False when it cannot be
 +// (no app_server, turned off with SUMMIT_HAIKU_CONTROLS=0): the caller then
-+// draws Adwaita's.
-+bool paintControlLookHaiku(GraphicsContext&, ControlLookPartHaiku, const FloatRect&, float deviceScaleFactor, const ControlStyle&);
++// draws Adwaita's. value: how far a slider's thumb is, or a progress bar's
++// progress, from 0 to 1.
++bool paintControlLookHaiku(GraphicsContext&, ControlLookPartHaiku, const FloatRect&, float deviceScaleFactor, const ControlStyle&, double value = 0);
++
++// Draws what draw paints into a view (in device pixels: the rect it is
++// given, and the colour around it to blend with) into the rect of the
++// context, as an image cached under look (which must name everything the
++// drawing depends on but the size). False as paintControlLookHaiku.
++bool paintWithControlLookHaiku(GraphicsContext&, const FloatRect&, float deviceScaleFactor, const String& look,
++    const Function<void(BView&, BRect, rgb_color background)>& draw);
++
++// A system colour as a page with this colour scheme should have it: the dark
++// variant for a page that asks for dark colours on a light system, and the
++// other way round.
++rgb_color systemColorHaiku(int which, bool dark);
 +
 +} // namespace WebCore
 +
