@@ -33,8 +33,51 @@ once; `setIcon` is accepted (the pane shows no icon). Each call is a
 `SIDEBAR` browser command (`BrowserWindow::SidebarCommand`). `open()` needs
 no user gesture here, unlike Firefox.
 
-Not yet: remembering the open sidebar across restarts, and Chrome's
-`sidePanel` API (its panel opens from View › Sidebar).
+Not yet: remembering the open sidebar across restarts.
+
+## sidePanel
+
+Chrome's `sidePanel` is there for an extension with the `sidePanel`
+permission (now one Summit grants). It shows its panel in the same sidebar:
+the namespace object is a second `WebExtensionAPISidebarActionHaiku` whose
+calls go to the UI process as `sidePanel.METHOD`, which
+`WebExtensionContext::sidebarActionHaiku` turns into the same `SIDEBAR`
+commands, so the application needs nothing new.
+
+- `open({windowId, tabId})` and `close(...)` act on that window's sidebar
+  (or the tab's window; the front window without either). Chrome needs one
+  of them; Summit does not, and needs no user gesture.
+- `setOptions({tabId, path, enabled})`: `path` (a page of the extension,
+  else rejected) becomes the panel of the tab's window, or of the front
+  window without a `tabId` (Summit's sidebar belongs to a window, not a
+  tab, so per-tab panels follow the window); `enabled: false` closes it.
+- `getOptions({tabId})` answers `{enabled, path}` for that window: the
+  panel's path relative to the extension, `enabled` while there is one
+  (`enabled: false` is not remembered).
+- `setPanelBehavior({openPanelOnActionClick})` / `getPanelBehavior()`: kept
+  in the extension's state (`SidePanelOpensOnActionClick` in its
+  `State.json`), so it lasts across launches as in Chrome. While it is on,
+  the extension's toolbar action opens or closes its panel in the tab's
+  window instead of its popup or `onClicked`
+  (`WebExtensionContext::performAction`).
+- The object also has `sidebarAction`'s `toggle()` and `isOpen()`.
+  Firefox's `sidebarAction` is still offered only to an extension with a
+  `sidebar_action`.
+
+Checked on the X399 (27 Oct) with `tests/fixtures/extensions/side-panel`
+(`side_panel.default_path` `panel.html`): `chrome.sidePanel` was there and
+`browser.sidebarAction` was not; `getOptions()` gave `{enabled: true,
+path: "panel.html"}`; `open()` showed the panel (it reported itself), as
+did `open({tabId})`; `setOptions({path: "second.html?x=1"})` loaded that
+page in the open panel and `getOptions()` answered it; `setOptions({enabled:
+false})` and `setOptions({tabId, path, enabled: false})` closed it; an
+outside `path`, a non-boolean `openPanelOnActionClick` and an unknown
+`windowId` were rejected; `setPanelBehavior({openPanelOnActionClick:
+true})` was still set after a restart. The sidebar fixture's
+`sidebarAction` (`open`, `toggle`, `close`, `isOpen`) behaved as before,
+without a `sidePanel`. Not checked: the toolbar click with
+the behaviour on (the X399's display was down, and the MCP `press_key`
+goes to the page, not the window's shortcuts).
 
 ## Fixture
 
