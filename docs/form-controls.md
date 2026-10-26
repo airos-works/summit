@@ -10,8 +10,17 @@ system's colours, in its dark variant for a page that asks for dark colours
 and 200 %. Before, under Skia, they were drawn in GNOME's Adwaita style.
 Range sliders (`BSlider`'s bar, filled up to the thumb, and its thumb) and
 determinate progress bars (`BStatusBar`'s) are Haiku's too. An indeterminate
-progress bar keeps Adwaita's animation; `<meter>`, the number field's arrows
-and page scroll bars are still Adwaita's.
+progress bar keeps Adwaita's animation; `<meter>` and the number field's
+arrows are still Adwaita's.
+
+Scroll bars, of the page and of scrolling boxes in it, are Haiku's classic
+ones, as `BScrollBar` draws them: a bar as wide as Haiku's vertical scroll bar
+(14 pixels at the default font size), which takes its room as in Haiku's
+applications, with an arrow button at each end and the thumb between them,
+and the panel colour in the corner between two bars. Before, they were
+Adwaita's overlay bars, drawn over the content. A page that sets
+`scrollbar-color` keeps Adwaita's drawing in those colours (in the same
+room).
 
 ## How it works
 
@@ -48,8 +57,23 @@ and page scroll bars are still Adwaita's.
   system colours they used (a change in Appearance draws new ones); at
   512 looks the cache starts again. Controls larger than 4096 × 1024 device
   pixels are left to Adwaita.
+- Scroll bars: `ScrollbarThemeAdwaita` stays the theme (the scrolling code
+  takes it to be Adwaita's), with Haiku's geometry when
+  `usesHaikuScrollbars()`: not overlay, `haikuScrollbarThickness()` wide
+  (`BControlLook::GetScrollBarWidth`), arrow buttons as long as the bar is
+  wide (half the bar when too short for two), the track between them. The
+  page's own scroll bars are drawn on the scrolling thread
+  (`USE(COORDINATED_GRAPHICS_ASYNC_SCROLLBAR)`, `ScrollerCoordinated`), which
+  now computes the thumb in that track too; both it and the main thread draw
+  through `AdwaitaScrollbarPainter::paint`, which draws Haiku's
+  (`paintHaikuScrollbar`): `DrawScrollBarBorder`, two `DrawScrollBarButton`s
+  (pressed when held) and `DrawScrollBarBackground` as one image per bar
+  size, and `DrawScrollBarThumb` as another, drawn where the thumb is, so
+  scrolling only moves an image. The painter's cache and offscreen bitmap
+  are behind a lock for the scrolling thread.
 - `SUMMIT_HAIKU_CONTROLS=0` (read when a web process starts) draws
-  Adwaita's again.
+  Adwaita's again, scroll bars included; `SUMMIT_HAIKU_SCROLLBARS=0` brings
+  back only Adwaita's overlay scroll bars.
 
 ## Checked
 
@@ -63,13 +87,14 @@ which is drawn checked. A focused text field showed no focus border on the
 X399 because its window was not active there, with Adwaita's controls too
 (WebKit counts a control as focused only in an active window).
 
+Scroll bars, on the X399 at 200 % with `scrollbars.html` (a scrolling box
+with both bars, one with only a horizontal bar, a tall page): all drawn as
+Haiku's, 14 CSS pixels wide (the page's content 14 pixels narrower); a click
+on the box's down arrow scrolled it by 40 pixels; wheel scrolling the page to
+500 moved its thumb; Wikipedia's article page drew its scroll bar the same.
+
 ## Not done
 
-- Page scroll bars. With Adwaita, the engine draws a page's scroll bars on
-  the scrolling thread (`USE(COORDINATED_GRAPHICS_ASYNC_SCROLLBAR)`,
-  `ScrollerImpAdwaita`), and the scrolling code takes the scroll bar theme to
-  be Adwaita's: Haiku's look there needs that painter to draw Haiku's parts
-  (from a thread-safe cache), not just another theme.
 - `<meter>`, an indeterminate or vertical progress bar, the number field's
   arrows.
 - The `<select>` arrow is small at 200 %: `BControlLook` sizes the pop-up
