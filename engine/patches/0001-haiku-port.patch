@@ -10749,10 +10749,10 @@ index 27ff2f14f28c9e87747ac02ddde34549545c9aa1..5c7fadd1505554bff6e340a0f8c66b7a
          || object.document()->view()->layoutContext().layoutState()
          || object.document()->childNeedsStyleRecalc())
 diff --git a/Source/WebCore/animation/KeyframeEffect.cpp b/Source/WebCore/animation/KeyframeEffect.cpp
-index 341ea6e69eeb97a36a3894476b45c5c27a089b43..4359d73a59b7dc05270e82684d7d30a1e5acb5f5 100644
+index 341ea6e69eeb97a36a3894476b45c5c27a089b43..7c393ece01949c8f91c7c57aef33171a209929ff 100644
 --- a/Source/WebCore/animation/KeyframeEffect.cpp
 +++ b/Source/WebCore/animation/KeyframeEffect.cpp
-@@ -97,18 +97,49 @@
+@@ -97,18 +97,145 @@
  #include <wtf/TZoneMallocInlines.h>
  #include <wtf/UUID.h>
  #include <wtf/text/TextStream.h>
@@ -10788,6 +10788,102 @@ index 341ea6e69eeb97a36a3894476b45c5c27a089b43..4359d73a59b7dc05270e82684d7d30a1
 +    static NeverDestroyed<HashMap<const KeyframeEffect*, TickedTimingHaiku>> timings;
 +    return timings;
 +}
++
++// Off-screen animations (#117). As in Firefox, a tick of an animation whose
++// target is well out of view, and that changes only how the target is
++// painted, does not restyle it: linear.app's home page spent a tenth of its
++// main thread at rest restyling 84 animations of elements below the fold.
++// The targets are kept here and restyled as soon as they come near the view
++// (resumeThrottledAnimationsHaiku, from LocalFrameView::viewportContentsChanged)
++// or a script asks for computed style (Style::Extractor). Properties that can
++// move or size anything (transform, filters, shadows) keep ticking.
++// SUMMIT_THROTTLE_OFFSCREEN_ANIMATIONS=0 turns it off.
++static WeakHashSet<Element, WeakPtrImplWithEventTargetData>& throttledAnimationTargetsHaiku()
++{
++    static NeverDestroyed<WeakHashSet<Element, WeakPtrImplWithEventTargetData>> targets;
++    return targets;
++}
++
++static bool animatesOnlyPaintHaiku(const BlendingKeyframes& keyframes)
++{
++    for (auto& property : keyframes.properties()) {
++        auto* propertyID = std::get_if<CSSPropertyID>(&property);
++        if (!propertyID)
++            return false;
++        switch (*propertyID) {
++        case CSSPropertyOpacity:
++        case CSSPropertyColor:
++        case CSSPropertyBackgroundColor:
++        case CSSPropertyBackgroundPositionX:
++        case CSSPropertyBackgroundPositionY:
++        case CSSPropertyBorderTopColor:
++        case CSSPropertyBorderRightColor:
++        case CSSPropertyBorderBottomColor:
++        case CSSPropertyBorderLeftColor:
++        case CSSPropertyOutlineColor:
++        case CSSPropertyTextDecorationColor:
++        case CSSPropertyCaretColor:
++        case CSSPropertyFill:
++        case CSSPropertyFillOpacity:
++        case CSSPropertyStroke:
++        case CSSPropertyStrokeOpacity:
++        case CSSPropertyStrokeDashoffset:
++        case CSSPropertyStopColor:
++        case CSSPropertyStopOpacity:
++        case CSSPropertyFloodColor:
++        case CSSPropertyFloodOpacity:
++        case CSSPropertyLightingColor:
++            break;
++        default:
++            return false;
++        }
++    }
++    return !keyframes.properties().isEmpty();
++}
++
++// The part of the document near enough the view to keep animating: the
++// visible rect and a quarter of it around, so that a target scrolled towards
++// the view is restyled before it shows.
++static IntRect nearViewRectHaiku(const IntRect& visibleRect)
++{
++    auto rect = visibleRect;
++    rect.inflateX(std::max(200, rect.width() / 4));
++    rect.inflateY(std::max(200, rect.height() / 4));
++    return rect;
++}
++
++static bool throttlesOffscreenAnimationsHaiku()
++{
++    static const bool throttles = [] {
++        const char* value = getenv("SUMMIT_THROTTLE_OFFSCREEN_ANIMATIONS");
++        return !value || strcmp(value, "0");
++    }();
++    return throttles;
++}
++
++void resumeThrottledAnimationsHaiku(Document& document, const IntRect* visibleRect)
++{
++    auto& targets = throttledAnimationTargetsHaiku();
++    if (targets.isEmptyIgnoringNullReferences())
++        return;
++    auto nearRect = visibleRect ? nearViewRectHaiku(*visibleRect) : IntRect { };
++    Vector<Ref<Element>> resumed;
++    for (auto& element : targets) {
++        if (&element.document() != &document)
++            continue;
++        if (visibleRect) {
++            CheckedPtr renderer = element.renderer();
++            if (renderer && !renderer->isVisibleInDocumentRect(nearRect))
++                continue;
++        }
++        resumed.append(element);
++    }
++    for (auto& element : resumed) {
++        targets.remove(element);
++        if (!document.inStyleRecalc())
++            element->invalidateStyleForAnimation();
++    }
++}
 +#endif
 +
  using namespace JSC;
@@ -10802,7 +10898,7 @@ index 341ea6e69eeb97a36a3894476b45c5c27a089b43..4359d73a59b7dc05270e82684d7d30a1
      if (m_inTargetEffectStack) {
          if (auto target = targetStyleable()) {
              if (auto* keyframeEffectStack = target->keyframeEffectStack())
-@@ -2126,7 +2157,26 @@ void KeyframeEffect::addPendingAcceleratedAction(AcceleratedAction action)
+@@ -2126,7 +2253,36 @@ void KeyframeEffect::addPendingAcceleratedAction(AcceleratedAction action)
  
  void KeyframeEffect::animationDidTick()
  {
@@ -10819,6 +10915,16 @@ index 341ea6e69eeb97a36a3894476b45c5c27a089b43..4359d73a59b7dc05270e82684d7d30a1
 +        if (!result.isNewEntry) {
 +            changed = result.iterator->value.phase != ticked.phase || result.iterator->value.activeTime != ticked.activeTime;
 +            result.iterator->value = ticked;
++        }
++    }
++    if (changed && throttlesOffscreenAnimationsHaiku() && m_target && !m_pseudoElementIdentifier
++        && m_target->document().frame() && animatesOnlyPaintHaiku(m_blendingKeyframes)) {
++        if (CheckedPtr renderer = this->renderer()) {
++            Ref frameView = renderer->view().frameView();
++            if (!renderer->isVisibleInDocumentRect(nearViewRectHaiku(frameView->windowToContents(frameView->windowClipRect())))) {
++                throttledAnimationTargetsHaiku().add(*m_target);
++                changed = false;
++            }
 +        }
 +    }
 +    if (changed)
@@ -16687,10 +16793,10 @@ index 4555034d8312449920f8f16e8a9c252277d25003..fc2cb658f2f8ee869eaa6a7750ae834b
  
      if (event.ctrlKey() || event.metaKey() || event.altKey() || event.shiftKey())
 diff --git a/Source/WebCore/page/LocalFrameView.cpp b/Source/WebCore/page/LocalFrameView.cpp
-index 2132dee6a2c27be522007bb4df5bc1f5940c1c06..92204f12ac19f0bc5b70ba956ed5857a19114e92 100644
+index 2132dee6a2c27be522007bb4df5bc1f5940c1c06..a8c0f814175f94e5e65b3508dfb528af34519b33 100644
 --- a/Source/WebCore/page/LocalFrameView.cpp
 +++ b/Source/WebCore/page/LocalFrameView.cpp
-@@ -167,6 +167,12 @@
+@@ -167,8 +167,20 @@
  #define FRAME_ID m_frame->frameID().toUInt64()
  #define FRAMEVIEW_RELEASE_LOG(channel, fmt, ...) RELEASE_LOG_FORWARDABLE(channel, fmt, PAGE_ID, FRAME_ID, m_frame->isMainFrame(), ##__VA_ARGS__)
  
@@ -16702,8 +16808,27 @@ index 2132dee6a2c27be522007bb4df5bc1f5940c1c06..92204f12ac19f0bc5b70ba956ed5857a
 +
  namespace WebCore {
  
++#if PLATFORM(HAIKU)
++// Off-screen animations (KeyframeEffect.cpp): restyles the targets near the
++// view, or all of them without a rect.
++void resumeThrottledAnimationsHaiku(Document&, const IntRect* visibleRect);
++#endif
++
  using namespace HTMLNames;
-@@ -4939,10 +4945,30 @@ void LocalFrameView::flushAnyPendingPostLayoutTasks()
+ 
+ WTF_MAKE_TZONE_ALLOCATED_IMPL(LocalFrameView);
+@@ -2969,6 +2981,10 @@ void LocalFrameView::viewportContentsChanged()
+ 
+         if (CheckedPtr renderView = frameView.m_frame->contentRenderer())
+             renderView->updateVisibleViewportRect(visibleRect);
++#if PLATFORM(HAIKU)
++        if (RefPtr document = frameView.m_frame->document())
++            resumeThrottledAnimationsHaiku(*document, &visibleRect);
++#endif
+     });
+ }
+ 
+@@ -4939,10 +4955,30 @@ void LocalFrameView::flushAnyPendingPostLayoutTasks()
  void LocalFrameView::performPostLayoutTasks()
  {
      ScriptDisallowedScope::InMainThread scriptDisallowedScope;
@@ -16734,7 +16859,7 @@ index 2132dee6a2c27be522007bb4df5bc1f5940c1c06..92204f12ac19f0bc5b70ba956ed5857a
  
      if (!layoutContext().isLayoutNested() && m_frame->document()->documentElement())
          fireLayoutRelatedMilestonesIfNeeded();
-@@ -4952,6 +4978,10 @@ void LocalFrameView::performPostLayoutTasks()
+@@ -4952,6 +4988,10 @@ void LocalFrameView::performPostLayoutTasks()
          renderView->adjustAXCustomColorModeAfterLayout();
  #endif
  
@@ -16745,7 +16870,7 @@ index 2132dee6a2c27be522007bb4df5bc1f5940c1c06..92204f12ac19f0bc5b70ba956ed5857a
  #if PLATFORM(IOS_FAMILY)
      // Only send layout-related delegate callbacks synchronously for the main frame to
      // avoid re-entering layout for the main frame while delivering a layout-related delegate
-@@ -4965,32 +4995,56 @@ void LocalFrameView::performPostLayoutTasks()
+@@ -4965,32 +5005,56 @@ void LocalFrameView::performPostLayoutTasks()
      // FIXME: We should consider adding DidLayout as a LayoutMilestone. That would let us merge this
      // with didLayout(LayoutMilestones).
      m_frame->loader().client().dispatchDidLayout();
@@ -16802,7 +16927,7 @@ index 2132dee6a2c27be522007bb4df5bc1f5940c1c06..92204f12ac19f0bc5b70ba956ed5857a
  
      protect(m_frame->document())->scheduleDeferredAXObjectCacheUpdate();
  
-@@ -6094,8 +6148,31 @@ void LocalFrameView::paintOverhangAreas(GraphicsContext& context, const IntRect&
+@@ -6094,8 +6158,31 @@ void LocalFrameView::paintOverhangAreas(GraphicsContext& context, const IntRect&
      ScrollView::paintOverhangAreas(context, horizontalOverhangArea, verticalOverhangArea, dirtyRect);
  }
  
@@ -16834,7 +16959,7 @@ index 2132dee6a2c27be522007bb4df5bc1f5940c1c06..92204f12ac19f0bc5b70ba956ed5857a
      // Style updating, render tree creation, and layout needs to be done multiple times
      // for more than one reason. But one reason is that when an <object> element determines
      // what it needs to load a subframe, a second pass is needed. That requires update
-@@ -6142,6 +6219,23 @@ void LocalFrameView::updateLayoutAndStyleIfNeededRecursive(OptionSet<LayoutOptio
+@@ -6142,6 +6229,23 @@ void LocalFrameView::updateLayoutAndStyleIfNeededRecursive(OptionSet<LayoutOptio
              break;
      }
  
@@ -16858,7 +16983,7 @@ index 2132dee6a2c27be522007bb4df5bc1f5940c1c06..92204f12ac19f0bc5b70ba956ed5857a
  #if ASSERT_ENABLED
      auto needsStyleRecalc = [&] {
          DescendantsDeque deque;
-@@ -6299,6 +6393,21 @@ void LocalFrameView::checkAndDispatchDidReachVisuallyNonEmptyState()
+@@ -6299,6 +6403,21 @@ void LocalFrameView::checkAndDispatchDidReachVisuallyNonEmptyState()
          return;
  
      m_contentQualifiesAsVisuallyNonEmpty = true;
@@ -74789,6 +74914,35 @@ index 34e45677f81e31be7b713eacb9e58dbcf88459a2..21d146d1be109c27b78accf39995403b
  void DocumentScope::didChangeExtensionStyleSheets()
  {
      // Extension stylesheets may mutate in the middle of a style update when resource loading triggers
+diff --git a/Source/WebCore/style/StyleExtractor.cpp b/Source/WebCore/style/StyleExtractor.cpp
+index 2bd348a57eb3681858941aef2a664d4795c60f05..ae40a6aaffa1519969d35f512148df4d6dd21803 100644
+--- a/Source/WebCore/style/StyleExtractor.cpp
++++ b/Source/WebCore/style/StyleExtractor.cpp
+@@ -58,6 +58,12 @@
+ #include "Styleable.h"
+ 
+ namespace WebCore {
++
++#if PLATFORM(HAIKU)
++// Off-screen animations (KeyframeEffect.cpp).
++void resumeThrottledAnimationsHaiku(Document&, const IntRect* visibleRect);
++#endif
++
+ namespace Style {
+ 
+ // Define this to 1 to enable validation of direct serialization against serialization using CSSValue.
+@@ -189,6 +195,11 @@ bool Extractor::updateStyleIfNeededForProperty(Element& element, const std::opti
+     Ref document = element.document();
+ 
+     document->styleScope().flushPendingUpdate();
++#if PLATFORM(HAIKU)
++    // A script reads computed style: the off-screen animations left
++    // unstyled (KeyframeEffect.cpp) give their current values.
++    resumeThrottledAnimationsHaiku(document, nullptr);
++#endif
+ 
+     auto hasValidStyle = [&] {
+         auto shorthand = shorthandForProperty(propertyID);
 diff --git a/Source/WebCore/style/StyleInvalidator.cpp b/Source/WebCore/style/StyleInvalidator.cpp
 index 50b6c9a78a84ec75f7c7577fb98e8c1f2bcd1b16..84582a597b854f49acdd0748fff3732ec3b7d56b 100644
 --- a/Source/WebCore/style/StyleInvalidator.cpp
