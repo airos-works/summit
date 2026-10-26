@@ -122,6 +122,29 @@ public:
         };
         fDepth = 0;
         for (const auto& record : fRecords) walk(walk, record, 0);
+        // The rendering frames, for the frames strip: WebKit's
+        // RenderingFrame records where the engine makes them (Cocoa, GLib);
+        // on Haiku, which has none, the work of the main thread up to and
+        // including each rendering update's Composite.
+        fFrames.clear();
+        for (const auto& box : fBoxes)
+            if (Text(*box.record, "type") == "RenderingFrame") fFrames.push_back({box.start, box.end, box.end - box.start});
+        if (fFrames.empty()) {
+            std::vector<const Box*> top;
+            for (const auto& box : fBoxes)
+                if (!box.depth) top.push_back(&box);
+            std::sort(top.begin(), top.end(), [](const Box* a, const Box* b) { return a->start < b->start; });
+            double start = -1, work = 0;
+            for (const auto* box : top) {
+                if (start < 0) start = box->start;
+                work += box->end - box->start;
+                if (Text(*box->record, "type") == "Composite") {
+                    fFrames.push_back({start, box->end, work});
+                    start = -1;
+                    work = 0;
+                }
+            }
+        }
         fSpan = std::isfinite(fOrigin) && last > fOrigin ? last - fOrigin : 0;
         Fit();
     }
@@ -186,6 +209,8 @@ public:
         for (const auto& sample : fCPU) cpuPeak = std::max(cpuPeak, sample.second);
         for (const auto& sample : fMemory) memoryPeak = std::max(memoryPeak, sample.second);
         json state = {{"boxes", fBoxes.size()}, {"depth", fDepth}, {"spanMs", std::round(fSpan * 10000) / 10},
+            {"frames", fFrames.size()},
+            {"slowFrames", std::count_if(fFrames.begin(), fFrames.end(), [](const Frame& frame) { return frame.work > 1.0 / 60; })},
             {"cpuSamples", fCPU.size()}, {"cpuPeakPercent", std::round(cpuPeak * 10) / 10},
             {"memorySamples", fMemory.size()}, {"memoryPeakMiB", std::round(memoryPeak / 1048576 * 10) / 10},
             {"viewMs", {std::round(fViewStart * 10000) / 10, std::round(fViewEnd * 10000) / 10}}, {"selected", nullptr}};
@@ -266,6 +291,34 @@ public:
             double peak = 0;
             for (const auto& sample : fMemory) peak = std::max(peak, sample.second);
             strip(fMemory, {70, 140, 210, 255}, "Memory (peak " + Milliseconds(peak / 1048576) + " MiB)", peak);
+        }
+        // Each rendering frame as a bar as tall as the main thread's work in
+        // it (33 ms fills the strip): green within a 60 Hz frame (16.7 ms),
+        // orange within two, red beyond.
+        if (!fFrames.empty()) {
+            const BRect band(bounds.left, stripTop, bounds.right, stripTop + kStripHeight - 1);
+            SetHighColor(palette.Tint({120, 120, 120, 255}, .08f));
+            FillRect(band);
+            size_t slow = 0;
+            for (const auto& [start, end, duration] : fFrames) {
+                if (duration > 1.0 / 60) ++slow;
+                if (end < fViewStart || start > fViewEnd) continue;
+                const rgb_color color = duration <= 1.0 / 60 ? rgb_color {98, 176, 98, 255}
+                    : duration <= 2.0 / 60 ? rgb_color {232, 160, 46, 255} : rgb_color {214, 72, 64, 255};
+                const float left = static_cast<float>((start - fViewStart) * scale);
+                const float right = std::max(left + 1, static_cast<float>((end - fViewStart) * scale) - 1);
+                const float height = static_cast<float>(std::clamp(duration / (2.0 / 60), 0.05, 1.0)) * (kStripHeight - 3);
+                SetHighColor(palette.Tint(color, palette.dark ? .7f : .8f));
+                FillRect(BRect(left, band.bottom - height, right, band.bottom));
+            }
+            // The 60 Hz line.
+            SetHighColor(palette.border);
+            const float budget = band.bottom - (kStripHeight - 3) / 2;
+            StrokeLine(BPoint(band.left, budget), BPoint(band.right, budget));
+            SetHighColor(palette.muted);
+            DrawString(("Frames (" + std::to_string(fFrames.size()) + ", " + std::to_string(slow) + " over 16.7 ms)").c_str(),
+                BPoint(bounds.left + 3, band.top + height.ascent + 1));
+            stripTop += kStripHeight + 1;
         }
         for (size_t i = 0; i < fBoxes.size(); ++i) {
             const auto& box = fBoxes[i];
@@ -412,7 +465,8 @@ private:
     static constexpr float kStripHeight = 28;
     float BoxesTop(float axis) const
     {
-        return axis + 1 + (fCPU.empty() ? 0 : kStripHeight + 1) + (fMemory.empty() ? 0 : kStripHeight + 1);
+        return axis + 1 + (fCPU.empty() ? 0 : kStripHeight + 1) + (fMemory.empty() ? 0 : kStripHeight + 1)
+            + (fFrames.empty() ? 0 : kStripHeight + 1);
     }
 
     void Clamp()
@@ -425,6 +479,12 @@ private:
 
     std::vector<json> fRecords;
     std::vector<std::pair<double, double>> fCPU, fMemory;
+    // The rendering frames: start and end (on the records' clock less
+    // fOrigin) and the main thread's work in them.
+    struct Frame {
+        double start, end, work;
+    };
+    std::vector<Frame> fFrames;
     std::vector<Box> fBoxes;
     double fOrigin = 0, fSpan = 0, fViewStart = 0, fViewEnd = 1, fPressedStart = 0;
     int fDepth = 0, fSelected = -1, fHover = -1;

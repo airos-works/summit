@@ -321,7 +321,15 @@ categories, up to its peak), a sample about every half second
 (`CPUProfiler.startTracking` and `Memory.startTracking` while recording,
 `ENABLE(RESOURCE_USAGE)` with `ResourceUsageThreadHaiku`); the status line
 adds the average and peak CPU and the memory range. Other tabs of the same
-web process count in them too. Under it, the table on the left is time by kind
+web process count in them too. A third strip shows the rendering frames:
+WebKit's `RenderingFrame` records where the engine makes them (its Cocoa
+and GLib run loops do; Haiku's does not), else the main thread's work up to
+and including each rendering update's `Composite`; each frame is a bar as
+wide as it lasted and as tall as the work in it (33 ms fills the strip),
+green within 16.7 ms, orange within 33 ms, red beyond, with a line at
+16.7 ms and the count of frames over it. The state's `flame` has `frames`
+and `slowFrames`. Checked on the X399 scrolling The Guardian: 10 frames in
+2.4 s, 9 over 16.7 ms (software rendering there). Under it, the table on the left is time by kind
 of work (script evaluation, function calls, timers, events, style, layout,
 painting, rendering frames), with the nested records counted in their
 parents. On the right are the 200 longest records: when they started, how long
@@ -725,7 +733,7 @@ is started again.
 - Network requests from before the tools were opened (as in other
   browsers). Console messages are kept: developer extras are on for every
   page (`SUMMIT_DEVELOPER_EXTRAS=0` turns that off).
-- A per-frame view in Performance. In Sources: an original source the map carries no text of is not
+- In Sources: an original source the map carries no text of is not
   fetched. In Storage: partitioned cookies.
 - Elements › Accessibility shows the selected element's role, name and
   states, asked for only while that tab is shown; accessibility, which this
