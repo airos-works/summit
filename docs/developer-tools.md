@@ -725,7 +725,7 @@ is started again.
 - Network requests from before the tools were opened (as in other
   browsers). Console messages are kept: developer extras are on for every
   page (`SUMMIT_DEVELOPER_EXTRAS=0` turns that off).
-- A per-frame view in Performance (`ENABLE(RESOURCE_USAGE)` is off). In Sources: an original source the map carries no text of is not
+- A per-frame view in Performance. In Sources: an original source the map carries no text of is not
   fetched. In Storage: partitioned cookies.
 - Elements › Accessibility shows the selected element's role, name and
   states, asked for only while that tab is shown; accessibility, which this
