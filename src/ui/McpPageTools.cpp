@@ -125,24 +125,45 @@ bool WithView(const BMessenger& window, int64 tab, const std::function<void(BWeb
     return found;
 }
 
-// The engine names a page's target after the page; a connection that is not
-// the page's first (the Developer Tools may be open) is not told the name.
-std::string PageTarget(const BMessenger& window, const std::string& id)
+// The tab as the window's tabs state lists it (null when it is not there).
+Json TabState(const BMessenger& window, const std::string& id)
 {
-    if (window.LockTargetWithTimeout(3000000) != B_OK) return { };
+    if (window.LockTargetWithTimeout(3000000) != B_OK) return nullptr;
     BLooper* looper = nullptr;
     window.Target(&looper);
     std::string answer;
     if (auto* browser = dynamic_cast<BrowserWindow*>(looper)) answer = browser->McpRequest("{\"action\":\"tabs\"}");
     if (looper) looper->Unlock();
     const Json tabs = Json::parse(answer, nullptr, false);
-    if (!tabs.is_object() || !tabs.contains("tabs") || !tabs["tabs"].is_array()) return { };
-    for (const auto& tab : tabs["tabs"]) {
-        if (!tab.is_object() || tab.value("id", std::string()) != id) continue;
-        const uint64 page = tab.value("pageIdentifier", uint64(0));
-        return page ? "page-" + std::to_string(page) : std::string();
+    if (!tabs.is_object() || !tabs.contains("tabs") || !tabs["tabs"].is_array()) return nullptr;
+    for (const auto& tab : tabs["tabs"])
+        if (tab.is_object() && tab.value("id", std::string()) == id) return tab;
+    return nullptr;
+}
+
+// The engine names a page's target after the page; a connection that is not
+// the page's first (the Developer Tools may be open) is not told the name.
+std::string PageTarget(const BMessenger& window, const std::string& id)
+{
+    const Json tab = TabState(window, id);
+    const uint64 page = tab.is_object() ? tab.value("pageIdentifier", uint64(0)) : 0;
+    return page ? "page-" + std::to_string(page) : std::string();
+}
+
+// A session made while the tab's page has no web process (an unloaded tab:
+// Unload Tab, tabs.discard, or a restored one not yet selected) never
+// reaches the page, not even once the tab loads, so the tab must have one.
+// A page that is starting its process gets a moment.
+void RequireWebProcess(const BMessenger& window, const std::string& id)
+{
+    const bigtime_t deadline = system_time() + 3000000;
+    for (;;) {
+        const Json tab = TabState(window, id);
+        if (!tab.is_object() || tab.value("webProcess", int64(0)) > 0) return;
+        if (system_time() >= deadline)
+            throw ToolError("tab " + id + " is unloaded (it has no web process): navigate or select it to load it first");
+        snooze(100000);
     }
-    return { };
 }
 
 // A session on an extension's background page (the extensions tool's
@@ -204,6 +225,7 @@ std::shared_ptr<PageConnection> Connect(const Json& arguments)
         if (auto found = sByTab.find(id); found != sByTab.end()) existing = found->second;
     }
     const BMessenger pump = Pump();
+    RequireWebProcess(ref.window, id);
     std::shared_ptr<PageConnection> connection;
     const bool found = WithView(ref.window, tab, [&](BWebKitView& view) {
         // A tab whose view was replaced (an extension page and a web page

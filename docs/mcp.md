@@ -233,6 +233,13 @@ stack in the JavaScript interpreter under `Runtime.evaluate`.
   background that is not running). A Manifest V3 service worker runs in the
   background's generated page, whose own world is what `evaluate` reaches.
   Extension console output is also in `logs`.
+- The page tools need the tab's page to have a web process. An unloaded tab
+  (Unload Tab, `tabs.discard`, or a restored background tab not yet
+  selected) is refused after up to 3 s with "tab N is unloaded":
+  `navigate` or select it first. Until 27 Oct the tools made an inspector
+  session on the unloaded page, which never reached it, not even once the
+  tab had loaded (every later call to that tab timed out). Checked on the
+  X399 with a restored tab and a `tabs.discard`ed one.
 - Most `SUMMIT_*` switches are read once when a process starts:
   `set_environment` applies to processes started afterwards
   (`restart_process`).
