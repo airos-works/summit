@@ -301,10 +301,17 @@ breakpoints, frames and scope rows.
 
 **Record**, use the page, **Stop**: the inspector's `Timeline` records
 what the page's main thread did meanwhile (`Timeline.start` with five stack
-frames a record; `Timeline.eventRecorded`). The top table is time by kind
+frames a record; `Timeline.eventRecorded`). At the top a **flame chart**
+lays the records out in time, each under the one it happened in, coloured
+by kind (script yellow, style and layout purple, painting and compositing
+green, the rest grey) and labelled where there is room; the wheel zooms
+where the pointer is, dragging moves along, **Zoom to Fit** shows the whole
+recording again, hovering a box tells its kind, what it was about and its
+time, and clicking one shows the record (without its children, which are
+counted) below. Under it, the table on the left is time by kind
 of work (script evaluation, function calls, timers, events, style, layout,
 painting, rendering frames), with the nested records counted in their
-parents. Below it are the 200 longest records: when they started, how long
+parents. On the right are the 200 longest records: when they started, how long
 they took, what they were about (the function and its script and line, the
 timer, the event) and what was inside them by kind. Selecting one shows
 its whole summary, stack included. The status line has the span, how busy
@@ -313,7 +320,18 @@ The summary is the MCP `timeline` tool's (`SummarizeTimeline` in
 `src/core/McpInspector.cpp`). WebKit's `ScriptProfiler`, `Memory` and
 `CPUProfiler` domains are not used: the last two are compiled out on Haiku
 (`ENABLE(RESOURCE_USAGE)` off). Test actions: `performance-record`,
-`performance-stop`; the state's `performance` has the tables.
+`performance-stop`, `performance-flame-select longest|N`,
+`performance-flame-zoom "FACTOR X"`, `performance-flame-fit`; the state's
+`performance` has the tables and `flame` (boxes, depth, the span and the
+time in view, the selected record).
+
+The panel never showed until 26 October: its method that fills it was
+called `Show()`, which overrides the virtual `BView::Show()` the tab view
+shows a panel with, so selecting the tab refreshed the panel and left it
+hidden (the state, which the earlier checks read, was right). It is
+`ShowRecording()` now. Checked on the X399 with linear.app: 766 records over
+3 s drawn as 990 boxes two deep, zoomed to 12 ms with labelled boxes, the
+longest record selected and shown.
 
 ### Storage
 
@@ -690,7 +708,7 @@ is started again.
 - Network requests from before the tools were opened (as in other
   browsers). Console messages are kept: developer extras are on for every
   page (`SUMMIT_DEVELOPER_EXTRAS=0` turns that off).
-- A flame chart or per-frame view in Performance (it has tables), and
+- A per-frame view in Performance, and
   memory and CPU-usage timelines (`ENABLE(RESOURCE_USAGE)` is off). In Sources: an original source the map carries no text of is not
   fetched. In Storage: partitioned cookies, and Cache Storage of
   frames from other sites.

@@ -1,5 +1,6 @@
 #if SUMMIT_MODERN_WEBKIT
 #include "DevToolsPanels.h"
+#include "SourceView.h"
 #include "core/McpInspector.h"
 #include <interface/ColumnListView.h>
 #include <interface/ColumnTypes.h>
@@ -7,6 +8,7 @@
 #include <LayoutBuilder.h>
 #include <SplitView.h>
 #include <StringView.h>
+#include <Window.h>
 #include <nlohmann/json.hpp>
 #include <algorithm>
 #include <cmath>
@@ -16,7 +18,7 @@ namespace summit {
 using namespace devtools;
 using nlohmann::json;
 namespace {
-constexpr uint32 kRecord = 'dprc', kRecordSelected = 'dprs';
+constexpr uint32 kRecord = 'dprc', kRecordSelected = 'dprs', kFlameSelected = 'dpfs', kFit = 'dpft';
 enum { kTypeName, kTypeCount, kTypeTotal, kTypeLongest };
 enum { kRecordAt, kRecordType, kRecordDuration, kRecordWhat, kRecordInside };
 
@@ -79,6 +81,305 @@ public:
     int index = -1;
 };
 
+// The recording as a flame chart: time from left to right, each record a
+// box under the one it happened in, coloured by kind (script, style and
+// layout, painting). The wheel zooms where the pointer is, dragging moves
+// along, and a click selects a record for the detail below.
+class PerformancePanel::Flame : public BView {
+public:
+    Flame()
+        : BView("flame", B_WILL_DRAW | B_FULL_UPDATE_ON_RESIZE | B_FRAME_EVENTS)
+    {
+        SetViewColor(B_TRANSPARENT_COLOR);
+        SetExplicitMinSize(BSize(200, 90));
+    }
+
+    void SetRecords(std::vector<json>&& records)
+    {
+        fRecords = std::move(records);
+        fBoxes.clear();
+        fSelected = fHover = -1;
+        fOrigin = INFINITY;
+        double last = -INFINITY;
+        for (const auto& record : fRecords) {
+            if (!record.is_object()) continue;
+            fOrigin = std::min(fOrigin, Number(record, "startTime"));
+            last = std::max(last, std::max(Number(record, "endTime"), Number(record, "startTime")));
+        }
+        const auto walk = [&](auto&& self, const json& record, int depth) -> void {
+            if (!record.is_object()) return;
+            const double start = Number(record, "startTime");
+            const double end = std::max(start, Number(record, "endTime"));
+            fBoxes.push_back({start - fOrigin, end - fOrigin, depth, &record});
+            fDepth = std::max(fDepth, depth + 1);
+            if (const auto children = record.find("children"); children != record.end() && children->is_array())
+                for (const auto& child : *children) self(self, child, depth + 1);
+        };
+        fDepth = 0;
+        for (const auto& record : fRecords) walk(walk, record, 0);
+        fSpan = std::isfinite(fOrigin) && last > fOrigin ? last - fOrigin : 0;
+        Fit();
+    }
+
+    // The whole recording in view.
+    void Fit()
+    {
+        fViewStart = 0;
+        fViewEnd = fSpan > 0 ? fSpan : 1;
+        Invalidate();
+    }
+
+    // Shows factor times as much time (less than 1 zooms in), keeping the
+    // time under x where it is.
+    void ZoomAt(double factor, float x)
+    {
+        const double width = std::max(1.f, Bounds().Width());
+        const double at = fViewStart + (fViewEnd - fViewStart) * std::clamp(x / width, 0.0, 1.0);
+        double length = std::clamp((fViewEnd - fViewStart) * factor, 0.00002, std::max(fSpan, 0.00002));
+        fViewStart = at - (at - fViewStart) * length / (fViewEnd - fViewStart);
+        fViewEnd = fViewStart + length;
+        Clamp();
+        Invalidate();
+    }
+
+    void Select(int index)
+    {
+        fSelected = index >= 0 && index < static_cast<int>(fBoxes.size()) ? index : -1;
+        Invalidate();
+        if (fTarget.IsValid()) fTarget.SendMessage(kFlameSelected);
+    }
+
+    // The longest record that has no record around it.
+    int Longest() const
+    {
+        int longest = -1;
+        for (size_t i = 0; i < fBoxes.size(); ++i)
+            if (!fBoxes[i].depth && (longest < 0 || Duration(fBoxes[i]) > Duration(fBoxes[longest]))) longest = static_cast<int>(i);
+        return longest;
+    }
+
+    // The selected record without its children (counted instead), and
+    // when it started and how long it took, as JSON.
+    std::string SelectedJSON() const
+    {
+        if (fSelected < 0) return { };
+        const auto& box = fBoxes[fSelected];
+        json record = *box.record;
+        if (const auto children = record.find("children"); children != record.end() && children->is_array()) {
+            const auto count = children->size();
+            record.erase("children");
+            record["childCount"] = count;
+        }
+        record["atMs"] = std::round(box.start * 10000) / 10;
+        record["durationMs"] = std::round(Duration(box) * 10000) / 10;
+        return record.dump(2, ' ', false, json::error_handler_t::replace);
+    }
+
+    json State() const
+    {
+        json state = {{"boxes", fBoxes.size()}, {"depth", fDepth}, {"spanMs", std::round(fSpan * 10000) / 10},
+            {"viewMs", {std::round(fViewStart * 10000) / 10, std::round(fViewEnd * 10000) / 10}}, {"selected", nullptr}};
+        if (fSelected >= 0) {
+            const auto& box = fBoxes[fSelected];
+            state["selected"] = {{"type", Text(*box.record, "type")}, {"depth", box.depth},
+                {"atMs", std::round(box.start * 10000) / 10}, {"durationMs", std::round(Duration(box) * 10000) / 10}};
+        }
+        return state;
+    }
+
+    void SetTarget(BMessenger target) { fTarget = target; }
+
+    void Draw(BRect update) override
+    {
+        const auto& palette = CurrentSourcePalette();
+        const BRect bounds = Bounds();
+        SetHighColor(palette.background);
+        FillRect(update);
+        BFont font(be_plain_font);
+        font.SetSize(std::max(9.f, be_plain_font->Size() * .85f));
+        SetFont(&font);
+        font_height height;
+        font.GetHeight(&height);
+        const float lineHeight = std::ceil(height.ascent + height.descent);
+        const float axis = lineHeight + 6, row = lineHeight + 4;
+        if (fBoxes.empty()) {
+            SetHighColor(palette.muted);
+            DrawString("Record, use the page, then Stop: its main thread's records appear here.", BPoint(8, axis));
+            return;
+        }
+        // The time axis: a step of 1, 2 or 5 times a power of ten, at
+        // least 80 pixels apart.
+        const double length = fViewEnd - fViewStart, scale = bounds.Width() / length;
+        double step = 0.000001;
+        for (int i = 0; step * scale < 80 && i < 30; ++i) step *= (i % 3 == 1) ? 2.5 : 2;
+        SetHighColor(palette.border);
+        StrokeLine(BPoint(bounds.left, axis - 1), BPoint(bounds.right, axis - 1));
+        for (double t = std::ceil(fViewStart / step) * step; t <= fViewEnd; t += step) {
+            const float x = static_cast<float>((t - fViewStart) * scale);
+            SetHighColor(palette.border);
+            StrokeLine(BPoint(x, axis - 4), BPoint(x, bounds.bottom));
+            char label[32];
+            const double ms = t * 1000;
+            std::snprintf(label, sizeof label, step >= 0.001 ? "%.0f ms" : step >= 0.0001 ? "%.1f ms" : "%.2f ms", ms);
+            SetHighColor(palette.muted);
+            DrawString(label, BPoint(x + 3, height.ascent + 2));
+        }
+        for (size_t i = 0; i < fBoxes.size(); ++i) {
+            const auto& box = fBoxes[i];
+            if (box.end < fViewStart || box.start > fViewEnd) continue;
+            BRect frame((box.start - fViewStart) * scale, axis + 1 + box.depth * row, (box.end - fViewStart) * scale, axis + box.depth * row + row - 1);
+            if (frame.top > update.bottom || frame.bottom < update.top) continue;
+            frame.left = std::max(frame.left, bounds.left - 1);
+            frame.right = std::min(std::max(frame.right, frame.left + 1), bounds.right + 1);
+            SetHighColor(palette.Tint(KindColor(Text(*box.record, "type")), palette.dark ? .55f : .7f));
+            FillRect(frame);
+            if (frame.Width() > 6) {
+                SetHighColor(palette.background);
+                StrokeLine(frame.RightTop(), frame.RightBottom());
+            }
+            const std::string label = Label(box);
+            if (frame.Width() > 24) {
+                SetHighColor(palette.text);
+                BString text(label.c_str());
+                font.TruncateString(&text, B_TRUNCATE_END, frame.Width() - 6);
+                DrawString(text.String(), BPoint(frame.left + 3, frame.top + height.ascent + 1));
+            }
+            if (static_cast<int>(i) == fSelected) {
+                SetHighColor(palette.accent);
+                SetPenSize(2);
+                StrokeRect(frame.InsetByCopy(-1, -1));
+                SetPenSize(1);
+            }
+        }
+    }
+
+    void MouseDown(BPoint where) override
+    {
+        if (!IsFocus()) MakeFocus(true);
+        fPressed = true;
+        fMoved = false;
+        fPressedAt = where;
+        fPressedStart = fViewStart;
+        SetMouseEventMask(B_POINTER_EVENTS, B_LOCK_WINDOW_FOCUS);
+    }
+
+    void MouseMoved(BPoint where, uint32 transit, const BMessage* dragged) override
+    {
+        BView::MouseMoved(where, transit, dragged);
+        if (fPressed) {
+            if (std::abs(where.x - fPressedAt.x) > 3) fMoved = true;
+            if (fMoved) {
+                const double length = fViewEnd - fViewStart;
+                fViewStart = fPressedStart - (where.x - fPressedAt.x) * length / std::max(1.f, Bounds().Width());
+                fViewEnd = fViewStart + length;
+                Clamp();
+                Invalidate();
+            }
+            return;
+        }
+        const int hover = transit == B_EXITED_VIEW ? -1 : BoxAt(where);
+        if (hover == fHover) return;
+        fHover = hover;
+        if (hover < 0) {
+            SetToolTip(static_cast<const char*>(nullptr));
+            return;
+        }
+        const auto& box = fBoxes[hover];
+        SetToolTip((Label(box) + " · " + Milliseconds(Duration(box) * 1000) + " ms at " + Milliseconds(box.start * 1000) + " ms").c_str());
+        ShowToolTip(ToolTip());
+    }
+
+    void MouseUp(BPoint where) override
+    {
+        if (fPressed && !fMoved) Select(BoxAt(where));
+        fPressed = false;
+    }
+
+    void MessageReceived(BMessage* message) override
+    {
+        if (message->what == B_MOUSE_WHEEL_CHANGED && !fBoxes.empty()) {
+            float delta = 0;
+            if (message->FindFloat("be:wheel_delta_y", &delta) == B_OK && delta) {
+                BPoint where;
+                uint32 buttons;
+                GetMouse(&where, &buttons, false);
+                ZoomAt(std::pow(1.25, delta), where.x);
+            }
+            return;
+        }
+        BView::MessageReceived(message);
+    }
+
+private:
+    struct Box {
+        double start, end;
+        int depth;
+        const json* record;
+    };
+
+    static double Duration(const Box& box) { return box.end - box.start; }
+
+    static rgb_color KindColor(const std::string& type)
+    {
+        static const char* const script[] = {"EvaluateScript", "FunctionCall", "TimerFire", "TimerInstall", "TimerRemove",
+            "EventDispatch", "ObserverCallback", "FireAnimationFrame", "RequestAnimationFrame", "CancelAnimationFrame",
+            "ConsoleProfile", "TimeStamp", "Microtask"};
+        static const char* const style[] = {"RecalculateStyles", "Layout", "InvalidateLayout", "ScheduleLayout",
+            "ScheduleStyleRecalculation", "InvalidateStyles"};
+        static const char* const paint[] = {"Paint", "Composite", "RenderingFrame", "Screenshot"};
+        for (const char* name : script) if (type == name) return {232, 184, 46, 255};
+        for (const char* name : style) if (type == name) return {155, 112, 220, 255};
+        for (const char* name : paint) if (type == name) return {98, 176, 98, 255};
+        return {150, 150, 150, 255};
+    }
+
+    static std::string Label(const Box& box)
+    {
+        std::string label = Text(*box.record, "type");
+        if (const auto what = What(*box.record); !what.empty() && what != label) label += " " + what;
+        return label;
+    }
+
+    int BoxAt(BPoint where) const
+    {
+        font_height height;
+        BFont font(be_plain_font);
+        font.SetSize(std::max(9.f, be_plain_font->Size() * .85f));
+        font.GetHeight(&height);
+        const float lineHeight = std::ceil(height.ascent + height.descent), axis = lineHeight + 6, row = lineHeight + 4;
+        if (where.y < axis) return -1;
+        const int depth = static_cast<int>((where.y - axis) / row);
+        const double length = fViewEnd - fViewStart, perPixel = length / std::max(1.f, Bounds().Width());
+        const double at = fViewStart + where.x * perPixel;
+        // A box at least a pixel wide, so that a thin one can be hit.
+        int found = -1;
+        for (size_t i = 0; i < fBoxes.size(); ++i) {
+            const auto& box = fBoxes[i];
+            if (box.depth == depth && at >= box.start - perPixel && at <= std::max(box.end, box.start + perPixel)) {
+                found = static_cast<int>(i);
+                if (at >= box.start && at <= box.end) break;
+            }
+        }
+        return found;
+    }
+
+    void Clamp()
+    {
+        const double length = fViewEnd - fViewStart;
+        if (fViewStart < 0) fViewStart = 0;
+        if (fSpan > 0 && fViewStart + length > fSpan) fViewStart = std::max(0.0, fSpan - length);
+        fViewEnd = fViewStart + length;
+    }
+
+    std::vector<json> fRecords;
+    std::vector<Box> fBoxes;
+    double fOrigin = 0, fSpan = 0, fViewStart = 0, fViewEnd = 1, fPressedStart = 0;
+    int fDepth = 0, fSelected = -1, fHover = -1;
+    bool fPressed = false, fMoved = false;
+    BPoint fPressedAt;
+    BMessenger fTarget;
+};
+
 PerformancePanel::PerformancePanel(Session& session, DevToolsHost& host)
     : BView("Performance", 0), fSession(session), fHost(host)
 {
@@ -106,15 +407,21 @@ PerformancePanel::PerformancePanel(Session& session, DevToolsHost& host)
         list->SetExplicitMinSize(BSize(200, 60));
     }
     fDetail = new BodyView("detail");
+    fFlame = new Flame();
+    fFit = new BButton("fit", "Zoom to Fit", new BMessage(kFit));
+    fFit->SetToolTip("Show the whole recording in the chart (the wheel zooms where the pointer is; drag to move along)");
+    auto* lists = new BSplitView(B_HORIZONTAL, 2);
+    BLayoutBuilder::Split<>(lists).Add(fTypes, 2).Add(fRecords, 3);
     auto* split = new BSplitView(B_VERTICAL, 2);
-    BLayoutBuilder::Split<>(split).Add(fTypes, 2).Add(fRecords, 3).Add(fDetail, 2);
+    BLayoutBuilder::Split<>(split).Add(fFlame, 3).Add(lists, 3).Add(fDetail, 2);
     BLayoutBuilder::Group<>(this, B_VERTICAL, 0)
         .AddGroup(B_HORIZONTAL, 8).SetInsets(8, 6, 8, 6)
             .Add(fRecord)
+            .Add(fFit)
             .Add(fStatus, 1)
         .End()
         .Add(split, 1);
-    Show();
+    ShowRecording();
 }
 
 void PerformancePanel::AttachedToWindow()
@@ -123,6 +430,8 @@ void PerformancePanel::AttachedToWindow()
     AdoptParentColors();
     fRecord->SetTarget(this);
     fRecords->SetTarget(this);
+    fFit->SetTarget(this);
+    fFlame->SetTarget(BMessenger(this));
 }
 
 void PerformancePanel::MessageReceived(BMessage* message)
@@ -131,9 +440,11 @@ void PerformancePanel::MessageReceived(BMessage* message)
         case kRecord:
             fSession.RecordTimeline(!fSession.TimelineRecording());
             fHost.Sync();
-            Show();
+            ShowRecording();
             break;
         case kRecordSelected: ShowRecord(); break;
+        case kFlameSelected: ShowFlameRecord(); break;
+        case kFit: fFlame->Fit(); break;
         default: BView::MessageReceived(message);
     }
 }
@@ -146,7 +457,7 @@ void PerformancePanel::Apply(const Changes& changes)
         ShowStatus();
         return;
     }
-    Show();
+    ShowRecording();
 }
 
 void PerformancePanel::ShowStatus()
@@ -156,7 +467,7 @@ void PerformancePanel::ShowStatus()
         fStatus->SetText(("Recording… " + std::to_string(records.size()) + (records.size() == 1 ? " record" : " records")).c_str());
 }
 
-void PerformancePanel::Show()
+void PerformancePanel::ShowRecording()
 {
     const bool recording = fSession.TimelineRecording();
     fWasRecording = recording;
@@ -169,7 +480,9 @@ void PerformancePanel::Show()
     fRecords->Clear();
     fLongest.clear();
     const auto& texts = fSession.TimelineRecords();
+    fFit->SetEnabled(!texts.empty());
     if (texts.empty()) {
+        fFlame->SetRecords({ });
         fStatus->SetText("Record, use the page, then Stop: where its main thread's time went.");
         fDetail->ShowNote("");
         return;
@@ -182,6 +495,7 @@ void PerformancePanel::Show()
     try {
         summary = mcp::SummarizeTimeline(records, 200);
     } catch (const std::exception& error) {
+        fFlame->SetRecords({ });
         fStatus->SetText((std::string("The recording could not be read: ") + error.what()).c_str());
         return;
     }
@@ -221,6 +535,14 @@ void PerformancePanel::Show()
     if (texts.size() >= Session::kTimelineRecords) status += " · the first " + std::to_string(Session::kTimelineRecords) + " records";
     fStatus->SetText(status.c_str());
     fDetail->ShowNote("Select a record to see its data and where it came from.");
+    fFlame->SetRecords(std::move(records));
+}
+
+void PerformancePanel::ShowFlameRecord()
+{
+    const auto text = fFlame->SelectedJSON();
+    if (text.empty()) fDetail->ShowNote("");
+    else fDetail->ShowBody(text, "application/json");
 }
 
 void PerformancePanel::ShowRecord()
@@ -233,14 +555,33 @@ void PerformancePanel::ShowRecord()
     fDetail->ShowBody(fLongest[row->index], "application/json");
 }
 
-bool PerformancePanel::Command(const std::string& action, const std::string&, std::string& error)
+bool PerformancePanel::Command(const std::string& action, const std::string& argument, std::string& error)
 {
     if (action == "performance-record" || action == "performance-stop") {
         const bool on = action == "performance-record";
         if (on == fSession.TimelineRecording()) error = on ? "Already recording" : "Not recording";
         fSession.RecordTimeline(on);
         fHost.Sync();
-        Show();
+        ShowRecording();
+        return true;
+    }
+    // Test actions: the flame chart's longest record (or the Nth box)
+    // selected, a zoom by a factor around a point (x in pixels), and Zoom to
+    // Fit.
+    if (action == "performance-flame-select") {
+        fFlame->Select(argument.empty() || argument == "longest" ? fFlame->Longest() : std::atoi(argument.c_str()));
+        ShowFlameRecord();
+        return true;
+    }
+    if (action == "performance-flame-zoom") {
+        double factor = 0.5;
+        float x = fFlame->Bounds().Width() / 2;
+        std::sscanf(argument.c_str(), "%lf %f", &factor, &x);
+        if (factor > 0) fFlame->ZoomAt(factor, x);
+        return true;
+    }
+    if (action == "performance-flame-fit") {
+        fFlame->Fit();
         return true;
     }
     return false;
@@ -261,7 +602,7 @@ std::string PerformancePanel::StateJSON()
         rows.push_back(cells);
     }
     json state = {{"recording", fSession.TimelineRecording()}, {"records", fSession.TimelineRecords().size()}, {"status", fStatus->Text()},
-        {"types", types}, {"longest", rows}};
+        {"types", types}, {"longest", rows}, {"flame", fFlame->State()}};
     return state.dump(-1, ' ', false, json::error_handler_t::replace);
 }
 }

@@ -331,15 +331,20 @@ public:
 
 private:
     class Row;
-    void Show();
+    class Flame;
+    // Not Show(): BView::Show() is virtual, and the tab view shows the panel with it.
+    void ShowRecording();
     void ShowStatus();
     void ShowRecord();
+    void ShowFlameRecord();
     devtools::Session& fSession;
     DevToolsHost& fHost;
     bool fWasRecording = false;
     // The longest records' summaries, as JSON, by row.
     std::vector<std::string> fLongest;
     BButton* fRecord;
+    BButton* fFit;
+    Flame* fFlame;
     BStringView* fStatus;
     BColumnListView* fTypes;
     BColumnListView* fRecords;
