@@ -55,15 +55,23 @@ Limits:
   patterns: Cocoa sets them in `updateWebsitePoliciesForNavigation`, and Haiku
   has no equivalent. Response headers are never applied on any platform. So
   `modifyHeaders` is rejected instead of being accepted and silently ignored.
-- For extensions with only `declarativeNetRequestWithHostAccess`, `update*`
-  calls reject with an explicit message unless the extension may access every
-  URL. The native loader has no per-request host-permission check, and with
-  access to every URL there is nothing to check. (Until 23 Oct their accepted
-  rules were also never attached to pages; see `webextensions-userscripts.md`.)
+- For extensions with only `declarativeNetRequestWithHostAccess`, the rules
+  apply to requests to the hosts the extension may act on: each rule's
+  triggers get one more URL-condition group (`if-request-url`) of the hosts
+  its host permissions grant (`hostAccessRequestPatterns`: scheme and host,
+  `*.` including the domain itself; the pattern's path is not kept), so
+  they apply nowhere without any; with access to every URL nothing is added.
+  Redirect and header actions are limited to those hosts by WebCore as well
+  (`updateWebsitePoliciesForNavigation`). The rules are compiled again when
+  host access changes. Before 27 Oct `update*` calls rejected unless the
+  extension could access every URL. Checked on the X399 with `dnr-host.zip`
+  (hosts `https://example.com/*` and `https://*.example.org/*`): its block
+  rule matched images on example.com, www.example.org and example.org, not
+  on other.test nor http://example.com (`testMatchOutcome`).
 - 1Password is one of these extensions (its Firefox build requests only
   `declarativeNetRequestWithHostAccess`). Its WebAuthn related-origins session
   rule (`modifyHeaders` with request and response headers, plus
-  `requestDomains`) therefore rejects. 1Password catches the rejection, logs
+  `requestDomains`) rejects, for the response headers no platform applies. 1Password catches the rejection, logs
   "proceeding without it" and continues.
 - `getMatchedRules({tabId, minTimeStamp})` answers Chrome's
   `{rulesMatchedInfo: [{rule: {ruleId, rulesetId}, tabId, timeStamp}]}` for

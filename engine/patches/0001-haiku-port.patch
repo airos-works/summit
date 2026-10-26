@@ -111313,10 +111313,10 @@ index 0000000000000000000000000000000000000000..7fe0a057f869a7ea735d3118f5242dce
 +#endif // ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
 diff --git a/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextDeclarativeNetRequestHaiku.cpp b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextDeclarativeNetRequestHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..61c456bfdd5f669b31e08c99b0f1d9517de58302
+index 0000000000000000000000000000000000000000..90046b1b9f25f7c16523cd8ff5064e92fc3a5e90
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextDeclarativeNetRequestHaiku.cpp
-@@ -0,0 +1,245 @@
+@@ -0,0 +1,298 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +#include "config.h"
 +#include "WebExtensionContext.h"
@@ -111360,7 +111360,55 @@ index 0000000000000000000000000000000000000000..61c456bfdd5f669b31e08c99b0f1d951
 +    if (!path.isEmpty())
 +        API::ContentRuleListStore::defaultStoreSingleton().removeContentRuleListFile(WTF::move(path), [](std::error_code) { });
 +}
-+void translateRules(Vector<RulesetSource>&& input, bool reportMatchedRules, CompletionHandler<void(Translation&&)>&& completion)
++// The request-URL patterns (WebCore's URL-filter syntax, as the translator's
++// domain patterns) of the hosts an extension's host permissions grant; none
++// when they grant every URL.
++std::optional<Vector<String>> hostAccessRequestPatterns(WebExtensionContext& context)
++{
++    Vector<String> patterns;
++    auto append = [](StringBuilder& builder, StringView text) {
++        for (auto character : text.codeUnits()) {
++            if (!isASCIIAlphanumeric(character) && character != '.' && character != '-' && character != '_')
++                return false;
++            if (character == '.')
++                builder.append('\\');
++            builder.append(toASCIILower(character));
++        }
++        return true;
++    };
++    for (Ref pattern : context.currentPermissionMatchPatterns()) {
++        if (pattern->matchesAllURLs())
++            return std::nullopt;
++        auto scheme = pattern->scheme();
++        auto host = pattern->host();
++        if (host.isEmpty() || scheme == "file"_s)
++            continue;
++        StringBuilder builder;
++        builder.append('^');
++        if (scheme == "*"_s)
++            builder.append("[^:]+"_s);
++        else if (!append(builder, scheme))
++            continue;
++        builder.append("://+"_s);
++        if (host == "*"_s)
++            builder.append("[^:/]+"_s);
++        else {
++            StringView name = host;
++            if (host.startsWith("*."_s)) {
++                builder.append("([^:/]+\\.)?"_s);
++                name = name.substring(2);
++            }
++            if (!append(builder, name))
++                continue;
++        }
++        // The pattern's path is not kept: the host is what grants access.
++        builder.append("[:/]"_s);
++        patterns.append(builder.toString());
++    }
++    return patterns;
++}
++
++void translateRules(Vector<RulesetSource>&& input, bool reportMatchedRules, std::optional<Vector<String>>&& hostAccessPatterns, CompletionHandler<void(Translation&&)>&& completion)
 +{
 +    static NeverDestroyed<Ref<WorkQueue>> queue(WorkQueue::create("WebKit DNR translation"_s));
 +    Vector<RulesetSource> sources;
@@ -111368,7 +111416,11 @@ index 0000000000000000000000000000000000000000..61c456bfdd5f669b31e08c99b0f1d951
 +        sources.append({ source.identifier.isolatedCopy(), source.json.isolatedCopy() });
 +    // The completion owns engine references on main. Move it through this
 +    // worker without invoking or copying it, and destroy it only on main.
-+    queue.get()->dispatch([sources = WTF::move(sources), reportMatchedRules, completion = WTF::move(completion)]() mutable {
++    if (hostAccessPatterns) {
++        for (auto& pattern : *hostAccessPatterns)
++            pattern = pattern.isolatedCopy();
++    }
++    queue.get()->dispatch([sources = WTF::move(sources), reportMatchedRules, hostAccessPatterns = WTF::move(hostAccessPatterns), completion = WTF::move(completion)]() mutable {
 +        auto translate = [&]() -> Translation {
 +            Vector<WebExtensionDeclarativeNetRequestRulesetHaiku> rulesets;
 +            size_t length = 0;
@@ -111383,7 +111435,7 @@ index 0000000000000000000000000000000000000000..61c456bfdd5f669b31e08c99b0f1d951
 +                bool isStatic = source.identifier != sessionRulesetID && source.identifier != dynamicRulesetID;
 +                rulesets.append({ source.identifier, array.releaseNonNull(), isStatic });
 +            }
-+            return translateDeclarativeNetRequestRulesHaiku(rulesets, { }, reportMatchedRules);
++            return translateDeclarativeNetRequestRulesHaiku(rulesets, { }, reportMatchedRules, hostAccessPatterns);
 +        };
 +        auto result = translate();
 +        if (result && result->skippedRuleCount)
@@ -111418,8 +111470,10 @@ index 0000000000000000000000000000000000000000..61c456bfdd5f669b31e08c99b0f1d951
 +
 +bool WebExtensionContext::nativeDeclarativeNetRequestAllowed()
 +{
++    // With only declarativeNetRequestWithHostAccess the rules are limited to
++    // the hosts the extension may act on (hostAccessRequestPatterns).
 +    return hasPermission(WebExtensionPermission::declarativeNetRequest())
-+        || (hasPermission(WebExtensionPermission::declarativeNetRequestWithHostAccess()) && hasAccessToAllURLs());
++        || hasPermission(WebExtensionPermission::declarativeNetRequestWithHostAccess());
 +}
 +
 +void WebExtensionContext::loadDeclarativeNetRequestRules(CompletionHandler<void(bool)>&& completion)
@@ -111429,12 +111483,8 @@ index 0000000000000000000000000000000000000000..61c456bfdd5f669b31e08c99b0f1d951
 +        completion(false);
 +        return;
 +    }
-+    // Host-access-only DNR needs action-level permission evaluation in the
-+    // request path. Do not install an unrestricted blocker in its place.
 +    if (!nativeDeclarativeNetRequestAllowed()) {
 +        clearNativeDeclarativeNetRequestRules();
-+        if (hasPermission(WebExtensionPermission::declarativeNetRequestWithHostAccess()))
-+            recordErrorIfNeeded(createError(Error::Unknown, "Host-access-only DNR requires native request permission integration."_s));
 +        completion(false);
 +        return;
 +    }
@@ -111481,7 +111531,10 @@ index 0000000000000000000000000000000000000000..61c456bfdd5f669b31e08c99b0f1d951
 +        // its matched rules (and may: either permission, as in Chrome).
 +        bool reportMatchedRules = m_declarativeNetRequestReportsMatchesHaiku
 +            && (hasPermission(WebExtensionPermission::declarativeNetRequestFeedback()) || hasPermission(WebExtensionPermission::activeTab()));
-+        translateRules(WTF::move(*sources), reportMatchedRules, [this, protectedThis = Ref { *this }, current, fail, regexIDs, completion = WTF::move(completion)](Translation&& translation) mutable {
++        std::optional<Vector<String>> hostAccessPatterns;
++        if (!hasPermission(WebExtensionPermission::declarativeNetRequest()))
++            hostAccessPatterns = hostAccessRequestPatterns(*this);
++        translateRules(WTF::move(*sources), reportMatchedRules, WTF::move(hostAccessPatterns), [this, protectedThis = Ref { *this }, current, fail, regexIDs, completion = WTF::move(completion)](Translation&& translation) mutable {
 +            if (!current()) { completion(false); return; }
 +            if (!translation) { fail(translation.error()); completion(false); return; }
 +            auto sessionIDs = translation->identifiers.take(String(sessionRulesetID));
@@ -111858,10 +111911,10 @@ index 0000000000000000000000000000000000000000..0214660847f4b08c65e7a7b6475a7b99
 +#endif // ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
 diff --git a/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextPermissionsHaiku.cpp b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextPermissionsHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..0692e4aa970c2039b267a91bba983b05e62e0d59
+index 0000000000000000000000000000000000000000..12ab396a3ce410a308f2f40c14b96bae7009ce64
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextPermissionsHaiku.cpp
-@@ -0,0 +1,237 @@
+@@ -0,0 +1,240 @@
 +/*
 + * Copyright (C) 2022-2025 Apple Inc. All rights reserved.
 + *
@@ -111934,7 +111987,10 @@ index 0000000000000000000000000000000000000000..0692e4aa970c2039b267a91bba983b05
 +void WebExtensionContext::notifyNativePermissionChange(PermissionNotification notification, const PermissionsSet& permissions, const MatchPatternSet& matchPatterns)
 +{
 +    ASSERT(isMainThread());
-+    if (isLoaded() && (permissions.contains(WebExtensionPermission::declarativeNetRequest()) || permissions.contains(WebExtensionPermission::declarativeNetRequestWithHostAccess()))) {
++    // A host-access-only extension's rules follow its hosts too.
++    bool hostAccessRules = !matchPatterns.isEmpty() && hasPermission(WebExtensionPermission::declarativeNetRequestWithHostAccess())
++        && !hasPermission(WebExtensionPermission::declarativeNetRequest());
++    if (isLoaded() && (hostAccessRules || permissions.contains(WebExtensionPermission::declarativeNetRequest()) || permissions.contains(WebExtensionPermission::declarativeNetRequestWithHostAccess()))) {
 +        if (nativeDeclarativeNetRequestAllowed())
 +            loadDeclarativeNetRequestRules([](bool) { });
 +        else
@@ -113730,10 +113786,10 @@ index 0000000000000000000000000000000000000000..3782c3ce8537852e5840002a582790e5
 +#endif
 diff --git a/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionDeclarativeNetRequestRulesHaiku.cpp b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionDeclarativeNetRequestRulesHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..3581b8f078b76795025ac6dc514d3f3647f4cac4
+index 0000000000000000000000000000000000000000..ccfc3f640f7978ad891e30deea48998a5cfbe2fe
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionDeclarativeNetRequestRulesHaiku.cpp
-@@ -0,0 +1,477 @@
+@@ -0,0 +1,499 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +#include "config.h"
 +#include "WebExtensionDeclarativeNetRequestRulesHaiku.h"
@@ -114095,8 +114151,23 @@ index 0000000000000000000000000000000000000000..3581b8f078b76795025ac6dc514d3f36
 +} // namespace
 +
 +std::expected<WebExtensionDeclarativeNetRequestTranslationHaiku, String> translateDeclarativeNetRequestRulesHaiku(
-+    const Vector<WebExtensionDeclarativeNetRequestRulesetHaiku>& rulesets, WebExtensionDeclarativeNetRequestLimitsHaiku limits, bool reportMatchedRules)
++    const Vector<WebExtensionDeclarativeNetRequestRulesetHaiku>& rulesets, WebExtensionDeclarativeNetRequestLimitsHaiku limits, bool reportMatchedRules,
++    const std::optional<Vector<String>>& hostAccessPatterns)
 +{
++    // A host-access-only extension's rules apply to requests to its hosts:
++    // one more URL-condition group, which must hold with the rule's own.
++    auto restrictToHosts = [&](JSON::Object& trigger) {
++        RefPtr existing = trigger.getArray("url-conditions"_s);
++        Ref groups = existing ? existing.releaseNonNull() : JSON::Array::create();
++        Ref urls = JSON::Array::create();
++        for (auto& pattern : *hostAccessPatterns)
++            urls->pushString(pattern);
++        Ref group = JSON::Object::create();
++        group->setString("type"_s, "if-request-url"_s);
++        group->setArray("urls"_s, WTF::move(urls));
++        groups->pushObject(WTF::move(group));
++        trigger.setArray("url-conditions"_s, WTF::move(groups));
++    };
 +    WebExtensionDeclarativeNetRequestTranslationHaiku result;
 +    Vector<Rule> rules;
 +    for (auto& ruleset : rulesets) {
@@ -114123,6 +114194,13 @@ index 0000000000000000000000000000000000000000..3581b8f078b76795025ac6dc514d3f36
 +            if (!identifiers.add(parsed->identifier).isNewEntry)
 +                return makeUnexpected(makeString("Duplicate rule id in ruleset "_s, ruleset.identifier));
 +            parsed->ruleset = &ruleset - rulesets.begin();
++            if (hostAccessPatterns) {
++                // No hosts: the rule applies nowhere (its id still counts).
++                if (hostAccessPatterns->isEmpty())
++                    continue;
++                for (auto& trigger : parsed->triggers)
++                    restrictToHosts(trigger.get());
++            }
 +            rules.append(WTF::move(*parsed));
 +        }
 +        result.identifiers.add(ruleset.identifier, WTF::move(identifiers));
@@ -114213,10 +114291,10 @@ index 0000000000000000000000000000000000000000..3581b8f078b76795025ac6dc514d3f36
 +#endif
 diff --git a/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionDeclarativeNetRequestRulesHaiku.h b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionDeclarativeNetRequestRulesHaiku.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..8d4d2bc0dc95964aee2cfe24f20638cc3301a868
+index 0000000000000000000000000000000000000000..a59bc3bab3d6920452a38711ac0660c93f53aacf
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionDeclarativeNetRequestRulesHaiku.h
-@@ -0,0 +1,37 @@
+@@ -0,0 +1,43 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +#pragma once
 +#if ENABLE(WK_WEB_EXTENSIONS) && ENABLE(CONTENT_EXTENSIONS)
@@ -114225,6 +114303,7 @@ index 0000000000000000000000000000000000000000..8d4d2bc0dc95964aee2cfe24f20638cc
 +#include <wtf/JSONValues.h>
 +#include <wtf/Vector.h>
 +#include <expected>
++#include <optional>
 +
 +namespace WebKit {
 +struct WebExtensionDeclarativeNetRequestRulesetHaiku {
@@ -114250,8 +114329,13 @@ index 0000000000000000000000000000000000000000..8d4d2bc0dc95964aee2cfe24f20638cc
 +// reportMatchedRules tags each rule with its id and ruleset ("_identifier",
 +// "_rulesetIdentifier"), so WebCore reports the rules that match a load
 +// (ContentRuleListMatchedRule, for declarativeNetRequest.getMatchedRules).
++// hostAccessPatterns (declarativeNetRequestWithHostAccess without access to
++// every URL): the request-URL patterns of the hosts the extension may act
++// on; every rule then applies only to requests to them, and to none when
++// there are none. Without it the rules apply everywhere.
 +std::expected<WebExtensionDeclarativeNetRequestTranslationHaiku, String> translateDeclarativeNetRequestRulesHaiku(
-+    const Vector<WebExtensionDeclarativeNetRequestRulesetHaiku>&, WebExtensionDeclarativeNetRequestLimitsHaiku = { }, bool reportMatchedRules = false);
++    const Vector<WebExtensionDeclarativeNetRequestRulesetHaiku>&, WebExtensionDeclarativeNetRequestLimitsHaiku = { }, bool reportMatchedRules = false,
++    const std::optional<Vector<String>>& hostAccessPatterns = std::nullopt);
 +} // namespace WebKit
 +#endif
 diff --git a/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionDeclarativeNetRequestURLFilter.cpp b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionDeclarativeNetRequestURLFilter.cpp
