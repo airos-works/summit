@@ -475,10 +475,10 @@ page (WebProcess)          UIProcess                          browser
     them. Find is `DOM.performSearch` and `DOM.getSearchResults`.
   - The highlight is `DOM.highlightNode` with Web Inspector's colours
     (`showInfo` off), and `DOM.hideHighlight`; the picker is
-    `DOM.setInspectModeEnabled`. The engine draws both in a page overlay of
-    the compositor, so they need accelerated compositing (the X399 and the
-    other machines with a GPU have it); a page drawn in software shows no
-    highlight. Inspect Element evaluates `document.elementFromPoint()` at the
+    `DOM.setInspectModeEnabled`. With accelerated compositing the engine
+    draws both in a page overlay of the compositor; a page drawn in software
+    (`SUMMIT_COORDINATED_COMPOSITING=0`, or the stock OS without a GPU) has
+    them drawn over it by `WebPage::drawRect` (c7e4be2). Inspect Element evaluates `document.elementFromPoint()` at the
     point of the context menu (divided by the page's zoom), going into frames
     of the same origin and open shadow roots, and gives the element to
     `DOM.requestNode`.
@@ -707,5 +707,3 @@ is started again.
   of the page.
 - In Elements: the hovered node selected in the tree while picking,
   dragging nodes, and the box model of other than the selected element.
-- The highlight needs accelerated compositing; a page drawn in software has
-  none.
