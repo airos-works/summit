@@ -40,8 +40,24 @@ read mode: the published uBlock CRX has local/central ZIP version metadata that
 libzip's additional consistency mode rejects, although its payload is readable.
 The signed hostile-archive tests cover this separate path.
 
-CRX2, Mozilla XPI signature validation, store publisher authentication, Safari
-bundles and complete browser-specific API semantics remain unfinished.
+CRX2, Mozilla XPI signature validation, store publisher authentication and
+complete browser-specific API semantics remain unfinished.
+
+## Safari web extensions
+
+A Safari web extension ships inside a macOS app: `Name.app/Contents/PlugIns/`
+holds an app extension (`Name Extension.appex`) whose `Contents/Resources`
+folder is the web extension (`manifest.json`, scripts, images). Choosing the
+`.app` or the `.appex` in **Add extension…** imports that Resources folder as
+an unpacked extension (`SafariWebExtensionResources`, called by
+`ExtensionCatalog::Stage`); app extensions without a `manifest.json` (share or
+widget extensions) are passed over, in name order. The extension gets the
+identity an unpacked folder gets (its manifest's key or browser ID, else a
+local one), not its macOS bundle identifier, and the app's native part (the
+Swift handler `browser.runtime.sendNativeMessage` reaches) does not run on
+Haiku. The browser's user agent stays Summit's. Checked by the package tests
+(`tests/ExtensionPackageTests.cpp`: an app, its `.appex`, a share extension
+before it, an unpacked folder and an archive).
 
 ## Native results
 

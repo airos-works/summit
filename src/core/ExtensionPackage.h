@@ -18,4 +18,11 @@ std::optional<std::string> ReadExtensionPackageFile(const std::filesystem::path&
 // else the largest, else its toolbar action's default icon. Empty when the
 // package has none Summit can read.
 std::string ExtensionIconData(const std::filesystem::path& package, int size);
+
+// A Safari web extension, as macOS ships it: an app (Name.app) whose
+// Contents/PlugIns has an app extension (Name Extension.appex) with the web
+// extension in its Contents/Resources (manifest.json and the rest), or that
+// .appex itself. The Resources folder of the first such extension, to import
+// unpacked; nothing for anything else.
+std::optional<std::filesystem::path> SafariWebExtensionResources(const std::filesystem::path& bundle);
 }

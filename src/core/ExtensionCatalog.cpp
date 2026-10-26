@@ -1,4 +1,5 @@
 #include "ExtensionCatalog.h"
+#include "ExtensionPackage.h"
 #include <nlohmann/json.hpp>
 #include <algorithm>
 #include <array>
@@ -273,9 +274,11 @@ bool ExtensionCatalog::Save(const std::vector<InstalledExtension>& entries, std:
     }
 }
 
-std::unique_ptr<StagedExtensionPackage> ExtensionCatalog::Stage(const fs::path& source, std::string& error) const
+std::unique_ptr<StagedExtensionPackage> ExtensionCatalog::Stage(const fs::path& chosen, std::string& error) const
 {
     error.clear();
+    // A Safari extension's app or .appex: the web extension inside it.
+    const auto source = SafariWebExtensionResources(chosen).value_or(chosen);
     try {
         auto type = fs::symlink_status(source).type();
         if (type != fs::file_type::regular && type != fs::file_type::directory)

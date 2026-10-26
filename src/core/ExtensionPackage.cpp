@@ -329,6 +329,28 @@ std::optional<std::string> ReadExtensionPackageFile(const fs::path& package, std
     return ReadArchiveMember(package, name, limit);
 }
 
+std::optional<fs::path> SafariWebExtensionResources(const fs::path& bundle)
+{
+    std::error_code error;
+    if (!fs::is_directory(bundle, error)) return std::nullopt;
+    const auto resources = [&](const fs::path& appex) -> std::optional<fs::path> {
+        const auto folder = appex / "Contents" / "Resources";
+        if (fs::is_regular_file(folder / "manifest.json", error)) return folder;
+        return std::nullopt;
+    };
+    if (bundle.extension() == ".appex") return resources(bundle);
+    const auto plugIns = bundle / "Contents" / "PlugIns";
+    if (!fs::is_directory(plugIns, error)) return std::nullopt;
+    // In name order, so that the same app gives the same extension.
+    std::vector<fs::path> extensions;
+    for (const auto& entry : fs::directory_iterator(plugIns, error))
+        if (entry.path().extension() == ".appex" && entry.is_directory(error)) extensions.push_back(entry.path());
+    std::sort(extensions.begin(), extensions.end());
+    for (const auto& appex : extensions)
+        if (auto found = resources(appex)) return found;
+    return std::nullopt;
+}
+
 std::string ExtensionIconData(const fs::path& package, int size)
 {
     const auto text = ReadExtensionPackageFile(package, "manifest.json", 1024 * 1024);

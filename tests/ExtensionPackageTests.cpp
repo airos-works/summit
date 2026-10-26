@@ -3,6 +3,7 @@
 #include <fstream>
 #include <iostream>
 #include <sstream>
+#include <unistd.h>
 
 // ExtensionPackageTests FIXTURES [PACKAGE...]: FIXTURES is
 // tests/fixtures/extensions/package-icons. Extra packages (real CRX, ZIP or
@@ -62,6 +63,26 @@ int main(int argc, char** argv)
     for (int i = 2; i < argc; ++i) {
         const auto icon = ExtensionIconData(argv[i], 32);
         check(icon.size() > 8 && icon.compare(0, 4, "\x89PNG") == 0, std::string("icon of ") + argv[i]);
+    }
+    // A Safari web extension's app: the web extension in its .appex's
+    // Resources; an app extension without one (a share extension, first in
+    // name order) is passed over; anything else is not a Safari extension.
+    {
+        namespace fs = std::filesystem;
+        const auto root = fs::temp_directory_path() / ("summit-safari-" + std::to_string(::getpid()));
+        fs::remove_all(root);
+        const auto app = root / "Example.app";
+        const auto web = app / "Contents/PlugIns/Example Extension.appex/Contents/Resources";
+        fs::create_directories(web / "images");
+        fs::create_directories(app / "Contents/PlugIns/A Share.appex/Contents/Resources");
+        std::ofstream(web / "manifest.json") << "{\"manifest_version\": 3, \"name\": \"Example\", \"version\": \"1.0\"}";
+        check(SafariWebExtensionResources(app) == web, "Safari app");
+        check(SafariWebExtensionResources(app / "Contents/PlugIns/Example Extension.appex") == web, "Safari appex");
+        check(!SafariWebExtensionResources(app / "Contents/PlugIns/A Share.appex"), "app extension without a web extension");
+        check(!SafariWebExtensionResources(fixtures / "unpacked"), "unpacked extension");
+        check(!SafariWebExtensionResources(fixtures / "package.zip"), "archive");
+        check(ReadExtensionPackageFile(*SafariWebExtensionResources(app), "manifest.json").has_value(), "Safari manifest readable");
+        fs::remove_all(root);
     }
     std::cout << checks << " extension package checks passed\n";
 }
