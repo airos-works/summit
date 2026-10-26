@@ -105,3 +105,30 @@ Local evidence is retained in `.vm/issues43-49/` under
 `ts-native-complete`, `webm-parser-integrated`, `mpeg-audio-preroll` and
 `streaming-codecs-timing-x399`. The earlier broad native-codec integration
 used `bundle-e821ncjv`; the current browser suite repeats its playback cases.
+
+## HLS: script players for live and encrypted streams (#115)
+
+Summit's own HLS path (`MediaPlayerPrivateHaiku`) plays only finite,
+unencrypted, byte-range CMAF playlists: it downloads the renditions and plays
+the files. `canPlayType("application/vnd.apple.mpegurl")` answered `maybe`
+(since 23 September, when Summit had no Media Source and Reddit's typed
+`<source>` needed it), so pages that ask before choosing a script player,
+as hls.js's own example and video.js do, chose the native path and failed on
+live and encrypted streams with a format error.
+
+`HTMLMediaElement::canPlayType` now answers `""` for the HLS types while Media
+Source is enabled, as Firefox does, and those pages play the stream with
+their script player over Media Source, which handles live playlists,
+AES-128, discontinuities and multi-resource playlists. A typed `<source>`
+and a plain `src` still use the native path (source selection asks the
+media engine, not `canPlayType`). `SUMMIT_NATIVE_HLS_CAN_PLAY=1` answers
+`maybe` again.
+
+Checked on the X399 with a page doing what hls.js's example does
+(`hls-player.html`, hls.js 1.5.20): Unified Streaming's live demo
+(`demo.unified-streaming.com/k8s/live/stable/live.isml/.m3u8`, MPEG-TS
+segments) went to the native path and failed with error 4 before; now it
+plays through hls.js (duration growing 601 → 618 s, 563 frames, 61 dropped).
+JW Player's AES-128 test stream (`oceans_aes.m3u8`) plays through hls.js
+(21.6 s in, 518 frames, 8 dropped). A video with a typed HLS `<source>` and an
+MP4 one still tries the HLS one first.

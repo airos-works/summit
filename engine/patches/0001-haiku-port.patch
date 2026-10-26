@@ -13971,10 +13971,35 @@ index aeb17770f3e1e6fca6f5efc89419a0895221014b..dbb756d88aeab3b8845f4c58ecdc7e44
  }
  
 diff --git a/Source/WebCore/html/HTMLMediaElement.cpp b/Source/WebCore/html/HTMLMediaElement.cpp
-index 81443b80c390626d0f6b2521a34c815f323f7445..41df88efd239c86a24c1d515eb0708784c15ad73 100644
+index 81443b80c390626d0f6b2521a34c815f323f7445..7601ed54d6868ca9d67b1cbb316c1ef83dcdc11a 100644
 --- a/Source/WebCore/html/HTMLMediaElement.cpp
 +++ b/Source/WebCore/html/HTMLMediaElement.cpp
-@@ -3697,7 +3697,15 @@ void HTMLMediaElement::mediaPlayerInitializationDataEncountered(const String& in
+@@ -1569,6 +1569,24 @@ HTMLMediaElement::NetworkState HTMLMediaElement::networkState() const
+ 
+ String HTMLMediaElement::canPlayType(const String& mimeType) const
+ {
++#if PLATFORM(HAIKU)
++    // The native HLS path plays only finite, unencrypted byte-range
++    // playlists (MediaPlayerPrivateHaiku). A page that asks before choosing
++    // a script player over Media Source (hls.js's own example, video.js)
++    // gets the script player, which plays live and encrypted streams too, as
++    // in Firefox. A typed <source> and a plain src still use the native path.
++    // SUMMIT_NATIVE_HLS_CAN_PLAY=1 answers "maybe" again.
++    static const bool nativeHLSCanPlay = [] {
++        const char* value = getenv("SUMMIT_NATIVE_HLS_CAN_PLAY");
++        return value && !strcmp(value, "1");
++    }();
++    if (!nativeHLSCanPlay && document().settings().mediaSourceEnabled()) {
++        auto containerType = ContentType(mimeType).containerType();
++        if (equalLettersIgnoringASCIICase(containerType, "application/vnd.apple.mpegurl"_s)
++            || equalLettersIgnoringASCIICase(containerType, "application/x-mpegurl"_s))
++            return emptyString();
++    }
++#endif
+     MediaEngineSupportParameters parameters {
+         .type = ContentType(mimeType),
+         .supportsLimitedMatroska = limitedMatroskaSupportEnabled(),
+@@ -3697,7 +3715,15 @@ void HTMLMediaElement::mediaPlayerInitializationDataEncountered(const String& in
      // 4. If the media data is CORS-same-origin and not mixed content, run the following steps:
      //   4.1. Let initDataType be the string representing the Initialization Data Type of the Initialization Data.
      //   4.2. Let initData be the Initialization Data.
@@ -13991,7 +14016,7 @@ index 81443b80c390626d0f6b2521a34c815f323f7445..41df88efd239c86a24c1d515eb070878
  
      // 5. Queue a task to create an event named encrypted that does not bubble and is not cancellable using the
      //    MediaEncryptedEvent interface with its type attribute set to encrypted and its isTrusted attribute
-@@ -3707,7 +3715,7 @@ void HTMLMediaElement::mediaPlayerInitializationDataEncountered(const String& in
+@@ -3707,7 +3733,7 @@ void HTMLMediaElement::mediaPlayerInitializationDataEncountered(const String& in
      //      initData = initData
      auto initializer = MediaEncryptedEvent::Init {
          { false, false, false },
@@ -14000,7 +14025,7 @@ index 81443b80c390626d0f6b2521a34c815f323f7445..41df88efd239c86a24c1d515eb070878
          WTF::move(initData)
      };
      scheduleEvent(MediaEncryptedEvent::create(eventNames().encryptedEvent, WTF::move(initializer), Event::IsTrusted::Yes));
-@@ -6305,7 +6313,7 @@ void HTMLMediaElement::handlePlaybackPositionChanged()
+@@ -6305,7 +6331,7 @@ void HTMLMediaElement::handlePlaybackPositionChanged()
      bool canReachEnd = true;
  #if ENABLE(MEDIA_SOURCE)
      if (m_mediaSource)
@@ -14009,7 +14034,7 @@ index 81443b80c390626d0f6b2521a34c815f323f7445..41df88efd239c86a24c1d515eb070878
  #endif
  
      // When the current playback position reaches the end of the media resource then the user agent must follow these steps:
-@@ -6801,8 +6809,17 @@ bool HTMLMediaElement::endedPlayback() const
+@@ -6801,8 +6827,17 @@ bool HTMLMediaElement::endedPlayback() const
      // of playback is forwards, Either the media element does not have a loop attribute specified,
      // or the media element has a current media controller.
      MediaTime now = currentMediaTime();
@@ -14028,7 +14053,7 @@ index 81443b80c390626d0f6b2521a34c815f323f7445..41df88efd239c86a24c1d515eb070878
  
      // or the current playback position is the earliest possible position and the direction
      // of playback is backwards
-@@ -8889,7 +8906,7 @@ static inline bool isRemoteMediaStreamVideoTrack(const Ref<MediaStreamTrack>& it
+@@ -8889,7 +8924,7 @@ static inline bool isRemoteMediaStreamVideoTrack(const Ref<MediaStreamTrack>& it
  
  HTMLMediaElement::SleepType HTMLMediaElement::shouldDisableSleep() const
  {
