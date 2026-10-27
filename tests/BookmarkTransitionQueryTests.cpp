@@ -172,5 +172,40 @@ int main(int argc,char** argv)
     const auto dailyDownloads=QueryBookmarks("place:transition=7",{},imported);
     CHECK(dailyDownloads.items.size()==1 && dailyDownloads.items[0].url=="https://daily.test/1");
     std::filesystem::remove_all(dir);
+    {
+        // Chrome History visits with transitions: each retained visit takes
+        // the Firefox type its Chrome transition maps to.
+        const std::string library=std::getenv("SUMMIT_TEST_SQLITE")?std::getenv("SUMMIT_TEST_SQLITE"):"libsqlite3.so.0";
+        const auto directory=std::filesystem::temp_directory_path()/("summit-chrome-transitions-"+std::to_string(getpid()));
+        std::filesystem::create_directories(directory);
+        const auto database=directory/"History";
+        const int64_t offset=11644473600000000, base=int64_t(1700000000)*1000000;
+        auto at=[&](int i){return std::to_string(base+offset+i*1000000);};
+        std::string sql="CREATE TABLE urls(id INTEGER PRIMARY KEY,url TEXT,title TEXT,visit_count INTEGER,hidden INTEGER,last_visit_time INTEGER);"
+            "CREATE TABLE visits(id INTEGER PRIMARY KEY,url INTEGER,visit_time INTEGER,transition INTEGER);"
+            "INSERT INTO urls VALUES(1,'https://chrome.test/','Chrome',6,0,"+at(6)+");";
+        // link, typed from the address bar, auto bookmark, reload, a server
+        // redirect's target, keyword.
+        const int64_t transitions[]={0x30000000,0x32000001,0x30000002,0x30000008,0xA0000000,0x30000009};
+        for (int i=0;i<6;++i) sql+="INSERT INTO visits VALUES("+std::to_string(i+1)+",1,"+at(i+1)+","+std::to_string(transitions[i])+");";
+        CHECK(Database(library,database,sql));
+        std::vector<PageRecord> imported;std::string error;
+        CHECK(ReadChromeHistory(database,library,imported,error)&&error.empty()&&imported.size()==1);
+        if (!imported.empty()) {
+            std::map<int64_t,uint32_t> types(imported[0].visitTransitions.begin(),imported[0].visitTransitions.end());
+            auto type=[&](int i){auto found=types.find(base+i*1000000);return found==types.end()?0u:found->second;};
+            CHECK(type(1)==1&&type(2)==2&&type(3)==3&&type(4)==9&&type(5)==6&&type(6)==2);
+            CHECK(QueryBookmarks("place:transition=2",{},imported).items.size()==1);
+            CHECK(QueryBookmarks("place:transition=8",{},imported).items.empty());
+        }
+        // Without a transition column (older History files) visits keep no type.
+        const auto old=directory/"OldHistory";
+        CHECK(Database(library,old,"CREATE TABLE urls(id INTEGER PRIMARY KEY,url TEXT,title TEXT,visit_count INTEGER,hidden INTEGER,last_visit_time INTEGER);"
+            "CREATE TABLE visits(id INTEGER PRIMARY KEY,url INTEGER,visit_time INTEGER);"
+            "INSERT INTO urls VALUES(1,'https://old.test/','Old',1,0,"+at(1)+");INSERT INTO visits VALUES(1,1,"+at(1)+");"));
+        imported.clear();
+        CHECK(ReadChromeHistory(old,library,imported,error)&&imported.size()==1&&imported[0].visitTransitions.empty());
+        std::filesystem::remove_all(directory);
+    }
     std::cout<<checks<<" transition query checks, "<<failures<<" failures\n";return failures?1:0;
 }

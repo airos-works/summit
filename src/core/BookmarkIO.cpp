@@ -684,6 +684,28 @@ int64_t Seconds(int64_t microseconds) { return microseconds > 0 ? microseconds /
 
 // Exported/older databases may omit visit rows. Their last-visit summary still
 // survives; complete databases supply exact recent times and older daily samples.
+// Chrome's page transition (ui/base/page_transition_types.h: a core type in
+// the low byte, qualifiers above) as Firefox's visit type, for the same
+// smart-folder transition filters and frecency: a redirect's target is a
+// temporary redirect (Chrome does not say which kind); link, typed (also
+// generated suggestions and keywords), bookmark, embedded frame, followed
+// frame and reload map to theirs; an automatic top-level load and a form
+// submission count as links. 0 for none.
+uint32_t FirefoxTransitionForChrome(int64_t transition)
+{
+    constexpr int64_t clientRedirect = 0x40000000, serverRedirect = 0x80000000;
+    if (transition & (clientRedirect | serverRedirect)) return 6;
+    switch (transition & 0xff) {
+        case 0: case 6: case 7: return 1;
+        case 1: case 5: case 9: case 10: return 2;
+        case 2: return 3;
+        case 3: return 4;
+        case 4: return 8;
+        case 8: return 9;
+        default: return 0;
+    }
+}
+
 bool ReadVisitTimes(SQLite& database, bool firefox, const std::map<int64_t, size_t>& pages,
     std::vector<PageRecord>& history, std::string& error)
 {
@@ -692,8 +714,8 @@ bool ReadVisitTimes(SQLite& database, bool firefox, const std::map<int64_t, size
     if (!database.Query(("SELECT 1 FROM sqlite_master WHERE type='table' AND name='" + table + "'").c_str(),
             [&](void*) { available = true; }, error)) return false;
     bool transitionTypes = false;
-    if (available && firefox && !database.Query("PRAGMA table_info(moz_historyvisits)", [&](void* row) {
-            if (database.Text(row, 1) == "visit_type") transitionTypes = true;
+    if (available && !database.Query(("PRAGMA table_info(" + table + ")").c_str(), [&](void* row) {
+            if (database.Text(row, 1) == (firefox ? "visit_type" : "transition")) transitionTypes = true;
         }, error)) return false;
     for (auto [id, index] : pages) {
         auto times = HistoryVisitTimes(history[index]);
@@ -720,11 +742,25 @@ bool ReadVisitTimes(SQLite& database, bool firefox, const std::map<int64_t, size
             }
             // Select types for the actual retained rows, including the daily
             // samples. Do not associate an arbitrary type with a MAX() group.
-            const auto query = "SELECT visit_date, visit_type FROM moz_historyvisits WHERE place_id=" + std::to_string(id)
-                + " AND visit_date IN (" + retained + ") AND visit_type BETWEEN 1 AND 9 GROUP BY visit_date, visit_type";
-            if (!database.Query(query.c_str(), [&](void* row) {
-                    history[index].visitTransitions.emplace_back(database.Int(row, 0), uint32_t(database.Int(row, 1)));
-                }, error)) return false;
+            if (firefox) {
+                const auto query = "SELECT visit_date, visit_type FROM moz_historyvisits WHERE place_id=" + std::to_string(id)
+                    + " AND visit_date IN (" + retained + ") AND visit_type BETWEEN 1 AND 9 GROUP BY visit_date, visit_type";
+                if (!database.Query(query.c_str(), [&](void* row) {
+                        history[index].visitTransitions.emplace_back(database.Int(row, 0), uint32_t(database.Int(row, 1)));
+                    }, error)) return false;
+            } else {
+                std::string chromeTimes;
+                for (auto time : history[index].visitTimes) {
+                    if (!chromeTimes.empty()) chromeTimes += ',';
+                    chromeTimes += std::to_string(time + kWindowsEpochSeconds * 1000000);
+                }
+                const auto query = "SELECT visit_time, transition FROM visits WHERE url=" + std::to_string(id)
+                    + " AND visit_time IN (" + chromeTimes + ") GROUP BY visit_time, transition";
+                if (!database.Query(query.c_str(), [&](void* row) {
+                        if (auto type = FirefoxTransitionForChrome(database.Int(row, 1)))
+                            history[index].visitTransitions.emplace_back(database.Int(row, 0) - kWindowsEpochSeconds * 1000000, type);
+                    }, error)) return false;
+            }
             SetHistoryVisitTimes(history[index], history[index].visitTimes);
         }
     }

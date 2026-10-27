@@ -404,9 +404,20 @@ types. Removing known non-counting Firefox visits does not subtract an unrelated
 counted visit. The existing 2,000-page and recent/daily timestamp bounds still
 apply; hidden pages remain excluded from history imports.
 
-This supports **retained Firefox transition data**. Classification of new Summit
-navigations/downloads and mapping Chrome's different transition encoding remain
-unfinished. Grouped tag, site, date and virtual-root queries with transition
+This supports **retained Firefox transition data**, and Chrome's since 27 Oct:
+a Chrome History import reads each retained visit's `transition`
+(`FirefoxTransitionForChrome` in `BookmarkIO.cpp`; Chrome's core type in the
+low byte, qualifiers above). A redirect's target (client or server redirect
+qualifier) becomes a temporary redirect (6; Chrome does not record which
+kind); link (0), automatic top-level (6) and form submission (7) become link
+(1); typed (1), generated (5), keyword (9) and keyword-generated (10) become
+typed (2); automatic bookmark (2) bookmark (3); automatic subframe (3) embed
+(4); manual subframe (4) framed link (8); reload (8) reload (9). Firefox's own
+Chrome importer only marks a page typed when its `typed_count` is above zero.
+A History file without the column keeps no types. Checked by
+`BookmarkTransitionQueryTests` (six transitions, `place:transition` filters,
+an older History file). Classification of new Summit navigations/downloads
+remains unfinished. Grouped tag, site, date and virtual-root queries with transition
 conditions show an explanation. Invalid numeric filters also show an explanation
 instead of reproducing Firefox's fallback to a broader query.
 
