@@ -480,11 +480,18 @@ which support saved multi-query URLs from older profiles.
 
 **This does not complete Firefox smart-folder compatibility or #110.** Folder
 references, visit-time ranges and imported transitions are implemented for retained
-data. Classification of new navigations remains unfinished. Annotations, frecency
-sorts, other groupings and more complex grouped filters remain unsupported.
+data. Classification of new navigations remains unfinished. Annotations,
+other groupings and more complex grouped filters remain unsupported. Frecency
+sorts (`sort=19`/`20`) work since 27 Oct with Firefox's classic frecency
+computed from Summit's retained visits (`Frecency` in `BookmarkQueries.cpp`):
+the ten newest visits, each worth its transition's bonus (typed 2000, link
+100, bookmark 75, others 0, plus 75 for a bookmarked page) weighted by age
+(100 within 4 days, then 70, 50, 30 and 10 after 90 days), scaled to the
+page's visit count; a visit of unknown transition counts as a link, and an
+unvisited bookmark scores 140. Ties fall back to the newest visit.
 Unsupported queries stay saved and show an explicit explanation, with no
 broader substitute results. Query history is limited to Summit's retained 2,000
-pages; Firefox frecency is not stored. Text matching uses
+pages; Firefox's stored frecency is not imported (it is computed). Text matching uses
 ASCII case folding, and tag names match exactly, rather than Firefox's full
 locale-aware collation. Parameterized query keywords are not supported.
 

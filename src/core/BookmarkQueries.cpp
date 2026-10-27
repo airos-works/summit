@@ -1,6 +1,7 @@
 #include "BookmarkQueries.h"
 #include "Address.h"
 #include <algorithm>
+#include <cmath>
 #include <charconv>
 #include <cstdio>
 #include <ctime>
@@ -198,7 +199,7 @@ Query Parse(std::string_view url)
         q.error = "This smart folder's result grouping is not yet supported.";
     if (q.error.empty() && q.sort != 0 && q.sort != 1 && q.sort != 2 && q.sort != 3 && q.sort != 4
         && q.sort != 5 && q.sort != 6 && q.sort != 7 && q.sort != 8 && q.sort != 11 && q.sort != 12
-        && q.sort != 13 && q.sort != 14 && q.sort != 17 && q.sort != 18)
+        && q.sort != 13 && q.sort != 14 && q.sort != 17 && q.sort != 18 && q.sort != 19 && q.sort != 20)
         q.error = "This smart folder's sort order requires data Summit does not yet retain.";
     if (q.type == 6 || q.type == 8 || std::any_of(q.clauses.begin(), q.clauses.end(), [](const auto& c) { return !c.parents.empty(); })) q.source = 1;
     if (q.error.empty() && q.type == 8 && std::any_of(q.clauses.begin(), q.clauses.end(), [](const auto& c) { return c.HasConditions(true); }))
@@ -232,6 +233,38 @@ Query Parse(std::string_view url)
     if (q.error.empty() && q.type == 6 && std::any_of(q.clauses.begin(), q.clauses.end(), [](const auto& c) { return !c.transitions.empty(); }))
         q.error = "Tag grouping with transition conditions is not yet supported.";
     return q;
+}
+
+// Firefox's frecency of a page (the classic algorithm of Firefox 60's
+// CalculateFrecencyFunction, toolkit/components/places/SQLFunctions.cpp, with
+// its default preferences): its ten newest visits, each worth its transition's
+// bonus (typed 2000, link 100, bookmark 75, the rest 0; 75 more when the page
+// is bookmarked) weighted by age (100 within 4 days, 70 within 14, 50 within
+// 31, 30 within 90, else 10), scaled to all its visits. A visit whose
+// transition Summit does not know counts as a link. Unvisited bookmarks score
+// 140. Firefox's own stored values are not imported.
+int64_t Frecency(const PageRecord* page, bool bookmarked, int64_t now)
+{
+    std::vector<int64_t> sampled;
+    if (page) {
+        sampled.assign(page->visitTimes.begin(), page->visitTimes.begin() + std::min<size_t>(page->visitTimes.size(), 10));
+        if (sampled.empty() && page->visited) sampled.push_back(HistoryMicroseconds(page->visited));
+    }
+    if (sampled.empty()) return bookmarked ? 140 : 0;
+    double points = 0;
+    for (auto time : sampled) {
+        uint32_t transition = 1;
+        for (const auto& [visitTime, type] : page->visitTransitions) {
+            if (visitTime == time) { transition = type; break; }
+        }
+        int bonus = transition == 2 ? 2000 : transition == 1 ? 100 : transition == 3 ? 75 : 0;
+        if (bookmarked) bonus += 75;
+        const int64_t days = (now - time) / (int64_t(86400) * 1000000);
+        const int weight = days <= 4 ? 100 : days <= 14 ? 70 : days <= 31 ? 50 : days <= 90 ? 30 : 10;
+        points += weight * (bonus / 100.0);
+    }
+    const int count = std::max(HistoryVisitCount(*page), 1);
+    return static_cast<int64_t>(std::ceil(count * std::ceil(points) / sampled.size()));
 }
 
 struct Entry {
@@ -277,7 +310,7 @@ const BookmarkNode* ResolveFolder(const Bookmarks& bookmarks, const BookmarkOrig
 }
 
 BookmarkNode RootContents(const BookmarkNode& folder, const Query& query,
-    const std::map<std::string, const PageRecord*>& visits)
+    const std::map<std::string, const PageRecord*>& visits, int64_t now)
 {
     auto result = folder;
     result.children.clear();
@@ -291,7 +324,7 @@ BookmarkNode RootContents(const BookmarkNode& folder, const Query& query,
             const auto nested = Parse(node.url);
             if (!nested.error.empty() || !SimpleFolder(nested)) continue;
         }
-        result.children.push_back(node.folder ? RootContents(node, query, visits) : node);
+        result.children.push_back(node.folder ? RootContents(node, query, visits, now) : node);
     }
     auto visit = [&](const BookmarkNode& node) -> const PageRecord* {
         if (node.folder || node.separator || IsBookmarkQueryURL(node.url)) return nullptr;
@@ -328,6 +361,12 @@ BookmarkNode RootContents(const BookmarkNode& folder, const Query& query,
             }
             case 7: case 8: order = compare(count(a), count(b)); if (!order) order = compare(date(a), date(b)); break;
             case 11: case 12: order = compare(a.added, b.added); if (!order) order = title(); break;
+            case 19: case 20:
+                // Containers have no frecency.
+                order = compare(a.folder || a.separator || IsBookmarkQueryURL(a.url) ? int64_t(0) : Frecency(visit(a), true, now),
+                    b.folder || b.separator || IsBookmarkQueryURL(b.url) ? int64_t(0) : Frecency(visit(b), true, now));
+                if (!order) order = compare(date(a), date(b));
+                break;
             case 13: case 14: order = compare(a.modified, b.modified); if (!order) order = title(); break;
             case 17: case 18:
                 order = compare(BookmarkTagsText(a.metadata.tags), BookmarkTagsText(b.metadata.tags));
@@ -497,7 +536,7 @@ BookmarkQueryResult QueryBookmarks(std::string_view url, const Bookmarks& bookma
             if (origin.scope.empty() && std::string_view(guid) == "menu________") continue;
             const auto* folder = ResolveFolder(bookmarks, origin, false, guid, result.error);
             if (!folder) { result.items.clear(); return result; }
-            auto root = RootContents(*folder, q, visits);
+            auto root = RootContents(*folder, q, visits, now);
             if (!origin.scope.empty()) root.title = title;
             result.items.push_back(std::move(root));
         }
@@ -689,6 +728,12 @@ BookmarkQueryResult QueryBookmarks(std::string_view url, const Bookmarks& bookma
                 case 11: case 12:
                     if (historyOrder && a.node.added == b.node.added) return less(Lower(a.node.title), Lower(b.node.title));
                     return less(a.node.added, b.node.added);
+                case 19: case 20: {
+                    const auto x = Frecency(a.visit, q.source == 1 || saved.count(a.node.url), now);
+                    const auto y = Frecency(b.visit, q.source == 1 || saved.count(b.node.url), now);
+                    if (x == y) return less(date(a), date(b));
+                    return less(x, y);
+                }
                 case 13: case 14:
                     if (a.node.modified != b.node.modified) return less(a.node.modified, b.node.modified);
                     if (Lower(a.node.title) != Lower(b.node.title)) return less(Lower(a.node.title), Lower(b.node.title));
