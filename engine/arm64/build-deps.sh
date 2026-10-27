@@ -59,7 +59,9 @@ EOF
 
 nghttp2() { cm nghttp2-1.64.0 -DENABLE_LIB_ONLY=ON -DBUILD_STATIC_LIBS=OFF -DENABLE_DOC=OFF; }
 
-libpsl() { ac libpsl-0.21.5 --disable-runtime --disable-builtin --disable-man --disable-gtk-doc LIBS=-lnetwork; }
+# The Public Suffix List built in: PublicSuffixStoreCurl asks psl_builtin(), and
+# without it every domain is a public suffix and no cookie is ever stored.
+libpsl() { ac libpsl-0.21.5 --disable-runtime --enable-builtin --disable-man --disable-gtk-doc LIBS=-lnetwork; }
 
 curl() { ac curl-8.10.1 --with-openssl=$P --with-nghttp2=$P --with-zlib=$P --without-libpsl \
     --without-brotli --without-zstd --without-libidn2 --disable-ldap --disable-manual --disable-docs \
