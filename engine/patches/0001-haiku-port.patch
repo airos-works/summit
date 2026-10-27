@@ -18976,10 +18976,10 @@ index fbe73cf3679059de2b1a1e695f53bb4aa9bfce8a..4f31606dfaf7d1a0bc0ae8a238e5008c
      void scrollingTreeNodeScrollUpdated(ScrollingTreeScrollingNode&, ScrollUpdateType);
  
 diff --git a/Source/WebCore/page/scrolling/coordinated/ScrollerCoordinated.cpp b/Source/WebCore/page/scrolling/coordinated/ScrollerCoordinated.cpp
-index 286d09b121f073a0cc755c138ba0c9ae53ae4ef4..95f9508c3787efd32557a0fabb9a4a94f90c9859 100644
+index 286d09b121f073a0cc755c138ba0c9ae53ae4ef4..77b1469c7a0ac7617aeaadb446df7a3fe6a719c0 100644
 --- a/Source/WebCore/page/scrolling/coordinated/ScrollerCoordinated.cpp
 +++ b/Source/WebCore/page/scrolling/coordinated/ScrollerCoordinated.cpp
-@@ -31,12 +31,20 @@
+@@ -31,6 +31,10 @@
  #if USE(COORDINATED_GRAPHICS_ASYNC_SCROLLBAR)
  #include "BitmapTexturePool.h"
  #include "CoordinatedPlatformLayer.h"
@@ -18990,17 +18990,7 @@ index 286d09b121f073a0cc755c138ba0c9ae53ae4ef4..95f9508c3787efd32557a0fabb9a4a94
  #include "FontRenderOptions.h"
  #include "GLContext.h"
  #include "GLFence.h"
- #include "GraphicsContextSkia.h"
- #include "PlatformDisplay.h"
- #include "ScrollerImpAdwaita.h"
-+
-+#if PLATFORM(HAIKU) && USE(SKIA)
-+#include "ControlLookHaiku.h"
-+#endif
- WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_BEGIN
- #include <skia/core/SkCanvas.h>
- #include <skia/core/SkSurface.h>
-@@ -73,6 +81,9 @@ void ScrollerCoordinated::setScrollerImp(ScrollerImpAdwaita* scrollerImp)
+@@ -73,6 +77,9 @@ void ScrollerCoordinated::setScrollerImp(ScrollerImpAdwaita* scrollerImp)
      Locker locker { m_lock };
      m_scrollerImp = scrollerImp;
      m_needsUpdate = true;
@@ -19010,7 +19000,7 @@ index 286d09b121f073a0cc755c138ba0c9ae53ae4ef4..95f9508c3787efd32557a0fabb9a4a94
  }
  
  void ScrollerCoordinated::setHostLayer(CoordinatedPlatformLayer* layer)
-@@ -80,6 +91,9 @@ void ScrollerCoordinated::setHostLayer(CoordinatedPlatformLayer* layer)
+@@ -80,6 +87,9 @@ void ScrollerCoordinated::setHostLayer(CoordinatedPlatformLayer* layer)
      Locker locker { m_lock };
      m_hostLayer = layer;
      m_needsUpdate = true;
@@ -19020,7 +19010,7 @@ index 286d09b121f073a0cc755c138ba0c9ae53ae4ef4..95f9508c3787efd32557a0fabb9a4a94
  }
  
  void ScrollerCoordinated::updateValues()
-@@ -96,6 +110,12 @@ void ScrollerCoordinated::updateValues()
+@@ -96,6 +106,12 @@ void ScrollerCoordinated::updateValues()
          return;
  
      if (!scrollerImp) {
@@ -19033,42 +19023,7 @@ index 286d09b121f073a0cc755c138ba0c9ae53ae4ef4..95f9508c3787efd32557a0fabb9a4a94
          // Custom scrollbars are painted by RenderScrollbar
          Locker layerLocker { hostLayer->lock() };
          hostLayer->setContentsBuffer(nullptr);
-@@ -118,6 +138,13 @@ void ScrollerCoordinated::updateValues()
-     }
- 
-     int width = AdwaitaScrollbarPainter::scrollbarSize;
-+#if PLATFORM(HAIKU) && USE(SKIA)
-+    // Haiku's classic scroll bars (#114): as wide as ScrollbarThemeAdwaita
-+    // says, the thumb between the arrow buttons.
-+    bool haikuScrollbar = !state.usesOverlayScrollbars && !state.scrollbarColor && usesHaikuScrollbars();
-+    if (haikuScrollbar)
-+        width = haikuScrollbarThickness();
-+#endif
-     IntRect rect { 0, 0, width, int(values.visibleSize) };
- 
-     if (rect.isEmpty())
-@@ -127,11 +154,20 @@ void ScrollerCoordinated::updateValues()
-         rect = rect.transposedRect();
- 
-     const int minimumThumbLength = AdwaitaScrollbarPainter::minimumThumbSize;
-+#if PLATFORM(HAIKU) && USE(SKIA)
-+    if (haikuScrollbar) {
-+        int track = int(values.visibleSize) - 2 * haikuScrollbarButtonLength(int(values.visibleSize));
-+        state.thumbLength = track <= minimumThumbLength ? 0 : std::max<int>(track * values.proportion, minimumThumbLength);
-+        state.thumbPosition = (track - state.thumbLength) * values.value;
-+    } else
-+#endif
-+    {
-     if (values.visibleSize <= minimumThumbLength)
-         state.thumbLength = 0;
-     else
-         state.thumbLength = std::max<int>(values.visibleSize * values.proportion, minimumThumbLength);
-     state.thumbPosition = (values.visibleSize - state.thumbLength) * values.value;
-+    }
-     state.frameRect = rect;
- 
-     float contentsScale;
-@@ -143,7 +179,48 @@ void ScrollerCoordinated::updateValues()
+@@ -143,7 +159,48 @@ void ScrollerCoordinated::updateValues()
      auto frameRect = enclosingIntRect(FloatRect(state.frameRect.x() * contentsScale, state.frameRect.y() * contentsScale,
          state.frameRect.width() * contentsScale, state.frameRect.height() * contentsScale));
  
@@ -19117,7 +19072,7 @@ index 286d09b121f073a0cc755c138ba0c9ae53ae4ef4..95f9508c3787efd32557a0fabb9a4a94
      auto& display = PlatformDisplay::sharedDisplay();
      auto* glContext = display.skiaGLContext();
      if (!glContext)
-@@ -170,6 +247,7 @@ void ScrollerCoordinated::updateValues()
+@@ -170,6 +227,7 @@ void ScrollerCoordinated::updateValues()
  
      grContext->flushAndSubmit(surface.get(), GLFence::isSupported(display.glDisplay()) ? GrSyncCpu::kNo : GrSyncCpu::kYes);
      auto buffer = CoordinatedPlatformLayerBufferRGB::create(WTF::move(texture), { TextureMapperFlags::ShouldBlend }, GLFence::create(display.glDisplay()));
@@ -20655,171 +20610,6 @@ index ce4e0d940167703a010a3d14f8a51ee98b93fc47..194ed6288d965f9734f7d39afbc80efd
 +
      IntRect m_frame; // Not used when a native widget exists.
  };
- 
-diff --git a/Source/WebCore/platform/adwaita/AdwaitaScrollbarPainter.cpp b/Source/WebCore/platform/adwaita/AdwaitaScrollbarPainter.cpp
-index fb108ceaaf42ca33ad326ca57d03642c1bdb6769..fa32e9b6503879dde5264ac80c2c89a1fdb67541 100644
---- a/Source/WebCore/platform/adwaita/AdwaitaScrollbarPainter.cpp
-+++ b/Source/WebCore/platform/adwaita/AdwaitaScrollbarPainter.cpp
-@@ -30,6 +30,10 @@
- 
- #include "GraphicsContext.h"
- 
-+#if PLATFORM(HAIKU) && USE(SKIA)
-+#include "ControlLookHaiku.h"
-+#endif
-+
- namespace WebCore::AdwaitaScrollbarPainter {
- 
- void paint(GraphicsContext& graphicsContext, const IntRect& damageRect, const State& scrollbar)
-@@ -44,6 +48,25 @@ void paint(GraphicsContext& graphicsContext, const IntRect& damageRect, const St
-     if (!rect.intersects(damageRect))
-         return;
- 
-+#if PLATFORM(HAIKU) && USE(SKIA)
-+    // Haiku's classic scroll bars (#114). A page's own scroll bar colours
-+    // (scrollbar-color) keep Adwaita's drawing.
-+    if (!scrollbar.usesOverlayScrollbars && !scrollbar.scrollbarColor && usesHaikuScrollbars()) {
-+        HaikuScrollbarState haikuState {
-+            .vertical = scrollbar.orientation == ScrollbarOrientation::Vertical,
-+            .enabled = scrollbar.enabled,
-+            .dark = scrollbar.useDarkAppearanceForScrollbars,
-+            .scrollable = scrollbar.enabled && scrollbar.thumbLength > 0,
-+            .backButtonPressed = scrollbar.pressedPart == BackButtonStartPart,
-+            .forwardButtonPressed = scrollbar.pressedPart == ForwardButtonEndPart,
-+            .thumbPosition = scrollbar.thumbPosition,
-+            .thumbLength = scrollbar.thumbLength,
-+        };
-+        if (paintHaikuScrollbar(graphicsContext, rect, haikuState))
-+            return;
-+    }
-+#endif
-+
-     double opacity;
-     if (scrollbar.usesOverlayScrollbars)
-         opacity = scrollbar.opacity;
-diff --git a/Source/WebCore/platform/adwaita/ScrollbarThemeAdwaita.cpp b/Source/WebCore/platform/adwaita/ScrollbarThemeAdwaita.cpp
-index dd4409073c1db7e0fad87272d1d4f883fd60e350..2e36809b20ef3576ed72a133611694de05e2bb95 100644
---- a/Source/WebCore/platform/adwaita/ScrollbarThemeAdwaita.cpp
-+++ b/Source/WebCore/platform/adwaita/ScrollbarThemeAdwaita.cpp
-@@ -38,6 +38,11 @@
- #include "Scrollbar.h"
- #include "ThemeAdwaita.h"
- 
-+#if PLATFORM(HAIKU) && USE(SKIA)
-+#include "ControlLookHaiku.h"
-+#include <InterfaceDefs.h>
-+#endif
-+
- #if PLATFORM(GTK) || PLATFORM(WPE)
- #include "SystemSettings.h"
- #endif
-@@ -58,6 +63,10 @@ void ScrollbarThemeAdwaita::updateScrollbarOverlayStyle(Scrollbar& scrollbar)
- 
- bool ScrollbarThemeAdwaita::usesOverlayScrollbars() const
- {
-+#if PLATFORM(HAIKU) && USE(SKIA)
-+    // Haiku's scroll bars take their room, as in its applications (#114).
-+    return !usesHaikuScrollbars();
-+#endif
- #if PLATFORM(GTK) && !USE(GTK4)
-     if (!g_strcmp0(g_getenv("GTK_OVERLAY_SCROLLING"), "0"))
-         return false;
-@@ -73,6 +82,10 @@ int ScrollbarThemeAdwaita::scrollbarThickness(ScrollbarWidth scrollbarWidth, Ove
- {
-     if (scrollbarWidth == ScrollbarWidth::None || (usesOverlayScrollbars() && overlayRelevancy == OverlayScrollbarSizeRelevancy::IgnoreOverlayScrollbarSize))
-         return 0;
-+#if PLATFORM(HAIKU) && USE(SKIA)
-+    if (usesHaikuScrollbars())
-+        return haikuScrollbarThickness();
-+#endif
-     return scrollbarSize;
- }
- 
-@@ -83,6 +96,11 @@ int ScrollbarThemeAdwaita::minimumThumbLength(Scrollbar&)
- 
- bool ScrollbarThemeAdwaita::hasButtons(Scrollbar&)
- {
-+#if PLATFORM(HAIKU) && USE(SKIA)
-+    // An arrow button at each end, as BScrollBar's.
-+    if (usesHaikuScrollbars())
-+        return true;
-+#endif
-     return false;
- }
- 
-@@ -91,18 +109,55 @@ bool ScrollbarThemeAdwaita::hasThumb(Scrollbar& scrollbar)
-     return thumbLength(scrollbar) > 0;
- }
- 
--IntRect ScrollbarThemeAdwaita::backButtonRect(Scrollbar&, ScrollbarPart, bool)
-+IntRect ScrollbarThemeAdwaita::backButtonRect(Scrollbar& scrollbar, ScrollbarPart part, bool)
- {
-+#if PLATFORM(HAIKU) && USE(SKIA)
-+    if (usesHaikuScrollbars() && part == BackButtonStartPart) {
-+        auto frame = scrollbar.frameRect();
-+        if (scrollbar.orientation() == ScrollbarOrientation::Vertical)
-+            return { frame.x(), frame.y(), frame.width(), haikuScrollbarButtonLength(frame.height()) };
-+        return { frame.x(), frame.y(), haikuScrollbarButtonLength(frame.width()), frame.height() };
-+    }
-+#else
-+    UNUSED_PARAM(scrollbar);
-+    UNUSED_PARAM(part);
-+#endif
-     return { };
- }
- 
--IntRect ScrollbarThemeAdwaita::forwardButtonRect(Scrollbar&, ScrollbarPart, bool)
-+IntRect ScrollbarThemeAdwaita::forwardButtonRect(Scrollbar& scrollbar, ScrollbarPart part, bool)
- {
-+#if PLATFORM(HAIKU) && USE(SKIA)
-+    if (usesHaikuScrollbars() && part == ForwardButtonEndPart) {
-+        auto frame = scrollbar.frameRect();
-+        if (scrollbar.orientation() == ScrollbarOrientation::Vertical) {
-+            int length = haikuScrollbarButtonLength(frame.height());
-+            return { frame.x(), frame.maxY() - length, frame.width(), length };
-+        }
-+        int length = haikuScrollbarButtonLength(frame.width());
-+        return { frame.maxX() - length, frame.y(), length, frame.height() };
-+    }
-+#else
-+    UNUSED_PARAM(scrollbar);
-+    UNUSED_PARAM(part);
-+#endif
-     return { };
- }
- 
- IntRect ScrollbarThemeAdwaita::trackRect(Scrollbar& scrollbar, bool)
- {
-+#if PLATFORM(HAIKU) && USE(SKIA)
-+    // Between the arrow buttons.
-+    if (usesHaikuScrollbars()) {
-+        auto frame = scrollbar.frameRect();
-+        if (scrollbar.orientation() == ScrollbarOrientation::Vertical) {
-+            int length = haikuScrollbarButtonLength(frame.height());
-+            return { frame.x(), frame.y() + length, frame.width(), std::max(0, frame.height() - 2 * length) };
-+        }
-+        int length = haikuScrollbarButtonLength(frame.width());
-+        return { frame.x() + length, frame.y(), std::max(0, frame.width() - 2 * length), frame.height() };
-+    }
-+#endif
-     return scrollbar.frameRect();
- }
- 
-@@ -146,6 +201,15 @@ void ScrollbarThemeAdwaita::paintScrollCorner(ScrollableArea& scrollableArea, Gr
-     if (graphicsContext.paintingDisabled())
-         return;
- 
-+#if PLATFORM(HAIKU) && USE(SKIA)
-+    // The panel colour, as between a Haiku view's two scroll bars.
-+    if (usesHaikuScrollbars() && !scrollableArea.scrollbarTrackColorStyle().isValid()) {
-+        auto panel = systemColorHaiku(B_PANEL_BACKGROUND_COLOR, scrollableArea.useDarkAppearanceForScrollbars());
-+        graphicsContext.fillRect(cornerRect, Color(SRGBA<uint8_t> { panel.red, panel.green, panel.blue }));
-+        return;
-+    }
-+#endif
-+
-     Color scrollbarBackgroundColor;
-     Color scrollbarBorderColor;
  
 diff --git a/Source/WebCore/platform/audio/AudioStreamDescription.h b/Source/WebCore/platform/audio/AudioStreamDescription.h
 index 42b0060c8d236db653290378a12633923b3315a8..2d78b7da58d4443ca52d4e9c04a3eb8c1650dc41 100644
@@ -29586,10 +29376,10 @@ index 0000000000000000000000000000000000000000..7d495c04b64af928f0525ca51be51686
 +}
 diff --git a/Source/WebCore/platform/graphics/haiku/ControlLookHaiku.cpp b/Source/WebCore/platform/graphics/haiku/ControlLookHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..ffb4be06566fd5297ec5a9d0677beea6c6f85028
+index 0000000000000000000000000000000000000000..2b2bf0dcac51c3dd0182aee68a6004fd5ef3af12
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/haiku/ControlLookHaiku.cpp
-@@ -0,0 +1,445 @@
+@@ -0,0 +1,342 @@
 +/*
 + * Copyright (C) 2026 Haiku, Inc.
 + *
@@ -29631,9 +29421,7 @@ index 0000000000000000000000000000000000000000..ffb4be06566fd5297ec5a9d0677beea6
 +#include <cstdlib>
 +#include <cstring>
 +#include <private/interface/DefaultColors.h>
-+#include <atomic>
 +#include <wtf/HashMap.h>
-+#include <wtf/Lock.h>
 +#include <wtf/NeverDestroyed.h>
 +#include <wtf/Vector.h>
 +#include <wtf/text/MakeString.h>
@@ -29646,10 +29434,9 @@ index 0000000000000000000000000000000000000000..ffb4be06566fd5297ec5a9d0677beea6
 +namespace WebCore {
 +
 +// The largest control drawn, in device pixels: bigger ones (a text area
-+// filling the page) are left to Adwaita. A scroll bar may be as long as the
-+// screen is high.
-+static constexpr int maximumSide = 8192;
-+static constexpr int maximumPixels = 4096 * 1024;
++// filling the page) are left to Adwaita.
++static constexpr int maximumWidth = 4096;
++static constexpr int maximumHeight = 1024;
 +// Looks kept; when full, the cache starts again.
 +static constexpr unsigned maximumCachedLooks = 512;
 +
@@ -29727,12 +29514,8 @@ index 0000000000000000000000000000000000000000..ffb4be06566fd5297ec5a9d0677beea6
 +    {
 +        if (m_bitmap && width <= m_width && height <= m_height)
 +            return true;
-+        // Big enough for the last ones too, unless that is too big: a long
-+        // scroll bar after a wide text field.
-+        if (std::max(width, m_width) * std::max(height, m_height) <= maximumPixels) {
-+            width = std::max(width, m_width);
-+            height = std::max(height, m_height);
-+        }
++        width = std::max(width, m_width);
++        height = std::max(height, m_height);
 +        auto bitmap = std::make_unique<BBitmap>(BRect(0, 0, width - 1, height - 1), B_BITMAP_ACCEPTS_VIEWS, B_RGBA32);
 +        if (bitmap->InitCheck() != B_OK)
 +            return false;
@@ -29889,12 +29672,9 @@ index 0000000000000000000000000000000000000000..ffb4be06566fd5297ec5a9d0677beea6
 +    FloatSize size(std::max(1.f, std::round(rect.width())), std::max(1.f, std::round(rect.height())));
 +    int width = static_cast<int>(std::ceil(size.width() * scale));
 +    int height = static_cast<int>(std::ceil(size.height() * scale));
-+    if (width > maximumSide || height > maximumSide || width * height > maximumPixels)
++    if (width > maximumWidth || height > maximumHeight)
 +        return false;
 +    auto key = makeString(look, ':', width, 'x', height);
-+    // The scrolling thread draws scroll bars too.
-+    static Lock lock;
-+    Locker locker { lock };
 +    static NeverDestroyed<HashMap<String, RefPtr<NativeImage>>> looks;
 +    RefPtr<NativeImage> image;
 +    if (auto found = looks->find(key); found != looks->end())
@@ -29939,108 +29719,15 @@ index 0000000000000000000000000000000000000000..ffb4be06566fd5297ec5a9d0677beea6
 +    });
 +}
 +
-+bool usesHaikuScrollbars()
-+{
-+    static const bool uses = [] {
-+        const char* value = getenv("SUMMIT_HAIKU_SCROLLBARS");
-+        return !value || strcmp(value, "0");
-+    }();
-+    return uses && controlLookEnabled();
-+}
-+
-+int haikuScrollbarThickness()
-+{
-+    static std::atomic<int> thickness { 0 };
-+    if (int known = thickness.load(std::memory_order_relaxed))
-+        return known;
-+    int width = be_control_look ? static_cast<int>(std::round(be_control_look->GetScrollBarWidth(B_VERTICAL))) : 14;
-+    thickness.store(std::max(width, 8), std::memory_order_relaxed);
-+    return thickness.load(std::memory_order_relaxed);
-+}
-+
-+int haikuScrollbarButtonLength(int scrollbarLength)
-+{
-+    return std::min(haikuScrollbarThickness(), scrollbarLength / 2);
-+}
-+
-+bool paintHaikuScrollbar(GraphicsContext& context, const FloatRect& frame, const HaikuScrollbarState& state)
-+{
-+    if (!usesHaikuScrollbars())
-+        return false;
-+    float scale = std::max(1.f, context.scaleFactor().width());
-+    auto orientation = state.vertical ? B_VERTICAL : B_HORIZONTAL;
-+    rgb_color base = systemColor(B_PANEL_BACKGROUND_COLOR, state.dark);
-+    rgb_color text = systemColor(B_PANEL_TEXT_COLOR, state.dark);
-+    rgb_color thumbColor = systemColor(B_SCROLL_BAR_THUMB_COLOR, state.dark);
-+    uint32 flags = 0;
-+    if (state.scrollable)
-+        flags |= BControlLook::B_PARTIALLY_ACTIVATED;
-+    if (!state.enabled)
-+        flags |= BControlLook::B_DISABLED;
-+    auto colorKey = [](rgb_color color) {
-+        return (static_cast<unsigned>(color.red) << 16) | (static_cast<unsigned>(color.green) << 8) | color.blue;
-+    };
-+
-+    // The border, the arrow buttons and the track, as BScrollBar::Draw; the
-+    // thumb comes over the track. Scrolling moves only the thumb.
-+    auto bar = makeString("scrollbar:"_s, state.vertical ? 'v' : 'h', ':', flags, ':', state.backButtonPressed ? 'b' : '-',
-+        state.forwardButtonPressed ? 'f' : '-', ':', colorKey(base), ':', colorKey(text));
-+    bool drawn = paintWithControlLookHaiku(context, frame, scale, bar, [&](BView& view, BRect rect, rgb_color) {
-+        be_control_look->DrawScrollBarBorder(&view, rect, rect, base, flags, orientation);
-+        rect.InsetBy(1, 1);
-+        BRect track = rect;
-+        // Square buttons at both ends, unless the bar is too short.
-+        float side = std::min(state.vertical ? rect.Width() : rect.Height(), (state.vertical ? rect.Height() : rect.Width()) / 2 - 1);
-+        BRect back = rect, forward = rect;
-+        if (state.vertical) {
-+            back.bottom = back.top + side;
-+            forward.top = forward.bottom - side;
-+            track.top = back.bottom + 1;
-+            track.bottom = forward.top - 1;
-+        } else {
-+            back.right = back.left + side;
-+            forward.left = forward.right - side;
-+            track.left = back.right + 1;
-+            track.right = forward.left - 1;
-+        }
-+        be_control_look->DrawScrollBarButton(&view, back, back, base, text, flags | (state.backButtonPressed ? BControlLook::B_ACTIVATED : 0),
-+            state.vertical ? BControlLook::B_UP_ARROW : BControlLook::B_LEFT_ARROW, orientation, state.backButtonPressed);
-+        be_control_look->DrawScrollBarButton(&view, forward, forward, base, text, flags | (state.forwardButtonPressed ? BControlLook::B_ACTIVATED : 0),
-+            state.vertical ? BControlLook::B_DOWN_ARROW : BControlLook::B_RIGHT_ARROW, orientation, state.forwardButtonPressed);
-+        if (track.IsValid())
-+            be_control_look->DrawScrollBarBackground(&view, track, track, base, flags, orientation);
-+    });
-+    if (!drawn)
-+        return false;
-+    if (state.thumbLength <= 0 || !state.scrollable)
-+        return true;
-+
-+    float length = state.vertical ? frame.height() : frame.width();
-+    float trackStart = haikuScrollbarButtonLength(static_cast<int>(length));
-+    FloatRect thumb = state.vertical
-+        ? FloatRect(frame.x(), frame.y() + trackStart + state.thumbPosition, frame.width(), state.thumbLength)
-+        : FloatRect(frame.x() + trackStart + state.thumbPosition, frame.y(), state.thumbLength, frame.height());
-+    auto thumbLook = makeString("scrollbar-thumb:"_s, state.vertical ? 'v' : 'h', ':', flags, ':', colorKey(thumbColor));
-+    paintWithControlLookHaiku(context, thumb, scale, thumbLook, [&](BView& view, BRect rect, rgb_color) {
-+        // Inside the bar's border.
-+        if (state.vertical)
-+            rect.InsetBy(1, 0);
-+        else
-+            rect.InsetBy(0, 1);
-+        be_control_look->DrawScrollBarThumb(&view, rect, rect, thumbColor, flags, orientation);
-+    });
-+    return true;
-+}
-+
 +} // namespace WebCore
 +
 +#endif
 diff --git a/Source/WebCore/platform/graphics/haiku/ControlLookHaiku.h b/Source/WebCore/platform/graphics/haiku/ControlLookHaiku.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..35698c6eb02e990257a6a4d7c57cb3a56ed56ea1
+index 0000000000000000000000000000000000000000..971a983ebbd1995de9822a95bf3ae16cbec9927a
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/haiku/ControlLookHaiku.h
-@@ -0,0 +1,107 @@
+@@ -0,0 +1,78 @@
 +/*
 + * Copyright (C) 2026 Haiku, Inc.
 + *
@@ -30110,35 +29797,6 @@ index 0000000000000000000000000000000000000000..35698c6eb02e990257a6a4d7c57cb3a5
 +// drawing depends on but the size). False as paintControlLookHaiku.
 +bool paintWithControlLookHaiku(GraphicsContext&, const FloatRect&, float deviceScaleFactor, const String& look,
 +    const Function<void(BView&, BRect, rgb_color background)>& draw);
-+
-+// Haiku's classic scroll bars for pages (#114), as BScrollBar draws them:
-+// whether pages get them (else Adwaita's overlay ones: SUMMIT_HAIKU_CONTROLS=0
-+// or SUMMIT_HAIKU_SCROLLBARS=0), and their thickness in CSS pixels (that of
-+// Haiku's vertical scroll bar). Any thread.
-+bool usesHaikuScrollbars();
-+int haikuScrollbarThickness();
-+// The length of each arrow button of a bar that long: as wide as the bar,
-+// or half the bar when it is too short for two.
-+int haikuScrollbarButtonLength(int scrollbarLength);
-+
-+struct HaikuScrollbarState {
-+    bool vertical { true };
-+    bool enabled { true };
-+    bool dark { false };
-+    // Can scroll (the thumb is shorter than the track).
-+    bool scrollable { true };
-+    bool backButtonPressed { false };
-+    bool forwardButtonPressed { false };
-+    // The thumb along the track (which starts after the back button), in
-+    // CSS pixels; no thumb when its length is 0.
-+    int thumbPosition { 0 };
-+    int thumbLength { 0 };
-+};
-+
-+// Draws a scroll bar of that frame (in CSS pixels, in the context's
-+// coordinates) as BScrollBar does. Any thread. False as
-+// paintWithControlLookHaiku.
-+bool paintHaikuScrollbar(GraphicsContext&, const FloatRect& frame, const HaikuScrollbarState&);
 +
 +// A system colour as a page with this colour scheme should have it: the dark
 +// variant for a page that asks for dark colours on a light system, and the
