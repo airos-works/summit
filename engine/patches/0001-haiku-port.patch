@@ -104320,10 +104320,10 @@ index 0000000000000000000000000000000000000000..2f71885a2c8f6e4819dd9431a5848905
 +#endif // ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
 diff --git a/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionCRXHaiku.cpp b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionCRXHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..c437c4e32c8539dbb71f4334521a40fd7bf93736
+index 0000000000000000000000000000000000000000..365ec122f3d047efbc297e87756b1c3a8070dc66
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionCRXHaiku.cpp
-@@ -0,0 +1,432 @@
+@@ -0,0 +1,443 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +#include "config.h"
 +#include "WebExtensionCRXHaiku.h"
@@ -104615,10 +104615,10 @@ index 0000000000000000000000000000000000000000..c437c4e32c8539dbb71f4334521a40fd
 +    return encoded;
 +}
 +
-+std::optional<std::string> sha256Base64(std::istream& stream)
++std::optional<std::string> digestBase64(std::istream& stream, const EVP_MD* algorithm)
 +{
 +    std::unique_ptr<EVP_MD_CTX, decltype(&EVP_MD_CTX_free)> context(EVP_MD_CTX_new(), EVP_MD_CTX_free);
-+    if (!context || EVP_DigestInit_ex(context.get(), EVP_sha256(), nullptr) != 1)
++    if (!context || EVP_DigestInit_ex(context.get(), algorithm, nullptr) != 1)
 +        return std::nullopt;
 +    std::array<char, 65536> buffer;
 +    while (stream) {
@@ -104698,6 +104698,10 @@ index 0000000000000000000000000000000000000000..c437c4e32c8539dbb71f4334521a40fd
 +        return invalid("the PKCS #7 signature could not be read");
 +    // Add-on certificates carry no extended key usage for e-mail or code.
 +    X509_STORE_set_purpose(store.get(), X509_PURPOSE_ANY);
++    // As Firefox (AppSignatureVerification.cpp, bug 1267318): Mozilla signs
++    // every add-on itself, so an expired (or not yet valid) certificate does
++    // not make a signature invalid; uBlock Origin 1.14's of 2017 expired in 2022.
++    X509_STORE_set_flags(store.get(), X509_V_FLAG_NO_CHECK_TIME);
 +    std::unique_ptr<BIO, decltype(&BIO_free)> content(BIO_new_mem_buf(signatureFile->data(), static_cast<int>(signatureFile->size())), BIO_free);
 +    if (!content || PKCS7_verify(pkcs7.get(), nullptr, store.get(), content.get(), nullptr, PKCS7_BINARY) != 1)
 +        return invalid("the signature does not verify against Mozilla's add-on root");
@@ -104709,12 +104713,19 @@ index 0000000000000000000000000000000000000000..c437c4e32c8539dbb71f4334521a40fd
 +    if (X509_NAME_get_text_by_NID(X509_get_subject_name(sk_X509_value(signers.get(), 0)), NID_commonName, commonName.data(), commonName.size()) <= 0)
 +        return invalid("the signing certificate has no common name");
 +
-+    // mozilla.sf holds manifest.mf's digest.
++    // mozilla.sf holds manifest.mf's digest: SHA-256, or SHA-1 in packages
++    // signed before 2019 (Firefox uses the algorithm of the signer, SHA-256
++    // when there is one; the files name the same one).
 +    auto signatureSections = manifestSections(*signatureFile);
++    if (signatureSections.empty())
++        return invalid("META-INF/mozilla.sf is empty");
++    const bool sha256 = signatureSections[0].contains("SHA256-Digest-Manifest");
++    const EVP_MD* algorithm = sha256 ? EVP_sha256() : EVP_sha1();
++    const std::string prefix = sha256 ? "SHA256" : "SHA1";
 +    std::istringstream manifestStream(*manifest);
-+    auto manifestDigest = sha256Base64(manifestStream);
-+    if (signatureSections.empty() || !manifestDigest || signatureSections[0]["SHA256-Digest-Manifest"] != *manifestDigest)
-+        return invalid("META-INF/mozilla.sf does not hold manifest.mf's SHA-256 digest");
++    auto manifestDigest = digestBase64(manifestStream, algorithm);
++    if (!manifestDigest || signatureSections[0][prefix + "-Digest-Manifest"] != *manifestDigest)
++        return invalid("META-INF/mozilla.sf does not hold manifest.mf's digest");
 +
 +    // manifest.mf: every file but the signature's own, each digest matching.
 +    std::map<std::string, std::string> digests;
@@ -104722,9 +104733,9 @@ index 0000000000000000000000000000000000000000..c437c4e32c8539dbb71f4334521a40fd
 +        auto name = section.find("Name");
 +        if (name == section.end())
 +            continue;
-+        auto digest = section.find("SHA256-Digest");
++        auto digest = section.find(prefix + "-Digest");
 +        if (digest == section.end())
-+            return invalid("manifest.mf has no SHA-256 digest for " + name->second);
++            return invalid("manifest.mf has no " + prefix + " digest for " + name->second);
 +        digests[name->second] = digest->second;
 +    }
 +    size_t checked = 0;
@@ -104741,7 +104752,7 @@ index 0000000000000000000000000000000000000000..c437c4e32c8539dbb71f4334521a40fd
 +        if (expected == digests.end())
 +            return invalid(relative + " is not signed");
 +        std::ifstream stream(iterator->path(), std::ios::binary);
-+        auto digest = sha256Base64(stream);
++        auto digest = digestBase64(stream, algorithm);
 +        if (!digest || *digest != expected->second)
 +            return invalid(relative + " does not match its signed digest");
 +        ++checked;

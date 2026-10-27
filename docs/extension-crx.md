@@ -87,7 +87,13 @@ does: the signature over `mozilla.sf` chains to Mozilla's add-on root
 `security/manager/ssl/addons-public.pem`; the intermediate comes with the
 signature), `mozilla.sf` holds the SHA-256 of `manifest.mf`, and
 `manifest.mf` lists the SHA-256 of every other file, with none missing or
-added (the COSE files are checked when listed). The signing certificate's
+added (the COSE files are checked when listed). Packages signed before 2019
+carry SHA-1 digests only (`SHA1-Digest-Manifest`, `SHA1-Digest`); they are
+checked with SHA-1, as Firefox picks the algorithm of the signature.
+Certificate expiry is not checked, as in Firefox
+(`AppSignatureVerification.cpp`, bug 1267318: Mozilla signs every add-on
+itself): uBlock Origin 1.14.0 of 2017, whose signing certificate expired in
+2022, verifies, and the same package with a changed file does not. The signing certificate's
 common name is the add-on's ID. The package registry reports
 `xpi_signature` (`verified` or `invalid`, absent when unsigned),
 `xpi_signer` and `xpi_signature_error` with the prepared package.
