@@ -40,8 +40,44 @@ read mode: the published uBlock CRX has local/central ZIP version metadata that
 libzip's additional consistency mode rejects, although its payload is readable.
 The signed hostile-archive tests cover this separate path.
 
-CRX2, Mozilla XPI signature validation, store publisher authentication and
-complete browser-specific API semantics remain unfinished.
+CRX2, store publisher authentication and complete browser-specific API
+semantics remain unfinished. Mozilla's XPI signature is checked since 27 Oct
+(below).
+
+## Mozilla XPI signatures
+
+A Firefox package signed by addons.mozilla.org carries Mozilla's signature in
+`META-INF` (Firefox's PKCS #7 form: `mozilla.rsa`, `mozilla.sf`,
+`manifest.mf`). `verifyWebExtensionXPISignatureHaiku`
+(`WebExtensionCRXHaiku.cpp`) checks it over the unpacked files as Firefox
+does: the signature over `mozilla.sf` chains to Mozilla's add-on root
+`root-ca-production-amo` (built in, from Firefox's
+`security/manager/ssl/addons-public.pem`; the intermediate comes with the
+signature), `mozilla.sf` holds the SHA-256 of `manifest.mf`, and
+`manifest.mf` lists the SHA-256 of every other file, with none missing or
+added (the COSE files are checked when listed). The signing certificate's
+common name is the add-on's ID. The package registry reports
+`xpi_signature` (`verified` or `invalid`, absent when unsigned),
+`xpi_signer` and `xpi_signature_error` with the prepared package.
+
+The installer refuses a package whose signature does not verify ("The
+package's Mozilla signature is not valid: …"), or that was signed for
+another ID than its manifest's Gecko ID, and says "Signed by Mozilla
+(Firefox Add-ons) for ID; signature verified." in the review. An unsigned
+package installs as before, with the unverified-package warning. The
+signature is checked at installation, not on every launch (the installed
+files' own fingerprint covers later changes).
+
+Checked on the host with the verifier alone: Dark Reader 4.9.133,
+SponsorBlock, uBlock Origin, 1Password and Bitwarden from AMO verify, each
+signed for its own ID; a changed `manifest.json`, an added file, a missing
+file and a changed `mozilla.sf` are refused with the reason; a package
+without `META-INF` is unsigned. On the X399 (27 Oct, an19 engine): Dark
+Reader's AMO package showed "Signed by Mozilla (Firefox Add-ons) for
+addon@darkreader.org; signature verified." in the review and installed; the
+same package with a changed name was refused with "The package's Mozilla
+signature is not valid: manifest.json does not match its signed digest.";
+without `META-INF` it showed the unverified-package warning and installed.
 
 ## Safari web extensions
 

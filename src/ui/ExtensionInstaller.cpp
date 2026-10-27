@@ -317,6 +317,14 @@ void ExtensionInstaller::MessageReceived(BMessage* message)
             throw std::runtime_error("The downloaded extension's identity does not match the selected store item.");
         if (draft.storeName == "Chrome Web Store" && verifiedCRXIdentity.empty())
             throw std::runtime_error("The Chrome Web Store package does not have a valid CRX3 signature.");
+        // A Firefox package's Mozilla signature, as Firefox checks it: one that
+        // does not verify, or names another add-on, is refused.
+        const auto xpiSignature = field(*message, "xpi_signature"), xpiSigner = field(*message, "xpi_signer");
+        if (xpiSignature == "invalid")
+            throw std::runtime_error("The package's Mozilla signature is not valid: " + field(*message, "xpi_signature_error") + ".");
+        const bool mozillaSigned = xpiSignature == "verified";
+        if (mozillaSigned && verifiedCRXIdentity.empty() && !draft.entry.identifier.starts_with("summit-") && draft.entry.identifier != xpiSigner)
+            throw std::runtime_error("The package was signed by Mozilla for another add-on (" + ExtensionDisplayText(xpiSigner) + ").");
         std::vector<InstalledExtension> entries;
         std::string error;
         if (!fCatalog.Load(entries, error)) throw std::runtime_error(error);
@@ -349,9 +357,10 @@ void ExtensionInstaller::MessageReceived(BMessage* message)
         requested.insert(draft.origins.begin(), draft.origins.end());
         draft.body = ExtensionDisplayText(draft.entry.name) + "\nVersion " + ExtensionDisplayText(draft.entry.version);
         if (!draft.storeName.empty()) draft.body += "\nDownloaded from " + draft.storeName + " over HTTPS.";
-        draft.body += verifiedCRXIdentity.empty()
-            ? "\n\nThis package has not been signature-verified. Install only packages you trust."
-            : "\n\nPackage signature verified. Chrome Web Store provenance has not been verified.";
+        draft.body += !verifiedCRXIdentity.empty()
+            ? "\n\nPackage signature verified. Chrome Web Store provenance has not been verified."
+            : mozillaSigned ? "\n\nSigned by Mozilla (Firefox Add-ons) for " + ExtensionDisplayText(xpiSigner) + "; signature verified."
+            : "\n\nThis package has not been signature-verified. Install only packages you trust.";
         draft.body += "\nCompatibility with this extension has not been verified.\n\nRequested access:\n";
         if (requested.empty()) draft.body += "  No additional permissions requested.\n";
         // Every API permission is listed; long lists of sites end with a count.

@@ -26,7 +26,8 @@ identity, update themselves from the same services, with the same checks
 
 This does not add API compatibility for arbitrary extensions. The review
 continues to distinguish CRX signature verification from store provenance;
-Firefox's XPI signature is not independently verified. Package downloads and
+Firefox's XPI signature is verified as well, for store downloads and saved
+packages alike (since 27 Oct, `extension-crx.md`). Package downloads and
 permissions do not bypass the existing consent, fingerprint or restart checks.
 
 Protocol references: [Mozilla's add-on API](https://mozilla.github.io/addons-server/topics/api/addons)

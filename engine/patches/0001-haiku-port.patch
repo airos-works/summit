@@ -104320,10 +104320,10 @@ index 0000000000000000000000000000000000000000..2f71885a2c8f6e4819dd9431a5848905
 +#endif // ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
 diff --git a/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionCRXHaiku.cpp b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionCRXHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..0d733374896587861b36f57ae8aed2079dd6650e
+index 0000000000000000000000000000000000000000..29cca3f3ed4f70310c84c70e7c83b00f34a86793
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionCRXHaiku.cpp
-@@ -0,0 +1,174 @@
+@@ -0,0 +1,385 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +#include "config.h"
 +#include "WebExtensionCRXHaiku.h"
@@ -104332,9 +104332,17 @@ index 0000000000000000000000000000000000000000..0d733374896587861b36f57ae8aed207
 +#include <array>
 +#include <limits>
 +#include <memory>
++#include <optional>
++#include <filesystem>
++#include <fstream>
++#include <map>
 +#include <openssl/evp.h>
++#include <openssl/pem.h>
++#include <openssl/pkcs7.h>
 +#include <openssl/rsa.h>
 +#include <openssl/x509.h>
++#include <openssl/x509v3.h>
++#include <sstream>
 +#include <vector>
 +
 +namespace WebKit {
@@ -104496,14 +104504,217 @@ index 0000000000000000000000000000000000000000..0d733374896587861b36f57ae8aed207
 +    }
 +    return WebExtensionVerifiedCRXHaiku { 12 + headerSize, std::move(name) };
 +}
++
++namespace {
++// Mozilla's add-on signing root (Firefox's security/manager/ssl/addons-public.pem).
++constexpr const char* mozillaAddonsRoot =
++    "-----BEGIN CERTIFICATE-----\n"
++    "MIIGZTCCBE2gAwIBAgIBATANBgkqhkiG9w0BAQwFADB9MQswCQYDVQQGEwJVUzEc\n"
++    "MBoGA1UEChMTTW96aWxsYSBDb3Jwb3JhdGlvbjEvMC0GA1UECxMmTW96aWxsYSBB\n"
++    "TU8gUHJvZHVjdGlvbiBTaWduaW5nIFNlcnZpY2UxHzAdBgNVBAMTFnJvb3QtY2Et\n"
++    "cHJvZHVjdGlvbi1hbW8wIhgPMjAyNDAyMDEwMDAwMDBaGA8yMjAwMTIwMzAwMDAw\n"
++    "MFowfTELMAkGA1UEBhMCVVMxHDAaBgNVBAoTE01vemlsbGEgQ29ycG9yYXRpb24x\n"
++    "LzAtBgNVBAsTJk1vemlsbGEgQU1PIFByb2R1Y3Rpb24gU2lnbmluZyBTZXJ2aWNl\n"
++    "MR8wHQYDVQQDExZyb290LWNhLXByb2R1Y3Rpb24tYW1vMIICIDANBgkqhkiG9w0B\n"
++    "AQEFAAOCAg0AMIICCAKCAgEAtLth11268Mt+vjD3in+Y4KAEjHzDc+5iVgXnCYL5\n"
++    "U3+IRyWy8zD7CFGrsyPRhKS3x3WesM0shTm+ADPg9ZsQFobmSdzAwCTn9wdUbOkK\n"
++    "Kx65fKqpTbTxqnqZ6TSXC6OybEqqhNzVJu9jIKiB0YE0bKlLPuyyDxnu9utlPjf0\n"
++    "9Cz2FS3uK2dkQx6GmYWGO2vfuPZhziP4NmBQfvcmYxPl3aZU9pAYAOD/HW+4uyNL\n"
++    "SIuG9AdDesvTIS/gkWScsXRXtsAcpCV9eC7IXirDNWsx42Tuekija1vFQCUy5KUc\n"
++    "QprIk69PH5z8gypmnmdAbbLoInHYqXGaV64iBprGWyNdqucrsI0hC3ZA1elGo6Np\n"
++    "/tsLObl6z9+Nl+9VoloQv3ReXc9SyrYwXZlJMWkDDj/7obVxCga2aNaLpw0UMdY+\n"
++    "/kpEOARMIwd0hLa+1w1hjnDiJKCWVjwAnwSwtzyQgVo0wMgZbndAuZ9wsva3oAAJ\n"
++    "ziKiNbdehlNpWkYe3pSe4D0TYEIMC13mXBccOsL8ohHJgozhEOjzPFEI7YTrCpbM\n"
++    "zIZSsL48jhg6M7ZKkgcv7/gLMezltkO65VXymqy9JkRGXUjH6Mt804LTFQjNL4TZ\n"
++    "es3L3+RzTaKaBHYOcrl6NnIWdadSfqvOm9BuciUTHk9vojlWNhEN+7R66lFEZ3As\n"
++    "uLsCAQOjge0wgeowDAYDVR0TBAUwAwEB/zAOBgNVHQ8BAf8EBAMCAQYwFgYDVR0l\n"
++    "AQH/BAwwCgYIKwYBBQUHAwMwHQYDVR0OBBYEFLO86lh0q+FueCqyq5wjHqhjLJe3\n"
++    "MIGSBgNVHSMEgYowgYehgYGkfzB9MQswCQYDVQQGEwJVUzEcMBoGA1UEChMTTW96\n"
++    "aWxsYSBDb3Jwb3JhdGlvbjEvMC0GA1UECxMmTW96aWxsYSBBTU8gUHJvZHVjdGlv\n"
++    "biBTaWduaW5nIFNlcnZpY2UxHzAdBgNVBAMTFnJvb3QtY2EtcHJvZHVjdGlvbi1h\n"
++    "bW+CAQEwDQYJKoZIhvcNAQEMBQADggIBAAAJuN23qDiyAZ8y9DhqTfIfdYBXC7jg\n"
++    "f7p5DNCj6mcfLxCMLuSvLljYWm0IfHYs5W0lnQgm8+N0m3SAjQd18AzWfXNklFjZ\n"
++    "1EcP8MRU/keFEk9SmeHZhP916jQfqQvB45w4QwPcJG0nPkWsYzceqD3uL5g2g4Jg\n"
++    "gk+WYWmtE4eeM2BX6cT0itMErYKWei3SF09TdrCX+XpHMixg4nnDdsGe9wxc8F/o\n"
++    "diQ48f/7AZo06moMyZvIH4PPcVt0osAU18fLO0RrVJkupMraxbM1XXL1UwJlyV+p\n"
++    "kvJutX2xBB1f1BA3xPl3NlQneaLIm3JFsw0r7t0z0n1shC6xCi4+t3Fh6Z38CnbS\n"
++    "WwAe5rA2OCQYMjsehxRK9BhmDCG8U65GVd9t8nV4iEJFTrjntBDEFtVD5s4Qnlyv\n"
++    "OUrWd2du4dLCs+WW2E6+R7jZtrsIqFD6qwCLqcgBgC9CM9UgHeUBOixmZLBKCNDE\n"
++    "N1sRkmcVwXcCl5btdgVVq74Mgsd38xsmYuFoMi6nbDLllm6T2ql8LZExyX2i/vo0\n"
++    "pxhEVRaFwj1J1r3TRNXksjdqFcgpNCMf2FRbjDGtVLXRVG0DCCGRayigKgdH78qM\n"
++    "HpdXrbaTDFsfMLTAMnGFnqOZMuMobNJS5M6/vqdepoC8L7xmI5dQgW8YGyymr8DP\n"
++    "gchMof0tylgn\n"
++    "-----END CERTIFICATE-----\n";
++constexpr size_t maximumSignatureFileBytes = 4 * 1024 * 1024;
++
++std::optional<std::string> readSmallFile(const std::filesystem::path& path)
++{
++    std::error_code error;
++    auto size = std::filesystem::file_size(path, error);
++    if (error || size > maximumSignatureFileBytes)
++        return std::nullopt;
++    std::ifstream stream(path, std::ios::binary);
++    std::string contents(size, '\0');
++    if (!stream.read(contents.data(), static_cast<std::streamsize>(size)))
++        return std::nullopt;
++    return contents;
++}
++
++std::string base64(std::span<const unsigned char> bytes)
++{
++    std::string encoded(4 * ((bytes.size() + 2) / 3) + 1, '\0');
++    int length = EVP_EncodeBlock(reinterpret_cast<unsigned char*>(encoded.data()), bytes.data(), static_cast<int>(bytes.size()));
++    encoded.resize(length > 0 ? length : 0);
++    return encoded;
++}
++
++std::optional<std::string> sha256Base64(std::istream& stream)
++{
++    std::unique_ptr<EVP_MD_CTX, decltype(&EVP_MD_CTX_free)> context(EVP_MD_CTX_new(), EVP_MD_CTX_free);
++    if (!context || EVP_DigestInit_ex(context.get(), EVP_sha256(), nullptr) != 1)
++        return std::nullopt;
++    std::array<char, 65536> buffer;
++    while (stream) {
++        stream.read(buffer.data(), buffer.size());
++        if (stream.gcount() > 0 && EVP_DigestUpdate(context.get(), buffer.data(), static_cast<size_t>(stream.gcount())) != 1)
++            return std::nullopt;
++    }
++    if (stream.bad())
++        return std::nullopt;
++    std::array<unsigned char, EVP_MAX_MD_SIZE> digest;
++    unsigned length = 0;
++    if (EVP_DigestFinal_ex(context.get(), digest.data(), &length) != 1)
++        return std::nullopt;
++    return base64({ digest.data(), length });
++}
++
++// A JAR manifest's sections: lines of "Key: value", a line starting with a
++// space continuing the one before, sections separated by blank lines.
++std::vector<std::map<std::string, std::string>> manifestSections(const std::string& text)
++{
++    std::vector<std::map<std::string, std::string>> sections(1);
++    std::vector<std::string> lines;
++    std::istringstream stream(text);
++    for (std::string line; std::getline(stream, line);) {
++        if (!line.empty() && line.back() == '\r')
++            line.pop_back();
++        if (!line.empty() && line[0] == ' ' && !lines.empty() && !lines.back().empty())
++            lines.back() += line.substr(1);
++        else
++            lines.push_back(line);
++    }
++    for (auto& line : lines) {
++        if (line.empty()) {
++            if (!sections.back().empty())
++                sections.emplace_back();
++            continue;
++        }
++        auto colon = line.find(": ");
++        if (colon != std::string::npos)
++            sections.back()[line.substr(0, colon)] = line.substr(colon + 2);
++    }
++    if (sections.back().empty())
++        sections.pop_back();
++    return sections;
++}
++}
++
++WebExtensionXPISignatureHaiku verifyWebExtensionXPISignatureHaiku(const std::string& directory)
++{
++    using Status = WebExtensionXPISignatureHaiku::Status;
++    namespace fs = std::filesystem;
++    WebExtensionXPISignatureHaiku result;
++    const fs::path root(directory);
++    const fs::path metaInf = root / "META-INF";
++    std::error_code error;
++    if (!fs::exists(metaInf / "mozilla.rsa", error))
++        return result;
++    auto invalid = [&](std::string reason) {
++        result.status = Status::Invalid;
++        result.error = std::move(reason);
++        return result;
++    };
++    auto signature = readSmallFile(metaInf / "mozilla.rsa");
++    auto signatureFile = readSmallFile(metaInf / "mozilla.sf");
++    auto manifest = readSmallFile(metaInf / "manifest.mf");
++    if (!signature || !signatureFile || !manifest)
++        return invalid("META-INF/mozilla.rsa, mozilla.sf or manifest.mf is missing or too large");
++
++    // The PKCS #7 signature over mozilla.sf, chaining to Mozilla's root (its
++    // certificates carry the intermediate).
++    const unsigned char* signatureBytes = reinterpret_cast<const unsigned char*>(signature->data());
++    std::unique_ptr<PKCS7, decltype(&PKCS7_free)> pkcs7(d2i_PKCS7(nullptr, &signatureBytes, static_cast<long>(signature->size())), PKCS7_free);
++    std::unique_ptr<BIO, decltype(&BIO_free)> rootBIO(BIO_new_mem_buf(mozillaAddonsRoot, -1), BIO_free);
++    std::unique_ptr<X509, decltype(&X509_free)> rootCertificate(rootBIO ? PEM_read_bio_X509(rootBIO.get(), nullptr, nullptr, nullptr) : nullptr, X509_free);
++    std::unique_ptr<X509_STORE, decltype(&X509_STORE_free)> store(X509_STORE_new(), X509_STORE_free);
++    if (!pkcs7 || !rootCertificate || !store || X509_STORE_add_cert(store.get(), rootCertificate.get()) != 1)
++        return invalid("the PKCS #7 signature could not be read");
++    // Add-on certificates carry no extended key usage for e-mail or code.
++    X509_STORE_set_purpose(store.get(), X509_PURPOSE_ANY);
++    std::unique_ptr<BIO, decltype(&BIO_free)> content(BIO_new_mem_buf(signatureFile->data(), static_cast<int>(signatureFile->size())), BIO_free);
++    if (!content || PKCS7_verify(pkcs7.get(), nullptr, store.get(), content.get(), nullptr, PKCS7_BINARY) != 1)
++        return invalid("the signature does not verify against Mozilla's add-on root");
++    auto freeSigners = [](STACK_OF(X509)* stack) { sk_X509_free(stack); };
++    std::unique_ptr<STACK_OF(X509), decltype(freeSigners)> signers(PKCS7_get0_signers(pkcs7.get(), nullptr, 0), freeSigners);
++    if (!signers || sk_X509_num(signers.get()) != 1)
++        return invalid("the signature has no single signer");
++    std::array<char, 256> commonName { };
++    if (X509_NAME_get_text_by_NID(X509_get_subject_name(sk_X509_value(signers.get(), 0)), NID_commonName, commonName.data(), commonName.size()) <= 0)
++        return invalid("the signing certificate has no common name");
++
++    // mozilla.sf holds manifest.mf's digest.
++    auto signatureSections = manifestSections(*signatureFile);
++    std::istringstream manifestStream(*manifest);
++    auto manifestDigest = sha256Base64(manifestStream);
++    if (signatureSections.empty() || !manifestDigest || signatureSections[0]["SHA256-Digest-Manifest"] != *manifestDigest)
++        return invalid("META-INF/mozilla.sf does not hold manifest.mf's SHA-256 digest");
++
++    // manifest.mf: every file but the signature's own, each digest matching.
++    std::map<std::string, std::string> digests;
++    for (auto& section : manifestSections(*manifest)) {
++        auto name = section.find("Name");
++        if (name == section.end())
++            continue;
++        auto digest = section.find("SHA256-Digest");
++        if (digest == section.end())
++            return invalid("manifest.mf has no SHA-256 digest for " + name->second);
++        digests[name->second] = digest->second;
++    }
++    size_t checked = 0;
++    for (auto iterator = fs::recursive_directory_iterator(root, error); !error && iterator != fs::recursive_directory_iterator(); iterator.increment(error)) {
++        if (!iterator->is_regular_file(error))
++            continue;
++        auto relative = fs::relative(iterator->path(), root, error).generic_string();
++        if (relative == "META-INF/mozilla.rsa" || relative == "META-INF/mozilla.sf" || relative == "META-INF/manifest.mf")
++            continue;
++        auto expected = digests.find(relative);
++        // Newer packages list their COSE signature here as well; older ones not.
++        if (expected == digests.end() && (relative == "META-INF/cose.manifest" || relative == "META-INF/cose.sig"))
++            continue;
++        if (expected == digests.end())
++            return invalid(relative + " is not signed");
++        std::ifstream stream(iterator->path(), std::ios::binary);
++        auto digest = sha256Base64(stream);
++        if (!digest || *digest != expected->second)
++            return invalid(relative + " does not match its signed digest");
++        ++checked;
++    }
++    if (error)
++        return invalid("the package's files could not be listed");
++    if (checked != digests.size())
++        return invalid("a signed file is missing from the package");
++    result.status = Status::Verified;
++    result.signer = commonName.data();
++    return result;
++}
 +}
 +#endif
 diff --git a/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionCRXHaiku.h b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionCRXHaiku.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..2994f8c91cd6919deb0b7504f969800d1d8b1164
+index 0000000000000000000000000000000000000000..51dd882706dd0e6007ac5b04118fabacf8cd40e1
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionCRXHaiku.h
-@@ -0,0 +1,19 @@
+@@ -0,0 +1,33 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +#pragma once
 +#include <cstddef>
@@ -104522,6 +104733,20 @@ index 0000000000000000000000000000000000000000..2994f8c91cd6919deb0b7504f969800d
 +// requires a developer key whose SHA-256 prefix matches the signed ID. This
 +// authenticates package integrity/identity, not Chrome Web Store provenance.
 +std::expected<WebExtensionVerifiedCRXHaiku, WebExtensionCRXErrorHaiku> verifyWebExtensionCRXHaiku(std::span<const uint8_t>);
++
++// Firefox's add-on signature over an unpacked XPI (Mozilla's PKCS #7 one in
++// META-INF): Unsigned without it; Verified when the signature chains to
++// Mozilla's add-on root (root-ca-production-amo), META-INF/mozilla.sf holds
++// the digest of manifest.mf, and manifest.mf the digest of every other file
++// and of no missing one; else Invalid, with the reason. signer is the signing
++// certificate's common name: the add-on's ID.
++struct WebExtensionXPISignatureHaiku {
++    enum class Status : uint8_t { Unsigned, Verified, Invalid };
++    Status status { Status::Unsigned };
++    std::string signer;
++    std::string error;
++};
++WebExtensionXPISignatureHaiku verifyWebExtensionXPISignatureHaiku(const std::string& directory);
 +}
 diff --git a/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionCommandHaiku.cpp b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionCommandHaiku.cpp
 new file mode 100644
@@ -123799,10 +124024,10 @@ index 0000000000000000000000000000000000000000..f61939d10995397e88877a36905238be
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/ExtensionPackageRegistryHaiku.cpp b/Source/WebKit/UIProcess/haiku/ExtensionPackageRegistryHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..a593520e8b8bb829af0bc9d0f94d272316eea8a4
+index 0000000000000000000000000000000000000000..9e4f2cbc22b6ce7c4756530ea8693e7953748519
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/ExtensionPackageRegistryHaiku.cpp
-@@ -0,0 +1,934 @@
+@@ -0,0 +1,945 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +#include "config.h"
 +#include "ExtensionPackageRegistryHaiku.h"
@@ -123825,6 +124050,7 @@ index 0000000000000000000000000000000000000000..a593520e8b8bb829af0bc9d0f94d2723
 +#include "WebsiteDataFetchOption.h"
 +#include "WebsiteDataRecord.h"
 +#include "WebsiteDataStore.h"
++#include "haiku/WebExtensionCRXHaiku.h"
 +#include "haiku/WebExtensionResourcePathsHaiku.h"
 +#include "haiku/WebExtensionStagingDirectoryHaiku.h"
 +#include "haiku/WebExtensionStateHaiku.h"
@@ -123926,6 +124152,8 @@ index 0000000000000000000000000000000000000000..a593520e8b8bb829af0bc9d0f94d2723
 +        reply(target, B_WEBKIT_EXTENSION_PACKAGE_PREPARED, identifier, error);
 +        return;
 +    }
++    // Mozilla's signature of a Firefox package, checked over its unpacked files.
++    auto xpiSignature = verifyWebExtensionXPISignatureHaiku(prepared->path().utf8().toStdString());
 +    RefPtr<API::Error> parseError;
 +    Ref extension = WebExtension::create(WTF::move(*prepared), parseError);
 +    SUMMIT_EXTENSION_TIMING("prepare parsed manifest of %s", extension->displayName().utf8().legacyCStringPointer());
@@ -123948,6 +124176,14 @@ index 0000000000000000000000000000000000000000..a593520e8b8bb829af0bc9d0f94d2723
 +    add("description", extension->displayDescription());
 +    add("fingerprint", extension->nativeResourceFingerprint());
 +    add("verified_crx_id", extension->nativeVerifiedCRXIdentifier());
++    // xpi_signature: "verified" (xpi_signer: the add-on ID it was signed
++    // for) or "invalid" (xpi_signature_error); absent when unsigned.
++    using XPIStatus = WebExtensionXPISignatureHaiku::Status;
++    if (xpiSignature.status != XPIStatus::Unsigned) {
++        add("xpi_signature", xpiSignature.status == XPIStatus::Verified ? "verified"_s : "invalid"_s);
++        add("xpi_signer", String::fromUTF8(xpiSignature.signer.c_str()));
++        add("xpi_signature_error", String::fromUTF8(xpiSignature.error.c_str()));
++    }
 +    // Keep the complete parsed manifest available to the installer. WebKit's
 +    // permission sets omit names it does not recognize; that omission must not
 +    // hide a package requirement from the host's compatibility/consent UI.
