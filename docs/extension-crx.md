@@ -40,9 +40,24 @@ read mode: the published uBlock CRX has local/central ZIP version metadata that
 libzip's additional consistency mode rejects, although its payload is readable.
 The signed hostile-archive tests cover this separate path.
 
-CRX2, store publisher authentication and complete browser-specific API
-semantics remain unfinished. Mozilla's XPI signature is checked since 27 Oct
-(below).
+Store publisher authentication and complete browser-specific API semantics
+remain unfinished. Mozilla's XPI signature is checked since 27 Oct (below),
+and so are CRX2 packages.
+
+## CRX2
+
+Chrome's packages before CRX3 (version 2 in the `Cr24` header) carry the
+developer's RSA key and its PKCS #1 v1.5 SHA-1 signature over the ZIP that
+follows them. `verifyWebExtensionCRXHaiku` checks that signature
+(`verifyCRX2`), and the extension ID is the key's SHA-256 prefix as for
+CRX3, so a CRX2 package installs as a verified CRX3 one does ("Package
+signature verified"). Chrome stopped accepting CRX2 in 2019; old saved
+packages still use it. Checked on the host with the verifier alone: a CRX2
+built and signed with OpenSSL verified with the ID its key gives; one byte
+changed in its ZIP, and a zeroed signature, were refused; Honey's CRX3 still
+verified. On the X399 (27 Oct, an20 engine) that CRX2 installed with
+"Package signature verified." and the ID `ofkikkbcffofmmncfcmnojdjefdhfkmb`
+and ran; the changed one was refused ("Bad data", as an invalid CRX3 is).
 
 ## Mozilla XPI signatures
 

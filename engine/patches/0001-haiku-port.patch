@@ -104320,10 +104320,10 @@ index 0000000000000000000000000000000000000000..2f71885a2c8f6e4819dd9431a5848905
 +#endif // ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
 diff --git a/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionCRXHaiku.cpp b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionCRXHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..29cca3f3ed4f70310c84c70e7c83b00f34a86793
+index 0000000000000000000000000000000000000000..c437c4e32c8539dbb71f4334521a40fd7bf93736
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionCRXHaiku.cpp
-@@ -0,0 +1,385 @@
+@@ -0,0 +1,432 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +#include "config.h"
 +#include "WebExtensionCRXHaiku.h"
@@ -104455,9 +104455,56 @@ index 0000000000000000000000000000000000000000..29cca3f3ed4f70310c84c70e7c83b00f
 +}
 +}
 +
++namespace {
++// The extension ID: the first 16 bytes of the key's SHA-256, as letters a-p.
++std::optional<std::string> identifierForKey(Bytes key)
++{
++    std::array<uint8_t, EVP_MAX_MD_SIZE> hash;
++    unsigned size = 0;
++    if (EVP_Digest(key.data(), key.size(), hash.data(), &size, EVP_sha256(), nullptr) != 1 || size != 32)
++        return std::nullopt;
++    std::string name;
++    for (size_t index = 0; index < 16; ++index) {
++        name += static_cast<char>('a' + (hash[index] >> 4));
++        name += static_cast<char>('a' + (hash[index] & 15));
++    }
++    return name;
++}
++
++// CRX2 (Chrome before 2019): the developer's RSA key and its PKCS #1 v1.5
++// SHA-1 signature over the ZIP, which follows them
++// (https://chromium.googlesource.com/chromium/src/+/refs/tags/64.0.3282.0/components/crx_file/crx_file.h).
++std::expected<WebExtensionVerifiedCRXHaiku, Error> verifyCRX2(Bytes bytes)
++{
++    if (bytes.size() < 16) return std::unexpected(Error::InvalidHeader);
++    size_t keySize = littleEndian32(bytes.subspan(8, 4)), signatureSize = littleEndian32(bytes.subspan(12, 4));
++    if (keySize > maximumKeyBytes || signatureSize > maximumSignatureBytes) return std::unexpected(Error::LimitExceeded);
++    if (!keySize || !signatureSize || keySize + signatureSize > bytes.size() - 16) return std::unexpected(Error::InvalidHeader);
++    Bytes keyBytes = bytes.subspan(16, keySize), signature = bytes.subspan(16 + keySize, signatureSize);
++    size_t archiveOffset = 16 + keySize + signatureSize;
++    auto archive = bytes.subspan(archiveOffset);
++    if (archive.size() < 4 || archive[0] != 'P' || archive[1] != 'K') return std::unexpected(Error::InvalidHeader);
++    const auto* pointer = keyBytes.data();
++    std::unique_ptr<EVP_PKEY, decltype(&EVP_PKEY_free)> key(d2i_PUBKEY(nullptr, &pointer, static_cast<long>(keyBytes.size())), EVP_PKEY_free);
++    if (!key || pointer != keyBytes.data() + keyBytes.size() || EVP_PKEY_base_id(key.get()) != EVP_PKEY_RSA)
++        return std::unexpected(Error::InvalidSignature);
++    std::unique_ptr<EVP_MD_CTX, decltype(&EVP_MD_CTX_free)> context(EVP_MD_CTX_new(), EVP_MD_CTX_free);
++    EVP_PKEY_CTX* keyContext = nullptr;
++    if (!context || EVP_DigestVerifyInit(context.get(), &keyContext, EVP_sha1(), nullptr, key.get()) != 1
++        || EVP_PKEY_CTX_set_rsa_padding(keyContext, RSA_PKCS1_PADDING) != 1
++        || EVP_DigestVerifyUpdate(context.get(), archive.data(), archive.size()) != 1
++        || EVP_DigestVerifyFinal(context.get(), signature.data(), signature.size()) != 1)
++        return std::unexpected(Error::InvalidSignature);
++    auto name = identifierForKey(keyBytes);
++    if (!name) return std::unexpected(Error::InvalidSignature);
++    return WebExtensionVerifiedCRXHaiku { archiveOffset, std::move(*name) };
++}
++}
++
 +std::expected<WebExtensionVerifiedCRXHaiku, WebExtensionCRXErrorHaiku> verifyWebExtensionCRXHaiku(std::span<const uint8_t> bytes)
 +{
 +    if (bytes.size() < 12 || !std::equal(bytes.begin(), bytes.begin() + 4, "Cr24")) return std::unexpected(Error::InvalidHeader);
++    if (littleEndian32(bytes.subspan(4, 4)) == 2) return verifyCRX2(bytes);
 +    if (littleEndian32(bytes.subspan(4, 4)) != 3) return std::unexpected(Error::UnsupportedVersion);
 +    size_t headerSize = littleEndian32(bytes.subspan(8, 4));
 +    if (headerSize > maximumHeaderBytes) return std::unexpected(Error::LimitExceeded);
