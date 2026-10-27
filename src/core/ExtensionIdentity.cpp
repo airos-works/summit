@@ -2,6 +2,7 @@
 #include <openssl/evp.h>
 #include <algorithm>
 #include <array>
+#include <cstdint>
 #include <stdexcept>
 #include <vector>
 
@@ -61,6 +62,39 @@ std::string chromeIdentity(std::string key)
     }
     return identity;
 }
+// A protobuf length-delimited field reader for the CRX3 header
+// (Chromium's crx3.proto): field number and bytes; false when malformed.
+bool readVarint(std::string_view& bytes, uint64_t& value)
+{
+    value = 0;
+    for (int shift = 0; shift < 64 && !bytes.empty(); shift += 7) {
+        const auto byte = static_cast<unsigned char>(bytes.front());
+        bytes.remove_prefix(1);
+        value |= uint64_t(byte & 0x7f) << shift;
+        if (!(byte & 0x80)) return true;
+    }
+    return false;
+}
+template<typename Function>
+bool eachField(std::string_view bytes, const Function& function)
+{
+    while (!bytes.empty()) {
+        uint64_t key = 0, length = 0;
+        if (!readVarint(bytes, key)) return false;
+        switch (key & 7) {
+        case 0: if (!readVarint(bytes, length)) return false; break;
+        case 1: if (bytes.size() < 8) return false; bytes.remove_prefix(8); break;
+        case 5: if (bytes.size() < 4) return false; bytes.remove_prefix(4); break;
+        case 2:
+            if (!readVarint(bytes, length) || length > bytes.size()) return false;
+            function(key >> 3, bytes.substr(0, length));
+            bytes.remove_prefix(length);
+            break;
+        default: return false;
+        }
+    }
+    return true;
+}
 bool validIdentity(std::string_view value)
 {
     return !value.empty() && value.size() <= 255 && value != "." && value != ".."
@@ -96,5 +130,37 @@ std::string ExtensionIdentity(const nlohmann::json& manifest, std::string_view l
     }
     if (!validIdentity(identity)) throw std::runtime_error("The extension declares an invalid identity.");
     return identity;
+}
+
+bool CRXHasWebStorePublisherProof(std::string_view crx)
+{
+    // The SHA-256 of the store's publisher key (Chromium's kPublisherKeyHash,
+    // components/crx_file/crx_verifier.cc).
+    static constexpr std::array<unsigned char, 32> publisherKeyHash {
+        0x61, 0xf7, 0xf2, 0xa6, 0xbf, 0xcf, 0x74, 0xcd, 0x0b, 0xc1, 0xfe,
+        0x24, 0x97, 0xcc, 0x9b, 0x04, 0x25, 0x4c, 0x65, 0x8f, 0x79, 0xf2,
+        0x14, 0x53, 0x92, 0x86, 0x7e, 0xa8, 0x36, 0x63, 0x67, 0xcf };
+    if (crx.size() < 12 || crx.substr(0, 4) != "Cr24") return false;
+    auto little = [&](size_t offset) {
+        return uint32_t(static_cast<unsigned char>(crx[offset])) | uint32_t(static_cast<unsigned char>(crx[offset + 1])) << 8
+            | uint32_t(static_cast<unsigned char>(crx[offset + 2])) << 16 | uint32_t(static_cast<unsigned char>(crx[offset + 3])) << 24;
+    };
+    if (little(4) != 3) return false;
+    const size_t headerSize = little(8);
+    if (headerSize > crx.size() - 12) return false;
+    bool found = false;
+    // Proofs: field 2 (RSA) and 3 (ECDSA), each {1: public key, 2: signature}.
+    const bool parsed = eachField(crx.substr(12, headerSize), [&](uint64_t number, std::string_view proof) {
+        if (number != 2 && number != 3) return;
+        eachField(proof, [&](uint64_t field, std::string_view key) {
+            if (field != 1) return;
+            std::array<unsigned char, EVP_MAX_MD_SIZE> hash;
+            unsigned size = 0;
+            if (EVP_Digest(key.data(), key.size(), hash.data(), &size, EVP_sha256(), nullptr) == 1 && size == publisherKeyHash.size()
+                && std::equal(publisherKeyHash.begin(), publisherKeyHash.end(), hash.begin()))
+                found = true;
+        });
+    });
+    return parsed && found;
 }
 }

@@ -25,7 +25,8 @@ identity, update themselves from the same services, with the same checks
 (#104, [extension-fixes-2026-10-20.md](extension-fixes-2026-10-20.md)).
 
 This does not add API compatibility for arbitrary extensions. The review
-continues to distinguish CRX signature verification from store provenance;
+says whether a CRX was published by the Chrome Web Store (its publisher
+proof, since 27 Oct; `extension-crx.md`), and store packages must be;
 Firefox's XPI signature is verified as well, for store downloads and saved
 packages alike (since 27 Oct, `extension-crx.md`). Package downloads and
 permissions do not bypass the existing consent, fingerprint or restart checks.

@@ -1,4 +1,5 @@
 #include "core/ExtensionIdentity.h"
+#include <cstdint>
 #include <cstdio>
 #include <fstream>
 #include <functional>
@@ -54,6 +55,36 @@ int main(int argc, char** argv)
     rejects({{"browser_specific_settings", {{"gecko", {{"id", 42}}}}}}, "non-string Gecko identity is rejected");
     rejects({{"applications", {{"gecko", {{"id", "../escape"}}}}}}, "unsafe declared identity is rejected");
     rejects(json::array(), "non-object manifest is rejected");
+    // CRX3 headers with and without a proof by the Chrome Web Store's
+    // publisher key (its public ECDSA key, from a store package's header).
+    {
+        const std::string publisherHex = "3059301306072a8648ce3d020106082a8648ce3d03010703420004b402f9a91caee10c84f8dc9b177298a5e032d5db"
+            "2b59d849c0efbee86bf9f86252b86a35536c078b38d4ff9addbcddf9bc482269cc2d6ca10160b451e37bd1cf";
+        std::string publisher;
+        for (size_t i = 0; i + 1 < publisherHex.size(); i += 2) publisher += static_cast<char>(std::stoi(publisherHex.substr(i, 2), nullptr, 16));
+        auto lengthDelimited = [](int field, const std::string& bytes) {
+            std::string out(1, static_cast<char>(field << 3 | 2));
+            for (size_t length = bytes.size(); ; length >>= 7) {
+                out += static_cast<char>((length & 0x7f) | (length > 0x7f ? 0x80 : 0));
+                if (length <= 0x7f) break;
+            }
+            return out + bytes;
+        };
+        auto crx = [&](int version, const std::string& header) {
+            std::string out = "Cr24";
+            for (uint32_t value : { uint32_t(version), uint32_t(header.size()) })
+                for (int shift = 0; shift < 32; shift += 8) out += static_cast<char>(value >> shift & 0xff);
+            return out + header + "PK\x05\x06";
+        };
+        auto proof = [&](const std::string& key) { return lengthDelimited(1, key) + lengthDelimited(2, std::string(64, 's')); };
+        const std::string developer(294, 'k');
+        check(summit::CRXHasWebStorePublisherProof(crx(3, lengthDelimited(2, proof(developer)) + lengthDelimited(3, proof(publisher)))),
+            "a CRX3 with the store's publisher proof is the store's");
+        check(!summit::CRXHasWebStorePublisherProof(crx(3, lengthDelimited(2, proof(developer)))), "a developer-signed CRX3 is not the store's");
+        check(!summit::CRXHasWebStorePublisherProof(crx(2, lengthDelimited(3, proof(publisher)))), "a CRX2 is never the store's");
+        check(!summit::CRXHasWebStorePublisherProof(crx(3, lengthDelimited(3, proof(publisher)).substr(0, 40))), "a malformed header has no publisher");
+        check(!summit::CRXHasWebStorePublisherProof("PK\x03\x04"), "a ZIP is not a CRX");
+    }
     std::printf("EXTENSION_IDENTITY_RESULT checks=%d failures=%d\n", checks, failures);
     return failures ? 1 : 0;
 }

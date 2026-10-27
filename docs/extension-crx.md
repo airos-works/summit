@@ -40,8 +40,25 @@ read mode: the published uBlock CRX has local/central ZIP version metadata that
 libzip's additional consistency mode rejects, although its payload is readable.
 The signed hostile-archive tests cover this separate path.
 
-Store publisher authentication and complete browser-specific API semantics
-remain unfinished. Mozilla's XPI signature is checked since 27 Oct (below),
+Complete browser-specific API semantics remain unfinished.
+
+## Chrome Web Store publisher
+
+A package the Chrome Web Store publishes carries, besides the developer's
+proof, one by the store's own publisher key (an ECDSA proof whose key's
+SHA-256 is Chromium's `kPublisherKeyHash`,
+`components/crx_file/crx_verifier.cc`). The engine verifies every proof of
+a CRX3; `CRXHasWebStorePublisherProof` (`src/core/ExtensionIdentity.cpp`)
+reads the staged package's header and finds whether one is the
+publisher's. The review then says "Package signature verified; published
+by the Chrome Web Store." or "… It was not published by the Chrome Web
+Store.", and a package from the Chrome Web Store link, or a store update
+(`ExtensionUpdater`, source `chrome`), without that proof is refused, as
+Chrome refuses it. Updates with a Mozilla signature that does not verify
+are refused too. Checked with `ExtensionIdentityTests` (CRX3 headers with
+and without the publisher's key, a CRX2, a malformed header) and on the
+X399 (27 Oct): Honey's CRX3 from the store showed the publisher line and
+installed; the CRX2 fixture showed the other. Mozilla's XPI signature is checked since 27 Oct (below),
 and so are CRX2 packages.
 
 ## CRX2

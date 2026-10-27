@@ -8,6 +8,7 @@
 #include <WebKit/WebKitContext.h>
 #include <MessageRunner.h>
 #include <OS.h>
+#include <fstream>
 #include <nlohmann/json.hpp>
 #include <algorithm>
 #include <cstdio>
@@ -285,6 +286,16 @@ void ExtensionUpdater::Prepared(const BMessage& message)
         const auto verified = field(message, "verified_crx_id");
         identity = ExtensionIdentity(manifest, "summit-" + found->package->Path().parent_path().filename().string(), verified);
         if (candidate.source == "chrome" && verified != candidate.identifier) { fail("its package is not signed for this extension."); return; }
+        // As at installation: a store package carries the store's publisher
+        // proof, and a Mozilla signature that does not verify is refused.
+        if (candidate.source == "chrome") {
+            std::ifstream crx(found->package->Path(), std::ios::binary);
+            std::string header(12 + 1024 * 1024, '\0');
+            crx.read(header.data(), static_cast<std::streamsize>(header.size()));
+            header.resize(static_cast<size_t>(crx.gcount()));
+            if (!CRXHasWebStorePublisherProof(header)) { fail("its package is not signed by the Chrome Web Store."); return; }
+        }
+        if (field(message, "xpi_signature") == "invalid") { fail("its Mozilla signature is not valid: " + field(message, "xpi_signature_error") + "."); return; }
         update->source = ExtensionUpdateSource(manifest, identity, verified);
         if (manifest.contains("update_url") && manifest["update_url"].is_string()) update->updateURL = manifest["update_url"].get<std::string>();
     } catch (const std::exception& error) {
