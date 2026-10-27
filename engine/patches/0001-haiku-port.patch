@@ -96511,7 +96511,7 @@ index 0000000000000000000000000000000000000000..06e0edb16921b6b4de36743b57e1e73a
 +
 +#endif // ENABLE(WK_WEB_EXTENSIONS)
 diff --git a/Source/WebKit/UIProcess/Extensions/API/WebExtensionContextAPIStorage.cpp b/Source/WebKit/UIProcess/Extensions/API/WebExtensionContextAPIStorage.cpp
-index 1a507c778ac462b5054cba989576494682fc861f..b9e13fb4e5f3c7e26839f3543ea62397358c3e64 100644
+index 1a507c778ac462b5054cba989576494682fc861f..a77d65f18ff50b5238cdb745c4554aef657a958f 100644
 --- a/Source/WebKit/UIProcess/Extensions/API/WebExtensionContextAPIStorage.cpp
 +++ b/Source/WebKit/UIProcess/Extensions/API/WebExtensionContextAPIStorage.cpp
 @@ -122,7 +122,10 @@ void WebExtensionContext::storageSet(WebPageProxyIdentifier webPageProxyIdentifi
@@ -96526,6 +96526,56 @@ index 1a507c778ac462b5054cba989576494682fc861f..b9e13fb4e5f3c7e26839f3543ea62397
          if (!errorMessage.isEmpty()) {
              completionHandler(toWebExtensionError(callingAPIName, nullString(), errorMessage));
              return;
+@@ -224,7 +227,10 @@ void WebExtensionContext::fireStorageChangedEventIfNeeded(HashMap<String, String
+ 
+     // Dispatch this work to a background thread to avoid hangs on the main thread. See https://webkit.org/b/305347.
+     Ref queue = extensionStorageQueue();
+-    queue->dispatch([this, protectedThis = Ref { *this }, oldKeysAndValues = crossThreadCopy(WTF::move(oldKeysAndValues)), newKeysAndValues = crossThreadCopy(WTF::move(newKeysAndValues)), dataType]() mutable {
++    // The context goes back to the main thread in every case: this may hold
++    // its last reference (an extension unloaded at quit), and it must not be
++    // destroyed here, where releasing its atom strings crashes.
++    queue->dispatch([protectedThis = Ref { *this }, oldKeysAndValues = crossThreadCopy(WTF::move(oldKeysAndValues)), newKeysAndValues = crossThreadCopy(WTF::move(newKeysAndValues)), dataType]() mutable {
+         Ref changedData = JSON::Object::create();
+ 
+         // Process new or changed keys
+@@ -260,24 +266,26 @@ void WebExtensionContext::fireStorageChangedEventIfNeeded(HashMap<String, String
+             }
+         }
+ 
+-        if (!changedData->size())
+-            return;
+-
+         constexpr auto type = WebExtensionEventListenerType::StorageOnChanged;
+ 
+         Vector<String> serializedJSONStrings;
+-        serializeToMultipleJSONStrings(changedData, [&](String&& jsonChunk) {
+-            serializedJSONStrings.append(WTF::move(jsonChunk));
+-        });
++        if (changedData->size()) {
++            serializeToMultipleJSONStrings(changedData, [&](String&& jsonChunk) {
++                serializedJSONStrings.append(WTF::move(jsonChunk));
++            });
++        }
+ 
+-        WorkQueue::mainSingleton().dispatch([this, protectedThis = Ref { *this }, serializedJSONStrings = crossThreadCopy(WTF::move(serializedJSONStrings)), dataType]() mutable {
++        WorkQueue::mainSingleton().dispatch([protectedThis = WTF::move(protectedThis), serializedJSONStrings = crossThreadCopy(WTF::move(serializedJSONStrings)), dataType]() mutable {
++            if (serializedJSONStrings.isEmpty())
++                return;
++            Ref context = protectedThis;
+             // Unlike other extension events which are only dispatched to the web process that hosts all the extension-related web views (background page, popup, full page extension content),
+             // content scripts are allowed to listen to storage.onChanged events.
+-            if (isStorageAllowedInUntrustedContexts(dataType))
+-                sendToContentScriptProcessesForEvent(type, Messages::WebExtensionContextProxy::DispatchStorageChangedEvent(serializedJSONStrings, dataType, WebExtensionContentWorldType::ContentScript));
++            if (context->isStorageAllowedInUntrustedContexts(dataType))
++                context->sendToContentScriptProcessesForEvent(type, Messages::WebExtensionContextProxy::DispatchStorageChangedEvent(serializedJSONStrings, dataType, WebExtensionContentWorldType::ContentScript));
+ 
+-            wakeUpBackgroundContentIfNecessaryToFireEvents({ type }, [=, this, protectedThis = Ref { *this }] {
+-                sendToProcessesForEvent(type, Messages::WebExtensionContextProxy::DispatchStorageChangedEvent(serializedJSONStrings, dataType, WebExtensionContentWorldType::Main));
++            context->wakeUpBackgroundContentIfNecessaryToFireEvents({ type }, [=, context = context.copyRef()] {
++                context->sendToProcessesForEvent(type, Messages::WebExtensionContextProxy::DispatchStorageChangedEvent(serializedJSONStrings, dataType, WebExtensionContentWorldType::Main));
+             });
+         });
+     });
 diff --git a/Source/WebKit/UIProcess/Extensions/API/WebExtensionContextAPIWebNavigation.cpp b/Source/WebKit/UIProcess/Extensions/API/WebExtensionContextAPIWebNavigation.cpp
 new file mode 100644
 index 0000000000000000000000000000000000000000..d2b533a9e2910ceba00356de494e5783cac3b51c
