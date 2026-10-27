@@ -742,11 +742,11 @@ static nlohmann::json HistoryItemJSON(const PageRecord& page)
     };
 }
 
-void BrowserWindow::RecordVisit(const PageRecord& visit)
+void BrowserWindow::RecordVisit(const PageRecord& visit, uint32 transition)
 {
     std::optional<PageRecord> recorded;
     fShared->Change([&](Profile& profile) -> uint32 {
-        if (!profile.Visit(visit)) return 0;
+        if (!(transition ? profile.VisitWithTransition(visit, transition) : profile.Visit(visit))) return 0;
         for (const auto& page : profile.history) {
             if (page.url == visit.url) { recorded = page; break; }
         }
@@ -801,8 +801,23 @@ void BrowserWindow::HistoryCommand(const BMessage& message, uint64 identifier)
             for (const auto& page : profile.history) {
                 if (page.url != url) continue;
                 const auto id = std::to_string(std::hash<std::string>()(page.url));
+                // Chrome's TransitionType for the visit's Firefox type.
+                auto transition = [&](int64_t time) {
+                    for (const auto& [visitTime, type] : page.visitTransitions) {
+                        if (visitTime != time) continue;
+                        switch (type) {
+                            case 2: return "typed";
+                            case 3: return "auto_bookmark";
+                            case 4: return "auto_subframe";
+                            case 8: return "manual_subframe";
+                            case 9: return "reload";
+                            default: return "link";
+                        }
+                    }
+                    return "link";
+                };
                 for (auto time : HistoryVisitTimes(page))
-                    visits.push_back({{"id", id}, {"visitId", std::to_string(time)}, {"visitTime", time / 1000.0}, {"referringVisitId", "0"}, {"transition", "link"}, {"isLocal", true}});
+                    visits.push_back({{"id", id}, {"visitId", std::to_string(time)}, {"visitTime", time / 1000.0}, {"referringVisitId", "0"}, {"transition", transition(time)}, {"isLocal", true}});
                 if (visits.empty() && page.visited)
                     visits.push_back({{"id", id}, {"visitId", std::to_string(page.visited)}, {"visitTime", page.visited * 1000.0}, {"referringVisitId", "0"}, {"transition", "link"}, {"isLocal", true}});
                 break;

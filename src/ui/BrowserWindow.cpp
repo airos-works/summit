@@ -4222,6 +4222,7 @@ void BrowserWindow::MessageReceived(BMessage* message)
             const std::string target = typed ? AddressTarget() : std::string(url);
             NavigationTrace("window handles the address: %s", target.c_str());
             HideSuggestions();
+            if (auto* active = ActiveTab()) active->nextTransition = 2;
             Navigate(target);
             // As in other browsers, the page takes the focus once an address
             // is entered, so the field follows the page again.
@@ -4277,6 +4278,7 @@ void BrowserWindow::MessageReceived(BMessage* message)
             if (message->FindString("url", &url) != B_OK || !fSuggestions->IsShowing()) break;
             const std::string target = url;
             HideSuggestions();
+            if (auto* active = ActiveTab()) active->nextTransition = 2;
             Navigate(target);
             if (auto* tab = ActiveTab()) tab->view->MakeFocus();
             break;
@@ -4369,7 +4371,10 @@ void BrowserWindow::MessageReceived(BMessage* message)
 #else
                 tab->view->StopLoading();
 #endif
-            } else tab->view->Reload();
+            } else {
+                tab->nextTransition = 9;
+                tab->view->Reload();
+            }
         } break;
         case kHome: Navigate(HomeAddress()); break;
         case kFocusAddress: fAddress->MakeFocus(); fAddress->TextView()->SelectAll(); break;
@@ -4703,7 +4708,12 @@ void BrowserWindow::MessageReceived(BMessage* message)
                 break;
             }
             if (message->GetBool("new_tab", false)) CreateTab(url);
-            else Navigate(url);
+            else {
+                // The same message opens history entries and dropped links.
+                if (auto* active = ActiveTab(); active && fShared->Read([&](const Profile& profile) { return profile.bookmarks.Contains(url); }))
+                    active->nextTransition = 3;
+                Navigate(url);
+            }
             break;
         }
         case kBookmarkButton: ShowBookmarkMenu(); break;
@@ -5920,6 +5930,8 @@ void BrowserWindow::WebKitStateChanged(const BMessage& message)
         tab->connectionCertificate.MakeEmpty();
         message.FindMessage("connectionCertificate", &tab->connectionCertificate);
         if (message.FindString("loadOutcome", &value) == B_OK && value) tab->loadOutcome = value;
+        // A navigation that failed or was cancelled leaves no visit to classify.
+        if (tab->loadOutcome == "failed" || tab->loadOutcome == "cancelled" || tab->loadOutcome == "process-exited") tab->nextTransition = 0;
         bool failed = false;
         if (message.FindBool("loadError", &failed) == B_OK) {
             if (!failed) tab->certificate.reset();
@@ -6041,9 +6053,11 @@ void BrowserWindow::WebKitStateChanged(const BMessage& message)
             && message.FindString("loadSuccessTitle", &successTitle) == B_OK && successTitle) {
             const auto stored = StoredURL(successURL);
             const PageRecord visit { stored, successTitle };
-            // Private windows leave no history.
+            // Private windows leave no history. A navigation the window did
+            // not start (a link, the page's own) is a link visit.
+            const uint32 transition = std::exchange(tab->nextTransition, 0);
             if (!fPrivate && tab->readerURL != successURL)
-                RecordVisit(visit);
+                RecordVisit(visit, transition ? transition : 1);
             internalPageLoaded = stored == kHistoryPage || stored == kBookmarksPage;
         }
     }

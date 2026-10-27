@@ -217,6 +217,10 @@ private:
         std::string deferredURL;
         // system_time() when the tab was last selected, for choosing which to unload.
         bigtime_t lastSelected = 0;
+        // How the window started the tab's next navigation, as a Firefox visit
+        // type for its history visit: 2 typed (the address field or a
+        // suggestion), 3 a bookmark, 9 a reload; 0 a link (the page's own).
+        uint32 nextTransition = 0;
         // The tab's Developer Tools window, while it is open, and whether it
         // is docked under the page.
         BMessenger devTools { };
@@ -611,7 +615,8 @@ private:
     void SetTabPinned(int64 id, bool pinned);
     // Records a visit in the profile's history; outside private windows,
     // extensions hear of it (history.onVisited).
-    void RecordVisit(const PageRecord& visit);
+    // transition: the visit's Firefox type (Tab::nextTransition), 0 unknown.
+    void RecordVisit(const PageRecord& visit, uint32 transition = 0);
     // An extension's chrome.history call (B_WEBKIT_BROWSER_HISTORY).
     void HistoryCommand(const BMessage& message, uint64 identifier);
     // An extension's chrome.bookmarks call (B_WEBKIT_BROWSER_BOOKMARKS).

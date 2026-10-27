@@ -558,8 +558,10 @@ bool Profile::Save(const std::filesystem::path& path, std::string& error, int64_
     } catch (const std::exception&) { }
     return true;
 }
-static bool RecordVisit(Profile& profile, const PageRecord& page, int64_t micros, bool download = false)
+static bool RecordVisit(Profile& profile, const PageRecord& page, int64_t micros, bool download = false, uint32_t transition = 0)
 {
+    if (download) transition = 7;
+    const bool counts = transition != 4 && transition != 7 && transition != 8 && transition != 9;
     if (page.url.rfind("https://", 0) != 0 && page.url.rfind("http://", 0) != 0) return false;
     if (page.url.size() > 65536 || page.title.size() > 65536 || page.url.find('\0') != std::string::npos) return false;
     int visits = 0;
@@ -582,11 +584,11 @@ static bool RecordVisit(Profile& profile, const PageRecord& page, int64_t micros
     history.insert(history.begin(), page);
     auto& record = history.front();
     if (download && !oldTitle.empty()) record.title = std::move(oldTitle);
-    if (download) transitions.emplace_back(micros, 7);
+    if (transition) transitions.emplace_back(micros, transition);
     record.visitTransitions = std::move(transitions);
     SetHistoryVisitTimes(record, std::move(times));
-    record.visits = std::min(visits + (download ? 0 : 1), 1000000);
-    record.visitCountKnown = countKnown || download;
+    record.visits = std::min(visits + (counts ? 1 : 0), 1000000);
+    record.visitCountKnown = countKnown || !counts;
     record.bar = false;
     std::stable_sort(history.begin(), history.end(), [](const auto& a, const auto& b) { return a.visited > b.visited; });
     if (history.size() > 2000) history.resize(2000);
@@ -595,6 +597,10 @@ static bool RecordVisit(Profile& profile, const PageRecord& page, int64_t micros
 bool Profile::Visit(const PageRecord& page)
 {
     return RecordVisit(*this, page, HistoryNowMicroseconds());
+}
+bool Profile::VisitWithTransition(const PageRecord& page, uint32_t transition)
+{
+    return RecordVisit(*this, page, HistoryNowMicroseconds(), false, transition <= 9 ? transition : 0);
 }
 bool Profile::Visit(const PageRecord& page, int64_t now)
 {

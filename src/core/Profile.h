@@ -134,6 +134,10 @@ struct Profile {
     // Records a visit to an http(s) page; returns false for other pages.
     bool Visit(const PageRecord& page);
     bool Visit(const PageRecord& page, int64_t now);
+    // A visit of a known Firefox visit type (1 link, 2 typed, 3 bookmark,
+    // 9 reload, …; 0 unknown). As in Firefox, a reload, embed or framed-link
+    // visit does not add to the page's visit count.
+    bool VisitWithTransition(const PageRecord& page, uint32_t transition);
     // A download is a history visit of its original URL, but does not add to
     // the page's visit count. Keep an existing title; otherwise use filename.
     // The caller supplies the start time in microseconds, once per download.

@@ -1,6 +1,7 @@
 #include "core/Profile.h"
 #include "core/HistoryVisits.h"
 #include "core/BookmarkQueries.h"
+#include <algorithm>
 #include <filesystem>
 #include <iostream>
 #include <unistd.h>
@@ -63,6 +64,25 @@ int main()
     CHECK(retained.history.size() == 1 && HistoryVisitCount(retained.history[0]) == 0);
     CHECK(retained.history[0].visitTimes.size() == kRecentHistoryVisits);
     CHECK(retained.history[0].visitTransitions.size() == retained.history[0].visitTimes.size());
+    {
+        // Summit's own visits keep the way they started: typed and link
+        // visits count, a reload is recorded but does not, as in Firefox.
+        Profile visits;
+        const std::string page = "https://typed-visit.test/";
+        CHECK(visits.VisitWithTransition({page, "Typed"}, 2));
+        CHECK(visits.VisitWithTransition({page, "Reloaded"}, 9));
+        CHECK(visits.VisitWithTransition({page, "Followed"}, 1));
+        CHECK(visits.history.size() == 1 && HistoryVisitCount(visits.history[0]) == 2);
+        std::vector<uint32_t> types;
+        for (const auto& [time, type] : visits.history[0].visitTransitions) types.push_back(type);
+        std::sort(types.begin(), types.end());
+        CHECK((types == std::vector<uint32_t> {1, 2, 9}));
+        CHECK(QueryBookmarks("place:transition=2", {}, visits.history).items.size() == 1);
+        CHECK(QueryBookmarks("place:transition=3", {}, visits.history).items.empty());
+        CHECK(!visits.VisitWithTransition({"about:blank", ""}, 2));
+        // An unknown visit (0) records no type and counts.
+        CHECK(visits.VisitWithTransition({page, ""}, 0) && HistoryVisitCount(visits.history[0]) == 3 && visits.history[0].visitTransitions.size() == 3);
+    }
     std::cout << checks << " download visit checks, " << failures << " failures\n";
     return failures ? 1 : 0;
 }

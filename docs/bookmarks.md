@@ -416,8 +416,21 @@ typed (2); automatic bookmark (2) bookmark (3); automatic subframe (3) embed
 Chrome importer only marks a page typed when its `typed_count` is above zero.
 A History file without the column keeps no types. Checked by
 `BookmarkTransitionQueryTests` (six transitions, `place:transition` filters,
-an older History file). Classification of new Summit navigations/downloads
-remains unfinished. Grouped tag, site, date and virtual-root queries with transition
+an older History file).
+
+Summit's own visits are classified as well since 27 Oct (downloads since
+088ba3d): a page loaded from the address field or a suggestion is a typed
+visit (2), from a bookmark (a bookmarked address opened from the bar, menus
+or Bookmarks page) a bookmark visit (3), a reload a reload visit (9), and
+any other load (a link, the page's own navigation) a link visit (1)
+(`Tab::nextTransition`, `Profile::VisitWithTransition`). As in Firefox, a
+reload does not add to the visit count. A load that fails or is cancelled
+forgets the pending type. `chrome.history.getVisits` reports the visits'
+`transition` (typed, auto_bookmark, reload, …) instead of always `link`.
+Redirect targets are not told apart (the engine does not report them).
+Checked by `DownloadVisitTests` and on the X399 (27 Oct): the address field,
+Reload, a bookmark, a history entry that is not bookmarked and the MCP's
+navigate gave 2, 9, 3, 1 and 1, with the reload not counted. Grouped tag, site, date and virtual-root queries with transition
 conditions show an explanation. Invalid numeric filters also show an explanation
 instead of reproducing Firefox's fallback to a broader query.
 
