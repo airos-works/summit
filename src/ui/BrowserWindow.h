@@ -490,11 +490,15 @@ private:
     // or what sidebarAction.setPanel and setTitle made them in this window.
     std::pair<std::string, std::string> SidebarPage(const std::string& extension) const;
     std::map<std::string, std::pair<std::string, std::string>> fSidebarOverrides;
+    // The sidebar beside fSideSplit: the pages and the side dock beside them.
     BSplitView* fContentSplit = nullptr;
+    BSplitView* fSideSplit = nullptr;
     // Docked Developer Tools: the slot under the pages they are placed over.
     BSplitView* fPageSplit = nullptr;
     BView* fDock = nullptr;
     BView* fSideDock = nullptr;
+    float fSplitterSize = 0;
+    void UpdateSplitters();
     void PlaceDockedDeveloperTools();
     BGroupView* fSidebar = nullptr;
     BStringView* fSidebarTitle = nullptr;

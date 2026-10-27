@@ -1000,11 +1000,13 @@ BrowserWindow::BrowserWindow(std::shared_ptr<SharedProfile> profile, std::string
 #if SUMMIT_MODERN_WEBKIT
         .AddSplit(B_HORIZONTAL, 0, 1.0f).GetSplitView(&fContentSplit)
             .Add(fSidebar, 0.25f)
-            .AddSplit(B_VERTICAL, 0, 0.75f).GetSplitView(&fPageSplit)
-                .Add(fPages, 0.65f)
-                .Add(fDock = new DockSlot(), 0.35f)
+            .AddSplit(B_HORIZONTAL, 0, 0.75f).GetSplitView(&fSideSplit)
+                .AddSplit(B_VERTICAL, 0, 0.75f).GetSplitView(&fPageSplit)
+                    .Add(fPages, 0.65f)
+                    .Add(fDock = new DockSlot(), 0.35f)
+                .End()
+                .Add(fSideDock = new DockSlot(true), 0.4f)
             .End()
-            .Add(fSideDock = new DockSlot(true), 0.4f)
         .End()
 #else
         .Add(fPages, 1)
@@ -1015,6 +1017,8 @@ BrowserWindow::BrowserWindow(std::shared_ptr<SharedProfile> profile, std::string
     fNoticeBar->Hide();
     fDock->Hide();
     fSideDock->Hide();
+    fSplitterSize = fContentSplit->SplitterSize();
+    UpdateSplitters();
 #endif
 #if SUMMIT_MODERN_WEBKIT
     fFullScreenNotice = new BStringView("fullscreen-notice", "");
@@ -3329,6 +3333,7 @@ void BrowserWindow::ShowSidebar(const std::string& extension, const std::string&
     fSidebarExtension = extension;
     fSidebarTitle->SetText(title.c_str());
     if (fSidebar->IsHidden(fSidebar)) fSidebar->Show();
+    UpdateSplitters();
     view->LoadURL(url.c_str());
 }
 
@@ -3394,6 +3399,18 @@ void BrowserWindow::CloseSidebar()
     delete std::exchange(fSidebarView, nullptr);
     fSidebarExtension.clear();
     if (!fSidebar->IsHidden(fSidebar)) fSidebar->Hide();
+    UpdateSplitters();
+}
+
+// BSplitLayout lays out the splitter beside a hidden item too, drawn and
+// draggable, so each split holds one pane that can be hidden and has no
+// splitter while that pane is hidden.
+void BrowserWindow::UpdateSplitters()
+{
+    if (!fContentSplit || !fSideSplit || !fPageSplit) return;
+    fContentSplit->SetSplitterSize(fSidebar->IsHidden(fSidebar) ? 0 : fSplitterSize);
+    fSideSplit->SetSplitterSize(fSideDock->IsHidden(fSideDock) ? 0 : fSplitterSize);
+    fPageSplit->SetSplitterSize(fDock->IsHidden(fDock) ? 0 : fSplitterSize);
 }
 #endif
 
@@ -4010,6 +4027,7 @@ bool BrowserWindow::SetPageFullScreen(int64 tab, bool enter)
         if (fSidebar && !fSidebar->IsHidden(fSidebar)) {
             fFullScreenHidden.push_back(fSidebar);
             fSidebar->Hide();
+            UpdateSplitters();
         }
         SetLook(B_NO_BORDER_WINDOW_LOOK);
         SetWindowFlags(this, Flags() | B_NOT_MOVABLE | B_NOT_RESIZABLE);
@@ -4032,6 +4050,7 @@ bool BrowserWindow::SetPageFullScreen(int64 tab, bool enter)
         SetLook(fBeforeFullScreenLook);
         for (auto* view : fFullScreenHidden) view->Show();
         fFullScreenHidden.clear();
+        UpdateSplitters();
         MoveTo(fBeforeFullScreen.LeftTop());
         ResizeTo(fBeforeFullScreen.Width(), fBeforeFullScreen.Height());
     }
@@ -5688,7 +5707,7 @@ void BrowserWindow::ShowPageSource()
 // hidden until their tab is selected.
 void BrowserWindow::PlaceDockedDeveloperTools()
 {
-    if (!fDock || !fSideDock || !fPageSplit || !fContentSplit) return;
+    if (!fDock || !fSideDock || !fPageSplit || !fSideSplit || !fContentSplit) return;
     const auto* active = ActiveTab();
     const bool show = active && active->devTools.IsValid() && active->devToolsDocked && !fClosingWindow && !IsHidden() && !IsMinimized();
     const int32 side = show ? active->devToolsDockSide : -1;
@@ -5711,7 +5730,10 @@ void BrowserWindow::PlaceDockedDeveloperTools()
         fSideDock->Hide();
         changed = true;
     }
-    if (changed) Layout(true);
+    if (changed) {
+        UpdateSplitters();
+        Layout(true);
+    }
     BView* slot = side == 1 ? fSideDock : fDock;
     for (auto& tab : fTabs) {
         if (!tab.devTools.IsValid() || !tab.devToolsDocked) continue;
