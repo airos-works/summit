@@ -36737,7 +36737,7 @@ new file mode 100644
 index 0000000000000000000000000000000000000000..2e82573aac195039695186ee0b27488352ce7d10
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/haiku/MediaDecoderSelectionHaiku.cpp
-@@ -0,0 +1,1028 @@
+@@ -0,0 +1,1051 @@
 +/*
 + * Copyright (C) 2026 Haiku, Inc. All rights reserved.
 + *
@@ -36951,6 +36951,7 @@ index 0000000000000000000000000000000000000000..2e82573aac195039695186ee0b274883
 +// of the media kit's 'ffmp' family.
 +constexpr uint32 ffmpegCodecH264 = 27;
 +constexpr uint32 ffmpegCodecHEVC = 173;
++constexpr uint32 ffmpegCodecVP9 = 167;
 +
 +// A decoder add-on loaded by name, and what it is known to decode.
 +struct NamedDecoderAddOn {
@@ -37003,6 +37004,9 @@ index 0000000000000000000000000000000000000000..2e82573aac195039695186ee0b274883
 +    // YouTube's page asks for one set instead of two (it seeks just after
 +    // it starts) and keeps the engine where a new set would no longer fit.
 +    { "sunxi_cedar", ffmpegCodecH264, 4096, 4096, 4096 * 2304, !cedarPlanesRequested(), 1, false, "/dev/misc/sunxi_ve", true },
++    // VP9 profiles 0 and 2 (air/OS from 8bf4a07850): YouTube's only codec
++    // for 1440p and 2160p. A 2160p60 picture takes the engine 10 ms.
++    { "sunxi_cedar", ffmpegCodecVP9, 4096, 4096, 4096 * 2304, !cedarPlanesRequested(), 1, false, "/dev/misc/sunxi_ve", true },
 +#endif
 +    { "rpi_mmal", ffmpegCodecH264, 1920, 1920, 1920 * 1088, false, 0, false, nullptr, false },
 +};
@@ -37311,6 +37315,25 @@ index 0000000000000000000000000000000000000000..2e82573aac195039695186ee0b274883
 +{
 +    auto info = h264SequenceInfo(avcC);
 +    return info ? std::optional { info->maxReferenceFrames } : std::nullopt;
++}
++
++// A hardware decoder for VP9: a named add-on that lists VP9 among its formats
++// (a sunxi_cedar from before VP9 does not).
++bool hardwareVP9DecoderHaiku()
++{
++    static const bool available = [] {
++        auto* addOn = namedAddOnFor(ffmpegCodecVP9);
++        media_format* formats = nullptr;
++        size_t count = 0;
++        if (!addOn || addOn->plugin->GetSupportedFormats(&formats, &count) != B_OK)
++            return false;
++        for (size_t i = 0; i < count; ++i) {
++            if (ffmpegCodecOf(formats[i]) == ffmpegCodecVP9)
++                return true;
++        }
++        return false;
++    }();
++    return available;
 +}
 +
 +bool hardwareDecoderCannotDecodeHaiku(const media_codec_info& decoder, std::span<const uint8_t> avcC)
@@ -37771,7 +37794,7 @@ new file mode 100644
 index 0000000000000000000000000000000000000000..1a59f5ca77ca81301993268bcdee2f36a4d97113
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/haiku/MediaDecoderSelectionHaiku.h
-@@ -0,0 +1,200 @@
+@@ -0,0 +1,202 @@
 +/*
 + * Copyright (C) 2026 Haiku, Inc. All rights reserved.
 + *
@@ -37857,6 +37880,8 @@ index 0000000000000000000000000000000000000000..1a59f5ca77ca81301993268bcdee2f36
 +// stream with this avcC. Only the NVDEC add-on under the name it has now
 +// ("nvdec h264") is suspected; a fixed add-on under another name is trusted.
 +// SUMMIT_NVDEC_MAX_REFERENCES overrides the 15 reference frames it handles.
++// Whether VP9 can be decoded in hardware (the Radxa Cubie A7S's video engine).
++bool hardwareVP9DecoderHaiku();
 +bool hardwareDecoderCannotDecodeHaiku(const media_codec_info& decoder, std::span<const uint8_t> avcC);
 +
 +// Sets `decoder` to an add-on other than NVDEC that accepts `format`
@@ -40370,7 +40395,7 @@ new file mode 100644
 index 0000000000000000000000000000000000000000..3c9b1ac409205125b4b5b28112af0e2b26d33a55
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaikuMSE.cpp
-@@ -0,0 +1,3171 @@
+@@ -0,0 +1,3182 @@
 +/*
 + * Copyright (C) 2026 Summit contributors.
 + *
@@ -42272,6 +42297,8 @@ index 0000000000000000000000000000000000000000..3c9b1ac409205125b4b5b28112af0e2b
 +// VP8, WebM's other video codec) are declined to Media Source Extensions
 +// (and media capabilities, which ask supportsType()), and sites pick H.264.
 +// SUMMIT_MEDIA_PREFER_H264=0 offers them again, =1 declines them elsewhere.
++// Where VP9 has a decoder of its own (the Cubie A7S's video engine since
++// air/OS 8bf4a07850) VP9 is offered: 1440p and 2160p come only as VP9 or AV1.
 +static bool declinesSoftwareOnlyVideoCodecsHaiku()
 +{
 +    static const bool declines = [] {
@@ -42284,6 +42311,15 @@ index 0000000000000000000000000000000000000000..3c9b1ac409205125b4b5b28112af0e2b
 +#endif
 +    }();
 +    return declines;
++}
++
++static bool declinesVideoCodecHaiku(StringView codec)
++{
++    if (!declinesSoftwareOnlyVideoCodecsHaiku())
++        return false;
++    if (codec.startsWith("vp09"_s) || codec.startsWith("vp9"_s))
++        return !hardwareVP9DecoderHaiku();
++    return true;
 +}
 +
 +static bool isSupportedCodec(StringView codec, bool audioOnly)
@@ -42307,7 +42343,7 @@ index 0000000000000000000000000000000000000000..3c9b1ac409205125b4b5b28112af0e2b
 +        return true;
 +    if (audioOnly)
 +        return false;
-+    if (declinesSoftwareOnlyVideoCodecsHaiku() && (codec.startsWith("vp09"_s) || codec.startsWith("av01"_s)))
++    if ((codec.startsWith("vp09"_s) || codec.startsWith("av01"_s)) && declinesVideoCodecHaiku(codec))
 +        return false;
 +    if (codec.startsWith("vp09"_s)) {
 +        if (auto vp = parseVPCodecParameters(codec))
@@ -42386,7 +42422,7 @@ index 0000000000000000000000000000000000000000..3c9b1ac409205125b4b5b28112af0e2b
 +        for (auto& codec : codecs) {
 +            bool audio = codec == "opus"_s || (codec == "vorbis"_s && SummitWebM::Parser::supportsVorbis());
 +            bool video = false;
-+            if (!audioOnly && !declinesSoftwareOnlyVideoCodecsHaiku()) {
++            if (!audioOnly && !declinesVideoCodecHaiku(codec)) {
 +                if (auto vp = parseVPCodecParameters(codec)) {
 +                    bool vp8 = vp->codecName == "vp8"_s || vp->codecName == "vp08"_s;
 +                    video = vp8 ? vp->bitDepth == 8 : (vp->profile < 2 ? vp->bitDepth == 8 : vp->bitDepth > 8);
