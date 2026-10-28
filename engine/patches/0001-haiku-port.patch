@@ -36737,7 +36737,7 @@ new file mode 100644
 index 0000000000000000000000000000000000000000..2e82573aac195039695186ee0b27488352ce7d10
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/haiku/MediaDecoderSelectionHaiku.cpp
-@@ -0,0 +1,1051 @@
+@@ -0,0 +1,1085 @@
 +/*
 + * Copyright (C) 2026 Haiku, Inc. All rights reserved.
 + *
@@ -36770,12 +36770,14 @@ index 0000000000000000000000000000000000000000..2e82573aac195039695186ee0b274883
 +#include <FindDirectory.h>
 +#include <MediaFormats.h>
 +#include <Path.h>
++#include <Screen.h>
 +#include <algorithm>
 +#include <atomic>
 +#include <cmath>
 +#include <cstdio>
 +#include <cstdlib>
 +#include <cstring>
++#include <dlfcn.h>
 +#include <image.h>
 +#include <mutex>
 +#include <private/media/DecoderPlugin.h>
@@ -37336,6 +37338,34 @@ index 0000000000000000000000000000000000000000..2e82573aac195039695186ee0b274883
 +    return available;
 +}
 +
++// Pictures at least twice as wide and high as the screen (in its pixels)
++// are asked for at half size. A decoder that can (sunxi_cedar) makes them
++// so in the pass that copies them anyway: a quarter of the samples to
++// convert, copy and scale. Packed at full size, YouTube's 2160p60 VP9 kept
++// the Cubie A7S's eight cores busy and still fell behind, dropping nearly
++// every picture. Others give the full size, which is used as it comes.
++// SUMMIT_VIDEO_HALF=0 never asks, =1 asks for every size that allows it.
++bool halfSizeVideoHaiku(unsigned width, unsigned height)
++{
++    if (!width || !height || width % 4 || height % 4)
++        return false;
++    static const int mode = [] {
++        const char* value = std::getenv("SUMMIT_VIDEO_HALF");
++        return value && *value ? std::atoi(value) : -1;
++    }();
++    if (mode >= 0)
++        return mode;
++    BScreen screen(B_MAIN_SCREEN_ID);
++    if (!screen.IsValid())
++        return false;
++    using DeviceScaleFunction = float (*)(BScreen*);
++    static const auto deviceScale = reinterpret_cast<DeviceScaleFunction>(
++        dlsym(RTLD_DEFAULT, "_ZN7BScreen11DeviceScaleEv"));
++    float scale = deviceScale ? deviceScale(&screen) : 1;
++    BRect frame = screen.Frame();
++    return width >= 2 * (frame.Width() + 1) * scale && height >= 2 * (frame.Height() + 1) * scale;
++}
++
 +bool hardwareDecoderCannotDecodeHaiku(const media_codec_info& decoder, std::span<const uint8_t> avcC)
 +{
 +    if (std::strcmp(decoder.short_name, "nvdec h264"))
@@ -37416,6 +37446,10 @@ index 0000000000000000000000000000000000000000..2e82573aac195039695186ee0b274883
 +        output.type = B_MEDIA_RAW_VIDEO;
 +        output.u.raw_video = media_raw_video_format::wildcard;
 +        output.u.raw_video.display.format = colorSpace;
++        if (halfSizeVideoHaiku(encoded.u.encoded_video.output.display.line_width, encoded.u.encoded_video.output.display.line_count)) {
++            output.u.raw_video.display.line_width = encoded.u.encoded_video.output.display.line_width / 2;
++            output.u.raw_video.display.line_count = encoded.u.encoded_video.output.display.line_count / 2;
++        }
 +        // Decodes the first picture: it tells how large they are.
 +        status = decoder->NegotiateOutputFormat(&output);
 +    }
@@ -37794,7 +37828,7 @@ new file mode 100644
 index 0000000000000000000000000000000000000000..1a59f5ca77ca81301993268bcdee2f36a4d97113
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/haiku/MediaDecoderSelectionHaiku.h
-@@ -0,0 +1,202 @@
+@@ -0,0 +1,204 @@
 +/*
 + * Copyright (C) 2026 Haiku, Inc. All rights reserved.
 + *
@@ -37882,6 +37916,8 @@ index 0000000000000000000000000000000000000000..1a59f5ca77ca81301993268bcdee2f36
 +// SUMMIT_NVDEC_MAX_REFERENCES overrides the 15 reference frames it handles.
 +// Whether VP9 can be decoded in hardware (the Radxa Cubie A7S's video engine).
 +bool hardwareVP9DecoderHaiku();
++// Whether to ask the decoder for pictures of half the width and height.
++bool halfSizeVideoHaiku(unsigned width, unsigned height);
 +bool hardwareDecoderCannotDecodeHaiku(const media_codec_info& decoder, std::span<const uint8_t> avcC);
 +
 +// Sets `decoder` to an add-on other than NVDEC that accepts `format`
@@ -40395,7 +40431,7 @@ new file mode 100644
 index 0000000000000000000000000000000000000000..3c9b1ac409205125b4b5b28112af0e2b26d33a55
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaikuMSE.cpp
-@@ -0,0 +1,3182 @@
+@@ -0,0 +1,3183 @@
 +/*
 + * Copyright (C) 2026 Summit contributors.
 + *
@@ -41346,8 +41382,9 @@ index 0000000000000000000000000000000000000000..3c9b1ac409205125b4b5b28112af0e2b
 +            output.type = B_MEDIA_RAW_VIDEO;
 +            output.u.raw_video = media_raw_video_format::wildcard;
 +            output.u.raw_video.display.format = B_RGB32;
-+            output.u.raw_video.display.line_width = info.width;
-+            output.u.raw_video.display.line_count = info.height;
++            bool half = halfSizeVideoHaiku(info.width, info.height);
++            output.u.raw_video.display.line_width = half ? info.width / 2 : info.width;
++            output.u.raw_video.display.line_count = half ? info.height / 2 : info.height;
 +            if (status == B_OK)
 +                status = decoder.SetOutputFormat(&output);
 +            decoder.GetDecoderInfo(&codecInfo);
