@@ -1,5 +1,98 @@
 # Summit performance: Speedometer 3.1 baseline, where the time goes, stress test
 
+## 29-30 October 2026: hidden tabs give back their GPU memory; the critical release reaches every thread (#116)
+
+Measured on the Framework 13 laptop (Radeon 760M, RADV through zink) with the
+Summit MCP and a small tool that asks amdgpu for the device's VRAM and GTT use
+(`amdgpu_query_info` VRAM_USAGE/GTT_USAGE). The laptop's 512 MiB of VRAM is
+full almost at once, so tabs' GPU memory lands in GTT, which is system memory;
+none of it shows in a process's areas, so the 8 October trials, which summed
+resident areas on the X399, could not see it.
+
+- **Before:** a tab of example.com costs 68 MiB of GPU memory, ordinary sites
+  95-320 MiB. Hidden for 80 s, seven tabs gave back 4 MiB in all (3042 -> 3038
+  MiB GTT); only closing them freed it (85-253 MiB each). `release-memory`
+  freed none of it.
+- **Why:** a hidden page keeps its tiles, its layers' targets, the textures
+  composited pictures were uploaded to, its swap chain and its compositor's GL
+  context. What it does free (the pool's textures after 15 s, the spare swap
+  chain buffers after 10 s) goes into Mesa zink's caches: buffers stay in a
+  cache that only frees entries older than half a second when another buffer
+  goes in, and allocations up to 1 MiB (tiles) live in 2 MiB slabs that are
+  reclaimed only by a later allocation of their size class. An idle hidden
+  process does neither.
+
+**Hidden pages release their GPU memory after 30 s** (LayerTreeHost,
+ThreadedCompositor). The compositor drops its committed layers' targets and
+tiles (as after a lost context, but layers' contents buffers, such as a video
+frame or a canvas, go back to pending so they are committed again), the
+textures image layers were uploaded to, its swap chain and its GL context; the
+main thread drops the tiles' backing stores. 1.5 s and 3 s later a few GL
+buffers of each slab size and one past the slabs are made and deleted, which
+makes zink let go of what was freed. On show, a new context is made (1-3 ms),
+every layer is repainted and committed, and the browser keeps showing the frame
+it holds until the new one comes. A rendering update still waiting for the
+compositor when the page was hidden is dropped, as after a lost context (the
+page is repainted in full when shown); not while a frame is being rendered, a
+forced repaint is outstanding or the page is in the back/forward cache (tried
+again 10 s later). A forced repaint of a hidden page restores first. Under critical memory pressure a hidden page
+releases at once. `SUMMIT_HIDDEN_GPU_RELEASE=0` turns it off, `=1` keeps the
+context; `SUMMIT_HIDDEN_GPU_RELEASE_S` sets the delay (30);
+`SUMMIT_HIDDEN_GPU_TRACE=1` logs each release and the first frame after a tab
+is shown.
+
+Six sites, one at a time in the same build, VRAM+GTT held by the tab after
+45 s hidden (MiB), and the first frame after it is selected again:
+
+| Site | off | on | first frame off / on |
+| --- | ---: | ---: | ---: |
+| github.com/WebKit/WebKit | 160 | 58 | 17 / 56 ms |
+| bbc.com/news | 117 | 74 | 18 / 50 ms |
+| MDN JavaScript | 132 | 42 | 17 / 51 ms |
+| Wikipedia (Hobart) | 109 | 56 | 15 / 42 ms |
+| stackoverflow.com/questions | 286 | 241 | 19 / 100 ms |
+| news.ycombinator.com | 97 | 54 | 15 / 42 ms |
+| **total** | **902** | **526** | |
+
+That is 376 MiB less for six hidden tabs (42%); a repeat with the final engine
+held 530 MiB (Stack Overflow's restored frame differed only in a rotating
+advertisement). Eight tabs in one window
+(Wikipedia shown, seven sites hidden 80 s, the 28 September set plus the
+Guardian): 1171 MiB above the browser's start without the change (installed
+engine), 723 MiB with it (-448 MiB, -38%); all seven released, and switching
+back to each showed its first frame after 49-140 ms (Stack Overflow the
+slowest). Every restored frame matched the
+frame before hiding (page_frame, at most 0.01% of pixels different, the same
+blinking element as without the release). Keeping the context (`=1`) freed
+much less (github 61, MDN 41, Wikipedia 19, Stack Overflow 28 MiB) and restored
+in 33-92 ms. What a hidden tab still holds is mostly the process's fixed cost
+(zink screen and RADV device, the sharing context); Stack Overflow keeps about
+180 MiB more that was not traced. A tab switched back to gets its memory back
+as it paints, so the saving is for tabs left in the background.
+
+**The critical release now reaches every thread's heap.** mimalloc's
+`mi_collect()` (`bmalloc::api::scavenge`) collects only the calling thread's
+heap; pages freed into other threads' heaps (compositor, work queues,
+scrolling thread) stayed until those threads allocated again. On Haiku,
+`MemoryPressureHandler::platformReleaseMemory(Critical::Yes)` now posts
+`releaseFastMallocFreeMemoryForThisThread()` to every running RunLoop
+(`dispatchToRunningLoopsHaiku()`, a registry of loops in `RunLoop::run()`);
+`SUMMIT_RELEASE_ALL_THREADS=0` turns it off. The MCP `memory_action
+release-memory` now goes through `MemoryPressureHandler::releaseMemory()`, as a
+real critical event does (it also reaches the pages' compositors). Four sites
+(Guardian, BBC, GitHub, MDN), two runs each way, "JavaScript heap and malloc"
+areas before and after:
+
+| | run 1 | run 2 |
+| --- | --- | --- |
+| main thread only | 94 of 1060 MiB (8.9%) | 90 of 965 MiB (9.3%) |
+| every run loop | 151 of 1038 MiB (14.6%) | 153 of 1058 MiB (14.5%) |
+
+(The installed engine freed 102 of 1125 MiB, 9%.) Still not reached: the
+painting threads (WorkerPool, no run loop) and JavaScriptCore's helper
+threads; libroot's heap areas (Haiku has no `malloc_trim`) did not shrink at
+all.
+
 ## 22 October 2026: live compositor recovery (#100)
 
 The renderer now replaces a lost native share group and rebuilds the retained
