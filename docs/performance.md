@@ -10896,3 +10896,16 @@ same. Two causes:
   wherever a tile was missing (a window that was made wider). The colour is
   now drawn under the tiles: what is not painted yet shows the page's
   background.
+- **Late uploads without damage (#133, 29 October).** Whether a tile is in
+  view is still judged with the transform of the layer's last paint. After a
+  resize or a jump in the scroll position that transform is stale (the
+  laptop, moving a window from a 4K output to the built-in screen: the page's
+  layer was last painted at -1408,-35), so tiles in view went to the "later"
+  list. The composition that uploaded them had no damage there, so the frame
+  the browser got kept their old contents: a 512-pixel square of an earlier
+  layout (airos.works' sky without its text) until the next scroll. Tiles
+  uploaded a composition after the one that brought them now force a full
+  repaint, and a layer that changed size or scale uploads everything with
+  that update. On the laptop at 175 %, 0 of 6 such moves left a stale tile,
+  against 8 of 9 before. `SUMMIT_UPLOAD_TRACE=1` lists the tiles left for
+  later, `SUMMIT_EMPTY_TILE_TRACE=1` the tiles whose paint came out empty.

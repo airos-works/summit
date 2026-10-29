@@ -49883,7 +49883,7 @@ index 776466ea87d3d721d32ac4e52db702bb2b544e46..a8a90bcba97784f41f50ecc42422bf57
          s_skiaGLContext = SkiaGLContext::create(*this);
          m_skiaGLContexts.add(*s_skiaGLContext);
 diff --git a/Source/WebCore/platform/graphics/skia/SkiaPaintingEngine.cpp b/Source/WebCore/platform/graphics/skia/SkiaPaintingEngine.cpp
-index ffcff7e0b02bdf8599d7b8f245f3323f2f2743cd..b5df122ac016b0a77f890c49249a46cf8e3f8ecb 100644
+index ffcff7e0b02bdf8599d7b8f245f3323f2f2743cd..ac94d218d9aa37dab4cea78e179a276c62e7dea8 100644
 --- a/Source/WebCore/platform/graphics/skia/SkiaPaintingEngine.cpp
 +++ b/Source/WebCore/platform/graphics/skia/SkiaPaintingEngine.cpp
 @@ -58,6 +58,13 @@ WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_BEGIN
@@ -50043,13 +50043,27 @@ index ffcff7e0b02bdf8599d7b8f245f3323f2f2743cd..b5df122ac016b0a77f890c49249a46cf
          if (auto* canvas = buffer->canvas()) {
              auto replayPicture = [](const sk_sp<SkPicture>& picture, SkCanvas* canvas, const IntRect& recordRect, const IntRect& tileRect, const IntRect& dirtyRect, bool isDDLBuffer) {
                  canvas->save();
-@@ -297,9 +403,27 @@ Ref<CoordinatedTileBuffer> SkiaPaintingEngine::replay(const GraphicsLayerCoordin
+@@ -297,9 +403,41 @@ Ref<CoordinatedTileBuffer> SkiaPaintingEngine::replay(const GraphicsLayerCoordin
              WTFEndSignpost(canvas, PaintTile);
          }
  
 +#if PLATFORM(HAIKU)
-+        if (mayHaveNoTexture && !buffer->isBackedByOpenGL())
++        if (mayHaveNoTexture && !buffer->isBackedByOpenGL()) {
 +            static_cast<CoordinatedUnacceleratedTileBuffer&>(buffer.get()).noteIfTransparent();
++            // SUMMIT_EMPTY_TILE_TRACE=1: tiles whose replay drew nothing.
++            static const bool traceEmpty = [] {
++                const char* value = getenv("SUMMIT_EMPTY_TILE_TRACE");
++                return value && value[0] == '1' && !value[1];
++            }();
++            if (traceEmpty && static_cast<CoordinatedUnacceleratedTileBuffer&>(buffer.get()).isTransparent()) {
++                auto cull = recording->picture() ? recording->picture()->cullRect() : SkRect::MakeEmpty();
++                fprintf(stderr, "Summit empty tile: layer=%p tile=%d,%d %dx%d dirty=%d,%d %dx%d record=%d,%d %dx%d cull=%.0f,%.0f %.0fx%.0f ops=%d replayCanvas=%d\n",
++                    platformLayer.ptr(), tileRect.x(), tileRect.y(), tileRect.width(), tileRect.height(), dirtyRect.x(), dirtyRect.y(), dirtyRect.width(), dirtyRect.height(),
++                    recording->recordRect().x(), recording->recordRect().y(), recording->recordRect().width(), recording->recordRect().height(),
++                    cull.x(), cull.y(), cull.width(), cull.height(), recording->picture() ? recording->picture()->approximateOpCount() : -1,
++                    recording->hasFences() || recording->hasGPUAtlases());
++            }
++        }
 +#endif
          buffer->completePainting();
 +#if PLATFORM(HAIKU)
@@ -50072,7 +50086,7 @@ index ffcff7e0b02bdf8599d7b8f245f3323f2f2743cd..b5df122ac016b0a77f890c49249a46cf
  
      return buffer;
  }
-@@ -310,7 +434,15 @@ unsigned SkiaPaintingEngine::numberOfCPUPaintingThreads()
+@@ -310,7 +448,15 @@ unsigned SkiaPaintingEngine::numberOfCPUPaintingThreads()
      static unsigned numberOfThreads = 0;
  
      std::call_once(onceFlag, [] {
@@ -52021,10 +52035,10 @@ index f4510ce2501dd8b7577ceb994e9090da9e649dda..874f59b9469cc9b1bf8d1d20a4775e06
  
      GLuint m_vertexShader;
 diff --git a/Source/WebCore/platform/graphics/texmap/coordinated/CoordinatedBackingStore.cpp b/Source/WebCore/platform/graphics/texmap/coordinated/CoordinatedBackingStore.cpp
-index 0badc4492a49e10ae2faa80d59da84a9cea259d6..0873e0a34af34321956b616c52faf15c75cb930b 100644
+index 0badc4492a49e10ae2faa80d59da84a9cea259d6..3dccd0e718b58c30fd2e2b492d1c7181976e09c5 100644
 --- a/Source/WebCore/platform/graphics/texmap/coordinated/CoordinatedBackingStore.cpp
 +++ b/Source/WebCore/platform/graphics/texmap/coordinated/CoordinatedBackingStore.cpp
-@@ -24,35 +24,157 @@
+@@ -24,35 +24,176 @@
  #include "BitmapTexture.h"
  #include "CoordinatedTileBuffer.h"
  #include "GraphicsLayer.h"
@@ -52151,8 +52165,19 @@ index 0badc4492a49e10ae2faa80d59da84a9cea259d6..0873e0a34af34321956b616c52faf15c
 +                tile.processPendingUpdates();
 +                if (m_hasDeferredTiles)
 +                    s_showsLateUpload = true;
-+            } else
++            } else {
++                // SUMMIT_UPLOAD_TRACE=1: tiles of large layers left for later.
++                static const bool traceUploads = [] {
++                    const char* value = getenv("SUMMIT_UPLOAD_TRACE");
++                    return value && value[0] == '1' && !value[1];
++                }();
++                if (traceUploads && m_size.height() > 1000)
++                    fprintf(stderr, "Summit upload: later store=%p size=%.0fx%.0f tile=%.0f,%.0f %.0fx%.0f shown at %.0f,%.0f %.0fx%.0f view=%.0fx%.0f painted=%d transform=%.2f,%.2f,%.0f,%.0f\n",
++                        static_cast<void*>(this), m_size.width(), m_size.height(), tile.rectAfterPendingUpdates().x(), tile.rectAfterPendingUpdates().y(),
++                        tile.rectAfterPendingUpdates().width(), tile.rectAfterPendingUpdates().height(), tileRect.x(), tileRect.y(), tileRect.width(), tileRect.height(),
++                        inView.width(), inView.height(), tile.pendingUpdatesArePainted(), m_lastPaintTransform.a(), m_lastPaintTransform.d(), m_lastPaintTransform.e(), m_lastPaintTransform.f());
 +                others.append(&tile);
++            }
 +        }
 +        for (auto* tile : others) {
 +            if (system_time() >= s_uploadDeadline) {
@@ -52168,6 +52193,14 @@ index 0badc4492a49e10ae2faa80d59da84a9cea259d6..0873e0a34af34321956b616c52faf15c
 +                continue;
 +            }
 +            tile->processPendingUpdates();
++            // An update a composition before this one left for later has no
++            // damage of its own any more, and the transform that put it out
++            // of view is the last paint's: after a resize or a jump in the
++            // scroll position it can be in view. Without a full repaint the
++            // frame kept the tile's earlier contents until the next scroll
++            // (#133: blocks of an earlier layout on airos.works).
++            if (m_hasDeferredTiles)
++                s_showsLateUpload = true;
 +        }
 +        m_hasPendingTileUpdates = deferred;
 +        m_hasDeferredTiles = deferred;
@@ -52182,17 +52215,23 @@ index 0badc4492a49e10ae2faa80d59da84a9cea259d6..0873e0a34af34321956b616c52faf15c
  
      for (auto& tile : m_tiles.values())
          tile.processPendingUpdates();
-@@ -62,6 +184,9 @@ void CoordinatedBackingStore::processPendingUpdates()
+@@ -62,6 +203,15 @@ void CoordinatedBackingStore::processPendingUpdates()
  
  void CoordinatedBackingStore::resize(const FloatSize& size, float scale)
  {
 +#if PLATFORM(HAIKU)
 +    ++m_contentVersionHaiku;
 +#endif
++#if PLATFORM(HAIKU)
++    // Where the last paint put the layer says nothing about tiles of another
++    // size or scale: upload them all with the update that brings them.
++    if (size != m_size || scale != m_scale)
++        m_hasLastPaint = false;
++#endif
      m_size = size;
      m_scale = scale;
  }
-@@ -74,6 +199,17 @@ void CoordinatedBackingStore::paintToTextureMapper(TextureMapper& textureMapper,
+@@ -74,6 +224,17 @@ void CoordinatedBackingStore::paintToTextureMapper(TextureMapper& textureMapper,
      ASSERT(!m_size.isZero());
      FloatRect layerRect = { { }, m_size };
      TransformationMatrix adjustedTransform = transform * TransformationMatrix::rectToRect(layerRect, targetRect);
@@ -52210,7 +52249,7 @@ index 0badc4492a49e10ae2faa80d59da84a9cea259d6..0873e0a34af34321956b616c52faf15c
  
  #if ENABLE(DAMAGE_TRACKING)
      const auto& frameDamage = textureMapper.damage();
-@@ -86,8 +222,43 @@ void CoordinatedBackingStore::paintToTextureMapper(TextureMapper& textureMapper,
+@@ -86,8 +247,43 @@ void CoordinatedBackingStore::paintToTextureMapper(TextureMapper& textureMapper,
      }();
  #endif
  
@@ -52254,7 +52293,7 @@ index 0badc4492a49e10ae2faa80d59da84a9cea259d6..0873e0a34af34321956b616c52faf15c
          const auto allEdgesExposed = allTileEdgesExposed(layerRect, tile.rect()) ? TextureMapper::AllEdgesExposed::Yes : TextureMapper::AllEdgesExposed::No;
  
  #if ENABLE(DAMAGE_TRACKING)
-@@ -105,6 +276,93 @@ void CoordinatedBackingStore::paintToTextureMapper(TextureMapper& textureMapper,
+@@ -105,6 +301,93 @@ void CoordinatedBackingStore::paintToTextureMapper(TextureMapper& textureMapper,
      }
  }
  
