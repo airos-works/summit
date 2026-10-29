@@ -18,6 +18,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <map>
+#include <memory>
+#include <mutex>
 
 namespace {
 enum {
@@ -31,6 +34,122 @@ enum {
 	// send it themselves to open the inspector.
 	kInspect = 'sins'
 };
+
+
+// A view's context menu is closed when the view leaves its window, is shut
+// down or deleted. BPopUpMenu::Go() with async set, called on the window's
+// thread, makes the window's destructor wait until the menu stops tracking
+// (the "window close lock"), and a menu nobody clicks never stops: quitting
+// WebPositive, or closing its window, with the menu open hung in
+// ~BrowserWindow, and the application with it.
+struct MenuState {
+	std::mutex lock;
+	bool closed = false;
+	// The menu, while it is in its window.
+	BMessenger menu;
+};
+using SharedMenuState = std::shared_ptr<MenuState>;
+std::mutex sMenusLock;
+std::map<const BWebView*, SharedMenuState> sOpenMenus;
+
+
+// An Escape key for the menu, as from the keyboard: ends its tracking at once.
+void
+SendEscape(const BMessenger& menu)
+{
+	BMessage escape(B_KEY_DOWN);
+	escape.AddInt64("when", system_time());
+	escape.AddInt32("modifiers", 0);
+	escape.AddInt32("key", 0x01);
+	escape.AddInt32("raw_char", B_ESCAPE);
+	escape.AddString("bytes", "\x1b");
+	menu.SendMessage(&escape);
+}
+
+
+class ContextMenu final : public BPopUpMenu {
+public:
+	explicit ContextMenu(SharedMenuState state)
+		:
+		BPopUpMenu("context", false, false),
+		fState(std::move(state))
+	{
+		SetAsyncAutoDestruct(true);
+		SetTrackingHook(&ContextMenu::WantsToQuit, fState.get());
+	}
+
+	void AttachedToWindow() override
+	{
+		BPopUpMenu::AttachedToWindow();
+		std::lock_guard lock(fState->lock);
+		fState->menu = BMessenger(this);
+		// Closed before it was shown.
+		if (fState->closed)
+			SendEscape(fState->menu);
+	}
+
+	void DetachedFromWindow() override
+	{
+		{
+			std::lock_guard lock(fState->lock);
+			fState->menu = BMessenger();
+		}
+		BPopUpMenu::DetachedFromWindow();
+	}
+
+	static void Close(MenuState& state)
+	{
+		BMessenger menu;
+		{
+			std::lock_guard lock(state.lock);
+			state.closed = true;
+			menu = state.menu;
+		}
+		if (menu.IsValid())
+			SendEscape(menu);
+	}
+
+private:
+	// The tracking loop asks this when it begins and after the pointer
+	// moves, not while it waits for the pointer: the Escape key ends that
+	// wait. This covers a menu closed before its tracking began (which
+	// undoes what the key did).
+	static bool WantsToQuit(BMenu* menu, void* data)
+	{
+		MenuState& state = *static_cast<MenuState*>(data);
+		{
+			std::lock_guard lock(state.lock);
+			if (!state.closed)
+				return false;
+		}
+		// Nothing is chosen on the way out (the item under the pointer
+		// would be).
+		if (menu->LockLooper()) {
+			for (int32 i = 0; BMenuItem* item = menu->ItemAt(i); i++)
+				item->SetEnabled(false);
+			menu->UnlockLooper();
+		}
+		return true;
+	}
+
+	SharedMenuState fState;
+};
+
+
+void
+CloseContextMenu(const BWebView* view)
+{
+	SharedMenuState state;
+	{
+		std::lock_guard lock(sMenusLock);
+		auto found = sOpenMenus.find(view);
+		if (found == sOpenMenus.end())
+			return;
+		state = std::move(found->second);
+		sOpenMenus.erase(found);
+	}
+	ContextMenu::Close(*state);
+}
 }
 
 BWebView::UserData::~UserData()
@@ -58,6 +177,7 @@ BWebView::BWebView(const char* name, BPrivate::Network::BUrlContext* context)
 
 BWebView::~BWebView()
 {
+	CloseContextMenu(this);
 	// The engine view goes with this view's children; the cookie mirror,
 	// on its own thread, must not use it any more.
 	SummitLegacy::RemoveCookieView(static_cast<BWebKitView*>(fOffscreenView));
@@ -74,6 +194,7 @@ BWebView::~BWebView()
 void
 BWebView::Shutdown()
 {
+	CloseContextMenu(this);
 	if (fWebPage != nullptr)
 		fWebPage->Shutdown();
 }
@@ -100,6 +221,8 @@ BWebView::AttachedToWindow()
 void
 BWebView::DetachedFromWindow()
 {
+	// Before the window can wait for it (a tab closed, the window quit).
+	CloseContextMenu(this);
 	BView::DetachedFromWindow();
 }
 
@@ -166,8 +289,14 @@ BWebView::MessageReceived(BMessage* message)
 			BPoint where;
 			if (message->FindPoint("where", &where) != B_OK || Window() == nullptr)
 				break;
-			BPopUpMenu* menu = new BPopUpMenu("context", false, false);
-			menu->SetAsyncAutoDestruct(true);
+			// One menu at a time: an earlier one still open closes.
+			CloseContextMenu(this);
+			auto state = std::make_shared<MenuState>();
+			{
+				std::lock_guard lock(sMenusLock);
+				sOpenMenus[this] = state;
+			}
+			BPopUpMenu* menu = new ContextMenu(state);
 			auto add = [&](const char* label, uint32 what, const char* url = nullptr, uint32 command = 0) {
 				BMessage* item = new BMessage(what);
 				if (url != nullptr)

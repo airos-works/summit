@@ -18,7 +18,7 @@ classes, implemented on Summit's engine API (`BWebKitView`,
 | The listener | As before, a `BWebView` makes its window its page's listener when it is attached (WebPositive never sets one itself). |
 | HTTP authentication | Engine challenges become the old `AUTHENTICATION_CHALLENGE` message. A separate reply handler binds each asynchronous response to its request, keeping the engine application thread free while WebPositive's existing panel waits. Basic/Digest login, retry, cancellation and session reuse are [verified](legacy-authentication-2026-10-22.md). |
 | Certificate failures | `SSL_CERT_ERROR` carries the failed host, certificate details and session scope to the existing `BWebWindow` dialog, which defaults to Stop. An asynchronous response can approve only the exact current failed navigation. See [native acceptance and limits](legacy-certificates-2026-10-22.md). |
-| Context menu | The engine leaves the menu to its host; the old engine drew its own. `BWebView` shows one: open link or image in a new tab, copy its address, download it, cut/copy/paste, back/forward/reload. |
+| Context menu | The engine leaves the menu to its host; the old engine drew its own. `BWebView` shows one: open link or image in a new tab, copy its address, download it, cut/copy/paste, back/forward/reload. It is closed (as by Escape, nothing chosen) when the view leaves its window, is shut down or deleted: an asynchronous `BPopUpMenu` opened on a window's thread makes that window's destructor wait until the menu stops tracking. |
 | `BWebDownload` | The engine reports downloads to a handler of the application looper, which makes `BWebDownload` objects and sends `B_DOWNLOAD_ADDED` to the download listener. The engine starts saving at once (to the Desktop); `Start(folder)` moves the file into the application's folder when it is complete. `B_DOWNLOAD_STARTED`, `B_DOWNLOAD_PROGRESS` and a synchronous `B_DOWNLOAD_REMOVED` follow as before; the file gets its `META:url` and MIME type. |
 | `BWebSettings` | `SetPersistentStoragePath()` chooses where the engine keeps the application's website data: `<path>/WebKit` (WebPositive: `~/config/settings/WebPositive/WebKit`). `SendIconForURL()` answers from the site icons the engine reported. `Apply()` publishes font and JavaScript settings, with application defaults and per-page overrides. `SetUserAgent()` adds the same control for the user agent. Proxy settings remain unapplied. See [settings behavior and acceptance](legacy-settings-2026-10-22.md). |
 | `BWebFrame` | The main frame: address, title, editing commands, zoom, find. `InnerText()`, `AsMarkup()` and `FrameSource()` ask the page with a script and wait for it (up to 10 s), so like `GetContentsAsMHTML()` they answer only off the application thread (empty on it, or when the page does not answer); `FrameSource()` is the source from the cache as `SendPageSource()` gets it. `SetEditable()` switches the document's `designMode`, for the page shown then (a new page starts not editable). There is no frame tree. |
@@ -145,12 +145,52 @@ two persistent cookies (paths `/` and `/legacy`) and a session cookie:
 | Inspector | the context menu showed "Inspect element" (opened with a scripted `B_WEBKIT_CONTEXT_MENU`; the item's message, `'sins'`, was then sent by `hey`, as no pointer input was available); the developer tools window showed the page's DOM tree (`<html>`, `<head>`, `<body>`, `<h1 id="h">`...), its styles and the console's 404 for `favicon.ico`; asked at a point over the heading, it selected `<h1 id="h">`; closed and reopened (a second connection to the page) it worked again |
 | Closing | closing the inspected tab closed the inspector; quitting WebPositive with the inspector open left no process and no crash |
 
-Two failures seen in these runs also happen with the shim before this
-change (same engine): closing the last browser window while it has several
-tabs crashes WebPositive in a WebKit run-loop thread
-(`WTF::RunLoop::dispatch` from `~Ref<IPC::Connection>`), and quitting while
-the view's context menu is open hangs the application. Quitting with the
-application's Quit does not crash.
+Two failures seen in these runs, which also happened with the shim before
+this change, are fixed (30 October, below).
+
+### Quitting: closing the last window, an open context menu (30 October 2026)
+
+- Closing WebPositive's last browser window while it had several tabs
+  crashed it in an IPC `ReceiveQueue` thread (`WTF::RunLoop::dispatch`, at
+  `this` + 0x48 of a null `RunLoop`). Closing the window shuts its pages down
+  just before the application quits (the last window's `WINDOW_CLOSED` posts
+  `B_QUIT_REQUESTED`), so the web processes' connections are still being
+  released when `main()` returns. `exit()` runs the main thread's TLS
+  destructors, and the engine's `RunLoop::threadWillExit()` (Haiku part) then
+  stopped the main run loop and set it to null; a connection whose last
+  reference an IPC thread dropped after that is destroyed through
+  `RunLoop::mainSingleton().dispatch()` and followed the null pointer.
+  Quitting from the menu did not crash because its tabs' shutdown messages
+  are never handled (the pages live until the process ends). Summit itself
+  never gets there (it leaves with `_Exit()`). The fix is in the engine
+  (`Source/WTF/wtf/RunLoop.cpp`): the main run loop stays, stopped, and
+  keeps a reference of its own, so that a late dispatch is queued and
+  dropped.
+- Quitting WebPositive (or closing its window) while the view's context
+  menu was open hung it: `BPopUpMenu::Go()` with `async` on the window's
+  thread gives the window the menu's semaphore ("window close lock"), and
+  `~BWindow` waits on it until the menu stops tracking, which, with nobody
+  to click, it never did (`BrowserApp::QuitRequested` waits for the window
+  thread). `BWebView` now closes its menu when it is detached from its
+  window, shut down or deleted (`legacy/src/WebView.cpp`): an Escape key for
+  the menu ends the tracking, and a tracking hook covers a menu not yet
+  tracking; items are disabled first so the one under the pointer is not
+  chosen.
+
+Verified on the X399 (WebPositive from the Haiku build, the shim cross-built
+from this tree, the engine of `bundle-x399a` with the changed
+`libJavaScriptCore`/`libWebKit` from a CI-tree test build), each run started
+with three URLs plus the restored session's tabs: closing the browser window
+(a scripted `quit` of the window) crashed 4 of 4 times with the unchanged
+engine (with either shim), and left no crash and no engine process 6 of 6
+times with the changed one; quitting with the context menu open (a scripted
+`B_WEBKIT_CONTEXT_MENU`, then `hey WebPositive quit`) hung 3 of 3 times with
+the old shim and quit within 1 s, leaving no engine process, 10 of 10 times
+with the new one (5 on each engine);
+closing a second window with its context menu open closed the window and
+the menu and left the application running. Opening a second window
+(`nwnd`), opening tabs (a second launch with a URL) and closing them
+(`cltb`), loading pages and quitting still worked.
 
 ## Not done
 

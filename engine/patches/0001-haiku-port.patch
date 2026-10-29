@@ -3889,7 +3889,7 @@ index a49b2f86ed54af526692b47ef4ba02887f403e69..640966d9312e7eb0b0b7139b595145b8
  #endif
  
 diff --git a/Source/WTF/wtf/RunLoop.cpp b/Source/WTF/wtf/RunLoop.cpp
-index 165711873f2bafa492d1838f02678d362b70fe4c..af511cfe922ed4957db0ca221e4a899a80612713 100644
+index 165711873f2bafa492d1838f02678d362b70fe4c..dd44df23bc8c7f576c61e33ea205e9884f84997a 100644
 --- a/Source/WTF/wtf/RunLoop.cpp
 +++ b/Source/WTF/wtf/RunLoop.cpp
 @@ -32,6 +32,7 @@
@@ -3915,14 +3915,22 @@ index 165711873f2bafa492d1838f02678d362b70fe4c..af511cfe922ed4957db0ca221e4a899a
  }
  
  auto RunLoop::runLoopHolder() -> ThreadSpecific<Holder>&
-@@ -200,6 +209,12 @@ void RunLoop::threadWillExit()
+@@ -200,6 +209,20 @@ void RunLoop::threadWillExit()
          Locker locker { m_nextIterationLock };
          m_nextIteration.clear();
      }
 +#if OS(HAIKU)
 +    if (this == s_mainRunLoop) {
 +        stop();
-+        s_mainRunLoop = nullptr;
++        // The process is exiting (Haiku runs the main thread's TLS
++        // destructors in exit()), but the IPC threads still run: a
++        // connection whose last reference they drop is destroyed through
++        // mainSingleton().dispatch(). Keep the stopped loop alive and named
++        // as the main one, so that such a dispatch is queued and dropped
++        // instead of following a null or freed pointer (a program on the
++        // legacy BWebView library crashed when it quit right after closing
++        // its pages).
++        ref();
 +    }
 +#endif
  }
