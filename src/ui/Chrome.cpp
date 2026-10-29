@@ -18,6 +18,7 @@
 #include <MessageRunner.h>
 #include <Entry.h>
 #include <Path.h>
+#include <Shape.h>
 #if SUMMIT_MODERN_WEBKIT
 #include "ExtensionInstaller.h"
 #include <WebKit/WebKitView.h>
@@ -680,8 +681,20 @@ void TabStrip::DrawAudio(BRect rect, TabAudio audio, rgb_color color)
         StrokeLine(BPoint(x + 8.5f, y - 3), BPoint(x + 13, y + 3));
         StrokeLine(BPoint(x + 13, y - 3), BPoint(x + 8.5f, y + 3));
     } else {
-        StrokeArc(BPoint(x + 6, y), 3.5f, 3.5f, -50, 100);
-        StrokeArc(BPoint(x + 6, y), 6.5f, 6.5f, -50, 100);
+        // The sound waves as shapes on the cone's own centre line: StrokeArc()
+        // places an arc by its bounding rectangle, which put them a pixel or two
+        // below the cone (#134).
+        for (const float radius : { 3.5f, 6.5f }) {
+            BShape wave;
+            for (int step = 0; step <= 10; ++step) {
+                const float angle = (-50 + step * 10) * float(M_PI) / 180;
+                const BPoint point(x + 6 + radius * std::cos(angle), y + radius * std::sin(angle));
+                if (step == 0) wave.MoveTo(point);
+                else wave.LineTo(point);
+            }
+            MovePenTo(B_ORIGIN);
+            StrokeShape(&wave);
+        }
     }
     SetPenSize(1);
 }
