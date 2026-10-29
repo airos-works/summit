@@ -5903,6 +5903,55 @@ index 9b642c760a0aa1ea0e1888f00e0ce52196c0f822..7eea57492e165a4549ee95d954b9dc4d
      bool receivedFirstInitializationSegment() const { return m_receivedFirstInitializationSegment; }
  
  #if !RELEASE_LOG_DISABLED
+diff --git a/Source/WebCore/Modules/mediastream/MediaDevices.cpp b/Source/WebCore/Modules/mediastream/MediaDevices.cpp
+index af593956d1bafa17b2fee9fabf285b1b54e30688..cb9ea010d90131591fc65f4b04014d9fd94235f9 100644
+--- a/Source/WebCore/Modules/mediastream/MediaDevices.cpp
++++ b/Source/WebCore/Modules/mediastream/MediaDevices.cpp
+@@ -314,7 +314,20 @@ void MediaDevices::getDisplayMedia(DisplayMediaStreamConstraints&& constraints,
+         return;
+     }
+ 
++#if PLATFORM(HAIKU)
++    // The computer's sound can be shared with the screen (the system mixer's
++    // monitor, HaikuSystemAudioCaptureSource): the page's audio constraints
++    // go with the request, and the browser asks whether to share it.
++    auto audioConstraints = createMediaConstraints(constraints.audio);
++    if (audioConstraints.isValid && hasInvalidGetDisplayMediaConstraint(audioConstraints)) {
++        promise.reject(Exception { ExceptionCode::TypeError, "getDisplayMedia must be called with valid constraints."_s });
++        return;
++    }
++    auto requestType = audioConstraints.isValid ? MediaStreamRequest::Type::DisplayMediaWithAudio : MediaStreamRequest::Type::DisplayMedia;
++    auto request = UserMediaRequest::create(*document, { requestType, WTF::move(audioConstraints), WTF::move(videoConstraints), isUserGesturePriviledged, *document->pageID() }, WTF::move(constraints.audio), WTF::move(constraints.video), WTF::move(promise));
++#else
+     auto request = UserMediaRequest::create(*document, { MediaStreamRequest::Type::DisplayMedia, { }, WTF::move(videoConstraints), isUserGesturePriviledged, *document->pageID() }, WTF::move(constraints.audio), WTF::move(constraints.video), WTF::move(promise));
++#endif
+     request->start();
+ }
+ 
+diff --git a/Source/WebCore/Modules/mediastream/MediaStreamTrack.cpp b/Source/WebCore/Modules/mediastream/MediaStreamTrack.cpp
+index cd9a3d954e42a3886ade1462945b9f10e81d8374..b73da6790a6da855074d922dcb9598c3fe81c168 100644
+--- a/Source/WebCore/Modules/mediastream/MediaStreamTrack.cpp
++++ b/Source/WebCore/Modules/mediastream/MediaStreamTrack.cpp
+@@ -476,7 +476,19 @@ MediaProducerMediaStateFlags MediaStreamTrack::captureState(const RealtimeMediaS
+         if (source.isProducingData())
+             return MediaProducerMediaState::HasActiveWindowCaptureDevice;
+         break;
++#if PLATFORM(HAIKU)
++    // The computer's sound shared with the screen (getDisplayMedia).
+     case CaptureDevice::DeviceType::SystemAudio:
++        if (source.muted())
++            return MediaProducerMediaState::HasMutedSystemAudioCaptureDevice;
++        if (source.interrupted())
++            return MediaProducerMediaState::HasInterruptedSystemAudioCaptureDevice;
++        if (source.isProducingData())
++            return MediaProducerMediaState::HasActiveSystemAudioCaptureDevice;
++        break;
++#else
++    case CaptureDevice::DeviceType::SystemAudio:
++#endif
+     case CaptureDevice::DeviceType::Speaker:
+     case CaptureDevice::DeviceType::Unknown:
+         ASSERT_NOT_REACHED();
 diff --git a/Source/WebCore/Modules/modern-media-controls/media/pip-support.js b/Source/WebCore/Modules/modern-media-controls/media/pip-support.js
 index 760bb8b038ff94fd34ff200228a0313fe243d092..15403102944c94a1de88e5dcda4b20e56a992463 100644
 --- a/Source/WebCore/Modules/modern-media-controls/media/pip-support.js
@@ -59786,6 +59835,74 @@ index a84176150762a2027d544cb59bd870396aa7fbc2..e1a1f069e16be069348008384d9402c9
  #else
      UNUSED_PARAM(adaptor);
      UNUSED_PARAM(videoFrame);
+diff --git a/Source/WebCore/platform/mediastream/RealtimeMediaSourceCenter.cpp b/Source/WebCore/platform/mediastream/RealtimeMediaSourceCenter.cpp
+index 08b5220e4c15ff7167c087ad756d68d29d65d79f..fe47de65ac251051b752d9614e34bff64c835c6d 100644
+--- a/Source/WebCore/platform/mediastream/RealtimeMediaSourceCenter.cpp
++++ b/Source/WebCore/platform/mediastream/RealtimeMediaSourceCenter.cpp
+@@ -44,6 +44,10 @@
+ #include <wtf/HexNumber.h>
+ #include <wtf/SHA1.h>
+ 
++#if PLATFORM(HAIKU)
++#include "HaikuSystemAudioCapture.h"
++#endif
++
+ namespace WebCore {
+ 
+ #if !USE(GSTREAMER)
+@@ -73,12 +77,23 @@ void RealtimeMediaSourceCenter::createMediaStream(Ref<const Logger>&& logger, Ne
+ 
+     RefPtr<RealtimeMediaSource> audioSource;
+     if (audioDevice && !audioDevice.isSpeakerDevice()) {
++#if PLATFORM(HAIKU)
++        bool isSystemAudio = audioDevice.type() == CaptureDevice::DeviceType::SystemAudio;
++#endif
+         auto source = audioCaptureFactory().createAudioCaptureSource(WTF::move(audioDevice), MediaDeviceHashSalts { hashSalts }, &request.audioConstraints, request.pageIdentifier);
++#if PLATFORM(HAIKU)
++        // The computer's sound comes with a shared screen when it can: when
++        // it cannot be recorded (no sound card any more, another program
++        // records it), the screen is shared without it, as in Chrome.
++        if (!source && isSystemAudio)
++            WTFLogAlways("getDisplayMedia: the screen is shared without its sound: %s", source.error.errorMessage.utf8().data());
++        else
++#endif
+         if (!source) {
+             completionHandler(makeUnexpected(WTF::move(source.error)));
+             return;
+-        }
+-        audioSource = source.source();
++        } else
++            audioSource = source.source();
+     }
+ 
+     RefPtr<RealtimeMediaSource> videoSource;
+@@ -332,12 +347,25 @@ std::expected<RealtimeMediaSourceCenter::ValidDevices, MediaConstraintType> Real
+     MediaConstraintType firstInvalidConstraint = MediaConstraintType::Unknown;
+ 
+     auto& displayCaptureManager = displayCaptureFactory().displayCaptureDeviceManager();
+-    if (displayCaptureManager.requiresCaptureDevicesEnumeration() && (request.type == MediaStreamRequest::Type::DisplayMedia || request.type == MediaStreamRequest::Type::DisplayMediaWithAudio))
++    bool isDisplayRequest = request.type == MediaStreamRequest::Type::DisplayMedia || request.type == MediaStreamRequest::Type::DisplayMediaWithAudio;
++    if (displayCaptureManager.requiresCaptureDevicesEnumeration() && isDisplayRequest)
+         getDisplayMediaDevices(request, MediaDeviceHashSalts { deviceIdentifierHashSalts }, videoDeviceInfo, firstInvalidConstraint);
+     else
+         getUserMediaDevices(request, MediaDeviceHashSalts { deviceIdentifierHashSalts }, audioDeviceInfo, videoDeviceInfo, firstInvalidConstraint);
+ 
++#if PLATFORM(HAIKU)
++    // getDisplayMedia({ audio: true }): the computer's sound, which the
++    // person may share with the screen. A request for sound that cannot be
++    // had still shares the screen, without it.
++    if (isDisplayRequest && request.audioConstraints.isValid) {
++        if (auto device = haikuSystemAudioCaptureDevice())
++            audioDeviceInfo.append({ 0, WTF::move(*device) });
++    }
++    if (request.audioConstraints.isValid && audioDeviceInfo.isEmpty() && !isDisplayRequest) {
++#else
++    UNUSED_VARIABLE(isDisplayRequest);
+     if (request.audioConstraints.isValid && audioDeviceInfo.isEmpty()) {
++#endif
+         WTFLogAlways("Audio capture was requested but no device was found amongst %zu devices", audioCaptureFactory().audioCaptureDeviceManager().captureDevices().size());
+         request.audioConstraints.mandatoryConstraints.forEach([](auto constraintType, auto& constraint) { constraint.log(constraintType); });
+ 
 diff --git a/Source/WebCore/platform/mediastream/RealtimeVideoCaptureSource.cpp b/Source/WebCore/platform/mediastream/RealtimeVideoCaptureSource.cpp
 index d4ed58f6e04d7f58667397d81db0675b6ce7f131..b95528567332612653af59bf8dbca81b7d280daa 100644
 --- a/Source/WebCore/platform/mediastream/RealtimeVideoCaptureSource.cpp
@@ -60159,10 +60276,10 @@ index 0000000000000000000000000000000000000000..b59f56027057be21b0b3eeaeb5f9ec3b
 +#endif
 diff --git a/Source/WebCore/platform/mediastream/haiku/HaikuCaptureNode.cpp b/Source/WebCore/platform/mediastream/haiku/HaikuCaptureNode.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..b7959e4229b502c7a901cd406957985daf37852d
+index 0000000000000000000000000000000000000000..1141b5beb1b954f912984bedfd0dfee013386601
 --- /dev/null
 +++ b/Source/WebCore/platform/mediastream/haiku/HaikuCaptureNode.cpp
-@@ -0,0 +1,431 @@
+@@ -0,0 +1,482 @@
 +/*
 + * Copyright (C) 2026 Summit contributors.
 + *
@@ -60462,11 +60579,60 @@ index 0000000000000000000000000000000000000000..b7959e4229b502c7a901cd406957985d
 +        return nullptr;
 +    }
 +
++    return connectOutput(*roster, producer, output, requested.type == B_MEDIA_RAW_VIDEO ? "Summit camera" : "Summit microphone", requested, WTF::move(handler), error, status);
++}
++
++std::unique_ptr<HaikuCaptureConnection> HaikuCaptureConnection::connectToOutput(const media_node& producer, const char* outputName, const char* consumerName, const media_format& requested, BufferHandler&& handler, String& error, status_t& status)
++{
++    BMediaRoster* roster = mediaRoster();
++    if (!roster) {
++        error = "The media services are not running."_s;
++        status = B_NO_INIT;
++        return nullptr;
++    }
++
++    auto findOutput = [&](media_output& found) {
++        media_output outputs[16];
++        int32 count = 0;
++        status = roster->GetAllOutputsFor(producer, outputs, std::size(outputs), &count);
++        if (status != B_OK)
++            return false;
++        for (int32 index = 0; index < count; ++index) {
++            if (!strcmp(outputs[index].name, outputName)) {
++                found = outputs[index];
++                return true;
++            }
++        }
++        status = B_MEDIA_BAD_SOURCE;
++        return false;
++    };
++    media_output output;
++    if (!findOutput(output)) {
++        error = makeString("The output \""_s, String::fromUTF8(outputName), "\" is missing."_s);
++        CAPTURE_TRACE("node %d has no output \"%s\"\n", int(producer.node), outputName);
++        return nullptr;
++    }
++    if (output.destination != media_destination::null) {
++        // Left connected by a program that ended, or recorded by another.
++        reclaimAbandonedOutputs(*roster, producer);
++        if (!findOutput(output) || output.destination != media_destination::null) {
++            error = "Another program records it."_s;
++            status = B_MEDIA_ALREADY_CONNECTED;
++            CAPTURE_TRACE("output \"%s\" of node %d is in use\n", outputName, int(producer.node));
++            return nullptr;
++        }
++    }
++    return connectOutput(*roster, producer, output, consumerName, requested, WTF::move(handler), error, status);
++}
++
++std::unique_ptr<HaikuCaptureConnection> HaikuCaptureConnection::connectOutput(BMediaRoster& rosterReference, const media_node& producer, const media_output& output, const char* consumerName, const media_format& requested, BufferHandler&& handler, String& error, status_t& status)
++{
++    BMediaRoster* roster = &rosterReference;
 +    std::unique_ptr<HaikuCaptureConnection> connection(new HaikuCaptureConnection);
 +    connection->m_producer = producer;
 +    connection->m_output = output;
 +
-+    auto* consumer = new HaikuCaptureConsumer(requested.type == B_MEDIA_RAW_VIDEO ? "Summit camera" : "Summit microphone", requested.type);
++    auto* consumer = new HaikuCaptureConsumer(consumerName, requested.type);
 +    status = roster->RegisterNode(consumer);
 +    if (status != B_OK) {
 +        error = "The media services refused a capture node."_s;
@@ -60477,10 +60643,11 @@ index 0000000000000000000000000000000000000000..b7959e4229b502c7a901cd406957985d
 +    consumer->setHandler(WTF::move(handler));
 +
 +    media_input input;
-+    count = 0;
++    int32 count = 0;
 +    roster->GetFreeInputsFor(consumer->Node(), &input, 1, &count, requested.type);
 +    if (count < 1) {
 +        error = "The capture node has no input."_s;
++        status = B_ERROR;
 +        return nullptr;
 +    }
 +    connection->m_input = input;
@@ -60516,8 +60683,9 @@ index 0000000000000000000000000000000000000000..b7959e4229b502c7a901cd406957985d
 +    bigtime_t start = system_time() + 20000;
 +    roster->StartNode(consumer->Node(), start);
 +    // A sound card's input is usually running already (it plays too); a
-+    // camera is started for us.
-+    roster->StartNode(producer, start);
++    // camera is started for us. The system mixer runs by itself.
++    if (!(producer.kind & B_SYSTEM_MIXER))
++        roster->StartNode(producer, start);
 +
 +    if (format.type == B_MEDIA_RAW_VIDEO) {
 +        CAPTURE_TRACE("video connected: %ux%u, %.1f per second, color space %d, \"%s\"\n",
@@ -60596,10 +60764,10 @@ index 0000000000000000000000000000000000000000..b7959e4229b502c7a901cd406957985d
 +#endif // ENABLE(MEDIA_STREAM) && PLATFORM(HAIKU)
 diff --git a/Source/WebCore/platform/mediastream/haiku/HaikuCaptureNode.h b/Source/WebCore/platform/mediastream/haiku/HaikuCaptureNode.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..45f9b5810dcc89414a8444dfd9a93e62362758aa
+index 0000000000000000000000000000000000000000..baf606eb8a43e053820e4a472dc51c40fcf8a325
 --- /dev/null
 +++ b/Source/WebCore/platform/mediastream/haiku/HaikuCaptureNode.h
-@@ -0,0 +1,89 @@
+@@ -0,0 +1,100 @@
 +/*
 + * Copyright (C) 2026 Summit contributors.
 + *
@@ -60627,6 +60795,8 @@ index 0000000000000000000000000000000000000000..45f9b5810dcc89414a8444dfd9a93e62
 +#include <wtf/Lock.h>
 +#include <wtf/Vector.h>
 +#include <wtf/text/WTFString.h>
++
++class BMediaRoster;
 +
 +namespace WebCore {
 +
@@ -60664,6 +60834,13 @@ index 0000000000000000000000000000000000000000..45f9b5810dcc89414a8444dfd9a93e62
 +    // the camera for that size. On failure `error` says why (the input
 +    // being in use is one reason: it serves one consumer at a time).
 +    static std::unique_ptr<HaikuCaptureConnection> connect(const media_node& producer, const media_format& requested, BufferHandler&&, String& error);
++    // The same for the producer's output named `outputName` rather than a
++    // free one: the system mixer's "Mixer Monitor", a copy of what the
++    // computer plays (getDisplayMedia() with audio). The producer runs by
++    // itself; it is neither started nor stopped. `status` is the Media
++    // Kit's answer (B_MEDIA_NOT_CONNECTED: no sound card;
++    // B_MEDIA_ALREADY_CONNECTED: another program records it).
++    static std::unique_ptr<HaikuCaptureConnection> connectToOutput(const media_node& producer, const char* outputName, const char* consumerName, const media_format& requested, BufferHandler&&, String& error, status_t& status);
 +    ~HaikuCaptureConnection();
 +
 +    const media_format& format() const { return m_format; }
@@ -60678,6 +60855,8 @@ index 0000000000000000000000000000000000000000..45f9b5810dcc89414a8444dfd9a93e62
 +    HaikuCaptureConnection() = default;
 +    void disconnectLocked();
 +
++    static std::unique_ptr<HaikuCaptureConnection> connectOutput(BMediaRoster&, const media_node& producer, const media_output&, const char* consumerName, const media_format& requested, BufferHandler&&, String& error, status_t& status);
++
 +    media_node m_producer;
 +    HaikuCaptureConsumer* m_consumer { nullptr };
 +    media_output m_output;
@@ -60691,10 +60870,10 @@ index 0000000000000000000000000000000000000000..45f9b5810dcc89414a8444dfd9a93e62
 +#endif // ENABLE(MEDIA_STREAM) && PLATFORM(HAIKU)
 diff --git a/Source/WebCore/platform/mediastream/haiku/HaikuCaptureSources.cpp b/Source/WebCore/platform/mediastream/haiku/HaikuCaptureSources.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..de3c04bcbf8abfdc918b3d82ed8e48413fe30387
+index 0000000000000000000000000000000000000000..25724e9c4cd67eb0565f5dcf537063a24d1c4331
 --- /dev/null
 +++ b/Source/WebCore/platform/mediastream/haiku/HaikuCaptureSources.cpp
-@@ -0,0 +1,1403 @@
+@@ -0,0 +1,1804 @@
 +/*
 + * Copyright (C) 2026 Summit contributors.
 + *
@@ -60719,6 +60898,7 @@ index 0000000000000000000000000000000000000000..de3c04bcbf8abfdc918b3d82ed8e4841
 +
 +#include "HaikuAudioData.h"
 +#include "HaikuCaptureNode.h"
++#include "HaikuSystemAudioCapture.h"
 +#include "HaikuVoiceProcessing.h"
 +#include "MediaConstraints.h"
 +#include "RealtimeMediaSourceCenter.h"
@@ -60951,6 +61131,8 @@ index 0000000000000000000000000000000000000000..de3c04bcbf8abfdc918b3d82ed8e4841
 +
 +CaptureSourceOrError HaikuAudioCaptureFactory::createAudioCaptureSource(const CaptureDevice& device, MediaDeviceHashSalts&& hashSalts, const MediaConstraints* constraints, std::optional<PageIdentifier> pageIdentifier)
 +{
++    if (device.type() == CaptureDevice::DeviceType::SystemAudio)
++        return HaikuSystemAudioCaptureSource::create(device, WTF::move(hashSalts), constraints, pageIdentifier);
 +    return HaikuAudioCaptureSource::create(device, WTF::move(hashSalts), constraints, pageIdentifier);
 +}
 +
@@ -62078,6 +62260,404 @@ index 0000000000000000000000000000000000000000..de3c04bcbf8abfdc918b3d82ed8e4841
 +    audioSamplesAvailable(time, audioData, description, frames);
 +}
 +
++// System audio.
++
++static constexpr auto systemAudioDeviceId = "haiku-system-audio"_s;
++static constexpr const char* mixerMonitorName = "Mixer Monitor";
++
++static bool systemAudioTraceEnabled()
++{
++    static bool enabled = [] {
++        const char* value = getenv("SUMMIT_CAPTURE_TRACE");
++        return value && *value && strcmp(value, "0");
++    }();
++    return enabled;
++}
++
++static bool systemAudioCaptureEnabled()
++{
++    static bool enabled = [] {
++        const char* value = getenv("SUMMIT_SYSTEM_AUDIO_CAPTURE");
++        return !value || strcmp(value, "0");
++    }();
++    return enabled;
++}
++
++std::optional<CaptureDevice> HaikuSystemAudioCaptureSource::availableDevice()
++{
++    if (!systemAudioCaptureEnabled())
++        return std::nullopt;
++    BMediaRoster* roster = BMediaRoster::Roster();
++    media_node mixer;
++    if (!roster || roster->GetAudioMixer(&mixer) != B_OK)
++        return std::nullopt;
++    // Asking for the outputs also drops a recorder whose program ended.
++    media_output outputs[8];
++    int32 count = 0;
++    bool hasMonitor = false;
++    bool monitorFree = false;
++    bool hasSoundCard = false;
++    if (roster->GetAllOutputsFor(mixer, outputs, std::size(outputs), &count) == B_OK) {
++        for (int32 index = 0; index < count; ++index) {
++            bool connected = outputs[index].destination != media_destination::null;
++            if (!strcmp(outputs[index].name, mixerMonitorName)) {
++                hasMonitor = true;
++                port_info info;
++                monitorFree = !connected || get_port_info(outputs[index].destination.port, &info) != B_OK;
++            } else if (connected)
++                hasSoundCard = true;
++        }
++    }
++    roster->ReleaseNode(mixer);
++    // Without a sound card the monitor carries nothing (and refuses a
++    // connection); another program recording it would refuse ours.
++    if (!hasMonitor || !hasSoundCard || !monitorFree)
++        return std::nullopt;
++    CaptureDevice device(systemAudioDeviceId, CaptureDevice::DeviceType::SystemAudio, "System audio"_s);
++    device.setEnabled(true);
++    return device;
++}
++
++std::optional<CaptureDevice> haikuSystemAudioCaptureDevice()
++{
++    return HaikuSystemAudioCaptureSource::availableDevice();
++}
++
++CaptureSourceOrError HaikuSystemAudioCaptureSource::create(const CaptureDevice& device, MediaDeviceHashSalts&& hashSalts, const MediaConstraints* constraints, std::optional<PageIdentifier> pageIdentifier)
++{
++    if (!systemAudioCaptureEnabled())
++        return CaptureSourceOrError(CaptureSourceError { "System audio capture is off"_s, MediaAccessDenialReason::PermissionDenied });
++    auto source = adoptRef(*new HaikuSystemAudioCaptureSource(device, WTF::move(hashSalts), pageIdentifier));
++    if (constraints && constraints->isValid) {
++        if (auto error = source->applyConstraints(*constraints))
++            return CaptureSourceOrError(CaptureSourceError { error->invalidConstraint });
++    }
++    // Connected now, so a monitor that cannot be recorded fails the request
++    // for sound here, before the stream is made (the screen is then shared
++    // without it, see RealtimeMediaSourceCenter::createMediaStream()).
++    String error;
++    if (!source->connect(error))
++        return CaptureSourceOrError(CaptureSourceError { WTF::move(error), MediaAccessDenialReason::HardwareError });
++    return CaptureSourceOrError(WTF::move(source));
++}
++
++HaikuSystemAudioCaptureSource::HaikuSystemAudioCaptureSource(const CaptureDevice& device, MediaDeviceHashSalts&& hashSalts, std::optional<PageIdentifier> pageIdentifier)
++    : RealtimeMediaSource(device, WTF::move(hashSalts), pageIdentifier)
++{
++    initializeSampleRate(48000);
++    initializeVolume(1);
++    // The computer's sound is not a voice next to a loudspeaker: no echo
++    // cancellation, as in Chrome.
++    initializeEchoCancellation(false);
++}
++
++HaikuSystemAudioCaptureSource::~HaikuSystemAudioCaptureSource()
++{
++    stopProducingData();
++    disconnect();
++}
++
++const RealtimeMediaSourceCapabilities& HaikuSystemAudioCaptureSource::capabilities()
++{
++    if (!m_capabilities) {
++        RealtimeMediaSourceCapabilities capabilities(settings().supportedConstraints());
++        capabilities.setDeviceId(hashedId());
++        capabilities.setVolume({ 0.0, 1.0 });
++        capabilities.setSampleRate({ 8000, 192000 });
++        capabilities.setEchoCancellation(RealtimeMediaSourceCapabilities::EchoCancellation::Off);
++        m_capabilities = WTF::move(capabilities);
++    }
++    return *m_capabilities;
++}
++
++const RealtimeMediaSourceSettings& HaikuSystemAudioCaptureSource::settings()
++{
++    if (!m_currentSettings) {
++        RealtimeMediaSourceSettings settings;
++        settings.setDeviceId(hashedId());
++        settings.setLabel(name());
++        RealtimeMediaSourceSupportedConstraints supportedConstraints;
++        supportedConstraints.setSupportsDeviceId(true);
++        supportedConstraints.setSupportsEchoCancellation(true);
++        supportedConstraints.setSupportsVolume(true);
++        supportedConstraints.setSupportsSampleRate(true);
++        settings.setSupportedConstraints(supportedConstraints);
++        m_currentSettings = WTF::move(settings);
++    }
++    m_currentSettings->setVolume(volume());
++    m_currentSettings->setSampleRate(sampleRate());
++    m_currentSettings->setEchoCancellation(false);
++    return *m_currentSettings;
++}
++
++void HaikuSystemAudioCaptureSource::configurationChanged()
++{
++    m_currentSettings = std::nullopt;
++    m_capabilities = std::nullopt;
++    RealtimeMediaSource::configurationChanged();
++}
++
++void HaikuSystemAudioCaptureSource::settingsDidChange(OptionSet<RealtimeMediaSourceSettings::Flag> flags)
++{
++    m_currentSettings = std::nullopt;
++    if (flags.contains(RealtimeMediaSourceSettings::Flag::Volume))
++        m_gain = volume();
++}
++
++bool HaikuSystemAudioCaptureSource::connect(String& error)
++{
++    ASSERT(isMainThread());
++    if (m_connection)
++        return true;
++    BMediaRoster* roster = BMediaRoster::Roster();
++    media_node mixer;
++    if (!roster || roster->GetAudioMixer(&mixer) != B_OK) {
++        error = "The system mixer is not running"_s;
++        return false;
++    }
++    media_format format;
++    format.type = B_MEDIA_RAW_AUDIO;
++    format.u.raw_audio = media_raw_audio_format::wildcard;
++    status_t status = B_OK;
++    // Destroying the connection waits for its handler, so it never outlives
++    // this object.
++    m_connection = HaikuCaptureConnection::connectToOutput(mixer, mixerMonitorName, "Summit system audio", format, [this](const void* data, size_t bytes, const media_format& format, bigtime_t) {
++        buffersReceived(data, bytes, format);
++    }, error, status);
++    roster->ReleaseNode(mixer);
++    if (!m_connection) {
++        if (status == B_MEDIA_NOT_CONNECTED)
++            error = "There is no sound card"_s;
++        else if (status == B_MEDIA_ALREADY_CONNECTED)
++            error = "Another program records the computer's sound"_s;
++        fprintf(stderr, "Summit: system audio: %s\n", error.utf8().legacyCStringPointer());
++        return false;
++    }
++    auto& audio = m_connection->format().u.raw_audio;
++    if (audio.frame_rate > 0 && audio.frame_rate != sampleRate())
++        setSampleRate(audio.frame_rate);
++    return true;
++}
++
++void HaikuSystemAudioCaptureSource::disconnect()
++{
++    m_connection = nullptr;
++}
++
++void HaikuSystemAudioCaptureSource::startProducingData()
++{
++    {
++        Locker locker { m_lock };
++        if (m_running)
++            return;
++    }
++    // Stopped before (the track was stopped and started again): connect again.
++    String error;
++    if (!connect(error)) {
++        captureFailed();
++        return;
++    }
++    {
++        Locker locker { m_sendLock };
++        m_baseTime = MediaTime::invalidTime();
++        m_framesSent = 0;
++        m_rate = 0;
++        m_channels = 0;
++        m_silenceSince = { };
++    }
++    m_gain = volume();
++    {
++        Locker locker { m_lock };
++        m_running = true;
++    }
++    m_silenceThread = Thread::create("Summit system audio"_s, [protectedThis = Ref { *this }] {
++        protectedThis->silenceLoop();
++    });
++}
++
++void HaikuSystemAudioCaptureSource::stopProducingData()
++{
++    {
++        Locker locker { m_lock };
++        if (!m_running)
++            return;
++        m_running = false;
++        m_condition.notifyAll();
++    }
++    if (m_silenceThread) {
++        if (&Thread::currentSingleton() != m_silenceThread.get())
++            m_silenceThread->waitForCompletion();
++        m_silenceThread = nullptr;
++    }
++    // Frees the monitor for other programs.
++    disconnect();
++}
++
++static bool convertToFloat(const void* data, size_t bytes, const media_raw_audio_format& audio, Vector<float>& samples)
++{
++    size_t sampleSize = audio.format & media_raw_audio_format::B_AUDIO_SIZE_MASK;
++    if (!sampleSize || !audio.channel_count)
++        return false;
++    size_t sampleCount = bytes / sampleSize / audio.channel_count * audio.channel_count;
++    if (!sampleCount)
++        return false;
++    samples.resize(sampleCount);
++    switch (audio.format) {
++    case media_raw_audio_format::B_AUDIO_FLOAT:
++        memcpy(samples.mutableSpan().data(), data, sampleCount * sizeof(float));
++        return true;
++    case media_raw_audio_format::B_AUDIO_INT: {
++        auto* in = static_cast<const int32_t*>(data);
++        for (size_t i = 0; i < sampleCount; ++i)
++            samples[i] = in[i] / 2147483648.0f;
++        return true;
++    }
++    case media_raw_audio_format::B_AUDIO_SHORT: {
++        auto* in = static_cast<const int16_t*>(data);
++        for (size_t i = 0; i < sampleCount; ++i)
++            samples[i] = in[i] / 32768.0f;
++        return true;
++    }
++    case media_raw_audio_format::B_AUDIO_CHAR: {
++        auto* in = static_cast<const int8_t*>(data);
++        for (size_t i = 0; i < sampleCount; ++i)
++            samples[i] = in[i] / 128.0f;
++        return true;
++    }
++    case media_raw_audio_format::B_AUDIO_UCHAR: {
++        auto* in = static_cast<const uint8_t*>(data);
++        for (size_t i = 0; i < sampleCount; ++i)
++            samples[i] = (int(in[i]) - 128) / 128.0f;
++        return true;
++    }
++    default:
++        return false;
++    }
++}
++
++void HaikuSystemAudioCaptureSource::buffersReceived(const void* data, size_t bytes, const media_format& format)
++{
++    if (!isProducingData())
++        return;
++    // The format the buffer came in: the consumer takes FormatChanged()
++    // (another frame rate in Media preferences, another sound card) before
++    // the buffers that have it.
++    auto& audio = format.u.raw_audio;
++    unsigned channels = audio.channel_count;
++    double rate = audio.frame_rate;
++    if (!channels || rate <= 0)
++        return;
++
++    Locker locker { m_sendLock };
++    if (!convertToFloat(data, bytes, audio, m_samples))
++        return;
++    m_lastBuffer = MonotonicTime::now();
++    if (m_silenceSince) {
++        if (systemAudioTraceEnabled())
++            fprintf(stderr, "Summit capture: system audio: the mixer sends again after %.0f ms of silence\n", (m_lastBuffer - m_silenceSince).milliseconds());
++        m_silenceSince = { };
++    }
++    if (muted())
++        std::fill(m_samples.begin(), m_samples.end(), 0.0f);
++    else if (float gain = m_gain; gain != 1) {
++        for (auto& sample : m_samples)
++            sample *= gain;
++    }
++    sendSamples(m_samples.mutableSpan(), channels, rate);
++}
++
++void HaikuSystemAudioCaptureSource::sendSamples(std::span<float> samples, unsigned channels, double rate)
++{
++    size_t frames = samples.size() / channels;
++    auto now = MonotonicTime::now();
++    if (m_baseTime.isInvalid()) {
++        m_baseTime = MediaTime::createWithDouble(now.secondsSinceEpoch().value());
++        m_baseClock = now;
++        m_framesSent = 0;
++    } else if (rate != m_rate) {
++        // A new rate goes on from where the last one ended.
++        m_baseTime = m_baseTime + MediaTime(m_framesSent * 1000000 / uint64_t(m_rate), 1000000);
++        m_baseClock = m_baseClock + Seconds(m_framesSent / m_rate);
++        m_framesSent = 0;
++    }
++    if (rate != m_rate) {
++        callOnMainThread([weakThis = ThreadSafeWeakPtr { *this }, rate] {
++            if (RefPtr protectedThis = weakThis.get(); protectedThis && protectedThis->sampleRate() != rate)
++                protectedThis->setSampleRate(rate);
++        });
++    }
++    m_rate = rate;
++    m_channels = channels;
++
++    auto time = m_baseTime + MediaTime(m_framesSent * 1000000 / uint64_t(rate), 1000000);
++    m_framesSent += frames;
++
++    HaikuAudioData audioData(samples, channels);
++    HaikuAudioStreamDescription description(rate, channels);
++    audioSamplesAvailable(time, audioData, description, frames);
++}
++
++// How long the mixer may send nothing before the track carries silence, and
++// how far behind the clock silence keeps it: the mixer's buffers come
++// ahead of their time by the sound card's latency, and some late.
++static constexpr Seconds systemAudioGap = 100_ms;
++static constexpr Seconds systemAudioSilenceLag = 20_ms;
++
++void HaikuSystemAudioCaptureSource::silenceLoop()
++{
++    while (true) {
++        {
++            Locker locker { m_lock };
++            if (!m_running)
++                break;
++            m_condition.waitFor(m_lock, 10_ms);
++            if (!m_running)
++                break;
++        }
++        if (!isProducingData())
++            continue;
++
++        Locker locker { m_sendLock };
++        auto now = MonotonicTime::now();
++        // Nothing was sent yet: the format is that of the connection (the
++        // monitor's is the sound card's).
++        if (!m_rate) {
++            if (!m_connection)
++                continue;
++            auto& audio = m_connection->format().u.raw_audio;
++            if (audio.frame_rate <= 0 || !audio.channel_count)
++                continue;
++            m_rate = audio.frame_rate;
++            m_channels = audio.channel_count;
++            m_lastBuffer = now - systemAudioGap;
++        }
++        if (now - m_lastBuffer < systemAudioGap)
++            continue;
++        if (m_baseTime.isInvalid()) {
++            m_baseTime = MediaTime::createWithDouble(now.secondsSinceEpoch().value());
++            m_baseClock = now;
++            m_framesSent = 0;
++        }
++        double due = ((now - m_baseClock) - systemAudioSilenceLag).seconds() * m_rate;
++        if (due <= double(m_framesSent))
++            continue;
++        if (!m_silenceSince) {
++            m_silenceSince = now;
++            if (systemAudioTraceEnabled())
++                fprintf(stderr, "Summit capture: system audio: the mixer sends nothing; silence from frame %llu\n", static_cast<unsigned long long>(m_framesSent));
++        }
++        // Long gaps go out in pieces of 10 ms, as audio does.
++        size_t chunk = std::max<size_t>(1, size_t(m_rate / 100));
++        size_t frames = std::min<size_t>(size_t(due - m_framesSent), chunk * 50);
++        while (frames) {
++            size_t count = std::min(frames, chunk);
++            m_silence.fill(0, count * m_channels);
++            sendSamples(m_silence.mutableSpan(), m_channels, m_rate);
++            frames -= count;
++        }
++    }
++}
++
 +// The center's platform factories.
 +
 +AudioCaptureFactory& RealtimeMediaSourceCenter::defaultAudioCaptureFactory()
@@ -62100,10 +62680,10 @@ index 0000000000000000000000000000000000000000..de3c04bcbf8abfdc918b3d82ed8e4841
 +#endif // ENABLE(MEDIA_STREAM) && PLATFORM(HAIKU)
 diff --git a/Source/WebCore/platform/mediastream/haiku/HaikuCaptureSources.h b/Source/WebCore/platform/mediastream/haiku/HaikuCaptureSources.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..4924bd7a56b3781b1e863602cec4ea01e6dc0e25
+index 0000000000000000000000000000000000000000..526d2085681881b666869044e5c3ed73efd9f1c8
 --- /dev/null
 +++ b/Source/WebCore/platform/mediastream/haiku/HaikuCaptureSources.h
-@@ -0,0 +1,244 @@
+@@ -0,0 +1,310 @@
 +/*
 + * Copyright (C) 2026 Summit contributors.
 + *
@@ -62141,6 +62721,7 @@ index 0000000000000000000000000000000000000000..4924bd7a56b3781b1e863602cec4ea01
 +
 +namespace WebCore {
 +
++class HaikuCaptureConnection;
 +class HaikuSharedCamera;
 +class HaikuSharedMicrophone;
 +class VideoFrameHaiku;
@@ -62319,6 +62900,71 @@ index 0000000000000000000000000000000000000000..4924bd7a56b3781b1e863602cec4ea01
 +    std::optional<RealtimeMediaSourceSettings> m_currentSettings;
 +};
 +
++// What the computer plays, for getDisplayMedia({ audio: true }): the system
++// mixer's "Mixer Monitor" output (air/OS, docs/airos/AUDIO-CAPTURE.md), a
++// copy of every buffer the mixer sends to the sound card, recorded through a
++// consumer node of ours. The mixer sends nothing while nothing plays; the
++// track then carries silence, so its time keeps up with the clock. One
++// program records the monitor at a time. SUMMIT_SYSTEM_AUDIO_CAPTURE=0 never
++// offers it.
++class HaikuSystemAudioCaptureSource final : public RealtimeMediaSource, public ThreadSafeRefCountedAndCanMakeThreadSafeWeakPtr<HaikuSystemAudioCaptureSource, WTF::DestructionThread::MainRunLoop> {
++public:
++    static CaptureSourceOrError create(const CaptureDevice&, MediaDeviceHashSalts&&, const MediaConstraints*, std::optional<PageIdentifier>);
++    // The device getDisplayMedia() offers when the monitor can be recorded
++    // now: there is a sound card and no other program records it. Main
++    // thread (it asks the media_server).
++    static std::optional<CaptureDevice> availableDevice();
++    ~HaikuSystemAudioCaptureSource();
++
++    WTF_ABSTRACT_THREAD_SAFE_REF_COUNTED_AND_CAN_MAKE_WEAK_PTR_IMPL;
++
++    const RealtimeMediaSourceCapabilities& capabilities() final;
++    const RealtimeMediaSourceSettings& settings() final;
++
++private:
++    HaikuSystemAudioCaptureSource(const CaptureDevice&, MediaDeviceHashSalts&&, std::optional<PageIdentifier>);
++
++    bool isCaptureSource() const final { return true; }
++    CaptureDevice::DeviceType deviceType() const final { return CaptureDevice::DeviceType::SystemAudio; }
++    void startProducingData() final;
++    void stopProducingData() final;
++    void settingsDidChange(OptionSet<RealtimeMediaSourceSettings::Flag>) final;
++    void configurationChanged() final;
++
++    // Main thread. False, with the reason, when the monitor cannot be
++    // recorded (no sound card, another program records it).
++    bool connect(String& error);
++    void disconnect();
++    // On the consumer's thread.
++    void buffersReceived(const void*, size_t, const media_format&);
++    // On a thread of its own while producing: silence for the time the mixer
++    // sends nothing.
++    void silenceLoop();
++    void sendSamples(std::span<float>, unsigned channels, double rate) WTF_REQUIRES_LOCK(m_sendLock);
++
++    std::unique_ptr<HaikuCaptureConnection> m_connection;
++    RefPtr<Thread> m_silenceThread;
++    Lock m_lock;
++    Condition m_condition;
++    bool m_running WTF_GUARDED_BY_LOCK(m_lock) { false };
++
++    Lock m_sendLock;
++    Vector<float> m_samples WTF_GUARDED_BY_LOCK(m_sendLock);
++    Vector<float> m_silence WTF_GUARDED_BY_LOCK(m_sendLock);
++    unsigned m_channels WTF_GUARDED_BY_LOCK(m_sendLock) { 0 };
++    double m_rate WTF_GUARDED_BY_LOCK(m_sendLock) { 0 };
++    // The time of the first sample sent at this rate, and the frames sent since.
++    MediaTime m_baseTime WTF_GUARDED_BY_LOCK(m_sendLock) { MediaTime::invalidTime() };
++    MonotonicTime m_baseClock WTF_GUARDED_BY_LOCK(m_sendLock);
++    uint64_t m_framesSent WTF_GUARDED_BY_LOCK(m_sendLock) { 0 };
++    MonotonicTime m_lastBuffer WTF_GUARDED_BY_LOCK(m_sendLock);
++    // Since when silence stands in for the mixer's buffers, or nothing.
++    MonotonicTime m_silenceSince WTF_GUARDED_BY_LOCK(m_sendLock);
++    std::atomic<float> m_gain { 1 };
++    std::optional<RealtimeMediaSourceCapabilities> m_capabilities;
++    std::optional<RealtimeMediaSourceSettings> m_currentSettings;
++};
++
 +class HaikuAudioCaptureFactory final : public AudioCaptureFactory {
 +public:
 +    static HaikuAudioCaptureFactory& singleton();
@@ -62344,6 +62990,46 @@ index 0000000000000000000000000000000000000000..4924bd7a56b3781b1e863602cec4ea01
 +    CaptureSourceOrError createDisplayCaptureSource(const CaptureDevice&, MediaDeviceHashSalts&&, const MediaConstraints*, std::optional<PageIdentifier>) final;
 +    DisplayCaptureManager& displayCaptureDeviceManager() final { return HaikuDisplayCaptureDeviceManager::singleton(); }
 +};
++
++} // namespace WebCore
++
++#endif // ENABLE(MEDIA_STREAM) && PLATFORM(HAIKU)
+diff --git a/Source/WebCore/platform/mediastream/haiku/HaikuSystemAudioCapture.h b/Source/WebCore/platform/mediastream/haiku/HaikuSystemAudioCapture.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..db5a33a3ddcb4c345cc44a87fe35c22d93030f53
+--- /dev/null
++++ b/Source/WebCore/platform/mediastream/haiku/HaikuSystemAudioCapture.h
+@@ -0,0 +1,34 @@
++/*
++ * Copyright (C) 2026 Summit contributors.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE AUTHORS ``AS IS'' AND ANY EXPRESS OR
++ * IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
++ * OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
++ */
++
++#pragma once
++
++#if ENABLE(MEDIA_STREAM) && PLATFORM(HAIKU)
++
++#include "CaptureDevice.h"
++#include <optional>
++
++namespace WebCore {
++
++// getDisplayMedia({ audio: true }): the computer's sound as a capture device
++// (HaikuSystemAudioCaptureSource), when it can be recorded now. Without the
++// Media Kit's headers, for RealtimeMediaSourceCenter. Main thread.
++std::optional<CaptureDevice> haikuSystemAudioCaptureDevice();
 +
 +} // namespace WebCore
 +
@@ -89136,10 +89822,10 @@ index 0000000000000000000000000000000000000000..574ed16658f0c14b1aa2e63208e990b8
 +#define WEBKIT_ENGINE_VERSION_HAIKU "@WebKit_HAIKU_MAJOR_VERSION@.@WebKit_HAIKU_MINOR_VERSION@.@WebKit_HAIKU_TINY_VERSION@"
 diff --git a/Source/WebKit/UIProcess/API/haiku/WebKitContext.cpp b/Source/WebKit/UIProcess/API/haiku/WebKitContext.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..b20795b1082e9bd87cd2084aab1def14d21d6ce1
+index 0000000000000000000000000000000000000000..780bef48602a785be99c6721e2614120ece36c38
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/API/haiku/WebKitContext.cpp
-@@ -0,0 +1,1191 @@
+@@ -0,0 +1,1196 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#include "config.h"
@@ -90018,10 +90704,15 @@ index 0000000000000000000000000000000000000000..b20795b1082e9bd87cd2084aab1def14
 +
 +void BWebKitContext::RespondToMediaPermissionRequest(uint64 identifier, bool allowed, const char* deviceId)
 +{
++    RespondToMediaPermissionRequest(identifier, allowed, deviceId, false);
++}
++
++void BWebKitContext::RespondToMediaPermissionRequest(uint64 identifier, bool allowed, const char* deviceId, bool shareAudio)
++{
 +    if (m_status != B_OK)
 +        return;
-+    withSitePermissionsHaiku(m_context, [identifier, allowed, deviceId = String::fromUTF8(deviceId ? deviceId : "").isolatedCopy()](WebKit::SitePermissionsHaiku& permissions) {
-+        permissions.respond(identifier, allowed, deviceId);
++    withSitePermissionsHaiku(m_context, [identifier, allowed, shareAudio, deviceId = String::fromUTF8(deviceId ? deviceId : "").isolatedCopy()](WebKit::SitePermissionsHaiku& permissions) {
++        permissions.respond(identifier, allowed, deviceId, shareAudio);
 +    });
 +}
 +
@@ -90333,10 +91024,10 @@ index 0000000000000000000000000000000000000000..b20795b1082e9bd87cd2084aab1def14
 +}
 diff --git a/Source/WebKit/UIProcess/API/haiku/WebKitContext.h b/Source/WebKit/UIProcess/API/haiku/WebKitContext.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..8bed6738bc698e3f3b3c9ee8f0b6177921590284
+index 0000000000000000000000000000000000000000..504871fcf63fea0143bec58eb5d97069078b4f31
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/API/haiku/WebKitContext.h
-@@ -0,0 +1,600 @@
+@@ -0,0 +1,605 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#pragma once
@@ -90551,8 +91242,10 @@ index 0000000000000000000000000000000000000000..8bed6738bc698e3f3b3c9ee8f0b61779
 +//                  saved as "camera" and "microphone". "screen" (getDisplayMedia)
 +//                  is never saved: it carries repeated "device_id" and
 +//                  "device_label" strings, the screens that may be shared, and
-+//                  "audio" (bool, the page also asked for the sound); answer it
-+//                  with RespondToMediaPermissionRequest and the chosen id.
++//                  "audio" (bool: the page also asked for the sound, and the
++//                  computer's sound can be shared with the screen); answer it
++//                  with RespondToMediaPermissionRequest, the chosen id and
++//                  whether the sound goes with it.
 +//                  "usb" and "bluetooth" also carry device_id/device_label
 +//                  choices; their grants last only for this browsing context.
 +//   PERMISSION_CANCELLED identifier (uint64): close this request's prompt;
@@ -90912,6 +91605,9 @@ index 0000000000000000000000000000000000000000..8bed6738bc698e3f3b3c9ee8f0b61779
 +    // Answers a "screen" request with the device_id the user chose (or any
 +    // request; the device is ignored for the others).
 +    void RespondToMediaPermissionRequest(uint64 identifier, bool allowed, const char* deviceId);
++    // The same, for a "screen" request with "audio": shareAudio shares what
++    // the computer plays with the screen (getDisplayMedia's audio track).
++    void RespondToMediaPermissionRequest(uint64 identifier, bool allowed, const char* deviceId, bool shareAudio);
 +    // The host's decision for an origin: state 1 allows, 0 denies, -1 forgets
 +    // it (the page asks again). Pages see it at once (Notification.permission,
 +    // navigator.permissions.query()). The engine stores nothing: give the
@@ -127520,10 +128216,10 @@ index 0000000000000000000000000000000000000000..a1df802a24259059253fe0d7e648aee7
 +};
 diff --git a/Source/WebKit/UIProcess/haiku/SitePermissionsHaiku.cpp b/Source/WebKit/UIProcess/haiku/SitePermissionsHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..e45c032e6b24926e167bb0fa374bac5d1902dcd2
+index 0000000000000000000000000000000000000000..52dabc013111ac0017c58a09b1ca593478fcf633
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/SitePermissionsHaiku.cpp
-@@ -0,0 +1,510 @@
+@@ -0,0 +1,516 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#include "config.h"
@@ -127654,6 +128350,8 @@ index 0000000000000000000000000000000000000000..e45c032e6b24926e167bb0fa374bac5d
 +            request.completion(false);
 +        if (request.mediaCompletion)
 +            request.mediaCompletion(false, { });
++        if (request.screenCompletion)
++            request.screenCompletion(false, { }, false);
 +    }
 +    if (m_geolocation)
 +        m_geolocation->providerDidFailToDeterminePosition("Location is not available"_s);
@@ -127700,6 +128398,8 @@ index 0000000000000000000000000000000000000000..e45c032e6b24926e167bb0fa374bac5d
 +                request.completion(false);
 +            if (request.mediaCompletion)
 +                request.mediaCompletion(false, { });
++            if (request.screenCompletion)
++                request.screenCompletion(false, { }, false);
 +        }
 +    }
 +}
@@ -127780,7 +128480,7 @@ index 0000000000000000000000000000000000000000..e45c032e6b24926e167bb0fa374bac5d
 +    }
 +}
 +
-+void SitePermissionsHaiku::respond(uint64_t identifier, bool allowed, const String& deviceId)
++void SitePermissionsHaiku::respond(uint64_t identifier, bool allowed, const String& deviceId, bool shareAudio)
 +{
 +    ASSERT(RunLoop::isMain());
 +    m_bluetoothViews.remove(identifier);
@@ -127789,25 +128489,27 @@ index 0000000000000000000000000000000000000000..e45c032e6b24926e167bb0fa374bac5d
 +        request.completion(allowed);
 +    if (request.mediaCompletion)
 +        request.mediaCompletion(allowed, deviceId);
++    if (request.screenCompletion)
++        request.screenCompletion(allowed, deviceId, allowed && shareAudio);
 +}
 +
-+void SitePermissionsHaiku::requestMedia(const String& origin, const BMessenger& view, MediaRequest&& media, MediaCompletion&& completion)
++void SitePermissionsHaiku::requestMedia(const String& origin, const BMessenger& view, MediaRequest&& media, ScreenCompletion&& completion)
 +{
 +    ASSERT(RunLoop::isMain());
 +    if (!media.screen) {
 +        auto camera = media.camera ? decision(Kind::Camera, origin) : std::optional<bool> { true };
 +        auto microphone = media.microphone ? decision(Kind::Microphone, origin) : std::optional<bool> { true };
 +        if ((camera && !*camera) || (microphone && !*microphone)) {
-+            completion(false, { });
++            completion(false, { }, false);
 +            return;
 +        }
 +        if (camera && microphone) {
-+            completion(true, { });
++            completion(true, { }, false);
 +            return;
 +        }
 +    }
 +    if (m_shutdown || !m_listener.IsValid() || origin.isEmpty() || origin == "null"_s || (media.screen && media.screens.isEmpty())) {
-+        completion(false, { });
++        completion(false, { }, false);
 +        return;
 +    }
 +
@@ -127829,10 +128531,10 @@ index 0000000000000000000000000000000000000000..e45c032e6b24926e167bb0fa374bac5d
 +    }
 +    if (view.IsValid())
 +        message.AddMessenger("view", view);
-+    m_pending.add(identifier, Pending { media.camera ? Kind::Camera : Kind::Microphone, origin, { }, WTF::move(completion) });
++    m_pending.add(identifier, Pending { media.camera ? Kind::Camera : Kind::Microphone, origin, { }, { }, WTF::move(completion) });
 +    if (!post(message)) {
-+        if (auto request = m_pending.take(identifier); request.mediaCompletion)
-+            request.mediaCompletion(false, { });
++        if (auto request = m_pending.take(identifier); request.screenCompletion)
++            request.screenCompletion(false, { }, false);
 +    }
 +}
 +
@@ -128036,10 +128738,10 @@ index 0000000000000000000000000000000000000000..e45c032e6b24926e167bb0fa374bac5d
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/SitePermissionsHaiku.h b/Source/WebKit/UIProcess/haiku/SitePermissionsHaiku.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..58f92b8c69e65a3c2db89f286d6ac98b2ae0f5b9
+index 0000000000000000000000000000000000000000..ba178c48466cf19c4483c5913dee766164148262
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/SitePermissionsHaiku.h
-@@ -0,0 +1,113 @@
+@@ -0,0 +1,118 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#pragma once
@@ -128089,11 +128791,14 @@ index 0000000000000000000000000000000000000000..58f92b8c69e65a3c2db89f286d6ac98b
 +    // A page asks: answered from a saved decision, or by the host, or denied
 +    // when there is no host. view is the asking page's BWebKitView.
 +    void request(Kind, const String& origin, const BMessenger& view, CompletionHandler<void(bool)>&&);
-+    void respond(uint64_t identifier, bool allowed, const String& deviceId = { });
++    // shareAudio: the person shares the computer's sound with the screen.
++    void respond(uint64_t identifier, bool allowed, const String& deviceId = { }, bool shareAudio = false);
 +
 +    // getUserMedia() and getDisplayMedia(): the camera and microphone from
 +    // saved decisions or the host; a screen always from the host, which
-+    // answers with the one chosen among `screens` (id, label).
++    // answers with the one chosen among `screens` (id, label), and whether
++    // the computer's sound goes with it when screenAudio (the page asked for
++    // sound and it can be recorded).
 +    struct MediaRequest {
 +        bool camera { false };
 +        bool microphone { false };
@@ -128102,7 +128807,8 @@ index 0000000000000000000000000000000000000000..58f92b8c69e65a3c2db89f286d6ac98b
 +        Vector<std::pair<String, String>> screens;
 +    };
 +    using MediaCompletion = CompletionHandler<void(bool allowed, const String& deviceId)>;
-+    void requestMedia(const String& origin, const BMessenger& view, MediaRequest&&, MediaCompletion&&);
++    using ScreenCompletion = CompletionHandler<void(bool allowed, const String& deviceId, bool shareAudio)>;
++    void requestMedia(const String& origin, const BMessenger& view, MediaRequest&&, ScreenCompletion&&);
 +    // permission is "usb", or "hid" for a WebHID chooser.
 +    void requestUSB(const String& origin, const BMessenger& view, Vector<std::pair<String, String>>&& devices, MediaCompletion&&, ASCIILiteral permission = "usb"_s);
 +    void requestBluetooth(const String& origin, const BMessenger& view, Vector<std::pair<String, String>>&& devices, MediaCompletion&&);
@@ -128141,6 +128847,7 @@ index 0000000000000000000000000000000000000000..58f92b8c69e65a3c2db89f286d6ac98b
 +        String origin;
 +        CompletionHandler<void(bool)> completion;
 +        MediaCompletion mediaCompletion;
++        ScreenCompletion screenCompletion;
 +    };
 +    HashMap<uint64_t, Pending> m_pending;
 +    HashMap<uint64_t, BMessenger> m_bluetoothViews;
@@ -129844,10 +130551,10 @@ index 0000000000000000000000000000000000000000..c9a119d02f85b7c5ad8fe9153bfc9604
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/WebView.cpp b/Source/WebKit/UIProcess/haiku/WebView.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..761ab141f1059ae39c6849036e2665a570f0fb60
+index 0000000000000000000000000000000000000000..f9d091474286a45118df2da8187ff4894508156c
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/WebView.cpp
-@@ -0,0 +1,3229 @@
+@@ -0,0 +1,3238 @@
 +/*
 + * Copyright (C) 2013 Intel Corporation. All rights reserved.
 + *
@@ -131332,7 +132039,10 @@ index 0000000000000000000000000000000000000000..761ab141f1059ae39c6849036e2665a5
 +        }
 +        SitePermissionsHaiku::MediaRequest media;
 +        media.screen = request.requiresDisplayCapture();
-+        media.screenAudio = request.requiresDisplayCaptureWithAudio();
++        // The page asked for sound and the computer's sound can be recorded
++        // (the web process offered it, HaikuSystemAudioCaptureSource).
++        media.screenAudio = media.screen && request.requiresDisplayCaptureWithAudio()
++            && request.audioDevice().type() == WebCore::CaptureDevice::DeviceType::SystemAudio;
 +        media.camera = request.requiresVideoCapture();
 +        media.microphone = !media.screen && request.requiresAudioCapture();
 +        if (media.screen) {
@@ -131342,7 +132052,7 @@ index 0000000000000000000000000000000000000000..761ab141f1059ae39c6849036e2665a5
 +        Ref protectedRequest = request;
 +        bool screen = media.screen;
 +        state->context->sitePermissions()->requestMedia(topOrigin.securityOrigin().toString(), view, WTF::move(media),
-+            [protectedRequest, screen](bool allowed, const String& deviceId) {
++            [protectedRequest, screen](bool allowed, const String& deviceId, bool shareAudio) {
 +                if (!protectedRequest->isPending())
 +                    return;
 +                if (!allowed) {
@@ -131350,16 +132060,21 @@ index 0000000000000000000000000000000000000000..761ab141f1059ae39c6849036e2665a5
 +                    return;
 +                }
 +                if (screen) {
-+                    // The screen the user picked; its sound is not captured.
++                    // The screen the user picked, and the computer's sound
++                    // when the user shares it too.
 +                    auto& devices = protectedRequest->eligibleVideoDevices();
 +                    auto index = devices.findIf([&](auto& device) { return device.persistentId() == deviceId; });
 +                    if (index == notFound) {
 +                        protectedRequest->deny(UserMediaPermissionRequestProxy::UserMediaAccessDenialReason::PermissionDenied);
 +                        return;
 +                    }
++                    Vector<WebCore::CaptureDevice> audioDevices;
++                    if (auto audioDevice = protectedRequest->audioDevice(); shareAudio && audioDevice.type() == WebCore::CaptureDevice::DeviceType::SystemAudio)
++                        audioDevices.append(WTF::move(audioDevice));
++                    String audioDeviceId = audioDevices.isEmpty() ? String() : audioDevices[0].persistentId();
 +                    protectedRequest->setEligibleVideoDevices({ devices[index] });
-+                    protectedRequest->setEligibleAudioDevices({ });
-+                    protectedRequest->allow(String(), deviceId);
++                    protectedRequest->setEligibleAudioDevices(WTF::move(audioDevices));
++                    protectedRequest->allow(audioDeviceId, deviceId);
 +                    return;
 +                }
 +                auto audioDevices = protectedRequest->audioDeviceUIDs();
@@ -131971,7 +132686,8 @@ index 0000000000000000000000000000000000000000..761ab141f1059ae39c6849036e2665a5
 +    message.AddBool("capturingCamera", mediaState.containsAny({ WebCore::MediaProducerMediaState::HasActiveVideoCaptureDevice, WebCore::MediaProducerMediaState::HasMutedVideoCaptureDevice }));
 +    message.AddBool("capturingMicrophone", mediaState.containsAny({ WebCore::MediaProducerMediaState::HasActiveAudioCaptureDevice, WebCore::MediaProducerMediaState::HasMutedAudioCaptureDevice }));
 +    message.AddBool("capturingScreen", mediaState.containsAny({ WebCore::MediaProducerMediaState::HasActiveScreenCaptureDevice, WebCore::MediaProducerMediaState::HasActiveWindowCaptureDevice,
-+        WebCore::MediaProducerMediaState::HasMutedScreenCaptureDevice, WebCore::MediaProducerMediaState::HasMutedWindowCaptureDevice }));
++        WebCore::MediaProducerMediaState::HasMutedScreenCaptureDevice, WebCore::MediaProducerMediaState::HasMutedWindowCaptureDevice,
++        WebCore::MediaProducerMediaState::HasActiveSystemAudioCaptureDevice, WebCore::MediaProducerMediaState::HasMutedSystemAudioCaptureDevice }));
 +#endif
 +    const auto& load = m_state->load;
 +    message.AddUInt64("loadGeneration", load.generation);

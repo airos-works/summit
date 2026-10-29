@@ -154,6 +154,23 @@ the GLib files, which are portable).
   engine). The fix belongs in the add-on: take `fBufferLock` in
   `Disconnect()` and `SetBufferGroup()`. The media_server does not relaunch
   the add-on server by itself.
+- The computer's sound when sharing the screen (#112, 29 October):
+  `getDisplayMedia({video: true, audio: true})` keeps the page's audio
+  constraints on Haiku (WebCore passes none on other ports), and the web
+  process offers a "System audio" device when the system mixer has its
+  "Mixer Monitor" output (air/OS since 27 October), a sound card is
+  connected and no other program is recording it. The screen picker then
+  shows **Share system audio**, ticked; without it, or when the sound cannot
+  be had, the screen is shared without sound rather than refused.
+  `HaikuSystemAudioCaptureSource` (`HaikuSystemAudioCapture.h`) records the
+  monitor through the capture node (connected to a named output, without
+  starting the mixer), follows its format changes, sends silence while the
+  mixer sends nothing for 100 ms, and lets go of the monitor when the track
+  stops. No echo cancellation. `SUMMIT_SYSTEM_AUDIO_CAPTURE=0` turns it off.
+  Laptop, an 880 Hz tone playing: the shared track (192 kHz) measured
+  879.9 Hz; paused, level 0; over a WebRTC loopback 50 packets a second and
+  no concealed samples. Not exercised there: the silence filling (the mixer
+  never stopped), a sound card's rate change, no sound card.
 - `SUMMIT_CAPTURE_TRACE=1` traces device lists and connections.
 
 ### Frames and samples
@@ -253,8 +270,6 @@ codecs both directions have); Summit calls Chromium (VP8 and VP9).
 
 ## Not done yet
 
-- System audio capture (sharing what the computer plays).
-- WebCodecs audio (video WebCodecs is in [webcodecs.md](webcodecs.md)).
 - Not yet tried in a real Zoom or Teams meeting (they need accounts or
   meetings to join); Summit presents itself as Safari, which both support.
   Teams' device check, its meeting launcher and Microsoft's calling library

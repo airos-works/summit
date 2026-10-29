@@ -839,9 +839,10 @@ public:
 #if SUMMIT_MODERN_WEBKIT
         if (message->what == summit::kAnswerPermissionPrompt) {
             const int32 which = message->GetInt32("which", 1), device = message->GetInt32("device_index", 0);
+            const bool shareAudio = message->GetBool("share_audio", true);
             bool answered = false;
             for (auto* service : { fSitePermissions.get(), fPrivateSitePermissions.get() }) {
-                if (!answered && service) answered = service->AnswerOpenPrompt(which, device);
+                if (!answered && service) answered = service->AnswerOpenPrompt(which, device, shareAudio);
             }
             BMessage reply(B_REPLY);
             reply.AddBool("answered", answered);

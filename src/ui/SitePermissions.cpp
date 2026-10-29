@@ -8,6 +8,7 @@
 #include <Application.h>
 #include <Bitmap.h>
 #include <Button.h>
+#include <CheckBox.h>
 #include <ControlLook.h>
 #include <File.h>
 #include <IconUtils.h>
@@ -86,9 +87,10 @@ bool DeviceChooser(const std::string& permission)
     return permission == "usb" || permission == "hid" || permission == "bluetooth";
 }
 
-// getDisplayMedia(): which screen or window to share, asked every time.
-// Answers the service with kPromptAnswered ("which" 2 and "device_id", or
-// "which" 1).
+// getDisplayMedia(): which screen or window to share, asked every time, and
+// whether the computer's sound goes with it when the page asked for sound.
+// Answers the service with kPromptAnswered ("which" 2, "device_id" and
+// "share_audio", or "which" 1).
 class DevicePermissionPicker final : public BWindow {
 public:
     DevicePermissionPicker(const BMessage& request, const std::string& question, BMessenger service)
@@ -127,12 +129,19 @@ public:
         scroll->SetExplicitMinSize(BSize(340, row * std::min<int32>(std::max<int32>(fList->CountItems(), 3), 10) + 4));
         auto* share = new BButton("share", DeviceChooser(fPermission) ? "Connect" : "Share", new BMessage(kShare));
         auto* cancel = new BButton("cancel", "Cancel", new BMessage(B_QUIT_REQUESTED));
-        BLayoutBuilder::Group<>(this, B_VERTICAL, B_USE_DEFAULT_SPACING)
-            .SetInsets(B_USE_WINDOW_INSETS)
+        // The page asked for sound and the computer's can be recorded: what
+        // plays (a video's sound) goes with the screen unless unchecked.
+        if (fPermission == "screen" && request.GetBool("audio", false)) {
+            fShareAudio = new BCheckBox("share-audio", "Share system audio", nullptr);
+            fShareAudio->SetValue(B_CONTROL_ON);
+        }
+        BLayoutBuilder::Group<> layout(this, B_VERTICAL, B_USE_DEFAULT_SPACING);
+        layout.SetInsets(B_USE_WINDOW_INSETS)
             .Add(text)
             .Add(scroll)
-            .Add(note)
-            .AddGroup(B_HORIZONTAL)
+            .Add(note);
+        if (fShareAudio) layout.Add(fShareAudio);
+        layout.AddGroup(B_HORIZONTAL)
                 .AddGlue()
                 .Add(cancel)
                 .Add(share)
@@ -172,6 +181,7 @@ private:
         answer.AddUInt64("identifier", fIdentifier);
         answer.AddInt32("which", which);
         answer.AddString("device_id", id.c_str());
+        answer.AddBool("share_audio", fShareAudio && fShareAudio->Value() == B_CONTROL_ON);
         fService.SendMessage(&answer);
     }
 
@@ -179,6 +189,7 @@ private:
     std::string fPermission, fOrigin;
     uint64 fIdentifier;
     BListView* fList = nullptr;
+    BCheckBox* fShareAudio = nullptr;
     std::vector<std::string> fIds;
     bool fAnswered = false;
 };
@@ -267,7 +278,6 @@ void SitePermissionService::Ask(const BMessage& request)
             : permission == "usb" ? " wants to connect to a USB device."
             : permission == "hid" ? " wants to connect to a HID device."
             : " wants to see your screen.");
-        if (request.GetBool("audio", false)) question += " (Its sound is not shared.)";
         auto* picker = new DevicePermissionPicker(request, question, BMessenger(this));
         picker->Lock();
         picker->Layout(true);
@@ -276,6 +286,7 @@ void SitePermissionService::Ask(const BMessage& request)
         PlaceOverView(picker, request);
         auto& shown = fPromptWindows[{permission, origin}];
         shown.window = BMessenger(picker);
+        shown.audio = permission == "screen" && request.GetBool("audio", false);
         const char* device = nullptr;
         for (int32 index = 0; request.FindString("device_id", index, &device) == B_OK; ++index)
             shown.devices.emplace_back(device);
@@ -315,7 +326,7 @@ void SitePermissionService::Ask(const BMessage& request)
     alert->Go(new BInvoker(answer, this));
 }
 
-bool SitePermissionService::AnswerOpenPrompt(int32 which, int32 deviceIndex)
+bool SitePermissionService::AnswerOpenPrompt(int32 which, int32 deviceIndex, bool shareAudio)
 {
     if (fPrompts.empty()) return false;
     const auto& [permission, origin] = fPrompts.begin()->first;
@@ -329,6 +340,7 @@ bool SitePermissionService::AnswerOpenPrompt(int32 which, int32 deviceIndex)
         if (shown == fPromptWindows.end() || shown->second.devices.empty()) return false;
         const auto& devices = shown->second.devices;
         answer.AddString("device_id", devices[std::clamp<int32>(deviceIndex, 0, int32(devices.size()) - 1)].c_str());
+        answer.AddBool("share_audio", shown->second.audio && shareAudio);
     }
     Answered(answer);
     return true;
@@ -369,7 +381,10 @@ void SitePermissionService::Answered(const BMessage& message)
             for (const auto& name : saved) context->SetSitePermission(name.c_str(), origin.c_str(), allowed ? 1 : 0);
         }
         for (const uint64 identifier : identifiers) {
-            if (permission == "screen" || DeviceChooser(permission))
+            if (permission == "screen")
+                context->RespondToMediaPermissionRequest(identifier, allowed && !device.empty(), device.c_str(),
+                    message.GetBool("share_audio", false));
+            else if (DeviceChooser(permission))
                 context->RespondToMediaPermissionRequest(identifier, allowed && !device.empty(), device.c_str());
             else
                 context->RespondToPermissionRequest(identifier, allowed);

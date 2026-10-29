@@ -31,8 +31,9 @@ public:
     // A click on one of this context's notifications (from ArgvReceived).
     void NotificationClicked(uint64 identifier);
     // Answers the oldest open prompt as its window would, and closes the
-    // window (kAnswerPermissionPrompt). False when none is open.
-    bool AnswerOpenPrompt(int32 which, int32 deviceIndex);
+    // window (kAnswerPermissionPrompt). False when none is open. shareAudio:
+    // a shared screen takes the computer's sound with it when offered.
+    bool AnswerOpenPrompt(int32 which, int32 deviceIndex, bool shareAudio = true);
     bool IsPrivate() const { return fPrivate; }
 
 private:
@@ -50,10 +51,12 @@ private:
     // Open prompts by permission and origin; requests that arrive while one
     // is open wait for its answer.
     std::map<std::pair<std::string, std::string>, std::vector<uint64>> fPrompts;
-    // Their windows, and for a screen the devices it offers.
+    // Their windows, and for a screen the devices it offers and whether it
+    // offers the computer's sound too.
     struct PromptWindow {
         BMessenger window;
         std::vector<std::string> devices;
+        bool audio = false;
     };
     std::map<std::pair<std::string, std::string>, PromptWindow> fPromptWindows;
     struct Shown {
