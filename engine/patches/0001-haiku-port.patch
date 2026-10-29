@@ -67425,13 +67425,15 @@ index 0000000000000000000000000000000000000000..6b5fc0f78f205ca35494521f2ebefe65
 +
 +} // namespace WebCore
 diff --git a/Source/WebCore/platform/network/curl/CurlContext.cpp b/Source/WebCore/platform/network/curl/CurlContext.cpp
-index 2e6a2537f3e283d7cb7f2081c8549f0256ee4e71..3991674f9eacb7deaf80a326ad41ac0a523fb08c 100644
+index 2e6a2537f3e283d7cb7f2081c8549f0256ee4e71..d05a96b1750588b0a1d4225f8333245021b3e2ec 100644
 --- a/Source/WebCore/platform/network/curl/CurlContext.cpp
 +++ b/Source/WebCore/platform/network/curl/CurlContext.cpp
-@@ -27,6 +27,17 @@
+@@ -26,6 +26,18 @@
+ 
  #include "config.h"
  #include "CurlContext.h"
- 
++#include <wtf/text/StringToIntegerConversion.h>
++
 +#include <cstdlib>
 +#include <cstring>
 +#if PLATFORM(HAIKU)
@@ -67442,11 +67444,10 @@ index 2e6a2537f3e283d7cb7f2081c8549f0256ee4e71..3991674f9eacb7deaf80a326ad41ac0a
 +#include <unistd.h>
 +#include <wtf/Lock.h>
 +#endif
-+
+ 
  #if USE(CURL)
  #include "CertificateInfo.h"
- #include "CurlRequestScheduler.h"
-@@ -289,6 +300,108 @@ CURLMsg* CurlMultiHandle::readInfo(int& messagesInQueue)
+@@ -289,6 +301,108 @@ CURLMsg* CurlMultiHandle::readInfo(int& messagesInQueue)
      return curl_multi_info_read(m_multiHandle, &messagesInQueue);
  }
  
@@ -67555,7 +67556,7 @@ index 2e6a2537f3e283d7cb7f2081c8549f0256ee4e71..3991674f9eacb7deaf80a326ad41ac0a
  // CurlHandle -------------------------------------------------
  
  CurlHandle::CurlHandle()
-@@ -297,6 +410,10 @@ CurlHandle::CurlHandle()
+@@ -297,6 +411,10 @@ CurlHandle::CurlHandle()
      curl_easy_setopt(m_handle, CURLOPT_ERRORBUFFER, m_errorBuffer);
      curl_easy_setopt(m_handle, CURLOPT_NOSIGNAL, 1L);
      curl_easy_setopt(m_handle, CURLOPT_COOKIEFILE, nullptr);
@@ -67566,7 +67567,94 @@ index 2e6a2537f3e283d7cb7f2081c8549f0256ee4e71..3991674f9eacb7deaf80a326ad41ac0a
  
      enableShareHandle();
      enableAcceptEncoding();
-@@ -503,7 +620,15 @@ void CurlHandle::enableHttp()
+@@ -495,15 +613,102 @@ void CurlHandle::enableProxyRequestHeaders()
+     curl_easy_setopt(m_handle, CURLOPT_PROXYHEADER, headers);
+ }
+ 
++#if PLATFORM(HAIKU)
++// libcurl keeps Alt-Svc in a file each transfer reads when it starts and
++// writes when it ends, so of transfers that overlap the last one to end wins
++// and the others' entries are lost: a page's own origin rarely kept its h3
++// entry, and HTTP/3 was hardly ever used. The network process remembers the
++// origins itself, from the responses' Alt-Svc headers (an h3 alternative on
++// the same port, for its max age, 24 hours by default; "clear" forgets),
++// and asks libcurl for HTTP/3 for them, which falls back to TCP when QUIC
++// does not get through. SUMMIT_HTTP3=0 leaves it to libcurl's own cache.
++static bool usesHttp3OriginsHaiku()
++{
++    static const bool enabled = [] {
++        const char* value = getenv("SUMMIT_HTTP3");
++        return !value || strcmp(value, "0");
++    }();
++    return enabled;
++}
++
++static String http3OriginKeyHaiku(const URL& url)
++{
++    return makeString(url.host(), ':', url.port().value_or(443));
++}
++
++void CurlContext::noteAlternativeServiceHaiku(const URL& url, StringView value)
++{
++    if (!m_isHttp3Enabled || !usesHttp3OriginsHaiku() || !url.protocolIs("https"_s))
++        return;
++    auto key = http3OriginKeyHaiku(url);
++    if (value.trim(isASCIIWhitespace<char16_t>) == "clear"_s) {
++        Locker locker { m_http3OriginsLock };
++        m_http3OriginsHaiku.remove(key);
++        return;
++    }
++    const auto samePort = makeString("h3=\":"_s, url.port().value_or(443), '"');
++    for (auto alternative : value.split(',')) {
++        alternative = alternative.trim(isASCIIWhitespace<char16_t>);
++        if (!alternative.startsWith(StringView(samePort)))
++            continue;
++        Seconds maxAge = 24_h;
++        for (auto parameter : alternative.split(';')) {
++            parameter = parameter.trim(isASCIIWhitespace<char16_t>);
++            if (parameter.startsWith("ma="_s)) {
++                if (auto seconds = parseInteger<uint64_t>(parameter.substring(3)))
++                    maxAge = Seconds(std::min<uint64_t>(*seconds, 30 * 24 * 3600));
++            }
++        }
++        Locker locker { m_http3OriginsLock };
++        if (maxAge)
++            m_http3OriginsHaiku.set(key, MonotonicTime::now() + maxAge);
++        else
++            m_http3OriginsHaiku.remove(key);
++        return;
++    }
++}
++
++bool CurlContext::prefersHttp3Haiku(const URL& url)
++{
++    if (!m_isHttp3Enabled || !usesHttp3OriginsHaiku() || !url.protocolIs("https"_s))
++        return false;
++    Locker locker { m_http3OriginsLock };
++    auto found = m_http3OriginsHaiku.find(http3OriginKeyHaiku(url));
++    if (found == m_http3OriginsHaiku.end())
++        return false;
++    if (found->value < MonotonicTime::now()) {
++        m_http3OriginsHaiku.remove(found);
++        return false;
++    }
++    return true;
++}
++#endif
++
+ void CurlHandle::enableHttp()
+ {
+     auto isHttp2Enabled = CurlContext::singleton().isHttp2Enabled();
+     auto isHttp3Enabled = CurlContext::singleton().isHttp3Enabled();
+ 
++#if PLATFORM(HAIKU)
++    if (CurlContext::singleton().prefersHttp3Haiku(m_url)) {
++        // HTTP/3 first, TCP (h2 or HTTP/1.1) if QUIC fails.
++        curl_easy_setopt(m_handle, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_3);
++        curl_easy_setopt(m_handle, CURLOPT_PIPEWAIT, 0L);
++        return;
++    }
++#endif
      if (m_url.protocolIs("https"_s) && (isHttp2Enabled || isHttp3Enabled)) {
          // The appropriate HTTP version is selected based on ALPN, Alt-Svc, etc.
          curl_easy_setopt(m_handle, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_NONE);
@@ -67582,7 +67670,7 @@ index 2e6a2537f3e283d7cb7f2081c8549f0256ee4e71..3991674f9eacb7deaf80a326ad41ac0a
  #if LIBCURL_VERSION_NUM <= 0x075500
          curl_easy_setopt(m_handle, CURLOPT_SSL_ENABLE_ALPN, 1L);
          curl_easy_setopt(m_handle, CURLOPT_SSL_ENABLE_NPN, 0L);
-@@ -563,6 +688,21 @@ void CurlHandle::enableAltSvc()
+@@ -563,6 +768,21 @@ void CurlHandle::enableAltSvc()
      if (CurlContext::singleton().alternativeServicesStorageFile().isEmpty())
          return;
  
@@ -67605,10 +67693,18 @@ index 2e6a2537f3e283d7cb7f2081c8549f0256ee4e71..3991674f9eacb7deaf80a326ad41ac0a
      altSvcCtrl |= CurlContext::singleton().isHttp2Enabled() ? CURLALTSVC_H2 : 0;
      altSvcCtrl |= CurlContext::singleton().isHttp3Enabled() ? CURLALTSVC_H3 : 0;
 diff --git a/Source/WebCore/platform/network/curl/CurlContext.h b/Source/WebCore/platform/network/curl/CurlContext.h
-index 757359cf3b1e1890fc906497907c4fe5ed00e6a0..a4a2b599f2cd92275a9f7eb5c16bd99c91871478 100644
+index 757359cf3b1e1890fc906497907c4fe5ed00e6a0..64c53227332a8fbf991f9ab6bec64d6e74327661 100644
 --- a/Source/WebCore/platform/network/curl/CurlContext.h
 +++ b/Source/WebCore/platform/network/curl/CurlContext.h
-@@ -50,8 +50,22 @@ namespace WebCore {
+@@ -30,6 +30,7 @@
+ #include "CurlProxySettings.h"
+ #include "CurlSSLHandle.h"
+ 
++#include <wtf/HashMap.h>
+ #include <wtf/Lock.h>
+ #include <wtf/MonotonicTime.h>
+ #include <wtf/NeverDestroyed.h>
+@@ -50,8 +51,22 @@ namespace WebCore {
  
  // Values taken from http://www.browserscope.org/ following
  // the rule "Do What Every Other Modern Browser Is Doing".
@@ -67631,6 +67727,29 @@ index 757359cf3b1e1890fc906497907c4fe5ed00e6a0..a4a2b599f2cd92275a9f7eb5c16bd99c
  const long CurlDefaultMaxHostConnections { 6 };
  
  // CurlGlobal --------------------------------------------
+@@ -126,6 +141,11 @@ public:
+     bool isAltSvcEnabled() const { return m_isAltSvcEnabled; }
+     bool isHttp2Enabled() const { return m_isHttp2Enabled; }
+     bool isHttp3Enabled() const { return m_isHttp3Enabled; }
++#if PLATFORM(HAIKU)
++    // Origins that said with Alt-Svc they answer over HTTP/3 on the same port.
++    void noteAlternativeServiceHaiku(const URL&, StringView headerValue);
++    bool prefersHttp3Haiku(const URL&);
++#endif
+ 
+     // Timeout
+     Seconds dnsCacheTimeout() const { return m_dnsCacheTimeout; }
+@@ -149,6 +169,10 @@ private:
+     bool m_isAltSvcEnabled { false };
+     bool m_isHttp2Enabled { false };
+     bool m_isHttp3Enabled { false };
++#if PLATFORM(HAIKU)
++    Lock m_http3OriginsLock;
++    HashMap<String, MonotonicTime> m_http3OriginsHaiku WTF_GUARDED_BY_LOCK(m_http3OriginsLock);
++#endif
+ 
+     Seconds m_dnsCacheTimeout { Seconds::fromMinutes(5) };
+     Seconds m_connectTimeout { 30.0 };
 diff --git a/Source/WebCore/platform/network/curl/CurlDownload.cpp b/Source/WebCore/platform/network/curl/CurlDownload.cpp
 new file mode 100644
 index 0000000000000000000000000000000000000000..5fa759dc4891001a7857599fbe9500f9f6cda5a3
@@ -67967,7 +68086,7 @@ index 0000000000000000000000000000000000000000..da71c185bfa5f93bf68ba7a513f48393
 +
 +#endif
 diff --git a/Source/WebCore/platform/network/curl/CurlRequest.cpp b/Source/WebCore/platform/network/curl/CurlRequest.cpp
-index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..0bed95b573ad1117b82f361a140976974d332ad8 100644
+index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..5a2f97d9fbc2b13dd5c566409cc0fdd0cb1af5fb 100644
 --- a/Source/WebCore/platform/network/curl/CurlRequest.cpp
 +++ b/Source/WebCore/platform/network/curl/CurlRequest.cpp
 @@ -36,19 +36,411 @@
@@ -68598,7 +68717,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..0bed95b573ad1117b82f361a14097697
  // This is being called for each HTTP header in the response. This includes '\r\n'
  // for the last line of the header.
  
-@@ -294,6 +798,9 @@ size_t CurlRequest::didReceiveHeader(String&& header)
+@@ -294,12 +798,19 @@ size_t CurlRequest::didReceiveHeader(String&& header)
          m_didReceiveResponse = false;
          m_response = CurlResponse { };
          m_multipartHandle = nullptr;
@@ -68608,7 +68727,17 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..0bed95b573ad1117b82f361a14097697
      }
  
      auto receiveBytes = static_cast<size_t>(header.length());
-@@ -343,6 +850,26 @@ size_t CurlRequest::didReceiveHeader(String&& header)
+ 
+     // The HTTP standard requires to use \r\n but for compatibility it recommends to accept also \n.
+     if ((header != emptyLineCRLF) && (header != emptyLineLF)) {
++#if PLATFORM(HAIKU)
++        if (header.startsWithIgnoringASCIICase("alt-svc:"_s))
++            CurlContext::singleton().noteAlternativeServiceHaiku(m_request.url(), StringView(header).substring(8));
++#endif
+         m_response.headers.append(WTF::move(header));
+         return receiveBytes;
+     }
+@@ -343,6 +854,26 @@ size_t CurlRequest::didReceiveHeader(String&& header)
  
      m_multipartHandle = CurlMultipartHandle::createIfNeeded(*this, m_response);
  
@@ -68635,7 +68764,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..0bed95b573ad1117b82f361a14097697
      // Response will send at didReceiveData() or didCompleteTransfer()
      // to receive continueDidRceiveResponse() for asynchronously.
  
-@@ -375,8 +902,24 @@ size_t CurlRequest::didReceiveData(std::span<const uint8_t> receivedData)
+@@ -375,8 +906,24 @@ size_t CurlRequest::didReceiveData(std::span<const uint8_t> receivedData)
          return CURL_WRITEFUNC_PAUSE;
      }
  
@@ -68660,7 +68789,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..0bed95b573ad1117b82f361a14097697
      if (receivedData.size()) {
          if (m_multipartHandle) {
              m_multipartHandle->didReceiveMessage(receivedData);
-@@ -393,7 +936,7 @@ size_t CurlRequest::didReceiveData(std::span<const uint8_t> receivedData)
+@@ -393,7 +940,7 @@ size_t CurlRequest::didReceiveData(std::span<const uint8_t> receivedData)
          }
      }
  
@@ -68669,7 +68798,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..0bed95b573ad1117b82f361a14097697
  }
  
  void CurlRequest::didReceiveHeaderFromMultipart(Vector<String>&& headers)
-@@ -446,6 +989,31 @@ void CurlRequest::didCompleteTransfer(CURLcode result)
+@@ -446,6 +993,31 @@ void CurlRequest::didCompleteTransfer(CURLcode result)
          return;
      }
  
@@ -68701,7 +68830,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..0bed95b573ad1117b82f361a14097697
      // Newer versions of curl/OpenSSL report CURLE_RECV_ERROR or CURLE_PARTIAL_FILE
      // when a server closes the connection to signal end-of-body on responses with
      // no Content-Length and no chunked encoding. This is valid HTTP/1.1 behavior,
-@@ -475,6 +1043,19 @@ void CurlRequest::didCompleteTransfer(CURLcode result)
+@@ -475,6 +1047,19 @@ void CurlRequest::didCompleteTransfer(CURLcode result)
          }
  
          auto metrics = networkLoadMetrics();
@@ -68721,7 +68850,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..0bed95b573ad1117b82f361a14097697
  
          finalizeTransfer();
          callClient([networkLoadMetrics = WTF::move(metrics)](CurlRequest& request, CurlRequestClient& client) mutable {
-@@ -486,6 +1067,11 @@ void CurlRequest::didCompleteTransfer(CURLcode result)
+@@ -486,6 +1071,11 @@ void CurlRequest::didCompleteTransfer(CURLcode result)
      } else {
          auto type = (result == CURLE_OPERATION_TIMEDOUT && timeoutInterval()) ? ResourceError::Type::Timeout : ResourceError::Type::General;
          auto resourceError = ResourceError(result, m_request.url(), type);
@@ -68733,7 +68862,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..0bed95b573ad1117b82f361a14097697
  
          CertificateInfo certificateInfo;
          if (auto info = m_curlHandle->certificateInfo())
-@@ -503,13 +1089,86 @@ void CurlRequest::didCompleteTransfer(CURLcode result)
+@@ -503,13 +1093,86 @@ void CurlRequest::didCompleteTransfer(CURLcode result)
      }
  }
  
@@ -68820,7 +68949,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..0bed95b573ad1117b82f361a14097697
      m_formDataStream.clean();
      m_multipartHandle = nullptr;
      m_curlHandle = nullptr;
-@@ -632,6 +1291,88 @@ void CurlRequest::completeDidReceiveResponse()
+@@ -632,6 +1295,88 @@ void CurlRequest::completeDidReceiveResponse()
          responseCompletionHandler();
  }
  
@@ -68909,7 +69038,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..0bed95b573ad1117b82f361a14097697
  NetworkLoadMetrics CurlRequest::networkLoadMetrics()
  {
      ASSERT(m_curlHandle);
-@@ -653,6 +1394,57 @@ NetworkLoadMetrics CurlRequest::networkLoadMetrics()
+@@ -653,6 +1398,57 @@ NetworkLoadMetrics CurlRequest::networkLoadMetrics()
      return WTF::move(*networkLoadMetrics);
  }
  
@@ -160541,17 +160670,19 @@ index 0000000000000000000000000000000000000000..abc82f6d26d2b1374740dc304282ae75
 +
 +}
 diff --git a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/AcceleratedSurface.cpp b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/AcceleratedSurface.cpp
-index 8177756a0e14111347846c912b8e3851f2559b4a..da8321441c420f3e72830d53de46a843a55520eb 100644
+index 8177756a0e14111347846c912b8e3851f2559b4a..6454b673e4ed814f748fc9f6abd6866ec6189581 100644
 --- a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/AcceleratedSurface.cpp
 +++ b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/AcceleratedSurface.cpp
-@@ -26,6 +26,27 @@
+@@ -26,6 +26,29 @@
  #include "config.h"
  #include "AcceleratedSurface.h"
  
 +#if PLATFORM(HAIKU)
 +#include "DirectPresentHaiku.h"
 +#include "PresentStatsHaiku.h"
++#include <dlfcn.h>
 +#include <image.h>
++#include <interface/Screen.h>
 +#include <sys/ioctl.h>
 +#include <algorithm>
 +#include <atomic>
@@ -160572,7 +160703,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..da8321441c420f3e72830d53de46a843
  #if USE(COORDINATED_GRAPHICS)
  #include "WebPage.h"
  #include "WebProcess.h"
-@@ -51,12 +72,18 @@ WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_BEGIN
+@@ -51,12 +74,18 @@ WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_BEGIN
  #include <skia/gpu/ganesh/GrBackendSurface.h>
  #include <skia/gpu/ganesh/SkSurfaceGanesh.h>
  #include <skia/gpu/ganesh/gl/GrGLBackendSurface.h>
@@ -160592,7 +160723,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..da8321441c420f3e72830d53de46a843
  #include <epoxy/egl.h>
  #endif
  
-@@ -94,6 +121,19 @@ using namespace WebCore;
+@@ -94,6 +123,19 @@ using namespace WebCore;
  
  WTF_MAKE_TZONE_ALLOCATED_IMPL(AcceleratedSurface);
  
@@ -160612,7 +160743,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..da8321441c420f3e72830d53de46a843
  Ref<AcceleratedSurface> AcceleratedSurface::create(WebPage& webPage, Function<void()>&& frameCompleteHandler, RenderingPurpose renderingPurpose)
  {
      return adoptRef(*new AcceleratedSurface(webPage, WTF::move(frameCompleteHandler), renderingPurpose));
-@@ -122,7 +162,7 @@ AcceleratedSurface::AcceleratedSurface(WebPage& webPage, Function<void()>&& fram
+@@ -122,7 +164,7 @@ AcceleratedSurface::AcceleratedSurface(WebPage& webPage, Function<void()>&& fram
  #endif
      , m_id(generateID())
      , m_renderingPurpose(renderingPurpose)
@@ -160621,7 +160752,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..da8321441c420f3e72830d53de46a843
      , m_hardwareAccelerationEnabled(webPage.corePage()->settings().hardwareAccelerationEnabled())
  #endif
      , m_backgroundColor(webPage.backgroundColor())
-@@ -130,11 +170,672 @@ AcceleratedSurface::AcceleratedSurface(WebPage& webPage, Function<void()>&& fram
+@@ -130,11 +172,792 @@ AcceleratedSurface::AcceleratedSurface(WebPage& webPage, Function<void()>&& fram
      , m_isVisible(webPage.activityState().contains(ActivityState::IsVisible))
      , m_useExplicitSync(usesGL() && useExplicitSync())
  #if ENABLE(DAMAGE_TRACKING)
@@ -160637,9 +160768,9 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..da8321441c420f3e72830d53de46a843
      , m_damageTracker(m_swapChain, !usesGL())
  #endif
 +#endif
-+{
-+}
-+
+ {
+ }
+ 
 +#if PLATFORM(HAIKU)
 +// app_server's copy of the screen, mapped once for the life of the process.
 +// Mesa keeps the pages of the mapping it presents into locked for the GPU,
@@ -160663,6 +160794,20 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..da8321441c420f3e72830d53de46a843
 +    return false;
 +}
 +
++// Whether the kernel lets go of a dying team's GPU imports before its
++// address space goes (air/OS since 28 October, haiku@db38d4d9ec): before,
++// nvidia_rm hung the machine when a web process holding app_server's copy
++// died. BDirectWindow::MarkDrawingBitsStale() came with the same day's
++// system, a little later, so a libgame that has it runs on such a kernel.
++static bool kernelReleasesImportsHaiku()
++{
++    static const bool releases = [] {
++        void* game = dlopen("libgame.so", RTLD_LAZY | RTLD_LOCAL);
++        return game && dlsym(game, "_ZN13BDirectWindow20MarkDrawingBitsStaleEPK13clipping_rectj");
++    }();
++    return releases;
++}
++
 +static void* backBufferMappingHaiku(area_id source)
 +{
 +    static NeverDestroyed<std::mutex> lock;
@@ -160670,18 +160815,19 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..da8321441c420f3e72830d53de46a843
 +    if (source < 0 || backBufferImportFailedHaiku)
 +        return nullptr;
 +    // A web process that ends while the driver holds these pages for the GPU
-+    // hangs the X399 (Haiku tears the address space down before it closes the
++    // hung the X399 (Haiku tore the address space down before it closed the
 +    // driver), and a crash ends a process that way. amdgpu lets go of a dying
-+    // team's pages first (haiku#38), so on AMD's GPUs this is on unless
-+    // SUMMIT_DIRECT_PRESENT_BACK=0; elsewhere it is off unless
-+    // SUMMIT_DIRECT_PRESENT_BACK=1, and app_server's copy is kept current by
-+    // a frame through app_server now and then instead
++    // team's pages first (haiku#38), and since 28 October the kernel closes a
++    // dying team's files first for every driver (kernelReleasesImportsHaiku),
++    // so on those this is on unless SUMMIT_DIRECT_PRESENT_BACK=0; elsewhere it
++    // is off unless SUMMIT_DIRECT_PRESENT_BACK=1, and app_server's copy is kept
++    // current by a frame through app_server now and then instead
 +    // (AcceleratedSurface::didRenderFrame).
 +    static const bool enabled = [] {
 +        const char* value = getenv("SUMMIT_DIRECT_PRESENT_BACK");
 +        if (value)
 +            return !strcmp(value, "1");
-+        return usesRadvHaiku();
++        return usesRadvHaiku() || kernelReleasesImportsHaiku();
 +    }();
 +    if (!enabled)
 +        return nullptr;
@@ -160709,9 +160855,12 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..da8321441c420f3e72830d53de46a843
 +// writes, else it waits until the scan has just left them; the copy, a GPU
 +// blit many times faster than the scan, then stays ahead of it, as
 +// app_server's own copies do (its vertical blank flush).
-+// SUMMIT_DIRECT_PRESENT_SCAN_TIMING=0 turns it off; SUMMIT_SCAN_MARGIN_US is
-+// the time a copy may take to start (300 by default), on top of how long the
-+// last copies took.
++// Since 28 October air/OS's app_server says it for any output and driver
++// with blanks, NVIDIA's included (BScreen::GetScanTiming(), haiku#39); the
++// KMS node is the way on systems without it (and on AMD if the call fails).
++// SUMMIT_DIRECT_PRESENT_SCAN_TIMING=0 turns it off, =kms takes the KMS node;
++// SUMMIT_SCAN_MARGIN_US is the time a copy may take to start (300 by
++// default), on top of how long the last copies took.
 +class ScanTimingHaiku {
 +    WTF_MAKE_NONCOPYABLE(ScanTimingHaiku);
 +public:
@@ -160720,7 +160869,17 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..da8321441c420f3e72830d53de46a843
 +    {
 +        static ScanTimingHaiku* timing = [] () -> ScanTimingHaiku* {
 +            const char* value = getenv("SUMMIT_DIRECT_PRESENT_SCAN_TIMING");
-+            if (value ? !strcmp(value, "0") : !usesRadvHaiku())
++            if (value && !strcmp(value, "0"))
++                return nullptr;
++            // Looked up at run time: stock Haiku's libbe has no such call.
++            auto getScanTiming = reinterpret_cast<GetScanTimingFunction>(dlsym(RTLD_DEFAULT, "_ZN7BScreen13GetScanTimingE5BRectP19display_scan_timing"));
++            if (getScanTiming && !(value && !strcmp(value, "kms"))) {
++                auto* timing = new ScanTimingHaiku(-1, getScanTiming);
++                if (const char* margin = getenv("SUMMIT_SCAN_MARGIN_US"))
++                    timing->m_startMicros = std::clamp(atoi(margin), 0, 8000);
++                return timing;
++            }
++            if (!value && !usesRadvHaiku())
 +                return nullptr;
 +            int device = open("/dev/dri/card0", O_RDWR | O_CLOEXEC);
 +            if (device < 0) {
@@ -160730,7 +160889,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..da8321441c420f3e72830d53de46a843
 +            // Opened while no one held the display (app_server starting), the
 +            // node would make this process its master.
 +            ioctl(device, linuxIoctl(0, 0x1f, 0));
-+            auto* timing = new ScanTimingHaiku(device);
++            auto* timing = new ScanTimingHaiku(device, nullptr);
 +            if (const char* margin = getenv("SUMMIT_SCAN_MARGIN_US"))
 +                timing->m_startMicros = std::clamp(atoi(margin), 0, 8000);
 +            return timing;
@@ -160743,6 +160902,8 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..da8321441c420f3e72830d53de46a843
 +    // monitor showing most of it. Returns how long it waited (microseconds).
 +    bigtime_t waitUntilClear(int32_t left, int32_t top, int32_t right, int32_t bottom, bigtime_t copyMicros)
 +    {
++        if (m_getScanTiming)
++            return waitUntilClearByAppServer(left, top, right, bottom, copyMicros);
 +        std::optional<Crtc> best;
 +        {
 +            std::lock_guard guard(m_lock);
@@ -160780,30 +160941,114 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..da8321441c420f3e72830d53de46a843
 +        }
 +        const bigtime_t scanStart = bigtime_t(query.reply.tvalSeconds) * 1000000 + query.reply.tvalMicroseconds;
 +        const double lineMicros = double(best->htotal) * 1000 / best->clock;
++        return waitForRows(scanStart, lineMicros, best->vtotal, best->height, first, end, copyMicros);
++    }
++
++private:
++    // display_scan_timing (<interface/Screen.h> on air/OS); kept here so the
++    // engine also builds against stock Haiku's headers.
++    struct ScanTiming {
++        uint32 outputID;
++        uint32 flags;
++        BRect frame;
++        clipping_rect deviceFrame;
++        bigtime_t scanStart;
++        bigtime_t period;
++        uint32 generation;
++        uint32 reserved[7];
++    };
++    static constexpr uint32 scanTimingFromHardware = 0x01;
++    static constexpr uint32 scanTimingFromBlank = 0x02;
++    // A non-virtual member function: the screen is its first argument.
++    using GetScanTimingFunction = status_t (*)(BScreen*, BRect, ScanTiming*);
++
++    explicit ScanTimingHaiku(int device, GetScanTimingFunction getScanTiming)
++        : m_device(device)
++        , m_getScanTiming(getScanTiming)
++    {
++    }
++
++    // The scan the copy has to keep clear of, from app_server. The answer for
++    // an output is kept for half a second: a call can wait for a blank (up to
++    // two frames) when app_server flushed nothing lately, and the frames go
++    // on at scanStart + n * period meanwhile.
++    bigtime_t waitUntilClearByAppServer(int32_t left, int32_t top, int32_t right, int32_t bottom, bigtime_t copyMicros)
++    {
++        ScanTiming timing { };
++        double vtotalRatio;
++        {
++            std::lock_guard guard(m_lock);
++            if (m_failed)
++                return 0;
++            const bigtime_t now = system_time();
++            auto inOutput = [&](const ScanTiming& cached) {
++                return (left + right) / 2 >= cached.deviceFrame.left && (left + right) / 2 <= cached.deviceFrame.right
++                    && (top + bottom) / 2 >= cached.deviceFrame.top && (top + bottom) / 2 <= cached.deviceFrame.bottom;
++            };
++            if (!m_hasTiming || now - m_timingAt > 500000 || !inOutput(m_timing)) {
++                BScreen screen;
++                if (!m_factor) {
++                    // Frame buffer pixels per screen coordinate, from any output.
++                    ScanTiming whole { };
++                    if (m_getScanTiming(&screen, BRect(), &whole) != B_OK || !whole.frame.IsValid()) {
++                        m_failed = true;
++                        std::fprintf(stderr, "Summit direct present: app_server gives no scan timing; presents are not timed to the scan\n");
++                        return 0;
++                    }
++                    m_factor = (whole.deviceFrame.right - whole.deviceFrame.left + 1) / (whole.frame.Width() + 1);
++                    display_mode mode;
++                    if (screen.GetMode(&mode) == B_OK && mode.timing.v_display && mode.timing.v_total > mode.timing.v_display)
++                        m_vtotalRatio = std::clamp(double(mode.timing.v_total) / mode.timing.v_display, 1.005, 1.2);
++                }
++                const BRect frame(left / m_factor, top / m_factor, (right + 1) / m_factor - 1, (bottom + 1) / m_factor - 1);
++                if (m_getScanTiming(&screen, frame, &m_timing) != B_OK) {
++                    m_hasTiming = false;
++                    return 0;
++                }
++                m_hasTiming = true;
++                m_timingAt = now;
++            }
++            timing = m_timing;
++            vtotalRatio = m_vtotalRatio;
++        }
++        if (!(timing.flags & (scanTimingFromHardware | scanTimingFromBlank)) || timing.period <= 0)
++            return 0;
++        const int32_t height = timing.deviceFrame.bottom - timing.deviceFrame.top + 1;
++        const double first = std::max(0, top - timing.deviceFrame.top);
++        const double end = std::min(height, bottom + 1 - timing.deviceFrame.top);
++        if (height <= 0 || first >= end)
++            return 0;
++        const int32_t vtotal = static_cast<int32_t>(std::lround(height * vtotalRatio));
++        const double lineMicros = double(timing.period) / vtotal;
++        // A blank interrupt comes as the blank begins: the rows start after it.
++        bigtime_t scanStart = timing.scanStart;
++        if (timing.flags & scanTimingFromBlank)
++            scanStart += static_cast<bigtime_t>((vtotal - height) * lineMicros);
++        return waitForRows(scanStart, lineMicros, vtotal, height, first, end, copyMicros);
++    }
++
++    // Until rows [first, end) of an output scanned from scanStart, a frame
++    // every vtotal lines, can be copied in copyMicros out of the scan's way.
++    bigtime_t waitForRows(bigtime_t scanStart, double lineMicros, int32_t vtotal, int32_t height, double first, double end, bigtime_t copyMicros)
++    {
 +        const bigtime_t now = system_time();
 +        // The scan's row now: negative while the blank before row 0 lasts.
-+        double line = std::fmod((now - scanStart) / lineMicros, double(best->vtotal));
++        double line = std::fmod((now - scanStart) / lineMicros, double(vtotal));
 +        if (line < 0)
-+            line += best->vtotal;
-+        if (line >= best->height)
-+            line -= best->vtotal;
++            line += vtotal;
++        if (line >= height)
++            line -= vtotal;
 +        const double margin = (m_startMicros + copyMicros) / lineMicros;
 +        // Rows still to scan before the scan reaches the first of them.
-+        const double ahead = line < first ? first - line : best->vtotal - line + first;
++        const double ahead = line < first ? first - line : vtotal - line + first;
 +        if ((line < first || line >= end) && ahead >= margin)
 +            return 0;
 +        // A page too tall for the blank (one filling the screen) is copied
 +        // from there all the same: the copy is faster than the scan.
-+        const double toEnd = line < end ? end - line : best->vtotal - line + end;
++        const double toEnd = line < end ? end - line : vtotal - line + end;
 +        const bigtime_t wait = static_cast<bigtime_t>(toEnd * lineMicros) + 1;
 +        snooze(wait);
 +        return wait;
-+    }
-+
-+private:
-+    explicit ScanTimingHaiku(int device)
-+        : m_device(device)
-+    {
 +    }
 +
 +    // Linux's ioctl numbers, which amdgpu_drm decodes (Haiku's BSD macros
@@ -160880,6 +161125,12 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..da8321441c420f3e72830d53de46a843
 +    }
 +
 +    int m_device;
++    GetScanTimingFunction m_getScanTiming { nullptr };
++    ScanTiming m_timing { };
++    bool m_hasTiming { false };
++    bigtime_t m_timingAt { 0 };
++    float m_factor { 0 };
++    double m_vtotalRatio { 1.04 };
 +    int m_startMicros { 300 };
 +    std::mutex m_lock;
 +    Vector<Crtc, 4> m_crtcs;
@@ -161263,11 +161514,11 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..da8321441c420f3e72830d53de46a843
 +}
 +
 +void AcceleratedSurface::redisplayDirect()
- {
++{
 +    if (m_redisplayHandlerHaiku)
 +        m_redisplayHandlerHaiku();
- }
- 
++}
++
 +// A page that stops changing gets its last frame through app_server
 +// (didRenderFrame()). Where every direct present writes app_server's copy
 +// too, that waits until the page has really stopped: it is looked at again
@@ -161294,7 +161545,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..da8321441c420f3e72830d53de46a843
  AcceleratedSurface::~AcceleratedSurface() = default;
  
  WTF_MAKE_TZONE_ALLOCATED_IMPL(AcceleratedSurface::RenderTarget);
-@@ -150,6 +851,10 @@ AcceleratedSurface::RenderTarget::RenderTarget(AcceleratedSurface& surface, cons
+@@ -150,6 +973,10 @@ AcceleratedSurface::RenderTarget::RenderTarget(AcceleratedSurface& surface, cons
      , m_surface(surface)
      , m_size(size)
  {
@@ -161305,7 +161556,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..da8321441c420f3e72830d53de46a843
  }
  
  AcceleratedSurface::RenderTarget::~RenderTarget() = default;
-@@ -176,7 +881,7 @@ void AcceleratedSurface::RenderTarget::createSkiaSurfaceForFramebuffer(unsigned
+@@ -176,7 +1003,7 @@ void AcceleratedSurface::RenderTarget::createSkiaSurfaceForFramebuffer(unsigned
      m_skiaSurface = SkSurfaces::WrapBackendRenderTarget(display.skiaGrContext(), backendRenderTarget, origin, kRGBA_8888_SkColorType, SkColorSpace::MakeSRGB(), &properties);
  }
  
@@ -161314,7 +161565,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..da8321441c420f3e72830d53de46a843
  WTF_MAKE_TZONE_ALLOCATED_IMPL(AcceleratedSurface::RenderTargetShareableBuffer);
  
  AcceleratedSurface::RenderTargetShareableBuffer::RenderTargetShareableBuffer(AcceleratedSurface& surface, const IntSize& size)
-@@ -200,14 +905,22 @@ AcceleratedSurface::RenderTargetShareableBuffer::~RenderTargetShareableBuffer()
+@@ -200,14 +1027,22 @@ AcceleratedSurface::RenderTargetShareableBuffer::~RenderTargetShareableBuffer()
  {
      m_skiaSurface = nullptr;
  
@@ -161345,7 +161596,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..da8321441c420f3e72830d53de46a843
  
      WebProcess::singleton().parentProcessConnection()->send(Messages::AcceleratedBackingStore::DidDestroyBuffer(m_id), m_surface->surfaceID());
  }
-@@ -218,9 +931,45 @@ void AcceleratedSurface::RenderTargetShareableBuffer::initializeColorBuffer(EGLI
+@@ -218,9 +1053,45 @@ void AcceleratedSurface::RenderTargetShareableBuffer::initializeColorBuffer(EGLI
      glBindRenderbuffer(GL_RENDERBUFFER, m_colorBuffer);
      if (image)
          glEGLImageTargetRenderbufferStorageOES(GL_RENDERBUFFER, image);
@@ -161392,7 +161643,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..da8321441c420f3e72830d53de46a843
  
      if (m_surface->useSkia())
          createSkiaSurfaceForFramebuffer(m_fbo);
-@@ -228,6 +977,10 @@ void AcceleratedSurface::RenderTargetShareableBuffer::initializeColorBuffer(EGLI
+@@ -228,6 +1099,10 @@ void AcceleratedSurface::RenderTargetShareableBuffer::initializeColorBuffer(EGLI
  
  void AcceleratedSurface::RenderTargetShareableBuffer::sendFrame(Vector<WebCore::IntRect, 1>&& damageRects)
  {
@@ -161403,7 +161654,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..da8321441c420f3e72830d53de46a843
      WebProcess::singleton().parentProcessConnection()->send(Messages::AcceleratedBackingStore::Frame(m_id, WTF::move(damageRects), WTF::move(m_renderingFenceFD)), m_surface->surfaceID());
  }
  
-@@ -418,7 +1171,14 @@ std::unique_ptr<AcceleratedSurface::RenderTarget> AcceleratedSurface::RenderTarg
+@@ -418,7 +1293,14 @@ std::unique_ptr<AcceleratedSurface::RenderTarget> AcceleratedSurface::RenderTarg
          return nullptr;
      }
  
@@ -161418,7 +161669,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..da8321441c420f3e72830d53de46a843
      if (!bufferHandle) {
          WTFLogAlways("Failed to create handle for shared memory buffer");
          return nullptr;
-@@ -439,13 +1199,483 @@ AcceleratedSurface::RenderTargetSHMImage::RenderTargetSHMImage(AcceleratedSurfac
+@@ -439,13 +1321,483 @@ AcceleratedSurface::RenderTargetSHMImage::RenderTargetSHMImage(AcceleratedSurfac
      WebProcess::singleton().parentProcessConnection()->send(Messages::AcceleratedBackingStore::DidCreateSHMBuffer(m_id, WTF::move(bitmapHandle)), m_surface->surfaceID());
  }
  
@@ -161902,7 +162153,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..da8321441c420f3e72830d53de46a843
  
          SkImageInfo info = SkImageInfo::Make(m_bitmap->size().width(), m_bitmap->size().height(), SkColorType::kBGRA_8888_SkColorType, SkAlphaType::kPremul_SkAlphaType);
  
-@@ -457,9 +1687,14 @@ void AcceleratedSurface::RenderTargetSHMImage::didRenderFrame()
+@@ -457,9 +1809,14 @@ void AcceleratedSurface::RenderTargetSHMImage::didRenderFrame()
          return;
      }
  
@@ -161917,7 +162168,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..da8321441c420f3e72830d53de46a843
  std::unique_ptr<AcceleratedSurface::RenderTarget> AcceleratedSurface::RenderTargetTexture::create(AcceleratedSurface& surface, const IntSize& size)
  {
      auto texture = BitmapTexture::create(size);
-@@ -515,8 +1750,9 @@ AcceleratedSurface::RenderTargetTexture::RenderTargetTexture(AcceleratedSurface&
+@@ -515,8 +1872,9 @@ AcceleratedSurface::RenderTargetTexture::RenderTargetTexture(AcceleratedSurface&
  }
  
  AcceleratedSurface::RenderTargetTexture::~RenderTargetTexture() = default;
@@ -161928,7 +162179,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..da8321441c420f3e72830d53de46a843
  
  #if USE(WPE_RENDERER)
  std::unique_ptr<AcceleratedSurface::RenderTarget> AcceleratedSurface::RenderTargetWPEBackend::create(AcceleratedSurface& surface, const IntSize& initialSize, UnixFileDescriptor&& hostFD)
-@@ -594,7 +1830,7 @@ void AcceleratedSurface::RenderTargetWPEBackend::didRenderFrame()
+@@ -594,7 +1952,7 @@ void AcceleratedSurface::RenderTargetWPEBackend::didRenderFrame()
  AcceleratedSurface::SwapChain::SwapChain(AcceleratedSurface& surface)
      : m_surface(surface)
  {
@@ -161937,7 +162188,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..da8321441c420f3e72830d53de46a843
      if (!m_surface->hardwareAccelerationEnabled()) {
          m_type = Type::SharedMemory;
          return;
-@@ -632,7 +1868,7 @@ AcceleratedSurface::SwapChain::SwapChain(AcceleratedSurface& surface)
+@@ -632,7 +1990,7 @@ AcceleratedSurface::SwapChain::SwapChain(AcceleratedSurface& surface)
      case PlatformDisplay::Type::GBM:
  #endif
          break;
@@ -161946,7 +162197,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..da8321441c420f3e72830d53de46a843
  #if USE(WPE_RENDERER)
      case PlatformDisplay::Type::WPE:
          m_type = Type::WPEBackend;
-@@ -646,11 +1882,19 @@ AcceleratedSurface::SwapChain::SwapChain(AcceleratedSurface& surface)
+@@ -646,11 +2004,19 @@ AcceleratedSurface::SwapChain::SwapChain(AcceleratedSurface& surface)
      case PlatformDisplay::Type::Default:
          break;
  #endif // PLATFORM(GTK)
@@ -161967,7 +162218,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..da8321441c420f3e72830d53de46a843
  void AcceleratedSurface::SwapChain::setupBufferFormat()
  {
      if (m_type != Type::EGLImage)
-@@ -749,7 +1993,7 @@ bool AcceleratedSurface::SwapChain::resize(const IntSize& size)
+@@ -749,7 +2115,7 @@ bool AcceleratedSurface::SwapChain::resize(const IntSize& size)
  
  bool AcceleratedSurface::SwapChain::handleBufferFormatChangeIfNeeded()
  {
@@ -161976,7 +162227,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..da8321441c420f3e72830d53de46a843
      if (m_type == Type::EGLImage) {
          Locker locker { m_bufferFormatLock };
          if (m_bufferFormatChanged) {
-@@ -765,7 +2009,7 @@ bool AcceleratedSurface::SwapChain::handleBufferFormatChangeIfNeeded()
+@@ -765,7 +2131,7 @@ bool AcceleratedSurface::SwapChain::handleBufferFormatChangeIfNeeded()
  std::unique_ptr<AcceleratedSurface::RenderTarget> AcceleratedSurface::SwapChain::createTarget() const
  {
      switch (m_type) {
@@ -161985,7 +162236,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..da8321441c420f3e72830d53de46a843
  #if USE(GBM) || OS(ANDROID)
      case Type::EGLImage: {
          Locker locker { m_bufferFormatLock };
-@@ -773,7 +2017,11 @@ std::unique_ptr<AcceleratedSurface::RenderTarget> AcceleratedSurface::SwapChain:
+@@ -773,7 +2139,11 @@ std::unique_ptr<AcceleratedSurface::RenderTarget> AcceleratedSurface::SwapChain:
      }
  #endif
      case Type::Texture:
@@ -161997,7 +162248,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..da8321441c420f3e72830d53de46a843
      case Type::SharedMemory:
          return RenderTargetSHMImage::create(m_surface.get(), m_size);
  #endif
-@@ -812,6 +2060,11 @@ AcceleratedSurface::RenderTarget* AcceleratedSurface::SwapChain::nextTarget()
+@@ -812,6 +2182,11 @@ AcceleratedSurface::RenderTarget* AcceleratedSurface::SwapChain::nextTarget()
              if (auto target = createTarget())
                  m_freeTargets.append(WTF::move(target));
          }
@@ -162009,7 +162260,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..da8321441c420f3e72830d53de46a843
  
  #if ENABLE(WPE_PLATFORM)
          if (m_freeTargets.size() != targetsToCreate)
-@@ -841,6 +2094,12 @@ void AcceleratedSurface::SwapChain::releaseTarget(uint64_t targetID, UnixFileDes
+@@ -841,6 +2216,12 @@ void AcceleratedSurface::SwapChain::releaseTarget(uint64_t targetID, UnixFileDes
          m_freeTargets.insert(0, WTF::move(m_lockedTargets[index]));
          m_lockedTargets.removeAt(index);
      }
@@ -162022,7 +162273,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..da8321441c420f3e72830d53de46a843
  }
  
  void AcceleratedSurface::SwapChain::reset()
-@@ -859,6 +2118,11 @@ void AcceleratedSurface::SwapChain::releaseUnusedBuffers()
+@@ -859,6 +2240,11 @@ void AcceleratedSurface::SwapChain::releaseUnusedBuffers()
  #if USE(WPE_RENDERER)
      ASSERT(m_type != Type::WPEBackend);
  #endif
@@ -162034,7 +162285,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..da8321441c420f3e72830d53de46a843
  
  #if ENABLE(WPE_PLATFORM)
      WebProcess::singleton().parentProcessConnection()->send(Messages::AcceleratedBackingStore::DidChangeBufferConfiguration(m_lockedTargets.size()), m_surface->surfaceID());
-@@ -901,6 +2165,17 @@ Vector<IntRect, 1> AcceleratedSurface::SwapChainDamageTracker::takeFrameDamageRe
+@@ -901,6 +2287,17 @@ Vector<IntRect, 1> AcceleratedSurface::SwapChainDamageTracker::takeFrameDamageRe
      if (frameDamage.mode() != Damage::Mode::Rectangles || m_swapChain.size().isEmpty())
          return frameDamage.rects();
  
@@ -162052,7 +162303,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..da8321441c420f3e72830d53de46a843
      // The frame damage is fine-grained, because the compositing restriction needs it that way, but the
      // platform only wants a bounded number of rects. Merge it down to the threshold here, which is the
      // only thing the threshold bounds.
-@@ -929,7 +2204,7 @@ bool AcceleratedSurface::shouldPaintMirrored() const
+@@ -929,7 +2326,7 @@ bool AcceleratedSurface::shouldPaintMirrored() const
      switch (m_swapChain.type()) {
      case SwapChain::Type::Invalid:
          return false;
@@ -162061,7 +162312,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..da8321441c420f3e72830d53de46a843
      case SwapChain::Type::Texture:
  #if USE(GBM) || OS(ANDROID)
      case SwapChain::Type::EGLImage:
-@@ -960,6 +2235,10 @@ void AcceleratedSurface::preferredBufferFormatsDidChange()
+@@ -960,6 +2357,10 @@ void AcceleratedSurface::preferredBufferFormatsDidChange()
  
  void AcceleratedSurface::visibilityDidChange(bool isVisible)
  {
@@ -162072,7 +162323,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..da8321441c420f3e72830d53de46a843
      if (m_isVisible == isVisible)
          return;
  
-@@ -1000,7 +2279,7 @@ void AcceleratedSurface::backgroundColorDidChange()
+@@ -1000,7 +2401,7 @@ void AcceleratedSurface::backgroundColorDidChange()
      if (isOpaque == wasOpaque)
          return;
  
@@ -162081,7 +162332,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..da8321441c420f3e72830d53de46a843
      m_swapChain.setupBufferFormat();
  #endif
  }
-@@ -1022,7 +2301,7 @@ void AcceleratedSurface::didCreateCompositingRunLoop(RunLoop& runLoop)
+@@ -1022,7 +2423,7 @@ void AcceleratedSurface::didCreateCompositingRunLoop(RunLoop& runLoop)
  #if USE(GLIB_EVENT_LOOP)
      m_releaseUnusedBuffersTimer->setPriority(RunLoopSourcePriority::ReleaseUnusedResourcesTimer);
  #endif
@@ -162090,7 +162341,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..da8321441c420f3e72830d53de46a843
      WebProcess::singleton().parentProcessConnection()->addMessageReceiver(runLoop, *this, Messages::AcceleratedSurface::messageReceiverName(), m_id);
  #endif
  }
-@@ -1030,6 +2309,10 @@ void AcceleratedSurface::didCreateCompositingRunLoop(RunLoop& runLoop)
+@@ -1030,6 +2431,10 @@ void AcceleratedSurface::didCreateCompositingRunLoop(RunLoop& runLoop)
  void AcceleratedSurface::willDestroyCompositingRunLoop()
  {
      m_frameCompleteHandler = nullptr;
@@ -162101,7 +162352,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..da8321441c420f3e72830d53de46a843
  
  #if USE(WPE_RENDERER)
      if (m_swapChain.type() == SwapChain::Type::WPEBackend)
-@@ -1043,7 +2326,7 @@ void AcceleratedSurface::willDestroyCompositingRunLoop()
+@@ -1043,7 +2448,7 @@ void AcceleratedSurface::willDestroyCompositingRunLoop()
              protectedThis->m_releaseUnusedBuffersTimer = nullptr;
          });
      }
@@ -162110,7 +162361,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..da8321441c420f3e72830d53de46a843
      WebProcess::singleton().parentProcessConnection()->removeMessageReceiver(Messages::AcceleratedSurface::messageReceiverName(), m_id);
  #endif
  }
-@@ -1053,6 +2336,14 @@ void AcceleratedSurface::willDestroyGLContext()
+@@ -1053,6 +2458,14 @@ void AcceleratedSurface::willDestroyGLContext()
      m_pendingFrameNotifyTargets.clear();
      m_target = nullptr;
      m_swapChain.reset();
@@ -162125,7 +162376,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..da8321441c420f3e72830d53de46a843
  }
  
  uint64_t AcceleratedSurface::window()
-@@ -1149,18 +2440,143 @@ void AcceleratedSurface::didRenderFrame(TargetContents targetContents)
+@@ -1149,18 +2562,143 @@ void AcceleratedSurface::didRenderFrame(TargetContents targetContents)
      if (!m_target)
          return;
  
@@ -162269,7 +162520,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..da8321441c420f3e72830d53de46a843
      m_pendingFrameNotifyTargets.insert(0, { m_target, WTF::move(damageRects) });
      m_target = nullptr;
  }
-@@ -1182,13 +2598,17 @@ const std::optional<Damage>& AcceleratedSurface::renderTargetDamage()
+@@ -1182,13 +2720,17 @@ const std::optional<Damage>& AcceleratedSurface::renderTargetDamage()
  }
  #endif
  

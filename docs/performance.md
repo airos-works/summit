@@ -375,6 +375,25 @@ where zink runs on RADV):
   `SUMMIT_DIRECT_PRESENT_TRACE=1`, a line every 5 s says how many presents
   waited, how long, and how long the copies took.
 
+**Every driver since 29 October.** air/OS's app_server says each output's
+scan timing (`BScreen::GetScanTiming()`, haiku#39: the frame start from the
+hardware or the blank interrupt, the period, the output's rows). Where libbe
+has the call (looked up at run time; stock Haiku lacks it), presents are
+timed with it on every driver, NVIDIA included, and the KMS node is only
+the fallback (`SUMMIT_DIRECT_PRESENT_SCAN_TIMING=kms` takes it). The answer
+for an output is kept for half a second, since a call can wait for a blank
+when app_server flushed nothing lately. The line count of a frame comes from
+the screen mode's v_total/v_display. On NVIDIA app_server's back-buffer copy
+is now also on by default (where libgame has
+`BDirectWindow::MarkDrawingBitsStale`, which came with the kernel that lets
+go of a dying team's GPU imports), so a page that keeps changing no longer
+sends a frame through app_server every 250 ms. X399 (GTX 1070, 3840x2160,
+hrev60207+2112): 37 to 143 of 75 to 179 presents per 5 s waited for the scan,
+6.5-10 ms on average; scrolling kept 16.7 ms median frame gaps with timing on
+and off; a web process killed while presenting with the back copy on left
+the machine running (nvidia_rm unlocked its 33 MB of imported pages).
+Tearing on NVIDIA was not measured (no CRC tool there).
+
 The frame rate holds: a frame that misses its moment is presented a frame
 later, and the compositor's grid then starts the next one there, so frames
 settle just after the moment. The cost is up to one frame of latency, as with

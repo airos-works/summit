@@ -153,6 +153,24 @@ again then, on a new connection, and answered at once (300.0 s). With both
 interfaces left out, the network was gone and both addresses went away, as
 before.
 
+## HTTP/3 (#119)
+
+air/OS's system curl speaks HTTP/3 since 28 October (ngtcp2 and nghttp3;
+an updated machine keeps HaikuPorts' curl without it until its image is
+renewed). WebKit's curl backend finds HTTP/3 through Alt-Svc, with libcurl's
+cache file: every transfer reads it when it starts and writes it when it
+ends, so of overlapping transfers the last one wins and the others' entries
+are lost, and the page's own origin hardly ever kept its h3 entry. The
+network process now remembers origins itself (`CurlContext::
+noteAlternativeServiceHaiku`): an `Alt-Svc` response header with an `h3`
+alternative on the same port, for its `ma` (24 hours by default, 30 days at
+most), and `clear` forgets. Requests to those origins ask libcurl for
+HTTP/3, which falls back to TCP when QUIC doesn't get through. libcurl keeps
+using an HTTP/2 connection it already has, so HTTP/3 starts with the next
+connection, as in Chrome. `SUMMIT_HTTP3=0` leaves it to libcurl's own cache.
+X399 (curl 8.23): cloudflare-quic.com and google.com loaded over h2, and
+over h3 once the h2 connections had gone idle (`nextHopProtocol`).
+
 ## SameSite cookies (#92)
 
 ### What the user sees
