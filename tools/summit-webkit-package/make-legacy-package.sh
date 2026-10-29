@@ -1,6 +1,8 @@
 #!/bin/sh
 # Runs on Haiku: builds the summit_webkitlegacy package, the legacy BWebView
-# API (libWebKitLegacy, WebPositive's) on Summit's engine, from legacy/.
+# API (libWebKitLegacy, WebPositive's) on Summit's engine, from legacy/
+# (LEGACY_SOURCE, next to Summit's src/ and vendor/, whose developer tools
+# are its web inspector).
 #
 #   make-legacy-package.sh LEGACY_SOURCE ENGINE_HEADERS ENGINE_LIB OUTPUT_DIR VERSION REVISION ENGINE_REQUIREMENT
 #
@@ -49,6 +51,8 @@ provides {
 requires {
 	haiku
 	summit_webkit >= $ENGINE
+	lib:libscintilla
+	lib:liblexilla
 }
 conflicts {
 	haikuwebkit

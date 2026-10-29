@@ -19,9 +19,13 @@ if [[ ! $engine =~ ^[0-9][0-9A-Za-z._~-]*$ ]]; then
     exit 2
 fi
 bash "$shell" "rm -rf $out/source && mkdir -p $out/source"
-tar -C "$SUMMIT_ROOT/legacy" -cf - Makefile README.md headers src | bash "$shell" "tar -C $out/source -xf -"
+# The web inspector is Summit's developer tools, built from src/ (with
+# nlohmann/json from vendor/); building needs scintilla_devel and
+# lexilla_devel on the workstation.
+tar -C "$SUMMIT_ROOT" -cf - legacy/Makefile legacy/README.md legacy/headers legacy/src src/core src/ui vendor/nlohmann \
+    | bash "$shell" "tar -C $out/source -xf -"
 bash "$shell" "cat > $out/make-legacy-package.sh" < "$SUMMIT_ROOT/tools/summit-webkit-package/make-legacy-package.sh"
-bash "$shell" "sh $out/make-legacy-package.sh $out/source /boot/system/develop/headers/summit-webkit \
+bash "$shell" "sh $out/make-legacy-package.sh $out/source/legacy /boot/system/develop/headers/summit-webkit \
     /boot/system/lib/summit-webkit/lib $out $version $revision $engine"
 mkdir -p "$SUMMIT_ROOT/artifacts"
 name=summit_webkitlegacy-$version-$revision-x86_64.hpkg

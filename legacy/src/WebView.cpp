@@ -17,6 +17,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 
 namespace {
 enum {
@@ -25,7 +26,10 @@ enum {
 	kDownloadAddress = 'sdla',
 	kOpenImageInNewTab = 'soit',
 	kEditCommand = 'sedc',
-	kNavigate = 'snav'
+	kNavigate = 'snav',
+	// "Inspect element"; "where" (view coordinates) is optional. Programs may
+	// send it themselves to open the inspector.
+	kInspect = 'sins'
 };
 }
 
@@ -54,6 +58,9 @@ BWebView::BWebView(const char* name, BPrivate::Network::BUrlContext* context)
 
 BWebView::~BWebView()
 {
+	// The engine view goes with this view's children; the cookie mirror,
+	// on its own thread, must not use it any more.
+	SummitLegacy::RemoveCookieView(static_cast<BWebKitView*>(fOffscreenView));
 	// Deleted without Shutdown(): the page goes with it.
 	if (fWebPage != nullptr) {
 		fWebPage->fWebView = nullptr;
@@ -205,6 +212,20 @@ BWebView::MessageReceived(BMessage* message)
 				menu->AddSeparatorItem();
 				add("Select all", kEditCommand, nullptr, B_SELECT_ALL);
 			}
+			bool developerExtras = false;
+			if (fWebPage != nullptr) {
+				std::lock_guard lock(fWebPage->fPagePrivate->lock);
+				developerExtras = fWebPage->fPagePrivate->developerExtras;
+			}
+			const char* inspector = getenv("SUMMIT_LEGACY_INSPECTOR");
+			if (developerExtras && (inspector == nullptr || strcmp(inspector, "0") != 0)) {
+				menu->AddSeparatorItem();
+				BMessage* inspect = new BMessage(kInspect);
+				inspect->AddPoint("where", where);
+				BMenuItem* item = new BMenuItem("Inspect element", inspect);
+				item->SetTarget(this);
+				menu->AddItem(item);
+			}
 			menu->Go(ConvertToScreen(where), true, false, true);
 			break;
 		}
@@ -215,6 +236,15 @@ BWebView::MessageReceived(BMessage* message)
 			request.AddString("url", message->GetString("url", ""));
 			request.AddBool("primary", false);
 			fWebPage->dispatchMessage(request);
+			break;
+		}
+		case kInspect:
+		{
+			if (fWebPage == nullptr)
+				break;
+			BPoint where(-1, -1);
+			message->FindPoint("where", &where);
+			SummitLegacy::ShowInspector(*fWebPage->fPagePrivate, fWebPage, Window(), where);
 			break;
 		}
 		case kCopyAddress:

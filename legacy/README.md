@@ -15,7 +15,14 @@ engine (`summit_webkit`: `BWebKitView`, `BWebKitContext`).
   before, and turns the engine's notifications into the old listener
   messages (`LOAD_*`, `TITLE_CHANGED`, `UPDATE_NAVIGATION_INTERFACE`,
   `NEW_PAGE_CREATED`, `ICON_RECEIVED`, `B_DOWNLOAD_ADDED`...).
-- `make` builds it on Haiku against the installed `summit_webkit`;
+- WebPositive's cookie window reads the `BNetworkCookieJar` of its
+  `BUrlContext`; `src/Cookies.cpp` keeps that jar in step with the engine's
+  cookies and passes deletions back. The web inspector ("Inspect element"
+  in the view's context menu, `src/Inspector.cpp`) is Summit's developer
+  tools window, compiled from `../src` (with `../vendor/nlohmann`).
+- `make` builds it on Haiku against the installed `summit_webkit`
+  (it also needs `scintilla_devel`, `lexilla_devel` and Haiku's static
+  `libnetservices.a`, `libshared.a` and `libcolumnlistview.a`);
   `tools/package-summit-webkitlegacy.sh` builds the `summit_webkitlegacy`
   package, which replaces `haikuwebkit` and `haikuwebkit_devel`.
 

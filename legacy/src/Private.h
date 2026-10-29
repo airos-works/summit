@@ -26,6 +26,14 @@
 #include <string>
 
 class BBitmap;
+class BWindow;
+
+namespace BPrivate {
+class WebPagePrivate;
+namespace Network {
+class BUrlContext;
+}
+}
 
 namespace SummitLegacy {
 
@@ -64,6 +72,33 @@ void CopyToClipboard(const BString& text);
 // which runs the engine.
 status_t EvaluateAndWait(BWebKitView* view, const char* source, BString& result, bigtime_t timeout);
 
+// WebPositive's cookie window reads the BNetworkCookieJar of the BUrlContext
+// it gives its views; the engine keeps the cookies (Cookies.cpp). Pages
+// register their context and engine view; the jars are kept in step with
+// the engine on a looper of the library's. Any thread; RemoveCookieView()
+// before the view is deleted (~BWebView, whose child it is).
+void StartCookieMirror();
+// BWebPage::ShutdownOnce(): the jars are not used any more.
+void StopCookieMirror();
+void AddCookieJar(BPrivate::Network::BUrlContext* context);
+void RemoveCookieJar(BPrivate::Network::BUrlContext* context);
+void AddCookieView(BWebKitView* view);
+void RemoveCookieView(BWebKitView* view);
+// A page finished loading: its cookies are fetched soon.
+void SyncCookiesSoon();
+
+// The page's web inspector: Summit's developer tools window (Inspector.cpp).
+// Opens it, or shows it again; where (view coordinates, or negative) selects
+// the element there. The window's notifications go to page. On the thread
+// of near, the page's window, which is locked.
+void ShowInspector(BPrivate::WebPagePrivate& data, BHandler* page, BWindow* near, BPoint where);
+void CloseInspector(BPrivate::WebPagePrivate& data);
+void SetInspectorTitle(BPrivate::WebPagePrivate& data, const BString& title);
+// What the inspector window sends its page: it closed ("window"), and the
+// dock buttons' request, which is ignored (summit::kDeveloperToolsClosed and
+// kDockDeveloperTools of src/ui/Messages.h).
+enum : uint32 { kInspectorClosed = 'dvtc', kInspectorDock = 'dvdk' };
+
 }
 
 namespace BPrivate {
@@ -94,6 +129,14 @@ public:
 	// is checked again by the engine when applying an explicit approval.
 	std::unique_ptr<BHandler> certificateReply;
 	uint64 certificateGeneration = 0;
+	// The engine's identifier of the page (B_WEBKIT_STATE_CHANGED), which
+	// names it to an inspector that connects after another.
+	uint64 pageIdentifier = 0;
+	// The page's inspector window, while it is open.
+	BMessenger devTools;
+	// BWebPage::SetDeveloperExtrasEnabled(): "Inspect element" in the
+	// context menu.
+	bool developerExtras = true;
 };
 
 // A download the engine reported, until it is finished and handed over.

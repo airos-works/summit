@@ -358,6 +358,7 @@ Initialize()
 		be_app->AddHandler(sDispatcher);
 		be_app->Unlock();
 	}
+	StartCookieMirror();
 	sInitialized = true;
 	return B_OK;
 }
@@ -366,6 +367,7 @@ Initialize()
 void
 Shutdown()
 {
+	StopCookieMirror();
 	std::lock_guard lock(sLock);
 	sContext.reset();
 }

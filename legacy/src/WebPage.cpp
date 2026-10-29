@@ -193,11 +193,13 @@ BWebPage::BWebPage(BWebView* webView, BPrivate::Network::BUrlContext* context)
 	frame->page = this;
 	fMainFrame = new BWebFrame(this, nullptr, frame);
 	fSettings = new BWebSettings();
+	SummitLegacy::AddCookieJar(fContext);
 }
 
 
 BWebPage::~BWebPage()
 {
+	SummitLegacy::RemoveCookieJar(fContext);
 	delete fMainFrame;
 	delete fSettings;
 }
@@ -239,8 +241,13 @@ WebCore::ChromeClientHaiku::CreateEngineView(BWebPage* page)
 			request != 0 ? "for an opened page" : "", frame.Width() + 1, frame.Height() + 1,
 			page->fWebView->Window() != nullptr, page->fWebView->Window() != nullptr && view->IsHidden());
 	page->fWebView->fOffscreenView = view;
-	data.view = view;
+	{
+		// Read by the inspector on the view's window thread.
+		std::lock_guard lock(data.lock);
+		data.view = view;
+	}
 	page->fMainFrame->fData->view = view;
+	SummitLegacy::AddCookieView(view);
 }
 
 
@@ -437,9 +444,13 @@ BWebPage::FindString(const char* string, bool forward, bool caseSensitive,
 
 
 void
-BWebPage::SetDeveloperExtrasEnabled(bool)
+BWebPage::SetDeveloperExtrasEnabled(bool enable)
 {
-	// Summit's developer tools come with Summit.
+	// "Inspect element" in the view's context menu (Summit's developer
+	// tools). Unlike the old engine's, it is there unless turned off: the
+	// old one had no working inspector, so programs never turned it on.
+	std::lock_guard lock(fPagePrivate->lock);
+	fPagePrivate->developerExtras = enable;
 }
 
 
@@ -579,6 +590,18 @@ void
 BWebPage::MessageReceived(BMessage* message)
 {
 	switch (message->what) {
+		case SummitLegacy::kInspectorClosed:
+		{
+			// The inspector window closed (Inspector.cpp).
+			BMessenger window;
+			std::lock_guard lock(fPagePrivate->lock);
+			if (message->FindMessenger("window", &window) == B_OK && window == fPagePrivate->devTools)
+				fPagePrivate->devTools = BMessenger();
+			break;
+		}
+		case SummitLegacy::kInspectorDock:
+			// Its dock buttons are hidden: a BWebView's window has no dock.
+			break;
 		case SummitLegacy::kApplySettings:
 		{
 			std::lock_guard lock(fPagePrivate->lock);
@@ -660,6 +683,11 @@ BWebPage::MessageReceived(BMessage* message)
 			const uint64 successSequence = message->GetUInt64("loadSuccessSequence", 0);
 			const BString successURL = StringField(*message, "loadSuccessURL");
 			const uint64 generation = message->GetUInt64("loadGeneration", 0);
+			uint64 pageIdentifier = 0;
+			if (message->FindUInt64("pageIdentifier", &pageIdentifier) == B_OK) {
+				std::lock_guard lock(fPagePrivate->lock);
+				fPagePrivate->pageIdentifier = pageIdentifier;
+			}
 			if (generation != fPagePrivate->certificateGeneration || outcome != "failed"
 				|| !message->GetBool("loadErrorCertificate", false))
 				ForgetCertificate(*fPagePrivate);
@@ -722,6 +750,7 @@ BWebPage::MessageReceived(BMessage* message)
 				dispatchMessage(committed);
 			}
 			if (titleChanged) {
+				SummitLegacy::SetInspectorTitle(*fPagePrivate, title);
 				BMessage changed(TITLE_CHANGED);
 				changed.AddString("title", title);
 				changed.AddString("url", url);
@@ -753,6 +782,9 @@ BWebPage::MessageReceived(BMessage* message)
 					finished.AddString("url", url);
 					dispatchMessage(finished);
 				}
+				// The page may have set cookies: the application's jar shows
+				// them soon.
+				SummitLegacy::SyncCookiesSoon();
 				fLoadingProgress = 100;
 			}
 			if (succeeded) {
@@ -870,6 +902,7 @@ BWebPage::MessageReceived(BMessage* message)
 				BWebKitView::CancelAuthentication(identifier);
 				ForgetAuthentication(*fPagePrivate, identifier);
 			}
+			SummitLegacy::CloseInspector(*fPagePrivate);
 			// On the application thread, as before: the view (and with it the
 			// engine's page) goes, then the page.
 			if (fWebView != nullptr) {
@@ -881,7 +914,10 @@ BWebPage::MessageReceived(BMessage* message)
 				}
 				delete view;
 			}
-			fPagePrivate->view = nullptr;
+			{
+				std::lock_guard lock(fPagePrivate->lock);
+				fPagePrivate->view = nullptr;
+			}
 			fMainFrame->fData->view = nullptr;
 			// A page opened for a view that never reached a window.
 			if (fPagePrivate->pendingNewPage != 0)
