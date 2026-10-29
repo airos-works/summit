@@ -27370,7 +27370,7 @@ index 63ec41fac1fe1f6d4b7606555093bc4bed44d365..d687d1aba7c7e404d1de332bef700328
  
          if (m_contentsBuffer.committed)
 diff --git a/Source/WebCore/platform/graphics/coordinated/CoordinatedPlatformLayer.h b/Source/WebCore/platform/graphics/coordinated/CoordinatedPlatformLayer.h
-index dc4108941486e941ebe3b62eb9a1612941385fa2..c8bb0a18aefba67cce80b12ec940d40d13f2a11b 100644
+index dc4108941486e941ebe3b62eb9a1612941385fa2..ccc86791f181911b66422eebdb6fa6709f514aee 100644
 --- a/Source/WebCore/platform/graphics/coordinated/CoordinatedPlatformLayer.h
 +++ b/Source/WebCore/platform/graphics/coordinated/CoordinatedPlatformLayer.h
 @@ -36,6 +36,7 @@
@@ -27394,7 +27394,7 @@ index dc4108941486e941ebe3b62eb9a1612941385fa2..c8bb0a18aefba67cce80b12ec940d40d
      };
  
      static Ref<CoordinatedPlatformLayer> create();
-@@ -102,6 +109,12 @@ public:
+@@ -102,6 +109,14 @@ public:
  
      PlatformLayerIdentifier id() const { return m_id; }
      Lock& lock() LIFETIME_BOUND WTF_RETURNS_LOCK(m_lock) { return m_lock; }
@@ -27403,11 +27403,13 @@ index dc4108941486e941ebe3b62eb9a1612941385fa2..c8bb0a18aefba67cce80b12ec940d40d
 +    // shown yet while compositions show this layer's buffers: a video frame
 +    // the compositor had no time for (CoordinatedPlatformLayerBufferProxy).
 +    bool replacesUnshownContentsBufferHaiku() const WTF_REQUIRES_LOCK(m_lock);
++    // A buffer no composition has taken yet.
++    bool hasPendingContentsBufferHaiku() const WTF_REQUIRES_LOCK(m_lock) { return !!m_contentsBuffer.pending; }
 +#endif
  
      Client& client() const { ASSERT(m_client); return *m_client; }
      void invalidateClient();
-@@ -116,6 +129,15 @@ public:
+@@ -116,6 +131,15 @@ public:
      sk_sp<GrContextThreadSafeProxy> threadSafeGrContext() const { return m_threadSafeGrContext; }
  #endif
      void invalidateTarget();
@@ -27423,7 +27425,7 @@ index dc4108941486e941ebe3b62eb9a1612941385fa2..c8bb0a18aefba67cce80b12ec940d40d
  
  #if ENABLE(DAMAGE_TRACKING)
      void setDamagePropagationEnabled(bool enabled) { m_damagePropagationEnabled = enabled; }
-@@ -220,6 +242,9 @@ public:
+@@ -220,6 +244,9 @@ public:
      void processPendingBackingStoreTileUpdates();
      bool isCompositionRequiredOrOngoing() const;
      void requestComposition(CompositionReason);
@@ -27433,7 +27435,7 @@ index dc4108941486e941ebe3b62eb9a1612941385fa2..c8bb0a18aefba67cce80b12ec940d40d
      RunLoop* compositingRunLoop() const;
      int maxTextureSize() const;
  
-@@ -241,6 +266,9 @@ private:
+@@ -241,6 +268,9 @@ private:
      void addDamage(Damage&&) WTF_REQUIRES_LOCK(m_lock);
  #endif
      void damageWholeLayer() WTF_REQUIRES_LOCK(m_lock);
@@ -27443,7 +27445,7 @@ index dc4108941486e941ebe3b62eb9a1612941385fa2..c8bb0a18aefba67cce80b12ec940d40d
  
  #if USE(TEXTURE_MAPPER)
      void flushCompositingStateOnTarget(const OptionSet<CompositionReason>&, TextureMapperLayer&);
-@@ -330,6 +358,9 @@ private:
+@@ -330,6 +360,9 @@ private:
      bool m_contentsVisible WTF_GUARDED_BY_LOCK(m_lock) { true };
      bool m_contentsOpaque WTF_GUARDED_BY_LOCK(m_lock) { false };
      FloatRect m_contentsRect WTF_GUARDED_BY_LOCK(m_lock);
@@ -27454,10 +27456,43 @@ index dc4108941486e941ebe3b62eb9a1612941385fa2..c8bb0a18aefba67cce80b12ec940d40d
      FloatRoundedRect m_contentsClippingRect WTF_GUARDED_BY_LOCK(m_lock);
      Path m_contentsClipShapePath WTF_GUARDED_BY_LOCK(m_lock);
 diff --git a/Source/WebCore/platform/graphics/coordinated/CoordinatedPlatformLayerBufferProxy.cpp b/Source/WebCore/platform/graphics/coordinated/CoordinatedPlatformLayerBufferProxy.cpp
-index 0e33a153a39cc80a114f803b08b874239e5d8c91..4a0dbe5d9bfd317c2aab7e1f8048c11d0e51f219 100644
+index 0e33a153a39cc80a114f803b08b874239e5d8c91..635e472a0c151c051c839481f413c5bb36622f5b 100644
 --- a/Source/WebCore/platform/graphics/coordinated/CoordinatedPlatformLayerBufferProxy.cpp
 +++ b/Source/WebCore/platform/graphics/coordinated/CoordinatedPlatformLayerBufferProxy.cpp
-@@ -98,6 +98,24 @@ void CoordinatedPlatformLayerBufferProxy::setDisplayBuffer(std::unique_ptr<Coord
+@@ -31,6 +31,12 @@
+ #include "CoordinatedPlatformLayerBuffer.h"
+ #include <wtf/threads/BinarySemaphore.h>
+ 
++#if PLATFORM(HAIKU)
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#endif
++
+ namespace WebCore {
+ 
+ Ref<CoordinatedPlatformLayerBufferProxy> CoordinatedPlatformLayerBufferProxy::create(Ref<CoordinatedPlatformLayer>&& layer)
+@@ -54,6 +60,19 @@ CoordinatedPlatformLayerBufferProxy::~CoordinatedPlatformLayerBufferProxy()
+ #endif
+ }
+ 
++#if PLATFORM(HAIKU)
++void CoordinatedPlatformLayerBufferProxy::invalidateKeepingLayerHaiku()
++{
++    assertIsMainThread();
++    {
++        Locker locker { m_handoverLockHaiku };
++        m_invalidatedLayerHaiku = m_layer;
++        m_invalidatedAtHaiku = MonotonicTime::now();
++    }
++    invalidate();
++}
++#endif
++
+ void CoordinatedPlatformLayerBufferProxy::invalidate()
+ {
+     assertIsMainThread();
+@@ -98,6 +117,148 @@ void CoordinatedPlatformLayerBufferProxy::setDisplayBuffer(std::unique_ptr<Coord
      layer->requestComposition(CompositionReason::VideoFrame);
  }
  
@@ -27477,16 +27512,166 @@ index 0e33a153a39cc80a114f803b08b874239e5d8c91..4a0dbe5d9bfd317c2aab7e1f8048c11d
 +    layer->requestComposition(CompositionReason::VideoFrame);
 +    return replacesUnshown;
 +}
++
++static bool videoLayerTraceHaiku()
++{
++    static const bool traces = [] {
++        const char* value = getenv("SUMMIT_VIDEO_LAYER_TRACE");
++        return value && !strcmp(value, "1");
++    }();
++    return traces;
++}
++
++static bool handsOverLayersHaiku()
++{
++    static const bool handsOver = [] {
++        const char* value = getenv("SUMMIT_VIDEO_LAYER_HANDOVER");
++        return !value || strcmp(value, "0");
++    }();
++    return handsOver;
++}
++
++static constexpr Seconds handoverLimitHaiku = 2_s;
++
++bool CoordinatedPlatformLayerBufferProxy::acceptsDisplayBufferHaiku() const
++{
++    if (m_layer)
++        return true;
++    if (!handsOverLayersHaiku())
++        return false;
++    Locker locker { m_handoverLockHaiku };
++    return m_invalidatedLayerHaiku && MonotonicTime::now() - m_invalidatedAtHaiku < handoverLimitHaiku;
++}
++
++void CoordinatedPlatformLayerBufferProxy::takeOverFromHaiku(CoordinatedPlatformLayerBufferProxy& previous)
++{
++    assertIsMainThread();
++    if (!handsOverLayersHaiku() || &previous == this)
++        return;
++    Vector<Ref<CoordinatedPlatformLayer>, 2> layers;
++    {
++        Locker locker { previous.m_handoverLockHaiku };
++        // Layers the previous proxy still hands frames to: the compositor
++        // may show any of them until a rendering update brings in ours.
++        layers = previous.m_predecessorLayersHaiku;
++        if (RefPtr layer = previous.m_layer ? previous.m_layer : previous.m_invalidatedLayerHaiku)
++            layers.append(layer.releaseNonNull());
++    }
++    layers.removeAllMatching([&](auto& layer) {
++        return layer.ptr() == m_layer.get();
++    });
++    // The oldest go first when YouTube is quicker than the compositor.
++    static constexpr size_t maximumLayers = 4;
++    if (layers.size() > maximumLayers)
++        layers.removeAt(0, layers.size() - maximumLayers);
++    if (layers.isEmpty())
++        return;
++    Locker locker { m_handoverLockHaiku };
++    m_predecessorLayersHaiku = WTF::move(layers);
++    m_tookOverAtHaiku = MonotonicTime::now();
++    m_framesSinceTakeOverHaiku = 0;
++    if (videoLayerTraceHaiku())
++        fprintf(stderr, "Summit video layer: %p takes over from %zu layers (the newest %p)\n", m_layer.get(), m_predecessorLayersHaiku.size(), m_predecessorLayersHaiku.last().ptr());
++}
++
++// Hands the layer a buffer; true when the compositor had taken the one before.
++static bool handToLayerHaiku(CoordinatedPlatformLayer& layer, std::unique_ptr<CoordinatedPlatformLayerBuffer>&& buffer, bool& replacesUnshown)
++{
++    bool took;
++    {
++        Locker layerLocker { layer.lock() };
++        took = !layer.hasPendingContentsBufferHaiku();
++        replacesUnshown = layer.replacesUnshownContentsBufferHaiku();
++        layer.setContentsBuffer(WTF::move(buffer), std::nullopt, CoordinatedPlatformLayer::RequireComposition::No);
++    }
++    layer.requestComposition(CompositionReason::VideoFrame);
++    return took;
++}
++
++bool CoordinatedPlatformLayerBufferProxy::setDisplayBufferHaiku(const Function<std::unique_ptr<CoordinatedPlatformLayerBuffer>()>& makeBuffer)
++{
++    RefPtr layer = m_layer;
++    Vector<Ref<CoordinatedPlatformLayer>, 2> predecessors;
++    unsigned frames = 0;
++    bool expired = false;
++    {
++        Locker locker { m_handoverLockHaiku };
++        if (!layer) {
++            // See acceptsDisplayBufferHaiku(): the old layer and those it
++            // was still taking over from.
++            if (!handsOverLayersHaiku() || !m_invalidatedLayerHaiku || MonotonicTime::now() - m_invalidatedAtHaiku >= handoverLimitHaiku)
++                return false;
++            predecessors = m_predecessorLayersHaiku;
++            predecessors.append(*m_invalidatedLayerHaiku);
++        } else if (!m_predecessorLayersHaiku.isEmpty()) {
++            predecessors = m_predecessorLayersHaiku;
++            frames = m_framesSinceTakeOverHaiku++;
++            expired = MonotonicTime::now() - m_tookOverAtHaiku > handoverLimitHaiku;
++        }
++    }
++    if (!layer) {
++        for (auto& predecessor : predecessors) {
++            bool ignored;
++            handToLayerHaiku(predecessor, makeBuffer(), ignored);
++        }
++        return false;
++    }
++    bool replacesUnshown;
++    // A first buffer is pending whether or not the layer is shown yet.
++    const bool newLayerShows = handToLayerHaiku(*layer, makeBuffer(), replacesUnshown) && frames;
++    if (predecessors.isEmpty())
++        return replacesUnshown;
++
++    if (!newLayerShows && !expired) {
++        bool anyShows = false;
++        for (auto& predecessor : predecessors) {
++            bool ignored;
++            anyShows |= handToLayerHaiku(predecessor, makeBuffer(), ignored);
++        }
++        return replacesUnshown && !anyShows;
++    }
++    if (videoLayerTraceHaiku())
++        fprintf(stderr, "Summit video layer: %p handed over after %u frames (%s)\n", layer.get(), frames, newLayerShows ? "the new layer is shown" : "2 s passed");
++    Locker locker { m_handoverLockHaiku };
++    m_predecessorLayersHaiku.clear();
++    return replacesUnshown;
++}
 +#endif
 +
  #if ENABLE(VIDEO) && USE(GSTREAMER_GL)
  void CoordinatedPlatformLayerBufferProxy::dropCurrentBufferWhilePreservingTexture(ShouldWait shouldWait)
  {
 diff --git a/Source/WebCore/platform/graphics/coordinated/CoordinatedPlatformLayerBufferProxy.h b/Source/WebCore/platform/graphics/coordinated/CoordinatedPlatformLayerBufferProxy.h
-index f3b9edf26fec8bc41686618262ca30910866499f..2a41d70e6cc20c1df7025c5720d6ca91ffca7460 100644
+index f3b9edf26fec8bc41686618262ca30910866499f..ac1b2fea6e0fbb030e3472d0a2419ce4d85f9ec5 100644
 --- a/Source/WebCore/platform/graphics/coordinated/CoordinatedPlatformLayerBufferProxy.h
 +++ b/Source/WebCore/platform/graphics/coordinated/CoordinatedPlatformLayerBufferProxy.h
-@@ -54,6 +54,11 @@ public:
+@@ -26,10 +26,14 @@
+ #pragma once
+ 
+ #if USE(COORDINATED_GRAPHICS)
++#include <wtf/Function.h>
++#include <wtf/Lock.h>
+ #include <wtf/MainThread.h>
++#include <wtf/MonotonicTime.h>
+ #include <wtf/RefPtr.h>
+ #include <wtf/RunLoop.h>
+ #include <wtf/ThreadSafeRefCounted.h>
++#include <wtf/Vector.h>
+ 
+ #if !USE(TEXTURE_MAPPER)
+ WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_BEGIN
+@@ -49,11 +53,40 @@ public:
+     ~CoordinatedPlatformLayerBufferProxy();
+ 
+     void invalidate();
++#if PLATFORM(HAIKU)
++    // invalidate() for a layer that is going away with its GraphicsLayer;
++    // see acceptsDisplayBufferHaiku(). A layer the page keeps without the
++    // video (setContentsToMediaPlayer(nullptr)) must not get frames again.
++    void invalidateKeepingLayerHaiku();
++#endif
+     bool isValid() const { return !!m_layer; }
+ 
      void consumePendingBufferIfNeeded();
      void setInitialDisplayBuffer(std::unique_ptr<CoordinatedPlatformLayerBuffer>&&);
      void setDisplayBuffer(std::unique_ptr<CoordinatedPlatformLayerBuffer>&&);
@@ -27494,10 +27679,44 @@ index f3b9edf26fec8bc41686618262ca30910866499f..2a41d70e6cc20c1df7025c5720d6ca91
 +    // As setDisplayBuffer(); true when it replaced a buffer the compositor
 +    // never showed, while it was showing this layer's buffers.
 +    bool setDisplayBufferHaiku(std::unique_ptr<CoordinatedPlatformLayerBuffer>&&);
++    // The page replaced the video's layer (YouTube does, two or three times
++    // as a video starts). The compositor goes on showing the old layer until
++    // the page's next rendering update brings in the new one, which a busy
++    // page holds back for 250 ms and more: the picture stood still that long.
++    // A proxy that took over from the previous one hands each frame to the
++    // old layers too (makeBuffer() is called again for each) until the
++    // compositor took a frame from the new layer, for 2 s at most. All of
++    // them: YouTube replaces the layer again before the first replacement
++    // is shown, and which of them a rendering update brings in can't be
++    // told beforehand (a layer not taking frames may not be in yet, or no
++    // longer). SUMMIT_VIDEO_LAYER_HANDOVER=0 turns this off.
++    // An invalidated proxy (the page removed its layer and has not made the
++    // next one yet: that comes with a rendering update, 500 ms later on
++    // YouTube) goes on handing frames to its old layer, which the compositor
++    // shows until that update, for 2 s at most.
++    bool acceptsDisplayBufferHaiku() const;
++    void takeOverFromHaiku(CoordinatedPlatformLayerBufferProxy& previous);
++    bool setDisplayBufferHaiku(const Function<std::unique_ptr<CoordinatedPlatformLayerBuffer>()>& makeBuffer);
 +#endif
  
  #if ENABLE(VIDEO) && USE(GSTREAMER_GL)
      enum class ShouldWait : bool { No, Yes };
+@@ -68,6 +101,15 @@ private:
+     explicit CoordinatedPlatformLayerBufferProxy(Ref<CoordinatedPlatformLayer>&&);
+ 
+     RefPtr<CoordinatedPlatformLayer> m_layer;
++#if PLATFORM(HAIKU)
++    mutable Lock m_handoverLockHaiku;
++    // The layer this proxy had before invalidate(), for a successor to take over.
++    RefPtr<CoordinatedPlatformLayer> m_invalidatedLayerHaiku WTF_GUARDED_BY_LOCK(m_handoverLockHaiku);
++    MonotonicTime m_invalidatedAtHaiku WTF_GUARDED_BY_LOCK(m_handoverLockHaiku);
++    Vector<Ref<CoordinatedPlatformLayer>, 2> m_predecessorLayersHaiku WTF_GUARDED_BY_LOCK(m_handoverLockHaiku);
++    MonotonicTime m_tookOverAtHaiku WTF_GUARDED_BY_LOCK(m_handoverLockHaiku);
++    unsigned m_framesSinceTakeOverHaiku WTF_GUARDED_BY_LOCK(m_handoverLockHaiku) { 0 };
++#endif
+     std::unique_ptr<CoordinatedPlatformLayerBuffer> m_pendingBuffer WTF_GUARDED_BY_CAPABILITY(mainThread);
+ #if ENABLE(VIDEO) && USE(GSTREAMER)
+     RefPtr<RunLoop> m_compositingRunLoop;
 diff --git a/Source/WebCore/platform/graphics/coordinated/CoordinatedTileBuffer.cpp b/Source/WebCore/platform/graphics/coordinated/CoordinatedTileBuffer.cpp
 index 97343135c0044a99532b9f29b2928c98b0e0cd7c..4d285f58bebca01f42dc425cc057c9309dac08db 100644
 --- a/Source/WebCore/platform/graphics/coordinated/CoordinatedTileBuffer.cpp
@@ -27676,10 +27895,24 @@ index 2b1b31403c0b4c1f894c374d576ee2e79ddcd751..da0b36c0555a007ed33f74c6d8a7dace
  
      enum class PaintingState {
 diff --git a/Source/WebCore/platform/graphics/coordinated/GraphicsLayerCoordinated.cpp b/Source/WebCore/platform/graphics/coordinated/GraphicsLayerCoordinated.cpp
-index be3145e2dc5a248c932f24023c37029290825571..a95f92eb567288d052838ef31f0e9953828a584c 100644
+index be3145e2dc5a248c932f24023c37029290825571..04aff252f473d8f4eb6680edd08e7ea350c55bef 100644
 --- a/Source/WebCore/platform/graphics/coordinated/GraphicsLayerCoordinated.cpp
 +++ b/Source/WebCore/platform/graphics/coordinated/GraphicsLayerCoordinated.cpp
-@@ -102,10 +102,50 @@ std::optional<PlatformLayerIdentifier> GraphicsLayerCoordinated::primaryLayerID(
+@@ -89,8 +89,13 @@ GraphicsLayerCoordinated::GraphicsLayerCoordinated(Type layerType, GraphicsLayer
+ 
+ GraphicsLayerCoordinated::~GraphicsLayerCoordinated()
+ {
++#if PLATFORM(HAIKU)
++    if (m_contentsBufferProxy)
++        m_contentsBufferProxy->invalidateKeepingLayerHaiku();
++#else
+     if (m_contentsBufferProxy)
+         m_contentsBufferProxy->invalidate();
++#endif
+     m_platformLayer->setOwner(nullptr);
+     if (m_parent)
+         downcast<GraphicsLayerCoordinated>(*m_parent).noteLayerPropertyChanged(Change::Children, ScheduleFlush::Yes);
+@@ -102,10 +107,50 @@ std::optional<PlatformLayerIdentifier> GraphicsLayerCoordinated::primaryLayerID(
      return m_platformLayer->id();
  }
  
@@ -27730,7 +27963,7 @@ index be3145e2dc5a248c932f24023c37029290825571..a95f92eb567288d052838ef31f0e9953
  
      if (m_dirtyRegion) {
          if (m_dirtyRegion->mode() == Damage::Mode::Full)
-@@ -133,6 +173,10 @@ void GraphicsLayerCoordinated::setNeedsDisplayInRect(const FloatRect& initialRec
+@@ -133,6 +178,10 @@ void GraphicsLayerCoordinated::setNeedsDisplayInRect(const FloatRect& initialRec
  
      if (rect.isEmpty())
          return;
@@ -27741,7 +27974,7 @@ index be3145e2dc5a248c932f24023c37029290825571..a95f92eb567288d052838ef31f0e9953
  
      addRepaintRect(rect);
  
-@@ -403,7 +447,7 @@ void GraphicsLayerCoordinated::setContentsNeedsDisplayInRect(const FloatRect& re
+@@ -403,7 +452,7 @@ void GraphicsLayerCoordinated::setContentsNeedsDisplayInRect(const FloatRect& re
      noteLayerPropertyChanged(Change::ContentsBufferNeedsDisplay, ScheduleFlush::Yes);
  }
  
@@ -38522,10 +38755,10 @@ index 0000000000000000000000000000000000000000..4ea801e0330075e43363d4a03c0f0975
 +} // namespace WebCore
 diff --git a/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaiku.cpp b/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..3f4462a53660b3a2c463fa6731be87ef47bf81c6
+index 0000000000000000000000000000000000000000..0aa40c795ca3d58cfb3e9538c18b7f65a5186432
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaiku.cpp
-@@ -0,0 +1,2237 @@
+@@ -0,0 +1,2247 @@
 +/*
 + * Copyright (C) 2014-2016 Haiku, Inc.
 + *
@@ -39524,15 +39757,20 @@ index 0000000000000000000000000000000000000000..3f4462a53660b3a2c463fa6731be87ef
 +        BAutolock locker(m_layerBufferProxyLock);
 +        proxy = m_layerBufferProxy;
 +    }
-+    if (!proxy || !proxy->isValid() || !m_frameBuffer) {
++    if (!proxy || !proxy->acceptsDisplayBufferHaiku() || !m_frameBuffer) {
 +        // Painted instead: from m_frameBuffer.
 +        updateFrameBufferLocked();
 +        return false;
 +    }
++    // The page removed the video's layer; the old one gets the frame until the next one comes, and the page's own picture is kept too.
++    if (!proxy->isValid())
++        updateFrameBufferLocked();
 +    if (m_planesLayout && m_framePlanes) {
 +        // The decoder writes the next picture into another buffer while
 +        // the compositor holds this one.
-+        proxy->setDisplayBuffer(makeUnique<CoordinatedPlatformLayerBufferPlanesHaiku>(sk_sp<SkData>(m_framePlanes), *m_planesLayout));
++        proxy->setDisplayBufferHaiku([&]() -> std::unique_ptr<CoordinatedPlatformLayerBuffer> {
++            return makeUnique<CoordinatedPlatformLayerBufferPlanesHaiku>(sk_sp<SkData>(m_framePlanes), *m_planesLayout);
++        });
 +        return true;
 +    }
 +    // The decoder writes the next picture into the same bitmap, so the
@@ -39565,7 +39803,9 @@ index 0000000000000000000000000000000000000000..3f4462a53660b3a2c463fa6731be87ef
 +    RefPtr nativeImage = NativeImage::create(WTF::move(image));
 +    if (!nativeImage)
 +        return false;
-+    proxy->setDisplayBuffer(CoordinatedPlatformLayerBufferNativeImage::create(nativeImage.releaseNonNull(), nullptr));
++    proxy->setDisplayBufferHaiku([&]() -> std::unique_ptr<CoordinatedPlatformLayerBuffer> {
++        return CoordinatedPlatformLayerBufferNativeImage::create(Ref { *nativeImage }, nullptr);
++    });
 +    return true;
 +#else
 +    return false;
@@ -39577,6 +39817,9 @@ index 0000000000000000000000000000000000000000..3f4462a53660b3a2c463fa6731be87ef
 +{
 +    {
 +        BAutolock locker(m_layerBufferProxyLock);
++        // See CoordinatedPlatformLayerBufferProxy::takeOverFromHaiku().
++        if (m_layerBufferProxy)
++            proxy->takeOverFromHaiku(*m_layerBufferProxy);
 +        m_layerBufferProxy = proxy.copyRef();
 +    }
 +    if (m_mediaLock.Lock()) {
@@ -41084,10 +41327,10 @@ index 0000000000000000000000000000000000000000..7d7398ed294e485d2708cb41295954d8
 +#endif
 diff --git a/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaikuMSE.cpp b/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaikuMSE.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..d7e7c91ff608981fa21783c68841dab70177c774
+index 0000000000000000000000000000000000000000..2907530799802ddf6305caca0ab22e7a458883bb
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaikuMSE.cpp
-@@ -0,0 +1,3244 @@
+@@ -0,0 +1,3252 @@
 +/*
 + * Copyright (C) 2026 Summit contributors.
 + *
@@ -41783,6 +42026,8 @@ index 0000000000000000000000000000000000000000..d7e7c91ff608981fa21783c68841dab7
 +    void setLayerBufferProxy(RefPtr<CoordinatedPlatformLayerBufferProxy>&& proxy)
 +    {
 +        Locker locker { m_frameLock };
++        if (proxy && m_layerBufferProxy)
++            proxy->takeOverFromHaiku(*m_layerBufferProxy);
 +        m_layerBufferProxy = WTF::move(proxy);
 +    }
 +#endif
@@ -42440,9 +42685,12 @@ index 0000000000000000000000000000000000000000..d7e7c91ff608981fa21783c68841dab7
 +#if defined(HAIKU_MSE_COMPOSITED_VIDEO)
 +        // Hand the frame to the compositor directly, so a busy page thread
 +        // does not hold it back and no tile has to be repainted for it.
-+        if (proxy && proxy->isValid()) {
-+            if (RefPtr nativeImage = NativeImage::create(WTF::move(image)))
-+                noteReplacedUnshown(proxy->setDisplayBufferHaiku(CoordinatedPlatformLayerBufferNativeImage::create(nativeImage.releaseNonNull(), nullptr)));
++        if (proxy && proxy->acceptsDisplayBufferHaiku()) {
++            if (RefPtr nativeImage = NativeImage::create(WTF::move(image))) {
++                noteReplacedUnshown(proxy->setDisplayBufferHaiku([&]() -> std::unique_ptr<CoordinatedPlatformLayerBuffer> {
++                    return CoordinatedPlatformLayerBufferNativeImage::create(Ref { *nativeImage }, nullptr);
++                }));
++            }
 +        }
 +#endif
 +        didPresent();
@@ -42460,8 +42708,11 @@ index 0000000000000000000000000000000000000000..d7e7c91ff608981fa21783c68841dab7
 +            m_frameSize = IntSize(layout.width, layout.height);
 +            proxy = m_layerBufferProxy;
 +        }
-+        if (proxy && proxy->isValid())
-+            noteReplacedUnshown(proxy->setDisplayBufferHaiku(makeUnique<CoordinatedPlatformLayerBufferPlanesHaiku>(WTF::move(planes), layout)));
++        if (proxy && proxy->acceptsDisplayBufferHaiku()) {
++            noteReplacedUnshown(proxy->setDisplayBufferHaiku([&]() -> std::unique_ptr<CoordinatedPlatformLayerBuffer> {
++                return makeUnique<CoordinatedPlatformLayerBufferPlanesHaiku>(sk_sp<SkData>(planes), layout);
++            }));
++        }
 +        didPresent();
 +    }
 +#endif

@@ -1420,6 +1420,23 @@ What changed:
   where the page saw 0-3 %. YouTube did not switch streams within two
   minutes; it may cap the quality of later videos.
   `SUMMIT_COUNT_UNSHOWN_FRAMES=0` restores the old count.
+- **No freeze when the page replaces the video's layer** (#115, #117).
+  YouTube destroys and recreates the video's compositing layer two or three
+  times as a video starts, sometimes twice before the first replacement is
+  shown. The compositor shows the old layer until the page's next rendering
+  update brings in the new one, which YouTube's busy page held back for
+  230-830 ms; the old layer got no frames meanwhile, and its proxy was
+  invalidated before the new one existed, so the picture stood still. Now a
+  proxy that takes over (`takeOverFromHaiku`) hands each frame to the
+  layers it replaced (up to four) until the compositor takes one from the
+  new layer, and a proxy invalidated with its GraphicsLayer keeps feeding
+  its old layer until a successor takes over (2 s at most each). A layer
+  the page keeps without the video is not fed. Both players use it. X399,
+  YouTube 720p60 AV1 played muted from the start, first ~2 s: 125-129
+  frames drawn, longest gap 25-34 ms (4 runs), against 46-47 frames and
+  813-833 ms gaps without it. `SUMMIT_VIDEO_LAYER_HANDOVER=0` turns it off,
+  `SUMMIT_VIDEO_LAYER_TRACE=1` prints each take-over and hand-over. The
+  decoder was set up once per load in these runs.
 - New traces: `SUMMIT_DRAW_TRACE=N` (every draw of every Nth composition:
   shader options, rectangle, clip, blending), `SUMMIT_DAMAGE_TRACE=1` (frame,
   target and per-layer damage, filter regions that join) and `=2` (what
