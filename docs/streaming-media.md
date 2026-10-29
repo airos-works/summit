@@ -22,8 +22,10 @@ codecs do not extend the [Clear Key](encrypted-media.md) support matrix.
 
 The decoder registry can select installed hardware. Existing NVDEC/Raspberry Pi
 H.264 selection and software fallback remain enabled. On X399, the additional
-video codecs listed here were tested with software decoding; this change does
-not add NVDEC codec implementations. HEVC/AV1 presentation timestamps are kept
+video codecs listed here were tested with software decoding. Since 30 October
+H.265 also goes to NVDEC where it is installed (a named add-on, as for the
+Raspberry Pi), and NVDEC's pictures reach the compositor as NV12
+([performance.md](performance.md), 30 October). HEVC/AV1 presentation timestamps are kept
 from the container because the installed decoders do not preserve them reliably.
 
 WebM parsing supports fixed, Xiph and EBML lacing, Opus pre-skip, discard

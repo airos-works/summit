@@ -1,5 +1,86 @@
 # Summit performance: Speedometer 3.1 baseline, where the time goes, stress test
 
+## 30 October 2026: NVDEC pictures go to the GPU as NV12; H.265 on NVDEC (#115)
+
+The NVDEC add-on converted every picture to RGB32 on the processor (in bands,
+on threads of its own), and the compositor uploaded 8 MB per 1080p picture.
+air/OS's add-on gives NV12 since jmgasper/haiku@adebbddd30 to a caller that
+asks for the colour space `'NV12'`: the luma plane and the Cb/Cr pairs as the
+card wrote them, 3 MB. Summit now asks for it and the compositor converts as
+it draws.
+
+- **Both players ask.** Where the decoder is NVDEC (`nvdec…`), the MSE player
+  (`BMediaDecoder::SetOutputFormat`) and the file player
+  (`BMediaTrack::DecodedFormat`) ask for `'NV12'`; an add-on that does not know
+  it answers RGB32, which is used as before. `SUMMIT_NVDEC_NV12=0` (or
+  `SUMMIT_VIDEO_PLANES=0`) asks for RGB32 again.
+- **Upload.** `CoordinatedPlatformLayerBufferPlanesHaiku` takes NV12 as well as
+  the Raspberry Pi's I420: the luma into a single-channel texture, the pairs
+  into a two-channel one (`BitmapTexture::Flags::TwoChannel`, `GL_RG8`, Haiku
+  only), drawn with TextureMapper's NV12 shader (BT.709 at 720 lines and more,
+  BT.601 below, as for I420). A context without RG textures (OpenGL ES 2
+  without `EXT_texture_rg`) gets the pairs split into two planes on the CPU;
+  `SUMMIT_VIDEO_RG_TEXTURES=0` forces that. On the X399 the pool holds one
+  1920x1080 luma and one 960x540 chroma texture for a playing 1080p video.
+- **The file player has a planes path now.** Each picture is decoded into a
+  buffer no one else refers to (a pool of up to six) and handed to the
+  compositor as it is, with no copy. The BGRA bitmap gets the picture only when
+  something paints the video itself (a canvas, WebGL, a video that is not
+  composited): `AddOnVideoDecoderHaiku::convertToBGRA()`, about 3.4 ms a 1080p
+  picture. libyuv's `NV12ToARGBMatrix` was tried first and gave saturated
+  BT.709 blues 9-12 levels darker than NVDEC's own conversion.
+- **H.265 goes to NVDEC.** The add-on never offers H.265 to the media kit (a
+  stream it refused would have no decoder), so the media kit's choice was
+  libavcodec. It is now one of the named add-ons (`nvdec`, H.265 Main and
+  Main 10 up to 8192x8192, where `/dev/nvidiactl` exists), as airTime uses it:
+  NV12 for the MSE player and for the file player
+  (`SubstituteVideoDecoderHaiku::readPlanes()`), RGB32 from the add-on for a
+  caller that cannot take planes. A decoder that fails mid-stream hands over to
+  libavcodec in RGB, as before. Ten-bit pictures come as their top eight bits.
+  With `SUMMIT_NVDEC_NV12=0` H.265 stays on NVDEC with the add-on's RGB;
+  `SUMMIT_HARDWARE_VIDEO=0` sends it back to libavcodec.
+- **NVDEC shows H.265 leading pictures it cannot decode.** Started at a CRA
+  picture (an MSE seek into an x265 stream with open GOPs), the add-on hands out
+  the RASL pictures that come before it in display order, decoded from
+  references it never had; the picture at the seek target was garbage. A
+  decoder must drop them (H.265 8.1.3); the MSE player now drops what NVDEC
+  returns from before the picture it started at. OS side: the add-on should
+  drop them itself.
+
+X399 (GTX 1070, air/OS hrev60207+2112), one tab, 960x540 `<video>`, CPU of
+the web process from the `cpu` tool over 5 s (the team's total: the add-on's
+conversion threads are short-lived and do not show in `threads`), two runs
+each, fresh profile; the same engine with `SUMMIT_NVDEC_NV12=0` for "RGB":
+
+| clip | RGB | NV12 |
+| --- | --- | --- |
+| H.264 1080p60 file | 1.20-1.21 cores (machine 1.28) | 0.38-0.39 (machine 0.48) |
+| H.264 1080p60 MSE | 1.39 (machine 1.58-1.63) | 0.42-0.46 (machine 0.65) |
+| YouTube Big Buck Bunny 60 fps, H.264 720p60 (`SUMMIT_MEDIA_PREFER_H264=1`) | 0.91-0.94 | 0.28-0.33 |
+| H.265 1080p60 file | 0.81-0.83 (libavcodec, as before) | 0.38-0.39 (NVDEC) |
+| H.265 1080p30 file (Big Buck Bunny) | 0.51 (libavcodec) | 0.19 (NVDEC) |
+| H.265 1080p60 MSE | (libavcodec before) | 0.42 |
+
+All at 60 (or 30) frames a second. Dropped frames (`getVideoPlaybackQuality`)
+in the first 26 s of the H.264 MSE clip: 39 RGB (21 of them in the first 3 s),
+6 NV12; the file clips dropped none either way. (Runs while other sessions'
+crash reports were being written on the X399 dropped frames in both modes;
+those are left out.) NVDEC with the add-on's RGB for
+H.265 (before the file player took planes) cost 1.20 cores, more than
+libavcodec on this content: the conversion and the 8 MB copies are most of it.
+
+The picture: the clip is SMPTE bars with a moving test pattern; 15 patches of
+the bars in a screenshot of the page match ffmpeg's own decode of the same
+frame to within 3 levels, the same as the RGB path, also with the CPU-split
+chroma and after seeks (file and MSE, H.264 and H.265). YouTube on the X399
+takes AV1 (dav1d) unless H.264 is preferred, so it reaches NVDEC only with
+`SUMMIT_MEDIA_PREFER_H264=1`.
+
+Test kit: clips in the host's www `nv12/` (`h264-1080p60.mp4`,
+`hevc-1080p60.mp4`, their `-frag` MSE versions, `bbb-*-1080p30.mp4`,
+`ref-h264-10s.png`) and `nv12/play.html?src=…[&mse=1&codec=…][&paused=1&t=10]`;
+ffmpeg with libx264/libx265 from `imageio-ffmpeg` in a venv on the host.
+
 ## 29-30 October 2026: hidden tabs give back their GPU memory; the critical release reaches every thread (#116)
 
 Measured on the Framework 13 laptop (Radeon 760M, RADV through zink) with the
@@ -4981,7 +5062,7 @@ released them, as the MSE player already did. The decoder thread fell to
 still play, seek and end, the MSE fixture shows 360 frames with none
 dropped).
 
-Next for video: the NVDEC add-on converts every picture to RGB32 on the CPU
+Next for video (done 30 October, see above): the NVDEC add-on converts every picture to RGB32 on the CPU
 and the compositor uploads 8 MB per 1080p frame. TextureMapper can draw NV12
 (`drawTextureSemiPlanarYUV`, `CoordinatedPlatformLayerBufferYUV`), which is
 what NVDEC produces, at 3 MB a frame and no conversion; that needs an NV12

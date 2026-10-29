@@ -181,7 +181,10 @@ decoder: H.264 on the graphics card (NVDEC)
 60 pictures in 927.6 ms, 15.46 ms each (64.7 a second)
 ```
 
-The plugin decodes **H.264 only** and hands back `B_RGB32`.
+The plugin decodes **H.264 only** and hands back `B_RGB32`. (Since then the
+air/OS add-on also decodes H.265 for programs that ask for it, holds 16
+reference frames and gives NV12; Summit uses both: see
+[performance.md](performance.md), 30 October.)
 
 ### Hardware video decoding in Summit
 
