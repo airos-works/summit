@@ -4428,10 +4428,15 @@ void BrowserWindow::MessageReceived(BMessage* message)
                 CreateTab(target->url, true);
 #endif
             } else if (message->what == kMoveTabToNewWindow) {
-                // The page opens afresh in the new window; its back list stays behind.
+                // The page itself moves, as a tab dragged out of the window
+                // does: its back list, state and container go with it.
                 if (fTabs.size() < 2) break;
-                RequestNewWindow({ target->url }, fPrivate);
-                CloseTab(id);
+                BMessage transfer(kTransferTab);
+                transfer.AddMessenger("window", BMessenger(this));
+                transfer.AddInt64("id", id);
+                transfer.AddBool("private", fPrivate);
+                transfer.AddBool("last", false);
+                be_app->PostMessage(&transfer);
             } else {
                 std::vector<int64> others;
                 for (const auto& page : fTabs) if (page.id != id) others.push_back(page.id);

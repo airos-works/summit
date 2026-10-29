@@ -1198,23 +1198,31 @@ void BrowserWindow::BrowsingDataCommand(const BMessage& message, uint64 identifi
     const uint64 id = ++fNextBrowsingDataRequest;
     const uint32 types = request.types;
     fBrowsingDataRequests[id] = std::move(request);
-    if (filtered)
-        fWebKitContext->FetchWebsiteDataSizes(types, BMessenger(this), id);
-    else if (since > 0)
-        fWebKitContext->RemoveWebsiteDataSince(types, since, std::vector<std::string>(visited.begin(), visited.end()), BMessenger(this), id);
-    else
-        fWebKitContext->RemoveWebsiteData(types, BMessenger(this), id);
+    // Without a cookieStoreId (the engine handles one) Firefox removes from
+    // every store: the profile's and each container's.
+    const std::vector<std::string> hosts(visited.begin(), visited.end());
+    fStoreRequests.Issue(id, fWebKitContext, [&](BWebKitContext& context, uint64 identifier) {
+        if (filtered)
+            context.FetchWebsiteDataSizes(types, BMessenger(this), identifier);
+        else if (since > 0)
+            context.RemoveWebsiteDataSince(types, since, hosts, BMessenger(this), identifier);
+        else
+            context.RemoveWebsiteData(types, BMessenger(this), identifier);
+    });
 }
 
 void BrowserWindow::BrowsingDataReply(const BMessage& message)
 {
-    auto found = fBrowsingDataRequests.find(message.GetUInt64("identifier", 0));
+    // Every store's answer is in (summit::StoreRequests).
+    auto answered = fStoreRequests.Reply(message);
+    if (!answered) return;
+    auto found = fBrowsingDataRequests.find(answered->key);
     if (found == fBrowsingDataRequests.end()) return;
     const uint64 id = found->first;
     auto request = found->second;
     fBrowsingDataRequests.erase(found);
-    if (const char* error = nullptr; message.FindString("error", &error) == B_OK) {
-        fWebKitContext->RespondToBrowserCommandWithData(request.command, B_ERROR, "null", error);
+    if (!answered->error.empty()) {
+        fWebKitContext->RespondToBrowserCommandWithData(request.command, B_ERROR, "null", answered->error.c_str());
         return;
     }
     if (message.what == B_WEBKIT_WEBSITE_DATA_REMOVED) {
@@ -1228,8 +1236,7 @@ void BrowserWindow::BrowsingDataReply(const BMessage& message)
             && host[host.size() - site.size() - 1] == '.');
     };
     std::vector<std::string> sites;
-    const char* site = nullptr;
-    for (int32 i = 0; message.FindString("site", i, &site) == B_OK; ++i) {
+    for (const auto& [site, size] : answered->sizes) {
         auto named = [&](const std::vector<std::string>& hosts) {
             return std::any_of(hosts.begin(), hosts.end(), [&](const std::string& host) { return inSite(host, site); });
         };
@@ -1241,7 +1248,9 @@ void BrowserWindow::BrowsingDataReply(const BMessage& message)
     }
     const uint32 types = request.types;
     fBrowsingDataRequests[id] = std::move(request);
-    fWebKitContext->RemoveWebsiteDataOfSites(types, sites, BMessenger(this), id);
+    fStoreRequests.Issue(id, fWebKitContext, [&](BWebKitContext& context, uint64 identifier) {
+        context.RemoveWebsiteDataOfSites(types, sites, BMessenger(this), identifier);
+    });
 }
 
 // chrome.sessions (#106): the tabs and windows closed while Summit runs,

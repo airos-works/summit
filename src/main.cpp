@@ -869,10 +869,32 @@ public:
             return;
         }
         if (message->what == summit::kSiteDataSizesRequest) {
+            // The sites of the profile and of every container, sizes added
+            // up, as Firefox lists them (B_WEBKIT_WEBSITE_DATA_SIZES below).
             BMessenger reply;
-            if (message->FindMessenger("reply", &reply) == B_OK && fWebKitContext)
-                fWebKitContext->FetchWebsiteDataSizes(B_WEBKIT_DATA_COOKIES | B_WEBKIT_DATA_CACHE | B_WEBKIT_DATA_LOCAL_STORAGE
-                    | B_WEBKIT_DATA_INDEXED_DB | B_WEBKIT_DATA_SERVICE_WORKERS, reply, 0);
+            if (message->FindMessenger("reply", &reply) == B_OK && fWebKitContext) {
+                fSizeReplies[++fNextDataRequest] = reply;
+                fStoreRequests.Issue(fNextDataRequest, fWebKitContext, [this](BWebKitContext& context, uint64 identifier) {
+                    context.FetchWebsiteDataSizes(B_WEBKIT_DATA_COOKIES | B_WEBKIT_DATA_CACHE | B_WEBKIT_DATA_LOCAL_STORAGE
+                        | B_WEBKIT_DATA_INDEXED_DB | B_WEBKIT_DATA_SERVICE_WORKERS, BMessenger(this), identifier);
+                });
+            }
+            return;
+        }
+        if (message->what == B_WEBKIT_WEBSITE_DATA_SIZES) {
+            auto request = fStoreRequests.Reply(*message);
+            if (!request) return;
+            auto reply = fSizeReplies.find(request->key);
+            if (reply == fSizeReplies.end()) return;
+            BMessage sizes(B_WEBKIT_WEBSITE_DATA_SIZES);
+            sizes.AddUInt64("identifier", 0);
+            if (!request->error.empty()) sizes.AddString("error", request->error.c_str());
+            for (const auto& [site, size] : request->sizes) {
+                sizes.AddString("site", site.c_str());
+                sizes.AddUInt64("size", size);
+            }
+            reply->second.SendMessage(&sizes);
+            fSizeReplies.erase(reply);
             return;
         }
         if (message->what == summit::kClearCacheRequest || message->what == summit::kClearSiteDataRequest) {
@@ -884,18 +906,24 @@ public:
             std::vector<std::string> sites;
             const char* site = nullptr;
             for (int32 i = 0; message->FindString("site", i, &site) == B_OK; ++i) sites.push_back(site);
-            if (!sites.empty()) {
-                fWebKitContext->RemoveWebsiteDataOfSites(types | B_WEBKIT_DATA_CACHE, sites, BMessenger(this), fNextDataRequest);
-                return;
+            const int64 since = message->GetInt64("since", 0);
+            std::vector<std::string> visited;
+            if (since > 0) {
+                const auto hosts = fShared->HostsVisitedSince(since);
+                visited.assign(hosts.begin(), hosts.end());
             }
-            // A time range: cookies and caches by their times, the storage of
-            // the sites visited then.
-            if (const int64 since = message->GetInt64("since", 0); since > 0) {
-                const auto visited = fShared->HostsVisitedSince(since);
-                fWebKitContext->RemoveWebsiteDataSince(types, since, std::vector<std::string>(visited.begin(), visited.end()),
-                    BMessenger(this), fNextDataRequest);
-            } else
-                fWebKitContext->RemoveWebsiteData(types, BMessenger(this), fNextDataRequest);
+            // From the profile's store and every container's, as Firefox
+            // clears them all.
+            fStoreRequests.Issue(fNextDataRequest, fWebKitContext, [&](BWebKitContext& context, uint64 identifier) {
+                if (!sites.empty())
+                    context.RemoveWebsiteDataOfSites(types | B_WEBKIT_DATA_CACHE, sites, BMessenger(this), identifier);
+                // A time range: cookies and caches by their times, the
+                // storage of the sites visited then.
+                else if (since > 0)
+                    context.RemoveWebsiteDataSince(types, since, visited, BMessenger(this), identifier);
+                else
+                    context.RemoveWebsiteData(types, BMessenger(this), identifier);
+            });
             return;
         }
         if (message->what == summit::kTrustCertificate) {
@@ -927,11 +955,13 @@ public:
             return;
         }
         if (message->what == B_WEBKIT_WEBSITE_DATA_REMOVED) {
-            auto request = fDataRequests.find(message->GetUInt64("identifier", 0));
+            auto answered = fStoreRequests.Reply(*message);
+            if (!answered) return;
+            auto request = fDataRequests.find(answered->key);
             if (request == fDataRequests.end()) return;
             BMessage cleared(summit::kDataCleared);
             cleared.AddInt32("kind", request->second);
-            if (const char* error = nullptr; message->FindString("error", &error) == B_OK) cleared.AddString("error", error);
+            if (!answered->error.empty()) cleared.AddString("error", answered->error.c_str());
             fDataRequests.erase(request);
             fPreferences.SendMessage(&cleared);
             return;
@@ -2349,6 +2379,9 @@ private:
     std::map<BWebKitContext*, std::unique_ptr<summit::DownloadListener>> fDownloadListeners;
     std::vector<BMessage> fPendingExtensionTabs;
     std::map<uint64, uint32> fDataRequests;
+    // Sizes asked for by the Preferences window, by request.
+    std::map<uint64, BMessenger> fSizeReplies;
+    summit::StoreRequests fStoreRequests;
     uint64 fNextDataRequest = 0;
     std::unique_ptr<summit::ExtensionPermissionPrompt> fPermissionPrompts;
     std::unique_ptr<summit::SitePermissionService> fSitePermissions;

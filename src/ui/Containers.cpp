@@ -49,6 +49,44 @@ std::vector<ContainerInfo> Containers::List() const
     std::lock_guard lock(fLock);
     return fList;
 }
+std::vector<std::shared_ptr<BWebKitContext>> Containers::Contexts() const
+{
+    std::lock_guard lock(fLock);
+    std::vector<std::shared_ptr<BWebKitContext>> result;
+    for (const auto& [id, context] : fContexts) result.push_back(context);
+    return result;
+}
+void StoreRequests::Issue(uint64 key, const std::shared_ptr<BWebKitContext>& profile,
+    const std::function<void(BWebKitContext&, uint64)>& issue)
+{
+    auto request = std::make_shared<Request>();
+    request->key = key;
+    std::vector<std::shared_ptr<BWebKitContext>> stores { profile };
+    // A private profile has no containers.
+    if (profile && !profile->IsPrivate())
+        for (auto& context : Containers::Shared().Contexts()) stores.push_back(context);
+    request->remaining = int(stores.size());
+    // Registered before any store can answer.
+    std::vector<uint64> identifiers;
+    for (size_t i = 0; i < stores.size(); ++i) {
+        identifiers.push_back(++fNext);
+        fPending[fNext] = request;
+    }
+    for (size_t i = 0; i < stores.size(); ++i) issue(*stores[i], identifiers[i]);
+}
+std::optional<StoreRequests::Request> StoreRequests::Reply(const BMessage& message)
+{
+    auto found = fPending.find(message.GetUInt64("identifier", 0));
+    if (found == fPending.end()) return std::nullopt;
+    auto request = found->second;
+    fPending.erase(found);
+    if (const char* error = nullptr; request->error.empty() && message.FindString("error", &error) == B_OK) request->error = error;
+    const char* site = nullptr;
+    for (int32 i = 0; message.FindString("site", i, &site) == B_OK; ++i)
+        request->sizes[site] += message.GetUInt64("size", i, 0);
+    if (--request->remaining > 0) return std::nullopt;
+    return *request;
+}
 std::optional<ContainerInfo> Containers::Find(uint32 id) const
 {
     std::lock_guard lock(fLock);

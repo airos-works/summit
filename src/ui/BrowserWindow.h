@@ -3,6 +3,7 @@
 #include "core/Suggest.h"
 #if SUMMIT_MODERN_WEBKIT
 #include <WebKit/WebKitView.h>
+#include "Containers.h"
 #include <DirectWindow.h>
 #include <Window.h>
 #else
@@ -884,6 +885,8 @@ private:
     };
     std::map<uint64, BrowsingDataRequest> fBrowsingDataRequests;
     uint64 fNextBrowsingDataRequest = 0;
+    // The stores (the window's and its containers') each request went to.
+    summit::StoreRequests fStoreRequests;
 #endif
     int64 fNextID = 1;
     int64 fSelected = 0;

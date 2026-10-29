@@ -13,7 +13,12 @@ Firefox Multi-Account Containers make, change and remove them.
 - A container's tab has a line of its colour along the bottom of the tab.
 - Links, `target=_blank` and `window.open()` from a container's page open in
   the same container (also pop-up windows); Duplicate Tab keeps the
-  container.
+  container, and so does a tab dragged out of its window or moved with Move
+  Tab to New Window (both move the live page, its history with it).
+- Clearing data clears every container's too, as Firefox does: Preferences ›
+  Privacy (cookies and site data, cache, a time range or chosen sites) and
+  extensions' `browsingData` without a `cookieStoreId`. The Site data list
+  shows each site once, with its data in all containers added up.
 - The session keeps each tab's container: restored tabs open in it again
   (a tab of a container that is gone opens without one).
 - When a container is removed (by an extension), its tabs close and its data
@@ -54,6 +59,14 @@ Not done: Firefox's `firstPartyDomain` (first-party isolation) is not
 supported; cookies with it are neither filtered nor reported. A container is
 the profile's in everything else: history, bookmarks, permissions,
 certificate exceptions and downloads are shared, as in Firefox.
+
+Multi-Account Containers logs "menus.create(): identifier is already used"
+now and then: it recomputes its page menu on `tabs.onActivated` and on the
+page's `webRequest.onCompleted`, removing its items and creating them again
+after an `await`; a page that loads within that time (a new tab of a fast
+site: the two events came 36 ms apart) runs the two out of order. Summit
+fires each event once and starts an extension with no menu items (checked by
+restarting one); Firefox reports the same failure for the same race.
 
 ## How
 
