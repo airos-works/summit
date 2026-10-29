@@ -746,6 +746,22 @@ the fingers move, and the wheel message says which kind of device sent it
   in step with the compositor; a second refresh for the same frame samples
   the same time and changes nothing. `SUMMIT_SCROLL_FRAME_TIMES=0` samples
   at the refresh's own time every 16 ms, as before.
+- **Touchpad scrolling by the finger (29 October).** air/OS's input server
+  sends a touchpad's scroll gesture with its movement in fractions of a step
+  (`be:wheel_precise_delta_x/y`) and where in the gesture it is
+  (`be:wheel_phase`: began, changed, ended). Such messages become wheel
+  events with precise deltas and a phase (`NativeWebEventsHaiku.cpp`; the
+  phase fields of `WebWheelEvent` were Cocoa, GTK and WPE only): the page
+  follows the fingers without the step animation above, and once they leave
+  it glides on and slows down (WebCore's kinetic scrolling, as on GTK). A
+  mouse wheel and stock Haiku's messages have no phase and keep the steps.
+  `SUMMIT_PRECISE_WHEEL=0` takes the whole steps only. The glide stopped one
+  frame after it began at first: the scrolling thread can sample the same
+  frame time twice, and `ScrollAnimationKinetic` took a sample with no time
+  passed, and so no movement, for one that had come to rest; a repeated time
+  now leaves it as it was. Laptop, a synthetic gesture of 21 half steps in
+  0.45 s (MCP `scroll` with `phase`): the page followed it to 1050 px and
+  glided on to 1541 and 1625 px within a second (1085-1115 px before).
 - **Page Up, Page Down, Home and End scroll the page.** WebCore's default
   handlers for them were compiled for GTK, WPE and Windows only; on Haiku
   these keys are editing commands only in editable text
@@ -759,7 +775,8 @@ the fingers move, and the wheel message says which kind of device sent it
 
 | switch | default | what it does |
 | --- | --- | --- |
-| `SUMMIT_SMOOTH_WHEEL` | 1 | a wheel or touchpad step continues the motion at its speed |
+| `SUMMIT_SMOOTH_WHEEL` | 1 | a wheel step (or a touchpad's without precise deltas) continues the motion at its speed |
+| `SUMMIT_PRECISE_WHEEL` | 1 | a touchpad gesture scrolls by its precise deltas, with kinetic scrolling after it |
 | `SUMMIT_SMOOTH_WHEEL_MS` | 80,250 | shortest and longest animation of a step |
 | `SUMMIT_SCROLL_FRAME_TIMES` | 1 | scroll animations sampled when the frame showing them is due |
 | `SUMMIT_SCROLL_FRAME_TRACE` | 0 | prints each frame's flush and each sampled scroll position |

@@ -119,10 +119,14 @@ the GLib files, which are portable).
   (`HaikuVoiceProcessing`): libwebrtc's audio processing module (AEC3),
   with what the page plays (streams and Web Audio) as the echo reference.
   `SUMMIT_VOICE_PROCESSING=0` turns it off.
-- The Media Kit sends no notice when a camera is plugged in or taken out:
-  a change shows the next time the device list is computed (a page's
-  `enumerateDevices()`, a `getUserMedia()`), and only a list that differs
-  from the last one is announced as `devicechange`. WebCore's
+- Cameras and microphones coming and going: the Media Kit announces them
+  as `B_MEDIA_FLAVORS_CHANGED` (air/OS and Haiku since October 2026), which
+  the device lists watch (`MediaDeviceWatcherHaiku`); they are taken again
+  then and once more a second later, for a driver that publishes its device
+  after the notice. Without the notice a change shows the next time the list
+  is computed (a page's `enumerateDevices()`, a `getUserMedia()`).
+  `SUMMIT_MEDIA_DEVICE_WATCH=0` turns the watching off. Either way only a
+  list that differs from the last one is announced as `devicechange`. WebCore's
   `haveDevicesChanged()` cannot be used for that: it answers "changed" for
   two equal lists, and announcing on its word made the observers enumerate
   again, which announced again, five times a second for as long as a page
@@ -251,8 +255,6 @@ codecs both directions have); Summit calls Chromium (VP8 and VP9).
 
 - System audio capture (sharing what the computer plays).
 - WebCodecs audio (video WebCodecs is in [webcodecs.md](webcodecs.md)).
-- `devicechange` when a camera is plugged in: the Media Kit sends no notice,
-  so the change is announced only the next time a page lists the devices.
 - Not yet tried in a real Zoom or Teams meeting (they need accounts or
   meetings to join); Summit presents itself as Safari, which both support.
   Teams' device check, its meeting launcher and Microsoft's calling library

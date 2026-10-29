@@ -33,6 +33,18 @@ notificationClicked`) checks the extension is loaded and has the
 `DispatchNotificationsEventHaiku` to its processes, which fire the event.
 Web notifications (#10) have taken the same route since October.
 
+**On air/OS since 29 October** the notification server answers the sender
+(its `_reply:target`, `_reply:activated` and `_reply:closed` fields,
+docs/airos/NOTIFICATIONS.md in the OS tree). The engine asks for those
+answers: the buttons are the notification's own (`_buttons`, two at most), a
+click on the notification or a button comes back to the web process
+(`NotificationRepliesHaiku`, on its application's looper) as `onClicked` or
+`onButtonClicked` without starting Summit or its window, and
+`onClosed(id, byUser)` fires when the notification goes away, `byUser` true
+when the user clicked or closed it, false when it timed out. The launch
+arguments above stay in the notification for servers without the answers.
+`SUMMIT_NOTIFICATION_REPLIES=0` leaves the answers out.
+
 Two-argument events (`onButtonClicked`, `onClosed`) used to hand the
 notification's identifier over in quotes (`"\"buttons-installed\""`):
 WebKit's two-argument `invokeListenersWithJSONArgument()` takes its first

@@ -379,10 +379,12 @@ void RegisterMcpBrowserTools(mcp::Server& server, const std::shared_ptr<McpConte
     server.Add({"scroll",
         "Scrolls a tab's page with mouse wheel messages at a point (default the middle): one event of dy notches "
         "(positive scrolls down), or with count a burst paced at interval_ms (default 16 ms, as a fast wheel), "
-        "which frame_stats can then measure.",
+        "which frame_stats can then measure. With phase, one touchpad message instead: dx/dy in fractions of a "
+        "step (air/OS's precise deltas) at that point of a gesture.",
         Schema().String("tab", kTabArgument).Number("dy", "Vertical notches per event (default 3)").Number("dx", "Horizontal notches")
             .Number("x", "X in the page view").Number("y", "Y in the page view").Integer("count", "Events in a burst")
-            .Integer("interval_ms", "Time between burst events").Boolean("activate", "Select the tab and raise the window first"),
+            .Integer("interval_ms", "Time between burst events").Boolean("activate", "Select the tab and raise the window first")
+            .String("phase", "A touchpad gesture's message: began, changed or ended (ended sends no movement)"),
         [input](const Json& arguments) {
             if (mcp::HasArgument(arguments, "count")) {
                 Json request = {{"action", "burst"}, {"count", mcp::IntegerArgument(arguments, "count", 30, 1, 10000)},
@@ -395,6 +397,12 @@ void RegisterMcpBrowserTools(mcp::Server& server, const std::shared_ptr<McpConte
             }
             Json request = {{"action", "input"}, {"kind", "scroll"}, {"dy", mcp::NumberArgument(arguments, "dy", 3)},
                 {"dx", mcp::NumberArgument(arguments, "dx", 0)}};
+            if (mcp::HasArgument(arguments, "phase")) {
+                const std::string phase = mcp::StringArgument(arguments, "phase", "");
+                const int phaseCode = phase == "began" ? 1 : phase == "changed" ? 2 : phase == "ended" ? 3 : 0;
+                if (!phaseCode) return ToolResult::Error("phase is began, changed or ended");
+                request["phase"] = phaseCode;
+            }
             if (mcp::HasArgument(arguments, "x")) request["x"] = mcp::NumberArgument(arguments, "x", 0);
             if (mcp::HasArgument(arguments, "y")) request["y"] = mcp::NumberArgument(arguments, "y", 0);
             return input(arguments, request);

@@ -19904,6 +19904,26 @@ index c814f8594668d14423d1bba0bc1df0e17ff98088..66a0f22d9c3fe8e6284d801e6f1c4b12
  #endif
  };
  
+diff --git a/Source/WebCore/platform/ScrollAnimationKinetic.cpp b/Source/WebCore/platform/ScrollAnimationKinetic.cpp
+index dd2f0588852684a249ac7b175a1e775ad35bbd2b..7ac12fca8477b0b5b62cb7e6f26d543bc42f8e44 100644
+--- a/Source/WebCore/platform/ScrollAnimationKinetic.cpp
++++ b/Source/WebCore/platform/ScrollAnimationKinetic.cpp
+@@ -87,6 +87,15 @@ ScrollAnimationKinetic::PerAxisData::PerAxisData(double lower, double upper, dou
+ 
+ bool ScrollAnimationKinetic::PerAxisData::animateScroll(Seconds elapsedTime)
+ {
++#if PLATFORM(HAIKU)
++    // Haiku samples scroll animations at the time the next frame is due,
++    // and a rendering update can sample that same time again: no time
++    // passed, so nothing moved, which the test below took for a glide that
++    // had come to rest. The kinetic scroll after a touchpad gesture ended
++    // one frame after it began.
++    if (m_elapsedTime > 0_s && elapsedTime <= m_elapsedTime)
++        return m_velocity;
++#endif
+     auto lastOffset = m_offset;
+     auto lastTime = m_elapsedTime;
+     m_elapsedTime = elapsedTime;
 diff --git a/Source/WebCore/platform/ScrollAnimationSmooth.cpp b/Source/WebCore/platform/ScrollAnimationSmooth.cpp
 index 9f27c732ae47f8edc572d51a1a90f19157fffd6a..547e04a793b6f117be0c27b43df493bf08448063 100644
 --- a/Source/WebCore/platform/ScrollAnimationSmooth.cpp
@@ -60671,10 +60691,10 @@ index 0000000000000000000000000000000000000000..45f9b5810dcc89414a8444dfd9a93e62
 +#endif // ENABLE(MEDIA_STREAM) && PLATFORM(HAIKU)
 diff --git a/Source/WebCore/platform/mediastream/haiku/HaikuCaptureSources.cpp b/Source/WebCore/platform/mediastream/haiku/HaikuCaptureSources.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..0e1fbf25b8f8edf7fb91667448c3cb0acd2b4b7e
+index 0000000000000000000000000000000000000000..de3c04bcbf8abfdc918b3d82ed8e48413fe30387
 --- /dev/null
 +++ b/Source/WebCore/platform/mediastream/haiku/HaikuCaptureSources.cpp
-@@ -0,0 +1,1339 @@
+@@ -0,0 +1,1403 @@
 +/*
 + * Copyright (C) 2026 Summit contributors.
 + *
@@ -60703,16 +60723,21 @@ index 0000000000000000000000000000000000000000..0e1fbf25b8f8edf7fb91667448c3cb0a
 +#include "MediaConstraints.h"
 +#include "RealtimeMediaSourceCenter.h"
 +#include "VideoFrameHaiku.h"
++#include <Application.h>
 +#include <Bitmap.h>
++#include <Handler.h>
 +#include <InterfaceDefs.h>
++#include <MediaRoster.h>
 +#include <Rect.h>
 +#include <cmath>
 +#include <cstdlib>
++#include <cstring>
 +#include <interface/Screen.h>
 +#include <private/interface/WindowInfo.h>
 +#include <wtf/HashMap.h>
 +#include <wtf/MainThread.h>
 +#include <wtf/NeverDestroyed.h>
++#include <wtf/RunLoop.h>
 +#include <wtf/text/MakeString.h>
 +#include <wtf/text/StringHash.h>
 +#include <wtf/text/StringToIntegerConversion.h>
@@ -60763,8 +60788,68 @@ index 0000000000000000000000000000000000000000..0e1fbf25b8f8edf7fb91667448c3cb0a
 +    return true;
 +}
 +
++// The Media Kit announces cameras and sound devices coming and going as
++// B_MEDIA_FLAVORS_CHANGED (the webcam and multi_audio add-ons, on air/OS and
++// in Haiku since 2026), to watchers on a looper: the application's here. The
++// lists are taken again then, and once more a second later, for a driver
++// that publishes its device after the notice; only a list that differs is
++// announced as devicechange. SUMMIT_MEDIA_DEVICE_WATCH=0 leaves it to the
++// next time a page asks.
++class MediaDeviceWatcherHaiku final : public BHandler {
++public:
++    MediaDeviceWatcherHaiku()
++        : BHandler("capture device watcher")
++    {
++    }
++
++    static void start()
++    {
++        static bool started;
++        if (std::exchange(started, true))
++            return;
++        if (const char* value = getenv("SUMMIT_MEDIA_DEVICE_WATCH"); value && !strcmp(value, "0"))
++            return;
++        BMediaRoster* roster = BMediaRoster::Roster();
++        if (!be_app || !roster || !be_app->Lock())
++            return;
++        auto* watcher = new MediaDeviceWatcherHaiku;
++        be_app->AddHandler(watcher);
++        be_app->Unlock();
++        if (roster->StartWatching(BMessenger(watcher), B_MEDIA_FLAVORS_CHANGED) != B_OK) {
++            if (be_app->Lock()) {
++                be_app->RemoveHandler(watcher);
++                be_app->Unlock();
++            }
++            delete watcher;
++        }
++    }
++
++    void MessageReceived(BMessage* message) final
++    {
++        if (message->what != B_MEDIA_FLAVORS_CHANGED) {
++            BHandler::MessageReceived(message);
++            return;
++        }
++        callOnMainThread([] {
++            HaikuCaptureDeviceManager::mediaDevicesChanged();
++            RunLoop::mainSingleton().dispatchAfter(1_s, [] {
++                HaikuCaptureDeviceManager::mediaDevicesChanged();
++            });
++        });
++    }
++};
++
++void HaikuCaptureDeviceManager::mediaDevicesChanged()
++{
++    for (auto* manager : { &cameras(), &microphones() }) {
++        if (manager->m_computed)
++            manager->refresh();
++    }
++}
++
 +void HaikuCaptureDeviceManager::refresh()
 +{
++    MediaDeviceWatcherHaiku::start();
 +    Vector<CaptureDevice> devices;
 +    auto type = m_type == CaptureDevice::DeviceType::Camera ? B_MEDIA_RAW_VIDEO : B_MEDIA_RAW_AUDIO;
 +    for (auto& input : haikuMediaInputs(type)) {
@@ -60773,10 +60858,9 @@ index 0000000000000000000000000000000000000000..0e1fbf25b8f8edf7fb91667448c3cb0a
 +        device.setIsDefault(input.isDefault);
 +        devices.append(WTF::move(device));
 +    }
-+    // The Media Kit sends no notice when a camera is plugged in or taken
-+    // out; a change shows the next time the list is computed, and only a
-+    // list that differs from the last one is announced. The first list is
-+    // not a change.
++    // Only a list that differs from the last one is announced (also when
++    // the Media Kit's notice brought no change). The first list is not a
++    // change.
 +    bool changed = m_computed && !sameDevices(m_devices, devices);
 +    m_computed = true;
 +    m_devices = WTF::move(devices);
@@ -62016,10 +62100,10 @@ index 0000000000000000000000000000000000000000..0e1fbf25b8f8edf7fb91667448c3cb0a
 +#endif // ENABLE(MEDIA_STREAM) && PLATFORM(HAIKU)
 diff --git a/Source/WebCore/platform/mediastream/haiku/HaikuCaptureSources.h b/Source/WebCore/platform/mediastream/haiku/HaikuCaptureSources.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..cd106bc074d2bc3ee339b6881a1f61467c66cd97
+index 0000000000000000000000000000000000000000..4924bd7a56b3781b1e863602cec4ea01e6dc0e25
 --- /dev/null
 +++ b/Source/WebCore/platform/mediastream/haiku/HaikuCaptureSources.h
-@@ -0,0 +1,241 @@
+@@ -0,0 +1,244 @@
 +/*
 + * Copyright (C) 2026 Summit contributors.
 + *
@@ -62070,6 +62154,9 @@ index 0000000000000000000000000000000000000000..cd106bc074d2bc3ee339b6881a1f6146
 +
 +    const Vector<CaptureDevice>& captureDevices() final;
 +    void computeCaptureDevices(CompletionHandler<void()>&&) final;
++
++    // The Media Kit says a capture device came or went: both lists again.
++    static void mediaDevicesChanged();
 +
 +private:
 +    friend class NeverDestroyed<HaikuCaptureDeviceManager>;
@@ -86594,6 +86681,32 @@ index f5d465ab8f8ce8096c4b19592c4020f62bcd6e69..1ea6f0eb4f0622453c8d899c7755aaa2
  #include "WebKeyboardEvent.h"
  #include <WebCore/WindowsKeyboardCodes.h>
  #include <wtf/TZoneMallocInlines.h>
+diff --git a/Source/WebKit/Shared/WebEvent.serialization.in b/Source/WebKit/Shared/WebEvent.serialization.in
+index 071487e78227f6f2198688a92a69c050cc4cb895..0220f5c6b8639fb8d2f45c2000462345f7a6f837 100644
+--- a/Source/WebKit/Shared/WebEvent.serialization.in
++++ b/Source/WebKit/Shared/WebEvent.serialization.in
+@@ -273,7 +273,7 @@ enum class WebKit::WebWheelEventMomentumEndType : uint8_t {
+ #if PLATFORM(COCOA)
+     bool directionInvertedFromDevice;
+ #endif
+-#if PLATFORM(COCOA) || PLATFORM(GTK) || USE(LIBWPE) || ENABLE(WPE_PLATFORM)
++#if PLATFORM(COCOA) || PLATFORM(GTK) || USE(LIBWPE) || ENABLE(WPE_PLATFORM) || PLATFORM(HAIKU)
+     WebKit::WebEventPhase phase;
+     WebKit::WebEventPhase momentumPhase;
+     bool hasPreciseScrollingDeltas;
+diff --git a/Source/WebKit/Shared/WebEventConversion.cpp b/Source/WebKit/Shared/WebEventConversion.cpp
+index 7c18e9ea106adc69c204182920971cf96df86f98..d0729d9a3bff1f98aa15fc495b27543c64f13de8 100644
+--- a/Source/WebKit/Shared/WebEventConversion.cpp
++++ b/Source/WebKit/Shared/WebEventConversion.cpp
+@@ -369,7 +369,7 @@ public:
+         m_phase = platform(webEvent.phase());
+         m_momentumPhase = platform(webEvent.momentumPhase());
+ #endif
+-#if PLATFORM(COCOA) || PLATFORM(GTK) || USE(LIBWPE) || ENABLE(WPE_PLATFORM)
++#if PLATFORM(COCOA) || PLATFORM(GTK) || USE(LIBWPE) || ENABLE(WPE_PLATFORM) || PLATFORM(HAIKU)
+         m_hasPreciseScrollingDeltas = webEvent.hasPreciseScrollingDeltas();
+ #endif
+ #if PLATFORM(COCOA)
 diff --git a/Source/WebKit/Shared/WebKit2Initialize.cpp b/Source/WebKit/Shared/WebKit2Initialize.cpp
 index 2491bb904241c49b98c3edea26385b6fafca8be7..dbac6f51764c0af692c3a12610f6a2c6bdb470b3 100644
 --- a/Source/WebKit/Shared/WebKit2Initialize.cpp
@@ -86663,6 +86776,41 @@ index dd691ecc11afdf832b4771945c0a2ca533dac351..cc957af3864de73308f9c89afff1d95c
  #else
      return false;
  #endif
+diff --git a/Source/WebKit/Shared/WebWheelEvent.cpp b/Source/WebKit/Shared/WebWheelEvent.cpp
+index 5602ecc825c971e4807d87ca09c28b6d509c5c1b..fc08539fd4586622cda3077a9dd4ab11892363c6 100644
+--- a/Source/WebKit/Shared/WebWheelEvent.cpp
++++ b/Source/WebKit/Shared/WebWheelEvent.cpp
+@@ -110,7 +110,7 @@ WTF::TextStream& operator<<(WTF::TextStream& ts, const WebWheelEvent& event)
+     ts.dumpProperty("phase"_s, event.phase());
+     ts.dumpProperty("momentumPhase"_s, event.momentumPhase());
+     ts.dumpProperty("momentumEndType"_s, event.momentumEndType());
+-#if PLATFORM(COCOA) || PLATFORM(GTK) || USE(LIBWPE) || ENABLE(WPE_PLATFORM)
++#if PLATFORM(COCOA) || PLATFORM(GTK) || USE(LIBWPE) || ENABLE(WPE_PLATFORM) || PLATFORM(HAIKU)
+     ts.dumpProperty("hasPreciseScrollingDeltas"_s, event.hasPreciseScrollingDeltas());
+ #endif
+ #if PLATFORM(COCOA)
+diff --git a/Source/WebKit/Shared/WebWheelEvent.h b/Source/WebKit/Shared/WebWheelEvent.h
+index e65165b81fa51d6547b46837ad69503c6587360f..fa83ca3e0a4ffbc67b2d6e6e81c98e5f05dfff24 100644
+--- a/Source/WebKit/Shared/WebWheelEvent.h
++++ b/Source/WebKit/Shared/WebWheelEvent.h
+@@ -61,7 +61,7 @@ struct WebWheelEventData {
+ #if PLATFORM(COCOA)
+     bool directionInvertedFromDevice { false };
+ #endif
+-#if PLATFORM(COCOA) || PLATFORM(GTK) || USE(LIBWPE) || ENABLE(WPE_PLATFORM)
++#if PLATFORM(COCOA) || PLATFORM(GTK) || USE(LIBWPE) || ENABLE(WPE_PLATFORM) || PLATFORM(HAIKU)
+     WebEventPhase phase { WebEventPhase::None };
+     WebEventPhase momentumPhase { WebEventPhase::None };
+     bool hasPreciseScrollingDeltas { false };
+@@ -110,7 +110,7 @@ public:
+     bool directionInvertedFromDevice() const { return false; }
+     MomentumEndType momentumEndType() const { return MomentumEndType::Unknown; }
+ #endif
+-#if PLATFORM(COCOA) || PLATFORM(GTK) || USE(LIBWPE) || ENABLE(WPE_PLATFORM)
++#if PLATFORM(COCOA) || PLATFORM(GTK) || USE(LIBWPE) || ENABLE(WPE_PLATFORM) || PLATFORM(HAIKU)
+     Phase phase() const { return m_data.phase; }
+     Phase momentumPhase() const { return m_data.momentumPhase; }
+     bool hasPreciseScrollingDeltas() const { return m_data.hasPreciseScrollingDeltas; }
 diff --git a/Source/WebKit/Shared/haiku/AuxiliaryProcessMainHaiku.cpp b/Source/WebKit/Shared/haiku/AuxiliaryProcessMainHaiku.cpp
 new file mode 100644
 index 0000000000000000000000000000000000000000..ee93bdaf3f08d885309473d7532b715e2a4e3797
@@ -86908,10 +87056,10 @@ index 0000000000000000000000000000000000000000..e1531920fb9a5369a7bd708f8e888cf3
 +} // namespace WebKit
 diff --git a/Source/WebKit/Shared/haiku/NativeWebEventsHaiku.cpp b/Source/WebKit/Shared/haiku/NativeWebEventsHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..8f2c1c6acdb7f6d0dbdc3474d2bbe68a414276b5
+index 0000000000000000000000000000000000000000..97a69d3caec442fc8bc56499d2807a60437ac28e
 --- /dev/null
 +++ b/Source/WebKit/Shared/haiku/NativeWebEventsHaiku.cpp
-@@ -0,0 +1,183 @@
+@@ -0,0 +1,210 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#include "config.h"
@@ -86926,6 +87074,7 @@ index 0000000000000000000000000000000000000000..8f2c1c6acdb7f6d0dbdc3474d2bbe68a
 +#include <WebCore/Scrollbar.h>
 +#include <algorithm>
 +#include <cmath>
++#include <cstring>
 +#include <cstdlib>
 +#include <wtf/TZoneMallocInlines.h>
 +
@@ -87076,6 +87225,27 @@ index 0000000000000000000000000000000000000000..8f2c1c6acdb7f6d0dbdc3474d2bbe68a
 +        return nullptr;
 +    float deltaX = message.FindFloat("be:wheel_delta_x");
 +    float deltaY = message.FindFloat("be:wheel_delta_y");
++    // A touchpad's scroll gesture (air/OS since 27 October): the movement in
++    // fractions of a step, and where in the gesture it is. Such events scroll
++    // by exactly that, without the notch animation, and the page glides on
++    // once the fingers leave (WebCore's kinetic scrolling), as on GTK.
++    // Messages without them are a mouse wheel's, or stock Haiku's.
++    // SUMMIT_PRECISE_WHEEL=0 takes the whole steps only.
++    static const bool usesPreciseDeltas = [] {
++        const char* value = std::getenv("SUMMIT_PRECISE_WHEEL");
++        return !value || std::strcmp(value, "0");
++    }();
++    int32 phase = 0;
++    float preciseX = 0;
++    float preciseY = 0;
++    const bool precise = usesPreciseDeltas && message.FindInt32("be:wheel_phase", &phase) == B_OK
++        && phase >= 1 && phase <= 3;
++    if (precise) {
++        message.FindFloat("be:wheel_precise_delta_x", &preciseX);
++        message.FindFloat("be:wheel_precise_delta_y", &preciseY);
++        deltaX = preciseX;
++        deltaY = preciseY;
++    }
 +    if (!std::isfinite(deltaX) || !std::isfinite(deltaY) || std::abs(deltaX) > 1e6f || std::abs(deltaY) > 1e6f)
 +        return nullptr;
 +    WebWheelEventData wheel;
@@ -87085,6 +87255,11 @@ index 0000000000000000000000000000000000000000..8f2c1c6acdb7f6d0dbdc3474d2bbe68a
 +    wheel.delta = wheel.wheelTicks;
 +    wheel.delta.scale(wheelPixelsPerNotch());
 +    wheel.granularity = WebWheelEventGranularity::ScrollByPixelWheelEvent;
++    if (precise) {
++        // B_WHEEL_PHASE_BEGAN, _CHANGED and _ENDED (<Input.h>).
++        wheel.phase = phase == 1 ? WebEventPhase::Began : phase == 2 ? WebEventPhase::Changed : WebEventPhase::Ended;
++        wheel.hasPreciseScrollingDeltas = true;
++    }
 +    return adoptRef(*new NativeWebWheelEvent({ makeEventDataHaiku(message, WebEventType::Wheel), WTF::move(wheel) }, message));
 +}
 +
@@ -145674,10 +145849,10 @@ index fc3e8017564cf29eb647731205e00dc8500dd13d..de1cc0d4bbc1f95e96ef88922ac91a08
  #if ENABLE(WK_WEB_EXTENSIONS_SIDEBAR)
 diff --git a/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPINotificationsHaiku.cpp b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPINotificationsHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..e85163143b320fe4c7884d3c37c59d849a7e07b6
+index 0000000000000000000000000000000000000000..1b3f4d71cc22f5214f7431bb2da3c4da22e15967
 --- /dev/null
 +++ b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPINotificationsHaiku.cpp
-@@ -0,0 +1,217 @@
+@@ -0,0 +1,329 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +#include "config.h"
 +#include "WebExtensionAPINotificationsHaiku.h"
@@ -145687,11 +145862,16 @@ index 0000000000000000000000000000000000000000..e85163143b320fe4c7884d3c37c59d84
 +#include "WebExtensionPermission.h"
 +#include "WebExtensionLocalization.h"
 +#include "WebExtensionUtilities.h"
++#include <Application.h>
 +#include <Entry.h>
++#include <Handler.h>
++#include <Messenger.h>
 +#include <Notification.h>
 +#include <String.h>
 +#include <image.h>
 +#include <unistd.h>
++#include <cstdlib>
++#include <cstring>
 +#include <wtf/HashMap.h>
 +#include <wtf/JSONValues.h>
 +#include <wtf/NeverDestroyed.h>
@@ -145700,14 +145880,88 @@ index 0000000000000000000000000000000000000000..e85163143b320fe4c7884d3c37c59d84
 +
 +namespace WebKit {
 +// Documentation: https://developer.mozilla.org/docs/Mozilla/Add-ons/WebExtensions/API/notifications
-+// Notifications are shown through the native notification server. It offers no
-+// activation callback to the sender: a click starts an application with
-+// arguments. So a click starts the browser again with the extension and the
-+// notification (Summit hands that to BWebKitContext::ExtensionNotificationClicked,
-+// as it routes its web notifications' clicks), and the browser fires
-+// onClicked, or onButtonClicked when the user picks one of the buttons it
-+// offers then (Haiku notifications have none of their own).
++// Notifications are shown through the native notification server. air/OS's
++// answers the sender (NotificationRepliesHaiku below): clicks on the
++// notification or its buttons, and its closing. Stock Haiku's offers no
++// callback: a click starts an application with arguments. There a click
++// starts the browser again with the extension and the notification (Summit
++// hands that to BWebKitContext::ExtensionNotificationClicked, as it routes its
++// web notifications' clicks), and the browser fires onClicked, or
++// onButtonClicked when the user picks one of the buttons it offers then.
 +using NotificationMap = HashMap<String, Ref<JSON::Object>>;
++
++// air/OS's notification server answers the sender (since 27 October,
++// docs/airos/NOTIFICATIONS.md): which button a click was on, and when the
++// notification went away and whether the user closed it. With those answers
++// the buttons are the notification's own, and onClosed says byUser. A server
++// without them ignores the fields and starts the browser as below.
++// SUMMIT_NOTIFICATION_REPLIES=0 leaves them out.
++static constexpr uint32 notificationActivatedHaiku = 'SXna';
++static constexpr uint32 notificationClosedHaiku = 'SXnc';
++
++static HashMap<String, WebExtensionContextIdentifier>& contextsWithNotificationsHaiku()
++{
++    static NeverDestroyed<HashMap<String, WebExtensionContextIdentifier>> contexts;
++    return contexts;
++}
++
++static NotificationMap& notificationsForExtension(const String& extensionIdentifier);
++
++// On the application's looper, the main thread, as the extension's own calls.
++class NotificationRepliesHaiku final : public BHandler {
++public:
++    NotificationRepliesHaiku()
++        : BHandler("extension notification replies")
++    {
++    }
++
++    static BMessenger messenger()
++    {
++        static NotificationRepliesHaiku* replies = [] () -> NotificationRepliesHaiku* {
++            if (!be_app || !be_app->Lock())
++                return nullptr;
++            auto* handler = new NotificationRepliesHaiku;
++            be_app->AddHandler(handler);
++            be_app->Unlock();
++            return handler;
++        }();
++        return replies ? BMessenger(replies) : BMessenger();
++    }
++
++    void MessageReceived(BMessage* message) final
++    {
++        if (message->what != notificationActivatedHaiku && message->what != notificationClosedHaiku) {
++            BHandler::MessageReceived(message);
++            return;
++        }
++        const String extension = String::fromUTF8(message->GetString("extension", ""));
++        const String identifier = String::fromUTF8(message->GetString("id", ""));
++        auto contextIdentifier = contextsWithNotificationsHaiku().getOptional(extension);
++        RefPtr context = contextIdentifier ? WebExtensionContextProxy::get(*contextIdentifier) : nullptr;
++        if (!context || identifier.isEmpty())
++            return;
++        if (message->what == notificationActivatedHaiku) {
++            // 0 is the notification itself, buttons count from 1.
++            const int32 button = message->GetInt32("button", 0);
++            if (!context->hasPermission(WebExtensionPermission::notifications()))
++                return;
++            context->enumerateNamespaceObjects([&](auto& object) {
++                if (button > 0)
++                    object.notificationsHaiku().dispatchButtonClicked(identifier, button - 1);
++                else
++                    object.notificationsHaiku().dispatchClicked(identifier);
++            });
++            return;
++        }
++        // Gone from the screen: closed by the user (a click, a button, its
++        // close button) or timed out. clear() already sent onClosed for
++        // notifications it took away.
++        if (!notificationsForExtension(extension).remove(identifier))
++            return;
++        const bool byUser = message->GetBool("by_user", false);
++        context->enumerateNamespaceObjects([&](auto& object) { object.notificationsHaiku().dispatchClosed(identifier, byUser); });
++    }
++};
 +
 +// The argument a click on an extension's notification starts the browser with.
 +static constexpr auto notificationClickArgumentHaiku = "--summit-extension-notification-click";
@@ -145782,7 +146036,40 @@ index 0000000000000000000000000000000000000000..e85163143b320fe4c7884d3c37c59d84
 +            }
 +        }
 +    }
-+    notification.Send();
++    static const bool asksForReplies = [] {
++        const char* value = getenv("SUMMIT_NOTIFICATION_REPLIES");
++        return !value || strcmp(value, "0");
++    }();
++    BMessenger replies = asksForReplies ? NotificationRepliesHaiku::messenger() : BMessenger();
++    if (!replies.IsValid()) {
++        notification.Send();
++        return;
++    }
++    contextsWithNotificationsHaiku().set(context->uniqueIdentifier(), context->unprivilegedIdentifier());
++    // What BNotification::Send() sends ('nssm'), with the answers asked for.
++    BMessage request('nssm');
++    if (notification.Archive(&request) != B_OK) {
++        notification.Send();
++        return;
++    }
++    request.AddMessenger("_reply:target", replies);
++    BMessage activated(notificationActivatedHaiku);
++    activated.AddString("extension", context->uniqueIdentifier().utf8().legacyCStringPointer());
++    activated.AddString("id", identifier.utf8().legacyCStringPointer());
++    request.AddMessage("_reply:activated", &activated);
++    BMessage closed(activated);
++    closed.what = notificationClosedHaiku;
++    request.AddMessage("_reply:closed", &closed);
++    if (RefPtr buttons = options.getArray("buttons"_s)) {
++        for (size_t i = 0; i < std::min<size_t>(buttons->length(), 2); ++i) {
++            RefPtr button = buttons->get(i)->asObject();
++            auto title = button ? button->getString("title"_s) : String();
++            if (title.isEmpty())
++                break;
++            request.AddString("_buttons", title.utf8().legacyCStringPointer());
++        }
++    }
++    BMessenger("application/x-vnd.Haiku-notification_server").SendMessage(&request);
 +}
 +void WebExtensionAPINotificationsHaiku::createNotification(const String& identifier, RefPtr<JSON::Value> options, Ref<WebExtensionCallbackHandler>&& callback, String& outExceptionString)
 +{

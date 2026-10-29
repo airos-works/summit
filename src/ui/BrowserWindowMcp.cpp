@@ -265,10 +265,21 @@ std::string BrowserWindow::McpRequest(const std::string& text)
             // One wheel message per notch, as a mouse sends them; a burst
             // paced in time goes through the scroll tool's burst instead.
             const double dx = request.value("dx", 0.0), dy = request.value("dy", 3.0);
+            const int phase = request.value("phase", 0);
             BMessage event(B_MOUSE_WHEEL_CHANGED);
             event.AddInt64("when", system_time());
-            event.AddFloat("be:wheel_delta_x", float(dx));
-            event.AddFloat("be:wheel_delta_y", float(dy));
+            if (phase) {
+                // As air/OS's input server sends a touchpad's scroll gesture:
+                // whole steps (none here) and the movement in fractions.
+                event.AddFloat("be:wheel_delta_x", 0);
+                event.AddFloat("be:wheel_delta_y", 0);
+                event.AddFloat("be:wheel_precise_delta_x", phase == 3 ? 0 : float(dx));
+                event.AddFloat("be:wheel_precise_delta_y", phase == 3 ? 0 : float(dy));
+                event.AddInt32("be:wheel_phase", phase);
+            } else {
+                event.AddFloat("be:wheel_delta_x", float(dx));
+                event.AddFloat("be:wheel_delta_y", float(dy));
+            }
             event.AddPoint("summit:view_where", at);
             event.AddInt32("_view_token", _get_object_token_(view));
             PostMessage(&event, view);
