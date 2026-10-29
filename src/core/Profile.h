@@ -21,6 +21,9 @@ struct WindowSession {
     float frame[4] = {0, 0, 0, 0};
     // The first `pinned` tabs are pinned (small, icon-only tabs).
     size_t pinned = 0;
+    // Each tab's container (Firefox's contextualIdentities), 0 for none;
+    // parallel to tabs, possibly shorter (older sessions).
+    std::vector<uint32_t> containers;
     bool HasFrame() const { return frame[2] > frame[0] && frame[3] > frame[1]; }
 };
 // A server certificate the user chose to trust for a host although it failed

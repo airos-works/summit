@@ -245,4 +245,9 @@ constexpr uint32 kDeveloperToolsCommand = 'dvcm';
 constexpr uint32 kSimulateScroll = 'sscr';
 constexpr uint32 kScrollBurstCompleted = 'ssco';
 constexpr uint32 kFrameStats = 'fsts';
+// Containers (Containers.h): the application tells every window that one
+// was created, changed or removed ("event", "container"); the windows redraw
+// their tabs and close those of a removed container. kNewTab and
+// kOpenLinkInNewTab take "container" (uint32) to open the tab in one.
+constexpr uint32 kContainersChanged = 'cnch';
 }

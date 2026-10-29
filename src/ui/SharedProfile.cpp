@@ -11,7 +11,7 @@
 namespace summit {
 static bool SameSession(const WindowSession& a, const WindowSession& b)
 {
-    if (a.selected != b.selected || a.tabs.size() != b.tabs.size()
+    if (a.selected != b.selected || a.tabs.size() != b.tabs.size() || a.containers != b.containers
         || !std::equal(std::begin(a.frame), std::end(a.frame), std::begin(b.frame))) return false;
     for (size_t i = 0; i < a.tabs.size(); ++i)
         if (a.tabs[i].url != b.tabs[i].url || a.tabs[i].title != b.tabs[i].title) return false;

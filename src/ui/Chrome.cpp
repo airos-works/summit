@@ -728,6 +728,11 @@ void TabStrip::DrawHaiku(BRect update)
         else
             be_control_look->DrawInactiveTab(this, tab, update, base, 0, borders, BControlLook::B_TOP_BORDER,
                 int32(i), selectedIndex, first, last);
+        // A container's tab: a line of its colour along the bottom, as Firefox draws it.
+        if (fTabs[i].container) {
+            SetHighColor(fTabs[i].containerColor);
+            FillRect(BRect(rect.left + 4, rect.bottom - 2, rect.right - 4, rect.bottom));
+        }
         // Contents sit lower on tabs behind the selected one, as BTabView draws them.
         BRect content = rect;
         content.top += selected ? 2 : 4;
@@ -795,6 +800,10 @@ void TabStrip::DrawSafari(BRect)
         const bool pinned = fTabs[i].pinned;
         SetHighColor(selected ? selectedTab : strip);
         FillRoundRect(rect, 5, 5);
+        if (fTabs[i].container) {
+            SetHighColor(fTabs[i].containerColor);
+            FillRect(BRect(rect.left + 6, rect.bottom - 2, rect.right - 6, rect.bottom));
+        }
         SetHighColor(selected ? selectedText : otherText);
         const float textLeft = rect.left + 31 + (fTabs[i].audio != TabAudio::None ? 18 : 0);
         BString text(fTabs[i].title.empty() ? "New Tab" : fTabs[i].title.c_str());
@@ -1107,6 +1116,46 @@ private:
     float Gap() const { return std::ceil(IconSize() / 3); }
     std::shared_ptr<const BBitmap> fIcon;
 };
+}
+
+namespace {
+class ColorMenuItem final : public BMenuItem {
+public:
+    ColorMenuItem(const char* label, BMessage* message, rgb_color color) : BMenuItem(label, message), fColor(color) { }
+    void GetContentSize(float* width, float* height) override
+    {
+        BMenuItem::GetContentSize(width, height);
+        *width += DotSize() * 2;
+    }
+    void DrawContent() override
+    {
+        BMenu* menu = Menu();
+        BPoint where = ContentLocation();
+        const float size = DotSize();
+        const BRect frame = Frame();
+        const float top = std::floor(frame.top + (frame.Height() + 1 - size) / 2);
+        const rgb_color high = menu->HighColor();
+        menu->SetHighColor(fColor);
+        menu->FillEllipse(BRect(where.x, top, where.x + size - 1, top + size - 1));
+        menu->SetHighColor(high);
+        where.x += size * 2;
+        menu->MovePenTo(where);
+        BMenuItem::DrawContent();
+    }
+private:
+    float DotSize() const
+    {
+        font_height height;
+        Menu()->GetFontHeight(&height);
+        return std::ceil(height.ascent * 0.75f);
+    }
+    rgb_color fColor;
+};
+}
+
+BMenuItem* NewColorMenuItem(const char* label, BMessage* message, rgb_color color)
+{
+    return new ColorMenuItem(label, message, color);
 }
 
 BMenuItem* NewPageMenuItem(const char* label, BMessage* message, std::shared_ptr<const BBitmap> icon)

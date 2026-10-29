@@ -146,6 +146,7 @@ std::string BrowserWindow::McpRequest(const std::string& text)
                     {"screen", item.capturingScreen}};
             if (item.devTools.IsValid()) entry["developerToolsOpen"] = true;
             if (item.readerActive) entry["readerMode"] = true;
+            if (item.container) entry["container"] = item.container;
             if (!item.translation.phase.empty()) entry["translation"] = {
                 {"phase", item.translation.phase}, {"from", item.translation.from}, {"to", item.translation.to},
                 {"active", item.translation.active}, {"dismissed", item.translation.dismissed},
@@ -167,7 +168,8 @@ std::string BrowserWindow::McpRequest(const std::string& text)
     }
     if (action == "open") {
         const std::string url = request.value("url", "");
-        CreateTab(url.empty() ? NewTabAddress() : url, request.value("select", true));
+        CreateTab(url.empty() ? NewTabAddress() : url, request.value("select", true), nullptr, -1, 0, 0, 0,
+            request.value("container", uint32(0)));
         return json{{"opened", std::to_string(fKey) + "." + std::to_string(fNextID - 1)}}.dump();
     }
     if (!tab) return fail(tabID ? "This window has no tab " + std::to_string(tabID) : "This window has no tab");

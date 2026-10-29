@@ -72,6 +72,8 @@ struct BrowserWindowOptions {
     // A pop-up a page opened with a size (window.open() with width and
     // height): it may be small, and has no bookmarks bar (#95).
     bool popup = false;
+    // The container (Containers.h) newPage's page is in, 0 for none.
+    uint32 container = 0;
 };
 #if SUMMIT_MODERN_WEBKIT
 // A direct window, so that on a GPU the engine can put pages straight into
@@ -126,8 +128,10 @@ public:
     // pages need different kinds of view, so moving a tab between them swaps its view.
     // A nonzero newPage shows the page of a B_WEBKIT_NEW_PAGE_REQUESTED
     // notification (url is then only what the tab shows until it loads).
+    // A nonzero container opens the tab in that container (Containers.h): its
+    // cookies and site storage are the container's.
     void CreateTab(const std::string& url, bool select = true, const char* extensionIdentifier = nullptr,
-        int32 index = -1, uint64 command = 0, int64 replaces = 0, uint64 newPage = 0);
+        int32 index = -1, uint64 command = 0, int64 replaces = 0, uint64 newPage = 0, uint32 container = 0);
     void WindowActivated(bool active) override;
     // The MCP server's requests (BrowserWindowMcp.cpp): JSON text in and out,
     // with the window locked (a kMcpRequest message, or McpService's lock).
@@ -297,6 +301,8 @@ private:
         std::optional<PendingPassword> pendingPassword;
         // The video a context menu or the page chose for Picture in Picture (#74).
         std::string pipToken;
+        // Firefox's container the page is in (Containers.h), 0 for none.
+        uint32 container = 0;
 #endif
     };
 #if SUMMIT_MODERN_WEBKIT
@@ -482,6 +488,14 @@ private:
     // the tab is selected (tabs.discard, Unload Tab). The reason it cannot,
     // or empty.
     std::string DiscardTab(int64 id);
+    // The engine context for a tab of container (0: the window's own); null
+    // when that container is gone.
+    std::shared_ptr<BWebKitContext> ContainerContext(uint32 container) const;
+    // kContainersChanged: tabs of a removed container close, the rest redraw.
+    void ContainersChanged(const BMessage&);
+    // A "New Container Tab" style submenu of the containers, each item
+    // sending what with "container" (and url when given).
+    BMenu* ContainerMenu(const char* label, uint32 what, const std::string& url = std::string()) const;
 #if SUMMIT_MODERN_WEBKIT
     void CloseSidebar();
     // An extension's sidebarAction call (B_WEBKIT_BROWSER_SIDEBAR).
@@ -803,6 +817,10 @@ private:
     void BookmarksChanged();
     void RefreshBookmarks();
     void RebuildDynamicMenus();
+#if SUMMIT_MODERN_WEBKIT
+    // File › New Container Tab, filled when the menus open.
+    BMenu* fContainerMenu = nullptr;
+#endif
     void ShowBookmarkMenu();
     // Editing bookmarks (BookmarkEditor) and the summit:bookmarks page's
     // requests (summit-bookmarks: links; true when url was one).

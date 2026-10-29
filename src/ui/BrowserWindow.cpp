@@ -8,6 +8,7 @@
 #include "StallTrace.h"
 #include "NavigationTrace.h"
 #include "Chrome.h"
+#include "Containers.h"
 #include "FaviconCache.h"
 #include "AddressSuggestions.h"
 #include "DirectWindowRescue.h"
@@ -797,6 +798,13 @@ BrowserWindow::BrowserWindow(std::shared_ptr<SharedProfile> profile, std::string
     AddItem(file, "New Window", kNewWindow, 'N');
     AddItem(file, "New Private Window", kNewPrivateWindow, 'N', B_SHIFT_KEY);
     AddItem(file, "New Tab", kNewTab, 'T');
+#if SUMMIT_MODERN_WEBKIT
+    // Firefox's containers: filled with them when the menus open.
+    if (!fPrivate && fWebApp.empty()) {
+        fContainerMenu = new BMenu("New Container Tab");
+        file->AddItem(fContainerMenu);
+    }
+#endif
     AddItem(file, "Open File…", kOpenFile, 'O');
 #if SUMMIT_MODERN_WEBKIT
     file->AddSeparatorItem();
@@ -1128,14 +1136,21 @@ BrowserWindow::BrowserWindow(std::shared_ptr<SharedProfile> profile, std::string
 
     if (!options.empty) {
 #if SUMMIT_MODERN_WEBKIT
-        if (options.newPage) CreateTab(options.newPageURL, true, nullptr, -1, 0, 0, options.newPage);
+        if (options.newPage) CreateTab(options.newPageURL, true, nullptr, -1, 0, 0, options.newPage, options.container);
         else
 #endif
         if (!options.urls.empty()) for (const auto& url : options.urls) CreateTab(url);
         else if (!options.session.tabs.empty()) {
 #if SUMMIT_MODERN_WEBKIT
             fRestoringSession = true;
-            for (const auto& page : options.session.tabs) { fRestoringTitle = page.title; CreateTab(page.url, false); }
+            for (size_t i = 0; i < options.session.tabs.size(); ++i) {
+                const auto& page = options.session.tabs[i];
+                fRestoringTitle = page.title;
+                // A tab of a container that is gone opens without one.
+                uint32 container = i < options.session.containers.size() ? options.session.containers[i] : 0;
+                if (container && !summit::Containers::Shared().Context(container)) container = 0;
+                CreateTab(page.url, false, nullptr, -1, 0, 0, 0, container);
+            }
             fRestoringSession = false;
             fRestoringTitle.clear();
             for (size_t i = 0; i < std::min(options.session.pinned, fTabs.size()); ++i) {
@@ -1345,7 +1360,7 @@ std::string BrowserWindow::StoredURL(const BString& url) const
     return value;
 }
 #if SUMMIT_MODERN_WEBKIT
-void BrowserWindow::CreateTab(const std::string& input, bool select, const char* extensionIdentifier, int32 index, uint64 command, int64 replaces, uint64 newPage)
+void BrowserWindow::CreateTab(const std::string& input, bool select, const char* extensionIdentifier, int32 index, uint64 command, int64 replaces, uint64 newPage, uint32 container)
 #else
 void BrowserWindow::CreateTab(const std::string& input, bool select, BWebView* adopted)
 #endif
@@ -1410,6 +1425,11 @@ void BrowserWindow::CreateTab(const std::string& input, bool select, BWebView* a
         return;
     }
     BWebKitView* webView = nullptr;
+    // Containers keep apart what sites store; private windows and extension
+    // pages have none.
+    if (fPrivate || extensionPage) container = 0;
+    auto context = ContainerContext(container);
+    if (!context) { fail("The container is not available."); return; }
     if (extensionPage) {
         if (!*extensionIdentifier) { fail("This extension is not available."); return; }
         status_t status;
@@ -1418,11 +1438,11 @@ void BrowserWindow::CreateTab(const std::string& input, bool select, BWebView* a
     } else {
         const char* frameStats = std::getenv("SUMMIT_UI_FRAME_STATS");
         if (newPage)
-            webView = new BWebKitView(BRect(0, 0, 319, 199), "web-page", BMessenger(this), newPage, B_FOLLOW_ALL, fWebKitContext);
+            webView = new BWebKitView(BRect(0, 0, 319, 199), "web-page", BMessenger(this), newPage, B_FOLLOW_ALL, context);
         else if (frameStats && (std::strcmp(frameStats, "1") == 0 || std::strcmp(frameStats, "2") == 0))
-            webView = new FrameStatsWebKitView(BRect(0, 0, 319, 199), "web-page", BMessenger(this), B_FOLLOW_ALL, fWebKitContext);
+            webView = new FrameStatsWebKitView(BRect(0, 0, 319, 199), "web-page", BMessenger(this), B_FOLLOW_ALL, context);
         else
-            webView = new BWebKitView(BRect(0, 0, 319, 199), "web-page", BMessenger(this), B_FOLLOW_ALL, fWebKitContext);
+            webView = new BWebKitView(BRect(0, 0, 319, 199), "web-page", BMessenger(this), B_FOLLOW_ALL, context);
     }
     if (webView->InitCheck() != B_OK) {
         const status_t status = webView->InitCheck();
@@ -1449,6 +1469,7 @@ void BrowserWindow::CreateTab(const std::string& input, bool select, BWebView* a
         : address.url == kBookmarksPage ? "Bookmarks" : "Loading…";
     created.pageRevision = fPagesRevision;
     created.lastSelected = system_time();
+    created.container = container;
     AttachPageView(created, webView, extensionPage);
     // As in other browsers, a restored session's tabs wait to be selected
     // before they load: a window of fifteen tabs would otherwise start fifteen
@@ -1515,6 +1536,39 @@ void BrowserWindow::AttachPageView(Tab& tab, BWebKitView* webView, bool extensio
     }));
 }
 
+std::shared_ptr<BWebKitContext> BrowserWindow::ContainerContext(uint32 container) const
+{
+    if (!container) return fWebKitContext;
+    return summit::Containers::Shared().Context(container);
+}
+
+void BrowserWindow::ContainersChanged(const BMessage& message)
+{
+    if (!strcmp(message.GetString("event", ""), "removed")) {
+        // Its data is being erased: as in Firefox, its tabs close.
+        const uint32 removed = message.GetUInt32("container", 0);
+        std::vector<int64> doomed;
+        for (const auto& tab : fTabs) if (removed && tab.container == removed) doomed.push_back(tab.id);
+        for (auto id : doomed) CloseTab(id);
+    }
+    RefreshChrome();
+}
+
+BMenu* BrowserWindow::ContainerMenu(const char* label, uint32 what, const std::string& url) const
+{
+    auto* menu = new BMenu(label);
+    for (const auto& container : summit::Containers::Shared().List()) {
+        auto* invoke = new BMessage(what);
+        invoke->AddUInt32("container", container.id);
+        if (!url.empty()) invoke->AddString("url", url.c_str());
+        auto* item = NewColorMenuItem(container.name.c_str(), invoke,
+            rgb_color{uint8(container.rgb >> 16), uint8(container.rgb >> 8), uint8(container.rgb), 255});
+        item->SetTarget(this);
+        menu->AddItem(item);
+    }
+    return menu;
+}
+
 std::string BrowserWindow::DiscardTab(int64 id)
 {
     auto* tab = FindTabByID(id);
@@ -1529,7 +1583,9 @@ std::string BrowserWindow::DiscardTab(int64 id)
     if (tab->closeQueued || tab->closeRequested || tab->devTools.IsValid() || tab->crashView || tab->errorView
         || tab->readerActive || fPictureInPictureTab == id || fFullScreenTab == id)
         return "The tab is busy.";
-    auto* webView = new BWebKitView(BRect(0, 0, 319, 199), "web-page", BMessenger(this), B_FOLLOW_ALL, fWebKitContext);
+    auto context = ContainerContext(tab->container);
+    if (!context) return "The tab's container is gone.";
+    auto* webView = new BWebKitView(BRect(0, 0, 319, 199), "web-page", BMessenger(this), B_FOLLOW_ALL, context);
     if (webView->InitCheck() != B_OK) {
         delete webView;
         return "Could not create the unloaded page.";
@@ -2520,7 +2576,7 @@ void BrowserWindow::OpenTabsForCommand(const BMessage& message, uint64 identifie
     fOpenCommands.push_back(std::move(command));
     for (const auto& address : urls) {
         // Only the first page of a new "window" takes the selection.
-        CreateTab(address, select, nullptr, index, identifier);
+        CreateTab(address, select, nullptr, index, identifier, 0, 0, message.GetUInt32("container", 0));
         select = false;
     }
 }
@@ -3083,6 +3139,13 @@ void BrowserWindow::RefreshChrome()
 #if SUMMIT_MODERN_WEBKIT
         labels.back().pinned = tab.pinned;
         labels.back().audio = tab.audioMuted ? TabAudio::Muted : tab.playingAudio ? TabAudio::Playing : TabAudio::None;
+        if (tab.container) {
+            if (auto container = summit::Containers::Shared().Find(tab.container)) {
+                labels.back().container = true;
+                labels.back().containerColor = {uint8(container->rgb >> 16), uint8(container->rgb >> 8), uint8(container->rgb), 255};
+                labels.back().containerName = container->name;
+            }
+        }
 #endif
     }
     fTabStrip->SetTabs(std::move(labels), fSelected);
@@ -3635,6 +3698,14 @@ void BrowserWindow::MenusBeginning()
 }
 void BrowserWindow::RebuildDynamicMenus()
 {
+#if SUMMIT_MODERN_WEBKIT
+    if (fContainerMenu) {
+        while (fContainerMenu->CountItems() > 0) delete fContainerMenu->RemoveItem(int32(0));
+        std::unique_ptr<BMenu> fresh(ContainerMenu("New Container Tab", kNewTab));
+        while (fresh->CountItems() > 0) fContainerMenu->AddItem(fresh->RemoveItem(int32(0)));
+        fContainerMenu->SetEnabled(fContainerMenu->CountItems() > 0);
+    }
+#endif
     auto* tab = ActiveTab();
     const bool bookmarkable = tab && Bookmarkable(tab->url);
     std::vector<PageRecord> history;
@@ -4090,6 +4161,7 @@ void BrowserWindow::SaveSession()
         if (fTabs[i].id == fSelected) session.selected = i;
 #if SUMMIT_MODERN_WEBKIT
         if (fTabs[i].pinned && session.pinned == i) ++session.pinned;
+        session.containers.push_back(fTabs[i].container);
 #endif
     }
 #if SUMMIT_MODERN_WEBKIT
@@ -4320,7 +4392,8 @@ void BrowserWindow::MessageReceived(BMessage* message)
             }
 #endif
             // A new tab shows the home page; its address is selected, ready to type over.
-            CreateTab(message->FindString("url", &url) == B_OK ? url : NewTabAddress());
+            CreateTab(message->FindString("url", &url) == B_OK ? url : NewTabAddress(), true, nullptr, -1, 0, 0, 0,
+                message->GetUInt32("container", 0));
             fAddress->MakeFocus();
             fAddress->TextView()->SelectAll();
             break;
@@ -4350,7 +4423,7 @@ void BrowserWindow::MessageReceived(BMessage* message)
                 int32 index = 0;
                 for (size_t i = 0; i < fTabs.size(); ++i) if (fTabs[i].id == id) index = int32(i) + 1;
 #if SUMMIT_MODERN_WEBKIT
-                CreateTab(target->url, true, nullptr, index);
+                CreateTab(target->url, true, nullptr, index, 0, 0, 0, target->container);
 #else
                 CreateTab(target->url, true);
 #endif
@@ -4524,6 +4597,7 @@ void BrowserWindow::MessageReceived(BMessage* message)
             break;
         }
         case kAdoptTab: AdoptTab(*message); break;
+        case kContainersChanged: ContainersChanged(*message); break;
         case kCloseTabsToRight: {
             const int64 id = message->GetInt64("id", fSelected);
             std::vector<int64> right;
@@ -5153,7 +5227,9 @@ void BrowserWindow::MessageReceived(BMessage* message)
             const char* url = nullptr;
             if (message->FindString("url", &url) != B_OK || !*url) break;
             if (message->what == kOpenLink) Navigate(url);
-            else if (message->what == kOpenLinkInNewTab) CreateTab(url, false, nullptr, BackgroundTabIndex());
+            // A link opens in the container of the page it is on, or the one chosen.
+            else if (message->what == kOpenLinkInNewTab)
+                CreateTab(url, false, nullptr, BackgroundTabIndex(), 0, 0, 0, message->GetUInt32("container", tab ? tab->container : 0));
             else if (message->what == kOpenLinkInNewWindow) RequestNewWindow({ url }, fPrivate);
             else if (message->what == kOpenLinkInNewPrivateWindow) RequestNewWindow({ url }, true);
             // Selected text is searched for even when it looks like an address.
@@ -5471,6 +5547,11 @@ void BrowserWindow::ShowPageContextMenu(const BMessage& message)
         auto* tabItem = new BMenuItem("Open Link in New Tab", withURL(kOpenLinkInNewTab, link));
         tabItem->SetEnabled(!script);
         menu->AddItem(tabItem);
+        if (!fPrivate && !script) {
+            auto* containers = ContainerMenu("Open Link in New Container Tab", kOpenLinkInNewTab, link);
+            if (containers->CountItems() > 0) menu->AddItem(containers);
+            else delete containers;
+        }
         // A private window's links open in private windows.
         auto* windowItem = new BMenuItem(fPrivate ? "Open Link in New Private Window" : "Open Link in New Window",
             withURL(kOpenLinkInNewWindow, link));
@@ -5839,6 +5920,7 @@ void BrowserWindow::NewPageRequested(const BMessage& message)
         request.AddString("new_page_url", url.c_str());
         // The page belongs to the opener's context, so it opens in a window of the same kind.
         request.AddBool("private", fPrivate);
+        request.AddUInt32("container", message.GetUInt32("container", opener->container));
         BRect frame = Frame().OffsetByCopy(24, 24);
         float width, height;
         if (message.FindFloat("width", &width) == B_OK && message.FindFloat("height", &height) == B_OK) {
@@ -5865,7 +5947,8 @@ void BrowserWindow::NewPageRequested(const BMessage& message)
     int32 index = -1;
     for (size_t i = 0; i < fTabs.size(); ++i) if (fTabs[i].id == opener->id) index = int32(i) + 1;
     if (background && opener->id == fSelected) index = BackgroundTabIndex();
-    CreateTab(url, !background, nullptr, index, 0, 0, identifier);
+    // The engine names the opener's container; the page is already of it.
+    CreateTab(url, !background, nullptr, index, 0, 0, identifier, message.GetUInt32("container", opener->container));
 }
 
 void BrowserWindow::LinkOpenRequested(const BMessage& message)
@@ -5873,12 +5956,17 @@ void BrowserWindow::LinkOpenRequested(const BMessage& message)
     const char* url = nullptr;
     if (message.FindString("url", &url) != B_OK || !*url) return;
     const int32 modifiers = message.GetInt32("modifiers", 0);
+    // The link's tab opens in the container of the page it is on.
+    BMessenger sender;
+    message.FindMessenger("view", &sender);
+    const auto* opener = FindTab(sender);
+    const uint32 container = opener ? opener->container : 0;
     // Shift brings the new tab to the front, as in other browsers.
     if (modifiers & B_SHIFT_KEY) {
         int32 index = -1;
         for (size_t i = 0; i < fTabs.size(); ++i) if (fTabs[i].id == fSelected) index = int32(i) + 1;
-        CreateTab(url, true, nullptr, index);
-    } else CreateTab(url, false, nullptr, BackgroundTabIndex());
+        CreateTab(url, true, nullptr, index, 0, 0, 0, container);
+    } else CreateTab(url, false, nullptr, BackgroundTabIndex(), 0, 0, 0, container);
 }
 
 void BrowserWindow::LinkHovered(const BMessage& message)

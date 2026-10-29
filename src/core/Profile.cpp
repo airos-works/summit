@@ -184,6 +184,11 @@ Profile Profile::Load(const std::filesystem::path& path, std::string& error)
                 if (window.selected >= window.tabs.size()) window.selected = 0;
                 if (auto pinned = item.find("pinned"); pinned != item.end() && pinned->is_number_unsigned())
                     window.pinned = std::min(pinned->get<size_t>(), window.tabs.size());
+                if (auto containers = item.find("containers"); containers != item.end() && containers->is_array())
+                    for (const auto& container : *containers) {
+                        if (window.containers.size() >= window.tabs.size()) break;
+                        window.containers.push_back(container.is_number_unsigned() ? container.get<uint32_t>() : 0);
+                    }
                 if (auto frame = item.find("frame"); frame != item.end()) {
                     if (!frame->is_array() || frame->size() != 4) throw std::runtime_error("Invalid window frame");
                     for (size_t i = 0; i < 4; ++i) window.frame[i] = (*frame)[i].get<float>();
@@ -499,6 +504,8 @@ bool Profile::Save(const std::filesystem::path& path, std::string& error, int64_
         for (const auto& window : windows) {
             json item = {{"tabs", Encode(window.tabs)}, {"selected", window.selected}};
             if (window.pinned) item["pinned"] = window.pinned;
+            if (std::any_of(window.containers.begin(), window.containers.end(), [](uint32_t container) { return container != 0; }))
+                item["containers"] = window.containers;
             if (window.HasFrame()) item["frame"] = {window.frame[0], window.frame[1], window.frame[2], window.frame[3]};
             sessions.push_back(std::move(item));
         }

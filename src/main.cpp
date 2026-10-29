@@ -1,3 +1,4 @@
+#include "ui/Containers.h"
 #include "ui/BrowserWindow.h"
 #include "ui/PreferencesWindow.h"
 #include "ui/DefaultBrowser.h"
@@ -303,6 +304,10 @@ public:
         TrustSavedCertificates(*fWebKitContext);
         GiveSitePermissions(*fWebKitContext);
         ApplySpellChecking();
+        // Firefox's containers: a context for each, before windows restore
+        // their tabs in them.
+        if (fWebKitContext->SetContainerListener(BMessenger(this)) == B_OK)
+            summit::Containers::Shared().Sync(fWebKitContext);
 #endif
         summit::SetSearchEngine(fShared->Read([](const summit::Profile& profile) { return profile.searchEngine; }));
         // Reopen every window of the last session unless Preferences say to
@@ -409,6 +414,19 @@ public:
                     which < buttons ? which : -1);
             return;
         }
+#if SUMMIT_MODERN_WEBKIT
+        if (message->what == B_WEBKIT_CONTAINERS_CHANGED) {
+            // An extension made, changed or removed a container: a context
+            // for a new one, and the windows redraw their tabs (and close
+            // those of a removed one).
+            if (fWebKitContext && !fQuitting) summit::Containers::Shared().Sync(fWebKitContext);
+            BMessage changed(summit::kContainersChanged);
+            changed.AddString("event", message->GetString("event", ""));
+            changed.AddUInt32("container", message->GetUInt32("container", 0));
+            for (const auto& window : fWindows) window.messenger.SendMessage(&changed);
+            return;
+        }
+#endif
         if (message->what == B_WEBKIT_EXTENSION_ACTIONS_CHANGED) {
             for (const auto& window : fWindows) window.messenger.SendMessage(message);
             // Loads, unloads and changed keys: the commands' shortcuts again.
@@ -654,6 +672,7 @@ public:
 #if SUMMIT_MODERN_WEBKIT
             options.newPage = message->GetUInt64("new_page", 0);
             options.newPageURL = message->GetString("new_page_url", "about:blank");
+            options.container = message->GetUInt32("container", 0);
             options.popup = options.newPage && message->GetBool("popup", false);
             if (fQuitting) {
                 if (options.newPage) BWebKitView::DeclineNewPage(options.newPage);
@@ -1108,6 +1127,8 @@ public:
                 return false;
             }
             SUMMIT_QUIT_TRACE("releasing the engine");
+            fWebKitContext->SetContainerListener({});
+            summit::Containers::Shared().Sync(nullptr);
             fWebKitContext.reset();
             SUMMIT_QUIT_TRACE("engine released");
             PostMessage(B_QUIT_REQUESTED);

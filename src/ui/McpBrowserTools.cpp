@@ -240,14 +240,16 @@ void RegisterMcpBrowserTools(mcp::Server& server, const std::shared_ptr<McpConte
         "Opens a tab (in the front window, or the given window) with an address or search text.",
         Schema().String("url", "Address (or text to search for); omitted: the new tab page", false)
             .Integer("window", "Window key (from tabs); omitted: the front window")
-            .Boolean("select", "Select the new tab (default true)"),
+            .Boolean("select", "Select the new tab (default true)")
+            .Integer("container", "Open the tab in this container (Firefox's firefox-container-N); omitted: none"),
         [](const Json& arguments) {
             Json windowArgument = Json::object();
             if (mcp::HasArgument(arguments, "window"))
                 windowArgument["tab"] = std::to_string(mcp::IntegerArgument(arguments, "window", 0)) + ".0";
             McpTabRef ref = McpResolveTab(windowArgument);
             return ToolResult::Data(McpAsk(ref.window, {{"action", "open"}, {"url", mcp::StringArgument(arguments, "url")},
-                {"select", mcp::BooleanArgument(arguments, "select", true)}}, 3000000, "The window"));
+                {"select", mcp::BooleanArgument(arguments, "select", true)},
+                {"container", mcp::IntegerArgument(arguments, "container", 0)}}, 3000000, "The window"));
         }, false});
 
     server.Add({"navigate",

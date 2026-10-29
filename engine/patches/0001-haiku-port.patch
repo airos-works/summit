@@ -82794,10 +82794,10 @@ index 0000000000000000000000000000000000000000..abdba4dff009ff314eecd9f825a128aa
 +} // namespace WebKit
 diff --git a/Source/WebKit/PlatformHaiku.cmake b/Source/WebKit/PlatformHaiku.cmake
 new file mode 100644
-index 0000000000000000000000000000000000000000..54817a7aeee664c87b553a54cdfcf5175a079837
+index 0000000000000000000000000000000000000000..2408c2c0e69686022d85b7c377b58d44d9e21e5e
 --- /dev/null
 +++ b/Source/WebKit/PlatformHaiku.cmake
-@@ -0,0 +1,529 @@
+@@ -0,0 +1,533 @@
 +include(Headers.cmake)
 +include(Platform/Curl.cmake)
 +
@@ -82937,6 +82937,7 @@ index 0000000000000000000000000000000000000000..54817a7aeee664c87b553a54cdfcf517
 +    UIProcess/haiku/BrowserTabRegistryHaiku.cpp
 +    UIProcess/haiku/BrowserCommandBrokerHaiku.cpp
 +    UIProcess/haiku/WebViewContextHaiku.cpp
++    UIProcess/haiku/ContextualIdentitiesHaiku.cpp
 +    UIProcess/haiku/SitePermissionsHaiku.cpp
 +
 +    WebProcess/Extensions/Bindings/JSWebExtensionWrapper.cpp
@@ -83225,6 +83226,7 @@ index 0000000000000000000000000000000000000000..54817a7aeee664c87b553a54cdfcf517
 +        WebProcess/Extensions/Interfaces/WebExtensionAPISearch
 +        WebProcess/Extensions/Interfaces/WebExtensionAPIBrowsingData
 +        WebProcess/Extensions/Interfaces/WebExtensionAPISessions
++        WebProcess/Extensions/Interfaces/WebExtensionAPIContextualIdentities
 +        WebProcess/Extensions/Interfaces/WebExtensionAPITabGroups
 +        WebProcess/Extensions/Interfaces/WebExtensionAPISidebarActionHaiku
 +        WebProcess/Extensions/Interfaces/WebExtensionAPIIdentity
@@ -83263,6 +83265,8 @@ index 0000000000000000000000000000000000000000..54817a7aeee664c87b553a54cdfcf517
 +        WebProcess/Extensions/API/WebExtensionAPISearch.cpp
 +        WebProcess/Extensions/API/WebExtensionAPIBrowsingData.cpp
 +        WebProcess/Extensions/API/WebExtensionAPISessions.cpp
++        WebProcess/Extensions/API/WebExtensionAPIContextualIdentities.cpp
++        UIProcess/Extensions/haiku/WebExtensionContextAPIContextualIdentitiesHaiku.cpp
 +        WebProcess/Extensions/API/WebExtensionAPITabGroups.cpp
 +        WebProcess/Extensions/API/WebExtensionAPISidebarActionHaiku.cpp
 +        WebProcess/Extensions/API/WebExtensionAPIIdentity.cpp
@@ -84432,18 +84436,61 @@ index 0000000000000000000000000000000000000000..ad6077ff74c4d951fa37eed2d1b8849b
 +#endif
 diff --git a/Source/WebKit/Shared/Extensions/WebExtensionCookieStoreIdentifier.cpp b/Source/WebKit/Shared/Extensions/WebExtensionCookieStoreIdentifier.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..1e5dd3e2678ce4e0002fd006ac825a9b47ca4c1e
+index 0000000000000000000000000000000000000000..574671062c21b54bfe8abc0c19de30ad059bdc17
 --- /dev/null
 +++ b/Source/WebKit/Shared/Extensions/WebExtensionCookieStoreIdentifier.cpp
-@@ -0,0 +1,39 @@
+@@ -0,0 +1,88 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +#include "config.h"
 +#include "WebExtensionCookieStoreIdentifier.h"
 +#if ENABLE(WK_WEB_EXTENSIONS)
++#include <limits>
 +#include <wtf/text/MakeString.h>
++#include <wtf/text/StringToIntegerConversion.h>
 +namespace WebKit {
++#if PLATFORM(HAIKU)
++// Above any persistent session WebKit generates (a counter from 2) and below
++// the ephemeral bit.
++static constexpr uint64_t containerSessionBase = uint64_t { 1 } << 48;
++static constexpr auto containerPrefix = "firefox-container-"_s;
++
++PAL::SessionID webExtensionContainerSessionID(uint32_t container)
++{
++    return PAL::SessionID(containerSessionBase + container);
++}
++
++std::optional<uint32_t> webExtensionContainerIdentifier(PAL::SessionID session)
++{
++    auto value = session.toUInt64();
++    if (session.isEphemeral() || value <= containerSessionBase || value - containerSessionBase > std::numeric_limits<uint32_t>::max())
++        return std::nullopt;
++    return static_cast<uint32_t>(value - containerSessionBase);
++}
++
++String webExtensionContainerCookieStoreIdentifier(uint32_t container)
++{
++    return makeString(containerPrefix, container);
++}
++
++PAL::SessionID webExtensionDefaultCookieStoreSessionID()
++{
++    // WebKit's own default session, which the Haiku port never gives a store.
++    return PAL::SessionID::defaultSessionID();
++}
++#endif
++
 +std::optional<PAL::SessionID> parseWebExtensionCookieStoreIdentifier(const String& value)
 +{
++#if PLATFORM(HAIKU)
++    if (value == "firefox-default"_s)
++        return webExtensionDefaultCookieStoreSessionID();
++    if (value.startsWith(containerPrefix)) {
++        auto number = parseInteger<uint32_t>(StringView(value).substring(containerPrefix.length()), 10, WTF::ParseIntegerWhitespacePolicy::Disallow);
++        if (!number || !*number || value[containerPrefix.length()] == '+' || value[containerPrefix.length()] == '0')
++            return std::nullopt;
++        return webExtensionContainerSessionID(*number);
++    }
++#endif
 +    constexpr auto persistentPrefix = "persistent-"_s;
 +    constexpr auto ephemeralPrefix = "ephemeral-"_s;
 +    bool ephemeral = value.startsWith(ephemeralPrefix);
@@ -84470,6 +84517,12 @@ index 0000000000000000000000000000000000000000..1e5dd3e2678ce4e0002fd006ac825a9b
 +{
 +    if (!session.isValid())
 +        return nullString();
++#if PLATFORM(HAIKU)
++    if (session == webExtensionDefaultCookieStoreSessionID())
++        return "firefox-default"_s;
++    if (auto container = webExtensionContainerIdentifier(session))
++        return webExtensionContainerCookieStoreIdentifier(*container);
++#endif
 +    return makeString(session.isEphemeral() ? "ephemeral-"_s : "persistent-"_s,
 +        session.toUInt64() & ~PAL::SessionID::EphemeralSessionMask);
 +}
@@ -84477,10 +84530,10 @@ index 0000000000000000000000000000000000000000..1e5dd3e2678ce4e0002fd006ac825a9b
 +#endif
 diff --git a/Source/WebKit/Shared/Extensions/WebExtensionCookieStoreIdentifier.h b/Source/WebKit/Shared/Extensions/WebExtensionCookieStoreIdentifier.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..cb6243b681180200ed4ce67b70ec8f7393848774
+index 0000000000000000000000000000000000000000..4c56fc9dae99bf990b9430def907a4ab73f3f595
 --- /dev/null
 +++ b/Source/WebKit/Shared/Extensions/WebExtensionCookieStoreIdentifier.h
-@@ -0,0 +1,11 @@
+@@ -0,0 +1,26 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +#pragma once
 +#if ENABLE(WK_WEB_EXTENSIONS)
@@ -84490,6 +84543,21 @@ index 0000000000000000000000000000000000000000..cb6243b681180200ed4ce67b70ec8f73
 +// Session identity conversion only. The context must separately check access.
 +std::optional<PAL::SessionID> parseWebExtensionCookieStoreIdentifier(const String&);
 +String webExtensionCookieStoreIdentifier(PAL::SessionID);
++#if PLATFORM(HAIKU)
++// Firefox's container stores ("firefox-container-N", contextualIdentities)
++// have persistent session identifiers of their own range, so that both
++// processes turn them into storeIds and back without a table. N is the
++// container's userContextId, 1 to 2^32 - 1.
++PAL::SessionID webExtensionContainerSessionID(uint32_t container);
++std::optional<uint32_t> webExtensionContainerIdentifier(PAL::SessionID);
++String webExtensionContainerCookieStoreIdentifier(uint32_t container);
++// "firefox-default": extensions written for Firefox (Multi-Account
++// Containers, Cookie AutoDelete) name the profile's own store so and compare
++// tab.cookieStoreId with it. The UI process reports the profile's store with
++// this stand-in session (WebExtensionContext::cookieStoreSessionHaiku) and
++// resolves it back to the store.
++PAL::SessionID webExtensionDefaultCookieStoreSessionID();
++#endif
 +}
 +#endif
 diff --git a/Source/WebKit/Shared/Extensions/WebExtensionCookieWriteParser.cpp b/Source/WebKit/Shared/Extensions/WebExtensionCookieWriteParser.cpp
@@ -84760,10 +84828,10 @@ index e1e00f448cdfe28b28e6ac184bdb9025666411de..bbe23d2c25f24c8c9031515e563fee8b
  
  [Nested] enum class WebKit::WebExtension::InjectionTime : uint8_t {
 diff --git a/Source/WebKit/Shared/Extensions/WebExtensionEventListenerType.h b/Source/WebKit/Shared/Extensions/WebExtensionEventListenerType.h
-index c6ffb3e89eeaffe26af5d76690da641e7b65c4c0..6d3ffc3886a7cee0d66ffb761391c0b80260991f 100644
+index c6ffb3e89eeaffe26af5d76690da641e7b65c4c0..39af3be632dc5a2dc11b9dd336a6898cc3c4de81 100644
 --- a/Source/WebKit/Shared/Extensions/WebExtensionEventListenerType.h
 +++ b/Source/WebKit/Shared/Extensions/WebExtensionEventListenerType.h
-@@ -99,11 +99,110 @@ enum class WebExtensionEventListenerType : uint8_t {
+@@ -99,11 +99,119 @@ enum class WebExtensionEventListenerType : uint8_t {
      WindowsOnCreated,
      WindowsOnFocusChanged,
      WindowsOnRemoved,
@@ -84801,6 +84869,9 @@ index c6ffb3e89eeaffe26af5d76690da641e7b65c4c0..6d3ffc3886a7cee0d66ffb761391c0b8
 +    // declarativeNetRequest.onRuleMatchedDebug without Cocoa's
 +    // DNR_ON_RULE_MATCHED_DEBUG (whose value sits mid-enum).
 +    DeclarativeNetRequestOnRuleMatchedDebugHaiku,
++    ContextualIdentitiesOnCreated,
++    ContextualIdentitiesOnUpdated,
++    ContextualIdentitiesOnRemoved,
 +#endif
  };
  
@@ -84870,15 +84941,21 @@ index c6ffb3e89eeaffe26af5d76690da641e7b65c4c0..6d3ffc3886a7cee0d66ffb761391c0b8
 +        return "onMoved"_s;
 +    case WebExtensionEventListenerType::DeclarativeNetRequestOnRuleMatchedDebugHaiku:
 +        return "onRuleMatchedDebug"_s;
++    case WebExtensionEventListenerType::ContextualIdentitiesOnCreated:
++        return "onCreated"_s;
++    case WebExtensionEventListenerType::ContextualIdentitiesOnUpdated:
++        return "onUpdated"_s;
++    case WebExtensionEventListenerType::ContextualIdentitiesOnRemoved:
++        return "onRemoved"_s;
 +#endif
      case WebExtensionEventListenerType::Unknown:
          return nullString();
      case WebExtensionEventListenerType::ActionOnClicked:
 diff --git a/Source/WebKit/Shared/Extensions/WebExtensionEventListenerType.serialization.in b/Source/WebKit/Shared/Extensions/WebExtensionEventListenerType.serialization.in
-index 66271809620c823d465be4cee34c1806ab422cbe..ae7e658757010f4b9e8b8699437ea0216a27036f 100644
+index 66271809620c823d465be4cee34c1806ab422cbe..30917926546aea0c6a03d8bc1ea6b62db1e756f0 100644
 --- a/Source/WebKit/Shared/Extensions/WebExtensionEventListenerType.serialization.in
 +++ b/Source/WebKit/Shared/Extensions/WebExtensionEventListenerType.serialization.in
-@@ -90,6 +90,39 @@ enum class WebKit::WebExtensionEventListenerType : uint8_t {
+@@ -90,6 +90,42 @@ enum class WebKit::WebExtensionEventListenerType : uint8_t {
      WindowsOnCreated,
      WindowsOnFocusChanged,
      WindowsOnRemoved,
@@ -84914,6 +84991,9 @@ index 66271809620c823d465be4cee34c1806ab422cbe..ae7e658757010f4b9e8b8699437ea021
 +    TabGroupsOnRemoved,
 +    TabGroupsOnMoved,
 +    DeclarativeNetRequestOnRuleMatchedDebugHaiku,
++    ContextualIdentitiesOnCreated,
++    ContextualIdentitiesOnUpdated,
++    ContextualIdentitiesOnRemoved,
 +#endif
  };
  
@@ -86249,10 +86329,10 @@ index 1b2c6a3f188d1c0063753c2c46e1ba2d5446f244..2febefa22dad34aaa2099ac1e101f3c1
      std::optional<bool> muted;
 diff --git a/Source/WebKit/Shared/Extensions/WebExtensionTabCommandParser.cpp b/Source/WebKit/Shared/Extensions/WebExtensionTabCommandParser.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..6432aa028b04c7400320005bd9265ff57eb70db8
+index 0000000000000000000000000000000000000000..d55940bc15622f829bff10b7c290409436b89f25
 --- /dev/null
 +++ b/Source/WebKit/Shared/Extensions/WebExtensionTabCommandParser.cpp
-@@ -0,0 +1,419 @@
+@@ -0,0 +1,426 @@
 +/*
 + * Copyright (C) 2022-2024 Apple Inc. All rights reserved.
 + *
@@ -86429,6 +86509,13 @@ index 0000000000000000000000000000000000000000..6432aa028b04c7400320005bd9265ff5
 +    // Firefox accepts a placeholder title for discarded tabs; validate and ignore it.
 +    if (auto title = stringMember(*object, "title"_s); !title)
 +        return makeUnexpected(title.error());
++
++    // Firefox's container (or "firefox-default"); the UI process checks it.
++    auto cookieStoreId = stringMember(*object, "cookieStoreId"_s);
++    if (!cookieStoreId)
++        return makeUnexpected(cookieStoreId.error());
++    if (!cookieStoreId->isNull())
++        parameters.cookieStoreIdentifier = *cookieStoreId;
 +    return parameters;
 +}
 +
@@ -86747,10 +86834,10 @@ index 1f05b9ffedaafd11d7971241deb7c1417a55a2e5..84932e03d986305269a5f8e859cf0581
      std::optional<bool> muted;
 diff --git a/Source/WebKit/Shared/Extensions/WebExtensionTabQueryParser.cpp b/Source/WebKit/Shared/Extensions/WebExtensionTabQueryParser.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..a162e321e43bb81075b12c8ae73b80cefb341741
+index 0000000000000000000000000000000000000000..2ea9b3c29b366f8c108c5f9d9fbfe8119cbe1cb2
 --- /dev/null
 +++ b/Source/WebKit/Shared/Extensions/WebExtensionTabQueryParser.cpp
-@@ -0,0 +1,128 @@
+@@ -0,0 +1,139 @@
 +/*
 + * Copyright (C) 2023 Apple Inc. All rights reserved.
 + *
@@ -86869,6 +86956,17 @@ index 0000000000000000000000000000000000000000..a162e321e43bb81075b12c8ae73b80ce
 +                    return makeUnexpected("URL patterns must be nonempty and contain no NUL"_s);
 +            }
 +            result.urlPatterns = WTF::move(patterns);
++        } else if (key == "cookieStoreId"_s) {
++            // Firefox's: one storeId or several. WebExtensionAPITabs::query
++            // keeps the tabs whose tab.cookieStoreId is one of them.
++            bool valid = value->type() == JSON::Value::Type::String;
++            if (RefPtr array = value->asArray()) {
++                valid = true;
++                for (auto& entry : *array)
++                    valid &= entry->type() == JSON::Value::Type::String;
++            }
++            if (!valid)
++                return makeUnexpected("cookieStoreId must be a string or an array of strings"_s);
 +        } else
 +            return makeUnexpected("unsupported tab query field"_s);
 +    }
@@ -90912,10 +91010,10 @@ index 0000000000000000000000000000000000000000..574ed16658f0c14b1aa2e63208e990b8
 +#define WEBKIT_ENGINE_VERSION_HAIKU "@WebKit_HAIKU_MAJOR_VERSION@.@WebKit_HAIKU_MINOR_VERSION@.@WebKit_HAIKU_TINY_VERSION@"
 diff --git a/Source/WebKit/UIProcess/API/haiku/WebKitContext.cpp b/Source/WebKit/UIProcess/API/haiku/WebKitContext.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..780bef48602a785be99c6721e2614120ece36c38
+index 0000000000000000000000000000000000000000..d4e5c5df9bb63513ab3e873e78d330fb5bd09b06
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/API/haiku/WebKitContext.cpp
-@@ -0,0 +1,1196 @@
+@@ -0,0 +1,1245 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#include "config.h"
@@ -90924,6 +91022,7 @@ index 0000000000000000000000000000000000000000..780bef48602a785be99c6721e2614120
 +#include "APIPageConfiguration.h"
 +#include "BrowserCommandBrokerHaiku.h"
 +#include "BrowserTabRegistryHaiku.h"
++#include "ContextualIdentitiesHaiku.h"
 +#include <cmath>
 +#include "DownloadRegistryHaiku.h"
 +#include "ExtensionPermissionPromptHaiku.h"
@@ -90974,10 +91073,58 @@ index 0000000000000000000000000000000000000000..780bef48602a785be99c6721e2614120
 +        m_status = B_ERROR;
 +}
 +
++BWebKitContext::BWebKitContext(const std::shared_ptr<BWebKitContext>& profile, uint32 container)
++    : m_private(false)
++    , m_container(container)
++{
++    m_status = BWebKitInitialize();
++    if (m_status != B_OK)
++        return;
++    if (!profile || profile->InitCheck() != B_OK || profile->IsPrivate() || profile->Container() || !container) {
++        m_status = B_BAD_VALUE;
++        return;
++    }
++    m_context = WebKit::WebViewContextHaiku::createContainer(profile->m_context, container);
++    if (!m_context)
++        m_status = B_BAD_VALUE;
++}
++
 +BWebKitContext::~BWebKitContext() = default;
 +
 +status_t BWebKitContext::InitCheck() const { return m_status; }
 +bool BWebKitContext::IsPrivate() const { return m_private; }
++uint32 BWebKitContext::Container() const { return m_container; }
++
++status_t BWebKitContext::GetContainers(std::vector<BWebKitContainer>& result) const
++{
++    if (m_status != B_OK)
++        return m_status;
++    auto& containers = m_context->containers();
++    if (!containers)
++        return B_NOT_SUPPORTED;
++    result.clear();
++    for (auto& entry : containers->snapshot())
++        result.push_back({ entry.identifier, entry.name, entry.color, entry.icon, entry.rgb });
++    return B_OK;
++}
++
++status_t BWebKitContext::SetContainerListener(const BMessenger& listener)
++{
++    if (m_status != B_OK)
++        return m_status;
++    auto& containers = m_context->containers();
++    if (!containers)
++        return B_NOT_SUPPORTED;
++    containers->setListener(listener);
++    return B_OK;
++}
++
++// Views of a profile and of its containers belong to one family of tabs
++// (one tab registry, one set of windows); a private context is its own.
++static bool sameTabFamilyHaiku(const std::shared_ptr<WebKit::WebViewContextHaiku>& first, const std::shared_ptr<WebKit::WebViewContextHaiku>& second)
++{
++    return first == second || (first && second && &first->tabFamily() == &second->tabFamily());
++}
 +
 +status_t BWebKitContext::PrepareExtension(const char* path, const BMessenger& reply, uint64 identifier)
 +{
@@ -91542,9 +91689,9 @@ index 0000000000000000000000000000000000000000..780bef48602a785be99c6721e2614120
 +            return;
 +        WebKit::BrowserCommandBrokerHaiku::Result result { status, WTF::move(description), { } };
 +        for (auto& state : states) {
-+            if (state->context != context || state->closed || !state->client || !state->client->page() || state->client->page()->isClosed()) {
++            if (!sameTabFamilyHaiku(state->context, context) || state->closed || !state->client || !state->client->page() || state->client->page()->isClosed()) {
 +                if (result.status == B_OK)
-+                    result.status = state->context != context ? B_BAD_VALUE : B_CANCELED;
++                    result.status = !sameTabFamilyHaiku(state->context, context) ? B_BAD_VALUE : B_CANCELED;
 +                continue;
 +            }
 +            result.createdPages.append(state->client->page()->identifier());
@@ -91613,7 +91760,7 @@ index 0000000000000000000000000000000000000000..780bef48602a785be99c6721e2614120
 +    WTF::RunLoop::mainSingleton().dispatch([context = m_context, states = std::move(states), window, focused, activeIndex, respond] {
 +        Vector<WebKit::WebPageProxyIdentifier> pages;
 +        for (auto& state : states) {
-+            if (state->context != context) {
++            if (!sameTabFamilyHaiku(state->context, context)) {
 +                respond(B_BAD_VALUE, 0, 0, -1);
 +                return;
 +            }
@@ -91637,7 +91784,7 @@ index 0000000000000000000000000000000000000000..780bef48602a785be99c6721e2614120
 +    if (discarded)
 +        tab = WebKit::BrowserTabRegistryHaiku::DiscardedTab { String::fromUTF8(url ? url : "").isolatedCopy(), String::fromUTF8(title ? title : "").isolatedCopy() };
 +    WTF::RunLoop::mainSingleton().dispatch([context = m_context, state = view->m_state, tab = WTF::move(tab)]() mutable {
-+        if (state->context != context || state->closed || !state->client || !state->client->page())
++        if (!sameTabFamilyHaiku(state->context, context) || state->closed || !state->client || !state->client->page())
 +            return;
 +        context->browserTabs()->setDiscarded(state->client->page()->identifier(), WTF::move(tab));
 +    });
@@ -91648,7 +91795,7 @@ index 0000000000000000000000000000000000000000..780bef48602a785be99c6721e2614120
 +    if (m_status != B_OK || !view)
 +        return;
 +    WTF::RunLoop::mainSingleton().dispatch([context = m_context, state = view->m_state, available, active] {
-+        if (state->context != context || state->closed || !state->client || !state->client->page())
++        if (!sameTabFamilyHaiku(state->context, context) || state->closed || !state->client || !state->client->page())
 +            return;
 +        auto page = state->client->page()->identifier();
 +        if (context->browserTabs()->setReader(page, { available, active }))
@@ -91661,7 +91808,7 @@ index 0000000000000000000000000000000000000000..780bef48602a785be99c6721e2614120
 +    if (m_status != B_OK || !view)
 +        return;
 +    WTF::RunLoop::mainSingleton().dispatch([context = m_context, state = view->m_state, pinned] {
-+        if (state->context != context || state->closed || !state->client || !state->client->page())
++        if (!sameTabFamilyHaiku(state->context, context) || state->closed || !state->client || !state->client->page())
 +            return;
 +        context->browserTabs()->setPinned(state->client->page()->identifier(), pinned);
 +    });
@@ -92114,10 +92261,10 @@ index 0000000000000000000000000000000000000000..780bef48602a785be99c6721e2614120
 +}
 diff --git a/Source/WebKit/UIProcess/API/haiku/WebKitContext.h b/Source/WebKit/UIProcess/API/haiku/WebKitContext.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..504871fcf63fea0143bec58eb5d97069078b4f31
+index 0000000000000000000000000000000000000000..e352146030a6965e1add5d2760efe8691cee5445
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/API/haiku/WebKitContext.h
-@@ -0,0 +1,605 @@
+@@ -0,0 +1,653 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#pragma once
@@ -92192,7 +92339,10 @@ index 0000000000000000000000000000000000000000..504871fcf63fea0143bec58eb5d97069
 +//                  index (int32, -1 appends), optional window/window_identifier
 +//                  (absent: host's choice), optional opener view/page, optional
 +//                  reader (bool, Firefox's openInReaderMode: show the page in
-+//                  Reader view when it has an article).
++//                  Reader view when it has an article), optional container
++//                  (uint32, Firefox's cookieStoreId: open the tab in that
++//                  container, BWebKitContext(profile, container); absent:
++//                  the profile's own store).
 +//   CLOSE_TABS     repeated view/page_identifier and parallel window entries.
 +//                  Succeeds only when every named tab was closed; a user who
 +//                  keeps a tab open through beforeunload answers B_CANCELED.
@@ -92360,6 +92510,29 @@ index 0000000000000000000000000000000000000000..504871fcf63fea0143bec58eb5d97069
 +    B_WEBKIT_GEOLOCATION_STOP = 'wgsp'
 +};
 +
++// Firefox's containers (contextualIdentities) of a persistent profile: each
++// has its own cookies and site storage. CHANGED goes to the listener set with
++// SetContainerListener after a container was created, changed or removed (by
++// an extension), with event ("created", "updated", "removed") and container
++// (uint32). Read the list again with GetContainers; close the tabs of a
++// removed container (its data is being erased).
++enum : uint32 {
++    B_WEBKIT_CONTAINERS_CHANGED = 'wctc'
++};
++
++struct BWebKitContainer {
++    // Extensions name it "firefox-container-<identifier>".
++    uint32 identifier { 0 };
++    std::string name;
++    // Firefox's names: blue, turquoise, green, yellow, orange, red, pink,
++    // purple, toolbar; rgb is that colour as 0xRRGGBB.
++    std::string color;
++    // fingerprint, briefcase, dollar, cart, circle, gift, vacation, food,
++    // fruit, pet, tree, chill, fence.
++    std::string icon;
++    uint32 rgb { 0 };
++};
++
 +struct BWebKitExtensionLoadOptions {
 +    enum class Purpose : uint32 { UserApproved, BrowserStartup, BrowserUpdate, ExtensionUpdate };
 +    std::string uniqueIdentifier;
@@ -92397,12 +92570,33 @@ index 0000000000000000000000000000000000000000..504871fcf63fea0143bec58eb5d97069
 +    // windows with SetBrowserWindowTabs as usual. extensionHost must not be
 +    // private; this context keeps it alive.
 +    explicit BWebKitContext(const std::shared_ptr<BWebKitContext>& extensionHost);
++    // The pages of one of profile's containers: they keep cookies and site
++    // storage of their own (persistent, in the profile's Containers/<id>/);
++    // everything else is profile's: its extensions (they see these pages as
++    // tabs whose cookieStoreId is "firefox-container-<id>"), downloads, site
++    // permissions, trusted certificates and their listeners. Configure those
++    // on profile, not here. Views of profile and of its containers may be
++    // tabs of one browser window: submit them with SetBrowserWindowTabs on
++    // any of these contexts. Pages opened by a container page's
++    // window.open() are of the same container (B_WEBKIT_NEW_PAGE_REQUESTED
++    // names it). On the application thread; InitCheck() is B_BAD_VALUE when
++    // profile is private or has no such container. profile is kept alive.
++    BWebKitContext(const std::shared_ptr<BWebKitContext>& profile, uint32 container);
 +    ~BWebKitContext();
 +    BWebKitContext(const BWebKitContext&) = delete;
 +    BWebKitContext& operator=(const BWebKitContext&) = delete;
 +
 +    status_t InitCheck() const;
 +    bool IsPrivate() const;
++    // The container of this context's pages, 0 for none.
++    uint32 Container() const;
++    // The profile's containers in their order (of the profile, also when
++    // asked of one of its containers). B_NOT_SUPPORTED for a private context
++    // or when containers are turned off (SUMMIT_CONTAINERS=0). Any thread.
++    status_t GetContainers(std::vector<BWebKitContainer>&) const;
++    // Where B_WEBKIT_CONTAINERS_CHANGED goes; an invalid messenger stops it.
++    // Any thread.
++    status_t SetContainerListener(const BMessenger&);
 +
 +    // Submit from the owning window looper while these views are alive. The
 +    // complete ordered list is applied on WebKit main after checking every
@@ -92722,6 +92916,7 @@ index 0000000000000000000000000000000000000000..504871fcf63fea0143bec58eb5d97069
 +    friend class BWebKitInspectorSession;
 +    status_t m_status { B_NO_INIT };
 +    const bool m_private;
++    const uint32 m_container { 0 };
 +};
 diff --git a/Source/WebKit/UIProcess/API/haiku/WebKitDiagnostics.cpp b/Source/WebKit/UIProcess/API/haiku/WebKitDiagnostics.cpp
 new file mode 100644
@@ -100333,7 +100528,7 @@ index 713a395f6fda1c50c694eef6181a23349c9b5fb2..d6419587d5402f01e573eb5f7335695a
  } // namespace WebExtensionDynamicScripts
  
 diff --git a/Source/WebKit/UIProcess/Extensions/WebExtension.cpp b/Source/WebKit/UIProcess/Extensions/WebExtension.cpp
-index 5ee894425eae1d1ba27e29aba5928af432d98095..1eb76f6c0fdfd8b275df3d3bf419918043cc2d0b 100644
+index 5ee894425eae1d1ba27e29aba5928af432d98095..d97049e5907016ab5680bf5572cc0b180bcbf21e 100644
 --- a/Source/WebKit/UIProcess/Extensions/WebExtension.cpp
 +++ b/Source/WebKit/UIProcess/Extensions/WebExtension.cpp
 @@ -48,6 +48,10 @@
@@ -100434,7 +100629,7 @@ index 5ee894425eae1d1ba27e29aba5928af432d98095..1eb76f6c0fdfd8b275df3d3bf4199180
          if (mimeTypePosition != notFound)
              return path.substring(dataPrefix.length(), mimeTypePosition - dataPrefix.length());
          return defaultMIMEType();
-@@ -1642,6 +1674,32 @@ const WebExtension::PermissionsSet& WebExtension::supportedPermissions()
+@@ -1642,6 +1674,34 @@ const WebExtension::PermissionsSet& WebExtension::supportedPermissions()
          WebExtensionPermission::contextMenus(), WebExtensionPermission::cookies(), WebExtensionPermission::declarativeNetRequest(), WebExtensionPermission::declarativeNetRequestFeedback(),
          WebExtensionPermission::declarativeNetRequestWithHostAccess(), WebExtensionPermission::menus(), WebExtensionPermission::nativeMessaging(), WebExtensionPermission::notifications(), WebExtensionPermission::scripting(),
          WebExtensionPermission::storage(), WebExtensionPermission::tabs(), WebExtensionPermission::unlimitedStorage(), WebExtensionPermission::webNavigation(), WebExtensionPermission::webRequest(),
@@ -100454,6 +100649,8 @@ index 5ee894425eae1d1ba27e29aba5928af432d98095..1eb76f6c0fdfd8b275df3d3bf4199180
 +        "browsingData"_s,
 +        // chrome.sessions, with the browser's recently closed tabs and windows.
 +        "sessions"_s,
++        // Firefox's contextualIdentities: the browser's containers.
++        "contextualIdentities"_s,
 +        // chrome.tabGroups: Summit has no tab groups, so there are none.
 +        "tabGroups"_s,
 +        // identity.launchWebAuthFlow and getRedirectURL.
@@ -100467,7 +100664,7 @@ index 5ee894425eae1d1ba27e29aba5928af432d98095..1eb76f6c0fdfd8b275df3d3bf4199180
  #if ENABLE(WK_WEB_EXTENSIONS_SIDEBAR)
          WebExtensionPermission::sidePanel(),
  #endif
-@@ -1679,6 +1737,16 @@ const WebExtension::MatchPatternSet& WebExtension::optionalPermissionMatchPatter
+@@ -1679,6 +1739,16 @@ const WebExtension::MatchPatternSet& WebExtension::optionalPermissionMatchPatter
      return m_optionalPermissionMatchPatterns;
  }
  
@@ -100484,7 +100681,7 @@ index 5ee894425eae1d1ba27e29aba5928af432d98095..1eb76f6c0fdfd8b275df3d3bf4199180
  const WebExtension::MatchPatternSet& WebExtension::externallyConnectableMatchPatterns()
  {
      populateExternallyConnectableIfNeeded();
-@@ -1723,6 +1791,9 @@ void WebExtension::populateExternallyConnectableIfNeeded()
+@@ -1723,6 +1793,9 @@ void WebExtension::populateExternallyConnectableIfNeeded()
      RefPtr externallyConnectableObject = manifestObject->getObject(externallyConnectableManifestKey);
      if (!externallyConnectableObject)
          return;
@@ -100494,7 +100691,7 @@ index 5ee894425eae1d1ba27e29aba5928af432d98095..1eb76f6c0fdfd8b275df3d3bf4199180
  
      if (!externallyConnectableObject->size()) {
          recordError(createError(Error::InvalidExternallyConnectable));
-@@ -1756,6 +1827,10 @@ void WebExtension::populateExternallyConnectableIfNeeded()
+@@ -1756,6 +1829,10 @@ void WebExtension::populateExternallyConnectableIfNeeded()
          extensionIDs = filterObjects(*extensionIDs, [](auto& value) {
              return !value.asString().isEmpty();
          });
@@ -100505,7 +100702,7 @@ index 5ee894425eae1d1ba27e29aba5928af432d98095..1eb76f6c0fdfd8b275df3d3bf4199180
      }
  
      if (shouldReportError || (m_externallyConnectableMatchPatterns.isEmpty() && (!extensionIDs || (extensionIDs && !extensionIDs->length()))))
-@@ -2216,6 +2291,12 @@ using ModifierFlags = WebExtension::ModifierFlags;
+@@ -2216,6 +2293,12 @@ using ModifierFlags = WebExtension::ModifierFlags;
  
  static bool parseCommandShortcut(const String& shortcut, OptionSet<ModifierFlags>& modifierFlags, String& key)
  {
@@ -100518,7 +100715,7 @@ index 5ee894425eae1d1ba27e29aba5928af432d98095..1eb76f6c0fdfd8b275df3d3bf4199180
      modifierFlags = { };
      key = emptyString();
  
-@@ -2300,6 +2381,7 @@ static bool parseCommandShortcut(const String& shortcut, OptionSet<ModifierFlags
+@@ -2300,6 +2383,7 @@ static bool parseCommandShortcut(const String& shortcut, OptionSet<ModifierFlags
          return false;
  
      return true;
@@ -100526,7 +100723,7 @@ index 5ee894425eae1d1ba27e29aba5928af432d98095..1eb76f6c0fdfd8b275df3d3bf4199180
  }
  
  void WebExtension::populateCommandsIfNeeded()
-@@ -2355,6 +2437,13 @@ void WebExtension::populateCommandsIfNeeded()
+@@ -2355,6 +2439,13 @@ void WebExtension::populateCommandsIfNeeded()
  
              // Descriptions are required for standard commands, but are optional for action commands.
              auto description = commandObject->getString(commandsDescriptionKeyManifestKey);
@@ -100540,7 +100737,7 @@ index 5ee894425eae1d1ba27e29aba5928af432d98095..1eb76f6c0fdfd8b275df3d3bf4199180
              if (description.isEmpty() && !isActionCommand) {
                  error = WEB_UI_STRING("Empty or invalid `description` in the `commands` manifest entry.", "WKWebExtensionErrorInvalidManifestEntry description for invalid command description");
                  continue;
-@@ -2368,11 +2457,30 @@ void WebExtension::populateCommandsIfNeeded()
+@@ -2368,11 +2459,30 @@ void WebExtension::populateCommandsIfNeeded()
  
              commandData.description = description;
  
@@ -100572,7 +100769,7 @@ index 5ee894425eae1d1ba27e29aba5928af432d98095..1eb76f6c0fdfd8b275df3d3bf4199180
                  const auto linuxPlatform = "linux"_s;
  #endif
                  const auto defaultPlatform = "default"_s;
-@@ -2382,7 +2490,7 @@ void WebExtension::populateCommandsIfNeeded()
+@@ -2382,7 +2492,7 @@ void WebExtension::populateCommandsIfNeeded()
                  platformShortcut = !suggestedKeyObject->getString(macPlatform).isEmpty() ? suggestedKeyObject->getString(macPlatform) : suggestedKeyObject->getString(iosPlatform);
  #elif PLATFORM(IOS_FAMILY)
                  platformShortcut = !suggestedKeyObject->getString(iosPlatform).isEmpty() ? suggestedKeyObject->getString(iosPlatform) : suggestedKeyObject->getString(macPlatform);
@@ -101579,7 +101776,7 @@ index 8947f24ec9866c39f206aab464ec21c5d4213b95..3e5e7c7a1277f52019ece5c67a166510
  
  #endif // ENABLE(WK_WEB_EXTENSIONS)
 diff --git a/Source/WebKit/UIProcess/Extensions/WebExtensionContext.h b/Source/WebKit/UIProcess/Extensions/WebExtensionContext.h
-index 5f8454dd5897a49ffba794e50fb04b7257ad2291..43dbb3b3a447821d3764691833376c8e2ce2cce3 100644
+index 5f8454dd5897a49ffba794e50fb04b7257ad2291..c56696a0ab541bb1c0c454cb7da99e33b2d4e3e9 100644
 --- a/Source/WebKit/UIProcess/Extensions/WebExtensionContext.h
 +++ b/Source/WebKit/UIProcess/Extensions/WebExtensionContext.h
 @@ -40,6 +40,9 @@
@@ -101767,7 +101964,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..43dbb3b3a447821d3764691833376c8e
  
      RefPtr<WebExtensionLocalization> localization();
  
-@@ -505,6 +584,59 @@ public:
+@@ -505,6 +584,61 @@ public:
  
      void removePage(WebPageProxy&);
  
@@ -101811,6 +102008,8 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..43dbb3b3a447821d3764691833376c8e
 +    // chrome.sessions: the browser's recently closed tabs and windows (SESSIONS
 +    // browser commands), and Firefox's tab and window values, kept here.
 +    void sessionsQueryHaiku(const String& method, const String& argumentsJSON, CompletionHandler<void(std::expected<String, WebExtensionError>&&)>&&);
++    // contextualIdentities (WebExtensionContextAPIContextualIdentitiesHaiku.cpp).
++    void contextualIdentitiesQueryHaiku(const String& method, const String& argumentsJSON, CompletionHandler<void(std::expected<String, WebExtensionError>&&)>&&);
 +    // identity.launchWebAuthFlow: the sign-in page in a pop-up window, until it
 +    // navigates to the extension's redirect address (completeAuthFlowHaiku)
 +    // or is closed (failAuthFlowHaiku).
@@ -101827,7 +102026,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..43dbb3b3a447821d3764691833376c8e
      Ref<WebExtensionWindow> getOrCreateWindow(WKWebExtensionWindow *) const;
      RefPtr<WebExtensionWindow> getWindow(WebExtensionWindowIdentifier, std::optional<WebPageProxyIdentifier> = std::nullopt, IgnoreExtensionAccess = IgnoreExtensionAccess::No) const;
      void forgetWindow(WebExtensionWindowIdentifier) const;
-@@ -546,6 +678,10 @@ public:
+@@ -546,6 +680,10 @@ public:
      void didCommitLoadForFrame(WebPageProxyIdentifier, const WebExtensionFrameParameters&, WallTime);
      void didFinishLoadForFrame(WebPageProxyIdentifier, const WebExtensionFrameParameters&, WallTime);
      void didFailLoadForFrame(WebPageProxyIdentifier, const WebExtensionFrameParameters&, WallTime);
@@ -101838,7 +102037,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..43dbb3b3a447821d3764691833376c8e
  
      void resourceLoadDidSendRequest(WebPageProxyIdentifier, const ResourceLoadInfo&, const WebCore::ResourceRequest&);
      void resourceLoadDidPerformHTTPRedirection(WebPageProxyIdentifier, const ResourceLoadInfo&, const WebCore::ResourceResponse&, const WebCore::ResourceRequest&);
-@@ -597,6 +733,12 @@ public:
+@@ -597,6 +735,12 @@ public:
      const CommandsVector& commands();
      WebExtensionCommand* command(const String& identifier);
      void performCommand(WebExtensionCommand&, UserTriggered = UserTriggered::No);
@@ -101851,7 +102050,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..43dbb3b3a447821d3764691833376c8e
      void resetCommands();
  
  #if TARGET_OS_IPHONE
-@@ -611,6 +753,11 @@ public:
+@@ -611,6 +755,11 @@ public:
      NSArray *platformMenuItems(const WebExtensionTab&) const;
  
      const MenuItemVector& mainMenuItems() const LIFETIME_BOUND { return m_mainMenuItems; }
@@ -101863,7 +102062,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..43dbb3b3a447821d3764691833376c8e
      WebExtensionMenuItem* menuItem(const String& identifier) const;
      void performMenuItem(WebExtensionMenuItem&, const WebExtensionMenuItemContextParameters&, UserTriggered = UserTriggered::No);
  
-@@ -638,6 +785,10 @@ public:
+@@ -638,6 +787,10 @@ public:
      void sendTestFinished(id argument);
      void reloadBackgroundContentForTesting();
      void unloadBackgroundContentForTesting();
@@ -101874,7 +102073,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..43dbb3b3a447821d3764691833376c8e
  #endif
  
      URL backgroundContentURL();
-@@ -646,6 +797,11 @@ public:
+@@ -646,6 +799,11 @@ public:
  #if ENABLE(WK_WEB_EXTENSIONS_OFFSCREEN) && PLATFORM(COCOA)
      WKWebView *offscreenWebView() const { return m_offscreenWebView.get(); }
      bool isOffscreenWebView(WKWebView *webView) const { return webView == m_offscreenWebView; }
@@ -101886,7 +102085,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..43dbb3b3a447821d3764691833376c8e
  #endif
      bool safeToLoadBackgroundContent() const { return m_safeToLoadBackgroundContent; }
  
-@@ -664,6 +820,7 @@ public:
+@@ -664,6 +822,7 @@ public:
      void runOpenPanel(WKWebView *, WKOpenPanelParameters *, void (^)(NSArray *));
  #endif
  
@@ -101894,7 +102093,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..43dbb3b3a447821d3764691833376c8e
  #if PLATFORM(COCOA)
      void sendNativeMessage(const String& applicationID, id message, CompletionHandler<void(std::expected<RetainPtr<id>, WebExtensionError>&&)>&&);
  #endif
-@@ -674,6 +831,10 @@ public:
+@@ -674,6 +833,10 @@ public:
      void addDeclarativeNetRequestRules(WebUserContentControllerProxy&);
  
      bool handleContentRuleListNotificationForTab(WebExtensionTab&, const URL&, WebCore::ContentRuleListResults::Result);
@@ -101905,9 +102104,16 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..43dbb3b3a447821d3764691833376c8e
      void incrementActionCountForTab(WebExtensionTab&, ssize_t incrementAmount);
  
  #if ENABLE(DNR_ON_RULE_MATCHED_DEBUG)
-@@ -709,7 +870,11 @@ public:
+@@ -708,8 +871,18 @@ public:
+     WebViewConfiguration webViewConfiguration(WebViewPurpose = WebViewPurpose::Any);
  
      WebsiteDataStore* websiteDataStore(std::optional<PAL::SessionID> = std::nullopt) const;
++#if PLATFORM(HAIKU)
++    // The session a store is named by to extensions: the profile's own store
++    // as "firefox-default" (webExtensionDefaultCookieStoreSessionID), others
++    // (containers, private) by their own.
++    PAL::SessionID cookieStoreSessionHaiku(const WebsiteDataStore&) const;
++#endif
  
 +#if PLATFORM(HAIKU) && USE(CURL)
 +    void cookiesDidChange(API::HTTPCookieStore&, const Vector<WebCore::CookieChange>&);
@@ -101917,7 +102123,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..43dbb3b3a447821d3764691833376c8e
  
      void loadBackgroundContent(CompletionHandler<void(RefPtr<API::Error>)>&&);
  
-@@ -758,11 +923,18 @@ private:
+@@ -758,11 +931,18 @@ private:
  #if PLATFORM(COCOA)
      NSDictionary *currentState() const;
      NSDictionary *readStateFromStorage();
@@ -101937,7 +102143,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..43dbb3b3a447821d3764691833376c8e
  
      void loadStorageAccessLevelsFromStorage();
      void saveStorageAccessLevelsToStorage();
-@@ -771,6 +943,10 @@ private:
+@@ -771,6 +951,10 @@ private:
      void moveLocalStorageIfNeeded(const URL& previousBaseURL, CompletionHandler<void()>&&);
      void removeStaleExtensionWebsiteData();
  
@@ -101948,7 +102154,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..43dbb3b3a447821d3764691833376c8e
      void permissionsDidChange(PermissionNotification, const PermissionsSet&);
      void permissionsDidChange(PermissionNotification, const MatchPatternSet&);
  
-@@ -806,6 +982,7 @@ private:
+@@ -806,6 +990,7 @@ private:
      void saveBackgroundPageListenersToStorage();
  
      void performTasksAfterBackgroundContentLoads();
@@ -101956,7 +102162,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..43dbb3b3a447821d3764691833376c8e
  
  #ifdef NDEBUG
      // This is method is a no-op in release builds since it has a performance impact with little benefit to release builds.
-@@ -854,6 +1031,18 @@ private:
+@@ -854,6 +1039,18 @@ private:
      void loadDeclarativeNetRequestRules(CompletionHandler<void(bool)>&&);
      void compileDeclarativeNetRequestRules(NSDictionary *, CompletionHandler<void(bool)>&&);
      void unloadDeclarativeNetRequestState();
@@ -101975,7 +102181,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..43dbb3b3a447821d3764691833376c8e
      String declarativeNetRequestContentRuleListFilePath();
  
      // Updating user content controllers with new rules.
-@@ -892,6 +1081,15 @@ private:
+@@ -892,6 +1089,15 @@ private:
      Ref<WebExtensionStorageSQLiteStore> syncStorageStore();
  
      void fetchCookies(WebsiteDataStore&, const URL&, const WebExtensionCookieFilterParameters&, CompletionHandler<void(std::expected<Vector<WebExtensionCookieParameters>, WebExtensionError>&&)>&&);
@@ -101991,7 +102197,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..43dbb3b3a447821d3764691833376c8e
  
      // Action APIs
      bool isActionMessageAllowed(IPC::Decoder&);
-@@ -903,6 +1101,10 @@ private:
+@@ -903,6 +1109,10 @@ private:
      void actionOpenPopup(WebPageProxyIdentifier, std::optional<WebExtensionWindowIdentifier>, std::optional<WebExtensionTabIdentifier>, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
      void actionGetBadgeText(std::optional<WebExtensionWindowIdentifier>, std::optional<WebExtensionTabIdentifier>, CompletionHandler<void(std::expected<String, WebExtensionError>&&)>&&);
      void actionSetBadgeText(std::optional<WebExtensionWindowIdentifier>, std::optional<WebExtensionTabIdentifier>, const String& text, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
@@ -102002,7 +102208,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..43dbb3b3a447821d3764691833376c8e
      void actionGetEnabled(std::optional<WebExtensionWindowIdentifier>, std::optional<WebExtensionTabIdentifier>, CompletionHandler<void(std::expected<bool, WebExtensionError>&&)>&&);
      void actionSetEnabled(std::optional<WebExtensionTabIdentifier>, bool enabled, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
      void fireActionClickedEventIfNeeded(WebExtensionTab*);
-@@ -934,6 +1136,11 @@ private:
+@@ -934,6 +1144,11 @@ private:
      // Commands APIs
      bool isCommandsMessageAllowed(IPC::Decoder&);
      void commandsGetAll(CompletionHandler<void(Vector<WebExtensionCommandParameters>)>&&);
@@ -102014,7 +102220,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..43dbb3b3a447821d3764691833376c8e
      void fireCommandEventIfNeeded(const WebExtensionCommand&, WebExtensionTab*);
      void fireCommandChangedEventIfNeeded(const WebExtensionCommand&, const String& oldShortcut);
  
-@@ -944,7 +1151,9 @@ private:
+@@ -944,7 +1159,9 @@ private:
      void cookiesSet(std::optional<PAL::SessionID>, const WebExtensionCookieParameters&, CompletionHandler<void(std::expected<std::optional<WebExtensionCookieParameters>, WebExtensionError>&&)>&&);
      void cookiesRemove(std::optional<PAL::SessionID>, const String& name, const URL&, CompletionHandler<void(std::expected<std::optional<WebExtensionCookieParameters>, WebExtensionError>&&)>&&);
      void cookiesGetAllCookieStores(CompletionHandler<void(std::expected<HashMap<PAL::SessionID, Vector<WebExtensionTabIdentifier>>, WebExtensionError>&&)>&&);
@@ -102024,7 +102230,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..43dbb3b3a447821d3764691833376c8e
  
      // DeclarativeNetRequest APIs
      bool isDeclarativeNetRequestMessageAllowed(IPC::Decoder&);
-@@ -960,6 +1169,33 @@ private:
+@@ -960,6 +1177,33 @@ private:
      void declarativeNetRequestUpdateDynamicRules(String&& rulesToAddJSON, Vector<double>&& ruleIDsToDelete, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
      void declarativeNetRequestGetSessionRules(Vector<double>&& filter, CompletionHandler<void(std::expected<String, WebExtensionError>&&)>&&);
      void declarativeNetRequestUpdateSessionRules(String&& rulesToAddJSON, Vector<double>&& ruleIDsToDelete, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
@@ -102058,7 +102264,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..43dbb3b3a447821d3764691833376c8e
  
  #if ENABLE(INSPECTOR_EXTENSIONS)
      // DevTools APIs
-@@ -975,12 +1211,22 @@ private:
+@@ -975,12 +1219,22 @@ private:
  
      // Extension APIs
      void extensionIsAllowedIncognitoAccess(CompletionHandler<void(bool)>&&);
@@ -102081,7 +102287,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..43dbb3b3a447821d3764691833376c8e
      void menusCreate(const WebExtensionMenuItemParameters&, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
      void menusUpdate(const String& identifier, const WebExtensionMenuItemParameters&, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
      void menusRemove(const String& identifier, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
-@@ -1009,9 +1255,18 @@ private:
+@@ -1009,9 +1263,18 @@ private:
  
      // Permissions APIs
      void permissionsGetAll(CompletionHandler<void(Vector<String>&& permissions, Vector<String>&& origins)>&&);
@@ -102100,7 +102306,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..43dbb3b3a447821d3764691833376c8e
      void firePermissionsEventListenerIfNecessary(WebExtensionEventListenerType, const PermissionsSet&, const MatchPatternSet&);
  
      // Port APIs
-@@ -1021,7 +1276,7 @@ private:
+@@ -1021,7 +1284,7 @@ private:
      void disconnectPortsForPage(WebPageProxy&);
      void addPorts(WebExtensionContentWorldType sourceContentWorldType, WebExtensionContentWorldType targetContentWorldType, WebExtensionPortChannelIdentifier, HashCountedSet<WebPageProxyIdentifier>&&);
      void removePort(WebExtensionContentWorldType sourceContentWorldType, WebExtensionContentWorldType targetContentWorldType, WebExtensionPortChannelIdentifier, WebPageProxyIdentifier);
@@ -102109,7 +102315,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..43dbb3b3a447821d3764691833376c8e
      void removeNativePort(WebExtensionMessagePort&);
      unsigned openPortCount(WebExtensionContentWorldType, WebExtensionPortChannelIdentifier);
      bool isPortConnected(WebExtensionContentWorldType sourceContentWorldType, WebExtensionContentWorldType targetContentWorldType, WebExtensionPortChannelIdentifier);
-@@ -1030,13 +1285,27 @@ private:
+@@ -1030,13 +1293,27 @@ private:
      void firePortMessageEventsIfNeeded(WebExtensionContentWorldType, std::optional<WebPageProxyIdentifier>, WebExtensionPortChannelIdentifier, const String& messageJSON, bool userGesture);
      void fireQueuedPortMessageEventsIfNeeded(WebExtensionContentWorldType, WebExtensionPortChannelIdentifier);
      void sendQueuedNativePortMessagesIfNeeded(WebExtensionPortChannelIdentifier);
@@ -102138,7 +102344,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..43dbb3b3a447821d3764691833376c8e
      void runtimeConnect(const String& extensionID, WebExtensionPortChannelIdentifier, const String& name, const WebExtensionMessageSenderParameters&, bool userGesture, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
      void runtimeSendNativeMessage(const String& applicationID, const String& messageJSON, CompletionHandler<void(std::expected<String, WebExtensionError>&&)>&&);
      void runtimeConnectNative(const String& applicationID, WebExtensionPortChannelIdentifier, WebPageProxyIdentifier, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
-@@ -1055,6 +1324,18 @@ private:
+@@ -1055,6 +1332,18 @@ private:
      void scriptingGetRegisteredScripts(const Vector<String>&, CompletionHandler<void(std::expected<Vector<WebExtensionRegisteredScriptParameters>, WebExtensionError>&&)>&&);
      void scriptingUnregisterContentScripts(const Vector<String>&, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
      bool createInjectedContentForScripts(const Vector<WebExtensionRegisteredScriptParameters>&, WebExtensionDynamicScripts::WebExtensionRegisteredScript::FirstTimeRegistration, DynamicInjectedContentsMap&, NSString *callingAPIName, NSString **errorMessage);
@@ -102157,7 +102363,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..43dbb3b3a447821d3764691833376c8e
  
      // Sidebar APIs
  #if ENABLE(WK_WEB_EXTENSIONS_SIDEBAR)
-@@ -1088,6 +1369,9 @@ private:
+@@ -1088,6 +1377,9 @@ private:
      void tabsCreate(std::optional<WebPageProxyIdentifier>, const WebExtensionTabParameters&, CompletionHandler<void(std::expected<std::optional<WebExtensionTabParameters>, WebExtensionError>&&)>&&);
      void tabsUpdate(WebPageProxyIdentifier, std::optional<WebExtensionTabIdentifier>, const WebExtensionTabParameters&, CompletionHandler<void(std::expected<std::optional<WebExtensionTabParameters>, WebExtensionError>&&)>&&);
      void tabsDuplicate(WebExtensionTabIdentifier, const WebExtensionTabParameters&, CompletionHandler<void(std::expected<std::optional<WebExtensionTabParameters>, WebExtensionError>&&)>&&);
@@ -102167,7 +102373,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..43dbb3b3a447821d3764691833376c8e
      void tabsGet(WebExtensionTabIdentifier, CompletionHandler<void(std::expected<std::optional<WebExtensionTabParameters>, WebExtensionError>&&)>&&);
      void tabsGetCurrent(WebPageProxyIdentifier, CompletionHandler<void(std::expected<std::optional<WebExtensionTabParameters>, WebExtensionError>&&)>&&);
      void tabsQuery(WebPageProxyIdentifier, const WebExtensionTabQueryParameters&, CompletionHandler<void(std::expected<Vector<WebExtensionTabParameters>, WebExtensionError>&&)>&&);
-@@ -1103,6 +1387,9 @@ private:
+@@ -1103,6 +1395,9 @@ private:
      void tabsSetZoom(WebPageProxyIdentifier, std::optional<WebExtensionTabIdentifier>, double, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
      void tabsMove(Vector<WebExtensionTabIdentifier>, std::optional<WebExtensionWindowIdentifier>, double, CompletionHandler<void(std::expected<Vector<WebExtensionTabParameters>, WebExtensionError>&&)>&&);
      void tabsRemove(Vector<WebExtensionTabIdentifier>, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
@@ -102177,7 +102383,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..43dbb3b3a447821d3764691833376c8e
      void tabsExecuteScript(WebPageProxyIdentifier, std::optional<WebExtensionTabIdentifier>, const WebExtensionScriptInjectionParameters&, bool userGesture, CompletionHandler<void(std::expected<Vector<WebExtensionScriptInjectionResultParameters>, WebExtensionError>&&)>&&);
      void tabsInsertCSS(WebPageProxyIdentifier, std::optional<WebExtensionTabIdentifier>, const WebExtensionScriptInjectionParameters&, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
      void tabsRemoveCSS(WebPageProxyIdentifier, std::optional<WebExtensionTabIdentifier>, const WebExtensionScriptInjectionParameters&, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
-@@ -1133,8 +1420,20 @@ private:
+@@ -1133,8 +1428,20 @@ private:
      void fireWindowsEventIfNeeded(WebExtensionEventListenerType, std::optional<WebExtensionWindowParameters>);
  
      // webRequest support.
@@ -102200,7 +102406,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..43dbb3b3a447821d3764691833376c8e
  
      // IPC::MessageReceiver.
      void didReceiveMessage(IPC::Connection&, IPC::Decoder&) override;
-@@ -1145,12 +1444,31 @@ private:
+@@ -1145,12 +1452,31 @@ private:
  
      mutable Markable<WebExtensionContextIdentifier> m_privilegedIdentifier;
  
@@ -102232,7 +102438,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..43dbb3b3a447821d3764691833376c8e
  #endif
      Vector<Ref<API::Error>> m_errors;
  
-@@ -1169,6 +1487,15 @@ private:
+@@ -1169,6 +1495,15 @@ private:
  
      RefPtr<API::ContentWorld> m_contentScriptWorld;
  
@@ -102248,7 +102454,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..43dbb3b3a447821d3764691833376c8e
      PermissionsMap m_grantedPermissions;
      PermissionsMap m_deniedPermissions;
  
-@@ -1194,6 +1521,14 @@ private:
+@@ -1194,6 +1529,14 @@ private:
      EventListenerTypeCountedSet m_backgroundContentEventListeners;
      EventListenerTypeFrameMap m_eventListenerFrames;
  
@@ -102263,7 +102469,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..43dbb3b3a447821d3764691833376c8e
      bool m_shouldFireStartupEvent { false };
      InstallReason m_installReason { InstallReason::None };
      String m_previousVersion;
-@@ -1216,6 +1551,16 @@ private:
+@@ -1216,6 +1559,16 @@ private:
  #elif ENABLE(2022_GLIB_API)
      GRefPtr<WebKitWebView> m_backgroundWebView;
      GWeakPtr<WebKitWebExtensionContext> m_delegate;
@@ -102280,7 +102486,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..43dbb3b3a447821d3764691833376c8e
  #endif
      Variant<std::monostate, Ref<ProcessThrottlerActivity>, Ref<ProcessActivityGroup>> m_backgroundWebViewActivity;
      RefPtr<API::Error> m_backgroundContentLoadError;
-@@ -1237,6 +1582,7 @@ private:
+@@ -1237,6 +1590,7 @@ private:
      HashMap<Ref<WebExtensionMatchPattern>, UserScriptVector> m_injectedScriptsPerPatternMap;
      HashMap<Ref<WebExtensionMatchPattern>, UserStyleSheetVector> m_injectedStyleSheetsPerPatternMap;
  
@@ -102288,7 +102494,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..43dbb3b3a447821d3764691833376c8e
      HashMap<String, Ref<WebExtensionDynamicScripts::WebExtensionRegisteredScript>> m_registeredScriptsMap;
      RefPtr<WebExtensionRegisteredScriptsSQLiteStore> m_registeredContentScriptsStorage;
  
-@@ -1256,11 +1602,20 @@ private:
+@@ -1256,11 +1610,20 @@ private:
  #endif // ENABLE(WK_WEB_EXTENSIONS_SIDEBAR)
  
      PortCountedSet m_ports;
@@ -102310,7 +102516,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..43dbb3b3a447821d3764691833376c8e
      mutable WindowIdentifierVector m_windowOrderVector;
      mutable std::optional<WebExtensionWindowIdentifier> m_focusedWindowIdentifier;
  
-@@ -1276,6 +1631,30 @@ private:
+@@ -1276,6 +1639,30 @@ private:
      bool m_populatedCommands { false };
  
      String m_declarativeNetRequestContentRuleListFilePath;
@@ -102341,7 +102547,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..43dbb3b3a447821d3764691833376c8e
      DeclarativeNetRequestMatchedRuleVector m_matchedRules;
      RefPtr<WebExtensionDeclarativeNetRequestSQLiteStore> m_declarativeNetRequestDynamicRulesStore;
      RefPtr<WebExtensionDeclarativeNetRequestSQLiteStore> m_declarativeNetRequestSessionRulesStore;
-@@ -1283,6 +1662,9 @@ private:
+@@ -1283,6 +1670,9 @@ private:
      HashSet<double> m_sessionRulesIDs;
      HashSet<double> m_dynamicRulesIDs;
  
@@ -102351,7 +102557,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..43dbb3b3a447821d3764691833376c8e
      MenuItemMap m_menuItems;
      MenuItemVector m_mainMenuItems;
  
-@@ -1300,12 +1682,16 @@ private:
+@@ -1300,12 +1690,16 @@ private:
          String message;
  #if PLATFORM(COCOA)
          RetainPtr<id> argument;
@@ -102368,7 +102574,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..43dbb3b3a447821d3764691833376c8e
  
      Deque<TestMessage> m_testMessageQueue;
      Deque<TestMessage> m_testStartedQueue;
-@@ -1315,6 +1701,8 @@ private:
+@@ -1315,6 +1709,8 @@ private:
      void sendQueuedTestMessagesIfNeeded(WebExtensionEventListenerType);
  #if PLATFORM(COCOA)
      void addTestMessageToQueue(const String& message, id argument, WebExtensionEventListenerType);
@@ -102378,10 +102584,10 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..43dbb3b3a447821d3764691833376c8e
  };
  
 diff --git a/Source/WebKit/UIProcess/Extensions/WebExtensionContext.messages.in b/Source/WebKit/UIProcess/Extensions/WebExtensionContext.messages.in
-index 6581f34180846663e2a8be51064e43c2d8173b64..f78a18571554a328dab12810fc382c34105b5cdd 100644
+index 6581f34180846663e2a8be51064e43c2d8173b64..6914a63c1452c07926316d282609b54b127a3934 100644
 --- a/Source/WebKit/UIProcess/Extensions/WebExtensionContext.messages.in
 +++ b/Source/WebKit/UIProcess/Extensions/WebExtensionContext.messages.in
-@@ -31,10 +31,144 @@
+@@ -31,10 +31,145 @@
      DispatchedTo=UI
  ]
  messages -> WebExtensionContext {
@@ -102420,6 +102626,7 @@ index 6581f34180846663e2a8be51064e43c2d8173b64..f78a18571554a328dab12810fc382c34
 +    [Validator=isLoadedAndPrivilegedMessage] BookmarksQueryHaiku(String method, String argumentsJSON) -> (std::expected<String, WebKit::WebExtensionError> result)
 +    [Validator=isLoadedAndPrivilegedMessage] IdentityLaunchWebAuthFlowHaiku(URL url, bool interactive) -> (std::expected<String, WebKit::WebExtensionError> result)
 +    [Validator=isLoadedAndPrivilegedMessage] SessionsQueryHaiku(String method, String argumentsJSON) -> (std::expected<String, WebKit::WebExtensionError> result)
++    [Validator=isLoadedAndPrivilegedMessage] ContextualIdentitiesQueryHaiku(String method, String argumentsJSON) -> (std::expected<String, WebKit::WebExtensionError> result)
 +    [Validator=isLoadedAndPrivilegedMessage] SessionsValueHaiku(uint8_t operation, std::optional<WebKit::WebExtensionTabIdentifier> tabIdentifier, std::optional<WebKit::WebExtensionWindowIdentifier> windowIdentifier, String key, String valueJSON) -> (std::expected<String, WebKit::WebExtensionError> result)
 +    [Validator=isLoadedAndPrivilegedMessage] BrowsingDataQueryHaiku(String method, String argumentsJSON) -> (std::expected<String, WebKit::WebExtensionError> result)
 +    [Validator=isLoadedAndPrivilegedMessage] SearchQueryHaiku(String method, String argumentsJSON, std::optional<WebKit::WebExtensionTabIdentifier> tabIdentifier) -> (std::expected<String, WebKit::WebExtensionError> result)
@@ -102527,7 +102734,7 @@ index 6581f34180846663e2a8be51064e43c2d8173b64..f78a18571554a328dab12810fc382c34
      // Action APIs
      [Validator=isActionMessageAllowed] ActionGetTitle(std::optional<WebKit::WebExtensionWindowIdentifier> windowIdentifier, std::optional<WebKit::WebExtensionTabIdentifier> tabIdentifier) -> (std::expected<String, WebKit::WebExtensionError> result)
      [Validator=isActionMessageAllowed] ActionSetTitle(std::optional<WebKit::WebExtensionWindowIdentifier> windowIdentifier, std::optional<WebKit::WebExtensionTabIdentifier> tabIdentifier, String title) -> (std::expected<void, WebKit::WebExtensionError> result)
-@@ -48,6 +182,37 @@ messages -> WebExtensionContext {
+@@ -48,6 +183,37 @@ messages -> WebExtensionContext {
      [Validator=isActionMessageAllowed] ActionSetEnabled(std::optional<WebKit::WebExtensionTabIdentifier> tabIdentifier, bool enabled) -> (std::expected<void, WebKit::WebExtensionError> result)
  #endif
  
@@ -102565,7 +102772,7 @@ index 6581f34180846663e2a8be51064e43c2d8173b64..f78a18571554a328dab12810fc382c34
      // Alarms APIs
      [Validator=isAlarmsMessageAllowed] AlarmsCreate(String name, Seconds initialInterval, Seconds repeatInterval) -> ()
      [Validator=isAlarmsMessageAllowed] AlarmsGet(String name) -> (struct std::optional<WebKit::WebExtensionAlarmParameters> alarmInfo)
-@@ -71,9 +236,6 @@ messages -> WebExtensionContext {
+@@ -71,9 +237,6 @@ messages -> WebExtensionContext {
      [Validator=isBookmarksMessageAllowed] BookmarksRemoveTree(String bookmarkId) -> (std::expected<void, WebKit::WebExtensionError> result)
  #endif // ENABLE(WK_WEB_EXTENSIONS_BOOKMARKS)
  
@@ -102575,7 +102782,7 @@ index 6581f34180846663e2a8be51064e43c2d8173b64..f78a18571554a328dab12810fc382c34
      // Cookies APIs
      [Validator=isCookiesMessageAllowed] CookiesGet(std::optional<PAL::SessionID> sessionID, String name, URL url) -> (std::expected<std::optional<WebKit::WebExtensionCookieParameters>, WebKit::WebExtensionError> result)
      [Validator=isCookiesMessageAllowed] CookiesGetAll(std::optional<PAL::SessionID> sessionID, URL url, struct WebKit::WebExtensionCookieFilterParameters filterParameters) -> (std::expected<Vector<WebKit::WebExtensionCookieParameters>, WebKit::WebExtensionError> result)
-@@ -100,8 +262,6 @@ messages -> WebExtensionContext {
+@@ -100,8 +263,6 @@ messages -> WebExtensionContext {
  #endif
  
      // Event APIs
@@ -102584,7 +102791,7 @@ index 6581f34180846663e2a8be51064e43c2d8173b64..f78a18571554a328dab12810fc382c34
  
      // Extensions APIs
      [Validator=isLoaded] ExtensionIsAllowedIncognitoAccess() -> (bool result)
-@@ -134,20 +294,10 @@ messages -> WebExtensionContext {
+@@ -134,20 +295,10 @@ messages -> WebExtensionContext {
      [Validator=isLoaded] PermissionsRequest(HashSet<String> permissions, HashSet<String> origins) -> (bool success)
      [Validator=isLoaded] PermissionsRemove(HashSet<String> permissions, HashSet<String> origins) -> (bool success)
  
@@ -102605,7 +102812,7 @@ index 6581f34180846663e2a8be51064e43c2d8173b64..f78a18571554a328dab12810fc382c34
  
      // Scripting APIs
      [Validator=isScriptingMessageAllowed] ScriptingExecuteScript(WebKit::WebExtensionScriptInjectionParameters parameters, bool userGesture) -> (std::expected<Vector<WebKit::WebExtensionScriptInjectionResultParameters>, WebKit::WebExtensionError> result)
-@@ -174,15 +324,6 @@ messages -> WebExtensionContext {
+@@ -174,15 +325,6 @@ messages -> WebExtensionContext {
      [Validator=isSidebarMessageAllowed] SidebarGetActionClickBehavior() -> (std::expected<WebKit::WebExtensionActionClickBehavior, WebKit::WebExtensionError> result)
  #endif // ENABLE(WK_WEB_EXTENSIONS_SIDEBAR)
  
@@ -102621,7 +102828,7 @@ index 6581f34180846663e2a8be51064e43c2d8173b64..f78a18571554a328dab12810fc382c34
      // Tabs APIs
      [Validator=isLoadedAndPrivilegedMessage] TabsCreate(std::optional<WebKit::WebPageProxyIdentifier> webPageProxyIdentifier, WebKit::WebExtensionTabParameters creationParameters) -> (std::expected<std::optional<WebKit::WebExtensionTabParameters>, WebKit::WebExtensionError> result)
      [Validator=isLoadedAndPrivilegedMessage] TabsUpdate(WebKit::WebPageProxyIdentifier webPageProxyIdentifier, std::optional<WebKit::WebExtensionTabIdentifier> tabIdentifier, WebKit::WebExtensionTabParameters updateParameters) -> (std::expected<std::optional<WebKit::WebExtensionTabParameters>, WebKit::WebExtensionError> result)
-@@ -207,8 +348,6 @@ messages -> WebExtensionContext {
+@@ -207,8 +349,6 @@ messages -> WebExtensionContext {
      [Validator=isLoadedAndPrivilegedMessage] TabsRemoveCSS(WebKit::WebPageProxyIdentifier webPageProxyIdentifier, std::optional<WebKit::WebExtensionTabIdentifier> tabIdentifier, WebKit::WebExtensionScriptInjectionParameters parameters) -> (std::expected<void, WebKit::WebExtensionError> result)
  
      // WebNavigation APIs
@@ -102909,10 +103116,10 @@ index 0000000000000000000000000000000000000000..b5a17393623897b91dee01412b7ae904
 +
 +#endif // ENABLE(WK_WEB_EXTENSIONS)
 diff --git a/Source/WebKit/UIProcess/Extensions/WebExtensionController.cpp b/Source/WebKit/UIProcess/Extensions/WebExtensionController.cpp
-index 2072e4a99372133e90eda56b3ba1bcc496705af0..7b45379d6ecffb74bdae6949796f38119e11662a 100644
+index 2072e4a99372133e90eda56b3ba1bcc496705af0..507df6cb1661ebe119e1c481d31e93f9d4384304 100644
 --- a/Source/WebKit/UIProcess/Extensions/WebExtensionController.cpp
 +++ b/Source/WebKit/UIProcess/Extensions/WebExtensionController.cpp
-@@ -25,11 +25,16 @@
+@@ -25,11 +25,18 @@
  
  #include "config.h"
  #include "WebExtensionController.h"
@@ -102923,13 +103130,15 @@ index 2072e4a99372133e90eda56b3ba1bcc496705af0..7b45379d6ecffb74bdae6949796f3811
  #include "APIError.h"
  #include "Logging.h"
 +#if PLATFORM(HAIKU)
++#include "ContextualIdentitiesHaiku.h"
++#include "WebExtensionCookieStoreIdentifier.h"
 +#include "haiku/WebExtensionDownloadsHaiku.h"
 +#include "haiku/WebExtensionPrivacyControllerHaiku.h"
 +#endif
  #include "WebExtensionContextMessages.h"
  #include "WebExtensionControllerMessages.h"
  #include "WebExtensionControllerParameters.h"
-@@ -42,20 +47,13 @@
+@@ -42,20 +49,13 @@
  #include <wtf/HashMap.h>
  #include <wtf/NeverDestroyed.h>
  
@@ -102951,7 +103160,7 @@ index 2072e4a99372133e90eda56b3ba1bcc496705af0..7b45379d6ecffb74bdae6949796f3811
      processPool.addMessageReceiver(Messages::WebExtensionContext::messageReceiverName(), context.identifier(), context);
      processPool.addMessageReceiver(Messages::WebExtensionContext::messageReceiverName(), context.privilegedIdentifier(), context);
  #else
-@@ -66,7 +64,7 @@ static void addContextMessageReceivers(WebProcessPool& processPool, WebExtension
+@@ -66,7 +66,7 @@ static void addContextMessageReceivers(WebProcessPool& processPool, WebExtension
  
  static void removeContextMessageReceivers(WebProcessPool& processPool, WebExtensionContext& context)
  {
@@ -102960,7 +103169,7 @@ index 2072e4a99372133e90eda56b3ba1bcc496705af0..7b45379d6ecffb74bdae6949796f3811
      processPool.removeMessageReceiver(Messages::WebExtensionContext::messageReceiverName(), context.identifier());
      processPool.removeMessageReceiver(Messages::WebExtensionContext::messageReceiverName(), context.privilegedIdentifier());
  #else
-@@ -96,22 +94,27 @@ WebExtensionController::WebExtensionController(Ref<WebExtensionControllerConfigu
+@@ -96,22 +96,27 @@ WebExtensionController::WebExtensionController(Ref<WebExtensionControllerConfigu
  
      // A freshly created extension controller will be used to determine if the startup event
      // should be fired for any loaded extensions during a brief time window. Start a timer
@@ -102993,7 +103202,7 @@ index 2072e4a99372133e90eda56b3ba1bcc496705af0..7b45379d6ecffb74bdae6949796f3811
      // Unload first, since closing extension pages can call removePage(), which removes the message
      // receiver and process pool when no other pages use the same process pool.
      unloadAll();
-@@ -148,6 +151,15 @@ WebExtensionController::WebProcessProxySet WebExtensionController::allProcesses(
+@@ -148,6 +153,15 @@ WebExtensionController::WebProcessProxySet WebExtensionController::allProcesses(
  
  std::expected<bool, RefPtr<API::Error>> WebExtensionController::load(WebExtensionContext& extensionContext)
  {
@@ -103009,7 +103218,7 @@ index 2072e4a99372133e90eda56b3ba1bcc496705af0..7b45379d6ecffb74bdae6949796f3811
      if (!m_extensionContexts.add(extensionContext)) {
          RELEASE_LOG_ERROR(Extensions, "Extension context already loaded");
          return makeUnexpected(extensionContext.createError(WebExtensionContext::Error::AlreadyLoaded));
-@@ -187,6 +199,9 @@ std::expected<bool, RefPtr<API::Error>> WebExtensionController::load(WebExtensio
+@@ -187,6 +201,9 @@ std::expected<bool, RefPtr<API::Error>> WebExtensionController::load(WebExtensio
          return makeUnexpected(loadResult.error());
      }
  
@@ -103019,7 +103228,7 @@ index 2072e4a99372133e90eda56b3ba1bcc496705af0..7b45379d6ecffb74bdae6949796f3811
      return true;
  }
  
-@@ -209,6 +224,9 @@ std::expected<bool, RefPtr<API::Error>> WebExtensionController::unload(WebExtens
+@@ -209,6 +226,9 @@ std::expected<bool, RefPtr<API::Error>> WebExtensionController::unload(WebExtens
          removeContextMessageReceivers(processPool, extensionContext);
  
      auto unloadResult = extensionContext.unload();
@@ -103029,7 +103238,7 @@ index 2072e4a99372133e90eda56b3ba1bcc496705af0..7b45379d6ecffb74bdae6949796f3811
      if (!unloadResult)
          return makeUnexpected(unloadResult.error());
  
-@@ -249,12 +267,19 @@ void WebExtensionController::addPage(WebPageProxy& page)
+@@ -249,12 +269,19 @@ void WebExtensionController::addPage(WebPageProxy& page)
      Ref controller = page.userContentController();
      bool isOwnStore = !dataStore->isPersistent() && (&dataStore.get() == &m_configuration->defaultWebsiteDataStore());
      addUserContentController(controller, (dataStore->isPersistent() || isOwnStore) ? ForPrivateBrowsing::No : ForPrivateBrowsing::Yes);
@@ -103049,7 +103258,7 @@ index 2072e4a99372133e90eda56b3ba1bcc496705af0..7b45379d6ecffb74bdae6949796f3811
  
      Ref pool = page.configuration().processPool();
      removeProcessPool(pool);
-@@ -267,6 +292,9 @@ void WebExtensionController::removePage(WebPageProxy& page)
+@@ -267,6 +294,9 @@ void WebExtensionController::removePage(WebPageProxy& page)
  
      for (Ref context : m_extensionContexts)
          context->removePage(page);
@@ -103059,7 +103268,22 @@ index 2072e4a99372133e90eda56b3ba1bcc496705af0..7b45379d6ecffb74bdae6949796f3811
  }
  
  void WebExtensionController::addProcessPool(WebProcessPool& processPool)
-@@ -406,13 +434,122 @@ void WebExtensionController::didFailLoadForFrame(WebPageProxyIdentifier pageID,
+@@ -344,6 +374,14 @@ RefPtr<WebsiteDataStore> WebExtensionController::websiteDataStore(std::optional<
+     Ref configuration = m_configuration;
+     if (!sessionID || configuration->defaultWebsiteDataStore().sessionID() == sessionID.value())
+         return configuration->defaultWebsiteDataStore();
++#if PLATFORM(HAIKU)
++    // "firefox-default", and containers' stores, which exist while no tab
++    // uses them.
++    if (*sessionID == webExtensionDefaultCookieStoreSessionID())
++        return configuration->defaultWebsiteDataStore();
++    if (auto container = webExtensionContainerIdentifier(*sessionID))
++        return m_nativeContainers ? m_nativeContainers->dataStore(*container) : nullptr;
++#endif
+ 
+     for (auto& dataStore : allWebsiteDataStores()) {
+         if (dataStore.sessionID() == sessionID.value())
+@@ -406,14 +444,151 @@ void WebExtensionController::didFailLoadForFrame(WebPageProxyIdentifier pageID,
          context->didFailLoadForFrame(pageID, frameParameters, timestamp);
  }
  
@@ -103119,6 +103343,34 @@ index 2072e4a99372133e90eda56b3ba1bcc496705af0..7b45379d6ecffb74bdae6949796f3811
 +    return false;
 +}
 +
++void WebExtensionController::setNativeContainersHaiku(std::shared_ptr<ContextualIdentitiesHaiku> containers)
++{
++    m_nativeContainers = WTF::move(containers);
++    if (!m_nativeContainers)
++        return;
++    // The containers belong to the context that owns this controller, and
++    // live no longer than it.
++    m_nativeContainers->addObserver([this](ContextualIdentitiesHaiku::Change change, const ContextualIdentitiesHaiku::Identity& identity) {
++        auto type = change == ContextualIdentitiesHaiku::Change::Created ? WebExtensionEventListenerType::ContextualIdentitiesOnCreated
++            : change == ContextualIdentitiesHaiku::Change::Updated ? WebExtensionEventListenerType::ContextualIdentitiesOnUpdated
++            : WebExtensionEventListenerType::ContextualIdentitiesOnRemoved;
++        Ref info = JSON::Object::create();
++        info->setObject("contextualIdentity"_s, contextualIdentityJSONHaiku(identity));
++        didChangeContextualIdentityHaiku(type, info->toJSONString());
++    });
++}
++
++void WebExtensionController::didChangeContextualIdentityHaiku(WebExtensionEventListenerType type, const String& infoJSON)
++{
++    for (Ref context : m_extensionContexts) {
++        if (!context->isLoaded() || !context->hasPermission("contextualIdentities"_s))
++            continue;
++        context->wakeUpBackgroundContentIfNecessaryToFireEvents({ type }, [context, type, infoJSON] {
++            context->sendToProcessesForEvent(type, Messages::WebExtensionContextProxy::DispatchContextualIdentitiesEventHaiku(type, infoJSON));
++        });
++    }
++}
++
 +void WebExtensionController::didChangeSessionsHaiku()
 +{
 +    constexpr auto type = WebExtensionEventListenerType::SessionsOnChanged;
@@ -103171,19 +103423,20 @@ index 2072e4a99372133e90eda56b3ba1bcc496705af0..7b45379d6ecffb74bdae6949796f3811
      for (Ref context : m_extensionContexts)
          context->cookiesDidChange(cookieStore);
 +#endif
-+}
-+
+ }
+ 
 +#if PLATFORM(HAIKU) && USE(CURL)
 +void WebExtensionController::cookiesDidChange(API::HTTPCookieStore& cookieStore, const Vector<WebCore::CookieChange>& changes)
 +{
 +    for (Ref context : m_extensionContexts)
 +        context->cookiesDidChange(cookieStore, changes);
- }
++}
 +#endif
- 
++
  RefPtr<WebExtensionContext> WebExtensionController::extensionContext(const WebExtension& extension) const
  {
-@@ -465,6 +602,42 @@ String WebExtensionController::stateFilePath(const String& uniqueIdentifier) con
+     for (auto& context : m_extensionContexts) {
+@@ -465,6 +640,42 @@ String WebExtensionController::stateFilePath(const String& uniqueIdentifier) con
      return FileSystem::pathByAppendingComponent(storageDirectory(uniqueIdentifier), WebExtensionContext::stateFileName());
  }
  
@@ -103227,7 +103480,7 @@ index 2072e4a99372133e90eda56b3ba1bcc496705af0..7b45379d6ecffb74bdae6949796f3811
  {
      HashSet<String> origins;
 diff --git a/Source/WebKit/UIProcess/Extensions/WebExtensionController.h b/Source/WebKit/UIProcess/Extensions/WebExtensionController.h
-index 7ec330ea503fa362051ba6c5f8fe4c263ffe2390..de45a97b71227a4853d6f07109193e43a69ce238 100644
+index 7ec330ea503fa362051ba6c5f8fe4c263ffe2390..fcad64dcb9d570b3f21b596fdd72349257be948a 100644
 --- a/Source/WebKit/UIProcess/Extensions/WebExtensionController.h
 +++ b/Source/WebKit/UIProcess/Extensions/WebExtensionController.h
 @@ -45,6 +45,7 @@
@@ -103238,7 +103491,7 @@ index 7ec330ea503fa362051ba6c5f8fe4c263ffe2390..de45a97b71227a4853d6f07109193e43
  #include <wtf/Identified.h>
  #include <wtf/RunLoop.h>
  #include <wtf/TZoneMallocInlines.h>
-@@ -64,8 +65,19 @@ class NavigationAction;
+@@ -64,8 +65,20 @@ class NavigationAction;
  class WebsitePolicies;
  }
  
@@ -103252,13 +103505,14 @@ index 7ec330ea503fa362051ba6c5f8fe4c263ffe2390..de45a97b71227a4853d6f07109193e43
  
 +class BrowserCommandBrokerHaiku;
 +class BrowserTabRegistryHaiku;
++class ContextualIdentitiesHaiku;
 +class WebExtensionPrivacyControllerHaiku;
 +class WebExtensionDownloadsHaiku;
 +class ExtensionPermissionPromptHaiku;
  class ContextMenuContextData;
  class WebExtensionContext;
  class WebExtensionDataRecord;
-@@ -73,6 +85,9 @@ class WebPageProxy;
+@@ -73,6 +86,9 @@ class WebPageProxy;
  class WebProcessPool;
  class WebsiteDataStore;
  struct WebExtensionContentRuleListBlockedLoadInfo;
@@ -103268,7 +103522,7 @@ index 7ec330ea503fa362051ba6c5f8fe4c263ffe2390..de45a97b71227a4853d6f07109193e43
  struct WebExtensionControllerParameters;
  struct WebExtensionFrameParameters;
  
-@@ -113,6 +128,13 @@ public:
+@@ -113,6 +129,16 @@ public:
      enum class ForPrivateBrowsing { No, Yes };
  
      WebExtensionControllerConfiguration& configuration() const LIFETIME_BOUND { return m_configuration.get(); }
@@ -103278,11 +103532,14 @@ index 7ec330ea503fa362051ba6c5f8fe4c263ffe2390..de45a97b71227a4853d6f07109193e43
 +    const std::shared_ptr<ExtensionPermissionPromptHaiku>& nativePermissionPrompts() const { return m_nativePermissionPrompts; }
 +    const std::shared_ptr<BrowserCommandBrokerHaiku>& nativeBrowserCommands() const { return m_nativeBrowserCommands; }
 +    WebExtensionDownloadsHaiku& nativeDownloads();
++    // The profile's containers (contextualIdentities); null without them.
++    const std::shared_ptr<ContextualIdentitiesHaiku>& nativeContainersHaiku() const { return m_nativeContainers; }
++    void setNativeContainersHaiku(std::shared_ptr<ContextualIdentitiesHaiku>);
 +#endif
      WebExtensionControllerParameters parameters(const API::PageConfiguration&, WebProcessProxy& destinationProcess) const;
  
      bool operator==(const WebExtensionController& other) const { return (this == &other); }
-@@ -135,6 +157,14 @@ public:
+@@ -135,6 +161,14 @@ public:
      std::expected<bool, RefPtr<API::Error>> load(WebExtensionContext&);
      std::expected<bool, RefPtr<API::Error>> unload(WebExtensionContext&);
  
@@ -103297,7 +103554,7 @@ index 7ec330ea503fa362051ba6c5f8fe4c263ffe2390..de45a97b71227a4853d6f07109193e43
      void unloadAll();
  
      void dispatchDidLoad(WebExtensionContext&);
-@@ -163,6 +193,9 @@ public:
+@@ -163,6 +197,9 @@ public:
      WebExtensionSet extensions() const;
  
      void cookiesDidChange(API::HTTPCookieStore&);
@@ -103307,7 +103564,7 @@ index 7ec330ea503fa362051ba6c5f8fe4c263ffe2390..de45a97b71227a4853d6f07109193e43
  
      template<typename T>
      void sendToAllProcesses(const T& message, const ObjectIdentifierGenericBase& destinationID);
-@@ -191,6 +224,46 @@ public:
+@@ -191,6 +228,48 @@ public:
      void resourceLoadDidReceiveChallenge(WebPageProxyIdentifier, const ResourceLoadInfo&, const WebCore::AuthenticationChallenge&);
      void resourceLoadDidReceiveResponse(WebPageProxyIdentifier, const ResourceLoadInfo&, const WebCore::ResourceResponse&);
      void resourceLoadDidCompleteWithError(WebPageProxyIdentifier, const ResourceLoadInfo&, const WebCore::ResourceResponse&, const WebCore::ResourceError&);
@@ -103335,6 +103592,8 @@ index 7ec330ea503fa362051ba6c5f8fe4c263ffe2390..de45a97b71227a4853d6f07109193e43
 +    void didChangeHistoryHaiku(WebExtensionEventListenerType, const String& json);
 +    void didChangeBookmarksHaiku(WebExtensionEventListenerType, const String& identifier, const String& infoJSON);
 +    void didChangeSessionsHaiku();
++    // contextualIdentities.onCreated/onUpdated/onRemoved.
++    void didChangeContextualIdentityHaiku(WebExtensionEventListenerType, const String& infoJSON);
 +    // A main-frame navigation of page to an extension's identity redirect
 +    // address ends that extension's launchWebAuthFlow: true when it did, and
 +    // the navigation is to be ignored.
@@ -103354,7 +103613,7 @@ index 7ec330ea503fa362051ba6c5f8fe4c263ffe2390..de45a97b71227a4853d6f07109193e43
  
  #if ENABLE(CONTENT_EXTENSIONS)
      void resourceLoadWasBlockedByContentRuleList(WebPageProxyIdentifier, const WebExtensionContentRuleListBlockedLoadInfo&);
-@@ -266,17 +339,34 @@ private:
+@@ -266,17 +345,35 @@ private:
          {
              // FIXME: <https://webkit.org/b/267514> Add support for changeInfo.
  
@@ -103383,6 +103642,7 @@ index 7ec330ea503fa362051ba6c5f8fe4c263ffe2390..de45a97b71227a4853d6f07109193e43
 +    std::shared_ptr<ExtensionPermissionPromptHaiku> m_nativePermissionPrompts;
 +    std::shared_ptr<BrowserCommandBrokerHaiku> m_nativeBrowserCommands;
 +    std::unique_ptr<WebExtensionDownloadsHaiku> m_nativeDownloads;
++    std::shared_ptr<ContextualIdentitiesHaiku> m_nativeContainers;
 +    HashMap<WebPageProxyIdentifier, NavigationTargetSourceHaiku> m_navigationTargetSourcesHaiku;
 +    HashMap<WebPageProxyIdentifier, WebPageProxyIdentifier> m_openerPagesHaiku;
 +    // windows.onBoundsChanged: windows moved or resized in the last 100 ms.
@@ -107118,17 +107378,156 @@ index 0000000000000000000000000000000000000000..8568a4ea133a137222c9c34a08367e66
 +}
 +}
 +#endif
+diff --git a/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextAPIContextualIdentitiesHaiku.cpp b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextAPIContextualIdentitiesHaiku.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..763c5182a8e28331884e26fc0721c6dfb06077bd
+--- /dev/null
++++ b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextAPIContextualIdentitiesHaiku.cpp
+@@ -0,0 +1,131 @@
++/* Copyright (C) 2026 Summit contributors. SPDX-License-Identifier: BSD-2-Clause */
++#include "config.h"
++#include "WebExtensionContext.h"
++
++#if ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
++
++#include "ContextualIdentitiesHaiku.h"
++#include "WebExtensionController.h"
++#include "WebExtensionCookieStoreIdentifier.h"
++#include "WebExtensionUtilities.h"
++#include <wtf/JSONValues.h>
++#include <wtf/text/MakeString.h>
++
++namespace WebKit {
++
++// Firefox's contextualIdentities on the profile's containers. The containers
++// are the browser's, not the extension's: what one extension creates, every
++// extension and the browser's own menus see.
++void WebExtensionContext::contextualIdentitiesQueryHaiku(const String& method, const String& argumentsJSON, CompletionHandler<void(std::expected<String, WebExtensionError>&&)>&& completion)
++{
++    auto apiName = makeString("contextualIdentities."_s, method, "()"_s);
++    RefPtr controller = extensionController();
++    if (!controller || !hasPermission("contextualIdentities"_s)) {
++        completion(toWebExtensionError(apiName, nullString(), "permission denied"_s));
++        return;
++    }
++    auto containers = controller->nativeContainersHaiku();
++    if (!containers) {
++        // Firefox's answer when containers are turned off.
++        completion(toWebExtensionError(apiName, nullString(), "Contextual identities are currently disabled"_s));
++        return;
++    }
++    RefPtr value = JSON::Value::parseJSON(argumentsJSON);
++    RefPtr arguments = value ? value->asObject() : nullptr;
++    if (!arguments) {
++        completion(toWebExtensionError(apiName, nullString(), "invalid arguments"_s));
++        return;
++    }
++    auto container = [&](const String& cookieStoreId) -> std::optional<uint32_t> {
++        auto session = parseWebExtensionCookieStoreIdentifier(cookieStoreId);
++        auto identifier = session ? webExtensionContainerIdentifier(*session) : std::nullopt;
++        if (!identifier || !containers->identity(*identifier)) {
++            completion(toWebExtensionError(apiName, nullString(), makeString("Invalid contextual identity: "_s, cookieStoreId)));
++            return std::nullopt;
++        }
++        return identifier;
++    };
++    auto answer = [&](std::expected<ContextualIdentitiesHaiku::Identity, String>&& result) {
++        if (!result)
++            completion(toWebExtensionError(apiName, nullString(), result.error()));
++        else
++            completion(contextualIdentityJSONHaiku(*result)->toJSONString());
++    };
++
++    if (method == "get"_s) {
++        if (auto identifier = container(arguments->getString("cookieStoreId"_s)))
++            answer(*containers->identity(*identifier));
++        return;
++    }
++    if (method == "query"_s) {
++        auto name = arguments->getString("name"_s);
++        Ref list = JSON::Array::create();
++        for (auto& identity : containers->identities()) {
++            if (name.isNull() || identity.name == name)
++                list->pushObject(contextualIdentityJSONHaiku(identity));
++        }
++        completion(list->toJSONString());
++        return;
++    }
++    if (method == "create"_s) {
++        answer(containers->createIdentity(arguments->getString("name"_s), arguments->getString("color"_s), arguments->getString("icon"_s)));
++        return;
++    }
++    if (method == "update"_s) {
++        if (auto identifier = container(arguments->getString("cookieStoreId"_s)))
++            answer(containers->updateIdentity(*identifier, arguments->getString("name"_s), arguments->getString("color"_s), arguments->getString("icon"_s)));
++        return;
++    }
++    if (method == "remove"_s) {
++        if (auto identifier = container(arguments->getString("cookieStoreId"_s)))
++            answer(containers->removeIdentity(*identifier));
++        return;
++    }
++    if (method == "move"_s) {
++        Vector<uint32_t> identifiers;
++        if (RefPtr list = arguments->getArray("cookieStoreIds"_s)) {
++            for (auto& entry : *list) {
++                auto identifier = container(entry->asString());
++                if (!identifier)
++                    return;
++                identifiers.append(*identifier);
++            }
++        }
++        auto position = arguments->getDouble("position"_s).value_or(-1);
++        auto result = containers->moveIdentities(identifiers, static_cast<int64_t>(position));
++        if (!result)
++            completion(toWebExtensionError(apiName, nullString(), result.error()));
++        else
++            completion(String { "null"_s });
++        return;
++    }
++    if (method == "getSupportedColors"_s) {
++        Ref list = JSON::Array::create();
++        for (auto& [color, code] : ContextualIdentitiesHaiku::colors()) {
++            Ref entry = JSON::Object::create();
++            entry->setString("color"_s, color);
++            entry->setString("colorCode"_s, code);
++            list->pushObject(WTF::move(entry));
++        }
++        completion(list->toJSONString());
++        return;
++    }
++    if (method == "getSupportedIcons"_s) {
++        // No iconUrl: Summit has no icon images of its own to point at, and
++        // extensions then draw their own (Multi-Account Containers does).
++        Ref list = JSON::Array::create();
++        for (auto& icon : ContextualIdentitiesHaiku::icons()) {
++            Ref entry = JSON::Object::create();
++            entry->setString("icon"_s, icon);
++            entry->setString("iconUrl"_s, emptyString());
++            list->pushObject(WTF::move(entry));
++        }
++        completion(list->toJSONString());
++        return;
++    }
++    completion(toWebExtensionError(apiName, nullString(), "it is not implemented"_s));
++}
++
++} // namespace WebKit
++
++#endif // ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
 diff --git a/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextAPICookiesHaiku.cpp b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextAPICookiesHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..3998cffe6e607ec3c376ccce7afd9b9472574546
+index 0000000000000000000000000000000000000000..a552e61aa9f512954a24b1d3a4e97db9e39680f1
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextAPICookiesHaiku.cpp
-@@ -0,0 +1,369 @@
+@@ -0,0 +1,385 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +#include "config.h"
 +#include "WebExtensionContext.h"
 +#if ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
 +#include "APIHTTPCookieStore.h"
++#include "ContextualIdentitiesHaiku.h"
++#include "WebExtensionCookieStoreIdentifier.h"
 +#include "WebExtensionCookieHostAccess.h"
 +#include "WebExtensionCookieWriteParser.h"
 +#include "WebExtensionCookieQueryParser.h"
@@ -107207,7 +107606,7 @@ index 0000000000000000000000000000000000000000..3998cffe6e607ec3c376ccce7afd9b94
 +            return !hasCookieHostPermission(*this, cookieOrigin(change.cookie));
 +        });
 +        if (!changes.isEmpty())
-+            sendToProcessesForEvent(type, Messages::WebExtensionContextProxy::DispatchCookiesChangedEvent(store->sessionID(), changes));
++            sendToProcessesForEvent(type, Messages::WebExtensionContextProxy::DispatchCookiesChangedEvent(cookieStoreSessionHaiku(store.get()), changes));
 +    });
 +}
 +
@@ -107222,6 +107621,14 @@ index 0000000000000000000000000000000000000000..3998cffe6e607ec3c376ccce7afd9b94
 +        return nullptr;
 +    return store.get();
 +}
++PAL::SessionID WebExtensionContext::cookieStoreSessionHaiku(const WebsiteDataStore& store) const
++{
++    RefPtr controller = extensionController();
++    if (controller && &store == &controller->configuration().defaultWebsiteDataStore())
++        return webExtensionDefaultCookieStoreSessionID();
++    return store.sessionID();
++}
++
 +bool WebExtensionContext::isCookiesMessageAllowed(IPC::Decoder& message)
 +{
 +    return isLoadedAndPrivilegedMessage(message) && hasPermission(WebExtensionPermission::cookies());
@@ -107274,7 +107681,7 @@ index 0000000000000000000000000000000000000000..3998cffe6e607ec3c376ccce7afd9b94
 +            }
 +            if (requireCookieHostPermission && !hasCookieHostPermission(*this, cookieOrigin(cookie)))
 +                continue;
-+            result.append({ store->sessionID(), WTF::move(cookie) });
++            result.append({ cookieStoreSessionHaiku(store.get()), WTF::move(cookie) });
 +        }
 +        std::stable_sort(result.begin(), result.end(), [](auto& first, auto& second) {
 +            if (first.cookie.path.length() != second.cookie.path.length())
@@ -107345,7 +107752,7 @@ index 0000000000000000000000000000000000000000..3998cffe6e607ec3c376ccce7afd9b94
 +        if (!cookie)
 +            completion({ std::nullopt });
 +        else
-+            completion({ WebExtensionCookieParameters { store->sessionID(), WTF::move(*cookie) } });
++            completion({ WebExtensionCookieParameters { cookieStoreSessionHaiku(*store), WTF::move(*cookie) } });
 +    });
 +}
 +void WebExtensionContext::cookiesRemoveJSON(const String& details, CompletionHandler<void(std::expected<std::optional<WebExtensionCookieParameters>, WebExtensionError>&&)>&& completion)
@@ -107477,7 +107884,12 @@ index 0000000000000000000000000000000000000000..3998cffe6e607ec3c376ccce7afd9b94
 +        return;
 +    }
 +    HashMap<PAL::SessionID, Vector<WebExtensionTabIdentifier>> stores;
-+    stores.set(controller->configuration().defaultWebsiteDataStore().sessionID(), Vector<WebExtensionTabIdentifier> { });
++    stores.set(webExtensionDefaultCookieStoreSessionID(), Vector<WebExtensionTabIdentifier> { });
++    // Every container's store, as in Firefox, also those no tab uses.
++    if (auto& containers = controller->nativeContainersHaiku()) {
++        for (auto& identity : containers->identities())
++            stores.set(webExtensionContainerSessionID(identity.identifier), Vector<WebExtensionTabIdentifier> { });
++    }
 +    for (Ref tab : openTabs()) {
 +        if (!tab->isOpen() || !tab->extensionHasAccess())
 +            continue;
@@ -107487,6 +107899,7 @@ index 0000000000000000000000000000000000000000..3998cffe6e607ec3c376ccce7afd9b94
 +        auto session = page->websiteDataStore().sessionID();
 +        if (websiteDataStore(session) != &page->websiteDataStore())
 +            continue;
++        session = cookieStoreSessionHaiku(page->websiteDataStore());
 +        stores.ensure(session, [] { return Vector<WebExtensionTabIdentifier> { }; }).iterator->value.append(tab->identifier());
 +    }
 +    completion(WTF::move(stores));
@@ -109422,10 +109835,10 @@ index 0000000000000000000000000000000000000000..81ec0f40f8811e5cf7b4bc646d54bfe3
 +#endif // ENABLE(WK_WEB_EXTENSIONS_OFFSCREEN) && PLATFORM(HAIKU)
 diff --git a/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextAPIPermissionsHaiku.cpp b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextAPIPermissionsHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..06b7ae6968f52ad877c1747f6f5c6bd48e596741
+index 0000000000000000000000000000000000000000..33972d7cecf0bf2982b994d8d0b0798ecc62a1f9
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextAPIPermissionsHaiku.cpp
-@@ -0,0 +1,386 @@
+@@ -0,0 +1,393 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#include "config.h"
@@ -109504,8 +109917,15 @@ index 0000000000000000000000000000000000000000..06b7ae6968f52ad877c1747f6f5c6bd4
 +    auto requiredPatterns = extension.allRequestedMatchPatterns();
 +    auto allowedPatterns = requiredPatterns.unionWith(extension.optionalPermissionMatchPatterns());
 +    for (auto& permission : permissions) {
-+        if (!WebExtension::supportedPermissions().contains(permission))
++        if (!WebExtension::supportedPermissions().contains(permission)) {
++            // A permission Summit does not have is not granted: contains()
++            // answers false, as Firefox does for one the extension lacks.
++            // Multi-Account Containers asks for "proxy" and "nativeMessaging"
++            // when its panel opens, and stopped drawing it at the error.
++            if (operation == PermissionOperation::Contains)
++                continue;
 +            return toWebExtensionError(api, "permissions"_s, "unsupported permission"_s);
++        }
 +        if (operation != PermissionOperation::Contains && !allowedNames.contains(permission))
 +            return toWebExtensionError(api, "permissions"_s, "permission was not declared in the manifest"_s);
 +        if (operation == PermissionOperation::Remove && extension.requestedPermissions().contains(permission))
@@ -110808,10 +111228,10 @@ index 0000000000000000000000000000000000000000..b1a9c244eddfba7b0b369b8576656c22
 +#endif // ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
 diff --git a/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextAPITabCommandsHaiku.cpp b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextAPITabCommandsHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..b6b273328f9cd72c2836b1bf5ab75bbcac8ce642
+index 0000000000000000000000000000000000000000..9189ac4228e11df0314ee85d085db10cb751683a
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextAPITabCommandsHaiku.cpp
-@@ -0,0 +1,764 @@
+@@ -0,0 +1,800 @@
 +/*
 + * Copyright (C) 2023-2024 Apple Inc. All rights reserved.
 + *
@@ -110845,6 +111265,9 @@ index 0000000000000000000000000000000000000000..b6b273328f9cd72c2836b1bf5ab75bbc
 +#if ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
 +
 +#include "BrowserCommandBrokerHaiku.h"
++#include "ContextualIdentitiesHaiku.h"
++#include "WebExtensionCookieStoreIdentifier.h"
++#include "WebExtensionPermission.h"
 +#include "WebExtensionController.h"
 +#include "WebExtensionTabParameters.h"
 +#include "WebExtensionUtilities.h"
@@ -110930,6 +111353,37 @@ index 0000000000000000000000000000000000000000..b6b273328f9cd72c2836b1bf5ab75bbc
 +        }
 +    }
 +
++    // Firefox's cookieStoreId: open the tab in one of the profile's
++    // containers (OPEN_TAB's container), or in its own store.
++    uint32_t container = 0;
++    if (parameters.cookieStoreIdentifier) {
++        auto& storeId = *parameters.cookieStoreIdentifier;
++        if (!hasPermission(WebExtensionPermission::cookies())) {
++            completionHandler(toWebExtensionError(apiName, nullString(), makeString("No permission for cookieStoreId: "_s, storeId)));
++            return;
++        }
++        auto session = parseWebExtensionCookieStoreIdentifier(storeId);
++        auto identifier = session ? webExtensionContainerIdentifier(*session) : std::nullopt;
++        auto& containers = extensionController->nativeContainersHaiku();
++        bool isPrivateWindow = window && window->isPrivate();
++        if (session && (*session == webExtensionDefaultCookieStoreSessionID()
++            || *session == extensionController->configuration().defaultWebsiteDataStore().sessionID())) {
++            if (isPrivateWindow) {
++                completionHandler(toWebExtensionError(apiName, nullString(), "Illegal to set non-private cookieStoreId in a private window"_s));
++                return;
++            }
++        } else if (identifier && containers && containers->identity(*identifier)) {
++            if (isPrivateWindow) {
++                completionHandler(toWebExtensionError(apiName, nullString(), "Illegal to set non-private cookieStoreId in a private window"_s));
++                return;
++            }
++            container = *identifier;
++        } else if (!(session && session->isEphemeral() && isPrivateWindow)) {
++            completionHandler(toWebExtensionError(apiName, nullString(), makeString("Illegal cookieStoreId: "_s, storeId)));
++            return;
++        }
++    }
++
 +    BMessage message(B_WEBKIT_BROWSER_COMMAND);
 +    bool complete = message.AddUInt32("command", B_WEBKIT_BROWSER_OPEN_TAB) == B_OK
 +        && message.AddBool("active", parameters.active.value_or(true)) == B_OK
@@ -110938,6 +111392,8 @@ index 0000000000000000000000000000000000000000..b6b273328f9cd72c2836b1bf5ab75bbc
 +        complete = message.AddString("url", parameters.url->string().utf8().legacyCStringPointer()) == B_OK;
 +    if (complete && parameters.showingReaderMode.value_or(false))
 +        complete = message.AddBool("reader", true) == B_OK;
++    if (complete && container)
++        complete = message.AddUInt32("container", container) == B_OK;
 +    // Without an accessible window the host chooses where the tab opens.
 +    if (complete && window)
 +        complete = addNativeBrowserCommandWindow(message, *window);
@@ -112777,10 +113233,10 @@ index 0000000000000000000000000000000000000000..99532b95636c27ebefb3884399e8eaff
 +#endif // ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
 diff --git a/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextBrowserCommandsHaiku.cpp b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextBrowserCommandsHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..1096e6fdb2aa9f4b54c120a57841b3847772f737
+index 0000000000000000000000000000000000000000..b0cc5ef225f57a387f41cda3c1ed5b96d0304a0d
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextBrowserCommandsHaiku.cpp
-@@ -0,0 +1,759 @@
+@@ -0,0 +1,858 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#include "config.h"
@@ -112790,6 +113246,10 @@ index 0000000000000000000000000000000000000000..1096e6fdb2aa9f4b54c120a57841b384
 +
 +#include "BrowserCommandBrokerHaiku.h"
 +#include "BrowserTabRegistryHaiku.h"
++#include "ContextualIdentitiesHaiku.h"
++#include "WebExtensionCookieStoreIdentifier.h"
++#include "WebsiteDataRecord.h"
++#include "WebsiteDataType.h"
 +#include "WebExtensionContextProxyMessages.h"
 +#include "WebExtensionController.h"
 +#include "WebExtensionPermission.h"
@@ -113100,10 +113560,105 @@ index 0000000000000000000000000000000000000000..1096e6fdb2aa9f4b54c120a57841b384
 +    sendNativeBrowserQueryHaiku(WTF::move(*message), apiName, WTF::move(completion));
 +}
 +
++// Firefox's browsingData with a container's cookieStoreId (Multi-Account
++// Containers clears a container so): that store's data, removed here, as the
++// browser knows nothing of the containers' data.
++static void removeContainerDataHaiku(WebsiteDataStore& store, const JSON::Object& arguments, CompletionHandler<void(std::expected<String, WebExtensionError>&&)>&& completion)
++{
++    OptionSet<WebsiteDataType> types;
++    if (RefPtr list = arguments.getArray("types"_s)) {
++        for (auto& entry : *list) {
++            auto type = entry->asString();
++            if (type == "cookies"_s)
++                types.add(WebsiteDataType::Cookies);
++            else if (type == "cache"_s)
++                types.add({ WebsiteDataType::DiskCache, WebsiteDataType::MemoryCache });
++            else if (type == "localStorage"_s)
++                types.add({ WebsiteDataType::LocalStorage, WebsiteDataType::SessionStorage });
++            else if (type == "indexedDB"_s)
++                types.add(WebsiteDataType::IndexedDBDatabases);
++            else if (type == "serviceWorkers"_s)
++                types.add(WebsiteDataType::ServiceWorkerRegistrations);
++            else if (type == "cacheStorage"_s)
++                types.add(WebsiteDataType::DOMCache);
++        }
++    }
++    if (!types) {
++        completion(String { "null"_s });
++        return;
++    }
++    auto hostsOf = [&](ASCIILiteral key) {
++        HashSet<String> hosts;
++        if (RefPtr list = arguments.getArray(key)) {
++            for (auto& entry : *list)
++                hosts.add(entry->asString());
++        }
++        return hosts;
++    };
++    auto hosts = hostsOf("hosts"_s);
++    auto excluded = hostsOf("excludeHosts"_s);
++    double since = arguments.getDouble("since"_s).value_or(0);
++    if (hosts.isEmpty() && excluded.isEmpty()) {
++        auto from = since > 0 ? WallTime::fromRawSeconds(since / 1000) : -WallTime::infinity();
++        store.removeData(types, from, [completion = WTF::move(completion)]() mutable {
++            completion(String { "null"_s });
++        });
++        return;
++    }
++    // A site's records are named by its registrable domain; a host matches
++    // the record of its site.
++    store.fetchData(types, { }, [store = Ref { store }, types, hosts = WTF::move(hosts), excluded = WTF::move(excluded), completion = WTF::move(completion)](Vector<WebsiteDataRecord>&& records) mutable {
++        auto matches = [](const HashSet<String>& list, const String& site) {
++            for (auto& host : list) {
++                if (host == site || host.endsWith(makeString('.', site)))
++                    return true;
++            }
++            return false;
++        };
++        records.removeAllMatching([&](auto& record) {
++            return hosts.isEmpty() ? matches(excluded, record.displayName) : !matches(hosts, record.displayName);
++        });
++        store->removeData(types, records, [completion = WTF::move(completion)]() mutable {
++            completion(String { "null"_s });
++        });
++    });
++}
++
 +void WebExtensionContext::browsingDataQueryHaiku(const String& method, const String& argumentsJSON, CompletionHandler<void(std::expected<String, WebExtensionError>&&)>&& completion)
 +{
 +    auto apiName = makeString("browsingData."_s, method, "()"_s);
 +    static constexpr std::array methods { "remove"_s, "settings"_s };
++    RefPtr value = JSON::Value::parseJSON(argumentsJSON);
++    RefPtr arguments = value ? value->asObject() : nullptr;
++    if (method == "remove"_s && arguments && arguments->getValue("cookieStoreId"_s)) {
++        auto storeId = arguments->getString("cookieStoreId"_s);
++        auto session = parseWebExtensionCookieStoreIdentifier(storeId);
++        auto container = session ? webExtensionContainerIdentifier(*session) : std::nullopt;
++        RefPtr controller = extensionController();
++        if (!hasPermission("browsingData"_s) || !controller) {
++            completion(toWebExtensionError(apiName, nullString(), "permission denied"_s));
++            return;
++        }
++        if (container) {
++            auto& containers = controller->nativeContainersHaiku();
++            RefPtr store = containers ? containers->dataStore(*container) : nullptr;
++            if (!store) {
++                completion(toWebExtensionError(apiName, nullString(), makeString("Invalid cookieStoreId: "_s, storeId)));
++                return;
++            }
++            removeContainerDataHaiku(*store, *arguments, WTF::move(completion));
++            return;
++        }
++        if (!session || (*session != webExtensionDefaultCookieStoreSessionID() && *session != controller->configuration().defaultWebsiteDataStore().sessionID())) {
++            completion(toWebExtensionError(apiName, nullString(), makeString("Invalid cookieStoreId: "_s, storeId)));
++            return;
++        }
++        // The profile's own store: the browser's usual removal.
++        arguments->remove("cookieStoreId"_s);
++        if (auto message = nativeNamespaceQueryHaiku(*this, B_WEBKIT_BROWSER_BROWSING_DATA, "browsingData"_s, methods, method, arguments->toJSONString(), apiName, completion))
++            sendNativeBrowserQueryHaiku(WTF::move(*message), apiName, WTF::move(completion));
++        return;
++    }
 +    if (auto message = nativeNamespaceQueryHaiku(*this, B_WEBKIT_BROWSER_BROWSING_DATA, "browsingData"_s, methods, method, argumentsJSON, apiName, completion))
 +        sendNativeBrowserQueryHaiku(WTF::move(*message), apiName, WTF::move(completion));
 +}
@@ -121164,7 +121719,7 @@ index 0000000000000000000000000000000000000000..71c71ec018dcc674c7773e79e8278e1d
 +#endif // ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
 diff --git a/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionTabHaiku.cpp b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionTabHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..d352665db3e90de943961cc56c6f1d1cbae64f3e
+index 0000000000000000000000000000000000000000..7984a723299dc4056d9e556aa1dd3c393a7b9f43
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionTabHaiku.cpp
 @@ -0,0 +1,289 @@
@@ -121415,7 +121970,7 @@ index 0000000000000000000000000000000000000000..d352665db3e90de943961cc56c6f1d1c
 +        // Cookie managers (Cookie AutoDelete) decide which cookie stores are in use
 +        // from tab.cookieStoreId, else from Chrome's "0"/"1". Neither matched
 +        // Summit's storeIds, so cookies of open tabs were treated as unused.
-+        result.cookieStoreIdentifier = webExtensionCookieStoreIdentifier(page->websiteDataStore().sessionID());
++        result.cookieStoreIdentifier = webExtensionCookieStoreIdentifier(m_extensionContext->cookieStoreSessionHaiku(page->websiteDataStore()));
 +        if (RefPtr controller = m_extensionContext->extensionController()) {
 +            if (auto openerPage = controller->openerPageHaiku(page->identifier())) {
 +                if (RefPtr opener = m_extensionContext->getTab(*openerPage); opener && opener->extensionHasAccess())
@@ -125950,6 +126505,498 @@ index 0000000000000000000000000000000000000000..d822f95988aae563c52ec5fa97c604f4
 +    std::optional<uint64_t> m_focusedWindow;
 +    uint64_t m_nextWindowIdentifier { 1 };
 +};
++
++} // namespace WebKit
+diff --git a/Source/WebKit/UIProcess/haiku/ContextualIdentitiesHaiku.cpp b/Source/WebKit/UIProcess/haiku/ContextualIdentitiesHaiku.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..c83c4cb258cac04540c50ab43f06ce253cd1a37a
+--- /dev/null
++++ b/Source/WebKit/UIProcess/haiku/ContextualIdentitiesHaiku.cpp
+@@ -0,0 +1,374 @@
++/* Copyright (C) 2026 Summit contributors. SPDX-License-Identifier: BSD-2-Clause */
++
++#include "config.h"
++#include "ContextualIdentitiesHaiku.h"
++
++#include "StoragePathsHaiku.h"
++#include "WebKitContext.h"
++#include "WebsiteDataStore.h"
++#include "WebsiteDataType.h"
++#include <Message.h>
++#include <algorithm>
++#include <wtf/FileSystem.h>
++#include <wtf/JSONValues.h>
++#include <wtf/NeverDestroyed.h>
++#include <wtf/RunLoop.h>
++#include <wtf/text/MakeString.h>
++
++namespace WebKit {
++
++static constexpr auto listFileName = "containers.json"_s;
++static constexpr size_t maximumNameLength = 256;
++static constexpr size_t maximumIdentities = 1000;
++
++// Firefox's palette and icons (toolkit/components/contextualidentity).
++const Vector<std::pair<ASCIILiteral, ASCIILiteral>>& ContextualIdentitiesHaiku::colors()
++{
++    static NeverDestroyed<Vector<std::pair<ASCIILiteral, ASCIILiteral>>> colors(std::initializer_list<std::pair<ASCIILiteral, ASCIILiteral>> {
++        { "blue"_s, "#37adff"_s }, { "turquoise"_s, "#00c79a"_s }, { "green"_s, "#51cd00"_s }, { "yellow"_s, "#ffcb00"_s },
++        { "orange"_s, "#ff9f00"_s }, { "red"_s, "#ff613d"_s }, { "pink"_s, "#ff4bda"_s }, { "purple"_s, "#af51f5"_s },
++        { "toolbar"_s, "#7c7c7d"_s } });
++    return colors.get();
++}
++
++const Vector<ASCIILiteral>& ContextualIdentitiesHaiku::icons()
++{
++    static NeverDestroyed<Vector<ASCIILiteral>> icons(std::initializer_list<ASCIILiteral> {
++        "fingerprint"_s, "briefcase"_s, "dollar"_s, "cart"_s, "circle"_s, "gift"_s, "vacation"_s, "food"_s, "fruit"_s,
++        "pet"_s, "tree"_s, "chill"_s, "fence"_s });
++    return icons.get();
++}
++
++String ContextualIdentitiesHaiku::colorCode(const String& color)
++{
++    for (auto& [name, code] : colors()) {
++        if (color == name)
++            return code;
++    }
++    return { };
++}
++
++uint32 ContextualIdentitiesHaiku::colorRGB(const String& color)
++{
++    auto code = colorCode(color);
++    if (code.length() != 7)
++        return 0;
++    uint32 value = 0;
++    for (unsigned i = 1; i < 7; ++i)
++        value = value << 4 | toASCIIHexValue(code[i]);
++    return value;
++}
++
++static bool knownColor(const String& color)
++{
++    return !ContextualIdentitiesHaiku::colorCode(color).isNull();
++}
++
++static bool knownIcon(const String& icon)
++{
++    auto& icons = ContextualIdentitiesHaiku::icons();
++    return std::ranges::find_if(icons, [&](auto& name) { return icon == name; }) != icons.end();
++}
++
++Ref<JSON::Object> contextualIdentityJSONHaiku(const ContextualIdentitiesHaiku::Identity& identity)
++{
++    Ref object = JSON::Object::create();
++    object->setString("name"_s, identity.name);
++    object->setString("icon"_s, identity.icon);
++    // Firefox's own address of the icon; Summit has none to offer, so pages
++    // (Multi-Account Containers) draw their own (getSupportedIcons()).
++    object->setString("iconUrl"_s, makeString("resource://usercontext-content/"_s, identity.icon, ".svg"_s));
++    object->setString("color"_s, identity.color);
++    object->setString("colorCode"_s, ContextualIdentitiesHaiku::colorCode(identity.color));
++    object->setString("cookieStoreId"_s, makeString("firefox-container-"_s, identity.identifier));
++    return object;
++}
++
++std::shared_ptr<ContextualIdentitiesHaiku> ContextualIdentitiesHaiku::create(const String& profileDirectory, StoreFactory&& factory)
++{
++    ASSERT(RunLoop::isMain());
++    auto directory = storageDirectoryPathHaiku(false, profileDirectory, "Containers"_s, true);
++    if (directory.isEmpty())
++        return nullptr;
++    std::shared_ptr<ContextualIdentitiesHaiku> result(new ContextualIdentitiesHaiku(directory, WTF::move(factory)), [](ContextualIdentitiesHaiku* identities) {
++        if (RunLoop::isMain())
++            delete identities;
++        else
++            RunLoop::mainSingleton().dispatch([identities] { delete identities; });
++    });
++    result->load();
++    return result;
++}
++
++ContextualIdentitiesHaiku::ContextualIdentitiesHaiku(const String& directory, StoreFactory&& factory)
++    : m_directory(directory)
++    , m_storeFactory(WTF::move(factory))
++{
++}
++
++ContextualIdentitiesHaiku::~ContextualIdentitiesHaiku() = default;
++
++void ContextualIdentitiesHaiku::load()
++{
++    auto path = FileSystem::pathByAppendingComponent(m_directory, listFileName);
++    auto data = FileSystem::readEntireFile(path);
++    RefPtr value = data ? JSON::Value::parseJSON(String::fromUTF8(data->span())) : nullptr;
++    RefPtr object = value ? value->asObject() : nullptr;
++    if (!object) {
++        // A new profile (or an unreadable list, which is kept aside): Firefox's
++        // four containers.
++        if (data)
++            FileSystem::moveFile(path, makeString(path, ".bad"_s));
++        m_identities = {
++            { 1, "Personal"_s, "blue"_s, "fingerprint"_s },
++            { 2, "Work"_s, "orange"_s, "briefcase"_s },
++            { 3, "Banking"_s, "green"_s, "dollar"_s },
++            { 4, "Shopping"_s, "pink"_s, "cart"_s },
++        };
++        m_nextIdentifier = 5;
++        save();
++        updateSnapshot();
++        return;
++    }
++    m_nextIdentifier = std::max<uint32_t>(1, object->getInteger("next"_s).value_or(1));
++    if (RefPtr list = object->getArray("identities"_s)) {
++        for (auto& entry : *list) {
++            RefPtr identity = entry->asObject();
++            if (!identity)
++                continue;
++            auto identifier = identity->getInteger("id"_s).value_or(0);
++            auto name = identity->getString("name"_s);
++            auto color = identity->getString("color"_s);
++            auto icon = identity->getString("icon"_s);
++            if (identifier <= 0 || static_cast<uint64_t>(identifier) > std::numeric_limits<uint32_t>::max() - 1 || name.isNull()
++                || this->identity(identifier) || m_identities.size() >= maximumIdentities)
++                continue;
++            m_identities.append({ static_cast<uint32_t>(identifier), name, knownColor(color) ? color : "blue"_s, knownIcon(icon) ? icon : "circle"_s });
++            m_nextIdentifier = std::max<uint32_t>(m_nextIdentifier, identifier + 1);
++        }
++    }
++    // The data of containers removed while their pages were open.
++    bool removedAny = false;
++    if (RefPtr removed = object->getArray("removed"_s)) {
++        for (auto& entry : *removed) {
++            auto identifier = entry->asInteger().value_or(0);
++            if (identifier <= 0 || this->identity(identifier))
++                continue;
++            FileSystem::deleteNonEmptyDirectory(FileSystem::pathByAppendingComponent(m_directory, String::number(identifier)));
++            removedAny = true;
++        }
++    }
++    if (removedAny)
++        save();
++    updateSnapshot();
++}
++
++bool ContextualIdentitiesHaiku::save() const
++{
++    Ref list = JSON::Array::create();
++    for (auto& identity : m_identities) {
++        Ref object = JSON::Object::create();
++        object->setInteger("id"_s, identity.identifier);
++        object->setString("name"_s, identity.name);
++        object->setString("color"_s, identity.color);
++        object->setString("icon"_s, identity.icon);
++        list->pushObject(WTF::move(object));
++    }
++    Ref removed = JSON::Array::create();
++    for (auto identifier : m_removed)
++        removed->pushInteger(identifier);
++    Ref root = JSON::Object::create();
++    root->setInteger("version"_s, 1);
++    root->setInteger("next"_s, m_nextIdentifier);
++    root->setArray("identities"_s, WTF::move(list));
++    root->setArray("removed"_s, WTF::move(removed));
++    auto text = root->toJSONString().utf8();
++    auto path = FileSystem::pathByAppendingComponent(m_directory, listFileName);
++    auto temporary = makeString(path, ".new"_s);
++    // Written aside and renamed, so a crash never leaves half a list.
++    if (FileSystem::overwriteEntireFile(temporary, byteCast<uint8_t>(text.span())) != text.length()) {
++        FileSystem::deleteFile(temporary);
++        return false;
++    }
++    return FileSystem::moveFile(temporary, path);
++}
++
++const ContextualIdentitiesHaiku::Identity* ContextualIdentitiesHaiku::identity(uint32_t identifier) const
++{
++    auto found = std::ranges::find_if(m_identities, [&](auto& identity) { return identity.identifier == identifier; });
++    return found == m_identities.end() ? nullptr : &*found;
++}
++
++static std::optional<String> invalidMembers(const String& name, const String& color, const String& icon)
++{
++    if (!name.isNull() && (name.length() > maximumNameLength || name.contains('\0')))
++        return "the name is too long"_s;
++    if (!color.isNull() && !knownColor(color))
++        return makeString("Invalid color name: "_s, color);
++    if (!icon.isNull() && !knownIcon(icon))
++        return makeString("Invalid icon name: "_s, icon);
++    return std::nullopt;
++}
++
++std::expected<ContextualIdentitiesHaiku::Identity, String> ContextualIdentitiesHaiku::createIdentity(const String& name, const String& color, const String& icon)
++{
++    ASSERT(RunLoop::isMain());
++    if (name.isNull() || color.isNull() || icon.isNull())
++        return std::unexpected("name, color and icon are required"_s);
++    if (auto error = invalidMembers(name, color, icon))
++        return std::unexpected(*error);
++    if (m_identities.size() >= maximumIdentities || m_nextIdentifier == std::numeric_limits<uint32_t>::max())
++        return std::unexpected("there are too many containers"_s);
++    Identity identity { m_nextIdentifier++, name, color, icon };
++    m_identities.append(identity);
++    save();
++    changed(Change::Created, identity);
++    return identity;
++}
++
++std::expected<ContextualIdentitiesHaiku::Identity, String> ContextualIdentitiesHaiku::updateIdentity(uint32_t identifier, const String& name, const String& color, const String& icon)
++{
++    ASSERT(RunLoop::isMain());
++    auto* identity = const_cast<Identity*>(this->identity(identifier));
++    if (!identity)
++        return std::unexpected(makeString("Invalid contextual identity: firefox-container-"_s, identifier));
++    if (auto error = invalidMembers(name, color, icon))
++        return std::unexpected(*error);
++    if (!name.isNull())
++        identity->name = name;
++    if (!color.isNull())
++        identity->color = color;
++    if (!icon.isNull())
++        identity->icon = icon;
++    auto result = *identity;
++    save();
++    changed(Change::Updated, result);
++    return result;
++}
++
++static OptionSet<WebsiteDataType> containerDataTypes()
++{
++    return { WebsiteDataType::Cookies, WebsiteDataType::DiskCache, WebsiteDataType::MemoryCache, WebsiteDataType::LocalStorage,
++        WebsiteDataType::SessionStorage, WebsiteDataType::IndexedDBDatabases, WebsiteDataType::ServiceWorkerRegistrations,
++        WebsiteDataType::DOMCache, WebsiteDataType::HSTSCache, WebsiteDataType::FileSystem };
++}
++
++std::expected<ContextualIdentitiesHaiku::Identity, String> ContextualIdentitiesHaiku::removeIdentity(uint32_t identifier)
++{
++    ASSERT(RunLoop::isMain());
++    auto index = m_identities.findIf([&](auto& identity) { return identity.identifier == identifier; });
++    if (index == notFound)
++        return std::unexpected(makeString("Invalid contextual identity: firefox-container-"_s, identifier));
++    auto removed = m_identities[index];
++    m_identities.removeAt(index);
++    m_removed.append(identifier);
++    save();
++    // The host closes the container's tabs when it hears of the removal;
++    // their data goes now, and the directory at the next start.
++    if (auto store = m_stores.take(identifier))
++        store->removeData(containerDataTypes(), -WallTime::infinity(), [store] { });
++    else
++        FileSystem::deleteNonEmptyDirectory(FileSystem::pathByAppendingComponent(m_directory, String::number(identifier)));
++    changed(Change::Removed, removed);
++    return removed;
++}
++
++std::expected<void, String> ContextualIdentitiesHaiku::moveIdentities(const Vector<uint32_t>& identifiers, int64_t position)
++{
++    ASSERT(RunLoop::isMain());
++    Vector<Identity> moved;
++    for (auto identifier : identifiers) {
++        auto* identity = this->identity(identifier);
++        if (!identity)
++            return std::unexpected(makeString("Invalid contextual identity: firefox-container-"_s, identifier));
++        if (moved.containsIf([&](auto& entry) { return entry.identifier == identifier; }))
++            return std::unexpected("a container is named twice"_s);
++        moved.append(*identity);
++    }
++    Vector<Identity> rest;
++    for (auto& identity : m_identities) {
++        if (!identifiers.contains(identity.identifier))
++            rest.append(identity);
++    }
++    if (position < -1 || position > static_cast<int64_t>(rest.size()))
++        return std::unexpected("Invalid position"_s);
++    size_t at = position == -1 ? rest.size() : static_cast<size_t>(position);
++    rest.insertVector(at, moved);
++    m_identities = WTF::move(rest);
++    save();
++    // Firefox reports a move as onUpdated of each moved container.
++    for (auto& identity : moved)
++        changed(Change::Updated, identity);
++    return { };
++}
++
++RefPtr<WebsiteDataStore> ContextualIdentitiesHaiku::dataStore(uint32_t identifier)
++{
++    ASSERT(RunLoop::isMain());
++    if (!identity(identifier))
++        return nullptr;
++    if (auto store = m_stores.get(identifier))
++        return store;
++    auto directory = storageDirectoryPathHaiku(false, m_directory, String::number(identifier), true);
++    if (directory.isEmpty())
++        return nullptr;
++    RefPtr store = m_storeFactory(directory, identifier);
++    if (store)
++        m_stores.set(identifier, store);
++    return store;
++}
++
++WebsiteDataStore* ContextualIdentitiesHaiku::existingDataStore(uint32_t identifier) const
++{
++    return m_stores.get(identifier);
++}
++
++void ContextualIdentitiesHaiku::addObserver(Observer&& observer)
++{
++    ASSERT(RunLoop::isMain());
++    m_observers.append(WTF::move(observer));
++}
++
++void ContextualIdentitiesHaiku::updateSnapshot()
++{
++    std::vector<Snapshot> snapshot;
++    snapshot.reserve(m_identities.size());
++    for (auto& identity : m_identities) {
++        snapshot.push_back({ identity.identifier, identity.name.utf8().toStdString(), identity.color.utf8().toStdString(),
++            identity.icon.utf8().toStdString(), colorRGB(identity.color) });
++    }
++    std::lock_guard guard(m_lock);
++    m_snapshot = WTF::move(snapshot);
++}
++
++void ContextualIdentitiesHaiku::changed(Change change, const Identity& identity)
++{
++    updateSnapshot();
++    BMessenger listener;
++    {
++        std::lock_guard guard(m_lock);
++        listener = m_listener;
++    }
++    if (listener.IsValid()) {
++        BMessage message(B_WEBKIT_CONTAINERS_CHANGED);
++        message.AddString("event", change == Change::Created ? "created" : change == Change::Updated ? "updated" : "removed");
++        message.AddUInt32("container", identity.identifier);
++        listener.SendMessage(&message, static_cast<BHandler*>(nullptr), 0);
++    }
++    for (auto& observer : m_observers)
++        observer(change, identity);
++}
++
++std::vector<ContextualIdentitiesHaiku::Snapshot> ContextualIdentitiesHaiku::snapshot() const
++{
++    std::lock_guard guard(m_lock);
++    return m_snapshot;
++}
++
++void ContextualIdentitiesHaiku::setListener(const BMessenger& listener)
++{
++    std::lock_guard guard(m_lock);
++    m_listener = listener;
++}
++
++} // namespace WebKit
+diff --git a/Source/WebKit/UIProcess/haiku/ContextualIdentitiesHaiku.h b/Source/WebKit/UIProcess/haiku/ContextualIdentitiesHaiku.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..af475411b8cdc633aab882f52e14d44cbd188505
+--- /dev/null
++++ b/Source/WebKit/UIProcess/haiku/ContextualIdentitiesHaiku.h
+@@ -0,0 +1,106 @@
++/* Copyright (C) 2026 Summit contributors. SPDX-License-Identifier: BSD-2-Clause */
++
++#pragma once
++
++#include <Messenger.h>
++#include <SupportDefs.h>
++#include <expected>
++#include <memory>
++#include <mutex>
++#include <string>
++#include <vector>
++#include <wtf/Function.h>
++#include <wtf/HashMap.h>
++#include <wtf/JSONValues.h>
++#include <wtf/RefPtr.h>
++#include <wtf/Vector.h>
++#include <wtf/text/WTFString.h>
++
++namespace WebKit {
++
++class WebsiteDataStore;
++
++// Firefox's containers (contextual identities) of one persistent profile:
++// each has a name, colour and icon, and cookies and site storage of its own
++// in a persistent website data store under <profile>/Containers/<id>/. Tabs
++// of a container are pages of that store (WebViewContextHaiku::
++// createContainer); extensions name it "firefox-container-<id>". The list is
++// kept in <profile>/Containers/containers.json. A new profile starts with
++// Firefox's four (Personal, Work, Banking, Shopping).
++//
++// WebKit objects and the list are used on the application (WebKit main)
++// thread; the snapshot and the listener may be used from any thread.
++class ContextualIdentitiesHaiku final {
++public:
++    struct Identity {
++        uint32_t identifier { 0 };
++        String name;
++        String color;
++        String icon;
++    };
++    enum class Change : uint8_t { Created, Updated, Removed };
++    using Observer = Function<void(Change, const Identity&)>;
++    using StoreFactory = Function<RefPtr<WebsiteDataStore>(const String& directory, uint32_t identifier)>;
++
++    static std::shared_ptr<ContextualIdentitiesHaiku> create(const String& profileDirectory, StoreFactory&&);
++    ~ContextualIdentitiesHaiku();
++
++    const Vector<Identity>& identities() const { return m_identities; }
++    const Identity* identity(uint32_t) const;
++    // Null members of update leave those unchanged.
++    std::expected<Identity, String> createIdentity(const String& name, const String& color, const String& icon);
++    std::expected<Identity, String> updateIdentity(uint32_t, const String& name, const String& color, const String& icon);
++    // Removes the container and erases its website data; its directory goes
++    // at the next start, when no page can still be using it.
++    std::expected<Identity, String> removeIdentity(uint32_t);
++    // Firefox's move(): the containers keep their relative order and go to
++    // position (-1: the end).
++    std::expected<void, String> moveIdentities(const Vector<uint32_t>&, int64_t position);
++    // The container's store, made on first use. Null for an unknown container
++    // or when its directories cannot be made.
++    RefPtr<WebsiteDataStore> dataStore(uint32_t);
++    WebsiteDataStore* existingDataStore(uint32_t) const;
++    void addObserver(Observer&&);
++
++    // Any thread.
++    struct Snapshot {
++        uint32 identifier;
++        std::string name;
++        std::string color;
++        std::string icon;
++        uint32 rgb;
++    };
++    std::vector<Snapshot> snapshot() const;
++    // B_WEBKIT_CONTAINERS_CHANGED (WebKitContext.h) goes here after each change.
++    void setListener(const BMessenger&);
++
++    static const Vector<std::pair<ASCIILiteral, ASCIILiteral>>& colors();
++    static const Vector<ASCIILiteral>& icons();
++    static String colorCode(const String& color);
++    static uint32 colorRGB(const String& color);
++
++private:
++    ContextualIdentitiesHaiku(const String& directory, StoreFactory&&);
++    void load();
++    bool save() const;
++    void changed(Change, const Identity&);
++    void updateSnapshot();
++
++    const String m_directory;
++    StoreFactory m_storeFactory;
++    Vector<Identity> m_identities;
++    Vector<uint32_t> m_removed;
++    uint32_t m_nextIdentifier { 1 };
++    HashMap<uint32_t, RefPtr<WebsiteDataStore>> m_stores;
++    Vector<Observer> m_observers;
++
++    mutable std::mutex m_lock;
++    std::vector<Snapshot> m_snapshot;
++    BMessenger m_listener;
++};
++
++// Firefox's ContextualIdentity object: name, icon, iconUrl, color, colorCode
++// and cookieStoreId ("firefox-container-<id>").
++Ref<JSON::Object> contextualIdentityJSONHaiku(const ContextualIdentitiesHaiku::Identity&);
 +
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/DateTimeValueHaiku.h b/Source/WebKit/UIProcess/haiku/DateTimeValueHaiku.h
@@ -132897,10 +133944,10 @@ index 0000000000000000000000000000000000000000..c9a119d02f85b7c5ad8fe9153bfc9604
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/WebView.cpp b/Source/WebKit/UIProcess/haiku/WebView.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..5abbe700d3b25cb47f30228d04aff57b43911e19
+index 0000000000000000000000000000000000000000..812210529a70561da4dad5fc6301aebd2b1fe636
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/WebView.cpp
-@@ -0,0 +1,3260 @@
+@@ -0,0 +1,3269 @@
 +/*
 + * Copyright (C) 2013 Intel Corporation. All rights reserved.
 + *
@@ -132927,6 +133974,7 @@ index 0000000000000000000000000000000000000000..5abbe700d3b25cb47f30228d04aff57b
 + */
 +
 +#include "config.h"
++#include "WebExtensionCookieStoreIdentifier.h"
 +#include "FrameInfoHaiku.h"
 +#include "WebViewPrivate.h"
 +#include <MessageRunner.h>
@@ -134199,6 +135247,14 @@ index 0000000000000000000000000000000000000000..5abbe700d3b25cb47f30228d04aff57b
 +        message.AddBool("user_gesture", action->isProcessingUserGesture());
 +        message.AddInt32("modifiers", nativeModifiersHaiku(action->modifiers()));
 +        message.AddInt32("button", nativeButtonHaiku(action->mouseButton()));
++#if ENABLE(WK_WEB_EXTENSIONS)
++        // A container page's new page is of its container: the host makes the
++        // view with that container's context.
++        if (auto* store = configuration->websiteDataStoreIfExists()) {
++            if (auto container = webExtensionContainerIdentifier(store->sessionID()))
++                message.AddUInt32("container", *container);
++        }
++#endif
 +        if (features && features->width && features->height) {
 +            message.AddFloat("width", *features->width);
 +            message.AddFloat("height", *features->height);
@@ -136163,10 +137219,10 @@ index 0000000000000000000000000000000000000000..5abbe700d3b25cb47f30228d04aff57b
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/WebViewContextHaiku.cpp b/Source/WebKit/UIProcess/haiku/WebViewContextHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..ea23addfdb6e3d6a9bbcc180c761c6220128db58
+index 0000000000000000000000000000000000000000..db1accc1ad13a614f1ed9aabfcbce8c54c310d41
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/WebViewContextHaiku.cpp
-@@ -0,0 +1,391 @@
+@@ -0,0 +1,485 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#include "config.h"
@@ -136179,6 +137235,7 @@ index 0000000000000000000000000000000000000000..ea23addfdb6e3d6a9bbcc180c761c622
 +#endif
 +#include "BrowserCommandBrokerHaiku.h"
 +#include "BrowserTabRegistryHaiku.h"
++#include "ContextualIdentitiesHaiku.h"
 +
 +#include "APIDownloadClient.h"
 +#include "APIPageConfiguration.h"
@@ -136196,12 +137253,14 @@ index 0000000000000000000000000000000000000000..ea23addfdb6e3d6a9bbcc180c761c622
 +#include "WebExtensionControllerConfiguration.h"
 +#include "haiku/WebExtensionDownloadsHaiku.h"
 +#include "haiku/WebExtensionStagingDirectoryHaiku.h"
++#include "WebExtensionCookieStoreIdentifier.h"
 +#endif
 +#include "WebProcessPool.h"
 +#include <WebCore/HTTPHeaderNames.h>
 +#include <WebCore/ResourceRequest.h>
 +#include <pal/SessionID.h>
 +#include <cstdlib>
++#include <cstring>
 +#include <wtf/FileSystem.h>
 +#include <wtf/NeverDestroyed.h>
 +#include <wtf/RunLoop.h>
@@ -136277,9 +137336,37 @@ index 0000000000000000000000000000000000000000..ea23addfdb6e3d6a9bbcc180c761c622
 +    m_processPool->setLegacyDownloadClient(m_downloads->createClient());
 +}
 +
++WebViewContextHaiku::WebViewContextHaiku(Ref<WebsiteDataStore>&& dataStore, std::shared_ptr<WebViewContextHaiku> owner, uint32_t container)
++    : m_dataStore(WTF::move(dataStore))
++    , m_processPool(owner->m_processPool.copyRef())
++    , m_downloads(owner->m_downloads)
++#if ENABLE(WK_WEB_EXTENSIONS)
++    , m_extensionController(owner->m_extensionController.copyRef())
++    , m_extensionPackages(owner->m_extensionPackages)
++#endif
++    , m_browserTabs(owner->m_browserTabs)
++    , m_extensionOwner(WTF::move(owner))
++    , m_container(container)
++    , m_sitePermissions(m_extensionOwner->m_sitePermissions)
++#if ENABLE(WEBUSB)
++    , m_usb(m_extensionOwner->m_usb)
++#endif
++#if ENABLE(WEB_BLUETOOTH)
++    , m_bluetooth(m_extensionOwner->m_bluetooth)
++#endif
++{
++    ASSERT(RunLoop::isMain());
++    // One process pool serves the profile and its containers: WebKit keeps
++    // web processes of different stores apart, and downloads, site
++    // permissions and extensions' native objects stay the profile's.
++}
++
 +WebViewContextHaiku::~WebViewContextHaiku()
 +{
 +    ASSERT(RunLoop::isMain());
++    // Everything but the store is the owner's.
++    if (m_container)
++        return;
 +#if ENABLE(WEBUSB)
 +    m_usb->shutdown();
 +#endif
@@ -136308,6 +137395,11 @@ index 0000000000000000000000000000000000000000..ea23addfdb6e3d6a9bbcc180c761c622
 +void WebViewContextHaiku::allowServerCertificate(const String& host, const String& sha256)
 +{
 +    ASSERT(RunLoop::isMain());
++    // The user's decisions are the profile's, in every container.
++    if (m_container) {
++        m_extensionOwner->allowServerCertificate(host, sha256);
++        return;
++    }
 +    if (host.isEmpty() || sha256.isEmpty())
 +        return;
 +    m_allowedServerCertificates.ensure(host.convertToASCIILowercase(), [] {
@@ -136318,6 +137410,10 @@ index 0000000000000000000000000000000000000000..ea23addfdb6e3d6a9bbcc180c761c622
 +void WebViewContextHaiku::forgetServerCertificates(const String& host)
 +{
 +    ASSERT(RunLoop::isMain());
++    if (m_container) {
++        m_extensionOwner->forgetServerCertificates(host);
++        return;
++    }
 +    if (host.isEmpty())
 +        m_allowedServerCertificates.clear();
 +    else
@@ -136327,6 +137423,8 @@ index 0000000000000000000000000000000000000000..ea23addfdb6e3d6a9bbcc180c761c622
 +bool WebViewContextHaiku::allowsServerCertificate(const String& host, const String& sha256) const
 +{
 +    ASSERT(RunLoop::isMain());
++    if (m_container)
++        return m_extensionOwner->allowsServerCertificate(host, sha256);
 +    auto iterator = m_allowedServerCertificates.find(host.convertToASCIILowercase());
 +    return iterator != m_allowedServerCertificates.end()
 +        && iterator->value.contains(sha256.convertToASCIILowercase());
@@ -136335,6 +137433,10 @@ index 0000000000000000000000000000000000000000..ea23addfdb6e3d6a9bbcc180c761c622
 +void WebViewContextHaiku::setSitePolicy(const String& policy, const String& origin, int32_t value)
 +{
 +    ASSERT(RunLoop::isMain());
++    if (m_container) {
++        m_extensionOwner->setSitePolicy(policy, origin, value);
++        return;
++    }
 +    if (policy.isEmpty() || origin.isEmpty())
 +        return;
 +    auto& origins = m_sitePolicies.ensure(policy, [] { return HashMap<String, int32_t> { }; }).iterator->value;
@@ -136347,6 +137449,8 @@ index 0000000000000000000000000000000000000000..ea23addfdb6e3d6a9bbcc180c761c622
 +std::optional<int32_t> WebViewContextHaiku::sitePolicy(const String& policy, const String& origin) const
 +{
 +    ASSERT(RunLoop::isMain());
++    if (m_container)
++        return m_extensionOwner->sitePolicy(policy, origin);
 +    auto origins = m_sitePolicies.find(policy);
 +    if (origins == m_sitePolicies.end())
 +        return std::nullopt;
@@ -136415,23 +137519,26 @@ index 0000000000000000000000000000000000000000..ea23addfdb6e3d6a9bbcc180c761c622
 +    return adopt(new WebViewContextHaiku(WebsiteDataStore::createNonPersistent(), WTF::move(extensionOwner)));
 +}
 +
-+std::shared_ptr<WebViewContextHaiku> WebViewContextHaiku::create(const char* profilePath, bool privateBrowsing, status_t& status)
++std::shared_ptr<WebViewContextHaiku> WebViewContextHaiku::createContainer(std::shared_ptr<WebViewContextHaiku> owner, uint32_t container)
 +{
 +    ASSERT(RunLoop::isMain());
-+    status = B_OK;
-+    if (privateBrowsing)
-+        return adopt(WebsiteDataStore::createNonPersistent());
++    if (!owner || owner->m_container || !owner->m_containers || !container)
++        return nullptr;
++    RefPtr store = owner->m_containers->dataStore(container);
++    if (!store)
++        return nullptr;
++    return adopt(new WebViewContextHaiku(store.releaseNonNull(), WTF::move(owner), container));
++}
 +
-+    String requestedPath = String::fromUTF8(profilePath);
-+    if (profilePath && (requestedPath.isEmpty() || !requestedPath.startsWith('/'))) {
-+        status = B_BAD_VALUE;
-+        return nullptr;
-+    }
-+    auto profile = storageDirectoryPathHaiku(false, requestedPath, emptyString(), true);
-+    if (profile.isEmpty()) {
-+        status = B_IO_ERROR;
-+        return nullptr;
-+    }
++const std::shared_ptr<ContextualIdentitiesHaiku>& WebViewContextHaiku::containers() const
++{
++    return m_container ? m_extensionOwner->m_containers : m_containers;
++}
++
++// A persistent store with its directories under profile (Cache, Data), as
++// for the profile itself and for each of its containers.
++static RefPtr<WebsiteDataStore> createPersistentDataStoreHaiku(const String& profile, PAL::SessionID session, status_t& status)
++{
 +    auto cache = storageDirectoryPathHaiku(true, profile, "Cache"_s, true);
 +    auto data = storageDirectoryPathHaiku(false, profile, "Data"_s, true);
 +    if (cache.isEmpty() || data.isEmpty()) {
@@ -136479,6 +137586,30 @@ index 0000000000000000000000000000000000000000..ea23addfdb6e3d6a9bbcc180c761c622
 +            return nullptr;
 +        }
 +    }
++    status = B_OK;
++    return WebsiteDataStore::create(WTF::move(configuration), session);
++}
++
++std::shared_ptr<WebViewContextHaiku> WebViewContextHaiku::create(const char* profilePath, bool privateBrowsing, status_t& status)
++{
++    ASSERT(RunLoop::isMain());
++    status = B_OK;
++    if (privateBrowsing)
++        return adopt(WebsiteDataStore::createNonPersistent());
++
++    String requestedPath = String::fromUTF8(profilePath);
++    if (profilePath && (requestedPath.isEmpty() || !requestedPath.startsWith('/'))) {
++        status = B_BAD_VALUE;
++        return nullptr;
++    }
++    auto profile = storageDirectoryPathHaiku(false, requestedPath, emptyString(), true);
++    if (profile.isEmpty()) {
++        status = B_IO_ERROR;
++        return nullptr;
++    }
++    RefPtr store = createPersistentDataStoreHaiku(profile, PAL::SessionID::generatePersistentSessionID(), status);
++    if (!store)
++        return nullptr;
 +    // JavaScriptConfiguration is a Cocoa-only configuration input. Its common
 +    // Haiku default stays empty instead of enabling an unrelated configuration.
 +    String extensionStorageDirectory;
@@ -136493,7 +137624,26 @@ index 0000000000000000000000000000000000000000..ea23addfdb6e3d6a9bbcc180c761c622
 +    // failed copy would silently leave every extension unloaded.
 +    setWebExtensionStagingDirectoryHaiku(profile);
 +#endif
-+    return adopt(WebsiteDataStore::create(WTF::move(configuration), PAL::SessionID::generatePersistentSessionID()), WTF::move(extensionStorageDirectory));
++    auto context = adopt(store.releaseNonNull(), WTF::move(extensionStorageDirectory));
++    // Firefox's containers (contextualIdentities), each a store of its own
++    // under Containers/. SUMMIT_CONTAINERS=0 leaves the profile without them.
++    if (const char* setting = getenv("SUMMIT_CONTAINERS"); !setting || strcmp(setting, "0")) {
++        context->m_containers = ContextualIdentitiesHaiku::create(profile, [](const String& directory, uint32_t container) -> RefPtr<WebsiteDataStore> {
++#if ENABLE(WK_WEB_EXTENSIONS)
++            auto session = webExtensionContainerSessionID(container);
++#else
++            UNUSED_PARAM(container);
++            auto session = PAL::SessionID::generatePersistentSessionID();
++#endif
++            status_t status;
++            return createPersistentDataStoreHaiku(directory, session, status);
++        });
++#if ENABLE(WK_WEB_EXTENSIONS)
++        if (context->m_containers)
++            context->m_extensionController->setNativeContainersHaiku(context->m_containers);
++#endif
++    }
++    return context;
 +}
 +
 +std::shared_ptr<WebViewContextHaiku> WebViewContextHaiku::defaultContext(status_t& status)
@@ -136560,10 +137710,10 @@ index 0000000000000000000000000000000000000000..ea23addfdb6e3d6a9bbcc180c761c622
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/WebViewContextHaiku.h b/Source/WebKit/UIProcess/haiku/WebViewContextHaiku.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..b252c8d4a269799df95e145e4f9183d7e0b0f05e
+index 0000000000000000000000000000000000000000..1fec47d2a254d8f58365601ebe05851b74a52249
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/WebViewContextHaiku.h
-@@ -0,0 +1,114 @@
+@@ -0,0 +1,131 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#pragma once
@@ -136584,6 +137734,7 @@ index 0000000000000000000000000000000000000000..b252c8d4a269799df95e145e4f9183d7
 +namespace WebKit {
 +
 +class BrowserCommandBrokerHaiku;
++class ContextualIdentitiesHaiku;
 +class BrowserTabRegistryHaiku;
 +class DownloadRegistryHaiku;
 +class ExtensionPermissionPromptHaiku;
@@ -136611,6 +137762,19 @@ index 0000000000000000000000000000000000000000..b252c8d4a269799df95e145e4f9183d7
 +    // windows in other browsers. Only extensions allowed in private browsing
 +    // see or act on its pages. It keeps extensionOwner alive.
 +    static std::shared_ptr<WebViewContextHaiku> createPrivate(std::shared_ptr<WebViewContextHaiku> extensionOwner);
++    // The pages of one of owner's containers (contextualIdentities): its own
++    // persistent website data store, everything else (process pool,
++    // extensions, downloads, site permissions, trusted certificates) the
++    // owner's. Null when owner has no such container.
++    static std::shared_ptr<WebViewContextHaiku> createContainer(std::shared_ptr<WebViewContextHaiku> owner, uint32_t container);
++    // The containers of a persistent profile (null for a private context);
++    // a container context answers with its owner's.
++    const std::shared_ptr<ContextualIdentitiesHaiku>& containers() const;
++    // Zero, or the container whose store this context's pages use.
++    uint32_t container() const { return m_container; }
++    // Views of one browser window must share this: a profile's own context
++    // and its containers' do, a private context has its own.
++    const WebViewContextHaiku& tabFamily() const { return m_container ? *m_extensionOwner : *this; }
 +    ~WebViewContextHaiku();
 +    void configure(API::PageConfiguration&) const;
 +    const std::shared_ptr<DownloadRegistryHaiku>& downloads() const { return m_downloads; }
@@ -136653,6 +137817,7 @@ index 0000000000000000000000000000000000000000..b252c8d4a269799df95e145e4f9183d7
 +private:
 +    explicit WebViewContextHaiku(Ref<WebsiteDataStore>&&, String extensionStorageDirectory);
 +    WebViewContextHaiku(Ref<WebsiteDataStore>&&, std::shared_ptr<WebViewContextHaiku> extensionOwner);
++    WebViewContextHaiku(Ref<WebsiteDataStore>&&, std::shared_ptr<WebViewContextHaiku> owner, uint32_t container);
 +    static std::shared_ptr<WebViewContextHaiku> adopt(WebViewContextHaiku*);
 +    static std::shared_ptr<WebViewContextHaiku> adopt(Ref<WebsiteDataStore>&&, String extensionStorageDirectory = { });
 +
@@ -136666,6 +137831,8 @@ index 0000000000000000000000000000000000000000..b252c8d4a269799df95e145e4f9183d7
 +    const std::shared_ptr<BrowserTabRegistryHaiku> m_browserTabs;
 +    // Set when the extensions above are another context's.
 +    const std::shared_ptr<WebViewContextHaiku> m_extensionOwner;
++    const uint32_t m_container { 0 };
++    std::shared_ptr<ContextualIdentitiesHaiku> m_containers;
 +    HashMap<String, HashSet<String>> m_allowedServerCertificates;
 +    HashMap<String, HashMap<String, int32_t>> m_sitePolicies;
 +    const std::shared_ptr<SitePermissionsHaiku> m_sitePermissions;
@@ -145708,10 +146875,10 @@ index 0000000000000000000000000000000000000000..382c570757b91e4afe885055ec16e905
 +#endif // ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
 diff --git a/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIBrowsingData.cpp b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIBrowsingData.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..bfcdd883e69b354fb2e1524b9ee87d979f280f67
+index 0000000000000000000000000000000000000000..e990c9933bd2b27b1a909f15c36787763d826de2
 --- /dev/null
 +++ b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIBrowsingData.cpp
-@@ -0,0 +1,139 @@
+@@ -0,0 +1,147 @@
 +/* Copyright (C) 2026 Summit contributors. SPDX-License-Identifier: BSD-2-Clause */
 +#include "config.h"
 +#include "WebExtensionAPIBrowsingData.h"
@@ -145822,6 +146989,14 @@ index 0000000000000000000000000000000000000000..bfcdd883e69b354fb2e1524b9ee87d97
 +    if (excluded)
 +        arguments->setArray("excludeHosts"_s, excluded.releaseNonNull());
 +    arguments->setArray("types"_s, WTF::move(types));
++    // Firefox's: the data of one cookie store (a container's).
++    if (RefPtr value = object->getValue("cookieStoreId"_s)) {
++        if (value->type() != JSON::Value::Type::String) {
++            exception = toErrorString(nullString(), "cookieStoreId"_s, "a string is expected"_s);
++            return;
++        }
++        arguments->setString("cookieStoreId"_s, value->asString());
++    }
 +    query("remove"_s, WTF::move(arguments), WTF::move(callback));
 +}
 +
@@ -146062,6 +147237,264 @@ index 50355b88656007ccd2b3fa9710b5bc1079e6582c..3dcbef42ab33c5a9d1648408ac0ce5b2
  };
  
  } // namespace WebKit
+diff --git a/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIContextualIdentities.cpp b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIContextualIdentities.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..301a7b4e256bd27f26f100e0fd6e0066a31397a9
+--- /dev/null
++++ b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIContextualIdentities.cpp
+@@ -0,0 +1,201 @@
++/* Copyright (C) 2026 Summit contributors. SPDX-License-Identifier: BSD-2-Clause */
++#include "config.h"
++#include "WebExtensionAPIContextualIdentities.h"
++
++#if ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
++
++#include "MessageSenderInlines.h"
++#include "WebExtensionAPINamespace.h"
++#include "WebExtensionContextMessages.h"
++#include "WebExtensionContextProxy.h"
++#include "WebExtensionEventListenerType.h"
++#include "WebExtensionUtilities.h"
++#include "WebProcess.h"
++#include <cmath>
++
++namespace WebKit {
++
++static bool validCookieStoreId(const String& cookieStoreId, String& exception)
++{
++    if (cookieStoreId.isEmpty() || cookieStoreId.length() > 64) {
++        exception = toErrorString(nullString(), "cookieStoreId"_s, "it must be a cookie store identifier"_s);
++        return false;
++    }
++    return true;
++}
++
++// name, color and icon strings of a details object; required ones for create().
++static RefPtr<JSON::Object> identityDetails(RefPtr<JSON::Value> details, bool required, String& exception)
++{
++    RefPtr object = details ? details->asObject() : nullptr;
++    if (!object) {
++        exception = toErrorString(nullString(), "details"_s, "an object is expected"_s);
++        return nullptr;
++    }
++    Ref result = JSON::Object::create();
++    for (auto key : { "name"_s, "color"_s, "icon"_s }) {
++        RefPtr value = object->getValue(key);
++        if (!value || value->isNull()) {
++            if (required) {
++                exception = toErrorString(nullString(), key, "it is required"_s);
++                return nullptr;
++            }
++            continue;
++        }
++        if (value->type() != JSON::Value::Type::String) {
++            exception = toErrorString(nullString(), key, "a string is expected"_s);
++            return nullptr;
++        }
++        result->setString(key, value->asString());
++    }
++    return result;
++}
++
++void WebExtensionAPIContextualIdentities::get(const String& cookieStoreId, Ref<WebExtensionCallbackHandler>&& callback, String& exception)
++{
++    if (!validCookieStoreId(cookieStoreId, exception))
++        return;
++    Ref arguments = JSON::Object::create();
++    arguments->setString("cookieStoreId"_s, cookieStoreId);
++    request("get"_s, WTF::move(arguments), WTF::move(callback));
++}
++
++void WebExtensionAPIContextualIdentities::query(RefPtr<JSON::Value> details, Ref<WebExtensionCallbackHandler>&& callback, String& exception)
++{
++    Ref arguments = JSON::Object::create();
++    if (details && !details->isNull()) {
++        RefPtr object = details->asObject();
++        if (!object) {
++            exception = toErrorString(nullString(), "details"_s, "an object is expected"_s);
++            return;
++        }
++        if (RefPtr name = object->getValue("name"_s); name && !name->isNull()) {
++            if (name->type() != JSON::Value::Type::String) {
++                exception = toErrorString(nullString(), "name"_s, "a string is expected"_s);
++                return;
++            }
++            arguments->setString("name"_s, name->asString());
++        }
++    }
++    request("query"_s, WTF::move(arguments), WTF::move(callback));
++}
++
++void WebExtensionAPIContextualIdentities::create(RefPtr<JSON::Value> details, Ref<WebExtensionCallbackHandler>&& callback, String& exception)
++{
++    RefPtr arguments = identityDetails(WTF::move(details), true, exception);
++    if (!arguments)
++        return;
++    request("create"_s, arguments.releaseNonNull(), WTF::move(callback));
++}
++
++void WebExtensionAPIContextualIdentities::update(const String& cookieStoreId, RefPtr<JSON::Value> details, Ref<WebExtensionCallbackHandler>&& callback, String& exception)
++{
++    if (!validCookieStoreId(cookieStoreId, exception))
++        return;
++    RefPtr arguments = identityDetails(WTF::move(details), false, exception);
++    if (!arguments)
++        return;
++    arguments->setString("cookieStoreId"_s, cookieStoreId);
++    request("update"_s, arguments.releaseNonNull(), WTF::move(callback));
++}
++
++void WebExtensionAPIContextualIdentities::move(const String& cookieStoreIdsJSON, double position, Ref<WebExtensionCallbackHandler>&& callback, String& exception)
++{
++    // One identifier or a list of them.
++    RefPtr cookieStoreIds = JSON::Value::parseJSON(cookieStoreIdsJSON);
++    Ref list = JSON::Array::create();
++    if (cookieStoreIds && cookieStoreIds->type() == JSON::Value::Type::String)
++        list->pushString(cookieStoreIds->asString());
++    else if (RefPtr array = cookieStoreIds ? cookieStoreIds->asArray() : nullptr) {
++        for (auto& entry : *array) {
++            if (entry->type() != JSON::Value::Type::String) {
++                exception = toErrorString(nullString(), "cookieStoreIds"_s, "it must be a string or an array of strings"_s);
++                return;
++            }
++            list->pushString(entry->asString());
++        }
++    } else {
++        exception = toErrorString(nullString(), "cookieStoreIds"_s, "it must be a string or an array of strings"_s);
++        return;
++    }
++    if (!std::isfinite(position) || std::trunc(position) != position || position < -1) {
++        exception = toErrorString(nullString(), "position"_s, "it must be an integer of -1 or more"_s);
++        return;
++    }
++    Ref arguments = JSON::Object::create();
++    arguments->setArray("cookieStoreIds"_s, WTF::move(list));
++    arguments->setDouble("position"_s, position);
++    request("move"_s, WTF::move(arguments), WTF::move(callback));
++}
++
++void WebExtensionAPIContextualIdentities::remove(const String& cookieStoreId, Ref<WebExtensionCallbackHandler>&& callback, String& exception)
++{
++    if (!validCookieStoreId(cookieStoreId, exception))
++        return;
++    Ref arguments = JSON::Object::create();
++    arguments->setString("cookieStoreId"_s, cookieStoreId);
++    request("remove"_s, WTF::move(arguments), WTF::move(callback));
++}
++
++void WebExtensionAPIContextualIdentities::getSupportedColors(Ref<WebExtensionCallbackHandler>&& callback)
++{
++    request("getSupportedColors"_s, JSON::Object::create(), WTF::move(callback));
++}
++
++void WebExtensionAPIContextualIdentities::getSupportedIcons(Ref<WebExtensionCallbackHandler>&& callback)
++{
++    request("getSupportedIcons"_s, JSON::Object::create(), WTF::move(callback));
++}
++
++void WebExtensionAPIContextualIdentities::request(const String& method, Ref<JSON::Object>&& arguments, Ref<WebExtensionCallbackHandler>&& callback)
++{
++    WebProcess::singleton().sendWithAsyncReply(Messages::WebExtensionContext::ContextualIdentitiesQueryHaiku(method, arguments->toJSONString()),
++        [protectedThis = Ref { *this }, callback = WTF::move(callback)](std::expected<String, WebExtensionError>&& result) {
++            if (!result) {
++                callback->reportError(result.error());
++                return;
++            }
++            if (result->isEmpty() || *result == "null"_s) {
++                callback->call();
++                return;
++            }
++            auto context = callback->globalContext();
++            Protected<JSValueRef> value(context, fromJSON(context, JSON::Value::parseJSON(*result)));
++            callback->call(value.get());
++        }, extensionContext().identifier());
++}
++
++WebExtensionAPIEvent& WebExtensionAPIContextualIdentities::onCreated()
++{
++    if (!m_onCreated)
++        m_onCreated = WebExtensionAPIEvent::create(*this, WebExtensionEventListenerType::ContextualIdentitiesOnCreated);
++    return *m_onCreated;
++}
++
++WebExtensionAPIEvent& WebExtensionAPIContextualIdentities::onUpdated()
++{
++    if (!m_onUpdated)
++        m_onUpdated = WebExtensionAPIEvent::create(*this, WebExtensionEventListenerType::ContextualIdentitiesOnUpdated);
++    return *m_onUpdated;
++}
++
++WebExtensionAPIEvent& WebExtensionAPIContextualIdentities::onRemoved()
++{
++    if (!m_onRemoved)
++        m_onRemoved = WebExtensionAPIEvent::create(*this, WebExtensionEventListenerType::ContextualIdentitiesOnRemoved);
++    return *m_onRemoved;
++}
++
++void WebExtensionContextProxy::dispatchContextualIdentitiesEventHaiku(WebExtensionEventListenerType type, const String& infoJSON)
++{
++    enumerateNamespaceObjects([&](auto& namespaceObject) {
++        auto& identities = namespaceObject.contextualIdentities();
++        auto& event = type == WebExtensionEventListenerType::ContextualIdentitiesOnCreated ? identities.onCreated()
++            : type == WebExtensionEventListenerType::ContextualIdentitiesOnUpdated ? identities.onUpdated() : identities.onRemoved();
++        event.invokeListenersWithJSONArguments({ infoJSON });
++    });
++}
++
++} // namespace WebKit
++
++#endif // ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
+diff --git a/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIContextualIdentities.h b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIContextualIdentities.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..9ce0f3b5c1287b522f9a11cfabc34299eac2a042
+--- /dev/null
++++ b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIContextualIdentities.h
+@@ -0,0 +1,45 @@
++/* Copyright (C) 2026 Summit contributors. SPDX-License-Identifier: BSD-2-Clause */
++#pragma once
++
++#if ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
++
++#include "JSWebExtensionAPIContextualIdentities.h"
++#include "WebExtensionAPIEvent.h"
++#include "WebExtensionAPIObject.h"
++#include <wtf/JSONValues.h>
++
++namespace WebKit {
++
++// Firefox's contextualIdentities: the profile's containers, kept in the UI
++// process (ContextualIdentitiesHaiku). Every call becomes one
++// ContextualIdentitiesQueryHaiku message answered with JSON.
++class WebExtensionAPIContextualIdentities : public WebExtensionAPIObject, public JSWebExtensionWrappable {
++    WEB_EXTENSION_DECLARE_JS_WRAPPER_CLASS(WebExtensionAPIContextualIdentities, contextualIdentities, contextualIdentities);
++
++public:
++    void get(const String& cookieStoreId, Ref<WebExtensionCallbackHandler>&&, String& outExceptionString);
++    void query(RefPtr<JSON::Value> details, Ref<WebExtensionCallbackHandler>&&, String& outExceptionString);
++    void create(RefPtr<JSON::Value> details, Ref<WebExtensionCallbackHandler>&&, String& outExceptionString);
++    void update(const String& cookieStoreId, RefPtr<JSON::Value> details, Ref<WebExtensionCallbackHandler>&&, String& outExceptionString);
++    void move(const String& cookieStoreIdsJSON, double position, Ref<WebExtensionCallbackHandler>&&, String& outExceptionString);
++    void remove(const String& cookieStoreId, Ref<WebExtensionCallbackHandler>&&, String& outExceptionString);
++    void getSupportedColors(Ref<WebExtensionCallbackHandler>&&);
++    void getSupportedIcons(Ref<WebExtensionCallbackHandler>&&);
++
++    WebExtensionAPIEvent& onCreated();
++    WebExtensionAPIEvent& onUpdated();
++    WebExtensionAPIEvent& onRemoved();
++
++private:
++    void request(const String& method, Ref<JSON::Object>&& arguments, Ref<WebExtensionCallbackHandler>&&);
++
++    RefPtr<WebExtensionAPIEvent> m_onCreated;
++    RefPtr<WebExtensionAPIEvent> m_onUpdated;
++    RefPtr<WebExtensionAPIEvent> m_onRemoved;
++};
++
++} // namespace WebKit
++
++SPECIALIZE_TYPE_TRAITS_WEB_EXTENSION(WebExtensionAPIContextualIdentities, contextualIdentities);
++
++#endif // ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
 diff --git a/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPICookies.cpp b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPICookies.cpp
 new file mode 100644
 index 0000000000000000000000000000000000000000..b322344494119786003adb15ca6537e1605e6362
@@ -148444,7 +149877,7 @@ index 8f99137471c0c991d6ec6d0f865f7e0ccc282ce1..5f5011123e144b226f5136b40ebad739
  
  } // namespace WebKit
 diff --git a/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPINamespace.cpp b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPINamespace.cpp
-index cdf7b6ed9b22a11f8ebdce34e1755607c892c4d1..5c246bfff146f9d118725c79b6b44953e5870ed7 100644
+index cdf7b6ed9b22a11f8ebdce34e1755607c892c4d1..e9f2fb53e23f6a3d0d6720fe8246717127cc51d5 100644
 --- a/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPINamespace.cpp
 +++ b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPINamespace.cpp
 @@ -32,7 +32,7 @@
@@ -148621,7 +150054,7 @@ index cdf7b6ed9b22a11f8ebdce34e1755607c892c4d1..5c246bfff146f9d118725c79b6b44953
  
  #if ENABLE(WK_WEB_EXTENSIONS_OFFSCREEN)
  WebExtensionAPIOffscreen& WebExtensionAPINamespace::offscreen()
-@@ -244,16 +280,137 @@ WebExtensionAPIOffscreen& WebExtensionAPINamespace::offscreen()
+@@ -244,16 +280,146 @@ WebExtensionAPIOffscreen& WebExtensionAPINamespace::offscreen()
  }
  #endif
  
@@ -148684,8 +150117,8 @@ index cdf7b6ed9b22a11f8ebdce34e1755607c892c4d1..5c246bfff146f9d118725c79b6b44953
 +    if (!m_bookmarksHaiku)
 +        lazyInitialize(m_bookmarksHaiku, WebExtensionAPIBookmarksHaiku::create(*this));
 +    return *m_bookmarksHaiku;
-+}
-+
+ }
+ 
 +WebExtensionAPISearch& WebExtensionAPINamespace::search()
 +{
 +    // Documentation: https://developer.chrome.com/docs/extensions/reference/api/search
@@ -148713,6 +150146,15 @@ index cdf7b6ed9b22a11f8ebdce34e1755607c892c4d1..5c246bfff146f9d118725c79b6b44953
 +    return *m_sessions;
 +}
 +
++WebExtensionAPIContextualIdentities& WebExtensionAPINamespace::contextualIdentities()
++{
++    // Documentation: https://developer.mozilla.org/docs/Mozilla/Add-ons/WebExtensions/API/contextualIdentities
++
++    if (!m_contextualIdentities)
++        lazyInitialize(m_contextualIdentities, WebExtensionAPIContextualIdentities::create(*this));
++    return *m_contextualIdentities;
++}
++
 +WebExtensionAPISidebarActionHaiku& WebExtensionAPINamespace::sidebarAction()
 +{
 +    // Documentation: https://developer.mozilla.org/docs/Mozilla/Add-ons/WebExtensions/API/sidebarAction
@@ -148720,8 +150162,8 @@ index cdf7b6ed9b22a11f8ebdce34e1755607c892c4d1..5c246bfff146f9d118725c79b6b44953
 +    if (!m_sidebarActionHaiku)
 +        lazyInitialize(m_sidebarActionHaiku, WebExtensionAPISidebarActionHaiku::create(*this));
 +    return *m_sidebarActionHaiku;
- }
- 
++}
++
 +WebExtensionAPISidebarActionHaiku& WebExtensionAPINamespace::sidePanel()
 +{
 +    // Documentation: https://developer.chrome.com/docs/extensions/reference/api/sidePanel
@@ -148764,7 +150206,7 @@ index cdf7b6ed9b22a11f8ebdce34e1755607c892c4d1..5c246bfff146f9d118725c79b6b44953
  WebExtensionAPIPermissions& WebExtensionAPINamespace::permissions()
  {
      // Documentation: https://developer.mozilla.org/docs/Mozilla/Add-ons/WebExtensions/API/permissions
-@@ -286,6 +443,7 @@ WebExtensionAPIScripting& WebExtensionAPINamespace::scripting()
+@@ -286,6 +452,7 @@ WebExtensionAPIScripting& WebExtensionAPINamespace::scripting()
      return *m_scripting;
  }
  
@@ -148772,24 +150214,24 @@ index cdf7b6ed9b22a11f8ebdce34e1755607c892c4d1..5c246bfff146f9d118725c79b6b44953
  #if ENABLE(WK_WEB_EXTENSIONS_SIDEBAR)
  WebExtensionAPISidePanel& WebExtensionAPINamespace::sidePanel()
  {
-@@ -320,15 +478,8 @@ WebExtensionAPIBookmarks& WebExtensionAPINamespace::bookmarks()
+@@ -320,15 +487,8 @@ WebExtensionAPIBookmarks& WebExtensionAPINamespace::bookmarks()
  }
  #endif
  
 -WebExtensionAPIStorage& WebExtensionAPINamespace::storage()
 -{
 -    // Documentation: https://developer.mozilla.org/docs/Mozilla/Add-ons/WebExtensions/API/storage
- 
+-
 -    if (!m_storage)
 -        lazyInitialize(m_storage, WebExtensionAPIStorage::create(*this));
--
+ 
 -    return *m_storage;
 -}
 +#endif
  
  WebExtensionAPITabs& WebExtensionAPINamespace::tabs()
  {
-@@ -339,27 +490,15 @@ WebExtensionAPITabs& WebExtensionAPINamespace::tabs()
+@@ -339,27 +499,15 @@ WebExtensionAPITabs& WebExtensionAPINamespace::tabs()
  
      return *m_tabs;
  }
@@ -148822,7 +150264,7 @@ index cdf7b6ed9b22a11f8ebdce34e1755607c892c4d1..5c246bfff146f9d118725c79b6b44953
  }
  
  WebExtensionAPIWebNavigation& WebExtensionAPINamespace::webNavigation()
-@@ -381,7 +520,28 @@ WebExtensionAPIWebRequest& WebExtensionAPINamespace::webRequest()
+@@ -381,7 +529,28 @@ WebExtensionAPIWebRequest& WebExtensionAPINamespace::webRequest()
  
      return *m_webRequest;
  }
@@ -148853,10 +150295,10 @@ index cdf7b6ed9b22a11f8ebdce34e1755607c892c4d1..5c246bfff146f9d118725c79b6b44953
  } // namespace WebKit
  
 diff --git a/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPINamespace.h b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPINamespace.h
-index fc3e8017564cf29eb647731205e00dc8500dd13d..de1cc0d4bbc1f95e96ef88922ac91a086411fcbb 100644
+index fc3e8017564cf29eb647731205e00dc8500dd13d..940f80cc0c5a482c469988d4707f6e8837cd7012 100644
 --- a/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPINamespace.h
 +++ b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPINamespace.h
-@@ -45,6 +45,22 @@
+@@ -45,6 +45,23 @@
  #include "WebExtensionAPIObject.h"
  #include "WebExtensionAPIOffscreen.h"
  #include "WebExtensionAPIPermissions.h"
@@ -148872,6 +150314,7 @@ index fc3e8017564cf29eb647731205e00dc8500dd13d..de1cc0d4bbc1f95e96ef88922ac91a08
 +#include "WebExtensionAPISearch.h"
 +#include "WebExtensionAPIBrowsingData.h"
 +#include "WebExtensionAPISessions.h"
++#include "WebExtensionAPIContextualIdentities.h"
 +#include "WebExtensionAPITabGroups.h"
 +#include "WebExtensionAPISidebarActionHaiku.h"
 +#include "WebExtensionAPIIdentity.h"
@@ -148879,7 +150322,7 @@ index fc3e8017564cf29eb647731205e00dc8500dd13d..de1cc0d4bbc1f95e96ef88922ac91a08
  #include "WebExtensionAPIRuntime.h"
  #include "WebExtensionAPIScripting.h"
  #include "WebExtensionAPISidePanel.h"
-@@ -66,33 +82,48 @@ class WebExtensionAPINamespace : public WebExtensionAPIObject, public JSWebExten
+@@ -66,33 +83,49 @@ class WebExtensionAPINamespace : public WebExtensionAPIObject, public JSWebExten
  
  public:
      bool isPropertyAllowed(const ASCIILiteral& propertyName, WebPage*);
@@ -148925,6 +150368,7 @@ index fc3e8017564cf29eb647731205e00dc8500dd13d..de1cc0d4bbc1f95e96ef88922ac91a08
 +    WebExtensionAPISearch& search();
 +    WebExtensionAPIBrowsingData& browsingData();
 +    WebExtensionAPISessions& sessions();
++    WebExtensionAPIContextualIdentities& contextualIdentities();
 +    WebExtensionAPITabGroups& tabGroups();
 +    WebExtensionAPISidebarActionHaiku& sidebarAction();
 +    WebExtensionAPISidebarActionHaiku& sidePanel();
@@ -148937,7 +150381,7 @@ index fc3e8017564cf29eb647731205e00dc8500dd13d..de1cc0d4bbc1f95e96ef88922ac91a08
  #if ENABLE(WK_WEB_EXTENSIONS_SIDEBAR)
      WebExtensionAPISidePanel& sidePanel();
      WebExtensionAPISidebarAction& sidebarAction();
-@@ -100,15 +131,13 @@ public:
+@@ -100,15 +133,13 @@ public:
  #if ENABLE(WK_WEB_EXTENSIONS_BOOKMARKS)
      WebExtensionAPIBookmarks& bookmarks();
  #endif
@@ -148957,7 +150401,7 @@ index fc3e8017564cf29eb647731205e00dc8500dd13d..de1cc0d4bbc1f95e96ef88922ac91a08
  
  private:
      const RefPtr<WebExtensionAPIAction> m_action;
-@@ -127,7 +156,24 @@ private:
+@@ -127,7 +158,25 @@ private:
  #if ENABLE(WK_WEB_EXTENSIONS_OFFSCREEN)
      const RefPtr<WebExtensionAPIOffscreen> m_offscreen;
  #endif
@@ -148975,6 +150419,7 @@ index fc3e8017564cf29eb647731205e00dc8500dd13d..de1cc0d4bbc1f95e96ef88922ac91a08
 +    RefPtr<WebExtensionAPISearch> m_search;
 +    RefPtr<WebExtensionAPIBrowsingData> m_browsingData;
 +    RefPtr<WebExtensionAPISessions> m_sessions;
++    RefPtr<WebExtensionAPIContextualIdentities> m_contextualIdentities;
 +    RefPtr<WebExtensionAPITabGroups> m_tabGroups;
 +    RefPtr<WebExtensionAPISidebarActionHaiku> m_sidebarActionHaiku;
 +    RefPtr<WebExtensionAPISidebarActionHaiku> m_sidePanelHaiku;
@@ -152675,10 +154120,10 @@ index 0000000000000000000000000000000000000000..53f3d5d0e7d0737a767f292c7972464c
 +#endif // ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
 diff --git a/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPITabs.cpp b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPITabs.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..fefdf65aaa75bd8a8b50cb525e2cdeed85d7e85f
+index 0000000000000000000000000000000000000000..aa97ff0b5978a0010af3d367e5c25a801819785e
 --- /dev/null
 +++ b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPITabs.cpp
-@@ -0,0 +1,980 @@
+@@ -0,0 +1,1004 @@
 +/*
 + * Copyright (C) 2023 Apple Inc. All rights reserved.
 + *
@@ -152729,6 +154174,7 @@ index 0000000000000000000000000000000000000000..fefdf65aaa75bd8a8b50cb525e2cdeed
 +#include "WebProcess.h"
 +#include "WebPage.h"
 +#include <WebCore/UserGestureIndicator.h>
++#include <wtf/HashSet.h>
 +
 +namespace WebKit {
 +static void callWithTab(WebExtensionCallbackHandler& callback, std::expected<std::optional<WebExtensionTabParameters>, WebExtensionError>&& result)
@@ -152767,6 +154213,15 @@ index 0000000000000000000000000000000000000000..fefdf65aaa75bd8a8b50cb525e2cdeed
 +
 +void WebExtensionAPITabs::query(WebPageProxyIdentifier page, RefPtr<JSON::Value> info, Ref<WebExtensionCallbackHandler>&& callback, String& exception)
 +{
++    // windows.WINDOW_ID_NONE (-1), as windows.onFocusChanged reports when no
++    // browser window has the focus: no tabs, as in Firefox (Multi-Account
++    // Containers queries it so).
++    if (RefPtr object = info ? info->asObject() : nullptr; object && object->getDouble("windowId"_s) == -1.0) {
++        auto context = callback->globalContext();
++        Protected<JSObjectRef> none(context, JSObjectMakeArray(context, 0, nullptr, nullptr));
++        callback->call(none.get());
++        return;
++    }
 +    auto parameters = parseWebExtensionTabQuery(info.get());
 +    if (!parameters) {
 +        exception = parameters.error();
@@ -152779,8 +154234,20 @@ index 0000000000000000000000000000000000000000..fefdf65aaa75bd8a8b50cb525e2cdeed
 +        callback->call(none.get());
 +        return;
 +    }
++    // Firefox's cookieStoreId filter (WebExtensionTabQueryParser checked it).
++    std::optional<HashSet<String>> cookieStores;
++    if (RefPtr object = info->asObject()) {
++        if (RefPtr value = object->getValue("cookieStoreId"_s)) {
++            cookieStores = HashSet<String> { };
++            if (RefPtr array = value->asArray()) {
++                for (auto& entry : *array)
++                    cookieStores->add(entry->asString());
++            } else
++                cookieStores->add(value->asString());
++        }
++    }
 +    WebProcess::singleton().sendWithAsyncReply(Messages::WebExtensionContext::TabsQuery(page, WTF::move(*parameters)),
-+        [protectedThis = Ref { *this }, callback = WTF::move(callback)](std::expected<Vector<WebExtensionTabParameters>, WebExtensionError>&& result) {
++        [protectedThis = Ref { *this }, callback = WTF::move(callback), cookieStores = WTF::move(cookieStores)](std::expected<Vector<WebExtensionTabParameters>, WebExtensionError>&& result) {
 +            if (!result) {
 +                callback->reportError(result.error());
 +                return;
@@ -152789,6 +154256,8 @@ index 0000000000000000000000000000000000000000..fefdf65aaa75bd8a8b50cb525e2cdeed
 +            Vector<Protected<JSValueRef>> protectedTabs;
 +            Vector<JSValueRef> tabs;
 +            for (auto& tab : *result) {
++                if (cookieStores && (!tab.cookieStoreIdentifier || !cookieStores->contains(*tab.cookieStoreIdentifier)))
++                    continue;
 +                protectedTabs.append(Protected<JSValueRef>(context, toWebAPI(context, tab)));
 +                tabs.append(protectedTabs.last().get());
 +            }
@@ -158758,6 +160227,40 @@ index a7907ee1aeea5f7c5fb86a6f7d99e83b69aa2640..4b6be127113d8a81a2f6114642776a14
  
      readonly attribute WebExtensionAPIEvent onCommand;
      readonly attribute WebExtensionAPIEvent onChanged;
+diff --git a/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPIContextualIdentities.idl b/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPIContextualIdentities.idl
+new file mode 100644
+index 0000000000000000000000000000000000000000..bc1b773c0abfcf0369bc8a219bfce9cef622e414
+--- /dev/null
++++ b/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPIContextualIdentities.idl
+@@ -0,0 +1,28 @@
++/*
++ * Copyright (C) 2026 Summit contributors.
++ * SPDX-License-Identifier: BSD-2-Clause
++ */
++
++// Firefox's contextualIdentities, with the browser's containers:
++// https://developer.mozilla.org/docs/Mozilla/Add-ons/WebExtensions/API/contextualIdentities
++[
++    Conditional=WK_WEB_EXTENSIONS,
++    MainWorldOnly,
++    ReturnsPromiseWhenCallbackIsOmitted,
++    UseCPPAPI,
++] interface WebExtensionAPIContextualIdentities {
++
++    [RaisesStringException] void get(DOMString cookieStoreId, [Optional, CallbackHandler] function callback);
++    [RaisesStringException] void query([Optional, JSONValue] any details, [Optional, CallbackHandler] function callback);
++    [RaisesStringException] void create([JSONValue] any details, [Optional, CallbackHandler] function callback);
++    [RaisesStringException] void update(DOMString cookieStoreId, [JSONValue] any details, [Optional, CallbackHandler] function callback);
++    [RaisesStringException] void move([Serialization=JSON, ValuesAllowed] any cookieStoreIds, double position, [Optional, CallbackHandler] function callback);
++    [RaisesStringException] void remove(DOMString cookieStoreId, [Optional, CallbackHandler] function callback);
++    void getSupportedColors([Optional, CallbackHandler] function callback);
++    void getSupportedIcons([Optional, CallbackHandler] function callback);
++
++    readonly attribute WebExtensionAPIEvent onCreated;
++    readonly attribute WebExtensionAPIEvent onUpdated;
++    readonly attribute WebExtensionAPIEvent onRemoved;
++
++};
 diff --git a/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPICookies.idl b/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPICookies.idl
 index 47269bffaea122d173c5b7095608c14e20fb3e01..e83f75ff9eb5cf9764e67f6936832b180e404fcc 100644
 --- a/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPICookies.idl
@@ -159062,10 +160565,10 @@ index 2868b8c1b322da84dda89344451196e063c4264d..701eab20681dee6d7595f0a57f9df7c7
  
  };
 diff --git a/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPINamespace.idl b/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPINamespace.idl
-index cf3a76d37a4d9379d4191ac666ba4bc97bd9013d..5c757656707ce2d2665052a46ec5614ffa4fff7b 100644
+index cf3a76d37a4d9379d4191ac666ba4bc97bd9013d..56d92eee4968aed5824957d8dd46cd2b7c7e0e31 100644
 --- a/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPINamespace.idl
 +++ b/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPINamespace.idl
-@@ -33,57 +33,76 @@
+@@ -33,57 +33,77 @@
      * in the offscreen web view context) - and automatically grant it in WebExtensionAPINamespace::isPropertyAllowed.
      */
  
@@ -159135,6 +160638,7 @@ index cf3a76d37a4d9379d4191ac666ba4bc97bd9013d..5c757656707ce2d2665052a46ec5614f
 +    [MainWorldOnly, Dynamic, Platform=HAIKU] readonly attribute WebExtensionAPISearch search;
 +    [MainWorldOnly, Dynamic, Platform=HAIKU] readonly attribute WebExtensionAPIBrowsingData browsingData;
 +    [MainWorldOnly, Dynamic, Platform=HAIKU] readonly attribute WebExtensionAPISessions sessions;
++    [MainWorldOnly, Dynamic, Platform=HAIKU] readonly attribute WebExtensionAPIContextualIdentities contextualIdentities;
 +    [MainWorldOnly, Dynamic, Platform=HAIKU] readonly attribute WebExtensionAPITabGroups tabGroups;
 +    [MainWorldOnly, Dynamic, Platform=HAIKU] readonly attribute WebExtensionAPISidebarActionHaiku sidebarAction;
 +    [MainWorldOnly, Dynamic, Platform=HAIKU] readonly attribute WebExtensionAPISidebarActionHaiku sidePanel;
@@ -160104,7 +161608,7 @@ index 2b2ff5395e73b7978dc8b610d62ffe835fc1a886..443a5b3005437f3a7ec05ce7b4eca60d
  
  #endif // ENABLE(WK_WEB_EXTENSIONS)
 diff --git a/Source/WebKit/WebProcess/Extensions/WebExtensionContextProxy.h b/Source/WebKit/WebProcess/Extensions/WebExtensionContextProxy.h
-index d6d7467a810b4fa585e99e9ad58711f17a7084bf..3aa165e25547aecbec8eb4734d674e8894e4d2b1 100644
+index d6d7467a810b4fa585e99e9ad58711f17a7084bf..a029f89c2602e2f82bc0d2792f0ce671fc6ba14a 100644
 --- a/Source/WebKit/WebProcess/Extensions/WebExtensionContextProxy.h
 +++ b/Source/WebKit/WebProcess/Extensions/WebExtensionContextProxy.h
 @@ -41,9 +41,12 @@
@@ -160204,7 +161708,7 @@ index d6d7467a810b4fa585e99e9ad58711f17a7084bf..3aa165e25547aecbec8eb4734d674e88
      void internalDispatchRuntimeConnectEvent(WebExtensionContentWorldType, WebExtensionPortChannelIdentifier, const String& name, const std::optional<WebExtensionMessageTargetParameters>&, const WebExtensionMessageSenderParameters&, bool userGesture, CompletionHandler<void(HashCountedSet<WebPageProxyIdentifier>&&)>&&);
      void dispatchRuntimeMessageEvent(WebExtensionContentWorldType, const String& messageJSON, const std::optional<WebExtensionMessageTargetParameters>&, const WebExtensionMessageSenderParameters&, bool userGesture, CompletionHandler<void(String&& replyJSON)>&&);
      void dispatchRuntimeConnectEvent(WebExtensionContentWorldType, WebExtensionPortChannelIdentifier, const String& name, const std::optional<WebExtensionMessageTargetParameters>&, const WebExtensionMessageSenderParameters&, bool userGesture, CompletionHandler<void(HashCountedSet<WebPageProxyIdentifier>&&)>&&);
-@@ -229,8 +269,20 @@ private:
+@@ -229,8 +269,21 @@ private:
      void dispatchStorageChangedEvent(const Vector<String>& onChangedJSON, WebExtensionDataType, WebExtensionContentWorldType);
  
      // Tabs
@@ -160218,6 +161722,7 @@ index d6d7467a810b4fa585e99e9ad58711f17a7084bf..3aa165e25547aecbec8eb4734d674e88
 +    void dispatchHistoryEventHaiku(WebExtensionEventListenerType, const String& json);
 +    void dispatchBookmarksEventHaiku(WebExtensionEventListenerType, const String& identifier, const String& infoJSON);
 +    void dispatchSessionsChangedEventHaiku();
++    void dispatchContextualIdentitiesEventHaiku(WebExtensionEventListenerType, const String& infoJSON);
 +    void dispatchMenusShownEventHaiku(const String& infoJSON, const std::optional<WebExtensionTabParameters>&);
 +    void dispatchMenusHiddenEventHaiku();
 +    void dispatchDeclarativeNetRequestRuleMatchedDebugEventHaiku(const String& infoJSON);
@@ -160225,7 +161730,7 @@ index d6d7467a810b4fa585e99e9ad58711f17a7084bf..3aa165e25547aecbec8eb4734d674e88
      void dispatchTabsReplacedEvent(WebExtensionTabIdentifier replacedTabIdentifier, WebExtensionTabIdentifier newTabIdentifier);
      void dispatchTabsDetachedEvent(WebExtensionTabIdentifier, WebExtensionWindowIdentifier oldWindowIdentifier, uint64_t oldIndex);
      void dispatchTabsMovedEvent(WebExtensionTabIdentifier, WebExtensionWindowIdentifier, uint64_t oldIndex, uint64_t newIndex);
-@@ -246,14 +298,22 @@ private:
+@@ -246,14 +299,22 @@ private:
  
      // Web Navigation
      void dispatchWebNavigationEvent(WebExtensionEventListenerType, WebExtensionTabIdentifier, const WebExtensionFrameParameters&, WallTime);
@@ -160254,7 +161759,7 @@ index d6d7467a810b4fa585e99e9ad58711f17a7084bf..3aa165e25547aecbec8eb4734d674e88
  
      // Windows
      void dispatchWindowsEvent(WebExtensionEventListenerType, const std::optional<WebExtensionWindowParameters>&);
-@@ -275,8 +335,17 @@ private:
+@@ -275,8 +336,17 @@ private:
      mutable PermissionsMap m_grantedPermissions;
      mutable WallTime m_nextGrantedPermissionsExpirationDate { WallTime::nan() };
      RefPtr<WebCore::DOMWrapperWorld> m_contentScriptWorld;
@@ -160273,7 +161778,7 @@ index d6d7467a810b4fa585e99e9ad58711f17a7084bf..3aa165e25547aecbec8eb4734d674e88
      WeakPtr<WebPage> m_offscreenPage;
  #endif
 diff --git a/Source/WebKit/WebProcess/Extensions/WebExtensionContextProxy.messages.in b/Source/WebKit/WebProcess/Extensions/WebExtensionContextProxy.messages.in
-index 6ffe6eabe189601f01839e2fe9d4ae0e2850b0b3..8ab6290c3ae1cfc9907be5d0765b5c1333170897 100644
+index 6ffe6eabe189601f01839e2fe9d4ae0e2850b0b3..8756942e5f8d9da736b1dc9d86a5899a954b87c3 100644
 --- a/Source/WebKit/WebProcess/Extensions/WebExtensionContextProxy.messages.in
 +++ b/Source/WebKit/WebProcess/Extensions/WebExtensionContextProxy.messages.in
 @@ -41,7 +41,12 @@ messages -> WebExtensionContextProxy {
@@ -160327,7 +161832,7 @@ index 6ffe6eabe189601f01839e2fe9d4ae0e2850b0b3..8ab6290c3ae1cfc9907be5d0765b5c13
      DispatchRuntimeConnectEvent(WebKit::WebExtensionContentWorldType contentWorldType, WebKit::WebExtensionPortChannelIdentifier channelIdentifier, String name, struct std::optional<WebKit::WebExtensionMessageTargetParameters> targetParameters, struct WebKit::WebExtensionMessageSenderParameters senderParameters, bool userGesture) -> (HashCountedSet<WebKit::WebPageProxyIdentifier> addedPortCounts)
      DispatchRuntimeInstalledEvent(enum:uint8_t WebKit::WebExtensionContextInstallReason installReason, String previousVersion)
      DispatchRuntimeStartupEvent()
-@@ -99,6 +122,15 @@ messages -> WebExtensionContextProxy {
+@@ -99,6 +122,16 @@ messages -> WebExtensionContextProxy {
      // Tabs Events
      DispatchTabsCreatedEvent(WebKit::WebExtensionTabParameters tabParameters)
      DispatchTabsUpdatedEvent(WebKit::WebExtensionTabParameters tabParameters, WebKit::WebExtensionTabParameters changedParameters)
@@ -160336,6 +161841,7 @@ index 6ffe6eabe189601f01839e2fe9d4ae0e2850b0b3..8ab6290c3ae1cfc9907be5d0765b5c13
 +    DispatchHistoryEventHaiku(WebKit::WebExtensionEventListenerType type, String json)
 +    DispatchBookmarksEventHaiku(WebKit::WebExtensionEventListenerType type, String identifier, String infoJSON)
 +    DispatchSessionsChangedEventHaiku()
++    DispatchContextualIdentitiesEventHaiku(WebKit::WebExtensionEventListenerType type, String infoJSON)
 +    DispatchMenusShownEventHaiku(String infoJSON, std::optional<WebKit::WebExtensionTabParameters> tab)
 +    DispatchMenusHiddenEventHaiku()
 +    DispatchDeclarativeNetRequestRuleMatchedDebugEventHaiku(String infoJSON)
@@ -160343,7 +161849,7 @@ index 6ffe6eabe189601f01839e2fe9d4ae0e2850b0b3..8ab6290c3ae1cfc9907be5d0765b5c13
      DispatchTabsReplacedEvent(WebKit::WebExtensionTabIdentifier replacedTabIdentifier, WebKit::WebExtensionTabIdentifier newTabIdentifier)
      DispatchTabsDetachedEvent(WebKit::WebExtensionTabIdentifier tabIdentifier, WebKit::WebExtensionWindowIdentifier oldWindowIdentifier, uint64_t oldIndex)
      DispatchTabsMovedEvent(WebKit::WebExtensionTabIdentifier tabIdentifier, WebKit::WebExtensionWindowIdentifier windowIdentifier, uint64_t oldIndex, uint64_t newIndex)
-@@ -114,14 +146,20 @@ messages -> WebExtensionContextProxy {
+@@ -114,14 +147,20 @@ messages -> WebExtensionContextProxy {
  
      // Web Navigation
      DispatchWebNavigationEvent(WebKit::WebExtensionEventListenerType type, WebKit::WebExtensionTabIdentifier tabID, struct WebKit::WebExtensionFrameParameters frameParamaters, WallTime timestamp)

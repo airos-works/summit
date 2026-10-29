@@ -44,8 +44,10 @@ This remains an incomplete cookie implementation. Native `onChanged` is now
 exposed and connected through typed IPC, database observation and context
 permission checks. Database events, expiry and the production IPC codecs have
 run in native tests. Network-to-UI delivery and extension listeners have not.
-Partition keys, Firefox first-party isolation and container stores, and
-`getPartitionKey` remain unfinished. WebCore still folds an omitted SameSite
+Partition keys and Firefox first-party isolation (`firstPartyDomain`) remain
+unfinished; container stores (`firefox-container-<id>`, the profile's store as
+`firefox-default`) work since 30 October 2026, see
+[webextensions-containers.md](webextensions-containers.md). WebCore still folds an omitted SameSite
 attribute into `None`; explicit `unspecified` is rejected. SameSite metadata
 storage does not establish SameSite enforcement on network requests (added
 separately on 20 October 2026, [networking.md](networking.md)). Unknown

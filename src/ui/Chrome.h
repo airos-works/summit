@@ -134,6 +134,8 @@ enum class TabAudio { None, Playing, Muted };
 struct TabLabel {
     int64 id; std::string title; bool loading; const BBitmap* icon = nullptr; bool capturing = false;
     bool pinned = false; TabAudio audio = TabAudio::None; std::string url;
+    // A tab of a container (Containers.h): a line of its colour under it.
+    bool container = false; rgb_color containerColor = {0, 0, 0, 255}; std::string containerName;
 };
 // Draws a site icon, or a neutral globe when there is none.
 void DrawSiteIcon(BView* view, const BBitmap* icon, BPoint leftTop);
@@ -204,6 +206,8 @@ BookmarkButton BookmarkButtons(const Bookmarks&, const std::vector<PageRecord>&,
 // A page in a menu (history, bookmarks): its site icon (a copy is kept;
 // null leaves the icon's place empty, so labels line up) before the label.
 BMenuItem* NewPageMenuItem(const char* label, BMessage* message, const BBitmap* icon);
+// An item with a dot of color before its label (a container's).
+BMenuItem* NewColorMenuItem(const char* label, BMessage* message, rgb_color color);
 BMenuItem* NewPageMenuItem(const char* label, BMessage* message, std::shared_ptr<const BBitmap> icon);
 // Adds a folder's contents to a menu: bookmarks, folders as submenus that
 // are filled when they open, and Open All in Tabs. Their messages go to target.
