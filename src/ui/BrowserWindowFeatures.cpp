@@ -145,7 +145,7 @@ private:
         const std::string body = "**What happened:** " + title + " (engine reason: " + (reason.empty() ? "unknown" : reason) + ").\n\n"
             "**Site:** " + OriginOf(url) + "\n\n**Summit:** WebKit " + BWebKitVersion() + ", Haiku port " + BWebKitPortVersion()
             + "\n\n**What I was doing:** \n";
-        return "https://github.com/jmgasper/summit/issues/new?title=" + encode(title + " on " + HostOf(url)) + "&body=" + encode(body);
+        return "https://github.com/airos-works/summit/issues/new?title=" + encode(title + " on " + HostOf(url)) + "&body=" + encode(body);
     }
 };
 }

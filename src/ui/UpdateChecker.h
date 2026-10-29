@@ -27,7 +27,7 @@ std::string BuildDescription();
 // ParseSimulatedBuild) and SUMMIT_UPDATE_DRY_RUN=1 replaces the pkgman
 // transaction by unpacking both packages into a scratch folder; a pretended
 // build always runs dry. SUMMIT_UPDATE_API replaces
-// https://api.github.com/repos/jmgasper/summit.
+// https://api.github.com/repos/airos-works/summit.
 class UpdateChecker final : public BHandler {
 public:
     struct Settings {

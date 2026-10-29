@@ -49,8 +49,8 @@ constexpr uint32 kCheckDone = 'upcd', kTick = 'uptk', kOpenRelease = 'upal';
 // application's answer when it did not restart.
 constexpr uint32 kInstall = 'upin', kShowChanges = 'upsc', kInstallProgress = 'uppg', kInstallDone = 'updn',
     kRestartCancelled = 'uprc', kActivate = 'upac';
-constexpr const char* kRepositoryAPI = "https://api.github.com/repos/jmgasper/summit";
-constexpr const char* kDownloadPrefix = "https://github.com/jmgasper/summit/releases/download/";
+constexpr const char* kRepositoryAPI = "https://api.github.com/repos/airos-works/summit";
+constexpr const char* kDownloadPrefix = "https://github.com/airos-works/summit/releases/download/";
 
 // --- What runs ---
 
@@ -967,7 +967,7 @@ void UpdateChecker::Finished()
                     "from the release page.";
             }
             auto* message = new BMessage(kOpenRelease);
-            message->AddString("url", job->release ? job->release->htmlURL.c_str() : "https://github.com/jmgasper/summit/releases");
+            message->AddString("url", job->release ? job->release->htmlURL.c_str() : "https://github.com/airos-works/summit/releases");
             auto* prompt = new BAlert("Summit Update", text.c_str(), "Open Release Page", "OK");
             prompt->SetShortcut(1, B_ESCAPE);
             prompt->Go(new BInvoker(message, this));
