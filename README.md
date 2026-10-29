@@ -28,14 +28,14 @@ tables below, and install both together.
 <!-- airos-ci:latest-builds:start -->
 ## Latest builds
 
-Built automatically by air/OS CI from commit `5876df1` on 2026-10-29 ([all files](https://github.com/airos-works/summit/releases/tag/latest)).
+Built automatically by air/OS CI from commit `61e5531` on 2026-10-29 ([all files](https://github.com/airos-works/summit/releases/tag/latest)).
 
 | Architecture | Package |
 |---|---|
-| arm64 | [summit-0.1.0.git20261029.1704-1-arm64.hpkg](https://github.com/airos-works/summit/releases/download/latest/summit-0.1.0.git20261029.1704-1-arm64.hpkg) |
-| arm64 | [summit_webkit-1.10.1.git20261029.1704-1-arm64.hpkg](https://github.com/airos-works/summit/releases/download/latest/summit_webkit-1.10.1.git20261029.1704-1-arm64.hpkg) |
-| x86_64 | [summit-0.1.0.git20261029.1704-1-x86_64.hpkg](https://github.com/airos-works/summit/releases/download/latest/summit-0.1.0.git20261029.1704-1-x86_64.hpkg) |
-| x86_64 | [summit_webkit-1.10.1.git20261029.1704-1-x86_64.hpkg](https://github.com/airos-works/summit/releases/download/latest/summit_webkit-1.10.1.git20261029.1704-1-x86_64.hpkg) |
+| arm64 | [summit-0.1.0.git20261029.1121-1-arm64.hpkg](https://github.com/airos-works/summit/releases/download/latest/summit-0.1.0.git20261029.1121-1-arm64.hpkg) |
+| arm64 | [summit_webkit-1.10.1.git20261029.1121-1-arm64.hpkg](https://github.com/airos-works/summit/releases/download/latest/summit_webkit-1.10.1.git20261029.1121-1-arm64.hpkg) |
+| x86_64 | [summit-0.1.0.git20261029.1121-1-x86_64.hpkg](https://github.com/airos-works/summit/releases/download/latest/summit-0.1.0.git20261029.1121-1-x86_64.hpkg) |
+| x86_64 | [summit_webkit-1.10.1.git20261029.1121-1-x86_64.hpkg](https://github.com/airos-works/summit/releases/download/latest/summit_webkit-1.10.1.git20261029.1121-1-x86_64.hpkg) |
 
 Install with `pkgman install <file>`, or copy the file into `/boot/system/packages`. Haiku SDK: x86_64 hrev60207-2112-g182e48b61c, arm64 hrev60207-2112-g182e48b61c.
 <!-- airos-ci:latest-builds:end -->
@@ -111,7 +111,7 @@ for tested versions and limitations.
 | Media | HTML audio/video and [MediaSource streaming](docs/streaming-media.md) for MP4, WebM, ADTS AAC, MPEG audio and MPEG-TS. Direct [MPEG-DASH](docs/dash-playback.md) supports H.264/AAC, seeking, adaptive quality and live refresh. |
 | Encrypted media | [Clear Key EME](docs/encrypted-media.md) with temporary CENC sessions for H.264/AAC through MediaSource or DASH. Widevine, PlayReady, FairPlay, and persistent licenses are unsupported. |
 | Devices | [WebUSB](docs/web-platform-issues.md) and [Web Bluetooth](docs/bluetooth-transport.md), with native selection, origin-scoped grants, protected-device checks, and cancellation on page closure. |
-| Integration | Native fullscreen, approved external-app and website protocol handlers, and Web Authentication. |
+| Integration | Native fullscreen, approved external-app and website protocol handlers, and Web Authentication with [passkeys kept by Summit](docs/webauthn-passkeys.md) in the key store (password-manager extensions first). |
 
 [Web-platform notes](docs/web-platform-issues.md) document the supported subsets.
 Device access requires a secure context and user approval. WebUSB physical

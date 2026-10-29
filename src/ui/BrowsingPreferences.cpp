@@ -169,7 +169,7 @@ BrowsingPreferences::BrowsingPreferences(BMessenger owner, const std::string& au
         .Add(Title("passwords-title", "Passwords"))
         .AddGroup(B_VERTICAL, 6).SetInsets(12, 0, 0, 0)
             .Add(fSavePasswords)
-            .Add(Hint("passwords-hint", "Saved passwords are kept in the Haiku key store, not in Summit's settings."))
+            .Add(Hint("passwords-hint", "Saved passwords and passkeys are kept in the Haiku key store, not in Summit's settings."))
             .Add(fAccounts)
             .AddGroup(B_HORIZONTAL, 8)
                 .Add(new BButton("import-passwords", "Import…", new BMessage(importPasswords)))
@@ -235,6 +235,12 @@ void BrowsingPreferences::ShowAccounts()
             accounts.AddString("origin", account.origin.c_str());
             accounts.AddString("username", account.username.c_str());
         }
+        for (const auto& passkey : PasskeyStore::Passkeys()) {
+            accounts.AddString("passkey_site", passkey.site.c_str());
+            accounts.AddString("passkey_credential", passkey.credential.c_str());
+            accounts.AddString("passkey_account", (passkey.displayName.empty() || passkey.displayName == passkey.userName
+                ? passkey.userName : passkey.displayName + " (" + passkey.userName + ")").c_str());
+        }
         target.SendMessage(&accounts);
     }).detach();
 }
@@ -248,9 +254,15 @@ void BrowsingPreferences::Send(const char* name, bool value)
 
 void BrowsingPreferences::MessageReceived(BMessage* message)
 {
+    auto selectedPasskey = [&]() -> const PasskeyRow* {
+        auto* row = fAccounts->CurrentSelection();
+        for (const auto& passkey : fPasskeyRows)
+            if (row && passkey.row == row) return &passkey;
+        return nullptr;
+    };
     auto selected = [&]() -> std::optional<SavedAccount> {
         auto* row = fAccounts->CurrentSelection();
-        if (!row) return std::nullopt;
+        if (!row || selectedPasskey()) return std::nullopt;
         const std::string site = static_cast<BStringField*>(row->GetField(0))->String();
         const std::string username = static_cast<BStringField*>(row->GetField(1))->String();
         for (const auto& account : PasswordStore::Accounts())
@@ -273,6 +285,16 @@ void BrowsingPreferences::MessageReceived(BMessage* message)
             row->SetField(new BStringField((text.rfind("https://", 0) == 0 ? text.substr(8) : text).c_str()), 0);
             row->SetField(new BStringField(message->GetString("username", i, "")), 1);
             fAccounts->AddRow(row);
+        }
+        fPasskeyRows.clear();
+        const char* site = nullptr;
+        for (int32 i = 0; message->FindString("passkey_site", i, &site) == B_OK; ++i) {
+            const std::string account = message->GetString("passkey_account", i, "");
+            auto* row = new BRow();
+            row->SetField(new BStringField(site), 0);
+            row->SetField(new BStringField((account + " — passkey").c_str()), 1);
+            fAccounts->AddRow(row);
+            fPasskeyRows.push_back({row, site, message->GetString("passkey_credential", i, ""), account});
         }
         fShow->SetEnabled(false);
         fRemove->SetEnabled(false);
@@ -321,13 +343,22 @@ void BrowsingPreferences::MessageReceived(BMessage* message)
         return;
     }
     case showPassword: {
+        if (auto* passkey = selectedPasskey()) {
+            (new BAlert("Saved passkey — Summit", ("Site: " + passkey->site + "\nAccount: " + passkey->account
+                + "\n\nA passkey Summit made for this site. Its private key stays in the key store (keyring "
+                "\u201cSummit passkeys\u201d) and is never shown.").c_str(), "OK"))->Go(nullptr);
+            return;
+        }
         if (auto account = selected())
             (new BAlert("Saved password — Summit", ("Site: " + account->origin + "\nAccount: " + account->username
                 + "\nPassword: " + account->password).c_str(), "OK"))->Go(nullptr);
         return;
     }
     case removeAccount: {
-        if (auto account = selected()) PasswordStore::Remove(account->origin, account->username);
+        // A removed passkey cannot sign in again; the site keeps its public
+        // key until the account's settings remove it there too.
+        if (auto* passkey = selectedPasskey()) PasskeyStore::Remove(passkey->site, passkey->credential);
+        else if (auto account = selected()) PasswordStore::Remove(account->origin, account->username);
         ShowAccounts();
         return;
     }

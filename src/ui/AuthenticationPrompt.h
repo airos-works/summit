@@ -19,6 +19,10 @@ constexpr uint32 kAuthenticationAnswer = 'auan';
 // thread: "identifier", repeated "user" and "password".
 constexpr uint32 kAuthenticationAccounts = 'auac';
 
+// A site's own text (a realm, an account name) as a prompt may show it: no
+// control or direction characters, cut at limit bytes with an ellipsis.
+std::string PromptDisplayText(const std::string& text, size_t limit);
+
 // The sheet a site that asks for a name and password gets (HTTP Basic,
 // Digest or NTLM authentication, #87): over its browser window, which takes
 // no input until it is answered. Escape and Close are Cancel.

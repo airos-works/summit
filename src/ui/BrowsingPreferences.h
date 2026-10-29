@@ -25,7 +25,7 @@ struct BrowsingAids {
 
 // Preferences › Browsing (#66, #67, #70): media that play by themselves,
 // spell checking, and saved passwords (PasswordStore.h) with import and
-// export. Changes go to the application as kPreferencesChanged.
+// export, and Summit's passkeys (#111), which can be removed. Changes go to the application as kPreferencesChanged.
 class BrowsingPreferences : public BGroupView {
 public:
     // spellingLanguage: the dictionary chosen, empty for the system's
@@ -59,6 +59,12 @@ private:
     BMenuField* fMinimumFontSize;
     BCheckBox* fUnload;
     std::vector<std::string> fAppIDs;
+    // The list's passkey rows (PasskeyStore): row, site and credential.
+    struct PasskeyRow {
+        const void* row;
+        std::string site, credential, account;
+    };
+    std::vector<PasskeyRow> fPasskeyRows;
     std::unique_ptr<BFilePanel> fPanel;
 };
 }

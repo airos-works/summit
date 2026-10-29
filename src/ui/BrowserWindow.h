@@ -740,13 +740,27 @@ private:
     void AuthenticationAnswered(const BMessage& message);
     void ShowAuthenticationPrompt();
     // A tab closes or moves to another window: its requests go on without
-    // a name and password.
+    // a name and password, and its passkey requests are declined.
     void DropTabAuthentications(int64 tab);
     std::vector<AuthenticationRequest> fAuthentications;
     BMessenger fAuthenticationPrompt;
     uint64 fAuthenticationShown = 0;
     // The name last signed in with, by protection space (AuthenticationSpace).
     std::map<std::string, std::string> fAuthenticationUsers;
+    // Passkeys (#111, BrowserWindowAuthentication.cpp): requests of Summit's
+    // own authenticator (B_WEBKIT_PASSKEY_REQUESTED) that wait for the user,
+    // in the order they came, and the sheet showing one of the selected tab's.
+    struct PasskeyRequest {
+        uint64 identifier = 0;
+        int64 tab = 0;
+        BMessage request;
+    };
+    void PasskeyRequested(const BMessage& message);
+    void PasskeyAnswered(const BMessage& message);
+    void ShowPasskeyPrompt();
+    std::vector<PasskeyRequest> fPasskeyRequests;
+    BMessenger fPasskeyPrompt;
+    uint64 fPasskeyShown = 0;
     // A web app's window (#75): no tabs, toolbar or bookmarks bar.
     std::string fWebApp;
     std::string fWebAppScope, fWebAppName;

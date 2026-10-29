@@ -1,6 +1,8 @@
 #include "PasswordStore.h"
 #include <Key.h>
 #include <KeyStore.h>
+#include <DataIO.h>
+#include <Message.h>
 #include <algorithm>
 #include <cstring>
 #include <sstream>
@@ -125,6 +127,46 @@ size_t ImportCSV(const std::string& text, std::string& error)
     }
     if (!imported) error = "No accounts were found in the file.";
     return imported;
+}
+}
+
+namespace PasskeyStore {
+namespace {
+constexpr const char* kPasskeyKeyring = "Summit passkeys";
+}
+
+std::vector<SavedPasskey> Passkeys()
+{
+    std::vector<SavedPasskey> passkeys;
+    BKeyStore store;
+    uint32 cookie = 0;
+    BKey key;
+    // A keyring that does not exist yet (no passkey was ever made) answers
+    // at once, without asking the user to allow Summit.
+    while (store.GetNextKey(kPasskeyKeyring, B_KEY_TYPE_GENERIC, B_KEY_PURPOSE_WEB, cookie, key) == B_OK) {
+        if (!key.Identifier() || !key.SecondaryIdentifier() || !key.Data()) continue;
+        BMemoryIO input(key.Data(), key.DataLength());
+        BMessage record;
+        if (record.Unflatten(&input) != B_OK) continue;
+        passkeys.push_back({key.Identifier(), key.SecondaryIdentifier(), record.GetString("user_name", ""),
+            record.GetString("display_name", "")});
+        if (passkeys.size() >= 10000) break;
+    }
+    return passkeys;
+}
+
+bool Remove(const std::string& site, const std::string& credential)
+{
+    // Found by enumeration, as Passkeys() does: keystore_server asks the
+    // user once per kind of access, and listing already asked.
+    BKeyStore store;
+    uint32 cookie = 0;
+    BKey key;
+    while (store.GetNextKey(kPasskeyKeyring, B_KEY_TYPE_GENERIC, B_KEY_PURPOSE_WEB, cookie, key) == B_OK) {
+        if (key.Identifier() && key.SecondaryIdentifier() && site == key.Identifier() && credential == key.SecondaryIdentifier())
+            return store.RemoveKey(kPasskeyKeyring, key) == B_OK;
+    }
+    return false;
 }
 }
 }

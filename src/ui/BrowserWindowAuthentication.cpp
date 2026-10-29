@@ -2,8 +2,10 @@
 // Sites that ask for a name and password (HTTP Basic, Digest and NTLM
 // authentication, #87): the engine asks (B_WEBKIT_AUTHENTICATION_REQUESTED),
 // a saved account answers by itself, and otherwise a sheet over the window
-// asks the user (AuthenticationPrompt).
+// asks the user (AuthenticationPrompt). Passkeys of Summit's own WebAuthn
+// authenticator (#111) are asked about the same way (PasskeyPrompt).
 #include "AuthenticationPrompt.h"
+#include "PasskeyPrompt.h"
 #include "BrowserWindow.h"
 #include "FeatureMessages.h"
 #include "PasswordStore.h"
@@ -215,6 +217,102 @@ void BrowserWindow::DropTabAuthentications(int64 tab)
         BWebKitView::AnswerAuthentication(request.identifier, nullptr, nullptr);
         return true;
     });
+    std::erase_if(fPasskeyRequests, [&](const PasskeyRequest& request) {
+        if (request.tab != tab) return false;
+        if (request.identifier == fPasskeyShown && fPasskeyPrompt.IsValid()) {
+            BMessage close(B_QUIT_REQUESTED);
+            fPasskeyPrompt.SendMessage(&close);
+        }
+        BWebKitView::AnswerPasskeyRequest(request.identifier, -1);
+        return true;
+    });
+}
+
+// A page's WebAuthn request reached Summit's own authenticator: create a
+// passkey, or sign in with one (#111). The engine keeps the passkeys (the
+// key store's "Summit passkeys" keyring) and makes the keys and signatures;
+// the user's confirmation here is all it needs.
+void BrowserWindow::PasskeyRequested(const BMessage& message)
+{
+    const uint64 identifier = message.GetUInt64("identifier", 0);
+    if (!identifier) return;
+    if (message.GetBool("withdrawn", false)) {
+        // The page aborted the request, closed, or it timed out.
+        std::erase_if(fPasskeyRequests, [&](const PasskeyRequest& request) { return request.identifier == identifier; });
+        if (fPasskeyShown == identifier && fPasskeyPrompt.IsValid()) {
+            BMessage close(B_QUIT_REQUESTED);
+            fPasskeyPrompt.SendMessage(&close);
+        }
+        return;
+    }
+    BMessenger view;
+    auto* tab = message.FindMessenger("view", &view) == B_OK ? FindTab(view) : nullptr;
+    if (!tab) {
+        BWebKitView::AnswerPasskeyRequest(identifier, -1);
+        return;
+    }
+    const bool create = message.GetBool("create", false);
+    std::fprintf(stderr, "Summit: %s asks %s a passkey for %s (request %llu)\n", message.GetString("origin", ""),
+        create ? "to create" : "for", message.GetString("rp_id", ""), static_cast<unsigned long long>(identifier));
+    fPasskeyRequests.push_back({identifier, tab->id, message});
+    ShowPasskeyPrompt();
+}
+
+void BrowserWindow::ShowPasskeyPrompt()
+{
+    if (fPasskeyPrompt.IsValid()) return;
+    fPasskeyShown = 0;
+    auto found = std::find_if(fPasskeyRequests.begin(), fPasskeyRequests.end(),
+        [&](const PasskeyRequest& request) { return request.tab == fSelected; });
+    if (found == fPasskeyRequests.end()) return;
+    const BMessage& request = found->request;
+    PasskeyPrompt::Fields fields;
+    fields.identifier = found->identifier;
+    fields.site = request.GetString("rp_id", "");
+    const std::string origin = request.GetString("origin", "");
+    if (const auto scheme = origin.find("://"); scheme != std::string::npos) fields.pageHost = origin.substr(scheme + 3);
+    fields.privateWindow = fPrivate;
+    if (request.GetBool("create", false)) {
+        fields.kind = request.GetBool("exists", false) ? PasskeyPrompt::Kind::AlreadySaved : PasskeyPrompt::Kind::Create;
+        fields.userName = request.GetString("user_name", "");
+        fields.displayName = request.GetString("user_display_name", "");
+        fields.replaces = request.GetBool("replaces", false);
+    } else {
+        const char* name = nullptr;
+        for (int32 i = 0; request.FindString("account_name", i, &name) == B_OK; ++i)
+            fields.accounts.emplace_back(name, request.GetString("account_display_name", i, ""));
+        fields.kind = fields.accounts.empty() ? PasskeyPrompt::Kind::NoPasskey : PasskeyPrompt::Kind::SignIn;
+    }
+    auto* prompt = new PasskeyPrompt(fields, BMessenger(this));
+    if (prompt->AddToSubset(this) != B_OK) {
+        prompt->Quit();
+        return;
+    }
+    // Over the page, a little above its middle, as the sign-in sheet.
+    const BRect frame = Frame(), size = prompt->Frame();
+    prompt->MoveTo(frame.left + (frame.Width() - size.Width()) / 2, frame.top + (frame.Height() - size.Height()) / 3);
+    fPasskeyShown = found->identifier;
+    fPasskeyPrompt = BMessenger(prompt);
+    prompt->Show();
+}
+
+void BrowserWindow::PasskeyAnswered(const BMessage& message)
+{
+    const uint64 identifier = message.GetUInt64("identifier", 0);
+    if (identifier == fPasskeyShown) {
+        fPasskeyShown = 0;
+        fPasskeyPrompt = BMessenger();
+    }
+    const auto found = std::find_if(fPasskeyRequests.begin(), fPasskeyRequests.end(),
+        [&](const PasskeyRequest& request) { return request.identifier == identifier; });
+    if (found != fPasskeyRequests.end()) {
+        const int32 account = message.GetInt32("account", -1);
+        std::fprintf(stderr, "Summit: passkey request %llu %s\n", static_cast<unsigned long long>(identifier),
+            account < 0 ? "declined" : "confirmed");
+        BWebKitView::AnswerPasskeyRequest(identifier, account);
+        fPasskeyRequests.erase(found);
+    }
+    ShowPasskeyPrompt();
 }
 }
 #endif

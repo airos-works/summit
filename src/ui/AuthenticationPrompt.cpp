@@ -60,6 +60,11 @@ BStringView* Line(const char* name, const std::string& text)
 }
 }
 
+std::string PromptDisplayText(const std::string& text, size_t limit)
+{
+    return DisplayText(text, limit);
+}
+
 AuthenticationPrompt::AuthenticationPrompt(const Fields& fields, BMessenger target)
     : BWindow(BRect(0, 0, 460, 200), "Sign In", B_TITLED_WINDOW_LOOK, B_MODAL_SUBSET_WINDOW_FEEL,
         B_NOT_ZOOMABLE | B_NOT_MINIMIZABLE | B_NOT_RESIZABLE | B_ASYNCHRONOUS_CONTROLS | B_AUTO_UPDATE_SIZE_LIMITS

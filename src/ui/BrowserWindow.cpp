@@ -68,6 +68,7 @@
 #if SUMMIT_MODERN_WEBKIT
 #include "ExtensionInstaller.h"
 #include "AuthenticationPrompt.h"
+#include "PasskeyPrompt.h"
 #include "FeatureMessages.h"
 #include "NoticeBar.h"
 #include "PrintJob.h"
@@ -1162,6 +1163,7 @@ BrowserWindow::~BrowserWindow()
     fTranslationTimer.reset();
     fTranslator.reset();
     if (fAuthenticationPrompt.IsValid()) fAuthenticationPrompt.SendMessage(B_QUIT_REQUESTED);
+    if (fPasskeyPrompt.IsValid()) fPasskeyPrompt.SendMessage(B_QUIT_REQUESTED);
     BWebKitView::WindowDirectConnected(this, nullptr);
     // Without its daemon thread ~BDirectWindow would wait for ever.
     if (DirectDaemonLost()) {
@@ -1504,6 +1506,9 @@ void BrowserWindow::AttachPageView(Tab& tab, BWebKitView* webView, bool extensio
     if (!extensionPage) AddPageScripts(webView);
     // Sites that ask for a name and password get a sign-in sheet (#87).
     if (!extensionPage) webView->SetAuthenticationRequests(true);
+    // Summit's own passkeys (#111): a page's WebAuthn request that no
+    // extension takes asks the user (PasskeyPrompt).
+    if (!extensionPage) webView->SetPasskeyRequests(true);
     webView->SetCustomUserAgent(fShared->Read([](const Profile& profile) {
         return FindUserAgentPreset(profile.userAgent).agent;
     }));
@@ -1657,6 +1662,7 @@ void BrowserWindow::SelectTab(int64 id, bool forClose)
         if (!forClose && !fRestoringSession && fTabs[i].certificate && !fTabs[i].certificate->asked)
             AskAboutCertificate(fTabs[i]);
         ShowAuthenticationPrompt();
+        ShowPasskeyPrompt();
         ProbeReader(fTabs[i]);
         ProbeTranslation(fTabs[i]);
 #endif
@@ -4674,6 +4680,8 @@ void BrowserWindow::MessageReceived(BMessage* message)
         case B_WEBKIT_AUTHENTICATION_REQUESTED: AuthenticationRequested(*message); break;
         case kAuthenticationAccounts: AuthenticationAccounts(*message); break;
         case kAuthenticationAnswer: AuthenticationAnswered(*message); break;
+        case B_WEBKIT_PASSKEY_REQUESTED: PasskeyRequested(*message); break;
+        case kPasskeyAnswer: PasskeyAnswered(*message); break;
         case kPasswordSaved: {
             const std::string error = message->GetString("error", "");
             if (!error.empty()) ShowError("Could not save the password: " + error);
@@ -5092,16 +5100,18 @@ void BrowserWindow::MessageReceived(BMessage* message)
         }
         case B_WEBKIT_FULLSCREEN_REQUESTED: FullScreenRequested(*message); break;
         case B_WEBKIT_WEBAUTHN_UNHANDLED: {
-            // The page asked for a passkey and no extension answered: Summit
-            // has no passkey store of its own, so the page saw an error.
+            // The page asked for a passkey, no extension answered, and
+            // Summit's own passkeys could not (turned off with
+            // SUMMIT_PLATFORM_PASSKEYS=0, or the site wants a security key),
+            // so the page saw an error.
             BMessenger messenger;
             if (message->FindMessenger("view", &messenger) != B_OK) break;
             auto* tab = FindTab(messenger);
             if (!tab || tab->id != fSelected) break;
             std::string notice = message->GetBool("create", false)
-                ? "This page tried to create a passkey, but no password manager answered."
-                : "This page asked for a passkey, but no password manager answered.";
-            notice += " Summit keeps no passkeys of its own; an extension such as 1Password provides them";
+                ? "This page tried to create a passkey, but neither Summit nor a password manager could."
+                : "This page asked for a passkey, but neither Summit nor a password manager answered.";
+            notice += " Security keys (USB) are not supported yet; an extension such as 1Password provides its own passkeys";
             notice += fPrivate ? ", and must be allowed in private windows (Extensions)." : ".";
             // Shown for a while: the page's own reaction (a title or a reload)
             // would otherwise put "Ready" back at once.

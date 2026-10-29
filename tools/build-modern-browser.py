@@ -394,7 +394,7 @@ def main():
                    'src/ui/BrowserWindow.cpp', 'src/ui/BookmarkEditor.cpp', 'src/ui/BookmarkImport.cpp', 'src/ui/ProtocolHandlers.cpp', 'src/ui/AddressSuggestions.cpp', 'src/ui/SitePermissions.cpp', 'src/ui/Location.cpp', 'src/ui/Chrome.cpp', 'src/ui/ExtensionPermissionPrompt.cpp',
                    'src/ui/ExtensionController.cpp', 'src/ui/ExtensionInstaller.cpp', 'src/ui/ExtensionManager.cpp', 'src/ui/ExtensionStoreDownload.cpp', 'src/ui/DownloadList.cpp', 'src/ui/DownloadsPanel.cpp', 'src/ui/CertificateInfoWindow.cpp', 'src/ui/ReaderMode.cpp',
                    'src/ui/BrowserWindowMcp.cpp', 'src/ui/McpService.cpp', 'src/ui/McpLog.cpp', 'src/ui/McpBrowserTools.cpp', 'src/ui/McpSystemTools.cpp', 'src/ui/McpPageTools.cpp', 'src/ui/McpEngineTools.cpp', 'src/ui/McpDebugHelper.cpp',
-                   'src/ui/BrowserWindowFeatures.cpp', 'src/ui/BrowserWindowLoadErrors.cpp', 'src/ui/NoticeBar.cpp', 'src/ui/PageScripts.cpp', 'src/ui/PasswordStore.cpp', 'src/ui/AuthenticationPrompt.cpp', 'src/ui/BrowserWindowAuthentication.cpp',
+                   'src/ui/BrowserWindowFeatures.cpp', 'src/ui/BrowserWindowLoadErrors.cpp', 'src/ui/NoticeBar.cpp', 'src/ui/PageScripts.cpp', 'src/ui/PasswordStore.cpp', 'src/ui/AuthenticationPrompt.cpp', 'src/ui/PasskeyPrompt.cpp', 'src/ui/BrowserWindowAuthentication.cpp',
                    'src/ui/PictureInPictureWindow.cpp', 'src/ui/PrintJob.cpp', 'src/ui/BrowsingPreferences.cpp',
                    'src/ui/WebApps.cpp', 'src/core/WebAppManifest.cpp', 'src/ui/UpdateChecker.cpp',
                    'src/core/ExtensionShortcut.cpp', 'src/core/ExtensionUpdate.cpp', 'src/ui/ExtensionShortcuts.cpp',

@@ -94493,10 +94493,10 @@ index 0000000000000000000000000000000000000000..cd4bc7529d812074c6e5915950a4f395
 +}
 diff --git a/Source/WebKit/UIProcess/API/haiku/WebKitView.h b/Source/WebKit/UIProcess/API/haiku/WebKitView.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..b68ffffc38d023b7aa8e7a52eee3200591bb2778
+index 0000000000000000000000000000000000000000..1d1ace4f87bd3cc14f093bc7815ca92efcecd38d
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/API/haiku/WebKitView.h
-@@ -0,0 +1,457 @@
+@@ -0,0 +1,483 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#pragma once
@@ -94585,8 +94585,24 @@ index 0000000000000000000000000000000000000000..b68ffffc38d023b7aa8e7a52eee32005
 +    // the browser's own WebAuthn coordinator, which has no authenticator and
 +    // answered NotAllowedError: no extension (1Password...) took it. Not sent
 +    // for conditional-mediation requests, which pages make at load.
-+    // "view", "create" (bool).
++    // "view", "create" (bool). Sent when the view takes no passkey requests
++    // (SetPasskeyRequests) or SUMMIT_PLATFORM_PASSKEYS=0, or the site asked
++    // for a security key.
 +    B_WEBKIT_WEBAUTHN_UNHANDLED = 'wwau',
++    // A page's passkey request reached the browser's own authenticator
++    // (passkeys in the key store, keyring "Summit passkeys"), sent only to
++    // views that asked for it (SetPasskeyRequests). Fields: "view",
++    // "identifier" (uint64), "create" (bool), "rp_id" (the site the passkey
++    // is for), "origin" (the page's). create(): "user_name" and
++    // "user_display_name" (the site's words), "exists" (bool: a passkey the
++    // site excludes is saved already: tell the user, then answer; none is
++    // made) and "replaces" (bool: the account's saved passkey is replaced).
++    // get(): one "account_name" and "account_display_name" per passkey the
++    // user may choose; none when no saved passkey suits the site (tell the
++    // user and decline). Answer with AnswerPasskeyRequest. When the request
++    // no longer waits (the page aborted it or closed, or it timed out), a
++    // notice with "identifier" and "withdrawn" (true) follows.
++    B_WEBKIT_PASSKEY_REQUESTED = 'wpky',
 +    // A page navigated to a scheme no page can show: "view", "url",
 +    // "source_url" (the page's address), "committed_url", and bools
 +    // "user_gesture", "main_frame", "redirect" and "trusted". The load was
@@ -94882,6 +94898,16 @@ index 0000000000000000000000000000000000000000..b68ffffc38d023b7aa8e7a52eee32005
 +        uint32 persistence = B_WEBKIT_CREDENTIAL_FOR_SESSION);
 +    // Stops the request that asked: its load fails as cancelled.
 +    static void CancelAuthentication(uint64 identifier);
++    // Sends B_WEBKIT_PASSKEY_REQUESTED for the view's WebAuthn requests:
++    // the browser then has a platform authenticator whose passkeys are kept
++    // in the key store. Off by default: requests no extension takes fail
++    // (B_WEBKIT_WEBAUTHN_UNHANDLED).
++    void SetPasskeyRequests(bool enabled);
++    // Answers B_WEBKIT_PASSKEY_REQUESTED after the user confirmed: account
++    // is the index of the passkey chosen (get) or 0 (create); negative
++    // declines. Any thread; unknown, withdrawn and answered identifiers are
++    // ignored.
++    static void AnswerPasskeyRequest(uint64 identifier, int32 account);
 +    // How a beforeunload handler that asks to stay is answered; notifications
 +    // (B_WEBKIT_BEFORE_UNLOAD_PREVENTED) go to target.
 +    void SetBeforeUnloadBehavior(uint32 behavior, BMessenger target = BMessenger());
@@ -94956,10 +94982,10 @@ index 0000000000000000000000000000000000000000..b68ffffc38d023b7aa8e7a52eee32005
 +};
 diff --git a/Source/WebKit/UIProcess/API/haiku/WebKitViewEmbedding.cpp b/Source/WebKit/UIProcess/API/haiku/WebKitViewEmbedding.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..f55612b1c150782f7198f90398f55f310eb00f77
+index 0000000000000000000000000000000000000000..4830a6f65015a7b658805bdf7fb8e542c5423633
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/API/haiku/WebKitViewEmbedding.cpp
-@@ -0,0 +1,1117 @@
+@@ -0,0 +1,1134 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +// BWebKitView's embedding interfaces (WebKitEmbedding.h): user scripts,
@@ -95598,6 +95624,23 @@ index 0000000000000000000000000000000000000000..f55612b1c150782f7198f90398f55f31
 +    WTF::RunLoop::mainSingleton().dispatch([identifier] {
 +        answerAuthenticationHaiku(identifier, AuthenticationAnswerHaiku::Cancel, { }, { }, false);
 +    });
++}
++
++void BWebKitView::SetPasskeyRequests(bool enabled)
++{
++    m_state->asksForPasskeys = enabled;
++}
++
++void BWebKitView::AnswerPasskeyRequest(uint64 identifier, int32 account)
++{
++#if ENABLE(WEB_AUTHN)
++    WTF::RunLoop::mainSingleton().dispatch([identifier, account] {
++        answerPasskeyRequestHaiku(identifier, account);
++    });
++#else
++    UNUSED_PARAM(identifier);
++    UNUSED_PARAM(account);
++#endif
 +}
 +
 +void BWebKitView::RunBookmarklet(const char* source, BMessenger reply, uint64 identifier, uint64 expectedGeneration)
@@ -121972,45 +122015,630 @@ index c224bd2e2b3ff4cd1b8907c4a21342d9573812b2..644d6ce48362f21aaeda47d48e24dfe3
      bool hasVideoDevice() const { return !m_eligibleVideoDevices.isEmpty(); }
 diff --git a/Source/WebKit/UIProcess/WebAuthentication/haiku/WebAuthenticatorCoordinatorProxyHaiku.cpp b/Source/WebKit/UIProcess/WebAuthentication/haiku/WebAuthenticatorCoordinatorProxyHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..282ce8dda3f740c20ac5adb687999718800cfaac
+index 0000000000000000000000000000000000000000..8fbf29de81c05b4d0b8f3d4baad1a61fdcb8fcdc
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/WebAuthentication/haiku/WebAuthenticatorCoordinatorProxyHaiku.cpp
-@@ -0,0 +1,148 @@
+@@ -0,0 +1,839 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
-+// KunanyiOS has no platform authenticator: no Touch ID equivalent, no CTAP
-+// transport for USB or NFC security keys. The Web Authentication API is still
-+// built, because password managers extend it from their content scripts, and
-+// they can only do that when the page really exposes `navigator.credentials`
-+// and `PublicKeyCredential`. Those extensions answer the page themselves and
-+// never reach this proxy; a request that does reach it has no authenticator to
-+// satisfy it and is declined the way a browser without one declines it.
++// The Web Authentication API on KunanyiOS. It is built because password
++// managers extend it from their content scripts, which they can only do when
++// the page really exposes `navigator.credentials` and `PublicKeyCredential`.
++// Those extensions answer the page themselves and never reach this proxy.
++//
++// A request that does reach it is answered by the browser's own platform
++// authenticator (#111): passkeys kept in the system key store
++// (keystore_server), in the keyring "Summit passkeys", one generic key per
++// passkey. The host application asks the user to create or use one
++// (B_WEBKIT_PASSKEY_REQUESTED, BWebKitView::AnswerPasskeyRequest); a host
++// that does not take those questions (BWebKitView::SetPasskeyRequests), or
++// SUMMIT_PLATFORM_PASSKEYS=0, leaves the browser without an authenticator,
++// and requests are declined the way a browser without one declines them.
++//
++// The authenticator makes ES256 (P-256) key pairs with OpenSSL, attests with
++// "none", and keeps every passkey discoverable (it stores the user handle and
++// names). The user's confirmation in the browser's own prompt is its user
++// verification. Passkeys stay on this computer: backup eligibility and state
++// are not set, and the signature counter is always zero.
 +
 +#include "config.h"
 +#include "WebAuthenticatorCoordinatorProxy.h"
 +
 +#if ENABLE(WEB_AUTHN) && PLATFORM(HAIKU)
 +
++#include "Connection.h"
++#include "FrameInfoData.h"
 +#include "WebAuthenticatorCoordinatorProxyMessages.h"
++#include "WebFrameProxy.h"
 +#include "WebPageProxy.h"
 +#include "WebViewPrivate.h"
 +#include "WebProcessProxy.h"
++#include <JavaScriptCore/ArrayBuffer.h>
 +#include <WebCore/AllAcceptedCredentialsOptions.h>
++#include <WebCore/AuthenticationExtensionsClientOutputs.h>
 +#include <WebCore/AuthenticatorAttachment.h>
 +#include <WebCore/AuthenticatorResponseData.h>
++#include <WebCore/AuthenticatorTransport.h>
 +#include <WebCore/CurrentUserDetailsOptions.h>
 +#include <WebCore/ExceptionData.h>
 +#include <WebCore/MediationRequirement.h>
 +#include <WebCore/PublicKeyCredentialCreationOptions.h>
 +#include <WebCore/PublicKeyCredentialRequestOptions.h>
++#include <WebCore/SecurityOrigin.h>
 +#include <WebCore/SecurityOriginData.h>
 +#include <WebCore/UnknownCredentialOptions.h>
++#include <WebCore/WebAuthenticationConstants.h>
++#include <WebCore/WebAuthenticationUtils.h>
++#include <wtf/NeverDestroyed.h>
++#include <wtf/RunLoop.h>
 +#include <wtf/TZoneMallocInlines.h>
++#include <wtf/WorkQueue.h>
++
++#include <DataIO.h>
++#include <Key.h>
++#include <KeyStore.h>
++#include <Message.h>
++#include <OS.h>
++#include <algorithm>
++#include <cstdlib>
++#include <cstring>
++#include <openssl/core_names.h>
++#include <openssl/crypto.h>
++#include <openssl/evp.h>
++#include <openssl/rand.h>
++#include <openssl/x509.h>
++#include <string>
++#include <unordered_map>
++#include <vector>
 +
 +namespace WebKit {
 +using namespace WebCore;
 +
 +WTF_MAKE_TZONE_ALLOCATED_IMPL(WebAuthenticatorCoordinatorProxy);
++
++namespace {
++
++// SUMMIT_PLATFORM_PASSKEYS=0 turns the authenticator off: requests that no
++// extension takes are declined, as before #111.
++bool platformPasskeysEnabledHaiku()
++{
++    static const bool enabled = [] {
++        const char* value = std::getenv("SUMMIT_PLATFORM_PASSKEYS");
++        return !value || std::strcmp(value, "0");
++    }();
++    return enabled;
++}
++
++// The spec asks for NotAllowedError whenever no authenticator can serve a
++// request, so a page cannot tell from the error which authenticators exist.
++ExceptionData noAuthenticatorAvailable()
++{
++    return ExceptionData { ExceptionCode::NotAllowedError, "No authenticator is available on this device."_s };
++}
++
++ExceptionData notAllowed(ASCIILiteral message)
++{
++    return ExceptionData { ExceptionCode::NotAllowedError, message };
++}
++
++// A request that reaches this coordinator was not taken by an extension (a
++// password manager replaces navigator.credentials in the page). When the
++// browser has no authenticator to offer, the page gets an error it shows as a
++// failed passkey, and the browser window is told, so that the user learns why
++// instead of a bare failure. Conditional-mediation requests, which pages make
++// at load for passkey autofill, are not the user's doing and are left quiet.
++void tellWindow(WebPageProxy* page, MediationRequirement mediation, bool create)
++{
++    if (!page || mediation == MediationRequirement::Conditional)
++        return;
++    if (auto* view = static_cast<WebView*>(page->pageClient()))
++        view->notifyWebAuthnUnhandled(create);
++}
++
++std::string utf8Haiku(const String& string)
++{
++    auto utf8 = string.utf8();
++    return std::string(reinterpret_cast<const char*>(utf8.data()), utf8.length());
++}
++
++std::vector<uint8_t> bytesHaiku(std::span<const uint8_t> span)
++{
++    return std::vector<uint8_t>(span.begin(), span.end());
++}
++
++Vector<uint8_t> vectorHaiku(const std::vector<uint8_t>& bytes)
++{
++    return Vector<uint8_t>(std::span<const uint8_t>(bytes.data(), bytes.size()));
++}
++
++// ---- The key store ------------------------------------------------------
++// Runs on the passkey queue only: keystore_server may stop to ask the user
++// whether Summit may use the keyring, which must not hold up the main thread.
++
++constexpr const char* passkeyKeyringHaiku = "Summit passkeys";
++
++// One passkey as the key store keeps it: a generic key whose identifier is
++// the relying party ID and whose secondary identifier is the credential ID
++// in hexadecimal; its data is a flattened BMessage with the fields below.
++struct StoredPasskeyHaiku {
++    std::vector<uint8_t> credentialID;
++    std::vector<uint8_t> userHandle;
++    std::string userName;
++    std::string displayName;
++    // ECPrivateKey DER (RFC 5915); filled only where a signature is made.
++    std::vector<uint8_t> privateKey;
++};
++
++std::string hexHaiku(const std::vector<uint8_t>& bytes)
++{
++    static const char digits[] = "0123456789abcdef";
++    std::string hex;
++    hex.reserve(bytes.size() * 2);
++    for (auto byte : bytes) {
++        hex += digits[byte >> 4];
++        hex += digits[byte & 15];
++    }
++    return hex;
++}
++
++std::vector<uint8_t> dataFieldHaiku(const BMessage& message, const char* name)
++{
++    const void* data = nullptr;
++    ssize_t size = 0;
++    if (message.FindData(name, B_RAW_TYPE, &data, &size) != B_OK || size <= 0)
++        return { };
++    auto* bytes = static_cast<const uint8_t*>(data);
++    return std::vector<uint8_t>(bytes, bytes + size);
++}
++
++bool readPasskeyHaiku(const BKey& key, StoredPasskeyHaiku& passkey, bool withPrivateKey)
++{
++    BMemoryIO input(key.Data(), key.DataLength());
++    BMessage record;
++    if (!key.Data() || record.Unflatten(&input) != B_OK)
++        return false;
++    passkey.credentialID = dataFieldHaiku(record, "credential_id");
++    passkey.userHandle = dataFieldHaiku(record, "user_handle");
++    passkey.userName = record.GetString("user_name", "");
++    passkey.displayName = record.GetString("display_name", "");
++    if (withPrivateKey)
++        passkey.privateKey = dataFieldHaiku(record, "private_key");
++    return !passkey.credentialID.empty() && record.GetInt32("algorithm", 0) == COSE::ES256
++        && (!withPrivateKey || !passkey.privateKey.empty());
++}
++
++// The relying party's passkeys, in the order they were saved. A keyring that
++// does not exist yet has none; one Summit may not use answers B_NOT_ALLOWED.
++status_t storedPasskeysHaiku(const std::string& rpID, std::vector<StoredPasskeyHaiku>& passkeys)
++{
++    BKeyStore store;
++    uint32 cookie = 0;
++    BKey key;
++    status_t status;
++    while ((status = store.GetNextKey(passkeyKeyringHaiku, B_KEY_TYPE_GENERIC, B_KEY_PURPOSE_WEB, cookie, key)) == B_OK) {
++        if (!key.Identifier() || rpID != key.Identifier())
++            continue;
++        StoredPasskeyHaiku passkey;
++        if (readPasskeyHaiku(key, passkey, false))
++            passkeys.push_back(std::move(passkey));
++        if (passkeys.size() >= 1000)
++            break;
++    }
++    return status == B_NOT_ALLOWED ? status : B_OK;
++}
++
++// Found by enumerating the keyring, as storedPasskeysHaiku does, rather than
++// with GetKey: keystore_server asks the user once per kind of access, and
++// this keeps reading passkeys to one question.
++status_t privateKeyHaiku(const std::string& rpID, const std::vector<uint8_t>& credentialID, std::vector<uint8_t>& privateKey)
++{
++    BKeyStore store;
++    uint32 cookie = 0;
++    BKey key;
++    const std::string secondary = hexHaiku(credentialID);
++    status_t status;
++    while ((status = store.GetNextKey(passkeyKeyringHaiku, B_KEY_TYPE_GENERIC, B_KEY_PURPOSE_WEB, cookie, key)) == B_OK) {
++        if (!key.Identifier() || !key.SecondaryIdentifier() || rpID != key.Identifier() || secondary != key.SecondaryIdentifier())
++            continue;
++        StoredPasskeyHaiku passkey;
++        if (!readPasskeyHaiku(key, passkey, true) || passkey.credentialID != credentialID)
++            return B_BAD_DATA;
++        privateKey = std::move(passkey.privateKey);
++        return B_OK;
++    }
++    return status == B_NOT_ALLOWED ? status : B_ENTRY_NOT_FOUND;
++}
++
++// A site keeps one passkey per account (user handle): a new one replaces it,
++// as Apple's LocalAuthenticator does.
++status_t savePasskeyHaiku(const std::string& rpID, const std::string& origin, const StoredPasskeyHaiku& passkey)
++{
++    BMessage record;
++    record.AddInt32("version", 1);
++    record.AddInt32("algorithm", COSE::ES256);
++    record.AddData("credential_id", B_RAW_TYPE, passkey.credentialID.data(), passkey.credentialID.size());
++    record.AddData("user_handle", B_RAW_TYPE, passkey.userHandle.data(), passkey.userHandle.size());
++    record.AddString("user_name", passkey.userName.c_str());
++    record.AddString("display_name", passkey.displayName.c_str());
++    record.AddString("origin", origin.c_str());
++    record.AddInt64("created", real_time_clock_usecs());
++    record.AddData("private_key", B_RAW_TYPE, passkey.privateKey.data(), passkey.privateKey.size());
++    BMallocIO flat;
++    status_t status = record.Flatten(&flat);
++    if (status != B_OK)
++        return status;
++
++    BKeyStore store;
++    // The keyring is made on first use; it exists from then on.
++    store.AddKeyring(passkeyKeyringHaiku);
++    std::vector<BKey*> replaced;
++    {
++        uint32 cookie = 0;
++        BKey key;
++        while (store.GetNextKey(passkeyKeyringHaiku, B_KEY_TYPE_GENERIC, B_KEY_PURPOSE_WEB, cookie, key) == B_OK) {
++            StoredPasskeyHaiku existing;
++            if (key.Identifier() && rpID == key.Identifier() && readPasskeyHaiku(key, existing, false)
++                && existing.userHandle == passkey.userHandle)
++                replaced.push_back(new BKey(key));
++        }
++    }
++    BKey key(B_KEY_PURPOSE_WEB, rpID.c_str(), hexHaiku(passkey.credentialID).c_str(),
++        static_cast<const uint8*>(flat.Buffer()), flat.BufferLength());
++    // The flattened record holds the private key: clear our copy of it.
++    OPENSSL_cleanse(const_cast<void*>(flat.Buffer()), flat.BufferLength());
++    status = store.AddKey(passkeyKeyringHaiku, key);
++    if (status == B_OK) {
++        for (auto* old : replaced)
++            store.RemoveKey(passkeyKeyringHaiku, *old);
++    }
++    for (auto* old : replaced)
++        delete old;
++    return status;
++}
++
++// ---- Keys and signatures -------------------------------------------------
++
++struct NewKeyHaiku {
++    std::vector<uint8_t> privateKey;
++    std::vector<uint8_t> x;
++    std::vector<uint8_t> y;
++};
++
++std::optional<NewKeyHaiku> generateKeyHaiku()
++{
++    EVP_PKEY* key = EVP_PKEY_Q_keygen(nullptr, nullptr, "EC", "P-256");
++    if (!key)
++        return std::nullopt;
++    std::optional<NewKeyHaiku> result;
++    unsigned char point[1 + 2 * ES256FieldElementLength];
++    size_t pointLength = 0;
++    int derLength = i2d_PrivateKey(key, nullptr);
++    if (EVP_PKEY_get_octet_string_param(key, OSSL_PKEY_PARAM_ENCODED_PUBLIC_KEY, point, sizeof(point), &pointLength) == 1
++        && pointLength == sizeof(point) && point[0] == 4 && derLength > 0) {
++        NewKeyHaiku newKey;
++        newKey.privateKey.resize(derLength);
++        unsigned char* out = newKey.privateKey.data();
++        if (i2d_PrivateKey(key, &out) == derLength) {
++            newKey.x.assign(point + 1, point + 1 + ES256FieldElementLength);
++            newKey.y.assign(point + 1 + ES256FieldElementLength, point + sizeof(point));
++            result = WTF::move(newKey);
++        } else
++            OPENSSL_cleanse(newKey.privateKey.data(), newKey.privateKey.size());
++    }
++    EVP_PKEY_free(key);
++    return result;
++}
++
++// An ECDSA P-256 SHA-256 signature, DER encoded, as WebAuthn wants ES256.
++std::vector<uint8_t> signHaiku(const std::vector<uint8_t>& privateKey, const std::vector<uint8_t>& message)
++{
++    const unsigned char* input = privateKey.data();
++    EVP_PKEY* key = d2i_AutoPrivateKey(nullptr, &input, privateKey.size());
++    if (!key)
++        return { };
++    std::vector<uint8_t> signature;
++    EVP_MD_CTX* context = EVP_MD_CTX_new();
++    size_t length = 0;
++    if (context && EVP_DigestSignInit(context, nullptr, EVP_sha256(), nullptr, key) == 1
++        && EVP_DigestSign(context, nullptr, &length, message.data(), message.size()) == 1) {
++        signature.resize(length);
++        if (EVP_DigestSign(context, signature.data(), &length, message.data(), message.size()) == 1)
++            signature.resize(length);
++        else
++            signature.clear();
++    }
++    EVP_MD_CTX_free(context);
++    EVP_PKEY_free(key);
++    return signature;
++}
++
++WorkQueue& passkeyQueueHaiku()
++{
++    static NeverDestroyed<Ref<WorkQueue>> queue = WorkQueue::create("Summit passkeys"_s);
++    return queue.get();
++}
++
++// ---- Requests waiting for the user ---------------------------------------
++
++struct PasskeyRequestHaiku {
++    const WebAuthenticatorCoordinatorProxy* owner { nullptr };
++    WeakPtr<WebPageProxy> page;
++    RequestCompletionHandler handler;
++    bool create { false };
++    // The host was asked (B_WEBKIT_PASSKEY_REQUESTED) and must be told when
++    // the request goes away without its answer.
++    bool asked { false };
++    // The user answered and a key is being made or used, off the main
++    // thread; the request completes with that work's result, whatever else
++    // happens meanwhile (an abort or the timeout).
++    bool working { false };
++    std::string rpID;
++    std::string origin;
++    RefPtr<ArrayBuffer> clientDataJSON;
++    Vector<uint8_t> clientDataHash;
++    // create()
++    std::vector<uint8_t> userHandle;
++    std::string userName;
++    std::string displayName;
++    bool excluded { false };
++    bool credProps { false };
++    // get(): the passkeys offered, in the host's order.
++    std::vector<StoredPasskeyHaiku> candidates;
++};
++
++std::unordered_map<uint64_t, PasskeyRequestHaiku>& passkeyRequestsHaiku()
++{
++    static NeverDestroyed<std::unordered_map<uint64_t, PasskeyRequestHaiku>> requests;
++    return requests.get();
++}
++
++WebView* webViewHaiku(WebPageProxy* page)
++{
++    return page ? static_cast<WebView*>(page->pageClient()) : nullptr;
++}
++
++// Ends a request without an answer from the user: its prompt goes away.
++void finishPasskeyRequestHaiku(uint64_t identifier, const ExceptionData& exception)
++{
++    auto entry = passkeyRequestsHaiku().find(identifier);
++    if (entry == passkeyRequestsHaiku().end() || entry->second.working)
++        return;
++    auto found = passkeyRequestsHaiku().extract(entry);
++    auto& request = found.mapped();
++    if (request.asked) {
++        if (auto* view = webViewHaiku(request.page.get())) {
++            BMessage message(B_WEBKIT_PASSKEY_REQUESTED);
++            message.AddUInt64("identifier", identifier);
++            message.AddBool("withdrawn", true);
++            view->sendPasskeyRequest(message);
++        }
++    }
++    request.handler({ }, AuthenticatorAttachment::Platform, exception);
++}
++
++// WebAuthn's timeout option, within reason: the prompt waits for the user,
++// not for the page.
++Seconds passkeyTimeoutHaiku(std::optional<unsigned> milliseconds)
++{
++    constexpr Seconds defaultTimeout = 5_min;
++    if (!milliseconds)
++        return defaultTimeout;
++    return std::clamp(Seconds::fromMilliseconds(*milliseconds), 30_s, 10_min);
++}
++
++uint64_t addPasskeyRequestHaiku(PasskeyRequestHaiku&& request, Seconds timeout)
++{
++    static uint64_t lastIdentifier;
++    uint64_t identifier = ++lastIdentifier;
++    passkeyRequestsHaiku().emplace(identifier, WTF::move(request));
++    RunLoop::mainSingleton().dispatchAfter(timeout, [identifier] {
++        finishPasskeyRequestHaiku(identifier, notAllowed("The request timed out."_s));
++    });
++    return identifier;
++}
++
++// The host asks the user (B_WEBKIT_PASSKEY_REQUESTED). Fields: "view",
++// "identifier", "create" (bool), "rp_id", "origin"; for create(),
++// "user_name", "user_display_name" and "exists" (bool: one of the passkeys the
++// site excludes is saved here, so none is made) and "replaces" (bool: a
++// passkey of the same account is saved here and the new one replaces it); for
++// get(), one "account_name" and "account_display_name" per passkey the user
++// may choose (none: Summit keeps no passkey the site accepts).
++void askHostHaiku(uint64_t identifier)
++{
++    auto found = passkeyRequestsHaiku().find(identifier);
++    if (found == passkeyRequestsHaiku().end())
++        return;
++    auto& request = found->second;
++    BMessage message(B_WEBKIT_PASSKEY_REQUESTED);
++    message.AddUInt64("identifier", identifier);
++    message.AddBool("create", request.create);
++    message.AddString("rp_id", request.rpID.c_str());
++    message.AddString("origin", request.origin.c_str());
++    if (request.create) {
++        message.AddString("user_name", request.userName.c_str());
++        message.AddString("user_display_name", request.displayName.c_str());
++        message.AddBool("exists", request.excluded);
++        bool replaces = false;
++        for (auto& passkey : request.candidates)
++            replaces |= passkey.userHandle == request.userHandle;
++        message.AddBool("replaces", replaces && !request.excluded);
++        request.candidates.clear();
++    } else {
++        for (auto& passkey : request.candidates) {
++            message.AddString("account_name", passkey.userName.c_str());
++            message.AddString("account_display_name", passkey.displayName.c_str());
++        }
++    }
++    auto* view = webViewHaiku(request.page.get());
++    if (!view || !view->sendPasskeyRequest(message)) {
++        finishPasskeyRequestHaiku(identifier, noAuthenticatorAvailable());
++        return;
++    }
++    request.asked = true;
++}
++
++Ref<ArrayBuffer> arrayBufferHaiku(std::span<const uint8_t> bytes)
++{
++    return ArrayBuffer::create(bytes);
++}
++
++// The request's work is done: it leaves the table, to be answered.
++std::optional<PasskeyRequestHaiku> takePasskeyRequestHaiku(uint64_t identifier)
++{
++    auto found = passkeyRequestsHaiku().extract(identifier);
++    if (found.empty())
++        return std::nullopt;
++    return WTF::move(found.mapped());
++}
++
++// Only plain data crosses to the passkey queue and back; the request (its
++// completion handler, page and buffers) stays on the main thread.
++void completeCreateHaiku(uint64_t identifier, const PasskeyRequestHaiku& request)
++{
++    StoredPasskeyHaiku passkey;
++    passkey.userHandle = request.userHandle;
++    passkey.userName = request.userName;
++    passkey.displayName = request.displayName;
++    passkeyQueueHaiku().dispatch([identifier, rpID = request.rpID, origin = request.origin, passkey = WTF::move(passkey)]() mutable {
++        passkey.credentialID.resize(16);
++        std::optional<NewKeyHaiku> newKey;
++        status_t status = B_ERROR;
++        if (RAND_bytes(passkey.credentialID.data(), passkey.credentialID.size()) == 1)
++            newKey = generateKeyHaiku();
++        if (newKey) {
++            passkey.privateKey = WTF::move(newKey->privateKey);
++            status = savePasskeyHaiku(rpID, origin, passkey);
++            OPENSSL_cleanse(passkey.privateKey.data(), passkey.privateKey.size());
++        }
++        RunLoop::mainSingleton().dispatch([identifier, status, credentialID = WTF::move(passkey.credentialID), newKey = WTF::move(newKey)]() mutable {
++            auto request = takePasskeyRequestHaiku(identifier);
++            if (!request)
++                return;
++            if (status != B_OK || !newKey) {
++                request->handler({ }, AuthenticatorAttachment::Platform, ExceptionData { ExceptionCode::UnknownError,
++                    status == B_NOT_ALLOWED ? "Summit may not use the key store."_s : "The passkey could not be saved."_s });
++                return;
++            }
++            auto credential = vectorHaiku(credentialID);
++            auto coseKey = encodeES256PublicKeyAsCBOR(vectorHaiku(newKey->x), vectorHaiku(newKey->y));
++            // No AAGUID: attestation "none" says nothing about the authenticator.
++            Vector<uint8_t> aaguid(std::span<const uint8_t>(std::array<uint8_t, aaguidLength> { }));
++            uint8_t flags = WebAuthn::userPresenceFlag | WebAuthn::userVerifiedFlag | WebAuthn::attestedCredentialDataIncludedFlag;
++            auto authData = buildAuthData(String::fromUTF8(request->rpID.c_str()), flags, 0, buildAttestedCredentialData(aaguid, credential, coseKey));
++            auto attestationObject = buildAttestationObject(WTF::move(authData), String { emptyString() }, { }, AttestationConveyancePreference::None);
++
++            AuthenticatorResponseData response;
++            response.isAuthenticatorAttestationResponse = true;
++            response.rawId = arrayBufferHaiku(credential.span());
++            response.attestationObject = arrayBufferHaiku(attestationObject.span());
++            response.clientDataJSON = WTF::move(request->clientDataJSON);
++            response.transports = { AuthenticatorTransport::Internal };
++            if (request->credProps) {
++                AuthenticationExtensionsClientOutputs outputs;
++                outputs.credProps = CredentialPropertiesOutput { true };
++                response.extensionOutputs = WTF::move(outputs);
++            }
++            request->handler(response, AuthenticatorAttachment::Platform, { });
++        });
++    });
++}
++
++void completeGetHaiku(uint64_t identifier, const PasskeyRequestHaiku& request, size_t choice)
++{
++    const auto& passkey = request.candidates[choice];
++    uint8_t flags = WebAuthn::userPresenceFlag | WebAuthn::userVerifiedFlag;
++    auto authData = buildAuthData(String::fromUTF8(request.rpID.c_str()), flags, 0, { });
++    std::vector<uint8_t> signedData(authData.begin(), authData.end());
++    signedData.insert(signedData.end(), request.clientDataHash.begin(), request.clientDataHash.end());
++    passkeyQueueHaiku().dispatch([identifier, rpID = request.rpID, credentialID = passkey.credentialID, userHandle = passkey.userHandle,
++        authData = bytesHaiku(authData.span()), signedData = WTF::move(signedData)]() mutable {
++        std::vector<uint8_t> privateKey;
++        status_t status = privateKeyHaiku(rpID, credentialID, privateKey);
++        std::vector<uint8_t> signature;
++        if (status == B_OK) {
++            signature = signHaiku(privateKey, signedData);
++            OPENSSL_cleanse(privateKey.data(), privateKey.size());
++        }
++        RunLoop::mainSingleton().dispatch([identifier, credentialID = WTF::move(credentialID), userHandle = WTF::move(userHandle),
++            authData = WTF::move(authData), signature = WTF::move(signature), status]() mutable {
++            auto request = takePasskeyRequestHaiku(identifier);
++            if (!request)
++                return;
++            if (signature.empty()) {
++                request->handler({ }, AuthenticatorAttachment::Platform, ExceptionData { ExceptionCode::UnknownError,
++                    status == B_NOT_ALLOWED ? "Summit may not use the key store."_s : "The passkey could not be used."_s });
++                return;
++            }
++            AuthenticatorResponseData response;
++            response.rawId = arrayBufferHaiku(credentialID);
++            response.authenticatorData = arrayBufferHaiku(authData);
++            response.signature = arrayBufferHaiku(signature);
++            response.userHandle = arrayBufferHaiku(userHandle);
++            response.clientDataJSON = WTF::move(request->clientDataJSON);
++            request->handler(response, AuthenticatorAttachment::Platform, { });
++        });
++    });
++}
++
++// The checks a request passes before anyone is asked: the frame is the one
++// the web process names, and the relying party ID is the caller's
++// registrable domain or a suffix of it. Related origins (.well-known/webauthn)
++// are not consulted. An exception, or nothing.
++std::optional<ExceptionData> validateRequestHaiku(IPC::Connection& connection, FrameIdentifier frameID, const FrameInfoData& frameInfo, const String& rpID)
++{
++    RefPtr frame = WebFrameProxy::webFrame(frameID);
++    if (!frame)
++        return ExceptionData { ExceptionCode::InvalidStateError, "The frame is gone."_s };
++    if (frame->url().protocolIsInHTTPFamily()) {
++        auto expectedOrigin = SecurityOriginData::fromURLWithoutStrictOpaqueness(frame->url());
++        if (frameInfo.securityOrigin != expectedOrigin) {
++            IPC::markCurrentlyDispatchedMessageAsInvalid(connection, "Message check failed: the frame's origin"_s);
++            return ExceptionData { ExceptionCode::InvalidStateError, { } };
++        }
++    }
++    if (!frameInfo.securityOrigin.securityOrigin()->isMatchingRegistrableDomainSuffix(rpID))
++        return ExceptionData { ExceptionCode::SecurityError, "The origin of the document is not authorized for the provided RP ID."_s };
++    return std::nullopt;
++}
++
++bool takesPasskeyRequestsHaiku(WebPageProxy* page)
++{
++    auto* view = webViewHaiku(page);
++    return platformPasskeysEnabledHaiku() && view && view->takesPasskeyRequests();
++}
++
++} // namespace
++
++// Main thread only (BWebKitView::AnswerPasskeyRequest): the user's answer to
++// a B_WEBKIT_PASSKEY_REQUESTED. account is the passkey chosen (get), 0 to
++// create one, or negative to decline.
++void answerPasskeyRequestHaiku(uint64_t identifier, int32_t account)
++{
++    auto found = passkeyRequestsHaiku().find(identifier);
++    if (found == passkeyRequestsHaiku().end() || found->second.working)
++        return;
++    auto& request = found->second;
++    auto decline = [&](ExceptionData&& exception) {
++        auto taken = takePasskeyRequestHaiku(identifier);
++        taken->handler({ }, AuthenticatorAttachment::Platform, exception);
++    };
++    if (account < 0)
++        return decline(notAllowed("The user declined."_s));
++    if (request.create) {
++        // The user agreed before learning the passkey existed; the site
++        // learns it only now, as the spec asks.
++        if (request.excluded)
++            return decline(ExceptionData { ExceptionCode::InvalidStateError, "A passkey for this account is already saved in Summit."_s });
++        request.working = true;
++        completeCreateHaiku(identifier, request);
++        return;
++    }
++    if (static_cast<size_t>(account) >= request.candidates.size())
++        return decline(notAllowed("The user declined."_s));
++    request.working = true;
++    completeGetHaiku(identifier, request, account);
++}
 +
 +Ref<WebAuthenticatorCoordinatorProxy> WebAuthenticatorCoordinatorProxy::create(WebPageProxy& webPageProxy)
 +{
@@ -122025,6 +122653,8 @@ index 0000000000000000000000000000000000000000..282ce8dda3f740c20ac5adb687999718
 +
 +WebAuthenticatorCoordinatorProxy::~WebAuthenticatorCoordinatorProxy()
 +{
++    // The page closed or changed processes: its questions to the user go.
++    cancel([] { });
 +    if (RefPtr webPageProxy = m_webPageProxy.get())
 +        protect(webPageProxy->legacyMainFrameProcess())->removeMessageReceiver(Messages::WebAuthenticatorCoordinatorProxy::messageReceiverName(), webPageProxy->webPageIDInMainFrameProcess());
 +}
@@ -122035,43 +122665,137 @@ index 0000000000000000000000000000000000000000..282ce8dda3f740c20ac5adb687999718
 +    return webPageProxy ? webPageProxy->legacyMainFrameProcess().sharedPreferencesForWebProcess() : std::nullopt;
 +}
 +
-+// The spec asks for NotAllowedError whenever no authenticator can serve a
-+// request, so a page cannot tell from the error which authenticators exist.
-+static ExceptionData noAuthenticatorAvailable()
++void WebAuthenticatorCoordinatorProxy::makeCredential(IPC::Connection& connection, FrameIdentifier frameID, FrameInfoData&& frameInfo, PublicKeyCredentialCreationOptions&& options, MediationRequirement mediation, RequestCompletionHandler&& handler)
 +{
-+    return ExceptionData { ExceptionCode::NotAllowedError, "No authenticator is available on this device."_s };
-+}
-+
-+// A request that reaches this coordinator was not taken by an extension (a
-+// password manager replaces navigator.credentials in the page), so the page
-+// gets an error it shows as a failed passkey. The browser window is told, so
-+// that the user learns why instead of a bare failure: no passkey provider in
-+// this window, as in a private window the extension is not allowed in.
-+// Conditional-mediation requests, which pages make at load for passkey
-+// autofill, are not the user's doing and are left quiet.
-+static void tellWindow(WebPageProxy* page, MediationRequirement mediation, bool create)
-+{
-+    if (!page || mediation == MediationRequirement::Conditional)
++    RefPtr page = m_webPageProxy.get();
++    // Conditional creation (a passkey made after a password sign-in) needs a
++    // password manager's say; there is none in the browser.
++    if (!takesPasskeyRequestsHaiku(page.get()) || mediation == MediationRequirement::Conditional) {
++        tellWindow(page.get(), mediation, true);
++        handler({ }, AuthenticatorAttachment::Platform, noAuthenticatorAvailable());
 +        return;
-+    if (auto* view = static_cast<WebView*>(page->pageClient()))
-+        view->notifyWebAuthnUnhandled(create);
++    }
++    if (auto exception = validateRequestHaiku(connection, frameID, frameInfo, options.rp.id))
++        return handler({ }, AuthenticatorAttachment::Platform, *exception);
++
++    // The authenticator makes ES256 keys only.
++    bool es256 = false;
++    for (auto& parameters : options.pubKeyCredParams)
++        es256 |= parameters.type == PublicKeyCredentialType::PublicKey && parameters.alg == COSE::ES256;
++    if (!es256)
++        return handler({ }, AuthenticatorAttachment::Platform, ExceptionData { ExceptionCode::NotSupportedError, "Summit's passkeys are ES256 (-7) keys, which the site does not accept."_s });
++    // A site that asks for a security key (cross-platform) cannot use it.
++    if (options.authenticatorSelection && options.authenticatorSelection->authenticatorAttachment == AuthenticatorAttachment::CrossPlatform) {
++        tellWindow(page.get(), mediation, true);
++        return handler({ }, AuthenticatorAttachment::Platform, noAuthenticatorAvailable());
++    }
++
++    PasskeyRequestHaiku request;
++    request.owner = this;
++    request.page = page.get();
++    request.handler = WTF::move(handler);
++    request.create = true;
++    request.rpID = utf8Haiku(options.rp.id);
++    request.origin = utf8Haiku(frameInfo.securityOrigin.toString());
++    request.clientDataJSON = buildClientDataJson(ClientDataType::Create, options.challenge, frameInfo.securityOrigin.securityOrigin(), WebAuthn::Scope::SameOrigin);
++    request.userHandle = bytesHaiku(options.user.id.span());
++    request.userName = utf8Haiku(options.user.name);
++    request.displayName = utf8Haiku(options.user.displayName);
++    request.credProps = options.extensions && options.extensions->credProps && *options.extensions->credProps;
++    std::vector<std::vector<uint8_t>> excluded;
++    for (auto& descriptor : options.excludeCredentials) {
++        if (descriptor.type == PublicKeyCredentialType::PublicKey)
++            excluded.push_back(bytesHaiku(descriptor.id.span()));
++    }
++    auto rpID = request.rpID;
++    auto identifier = addPasskeyRequestHaiku(WTF::move(request), passkeyTimeoutHaiku(options.timeout));
++    passkeyQueueHaiku().dispatch([identifier, rpID = WTF::move(rpID), excluded = WTF::move(excluded)]() mutable {
++        std::vector<StoredPasskeyHaiku> passkeys;
++        status_t status = storedPasskeysHaiku(rpID, passkeys);
++        RunLoop::mainSingleton().dispatch([identifier, status, passkeys = WTF::move(passkeys), excluded = WTF::move(excluded)]() mutable {
++            if (status != B_OK) {
++                finishPasskeyRequestHaiku(identifier, notAllowed("Summit may not use the key store."_s));
++                return;
++            }
++            auto found = passkeyRequestsHaiku().find(identifier);
++            if (found == passkeyRequestsHaiku().end())
++                return;
++            for (auto& passkey : passkeys) {
++                for (auto& id : excluded)
++                    found->second.excluded |= passkey.credentialID == id;
++            }
++            found->second.candidates = WTF::move(passkeys);
++            askHostHaiku(identifier);
++        });
++    });
 +}
 +
-+void WebAuthenticatorCoordinatorProxy::makeCredential(IPC::Connection&, FrameIdentifier, FrameInfoData&&, PublicKeyCredentialCreationOptions&&, MediationRequirement mediation, RequestCompletionHandler&& handler)
++void WebAuthenticatorCoordinatorProxy::getAssertion(IPC::Connection& connection, FrameIdentifier frameID, FrameInfoData&& frameInfo, PublicKeyCredentialRequestOptions&& options, MediationRequirement mediation, IPC::Untrusted<std::optional<SecurityOriginData>>&& untrustedParentOrigin, RequestCompletionHandler&& handler)
 +{
-+    tellWindow(m_webPageProxy.get(), mediation, true);
-+    handler({ }, AuthenticatorAttachment::Platform, noAuthenticatorAvailable());
-+}
++    RefPtr page = m_webPageProxy.get();
++    // Conditional mediation (passkeys offered in a sign-in field's autofill)
++    // is reported unavailable, so pages that check do not ask.
++    if (!takesPasskeyRequestsHaiku(page.get()) || mediation == MediationRequirement::Conditional) {
++        tellWindow(page.get(), mediation, false);
++        handler({ }, AuthenticatorAttachment::Platform, noAuthenticatorAvailable());
++        return;
++    }
++    if (auto exception = validateRequestHaiku(connection, frameID, frameInfo, options.rpId))
++        return handler({ }, AuthenticatorAttachment::Platform, *exception);
++    // A frame of another origin than the page's: the passkey would sign for a
++    // page the user does not see; as upstream's own authenticators, decline.
++    auto parentOrigin = WTF::move(untrustedParentOrigin).unsafeExtractWithoutValidation(IPC::UnvalidatedReason::NeedsReview);
++    if (parentOrigin)
++        return handler({ }, AuthenticatorAttachment::Platform, notAllowed("The origin of the document is not the same as its ancestors."_s));
++    if (options.authenticatorAttachment == AuthenticatorAttachment::CrossPlatform) {
++        tellWindow(page.get(), mediation, false);
++        return handler({ }, AuthenticatorAttachment::Platform, noAuthenticatorAvailable());
++    }
 +
-+void WebAuthenticatorCoordinatorProxy::getAssertion(IPC::Connection&, FrameIdentifier, FrameInfoData&&, PublicKeyCredentialRequestOptions&&, MediationRequirement mediation, IPC::Untrusted<std::optional<SecurityOriginData>>&&, RequestCompletionHandler&& handler)
-+{
-+    tellWindow(m_webPageProxy.get(), mediation, false);
-+    handler({ }, AuthenticatorAttachment::Platform, noAuthenticatorAvailable());
++    PasskeyRequestHaiku request;
++    request.owner = this;
++    request.page = page.get();
++    request.handler = WTF::move(handler);
++    request.create = false;
++    request.rpID = utf8Haiku(options.rpId);
++    request.origin = utf8Haiku(frameInfo.securityOrigin.toString());
++    request.clientDataJSON = buildClientDataJson(ClientDataType::Get, options.challenge, frameInfo.securityOrigin.securityOrigin(), WebAuthn::Scope::SameOrigin);
++    request.clientDataHash = buildClientDataJsonHash(*request.clientDataJSON);
++    std::vector<std::vector<uint8_t>> allowed;
++    for (auto& descriptor : options.allowCredentials) {
++        if (descriptor.type == PublicKeyCredentialType::PublicKey)
++            allowed.push_back(bytesHaiku(descriptor.id.span()));
++    }
++    auto rpID = request.rpID;
++    auto identifier = addPasskeyRequestHaiku(WTF::move(request), passkeyTimeoutHaiku(options.timeout));
++    passkeyQueueHaiku().dispatch([identifier, rpID = WTF::move(rpID), allowed = WTF::move(allowed)]() mutable {
++        std::vector<StoredPasskeyHaiku> passkeys;
++        status_t status = storedPasskeysHaiku(rpID, passkeys);
++        RunLoop::mainSingleton().dispatch([identifier, status, passkeys = WTF::move(passkeys), allowed = WTF::move(allowed)]() mutable {
++            if (status != B_OK) {
++                finishPasskeyRequestHaiku(identifier, notAllowed("Summit may not use the key store."_s));
++                return;
++            }
++            auto found = passkeyRequestsHaiku().find(identifier);
++            if (found == passkeyRequestsHaiku().end())
++                return;
++            // An allow list names the passkeys the site knows for the account
++            // being signed in; without one, every passkey of the site is
++            // offered (discoverable credentials).
++            if (!allowed.empty()) {
++                std::erase_if(passkeys, [&](const StoredPasskeyHaiku& passkey) {
++                    return std::find(allowed.begin(), allowed.end(), passkey.credentialID) == allowed.end();
++                });
++            }
++            found->second.candidates = WTF::move(passkeys);
++            askHostHaiku(identifier);
++        });
++    });
 +}
 +
 +void WebAuthenticatorCoordinatorProxy::isUserVerifyingPlatformAuthenticatorAvailable(IPC::Untrusted<SecurityOriginData>&&, QueryCompletionHandler&& handler)
 +{
-+    handler(false);
++    handler(takesPasskeyRequestsHaiku(m_webPageProxy.get()));
 +}
 +
 +void WebAuthenticatorCoordinatorProxy::isConditionalMediationAvailable(IPC::Untrusted<SecurityOriginData>&&, QueryCompletionHandler&& handler)
@@ -122081,15 +122805,16 @@ index 0000000000000000000000000000000000000000..282ce8dda3f740c20ac5adb687999718
 +
 +void WebAuthenticatorCoordinatorProxy::getClientCapabilities(IPC::Untrusted<SecurityOriginData>&&, CapabilitiesCompletionHandler&& handler)
 +{
-+    // Report the capabilities this client understands, all unsupported, rather
-+    // than an empty map: a page can then tell a browser that knows about a
-+    // capability and lacks it from one that has never heard of it.
++    // Report the capabilities this client understands rather than an empty
++    // map: a page can then tell a browser that knows about a capability and
++    // lacks it from one that has never heard of it.
++    bool platform = takesPasskeyRequestsHaiku(m_webPageProxy.get());
 +    Vector<KeyValuePair<String, bool>> capabilities {
 +        { "conditionalCreate"_s, false },
 +        { "conditionalGet"_s, false },
 +        { "hybridTransport"_s, false },
-+        { "passkeyPlatformAuthenticator"_s, false },
-+        { "userVerifyingPlatformAuthenticator"_s, false },
++        { "passkeyPlatformAuthenticator"_s, platform },
++        { "userVerifyingPlatformAuthenticator"_s, platform },
 +        { "relatedOrigins"_s, false },
 +        { "signalAllAcceptedCredentials"_s, false },
 +        { "signalCurrentUserDetails"_s, false },
@@ -122099,8 +122824,8 @@ index 0000000000000000000000000000000000000000..282ce8dda3f740c20ac5adb687999718
 +}
 +
 +// The signal methods keep a platform credential store in step with the relying
-+// party. There is no such store here, so they report success without doing
-+// anything, which is what the spec asks of a client that stores no credentials.
++// party. Summit's passkeys are changed only by the user, so they report
++// success without doing anything.
 +void WebAuthenticatorCoordinatorProxy::signalUnknownCredential(IPC::Untrusted<SecurityOriginData>&&, UnknownCredentialOptions&&, CompletionHandler<void(std::optional<ExceptionData>)>&& handler)
 +{
 +    handler(std::nullopt);
@@ -122116,8 +122841,17 @@ index 0000000000000000000000000000000000000000..282ce8dda3f740c20ac5adb687999718
 +    handler(std::nullopt);
 +}
 +
++// The page aborted its request (AbortSignal): the prompt goes away. A request
++// whose answer is being worked on (a key made or a signature) completes.
 +void WebAuthenticatorCoordinatorProxy::cancel(CompletionHandler<void()>&& handler)
 +{
++    Vector<uint64_t> identifiers;
++    for (auto& [identifier, request] : passkeyRequestsHaiku()) {
++        if (request.owner == this)
++            identifiers.append(identifier);
++    }
++    for (auto identifier : identifiers)
++        finishPasskeyRequestHaiku(identifier, ExceptionData { ExceptionCode::AbortError, "The request was aborted."_s });
 +    handler();
 +}
 +
@@ -131206,10 +131940,10 @@ index 0000000000000000000000000000000000000000..c9a119d02f85b7c5ad8fe9153bfc9604
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/WebView.cpp b/Source/WebKit/UIProcess/haiku/WebView.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..ace77fb311c85392e240008d6eeaf850eb9e6576
+index 0000000000000000000000000000000000000000..1c04b9217777568be50ef2ed2e08898d311173ad
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/WebView.cpp
-@@ -0,0 +1,3241 @@
+@@ -0,0 +1,3249 @@
 +/*
 + * Copyright (C) 2013 Intel Corporation. All rights reserved.
 + *
@@ -134388,6 +135122,14 @@ index 0000000000000000000000000000000000000000..ace77fb311c85392e240008d6eeaf850
 +    m_state->target.SendMessage(&message, static_cast<BHandler*>(nullptr), 0);
 +}
 +
++bool WebView::sendPasskeyRequest(BMessage& message)
++{
++    if (!takesPasskeyRequests())
++        return false;
++    message.AddMessenger("view", nativeView());
++    return m_state->target.SendMessage(&message, static_cast<BHandler*>(nullptr), 0) == B_OK;
++}
++
 +#if ENABLE(FULLSCREEN_API)
 +void WebView::requestFullScreen(bool enter, CompletionHandler<void(bool)>&& completion)
 +{
@@ -134970,10 +135712,10 @@ index 0000000000000000000000000000000000000000..b252c8d4a269799df95e145e4f9183d7
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/WebViewPrivate.h b/Source/WebKit/UIProcess/haiku/WebViewPrivate.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..3670bf654afeab72d15d457060553c36220c35e6
+index 0000000000000000000000000000000000000000..09065324e26c3f8226b7b12ba0f6e53c692f8f11
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/WebViewPrivate.h
-@@ -0,0 +1,221 @@
+@@ -0,0 +1,226 @@
 +/*
 +   Copyright (C) 2014 Haiku, inc.
 +
@@ -135037,6 +135779,11 @@ index 0000000000000000000000000000000000000000..3670bf654afeab72d15d457060553c36
 +    // Tells the native window that a passkey request reached the browser's
 +    // own coordinator (B_WEBKIT_WEBAUTHN_UNHANDLED).
 +    void notifyWebAuthnUnhandled(bool create);
++    // The host asks the user about passkeys (BWebKitView::SetPasskeyRequests).
++    bool takesPasskeyRequests() const { return !m_state->closed && m_state->asksForPasskeys; }
++    // Sends a B_WEBKIT_PASSKEY_REQUESTED with "view" added. False when the
++    // host takes no passkey requests or cannot be reached.
++    bool sendPasskeyRequest(BMessage&);
 +    // The attached BWebKitView, or an invalid messenger while it is detached.
 +    BMessenger nativeView() const
 +    {
@@ -135197,10 +135944,10 @@ index 0000000000000000000000000000000000000000..3670bf654afeab72d15d457060553c36
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/WebViewStateHaiku.h b/Source/WebKit/UIProcess/haiku/WebViewStateHaiku.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..b2945258d1674302b0bcb47785cd25ab0bb058a4
+index 0000000000000000000000000000000000000000..7f921b9da6ddbf915192f0474c03b133e6c3670c
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/WebViewStateHaiku.h
-@@ -0,0 +1,233 @@
+@@ -0,0 +1,242 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#pragma once
@@ -135308,6 +136055,9 @@ index 0000000000000000000000000000000000000000..b2945258d1674302b0bcb47785cd25ab
 +    // The host answers HTTP authentication challenges
 +    // (BWebKitView::SetAuthenticationRequests).
 +    std::atomic<bool> asksForAuthentication { false };
++    // The host asks the user about passkeys, Summit's own WebAuthn
++    // authenticator (BWebKitView::SetPasskeyRequests).
++    std::atomic<bool> asksForPasskeys { false };
 +    const std::shared_ptr<JavaScriptDialogRequestsHaiku> dialogs { std::make_shared<JavaScriptDialogRequestsHaiku>() };
 +    std::shared_ptr<WebViewContextHaiku> context;
 +    // Where on the screen the page goes when the view's window is a direct
@@ -135420,6 +136170,12 @@ index 0000000000000000000000000000000000000000..b2945258d1674302b0bcb47785cd25ab
 +// request.
 +enum class AuthenticationAnswerHaiku : uint8_t { SignIn, Continue, Cancel };
 +void answerAuthenticationHaiku(uint64_t identifier, AuthenticationAnswerHaiku, const String& user, const String& password, bool forSession);
++#if ENABLE(WEB_AUTHN)
++// Main thread only. Answers a B_WEBKIT_PASSKEY_REQUESTED identifier: the
++// passkey chosen (get), 0 to create one, or negative to decline
++// (WebAuthenticatorCoordinatorProxyHaiku.cpp).
++void answerPasskeyRequestHaiku(uint64_t identifier, int32_t account);
++#endif
 +// Main thread only. Runs an extension item of the last B_WEBKIT_CONTEXT_MENU.
 +void performExtensionMenuItemHaiku(uint64_t token);
 +#if ENABLE(WK_WEB_EXTENSIONS)
