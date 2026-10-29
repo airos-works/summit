@@ -117,7 +117,7 @@ int main(int argc,char** argv)
     CHECK(IsBookmarkFolderQueryURL("place:parent=toolbar_____") && !IsBookmarkFolderQueryURL("place:type=8"));
     CHECK(!IsBookmarkFolderQueryURL("place:parent=toolbar_____&terms=x") && !IsBookmarkFolderQueryURL("https://example.test/"));
     CHECK(query("place:type=8&OR").items.size()==3);
-    for (const auto* suffix:{"&terms=x","&parent=toolbar_____","&folder=TOOLBAR","&minVisits=1","&beginTimeRef=1","&domain=x","&tag=x","&OR&uri=https%3A%2F%2Fx.test%2F","&annotation=x","&transition=1","&sort=22"}) {
+    for (const auto* suffix:{"&terms=x","&parent=toolbar_____","&folder=TOOLBAR","&minVisits=1","&beginTimeRef=1","&domain=x","&tag=x","&OR&uri=https%3A%2F%2Fx.test%2F","&annotation=x","&!annotation=x","&transition=1","&sort=15"}) {
         const auto bad=query(std::string("place:type=8")+suffix);CHECK(!bad.error.empty() && bad.items.empty());
     }
     // Persist and export the source query and identities, never its expansion.

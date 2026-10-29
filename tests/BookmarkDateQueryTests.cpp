@@ -92,10 +92,13 @@ int main(int argc, char** argv)
     }
     for (const auto type : {3,5}) {
         for (const auto* suffix : {"&terms=Today","&beginTime=1","&domain=date.test","&tag=work","&onlyBookmarked=1",
-                "&minVisits=1","&parent=toolbar_____","&OR","&transition=1","&includeHidden=1"}) {
+                "&minVisits=1","&parent=toolbar_____","&OR&tag=work","&transition=1","&includeHidden=1","&annotation=x"}) {
             const auto result = query("place:type="+std::to_string(type)+suffix);
             CHECK(!result.error.empty() && result.items.empty());
         }
+        // Firefox 60 omits empty OR groups, leaving the unconditioned query.
+        const auto plain = query("place:type="+std::to_string(type)), split = query("place:type="+std::to_string(type)+"&OR");
+        CHECK(split.error.empty() && !plain.items.empty() && split.items.size() == plain.items.size());
     }
     constexpr int64_t second = 1000000;
     // DST days are calendar days: spring has 23 hours, autumn has 25.

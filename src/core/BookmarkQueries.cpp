@@ -7,6 +7,7 @@
 #include <ctime>
 #include <functional>
 #include <map>
+#include <optional>
 #include <set>
 
 namespace summit {
@@ -51,6 +52,30 @@ std::string Lower(std::string text)
 {
     for (char& c : text) if (c >= 'A' && c <= 'Z') c += 'a' - 'A';
     return text;
+}
+
+// Firefox 60 annotations Summit retains under other names. Every other
+// annotation is absent, as on a Firefox page or item that never had it.
+constexpr std::string_view kCharsetAnnotation = "URIProperties/characterSet"; // page
+std::optional<std::string> ItemAnnotation(const BookmarkNode& node, std::string_view name)
+{
+    if (name == "bookmarkProperties/description" && !node.metadata.description.empty()) return node.metadata.description;
+    return std::nullopt;
+}
+
+// The keyword older Places sorted by (sort=9/10, GetKeywordForBookmark).
+std::string SortKeyword(const BookmarkNode& node)
+{
+    return node.metadata.keywords.empty() ? std::string() : Lower(node.metadata.keywords.front().name);
+}
+
+// Firefox 60's SortComparison_AnnotationLess before its title fallback: a
+// missing value compares as empty, and two missing values are equal.
+int CompareAnnotations(const std::optional<std::string>& a, const std::optional<std::string>& b)
+{
+    if (!a && !b) return 0;
+    const auto x = Lower(a.value_or(std::string())), y = Lower(b.value_or(std::string()));
+    return x < y ? -1 : y < x ? 1 : 0;
 }
 
 std::string Host(std::string_view url)
@@ -100,26 +125,40 @@ struct Clause {
     std::vector<std::string> tags;
     std::vector<uint32_t> transitions;
     std::vector<std::pair<bool, std::string>> parents; // legacy numeric/symbolic folder, or GUID parent
+    // Firefox 60's (!)annotation: one page annotation name per group; the last
+    // key wins, and an empty name is no condition (nsNavHistoryQuery).
+    std::string annotation;
+    bool annotationIsNot = false;
     bool HasConditions(bool bookmarkQuery) const {
         return minVisits >= 0 || maxVisits >= 0 || HasBegin() || HasEnd() || hasDomain || !uri.empty()
-            || !terms.empty() || !tags.empty() || !transitions.empty() || !parents.empty() || (onlyBookmarked && !bookmarkQuery);
+            || !terms.empty() || !tags.empty() || !transitions.empty() || !parents.empty() || !annotation.empty()
+            || (onlyBookmarked && !bookmarkQuery);
     }
 };
 
 struct Query {
     int64_t source = 0, sort = 0, type = 0, limit = 0;
     bool excludeQueries = false, excludeItems = false, expandQueries = true, visitTags = false;
+    // Legacy options: the annotation sorted by sort=19/20 (Firefox 60 and
+    // earlier) and Firefox 3's excludeItemIfParentHasAnnotation.
+    std::string sortingAnnotation, parentAnnotation;
     std::string error;
     // Legacy Places OR separates conditions; presentation options are global.
     std::vector<Clause> clauses{1};
 };
 
+// Firefox's folder shortcut (GetSimpleBookmarksQueryParent; Firefox 60's
+// GetSimpleBookmarksQueryFolder): one group with one parent and no time,
+// domain, URI, terms, tags or limit. Visit counts, transitions, annotations,
+// !tags and the result type do not prevent it, and its folder node ignores
+// them. Firefox 158 shows such a visit query (type=1) as the folder; other
+// result types fail there, so they keep their own explanations here.
 bool SimpleFolder(const Query& query)
 {
     if (query.clauses.size() != 1) return false;
     const auto& clause = query.clauses.front();
     return clause.parents.size() == 1 && clause.terms.empty() && !clause.hasDomain && clause.uri.empty()
-        && clause.tags.empty() && clause.transitions.empty() && !query.limit && query.type == 0 && !clause.HasBegin() && !clause.HasEnd();
+        && clause.tags.empty() && !query.limit && (query.type == 0 || query.type == 1) && !clause.HasBegin() && !clause.HasEnd();
 }
 
 Query Parse(std::string_view url)
@@ -187,8 +226,16 @@ Query Parse(std::string_view url)
             std::string tag; text(tag);
             if (std::find(clause.tags.begin(), clause.tags.end(), tag) == clause.tags.end()) clause.tags.push_back(std::move(tag));
         } else if (name == "OR") q.clauses.emplace_back();
-        else if (name == "asyncEnabled") {
-            bool ignored = false; flag(ignored); // Presentation/scheduling, not membership.
+        else if (name == "annotation" || name == "!annotation") {
+            text(clause.annotation);
+            clause.annotationIsNot = name == "!annotation";
+        } else if (name == "sortingAnnotation") text(q.sortingAnnotation);
+        else if (name == "excludeItemIfParentHasAnnotation") text(q.parentAnnotation);
+        else if (name == "asyncEnabled" || name == "excludeReadOnlyFolders") {
+            // asyncEnabled is scheduling, not membership. Read-only folders
+            // carried Firefox's placesInternal/READ_ONLY item annotation;
+            // imports do not keep it, so no Summit folder is read-only.
+            bool ignored = false; flag(ignored);
         } else if (name == "includeHidden" || name == "originalTitle") {
             bool enabled = false; flag(enabled);
             if (enabled) q.error = "Summit does not retain the data required by " + std::string(name) + ".";
@@ -197,37 +244,50 @@ Query Parse(std::string_view url)
     }
     if (q.error.empty() && q.type != 0 && q.type != 1 && q.type != 3 && q.type != 4 && q.type != 5 && q.type != 6 && q.type != 8 && q.type != 9)
         q.error = "This smart folder's result grouping is not yet supported.";
-    if (q.error.empty() && q.sort != 0 && q.sort != 1 && q.sort != 2 && q.sort != 3 && q.sort != 4
-        && q.sort != 5 && q.sort != 6 && q.sort != 7 && q.sort != 8 && q.sort != 11 && q.sort != 12
-        && q.sort != 13 && q.sort != 14 && q.sort != 17 && q.sort != 18 && q.sort != 19 && q.sort != 20)
-        q.error = "This smart folder's sort order requires data Summit does not yet retain.";
+    // Older Places sorted 9/10 by keyword (Firefox 52 had it, current Firefox
+    // does not) and 19/20 by sortingAnnotation (through Firefox 60). 21/22 are
+    // frecency. No release assigned 15/16.
+    if (q.error.empty() && (q.sort == 15 || q.sort == 16))
+        q.error = "This smart folder uses a sort order Firefox does not define.";
     if (q.type == 6 || q.type == 8 || std::any_of(q.clauses.begin(), q.clauses.end(), [](const auto& c) { return !c.parents.empty(); })) q.source = 1;
     if (q.error.empty() && q.type == 8 && std::any_of(q.clauses.begin(), q.clauses.end(), [](const auto& c) { return c.HasConditions(true); }))
         q.error = "Virtual bookmark roots with additional conditions are not supported.";
     if (q.error.empty() && q.type == 9 && (q.clauses.size() != 1 || q.clauses.front().HasConditions(false)))
         q.error = "Library queries with additional conditions are not yet supported.";
-    if (q.type == 1) {
-        // Places selects visits even with queryType=1. Parent queries can take
-        // a separate folder-shortcut path; do not silently broaden those.
+    if (q.type == 1 && SimpleFolder(q)) {
+        // Firefox opens a visit query naming one folder, without the
+        // conditions that prevent a shortcut, as that folder (verified with
+        // Firefox 158): its bookmarks, folders and separators, not visits.
+        q.type = 0;
+    } else if (q.type == 1) {
+        // Places selects visits even with queryType=1. Any other folder
+        // restriction adds b.parent to SQL that has no bookmarks table
+        // (SelectAsVisit), so Firefox fails it.
         if (q.error.empty() && std::any_of(q.clauses.begin(), q.clauses.end(), [](const auto& c) { return !c.parents.empty(); }))
-            q.error = "Individual visits restricted by bookmark folders are not yet supported.";
+            q.error = "Firefox cannot evaluate individual visits restricted by bookmark folders together with other conditions.";
         q.visitTags = q.source == 1 && !q.excludeItems;
         q.source = 0;
     }
     if (q.error.empty() && q.type == 4) {
-        const auto& c = q.clauses.front();
-        // Places creates history containers even with queryType=1. Additional
-        // filters have different SQL/container semantics from ordinary searches;
-        // support only the verified complete time-range form for now.
-        if (q.clauses.size() != 1 || c.minVisits >= 0 || c.maxVisits >= 0 || c.onlyBookmarked
-            || !c.terms.empty() || !c.uri.empty() || !c.tags.empty() || !c.transitions.empty() || !c.parents.empty()
-            || c.HasBegin() != c.HasEnd() || (c.hasDomain && !c.HasBegin()))
-            q.error = "Site grouping currently supports an unfiltered history query or a complete visit-time range, optionally restricted by domain.";
+        // Places creates history containers even with queryType=1. Its site SQL
+        // (SelectAsSite) selects hosts having a page that matches the groups;
+        // each host's child query carries only the host and the first group's
+        // :begin_time/:end_time. Without both bounds those child URIs are NULL.
+        // Search terms and folder references name columns (page_title, tags,
+        // b.parent) the site SQL lacks. Firefox fails all of these.
+        const auto& first = q.clauses.front();
+        const bool constrained = std::any_of(q.clauses.begin(), q.clauses.end(), [](const auto& c) { return c.HasConditions(false); });
+        if (std::any_of(q.clauses.begin(), q.clauses.end(), [](const auto& c) { return !c.terms.empty() || !c.parents.empty(); }))
+            q.error = "Firefox cannot evaluate site grouping with search terms or folder restrictions.";
+        else if (constrained && !(first.HasBegin() && first.HasEnd()))
+            q.error = "Firefox cannot evaluate site grouping with conditions unless its first group has both a begin and an end time.";
         q.source = 0;
     }
     if (q.error.empty() && (q.type == 3 || q.type == 5)) {
-        if (q.clauses.size() != 1 || q.clauses.front().HasConditions(false))
-            q.error = "Date grouping with additional conditions is not yet supported.";
+        // The date SQL (SelectAsDay) appends conditions as a WHERE clause on
+        // columns it does not select, so Firefox fails any condition.
+        if (std::any_of(q.clauses.begin(), q.clauses.end(), [](const auto& c) { return c.HasConditions(false); }))
+            q.error = "Firefox cannot evaluate date grouping with additional conditions.";
         q.source = 0;
     }
     if (q.error.empty() && q.type == 6 && std::any_of(q.clauses.begin(), q.clauses.end(), [](const auto& c) { return !c.transitions.empty(); }))
@@ -336,7 +396,8 @@ BookmarkNode RootContents(const BookmarkNode& folder, const Query& query,
         return !page ? int64_t(0) : page->visitTimes.empty() ? HistoryMicroseconds(page->visited) : page->visitTimes.front();
     };
     auto count = [&](const BookmarkNode& node) { const auto* page = visit(node); return page ? HistoryVisitCount(*page) : 0; };
-    const auto mode = query.sort;
+    // An annotation sort without an annotation name compares everything equal.
+    const auto mode = (query.sort == 19 || query.sort == 20) && query.sortingAnnotation.empty() ? 0 : query.sort;
     if (mode) std::stable_sort(result.children.begin(), result.children.end(), [&](const auto& a, const auto& b) {
         auto compare = [](const auto& x, const auto& y) { return x < y ? -1 : y < x ? 1 : 0; };
         auto title = [&] { return compare(Lower(a.title), Lower(b.title)); };
@@ -361,7 +422,12 @@ BookmarkNode RootContents(const BookmarkNode& folder, const Query& query,
             }
             case 7: case 8: order = compare(count(a), count(b)); if (!order) order = compare(date(a), date(b)); break;
             case 11: case 12: order = compare(a.added, b.added); if (!order) order = title(); break;
+            case 9: case 10: order = compare(SortKeyword(a), SortKeyword(b)); if (!order) order = titleRank(); break;
             case 19: case 20:
+                order = CompareAnnotations(ItemAnnotation(a, query.sortingAnnotation), ItemAnnotation(b, query.sortingAnnotation));
+                if (!order) order = titleRank();
+                break;
+            case 21: case 22:
                 // Containers have no frecency.
                 order = compare(a.folder || a.separator || IsBookmarkQueryURL(a.url) ? int64_t(0) : Frecency(visit(a), true, now),
                     b.folder || b.separator || IsBookmarkQueryURL(b.url) ? int64_t(0) : Frecency(visit(b), true, now));
@@ -433,17 +499,28 @@ bool DateRanges(int64_t now, std::vector<DateRange>& ranges)
     return true;
 }
 
-std::vector<BookmarkNode> SiteGroups(const std::vector<const Entry*>& entries, bool showItems)
+// Places' site SQL lists the hosts of the matching pages that have counted
+// visits (h.visit_count > 0); each host's child query lists every page of
+// that host in the pool, including pages with only downloads or reloads.
+std::vector<BookmarkNode> SiteGroups(const std::vector<const Entry*>& matching, const std::vector<const Entry*>& pool, bool showItems)
 {
+    auto site = [](const std::string& url) -> std::optional<std::string> {
+        auto host = Lower(Host(url));
+        if (host.empty() && Lower(url.substr(0, 5)) != "file:") return std::nullopt;
+        return host;
+    };
     std::map<std::string, BookmarkNode> groups;
-    for (const auto* entry : entries) {
-        auto host = Lower(Host(entry->node.url));
-        if (host.empty() && Lower(entry->node.url.substr(0, 5)) != "file:") continue;
-        auto& group = groups[host];
+    for (const auto* entry : matching) {
+        const auto host = site(entry->node.url);
+        if (!host || !entry->visit || HistoryVisitCount(*entry->visit) <= 0) continue;
+        auto& group = groups[*host];
         group.folder = true;
-        group.title = host.empty() ? "(local files)" : host;
-        if (showItems) group.children.push_back(entry->node);
+        group.title = host->empty() ? "(local files)" : *host;
     }
+    if (showItems)
+        for (const auto* entry : pool)
+            if (const auto host = site(entry->node.url))
+                if (auto group = groups.find(*host); group != groups.end()) group->second.children.push_back(entry->node);
     std::vector<BookmarkNode> result;
     for (auto& [host, group] : groups) result.push_back(std::move(group));
     return result;
@@ -561,15 +638,29 @@ BookmarkQueryResult QueryBookmarks(std::string_view url, const Bookmarks& bookma
     std::map<std::string, const BookmarkNode*> saved;
     std::vector<const BookmarkNode*> ordered;
     std::map<int64_t, size_t> positions;
+    std::map<int64_t, const BookmarkNode*> parentOf;
+    // Firefox 60 kept a keyword's character set as the page annotation
+    // URIProperties/characterSet. Summit retains it with the keyword.
+    std::map<std::string, std::string> charsets;
     std::function<void(const BookmarkNode&)> collect = [&](const BookmarkNode& folder) {
         size_t position = 0;
         for (const auto& child : folder.children) {
             positions.emplace(child.id, position++);
+            parentOf.emplace(child.id, &folder);
             if (child.folder) collect(child);
-            else if (!child.separator) { ordered.push_back(&child); saved.emplace(child.url, &child); }
+            else if (!child.separator) {
+                ordered.push_back(&child); saved.emplace(child.url, &child);
+                for (const auto& keyword : child.metadata.keywords)
+                    if (!keyword.charset.empty()) { charsets.emplace(child.url, keyword.charset); break; }
+            }
         }
     };
     collect(bookmarks.Bar()); collect(bookmarks.Other());
+    auto pageAnnotation = [&](const std::string& url, const std::string& name) -> std::optional<std::string> {
+        if (name == kCharsetAnnotation)
+            if (auto found = charsets.find(url); found != charsets.end()) return found->second;
+        return std::nullopt;
+    };
     struct PreparedClause {
         const Clause* condition;
         int64_t begin = INT64_MIN, end = INT64_MAX;
@@ -628,6 +719,14 @@ BookmarkQueryResult QueryBookmarks(std::string_view url, const Bookmarks& bookma
             folderShortcut = nested.error.empty() && SimpleFolder(nested);
         }
         if ((query && q.excludeQueries && !folderShortcut) || (!query && q.excludeItems && q.type == 0)) return;
+        // A folder shortcut's node lists the folder; its query conditions
+        // (visit counts, transitions, annotations) do not apply.
+        if (simpleFolder) { matches.push_back({node, visit}); return; }
+        // Firefox 3's excludeItemIfParentHasAnnotation filtered bookmark
+        // results by their folder's item annotation (FilterResultSet).
+        if (!q.parentAnnotation.empty() && node.id)
+            if (auto parent = parentOf.find(node.id); parent != parentOf.end() && ItemAnnotation(*parent->second, q.parentAnnotation))
+                return;
         const int count = visit ? HistoryVisitCount(*visit) : 0;
         const auto search = Lower(node.title + " " + node.url + " " + BookmarkTagsText(node.metadata.tags));
         for (const auto& filter : filters) {
@@ -653,10 +752,15 @@ BookmarkQueryResult QueryBookmarks(std::string_view url, const Bookmarks& bookma
                     || host.compare(host.size() - domain.size(), domain.size(), domain) || host[host.size() - domain.size() - 1] != '.')) continue;
             }
             if (std::any_of(filter.terms.begin(), filter.terms.end(), [&](const auto& term) { return search.find(term) == std::string::npos; })) continue;
+            // Places compares lower(tag folder title) with the lower-cased tag.
             if (std::any_of(clause.tags.begin(), clause.tags.end(), [&](const auto& tag) {
-                    const bool has = std::find(node.metadata.tags.begin(), node.metadata.tags.end(), tag) != node.metadata.tags.end();
+                    const bool has = std::any_of(node.metadata.tags.begin(), node.metadata.tags.end(),
+                        [&](const auto& name) { return Lower(name) == Lower(tag); });
                     return has == clause.notTags;
                 })) continue;
+            // Firefox 60's EXISTS over the page's annotations (moz_annos).
+            // Pages lack every annotation Summit does not retain.
+            if (!clause.annotation.empty() && pageAnnotation(node.url, clause.annotation).has_value() == clause.annotationIsNot) continue;
             // Each candidate is visited once. Overlapping OR branches cannot
             // duplicate it, while distinct bookmarks sharing a URL remain distinct.
             // Like Places' EXISTS time predicate, the range selects pages
@@ -698,7 +802,20 @@ BookmarkQueryResult QueryBookmarks(std::string_view url, const Bookmarks& bookma
     auto date = [&](const Entry& e) { return q.type == 1 ? e.visitTime : e.visit ? (e.visit->visitTimes.empty()
         ? HistoryMicroseconds(e.visit->visited) : e.visit->visitTimes.front()) : int64_t(0); };
     auto count = [](const Entry& e) { return e.visit ? HistoryVisitCount(*e.visit) : 0; };
+    // Bookmark rows carry item annotations and keywords; history and visit rows
+    // (no item ID) carry page annotations and no keyword.
+    auto annotation = [&](const Entry& e) {
+        return e.node.id ? ItemAnnotation(e.node, q.sortingAnnotation) : pageAnnotation(e.node.url, q.sortingAnnotation);
+    };
+    // Places' SortComparison_TitleLess: title, address, then date.
+    auto titleRank = [&](const Entry& a, const Entry& b) {
+        auto compare = [](const auto& x, const auto& y) { return x < y ? -1 : y < x ? 1 : 0; };
+        int order = compare(Lower(a.node.title), Lower(b.node.title));
+        if (!order && !a.node.folder && !b.node.folder) order = compare(a.node.url, b.node.url);
+        return order ? order : compare(date(a), date(b));
+    };
     auto sort = [&](int64_t mode) {
+        if ((mode == 19 || mode == 20) && q.sortingAnnotation.empty()) mode = 0;
         if (!mode) return;
         // History visit rows have null tag columns unless queryType=1 and
         // excludeItems is false; their tag comparator falls back to title.
@@ -707,6 +824,16 @@ BookmarkQueryResult QueryBookmarks(std::string_view url, const Bookmarks& bookma
             const bool descending = !(mode % 2);
             auto less = [&](const auto& x, const auto& y) { return descending ? y < x : x < y; };
             switch (mode) {
+                case 9: case 10: case 19: case 20: {
+                    int order = 0;
+                    if (mode >= 19) order = CompareAnnotations(annotation(a), annotation(b));
+                    else if (a.node.id || b.node.id) {
+                        const auto x = a.node.id ? SortKeyword(a.node) : std::string(), y = b.node.id ? SortKeyword(b.node) : std::string();
+                        order = x < y ? -1 : y < x ? 1 : 0;
+                    }
+                    if (!order) order = titleRank(a, b);
+                    return descending ? order > 0 : order < 0;
+                }
                 case 1: case 2:
                     if (historyOrder) {
                         if (Lower(a.node.title) == Lower(b.node.title)) {
@@ -728,7 +855,7 @@ BookmarkQueryResult QueryBookmarks(std::string_view url, const Bookmarks& bookma
                 case 11: case 12:
                     if (historyOrder && a.node.added == b.node.added) return less(Lower(a.node.title), Lower(b.node.title));
                     return less(a.node.added, b.node.added);
-                case 19: case 20: {
+                case 21: case 22: {
                     const auto x = Frecency(a.visit, q.source == 1 || saved.count(a.node.url), now);
                     const auto y = Frecency(b.visit, q.source == 1 || saved.count(b.node.url), now);
                     if (x == y) return less(date(a), date(b));
@@ -753,14 +880,32 @@ BookmarkQueryResult QueryBookmarks(std::string_view url, const Bookmarks& bookma
     };
     if (groupedHistory) {
         if (q.excludeQueries) return result;
-        // Date/site descendants always use title order. Date-only descendants
-        // inherit the requested order, defaulting to title when none is set.
-        sort(q.type == 5 || (q.type == 3 && !q.sort) ? 1 : q.sort);
         if (q.type == 4) {
-            std::vector<const Entry*> selected;
-            for (const auto& entry : matches) selected.push_back(&entry);
-            result.items = SiteGroups(selected, !q.excludeItems && q.expandQueries);
+            // Hosts follow every group's conditions; their child queries carry
+            // only the host and the first group's time range (SelectAsSite).
+            std::vector<Entry> hosts;
+            if (constrained) {
+                hosts = std::move(matches);
+                matches.clear();
+                const auto& range = filters.front();
+                for (const auto& page : history) {
+                    if (!IsBookmarkableURL(page.url)) continue;
+                    const auto times = HistoryVisitTimes(page);
+                    if (std::none_of(times.begin(), times.end(), [&](int64_t t) { return t >= range.begin && t <= range.end; })) continue;
+                    BookmarkNode node{0, page.title, page.url, false, 0, {}};
+                    if (auto found = saved.find(page.url); found != saved.end()) node.metadata = found->second->metadata;
+                    matches.push_back({std::move(node), &page});
+                }
+            }
+            sort(q.sort);
+            std::vector<const Entry*> selected, pool;
+            for (const auto& entry : matches) pool.push_back(&entry);
+            for (const auto& entry : constrained ? hosts : matches) selected.push_back(&entry);
+            result.items = SiteGroups(selected, pool, !q.excludeItems && q.expandQueries);
         } else {
+            // Date/site descendants always use title order. Date-only descendants
+            // inherit the requested order, defaulting to title when none is set.
+            sort(q.type == 5 || (q.type == 3 && !q.sort) ? 1 : q.sort);
             std::vector<DateRange> ranges;
             if (!DateRanges(now, ranges)) return {{}, "This smart folder's calendar ranges cannot be represented."};
             for (const auto& range : ranges) {
@@ -778,7 +923,7 @@ BookmarkQueryResult QueryBookmarks(std::string_view url, const Bookmarks& bookma
                 if (!visible) continue;
                 BookmarkNode group;
                 group.folder = true; group.title = range.title;
-                if (q.type == 5) group.children = SiteGroups(selected, !q.excludeItems && q.expandQueries);
+                if (q.type == 5) group.children = SiteGroups(selected, selected, !q.excludeItems && q.expandQueries);
                 else if (q.expandQueries && !q.excludeItems)
                     for (const auto* entry : selected) group.children.push_back(entry->node);
                 result.items.push_back(std::move(group));
@@ -823,11 +968,13 @@ BookmarkQueryResult QueryBookmarks(std::string_view url, const Bookmarks& bookma
         if (q.limit && result.items.size() > uint64_t(q.limit)) result.items.resize(q.limit);
         return result;
     }
-    // Firefox chooses the newest maxResults before sorting by title.
-    const bool visitPostSort = q.type == 1 && q.sort >= 11;
-    sort(visitPostSort && q.limit ? 0 : q.limit && (q.sort == 1 || q.sort == 2) ? 4 : q.sort);
+    // Firefox chooses the newest maxResults before sorting by title. Keyword
+    // and annotation sorts have no SQL ORDER BY: the limit takes rows in
+    // their stored order, which are sorted afterwards.
+    const bool postSort = (q.type == 1 && q.sort >= 11) || q.sort == 9 || q.sort == 10 || q.sort == 19 || q.sort == 20;
+    sort(postSort && q.limit ? 0 : q.limit && (q.sort == 1 || q.sort == 2) ? 4 : q.sort);
     if (q.limit && matches.size() > uint64_t(q.limit)) matches.resize(q.limit);
-    if (q.limit && (q.sort == 1 || q.sort == 2 || visitPostSort)) sort(q.sort);
+    if (q.limit && (q.sort == 1 || q.sort == 2 || postSort)) sort(q.sort);
     for (auto& entry : matches) {
         if (q.type == 1) result.visitTimes.push_back(entry.visitTime);
         result.items.push_back(std::move(entry.node));

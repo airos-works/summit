@@ -70,7 +70,11 @@ int main(int argc,char** argv)
     }
     CHECK(compared==69 && invalid==15 && grouped==6 && legacy==9);
     CHECK(query("place:transition=7&onlyBookmarked=1").items.size()==4);
-    CHECK(query("place:transition=7&parent=toolbar_____").items.size()==4);
+    // One parent and no time, domain, URI, terms, tags or limit is Firefox's
+    // folder shortcut, which ignores the transition (GetSimpleBookmarksQueryParent).
+    CHECK(query("place:transition=7&parent=toolbar_____").items.size()==query("place:parent=toolbar_____").items.size());
+    CHECK(query("place:transition=7&parent=toolbar_____").items.size()>4);
+    CHECK(query("place:transition=7&parent=toolbar_____&maxResults=100").items.size()==4); // A limit searches descendants.
     CHECK(query("place:transition=7&domain=transitions.example&terms=both").items.size()==2);
     CHECK(query("place:transition=7&queryType=1&maxVisits=0").items.size()==2);
     CHECK(query("place:transition=1&OR&transition=7").items.size()==7);

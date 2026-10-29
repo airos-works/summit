@@ -56,7 +56,6 @@ int main(int argc,char** argv)
     for (const auto& test:fixture["queries"]) {
         const std::string url=test["uri"];const auto actual=query(url);
         if (test.contains("error") || (test["rows"].empty() && url.find("excludeQueries=1")==std::string::npos)
-            || url.find("sort=21")!=std::string::npos || url.find("sort=22")!=std::string::npos
             || url.find("includeHidden=1")!=std::string::npos || url.find("onlyBookmarked=1")!=std::string::npos
             || url.find("&OR")!=std::string::npos) {
             ++unsupported;CHECK(!actual.error.empty() && actual.items.empty());continue;
@@ -70,7 +69,7 @@ int main(int argc,char** argv)
         }
         if (rows!=expected) {std::cerr<<url<<"\nActual "<<rows<<"\nExpected "<<expected<<'\n';CHECK(false);}else CHECK(true);
     }
-    CHECK(compared+unsupported==41);
+    CHECK(compared+unsupported==41 && compared==29); // Includes both frecency sorts (21/22).
     CHECK(query("place:type=9&expandQueries=0").expandQueries==false);
     CHECK(query("place:type=7").items.empty() && !query("place:type=7").error.empty());
     const auto snapshot=query("place:type=9");CHECK(snapshot.items.size()==4);

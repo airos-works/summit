@@ -59,8 +59,18 @@ int main(int argc, char** argv)
     for (const auto& test : fixture["queries"]) {
         const auto url = test["uri"].get<std::string>();
         if (url.find("parent=") != std::string::npos) {
+            // Firefox 158 shows a one-parent visit query as that folder
+            // (type 6 = folder node): bookmarks with their latest visit times.
             const auto result = query(url);
-            CHECK(!result.error.empty() && result.items.empty() && result.visitTimes.empty());
+            CHECK(result.error.empty() && result.visitTimes.empty() && test["tree"]["type"] == 6);
+            std::vector<Row> actual, expected;
+            for (const auto& node : result.items) {
+                CHECK(node.id && !node.folder);
+                const auto page = std::find_if(profile.history.begin(),profile.history.end(),[&](const auto& p) { return p.url == node.url; });
+                actual.emplace_back(node.title,node.url,page == profile.history.end() ? 0 : HistoryVisitTimes(*page).front());
+            }
+            for (const auto& row : test["tree"]["children"]) expected.emplace_back(row["title"],row["uri"],row["time"]);
+            if (actual != expected) { std::cerr << "Firefox mismatch: " << url << '\n'; CHECK(false); } else CHECK(true);
             continue;
         }
         if (url.find("onlyBookmarked=") != std::string::npos) continue; // Removed in current Firefox; legacy behavior below.
@@ -125,11 +135,20 @@ int main(int argc, char** argv)
     CHECK(result.items.size() == 5 && Rows(result).size() == 5); // Overlap does not duplicate a visit.
     CHECK(query("place:type=1&OR&uri=http%3A%2F%2Falpha.example%2Fa").items.size() == 3);
     CHECK(query("place:type=1&beginTimeRef=2&beginTime="+std::to_string(times[1]-now)+"&endTimeRef=2&endTime="+std::to_string(times[1]-now)).items.size() == 3);
-    for (const auto* suffix : {"&parent=toolbar_____","&folder=TOOLBAR","&transition=invalid","&annotation=x","&sort=22","&includeHidden=1","&beginTimeRef=2&beginTime=9223372036854775807"}) {
+    // Other folder restrictions put b.parent into visit SQL without bookmarks; Firefox fails them.
+    for (const auto* suffix : {"&parent=toolbar_____&terms=Alpha","&folder=TOOLBAR&maxResults=1","&parent=toolbar_____&OR&terms=x",
+            "&transition=invalid","&sort=15","&includeHidden=1","&beginTimeRef=2&beginTime=9223372036854775807"}) {
         const auto bad = query(std::string("place:type=1")+suffix);
         CHECK(!bad.error.empty() && bad.items.empty() && bad.visitTimes.empty());
     }
     CHECK(query("place:type=0").visitTimes.empty());
+    // The folder shortcut ignores visit counts, transitions and annotations, as Firefox's does.
+    const auto shortcut = query("place:type=1&parent=toolbar_____");
+    CHECK(shortcut.error.empty() && shortcut.items.size() == 2 && shortcut.visitTimes.empty());
+    CHECK(query("place:type=1&folder=TOOLBAR&minVisits=99&transition=7&annotation=x").items.size() == 2);
+    CHECK(IsBookmarkFolderQueryURL("place:type=1&parent=toolbar_____") && !IsBookmarkFolderQueryURL("place:type=1&parent=toolbar_____&terms=a"));
+    // A missing page annotation: every visit lacks it, none has it.
+    CHECK(query("place:type=1&!annotation=x").items.size() == all.size() && query("place:type=1&annotation=x").items.empty());
     const auto id = profile.bookmarks.Add({"place:type=1&sort=4","Individual visits"},kBookmarksBarFolder);
     auto page = RenderBookmarkQueryPage(profile.bookmarks,profile.history,id,{},"visit-tests");
     CHECK(page.find("class=\"visit-time\">Visited "+FormatBookmarkVisitTime(times[1])) != std::string::npos);

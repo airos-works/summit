@@ -51,11 +51,11 @@ int main()
     CHECK(URLs(query("place:queryType=1&sort=5&maxResults=1")) == "file:///tmp/example");
     CHECK(URLs(query("place:queryType=1&sort=6&maxResults=1")) == "https://sub.example.com/b");
     CHECK(query("place:queryType=1&sort=17").error.empty() && query("place:queryType=1&sort=18").error.empty());
-    // Frecency (sort=19/20): visit counts weighted by old visits' small
-    // weight; bookmarked pages get the bookmark bonus on each visit.
-    CHECK(query("place:sort=20").error.empty());
-    CHECK(URLs(query("place:sort=20")) == "https://example.com/a,https://other.test/c,https://sub.example.com/b,https://unbookmarked.test/");
-    CHECK(URLs(query("place:sort=19&maxResults=1")) == "https://unbookmarked.test/");
+    // Frecency (sort=21/22, Places' SORT_BY_FRECENCY_*): visit counts weighted
+    // by old visits' small weight; bookmarked pages get the bookmark bonus.
+    CHECK(query("place:sort=22").error.empty());
+    CHECK(URLs(query("place:sort=22")) == "https://example.com/a,https://other.test/c,https://sub.example.com/b,https://unbookmarked.test/");
+    CHECK(URLs(query("place:sort=21&maxResults=1")) == "https://unbookmarked.test/");
     {
         // A typed visit today outweighs nine old link visits.
         auto history = profile.history;
@@ -64,8 +64,8 @@ int main()
         typed.visitTimes = {now - 3600000000};
         typed.visitTransitions = {{now - 3600000000, 2}};
         history.push_back(typed);
-        CHECK(URLs(QueryBookmarks("place:sort=20&maxResults=2", marks, history)) == "https://typed.test/,https://example.com/a");
-        CHECK(URLs(QueryBookmarks("place:queryType=1&sort=20&maxResults=1", marks, history)) == "https://example.com/a");
+        CHECK(URLs(QueryBookmarks("place:sort=22&maxResults=2", marks, history)) == "https://typed.test/,https://example.com/a");
+        CHECK(URLs(QueryBookmarks("place:queryType=1&sort=22&maxResults=1", marks, history)) == "https://example.com/a");
     }
     CHECK(query("place:sort=8&maxResults=0").items.size() == 4);
     CHECK(query("place:sort=8&maxResults=4294967295").items.size() == 4);
@@ -101,7 +101,7 @@ int main()
         const auto result = query(invalid); CHECK(result.items.empty() && !result.error.empty());
     }
     for (const auto* unsupported : {"place:parent=unknown", "place:folder=3", "place:transition=invalid",
-        "place:annotation=test", "place:includeHidden=1", "place:originalTitle=1", "place:type=2", "place:sort=22"}) {
+        "place:includeHidden=1", "place:originalTitle=1", "place:type=2", "place:sort=15", "place:sort=16"}) {
         const auto result = query(unsupported); CHECK(result.items.empty() && !result.error.empty());
     }
     CHECK(query("place:includeHidden=false&originalTitle=0&asyncEnabled=1&expandQueries=1").items.size() == 4);

@@ -48,13 +48,16 @@ int main(int argc, char** argv)
     }
     // Unsupported filters are preserved with an explanation, never broadened.
     for (const auto* url : {"place:type=4&terms=Alpha", "place:type=4&onlyBookmarked=1", "place:type=4&minVisits=2",
-            "place:type=4&tag=work", "place:type=4&parent=toolbar_____", "place:type=4&OR",
+            "place:type=4&tag=work", "place:type=4&parent=toolbar_____", "place:type=4&annotation=x",
             "place:type=4&beginTime=1", "place:type=4&endTime=2", "place:type=4&domain=alpha.example",
-            "place:type=4&uri=https%3A%2F%2Falpha.example", "place:type=4&transition=1", "place:type=4&sort=22",
+            "place:type=4&uri=https%3A%2F%2Falpha.example", "place:type=4&transition=1", "place:type=4&sort=15",
             "place:type=4&beginTimeRef=2&beginTime=9223372036854775807&endTime=1"}) {
         const auto result = query(url);
         CHECK(!result.error.empty() && result.items.empty());
     }
+    // Firefox 60 omits empty OR groups, leaving the plain site query.
+    CHECK(Tree(query("place:type=4&OR")) == Tree(query("place:type=4")) && !query("place:type=4").items.empty());
+    CHECK(query("place:type=4&sort=22").error.empty() && query("place:type=4&sort=22").items.size() == query("place:type=4").items.size());
     auto bounded = query("place:type=4&beginTimeRef=2&beginTime=-1&endTimeRef=2&endTime=1");
     CHECK(bounded.error.empty() && bounded.items.empty());
     CHECK(query("place:type=4&beginTime=10&endTime=1").items.empty());

@@ -287,17 +287,25 @@ Examples supported by this implementation:
 
 Other implemented filters include exact URI, domain (optionally exact host),
 inclusive visit-time ranges, visit-count bounds, multiple required or excluded tags, bookmarked-only history,
-and exclusion of queries or ordinary items. Sorts include title, address,
-last visit, visit count, bookmark addition/modification times and tags. A zero result limit
+legacy page-annotation clauses and exclusion of queries or ordinary items. Sorts include title, address,
+last visit, visit count, bookmark addition/modification times, tags, frecency and
+the legacy keyword and annotation sorts (see **Annotations and legacy options**). A zero result limit
 means no additional query limit. For ordinary page queries, title sorting with
 a limit first selects the most recently visited matches. Menus evaluate an immutable snapshot on opening;
 profile changes replace the snapshot for subsequent menus. Circular query
 expansion stops at a repeated query in its source scope or eight nested queries. Tag expansion
-is bounded to 10,000 page memberships.
+is bounded to 10,000 page memberships. Tag roots (`type=6`) with conditions group
+only the matching pages; Firefox's tag SQL (`SelectAsTag`) rejects any condition,
+so this filter is Summit's own.
 
 **Folder references** retain the target's imported GUID and numeric ID. Simple
 one-parent shortcuts expose ordered direct children, including folders,
-separators and nested shortcuts. Constrained searches (for example a parent
+separators and nested shortcuts. A shortcut is a single group with one parent and
+no time range, domain, URI, search terms, tags or result limit, as in Firefox's
+`GetSimpleBookmarksQueryParent` (Firefox 60: `GetSimpleBookmarksQueryFolder`).
+Visit counts, transitions, annotations and `!tags` do not prevent it, and its
+folder view ignores them, as Firefox's folder node does: `place:parent=toolbar_____&transition=7`
+lists the whole toolbar. Other constrained searches (for example a parent
 plus search terms or a result limit) search descendants, as
 [Firefox's query implementation](https://github.com/mozilla-firefox/firefox/blob/main/toolkit/components/places/nsNavHistory.cpp)
 does. Multiple parents select the union of their subtrees.
@@ -430,7 +438,9 @@ forgets the pending type. `chrome.history.getVisits` reports the visits'
 Redirect targets are not told apart (the engine does not report them).
 Checked by `DownloadVisitTests` and on the X399 (27 Oct): the address field,
 Reload, a bookmark, a history entry that is not bookmarked and the MCP's
-navigate gave 2, 9, 3, 1 and 1, with the reload not counted. Grouped tag, site, date and virtual-root queries with transition
+navigate gave 2, 9, 3, 1 and 1, with the reload not counted. Site queries accept
+transition conditions together with a complete time range (see **History grouped by site**);
+tag, date and virtual-root queries with transition
 conditions show an explanation. Invalid numeric filters also show an explanation
 instead of reproducing Firefox's fallback to a broader query.
 
@@ -502,22 +512,77 @@ query, without substituting results from only its supported groups. The
 and [combined query builder](https://hg.mozilla.org/releases/mozilla-release/raw-file/FIREFOX_60_0_RELEASE/toolkit/components/places/nsNavHistory.cpp),
 which support saved multi-query URLs from older profiles.
 
-**This does not complete Firefox smart-folder compatibility or #110.** Folder
-references, visit-time ranges and imported transitions are implemented for retained
-data. Classification of new navigations remains unfinished. Annotations,
-other groupings and more complex grouped filters remain unsupported. Frecency
-sorts (`sort=19`/`20`) work since 27 Oct with Firefox's classic frecency
+Folder references, visit-time ranges, imported transitions, annotation clauses and
+grouped filters are implemented for retained data (annotations and grouped filters
+since 29 Oct; see **Annotations and legacy options**). Frecency
+sorts (`sort=21`/`22`, Places' `SORT_BY_FRECENCY_*`) work since 27 Oct with Firefox's classic frecency
 computed from Summit's retained visits (`Frecency` in `BookmarkQueries.cpp`):
 the ten newest visits, each worth its transition's bonus (typed 2000, link
 100, bookmark 75, others 0, plus 75 for a bookmarked page) weighted by age
 (100 within 4 days, then 70, 50, 30 and 10 after 90 days), scaled to the
 page's visit count; a visit of unknown transition counts as a link, and an
-unvisited bookmark scores 140. Ties fall back to the newest visit.
+unvisited bookmark scores 140. Ties fall back to the newest visit. (Until 29 Oct
+Summit read frecency from `sort=19`/`20`, which older Places used for annotation
+sorts and current Places leaves unassigned; `sort=21`/`22` showed an explanation.)
 Unsupported queries stay saved and show an explicit explanation, with no
 broader substitute results. Query history is limited to Summit's retained 2,000
 pages; Firefox's stored frecency is not imported (it is computed). Text matching uses
-ASCII case folding, and tag names match exactly, rather than Firefox's full
+ASCII case folding, and tag names match ASCII case-insensitively (Places compares
+`lower(tag title)` with the lower-cased tag), rather than Firefox's full
 locale-aware collation. Parameterized query keywords are not supported.
+
+### Annotations and legacy options
+
+Firefox 60 and earlier saved queries could name annotations. Summit evaluates them
+as those releases' [query builder](https://hg.mozilla.org/releases/mozilla-release/raw-file/FIREFOX_60_0_RELEASE/toolkit/components/places/nsNavHistory.cpp)
+and [result sorting](https://hg.mozilla.org/releases/mozilla-release/raw-file/FIREFOX_60_0_RELEASE/toolkit/components/places/nsNavHistoryResult.cpp)
+did. Current Firefox no longer parses these keys and ignores them as unknown; a
+query that names one was written for the older behaviour, which Summit keeps.
+
+| Clause | Meaning |
+| --- | --- |
+| `annotation=NAME` | The page has page annotation `NAME` (`EXISTS` in `moz_annos`) |
+| `!annotation=NAME` | The page does not have it |
+| `sort=19`/`20` with `sortingAnnotation=NAME` | Ascending/descending by that annotation's value |
+| `sort=9`/`10` | Ascending/descending by bookmark keyword (Firefox 52 and earlier) |
+| `excludeItemIfParentHasAnnotation=NAME` | Firefox 3: bookmark results whose folder has item annotation `NAME` are left out |
+| `excludeReadOnlyFolders=1` | Firefox 60: read-only folders are left out |
+
+Each OR group has one annotation condition; a later `annotation` or `!annotation`
+key in the group replaces the earlier one, and an empty name is no condition.
+Annotation conditions are page conditions: they count as a condition for empty-group
+omission, apply to bookmark, history and visit queries, and are ignored by a folder
+shortcut, as in Firefox.
+
+Summit does not keep Firefox's annotation tables. It answers for the annotations
+whose data it retains under another name, and treats every other annotation as
+absent, as Firefox did for a page or item that never had it:
+
+- `URIProperties/characterSet` (page): a page has it when one of its bookmarks
+  has a keyword with a character set, the only place Summit keeps one (imported
+  from `moz_annos` or HTML `LAST_CHARSET` for keyword bookmarks). Pages without
+  such a keyword lack it, even if Firefox had recorded a character set for them.
+- `bookmarkProperties/description` (item): a bookmark or folder with a
+  description has it. It is an item annotation, so `annotation=` never matches it
+  (Firefox 60 tests page annotations only); `sortingAnnotation` and
+  `excludeItemIfParentHasAnnotation` use it.
+- Everything else, including `livemark/feedURI`, `Places/SmartBookmark` and
+  `placesInternal/READ_ONLY`, is absent: `annotation=` matches nothing,
+  `!annotation=` matches everything, `excludeItemIfParentHasAnnotation` and
+  `excludeReadOnlyFolders` remove nothing.
+
+Annotation sorts compare bookmark rows by item annotation and history or visit rows
+by page annotation. A missing value sorts as empty text; when both are missing, or
+equal, rows fall back to Places' title order (title, address, date). Without
+`sortingAnnotation` the sort leaves rows in their stored order. Keyword sorts compare
+a bookmark's first keyword; history rows have none, so a history query sorts by
+title. Places has no SQL ordering for these modes, so with a result limit Summit
+takes the first rows in stored order and then sorts them. `sort=15`/`16` were never
+assigned and show an explanation.
+
+Tests: `BookmarkLegacyQueryTests` (host; `tools/bench/bookmarks-native.sh` also
+builds it for airOS), plus updated cases in the query, combined, site, date, visit,
+root, transition and library suites.
 
 ### History grouped by site
 
@@ -545,11 +610,22 @@ visit falls outside that range. `queryType=1` still produces history containers,
 as Firefox does for this result type. `excludeQueries=1` hides the generated
 folders; `excludeItems=1` or `expandQueries=0` leaves them empty.
 
-Grouped text/tag/URI/bookmark-only filters, visit-count conditions, folder
-references, legacy OR groups and one-sided time bounds remain unsupported and
-show an explanation. Firefox's site SQL and subsequent container filtering do
-not apply these conditions like an ordinary page search; Summit does not
-substitute a broader search for an unsupported grouped query.
+Since 29 Oct, other conditions follow Firefox's site SQL
+([`SelectAsSite`](https://hg.mozilla.org/releases/mozilla-release/raw-file/48a735cc74a7e6d730f9bf59c3de58f750287a23/toolkit/components/places/nsNavHistory.cpp)).
+A host is listed when one of its pages with counted visits (`visit_count > 0`)
+matches the conditions: tags (`!tags`), visit counts, transitions, URI, domain,
+annotations, the legacy bookmarked-only flag, and legacy OR groups. Each host's
+child query carries only the host and the **first** group's time range, so a
+host's folder lists every page of that host visited in that range, whether or
+not the page itself matched. For example `place:type=4&beginTime=…&endTime=…&tag=work`
+lists the hosts of tagged pages, each with all its pages from that period, and a
+host chosen by a later OR group can be empty. Download- or reload-only pages
+(visit count zero) never select a host but appear inside one.
+
+Firefox fails the remaining forms, so they keep an explanation: conditions
+without a begin and end time in the first group (the child URIs become NULL),
+one-sided time bounds, search terms and folder references (the site SQL lacks
+`page_title`, `tags` and `b.parent`).
 
 The ordering and supported membership cases were compared with the official
 Firefox 158.0.1 Linux release, using an isolated generated history profile.
@@ -597,9 +673,10 @@ their empty host folders.
 The older-period lower bound preserves Firefox 158's generated value of
 1,970,000,000 microseconds after the Unix epoch, resulting from its SQLite
 `datetime(0,'unixepoch')` numeric conversion. This excludes visits from the
-first 1,970 seconds of 1970 from that folder. Additional conditions on date
-queries, including legacy OR groups, remain unsupported and show an explanation.
-Firefox's date SQL does not apply those conditions like an ordinary page search.
+first 1,970 seconds of 1970 from that folder. Firefox's date SQL (`SelectAsDay`)
+appends any condition as a `WHERE` clause on columns it does not select, so
+Firefox fails date queries with conditions; Summit shows an explanation. Empty
+legacy OR groups are omitted, leaving the plain date query.
 The library-sidebar result type remains unfinished.
 
 The [date oracle fixture](../tests/fixtures/bookmarks/date-query-firefox158.json)
@@ -640,8 +717,12 @@ Metadata sorts apply after limiting; their initial subset is unspecified in
 Firefox's SQL. Tags are available to the visit tag comparator with
 `queryType=1` unless `excludeItems=1`; otherwise it falls back to title order.
 `excludeItems`, `excludeQueries` and `expandQueries` do not remove visit rows.
-Parent/folder restrictions on visit results remain unsupported and show an
-explanation because Firefox can route them through a separate folder shortcut.
+A visit query with one folder and no time, domain, URI, terms, tags or limit is a
+folder shortcut in Firefox: `place:type=1&parent=toolbar_____&sort=4` shows the
+toolbar's bookmarks, folders and separators, sorted by their pages' latest visits,
+not individual visits (checked against the Firefox 158 fixture). Any other
+folder restriction adds `b.parent` to visit SQL that has no bookmarks table, so
+Firefox fails it and Summit shows an explanation.
 
 The [visit oracle fixture](../tests/fixtures/bookmarks/visit-query-firefox158.json)
 records 66 queries from Firefox 158.0.1, with the same pinned primary sources
@@ -691,8 +772,9 @@ uses the displayed page URLs and order from its immutable menu snapshot. Virtual
 folder IDs are transient, while saved query links keep their real bookmark IDs
 and source scope. No generated tree is persisted or exported.
 
-Additional root conditions are unsupported and show an explanation. Firefox's
-virtual-root SQL returns no rows or errors for the captured condition cases;
+Additional root conditions, including annotations, are unsupported and show an
+explanation. Firefox's virtual-root SQL returns no rows or errors for the captured
+condition cases (its `VALUES` rows have no page columns for a condition);
 Summit does not substitute a broader view. The
 [root oracle fixture](../tests/fixtures/bookmarks/root-query-firefox158.json)
 records 98 queries with both values of the mobile preference. Comparisons cover
@@ -735,6 +817,14 @@ is the deprecated tag-contents view, not the library sidebar, and remains
 unsupported.
 
 ## Testing
+
+The annotation and grouped-filter follow-up (29 Oct) passes **62 legacy-query
+checks** (`BookmarkLegacyQueryTests`) on the host. The updated suites pass on the
+host: 102 query, 63 combined, 513 site, 2949 date, 914 visit, 826 root, 242
+transition and 254 library checks; the library oracle now compares 29 current
+queries (both frecency sorts) with 12 explanations, and the visit oracle's
+folder-shortcut case is compared instead of explained. Native airOS runs of these
+suites were not repeated for this change.
 
 The library-sidebar follow-up passes **244 sidebar-query checks** on the host
 and native airOS. Its Firefox oracle records **41 cases**, with 27 current-query
@@ -1109,9 +1199,13 @@ engine, profile `p-bm`):
 
 ## Not done
 
-- Advanced Firefox smart-folder clauses remain unsupported; see **Live smart
-  folders** above for the implemented subset and outstanding work. Keywords
-  and bookmarklets are supported by the 22 October #110 follow-ups.
+- Firefox smart-folder clauses: annotations, legacy options, folder-shortcut
+  and grouped-filter semantics were finished on 29 October (see **Annotations and
+  legacy options**). What remains are approximations listed there and above:
+  ASCII rather than locale collation, annotations Summit does not retain, the
+  Firefox data retention limits, tag-folder date sorts (`type=6&sort=11..14`) and
+  Summit's own filter on tag-root conditions, which Firefox's SQL rejects.
+  Keywords and bookmarklets are supported by the 22 October #110 follow-ups.
 - ~~Exporting and importing back leaves out empty folders.~~ Done 20 October
   (#110): a folder empty in the file is imported (one only duplicates filled is
   still left out), and the HTML reader drops the browsers' own root folders
