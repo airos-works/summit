@@ -25,6 +25,12 @@ overflow button, and so does one the extension opens itself
 window moves or resizes, and before activating or preloading an action;
 without a report the popup opens at the top right of the page.
 
+A link with a target (`target="_blank"`, or `window.open()` from a click) in
+a popup opens in a new tab of the popup's window (its tab named as the opener), and
+the popup closes, as in Firefox and Chrome
+(`ExtensionActionPopupHaiku::openInTab`, through `tabs.create()`, which
+refuses what an extension may not open). It used to be dropped silently.
+
 ## Public SDK and lifetime
 
 `BWebKitContext::SetExtensionActionListener` registers a local application
@@ -156,11 +162,26 @@ binary/launcher digests and unchanged source/support fingerprints. Copy log:
 
 ![Six installed extensions with the native overflow menu open](screenshots/extension-overflow.png)
 
+## Pointer input (laptop, 30 Oct 2026)
+
+With six actions (four buttons and the overflow button) and real pointer
+input (the pointer moved by `set_mouse_position`, buttons pressed by a test
+input_server device add-on, `uipoke_clicker`):
+
+- a click on the overflow button opens its menu (Action test 5, Action test 6,
+  Manage extensions…); hovering highlights an item and a click on it opens
+  that extension's popup under the overflow button, right-aligned with it,
+  also with the window at its narrowest;
+- a click on a toolbar button opens its popup under that button;
+- the popup takes clicks (its button counted two clicks) and its links; a
+  link with a target opens a tab (above);
+- Escape in the popup and a click outside it close it.
+
 ## Remaining coverage and compatibility
 
 These fixtures prove the listed action paths, not arbitrary Chrome, Firefox or
 Safari extension compatibility. MV3/service workers, remaining action APIs,
-badge alpha/theme rendering coverage, dynamic icon changes, overflow pointer input,
+badge alpha/theme rendering coverage, dynamic icon changes,
 private contexts, multi-window behavior and a real extension corpus need more
 implementation or runtime coverage. Active-tab permission transitions, popup
 navigation/CSP rejection, modal dialogs, renderer failure and permission

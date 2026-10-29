@@ -105539,10 +105539,10 @@ index b9eb05c62a8aade37bb75b1a196fd114b3bfebd7..1759a9c1a598de8bd22c7d09ec631189
  #endif // ENABLE(WK_WEB_EXTENSIONS)
 diff --git a/Source/WebKit/UIProcess/Extensions/haiku/ExtensionActionPopupHaiku.cpp b/Source/WebKit/UIProcess/Extensions/haiku/ExtensionActionPopupHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..65bb7b1e46c29659d45cfdd34314b34a91d231f5
+index 0000000000000000000000000000000000000000..e743c98f346a6f9a9c4998c5e8813ae8bdae47f4
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/haiku/ExtensionActionPopupHaiku.cpp
-@@ -0,0 +1,561 @@
+@@ -0,0 +1,589 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +#include "config.h"
 +#include "FrameInfoHaiku.h"
@@ -105598,8 +105598,11 @@ index 0000000000000000000000000000000000000000..65bb7b1e46c29659d45cfdd34314b34a
 +        RefPtr popup = popupForPage(page);
 +        RefPtr frame = action->targetFrame();
 +        // A popup's top-level document must remain inside its extension. Child
-+        // frames retain the extension configuration's normal CSP checks.
-+        if (popup && popup->isCurrent() && ((frame && !frame->isMainFrame()) || popup->allowsNavigation(action->request().url())))
++        // frames retain the extension configuration's normal CSP checks. A
++        // new page (a link with a target, window.open()) has no frame yet: the
++        // UI client opens it in a tab instead (ExtensionActionPopupHaiku::
++        // openInTab), so it may go on to there.
++        if (popup && popup->isCurrent() && (!frame || !frame->isMainFrame() || popup->allowsNavigation(action->request().url())))
 +            listener->use();
 +        else
 +            listener->ignore();
@@ -105695,6 +105698,25 @@ index 0000000000000000000000000000000000000000..65bb7b1e46c29659d45cfdd34314b34a
 +    return isCurrent() && m_context->isURLForThisExtension(url);
 +}
 +
++void ExtensionActionPopupHaiku::openInTab(const URL& url)
++{
++    ASSERT(RunLoop::isMain());
++    RefPtr context = m_context.get();
++    if (!context || !isCurrent() || !url.isValid())
++        return;
++    WebExtensionTabParameters parameters;
++    parameters.url = url;
++    parameters.active = true;
++    if (RefPtr window = m_tab->window())
++        parameters.windowIdentifier = window->identifier();
++    // After the popup's tab, as a link opened from that page would be.
++    parameters.parentTabIdentifier = m_tab->identifier();
++    // tabs.create() refuses what an extension may not open (javascript:,
++    // file: and other browsers' internal pages).
++    context->tabsCreate(std::nullopt, parameters, [](auto&&) { });
++    close();
++}
++
 +bool ExtensionActionPopupHaiku::start()
 +{
 +    ASSERT(RunLoop::isMain());
@@ -105722,7 +105744,13 @@ index 0000000000000000000000000000000000000000..65bb7b1e46c29659d45cfdd34314b34a
 +    auto anchor = controller->nativeBrowserTabs()->actionAnchor(nativeWindow->messenger, context->uniqueIdentifier())
 +        .value_or(BRect(corner.x(), corner.y(), corner.x(), corner.y()));
 +    SUMMIT_EXTENSION_TIMING("popup start: anchor ready");
-+    m_state->client = WebView::createForExtensionPopup(m_state, configuration.releaseNonNull());
++    m_state->client = WebView::createForExtensionPopup(m_state, configuration.releaseNonNull(), [weakThis = WeakPtr { *this }](const URL& url) {
++        // After the engine's decision about the new page is answered.
++        RunLoop::mainSingleton().dispatch([weakThis, url = url.isolatedCopy()] {
++            if (RefPtr popup = weakThis.get())
++                popup->openInTab(url);
++        });
++    });
 +    m_page = m_state->client->page();
 +    SUMMIT_EXTENSION_TIMING("popup start: page created");
 +    if (!m_page) {
@@ -106106,10 +106134,10 @@ index 0000000000000000000000000000000000000000..65bb7b1e46c29659d45cfdd34314b34a
 +#endif
 diff --git a/Source/WebKit/UIProcess/Extensions/haiku/ExtensionActionPopupHaiku.h b/Source/WebKit/UIProcess/Extensions/haiku/ExtensionActionPopupHaiku.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..d2a0a6d558df5741fbb93558b05dc7ea414295b1
+index 0000000000000000000000000000000000000000..33dffc54a954fd9f34892e8eeaaa343613d9d4b5
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/haiku/ExtensionActionPopupHaiku.h
-@@ -0,0 +1,85 @@
+@@ -0,0 +1,88 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +#pragma once
 +#if ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
@@ -106159,6 +106187,9 @@ index 0000000000000000000000000000000000000000..d2a0a6d558df5741fbb93558b05dc7ea
 +    bool allowsNavigation(const URL&) const;
 +    void documentLoaded();
 +    void fail(const String&);
++    // A link the user opened from the popup with a target: a new tab of the
++    // popup's window, and the popup closes, as in Firefox and Chrome.
++    void openInTab(const URL&);
 +    void MessageReceived(BMessage*) override;
 +
 +private:
@@ -134701,10 +134732,10 @@ index 0000000000000000000000000000000000000000..c9a119d02f85b7c5ad8fe9153bfc9604
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/WebView.cpp b/Source/WebKit/UIProcess/haiku/WebView.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..812210529a70561da4dad5fc6301aebd2b1fe636
+index 0000000000000000000000000000000000000000..66b4a585dab1c93b09ca26769de3ea84b9fd0b39
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/WebView.cpp
-@@ -0,0 +1,3269 @@
+@@ -0,0 +1,3275 @@
 +/*
 + * Copyright (C) 2013 Intel Corporation. All rights reserved.
 + *
@@ -135968,10 +135999,12 @@ index 0000000000000000000000000000000000000000..812210529a70561da4dad5fc6301aebd
 +class JavaScriptUIClientHaiku final : public API::UIClient {
 +    WTF_MAKE_TZONE_ALLOCATED_INLINE(JavaScriptUIClientHaiku);
 +public:
-+    // Only browser tabs have a host that can open pages; an extension popup
-+    // declines window.open() as before.
-+    JavaScriptUIClientHaiku(std::weak_ptr<WebViewStateHaiku> state, bool hostsNewPages)
-+        : m_state(std::move(state)), m_hostsNewPages(hostsNewPages) { }
++    // Only browser tabs have a host that can open pages. An extension popup
++    // has none: what the user opens from it with a link that has a target
++    // goes to openInTab (a new browser tab, as in Firefox and Chrome);
++    // window.open() without a click is declined.
++    JavaScriptUIClientHaiku(std::weak_ptr<WebViewStateHaiku> state, bool hostsNewPages, Function<void(const URL&)>&& openInTab = { })
++        : m_state(std::move(state)), m_hostsNewPages(hostsNewPages), m_openInTab(WTF::move(openInTab)) { }
 +
 +    // window.print(): the host shows its print dialog
 +    // (BWebKitView::DrawPagesForPrinting). The page's script goes on at once.
@@ -135991,6 +136024,8 @@ index 0000000000000000000000000000000000000000..812210529a70561da4dad5fc6301aebd
 +    {
 +        auto state = m_state.lock();
 +        if (!m_hostsNewPages || !state || state->closed) {
++            if (!m_hostsNewPages && m_openInTab && state && !state->closed && action->isProcessingUserGesture())
++                m_openInTab(action->request().url());
 +            completion(nullptr);
 +            return;
 +        }
@@ -136269,6 +136304,7 @@ index 0000000000000000000000000000000000000000..812210529a70561da4dad5fc6301aebd
 +
 +    const std::weak_ptr<WebViewStateHaiku> m_state;
 +    const bool m_hostsNewPages;
++    Function<void(const URL&)> m_openInTab;
 +    String m_hoveredLink;
 +};
 +
@@ -136357,13 +136393,14 @@ index 0000000000000000000000000000000000000000..812210529a70561da4dad5fc6301aebd
 +    return view;
 +}
 +
-+Ref<WebView> WebView::createForExtensionPopup(std::shared_ptr<WebViewStateHaiku> state, Ref<API::PageConfiguration>&& configuration)
++Ref<WebView> WebView::createForExtensionPopup(std::shared_ptr<WebViewStateHaiku> state, Ref<API::PageConfiguration>&& configuration,
++    Function<void(const URL&)>&& openInTab)
 +{
 +    ASSERT(RunLoop::isMain());
 +    Ref view = adoptRef(*new WebView(std::move(state)));
 +    auto& pool = configuration->processPool();
 +    view->m_page = pool.createWebPage(view.get(), WTF::move(configuration));
-+    view->m_page->setUIClient(makeUnique<JavaScriptUIClientHaiku>(view->m_state, false));
++    view->m_page->setUIClient(makeUnique<JavaScriptUIClientHaiku>(view->m_state, false, WTF::move(openInTab)));
 +    auto& pageConfiguration = view->m_page->configuration();
 +    view->m_page->initializeWebPage(pageConfiguration.openedSite(), pageConfiguration.initialSandboxFlags(), pageConfiguration.initialReferrerPolicy());
 +    view->m_page->setIntrinsicDeviceScaleFactor(displayScaleFactorHaiku());
@@ -138604,10 +138641,10 @@ index 0000000000000000000000000000000000000000..1fec47d2a254d8f58365601ebe05851b
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/WebViewPrivate.h b/Source/WebKit/UIProcess/haiku/WebViewPrivate.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..09065324e26c3f8226b7b12ba0f6e53c692f8f11
+index 0000000000000000000000000000000000000000..3d03048e2ef4f1f8a33fabb5c9ab3083d5705757
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/WebViewPrivate.h
-@@ -0,0 +1,226 @@
+@@ -0,0 +1,229 @@
 +/*
 +   Copyright (C) 2014 Haiku, inc.
 +
@@ -138659,7 +138696,10 @@ index 0000000000000000000000000000000000000000..09065324e26c3f8226b7b12ba0f6e53c
 +    static Ref<WebView> createWithConfiguration(std::shared_ptr<WebViewStateHaiku>, Ref<API::PageConfiguration>&&, const BMessage* initialSettings = nullptr);
 +#if ENABLE(WK_WEB_EXTENSIONS)
 +    static Ref<WebView> createForExtensionBackground(Ref<API::PageConfiguration>&&);
-+    static Ref<WebView> createForExtensionPopup(std::shared_ptr<WebViewStateHaiku>, Ref<API::PageConfiguration>&&);
++    // openInTab: where a link with a target (or window.open()) that the user
++    // clicked in the popup goes, as a new browser tab.
++    static Ref<WebView> createForExtensionPopup(std::shared_ptr<WebViewStateHaiku>, Ref<API::PageConfiguration>&&,
++        Function<void(const URL&)>&& openInTab = { });
 +    static Ref<WebView> createForExtensionPage(std::shared_ptr<WebViewStateHaiku>, Ref<API::PageConfiguration>&&);
 +#endif
 +    ~WebView() override;
