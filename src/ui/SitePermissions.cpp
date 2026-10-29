@@ -283,7 +283,10 @@ void SitePermissionService::Ask(const BMessage& request)
         return;
     }
     std::string text = HostOf(origin) + " " + Question(permission);
-    if (permission == "geolocation")
+    if (permission == "geolocation" && HasSystemLocationService())
+        text += "\n\nSummit asks the system's location service where you are: the place set in its settings, or one "
+            "found from the Wi-Fi networks nearby and your network address.";
+    else if (permission == "geolocation")
         text += "\n\nSummit asks BeaconDB (beacondb.net) where you are, from the Wi-Fi networks nearby and your "
             "network address.";
     if (fPrivate) text += "\n\nIn a private window, the answer is forgotten when the window closes.";

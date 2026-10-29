@@ -1,6 +1,7 @@
 #include "PreferencesWindow.h"
 #if SUMMIT_MODERN_WEBKIT
 #include "BrowsingPreferences.h"
+#include "Location.h"
 #endif
 #include "Messages.h"
 #include "McpService.h"
@@ -166,8 +167,10 @@ PreferencesWindow::PreferencesWindow(BMessenger owner, const PreferencesState& s
     auto* sitesIntro = new BStringView("sites-intro", "Sites you have allowed or blocked. Other sites ask first.");
     auto* sitesRemoveHint = new BStringView("sites-remove-hint", "A removed site asks again the next time it wants to.");
     sitesRemoveHint->SetHighUIColor(B_PANEL_TEXT_COLOR, B_DARKEN_2_TINT);
-    auto* locationHint = new BStringView("location-hint", "Your location comes from BeaconDB (beacondb.net), from the "
-        "Wi-Fi networks nearby and your network address.");
+    auto* locationHint = new BStringView("location-hint", HasSystemLocationService()
+        ? "Your location comes from the system's location service: the place set in its settings, or one found from "
+          "the Wi-Fi networks nearby and your network address."
+        : "Your location comes from BeaconDB (beacondb.net), from the Wi-Fi networks nearby and your network address.");
     locationHint->SetHighUIColor(B_PANEL_TEXT_COLOR, B_DARKEN_2_TINT);
     ShowSitePermissions({ });
 

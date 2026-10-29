@@ -1,5 +1,9 @@
 #include "Location.h"
+#include <Entry.h>
+#include <FindDirectory.h>
 #include <Message.h>
+#include <Path.h>
+#include <Roster.h>
 #include <NetworkAddress.h>
 #include <NetworkDevice.h>
 #include <NetworkInterface.h>
@@ -116,10 +120,60 @@ bool Post(const std::string& body, std::string& response, std::string& error)
 }
 }
 
+// air/OS's location service (since 28 October; its private
+// <location_server.h>): the position the user entered in the system's
+// settings, else the same Wi-Fi and network-address lookup as below, cached
+// for every program, and a system-wide switch. Asked first; Haiku without it
+// gets the lookup below. Returns false when there is no such service.
+bool AskLocationServer(BMessage& result)
+{
+    constexpr const char* kSignature = "application/x-vnd.Haiku-location_server";
+    constexpr uint32 kGetPosition = 'lcgp';
+    BMessenger server(kSignature);
+    // It is started on demand.
+    if (!server.IsValid() && be_roster->Launch(kSignature) == B_OK)
+        server = BMessenger(kSignature);
+    if (!server.IsValid()) return false;
+    BMessage request(kGetPosition), answer;
+    // A lookup takes about a second; the cache answers at once.
+    if (server.SendMessage(&request, &answer, 5000000, 30000000) != B_OK) return false;
+    const status_t status = answer.GetInt32("status", B_ERROR);
+    if (status == B_NOT_ALLOWED) {
+        result.AddString("error", "Location is turned off in the system's settings");
+        return true;
+    }
+    double latitude, longitude;
+    if (status != B_OK || answer.FindDouble("latitude", &latitude) != B_OK || answer.FindDouble("longitude", &longitude) != B_OK) {
+        result.AddString("error", "The system's location service could not find this computer");
+        return true;
+    }
+    result.AddDouble("latitude", latitude);
+    result.AddDouble("longitude", longitude);
+    result.AddDouble("accuracy", answer.GetDouble("accuracy", 25000.0));
+    const int64 determined = answer.GetInt64("time", 0);
+    result.AddDouble("timestamp", determined > 0 ? determined / 1e6 : static_cast<double>(std::time(nullptr)));
+    if (const char* source = answer.GetString("source", nullptr)) result.AddString("source", source);
+    return true;
+}
+
+bool HasSystemLocationService()
+{
+    static const bool present = [] {
+        BPath servers;
+        return find_directory(B_SYSTEM_SERVERS_DIRECTORY, &servers) == B_OK
+            && servers.Append("location_server") == B_OK && BEntry(servers.Path()).Exists();
+    }();
+    return present;
+}
+
 void LookUpLocation(BMessenger reply, uint32 what)
 {
     std::thread([reply, what] {
         BMessage result(what);
+        if (AskLocationServer(result)) {
+            reply.SendMessage(&result);
+            return;
+        }
         try {
             nlohmann::json request = {{"considerIp", true}};
             const auto networks = NearbyNetworks();
