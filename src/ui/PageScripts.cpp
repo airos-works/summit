@@ -351,4 +351,34 @@ document.addEventListener('focusin', (event) => {
     offer(field);
 }, true);
 })();)js";
+
+// The page only says where the field is: the passkeys are offered in a native
+// menu, and choosing one is the browser's, never the page's, doing.
+const char* const kPasskeyFieldScript = R"js((() => {
+if (window.__summitPasskeys || window !== window.top) return;
+window.__summitPasskeys = true;
+const handlers = window.webkit && window.webkit.messageHandlers;
+const handler = handlers && handlers.summitPasskeys;
+if (!handler) return;
+const isPasskeyField = (field) => field instanceof HTMLInputElement
+  && (field.getAttribute('autocomplete') || '').toLowerCase().split(/\s+/).includes('webauthn');
+const report = (event) => {
+  const field = event.target;
+  if (!isPasskeyField(field)) return;
+  const rect = field.getBoundingClientRect();
+  handler.postMessage(JSON.stringify({ type: 'field', left: rect.left, top: rect.top, right: rect.right,
+    bottom: rect.bottom, width: window.innerWidth, height: window.innerHeight })).catch(() => {});
+};
+document.addEventListener('focusin', report, true);
+document.addEventListener('mousedown', report, true);
+// The list follows the field: it goes when the field is left or moves. A
+// click in the list does not take the field's focus (the list takes none).
+const leave = (event) => {
+  if (event.type === 'focusout' && !isPasskeyField(event.target)) return;
+  handler.postMessage(JSON.stringify({ type: 'leave' })).catch(() => {});
+};
+document.addEventListener('focusout', leave, true);
+window.addEventListener('scroll', leave, { capture: true, passive: true });
+window.addEventListener('resize', leave, { passive: true });
+})();)js";
 }

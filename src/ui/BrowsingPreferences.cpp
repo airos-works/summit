@@ -240,6 +240,7 @@ void BrowsingPreferences::ShowAccounts()
             accounts.AddString("passkey_credential", passkey.credential.c_str());
             accounts.AddString("passkey_account", (passkey.displayName.empty() || passkey.displayName == passkey.userName
                 ? passkey.userName : passkey.displayName + " (" + passkey.userName + ")").c_str());
+            accounts.AddBool("passkey_hidden", passkey.hidden);
         }
         target.SendMessage(&accounts);
     }).detach();
@@ -292,7 +293,8 @@ void BrowsingPreferences::MessageReceived(BMessage* message)
             const std::string account = message->GetString("passkey_account", i, "");
             auto* row = new BRow();
             row->SetField(new BStringField(site), 0);
-            row->SetField(new BStringField((account + " — passkey").c_str()), 1);
+            row->SetField(new BStringField((account + (message->GetBool("passkey_hidden", i, false)
+                ? " — passkey, hidden by the site" : " — passkey")).c_str()), 1);
             fAccounts->AddRow(row);
             fPasskeyRows.push_back({row, site, message->GetString("passkey_credential", i, ""), account});
         }

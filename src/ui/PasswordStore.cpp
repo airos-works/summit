@@ -149,7 +149,7 @@ std::vector<SavedPasskey> Passkeys()
         BMessage record;
         if (record.Unflatten(&input) != B_OK) continue;
         passkeys.push_back({key.Identifier(), key.SecondaryIdentifier(), record.GetString("user_name", ""),
-            record.GetString("display_name", "")});
+            record.GetString("display_name", ""), record.GetBool("hidden", false)});
         if (passkeys.size() >= 10000) break;
     }
     return passkeys;

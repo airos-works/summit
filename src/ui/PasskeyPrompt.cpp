@@ -10,6 +10,10 @@
 #include <PopUpMenu.h>
 #include <StringView.h>
 #include <GroupView.h>
+#include <ListView.h>
+#include <algorithm>
+#include <cmath>
+#include <Screen.h>
 
 namespace summit {
 namespace {
@@ -178,6 +182,93 @@ void PasskeyPrompt::Answer(int32 account)
     answer.AddUInt64("identifier", fFields.identifier);
     answer.AddInt32("account", account);
     fTarget.SendMessage(&answer, static_cast<BHandler*>(nullptr), 0);
+}
+
+namespace {
+constexpr uint32 kAutofillClicked = 'pkac';
+
+// One passkey in the autofill list: the account, and "Passkey" below it.
+class PasskeyAutofillItem final : public BListItem {
+public:
+    explicit PasskeyAutofillItem(const std::string& label) : fLabel(label) { }
+    void DrawItem(BView* owner, BRect frame, bool) override
+    {
+        const rgb_color background = ui_color(IsSelected() ? B_LIST_SELECTED_BACKGROUND_COLOR : B_LIST_BACKGROUND_COLOR);
+        owner->SetLowColor(background);
+        owner->FillRect(frame, B_SOLID_LOW);
+        font_height height;
+        owner->GetFontHeight(&height);
+        const float line = ceilf(height.ascent + height.descent + height.leading);
+        owner->SetHighColor(ui_color(IsSelected() ? B_LIST_SELECTED_ITEM_TEXT_COLOR : B_LIST_ITEM_TEXT_COLOR));
+        owner->DrawString(fLabel.c_str(), BPoint(frame.left + 8, frame.top + 4 + height.ascent));
+        owner->SetHighColor(tint_color(ui_color(B_LIST_ITEM_TEXT_COLOR), B_LIGHTEN_1_TINT));
+        owner->DrawString("Passkey saved in Summit", BPoint(frame.left + 8, frame.top + 4 + line + height.ascent));
+    }
+    void Update(BView* owner, const BFont* font) override
+    {
+        BListItem::Update(owner, font);
+        font_height height;
+        font->GetHeight(&height);
+        SetHeight(ceilf(height.ascent + height.descent + height.leading) * 2 + 8);
+        SetWidth(std::max(font->StringWidth(fLabel.c_str()), font->StringWidth("Passkey saved in Summit")) + 16);
+    }
+
+private:
+    std::string fLabel;
+};
+}
+
+PasskeyAutofill::PasskeyAutofill(BPoint where, uint64 identifier, const std::vector<std::pair<std::string, std::string>>& accounts,
+    BMessenger target)
+    : BWindow(BRect(where, where + BPoint(200, 40)), "Passkeys", B_BORDERED_WINDOW_LOOK, B_FLOATING_SUBSET_WINDOW_FEEL,
+        B_AVOID_FOCUS | B_NOT_MOVABLE | B_NOT_RESIZABLE | B_NOT_ZOOMABLE | B_NOT_MINIMIZABLE | B_NOT_CLOSABLE
+        | B_ASYNCHRONOUS_CONTROLS),
+      fIdentifier(identifier), fTarget(target)
+{
+    fList = new BListView(Bounds(), "passkeys", B_SINGLE_SELECTION_LIST, B_FOLLOW_ALL);
+    float width = 220, height = 0;
+    for (const auto& [name, displayName] : accounts) {
+        auto* item = new PasskeyAutofillItem(PasskeyAccountLabel(name, displayName));
+        fList->AddItem(item);
+    }
+    AddChild(fList);
+    for (int32 i = 0; i < fList->CountItems(); ++i) {
+        width = std::max(width, fList->ItemAt(i)->Width());
+        height += fList->ItemAt(i)->Height() + 1;
+    }
+    fList->SetSelectionMessage(new BMessage(kAutofillClicked));
+    fList->SetTarget(this);
+    // Below the field, on the screen.
+    const BRect screen = BScreen(this).Frame();
+    width = std::min(width, screen.Width() / 2);
+    height = std::min(height, screen.Height() / 3);
+    ResizeTo(width, height);
+    MoveTo(std::clamp(where.x, screen.left, screen.right - width), std::clamp(where.y, screen.top, screen.bottom - height));
+}
+
+void PasskeyAutofill::MessageReceived(BMessage* message)
+{
+    switch (message->what) {
+        case kAutofillClicked:
+            if (fList->CurrentSelection() >= 0) Choose(fList->CurrentSelection());
+            return;
+        case kScriptedButton:
+            Choose(message->GetInt32("account", 0));
+            return;
+        default:
+            BWindow::MessageReceived(message);
+    }
+}
+
+void PasskeyAutofill::Choose(int32 account)
+{
+    if (fChosen || account < 0 || account >= fList->CountItems()) return;
+    fChosen = true;
+    BMessage chosen(kPasskeyConditionalChosen);
+    chosen.AddUInt64("identifier", fIdentifier);
+    chosen.AddInt32("account", account);
+    fTarget.SendMessage(&chosen, static_cast<BHandler*>(nullptr), 0);
+    Quit();
 }
 }
 

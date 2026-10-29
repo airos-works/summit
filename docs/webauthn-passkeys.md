@@ -40,7 +40,8 @@ a sheet over the window (`src/ui/PasskeyPrompt.cpp`):
 | `get()` with no suitable passkey | "No passkey for *site*" | `NotAllowedError` | `NotAllowedError` |
 
 The sheet also says which page asks when it is a subdomain of the site the
-passkey is for.
+passkey is for. A `get()` with `mediation: "conditional"` gets no sheet: its
+passkeys are offered in the sign-in field's autofill (below).
 
 What the authenticator does:
 
@@ -54,8 +55,9 @@ What the authenticator does:
   computer. The signature counter is always 0, as for synced passkeys (a
   counter that never moves tells the site not to rely on it).
 - **User verification** is the user's confirmation in the browser's own
-  sheet, which a page cannot draw or click. That is how the UV flag is
-  earned; there is no PIN or biometric step.
+  sheet, or the choice of a passkey in its autofill list, neither of which a
+  page can draw or click. That is how the UV flag is earned; there is no PIN
+  or biometric step.
 - **Discoverable credentials.** Every passkey is discoverable: it keeps the
   user handle, name and display name, so `get()` without `allowCredentials`
   (username-less sign-in) offers all of the site's passkeys, and
@@ -73,13 +75,78 @@ What the authenticator does:
   10 minutes (5 minutes without one); an `AbortSignal` or the timeout closes the
   sheet. A request whose key is already being made or used completes.
 - **Availability.** `PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable()`
-  is `true`, and `getClientCapabilities()` reports
-  `passkeyPlatformAuthenticator` and `userVerifyingPlatformAuthenticator`.
-  Conditional mediation (passkeys in a sign-in field's autofill) and
-  conditional creation are not offered: `isConditionalMediationAvailable()` is
-  `false`, and such requests are declined quietly.
-- The signal methods (`signalUnknownCredential` and the others) succeed
-  without changing anything: Summit's passkeys are removed only by the user.
+  and `isConditionalMediationAvailable()` are `true`, and
+  `getClientCapabilities()` reports `passkeyPlatformAuthenticator`,
+  `userVerifyingPlatformAuthenticator`, `conditionalGet`, the three signals and
+  `extension:prf`, `extension:largeBlob` and `extension:credProps`.
+  Conditional creation (a passkey made by itself after a password sign-in) is
+  not offered and is declined quietly.
+- **Extensions** (below): `credProps`, `prf` and `largeBlob`.
+
+### Passkey autofill (conditional mediation, 30 October 2026)
+
+A page that calls `navigator.credentials.get({mediation: "conditional",
+publicKey})` (webauthn.io and most passkey sites do at load) gets its
+passkeys offered in the autofill of its sign-in field, as other browsers do:
+
+- The engine looks up the site's passkeys (allow list and hidden ones
+  applied) and tells the window (`B_WEBKIT_PASSKEY_REQUESTED` with
+  `conditional`); the request then waits, without a timeout.
+- A page script (`kPasskeyFieldScript`, main frame only) reports where a field
+  marked `autocomplete="… webauthn"` is when the user goes into it or clicks
+  it. The window opens a list under it (`PasskeyAutofill`): a borderless window
+  that takes no focus, so the field keeps the caret and typing goes on. Each
+  row is an account and "Passkey saved in Summit".
+- A click on a row signs with that passkey and completes the page's `get()`.
+  The page only says where its field is; it cannot open, read or click the
+  list, which is the browser's.
+- The list closes when the field loses focus, the page scrolls or resizes, the
+  tab or window changes, or the request ends. The request ends when a passkey
+  is chosen, the page aborts it (`AbortError`; webauthn.io aborts it before a
+  modal `get()`), the frame goes to another document (the engine withdraws it
+  on commit), the tab closes, or the page process goes.
+- No passkeys for the site: nothing is shown and the request just waits.
+
+For tests, the list takes `hey Summit 'ALTB' of Window N with
+account=int32(K)` (the window titled "Passkeys").
+
+### Extensions: prf and largeBlob
+
+- **prf** (`extensions: {prf: {eval: {first, second?}, evalByCredential}}`):
+  every passkey made from now on has a 32-byte PRF secret in its record
+  (`prf_secret`). An output is HMAC-SHA-256(secret, SHA-256("WebAuthn PRF" ||
+  0x00 || input)), the salt construction CTAP2's hmac-secret uses. On
+  `create()` the result is `prf: {enabled: true}`, with `results` at once when
+  `eval` is given; on `get()`, `results.first` (and `second`) for the chosen
+  passkey, from its `evalByCredential` entry if there is one, else `eval`. The
+  client checks: `evalByCredential` without `allowCredentials` →
+  `NotSupportedError`; an entry naming a credential not in `allowCredentials`
+  (or not base64url) → `SyntaxError`; on `create()` → `NotSupportedError`.
+  Passkeys made before PRF have no secret and give no `prf` output.
+- **largeBlob**: `create()` with `largeBlob.support` reports `supported: true`.
+  `get()` with `read: true` returns the passkey's blob (absent when there is
+  none); `write` needs exactly one credential in `allowCredentials`
+  (`NotSupportedError` otherwise), is stored only after that passkey signed,
+  and reports `written` (false over 16 KiB). The blob is the record's
+  `large_blob`, rewritten in the key store.
+
+### Signals from the site
+
+The signals change Summit's passkeys only for the site the page shows: the
+origin the web process names must be a secure one, of the main frame's site,
+and the RP ID must be its registrable domain or a suffix (WebCore checks the
+RP ID too). The page's promise resolves at once, and the key store changes
+after, on the passkey queue.
+
+| Signal | What Summit does |
+| --- | --- |
+| `signalUnknownCredential({rpId, credentialId})` | Removes that passkey: the site does not know it (a sign-in with it failed) |
+| `signalAllAcceptedCredentials({rpId, userId, allAcceptedCredentialIds})` | The account's passkeys missing from the list are **hidden**, not removed (a site's mistake, such as an empty list, would otherwise lose them): not offered or matched, and listed in Preferences as "passkey, hidden by the site". Hidden ones the site lists again come back. A malformed ID makes the whole list ignored. |
+| `signalCurrentUserDetails({rpId, userId, name, displayName})` | Renames the account's passkeys |
+
+When something changed, the window's status line says so ("The site
+webauthn.io hid 1 passkey (Preferences › Browsing › Passwords).",
+`B_WEBKIT_PASSKEYS_CHANGED`).
 
 ### Where the passkeys are kept
 
@@ -88,7 +155,10 @@ generic key per passkey (purpose `B_KEY_PURPOSE_WEB`): identifier = RP ID,
 secondary identifier = credential ID in hexadecimal, data = a flattened
 `BMessage` with `version`, `algorithm` (-7), `credential_id`, `user_handle`,
 `user_name`, `display_name`, `origin` (the page that made it), `created` and
-`private_key` (ECPrivateKey DER). Nothing is written to Summit's profile.
+`private_key` (ECPrivateKey DER), and since PRF `prf_secret`; `large_blob` and
+`hidden` when set. Nothing is written to Summit's profile. The key store has
+no update: a changed passkey (blob, hidden, names) is removed and added again,
+and put back as it was if adding fails.
 
 The engine reads and writes the keyring on a queue of its own, never the main
 thread, because keystore_server asks the user the first time Summit uses the
@@ -103,10 +173,11 @@ it. The private key is never shown or exported.
 
 ### Security model
 
-- Private keys exist only in the key store and, briefly, in the browser
-  process while a key is made or a signature computed; those copies are
-  cleared (`OPENSSL_cleanse`). Web processes never see them: they get the
-  public key, the attestation and signatures.
+- Private keys and PRF secrets exist only in the key store and, briefly, in
+  the browser process while a key is made or a signature or PRF output
+  computed; those copies are cleared (`OPENSSL_cleanse`). Web processes never
+  see them: they get the public key, the attestation, signatures and PRF
+  outputs.
 - The key store is what protects them at rest, exactly as for Summit's saved
   passwords (#67). Haiku's keystore_server does not encrypt keyrings yet (its
   `_EncryptToFlatBuffer` is a TODO), so
@@ -138,12 +209,14 @@ is `false`, and the window's status line explains (below).
 Hosts opt in per view with `BWebKitView::SetPasskeyRequests(true)` (Summit does
 for every page view, not extension pages). The engine then sends
 `B_WEBKIT_PASSKEY_REQUESTED` ('wpky') with `view`, `identifier`, `create`,
-`rp_id`, `origin`, and either `user_name`, `user_display_name`, `exists`,
+`conditional`, `rp_id`, `origin`, and either `user_name`, `user_display_name`, `exists`,
 `replaces` (create) or one `account_name`/`account_display_name` per passkey
 (get); the host answers with `BWebKitView::AnswerPasskeyRequest(identifier,
 account)` (the passkey's index, 0 to create, negative to decline). A request
-that goes away first is followed by a notice with `withdrawn`. A view that did
-not opt in behaves as before #111.
+that goes away first is followed by a notice with `withdrawn`. Signals that
+changed passkeys send `B_WEBKIT_PASSKEYS_CHANGED` ('wpkc') with `rp_id` and
+the counts `removed`, `hidden`, `restored`, `renamed`. A view that did not
+opt in behaves as before #111.
 
 The sheet takes BAlert's scripting message, for tests: `hey Summit 'ALTB' of
 Window N with which=int32(1)` confirms (`which=int32(0)` declines), and
@@ -186,6 +259,45 @@ On https://webauthn.io, profile `passkey-prof`:
   `false`, capabilities all `false`, `create()` → `NotAllowedError: No
   authenticator is available on this device.` and the status line notice.
 
+### Verified (30 October 2026, second round, engine passkey4 + app)
+
+On the laptop, https://webauthn.io, the same profile:
+
+- `isConditionalMediationAvailable()` → `true`; `getClientCapabilities()`
+  lists `conditionalGet`, the signals and the extensions as `true`.
+- **Autofill.** At load webauthn.io made a conditional `get()` ("offers 5
+  passkeys … in its sign-in field"). A click in the username field opened the
+  list under it (five passkeys, the field kept focus and caret); choosing
+  `summit-passkey-3` → *"You're logged in!"* (`/profile`). The choice was sent
+  to the list with `hey` (no pointer input on the laptop). Choosing an account
+  other than the username typed gave the site's own "Credential does not
+  belong to user", and two webauthn.io tabs loading at once gave its "Client
+  data challenge was not expected challenge" (one challenge per session):
+  both are the site's checks.
+- Going to another page while the list was open: "passkey request 4
+  withdrawn" and the list closed. `AbortController.abort()` on a conditional
+  `get()` → `AbortError`. Quitting with the list open quit normally.
+- **prf/largeBlob** (script on webauthn.io): `create()` with `prf.eval.first =
+  "one"` and `largeBlob.support` → `prf.enabled: true`, `results.first`
+  `gz00rtIx…`, `largeBlob.supported: true`, `credProps.rk: true`; `get()` with
+  `eval {first: "one", second: "two"}` and `largeBlob.write` → the same
+  `first` (`gz00rtIx…`), a different `second`, `written: true`; `get()` with
+  `evalByCredential` for that passkey (`"other"`) and `read` → a different
+  `first` and the blob back ("hello blob from Summit"). The three client
+  checks gave `NotSupportedError`, `SyntaxError` and `NotSupportedError`. A
+  passkey made before PRF gave no `prf` output.
+- **Signals**: `signalCurrentUserDetails` → "renamed the account of 1
+  passkey"; `signalAllAcceptedCredentials` with an empty list → "hid 1
+  passkey", after which a `get()` naming it got the "No passkey" sheet and the
+  autofill offered 5 instead of 6; listing it again → "showed again 1 passkey"
+  and it signed, its blob intact; `signalUnknownCredential` → "removed 1
+  passkey" and its record was gone from `keystore_database`; an `rpId` of
+  another site → `SecurityError` (WebCore's check). No new keystore_server
+  questions (removing was allowed in the first round).
+- An earlier build used a native `BPopUpMenu` for the list; menus nobody
+  clicked away kept the window's close lock and quitting hung, so the list is
+  a window Summit closes itself.
+
 ## Status (September 20, 2026)
 
 Verified on `bundle-dxx4tx8e`:
@@ -211,11 +323,11 @@ Verified on `bundle-dxx4tx8e`:
 
 | Request | Answer |
 | --- | --- |
-| `create()` / `get()` | Summit's authenticator (above); `NotAllowedError` when it is off or the view did not opt in, for conditional mediation, and when the site asks for a cross-platform authenticator (a security key) |
+| `create()` / `get()` | Summit's authenticator (above), conditional `get()` through autofill; `NotAllowedError` when it is off or the view did not opt in, for conditional `create()`, and when the site asks for a cross-platform authenticator (a security key) |
 | `isUserVerifyingPlatformAuthenticatorAvailable()` | `true` (`false` when off) |
-| `isConditionalMediationAvailable()` | `false` |
-| `getClientCapabilities()` | Every known capability; `passkeyPlatformAuthenticator` and `userVerifyingPlatformAuthenticator` `true` (when on), the rest `false` |
-| `signalUnknownCredential` and the other signals | Succeed without doing anything |
+| `isConditionalMediationAvailable()` | `true` (`false` when off) |
+| `getClientCapabilities()` | Every known capability; the platform authenticator, `conditionalGet`, the signals and `extension:prf`/`largeBlob`/`credProps` `true` (when on), the rest `false` |
+| `signalUnknownCredential`, `signalAllAcceptedCredentials`, `signalCurrentUserDetails` | Remove, hide/show, rename Summit's passkeys (above); resolve at once |
 
 Apple's authenticator manager (Touch ID service, NFC, the authenticator panel)
 is not built. `WebsiteDataStore` and `WebPageProxy` keep their manager only off
@@ -231,8 +343,8 @@ not opt in, or the site wants a security key) is declined with
 but neither Summit nor a password manager answered. Security keys (USB) are
 not supported yet; an extension such as 1Password provides its own passkeys",
 with ", and must be allowed in private windows (Extensions)" in a private
-window. Conditional-mediation requests, which pages make at load for passkey
-autofill, stay quiet. `tests/fixtures/webauthn/request.html` makes both kinds
+window. Conditional-mediation requests that are declined (the authenticator is
+off) stay quiet. `tests/fixtures/webauthn/request.html` makes both kinds
 of request from buttons (it needs a secure context with a domain, so it shows
 errors from `file:`).
 
@@ -247,10 +359,14 @@ answers come from Summit's own coordinator when no extension is installed; with
 
 - Security keys over USB or NFC (CTAP2/U2F) are not supported: there is no
   HID transport yet, and no key was available to test one.
-- No passkey autofill (conditional mediation) or automatic passkey upgrade
-  after a password sign-in (conditional create).
+- No automatic passkey upgrade after a password sign-in (conditional create).
+- Autofill is offered in the main frame only (a sign-in field in an iframe
+  gets no list), and only in fields marked `autocomplete="… webauthn"`; the
+  list is not part of the saved-password list of the same field, which still
+  shows its own.
 - Passkeys are not synced and cannot be exported; removing Summit's key store
   data removes them. Hybrid sign-in with a phone (caBLE/QR) is not offered.
 - Related origins and cross-origin iframes (`publickey-credentials-get` in a
   frame of another origin) are declined.
-- No PRF, largeBlob or other authenticator extensions; only `credProps`.
+- Extensions: `credProps`, `prf` and `largeBlob` only. PRF needs a passkey
+  made with this build or later (older ones have no secret).

@@ -761,6 +761,25 @@ private:
     std::vector<PasskeyRequest> fPasskeyRequests;
     BMessenger fPasskeyPrompt;
     uint64 fPasskeyShown = 0;
+    // Passkey autofill (conditional mediation): a tab's get() that waits for
+    // the user to choose one of the site's passkeys in the native menu under
+    // its sign-in field (kPasskeyFieldScript).
+    struct ConditionalPasskeys {
+        uint64 identifier = 0;
+        int64 tab = 0;
+        std::string site;
+        std::vector<std::pair<std::string, std::string>> accounts;
+    };
+    std::vector<ConditionalPasskeys> fConditionalPasskeys;
+    // The page reported its passkey field (view coordinates of the page,
+    // and the page's width in its own pixels, to scale them).
+    void PasskeyFieldEntered(Tab& tab, BRect field, double pageWidth);
+    void ConditionalPasskeyChosen(const BMessage& message);
+    // The list under the field (PasskeyAutofill), when one shows.
+    void ClosePasskeyAutofill();
+    BMessenger fPasskeyAutofill;
+    // A site's signal changed its passkeys (B_WEBKIT_PASSKEYS_CHANGED).
+    void PasskeysChanged(const BMessage& message);
     // A web app's window (#75): no tabs, toolbar or bookmarks bar.
     std::string fWebApp;
     std::string fWebAppScope, fWebAppName;

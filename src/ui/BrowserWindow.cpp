@@ -1164,6 +1164,7 @@ BrowserWindow::~BrowserWindow()
     fTranslator.reset();
     if (fAuthenticationPrompt.IsValid()) fAuthenticationPrompt.SendMessage(B_QUIT_REQUESTED);
     if (fPasskeyPrompt.IsValid()) fPasskeyPrompt.SendMessage(B_QUIT_REQUESTED);
+    if (fPasskeyAutofill.IsValid()) fPasskeyAutofill.SendMessage(B_QUIT_REQUESTED);
     BWebKitView::WindowDirectConnected(this, nullptr);
     // Without its daemon thread ~BDirectWindow would wait for ever.
     if (DirectDaemonLost()) {
@@ -1663,6 +1664,7 @@ void BrowserWindow::SelectTab(int64 id, bool forClose)
             AskAboutCertificate(fTabs[i]);
         ShowAuthenticationPrompt();
         ShowPasskeyPrompt();
+        ClosePasskeyAutofill();
         ProbeReader(fTabs[i]);
         ProbeTranslation(fTabs[i]);
 #endif
@@ -4682,6 +4684,8 @@ void BrowserWindow::MessageReceived(BMessage* message)
         case kAuthenticationAnswer: AuthenticationAnswered(*message); break;
         case B_WEBKIT_PASSKEY_REQUESTED: PasskeyRequested(*message); break;
         case kPasskeyAnswer: PasskeyAnswered(*message); break;
+        case kPasskeyConditionalChosen: ConditionalPasskeyChosen(*message); break;
+        case B_WEBKIT_PASSKEYS_CHANGED: PasskeysChanged(*message); break;
         case kPasswordSaved: {
             const std::string error = message->GetString("error", "");
             if (!error.empty()) ShowError("Could not save the password: " + error);

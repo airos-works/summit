@@ -95018,10 +95018,10 @@ index 0000000000000000000000000000000000000000..cd4bc7529d812074c6e5915950a4f395
 +}
 diff --git a/Source/WebKit/UIProcess/API/haiku/WebKitView.h b/Source/WebKit/UIProcess/API/haiku/WebKitView.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..1d1ace4f87bd3cc14f093bc7815ca92efcecd38d
+index 0000000000000000000000000000000000000000..d12d1bdaf2123f38f7b2b1c0153dcf4704db1fa4
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/API/haiku/WebKitView.h
-@@ -0,0 +1,483 @@
+@@ -0,0 +1,494 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#pragma once
@@ -95124,10 +95124,21 @@ index 0000000000000000000000000000000000000000..1d1ace4f87bd3cc14f093bc7815ca92e
 +    // made) and "replaces" (bool: the account's saved passkey is replaced).
 +    // get(): one "account_name" and "account_display_name" per passkey the
 +    // user may choose; none when no saved passkey suits the site (tell the
-+    // user and decline). Answer with AnswerPasskeyRequest. When the request
-+    // no longer waits (the page aborted it or closed, or it timed out), a
++    // user and decline). "conditional" (bool): a get() for the page's
++    // sign-in field autofill (mediation "conditional"): offer the passkeys
++    // when the user is in a field marked autocomplete="… webauthn" and
++    // answer when one is chosen; it waits without a timeout and needs no
++    // answer otherwise (none at all when there are no passkeys). Answer with
++    // AnswerPasskeyRequest. When the request no longer waits (the page
++    // aborted it, went to another document or closed, or it timed out), a
 +    // notice with "identifier" and "withdrawn" (true) follows.
 +    B_WEBKIT_PASSKEY_REQUESTED = 'wpky',
++    // A site's signal changed its passkeys (signalUnknownCredential removes
++    // one, signalAllAcceptedCredentials hides those it no longer lists and
++    // shows those it lists again, signalCurrentUserDetails renames). Sent to
++    // views that take passkey requests. Fields: "view", "rp_id", and int32
++    // counts "removed", "hidden", "restored" and "renamed".
++    B_WEBKIT_PASSKEYS_CHANGED = 'wpkc',
 +    // A page navigated to a scheme no page can show: "view", "url",
 +    // "source_url" (the page's address), "committed_url", and bools
 +    // "user_gesture", "main_frame", "redirect" and "trusted". The load was
@@ -122540,10 +122551,10 @@ index c224bd2e2b3ff4cd1b8907c4a21342d9573812b2..644d6ce48362f21aaeda47d48e24dfe3
      bool hasVideoDevice() const { return !m_eligibleVideoDevices.isEmpty(); }
 diff --git a/Source/WebKit/UIProcess/WebAuthentication/haiku/WebAuthenticatorCoordinatorProxyHaiku.cpp b/Source/WebKit/UIProcess/WebAuthentication/haiku/WebAuthenticatorCoordinatorProxyHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..8fbf29de81c05b4d0b8f3d4baad1a61fdcb8fcdc
+index 0000000000000000000000000000000000000000..3203a53576aa5092b4b2fd30c9d3363dfcfb6174
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/WebAuthentication/haiku/WebAuthenticatorCoordinatorProxyHaiku.cpp
-@@ -0,0 +1,839 @@
+@@ -0,0 +1,1260 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +// The Web Authentication API on KunanyiOS. It is built because password
@@ -122562,9 +122573,13 @@ index 0000000000000000000000000000000000000000..8fbf29de81c05b4d0b8f3d4baad1a61f
 +//
 +// The authenticator makes ES256 (P-256) key pairs with OpenSSL, attests with
 +// "none", and keeps every passkey discoverable (it stores the user handle and
-+// names). The user's confirmation in the browser's own prompt is its user
-+// verification. Passkeys stay on this computer: backup eligibility and state
-+// are not set, and the signature counter is always zero.
++// names). The user's confirmation in the browser's own prompt, or the choice
++// of a passkey in its native autofill menu (conditional mediation), is its
++// user verification. Passkeys stay on this computer: backup eligibility and
++// state are not set, and the signature counter is always zero. Each passkey
++// also has a PRF secret (the prf extension, as CTAP2's hmac-secret) and may
++// hold a large blob (largeBlob); relying parties' signals hide, show, rename
++// or remove the passkeys they no longer accept.
 +
 +#include "config.h"
 +#include "WebAuthenticatorCoordinatorProxy.h"
@@ -122589,6 +122604,7 @@ index 0000000000000000000000000000000000000000..8fbf29de81c05b4d0b8f3d4baad1a61f
 +#include <WebCore/MediationRequirement.h>
 +#include <WebCore/PublicKeyCredentialCreationOptions.h>
 +#include <WebCore/PublicKeyCredentialRequestOptions.h>
++#include <WebCore/RegistrableDomain.h>
 +#include <WebCore/SecurityOrigin.h>
 +#include <WebCore/SecurityOriginData.h>
 +#include <WebCore/UnknownCredentialOptions.h>
@@ -122598,6 +122614,7 @@ index 0000000000000000000000000000000000000000..8fbf29de81c05b4d0b8f3d4baad1a61f
 +#include <wtf/RunLoop.h>
 +#include <wtf/TZoneMallocInlines.h>
 +#include <wtf/WorkQueue.h>
++#include <wtf/text/Base64.h>
 +
 +#include <DataIO.h>
 +#include <Key.h>
@@ -122610,6 +122627,7 @@ index 0000000000000000000000000000000000000000..8fbf29de81c05b4d0b8f3d4baad1a61f
 +#include <openssl/core_names.h>
 +#include <openssl/crypto.h>
 +#include <openssl/evp.h>
++#include <openssl/hmac.h>
 +#include <openssl/rand.h>
 +#include <openssl/x509.h>
 +#include <string>
@@ -122682,16 +122700,31 @@ index 0000000000000000000000000000000000000000..8fbf29de81c05b4d0b8f3d4baad1a61f
 +
 +constexpr const char* passkeyKeyringHaiku = "Summit passkeys";
 +
++// The largest blob a site may keep with a passkey (largeBlob). The spec asks
++// authenticators for at least 1024 bytes.
++constexpr size_t largeBlobLimitHaiku = 16 * 1024;
++
 +// One passkey as the key store keeps it: a generic key whose identifier is
 +// the relying party ID and whose secondary identifier is the credential ID
-+// in hexadecimal; its data is a flattened BMessage with the fields below.
++// in hexadecimal; its data is a flattened BMessage with the fields below
++// (version, algorithm, credential_id, user_handle, user_name, display_name,
++// origin, created, private_key, prf_secret, and when set large_blob and
++// hidden).
 +struct StoredPasskeyHaiku {
 +    std::vector<uint8_t> credentialID;
 +    std::vector<uint8_t> userHandle;
 +    std::string userName;
 +    std::string displayName;
-+    // ECPrivateKey DER (RFC 5915); filled only where a signature is made.
++    // The site said it no longer accepts the passkey
++    // (signalAllAcceptedCredentials): it is not offered until the site lists
++    // it again.
++    bool hidden { false };
++    // Filled only where a signature is made: ECPrivateKey DER (RFC 5915), the
++    // PRF secret (32 bytes; passkeys made before PRF have none) and the
++    // large blob.
 +    std::vector<uint8_t> privateKey;
++    std::vector<uint8_t> prfSecret;
++    std::vector<uint8_t> largeBlob;
 +};
 +
 +std::string hexHaiku(const std::vector<uint8_t>& bytes)
@@ -122716,24 +122749,38 @@ index 0000000000000000000000000000000000000000..8fbf29de81c05b4d0b8f3d4baad1a61f
 +    return std::vector<uint8_t>(bytes, bytes + size);
 +}
 +
-+bool readPasskeyHaiku(const BKey& key, StoredPasskeyHaiku& passkey, bool withPrivateKey)
++bool readRecordHaiku(const BKey& key, BMessage& record)
 +{
++    if (!key.Data())
++        return false;
 +    BMemoryIO input(key.Data(), key.DataLength());
++    return record.Unflatten(&input) == B_OK;
++}
++
++bool readPasskeyHaiku(const BKey& key, StoredPasskeyHaiku& passkey, bool withSecrets)
++{
 +    BMessage record;
-+    if (!key.Data() || record.Unflatten(&input) != B_OK)
++    if (!readRecordHaiku(key, record))
 +        return false;
 +    passkey.credentialID = dataFieldHaiku(record, "credential_id");
 +    passkey.userHandle = dataFieldHaiku(record, "user_handle");
 +    passkey.userName = record.GetString("user_name", "");
 +    passkey.displayName = record.GetString("display_name", "");
-+    if (withPrivateKey)
++    passkey.hidden = record.GetBool("hidden", false);
++    if (withSecrets) {
 +        passkey.privateKey = dataFieldHaiku(record, "private_key");
-+    return !passkey.credentialID.empty() && record.GetInt32("algorithm", 0) == COSE::ES256
-+        && (!withPrivateKey || !passkey.privateKey.empty());
++        passkey.prfSecret = dataFieldHaiku(record, "prf_secret");
++        passkey.largeBlob = dataFieldHaiku(record, "large_blob");
++    }
++    bool es256 = record.GetInt32("algorithm", 0) == COSE::ES256;
++    // The record's own copy of the secrets goes with it.
++    record.MakeEmpty();
++    return es256 && !passkey.credentialID.empty();
 +}
 +
-+// The relying party's passkeys, in the order they were saved. A keyring that
-+// does not exist yet has none; one Summit may not use answers B_NOT_ALLOWED.
++// The relying party's passkeys, in the order they were saved, hidden ones
++// included. A keyring that does not exist yet has none; one Summit may not
++// use answers B_NOT_ALLOWED.
 +status_t storedPasskeysHaiku(const std::string& rpID, std::vector<StoredPasskeyHaiku>& passkeys)
 +{
 +    BKeyStore store;
@@ -122752,26 +122799,79 @@ index 0000000000000000000000000000000000000000..8fbf29de81c05b4d0b8f3d4baad1a61f
 +    return status == B_NOT_ALLOWED ? status : B_OK;
 +}
 +
-+// Found by enumerating the keyring, as storedPasskeysHaiku does, rather than
-+// with GetKey: keystore_server asks the user once per kind of access, and
-+// this keeps reading passkeys to one question.
-+status_t privateKeyHaiku(const std::string& rpID, const std::vector<uint8_t>& credentialID, std::vector<uint8_t>& privateKey)
++// Keys are found by enumerating the keyring rather than with GetKey:
++// keystore_server asks the user once per kind of access, and this keeps
++// reading passkeys to one question.
++status_t findPasskeyKeyHaiku(BKeyStore& store, const std::string& rpID, const std::vector<uint8_t>& credentialID, BKey& found)
 +{
-+    BKeyStore store;
 +    uint32 cookie = 0;
-+    BKey key;
 +    const std::string secondary = hexHaiku(credentialID);
 +    status_t status;
-+    while ((status = store.GetNextKey(passkeyKeyringHaiku, B_KEY_TYPE_GENERIC, B_KEY_PURPOSE_WEB, cookie, key)) == B_OK) {
-+        if (!key.Identifier() || !key.SecondaryIdentifier() || rpID != key.Identifier() || secondary != key.SecondaryIdentifier())
-+            continue;
-+        StoredPasskeyHaiku passkey;
-+        if (!readPasskeyHaiku(key, passkey, true) || passkey.credentialID != credentialID)
-+            return B_BAD_DATA;
-+        privateKey = std::move(passkey.privateKey);
-+        return B_OK;
++    while ((status = store.GetNextKey(passkeyKeyringHaiku, B_KEY_TYPE_GENERIC, B_KEY_PURPOSE_WEB, cookie, found)) == B_OK) {
++        if (found.Identifier() && found.SecondaryIdentifier() && rpID == found.Identifier() && secondary == found.SecondaryIdentifier())
++            return B_OK;
 +    }
 +    return status == B_NOT_ALLOWED ? status : B_ENTRY_NOT_FOUND;
++}
++
++status_t secretsHaiku(const std::string& rpID, const std::vector<uint8_t>& credentialID, StoredPasskeyHaiku& passkey)
++{
++    BKeyStore store;
++    BKey key;
++    if (status_t status = findPasskeyKeyHaiku(store, rpID, credentialID, key); status != B_OK)
++        return status;
++    if (!readPasskeyHaiku(key, passkey, true) || passkey.credentialID != credentialID || passkey.privateKey.empty())
++        return B_BAD_DATA;
++    return B_OK;
++}
++
++BKey* keyForRecordHaiku(const std::string& rpID, const std::vector<uint8_t>& credentialID, const BMessage& record)
++{
++    BMallocIO flat;
++    if (record.Flatten(&flat) != B_OK)
++        return nullptr;
++    auto* key = new BKey(B_KEY_PURPOSE_WEB, rpID.c_str(), hexHaiku(credentialID).c_str(),
++        static_cast<const uint8*>(flat.Buffer()), flat.BufferLength());
++    // The flattened record holds the private key: clear our copy of it.
++    OPENSSL_cleanse(const_cast<void*>(flat.Buffer()), flat.BufferLength());
++    return key;
++}
++
++// The key store has no update: a changed passkey is removed and added again,
++// and put back as it was when adding fails. change edits the record and
++// says whether it changed anything.
++template<typename Change>
++status_t rewritePasskeyHaiku(const std::string& rpID, const std::vector<uint8_t>& credentialID, Change&& change)
++{
++    BKeyStore store;
++    BKey old;
++    if (status_t status = findPasskeyKeyHaiku(store, rpID, credentialID, old); status != B_OK)
++        return status;
++    BMessage record;
++    if (!readRecordHaiku(old, record))
++        return B_BAD_DATA;
++    if (!change(record))
++        return B_OK;
++    std::unique_ptr<BKey> updated(keyForRecordHaiku(rpID, credentialID, record));
++    record.MakeEmpty();
++    if (!updated)
++        return B_NO_MEMORY;
++    status_t status = store.RemoveKey(passkeyKeyringHaiku, old);
++    if (status != B_OK)
++        return status;
++    status = store.AddKey(passkeyKeyringHaiku, *updated);
++    if (status != B_OK)
++        store.AddKey(passkeyKeyringHaiku, old);
++    return status;
++}
++
++status_t removePasskeyHaiku(const std::string& rpID, const std::vector<uint8_t>& credentialID)
++{
++    BKeyStore store;
++    BKey key;
++    if (status_t status = findPasskeyKeyHaiku(store, rpID, credentialID, key); status != B_OK)
++        return status;
++    return store.RemoveKey(passkeyKeyringHaiku, key);
 +}
 +
 +// A site keeps one passkey per account (user handle): a new one replaces it,
@@ -122788,40 +122888,35 @@ index 0000000000000000000000000000000000000000..8fbf29de81c05b4d0b8f3d4baad1a61f
 +    record.AddString("origin", origin.c_str());
 +    record.AddInt64("created", real_time_clock_usecs());
 +    record.AddData("private_key", B_RAW_TYPE, passkey.privateKey.data(), passkey.privateKey.size());
-+    BMallocIO flat;
-+    status_t status = record.Flatten(&flat);
-+    if (status != B_OK)
-+        return status;
++    record.AddData("prf_secret", B_RAW_TYPE, passkey.prfSecret.data(), passkey.prfSecret.size());
++    std::unique_ptr<BKey> key(keyForRecordHaiku(rpID, passkey.credentialID, record));
++    record.MakeEmpty();
++    if (!key)
++        return B_NO_MEMORY;
 +
 +    BKeyStore store;
 +    // The keyring is made on first use; it exists from then on.
 +    store.AddKeyring(passkeyKeyringHaiku);
-+    std::vector<BKey*> replaced;
++    std::vector<std::unique_ptr<BKey>> replaced;
 +    {
 +        uint32 cookie = 0;
-+        BKey key;
-+        while (store.GetNextKey(passkeyKeyringHaiku, B_KEY_TYPE_GENERIC, B_KEY_PURPOSE_WEB, cookie, key) == B_OK) {
++        BKey existingKey;
++        while (store.GetNextKey(passkeyKeyringHaiku, B_KEY_TYPE_GENERIC, B_KEY_PURPOSE_WEB, cookie, existingKey) == B_OK) {
 +            StoredPasskeyHaiku existing;
-+            if (key.Identifier() && rpID == key.Identifier() && readPasskeyHaiku(key, existing, false)
++            if (existingKey.Identifier() && rpID == existingKey.Identifier() && readPasskeyHaiku(existingKey, existing, false)
 +                && existing.userHandle == passkey.userHandle)
-+                replaced.push_back(new BKey(key));
++                replaced.push_back(std::make_unique<BKey>(existingKey));
 +        }
 +    }
-+    BKey key(B_KEY_PURPOSE_WEB, rpID.c_str(), hexHaiku(passkey.credentialID).c_str(),
-+        static_cast<const uint8*>(flat.Buffer()), flat.BufferLength());
-+    // The flattened record holds the private key: clear our copy of it.
-+    OPENSSL_cleanse(const_cast<void*>(flat.Buffer()), flat.BufferLength());
-+    status = store.AddKey(passkeyKeyringHaiku, key);
++    status_t status = store.AddKey(passkeyKeyringHaiku, *key);
 +    if (status == B_OK) {
-+        for (auto* old : replaced)
++        for (auto& old : replaced)
 +            store.RemoveKey(passkeyKeyringHaiku, *old);
 +    }
-+    for (auto* old : replaced)
-+        delete old;
 +    return status;
 +}
 +
-+// ---- Keys and signatures -------------------------------------------------
++// ---- Keys, signatures and PRF --------------------------------------------
 +
 +struct NewKeyHaiku {
 +    std::vector<uint8_t> privateKey;
@@ -122877,6 +122972,59 @@ index 0000000000000000000000000000000000000000..8fbf29de81c05b4d0b8f3d4baad1a61f
 +    return signature;
 +}
 +
++struct PRFValuesHaiku {
++    std::vector<uint8_t> first;
++    std::optional<std::vector<uint8_t>> second;
++};
++
++PRFValuesHaiku prfValuesHaiku(const AuthenticationExtensionsClientInputs::PRFValues& values)
++{
++    PRFValuesHaiku result { bytesHaiku(values.first.span()), std::nullopt };
++    if (values.second)
++        result.second = bytesHaiku(values.second->span());
++    return result;
++}
++
++// The prf extension's output for one input, as a CTAP2 authenticator's
++// hmac-secret computes it from the client's salt: HMAC-SHA-256(secret,
++// SHA-256("WebAuthn PRF" || 0x00 || input)).
++std::vector<uint8_t> prfHaiku(const std::vector<uint8_t>& secret, const std::vector<uint8_t>& input)
++{
++    static constexpr char label[] = "WebAuthn PRF";
++    std::vector<uint8_t> salted(label, label + sizeof(label));
++    salted.insert(salted.end(), input.begin(), input.end());
++    unsigned char salt[32];
++    unsigned saltLength = 0;
++    unsigned char output[32];
++    unsigned outputLength = 0;
++    if (EVP_Digest(salted.data(), salted.size(), salt, &saltLength, EVP_sha256(), nullptr) != 1
++        || !HMAC(EVP_sha256(), secret.data(), secret.size(), salt, saltLength, output, &outputLength))
++        return { };
++    return std::vector<uint8_t>(output, output + outputLength);
++}
++
++std::optional<PRFValuesHaiku> evaluatePRFHaiku(const std::vector<uint8_t>& secret, const std::optional<PRFValuesHaiku>& inputs)
++{
++    if (secret.empty() || !inputs)
++        return std::nullopt;
++    PRFValuesHaiku results { prfHaiku(secret, inputs->first), std::nullopt };
++    if (inputs->second)
++        results.second = prfHaiku(secret, *inputs->second);
++    if (results.first.empty() || (results.second && results.second->empty()))
++        return std::nullopt;
++    return results;
++}
++
++Ref<ArrayBuffer> arrayBufferHaiku(std::span<const uint8_t> bytes)
++{
++    return ArrayBuffer::create(bytes);
++}
++
++AuthenticationExtensionsClientOutputs::PRFValues prfOutputHaiku(const PRFValuesHaiku& results)
++{
++    return { arrayBufferHaiku(results.first), results.second ? RefPtr<ArrayBuffer> { arrayBufferHaiku(*results.second) } : nullptr };
++}
++
 +WorkQueue& passkeyQueueHaiku()
 +{
 +    static NeverDestroyed<Ref<WorkQueue>> queue = WorkQueue::create("Summit passkeys"_s);
@@ -122888,8 +123036,13 @@ index 0000000000000000000000000000000000000000..8fbf29de81c05b4d0b8f3d4baad1a61f
 +struct PasskeyRequestHaiku {
 +    const WebAuthenticatorCoordinatorProxy* owner { nullptr };
 +    WeakPtr<WebPageProxy> page;
++    std::optional<FrameIdentifier> frame;
 +    RequestCompletionHandler handler;
 +    bool create { false };
++    // get() with mediation "conditional": the passkeys are offered in the
++    // sign-in field's autofill, and the request waits, without a timeout,
++    // until one is chosen, the page aborts it or the frame goes away.
++    bool conditional { false };
 +    // The host was asked (B_WEBKIT_PASSKEY_REQUESTED) and must be told when
 +    // the request goes away without its answer.
 +    bool asked { false };
@@ -122907,6 +123060,14 @@ index 0000000000000000000000000000000000000000..8fbf29de81c05b4d0b8f3d4baad1a61f
 +    std::string displayName;
 +    bool excluded { false };
 +    bool credProps { false };
++    bool largeBlobSupport { false };
++    // Extensions: prf asked for (create: whether it is enabled), its inputs,
++    // and get()'s inputs for particular passkeys (evalByCredential).
++    bool prf { false };
++    std::optional<PRFValuesHaiku> prfEval;
++    std::vector<std::pair<std::vector<uint8_t>, PRFValuesHaiku>> prfByCredential;
++    bool largeBlobRead { false };
++    std::optional<std::vector<uint8_t>> largeBlobWrite;
 +    // get(): the passkeys offered, in the host's order.
 +    std::vector<StoredPasskeyHaiku> candidates;
 +};
@@ -122922,7 +123083,8 @@ index 0000000000000000000000000000000000000000..8fbf29de81c05b4d0b8f3d4baad1a61f
 +    return page ? static_cast<WebView*>(page->pageClient()) : nullptr;
 +}
 +
-+// Ends a request without an answer from the user: its prompt goes away.
++// Ends a request without an answer from the user: its prompt or autofill
++// offer goes away.
 +void finishPasskeyRequestHaiku(uint64_t identifier, const ExceptionData& exception)
 +{
 +    auto entry = passkeyRequestsHaiku().find(identifier);
@@ -122951,24 +123113,27 @@ index 0000000000000000000000000000000000000000..8fbf29de81c05b4d0b8f3d4baad1a61f
 +    return std::clamp(Seconds::fromMilliseconds(*milliseconds), 30_s, 10_min);
 +}
 +
-+uint64_t addPasskeyRequestHaiku(PasskeyRequestHaiku&& request, Seconds timeout)
++uint64_t addPasskeyRequestHaiku(PasskeyRequestHaiku&& request, std::optional<Seconds> timeout)
 +{
 +    static uint64_t lastIdentifier;
 +    uint64_t identifier = ++lastIdentifier;
 +    passkeyRequestsHaiku().emplace(identifier, WTF::move(request));
-+    RunLoop::mainSingleton().dispatchAfter(timeout, [identifier] {
-+        finishPasskeyRequestHaiku(identifier, notAllowed("The request timed out."_s));
-+    });
++    if (timeout) {
++        RunLoop::mainSingleton().dispatchAfter(*timeout, [identifier] {
++            finishPasskeyRequestHaiku(identifier, notAllowed("The request timed out."_s));
++        });
++    }
 +    return identifier;
 +}
 +
 +// The host asks the user (B_WEBKIT_PASSKEY_REQUESTED). Fields: "view",
-+// "identifier", "create" (bool), "rp_id", "origin"; for create(),
-+// "user_name", "user_display_name" and "exists" (bool: one of the passkeys the
-+// site excludes is saved here, so none is made) and "replaces" (bool: a
-+// passkey of the same account is saved here and the new one replaces it); for
-+// get(), one "account_name" and "account_display_name" per passkey the user
-+// may choose (none: Summit keeps no passkey the site accepts).
++// "identifier", "create" (bool), "conditional" (bool), "rp_id", "origin";
++// for create(), "user_name", "user_display_name" and "exists" (bool: one of
++// the passkeys the site excludes is saved here, so none is made) and
++// "replaces" (bool: a passkey of the same account is saved here and the new
++// one replaces it); for get(), one "account_name" and "account_display_name"
++// per passkey the user may choose (none: Summit keeps no passkey the site
++// accepts).
 +void askHostHaiku(uint64_t identifier)
 +{
 +    auto found = passkeyRequestsHaiku().find(identifier);
@@ -122978,6 +123143,7 @@ index 0000000000000000000000000000000000000000..8fbf29de81c05b4d0b8f3d4baad1a61f
 +    BMessage message(B_WEBKIT_PASSKEY_REQUESTED);
 +    message.AddUInt64("identifier", identifier);
 +    message.AddBool("create", request.create);
++    message.AddBool("conditional", request.conditional);
 +    message.AddString("rp_id", request.rpID.c_str());
 +    message.AddString("origin", request.origin.c_str());
 +    if (request.create) {
@@ -123003,11 +123169,6 @@ index 0000000000000000000000000000000000000000..8fbf29de81c05b4d0b8f3d4baad1a61f
 +    request.asked = true;
 +}
 +
-+Ref<ArrayBuffer> arrayBufferHaiku(std::span<const uint8_t> bytes)
-+{
-+    return ArrayBuffer::create(bytes);
-+}
-+
 +// The request's work is done: it leaves the table, to be answered.
 +std::optional<PasskeyRequestHaiku> takePasskeyRequestHaiku(uint64_t identifier)
 +{
@@ -123025,18 +123186,24 @@ index 0000000000000000000000000000000000000000..8fbf29de81c05b4d0b8f3d4baad1a61f
 +    passkey.userHandle = request.userHandle;
 +    passkey.userName = request.userName;
 +    passkey.displayName = request.displayName;
-+    passkeyQueueHaiku().dispatch([identifier, rpID = request.rpID, origin = request.origin, passkey = WTF::move(passkey)]() mutable {
++    passkeyQueueHaiku().dispatch([identifier, rpID = request.rpID, origin = request.origin, passkey = WTF::move(passkey), prfEval = request.prfEval]() mutable {
 +        passkey.credentialID.resize(16);
++        passkey.prfSecret.resize(32);
 +        std::optional<NewKeyHaiku> newKey;
++        std::optional<PRFValuesHaiku> prfResults;
 +        status_t status = B_ERROR;
-+        if (RAND_bytes(passkey.credentialID.data(), passkey.credentialID.size()) == 1)
++        if (RAND_bytes(passkey.credentialID.data(), passkey.credentialID.size()) == 1
++            && RAND_bytes(passkey.prfSecret.data(), passkey.prfSecret.size()) == 1)
 +            newKey = generateKeyHaiku();
 +        if (newKey) {
 +            passkey.privateKey = WTF::move(newKey->privateKey);
 +            status = savePasskeyHaiku(rpID, origin, passkey);
++            if (status == B_OK)
++                prfResults = evaluatePRFHaiku(passkey.prfSecret, prfEval);
 +            OPENSSL_cleanse(passkey.privateKey.data(), passkey.privateKey.size());
++            OPENSSL_cleanse(passkey.prfSecret.data(), passkey.prfSecret.size());
 +        }
-+        RunLoop::mainSingleton().dispatch([identifier, status, credentialID = WTF::move(passkey.credentialID), newKey = WTF::move(newKey)]() mutable {
++        RunLoop::mainSingleton().dispatch([identifier, status, credentialID = WTF::move(passkey.credentialID), newKey = WTF::move(newKey), prfResults = WTF::move(prfResults)]() mutable {
 +            auto request = takePasskeyRequestHaiku(identifier);
 +            if (!request)
 +                return;
@@ -123059,9 +123226,21 @@ index 0000000000000000000000000000000000000000..8fbf29de81c05b4d0b8f3d4baad1a61f
 +            response.attestationObject = arrayBufferHaiku(attestationObject.span());
 +            response.clientDataJSON = WTF::move(request->clientDataJSON);
 +            response.transports = { AuthenticatorTransport::Internal };
-+            if (request->credProps) {
++            if (request->credProps || request->prf || request->largeBlobSupport) {
 +                AuthenticationExtensionsClientOutputs outputs;
-+                outputs.credProps = CredentialPropertiesOutput { true };
++                if (request->credProps)
++                    outputs.credProps = CredentialPropertiesOutput { true };
++                // Every passkey has a PRF secret; the results come at once
++                // when the site gave inputs.
++                if (request->prf) {
++                    AuthenticationExtensionsClientOutputs::PRFOutputs prf;
++                    prf.enabled = true;
++                    if (prfResults)
++                        prf.results = prfOutputHaiku(*prfResults);
++                    outputs.prf = WTF::move(prf);
++                }
++                if (request->largeBlobSupport)
++                    outputs.largeBlob = AuthenticationExtensionsClientOutputs::LargeBlobOutputs { true, nullptr, std::nullopt };
 +                response.extensionOutputs = WTF::move(outputs);
 +            }
 +            request->handler(response, AuthenticatorAttachment::Platform, { });
@@ -123076,17 +123255,43 @@ index 0000000000000000000000000000000000000000..8fbf29de81c05b4d0b8f3d4baad1a61f
 +    auto authData = buildAuthData(String::fromUTF8(request.rpID.c_str()), flags, 0, { });
 +    std::vector<uint8_t> signedData(authData.begin(), authData.end());
 +    signedData.insert(signedData.end(), request.clientDataHash.begin(), request.clientDataHash.end());
++    // evalByCredential's inputs for the passkey chosen, else eval's.
++    std::optional<PRFValuesHaiku> prfInputs = request.prfEval;
++    for (auto& [credentialID, values] : request.prfByCredential) {
++        if (credentialID == passkey.credentialID)
++            prfInputs = values;
++    }
 +    passkeyQueueHaiku().dispatch([identifier, rpID = request.rpID, credentialID = passkey.credentialID, userHandle = passkey.userHandle,
-+        authData = bytesHaiku(authData.span()), signedData = WTF::move(signedData)]() mutable {
-+        std::vector<uint8_t> privateKey;
-+        status_t status = privateKeyHaiku(rpID, credentialID, privateKey);
++        authData = bytesHaiku(authData.span()), signedData = WTF::move(signedData), prfInputs = WTF::move(prfInputs),
++        largeBlobRead = request.largeBlobRead, largeBlobWrite = request.largeBlobWrite]() mutable {
++        StoredPasskeyHaiku secrets;
++        status_t status = secretsHaiku(rpID, credentialID, secrets);
 +        std::vector<uint8_t> signature;
++        std::optional<PRFValuesHaiku> prfResults;
++        std::optional<std::vector<uint8_t>> blob;
++        std::optional<bool> written;
 +        if (status == B_OK) {
-+            signature = signHaiku(privateKey, signedData);
-+            OPENSSL_cleanse(privateKey.data(), privateKey.size());
++            signature = signHaiku(secrets.privateKey, signedData);
++            prfResults = evaluatePRFHaiku(secrets.prfSecret, prfInputs);
++            if (largeBlobRead && !secrets.largeBlob.empty())
++                blob = secrets.largeBlob;
++            OPENSSL_cleanse(secrets.privateKey.data(), secrets.privateKey.size());
++            OPENSSL_cleanse(secrets.prfSecret.data(), secrets.prfSecret.size());
++        }
++        // A blob is written only once the passkey has signed: the user chose
++        // it for this site.
++        if (!signature.empty() && largeBlobWrite) {
++            written = largeBlobWrite->size() <= largeBlobLimitHaiku
++                && rewritePasskeyHaiku(rpID, credentialID, [&](BMessage& record) {
++                    record.RemoveName("large_blob");
++                    if (!largeBlobWrite->empty())
++                        record.AddData("large_blob", B_RAW_TYPE, largeBlobWrite->data(), largeBlobWrite->size());
++                    return true;
++                }) == B_OK;
 +        }
 +        RunLoop::mainSingleton().dispatch([identifier, credentialID = WTF::move(credentialID), userHandle = WTF::move(userHandle),
-+            authData = WTF::move(authData), signature = WTF::move(signature), status]() mutable {
++            authData = WTF::move(authData), signature = WTF::move(signature), status, prfResults = WTF::move(prfResults),
++            blob = WTF::move(blob), written]() mutable {
 +            auto request = takePasskeyRequestHaiku(identifier);
 +            if (!request)
 +                return;
@@ -123101,6 +123306,22 @@ index 0000000000000000000000000000000000000000..8fbf29de81c05b4d0b8f3d4baad1a61f
 +            response.signature = arrayBufferHaiku(signature);
 +            response.userHandle = arrayBufferHaiku(userHandle);
 +            response.clientDataJSON = WTF::move(request->clientDataJSON);
++            if (prfResults || request->largeBlobRead || request->largeBlobWrite) {
++                AuthenticationExtensionsClientOutputs outputs;
++                if (prfResults) {
++                    AuthenticationExtensionsClientOutputs::PRFOutputs prf;
++                    prf.results = prfOutputHaiku(*prfResults);
++                    outputs.prf = WTF::move(prf);
++                }
++                if (request->largeBlobRead || request->largeBlobWrite) {
++                    AuthenticationExtensionsClientOutputs::LargeBlobOutputs largeBlob;
++                    if (blob)
++                        largeBlob.blob = arrayBufferHaiku(*blob);
++                    largeBlob.written = written;
++                    outputs.largeBlob = WTF::move(largeBlob);
++                }
++                response.extensionOutputs = WTF::move(outputs);
++            }
 +            request->handler(response, AuthenticatorAttachment::Platform, { });
 +        });
 +    });
@@ -123133,6 +123354,73 @@ index 0000000000000000000000000000000000000000..8fbf29de81c05b4d0b8f3d4baad1a61f
 +    return platformPasskeysEnabledHaiku() && view && view->takesPasskeyRequests();
 +}
 +
++// ---- Signals ---------------------------------------------------------------
++
++// A signal changes Summit's passkeys only for the site the page shows: the
++// web process names the origin, which must be a secure one of the main
++// frame's site, and the relying party ID must be its registrable domain or
++// a suffix of it (the web process checked that too).
++bool signalAllowedHaiku(WebPageProxy* page, const SecurityOriginData& origin, const String& rpID)
++{
++    if (!page || !takesPasskeyRequestsHaiku(page))
++        return false;
++    Ref securityOrigin = origin.securityOrigin();
++    if (!securityOrigin->isPotentiallyTrustworthy() || !securityOrigin->isMatchingRegistrableDomainSuffix(rpID))
++        return false;
++    URL mainFrameURL { page->currentURL() };
++    return mainFrameURL.protocolIsInHTTPFamily() && RegistrableDomain { mainFrameURL } == RegistrableDomain { origin };
++}
++
++struct SignalChangesHaiku {
++    int32 removed { 0 };
++    int32 hidden { 0 };
++    int32 restored { 0 };
++    int32 renamed { 0 };
++};
++
++// The pages whose signals are being carried out, by token: the page stays
++// on the main thread while the key store changes.
++std::unordered_map<uint64_t, WeakPtr<WebPageProxy>>& signalPagesHaiku()
++{
++    static NeverDestroyed<std::unordered_map<uint64_t, WeakPtr<WebPageProxy>>> pages;
++    return pages.get();
++}
++
++// The window says what a site changed (B_WEBKIT_PASSKEYS_CHANGED).
++void tellWindowAboutSignalHaiku(WebPageProxy* page, const std::string& rpID, const SignalChangesHaiku& changes)
++{
++    if (!changes.removed && !changes.hidden && !changes.restored && !changes.renamed)
++        return;
++    auto* view = webViewHaiku(page);
++    if (!view)
++        return;
++    BMessage message(B_WEBKIT_PASSKEYS_CHANGED);
++    message.AddString("rp_id", rpID.c_str());
++    message.AddInt32("removed", changes.removed);
++    message.AddInt32("hidden", changes.hidden);
++    message.AddInt32("restored", changes.restored);
++    message.AddInt32("renamed", changes.renamed);
++    view->sendPasskeyRequest(message);
++}
++
++// The page's promise is answered at once, as the spec asks (a site learns
++// nothing about the passkeys from it); the key store changes after.
++template<typename Work>
++void runSignalHaiku(WebPageProxy* page, std::string rpID, Work&& work)
++{
++    static uint64_t lastToken;
++    uint64_t token = ++lastToken;
++    signalPagesHaiku().emplace(token, page);
++    passkeyQueueHaiku().dispatch([token, rpID = WTF::move(rpID), work = WTF::move(work)]() mutable {
++        SignalChangesHaiku changes = work(rpID);
++        RunLoop::mainSingleton().dispatch([token, rpID = WTF::move(rpID), changes]() mutable {
++            auto page = signalPagesHaiku().extract(token);
++            if (!page.empty())
++                tellWindowAboutSignalHaiku(page.mapped().get(), rpID, changes);
++        });
++    });
++}
++
 +} // namespace
 +
 +// Main thread only (BWebKitView::AnswerPasskeyRequest): the user's answer to
@@ -123163,6 +123451,20 @@ index 0000000000000000000000000000000000000000..8fbf29de81c05b4d0b8f3d4baad1a61f
 +        return decline(notAllowed("The user declined."_s));
 +    request.working = true;
 +    completeGetHaiku(identifier, request, account);
++}
++
++// Main thread only (WebView.cpp): a frame committed a new document. The
++// requests its old document made (all of the page's, for the main frame)
++// have no one left to answer; their prompts and autofill offers go.
++void withdrawPasskeyRequestsHaiku(WebPageProxy& page, FrameIdentifier frame, bool mainFrame)
++{
++    Vector<uint64_t> identifiers;
++    for (auto& [identifier, request] : passkeyRequestsHaiku()) {
++        if (request.page.get() == &page && (mainFrame || request.frame == frame))
++            identifiers.append(identifier);
++    }
++    for (auto identifier : identifiers)
++        finishPasskeyRequestHaiku(identifier, ExceptionData { ExceptionCode::AbortError, "The document went away."_s });
 +}
 +
 +Ref<WebAuthenticatorCoordinatorProxy> WebAuthenticatorCoordinatorProxy::create(WebPageProxy& webPageProxy)
@@ -123218,6 +123520,7 @@ index 0000000000000000000000000000000000000000..8fbf29de81c05b4d0b8f3d4baad1a61f
 +    PasskeyRequestHaiku request;
 +    request.owner = this;
 +    request.page = page.get();
++    request.frame = frameID;
 +    request.handler = WTF::move(handler);
 +    request.create = true;
 +    request.rpID = utf8Haiku(options.rp.id);
@@ -123226,7 +123529,20 @@ index 0000000000000000000000000000000000000000..8fbf29de81c05b4d0b8f3d4baad1a61f
 +    request.userHandle = bytesHaiku(options.user.id.span());
 +    request.userName = utf8Haiku(options.user.name);
 +    request.displayName = utf8Haiku(options.user.displayName);
-+    request.credProps = options.extensions && options.extensions->credProps && *options.extensions->credProps;
++    if (auto& extensions = options.extensions) {
++        request.credProps = extensions->credProps && *extensions->credProps;
++        // Every passkey here can keep a large blob, so "required" and
++        // "preferred" are both met.
++        request.largeBlobSupport = !!extensions->largeBlob;
++        if (extensions->prf) {
++            request.prf = true;
++            if (extensions->prf->eval)
++                request.prfEval = prfValuesHaiku(*extensions->prf->eval);
++            // Per-credential inputs make no sense for a passkey not made yet.
++            if (extensions->prf->evalByCredential && !extensions->prf->evalByCredential->isEmpty())
++                return handler({ }, AuthenticatorAttachment::Platform, ExceptionData { ExceptionCode::NotSupportedError, "prf.evalByCredential is for get()."_s });
++        }
++    }
 +    std::vector<std::vector<uint8_t>> excluded;
 +    for (auto& descriptor : options.excludeCredentials) {
 +        if (descriptor.type == PublicKeyCredentialType::PublicKey)
@@ -123245,9 +123561,11 @@ index 0000000000000000000000000000000000000000..8fbf29de81c05b4d0b8f3d4baad1a61f
 +            auto found = passkeyRequestsHaiku().find(identifier);
 +            if (found == passkeyRequestsHaiku().end())
 +                return;
++            // A passkey the site hid (it no longer accepts it) does not
++            // count as one it excludes.
 +            for (auto& passkey : passkeys) {
 +                for (auto& id : excluded)
-+                    found->second.excluded |= passkey.credentialID == id;
++                    found->second.excluded |= !passkey.hidden && passkey.credentialID == id;
 +            }
 +            found->second.candidates = WTF::move(passkeys);
 +            askHostHaiku(identifier);
@@ -123258,9 +123576,7 @@ index 0000000000000000000000000000000000000000..8fbf29de81c05b4d0b8f3d4baad1a61f
 +void WebAuthenticatorCoordinatorProxy::getAssertion(IPC::Connection& connection, FrameIdentifier frameID, FrameInfoData&& frameInfo, PublicKeyCredentialRequestOptions&& options, MediationRequirement mediation, IPC::Untrusted<std::optional<SecurityOriginData>>&& untrustedParentOrigin, RequestCompletionHandler&& handler)
 +{
 +    RefPtr page = m_webPageProxy.get();
-+    // Conditional mediation (passkeys offered in a sign-in field's autofill)
-+    // is reported unavailable, so pages that check do not ask.
-+    if (!takesPasskeyRequestsHaiku(page.get()) || mediation == MediationRequirement::Conditional) {
++    if (!takesPasskeyRequestsHaiku(page.get())) {
 +        tellWindow(page.get(), mediation, false);
 +        handler({ }, AuthenticatorAttachment::Platform, noAuthenticatorAvailable());
 +        return;
@@ -123277,22 +123593,56 @@ index 0000000000000000000000000000000000000000..8fbf29de81c05b4d0b8f3d4baad1a61f
 +        return handler({ }, AuthenticatorAttachment::Platform, noAuthenticatorAvailable());
 +    }
 +
-+    PasskeyRequestHaiku request;
-+    request.owner = this;
-+    request.page = page.get();
-+    request.handler = WTF::move(handler);
-+    request.create = false;
-+    request.rpID = utf8Haiku(options.rpId);
-+    request.origin = utf8Haiku(frameInfo.securityOrigin.toString());
-+    request.clientDataJSON = buildClientDataJson(ClientDataType::Get, options.challenge, frameInfo.securityOrigin.securityOrigin(), WebAuthn::Scope::SameOrigin);
-+    request.clientDataHash = buildClientDataJsonHash(*request.clientDataJSON);
 +    std::vector<std::vector<uint8_t>> allowed;
 +    for (auto& descriptor : options.allowCredentials) {
 +        if (descriptor.type == PublicKeyCredentialType::PublicKey)
 +            allowed.push_back(bytesHaiku(descriptor.id.span()));
 +    }
++
++    PasskeyRequestHaiku request;
++    request.owner = this;
++    request.page = page.get();
++    request.frame = frameID;
++    request.handler = WTF::move(handler);
++    request.create = false;
++    request.conditional = mediation == MediationRequirement::Conditional;
++    request.rpID = utf8Haiku(options.rpId);
++    request.origin = utf8Haiku(frameInfo.securityOrigin.toString());
++    request.clientDataJSON = buildClientDataJson(ClientDataType::Get, options.challenge, frameInfo.securityOrigin.securityOrigin(), WebAuthn::Scope::SameOrigin);
++    request.clientDataHash = buildClientDataJsonHash(*request.clientDataJSON);
++    if (auto& extensions = options.extensions) {
++        // The client checks of the prf extension
++        // (https://w3c.github.io/webauthn/#prf-extension): per-credential
++        // inputs need an allow list, and name passkeys in it.
++        if (auto& prf = extensions->prf) {
++            request.prf = true;
++            if (prf->eval)
++                request.prfEval = prfValuesHaiku(*prf->eval);
++            if (prf->evalByCredential && !prf->evalByCredential->isEmpty()) {
++                if (allowed.empty())
++                    return request.handler({ }, AuthenticatorAttachment::Platform, ExceptionData { ExceptionCode::NotSupportedError, "prf.evalByCredential needs allowCredentials."_s });
++                for (auto& [encoded, values] : *prf->evalByCredential) {
++                    auto credentialID = base64URLDecode(encoded);
++                    if (!credentialID || std::find(allowed.begin(), allowed.end(), bytesHaiku(credentialID->span())) == allowed.end())
++                        return request.handler({ }, AuthenticatorAttachment::Platform, ExceptionData { ExceptionCode::SyntaxError, "prf.evalByCredential names a credential that is not in allowCredentials."_s });
++                    request.prfByCredential.emplace_back(bytesHaiku(credentialID->span()), prfValuesHaiku(values));
++                }
++            }
++        }
++        if (auto& largeBlob = extensions->largeBlob) {
++            request.largeBlobRead = largeBlob->read && *largeBlob->read;
++            if (largeBlob->write) {
++                // A blob belongs to one passkey, which the site must name.
++                if (allowed.size() != 1)
++                    return request.handler({ }, AuthenticatorAttachment::Platform, ExceptionData { ExceptionCode::NotSupportedError, "largeBlob.write needs exactly one credential in allowCredentials."_s });
++                request.largeBlobWrite = bytesHaiku(largeBlob->write->span());
++            }
++        }
++    }
 +    auto rpID = request.rpID;
-+    auto identifier = addPasskeyRequestHaiku(WTF::move(request), passkeyTimeoutHaiku(options.timeout));
++    // A conditional request waits as long as the page shows the field.
++    auto timeout = request.conditional ? std::nullopt : std::optional<Seconds> { passkeyTimeoutHaiku(options.timeout) };
++    auto identifier = addPasskeyRequestHaiku(WTF::move(request), timeout);
 +    passkeyQueueHaiku().dispatch([identifier, rpID = WTF::move(rpID), allowed = WTF::move(allowed)]() mutable {
 +        std::vector<StoredPasskeyHaiku> passkeys;
 +        status_t status = storedPasskeysHaiku(rpID, passkeys);
@@ -123306,12 +123656,11 @@ index 0000000000000000000000000000000000000000..8fbf29de81c05b4d0b8f3d4baad1a61f
 +                return;
 +            // An allow list names the passkeys the site knows for the account
 +            // being signed in; without one, every passkey of the site is
-+            // offered (discoverable credentials).
-+            if (!allowed.empty()) {
-+                std::erase_if(passkeys, [&](const StoredPasskeyHaiku& passkey) {
-+                    return std::find(allowed.begin(), allowed.end(), passkey.credentialID) == allowed.end();
-+                });
-+            }
++            // offered (discoverable credentials). Passkeys the site hid are
++            // not offered.
++            std::erase_if(passkeys, [&](const StoredPasskeyHaiku& passkey) {
++                return passkey.hidden || (!allowed.empty() && std::find(allowed.begin(), allowed.end(), passkey.credentialID) == allowed.end());
++            });
 +            found->second.candidates = WTF::move(passkeys);
 +            askHostHaiku(identifier);
 +        });
@@ -123323,9 +123672,11 @@ index 0000000000000000000000000000000000000000..8fbf29de81c05b4d0b8f3d4baad1a61f
 +    handler(takesPasskeyRequestsHaiku(m_webPageProxy.get()));
 +}
 +
++// The passkeys are offered in the sign-in field's autofill: the host shows
++// them in a native menu under a field marked autocomplete="… webauthn".
 +void WebAuthenticatorCoordinatorProxy::isConditionalMediationAvailable(IPC::Untrusted<SecurityOriginData>&&, QueryCompletionHandler&& handler)
 +{
-+    handler(false);
++    handler(takesPasskeyRequestsHaiku(m_webPageProxy.get()));
 +}
 +
 +void WebAuthenticatorCoordinatorProxy::getClientCapabilities(IPC::Untrusted<SecurityOriginData>&&, CapabilitiesCompletionHandler&& handler)
@@ -123336,38 +123687,119 @@ index 0000000000000000000000000000000000000000..8fbf29de81c05b4d0b8f3d4baad1a61f
 +    bool platform = takesPasskeyRequestsHaiku(m_webPageProxy.get());
 +    Vector<KeyValuePair<String, bool>> capabilities {
 +        { "conditionalCreate"_s, false },
-+        { "conditionalGet"_s, false },
++        { "conditionalGet"_s, platform },
 +        { "hybridTransport"_s, false },
 +        { "passkeyPlatformAuthenticator"_s, platform },
 +        { "userVerifyingPlatformAuthenticator"_s, platform },
 +        { "relatedOrigins"_s, false },
-+        { "signalAllAcceptedCredentials"_s, false },
-+        { "signalCurrentUserDetails"_s, false },
-+        { "signalUnknownCredential"_s, false },
++        { "signalAllAcceptedCredentials"_s, platform },
++        { "signalCurrentUserDetails"_s, platform },
++        { "signalUnknownCredential"_s, platform },
++        { "extension:prf"_s, platform },
++        { "extension:largeBlob"_s, platform },
++        { "extension:credProps"_s, platform },
 +    };
 +    handler(WTF::move(capabilities));
 +}
 +
-+// The signal methods keep a platform credential store in step with the relying
-+// party. Summit's passkeys are changed only by the user, so they report
-+// success without doing anything.
-+void WebAuthenticatorCoordinatorProxy::signalUnknownCredential(IPC::Untrusted<SecurityOriginData>&&, UnknownCredentialOptions&&, CompletionHandler<void(std::optional<ExceptionData>)>&& handler)
++// The relying party says a credential does not exist (a sign-in with it
++// failed): Summit's passkey of that ID for the site is removed.
++void WebAuthenticatorCoordinatorProxy::signalUnknownCredential(IPC::Untrusted<SecurityOriginData>&& untrustedOrigin, UnknownCredentialOptions&& options, CompletionHandler<void(std::optional<ExceptionData>)>&& handler)
 +{
++    auto origin = WTF::move(untrustedOrigin).unsafeExtractWithoutValidation(IPC::UnvalidatedReason::NeedsReview);
 +    handler(std::nullopt);
++    RefPtr page = m_webPageProxy.get();
++    auto credentialID = base64URLDecode(options.credentialId);
++    if (!credentialID || credentialID->isEmpty() || !signalAllowedHaiku(page.get(), origin, options.rpId))
++        return;
++    runSignalHaiku(page.get(), utf8Haiku(options.rpId), [credentialID = bytesHaiku(credentialID->span())](const std::string& rpID) {
++        SignalChangesHaiku changes;
++        if (removePasskeyHaiku(rpID, credentialID) == B_OK)
++            changes.removed = 1;
++        return changes;
++    });
 +}
 +
-+void WebAuthenticatorCoordinatorProxy::signalAllAcceptedCredentials(IPC::Untrusted<SecurityOriginData>&&, AllAcceptedCredentialsOptions&&, CompletionHandler<void(std::optional<ExceptionData>)>&& handler)
++// The relying party lists every credential it accepts for an account: that
++// account's passkeys missing from the list are hidden, not removed (a site's
++// mistake would otherwise lose them), and hidden ones in the list come back.
++void WebAuthenticatorCoordinatorProxy::signalAllAcceptedCredentials(IPC::Untrusted<SecurityOriginData>&& untrustedOrigin, AllAcceptedCredentialsOptions&& options, CompletionHandler<void(std::optional<ExceptionData>)>&& handler)
 +{
++    auto origin = WTF::move(untrustedOrigin).unsafeExtractWithoutValidation(IPC::UnvalidatedReason::NeedsReview);
 +    handler(std::nullopt);
++    RefPtr page = m_webPageProxy.get();
++    auto userHandle = base64URLDecode(options.userId);
++    if (!userHandle || userHandle->isEmpty() || !signalAllowedHaiku(page.get(), origin, options.rpId))
++        return;
++    std::vector<std::vector<uint8_t>> accepted;
++    for (auto& encoded : options.allAcceptedCredentialIds) {
++        // One malformed ID makes the list untrustworthy: nothing changes.
++        auto credentialID = base64URLDecode(encoded);
++        if (!credentialID)
++            return;
++        accepted.push_back(bytesHaiku(credentialID->span()));
++    }
++    runSignalHaiku(page.get(), utf8Haiku(options.rpId), [userHandle = bytesHaiku(userHandle->span()), accepted = WTF::move(accepted)](const std::string& rpID) {
++        SignalChangesHaiku changes;
++        std::vector<StoredPasskeyHaiku> passkeys;
++        if (storedPasskeysHaiku(rpID, passkeys) != B_OK)
++            return changes;
++        for (auto& passkey : passkeys) {
++            if (passkey.userHandle != userHandle)
++                continue;
++            bool listed = std::find(accepted.begin(), accepted.end(), passkey.credentialID) != accepted.end();
++            if (listed == !passkey.hidden)
++                continue;
++            if (rewritePasskeyHaiku(rpID, passkey.credentialID, [&](BMessage& record) {
++                record.RemoveName("hidden");
++                if (!listed)
++                    record.AddBool("hidden", true);
++                return true;
++            }) == B_OK)
++                ++(listed ? changes.restored : changes.hidden);
++        }
++        return changes;
++    });
 +}
 +
-+void WebAuthenticatorCoordinatorProxy::signalCurrentUserDetails(IPC::Untrusted<SecurityOriginData>&&, CurrentUserDetailsOptions&&, CompletionHandler<void(std::optional<ExceptionData>)>&& handler)
++// The relying party gives an account's current name and display name: the
++// account's passkeys show them.
++void WebAuthenticatorCoordinatorProxy::signalCurrentUserDetails(IPC::Untrusted<SecurityOriginData>&& untrustedOrigin, CurrentUserDetailsOptions&& options, CompletionHandler<void(std::optional<ExceptionData>)>&& handler)
 +{
++    auto origin = WTF::move(untrustedOrigin).unsafeExtractWithoutValidation(IPC::UnvalidatedReason::NeedsReview);
 +    handler(std::nullopt);
++    RefPtr page = m_webPageProxy.get();
++    auto userHandle = base64URLDecode(options.userId);
++    if (!userHandle || userHandle->isEmpty() || !signalAllowedHaiku(page.get(), origin, options.rpId))
++        return;
++    auto name = utf8Haiku(options.name);
++    auto displayName = utf8Haiku(options.displayName);
++    if (name.size() > 1024 || displayName.size() > 1024)
++        return;
++    runSignalHaiku(page.get(), utf8Haiku(options.rpId), [userHandle = bytesHaiku(userHandle->span()), name = WTF::move(name), displayName = WTF::move(displayName)](const std::string& rpID) {
++        SignalChangesHaiku changes;
++        std::vector<StoredPasskeyHaiku> passkeys;
++        if (storedPasskeysHaiku(rpID, passkeys) != B_OK)
++            return changes;
++        for (auto& passkey : passkeys) {
++            if (passkey.userHandle != userHandle || (passkey.userName == name && passkey.displayName == displayName))
++                continue;
++            if (rewritePasskeyHaiku(rpID, passkey.credentialID, [&](BMessage& record) {
++                record.RemoveName("user_name");
++                record.RemoveName("display_name");
++                record.AddString("user_name", name.c_str());
++                record.AddString("display_name", displayName.c_str());
++                return true;
++            }) == B_OK)
++                ++changes.renamed;
++        }
++        return changes;
++    });
 +}
 +
-+// The page aborted its request (AbortSignal): the prompt goes away. A request
-+// whose answer is being worked on (a key made or a signature) completes.
++// The page aborted its request (AbortSignal): the prompt or autofill offer
++// goes away. A request whose answer is being worked on (a key made or a
++// signature) completes.
 +void WebAuthenticatorCoordinatorProxy::cancel(CompletionHandler<void()>&& handler)
 +{
 +    Vector<uint64_t> identifiers;
@@ -132465,10 +132897,10 @@ index 0000000000000000000000000000000000000000..c9a119d02f85b7c5ad8fe9153bfc9604
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/WebView.cpp b/Source/WebKit/UIProcess/haiku/WebView.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..1c04b9217777568be50ef2ed2e08898d311173ad
+index 0000000000000000000000000000000000000000..5abbe700d3b25cb47f30228d04aff57b43911e19
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/WebView.cpp
-@@ -0,0 +1,3249 @@
+@@ -0,0 +1,3260 @@
 +/*
 + * Copyright (C) 2013 Intel Corporation. All rights reserved.
 + *
@@ -133088,6 +133520,12 @@ index 0000000000000000000000000000000000000000..1c04b9217777568be50ef2ed2e08898d
 +        RunLoop::mainSingleton().dispatchAfter(1_s, WTF::move(prewarm));
 +}
 +
++#if ENABLE(WEB_AUTHN)
++// WebAuthenticatorCoordinatorProxyHaiku.cpp: a frame committed a new
++// document, so the passkey requests of the old one end.
++void withdrawPasskeyRequestsHaiku(WebPageProxy&, WebCore::FrameIdentifier, bool mainFrame);
++#endif
++
 +// HTTP authentication challenges the host was asked about
 +// (B_WEBKIT_AUTHENTICATION_REQUESTED). They wait here, on the main thread,
 +// until the host answers or the page moves on.
@@ -133504,6 +133942,11 @@ index 0000000000000000000000000000000000000000..1c04b9217777568be50ef2ed2e08898d
 +            ++state->bluetoothGeneration;
 +            state->context->bluetooth()->cancelPage(page.identifier().toUInt64());
 +        }
++#endif
++#if ENABLE(WEB_AUTHN)
++        // Passkey requests of the document that went (a conditional one
++        // waiting in its sign-in field) end with it.
++        withdrawPasskeyRequestsHaiku(page, frame.frameID, isMainFrameHaiku(frame, &page));
 +#endif
 +        if (!isMainFrameHaiku(frame, &page))
 +            return;

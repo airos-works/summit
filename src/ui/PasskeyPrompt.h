@@ -8,6 +8,7 @@
 #include <utility>
 #include <vector>
 
+class BListView;
 class BMenuField;
 
 namespace summit {
@@ -15,6 +16,9 @@ namespace summit {
 // "account" (int32: the passkey chosen, 0 to create one or to acknowledge,
 // negative to decline), as BWebKitView::AnswerPasskeyRequest takes it.
 constexpr uint32 kPasskeyAnswer = 'pkan';
+// A passkey chosen in the autofill menu under a sign-in field, to its browser
+// window: "identifier" (uint64, or int64 from hey) and "account" (int32).
+constexpr uint32 kPasskeyConditionalChosen = 'pkcc';
 
 // The sheet a page that asks for a passkey gets when Summit's own
 // authenticator answers it (#111, B_WEBKIT_PASSKEY_REQUESTED): create a
@@ -52,6 +56,27 @@ private:
     BMenuField* fAccounts = nullptr;
     int32 fChosen = 0;
     bool fAnswered = false;
+};
+
+// Passkey autofill (conditional mediation): the site's passkeys in a small
+// list under the sign-in field, as other browsers show autofill. It takes no
+// focus (the field keeps it, and typing goes on), and a click on a passkey
+// sends kPasskeyConditionalChosen with "identifier" and "account". The
+// browser window closes it when the field is left, the request ends, or the
+// tab or window changes. Scripting, for tests: 'ALTB' with account=int32(N).
+class PasskeyAutofill final : public BWindow {
+public:
+    PasskeyAutofill(BPoint where, uint64 identifier, const std::vector<std::pair<std::string, std::string>>& accounts,
+        BMessenger target);
+    void MessageReceived(BMessage* message) override;
+    uint64 Identifier() const { return fIdentifier; }
+
+private:
+    void Choose(int32 account);
+    uint64 fIdentifier;
+    BMessenger fTarget;
+    BListView* fList = nullptr;
+    bool fChosen = false;
 };
 
 // An account as the sheet shows it: "Display Name (name)", or one of them.

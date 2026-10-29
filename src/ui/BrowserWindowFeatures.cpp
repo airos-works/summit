@@ -161,6 +161,10 @@ void BrowserWindow::AddPageScripts(BWebKitView* view)
         view->AddScriptMessageHandler("summitPasswords", BMessenger(this));
         view->AddUserScript(kPasswordScript, true, true);
     }
+    // Passkey autofill (#111), in private windows too: passkeys are used
+    // there, only never made without the user's say.
+    view->AddScriptMessageHandler("summitPasskeys", BMessenger(this));
+    view->AddUserScript(kPasskeyFieldScript, true, false);
 }
 
 void BrowserWindow::PageScriptMessage(BMessage& message)
@@ -178,7 +182,13 @@ void BrowserWindow::PageScriptMessage(BMessage& message)
     } catch (const std::exception&) { }
     if (!body.is_object()) body = json::object();
     auto text = [&](const char* key) { return body.contains(key) && body[key].is_string() ? body[key].get<std::string>() : std::string(); };
-    if (tab && name == "summitPopups") {
+    if (tab && name == "summitPasskeys" && mainFrame) {
+        auto number = [&](const char* key) { return body.contains(key) && body[key].is_number() ? body[key].get<double>() : 0.0; };
+        if (text("type") == "field")
+            PasskeyFieldEntered(*tab, BRect(number("left"), number("top"), number("right"), number("bottom")), number("width"));
+        else if (text("type") == "leave" && tab->id == fSelected)
+            ClosePasskeyAutofill();
+    } else if (tab && name == "summitPopups") {
         const auto url = text("url");
         if (!url.empty() && url.size() < 8192) {
             tab->blockedPopup = url;

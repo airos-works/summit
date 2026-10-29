@@ -31,6 +31,9 @@ size_t ImportCSV(const std::string& text, std::string& error);
 // their private keys are never read.
 struct SavedPasskey {
     std::string site, credential, userName, displayName;
+    // The site no longer lists it (signalAllAcceptedCredentials): it is not
+    // offered until the site lists it again.
+    bool hidden = false;
 };
 namespace PasskeyStore {
 std::vector<SavedPasskey> Passkeys();

@@ -16,4 +16,8 @@ namespace summit {
 extern const char* const kPopupScript;
 extern const char* const kPictureInPictureScript;
 extern const char* const kPasswordScript;
+// Passkey autofill (#111): tells the browser where a sign-in field marked
+// autocomplete="… webauthn" is when the user goes into it, so that the
+// native menu of the site's passkeys opens under it.
+extern const char* const kPasskeyFieldScript;
 }

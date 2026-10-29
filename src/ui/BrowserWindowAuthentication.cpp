@@ -226,6 +226,12 @@ void BrowserWindow::DropTabAuthentications(int64 tab)
         BWebKitView::AnswerPasskeyRequest(request.identifier, -1);
         return true;
     });
+    std::erase_if(fConditionalPasskeys, [&](const ConditionalPasskeys& request) {
+        if (request.tab != tab) return false;
+        ClosePasskeyAutofill();
+        BWebKitView::AnswerPasskeyRequest(request.identifier, -1);
+        return true;
+    });
 }
 
 // A page's WebAuthn request reached Summit's own authenticator: create a
@@ -237,8 +243,12 @@ void BrowserWindow::PasskeyRequested(const BMessage& message)
     const uint64 identifier = message.GetUInt64("identifier", 0);
     if (!identifier) return;
     if (message.GetBool("withdrawn", false)) {
-        // The page aborted the request, closed, or it timed out.
+        // The page aborted the request, went to another document or closed,
+        // or it timed out.
+        std::fprintf(stderr, "Summit: passkey request %llu withdrawn\n", static_cast<unsigned long long>(identifier));
         std::erase_if(fPasskeyRequests, [&](const PasskeyRequest& request) { return request.identifier == identifier; });
+        std::erase_if(fConditionalPasskeys, [&](const ConditionalPasskeys& request) { return request.identifier == identifier; });
+        ClosePasskeyAutofill();
         if (fPasskeyShown == identifier && fPasskeyPrompt.IsValid()) {
             BMessage close(B_QUIT_REQUESTED);
             fPasskeyPrompt.SendMessage(&close);
@@ -252,6 +262,22 @@ void BrowserWindow::PasskeyRequested(const BMessage& message)
         return;
     }
     const bool create = message.GetBool("create", false);
+    if (!create && message.GetBool("conditional", false)) {
+        // Offered in the sign-in field's native menu, not a sheet; the page
+        // keeps waiting until a passkey is chosen there.
+        ConditionalPasskeys request;
+        request.identifier = identifier;
+        request.tab = tab->id;
+        request.site = message.GetString("rp_id", "");
+        const char* name = nullptr;
+        for (int32 i = 0; message.FindString("account_name", i, &name) == B_OK; ++i)
+            request.accounts.emplace_back(name, message.GetString("account_display_name", i, ""));
+        std::fprintf(stderr, "Summit: %s offers %zu passkey%s for %s in its sign-in field (request %llu)\n",
+            message.GetString("origin", ""), request.accounts.size(), request.accounts.size() == 1 ? "" : "s",
+            request.site.c_str(), static_cast<unsigned long long>(identifier));
+        fConditionalPasskeys.push_back(std::move(request));
+        return;
+    }
     std::fprintf(stderr, "Summit: %s asks %s a passkey for %s (request %llu)\n", message.GetString("origin", ""),
         create ? "to create" : "for", message.GetString("rp_id", ""), static_cast<unsigned long long>(identifier));
     fPasskeyRequests.push_back({identifier, tab->id, message});
@@ -313,6 +339,82 @@ void BrowserWindow::PasskeyAnswered(const BMessage& message)
         fPasskeyRequests.erase(found);
     }
     ShowPasskeyPrompt();
+}
+
+// The user went into a sign-in field marked for passkeys (autocomplete
+// "webauthn") on a page whose conditional get() waits: its passkeys open in a
+// native menu under the field. The page only says where the field is; the
+// choice is made in the menu, which a page cannot reach.
+void BrowserWindow::PasskeyFieldEntered(Tab& tab, BRect field, double pageWidth)
+{
+    if (tab.id != fSelected || !tab.view || !field.IsValid() || pageWidth <= 0) return;
+    auto found = std::find_if(fConditionalPasskeys.rbegin(), fConditionalPasskeys.rend(),
+        [&](const ConditionalPasskeys& request) { return request.tab == tab.id; });
+    if (found == fConditionalPasskeys.rend() || found->accounts.empty()) return;
+    // CSS pixels to the view's: page zoom and the display's scale both.
+    const float scale = tab.view->Bounds().Width() / pageWidth;
+    BPoint where(field.left * scale, field.bottom * scale + 2);
+    where.x = std::clamp(where.x, 0.0f, tab.view->Bounds().right);
+    where.y = std::clamp(where.y, 0.0f, tab.view->Bounds().bottom);
+    where = tab.view->ConvertToScreen(where);
+    ClosePasskeyAutofill();
+    auto* list = new PasskeyAutofill(where, found->identifier, found->accounts, BMessenger(this));
+    if (list->AddToSubset(this) != B_OK) {
+        list->Quit();
+        return;
+    }
+    fPasskeyAutofill = BMessenger(list);
+    std::fprintf(stderr, "Summit: passkey autofill for %s with %zu passkey%s (request %llu)\n", found->site.c_str(),
+        found->accounts.size(), found->accounts.size() == 1 ? "" : "s", static_cast<unsigned long long>(found->identifier));
+    list->Show();
+}
+
+void BrowserWindow::ClosePasskeyAutofill()
+{
+    if (fPasskeyAutofill.IsValid()) fPasskeyAutofill.SendMessage(B_QUIT_REQUESTED);
+    fPasskeyAutofill = BMessenger();
+}
+
+void BrowserWindow::ConditionalPasskeyChosen(const BMessage& message)
+{
+    uint64 identifier = message.GetUInt64("identifier", 0);
+    if (!identifier) identifier = static_cast<uint64>(message.GetInt64("identifier", 0));
+    const int32 account = message.GetInt32("account", -1);
+    auto found = std::find_if(fConditionalPasskeys.begin(), fConditionalPasskeys.end(),
+        [&](const ConditionalPasskeys& request) { return request.identifier == identifier; });
+    if (found == fConditionalPasskeys.end() || account < 0 || account >= static_cast<int32>(found->accounts.size())) return;
+    std::fprintf(stderr, "Summit: passkey %d chosen in the sign-in field (request %llu)\n", static_cast<int>(account),
+        static_cast<unsigned long long>(identifier));
+    BWebKitView::AnswerPasskeyRequest(identifier, account);
+    fConditionalPasskeys.erase(found);
+    ClosePasskeyAutofill();
+}
+
+void BrowserWindow::PasskeysChanged(const BMessage& message)
+{
+    BMessenger view;
+    auto* tab = message.FindMessenger("view", &view) == B_OK ? FindTab(view) : nullptr;
+    const std::string site = message.GetString("rp_id", "");
+    std::vector<std::string> parts;
+    auto count = [&](const char* field, const char* verb) {
+        const int32 number = message.GetInt32(field, 0);
+        if (number > 0) parts.push_back(std::string(verb) + " " + std::to_string(number) + (number == 1 ? " passkey" : " passkeys"));
+    };
+    // Hidden: the site no longer accepts them; they come back if it lists
+    // them again.
+    count("removed", "removed");
+    count("hidden", "hid");
+    count("restored", "showed again");
+    count("renamed", "renamed the account of");
+    if (parts.empty()) return;
+    std::string notice = "The site " + site;
+    for (size_t i = 0; i < parts.size(); ++i) notice += (i ? ", " : " ") + parts[i];
+    notice += " (Preferences › Browsing › Passwords).";
+    std::fprintf(stderr, "Summit: %s\n", notice.c_str());
+    if (!tab) return;
+    tab->notice = notice;
+    tab->noticeUntil = system_time() + 15 * 1000000LL;
+    if (tab->id == fSelected) ShowTabStatus(*tab);
 }
 }
 #endif
