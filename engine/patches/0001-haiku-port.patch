@@ -84098,10 +84098,10 @@ index e1e00f448cdfe28b28e6ac184bdb9025666411de..bbe23d2c25f24c8c9031515e563fee8b
  
  [Nested] enum class WebKit::WebExtension::InjectionTime : uint8_t {
 diff --git a/Source/WebKit/Shared/Extensions/WebExtensionEventListenerType.h b/Source/WebKit/Shared/Extensions/WebExtensionEventListenerType.h
-index c6ffb3e89eeaffe26af5d76690da641e7b65c4c0..d67b42cd3f185a120392f0e6da499ddfb9194235 100644
+index c6ffb3e89eeaffe26af5d76690da641e7b65c4c0..6d3ffc3886a7cee0d66ffb761391c0b80260991f 100644
 --- a/Source/WebKit/Shared/Extensions/WebExtensionEventListenerType.h
 +++ b/Source/WebKit/Shared/Extensions/WebExtensionEventListenerType.h
-@@ -99,11 +99,105 @@ enum class WebExtensionEventListenerType : uint8_t {
+@@ -99,11 +99,110 @@ enum class WebExtensionEventListenerType : uint8_t {
      WindowsOnCreated,
      WindowsOnFocusChanged,
      WindowsOnRemoved,
@@ -84136,6 +84136,9 @@ index c6ffb3e89eeaffe26af5d76690da641e7b65c4c0..d67b42cd3f185a120392f0e6da499ddf
 +    TabGroupsOnUpdated,
 +    TabGroupsOnRemoved,
 +    TabGroupsOnMoved,
++    // declarativeNetRequest.onRuleMatchedDebug without Cocoa's
++    // DNR_ON_RULE_MATCHED_DEBUG (whose value sits mid-enum).
++    DeclarativeNetRequestOnRuleMatchedDebugHaiku,
 +#endif
  };
  
@@ -84203,15 +84206,17 @@ index c6ffb3e89eeaffe26af5d76690da641e7b65c4c0..d67b42cd3f185a120392f0e6da499ddf
 +        return "onRemoved"_s;
 +    case WebExtensionEventListenerType::TabGroupsOnMoved:
 +        return "onMoved"_s;
++    case WebExtensionEventListenerType::DeclarativeNetRequestOnRuleMatchedDebugHaiku:
++        return "onRuleMatchedDebug"_s;
 +#endif
      case WebExtensionEventListenerType::Unknown:
          return nullString();
      case WebExtensionEventListenerType::ActionOnClicked:
 diff --git a/Source/WebKit/Shared/Extensions/WebExtensionEventListenerType.serialization.in b/Source/WebKit/Shared/Extensions/WebExtensionEventListenerType.serialization.in
-index 66271809620c823d465be4cee34c1806ab422cbe..e1be2e71e75ee7d1c34a95f30ce4c58079e9c47f 100644
+index 66271809620c823d465be4cee34c1806ab422cbe..ae7e658757010f4b9e8b8699437ea0216a27036f 100644
 --- a/Source/WebKit/Shared/Extensions/WebExtensionEventListenerType.serialization.in
 +++ b/Source/WebKit/Shared/Extensions/WebExtensionEventListenerType.serialization.in
-@@ -90,6 +90,38 @@ enum class WebKit::WebExtensionEventListenerType : uint8_t {
+@@ -90,6 +90,39 @@ enum class WebKit::WebExtensionEventListenerType : uint8_t {
      WindowsOnCreated,
      WindowsOnFocusChanged,
      WindowsOnRemoved,
@@ -84246,6 +84251,7 @@ index 66271809620c823d465be4cee34c1806ab422cbe..e1be2e71e75ee7d1c34a95f30ce4c580
 +    TabGroupsOnUpdated,
 +    TabGroupsOnRemoved,
 +    TabGroupsOnMoved,
++    DeclarativeNetRequestOnRuleMatchedDebugHaiku,
 +#endif
  };
  
@@ -96245,10 +96251,10 @@ index e317863095c8bd9d804cfa22e8d9a1aa7e420d0d..d57f6bc2951e88f5275912b760913a32
  }
 diff --git a/Source/WebKit/UIProcess/Extensions/API/WebExtensionContextAPIEvent.cpp b/Source/WebKit/UIProcess/Extensions/API/WebExtensionContextAPIEvent.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..063b88f1c58b2e628a568392d5bd1a5d81158e83
+index 0000000000000000000000000000000000000000..51b6fa417318f5f05f5ae2dc7e793fd5b42ad561
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/API/WebExtensionContextAPIEvent.cpp
-@@ -0,0 +1,322 @@
+@@ -0,0 +1,332 @@
 +/*
 + * Copyright (C) 2022-2024 Apple Inc. All rights reserved.
 + *
@@ -96313,6 +96319,16 @@ index 0000000000000000000000000000000000000000..063b88f1c58b2e628a568392d5bd1a5d
 +
 +    auto result = m_eventListenerFrames.add({ listenerType, contentWorldType }, WeakFrameCountedSet { });
 +    result.iterator->value.add(*frame);
++
++#if PLATFORM(HAIKU)
++    // onRuleMatchedDebug needs the rules compiled again to report their
++    // matches (WebExtensionContextDeclarativeNetRequestHaiku.cpp).
++    if (listenerType == WebExtensionEventListenerType::DeclarativeNetRequestOnRuleMatchedDebugHaiku && !m_declarativeNetRequestReportsMatchesHaiku
++        && hasPermission(WebExtensionPermission::declarativeNetRequestFeedback())) {
++        m_declarativeNetRequestReportsMatchesHaiku = true;
++        loadDeclarativeNetRequestRules([](bool) { });
++    }
++#endif
 +
 +    if (!isTestEventListener(listenerType))
 +        return;
@@ -105432,7 +105448,7 @@ index 0000000000000000000000000000000000000000..1abaf938599f4601a4f1a53999fffe84
 +#endif // PLATFORM(HAIKU)
 diff --git a/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionBackgroundListenersHaiku.h b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionBackgroundListenersHaiku.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..2f71885a2c8f6e4819dd9431a5848905267b3947
+index 0000000000000000000000000000000000000000..9a15cd596c4e4231204a1f5dba1368aca91526d4
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionBackgroundListenersHaiku.h
 @@ -0,0 +1,106 @@
@@ -105475,8 +105491,8 @@ index 0000000000000000000000000000000000000000..2f71885a2c8f6e4819dd9431a5848905
 +
 +inline constexpr auto backgroundContentEventListenersKeyHaiku = "BackgroundContentEventListeners"_s;
 +inline constexpr auto backgroundContentEventListenersVersionKeyHaiku = "BackgroundContentEventListenersVersion"_s;
-+// Refresh listeners after integrating the upstream notification events.
-+inline constexpr unsigned currentBackgroundContentListenerStateVersionHaiku = 7;
++// Refresh listeners after adding an event (8: declarativeNetRequest.onRuleMatchedDebug).
++inline constexpr unsigned currentBackgroundContentListenerStateVersionHaiku = 8;
 +
 +using BackgroundListenerCountsHaiku = HashCountedSet<WebExtensionEventListenerType>;
 +
@@ -106763,10 +106779,10 @@ index 0000000000000000000000000000000000000000..3998cffe6e607ec3c376ccce7afd9b94
 +#endif
 diff --git a/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextAPIDeclarativeNetRequestHaiku.cpp b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextAPIDeclarativeNetRequestHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..0e0f056add4c510960c4b6cc1ffa54b694666867
+index 0000000000000000000000000000000000000000..6b9a2302f78c0666b1662eaefb3c8744fb17e842
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextAPIDeclarativeNetRequestHaiku.cpp
-@@ -0,0 +1,415 @@
+@@ -0,0 +1,490 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +#include "config.h"
 +#include "WebExtensionContext.h"
@@ -106785,6 +106801,12 @@ index 0000000000000000000000000000000000000000..0e0f056add4c510960c4b6cc1ffa54b6
 +#include "WebExtensionDeclarativeNetRequestRulesHaiku.h"
 +#include "WebExtensionPermission.h"
 +#include "WebExtensionUtilities.h"
++#include "WebExtensionContextProxyMessages.h"
++#include "WebExtensionEventListenerType.h"
++#include "WebFrameProxy.h"
++#include "WebPageProxy.h"
++#include "WebProcessProxy.h"
++#include <WebCore/SecurityOriginData.h>
 +#include <wtf/text/MakeString.h>
 +
 +// C++ counterpart of Cocoa/API/WebExtensionContextAPIDeclarativeNetRequestCocoa.mm
@@ -106946,6 +106968,62 @@ index 0000000000000000000000000000000000000000..0e0f056add4c510960c4b6cc1ffa54b6
 +static constexpr Seconds declarativeNetRequestMatchLifetime = 5_min;
 +static constexpr size_t maximumDeclarativeNetRequestMatches = 10000;
 +
++// Chrome's MatchedRuleInfoDebug for one of WebCore's reports. WebCore
++// numbers frames as the extension APIs do (0 for the main frame), except that
++// a subframe's parent is the main frame's own identifier; and its initiator is
++// the frame's registrable domain, where Chrome gives the frame's origin.
++static String ruleMatchedDebugInfoHaiku(WebPageProxyIdentifier pageIdentifier, WebExtensionTab& tab, const WebCore::ContentRuleListMatchedRule& matchedRule)
++{
++    auto& info = matchedRule.request;
++    RefPtr page = WebProcessProxy::webPage(pageIdentifier);
++    RefPtr mainFrame = page ? page->mainFrame() : nullptr;
++    auto frameForIdentifier = [&](double identifier) -> RefPtr<WebFrameProxy> {
++        if (!identifier)
++            return mainFrame;
++        if (identifier < 0 || identifier != std::trunc(identifier) || !WebCore::FrameIdentifier::isValidIdentifier(static_cast<uint64_t>(identifier)))
++            return nullptr;
++        return WebFrameProxy::webFrame(WebCore::FrameIdentifier { static_cast<uint64_t>(identifier) });
++    };
++
++    double parentFrameIdentifier = info.parentFrameId;
++    if (mainFrame && parentFrameIdentifier > 0 && parentFrameIdentifier == static_cast<double>(mainFrame->frameID().toUInt64()))
++        parentFrameIdentifier = 0;
++
++    Ref request = JSON::Object::create();
++    request->setDouble("frameId"_s, info.frameId);
++    request->setDouble("parentFrameId"_s, parentFrameIdentifier);
++    request->setString("method"_s, info.method.convertToASCIILowercase());
++    request->setString("requestId"_s, info.requestId);
++    request->setDouble("tabId"_s, toWebAPI(tab.identifier()));
++    request->setString("type"_s, info.type);
++    request->setString("url"_s, info.url);
++    if (info.initiator) {
++        // A document load is started by the frame's parent (or, for the main
++        // frame, the page it replaces); other loads by the frame itself.
++        bool isDocument = info.type == "main_frame"_s || info.type == "sub_frame"_s;
++        RefPtr frame = frameForIdentifier(isDocument && info.type == "sub_frame"_s ? info.parentFrameId : info.frameId);
++        auto origin = frame ? WebCore::SecurityOriginData::fromURL(frame->url()) : WebCore::SecurityOriginData { };
++        request->setString("initiator"_s, !origin.isNull() && !origin.isOpaque() ? origin.toString() : *info.initiator);
++    }
++    if (info.documentId)
++        request->setString("documentId"_s, *info.documentId);
++    if (info.documentLifecycle)
++        request->setString("documentLifecycle"_s, *info.documentLifecycle);
++    if (info.frameType)
++        request->setString("frameType"_s, *info.frameType);
++    if (info.parentDocumentId)
++        request->setString("parentDocumentId"_s, *info.parentDocumentId);
++
++    Ref rule = JSON::Object::create();
++    rule->setDouble("ruleId"_s, matchedRule.rule.ruleId);
++    rule->setString("rulesetId"_s, matchedRule.rule.rulesetId);
++
++    Ref result = JSON::Object::create();
++    result->setObject("request"_s, WTF::move(request));
++    result->setObject("rule"_s, WTF::move(rule));
++    return result->toJSONString();
++}
++
 +void WebExtensionController::declarativeNetRequestRuleMatchedHaiku(WebPageProxyIdentifier pageIdentifier, const WebCore::ContentRuleListMatchedRule& matchedRule)
 +{
 +    // The rule list's identifier is the extension's unique identifier.
@@ -106956,8 +107034,21 @@ index 0000000000000000000000000000000000000000..0e0f056add4c510960c4b6cc1ffa54b6
 +        if (context->uniqueIdentifier() != *extensionIdentifier)
 +            continue;
 +        // Not in a tab the extension cannot see (a private window it is not allowed in).
-+        if (RefPtr tab = context->getTab(pageIdentifier))
-+            context->declarativeNetRequestRuleMatchedHaiku(*tab, matchedRule.rule.ruleId, matchedRule.rule.rulesetId, URL { matchedRule.request.url });
++        RefPtr tab = context->getTab(pageIdentifier);
++        if (!tab)
++            return;
++        context->declarativeNetRequestRuleMatchedHaiku(*tab, matchedRule.rule.ruleId, matchedRule.rule.rulesetId, URL { matchedRule.request.url });
++
++        // onRuleMatchedDebug, for extensions with declarativeNetRequestFeedback
++        // (Chrome: unpacked ones only). The rules report their matches once
++        // a listener was added (WebExtensionContext::addListener).
++        if (!context->hasPermission(WebExtensionPermission::declarativeNetRequestFeedback()))
++            return;
++        auto type = WebExtensionEventListenerType::DeclarativeNetRequestOnRuleMatchedDebugHaiku;
++        auto json = ruleMatchedDebugInfoHaiku(pageIdentifier, *tab, matchedRule);
++        context->wakeUpBackgroundContentIfNecessaryToFireEvents({ type }, [context, type, json = WTF::move(json)] {
++            context->sendToProcessesForEvent(type, Messages::WebExtensionContextProxy::DispatchDeclarativeNetRequestRuleMatchedDebugEventHaiku(json));
++        });
 +        return;
 +    }
 +}
@@ -112973,10 +113064,10 @@ index 0000000000000000000000000000000000000000..7fe0a057f869a7ea735d3118f5242dce
 +#endif // ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
 diff --git a/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextDeclarativeNetRequestHaiku.cpp b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextDeclarativeNetRequestHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..744517398d2c7807c2854bfb7f79c77e21543e12
+index 0000000000000000000000000000000000000000..271b0bb2be0908b0b54423e1f89f0920213f7bae
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextDeclarativeNetRequestHaiku.cpp
-@@ -0,0 +1,427 @@
+@@ -0,0 +1,432 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +#include "config.h"
 +#include "WebExtensionContext.h"
@@ -113283,9 +113374,14 @@ index 0000000000000000000000000000000000000000..744517398d2c7807c2854bfb7f79c77e
 +        }
 +        // Rules that report their matches cannot share WebCore's merged
 +        // actions, so they are tagged only once the extension has asked for
-+        // its matched rules (and may: either permission, as in Chrome).
++        // its matched rules (and may: either permission, as in Chrome), or
++        // listens to onRuleMatchedDebug (feedback only). A non-persistent
++        // background's saved listeners count before it starts again.
++        bool feedback = hasPermission(WebExtensionPermission::declarativeNetRequestFeedback());
++        if (feedback && m_backgroundContentEventListeners.contains(WebExtensionEventListenerType::DeclarativeNetRequestOnRuleMatchedDebugHaiku))
++            m_declarativeNetRequestReportsMatchesHaiku = true;
 +        bool reportMatchedRules = m_declarativeNetRequestReportsMatchesHaiku
-+            && (hasPermission(WebExtensionPermission::declarativeNetRequestFeedback()) || hasPermission(WebExtensionPermission::activeTab()));
++            && (feedback || hasPermission(WebExtensionPermission::activeTab()));
 +        std::optional<Vector<String>> hostAccessPatterns;
 +        if (!hasPermission(WebExtensionPermission::declarativeNetRequest()))
 +            hostAccessPatterns = hostAccessRequestPatterns(*this);
@@ -144298,15 +144394,17 @@ index a6c9a4b3fc592dee39df64fe02694034820a8510..4d7149b78f61d35fa211e33114789a3f
  } // namespace WebKit
 diff --git a/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIDeclarativeNetRequest.cpp b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIDeclarativeNetRequest.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..b8eb79b8383b8f06d529374d0f529d723df9ab83
+index 0000000000000000000000000000000000000000..d4bb3c533b859d6f25aee6017f338c66e9d379d0
 --- /dev/null
 +++ b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIDeclarativeNetRequest.cpp
-@@ -0,0 +1,323 @@
+@@ -0,0 +1,353 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +#include "config.h"
 +#include "WebExtensionAPIDeclarativeNetRequest.h"
 +#if ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
 +#include "MessageSenderInlines.h"
++#include "WebExtensionAPINamespace.h"
++#include "WebExtensionEventListenerType.h"
 +#include "WebExtensionContextMessages.h"
 +#include "WebExtensionContextProxy.h"
 +#include "WebExtensionUtilities.h"
@@ -144622,22 +144720,53 @@ index 0000000000000000000000000000000000000000..b8eb79b8383b8f06d529374d0f529d72
 +    }, extensionContext().identifier());
 +}
 +
++// Chrome's onRuleMatchedDebug: only for extensions with the
++// declarativeNetRequestFeedback permission. Chrome further limits it to
++// unpacked extensions; Summit has no such distinction for this permission.
++bool WebExtensionAPIDeclarativeNetRequest::isPropertyAllowed(const ASCIILiteral& name, WebPage*)
++{
++    Ref context = extensionContext();
++    if (context->isUnsupportedAPI(propertyPath(), name)) [[unlikely]]
++        return false;
++    if (name == "onRuleMatchedDebug"_s)
++        return context->hasPermission("declarativeNetRequestFeedback"_s);
++    return true;
++}
++
++WebExtensionAPIEvent& WebExtensionAPIDeclarativeNetRequest::onRuleMatchedDebug()
++{
++    if (!m_onRuleMatchedDebug)
++        m_onRuleMatchedDebug = WebExtensionAPIEvent::create(*this, WebExtensionEventListenerType::DeclarativeNetRequestOnRuleMatchedDebugHaiku);
++    return *m_onRuleMatchedDebug;
++}
++
++void WebExtensionContextProxy::dispatchDeclarativeNetRequestRuleMatchedDebugEventHaiku(const String& infoJSON)
++{
++    // infoJSON is Chrome's MatchedRuleInfoDebug ({request, rule}).
++    enumerateNamespaceObjects([&](auto& namespaceObject) {
++        namespaceObject.declarativeNetRequest().onRuleMatchedDebug().invokeListenersWithJSONArguments({ infoJSON });
++    });
++}
++
 +} // namespace WebKit
 +
 +#endif // ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
 diff --git a/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIDeclarativeNetRequest.h b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIDeclarativeNetRequest.h
-index a6dd4d40c24fd042e8a76a249cae9ff862f06dbf..6faac3eab57c476505d44c4c3432d0339b1dc270 100644
+index a6dd4d40c24fd042e8a76a249cae9ff862f06dbf..c29bbc5c17edd3504cbb9648c077854cc08f31b3 100644
 --- a/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIDeclarativeNetRequest.h
 +++ b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIDeclarativeNetRequest.h
-@@ -30,6 +30,7 @@
+@@ -30,8 +30,9 @@
  #include "JSWebExtensionAPIDeclarativeNetRequest.h"
  #include "WebExtensionAPIObject.h"
  #include "WebExtensionConstants.h"
 +#include <wtf/JSONValues.h>
  
- #if ENABLE(DNR_ON_RULE_MATCHED_DEBUG)
+-#if ENABLE(DNR_ON_RULE_MATCHED_DEBUG)
++#if ENABLE(DNR_ON_RULE_MATCHED_DEBUG) || PLATFORM(HAIKU)
  #include "WebExtensionAPIEvent.h"
-@@ -43,6 +44,42 @@ class WebExtensionAPIDeclarativeNetRequest : public WebExtensionAPIObject, publi
+ #endif
+ 
+@@ -43,6 +44,47 @@ class WebExtensionAPIDeclarativeNetRequest : public WebExtensionAPIObject, publi
      WEB_EXTENSION_DECLARE_JS_WRAPPER_CLASS(WebExtensionAPIDeclarativeNetRequest, declarativeNetRequest, declarativeNetRequest);
  
  public:
@@ -144670,7 +144799,12 @@ index a6dd4d40c24fd042e8a76a249cae9ff862f06dbf..6faac3eab57c476505d44c4c3432d033
 +    String dynamicRulesetIdentifier() const { return "_dynamic"_s; }
 +    String sessionRulesetIdentifier() const { return "_session"_s; }
 +
++    bool isPropertyAllowed(const ASCIILiteral& propertyName, WebPage*);
++    WebExtensionAPIEvent& onRuleMatchedDebug();
++
 +private:
++    RefPtr<WebExtensionAPIEvent> m_onRuleMatchedDebug;
++
 +    void updateRules(bool session, RefPtr<JSON::Value> options, Ref<WebExtensionCallbackHandler>&&, String& outExceptionString);
 +    void getRules(bool session, RefPtr<JSON::Value> filter, Ref<WebExtensionCallbackHandler>&&, String& outExceptionString);
 +
@@ -156789,10 +156923,10 @@ index 47269bffaea122d173c5b7095608c14e20fb3e01..e83f75ff9eb5cf9764e67f6936832b18
      void getAllCookieStores([Optional, CallbackHandler] function callback);
  
 diff --git a/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPIDeclarativeNetRequest.idl b/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPIDeclarativeNetRequest.idl
-index c5c670a8a637222faa2bc0d1313ac4f8d9063550..1888fc594307bc442039c1460b792f3dcb64a57d 100644
+index c5c670a8a637222faa2bc0d1313ac4f8d9063550..feab554584e20d45f0fa7e289031635799a60c68 100644
 --- a/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPIDeclarativeNetRequest.idl
 +++ b/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPIDeclarativeNetRequest.idl
-@@ -47,21 +47,26 @@ dictionary WebExtensionDNRTabUpdateOptions {
+@@ -47,28 +47,43 @@ dictionary WebExtensionDNRTabUpdateOptions {
      Conditional=WK_WEB_EXTENSIONS,
      MainWorldOnly,
      ReturnsPromiseWhenCallbackIsOmitted,
@@ -156822,12 +156956,15 @@ index c5c670a8a637222faa2bc0d1313ac4f8d9063550..1888fc594307bc442039c1460b792f3d
 -    [RaisesException] void setExtensionActionOptions([NSDictionary] any options, [Optional, CallbackHandler] function callback);
 +    [RaisesStringException] void isRegexSupported([JSONValue] any regexOptions, [Optional, CallbackHandler] function callback);
 +    [RaisesStringException] void setExtensionActionOptions([JSONValue] any options, [Optional, CallbackHandler] function callback);
-+
+ 
+-    [Dynamic, Conditional=DNR_ON_RULE_MATCHED_DEBUG] readonly attribute WebExtensionAPIEvent onRuleMatchedDebug;
 +    [Platform=HAIKU] void getAvailableStaticRuleCount([Optional, CallbackHandler] function callback);
++
++    [Dynamic, Platform=COCOA, Conditional=DNR_ON_RULE_MATCHED_DEBUG] readonly attribute WebExtensionAPIEvent onRuleMatchedDebug;
++    // Only with declarativeNetRequestFeedback, as in Chrome.
++    [Dynamic, Platform=HAIKU] readonly attribute WebExtensionAPIEvent onRuleMatchedDebug;
  
-     [Dynamic, Conditional=DNR_ON_RULE_MATCHED_DEBUG] readonly attribute WebExtensionAPIEvent onRuleMatchedDebug;
- 
-@@ -69,6 +74,14 @@ dictionary WebExtensionDNRTabUpdateOptions {
+     [ImplementedAs=maxNumberOfStaticRulesets] readonly attribute double MAX_NUMBER_OF_STATIC_RULESETS;
      [ImplementedAs=maxNumberOfEnabledRulesets] readonly attribute double MAX_NUMBER_OF_ENABLED_STATIC_RULESETS;
      [ImplementedAs=maxNumberOfDynamicAndSessionRules] readonly attribute double MAX_NUMBER_OF_DYNAMIC_AND_SESSION_RULES;
  
@@ -158106,7 +158243,7 @@ index 2b2ff5395e73b7978dc8b610d62ffe835fc1a886..443a5b3005437f3a7ec05ce7b4eca60d
  
  #endif // ENABLE(WK_WEB_EXTENSIONS)
 diff --git a/Source/WebKit/WebProcess/Extensions/WebExtensionContextProxy.h b/Source/WebKit/WebProcess/Extensions/WebExtensionContextProxy.h
-index d6d7467a810b4fa585e99e9ad58711f17a7084bf..0e9af1cee81eb2d12e6f2dbec33e08e863d03392 100644
+index d6d7467a810b4fa585e99e9ad58711f17a7084bf..3aa165e25547aecbec8eb4734d674e8894e4d2b1 100644
 --- a/Source/WebKit/WebProcess/Extensions/WebExtensionContextProxy.h
 +++ b/Source/WebKit/WebProcess/Extensions/WebExtensionContextProxy.h
 @@ -41,9 +41,12 @@
@@ -158206,7 +158343,7 @@ index d6d7467a810b4fa585e99e9ad58711f17a7084bf..0e9af1cee81eb2d12e6f2dbec33e08e8
      void internalDispatchRuntimeConnectEvent(WebExtensionContentWorldType, WebExtensionPortChannelIdentifier, const String& name, const std::optional<WebExtensionMessageTargetParameters>&, const WebExtensionMessageSenderParameters&, bool userGesture, CompletionHandler<void(HashCountedSet<WebPageProxyIdentifier>&&)>&&);
      void dispatchRuntimeMessageEvent(WebExtensionContentWorldType, const String& messageJSON, const std::optional<WebExtensionMessageTargetParameters>&, const WebExtensionMessageSenderParameters&, bool userGesture, CompletionHandler<void(String&& replyJSON)>&&);
      void dispatchRuntimeConnectEvent(WebExtensionContentWorldType, WebExtensionPortChannelIdentifier, const String& name, const std::optional<WebExtensionMessageTargetParameters>&, const WebExtensionMessageSenderParameters&, bool userGesture, CompletionHandler<void(HashCountedSet<WebPageProxyIdentifier>&&)>&&);
-@@ -229,8 +269,19 @@ private:
+@@ -229,8 +269,20 @@ private:
      void dispatchStorageChangedEvent(const Vector<String>& onChangedJSON, WebExtensionDataType, WebExtensionContentWorldType);
  
      // Tabs
@@ -158222,11 +158359,12 @@ index d6d7467a810b4fa585e99e9ad58711f17a7084bf..0e9af1cee81eb2d12e6f2dbec33e08e8
 +    void dispatchSessionsChangedEventHaiku();
 +    void dispatchMenusShownEventHaiku(const String& infoJSON, const std::optional<WebExtensionTabParameters>&);
 +    void dispatchMenusHiddenEventHaiku();
++    void dispatchDeclarativeNetRequestRuleMatchedDebugEventHaiku(const String& infoJSON);
 +#endif
      void dispatchTabsReplacedEvent(WebExtensionTabIdentifier replacedTabIdentifier, WebExtensionTabIdentifier newTabIdentifier);
      void dispatchTabsDetachedEvent(WebExtensionTabIdentifier, WebExtensionWindowIdentifier oldWindowIdentifier, uint64_t oldIndex);
      void dispatchTabsMovedEvent(WebExtensionTabIdentifier, WebExtensionWindowIdentifier, uint64_t oldIndex, uint64_t newIndex);
-@@ -246,14 +297,22 @@ private:
+@@ -246,14 +298,22 @@ private:
  
      // Web Navigation
      void dispatchWebNavigationEvent(WebExtensionEventListenerType, WebExtensionTabIdentifier, const WebExtensionFrameParameters&, WallTime);
@@ -158255,7 +158393,7 @@ index d6d7467a810b4fa585e99e9ad58711f17a7084bf..0e9af1cee81eb2d12e6f2dbec33e08e8
  
      // Windows
      void dispatchWindowsEvent(WebExtensionEventListenerType, const std::optional<WebExtensionWindowParameters>&);
-@@ -275,8 +334,17 @@ private:
+@@ -275,8 +335,17 @@ private:
      mutable PermissionsMap m_grantedPermissions;
      mutable WallTime m_nextGrantedPermissionsExpirationDate { WallTime::nan() };
      RefPtr<WebCore::DOMWrapperWorld> m_contentScriptWorld;
@@ -158274,7 +158412,7 @@ index d6d7467a810b4fa585e99e9ad58711f17a7084bf..0e9af1cee81eb2d12e6f2dbec33e08e8
      WeakPtr<WebPage> m_offscreenPage;
  #endif
 diff --git a/Source/WebKit/WebProcess/Extensions/WebExtensionContextProxy.messages.in b/Source/WebKit/WebProcess/Extensions/WebExtensionContextProxy.messages.in
-index 6ffe6eabe189601f01839e2fe9d4ae0e2850b0b3..e0a83afcc1dde31111191e490fcca8521fa8324b 100644
+index 6ffe6eabe189601f01839e2fe9d4ae0e2850b0b3..8ab6290c3ae1cfc9907be5d0765b5c1333170897 100644
 --- a/Source/WebKit/WebProcess/Extensions/WebExtensionContextProxy.messages.in
 +++ b/Source/WebKit/WebProcess/Extensions/WebExtensionContextProxy.messages.in
 @@ -41,7 +41,12 @@ messages -> WebExtensionContextProxy {
@@ -158328,7 +158466,7 @@ index 6ffe6eabe189601f01839e2fe9d4ae0e2850b0b3..e0a83afcc1dde31111191e490fcca852
      DispatchRuntimeConnectEvent(WebKit::WebExtensionContentWorldType contentWorldType, WebKit::WebExtensionPortChannelIdentifier channelIdentifier, String name, struct std::optional<WebKit::WebExtensionMessageTargetParameters> targetParameters, struct WebKit::WebExtensionMessageSenderParameters senderParameters, bool userGesture) -> (HashCountedSet<WebKit::WebPageProxyIdentifier> addedPortCounts)
      DispatchRuntimeInstalledEvent(enum:uint8_t WebKit::WebExtensionContextInstallReason installReason, String previousVersion)
      DispatchRuntimeStartupEvent()
-@@ -99,6 +122,14 @@ messages -> WebExtensionContextProxy {
+@@ -99,6 +122,15 @@ messages -> WebExtensionContextProxy {
      // Tabs Events
      DispatchTabsCreatedEvent(WebKit::WebExtensionTabParameters tabParameters)
      DispatchTabsUpdatedEvent(WebKit::WebExtensionTabParameters tabParameters, WebKit::WebExtensionTabParameters changedParameters)
@@ -158339,11 +158477,12 @@ index 6ffe6eabe189601f01839e2fe9d4ae0e2850b0b3..e0a83afcc1dde31111191e490fcca852
 +    DispatchSessionsChangedEventHaiku()
 +    DispatchMenusShownEventHaiku(String infoJSON, std::optional<WebKit::WebExtensionTabParameters> tab)
 +    DispatchMenusHiddenEventHaiku()
++    DispatchDeclarativeNetRequestRuleMatchedDebugEventHaiku(String infoJSON)
 +#endif
      DispatchTabsReplacedEvent(WebKit::WebExtensionTabIdentifier replacedTabIdentifier, WebKit::WebExtensionTabIdentifier newTabIdentifier)
      DispatchTabsDetachedEvent(WebKit::WebExtensionTabIdentifier tabIdentifier, WebKit::WebExtensionWindowIdentifier oldWindowIdentifier, uint64_t oldIndex)
      DispatchTabsMovedEvent(WebKit::WebExtensionTabIdentifier tabIdentifier, WebKit::WebExtensionWindowIdentifier windowIdentifier, uint64_t oldIndex, uint64_t newIndex)
-@@ -114,14 +145,20 @@ messages -> WebExtensionContextProxy {
+@@ -114,14 +146,20 @@ messages -> WebExtensionContextProxy {
  
      // Web Navigation
      DispatchWebNavigationEvent(WebKit::WebExtensionEventListenerType type, WebKit::WebExtensionTabIdentifier tabID, struct WebKit::WebExtensionFrameParameters frameParamaters, WallTime timestamp)
@@ -158371,10 +158510,10 @@ index 6ffe6eabe189601f01839e2fe9d4ae0e2850b0b3..e0a83afcc1dde31111191e490fcca852
      // Windows
      DispatchWindowsEvent(WebKit::WebExtensionEventListenerType type, std::optional<WebKit::WebExtensionWindowParameters> windowParameters)
 diff --git a/Source/WebKit/WebProcess/Extensions/WebExtensionControllerProxy.cpp b/Source/WebKit/WebProcess/Extensions/WebExtensionControllerProxy.cpp
-index 83216ed3967b6cdc9fa10e8588406734a4be6426..c9cc88681b3813584fbc5bbdd6f8a244ce880a18 100644
+index 83216ed3967b6cdc9fa10e8588406734a4be6426..0d2f8ea74970156eb226940632674f0d121bddd4 100644
 --- a/Source/WebKit/WebProcess/Extensions/WebExtensionControllerProxy.cpp
 +++ b/Source/WebKit/WebProcess/Extensions/WebExtensionControllerProxy.cpp
-@@ -28,11 +28,27 @@
+@@ -28,11 +28,44 @@
  
  #if ENABLE(WK_WEB_EXTENSIONS)
  
@@ -158396,13 +158535,30 @@ index 83216ed3967b6cdc9fa10e8588406734a4be6426..c9cc88681b3813584fbc5bbdd6f8a244
 +#if PLATFORM(HAIKU)
 +#include <JavaScriptCore/JSCInlines.h>
 +#include <JavaScriptCore/TopExceptionScope.h>
++#include <JavaScriptCore/Error.h>
++#include <JavaScriptCore/JSArray.h>
++#include <JavaScriptCore/JSNativeStdFunction.h>
++#include <JavaScriptCore/JSPromise.h>
++#include <JavaScriptCore/ObjectConstructor.h>
++#include <JavaScriptCore/PropertyNameArray.h>
++#include <WebCore/DocumentInlines.h>
++#include <WebCore/FrameDestructionObserverInlines.h>
++#include <WebCore/JSDOMExceptionHandling.h>
++#include <WebCore/JSDOMWindow.h>
++#include <WebCore/JSNode.h>
++#include <WebCore/JSWindowProxy.h>
++#include <WebCore/LocalDOMWindow.h>
 +#include <WebCore/LocalFrame.h>
++#include <WebCore/NodeDocument.h>
 +#include <WebCore/ScriptController.h>
++#include <WebCore/SerializedScriptValue.h>
++#include <WebCore/WindowProxy.h>
++#include <wtf/text/MakeString.h>
 +#endif
  #include <wtf/HashMap.h>
  #include <wtf/NeverDestroyed.h>
  #include <wtf/TZoneMallocInlines.h>
-@@ -138,12 +154,316 @@ RefPtr<WebExtensionContextProxy> WebExtensionControllerProxy::extensionContext(W
+@@ -138,12 +171,754 @@ RefPtr<WebExtensionContextProxy> WebExtensionControllerProxy::extensionContext(W
  
          auto prefixLength = prefix.length();
          auto uniqueIdentifier = world.name().substring(prefixLength);
@@ -158421,6 +158577,440 @@ index 83216ed3967b6cdc9fa10e8588406734a4be6426..c9cc88681b3813584fbc5bbdd6f8a244
  }
  
 +#if PLATFORM(HAIKU)
++// Firefox's content-script helpers cloneInto(), exportFunction() and
++// createObjectIn() (issue #106). Firefox's content scripts see the page
++// through Xray wrappers, and these move values and functions into the page's
++// compartment. WebKit's content scripts run in an isolated world of the same
++// VM instead: a page-world object can be handed to the extension's world, but
++// an extension-world object must never reach the page, whose code could then
++// walk its constructors into the world that holds browser.*. So:
++// - cloneInto(obj, scope, {cloneFunctions, wrapReflectors}) builds the copy in
++//   the scope's world: the page's for a window, a document or a node (or
++//   wrappedJSObject), else the scope object's own. Plain objects and arrays
++//   are copied here; functions become exported functions with
++//   cloneFunctions, DOM nodes and windows the target world's wrappers with
++//   wrapReflectors; other values go through the structured clone.
++// - exportFunction(fn, scope, {defineAs}) makes a function of the page's
++//   world that calls fn. The page's arguments reach fn as they are (as
++//   through Firefox's waived Xrays), DOM objects as the content script's own
++//   wrappers; fn's result is cloned into the page (a promise settles a page
++//   promise), and an exception reaches the page as a page Error with the
++//   same message.
++// - createObjectIn(scope, {defineAs}) makes an empty object in that world.
++// SUMMIT_FIREFOX_CONTENT_HELPERS=0 leaves them out.
++static bool isInWorldHaiku(JSC::JSObject* object, WebCore::DOMWrapperWorld& world)
++{
++    auto* realm = dynamicDowncast<WebCore::JSDOMGlobalObject>(object->realmMayBeNull());
++    return realm && &realm->world() == &world;
++}
++
++static WebCore::JSDOMGlobalObject* pageGlobalObjectHaiku(WebCore::LocalFrame* frame)
++{
++    return frame ? frame->script().globalObject(WebCore::mainThreadNormalWorldSingleton()) : nullptr;
++}
++
++// Firefox's targetScope stands for a compartment.
++static WebCore::JSDOMGlobalObject* targetGlobalObjectHaiku(JSC::VM& vm, JSC::JSValue scope)
++{
++    if (!scope.isObject())
++        return nullptr;
++    if (auto* window = dynamicDowncast<WebCore::LocalDOMWindow>(WebCore::JSDOMWindow::toWrapped(vm, scope)))
++        return pageGlobalObjectHaiku(window->frame());
++    if (RefPtr node = WebCore::JSNode::toWrapped(vm, scope))
++        return pageGlobalObjectHaiku(node->document().frame());
++    return dynamicDowncast<WebCore::JSDOMGlobalObject>(JSC::asObject(scope)->realmMayBeNull());
++}
++
++// A node or window as the given world's wrapper for it.
++static std::optional<JSC::JSValue> rewrapReflectorHaiku(JSC::VM& vm, JSC::JSValue value, WebCore::JSDOMGlobalObject& target)
++{
++    if (!value.isObject())
++        return std::nullopt;
++    if (RefPtr node = WebCore::JSNode::toWrapped(vm, value))
++        return WebCore::toJS(&target, &target, *node);
++    if (auto* window = WebCore::JSDOMWindow::toWrapped(vm, value)) {
++        RefPtr frame = window->frame();
++        return frame ? WebCore::toJS(&target, frame->windowProxy()) : JSC::jsNull();
++    }
++    return std::nullopt;
++}
++
++static JSC::JSObject* exportFunctionHaiku(JSC::VM&, WebCore::JSDOMGlobalObject& target, JSC::JSObject& function, const String& name);
++
++class CloneIntoHaiku {
++public:
++    CloneIntoHaiku(JSC::JSGlobalObject& source, WebCore::JSDOMGlobalObject& target, bool cloneFunctions, bool wrapReflectors)
++        : m_vm(source.vm())
++        , m_source(source)
++        , m_target(target)
++        , m_cloneFunctions(cloneFunctions)
++        , m_wrapReflectors(wrapReflectors)
++    {
++    }
++
++    JSC::JSValue clone(JSC::JSValue);
++
++private:
++    JSC::JSValue throwDataCloneError(JSC::ThrowScope& scope, ASCIILiteral message)
++    {
++        // Thrown in the caller's world; exported functions turn it into a page Error.
++        JSC::throwException(&m_source, scope, WebCore::createDOMException(&m_source, WebCore::ExceptionCode::DataCloneError, message));
++        return { };
++    }
++
++    JSC::VM& m_vm;
++    JSC::JSGlobalObject& m_source;
++    WebCore::JSDOMGlobalObject& m_target;
++    bool m_cloneFunctions;
++    bool m_wrapReflectors;
++    // Shared and circular references stay shared, as in a structured clone.
++    // The copies are reachable from the root copy, which is on the stack.
++    HashMap<JSC::JSObject*, JSC::JSValue> m_clones;
++};
++
++JSC::JSValue CloneIntoHaiku::clone(JSC::JSValue value)
++{
++    auto scope = DECLARE_THROW_SCOPE(m_vm);
++    if (!value.isObject())
++        return value;
++    if (!m_vm.isSafeToRecurse()) {
++        JSC::throwStackOverflowError(&m_source, scope);
++        return { };
++    }
++    auto* object = JSC::asObject(value);
++    if (auto found = m_clones.find(object); found != m_clones.end())
++        return found->value;
++
++    if (object->isCallable()) {
++        if (!m_cloneFunctions)
++            return throwDataCloneError(scope, "Function object could not be cloned."_s);
++        JSC::JSValue exported = exportFunctionHaiku(m_vm, m_target, *object, String { });
++        m_clones.add(object, exported);
++        return exported;
++    }
++
++    if (auto reflector = rewrapReflectorHaiku(m_vm, value, m_target)) {
++        if (!m_wrapReflectors)
++            return throwDataCloneError(scope, "DOM objects could not be cloned without wrapReflectors."_s);
++        RETURN_IF_EXCEPTION(scope, { });
++        m_clones.add(object, *reflector);
++        return *reflector;
++    }
++
++    if (JSC::isJSArray(object)) {
++        unsigned length = JSC::asArray(object)->length();
++        auto* result = JSC::constructEmptyArray(&m_target, nullptr);
++        RETURN_IF_EXCEPTION(scope, { });
++        m_clones.add(object, result);
++        for (unsigned index = 0; index < length; ++index) {
++            bool has = object->hasProperty(&m_source, index);
++            RETURN_IF_EXCEPTION(scope, { });
++            if (!has)
++                continue;
++            JSC::JSValue element = object->get(&m_source, index);
++            RETURN_IF_EXCEPTION(scope, { });
++            JSC::JSValue copy = clone(element);
++            RETURN_IF_EXCEPTION(scope, { });
++            result->putDirectIndex(&m_target, index, copy);
++            RETURN_IF_EXCEPTION(scope, { });
++        }
++        result->setLength(&m_target, length, true);
++        RETURN_IF_EXCEPTION(scope, { });
++        return result;
++    }
++
++    if (object->inherits<JSC::JSFinalObject>()) {
++        auto* result = JSC::constructEmptyObject(&m_target);
++        m_clones.add(object, result);
++        JSC::PropertyNameArrayBuilder names(m_vm, JSC::PropertyNameMode::Strings, JSC::PrivateSymbolMode::Exclude);
++        object->methodTable()->getOwnPropertyNames(object, &m_source, names, JSC::DontEnumPropertiesMode::Exclude);
++        RETURN_IF_EXCEPTION(scope, { });
++        for (auto& name : names) {
++            JSC::JSValue property = object->get(&m_source, name);
++            RETURN_IF_EXCEPTION(scope, { });
++            JSC::JSValue copy = clone(property);
++            RETURN_IF_EXCEPTION(scope, { });
++            result->putDirectMayBeIndex(&m_target, name, copy);
++            RETURN_IF_EXCEPTION(scope, { });
++        }
++        return result;
++    }
++
++    // Dates, regular expressions, maps, sets, buffers, errors, blobs, files...
++    RefPtr serialized = WebCore::SerializedScriptValue::create(m_source, value, WebCore::SerializationForStorage::No, WebCore::SerializationErrorMode::Throwing, WebCore::SerializationContext::CloneAcrossWorlds);
++    RETURN_IF_EXCEPTION(scope, { });
++    if (!serialized)
++        return throwDataCloneError(scope, "The object could not be cloned."_s);
++    JSC::JSValue result = serialized->deserialize(m_target, &m_target, WebCore::SerializationErrorMode::Throwing);
++    RETURN_IF_EXCEPTION(scope, { });
++    m_clones.add(object, result);
++    return result;
++}
++
++// What the page may see of a value from the extension's world.
++static JSC::JSValue errorForTargetHaiku(JSC::VM& vm, JSC::JSGlobalObject& source, WebCore::JSDOMGlobalObject& target, JSC::JSValue error)
++{
++    if (!error.isObject() || isInWorldHaiku(JSC::asObject(error), target.world()))
++        return error;
++    String message;
++    {
++        auto scope = DECLARE_TOP_EXCEPTION_SCOPE(vm);
++        JSC::JSValue messageValue = JSC::asObject(error)->get(&source, vm.propertyNames->message);
++        if (!scope.exception() && messageValue.isString())
++            message = JSC::asString(messageValue)->value(&source).data;
++        scope.clearException();
++    }
++    return JSC::createError(&target, message.isNull() ? "An exception was thrown"_s : message);
++}
++
++static JSC::JSValue settlePromiseForTargetHaiku(JSC::VM&, JSC::JSGlobalObject& source, WebCore::JSDOMGlobalObject& target, JSC::JSPromise&);
++
++// A value from the extension's world as the page may have it: values already
++// in the page's world as they are, else a clone without functions. Returns
++// the exception (page-safe) through exceptionValue instead of throwing.
++static JSC::JSValue valueForTargetHaiku(JSC::VM& vm, JSC::JSGlobalObject& source, WebCore::JSDOMGlobalObject& target, JSC::JSValue value, JSC::JSValue& exceptionValue)
++{
++    if (!value.isObject() || isInWorldHaiku(JSC::asObject(value), target.world()))
++        return value;
++    if (auto* promise = dynamicDowncast<JSC::JSPromise>(value))
++        return settlePromiseForTargetHaiku(vm, source, target, *promise);
++    auto scope = DECLARE_TOP_EXCEPTION_SCOPE(vm);
++    JSC::JSValue result = CloneIntoHaiku(source, target, false, true).clone(value);
++    if (auto* exception = scope.exception()) {
++        if (vm.isTerminationException(exception))
++            return { };
++        scope.clearException();
++        exceptionValue = errorForTargetHaiku(vm, source, target, exception->value());
++        return { };
++    }
++    return result;
++}
++
++static JSC::JSValue settlePromiseForTargetHaiku(JSC::VM& vm, JSC::JSGlobalObject& source, WebCore::JSDOMGlobalObject& target, JSC::JSPromise& promise)
++{
++    auto* result = JSC::JSPromise::create(vm, target.promiseStructure());
++    auto* sourceGlobal = &source;
++    auto* targetGlobal = &target;
++    auto* onFulfilled = JSC::JSNativeStdFunction::create(vm, &source, 1, String { }, [result, sourceGlobal, targetGlobal](JSC::JSGlobalObject*, JSC::CallFrame* callFrame) {
++        auto& vm = targetGlobal->vm();
++        JSC::JSValue exceptionValue;
++        JSC::JSValue value = valueForTargetHaiku(vm, *sourceGlobal, *targetGlobal, callFrame->argument(0), exceptionValue);
++        if (exceptionValue)
++            result->reject(vm, exceptionValue);
++        else if (value)
++            result->resolve(targetGlobal, vm, value);
++        return JSC::JSValue::encode(JSC::jsUndefined());
++    }, result, sourceGlobal, targetGlobal);
++    auto* onRejected = JSC::JSNativeStdFunction::create(vm, &source, 1, String { }, [result, sourceGlobal, targetGlobal](JSC::JSGlobalObject*, JSC::CallFrame* callFrame) {
++        auto& vm = targetGlobal->vm();
++        result->reject(vm, errorForTargetHaiku(vm, *sourceGlobal, *targetGlobal, callFrame->argument(0)));
++        return JSC::JSValue::encode(JSC::jsUndefined());
++    }, result, sourceGlobal, targetGlobal);
++
++    auto scope = DECLARE_TOP_EXCEPTION_SCOPE(vm);
++    JSC::JSValue then = promise.get(&source, vm.propertyNames->then);
++    if (!scope.exception()) {
++        auto callData = JSC::getCallData(then);
++        if (callData.type != JSC::CallData::Type::None) {
++            JSC::MarkedArgumentBuffer arguments;
++            arguments.append(onFulfilled);
++            arguments.append(onRejected);
++            JSC::call(&source, then, callData, &promise, arguments);
++        }
++    }
++    if (auto* exception = scope.exception()) {
++        if (vm.isTerminationException(exception))
++            return { };
++        scope.clearException();
++        result->reject(vm, errorForTargetHaiku(vm, source, target, exception->value()));
++    }
++    return result;
++}
++
++static JSC::EncodedJSValue callExportedFunctionHaiku(JSC::JSGlobalObject* lexicalGlobalObject, JSC::CallFrame* callFrame, JSC::JSObject& function, WebCore::JSDOMGlobalObject& target)
++{
++    auto& vm = lexicalGlobalObject->vm();
++    auto throwScope = DECLARE_THROW_SCOPE(vm);
++    auto* source = dynamicDowncast<WebCore::JSDOMGlobalObject>(function.realmMayBeNull());
++    if (!source)
++        return JSC::throwVMTypeError(lexicalGlobalObject, throwScope, "The exported function is no longer available"_s);
++
++    // DOM objects as the extension's own wrappers; other values as they are.
++    auto valueForSource = [&](JSC::JSValue value) {
++        auto reflector = rewrapReflectorHaiku(vm, value, *source);
++        return reflector ? *reflector : value;
++    };
++    JSC::MarkedArgumentBuffer arguments;
++    for (size_t index = 0; index < callFrame->argumentCount(); ++index)
++        arguments.append(valueForSource(callFrame->uncheckedArgument(index)));
++    if (arguments.hasOverflowed()) [[unlikely]] {
++        JSC::throwOutOfMemoryError(lexicalGlobalObject, throwScope);
++        return { };
++    }
++    JSC::JSValue thisValue = valueForSource(callFrame->thisValue());
++
++    JSC::JSValue exceptionValue;
++    JSC::JSValue result;
++    {
++        auto scope = DECLARE_TOP_EXCEPTION_SCOPE(vm);
++        auto callData = JSC::getCallData(&function);
++        result = JSC::call(source, &function, callData, thisValue, arguments);
++        if (auto* exception = scope.exception()) {
++            if (vm.isTerminationException(exception))
++                return { };
++            scope.clearException();
++            exceptionValue = errorForTargetHaiku(vm, *source, target, exception->value());
++        }
++    }
++    if (!exceptionValue) {
++        result = valueForTargetHaiku(vm, *source, target, result, exceptionValue);
++        if (!result && !exceptionValue)
++            return { };
++    }
++    if (exceptionValue) {
++        JSC::throwException(lexicalGlobalObject, throwScope, exceptionValue);
++        return { };
++    }
++    return JSC::JSValue::encode(result);
++}
++
++static JSC::JSObject* exportFunctionHaiku(JSC::VM& vm, WebCore::JSDOMGlobalObject& target, JSC::JSObject& function, const String& name)
++{
++    // The captures keep the function and the page's global alive with the
++    // exported function.
++    auto* functionPointer = &function;
++    auto* targetPointer = &target;
++    return JSC::JSNativeStdFunction::create(vm, &target, 0, name, [functionPointer, targetPointer](JSC::JSGlobalObject* lexicalGlobalObject, JSC::CallFrame* callFrame) {
++        return callExportedFunctionHaiku(lexicalGlobalObject, callFrame, *functionPointer, *targetPointer);
++    }, functionPointer, targetPointer);
++}
++
++// Where options.defineAs puts the result: on the page's window or the page's
++// wrapper for a node, else on the scope object itself.
++static void defineAsHaiku(JSC::JSGlobalObject& source, JSC::JSValue scopeValue, WebCore::JSDOMGlobalObject& target, const String& name, JSC::JSValue value)
++{
++    auto& vm = source.vm();
++    auto scope = DECLARE_THROW_SCOPE(vm);
++    JSC::JSObject* holder = nullptr;
++    if (WebCore::JSDOMWindow::toWrapped(vm, scopeValue))
++        holder = &target;
++    else if (auto reflector = rewrapReflectorHaiku(vm, scopeValue, target))
++        holder = reflector->getObject();
++    else if (scopeValue.isObject())
++        holder = JSC::asObject(scopeValue);
++    if (!holder) {
++        JSC::throwTypeError(&source, scope, "defineAs needs an object to define the property on"_s);
++        return;
++    }
++    JSC::PropertyDescriptor descriptor(value, static_cast<unsigned>(JSC::PropertyAttribute::None));
++    holder->methodTable()->defineOwnProperty(holder, &target, JSC::Identifier::fromString(vm, name), descriptor, true);
++}
++
++static JSValueRef firefoxContentHelperHaiku(JSContextRef context, JSObjectRef, JSObjectRef, size_t argumentCount, const JSValueRef arguments[], JSValueRef* exception)
++{
++    auto* globalObject = toJS(context);
++    auto& vm = globalObject->vm();
++    JSC::JSLockHolder lock(vm);
++    auto scope = DECLARE_TOP_EXCEPTION_SCOPE(vm);
++    auto argument = [&](size_t index) {
++        return index < argumentCount ? toJS(globalObject, arguments[index]) : JSC::jsUndefined();
++    };
++    auto fail = [&](JSC::JSValue error) -> JSValueRef {
++        if (exception)
++            *exception = toRef(globalObject, error);
++        return JSValueMakeUndefined(context);
++    };
++
++    int operation = argument(0).isInt32() ? argument(0).asInt32() : -1;
++    static constexpr ASCIILiteral names[] { "cloneInto"_s, "exportFunction"_s, "createObjectIn"_s };
++    if (operation < 0 || operation > 2)
++        return JSValueMakeUndefined(context);
++    JSC::JSValue scopeValue = argument(2);
++    auto* target = targetGlobalObjectHaiku(vm, scopeValue);
++    if (!target)
++        return fail(JSC::createTypeError(globalObject, makeString(names[operation], ": the target scope must be an object"_s)));
++
++    JSC::JSValue options = argument(3);
++    if (!options.isUndefinedOrNull() && !options.isObject())
++        return fail(JSC::createTypeError(globalObject, makeString(names[operation], ": the options must be an object"_s)));
++    auto option = [&](ASCIILiteral name) {
++        return options.isObject() ? JSC::asObject(options)->get(globalObject, JSC::Identifier::fromString(vm, name)) : JSC::jsUndefined();
++    };
++
++    JSC::JSValue result;
++    switch (operation) {
++    case 0: {
++        bool cloneFunctions = option("cloneFunctions"_s).toBoolean(globalObject);
++        bool wrapReflectors = !scope.exception() && option("wrapReflectors"_s).toBoolean(globalObject);
++        if (!scope.exception())
++            result = CloneIntoHaiku(*globalObject, *target, cloneFunctions, wrapReflectors).clone(argument(1));
++        break;
++    }
++    case 1:
++    case 2: {
++        JSC::JSValue defineAs = option("defineAs"_s);
++        if (scope.exception())
++            break;
++        if (!defineAs.isUndefined() && !defineAs.isString())
++            return fail(JSC::createTypeError(globalObject, makeString(names[operation], ": defineAs must be a string"_s)));
++        String name = defineAs.isString() ? JSC::asString(defineAs)->value(globalObject).data : String { };
++        if (operation == 1) {
++            JSC::JSValue function = argument(1);
++            if (!function.isCallable())
++                return fail(JSC::createTypeError(globalObject, "exportFunction: the first argument must be a function"_s));
++            result = exportFunctionHaiku(vm, *target, *JSC::asObject(function), name.isNull() ? emptyString() : name);
++        } else
++            result = JSC::constructEmptyObject(target);
++        if (!name.isNull() && !scope.exception())
++            defineAsHaiku(*globalObject, scopeValue, *target, name, result);
++        break;
++    }
++    }
++    if (auto* thrown = scope.exception()) {
++        scope.clearException();
++        return fail(thrown->value());
++    }
++    return toRef(globalObject, result);
++}
++
++static void installFirefoxContentHelpersHaiku(JSContextRef context, JSObjectRef globalObject)
++{
++    static bool enabled = [] {
++        auto* value = getenv("SUMMIT_FIREFOX_CONTENT_HELPERS");
++        return !value || strcmp(value, "0");
++    }();
++    if (!enabled)
++        return;
++    JSRetainPtr factorySource = toJSString(
++        "(function(helper, wrapped) {"
++        "  'use strict';"
++        "  const scope = (target) => target === wrapped ? globalThis : target;"
++        "  return ["
++        "    function cloneInto(obj, targetScope, options) { return helper(0, obj, scope(targetScope), options); },"
++        "    function exportFunction(func, targetScope, options) { return helper(1, func, scope(targetScope), options); },"
++        "    function createObjectIn(targetScope, options) { return helper(2, undefined, scope(targetScope), options); },"
++        "  ];"
++        "})"_s);
++    if (!factorySource)
++        return;
++    JSValueRef factory = JSEvaluateScript(context, factorySource.get(), nullptr, nullptr, 1, nullptr);
++    if (!factory || !JSValueIsObject(context, factory))
++        return;
++    JSValueRef factoryArguments[2];
++    factoryArguments[0] = JSObjectMakeFunctionWithCallback(context, nullptr, firefoxContentHelperHaiku);
++    JSRetainPtr wrappedName = toJSString("wrappedJSObject"_s);
++    factoryArguments[1] = wrappedName ? JSObjectGetProperty(context, globalObject, wrappedName.get(), nullptr) : JSValueMakeUndefined(context);
++    JSValueRef helpers = JSObjectCallAsFunction(context, const_cast<JSObjectRef>(factory), nullptr, 2, factoryArguments, nullptr);
++    if (!helpers || !JSValueIsObject(context, helpers))
++        return;
++    static constexpr ASCIILiteral names[] { "cloneInto"_s, "exportFunction"_s, "createObjectIn"_s };
++    for (unsigned index = 0; index < std::size(names); ++index) {
++        JSValueRef helper = JSObjectGetPropertyAtIndex(context, const_cast<JSObjectRef>(helpers), index, nullptr);
++        if (JSRetainPtr name = toJSString(names[index]))
++            JSObjectSetProperty(context, globalObject, name.get(), helper, kJSPropertyAttributeDontEnum, nullptr);
++    }
++}
++
 +// Firefox gives content scripts the page's own window as
 +// window.wrappedJSObject. uBlock Origin's Firefox build looks there for the
 +// sentinel its injected scriptlets set in the page before it records them as
@@ -158471,7 +159061,9 @@ index 83216ed3967b6cdc9fa10e8588406734a4be6426..c9cc88681b3813584fbc5bbdd6f8a244
 +    }
 +    case 1: {
 +        JSC::JSValue value = argumentCount > 2 ? toJS(globalObject, arguments[2]) : JSC::jsUndefined();
-+        if (isPlain(value)) {
++        // Also the page's own objects, such as cloneInto() and
++        // exportFunction() results: nothing of the extension's world.
++        if (isPlain(value) || (value.isObject() && isInWorldHaiku(JSC::asObject(value), WebCore::mainThreadNormalWorldSingleton()))) {
 +            JSC::PutPropertySlot slot(pageGlobalObject);
 +            pageGlobalObject->methodTable()->put(pageGlobalObject, pageGlobalObject, identifier, value, slot);
 +        }
@@ -158578,8 +159170,10 @@ index 83216ed3967b6cdc9fa10e8588406734a4be6426..c9cc88681b3813584fbc5bbdd6f8a244
 +    }
 +
 +#if PLATFORM(HAIKU)
-+    if (contentWorldType == WebExtensionContentWorldType::ContentScript)
++    if (contentWorldType == WebExtensionContentWorldType::ContentScript) {
 +        installWrappedJSObjectHaiku(context, globalObject, frame);
++        installFirefoxContentHelpersHaiku(context, globalObject);
++    }
 +#endif
 +
 +    if (auto* domGlobalObject = dynamicDowncast<JSDOMGlobalObject>(toJS(context))) {

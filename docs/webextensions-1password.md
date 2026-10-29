@@ -155,6 +155,12 @@ the `downloads` API (exporting the Emergency Kit,
 
 - No desktop-app integration, biometrics or SSH agent: those need a native
   messaging host (#106).
+- Since 29 Oct content scripts have Firefox's `cloneInto` and
+  `exportFunction` (`docs/webextensions-content-script-helpers.md`). The
+  Firefox build's injected scripts call `cloneInto(detail, window,
+  {cloneFunctions: true, wrapReflectors: true})` for the CustomEvents they
+  send the page (1password.com sign-in, remote autofill pairing); they now
+  get copies made in the page's world. Not yet rechecked with 1Password itself.
 
 ## CPU scheduling (9 October 2026)
 

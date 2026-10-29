@@ -3390,7 +3390,8 @@ list update, not a browser change.
   object, with plain values only (strings, numbers, booleans, null,
   undefined); the page's objects never cross into the extension's world.
   uBlock now injects once: 35,000 errors in a run instead of 320,000 to
-  1.6 million. (1Password only tests for `cloneInto`, which is still absent.)
+  1.6 million. (1Password only tests for `cloneInto`; that came on 29 Oct,
+  `docs/webextensions-content-script-helpers.md`.)
 - Errors are cheaper: an exception reuses the frames its Error recorded
   instead of walking the stack again; the frame vector doubles instead of
   growing by a quarter (six copies of every frame for a stack 60 deep);

@@ -1,0 +1,48 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>ext106</title>
+<h1>ext106 fixture page</h1>
+<pre id="cs-results">(content script did not run)</pre>
+<pre id="page-results">(page checks did not run)</pre>
+<img src="ext106-block.png" alt="blocked">
+<img src="ext106-ok.png" alt="ok">
+<iframe src="ext106-frame.html"></iframe>
+<iframe src="ext106-frame-block.html"></iframe>
+<script>
+const results = {};
+const note = (key, value) => { results[key] = value; document.getElementById('page-results').textContent = JSON.stringify(results, null, 1); };
+fetch('ext106-allow.txt').then((r) => note('fetchAllowed', r.status), (e) => note('fetchAllowed', String(e)));
+note('before', [typeof cloneInto, typeof exportFunction, typeof ext106Add].join(','));
+document.addEventListener('ext106-clone', (event) => {
+    const d = event.detail;
+    try {
+        note('cloneDetail', d === null ? 'null' : JSON.stringify(d));
+        note('cloneIsPageObject', d instanceof Object && d.nested.b instanceof Array);
+        note('cloneDate', d.date instanceof Date ? d.date.toISOString() : String(d.date));
+        note('cloneRegExp', d.re instanceof RegExp ? String(d.re) : String(d.re));
+        note('cloneMap', d.map instanceof Map ? d.map.get(1) : String(d.map));
+        note('cloneFn', typeof d.fn === 'function' ? d.fn() : typeof d.fn);
+    } catch (e) { note('cloneError', `${e.name}: ${e.message}`); }
+});
+document.addEventListener('ext106-plain', (event) => { note('plainDetail (no cloneInto)', String(event.detail)); });
+document.addEventListener('ext106-init', (event) => { note('initDetail', JSON.stringify(event.detail)); });
+document.addEventListener('ext106-node', (event) => { note('nodeIsPageWrapper', event.detail && event.detail.node === document.body); });
+document.addEventListener('ext106-ready', async () => {
+    const run = async (key, f) => { try { note(key, await f()); } catch (e) { note(key, `threw ${e.name}: ${e.message} pageError=${e instanceof Error}`); } };
+    await run('add', () => ext106Add(2, 3));
+    await run('addIsPageFunction', () => ext106Add instanceof Function && typeof ext106Add.call === 'function');
+    await run('callBack', () => ext106CallBack((s) => `page callback got ${s}`, document.body, { k: [1, 2] }));
+    await run('object', () => { const o = ext106Object(); return `${JSON.stringify(o)} pageObject=${o instanceof Object} date=${o.when instanceof Date}`; });
+    await run('async', async () => { const p = ext106Async(21); return `${p instanceof Promise} ${JSON.stringify(await p)}`; });
+    await run('throw', () => ext106Throw());
+    await run('uncloneable', () => ext106Uncloneable());
+    await run('node', () => ext106Node() === document.body);
+    await run('leak', () => typeof ext106Leak());
+    await run('wrapped', () => ext106Wrapped());
+    await run('api', () => ext106Api.hello());
+    // The page's own browser namespace (externally_connectable messaging) has no storage; the extension's has.
+    await run('constructorEscape', () => ext106Add.constructor.constructor('return [typeof browser.storage, typeof browser.runtime.getURL, this === window].join("/")')());
+    await run('callerFunctionWorld', () => ext106Add.constructor === Function);
+    note('done', true);
+});
+</script>

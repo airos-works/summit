@@ -90,6 +90,30 @@ Limits:
   or start. Fixture: `tests/fixtures/extensions/dnr-matched/` (open
   `http://127.0.0.1:8798/dnr.html` from the downloads-control `serve.py`;
   call `checks.all()` once first).
+- `onRuleMatchedDebug` (29 Oct, #106) fires Chrome's `MatchedRuleInfoDebug`
+  (`{request: {frameId, parentFrameId, method, requestId, tabId, type, url,
+  initiator?, documentId?, frameType?}, rule: {ruleId, rulesetId}}`) for each
+  match WebCore reports, from the same place `getMatchedRules` records it
+  (`WebExtensionController::declarativeNetRequestRuleMatchedHaiku`). The
+  property exists only with `declarativeNetRequestFeedback` (Chrome further
+  limits it to unpacked extensions; Summit does not). Adding a listener turns
+  on match reporting as a `getMatchedRules` call does, and a non-persistent
+  background's saved listener does at startup. The event is a Haiku enum value
+  (`DeclarativeNetRequestOnRuleMatchedDebugHaiku`, at the end of the list)
+  rather than Cocoa's `DNR_ON_RULE_MATCHED_DEBUG`, whose value sits mid-enum;
+  the saved-listener version went to 8 so backgrounds learn it. Differences
+  from Chrome: `method` is that of the document making the load, lowercased
+  (WebCore reports the document's, not the subresource's); `initiator` is the
+  frame's origin, and for `sub_frame` loads absent (WebCore reports none);
+  `parentDocumentId` and `documentLifecycle` are absent; `requestId` is a UUID
+  WebCore makes per load, unrelated to `webRequest` ids. Frame ids are the
+  ones `webNavigation` uses (0 for the main frame, a subframe's parent 0 when
+  it is the main frame). Checked on the laptop (29 Oct, engine ext106a) with
+  the ext106 fixture: a blocked image, an allowed fetch (allow rules report
+  too), a blocked iframe (`sub_frame`, `parentFrameId` 0, `documentId`,
+  `frameType`) and a blocked image inside an iframe each fired once per load
+  with the right rule, tab and frame ids; `getMatchedRules` answered the same
+  8 matches.
 - `setExtensionActionOptions` rejects the promise with "not supported on this
   platform".
 - `testMatchOutcome({url, type, method, initiator, tabId})` answers
