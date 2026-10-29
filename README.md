@@ -143,16 +143,19 @@ its `run-browser.sh`; it carries the matching engine, process helpers, private
 libraries, source archive, and build manifest. See the [native test VM](docs/VM.md);
 released builds are CI's packages (above).
 
-For UI development against an installed Haiku WebKit SDK:
+For UI development the Makefile builds against an engine whose API headers
+(`develop/headers/WebKit/WebKitView.h`) and library are under `WEBKIT_PREFIX`,
+such as the staging directory of an engine build (the `summit_webkit` package
+carries the library only):
 
 ```sh
-pkgman install gcc make haikuwebkit_devel
-make -j6
+pkgman install gcc make
+make -j6 WEBKIT_PREFIX=/path/to/engine/staging
 make check
-./build-haiku/Summit
+./build-modern-haiku/Summit
 ```
 
-That SDK may expose fewer features than Summit's patched engine.
+The build against HaikuWebKit's WebKitLegacy library is retired (#120).
 
 Portable tests also run on Linux. Install a C++ compiler, CMake, and OpenSSL
 development headers/libraries, then run:

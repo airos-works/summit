@@ -8,9 +8,9 @@ trap 'rm -rf -- "$SUMMIT_STAGE"' EXIT
 mkdir -p "$SUMMIT_STAGE/apps" "$SUMMIT_STAGE/data/Summit" \
     "$SUMMIT_STAGE/data/deskbar/menu/Applications" \
     "$SUMMIT_STAGE/documentation/packages/summit/vendor/nlohmann" "$SUMMIT_ROOT/artifacts"
-cp build-haiku/Summit "$SUMMIT_STAGE/apps/Summit"
+cp build-modern-haiku/Summit "$SUMMIT_STAGE/apps/Summit"
 strip --strip-debug "$SUMMIT_STAGE/apps/Summit"
-xres -o "$SUMMIT_STAGE/apps/Summit" build-haiku/Summit.rsrc
+xres -o "$SUMMIT_STAGE/apps/Summit" build-modern-haiku/Summit.rsrc
 cp resources/start.html "$SUMMIT_STAGE/data/Summit/start.html"
 cp resources/Summit.PackageInfo "$SUMMIT_STAGE/.PackageInfo"
 cp README.md LICENSE "$SUMMIT_STAGE/documentation/packages/summit/"

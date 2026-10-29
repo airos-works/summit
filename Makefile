@@ -1,11 +1,14 @@
 CXX ?= g++
-SUMMIT_MODERN_WEBKIT ?= 0
+# Summit runs on its own engine (summit_webkit). The build against HaikuWebKit's
+# WebKitLegacy library has not been kept up since September 2026 and no longer
+# compiles; it is retired (#120).
+SUMMIT_MODERN_WEBKIT ?= 1
 ifeq ($(SUMMIT_MODERN_WEBKIT),1)
 BUILD ?= build-modern-haiku
 else ifeq ($(SUMMIT_MODERN_WEBKIT),0)
-BUILD ?= build-haiku
+$(error The WebKitLegacy build is retired (#120): Summit needs its own engine, summit_webkit)
 else
-$(error SUMMIT_MODERN_WEBKIT must be 0 or 1)
+$(error SUMMIT_MODERN_WEBKIT must be 1)
 endif
 WEBKIT_PREFIX ?= /boot/system
 WEBKIT_LIBRARY_DIR ?= $(WEBKIT_PREFIX)/develop/lib

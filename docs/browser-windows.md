@@ -150,7 +150,8 @@ command now takes any character and `--mod alt/ctrl/shift`):
 - Dragging a tab out to make a window, or between windows; Move Tab to New
   Window reloads the page there (its back list stays behind).
 - No Copy Image (only its address), no Inspect Element.
-- The legacy (WebKitLegacy) build was not updated or compiled.
+- The legacy (WebKitLegacy) build was not updated or compiled; it is retired
+  since 30 October 2026 (#120): the Makefile and CMake now refuse it.
 
 ## Installed
 

@@ -8,5 +8,5 @@ bash tools/haiku.sh 'cd /boot/home/summit && make -j6 && make check'
 mkdir -p artifacts
 scp -O -i .vm/id_ed25519 -P 2225 -o IdentitiesOnly=yes -o BatchMode=yes \
     -o UserKnownHostsFile=.vm/known_hosts \
-    user@127.0.0.1:/boot/home/summit/build-haiku/Summit artifacts/Summit.new
+    user@127.0.0.1:/boot/home/summit/build-modern-haiku/Summit artifacts/Summit.new
 mv artifacts/Summit.new artifacts/Summit
