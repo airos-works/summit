@@ -199,13 +199,25 @@ and video sources. Outgoing audio goes to libwebrtc as 10 ms chunks of 16-bit
 samples at the capture rate; libwebrtc resamples. Sockets live in the network
 process (`NetworkRTCProvider`, as on GTK).
 
-Host candidates are not hidden behind mDNS names on Haiku
-(`ICECandidateFilteringEnabled` is off in `UIProcess/haiku/WebView.cpp`, and
-the provider says it has no mDNS): a random `.local` name needs a responder
-on the network to answer for it, and Haiku has none, so neither this machine
-nor the other peer could resolve it and peers on the same network never
-connected. Pages that make peer connections can see the default route's
-address, as in browsers before mDNS candidates.
+Host candidates are hidden behind mDNS names on air/OS (29 October), as in
+other browsers: a page sees `<uuid>.local` instead of the computer's address.
+air/OS answers for such names (mdns_server, `.local` names in
+`getaddrinfo()`); `MDNSResponderHaiku.h` checks once per process that the
+responder is there. The network process registers each name for its IPv4
+address with mdns_server (`NetworkMDNSRegister`, on a queue of its own) and
+withdraws it when the document goes away or the web process disconnects; an
+IPv6 host candidate gets a name that is not registered, as on Cocoa.
+`DNSResolveQueueCurl`, an empty stub on Haiku before, now resolves names with
+`getaddrinfo()` on a thread, which is how another peer's `.local` names (and
+STUN/TURN host names) resolve; the network process skips the `::` answer it
+gave its own names without an IPv6 route (libwebrtc preferred it and ICE
+failed after 15 s). On stock Haiku, or with `SUMMIT_WEBRTC_MDNS=0`,
+candidate filtering stays off and pages see the default route's address, as
+before. Laptop: two peer connections in a page and two tabs in separate web
+processes connected over `.local` candidates and delivered their messages;
+a query from another machine on the network got the address while the page
+was open and no answer after it left. Not tried: a call between two
+machines, TURN relays (no longer turned off now that mDNS is on).
 
 ### MediaRecorder
 

@@ -70011,17 +70011,22 @@ index af04c9f7ac0333ffdb5c6638eb6b1ae20ab8104e..6085594fbae2ff4b8995fe561d1923da
  
  } // namespace WebCore
 diff --git a/Source/WebCore/platform/network/curl/DNSResolveQueueCurl.cpp b/Source/WebCore/platform/network/curl/DNSResolveQueueCurl.cpp
-index 0a21c097975d267a561b77b3f750872b987bd98f..aefac57fa5ef7dbe444cebb76dca6708e6145071 100644
+index 0a21c097975d267a561b77b3f750872b987bd98f..5e267d7f547c93cb2a6f268e4355790ae2f27162 100644
 --- a/Source/WebCore/platform/network/curl/DNSResolveQueueCurl.cpp
 +++ b/Source/WebCore/platform/network/curl/DNSResolveQueueCurl.cpp
-@@ -31,10 +31,61 @@
+@@ -31,10 +31,66 @@
  #include "NotImplemented.h"
  #include <wtf/TZoneMallocInlines.h>
  
 +#if PLATFORM(HAIKU)
 +#include "CurlContext.h"
 +#include <cstdlib>
++#include <netdb.h>
++#include <netinet/in.h>
++#include <sys/socket.h>
++#include <wtf/HashMap.h>
 +#include <wtf/MainThread.h>
++#include <wtf/NeverDestroyed.h>
 +#include <wtf/Threading.h>
 +#include <wtf/text/CString.h>
 +#include <wtf/text/MakeString.h>
@@ -70076,14 +70081,77 @@ index 0a21c097975d267a561b77b3f750872b987bd98f..aefac57fa5ef7dbe444cebb76dca6708
  void DNSResolveQueueCurl::updateIsUsingProxy()
  {
      notImplemented();
-@@ -44,6 +95,7 @@ void DNSResolveQueueCurl::platformResolve(const String& /* hostname */)
+@@ -44,7 +100,62 @@ void DNSResolveQueueCurl::platformResolve(const String& /* hostname */)
+ {
+     notImplemented();
+ }
++#endif
++
++#if PLATFORM(HAIKU)
++// WebRTC resolves the names in ICE candidates and STUN/TURN server URLs here
++// (NetworkRTCProvider::createResolver): the <uuid>.local names of a peer in
++// another web process or on another machine, which air/OS's getaddrinfo()
++// asks the network for with multicast DNS (up to three seconds), and server
++// names. getaddrinfo() blocks, so each name gets a thread of its own; the
++// answer is handed over on the main thread unless stopResolve() came first.
++static HashMap<uint64_t, DNSCompletionHandler>& pendingResolves()
++{
++    static NeverDestroyed<HashMap<uint64_t, DNSCompletionHandler>> resolves;
++    return resolves.get();
++}
++
++void DNSResolveQueueCurl::resolve(const String& hostname, uint64_t identifier, DNSCompletionHandler&& completionHandler)
++{
++    ASSERT(isMainThread());
++    if (auto previous = pendingResolves().take(identifier))
++        previous(makeUnexpected(DNSError::Cancelled));
++    pendingResolves().set(identifier, WTF::move(completionHandler));
+ 
++    Thread::create("DNS resolve"_s, [hostname = hostname.utf8(), identifier] {
++        Vector<IPAddress> addresses;
++        struct addrinfo hints { };
++        hints.ai_family = AF_UNSPEC;
++        hints.ai_socktype = SOCK_DGRAM;
++        struct addrinfo* result = nullptr;
++        if (!getaddrinfo(hostname.legacyCStringPointer(), nullptr, &hints, &result)) {
++            for (auto* info = result; info; info = info->ai_next) {
++                if (info->ai_family == AF_INET)
++                    addresses.append(IPAddress { reinterpret_cast<struct sockaddr_in*>(info->ai_addr)->sin_addr });
++                else if (info->ai_family == AF_INET6)
++                    addresses.append(IPAddress { reinterpret_cast<struct sockaddr_in6*>(info->ai_addr)->sin6_addr });
++            }
++            freeaddrinfo(result);
++        }
++        callOnMainThread([identifier, addresses = WTF::move(addresses)]() mutable {
++            auto completionHandler = pendingResolves().take(identifier);
++            if (!completionHandler)
++                return;
++            if (addresses.isEmpty())
++                completionHandler(makeUnexpected(DNSError::CannotResolve));
++            else
++                completionHandler(WTF::move(addresses));
++        });
++    }, ThreadType::Network)->detach();
++}
++
++void DNSResolveQueueCurl::stopResolve(uint64_t identifier)
++{
++    ASSERT(isMainThread());
++    if (auto completionHandler = pendingResolves().take(identifier))
++        completionHandler(makeUnexpected(DNSError::Cancelled));
++}
++#else
+ void DNSResolveQueueCurl::resolve(const String& /* hostname */, uint64_t /* identifier */, DNSCompletionHandler&& /* completionHandler */)
+ {
+     notImplemented();
+@@ -54,6 +165,7 @@ void DNSResolveQueueCurl::stopResolve(uint64_t /* identifier */)
  {
      notImplemented();
  }
 +#endif
  
- void DNSResolveQueueCurl::resolve(const String& /* hostname */, uint64_t /* identifier */, DNSCompletionHandler&& /* completionHandler */)
- {
+ }
+ 
 diff --git a/Source/WebCore/platform/network/curl/OpenSSLHelper.cpp b/Source/WebCore/platform/network/curl/OpenSSLHelper.cpp
 index 4cfe46eed7ca84223c22c0d5f467692fad5c7d09..f42a21b34de0cf59318bf1c27897cf4c7b403a0d 100644
 --- a/Source/WebCore/platform/network/curl/OpenSSLHelper.cpp
@@ -79477,6 +79545,133 @@ index a21e976b65cc326f4ca8dbddb68d0998f8c898d4..6a102059df71b585e9441e28708f55e9
  #include <WebCore/SoupNetworkSession.h>
  #include <libsoup/soup.h>
  #include <wtf/CallbackAggregator.h>
+diff --git a/Source/WebKit/NetworkProcess/webrtc/NetworkMDNSRegister.cpp b/Source/WebKit/NetworkProcess/webrtc/NetworkMDNSRegister.cpp
+index d963b6ef923b25b89841a5b4c067af8f0784d50a..74f9779818ce96535c1ec9cb628828c8669cef2e 100644
+--- a/Source/WebKit/NetworkProcess/webrtc/NetworkMDNSRegister.cpp
++++ b/Source/WebKit/NetworkProcess/webrtc/NetworkMDNSRegister.cpp
+@@ -37,6 +37,16 @@
+ #include <wtf/darwin/DispatchExtras.h>
+ #endif
+ 
++#if PLATFORM(HAIKU)
++#include "MDNSResponderHaiku.h"
++#include <Message.h>
++#include <arpa/inet.h>
++#include <wtf/MainThread.h>
++#include <wtf/NeverDestroyed.h>
++#include <wtf/WorkQueue.h>
++#include <wtf/text/CString.h>
++#endif
++
+ namespace WebKit {
+ 
+ #define MDNS_RELEASE_LOG(fmt, ...) RELEASE_LOG(Network, "%p - NetworkMDNSRegister::" fmt, this, ##__VA_ARGS__)
+@@ -58,9 +68,54 @@ NetworkMDNSRegister::NetworkMDNSRegister(NetworkConnectionToWebProcess& connecti
+ }
+ #endif
+ 
++#if PLATFORM(HAIKU)
++// mdns_server (MDNSResponderHaiku.h) answers for a name until it is
++// unregistered or this process is gone. The messages wait for its reply
++// (starting it on demand takes a moment), so they are sent from a queue of
++// their own, in order: a name is never unregistered before it is registered.
++static WorkQueue& mdnsServerQueue()
++{
++    static NeverDestroyed<Ref<WorkQueue>> queue(WorkQueue::create("Summit mDNS registration"_s));
++    return queue.get();
++}
++
++static status_t sendToMDNSServer(uint32 what, const UTF8CString& name, const UTF8CString& address)
++{
++    BMessenger server(mdnsServerSignature);
++    if (!server.IsValid())
++        return B_NAME_NOT_FOUND;
++    BMessage request(what);
++    request.AddString("name", name.legacyCStringPointer());
++    if (!address.isNull())
++        request.AddString("address", address.legacyCStringPointer());
++    BMessage reply;
++    status_t status = server.SendMessage(&request, &reply, 2000000, 5000000);
++    if (status == B_OK)
++        status = reply.GetInt32("status", B_ERROR);
++    return status;
++}
++
++static void unregisterFromMDNSServer(const String& name)
++{
++    mdnsServerQueue().dispatch([name = name.utf8()] {
++        sendToMDNSServer(mdnsUnregisterNameMessage, name, UTF8CString { });
++    });
++}
++#endif
++
+ #if !USE(GLIB)
++#if PLATFORM(HAIKU)
++NetworkMDNSRegister::~NetworkMDNSRegister()
++{
++    // The web process is gone: its names stop being answered now rather than
++    // when the network process exits.
++    for (auto& name : m_registeredNames)
++        unregisterFromMDNSServer(name);
++}
++#else
+ NetworkMDNSRegister::~NetworkMDNSRegister() = default;
+ #endif
++#endif
+ 
+ void NetworkMDNSRegister::ref() const
+ {
+@@ -187,11 +242,48 @@ void NetworkMDNSRegister::registerMDNSName(WebCore::ScriptExecutionContextIdenti
+ 
+ void NetworkMDNSRegister::unregisterMDNSNames(WebCore::ScriptExecutionContextIdentifier documentIdentifier)
+ {
+-    for (auto& name : m_perDocumentRegisteredNames.take(documentIdentifier))
++    for (auto& name : m_perDocumentRegisteredNames.take(documentIdentifier)) {
++#if PLATFORM(HAIKU)
++        unregisterFromMDNSServer(name);
++#endif
+         m_registeredNames.remove(name);
++    }
+ }
+ 
+-#if !USE(GLIB)
++#if PLATFORM(HAIKU)
++void NetworkMDNSRegister::registerMDNSName(WebCore::ScriptExecutionContextIdentifier documentIdentifier, const String& ipAddress, CompletionHandler<void(const String&, std::optional<WebCore::MDNSRegisterError>)>&& completionHandler)
++{
++    auto name = makeString(WTF::UUID::createVersion4(), ".local"_s);
++
++    // mdns_server answers A questions only. Like Cocoa, an IPv6 host
++    // candidate gets a name that is not registered (libwebrtc still needs
++    // one to finish gathering).
++    auto address = ipAddress.utf8();
++    in_addr parsed;
++    if (inet_pton(AF_INET, address.legacyCStringPointer(), &parsed) != 1 || !parsed.s_addr) {
++        MDNS_RELEASE_LOG("registerMDNSName: not an IPv4 address");
++        completionHandler(name, WebCore::MDNSRegisterError::BadParameter);
++        return;
++    }
++
++    m_registeredNames.add(name);
++    m_perDocumentRegisteredNames.ensure(documentIdentifier, [] {
++        return Vector<String>();
++    }).iterator->value.append(name);
++
++    mdnsServerQueue().dispatch([name = name.isolatedCopy(), address = WTF::move(address), completionHandler = WTF::move(completionHandler)]() mutable {
++        status_t status = sendToMDNSServer(mdnsRegisterNameMessage, name.utf8(), address);
++        callOnMainRunLoop([name = WTF::move(name), status, completionHandler = WTF::move(completionHandler)]() mutable {
++            if (status != B_OK) {
++                RELEASE_LOG_ERROR(Network, "NetworkMDNSRegister: mdns_server did not register a name: %s", strerror(status));
++                completionHandler(name, WebCore::MDNSRegisterError::DNSSD);
++                return;
++            }
++            completionHandler(name, { });
++        });
++    });
++}
++#elif !USE(GLIB)
+ void NetworkMDNSRegister::registerMDNSName(WebCore::ScriptExecutionContextIdentifier documentIdentifier, const String& ipAddress, CompletionHandler<void(const String&, std::optional<WebCore::MDNSRegisterError>)>&& completionHandler)
+ {
+     auto name = makeString(WTF::UUID::createVersion4(), ".local"_s);
 diff --git a/Source/WebKit/NetworkProcess/webrtc/NetworkRTCMonitor.cpp b/Source/WebKit/NetworkProcess/webrtc/NetworkRTCMonitor.cpp
 index 9ed75e084a5668ead299e603a7dae3381df77eff..2db9ebb436670df1b2ee7cb6ad31319372b392fe 100644
 --- a/Source/WebKit/NetworkProcess/webrtc/NetworkRTCMonitor.cpp
@@ -79496,6 +79691,34 @@ index 9ed75e084a5668ead299e603a7dae3381df77eff..2db9ebb436670df1b2ee7cb6ad313193
  
          auto address = addressFromInterface(*iterator);
          if (!address)
+diff --git a/Source/WebKit/NetworkProcess/webrtc/NetworkRTCProvider.cpp b/Source/WebKit/NetworkProcess/webrtc/NetworkRTCProvider.cpp
+index cd9a3c646e7a418562830f66d1c5117190fa29a1..9d9492e6a7aabbd85c7aa01abc9096a3d343f8ab 100644
+--- a/Source/WebKit/NetworkProcess/webrtc/NetworkRTCProvider.cpp
++++ b/Source/WebKit/NetworkProcess/webrtc/NetworkRTCProvider.cpp
+@@ -211,9 +211,21 @@ void NetworkRTCProvider::createResolver(LibWebRTCResolverIdentifier identifier,
+     if (connection && protect(connection->mdnsRegister())->hasRegisteredName(address)) {
+         Vector<WebKit::WebRTCNetwork::IPAddress> ipAddresses;
+         Ref rtcMonitor = m_rtcMonitor;
+-        if (!rtcMonitor->ipv4().isUnspecified())
++#if PLATFORM(HAIKU)
++        // Without an IPv6 route the default IPv6 address is "::" rather than
++        // none, and libwebrtc, which prefers IPv6, would take the peer to be
++        // there: a name of this process stands for its default IPv4 address.
++        auto isUsable = [](const RTCNetwork::IPAddress& address) {
++            return !address.isUnspecified() && !webrtc::IPIsAny(address.rtcAddress());
++        };
++#else
++        auto isUsable = [](const RTCNetwork::IPAddress& address) {
++            return !address.isUnspecified();
++        };
++#endif
++        if (isUsable(rtcMonitor->ipv4()))
+             ipAddresses.append(rtcMonitor->ipv4());
+-        if (!rtcMonitor->ipv6().isUnspecified())
++        if (isUsable(rtcMonitor->ipv6()))
+             ipAddresses.append(rtcMonitor->ipv6());
+         protect(this->connection())->send(Messages::WebRTCResolver::SetResolvedAddress(ipAddresses), identifier);
+         return;
 diff --git a/Source/WebKit/Platform/IPC/ArgumentCoders.h b/Source/WebKit/Platform/IPC/ArgumentCoders.h
 index a3668ff9135fd5779ff38f61604f8336fa5e78ce..7d9c39addac9404e6e52868530aa852748443dd9 100644
 --- a/Source/WebKit/Platform/IPC/ArgumentCoders.h
@@ -87740,6 +87963,76 @@ index 0000000000000000000000000000000000000000..e1531920fb9a5369a7bd708f8e888cf3
 +}
 +
 +} // namespace WebKit
+diff --git a/Source/WebKit/Shared/haiku/MDNSResponderHaiku.h b/Source/WebKit/Shared/haiku/MDNSResponderHaiku.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..daa3355f836f4975b9d3ee80b65ecf4e198d3138
+--- /dev/null
++++ b/Source/WebKit/Shared/haiku/MDNSResponderHaiku.h
+@@ -0,0 +1,64 @@
++/*
++ * Copyright (C) 2026 Summit contributors. All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE AUTHORS ``AS IS'' AND ANY EXPRESS OR
++ * IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
++ * OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
++ * IN NO EVENT SHALL THE AUTHORS BE LIABLE FOR ANY DIRECT, INDIRECT,
++ * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
++ * NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
++ * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
++ * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
++ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
++ * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#pragma once
++
++#if PLATFORM(HAIKU)
++
++#include <Messenger.h>
++#include <cstdlib>
++#include <cstring>
++
++namespace WebKit {
++
++// air/OS answers .local names for programs that register them with
++// mdns_server, and resolves .local names in getaddrinfo() with multicast DNS
++// (docs/airos/MDNS.md in the OS tree). WebRTC then hides host candidates
++// behind random <uuid>.local names, as other browsers do. Stock Haiku has no
++// such server: a name nobody answers would leave peers without host
++// candidates, so there the addresses are given as they are.
++// The constants are those of <mdns_server.h>, a private header that
++// stock Haiku SDKs do not have.
++inline constexpr const char* mdnsServerSignature = "application/x-vnd.Haiku-mdns_server";
++inline constexpr uint32 mdnsRegisterNameMessage = 'mdrg';
++inline constexpr uint32 mdnsUnregisterNameMessage = 'mdur';
++
++// Whether host candidates hide behind .local names: the UI process (the
++// ICECandidateFilteringEnabled preference) and the web process (the provider's
++// mDNS support) ask the same question, once each. SUMMIT_WEBRTC_MDNS=0 gives
++// the addresses as they are. mdns_server is started on demand by the launch
++// daemon, whose port BMessenger finds without it running.
++inline bool isMDNSResponderAvailable()
++{
++    static const bool available = [] {
++        if (const char* value = std::getenv("SUMMIT_WEBRTC_MDNS"); value && !std::strcmp(value, "0"))
++            return false;
++        return BMessenger(mdnsServerSignature).IsValid();
++    }();
++    return available;
++}
++
++} // namespace WebKit
++
++#endif // PLATFORM(HAIKU)
 diff --git a/Source/WebKit/Shared/haiku/NativeWebEventsHaiku.cpp b/Source/WebKit/Shared/haiku/NativeWebEventsHaiku.cpp
 new file mode 100644
 index 0000000000000000000000000000000000000000..97a69d3caec442fc8bc56499d2807a60437ac28e
@@ -130551,10 +130844,10 @@ index 0000000000000000000000000000000000000000..c9a119d02f85b7c5ad8fe9153bfc9604
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/WebView.cpp b/Source/WebKit/UIProcess/haiku/WebView.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..f9d091474286a45118df2da8187ff4894508156c
+index 0000000000000000000000000000000000000000..ace77fb311c85392e240008d6eeaf850eb9e6576
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/WebView.cpp
-@@ -0,0 +1,3238 @@
+@@ -0,0 +1,3241 @@
 +/*
 + * Copyright (C) 2013 Intel Corporation. All rights reserved.
 + *
@@ -130601,6 +130894,7 @@ index 0000000000000000000000000000000000000000..f9d091474286a45118df2da8187ff489
 +#include "APINavigation.h"
 +#include "APIUIClient.h"
 +#include "DrawingAreaProxyHaiku.h"
++#include "MDNSResponderHaiku.h"
 +#if USE(COORDINATED_GRAPHICS)
 +#include "AcceleratedBackingStore.h"
 +#endif
@@ -132395,10 +132689,12 @@ index 0000000000000000000000000000000000000000..f9d091474286a45118df2da8187ff489
 +#if USE(LIBWEBRTC)
 +    configuration->preferences().setPeerConnectionEnabled(true);
 +    // Host candidates hidden behind random .local names need an mDNS
-+    // responder to answer for them, and Haiku has none: neither this machine
-+    // nor the other peer could resolve them. The default route's address is
-+    // given instead, as browsers did before mDNS candidates.
-+    configuration->preferences().setICECandidateFilteringEnabled(false);
++    // responder to answer for them. air/OS has one (mdns_server); stock Haiku
++    // has none, so neither this machine nor the other peer could resolve
++    // them: there the default route's address is given instead, as browsers
++    // did before mDNS candidates. SUMMIT_WEBRTC_MDNS=0 does the same on air/OS.
++    if (!isMDNSResponderAvailable())
++        configuration->preferences().setICECandidateFilteringEnabled(false);
 +#endif
 +#if ENABLE(MEDIA_RECORDER)
 +    configuration->preferences().setMediaRecorderEnabled(true);
@@ -159498,19 +159794,30 @@ index e3e30a5f161e08445ed6085d5b5cef2b9fcfd038..e78ae2da3d528ab3d437a836c4998ebd
                  parameters.pageHasLoadedWebExtensions = extensionControllerProxy->hasLoadedContexts();
  #endif
 diff --git a/Source/WebKit/WebProcess/Network/webrtc/LibWebRTCProvider.cpp b/Source/WebKit/WebProcess/Network/webrtc/LibWebRTCProvider.cpp
-index 406419a8ba44922d118113e6e0f645a11509bffe..a27cdb6160524ddefbf0db27e3cd9bd5177feacc 100644
+index 406419a8ba44922d118113e6e0f645a11509bffe..8e584c97331e2347d7b607705eeaff88c2ab0e6b 100644
 --- a/Source/WebKit/WebProcess/Network/webrtc/LibWebRTCProvider.cpp
 +++ b/Source/WebKit/WebProcess/Network/webrtc/LibWebRTCProvider.cpp
-@@ -60,7 +60,15 @@ LibWebRTCProvider::LibWebRTCProvider(WebPage& webPage)
+@@ -39,6 +39,9 @@
+ #include "RTCSocketCreationFlags.h"
+ #include "WebPage.h"
+ #include "WebProcess.h"
++#if PLATFORM(HAIKU)
++#include "MDNSResponderHaiku.h"
++#endif
+ #include <WebCore/Page.h>
+ #include <WebCore/RegistrableDomain.h>
+ #include <WebCore/Settings.h>
+@@ -60,7 +63,16 @@ LibWebRTCProvider::LibWebRTCProvider(WebPage& webPage)
      : m_webPage(webPage)
  {
      m_useNetworkThreadWithSocketServer = false;
 +#if PLATFORM(HAIKU)
 +    // Host candidates hide behind mDNS names only where the network process
-+    // can answer for them (Avahi on GTK and WPE, Bonjour on Cocoa). Haiku has
-+    // no mDNS responder: a name nobody answers would leave peers without host
-+    // candidates, so they are given as they are, as browsers did before mDNS.
-+    m_supportsMDNS = false;
++    // can answer for them (Avahi on GTK and WPE, Bonjour on Cocoa, mdns_server
++    // on air/OS). Stock Haiku has no mDNS responder: a name nobody answers
++    // would leave peers without host candidates, so they are given as they
++    // are, as browsers did before mDNS.
++    m_supportsMDNS = isMDNSResponderAvailable();
 +#else
      m_supportsMDNS = true;
 +#endif
