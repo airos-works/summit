@@ -30,6 +30,22 @@ Upstream projects: [Noto Emoji](https://github.com/googlefonts/noto-emoji) and
 [Google Fonts' monochrome Noto Emoji](https://github.com/google/fonts/tree/main/ofl/notoemoji).
 The configuration follows [fontconfig's documented directory, include and alias elements](https://fontconfig.pages.freedesktop.org/fontconfig/fontconfig-user.html).
 
+## Choosing the color font (#131)
+
+For a character the page's fonts lack, the engine takes the first font in
+fontconfig's sorted list that covers it. On air/OS hrev60207+2009 (X399, 29
+October) that was the profile's monochrome `NotoEmoji.ttf`, ahead of
+`Noto-COLRv1.ttf`, so emoji in ordinary text came out as gray outlines (GitHub's
+docker organisation page, #131). A page naming `emoji` or `Noto Color Emoji`
+was not affected. The checks passed on 21 October; the system's fontconfig
+defaults, broken until 27 October, may have changed the order since.
+`SkiaSystemFallbackFontCache` now records each font's `FC_COLOR` and, for a
+cluster meant as emoji (an emoji-presentation character, U+FE0F or the emoji
+locale `und-Zsye`), takes the first color font that covers it; a monochrome one
+only when no color font does. U+FE0E keeps text presentation.
+`SUMMIT_FALLBACK_TRACE=1` logs each fallback choice (`Summit fonts: fallback for
+U+1F64C (3 code units, und-Zsye, color) -> .../Fonts/Noto-COLRv1.ttf`).
+
 ## Verification
 
 `tools/test-emoji.py` runs the real browser with an isolated profile. Its

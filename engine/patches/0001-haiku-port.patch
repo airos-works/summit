@@ -36734,7 +36734,7 @@ index 0000000000000000000000000000000000000000..21962ea9d0bd80ba9c260e9ef9ecac36
 +} // namespace SummitMPEGTS
 diff --git a/Source/WebCore/platform/graphics/haiku/MediaDecoderSelectionHaiku.cpp b/Source/WebCore/platform/graphics/haiku/MediaDecoderSelectionHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..2e82573aac195039695186ee0b27488352ce7d10
+index 0000000000000000000000000000000000000000..3419eceb8eabb7a345eb2cc79459889cc4b8ee45
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/haiku/MediaDecoderSelectionHaiku.cpp
 @@ -0,0 +1,1089 @@
@@ -37829,7 +37829,7 @@ index 0000000000000000000000000000000000000000..2e82573aac195039695186ee0b274883
 +} // namespace WebCore
 diff --git a/Source/WebCore/platform/graphics/haiku/MediaDecoderSelectionHaiku.h b/Source/WebCore/platform/graphics/haiku/MediaDecoderSelectionHaiku.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..1a59f5ca77ca81301993268bcdee2f36a4d97113
+index 0000000000000000000000000000000000000000..8eaaf1883c119c595e9cfca3b4228ecbbf3ec40b
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/haiku/MediaDecoderSelectionHaiku.h
 @@ -0,0 +1,204 @@
@@ -40432,7 +40432,7 @@ index 0000000000000000000000000000000000000000..53bdd111326959b7957f2e6bc5c35eb9
 +#endif
 diff --git a/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaikuMSE.cpp b/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaikuMSE.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..3c9b1ac409205125b4b5b28112af0e2b26d33a55
+index 0000000000000000000000000000000000000000..1e287f783528bc7b0114402a919fcbbbe90d365c
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaikuMSE.cpp
 @@ -0,0 +1,3183 @@
@@ -50128,6 +50128,108 @@ index 6600c24f0265dfae370e5c195967424f74f1ceae..db4ff38f7f75579460ddde62c84ed8bf
      const RefPtr<WorkerPool> m_paintingWorkerPool;
      const RefPtr<WorkQueue> m_uploadWorkQueue;
      unsigned m_cachedImageFingerprint { 0 };
+diff --git a/Source/WebCore/platform/graphics/skia/SkiaSystemFallbackFontCache.cpp b/Source/WebCore/platform/graphics/skia/SkiaSystemFallbackFontCache.cpp
+index 224f9c34c485e2b28bde8d457d9ef1938e6f1669..564a4102447fd6248eec3c40b428588e6affc9b1 100644
+--- a/Source/WebCore/platform/graphics/skia/SkiaSystemFallbackFontCache.cpp
++++ b/Source/WebCore/platform/graphics/skia/SkiaSystemFallbackFontCache.cpp
+@@ -69,21 +69,23 @@ public:
+     }
+ 
+     struct Font {
+-        Font(String&& path, int ttcIndex, FcCharSet* charSet)
++        Font(String&& path, int ttcIndex, FcCharSet* charSet, bool color)
+             : path(WTF::move(path))
+             , ttcIndex(ttcIndex)
+             , charSet(charSet)
++            , color(color)
+         {
+         }
+ 
+         String path;
+         int ttcIndex { 0 };
+         FcCharSet* charSet { nullptr }; // Owned by FcFontSet.
++        bool color { false };
+     };
+ 
+-    const FontSetCache::Font* fontForCharacterCluster(FcCharSet* charSet)
++    const FontSetCache::Font* fontForCharacterCluster(FcCharSet* charSet, bool preferColor)
+     {
+-        return m_fontSet->bestForCharacterCluster(charSet);
++        return m_fontSet->bestForCharacterCluster(charSet, preferColor);
+     }
+ 
+ private:
+@@ -137,7 +139,11 @@ private:
+                 if (FcPatternGetInteger(pattern, FC_INDEX, 0, &ttcIndex) != FcResultMatch)
+                     ttcIndex = 0;
+ 
+-                m_fallbackList.append(Font(WTF::move(filepath), ttcIndex, charSet));
++                FcBool color = FcFalse;
++#ifdef FC_COLOR
++                FcPatternGetBool(pattern, FC_COLOR, 0, &color);
++#endif
++                m_fallbackList.append(Font(WTF::move(filepath), ttcIndex, charSet, color));
+             }
+         }
+ 
+@@ -146,7 +152,7 @@ private:
+             FcFontSetDestroy(m_fontSet);
+         }
+ 
+-        const FontSetCache::Font* bestForCharacterCluster(FcCharSet* charSet)
++        const FontSetCache::Font* bestForCharacterCluster(FcCharSet* charSet, bool preferColor)
+         {
+             if (m_fallbackList.isEmpty())
+                 return nullptr;
+@@ -155,6 +161,16 @@ private:
+             int minScore = std::numeric_limits<int>::max();
+             for (const auto& font : m_fallbackList) {
+                 int score = FcCharSetSubtractCount(charSet, font.charSet);
++                if (!score && preferColor && !font.color) {
++                    // A monochrome emoji font (Noto Emoji) can sort ahead of
++                    // the color one; take it only if no color font covers the
++                    // cluster (#131).
++                    if (!bestFont || minScore) {
++                        bestFont = &font;
++                        minScore = 0;
++                    }
++                    continue;
++                }
+                 if (!score) {
+                     bestFont = &font;
+                     break;
+@@ -185,7 +201,15 @@ sk_sp<SkTypeface> SkiaSystemFallbackFontCache::fontForCharacterCluster(const Str
+ {
+     FcCharSet* charSet = FcCharSetCreate();
+     bool hasNonIgnorableCharacters = false;
++    // Emoji presentation (the emoji locale, U+FE0F, or a character shown as
++    // emoji by default) asks for a color font; U+FE0E asks for text.
++    bool preferColor = locale == "und-Zsye"_s;
++    bool requireText = false;
+     for (char32_t character : stringView.codePoints()) {
++        if (character == 0xFE0F || isEmojiWithPresentationByDefault(character))
++            preferColor = true;
++        else if (character == 0xFE0E)
++            requireText = true;
+         if (!isDefaultIgnorableCodePoint(character)) {
+             FcCharSetAddChar(charSet, character);
+             hasNonIgnorableCharacters = true;
+@@ -204,10 +228,14 @@ sk_sp<SkTypeface> SkiaSystemFallbackFontCache::fontForCharacterCluster(const Str
+     if (!fontSetCache)
+         return nullptr;
+ 
+-    const auto* font = fontSetCache->fontForCharacterCluster(charSet);
++    const auto* font = fontSetCache->fontForCharacterCluster(charSet, preferColor && !requireText);
+     FcCharSetDestroy(charSet);
+     if (!font)
+         return nullptr;
++#if PLATFORM(HAIKU)
++    if (getenv("SUMMIT_FALLBACK_TRACE"))
++        fprintf(stderr, "Summit fonts: fallback for U+%04X (%u code units, %s%s) -> %s #%d\n", unsigned(*stringView.codePoints().begin()), stringView.length(), locale.utf8().legacyCStringPointer(), preferColor && !requireText ? ", color" : "", font->path.utf8().legacyCStringPointer(), font->ttcIndex);
++#endif
+ 
+     return m_typefaceCache.ensure({ font->path, font->ttcIndex }, [font] -> sk_sp<SkTypeface> {
+         return FontCache::forCurrentThread().fontManager().makeFromFile(font->path.utf8().legacyCStringPointer(), font->ttcIndex);
 diff --git a/Source/WebCore/platform/graphics/texmap/ClipStack.h b/Source/WebCore/platform/graphics/texmap/ClipStack.h
 index 9fd560e16a7e8b8b5cdf0ef54b46ab2dddc32e4f..37b7905e18e26b577ae0ec335352ae63b2423295 100644
 --- a/Source/WebCore/platform/graphics/texmap/ClipStack.h
