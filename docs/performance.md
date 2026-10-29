@@ -1,5 +1,96 @@
 # Summit performance: Speedometer 3.1 baseline, where the time goes, stress test
 
+## 30 October 2026: textures in buckets for edge tiles and intermediate surfaces (#117)
+
+An edge tile (the part of a layer left at its right or bottom edge) is as
+large as that remainder, and an intermediate surface (an opacity group, a
+filtered or masked layer, a backdrop, a filter pass) as large as what it
+holds. `BitmapTexturePool` only handed out a free texture of exactly the size
+asked for, so a layer resized, or moved by a fraction of a pixel, made new GPU
+textures in every frame. Since haiku#36 an allocation on the laptop's amdgpu
+costs about 0.05 ms instead of 2-12 ms, so this now saves textures and memory
+churn rather than frame time.
+
+- **Bucketed storage** (`BitmapTexturePool::acquireBucketedTextureHaiku`,
+  Haiku only). A texture's storage (`BitmapTexture::allocatedSize()`) may now
+  be larger than the size it is used at (`size()`). Callers that sample only
+  that part ask for a bucketed texture. They get a free texture whose storage
+  holds the size, at most one 64-pixel step past the size's bucket and at most
+  twice the bucket's area (the smallest such one). Otherwise they get a new
+  texture with storage on a 64-pixel grid. These callers are:
+  - backing-store tiles (`CoordinatedBackingStoreTile`);
+  - intermediate surfaces (`paintWithIntermediateSurface`,
+    `paintSelfAndChildrenWithIntermediateSurface`);
+  - the filter cache's surface;
+  - blur and colour-filter passes (`applyBlurFilter`, `applySinglePassFilter`).
+
+  The drop shadow's textures all take their source's storage size, because
+  its last pass samples two of them with one set of coordinates
+  (`acquireTextureWithAllocationHaiku`). Every other caller still gets exact
+  sizes, as do flattened 3D layers, which are drawn transformed.
+  `SUMMIT_TEXTURE_BUCKETS=0` turns this off; another number sets the grid.
+- **Sampling.** `drawTexture()` scales the texture coordinates to the used
+  part, and `drawTextureCopy()`/`drawBlurred()` use the storage size for
+  texel sizes and coordinates; their shaders already clamp to the drawn part.
+  The upstream route for larger storage (`drawTextureWithPhysicalSize`, the
+  `ClampUVBounds` shader option) was tried first and is not used on Haiku.
+  Its clamp runs at medium precision, which is 16 bits on RADV through zink.
+  Text in padded tiles came out shifted by a fraction of a pixel: up to 49/255
+  on glyph edges, in the fixed header and in an opacity group's children. That
+  is probably what the 64-pixel tile grid of 18 October ran into. Instead,
+  a padded tile gets its last column and row uploaded once more just past
+  its edge. Drawn at a fraction of a pixel, bilinear filtering then reads what
+  a texture of the tile's size clamps to. Intermediate surfaces are drawn at
+  whole pixels, so nothing past them is sampled.
+- **Trace.** The compositor timing line (`SUMMIT_COMPOSITOR_TIMING_TRACE`) has
+  `gpuTextures`: texture storage made by `glTexImage2D`, by the pool or anyone
+  else, including a `reset()` to a new size. `SUMMIT_POOL_TRACE=1` prints each
+  new pool texture with its size and storage.
+
+Measured on the Framework 13 laptop with the same engine build, alternating
+`SUMMIT_TEXTURE_BUCKETS=0` and the default:
+- **Test page.** A 1118x538 window at 200%. The page has a text panel and a
+  blurred box that change size by a pixel or two every frame, an opacity group
+  with composited children, a masked box, a drop shadow with grayscale, a
+  sepia-blur-brightness box, a backdrop-filter glass and a fixed header at
+  0.37 px.
+- **The site runs** went through an HTTP proxy on the build server, because
+  the laptop had no route to the internet. linear.app did not load through
+  it.
+
+| New GPU textures per second | exact sizes | buckets |
+|---|---|---|
+| test page, sizes animated for 10 s (5 runs each) | 86.9-91.1 | 0.9-1.2 |
+| test page, 60-notch wheel burst down and up | 22.2-25.9 | 14.8-17.8 |
+| getartcraft.com, first scroll after load | 74.8-92.1 | 28.4-31.2 |
+| github.com, scroll | 17.5-19.4 | 10.0 |
+
+What the buckets leave on getartcraft.com is mostly new 512x512 tiles of
+content not seen before, and 1280x1080 video frames.
+
+Composition time did not change measurably:
+- **Animated test page:** median 15.3-16.6 ms with exact sizes, 15.0-16.2 ms
+  with buckets. The page is bound by its main thread at 20 frames a second
+  either way.
+- **getartcraft.com:** 14.7-15.6 ms against 15.6 ms.
+- **Wheel bursts:** frame gaps had a median of 16.7 ms and a 95th percentile
+  of 17.5-18 ms in both modes.
+
+Several runs in both modes fell into frames 100-110 ms apart. In that state
+the UI process's 100 ms fallback in `WebView` ends each frame because the
+view never draws it. Those runs count for textures but not for frame times.
+Another session was using the laptop and its second screen at the time.
+
+**Pixels.** We compared the engine's presented frames (the Summit MCP's
+`page_frame`, full size) at ten fixed states of the test page, some taken
+after the animation had filled the pool with odd sizes:
+- Text, edges, tiles, the opacity group and the mask are identical
+  in both modes.
+- The blurred and drop-shadowed areas differ by up to 9/255. The blur
+  shaders' clamp also runs at medium precision, and its coordinates are now
+  fractions of a different size.
+- Exact sizes are identical from run to run.
+
 ## 30 October 2026: NVDEC pictures go to the GPU as NV12; H.265 on NVDEC (#115)
 
 The NVDEC add-on converted every picture to RGB32 on the processor (in bands,

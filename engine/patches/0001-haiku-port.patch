@@ -28007,14 +28007,15 @@ index 139bcc9a9cbfae7dcf875231044d69c23dab9dca..3d1fb9678a1a59401310b361753d4173
  
      FloatSize pixelAlignmentOffset() const override { return m_pixelAlignmentOffset; }
 diff --git a/Source/WebCore/platform/graphics/egl/BitmapTexture.cpp b/Source/WebCore/platform/graphics/egl/BitmapTexture.cpp
-index 6b3597b50ca897e12bbe8c0de4cf44860c3ab692..c88e008884ae0f7f79a2317e3d636c9e40fdfeda 100644
+index 6b3597b50ca897e12bbe8c0de4cf44860c3ab692..9517fba9a215a39b818e760b37382a2a80da6e66 100644
 --- a/Source/WebCore/platform/graphics/egl/BitmapTexture.cpp
 +++ b/Source/WebCore/platform/graphics/egl/BitmapTexture.cpp
-@@ -29,6 +29,12 @@
+@@ -29,6 +29,13 @@
  #include <wtf/RefPtr.h>
  #include <wtf/StdLibExtras.h>
  
 +#if PLATFORM(HAIKU)
++#include <atomic>
 +#include <cstdio>
 +#include <cstdlib>
 +#include <cstring>
@@ -28023,7 +28024,7 @@ index 6b3597b50ca897e12bbe8c0de4cf44860c3ab692..c88e008884ae0f7f79a2317e3d636c9e
  #if USE(TEXTURE_MAPPER)
  #include "GraphicsContext.h"
  #include "GraphicsLayer.h"
-@@ -92,6 +98,15 @@ static const GLenum s_pixelDataType = GL_UNSIGNED_BYTE;
+@@ -92,6 +99,15 @@ static const GLenum s_pixelDataType = GL_UNSIGNED_BYTE;
  #ifndef GL_DEPTH24_STENCIL8
  #define GL_DEPTH24_STENCIL8 0x88F0
  #endif
@@ -28039,7 +28040,7 @@ index 6b3597b50ca897e12bbe8c0de4cf44860c3ab692..c88e008884ae0f7f79a2317e3d636c9e
  
  namespace WebCore {
  
-@@ -109,6 +124,12 @@ void BitmapTexture::determineRenderTargetAndBinding()
+@@ -109,14 +125,39 @@ void BitmapTexture::determineRenderTargetAndBinding()
  
  unsigned BitmapTexture::textureFormat() const
  {
@@ -28052,8 +28053,25 @@ index 6b3597b50ca897e12bbe8c0de4cf44860c3ab692..c88e008884ae0f7f79a2317e3d636c9e
      return m_flags.contains(Flags::UseBGRALayout) ? GL_BGRA : GL_RGBA;
  }
  
-@@ -117,6 +138,9 @@ BitmapTexture::BitmapTexture(const IntSize& size, OptionSet<Flags> flags)
++#if PLATFORM(HAIKU)
++// GPU texture storage made (glTexImage2D of a new size), by the pool or
++// anyone else, for the compositor's timing trace.
++static std::atomic<unsigned> s_textureAllocationsHaiku;
++
++unsigned takeTextureAllocationsHaiku()
++{
++    return s_textureAllocationsHaiku.exchange(0, std::memory_order_relaxed);
++}
++
++BitmapTexture::BitmapTexture(const IntSize& size, OptionSet<Flags> flags, const IntSize& allocatedSize)
++#else
+ BitmapTexture::BitmapTexture(const IntSize& size, OptionSet<Flags> flags)
++#endif
+     : m_flags(flags)
      , m_size(size)
++#if PLATFORM(HAIKU)
++    , m_allocatedSizeHaiku(allocatedSize.width() >= size.width() && allocatedSize.height() >= size.height() ? allocatedSize : size)
++#endif
      , m_pixelFormat(flags.contains(Flags::UseBGRALayout) ? PixelFormat::BGRA8 : PixelFormat::RGBA8)
  {
 +#if PLATFORM(HAIKU)
@@ -28062,7 +28080,7 @@ index 6b3597b50ca897e12bbe8c0de4cf44860c3ab692..c88e008884ae0f7f79a2317e3d636c9e
      determineRenderTargetAndBinding();
  
      GLint boundTexture = 0;
-@@ -159,6 +183,64 @@ BitmapTexture::BitmapTexture(const IntSize& size, OptionSet<Flags> flags)
+@@ -159,6 +200,64 @@ BitmapTexture::BitmapTexture(const IntSize& size, OptionSet<Flags> flags)
      glBindTexture(m_renderTarget, boundTexture);
  }
  
@@ -28127,25 +28145,26 @@ index 6b3597b50ca897e12bbe8c0de4cf44860c3ab692..c88e008884ae0f7f79a2317e3d636c9e
  void BitmapTexture::createTexture()
  {
      ASSERT(!m_id);
-@@ -177,7 +259,17 @@ void BitmapTexture::allocateTexture()
+@@ -177,7 +276,18 @@ void BitmapTexture::allocateTexture()
      createTexture();
      // EXT_texture_format_BGRA8888 mandates internalFormat == format.
      // https://registry.khronos.org/OpenGL/extensions/EXT/EXT_texture_format_BGRA8888.txt
 +#if PLATFORM(HAIKU)
++    s_textureAllocationsHaiku.fetch_add(1, std::memory_order_relaxed);
 +    if (m_flags.contains(Flags::TwoChannel)) {
-+        allocateTwoChannelTextureHaiku(m_renderTarget, m_size);
++        allocateTwoChannelTextureHaiku(m_renderTarget, m_allocatedSizeHaiku);
 +        return;
 +    }
 +    forgetGLErrors();
-+#endif
++    glTexImage2D(m_renderTarget, 0, textureFormat(), m_allocatedSizeHaiku.width(), m_allocatedSizeHaiku.height(), 0, textureFormat(), s_pixelDataType, nullptr);
++    reportGLError("texture", m_allocatedSizeHaiku, textureFormat());
++#else
      glTexImage2D(m_renderTarget, 0, textureFormat(), m_size.width(), m_size.height(), 0, textureFormat(), s_pixelDataType, nullptr);
-+#if PLATFORM(HAIKU)
-+    reportGLError("texture", m_size, textureFormat());
 +#endif
  }
  
  size_t BitmapTexture::sizeInBytes() const
-@@ -186,7 +278,11 @@ size_t BitmapTexture::sizeInBytes() const
+@@ -186,7 +296,11 @@ size_t BitmapTexture::sizeInBytes() const
      if (size.isEmpty())
          return 0;
  
@@ -28157,7 +28176,7 @@ index 6b3597b50ca897e12bbe8c0de4cf44860c3ab692..c88e008884ae0f7f79a2317e3d636c9e
      return CheckedUint32(size.height()) * bytesPerRow;
  }
  
-@@ -234,14 +330,24 @@ BitmapTexture::BitmapTexture(EGLImage image, const IntSize& size, OptionSet<Flag
+@@ -234,18 +348,45 @@ BitmapTexture::BitmapTexture(EGLImage image, const IntSize& size, OptionSet<Flag
  
  BitmapTexture::~BitmapTexture()
  {
@@ -28186,19 +28205,63 @@ index 6b3597b50ca897e12bbe8c0de4cf44860c3ab692..c88e008884ae0f7f79a2317e3d636c9e
  #endif
  }
  
-@@ -301,6 +407,11 @@ void BitmapTexture::reset(const IntSize& size, OptionSet<Flags> flags)
++#if PLATFORM(HAIKU)
++void BitmapTexture::reset(const IntSize& size, OptionSet<Flags> flags)
++{
++    resetHaiku(size, flags, false);
++}
++
++void BitmapTexture::resetWithinAllocationHaiku(const IntSize& size, OptionSet<Flags> flags)
++{
++    resetHaiku(size, flags, true);
++}
++
++// reset() keeps the storage only when it is exactly the size asked for, so a
++// caller that samples the whole texture never gets a larger one;
++// resetWithinAllocationHaiku() also keeps a larger one.
++void BitmapTexture::resetHaiku(const IntSize& size, OptionSet<Flags> flags, bool keepsLargerAllocation)
++#else
+ void BitmapTexture::reset(const IntSize& size, OptionSet<Flags> flags)
++#endif
+ {
+ #if USE(GBM)
+     // We don't support switching from dmabuf backing to regular textures -- there is no use-case for that scenario.
+@@ -273,9 +414,19 @@ void BitmapTexture::reset(const IntSize& size, OptionSet<Flags> flags)
+     m_clipStack = { };
+ #endif
+ 
++#if PLATFORM(HAIKU)
++    bool fits = size.width() <= m_allocatedSizeHaiku.width() && size.height() <= m_allocatedSizeHaiku.height();
++    IntSize allocation = size == m_allocatedSizeHaiku || (keepsLargerAllocation && fits) ? m_allocatedSizeHaiku : size;
++    m_size = size;
++    if (allocation == m_allocatedSizeHaiku)
++        return;
++    m_allocatedSizeHaiku = allocation;
++    s_textureAllocationsHaiku.fetch_add(1, std::memory_order_relaxed);
++#else
+     if (m_size == size)
+         return;
+     m_size = size;
++#endif
+ 
+     determineRenderTargetAndBinding();
+ 
+@@ -301,7 +452,14 @@ void BitmapTexture::reset(const IntSize& size, OptionSet<Flags> flags)
  #endif
  
      glBindTexture(m_renderTarget, m_id);
 +#if PLATFORM(HAIKU)
 +    if (m_flags.contains(Flags::TwoChannel))
-+        allocateTwoChannelTextureHaiku(m_renderTarget, m_size);
++        allocateTwoChannelTextureHaiku(m_renderTarget, m_allocatedSizeHaiku);
 +    else
-+#endif
++        glTexImage2D(m_renderTarget, 0, textureFormat(), m_allocatedSizeHaiku.width(), m_allocatedSizeHaiku.height(), 0, textureFormat(), s_pixelDataType, nullptr);
++#else
      glTexImage2D(m_renderTarget, 0, textureFormat(), m_size.width(), m_size.height(), 0, textureFormat(), s_pixelDataType, nullptr);
++#endif
      glBindTexture(m_renderTarget, boundTexture);
  }
-@@ -328,7 +439,12 @@ void BitmapTexture::updateContents(const void* srcData, const IntRect& targetRec
+ 
+@@ -328,7 +486,12 @@ void BitmapTexture::updateContents(const void* srcData, const IntRect& targetRec
      }
  #endif
  
@@ -28211,7 +28274,7 @@ index 6b3597b50ca897e12bbe8c0de4cf44860c3ab692..c88e008884ae0f7f79a2317e3d636c9e
      auto data = static_cast<const uint8_t*>(srcData);
      Vector<uint8_t> temporaryData;
      IntPoint adjustedSourceOffset = sourceOffset;
-@@ -367,7 +483,16 @@ void BitmapTexture::updateContents(const void* srcData, const IntRect& targetRec
+@@ -367,7 +530,16 @@ void BitmapTexture::updateContents(const void* srcData, const IntRect& targetRec
          glPixelStorei(GL_UNPACK_SKIP_PIXELS, adjustedSourceOffset.x());
      }
  
@@ -28228,7 +28291,7 @@ index 6b3597b50ca897e12bbe8c0de4cf44860c3ab692..c88e008884ae0f7f79a2317e3d636c9e
  
      if (supportsUnpackSubimage) {
          glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
-@@ -394,6 +519,57 @@ void BitmapTexture::updateContents(NativeImage* frameImage, const IntRect& targe
+@@ -394,6 +566,57 @@ void BitmapTexture::updateContents(NativeImage* frameImage, const IntRect& targe
      SkPixmap pixmap;
      if (surface->peekPixels(&pixmap))
          updateContents(pixmap.addr(), targetRect, offset, pixmap.rowBytes(), PixelFormat::BGRA8);
@@ -28286,7 +28349,7 @@ index 6b3597b50ca897e12bbe8c0de4cf44860c3ab692..c88e008884ae0f7f79a2317e3d636c9e
  #else
      UNUSED_PARAM(targetRect);
      UNUSED_PARAM(offset);
-@@ -477,6 +653,20 @@ void BitmapTexture::copyFromExternalTexture(GLuint sourceTextureID, const IntRec
+@@ -477,6 +700,20 @@ void BitmapTexture::copyFromExternalTexture(GLuint sourceTextureID, const IntRec
  }
  
  #if USE(TEXTURE_MAPPER)
@@ -28307,14 +28370,29 @@ index 6b3597b50ca897e12bbe8c0de4cf44860c3ab692..c88e008884ae0f7f79a2317e3d636c9e
  void BitmapTexture::swapTexture(BitmapTexture& other)
  {
      RELEASE_ASSERT(m_size == other.m_size);
-@@ -503,11 +693,21 @@ void BitmapTexture::initializeStencil()
+@@ -486,6 +723,9 @@ void BitmapTexture::swapTexture(BitmapTexture& other)
+ #endif
+     std::swap(m_flags, other.m_flags);
+     std::swap(m_id, other.m_id);
++#if PLATFORM(HAIKU)
++    std::swap(m_allocatedSizeHaiku, other.m_allocatedSizeHaiku);
++#endif
+ 
+     determineRenderTargetAndBinding();
+     other.determineRenderTargetAndBinding();
+@@ -503,11 +743,26 @@ void BitmapTexture::initializeStencil()
  
      glGenRenderbuffers(1, &m_stencilBufferObject);
      glBindRenderbuffer(GL_RENDERBUFFER, m_stencilBufferObject);
 +#if PLATFORM(HAIKU)
 +    forgetGLErrors();
 +#endif
++#if PLATFORM(HAIKU)
++    // The size of the texture's storage: attachments of one size.
++    glRenderbufferStorage(GL_RENDERBUFFER, GL_STENCIL_INDEX8, m_allocatedSizeHaiku.width(), m_allocatedSizeHaiku.height());
++#else
      glRenderbufferStorage(GL_RENDERBUFFER, GL_STENCIL_INDEX8, m_size.width(), m_size.height());
++#endif
 +#if PLATFORM(HAIKU)
 +    reportGLError("stencil buffer", m_size, GL_STENCIL_INDEX8);
 +#endif
@@ -28330,7 +28408,7 @@ index 6b3597b50ca897e12bbe8c0de4cf44860c3ab692..c88e008884ae0f7f79a2317e3d636c9e
  
  void BitmapTexture::clearIfNeeded()
 diff --git a/Source/WebCore/platform/graphics/egl/BitmapTexture.h b/Source/WebCore/platform/graphics/egl/BitmapTexture.h
-index 25a33139079a55094a25c97216a9575a59224292..e23d2c09d08adafff45f9bdd38c0ab70ca4678dc 100644
+index 25a33139079a55094a25c97216a9575a59224292..4c9bc88e38f2d16d7fb005f0e93515775c89f642 100644
 --- a/Source/WebCore/platform/graphics/egl/BitmapTexture.h
 +++ b/Source/WebCore/platform/graphics/egl/BitmapTexture.h
 @@ -58,13 +58,17 @@ typedef void *EGLImage;
@@ -28367,7 +28445,25 @@ index 25a33139079a55094a25c97216a9575a59224292..e23d2c09d08adafff45f9bdd38c0ab70
      };
  
      static Ref<BitmapTexture> create(const IntSize& size, OptionSet<Flags> flags = { })
-@@ -95,6 +107,14 @@ public:
+@@ -81,6 +93,17 @@ public:
+         return adoptRef(*new BitmapTexture(size, flags));
+     }
+ 
++#if PLATFORM(HAIKU)
++    // A texture whose GL storage (allocatedSize) is larger than the size it
++    // is used at: BitmapTexturePool hands these out to the callers that
++    // sample only the used part (tiles, intermediate surfaces), so that a
++    // size changed by a pixel or two reuses a texture instead of making one.
++    static Ref<BitmapTexture> createHaiku(const IntSize& size, const IntSize& allocatedSize, OptionSet<Flags> flags = { })
++    {
++        return adoptRef(*new BitmapTexture(size, flags, allocatedSize));
++    }
++#endif
++
+ #if USE(GBM) || OS(ANDROID)
+     static Ref<BitmapTexture> create(EGLImage image, const IntSize& size, OptionSet<Flags> flags = { })
+     {
+@@ -95,11 +118,24 @@ public:
      OptionSet<Flags> flags() const { return m_flags; }
      bool isOpaque() const { return !m_flags.contains(Flags::SupportsAlpha); }
  
@@ -28382,21 +28478,64 @@ index 25a33139079a55094a25c97216a9575a59224292..e23d2c09d08adafff45f9bdd38c0ab70
      uint32_t id() const { return m_id; }
  
      void updateContents(const void* srcData, const IntRect& targetRect, const IntPoint& sourceOffset, int bytesPerLine, PixelFormat);
-@@ -133,6 +153,9 @@ public:
+ 
+     void reset(const IntSize&, OptionSet<Flags> = { });
++#if PLATFORM(HAIKU)
++    // As reset(), but keeps the storage when the size fits in it (the
++    // texture is then used at a part of its storage; see createHaiku()).
++    void resetWithinAllocationHaiku(const IntSize&, OptionSet<Flags> = { });
++#endif
+ 
+ #if USE(TEXTURE_MAPPER)
+     void updateContents(NativeImage*, const IntRect&, const IntPoint& offset);
+@@ -128,12 +164,21 @@ public:
+ #if USE(GBM)
+     MemoryMappedGPUBuffer* memoryMappedGPUBuffer() const LIFETIME_BOUND { return m_memoryMappedGPUBuffer.get(); }
+     IntSize allocatedSize() const;
++#elif PLATFORM(HAIKU)
++    IntSize allocatedSize() const { return m_allocatedSizeHaiku; }
+ #else
+     IntSize allocatedSize() const { return m_size; }
  #endif
  
  private:
 +#if PLATFORM(HAIKU)
 +    RefPtr<GLContextState> m_contextState;
 +#endif
++#if PLATFORM(HAIKU)
++    BitmapTexture(const IntSize&, OptionSet<Flags>, const IntSize& allocatedSize = { });
++#else
      BitmapTexture(const IntSize&, OptionSet<Flags>);
++#endif
  #if USE(GBM) || OS(ANDROID)
      BitmapTexture(EGLImage, const IntSize&, OptionSet<Flags>);
+ #endif
+@@ -144,6 +189,9 @@ private:
+ #endif
+ 
+     void determineRenderTargetAndBinding();
++#if PLATFORM(HAIKU)
++    void resetHaiku(const IntSize&, OptionSet<Flags>, bool keepsLargerAllocation);
++#endif
+ 
+     unsigned textureFormat() const;
+     void createTexture();
+@@ -154,6 +202,10 @@ private:
+ 
+     OptionSet<Flags> m_flags;
+     IntSize m_size;
++#if PLATFORM(HAIKU)
++    // The GL storage's size: m_size, or larger (see createHaiku()).
++    IntSize m_allocatedSizeHaiku;
++#endif
+     unsigned m_id { 0 };
+     unsigned m_renderTarget { 0 };
+     unsigned m_binding { 0 };
 diff --git a/Source/WebCore/platform/graphics/egl/BitmapTexturePool.cpp b/Source/WebCore/platform/graphics/egl/BitmapTexturePool.cpp
-index 36206e6f966e88e056cf20705257fddb8b14d601..2f1501f92b78049ed516d31f2f500393cbbe2267 100644
+index 36206e6f966e88e056cf20705257fddb8b14d601..b968cdd825f2dd4f39a75609ec21839ab111d02d 100644
 --- a/Source/WebCore/platform/graphics/egl/BitmapTexturePool.cpp
 +++ b/Source/WebCore/platform/graphics/egl/BitmapTexturePool.cpp
-@@ -27,6 +27,14 @@
+@@ -27,6 +27,19 @@
  #include "config.h"
  #include "BitmapTexturePool.h"
  
@@ -28406,12 +28545,17 @@ index 36206e6f966e88e056cf20705257fddb8b14d601..2f1501f92b78049ed516d31f2f500393
 +#include <cstdlib>
 +#include <cstring>
 +#include <wtf/Assertions.h>
++#if USE(LIBEPOXY)
++#include <epoxy/gl.h>
++#else
++#include <GLES2/gl2.h>
++#endif
 +#endif
 +
  #include "GLContext.h"
  #include "GLContextWrapper.h"
  #include "PlatformDisplay.h"
-@@ -47,6 +55,24 @@ static constexpr size_t s_poolSizeLimitInBytes = std::numeric_limits<size_t>::ma
+@@ -47,6 +60,24 @@ static constexpr size_t s_poolSizeLimitInBytes = std::numeric_limits<size_t>::ma
  #endif
  
  static constexpr Seconds s_releaseUnusedSecondsTolerance { 3_s };
@@ -28436,7 +28580,7 @@ index 36206e6f966e88e056cf20705257fddb8b14d601..2f1501f92b78049ed516d31f2f500393
  static constexpr Seconds s_releaseUnusedTexturesTimerInterval { 500_ms };
  static constexpr Seconds s_releaseUnusedSecondsToleranceOnLimitExceeded { 50_ms };
  static constexpr Seconds s_releaseUnusedTexturesTimerIntervalOnLimitExceeded { 200_ms };
-@@ -59,7 +85,7 @@ BitmapTexturePool& BitmapTexturePool::singleton()
+@@ -59,7 +90,7 @@ BitmapTexturePool& BitmapTexturePool::singleton()
  
  BitmapTexturePool::BitmapTexturePool()
      : m_releaseUnusedTexturesTimer(RunLoop::mainSingleton(), "BitmapTexturePool::ReleaseUnusedTexturesTimer"_s, this, &BitmapTexturePool::releaseUnusedTexturesTimerFired)
@@ -28445,7 +28589,7 @@ index 36206e6f966e88e056cf20705257fddb8b14d601..2f1501f92b78049ed516d31f2f500393
      , m_releaseUnusedTexturesTimerInterval(s_releaseUnusedTexturesTimerInterval)
  {
  #if USE(GLIB)
-@@ -67,12 +93,34 @@ BitmapTexturePool::BitmapTexturePool()
+@@ -67,29 +98,165 @@ BitmapTexturePool::BitmapTexturePool()
  #endif
  }
  
@@ -28460,10 +28604,64 @@ index 36206e6f966e88e056cf20705257fddb8b14d601..2f1501f92b78049ed516d31f2f500393
 +}
 +#endif
 +
++#if PLATFORM(HAIKU)
++// The grid that bucketed textures' storage is on (SUMMIT_TEXTURE_BUCKETS:
++// 0 or 1 for exact sizes, or another grid in pixels). Edge tiles are a
++// layer's size modulo the tile size, and intermediate surfaces the size of
++// what they hold: a layer resized or moved by a fraction of a pixel asked
++// for a texture of a new size in every frame, and every one was a new GPU
++// texture (a blurred layer animated in size made three a frame).
++static int textureBucketGridHaiku()
++{
++    static const int grid = [] {
++        const char* value = getenv("SUMMIT_TEXTURE_BUCKETS");
++        if (!value)
++            return 64;
++        int grid = atoi(value);
++        return grid > 1 ? std::min(grid, 1024) : 0;
++    }();
++    return grid;
++}
++
++static IntSize bucketedSizeHaiku(const IntSize& size, int grid)
++{
++    static const int maxTextureSize = [] {
++        GLint max = 0;
++        glGetIntegerv(GL_MAX_TEXTURE_SIZE, &max);
++        return max > 0 ? max : 4096;
++    }();
++    auto bucket = [&](int value) {
++        return std::max(value, std::min(maxTextureSize, (value + grid - 1) / grid * grid));
++    };
++    return { bucket(size.width()), bucket(size.height()) };
++}
++
++Ref<BitmapTexture> BitmapTexturePool::acquireTexture(const IntSize& size, OptionSet<BitmapTexture::Flags> flags)
++{
++    return acquireTextureHaiku(size, size, flags, SizeMatchHaiku::Exact);
++}
++
++Ref<BitmapTexture> BitmapTexturePool::acquireBucketedTextureHaiku(const IntSize& size, OptionSet<BitmapTexture::Flags> flags)
++{
++    int grid = textureBucketGridHaiku();
++    if (!grid || size.isEmpty())
++        return acquireTextureHaiku(size, size, flags, SizeMatchHaiku::Exact);
++    return acquireTextureHaiku(size, bucketedSizeHaiku(size, grid), flags, SizeMatchHaiku::Bucketed);
++}
++
++Ref<BitmapTexture> BitmapTexturePool::acquireTextureWithAllocationHaiku(const IntSize& size, const IntSize& allocatedSize, OptionSet<BitmapTexture::Flags> flags)
++{
++    return acquireTextureHaiku(size, allocatedSize, flags, SizeMatchHaiku::Allocation);
++}
++
++Ref<BitmapTexture> BitmapTexturePool::acquireTextureHaiku(const IntSize& size, const IntSize& allocatedSize, OptionSet<BitmapTexture::Flags> flags, SizeMatchHaiku match)
++#else
  Ref<BitmapTexture> BitmapTexturePool::acquireTexture(const IntSize& size, OptionSet<BitmapTexture::Flags> flags)
++#endif
  {
      ASSERT(GLContextWrapper::currentContext());
      Locker locker { m_lock };
+-    Entry* selectedEntry = std::find_if(m_textures.begin(), m_textures.end(), [&](Entry& entry) {
 +#if PLATFORM(HAIKU)
 +    m_textures.removeAllMatching([&](const Entry& entry) {
 +        if (!entry.texture->hasLostContextHaiku())
@@ -28471,16 +28669,36 @@ index 36206e6f966e88e056cf20705257fddb8b14d601..2f1501f92b78049ed516d31f2f500393
 +        m_poolSizeInBytes -= entry.texture->sizeInBytes();
 +        return true;
 +    });
++    // Bucketed: a free texture whose storage holds the size and is at most a
++    // grid step larger than the bucket's (and at most twice its area); the
++    // smallest such one.
++    const int grid = match == SizeMatchHaiku::Bucketed ? textureBucketGridHaiku() : 0;
++    const uint64_t maxArea = 2 * uint64_t(allocatedSize.width()) * allocatedSize.height();
++    auto sizeMatches = [&](const IntSize& storage) {
++        switch (match) {
++        case SizeMatchHaiku::Exact:
++            return storage == size;
++        case SizeMatchHaiku::Allocation:
++            return storage == allocatedSize;
++        case SizeMatchHaiku::Bucketed:
++            return storage.width() >= size.width() && storage.height() >= size.height()
++                && storage.width() <= allocatedSize.width() + grid && storage.height() <= allocatedSize.height() + grid
++                && uint64_t(storage.width()) * storage.height() <= maxArea;
++        }
++        return false;
++    };
 +#endif
-     Entry* selectedEntry = std::find_if(m_textures.begin(), m_textures.end(), [&](Entry& entry) {
++    auto entryMatches = [&](Entry& entry) {
          return entry.texture->refCount() == 1
 +#if PLATFORM(HAIKU)
 +            && entry.texture->belongsToCurrentContextHaiku()
-+#endif
++            && sizeMatches(entry.texture->allocatedSize())
++#else
              && entry.texture->size() == size
++#endif
  #if USE(GBM)
              && entry.texture->flags().contains(BitmapTexture::Flags::BackedByDMABuf) == flags.contains(BitmapTexture::Flags::BackedByDMABuf)
-@@ -80,10 +128,23 @@ Ref<BitmapTexture> BitmapTexturePool::acquireTexture(const IntSize& size, Option
+             && entry.texture->flags().contains(BitmapTexture::Flags::ForceLinearBuffer) == flags.contains(BitmapTexture::Flags::ForceLinearBuffer)
              && entry.texture->flags().contains(BitmapTexture::Flags::ForceVivanteSuperTiledBuffer) == flags.contains(BitmapTexture::Flags::ForceVivanteSuperTiledBuffer)
  #endif
              && entry.texture->flags().contains(BitmapTexture::Flags::UseBGRALayout) == flags.contains(BitmapTexture::Flags::UseBGRALayout)
@@ -28489,22 +28707,57 @@ index 36206e6f966e88e056cf20705257fddb8b14d601..2f1501f92b78049ed516d31f2f500393
 +            && entry.texture->flags().contains(BitmapTexture::Flags::TwoChannel) == flags.contains(BitmapTexture::Flags::TwoChannel)
 +#endif
              && entry.texture->flags().contains(BitmapTexture::Flags::NearestFiltering) == flags.contains(BitmapTexture::Flags::NearestFiltering);
-     });
+-    });
++    };
++    Entry* selectedEntry = std::find_if(m_textures.begin(), m_textures.end(), entryMatches);
++#if PLATFORM(HAIKU)
++    if (match == SizeMatchHaiku::Bucketed && selectedEntry != m_textures.end()) {
++        auto area = [](const Entry& entry) {
++            auto storage = entry.texture->allocatedSize();
++            return uint64_t(storage.width()) * storage.height();
++        };
++        for (auto* entry = selectedEntry + 1; entry != m_textures.end(); ++entry) {
++            if (area(*entry) < area(*selectedEntry) && entryMatches(*entry))
++                selectedEntry = entry;
++        }
++    }
++#endif
  
      if (selectedEntry == m_textures.end()) {
 +#if PLATFORM(HAIKU)
 +        s_createdTexturesHaiku.fetch_add(1, std::memory_order_relaxed);
 +        static const bool tracePool = getenv("SUMMIT_POOL_TRACE");
 +        if (tracePool) {
-+            fprintf(stderr, "Summit texture pool: new %dx%d flags=0x%x (%zu textures)\n", size.width(), size.height(), flags.toRaw(), m_textures.size());
++            fprintf(stderr, "Summit texture pool: new %dx%d flags=0x%x storage=%dx%d (%zu textures)\n", size.width(), size.height(), flags.toRaw(), allocatedSize.width(), allocatedSize.height(), m_textures.size());
 +            if (!strcmp(getenv("SUMMIT_POOL_TRACE"), "2"))
 +                WTFReportBacktraceWithPrefix("    ");
 +        }
-+#endif
++        m_textures.append(Entry(BitmapTexture::createHaiku(size, allocatedSize, flags)));
++#else
          m_textures.append(Entry(BitmapTexture::create(size, flags)));
++#endif
          selectedEntry = &m_textures.last();
          m_poolSizeInBytes += selectedEntry->texture->sizeInBytes();
-@@ -115,15 +176,35 @@ Ref<BitmapTexture> BitmapTexturePool::createTextureForImage(EGLImage image, cons
+     } else {
++#if PLATFORM(HAIKU)
++        if (match == SizeMatchHaiku::Bucketed)
++            selectedEntry->texture->resetWithinAllocationHaiku(size, flags);
++        else if (match == SizeMatchHaiku::Allocation) {
++            RELEASE_ASSERT(allocatedSize == selectedEntry->texture->allocatedSize());
++            selectedEntry->texture->resetWithinAllocationHaiku(size, flags);
++        } else {
++            RELEASE_ASSERT(size == selectedEntry->texture->allocatedSize());
++            selectedEntry->texture->reset(size, flags);
++        }
++        RELEASE_ASSERT(size == selectedEntry->texture->size());
++#else
+         RELEASE_ASSERT(size == selectedEntry->texture->size());
+         selectedEntry->texture->reset(size, flags);
++#endif
+     }
+ 
+     enterLimitExceededModeIfNeeded();
+@@ -115,15 +282,35 @@ Ref<BitmapTexture> BitmapTexturePool::createTextureForImage(EGLImage image, cons
  void BitmapTexturePool::scheduleReleaseUnusedTextures()
  {
      assertIsHeld(m_lock);
@@ -28542,7 +28795,7 @@ index 36206e6f966e88e056cf20705257fddb8b14d601..2f1501f92b78049ed516d31f2f500393
  
      auto hasTextures = [this] -> bool {
          assertIsHeld(m_lock);
-@@ -139,12 +220,28 @@ void BitmapTexturePool::releaseUnusedTexturesTimerFired()
+@@ -139,12 +326,28 @@ void BitmapTexturePool::releaseUnusedTexturesTimerFired()
      if (!hasTextures())
          return;
  
@@ -28573,7 +28826,7 @@ index 36206e6f966e88e056cf20705257fddb8b14d601..2f1501f92b78049ed516d31f2f500393
              auto matchCount = m_textures.removeAllMatching([this, &minUsedTime](const Entry& entry) {
                  assertIsHeld(m_lock);
                  if (entry.canBeReleased(minUsedTime)) {
-@@ -170,7 +267,7 @@ void BitmapTexturePool::releaseUnusedTexturesTimerFired()
+@@ -170,7 +373,7 @@ void BitmapTexturePool::releaseUnusedTexturesTimerFired()
      if (GLContextWrapper::currentContext())
          releaseTexturesIfNeeded();
  #if !PLATFORM(WIN)
@@ -28582,7 +28835,7 @@ index 36206e6f966e88e056cf20705257fddb8b14d601..2f1501f92b78049ed516d31f2f500393
          GLContext::ScopedGLContextCurrent scopedCurrent(*context);
          releaseTexturesIfNeeded();
      }
-@@ -194,7 +291,7 @@ void BitmapTexturePool::enterLimitExceededModeIfNeeded()
+@@ -194,7 +397,7 @@ void BitmapTexturePool::enterLimitExceededModeIfNeeded()
          m_onLimitExceededMode = true;
          m_releaseUnusedSecondsTolerance = s_releaseUnusedSecondsToleranceOnLimitExceeded;
          m_releaseUnusedTexturesTimerInterval = s_releaseUnusedTexturesTimerIntervalOnLimitExceeded;
@@ -28591,7 +28844,7 @@ index 36206e6f966e88e056cf20705257fddb8b14d601..2f1501f92b78049ed516d31f2f500393
      }
  }
  
-@@ -208,7 +305,7 @@ void BitmapTexturePool::exitLimitExceededModeIfNeeded()
+@@ -208,7 +411,7 @@ void BitmapTexturePool::exitLimitExceededModeIfNeeded()
      // exit the limit exceeded mode and set the default values for interval and tolerance again.
      if (m_poolSizeInBytes <= s_poolSizeLimitInBytes) {
          m_onLimitExceededMode = false;
@@ -28601,10 +28854,39 @@ index 36206e6f966e88e056cf20705257fddb8b14d601..2f1501f92b78049ed516d31f2f500393
      }
  }
 diff --git a/Source/WebCore/platform/graphics/egl/BitmapTexturePool.h b/Source/WebCore/platform/graphics/egl/BitmapTexturePool.h
-index 04c7f35b45eb11fc3e87bd16b5aa657e46501001..09ba02743c2a405b4aa1895da07a954280a9d83f 100644
+index 04c7f35b45eb11fc3e87bd16b5aa657e46501001..4d67ac10581dc3ca0eab05da79de8d2db0ea306d 100644
 --- a/Source/WebCore/platform/graphics/egl/BitmapTexturePool.h
 +++ b/Source/WebCore/platform/graphics/egl/BitmapTexturePool.h
-@@ -86,6 +86,9 @@ private:
+@@ -51,6 +51,17 @@ public:
+     ~BitmapTexturePool() = default;
+ 
+     WEBCORE_EXPORT Ref<BitmapTexture> acquireTexture(const IntSize&, OptionSet<BitmapTexture::Flags>);
++#if PLATFORM(HAIKU)
++    // For a caller that samples only the part of the texture it asked for
++    // (BitmapTexture::size(), within allocatedSize()): a free texture up to
++    // a bucket larger is reused, and a new one is made in a bucket's size,
++    // so a size that changes by a pixel or two does not make a new GPU
++    // texture each time. SUMMIT_TEXTURE_BUCKETS=0 gives exact sizes.
++    WEBCORE_EXPORT Ref<BitmapTexture> acquireBucketedTextureHaiku(const IntSize&, OptionSet<BitmapTexture::Flags>);
++    // A texture used at the given size whose storage is exactly
++    // allocatedSize (several textures sampled with one set of coordinates).
++    Ref<BitmapTexture> acquireTextureWithAllocationHaiku(const IntSize&, const IntSize& allocatedSize, OptionSet<BitmapTexture::Flags>);
++#endif
+ #if USE(GBM)
+     Ref<BitmapTexture> createTextureForImage(EGLImage, const IntSize&, OptionSet<BitmapTexture::Flags>);
+ #endif
+@@ -75,6 +86,10 @@ private:
+         MonotonicTime lastUsedTime;
+     };
+ 
++#if PLATFORM(HAIKU)
++    enum class SizeMatchHaiku : uint8_t { Exact, Bucketed, Allocation };
++    Ref<BitmapTexture> acquireTextureHaiku(const IntSize&, const IntSize& allocatedSize, OptionSet<BitmapTexture::Flags>, SizeMatchHaiku);
++#endif
+     void scheduleReleaseUnusedTextures();
+     void enterLimitExceededModeIfNeeded();
+     void exitLimitExceededModeIfNeeded();
+@@ -86,6 +101,9 @@ private:
      Vector<Ref<BitmapTexture>> m_imageTextures WTF_GUARDED_BY_LOCK(m_lock);
  #endif
      RunLoop::Timer m_releaseUnusedTexturesTimer WTF_GUARDED_BY_LOCK(m_lock);
@@ -51228,7 +51510,7 @@ index 9fd560e16a7e8b8b5cdf0ef54b46ab2dddc32e4f..37b7905e18e26b577ae0ec335352ae63
  
      // Y-axis should be inverted only when painting into the window.
 diff --git a/Source/WebCore/platform/graphics/texmap/TextureMapper.cpp b/Source/WebCore/platform/graphics/texmap/TextureMapper.cpp
-index 1b88532103dfc26c2a90aedce768e19f2e7059e6..33eb97b11231498d8e5ef8d811b6c5044044b60b 100644
+index 1b88532103dfc26c2a90aedce768e19f2e7059e6..33a0267d8a4499508d519939efa8f0e60d666b57 100644
 --- a/Source/WebCore/platform/graphics/texmap/TextureMapper.cpp
 +++ b/Source/WebCore/platform/graphics/texmap/TextureMapper.cpp
 @@ -41,9 +41,18 @@
@@ -51520,7 +51802,40 @@ index 1b88532103dfc26c2a90aedce768e19f2e7059e6..33eb97b11231498d8e5ef8d811b6c504
  static void prepareRoundedRectClip(TextureMapperShaderProgram& program, const float* rects, const float* transforms, int nRects)
  {
      glUseProgram(program.programID());
-@@ -532,6 +734,9 @@ void TextureMapper::drawTextureFragment(const BitmapTexture& sourceTexture, cons
+@@ -491,7 +693,21 @@ void TextureMapper::drawTexture(const BitmapTexture& texture, const FloatRect& t
+     // For tiled textures, allocated size may be larger than logical size.
+     // Adjust texture coordinates to sample only the logical region.
+     if (texture.size() != texture.allocatedSize()) [[unlikely]] {
++#if PLATFORM(HAIKU)
++        // BitmapTexturePool's bucketed textures: only the texture coordinates
++        // are scaled (in the vertex shader). The shader's clamp to the used
++        // part (ClampUVBounds) runs at medium precision, which on RADV
++        // through zink is 16 bits: text in such textures came out shifted
++        // by a fraction of a pixel. Tiles have their edge texels repeated
++        // past their size instead (CoordinatedBackingStoreTile), and
++        // intermediate surfaces are drawn at whole pixels.
++        TransformationMatrix usedPart = patternTransform();
++        usedPart.scaleNonUniform(float(texture.size().width()) / texture.allocatedSize().width(), float(texture.size().height()) / texture.allocatedSize().height());
++        SetForScope patternTransformScope(m_patternTransform, usedPart);
++        drawTexture(texture.id(), texture.colorConvertFlags() | (texture.isOpaque() ? OptionSet<TextureMapperFlags> { } : TextureMapperFlags::ShouldBlend), targetRect, matrix, opacity, allEdgesExposed);
++#else
+         drawTextureWithPhysicalSize(texture, targetRect, matrix, opacity, allEdgesExposed);
++#endif
+         return;
+     }
+ 
+@@ -527,11 +743,20 @@ void TextureMapper::drawTextureFragment(const BitmapTexture& sourceTexture, cons
+ {
+     const auto& textureSize = sourceTexture.size();
+     const auto& allocatedSize = sourceTexture.allocatedSize();
++#if PLATFORM(HAIKU)
++    // A fragment within the texture's size, drawn at whole pixels: nothing
++    // past it is sampled (see drawTexture() for the clamp's precision).
++    const bool needsUVClamping = false;
++#else
+     bool needsUVClamping = textureSize != allocatedSize;
++#endif
+ 
      TextureMapperShaderProgram::Options options = TextureMapperShaderProgram::TextureRGB;
      if (needsUVClamping) [[unlikely]]
          options.add(TextureMapperShaderProgram::ClampUVBounds);
@@ -51530,7 +51845,19 @@ index 1b88532103dfc26c2a90aedce768e19f2e7059e6..33eb97b11231498d8e5ef8d811b6c504
  
      Ref<TextureMapperShaderProgram> program = data().getShaderProgram(options);
  
-@@ -574,6 +779,12 @@ void TextureMapper::drawTextureFragment(const BitmapTexture& sourceTexture, cons
+@@ -539,7 +764,11 @@ void TextureMapper::drawTextureFragment(const BitmapTexture& sourceTexture, cons
+ 
+     // When allocated size differs from logical size, use allocated size for coordinate calculations
+     // so UV coordinates map to the correct physical texels.
++#if PLATFORM(HAIKU)
++    const auto& coordSize = allocatedSize;
++#else
+     const auto& coordSize = needsUVClamping ? allocatedSize : textureSize;
++#endif
+ 
+     auto textureFragmentMatrix = TransformationMatrix::identity;
+ 
+@@ -574,6 +803,12 @@ void TextureMapper::drawTextureFragment(const BitmapTexture& sourceTexture, cons
  
  void TextureMapper::drawTexture(GLuint texture, OptionSet<TextureMapperFlags> flags, const FloatRect& targetRect, const TransformationMatrix& modelViewMatrix, float opacity, AllEdgesExposed allEdgesExposed)
  {
@@ -51543,7 +51870,7 @@ index 1b88532103dfc26c2a90aedce768e19f2e7059e6..33eb97b11231498d8e5ef8d811b6c504
      bool useAntialiasing = allEdgesExposed == AllEdgesExposed::Yes && !modelViewMatrix.mapQuad(targetRect).isRectilinear();
  
      TextureMapperShaderProgram::Options options;
-@@ -607,6 +818,9 @@ void TextureMapper::drawTexture(GLuint texture, OptionSet<TextureMapperFlags> fl
+@@ -607,6 +842,9 @@ void TextureMapper::drawTexture(GLuint texture, OptionSet<TextureMapperFlags> fl
  
      if (flags.contains(TextureMapperFlags::ShouldPremultiply))
          options.add(TextureMapperShaderProgram::Premultiply);
@@ -51553,7 +51880,7 @@ index 1b88532103dfc26c2a90aedce768e19f2e7059e6..33eb97b11231498d8e5ef8d811b6c504
  
      Ref<TextureMapperShaderProgram> program = data().getShaderProgram(options);
  
-@@ -647,6 +861,12 @@ static void prepareTransformationMatrixWithFlags(TransformationMatrix& patternTr
+@@ -647,6 +885,12 @@ static void prepareTransformationMatrixWithFlags(TransformationMatrix& patternTr
  
  void TextureMapper::drawTexturePlanarYUV(const std::array<GLuint, 3>& textures, const std::array<GLfloat, 16>& yuvToRgbMatrix, OptionSet<TextureMapperFlags> flags, const FloatRect& targetRect, const TransformationMatrix& modelViewMatrix, float opacity, std::optional<GLuint> alphaPlane, TextureMapper::TransferFunction transferFunction, AllEdgesExposed allEdgesExposed)
  {
@@ -51566,7 +51893,7 @@ index 1b88532103dfc26c2a90aedce768e19f2e7059e6..33eb97b11231498d8e5ef8d811b6c504
      bool useAntialiasing = allEdgesExposed == AllEdgesExposed::Yes && !modelViewMatrix.mapQuad(targetRect).isRectilinear();
  
      TextureMapperShaderProgram::Options options = alphaPlane ? TextureMapperShaderProgram::TextureYUVA : TextureMapperShaderProgram::TextureYUV;
-@@ -801,6 +1021,14 @@ void TextureMapper::drawTexturePackedYUV(GLuint texture, const std::array<GLfloa
+@@ -801,6 +1045,14 @@ void TextureMapper::drawTexturePackedYUV(GLuint texture, const std::array<GLfloa
  
  void TextureMapper::drawSolidColor(const FloatRect& rect, const TransformationMatrix& matrix, const Color& color, bool isBlendingAllowed)
  {
@@ -51581,7 +51908,7 @@ index 1b88532103dfc26c2a90aedce768e19f2e7059e6..33eb97b11231498d8e5ef8d811b6c504
      OptionSet<TextureMapperFlags> flags;
      TextureMapperShaderProgram::Options options = TextureMapperShaderProgram::SolidColor;
      if (!matrix.mapQuad(rect).isRectilinear()) {
-@@ -817,6 +1045,9 @@ void TextureMapper::drawSolidColor(const FloatRect& rect, const TransformationMa
+@@ -817,6 +1069,9 @@ void TextureMapper::drawSolidColor(const FloatRect& rect, const TransformationMa
      }
  
      Ref<TextureMapperShaderProgram> program = data().getShaderProgram(options);
@@ -51591,7 +51918,7 @@ index 1b88532103dfc26c2a90aedce768e19f2e7059e6..33eb97b11231498d8e5ef8d811b6c504
      glUseProgram(program->programID());
  
      if (clipStack().isRoundedRectClipEnabled())
-@@ -828,6 +1059,13 @@ void TextureMapper::drawSolidColor(const FloatRect& rect, const TransformationMa
+@@ -828,6 +1083,13 @@ void TextureMapper::drawSolidColor(const FloatRect& rect, const TransformationMa
          flags.add(TextureMapperFlags::ShouldBlend);
  
      draw(rect, matrix, program.get(), GL_TRIANGLE_FAN, flags);
@@ -51605,7 +51932,7 @@ index 1b88532103dfc26c2a90aedce768e19f2e7059e6..33eb97b11231498d8e5ef8d811b6c504
  }
  
  void TextureMapper::clearColor(const Color& color)
-@@ -877,8 +1115,59 @@ void TextureMapper::drawUnitRect(TextureMapperShaderProgram& program, GLenum dra
+@@ -877,8 +1139,59 @@ void TextureMapper::drawUnitRect(TextureMapperShaderProgram& program, GLenum dra
      glBindBuffer(GL_ARRAY_BUFFER, 0);
  }
  
@@ -51665,7 +51992,21 @@ index 1b88532103dfc26c2a90aedce768e19f2e7059e6..33eb97b11231498d8e5ef8d811b6c504
      TransformationMatrix matrix(modelViewMatrix);
      matrix.multiply(TransformationMatrix::rectToRect(FloatRect(0, 0, 1, 1), rect));
  
-@@ -987,6 +1276,10 @@ void TextureMapper::drawTextureCopy(const BitmapTexture& sourceTexture, const Fl
+@@ -958,7 +1271,13 @@ void TextureMapper::drawTexturedQuadWithProgram(TextureMapperShaderProgram& prog
+ void TextureMapper::drawTextureCopy(const BitmapTexture& sourceTexture, const FloatRect& sourceRect, const FloatRect& targetRect)
+ {
+     Ref<TextureMapperShaderProgram> program = data().getShaderProgram({ TextureMapperShaderProgram::TextureCopy });
++#if PLATFORM(HAIKU)
++    // Texture coordinates are in the texture's storage, which may be larger
++    // than its size (BitmapTexturePool::acquireBucketedTextureHaiku()).
++    const auto textureSize = sourceTexture.allocatedSize();
++#else
+     const auto& textureSize = sourceTexture.size();
++#endif
+ 
+     glUseProgram(program->programID());
+ 
+@@ -987,11 +1306,19 @@ void TextureMapper::drawTextureCopy(const BitmapTexture& sourceTexture, const Fl
  
  void TextureMapper::drawBlurred(const BitmapTexture& sourceTexture, const FloatRect& rect, float radius, Direction direction, bool alphaBlur)
  {
@@ -51676,7 +52017,88 @@ index 1b88532103dfc26c2a90aedce768e19f2e7059e6..33eb97b11231498d8e5ef8d811b6c504
      Ref<TextureMapperShaderProgram> program = data().getShaderProgram({
          alphaBlur ? TextureMapperShaderProgram::AlphaBlur : TextureMapperShaderProgram::BlurFilter,
      });
-@@ -1278,6 +1571,28 @@ RefPtr<BitmapTexture> TextureMapper::applyFilters(RefPtr<BitmapTexture>& sourceT
+ 
++#if PLATFORM(HAIKU)
++    const auto textureSize = sourceTexture.allocatedSize();
++#else
+     const auto& textureSize = sourceTexture.size();
++#endif
+ 
+     glUseProgram(program->programID());
+ 
+@@ -1038,7 +1365,13 @@ RefPtr<BitmapTexture> TextureMapper::applyBlurFilter(RefPtr<BitmapTexture>& sour
+     if (radiusX < MinBlurRadius && radiusY < MinBlurRadius)
+         return sourceTexture;
+ 
++#if PLATFORM(HAIKU)
++    // Its passes sample only the part they drew (drawTextureCopy() and
++    // drawBlurred() clamp to it).
++    RefPtr<BitmapTexture> resultTexture = BitmapTexturePool::singleton().acquireBucketedTextureHaiku(textureSize, { BitmapTexture::Flags::SupportsAlpha });
++#else
+     RefPtr<BitmapTexture> resultTexture = BitmapTexturePool::singleton().acquireTexture(textureSize, { BitmapTexture::Flags::SupportsAlpha });
++#endif
+     IntSize currentSize = textureSize;
+     IntSize targetSize = currentSize;
+     Vector<Direction> blurDirections;
+@@ -1115,8 +1448,16 @@ RefPtr<BitmapTexture> TextureMapper::applyDropShadowFilter(RefPtr<BitmapTexture>
+ {
+     const auto& textureSize = sourceTexture->size();
+     auto& texturePool = BitmapTexturePool::singleton();
++#if PLATFORM(HAIKU)
++    // The last pass samples two of these textures with one set of texture
++    // coordinates: all of them have the source's storage size.
++    const auto allocatedSize = sourceTexture->allocatedSize();
++    RefPtr<BitmapTexture> resultTexture = texturePool.acquireTextureWithAllocationHaiku(textureSize, allocatedSize, { BitmapTexture::Flags::SupportsAlpha });
++    RefPtr<BitmapTexture> contentTexture = texturePool.acquireTextureWithAllocationHaiku(textureSize, allocatedSize, { BitmapTexture::Flags::SupportsAlpha });
++#else
+     RefPtr<BitmapTexture> resultTexture = texturePool.acquireTexture(textureSize, { BitmapTexture::Flags::SupportsAlpha });
+     RefPtr<BitmapTexture> contentTexture = texturePool.acquireTexture(textureSize, { BitmapTexture::Flags::SupportsAlpha });
++#endif
+     IntSize currentSize = textureSize;
+     IntSize targetSize = currentSize;
+     float radius = float(dropShadowFilter.stdDeviation());
+@@ -1221,7 +1562,14 @@ RefPtr<BitmapTexture> TextureMapper::applyDropShadowFilter(RefPtr<BitmapTexture>
+         auto [r, g, b, a] = premultiplied(dropShadowFilter.color().toColorTypeLossy<SRGBA<float>>()).resolved();
+         glUniform4f(program->colorLocation(), r, g, b, a);
+ 
++#if PLATFORM(HAIKU)
++        glUniform2f(program->texelSizeLocation(), 1.f / allocatedSize.width(), 1.f / allocatedSize.height());
++        TransformationMatrix usedPart = patternTransform();
++        usedPart.scaleNonUniform(float(textureSize.width()) / allocatedSize.width(), float(textureSize.height()) / allocatedSize.height());
++        SetForScope patternTransformScope(m_patternTransform, usedPart);
++#else
+         glUniform2f(program->texelSizeLocation(), 1.f / textureSize.width(), 1.f / textureSize.height());
++#endif
+ 
+         glActiveTexture(GL_TEXTURE1);
+         glBindTexture(GL_TEXTURE_2D, contentTexture->id());
+@@ -1241,7 +1589,11 @@ RefPtr<BitmapTexture> TextureMapper::applySinglePassFilter(RefPtr<BitmapTexture>
+         return sourceTexture;
+     }
+ 
++#if PLATFORM(HAIKU)
++    RefPtr<BitmapTexture> resultTexture = BitmapTexturePool::singleton().acquireBucketedTextureHaiku(sourceTexture->size(), { BitmapTexture::Flags::SupportsAlpha });
++#else
+     RefPtr<BitmapTexture> resultTexture = BitmapTexturePool::singleton().acquireTexture(sourceTexture->size(), { BitmapTexture::Flags::SupportsAlpha });
++#endif
+ 
+     bindSurface(resultTexture.get());
+ 
+@@ -1251,6 +1603,13 @@ RefPtr<BitmapTexture> TextureMapper::applySinglePassFilter(RefPtr<BitmapTexture>
+ 
+     prepareFilterProgram(program.get(), filter);
+     FloatRect targetRect(FloatPoint::zero(), sourceTexture->size());
++#if PLATFORM(HAIKU)
++    // The source's part of its storage (one texel per pixel, so nothing
++    // past it is sampled).
++    TransformationMatrix usedPart = patternTransform();
++    usedPart.scaleNonUniform(float(sourceTexture->size().width()) / sourceTexture->allocatedSize().width(), float(sourceTexture->size().height()) / sourceTexture->allocatedSize().height());
++    SetForScope patternTransformScope(m_patternTransform, usedPart);
++#endif
+     drawTexturedQuadWithProgram(program.get(), sourceTexture->id(), { }, targetRect, TransformationMatrix(), 1);
+ 
+     return resultTexture;
+@@ -1278,6 +1637,28 @@ RefPtr<BitmapTexture> TextureMapper::applyFilters(RefPtr<BitmapTexture>& sourceT
  
  RefPtr<BitmapTexture> TextureMapper::applyFilter(RefPtr<BitmapTexture>& sourceTexture, const Ref<const FilterOperation>& filter, bool defersLastPass)
  {
@@ -51705,7 +52127,7 @@ index 1b88532103dfc26c2a90aedce768e19f2e7059e6..33eb97b11231498d8e5ef8d811b6c504
      switch (filter->type()) {
      case FilterOperation::Type::Grayscale:
      case FilterOperation::Type::Sepia:
-@@ -1330,6 +1645,10 @@ void TextureMapper::bindDefaultSurface()
+@@ -1330,6 +1711,10 @@ void TextureMapper::bindDefaultSurface()
  
  void TextureMapper::bindSurface(BitmapTexture *surface)
  {
@@ -51716,7 +52138,7 @@ index 1b88532103dfc26c2a90aedce768e19f2e7059e6..33eb97b11231498d8e5ef8d811b6c504
      if (!surface) {
          bindDefaultSurface();
          return;
-@@ -1385,6 +1704,18 @@ bool TextureMapper::beginRoundedRectClip(const TransformationMatrix& modelViewMa
+@@ -1385,6 +1770,18 @@ bool TextureMapper::beginRoundedRectClip(const TransformationMatrix& modelViewMa
      FloatQuad quad = modelViewMatrix.projectQuad(targetRect.rect());
      IntRect rect = quad.enclosingBoundingBox();
  
@@ -51735,7 +52157,7 @@ index 1b88532103dfc26c2a90aedce768e19f2e7059e6..33eb97b11231498d8e5ef8d811b6c504
      clipStack().addRoundedRect(targetRect, modelViewMatrix.inverse().value());
      clipStack().intersect(rect);
      clipStack().applyIfNeeded();
-@@ -1402,6 +1733,10 @@ void TextureMapper::beginClip(const TransformationMatrix& modelViewMatrix, const
+@@ -1402,6 +1799,10 @@ void TextureMapper::beginClip(const TransformationMatrix& modelViewMatrix, const
          return;
  
      data().initializeStencil();
@@ -51883,7 +52305,7 @@ index 57adb06b0d3bf385a76bae2729c5e04dd5e7b268..cf25d7f33b561e652d9d051e47cf9fba
  
      size_t m_size;
 diff --git a/Source/WebCore/platform/graphics/texmap/TextureMapperLayer.cpp b/Source/WebCore/platform/graphics/texmap/TextureMapperLayer.cpp
-index 112d19b1676c297b0168941b1db5b619cd535a29..c5cfc869f1956431f60a7b70c00ad0641a7284cf 100644
+index 112d19b1676c297b0168941b1db5b619cd535a29..005751220bfd3c0506daa527adc3e1344ae8a522 100644
 --- a/Source/WebCore/platform/graphics/texmap/TextureMapperLayer.cpp
 +++ b/Source/WebCore/platform/graphics/texmap/TextureMapperLayer.cpp
 @@ -21,6 +21,16 @@
@@ -52664,7 +53086,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..c5cfc869f1956431f60a7b70c00ad064
 +            surfaceSize = IntSize(std::min(roundUpToMultipleOf(surfaceGrid, whole.width()), maxTextureSize.width()),
 +                std::min(roundUpToMultipleOf(surfaceGrid, whole.height()), maxTextureSize.height()));
 +        }
-+        auto surface = BitmapTexturePool::singleton().acquireTexture(surfaceSize, { BitmapTexture::Flags::SupportsAlpha });
++        auto surface = BitmapTexturePool::singleton().acquireBucketedTextureHaiku(surfaceSize, { BitmapTexture::Flags::SupportsAlpha });
 +        {
 +            SetForScope scopedSurface(options.surface, surface.ptr());
 +            SetForScope scopedOffset(options.offset, -toIntSize(whole.location()));
@@ -52762,7 +53184,47 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..c5cfc869f1956431f60a7b70c00ad064
      options.textureMapper.bindSurface(options.surface.get());
      if (hasMask)
          m_state.maskLayer->applyMask(options);
-@@ -1142,6 +1816,10 @@ void TextureMapperLayer::paintSelfAndChildrenWithIntermediateSurface(TextureMapp
+@@ -1109,9 +1783,27 @@ static void commitSurface(TextureMapperPaintOptions& options, BitmapTexture& sur
+     options.textureMapper.drawTexture(surface, targetRect, { }, opacity);
+ }
+ 
++#if PLATFORM(HAIKU)
++// Intermediate surfaces are drawn at whole pixels (commitSurface()) with
++// TextureMapper::drawTexture(), which samples only their size's part of a
++// larger texture: they come from the pool's buckets, so a group or a
++// filtered layer whose surface changes size by a pixel or two (a fractional
++// move, an animated size, the part in view while scrolling) reuses textures
++// instead of making one each frame. (A flattened 3D layer's surfaces are
++// drawn transformed, and keep exact sizes.)
++static Ref<BitmapTexture> acquireSurfaceHaiku(const IntSize& size)
++{
++    return BitmapTexturePool::singleton().acquireBucketedTextureHaiku(size, { BitmapTexture::Flags::SupportsAlpha });
++}
++#endif
++
+ void TextureMapperLayer::paintWithIntermediateSurface(TextureMapperPaintOptions& options, const IntRect& rect)
+ {
++#if PLATFORM(HAIKU)
++    auto surface = acquireSurfaceHaiku(rect.size());
++#else
+     auto surface = BitmapTexturePool::singleton().acquireTexture(rect.size(), { BitmapTexture::Flags::SupportsAlpha });
++#endif
+     {
+         SetForScope scopedSurface(options.surface, surface.ptr());
+         SetForScope scopedOffset(options.offset, -toIntSize(rect.location()));
+@@ -1127,7 +1819,11 @@ void TextureMapperLayer::paintWithIntermediateSurface(TextureMapperPaintOptions&
+ 
+ void TextureMapperLayer::paintSelfAndChildrenWithIntermediateSurface(TextureMapperPaintOptions& options, const IntRect& rect)
+ {
++#if PLATFORM(HAIKU)
++    auto surface = acquireSurfaceHaiku(rect.size());
++#else
+     auto surface = BitmapTexturePool::singleton().acquireTexture(rect.size(), { BitmapTexture::Flags::SupportsAlpha });
++#endif
+     {
+         SetForScope scopedSurface(options.surface, surface.ptr());
+         SetForScope scopedOffset(options.offset, -toIntSize(rect.location()));
+@@ -1142,6 +1838,10 @@ void TextureMapperLayer::paintSelfAndChildrenWithIntermediateSurface(TextureMapp
  
  void TextureMapperLayer::paintSelfChildrenReplicaFilterAndMask(TextureMapperPaintOptions& options)
  {
@@ -52773,7 +53235,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..c5cfc869f1956431f60a7b70c00ad064
      bool hasFilterOrMask = [&] {
          if (hasFilters())
              return true;
-@@ -1165,8 +1843,24 @@ void TextureMapperLayer::paintSelfChildrenReplicaFilterAndMask(TextureMapperPain
+@@ -1165,8 +1865,24 @@ void TextureMapperLayer::paintSelfChildrenReplicaFilterAndMask(TextureMapperPain
  
  void TextureMapperLayer::paintRecursive(TextureMapperPaintOptions& options)
  {
@@ -52798,7 +53260,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..c5cfc869f1956431f60a7b70c00ad064
  
      SetForScope scopedOpacity(options.opacity, options.opacity * m_currentOpacity);
  
-@@ -1184,8 +1878,12 @@ void TextureMapperLayer::paintFlattened(TextureMapperPaintOptions& options)
+@@ -1184,8 +1900,12 @@ void TextureMapperLayer::paintFlattened(TextureMapperPaintOptions& options)
  {
      // If painting a backdrop for a flattened layer, processing should stop here.
      // Only the elements up to the flattened layer need to be painted into the backdrop buffer.
@@ -52812,7 +53274,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..c5cfc869f1956431f60a7b70c00ad064
  
      if (m_state.backdropLayer && !options.backdropLayer)
          paintBackdrop(options);
-@@ -1495,6 +2193,11 @@ void TextureMapperLayer::setBackgroundColor(const Color& color)
+@@ -1495,6 +2215,11 @@ void TextureMapperLayer::setBackgroundColor(const Color& color)
  void TextureMapperLayer::setFilters(const FilterOperations& filters)
  {
      m_state.filters = filters;
@@ -53412,7 +53874,7 @@ index 8723b9e2f90788a74d1ddc536a399463921231ec..4039a2586a2832d85258b7dc33b0db50
  
  } // namespace WebKit
 diff --git a/Source/WebCore/platform/graphics/texmap/coordinated/CoordinatedBackingStoreTile.cpp b/Source/WebCore/platform/graphics/texmap/coordinated/CoordinatedBackingStoreTile.cpp
-index 3f7acfab36c398a8e7af4c55768bdef27cdac477..1d8a3db1e5009fc250226ac1900c88172ffe6a83 100644
+index 3f7acfab36c398a8e7af4c55768bdef27cdac477..5d1746d061d1c9863882e3e02a09b141df03dfd7 100644
 --- a/Source/WebCore/platform/graphics/texmap/coordinated/CoordinatedBackingStoreTile.cpp
 +++ b/Source/WebCore/platform/graphics/texmap/coordinated/CoordinatedBackingStoreTile.cpp
 @@ -25,6 +25,7 @@
@@ -53460,7 +53922,26 @@ index 3f7acfab36c398a8e7af4c55768bdef27cdac477..1d8a3db1e5009fc250226ac1900c8817
  CoordinatedBackingStoreTile::CoordinatedBackingStoreTile(float scale)
      : m_scale(scale)
  {
-@@ -70,6 +99,17 @@ void CoordinatedBackingStoreTile::ensureTexture(const IntSize& size, Coordinated
+@@ -63,13 +92,36 @@ void CoordinatedBackingStoreTile::ensureTexture(const IntSize& size, Coordinated
+ #endif
+ 
+     WTFBeginSignpost(this, AcquireTexture);
++#if PLATFORM(HAIKU)
++    // A tile at a layer's right or bottom edge is as large as what is left
++    // of the layer there, so it changes size with the layer. Its texture
++    // may be larger than the tile (on a grid); TextureMapper::drawTexture()
++    // and drawTextureFragment() sample only the tile's part of it, and the
++    // texel past the tile's edge (see processPendingUpdates()).
++    if (!m_texture)
++        m_texture = BitmapTexturePool::singleton().acquireBucketedTextureHaiku(size, flags);
++    else if (buffer.supportsAlpha() == m_texture->isOpaque())
++        m_texture->resetWithinAllocationHaiku(size, flags);
++#else
+     if (!m_texture)
+         m_texture = BitmapTexturePool::singleton().acquireTexture(size, flags);
+     else if (buffer.supportsAlpha() == m_texture->isOpaque())
+         m_texture->reset(size, flags);
++#endif
      WTFEndSignpost(this, AcquireTexture);
  }
  
@@ -53478,7 +53959,7 @@ index 3f7acfab36c398a8e7af4c55768bdef27cdac477..1d8a3db1e5009fc250226ac1900c8817
  void CoordinatedBackingStoreTile::processPendingUpdates()
  {
      auto updates = WTF::move(m_updates);
-@@ -83,7 +123,13 @@ void CoordinatedBackingStoreTile::processPendingUpdates()
+@@ -83,7 +135,13 @@ void CoordinatedBackingStoreTile::processPendingUpdates()
  
          WTFBeginSignpost(this, CoordinatedSwapBuffer, "%u/%zu, rect %ix%i+%i+%i", updateIndex + 1, updatesCount, update.tileRect.x(), update.tileRect.y(), update.tileRect.width(), update.tileRect.height());
  
@@ -53492,7 +53973,7 @@ index 3f7acfab36c398a8e7af4c55768bdef27cdac477..1d8a3db1e5009fc250226ac1900c8817
  
          FloatRect unscaledTileRect(update.tileRect);
          unscaledTileRect.scale(1. / m_scale);
-@@ -91,7 +137,13 @@ void CoordinatedBackingStoreTile::processPendingUpdates()
+@@ -91,7 +149,13 @@ void CoordinatedBackingStoreTile::processPendingUpdates()
          if (unscaledTileRect != m_rect) {
              m_rect = unscaledTileRect;
              m_texture = nullptr;
@@ -53506,7 +53987,7 @@ index 3f7acfab36c398a8e7af4c55768bdef27cdac477..1d8a3db1e5009fc250226ac1900c8817
  
  #if USE(SKIA)
          if (update.buffer->isBackedByOpenGL()) {
-@@ -118,12 +170,46 @@ void CoordinatedBackingStoreTile::processPendingUpdates()
+@@ -118,12 +182,71 @@ void CoordinatedBackingStoreTile::processPendingUpdates()
          }
  #endif
          auto& buffer = static_cast<CoordinatedUnacceleratedTileBuffer&>(update.buffer.get());
@@ -53525,8 +54006,10 @@ index 3f7acfab36c398a8e7af4c55768bdef27cdac477..1d8a3db1e5009fc250226ac1900c8817
 +            // Part of a tile that had nothing is painted: the rest of its
 +            // new texture, which may have been another tile's, is cleared.
 +            ensureTexture(update.tileRect.size(), buffer);
-+            auto nothing = MallocSpan<unsigned char>::zeroedMalloc(static_cast<size_t>(update.tileRect.width()) * update.tileRect.height() * 4);
-+            m_texture->updateContents(nothing.span().data(), IntRect({ }, update.tileRect.size()), { }, update.tileRect.width() * 4, update.buffer->pixelFormat());
++            // All of its storage, which may be larger than the tile.
++            auto storage = m_texture->allocatedSize();
++            auto nothing = MallocSpan<unsigned char>::zeroedMalloc(static_cast<size_t>(storage.width()) * storage.height() * 4);
++            m_texture->updateContents(nothing.span().data(), IntRect({ }, storage), { }, storage.width() * 4, update.buffer->pixelFormat());
 +        }
 +        m_isTransparent = false;
 +#endif
@@ -53538,6 +54021,29 @@ index 3f7acfab36c398a8e7af4c55768bdef27cdac477..1d8a3db1e5009fc250226ac1900c8817
          WTFBeginSignpost(this, CopyTextureCPUToGPU);
          ASSERT(!update.buffer->isBackedByOpenGL());
          m_texture->updateContents(buffer.data(), update.sourceRect, update.bufferOffset, buffer.stride(), update.buffer->pixelFormat());
++#if PLATFORM(HAIKU)
++        // A texture larger than the tile gets the tile's last column and row
++        // once more just past them. Drawn at a fraction of a pixel (or
++        // scaled), bilinear filtering reads up to one texel past the tile's
++        // edge, which a texture of the tile's size clamps to the edge texel;
++        // this gives the same pixels without clamping in the shader (whose
++        // clamp runs at medium precision: text came out shifted by a
++        // fraction of a pixel on the laptop's GPU).
++        {
++            const auto size = m_texture->size();
++            const auto storage = m_texture->allocatedSize();
++            const auto& rect = update.sourceRect;
++            const IntPoint offset = update.bufferOffset;
++            const bool right = storage.width() > size.width() && rect.maxX() == size.width();
++            const bool bottom = storage.height() > size.height() && rect.maxY() == size.height();
++            if (right)
++                m_texture->updateContents(buffer.data(), IntRect(size.width(), rect.y(), 1, rect.height()), offset + IntSize(rect.width() - 1, 0), buffer.stride(), update.buffer->pixelFormat());
++            if (bottom)
++                m_texture->updateContents(buffer.data(), IntRect(rect.x(), size.height(), rect.width(), 1), offset + IntSize(0, rect.height() - 1), buffer.stride(), update.buffer->pixelFormat());
++            if (right && bottom)
++                m_texture->updateContents(buffer.data(), IntRect(size.width(), size.height(), 1, 1), offset + IntSize(rect.width() - 1, rect.height() - 1), buffer.stride(), update.buffer->pixelFormat());
++        }
++#endif
          WTFEndSignpost(this, CopyTextureCPUToGPU);
 +#if PLATFORM(HAIKU)
 +        if (s_countsUpdates) {
@@ -168076,7 +168582,7 @@ index 57163f65873e5a481e5ef5a4ec3beec4b40b7cea..c794adfac01b302829288e03746d1f5d
      bool m_compositionRequired { false };
  #if ENABLE(SCROLLING_THREAD)
 diff --git a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/ThreadedCompositor.cpp b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/ThreadedCompositor.cpp
-index c238029ad9c99c5028ea7e456520af85d1d85532..8b0f7ef657ff1dc59c2e67543f000bb0504c3efe 100644
+index c238029ad9c99c5028ea7e456520af85d1d85532..2ee1af28577f1ae2120f5948dfa4e967be925886 100644
 --- a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/ThreadedCompositor.cpp
 +++ b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/ThreadedCompositor.cpp
 @@ -26,6 +26,11 @@
@@ -168121,7 +168627,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..8b0f7ef657ff1dc59c2e67543f000bb0
  #if USE(GLIB_EVENT_LOOP)
  #include <wtf/glib/RunLoopSourcePriority.h>
  #endif
-@@ -68,18 +87,46 @@ WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_END
+@@ -68,18 +87,47 @@ WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_END
  #include <GLES2/gl2.h>
  #endif
  
@@ -168134,6 +168640,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..8b0f7ef657ff1dc59c2e67543f000bb0
 +#if PLATFORM(HAIKU)
 +namespace WebCore {
 +unsigned takeCreatedPoolTexturesHaiku(); // BitmapTexturePool.cpp
++unsigned takeTextureAllocationsHaiku(); // BitmapTexture.cpp
 +}
 +#endif
 +
@@ -168168,7 +168675,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..8b0f7ef657ff1dc59c2e67543f000bb0
      , m_layerTreeHost(&layerTreeHost)
      , m_surface(AcceleratedSurface::create(webPage, [this] { frameComplete(); }, AcceleratedSurface::RenderingPurpose::Composited))
      , m_sceneState(&sceneState)
-@@ -90,6 +137,19 @@ ThreadedCompositor::ThreadedCompositor(WebPage& webPage, LayerTreeHost& layerTre
+@@ -90,6 +138,19 @@ ThreadedCompositor::ThreadedCompositor(WebPage& webPage, LayerTreeHost& layerTre
  {
      ASSERT(RunLoop::isMain());
  
@@ -168188,7 +168695,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..8b0f7ef657ff1dc59c2e67543f000bb0
      lazyInitialize(m_didCompositeRunLoopObserver, makeUnique<RunLoopObserver>(RunLoopObserver::WellKnownOrder::GraphicsCommit, [this] {
          this->didCompositeRunLoopObserverFired();
      }));
-@@ -127,6 +187,11 @@ ThreadedCompositor::ThreadedCompositor(WebPage& webPage, LayerTreeHost& layerTre
+@@ -127,6 +188,11 @@ ThreadedCompositor::ThreadedCompositor(WebPage& webPage, LayerTreeHost& layerTre
          }
  
          glGetIntegerv(GL_MAX_TEXTURE_SIZE, &m_maxTextureSize);
@@ -168200,7 +168707,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..8b0f7ef657ff1dc59c2e67543f000bb0
  
  #if USE(TEXTURE_MAPPER)
          m_context = WTF::move(context);
-@@ -136,9 +201,323 @@ ThreadedCompositor::ThreadedCompositor(WebPage& webPage, LayerTreeHost& layerTre
+@@ -136,9 +202,323 @@ ThreadedCompositor::ThreadedCompositor(WebPage& webPage, LayerTreeHost& layerTre
          m_threadSafeGrContext = PlatformDisplay::sharedDisplay().skiaGrContext()->threadSafeProxy();
  #endif
      });
@@ -168524,7 +169031,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..8b0f7ef657ff1dc59c2e67543f000bb0
  
  uint64_t ThreadedCompositor::surfaceID() const
  {
-@@ -160,11 +539,20 @@ void ThreadedCompositor::invalidate()
+@@ -160,11 +540,20 @@ void ThreadedCompositor::invalidate()
      m_didCompositeRunLoopObserver->invalidate();
      m_workQueue->dispatchSync([this] {
  #if USE(TEXTURE_MAPPER)
@@ -168545,7 +169052,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..8b0f7ef657ff1dc59c2e67543f000bb0
          flushCompositingState(CompositionReason::RenderingUpdate);
  
          m_sceneState->invalidateCommittedLayers();
-@@ -184,6 +572,59 @@ void ThreadedCompositor::invalidate()
+@@ -184,6 +573,59 @@ void ThreadedCompositor::invalidate()
      m_surface = nullptr;
  }
  
@@ -168605,7 +169112,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..8b0f7ef657ff1dc59c2e67543f000bb0
  void ThreadedCompositor::startRenderTimer()
  {
      assertIsHeld(m_state.lock);
-@@ -216,8 +657,37 @@ void ThreadedCompositor::updateRenderTimer()
+@@ -216,8 +658,37 @@ void ThreadedCompositor::updateRenderTimer()
      }
  
      if (m_state.isRenderTimerActive) {
@@ -168645,7 +169152,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..8b0f7ef657ff1dc59c2e67543f000bb0
      } else
          m_renderTimer.stop();
  }
-@@ -364,6 +834,10 @@ TargetContents ThreadedCompositor::paintToCurrentGLContext(const TransformationM
+@@ -364,6 +835,10 @@ TargetContents ThreadedCompositor::paintToCurrentGLContext(const TransformationM
  #if USE(TEXTURE_MAPPER)
  void ThreadedCompositor::paintToTextureMapper(const TransformationMatrix& matrix, const IntSize& size, const OptionSet<CompositionReason>& reasons)
  {
@@ -168656,7 +169163,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..8b0f7ef657ff1dc59c2e67543f000bb0
      FloatRect clipRect(FloatPoint { }, size);
      TextureMapperLayer& currentRootLayer = m_sceneState->rootLayer().ensureTarget();
      if (currentRootLayer.transform() != matrix)
-@@ -371,11 +845,23 @@ void ThreadedCompositor::paintToTextureMapper(const TransformationMatrix& matrix
+@@ -371,11 +846,23 @@ void ThreadedCompositor::paintToTextureMapper(const TransformationMatrix& matrix
  
      bool sceneHasRunningAnimations = currentRootLayer.applyAnimationsRecursively(MonotonicTime::now());
  
@@ -168680,7 +169187,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..8b0f7ef657ff1dc59c2e67543f000bb0
      currentRootLayer.prepareForPainting(*m_textureMapper);
      if (m_damage.flags) {
          Damage frameDamage(size, m_damage.flags->contains(DamagePropagationFlags::Unified) ? Damage::Mode::BoundingBox : Damage::Mode::Rectangles);
-@@ -383,7 +869,26 @@ void ThreadedCompositor::paintToTextureMapper(const TransformationMatrix& matrix
+@@ -383,7 +870,26 @@ void ThreadedCompositor::paintToTextureMapper(const TransformationMatrix& matrix
          WTFBeginSignpost(this, CollectDamage);
          currentRootLayer.collectDamage(*m_textureMapper, frameDamage);
          WTFEndSignpost(this, CollectDamage);
@@ -168707,7 +169214,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..8b0f7ef657ff1dc59c2e67543f000bb0
          recordFrameDamage(WTF::move(frameDamage));
  
          if (m_damage.flags->contains(DamagePropagationFlags::UseForCompositing)) {
-@@ -392,23 +897,62 @@ void ThreadedCompositor::paintToTextureMapper(const TransformationMatrix& matrix
+@@ -392,23 +898,62 @@ void ThreadedCompositor::paintToTextureMapper(const TransformationMatrix& matrix
                  m_textureMapper->setDamage(std::nullopt);
              } else {
                  const auto& damageSinceLastSurfaceUse = m_surface->renderTargetDamage();
@@ -168770,7 +169277,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..8b0f7ef657ff1dc59c2e67543f000bb0
  
  #if ENABLE(DAMAGE_TRACKING)
      if (rectContainingRegionThatActuallyChanged)
-@@ -426,6 +970,21 @@ void ThreadedCompositor::paintToTextureMapper(const TransformationMatrix& matrix
+@@ -426,6 +971,21 @@ void ThreadedCompositor::paintToTextureMapper(const TransformationMatrix& matrix
  
      m_textureMapper->endClip();
      m_textureMapper->endPainting();
@@ -168792,7 +169299,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..8b0f7ef657ff1dc59c2e67543f000bb0
  
      if (sceneHasRunningAnimations)
          requestComposition(CompositionReason::Animation);
-@@ -525,8 +1084,17 @@ void ThreadedCompositor::recordFrameDamage(Damage&& damage)
+@@ -525,8 +1085,17 @@ void ThreadedCompositor::recordFrameDamage(Damage&& damage)
  
      // Nothing changed this frame: an empty damage contributes nothing to the targets, since Damage::add()
      // ignores empty damage. Skip it rather than replace the recorded frame damage with an empty one.
@@ -168811,7 +169318,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..8b0f7ef657ff1dc59c2e67543f000bb0
  
      m_surface->setFrameDamage(WTF::move(damage));
  }
-@@ -555,6 +1123,53 @@ void ThreadedCompositor::renderLayerTree()
+@@ -555,6 +1124,53 @@ void ThreadedCompositor::renderLayerTree()
  
      if (m_suspendedCount > 0)
          return;
@@ -168865,7 +169372,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..8b0f7ef657ff1dc59c2e67543f000bb0
  
      OptionSet<CompositionReason> reasons;
      bool shouldNotifiyDidComposite = false;
-@@ -580,11 +1195,31 @@ void ThreadedCompositor::renderLayerTree()
+@@ -580,11 +1196,31 @@ void ThreadedCompositor::renderLayerTree()
  
          ASSERT(m_state.state == State::Scheduled);
          m_state.state = State::InProgress;
@@ -168898,7 +169405,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..8b0f7ef657ff1dc59c2e67543f000bb0
  #endif
  
      // Retrieve the scene attributes in a thread-safe manner.
-@@ -599,29 +1234,90 @@ void ThreadedCompositor::renderLayerTree()
+@@ -599,29 +1235,90 @@ void ThreadedCompositor::renderLayerTree()
      if (viewportSize.isEmpty())
          return;
  
@@ -168992,7 +169499,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..8b0f7ef657ff1dc59c2e67543f000bb0
      WTFEmitSignpost(this, DidRenderFrame, "reasons: %s", reasonsToString(reasons).utf8());
  
  #if USE(TEXTURE_MAPPER)
-@@ -631,8 +1327,69 @@ void ThreadedCompositor::renderLayerTree()
+@@ -631,8 +1328,69 @@ void ThreadedCompositor::renderLayerTree()
      PlatformDisplay::sharedDisplay().skiaGLContext()->swapBuffers();
  #endif
  
@@ -169044,14 +169551,14 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..8b0f7ef657ff1dc59c2e67543f000bb0
 +#endif
 +#if PLATFORM(HAIKU)
 +    if (traceTiming)
-+        std::fprintf(stderr, "Summit compositor timing: pid=%d at=%lld async=%d update=%d surface=%.1f flush=%.1f paint=%.1f send=%.1f total=%.1f tiles=%u newTextures=%u tileMpx=%.2f paintWait=%.1f texture=%.1f upload=%.1f swap=%.1f read=%.1f ipc=%.1f deferred=%d draws=%u blended=%u intoSurfaces=%u surfaces=%u blurs=%u drawMpx=%.1f blendedMpx=%.1f transparentTiles=%u waitingInView=%u texturelessInView=%u drawCpu=%.1f stencilClips=%u poolNew=%u\n",
++        std::fprintf(stderr, "Summit compositor timing: pid=%d at=%lld async=%d update=%d surface=%.1f flush=%.1f paint=%.1f send=%.1f total=%.1f tiles=%u newTextures=%u tileMpx=%.2f paintWait=%.1f texture=%.1f upload=%.1f swap=%.1f read=%.1f ipc=%.1f deferred=%d draws=%u blended=%u intoSurfaces=%u surfaces=%u blurs=%u drawMpx=%.1f blendedMpx=%.1f transparentTiles=%u waitingInView=%u texturelessInView=%u drawCpu=%.1f stencilClips=%u poolNew=%u gpuTextures=%u\n",
 +            static_cast<int>(getpid()), static_cast<long long>(startedAt), reasons.contains(CompositionReason::AsyncScrolling),
 +            reasons.contains(CompositionReason::RenderingUpdate), (surfaceAt - startedAt) / 1000.0,
 +            (flushedAt - surfaceAt) / 1000.0, (paintedAt - flushedAt) / 1000.0,
 +            (system_time() - paintedAt) / 1000.0, (system_time() - startedAt) / 1000.0,
 +            tileUpdates.tiles, tileUpdates.newTextures, tileUpdates.megapixels, tileUpdates.paintWaitMs, tileUpdates.textureMs, tileUpdates.uploadMs,
 +            (swappedAt - paintedAt) / 1000.0, (readAt - swappedAt) / 1000.0, (system_time() - readAt) / 1000.0, deferredUploads,
-+            drawStats.draws, drawStats.blendedDraws, drawStats.drawsIntoSurfaces, drawStats.surfaceBinds, drawStats.blurPasses, drawStats.megapixels, drawStats.blendedMegapixels, tileUpdates.transparentTiles, waitingTiles, texturelessTiles, drawStats.drawMs, drawStats.stencilClips, WebCore::takeCreatedPoolTexturesHaiku());
++            drawStats.draws, drawStats.blendedDraws, drawStats.drawsIntoSurfaces, drawStats.surfaceBinds, drawStats.blurPasses, drawStats.megapixels, drawStats.blendedMegapixels, tileUpdates.transparentTiles, waitingTiles, texturelessTiles, drawStats.drawMs, drawStats.stencilClips, WebCore::takeCreatedPoolTexturesHaiku(), WebCore::takeTextureAllocationsHaiku());
 +    // The tiles that were left over are uploaded by the compositions that
 +    // follow, which this asks for in case nothing else does.
 +    if (deferredUploads)
@@ -169062,7 +169569,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..8b0f7ef657ff1dc59c2e67543f000bb0
  
      RunLoop::mainSingleton().dispatch([this, protectedThis = Ref { *this }] {
          if (m_layerTreeHost)
-@@ -656,6 +1413,13 @@ void ThreadedCompositor::requestComposition(CompositionReason reason)
+@@ -656,6 +1414,13 @@ void ThreadedCompositor::requestComposition(CompositionReason reason)
  {
      Locker locker { m_state.lock };
      m_state.reasons.add(reason);
@@ -169076,7 +169583,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..8b0f7ef657ff1dc59c2e67543f000bb0
      scheduleUpdateLocked();
  }
  
-@@ -679,6 +1443,10 @@ ASCIILiteral ThreadedCompositor::stateToString(ThreadedCompositor::State state)
+@@ -679,6 +1444,10 @@ ASCIILiteral ThreadedCompositor::stateToString(ThreadedCompositor::State state)
  void ThreadedCompositor::scheduleUpdateLocked()
  {
      assertIsHeld(m_state.lock);
@@ -169087,7 +169594,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..8b0f7ef657ff1dc59c2e67543f000bb0
      WTFEmitSignpost(this, ScheduleComposition, "reasons: %s, state: %s, waiting for tiles: %s, render timer active: %s", reasonsToString(m_state.reasons).utf8(), stateToString(m_state.state).characters(), m_state.isWaitingForTiles ? "yes" : "no", m_state.isRenderTimerActive ? "yes" : "no");
  
      switch (m_state.state) {
-@@ -703,6 +1471,10 @@ void ThreadedCompositor::scheduleUpdateLocked()
+@@ -703,6 +1472,10 @@ void ThreadedCompositor::scheduleUpdateLocked()
  void ThreadedCompositor::frameComplete()
  {
      ASSERT(m_workQueue->runLoop().isCurrent());
@@ -169098,7 +169605,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..8b0f7ef657ff1dc59c2e67543f000bb0
  
      Locker locker { m_state.lock };
      WTFEmitSignpost(this, FrameComplete, "reasons: %s, state: %s, waiting for tiles: %s", reasonsToString(m_state.reasons).utf8(), stateToString(m_state.state).characters(), m_state.isWaitingForTiles ? "yes" : "no");
-@@ -726,6 +1498,112 @@ void ThreadedCompositor::frameComplete()
+@@ -726,6 +1499,112 @@ void ThreadedCompositor::frameComplete()
      }
  }
  
@@ -169211,7 +169718,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..8b0f7ef657ff1dc59c2e67543f000bb0
  RunLoop* ThreadedCompositor::runLoop()
  {
      return m_surface ? &m_workQueue->runLoop() : nullptr;
-@@ -747,7 +1625,15 @@ void ThreadedCompositor::updateSceneAttributes(const IntSize& size, float device
+@@ -747,7 +1626,15 @@ void ThreadedCompositor::updateSceneAttributes(const IntSize& size, float device
  {
      m_attributes.viewportSize = size;
      m_attributes.deviceScaleFactor = deviceScaleFactor;
