@@ -23,6 +23,7 @@ engine and the private dependency closure.
 | #29 WebUSB | Window bindings, native chooser, origin grants and native transfer backend | 54/54 browser checks; 550 policy checks; native protected-device and closed-session guards; real chooser click returns NotFoundError with no eligible devices |
 | #122 WebHID | `navigator.hid` with a native chooser, origin grants, input/output/feature reports and connection events over the WebUSB broker | 48 descriptor parser checks (`tests/HIDDescriptorTests.cpp`, devices from the Framework laptop); VIA configures the Keychron Q6 on the Framework laptop (checked by the reporter, 23 October) |
 | #30 Toolbar icons | Native scalable HVIF toolbar resources | All normal/disabled icon variants and complete native toolbar visually checked |
+| #132 Navigation API | `window.navigation` and `NavigateEvent`, on in Chrome, Safari and WebKitGTK; WebKit leaves the preference off for other ports. Reddit, given no native API, loaded its polyfill, which ignores a Back whose history entry the page had rewritten with a `replaceState` it did not wrap: the address went back to the feed and the post stayed (with uBlock Origin often, without it now and then). `SUMMIT_NAVIGATION_API=0` turns it off | Laptop with uBlock Origin and Privacy Badger: feed back after Back in 8 of 8 rounds (4 of 8 and worse before); ordinary Back/Forward and fragments unchanged |
 
 Five consecutive OffscreenCanvas and image-codec runs pass with no new crash
 reports or debugger events. The final installed desktop launcher was also
