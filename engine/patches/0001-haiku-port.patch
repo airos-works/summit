@@ -12952,6 +12952,107 @@ index 3bc098d85c2ced569a5ad2333f58eef95afb5aff..1aadc3624da0945d69be9b07ebda02cf
  
  bool CryptoKeyOKP::supportsNamedCurve()
  {
+diff --git a/Source/WebCore/crypto/openssl/CryptoAlgorithmAESCBCOpenSSL.cpp b/Source/WebCore/crypto/openssl/CryptoAlgorithmAESCBCOpenSSL.cpp
+index 71bca0d352669f8b8e6be7b7db6febf176861ee0..b9096cc8381595c09fa8571479bf5c80e6c5ad9d 100644
+--- a/Source/WebCore/crypto/openssl/CryptoAlgorithmAESCBCOpenSSL.cpp
++++ b/Source/WebCore/crypto/openssl/CryptoAlgorithmAESCBCOpenSSL.cpp
+@@ -48,11 +48,34 @@ static const EVP_CIPHER* aesAlgorithm(size_t keySize)
+     return nullptr;
+ }
+ 
+-static std::optional<Vector<uint8_t>> cryptEncrypt(const Vector<uint8_t>& key, const Vector<uint8_t>& iv, Vector<uint8_t>&& plainText)
++// Padding::No is what CTAP2's PIN protocol asks for (Pin.cpp: the PIN hash,
++// the PIN token, hmac-secret salts are whole blocks, encrypted as they are);
++// Web Crypto's AES-CBC always pads. Without this the PIN hash sent to a
++// security key had a padding block more than the key expects, and the PIN
++// token it returned could not be decrypted.
++static bool setPadding(EVP_CIPHER_CTX* ctx, const EVP_CIPHER* algorithm, CryptoAlgorithmAESCBC::Padding padding, size_t inputSize)
++{
++    if (padding == CryptoAlgorithmAESCBC::Padding::Yes)
++        return true;
++    if (inputSize % EVP_CIPHER_block_size(algorithm))
++        return false;
++    return EVP_CIPHER_CTX_set_padding(ctx, 0) == 1;
++}
++
++// An empty IV is a zero IV (CTAP2 PIN protocol 1), not "no IV".
++static Vector<uint8_t> ivOrZero(const Vector<uint8_t>& iv, const EVP_CIPHER* algorithm)
++{
++    if (!iv.isEmpty())
++        return iv;
++    return Vector<uint8_t>(FillWith { }, static_cast<size_t>(EVP_CIPHER_iv_length(algorithm)), 0);
++}
++
++static std::optional<Vector<uint8_t>> cryptEncrypt(const Vector<uint8_t>& key, const Vector<uint8_t>& ivOrEmpty, Vector<uint8_t>&& plainText, CryptoAlgorithmAESCBC::Padding padding)
+ {
+     const EVP_CIPHER* algorithm = aesAlgorithm(key.size());
+     if (!algorithm)
+         return std::nullopt;
++    auto iv = ivOrZero(ivOrEmpty, algorithm);
+ 
+     EvpCipherCtxPtr ctx;
+     int len;
+@@ -62,12 +85,14 @@ static std::optional<Vector<uint8_t>> cryptEncrypt(const Vector<uint8_t>& key, c
+         return std::nullopt;
+ 
+     size_t plainSize = plainText.size();
+-    const size_t cipherTextLen = roundUpToMultipleOf(EVP_CIPHER_block_size(algorithm), plainSize + 1);
++    const size_t cipherTextLen = padding == CryptoAlgorithmAESCBC::Padding::No ? plainSize : roundUpToMultipleOf(EVP_CIPHER_block_size(algorithm), plainSize + 1);
+     Vector<uint8_t> cipherText(cipherTextLen);
+ 
+     // Initialize the encryption operation
+     if (1 != EVP_EncryptInit_ex(ctx.get(), algorithm, nullptr, key.span().data(), iv.span().data()))
+         return std::nullopt;
++    if (!setPadding(ctx.get(), algorithm, padding, plainSize))
++        return std::nullopt;
+ 
+     // Provide the message to be encrypted, and obtain the encrypted output
+     if (1 != EVP_EncryptUpdate(ctx.get(), cipherText.mutableSpan().data(), &len, plainText.span().data(), plainSize))
+@@ -80,11 +105,12 @@ static std::optional<Vector<uint8_t>> cryptEncrypt(const Vector<uint8_t>& key, c
+     return cipherText;
+ }
+ 
+-static std::optional<Vector<uint8_t>> cryptDecrypt(const Vector<uint8_t>& key, const Vector<uint8_t>& iv, const Vector<uint8_t>& cipherText)
++static std::optional<Vector<uint8_t>> cryptDecrypt(const Vector<uint8_t>& key, const Vector<uint8_t>& ivOrEmpty, const Vector<uint8_t>& cipherText, CryptoAlgorithmAESCBC::Padding padding)
+ {
+     const EVP_CIPHER* algorithm = aesAlgorithm(key.size());
+     if (!algorithm)
+         return std::nullopt;
++    auto iv = ivOrZero(ivOrEmpty, algorithm);
+ 
+     EvpCipherCtxPtr ctx;
+ 
+@@ -100,6 +126,8 @@ static std::optional<Vector<uint8_t>> cryptDecrypt(const Vector<uint8_t>& key, c
+     // Initialize the decryption operation
+     if (1 != EVP_DecryptInit_ex(ctx.get(), algorithm, nullptr, key.span().data(), iv.span().data()))
+         return std::nullopt;
++    if (!setPadding(ctx.get(), algorithm, padding, cipherSize))
++        return std::nullopt;
+ 
+     // Provide the message to be decrypted, and obtain the plaintext output
+     if (1 != EVP_DecryptUpdate(ctx.get(), plainText.mutableSpan().data(), &len, cipherText.span().data(), cipherSize))
+@@ -116,17 +144,17 @@ static std::optional<Vector<uint8_t>> cryptDecrypt(const Vector<uint8_t>& key, c
+     return plainText;
+ }
+ 
+-ExceptionOr<Vector<uint8_t>> CryptoAlgorithmAESCBC::platformEncrypt(const CryptoAlgorithmAesCbcCfbParams& parameters, const CryptoKeyAES& key, const Vector<uint8_t>& plainText, Padding)
++ExceptionOr<Vector<uint8_t>> CryptoAlgorithmAESCBC::platformEncrypt(const CryptoAlgorithmAesCbcCfbParams& parameters, const CryptoKeyAES& key, const Vector<uint8_t>& plainText, Padding padding)
+ {
+-    auto output = cryptEncrypt(key.key(), parameters.ivVector(), Vector<uint8_t>(plainText));
++    auto output = cryptEncrypt(key.key(), parameters.ivVector(), Vector<uint8_t>(plainText), padding);
+     if (!output)
+         return Exception { ExceptionCode::OperationError };
+     return WTF::move(*output);
+ }
+ 
+-ExceptionOr<Vector<uint8_t>> CryptoAlgorithmAESCBC::platformDecrypt(const CryptoAlgorithmAesCbcCfbParams& parameters, const CryptoKeyAES& key, const Vector<uint8_t>& cipherText, Padding)
++ExceptionOr<Vector<uint8_t>> CryptoAlgorithmAESCBC::platformDecrypt(const CryptoAlgorithmAesCbcCfbParams& parameters, const CryptoKeyAES& key, const Vector<uint8_t>& cipherText, Padding padding)
+ {
+-    auto output = cryptDecrypt(key.key(), parameters.ivVector(), cipherText);
++    auto output = cryptDecrypt(key.key(), parameters.ivVector(), cipherText, padding);
+     if (!output)
+         return Exception { ExceptionCode::OperationError };
+     return WTF::move(*output);
 diff --git a/Source/WebCore/crypto/openssl/CryptoAlgorithmEd25519OpenSSL.cpp b/Source/WebCore/crypto/openssl/CryptoAlgorithmEd25519OpenSSL.cpp
 new file mode 100644
 index 0000000000000000000000000000000000000000..92da00b28120aede819ff891eb708a3d00138ba7
@@ -89848,10 +89949,10 @@ index 0000000000000000000000000000000000000000..abdba4dff009ff314eecd9f825a128aa
 +} // namespace WebKit
 diff --git a/Source/WebKit/PlatformHaiku.cmake b/Source/WebKit/PlatformHaiku.cmake
 new file mode 100644
-index 0000000000000000000000000000000000000000..75228ff5b973217284ff30fed15b4ef374f7b0dc
+index 0000000000000000000000000000000000000000..1b0e9852e2c8680e90bb46ad02981abf9ddce13c
 --- /dev/null
 +++ b/Source/WebKit/PlatformHaiku.cmake
-@@ -0,0 +1,541 @@
+@@ -0,0 +1,567 @@
 +include(Headers.cmake)
 +include(Platform/Curl.cmake)
 +
@@ -90083,10 +90184,11 @@ index 0000000000000000000000000000000000000000..75228ff5b973217284ff30fed15b4ef3
 +endif ()
 +
 +if (ENABLE_WEB_AUTHN)
-+    # This port answers Web Authentication itself. The authenticators upstream
-+    # builds (Touch ID, USB HID and NFC security keys, and their mocks) need
-+    # platform device access that KunanyiOS does not provide, and their manager
-+    # and panel go with them. The WebProcess side is portable and stays.
++    # This port answers Web Authentication itself. Upstream's Touch ID, NFC
++    # and smart card authenticators need platform device access that
++    # KunanyiOS does not provide, and their manager and panel go with them;
++    # its USB security key code is built below. The WebProcess side is
++    # portable and stays.
 +    list(APPEND WebKit_UNIFIED_SOURCE_EXCLUDES
 +        "UIProcess/WebAuthentication/WebAuthenticatorCoordinatorProxy\\.cpp"
 +        "UIProcess/WebAuthentication/WebAuthenticationRequestData\\.cpp"
@@ -90102,6 +90204,31 @@ index 0000000000000000000000000000000000000000..75228ff5b973217284ff30fed15b4ef3
 +        UIProcess/WebAuthentication/haiku/WebAuthenticatorCoordinatorProxyHaiku.cpp
 +        WebProcess/DigitalCredentials/haiku/DigitalCredentialsRequestValidatorHaiku.cpp
 +    )
++    # USB security keys (#111): upstream's portable CTAP2/U2F code and its
++    # HID mock, on a HidService/HidConnection over the WebHID device code
++    # (UIProcess/haiku/usb). They stay out of the unified bundles above (their
++    # exclusions keep the rest of upstream's manager out) and build on their
++    # own.
++    list(APPEND WebKit_SOURCES
++        UIProcess/WebAuthentication/Authenticator.cpp
++        UIProcess/WebAuthentication/AuthenticatorTransportService.cpp
++        UIProcess/WebAuthentication/fido/CtapAuthenticator.cpp
++        UIProcess/WebAuthentication/fido/CtapHidDriver.cpp
++        UIProcess/WebAuthentication/fido/FidoAuthenticator.cpp
++        UIProcess/WebAuthentication/fido/FidoService.cpp
++        UIProcess/WebAuthentication/fido/U2fAuthenticator.cpp
++        UIProcess/WebAuthentication/Mock/MockHidConnection.cpp
++        UIProcess/WebAuthentication/Mock/MockHidService.cpp
++        UIProcess/WebAuthentication/haiku/HidConnectionHaiku.cpp
++        UIProcess/WebAuthentication/haiku/HidServiceHaiku.cpp
++        UIProcess/WebAuthentication/haiku/SecurityKeysHaiku.cpp
++        UIProcess/WebAuthentication/haiku/SoftSecurityKeyHaiku.cpp
++    )
++    if (NOT ENABLE_WEBUSB)
++        list(APPEND WebKit_SOURCES UIProcess/haiku/usb/HIDDeviceHaiku.cpp)
++        list(APPEND WebKit_PRIVATE_INCLUDE_DIRECTORIES "${WEBKIT_DIR}/UIProcess/haiku/usb")
++        list(APPEND WebKit_LIBRARIES device)
++    endif ()
 +    list(APPEND WebKit_PRIVATE_INCLUDE_DIRECTORIES
 +        "${WEBKIT_DIR}/UIProcess/WebAuthentication"
 +        "${WEBKIT_DIR}/UIProcess/WebAuthentication/haiku"
@@ -102583,10 +102710,10 @@ index 0000000000000000000000000000000000000000..cd4bc7529d812074c6e5915950a4f395
 +}
 diff --git a/Source/WebKit/UIProcess/API/haiku/WebKitView.h b/Source/WebKit/UIProcess/API/haiku/WebKitView.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..236b41a57de33ac1855176d37348f7d22ed15402
+index 0000000000000000000000000000000000000000..883c48537d6340d1053fb4674158fd0e71294b8e
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/API/haiku/WebKitView.h
-@@ -0,0 +1,500 @@
+@@ -0,0 +1,522 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#pragma once
@@ -102703,6 +102830,22 @@ index 0000000000000000000000000000000000000000..236b41a57de33ac1855176d37348f7d2
 +    // AnswerPasskeyRequest. When the request no longer waits (the page
 +    // aborted it, went to another document or closed, or it timed out), a
 +    // notice with "identifier" and "withdrawn" (true) follows.
++    // Security keys (USB, CTAP2/U2F): "security_key" (bool) says one may
++    // answer the request too: tell the user to insert and touch it. With
++    // "platform" false only a security key may (no "account_name" then, and
++    // "exists"/"replaces" are false): AnswerPasskeyRequest only declines.
++    // While the request waits, notices with "identifier" and
++    // "security_key_state" say what a key wants: "touch" (a key took the
++    // request), "pin" (its PIN; int32 "retries" left), "new_pin" (the key
++    // has none and the site wants one; int32 "min_length"), "account" (which
++    // of its passkeys: "account_name"/"account_display_name" each),
++    // "failed" (that key cannot answer, "error" says why; another may), or
++    // "status"; each may carry "status": "pin_invalid", "pin_blocked",
++    // "pin_auth_blocked", "no_credentials", "key_store_full",
++    // "pin_too_short", "pin_too_long" or "pin_accepted". Answer "pin",
++    // "new_pin" and "account" with AnswerSecurityKey. When a key answered the
++    // page, the "withdrawn" notice has "security_key" (true), and "error"
++    // when the page got one.
 +    B_WEBKIT_PASSKEY_REQUESTED = 'wpky',
 +    // A site's signal changed its passkeys (signalUnknownCredential removes
 +    // one, signalAllAcceptedCredentials hides those it no longer lists and
@@ -103015,6 +103158,12 @@ index 0000000000000000000000000000000000000000..236b41a57de33ac1855176d37348f7d2
 +    // declines. Any thread; unknown, withdrawn and answered identifiers are
 +    // ignored.
 +    static void AnswerPasskeyRequest(uint64 identifier, int32 account);
++    // Answers a security key's question in B_WEBKIT_PASSKEY_REQUESTED: its
++    // PIN or the new PIN ("pin", "new_pin"), or the index of the passkey
++    // chosen ("account"). A null pin or negative account gives up on the
++    // key; AnswerPasskeyRequest(identifier, -1) declines the whole request.
++    // Any thread.
++    static void AnswerSecurityKey(uint64 identifier, const char* pin, int32 account = -1);
 +    // How a beforeunload handler that asks to stay is answered; notifications
 +    // (B_WEBKIT_BEFORE_UNLOAD_PREVENTED) go to target.
 +    void SetBeforeUnloadBehavior(uint32 behavior, BMessenger target = BMessenger());
@@ -103089,10 +103238,10 @@ index 0000000000000000000000000000000000000000..236b41a57de33ac1855176d37348f7d2
 +};
 diff --git a/Source/WebKit/UIProcess/API/haiku/WebKitViewEmbedding.cpp b/Source/WebKit/UIProcess/API/haiku/WebKitViewEmbedding.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..4830a6f65015a7b658805bdf7fb8e542c5423633
+index 0000000000000000000000000000000000000000..4f69fc2f3140efbf819981fd565e2269a21a09df
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/API/haiku/WebKitViewEmbedding.cpp
-@@ -0,0 +1,1134 @@
+@@ -0,0 +1,1150 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +// BWebKitView's embedding interfaces (WebKitEmbedding.h): user scripts,
@@ -103746,6 +103895,22 @@ index 0000000000000000000000000000000000000000..4830a6f65015a7b658805bdf7fb8e542
 +    });
 +#else
 +    UNUSED_PARAM(identifier);
++    UNUSED_PARAM(account);
++#endif
++}
++
++void BWebKitView::AnswerSecurityKey(uint64 identifier, const char* pin, int32 account)
++{
++#if ENABLE(WEB_AUTHN)
++    // The PIN is copied here, on the caller's thread, and travels as a
++    // String; the caller clears its own copy.
++    String value = pin ? String::fromUTF8(pin) : String();
++    WTF::RunLoop::mainSingleton().dispatch([identifier, value = WTF::move(value).isolatedCopy(), account] {
++        answerSecurityKeyHaiku(identifier, value, account);
++    });
++#else
++    UNUSED_PARAM(identifier);
++    UNUSED_PARAM(pin);
 +    UNUSED_PARAM(account);
 +#endif
 +}
@@ -131404,12 +131569,2026 @@ index c224bd2e2b3ff4cd1b8907c4a21342d9573812b2..644d6ce48362f21aaeda47d48e24dfe3
      Vector<String> audioDeviceUIDs() const;
      bool hasAudioDevice() const { return !m_eligibleAudioDevices.isEmpty(); }
      bool hasVideoDevice() const { return !m_eligibleVideoDevices.isEmpty(); }
+diff --git a/Source/WebKit/UIProcess/WebAuthentication/Authenticator.h b/Source/WebKit/UIProcess/WebAuthentication/Authenticator.h
+index aab904a2fd83c5ba97938ae4b2edebdd5e1944e6..785bcba26b07d9b4fef531188c42f7516661a9e1 100644
+--- a/Source/WebKit/UIProcess/WebAuthentication/Authenticator.h
++++ b/Source/WebKit/UIProcess/WebAuthentication/Authenticator.h
+@@ -35,7 +35,9 @@
+ #include <wtf/Forward.h>
+ #include <wtf/RefCounted.h>
+ #include <wtf/WeakPtr.h>
++#if !PLATFORM(HAIKU)
+ #include <wtf/spi/cocoa/SecuritySPI.h>
++#endif
+ 
+ OBJC_CLASS LAContext;
+ 
+diff --git a/Source/WebKit/UIProcess/WebAuthentication/AuthenticatorTransportService.cpp b/Source/WebKit/UIProcess/WebAuthentication/AuthenticatorTransportService.cpp
+index 1e76e2a56b670d21fc7eb38cd18745f2414805a7..32f0a16fd82f1711bc6810237ef815384b0964b9 100644
+--- a/Source/WebKit/UIProcess/WebAuthentication/AuthenticatorTransportService.cpp
++++ b/Source/WebKit/UIProcess/WebAuthentication/AuthenticatorTransportService.cpp
+@@ -28,6 +28,10 @@
+ 
+ #if ENABLE(WEB_AUTHN)
+ 
++#if PLATFORM(HAIKU)
++#include "HidService.h"
++#include "MockHidService.h"
++#else
+ #include "CcidService.h"
+ #include "HidService.h"
+ #include "LocalService.h"
+@@ -36,6 +40,7 @@
+ #include "MockLocalService.h"
+ #include "MockNfcService.h"
+ #include "NfcService.h"
++#endif
+ #include <wtf/RunLoop.h>
+ #include <wtf/TZoneMallocInlines.h>
+ 
+@@ -43,6 +48,23 @@ namespace WebKit {
+ 
+ WTF_MAKE_TZONE_ALLOCATED_IMPL(AuthenticatorTransportService);
+ 
++#if PLATFORM(HAIKU)
++// KunanyiOS has USB HID security keys only (HidService over the WebHID
++// device code); its platform authenticator is the coordinator's own
++// (WebAuthenticatorCoordinatorProxyHaiku.cpp), and there is no NFC or smart
++// card stack.
++Ref<AuthenticatorTransportService> AuthenticatorTransportService::create(WebCore::AuthenticatorTransport transport, AuthenticatorTransportServiceObserver& observer)
++{
++    ASSERT_UNUSED(transport, transport == WebCore::AuthenticatorTransport::Usb);
++    return HidService::create(observer);
++}
++
++Ref<AuthenticatorTransportService> AuthenticatorTransportService::createMock(WebCore::AuthenticatorTransport transport, AuthenticatorTransportServiceObserver& observer, const WebCore::MockWebAuthenticationConfiguration& configuration)
++{
++    ASSERT_UNUSED(transport, transport == WebCore::AuthenticatorTransport::Usb);
++    return MockHidService::create(observer, configuration);
++}
++#else
+ Ref<AuthenticatorTransportService> AuthenticatorTransportService::create(WebCore::AuthenticatorTransport transport, AuthenticatorTransportServiceObserver& observer)
+ {
+     switch (transport) {
+@@ -76,6 +98,7 @@ Ref<AuthenticatorTransportService> AuthenticatorTransportService::createMock(Web
+         return MockLocalService::create(observer, configuration);
+     }
+ }
++#endif // PLATFORM(HAIKU)
+ 
+ AuthenticatorTransportService::AuthenticatorTransportService(AuthenticatorTransportServiceObserver& observer)
+     : m_observer(observer)
+diff --git a/Source/WebKit/UIProcess/WebAuthentication/Mock/MockHidConnection.cpp b/Source/WebKit/UIProcess/WebAuthentication/Mock/MockHidConnection.cpp
+index 67a1493de506613a3817ef823c7ef0f59b1f6ae3..6d58e9770e8c0123166c825cdde4ceb296f2d728 100644
+--- a/Source/WebKit/UIProcess/WebAuthentication/Mock/MockHidConnection.cpp
++++ b/Source/WebKit/UIProcess/WebAuthentication/Mock/MockHidConnection.cpp
+@@ -34,10 +34,12 @@
+ #include <WebCore/FidoConstants.h>
+ #include <WebCore/Pin.h>
+ #include <WebCore/WebAuthenticationConstants.h>
+-#include <wtf/BlockPtr.h>
+ #include <wtf/CryptographicallyRandomNumber.h>
+ #include <wtf/RunLoop.h>
++#if !PLATFORM(HAIKU)
++#include <wtf/BlockPtr.h>
+ #include <wtf/darwin/DispatchExtras.h>
++#endif
+ #include <wtf/text/Base64.h>
+ 
+ namespace WebKit {
+@@ -83,6 +85,24 @@ auto MockHidConnection::sendSync(const Vector<uint8_t>& data) -> DataSent
+ void MockHidConnection::send(Vector<uint8_t>&& data, DataSentCallback&& callback)
+ {
+     ASSERT(isInitialized());
++#if PLATFORM(HAIKU)
++    // No dispatch queues here: the next turn of the main run loop is as
++    // asynchronous as a real device's completion.
++    RunLoop::mainSingleton().dispatch([weakThis = WeakPtr { *this }, data = WTF::move(data), callback = WTF::move(callback)]() mutable {
++        RefPtr protectedThis = weakThis;
++        if (!protectedThis) {
++            callback(DataSent::No);
++            return;
++        }
++
++        protectedThis->assembleRequest(WTF::move(data));
++
++        auto sent = DataSent::Yes;
++        if (protectedThis->stagesMatch() && protectedThis->m_configuration.hid->error == Mock::HidError::DataNotSent)
++            sent = DataSent::No;
++        callback(sent);
++    });
++#else
+     auto task = makeBlockPtr([weakThis = WeakPtr { *this }, data = WTF::move(data), callback = WTF::move(callback)]() mutable {
+         ASSERT(!RunLoop::isMain());
+         RunLoop::mainSingleton().dispatch([weakThis, data = WTF::move(data), callback = WTF::move(callback)]() mutable {
+@@ -101,6 +121,7 @@ void MockHidConnection::send(Vector<uint8_t>&& data, DataSentCallback&& callback
+         });
+     });
+     dispatch_async(globalDispatchQueueSingleton(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), task.get());
++#endif
+ }
+ 
+ void MockHidConnection::registerDataReceivedCallbackInternal()
+@@ -286,6 +307,16 @@ void MockHidConnection::feedReports()
+             message = FidoHidMessage::create(m_currentChannel, FidoHidDeviceCommand::kCbor, { static_cast<uint8_t>(CtapDeviceResponseCode::kCtap2ErrUnsupportedOption) });
+         else {
+             ASSERT(!m_configuration.hid->payloadBase64.isEmpty());
++#if PLATFORM(HAIKU)
++            // The configuration comes from SUMMIT_WEBAUTHN_MOCK_HID, not a
++            // layout test: a request it has no answer for gets an error
++            // (CTAP2_ERR_OTHER) instead of reading past its payloads.
++            if (m_configuration.hid->payloadBase64.isEmpty() || !base64Decode(m_configuration.hid->payloadBase64[0])) {
++                if (!m_configuration.hid->payloadBase64.isEmpty())
++                    m_configuration.hid->payloadBase64.removeAt(0);
++                m_configuration.hid->payloadBase64.insert(0, m_configuration.hid->isU2f ? "bwA="_s : "fw=="_s);
++            }
++#endif
+             auto payload = base64Decode(m_configuration.hid->payloadBase64[0]);
+             m_configuration.hid->payloadBase64.removeAt(0);
+             if (!m_configuration.hid->isU2f)
+diff --git a/Source/WebKit/UIProcess/WebAuthentication/haiku/HidConnection.h b/Source/WebKit/UIProcess/WebAuthentication/haiku/HidConnection.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..7691c6dca87beb87fc0f2f21bb56dd3156792aee
+--- /dev/null
++++ b/Source/WebKit/UIProcess/WebAuthentication/haiku/HidConnection.h
+@@ -0,0 +1,95 @@
++/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
++
++// A FIDO security key's HID interface, under upstream's portable CTAPHID
++// driver (fido/CtapHidDriver). The Cocoa class of the same name sits on
++// IOHIDDevice; this one on the WebHID device code (HIDHaiku::Connection,
++// raw USB), which owns the interface on a device thread of its own. Its
++// output reports and their completions, and its input reports, come back to
++// the main run loop, where upstream's driver expects them.
++
++#pragma once
++
++#if ENABLE(WEB_AUTHN)
++
++#include <wtf/CompletionHandler.h>
++#include <wtf/Deque.h>
++#include <wtf/Forward.h>
++#include <wtf/Function.h>
++#include <wtf/HashMap.h>
++#include <wtf/Noncopyable.h>
++#include <wtf/RefCountedAndCanMakeWeakPtr.h>
++#include <wtf/Vector.h>
++#include <memory>
++
++namespace WebKit {
++
++namespace HIDHaiku {
++class Connection;
++}
++
++// Upstream's HID classes name a device by IOKit's handle. Here a real key
++// comes with its open interface (HidConnection::create below), and
++// upstream's mocks (MockHidService, MockHidConnection) pass none.
++struct HidDeviceHaiku;
++using IOHIDDeviceRef = HidDeviceHaiku*;
++
++class HidConnection : public RefCountedAndCanMakeWeakPtr<HidConnection> {
++    WTF_MAKE_NONCOPYABLE(HidConnection);
++public:
++    enum class DataSent : bool { No, Yes };
++
++    using DataSentCallback = CompletionHandler<void(DataSent)>;
++    using DataReceivedCallback = Function<void(Vector<uint8_t>&&)>;
++
++    // A key opened by HidService. identifier is the one its input handler
++    // was given (deliverInput()).
++    static Ref<HidConnection> create(std::shared_ptr<HIDHaiku::Connection>&&, uint64_t identifier);
++    virtual ~HidConnection();
++
++    // Overrided by MockHidConnection.
++    virtual void initialize();
++    virtual void terminate();
++    virtual DataSent sendSync(const Vector<uint8_t>& data);
++    // Caller should send data again after callback is invoked to control flow.
++    virtual void send(Vector<uint8_t>&& data, DataSentCallback&&);
++    void registerDataReceivedCallback(DataReceivedCallback&&);
++    void unregisterDataReceivedCallback();
++    void invalidateCache() { m_inputReports.clear(); }
++
++    void receiveReport(Vector<uint8_t>&&);
++
++    // Any thread: an input report of the key whose input handler was given
++    // identifier, or (gone) its removal. The connection gets it on the main
++    // run loop, if it is still there.
++    static void deliverInput(uint64_t identifier, Vector<uint8_t>&& report, bool gone);
++    // A new identifier for a key's input handler. Any thread.
++    static uint64_t nextIdentifier();
++
++protected:
++    explicit HidConnection(IOHIDDeviceRef);
++    bool isInitialized() const { return m_isInitialized; }
++    void setIsInitialized(bool isInitialized) { m_isInitialized = isInitialized; }
++
++private:
++    HidConnection(std::shared_ptr<HIDHaiku::Connection>&&, uint64_t identifier);
++    void consumeReports();
++    void sent(uint64_t token, bool ok);
++
++    // Overrided by MockHidConnection.
++    virtual void registerDataReceivedCallbackInternal();
++
++    std::shared_ptr<HIDHaiku::Connection> m_device;
++    uint64_t m_identifier { 0 };
++    bool m_gone { false };
++    // Could queue data requested by other applications.
++    Deque<Vector<uint8_t>> m_inputReports;
++    DataReceivedCallback m_inputCallback;
++    // send()'s callbacks while the device thread writes, by token.
++    HashMap<uint64_t, DataSentCallback> m_pendingSends;
++    uint64_t m_lastSend { 0 };
++    bool m_isInitialized { false };
++};
++
++} // namespace WebKit
++
++#endif // ENABLE(WEB_AUTHN)
+diff --git a/Source/WebKit/UIProcess/WebAuthentication/haiku/HidConnectionHaiku.cpp b/Source/WebKit/UIProcess/WebAuthentication/haiku/HidConnectionHaiku.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..a739add0b4bb6af54f0e46bac97df3e7af8079c6
+--- /dev/null
++++ b/Source/WebKit/UIProcess/WebAuthentication/haiku/HidConnectionHaiku.cpp
+@@ -0,0 +1,192 @@
++/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
++
++#include "config.h"
++#include "HidConnection.h"
++
++#if ENABLE(WEB_AUTHN) && PLATFORM(HAIKU)
++
++#include "HIDDeviceHaiku.h"
++#include <WebCore/FidoConstants.h>
++#include <atomic>
++#include <chrono>
++#include <semaphore>
++#include <wtf/NeverDestroyed.h>
++#include <wtf/RunLoop.h>
++
++namespace WebKit {
++using namespace fido;
++
++namespace {
++
++// The open keys, by the identifier their input handler was given; main
++// thread only.
++HashMap<uint64_t, WeakPtr<HidConnection>>& liveConnectionsHaiku()
++{
++    static NeverDestroyed<HashMap<uint64_t, WeakPtr<HidConnection>>> connections;
++    return connections.get();
++}
++
++// How long sendSync() waits for its report (CTAPHID_CANCEL) to go out. It
++// runs on the main thread, as upstream's IOHIDDeviceSetReport does.
++constexpr auto syncSendDeadline = std::chrono::milliseconds(250);
++
++} // namespace
++
++uint64_t HidConnection::nextIdentifier()
++{
++    static std::atomic<uint64_t> lastIdentifier;
++    return ++lastIdentifier;
++}
++
++void HidConnection::deliverInput(uint64_t identifier, Vector<uint8_t>&& report, bool gone)
++{
++    RunLoop::mainSingleton().dispatch([identifier, report = WTF::move(report), gone]() mutable {
++        auto found = liveConnectionsHaiku().find(identifier);
++        if (found == liveConnectionsHaiku().end())
++            return;
++        RefPtr connection = found->value.get();
++        if (!connection)
++            return;
++        if (gone) {
++            // The key was pulled out. What it was asked stays unanswered;
++            // the request goes on with the other authenticators, and the key
++            // is a new one when it comes back (HidService).
++            connection->m_gone = true;
++            return;
++        }
++        // CTAPHID packets are whole 64-byte reports (kHidMaxPacketSize).
++        if (report.size() != kHidMaxPacketSize)
++            return;
++        connection->receiveReport(WTF::move(report));
++    });
++}
++
++Ref<HidConnection> HidConnection::create(std::shared_ptr<HIDHaiku::Connection>&& device, uint64_t identifier)
++{
++    return adoptRef(*new HidConnection(WTF::move(device), identifier));
++}
++
++HidConnection::HidConnection(IOHIDDeviceRef)
++{
++}
++
++HidConnection::HidConnection(std::shared_ptr<HIDHaiku::Connection>&& device, uint64_t identifier)
++    : m_device(WTF::move(device))
++    , m_identifier(identifier)
++{
++    liveConnectionsHaiku().set(m_identifier, *this);
++}
++
++HidConnection::~HidConnection()
++{
++    if (m_identifier)
++        liveConnectionsHaiku().remove(m_identifier);
++    if (m_device)
++        m_device->close();
++}
++
++void HidConnection::initialize()
++{
++    // The interface was opened by HidService, off the main thread (opening
++    // raw USB blocks); its device thread already keeps a read pending.
++    m_isInitialized = true;
++}
++
++void HidConnection::terminate()
++{
++    m_isInitialized = false;
++    if (m_identifier)
++        liveConnectionsHaiku().remove(m_identifier);
++    // Reports already handed to the device thread (CTAPHID_CANCEL) go out
++    // first: sendSync() waited for its own.
++    if (m_device)
++        m_device->close();
++    auto pending = std::exchange(m_pendingSends, { });
++    for (auto& callback : pending.values())
++        callback(DataSent::No);
++}
++
++auto HidConnection::sendSync(const Vector<uint8_t>& data) -> DataSent
++{
++    ASSERT(m_isInitialized);
++    if (!m_device || m_gone)
++        return DataSent::No;
++    struct Wait {
++        std::binary_semaphore done { 0 };
++        std::atomic<bool> ok { false };
++    };
++    auto wait = std::make_shared<Wait>();
++    m_device->sendReport(kHidReportId, std::vector<uint8_t>(data.begin(), data.end()), [wait](HIDHaiku::Error error, std::vector<uint8_t>&&) {
++        wait->ok = error == HIDHaiku::Error::None;
++        wait->done.release();
++    });
++    if (!wait->done.try_acquire_for(syncSendDeadline))
++        return DataSent::No;
++    return wait->ok ? DataSent::Yes : DataSent::No;
++}
++
++void HidConnection::send(Vector<uint8_t>&& data, DataSentCallback&& callback)
++{
++    ASSERT(m_isInitialized);
++    if (!m_device || m_gone) {
++        RunLoop::mainSingleton().dispatch([callback = WTF::move(callback)]() mutable {
++            callback(DataSent::No);
++        });
++        return;
++    }
++    // The callback stays here, on the main thread; the device thread's
++    // completion names it by token.
++    auto token = ++m_lastSend;
++    m_pendingSends.set(token, WTF::move(callback));
++    m_device->sendReport(kHidReportId, std::vector<uint8_t>(data.begin(), data.end()), [identifier = m_identifier, token](HIDHaiku::Error error, std::vector<uint8_t>&&) {
++        bool ok = error == HIDHaiku::Error::None;
++        RunLoop::mainSingleton().dispatch([identifier, token, ok] {
++            auto found = liveConnectionsHaiku().find(identifier);
++            if (found == liveConnectionsHaiku().end())
++                return;
++            if (RefPtr connection = found->value.get())
++                connection->sent(token, ok);
++        });
++    });
++}
++
++void HidConnection::sent(uint64_t token, bool ok)
++{
++    auto callback = m_pendingSends.take(token);
++    if (callback)
++        callback(ok ? DataSent::Yes : DataSent::No);
++}
++
++void HidConnection::registerDataReceivedCallback(DataReceivedCallback&& callback)
++{
++    ASSERT(m_isInitialized);
++    ASSERT(!m_inputCallback);
++    m_inputCallback = WTF::move(callback);
++    consumeReports();
++    registerDataReceivedCallbackInternal();
++}
++
++void HidConnection::unregisterDataReceivedCallback()
++{
++    m_inputCallback = nullptr;
++}
++
++void HidConnection::receiveReport(Vector<uint8_t>&& report)
++{
++    m_inputReports.append(WTF::move(report));
++    consumeReports();
++}
++
++void HidConnection::consumeReports()
++{
++    while (!m_inputReports.isEmpty() && m_inputCallback)
++        m_inputCallback(m_inputReports.takeFirst());
++}
++
++void HidConnection::registerDataReceivedCallbackInternal()
++{
++}
++
++} // namespace WebKit
++
++#endif // ENABLE(WEB_AUTHN) && PLATFORM(HAIKU)
+diff --git a/Source/WebKit/UIProcess/WebAuthentication/haiku/HidService.h b/Source/WebKit/UIProcess/WebAuthentication/haiku/HidService.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..9aeac1c504b3f485f23f30abbe386cc49b3f9abb
+--- /dev/null
++++ b/Source/WebKit/UIProcess/WebAuthentication/haiku/HidService.h
+@@ -0,0 +1,54 @@
++/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
++
++// Finds FIDO security keys on USB for a Web Authentication request. The
++// Cocoa class of the same name is told about keys by IOHIDManager; here the
++// USB device nodes are looked at once a second while a request waits (the
++// WebHID device code, HIDHaiku::enumerateSecurityKeys, which reads a
++// device's report descriptors once), so that a key plugged in after the
++// prompt opened is found. Each new key is opened off the main thread and
++// handed to upstream's FidoService (getInfo, then a CtapAuthenticator or
++// U2fAuthenticator).
++
++#pragma once
++
++#if ENABLE(WEB_AUTHN)
++
++// fido/ is not an include directory of this port.
++#include "fido/FidoService.h"
++#include "HidConnection.h"
++#include <set>
++#include <string>
++
++namespace WebKit {
++
++class HidService : public FidoService {
++public:
++    static Ref<HidService> create(AuthenticatorTransportServiceObserver&);
++    ~HidService();
++
++    // Upstream's mocks (MockHidService) add their one device here.
++    void deviceAdded(IOHIDDeviceRef);
++
++protected:
++    explicit HidService(AuthenticatorTransportServiceObserver&);
++
++private:
++    void startDiscoveryInternal() final;
++
++    // Overrided by MockHidService.
++    virtual void platformStartDiscovery();
++    virtual Ref<HidConnection> createHidConnection(IOHIDDeviceRef) const;
++
++    void lookForKeys();
++
++    // The keys handed on, by device node and identity: each is asked once,
++    // until it is pulled out.
++    std::set<std::string> m_keys;
++    bool m_looking { false };
++    // What the last look found, to log changes only.
++    std::string m_lastCensus;
++};
++
++} // namespace WebKit
++
++#endif // ENABLE(WEB_AUTHN)
+diff --git a/Source/WebKit/UIProcess/WebAuthentication/haiku/HidServiceHaiku.cpp b/Source/WebKit/UIProcess/WebAuthentication/haiku/HidServiceHaiku.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..5c25555d2ef47676bfe8cff07a54e5319672f3b5
+--- /dev/null
++++ b/Source/WebKit/UIProcess/WebAuthentication/haiku/HidServiceHaiku.cpp
+@@ -0,0 +1,182 @@
++/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
++
++#include "config.h"
++#include "HidService.h"
++
++#if ENABLE(WEB_AUTHN) && PLATFORM(HAIKU)
++
++#include "HIDDeviceHaiku.h"
++#include "fido/CtapHidDriver.h"
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include <wtf/NeverDestroyed.h>
++#include <wtf/RunLoop.h>
++#include <wtf/WorkQueue.h>
++
++namespace WebKit {
++using namespace fido;
++
++namespace {
++
++WorkQueue& securityKeyQueueHaiku()
++{
++    static NeverDestroyed<Ref<WorkQueue>> queue = WorkQueue::create("Summit security keys"_s);
++    return queue.get();
++}
++
++// How often the USB devices are looked at while a request waits for a key.
++// Listing /dev/bus/usb is cheap; a device's descriptors are read once.
++constexpr Seconds lookInterval = 1_s;
++
++// SUMMIT_SECURITY_KEY_TRACE=1: every HID interface looked at is logged once
++// per request, with its top-level collections, to check what the browser
++// sees without a key.
++bool traceHaiku()
++{
++    static const bool trace = [] {
++        const char* value = std::getenv("SUMMIT_SECURITY_KEY_TRACE");
++        return value && std::strcmp(value, "0");
++    }();
++    return trace;
++}
++
++std::string keyNameHaiku(const HIDHaiku::Interface& interface)
++{
++    return interface.path + '#' + std::to_string(interface.number) + '#' + interface.identity;
++}
++
++std::string collectionsHaiku(const HIDHaiku::Interface& interface)
++{
++    std::string result;
++    for (auto& collection : interface.descriptor.collections) {
++        char text[32];
++        std::snprintf(text, sizeof(text), "%s%04x:%04x", result.empty() ? "" : " ", collection.usagePage, collection.usage);
++        result += text;
++    }
++    return result;
++}
++
++struct OpenedKeyHaiku {
++    std::string name;
++    std::string product;
++    uint16_t vendorId { 0 };
++    uint16_t productId { 0 };
++    std::shared_ptr<HIDHaiku::Connection> connection;
++    uint64_t identifier { 0 };
++    HIDHaiku::Error error { HIDHaiku::Error::None };
++};
++
++} // namespace
++
++Ref<HidService> HidService::create(AuthenticatorTransportServiceObserver& observer)
++{
++    return adoptRef(*new HidService(observer));
++}
++
++HidService::HidService(AuthenticatorTransportServiceObserver& observer)
++    : FidoService(observer)
++{
++}
++
++HidService::~HidService() = default;
++
++void HidService::startDiscoveryInternal()
++{
++    platformStartDiscovery();
++}
++
++void HidService::platformStartDiscovery()
++{
++    lookForKeys();
++}
++
++Ref<HidConnection> HidService::createHidConnection(IOHIDDeviceRef) const
++{
++    // Real keys come with their open interface (lookForKeys); only the
++    // mocks add a device by handle, and they make their own connection.
++    RELEASE_ASSERT_NOT_REACHED();
++}
++
++void HidService::deviceAdded(IOHIDDeviceRef device)
++{
++    getInfo(CtapHidDriver::create(createHidConnection(device)));
++}
++
++// Looks at the USB devices on the security key queue, opens the keys not
++// handed on yet there (opening raw USB blocks), and hands them to FidoService
++// on the main thread. Then again in a second, while the service is there:
++// the request that owns it ends it.
++void HidService::lookForKeys()
++{
++    if (m_looking)
++        return;
++    m_looking = true;
++    securityKeyQueueHaiku().dispatch([weakThis = WeakPtr { *this }, known = m_keys, trace = traceHaiku() && m_lastCensus.empty()]() mutable {
++        size_t devices = 0;
++        std::vector<HIDHaiku::Interface> interfaces;
++        auto keys = HIDHaiku::enumerateSecurityKeys(&devices, &interfaces);
++        if (trace) {
++            for (auto& interface : interfaces) {
++                std::fprintf(stderr, "Summit security keys: HID interface %04x:%04x #%u \"%s\", collections %s%s\n", interface.vendorId, interface.productId,
++                    interface.number, interface.product.c_str(), collectionsHaiku(interface).c_str(), HIDHaiku::securityKey(interface.descriptor) ? " (FIDO)" : "");
++            }
++        }
++        std::set<std::string> present;
++        std::vector<OpenedKeyHaiku> opened;
++        for (auto& key : keys) {
++            auto name = keyNameHaiku(key);
++            present.insert(name);
++            if (known.contains(name))
++                continue;
++            OpenedKeyHaiku result;
++            result.name = WTF::move(name);
++            result.product = key.product;
++            result.vendorId = key.vendorId;
++            result.productId = key.productId;
++            result.identifier = HidConnection::nextIdentifier();
++            result.connection = HIDHaiku::Connection::open(key, [identifier = result.identifier](uint8_t, std::vector<uint8_t>&& report, bool gone) {
++                HidConnection::deliverInput(identifier, Vector<uint8_t>(std::span<const uint8_t>(report.data(), report.size())), gone);
++            }, result.error, true);
++            opened.push_back(WTF::move(result));
++        }
++        RunLoop::mainSingleton().dispatch([weakThis = WTF::move(weakThis), devices, hidInterfaces = interfaces.size(), keyCount = keys.size(), present = WTF::move(present), opened = WTF::move(opened)]() mutable {
++            RefPtr protectedThis = weakThis.get();
++            if (!protectedThis) {
++                for (auto& key : opened) {
++                    if (key.connection)
++                        key.connection->close();
++                }
++                return;
++            }
++            protectedThis->m_looking = false;
++            // A key pulled out is a new key when it comes back.
++            std::erase_if(protectedThis->m_keys, [&](auto& name) { return !present.contains(name); });
++            auto census = std::to_string(devices) + " USB device" + (devices == 1 ? "" : "s") + ", " + std::to_string(hidInterfaces) + " HID interface"
++                + (hidInterfaces == 1 ? "" : "s") + ", " + std::to_string(keyCount) + " security key" + (keyCount == 1 ? "" : "s");
++            if (census != protectedThis->m_lastCensus) {
++                std::fprintf(stderr, "Summit security keys: %s\n", census.c_str());
++                protectedThis->m_lastCensus = WTF::move(census);
++            }
++            for (auto& key : opened) {
++                // A key that could not be opened is not tried again until it
++                // is plugged in again.
++                protectedThis->m_keys.insert(key.name);
++                if (!key.connection) {
++                    std::fprintf(stderr, "Summit security keys: %04x:%04x \"%s\" could not be opened (error %d)\n", key.vendorId, key.productId, key.product.c_str(), static_cast<int>(key.error));
++                    continue;
++                }
++                std::fprintf(stderr, "Summit security keys: found %04x:%04x \"%s\"\n", key.vendorId, key.productId, key.product.c_str());
++                protectedThis->getInfo(CtapHidDriver::create(HidConnection::create(WTF::move(key.connection), key.identifier)));
++            }
++            RunLoop::mainSingleton().dispatchAfter(lookInterval, [weakThis = WTF::move(weakThis)] {
++                if (RefPtr protectedThis = weakThis.get())
++                    protectedThis->lookForKeys();
++            });
++        });
++    });
++}
++
++} // namespace WebKit
++
++#endif // ENABLE(WEB_AUTHN) && PLATFORM(HAIKU)
+diff --git a/Source/WebKit/UIProcess/WebAuthentication/haiku/SecurityKeysHaiku.cpp b/Source/WebKit/UIProcess/WebAuthentication/haiku/SecurityKeysHaiku.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..3989c13916b205d3c2fd45aaabef340c2163f7cd
+--- /dev/null
++++ b/Source/WebKit/UIProcess/WebAuthentication/haiku/SecurityKeysHaiku.cpp
+@@ -0,0 +1,366 @@
++/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
++
++#include "config.h"
++#include "SecurityKeysHaiku.h"
++
++#include "SoftSecurityKeyHaiku.h"
++
++#if ENABLE(WEB_AUTHN) && PLATFORM(HAIKU)
++
++#include <WebCore/AuthenticatorAssertionResponse.h>
++#include <WebCore/AuthenticatorTransport.h>
++#include <WebCore/MockWebAuthenticationConfiguration.h>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include <fstream>
++#include <sstream>
++#include <wtf/JSONValues.h>
++#include <wtf/NeverDestroyed.h>
++#include <wtf/RunLoop.h>
++
++namespace WebKit {
++using namespace WebCore;
++
++namespace {
++
++// The request whose keys are being looked for: a key answers one request at
++// a time, and two services would open it twice.
++WeakPtr<SecurityKeyRequestHaiku>& activeRequestHaiku()
++{
++    static NeverDestroyed<WeakPtr<SecurityKeyRequestHaiku>> active;
++    return active.get();
++}
++
++// For tests without a key: SUMMIT_WEBAUTHN_MOCK_HID is upstream's mock HID
++// configuration (what LayoutTests give internals.setMockWebAuthenticationConfiguration
++// as "hid"), either inline JSON or the path of a file holding it, read again
++// for each request so that a test can change it between requests. Upstream's
++// MockHidConnection then plays a CTAP2 or U2F key at the CTAPHID packet level:
++// a getInfo answer from the flags, then the payloads given, in order.
++std::optional<MockWebAuthenticationConfiguration> mockConfigurationHaiku()
++{
++    const char* value = std::getenv("SUMMIT_WEBAUTHN_MOCK_HID");
++    if (!value || !*value)
++        return std::nullopt;
++    std::string text = value;
++    if (text.front() != '{') {
++        std::ifstream file(text);
++        if (!file) {
++            std::fprintf(stderr, "Summit security keys: SUMMIT_WEBAUTHN_MOCK_HID file %s cannot be read\n", value);
++            return std::nullopt;
++        }
++        std::stringstream contents;
++        contents << file.rdbuf();
++        text = contents.str();
++    }
++    auto json = JSON::Value::parseJSON(String::fromUTF8(text.c_str()));
++    auto object = json ? json->asObject() : nullptr;
++    if (!object) {
++        std::fprintf(stderr, "Summit security keys: SUMMIT_WEBAUTHN_MOCK_HID is not a JSON object\n");
++        return std::nullopt;
++    }
++    // {"hid": {...}} as internals takes it, or the hid part alone.
++    if (auto hid = object->getObject("hid"_s))
++        object = hid;
++
++    MockWebAuthenticationConfiguration configuration;
++    MockWebAuthenticationConfiguration::HidConfiguration hid;
++    using Mock = MockWebAuthenticationConfiguration;
++    if (auto payloads = object->getArray("payloadBase64"_s)) {
++        for (size_t i = 0; i < payloads->length(); ++i)
++            hid.payloadBase64.append(payloads->get(i)->asString());
++    }
++    if (auto commands = object->getArray("expectedCommandsBase64"_s)) {
++        for (size_t i = 0; i < commands->length(); ++i)
++            hid.expectedCommandsBase64.append(commands->get(i)->asString());
++    }
++    hid.validateExpectedCommands = object->getBoolean("validateExpectedCommands"_s).value_or(false);
++    auto stage = object->getString("stage"_s);
++    hid.stage = stage == "request"_s ? Mock::HidStage::Request : Mock::HidStage::Info;
++    auto subStage = object->getString("subStage"_s);
++    hid.subStage = subStage == "msg"_s ? Mock::HidSubStage::Msg : Mock::HidSubStage::Init;
++    auto error = object->getString("error"_s);
++    static constexpr std::pair<ASCIILiteral, Mock::HidError> errors[] = {
++        { "success"_s, Mock::HidError::Success },
++        { "data-not-sent"_s, Mock::HidError::DataNotSent },
++        { "empty-report"_s, Mock::HidError::EmptyReport },
++        { "wrong-channel-id"_s, Mock::HidError::WrongChannelId },
++        { "malicious-payload"_s, Mock::HidError::MaliciousPayload },
++        { "unsupported-options"_s, Mock::HidError::UnsupportedOptions },
++        { "wrong-nonce"_s, Mock::HidError::WrongNonce },
++        { "short-init-response"_s, Mock::HidError::ShortInitResponse },
++    };
++    for (auto& [name, code] : errors) {
++        if (error == name)
++            hid.error = code;
++    }
++    hid.isU2f = object->getBoolean("isU2f"_s).value_or(false);
++    hid.keepAlive = object->getBoolean("keepAlive"_s).value_or(false);
++    hid.fastDataArrival = object->getBoolean("fastDataArrival"_s).value_or(false);
++    hid.continueAfterErrorData = object->getBoolean("continueAfterErrorData"_s).value_or(false);
++    hid.canDowngrade = object->getBoolean("canDowngrade"_s).value_or(false);
++    hid.expectCancel = object->getBoolean("expectCancel"_s).value_or(false);
++    hid.supportClientPin = object->getBoolean("supportClientPin"_s).value_or(false);
++    hid.supportInternalUV = object->getBoolean("supportInternalUV"_s).value_or(false);
++    if (auto protocols = object->getArray("pinProtocols"_s)) {
++        for (size_t i = 0; i < protocols->length(); ++i)
++            hid.pinProtocols.append(static_cast<uint8_t>(protocols->get(i)->asInteger().value_or(1)));
++    }
++    hid.maxCredentialCountInList = object->getInteger("maxCredentialCountInList"_s).value_or(1);
++    hid.maxCredentialIdLength = object->getInteger("maxCredentialIdLength"_s).value_or(64);
++    configuration.hid = WTF::move(hid);
++    return configuration;
++}
++
++const char* statusNameHaiku(WebAuthenticationStatus status)
++{
++    switch (status) {
++    case WebAuthenticationStatus::NoCredentialsFound: return "no credentials";
++    case WebAuthenticationStatus::PinBlocked: return "PIN blocked";
++    case WebAuthenticationStatus::PinAuthBlocked: return "PIN auth blocked";
++    case WebAuthenticationStatus::PinInvalid: return "PIN invalid";
++    case WebAuthenticationStatus::KeyStoreFull: return "key store full";
++    case WebAuthenticationStatus::PINTooShort: return "PIN too short";
++    case WebAuthenticationStatus::PINTooLong: return "PIN too long";
++    case WebAuthenticationStatus::PINSuccessful: return "PIN accepted";
++    default: return "other";
++    }
++}
++
++} // namespace
++
++bool SecurityKeyRequestHaiku::enabled()
++{
++    static const bool enabled = [] {
++        const char* value = std::getenv("SUMMIT_SECURITY_KEYS");
++        return !value || std::strcmp(value, "0");
++    }();
++    return enabled;
++}
++
++Ref<SecurityKeyRequestHaiku> SecurityKeyRequestHaiku::create(WebAuthenticationRequestData&& data, EventHandler&& handler)
++{
++    return adoptRef(*new SecurityKeyRequestHaiku(WTF::move(data), WTF::move(handler)));
++}
++
++SecurityKeyRequestHaiku::SecurityKeyRequestHaiku(WebAuthenticationRequestData&& data, EventHandler&& handler)
++    : m_data(WTF::move(data))
++    , m_handler(WTF::move(handler))
++{
++}
++
++SecurityKeyRequestHaiku::~SecurityKeyRequestHaiku()
++{
++    stop();
++}
++
++void SecurityKeyRequestHaiku::start()
++{
++    if (m_started || m_stopped)
++        return;
++    m_started = true;
++    if (RefPtr previous = activeRequestHaiku().get(); previous && previous.get() != this) {
++        std::fprintf(stderr, "Summit security keys: a newer request takes the keys\n");
++        previous->stop();
++    }
++    activeRequestHaiku() = WeakPtr<SecurityKeyRequestHaiku> { *this };
++    if (softSecurityKeyEnabledHaiku())
++        m_service = createSoftSecurityKeyServiceHaiku(*this);
++    else if (auto mock = mockConfigurationHaiku()) {
++        std::fprintf(stderr, "Summit security keys: using the mock key of SUMMIT_WEBAUTHN_MOCK_HID (%s, %zu payloads)\n",
++            mock->hid->isU2f ? "U2F" : "CTAP2", mock->hid->payloadBase64.size());
++        m_service = AuthenticatorTransportService::createMock(AuthenticatorTransport::Usb, *this, *mock);
++    } else
++        m_service = AuthenticatorTransportService::create(AuthenticatorTransport::Usb, *this);
++    protect(m_service)->startDiscovery();
++}
++
++void SecurityKeyRequestHaiku::stop()
++{
++    if (m_stopped)
++        return;
++    m_stopped = true;
++    if (activeRequestHaiku().get() == this)
++        activeRequestHaiku() = nullptr;
++    // The authenticators' drivers send CTAPHID_CANCEL to what they asked
++    // (FidoAuthenticator's destructor), and close the keys.
++    m_authenticators.clear();
++    m_service = nullptr;
++    if (auto handler = std::exchange(m_pinHandler, nullptr))
++        handler(nullString());
++    if (auto handler = std::exchange(m_accountHandler, nullptr))
++        handler(nullptr);
++    m_accounts.clear();
++}
++
++void SecurityKeyRequestHaiku::post(SecurityKeyEventHaiku&& event)
++{
++    if (m_stopped)
++        return;
++    // Never from inside an authenticator's call: the coordinator may end the
++    // request, and this with it.
++    RunLoop::mainSingleton().dispatch([weakThis = WeakPtr { *this }, event = WTF::move(event)]() mutable {
++        RefPtr protectedThis = weakThis.get();
++        if (!protectedThis || protectedThis->m_stopped)
++            return;
++        protectedThis->m_handler(WTF::move(event));
++    });
++}
++
++void SecurityKeyRequestHaiku::authenticatorAdded(Ref<Authenticator>&& authenticator)
++{
++    if (m_stopped || m_completed)
++        return;
++    authenticator->setObserver(*this);
++    authenticator->handleRequest(m_data);
++    m_authenticators.add(WTF::move(authenticator));
++    post({ SecurityKeyEventHaiku::Kind::KeyFound });
++}
++
++void SecurityKeyRequestHaiku::respondReceived(AuthenticatorObserverRespond&& respond)
++{
++    if (m_stopped || m_completed)
++        return;
++    SecurityKeyEventHaiku event;
++    // As upstream's AuthenticatorManager: an answer, or an error that says
++    // the request cannot succeed (a key that already holds an excluded
++    // credential, options no key supports), ends the request; other errors
++    // (no passkey on this key, a wrong PIN given up) leave it to another key.
++    if (auto* response = std::get_if<Ref<AuthenticatorResponse>>(&respond)) {
++        event.kind = SecurityKeyEventHaiku::Kind::Completed;
++        event.response = response->ptr();
++        m_completed = true;
++    } else {
++        auto& error = std::get<ExceptionData>(respond);
++        bool final = error.code == ExceptionCode::InvalidStateError || error.code == ExceptionCode::NotSupportedError;
++        event.kind = final ? SecurityKeyEventHaiku::Kind::Completed : SecurityKeyEventHaiku::Kind::Failed;
++        event.error = error;
++        event.status = m_lastStatus;
++        m_completed |= final;
++        std::fprintf(stderr, "Summit security keys: the key answered %s: %s\n", final ? "with an error" : "with a passing error", error.message.utf8().legacyCStringPointer());
++    }
++    post(WTF::move(event));
++}
++
++void SecurityKeyRequestHaiku::downgrade(Authenticator& authenticator, Ref<Authenticator>&& downgraded)
++{
++    // A CTAP2 key that also speaks U2F, for a request CTAP2 cannot carry
++    // (an appid, for instance): upstream gives the request to its U2F side.
++    RunLoop::mainSingleton().dispatch([weakThis = WeakPtr { *this }, old = Ref { authenticator }] {
++        if (RefPtr protectedThis = weakThis.get())
++            protectedThis->m_authenticators.remove(old.ptr());
++    });
++    std::fprintf(stderr, "Summit security keys: the key is used as a U2F key\n");
++    authenticatorAdded(WTF::move(downgraded));
++}
++
++void SecurityKeyRequestHaiku::authenticatorStatusUpdated(WebAuthenticationStatus status)
++{
++    if (m_stopped || m_completed)
++        return;
++    // Upstream reports PINSuccessful whenever it is done with a PIN, also
++    // when the key refused it (CtapAuthenticator::continueRequestAfterGetPinToken):
++    // after a blocked PIN that would read as success.
++    if (status == WebAuthenticationStatus::PINSuccessful && (m_lastStatus == WebAuthenticationStatus::PinBlocked || m_lastStatus == WebAuthenticationStatus::PinAuthBlocked))
++        return;
++    m_lastStatus = status;
++    std::fprintf(stderr, "Summit security keys: %s\n", statusNameHaiku(status));
++    SecurityKeyEventHaiku event { SecurityKeyEventHaiku::Kind::StatusChanged };
++    event.status = status;
++    post(WTF::move(event));
++}
++
++void SecurityKeyRequestHaiku::requestPin(uint64_t retries, CompletionHandler<void(const WTF::String&)>&& handler)
++{
++    if (m_stopped || m_completed) {
++        handler(nullString());
++        return;
++    }
++    if (auto previous = std::exchange(m_pinHandler, WTF::move(handler)))
++        previous(nullString());
++    std::fprintf(stderr, "Summit security keys: the key wants its PIN (%llu tries left)\n", static_cast<unsigned long long>(retries));
++    SecurityKeyEventHaiku event { SecurityKeyEventHaiku::Kind::PinRequested };
++    event.retries = retries;
++    // A wrong PIN comes back as a new request for it: say so.
++    if (m_lastStatus == WebAuthenticationStatus::PinInvalid)
++        event.status = m_lastStatus;
++    m_lastStatus = std::nullopt;
++    post(WTF::move(event));
++}
++
++void SecurityKeyRequestHaiku::requestNewPin(uint64_t minLength, CompletionHandler<void(const WTF::String&)>&& handler)
++{
++    if (m_stopped || m_completed) {
++        handler(nullString());
++        return;
++    }
++    if (auto previous = std::exchange(m_pinHandler, WTF::move(handler)))
++        previous(nullString());
++    std::fprintf(stderr, "Summit security keys: the key has no PIN; the site wants one (at least %llu characters)\n", static_cast<unsigned long long>(minLength));
++    SecurityKeyEventHaiku event { SecurityKeyEventHaiku::Kind::NewPinRequested };
++    event.minimumLength = minLength;
++    if (m_lastStatus == WebAuthenticationStatus::PINTooShort || m_lastStatus == WebAuthenticationStatus::PINTooLong)
++        event.status = m_lastStatus;
++    m_lastStatus = std::nullopt;
++    post(WTF::move(event));
++}
++
++void SecurityKeyRequestHaiku::selectAssertionResponse(Vector<Ref<AuthenticatorAssertionResponse>>&& responses, WebAuthenticationSource, CompletionHandler<void(AuthenticatorAssertionResponse*)>&& handler)
++{
++    if (m_stopped || m_completed || responses.isEmpty()) {
++        handler(nullptr);
++        return;
++    }
++    if (auto previous = std::exchange(m_accountHandler, WTF::move(handler)))
++        previous(nullptr);
++    m_accounts = WTF::move(responses);
++    SecurityKeyEventHaiku event { SecurityKeyEventHaiku::Kind::AccountRequested };
++    for (auto& response : m_accounts)
++        event.accounts.append({ response->name(), response->displayName() });
++    post(WTF::move(event));
++}
++
++void SecurityKeyRequestHaiku::decidePolicyForLocalAuthenticator(CompletionHandler<void(LocalAuthenticatorPolicy)>&& handler)
++{
++    // Upstream's local (Touch ID) authenticator only; never here.
++    handler(LocalAuthenticatorPolicy::Disallow);
++}
++
++void SecurityKeyRequestHaiku::requestLAContextForUserVerification(CompletionHandler<void(LAContext *)>&& handler)
++{
++    handler(nullptr);
++}
++
++void SecurityKeyRequestHaiku::cancelRequest()
++{
++    if (m_stopped || m_completed)
++        return;
++    m_completed = true;
++    SecurityKeyEventHaiku event { SecurityKeyEventHaiku::Kind::Completed };
++    event.error = ExceptionData { ExceptionCode::NotAllowedError, "This request has been cancelled by the user."_s };
++    post(WTF::move(event));
++}
++
++void SecurityKeyRequestHaiku::answerPin(const String& pin)
++{
++    if (auto handler = std::exchange(m_pinHandler, nullptr))
++        handler(pin);
++}
++
++void SecurityKeyRequestHaiku::chooseAccount(int32_t account)
++{
++    auto handler = std::exchange(m_accountHandler, nullptr);
++    if (!handler)
++        return;
++    auto accounts = std::exchange(m_accounts, { });
++    if (account < 0 || static_cast<size_t>(account) >= accounts.size()) {
++        handler(nullptr);
++        return;
++    }
++    handler(accounts[account].ptr());
++}
++
++} // namespace WebKit
++
++#endif // ENABLE(WEB_AUTHN) && PLATFORM(HAIKU)
+diff --git a/Source/WebKit/UIProcess/WebAuthentication/haiku/SecurityKeysHaiku.h b/Source/WebKit/UIProcess/WebAuthentication/haiku/SecurityKeysHaiku.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..6404bf7f7e8dae883aa838cf66bdc692ed3e61ba
+--- /dev/null
++++ b/Source/WebKit/UIProcess/WebAuthentication/haiku/SecurityKeysHaiku.h
+@@ -0,0 +1,129 @@
++/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
++
++// One Web Authentication request's security keys (#111): what upstream's
++// AuthenticatorManager does for its USB transport, for one request of the
++// Haiku coordinator (WebAuthenticatorCoordinatorProxyHaiku.cpp), which asks
++// the user and answers the page. It looks for keys (HidService; with
++// SUMMIT_WEBAUTHN_SOFT_KEY a software key, with SUMMIT_WEBAUTHN_MOCK_HID
++// upstream's MockHidService instead), gives each
++// key found the request (upstream's CtapAuthenticator or U2fAuthenticator),
++// and reports what happens: a key's answer, its errors, and what it needs
++// from the user (a touch, a PIN, a new PIN, a choice of account).
++
++#pragma once
++
++#if ENABLE(WEB_AUTHN) && PLATFORM(HAIKU)
++
++#include "Authenticator.h"
++#include "AuthenticatorTransportService.h"
++#include "WebAuthenticationRequestData.h"
++#include <WebCore/AuthenticatorResponse.h>
++#include <WebCore/ExceptionData.h>
++#include <wtf/Function.h>
++#include <wtf/HashSet.h>
++#include <wtf/RefCounted.h>
++#include <wtf/Vector.h>
++#include <wtf/text/WTFString.h>
++
++namespace WebKit {
++
++struct SecurityKeyEventHaiku {
++    enum class Kind : uint8_t {
++        // A key took the request: touch it (it may first want its PIN).
++        KeyFound,
++        // A key answered: the request's result (response or error).
++        Completed,
++        // A key failed in a way another key, or this one again, may not:
++        // error says how; the request goes on.
++        Failed,
++        // A key's PIN is needed: retries left, and status (PinInvalid) when
++        // the last one was wrong. Answer with answerPin().
++        PinRequested,
++        // The key has no PIN and the site wants user verification: a new
++        // PIN of at least minimumLength. Answer with answerPin().
++        NewPinRequested,
++        // The key holds several of the site's passkeys: accounts, as (name,
++        // display name). Answer with chooseAccount().
++        AccountRequested,
++        // A key said something about the PIN or its passkeys (status).
++        StatusChanged,
++    };
++    Kind kind { Kind::KeyFound };
++    RefPtr<WebCore::AuthenticatorResponse> response;
++    std::optional<WebCore::ExceptionData> error;
++    std::optional<WebAuthenticationStatus> status;
++    uint64_t retries { 0 };
++    uint64_t minimumLength { 0 };
++    Vector<std::pair<String, String>> accounts;
++};
++
++class SecurityKeyRequestHaiku final : public RefCounted<SecurityKeyRequestHaiku>, public AuthenticatorTransportServiceObserver, public AuthenticatorObserver {
++    WTF_MAKE_NONCOPYABLE(SecurityKeyRequestHaiku);
++public:
++    using EventHandler = Function<void(SecurityKeyEventHaiku&&)>;
++    USING_CAN_MAKE_WEAKPTR(AuthenticatorTransportServiceObserver);
++
++    // Events come on the main run loop, never from inside a call to this.
++    static Ref<SecurityKeyRequestHaiku> create(WebAuthenticationRequestData&&, EventHandler&&);
++    ~SecurityKeyRequestHaiku();
++
++    void ref() const final { RefCounted::ref(); }
++    void deref() const final { RefCounted::deref(); }
++
++    // Starts looking for keys. Only one request looks at a time: another
++    // one's keys are stopped (the newer request is the one the user sees).
++    void start();
++    // Stops looking and cancels what the keys were asked (CTAPHID_CANCEL).
++    // Events stop.
++    void stop();
++
++    // Answers PinRequested or NewPinRequested; a null pin gives up.
++    void answerPin(const String&);
++    // Answers AccountRequested; a negative account gives up.
++    void chooseAccount(int32_t);
++
++    bool waitsForPin() const { return !!m_pinHandler; }
++    bool waitsForAccount() const { return !!m_accountHandler; }
++
++    // SUMMIT_SECURITY_KEYS=0 turns security keys off. For tests without a
++    // key, SUMMIT_WEBAUTHN_SOFT_KEY puts a software key in the place of the
++    // real ones (SoftSecurityKeyHaiku.h), and SUMMIT_WEBAUTHN_MOCK_HID
++    // upstream's mock key.
++    static bool enabled();
++
++private:
++    SecurityKeyRequestHaiku(WebAuthenticationRequestData&&, EventHandler&&);
++
++    // AuthenticatorTransportServiceObserver
++    void authenticatorAdded(Ref<Authenticator>&&) final;
++    void serviceStatusUpdated(WebAuthenticationStatus) final { }
++
++    // AuthenticatorObserver
++    void respondReceived(AuthenticatorObserverRespond&&) final;
++    void downgrade(Authenticator&, Ref<Authenticator>&&) final;
++    void authenticatorStatusUpdated(WebAuthenticationStatus) final;
++    void requestPin(uint64_t retries, CompletionHandler<void(const WTF::String&)>&&) final;
++    void requestNewPin(uint64_t minLength, CompletionHandler<void(const WTF::String&)>&&) final;
++    void selectAssertionResponse(Vector<Ref<WebCore::AuthenticatorAssertionResponse>>&&, WebAuthenticationSource, CompletionHandler<void(WebCore::AuthenticatorAssertionResponse*)>&&) final;
++    void decidePolicyForLocalAuthenticator(CompletionHandler<void(LocalAuthenticatorPolicy)>&&) final;
++    void requestLAContextForUserVerification(CompletionHandler<void(LAContext *)>&&) final;
++    void cancelRequest() final;
++
++    void post(SecurityKeyEventHaiku&&);
++
++    WebAuthenticationRequestData m_data;
++    EventHandler m_handler;
++    RefPtr<AuthenticatorTransportService> m_service;
++    HashSet<Ref<Authenticator>> m_authenticators;
++    CompletionHandler<void(const WTF::String&)> m_pinHandler;
++    CompletionHandler<void(WebCore::AuthenticatorAssertionResponse*)> m_accountHandler;
++    Vector<Ref<WebCore::AuthenticatorAssertionResponse>> m_accounts;
++    std::optional<WebAuthenticationStatus> m_lastStatus;
++    bool m_started { false };
++    bool m_stopped { false };
++    bool m_completed { false };
++};
++
++} // namespace WebKit
++
++#endif // ENABLE(WEB_AUTHN) && PLATFORM(HAIKU)
+diff --git a/Source/WebKit/UIProcess/WebAuthentication/haiku/SoftSecurityKeyHaiku.cpp b/Source/WebKit/UIProcess/WebAuthentication/haiku/SoftSecurityKeyHaiku.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..e9fd7b91fbbc37fed24886b60481d881ad79cc3a
+--- /dev/null
++++ b/Source/WebKit/UIProcess/WebAuthentication/haiku/SoftSecurityKeyHaiku.cpp
+@@ -0,0 +1,781 @@
++/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
++
++#include "config.h"
++#include "SoftSecurityKeyHaiku.h"
++
++#if ENABLE(WEB_AUTHN) && PLATFORM(HAIKU)
++
++#include "HidConnection.h"
++#include "fido/CtapHidDriver.h"
++#include "fido/FidoService.h"
++#include <WebCore/AuthenticatorGetInfoResponse.h>
++#include <WebCore/CBORReader.h>
++#include <WebCore/CBORWriter.h>
++#include <WebCore/FidoConstants.h>
++#include <WebCore/FidoHidMessage.h>
++#include <WebCore/FidoHidPacket.h>
++#include <WebCore/WebAuthenticationConstants.h>
++#include <WebCore/WebAuthenticationUtils.h>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include <openssl/core_names.h>
++#include <openssl/crypto.h>
++#include <openssl/evp.h>
++#include <openssl/hmac.h>
++#include <openssl/kdf.h>
++#include <openssl/param_build.h>
++#include <openssl/rand.h>
++#include <openssl/x509.h>
++#include <wtf/NeverDestroyed.h>
++#include <wtf/RunLoop.h>
++
++namespace WebKit {
++using namespace WebCore;
++using namespace cbor;
++using namespace fido;
++
++namespace {
++
++using Bytes = Vector<uint8_t>;
++
++// How long the "touch" takes: a request that needs user presence is
++// answered after it, as a key answers once touched.
++constexpr Seconds touchDelay = 400_ms;
++constexpr int64_t maximumRetries = 8;
++constexpr uint8_t aaguidByte = 0x5a;
++
++Bytes randomBytes(size_t size)
++{
++    Bytes bytes(size);
++    RAND_bytes(bytes.mutableSpan().data(), bytes.size());
++    return bytes;
++}
++
++Bytes sha256(std::span<const uint8_t> data)
++{
++    Bytes digest(32);
++    unsigned length = 32;
++    EVP_Digest(data.data(), data.size(), digest.mutableSpan().data(), &length, EVP_sha256(), nullptr);
++    return digest;
++}
++
++Bytes hmacSha256(std::span<const uint8_t> key, std::span<const uint8_t> data)
++{
++    Bytes mac(32);
++    unsigned length = 32;
++    HMAC(EVP_sha256(), key.data(), key.size(), data.data(), data.size(), mac.mutableSpan().data(), &length);
++    return mac;
++}
++
++std::optional<Bytes> aes256Cbc(bool encrypt, std::span<const uint8_t> key, std::span<const uint8_t> iv, std::span<const uint8_t> input)
++{
++    if (key.size() != 32 || iv.size() != 16 || input.size() % 16)
++        return std::nullopt;
++    EVP_CIPHER_CTX* context = EVP_CIPHER_CTX_new();
++    if (!context)
++        return std::nullopt;
++    Bytes output(input.size());
++    int length = 0;
++    bool ok = EVP_CipherInit_ex(context, EVP_aes_256_cbc(), nullptr, key.data(), iv.data(), encrypt) == 1
++        && EVP_CIPHER_CTX_set_padding(context, 0) == 1
++        && EVP_CipherUpdate(context, output.mutableSpan().data(), &length, input.data(), input.size()) == 1;
++    int finalLength = 0;
++    ok = ok && EVP_CipherFinal_ex(context, output.mutableSpan().subspan(length).data(), &finalLength) == 1;
++    EVP_CIPHER_CTX_free(context);
++    if (!ok)
++        return std::nullopt;
++    return output;
++}
++
++Bytes hkdfSha256(std::span<const uint8_t> secret, const char* info)
++{
++    Bytes output(32);
++    Bytes salt(FillWith { }, 32, 0);
++    EVP_PKEY_CTX* context = EVP_PKEY_CTX_new_id(EVP_PKEY_HKDF, nullptr);
++    size_t length = output.size();
++    bool ok = context && EVP_PKEY_derive_init(context) == 1
++        && EVP_PKEY_CTX_set_hkdf_md(context, EVP_sha256()) == 1
++        && EVP_PKEY_CTX_set1_hkdf_salt(context, salt.span().data(), salt.size()) == 1
++        && EVP_PKEY_CTX_set1_hkdf_key(context, secret.data(), secret.size()) == 1
++        && EVP_PKEY_CTX_add1_hkdf_info(context, reinterpret_cast<const unsigned char*>(info), std::strlen(info)) == 1
++        && EVP_PKEY_derive(context, output.mutableSpan().data(), &length) == 1;
++    EVP_PKEY_CTX_free(context);
++    if (!ok)
++        return { };
++    return output;
++}
++
++struct ECKey {
++    EVP_PKEY* key { nullptr };
++    ECKey() = default;
++    explicit ECKey(EVP_PKEY* key)
++        : key(key) { }
++    ECKey(ECKey&& other)
++        : key(std::exchange(other.key, nullptr)) { }
++    ECKey& operator=(ECKey&& other)
++    {
++        if (this != &other) {
++            EVP_PKEY_free(key);
++            key = std::exchange(other.key, nullptr);
++        }
++        return *this;
++    }
++    ~ECKey() { EVP_PKEY_free(key); }
++    static ECKey generate() { return ECKey(EVP_PKEY_Q_keygen(nullptr, nullptr, "EC", "P-256")); }
++    // x and y, 32 bytes each.
++    std::pair<Bytes, Bytes> publicPoint() const
++    {
++        unsigned char point[65];
++        size_t length = 0;
++        if (!key || EVP_PKEY_get_octet_string_param(key, OSSL_PKEY_PARAM_ENCODED_PUBLIC_KEY, point, sizeof(point), &length) != 1 || length != 65)
++            return { };
++        return { Bytes(std::span<const uint8_t>(point + 1, 32)), Bytes(std::span<const uint8_t>(point + 33, 32)) };
++    }
++};
++
++ECKey publicKeyFrom(const Bytes& x, const Bytes& y)
++{
++    if (x.size() != 32 || y.size() != 32)
++        return { };
++    unsigned char point[65];
++    point[0] = 4;
++    std::memcpy(point + 1, x.span().data(), 32);
++    std::memcpy(point + 33, y.span().data(), 32);
++    OSSL_PARAM_BLD* builder = OSSL_PARAM_BLD_new();
++    OSSL_PARAM_BLD_push_utf8_string(builder, OSSL_PKEY_PARAM_GROUP_NAME, "prime256v1", 0);
++    OSSL_PARAM_BLD_push_octet_string(builder, OSSL_PKEY_PARAM_PUB_KEY, point, sizeof(point));
++    OSSL_PARAM* parameters = OSSL_PARAM_BLD_to_param(builder);
++    EVP_PKEY_CTX* context = EVP_PKEY_CTX_new_from_name(nullptr, "EC", nullptr);
++    EVP_PKEY* key = nullptr;
++    if (context && parameters && EVP_PKEY_fromdata_init(context) == 1)
++        EVP_PKEY_fromdata(context, &key, EVP_PKEY_PUBLIC_KEY, parameters);
++    EVP_PKEY_CTX_free(context);
++    OSSL_PARAM_free(parameters);
++    OSSL_PARAM_BLD_free(builder);
++    return ECKey(key);
++}
++
++// The ECDH shared point's x coordinate.
++std::optional<Bytes> ecdh(const ECKey& own, const ECKey& peer)
++{
++    EVP_PKEY_CTX* context = EVP_PKEY_CTX_new(own.key, nullptr);
++    Bytes secret(32);
++    size_t length = secret.size();
++    bool ok = context && EVP_PKEY_derive_init(context) == 1 && EVP_PKEY_derive_set_peer(context, peer.key) == 1
++        && EVP_PKEY_derive(context, secret.mutableSpan().data(), &length) == 1 && length == 32;
++    EVP_PKEY_CTX_free(context);
++    if (!ok)
++        return std::nullopt;
++    return secret;
++}
++
++Bytes signEs256(const ECKey& key, std::span<const uint8_t> message)
++{
++    EVP_MD_CTX* context = EVP_MD_CTX_new();
++    size_t length = 0;
++    Bytes signature;
++    if (context && EVP_DigestSignInit(context, nullptr, EVP_sha256(), nullptr, key.key) == 1
++        && EVP_DigestSign(context, nullptr, &length, message.data(), message.size()) == 1) {
++        signature.grow(length);
++        if (EVP_DigestSign(context, signature.mutableSpan().data(), &length, message.data(), message.size()) == 1)
++            signature.shrink(length);
++        else
++            signature.clear();
++    }
++    EVP_MD_CTX_free(context);
++    return signature;
++}
++
++// The PIN/UV auth protocols (CTAP2.1 §6.5.6, §6.5.7) from the
++// authenticator's side.
++struct PinProtocol {
++    uint8_t version { 1 };
++    std::optional<Bytes> sharedSecret(const ECKey& own, const ECKey& peer) const
++    {
++        auto z = ecdh(own, peer);
++        if (!z)
++            return std::nullopt;
++        if (version == 1)
++            return sha256(z->span());
++        auto hmacKey = hkdfSha256(z->span(), "CTAP2 HMAC key");
++        auto aesKey = hkdfSha256(z->span(), "CTAP2 AES key");
++        if (hmacKey.isEmpty() || aesKey.isEmpty())
++            return std::nullopt;
++        hmacKey.appendVector(aesKey);
++        return hmacKey;
++    }
++    std::span<const uint8_t> hmacKey(const Bytes& secret) const { return secret.span().first(32); }
++    std::span<const uint8_t> aesKey(const Bytes& secret) const { return version == 1 ? secret.span() : secret.span().subspan(32); }
++    std::optional<Bytes> encrypt(const Bytes& secret, const Bytes& plain) const
++    {
++        Bytes iv = version == 1 ? Bytes(FillWith { }, 16, 0) : randomBytes(16);
++        auto cipher = aes256Cbc(true, aesKey(secret), iv.span(), plain.span());
++        if (!cipher || version == 1)
++            return cipher;
++        iv.appendVector(*cipher);
++        return iv;
++    }
++    std::optional<Bytes> decrypt(const Bytes& secret, const Bytes& cipher) const
++    {
++        if (version == 1)
++            return aes256Cbc(false, aesKey(secret), Bytes(FillWith { }, 16, 0).span(), cipher.span());
++        if (cipher.size() < 16)
++            return std::nullopt;
++        return aes256Cbc(false, aesKey(secret), cipher.span().first(16), cipher.span().subspan(16));
++    }
++    bool verify(std::span<const uint8_t> key, std::span<const uint8_t> message, const Bytes& signature) const
++    {
++        auto mac = hmacSha256(key, message);
++        size_t length = version == 1 ? 16 : 32;
++        return signature.size() == length && !CRYPTO_memcmp(mac.span().data(), signature.span().data(), length);
++    }
++};
++
++struct SoftCredential {
++    String rpID;
++    Bytes credentialID;
++    Bytes userHandle;
++    String userName;
++    String displayName;
++    bool discoverable { false };
++    std::shared_ptr<ECKey> key;
++};
++
++// The key's state: like a real key's, it outlives the requests that use it.
++struct SoftKeyState {
++    Vector<SoftCredential> credentials;
++    std::optional<Bytes> pinHash; // LEFT(SHA-256(PIN), 16)
++    int64_t retries { maximumRetries };
++    int consecutiveMismatches { 0 };
++    ECKey keyAgreement { ECKey::generate() };
++    Bytes pinToken { randomBytes(32) };
++    bool pinTokenValid { false };
++    uint32_t signCount { 0 };
++    StdSet<PINUVAuthProtocol> protocols;
++    // getNextAssertion's remaining credentials.
++    Vector<SoftCredential> nextAssertions;
++    Bytes nextClientDataHash;
++    bool nextUserVerified { false };
++};
++
++SoftKeyState& softKeyState()
++{
++    static NeverDestroyed<SoftKeyState> state = [] {
++        SoftKeyState state;
++        if (const char* pin = std::getenv("SUMMIT_WEBAUTHN_SOFT_KEY_PIN"); pin && *pin)
++            state.pinHash = Bytes(sha256(std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(pin), std::strlen(pin))).span().first(16));
++        const char* protocol = std::getenv("SUMMIT_WEBAUTHN_SOFT_KEY_PROTOCOL");
++        state.protocols.insert(PINUVAuthProtocol::kPinProtocol1);
++        if (!protocol || std::strcmp(protocol, "1"))
++            state.protocols.insert(PINUVAuthProtocol::kPinProtocol2);
++        return state;
++    }();
++    return state.get();
++}
++
++Bytes reply(CtapDeviceResponseCode code, std::optional<CBORValue::MapValue>&& map = std::nullopt)
++{
++    Bytes buffer;
++    buffer.append(static_cast<uint8_t>(code));
++    if (map) {
++        if (auto encoded = CBORWriter::write(CBORValue(WTF::move(*map))))
++            buffer.appendVector(*encoded);
++    }
++    return buffer;
++}
++
++const CBORValue* field(const CBORValue::MapValue& map, int64_t key)
++{
++    auto found = map.find(CBORValue(key));
++    return found == map.end() ? nullptr : &found->second;
++}
++
++const CBORValue* field(const CBORValue::MapValue& map, ASCIILiteral key)
++{
++    auto found = map.find(CBORValue(key));
++    return found == map.end() ? nullptr : &found->second;
++}
++
++std::optional<bool> option(const CBORValue::MapValue& request, int64_t optionsKey, ASCIILiteral name)
++{
++    auto* options = field(request, optionsKey);
++    if (!options || !options->isMap())
++        return std::nullopt;
++    auto* value = field(options->getMap(), name);
++    if (!value || !value->isBool())
++        return std::nullopt;
++    return value->getBool();
++}
++
++struct PinCheck {
++    std::optional<CtapDeviceResponseCode> error;
++    bool verified { false };
++};
++
++// pinUvAuthParam of makeCredential or getAssertion: absent, empty (the
++// client's "touch the key" probe), or an HMAC of the clientDataHash under
++// the PIN token.
++PinCheck checkPinAuth(const CBORValue::MapValue& request, int64_t paramKey, int64_t protocolKey, const Bytes& clientDataHash)
++{
++    auto& state = softKeyState();
++    auto* param = field(request, paramKey);
++    if (!param)
++        return { };
++    if (!param->isByteString())
++        return { CtapDeviceResponseCode::kCtap2ErrInvalidCBOR };
++    if (param->getByteString().isEmpty())
++        return { state.pinHash ? CtapDeviceResponseCode::kCtap2ErrPinInvalid : CtapDeviceResponseCode::kCtap2ErrPinNotSet };
++    auto* protocolValue = field(request, protocolKey);
++    if (!protocolValue || !protocolValue->isInteger())
++        return { CtapDeviceResponseCode::kCtap2ErrMissingParameter };
++    PinProtocol protocol { static_cast<uint8_t>(protocolValue->getInteger()) };
++    if (!state.pinTokenValid || !protocol.verify(state.pinToken.span(), clientDataHash.span(), param->getByteString()))
++        return { CtapDeviceResponseCode::kCtap2ErrPinAuthInvalid };
++    return { std::nullopt, true };
++}
++
++Bytes coseKey(const ECKey& key)
++{
++    auto [x, y] = key.publicPoint();
++    return encodeES256PublicKeyAsCBOR(WTF::move(x), WTF::move(y));
++}
++
++Bytes handleGetInfo()
++{
++    auto& state = softKeyState();
++    AuthenticatorGetInfoResponse info({ ProtocolVersion::kCtap2, ProtocolVersion::kCtap21 }, Bytes(FillWith { }, aaguidLength, aaguidByte));
++    AuthenticatorSupportedOptions options;
++    options.setResidentKeyAvailability(AuthenticatorSupportedOptions::ResidentKeyAvailability::kSupported);
++    options.setClientPinAvailability(state.pinHash ? AuthenticatorSupportedOptions::ClientPinAvailability::kSupportedAndPinSet : AuthenticatorSupportedOptions::ClientPinAvailability::kSupportedButPinNotSet);
++    info.setOptions(WTF::move(options));
++    info.setPinProtocols(StdSet<PINUVAuthProtocol> { state.protocols });
++    info.setMaxMsgSize(1200);
++    info.setMaxCredentialCountInList(8);
++    info.setMaxCredentialIDLength(128);
++    info.setTransports({ AuthenticatorTransport::Usb });
++    info.setMinPINLength(4);
++    auto encoded = encodeAsCBOR(info);
++    encoded.insert(0, static_cast<uint8_t>(CtapDeviceResponseCode::kSuccess));
++    return encoded;
++}
++
++Bytes handleClientPin(const CBORValue::MapValue& request)
++{
++    auto& state = softKeyState();
++    auto* protocolValue = field(request, 1);
++    auto* subcommandValue = field(request, 2);
++    if (!protocolValue || !protocolValue->isInteger() || !subcommandValue || !subcommandValue->isInteger())
++        return reply(CtapDeviceResponseCode::kCtap2ErrMissingParameter);
++    PinProtocol protocol { static_cast<uint8_t>(protocolValue->getInteger()) };
++    if (!state.protocols.contains(static_cast<PINUVAuthProtocol>(protocol.version)))
++        return reply(CtapDeviceResponseCode::kCtap1ErrInvalidParameter);
++    switch (subcommandValue->getInteger()) {
++    case 1: { // getRetries
++        CBORValue::MapValue map;
++        map[CBORValue(3)] = CBORValue(state.retries);
++        return reply(CtapDeviceResponseCode::kSuccess, WTF::move(map));
++    }
++    case 2: { // getKeyAgreement
++        auto [x, y] = state.keyAgreement.publicPoint();
++        CBORValue::MapValue cose;
++        cose[CBORValue(1)] = CBORValue(2);
++        cose[CBORValue(3)] = CBORValue(-25);
++        cose[CBORValue(-1)] = CBORValue(1);
++        cose[CBORValue(-2)] = CBORValue(WTF::move(x));
++        cose[CBORValue(-3)] = CBORValue(WTF::move(y));
++        CBORValue::MapValue map;
++        map[CBORValue(1)] = CBORValue(WTF::move(cose));
++        return reply(CtapDeviceResponseCode::kSuccess, WTF::move(map));
++    }
++    case 3: // setPIN
++    case 5: { // getPinToken
++        bool setting = subcommandValue->getInteger() == 3;
++        if (setting == !!state.pinHash)
++            return reply(setting ? CtapDeviceResponseCode::kCtap2ErrNotAllowed : CtapDeviceResponseCode::kCtap2ErrPinNotSet);
++        if (!setting && !state.retries)
++            return reply(CtapDeviceResponseCode::kCtap2ErrPinBlocked);
++        if (!setting && state.consecutiveMismatches >= 3)
++            return reply(CtapDeviceResponseCode::kCtap2ErrPinAuthBlocked);
++        auto* agreement = field(request, 3);
++        if (!agreement || !agreement->isMap())
++            return reply(CtapDeviceResponseCode::kCtap2ErrMissingParameter);
++        auto* x = field(agreement->getMap(), -2);
++        auto* y = field(agreement->getMap(), -3);
++        if (!x || !y || !x->isByteString() || !y->isByteString())
++            return reply(CtapDeviceResponseCode::kCtap1ErrInvalidParameter);
++        auto peer = publicKeyFrom(x->getByteString(), y->getByteString());
++        std::optional<Bytes> secret = peer.key ? protocol.sharedSecret(state.keyAgreement, peer) : std::nullopt;
++        if (!secret)
++            return reply(CtapDeviceResponseCode::kCtap1ErrInvalidParameter);
++        if (setting) {
++            auto* auth = field(request, 4);
++            auto* newPinEnc = field(request, 5);
++            if (!auth || !newPinEnc || !auth->isByteString() || !newPinEnc->isByteString())
++                return reply(CtapDeviceResponseCode::kCtap2ErrMissingParameter);
++            if (!protocol.verify(protocol.hmacKey(*secret), newPinEnc->getByteString().span(), auth->getByteString()))
++                return reply(CtapDeviceResponseCode::kCtap2ErrPinAuthInvalid);
++            auto padded = protocol.decrypt(*secret, newPinEnc->getByteString());
++            if (!padded || padded->size() < 64)
++                return reply(CtapDeviceResponseCode::kCtap1ErrInvalidParameter);
++            size_t length = 0;
++            while (length < padded->size() && (*padded)[length])
++                ++length;
++            if (length < 4 || length > 63)
++                return reply(CtapDeviceResponseCode::kCtap2ErrPinPolicyViolation);
++            state.pinHash = Bytes(sha256(padded->span().first(length)).span().first(16));
++            state.retries = maximumRetries;
++            std::fprintf(stderr, "Summit soft security key: PIN set (%zu characters)\n", length);
++            return reply(CtapDeviceResponseCode::kSuccess);
++        }
++        auto* pinHashEnc = field(request, 6);
++        if (!pinHashEnc || !pinHashEnc->isByteString())
++            return reply(CtapDeviceResponseCode::kCtap2ErrMissingParameter);
++        // The PIN hash, encrypted under the shared secret: exactly one
++        // AES block (protocol 2: with its IV). A client that pads it, or
++        // derives another secret, fails here as on a key.
++        auto pinHash = protocol.decrypt(*secret, pinHashEnc->getByteString());
++        --state.retries;
++        if (!pinHash || pinHash->size() != 16 || CRYPTO_memcmp(pinHash->span().data(), state.pinHash->span().data(), 16)) {
++            std::fprintf(stderr, "Summit soft security key: wrong PIN (protocol %u, encrypted hash %zu bytes), %lld tries left\n", protocol.version,
++                pinHashEnc->getByteString().size(), static_cast<long long>(state.retries));
++            state.keyAgreement = ECKey::generate();
++            ++state.consecutiveMismatches;
++            if (!state.retries)
++                return reply(CtapDeviceResponseCode::kCtap2ErrPinBlocked);
++            if (state.consecutiveMismatches >= 3)
++                return reply(CtapDeviceResponseCode::kCtap2ErrPinAuthBlocked);
++            return reply(CtapDeviceResponseCode::kCtap2ErrPinInvalid);
++        }
++        state.retries = maximumRetries;
++        state.consecutiveMismatches = 0;
++        state.pinToken = randomBytes(32);
++        state.pinTokenValid = true;
++        auto encryptedToken = protocol.encrypt(*secret, state.pinToken);
++        if (!encryptedToken)
++            return reply(CtapDeviceResponseCode::kCtap2ErrOther);
++        std::fprintf(stderr, "Summit soft security key: PIN right (protocol %u), PIN token issued\n", protocol.version);
++        CBORValue::MapValue map;
++        map[CBORValue(2)] = CBORValue(WTF::move(*encryptedToken));
++        return reply(CtapDeviceResponseCode::kSuccess, WTF::move(map));
++    }
++    default:
++        return reply(CtapDeviceResponseCode::kCtap2ErrInvalidOption);
++    }
++}
++
++Bytes handleMakeCredential(const CBORValue::MapValue& request)
++{
++    auto& state = softKeyState();
++    auto* clientDataHash = field(request, 1);
++    auto* rp = field(request, 2);
++    auto* user = field(request, 3);
++    auto* parameters = field(request, 4);
++    if (!clientDataHash || !clientDataHash->isByteString() || !rp || !rp->isMap() || !user || !user->isMap() || !parameters || !parameters->isArray())
++        return reply(CtapDeviceResponseCode::kCtap2ErrMissingParameter);
++    auto* rpID = field(rp->getMap(), "id"_s);
++    auto* userID = field(user->getMap(), "id"_s);
++    if (!rpID || !rpID->isString() || !userID || !userID->isByteString())
++        return reply(CtapDeviceResponseCode::kCtap2ErrMissingParameter);
++    bool es256 = false;
++    for (auto& parameter : parameters->getArray()) {
++        if (!parameter.isMap())
++            continue;
++        auto* algorithm = field(parameter.getMap(), "alg"_s);
++        es256 |= algorithm && algorithm->isInteger() && algorithm->getInteger() == -7;
++    }
++    if (!es256)
++        return reply(CtapDeviceResponseCode::kCtap2ErrUnsupportedAlgorithms);
++    auto pin = checkPinAuth(request, 8, 9, clientDataHash->getByteString());
++    if (pin.error)
++        return reply(*pin.error);
++    bool discoverable = option(request, 7, "rk"_s).value_or(false);
++    if (option(request, 7, "uv"_s).value_or(false))
++        return reply(CtapDeviceResponseCode::kCtap2ErrInvalidOption);
++    // A key with a PIN makes discoverable credentials only for a client that
++    // gave it (CTAP2.1 makeCredUvNotRqd: others need none).
++    if (state.pinHash && !pin.verified && discoverable)
++        return reply(CtapDeviceResponseCode::kCtap2ErrPinRequired);
++    if (auto* excluded = field(request, 5); excluded && excluded->isArray()) {
++        for (auto& descriptor : excluded->getArray()) {
++            auto* id = descriptor.isMap() ? field(descriptor.getMap(), "id"_s) : nullptr;
++            if (!id || !id->isByteString())
++                continue;
++            for (auto& credential : state.credentials) {
++                if (credential.rpID == rpID->getString() && credential.credentialID == id->getByteString())
++                    return reply(CtapDeviceResponseCode::kCtap2ErrCredentialExcluded);
++            }
++        }
++    }
++    SoftCredential credential;
++    credential.rpID = rpID->getString();
++    credential.credentialID = randomBytes(32);
++    credential.userHandle = userID->getByteString();
++    if (auto* name = field(user->getMap(), "name"_s); name && name->isString())
++        credential.userName = name->getString();
++    if (auto* name = field(user->getMap(), "displayName"_s); name && name->isString())
++        credential.displayName = name->getString();
++    credential.discoverable = discoverable;
++    credential.key = std::make_shared<ECKey>(ECKey::generate());
++    if (!credential.key->key)
++        return reply(CtapDeviceResponseCode::kCtap2ErrOther);
++    // A discoverable credential replaces the account's earlier one.
++    if (discoverable) {
++        state.credentials.removeAllMatching([&](auto& existing) {
++            return existing.discoverable && existing.rpID == credential.rpID && existing.userHandle == credential.userHandle;
++        });
++    }
++    uint8_t flags = WebAuthn::userPresenceFlag | WebAuthn::attestedCredentialDataIncludedFlag | (pin.verified ? WebAuthn::userVerifiedFlag : 0);
++    auto authData = buildAuthData(credential.rpID, flags, ++state.signCount,
++        buildAttestedCredentialData(Bytes(FillWith { }, aaguidLength, aaguidByte), credential.credentialID, coseKey(*credential.key)));
++    // Self attestation ("packed" without a certificate).
++    Bytes signedData = authData;
++    signedData.appendVector(clientDataHash->getByteString());
++    CBORValue::MapValue statement;
++    statement[CBORValue("alg"_s)] = CBORValue(-7);
++    statement[CBORValue("sig"_s)] = CBORValue(signEs256(*credential.key, signedData.span()));
++    CBORValue::MapValue map;
++    map[CBORValue(1)] = CBORValue("packed"_s);
++    map[CBORValue(2)] = CBORValue(WTF::move(authData));
++    map[CBORValue(3)] = CBORValue(WTF::move(statement));
++    std::fprintf(stderr, "Summit soft security key: made a%s credential for %s%s\n", discoverable ? " discoverable" : "",
++        credential.rpID.utf8().legacyCStringPointer(), pin.verified ? " (PIN verified)" : "");
++    state.credentials.append(WTF::move(credential));
++    return reply(CtapDeviceResponseCode::kSuccess, WTF::move(map));
++}
++
++Bytes assertion(const SoftCredential& credential, const Bytes& clientDataHash, bool userPresent, bool userVerified, std::optional<size_t> count, bool withUser)
++{
++    auto& state = softKeyState();
++    uint8_t flags = (userPresent ? WebAuthn::userPresenceFlag : 0) | (userVerified ? WebAuthn::userVerifiedFlag : 0);
++    auto authData = buildAuthData(credential.rpID, flags, ++state.signCount, { });
++    Bytes signedData = authData;
++    signedData.appendVector(clientDataHash);
++    CBORValue::MapValue map;
++    map[CBORValue(1)] = CBORValue(buildCredentialDescriptor(credential.credentialID));
++    map[CBORValue(2)] = CBORValue(WTF::move(authData));
++    map[CBORValue(3)] = CBORValue(signEs256(*credential.key, signedData.span()));
++    if (withUser)
++        map[CBORValue(4)] = CBORValue(buildUserEntityMap(credential.userHandle, credential.userName, credential.displayName));
++    if (count)
++        map[CBORValue(5)] = CBORValue(static_cast<int64_t>(*count));
++    return reply(CtapDeviceResponseCode::kSuccess, WTF::move(map));
++}
++
++Bytes handleGetAssertion(const CBORValue::MapValue& request)
++{
++    auto& state = softKeyState();
++    auto* rpID = field(request, 1);
++    auto* clientDataHash = field(request, 2);
++    if (!rpID || !rpID->isString() || !clientDataHash || !clientDataHash->isByteString())
++        return reply(CtapDeviceResponseCode::kCtap2ErrMissingParameter);
++    bool userPresence = option(request, 5, "up"_s).value_or(true);
++    if (option(request, 5, "uv"_s).value_or(false))
++        return reply(CtapDeviceResponseCode::kCtap2ErrInvalidOption);
++    // The client's silent check of an allow or exclude list (up false)
++    // carries its PIN auth too; a stale one does not matter there.
++    auto pin = checkPinAuth(request, 6, 7, clientDataHash->getByteString());
++    if (pin.error && userPresence)
++        return reply(*pin.error);
++    Vector<SoftCredential> matches;
++    auto* allowList = field(request, 3);
++    bool listed = allowList && allowList->isArray() && !allowList->getArray().isEmpty();
++    for (auto& credential : state.credentials) {
++        if (credential.rpID != rpID->getString())
++            continue;
++        bool match = !listed && credential.discoverable;
++        for (size_t i = 0; listed && i < allowList->getArray().size(); ++i) {
++            auto& descriptor = allowList->getArray()[i];
++            auto* id = descriptor.isMap() ? field(descriptor.getMap(), "id"_s) : nullptr;
++            match |= id && id->isByteString() && id->getByteString() == credential.credentialID;
++        }
++        if (match)
++            matches.append(credential);
++    }
++    if (matches.isEmpty())
++        return reply(CtapDeviceResponseCode::kCtap2ErrNoCredentials);
++    bool verified = pin.verified && userPresence;
++    // Newest first, as keys list discoverable credentials.
++    matches.reverse();
++    std::optional<size_t> count;
++    if (!listed && matches.size() > 1)
++        count = matches.size();
++    std::fprintf(stderr, "Summit soft security key: %s assertion for %s, %zu credential%s%s\n", userPresence ? "an" : "a silent", rpID->getString().utf8().legacyCStringPointer(),
++        matches.size(), matches.size() == 1 ? "" : "s", verified ? " (PIN verified)" : "");
++    state.nextAssertions = matches;
++    state.nextAssertions.removeAt(0);
++    state.nextClientDataHash = clientDataHash->getByteString();
++    state.nextUserVerified = verified;
++    return assertion(matches[0], clientDataHash->getByteString(), userPresence, verified, count, !listed);
++}
++
++Bytes handleGetNextAssertion()
++{
++    auto& state = softKeyState();
++    if (state.nextAssertions.isEmpty())
++        return reply(CtapDeviceResponseCode::kCtap2ErrNotAllowed);
++    auto credential = state.nextAssertions[0];
++    state.nextAssertions.removeAt(0);
++    return assertion(credential, state.nextClientDataHash, true, state.nextUserVerified, std::nullopt, true);
++}
++
++// What the key answers to one CTAP2 command (CTAPHID_CBOR payload), and
++// whether it waits for the user's touch first.
++std::pair<Bytes, bool> handleCommand(const Bytes& payload)
++{
++    if (payload.isEmpty())
++        return { reply(CtapDeviceResponseCode::kCtap1ErrInvalidLength), false };
++    auto command = payload[0];
++    std::optional<CBORValue> decoded;
++    if (payload.size() > 1) {
++        decoded = CBORReader::read(Bytes(payload.span().subspan(1)));
++        if (!decoded || !decoded->isMap())
++            return { reply(CtapDeviceResponseCode::kCtap2ErrInvalidCBOR), false };
++    }
++    static NeverDestroyed<CBORValue::MapValue> empty;
++    const auto& request = decoded ? decoded->getMap() : empty.get();
++    switch (static_cast<CtapRequestCommand>(command)) {
++    case CtapRequestCommand::kAuthenticatorGetInfo:
++        return { handleGetInfo(), false };
++    case CtapRequestCommand::kAuthenticatorClientPin:
++        return { handleClientPin(request), false };
++    case CtapRequestCommand::kAuthenticatorMakeCredential:
++        return { handleMakeCredential(request), true };
++    case CtapRequestCommand::kAuthenticatorGetAssertion: {
++        bool userPresence = option(request, 5, "up"_s).value_or(true);
++        return { handleGetAssertion(request), userPresence };
++    }
++    case CtapRequestCommand::kAuthenticatorGetNextAssertion:
++        return { handleGetNextAssertion(), false };
++    default:
++        // authenticatorSelection (0x0B) and the rest: a touch, then success.
++        if (command == 0x0B)
++            return { reply(CtapDeviceResponseCode::kSuccess), true };
++        return { reply(CtapDeviceResponseCode::kCtap1ErrInvalidCommand), false };
++    }
++}
++
++class SoftHidConnectionHaiku final : public HidConnection {
++public:
++    static Ref<SoftHidConnectionHaiku> create() { return adoptRef(*new SoftHidConnectionHaiku); }
++
++private:
++    SoftHidConnectionHaiku()
++        : HidConnection(nullptr) { }
++
++    void initialize() final { setIsInitialized(true); }
++    void terminate() final { setIsInitialized(false); }
++    DataSent sendSync(const Vector<uint8_t>& data) final
++    {
++        // CTAPHID_CANCEL: the pending touch is not given.
++        auto message = FidoHidMessage::createFromSerializedData(data);
++        if (message && message->cmd() == FidoHidDeviceCommand::kCancel) {
++            std::fprintf(stderr, "Summit soft security key: CTAPHID_CANCEL\n");
++            ++m_generation;
++        }
++        return DataSent::Yes;
++    }
++    void send(Vector<uint8_t>&& data, DataSentCallback&& callback) final
++    {
++        RunLoop::mainSingleton().dispatch([weakThis = WeakPtr { *this }, data = WTF::move(data), callback = WTF::move(callback)]() mutable {
++            RefPtr protectedThis = static_cast<SoftHidConnectionHaiku*>(weakThis.get());
++            if (!protectedThis) {
++                callback(DataSent::No);
++                return;
++            }
++            callback(DataSent::Yes);
++            protectedThis->packetReceived(WTF::move(data));
++        });
++    }
++
++    void packetReceived(Vector<uint8_t>&& data)
++    {
++        if (!m_request) {
++            m_request = FidoHidMessage::createFromSerializedData(data);
++            if (!m_request)
++                return;
++        } else if (!m_request->addContinuationPacket(data)) {
++            m_request = std::nullopt;
++            return;
++        }
++        if (!m_request->messageComplete())
++            return;
++        auto request = WTF::move(*m_request);
++        m_request = std::nullopt;
++        auto channel = request.channelId();
++        if (request.cmd() == FidoHidDeviceCommand::kInit) {
++            auto nonce = request.getMessagePayload();
++            Bytes payload = nonce;
++            m_channel = ++s_lastChannel;
++            for (int shift = 24; shift >= 0; shift -= 8)
++                payload.append(static_cast<uint8_t>(m_channel >> shift));
++            // CTAPHID protocol 2, device version 1.0.0, CBOR and wink.
++            payload.appendVector(Bytes { 2, 1, 0, 0, 0x05 });
++            // One packet; FidoHidMessage makes INIT requests only.
++            FidoHidInitPacket packet(channel, FidoHidDeviceCommand::kInit, Bytes(payload), payload.size());
++            RunLoop::mainSingleton().dispatch([weakThis = WeakPtr { *this }, report = packet.getSerializedData()]() mutable {
++                if (RefPtr protectedThis = weakThis.get())
++                    protectedThis->receiveReport(WTF::move(report));
++            });
++            return;
++        }
++        if (request.cmd() != FidoHidDeviceCommand::kCbor) {
++            respond(FidoHidMessage::create(channel, FidoHidDeviceCommand::kError, { static_cast<uint8_t>(CtapDeviceResponseCode::kCtap1ErrInvalidCommand) }), 0_s);
++            return;
++        }
++        auto [answer, touch] = handleCommand(request.getMessagePayload());
++        respond(FidoHidMessage::create(channel, FidoHidDeviceCommand::kCbor, answer), touch ? touchDelay : 0_s);
++    }
++
++    void respond(std::optional<FidoHidMessage>&& message, Seconds delay)
++    {
++        if (!message)
++            return;
++        RunLoop::mainSingleton().dispatchAfter(delay, [weakThis = WeakPtr { *this }, message = WTF::move(*message), generation = m_generation]() mutable {
++            RefPtr protectedThis = static_cast<SoftHidConnectionHaiku*>(weakThis.get());
++            // Cancelled while it waited for the touch.
++            if (!protectedThis || protectedThis->m_generation != generation)
++                return;
++            while (message.numPackets())
++                protectedThis->receiveReport(message.popNextPacket());
++        });
++    }
++
++    std::optional<FidoHidMessage> m_request;
++    uint32_t m_channel { 0 };
++    uint64_t m_generation { 0 };
++    static uint32_t s_lastChannel;
++};
++
++uint32_t SoftHidConnectionHaiku::s_lastChannel = 0x51000000;
++
++class SoftKeyServiceHaiku final : public FidoService {
++public:
++    static Ref<SoftKeyServiceHaiku> create(AuthenticatorTransportServiceObserver& observer) { return adoptRef(*new SoftKeyServiceHaiku(observer)); }
++
++private:
++    explicit SoftKeyServiceHaiku(AuthenticatorTransportServiceObserver& observer)
++        : FidoService(observer) { }
++    void startDiscoveryInternal() final
++    {
++        std::fprintf(stderr, "Summit soft security key: plugged in (%s)\n", softKeyState().pinHash ? "with a PIN" : "no PIN");
++        getInfo(CtapHidDriver::create(SoftHidConnectionHaiku::create()));
++    }
++};
++
++} // namespace
++
++bool softSecurityKeyEnabledHaiku()
++{
++    const char* value = std::getenv("SUMMIT_WEBAUTHN_SOFT_KEY");
++    return value && *value && std::strcmp(value, "0");
++}
++
++Ref<AuthenticatorTransportService> createSoftSecurityKeyServiceHaiku(AuthenticatorTransportServiceObserver& observer)
++{
++    return SoftKeyServiceHaiku::create(observer);
++}
++
++} // namespace WebKit
++
++#endif // ENABLE(WEB_AUTHN) && PLATFORM(HAIKU)
+diff --git a/Source/WebKit/UIProcess/WebAuthentication/haiku/SoftSecurityKeyHaiku.h b/Source/WebKit/UIProcess/WebAuthentication/haiku/SoftSecurityKeyHaiku.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..155ba73f40813a5c82f4a2e20d7752200d4e23cd
+--- /dev/null
++++ b/Source/WebKit/UIProcess/WebAuthentication/haiku/SoftSecurityKeyHaiku.h
+@@ -0,0 +1,30 @@
++/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
++
++// A FIDO2 security key in software, for tests without a key (#111):
++// SUMMIT_WEBAUTHN_SOFT_KEY=1. Unlike upstream's mock (canned answers), it is
++// a working CTAP2.1 authenticator at the CTAPHID packet level under
++// upstream's CtapHidDriver: ES256 credentials (discoverable ones too), the
++// clientPIN protocols 1 and 2 (key agreement, PIN token, setPIN, retries
++// and blocking), user presence after a short "touch", exclude and allow
++// lists, getNextAssertion. Its signatures verify, so real sites (webauthn.io)
++// accept it, and a wrong PIN encryption fails as it would on a key.
++// SUMMIT_WEBAUTHN_SOFT_KEY_PIN sets its PIN at start;
++// SUMMIT_WEBAUTHN_SOFT_KEY_PROTOCOL=1 offers PIN protocol 1 only (default
++// 2 and 1). Its credentials live as long as the browser.
++
++#pragma once
++
++#if ENABLE(WEB_AUTHN) && PLATFORM(HAIKU)
++
++#include "AuthenticatorTransportService.h"
++#include <wtf/Ref.h>
++
++namespace WebKit {
++
++// A service that finds the software key, once, as HidService finds keys.
++Ref<AuthenticatorTransportService> createSoftSecurityKeyServiceHaiku(AuthenticatorTransportServiceObserver&);
++bool softSecurityKeyEnabledHaiku();
++
++} // namespace WebKit
++
++#endif // ENABLE(WEB_AUTHN) && PLATFORM(HAIKU)
 diff --git a/Source/WebKit/UIProcess/WebAuthentication/haiku/WebAuthenticatorCoordinatorProxyHaiku.cpp b/Source/WebKit/UIProcess/WebAuthentication/haiku/WebAuthenticatorCoordinatorProxyHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..335771f4617c51b045b7f5de31ca7e11c3e980bb
+index 0000000000000000000000000000000000000000..958e7fda5ca187a8355448ecc3681157b7f43a06
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/WebAuthentication/haiku/WebAuthenticatorCoordinatorProxyHaiku.cpp
-@@ -0,0 +1,1565 @@
+@@ -0,0 +1,1789 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +// The Web Authentication API on KunanyiOS. It is built because password
@@ -131443,6 +133622,18 @@ index 0000000000000000000000000000000000000000..335771f4617c51b045b7f5de31ca7e11
 +// a frame of another origin than the page may sign in with a passkey when the
 +// page lets it (permissions policy "publickey-credentials-get", which the web
 +// process checked).
++//
++// Security keys (USB HID, CTAP2 or U2F) are offered alongside, through
++// upstream's portable CTAP code (SecurityKeysHaiku.cpp, HidService on the
++// WebHID device code): a modal request whose options allow a cross-platform
++// authenticator is also given to every key plugged in while the prompt
++// shows, and whichever the user uses answers the page. The host shows what a
++// key needs (a touch, its PIN, a new PIN, a choice of account) and answers
++// with BWebKitView::AnswerSecurityKey. A request for a security key only
++// (authenticatorAttachment "cross-platform", or an allow list naming only
++// USB) gets the security key prompt alone. SUMMIT_SECURITY_KEYS=0 turns them
++// off; for tests, SUMMIT_WEBAUTHN_SOFT_KEY plays a working key in software
++// and SUMMIT_WEBAUTHN_MOCK_HID upstream's mock key.
 +
 +#include "config.h"
 +#include "WebAuthenticatorCoordinatorProxy.h"
@@ -131451,6 +133642,8 @@ index 0000000000000000000000000000000000000000..335771f4617c51b045b7f5de31ca7e11
 +
 +#include "Connection.h"
 +#include "FrameInfoData.h"
++#include "SecurityKeysHaiku.h"
++#include "WebAuthenticationRequestData.h"
 +#include "WebAuthenticatorCoordinatorProxyMessages.h"
 +#include "WebFrameProxy.h"
 +#include "WebPageProxy.h"
@@ -131460,6 +133653,7 @@ index 0000000000000000000000000000000000000000..335771f4617c51b045b7f5de31ca7e11
 +#include <WebCore/AllAcceptedCredentialsOptions.h>
 +#include <WebCore/AuthenticationExtensionsClientOutputs.h>
 +#include <WebCore/AuthenticatorAttachment.h>
++#include <WebCore/AuthenticatorResponse.h>
 +#include <WebCore/AuthenticatorResponseData.h>
 +#include <WebCore/AuthenticatorTransport.h>
 +#include <WebCore/CurrentUserDetailsOptions.h>
@@ -131487,6 +133681,7 @@ index 0000000000000000000000000000000000000000..335771f4617c51b045b7f5de31ca7e11
 +#include <Message.h>
 +#include <OS.h>
 +#include <algorithm>
++#include <limits>
 +#include <cstdlib>
 +#include <cstdio>
 +#include <cstring>
@@ -132096,6 +134291,13 @@ index 0000000000000000000000000000000000000000..335771f4617c51b045b7f5de31ca7e11
 +    std::optional<std::vector<uint8_t>> largeBlobWrite;
 +    // get(): the passkeys offered, in the host's order.
 +    std::vector<StoredPasskeyHaiku> candidates;
++    // Summit's own passkeys are offered. Not when the site asks for a
++    // security key only, or for algorithms other than ES256.
++    bool platform { true };
++    // The request's security keys, looked for while the host asks (#111):
++    // started with the prompt, stopped when the request ends or the user
++    // chose one of Summit's passkeys.
++    RefPtr<SecurityKeyRequestHaiku> securityKeys;
 +};
 +
 +std::unordered_map<uint64_t, PasskeyRequestHaiku>& passkeyRequestsHaiku()
@@ -132175,6 +134377,10 @@ index 0000000000000000000000000000000000000000..335771f4617c51b045b7f5de31ca7e11
 +    message.AddString("origin", request.origin.c_str());
 +    if (!request.topOrigin.empty())
 +        message.AddString("top_origin", request.topOrigin.c_str());
++    // A security key may answer too ("security_key"); "platform" false: only
++    // a security key may (no passkey of Summit's is offered or made).
++    message.AddBool("security_key", !!request.securityKeys);
++    message.AddBool("platform", request.platform);
 +    if (request.create) {
 +        message.AddString("user_name", request.userName.c_str());
 +        message.AddString("user_display_name", request.displayName.c_str());
@@ -132196,6 +134402,10 @@ index 0000000000000000000000000000000000000000..335771f4617c51b045b7f5de31ca7e11
 +        return;
 +    }
 +    request.asked = true;
++    // The keys are asked while the prompt shows: a key answers only once it
++    // is touched (or its PIN given), so the user chooses by using it.
++    if (request.securityKeys)
++        protect(request.securityKeys)->start();
 +}
 +
 +// The request's work is done: it leaves the table, to be answered.
@@ -132409,10 +134619,38 @@ index 0000000000000000000000000000000000000000..335771f4617c51b045b7f5de31ca7e11
 +    return WTF::move(found.mapped().handler);
 +}
 +
-+bool takesPasskeyRequestsHaiku(WebPageProxy* page)
++// The host asks the user about this view's requests (SetPasskeyRequests).
++bool hostAsksHaiku(WebPageProxy* page)
 +{
 +    auto* view = webViewHaiku(page);
-+    return platformPasskeysEnabledHaiku() && view && view->takesPasskeyRequests();
++    return view && view->takesPasskeyRequests();
++}
++
++// Summit's own passkeys are offered for the view.
++bool takesPasskeyRequestsHaiku(WebPageProxy* page)
++{
++    return platformPasskeysEnabledHaiku() && hostAsksHaiku(page);
++}
++
++// Security keys are offered for the view.
++bool takesSecurityKeysHaiku(WebPageProxy* page)
++{
++    return SecurityKeyRequestHaiku::enabled() && hostAsksHaiku(page);
++}
++
++// What may answer a get(), from its allow list, as upstream's
++// AuthenticatorManager collects transports: without a list, or with an entry
++// that names no transport, any authenticator; otherwise those the entries
++// name (USB for security keys, "internal" for this computer's passkeys).
++bool allowListAcceptsHaiku(const Vector<PublicKeyCredentialDescriptor>& allowCredentials, AuthenticatorTransport transport)
++{
++    if (allowCredentials.isEmpty())
++        return true;
++    for (auto& descriptor : allowCredentials) {
++        if (descriptor.transports.isEmpty() || descriptor.transports.contains(transport))
++            return true;
++    }
++    return false;
 +}
 +
 +// ---- Signals ---------------------------------------------------------------
@@ -132484,6 +134722,126 @@ index 0000000000000000000000000000000000000000..335771f4617c51b045b7f5de31ca7e11
 +
 +} // namespace
 +
++// ---- Security keys -------------------------------------------------------
++
++namespace {
++
++const char* statusFieldHaiku(WebAuthenticationStatus status)
++{
++    switch (status) {
++    case WebAuthenticationStatus::NoCredentialsFound: return "no_credentials";
++    case WebAuthenticationStatus::PinBlocked: return "pin_blocked";
++    case WebAuthenticationStatus::PinAuthBlocked: return "pin_auth_blocked";
++    case WebAuthenticationStatus::PinInvalid: return "pin_invalid";
++    case WebAuthenticationStatus::KeyStoreFull: return "key_store_full";
++    case WebAuthenticationStatus::PINTooShort: return "pin_too_short";
++    case WebAuthenticationStatus::PINTooLong: return "pin_too_long";
++    case WebAuthenticationStatus::PINSuccessful: return "pin_accepted";
++    default: return "other";
++    }
++}
++
++// What a request's security keys did (SecurityKeyRequestHaiku). A key's
++// answer ends the request, as the user's choice in the prompt does; the rest
++// is for the host to show, as a B_WEBKIT_PASSKEY_REQUESTED with
++// "identifier" and "security_key_state".
++void securityKeyEventHaiku(uint64_t identifier, SecurityKeyEventHaiku&& event)
++{
++    auto found = passkeyRequestsHaiku().find(identifier);
++    // The user chose one of Summit's passkeys meanwhile: that answers.
++    if (found == passkeyRequestsHaiku().end() || found->second.working)
++        return;
++    auto* view = webViewHaiku(found->second.page.get());
++    if (event.kind == SecurityKeyEventHaiku::Kind::Completed) {
++        auto request = takePasskeyRequestHaiku(identifier);
++        String error = event.error ? event.error->message : String();
++        std::fprintf(stderr, "Summit passkeys: request %llu answered by a security key%s%s\n", static_cast<unsigned long long>(identifier),
++            event.response ? "" : ": ", event.response ? "" : error.utf8().legacyCStringPointer());
++        if (request->asked && view) {
++            BMessage message(B_WEBKIT_PASSKEY_REQUESTED);
++            message.AddUInt64("identifier", identifier);
++            message.AddBool("withdrawn", true);
++            message.AddBool("security_key", true);
++            if (!event.response)
++                message.AddString("error", error.utf8().legacyCStringPointer());
++            view->sendPasskeyRequest(message);
++        }
++        if (!event.response) {
++            request->handler({ }, AuthenticatorAttachment::CrossPlatform, *event.error);
++            return;
++        }
++        auto response = event.response->data();
++        response.clientDataJSON = WTF::move(request->clientDataJSON);
++        request->handler(response, event.response->attachment(), { });
++        return;
++    }
++    if (!found->second.asked || !view)
++        return;
++    BMessage message(B_WEBKIT_PASSKEY_REQUESTED);
++    message.AddUInt64("identifier", identifier);
++    switch (event.kind) {
++    case SecurityKeyEventHaiku::Kind::KeyFound:
++        message.AddString("security_key_state", "touch");
++        break;
++    case SecurityKeyEventHaiku::Kind::Failed:
++        message.AddString("security_key_state", "failed");
++        if (event.error)
++            message.AddString("error", event.error->message.utf8().legacyCStringPointer());
++        break;
++    case SecurityKeyEventHaiku::Kind::PinRequested:
++        message.AddString("security_key_state", "pin");
++        message.AddInt32("retries", static_cast<int32>(std::min<uint64_t>(event.retries, std::numeric_limits<int32>::max())));
++        break;
++    case SecurityKeyEventHaiku::Kind::NewPinRequested:
++        message.AddString("security_key_state", "new_pin");
++        message.AddInt32("min_length", static_cast<int32>(std::min<uint64_t>(event.minimumLength, 63)));
++        break;
++    case SecurityKeyEventHaiku::Kind::AccountRequested:
++        message.AddString("security_key_state", "account");
++        for (auto& [name, displayName] : event.accounts) {
++            message.AddString("account_name", name.utf8().legacyCStringPointer());
++            message.AddString("account_display_name", displayName.utf8().legacyCStringPointer());
++        }
++        break;
++    case SecurityKeyEventHaiku::Kind::StatusChanged:
++        message.AddString("security_key_state", "status");
++        break;
++    case SecurityKeyEventHaiku::Kind::Completed:
++        return;
++    }
++    if (event.status)
++        message.AddString("status", statusFieldHaiku(*event.status));
++    view->sendPasskeyRequest(message);
++}
++
++// A request's security keys, when its options let one answer: they get the
++// request with its clientDataJSON's hash, as upstream's manager gives it.
++RefPtr<SecurityKeyRequestHaiku> securityKeysForHaiku(uint64_t identifier, Variant<PublicKeyCredentialCreationOptions, PublicKeyCredentialRequestOptions>&& options, const Vector<uint8_t>& hash, MediationRequirement mediation)
++{
++    WebAuthenticationRequestData data { hash, WTF::move(options) };
++    data.mediation = mediation;
++    return SecurityKeyRequestHaiku::create(WTF::move(data), [identifier](SecurityKeyEventHaiku&& event) {
++        securityKeyEventHaiku(identifier, WTF::move(event));
++    });
++}
++
++} // namespace
++
++// Main thread only (BWebKitView::AnswerSecurityKey): the user's answer to a
++// security key's question: its PIN, or a new one (pin), or which of its
++// passkeys (account). A null pin and a negative account give up on the key.
++void answerSecurityKeyHaiku(uint64_t identifier, const String& pin, int32_t account)
++{
++    auto found = passkeyRequestsHaiku().find(identifier);
++    if (found == passkeyRequestsHaiku().end() || found->second.working || !found->second.securityKeys)
++        return;
++    RefPtr securityKeys = found->second.securityKeys;
++    if (securityKeys->waitsForPin())
++        securityKeys->answerPin(pin);
++    else if (securityKeys->waitsForAccount())
++        securityKeys->chooseAccount(account);
++}
++
 +// Main thread only (BWebKitView::AnswerPasskeyRequest): the user's answer to
 +// a B_WEBKIT_PASSKEY_REQUESTED. account is the passkey chosen (get), 0 to
 +// create one, or negative to decline.
@@ -132499,6 +134857,13 @@ index 0000000000000000000000000000000000000000..335771f4617c51b045b7f5de31ca7e11
 +    };
 +    if (account < 0)
 +        return decline(notAllowed(request.create && request.conditional ? "No passkey was created."_s : "The user declined."_s));
++    // Only a security key may answer this one: the prompt had nothing to
++    // confirm.
++    if (!request.platform)
++        return decline(notAllowed("The user declined."_s));
++    // The user chose Summit's passkey: the keys stop (they are told to
++    // cancel what they were asked).
++    request.securityKeys = nullptr;
 +    if (request.create) {
 +        // The user agreed before learning the passkey existed; the site
 +        // learns it only now, as the spec asks.
@@ -132553,8 +134918,9 @@ index 0000000000000000000000000000000000000000..335771f4617c51b045b7f5de31ca7e11
 +    return webPageProxy ? webPageProxy->legacyMainFrameProcess().sharedPreferencesForWebProcess() : std::nullopt;
 +}
 +
-+// create() after the relying party was checked.
-+static void startCreateHaiku(const WebAuthenticatorCoordinatorProxy* owner, WebPageProxy* page, FrameIdentifier frameID, const FrameInfoData& frameInfo, PublicKeyCredentialCreationOptions&& options, MediationRequirement mediation, RequestCompletionHandler&& handler)
++// create() after the relying party was checked: Summit's passkey (platform)
++// and security keys (securityKeys), as the request allows.
++static void startCreateHaiku(const WebAuthenticatorCoordinatorProxy* owner, WebPageProxy* page, FrameIdentifier frameID, const FrameInfoData& frameInfo, PublicKeyCredentialCreationOptions&& options, MediationRequirement mediation, bool platform, bool securityKeys, RequestCompletionHandler&& handler)
 +{
 +    bool conditional = mediation == MediationRequirement::Conditional;
 +    PasskeyRequestHaiku request;
@@ -132591,7 +134957,14 @@ index 0000000000000000000000000000000000000000..335771f4617c51b045b7f5de31ca7e11
 +    }
 +    auto rpID = request.rpID;
 +    auto userHandle = request.userHandle;
++    request.platform = platform;
++    auto hash = buildClientDataJsonHash(*request.clientDataJSON);
 +    auto identifier = addPasskeyRequestHaiku(WTF::move(request), passkeyTimeoutHaiku(options.timeout));
++    if (securityKeys)
++        passkeyRequestsHaiku()[identifier].securityKeys = securityKeysForHaiku(identifier, WTF::move(options), hash, mediation);
++    // A security key only: nothing to look up in the key store.
++    if (!platform)
++        return askHostHaiku(identifier);
 +    passkeyQueueHaiku().dispatch([identifier, rpID = WTF::move(rpID), excluded = WTF::move(excluded), userHandle = WTF::move(userHandle), conditional]() mutable {
 +        std::vector<StoredPasskeyHaiku> passkeys;
 +        status_t status = storedPasskeysHaiku(rpID, passkeys);
@@ -132624,8 +134997,9 @@ index 0000000000000000000000000000000000000000..335771f4617c51b045b7f5de31ca7e11
 +    });
 +}
 +
-+// get() after the relying party was checked.
-+static void startGetHaiku(const WebAuthenticatorCoordinatorProxy* owner, WebPageProxy* page, FrameIdentifier frameID, const FrameInfoData& frameInfo, PublicKeyCredentialRequestOptions&& options, MediationRequirement mediation, const std::optional<SecurityOriginData>& topOrigin, RequestCompletionHandler&& handler)
++// get() after the relying party was checked: Summit's passkeys (platform)
++// and security keys (securityKeys), as the request allows.
++static void startGetHaiku(const WebAuthenticatorCoordinatorProxy* owner, WebPageProxy* page, FrameIdentifier frameID, const FrameInfoData& frameInfo, PublicKeyCredentialRequestOptions&& options, MediationRequirement mediation, const std::optional<SecurityOriginData>& topOrigin, bool platform, bool securityKeys, RequestCompletionHandler&& handler)
 +{
 +    std::vector<std::vector<uint8_t>> allowed;
 +    for (auto& descriptor : options.allowCredentials) {
@@ -132682,7 +135056,14 @@ index 0000000000000000000000000000000000000000..335771f4617c51b045b7f5de31ca7e11
 +    auto rpID = request.rpID;
 +    // A conditional request waits as long as the page shows the field.
 +    auto timeout = request.conditional ? std::nullopt : std::optional<Seconds> { passkeyTimeoutHaiku(options.timeout) };
++    request.platform = platform;
++    auto hash = request.clientDataHash;
 +    auto identifier = addPasskeyRequestHaiku(WTF::move(request), timeout);
++    if (securityKeys)
++        passkeyRequestsHaiku()[identifier].securityKeys = securityKeysForHaiku(identifier, WTF::move(options), hash, mediation);
++    // A security key only: nothing to look up in the key store.
++    if (!platform)
++        return askHostHaiku(identifier);
 +    passkeyQueueHaiku().dispatch([identifier, rpID = WTF::move(rpID), allowed = WTF::move(allowed)]() mutable {
 +        std::vector<StoredPasskeyHaiku> passkeys;
 +        status_t status = storedPasskeysHaiku(rpID, passkeys);
@@ -132711,7 +135092,10 @@ index 0000000000000000000000000000000000000000..335771f4617c51b045b7f5de31ca7e11
 +{
 +    RefPtr page = m_webPageProxy.get();
 +    bool conditional = mediation == MediationRequirement::Conditional;
-+    if (!takesPasskeyRequestsHaiku(page.get()) || (conditional && !conditionalCreateEnabledHaiku())) {
++    bool platformOffered = takesPasskeyRequestsHaiku(page.get()) && (!conditional || conditionalCreateEnabledHaiku());
++    // A conditional create() is made without a prompt, by Summit only.
++    bool securityKeysOffered = !conditional && takesSecurityKeysHaiku(page.get());
++    if (!platformOffered && !securityKeysOffered) {
 +        tellWindow(page.get(), mediation, true);
 +        handler({ }, AuthenticatorAttachment::Platform, noAuthenticatorAvailable());
 +        return;
@@ -132719,14 +135103,22 @@ index 0000000000000000000000000000000000000000..335771f4617c51b045b7f5de31ca7e11
 +    if (auto exception = validateFrameHaiku(connection, frameID, frameInfo))
 +        return handler({ }, AuthenticatorAttachment::Platform, *exception);
 +
-+    // The authenticator makes ES256 keys only.
++    // Summit's authenticator makes ES256 keys only; a security key says
++    // which algorithms it has.
 +    bool es256 = false;
 +    for (auto& parameters : options.pubKeyCredParams)
 +        es256 |= parameters.type == PublicKeyCredentialType::PublicKey && parameters.alg == COSE::ES256;
-+    if (!es256)
-+        return handler({ }, AuthenticatorAttachment::Platform, ExceptionData { ExceptionCode::NotSupportedError, "Summit's passkeys are ES256 (-7) keys, which the site does not accept."_s });
-+    // A site that asks for a security key (cross-platform) cannot use it.
-+    if (options.authenticatorSelection && options.authenticatorSelection->authenticatorAttachment == AuthenticatorAttachment::CrossPlatform) {
++    // A site that asks for a security key (cross-platform) gets no passkey
++    // of Summit's, and one that asks for this computer's (platform) no
++    // security key.
++    std::optional<AuthenticatorAttachment> attachment;
++    if (options.authenticatorSelection)
++        attachment = options.authenticatorSelection->authenticatorAttachment;
++    bool platform = platformOffered && es256 && attachment != AuthenticatorAttachment::CrossPlatform;
++    bool securityKeys = securityKeysOffered && attachment != AuthenticatorAttachment::Platform;
++    if (!platform && !securityKeys) {
++        if (platformOffered && !es256 && attachment != AuthenticatorAttachment::CrossPlatform)
++            return handler({ }, AuthenticatorAttachment::Platform, ExceptionData { ExceptionCode::NotSupportedError, "Summit's passkeys are ES256 (-7) keys, which the site does not accept."_s });
 +        tellWindow(page.get(), mediation, true);
 +        return handler({ }, AuthenticatorAttachment::Platform, noAuthenticatorAvailable());
 +    }
@@ -132739,22 +135131,25 @@ index 0000000000000000000000000000000000000000..335771f4617c51b045b7f5de31ca7e11
 +    // A copy: the handler below takes frameInfo.
 +    auto callerOrigin = frameInfo.securityOrigin;
 +    auto token = addRelyingPartyCheckHaiku(this, WTF::move(handler));
-+    checkRelyingPartyHaiku(callerOrigin, rpID, page->userAgent(), [owner = this, token, page = WeakPtr { *page }, frameID, frameInfo = WTF::move(frameInfo), options = WTF::move(options), mediation](std::optional<ExceptionData>&& exception) mutable {
++    checkRelyingPartyHaiku(callerOrigin, rpID, page->userAgent(), [owner = this, token, page = WeakPtr { *page }, frameID, frameInfo = WTF::move(frameInfo), options = WTF::move(options), mediation, platform, securityKeys](std::optional<ExceptionData>&& exception) mutable {
 +        auto handler = takeRelyingPartyCheckHaiku(token);
 +        if (!handler)
 +            return;
 +        if (exception)
 +            return (*handler)({ }, AuthenticatorAttachment::Platform, *exception);
-+        if (!takesPasskeyRequestsHaiku(page.get()))
++        if (!hostAsksHaiku(page.get()))
 +            return (*handler)({ }, AuthenticatorAttachment::Platform, noAuthenticatorAvailable());
-+        startCreateHaiku(owner, page.get(), frameID, frameInfo, WTF::move(options), mediation, WTF::move(*handler));
++        startCreateHaiku(owner, page.get(), frameID, frameInfo, WTF::move(options), mediation, platform, securityKeys, WTF::move(*handler));
 +    });
 +}
 +
 +void WebAuthenticatorCoordinatorProxy::getAssertion(IPC::Connection& connection, FrameIdentifier frameID, FrameInfoData&& frameInfo, PublicKeyCredentialRequestOptions&& options, MediationRequirement mediation, IPC::Untrusted<std::optional<SecurityOriginData>>&& untrustedParentOrigin, RequestCompletionHandler&& handler)
 +{
 +    RefPtr page = m_webPageProxy.get();
-+    if (!takesPasskeyRequestsHaiku(page.get())) {
++    bool platformOffered = takesPasskeyRequestsHaiku(page.get());
++    // Passkey autofill (conditional) offers Summit's passkeys only.
++    bool securityKeysOffered = mediation != MediationRequirement::Conditional && takesSecurityKeysHaiku(page.get());
++    if (!platformOffered && !securityKeysOffered) {
 +        tellWindow(page.get(), mediation, false);
 +        handler({ }, AuthenticatorAttachment::Platform, noAuthenticatorAvailable());
 +        return;
@@ -132794,7 +135189,15 @@ index 0000000000000000000000000000000000000000..335771f4617c51b045b7f5de31ca7e11
 +        // The page itself may be the frame's origin again (a.example in
 +        // b.example in a.example): clientDataJSON still says crossOrigin.
 +    }
-+    if (options.authenticatorAttachment == AuthenticatorAttachment::CrossPlatform) {
++    // A site that asks for a security key (cross-platform) gets no passkey
++    // of Summit's; one whose allow list names only this computer's
++    // authenticators ("internal", as Summit's passkeys say) no security key.
++    // Summit's passkeys are looked up by ID whatever transports the list
++    // names, as before security keys.
++    bool platform = platformOffered && options.authenticatorAttachment != AuthenticatorAttachment::CrossPlatform;
++    bool securityKeys = securityKeysOffered && options.authenticatorAttachment != AuthenticatorAttachment::Platform
++        && allowListAcceptsHaiku(options.allowCredentials, AuthenticatorTransport::Usb);
++    if (!platform && !securityKeys) {
 +        tellWindow(page.get(), mediation, false);
 +        return handler({ }, AuthenticatorAttachment::Platform, noAuthenticatorAvailable());
 +    }
@@ -132803,15 +135206,15 @@ index 0000000000000000000000000000000000000000..335771f4617c51b045b7f5de31ca7e11
 +    // A copy: the handler below takes frameInfo.
 +    auto callerOrigin = frameInfo.securityOrigin;
 +    auto token = addRelyingPartyCheckHaiku(this, WTF::move(handler));
-+    checkRelyingPartyHaiku(callerOrigin, rpID, page->userAgent(), [owner = this, token, page = WeakPtr { *page }, frameID, frameInfo = WTF::move(frameInfo), options = WTF::move(options), mediation, topOrigin = WTF::move(topOrigin)](std::optional<ExceptionData>&& exception) mutable {
++    checkRelyingPartyHaiku(callerOrigin, rpID, page->userAgent(), [owner = this, token, page = WeakPtr { *page }, frameID, frameInfo = WTF::move(frameInfo), options = WTF::move(options), mediation, topOrigin = WTF::move(topOrigin), platform, securityKeys](std::optional<ExceptionData>&& exception) mutable {
 +        auto handler = takeRelyingPartyCheckHaiku(token);
 +        if (!handler)
 +            return;
 +        if (exception)
 +            return (*handler)({ }, AuthenticatorAttachment::Platform, *exception);
-+        if (!takesPasskeyRequestsHaiku(page.get()))
++        if (!hostAsksHaiku(page.get()))
 +            return (*handler)({ }, AuthenticatorAttachment::Platform, noAuthenticatorAvailable());
-+        startGetHaiku(owner, page.get(), frameID, frameInfo, WTF::move(options), mediation, topOrigin, WTF::move(*handler));
++        startGetHaiku(owner, page.get(), frameID, frameInfo, WTF::move(options), mediation, topOrigin, platform, securityKeys, WTF::move(*handler));
 +    });
 +}
 +
@@ -132975,6 +135378,23 @@ index 0000000000000000000000000000000000000000..335771f4617c51b045b7f5de31ca7e11
 +} // namespace WebKit
 +
 +#endif // ENABLE(WEB_AUTHN) && PLATFORM(HAIKU)
+diff --git a/Source/WebKit/UIProcess/WebAuthentication/haiku/crypto/openssl/OpenSSLCryptoUniquePtr.h b/Source/WebKit/UIProcess/WebAuthentication/haiku/crypto/openssl/OpenSSLCryptoUniquePtr.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..aaa31f30369a8638f1f2ab853f9736255fd5ab83
+--- /dev/null
++++ b/Source/WebKit/UIProcess/WebAuthentication/haiku/crypto/openssl/OpenSSLCryptoUniquePtr.h
+@@ -0,0 +1,11 @@
++/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
++
++// WebCore's CryptoKeyEC.h, which upstream's CTAP code includes for the PIN
++// protocol's key agreement, includes this header by its path in WebCore's
++// source tree, which is not an include directory of WebKit. This directory
++// (UIProcess/WebAuthentication/haiku) is, so the path resolves here, to
++// WebCore's own header.
++
++#pragma once
++
++#include "../../../../../../WebCore/crypto/openssl/OpenSSLCryptoUniquePtr.h"
 diff --git a/Source/WebKit/UIProcess/WebFrameProxy.cpp b/Source/WebKit/UIProcess/WebFrameProxy.cpp
 index f0a894576a62be24a8e7e5b8009d63128b210aa7..85264fa2c360e44d115c8604754c9e0c3f3cbe91 100644
 --- a/Source/WebKit/UIProcess/WebFrameProxy.cpp
@@ -147083,10 +149503,10 @@ index 0000000000000000000000000000000000000000..3d03048e2ef4f1f8a33fabb5c9ab3083
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/WebViewStateHaiku.h b/Source/WebKit/UIProcess/haiku/WebViewStateHaiku.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..7f921b9da6ddbf915192f0474c03b133e6c3670c
+index 0000000000000000000000000000000000000000..c70ad24f774b84a8cba7b09ff0e30da59525f5b5
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/WebViewStateHaiku.h
-@@ -0,0 +1,242 @@
+@@ -0,0 +1,246 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#pragma once
@@ -147314,6 +149734,10 @@ index 0000000000000000000000000000000000000000..7f921b9da6ddbf915192f0474c03b133
 +// passkey chosen (get), 0 to create one, or negative to decline
 +// (WebAuthenticatorCoordinatorProxyHaiku.cpp).
 +void answerPasskeyRequestHaiku(uint64_t identifier, int32_t account);
++// Main thread only. Answers a security key's question about a
++// B_WEBKIT_PASSKEY_REQUESTED identifier: its PIN or a new PIN (pin), or the
++// passkey chosen among the key's (account).
++void answerSecurityKeyHaiku(uint64_t identifier, const String& pin, int32_t account);
 +#endif
 +// Main thread only. Runs an extension item of the last B_WEBKIT_CONTEXT_MENU.
 +void performExtensionMenuItemHaiku(uint64_t token);
@@ -148182,10 +150606,10 @@ index 0000000000000000000000000000000000000000..e29f83d0a7d6a1f92d91248555491515
 +#endif
 diff --git a/Source/WebKit/UIProcess/haiku/usb/HIDDeviceHaiku.cpp b/Source/WebKit/UIProcess/haiku/usb/HIDDeviceHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..22bb375542546fb1a74b8a159672554aa0cac533
+index 0000000000000000000000000000000000000000..f61fdaf0d28ae7a6a2e89c17ca1d07b2ffabc5da
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/usb/HIDDeviceHaiku.cpp
-@@ -0,0 +1,675 @@
+@@ -0,0 +1,697 @@
 +/* Copyright (C) 2026 Summit contributors. SPDX-License-Identifier: BSD-2-Clause */
 +#include "config.h"
 +#include "HIDDeviceHaiku.h"
@@ -148343,8 +150767,10 @@ index 0000000000000000000000000000000000000000..22bb375542546fb1a74b8a159672554a
 +        if (read <= 0)
 +            continue;
 +        bytes.resize(read);
++        // Every interface with a usable descriptor is kept: WebHID offers the
++        // eligible ones, Web Authentication the security keys.
 +        auto descriptor = parseReportDescriptor(bytes);
-+        if (!descriptor || !eligible(*descriptor))
++        if (!descriptor)
 +            continue;
 +        if (identity.empty()) {
 +            identity = identityOf(device, st);
@@ -148416,7 +150842,9 @@ index 0000000000000000000000000000000000000000..22bb375542546fb1a74b8a159672554a
 +
 +} // namespace
 +
-+std::vector<Interface> enumerateInterfaces()
++// The HID interfaces of the USB devices attached now, with their report
++// descriptors.
++static std::vector<Interface> describedInterfaces(size_t* devices)
 +{
 +    // Reading a report descriptor is a control transfer: do it once for each
 +    // device node. A device node is never reused for a different device
@@ -148451,7 +150879,25 @@ index 0000000000000000000000000000000000000000..22bb375542546fb1a74b8a159672554a
 +        std::lock_guard lock(cacheLock);
 +        cache = std::move(current);
 +    }
++    if (devices)
++        *devices = paths.size();
 +    return result;
++}
++
++std::vector<Interface> enumerateInterfaces()
++{
++    auto interfaces = describedInterfaces(nullptr);
++    std::erase_if(interfaces, [](auto& interface) { return !eligible(interface.descriptor); });
++    return interfaces;
++}
++
++std::vector<Interface> enumerateSecurityKeys(size_t* devices, std::vector<Interface>* hidInterfaces)
++{
++    auto interfaces = describedInterfaces(devices);
++    if (hidInterfaces)
++        *hidInterfaces = interfaces;
++    std::erase_if(interfaces, [](auto& interface) { return !securityKey(interface.descriptor); });
++    return interfaces;
 +}
 +
 +struct Connection::State {
@@ -148490,10 +150936,10 @@ index 0000000000000000000000000000000000000000..22bb375542546fb1a74b8a159672554a
 +
 +enum { SendReport, SendFeatureReport, ReceiveFeatureReport };
 +
-+std::shared_ptr<Connection> Connection::open(const Interface& approved, InputHandler&& input, Error& error)
++std::shared_ptr<Connection> Connection::open(const Interface& approved, InputHandler&& input, Error& error, bool forSecurityKey)
 +{
 +    error = Error::None;
-+    if (!validPath(approved.path) || !eligible(approved.descriptor)) {
++    if (!validPath(approved.path) || !(forSecurityKey ? securityKey(approved.descriptor) : eligible(approved.descriptor))) {
 +        error = Error::Security;
 +        return nullptr;
 +    }
@@ -148863,15 +151309,16 @@ index 0000000000000000000000000000000000000000..22bb375542546fb1a74b8a159672554a
 +} // namespace WebKit::HIDHaiku
 diff --git a/Source/WebKit/UIProcess/haiku/usb/HIDDeviceHaiku.h b/Source/WebKit/UIProcess/haiku/usb/HIDDeviceHaiku.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..3389f4812ecc2e18d685f2b4982f8ce4a4dc4cd1
+index 0000000000000000000000000000000000000000..d04cc69b98670b4d2c430f768f6409722082f20b
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/usb/HIDDeviceHaiku.h
-@@ -0,0 +1,66 @@
+@@ -0,0 +1,87 @@
 +/* Copyright (C) 2026 Summit contributors. SPDX-License-Identifier: BSD-2-Clause */
 +#pragma once
 +
 +#include "HIDReportDescriptorHaiku.h"
 +#include <OS.h>
++#include <algorithm>
 +#include <atomic>
 +#include <deque>
 +#include <functional>
@@ -148898,6 +151345,25 @@ index 0000000000000000000000000000000000000000..3389f4812ecc2e18d685f2b4982f8ce4
 +// report descriptors of devices already seen are cached. Call on a worker.
 +std::vector<Interface> enumerateInterfaces();
 +
++// A FIDO security key's interface: a top-level collection of the FIDO
++// Alliance's usage page (0xF1D0), usage CTAPHID (0x01), whose 64-byte input
++// and output reports carry CTAPHID packets. WebHID never offers these to
++// pages (protectedUsagePage).
++inline bool securityKey(const Descriptor& descriptor)
++{
++    return std::any_of(descriptor.collections.begin(), descriptor.collections.end(), [](auto& collection) {
++        return collection.usagePage == 0xf1d0 && collection.usage == 0x01;
++    }) && descriptor.reportLength(ReportType::Input, 0).value_or(0) == 64
++        && descriptor.reportLength(ReportType::Output, 0).value_or(0) == 64;
++}
++
++// Lists the FIDO security keys (CTAPHID interfaces, see securityKey()), for
++// the browser's own Web Authentication, never for pages. Same cache; call on
++// a worker. devices, when given, is set to the number of USB device nodes
++// looked at, and hidInterfaces to all their HID interfaces (but boot
++// keyboards and mice), security keys or not.
++std::vector<Interface> enumerateSecurityKeys(size_t* devices = nullptr, std::vector<Interface>* hidInterfaces = nullptr);
++
 +enum class Error { None, NotFound, Security, InvalidState, Network, NotSupported, Abort };
 +
 +// An open HID interface. A device thread owns the raw USB handle. It keeps an
@@ -148912,8 +151378,9 @@ index 0000000000000000000000000000000000000000..3389f4812ecc2e18d685f2b4982f8ce4
 +    using InputHandler = std::function<void(uint8_t reportId, std::vector<uint8_t>&&, bool gone)>;
 +
 +    // Blocking: call on a worker. Verifies that the interface is still the one
-+    // approved.
-+    static std::shared_ptr<Connection> open(const Interface& approved, InputHandler&&, Error&);
++    // approved. A security key (enumerateSecurityKeys) is opened only with
++    // securityKey set, for the browser's Web Authentication.
++    static std::shared_ptr<Connection> open(const Interface& approved, InputHandler&&, Error&, bool securityKey = false);
 +    ~Connection();
 +
 +    // Completions are called on the device thread, in order, each exactly once.

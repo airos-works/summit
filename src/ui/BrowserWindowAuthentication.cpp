@@ -242,10 +242,29 @@ void BrowserWindow::PasskeyRequested(const BMessage& message)
 {
     const uint64 identifier = message.GetUInt64("identifier", 0);
     if (!identifier) return;
+    if (message.HasString("security_key_state")) {
+        SecurityKeyChanged(message);
+        return;
+    }
     if (message.GetBool("withdrawn", false)) {
         // The page aborted the request, went to another document or closed,
-        // or it timed out.
-        std::fprintf(stderr, "Summit: passkey request %llu withdrawn\n", static_cast<unsigned long long>(identifier));
+        // or it timed out; or a security key answered it.
+        std::fprintf(stderr, "Summit: passkey request %llu withdrawn%s%s\n", static_cast<unsigned long long>(identifier),
+            message.GetBool("security_key", false) ? ", answered by a security key" : "",
+            message.HasString("error") ? (std::string(": ") + message.GetString("error", "")).c_str() : "");
+        // A key that refused the request (it already holds a passkey the
+        // site excludes, for instance): the page got an error; say why.
+        if (message.GetBool("security_key", false) && message.HasString("error")) {
+            auto request = std::find_if(fPasskeyRequests.begin(), fPasskeyRequests.end(),
+                [&](const PasskeyRequest& request) { return request.identifier == identifier; });
+            Tab* tab = request != fPasskeyRequests.end() ? FindTabByID(request->tab) : nullptr;
+            if (tab) {
+                tab->notice = std::string("The security key could not be used for ") + request->request.GetString("rp_id", "the site") + ": "
+                    + PromptDisplayText(message.GetString("error", ""), 160);
+                tab->noticeUntil = system_time() + 15 * 1000000LL;
+                if (tab->id == fSelected) ShowTabStatus(*tab);
+            }
+        }
         std::erase_if(fPasskeyRequests, [&](const PasskeyRequest& request) { return request.identifier == identifier; });
         std::erase_if(fConditionalPasskeys, [&](const ConditionalPasskeys& request) { return request.identifier == identifier; });
         ClosePasskeyAutofill();
@@ -289,6 +308,92 @@ void BrowserWindow::PasskeyRequested(const BMessage& message)
     ShowPasskeyPrompt();
 }
 
+// What a security key is doing, in the sheet (B_WEBKIT_PASSKEY_REQUESTED
+// "security_key_state" and "status"); empty when there is nothing to say.
+static std::string SecurityKeyNote(const std::string& state, const std::string& statusField, const std::string& error, const std::string& site)
+{
+    // A key that failed after its PIN was taken failed all the same.
+    const std::string status = state == "failed" && statusField == "pin_accepted" ? std::string() : statusField;
+    if (status == "no_credentials")
+        return "This security key has no passkey for " + PromptDisplayText(site, 120) + ". Try another one.";
+    if (status == "pin_blocked")
+        return "This security key is locked after too many wrong PINs. It must be reset before it can be used again.";
+    if (status == "pin_auth_blocked")
+        return "Too many wrong PINs. Remove the security key and insert it again to try again.";
+    if (status == "key_store_full")
+        return "This security key has no room for another passkey.";
+    if (status == "pin_accepted")
+        return "PIN accepted. Touch your security key.";
+    if (state == "touch")
+        return "Security key found. Touch it to continue.";
+    if (state == "failed")
+        return "The security key could not be used" + (error.empty() ? std::string(".") : " (" + PromptDisplayText(error, 120) + ").")
+            + " Remove it and insert it again to try again.";
+    return {};
+}
+
+// A security key of a waiting request asks something or says what it is
+// doing (#111). Questions (its PIN, a new PIN, which of its passkeys) get a
+// sheet of their own; the rest is a line in the sheet showing.
+void BrowserWindow::SecurityKeyChanged(const BMessage& message)
+{
+    const uint64 identifier = message.GetUInt64("identifier", 0);
+    auto found = std::find_if(fPasskeyRequests.begin(), fPasskeyRequests.end(),
+        [&](const PasskeyRequest& request) { return request.identifier == identifier; });
+    if (found == fPasskeyRequests.end()) return;
+    BMessage& request = found->request;
+    const std::string state = message.GetString("security_key_state", ""), status = message.GetString("status", "");
+    const std::string error = message.GetString("error", "");
+    std::fprintf(stderr, "Summit: security key for passkey request %llu: %s%s%s%s%s\n", static_cast<unsigned long long>(identifier),
+        state.c_str(), status.empty() ? "" : ", ", status.c_str(), error.empty() ? "" : ": ", error.c_str());
+    const std::string shownState = request.GetString("key_state", "");
+    std::string nextState = shownState;
+    if (state == "pin" || state == "new_pin" || state == "account") {
+        nextState = state;
+        request.RemoveName("key_retries");
+        request.RemoveName("key_wrong_pin");
+        request.RemoveName("key_min_length");
+        request.RemoveName("key_pin_problem");
+        request.RemoveName("key_account_name");
+        request.RemoveName("key_account_display_name");
+        request.AddInt32("key_retries", message.GetInt32("retries", -1));
+        request.AddBool("key_wrong_pin", status == "pin_invalid");
+        request.AddInt32("key_min_length", message.GetInt32("min_length", 4));
+        if (status == "pin_too_short") request.AddString("key_pin_problem", "The key refused that PIN as too short.");
+        if (status == "pin_too_long") request.AddString("key_pin_problem", "The key refused that PIN as too long.");
+        const char* name = nullptr;
+        for (int32 i = 0; message.FindString("account_name", i, &name) == B_OK; ++i) {
+            request.AddString("key_account_name", name);
+            request.AddString("key_account_display_name", message.GetString("account_display_name", i, ""));
+        }
+        request.RemoveName("key_note");
+    } else {
+        // A wrong PIN is said in the PIN sheet the key asks for next.
+        if (status == "pin_invalid" || status == "pin_too_short" || status == "pin_too_long") return;
+        const std::string note = SecurityKeyNote(state, status, error, request.GetString("rp_id", ""));
+        if (note.empty()) return;
+        request.RemoveName("key_note");
+        request.AddString("key_note", note.c_str());
+        // A key that failed or locked up asks nothing more: back to the
+        // first sheet.
+        if (state == "failed" || status == "pin_blocked" || status == "pin_auth_blocked") nextState.clear();
+    }
+    request.RemoveName("key_state");
+    if (!nextState.empty()) request.AddString("key_state", nextState.c_str());
+    if (fPasskeyShown != identifier || !fPasskeyPrompt.IsValid()) return;
+    if (nextState == shownState) {
+        BMessage note(kPasskeyKeyNote);
+        note.AddString("note", request.GetString("key_note", ""));
+        fPasskeyPrompt.SendMessage(&note);
+        return;
+    }
+    // Another kind of sheet: it replaces the one showing.
+    fPasskeyPrompt.SendMessage(kPasskeyReplaced);
+    fPasskeyPrompt = BMessenger();
+    fPasskeyShown = 0;
+    ShowPasskeyPrompt();
+}
+
 void BrowserWindow::ShowPasskeyPrompt()
 {
     if (fPasskeyPrompt.IsValid()) return;
@@ -306,8 +411,13 @@ void BrowserWindow::ShowPasskeyPrompt()
     const std::string topOrigin = request.GetString("top_origin", "");
     if (const auto scheme = topOrigin.find("://"); scheme != std::string::npos) fields.topHost = topOrigin.substr(scheme + 3);
     fields.privateWindow = fPrivate;
-    if (request.GetBool("create", false)) {
-        fields.kind = request.GetBool("exists", false) ? PasskeyPrompt::Kind::AlreadySaved : PasskeyPrompt::Kind::Create;
+    fields.create = request.GetBool("create", false);
+    fields.securityKey = request.GetBool("security_key", false);
+    // Only a security key may answer (the site asks for one).
+    const bool platform = request.GetBool("platform", true);
+    if (fields.create) {
+        fields.kind = !platform ? PasskeyPrompt::Kind::SecurityKey
+            : request.GetBool("exists", false) ? PasskeyPrompt::Kind::AlreadySaved : PasskeyPrompt::Kind::Create;
         fields.userName = request.GetString("user_name", "");
         fields.displayName = request.GetString("user_display_name", "");
         fields.replaces = request.GetBool("replaces", false);
@@ -315,8 +425,31 @@ void BrowserWindow::ShowPasskeyPrompt()
         const char* name = nullptr;
         for (int32 i = 0; request.FindString("account_name", i, &name) == B_OK; ++i)
             fields.accounts.emplace_back(name, request.GetString("account_display_name", i, ""));
-        fields.kind = fields.accounts.empty() ? PasskeyPrompt::Kind::NoPasskey : PasskeyPrompt::Kind::SignIn;
+        // No passkey of Summit's suits the site, but a security key may.
+        fields.kind = !fields.accounts.empty() ? PasskeyPrompt::Kind::SignIn
+            : fields.securityKey ? PasskeyPrompt::Kind::SecurityKey : PasskeyPrompt::Kind::NoPasskey;
     }
+    // A security key's question, until it is answered.
+    const std::string keyState = request.GetString("key_state", "");
+    if (keyState == "pin") {
+        fields.kind = PasskeyPrompt::Kind::SecurityKeyPin;
+        fields.retries = request.GetInt32("key_retries", -1);
+        fields.wrongPin = request.GetBool("key_wrong_pin", false);
+    } else if (keyState == "new_pin") {
+        fields.kind = PasskeyPrompt::Kind::SecurityKeyNewPin;
+        fields.minimumPinLength = std::max<int32>(1, request.GetInt32("key_min_length", 4));
+        fields.pinProblem = request.GetString("key_pin_problem", "");
+    } else if (keyState == "account") {
+        fields.kind = PasskeyPrompt::Kind::SecurityKeyAccount;
+        fields.accounts.clear();
+        const char* name = nullptr;
+        for (int32 i = 0; request.FindString("key_account_name", i, &name) == B_OK; ++i)
+            fields.accounts.emplace_back(name, request.GetString("key_account_display_name", i, ""));
+    } else if (keyState == "sent") {
+        // The key has its answer and works on it.
+        fields.kind = PasskeyPrompt::Kind::SecurityKey;
+    }
+    fields.keyNote = request.GetString("key_note", "");
     auto* prompt = new PasskeyPrompt(fields, BMessenger(this));
     if (prompt->AddToSubset(this) != B_OK) {
         prompt->Quit();
@@ -339,6 +472,27 @@ void BrowserWindow::PasskeyAnswered(const BMessage& message)
     }
     const auto found = std::find_if(fPasskeyRequests.begin(), fPasskeyRequests.end(),
         [&](const PasskeyRequest& request) { return request.identifier == identifier; });
+    // A security key's question answered: the request goes on, and the
+    // sheet says the key is at work until it answers or asks again.
+    if (found != fPasskeyRequests.end() && (message.HasString("pin") || message.HasInt32("key_account"))) {
+        BMessage& request = found->request;
+        request.RemoveName("key_state");
+        request.AddString("key_state", "sent");
+        request.RemoveName("key_note");
+        if (message.HasString("pin")) {
+            std::fprintf(stderr, "Summit: security key PIN given for passkey request %llu\n", static_cast<unsigned long long>(identifier));
+            request.AddString("key_note", "Checking the PIN…");
+            BWebKitView::AnswerSecurityKey(identifier, message.GetString("pin", ""));
+        } else {
+            const int32 account = message.GetInt32("key_account", -1);
+            std::fprintf(stderr, "Summit: security key account %d chosen for passkey request %llu\n", static_cast<int>(account),
+                static_cast<unsigned long long>(identifier));
+            request.AddString("key_note", "Signing in with the security key…");
+            BWebKitView::AnswerSecurityKey(identifier, nullptr, account);
+        }
+        ShowPasskeyPrompt();
+        return;
+    }
     if (found != fPasskeyRequests.end()) {
         const int32 account = message.GetInt32("account", -1);
         std::fprintf(stderr, "Summit: passkey request %llu %s\n", static_cast<unsigned long long>(identifier),

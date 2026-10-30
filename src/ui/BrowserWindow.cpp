@@ -5324,9 +5324,10 @@ void BrowserWindow::MessageReceived(BMessage* message)
         case B_WEBKIT_FULLSCREEN_REQUESTED: FullScreenRequested(*message); break;
         case B_WEBKIT_WEBAUTHN_UNHANDLED: {
             // The page asked for a passkey, no extension answered, and
-            // Summit's own passkeys could not (turned off with
-            // SUMMIT_PLATFORM_PASSKEYS=0, or the site wants a security key),
-            // so the page saw an error.
+            // Summit could not (its passkeys turned off with
+            // SUMMIT_PLATFORM_PASSKEYS=0, security keys with
+            // SUMMIT_SECURITY_KEYS=0, or neither suits the request), so the
+            // page saw an error.
             BMessenger messenger;
             if (message->FindMessenger("view", &messenger) != B_OK) break;
             auto* tab = FindTab(messenger);
@@ -5334,7 +5335,7 @@ void BrowserWindow::MessageReceived(BMessage* message)
             std::string notice = message->GetBool("create", false)
                 ? "This page tried to create a passkey, but neither Summit nor a password manager could."
                 : "This page asked for a passkey, but neither Summit nor a password manager answered.";
-            notice += " Security keys (USB) are not supported yet; an extension such as 1Password provides its own passkeys";
+            notice += " An extension such as 1Password provides its own passkeys";
             notice += fPrivate ? ", and must be allowed in private windows (Extensions)." : ".";
             // Shown for a while: the page's own reaction (a title or a reload)
             // would otherwise put "Ready" back at once.

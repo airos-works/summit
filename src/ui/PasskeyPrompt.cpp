@@ -9,6 +9,8 @@
 #include <MenuItem.h>
 #include <PopUpMenu.h>
 #include <StringView.h>
+#include <TextControl.h>
+#include <string>
 #include <GroupView.h>
 #include <ListView.h>
 #include <algorithm>
@@ -73,6 +75,9 @@ PasskeyPrompt::PasskeyPrompt(const Fields& fields, BMessenger target)
     std::string heading, explanation;
     const char* confirm = nullptr;
     const char* cancel = "Cancel";
+    // The create() sheets name the account; so does a security key's, for
+    // create(), since it makes the passkey for that account.
+    bool creating = fields.kind == Kind::Create || (fields.kind == Kind::SecurityKey && fields.create);
     switch (fields.kind) {
         case Kind::Create:
             heading = "Create a passkey for " + site + "?";
@@ -98,6 +103,27 @@ PasskeyPrompt::PasskeyPrompt(const Fields& fields, BMessenger target)
             confirm = "OK";
             cancel = nullptr;
             break;
+        case Kind::SecurityKey:
+            heading = "Use your security key";
+            explanation = creating ? "Insert your security key and touch it to create a passkey for " + site + " on it."
+                : "Insert your security key and touch it to sign in to " + site + ".";
+            break;
+        case Kind::SecurityKeyPin:
+            heading = "Enter your security key's PIN";
+            explanation = site + " asks your security key to check that it is you.";
+            confirm = "Continue";
+            break;
+        case Kind::SecurityKeyNewPin:
+            heading = "Set a PIN for your security key";
+            explanation = site + " asks your security key to check that it is you, and the key has no PIN yet. Choose one of at least "
+                + std::to_string(fields.minimumPinLength) + " characters; the key keeps it, and asks for it from now on.";
+            confirm = "Set PIN";
+            break;
+        case Kind::SecurityKeyAccount:
+            heading = "Sign in to " + site + " with your security key";
+            explanation = "The security key keeps more than one passkey for this site. Choose the account.";
+            confirm = "Sign In";
+            break;
     }
     if (fields.kind == Kind::SignIn) confirm = "Sign In";
     auto* title = Line("heading", heading);
@@ -115,11 +141,12 @@ PasskeyPrompt::PasskeyPrompt(const Fields& fields, BMessenger target)
             + ", in a frame of " + PromptDisplayText(fields.topHost, 120)));
     else if (!fields.pageHost.empty() && fields.pageHost != fields.site)
         layout.Add(Line("page", "Asked by " + PromptDisplayText(fields.pageHost, 120)));
-    if (fields.kind == Kind::Create)
+    if (creating)
         layout.Add(Line("account", "Account: " + PasskeyAccountLabel(fields.userName, fields.displayName)));
+    const bool choosesAccount = fields.kind == Kind::SignIn || fields.kind == Kind::SecurityKeyAccount;
     if (fields.kind == Kind::SignIn && fields.accounts.size() == 1)
         layout.Add(Line("account", "Account: " + PasskeyAccountLabel(fields.accounts[0].first, fields.accounts[0].second)));
-    if (fields.kind == Kind::SignIn && fields.accounts.size() > 1) {
+    if (choosesAccount && (fields.accounts.size() > 1 || fields.kind == Kind::SecurityKeyAccount) && !fields.accounts.empty()) {
         auto* menu = new BPopUpMenu("accounts");
         for (size_t index = 0; index < fields.accounts.size(); ++index) {
             auto* choose = new BMessage(kChoose);
@@ -131,11 +158,57 @@ PasskeyPrompt::PasskeyPrompt(const Fields& fields, BMessenger target)
         layout.Add(fAccounts);
     }
     if (!explanation.empty()) layout.Add(Paragraph("explanation", explanation));
+    if (fields.kind == Kind::SecurityKeyPin || fields.kind == Kind::SecurityKeyNewPin) {
+        fPin = new BTextControl("pin", fields.kind == Kind::SecurityKeyPin ? "PIN:" : "New PIN:", "", nullptr);
+        fPin->TextView()->HideTyping(true);
+        layout.Add(fPin);
+        if (fields.kind == Kind::SecurityKeyNewPin) {
+            fPinAgain = new BTextControl("pin again", "Again:", "", nullptr);
+            fPinAgain->TextView()->HideTyping(true);
+            layout.Add(fPinAgain);
+        }
+        std::string problem = fields.pinProblem;
+        if (fields.kind == Kind::SecurityKeyPin) {
+            if (fields.wrongPin) problem = "Wrong PIN.";
+            // The key locks itself after its last try: say how many are left
+            // once it matters.
+            if (fields.retries >= 0 && (fields.wrongPin || fields.retries <= 3))
+                problem += std::string(problem.empty() ? "" : " ") + std::to_string(fields.retries)
+                    + (fields.retries == 1 ? " try left before the key locks." : " tries left before the key locks.");
+        }
+        if (!problem.empty()) {
+            fProblem = Paragraph("problem", problem);
+            layout.Add(fProblem);
+        }
+    }
+    // Create and sign-in sheets: a security key may answer instead.
+    if (fields.securityKey && (fields.kind == Kind::Create || fields.kind == Kind::SignIn || fields.kind == Kind::AlreadySaved))
+        layout.Add(Paragraph("security key", fields.kind == Kind::SignIn
+            ? "Or sign in with a security key: insert it and touch it."
+            : "Or create the passkey on a security key: insert it and touch it."));
+    fKeyNote = new BGroupView("key note", B_VERTICAL, 0);
+    layout.Add(fKeyNote);
     auto buttons = layout.AddGroup(B_HORIZONTAL).AddGlue();
     if (cancel) buttons.Add(new BButton("cancel", cancel, new BMessage(kCancel)));
-    auto* confirmButton = new BButton("confirm", confirm, new BMessage(kConfirm));
-    buttons.Add(confirmButton).End();
-    SetDefaultButton(confirmButton);
+    BButton* confirmButton = confirm ? new BButton("confirm", confirm, new BMessage(kConfirm)) : nullptr;
+    if (confirmButton) buttons.Add(confirmButton);
+    buttons.End();
+    if (confirmButton) SetDefaultButton(confirmButton);
+    SetKeyNote(fields.keyNote);
+    if (fPin) fPin->MakeFocus(true);
+    ResizeToPreferred();
+}
+
+// A line of what the security key is doing, replaced in place: the sheet
+// stays, and with it what the user chose or typed.
+void PasskeyPrompt::SetKeyNote(const std::string& note)
+{
+    if (!fKeyNote) return;
+    while (BView* child = fKeyNote->ChildAt(0)) {
+        child->RemoveSelf();
+        delete child;
+    }
+    if (!note.empty()) fKeyNote->AddChild(Paragraph(nullptr, note));
     ResizeToPreferred();
 }
 
@@ -146,11 +219,64 @@ bool PasskeyPrompt::QuitRequested()
     return true;
 }
 
+void PasskeyPrompt::Confirm()
+{
+    switch (fFields.kind) {
+        case Kind::SignIn: Answer(fChosen); break;
+        case Kind::NoPasskey: Answer(-1); break;
+        case Kind::SecurityKey: return;
+        case Kind::SecurityKeyPin:
+        case Kind::SecurityKeyNewPin: {
+            std::string pin = fPin->Text();
+            std::string problem;
+            if (pin.empty())
+                problem = "Enter the PIN.";
+            else if (fPinAgain && pin != fPinAgain->Text())
+                problem = "The two PINs differ.";
+            else if (fFields.kind == Kind::SecurityKeyNewPin && static_cast<int32>(pin.size()) < fFields.minimumPinLength)
+                problem = "The PIN is too short: at least " + std::to_string(fFields.minimumPinLength) + " characters.";
+            if (!problem.empty()) {
+                SetKeyNote(problem);
+                return;
+            }
+            if (fAnswered) return;
+            fAnswered = true;
+            BMessage answer(kPasskeyAnswer);
+            answer.AddUInt64("identifier", fFields.identifier);
+            answer.AddString("pin", pin.c_str());
+            fTarget.SendMessage(&answer, static_cast<BHandler*>(nullptr), 0);
+            // Not kept in the window's fields after it closes.
+            std::fill(pin.begin(), pin.end(), '\0');
+            fPin->SetText("");
+            if (fPinAgain) fPinAgain->SetText("");
+            break;
+        }
+        case Kind::SecurityKeyAccount: {
+            if (fAnswered) return;
+            fAnswered = true;
+            BMessage answer(kPasskeyAnswer);
+            answer.AddUInt64("identifier", fFields.identifier);
+            answer.AddInt32("key_account", fChosen);
+            fTarget.SendMessage(&answer, static_cast<BHandler*>(nullptr), 0);
+            break;
+        }
+        default: Answer(0); break;
+    }
+    Quit();
+}
+
 void PasskeyPrompt::MessageReceived(BMessage* message)
 {
     switch (message->what) {
         case kChoose:
             fChosen = message->GetInt32("account", 0);
+            return;
+        case kPasskeyKeyNote:
+            SetKeyNote(message->GetString("note", ""));
+            return;
+        case kPasskeyReplaced:
+            fAnswered = true;
+            Quit();
             return;
         case kScriptedButton:
             if (message->HasInt32("account") && fAccounts) {
@@ -160,15 +286,18 @@ void PasskeyPrompt::MessageReceived(BMessage* message)
                     if (auto* item = fAccounts->Menu()->ItemAt(account)) item->SetMarked(true);
                 }
             }
-            if (message->GetInt32("which", 0) == 0 && (fFields.kind == Kind::Create || fFields.kind == Kind::SignIn))
+            if (const char* pin = nullptr; message->FindString("pin", &pin) == B_OK && fPin) {
+                fPin->SetText(pin);
+                if (fPinAgain) fPinAgain->SetText(pin);
+            }
+            if (message->GetInt32("which", 0) == 0 && fFields.kind != Kind::AlreadySaved && fFields.kind != Kind::NoPasskey) {
                 Answer(-1);
-            else
-                Answer(fFields.kind == Kind::SignIn ? fChosen : fFields.kind == Kind::NoPasskey ? -1 : 0);
-            Quit();
+                Quit();
+            } else
+                Confirm();
             return;
         case kConfirm:
-            Answer(fFields.kind == Kind::SignIn ? fChosen : fFields.kind == Kind::NoPasskey ? -1 : 0);
-            Quit();
+            Confirm();
             return;
         case kCancel:
             Answer(-1);

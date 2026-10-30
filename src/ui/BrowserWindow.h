@@ -817,6 +817,7 @@ private:
     };
     void PasskeyRequested(const BMessage& message);
     void PasskeyAnswered(const BMessage& message);
+    void SecurityKeyChanged(const BMessage& message);
     void ShowPasskeyPrompt();
     std::vector<PasskeyRequest> fPasskeyRequests;
     BMessenger fPasskeyPrompt;

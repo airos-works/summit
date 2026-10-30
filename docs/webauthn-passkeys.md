@@ -3,10 +3,11 @@
 ## Why the API is built at all
 
 KunanyiOS has no platform authenticator of its own: no biometric credential
-store, and no CTAP transport for USB or NFC security keys. Summit builds the
-Web Authentication API for two reasons: password managers provide passkeys
-through it from their content scripts, and since October 2026 (#111) Summit
-answers it itself with passkeys it keeps in the system key store.
+store, and no CTAP stack for security keys. Summit builds the Web
+Authentication API for three reasons: password managers provide passkeys
+through it from their content scripts, since October 2026 (#111) Summit
+answers it itself with passkeys it keeps in the system key store, and it
+talks to USB security keys (CTAP2 and U2F over HID, below).
 
 1Password's page script replaces `navigator.credentials.create`,
 `navigator.credentials.get` and the static methods on `PublicKeyCredential`
@@ -64,7 +65,8 @@ What the authenticator does:
   `credProps.rk` is `true`. A site keeps one passkey per account (user
   handle): a new one replaces the old.
 - **Allow and exclude lists** are honoured by credential ID. Entries for other
-  authenticators (security keys, phones) simply do not match.
+  authenticators (security keys, phones) simply do not match; security keys
+  are asked as well (below).
 - **clientDataJSON** is WebKit's `buildClientDataJson` from the frame's
   origin; the RP ID check is WebKit's
   (`SecurityOrigin::isMatchingRegistrableDomainSuffix`, after the web process's
@@ -469,25 +471,26 @@ Verified on `bundle-dxx4tx8e`:
 
 | Request | Answer |
 | --- | --- |
-| `create()` / `get()` | Summit's authenticator (above), conditional `get()` through autofill, conditional `create()` after a password sign-in; `NotAllowedError` when it is off or the view did not opt in, and when the site asks for a cross-platform authenticator (a security key) |
+| `create()` / `get()` | Summit's authenticator (above), conditional `get()` through autofill, conditional `create()` after a password sign-in; and USB security keys for modal requests that allow them (below); `NotAllowedError` when neither may answer or the view did not opt in |
 | `isUserVerifyingPlatformAuthenticatorAvailable()` | `true` (`false` when off) |
 | `isConditionalMediationAvailable()` | `true` (`false` when off) |
 | `getClientCapabilities()` | Every known capability; the platform authenticator, `conditionalGet`, the signals and `extension:prf`/`largeBlob`/`credProps` `true` (when on), the rest `false` |
 | `signalUnknownCredential`, `signalAllAcceptedCredentials`, `signalCurrentUserDetails` | Remove, hide/show, rename Summit's passkeys (above); resolve at once |
 
 Apple's authenticator manager (Touch ID service, NFC, the authenticator panel)
-is not built. `WebsiteDataStore` and `WebPageProxy` keep their manager only off
+is not built; its USB part is replaced by `SecurityKeysHaiku.cpp` (below). `WebsiteDataStore` and `WebPageProxy` keep their manager only off
 Haiku; nothing else refers to it.
 
 ## When a request reaches the browser unanswered (15 October 2026)
 
-A request that Summit's authenticator does not take (it is off, the view did
-not opt in, or the site wants a security key) is declined with
+A request that neither Summit's authenticator nor a security key may take
+(both are off, the view did not opt in, or the site asks for one that is off)
+is declined with
 `NotAllowedError`, and the browser window is told
 (`B_WEBKIT_WEBAUTHN_UNHANDLED`, with the view and whether the request was
 `create`). The window's status line explains: "This page asked for a passkey,
-but neither Summit nor a password manager answered. Security keys (USB) are
-not supported yet; an extension such as 1Password provides its own passkeys",
+but neither Summit nor a password manager answered. An extension such as
+1Password provides its own passkeys",
 with ", and must be allowed in private windows (Extensions)" in a private
 window. Conditional-mediation requests that are declined (the authenticator is
 off) stay quiet. `tests/fixtures/webauthn/request.html` makes both kinds
@@ -503,7 +506,8 @@ answers come from Summit's own coordinator when no extension is installed; with
 
 ## Limits
 
-- Security keys over USB or NFC (CTAP2/U2F) are not supported (below).
+- Security keys: USB only (no NFC or Bluetooth stack), and not yet tried
+  with a real key (below).
 - Autofill is offered only in fields marked `autocomplete="… webauthn"`; the
   list is not part of the saved-password list of the same field, which still
   shows its own.
@@ -516,41 +520,181 @@ answers come from Summit's own coordinator when no extension is installed; with
 - Extensions: `credProps`, `prf` and `largeBlob` only. PRF needs a passkey
   made with this build or later (older ones have no secret).
 
-## Security keys (CTAP2 over USB HID): what is missing
+## Security keys (USB, CTAP2 and U2F, 31 October 2026, #111)
 
-Checked 30 October 2026: no FIDO security key is attached to the laptop
-(`listusb`: a Goodix fingerprint reader 27c6:609c, which is not a FIDO
-device, a Realtek dock HID 0bda:1100 with one interrupt-in endpoint and no
-out endpoint, so not CTAPHID, keyboards, a camera, network adapters, a flash
-drive) or to the X399 (flash drive, disk, card reader, keyboard, mouse). A
-transport was therefore not written; it cannot be developed or tested
-without one. What it needs:
+Summit talks to FIDO security keys (YubiKey, SoloKey, Titan and the like)
+over USB HID, with upstream WebKit's portable CTAP code on a transport of its
+own:
 
-- **Finding keys.** HID interfaces whose report descriptor has usage page
-  `0xF1D0`, usage `0x01` (CTAPHID), 64-byte input and output reports. The
-  WebHID broker (`UIProcess/haiku/usb/WebHIDBrokerHaiku`,
-  `HIDDeviceHaiku::Connection`, `HIDReportDescriptorHaiku.h`) already opens
-  raw HID interfaces through usb_raw, reads the descriptor and keeps an
-  interrupt-in transfer pending; a FIDO key would be found the same way,
-  in the browser process, without the WebHID chooser.
-- **The transport.** Upstream's `fido/CtapHidDriver` (CTAPHID framing: INIT
-  with a nonce, channel IDs, CBOR/MSG/CANCEL/KEEPALIVE packets) sits on
-  `HidConnection`, which is IOKit-only (`Cocoa/HidConnection.mm`). A
-  `HidConnectionHaiku` over `HIDDeviceHaiku::Connection` (`sendReport` for
-  output reports, the input handler for input reports) is what is missing;
-  `CtapHidDriver`, `CtapAuthenticator`, `U2fAuthenticator` and the CBOR and
-  FIDO code above it are portable.
-- **The rest of upstream's stack** is excluded from the Haiku build with it
-  (`PlatformHaiku.cmake`: `fido/`, `Authenticator.cpp`,
-  `AuthenticatorTransportService.cpp`, `WebAuthenticationRequestData.cpp`):
-  the Haiku coordinator would drive a `CtapAuthenticator` itself for requests
-  whose `authenticatorAttachment` is `cross-platform` or whose
-  allow list names `usb` transports, and offer "Use a security key" in the
-  sheet.
-- **UI.** Touch prompts ("Touch your security key"), PIN entry and PIN
-  change (clientPIN protocol 1/2, `pinUvAuthToken`), "too many attempts",
-  and choosing among several keys; `credProtect`, `hmac-secret` (prf) and
-  `largeBlob` on the key where it supports them.
-- **The OS.** usb_raw access to the key's interface (the HID driver must
-  leave it alone, as for WebHID), and a key to test with (YubiKey 5 or
-  similar).
+- **Finding keys** (`UIProcess/WebAuthentication/haiku/HidServiceHaiku.cpp`):
+  while a request waits, the USB device nodes are looked at once a second
+  through the WebHID device code (`HIDHaiku::enumerateSecurityKeys`, which
+  reads each device's report descriptors once and caches them). A key is a
+  HID interface with a top-level collection of usage page `0xF1D0`, usage
+  `0x01` (CTAPHID) and 64-byte input and output reports. WebHID never offers
+  these to pages (`protectedUsagePage`); only the browser opens them
+  (`HIDHaiku::Connection::open(..., securityKey = true)`), off the main
+  thread. A key plugged in after the prompt opened is found within a second;
+  one pulled out and plugged in again is a new key.
+- **The transport** (`HidConnectionHaiku.cpp`, upstream's `HidConnection`
+  interface): output reports go to the key's interrupt-out endpoint (or
+  SET_REPORT) on the connection's device thread, input reports come from the
+  interrupt-in transfer it keeps pending; both are handed to the main run
+  loop, where upstream's `CtapHidDriver` does the CTAPHID framing (INIT with a
+  nonce, channel IDs, CBOR/MSG, KEEPALIVE, CANCEL).
+- **The protocol**: upstream's `FidoService` (getInfo), `CtapAuthenticator`
+  (makeCredential, getAssertion and getNextAssertion, exclude and allow lists
+  in batches, clientPIN protocols 1 and 2, setPIN, `hmac-secret` for prf,
+  `credProps`) and `U2fAuthenticator` (CTAP1 keys, and CTAP2 keys for U2F-only
+  requests such as `appid`).
+- **One request's keys** (`SecurityKeysHaiku.cpp`, what upstream's
+  `AuthenticatorManager` does for USB): gives every key found the request
+  (the clientDataJSON hash and the options), and reports to the coordinator
+  what the keys do. Only one request looks for keys at a time (a newer one
+  takes them). When the request ends, or the user chooses one of Summit's
+  passkeys instead, the keys are told to cancel (CTAPHID_CANCEL) and closed.
+
+### Which requests go to security keys
+
+A modal `create()` or `get()` (not conditional mediation) is given to
+security keys as well as to Summit's own passkeys, unless the site asks for
+this computer's authenticator (`authenticatorAttachment: "platform"`), or,
+for `get()`, its allow list names only other transports (Summit's own
+passkeys say `internal`). The key answers only once touched (or its PIN
+given), so the user chooses by using it; whichever answers first answers the
+page. A request for a security key only (`authenticatorAttachment:
+"cross-platform"`, or a `create()` with algorithms Summit's passkeys lack)
+gets the security key prompt alone; before this it was declined.
+
+As upstream's manager does, a key's answer ends the request, and so do the
+errors that say the request cannot succeed (`InvalidStateError`: the key
+already holds a credential the site excludes; `NotSupportedError`); other
+errors (this key has none of the site's credentials, a PIN given up) are
+shown, and the request waits for another key, or this one plugged in again.
+
+### The prompts
+
+In the passkey sheet (`src/ui/PasskeyPrompt.cpp`, `BrowserWindowAuthentication.cpp`):
+
+| What | The sheet |
+| --- | --- |
+| Summit's passkey and keys both possible | The usual "Create a passkey…" or "Sign in…" sheet, with "Or … on a security key: insert it and touch it." |
+| A key only (or `get()` with no passkey of Summit's) | "Use your security key": "Insert your security key and touch it to create a passkey for *site* on it" (or "to sign in to *site*"), Cancel |
+| A key took the request | "Security key found. Touch it to continue." in the sheet showing |
+| The key's PIN | "Enter your security key's PIN": a hidden PIN field; "Wrong PIN." and the tries left after a wrong one (or when 3 or fewer remain) |
+| The key has no PIN and the site wants verification | "Set a PIN for your security key": new PIN twice, at least the key's minimum (4) |
+| The key holds several of the site's passkeys | "Sign in to *site* with your security key" with an Account menu |
+| After a PIN | "Checking the PIN…", then "PIN accepted. Touch your security key." |
+| The key refused | "This security key has no passkey for *site*. Try another one.", "…is locked after too many wrong PINs…", "Too many wrong PINs. Remove the security key and insert it again…", "…has no room for another passkey." |
+
+Cancel (or Escape) in any of them declines the whole request
+(`NotAllowedError`). A key's final error (an excluded credential) closes the
+sheet and the window's status line says "The security key could not be used
+for *site*: …". For tests the sheets take `hey Summit 'ALTB' of Window
+Passkey with which=int32(1) and pin=1234` (`account=int32(K)` for the menu).
+
+### The API
+
+`B_WEBKIT_PASSKEY_REQUESTED` has two more fields: `security_key` (bool: a key
+may answer too) and `platform` (bool, false: only a key may). While the
+request waits, notices with `identifier` and `security_key_state` say what a
+key wants: `touch`, `pin` (`retries`), `new_pin` (`min_length`), `account`
+(`account_name`/`account_display_name`), `failed` (`error`), or `status`,
+each with `status` (`pin_invalid`, `pin_blocked`, `pin_auth_blocked`,
+`no_credentials`, `key_store_full`, `pin_too_short`, `pin_too_long`,
+`pin_accepted`) when there is one. The host answers `pin`, `new_pin` and
+`account` with `BWebKitView::AnswerSecurityKey(identifier, pin, account)`.
+When a key answered, the `withdrawn` notice has `security_key` and, when the
+page got an error, `error`.
+
+### Switches and test keys
+
+- `SUMMIT_SECURITY_KEYS=0`: no security keys (requests as before).
+- `SUMMIT_SECURITY_KEY_TRACE=1`: every HID interface looked at is logged once
+  per request, with its top-level collections.
+- `SUMMIT_WEBAUTHN_SOFT_KEY=1`: a working CTAP2.1 key in software in place of
+  real keys (`SoftSecurityKeyHaiku.cpp`), at the CTAPHID packet level under
+  `CtapHidDriver`: ES256 credentials (discoverable ones too), clientPIN
+  protocols 1 and 2 (key agreement, PIN token, setPIN, 8 retries, blocking
+  after 3 wrong in a row), a 0.4 s "touch", self attestation. Its signatures
+  verify, so real sites accept it. `SUMMIT_WEBAUTHN_SOFT_KEY_PIN=1234` gives
+  it a PIN; `SUMMIT_WEBAUTHN_SOFT_KEY_PROTOCOL=1` offers PIN protocol 1 only.
+  Its credentials last as long as the browser.
+- `SUMMIT_WEBAUTHN_MOCK_HID=<JSON or file>`: upstream's mock HID key
+  (`MockHidConnection`, what layout tests set with
+  `internals.setMockWebAuthenticationConfiguration({hid: …})`), canned
+  answers at the packet level. The value is that `hid` object (or
+  `{"hid": …}`), inline or the path of a file read again for each request.
+  A configuration without an answer for a request gets CTAP2_ERR_OTHER
+  (upstream's mock would read past its payloads).
+
+### A WebCore fix the PIN needed
+
+WebCore's OpenSSL AES-CBC (`crypto/openssl/CryptoAlgorithmAESCBCOpenSSL.cpp`)
+ignored `Padding::No`, which only the CTAP2 PIN protocol asks for: the
+encrypted PIN hash sent to a key had a padding block more than CTAP2 allows,
+and the PIN token a key returned could not be decrypted (found with the mock:
+"Unknown internal error. Error code: 0" after the PIN). It now turns padding
+off for those calls (input must be whole blocks) and takes an empty IV as a
+zero IV (PIN protocol 1). Web Crypto always pads and is unchanged.
+
+### Verified (31 October 2026, laptop and X399, engine ctap111c + app)
+
+Fixture: a page on `http://localhost:8011` (python's http.server on the
+laptop) whose script makes the requests and verifies signatures with Web
+Crypto; driven through Summit's MCP (`evaluate`) and `hey` for the sheets.
+
+- **Upstream's mock (canned CTAPHID traffic, the payloads of WebKit's own
+  tests):** CTAP2 `create()` (attachment `cross-platform`, transports
+  `["usb"]`, ES256, flags `0x41`) and `get()`; U2F `create()` (authData built
+  for `localhost`) and `get()` with an allow list; a key with two accounts →
+  the Account sheet → the second account; PIN `create()` and `get()` (wink,
+  getRetries 8, key agreement, the PIN sheet, PIN token, then the request
+  with `pinUvAuthParam`); a wrong PIN then the right one ("Wrong PIN. 8 tries
+  left"); PIN blocked and PIN auth blocked (the matching note; Cancel →
+  `NotAllowedError`); no credentials (CTAP2 and U2F: note "has no passkey…",
+  request goes on); excluded credential → `InvalidStateError` and the status
+  line; key store full → retried without a discoverable credential →
+  success; internal UV; PIN protocol 2 offered; user verification required
+  on a key without a PIN → the "Set a PIN" sheet; Cancel →
+  `NotAllowedError: The user declined.`; a key that never answers → the
+  page's 30 s timeout. The mock's packets cross `CtapHidDriver` as a key's
+  would; it does not check PIN cryptography.
+- **The software key (real cryptography):** a discoverable `create()` (flags
+  `0x41`, `credProps.rk` true, SHA-256(`localhost`) RP ID hash) and a
+  username-less `get()` whose signature Web Crypto verified (`verified:
+  true`, user handle back); with a PIN, protocol 2: a wrong PIN (the key
+  decrypted a well-formed 32-byte hash and refused it, 7 tries left) and the
+  right one → flags `0x45` (UV); protocol 1: `create()` and `get()` with
+  `userVerification: "required"` → flags `0x45`/`0x05`, signature verified
+  (this failed before the AES fix); no PIN with verification required →
+  "Set a PIN" (a 2-digit PIN refused in the sheet, then `4321`) → setPIN →
+  PIN token → credential with UV. **https://webauthn.io** with the software
+  key and its PIN: Register → *"Success! Now try to authenticate..."*,
+  Authenticate → *"You're logged in!"*.
+- **Real device enumeration (no key attached):** laptop: "23 USB devices, 5
+  HID interfaces, 0 security keys" (SMSL USB Audio `ff00:0001`, Keychron Q6
+  `ff60:0061` and `0001:0002 0001:0080 000c:0001 0001:0006`, a hub
+  `00ff:0001`, the Realtek dock HID `ffda:00da`); X399: "7 USB devices, 1 HID
+  interface, 0 security keys" (Melody96 keyboard); an `AbortController` abort
+  after 5 s ended the request and the polling (`AbortError`). No errors, no
+  crash; the user's keyboards kept working (WebHID's protections unchanged).
+- **Summit's passkeys (regression):** on webauthn.io with no key, Register →
+  "Create a passkey…" (with the security key line) → Create → *"Success!"*,
+  Authenticate (allow list `internal`: no key polling started) → Sign In →
+  *"You're logged in!"*. The test passkey was removed afterwards
+  (`signalUnknownCredential`).
+
+### What needs a real key
+
+- Opening a real key's interface through usb_raw while Haiku's usb_hid
+  driver is attached to it (WebHID works this way; usb_hid has no handler
+  for usage page `0xF1D0`, so it should not read its reports), and the
+  interrupt transfers' timing with a key that blinks, sends KEEPALIVE and
+  waits for a touch.
+- A real key's PIN, its getInfo (extensions, `minPINLength`,
+  `maxMsgSize`), its attestation certificate, `hmac-secret` (prf),
+  `credProtect`, and pulling it out in the middle of a request (the request
+  then waits for another key until its timeout).
+- The issue's done-when: webauthn.io with a YubiKey 5 with and without a
+  PIN, and GitHub's security key second factor (U2F `appid` path included).
