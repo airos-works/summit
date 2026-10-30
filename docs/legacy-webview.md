@@ -102,8 +102,15 @@ WebPositive (unpacked, not installed) drew https://www.haiku-os.org on the
 installed engine ("finished" in its status line) and quit cleanly. The
 package was built by airos-ci's recipe from Summit 75b323f against the
 image's `summit_webkit-1.10.1~git20261029.1957-1`. Twice, `pkgman uninstall
-summit_webkitlegacy` was followed by the X399 resetting (no log line after
-the command; not explained, see "Not done"). Putting
+summit_webkitlegacy` was followed by the X399 freezing (no log line after
+the command). The package is not the cause: in an air/OS VM of the same
+image, about 30 install, upgrade, replace (over HaikuPorts' haikuwebkit) and
+uninstall transactions ran without a fault, with the serial console
+captured. That test found `package_daemon` crashing at boot when System
+Updater's boot check asks for the package state before the daemon has
+loaded it (`Volume::HandleGetLocationInfoRequest` reading a null
+`fActiveState`); after that every `pkgman` change hangs, which matches the
+X399's first uninstall hanging. Putting
 WebPositive back into the images would be a change in the fork (its
 profiles, with `HAIKU_SUMMIT_PACKAGES_DIR` naming CI's packages, which the
 `webkit` build feature accepts on x86_64 only).
@@ -263,9 +270,7 @@ the menu and left the application running. Opening a second window
   with the engine, as before.
 - Live GitHub/Google sign-in acceptance through a popup. The opener mechanics
   now pass the controlled tests above.
-- Uninstalling `summit_webkitlegacy` on the X399 (30 October, hrev60207+2114,
-  nothing using the library) was followed by a machine reset both times it
-  was tried, with nothing in the syslog after the command. Whether the
-  package's deactivation causes it (packagefs, package_daemon) is not
-  known.
+- Why the X399 froze after both uninstalls (30 October) is not known; the
+  package itself does not do it (see above). The `package_daemon` boot race
+  is an OS bug of its own.
 
