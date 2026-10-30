@@ -91,6 +91,124 @@ after the animation had filled the pool with odd sizes:
   fractions of a different size.
 - Exact sizes are identical from run to run.
 
+## 30 October 2026: root repaints, web font loads and repeating patterns (#117)
+
+A style change on `<html>` or `<body>` repainted the whole page. Three rules
+did it, and each is now narrower on Haiku:
+
+- **The root background.** `RenderBox::styleWillChange` repainted all of the
+  root contents (`RenderView::repaintRootContents`) for any change of `<html>`
+  or `<body>` that needs a repaint or a layout, because their background is
+  painted over the whole canvas. It now does so only when that background may
+  have changed: the background itself, a background image (any change, since
+  the root box positions it and `paint()` can draw it), or how the canvas
+  paints it (visibility, opacity, transforms, border, clip path, filters,
+  masks, blending, isolation, colour scheme, zoom, writing mode, print colour
+  adjust).
+- **Their own repaint.** `<html>` and `<body>` repainted their visual
+  overflow, which is the page, for a change that needs a repaint
+  (`RenderElement::setStyle`). The properties that make one there are mostly
+  inherited (colour, user-select, accent-color), and each descendant whose
+  painting changes gets a style change of its own. They now skip it when they
+  paint nothing differently themselves: no visible border, outline or shadow
+  using `currentcolor`, no text of their own, no text decoration (it passes to
+  descendants without their own change), no mask or border image, not
+  editable, no columns, and highlights only `::selection` with no selection on
+  the page.
+- **After a layout.** A renderer that needs layout itself repaints all it holds
+  after the layout, and for `<html>` (with its layer) and `<body>` that is the
+  page. When the same conditions hold and all they hold are blocks (no inline
+  children, no floats) and position, display, float and overflow are
+  unchanged, the layout after such a change compares their old and new bounds
+  only (`RenderElement::repaintAfterLayoutIfNeeded`), and the children they move
+  repaint themselves (`RenderBlockFlow::layoutBlockChild`, which left that to
+  the parent's full repaint).
+
+`SUMMIT_ROOT_STYLE_REPAINT=1` restores all three.
+`SUMMIT_FULL_REPAINT_TRACE=1` now names what changed (`Summit root style:`
+lines: the difference, the properties, and whether the root, the element or
+its layout repaints).
+
+**Web font loads.** Every load of a face bumped the font selector's version,
+and the fonts of every element are cached under it (`FontCascadeCache`), so
+each load gave every element new fonts: the whole document was laid out and
+painted again per face. `CSSFontSelector::fontLoaded` and face additions and
+removals (`FontFaceSet.add()`/`delete()`) now record the family they change,
+and the cache key of a description whose families cannot reach that family
+keeps the version it had (`summitFontSelectorVersionForDescriptionHaiku`), so
+those elements keep their fonts and compare equal. Any other change of the
+selector (style sheet rebuilds, `@font-face` rules added, palettes, feature
+values, the font cache) still renews all fonts. The standard family is
+resolved to the family it names; the math family counts as reaching any.
+`SUMMIT_FONT_LOAD_FAMILY_VERSIONS=0` renews all fonts on any load;
+`SUMMIT_FONT_LOAD_TRACE=1` prints each recorded change.
+
+**Repeating patterns.** A pattern whose tile is part of an image, not a whole
+number of device pixels, or spaced, is drawn by Skia's picture shader. It
+rasterizes the tile the first time it is drawn and keeps that in Skia's
+resource cache under the picture's ID, but each display-list recording made
+a picture of its own, so every new recording rasterized the tile again (and
+dropped the old raster). `GraphicsContextSkia::drawPattern` now keeps the
+tile pictures (`PatternPictureCacheHaiku`, by image ID, tile, spacing and
+sampling; 64 entries, 48 MB of images, 10 s without use, images over 16 MB
+not kept), so recordings of one pattern share a picture and its raster.
+`SUMMIT_PATTERN_PICTURE_CACHE=0` makes one per drawing;
+`SUMMIT_PATTERN_TRACE=1` also prints how often one was reused.
+
+Measured on the laptop (Framework 13, 175 %, engine built from main of 30
+October with these changes, A/B by the switches in the same build; tile
+paints from `SUMMIT_TILE_PAINT_TRACE`, summed over the two painting threads).
+Test pages are in the session's www directory under `root117/`.
+
+| Test page, 10 changes (`root.html`, 400 cards over a tiled gradient) | tiles, ms before | after | Chromium (raster tasks) |
+| --- | --- | --- | --- |
+| `color` on `<html>` that `<body>` overrides | 240, 304 | 0, 0 | 0 |
+| `object-fit` on `<html>` (repaints nothing) | 216, 303 | 0, 0 | 0 |
+| `font-size` on `<html>` (`<body>` sets its own) | 216, 286 | 0, 0 | 0 |
+| `padding-right` on `<body>` (content moves) | 234, 222 | 153, 74 | 371 |
+| `color-scheme` on `<html>` (the canvas changes) | 234, 248 | 234, 250 | 0 |
+| a 40-pixel box in the header | 18, 3 | 18, 3 | 9 |
+
+`user-select` on `<body>` still repaints the page in both (every descendant's
+style changes; Chromium rasterizes it all too). Frames after each change are
+the same as WebCore's fresh paint (`page_render`) but for the scroll bar.
+
+`fonts.html` (a fixed-height heading in a late font over 400 cards in
+another): five `FontFace` add/load/delete rounds painted 240-336 tiles in
+198-343 ms before, 40-56 tiles in 9-12 ms after. Five rounds that each add a
+style sheet with a new `@font-face` paint 120 tiles instead of 240 (the
+style sheet still renews all fonts once per round). Chromium rasterized
+88-112 tiles per round in both tests, so it does not skip these either.
+
+`patterns.html` (three 560-pixel areas tiled with 301-pixel gradients, a
+257x211 conic gradient and a spaced SVG, a counter over each changed 40
+times): 120 tile paints took 68-85 ms with the cache against 231-232 ms
+without; frames pixel-identical at four scroll positions.
+
+Real sites, a load from cache after a warm load, two alternated pairs each:
+
+| | The Guardian before | after | linear.app before | after |
+| --- | --- | --- | --- | --- |
+| whole-root repaints from `<html>`/`<body>` style | 10, 10 | 0, 0 | 18, 19 | 0, 0 |
+| `<html>`/`<body>` repainting all they hold after layout | 4, 4 | 1, 0 | 7, 8 | 1, 1 |
+| tiles painted in the 22 s after navigation | 256, 275 | 1287*, 306 | 1071, 1089 | 765, 1108 |
+
+(*a load that ran 124 font loads and 36 root style changes instead of 80 and
+20.) The tile totals do not move: on The Guardian every style sheet rebuild
+(it rebuilds while islands hydrate) re-creates every `@font-face`, which
+renews the fonts of all text, so the sections repaint themselves where
+`<html>` did before; on linear.app animations dominate. Frames on both sites
+match WebCore's fresh paint except for animated parts and the scroll bar, as
+before the change.
+
+Left: a style sheet rebuild that re-adds the same `@font-face` rules still
+renews every element's fonts (WebCore makes a new `CSSFontFace` for each
+rule, and the faces "load" again from the memory cache); not re-creating
+identical faces would remove most of The Guardian's load-time repaints.
+`color-scheme` on `<html>` repaints all, which Chromium does not when the
+canvas colour stays the same. Patterns from texture-backed images still
+draw their tile into a new GPU surface per recording.
+
 ## 30 October 2026: NVDEC pictures go to the GPU as NV12; H.265 on NVDEC (#115)
 
 The NVDEC add-on converted every picture to RGB32 on the processor (in bands,

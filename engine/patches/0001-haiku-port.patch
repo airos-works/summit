@@ -12836,6 +12836,229 @@ index 0000000000000000000000000000000000000000..b6065c4fc8c51c594bde92ba41dd7146
 +}
 +
 +} // namespace WebCore
+diff --git a/Source/WebCore/css/CSSFontFaceSet.cpp b/Source/WebCore/css/CSSFontFaceSet.cpp
+index c8beb723de96daab7179cd34b3a122c185c48625..d611fe77cebe61de0a9ebe9571474058a48c9671 100644
+--- a/Source/WebCore/css/CSSFontFaceSet.cpp
++++ b/Source/WebCore/css/CSSFontFaceSet.cpp
+@@ -46,6 +46,12 @@
+ 
+ namespace WebCore {
+ 
++#if PLATFORM(HAIKU)
++// In CSSFontSelector.cpp: which family the face being added or removed is for,
++// while the observers run.
++void summitNoteModifiedFontFamilyHaiku(const AtomString*);
++#endif
++
+ CSSFontFaceSet::CSSFontFaceSet(CSSFontSelector* owningFontSelector)
+     : m_owningFontSelector(owningFontSelector)
+ {
+@@ -204,9 +210,16 @@ void CSSFontFaceSet::add(CSSFontFace& face)
+ {
+     ASSERT(!hasFace(face));
+ 
++#if PLATFORM(HAIKU)
++    auto addedFamily = face.family();
++    summitNoteModifiedFontFamilyHaiku(&addedFamily);
++#endif
+     m_fontModifiedObservers.forEach([] (auto& observer) {
+         observer();
+     });
++#if PLATFORM(HAIKU)
++    summitNoteModifiedFontFamilyHaiku(nullptr);
++#endif
+ 
+     face.addClient(*this);
+     m_cache.clear();
+@@ -259,9 +272,16 @@ void CSSFontFaceSet::remove(const CSSFontFace& face)
+ 
+     m_cache.clear();
+ 
++#if PLATFORM(HAIKU)
++    auto removedFamily = face.family();
++    summitNoteModifiedFontFamilyHaiku(&removedFamily);
++#endif
+     m_fontModifiedObservers.forEach([](auto& observer) {
+         observer();
+     });
++#if PLATFORM(HAIKU)
++    summitNoteModifiedFontFamilyHaiku(nullptr);
++#endif
+     
+     if (auto family = face.familyCSSValue())
+         removeFromFacesLookupTable(face, *family);
+diff --git a/Source/WebCore/css/CSSFontSelector.cpp b/Source/WebCore/css/CSSFontSelector.cpp
+index c0e79d205b34ca017d69dd11e47fc353b313e940..2c8ddc85b4d07ee841d7723169f8244db7bd7699 100644
+--- a/Source/WebCore/css/CSSFontSelector.cpp
++++ b/Source/WebCore/css/CSSFontSelector.cpp
+@@ -60,6 +60,104 @@ namespace WebCore {
+ 
+ using namespace WebKitFontFamilyNames;
+ 
++#if PLATFORM(HAIKU)
++// Every web font that finishes loading bumps the font selector's version, and
++// the fonts of every FontCascade are cached under that version, so each load
++// gave every element new fonts: the whole document was laid out and painted
++// again for each face (The Guardian loads about ten while the page builds,
++// each time repainting the whole page, root layer and all). Chrome and Firefox
++// lay out again only the text whose font families include the face. Here a
++// load records the family it was for, and the fonts of a description whose
++// families cannot reach that family are cached under the version they had, so
++// those elements keep their fonts, compare equal and are left alone. Any other
++// change of the font selector (rules, palettes, feature values, the font cache,
++// a face's state changing without a load) is not recorded and so still renews
++// all fonts. SUMMIT_FONT_LOAD_FAMILY_VERSIONS=0 renews all fonts on any load;
++// SUMMIT_FONT_LOAD_TRACE=1 prints each load.
++static bool fontLoadFamilyVersionsEnabledHaiku()
++{
++    static const bool enabled = [] {
++        const char* value = getenv("SUMMIT_FONT_LOAD_FAMILY_VERSIONS");
++        return !value || strcmp(value, "0");
++    }();
++    return enabled;
++}
++
++static const AtomString* s_modifiedFontFamilyHaiku;
++
++void summitNoteModifiedFontFamilyHaiku(const AtomString* family)
++{
++    if (isMainThread())
++        s_modifiedFontFamilyHaiku = family;
++}
++
++struct FontLoadRecordHaiku {
++    unsigned version;
++    AtomString family;
++};
++
++// By font selector, on the main thread: the versions that only a load of one family made.
++static HashMap<unsigned, Vector<FontLoadRecordHaiku>>& fontLoadRecordsHaiku()
++{
++    static NeverDestroyed<HashMap<unsigned, Vector<FontLoadRecordHaiku>>> records;
++    return records;
++}
++
++static bool descriptionMayUseFamilyHaiku(const CSSFontSelector& selector, const FontCascadeDescription& description, const AtomString& family)
++{
++    for (unsigned i = 0; i < description.familyCount(); ++i) {
++        auto& candidate = description.familyAt(i);
++        if (equalIgnoringASCIICase(candidate.name, family))
++            return true;
++        if (!candidate.isGeneric())
++            continue;
++        // A generic family is looked up among the faces under its own name
++        // (compared above), the standard family also under the family it
++        // resolves to, and the math family under a list of families.
++        if (candidate.name == mathFamily.get())
++            return true;
++        if (candidate.name == standardFamily.get()) {
++            auto resolved = FontDescription::platformResolveGenericFamily(description.script(), description.usedLocale(), candidate.name);
++            if (resolved.isNull()) {
++                RefPtr context = selector.scriptExecutionContext();
++                if (!context)
++                    return true;
++                if (equalIgnoringASCIICase(context->settingsValues().fontGenericFamilies.standardFontFamily(description.script()), family))
++                    return true;
++            } else if (equalIgnoringASCIICase(resolved, family))
++                return true;
++        }
++    }
++    return false;
++}
++
++// The version under which the fonts for this description are cached: the
++// newest version made by anything but a load of a family it cannot use.
++unsigned summitFontSelectorVersionForDescriptionHaiku(FontSelector& selector, const FontCascadeDescription& description)
++{
++    unsigned version = selector.version();
++    if (!fontLoadFamilyVersionsEnabledHaiku() || !isMainThread())
++        return version;
++    auto* cssSelector = dynamicDowncast<CSSFontSelector>(selector);
++    if (!cssSelector)
++        return version;
++    auto iterator = fontLoadRecordsHaiku().find(cssSelector->uniqueId());
++    if (iterator == fontLoadRecordsHaiku().end())
++        return version;
++    auto& records = iterator->value;
++    size_t index = records.size();
++    for (; version; --version) {
++        while (index && records[index - 1].version > version)
++            --index;
++        if (!index || records[index - 1].version != version)
++            return version;
++        if (descriptionMayUseFamilyHaiku(*cssSelector, description, records[index - 1].family))
++            return version;
++    }
++    return version;
++}
++#endif
++
+ static unsigned fontSelectorId;
+ 
+ Ref<CSSFontSelector> CSSFontSelector::create(ScriptExecutionContext& context)
+@@ -101,6 +199,11 @@ CSSFontSelector::~CSSFontSelector()
+ 
+     clearFonts();
+ 
++#if PLATFORM(HAIKU)
++    if (isMainThread())
++        fontLoadRecordsHaiku().remove(m_uniqueId);
++#endif
++
+     if (CheckedPtr fontCache = FontCache::forCurrentThreadIfNotDestroyed())
+         fontCache->removeClient(*this);
+ }
+@@ -313,15 +416,48 @@ void CSSFontSelector::opportunisticallyStartFontDataURLLoading(const FontCascade
+         face->opportunisticallyStartFontDataURLLoading(trustedType);
+ }
+ 
+-void CSSFontSelector::fontLoaded(CSSFontFace&)
++#if PLATFORM(HAIKU)
++// The next version (dispatchInvalidationCallbacks() makes it) changes only the faces of this family.
++static void recordFamilyVersionHaiku(const ScriptExecutionContext* context, unsigned selectorID, unsigned version, const AtomString& family, ASCIILiteral what)
+ {
++    if (!fontLoadFamilyVersionsEnabledHaiku() || !isMainThread() || !is<Document>(context))
++        return;
++    static const bool trace = [] {
++        const char* value = getenv("SUMMIT_FONT_LOAD_TRACE");
++        return value && value[0] == '1' && !value[1];
++    }();
++    if (trace)
++        fprintf(stderr, "Summit font %s: '%s' (version %u)\n", what.characters(), family.string().utf8().data(), version);
++    if (family.isEmpty())
++        return;
++    auto& records = fontLoadRecordsHaiku().add(selectorID, Vector<FontLoadRecordHaiku> { }).iterator->value;
++    constexpr size_t maximumRecords = 256;
++    if (records.size() >= maximumRecords)
++        records.removeAt(0);
++    records.append({ version, family });
++}
++#endif
++
++void CSSFontSelector::fontLoaded(CSSFontFace& face)
++{
++#if PLATFORM(HAIKU)
++    recordFamilyVersionHaiku(m_context.get(), m_uniqueId, m_version + 1, face.family(), "load"_s);
++#else
++    UNUSED_PARAM(face);
++#endif
+     dispatchInvalidationCallbacks();
+ }
+ 
+ void CSSFontSelector::fontModified()
+ {
+-    if (!m_creatingFont && !m_buildIsUnderway)
++    if (!m_creatingFont && !m_buildIsUnderway) {
++#if PLATFORM(HAIKU)
++        // A face was added or removed (FontFaceSet.add(), delete()).
++        if (s_modifiedFontFamilyHaiku)
++            recordFamilyVersionHaiku(m_context.get(), m_uniqueId, m_version + 1, *s_modifiedFontFamilyHaiku, "face added or removed"_s);
++#endif
+         dispatchInvalidationCallbacks();
++    }
+ }
+ 
+ void CSSFontSelector::updateStyleIfNeeded()
 diff --git a/Source/WebCore/css/CSSStyleSheet.cpp b/Source/WebCore/css/CSSStyleSheet.cpp
 index dd3c8bcbe66c87ea0ea7ff2dda98e27c39c8aaae..c228552fba5b24eddc563513583e6e840b2aa24d 100644
 --- a/Source/WebCore/css/CSSStyleSheet.cpp
@@ -25319,6 +25542,35 @@ index 55268404e5cf55f6e69fe7846d941cbef72b5e04..d7d4f2ef1805f1c2a293dd1b9098e216
      SkiaHarfBuzzFontCache m_harfBuzzFontCache;
  #if !OS(ANDROID) && !PLATFORM(WIN)
      SkiaSystemFallbackFontCache m_skiaSystemFallbackFontCache;
+diff --git a/Source/WebCore/platform/graphics/FontCascadeCache.cpp b/Source/WebCore/platform/graphics/FontCascadeCache.cpp
+index 51bffcdd7b6ef0b36e466f0dbbe35344306b2d0f..c07538a38c4f36d15f66c2db760d867d4c4c017e 100644
+--- a/Source/WebCore/platform/graphics/FontCascadeCache.cpp
++++ b/Source/WebCore/platform/graphics/FontCascadeCache.cpp
+@@ -101,6 +101,12 @@ void FontCascadeCache::pruneSystemFallbackFonts()
+         Ref { entry->fonts }->pruneSystemFallbacks();
+ }
+ 
++#if PLATFORM(HAIKU)
++// In CSSFontSelector.cpp: the selector's version, but for loads of web fonts
++// that the description's families cannot reach.
++unsigned summitFontSelectorVersionForDescriptionHaiku(FontSelector&, const FontCascadeDescription&);
++#endif
++
+ FontCascadeCacheKey makeFontCascadeCacheKey(const FontCascadeDescription& description, FontSelector* fontSelector)
+ {
+     unsigned familyCount = description.familyCount();
+@@ -109,7 +115,11 @@ FontCascadeCacheKey makeFontCascadeCacheKey(const FontCascadeDescription& descri
+         FontDescriptionKey(description),
+         Vector<FontFamilyName, 3>(familyCount, [&](size_t familyIndex) { return description.familyAt(familyIndex).name; }),
+         hasComplexFontSelector ? fontSelector->uniqueId() : 0,
++#if PLATFORM(HAIKU)
++        hasComplexFontSelector ? summitFontSelectorVersionForDescriptionHaiku(*fontSelector, description) : 0,
++#else
+         hasComplexFontSelector ? fontSelector->version() : 0,
++#endif
+         hasComplexFontSelector
+     };
+ }
 diff --git a/Source/WebCore/platform/graphics/FontCascadeInlines.h b/Source/WebCore/platform/graphics/FontCascadeInlines.h
 index 0e2555c44f4e1a6b3fecdd4bbf921d00c39b0899..7b0967e418d2d4ce3260e22bfd82ba3bedc4878e 100644
 --- a/Source/WebCore/platform/graphics/FontCascadeInlines.h
@@ -50479,10 +50731,10 @@ index 74cfeb60ac3daa537785693be3917358aa26a2b5..88ff5686da7145336f8b00b868fb5b61
  
  void FontCache::platformPurgeInactiveFontData()
 diff --git a/Source/WebCore/platform/graphics/skia/GraphicsContextSkia.cpp b/Source/WebCore/platform/graphics/skia/GraphicsContextSkia.cpp
-index a3cb981bd76fc7f7946862f8f7be53fe133bae79..9940c85fdebbf9fca0023d37b809d31a24f00e8a 100644
+index a3cb981bd76fc7f7946862f8f7be53fe133bae79..fbbeaba32188687e7a0dd06ec8401279e98cc7c7 100644
 --- a/Source/WebCore/platform/graphics/skia/GraphicsContextSkia.cpp
 +++ b/Source/WebCore/platform/graphics/skia/GraphicsContextSkia.cpp
-@@ -47,9 +47,16 @@
+@@ -47,9 +47,20 @@
  #include "SkiaUtilities.h"
  #include <cmath>
  #include <ranges>
@@ -50490,6 +50742,10 @@ index a3cb981bd76fc7f7946862f8f7be53fe133bae79..9940c85fdebbf9fca0023d37b809d31a
 +#include <cstdio>
 +#include <cstdlib>
 +#include <cstring>
++#include <wtf/Lock.h>
++#include <wtf/MonotonicTime.h>
++#include <wtf/NeverDestroyed.h>
++#include <wtf/Vector.h>
 +#endif
  WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_BEGIN
  #include <skia/core/SkColorFilter.h>
@@ -50499,7 +50755,7 @@ index a3cb981bd76fc7f7946862f8f7be53fe133bae79..9940c85fdebbf9fca0023d37b809d31a
  #include <skia/core/SkPathBuilder.h>
  #include <skia/core/SkPathEffect.h>
  #include <skia/core/SkPathTypes.h>
-@@ -421,7 +428,7 @@ void GraphicsContextSkia::drawSkiaPath(const SkPath& path, SkPaint& paint)
+@@ -421,7 +432,7 @@ void GraphicsContextSkia::drawSkiaPath(const SkPath& path, SkPaint& paint)
      if (hasDropShadow()) {
          inExtraTransparencyLayer = drawOutsetShadow(paint, [&](const SkPaint& paint) {
              m_canvas.drawPath(path, paint);
@@ -50508,7 +50764,7 @@ index a3cb981bd76fc7f7946862f8f7be53fe133bae79..9940c85fdebbf9fca0023d37b809d31a
      }
      m_canvas.drawPath(path, paint);
      if (inExtraTransparencyLayer)
-@@ -456,7 +463,11 @@ bool GraphicsContextSkia::drawPathAsSingleElement(const Path& path, SkPaint& pai
+@@ -456,7 +467,11 @@ bool GraphicsContextSkia::drawPathAsSingleElement(const Path& path, SkPaint& pai
              return false;
  
          SkRect oval = { arc.center.x() - arc.radius, arc.center.y() - arc.radius, arc.center.x() + arc.radius, arc.center.y() + arc.radius };
@@ -50521,7 +50777,7 @@ index a3cb981bd76fc7f7946862f8f7be53fe133bae79..9940c85fdebbf9fca0023d37b809d31a
              m_canvas.drawOval(oval, paint);
          else
              m_canvas.drawArc(oval, startDegrees, sweepDegrees, false, paint);
-@@ -575,15 +586,63 @@ sk_sp<SkImageFilter> GraphicsContextSkia::createDropShadowFilterIfNeeded(ShadowS
+@@ -575,15 +590,63 @@ sk_sp<SkImageFilter> GraphicsContextSkia::createDropShadowFilterIfNeeded(ShadowS
      return nullptr;
  }
  
@@ -50541,7 +50797,10 @@ index a3cb981bd76fc7f7946862f8f7be53fe133bae79..9940c85fdebbf9fca0023d37b809d31a
 +    const auto& shadowColor = shadow->color;
 +    if (!shadowColor.isVisible() || (!offset.width() && !offset.height() && !shadow->radius))
 +        return false;
-+
+ 
+-    paint.setImageFilter(shadow);
+-    drawFunction(paint);
+-    paint.setImageFilter(nullptr);
 +    // As with DropShadowOnly: the shape's coverage times its opacity, in the
 +    // shadow's colour, blurred with sigma radius / 2, offset, and composited
 +    // with the paint's blend mode.
@@ -50579,10 +50838,7 @@ index a3cb981bd76fc7f7946862f8f7be53fe133bae79..9940c85fdebbf9fca0023d37b809d31a
 +        auto shadow = createDropShadowFilterIfNeeded(ShadowStyle::Outset);
 +        if (!shadow)
 +            return false;
- 
--    paint.setImageFilter(shadow);
--    drawFunction(paint);
--    paint.setImageFilter(nullptr);
++
 +        paint.setImageFilter(shadow);
 +        drawFunction(paint);
 +        paint.setImageFilter(nullptr);
@@ -50590,7 +50846,7 @@ index a3cb981bd76fc7f7946862f8f7be53fe133bae79..9940c85fdebbf9fca0023d37b809d31a
  
      auto reversed = m_skiaStateStack | std::views::reverse;
      auto it = std::ranges::find(reversed, true, &SkiaState::isLayer);
-@@ -650,7 +709,7 @@ void GraphicsContextSkia::drawSkiaRect(const SkRect& boundaries, SkPaint& paint)
+@@ -650,7 +713,7 @@ void GraphicsContextSkia::drawSkiaRect(const SkRect& boundaries, SkPaint& paint)
      if (hasDropShadow()) {
          inExtraTransparencyLayer = drawOutsetShadow(paint, [&](const SkPaint& paint) {
              m_canvas.drawRect(boundaries, paint);
@@ -50599,7 +50855,7 @@ index a3cb981bd76fc7f7946862f8f7be53fe133bae79..9940c85fdebbf9fca0023d37b809d31a
      }
      m_canvas.drawRect(boundaries, paint);
      if (inExtraTransparencyLayer)
-@@ -1092,7 +1151,7 @@ void GraphicsContextSkia::fillRoundedRectImpl(const FloatRoundedRect& rect, cons
+@@ -1092,7 +1155,7 @@ void GraphicsContextSkia::fillRoundedRectImpl(const FloatRoundedRect& rect, cons
      if (hasDropShadow()) {
          inExtraTransparencyLayer = drawOutsetShadow(paint, [&](const SkPaint& paint) {
              m_canvas.drawRRect(rect, paint);
@@ -50608,7 +50864,129 @@ index a3cb981bd76fc7f7946862f8f7be53fe133bae79..9940c85fdebbf9fca0023d37b809d31a
      }
      m_canvas.drawRRect(rect, paint);
      if (inExtraTransparencyLayer)
-@@ -1180,6 +1239,51 @@ void GraphicsContextSkia::drawPattern(const NativeImage& nativeImage, const Floa
+@@ -1132,6 +1195,121 @@ static sk_sp<SkSurface> createAcceleratedSurface(const IntSize& size)
+     return surface;
+ }
+ 
++#if PLATFORM(HAIKU)
++// A repeating pattern whose tile is part of an image, or not a whole number of
++// pixels, or spaced, is drawn through a picture shader. The picture shader
++// rasterizes its tile at the device scale the first time it is drawn and keeps
++// that image in Skia's resource cache under the picture's ID, until the picture
++// goes. Each recording made a picture of its own, so the first tile painted
++// from every new recording of a pattern rasterized the tile again, and the
++// raster of the old recording's picture was thrown away with it. The pictures
++// are kept here by image, tile and sampling, so that the recordings of one
++// pattern share one picture and so one raster (and Ganesh's texture of it).
++// An entry holds its image: entries go after ten seconds without use, and
++// those of images over 16 MB are not kept. SUMMIT_PATTERN_PICTURE_CACHE=0 makes
++// a picture for each drawing.
++class PatternPictureCacheHaiku {
++public:
++    static bool enabled()
++    {
++        static const bool value = [] {
++            const char* setting = std::getenv("SUMMIT_PATTERN_PICTURE_CACHE");
++            return !setting || std::strcmp(setting, "0");
++        }();
++        return value;
++    }
++
++    template<typename Make>
++    static sk_sp<SkPicture> picture(const sk_sp<SkImage>& image, const FloatRect& tileRect, const FloatSize& tileWithSpacing, const SkSamplingOptions& sampling, Make&& make)
++    {
++        static constexpr size_t maximumEntries = 64;
++        static constexpr size_t maximumImageBytes = 16 * 1024 * 1024;
++        static constexpr size_t maximumTotalBytes = 48 * 1024 * 1024;
++        static constexpr Seconds keepFor = 10_s;
++
++        size_t imageBytes = image->imageInfo().computeMinByteSize();
++        if (imageBytes > maximumImageBytes)
++            return make();
++
++        Key key { image->uniqueID(), tileRect, tileWithSpacing, sampling };
++        auto now = MonotonicTime::now();
++        Locker locker { s_lock };
++        auto& entries = s_entries.get();
++        entries.removeAllMatching([&](auto& entry) {
++            return now - entry.lastUse > keepFor;
++        });
++        for (auto& entry : entries) {
++            if (entry.key == key) {
++                entry.lastUse = now;
++                s_hits++;
++                traceIfNeeded();
++                return entry.picture;
++            }
++        }
++
++        auto made = make();
++        s_misses++;
++        traceIfNeeded();
++        if (!made)
++            return made;
++
++        size_t totalBytes = imageBytes;
++        for (auto& entry : entries)
++            totalBytes += entry.imageBytes;
++        while (!entries.isEmpty() && (entries.size() >= maximumEntries || totalBytes > maximumTotalBytes)) {
++            size_t oldest = 0;
++            for (size_t i = 1; i < entries.size(); ++i) {
++                if (entries[i].lastUse < entries[oldest].lastUse)
++                    oldest = i;
++            }
++            totalBytes -= entries[oldest].imageBytes;
++            entries.removeAt(oldest);
++        }
++        entries.append({ key, made, imageBytes, now });
++        return made;
++    }
++
++private:
++    struct Key {
++        uint32_t imageID;
++        FloatRect tileRect;
++        FloatSize tileWithSpacing;
++        SkSamplingOptions sampling;
++        bool operator==(const Key& other) const
++        {
++            return imageID == other.imageID && tileRect == other.tileRect && tileWithSpacing == other.tileWithSpacing && sampling == other.sampling;
++        }
++    };
++    struct Entry {
++        Key key;
++        sk_sp<SkPicture> picture;
++        size_t imageBytes;
++        MonotonicTime lastUse;
++    };
++
++    // SUMMIT_PATTERN_TRACE=1 also counts how often a pattern's picture was found here.
++    static void traceIfNeeded() WTF_REQUIRES_LOCK(s_lock)
++    {
++        static const bool trace = [] {
++            const char* value = std::getenv("SUMMIT_PATTERN_TRACE");
++            return value && *value && std::strcmp(value, "0");
++        }();
++        if (trace && !((s_hits + s_misses) % 50))
++            fprintf(stderr, "summit-pattern pictures: %u reused, %u made, %zu kept\n", s_hits, s_misses, s_entries->size());
++    }
++
++    static Lock s_lock;
++    static NeverDestroyed<Vector<Entry>> s_entries WTF_GUARDED_BY_LOCK(s_lock);
++    static unsigned s_hits WTF_GUARDED_BY_LOCK(s_lock);
++    static unsigned s_misses WTF_GUARDED_BY_LOCK(s_lock);
++};
++
++Lock PatternPictureCacheHaiku::s_lock;
++NeverDestroyed<Vector<PatternPictureCacheHaiku::Entry>> PatternPictureCacheHaiku::s_entries;
++unsigned PatternPictureCacheHaiku::s_hits;
++unsigned PatternPictureCacheHaiku::s_misses;
++#endif
++
+ void GraphicsContextSkia::drawPattern(const NativeImage& nativeImage, const FloatRect& destRect, const FloatRect& tileRect, const AffineTransform& patternTransform, const FloatPoint& phase, const FloatSize& spacing, ImagePaintingOptions options)
+ {
+     if (!patternTransform.isInvertible())
+@@ -1180,6 +1358,51 @@ void GraphicsContextSkia::drawPattern(const NativeImage& nativeImage, const Floa
  #endif
          paint.setShader(image->makeShader(repeatX ? SkTileMode::kRepeat : SkTileMode::kClamp, repeatY ? SkTileMode::kRepeat : SkTileMode::kClamp, samplingOptions, &shaderMatrix));
      } else {
@@ -50660,7 +51038,39 @@ index a3cb981bd76fc7f7946862f8f7be53fe133bae79..9940c85fdebbf9fca0023d37b809d31a
          auto tileFloatRectWithSpacing = FloatRect(0, 0, tileRect.width() + spacing.width() / patternTransform.a(), tileRect.height() + spacing.height() / patternTransform.d());
          if (image->isTextureBacked()) {
              auto enclosingTileIntRect = enclosingIntRect(tileRect);
-@@ -1359,7 +1463,7 @@ void GraphicsContextSkia::drawSkiaText(const sk_sp<SkTextBlob>& blob, SkScalar x
+@@ -1199,14 +1422,23 @@ void GraphicsContextSkia::drawPattern(const NativeImage& nativeImage, const Floa
+                 paint.setShader(tileImage->makeShader(SkTileMode::kRepeat, SkTileMode::kRepeat, samplingOptions, &shaderMatrix));
+             }
+         } else {
+-            auto dstRect = SkRect::MakeWH(tileRect.width(), tileRect.height());
+-            auto clipRect = SkRect::MakeWH(tileFloatRectWithSpacing.width(), tileFloatRectWithSpacing.height());
+-            // For raster images we can save creating a copy altogether, by using SkPicture recording instead.
+-            SkPictureRecorder recorder;
+-            auto* recordCanvas = recorder.beginRecording(clipRect);
+-            // The below call effectively extracts a tile from the image thus performing a clipping.
+-            recordCanvas->drawImageRect(image, tileRect, dstRect, samplingOptions, nullptr, SkCanvas::kStrict_SrcRectConstraint);
+-            auto picture = recorder.finishRecordingAsPicture();
++            auto makePicture = [&] {
++                auto dstRect = SkRect::MakeWH(tileRect.width(), tileRect.height());
++                auto clipRect = SkRect::MakeWH(tileFloatRectWithSpacing.width(), tileFloatRectWithSpacing.height());
++                // For raster images we can save creating a copy altogether, by using SkPicture recording instead.
++                SkPictureRecorder recorder;
++                auto* recordCanvas = recorder.beginRecording(clipRect);
++                // The below call effectively extracts a tile from the image thus performing a clipping.
++                recordCanvas->drawImageRect(image, tileRect, dstRect, samplingOptions, nullptr, SkCanvas::kStrict_SrcRectConstraint);
++                return recorder.finishRecordingAsPicture();
++            };
++#if PLATFORM(HAIKU)
++            auto picture = PatternPictureCacheHaiku::enabled()
++                ? PatternPictureCacheHaiku::picture(image, tileRect, tileFloatRectWithSpacing.size(), samplingOptions, makePicture)
++                : makePicture();
++#else
++            auto picture = makePicture();
++#endif
+             paint.setShader(picture->makeShader(SkTileMode::kRepeat, SkTileMode::kRepeat, samplingOptions.filter, &shaderMatrix, nullptr));
+         }
+     }
+@@ -1359,7 +1591,7 @@ void GraphicsContextSkia::drawSkiaText(const sk_sp<SkTextBlob>& blob, SkScalar x
          if (hasDropShadow()) {
              inExtraTransparencyLayer = drawOutsetShadow(paint, [&](const SkPaint& paint) {
                  m_canvas.drawTextBlob(blob, x, y, paint);
@@ -76242,7 +76652,7 @@ index 0ff11fddb608c1b65d17189a08c8ffa40c284e90..871069b63cac71759a7f8ca5d7712a06
  
  RenderBlockRareData* RenderBlock::blockRareData() const
 diff --git a/Source/WebCore/rendering/RenderBlockFlow.cpp b/Source/WebCore/rendering/RenderBlockFlow.cpp
-index 820170c9ccbad7e487a557bcd6549aaeaeb0d9b0..ca8b7dd04b273a61e2368cfda0f128676c82525e 100644
+index 820170c9ccbad7e487a557bcd6549aaeaeb0d9b0..9ca651ae05bd9dc1fe0b62827e652bb914460c6f 100644
 --- a/Source/WebCore/rendering/RenderBlockFlow.cpp
 +++ b/Source/WebCore/rendering/RenderBlockFlow.cpp
 @@ -72,6 +72,7 @@
@@ -76253,7 +76663,7 @@ index 820170c9ccbad7e487a557bcd6549aaeaeb0d9b0..ca8b7dd04b273a61e2368cfda0f12867
  #include "RenderObjectInlines.h"
  #include "RenderTableCellInlines.h"
  #include "RenderText.h"
-@@ -84,9 +85,15 @@
+@@ -84,15 +85,29 @@
  #include "TextBoxTrimmer.h"
  #include "TextUtil.h"
  #include "VisiblePosition.h"
@@ -76269,7 +76679,21 @@ index 820170c9ccbad7e487a557bcd6549aaeaeb0d9b0..ca8b7dd04b273a61e2368cfda0f12867
  #include <wtf/unicode/CharacterNames.h>
  
  #if PLATFORM(COCOA)
-@@ -797,8 +804,184 @@ static bool formattingContextRootIntrinsicLogicalWidthsDependOnOwnHeight(const R
+ #include <wtf/cocoa/RuntimeApplicationChecksCocoa.h>
+ #endif
+ 
++#if PLATFORM(HAIKU)
++namespace WebCore {
++class RenderElement;
++// In RenderElement.cpp.
++bool summitRootLayoutComparesBoundsOnlyHaiku(const RenderElement&);
++}
++#endif
++
+ namespace WebCore {
+ 
+ WTF_MAKE_TZONE_ALLOCATED_IMPL(RenderBlockFlow);
+@@ -797,8 +812,184 @@ static bool formattingContextRootIntrinsicLogicalWidthsDependOnOwnHeight(const R
      return false;
  }
  
@@ -76454,7 +76878,23 @@ index 820170c9ccbad7e487a557bcd6549aaeaeb0d9b0..ca8b7dd04b273a61e2368cfda0f12867
      // Let's not dirty the height percentage descendant when it has an absolutely positioned containing block ancestor. We should be able to dirty such boxes through the regular invalidation logic.
      for (auto* ancestor = descendant.containingBlock(); ancestor && ancestor != this; ancestor = ancestor->containingBlock()) {
          if (ancestor->isOutOfFlowPositioned())
-@@ -4363,6 +4546,58 @@ std::pair<float, float> RenderBlockFlow::inlineContentTopAndBottomIncludingInkOv
+@@ -1347,7 +1538,15 @@ void RenderBlockFlow::layoutBlockChild(RenderBox& child, MarginInfo& marginInfo,
+         // If the child moved, we have to repaint it as well as any floating/positioned
+         // descendants. An exception is if we need a layout. In this case, we know we're going to
+         // repaint ourselves (and the child) anyway.
++#if PLATFORM(HAIKU)
++        // <html> and <body> may not repaint all they hold after a style change
++        // that needs their layout (RenderElement::setStyle): then the children
++        // they move repaint themselves here.
++        bool parentRepaintsChild = selfNeedsLayout() && !((isDocumentElementRenderer() || isBody()) && summitRootLayoutComparesBoundsOnlyHaiku(*this));
++        if (childHadLayout && !parentRepaintsChild && child.checkForRepaintDuringLayout())
++#else
+         if (childHadLayout && !selfNeedsLayout() && child.checkForRepaintDuringLayout())
++#endif
+             child.repaintDuringLayoutIfMoved(oldRect);
+     }
+ 
+@@ -4363,6 +4562,58 @@ std::pair<float, float> RenderBlockFlow::inlineContentTopAndBottomIncludingInkOv
  
  RenderBlockFlow::InlineContentStatus RenderBlockFlow::markInlineContentDirtyForLayout(RelayoutChildren relayoutChildren)
  {
@@ -76513,7 +76953,7 @@ index 820170c9ccbad7e487a557bcd6549aaeaeb0d9b0..ca8b7dd04b273a61e2368cfda0f12867
      auto contentNeedsNormalChildLayoutOnly = std::optional<bool> { };
      auto hasInFlowBlockLevelElement = false;
      auto hasDirtyInFlowBlockLevelElement = false;
-@@ -4375,7 +4610,78 @@ RenderBlockFlow::InlineContentStatus RenderBlockFlow::markInlineContentDirtyForL
+@@ -4375,7 +4626,78 @@ RenderBlockFlow::InlineContentStatus RenderBlockFlow::markInlineContentDirtyForL
          auto isInFlowBlockLevelElement = box && box->isBlockLevelBox() && box->isInFlow();
          hasInFlowBlockLevelElement |= isInFlowBlockLevelElement;
          hasDirtyInFlowBlockLevelElement |= (isInFlowBlockLevelElement && box->needsLayout());
@@ -76593,7 +77033,7 @@ index 820170c9ccbad7e487a557bcd6549aaeaeb0d9b0..ca8b7dd04b273a61e2368cfda0f12867
          auto childNeedsIntrinsicWidthComputation = !renderer.isExcludedFromNormalLayout() && relayoutChildren == RelayoutChildren::Yes && box && box->shouldInvalidateContentWidths();
  
          if (childNeedsLayout)
-@@ -4435,6 +4741,10 @@ RenderBlockFlow::InlineContentStatus RenderBlockFlow::markInlineContentDirtyForL
+@@ -4435,6 +4757,10 @@ RenderBlockFlow::InlineContentStatus RenderBlockFlow::markInlineContentDirtyForL
              continue;
          }
      }
@@ -76605,14 +77045,16 @@ index 820170c9ccbad7e487a557bcd6549aaeaeb0d9b0..ca8b7dd04b273a61e2368cfda0f12867
  }
  
 diff --git a/Source/WebCore/rendering/RenderBox.cpp b/Source/WebCore/rendering/RenderBox.cpp
-index b69c7bf9751cc17db10467583c079ebdedd9f1ae..1b99d0bd99408eeaf4703d8fe90b34c08f392587 100644
+index b69c7bf9751cc17db10467583c079ebdedd9f1ae..e8b28714b57ba9e95fa5129153aea82800262c92 100644
 --- a/Source/WebCore/rendering/RenderBox.cpp
 +++ b/Source/WebCore/rendering/RenderBox.cpp
-@@ -132,6 +132,13 @@
+@@ -132,6 +132,15 @@
  #include <WebKitAdditions/RenderBoxAdditions.cpp>
  #endif
  
 +#if PLATFORM(HAIKU)
++#include <wtf/text/StringBuilder.h>
++
 +namespace WebCore {
 +// Layout reuse for flex and grid items lives in RenderBlock.cpp.
 +void summitSetNeedsLayoutByContainer(RenderBox&);
@@ -76622,18 +77064,154 @@ index b69c7bf9751cc17db10467583c079ebdedd9f1ae..1b99d0bd99408eeaf4703d8fe90b34c0
  namespace WebCore {
  
  WTF_MAKE_TZONE_ALLOCATED_IMPL(RenderBox);
-@@ -305,6 +312,10 @@ void RenderBox::styleWillChange(Style::Difference diff, const Style::ComputedSty
+@@ -296,6 +305,127 @@ void RenderBox::removeFloatingOrOutOfFlowChildFromBlockLists()
+     ASSERT_NOT_REACHED();
+ }
+ 
++#if PLATFORM(HAIKU)
++// The background of the root element, or of the body when the root element has
++// none, is painted over the whole canvas, so a change to it repaints all of the
++// root layer (and the root element's layer). WebCore repainted all of it for
++// any style change of <html> or <body> that needs a repaint or a layout: The
++// Guardian and linear.app change classes, attributes and inherited properties
++// there while they load and on input, and each such change repainted the
++// whole page, though the renderers whose painting changes (the text that
++// inherits a colour, a box whose size depends on a custom property) repaint
++// themselves. Here the root contents are repainted only when what the root
++// background is painted from may have changed: the background itself, or how
++// the canvas paints it (visibility, opacity, transforms, border radius, clip
++// paths, filters, masks, blending, colour scheme, zoom, writing mode). A
++// change of layout keeps the old rule when a background image is involved,
++// since the root element's box positions it; a background of only a colour
++// fills the canvas whatever the boxes' geometry.
++// SUMMIT_ROOT_STYLE_REPAINT=1 repaints for every change as before.
++static bool rootStyleRepaintsAllHaiku()
++{
++    static const bool enabled = [] {
++        const char* value = getenv("SUMMIT_ROOT_STYLE_REPAINT");
++        return value && value[0] == '1' && !value[1];
++    }();
++    return enabled;
++}
++
++bool summitRootStyleRepaintsAllHaiku()
++{
++    return rootStyleRepaintsAllHaiku();
++}
++
++bool summitRootBackgroundMayChangeHaiku(Style::Difference diff, const Style::ComputedStyle& oldStyle, const Style::ComputedStyle& newStyle)
++{
++    // Opacity, filters, masks and blending on the root's own layer.
++    if (diff == Style::DifferenceResult::RepaintLayer || diff == Style::DifferenceResult::NewStyle)
++        return true;
++
++    if (oldStyle.backgroundLayers() != newStyle.backgroundLayers()
++        || oldStyle.backgroundColor() != newStyle.backgroundColor())
++        return true;
++    if (oldStyle.color() != newStyle.color() && oldStyle.backgroundColor().containsCurrentColor())
++        return true;
++
++    // A background image is positioned by the root element's box and may be
++    // generated from other properties (paint(), custom properties): any
++    // change keeps the old rule.
++    if (Style::hasImageInAnyLayer(oldStyle.backgroundLayers()) || Style::hasImageInAnyLayer(newStyle.backgroundLayers()))
++        return true;
++
++    if (oldStyle.usedVisibility() != newStyle.usedVisibility()
++        || oldStyle.opacity() != newStyle.opacity()
++        || oldStyle.transform() != newStyle.transform()
++        || oldStyle.offsetPath() != newStyle.offsetPath()
++        || oldStyle.border() != newStyle.border()
++        || oldStyle.clipPath() != newStyle.clipPath()
++        || oldStyle.filter() != newStyle.filter()
++        || oldStyle.backdropFilter() != newStyle.backdropFilter()
++        || oldStyle.maskLayers() != newStyle.maskLayers()
++        || oldStyle.maskBorder() != newStyle.maskBorder()
++        || oldStyle.blendMode() != newStyle.blendMode()
++        || oldStyle.isolation() != newStyle.isolation()
++        || oldStyle.printColorAdjust() != newStyle.printColorAdjust()
++        || oldStyle.appleColorFilter() != newStyle.appleColorFilter()
++        || oldStyle.imageRendering() != newStyle.imageRendering()
++        || oldStyle.usedZoom() != newStyle.usedZoom()
++        || oldStyle.writingMode() != newStyle.writingMode())
++        return true;
++#if ENABLE(DARK_MODE_CSS)
++    if (oldStyle.colorScheme() != newStyle.colorScheme())
++        return true;
++#endif
++    return false;
++}
++
++// SUMMIT_FULL_REPAINT_TRACE=1: what changed in a style change of <html> or <body>.
++static void traceRootStyleChangeHaiku(const RenderBox& box, Style::Difference diff, const Style::ComputedStyle& oldStyle, const Style::ComputedStyle& newStyle, bool repaints)
++{
++    StringBuilder changed;
++    auto note = [&](bool differs, ASCIILiteral name) {
++        if (differs) {
++            changed.append(' ');
++            changed.append(name);
++        }
++    };
++    note(oldStyle.backgroundLayers() != newStyle.backgroundLayers(), "background-layers"_s);
++    note(oldStyle.backgroundColor() != newStyle.backgroundColor(), "background-color"_s);
++    note(Style::hasImageInAnyLayer(oldStyle.backgroundLayers()) || Style::hasImageInAnyLayer(newStyle.backgroundLayers()), "(has-background-image)"_s);
++    note(oldStyle.color() != newStyle.color(), "color"_s);
++    note(oldStyle.border() != newStyle.border(), "border"_s);
++    note(oldStyle.outline() != newStyle.outline(), "outline"_s);
++    note(oldStyle.usedVisibility() != newStyle.usedVisibility(), "visibility"_s);
++    note(oldStyle.opacity() != newStyle.opacity(), "opacity"_s);
++    note(oldStyle.transform() != newStyle.transform(), "transform"_s);
++    note(oldStyle.filter() != newStyle.filter(), "filter"_s);
++    note(oldStyle.clipPath() != newStyle.clipPath(), "clip-path"_s);
++    note(oldStyle.userSelect() != newStyle.userSelect() || oldStyle.usedUserSelect() != newStyle.usedUserSelect(), "user-select"_s);
++    note(oldStyle.accentColor() != newStyle.accentColor(), "accent-color"_s);
++    note(oldStyle.caretColor() != newStyle.caretColor(), "caret-color"_s);
++    note(oldStyle.boxShadow() != newStyle.boxShadow(), "box-shadow"_s);
++    note(oldStyle.textDecorationColor() != newStyle.textDecorationColor(), "text-decoration-color"_s);
++    note(oldStyle.usedZoom() != newStyle.usedZoom(), "zoom"_s);
++    note(oldStyle.writingMode() != newStyle.writingMode(), "writing-mode"_s);
++    note(oldStyle.position() != newStyle.position(), "position"_s);
++    note(oldStyle.overflowX() != newStyle.overflowX() || oldStyle.overflowY() != newStyle.overflowY(), "overflow"_s);
++    note(oldStyle.inheritedCustomProperties() != newStyle.inheritedCustomProperties(), "custom-properties"_s);
++    note(oldStyle.fontDescription() != newStyle.fontDescription(), "font"_s);
++    note(oldStyle.fontDescription() == newStyle.fontDescription() && !oldStyle.fontCascadeEqual(newStyle), "fonts-renewed"_s);
++    note(oldStyle.lineHeight() != newStyle.lineHeight(), "line-height"_s);
++    note(oldStyle.marginBox() != newStyle.marginBox() || oldStyle.paddingBox() != newStyle.paddingBox(), "margin-padding"_s);
++    note(oldStyle.width() != newStyle.width() || oldStyle.height() != newStyle.height() || oldStyle.minHeight() != newStyle.minHeight(), "size"_s);
++    note(oldStyle.display() != newStyle.display(), "display"_s);
++#if ENABLE(DARK_MODE_CSS)
++    note(oldStyle.colorScheme() != newStyle.colorScheme(), "color-scheme"_s);
++#endif
++    static constexpr ASCIILiteral names[] = { "equal"_s, "recomposite-layer"_s, "repaint"_s, "repaint-if-text"_s, "repaint-layer"_s, "layout-out-of-flow-movement"_s, "overflow"_s, "overflow-and-out-of-flow-movement"_s, "layout"_s, "new-style"_s };
++    auto index = static_cast<unsigned>(diff.result);
++    fprintf(stderr, "Summit root style: %s %s, %s;%s\n", box.isBody() ? "body" : "html", index < std::size(names) ? names[index].characters() : "?",
++        repaints ? "repaints the root" : "root not repainted", changed.toString().utf8().data());
++}
++#endif
++
+ void RenderBox::styleWillChange(Style::Difference diff, const Style::ComputedStyle& newStyle)
+ {
+     s_hadNonVisibleOverflow = hasNonVisibleOverflow();
+@@ -304,7 +434,18 @@ void RenderBox::styleWillChange(Style::Difference diff, const Style::ComputedSty
+     if (oldStyle) {
          // The background of the root element or the body element could propagate up to
          // the canvas. Issue full repaint, when our style changes substantially.
-         if (diff >= Style::DifferenceResult::Repaint && (isDocumentElementRenderer() || isBody())) {
 +#if PLATFORM(HAIKU)
++        bool repaintsRoot = diff >= Style::DifferenceResult::Repaint && (isDocumentElementRenderer() || isBody());
++        if (repaintsRoot) {
++            bool mayChange = rootStyleRepaintsAllHaiku() || summitRootBackgroundMayChangeHaiku(diff, *oldStyle, newStyle);
 +            if (getenv("SUMMIT_FULL_REPAINT_TRACE"))
-+                fprintf(stderr, "Summit full repaint: style of %s changed\n", isBody() ? "body" : "html");
++                traceRootStyleChangeHaiku(*this, diff, *oldStyle, newStyle, mayChange);
++            repaintsRoot = mayChange;
++        }
++        if (repaintsRoot) {
++#else
+         if (diff >= Style::DifferenceResult::Repaint && (isDocumentElementRenderer() || isBody())) {
 +#endif
              view().repaintRootContents();
              if (Style::hasEntirelyFixedBackground(oldStyle->backgroundLayers()) != Style::hasEntirelyFixedBackground(newStyle.backgroundLayers()))
                  view().compositor().rootLayerConfigurationChanged();
-@@ -3559,7 +3570,11 @@ LayoutUnit RenderBox::computeIntrinsicLogicalHeight()
+@@ -3559,7 +3700,11 @@ LayoutUnit RenderBox::computeIntrinsicLogicalHeight()
      // height. A descendant that does not resolve against this box's logical height is unaffected and need not lay out again.
      layoutIfNeeded();
      auto blockSize = logicalHeight();
@@ -76706,7 +77284,7 @@ index 71b979677ed9ea5b375f374fdb66f824f3074ba6..6e12a53e3b504aac91236cc6cf058ae0
  
      // Choose a decodingMode such that the image does not flicker.
 diff --git a/Source/WebCore/rendering/RenderElement.cpp b/Source/WebCore/rendering/RenderElement.cpp
-index c30408dbc98900cac30cc19b6a52ac5e1b698120..b6ab9a44ecaee119ef604d07fbcc9aef94cc54ed 100644
+index c30408dbc98900cac30cc19b6a52ac5e1b698120..34b05150e7b8a6ec0c59f1d70a523b5906983a88 100644
 --- a/Source/WebCore/rendering/RenderElement.cpp
 +++ b/Source/WebCore/rendering/RenderElement.cpp
 @@ -43,6 +43,9 @@
@@ -76719,7 +77297,7 @@ index c30408dbc98900cac30cc19b6a52ac5e1b698120..b6ab9a44ecaee119ef604d07fbcc9aef
  #include "HTMLTableCellElement.h"
  #include "HTMLTableElement.h"
  #include "InlineIteratorLineBox.h"
-@@ -113,7 +116,9 @@
+@@ -113,10 +116,15 @@
  #include "TextAutoSizing.h"
  #include "TextManipulationController.h"
  #include "ViewTransition.h"
@@ -76729,7 +77307,216 @@ index c30408dbc98900cac30cc19b6a52ac5e1b698120..b6ab9a44ecaee119ef604d07fbcc9aef
  #include <wtf/StackStats.h>
  #include <wtf/TZoneMallocInlines.h>
  #include <wtf/text/TextStream.h>
-@@ -1585,30 +1590,60 @@ bool RenderElement::repaintAfterLayoutIfNeeded(SingleThreadWeakPtr<const RenderL
++#if PLATFORM(HAIKU)
++#include <wtf/NeverDestroyed.h>
++#endif
+ 
+ #if ENABLE(CONTENT_CHANGE_OBSERVER)
+ #include "ContentChangeObserver.h"
+@@ -612,6 +620,145 @@ static void logStyleDifference(const RenderElement& renderer, const Style::Compu
+ }
+ #endif
+ 
++#if PLATFORM(HAIKU)
++// In RenderBox.cpp.
++bool summitRootStyleRepaintsAllHaiku();
++bool summitRootBackgroundMayChangeHaiku(Style::Difference, const Style::ComputedStyle& oldStyle, const Style::ComputedStyle& newStyle);
++
++// <html> and <body> repaint all they contain (their visual overflow) for a
++// style change that needs a repaint, which for these two is the whole page,
++// though what they paint themselves is their background (the root's is the
++// canvas's, see RenderBox::styleWillChange), borders, outline and shadows,
++// and text of their own. The properties that make such changes are mostly
++// inherited (colour, user-select, accent-color, ...), and every descendant
++// whose painting they change gets a style change of its own and repaints
++// itself. Chrome rasterizes nothing for, say, a colour on <html> that <body>
++// overrides; WebCore repainted the page. This tells when they paint nothing
++// differently themselves, and pass nothing to descendants that the
++// descendants' own style changes would miss (text decorations, highlights,
++// generated images).
++// Highlight pseudo-elements on <html> or <body> (sites style ::selection
++// there) are inherited by every descendant, which compare their own; for the
++// root itself only a change of which kinds there are, or a highlight other
++// than the selection, or a selection now on the page, could matter.
++static bool highlightsMayChangeHaiku(const RenderElement& renderer, const Style::ComputedStyle& oldStyle, const Style::ComputedStyle& newStyle)
++{
++    auto types = oldStyle.highlightPseudoElementTypes();
++    if (types != newStyle.highlightPseudoElementTypes())
++        return true;
++    if (types.isEmpty())
++        return false;
++    for (auto type : types) {
++        if (type != PseudoElementType::Selection)
++            return true;
++    }
++    return renderer.frame().selection().isRange();
++}
++
++static bool rootRendererRepaintsNothingOfItsOwnHaiku(const RenderElement& renderer, Style::Difference diff, const Style::ComputedStyle& oldStyle, const Style::ComputedStyle& newStyle)
++{
++    if (diff != Style::DifferenceResult::Repaint || summitRootStyleRepaintsAllHaiku())
++        return false;
++    if (summitRootBackgroundMayChangeHaiku(diff, oldStyle, newStyle))
++        return false;
++    for (auto* style : { &oldStyle, &newStyle }) {
++        if (Style::hasImageInAnyLayer(style->maskLayers()) || style->border().hasBorderImage())
++            return false;
++        if (!style->textDecorationLine().isNone())
++            return false;
++        if (style->userModify() != UserModify::ReadOnly || style->specifiesColumns())
++            return false;
++    }
++    if (oldStyle.outline() != newStyle.outline() || oldStyle.boxShadow() != newStyle.boxShadow()
++        || oldStyle.textDecorationColor() != newStyle.textDecorationColor()
++        || oldStyle.viewTransitionName() != newStyle.viewTransitionName())
++        return false;
++    if (oldStyle.color() != newStyle.color()) {
++        // currentcolor in what the box paints itself.
++        if (oldStyle.border().hasVisibleBorderDecoration() || oldStyle.hasOutline() || !oldStyle.boxShadow().isNone())
++            return false;
++    }
++    if (highlightsMayChangeHaiku(renderer, oldStyle, newStyle))
++        return false;
++    // Text of its own (anonymous blocks restyle and repaint themselves).
++    if (hasNonWhitespaceTextContent(renderer))
++        return false;
++    return true;
++}
++
++// The same for a style change of <html> or <body> that needs a layout (a
++// web font of their family loaded, a font size, a margin): a renderer that
++// needs layout itself repaints all it holds after the layout, which for these
++// two is the whole page (and, for <html>, its layer). When they paint nothing
++// themselves that depends on their geometry and all they hold are blocks,
++// those blocks repaint where they moved or changed (as for any change deeper
++// down), so the layout after this change only compares their old and new
++// bounds. Kept by the frame's layout count at the change (that layout, and
++// the layer positions updated after it).
++static ASCIILiteral rootRendererLayoutRepaintsOwnHaiku(const RenderElement& renderer, Style::Difference diff, const Style::ComputedStyle& oldStyle, const Style::ComputedStyle& newStyle)
++{
++    if (diff < Style::DifferenceResult::LayoutOutOfFlowMovementOnly || diff == Style::DifferenceResult::NewStyle)
++        return "not a layout"_s;
++    if (summitRootStyleRepaintsAllHaiku())
++        return "SUMMIT_ROOT_STYLE_REPAINT=1"_s;
++    auto* block = dynamicDowncast<RenderBlockFlow>(renderer);
++    if (!block)
++        return "not a block flow"_s;
++    if (block->childrenInline())
++        return "inline children"_s;
++    if (block->containsFloats())
++        return "floats"_s;
++    if (summitRootBackgroundMayChangeHaiku(diff, oldStyle, newStyle))
++        return "root background"_s;
++    for (auto* style : { &oldStyle, &newStyle }) {
++        if (Style::hasImageInAnyLayer(style->maskLayers()) || style->border().hasVisibleBorderDecoration() || style->hasOutline() || !style->boxShadow().isNone())
++            return "own decorations"_s;
++        if (!style->textDecorationLine().isNone())
++            return "text decorations"_s;
++        if (style->userModify() != UserModify::ReadOnly || style->specifiesColumns())
++            return "editable or columns"_s;
++    }
++    if (oldStyle.position() != newStyle.position() || oldStyle.display() != newStyle.display() || oldStyle.floating() != newStyle.floating()
++        || oldStyle.overflowX() != newStyle.overflowX() || oldStyle.overflowY() != newStyle.overflowY()
++        || oldStyle.viewTransitionName() != newStyle.viewTransitionName())
++        return "position, display, float or overflow"_s;
++    if (highlightsMayChangeHaiku(renderer, oldStyle, newStyle))
++        return "highlights"_s;
++    return { };
++}
++
++struct RootLayoutWithoutOwnRepaintHaiku {
++    SingleThreadWeakPtr<const RenderElement> renderer;
++    unsigned layoutCount;
++};
++
++static Vector<RootLayoutWithoutOwnRepaintHaiku>& rootLayoutsWithoutOwnRepaintHaiku()
++{
++    static NeverDestroyed<Vector<RootLayoutWithoutOwnRepaintHaiku>> entries;
++    return entries;
++}
++
++static void noteRootLayoutWithoutOwnRepaintHaiku(const RenderElement& renderer, bool repaintsNothingOfItsOwn)
++{
++    auto& entries = rootLayoutsWithoutOwnRepaintHaiku();
++    entries.removeAllMatching([&](auto& entry) {
++        return !entry.renderer || entry.renderer.get() == &renderer;
++    });
++    if (repaintsNothingOfItsOwn)
++        entries.append({ renderer, renderer.view().frameView().layoutContext().layoutUpdateCount() });
++}
++
++bool summitRootLayoutComparesBoundsOnlyHaiku(const RenderElement& renderer)
++{
++    auto count = renderer.view().frameView().layoutContext().layoutUpdateCount();
++    for (auto& entry : rootLayoutsWithoutOwnRepaintHaiku()) {
++        if (entry.renderer.get() == &renderer)
++            return count == entry.layoutCount || count == entry.layoutCount + 1;
++    }
++    return false;
++}
++#endif
++
+ void RenderElement::setStyle(Style::ComputedStyle&& style, Style::DifferenceResult minimalStyleDifference)
+ {
+     // FIXME: Should change RenderView so it can use initializeStyle too.
+@@ -632,7 +779,20 @@ void RenderElement::setStyle(Style::ComputedStyle&& style, Style::DifferenceResu
+ 
+     Style::loadPendingResources(style, protect(document()), protect(element()).get());
+ 
++#if PLATFORM(HAIKU)
++    bool repaintsNothingOfItsOwn = (isDocumentElementRenderer() || isBody()) && m_hasInitializedStyle
++        && rootRendererRepaintsNothingOfItsOwnHaiku(*this, diff, m_style, style);
++    if ((isDocumentElementRenderer() || isBody()) && m_hasInitializedStyle && diff >= Style::DifferenceResult::LayoutOutOfFlowMovementOnly) {
++        auto repaintsOwnReason = rootRendererLayoutRepaintsOwnHaiku(*this, diff, m_style, style);
++        noteRootLayoutWithoutOwnRepaintHaiku(*this, repaintsOwnReason.isNull());
++        if (getenv("SUMMIT_FULL_REPAINT_TRACE"))
++            fprintf(stderr, "Summit root style: %s layout %s%s\n", isBody() ? "body" : "html", repaintsOwnReason.isNull() ? "compares bounds only" : "repaints all it holds: ",
++                repaintsOwnReason.isNull() ? "" : repaintsOwnReason.characters());
++    }
++    auto didRepaint = !repaintsNothingOfItsOwn && repaintBeforeStyleChange(diff, m_style, style);
++#else
+     auto didRepaint = repaintBeforeStyleChange(diff, m_style, style);
++#endif
+     styleWillChange(diff, style);
+     auto oldStyle = m_style.replace(WTF::move(style));
+     bool detachedFromParent = !parent();
+@@ -659,7 +819,20 @@ void RenderElement::setStyle(Style::ComputedStyle&& style, Style::DifferenceResu
+     if (diff <= Style::DifferenceResult::LayoutOutOfFlowMovementOnly)
+         setNeedsLayoutForStyleDifference(updatedDiff, &oldStyle);
+ 
+-    if (!didRepaint && (updatedDiff.result == Style::DifferenceResult::RepaintLayer || shouldRepaintForStyleDifference(updatedDiff))) {
++    bool repaintsAfter = !didRepaint && (updatedDiff.result == Style::DifferenceResult::RepaintLayer || shouldRepaintForStyleDifference(updatedDiff));
++#if PLATFORM(HAIKU)
++    if (repaintsNothingOfItsOwn && updatedDiff == diff)
++        repaintsAfter = false;
++    if (repaintsNothingOfItsOwn && getenv("SUMMIT_FULL_REPAINT_TRACE"))
++        fprintf(stderr, "Summit root style: %s repaints nothing of its own\n", isBody() ? "body" : "html");
++    // SUMMIT_FULL_REPAINT_TRACE=1: how much of the page <html> or <body> repaints for its own style change.
++    if ((didRepaint || repaintsAfter) && (isDocumentElementRenderer() || isBody()) && getenv("SUMMIT_FULL_REPAINT_TRACE")) {
++        auto rect = clippedOverflowRectForRepaint(containerForRepaint().renderer.get());
++        fprintf(stderr, "Summit root style: %s repaints itself %s, %.0fx%.0f\n", isBody() ? "body" : "html", didRepaint ? "before" : "after",
++            rect.width().toFloat(), rect.height().toFloat());
++    }
++#endif
++    if (repaintsAfter) {
+         // Do a repaint with the new style now, e.g., for example if we go from
+         // not having an outline to having an outline.
+         repaint();
+@@ -1547,6 +1720,13 @@ bool RenderElement::repaintAfterLayoutIfNeeded(SingleThreadWeakPtr<const RenderL
+     if (view().printing())
+         return false; // Don't repaint if we're printing.
+ 
++#if PLATFORM(HAIKU)
++    if (requiresFullRepaint == RequiresFullRepaint::Yes && (isDocumentElementRenderer() || isBody()) && summitRootLayoutComparesBoundsOnlyHaiku(*this)) {
++        requiresFullRepaint = RequiresFullRepaint::No;
++        if (getenv("SUMMIT_FULL_REPAINT_TRACE"))
++            fprintf(stderr, "Summit root style: %s compares bounds after layout\n", isBody() ? "body" : "html");
++    }
++#endif
+     auto oldClippedOverflowRect = oldRects.clippedOverflowRect;
+     auto newClippedOverflowRect = newRects.clippedOverflowRect;
+     bool haveOutlinesBoundsRects = oldRects.outlineBoundsRect && newRects.outlineBoundsRect;
+@@ -1585,30 +1765,60 @@ bool RenderElement::repaintAfterLayoutIfNeeded(SingleThreadWeakPtr<const RenderL
          return false;
      };
  
@@ -76795,7 +77582,7 @@ index c30408dbc98900cac30cc19b6a52ac5e1b698120..b6ab9a44ecaee119ef604d07fbcc9aef
  
      if (!repaintContainer)
          repaintContainer = &view();
-@@ -2917,7 +2952,21 @@ void RenderElement::layoutIfNeeded()
+@@ -2917,7 +3127,21 @@ void RenderElement::layoutIfNeeded()
          clearNeedsLayoutForSkippedContent();
          return;
      }

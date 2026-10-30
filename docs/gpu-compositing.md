@@ -130,6 +130,27 @@ rendering update tears the layers down and paints in software.
 - The real driver needs `HAIKU_CSF_DEVICE` in the **WebProcess** environment
   (see MESA.md); without it Mesa cannot open the GPU and the probe reports it.
 
+## What a style or font change repaints (Haiku rules)
+
+Tiles are repainted only where WebCore asks, so rules that ask for "all of
+it" cost a full raster of every tile kept. On Haiku:
+
+- A style change on `<html>` or `<body>` repaints the root contents only when
+  the root background may have changed (`RenderBox::styleWillChange`), and
+  does not repaint their whole visual overflow, after the change or after the
+  layout it needs, when they paint nothing differently themselves
+  (`RenderElement::setStyle`, `repaintAfterLayoutIfNeeded`); their moved
+  children then repaint themselves. `SUMMIT_ROOT_STYLE_REPAINT=1` turns this
+  off.
+- A web font load renews only the fonts of descriptions whose families can
+  reach the loaded family (`CSSFontSelector`, `FontCascadeCache`);
+  `SUMMIT_FONT_LOAD_FAMILY_VERSIONS=0` renews all.
+- Repeating-pattern tile pictures are shared across recordings so the
+  picture shader's raster is reused (`GraphicsContextSkia::drawPattern`);
+  `SUMMIT_PATTERN_PICTURE_CACHE=0` makes one per drawing.
+
+See `docs/performance.md`, 30 October 2026, for measurements.
+
 ## Not implemented
 
 - Threaded compositing, async scrolling, damage-limited readback (full frame
