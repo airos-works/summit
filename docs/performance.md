@@ -275,9 +275,9 @@ removals (`FontFaceSet.add()`/`delete()`) now record the family they change,
 and the cache key of a description whose families cannot reach that family
 keeps the version it had (`summitFontSelectorVersionForDescriptionHaiku`), so
 those elements keep their fonts and compare equal. Any other change of the
-selector (style sheet rebuilds, `@font-face` rules added, palettes, feature
-values, the font cache) still renews all fonts. The standard family is
-resolved to the family it names; the math family counts as reaching any.
+selector (`@font-face` rules added or changed, palettes, feature values, the
+font cache) still renews all fonts (style sheet rebuilds: see below). The
+standard family is resolved to the family it names; the math family counts as reaching any.
 `SUMMIT_FONT_LOAD_FAMILY_VERSIONS=0` renews all fonts on any load;
 `SUMMIT_FONT_LOAD_TRACE=1` prints each recorded change.
 
@@ -304,7 +304,7 @@ Test pages are in the session's www directory under `root117/`.
 | `object-fit` on `<html>` (repaints nothing) | 216, 303 | 0, 0 | 0 |
 | `font-size` on `<html>` (`<body>` sets its own) | 216, 286 | 0, 0 | 0 |
 | `padding-right` on `<body>` (content moves) | 234, 222 | 153, 74 | 371 |
-| `color-scheme` on `<html>` (the canvas changes) | 234, 248 | 234, 250 | 0 |
+| `color-scheme` on `<html>` (`light` and back, light appearance) | 234, 248 | 0, 0 (below) | 0 |
 | a 40-pixel box in the header | 18, 3 | 18, 3 | 9 |
 
 `user-select` on `<body>` still repaints the page in both (every descendant's
@@ -339,13 +339,66 @@ renews the fonts of all text, so the sections repaint themselves where
 match WebCore's fresh paint except for animated parts and the scroll bar, as
 before the change.
 
-Left: a style sheet rebuild that re-adds the same `@font-face` rules still
-renews every element's fonts (WebCore makes a new `CSSFontFace` for each
-rule, and the faces "load" again from the memory cache); not re-creating
-identical faces would remove most of The Guardian's load-time repaints.
-`color-scheme` on `<html>` repaints all, which Chromium does not when the
-canvas colour stays the same. Patterns from texture-backed images still
-draw their tile into a new GPU surface per recording.
+**Style sheet rebuilds.** A style sheet change that rebuilds the style
+resolver (a sheet removed, or the resolver cleared) rebuilt every
+`@font-face`: `CSSFontSelector::buildStarted` dropped the faces no script
+held and each rule made a new `CSSFontFace`, which "loaded" again from the
+memory cache and bumped the version again, and the build bumped it too; a
+sheet inserted before others re-registered every rule, which replaced each
+face the same way. So every rebuild renewed the fonts of all text, and The
+Guardian (it rebuilds while islands hydrate) laid out and repainted its
+sections about eight times per load. Now the faces are kept through the
+build: a rule that is still there with the same properties (the same
+`StyleRuleFontFace`, its declarations serialized the same) keeps its face and
+what it loaded, and a build that added, replaced and removed no face records
+its version as changing no family, so no description's fonts are renewed.
+`SUMMIT_FONT_FACE_REUSE=0` re-creates every face as before (it is also off
+with `SUMMIT_FONT_LOAD_FAMILY_VERSIONS=0`); `SUMMIT_FONT_LOAD_TRACE=1` prints
+`Summit font faces rebuilt: N kept, N made (N as a removed one), N removed`
+per build (the middle count: new rule objects with the text of a face
+dropped in the same build, which are still re-created).
+
+**`color-scheme`.** It is inherited and any change of it was a repaint, so
+setting it on `<html>` repainted every renderer. What it paints depends only
+on whether the used appearance is dark (form controls, scroll bars, the
+canvas; `light-dark()` and system colours are resolved into the colours and
+differ on their own), so `RenderElement::setStyle` now takes the difference as
+if `color-scheme` had not changed when `Document::useDarkAppearance` gives
+the same answer for both styles. `SUMMIT_COLOR_SCHEME_REPAINT=1` repaints for
+any change. Setting `dark` on a light page still repaints (26 tiles on
+screen) and the frame matches WebCore's fresh paint.
+
+Measured as above (engine of 30 October with both rounds, A/B by switches in
+the same build):
+
+| | before | after |
+| --- | --- | --- |
+| `fonts.html`, 10 sheet insert/remove steps (5 rebuilds), two rounds | 240 tiles, 297 / 337 ms; 10 face loads | 0 tiles; 0 loads; the face kept in each rebuild |
+| `root.html`, `color-scheme` 10 changes, two rounds | 234 / 260 tiles, 280 / 231 ms | 0 tiles |
+
+Real sites, a load from cache after a warm load (`SUMMIT_FONT_FACE_REUSE=0`
+before; "all off" also turns off the first round):
+
+| | The Guardian all off | before | after | linear.app before | after |
+| --- | --- | --- | --- | --- | --- |
+| face loads (incl. rebuilt faces) | (not traced) | 102, 102 | 15, 15 | 24, 24 | 2, 2 |
+| style rebuilds that renewed fonts | all | all | 1 of 8, 1 of 8 | all | 1 of 6, 1 of 6 (the first build) |
+| tiles painted in the 22 s after navigation | 317 | 309, 319 | 155, 155 | 1349, 1461 | 1010, 1025 |
+| tile paint, ms | 267 | 320, 303 | 143, 146 | 1808, 1908 | 1592, 1571 |
+| layouts over 10 ms (count, ms) | 7, 371 | 7, 368; 7, 364 | 2, 81; 2, 93 | 9, 258; 9, 312 | 1, 30; 1, 29 |
+
+On The Guardian the one rebuild that still renews fonts is a sheet replaced
+by an identical one (2 faces made with the text of 2 dropped). linear.app's
+tiles are mostly animations. The Guardian's frames at three scroll
+positions match WebCore's fresh paint, all six web font families loaded,
+except for a playing video card and the consent button's state; the fixture
+frames match too.
+
+Left: a face whose rule is a new object with the same text (a sheet replaced
+by an identical copy) is still re-created; keeping it would need the face to
+take the new rule (`CSSFontFace` holds its rule). Patterns from
+texture-backed images still draw their tile into a new GPU surface per
+recording.
 
 ## 30 October 2026: VP9 and AV1 on AMD's video engine; decoder timestamps trusted (#115)
 

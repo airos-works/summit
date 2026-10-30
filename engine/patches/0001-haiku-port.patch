@@ -12939,10 +12939,19 @@ index c8beb723de96daab7179cd34b3a122c185c48625..d611fe77cebe61de0a9ebe9571474058
      if (auto family = face.familyCSSValue())
          removeFromFacesLookupTable(face, *family);
 diff --git a/Source/WebCore/css/CSSFontSelector.cpp b/Source/WebCore/css/CSSFontSelector.cpp
-index c0e79d205b34ca017d69dd11e47fc353b313e940..2c8ddc85b4d07ee841d7723169f8244db7bd7699 100644
+index c0e79d205b34ca017d69dd11e47fc353b313e940..046589ec8194c6c9aa9cf4deabca5043aa973d9a 100644
 --- a/Source/WebCore/css/CSSFontSelector.cpp
 +++ b/Source/WebCore/css/CSSFontSelector.cpp
-@@ -60,6 +60,104 @@ namespace WebCore {
+@@ -55,11 +55,184 @@
+ #include <wtf/Ref.h>
+ #include <wtf/SetForScope.h>
+ #include <wtf/text/AtomString.h>
++#if PLATFORM(HAIKU)
++#include "CSSSerializationContext.h"
++#include <wtf/WeakHashMap.h>
++#endif
+ 
+ namespace WebCore {
  
  using namespace WebKitFontFamilyNames;
  
@@ -13017,6 +13026,76 @@ index c0e79d205b34ca017d69dd11e47fc353b313e940..2c8ddc85b4d07ee841d7723169f8244d
 +    return false;
 +}
 +
++// A style sheet change rebuilds the style resolver, and with it every
++// @font-face: buildStarted() dropped the faces no script holds, and each rule
++// then made a new CSSFontFace, which "loaded" again from the memory cache and
++// bumped the version once more; the build itself bumped it too. So every
++// rebuild renewed the fonts of every element, and all text was laid out and
++// painted again (The Guardian rebuilds its style sheets several times while
++// its islands hydrate, each time with the same @font-face rules). Here the
++// faces are kept through the build, a rule whose properties are what they were
++// keeps its face and its loaded state, and a build that changed no face (none
++// added, replaced or removed) makes a version that renews no fonts.
++// SUMMIT_FONT_FACE_REUSE=0 rebuilds every face as before.
++static bool fontFaceReuseEnabledHaiku()
++{
++    static const bool enabled = [] {
++        const char* value = getenv("SUMMIT_FONT_FACE_REUSE");
++        return !value || strcmp(value, "0");
++    }();
++    return enabled && fontLoadFamilyVersionsEnabledHaiku();
++}
++
++static bool fontLoadTraceHaiku()
++{
++    static const bool trace = [] {
++        const char* value = getenv("SUMMIT_FONT_LOAD_TRACE");
++        return value && value[0] == '1' && !value[1];
++    }();
++    return trace;
++}
++
++// The properties each rule's face was made from, on the main thread.
++static WeakHashMap<CSSFontFace, String>& fontFaceRulePropertiesHaiku()
++{
++    static NeverDestroyed<WeakHashMap<CSSFontFace, String>> properties;
++    return properties;
++}
++
++struct FontFaceBuildHaiku {
++    unsigned startVersion { 0 };
++    bool changedFaces { false };
++    unsigned kept { 0 };
++    unsigned made { 0 };
++    unsigned removed { 0 };
++    // Faces made for a rule whose text a removed face had (a new rule object
++    // for the same @font-face): those still load and renew all fonts.
++    HashSet<String> removedTexts;
++    unsigned sameTextAsRemoved { 0 };
++};
++
++// By font selector, on the main thread, while a build of a document's selector runs.
++static HashMap<unsigned, FontFaceBuildHaiku>& fontFaceBuildsHaiku()
++{
++    static NeverDestroyed<HashMap<unsigned, FontFaceBuildHaiku>> builds;
++    return builds;
++}
++
++// A version that changed no face at all: no description's fonts depend on it.
++static void recordVersionWithoutFaceChangesHaiku(unsigned selectorID, unsigned version)
++{
++    auto& records = fontLoadRecordsHaiku().add(selectorID, Vector<FontLoadRecordHaiku> { }).iterator->value;
++    size_t index = records.size();
++    while (index && records[index - 1].version > version)
++        --index;
++    if (index && records[index - 1].version == version)
++        return;
++    records.insert(index, { version, nullAtom() });
++    constexpr size_t maximumRecords = 256;
++    if (records.size() > maximumRecords)
++        records.removeAt(0);
++}
++
 +// The version under which the fonts for this description are cached: the
 +// newest version made by anything but a load of a family it cannot use.
 +unsigned summitFontSelectorVersionForDescriptionHaiku(FontSelector& selector, const FontCascadeDescription& description)
@@ -13037,7 +13116,8 @@ index c0e79d205b34ca017d69dd11e47fc353b313e940..2c8ddc85b4d07ee841d7723169f8244d
 +            --index;
 +        if (!index || records[index - 1].version != version)
 +            return version;
-+        if (descriptionMayUseFamilyHaiku(*cssSelector, description, records[index - 1].family))
++        // A null family: a version that changed no face.
++        if (!records[index - 1].family.isNull() && descriptionMayUseFamilyHaiku(*cssSelector, description, records[index - 1].family))
 +            return version;
 +    }
 +    return version;
@@ -13047,19 +13127,129 @@ index c0e79d205b34ca017d69dd11e47fc353b313e940..2c8ddc85b4d07ee841d7723169f8244d
  static unsigned fontSelectorId;
  
  Ref<CSSFontSelector> CSSFontSelector::create(ScriptExecutionContext& context)
-@@ -101,6 +199,11 @@ CSSFontSelector::~CSSFontSelector()
+@@ -101,6 +274,13 @@ CSSFontSelector::~CSSFontSelector()
  
      clearFonts();
  
 +#if PLATFORM(HAIKU)
-+    if (isMainThread())
++    if (isMainThread()) {
 +        fontLoadRecordsHaiku().remove(m_uniqueId);
++        fontFaceBuildsHaiku().remove(m_uniqueId);
++    }
 +#endif
 +
      if (CheckedPtr fontCache = FontCache::forCurrentThreadIfNotDestroyed())
          fontCache->removeClient(*this);
  }
-@@ -313,15 +416,48 @@ void CSSFontSelector::opportunisticallyStartFontDataURLLoading(const FontCascade
+@@ -133,8 +313,17 @@ void CSSFontSelector::emptyCaches()
+ void CSSFontSelector::buildStarted()
+ {
+     m_buildIsUnderway = true;
++#if PLATFORM(HAIKU)
++    bool reusesFaces = fontFaceReuseEnabledHaiku() && isMainThread() && is<Document>(m_context.get());
++    if (!reusesFaces)
++        m_cssFontFaceSet->purge();
++    ++m_version;
++    if (reusesFaces)
++        fontFaceBuildsHaiku().set(m_uniqueId, FontFaceBuildHaiku { m_version });
++#else
+     m_cssFontFaceSet->purge();
+     ++m_version;
++#endif
+ 
+     ASSERT(m_cssConnectionsPossiblyToRemove.isEmpty());
+     ASSERT(m_cssConnectionsEncounteredDuringBuild.isEmpty());
+@@ -155,12 +344,32 @@ void CSSFontSelector::buildCompleted()
+ 
+     m_buildIsUnderway = false;
+ 
++#if PLATFORM(HAIKU)
++    FontFaceBuildHaiku* build = nullptr;
++    if (isMainThread()) {
++        auto iterator = fontFaceBuildsHaiku().find(m_uniqueId);
++        if (iterator != fontFaceBuildsHaiku().end())
++            build = &iterator->value;
++    }
++#endif
+     // Some font faces weren't re-added during the build process.
+     for (auto& face : m_cssConnectionsPossiblyToRemove) {
+         RefPtr connection = face->cssConnection();
+         ASSERT(connection);
+-        if (!m_cssConnectionsEncounteredDuringBuild.contains(*connection))
++        if (!m_cssConnectionsEncounteredDuringBuild.contains(*connection)) {
++#if PLATFORM(HAIKU)
++            if (build) {
++                build->changedFaces = true;
++                build->removed++;
++                if (fontLoadTraceHaiku()) {
++                    auto iterator = fontFaceRulePropertiesHaiku().find(face.get());
++                    if (iterator != fontFaceRulePropertiesHaiku().end())
++                        build->removedTexts.add(iterator->value);
++                }
++            }
++#endif
+             m_cssFontFaceSet->remove(face);
++        }
+     }
+ 
+     for (auto& item : m_stagingArea)
+@@ -168,6 +377,18 @@ void CSSFontSelector::buildCompleted()
+     m_cssConnectionsEncounteredDuringBuild.clear();
+     m_stagingArea.clear();
+     m_cssConnectionsPossiblyToRemove.clear();
++#if PLATFORM(HAIKU)
++    if (isMainThread()) {
++        auto finished = fontFaceBuildsHaiku().take(m_uniqueId);
++        if (finished.startVersion) {
++            if (!finished.changedFaces)
++                recordVersionWithoutFaceChangesHaiku(m_uniqueId, finished.startVersion);
++            if (fontLoadTraceHaiku())
++                fprintf(stderr, "Summit font faces rebuilt: %u kept, %u made (%u as a removed one), %u removed (version %u %s)\n", finished.kept, finished.made,
++                    finished.sameTextAsRemoved, finished.removed, finished.startVersion, finished.changedFaces ? "renews fonts" : "renews none");
++        }
++    }
++#endif
+ }
+ 
+ void CSSFontSelector::addFontFaceRule(StyleRuleFontFace& fontFaceRule, bool isInitiatingElementInUserAgentShadowTree)
+@@ -198,8 +419,36 @@ void CSSFontSelector::addFontFaceRule(StyleRuleFontFace& fontFaceRule, bool isIn
+     if (!srcList->length())
+         return;
+ 
++#if PLATFORM(HAIKU)
++    bool tracksFaces = fontFaceReuseEnabledHaiku() && isMainThread() && is<Document>(m_context.get());
++    String propertiesText = tracksFaces ? style->asText(CSS::defaultSerializationContext()) : String();
++    auto buildIterator = tracksFaces ? fontFaceBuildsHaiku().find(m_uniqueId) : fontFaceBuildsHaiku().end();
++    auto* build = tracksFaces && buildIterator != fontFaceBuildsHaiku().end() ? &buildIterator->value : nullptr;
++    if (tracksFaces) {
++        // The same rule, unchanged: its face (and what it loaded) stays.
++        if (RefPtr existingFace = m_cssFontFaceSet->lookUpByCSSConnection(fontFaceRule)) {
++            auto iterator = fontFaceRulePropertiesHaiku().find(*existingFace);
++            if (iterator != fontFaceRulePropertiesHaiku().end() && iterator->value == propertiesText) {
++                if (build)
++                    build->kept++;
++                return;
++            }
++        }
++        if (build) {
++            build->changedFaces = true;
++            build->made++;
++            if (build->removedTexts.contains(propertiesText))
++                build->sameTextAsRemoved++;
++        }
++    }
++#endif
++
+     SetForScope creatingFont(m_creatingFont, true);
+     auto fontFace = CSSFontFace::create(*this, &fontFaceRule);
++#if PLATFORM(HAIKU)
++    if (tracksFaces)
++        fontFaceRulePropertiesHaiku().set(fontFace.get(), WTF::move(propertiesText));
++#endif
+ 
+     fontFace->setFamily(*fontFamily);
+     if (fontStyle)
+@@ -313,15 +562,48 @@ void CSSFontSelector::opportunisticallyStartFontDataURLLoading(const FontCascade
          face->opportunisticallyStartFontDataURLLoading(trustedType);
  }
  
@@ -78572,7 +78762,7 @@ index 71b979677ed9ea5b375f374fdb66f824f3074ba6..6e12a53e3b504aac91236cc6cf058ae0
  
      // Choose a decodingMode such that the image does not flicker.
 diff --git a/Source/WebCore/rendering/RenderElement.cpp b/Source/WebCore/rendering/RenderElement.cpp
-index c30408dbc98900cac30cc19b6a52ac5e1b698120..34b05150e7b8a6ec0c59f1d70a523b5906983a88 100644
+index c30408dbc98900cac30cc19b6a52ac5e1b698120..607ec6ccfe6b9cd342fe437f95e25ebc90b22217 100644
 --- a/Source/WebCore/rendering/RenderElement.cpp
 +++ b/Source/WebCore/rendering/RenderElement.cpp
 @@ -43,6 +43,9 @@
@@ -78601,10 +78791,45 @@ index c30408dbc98900cac30cc19b6a52ac5e1b698120..34b05150e7b8a6ec0c59f1d70a523b59
  
  #if ENABLE(CONTENT_CHANGE_OBSERVER)
  #include "ContentChangeObserver.h"
-@@ -612,6 +620,145 @@ static void logStyleDifference(const RenderElement& renderer, const Style::Compu
+@@ -612,6 +620,180 @@ static void logStyleDifference(const RenderElement& renderer, const Style::Compu
  }
  #endif
  
++#if PLATFORM(HAIKU) && ENABLE(DARK_MODE_CSS)
++// color-scheme is inherited and any change of it is a repaint, so setting it
++// on <html> (sites set `light`, or swap `light dark` for `light`, while their
++// theme script runs) repainted every renderer: the whole page. What it paints
++// depends only on whether the appearance used is dark (form controls,
++// scroll bars, the canvas; light-dark() and system colours are resolved into
++// the colours themselves and differ on their own), so when that is the same
++// for both styles the difference is taken as if color-scheme had not
++// changed. SUMMIT_COLOR_SCHEME_REPAINT=1 repaints for any change as before.
++static bool colorSchemeChangeRepaintsHaiku()
++{
++    static const bool repaints = [] {
++        const char* value = getenv("SUMMIT_COLOR_SCHEME_REPAINT");
++        return value && value[0] == '1' && !value[1];
++    }();
++    return repaints;
++}
++
++static Style::Difference differenceIgnoringUnusedColorSchemeHaiku(const RenderElement& renderer, const Style::ComputedStyle& oldStyle, const Style::ComputedStyle& newStyle, Style::Difference diff)
++{
++    if (diff.result == Style::DifferenceResult::Equal || oldStyle.colorScheme() == newStyle.colorScheme() || colorSchemeChangeRepaintsHaiku())
++        return diff;
++    Ref document = renderer.document();
++    if (document->useDarkAppearance(&oldStyle) != document->useDarkAppearance(&newStyle))
++        return diff;
++    auto styleWithOldColorScheme = Style::ComputedStyle::clone(newStyle);
++    styleWithOldColorScheme.setColorScheme(Style::ColorScheme { oldStyle.colorScheme() });
++    auto adjusted = Style::difference(oldStyle, styleWithOldColorScheme);
++    if ((renderer.isDocumentElementRenderer() || renderer.isBody()) && getenv("SUMMIT_FULL_REPAINT_TRACE"))
++        fprintf(stderr, "Summit root style: %s color-scheme change, same appearance: difference %u -> %u\n", renderer.isBody() ? "body" : "html",
++            static_cast<unsigned>(diff.result), static_cast<unsigned>(adjusted.result));
++    return adjusted;
++}
++#endif
++
 +#if PLATFORM(HAIKU)
 +// In RenderBox.cpp.
 +bool summitRootStyleRepaintsAllHaiku();
@@ -78747,7 +78972,17 @@ index c30408dbc98900cac30cc19b6a52ac5e1b698120..34b05150e7b8a6ec0c59f1d70a523b59
  void RenderElement::setStyle(Style::ComputedStyle&& style, Style::DifferenceResult minimalStyleDifference)
  {
      // FIXME: Should change RenderView so it can use initializeStyle too.
-@@ -632,7 +779,20 @@ void RenderElement::setStyle(Style::ComputedStyle&& style, Style::DifferenceResu
+@@ -622,6 +804,9 @@ void RenderElement::setStyle(Style::ComputedStyle&& style, Style::DifferenceResu
+     auto diff = Style::Difference { };
+     if (m_hasInitializedStyle) {
+         diff = Style::difference(m_style, style);
++#if PLATFORM(HAIKU) && ENABLE(DARK_MODE_CSS)
++        diff = differenceIgnoringUnusedColorSchemeHaiku(*this, m_style, style, diff);
++#endif
+ #if !LOG_DISABLED
+         logStyleDifference(*this, m_style, style, diff);
+ #endif
+@@ -632,7 +817,20 @@ void RenderElement::setStyle(Style::ComputedStyle&& style, Style::DifferenceResu
  
      Style::loadPendingResources(style, protect(document()), protect(element()).get());
  
@@ -78768,7 +79003,7 @@ index c30408dbc98900cac30cc19b6a52ac5e1b698120..34b05150e7b8a6ec0c59f1d70a523b59
      styleWillChange(diff, style);
      auto oldStyle = m_style.replace(WTF::move(style));
      bool detachedFromParent = !parent();
-@@ -659,7 +819,20 @@ void RenderElement::setStyle(Style::ComputedStyle&& style, Style::DifferenceResu
+@@ -659,7 +857,20 @@ void RenderElement::setStyle(Style::ComputedStyle&& style, Style::DifferenceResu
      if (diff <= Style::DifferenceResult::LayoutOutOfFlowMovementOnly)
          setNeedsLayoutForStyleDifference(updatedDiff, &oldStyle);
  
@@ -78790,7 +79025,7 @@ index c30408dbc98900cac30cc19b6a52ac5e1b698120..34b05150e7b8a6ec0c59f1d70a523b59
          // Do a repaint with the new style now, e.g., for example if we go from
          // not having an outline to having an outline.
          repaint();
-@@ -1547,6 +1720,13 @@ bool RenderElement::repaintAfterLayoutIfNeeded(SingleThreadWeakPtr<const RenderL
+@@ -1547,6 +1758,13 @@ bool RenderElement::repaintAfterLayoutIfNeeded(SingleThreadWeakPtr<const RenderL
      if (view().printing())
          return false; // Don't repaint if we're printing.
  
@@ -78804,7 +79039,7 @@ index c30408dbc98900cac30cc19b6a52ac5e1b698120..34b05150e7b8a6ec0c59f1d70a523b59
      auto oldClippedOverflowRect = oldRects.clippedOverflowRect;
      auto newClippedOverflowRect = newRects.clippedOverflowRect;
      bool haveOutlinesBoundsRects = oldRects.outlineBoundsRect && newRects.outlineBoundsRect;
-@@ -1585,30 +1765,60 @@ bool RenderElement::repaintAfterLayoutIfNeeded(SingleThreadWeakPtr<const RenderL
+@@ -1585,30 +1803,60 @@ bool RenderElement::repaintAfterLayoutIfNeeded(SingleThreadWeakPtr<const RenderL
          return false;
      };
  
@@ -78870,7 +79105,7 @@ index c30408dbc98900cac30cc19b6a52ac5e1b698120..34b05150e7b8a6ec0c59f1d70a523b59
  
      if (!repaintContainer)
          repaintContainer = &view();
-@@ -2917,7 +3127,21 @@ void RenderElement::layoutIfNeeded()
+@@ -2917,7 +3165,21 @@ void RenderElement::layoutIfNeeded()
          clearNeedsLayoutForSkippedContent();
          return;
      }

@@ -145,6 +145,14 @@ it" cost a full raster of every tile kept. On Haiku:
 - A web font load renews only the fonts of descriptions whose families can
   reach the loaded family (`CSSFontSelector`, `FontCascadeCache`);
   `SUMMIT_FONT_LOAD_FAMILY_VERSIONS=0` renews all.
+- A style sheet rebuild keeps the `CSSFontFace` of each `@font-face` rule
+  that is still there with the same properties, loaded state and all, and a
+  rebuild that adds, replaces or removes no face renews no fonts
+  (`CSSFontSelector::buildStarted`, `addFontFaceRule`);
+  `SUMMIT_FONT_FACE_REUSE=0` re-creates every face.
+- A `color-scheme` change repaints only where the used appearance (dark or
+  light) changes (`RenderElement::setStyle`);
+  `SUMMIT_COLOR_SCHEME_REPAINT=1` repaints for any change.
 - Repeating-pattern tile pictures are shared across recordings so the
   picture shader's raster is reused (`GraphicsContextSkia::drawPattern`);
   `SUMMIT_PATTERN_PICTURE_CACHE=0` makes one per drawing.
