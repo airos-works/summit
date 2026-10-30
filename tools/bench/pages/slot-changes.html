@@ -1,0 +1,140 @@
+<!doctype html>
+<!-- Children added to and removed from shadow hosts, with a geometry read
+     after every change: the pattern of Reddit's feed (shreddit-feed is a
+     shadow host with a default slot). Compare the checksum in the title with
+     SUMMIT_SLOT_REBUILD=1 (every change rebuilds the host's renderers, as
+     upstream does) and without: the same seed makes the same changes, so the
+     checksums must be equal. Covers default and named slots, a slot with
+     fallback content, a slot that is itself slotted, flex, grid, block and
+     inline hosts, text children, fragments, moves and ::slotted() rules with
+     structural pseudo-classes. -->
+<meta charset="utf-8">
+<title>slot changes</title>
+<style>
+body { margin: 0; font: 14px/1.4 sans-serif; }
+#out { position: fixed; right: 4px; bottom: 4px; background: #fff; border: 1px solid #000; padding: 4px; z-index: 5; }
+.item { border: 1px solid #888; padding: 3px; margin: 2px; background: #eef; }
+.item.big { padding: 12px; }
+.item.hidden { display: none; }
+.item.contents { display: contents; }
+span.item { display: inline; }
+</style>
+<div id="out">running</div>
+<div id="hosts"></div>
+<script>
+const hashParts = location.hash.slice(1).split(',');
+let seed = Number(hashParts[1]) || 4242;
+function random(n) { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed % n; }
+const words = 'slot shadow host child feed post render tree assign light composed flex grid'.split(' ');
+function text(n) { let s = ''; for (let i = 0; i < n; ++i) s += words[random(words.length)] + ' '; return s; }
+
+const shadowStyles = `
+:host { display: block; border: 2px solid #c88; margin: 4px; }
+:host(.flex) { display: flex; flex-direction: column; gap: 3px; }
+:host(.row) { display: flex; flex-wrap: wrap; align-items: stretch; }
+:host(.grid) { display: grid; grid-template-columns: repeat(3, 1fr); gap: 2px; }
+:host(.inline) { display: inline; }
+::slotted(:nth-child(odd)) { background: #fec; }
+::slotted(.item:first-child) { font-weight: bold; }
+::slotted(*:last-child) { border-color: red; }
+.head { background: #ddd; }
+slot[name=side] { display: block; float: right; width: 30%; background: #efe; }
+slot.box { display: block; border: 1px dashed #66c; padding: 2px; }
+`;
+function makeHost(kind, template) {
+    const host = document.createElement('div');
+    host.className = 'host ' + kind;
+    const root = host.attachShadow({ mode: 'open' });
+    root.innerHTML = '<style>' + shadowStyles + '</style>' + template;
+    document.getElementById('hosts').appendChild(host);
+    return host;
+}
+const hosts = [
+    makeHost('flex', '<div class="head">feed</div><slot name="before"></slot><slot></slot><slot name="after"></slot>'),
+    makeHost('row', '<slot></slot><slot name="side"></slot>'),
+    makeHost('grid', '<slot></slot>'),
+    makeHost('', '<div class="head">fallback</div><slot>fallback content <b>here</b></slot>'),
+    makeHost('', '<slot class="box"></slot><slot name="side"></slot>'),
+    makeHost('inline', '<slot></slot>'),
+];
+// A host whose slotted child is another host's slot (nested slots).
+const outer = makeHost('flex', '<inner-wrap></inner-wrap>');
+const innerHost = document.createElement('div');
+innerHost.attachShadow({ mode: 'open' }).innerHTML = '<style>' + shadowStyles + '</style><slot></slot>';
+outer.shadowRoot.querySelector('inner-wrap').replaceWith(innerHost);
+const passSlot = document.createElement('slot');
+innerHost.appendChild(passSlot);
+hosts.push(outer);
+
+let made = 0;
+function makeChild() {
+    const k = random(10);
+    const e = document.createElement(k == 9 ? 'span' : 'div');
+    e.className = 'item' + (k == 1 ? ' big' : '') + (k == 2 ? ' hidden' : '') + (k == 3 ? ' contents' : '');
+    e.textContent = 'c' + (made++) + ' ' + text(1 + random(8));
+    if (k == 3) e.innerHTML = '<div class="item">' + e.textContent + '</div>';
+    const s = random(8);
+    if (s == 0) e.slot = 'before';
+    else if (s == 1) e.slot = 'after';
+    else if (s == 2) e.slot = 'side';
+    else if (s == 3) e.slot = 'missing';
+    return e;
+}
+function pick() { return hosts[random(hosts.length)]; }
+function child(host) { const c = host.children; return c.length ? c[random(c.length)] : null; }
+for (const h of hosts) for (let i = 0; i < 6; ++i) h.appendChild(makeChild());
+
+const changes = [
+    () => { const h = pick(); h.appendChild(makeChild()); },
+    () => { const h = pick(); const c = child(h); h.insertBefore(makeChild(), c); },
+    () => { const h = pick(); const c = child(h); if (c && h.children.length > 2) c.remove(); },
+    () => { const h = pick(); h.insertAdjacentHTML(random(2) ? 'beforeend' : 'afterbegin', '<div class="item">frag ' + text(3) + '</div>\n<div class="item" slot="after">frag2</div> text ' + text(1)); },
+    () => { const h = pick(); h.appendChild(document.createTextNode(random(2) ? ' ' : text(2))); },
+    () => { const h = pick(); for (const n of [...h.childNodes]) if (n.nodeType == 3) { n.remove(); break; } },
+    () => { const h = pick(); for (const n of [...h.childNodes]) if (n.nodeType == 3) { n.data = text(1 + random(4)); break; } },
+    () => { const a = pick(), b = pick(); const c = child(a); if (c && a.children.length > 2) b.insertBefore(c, child(b)); },
+    () => { const c = child(pick()); if (c) c.slot = ['', 'before', 'after', 'side'][random(4)]; },
+    () => { const c = child(pick()); if (c) c.classList.toggle('hidden'); },
+    () => { const c = child(pick()); if (c) c.textContent = 'x ' + text(1 + random(12)); },
+    () => { const h = pick(); const c = child(h); if (c) c.classList.toggle('big'); },
+    () => { const p = innerHost.firstElementChild ? null : null; outer.appendChild(makeChild()); },
+    () => { const h = hosts[3]; if (h.children.length > 1) [...h.children].forEach((c, i) => i && c.remove()); else h.appendChild(makeChild()); },
+];
+
+function checksum() {
+    let sum = 0, index = 1;
+    const visit = (root) => {
+        for (const e of root.querySelectorAll('*')) {
+            const r = e.getBoundingClientRect();
+            sum = (sum + index * Math.round(r.x * 4 + r.y * 7 + r.width * 11 + r.height * 13)) % 1000000007;
+            ++index;
+            if (e.shadowRoot) visit(e.shadowRoot);
+        }
+    };
+    visit(document);
+    return sum;
+}
+
+const total = Number(hashParts[0]) || 600;
+const sums = [];
+let steps = 0;
+const started = performance.now();
+function run() {
+    const until = performance.now() + 30;
+    while (performance.now() < until && steps < total) {
+        changes[random(changes.length)]();
+        document.body.offsetHeight;
+        if (!(steps % 25)) sums.push(checksum());
+        ++steps;
+    }
+    if (steps < total) { setTimeout(run, 0); return; }
+    const elapsed = performance.now() - started;
+    let all = 0;
+    for (const s of sums) all = (all * 31 + s) % 1000000007;
+    all = (all * 31 + checksum()) % 1000000007;
+    window.slotSums = sums;
+    document.getElementById('out').textContent = 'done: ' + steps + ' changes, ' + (elapsed / steps).toFixed(2) + ' ms each, checksum ' + all;
+    document.title = 'slot changes: checksum ' + all + ', ' + (elapsed / steps).toFixed(2) + ' ms each';
+}
+setTimeout(run, 300);
+</script>

@@ -1,0 +1,118 @@
+<!doctype html>
+<!-- Reddit's gallery carousel, changed a little at a time with a geometry read
+     after each change: a flex box with a maximum height holding a stretched
+     flex item (measured without a height, then stretched) with percentage
+     heights inside, a grid of gallery items whose own heights are percentages,
+     a column flex box with a percentage-height child. Compare the checksum in
+     the title with SUMMIT_LAYOUT_REUSE=0 and with the default; run with
+     SUMMIT_LAYOUT_REUSE=verify to have kept layouts checked. -->
+<meta charset="utf-8">
+<title>carousel reuse</title>
+<style>
+body { margin: 0; font: 14px/1.4 sans-serif; }
+#out { position: fixed; right: 4px; bottom: 4px; background: #fff; border: 1px solid #000; padding: 4px; z-index: 5; }
+.page { display: grid; grid-template-columns: 200px minmax(0, 1fr); gap: 10px; }
+.feed { display: flex; flex-direction: column; gap: 6px; }
+.post { border: 1px solid #ccc; padding: 6px; }
+.fc { display: flex; position: relative; width: 100%; }
+.cc { display: flex; height: auto; align-items: center; position: relative; width: 100%; }
+.col { display: flex; flex-direction: column; flex: 1 1 0%; position: relative; }
+.win { position: relative; }
+.win.pct { height: 100%; }
+ul.g { display: grid; grid-auto-flow: column; grid-auto-columns: 100%; list-style: none; margin: 0; padding: 0; position: relative; overflow: hidden; }
+ul.g.pct { height: 100%; }
+li.i { display: flex; justify-content: center; position: relative; height: 100%; }
+li.i.minpct { min-height: 50%; }
+figure { height: 100%; width: 100%; margin: 0; display: flex; align-items: center; }
+figure .pic { height: 100%; width: 100%; max-height: 900px; background: linear-gradient(#9c9, #696); object-fit: contain; }
+figure .cap { position: absolute; bottom: 4px; left: 4px; background: #fff8; }
+.dots { position: absolute; bottom: 2px; inset-inline: 0; margin: auto; width: fit-content; display: flex; gap: 2px; }
+.dots i { width: 6px; height: 6px; background: #333; border-radius: 3px; }
+.cols { display: flex; flex-direction: column; height: 150px; }
+.cols > div { flex: 1 1 0; min-height: 0; background: #fd9; margin: 2px; }
+.cols > div > div { height: 50%; background: #f96; }
+.side { background: #eef; }
+.narrow .page { grid-template-columns: 280px minmax(0, 1fr); }
+</style>
+<div id="out">running</div>
+<div class="page" id="page"><div class="side" id="side">side</div><main><div class="feed" id="feed"></div></main></div>
+<script>
+const hashParts = location.hash.slice(1).split(',');
+let seed = Number(hashParts[1]) || 777;
+function random(n) { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed % n; }
+const words = 'gallery carousel stretch measure percent height item flex grid picture figure'.split(' ');
+function text(n) { let s = ''; for (let i = 0; i < n; ++i) s += words[random(words.length)] + ' '; return s; }
+const imageSizes = { '3 / 4': [300, 400], '4 / 3': [400, 300], '1 / 1': [300, 300], '16 / 9': [480, 270], '9 / 16': [270, 480], '2 / 1': [400, 200] };
+function svg(ratio) { const [w, h] = imageSizes[ratio]; return 'data:image/svg+xml,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="' + w + '" height="' + h + '"><rect width="100%" height="100%" fill="#7a7"/></svg>'); }
+// Every third picture is an image (a replaced box, as on Reddit), the others boxes with an aspect ratio.
+let pics = 0;
+function pic(ratio) {
+    const inner = (pics++ % 3) ? '<img class="pic" src="' + svg(ratio) + '">' : '<div class="pic" style="aspect-ratio: ' + ratio + '"></div>';
+    return '<figure>' + inner + '<span class="cap">' + text(2) + '</span></figure>';
+}
+function gallery(i) {
+    const n = 2 + random(4);
+    const ratios = ['3 / 4', '4 / 3', '1 / 1', '16 / 9', '9 / 16'];
+    let lis = '';
+    for (let k = 0; k < n; ++k) lis += '<li class="i' + (random(4) ? '' : ' minpct') + '">' + pic(ratios[random(ratios.length)]) + '</li>';
+    const winPct = random(3) ? ' pct' : '';
+    const ulPct = random(3) ? ' pct' : '';
+    return '<div class="fc" style="max-height: ' + (300 + random(300)) + 'px"><div class="cc"><div class="col"><div class="win' + winPct + '"><ul class="g' + ulPct + '">' + lis + '</ul></div>'
+        + '<div class="dots">' + '<i></i>'.repeat(n) + '</div></div></div></div>';
+}
+let count = 0;
+function post() {
+    const i = count++;
+    const kind = i % 3;
+    let body = '<p>' + text(5 + random(20)) + '</p>';
+    if (kind == 0 || kind == 1) body += gallery(i);
+    else body += '<div class="cols"><div><div></div>' + text(3) + '</div><div>' + text(9) + '</div></div>';
+    return '<article class="post" id="p' + i + '">' + body + '</article>';
+}
+const feed = document.getElementById('feed');
+function add(n) { let html = ''; for (let i = 0; i < n; ++i) html += post(); feed.insertAdjacentHTML('beforeend', html); }
+add(24);
+function any(selector) { const all = document.querySelectorAll(selector); return all.length ? all[random(all.length)] : null; }
+const changes = [
+    () => { const p = any('.post p'); if (p) p.textContent = text(3 + random(30)); },
+    () => { const f = any('.fc'); if (f) f.style.maxHeight = (200 + random(500)) + 'px'; },
+    () => { const c = any('.cap'); if (c) c.textContent = text(1 + random(6)); },
+    () => { const p = any('.pic'); const r = ['3 / 4', '4 / 3', '1 / 1', '2 / 1'][random(4)]; if (p && p.tagName == 'IMG') p.src = svg(r); else if (p) p.style.aspectRatio = r; },
+    () => { const u = any('ul.g'); if (u && u.children.length > 1 && random(2)) u.lastElementChild.remove(); else if (u) u.insertAdjacentHTML('beforeend', '<li class="i">' + pic('1 / 1') + '</li>'); },
+    () => { const c = any('.cols'); if (c) c.style.height = (80 + random(160)) + 'px'; },
+    () => { document.getElementById('side').textContent = text(1 + random(40)); },
+    () => { document.body.classList.toggle('narrow'); },
+    () => { document.getElementById('page').style.width = random(3) ? '' : (600 + random(600)) + 'px'; },
+    () => { add(1); },
+    () => { const w = any('.win'); if (w) w.classList.toggle('pct'); },
+    () => { const l = any('li.i'); if (l) l.classList.toggle('minpct'); },
+    () => { const c = any('.cc'); if (c) c.style.alignItems = ['center', 'stretch', ''][random(3)]; },
+];
+function checksum() {
+    let sum = 0, index = 1;
+    for (const e of document.querySelectorAll('#page *')) {
+        const r = e.getBoundingClientRect();
+        sum = (sum + index * Math.round(r.x * 4 + r.y * 7 + r.width * 11 + r.height * 13)) % 1000000007;
+        ++index;
+    }
+    return sum;
+}
+const total = Number(hashParts[0]) || 800;
+let steps = 0, all = 0;
+const started = performance.now();
+function run() {
+    const until = performance.now() + 30;
+    while (performance.now() < until && steps < total) {
+        changes[random(10) < 6 ? random(4) : random(changes.length)]();
+        document.getElementById('feed').offsetHeight;
+        if (!(steps % 20)) all = (all * 31 + checksum()) % 1000000007;
+        ++steps;
+    }
+    if (steps < total) { setTimeout(run, 0); return; }
+    const elapsed = performance.now() - started;
+    all = (all * 31 + checksum()) % 1000000007;
+    document.getElementById('out').textContent = 'done: ' + steps + ' changes, ' + (elapsed / steps).toFixed(2) + ' ms each, checksum ' + all;
+    document.title = 'carousel reuse: checksum ' + all + ', ' + (elapsed / steps).toFixed(2) + ' ms each';
+}
+setTimeout(run, 300);
+</script>

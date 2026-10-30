@@ -1,5 +1,147 @@
 # Summit performance: Speedometer 3.1 baseline, where the time goes, stress test
 
+## 30 October 2026: Reddit's feed no longer rebuilt for every post added or dropped (#117, layout)
+
+The two #117 layout items: Reddit's `main` laid out up to three times per
+change (items with percentage heights never kept), with grey placeholders
+and black picture boxes as new posts arrive; and the gallery carousel
+alternating between two heights (933 and 540) in every pass. Measured on
+the X399 (GTX 1070) in test copies, Reddit's front page and r/pics loaded,
+then four wheel bursts six seconds apart to bring new posts, recorded with
+the inspector's timeline (the MCP `timeline` tool).
+
+### What made the layouts big: the whole feed built again
+
+The layout why-trace (`SUMMIT_LAYOUT_WHY_TRACE=<ms>`) now also counts the
+renderers that need layout and have never been laid out (`fresh=`) and
+lists where those new subtrees hang. On the front page each batch of posts
+brought two or more layouts in a row like this one:
+
+```
+Summit layout why: 168.0 ms renderers=7180 dirty=6502 ... fresh=6487
+Summit layout why: 61.7 ms renderers=7179 dirty=6501 ... fresh=6486
+Summit layout why:   new subtree 163 RenderBlock<article.w-full m-0> in RenderFlexibleBox<shreddit-feed> ...
+```
+
+All but the 650 or so renderers of the page around the feed were new, and
+they were new again in the next layout 160 ms later: every post's renderers
+had been destroyed and made again. The posts did not change. Reddit's feed,
+`shreddit-feed`, is a custom element with a shadow root (`<slot
+name="load-before">`, `<slot>`, `<slot name="load-after">`), and while the
+page is scrolled it adds the posts of the next batch to it and drops posts
+far above (192-479 elements removed and a few added in each of its
+mutations). In WebKit any light-DOM child added to or removed from a shadow
+host (`NamedSlotAssignment::hostChildElementDidChange`), and any text child
+changed, tears down the renderers of everything the host holds and restyles
+it all (`RenderTreeUpdater::tearDownRenderersAfterSlotChange`,
+`invalidateStyleForSubtree`). So every mutation of the feed meant a full
+restyle of it (the 200-360 ms style recalculations in the timeline) and a
+layout of a new render tree for all of it: that, not the grid's repeats, is
+why `main` and everything in it was laid out in full several times a batch.
+
+Now (`dom/SlotAssignment.cpp`, Haiku only) the other children keep their
+renderers and styles: the child added is styled and given its renderer
+where it belongs like any inserted node (its composed-tree ancestors are
+found through the slot by name, so it is marked for style when it is
+inserted), and a child removed has its renderers torn down by the removal
+itself. Only when what a slot shows could change otherwise is everything
+rebuilt as before: a slot with fallback content (it shows that while
+nothing is assigned), a slot name used by more than one slot, user-agent
+shadow roots, a slot attribute changed, all children removed at once.
+`SUMMIT_SLOT_REBUILD=1` rebuilds every time, as upstream does.
+`SUMMIT_REBUILD_TRACE=<renderers>` (new) reports renderer subtrees of at
+least that size torn down to be built again and why (slot change, shadow
+root attached, block in an inline box, anonymous flex item, renderer
+change).
+
+`tools/bench/pages/slot-changes.html` (new) makes 600-1,000 random changes
+to seven shadow hosts (default and named slots, a slot with fallback
+content, a slot that is itself slotted, flex, grid, block and inline hosts,
+elements, text, fragments, moves, slot attribute changes, `::slotted()`
+rules with structural pseudo-classes) with a geometry read after each; its
+checksum of every box's position and size is the same with and without
+`SUMMIT_SLOT_REBUILD=1` for three seeds.
+
+### Items with percentage heights of their own are kept
+
+An item of a flex or grid container whose height (or minimum or maximum
+height) is a percentage was never kept, since its size comes from outside
+it. The base the percentage resolves against is now one of the inputs
+compared (`RenderBox::computePercentageLogicalHeight` of 100%, without
+registering anything): for a grid item the grid area, for a flex item its
+container's height when that is definite. Items with `stretch` heights are
+still never kept. `SUMMIT_LAYOUT_REUSE_PERCENT_ITEMS=0` turns this off. On
+Reddit it rarely applies: the gallery's `li` items have percentage heights
+but their grid gives them a different width or area in successive passes.
+
+### The carousel's two heights
+
+`div.carousel-container` is a stretched flex item of `faceplate-carousel`
+(a flex box with `max-height: 540px` and an automatic height), with
+percentage heights inside. In each layout of its container it is laid out
+without a height (the content height its line is sized from: 933) and then
+again stretched to the line (540), where those percentages resolve. When
+its last two layouts were exactly that pair, nothing in it needs layout and
+the container asks for the same measurement again, the container now skips
+the measuring layout, sizes the line from the content height it kept from
+the last one, and lays the item out again only if the stretched height comes
+out different (`FlexIntegrationUtils::layoutFlexItemWithMainSize`,
+`summitFlexItemKeepsStretchedLayout` in `RenderBlock.cpp`).
+`SUMMIT_FLEX_STRETCH_KEEP=0` turns it off; `SUMMIT_FLEX_STRETCH_TRACE=1`
+says why an item was measured again.
+
+On Reddit this applies less than the item suggested: in four bursts on
+r/pics the carousel was kept 4 times and measured again about 50 times, and
+in all of those something inside it needed layout (a picture that had
+loaded, `RenderImage`, or the gallery's grid), so the measurement was
+needed. The alternation is a real measure-then-stretch pair, not a cache
+that misses. Twitch has many such items (400 kept in one load and scroll).
+
+### Result
+
+Four bursts, a 26 s timeline each, the same build with the changes off
+(`SUMMIT_SLOT_REBUILD=1 SUMMIT_FLEX_STRETCH_KEEP=0
+SUMMIT_LAYOUT_REUSE_PERCENT_ITEMS=0`) and on, alternated:
+
+| 26 s with four bursts | front page, off | front page, on | r/pics, off | r/pics, on |
+| --- | --- | --- | --- | --- |
+| style recalculation | 2,399 / 2,692 ms | 1,135 / 1,182 ms | 1,735 / 1,753 ms | 851 / 650 ms |
+| layout | 1,325 / 1,113 ms | 575 / 670 ms | 822 / 988 ms | 543 / 512 ms |
+| longest layout | 165 / 150 ms | 67 / 71 ms | 123 / 198 ms | 80 / 87 ms |
+| script (function calls) | 5,869 / 5,409 ms | 3,467 / 3,379 ms | 3,970 / 2,762 ms | 2,757 / 2,163 ms |
+| main thread busy | 46 / 41 % | 29 / 33 % | 32 / 40 % | 28 / 36 % |
+
+The slot change alone (front page, an earlier build): style 2,496 / 2,535
+-> 1,353 / 1,459 ms, layout 1,354 / 1,171 -> 713 / 836 ms. Script time
+falls too because Reddit's components read geometry after their changes,
+which forced those rebuilds synchronously.
+
+`main` itself: its repeated layouts (measured by its grid, then laid out at
+the height it measured) cost 2.5-5.3 ms in all over a whole r/pics run once
+the feed is no longer rebuilt; the posts inside are kept. Making them cheaper
+still would need measurements kept apart from layouts; not worth it now.
+
+Speedometer 3.1 web component suites (`TodoMVC-WebComponents`,
+`-Complex-DOM`, `TodoMVC-Lit`, `-Complex-DOM`, 10 iterations, local copy):
+16.92, 16.41, 16.05, 16.07 with `SUMMIT_SLOT_REBUILD=1` against 15.94,
+16.26, 16.43, 16.44 without: unchanged (they don't add children to slotted
+hosts).
+
+**Verified.** `SUMMIT_LAYOUT_REUSE=verify` (which now also checks every
+kept carousel-type item against the layout it skipped, at the end of its
+container's layout) and `SUMMIT_PERCENT_HEIGHT_CHAINS=verify` over Reddit
+(front page, r/pics, r/sydney), YouTube, GitHub, The Guardian, BBC News,
+Amazon, eBay, Hacker News, Twitch, Stripe, linear.app, Airbnb and CNN,
+each loaded, scrolled and resized: no box different. A new fixture,
+`tools/bench/pages/carousel-reuse.html` (Reddit's gallery structure, 800
+changes), gives the same checksum with reuse on, off, in verify mode and
+with the two new parts off.
+
+**Left:** the front page still has style recalculations of up to 250-360 ms
+in a burst (the posts Reddit inserts); grey placeholders still show while a
+batch's HTML is fetched (network). The carousel is measured again whenever
+a picture in it loads.
+
 ## 30 October 2026: page loads: text in fallback fonts shows a page, largest paints stamped when painted (#117)
 
 The #117 page-load items: the largest paint behind Firefox on Reddit and a

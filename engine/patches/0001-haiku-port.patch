@@ -14679,6 +14679,106 @@ index fe92fc6370b31f2f826b8762171186c54700be76..4976d5a2754255636b2c71b899d6482d
      return timestamp <= m_lastAnimationFrameTimestamp || (isThrottledRelativeToPage() && (timestamp - m_lastAnimationFrameTimestamp < preferredScriptedAnimationInterval()));
  }
  
+diff --git a/Source/WebCore/dom/SlotAssignment.cpp b/Source/WebCore/dom/SlotAssignment.cpp
+index b7cc6b07caf172c2c167a081bd963c0c0a894842..1303442c7820d596d0253cd46eba6b7086bddb22 100644
+--- a/Source/WebCore/dom/SlotAssignment.cpp
++++ b/Source/WebCore/dom/SlotAssignment.cpp
+@@ -33,7 +33,11 @@
+ #include "ShadowRoot.h"
+ #include "StyleComputedStyle+GettersInlines.h"
+ #include "TypedElementDescendantIteratorInlines.h"
++#include <wtf/SetForScope.h>
+ #include <wtf/TZoneMallocInlines.h>
++#if PLATFORM(HAIKU)
++#include <cstdlib>
++#endif
+ 
+ namespace WebCore {
+ 
+@@ -54,6 +58,36 @@ struct SameSizeAsNamedSlotAssignment {
+ 
+ static_assert(sizeof(NamedSlotAssignment) == sizeof(SameSizeAsNamedSlotAssignment), "NamedSlotAssignment should remain small");
+ 
++#if PLATFORM(HAIKU)
++// A light-DOM child added to or removed from a shadow host (or a text node of
++// the host changed) tears down the renderers of everything the host holds,
++// slotted or not, and restyles it all (didChangeSlot()). Reddit's feed is a
++// shadow host with one default slot: every post the page adds or drops while
++// scrolling rebuilt, restyled and laid out all the posts, 60-170 ms of layout
++// and up to 200 ms of style each time, several times a batch.
++//
++// The renderers of the other assigned nodes do not depend on the change: the
++// node added is styled and given a renderer where it belongs like any inserted
++// node (its composed-tree ancestors are found by slot name, not by the
++// assignment), and a node removed has its renderers torn down by the removal.
++// What changes with the assignment is what the slot shows, which is left as
++// before only when the slot has no fallback content (it shows nothing without
++// assigned nodes) and is the only slot of its name. Author shadow roots only.
++// SUMMIT_SLOT_REBUILD=1 rebuilds everything, as before.
++static bool summitSlotRebuildAlways()
++{
++    static bool always = [] {
++        const char* value = getenv("SUMMIT_SLOT_REBUILD");
++        return value && value[0] == '1' && !value[1];
++    }();
++    return always;
++}
++
++// Set while a child of the host is added or removed (or a text child changed); the element, if one was added.
++static bool summitSlotChangeIsChildMutation;
++static Element* summitSlotChangeInsertedElement;
++#endif
++
+ static const AtomString& NODELETE slotNameFromAttributeValue(const AtomString& value)
+ {
+     return value == nullAtom() ? NamedSlotAssignment::defaultSlotName() : value;
+@@ -312,8 +346,26 @@ void NamedSlotAssignment::didChangeSlot(const AtomString& slotAttrValue, ShadowR
+ 
+     ASSERT(shadowRoot.host());
+     Ref shadowRootHost = *shadowRoot.host();
++#if PLATFORM(HAIKU)
++    bool keepRenderers = [&] {
++        if (!summitSlotChangeIsChildMutation || summitSlotRebuildAlways() || shadowRoot.mode() == ShadowRootMode::UserAgent)
++            return false;
++        if (slot->hasDuplicatedSlotElements())
++            return false;
++        RefPtr slotElement = findFirstSlotElement(*slot);
++        return slotElement && !slotElement->hasChildNodes();
++    }();
++    if (keepRenderers) {
++        if (RefPtr inserted = summitSlotChangeInsertedElement; inserted && inserted->isConnected() && inserted->parentNode() == shadowRootHost.ptr())
++            inserted->invalidateStyleAndRenderersForSubtree();
++    } else {
++        RenderTreeUpdater::tearDownRenderersAfterSlotChange(shadowRootHost);
++        shadowRootHost->invalidateStyleForSubtree();
++    }
++#else
+     RenderTreeUpdater::tearDownRenderersAfterSlotChange(shadowRootHost);
+     shadowRootHost->invalidateStyleForSubtree();
++#endif
+ 
+     auto assignedNodes = std::exchange(slot->assignedNodes, { });
+     m_slotAssignmentsIsValid = false;
+@@ -343,11 +395,19 @@ void NamedSlotAssignment::didRemoveAllChildrenOfShadowHost(ShadowRoot& shadowRoo
+ 
+ void NamedSlotAssignment::didMutateTextNodesOfShadowHost(ShadowRoot& shadowRoot)
+ {
++#if PLATFORM(HAIKU)
++    SetForScope isChildMutation { summitSlotChangeIsChildMutation, true };
++    SetForScope insertedElement { summitSlotChangeInsertedElement, nullptr };
++#endif
+     didChangeSlot(nullAtom(), shadowRoot);
+ }
+ 
+ void NamedSlotAssignment::hostChildElementDidChange(const Element& childElement, ShadowRoot& shadowRoot)
+ {
++#if PLATFORM(HAIKU)
++    SetForScope isChildMutation { summitSlotChangeIsChildMutation, true };
++    SetForScope insertedElement { summitSlotChangeInsertedElement, const_cast<Element*>(&childElement) };
++#endif
+     didChangeSlot(childElement.attributeWithoutSynchronization(slotAttr), shadowRoot);
+ }
+ 
 diff --git a/Source/WebCore/dom/ViewTransition.cpp b/Source/WebCore/dom/ViewTransition.cpp
 index 0d080489846058c7981fd45c760edca8e7fb4880..f435dd1f146550104aa7c9c1c3f5473a3c7c4ebe 100644
 --- a/Source/WebCore/dom/ViewTransition.cpp
@@ -16923,7 +17023,7 @@ index 0767e8c6ac89de2e79bcf9e6279a242d2a44b543..ac14c1c86718156ec1893f25d06bbb31
  }
 -
 diff --git a/Source/WebCore/layout/integration/flex/FlexIntegrationUtils.cpp b/Source/WebCore/layout/integration/flex/FlexIntegrationUtils.cpp
-index c13a0e3bb1faf7b85e398e990867c4407b752256..2f6b1933a76b2f06c9026d98a4bf6ce4c895d6ea 100644
+index c13a0e3bb1faf7b85e398e990867c4407b752256..63c0e97b2dc678507011aec5286f3ec79d024245 100644
 --- a/Source/WebCore/layout/integration/flex/FlexIntegrationUtils.cpp
 +++ b/Source/WebCore/layout/integration/flex/FlexIntegrationUtils.cpp
 @@ -26,6 +26,12 @@
@@ -16939,7 +17039,7 @@ index c13a0e3bb1faf7b85e398e990867c4407b752256..2f6b1933a76b2f06c9026d98a4bf6ce4
  #include "LocalFrameView.h"
  #include "RenderBlockFlow.h"
  #include "RenderBoxInlines.h"
-@@ -41,12 +47,30 @@
+@@ -41,12 +47,31 @@
  #include "StylePrimitiveNumericTypes+Evaluation.h"
  #include <wtf/TZoneMallocInlines.h>
  
@@ -16947,6 +17047,7 @@ index c13a0e3bb1faf7b85e398e990867c4407b752256..2f6b1933a76b2f06c9026d98a4bf6ce4
 +namespace WebCore {
 +// Layout reuse for flex and grid items lives in RenderBlock.cpp.
 +void summitSetChildNeedsLayoutByContainer(RenderBox&);
++bool summitFlexItemKeepsStretchedLayout(RenderBox&);
 +}
 +#endif
 +
@@ -16970,7 +17071,7 @@ index c13a0e3bb1faf7b85e398e990867c4407b752256..2f6b1933a76b2f06c9026d98a4bf6ce4
  FlexIntegrationUtils::FlexIntegrationUtils(RenderFlexibleBox& flexBox, FlexLayoutState& flexLayoutState, FlexItemContentCache& flexItemContentCache)
      : m_flexBox(flexBox)
      , m_flexLayoutState(flexLayoutState)
-@@ -85,7 +109,11 @@ void FlexIntegrationUtils::layoutFlexItemForStretchedCrossSize(const FlexLayoutI
+@@ -85,7 +110,11 @@ void FlexIntegrationUtils::layoutFlexItemForStretchedCrossSize(const FlexLayoutI
          renderer->setOverridingBorderBoxLogicalHeight(crossSize);
      else
          renderer->setOverridingBorderBoxLogicalWidth(crossSize);
@@ -16982,7 +17083,24 @@ index c13a0e3bb1faf7b85e398e990867c4407b752256..2f6b1933a76b2f06c9026d98a4bf6ce4
      renderer->layoutIfNeeded();
  }
  
-@@ -144,7 +172,11 @@ void FlexIntegrationUtils::layoutFlexItemWithMainSize(FlexLayoutItem& flexLayout
+@@ -140,11 +169,28 @@ void FlexIntegrationUtils::layoutFlexItemWithMainSize(FlexLayoutItem& flexLayout
+         // correctly, because its descendants are not sized correctly yet. Our
+         // previous layout of the child was done without an override height set.
+         // So, redo it here.
++#if PLATFORM(HAIKU)
++        // Unless the item is still as it was stretched after the same measurement last time and its
++        // content height from that measurement is at hand (RenderBlock.cpp, summitFlexItemKeepsStretchedLayout()).
++        if (flexItemHasPercentHeightDescendants(flexItem)) {
++            if (FlexFormattingUtils::isHorizontalFlow(flexBox()) && flexItem->isHorizontalWritingMode() && !is<RenderReplaced>(flexItem.get())
++                && FlexFormattingUtils::willStretchFlexItem(flexBox(), flexItem, LogicalBoxAxis::Block, StretchingMode::Normal)
++                && m_flexItemContentCache.contentLogicalHeight(flexItem) && summitFlexItemKeepsStretchedLayout(flexItem.get()))
++                return false;
++            return true;
++        }
++        return false;
++#else
+         return flexItemHasPercentHeightDescendants(flexItem);
++#endif
      };
  
      if (shouldMarkFlexItemForLayout())
@@ -16994,7 +17112,7 @@ index c13a0e3bb1faf7b85e398e990867c4407b752256..2f6b1933a76b2f06c9026d98a4bf6ce4
      else
          flexItem->markForPaginationRelayoutIfNeeded();
  
-@@ -374,7 +406,11 @@ LayoutUnit FlexIntegrationUtils::computeBlockAxisContentSizeForFlexItem(const Fl
+@@ -374,7 +420,11 @@ LayoutUnit FlexIntegrationUtils::computeBlockAxisContentSizeForFlexItem(const Fl
      // where we want percentages to be treated as auto. For flex-basis itself, this is not a problem because
      // by definition we have an indefinite flex basis here and thus percentages should not resolve.
      auto percentResolveDisableScope = FlexPercentResolveDisabler { flexBox().view().frameView().layoutContext(), renderer };
@@ -17006,7 +17124,7 @@ index c13a0e3bb1faf7b85e398e990867c4407b752256..2f6b1933a76b2f06c9026d98a4bf6ce4
      renderer->layoutIfNeeded();
      flexLayoutState().setFlexItemHasCompletedLayout(renderer);
  
-@@ -515,8 +551,24 @@ std::optional<LayoutUnit> FlexIntegrationUtils::computeMainAxisExtentForFlexItem
+@@ -515,8 +565,24 @@ std::optional<LayoutUnit> FlexIntegrationUtils::computeMainAxisExtentForFlexItem
          // (Compare code in RenderBlock::computeIntrinsicLogicalWidthContributions)
          if (flexLayoutItem.style().logicalWidth().isAuto() && !FlexFormattingUtils::flexItemHasAspectRatio(flexItem)) {
              if (size.isMinContent()) {
@@ -78644,21 +78762,22 @@ index 8004ec61378fe96a582562ae1a9a6253f8a9c198..182a2abe76a51ecb34a3afa7eda2c8c1
  }
  
 diff --git a/Source/WebCore/rendering/RenderBlock.cpp b/Source/WebCore/rendering/RenderBlock.cpp
-index 0ff11fddb608c1b65d17189a08c8ffa40c284e90..871069b63cac71759a7f8ca5d7712a0693e8335c 100644
+index 0ff11fddb608c1b65d17189a08c8ffa40c284e90..e6e9da5ea08d84e6f86bf0af301e72fd3dc83bce 100644
 --- a/Source/WebCore/rendering/RenderBlock.cpp
 +++ b/Source/WebCore/rendering/RenderBlock.cpp
-@@ -93,6 +93,10 @@
+@@ -93,6 +93,11 @@
  #include "TransformState.h"
  #include <wtf/HexNumber.h>
  #include <wtf/NeverDestroyed.h>
 +#include <wtf/HashSet.h>
 +#include <wtf/MonotonicTime.h>
++#include <wtf/WallTime.h>
 +#include <wtf/text/MakeString.h>
 +#include <wtf/text/StringBuilder.h>
  #include <wtf/SetForScope.h>
  #include <wtf/StackStats.h>
  #include <wtf/TZoneMallocInlines.h>
-@@ -583,9 +587,507 @@ static bool canContainDescendantScrollbarChanges(const RenderBlock& renderBlock,
+@@ -583,9 +588,753 @@ static bool canContainDescendantScrollbarChanges(const RenderBlock& renderBlock,
      return layoutContext.subtreeScrollbarChangesState().has_value() && renderBlock.style().logicalWidth().isFixed();
  }
  
@@ -78687,7 +78806,14 @@ index 0ff11fddb608c1b65d17189a08c8ffa40c284e90..871069b63cac71759a7f8ca5d7712a06
 +    unsigned reusedItemLayouts { 0 };
 +    unsigned percentChainsDirtiedAtStart { 0 };
 +    unsigned percentChainsLeftAtStart { 0 };
++    unsigned stretchedItemsKeptAtStart { 0 };
++    // Renderers that needed layout at the start and had never been laid out (new ones).
++    unsigned freshAtStart { 0 };
++    Vector<String> freshRoots;
 +};
++
++// Stretched flex items left as they were instead of measured again (summitFlexItemKeepsStretchedLayout()).
++static unsigned summitStretchedItemsKept;
 +
 +static SummitLayoutWhyTrace& summitLayoutWhyTrace()
 +{
@@ -78738,10 +78864,30 @@ index 0ff11fddb608c1b65d17189a08c8ffa40c284e90..871069b63cac71759a7f8ca5d7712a06
 +    trace.active = true;
 +    trace.percentChainsDirtiedAtStart = summitPercentHeightChainsDirtied;
 +    trace.percentChainsLeftAtStart = summitPercentHeightChainsLeft;
++    trace.stretchedItemsKeptAtStart = summitStretchedItemsKept;
++    // Where new renderers hang: the roots of new subtrees under renderers laid out before (a subtree
++    // built again, as when Reddit's feed lost and got back all its renderers, shows up here).
++    HashMap<const RenderObject*, unsigned> freshRoots;
 +    for (const RenderObject* renderer = &root; renderer; renderer = renderer->nextInPreOrder(&root)) {
 +        ++trace.renderers;
-+        if (renderer->needsLayout())
++        if (renderer->needsLayout()) {
 +            trace.dirtyAtStart.add(renderer);
++            if (!renderer->everHadLayout()) {
++                ++trace.freshAtStart;
++                const RenderObject* subtreeRoot = renderer;
++                while (subtreeRoot->parent() && !subtreeRoot->parent()->everHadLayout())
++                    subtreeRoot = subtreeRoot->parent();
++                freshRoots.add(subtreeRoot, 0).iterator->value++;
++            }
++        }
++    }
++    trace.freshRoots = { };
++    for (auto& entry : freshRoots) {
++        if (entry.value < 40)
++            continue;
++        auto* parent = entry.key->parent();
++        trace.freshRoots.append(makeString(entry.value, ' ', summitLayoutWhyDescription(*entry.key), " in "_s, parent ? summitLayoutWhyDescription(*parent) : String("none"_s),
++            parent && parent->parent() ? makeString(" in "_s, summitLayoutWhyDescription(*parent->parent())) : String()));
 +    }
 +    return true;
 +}
@@ -78752,9 +78898,17 @@ index 0ff11fddb608c1b65d17189a08c8ffa40c284e90..871069b63cac71759a7f8ca5d7712a06
 +    trace.active = false;
 +    if (milliseconds < summitLayoutWhyTraceThreshold())
 +        return;
-+    WTFLogAlways("Summit layout why: %.1f ms root=%s renderers=%u dirty=%u blockLayouts=%u forced=%u reused=%u percentChainsMarked=%u percentChainsLeft=%u\n", milliseconds,
-+        summitLayoutWhyDescription(root).utf8().legacyCStringPointer(), trace.renderers, trace.dirtyAtStart.size() + trace.laidOut.size(), trace.blockLayouts, trace.forcedBlockLayouts, trace.reusedItemLayouts,
-+        summitPercentHeightChainsDirtied - trace.percentChainsDirtiedAtStart, summitPercentHeightChainsLeft - trace.percentChainsLeftAtStart);
++    WTFLogAlways("Summit layout why: %.1f ms root=%s renderers=%u dirty=%u blockLayouts=%u forced=%u reused=%u stretchKept=%u percentChainsMarked=%u percentChainsLeft=%u fresh=%u at=%.0f url=%s\n", milliseconds,
++        summitLayoutWhyDescription(root).utf8().legacyCStringPointer(), trace.renderers, trace.dirtyAtStart.size() + trace.laidOut.size(), trace.blockLayouts, trace.forcedBlockLayouts, trace.reusedItemLayouts, summitStretchedItemsKept - trace.stretchedItemsKeptAtStart,
++        summitPercentHeightChainsDirtied - trace.percentChainsDirtiedAtStart, summitPercentHeightChainsLeft - trace.percentChainsLeftAtStart,
++        trace.freshAtStart, WallTime::now().secondsSinceEpoch().milliseconds(),
++        root.document().url().string().left(60).utf8().legacyCStringPointer());
++    unsigned listedRoots = 0;
++    for (auto& freshRoot : trace.freshRoots) {
++        WTFLogAlways("Summit layout why:   new subtree %s\n", freshRoot.utf8().legacyCStringPointer());
++        if (++listedRoots == 8)
++            break;
++    }
 +    Vector<std::pair<String, SummitLayoutWhyTrace::Entry>> entries;
 +    for (auto& entry : trace.forced)
 +        entries.append({ entry.key, entry.value });
@@ -78847,6 +79001,9 @@ index 0ff11fddb608c1b65d17189a08c8ffa40c284e90..871069b63cac71759a7f8ca5d7712a06
 +    bool containerPhaseChangesSizing { false };
 +    // The flex basis stood in for the item's size (while a flex container computes flex base sizes).
 +    bool flexBasisIsImposed { false };
++    // For an item with a percentage height (or minimum or maximum height) of its own: what a
++    // percentage resolves against (RenderBox::computePercentageLogicalHeight()), none when it cannot.
++    std::optional<LayoutUnit> percentageHeightBase;
 +
 +    bool operator==(const SummitItemLayoutInputs&) const = default;
 +};
@@ -78855,6 +79012,13 @@ index 0ff11fddb608c1b65d17189a08c8ffa40c284e90..871069b63cac71759a7f8ca5d7712a06
 +    SummitItemLayoutInputs inputs;
 +    // The size the item took when nothing imposed one, while that is still what it would take.
 +    std::optional<LayoutSize> naturalLogicalSize;
++};
++
++// The inputs of the last two layouts of an item actually run (SummitItemLayout::inputs also follows kept layouts).
++struct SummitItemLayoutRuns {
++    WTF_DEPRECATED_MAKE_STRUCT_FAST_ALLOCATED(SummitItemLayoutRuns);
++    SummitItemLayoutInputs last;
++    std::optional<SummitItemLayoutInputs> before;
 +};
 +
 +// Whether a layout from one set of inputs leaves what a layout from the other
@@ -78876,7 +79040,8 @@ index 0ff11fddb608c1b65d17189a08c8ffa40c284e90..871069b63cac71759a7f8ca5d7712a06
 +        || before.gridAreaContentLogicalWidth != now.gridAreaContentLogicalWidth
 +        || before.gridAreaContentLogicalHeight != now.gridAreaContentLogicalHeight
 +        || before.containerPhaseChangesSizing != now.containerPhaseChangesSizing
-+        || before.flexBasisIsImposed != now.flexBasisIsImposed)
++        || before.flexBasisIsImposed != now.flexBasisIsImposed
++        || before.percentageHeightBase != now.percentageHeightBase)
 +        return false;
 +
 +    if (item.hasPercentHeightDescendants() || item.hasRelativeLogicalHeight())
@@ -78969,6 +79134,12 @@ index 0ff11fddb608c1b65d17189a08c8ffa40c284e90..871069b63cac71759a7f8ca5d7712a06
 +    return layouts;
 +}
 +
++static SingleThreadWeakHashMap<RenderBox, std::unique_ptr<SummitItemLayoutRuns>>& summitItemLayoutRuns()
++{
++    static NeverDestroyed<SingleThreadWeakHashMap<RenderBox, std::unique_ptr<SummitItemLayoutRuns>>> runs;
++    return runs;
++}
++
 +static SingleThreadWeakHashSet<RenderBox>& summitItemsMarkedByContainer()
 +{
 +    static NeverDestroyed<SingleThreadWeakHashSet<RenderBox>> items;
@@ -79003,11 +79174,37 @@ index 0ff11fddb608c1b65d17189a08c8ffa40c284e90..871069b63cac71759a7f8ca5d7712a06
 +// In RenderBlockFlow.cpp.
 +void summitVerifyPercentHeightChains();
 +
++static void summitVerifyStretchedItems(const RenderElement*);
++
 +// Called when a layout of the document is finished.
 +void summitForgetItemsMarkedByContainer()
 +{
 +    summitItemsMarkedByContainer().clear();
 +    summitVerifyPercentHeightChains();
++    summitVerifyStretchedItems(nullptr);
++}
++
++// SUMMIT_LAYOUT_REUSE_PERCENT_ITEMS=0: never keep the layout of an item with a percentage height of its own, as before.
++static bool summitLayoutReuseKeepsPercentItems()
++{
++    static bool keeps = [] {
++        const char* value = std::getenv("SUMMIT_LAYOUT_REUSE_PERCENT_ITEMS");
++        return !value || value[0] != '0' || value[1];
++    }();
++    return keeps;
++}
++
++// An item whose height, minimum or maximum height is a percentage (or a calculation with one) and none of them
++// 'stretch'. Its height then comes from its container's only through the base the percentages resolve against,
++// which the inputs record (an item that fills the available height in other ways is not kept).
++static bool summitItemHeightResolvesPercentage(const RenderBox& item)
++{
++    if (!summitLayoutReuseKeepsPercentItems())
++        return false;
++    auto& style = item.style();
++    if (style.logicalHeight().isStretch() || style.logicalMinHeight().isStretch() || style.logicalMaxHeight().isStretch())
++        return false;
++    return style.logicalHeight().isPercentOrCalculated() || style.logicalMinHeight().isPercentOrCalculated() || style.logicalMaxHeight().isPercentOrCalculated();
 +}
 +
 +static SummitItemLayoutInputs summitCurrentItemLayoutInputs(RenderBlock& item)
@@ -79022,6 +79219,8 @@ index 0ff11fddb608c1b65d17189a08c8ffa40c284e90..871069b63cac71759a7f8ca5d7712a06
 +    inputs.logicalHeight = item.logicalHeight();
 +    inputs.flexBasisIsImposed = item.overridingLogicalWidthForFlexBasisComputation() || item.overridingLogicalHeightForFlexBasisComputation();
 +    auto& style = item.style();
++    if (summitItemHeightResolvesPercentage(item))
++        inputs.percentageHeightBase = item.computePercentageLogicalHeight(Style::Percentage<CSS::NonnegativeLayoutUnitClamped, float> { 100.f }, RenderBox::UpdatePercentageHeightDescendants::No);
 +    if (CheckedPtr flexBox = dynamicDowncast<RenderFlexibleBox>(item.parent())) {
 +        inputs.percentHeightResolveDisabled = item.view().frameView().layoutContext().isPercentHeightResolveDisabledFor(item);
 +        inputs.containerResolvesPercentHeights = flexBox->canUseFlexItemForPercentageResolution(item);
@@ -79065,7 +79264,7 @@ index 0ff11fddb608c1b65d17189a08c8ffa40c284e90..871069b63cac71759a7f8ca5d7712a06
 +    }
 +
 +    // Sizes that are found outside the item in ways the inputs do not record.
-+    if (item.hasRelativeLogicalHeight())
++    if (item.hasRelativeLogicalHeight() && !summitItemHeightResolvesPercentage(item))
 +        return refuse("relative-height"_s);
 +    if (item.overridingLogicalWidthForFlexBasisComputation() || item.overridingLogicalHeightForFlexBasisComputation())
 +        return refuse("flex-basis"_s);
@@ -79143,6 +79342,172 @@ index 0ff11fddb608c1b65d17189a08c8ffa40c284e90..871069b63cac71759a7f8ca5d7712a06
 +}
 +#endif
 +
++#if PLATFORM(HAIKU)
++// A stretched flex item with percentage heights inside is laid out twice in
++// each layout of its row flex container: once without a height, which gives
++// the content height its line is sized from (kept in the container's content
++// height cache), then again at the stretched height, against which those
++// percentages resolve. Reddit's gallery carousel is such an item: 933 then 540
++// pixels high in every layout, each time with the whole gallery inside.
++//
++// When the item's last two layouts were exactly that pair, nothing in it has
++// changed since and the container measures it as before, the measuring layout
++// would give the content height the cache already holds and leave the item to
++// be stretched again: the container skips it (FlexIntegrationUtils::
++// layoutFlexItemWithMainSize()), its line is sized from the cache, and the
++// item is laid out again only if the stretched height comes out different
++// (FlexFormattingContext::applyStretchAlignmentToFlexItem()).
++// SUMMIT_FLEX_STRETCH_KEEP=0 turns this off; SUMMIT_LAYOUT_REUSE=verify lays
++// the item out anyway and reports any box the two layouts left differently.
++static bool summitFlexStretchKeepEnabled()
++{
++    static bool enabled = [] {
++        const char* value = std::getenv("SUMMIT_FLEX_STRETCH_KEEP");
++        return !value || value[0] != '0' || value[1];
++    }();
++    return enabled && summitLayoutReuseEnabled();
++}
++
++struct SummitStretchedItemToVerify {
++    SingleThreadWeakPtr<RenderBlock> item;
++    SingleThreadWeakPtr<RenderElement> container;
++    Vector<LayoutRect> rects;
++};
++
++// The boxes in the item that its layout places: not those positioned against a box outside it.
++static Vector<LayoutRect> summitStretchedItemRects(const RenderBlock& item)
++{
++    Vector<LayoutRect> rects;
++    for (const RenderObject* renderer = &item; renderer; renderer = renderer->nextInPreOrder(&item)) {
++        auto* box = dynamicDowncast<RenderBox>(*renderer);
++        if (!box)
++            continue;
++        bool placedOutside = false;
++        if (box != &item && box->isOutOfFlowPositioned()) {
++            auto* containingBlock = box->containingBlock();
++            placedOutside = !containingBlock || (containingBlock != &item && !item.isContainingBlockAncestorFor(*containingBlock));
++        }
++        rects.append(placedOutside ? LayoutRect { } : summitFrameRectInItem(item, *box));
++    }
++    return rects;
++}
++
++static Vector<SummitStretchedItemToVerify>& summitStretchedItemsToVerify()
++{
++    static NeverDestroyed<Vector<SummitStretchedItemToVerify>> items;
++    return items;
++}
++
++// SUMMIT_FLEX_STRETCH_TRACE=1 says why stretched items were measured again (the first 300).
++static bool summitFlexStretchRefused(const RenderBox& box, ASCIILiteral reason)
++{
++    static bool enabled = [] {
++        const char* value = std::getenv("SUMMIT_FLEX_STRETCH_TRACE");
++        return value && value[0] == '1' && !value[1];
++    }();
++    static unsigned reported;
++    if (enabled && reported++ < 300)
++        WTFLogAlways("Summit flex stretch keep: %s measured again: %s\n", summitLayoutWhyDescription(box).utf8().legacyCStringPointer(), reason.characters());
++    return false;
++}
++
++bool summitFlexItemKeepsStretchedLayout(RenderBox& box)
++{
++    if (!summitFlexStretchKeepEnabled())
++        return false;
++    auto* item = dynamicDowncast<RenderBlock>(box);
++    if (!item)
++        return summitFlexStretchRefused(box, "not a block"_s);
++    if (box.needsLayout()) {
++        if (box.selfNeedsLayout())
++            return summitFlexStretchRefused(box, "needs layout itself"_s);
++        static bool describeInside = std::getenv("SUMMIT_FLEX_STRETCH_TRACE") && std::getenv("SUMMIT_FLEX_STRETCH_TRACE")[0] == '1';
++        if (describeInside) {
++            for (const RenderObject* renderer = box.firstChild(); renderer; renderer = renderer->nextInPreOrder(&box)) {
++                if (!renderer->selfNeedsLayout())
++                    continue;
++                WTFLogAlways("Summit flex stretch keep:   inside needs layout: %s%s in %s\n", summitLayoutWhyDescription(*renderer).utf8().legacyCStringPointer(),
++                    renderer->everHadLayout() ? "" : " (new)", renderer->parent() ? summitLayoutWhyDescription(*renderer->parent()).utf8().legacyCStringPointer() : "none");
++                break;
++            }
++        }
++        return summitFlexStretchRefused(box, "something inside needs layout"_s);
++    }
++    if (!item->everHadLayout() || item->isAnonymous() || item->document().inQuirksMode())
++        return summitFlexStretchRefused(box, "first/anonymous/quirks"_s);
++    if (item->hasRelativeLogicalHeight() || item->shouldComputeLogicalHeightFromAspectRatio())
++        return summitFlexStretchRefused(box, "relative height/aspect ratio"_s);
++    auto* layoutState = item->view().frameView().layoutContext().layoutState();
++    if (!layoutState || layoutState->isPaginated() || layoutState->lineClamp() || layoutState->legacyLineClamp() || item->enclosingFragmentedFlow())
++        return summitFlexStretchRefused(box, "paginated/line clamp"_s);
++    auto found = summitItemLayoutRuns().find(*item);
++    if (found == summitItemLayoutRuns().end() || !found->value->before)
++        return summitFlexStretchRefused(box, "no layouts"_s);
++    auto& stretched = found->value->last;
++    auto& measured = *found->value->before;
++    // The last layout run stretched the item to the height it has.
++    if (!stretched.overridingBorderBoxLogicalHeight || *stretched.overridingBorderBoxLogicalHeight != item->logicalHeight() || stretched.logicalWidth != item->logicalWidth())
++        return summitFlexStretchRefused(box, "last layout not stretched to this size"_s);
++    // The one before measured it without a height, at the same width.
++    if (measured.overridingBorderBoxLogicalHeight || measured.flexBasisIsImposed || stretched.flexBasisIsImposed)
++        return summitFlexStretchRefused(box, "layout before not a measurement"_s);
++    if (measured.overridingBorderBoxLogicalWidth != stretched.overridingBorderBoxLogicalWidth
++        || measured.containingBlockLogicalWidth != stretched.containingBlockLogicalWidth || measured.logicalWidth != stretched.logicalWidth)
++        return summitFlexStretchRefused(box, "measured at another width"_s);
++    // And the container asks for that measurement again.
++    auto now = summitCurrentItemLayoutInputs(*item);
++    now.logicalHeight = measured.logicalHeight;
++    if (now != measured)
++        return summitFlexStretchRefused(box, "measurement inputs differ"_s);
++    if (summitLayoutReuseVerifies()) {
++        summitStretchedItemsToVerify().append({ *item, item->parent(), summitStretchedItemRects(*item) });
++        return false;
++    }
++    ++summitStretchedItemsKept;
++    return true;
++}
++
++// Compares the items kept in the layout of a container that has just finished (all of them, at the end of a layout).
++static void summitVerifyStretchedItems(const RenderElement* container)
++{
++    Vector<SummitStretchedItemToVerify> items;
++    if (!container)
++        items = std::exchange(summitStretchedItemsToVerify(), { });
++    else {
++        summitStretchedItemsToVerify().removeAllMatching([&](auto& entry) {
++            if (entry.container.get() != container)
++                return false;
++            items.append(WTF::move(entry));
++            return true;
++        });
++    }
++    static unsigned verified;
++    static unsigned mismatches;
++    for (auto& entry : items) {
++        if (!entry.item)
++            continue;
++        ++verified;
++        auto rects = summitStretchedItemRects(*entry.item);
++        if (rects == entry.rects)
++            continue;
++        // A different stretched height is laid out again whether kept or not.
++        if (!rects.isEmpty() && !entry.rects.isEmpty() && rects[0].size() != entry.rects[0].size())
++            continue;
++        ++mismatches;
++        size_t index = 0;
++        while (index < rects.size() && index < entry.rects.size() && rects[index] == entry.rects[index])
++            ++index;
++        auto was = index < entry.rects.size() ? entry.rects[index] : LayoutRect { };
++        auto is = index < rects.size() ? rects[index] : LayoutRect { };
++        WTFLogAlways("Summit flex stretch keep MISMATCH: item %s (%u boxes): box %u was %.2f,%.2f %.2fx%.2f is %.2f,%.2f %.2fx%.2f\n",
++            summitLayoutWhyDescription(*entry.item).utf8().legacyCStringPointer(), static_cast<unsigned>(rects.size()), static_cast<unsigned>(index),
++            was.x().toFloat(), was.y().toFloat(), was.width().toFloat(), was.height().toFloat(), is.x().toFloat(), is.y().toFloat(), is.width().toFloat(), is.height().toFloat());
++    }
++    if (!items.isEmpty() && !(verified % 200))
++        WTFLogAlways("Summit flex stretch keep: %u checked, %u wrong\n", verified, mismatches);
++}
++#endif
++
  void RenderBlock::layout()
  {
      StackStats::LayoutCheckPoint layoutCheckPoint;
@@ -79166,7 +79531,7 @@ index 0ff11fddb608c1b65d17189a08c8ffa40c284e90..871069b63cac71759a7f8ca5d7712a06
  
      auto& layoutContext = this->layoutContext();
  
-@@ -609,6 +1111,19 @@ void RenderBlock::layout()
+@@ -609,6 +1358,29 @@ void RenderBlock::layout()
          clearLayoutOverflow();
  
      invalidateBackgroundObscurationStatus();
@@ -79176,10 +79541,20 @@ index 0ff11fddb608c1b65d17189a08c8ffa40c284e90..871069b63cac71759a7f8ca5d7712a06
 +        summitLayoutReuseContext = summitContextToVerify;
 +        summitReportLayoutReuseMismatch(*this, summitFrameRectsToVerify);
 +    }
++    if (!summitStretchedItemsToVerify().isEmpty())
++        summitVerifyStretchedItems(this);
 +    if (summitTracksLayoutInputs) {
 +        SummitItemLayout layout { summitCurrentItemLayoutInputs(*this), { } };
 +        if (!layout.inputs.overridingBorderBoxLogicalWidth && !layout.inputs.overridingBorderBoxLogicalHeight)
 +            layout.naturalLogicalSize = LayoutSize { logicalWidth(), logicalHeight() };
++        if (summitFlexStretchKeepEnabled() && isFlexItem()) {
++            auto result = summitItemLayoutRuns().ensure(*this, [&] { return makeUnique<SummitItemLayoutRuns>(layout.inputs, std::nullopt); });
++            if (!result.isNewEntry) {
++                auto& runs = *result.iterator->value;
++                runs.before = runs.last;
++                runs.last = layout.inputs;
++            }
++        }
 +        summitItemLayouts().set(*this, layout);
 +    }
 +#endif
@@ -81716,6 +82091,135 @@ index e35e12e8b19d0e6860a928fd325d858402e8e362..e317b971cbf7dbbe7a74378837976afd
          markerRenderer->setStyle(WTF::move(newStyle));
          // list-style-type, the counter style it resolves to and the writing mode all decide the marker's text.
          m_builder.addListItemNeedingMarkerUpdate(listItemRenderer);
+diff --git a/Source/WebCore/rendering/updating/RenderTreeUpdater.cpp b/Source/WebCore/rendering/updating/RenderTreeUpdater.cpp
+index b91cd6776229ae7d04e7619f00b014682f0bf252..a9c1dbea67e073db25d3c15be81f6d072c98ae1c 100644
+--- a/Source/WebCore/rendering/updating/RenderTreeUpdater.cpp
++++ b/Source/WebCore/rendering/updating/RenderTreeUpdater.cpp
+@@ -33,6 +33,7 @@
+ #include "Document.h"
+ #include "Element.h"
+ #include "FrameSelection.h"
++#include "HTMLNames.h"
+ #include "HTMLSlotElement.h"
+ #include "LayoutState.h"
+ #include "LayoutTreeBuilder.h"
+@@ -65,6 +66,8 @@
+ #include "StyleTreeResolver.h"
+ #include "TextManipulationController.h"
+ #include <wtf/Scope.h>
++#include <wtf/WallTime.h>
++#include <wtf/text/StringBuilder.h>
+ #include <wtf/SystemTracing.h>
+ 
+ #if ENABLE(CONTENT_CHANGE_OBSERVER)
+@@ -151,6 +154,44 @@ void RenderTreeUpdater::commit(std::unique_ptr<Style::Update> styleUpdate)
+     m_styleUpdate = nullptr;
+ }
+ 
++#if PLATFORM(HAIKU)
++// SUMMIT_REBUILD_TRACE=<renderers>: report renderer subtrees of at least that many
++// renderers that are torn down to be built again, and why.
++static unsigned summitRebuildTraceThreshold()
++{
++    static unsigned threshold = [] {
++        const char* value = getenv("SUMMIT_REBUILD_TRACE");
++        return value && *value ? static_cast<unsigned>(atoi(value)) : 0u;
++    }();
++    return threshold;
++}
++
++static String summitRebuildDescription(const Element& element)
++{
++    StringBuilder builder;
++    builder.append(element.localName());
++    if (element.hasID())
++        builder.append('#', element.getIdAttribute());
++    auto& classNames = element.getAttribute(HTMLNames::classAttr);
++    if (!classNames.isEmpty())
++        builder.append('.', StringView(classNames.string()).left(28));
++    if (auto* renderer = element.renderer())
++        builder.append('[', renderer->renderName(), ']');
++    return builder.toString();
++}
++
++static unsigned summitRendererCount(const Element& element)
++{
++    auto* renderer = element.renderer();
++    if (!renderer)
++        return 0;
++    unsigned count = 0;
++    for (const RenderObject* descendant = renderer; descendant; descendant = descendant->nextInPreOrder(renderer))
++        ++count;
++    return count;
++}
++#endif
++
+ void RenderTreeUpdater::updateRebuildRoots()
+ {
+     auto findNewRebuildRoot = [&](auto& root) -> RefPtr<Element> {
+@@ -173,6 +214,16 @@ void RenderTreeUpdater::updateRebuildRoots()
+                 return false;
+             return rootRenderer && rootRenderer->isInFlow() && !rootRenderer->isInline();
+         };
++#if PLATFORM(HAIKU)
++        if (summitRebuildTraceThreshold()) {
++            const char* reason = isInsideAnonymousFlexItemWithSiblings() ? "anonymous-flex-item" : isBlockInInline() ? "block-in-inline" : RenderTreeBuilder::isRebuildRootForChildren(*renderingAncestor->renderer()) ? "ruby" : nullptr;
++            if (reason) {
++                auto count = summitRendererCount(*renderingAncestor);
++                if (count >= summitRebuildTraceThreshold())
++                    WTFLogAlways("Summit rebuild: %s rebuilds %s (%u renderers) for %s\n", reason, summitRebuildDescription(*renderingAncestor).utf8().legacyCStringPointer(), count, summitRebuildDescription(root).utf8().legacyCStringPointer());
++            }
++        }
++#endif
+         if (isInsideAnonymousFlexItemWithSiblings() || isBlockInInline() || RenderTreeBuilder::isRebuildRootForChildren(*renderingAncestor->renderer()))
+             return renderingAncestor;
+         return nullptr;
+@@ -437,6 +488,16 @@ void RenderTreeUpdater::updateElementRenderer(Element& element, const Style::Ele
+     }();
+ 
+     if (shouldTearDownRenderers) {
++#if PLATFORM(HAIKU)
++        if (summitRebuildTraceThreshold()) {
++            auto count = summitRendererCount(element);
++            if (count >= summitRebuildTraceThreshold()) {
++                auto* oldStyle = element.renderOrDisplayContentsStyle();
++                WTFLogAlways("Summit rebuild: renderer change tears down %s (%u renderers) display %s at %.0f\n", summitRebuildDescription(element).utf8().legacyCStringPointer(), count,
++                    !oldStyle ? "no-style" : oldStyle->display() == elementUpdate.style->display() ? "same" : "changed", WallTime::now().secondsSinceEpoch().milliseconds());
++            }
++        }
++#endif
+         if (!element.renderer()) {
+             // We may be tearing down a descendant renderer cached in renderTreePosition.
+             renderTreePosition().invalidateNextSibling();
+@@ -767,6 +828,14 @@ void RenderTreeUpdater::tearDownRenderersAfterSlotChange(Element& host)
+     if (!host.renderer() && !host.hasDisplayContents())
+         return;
+ 
++#if PLATFORM(HAIKU)
++    if (summitRebuildTraceThreshold()) {
++        unsigned count = summitRendererCount(host);
++        if (count >= summitRebuildTraceThreshold())
++            WTFLogAlways("Summit rebuild: slot change tears down what %s holds (%u renderers)\n", summitRebuildDescription(host).utf8().legacyCStringPointer(), count);
++    }
++#endif
++
+     RenderTreeBuilder builder(*view);
+ 
+     tearDownDescendantRenderers(host, TeardownType::RendererUpdate, builder);
+@@ -900,6 +969,13 @@ template<RenderTreeUpdater::TeardownScope scope>
+ void RenderTreeUpdater::tearDownRenderersInternal(Element& root, TeardownType teardownType, RenderTreeBuilder& builder)
+ {
+     Vector<Element*, 30> teardownStack;
++#if PLATFORM(HAIKU)
++    if (summitRebuildTraceThreshold() && teardownType != TeardownType::RendererUpdate && teardownType != TeardownType::RendererUpdateCancelingAnimations) {
++        auto count = summitRendererCount(root);
++        if (count >= summitRebuildTraceThreshold())
++            WTFLogAlways("Summit rebuild: teardown %d of %s (%u renderers)\n", static_cast<int>(teardownType), summitRebuildDescription(root).utf8().legacyCStringPointer(), count);
++    }
++#endif
+ 
+     auto push = [&](Element& element) {
+         if constexpr (scope == TeardownScope::DescendantsOnly) {
 diff --git a/Source/WebCore/style/RuleSetBuilder.cpp b/Source/WebCore/style/RuleSetBuilder.cpp
 index b37af82d2bcf05a0d43b905a9231510b172ad917..e2f2b9bcddbbbd99e5bcf2068e0b4cbe0003e123 100644
 --- a/Source/WebCore/style/RuleSetBuilder.cpp
