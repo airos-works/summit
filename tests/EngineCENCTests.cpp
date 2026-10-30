@@ -118,7 +118,7 @@ int main(int argc, char** argv)
             for (auto at : {box(typedAuxiliary, "saio") + 20, box(typedAuxiliary, "trun") + 12}) put32(typedAuxiliary, at, u32(typedAuxiliary, at) + 16);
             check(typedAuxiliary, 113);
             auto bad = init; auto tenc = box(bad, "tenc"); bad[tenc + 11] = 7; reject(bad);
-            bad = init; auto schm = box(bad, "schm"); std::copy_n("cbcs", 4, bad.begin() + schm + 8); reject(bad);
+            bad = init; auto schm = box(bad, "schm"); std::copy_n("cbc2", 4, bad.begin() + schm + 8); reject(bad); // unknown scheme (cbcs is EngineCENCSchemeTests.cpp's)
             bad = init; bad[tenc + 9] = 0x19; reject(bad); // pattern encryption
             bad = init; renameBox(bad, "sinf", "free"); reject(bad);
             bad = media; auto senc = box(bad, "senc"); bad[senc + 7] |= 1; reject(init, bad); // unsupported override

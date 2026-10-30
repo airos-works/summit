@@ -15361,10 +15361,10 @@ index a9fbbce2092bc854d3dd72e278353e3b7ca93530..a6d159d54154ee82b97eb1430420ddaf
  private:
      PDFJSDocument(LocalFrame&, const URL&);
 diff --git a/Source/WebCore/html/PermissionsPolicy.cpp b/Source/WebCore/html/PermissionsPolicy.cpp
-index 5d09d06405a00f502001362cffe9cae2d699b212..7332277ffe3be46dde15c1ebb2f54d36340f6024 100644
+index 5d09d06405a00f502001362cffe9cae2d699b212..2765f193c7e51829185148b7c74c7d30273e7870 100644
 --- a/Source/WebCore/html/PermissionsPolicy.cpp
 +++ b/Source/WebCore/html/PermissionsPolicy.cpp
-@@ -28,12 +28,14 @@
+@@ -28,12 +28,19 @@
  
  #include "Allowlist.h"
  #include "Document.h"
@@ -15374,12 +15374,17 @@ index 5d09d06405a00f502001362cffe9cae2d699b212..7332277ffe3be46dde15c1ebb2f54d36
  #include "HTMLNames.h"
  #include "LocalDOMWindow.h"
  #include "OwnerPermissionsPolicyData.h"
++#include "PublicSuffixStore.h"
++#include "FormData.h"
++#include "Report.h"
++#include "ViolationReportType.h"
++#include <wtf/StdLibExtras.h>
  #include "Quirks.h"
 +#include "RFC8941.h"
  #include "SecurityOrigin.h"
  #include <wtf/TZoneMalloc.h>
  #include <wtf/text/MakeString.h>
-@@ -69,6 +71,12 @@ static ASCIILiteral toFeatureNameForLogging(PermissionsPolicy::Feature feature)
+@@ -69,6 +76,12 @@ static ASCIILiteral toFeatureNameForLogging(PermissionsPolicy::Feature feature)
          return "Fullscreen"_s;
      case PermissionsPolicy::Feature::WebShare:
          return "WebShare"_s;
@@ -15392,7 +15397,7 @@ index 5d09d06405a00f502001362cffe9cae2d699b212..7332277ffe3be46dde15c1ebb2f54d36
  #if ENABLE(DEVICE_ORIENTATION)
      case PermissionsPolicy::Feature::Gyroscope:
          return "Gyroscope"_s;
-@@ -135,13 +143,27 @@ static std::pair<PermissionsPolicy::Feature, StringView> readFeatureIdentifier(S
+@@ -135,13 +148,27 @@ static std::pair<PermissionsPolicy::Feature, StringView> readFeatureIdentifier(S
  #if ENABLE(WEBXR)
      constexpr auto xrSpatialTrackingToken { "xr-spatial-tracking"_s };
  #endif
@@ -15421,7 +15426,7 @@ index 5d09d06405a00f502001362cffe9cae2d699b212..7332277ffe3be46dde15c1ebb2f54d36
          feature = PermissionsPolicy::Feature::Camera;
          remainingValue = value.substring(cameraToken.length());
      } else if (value.startsWith(microphoneToken)) {
-@@ -240,6 +262,9 @@ static ASCIILiteral defaultAllowlistValue(PermissionsPolicy::Feature feature)
+@@ -240,6 +267,9 @@ static ASCIILiteral defaultAllowlistValue(PermissionsPolicy::Feature feature)
      case PermissionsPolicy::Feature::ScreenWakeLock:
      case PermissionsPolicy::Feature::Fullscreen:
      case PermissionsPolicy::Feature::WebShare:
@@ -15431,17 +15436,104 @@ index 5d09d06405a00f502001362cffe9cae2d699b212..7332277ffe3be46dde15c1ebb2f54d36
  #if ENABLE(DEVICE_ORIENTATION)
      case PermissionsPolicy::Feature::Gyroscope:
      case PermissionsPolicy::Feature::Accelerometer:
-@@ -289,6 +314,9 @@ static bool checkPermissionsPolicy(const PermissionsPolicy& permissionsPolicy, P
+@@ -283,12 +313,47 @@ static bool isFeatureAllowedByDefaultAllowlist(PermissionsPolicy::Feature featur
+     return false;
+ }
+ 
++// Allowlist::matches() compares whole origins. A serialized origin may also
++// name every subdomain of a host, "https://*.example.com" (the Permissions
++// Policy origin wildcards Chrome and the specification adopted in 2023); the
++// iframe allow attribute and the Permissions-Policy header keep those as
++// origins whose host starts with "*.". Such an entry matches origins with the
++// same scheme and port whose host is a subdomain of the rest, not the host
++// itself, and never one under a public suffix such as "*.co.uk".
++static bool isWildcardOrigin(const SecurityOriginData& origin)
++{
++    auto host = origin.host();
++    return host.length() > 2 && host.startsWith("*."_s) && host.find('*', 1) == notFound
++        && !PublicSuffixStore::singleton().isPublicSuffix(StringView { host }.substring(2));
++}
++
++static bool allowlistMatches(const Allowlist& allowlist, const SecurityOriginData& origin)
++{
++    if (allowlist.matches(origin))
++        return true;
++    auto* origins = std::get_if<HashSet<SecurityOriginData>>(&allowlist.origins());
++    if (!origins || origin.isOpaque())
++        return false;
++    for (auto& entry : *origins) {
++        if (entry.isOpaque() || entry.protocol() != origin.protocol() || entry.port() != origin.port() || !isWildcardOrigin(entry))
++            continue;
++        auto suffix = StringView { entry.host() }.substring(1); // ".example.com"
++        auto host = origin.host();
++        if (host.length() > suffix.length() && StringView { host }.endsWithIgnoringASCIICase(suffix))
++            return true;
++    }
++    return false;
++}
++
+ // https://w3c.github.io/webappsec-permissions-policy/#algo-check-permissions-policy
+ static bool checkPermissionsPolicy(const PermissionsPolicy& permissionsPolicy, PermissionsPolicy::Feature feature, const SecurityOriginData& origin, const SecurityOriginData& documentOrigin)
+ {
      if (!permissionsPolicy.inheritedPolicyValueForFeature(feature))
          return false;
  
 +    if (auto iterator = permissionsPolicy.declaredPolicy().find(feature); iterator != permissionsPolicy.declaredPolicy().end())
-+        return iterator->value.matches(origin);
++        return allowlistMatches(iterator->value, origin);
 +
      return isFeatureAllowedByDefaultAllowlist(feature, origin, documentOrigin);
  }
  
-@@ -401,10 +429,13 @@ PermissionsPolicy::PolicyDirective PermissionsPolicy::processPermissionsPolicyAt
+@@ -326,6 +391,40 @@ static Ref<SecurityOrigin> declaredOrigin(const HTMLIFrameElement& iframe)
+     return document->securityOrigin();
+ }
+ 
++static constexpr std::array headerPolicyFeatures { std::pair { "encrypted-media"_s, PermissionsPolicy::Feature::EncryptedMedia }, std::pair { "bluetooth"_s, PermissionsPolicy::Feature::Bluetooth } };
++
++// https://w3c.github.io/webappsec-permissions-policy/#reporting: a directive
++// in the Permissions-Policy header may name a Reporting-Endpoints endpoint,
++// "encrypted-media=();report-to=main". A blocked use is reported there as a
++// "permissions-policy-violation". ReportingObserver does not see these: that
++// would need a new report body interface.
++static void reportViolationToEndpoint(PermissionsPolicy::Feature feature, const Document& document)
++{
++    auto entry = std::ranges::find_if(headerPolicyFeatures, [&](auto& entry) { return entry.second == feature; });
++    RefPtr loader = document.loader();
++    if (entry == headerPolicyFeatures.end() || !loader)
++        return;
++    auto dictionary = RFC8941::parseDictionaryStructuredFieldValue(loader->response().httpHeaderField("Permissions-Policy"_s));
++    if (!dictionary)
++        return;
++    auto iterator = dictionary->find(entry->first);
++    if (iterator == dictionary->end())
++        return;
++    auto* endpoint = iterator->value.second.getIf<RFC8941::Token>("report-to"_s);
++    auto* endpointString = iterator->value.second.getIf<String>("report-to"_s);
++    String token = endpoint ? endpoint->string() : endpointString ? *endpointString : String { };
++    if (token.isEmpty())
++        return;
++    Ref protectedDocument = const_cast<Document&>(document);
++    auto& url = document.url();
++    auto report = Report::createReportFormDataForViolation("permissions-policy-violation"_s, url, document.httpUserAgent(), token, [&](auto& body) {
++        body.setString("featureId"_s, String { entry->first });
++        body.setString("disposition"_s, "enforce"_s);
++        body.setString("message"_s, makeString("Permissions policy violation: "_s, entry->first, " is not allowed in this document."_s));
++    });
++    protectedDocument->sendReportToEndpoints(url, { }, singleElementSpan(token), WTF::move(report), ViolationReportType::StandardReportingAPIViolation);
++}
++
+ // https://w3c.github.io/webappsec-permissions-policy/#algo-is-feature-enabled
+ static bool computeFeatureEnabled(PermissionsPolicy::Feature feature, const Document& document, const SecurityOriginData& origin, PermissionsPolicy::ShouldReportViolation shouldReportViolation)
+ {
+@@ -334,6 +433,7 @@ static bool computeFeatureEnabled(PermissionsPolicy::Feature feature, const Docu
+     if (!enabled && shouldReportViolation == PermissionsPolicy::ShouldReportViolation::Yes) {
+         if (RefPtr window = document.window())
+             window->printErrorMessage(makeString("Permission policy '"_s, toFeatureNameForLogging(feature), "' check failed for document with origin '"_s, origin.toString(), "'."_s));
++        reportViolationToEndpoint(feature, document);
+     }
+ 
+     return enabled;
+@@ -401,10 +501,13 @@ PermissionsPolicy::PolicyDirective PermissionsPolicy::processPermissionsPolicyAt
  }
  
  // https://w3c.github.io/webappsec-permissions-policy/#algo-get-feature-value-for-origin
@@ -15453,12 +15545,21 @@ index 5d09d06405a00f502001362cffe9cae2d699b212..7332277ffe3be46dde15c1ebb2f54d36
 +    if (!documentPermissionsPolicy.inheritedPolicyValueForFeature(feature))
 +        return false;
 +    if (auto iterator = documentPermissionsPolicy.declaredPolicy().find(feature); iterator != documentPermissionsPolicy.declaredPolicy().end())
-+        return iterator->value.matches(origin);
++        return allowlistMatches(iterator->value, origin);
 +    return true;
  }
  
  // https://w3c.github.io/webappsec-permissions-policy/#algo-define-inherited-policy-in-container
-@@ -435,8 +466,59 @@ bool PermissionsPolicy::inheritedPolicyValueForFeature(Feature feature) const
+@@ -423,7 +526,7 @@ bool PermissionsPolicy::computeInheritedPolicyValueInContainer(Feature feature,
+ 
+     auto containerPolicy = ownerPermissionsPolicy->containerPolicy;
+     if (auto iterator = containerPolicy.find(feature); iterator != containerPolicy.end())
+-        return iterator->value.matches(origin);
++        return allowlistMatches(iterator->value, origin);
+ 
+     return isFeatureAllowedByDefaultAllowlist(feature, origin, documentOrigin);
+ }
+@@ -435,8 +538,63 @@ bool PermissionsPolicy::inheritedPolicyValueForFeature(Feature feature) const
      return m_inheritedPolicy.contains(feature);
  }
  
@@ -15474,7 +15575,7 @@ index 5d09d06405a00f502001362cffe9cae2d699b212..7332277ffe3be46dde15c1ebb2f54d36
 +    auto dictionary = RFC8941::parseDictionaryStructuredFieldValue(loader->response().httpHeaderField("Permissions-Policy"_s));
 +    if (!dictionary)
 +        return result;
-+    for (auto entry : { std::pair { "encrypted-media"_s, PermissionsPolicy::Feature::EncryptedMedia }, std::pair { "bluetooth"_s, PermissionsPolicy::Feature::Bluetooth } }) {
++    for (auto entry : headerPolicyFeatures) {
 +        auto iterator = dictionary->find(entry.first);
 +        if (iterator == dictionary->end())
 +            continue;
@@ -15490,10 +15591,14 @@ index 5d09d06405a00f502001362cffe9cae2d699b212..7332277ffe3be46dde15c1ebb2f54d36
 +            } else if (auto* string = std::get_if<String>(&item)) {
 +                URL url { *string };
 +                auto authority = string->find("://"_s);
++                // A '*' may only start the host ("https://*.example.com").
++                auto wildcard = string->find('*');
++                bool validWildcard = wildcard == notFound
++                    || (authority != notFound && wildcard == authority + 3 && string->find("*."_s) == wildcard && string->find('*', wildcard + 1) == notFound);
 +                if (url.isValid() && authority != notFound && string->find('/', authority + 3) == notFound
-+                    && !string->contains('*') && !string->contains('?') && !string->contains('#') && !string->contains('@')) {
++                    && validWildcard && !string->contains('?') && !string->contains('#') && !string->contains('@')) {
 +                    auto origin = SecurityOrigin::create(url);
-+                    if (!origin->isOpaque())
++                    if (!origin->isOpaque() && (wildcard == notFound || isWildcardOrigin(origin->data())))
 +                        origins.add(origin->data());
 +                }
 +            }
@@ -25880,20 +25985,21 @@ index cec8c263e322d387db3d199ef3377a176d93d615..9fe412549b52fce53911799ed30fea0f
      bool isKeyAvailable(const KeyIDType&) const;
      bool isKeyAvailableUnlocked(const KeyIDType&) const WTF_REQUIRES_LOCK(m_keysLock);
 diff --git a/Source/WebCore/platform/encryptedmedia/clearkey/CDMClearKey.cpp b/Source/WebCore/platform/encryptedmedia/clearkey/CDMClearKey.cpp
-index 45b86514bb305b44dc4db3d219c6e7961867b2a9..ce709ed223755ac41adc49f3f7e86b05771c2c24 100644
+index 45b86514bb305b44dc4db3d219c6e7961867b2a9..f5f441493bdac880ee83bf51fed083cad8d9651f 100644
 --- a/Source/WebCore/platform/encryptedmedia/clearkey/CDMClearKey.cpp
 +++ b/Source/WebCore/platform/encryptedmedia/clearkey/CDMClearKey.cpp
-@@ -35,6 +35,9 @@
+@@ -35,6 +35,10 @@
  
  #include "CDMKeySystemConfiguration.h"
  #include "CDMRestrictions.h"
 +#if OS(HAIKU)
 +#include "ContentType.h"
++#include "MediaPlayer.h"
 +#endif
  #include "CDMSessionType.h"
  #include "CDMUtilities.h"
  #include "InitDataRegistry.h"
-@@ -59,6 +62,11 @@ WTF_MAKE_TZONE_ALLOCATED_IMPL(CDMInstanceClearKey);
+@@ -59,6 +63,11 @@ WTF_MAKE_TZONE_ALLOCATED_IMPL(CDMInstanceClearKey);
  
  static std::optional<Vector<Ref<KeyHandle>>> parseLicenseFormat(const JSON::Object& root)
  {
@@ -25905,7 +26011,7 @@ index 45b86514bb305b44dc4db3d219c6e7961867b2a9..ce709ed223755ac41adc49f3f7e86b05
      // If the 'keys' key is present in the root object, parse the JSON further
      // according to the specified 'license' format.
      auto it = root.find("keys"_s);
-@@ -78,7 +86,7 @@ static std::optional<Vector<Ref<KeyHandle>>> parseLicenseFormat(const JSON::Obje
+@@ -78,7 +87,7 @@ static std::optional<Vector<Ref<KeyHandle>>> parseLicenseFormat(const JSON::Obje
                  return false;
  
              auto keyType = keyObject->getString("kty"_s);
@@ -25914,7 +26020,7 @@ index 45b86514bb305b44dc4db3d219c6e7961867b2a9..ce709ed223755ac41adc49f3f7e86b05
                  return false;
  
              auto keyID = keyObject->getString("kid"_s);
-@@ -96,6 +104,10 @@ static std::optional<Vector<Ref<KeyHandle>>> parseLicenseFormat(const JSON::Obje
+@@ -96,6 +105,10 @@ static std::optional<Vector<Ref<KeyHandle>>> parseLicenseFormat(const JSON::Obje
              auto keyHandleValueData = base64URLDecode(keyValue);
              if (!keyHandleValueData)
                  return false;
@@ -25925,7 +26031,7 @@ index 45b86514bb305b44dc4db3d219c6e7961867b2a9..ce709ed223755ac41adc49f3f7e86b05
  
              decodedKeys.append(KeyHandle::create(CDMInstanceSession::KeyStatus::Usable, WTF::move(*keyIDData), WTF::move(*keyHandleValueData)));
              return true;
-@@ -142,59 +154,48 @@ static bool parseLicenseReleaseAcknowledgementFormat(const JSON::Object& root)
+@@ -142,59 +155,48 @@ static bool parseLicenseReleaseAcknowledgementFormat(const JSON::Object& root)
  // This function extracts the KeyIds count and the location of the first KeyId in initData buffer.
  static std::pair<unsigned, unsigned> extractKeyidsLocationFromCencInitData(const SharedBuffer& initData)
  {
@@ -26024,7 +26130,7 @@ index 45b86514bb305b44dc4db3d219c6e7961867b2a9..ce709ed223755ac41adc49f3f7e86b05
  }
  
  // This function checks if the initData sharedBuffer is a valid CENC initData.
-@@ -273,7 +274,7 @@ std::unique_ptr<CDMPrivate> CDMFactoryClearKey::createCDM(const String& keySyste
+@@ -273,7 +275,7 @@ std::unique_ptr<CDMPrivate> CDMFactoryClearKey::createCDM(const String& keySyste
  bool CDMFactoryClearKey::supportsKeySystem(const String& keySystem)
  {
      // `org.w3.clearkey` is the only supported key system.
@@ -26033,33 +26139,35 @@ index 45b86514bb305b44dc4db3d219c6e7961867b2a9..ce709ed223755ac41adc49f3f7e86b05
  }
  
  CDMPrivateClearKey::CDMPrivateClearKey() = default;
-@@ -284,7 +285,9 @@ Vector<String> CDMPrivateClearKey::supportedInitDataTypes() const
-     return {
-         InitDataRegistry::keyidsName(),
-         InitDataRegistry::cencName(),
-+#if !OS(HAIKU)
-         InitDataRegistry::webmName(),
-+#endif
-     };
- }
- 
-@@ -295,6 +298,24 @@ static bool NODELETE containsPersistentLicenseType(const Vector<CDMSessionType>&
+@@ -295,6 +297,36 @@ static bool NODELETE containsPersistentLicenseType(const Vector<CDMSessionType>&
  
  bool CDMPrivateClearKey::supportsConfiguration(const CDMKeySystemConfiguration& configuration) const
  {
 +#if OS(HAIKU)
 +    if (configuration.persistentState == CDMRequirement::Required || containsPersistentLicenseType(configuration.sessionTypes))
 +        return false;
++    // The native decrypter handles 'cenc', 'cbc1', 'cens' and 'cbcs' MP4
++    // (H.264, HEVC, VP9, AV1, AAC, Opus) and WebM encryption; the Media
++    // Source player then decides whether it can decode the codecs.
 +    auto supported = [](const CDMMediaCapability& capability) {
-+        if (capability.encryptionScheme && *capability.encryptionScheme != CDMEncryptionScheme::cenc)
-+            return false;
 +        ContentType type { capability.contentType };
-+        if (type.containerType() != "video/mp4"_s && type.containerType() != "audio/mp4"_s)
++        auto container = type.containerType().convertToASCIILowercase();
++        bool webm = container == "video/webm"_s || container == "audio/webm"_s;
++        if (container != "video/mp4"_s && container != "audio/mp4"_s && !webm)
++            return false;
++        // WebM encryption is AES-CTR, as 'cenc'.
++        if (webm && capability.encryptionScheme && *capability.encryptionScheme != CDMEncryptionScheme::cenc)
 +            return false;
 +        for (const auto& codec : type.codecs()) {
-+            if (!codec.startsWith("avc1."_s) && !codec.startsWith("avc3."_s) && codec != "mp4a.40.2"_s)
++            if (!webm && !codec.startsWith("avc1."_s) && !codec.startsWith("avc3."_s) && !codec.startsWith("hvc1."_s) && !codec.startsWith("hev1."_s)
++                && !codec.startsWith("vp09."_s) && !codec.startsWith("av01."_s) && !codec.startsWith("mp4a.40."_s) && codec != "opus"_s)
 +                return false;
 +        }
++#if ENABLE(MEDIA_SOURCE)
++        MediaEngineSupportParameters parameters { .platformType = PlatformMediaDecodingType::MediaSource, .type = type };
++        if (MediaPlayer::supportsType(parameters) == MediaPlayer::SupportsType::IsNotSupported)
++            return false;
++#endif
 +        return capability.robustness.isEmpty();
 +    };
 +    if (!std::ranges::all_of(configuration.audioCapabilities, supported) || !std::ranges::all_of(configuration.videoCapabilities, supported))
@@ -26068,7 +26176,7 @@ index 45b86514bb305b44dc4db3d219c6e7961867b2a9..ce709ed223755ac41adc49f3f7e86b05
      // Reject any configuration that marks distinctive identifier as required.
      if (configuration.distinctiveIdentifier == CDMRequirement::Required)
          return false;
-@@ -309,6 +330,10 @@ bool CDMPrivateClearKey::supportsConfiguration(const CDMKeySystemConfiguration&
+@@ -309,6 +341,10 @@ bool CDMPrivateClearKey::supportsConfiguration(const CDMKeySystemConfiguration&
  
  bool CDMPrivateClearKey::supportsConfigurationWithRestrictions(const CDMKeySystemConfiguration& configuration, const CDMRestrictions& restrictions) const
  {
@@ -26079,7 +26187,7 @@ index 45b86514bb305b44dc4db3d219c6e7961867b2a9..ce709ed223755ac41adc49f3f7e86b05
      // Reject any configuration that marks distincitive identifier as required, or that marks
      // distinctive identifier as optional even when restrictions mark it as denied.
      if ((configuration.distinctiveIdentifier == CDMRequirement::Optional && restrictions.distinctiveIdentifierDenied)
-@@ -330,6 +355,10 @@ bool CDMPrivateClearKey::supportsConfigurationWithRestrictions(const CDMKeySyste
+@@ -330,6 +366,10 @@ bool CDMPrivateClearKey::supportsConfigurationWithRestrictions(const CDMKeySyste
  
  bool CDMPrivateClearKey::supportsSessionTypeWithConfiguration(const CDMSessionType& sessionType, const CDMKeySystemConfiguration& configuration) const
  {
@@ -26090,7 +26198,7 @@ index 45b86514bb305b44dc4db3d219c6e7961867b2a9..ce709ed223755ac41adc49f3f7e86b05
      // Only support the 'temporary' and 'persistent-license' session types.
      if (sessionType != CDMSessionType::Temporary && sessionType != CDMSessionType::PersistentLicense)
          return false;
-@@ -344,6 +373,10 @@ Vector<String> CDMPrivateClearKey::supportedRobustnesses() const
+@@ -344,6 +384,10 @@ Vector<String> CDMPrivateClearKey::supportedRobustnesses() const
  
  CDMRequirement CDMPrivateClearKey::distinctiveIdentifiersRequirement(const CDMKeySystemConfiguration&, const CDMRestrictions& restrictions) const
  {
@@ -26101,7 +26209,7 @@ index 45b86514bb305b44dc4db3d219c6e7961867b2a9..ce709ed223755ac41adc49f3f7e86b05
      // Distinctive identifier is not allowed if it's been denied, otherwise it's optional.
      if (restrictions.distinctiveIdentifierDenied)
          return CDMRequirement::NotAllowed;
-@@ -352,6 +385,10 @@ CDMRequirement CDMPrivateClearKey::distinctiveIdentifiersRequirement(const CDMKe
+@@ -352,6 +396,10 @@ CDMRequirement CDMPrivateClearKey::distinctiveIdentifiersRequirement(const CDMKe
  
  CDMRequirement CDMPrivateClearKey::persistentStateRequirement(const CDMKeySystemConfiguration&, const CDMRestrictions& restrictions) const
  {
@@ -26112,7 +26220,7 @@ index 45b86514bb305b44dc4db3d219c6e7961867b2a9..ce709ed223755ac41adc49f3f7e86b05
      // Persistent state is not allowed if it's been denied, otherwise it's optional.
      if (restrictions.persistentStateDenied)
          return CDMRequirement::NotAllowed;
-@@ -396,8 +433,10 @@ bool CDMPrivateClearKey::supportsInitData(const String& initDataType, const Shar
+@@ -396,8 +444,10 @@ bool CDMPrivateClearKey::supportsInitData(const String& initDataType, const Shar
          return true;
  
      // Validate the initData buffer as WebM initData.
@@ -26123,7 +26231,7 @@ index 45b86514bb305b44dc4db3d219c6e7961867b2a9..ce709ed223755ac41adc49f3f7e86b05
  
      return false;
  }
-@@ -405,7 +444,7 @@ bool CDMPrivateClearKey::supportsInitData(const String& initDataType, const Shar
+@@ -405,7 +455,7 @@ bool CDMPrivateClearKey::supportsInitData(const String& initDataType, const Shar
  RefPtr<SharedBuffer> CDMPrivateClearKey::sanitizeResponse(const SharedBuffer& response) const
  {
      // Validate the response buffer as an JSON object.
@@ -26132,7 +26240,7 @@ index 45b86514bb305b44dc4db3d219c6e7961867b2a9..ce709ed223755ac41adc49f3f7e86b05
          return nullptr;
  
      return response.makeContiguous();
-@@ -450,6 +489,13 @@ RefPtr<CDMInstanceSession> CDMInstanceClearKey::createSession()
+@@ -450,6 +500,13 @@ RefPtr<CDMInstanceSession> CDMInstanceClearKey::createSession()
      return adoptRef(new CDMInstanceSessionClearKey(*this));
  }
  
@@ -26146,7 +26254,7 @@ index 45b86514bb305b44dc4db3d219c6e7961867b2a9..ce709ed223755ac41adc49f3f7e86b05
  void CDMInstanceSessionClearKey::requestLicense(LicenseType, KeyGroupingStrategy, const String& initDataType, Ref<SharedBuffer>&& initData, LicenseCallback&& callback)
  {
      if (RefPtr parentInstance = this->parentInstance())
-@@ -463,6 +509,21 @@ void CDMInstanceSessionClearKey::requestLicense(LicenseType, KeyGroupingStrategy
+@@ -463,6 +520,21 @@ void CDMInstanceSessionClearKey::requestLicense(LicenseType, KeyGroupingStrategy
      if (equalLettersIgnoringASCIICase(initDataType, "webm"_s))
          initData = extractKeyIdFromWebMInitData(initData.get());
  
@@ -26168,7 +26276,7 @@ index 45b86514bb305b44dc4db3d219c6e7961867b2a9..ce709ed223755ac41adc49f3f7e86b05
      callOnMainThread(
          [sessionID = m_sessionID, callback = WTF::move(callback), initData = WTF::move(initData)]() mutable {
              callback(WTF::move(initData), sessionID, false, Succeeded);
-@@ -520,7 +581,11 @@ void CDMInstanceSessionClearKey::updateLicense(const String& sessionId, LicenseT
+@@ -520,7 +592,11 @@ void CDMInstanceSessionClearKey::updateLicense(const String& sessionId, LicenseT
          return;
      }
  
@@ -26181,7 +26289,7 @@ index 45b86514bb305b44dc4db3d219c6e7961867b2a9..ce709ed223755ac41adc49f3f7e86b05
          LOG_WITH_STREAM(EME, stream << "EME - ClearKey - session "_s << sessionId << " release acknowledged, clearing all known keys"_s);
          parentInstance->unrefAllKeysFrom(m_keyStore);
          m_keyStore.clear();
-@@ -546,6 +611,10 @@ void CDMInstanceSessionClearKey::loadSession(LicenseType, const String& sessionI
+@@ -546,6 +622,10 @@ void CDMInstanceSessionClearKey::loadSession(LicenseType, const String& sessionI
  
  void CDMInstanceSessionClearKey::closeSession(const String&, CloseSessionCallback&& callback)
  {
@@ -26192,7 +26300,7 @@ index 45b86514bb305b44dc4db3d219c6e7961867b2a9..ce709ed223755ac41adc49f3f7e86b05
      callOnMainThread(
          [weakThis = WeakPtr { *this }, callback = WTF::move(callback)] () mutable {
              if (!weakThis)
-@@ -557,6 +626,16 @@ void CDMInstanceSessionClearKey::closeSession(const String&, CloseSessionCallbac
+@@ -557,6 +637,16 @@ void CDMInstanceSessionClearKey::closeSession(const String&, CloseSessionCallbac
  
  void CDMInstanceSessionClearKey::removeSessionData(const String& sessionId, LicenseType, RemoveSessionDataCallback&& callback)
  {
@@ -26209,7 +26317,7 @@ index 45b86514bb305b44dc4db3d219c6e7961867b2a9..ce709ed223755ac41adc49f3f7e86b05
      ASSERT_UNUSED(sessionId, sessionId == m_sessionID);
  
      auto dispatchCallback =
-@@ -592,6 +671,9 @@ void CDMInstanceSessionClearKey::removeSessionData(const String& sessionId, Lice
+@@ -592,6 +682,9 @@ void CDMInstanceSessionClearKey::removeSessionData(const String& sessionId, Lice
          message = SharedBuffer::create(messageString.utf8().span());
      }
  
@@ -31353,10 +31461,10 @@ index 0000000000000000000000000000000000000000..50579e1abd3cb1b6229256105cdbf51b
 +#endif
 diff --git a/Source/WebCore/platform/graphics/haiku/CencCryptoHaiku.cpp b/Source/WebCore/platform/graphics/haiku/CencCryptoHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..02d3134aae723398272d2ae66de2cef304318dbd
+index 0000000000000000000000000000000000000000..2e33c3fdd82b743f4fa3b4e9fab44ed09cc975d3
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/haiku/CencCryptoHaiku.cpp
-@@ -0,0 +1,44 @@
+@@ -0,0 +1,76 @@
 +// Copyright (C) 2026 Summit contributors. BSD-2-Clause.
 +#if __has_include("config.h")
 +#include "config.h"
@@ -31373,10 +31481,22 @@ index 0000000000000000000000000000000000000000..02d3134aae723398272d2ae66de2cef3
 +    const std::array<uint8_t, 16>& key, std::vector<uint8_t>& output)
 +{
 +    if (!validCencSample(sample, input.size())) return false;
-+    std::array<uint8_t, 16> counter { };
-+    std::copy(sample.iv.begin(), sample.iv.end(), counter.begin());
++    bool cbc = sample.scheme == CencScheme::CBC1 || sample.scheme == CencScheme::CBCS;
++    bool pattern = sample.scheme == CencScheme::CENS || sample.scheme == CencScheme::CBCS;
++    unsigned crypt = sample.cryptByteBlock, skip = sample.skipByteBlock;
++    if (pattern && !crypt) {
++        // 0:0 encrypts every block (cbcs audio); 0:N would encrypt nothing.
++        if (skip) return false;
++        crypt = 1;
++    }
++    // 8-byte IVs are the high half of the counter block (CTR) or are
++    // zero-padded (CBC), ISO/IEC 23001-7 9.1.
++    std::array<uint8_t, 16> iv { };
++    std::copy(sample.iv.begin(), sample.iv.end(), iv.begin());
 +    std::unique_ptr<EVP_CIPHER_CTX, decltype(&EVP_CIPHER_CTX_free)> context(EVP_CIPHER_CTX_new(), EVP_CIPHER_CTX_free);
-+    if (!context || EVP_DecryptInit_ex(context.get(), EVP_aes_128_ctr(), nullptr, key.data(), counter.data()) != 1)
++    if (!context || EVP_DecryptInit_ex(context.get(), cbc ? EVP_aes_128_cbc() : EVP_aes_128_ctr(), nullptr, key.data(), iv.data()) != 1)
++        return false;
++    if (cbc && EVP_CIPHER_CTX_set_padding(context.get(), 0) != 1)
 +        return false;
 +    std::vector<uint8_t> result(input.begin(), input.end());
 +    auto decrypt = [&](size_t at, size_t count) {
@@ -31384,17 +31504,37 @@ index 0000000000000000000000000000000000000000..02d3134aae723398272d2ae66de2cef3
 +        int written = 0;
 +        return count <= INT_MAX && EVP_DecryptUpdate(context.get(), result.data() + at, &written, input.data() + at, int(count)) == 1 && written == int(count);
 +    };
++    // One protected range. CBC leaves a trailing partial block clear, and a
++    // pattern covers whole blocks only; the last group may be short.
++    auto decryptRange = [&](size_t at, size_t count) {
++        if (!pattern)
++            return decrypt(at, cbc ? count - count % 16 : count);
++        for (size_t blocks = count / 16; blocks;) {
++            size_t encrypted = std::min<size_t>(crypt, blocks);
++            if (!decrypt(at, encrypted * 16)) return false;
++            at += encrypted * 16;
++            blocks -= encrypted;
++            size_t skipped = std::min<size_t>(skip, blocks);
++            at += skipped * 16;
++            blocks -= skipped;
++        }
++        return true;
++    };
 +    if (sample.subsamples.empty()) {
-+        if (!decrypt(0, input.size())) return false;
++        if (!decryptRange(0, input.size())) return false;
 +    } else {
 +        size_t at = 0;
 +        for (const auto& entry : sample.subsamples) {
 +            at += entry.clearBytes;
-+            if (!decrypt(at, entry.encryptedBytes)) return false;
++            // 'cbcs' starts every subsample's chain from the constant IV;
++            // the other schemes continue across subsamples.
++            if (sample.scheme == CencScheme::CBCS && EVP_DecryptInit_ex(context.get(), nullptr, nullptr, nullptr, iv.data()) != 1)
++                return false;
++            if (!decryptRange(at, entry.encryptedBytes)) return false;
 +            at += entry.encryptedBytes;
 +        }
 +    }
-+    std::array<uint8_t, 16> finalBytes { };
++    std::array<uint8_t, 32> finalBytes { };
 +    int written = 0;
 +    if (EVP_DecryptFinal_ex(context.get(), finalBytes.data(), &written) != 1 || written) return false;
 +    output = std::move(result);
@@ -31403,10 +31543,10 @@ index 0000000000000000000000000000000000000000..02d3134aae723398272d2ae66de2cef3
 +} // namespace SummitMP4
 diff --git a/Source/WebCore/platform/graphics/haiku/CencCryptoHaiku.h b/Source/WebCore/platform/graphics/haiku/CencCryptoHaiku.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..d77546c5a2050ae628523b3befeb7c7ebd2897bc
+index 0000000000000000000000000000000000000000..6d7a1e13b51c9082e83a12035ac7cef97ffdc90e
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/haiku/CencCryptoHaiku.h
-@@ -0,0 +1,38 @@
+@@ -0,0 +1,50 @@
 +// Copyright (C) 2026 Summit contributors. BSD-2-Clause.
 +#pragma once
 +#include <array>
@@ -31420,18 +31560,30 @@ index 0000000000000000000000000000000000000000..d77546c5a2050ae628523b3befeb7c7e
 +    uint32_t clearBytes { 0 };
 +    uint32_t encryptedBytes { 0 };
 +};
++// ISO/IEC 23001-7 protection schemes. WebM encryption is CENC with an 8-byte
++// IV and (for partitioned frames) subsamples.
++enum class CencScheme : uint8_t { CENC, CBC1, CENS, CBCS };
 +struct CencSample {
 +    std::array<uint8_t, 16> keyID { };
 +    std::vector<uint8_t> iv;
 +    std::vector<CencSubsample> subsamples;
++    CencScheme scheme { CencScheme::CENC };
++    // Pattern encryption ('cens', 'cbcs'): of every cryptByteBlock +
++    // skipByteBlock 16-byte blocks, the first cryptByteBlock are encrypted.
++    // 0:0 means every block is.
++    uint8_t cryptByteBlock { 0 };
++    uint8_t skipByteBlock { 0 };
 +};
-+// AES-128 CTR. Clear bytes do not consume the keystream. Failure leaves output
-+// unchanged, and never exposes a partially decrypted sample to a decoder.
++// AES-128 CTR ('cenc', 'cens') or CBC ('cbc1', 'cbcs'). Clear bytes do not
++// consume the keystream or the CBC chain. Failure leaves output unchanged,
++// and never exposes a partially decrypted sample to a decoder.
 +bool decryptCenc(std::span<const uint8_t> input, const CencSample&,
 +    const std::array<uint8_t, 16>& key, std::vector<uint8_t>& output);
 +inline bool validCencSample(const CencSample& sample, size_t size)
 +{
 +    if ((sample.iv.size() != 8 && sample.iv.size() != 16) || size > 64 * 1024 * 1024 || sample.subsamples.size() > 65535)
++        return false;
++    if (sample.cryptByteBlock > 15 || sample.skipByteBlock > 15)
 +        return false;
 +    if (sample.subsamples.empty()) return true;
 +    size_t remaining = size;
@@ -32877,10 +33029,10 @@ index 0000000000000000000000000000000000000000..69785063c0c8d3727bd9867ed0b42d88
 +}
 diff --git a/Source/WebCore/platform/graphics/haiku/DashPlaybackHaiku.cpp b/Source/WebCore/platform/graphics/haiku/DashPlaybackHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..e30bc9d64af1a37f732f9f110a8a580819bfd828
+index 0000000000000000000000000000000000000000..f8a6846155910b7b8f77397236e2918fb175c9b6
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/haiku/DashPlaybackHaiku.cpp
-@@ -0,0 +1,492 @@
+@@ -0,0 +1,495 @@
 +/* Copyright (C) 2026 air/OS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +#include "DashPlaybackHaiku.h"
 +#include "HLSPlaylistHaiku.h"
@@ -32973,17 +33125,12 @@ index 0000000000000000000000000000000000000000..e30bc9d64af1a37f732f9f110a8a5808
 +}
 +void Player::applyManifest(Manifest&& manifest)
 +{
-+    // One renderer per kind is retained across periods. Reject changing
-+    // track sets explicitly instead of stalling at a disappearing track.
-+    std::optional<std::array<bool, 2>> trackSet;
-+    for (const auto& period : manifest.periods) {
-+        std::array<bool, 2> present {false, false};
-+        for (const auto& rep : period.representations) if (supported(rep)) {
-+            present[0] = present[0] || rep.video; present[1] = present[1] || rep.audio;
-+        }
-+        if (trackSet && *trackSet != present) { fail("DASH periods with changing audio/video track sets are not supported"); return; }
-+        trackSet = present;
-+    }
++    // Periods may change their track sets (an ad with video only, a period
++    // without video). A kind is enabled if any period has it; across a period
++    // without it, select() moves that track on to the next period that has
++    // it, so its renderer waits there (audio plays silence, video keeps the
++    // last picture) instead of stalling playback. A period with other codecs
++    // gets a new parser here and a new decoder in the renderer.
 +    bool first = !m_manifest; m_manifest = std::move(manifest); ++m_catalogVersion;
 +    m_nextRefresh = m_now + m_manifest->updatePeriod;
 +    if (first) {
@@ -33033,6 +33180,10 @@ index 0000000000000000000000000000000000000000..e30bc9d64af1a37f732f9f110a8a5808
 +    track.parser->onInitSegment = [this, index](SummitMP4::InitSegment&& initialization) {
 +        if (m_hooks.protectionSystemHeaders && !initialization.protectionSystemHeaders.empty())
 +            m_hooks.protectionSystemHeaders(std::move(initialization.protectionSystemHeaders));
++        if (m_hooks.webmKeyID) {
++            for (auto& keyID : initialization.webmKeyIDs)
++                m_hooks.webmKeyID(std::vector<uint8_t>(keyID.begin(), keyID.end()));
++        }
 +        auto& track = m_tracks[index];
 +        // Muxed HLS: track 0's segments carry both kinds.
 +        auto* audio = index ? &track : muxed() ? &m_tracks[1] : nullptr;
@@ -33334,8 +33485,10 @@ index 0000000000000000000000000000000000000000..e30bc9d64af1a37f732f9f110a8a5808
 +bool Player::hasCurrentData() const
 +{
 +    if (m_stopped || (!hasVideo() && !hasAudio())) return false;
++    // A track that has ended (its kind is in no later period) does not hold
++    // up the other.
 +    for (const auto& track : m_tracks)
-+        if (track.enabled && (!track.haveData || track.bufferedEnd + 0.001 < m_position)) return false;
++        if (track.enabled && !track.ended && (!track.haveData || track.bufferedEnd + 0.001 < m_position)) return false;
 +    return true;
 +}
 +double Player::duration() const { return !m_manifest ? 0 : isLive() ? std::numeric_limits<double>::infinity() : m_manifest->duration; }
@@ -33347,9 +33500,11 @@ index 0000000000000000000000000000000000000000..e30bc9d64af1a37f732f9f110a8a5808
 +        if (supported(rep) && !rep.segments.empty()) {
 +            auto& start = starts[rep.audio ? 1 : 0]; start = std::min(start, rep.segments.front().start);
 +        }
-+    double result = 0;
-+    for (double start : starts) if (std::isfinite(start)) result = std::max(result, start);
-+    return result;
++    // Live: where both kinds can be fetched. Static: where the presentation
++    // starts, even if one kind only begins in a later period.
++    double result = isLive() ? 0 : std::numeric_limits<double>::infinity();
++    for (double start : starts) if (std::isfinite(start)) result = isLive() ? std::max(result, start) : std::min(result, start);
++    return std::isfinite(result) ? result : 0;
 +}
 +double Player::seekableEnd() const
 +{
@@ -33369,16 +33524,16 @@ index 0000000000000000000000000000000000000000..e30bc9d64af1a37f732f9f110a8a5808
 +double Player::bufferedEnd() const
 +{
 +    double result = duration();
-+    for (const auto& track : m_tracks) if (track.enabled) result = std::min(result, track.bufferedEnd);
++    for (const auto& track : m_tracks) if (track.enabled && !(track.ended && !isLive())) result = std::min(result, track.bufferedEnd);
 +    return result;
 +}
 +}
 diff --git a/Source/WebCore/platform/graphics/haiku/DashPlaybackHaiku.h b/Source/WebCore/platform/graphics/haiku/DashPlaybackHaiku.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..2f069833194610efc9364f5276264142c9105550
+index 0000000000000000000000000000000000000000..c657893b44517a36df0b46e65b8b29261fcfe93f
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/haiku/DashPlaybackHaiku.h
-@@ -0,0 +1,123 @@
+@@ -0,0 +1,125 @@
 +/* Copyright (C) 2026 air/OS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +#pragma once
 +#include "DashManifestHaiku.h"
@@ -33422,6 +33577,8 @@ index 0000000000000000000000000000000000000000..2f069833194610efc9364f5276264142
 +        std::function<void()> changed;
 +        std::function<void(const std::string&, bool)> error;
 +        std::function<void(std::vector<uint8_t>&&)> protectionSystemHeaders { };
++        // Encrypted WebM: each encrypted track's key ID ('webm' init data).
++        std::function<void(std::vector<uint8_t>&&)> webmKeyID { };
 +        std::function<std::unique_ptr<SegmentParser>(Container)> createParser { };
 +    };
 +    explicit Player(Hooks);
@@ -34711,10 +34868,10 @@ index 0000000000000000000000000000000000000000..f06b970433de5061ee8b0d0aad1cefc0
 +} // namespace WebCore
 diff --git a/Source/WebCore/platform/graphics/haiku/FragmentedMP4ParserHaiku.cpp b/Source/WebCore/platform/graphics/haiku/FragmentedMP4ParserHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..8853a91a09c15356864a31b1c167895a9bb29eb6
+index 0000000000000000000000000000000000000000..574440c5cc3b61be94ab5c808a798bd5ff8fd9d1
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/haiku/FragmentedMP4ParserHaiku.cpp
-@@ -0,0 +1,745 @@
+@@ -0,0 +1,937 @@
 +/*
 + * Copyright (C) 2026 Summit contributors.
 + *
@@ -34748,6 +34905,15 @@ index 0000000000000000000000000000000000000000..8853a91a09c15356864a31b1c167895a
 +uint64_t be64(const uint8_t* p) { return uint64_t(be32(p)) << 32 | be32(p + 4); }
 +
 +bool isType(const char* type, const char* expected) { return !std::memcmp(type, expected, 4); }
++// saiz/saio aux_info_type: the protection scheme's four-character code.
++bool isProtectionScheme(const uint8_t* type)
++{
++    for (const char* scheme : { "cenc", "cbc1", "cens", "cbcs" }) {
++        if (!std::memcmp(type, scheme, 4))
++            return true;
++    }
++    return false;
++}
 +
 +// Calls visit(type, payload, payloadSize) for each complete box in [data, data + size).
 +// Returns false if a box header is malformed or visit returns false.
@@ -34793,10 +34959,12 @@ index 0000000000000000000000000000000000000000..8853a91a09c15356864a31b1c167895a
 +    return true;
 +}
 +
++// An IV size of 0 keeps the constant IV already in the sample ('cbcs').
 +bool readCencAuxiliary(const uint8_t* data, size_t size, uint8_t ivSize, bool subsamples, CencSample& encryption, size_t& consumed)
 +{
-+    if ((ivSize != 8 && ivSize != 16) || size < ivSize) return false;
-+    encryption.iv.assign(data, data + ivSize);
++    if ((ivSize != 8 && ivSize != 16 && (ivSize || encryption.iv.empty())) || size < ivSize) return false;
++    if (ivSize)
++        encryption.iv.assign(data, data + ivSize);
 +    consumed = ivSize;
 +    if (!subsamples) return true;
 +    if (size - consumed < 2) return false;
@@ -35019,6 +35187,7 @@ index 0000000000000000000000000000000000000000..8853a91a09c15356864a31b1c167895a
 +            return forEachBox(payload, length, [&](const char* childType, const uint8_t* child, size_t childLength) {
 +                if (isType(childType, "trex") && childLength >= 24) {
 +                    TrackInfo& info = defaults[be32(child + 4)];
++                    info.defaultSampleDescriptionIndex = be32(child + 8);
 +                    info.defaultSampleDuration = be32(child + 12);
 +                    info.defaultSampleSize = be32(child + 16);
 +                    info.defaultSampleFlags = be32(child + 20);
@@ -35035,6 +35204,7 @@ index 0000000000000000000000000000000000000000..8853a91a09c15356864a31b1c167895a
 +        auto found = defaults.find(info.id);
 +        if (found == defaults.end())
 +            continue;
++        info.defaultSampleDescriptionIndex = found->second.defaultSampleDescriptionIndex;
 +        info.defaultSampleDuration = found->second.defaultSampleDuration;
 +        info.defaultSampleSize = found->second.defaultSampleSize;
 +        info.defaultSampleFlags = found->second.defaultSampleFlags;
@@ -35095,13 +35265,57 @@ index 0000000000000000000000000000000000000000..8853a91a09c15356864a31b1c167895a
 +
 +bool Parser::parseSampleDescription(const uint8_t* data, size_t size, TrackInfo& info)
 +{
-+    // Full box header, entry count, then the first sample entry.
-+    if (size < 16 || be32(data + 4) != 1)
++    // Full box header, entry count, then the sample entries. Several entries
++    // are accepted only as protected and clear descriptions of one stream
++    // (a clear lead), never as a codec change within the track.
++    if (size < 16)
 +        return false;
-+    const uint8_t* entry = data + 8;
-+    size_t entrySize = be32(entry);
-+    if (entrySize < 8 || entrySize > size - 8)
++    uint32_t count = be32(data + 4);
++    if (!count || count > 8)
 +        return false;
++    size_t at = 8;
++    std::optional<TrackInfo> first;
++    std::optional<TrackInfo> protection;
++    uint32_t clear = 0;
++    for (uint32_t index = 0; index < count; ++index) {
++        if (size - at < 8)
++            return false;
++        size_t entrySize = be32(data + at);
++        if (entrySize < 8 || entrySize > size - at)
++            return false;
++        TrackInfo entry;
++        entry.kind = info.kind;
++        if (!parseSampleEntry(data + at, entrySize, entry))
++            return false;
++        at += entrySize;
++        if (!first)
++            first = entry;
++        else if (entry.codec != first->codec || entry.codecConfig != first->codecConfig || entry.width != first->width
++            || entry.height != first->height || entry.channels != first->channels || entry.sampleRate != first->sampleRate
++            || entry.objectTypeIndication != first->objectTypeIndication)
++            return false;
++        if (!entry.encrypted) {
++            clear |= 1u << index;
++            continue;
++        }
++        if (protection && (protection->scheme != entry.scheme || protection->defaultIVSize != entry.defaultIVSize
++            || protection->defaultKeyID != entry.defaultKeyID || protection->cryptByteBlock != entry.cryptByteBlock
++            || protection->skipByteBlock != entry.skipByteBlock || protection->constantIV != entry.constantIV))
++            return false;
++        protection = entry;
++    }
++    auto id = info.id;
++    auto timescale = info.timescale;
++    info = protection ? *protection : *first;
++    info.id = id;
++    info.timescale = timescale;
++    info.clearDescriptions = clear;
++    info.descriptionCount = count;
++    return true;
++}
++
++bool Parser::parseSampleEntry(const uint8_t* entry, size_t entrySize, TrackInfo& info)
++{
 +    info.codec.assign(reinterpret_cast<const char*>(entry + 4), 4);
 +    const uint8_t* payload = entry + 8;
 +    size_t length = entrySize - 8;
@@ -35159,26 +35373,64 @@ index 0000000000000000000000000000000000000000..8853a91a09c15356864a31b1c167895a
 +            if (haveFormat || length != 4) return false;
 +            haveFormat = true;
 +            info.codec.assign(reinterpret_cast<const char*>(child), 4);
-+            return info.kind == TrackInfo::Kind::Video ? info.codec == "avc1" || info.codec == "avc3" : info.codec == "mp4a";
++            if (info.kind == TrackInfo::Kind::Video)
++                return info.codec == "avc1" || info.codec == "avc3" || info.codec == "hvc1" || info.codec == "hev1" || info.codec == "vp09" || info.codec == "av01";
++            return info.codec == "mp4a" || info.codec == "Opus";
 +        }
 +        if (isType(type, "schm")) {
-+            if (haveScheme || length < 12 || be32(child) || std::memcmp(child + 4, "cenc", 4) || be32(child + 8) != 0x10000) return false;
++            if (haveScheme || length < 12 || be32(child) || be32(child + 8) != 0x10000) return false;
++            if (!std::memcmp(child + 4, "cenc", 4))
++                info.scheme = CencScheme::CENC;
++            else if (!std::memcmp(child + 4, "cbc1", 4))
++                info.scheme = CencScheme::CBC1;
++            else if (!std::memcmp(child + 4, "cens", 4))
++                info.scheme = CencScheme::CENS;
++            else if (!std::memcmp(child + 4, "cbcs", 4))
++                info.scheme = CencScheme::CBCS;
++            else
++                return false;
 +            haveScheme = true;
 +        }
 +        if (isType(type, "schi")) {
 +            return forEachBox(child, length, [&](const char* type, const uint8_t* tenc, size_t length) {
 +                if (!isType(type, "tenc")) return true;
-+                if (haveTenc || length != 24 || tenc[0] > 1 || (be32(tenc) & 0xffffff) || tenc[4] || tenc[5] || tenc[6] != 1 || (tenc[7] != 8 && tenc[7] != 16)) return false;
++                // Version 1 adds the pattern (crypt:skip blocks) in byte 5.
++                // An IV size of 0 means a constant IV follows the key ID.
++                if (haveTenc || length < 24 || tenc[0] > 1 || (be32(tenc) & 0xffffff) || tenc[4] || (!tenc[0] && tenc[5]) || tenc[6] != 1
++                    || (tenc[7] && tenc[7] != 8 && tenc[7] != 16))
++                    return false;
++                size_t expected = 24;
++                if (!tenc[7]) {
++                    if (length < 25 || (tenc[24] != 8 && tenc[24] != 16)) return false;
++                    expected = 25 + tenc[24];
++                    info.constantIV.assign(tenc + 25, tenc + std::min(length, expected));
++                }
++                if (length != expected) return false;
 +                haveTenc = true;
 +                info.encrypted = true;
 +                info.defaultIVSize = tenc[7];
++                info.cryptByteBlock = tenc[5] >> 4;
++                info.skipByteBlock = tenc[5] & 0xf;
 +                std::copy(tenc + 8, tenc + 24, info.defaultKeyID.begin());
 +                return true;
 +            });
 +        }
 +        return true;
 +    });
-+    return valid && haveFormat && haveScheme && haveTenc;
++    if (!valid || !haveFormat || !haveScheme || !haveTenc)
++        return false;
++    // Patterns belong to 'cens' and 'cbcs'; a constant IV to 'cbcs'; CBC
++    // needs whole 16-byte IVs ISO/IEC 23001-7 10.2-10.4.
++    bool pattern = info.scheme == CencScheme::CENS || info.scheme == CencScheme::CBCS;
++    if (!pattern && (info.cryptByteBlock || info.skipByteBlock))
++        return false;
++    if (pattern && !info.cryptByteBlock && info.skipByteBlock)
++        return false;
++    if (!info.defaultIVSize && info.scheme != CencScheme::CBCS)
++        return false;
++    if (info.scheme == CencScheme::CBC1 && info.defaultIVSize != 16)
++        return false;
++    return true;
 +}
 +
 +bool Parser::parseMovieFragment(const uint8_t* data, size_t size, uint64_t moofOffset)
@@ -35199,7 +35451,7 @@ index 0000000000000000000000000000000000000000..8853a91a09c15356864a31b1c167895a
 +{
 +    uint32_t trackID = 0;
 +    uint64_t base = moofOffset;
-+    uint32_t defaultDuration = 0, defaultSize = 0, defaultFlags = 0;
++    uint32_t defaultDuration = 0, defaultSize = 0, defaultFlags = 0, descriptionIndex = 1;
 +    bool haveDefaults = false;
 +    std::optional<uint64_t> baseDecodeTime;
 +    const TrackInfo* info = nullptr;
@@ -35222,6 +35474,7 @@ index 0000000000000000000000000000000000000000..8853a91a09c15356864a31b1c167895a
 +            defaultDuration = info->defaultSampleDuration;
 +            defaultSize = info->defaultSampleSize;
 +            defaultFlags = info->defaultSampleFlags;
++            descriptionIndex = info->defaultSampleDescriptionIndex;
 +            size_t at = 8;
 +            auto need = [&](size_t bytes) { return at + bytes <= length; };
 +            if (flags & 0x1) {
@@ -35231,9 +35484,11 @@ index 0000000000000000000000000000000000000000..8853a91a09c15356864a31b1c167895a
 +                at += 8;
 +            }
 +            if (flags & 0x2) {
-+                if (!need(4) || be32(payload + at) != 1) return false;
++                if (!need(4)) return false;
++                descriptionIndex = be32(payload + at);
 +                at += 4;
 +            }
++            if (!descriptionIndex || descriptionIndex > info->descriptionCount) return false;
 +            if (flags & 0x8) {
 +                if (!need(4))
 +                    return false;
@@ -35344,9 +35599,77 @@ index 0000000000000000000000000000000000000000..8853a91a09c15356864a31b1c167895a
 +        std::vector<uint8_t> auxiliarySizes;
 +        std::optional<uint64_t> auxiliaryOffset;
 +        bool haveSizes = false;
++        // 'seig' sample groups: per-sample key IDs, IV sizes, patterns and
++        // clear samples (key rotation). Only the fragment's own descriptions
++        // (indexes above 0x10000) are supported.
++        struct Group {
++            bool isProtected { true };
++            uint8_t ivSize { 0 };
++            CencSample encryption;
++        };
++        std::vector<Group> groups;
++        std::vector<std::pair<uint32_t, uint32_t>> groupRuns;
++        bool haveGroups = false, haveGroupRuns = false;
 +        ok = forEachBox(data, size, [&](const char* type, const uint8_t* payload, size_t length) {
-+            if ((isType(type, "sgpd") || isType(type, "sbgp")) && length >= 8 && !std::memcmp(payload + 4, "seig", 4))
-+                return false; // Per-sample key overrides are not implemented.
++            if (isType(type, "sgpd") && length >= 8 && !std::memcmp(payload + 4, "seig", 4)) {
++                if (haveGroups || payload[0] < 1 || payload[0] > 2) return false;
++                haveGroups = true;
++                size_t at = 8;
++                uint32_t defaultLength = 0;
++                if (length < at + 4) return false;
++                defaultLength = be32(payload + at);
++                at += 4;
++                if (payload[0] >= 2) at += 4; // default_sample_description_index
++                if (length < at + 4) return false;
++                uint32_t count = be32(payload + at);
++                at += 4;
++                if (count > 1024) return false;
++                for (uint32_t i = 0; i < count; ++i) {
++                    uint32_t entryLength = defaultLength;
++                    if (!entryLength) {
++                        if (length - at < 4) return false;
++                        entryLength = be32(payload + at);
++                        at += 4;
++                    }
++                    if (entryLength < 20 || entryLength > length - at) return false;
++                    const uint8_t* entry = payload + at;
++                    Group group;
++                    group.encryption = defaultEncryption(*info);
++                    group.encryption.iv.clear();
++                    group.encryption.cryptByteBlock = entry[1] >> 4;
++                    group.encryption.skipByteBlock = entry[1] & 0xf;
++                    group.isProtected = entry[2];
++                    group.ivSize = entry[3];
++                    std::copy(entry + 4, entry + 20, group.encryption.keyID.begin());
++                    size_t expected = 20;
++                    if (entry[2] > 1 || (group.ivSize && group.ivSize != 8 && group.ivSize != 16)) return false;
++                    if (group.isProtected && !group.ivSize) {
++                        if (entryLength < 21 || (entry[20] != 8 && entry[20] != 16)) return false;
++                        expected = 21 + entry[20];
++                        if (entryLength < expected) return false;
++                        group.encryption.iv.assign(entry + 21, entry + expected);
++                    }
++                    if (entryLength != expected) return false;
++                    bool pattern = info->scheme == CencScheme::CENS || info->scheme == CencScheme::CBCS;
++                    if (!pattern && (group.encryption.cryptByteBlock || group.encryption.skipByteBlock)) return false;
++                    if (group.isProtected && !group.ivSize && info->scheme != CencScheme::CBCS) return false;
++                    groups.push_back(std::move(group));
++                    at += entryLength;
++                }
++                return at == length;
++            }
++            if (isType(type, "sbgp") && length >= 8 && !std::memcmp(payload + 4, "seig", 4)) {
++                if (haveGroupRuns || payload[0] > 1) return false;
++                haveGroupRuns = true;
++                size_t at = payload[0] ? 12 : 8;
++                if (length < at + 4) return false;
++                uint32_t count = be32(payload + at);
++                at += 4;
++                if (count > (length - at) / 8 || length - at != size_t(count) * 8) return false;
++                for (uint32_t i = 0; i < count; ++i, at += 8)
++                    groupRuns.emplace_back(be32(payload + at), be32(payload + at + 4));
++                return true;
++            }
 +            if (isType(type, "senc")) {
 +                if (senc || length < 8 || payload[0] || (be32(payload) & ~2u)) return false;
 +                senc = payload;
@@ -35356,7 +35679,7 @@ index 0000000000000000000000000000000000000000..8853a91a09c15356864a31b1c167895a
 +                haveSizes = true;
 +                size_t at = 4;
 +                if (be32(payload) & 1) {
-+                    if (length < 17 || std::memcmp(payload + at, "cenc", 4) || be32(payload + at + 4)) return false;
++                    if (length < 17 || !isProtectionScheme(payload + at) || be32(payload + at + 4)) return false;
 +                    at += 8;
 +                }
 +                uint8_t defaultSize = payload[at++];
@@ -35370,7 +35693,7 @@ index 0000000000000000000000000000000000000000..8853a91a09c15356864a31b1c167895a
 +                if (auxiliaryOffset || length < 12 || payload[0] > 1 || (be32(payload) & 0xfffffe)) return false;
 +                size_t at = 4;
 +                if (be32(payload) & 1) {
-+                    if (length < 20 || std::memcmp(payload + at, "cenc", 4) || be32(payload + at + 4)) return false;
++                    if (length < 20 || !isProtectionScheme(payload + at) || be32(payload + at + 4)) return false;
 +                    at += 8;
 +                }
 +                if (be32(payload + at) != 1 || length != at + (payload[0] ? 12u : 8u)) return false;
@@ -35381,30 +35704,56 @@ index 0000000000000000000000000000000000000000..8853a91a09c15356864a31b1c167895a
 +            }
 +            return true;
 +        });
-+        if (ok && info->encrypted) {
++        bool encryptedFragment = info->encrypted && !(info->clearDescriptions & (1u << (descriptionIndex - 1)));
++        if (ok && encryptedFragment) {
 +            size_t count = 0;
 +            for (size_t i = firstRunIndex; i < m_pendingRuns.size(); ++i) count += m_pendingRuns[i].entries.size();
 +            ok = count <= 200000 && (!senc || be32(senc + 4) == count)
 +                && (haveSizes == bool(auxiliaryOffset)) && (!haveSizes || auxiliarySizes.size() == count)
-+                && (senc || haveSizes);
-+            size_t at = 8, index = 0;
++                && (senc || haveSizes || !info->defaultIVSize || haveGroups);
++            if (haveGroupRuns != haveGroups) ok = false;
++            size_t at = 8, index = 0, groupRun = 0;
++            uint32_t groupRunLeft = groupRuns.empty() ? 0 : groupRuns[0].first;
 +            uint64_t aux = auxiliaryOffset.value_or(0);
 +            for (size_t i = firstRunIndex; ok && i < m_pendingRuns.size(); ++i) {
 +                for (auto& entry : m_pendingRuns[i].entries) {
-+                    entry.encryption.emplace();
-+                    entry.encryption->keyID = info->defaultKeyID;
++                    // The sample's description: the track default, or its
++                    // 'seig' group (0 means the default).
++                    while (groupRun < groupRuns.size() && !groupRunLeft && ++groupRun < groupRuns.size())
++                        groupRunLeft = groupRuns[groupRun].first;
++                    uint32_t group = 0;
++                    if (groupRun < groupRuns.size()) {
++                        group = groupRuns[groupRun].second;
++                        --groupRunLeft;
++                    }
++                    const Group* override = nullptr;
++                    if (group) {
++                        if (group <= 0x10000 || group - 0x10000 > groups.size()) { ok = false; break; }
++                        override = &groups[group - 0x10001];
++                    }
++                    bool sampleProtected = !override || override->isProtected;
++                    uint8_t ivSize = override ? override->ivSize : info->defaultIVSize;
++                    CencSample encryption = override ? override->encryption : defaultEncryption(*info);
++                    if (!sampleProtected) encryption.iv = { 0 }; // Lets an empty senc entry parse; discarded.
 +                    if (senc) {
 +                        size_t consumed = 0;
-+                        if (at > sencSize || !readCencAuxiliary(senc + at, sencSize - at, info->defaultIVSize, be32(senc) & 2, *entry.encryption, consumed)
-+                            || !validCencSample(*entry.encryption, entry.size)) { ok = false; break; }
++                        if (at > sencSize || !readCencAuxiliary(senc + at, sencSize - at, ivSize, be32(senc) & 2, encryption, consumed)
++                            || (sampleProtected && !validCencSample(encryption, entry.size))) { ok = false; break; }
 +                        uint64_t absolute = m_bufferOffset + size_t(senc + at - m_buffer.data());
 +                        if (haveSizes && (auxiliarySizes[index] != consumed || aux != absolute)) { ok = false; break; }
 +                        at += consumed;
-+                    } else {
-+                        if (auxiliarySizes[index] < info->defaultIVSize) { ok = false; break; }
-+                        entry.auxiliaryOffset = aux;
-+                        entry.auxiliarySize = auxiliarySizes[index];
++                    } else if (haveSizes) {
++                        if (auxiliarySizes[index] < ivSize) { ok = false; break; }
++                        if (sampleProtected) {
++                            entry.auxiliaryOffset = aux;
++                            entry.auxiliarySize = auxiliarySizes[index];
++                        }
++                    } else if (sampleProtected && (ivSize || !validCencSample(encryption, entry.size))) {
++                        ok = false; break; // Neither IVs nor a constant IV.
 +                    }
++                    entry.ivSize = ivSize;
++                    if (sampleProtected)
++                        entry.encryption = std::move(encryption);
 +                    if (haveSizes) {
 +                        if (auxiliarySizes[index] > UINT64_MAX - aux) { ok = false; break; }
 +                        aux += auxiliarySizes[index];
@@ -35413,7 +35762,7 @@ index 0000000000000000000000000000000000000000..8853a91a09c15356864a31b1c167895a
 +                }
 +            }
 +            if (senc && at != sencSize) ok = false;
-+        } else if (ok && (senc || haveSizes || auxiliaryOffset))
++        } else if (ok && (senc || haveSizes || auxiliaryOffset || haveGroups || haveGroupRuns))
 +            ok = false; // Never treat signaled encrypted samples as clear.
 +    }
 +    if (!ok)
@@ -35436,8 +35785,8 @@ index 0000000000000000000000000000000000000000..8853a91a09c15356864a31b1c167895a
 +                    return false;
 +                size_t consumed = 0;
 +                auto* info = track(run.trackID);
-+                if (!info || !readCencAuxiliary(m_buffer.data() + (aux - m_bufferOffset), entry.auxiliarySize, info->defaultIVSize,
-+                        entry.auxiliarySize > info->defaultIVSize, *entry.encryption, consumed)
++                if (!info || !readCencAuxiliary(m_buffer.data() + (aux - m_bufferOffset), entry.auxiliarySize, entry.ivSize,
++                        entry.auxiliarySize > entry.ivSize, *entry.encryption, consumed)
 +                    || consumed != entry.auxiliarySize || !validCencSample(*entry.encryption, entry.size))
 +                    return false;
 +            }
@@ -35462,10 +35811,10 @@ index 0000000000000000000000000000000000000000..8853a91a09c15356864a31b1c167895a
 +} // namespace SummitMP4
 diff --git a/Source/WebCore/platform/graphics/haiku/FragmentedMP4ParserHaiku.h b/Source/WebCore/platform/graphics/haiku/FragmentedMP4ParserHaiku.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..701534576fbed4765b47d2c05a12d7477de604cf
+index 0000000000000000000000000000000000000000..4ca0fe05143cfeb8a077cb97c8bafe7d957eb190
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/haiku/FragmentedMP4ParserHaiku.h
-@@ -0,0 +1,140 @@
+@@ -0,0 +1,171 @@
 +/*
 + * Copyright (C) 2026 Summit contributors.
 + *
@@ -35523,12 +35872,38 @@ index 0000000000000000000000000000000000000000..701534576fbed4765b47d2c05a12d747
 +    bool encrypted { false };
 +    uint8_t defaultIVSize { 0 };
 +    std::array<uint8_t, 16> defaultKeyID { };
++    // From 'schm' and 'tenc': the scheme, its pattern and, when samples carry
++    // no IV of their own (defaultIVSize 0, 'cbcs'), the constant IV.
++    CencScheme scheme { CencScheme::CENC };
++    uint8_t cryptByteBlock { 0 };
++    uint8_t skipByteBlock { 0 };
++    std::vector<uint8_t> constantIV;
++    // Sample descriptions (bit n - 1 for index n) that are not protected. A
++    // clear lead (Shaka Packager's default) describes the stream twice, as
++    // encv/enca and as the clear entry, and its first fragments use the latter.
++    uint32_t clearDescriptions { 0 };
++    uint32_t descriptionCount { 1 };
 +
 +    // Defaults from the movie extends box (trex).
++    uint32_t defaultSampleDescriptionIndex { 1 };
 +    uint32_t defaultSampleDuration { 0 };
 +    uint32_t defaultSampleSize { 0 };
 +    uint32_t defaultSampleFlags { 0 };
 +};
++
++// The track's default sample protection, before per-sample IVs, subsamples
++// and sample-group overrides.
++inline CencSample defaultEncryption(const TrackInfo& info)
++{
++    CencSample sample;
++    sample.keyID = info.defaultKeyID;
++    sample.scheme = info.scheme;
++    sample.cryptByteBlock = info.cryptByteBlock;
++    sample.skipByteBlock = info.skipByteBlock;
++    if (!info.defaultIVSize)
++        sample.iv = info.constantIV;
++    return sample;
++}
 +
 +struct InitSegment {
 +    uint32_t movieTimescale { 0 };
@@ -35536,6 +35911,8 @@ index 0000000000000000000000000000000000000000..701534576fbed4765b47d2c05a12d747
 +    uint64_t duration { 0 };
 +    std::vector<TrackInfo> tracks;
 +    std::vector<uint8_t> protectionSystemHeaders;
++    // WebM: the encrypted tracks' key IDs, each 'webm' initialization data.
++    std::vector<std::array<uint8_t, 16>> webmKeyIDs;
 +};
 +
 +struct Sample {
@@ -35579,6 +35956,8 @@ index 0000000000000000000000000000000000000000..701534576fbed4765b47d2c05a12d747
 +            std::optional<CencSample> encryption;
 +            uint64_t auxiliaryOffset { 0 };
 +            uint8_t auxiliarySize { 0 };
++            // Per-sample IV size: the track's, or a 'seig' group's.
++            uint8_t ivSize { 0 };
 +        };
 +        std::vector<Entry> entries;
 +    };
@@ -35587,6 +35966,7 @@ index 0000000000000000000000000000000000000000..701534576fbed4765b47d2c05a12d747
 +    bool parseMovie(const uint8_t*, size_t);
 +    bool parseTrack(const uint8_t*, size_t, TrackInfo&);
 +    bool parseSampleDescription(const uint8_t*, size_t, TrackInfo&);
++    bool parseSampleEntry(const uint8_t*, size_t, TrackInfo&);
 +    bool parseProtection(const uint8_t*, size_t, TrackInfo&);
 +    bool parseMovieFragment(const uint8_t*, size_t, uint64_t moofOffset);
 +    bool parseTrackFragment(const uint8_t*, size_t, uint64_t moofOffset);
@@ -44411,10 +44791,10 @@ index 0000000000000000000000000000000000000000..7d7398ed294e485d2708cb41295954d8
 +#endif
 diff --git a/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaikuMSE.cpp b/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaikuMSE.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..abc47345300dbadf9a06717b79743452cb578df7
+index 0000000000000000000000000000000000000000..98c0aea6b002917237029f105ed324529de42e1d
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaikuMSE.cpp
-@@ -0,0 +1,3389 @@
+@@ -0,0 +1,3394 @@
 +/*
 + * Copyright (C) 2026 Summit contributors.
 + *
@@ -46675,14 +47055,14 @@ index 0000000000000000000000000000000000000000..abc47345300dbadf9a06717b79743452
 +    if (m_cdmInstance.get() == &instance) cdmInstanceAttached(instance);
 +}
 +
-+void MediaPlayerPrivateHaikuMSE::initializationDataEncountered(std::vector<uint8_t>&& headers)
++void MediaPlayerPrivateHaikuMSE::initializationDataEncountered(std::vector<uint8_t>&& headers, ASCIILiteral initDataType)
 +{
 +    if (headers.empty()) return;
 +    if (RefPtr player = m_player.get()) {
 +        if (m_dashLoader && m_dashLoader->hasInsecureResource())
 +            player->initializationDataEncountered(emptyString(), nullptr);
 +        else
-+            player->initializationDataEncountered("cenc"_s, ArrayBuffer::create(std::span { headers }));
++            player->initializationDataEncountered(initDataType, ArrayBuffer::create(std::span { headers }));
 +    }
 +}
 +
@@ -46796,6 +47176,7 @@ index 0000000000000000000000000000000000000000..abc47345300dbadf9a06717b79743452
 +    };
 +#if ENABLE(ENCRYPTED_MEDIA)
 +    hooks.protectionSystemHeaders = [this](std::vector<uint8_t>&& headers) { initializationDataEncountered(WTF::move(headers)); };
++    hooks.webmKeyID = [this](std::vector<uint8_t>&& keyID) { initializationDataEncountered(WTF::move(keyID), "webm"_s); };
 +#endif
 +    hooks.createParser = [](SummitDASH::Container container) -> std::unique_ptr<SummitDASH::SegmentParser> {
 +        if (container == SummitDASH::Container::MPEG2TS && SummitMPEGTS::Parser::available())
@@ -47626,7 +48007,11 @@ index 0000000000000000000000000000000000000000..abc47345300dbadf9a06717b79743452
 +    }
 +    SourceBufferPrivate::didReceiveInitializationSegment(WTF::move(segment));
 +#if ENABLE(ENCRYPTED_MEDIA)
-+    if (RefPtr player = this->player()) player->initializationDataEncountered(WTF::move(init.protectionSystemHeaders));
++    if (RefPtr player = this->player()) {
++        player->initializationDataEncountered(WTF::move(init.protectionSystemHeaders));
++        for (auto& keyID : init.webmKeyIDs)
++            player->initializationDataEncountered(std::vector<uint8_t>(keyID.begin(), keyID.end()), "webm"_s);
++    }
 +#endif
 +}
 +
@@ -47806,10 +48191,10 @@ index 0000000000000000000000000000000000000000..abc47345300dbadf9a06717b79743452
 +#endif // ENABLE(MEDIA_SOURCE)
 diff --git a/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaikuMSE.h b/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaikuMSE.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..c31c88c61341d5bc7dc45cd5925fbe308d82f13c
+index 0000000000000000000000000000000000000000..ab43eb77437b26be01e5ae26ac5b0c484c4ba4e3
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaikuMSE.h
-@@ -0,0 +1,422 @@
+@@ -0,0 +1,423 @@
 +/*
 + * Copyright (C) 2026 Summit contributors.
 + *
@@ -48017,7 +48402,8 @@ index 0000000000000000000000000000000000000000..c31c88c61341d5bc7dc45cd5925fbe30
 +#if ENABLE(ENCRYPTED_MEDIA)
 +    HaikuCencDecryptionContext& decryptionContext() const { return m_decryptionContext.get(); }
 +    void encryptionStateChanged();
-+    void initializationDataEncountered(std::vector<uint8_t>&&);
++    // "cenc" (PSSH boxes) or "webm" (one key ID).
++    void initializationDataEncountered(std::vector<uint8_t>&&, ASCIILiteral initDataType = "cenc"_s);
 +#endif
 +
 +#if !RELEASE_LOG_DISABLED
@@ -52392,10 +52778,10 @@ index 0000000000000000000000000000000000000000..28344fa87031dce227821c00dfacb08e
 +} // namespace WebCore
 diff --git a/Source/WebCore/platform/graphics/haiku/WebMParserHaiku.cpp b/Source/WebCore/platform/graphics/haiku/WebMParserHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..cdb8c7f7c24639c71c111af7969f91ebfd8932cb
+index 0000000000000000000000000000000000000000..3eaa4afde8bbf2e577b579ef76de3029f0ef4a80
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/haiku/WebMParserHaiku.cpp
-@@ -0,0 +1,616 @@
+@@ -0,0 +1,711 @@
 +/*
 + * Copyright (C) 2026 Summit contributors.
 + *
@@ -52605,8 +52991,6 @@ index 0000000000000000000000000000000000000000..cdb8c7f7c24639c71c111af7969f91eb
 +        case Id::kVoid:
 +            *action = webm::Action::kSkip;
 +            return ok;
-+        case Id::kContentEncodings:
-+            return invalid; // WebM encryption/compression is not MP4 CENC.
 +        case Id::kSegment:
 +        case Id::kCluster:
 +            return ok; // Unknown-length live segments/clusters are valid.
@@ -52764,9 +53148,84 @@ index 0000000000000000000000000000000000000000..cdb8c7f7c24639c71c111af7969f91eb
 +                return invalid;
 +            track.defaultDuration = *duration;
 +        }
++        if (entry.content_encodings.is_present() && !readEncryption(entry.content_encodings.value(), info))
++            return invalid;
 +        auto trackID = info.id;
 +        m_pendingTracks.emplace(trackID, std::move(track));
 +        return ok;
++    }
++
++    // WebM encryption (https://www.webmproject.org/docs/webm-encryption/):
++    // one ContentEncoding of type encryption, AES in CTR mode, covering the
++    // frames. Compression (header stripping) is still refused.
++    static bool readEncryption(const webm::ContentEncodings& encodings, SummitMP4::TrackInfo& info)
++    {
++        if (encodings.encodings.size() != 1)
++            return false;
++        const auto& encoding = encodings.encodings[0].value();
++        if (encoding.type.value() != webm::ContentEncodingType::kEncryption || encoding.scope.value() != 1
++            || !encoding.encryption.is_present())
++            return false;
++        const auto& encryption = encoding.encryption.value();
++        if (encryption.algorithm.value() != webm::ContentEncAlgo::kAes || encryption.key_id.value().size() != 16
++            || encryption.aes_settings.value().aes_settings_cipher_mode.value() != webm::AesSettingsCipherMode::kCtr)
++            return false;
++        info.encrypted = true;
++        info.scheme = SummitMP4::CencScheme::CENC;
++        info.defaultIVSize = 8;
++        std::copy(encryption.key_id.value().begin(), encryption.key_id.value().end(), info.defaultKeyID.begin());
++        return true;
++    }
++
++    // Strips an encrypted track's frame header: the signal byte, then for
++    // an encrypted frame its 8-byte IV and, if partitioned, the partition
++    // offsets. Partitions alternate clear and encrypted, starting clear.
++    static bool readFrameEncryption(const SummitMP4::TrackInfo& info, std::vector<uint8_t>& bytes, std::optional<SummitMP4::CencSample>& encryption)
++    {
++        if (bytes.empty() || (bytes[0] & ~3))
++            return false;
++        uint8_t signal = bytes[0];
++        size_t header = 1;
++        if (signal & 1) {
++            if (bytes.size() < 9)
++                return false;
++            SummitMP4::CencSample sample;
++            sample.keyID = info.defaultKeyID;
++            sample.iv.assign(bytes.begin() + 1, bytes.begin() + 9);
++            header = 9;
++            if (signal & 2) {
++                if (bytes.size() < 10)
++                    return false;
++                size_t count = bytes[9];
++                header = 10 + count * 4;
++                if (bytes.size() < header)
++                    return false;
++                size_t frameSize = bytes.size() - header;
++                uint32_t previous = 0;
++                bool clear = true;
++                for (size_t i = 0; i <= count; ++i) {
++                    uint32_t end = frameSize;
++                    if (i < count) {
++                        const uint8_t* offset = bytes.data() + 10 + i * 4;
++                        end = uint32_t(offset[0]) << 24 | uint32_t(offset[1]) << 16 | uint32_t(offset[2]) << 8 | offset[3];
++                    }
++                    if (end < previous || end > frameSize)
++                        return false;
++                    if (clear)
++                        sample.subsamples.push_back({ end - previous, 0 });
++                    else
++                        sample.subsamples.back().encryptedBytes = end - previous;
++                    previous = end;
++                    clear = !clear;
++                }
++            }
++            if (!SummitMP4::validCencSample(sample, bytes.size() - header))
++                return false;
++            encryption = std::move(sample);
++        } else if (signal & 2)
++            return false; // Partitions describe an encrypted frame only.
++        bytes.erase(bytes.begin(), bytes.begin() + header);
++        return true;
 +    }
 +
 +    Status OnElementEnd(const webm::ElementMetadata& metadata) final
@@ -52784,8 +53243,11 @@ index 0000000000000000000000000000000000000000..cdb8c7f7c24639c71c111af7969f91eb
 +        SummitMP4::InitSegment init;
 +        init.movieTimescale = 1000000;
 +        init.duration = m_duration;
-+        for (auto& [id, track] : m_tracks)
++        for (auto& [id, track] : m_tracks) {
 +            init.tracks.push_back(track.info);
++            if (track.info.encrypted && std::find(init.webmKeyIDs.begin(), init.webmKeyIDs.end(), track.info.defaultKeyID) == init.webmKeyIDs.end())
++                init.webmKeyIDs.push_back(track.info.defaultKeyID);
++        }
 +        m_haveInit = true;
 +        if (m_owner.onInitSegment)
 +            m_owner.onInitSegment(std::move(init));
@@ -52894,12 +53356,23 @@ index 0000000000000000000000000000000000000000..cdb8c7f7c24639c71c111af7969f91eb
 +        // retaining actual discontinuities and out-of-order appends.
 +        if (audio && track.lastEnd && (*timestamp >= *track.lastEnd ? __int128(*timestamp) - *track.lastEnd : __int128(*track.lastEnd) - *timestamp) <= (__int128(m_timecodeScale) * info.timescale / nanosecondsPerSecond + 1))
 +            timestamp = track.lastEnd;
++        std::vector<std::optional<SummitMP4::CencSample>> encryption(m_frames.size());
++        if (info.encrypted) {
++            for (size_t index = 0; index < m_frames.size(); ++index) {
++                if (!readFrameEncryption(info, m_frames[index], encryption[index]) || m_frames[index].empty())
++                    return invalid;
++            }
++        }
 +        std::vector<uint32_t> durations;
 +        durations.reserve(m_frames.size());
 +        uint64_t remainingDuration = 0;
-+        for (auto& bytes : m_frames) {
++        for (size_t index = 0; index < m_frames.size(); ++index) {
++            auto& bytes = m_frames[index];
 +            int64_t duration = *explicitDuration ? *explicitDuration / m_frames.size() : track.defaultDuration;
-+            if (info.codec == "Opus") {
++            if (encryption[index]) {
++                // An encrypted packet's own duration can't be read here; the
++                // next packet's timestamp gives it (as for video).
++            } else if (info.codec == "Opus") {
 +                unsigned char toc;
 +                const unsigned char* frames[48];
 +                opus_int16 sizes[48];
@@ -52941,6 +53414,8 @@ index 0000000000000000000000000000000000000000..cdb8c7f7c24639c71c111af7969f91eb
 +            sample.duration = duration;
 +            sample.isSync = audio || m_keyframe;
 +            sample.data = std::move(bytes);
++            sample.encryption = std::move(encryption[index]);
++            bool encryptedAudio = audio && sample.encryption;
 +            // Keep coded duration and presentation timestamps intact. The
 +            // audio renderer consumes these trims after decoding the packet.
 +            sample.trimStart = std::min(track.preSkipRemaining, sample.duration);
@@ -52952,7 +53427,7 @@ index 0000000000000000000000000000000000000000..cdb8c7f7c24639c71c111af7969f91eb
 +                sample.trimEnd = std::min<uint64_t>(duration, discardEnd - remainingDuration);
 +            if (uint64_t(sample.trimStart) + sample.trimEnd > sample.duration)
 +                return invalid;
-+            if (!audio && !duration) {
++            if ((!audio || encryptedAudio) && !duration) {
 +                track.pending = std::move(sample);
 +                // Laced video requires timing for the individual frames.
 +                if (m_frames.size() > 1)
@@ -52972,9 +53447,15 @@ index 0000000000000000000000000000000000000000..cdb8c7f7c24639c71c111af7969f91eb
 +            return;
 +        auto sample = std::move(*track.pending);
 +        track.pending.reset();
++        bool audio = track.info.kind == SummitMP4::TrackInfo::Kind::Audio;
 +        if (!sample.duration)
-+            sample.duration = track.defaultDuration ? track.defaultDuration : track.lastDuration ? track.lastDuration : 33333;
++            sample.duration = track.defaultDuration ? track.defaultDuration : track.lastDuration ? track.lastDuration : audio ? track.info.timescale / 50 : 33333;
 +        track.lastDuration = sample.duration;
++        if (audio && sample.encryption) {
++            // Encrypted Opus: its pre-skip waited for the packet's duration.
++            sample.trimStart = std::min(track.preSkipRemaining, sample.duration);
++            track.preSkipRemaining -= sample.trimStart;
++        }
 +        if (m_owner.onSample)
 +            m_owner.onSample(std::move(sample));
 +    }

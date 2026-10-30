@@ -16,8 +16,9 @@ their separately documented H.264/AAC scope.
 Raw AAC and MPEG audio use MSE sequence mode and reject a `codecs` parameter,
 including an empty parameter. MIME type matching is case insensitive. Other
 containers validate codec strings and reject incompatible combinations. Vorbis
-requires the installed FFmpeg library's public packet-duration API. Unsupported
-WebM content compression or encryption produces an append error. The new clear
+requires the installed FFmpeg library's public packet-duration API. WebM
+content compression produces an append error; WebM encryption is read
+([Clear Key](encrypted-media.md)). The new clear
 codecs do not extend the [Clear Key](encrypted-media.md) support matrix.
 
 The decoder registry can select installed hardware. Existing NVDEC/Raspberry Pi
@@ -203,8 +204,10 @@ file player (finite byte-range CMAF only).
 
 Not supported, with a format error: `SAMPLE-AES` and `SAMPLE-AES-CTR`, any
 non-identity `KEYFORMAT` (FairPlay and other DRM), packed-audio segments
-(raw `.aac`/`.ac3`/`.mp3` with ID3 timestamps), I-frame playlists, a period
-whose track set changes, and a rendition from a second audio group. Subtitles,
+(raw `.aac`/`.ac3`/`.mp3` with ID3 timestamps), I-frame playlists and a
+rendition from a second audio group. (Periods whose track set changes are no
+longer refused since DASH plays them, 30 October; for HLS that is not
+tested.) Subtitles,
 `CLOSED-CAPTIONS`, low-latency parts (`EXT-X-PART`, blocking reloads; the full
 segments still play), delta updates, content steering and
 `EXT-X-START` are ignored.

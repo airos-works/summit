@@ -23,7 +23,9 @@ to the same Media Kit audio and video renderers used by MediaSource.
   indexes are refused. The MPD namespace is matched without regard to case
   (FFmpeg's WebM manifests write `urn:mpeg:DASH:schema:MPD:2011`).
 - Static presentations and dynamic manifests with live-window refresh.
-- Multiple periods with consistent audio/video track sets.
+- Multiple periods, including periods that change the track set (since 30
+  October): an ad period with video only, a period without video, or a
+  period with other codecs.
 - Adaptive representation changes at aligned segment boundaries. Selection
   starts with the lowest bandwidth and uses measured transfer throughput.
 
@@ -32,11 +34,24 @@ outstanding segment requests, discards stale completions, flushes decoder
 queues, and fetches the segment containing the target. Seek completion waits
 for a decoded video frame. Live streams expose a finite seekable window.
 
-Periods that change their audio/video track sets are outside this
-implementation: one renderer per kind is kept across periods. CENC-encrypted H.264/AAC
-representations can use temporary Clear Key sessions through
-[Encrypted Media Extensions](encrypted-media.md); other encryption schemes
-and commercial DRM systems are not supported.
+A kind (video, audio) is enabled when any period has a playable
+representation of it, and one renderer per kind is kept. Across a period
+without that kind, the track moves on to the next period that has it: its
+next segment is fetched early and the renderer waits for its timestamps, so
+audio plays silence and video keeps its last picture (after a seek into
+such a period, or at the start of an audio-only first period, the next
+period's first picture shows at once, as the first frame after a seek
+always does). A track whose kind no later period has ends there and no
+longer holds up the other (`hasCurrentData`, `bufferedEnd`). A static
+presentation's seekable range starts where its first period starts, even if
+one kind only begins later (live presentations still start where both kinds
+can be fetched). A period with other codecs or parameters gets a new parser,
+and the renderer a new decoder at the configuration change. Encrypted
+representations (`cenc`, `cbc1`, `cens`, `cbcs` MP4 and encrypted WebM) can
+use temporary Clear Key sessions through
+[Encrypted Media Extensions](encrypted-media.md), which CI's engine
+configuration currently compiles out; commercial DRM systems are not
+supported.
 
 ## Network and parsing boundaries
 
@@ -102,8 +117,21 @@ Both portable tests pass with `-fsanitize=address,undefined` and
 sample deliveries across its scenarios (3,444 before 30 October, when audio
 ending before the playback position after a seek began to be dropped instead
 of queued), including two consecutive periods,
-end-of-duration seeks, expired live-window seeks, stale completions, and
-explicit rejection of changing track sets.
+end-of-duration seeks, expired live-window seeks and stale completions. Since
+30 October it also plays the fixture as three periods with an ad period
+without audio (1,620 video samples; audio only from the first and third
+periods, current data throughout, a seek into the ad fetches the third
+period's audio) and as an audio-only period followed by a video-only one
+(each track ends after its own period); it used to check that such
+manifests were rejected.
+
+Checked on the X399 (30 October, engine `eme115-a` on CI's tree) with the
+same 18 s fixture made into three manifests, plain `<video src>`: three
+periods with a video-only ad between (1,619 frames in 54 s on NVDEC, the
+clock never stopped, `ended` at 54; a seek to 20 s played on), audio-only
+then video-only (540 frames, `ended` at 36), and a last period without audio
+(1,080 frames, `ended` at 36). The previous code refused all three ("DASH periods
+with changing audio/video track sets are not supported".
 
 The same player plays HLS playlists ([streaming-media.md](streaming-media.md),
 "Native HLS"). `tests/EngineHLSPlaybackTests.cpp` also covers `SegmentBase`
