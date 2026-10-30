@@ -10550,10 +10550,10 @@ index 0000000000000000000000000000000000000000..48e19a5957df4c1ae60378dd9a84cbe4
 +/* Copyright (C) 2026 Summit contributors. SPDX-License-Identifier: BSD-2-Clause */
 +enum USBTransferStatus { "ok", "stall", "babble" };
 diff --git a/Source/WebCore/PlatformHaiku.cmake b/Source/WebCore/PlatformHaiku.cmake
-index 16a88804a1baa39ccdd9fc2870b6e2524d941298..09a201c4a18f054908c942ab22b352bab5e33af4 100644
+index 16a88804a1baa39ccdd9fc2870b6e2524d941298..c3e134a4747592575c095fb2d0eb824241dba86a 100644
 --- a/Source/WebCore/PlatformHaiku.cmake
 +++ b/Source/WebCore/PlatformHaiku.cmake
-@@ -1,52 +1,373 @@
+@@ -1,52 +1,374 @@
 +include(platform/Haiku.cmake)
  include(platform/ImageDecoders.cmake)
  include(platform/OpenSSL.cmake)
@@ -10721,6 +10721,7 @@ index 16a88804a1baa39ccdd9fc2870b6e2524d941298..09a201c4a18f054908c942ab22b352ba
 +  platform/graphics/haiku/DashManifestHaiku.cpp
 +  platform/graphics/haiku/DashPlaybackHaiku.cpp
 +  platform/graphics/haiku/DashResourceLoaderHaiku.cpp
++  platform/graphics/haiku/HLSPlaylistHaiku.cpp
 +  platform/graphics/haiku/FragmentedMP4ParserHaiku.cpp
 +  platform/graphics/haiku/MPEGAudioParserHaiku.cpp
 +  platform/graphics/haiku/CDMProxyHaiku.cpp
@@ -10933,7 +10934,7 @@ index 16a88804a1baa39ccdd9fc2870b6e2524d941298..09a201c4a18f054908c942ab22b352ba
    textencoding
    translation
    ${WEBP_LIBRARIES}
-@@ -61,6 +382,244 @@ list(APPEND WebCore_SYSTEM_INCLUDE_DIRECTORIES
+@@ -61,6 +383,244 @@ list(APPEND WebCore_SYSTEM_INCLUDE_DIRECTORIES
    ${SQLITE_INCLUDE_DIR}
    ${WEBP_INCLUDE_DIRS}
    ${ZLIB_INCLUDE_DIRS}
@@ -32288,10 +32289,10 @@ index 0000000000000000000000000000000000000000..e335b26230d121b17d850055d748f270
 +#endif
 diff --git a/Source/WebCore/platform/graphics/haiku/DashManifestHaiku.cpp b/Source/WebCore/platform/graphics/haiku/DashManifestHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..4ddda92f0c44ce8a1163c90ac526a0f0b849c75e
+index 0000000000000000000000000000000000000000..b2dc14fd7024b299bc318d73930be739a1122c39
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/haiku/DashManifestHaiku.cpp
-@@ -0,0 +1,319 @@
+@@ -0,0 +1,495 @@
 +/* Copyright (C) 2026 air/OS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +#include "DashManifestHaiku.h"
 +#include <libxml/parser.h>
@@ -32302,6 +32303,7 @@ index 0000000000000000000000000000000000000000..4ddda92f0c44ce8a1163c90ac526a0f0
 +#include <cmath>
 +#include <cstdio>
 +#include <cstdlib>
++#include <cstring>
 +#include <ctime>
 +#include <limits>
 +#include <map>
@@ -32309,6 +32311,12 @@ index 0000000000000000000000000000000000000000..4ddda92f0c44ce8a1163c90ac526a0f0
 +#include <stdexcept>
 +
 +namespace SummitDASH {
++bool sameResource(const Resource& a, const Resource& b)
++{
++    if (a.url != b.url || bool(a.range) != bool(b.range) || bool(a.key) != bool(b.key)) return false;
++    if (a.range && (a.range->first != b.range->first || a.range->last != b.range->last)) return false;
++    return !a.key || (a.key->url == b.key->url && a.key->iv == b.key->iv);
++}
 +namespace {
 +using Node = xmlNode*;
 +using Attributes = std::map<std::string, std::string>;
@@ -32317,7 +32325,7 @@ index 0000000000000000000000000000000000000000..4ddda92f0c44ce8a1163c90ac526a0f0
 +bool named(Node node, const char* name)
 +{
 +    return node && node->type == XML_ELEMENT_NODE && xmlStrEqual(node->name, BAD_CAST name)
-+        && (!node->ns || xmlStrEqual(node->ns->href, BAD_CAST "urn:mpeg:dash:schema:mpd:2011"));
++        && (!node->ns || !xmlStrcasecmp(node->ns->href, BAD_CAST "urn:mpeg:dash:schema:mpd:2011"));
 +}
 +std::string owned(xmlChar* value)
 +{
@@ -32461,18 +32469,33 @@ index 0000000000000000000000000000000000000000..4ddda92f0c44ce8a1163c90ac526a0f0
 +}
 +void segments(Representation& rep, Addressing address, const std::string& base, double duration, const Manifest& manifest)
 +{
-+    if (address.kind != "SegmentTemplate" && address.kind != "SegmentList") throw Failure("DASH requires SegmentTemplate or SegmentList addressing");
++    if (address.kind != "SegmentTemplate" && address.kind != "SegmentList" && address.kind != "SegmentBase")
++        throw Failure("DASH requires SegmentTemplate, SegmentList or SegmentBase addressing");
 +    auto& attrs = address.attributes;
 +    const auto timescale = number(attrs["timescale"], 1), offset = number(attrs["presentationTimeOffset"]);
 +    if (!timescale || timescale > UINT32_MAX) throw Failure("Invalid DASH timescale");
 +    rep.presentationTimeOffset = double(offset) / timescale;
++    if (address.kind == "SegmentBase") {
++        // One file per representation; its index lists the segments.
++        if (manifest.dynamic) throw Failure("DASH SegmentBase is supported in static presentations only");
++        auto index = range(attrs["indexRange"]);
++        if (!index) throw Failure("DASH SegmentBase lacks an index range");
++        rep.index = Resource {base, index, {}};
++        if (address.initialization) {
++            auto source = attribute(address.initialization, "sourceURL");
++            rep.initialization = {source.empty() ? base : resolve(base, source), range(attribute(address.initialization, "range")), {}};
++        } else if (index->first)
++            rep.initialization = {base, ByteRange {0, index->first - 1}, {}};
++        if (rep.initialization.url.empty() || !rep.initialization.range) throw Failure("DASH SegmentBase lacks an initialization range");
++        return;
++    }
 +    uint64_t sequence = number(attrs["startNumber"], 1);
 +    if (address.kind == "SegmentTemplate") {
 +        if (attrs["initialization"].empty() || attrs["media"].empty()) throw Failure("DASH template lacks initialization or media URL");
 +        rep.initialization.url = resolve(base, substitute(attrs["initialization"], rep, sequence, 0));
 +    } else {
 +        if (!address.initialization || !address.list) throw Failure("DASH segment list lacks initialization or media");
-+        rep.initialization = {resolve(base, attribute(address.initialization, "sourceURL")), range(attribute(address.initialization, "range"))};
++        rep.initialization = {resolve(base, attribute(address.initialization, "sourceURL")), range(attribute(address.initialization, "range")), {}};
 +    }
 +    std::vector<Node> urls;
 +    if (address.list) for (Node n = address.list->children; n; n = n->next) if (named(n, "SegmentURL")) urls.push_back(n);
@@ -32488,11 +32511,11 @@ index 0000000000000000000000000000000000000000..4ddda92f0c44ce8a1163c90ac526a0f0
 +        if (address.kind == "SegmentTemplate") resource.url = resolve(base, substitute(attrs["media"], rep, sequence, time));
 +        else {
 +            if (index >= urls.size()) throw Failure("DASH timeline and segment list differ in length");
-+            resource = {resolve(base, attribute(urls[index], "media")), range(attribute(urls[index], "mediaRange"))};
++            resource = {resolve(base, attribute(urls[index], "media")), range(attribute(urls[index], "mediaRange")), {}};
 +        }
 +        if (start + length > earliest && start < limit && (!manifest.dynamic || start + length <= limit + 0.01)) {
 +            if (rep.segments.size() >= maxSegments) throw Failure("DASH representation contains too many segments");
-+            rep.segments.push_back({std::move(resource), rep.periodStart + start, length, sequence, time});
++            rep.segments.push_back({std::move(resource), rep.periodStart + start, length, sequence, time, {}});
 +        }
 +        ++index; ++sequence;
 +    };
@@ -32548,7 +32571,8 @@ index 0000000000000000000000000000000000000000..4ddda92f0c44ce8a1163c90ac526a0f0
 +            XML_PARSE_NONET | XML_PARSE_NOBLANKS | XML_PARSE_NOERROR | XML_PARSE_NOWARNING), xmlFreeDoc);
 +        Node root = doc ? xmlDocGetRootElement(doc.get()) : nullptr;
 +        if (!named(root, "MPD") || doc->intSubset || doc->extSubset
-+            || (root->ns && !xmlStrEqual(root->ns->href, BAD_CAST "urn:mpeg:dash:schema:mpd:2011"))) throw Failure("Invalid DASH XML document");
++            // FFmpeg's WebM DASH manifests spell it urn:mpeg:DASH:schema:MPD:2011.
++            || (root->ns && xmlStrcasecmp(root->ns->href, BAD_CAST "urn:mpeg:dash:schema:mpd:2011"))) throw Failure("Invalid DASH XML document");
 +        Manifest result;
 +        const auto type = attribute(root, "type");
 +        if (!type.empty() && type != "static" && type != "dynamic") throw Failure("Unknown DASH presentation type");
@@ -32588,11 +32612,13 @@ index 0000000000000000000000000000000000000000..4ddda92f0c44ce8a1163c90ac526a0f0
 +                    rep.id = attribute(representation, "id"); rep.adaptationID = attribute(adaptation, "id");
 +                    if (rep.adaptationID.empty()) rep.adaptationID = std::to_string(adaptationIndex);
 +                    rep.mimeType = attributes["mimeType"]; rep.codecs = attributes["codecs"]; rep.language = attributes["lang"];
-+                    if (!rep.mimeType.empty() && rep.mimeType != "video/mp4" && rep.mimeType != "audio/mp4") continue;
-+                    rep.audio = attributes["contentType"] == "audio" || rep.mimeType == "audio/mp4";
-+                    rep.video = attributes["contentType"] == "video" || rep.mimeType == "video/mp4";
++                    if (!rep.mimeType.empty() && rep.mimeType != "video/mp4" && rep.mimeType != "audio/mp4"
++                        && rep.mimeType != "video/webm" && rep.mimeType != "audio/webm") continue;
++                    rep.audio = attributes["contentType"] == "audio" || rep.mimeType.starts_with("audio/");
++                    rep.video = attributes["contentType"] == "video" || rep.mimeType.starts_with("video/");
 +                    if (!rep.audio && !rep.video) continue;
 +                    if (rep.mimeType.empty()) rep.mimeType = rep.audio ? "audio/mp4" : "video/mp4";
++                    if (rep.mimeType.ends_with("/webm")) rep.container = Container::WebM;
 +                    rep.bandwidth = number(attributes["bandwidth"]);
 +                    auto width = number(attributes["width"]), height = number(attributes["height"]);
 +                    if (width > 16384 || height > 16384) throw Failure("DASH video dimensions are too large");
@@ -32610,16 +32636,169 @@ index 0000000000000000000000000000000000000000..4ddda92f0c44ce8a1163c90ac526a0f0
 +        return result;
 +    } catch (const Failure& failure) { error = failure.what(); return {}; }
 +}
++
++namespace {
++uint64_t bigEndian(const uint8_t* bytes, unsigned size)
++{
++    uint64_t value = 0;
++    for (unsigned index = 0; index < size; ++index) value = value << 8 | bytes[index];
++    return value;
++}
++bool sidxSegments(Representation& rep, const uint8_t* data, size_t size, std::string& error)
++{
++    // ISO/IEC 14496-12 8.16.3. The index range starts with the sidx box.
++    if (size < 32 || std::string_view(reinterpret_cast<const char*>(data) + 4, 4) != "sidx") { error = "DASH index has no sidx box"; return false; }
++    uint64_t boxSize = bigEndian(data, 4);
++    if (boxSize < 32 || boxSize > size) { error = "DASH sidx box is truncated"; return false; }
++    unsigned version = data[8];
++    size_t at = 12 + 4; // reference_ID
++    uint32_t timescale = uint32_t(bigEndian(data + at, 4)); at += 4;
++    unsigned wide = version ? 8 : 4;
++    if (at + 2 * wide + 4 > boxSize || !timescale) { error = "Invalid DASH sidx box"; return false; }
++    uint64_t time = bigEndian(data + at, wide); at += wide;
++    uint64_t offset = bigEndian(data + at, wide); at += wide;
++    at += 2;
++    unsigned count = unsigned(bigEndian(data + at, 2)); at += 2;
++    if (at + size_t(count) * 12 > boxSize || !count) { error = "Invalid DASH sidx references"; return false; }
++    uint64_t position = rep.index->range->first + boxSize + offset;
++    for (unsigned index = 0; index < count; ++index, at += 12) {
++        uint32_t reference = uint32_t(bigEndian(data + at, 4)), duration = uint32_t(bigEndian(data + at + 4, 4));
++        if (reference >> 31) { error = "Hierarchical DASH sidx indexes are not supported"; return false; }
++        uint64_t bytes = reference & 0x7fffffff;
++        if (!bytes || !duration) { error = "Invalid DASH sidx reference"; return false; }
++        Segment segment;
++        segment.resource = {rep.index->url, ByteRange {position, position + bytes - 1}, {}};
++        segment.start = rep.periodStart + double(time) / timescale - rep.presentationTimeOffset;
++        segment.duration = double(duration) / timescale;
++        segment.number = index; segment.time = time;
++        rep.segments.push_back(std::move(segment));
++        position += bytes; time += duration;
++    }
++    return true;
++}
++// EBML (RFC 8794): IDs keep their length marker, sizes lose it.
++bool ebml(const uint8_t* data, size_t size, size_t& at, uint64_t& value, bool identifier)
++{
++    if (at >= size || !data[at]) return false;
++    unsigned length = 1;
++    while (!(data[at] & (0x80 >> (length - 1)))) ++length;
++    if (at + length > size) return false;
++    value = identifier ? data[at] : data[at] & (0xff >> length);
++    bool unknown = !identifier && value == (0xffu >> length);
++    for (unsigned index = 1; index < length; ++index) {
++        value = value << 8 | data[at + index];
++        unknown &= data[at + index] == 0xff;
++    }
++    if (unknown) value = UINT64_MAX;
++    at += length;
++    return true;
++}
++bool cuesSegments(Representation& rep, double periodDuration, const std::vector<uint8_t>& initialization, const std::vector<uint8_t>& index, std::string& error)
++{
++    if (!rep.initialization.range) { error = "DASH WebM representation has no initialization range"; return false; }
++    // The initialization: the Segment's data offset, Info's scale and duration.
++    const uint8_t* data = initialization.data();
++    size_t size = initialization.size(), at = 0;
++    uint64_t id = 0, length = 0, segmentData = 0, segmentEnd = UINT64_MAX, scale = 1000000;
++    double duration = 0;
++    bool inSegment = false;
++    while (at < size) {
++        if (!ebml(data, size, at, id, true) || !ebml(data, size, at, length, false)) break;
++        if (id == 0x18538067) { // Segment
++            inSegment = true; segmentData = rep.initialization.range->first + at;
++            if (length != UINT64_MAX) segmentEnd = segmentData + length;
++            continue;
++        }
++        if (length == UINT64_MAX || length > size - at) break;
++        const uint8_t* body = data + at;
++        if (id == 0x1549A966 && inSegment) { // Info
++            for (size_t inner = 0; inner < length;) {
++                uint64_t child, childLength;
++                if (!ebml(body, length, inner, child, true) || !ebml(body, length, inner, childLength, false) || childLength > length - inner) break;
++                if (child == 0x2AD7B1 && childLength && childLength <= 8) scale = bigEndian(body + inner, unsigned(childLength));
++                if (child == 0x4489 && childLength == 8) { uint64_t bits = bigEndian(body + inner, 8); double value; std::memcpy(&value, &bits, 8); duration = value; }
++                if (child == 0x4489 && childLength == 4) { uint32_t bits = uint32_t(bigEndian(body + inner, 4)); float value; std::memcpy(&value, &bits, 4); duration = value; }
++                inner += childLength;
++            }
++        }
++        at += length;
++    }
++    if (!inSegment || !scale) { error = "DASH WebM initialization has no Segment"; return false; }
++    // The index: one Cues element.
++    data = index.data(); size = index.size(); at = 0;
++    if (!ebml(data, size, at, id, true) || !ebml(data, size, at, length, false) || id != 0x1C53BB6B || length == UINT64_MAX || length > size - at) {
++        error = "DASH WebM index is not a Cues element"; return false;
++    }
++    std::vector<std::pair<uint64_t, uint64_t>> cues; // time, cluster position
++    const uint8_t* body = data + at;
++    for (size_t point = 0; point < length;) {
++        uint64_t child, childLength;
++        if (!ebml(body, length, point, child, true) || !ebml(body, length, point, childLength, false) || childLength > length - point) break;
++        if (child == 0xBB) { // CuePoint
++            const uint8_t* cue = body + point;
++            std::optional<uint64_t> time, position;
++            for (size_t inner = 0; inner < childLength;) {
++                uint64_t field, fieldLength;
++                if (!ebml(cue, childLength, inner, field, true) || !ebml(cue, childLength, inner, fieldLength, false) || fieldLength > childLength - inner) break;
++                if (field == 0xB3 && fieldLength <= 8) time = bigEndian(cue + inner, unsigned(fieldLength));
++                if (field == 0xB7 && !position) { // CueTrackPositions: the first track's
++                    for (size_t track = 0; track < fieldLength;) {
++                        uint64_t entry, entryLength;
++                        if (!ebml(cue + inner, fieldLength, track, entry, true) || !ebml(cue + inner, fieldLength, track, entryLength, false) || entryLength > fieldLength - track) break;
++                        if (entry == 0xF1 && entryLength <= 8) position = bigEndian(cue + inner + track, unsigned(entryLength));
++                        track += entryLength;
++                    }
++                }
++                inner += fieldLength;
++            }
++            if (time && position && (cues.empty() || *position > cues.back().second)) cues.emplace_back(*time, *position);
++            if (cues.size() > 100000) { error = "DASH WebM Cues list too many clusters"; return false; }
++        }
++        point += childLength;
++    }
++    if (cues.empty()) { error = "DASH WebM index has no cue points"; return false; }
++    const double seconds = double(scale) / 1e9;
++    const uint64_t cuesStart = rep.index->range->first;
++    for (size_t entry = 0; entry < cues.size(); ++entry) {
++        uint64_t first = segmentData + cues[entry].second;
++        // The last cluster ends at the Cues when they follow the clusters,
++        // otherwise at the end of the Segment.
++        uint64_t end = entry + 1 < cues.size() ? segmentData + cues[entry + 1].second : cuesStart > first ? cuesStart : segmentEnd;
++        if (end == UINT64_MAX || end <= first) { error = "DASH WebM cluster has no known end"; return false; }
++        double start = double(cues[entry].first) * seconds;
++        double stop = entry + 1 < cues.size() ? double(cues[entry + 1].first) * seconds : duration > 0 ? duration * seconds : periodDuration;
++        if (!(stop > start)) { error = "DASH WebM cluster has no duration"; return false; }
++        Segment segment;
++        segment.resource = {rep.index->url, ByteRange {first, end - 1}, {}};
++        segment.start = rep.periodStart + start - rep.presentationTimeOffset;
++        segment.duration = stop - start;
++        segment.number = entry; segment.time = cues[entry].first;
++        rep.segments.push_back(std::move(segment));
++    }
++    return true;
++}
++}
++
++bool indexSegments(Representation& rep, double periodDuration, const std::vector<uint8_t>& initialization, const std::vector<uint8_t>& index, std::string& error)
++{
++    rep.segments.clear();
++    if (!rep.index || !rep.index->range) { error = "DASH representation has no index"; return false; }
++    bool parsed = rep.container == Container::WebM ? cuesSegments(rep, periodDuration, initialization, index, error) : sidxSegments(rep, index.data(), index.size(), error);
++    if (!parsed) { rep.segments.clear(); return false; }
++    return true;
++}
 +}
 diff --git a/Source/WebCore/platform/graphics/haiku/DashManifestHaiku.h b/Source/WebCore/platform/graphics/haiku/DashManifestHaiku.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..be2deb2ec5913bb4b52f78693c0853f62c207e21
+index 0000000000000000000000000000000000000000..69785063c0c8d3727bd9867ed0b42d88594b83e5
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/haiku/DashManifestHaiku.h
-@@ -0,0 +1,40 @@
+@@ -0,0 +1,68 @@
 +/* Copyright (C) 2026 air/OS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +#pragma once
++#include <array>
 +#include <cstdint>
++#include <memory>
 +#include <optional>
 +#include <string>
 +#include <string_view>
@@ -32627,19 +32806,37 @@ index 0000000000000000000000000000000000000000..be2deb2ec5913bb4b52f78693c0853f6
 +
 +namespace SummitDASH {
 +struct ByteRange { uint64_t first {0}, last {0}; };
-+struct Resource { std::string url; std::optional<ByteRange> range; };
++// HLS AES-128 (whole-resource AES-CBC). Without an IV the segment's media
++// sequence number is the IV (RFC 8216, 5.2).
++struct Key { std::string url; std::optional<std::array<uint8_t, 16>> iv; };
++struct Resource { std::string url; std::optional<ByteRange> range; std::shared_ptr<const Key> key; };
++bool sameResource(const Resource&, const Resource&);
++enum class Container : uint8_t { MP4, MPEG2TS, WebM };
 +struct Segment {
 +    Resource resource;
 +    double start {0}, duration {0}; // Presentation seconds, including period start.
 +    uint64_t number {0}, time {0};
++    // HLS: EXT-X-MAP can change between segments of one playlist.
++    std::optional<Resource> initialization;
 +};
 +struct Representation {
 +    std::string id, adaptationID, codecs, mimeType, language;
 +    bool audio {false}, video {false}, encrypted {false};
++    Container container {Container::MP4};
++    // HLS: a video representation whose segments also carry the audio, and
++    // one whose playlist did not say which tracks it has (CODECS missing).
++    bool muxedAudio {false}, tracksKnown {true};
++    // HLS: sample times map to the playlist's timeline through an offset
++    // learnt from the first sample of each discontinuity sequence.
++    bool mediaTimeline {false};
++    uint64_t discontinuity {0};
 +    uint64_t bandwidth {0};
 +    unsigned width {0}, height {0};
 +    double periodStart {0}, presentationTimeOffset {0};
 +    Resource initialization;
++    // SegmentBase: segments come from this index (an MP4 sidx box or WebM
++    // Cues) once the player has loaded it; until then the list is empty.
++    std::optional<Resource> index;
 +    std::vector<Segment> segments;
 +};
 +struct Period {
@@ -32649,9 +32846,17 @@ index 0000000000000000000000000000000000000000..be2deb2ec5913bb4b52f78693c0853f6
 +};
 +struct Manifest {
 +    bool dynamic {false};
++    bool hls {false};
 +    double duration {0}, updatePeriod {5}, timeShiftBufferDepth {120}, liveEdge {0};
++    // How far behind the live edge playback starts.
++    double liveDelay {6};
 +    std::vector<Period> periods;
 +};
++// Fills a SegmentBase representation's segments from its index. WebM Cues
++// also need the initialization bytes (the Segment's data offset and the
++// timecode scale); MP4 ignores them.
++bool indexSegments(Representation&, double periodDuration, const std::vector<uint8_t>& initialization,
++    const std::vector<uint8_t>& index, std::string& error);
 +// Network URLs only; libxml external entities and DTDs are refused. The
 +// caller supplies the final response URL and UTC seconds for live manifests.
 +std::optional<Manifest> parseManifest(std::string_view xml, const std::string& responseURL,
@@ -32659,60 +32864,63 @@ index 0000000000000000000000000000000000000000..be2deb2ec5913bb4b52f78693c0853f6
 +}
 diff --git a/Source/WebCore/platform/graphics/haiku/DashPlaybackHaiku.cpp b/Source/WebCore/platform/graphics/haiku/DashPlaybackHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..3b488cc1aa98eddeee00e0e2824045b33a6ccb0e
+index 0000000000000000000000000000000000000000..e30bc9d64af1a37f732f9f110a8a580819bfd828
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/haiku/DashPlaybackHaiku.cpp
-@@ -0,0 +1,264 @@
+@@ -0,0 +1,492 @@
 +/* Copyright (C) 2026 air/OS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +#include "DashPlaybackHaiku.h"
++#include "HLSPlaylistHaiku.h"
 +#include <algorithm>
 +#include <cmath>
 +#include <limits>
 +
 +namespace SummitDASH {
-+Player::Player(Hooks hooks) : m_hooks(std::move(hooks))
-+{
-+    for (unsigned index = 0; index < m_tracks.size(); ++index) {
-+        auto& track = m_tracks[index];
-+        track.parser.onProtectionSystemHeaders = [this](std::vector<uint8_t>&& headers) {
-+            if (m_hooks.protectionSystemHeaders) m_hooks.protectionSystemHeaders(std::move(headers));
-+        };
-+        track.parser.onInitSegment = [this, index](SummitMP4::InitSegment&& initialization) {
-+            if (m_hooks.protectionSystemHeaders && !initialization.protectionSystemHeaders.empty())
-+                m_hooks.protectionSystemHeaders(std::move(initialization.protectionSystemHeaders));
-+            auto& track = m_tracks[index];
-+            auto kind = index ? SummitMP4::TrackInfo::Kind::Audio : SummitMP4::TrackInfo::Kind::Video;
-+            track.configuration.reset();
-+            for (auto& info : initialization.tracks) if (info.kind == kind && info.timescale) {
-+                track.configuration = std::make_shared<SummitMP4::TrackInfo>(std::move(info)); break;
-+            }
-+            track.parseFailed = !track.configuration;
-+        };
-+        track.parser.onSample = [this, index](SummitMP4::Sample&& sample) {
-+            auto& track = m_tracks[index];
-+            if (!track.configuration || sample.trackID != track.configuration->id) return;
-+            if (track.packets.size() >= 200000) { track.parseFailed = true; return; }
-+            const auto& rep = *track.representation;
-+            track.packets.push_back({track.configuration, std::move(sample), rep.periodStart - rep.presentationTimeOffset});
-+        };
++namespace {
++class MP4SegmentParser final : public SegmentParser {
++public:
++    MP4SegmentParser()
++    {
++        m_parser.onInitSegment = [this](SummitMP4::InitSegment&& init) { if (onInitSegment) onInitSegment(std::move(init)); };
++        m_parser.onSample = [this](SummitMP4::Sample&& sample) { if (onSample) onSample(std::move(sample)); };
++        m_parser.onProtectionSystemHeaders = [this](std::vector<uint8_t>&& headers) { if (onProtectionSystemHeaders) onProtectionSystemHeaders(std::move(headers)); };
 +    }
++    bool append(const uint8_t* data, size_t size) final { return m_parser.append(data, size); }
++private:
++    SummitMP4::Parser m_parser;
++};
++}
++
++Player::Player(Hooks hooks) : m_hooks(std::move(hooks)) { }
++bool Player::supported(const Representation& rep) const
++{
++    // Asked for every representation on every tick (seekable range, track
++    // selection): remember the media engine's answers.
++    auto key = rep.mimeType + ';' + rep.codecs + (rep.encrypted ? ";encrypted" : "");
++    if (auto found = m_supported.find(key); found != m_supported.end()) return found->second;
++    bool result = m_hooks.supports(rep);
++    if (m_supported.size() < 256) m_supported.emplace(std::move(key), result);
++    return result;
 +}
 +Player::~Player() { stop(); }
 +void Player::start(const std::string& url, double nowUTC, double monotonicTime)
 +{
-+    stop(); m_manifest.reset(); m_url = url; m_startUTC = nowUTC;
++    stop(); m_manifest.reset(); m_hls.reset(); m_keys.clear(); m_supported.clear(); m_url = url; m_startUTC = nowUTC;
 +    m_startMono = m_now = monotonicTime; m_bandwidth = 0; m_position = m_initialTime = 0;
++    m_muxed = m_probingTracks = m_videoAbsent = false;
 +    m_stopped = false; loadManifest();
 +}
 +void Player::stop()
 +{
 +    m_stopped = true;
-+    auto requests = std::move(m_requests); m_requests.clear(); m_manifestRequest = 0;
++    auto requests = std::move(m_requests); m_requests.clear(); m_manifestRequest = 0; m_pendingPlaylists = m_pendingIndexes = 0;
 +    for (const auto& [id, request] : requests) m_hooks.cancel(id);
 +    for (auto& track : m_tracks) {
-+        track.request = 0; track.packets.clear(); track.parser.reset(); track.configuration.reset(); track.representation.reset();
-+        track.enabled = track.initialized = track.ended = track.parseFailed = track.haveData = false;
++        track.request = 0; track.packets.clear(); track.parser.reset(); track.initialization.reset();
++        track.configuration.reset(); track.representation.reset();
++        track.enabled = track.ended = track.parseFailed = track.haveData = false;
 +    }
++    m_timelineOffsets.clear(); m_indexInitializations.clear();
 +}
 +void Player::fail(const std::string& message, bool network)
 +{
@@ -32721,21 +32929,162 @@ index 0000000000000000000000000000000000000000..3b488cc1aa98eddeee00e0e2824045b3
 +}
 +void Player::loadManifest()
 +{
-+    if (m_stopped || m_manifestRequest) return;
++    if (m_stopped) return;
++    if (m_hls) { loadPlaylists(); return; }
++    if (m_manifestRequest) return;
 +    const auto id = ++m_identifier; m_manifestRequest = id;
-+    m_requests.emplace(id, Request {RequestKind::Manifest, 0, {}, {}});
-+    m_hooks.request(id, {m_url, {}}, 4 * 1024 * 1024);
++    m_requests.emplace(id, Request {RequestKind::Manifest, 0, {}, {}, {}});
++    m_hooks.request(id, {m_url, {}, {}}, 4 * 1024 * 1024);
++}
++void Player::loadPlaylists()
++{
++    if (m_stopped || !m_hls || m_pendingPlaylists) return;
++    auto playlists = m_hls->playlistsToLoad();
++    if (playlists.empty()) { applyPlaylists(); return; }
++    for (auto& [index, url] : playlists) {
++        const auto id = ++m_identifier; ++m_pendingPlaylists;
++        m_requests.emplace(id, Request {RequestKind::Playlist, 0, {}, {}, {url, {}, {}}, index});
++        m_hooks.request(id, {url, {}, {}}, 4 * 1024 * 1024);
++    }
++}
++void Player::applyPlaylists()
++{
++    std::string error;
++    auto manifest = m_hls->manifest(error);
++    if (!manifest) {
++        if (!m_manifest) { fail(error); return; }
++        m_nextRefresh = m_now + m_manifest->updatePeriod;
++        return;
++    }
++    applyManifest(std::move(*manifest));
++}
++void Player::applyManifest(Manifest&& manifest)
++{
++    // One renderer per kind is retained across periods. Reject changing
++    // track sets explicitly instead of stalling at a disappearing track.
++    std::optional<std::array<bool, 2>> trackSet;
++    for (const auto& period : manifest.periods) {
++        std::array<bool, 2> present {false, false};
++        for (const auto& rep : period.representations) if (supported(rep)) {
++            present[0] = present[0] || rep.video; present[1] = present[1] || rep.audio;
++        }
++        if (trackSet && *trackSet != present) { fail("DASH periods with changing audio/video track sets are not supported"); return; }
++        trackSet = present;
++    }
++    bool first = !m_manifest; m_manifest = std::move(manifest); ++m_catalogVersion;
++    m_nextRefresh = m_now + m_manifest->updatePeriod;
++    if (first) {
++        // SegmentBase: load every playable representation's index first.
++        for (size_t p = 0; p < m_manifest->periods.size(); ++p) {
++            auto& period = m_manifest->periods[p];
++            for (size_t r = 0; r < period.representations.size(); ++r) {
++                auto& rep = period.representations[r];
++                if (!rep.index || !rep.segments.empty() || !supported(rep)) continue;
++                // WebM Cues need the initialization's Segment offset and
++                // timecode scale: fetch that first (track 1 marks it).
++                bool webm = rep.container == Container::WebM;
++                const auto id = ++m_identifier; ++m_pendingIndexes;
++                auto resource = webm ? rep.initialization : *rep.index;
++                m_requests.emplace(id, Request {RequestKind::Index, webm ? 1u : 0u, {}, {}, resource, p, r});
++                m_hooks.request(id, resource, 4 * 1024 * 1024);
++            }
++        }
++        if (!m_pendingIndexes) startPresentation();
++        return;
++    }
++    m_hooks.changed(); pump();
++}
++void Player::startPresentation()
++{
++    m_initialTime = isLive() ? std::max(seekableStart(), seekableEnd() - m_manifest->liveDelay) : seekableStart();
++    const auto* video = select(0, m_initialTime);
++    m_muxed = video && video->muxedAudio;
++    m_probingTracks = video && !video->tracksKnown;
++    m_tracks[0].enabled = video; m_tracks[1].enabled = m_muxed || select(1, m_initialTime);
++    if (!hasVideo() && !hasAudio()) { fail(m_hls ? "The HLS presentation has no playable audio or video" : "The DASH presentation has no playable audio or video"); return; }
++    resetTracks(m_initialTime);
++    m_hooks.changed(); pump();
++}
++void Player::resetParser(unsigned index)
++{
++    auto& track = m_tracks[index];
++    track.initialization.reset(); track.configuration.reset(); track.parser.reset();
++    if (!index && m_muxed) m_tracks[1].configuration.reset();
++    const auto container = track.representation ? track.representation->container : Container::MP4;
++    if (container == Container::MP4) track.parser = std::make_unique<MP4SegmentParser>();
++    else if (m_hooks.createParser) track.parser = m_hooks.createParser(container);
++    if (!track.parser) return;
++    track.parser->onProtectionSystemHeaders = [this](std::vector<uint8_t>&& headers) {
++        if (m_hooks.protectionSystemHeaders) m_hooks.protectionSystemHeaders(std::move(headers));
++    };
++    track.parser->onInitSegment = [this, index](SummitMP4::InitSegment&& initialization) {
++        if (m_hooks.protectionSystemHeaders && !initialization.protectionSystemHeaders.empty())
++            m_hooks.protectionSystemHeaders(std::move(initialization.protectionSystemHeaders));
++        auto& track = m_tracks[index];
++        // Muxed HLS: track 0's segments carry both kinds.
++        auto* audio = index ? &track : muxed() ? &m_tracks[1] : nullptr;
++        auto* video = index ? nullptr : &track;
++        if (video) video->configuration.reset();
++        if (audio) audio->configuration.reset();
++        for (auto& info : initialization.tracks) {
++            if (!info.timescale) continue;
++            if (video && !video->configuration && info.kind == SummitMP4::TrackInfo::Kind::Video)
++                video->configuration = std::make_shared<SummitMP4::TrackInfo>(info);
++            else if (audio && !audio->configuration && info.kind == SummitMP4::TrackInfo::Kind::Audio)
++                audio->configuration = std::make_shared<SummitMP4::TrackInfo>(info);
++        }
++        if (!index && std::exchange(m_probingTracks, false)) {
++            m_videoAbsent = !track.configuration;
++            if (muxed() && !m_tracks[1].configuration) { m_tracks[1].enabled = false; m_muxed = false; }
++            m_hooks.changed();
++        }
++        track.parseFailed = !track.configuration && !(audio && audio->configuration);
++    };
++    track.parser->onSample = [this, index](SummitMP4::Sample&& sample) {
++        auto& carrier = m_tracks[index];
++        Track* target = nullptr;
++        if (carrier.configuration && sample.trackID == carrier.configuration->id) target = &carrier;
++        else if (!index && muxed() && m_tracks[1].configuration && sample.trackID == m_tracks[1].configuration->id) target = &m_tracks[1];
++        if (!target) return;
++        if (target->packets.size() >= 200000) { carrier.parseFailed = true; return; }
++        double offset = sampleOffset(carrier, *target->configuration, sample);
++        ++m_segmentSamples;
++        target->packets.push_back({target->configuration, std::move(sample), offset});
++    };
++}
++double Player::sampleOffset(Track& carrier, const SummitMP4::TrackInfo& info, const SummitMP4::Sample& sample)
++{
++    const auto& rep = *carrier.representation;
++    if (!rep.mediaTimeline) return rep.periodStart - rep.presentationTimeOffset;
++    // HLS gives no media times: map the first sample of a discontinuity
++    // sequence to its segment's playlist time, and keep that offset for the
++    // sequence so that audio and video stay in step. A segment whose first
++    // sample lands far from its playlist time (a clock wrap, or a stream
++    // that restarted without a discontinuity tag) sets the offset again.
++    double time = double(sample.presentationTime) / info.timescale;
++    auto found = m_timelineOffsets.find(rep.discontinuity);
++    bool check = std::exchange(carrier.firstSample, false);
++    if (found == m_timelineOffsets.end()
++        || (check && (time + found->second < carrier.segmentStart - 10 || time + found->second > carrier.segmentEnd + 10))) {
++        if (found == m_timelineOffsets.end() && m_timelineOffsets.size() >= 64) m_timelineOffsets.erase(m_timelineOffsets.begin());
++        found = m_timelineOffsets.insert_or_assign(rep.discontinuity, carrier.segmentStart - time).first;
++    }
++    return found->second;
 +}
 +void Player::resetTracks(double position)
 +{
 +    for (auto& track : m_tracks) {
 +        if (track.request) { auto id = track.request; m_requests.erase(id); track.request = 0; m_hooks.cancel(id); }
-+        track.initialized = track.ended = track.parseFailed = track.haveData = false;
++        track.ended = track.parseFailed = track.haveData = false;
 +        track.nextTime = track.bufferedStart = track.bufferedEnd = position;
 +        if (!isLive() && position >= duration() && duration() > 0)
 +            track.nextTime = std::max(0.0, duration() - 0.01);
-+        track.representation.reset(); track.configuration.reset(); track.packets.clear(); track.parser.reset();
++        track.representation.reset(); track.configuration.reset(); track.packets.clear();
++        track.parser.reset(); track.initialization.reset();
 +    }
++    // Both tracks start again from new segments: learn the offsets again
++    // from whichever arrives first.
++    m_timelineOffsets.clear();
 +    m_position = position; m_hooks.reset(position); m_hooks.changed();
 +}
 +void Player::seek(double time)
@@ -32753,8 +33102,9 @@ index 0000000000000000000000000000000000000000..3b488cc1aa98eddeee00e0e2824045b3
 +}
 +const Segment* Player::segment(const Representation& rep, double position) const
 +{
-+    for (const auto& segment : rep.segments) if (segment.start + segment.duration > position + 0.001) return &segment;
-+    return nullptr;
++    auto found = std::partition_point(rep.segments.begin(), rep.segments.end(),
++        [&](const Segment& segment) { return segment.start + segment.duration <= position + 0.001; });
++    return found == rep.segments.end() ? nullptr : &*found;
 +}
 +const Representation* Player::select(unsigned track, double position) const
 +{
@@ -32766,7 +33116,7 @@ index 0000000000000000000000000000000000000000..3b488cc1aa98eddeee00e0e2824045b3
 +        std::string adaptation;
 +        const double budget = m_bandwidth * 0.65;
 +        for (const auto& rep : period.representations) {
-+            if ((track ? !rep.audio : !rep.video) || !m_hooks.supports(rep) || !segment(rep, position)) continue;
++            if ((track ? !rep.audio : !rep.video) || !supported(rep) || !segment(rep, position)) continue;
 +            if (adaptation.empty()) adaptation = rep.adaptationID;
 +            if (adaptation != rep.adaptationID) continue;
 +            if (!lowest || rep.bandwidth < lowest->bandwidth) lowest = &rep;
@@ -32776,13 +33126,19 @@ index 0000000000000000000000000000000000000000..3b488cc1aa98eddeee00e0e2824045b3
 +    }
 +    return nullptr;
 +}
-+void Player::requestTrack(unsigned index, RequestKind kind, const Segment* media)
++void Player::request(unsigned index, RequestKind kind, const Resource& resource, const Segment& media)
 +{
 +    auto& track = m_tracks[index];
 +    const auto id = ++m_identifier;
-+    Request request {kind, index, track.representation, media ? *media : Segment {}};
-+    Resource resource = media ? media->resource : track.representation->initialization;
-+    track.request = id; m_requests.emplace(id, std::move(request));
++    track.request = id;
++    if (resource.key && !m_keys.contains(resource.key->url)) {
++        // Fetched like the media, with the element's credentials and CORS mode.
++        Resource key {resource.key->url, {}, {}};
++        m_requests.emplace(id, Request {RequestKind::Key, index, track.representation, media, key});
++        m_hooks.request(id, key, 1024);
++        return;
++    }
++    m_requests.emplace(id, Request {kind, index, track.representation, media, resource});
 +    m_hooks.request(id, resource, 64 * 1024 * 1024);
 +}
 +void Player::pump()
@@ -32792,14 +33148,35 @@ index 0000000000000000000000000000000000000000..3b488cc1aa98eddeee00e0e2824045b3
 +    for (unsigned index = 0; index < m_tracks.size() && !m_stopped; ++index) {
 +        auto& track = m_tracks[index];
 +        if (!track.enabled || track.ended) continue;
-+        for (unsigned count = 0; count < 64 && !track.packets.empty() && m_hooks.canEnqueue(index); ++count) {
++        for (unsigned count = 0; count < 64 && !track.packets.empty(); ++count) {
++            // Audio that ends before the playback position would only fill
++            // the renderer's queue. An HLS audio rendition's segments need
++            // not line up with the video's, so the segment that holds the
++            // start position can be almost all before it, and while that
++            // queue is full playback cannot start.
++            auto& front = track.packets.front();
++            if (index && front.configuration->timescale
++                && double(front.sample.presentationTime + front.sample.duration) / front.configuration->timescale + front.offset < m_position - 0.2) {
++                track.packets.pop_front();
++                continue;
++            }
++            if (!m_hooks.canEnqueue(index)) break;
 +            auto packet = std::move(track.packets.front()); track.packets.pop_front();
 +            m_hooks.enqueue(index, *packet.configuration, std::move(packet.sample), packet.offset);
++        }
++        // Muxed HLS audio arrives with track 0's segments, and ends with them.
++        if (index && muxed()) {
++            if (m_tracks[0].ended && track.packets.empty()) { track.ended = true; m_hooks.endTrack(1); m_hooks.changed(); }
++            continue;
 +        }
 +        if (track.request || !track.packets.empty() || track.bufferedEnd - m_position >= 8) continue;
 +        auto* desired = select(index, track.nextTime);
 +        if (!desired) {
-+            if (!isLive()) { track.ended = true; m_hooks.endTrack(index); m_hooks.changed(); }
++            if (!isLive()) {
++                track.ended = true;
++                if (index || !m_videoAbsent) m_hooks.endTrack(index);
++                m_hooks.changed();
++            }
 +            continue;
 +        }
 +        bool changed = !track.representation || desired->id != track.representation->id
@@ -32813,13 +33190,22 @@ index 0000000000000000000000000000000000000000..3b488cc1aa98eddeee00e0e2824045b3
 +                desired = track.representation.get(); changed = false;
 +            }
 +        }
-+        if (changed) { track.initialized = false; track.parser.reset(); track.configuration.reset(); }
 +        if (changed || track.catalogVersion != m_catalogVersion) {
 +            track.representation = std::make_shared<Representation>(*desired);
 +            track.catalogVersion = m_catalogVersion;
 +        }
-+        if (!track.initialized) { requestTrack(index, RequestKind::Initialization); continue; }
-+        if (const auto* next = segment(*track.representation, track.nextTime)) requestTrack(index, RequestKind::Media, next);
++        if (changed) {
++            resetParser(index);
++            if (!track.parser) { m_pumping = false; fail("Segments of this kind cannot be demuxed"); return; }
++        }
++        const auto& rep = *track.representation;
++        const auto* next = segment(rep, track.nextTime);
++        const Resource& initialization = next && next->initialization ? *next->initialization : rep.initialization;
++        if (!initialization.url.empty() && (!track.initialization || !sameResource(*track.initialization, initialization))) {
++            request(index, RequestKind::Initialization, initialization, next ? *next : Segment {});
++            continue;
++        }
++        if (next) request(index, RequestKind::Media, next->resource, *next);
 +    }
 +    m_pumping = false;
 +}
@@ -32830,56 +33216,103 @@ index 0000000000000000000000000000000000000000..3b488cc1aa98eddeee00e0e2824045b3
 +    if (request.kind == RequestKind::Manifest) {
 +        m_manifestRequest = 0;
 +        std::string error;
-+        auto manifest = parseManifest({reinterpret_cast<const char*>(data.data()), data.size()}, finalURL,
-+            m_startUTC + m_now - m_startMono, error);
++        std::string_view text {reinterpret_cast<const char*>(data.data()), data.size()};
++        if (!m_manifest && SummitHLS::isPlaylist(text)) {
++            m_hls = std::make_unique<SummitHLS::Presentation>();
++            if (!m_hls->start(text, finalURL, error)) { fail(error); return; }
++            loadPlaylists(); return;
++        }
++        auto manifest = parseManifest(text, finalURL, m_startUTC + m_now - m_startMono, error);
 +        if (!manifest) { fail(error); return; }
-+        // One renderer per kind is retained across periods. Reject changing
-+        // track sets explicitly instead of stalling at a disappearing track.
-+        std::optional<std::array<bool, 2>> trackSet;
-+        for (const auto& period : manifest->periods) {
-+            std::array<bool, 2> present {false, false};
-+            for (const auto& rep : period.representations) if (m_hooks.supports(rep)) {
-+                present[0] = present[0] || rep.video; present[1] = present[1] || rep.audio;
-+            }
-+            if (trackSet && *trackSet != present) { fail("DASH periods with changing audio/video track sets are not supported"); return; }
-+            trackSet = present;
++        m_url = finalURL;
++        applyManifest(std::move(*manifest)); return;
++    }
++    if (request.kind == RequestKind::Playlist) {
++        if (m_pendingPlaylists) --m_pendingPlaylists;
++        std::string error;
++        if (!m_hls->update(request.playlist, {reinterpret_cast<const char*>(data.data()), data.size()}, finalURL, error) && !m_manifest) {
++            fail(error); return;
 +        }
-+        bool first = !m_manifest; m_manifest = std::move(manifest); m_url = finalURL; ++m_catalogVersion;
-+        m_nextRefresh = m_now + m_manifest->updatePeriod;
-+        if (first) {
-+            m_initialTime = isLive() ? std::max(seekableStart(), seekableEnd() - 6) : seekableStart();
-+            m_tracks[0].enabled = select(0, m_initialTime); m_tracks[1].enabled = select(1, m_initialTime);
-+            if (!hasVideo() && !hasAudio()) { fail("The DASH presentation has no playable audio or video"); return; }
-+            resetTracks(m_initialTime);
++        if (!m_pendingPlaylists) applyPlaylists();
++        return;
++    }
++    if (request.kind == RequestKind::Index) {
++        if (!m_manifest || request.playlist >= m_manifest->periods.size() || request.item >= m_manifest->periods[request.playlist].representations.size()) return;
++        auto& period = m_manifest->periods[request.playlist];
++        auto& rep = period.representations[request.item];
++        auto key = std::make_pair(request.playlist, request.item);
++        if (request.track) {
++            m_indexInitializations[key] = std::move(data);
++            const auto id = ++m_identifier;
++            m_requests.emplace(id, Request {RequestKind::Index, 0, {}, {}, *rep.index, request.playlist, request.item});
++            m_hooks.request(id, *rep.index, 4 * 1024 * 1024);
++            return;
 +        }
-+        m_hooks.changed(); pump(); return;
++        std::string error;
++        auto initialization = m_indexInitializations.extract(key);
++        if (!indexSegments(rep, period.duration, initialization ? initialization.mapped() : std::vector<uint8_t> { }, data, error)) { fail(error); return; }
++        if (m_pendingIndexes && !--m_pendingIndexes) startPresentation();
++        return;
 +    }
 +    auto& track = m_tracks[request.track]; track.request = 0;
-+    if (data.empty() || data.size() > 64 * 1024 * 1024) { fail("DASH segment size is invalid"); return; }
-+    if (!track.parser.append(data.data(), data.size()) || track.parseFailed) { fail("DASH MP4 segment could not be parsed"); return; }
-+    if (request.kind == RequestKind::Initialization) {
-+        if (!track.configuration) { fail("DASH initialization segment has no playable track"); return; }
-+        track.initialized = true;
-+    } else {
-+        if (track.packets.empty()) { fail("DASH media segment has no samples"); return; }
-+        if (std::isfinite(elapsedSeconds) && elapsedSeconds > 0) {
-+            double bandwidth = data.size() * 8.0 / std::max(elapsedSeconds, 0.005);
-+            // A sudden slowdown must take effect immediately; averaging a
-+            // fast local/CDN burst for several segments causes long stalls.
-+            // Increase conservatively after capacity improves again.
-+            m_bandwidth = !m_bandwidth || bandwidth < m_bandwidth ? bandwidth : m_bandwidth * 0.75 + bandwidth * 0.25;
-+        }
-+        track.nextTime = request.segment.start + request.segment.duration;
-+        track.bufferedEnd = track.nextTime;
-+        track.haveData = true;
-+        m_hooks.changed();
++    if (request.kind == RequestKind::Key) {
++        if (data.size() != 16) { fail("HLS key is not 16 bytes"); return; }
++        if (m_keys.size() >= 32) m_keys.erase(m_keys.begin());
++        std::copy(data.begin(), data.end(), m_keys[request.resource.url].begin());
++        pump(); return;
 +    }
++    if (data.empty() || data.size() > 64 * 1024 * 1024) { fail("DASH segment size is invalid"); return; }
++    if (const auto& key = request.resource.key) {
++        auto bytes = m_keys.find(key->url);
++        if (bytes == m_keys.end()) { pump(); return; } // Evicted meanwhile: fetch it again.
++        if (!SummitHLS::decryptAES128(data, bytes->second, key->iv ? *key->iv : SummitHLS::sequenceIV(request.segment.number))) {
++            fail("HLS segment could not be decrypted"); return;
++        }
++    }
++    if (!track.parser) { fail("Segments of this kind cannot be demuxed"); return; }
++    if (request.kind == RequestKind::Initialization) {
++        if (!track.parser->append(data.data(), data.size()) || track.parseFailed) { fail("DASH initialization segment could not be parsed"); return; }
++        if (!track.configuration && !(request.track == 0 && muxed() && m_tracks[1].configuration)) {
++            fail("DASH initialization segment has no playable track"); return;
++        }
++        track.initialization = request.resource;
++        pump(); return;
++    }
++    track.segmentStart = request.segment.start; track.segmentEnd = request.segment.start + request.segment.duration;
++    track.firstSample = true; m_segmentSamples = 0;
++    if (!track.parser->append(data.data(), data.size()) || !track.parser->endSegment() || track.parseFailed) {
++        fail(request.representation && request.representation->container == Container::MPEG2TS ? "HLS transport stream segment could not be parsed" : "DASH MP4 segment could not be parsed");
++        return;
++    }
++    if (!m_segmentSamples) { fail("DASH media segment has no samples"); return; }
++    if (std::isfinite(elapsedSeconds) && elapsedSeconds > 0) {
++        double bandwidth = data.size() * 8.0 / std::max(elapsedSeconds, 0.005);
++        // A sudden slowdown must take effect immediately; averaging a
++        // fast local/CDN burst for several segments causes long stalls.
++        // Increase conservatively after capacity improves again.
++        m_bandwidth = !m_bandwidth || bandwidth < m_bandwidth ? bandwidth : m_bandwidth * 0.75 + bandwidth * 0.25;
++    }
++    track.nextTime = request.segment.start + request.segment.duration;
++    track.bufferedEnd = track.nextTime;
++    track.haveData = true;
++    if (!request.track && muxed()) {
++        auto& audio = m_tracks[1];
++        audio.nextTime = audio.bufferedEnd = track.nextTime; audio.haveData = true;
++    }
++    m_hooks.changed();
 +    pump();
 +}
 +void Player::failed(uint64_t identifier)
 +{
-+    if (!m_requests.contains(identifier)) return;
-+    fail("Could not load a DASH resource", true);
++    auto found = m_requests.find(identifier);
++    if (found == m_requests.end()) return;
++    if (found->second.kind == RequestKind::Playlist && m_manifest) {
++        // A live playlist reload can fail now and then; try again later.
++        m_requests.erase(found);
++        if (m_pendingPlaylists && !--m_pendingPlaylists) applyPlaylists();
++        return;
++    }
++    fail(m_hls ? "Could not load an HLS resource" : "Could not load a DASH resource", true);
 +}
 +bool Player::hasEnded() const
 +{
@@ -32898,7 +33331,7 @@ index 0000000000000000000000000000000000000000..3b488cc1aa98eddeee00e0e2824045b3
 +    if (!m_manifest) return 0;
 +    std::array<double, 2> starts {std::numeric_limits<double>::infinity(), std::numeric_limits<double>::infinity()};
 +    for (const auto& period : m_manifest->periods) for (const auto& rep : period.representations)
-+        if (m_hooks.supports(rep) && !rep.segments.empty()) {
++        if (supported(rep) && !rep.segments.empty()) {
 +            auto& start = starts[rep.audio ? 1 : 0]; start = std::min(start, rep.segments.front().start);
 +        }
 +    double result = 0;
@@ -32911,7 +33344,7 @@ index 0000000000000000000000000000000000000000..3b488cc1aa98eddeee00e0e2824045b3
 +    if (!isLive()) return m_manifest->duration;
 +    std::array<double, 2> ends {0, 0};
 +    for (const auto& period : m_manifest->periods) for (const auto& rep : period.representations)
-+        if (m_hooks.supports(rep) && !rep.segments.empty()) {
++        if (supported(rep) && !rep.segments.empty()) {
 +            auto& end = ends[rep.audio ? 1 : 0]; end = std::max(end, rep.segments.back().start + rep.segments.back().duration);
 +        }
 +    return ends[0] && ends[1] ? std::min(ends[0], ends[1]) : std::max(ends[0], ends[1]);
@@ -32929,10 +33362,10 @@ index 0000000000000000000000000000000000000000..3b488cc1aa98eddeee00e0e2824045b3
 +}
 diff --git a/Source/WebCore/platform/graphics/haiku/DashPlaybackHaiku.h b/Source/WebCore/platform/graphics/haiku/DashPlaybackHaiku.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..8bb3904715f57aafec27fd7d4fa3c441788957d7
+index 0000000000000000000000000000000000000000..2f069833194610efc9364f5276264142c9105550
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/haiku/DashPlaybackHaiku.h
-@@ -0,0 +1,80 @@
+@@ -0,0 +1,123 @@
 +/* Copyright (C) 2026 air/OS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +#pragma once
 +#include "DashManifestHaiku.h"
@@ -32943,10 +33376,26 @@ index 0000000000000000000000000000000000000000..8bb3904715f57aafec27fd7d4fa3c441
 +#include <map>
 +#include <memory>
 +
++namespace SummitHLS { class Presentation; }
++
 +namespace SummitDASH {
-+// Main-thread state machine. The native adapter uses WebCore media resources
-+// for transport and the existing Media Kit renderers for sample delivery.
-+// Transport callbacks must be asynchronous; no callback may destroy Player.
++// Demuxes one track's segments into the MP4 parser's track/sample model.
++// MP4 is built in; the media player supplies MPEG-TS and WebM.
++class SegmentParser {
++public:
++    virtual ~SegmentParser() = default;
++    std::function<void(SummitMP4::InitSegment&&)> onInitSegment;
++    std::function<void(SummitMP4::Sample&&)> onSample;
++    std::function<void(std::vector<uint8_t>&&)> onProtectionSystemHeaders;
++    virtual bool append(const uint8_t*, size_t) = 0;
++    // After each complete media segment: emit what it held back.
++    virtual bool endSegment() { return true; }
++};
++
++// Main-thread state machine for DASH manifests and HLS playlists. The native
++// adapter uses WebCore media resources for transport and the existing Media
++// Kit renderers for sample delivery. Transport callbacks must be
++// asynchronous; no callback may destroy Player.
 +class Player {
 +public:
 +    struct Hooks {
@@ -32960,6 +33409,7 @@ index 0000000000000000000000000000000000000000..8bb3904715f57aafec27fd7d4fa3c441
 +        std::function<void()> changed;
 +        std::function<void(const std::string&, bool)> error;
 +        std::function<void(std::vector<uint8_t>&&)> protectionSystemHeaders { };
++        std::function<std::unique_ptr<SegmentParser>(Container)> createParser { };
 +    };
 +    explicit Player(Hooks);
 +    ~Player();
@@ -32970,10 +33420,13 @@ index 0000000000000000000000000000000000000000..8bb3904715f57aafec27fd7d4fa3c441
 +    void complete(uint64_t request, std::vector<uint8_t>, const std::string& finalURL, double elapsedSeconds);
 +    void failed(uint64_t request);
 +    bool isStopped() const { return m_stopped; }
-+    bool hasMetadata() const { return bool(m_manifest); }
-+    bool hasVideo() const { return m_tracks[0].enabled; }
++    // A playlist that does not list its codecs is known once its first
++    // segment has been demuxed.
++    bool hasMetadata() const { return m_manifest && !m_probingTracks && !m_pendingIndexes; }
++    bool hasVideo() const { return m_tracks[0].enabled && !m_videoAbsent; }
 +    bool hasAudio() const { return m_tracks[1].enabled; }
 +    bool isLive() const { return m_manifest && m_manifest->dynamic; }
++    bool isHLS() const { return bool(m_hls); }
 +    bool hasEnded() const;
 +    bool hasCurrentData() const;
 +    double duration() const;
@@ -32986,31 +33439,54 @@ index 0000000000000000000000000000000000000000..8bb3904715f57aafec27fd7d4fa3c441
 +private:
 +    struct Packet { std::shared_ptr<const SummitMP4::TrackInfo> configuration; SummitMP4::Sample sample; double offset; };
 +    struct Track {
-+        bool enabled {false}, initialized {false}, ended {false}, parseFailed {false}, haveData {false};
++        bool enabled {false}, ended {false}, parseFailed {false}, haveData {false}, firstSample {false};
 +        uint64_t request {0}, catalogVersion {0};
-+        double nextTime {0}, bufferedStart {0}, bufferedEnd {0};
++        double nextTime {0}, bufferedStart {0}, bufferedEnd {0}, segmentStart {0}, segmentEnd {0};
 +        std::shared_ptr<const Representation> representation;
 +        std::shared_ptr<const SummitMP4::TrackInfo> configuration;
-+        SummitMP4::Parser parser;
++        std::unique_ptr<SegmentParser> parser;
++        // The initialization segment the parser has, if any.
++        std::optional<Resource> initialization;
 +        std::deque<Packet> packets;
 +    };
-+    enum class RequestKind { Manifest, Initialization, Media };
-+    struct Request { RequestKind kind; unsigned track; std::shared_ptr<const Representation> representation; Segment segment; };
++    enum class RequestKind { Manifest, Playlist, Index, Key, Initialization, Media };
++    struct Request { RequestKind kind; unsigned track; std::shared_ptr<const Representation> representation; Segment segment; Resource resource; size_t playlist {0}, item {0}; };
 +    void pump();
 +    void loadManifest();
++    void loadPlaylists();
++    void applyPlaylists();
++    void applyManifest(Manifest&&);
++    void startPresentation();
 +    void fail(const std::string&, bool network = false);
++    bool supported(const Representation&) const;
 +    const Representation* select(unsigned track, double position) const;
 +    const Segment* segment(const Representation&, double position) const;
-+    void requestTrack(unsigned, RequestKind, const Segment* = nullptr);
++    void request(unsigned, RequestKind, const Resource&, const Segment&);
++    void resetParser(unsigned);
 +    void resetTracks(double);
++    double sampleOffset(Track& carrier, const SummitMP4::TrackInfo&, const SummitMP4::Sample&);
++    bool muxed() const { return m_muxed; }
 +    Hooks m_hooks;
 +    std::array<Track, 2> m_tracks;
 +    std::optional<Manifest> m_manifest;
++    std::unique_ptr<SummitHLS::Presentation> m_hls;
 +    std::map<uint64_t, Request> m_requests;
++    // HLS: AES-128 keys by URI, and each discontinuity sequence's offset from
++    // media time to playlist time.
++    std::map<std::string, std::array<uint8_t, 16>> m_keys;
++    std::map<uint64_t, double> m_timelineOffsets;
++    mutable std::map<std::string, bool> m_supported;
++    // SegmentBase WebM: initialization bytes by (period, representation)
++    // while their Cues load.
++    std::map<std::pair<size_t, size_t>, std::vector<uint8_t>> m_indexInitializations;
 +    std::string m_url;
-+    uint64_t m_identifier {0}, m_manifestRequest {0}, m_catalogVersion {0};
++    uint64_t m_identifier {0}, m_manifestRequest {0}, m_catalogVersion {0}, m_segmentSamples {0};
++    unsigned m_pendingPlaylists {0}, m_pendingIndexes {0};
 +    double m_now {0}, m_startUTC {0}, m_startMono {0}, m_nextRefresh {0}, m_position {0}, m_initialTime {0}, m_bandwidth {0};
 +    bool m_stopped {true}, m_pumping {false};
++    // HLS variants whose segments also carry the audio (track 1 is then fed
++    // by track 0's parser), and the probe of a playlist without CODECS.
++    bool m_muxed {false}, m_probingTracks {false}, m_videoAbsent {false};
 +};
 +}
 diff --git a/Source/WebCore/platform/graphics/haiku/DashResourceLoaderHaiku.cpp b/Source/WebCore/platform/graphics/haiku/DashResourceLoaderHaiku.cpp
@@ -36645,6 +37121,678 @@ index 0000000000000000000000000000000000000000..740c848aa5379c979b37382f4099a149
 +}
 +
 +}
+diff --git a/Source/WebCore/platform/graphics/haiku/HLSPlaylistHaiku.cpp b/Source/WebCore/platform/graphics/haiku/HLSPlaylistHaiku.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..aadea35cb72309beda78fd1e7b64d5391c5ff0bf
+--- /dev/null
++++ b/Source/WebCore/platform/graphics/haiku/HLSPlaylistHaiku.cpp
+@@ -0,0 +1,599 @@
++/* Copyright (C) 2026 air/OS contributors. SPDX-License-Identifier: BSD-2-Clause */
++#include "HLSPlaylistHaiku.h"
++#include <libxml/xmlmemory.h>
++#include <libxml/uri.h>
++#include <openssl/evp.h>
++#include <algorithm>
++#include <charconv>
++#include <climits>
++#include <cmath>
++#include <cstdio>
++#include <cstdlib>
++#include <ctime>
++#include <memory>
++#include <set>
++#include <strings.h>
++
++namespace SummitHLS {
++namespace {
++using Attributes = std::map<std::string, std::string>;
++constexpr size_t maxSegments = 100000;
++constexpr size_t maxVariants = 6;
++
++std::string_view trim(std::string_view text)
++{
++    while (!text.empty() && (text.front() == ' ' || text.front() == '\t' || text.front() == '\r')) text.remove_prefix(1);
++    while (!text.empty() && (text.back() == ' ' || text.back() == '\t' || text.back() == '\r')) text.remove_suffix(1);
++    return text;
++}
++std::vector<std::string_view> lines(std::string_view text)
++{
++    if (text.starts_with("\xEF\xBB\xBF")) text.remove_prefix(3);
++    std::vector<std::string_view> result;
++    while (!text.empty()) {
++        auto end = text.find('\n');
++        auto line = trim(text.substr(0, end));
++        if (!line.empty()) result.push_back(line);
++        if (end == std::string_view::npos) break;
++        text.remove_prefix(end + 1);
++    }
++    return result;
++}
++// Quoted values may contain commas (CODECS="avc1.64001f,mp4a.40.2").
++Attributes attributes(std::string_view text)
++{
++    Attributes result;
++    size_t at = 0;
++    while (at < text.size() && result.size() < 64) {
++        while (at < text.size() && (text[at] == ',' || text[at] == ' ')) ++at;
++        auto equals = text.find('=', at);
++        if (equals == std::string_view::npos) break;
++        std::string name(trim(text.substr(at, equals - at)));
++        at = equals + 1;
++        std::string value;
++        if (at < text.size() && text[at] == '"') {
++            auto end = text.find('"', at + 1);
++            if (end == std::string_view::npos) break;
++            value = text.substr(at + 1, end - at - 1);
++            at = end + 1;
++        } else {
++            auto end = text.find(',', at);
++            if (end == std::string_view::npos) end = text.size();
++            value = trim(text.substr(at, end - at));
++            at = end;
++        }
++        result[std::move(name)] = std::move(value);
++    }
++    return result;
++}
++std::optional<uint64_t> integer(std::string_view text)
++{
++    text = trim(text);
++    uint64_t value = 0;
++    auto result = std::from_chars(text.data(), text.data() + text.size(), value);
++    if (text.empty() || result.ec != std::errc() || result.ptr != text.data() + text.size()) return {};
++    return value;
++}
++std::optional<double> decimal(std::string_view text)
++{
++    std::string copy(trim(text));
++    if (copy.empty() || copy.size() > 64) return {};
++    char* end = nullptr;
++    double value = std::strtod(copy.c_str(), &end);
++    if (end != copy.c_str() + copy.size() || !std::isfinite(value) || value < 0 || value > 86400 * 365) return {};
++    return value;
++}
++std::optional<std::string> resolve(const std::string& base, std::string_view reference)
++{
++    if (reference.empty() || reference.size() > 4096) return {};
++    std::string relative(reference);
++    xmlChar* built = xmlBuildURI(BAD_CAST relative.c_str(), BAD_CAST base.c_str());
++    if (!built) return {};
++    std::string result(reinterpret_cast<const char*>(built));
++    xmlFree(built);
++    std::unique_ptr<xmlURI, decltype(&xmlFreeURI)> uri(xmlParseURI(result.c_str()), xmlFreeURI);
++    if (!uri || !uri->scheme || !uri->server || uri->user) return {};
++    std::string scheme(uri->scheme);
++    if (scheme != "https" && scheme != "http") return {};
++    return result;
++}
++std::optional<SummitDASH::ByteRange> byteRange(std::string_view text, std::optional<uint64_t> previousEnd)
++{
++    auto at = text.find('@');
++    auto length = integer(text.substr(0, at));
++    std::optional<uint64_t> offset = previousEnd;
++    if (at != std::string_view::npos) offset = integer(text.substr(at + 1));
++    if (!length || !*length || !offset || *length > 128 * 1024 * 1024 || *offset > UINT64_MAX - *length) return {};
++    return SummitDASH::ByteRange { *offset, *offset + *length - 1 };
++}
++std::optional<std::array<uint8_t, 16>> hexIV(std::string_view text)
++{
++    if (!text.starts_with("0x") && !text.starts_with("0X")) return {};
++    text.remove_prefix(2);
++    if (text.empty() || text.size() > 32) return {};
++    std::array<uint8_t, 16> iv { };
++    // Right-aligned: a shorter value is the low-order bytes.
++    size_t nibble = 32 - text.size();
++    for (char c : text) {
++        int value = c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1;
++        if (value < 0) return {};
++        iv[nibble / 2] |= uint8_t(nibble % 2 ? value : value << 4);
++        ++nibble;
++    }
++    return iv;
++}
++// EXT-X-PROGRAM-DATE-TIME: 2026-10-30T12:00:00.000Z, or with +hh:mm/+hhmm.
++std::optional<double> dateTime(std::string_view text)
++{
++    std::string copy(trim(text));
++    int y, m, d, h, minute, used = 0;
++    double second;
++    if (std::sscanf(copy.c_str(), "%4d-%2d-%2dT%2d:%2d:%lf%n", &y, &m, &d, &h, &minute, &second, &used) != 6
++        || y < 1970 || m < 1 || m > 12 || d < 1 || d > 31 || h > 23 || minute > 59 || !(second >= 0 && second < 61))
++        return {};
++    std::string_view zone = std::string_view(copy).substr(used);
++    int offset = 0;
++    if (!zone.empty() && zone != "Z" && zone != "z") {
++        if (zone[0] != '+' && zone[0] != '-') return {};
++        std::string digits;
++        for (char c : zone.substr(1)) if (c != ':') digits += c;
++        auto value = integer(digits);
++        if (!value || digits.size() != 4) return {};
++        offset = int(*value / 100 * 3600 + *value % 100 * 60) * (zone[0] == '-' ? -1 : 1);
++    }
++    std::tm time { };
++    time.tm_year = y - 1900; time.tm_mon = m - 1; time.tm_mday = d; time.tm_hour = h; time.tm_min = minute;
++    return double(timegm(&time)) + second - offset;
++}
++bool hasPrefix(const std::string& codec, std::initializer_list<const char*> prefixes)
++{
++    for (auto* prefix : prefixes) if (codec.size() >= 4 && !strncasecmp(codec.c_str(), prefix, 4)) return true;
++    return false;
++}
++bool videoCodec(const std::string& codec) { return hasPrefix(codec, { "avc1", "avc3", "hvc1", "hev1", "dvh1", "dvhe", "vp09", "vp08", "av01" }); }
++bool audioCodec(const std::string& codec) { return hasPrefix(codec, { "mp4a", "ac-3", "ec-3", "opus", "flac", "mp3", "ac-4" }); }
++std::vector<std::string> codecList(const std::string& codecs)
++{
++    std::vector<std::string> result;
++    std::string_view rest(codecs);
++    while (!rest.empty() && result.size() < 8) {
++        auto end = rest.find(',');
++        auto codec = trim(rest.substr(0, end));
++        if (!codec.empty()) result.emplace_back(codec);
++        if (end == std::string_view::npos) break;
++        rest.remove_prefix(end + 1);
++    }
++    return result;
++}
++// Old Apple tools wrote decimal AVC profile and level (avc1.66.30), and HLS
++// lists HE-AAC (mp4a.40.5/.29), which FFmpeg's AAC decoder plays as AAC.
++std::string normalizedCodec(std::string codec, SummitDASH::Container container)
++{
++    if ((codec.starts_with("avc1.") || codec.starts_with("avc3.")) && std::count(codec.begin(), codec.end(), '.') == 2) {
++        auto dot = codec.find('.', 5);
++        auto profile = integer(std::string_view(codec).substr(5, dot - 5)), level = integer(std::string_view(codec).substr(dot + 1));
++        if (profile && level && *profile < 256 && *level < 256) {
++            char buffer[16];
++            std::snprintf(buffer, sizeof buffer, "%.4s.%02x00%02x", codec.c_str(), unsigned(*profile), unsigned(*level));
++            return buffer;
++        }
++    }
++    if (codec == "mp4a.40.5" || codec == "mp4a.40.29") return "mp4a.40.2";
++    if (container == SummitDASH::Container::MPEG2TS && (codec == "mp4a.40.34" || codec == "mp4a.6B" || codec == "mp4a.6b")) return "mp3";
++    return codec;
++}
++
++struct ParsedMedia {
++    double targetDuration {0}, holdBack {0};
++    bool ended {false};
++    std::vector<Presentation::Segment> segments;
++};
++bool parseMedia(std::string_view text, const std::string& url, ParsedMedia& out, std::string& error)
++{
++    auto all = lines(text);
++    if (all.empty() || all[0] != "#EXTM3U") { error = "Not an HLS playlist"; return false; }
++    uint64_t sequence = 0, discontinuity = 0;
++    std::optional<double> duration;
++    std::optional<std::string_view> rangeText;
++    std::shared_ptr<const SummitDASH::Key> key;
++    std::optional<SummitDASH::Resource> map;
++    std::string lastURL;
++    std::optional<uint64_t> lastEnd;
++    double programTime = 0;
++    bool hasProgramTime = false, gap = false, sawSegment = false;
++    for (size_t index = 1; index < all.size(); ++index) {
++        auto line = all[index];
++        if (line[0] != '#') {
++            if (!duration) { error = "HLS segment without EXTINF"; return false; }
++            auto resolved = resolve(url, line);
++            if (!resolved) { error = "HLS segment requires an HTTP URL without credentials"; return false; }
++            Presentation::Segment segment;
++            segment.resource.url = *resolved;
++            if (rangeText) {
++                auto range = byteRange(*rangeText, lastURL == *resolved ? lastEnd : std::nullopt);
++                if (!range) { error = "Invalid HLS byte range"; return false; }
++                segment.resource.range = range;
++                lastEnd = range->last + 1;
++            } else
++                lastEnd.reset();
++            lastURL = *resolved;
++            segment.resource.key = key;
++            segment.map = map;
++            segment.duration = *duration;
++            segment.sequence = sequence++;
++            segment.discontinuity = discontinuity;
++            segment.programTime = programTime;
++            segment.hasProgramTime = hasProgramTime;
++            if (!gap && *duration > 0) {
++                if (out.segments.size() >= maxSegments) { error = "HLS playlist has too many segments"; return false; }
++                out.segments.push_back(std::move(segment));
++            }
++            programTime += *duration;
++            duration.reset(); rangeText.reset(); gap = false; sawSegment = true;
++            continue;
++        }
++        if (!line.starts_with("#EXT")) continue;
++        auto colon = line.find(':');
++        auto tag = line.substr(0, colon);
++        auto value = colon == std::string_view::npos ? std::string_view() : line.substr(colon + 1);
++        if (tag == "#EXT-X-STREAM-INF" || tag == "#EXT-X-MEDIA") { error = "HLS media playlist contains variant tags"; return false; }
++        if (tag == "#EXT-X-TARGETDURATION") {
++            auto target = decimal(value);
++            if (!target || *target > 3600) { error = "Invalid HLS target duration"; return false; }
++            out.targetDuration = *target;
++        } else if (tag == "#EXT-X-MEDIA-SEQUENCE" || tag == "#EXT-X-DISCONTINUITY-SEQUENCE") {
++            auto number = integer(value);
++            if (!number || sawSegment || *number > UINT64_MAX / 2) { error = "Invalid HLS sequence number"; return false; }
++            (tag == "#EXT-X-MEDIA-SEQUENCE" ? sequence : discontinuity) = *number;
++        } else if (tag == "#EXTINF") {
++            duration = decimal(value.substr(0, value.find(',')));
++            if (!duration) { error = "Invalid HLS segment duration"; return false; }
++        } else if (tag == "#EXT-X-BYTERANGE")
++            rangeText = value;
++        else if (tag == "#EXT-X-DISCONTINUITY")
++            ++discontinuity;
++        else if (tag == "#EXT-X-ENDLIST")
++            out.ended = true;
++        else if (tag == "#EXT-X-GAP")
++            gap = true;
++        else if (tag == "#EXT-X-I-FRAMES-ONLY") {
++            error = "HLS I-frame playlists are not playable"; return false;
++        } else if (tag == "#EXT-X-PROGRAM-DATE-TIME") {
++            if (auto time = dateTime(value)) { programTime = *time; hasProgramTime = true; }
++        } else if (tag == "#EXT-X-SERVER-CONTROL") {
++            auto list = attributes(value);
++            if (auto holdBack = decimal(list["HOLD-BACK"])) out.holdBack = *holdBack;
++        } else if (tag == "#EXT-X-KEY") {
++            auto list = attributes(value);
++            auto format = list["KEYFORMAT"];
++            if (!format.empty() && format != "identity") {
++                // A DRM system's key next to (or instead of) an identity key.
++                if (list["METHOD"] != "NONE") { error = "HLS stream uses a DRM key system"; return false; }
++                continue;
++            }
++            const auto& method = list["METHOD"];
++            if (method == "NONE")
++                key.reset();
++            else if (method == "AES-128") {
++                auto keyURL = resolve(url, list["URI"]);
++                if (!keyURL) { error = "HLS key requires an HTTP URL without credentials"; return false; }
++                auto newKey = std::make_shared<SummitDASH::Key>();
++                newKey->url = *keyURL;
++                if (!list["IV"].empty()) {
++                    newKey->iv = hexIV(list["IV"]);
++                    if (!newKey->iv) { error = "Invalid HLS key IV"; return false; }
++                }
++                key = std::move(newKey);
++            } else {
++                error = "HLS " + method + " encryption is not supported"; return false;
++            }
++        } else if (tag == "#EXT-X-MAP") {
++            auto list = attributes(value);
++            auto mapURL = resolve(url, list["URI"]);
++            if (!mapURL) { error = "Invalid HLS initialization URL"; return false; }
++            SummitDASH::Resource resource { *mapURL, std::nullopt, key };
++            if (!list["BYTERANGE"].empty()) {
++                resource.range = byteRange(list["BYTERANGE"], 0);
++                if (!resource.range) { error = "Invalid HLS initialization byte range"; return false; }
++            }
++            map = std::move(resource);
++        }
++    }
++    return true;
++}
++bool lessSequence(const Presentation::Segment& segment, uint64_t sequence) { return segment.sequence < sequence; }
++const Presentation::Segment* findSequence(const std::vector<Presentation::Segment>& segments, uint64_t sequence)
++{
++    auto found = std::lower_bound(segments.begin(), segments.end(), sequence, lessSequence);
++    return found != segments.end() && found->sequence == sequence ? &*found : nullptr;
++}
++} // namespace
++
++bool isPlaylist(std::string_view text)
++{
++    if (text.starts_with("\xEF\xBB\xBF")) text.remove_prefix(3);
++    return text.starts_with("#EXTM3U");
++}
++
++bool decryptAES128(std::vector<uint8_t>& data, const std::array<uint8_t, 16>& key, const std::array<uint8_t, 16>& iv)
++{
++    if (data.empty() || data.size() % 16 || data.size() > INT_MAX - 16) return false;
++    std::unique_ptr<EVP_CIPHER_CTX, decltype(&EVP_CIPHER_CTX_free)> context(EVP_CIPHER_CTX_new(), EVP_CIPHER_CTX_free);
++    if (!context || EVP_DecryptInit_ex(context.get(), EVP_aes_128_cbc(), nullptr, key.data(), iv.data()) != 1) return false;
++    std::vector<uint8_t> output(data.size() + 16);
++    int written = 0, last = 0;
++    if (EVP_DecryptUpdate(context.get(), output.data(), &written, data.data(), int(data.size())) != 1
++        || EVP_DecryptFinal_ex(context.get(), output.data() + written, &last) != 1)
++        return false;
++    output.resize(size_t(written) + size_t(last));
++    data = std::move(output);
++    return true;
++}
++
++std::array<uint8_t, 16> sequenceIV(uint64_t sequence)
++{
++    std::array<uint8_t, 16> iv { };
++    for (unsigned index = 0; index < 8; ++index) iv[15 - index] = uint8_t(sequence >> (index * 8));
++    return iv;
++}
++
++bool Presentation::start(std::string_view text, const std::string& url, std::string& error)
++{
++    m_playlists.clear(); m_periods.clear(); m_round = 0;
++    if (!isPlaylist(text)) { error = "Not an HLS playlist"; return false; }
++    if (text.find("#EXT-X-STREAM-INF") == std::string_view::npos) {
++        // A media playlist on its own says nothing about its tracks.
++        Playlist playlist;
++        playlist.url = url; playlist.muxedAudio = true; playlist.tracksKnown = false;
++        m_playlists.push_back(std::move(playlist));
++        return update(0, text, url, error);
++    }
++    struct Variant { std::string url, codecs, audioGroup; uint64_t bandwidth {0}; unsigned width {0}, height {0}; bool video {false}, audio {false}, unknown {false}; };
++    struct Rendition { std::string url, group, language; bool isDefault {false}; };
++    std::vector<Variant> variants;
++    std::vector<Rendition> renditions;
++    auto all = lines(text);
++    std::optional<Attributes> pending;
++    for (size_t index = 1; index < all.size(); ++index) {
++        auto line = all[index];
++        if (line.starts_with("#EXT-X-STREAM-INF:")) { pending = attributes(line.substr(18)); continue; }
++        if (line.starts_with("#EXT-X-MEDIA:")) {
++            auto list = attributes(line.substr(13));
++            if (list["TYPE"] != "AUDIO" || renditions.size() >= 64) continue;
++            Rendition rendition;
++            if (!list["URI"].empty()) {
++                auto resolved = resolve(url, list["URI"]);
++                if (!resolved) continue;
++                rendition.url = *resolved;
++            }
++            rendition.group = list["GROUP-ID"]; rendition.language = list["LANGUAGE"]; rendition.isDefault = list["DEFAULT"] == "YES";
++            renditions.push_back(std::move(rendition));
++            continue;
++        }
++        if (line[0] == '#') continue;
++        if (!pending) continue;
++        auto resolved = resolve(url, line);
++        auto list = std::move(*pending);
++        pending.reset();
++        if (!resolved || variants.size() >= 64) continue;
++        Variant variant;
++        variant.url = *resolved; variant.codecs = list["CODECS"]; variant.audioGroup = list["AUDIO"];
++        variant.bandwidth = integer(list["BANDWIDTH"]).value_or(0);
++        auto resolution = list["RESOLUTION"];
++        if (auto x = resolution.find('x'); x != std::string::npos) {
++            variant.width = unsigned(std::min<uint64_t>(integer(std::string_view(resolution).substr(0, x)).value_or(0), 16384));
++            variant.height = unsigned(std::min<uint64_t>(integer(std::string_view(resolution).substr(x + 1)).value_or(0), 16384));
++        }
++        for (auto& codec : codecList(variant.codecs)) { variant.video |= videoCodec(codec); variant.audio |= audioCodec(codec); }
++        variant.unknown = codecList(variant.codecs).empty();
++        if (std::none_of(variants.begin(), variants.end(), [&](auto& other) { return other.url == variant.url; }))
++            variants.push_back(std::move(variant));
++    }
++    std::vector<Variant> chosen;
++    for (auto& variant : variants) if (variant.video || variant.unknown) chosen.push_back(variant);
++    bool audioOnly = chosen.empty();
++    if (audioOnly) for (auto& variant : variants) if (variant.audio) chosen.push_back(variant);
++    if (chosen.empty()) { error = "HLS playlist has no audio or video variants"; return false; }
++    std::optional<Rendition> audio;
++    if (!audioOnly) {
++        // Variants that share the most common audio group; a different group
++        // would need a second audio rendition.
++        std::map<std::string, unsigned> groups;
++        for (auto& variant : chosen) ++groups[variant.audioGroup];
++        auto group = std::max_element(groups.begin(), groups.end(), [](auto& a, auto& b) { return a.second < b.second; })->first;
++        std::erase_if(chosen, [&](auto& variant) { return variant.audioGroup != group; });
++        if (!group.empty()) {
++            // The default rendition (else the first); without a URI it is
++            // the audio muxed into the variants.
++            for (auto& rendition : renditions) if (rendition.group == group && (!audio || (rendition.isDefault && !audio->isDefault))) audio = rendition;
++            if (audio && audio->url.empty()) audio.reset();
++        }
++        // 4K at most: larger pictures are beyond the decoders in use.
++        if (std::any_of(chosen.begin(), chosen.end(), [](auto& variant) { return variant.height <= 2160; }))
++            std::erase_if(chosen, [](auto& variant) { return variant.height > 2160; });
++    }
++    std::sort(chosen.begin(), chosen.end(), [](auto& a, auto& b) { return a.bandwidth < b.bandwidth; });
++    if (chosen.size() > maxVariants) {
++        // Live presentations reload every playlist, so keep a spread.
++        std::vector<Variant> spread;
++        for (size_t index = 0; index < maxVariants; ++index) spread.push_back(chosen[index * (chosen.size() - 1) / (maxVariants - 1)]);
++        chosen = std::move(spread);
++    }
++    for (auto& variant : chosen) {
++        Playlist playlist;
++        playlist.url = variant.url; playlist.audio = audioOnly; playlist.bandwidth = variant.bandwidth;
++        playlist.width = variant.width; playlist.height = variant.height;
++        if (audio && !audioOnly) {
++            for (auto& codec : codecList(variant.codecs)) if (!audioCodec(codec)) playlist.codecs += (playlist.codecs.empty() ? "" : ",") + codec;
++        } else {
++            playlist.codecs = variant.codecs;
++            playlist.muxedAudio = !audioOnly && (variant.audio || variant.unknown);
++            playlist.tracksKnown = !variant.unknown;
++        }
++        m_playlists.push_back(std::move(playlist));
++    }
++    if (audio) {
++        Playlist playlist;
++        playlist.url = audio->url; playlist.audio = true; playlist.language = audio->language;
++        for (auto& codec : codecList(chosen.back().codecs)) if (audioCodec(codec)) playlist.codecs += (playlist.codecs.empty() ? "" : ",") + codec;
++        m_playlists.push_back(std::move(playlist));
++    }
++    return true;
++}
++
++std::vector<std::pair<size_t, std::string>> Presentation::playlistsToLoad()
++{
++    std::vector<std::pair<size_t, std::string>> result;
++    bool first = !m_round++;
++    for (size_t index = 0; index < m_playlists.size(); ++index) {
++        auto& playlist = m_playlists[index];
++        if (first ? !playlist.loaded : !playlist.ended) result.emplace_back(index, playlist.url);
++    }
++    return result;
++}
++
++bool Presentation::isComplete() const
++{
++    return std::all_of(m_playlists.begin(), m_playlists.end(), [](auto& playlist) { return playlist.loaded; });
++}
++
++// The first load of a live playlist: line it up with one already loaded, by
++// program date, then media sequence number, then the live edge.
++bool Presentation::anchor(size_t index, std::vector<Segment>& segments, double targetDuration) const
++{
++    auto place = [&](size_t at, double start) {
++        for (size_t k = at; k-- > 0;) start -= segments[k].duration;
++        for (auto& segment : segments) { segment.start = start; start += segment.duration; }
++        return true;
++    };
++    for (size_t other = 0; other < m_playlists.size(); ++other) {
++        auto& reference = m_playlists[other];
++        if (other == index || !reference.loaded || reference.segments.empty()) continue;
++        auto dated = std::find_if(segments.begin(), segments.end(), [](auto& segment) { return segment.hasProgramTime; });
++        auto referenceDated = std::find_if(reference.segments.begin(), reference.segments.end(), [](auto& segment) { return segment.hasProgramTime; });
++        if (dated != segments.end() && referenceDated != reference.segments.end())
++            return place(dated - segments.begin(), referenceDated->start + dated->programTime - referenceDated->programTime);
++        if (std::abs(reference.targetDuration - targetDuration) < 0.5) {
++            for (size_t k = 0; k < segments.size(); ++k)
++                if (auto* match = findSequence(reference.segments, segments[k].sequence)) return place(k, match->start);
++        }
++        auto& last = reference.segments.back();
++        return place(segments.size(), last.start + last.duration);
++    }
++    return false;
++}
++
++bool Presentation::update(size_t index, std::string_view text, const std::string& url, std::string& error)
++{
++    if (index >= m_playlists.size()) { error = "Unknown HLS playlist"; return false; }
++    ParsedMedia parsed;
++    if (!parseMedia(text, url, parsed, error)) return false;
++    auto& playlist = m_playlists[index];
++    auto& segments = parsed.segments;
++    if (segments.empty() && (parsed.ended || !playlist.loaded)) { error = "HLS playlist has no segments"; return false; }
++    if (!playlist.loaded && !segments.empty()) {
++        auto& first = segments.front();
++        auto path = (first.map ? first.map->url : first.resource.url);
++        path = path.substr(0, path.find_first_of("?#"));
++        auto extension = path.substr(std::min(path.size(), path.rfind('.') + 1));
++        std::transform(extension.begin(), extension.end(), extension.begin(), [](unsigned char c) { return std::tolower(c); });
++        if (extension == "aac" || extension == "ac3" || extension == "ec3" || extension == "mp3") { error = "HLS packed audio segments are not supported"; return false; }
++        if (extension == "webvtt" || extension == "vtt") { error = "HLS subtitle playlist"; return false; }
++        playlist.container = first.map && extension != "ts" ? SummitDASH::Container::MP4 : SummitDASH::Container::MPEG2TS;
++    }
++    if (!segments.empty()) {
++        double start = 0;
++        if (playlist.loaded && !playlist.segments.empty()) {
++            bool found = false;
++            for (size_t k = 0; k < segments.size() && !found; ++k) {
++                if (auto* match = findSequence(playlist.segments, segments[k].sequence)) {
++                    start = match->start;
++                    for (size_t j = k; j-- > 0;) start -= segments[j].duration;
++                    found = true;
++                }
++            }
++            if (!found) {
++                // Reloaded too late for any overlap, or the sequence restarted.
++                auto& last = playlist.segments.back();
++                start = last.start + last.duration;
++                if (segments.front().sequence > last.sequence)
++                    start += double(std::min<uint64_t>(segments.front().sequence - last.sequence - 1, 10000)) * parsed.targetDuration;
++            }
++            for (auto& segment : segments) { segment.start = start; start += segment.duration; }
++        } else if (parsed.ended || !anchor(index, segments, parsed.targetDuration))
++            for (auto& segment : segments) { segment.start = start; start += segment.duration; }
++    }
++    playlist.changed = !playlist.loaded || parsed.ended != playlist.ended
++        || (!segments.empty() && (playlist.segments.empty() || segments.back().sequence != playlist.segments.back().sequence));
++    playlist.loaded = true; playlist.ended = parsed.ended;
++    playlist.targetDuration = parsed.targetDuration; playlist.holdBack = parsed.holdBack;
++    if (!segments.empty()) playlist.segments = std::move(segments);
++    for (auto& segment : playlist.segments) {
++        auto [found, inserted] = m_periods.try_emplace(segment.discontinuity, segment.start, m_round);
++        if (!inserted && found->second.second == m_round && segment.start < found->second.first) found->second.first = segment.start;
++    }
++    if (isComplete()) {
++        uint64_t oldest = UINT64_MAX;
++        for (auto& other : m_playlists) if (!other.segments.empty()) oldest = std::min(oldest, other.segments.front().discontinuity);
++        std::erase_if(m_periods, [&](auto& entry) { return entry.first < oldest; });
++    }
++    return true;
++}
++
++std::optional<SummitDASH::Manifest> Presentation::manifest(std::string& error) const
++{
++    if (!isComplete()) { error = "HLS playlists are still loading"; return {}; }
++    SummitDASH::Manifest manifest;
++    manifest.hls = true;
++    double end = 0, target = 0, holdBack = 0;
++    bool changed = false;
++    std::set<uint64_t> present;
++    for (auto& playlist : m_playlists) {
++        manifest.dynamic |= !playlist.ended;
++        changed |= playlist.changed;
++        if (playlist.targetDuration > 0) target = target ? std::min(target, playlist.targetDuration) : playlist.targetDuration;
++        holdBack = std::max(holdBack, playlist.holdBack);
++        if (!playlist.segments.empty()) end = std::max(end, playlist.segments.back().start + playlist.segments.back().duration);
++        for (auto& segment : playlist.segments) present.insert(segment.discontinuity);
++    }
++    if (!target) target = 6;
++    manifest.duration = manifest.dynamic ? 0 : end;
++    // RFC 8216 6.3.4: reload after the target duration, or half of it when
++    // the playlist did not change.
++    manifest.updatePeriod = std::clamp(changed ? target : target / 2, 1.0, 30.0);
++    manifest.liveDelay = holdBack > 0 ? holdBack : 3 * target;
++    std::vector<std::pair<uint64_t, double>> periods;
++    for (auto& [discontinuity, entry] : m_periods) if (present.contains(discontinuity)) periods.emplace_back(discontinuity, entry.first);
++    for (size_t p = 0; p < periods.size(); ++p) {
++        SummitDASH::Period period;
++        period.id = std::to_string(periods[p].first);
++        period.start = periods[p].second;
++        period.duration = p + 1 < periods.size() ? std::max(0.0, periods[p + 1].second - period.start)
++            : manifest.dynamic ? 0 : std::max(0.0, end - period.start);
++        for (size_t index = 0; index < m_playlists.size(); ++index) {
++            auto& playlist = m_playlists[index];
++            SummitDASH::Representation rep;
++            rep.id = (playlist.audio ? "a" : "v") + std::to_string(index);
++            rep.adaptationID = playlist.audio ? "audio" : "video";
++            rep.audio = playlist.audio; rep.video = !playlist.audio;
++            rep.container = playlist.container;
++            rep.mimeType = playlist.container == SummitDASH::Container::MPEG2TS ? "video/mp2t" : playlist.audio ? "audio/mp4" : "video/mp4";
++            for (auto& codec : codecList(playlist.codecs))
++                rep.codecs += (rep.codecs.empty() ? "" : ",") + normalizedCodec(codec, playlist.container);
++            rep.language = playlist.language;
++            rep.bandwidth = playlist.bandwidth; rep.width = playlist.width; rep.height = playlist.height;
++            rep.muxedAudio = playlist.muxedAudio; rep.tracksKnown = playlist.tracksKnown;
++            rep.mediaTimeline = true; rep.discontinuity = periods[p].first; rep.periodStart = period.start;
++            for (auto& segment : playlist.segments) {
++                if (segment.discontinuity != periods[p].first) continue;
++                if (rep.segments.empty() && segment.map) rep.initialization = *segment.map;
++                rep.segments.push_back({ segment.resource, segment.start, segment.duration, segment.sequence, 0, segment.map });
++            }
++            period.representations.push_back(std::move(rep));
++        }
++        manifest.periods.push_back(std::move(period));
++    }
++    if (manifest.periods.empty()) { error = "HLS presentation has no segments"; return {}; }
++    return manifest;
++}
++}
+diff --git a/Source/WebCore/platform/graphics/haiku/HLSPlaylistHaiku.h b/Source/WebCore/platform/graphics/haiku/HLSPlaylistHaiku.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..e2e1de09205d67bf1d17442c346c59090f1d092f
+--- /dev/null
++++ b/Source/WebCore/platform/graphics/haiku/HLSPlaylistHaiku.h
+@@ -0,0 +1,61 @@
++/* Copyright (C) 2026 air/OS contributors. SPDX-License-Identifier: BSD-2-Clause */
++#pragma once
++#include "DashManifestHaiku.h"
++#include <array>
++#include <map>
++#include <optional>
++#include <string>
++#include <string_view>
++#include <utility>
++#include <vector>
++
++namespace SummitHLS {
++// HTTP Live Streaming (RFC 8216) for the native player. Playlists are
++// translated into the DASH player's model: each variant and audio rendition
++// becomes a representation, each discontinuity sequence a period, and live
++// playlists are reloaded and re-anchored by media sequence number so that
++// segment times stay stable while the window slides. Portable: no WebCore or
++// Haiku types, and no exceptions.
++bool isPlaylist(std::string_view);
++// AES-128-CBC with PKCS#7 padding, in place (METHOD=AES-128).
++bool decryptAES128(std::vector<uint8_t>&, const std::array<uint8_t, 16>& key, const std::array<uint8_t, 16>& iv);
++std::array<uint8_t, 16> sequenceIV(uint64_t mediaSequence);
++
++class Presentation {
++public:
++    // The first response: a multivariant playlist or a media playlist.
++    bool start(std::string_view text, const std::string& url, std::string& error);
++    // Media playlists to load now: all of them at first, then the live ones.
++    std::vector<std::pair<size_t, std::string>> playlistsToLoad();
++    bool update(size_t index, std::string_view text, const std::string& url, std::string& error);
++    bool isComplete() const;
++    std::optional<SummitDASH::Manifest> manifest(std::string& error) const;
++
++    struct Segment {
++        SummitDASH::Resource resource;
++        std::optional<SummitDASH::Resource> map;
++        double duration {0}, start {0}, programTime {0};
++        bool hasProgramTime {false};
++        uint64_t sequence {0}, discontinuity {0};
++    };
++private:
++    struct Playlist {
++        std::string url;
++        bool audio {false}, muxedAudio {false}, tracksKnown {true};
++        bool loaded {false}, ended {false}, changed {false};
++        uint64_t bandwidth {0};
++        unsigned width {0}, height {0};
++        std::string codecs, language;
++        SummitDASH::Container container {SummitDASH::Container::MPEG2TS};
++        double targetDuration {0}, holdBack {0};
++        std::vector<Segment> segments;
++    };
++    bool anchor(size_t index, std::vector<Segment>&, double targetDuration) const;
++    std::vector<Playlist> m_playlists;
++    // Discontinuity sequence -> period start, and the load round that set it.
++    // A period's start must not move once published, or the player would
++    // take the stable timeline for a new period.
++    std::map<uint64_t, std::pair<double, unsigned>> m_periods;
++    unsigned m_round {0};
++};
++}
 diff --git a/Source/WebCore/platform/graphics/haiku/IconHaiku.cpp b/Source/WebCore/platform/graphics/haiku/IconHaiku.cpp
 new file mode 100644
 index 0000000000000000000000000000000000000000..e6d08ef95b47dae535f28f27f26a51ef8ea1e048
@@ -37836,10 +38984,10 @@ index 0000000000000000000000000000000000000000..25b7a88fac963dbb273a0059ee216443
 +} // namespace SummitMPEGAudio
 diff --git a/Source/WebCore/platform/graphics/haiku/MPEGTSParserHaiku.cpp b/Source/WebCore/platform/graphics/haiku/MPEGTSParserHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..6e501a2fe1cea41f053ab8d37de684f186bc5238
+index 0000000000000000000000000000000000000000..412d1358ca4728ff1f05d88e90244667862d6377
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/haiku/MPEGTSParserHaiku.cpp
-@@ -0,0 +1,1121 @@
+@@ -0,0 +1,1149 @@
 +/*
 + * Copyright (C) 2026 Summit contributors.
 + *
@@ -38022,6 +39170,8 @@ index 0000000000000000000000000000000000000000..6e501a2fe1cea41f053ab8d37de684f1
 +// packets, multiple programs, incomplete PES/PSI, missing PTS and missing PCR.
 +class TransportValidator {
 +public:
++    explicit TransportValidator(bool lenient = false) : m_lenient(lenient) { }
++
 +    bool append(const uint8_t* bytes, size_t size, std::vector<uint8_t>& output, std::vector<size_t>& boundaries)
 +    {
 +        if (m_failed || (size && !bytes))
@@ -38056,7 +39206,7 @@ index 0000000000000000000000000000000000000000..6e501a2fe1cea41f053ab8d37de684f1
 +        for (auto& [pid, state] : m_pids) {
 +            if (!state.section.empty() || (state.pesStarted && (!state.headerComplete
 +                || (state.pesLength && state.pesBytes != state.pesLength))))
-+                return false;
++                return m_lenient;
 +        }
 +        return true;
 +    }
@@ -38096,6 +39246,8 @@ index 0000000000000000000000000000000000000000..6e501a2fe1cea41f053ab8d37de684f1
 +    }
 +
 +private:
++    bool m_lenient { false };
++
 +    struct PIDState {
 +        bool counterKnown { false };
 +        uint8_t counter { 0 };
@@ -38223,16 +39375,16 @@ index 0000000000000000000000000000000000000000..6e501a2fe1cea41f053ab8d37de684f1
 +    bool pes(PIDState& state, const uint8_t* bytes, size_t size, bool start)
 +    {
 +        if (start) {
-+            if (state.pesStarted && (!state.headerComplete || (state.pesLength && state.pesBytes != state.pesLength)))
++            if (state.pesStarted && (!state.headerComplete || (state.pesLength && state.pesBytes != state.pesLength)) && !m_lenient)
 +                return false;
-+            if (!m_havePCR)
++            if (!m_havePCR && !m_lenient)
 +                return false;
 +            state.pesStarted = true;
 +            state.headerComplete = false;
 +            state.headerBytes = state.headerLength = state.pesBytes = state.pesLength = 0;
 +        }
 +        if (!state.pesStarted)
-+            return false;
++            return m_lenient;
 +        if (size > maxPacketBytes - state.pesBytes)
 +            return false;
 +        state.pesBytes += size;
@@ -38260,7 +39412,7 @@ index 0000000000000000000000000000000000000000..6e501a2fe1cea41f053ab8d37de684f1
 +                state.headerComplete = true;
 +            }
 +        }
-+        return !state.pesLength || state.pesBytes <= state.pesLength;
++        return !state.pesLength || state.pesBytes <= state.pesLength || m_lenient;
 +    }
 +
 +    bool packet()
@@ -38283,9 +39435,12 @@ index 0000000000000000000000000000000000000000..6e501a2fe1cea41f053ab8d37de684f1
 +                discontinuity = flags & 0x80;
 +                pcr = flags & 0x10;
 +                size_t position = offset + 1, end = offset + length;
++                // The six reserved bits between a clock's base and extension
++                // are not checked: some HLS packagers (Mux's test streams)
++                // write them as zeros, and FFmpeg ignores them too.
 +                auto clock = [&] {
-+                    if (end - position < 6 || (bytes[position + 4] & 0x7e) != 0x7e
-+                        || ((unsigned(bytes[position + 4] & 1) << 8) | bytes[position + 5]) >= 300)
++                    if (end - position < 6
++                        || (!m_lenient && ((unsigned(bytes[position + 4] & 1) << 8) | bytes[position + 5]) >= 300))
 +                        return false;
 +                    position += 6;
 +                    return true;
@@ -38336,14 +39491,14 @@ index 0000000000000000000000000000000000000000..6e501a2fe1cea41f053ab8d37de684f1
 +        if (!(control & 1))
 +            return true;
 +        if (offset == 188)
-+            return false;
++            return m_lenient; // A payload flag with no payload room.
 +        uint8_t counter = bytes[3] & 15;
 +        if (state.counterKnown) {
 +            if (counter == state.counter && state.previous == m_packet) {
 +                m_duplicate = true;
 +                return true;
 +            }
-+            if (counter != ((state.counter + 1) & 15))
++            if (counter != ((state.counter + 1) & 15) && !m_lenient)
 +                return false;
 +        }
 +        state.counterKnown = true;
@@ -38405,9 +39560,10 @@ index 0000000000000000000000000000000000000000..6e501a2fe1cea41f053ab8d37de684f1
 +        std::map<int, Track> tracks;
 +    };
 +
-+    explicit Impl(Parser& parser, std::optional<RestoreState> restored = std::nullopt)
++    explicit Impl(Parser& parser, bool hls, std::optional<RestoreState> restored = std::nullopt)
 +        : owner(parser)
-+        , transport(restored ? std::move(restored->transport) : TransportValidator())
++        , lenient(hls)
++        , transport(restored ? std::move(restored->transport) : TransportValidator(hls))
 +        , initialization(transport.initializationBytes())
 +        , restoredTracks(restored ? std::move(restored->tracks) : std::map<int, Track>())
 +        , worker([this] { run(); })
@@ -38425,6 +39581,7 @@ index 0000000000000000000000000000000000000000..6e501a2fe1cea41f053ab8d37de684f1
 +    }
 +
 +    Parser& owner;
++    const bool lenient;
 +    TransportValidator transport;
 +    std::vector<uint8_t> initialization;
 +    size_t initializationOffset { 0 };
@@ -38613,8 +39770,11 @@ index 0000000000000000000000000000000000000000..6e501a2fe1cea41f053ab8d37de684f1
 +                track.defaultDuration = duration && *duration > 0 && *duration < UINT32_MAX ? *duration : 3000;
 +            } else {
 +                info.kind = SummitMP4::TrackInfo::Kind::Audio;
-+                if (codec.sample_rate < 7350 || codec.sample_rate > 192000 || codec.ch_layout.nb_channels < 1 || codec.ch_layout.nb_channels > 8)
++                if (codec.sample_rate < 7350 || codec.sample_rate > 192000 || codec.ch_layout.nb_channels < 1 || codec.ch_layout.nb_channels > 8) {
++                    if (lenient)
++                        continue; // HLS: play the video of a segment whose audio the probe could not read.
 +                    return false;
++                }
 +                info.sampleRate = info.timescale = codec.sample_rate;
 +                info.channels = codec.ch_layout.nb_channels;
 +                info.packetTimedAudio = true;
@@ -38623,6 +39783,16 @@ index 0000000000000000000000000000000000000000..6e501a2fe1cea41f053ab8d37de684f1
 +                case AV_CODEC_ID_AAC: {
 +                    info.codec = "mp4a";
 +                    info.objectTypeIndication = 0x40;
++                    // HE-AAC (SBR, and v2's parametric stereo) in ADTS: FFmpeg
++                    // reports the decoded rate and channels, the ADTS headers
++                    // the AAC-LC core's, which the decoder extends itself
++                    // (implicit signalling). Profiles 4 and 28 are FFmpeg's
++                    // AV_PROFILE_AAC_HE and AV_PROFILE_AAC_HE_V2.
++                    if ((codec.profile == 4 || codec.profile == 28) && !(info.sampleRate % 2) && info.sampleRate / 2 >= 7350) {
++                        info.sampleRate = info.timescale = info.sampleRate / 2;
++                        if (codec.profile == 28 && info.channels == 2)
++                            info.channels = 1;
++                    }
 +                    auto* found = std::find(std::begin(audioRates), std::end(audioRates), info.sampleRate);
 +                    if (found == std::end(audioRates) || info.channels == 7)
 +                        return false;
@@ -38653,7 +39823,9 @@ index 0000000000000000000000000000000000000000..6e501a2fe1cea41f053ab8d37de684f1
 +        auto found = tracks.find(packet.stream_index);
 +        if (found == tracks.end())
 +            return true;
-+        if (packet.size <= 0 || static_cast<size_t>(packet.size) > maxPacketBytes || (packet.flags & AV_PKT_FLAG_CORRUPT))
++        if (packet.size <= 0 || static_cast<size_t>(packet.size) > maxPacketBytes)
++            return false;
++        if (packet.flags & AV_PKT_FLAG_CORRUPT)
 +            return false;
 +        auto& track = found->second;
 +        auto& info = track.info;
@@ -38888,10 +40060,12 @@ index 0000000000000000000000000000000000000000..6e501a2fe1cea41f053ab8d37de684f1
 +        if (ok) {
 +            context->pb = io;
 +            context->flags |= AVFMT_FLAG_CUSTOM_IO;
-+            context->probesize = 256 * 1024;
-+            context->max_analyze_duration = 500000;
++            // A whole HLS segment is there to probe: some packagers put the
++            // first audio well after half a second of video.
++            context->probesize = lenient ? 8 * 1024 * 1024 : 256 * 1024;
++            context->max_analyze_duration = lenient ? 15000000 : 500000;
 +            context->fps_probe_size = 0;
-+            context->max_probe_packets = 128;
++            context->max_probe_packets = lenient ? 4096 : 128;
 +            context->max_index_size = 65536;
 +            context->max_streams = 32;
 +            context->correct_ts_overflow = 0;
@@ -38909,7 +40083,9 @@ index 0000000000000000000000000000000000000000..6e501a2fe1cea41f053ab8d37de684f1
 +        while (ok) {
 +            int status = api.av_read_frame(context, packet);
 +            if (status >= 0) {
-+                ok = sample(*context, *packet);
++                // HLS: a packet the checks refuse is dropped, as players do. A
++                // segment cut inside an audio PES ends with a partial frame.
++                ok = sample(*context, *packet) || lenient;
 +                api.av_packet_unref(packet);
 +                continue;
 +            }
@@ -38947,7 +40123,7 @@ index 0000000000000000000000000000000000000000..6e501a2fe1cea41f053ab8d37de684f1
 +    }
 +};
 +
-+Parser::Parser() : m_impl(std::make_unique<Impl>(*this)) { }
++Parser::Parser(Mode mode) : m_mode(mode), m_impl(std::make_unique<Impl>(*this, mode == Mode::HLS)) { }
 +Parser::~Parser() = default;
 +bool Parser::available() { return api().ready; }
 +bool Parser::append(const uint8_t* bytes, size_t size) { return m_impl->append(bytes, size); }
@@ -38957,16 +40133,16 @@ index 0000000000000000000000000000000000000000..6e501a2fe1cea41f053ab8d37de684f1
 +{
 +    auto restored = m_impl->restoreState();
 +    m_impl.reset(); // Cancels blocked reads and joins before replacing state.
-+    m_impl = std::make_unique<Impl>(*this, std::move(restored));
++    m_impl = std::make_unique<Impl>(*this, m_mode == Mode::HLS, std::move(restored));
 +}
 +
 +} // namespace SummitMPEGTS
 diff --git a/Source/WebCore/platform/graphics/haiku/MPEGTSParserHaiku.h b/Source/WebCore/platform/graphics/haiku/MPEGTSParserHaiku.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..21962ea9d0bd80ba9c260e9ef9ecac36ecab14ef
+index 0000000000000000000000000000000000000000..c87bc8c087edd855e17a9d94d145ab2beb832248
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/haiku/MPEGTSParserHaiku.h
-@@ -0,0 +1,49 @@
+@@ -0,0 +1,55 @@
 +/*
 + * Copyright (C) 2026 Summit contributors.
 + *
@@ -38998,7 +40174,12 @@ index 0000000000000000000000000000000000000000..21962ea9d0bd80ba9c260e9ef9ecac36
 +// as end-of-stream, which would truncate a PES packet or an access unit.
 +class Parser {
 +public:
-+    Parser();
++    enum class Mode { MediaSource, HLS };
++    // HLS segments come whole and are judged the way FFmpeg judges them:
++    // damaged or unusual transport (continuity counter jumps, PES lengths that
++    // do not add up, clock fields with odd reserved bits) is demuxed rather
++    // than refused, and the stream probe may read the whole segment.
++    explicit Parser(Mode = Mode::MediaSource);
 +    ~Parser();
 +    Parser(const Parser&) = delete;
 +    Parser& operator=(const Parser&) = delete;
@@ -39012,6 +40193,7 @@ index 0000000000000000000000000000000000000000..21962ea9d0bd80ba9c260e9ef9ecac36
 +
 +private:
 +    struct Impl;
++    Mode m_mode;
 +    std::unique_ptr<Impl> m_impl;
 +};
 +
@@ -40634,10 +41816,10 @@ index 0000000000000000000000000000000000000000..f292128ffb7e634736143b1aa949c4cd
 +} // namespace WebCore
 diff --git a/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaiku.cpp b/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..0aa40c795ca3d58cfb3e9538c18b7f65a5186432
+index 0000000000000000000000000000000000000000..59a2ceffa822ff50a6017dc0cf272c76e93525a0
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaiku.cpp
-@@ -0,0 +1,2247 @@
+@@ -0,0 +1,2257 @@
 +/*
 + * Copyright (C) 2014-2016 Haiku, Inc.
 + *
@@ -42811,6 +43993,10 @@ index 0000000000000000000000000000000000000000..0aa40c795ca3d58cfb3e9538c18b7f65
 +    types = mimeTypeCache();
 +}
 +
++#if ENABLE(MEDIA_SOURCE)
++bool nativeHLSInMSEPlayerHaiku();
++#endif
++
 +MediaPlayer::SupportsType MediaPlayerPrivate::supportsType(const MediaEngineSupportParameters& parameters)
 +{
 +    if (parameters.type.isEmpty())
@@ -42822,8 +44008,14 @@ index 0000000000000000000000000000000000000000..0aa40c795ca3d58cfb3e9538c18b7f65
 +
 +    auto containerType = parameters.type.containerType();
 +    if (equalLettersIgnoringASCIICase(containerType, "application/vnd.apple.mpegurl"_s)
-+        || equalLettersIgnoringASCIICase(containerType, "application/x-mpegurl"_s))
++        || equalLettersIgnoringASCIICase(containerType, "application/x-mpegurl"_s)) {
++#if ENABLE(MEDIA_SOURCE)
++        // The Media Source player plays HLS (MediaPlayerPrivateHaikuMSE.cpp).
++        if (nativeHLSInMSEPlayerHaiku())
++            return MediaPlayer::SupportsType::IsNotSupported;
++#endif
 +        return MediaPlayer::SupportsType::MayBeSupported;
++    }
 +
 +    if (containerType == "audio/aac"_s || containerType == "audio/x-aac"_s
 +        || containerType == "audio/m4a"_s || containerType == "audio/x-m4a"_s) {
@@ -43206,10 +44398,10 @@ index 0000000000000000000000000000000000000000..7d7398ed294e485d2708cb41295954d8
 +#endif
 diff --git a/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaikuMSE.cpp b/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaikuMSE.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..77688b3e2063bdfeaac5e9705f5219dd833b2d2d
+index 0000000000000000000000000000000000000000..abc47345300dbadf9a06717b79743452cb578df7
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaikuMSE.cpp
-@@ -0,0 +1,3311 @@
+@@ -0,0 +1,3389 @@
 +/*
 + * Copyright (C) 2026 Summit contributors.
 + *
@@ -45224,10 +46416,34 @@ index 0000000000000000000000000000000000000000..77688b3e2063bdfeaac5e9705f5219dd
 +    return types;
 +}
 +
++// HLS playlists given to an element (a plain src or a typed <source>) play
++// through the DASH player's segment machinery: live reloads, AES-128,
++// discontinuities, MPEG-TS and fragmented MP4 segments. Before 30 October the
++// file player downloaded finite byte-range CMAF playlists only;
++// SUMMIT_HLS_FILE_PLAYER=1 gives HLS back to it.
++bool nativeHLSInMSEPlayerHaiku()
++{
++    static const bool enabled = [] {
++        const char* value = getenv("SUMMIT_HLS_FILE_PLAYER");
++        return !value || !*value || !std::strcmp(value, "0");
++    }();
++    return enabled;
++}
++
++static bool isHLSType(const String& container)
++{
++    return container == "application/vnd.apple.mpegurl"_s || container == "application/x-mpegurl"_s
++        || container == "application/mpegurl"_s || container == "audio/mpegurl"_s || container == "audio/x-mpegurl"_s;
++}
++
 +void MediaPlayerPrivateHaikuMSE::getSupportedTypes(HashSet<String>& types)
 +{
 +    types = mseTypes();
 +    types.add("application/dash+xml"_s);
++    if (nativeHLSInMSEPlayerHaiku()) {
++        types.add("application/vnd.apple.mpegurl"_s);
++        types.add("application/x-mpegurl"_s);
++    }
 +}
 +
 +// The ARM boards decode H.264 with their own decoder (rpi_mmal on the
@@ -45323,7 +46539,8 @@ index 0000000000000000000000000000000000000000..77688b3e2063bdfeaac5e9705f5219dd
 +        if (!frameRate.isNull() && frameRate.toDouble() > maxRate)
 +            return MediaPlayer::SupportsType::IsNotSupported;
 +    }
-+    if (parameters.platformType == PlatformMediaDecodingType::FileOrHLS && container == "application/dash+xml"_s) {
++    if (parameters.platformType == PlatformMediaDecodingType::FileOrHLS && (container == "application/dash+xml"_s
++        || (isHLSType(container) && nativeHLSInMSEPlayerHaiku()))) {
 +        for (auto& codec : parameters.type.codecs()) if (!isSupportedCodec(codec, false))
 +            return MediaPlayer::SupportsType::IsNotSupported;
 +        return parameters.type.codecs().isEmpty() ? MediaPlayer::SupportsType::MayBeSupported : MediaPlayer::SupportsType::IsSupported;
@@ -45488,6 +46705,47 @@ index 0000000000000000000000000000000000000000..77688b3e2063bdfeaac5e9705f5219dd
 +    return *m_audioRenderer;
 +}
 +
++namespace {
++// MPEG-TS (HLS) and WebM (DASH) segments for the DASH player.
++class TSSegmentParserHaiku final : public SummitDASH::SegmentParser {
++public:
++    TSSegmentParserHaiku()
++        : m_parser(SummitMPEGTS::Parser::Mode::HLS)
++    {
++        m_parser.onInitSegment = [this](SummitMP4::InitSegment&& init) { if (onInitSegment) onInitSegment(WTF::move(init)); };
++        m_parser.onSample = [this](SummitMP4::Sample&& sample) { if (onSample) onSample(WTF::move(sample)); };
++    }
++    bool append(const uint8_t* data, size_t size) final { return m_parser.append(data, size); }
++    // Each HLS segment is demuxed afresh (keeping the program's committed
++    // tables and codec configurations): segments are often cut or encoded
++    // separately, and FFmpeg marks packets after a continuity counter jump
++    // corrupt. The DASH player maps each segment's clock to the playlist.
++    bool endSegment() final
++    {
++        if (!m_parser.finish())
++            return false;
++        m_parser.reset();
++        return true;
++    }
++private:
++    SummitMPEGTS::Parser m_parser;
++};
++#if USE(LIBWEBRTC)
++class WebMSegmentParserHaiku final : public SummitDASH::SegmentParser {
++public:
++    WebMSegmentParserHaiku()
++    {
++        m_parser.onInitSegment = [this](SummitMP4::InitSegment&& init) { if (onInitSegment) onInitSegment(WTF::move(init)); };
++        m_parser.onSample = [this](SummitMP4::Sample&& sample) { if (onSample) onSample(WTF::move(sample)); };
++    }
++    bool append(const uint8_t* data, size_t size) final { return m_parser.append(data, size); }
++    bool endSegment() final { m_parser.flushPendingSamples(); return true; }
++private:
++    SummitWebM::Parser m_parser;
++};
++#endif
++}
++
 +void MediaPlayerPrivateHaikuMSE::load(const String& source)
 +{
 +    Ref protectedThis { *this };
@@ -45517,7 +46775,8 @@ index 0000000000000000000000000000000000000000..77688b3e2063bdfeaac5e9705f5219dd
 +#if !ENABLE(ENCRYPTED_MEDIA)
 +        if (representation.encrypted) return false;
 +#endif
-+        auto type = representation.mimeType + "; codecs=\"" + representation.codecs + "\"";
++        // An HLS playlist may leave CODECS out; its segments tell.
++        auto type = representation.codecs.empty() ? representation.mimeType : representation.mimeType + "; codecs=\"" + representation.codecs + "\"";
 +        MediaEngineSupportParameters parameters { .platformType = PlatformMediaDecodingType::MediaSource,
 +            .type = ContentType { String::fromUTF8(type.c_str()) } };
 +        return supportsType(parameters) != MediaPlayer::SupportsType::IsNotSupported;
@@ -45525,6 +46784,15 @@ index 0000000000000000000000000000000000000000..77688b3e2063bdfeaac5e9705f5219dd
 +#if ENABLE(ENCRYPTED_MEDIA)
 +    hooks.protectionSystemHeaders = [this](std::vector<uint8_t>&& headers) { initializationDataEncountered(WTF::move(headers)); };
 +#endif
++    hooks.createParser = [](SummitDASH::Container container) -> std::unique_ptr<SummitDASH::SegmentParser> {
++        if (container == SummitDASH::Container::MPEG2TS && SummitMPEGTS::Parser::available())
++            return std::make_unique<TSSegmentParserHaiku>();
++#if USE(LIBWEBRTC)
++        if (container == SummitDASH::Container::WebM)
++            return std::make_unique<WebMSegmentParserHaiku>();
++#endif
++        return nullptr;
++    };
 +    hooks.canEnqueue = [this](unsigned track) { return track ? audioRenderer().isReadyForMore() : videoRenderer().isReadyForMore(); };
 +    hooks.enqueue = [this](unsigned track, const auto& configuration, auto&& sample, double offset) {
 +        enqueueDashSample(track, configuration, WTF::move(sample), offset);
@@ -45549,6 +46817,8 @@ index 0000000000000000000000000000000000000000..77688b3e2063bdfeaac5e9705f5219dd
 +
 +void MediaPlayerPrivateHaikuMSE::dashReset(double position)
 +{
++    MSE_TRACE("%s reset at %.3f (seekable %.3f-%.3f)\n", m_dash && m_dash->isHLS() ? "HLS" : "DASH", position,
++        m_dash ? m_dash->seekableStart() : 0, m_dash ? m_dash->seekableEnd() : 0);
 +    m_clock.stop();
 +    m_clock.set(toMicroseconds(MediaTime::createWithDouble(position)));
 +    m_dashDecodeTarget = position;
@@ -46066,7 +47336,7 @@ index 0000000000000000000000000000000000000000..77688b3e2063bdfeaac5e9705f5219dd
 +{
 +    // JSON for the browser's debugging tools (WebProcessDiagnosticsHaiku.cpp).
 +    auto object = JSON::Object::create();
-+    object->setString("engine"_s, m_dash ? "Haiku MSE (DASH)"_s : "Haiku MSE"_s);
++    object->setString("engine"_s, m_dash ? (m_dash->isHLS() ? "Haiku MSE (HLS)"_s : "Haiku MSE (DASH)"_s) : "Haiku MSE"_s);
 +    auto size = naturalSize();
 +    object->setInteger("naturalWidth"_s, static_cast<int>(size.width()));
 +    object->setInteger("naturalHeight"_s, static_cast<int>(size.height()));

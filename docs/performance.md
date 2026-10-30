@@ -8824,7 +8824,9 @@ variant and its audio group, verifies that each child playlist is a finite
 same-resource byte-range playlist, then gives the completed video and audio
 MP4 resources to separate Media Kit readers. Unsupported encrypted, live,
 discontinuous, or multi-resource playlists still take the normal format-error
-path rather than being partially decoded.
+path rather than being partially decoded. (Since 30 October HLS goes to the
+Media Source player, which plays those too: [streaming-media.md](streaming-media.md),
+"Native HLS".)
 
 On `bundle-enb94pi0`, the previously failing Reddit master playlist loaded
 metadata in 756 ms and played its 720×1280 video through to the 12.7-second

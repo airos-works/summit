@@ -133,21 +133,20 @@ used `bundle-e821ncjv`; the current browser suite repeats its playback cases.
 
 ## HLS: script players for live and encrypted streams (#115)
 
-Summit's own HLS path (`MediaPlayerPrivateHaiku`) plays only finite,
-unencrypted, byte-range CMAF playlists: it downloads the renditions and plays
-the files. `canPlayType("application/vnd.apple.mpegurl")` answered `maybe`
-(since 23 September, when Summit had no Media Source and Reddit's typed
-`<source>` needed it), so pages that ask before choosing a script player,
-as hls.js's own example and video.js do, chose the native path and failed on
-live and encrypted streams with a format error.
+Until 30 October Summit's own HLS path (`MediaPlayerPrivateHaiku`) played only
+finite, unencrypted, byte-range CMAF playlists: it downloaded the renditions
+and played the files. `canPlayType("application/vnd.apple.mpegurl")` answered
+`maybe` (since 23 September, when Summit had no Media Source and Reddit's
+typed `<source>` needed it), so pages that ask before choosing a script
+player, as hls.js's own example and video.js do, chose the native path and
+failed on live and encrypted streams with a format error.
 
 `HTMLMediaElement::canPlayType` now answers `""` for the HLS types while Media
 Source is enabled, as Firefox does, and those pages play the stream with
-their script player over Media Source, which handles live playlists,
-AES-128, discontinuities and multi-resource playlists. A typed `<source>`
-and a plain `src` still use the native path (source selection asks the
-media engine, not `canPlayType`). `SUMMIT_NATIVE_HLS_CAN_PLAY=1` answers
-`maybe` again.
+their script player over Media Source. A typed `<source>` and a plain `src`
+use the native player (source selection asks the media engine, not
+`canPlayType`), which since 30 October plays live and encrypted playlists
+too (next section). `SUMMIT_NATIVE_HLS_CAN_PLAY=1` answers `maybe` again.
 
 Checked on the X399 with a page doing what hls.js's example does
 (`hls-player.html`, hls.js 1.5.20): Unified Streaming's live demo
@@ -157,3 +156,123 @@ plays through hls.js (duration growing 601 → 618 s, 563 frames, 61 dropped).
 JW Player's AES-128 test stream (`oceans_aes.m3u8`) plays through hls.js
 (21.6 s in, 518 frames, 8 dropped). A video with a typed HLS `<source>` and an
 MP4 one still tries the HLS one first.
+
+## Native HLS (#115, 30 October)
+
+A plain `src` or typed `<source>` HLS playlist (`.m3u8`, or a server type of
+`application/vnd.apple.mpegurl` / `application/x-mpegurl`) goes to the Media
+Source player's segment machinery, the one direct [DASH](dash-playback.md)
+uses (`DashPlaybackHaiku.cpp`), instead of the file player. The playlists are
+translated into that player's model (`HLSPlaylistHaiku.cpp`): each variant and
+the audio rendition is a representation, each discontinuity sequence a
+period. Requests use the media element's loader, so cookies, CORS mode, CSP
+and canvas tainting follow the element as for DASH; a playlist is limited to
+4 MiB and a segment to 64 MiB. `SUMMIT_HLS_FILE_PLAYER=1` gives HLS back to the
+file player (finite byte-range CMAF only).
+
+- **Multivariant playlists.** Variants whose video codecs the engine plays,
+  at most 2160 lines and six of them (spread by bandwidth), with adaptive
+  switches at segment boundaries as for DASH (starting with the lowest). The
+  audio group used by most variants is chosen, and in it the `DEFAULT`
+  rendition; one without a URI means the variants carry the audio. A media
+  playlist given directly is probed: its first segment says whether it has
+  video, audio or both. Old decimal AVC codec strings (`avc1.66.30`) and HE-AAC
+  (`mp4a.40.5`, `.29`) are understood.
+- **Segments.** MPEG-TS (the Media Source TS demuxer, below) and fragmented
+  MP4 with `EXT-X-MAP` (which may change between segments), whole files or
+  `EXT-X-BYTERANGE` ranges. Audio and video muxed in one segment feed both
+  renderers from one download.
+- **Live and event playlists.** Every playlist is reloaded after its target
+  duration (half of it when it did not change), segment times are anchored by
+  media sequence number so they stay put while the window slides (a newly
+  loaded rendition lines up by `EXT-X-PROGRAM-DATE-TIME`, else by sequence
+  number, else at the live edge), playback starts `HOLD-BACK` (else three
+  target durations) behind the edge, and `seekable` is the window. An
+  `EXT-X-ENDLIST` turns it into a finite presentation. A reload that fails is
+  tried again at the next one.
+- **AES-128.** Whole-segment AES-128-CBC with the key's URI fetched like the
+  segments (the element's credentials and CORS mode), cached per URI, the IV
+  from `EXT-X-KEY` or else the media sequence number. Key rotation works,
+  and an encrypted `EXT-X-MAP` too.
+- **Discontinuities.** HLS segments carry no presentation times, so each
+  discontinuity sequence's media clock is mapped to the playlist's time by
+  its first sample, shared by audio and video; a segment whose first sample
+  lands more than 10 s away from its playlist time (a 33-bit clock wrap, an
+  undeclared restart) is mapped again. A new sequence starts a new period,
+  so the demuxer and the initialization segment start afresh.
+
+Not supported, with a format error: `SAMPLE-AES` and `SAMPLE-AES-CTR`, any
+non-identity `KEYFORMAT` (FairPlay and other DRM), packed-audio segments
+(raw `.aac`/`.ac3`/`.mp3` with ID3 timestamps), I-frame playlists, a period
+whose track set changes, and a rendition from a second audio group. Subtitles,
+`CLOSED-CAPTIONS`, low-latency parts (`EXT-X-PART`, blocking reloads; the full
+segments still play), delta updates, content steering and
+`EXT-X-START` are ignored.
+
+MPEG-TS segments are demuxed in an HLS mode of `SummitMPEGTS::Parser`
+(`Parser::Mode::HLS`): each segment is demuxed afresh, keeping the program's
+committed tables and codec configurations (packagers cut and encode segments
+separately, and FFmpeg marks packets after a continuity jump corrupt), the
+stream probe may read the whole segment (Unified Streaming's segments put the
+first audio well after half a second of video), and transport that Media
+Source must refuse is demuxed as players do: continuity counter jumps, PES
+lengths that do not add up (segments cut inside an audio PES), payload flags
+without payload, clocks with zero reserved bits (Mux's packager), PES before
+the first PCR, and a packet the sample checks refuse is dropped. Two changes
+apply to Media Source too: a PCR's six reserved bits are no longer checked,
+and HE-AAC in ADTS is configured at its AAC-LC core rate (FFmpeg reports the
+SBR output rate, which the ADTS headers then contradicted).
+
+Checked on the X399 (GTX 1070, NVDEC) with fixtures from
+`tools/bench/native-streaming-fixture.py` served by its own server (byte
+ranges, CORS, simulated live windows that loop with a discontinuity) and
+public streams; `currentTime`, frames presented (`getVideoPlaybackQuality`)
+and seeks through the page, decoders through the MCP `media` tool:
+
+| Stream | Result |
+| --- | --- |
+| Fixture fMP4, two variants + audio rendition | 299 frames in 10 s, seek to 18 s, NVDEC, 0 dropped |
+| Fixture fMP4 byte ranges in one file (Reddit's form) | same |
+| Fixture muxed fMP4 media playlist (tracks probed) | 302 frames in 10 s, seek |
+| Fixture fMP4, AES-128 with sequence-number IVs | 300 frames in 10 s, seek |
+| Fixture TS; TS AES-128 (explicit IV); typed `<source>` | 339 frames in 11.3 s, 0 dropped; 421 in 14 s; plays |
+| Fixture TS with a discontinuity (new encoding, clock from 500 s) | 640×360 → 480×270 at 24 s, 25 fps after it, `ended` at 36 s |
+| Simulated live TS, 16 s window looping every 24 s | starts at the edge − 12 s, `seekable` slides (8–24 → 44–60 s), 30 fps through three loops, 0 dropped |
+| Simulated live multivariant fMP4 + audio rendition | 8 of 8 starts play (3 of 6 stalled before the late-audio fix below) |
+| Apple `img_bipbop_adv_example_fmp4` (fMP4, aud1 group) | 1080p60 NVDEC, seek to 60 s |
+| Apple `bipbop_16x9` (TS byte ranges, muxed default audio) | 416×234 → 1920×1080 by 25 s, 9 dropped |
+| Mux `x36xhzz` (TS, HE-AAC variants, zero PCR reserved bits) | 1080p, seek to 60 s, 0 dropped |
+| JW Player `oceans_aes` (TS, AES-128, IV from sequence) | 1264×528, seek to 60 s, 0 dropped |
+| Unified Streaming live demo (TS, 10 min window) | 720p at the edge, 536 frames, 0 dropped |
+| Mux `dai-discontinuity-deltatre` (key per segment, discontinuities into ads, SCTE-35) | 720p, seek to 34 s, into the 720×408 ad at 36.3 s with a 30 ms wait, 0 dropped |
+| Fixture DASH `SegmentBase` MP4; WebM (VP9 + Opus) | see [dash-playback.md](dash-playback.md) |
+| `SUMMIT_HLS_FILE_PLAYER=1` | byte-range CMAF goes to the file player ("Haiku Media Kit") again; TS fails there as before |
+| Akamai `cph-p2p-msl…/test/master.m3u8` | its media playlist answers 404 (stream gone) |
+
+`tests/EngineHLSPlaybackTests.cpp` drives the player on the host (ASan and
+UBSan) with the fMP4 fixtures and a model of the renderers' queues (90 video
+and 120 audio samples that drain only while the clock runs): multivariant,
+byte-range, probed muxed, discontinuity (1,020 frames, continuous times),
+AES-128, a live window over 70 s that loops (55 playlist loads, video and
+audio within 0.2 s of each other), DASH SegmentBase, refused forms, and
+playlist parsing. A sweep of 72 live start times over two loops stalled in
+38 before the late-audio fix and in none after. The DASH playback test still
+passes (2,280 video and 3,321 audio sample deliveries; audio ending before
+the playback position is now dropped).
+
+```sh
+FFMPEG=ffmpeg python3 tools/bench/native-streaming-fixture.py \
+  --directory .vm/native-streaming --port 8865
+g++ -std=c++20 -fsanitize=address,undefined -fexceptions \
+  -I<engine>/Source/WebCore/platform/graphics/haiku -I/usr/include/libxml2 \
+  tests/EngineHLSPlaybackTests.cpp <haiku>/{DashManifestHaiku,DashPlaybackHaiku,\
+  HLSPlaylistHaiku,FragmentedMP4ParserHaiku,CencCryptoHaiku}.cpp -lxml2 -lcrypto
+./a.out .vm/native-streaming
+```
+
+An HLS audio rendition's segments need not line up with the video's, so
+the audio segment holding the start position can lie almost entirely before
+it; its samples filled the audio renderer's queue while the clock waited for
+data past the position, and playback never started. The player now drops
+audio that ends more than 0.2 s before the playback position instead of
+queueing it (DASH too).

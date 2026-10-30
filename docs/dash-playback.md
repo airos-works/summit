@@ -7,10 +7,21 @@ to the same Media Kit audio and video renderers used by MediaSource.
 
 ## Supported presentations
 
-- H.264 video and AAC audio in separate MP4 representations.
+- H.264 video and AAC audio in separate MP4 representations, and since 30
+  October WebM representations (`video/webm`, `audio/webm`: VP9, VP8, AV1,
+  Opus, Vorbis, demuxed by the Media Source WebM parser). Representations
+  are offered to the Media Source player's `supportsType`, so its other MP4
+  codecs are accepted too (not checked separately for DASH).
 - `SegmentTemplate` with durations or `SegmentTimeline`, including inherited
   attributes, presentation offsets, and `$Number$` / `$Time$` substitutions.
 - `SegmentList`, including exact HTTP byte-range requests.
+- `SegmentBase` (one file per representation, 30 October): the player loads
+  each playable representation's index before playback starts, an MP4
+  `sidx` box (`indexRange`) or WebM `Cues` (with the initialization range,
+  for the Segment's data offset and timecode scale), and turns its entries
+  into byte-range segments. Static presentations only; hierarchical `sidx`
+  indexes are refused. The MPD namespace is matched without regard to case
+  (FFmpeg's WebM manifests write `urn:mpeg:DASH:schema:MPD:2011`).
 - Static presentations and dynamic manifests with live-window refresh.
 - Multiple periods with consistent audio/video track sets.
 - Adaptive representation changes at aligned segment boundaries. Selection
@@ -21,8 +32,8 @@ outstanding segment requests, discards stale completions, flushes decoder
 queues, and fetches the segment containing the target. Seek completion waits
 for a decoded video frame. Live streams expose a finite seekable window.
 
-`SegmentBase`, WebM representations, and periods that change their audio/video
-track sets are outside this implementation. CENC-encrypted H.264/AAC
+Periods that change their audio/video track sets are outside this
+implementation: one renderer per kind is kept across periods. CENC-encrypted H.264/AAC
 representations can use temporary Clear Key sessions through
 [Encrypted Media Extensions](encrypted-media.md); other encryption schemes
 and commercial DRM systems are not supported.
@@ -87,7 +98,18 @@ both directions under throttling. The final bandwidth estimator responds
 immediately to decreases and increases its estimate gradually.
 
 Both portable tests pass with `-fsanitize=address,undefined` and
-`-Wall -Wextra -Werror`. The playback test checks 2,280 video and 3,444 audio
-sample deliveries across its scenarios, including two consecutive periods,
+`-Wall -Wextra -Werror`. The playback test checks 2,280 video and 3,321 audio
+sample deliveries across its scenarios (3,444 before 30 October, when audio
+ending before the playback position after a seek began to be dropped instead
+of queued), including two consecutive periods,
 end-of-duration seeks, expired live-window seeks, stale completions, and
 explicit rejection of changing track sets.
+
+The same player plays HLS playlists ([streaming-media.md](streaming-media.md),
+"Native HLS"). `tests/EngineHLSPlaybackTests.cpp` also covers `SegmentBase`
+with the MP4 fixture of `tools/bench/native-streaming-fixture.py` (720 video
+frames, a seek). On the X399 with that tool's fixtures: `dashsb` (MP4,
+global `sidx`) played 299 frames in 10 s on NVDEC and seeked to 18 s;
+`dashwebm` (VP9 + Opus, FFmpeg's `webm_dash_manifest`, Cues after the
+clusters) played 302 frames in 10 s with the VP9 software decoder and seeked
+to 18 s.
