@@ -1,5 +1,204 @@
 # Summit performance: Speedometer 3.1 baseline, where the time goes, stress test
 
+## 31 October 2026: the 34a25b6 engine measured; the WebProcess cache capped, released under pressure; Speedometer suites (#117, #120, #115)
+
+The full engine rebuild for 34a25b6 (CI run 41051322015) brought
+`-fno-semantic-interposition` in the release flags, `ENABLE_WEBPROCESS_CACHE`
+on Haiku (`SUMMIT_WEBPROCESS_CACHE=0` turns it off), `USE_AVIF` and
+`ENABLE_ENCRYPTED_MEDIA` (Clear Key). It was compared with a test build made
+just before a2f4797: `stream115-g` (CI's tree at 1fe2f93 with the HLS/DASH
+engine changes of 0751ec3, the old flags, no cache, AVIF and EME off), each
+with an app built from its own tree. Fresh profiles, the default window
+(1121x538 CSS pixels at 200 % on the X399, 1118x538 on the laptop), local
+copy (`serve-speedometer.py`), runs alternated.
+
+### Speedometer 3.1
+
+| | before (stream115-g) | after (34a25b6) | |
+| --- | --- | --- | --- |
+| X399, 10 iterations | 7.74, 7.74, 7.66, 7.71 (7.71) | 7.95, 7.93, 7.86, 7.88 (7.91) | +2.5 % |
+| Laptop, 10 iterations | 15.73, 15.83, 15.86 (15.80) | 16.33, 16.19, 16.35 (16.29) | +3.1 % |
+
+No suite got slower. On the X399 most are 2-4 % faster (Chart.js 5.7 %,
+React-Redux 3.2 %); Svelte, Lit and React-Complex-DOM did not change. The
+laptop's suites are 1-7 % faster. A single page never leaves its process, so
+this is `-fno-semantic-interposition` (#120), not the cache.
+
+### Skia GL Canvas: Chart.js 3.4-3.6x faster
+
+The suites are now about level with the September Firefox 155 run on the
+X399 (7.81 at 1280x887, 100 %), except one. Relative to the overall ratio,
+Chart.js took 2.5 times longer than the rest (2.3 times on the laptop). It is
+drawn on the CPU: the packaged Summit has no Skia GL context unless
+`SUMMIT_SKIA_GL_CONTEXT=1` (only the X399's desktop launcher sets it). With
+it, same engine:
+
+| | CPU Canvas | GL Canvas |
+| --- | --- | --- |
+| X399, Chart.js (ms, 10 iterations, 3 runs each) | 495 | 136 |
+| X399, Perf-Dashboard | 323 | 238 |
+| Laptop, Chart.js (2 runs each) | 220 | 65 |
+| Laptop, Perf-Dashboard | 150 | 134 |
+| X399, whole Speedometer (2 runs each) | 7.84, 7.85 | 8.46, 8.51 (+8.2 %) |
+
+Observable Plot and Stockcharts (SVG) did not change. A canvas page of 3,000
+translucent circles, a gradient, a stroked curve, text, a blurred shadow and
+an ellipse (`canvas.html`) looks the same either way on both machines: no
+pixel differs by more than 59 of 255 (edge antialiasing), 0.35 % by more than
+16. The X399 still logs one `ZINK: vkCreateImage failed` per launch with the
+GL context (24 Oct: nothing missing on screen); the laptop logged none.
+Turning it on in the packaged Summit is left to a decision (Pi, Cubie and
+other GPUs not checked).
+
+### Preact, CodeMirror and Web Components (the #117 item)
+
+Against the same Firefox run, relative to each browser's overall ratio:
+
+| Suite | X399 (ms) | Firefox (ms) | ratio / overall (X399, laptop) |
+| --- | ---: | ---: | --- |
+| TodoMVC-Svelte-Complex-DOM | 52.5 | 42.2 | 1.27, 1.34 |
+| Editor-CodeMirror | 69.3 | 56.4 | 1.25, 1.32 |
+| TodoMVC-Preact-Complex-DOM | 58.1 | 50.3 | 1.18, 1.16 |
+| TodoMVC-Lit-Complex-DOM | 65.3 | 63.8 | 1.05, 1.08 |
+| TodoMVC-WebComponents | 57.6 | 66.7 | 0.88, 0.81 |
+
+(Firefox ran at 1280x887 and 100 %; Summit's page is smaller in CSS pixels
+and painted at 200 %. Treat the ratios as directional.) Web Components is now
+faster than Firefox. Per step, the frameworks' remaining gap is 2-5 ms in
+`Adding100Items` (both halves) and a millisecond or two in the synchronous
+half of the others; CodeMirror's is in `Long` (21.3 / 17.7 ms against 15.5 /
+13.6).
+
+Main-thread profiles of each suite running 300 iterations (MCP `profile`,
+10 s, unstripped CI libraries; the thread is busy about half the time, and
+about a third of that is loading the suite's page, which is not timed):
+
+- **Allocation, 6-7 %**: `_mi_theap_malloc_zero` (mimalloc's malloc entry;
+  `constprop` is the non-zeroing variant) 4.4-5.1 %, `mi_free` 1.1-1.8 %.
+  That is the share malloc takes in WebKit generally.
+- **Kernel calls, about 2-3 %**: `_kern_memory_advice` 0.8 % (Preact) and
+  1.4 % (CodeMirror), mimalloc's purges (`MADV_FREE`) 10 ms after pages go
+  unused; `_kern_mutex_unblock` / `_kern_mutex_switch_lock` 0.7-1.2 %
+  (contended locks with other threads); `_kern_write_port_etc` 0.3-0.4 %.
+- `pthread_self` 0.4-0.6 % and `tls_get` 0.4 % (calls into libroot).
+- The rest is WebKit's own: `RenderElement::mayContainOutOfFlowPositionedObjects`
+  1.5 %, `snapLengthAsBorderWidth` and `LineWidth` evaluation 1.5 % (noted
+  on 30 October), element iterators, rule collection; and JSC's inline-cache
+  and code-block churn in CodeMirror.
+
+`MIMALLOC_PURGE_DELAY=-1` removes `_kern_memory_advice` from the profile, but
+1000 ms against the default in focused runs (Preact, CodeMirror, Web
+Components, Svelte, 20 iterations, 3 alternated runs each) gave 18.61 against
+18.56, every suite within 1.3 %: not worth the memory. Nothing else
+Haiku-specific is above 1 %; the JIT tiers are all on (no Haiku option
+overrides), timers run off one deadline thread with zero-delay timers posted
+directly, and the -fno-semantic-interposition gain is in. What remains of
+these suites' gap is WebKit's style and layout work for 100 new items
+(29 September: tree resolution, render tree commit) and CodeMirror's
+synchronous measuring.
+
+### The WebProcess cache
+
+A web process with no page left (its last tab closed, or its pages gone from
+the back/forward cache) is kept for its site for 5 minutes and given to the
+next page of that site. Back and forward never use it: the back/forward cache
+keeps the page's process anyway, and a typed address of the site in the same
+tab goes to that process too.
+
+New tab to a site whose tab was closed seconds before (laptop, rounds 2-3 of
+three, first visually non-empty layout from the navigation):
+
+| | cache off (spare or new process) | cache on (same process) |
+| --- | ---: | ---: |
+| python.org | 154-157 ms | 38-40 ms |
+| GitHub | 447-451 ms | 180-227 ms |
+| en.wikipedia.org article | 299-308 ms | 212-216 ms |
+
+`load` came after 58 ms instead of 210-217 ms for python.org.
+
+The cost: after 15 sites in one tab (example.com, Wikipedia, python.org,
+GitHub, Hacker News, BBC News, The Guardian, mozilla.org, MDN, Stack
+Overflow, rust-lang.org, DuckDuckGo, w3.org, apple.com, YouTube), with
+WebKit's capacity (4 per GB, at most 32: 32 on both machines):
+
+| | processes | web processes | web processes' memory |
+| --- | ---: | ---: | ---: |
+| cache off | 6 | 4 | 1322 MiB |
+| cache on | 19 | 17 | 3422 MiB |
+| cache on, 5 minutes later | 6 | 4 | 1163 MiB |
+
+So 13 cached processes held 2.1 GB, 160 MiB each on average (GitHub's
+nearly 400). They do expire after 5 minutes. On Haiku they are not suspended,
+as on other platforms, and they give back nothing.
+
+**Memory pressure did not reach the cache.** `WebProcessCache::canCacheProcess`,
+`didReachGoodTimeToPrewarm` and Summit's spare process all ask the browser
+process's `MemoryPressureHandler`, which nothing on Haiku set:
+`MemoryPressureMonitorHaiku` only sent the web and network processes the
+event. With `SUMMIT_MEMORY_PRESSURE_PERCENT=3` (pressure at once on the
+X399), the CI engine kept three closed sites' processes and a spare (5 web
+processes, 851 MiB). Now (`MemoryPressureMonitorHaiku.cpp`) the monitor sets
+the browser process's status (critical from the first threshold, normal
+below it) and calls `handleMemoryPressureWarning()` for each pool, which
+empties the WebProcess cache and the back/forward cache and ends the spare,
+as GTK's and WPE's do: the same test kept 1 web process (132 MiB).
+
+**Capacity: at most 8, one per 2 GB** (`WebProcessCache.cpp`):
+32 GB -> 8, 8 GB -> 4, 4 GB -> 2, under 2 GB none (WebKit's rule).
+`SUMMIT_WEBPROCESS_CACHE=<n>` (n > 1) allows n (at most 32), `0` turns the
+cache off. Most of the gain is for the last few sites.
+
+**Cached processes release memory after 30 s.** Where WebKit suspends a
+cached process after 30 s (`cachedProcessSuspensionDelay`), on Haiku it is
+sent the critical memory pressure event instead: it collects garbage and
+drops compiled code and its caches, but stays running.
+`SUMMIT_WEBPROCESS_CACHE_RELEASE=0` turns it off.
+
+| 15 sites, laptop | web processes | their memory |
+| --- | ---: | ---: |
+| capacity 32, no release | 17 | 3422 MiB |
+| capacity 8, after the sites | 12 | 2751 MiB |
+| the same, 40 s later | 12 | 2236 MiB |
+
+A released process still serves its site quickly: a new tab to python.org
+35 s after its tab was closed showed it in 50-54 ms, Wikipedia in 228 ms,
+GitHub in 330-658 ms (its revalidation varied).
+
+### AVIF and Clear Key
+
+- **AVIF:** a page with `dog.avif` (180x180), `color_wheel.avif`, a 10-bit
+  picture (512x512), an animated one and a `<picture>` whose `image/avif`
+  source wins over a PNG: all decoded (`naturalWidth` right) and drawn.
+- **Clear Key** (`eme115.html` fixtures served from the X399's 127.0.0.1, a
+  secure context; on plain http to another host `requestMediaKeySystemAccess`
+  is absent, as it should be): `cbcs` (with its clear lead), `cenc` and
+  `cens` play (8-12 s, both key sessions usable).
+- **Encrypted WebM did not:** both sessions failed with `NotSupportedError`.
+  `CDMPrivateClearKey::supportsInitData` refused init data type `webm` on
+  Haiku (an `#if !OS(HAIKU)` from before the WebM parser read encrypted WebM),
+  so `generateRequest()` with the `encrypted` event's init data failed. With
+  the guard removed (`CDMClearKey.cpp`) the Shaka-packaged VP9 + Opus fixture
+  plays (8.6 s) and Chromium's `bear-320x240-opus-av_enc-av.webm` plays to
+  its end (2.74 s); `cbcs` still plays.
+
+### How it was measured
+
+- X399: `speedo117-sp.sh` runs on the machine itself (the runner in
+  `tools/bench` needs SSH): it starts the bundle with a fresh profile at
+  `http://192.168.1.200:<port>/?startAutomatically=true[&suites=...]`, polls
+  `serve-speedometer.py`'s `/__bench/status` and quits it; one server (port,
+  output directory) per run on the host. The screen blanker is killed before
+  each run; it comes back within minutes and blanks the screen otherwise.
+- `profile -v` (callgrind output) under Summit does not write the web
+  process's main thread when the process is killed; MCP `profile` with the
+  unstripped libraries gives names for static functions too.
+- `MIMALLOC_VERBOSE=1` breaks MCP `profile` (the debug helper's output is
+  read as its answer).
+
+**Left:** turning GL Canvas on by default (see above); Svelte, CodeMirror and
+Preact's remaining 16-30 % is WebKit's own style/layout and script work;
+the Pi and Cubie were not measured.
+
 ## 30 October 2026: direct presents no longer wait for their copies (#117)
 
 The #117 item "direct present waits for its app_server copy". #119 had

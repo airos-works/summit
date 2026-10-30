@@ -25985,7 +25985,7 @@ index cec8c263e322d387db3d199ef3377a176d93d615..9fe412549b52fce53911799ed30fea0f
      bool isKeyAvailable(const KeyIDType&) const;
      bool isKeyAvailableUnlocked(const KeyIDType&) const WTF_REQUIRES_LOCK(m_keysLock);
 diff --git a/Source/WebCore/platform/encryptedmedia/clearkey/CDMClearKey.cpp b/Source/WebCore/platform/encryptedmedia/clearkey/CDMClearKey.cpp
-index 45b86514bb305b44dc4db3d219c6e7961867b2a9..f5f441493bdac880ee83bf51fed083cad8d9651f 100644
+index 45b86514bb305b44dc4db3d219c6e7961867b2a9..ed2622fab4299c7607d749d0a27cf72ce87e46cc 100644
 --- a/Source/WebCore/platform/encryptedmedia/clearkey/CDMClearKey.cpp
 +++ b/Source/WebCore/platform/encryptedmedia/clearkey/CDMClearKey.cpp
 @@ -35,6 +35,10 @@
@@ -26220,18 +26220,17 @@ index 45b86514bb305b44dc4db3d219c6e7961867b2a9..f5f441493bdac880ee83bf51fed083ca
      // Persistent state is not allowed if it's been denied, otherwise it's optional.
      if (restrictions.persistentStateDenied)
          return CDMRequirement::NotAllowed;
-@@ -396,8 +444,10 @@ bool CDMPrivateClearKey::supportsInitData(const String& initDataType, const Shar
+@@ -395,7 +443,8 @@ bool CDMPrivateClearKey::supportsInitData(const String& initDataType, const Shar
+     if (equalLettersIgnoringASCIICase(initDataType, "cenc"_s) && isCencInitData(initData))
          return true;
  
-     // Validate the initData buffer as WebM initData.
-+#if !OS(HAIKU)
+-    // Validate the initData buffer as WebM initData.
++    // Validate the initData buffer as WebM initData. Haiku's WebM parser
++    // reads encrypted WebM now, and its `encrypted` events carry this type.
      if (equalLettersIgnoringASCIICase(initDataType, "webm"_s) && !initData.isEmpty())
          return true;
-+#endif
  
-     return false;
- }
-@@ -405,7 +455,7 @@ bool CDMPrivateClearKey::supportsInitData(const String& initDataType, const Shar
+@@ -405,7 +454,7 @@ bool CDMPrivateClearKey::supportsInitData(const String& initDataType, const Shar
  RefPtr<SharedBuffer> CDMPrivateClearKey::sanitizeResponse(const SharedBuffer& response) const
  {
      // Validate the response buffer as an JSON object.
@@ -26240,7 +26239,7 @@ index 45b86514bb305b44dc4db3d219c6e7961867b2a9..f5f441493bdac880ee83bf51fed083ca
          return nullptr;
  
      return response.makeContiguous();
-@@ -450,6 +500,13 @@ RefPtr<CDMInstanceSession> CDMInstanceClearKey::createSession()
+@@ -450,6 +499,13 @@ RefPtr<CDMInstanceSession> CDMInstanceClearKey::createSession()
      return adoptRef(new CDMInstanceSessionClearKey(*this));
  }
  
@@ -26254,7 +26253,7 @@ index 45b86514bb305b44dc4db3d219c6e7961867b2a9..f5f441493bdac880ee83bf51fed083ca
  void CDMInstanceSessionClearKey::requestLicense(LicenseType, KeyGroupingStrategy, const String& initDataType, Ref<SharedBuffer>&& initData, LicenseCallback&& callback)
  {
      if (RefPtr parentInstance = this->parentInstance())
-@@ -463,6 +520,21 @@ void CDMInstanceSessionClearKey::requestLicense(LicenseType, KeyGroupingStrategy
+@@ -463,6 +519,21 @@ void CDMInstanceSessionClearKey::requestLicense(LicenseType, KeyGroupingStrategy
      if (equalLettersIgnoringASCIICase(initDataType, "webm"_s))
          initData = extractKeyIdFromWebMInitData(initData.get());
  
@@ -26276,7 +26275,7 @@ index 45b86514bb305b44dc4db3d219c6e7961867b2a9..f5f441493bdac880ee83bf51fed083ca
      callOnMainThread(
          [sessionID = m_sessionID, callback = WTF::move(callback), initData = WTF::move(initData)]() mutable {
              callback(WTF::move(initData), sessionID, false, Succeeded);
-@@ -520,7 +592,11 @@ void CDMInstanceSessionClearKey::updateLicense(const String& sessionId, LicenseT
+@@ -520,7 +591,11 @@ void CDMInstanceSessionClearKey::updateLicense(const String& sessionId, LicenseT
          return;
      }
  
@@ -26289,7 +26288,7 @@ index 45b86514bb305b44dc4db3d219c6e7961867b2a9..f5f441493bdac880ee83bf51fed083ca
          LOG_WITH_STREAM(EME, stream << "EME - ClearKey - session "_s << sessionId << " release acknowledged, clearing all known keys"_s);
          parentInstance->unrefAllKeysFrom(m_keyStore);
          m_keyStore.clear();
-@@ -546,6 +622,10 @@ void CDMInstanceSessionClearKey::loadSession(LicenseType, const String& sessionI
+@@ -546,6 +621,10 @@ void CDMInstanceSessionClearKey::loadSession(LicenseType, const String& sessionI
  
  void CDMInstanceSessionClearKey::closeSession(const String&, CloseSessionCallback&& callback)
  {
@@ -26300,7 +26299,7 @@ index 45b86514bb305b44dc4db3d219c6e7961867b2a9..f5f441493bdac880ee83bf51fed083ca
      callOnMainThread(
          [weakThis = WeakPtr { *this }, callback = WTF::move(callback)] () mutable {
              if (!weakThis)
-@@ -557,6 +637,16 @@ void CDMInstanceSessionClearKey::closeSession(const String&, CloseSessionCallbac
+@@ -557,6 +636,16 @@ void CDMInstanceSessionClearKey::closeSession(const String&, CloseSessionCallbac
  
  void CDMInstanceSessionClearKey::removeSessionData(const String& sessionId, LicenseType, RemoveSessionDataCallback&& callback)
  {
@@ -26317,7 +26316,7 @@ index 45b86514bb305b44dc4db3d219c6e7961867b2a9..f5f441493bdac880ee83bf51fed083ca
      ASSERT_UNUSED(sessionId, sessionId == m_sessionID);
  
      auto dispatchCallback =
-@@ -592,6 +682,9 @@ void CDMInstanceSessionClearKey::removeSessionData(const String& sessionId, Lice
+@@ -592,6 +681,9 @@ void CDMInstanceSessionClearKey::removeSessionData(const String& sessionId, Lice
          message = SharedBuffer::create(messageString.utf8().span());
      }
  
@@ -54651,18 +54650,30 @@ index ec1913422db0d8b09376627bf859ea6a40c13ebb..c16f04c3a9a5d873f8fbf3ca7ad5bc2b
      computeHeadroom();
  }
 diff --git a/Source/WebCore/platform/graphics/skia/PlatformDisplaySkia.cpp b/Source/WebCore/platform/graphics/skia/PlatformDisplaySkia.cpp
-index 776466ea87d3d721d32ac4e52db702bb2b544e46..a8a90bcba97784f41f50ecc42422bf57d399ae4a 100644
+index 776466ea87d3d721d32ac4e52db702bb2b544e46..1b6198086a440272d190286940b3e9772feb96df 100644
 --- a/Source/WebCore/platform/graphics/skia/PlatformDisplaySkia.cpp
 +++ b/Source/WebCore/platform/graphics/skia/PlatformDisplaySkia.cpp
-@@ -29,6 +29,7 @@
+@@ -29,6 +29,9 @@
  #if USE(SKIA)
  #include "FontRenderOptions.h"
  #include "GLContext.h"
++#include <atomic>
 +#include <cstdlib>
++#include <cstring>
  
  WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_BEGIN
  #include <skia/core/SkColorSpace.h>
-@@ -280,8 +281,13 @@ public:
+@@ -41,6 +44,9 @@ WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_BEGIN
+ 
+ #if USE(LIBEPOXY)
+ #include <epoxy/egl.h>
++#if PLATFORM(HAIKU)
++#include <epoxy/gl.h>
++#endif
+ #include <skia/gpu/ganesh/gl/epoxy/GrGLMakeEpoxyEGLInterface.h>
+ #else
+ #include <EGL/egl.h>
+@@ -280,8 +286,13 @@ public:
          // terminates the display. Once it is terminated, drop the Skia resources without calling into GL.
          RefPtr display = glContext->display();
          bool didRelease = display && display->runIfNotTerminated([&](EGLDisplay) {
@@ -54678,7 +54689,7 @@ index 776466ea87d3d721d32ac4e52db702bb2b544e46..a8a90bcba97784f41f50ecc42422bf57
              grContext = nullptr;
          });
          if (!didRelease)
-@@ -317,6 +323,10 @@ public:
+@@ -317,6 +328,10 @@ public:
              return;
  
          GLContext::ScopedGLContextCurrent scopedCurrent(*m_skiaGLContext);
@@ -54689,17 +54700,31 @@ index 776466ea87d3d721d32ac4e52db702bb2b544e46..a8a90bcba97784f41f50ecc42422bf57
          switch (critical) {
          case Critical::No:
              m_skiaGrContext->purgeUnlockedResources(GrPurgeResourceOptions::kScratchResourcesOnly);
-@@ -369,7 +379,24 @@ private:
+@@ -369,10 +384,53 @@ private:
  
  GLContext* PlatformDisplay::skiaGLContext()
  {
 -#if PLATFORM(GTK) || PLATFORM(WPE) || (PLATFORM(PLAYSTATION) && !USE(COORDINATED_GRAPHICS))
 +#if PLATFORM(HAIKU)
++    // GPU canvases (and GPU snapshots): on by default on x86_64, where they
++    // made Speedometer's Chart.js 3.6x faster on the X399 (the whole score
++    // +8 %); SUMMIT_SKIA_GL_CONTEXT=0 turns them off, =1 turns them on
++    // elsewhere (the arm64 boards are untested). A software GL (llvmpipe:
++    // stock Haiku, machines without a GPU driver) is slower than Skia's own
++    // CPU raster, so it is not used unless forced with =1.
++    static const char* summitSkiaGLSetting = std::getenv("SUMMIT_SKIA_GL_CONTEXT");
++    static const bool summitSkiaGLForced = summitSkiaGLSetting && !std::strcmp(summitSkiaGLSetting, "1");
 +    static bool summitSkiaGLContextEnabled = [] {
-+        const char* value = std::getenv("SUMMIT_SKIA_GL_CONTEXT");
-+        return value && value[0] == '1' && !value[1];
++        if (summitSkiaGLSetting)
++            return summitSkiaGLForced;
++#if CPU(X86_64)
++        return true;
++#else
++        return false;
++#endif
 +    }();
-+    if (!summitSkiaGLContextEnabled)
++    static std::atomic<bool> summitSkiaGLSoftwareRefused { false };
++    if (!summitSkiaGLContextEnabled || summitSkiaGLSoftwareRefused)
 +        return nullptr;
 +#endif
 +#if PLATFORM(GTK) || PLATFORM(WPE) || PLATFORM(HAIKU) || (PLATFORM(PLAYSTATION) && !USE(COORDINATED_GRAPHICS))
@@ -54715,6 +54740,21 @@ index 776466ea87d3d721d32ac4e52db702bb2b544e46..a8a90bcba97784f41f50ecc42422bf57
      if (!s_skiaGLContext) {
          s_skiaGLContext = SkiaGLContext::create(*this);
          m_skiaGLContexts.add(*s_skiaGLContext);
++#if PLATFORM(HAIKU)
++        if (!summitSkiaGLForced) {
++            auto* context = s_skiaGLContext->skiaGLContext();
++            const char* renderer = context && context->makeContextCurrent() ? reinterpret_cast<const char*>(glGetString(GL_RENDERER)) : nullptr;
++            if (renderer && (strstr(renderer, "llvmpipe") || strstr(renderer, "softpipe") || strstr(renderer, "lavapipe") || strstr(renderer, "swrast"))) {
++                WTFLogAlways("Summit: %s is a software renderer; canvases stay on the CPU (SUMMIT_SKIA_GL_CONTEXT=1 forces the GPU path)", renderer);
++                summitSkiaGLSoftwareRefused = true;
++                s_skiaGLContext = nullptr;
++                return nullptr;
++            }
++        }
++#endif
+     }
+     return s_skiaGLContext->skiaGLContext();
+ #else
 diff --git a/Source/WebCore/platform/graphics/skia/SkiaPaintingEngine.cpp b/Source/WebCore/platform/graphics/skia/SkiaPaintingEngine.cpp
 index ffcff7e0b02bdf8599d7b8f245f3323f2f2743cd..ac94d218d9aa37dab4cea78e179a276c62e7dea8 100644
 --- a/Source/WebCore/platform/graphics/skia/SkiaPaintingEngine.cpp
@@ -133413,6 +133453,100 @@ index 41190ed770ac926edc65b498d52879ee7dc0eca6..90bd49e69683c16e1731252157f8edd1
      WebCore::Color underPageBackgroundColorOverride;
      WebCore::Color underlayColor;
      RunLoop::Timer updateReportedMediaCaptureStateTimer;
+diff --git a/Source/WebKit/UIProcess/WebProcessCache.cpp b/Source/WebKit/UIProcess/WebProcessCache.cpp
+index d9243a6e70f5b6759cb9d98941df81778c31e1c9..b6200d627dc4b62319ecef47a1e93385d9589f94 100644
+--- a/Source/WebKit/UIProcess/WebProcessCache.cpp
++++ b/Source/WebKit/UIProcess/WebProcessCache.cpp
+@@ -36,6 +36,12 @@
+ #include <wtf/StdLibExtras.h>
+ #include <wtf/TZoneMallocInlines.h>
+ 
++#if PLATFORM(HAIKU)
++#include "AuxiliaryProcessMessages.h"
++#include <cstdlib>
++#include <cstring>
++#endif
++
+ #define WEBPROCESSCACHE_RELEASE_LOG(fmt, ...) RELEASE_LOG(ProcessSwapping, "%p - [PID=%d] WebProcessCache::" fmt, this, ##__VA_ARGS__)
+ #define WEBPROCESSCACHE_RELEASE_LOG_ERROR(fmt, ...) RELEASE_LOG_ERROR(ProcessSwapping, "%p - [PID=%d] WebProcessCache::" fmt, this, ##__VA_ARGS__)
+ 
+@@ -55,6 +61,32 @@ Seconds WebProcessCache::clearingDelayAfterApplicationResignsActive = cachedProc
+ int WebProcessCache::capacityOverride { -1 };
+ static Seconds cachedProcessSuspensionDelay { 30_s };
+ 
++#if PLATFORM(HAIKU)
++// Other platforms suspend a cached process after cachedProcessSuspensionDelay,
++// and it gives back memory as it suspends. Haiku cannot suspend one, so after
++// the same delay (a site is often taken back within seconds) the process
++// drops its caches as under critical memory pressure. After 15 sites on the
++// laptop the cached processes held 515 MiB less (2751 -> 2236 MiB in all web
++// processes), and a new tab to a released python.org still showed its page
++// in 50-54 ms, against 155 ms in a new process. SUMMIT_WEBPROCESS_CACHE_RELEASE=0
++// turns it off.
++static void releaseMemoryOfCachedProcessLaterHaiku(WebProcessProxy& process)
++{
++    static const bool enabled = [] {
++        const char* value = std::getenv("SUMMIT_WEBPROCESS_CACHE_RELEASE");
++        return !value || std::strcmp(value, "0");
++    }();
++    if (!enabled)
++        return;
++    RunLoop::mainSingleton().dispatchAfter(cachedProcessSuspensionDelay, [weakProcess = WeakPtr { process }] {
++        RefPtr process = weakProcess.get();
++        if (!process || !process->isInProcessCache())
++            return;
++        process->send(Messages::AuxiliaryProcess::DidReceiveMemoryPressureEvent(true), 0);
++    });
++}
++#endif
++
+ void WebProcessCache::setCachedProcessSuspensionDelayForTesting(Seconds delay)
+ {
+     cachedProcessSuspensionDelay = delay;
+@@ -175,6 +207,8 @@ bool WebProcessCache::addProcess(Ref<CachedProcess>&& cachedProcess)
+ 
+ #if PLATFORM(COCOA) || PLATFORM(GTK) || PLATFORM(WPE)
+         cachedProcess->startSuspensionTimer();
++#elif PLATFORM(HAIKU)
++    releaseMemoryOfCachedProcessLaterHaiku(process);
+ #endif
+ 
+     if (auto& origin = process->coopCacheOrigin()) {
+@@ -421,6 +455,25 @@ void WebProcessCache::updateCapacity(WebProcessPool& processPool)
+         m_capacity = capacityOverride;
+     } else {
+         unsigned maxProcesses = 32;
++#if PLATFORM(HAIKU)
++        // Haiku neither suspends cached processes nor has them give back
++        // memory, so each one keeps what its page left (about 160 MiB on
++        // average over 15 common sites, 400 MiB for GitHub) until it expires
++        // after five minutes. One per 2 GB of memory, at most 8: most of the
++        // gain is in the last few sites. SUMMIT_WEBPROCESS_CACHE=<n> (n > 1)
++        // allows n, and 0 turns the cache off (WebViewContextHaiku).
++        maxProcesses = 8;
++        unsigned megabytesPerProcess = 2048;
++        if (const char* value = std::getenv("SUMMIT_WEBPROCESS_CACHE")) {
++            int requested = std::atoi(value);
++            if (requested > 1) {
++                maxProcesses = std::min(requested, 32);
++                megabytesPerProcess = 256;
++            }
++        }
++#else
++        unsigned megabytesPerProcess = 256;
++#endif
+ #if PLATFORM(IOS_FAMILY)
+         if (!processPool.hasUsedSiteIsolation())
+             maxProcesses = 10;
+@@ -434,7 +487,7 @@ void WebProcessCache::updateCapacity(WebProcessPool& processPool)
+             WEBPROCESSCACHE_RELEASE_LOG("updateCapacity: Cache is disabled because device does not have enough RAM", 0);
+         } else {
+             // Allow 4 processes in the cache per GB of RAM, up to maxProcesses.
+-            m_capacity = std::min<unsigned>(memorySize / (256 * MB), maxProcesses);
++            m_capacity = std::min<unsigned>(memorySize / (megabytesPerProcess * MB), maxProcesses);
+             WEBPROCESSCACHE_RELEASE_LOG("updateCapacity: Cache has a capacity of %u processes", 0, capacity());
+         }
+     }
 diff --git a/Source/WebKit/UIProcess/WebProcessPool.cpp b/Source/WebKit/UIProcess/WebProcessPool.cpp
 index cf634997b899951b6afccf716c62137a21a66d6a..838b682ec2471b6372de278c24e55e0dfa807d94 100644
 --- a/Source/WebKit/UIProcess/WebProcessPool.cpp
@@ -138492,10 +138626,10 @@ index 0000000000000000000000000000000000000000..fb3e33f0bce8a0e7a7f240e8f7308550
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/MemoryPressureMonitorHaiku.cpp b/Source/WebKit/UIProcess/haiku/MemoryPressureMonitorHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..4193e8a36e219e1eb0ff2c6efe87738afb758703
+index 0000000000000000000000000000000000000000..1e61e7a125d4984880932744c0985a1075955acd
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/MemoryPressureMonitorHaiku.cpp
-@@ -0,0 +1,129 @@
+@@ -0,0 +1,143 @@
 +/*
 + * Copyright (C) 2026 Haiku, Inc.
 + *
@@ -138530,6 +138664,7 @@ index 0000000000000000000000000000000000000000..4193e8a36e219e1eb0ff2c6efe87738a
 +#include <cstdio>
 +#include <cstdlib>
 +#include <cstring>
++#include <wtf/MemoryPressureHandler.h>
 +#include <wtf/RunLoop.h>
 +#include <wtf/Threading.h>
 +
@@ -138602,12 +138737,25 @@ index 0000000000000000000000000000000000000000..4193e8a36e219e1eb0ff2c6efe87738a
 +                std::fprintf(stderr, "Summit memory pressure: %d%% of memory in use, %s\n", usedPercentage,
 +                    level == 2 ? "critical" : level == 1 ? "releasing memory" : "normal");
 +                reportedLevel = level;
++                // The browser process's own state: the web process cache and
++                // the spare process check it before keeping or starting a
++                // process (WebProcessCache::canCacheProcess,
++                // didReachGoodTimeToPrewarm, prewarmWebProcessHaiku). Nothing
++                // else set it on Haiku, so they never held back.
++                RunLoop::mainSingleton().dispatch([level] {
++                    MemoryPressureHandler::singleton().setMemoryPressureStatus(level ? SystemMemoryPressureStatus::Critical : SystemMemoryPressureStatus::Normal);
++                });
 +            }
 +            if (level) {
 +                bool isCritical = level == 2;
 +                RunLoop::mainSingleton().dispatch([isCritical] {
-+                    for (auto& processPool : WebProcessPool::allProcessPools())
++                    for (auto& processPool : WebProcessPool::allProcessPools()) {
 +                        processPool->sendMemoryPressureEvent(isCritical);
++                        // Ends the processes kept for later (the web process
++                        // cache, the back/forward cache's pages, the spare
++                        // process), as GTK's and WPE's browser processes do.
++                        processPool->handleMemoryPressureWarning(isCritical ? Critical::Yes : Critical::No);
++                    }
 +                });
 +            }
 +            pollInterval = pollIntervalForUsedMemoryPercentage(usedPercentage);

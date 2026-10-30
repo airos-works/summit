@@ -45,6 +45,16 @@ this page says what changed and how to trace a navigation.
   that just started. `SUMMIT_PREWARM_PROCESS=0` still turns all of it off.
 - WebKit swaps processes on cross-site navigations in this port; the old
   comment in `WebView.cpp` that said it did not was wrong and is corrected.
+- **Sites visited again (31 October).** With `ENABLE_WEBPROCESS_CACHE` (since
+  a2f4797) a web process left without pages is kept for its site for five
+  minutes, at most one per 2 GB of memory and 8 in all
+  (`SUMMIT_WEBPROCESS_CACHE=<n>` allows n, `0` turns it off), and is sent the
+  critical memory pressure event after 30 s in the cache
+  (`SUMMIT_WEBPROCESS_CACHE_RELEASE=0` keeps everything). A new tab to such a
+  site shows it in 38-54 ms (python.org) instead of about 155 ms. Under
+  memory pressure the cache, the back/forward cache and the spare process are
+  emptied, and nothing new is kept or started. Numbers in
+  [performance.md](performance.md), 31 October.
 
 ## Tracing a navigation
 

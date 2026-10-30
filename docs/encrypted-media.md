@@ -84,7 +84,10 @@ read from its (encrypted) payload, so it is taken from the next packet's
 timestamp: encrypted WebM audio keeps the container's millisecond timestamps
 rather than the exact sample clock of clear audio, and Opus pre-skip is
 applied once that duration is known. Each encrypted track's key ID raises an
-`encrypted` event with init data type `webm`, which the CDM now accepts.
+`encrypted` event with init data type `webm`, which the CDM now accepts
+(31 October: `CDMPrivateClearKey::supportsInitData` had kept refusing it on
+Haiku, so `generateRequest()` failed with `NotSupportedError` in the
+browser; the WebM fixtures play since).
 
 Malformed metadata fails before ciphertext reaches a decoder.
 
