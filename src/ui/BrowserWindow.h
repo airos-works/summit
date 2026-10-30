@@ -272,6 +272,8 @@ private:
         // A small tab at the start of the strip (#68), whether the page plays
         // sound and whether it is muted (#70).
         bool pinned = false, playingAudio = false, audioMuted = false;
+        // The tab group it is in (TabGroup::id), 0 for none.
+        int64 group = 0;
         bool softwareRendering = false;
         // The page asks for the screen to stay on: a video with sound plays,
         // or it holds a screen wake lock (#88).
@@ -638,8 +640,43 @@ private:
     // detection, the Picture in Picture API and the password manager.
     void AddPageScripts(BWebKitView* view);
     void PageScriptMessage(BMessage& message);
-    void MoveTabTo(int64 id, size_t index);
+    // group: the tab group it is in afterwards (a drag along the strip).
+    void MoveTabTo(int64 id, size_t index, std::optional<int64> group = std::nullopt);
     void SetTabPinned(int64 id, bool pinned);
+    // Tab groups, as in Chrome and Firefox (BrowserWindowFeatures.cpp): a
+    // title, one of Chrome's nine colours and whether it is collapsed; its
+    // tabs are adjacent and never pinned. Identifiers are unique among the
+    // windows (extensions' tabGroups names them). Saved with the session.
+    struct TabGroup {
+        int64 id = 0;
+        std::string title, color;
+        bool collapsed = false;
+    };
+    TabGroup* FindTabGroup(int64 id);
+    static rgb_color TabGroupColor(const std::string& name);
+    static int64 NewTabGroupID();
+    // A new group of the tabs (moved next to the first), or the tabs added
+    // to the end of group; pinned tabs are unpinned. The group, 0 if none.
+    int64 GroupTabs(const std::vector<int64>& tabs, int64 group = 0, const std::string& title = {}, const std::string& color = {});
+    // Out of their groups, each to the place after its group.
+    void UngroupTabs(const std::vector<int64>& tabs);
+    void UngroupTabGroup(int64 group);
+    void CloseTabGroup(int64 group);
+    void NewTabInGroup(int64 group);
+    // Moves the group's tabs together to index (-1: the end), not into another group.
+    void MoveTabGroup(int64 group, int32 index);
+    void ShowTabGroupMenu(const BMessage& message);
+    void TabGroupMessage(const BMessage& message);
+    // An extension's tabs.group, tabs.ungroup or tabGroups change (B_WEBKIT_BROWSER_TAB_GROUPS).
+    void TabGroupsCommand(const BMessage& message, uint64 identifier);
+    // Keeps the groups whole: pinned tabs leave theirs, a group's tabs stay
+    // together (the longest run keeps it), a tab between two of a group
+    // joins it, and a group without tabs is gone. True when it changed something.
+    bool NormalizeTabGroups();
+    // Every change to the groups: the strip, extensions and the session.
+    void TabGroupsChanged();
+    // What extensions are told of this window's groups (SetBrowserWindowTabGroups).
+    void ReportTabGroups();
     // Records a visit in the profile's history; outside private windows,
     // extensions hear of it (history.onVisited).
     // transition: the visit's Firefox type (Tab::nextTransition), 0 unknown.
@@ -898,6 +935,14 @@ private:
     int32 fWindowMenuFixed = 0;
     std::vector<Tab> fTabs;
     std::vector<PageRecord> fClosedTabs;
+#if SUMMIT_MODERN_WEBKIT
+    std::vector<TabGroup> fTabGroups;
+    // The group whose tabs DetachTab is moving to another window with them.
+    std::optional<std::pair<TabGroup, std::vector<int64>>> fMovingTabGroup;
+    // Restored extension pages still to be made (the index CreateTab asked
+    // for) and the group each one is in.
+    std::vector<std::pair<int32, int64>> fRestoredTabGroups;
+#endif
 #if SUMMIT_MODERN_WEBKIT
     // browsingData removals waiting for the context, by request identifier.
     struct BrowsingDataRequest {

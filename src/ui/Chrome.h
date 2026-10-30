@@ -29,6 +29,11 @@ constexpr uint32 kTabMenu = 'tbmn';
 // Sent to the window by the tab strip's List All Tabs button: "where" (screen
 // point for the menu's top left corner).
 constexpr uint32 kTabListMenu = 'tblm';
+// Sent to the window by a tab group's label: a primary click toggles the
+// group's collapsed state ("group", int64), a secondary click asks for its
+// menu ("group", "where").
+constexpr uint32 kToggleTabGroup = 'tgtg';
+constexpr uint32 kTabGroupMenu = 'tgmn';
 // Private windows draw their bars in purple, so they cannot be mistaken for
 // ordinary ones. The window registers itself; its views look it up.
 void SetPrivateWindow(const BWindow* window, bool privateBrowsing);
@@ -139,6 +144,17 @@ struct TabLabel {
     bool pinned = false; TabAudio audio = TabAudio::None; std::string url;
     // A tab of a container (Containers.h): a line of its colour under it.
     bool container = false; rgb_color containerColor = {0, 0, 0, 255}; std::string containerName;
+    // The tab group it is in (TabGroupLabel::id), 0 for none.
+    int64 group = 0;
+};
+// A tab group as the strip shows it: a label of its colour before its tabs
+// (with its title, or only a dot), a line of its colour under them; a
+// collapsed group shows only its label (and its selected tab).
+struct TabGroupLabel {
+    int64 id = 0;
+    std::string title;
+    rgb_color color = {95, 99, 104, 255};
+    bool collapsed = false;
 };
 // Draws a site icon, or a neutral globe when there is none.
 void DrawSiteIcon(BView* view, const BBitmap* icon, BPoint leftTop);
@@ -150,11 +166,14 @@ void DrawSiteIcon(BView* view, const BBitmap* icon, BPoint leftTop);
 // the wheel and the arrows at both ends change, and which follows the
 // selected tab. A tab opened out of sight lights the arrow on its side. The
 // List All Tabs button (kTabListMenu) at the end lists every tab.
+// Tabs of a group are adjacent, after its label; dragging a tab between two
+// tabs of a group puts it in the group (kMoveTab "group"), dragging it past
+// the group's end takes it out.
 class TabStrip : public BView {
 public:
     TabStrip();
     ~TabStrip() override;
-    void SetTabs(std::vector<TabLabel> tabs, int64 selected);
+    void SetTabs(std::vector<TabLabel> tabs, int64 selected, std::vector<TabGroupLabel> groups = {});
     void Draw(BRect update) override;
     void MouseDown(BPoint where) override;
     void MouseUp(BPoint where) override;
@@ -171,6 +190,13 @@ private:
         float width = 0;     // of an unpinned tab
         bool overflow = false;
         BRect scrollLeft, scrollRight, newTab, list;
+        // Where each unpinned tab (by index; pinned ones 0) and each group's
+        // label start, from the start of the scrolled part, and how wide
+        // they are (0: a tab of a collapsed group, not drawn).
+        std::vector<float> tabLeft, tabWidth;
+        struct Chip { int64 group; float left, width; };
+        std::vector<Chip> chips;
+        float contentWidth = 0;
     };
     Layout ComputeLayout() const;
     void DrawHaiku(BRect update);
@@ -180,6 +206,14 @@ private:
     // The scroll arrows and the List All Tabs chevron.
     void DrawButtons(const Layout& layout, rgb_color ink, rgb_color dim, rgb_color attention);
     BRect TabRect(size_t index) const;
+    BRect TabRect(const Layout&, size_t index) const;
+    // A group's label, and the group whose label is under a point (0: none).
+    BRect ChipRect(const Layout&, const Layout::Chip&) const;
+    int64 ChipAt(BPoint where) const;
+    const TabGroupLabel* Group(int64 id) const;
+    float ChipWidth(const TabGroupLabel&) const;
+    // The labels and the lines under the groups' tabs.
+    void DrawGroups(const Layout&, rgb_color base, bool haiku);
     BRect CloseRect(size_t index) const;
     BRect AudioRect(size_t index) const;
     BRect NewTabRect() const;
@@ -219,8 +253,8 @@ private:
     int64 fDragTab = 0;
     BPoint fDragStart, fDragPoint;
     bool fDragging = false, fDragOutside = false;
-    // How far the unpinned tabs are scrolled, in tabs (so that it keeps
-    // its place when they change width).
+    std::vector<TabGroupLabel> fGroups;
+    // How far the unpinned tabs are scrolled, in pixels.
     float fScroll = 0;
     // An arrow held down, or a drag held past an end: -1 left, 1 right.
     int fRepeatDirection = 0;

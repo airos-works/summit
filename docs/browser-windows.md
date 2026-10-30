@@ -73,6 +73,21 @@ The tab bar handles any number of tabs, in both looks, as Firefox does:
   one checked; choosing one selects it. The menu lines up with the button's
   right edge and scrolls when it is taller than the screen.
 
+### Tab groups (#106)
+
+Tabs can be grouped as in Chrome and Firefox: a group has a title, one of
+Chrome's nine colours and a collapsed state; its tabs are adjacent, after a
+label of its colour (its title, or a dot), with a line of the colour under
+them. A click on the label collapses or expands the group (a collapsed group
+keeps only its selected tab in sight); the label's menu names it, colours it,
+opens a new tab in it, ungroups it or closes its tabs. The tab menu's Add Tab
+to Group makes a new group or adds the tab to another; Remove from Group takes
+it out. Dragging a tab between two tabs of a group puts it in; dragging it over
+its group's label or past its last tab takes it out. Pinned tabs are in no
+group. List All Tabs lists each group's tabs under its name. Groups are saved
+with the session, and extensions see and change them (`tabs.group`,
+`tabGroups`): see `webextensions-tab-groups.md`.
+
 Links now also behave as in other browsers: `target=_blank` and
 `window.open()` open a tab after the opener (in front); a middle click or
 Command-click opens a background tab (Shift brings it to the front); a
@@ -134,9 +149,10 @@ open windows by themselves. Web app windows can be as small as 320×240.
   others drop their copy and reread it from disk.
 - `TabStrip` (`src/ui/Chrome.cpp`) computes one `Layout` for its width and
   tab count (scroll area, tab width, arrows, New Tab and List All Tabs
-  buttons) that drawing, hit testing and dragging all use. The scroll offset
-  is kept in tabs rather than pixels, so it stays on a tab boundary when the
-  window or the number of tabs changes the width. `SetTabs` scrolls only when
+  buttons, and where each unpinned tab and group label starts) that drawing,
+  hit testing and dragging all use. The scroll offset is in pixels (since tab
+  groups: labels are narrower than tabs); the arrows step to the next tab or
+  label boundary and the wheel scrolls a tab's width per notch. `SetTabs` scrolls only when
   the selection changes or tabs are added, not on the title and progress
   updates that rebuild the labels all the time; a window still being set up
   (a restored session, before `Show()`) marks no tab for attention. The List
@@ -181,6 +197,10 @@ command now takes any character and `--mod alt/ctrl/shift`):
   tab of a window.
 
 ## Not done
+
+- Tab groups: a group cannot be dragged as a whole by its label (its tabs
+  can, one at a time, and `tabGroups.move` moves it), nor moved to another
+  window from its menu; closed groups are not in Reopen Closed Tab.
 
 - List All Tabs has no close button per tab and does not scroll itself to the
   current tab when it is taller than the screen; the tab bar does not animate

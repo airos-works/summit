@@ -456,6 +456,9 @@ int main()
     profile.userAgent = "firefox-macos";
     profile.siteZoom = {{"example.com", 1.5}, {"file", 0.8}};
     profile.unpinnedExtensions = {"ext-1", "ext-2"};
+    // Tab groups: the second tab in a collapsed, named group.
+    profile.windows[0].groups = {{"Reading", "green", true}};
+    profile.windows[0].tabGroups = {0, 1};
     const std::string routerCertificate(64, 'a');
     CHECK(profile.TrustCertificate({"Router.LAN", std::string(64, 'A'), "/CN=UniFi", 100}));
     CHECK(!profile.TrustCertificate({"router.lan", routerCertificate, "", 200}));
@@ -505,6 +508,9 @@ int main()
     CHECK(error.empty() && loaded.windows.size() == 2 && loaded.windows[0].tabs.size() == 2 && loaded.windows[0].selected == 1);
     CHECK(loaded.windows[0].HasFrame() && loaded.windows[0].frame[2] == 810 && !loaded.windows[1].HasFrame());
     CHECK(loaded.windows[1].tabs.at(0).url == "https://second.example/" && loaded.interfaceStyle == "safari");
+    CHECK(loaded.windows[0].groups.size() == 1 && loaded.windows[0].groups[0].title == "Reading" && loaded.windows[0].groups[0].color == "green"
+        && loaded.windows[0].groups[0].collapsed && loaded.windows[0].tabGroups == std::vector<uint32_t>({0, 1}));
+    CHECK(loaded.windows[1].groups.empty() && loaded.windows[1].tabGroups.empty());
     CHECK(loaded.bookmarks.Pages().at(1).title == "WebKit — 浏览器");
     CHECK(loaded.history.size() == 2 && loaded.history.front().title == "Updated title");
     CHECK(loaded.history.front().visited == profile.history.front().visited);

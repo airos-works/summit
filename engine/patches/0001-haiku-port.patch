@@ -89678,10 +89678,10 @@ index ea6574262c17de8087b5673957d32a356d3a0bfc..ee9cda2c98172d2cab9b1d287ff83632
      else {
          ASSERT(!m_url.isEmpty());
 diff --git a/Source/WebKit/Shared/Extensions/WebExtensionTab.serialization.in b/Source/WebKit/Shared/Extensions/WebExtensionTab.serialization.in
-index 1b2c6a3f188d1c0063753c2c46e1ba2d5446f244..2febefa22dad34aaa2099ac1e101f3c14eacdc81 100644
+index 1b2c6a3f188d1c0063753c2c46e1ba2d5446f244..b0bd19a6840a95f5f187db50e1e7ec88a8af7b62 100644
 --- a/Source/WebKit/Shared/Extensions/WebExtensionTab.serialization.in
 +++ b/Source/WebKit/Shared/Extensions/WebExtensionTab.serialization.in
-@@ -42,11 +42,15 @@ struct WebKit::WebExtensionTabParameters {
+@@ -42,11 +42,16 @@ struct WebKit::WebExtensionTabParameters {
      std::optional<bool> selected;
      std::optional<bool> pinned;
      std::optional<bool> audible;
@@ -89693,11 +89693,12 @@ index 1b2c6a3f188d1c0063753c2c46e1ba2d5446f244..2febefa22dad34aaa2099ac1e101f3c1
      std::optional<bool> showingReaderMode;
 +#if PLATFORM(HAIKU)
 +    std::optional<String> cookieStoreIdentifier;
++    std::optional<int32_t> groupIdentifier;
 +#endif
  }
  
  struct WebKit::WebExtensionTabQueryParameters {
-@@ -61,6 +65,7 @@ struct WebKit::WebExtensionTabQueryParameters {
+@@ -61,6 +66,7 @@ struct WebKit::WebExtensionTabQueryParameters {
  
      std::optional<bool> active;
      std::optional<bool> audible;
@@ -90178,10 +90179,10 @@ index 0000000000000000000000000000000000000000..3ad644797e242f595b43ff720270f09c
 +}
 +#endif
 diff --git a/Source/WebKit/Shared/Extensions/WebExtensionTabParameters.h b/Source/WebKit/Shared/Extensions/WebExtensionTabParameters.h
-index 58da4eb0574b8fd6b81a344c2474e36f44256342..dc4d27d9a856f5448f6abb24ae2853f12b7f934a 100644
+index 58da4eb0574b8fd6b81a344c2474e36f44256342..76d4ed75e5d0c67da4ca27d72131c59b5af8f9b0 100644
 --- a/Source/WebKit/Shared/Extensions/WebExtensionTabParameters.h
 +++ b/Source/WebKit/Shared/Extensions/WebExtensionTabParameters.h
-@@ -52,11 +52,16 @@ struct WebExtensionTabParameters {
+@@ -52,11 +52,18 @@ struct WebExtensionTabParameters {
      std::optional<bool> selected;
      std::optional<bool> pinned;
      std::optional<bool> audible;
@@ -90194,6 +90195,8 @@ index 58da4eb0574b8fd6b81a344c2474e36f44256342..dc4d27d9a856f5448f6abb24ae2853f1
 +#if PLATFORM(HAIKU)
 +    // Firefox's tab.cookieStoreId: the storeId that cookies.* reports for this tab's cookies.
 +    std::optional<String> cookieStoreIdentifier;
++    // tab.groupId: the browser's tab group of the tab, -1 (TAB_GROUP_ID_NONE) for none.
++    std::optional<int32_t> groupIdentifier;
 +#endif
  };
  
@@ -90212,10 +90215,10 @@ index 1f05b9ffedaafd11d7971241deb7c1417a55a2e5..84932e03d986305269a5f8e859cf0581
      std::optional<bool> muted;
 diff --git a/Source/WebKit/Shared/Extensions/WebExtensionTabQueryParser.cpp b/Source/WebKit/Shared/Extensions/WebExtensionTabQueryParser.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..2ea9b3c29b366f8c108c5f9d9fbfe8119cbe1cb2
+index 0000000000000000000000000000000000000000..3b43aa7b337b542457e67b79c46d9ff2fc5e1014
 --- /dev/null
 +++ b/Source/WebKit/Shared/Extensions/WebExtensionTabQueryParser.cpp
-@@ -0,0 +1,139 @@
+@@ -0,0 +1,138 @@
 +/*
 + * Copyright (C) 2023 Apple Inc. All rights reserved.
 + *
@@ -90294,9 +90297,8 @@ index 0000000000000000000000000000000000000000..2ea9b3c29b366f8c108c5f9d9fbfe811
 +            if (!isValid(result.windowIdentifier))
 +                return makeUnexpected("windowId must be a valid window identifier"_s);
 +        } else if (key == "groupId"_s) {
-+            // No tab is in a group (WebExtensionAPITabGroups): -1 (TAB_GROUP_ID_NONE)
-+            // matches every tab, and WebExtensionAPITabs::query answers
-+            // another group with no tabs.
++            // A tab group, or -1 (TAB_GROUP_ID_NONE) for tabs in none:
++            // WebExtensionAPITabs::query filters the answer by it.
 +            auto number = value->asDouble();
 +            if (!number || std::trunc(*number) != *number || *number < -1)
 +                return makeUnexpected("groupId must be a tab group identifier"_s);
@@ -94388,10 +94390,10 @@ index 0000000000000000000000000000000000000000..574ed16658f0c14b1aa2e63208e990b8
 +#define WEBKIT_ENGINE_VERSION_HAIKU "@WebKit_HAIKU_MAJOR_VERSION@.@WebKit_HAIKU_MINOR_VERSION@.@WebKit_HAIKU_TINY_VERSION@"
 diff --git a/Source/WebKit/UIProcess/API/haiku/WebKitContext.cpp b/Source/WebKit/UIProcess/API/haiku/WebKitContext.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..967bd8b22af0742843d0d7737bf97e495184695d
+index 0000000000000000000000000000000000000000..ac7db6cd29b0722649189a5d3fe09b5d8e56183e
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/API/haiku/WebKitContext.cpp
-@@ -0,0 +1,1397 @@
+@@ -0,0 +1,1434 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#include "config.h"
@@ -95344,6 +95346,43 @@ index 0000000000000000000000000000000000000000..967bd8b22af0742843d0d7737bf97e49
 +    });
 +}
 +
++void BWebKitContext::SetBrowserWindowTabGroups(const BMessenger& window, const std::vector<BWebKitTabGroup>& groups)
++{
++    if (m_status != B_OK)
++        return;
++    struct Group {
++        int32 identifier;
++        String title, color;
++        bool collapsed;
++        std::vector<std::shared_ptr<WebKit::WebViewStateHaiku>> states;
++    };
++    std::vector<Group> submitted;
++    for (auto& group : groups) {
++        Group copy { group.identifier, String::fromUTF8(group.title.c_str()).isolatedCopy(), String::fromUTF8(group.color.c_str()).isolatedCopy(), group.collapsed, { } };
++        for (auto* view : group.views) {
++            if (view)
++                copy.states.push_back(view->m_state);
++        }
++        submitted.push_back(WTF::move(copy));
++    }
++    WTF::RunLoop::mainSingleton().dispatch([context = m_context, window, submitted = WTF::move(submitted)] {
++        Vector<WebKit::BrowserTabRegistryHaiku::TabGroup> groups;
++        for (auto& group : submitted) {
++            WebKit::BrowserTabRegistryHaiku::TabGroup copy;
++            copy.identifier = group.identifier;
++            copy.title = group.title;
++            copy.color = group.color;
++            copy.collapsed = group.collapsed;
++            for (auto& state : group.states) {
++                if (sameTabFamilyHaiku(state->context, context) && !state->closed && state->client && state->client->page() && !state->client->page()->isClosed())
++                    copy.pages.append(state->client->page()->identifier());
++            }
++            groups.append(WTF::move(copy));
++        }
++        context->browserTabs()->setWindowGroups(window, WTF::move(groups));
++    });
++}
++
 +void BWebKitContext::NotifyHistoryChanged(const char* event, const char* json)
 +{
 +    if (m_status != B_OK || !event || !json)
@@ -95791,10 +95830,10 @@ index 0000000000000000000000000000000000000000..967bd8b22af0742843d0d7737bf97e49
 +}
 diff --git a/Source/WebKit/UIProcess/API/haiku/WebKitContext.h b/Source/WebKit/UIProcess/API/haiku/WebKitContext.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..fb952cd9cec6c26c9cf29c014d68ec01d1a3f651
+index 0000000000000000000000000000000000000000..fb8eb598c855482f31a36417c66446fa992a6ca3
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/API/haiku/WebKitContext.h
-@@ -0,0 +1,691 @@
+@@ -0,0 +1,724 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#pragma once
@@ -95969,6 +96008,20 @@ index 0000000000000000000000000000000000000000..fb952cd9cec6c26c9cf29c014d68ec01
 +//                  data of normal (not private) browsing and answers with
 +//                  null; "settings" {} answers with Chrome's
 +//                  {options, dataToRemove, dataRemovalPermitted}.
++//   TAB_GROUPS     method, arguments (a JSON object), repeated view (tabs),
++//                  optional window, for the tab groups of tabs.group(),
++//                  tabs.ungroup() and tabGroups (BWebKitTabGroup). "group"
++//                  {groupId?}: put the views (all in this window) into that
++//                  group, or into a new group of the window (window, else
++//                  the views' window), answer {"groupId": id}; "ungroup" {}:
++//                  take the views out of their groups, answer null;
++//                  "update" {groupId, title?, color?, collapsed?}: change the
++//                  group, answer null; "move" {groupId, index} (index -1:
++//                  the end): move the group's tabs together, to window if it
++//                  names another window, answer null. Report the result with
++//                  SetBrowserWindowTabs and SetBrowserWindowTabGroups before
++//                  answering (RespondToBrowserCommandWithData). Pinned tabs
++//                  are unpinned when grouped, as in Chrome.
 +//   SESSIONS       method, arguments (a JSON object), for chrome.sessions:
 +//                  "getRecentlyClosed" {maxResults} answers with a JSON array
 +//                  of Session objects, newest first ({lastModified (seconds),
@@ -96012,7 +96065,8 @@ index 0000000000000000000000000000000000000000..fb952cd9cec6c26c9cf29c014d68ec01
 +    B_WEBKIT_BROWSER_DETECT_LANGUAGE,
 +    B_WEBKIT_BROWSER_SIDEBAR,
 +    B_WEBKIT_BROWSER_DOWNLOADS_UI,
-+    B_WEBKIT_BROWSER_DEVTOOLS
++    B_WEBKIT_BROWSER_DEVTOOLS,
++    B_WEBKIT_BROWSER_TAB_GROUPS
 +};
 +
 +// Site permissions: what pages may ask the user for, and the services that
@@ -96063,6 +96117,18 @@ index 0000000000000000000000000000000000000000..fb952cd9cec6c26c9cf29c014d68ec01
 +// removed container (its data is being erased).
 +enum : uint32 {
 +    B_WEBKIT_CONTAINERS_CHANGED = 'wctc'
++};
++
++// A tab group of a browser window, as extensions see it (tabGroups.TabGroup).
++struct BWebKitTabGroup {
++    // Unique among the browser's groups (of every window), 1 or more.
++    int32 identifier { 0 };
++    std::string title;
++    // Chrome's names: grey, blue, red, yellow, green, pink, purple, cyan, orange.
++    std::string color;
++    bool collapsed { false };
++    // Its tabs, which are adjacent in the window, in their order.
++    std::vector<BWebKitView*> views;
 +};
 +
 +struct BWebKitContainer {
@@ -96154,6 +96220,12 @@ index 0000000000000000000000000000000000000000..fb952cd9cec6c26c9cf29c014d68ec01
 +    // Whether a tab is pinned in the browser (extensions' Tab.pinned). Any
 +    // thread; a closed view is ignored.
 +    void SetBrowserTabPinned(BWebKitView*, bool pinned);
++    // A window's tab groups, in the order of their tabs (an empty list: it has
++    // none). Submit after SetBrowserWindowTabs, whenever a group or the tabs
++    // in it change; extensions get tabGroups.onCreated, onUpdated, onMoved
++    // and onRemoved, and tabs.onUpdated with groupId for tabs that joined or
++    // left a group. Closed views are left out. From the window's looper.
++    void SetBrowserWindowTabGroups(const BMessenger& window, const std::vector<BWebKitTabGroup>&);
 +    // Whether a tab's page is unloaded until it is selected (Tab.discarded):
 +    // a tab DISCARD_TAB replaced, or one of a restored session not yet shown,
 +    // and the address and title extensions see for it until then. Any
@@ -104459,6 +104531,22 @@ index cfe1950fe9083e218330ca9bf101bffc0be311cb..12fc183b60a8da90369b851924ea1718
      URL m_resourceBaseURL;
      bool m_resourcesAreTemporary { false };
      Ref<const JSON::Value> m_manifestJSON;
+diff --git a/Source/WebKit/UIProcess/Extensions/WebExtension.serialization.in b/Source/WebKit/UIProcess/Extensions/WebExtension.serialization.in
+index 6720182659c05cce23c5f70d8a349b1f9a70b08b..2e99e489569d96290fb5e2c1f372a5d94ea4b603 100644
+--- a/Source/WebKit/UIProcess/Extensions/WebExtension.serialization.in
++++ b/Source/WebKit/UIProcess/Extensions/WebExtension.serialization.in
+@@ -38,7 +38,10 @@
+     Size,
+     Title,
+     URL,
+-    ZoomFactor
++    ZoomFactor,
++#if PLATFORM(HAIKU)
++    GroupIdentifier,
++#endif
+ };
+ 
+ enum class WebKit::WebExtensionWindowTypeFilter : uint8_t {
 diff --git a/Source/WebKit/UIProcess/Extensions/WebExtensionAction.h b/Source/WebKit/UIProcess/Extensions/WebExtensionAction.h
 index fac3a3b3cc2786da7bd9ac826eef6f75899f3af7..ea4b1e0b7e1bd1b2d9fb4b0de92b54f912635ff9 100644
 --- a/Source/WebKit/UIProcess/Extensions/WebExtensionAction.h
@@ -105359,7 +105447,7 @@ index 8947f24ec9866c39f206aab464ec21c5d4213b95..faa84e539724753796c97afaf05d1c08
  
  #endif // ENABLE(WK_WEB_EXTENSIONS)
 diff --git a/Source/WebKit/UIProcess/Extensions/WebExtensionContext.h b/Source/WebKit/UIProcess/Extensions/WebExtensionContext.h
-index 5f8454dd5897a49ffba794e50fb04b7257ad2291..ea25340470616cb65d4390deb1e517fc13339817 100644
+index 5f8454dd5897a49ffba794e50fb04b7257ad2291..aef15042fcd7b6421f5636b246a1da9d4588dbea 100644
 --- a/Source/WebKit/UIProcess/Extensions/WebExtensionContext.h
 +++ b/Source/WebKit/UIProcess/Extensions/WebExtensionContext.h
 @@ -40,6 +40,9 @@
@@ -105438,19 +105526,20 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..ea25340470616cb65d4390deb1e517fc
  
  #if ENABLE(DNR_ON_RULE_MATCHED_DEBUG)
  struct ContentRuleListMatchedRule;
-@@ -180,6 +209,11 @@ enum class WebExtensionContextInstallReason : uint8_t {
+@@ -180,6 +209,12 @@ enum class WebExtensionContextInstallReason : uint8_t {
      BrowserUpdate,
  };
  
 +#if PLATFORM(HAIKU)
 +class WebView;
 +class ExtensionActionPopupHaiku;
++struct BrowserTabGroupHaiku;
 +#endif
 +
  class WebExtensionContext : public API::ObjectImpl<API::Object::Type::WebExtensionContext>, public IPC::MessageReceiver, public Identified<WebExtensionContextIdentifier> {
      WTF_MAKE_NONCOPYABLE(WebExtensionContext);
  
-@@ -199,6 +233,8 @@ public:
+@@ -199,6 +234,8 @@ public:
      {
  #if PLATFORM(COCOA)
          return "State.plist"_s;
@@ -105459,7 +105548,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..ea25340470616cb65d4390deb1e517fc
  #else
          return "State.ini"_s;
  #endif
-@@ -207,6 +243,8 @@ public:
+@@ -207,6 +244,8 @@ public:
      static NSMutableDictionary *readStateFromPath(const String&);
  #elif ENABLE(2022_GLIB_API)
      static GRefPtr<GKeyFile> readStateFromPath(const String&);
@@ -105468,7 +105557,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..ea25340470616cb65d4390deb1e517fc
  #endif
      static bool readLastBaseURLFromState(const String& filePath, URL& outLastBaseURL);
      static bool readDisplayNameFromState(const String& filePath, String& outDisplayName);
-@@ -215,7 +253,7 @@ public:
+@@ -215,7 +254,7 @@ public:
  
      static WebExtensionContext* NODELETE get(WebExtensionContextIdentifier);
  
@@ -105477,7 +105566,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..ea25340470616cb65d4390deb1e517fc
      explicit WebExtensionContext(Ref<WebExtension>&&);
  #elif ENABLE(2022_GLIB_API)
      explicit WebExtensionContext(WebKitWebExtensionContext*);
-@@ -266,11 +304,8 @@ public:
+@@ -266,11 +305,8 @@ public:
          bool userGesture { false };
      };
  
@@ -105489,7 +105578,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..ea25340470616cb65d4390deb1e517fc
      using PortQueuedMessageMap = HashMap<PortWorldPair, Vector<PortQueuedMessage>>;
      using NativePortMap = HashMap<WebExtensionPortChannelIdentifier, Ref<WebExtensionMessagePort>>;
  
-@@ -335,6 +370,21 @@ public:
+@@ -335,6 +371,21 @@ public:
          DeniedPermissionMatchPatternsWereRemoved,
      };
  
@@ -105511,7 +105600,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..ea25340470616cb65d4390deb1e517fc
      enum class PermissionState : int8_t {
          DeniedExplicitly    = -3,
          DeniedImplicitly    = -2,
-@@ -417,6 +467,35 @@ public:
+@@ -417,6 +468,35 @@ public:
  
      const String& uniqueIdentifier() const LIFETIME_BOUND { return m_uniqueIdentifier; }
      void setUniqueIdentifier(String&&);
@@ -105547,7 +105636,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..ea25340470616cb65d4390deb1e517fc
  
      RefPtr<WebExtensionLocalization> localization();
  
-@@ -505,6 +584,89 @@ public:
+@@ -505,6 +585,97 @@ public:
  
      void removePage(WebPageProxy&);
  
@@ -105584,6 +105673,14 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..ea25340470616cb65d4390deb1e517fc
 +    void searchQueryHaiku(const String& method, const String& argumentsJSON, std::optional<WebExtensionTabIdentifier>, CompletionHandler<void(std::expected<String, WebExtensionError>&&)>&&);
 +    // sidebarAction: one SIDEBAR browser command per call.
 +    void sidebarActionHaiku(const String& method, const String& argumentsJSON, CompletionHandler<void(std::expected<String, WebExtensionError>&&)>&&);
++    // tabs.group(), tabs.ungroup() and tabGroups (WebExtensionContextAPITabsHaiku.cpp).
++    // They travel in the SidebarActionHaiku message as "tabGroups.METHOD": a
++    // new message would rebuild the whole engine. Reads answer from the
++    // browser's groups; changes are TAB_GROUPS browser commands.
++    void tabGroupsHaiku(const String& method, const String& argumentsJSON, CompletionHandler<void(std::expected<String, WebExtensionError>&&)>&&);
++    // The browser's tab groups changed: tabGroups events, and tabs.onUpdated
++    // for tabs that joined or left a group.
++    void nativeTabGroupsDidChangeHaiku(const Vector<BrowserTabGroupHaiku>& before, const Vector<BrowserTabGroupHaiku>& after);
 +    // devtools.* (WebExtensionContextAPIDevToolsHaiku.cpp). The host's
 +    // developer tools window (identified by `tools`) has a hidden view of the
 +    // extension's devtools_page (panel 0) and a view for each panel it
@@ -105637,7 +105734,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..ea25340470616cb65d4390deb1e517fc
      Ref<WebExtensionWindow> getOrCreateWindow(WKWebExtensionWindow *) const;
      RefPtr<WebExtensionWindow> getWindow(WebExtensionWindowIdentifier, std::optional<WebPageProxyIdentifier> = std::nullopt, IgnoreExtensionAccess = IgnoreExtensionAccess::No) const;
      void forgetWindow(WebExtensionWindowIdentifier) const;
-@@ -546,6 +708,10 @@ public:
+@@ -546,6 +717,10 @@ public:
      void didCommitLoadForFrame(WebPageProxyIdentifier, const WebExtensionFrameParameters&, WallTime);
      void didFinishLoadForFrame(WebPageProxyIdentifier, const WebExtensionFrameParameters&, WallTime);
      void didFailLoadForFrame(WebPageProxyIdentifier, const WebExtensionFrameParameters&, WallTime);
@@ -105648,7 +105745,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..ea25340470616cb65d4390deb1e517fc
  
      void resourceLoadDidSendRequest(WebPageProxyIdentifier, const ResourceLoadInfo&, const WebCore::ResourceRequest&);
      void resourceLoadDidPerformHTTPRedirection(WebPageProxyIdentifier, const ResourceLoadInfo&, const WebCore::ResourceResponse&, const WebCore::ResourceRequest&);
-@@ -597,6 +763,12 @@ public:
+@@ -597,6 +772,12 @@ public:
      const CommandsVector& commands();
      WebExtensionCommand* command(const String& identifier);
      void performCommand(WebExtensionCommand&, UserTriggered = UserTriggered::No);
@@ -105661,7 +105758,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..ea25340470616cb65d4390deb1e517fc
      void resetCommands();
  
  #if TARGET_OS_IPHONE
-@@ -611,6 +783,11 @@ public:
+@@ -611,6 +792,11 @@ public:
      NSArray *platformMenuItems(const WebExtensionTab&) const;
  
      const MenuItemVector& mainMenuItems() const LIFETIME_BOUND { return m_mainMenuItems; }
@@ -105673,7 +105770,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..ea25340470616cb65d4390deb1e517fc
      WebExtensionMenuItem* menuItem(const String& identifier) const;
      void performMenuItem(WebExtensionMenuItem&, const WebExtensionMenuItemContextParameters&, UserTriggered = UserTriggered::No);
  
-@@ -638,6 +815,10 @@ public:
+@@ -638,6 +824,10 @@ public:
      void sendTestFinished(id argument);
      void reloadBackgroundContentForTesting();
      void unloadBackgroundContentForTesting();
@@ -105684,7 +105781,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..ea25340470616cb65d4390deb1e517fc
  #endif
  
      URL backgroundContentURL();
-@@ -646,6 +827,11 @@ public:
+@@ -646,6 +836,11 @@ public:
  #if ENABLE(WK_WEB_EXTENSIONS_OFFSCREEN) && PLATFORM(COCOA)
      WKWebView *offscreenWebView() const { return m_offscreenWebView.get(); }
      bool isOffscreenWebView(WKWebView *webView) const { return webView == m_offscreenWebView; }
@@ -105696,7 +105793,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..ea25340470616cb65d4390deb1e517fc
  #endif
      bool safeToLoadBackgroundContent() const { return m_safeToLoadBackgroundContent; }
  
-@@ -664,6 +850,7 @@ public:
+@@ -664,6 +859,7 @@ public:
      void runOpenPanel(WKWebView *, WKOpenPanelParameters *, void (^)(NSArray *));
  #endif
  
@@ -105704,7 +105801,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..ea25340470616cb65d4390deb1e517fc
  #if PLATFORM(COCOA)
      void sendNativeMessage(const String& applicationID, id message, CompletionHandler<void(std::expected<RetainPtr<id>, WebExtensionError>&&)>&&);
  #endif
-@@ -674,6 +861,10 @@ public:
+@@ -674,6 +870,10 @@ public:
      void addDeclarativeNetRequestRules(WebUserContentControllerProxy&);
  
      bool handleContentRuleListNotificationForTab(WebExtensionTab&, const URL&, WebCore::ContentRuleListResults::Result);
@@ -105715,7 +105812,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..ea25340470616cb65d4390deb1e517fc
      void incrementActionCountForTab(WebExtensionTab&, ssize_t incrementAmount);
  
  #if ENABLE(DNR_ON_RULE_MATCHED_DEBUG)
-@@ -689,7 +880,7 @@ public:
+@@ -689,7 +889,7 @@ public:
      std::optional<WebCore::PageIdentifier> backgroundPageIdentifier(WebProcessProxy& destinationProcess) const;
      std::optional<WebCore::PageIdentifier> backgroundPageIdentifierInOwnProcess() const;
  
@@ -105724,7 +105821,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..ea25340470616cb65d4390deb1e517fc
      Vector<PageIdentifierTuple> inspectorBackgroundPageIdentifiers() const;
      Vector<PageIdentifierTuple> inspectorPageIdentifiers() const;
  #endif
-@@ -708,8 +899,18 @@ public:
+@@ -708,8 +908,18 @@ public:
      WebViewConfiguration webViewConfiguration(WebViewPurpose = WebViewPurpose::Any);
  
      WebsiteDataStore* websiteDataStore(std::optional<PAL::SessionID> = std::nullopt) const;
@@ -105743,7 +105840,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..ea25340470616cb65d4390deb1e517fc
  
      void loadBackgroundContent(CompletionHandler<void(RefPtr<API::Error>)>&&);
  
-@@ -758,11 +959,18 @@ private:
+@@ -758,11 +968,18 @@ private:
  #if PLATFORM(COCOA)
      NSDictionary *currentState() const;
      NSDictionary *readStateFromStorage();
@@ -105763,7 +105860,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..ea25340470616cb65d4390deb1e517fc
  
      void loadStorageAccessLevelsFromStorage();
      void saveStorageAccessLevelsToStorage();
-@@ -771,6 +979,10 @@ private:
+@@ -771,6 +988,10 @@ private:
      void moveLocalStorageIfNeeded(const URL& previousBaseURL, CompletionHandler<void()>&&);
      void removeStaleExtensionWebsiteData();
  
@@ -105774,7 +105871,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..ea25340470616cb65d4390deb1e517fc
      void permissionsDidChange(PermissionNotification, const PermissionsSet&);
      void permissionsDidChange(PermissionNotification, const MatchPatternSet&);
  
-@@ -806,6 +1018,7 @@ private:
+@@ -806,6 +1027,7 @@ private:
      void saveBackgroundPageListenersToStorage();
  
      void performTasksAfterBackgroundContentLoads();
@@ -105782,7 +105879,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..ea25340470616cb65d4390deb1e517fc
  
  #ifdef NDEBUG
      // This is method is a no-op in release builds since it has a performance impact with little benefit to release builds.
-@@ -854,6 +1067,18 @@ private:
+@@ -854,6 +1076,18 @@ private:
      void loadDeclarativeNetRequestRules(CompletionHandler<void(bool)>&&);
      void compileDeclarativeNetRequestRules(NSDictionary *, CompletionHandler<void(bool)>&&);
      void unloadDeclarativeNetRequestState();
@@ -105801,7 +105898,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..ea25340470616cb65d4390deb1e517fc
      String declarativeNetRequestContentRuleListFilePath();
  
      // Updating user content controllers with new rules.
-@@ -892,6 +1117,15 @@ private:
+@@ -892,6 +1126,15 @@ private:
      Ref<WebExtensionStorageSQLiteStore> syncStorageStore();
  
      void fetchCookies(WebsiteDataStore&, const URL&, const WebExtensionCookieFilterParameters&, CompletionHandler<void(std::expected<Vector<WebExtensionCookieParameters>, WebExtensionError>&&)>&&);
@@ -105817,7 +105914,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..ea25340470616cb65d4390deb1e517fc
  
      // Action APIs
      bool isActionMessageAllowed(IPC::Decoder&);
-@@ -903,6 +1137,10 @@ private:
+@@ -903,6 +1146,10 @@ private:
      void actionOpenPopup(WebPageProxyIdentifier, std::optional<WebExtensionWindowIdentifier>, std::optional<WebExtensionTabIdentifier>, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
      void actionGetBadgeText(std::optional<WebExtensionWindowIdentifier>, std::optional<WebExtensionTabIdentifier>, CompletionHandler<void(std::expected<String, WebExtensionError>&&)>&&);
      void actionSetBadgeText(std::optional<WebExtensionWindowIdentifier>, std::optional<WebExtensionTabIdentifier>, const String& text, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
@@ -105828,7 +105925,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..ea25340470616cb65d4390deb1e517fc
      void actionGetEnabled(std::optional<WebExtensionWindowIdentifier>, std::optional<WebExtensionTabIdentifier>, CompletionHandler<void(std::expected<bool, WebExtensionError>&&)>&&);
      void actionSetEnabled(std::optional<WebExtensionTabIdentifier>, bool enabled, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
      void fireActionClickedEventIfNeeded(WebExtensionTab*);
-@@ -934,6 +1172,11 @@ private:
+@@ -934,6 +1181,11 @@ private:
      // Commands APIs
      bool isCommandsMessageAllowed(IPC::Decoder&);
      void commandsGetAll(CompletionHandler<void(Vector<WebExtensionCommandParameters>)>&&);
@@ -105840,7 +105937,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..ea25340470616cb65d4390deb1e517fc
      void fireCommandEventIfNeeded(const WebExtensionCommand&, WebExtensionTab*);
      void fireCommandChangedEventIfNeeded(const WebExtensionCommand&, const String& oldShortcut);
  
-@@ -944,7 +1187,9 @@ private:
+@@ -944,7 +1196,9 @@ private:
      void cookiesSet(std::optional<PAL::SessionID>, const WebExtensionCookieParameters&, CompletionHandler<void(std::expected<std::optional<WebExtensionCookieParameters>, WebExtensionError>&&)>&&);
      void cookiesRemove(std::optional<PAL::SessionID>, const String& name, const URL&, CompletionHandler<void(std::expected<std::optional<WebExtensionCookieParameters>, WebExtensionError>&&)>&&);
      void cookiesGetAllCookieStores(CompletionHandler<void(std::expected<HashMap<PAL::SessionID, Vector<WebExtensionTabIdentifier>>, WebExtensionError>&&)>&&);
@@ -105850,7 +105947,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..ea25340470616cb65d4390deb1e517fc
  
      // DeclarativeNetRequest APIs
      bool isDeclarativeNetRequestMessageAllowed(IPC::Decoder&);
-@@ -960,6 +1205,33 @@ private:
+@@ -960,6 +1214,33 @@ private:
      void declarativeNetRequestUpdateDynamicRules(String&& rulesToAddJSON, Vector<double>&& ruleIDsToDelete, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
      void declarativeNetRequestGetSessionRules(Vector<double>&& filter, CompletionHandler<void(std::expected<String, WebExtensionError>&&)>&&);
      void declarativeNetRequestUpdateSessionRules(String&& rulesToAddJSON, Vector<double>&& ruleIDsToDelete, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
@@ -105884,7 +105981,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..ea25340470616cb65d4390deb1e517fc
  
  #if ENABLE(INSPECTOR_EXTENSIONS)
      // DevTools APIs
-@@ -975,12 +1247,22 @@ private:
+@@ -975,12 +1256,22 @@ private:
  
      // Extension APIs
      void extensionIsAllowedIncognitoAccess(CompletionHandler<void(bool)>&&);
@@ -105907,7 +106004,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..ea25340470616cb65d4390deb1e517fc
      void menusCreate(const WebExtensionMenuItemParameters&, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
      void menusUpdate(const String& identifier, const WebExtensionMenuItemParameters&, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
      void menusRemove(const String& identifier, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
-@@ -1009,9 +1291,18 @@ private:
+@@ -1009,9 +1300,18 @@ private:
  
      // Permissions APIs
      void permissionsGetAll(CompletionHandler<void(Vector<String>&& permissions, Vector<String>&& origins)>&&);
@@ -105926,7 +106023,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..ea25340470616cb65d4390deb1e517fc
      void firePermissionsEventListenerIfNecessary(WebExtensionEventListenerType, const PermissionsSet&, const MatchPatternSet&);
  
      // Port APIs
-@@ -1021,7 +1312,7 @@ private:
+@@ -1021,7 +1321,7 @@ private:
      void disconnectPortsForPage(WebPageProxy&);
      void addPorts(WebExtensionContentWorldType sourceContentWorldType, WebExtensionContentWorldType targetContentWorldType, WebExtensionPortChannelIdentifier, HashCountedSet<WebPageProxyIdentifier>&&);
      void removePort(WebExtensionContentWorldType sourceContentWorldType, WebExtensionContentWorldType targetContentWorldType, WebExtensionPortChannelIdentifier, WebPageProxyIdentifier);
@@ -105935,7 +106032,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..ea25340470616cb65d4390deb1e517fc
      void removeNativePort(WebExtensionMessagePort&);
      unsigned openPortCount(WebExtensionContentWorldType, WebExtensionPortChannelIdentifier);
      bool isPortConnected(WebExtensionContentWorldType sourceContentWorldType, WebExtensionContentWorldType targetContentWorldType, WebExtensionPortChannelIdentifier);
-@@ -1030,13 +1321,27 @@ private:
+@@ -1030,13 +1330,27 @@ private:
      void firePortMessageEventsIfNeeded(WebExtensionContentWorldType, std::optional<WebPageProxyIdentifier>, WebExtensionPortChannelIdentifier, const String& messageJSON, bool userGesture);
      void fireQueuedPortMessageEventsIfNeeded(WebExtensionContentWorldType, WebExtensionPortChannelIdentifier);
      void sendQueuedNativePortMessagesIfNeeded(WebExtensionPortChannelIdentifier);
@@ -105964,7 +106061,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..ea25340470616cb65d4390deb1e517fc
      void runtimeConnect(const String& extensionID, WebExtensionPortChannelIdentifier, const String& name, const WebExtensionMessageSenderParameters&, bool userGesture, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
      void runtimeSendNativeMessage(const String& applicationID, const String& messageJSON, CompletionHandler<void(std::expected<String, WebExtensionError>&&)>&&);
      void runtimeConnectNative(const String& applicationID, WebExtensionPortChannelIdentifier, WebPageProxyIdentifier, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
-@@ -1055,6 +1360,18 @@ private:
+@@ -1055,6 +1369,18 @@ private:
      void scriptingGetRegisteredScripts(const Vector<String>&, CompletionHandler<void(std::expected<Vector<WebExtensionRegisteredScriptParameters>, WebExtensionError>&&)>&&);
      void scriptingUnregisterContentScripts(const Vector<String>&, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
      bool createInjectedContentForScripts(const Vector<WebExtensionRegisteredScriptParameters>&, WebExtensionDynamicScripts::WebExtensionRegisteredScript::FirstTimeRegistration, DynamicInjectedContentsMap&, NSString *callingAPIName, NSString **errorMessage);
@@ -105983,7 +106080,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..ea25340470616cb65d4390deb1e517fc
  
      // Sidebar APIs
  #if ENABLE(WK_WEB_EXTENSIONS_SIDEBAR)
-@@ -1088,6 +1405,9 @@ private:
+@@ -1088,6 +1414,9 @@ private:
      void tabsCreate(std::optional<WebPageProxyIdentifier>, const WebExtensionTabParameters&, CompletionHandler<void(std::expected<std::optional<WebExtensionTabParameters>, WebExtensionError>&&)>&&);
      void tabsUpdate(WebPageProxyIdentifier, std::optional<WebExtensionTabIdentifier>, const WebExtensionTabParameters&, CompletionHandler<void(std::expected<std::optional<WebExtensionTabParameters>, WebExtensionError>&&)>&&);
      void tabsDuplicate(WebExtensionTabIdentifier, const WebExtensionTabParameters&, CompletionHandler<void(std::expected<std::optional<WebExtensionTabParameters>, WebExtensionError>&&)>&&);
@@ -105993,7 +106090,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..ea25340470616cb65d4390deb1e517fc
      void tabsGet(WebExtensionTabIdentifier, CompletionHandler<void(std::expected<std::optional<WebExtensionTabParameters>, WebExtensionError>&&)>&&);
      void tabsGetCurrent(WebPageProxyIdentifier, CompletionHandler<void(std::expected<std::optional<WebExtensionTabParameters>, WebExtensionError>&&)>&&);
      void tabsQuery(WebPageProxyIdentifier, const WebExtensionTabQueryParameters&, CompletionHandler<void(std::expected<Vector<WebExtensionTabParameters>, WebExtensionError>&&)>&&);
-@@ -1103,6 +1423,9 @@ private:
+@@ -1103,6 +1432,9 @@ private:
      void tabsSetZoom(WebPageProxyIdentifier, std::optional<WebExtensionTabIdentifier>, double, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
      void tabsMove(Vector<WebExtensionTabIdentifier>, std::optional<WebExtensionWindowIdentifier>, double, CompletionHandler<void(std::expected<Vector<WebExtensionTabParameters>, WebExtensionError>&&)>&&);
      void tabsRemove(Vector<WebExtensionTabIdentifier>, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
@@ -106003,7 +106100,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..ea25340470616cb65d4390deb1e517fc
      void tabsExecuteScript(WebPageProxyIdentifier, std::optional<WebExtensionTabIdentifier>, const WebExtensionScriptInjectionParameters&, bool userGesture, CompletionHandler<void(std::expected<Vector<WebExtensionScriptInjectionResultParameters>, WebExtensionError>&&)>&&);
      void tabsInsertCSS(WebPageProxyIdentifier, std::optional<WebExtensionTabIdentifier>, const WebExtensionScriptInjectionParameters&, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
      void tabsRemoveCSS(WebPageProxyIdentifier, std::optional<WebExtensionTabIdentifier>, const WebExtensionScriptInjectionParameters&, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
-@@ -1133,8 +1456,20 @@ private:
+@@ -1133,8 +1465,20 @@ private:
      void fireWindowsEventIfNeeded(WebExtensionEventListenerType, std::optional<WebExtensionWindowParameters>);
  
      // webRequest support.
@@ -106026,7 +106123,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..ea25340470616cb65d4390deb1e517fc
  
      // IPC::MessageReceiver.
      void didReceiveMessage(IPC::Connection&, IPC::Decoder&) override;
-@@ -1145,12 +1480,31 @@ private:
+@@ -1145,12 +1489,31 @@ private:
  
      mutable Markable<WebExtensionContextIdentifier> m_privilegedIdentifier;
  
@@ -106058,7 +106155,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..ea25340470616cb65d4390deb1e517fc
  #endif
      Vector<Ref<API::Error>> m_errors;
  
-@@ -1169,6 +1523,15 @@ private:
+@@ -1169,6 +1532,15 @@ private:
  
      RefPtr<API::ContentWorld> m_contentScriptWorld;
  
@@ -106074,7 +106171,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..ea25340470616cb65d4390deb1e517fc
      PermissionsMap m_grantedPermissions;
      PermissionsMap m_deniedPermissions;
  
-@@ -1194,6 +1557,14 @@ private:
+@@ -1194,6 +1566,14 @@ private:
      EventListenerTypeCountedSet m_backgroundContentEventListeners;
      EventListenerTypeFrameMap m_eventListenerFrames;
  
@@ -106089,7 +106186,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..ea25340470616cb65d4390deb1e517fc
      bool m_shouldFireStartupEvent { false };
      InstallReason m_installReason { InstallReason::None };
      String m_previousVersion;
-@@ -1216,6 +1587,16 @@ private:
+@@ -1216,6 +1596,16 @@ private:
  #elif ENABLE(2022_GLIB_API)
      GRefPtr<WebKitWebView> m_backgroundWebView;
      GWeakPtr<WebKitWebExtensionContext> m_delegate;
@@ -106106,7 +106203,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..ea25340470616cb65d4390deb1e517fc
  #endif
      Variant<std::monostate, Ref<ProcessThrottlerActivity>, Ref<ProcessActivityGroup>> m_backgroundWebViewActivity;
      RefPtr<API::Error> m_backgroundContentLoadError;
-@@ -1237,6 +1618,7 @@ private:
+@@ -1237,6 +1627,7 @@ private:
      HashMap<Ref<WebExtensionMatchPattern>, UserScriptVector> m_injectedScriptsPerPatternMap;
      HashMap<Ref<WebExtensionMatchPattern>, UserStyleSheetVector> m_injectedStyleSheetsPerPatternMap;
  
@@ -106114,7 +106211,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..ea25340470616cb65d4390deb1e517fc
      HashMap<String, Ref<WebExtensionDynamicScripts::WebExtensionRegisteredScript>> m_registeredScriptsMap;
      RefPtr<WebExtensionRegisteredScriptsSQLiteStore> m_registeredContentScriptsStorage;
  
-@@ -1251,16 +1633,31 @@ private:
+@@ -1251,16 +1642,34 @@ private:
      WeakHashMap<WebExtensionWindow, Ref<WebExtensionSidebar>> m_sidebarWindowMap;
      WeakHashMap<WebExtensionTab, Ref<WebExtensionSidebar>> m_sidebarTabMap;
      WeakHashMap<WebPageProxy, WeakPtr<WebExtensionSidebar>> m_sidebarPageMap;
@@ -106143,11 +106240,14 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..ea25340470616cb65d4390deb1e517fc
 +    // The public identity last reported for each registered page, kept until
 +    // its removal event: the wrapper itself may already have been pruned.
 +    HashMap<WebPageProxyIdentifier, std::pair<WebExtensionTabIdentifier, WebExtensionWindowIdentifier>> m_nativeTabEventIdentifiers;
++    // The tab groups this extension may see, as last reported (JSON), for
++    // tabGroups.onRemoved after their window closed.
++    HashMap<int32_t, String> m_nativeTabGroupsHaiku;
 +#endif
      mutable WindowIdentifierVector m_windowOrderVector;
      mutable std::optional<WebExtensionWindowIdentifier> m_focusedWindowIdentifier;
  
-@@ -1276,6 +1673,30 @@ private:
+@@ -1276,6 +1685,30 @@ private:
      bool m_populatedCommands { false };
  
      String m_declarativeNetRequestContentRuleListFilePath;
@@ -106178,7 +106278,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..ea25340470616cb65d4390deb1e517fc
      DeclarativeNetRequestMatchedRuleVector m_matchedRules;
      RefPtr<WebExtensionDeclarativeNetRequestSQLiteStore> m_declarativeNetRequestDynamicRulesStore;
      RefPtr<WebExtensionDeclarativeNetRequestSQLiteStore> m_declarativeNetRequestSessionRulesStore;
-@@ -1283,6 +1704,9 @@ private:
+@@ -1283,6 +1716,9 @@ private:
      HashSet<double> m_sessionRulesIDs;
      HashSet<double> m_dynamicRulesIDs;
  
@@ -106188,7 +106288,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..ea25340470616cb65d4390deb1e517fc
      MenuItemMap m_menuItems;
      MenuItemVector m_mainMenuItems;
  
-@@ -1300,12 +1724,16 @@ private:
+@@ -1300,12 +1736,16 @@ private:
          String message;
  #if PLATFORM(COCOA)
          RetainPtr<id> argument;
@@ -106205,7 +106305,7 @@ index 5f8454dd5897a49ffba794e50fb04b7257ad2291..ea25340470616cb65d4390deb1e517fc
  
      Deque<TestMessage> m_testMessageQueue;
      Deque<TestMessage> m_testStartedQueue;
-@@ -1315,6 +1743,8 @@ private:
+@@ -1315,6 +1755,8 @@ private:
      void sendQueuedTestMessagesIfNeeded(WebExtensionEventListenerType);
  #if PLATFORM(COCOA)
      void addTestMessageToQueue(const String& message, id argument, WebExtensionEventListenerType);
@@ -108020,7 +108120,7 @@ index 0000000000000000000000000000000000000000..458c7617bf4678c2cbe4d7c0b9b22b77
 +
 +#endif // ENABLE(WK_WEB_EXTENSIONS) && !PLATFORM(COCOA)
 diff --git a/Source/WebKit/UIProcess/Extensions/WebExtensionTab.h b/Source/WebKit/UIProcess/Extensions/WebExtensionTab.h
-index 41aa2bacea7ca71e4b7414628cb684111b223dbc..1d1060b06b2ecfb2bd8f92ae464462988723eccd 100644
+index 41aa2bacea7ca71e4b7414628cb684111b223dbc..683ae7d3df925a117bf153a1361fd7351a548c73 100644
 --- a/Source/WebKit/UIProcess/Extensions/WebExtensionTab.h
 +++ b/Source/WebKit/UIProcess/Extensions/WebExtensionTab.h
 @@ -35,6 +35,9 @@
@@ -108060,7 +108160,19 @@ index 41aa2bacea7ca71e4b7414628cb684111b223dbc..1d1060b06b2ecfb2bd8f92ae46446298
  
      enum class ChangedProperties : uint16_t {
          Loading      = 1 << 1,
-@@ -194,6 +210,10 @@ public:
+@@ -84,6 +100,11 @@ public:
+         Title        = 1 << 7,
+         URL          = 1 << 8,
+         ZoomFactor   = 1 << 9,
++#if PLATFORM(HAIKU)
++        // The tab joined or left a tab group (changeInfo.groupId). Not in
++        // allChangedProperties(): it is reported only when it changes.
++        GroupIdentifier = 1 << 10,
++#endif
+     };
+ 
+     static constexpr OptionSet<ChangedProperties> allChangedProperties()
+@@ -194,6 +215,10 @@ public:
  
      bool isActive() const;
      void activate(CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
@@ -108071,7 +108183,7 @@ index 41aa2bacea7ca71e4b7414628cb684111b223dbc..1d1060b06b2ecfb2bd8f92ae46446298
  
      bool isSelected() const;
      void setSelected(bool, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&&);
-@@ -217,6 +237,10 @@ public:
+@@ -217,6 +242,10 @@ public:
  
  private:
      WeakPtr<WebExtensionContext> m_extensionContext;
@@ -116144,10 +116256,10 @@ index 0000000000000000000000000000000000000000..df528e83c3b65c609416b3b57eb367b1
 +#endif
 diff --git a/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextAPITabsHaiku.cpp b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextAPITabsHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..9c1088e2d42ec9dc51edea28099e440cdd16b35a
+index 0000000000000000000000000000000000000000..17fc258c8b8a7830539dca08d7387c2695a8a4b9
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextAPITabsHaiku.cpp
-@@ -0,0 +1,334 @@
+@@ -0,0 +1,783 @@
 +/*
 + * Copyright (C) 2023-2024 Apple Inc. All rights reserved.
 + *
@@ -116177,8 +116289,11 @@ index 0000000000000000000000000000000000000000..9c1088e2d42ec9dc51edea28099e440c
 +#include "config.h"
 +#include "WebExtensionContext.h"
 +#if ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
++#include "BrowserTabRegistryHaiku.h"
 +#include "MessageSenderInlines.h"
 +#include "WebExtensionContextProxyMessages.h"
++#include "WebExtensionController.h"
++#include "WebKitContext.h"
 +#include "WebExtensionMessageSenderParameters.h"
 +#include "WebExtensionMessageTargetParameters.h"
 +#include "WebExtensionPermission.h"
@@ -116190,9 +116305,11 @@ index 0000000000000000000000000000000000000000..9c1088e2d42ec9dc51edea28099e440c
 +#include "WebProcessProxy.h"
 +#include "WebViewPrivate.h"
 +#include <Bitmap.h>
++#include <Message.h>
 +#include <WebCore/UserContentURLPattern.h>
 +#include <wtf/Box.h>
 +#include <wtf/CallbackAggregator.h>
++#include <wtf/JSONValues.h>
 +#include <wtf/NeverDestroyed.h>
 +#include <wtf/WorkQueue.h>
 +#include <wtf/text/Base64.h>
@@ -116352,6 +116469,450 @@ index 0000000000000000000000000000000000000000..9c1088e2d42ec9dc51edea28099e440c
 +    }
 +    completion(WTF::move(result));
 +}
++// Tab groups (tabs.group, tabs.ungroup and tabGroups): the browser owns them
++// and reports them with BWebKitContext::SetBrowserWindowTabGroups; a change
++// is a TAB_GROUPS browser command, answered once the browser reported it.
++
++static constexpr std::array tabGroupColorsHaiku { "grey"_s, "blue"_s, "red"_s, "yellow"_s, "green"_s, "pink"_s, "purple"_s, "cyan"_s, "orange"_s };
++
++// Chrome's texts for an unknown group or tab.
++static String noTabGroupErrorHaiku(double identifier)
++{
++    return makeString("No group with id: "_s, String::number(identifier), "."_s);
++}
++
++static String noTabErrorHaiku(double identifier)
++{
++    return makeString("No tab with id: "_s, String::number(identifier), "."_s);
++}
++
++// A tabGroups.TabGroup, or null when the extension may not see its window
++// (a private window without private access).
++static RefPtr<JSON::Object> tabGroupObjectHaiku(const WebExtensionContext& context, const BrowserTabGroupHaiku& group)
++{
++    RefPtr window = context.getOrCreateNativeWindow(group.windowIdentifier);
++    if (!window || !window->extensionHasAccess())
++        return nullptr;
++    Ref object = JSON::Object::create();
++    object->setInteger("id"_s, group.identifier);
++    object->setBoolean("collapsed"_s, group.collapsed);
++    object->setString("color"_s, group.color);
++    object->setString("title"_s, group.title);
++    object->setDouble("windowId"_s, toWebAPI(window->identifier()));
++    // Chrome 137's groups shared with other people: there are none.
++    object->setBoolean("shared"_s, false);
++    return object;
++}
++
++static std::optional<int32_t> tabGroupIdentifierHaiku(std::optional<double> value)
++{
++    if (!value || !std::isfinite(*value) || std::trunc(*value) != *value || *value < 1 || *value > std::numeric_limits<int32_t>::max())
++        return std::nullopt;
++    return static_cast<int32_t>(*value);
++}
++
++static void moveTabsIntoWindowHaiku(Vector<Ref<WebExtensionTab>>&& tabs, size_t position, Ref<WebExtensionWindow>&& window, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&& completion)
++{
++    if (position == tabs.size()) {
++        completion({ });
++        return;
++    }
++    Ref tab = tabs[position];
++    tab->moveToIndex(-1, window.ptr(), [tabs = WTF::move(tabs), position, window, completion = WTF::move(completion)](std::expected<void, WebExtensionError>&& result) mutable {
++        if (!result) {
++            completion(makeUnexpected(result.error()));
++            return;
++        }
++        moveTabsIntoWindowHaiku(WTF::move(tabs), position + 1, WTF::move(window), WTF::move(completion));
++    });
++}
++
++// tabs.group()'s GROUP command, once the tabs are in the group's window. A
++// tab just moved there is named only when its view is in that window, which
++// can be a moment after the move was answered: try again for up to a second.
++static void sendGroupTabsCommandHaiku(Ref<WebExtensionContext> context, Vector<Ref<WebExtensionTab>>&& tabs, Ref<WebExtensionWindow>&& target,
++    std::optional<int32_t> groupIdentifier, const String& apiName, CompletionHandler<void(std::expected<String, WebExtensionError>&&)>&& completion, unsigned attempt)
++{
++    Ref nativeArguments = JSON::Object::create();
++    if (groupIdentifier)
++        nativeArguments->setInteger("groupId"_s, *groupIdentifier);
++    BMessage command(B_WEBKIT_BROWSER_COMMAND);
++    bool complete = command.AddUInt32("command", B_WEBKIT_BROWSER_TAB_GROUPS) == B_OK && command.AddString("method", "group") == B_OK
++        && command.AddString("arguments", nativeArguments->toJSONString().utf8().legacyCStringPointer()) == B_OK
++        && context->addNativeBrowserCommandWindow(command, target);
++    for (auto& tab : tabs) {
++        RefPtr window = complete && tab->isOpen() ? tab->window() : nullptr;
++        complete = window && window->nativeWindowIdentifier() == target->nativeWindowIdentifier() && context->addNativeBrowserCommandTab(command, tab);
++    }
++    if (!complete) {
++        if (attempt < 20) {
++            RunLoop::mainSingleton().dispatchAfter(50_ms, [context, tabs = WTF::move(tabs), target = WTF::move(target), groupIdentifier, apiName, completion = WTF::move(completion), attempt]() mutable {
++                sendGroupTabsCommandHaiku(context, WTF::move(tabs), WTF::move(target), groupIdentifier, apiName, WTF::move(completion), attempt + 1);
++            });
++            return;
++        }
++        completion(toWebExtensionError(apiName, nullString(), "the tab is not available in the browser"_s));
++        return;
++    }
++    context->sendNativeBrowserQueryHaiku(WTF::move(command), apiName, [apiName, completion = WTF::move(completion)](std::expected<String, WebExtensionError>&& result) mutable {
++        if (!result) {
++            completion(WTF::move(result));
++            return;
++        }
++        // The browser answers {"groupId": id}; the extension gets the number.
++        RefPtr answer = JSON::Value::parseJSON(*result);
++        RefPtr answerObject = answer ? answer->asObject() : nullptr;
++        auto identifier = answerObject ? answerObject->getInteger("groupId"_s) : std::nullopt;
++        if (!identifier) {
++            completion(toWebExtensionError(apiName, nullString(), "the browser did not name the group"_s));
++            return;
++        }
++        completion(String::number(*identifier));
++    });
++}
++
++void WebExtensionContext::tabGroupsHaiku(const String& method, const String& argumentsJSON, CompletionHandler<void(std::expected<String, WebExtensionError>&&)>&& completion)
++{
++    bool tabsMethod = method == "groupTabs"_s || method == "ungroupTabs"_s;
++    auto apiName = tabsMethod ? makeString("tabs."_s, method == "groupTabs"_s ? "group"_s : "ungroup"_s, "()"_s) : makeString("tabGroups."_s, method, "()"_s);
++    static constexpr std::array methods { "get"_s, "query"_s, "update"_s, "move"_s, "groupTabs"_s, "ungroupTabs"_s };
++    if (std::ranges::find(methods, method) == methods.end() || (!tabsMethod && !hasPermission("tabGroups"_s))) {
++        completion(toWebExtensionError(apiName, nullString(), "permission denied"_s));
++        return;
++    }
++    RefPtr controller = extensionController();
++    RefPtr arguments = JSON::Value::parseJSON(argumentsJSON);
++    RefPtr object = arguments ? arguments->asObject() : nullptr;
++    if (!controller || !object) {
++        completion(toWebExtensionError(apiName, nullString(), "the arguments are not an object"_s));
++        return;
++    }
++    auto registry = controller->nativeBrowserTabs();
++    // A group this extension may see.
++    auto findGroup = [&](std::optional<double> value) -> const BrowserTabGroupHaiku* {
++        auto identifier = tabGroupIdentifierHaiku(value);
++        auto* group = identifier ? registry->group(*identifier) : nullptr;
++        return group && tabGroupObjectHaiku(*this, *group) ? group : nullptr;
++    };
++    auto answerWithGroup = [this, protectedThis = Ref { *this }, registry](int32_t identifier, CompletionHandler<void(std::expected<String, WebExtensionError>&&)>&& completion) {
++        auto* group = registry->group(identifier);
++        RefPtr object = group ? tabGroupObjectHaiku(*this, *group) : nullptr;
++        completion(object ? object->toJSONString() : String { "null"_s });
++    };
++
++    if (method == "get"_s) {
++        auto value = object->getDouble("groupId"_s);
++        auto* group = findGroup(value);
++        if (!group) {
++            completion(makeUnexpected(noTabGroupErrorHaiku(value.value_or(0))));
++            return;
++        }
++        answerWithGroup(group->identifier, WTF::move(completion));
++        return;
++    }
++
++    if (method == "query"_s) {
++        RefPtr<WebExtensionWindow> window;
++        if (auto windowId = object->getDouble("windowId"_s)) {
++            auto identifier = toWebExtensionWindowIdentifier(*windowId);
++            window = isValid(identifier) ? getWindow(*identifier) : nullptr;
++            if (!window) {
++                completion(Ref { JSON::Array::create() }->toJSONString());
++                return;
++            }
++        }
++        auto collapsed = object->getBoolean("collapsed"_s);
++        auto color = object->getString("color"_s);
++        auto title = object->getString("title"_s);
++        Ref result = JSON::Array::create();
++        // Shared groups (Chrome 137): there are none.
++        if (object->getBoolean("shared"_s).value_or(false)) {
++            completion(result->toJSONString());
++            return;
++        }
++        for (auto& group : registry->groups()) {
++            RefPtr groupObject = tabGroupObjectHaiku(*this, group);
++            if (!groupObject || (window && window->nativeWindowIdentifier() != group.windowIdentifier)
++                || (collapsed && *collapsed != group.collapsed) || (!color.isNull() && color != group.color)
++                || (!title.isNull() && !WebCore::matchesWildcardPattern(title, group.title)))
++                continue;
++            result->pushObject(groupObject.releaseNonNull());
++        }
++        completion(result->toJSONString());
++        return;
++    }
++
++    BMessage message(B_WEBKIT_BROWSER_COMMAND);
++    auto addCommand = [&](ASCIILiteral nativeMethod, const JSON::Object& nativeArguments) {
++        return message.AddUInt32("command", B_WEBKIT_BROWSER_TAB_GROUPS) == B_OK
++            && message.AddString("method", nativeMethod.characters()) == B_OK
++            && message.AddString("arguments", nativeArguments.toJSONString().utf8().legacyCStringPointer()) == B_OK;
++    };
++
++    if (method == "update"_s || method == "move"_s) {
++        auto value = object->getDouble("groupId"_s);
++        auto* group = findGroup(value);
++        if (!group) {
++            completion(makeUnexpected(noTabGroupErrorHaiku(value.value_or(0))));
++            return;
++        }
++        int32_t identifier = group->identifier;
++        RefPtr window = getOrCreateNativeWindow(group->windowIdentifier);
++        Ref nativeArguments = JSON::Object::create();
++        nativeArguments->setInteger("groupId"_s, identifier);
++        RefPtr<WebExtensionWindow> targetWindow;
++        if (method == "update"_s) {
++            if (RefPtr title = object->getValue("title"_s)) {
++                if (title->type() != JSON::Value::Type::String) {
++                    completion(toWebExtensionError(apiName, "title"_s, "a string is expected"_s));
++                    return;
++                }
++                nativeArguments->setString("title"_s, title->asString());
++            }
++            if (RefPtr color = object->getValue("color"_s)) {
++                if (std::ranges::find(tabGroupColorsHaiku, color->asString()) == tabGroupColorsHaiku.end()) {
++                    completion(toWebExtensionError(apiName, "color"_s, "it is not a tab group color"_s));
++                    return;
++                }
++                nativeArguments->setString("color"_s, color->asString());
++            }
++            if (RefPtr collapsed = object->getValue("collapsed"_s)) {
++                if (!collapsed->asBoolean()) {
++                    completion(toWebExtensionError(apiName, "collapsed"_s, "a boolean is expected"_s));
++                    return;
++                }
++                nativeArguments->setBoolean("collapsed"_s, *collapsed->asBoolean());
++            }
++        } else {
++            auto index = object->getDouble("index"_s);
++            if (!index || !std::isfinite(*index) || std::trunc(*index) != *index || *index < -1 || *index > std::numeric_limits<int32_t>::max()) {
++                completion(toWebExtensionError(apiName, "index"_s, "it must be -1 or a tab position"_s));
++                return;
++            }
++            nativeArguments->setInteger("index"_s, static_cast<int32_t>(*index));
++            if (auto windowId = object->getDouble("windowId"_s)) {
++                auto windowIdentifier = toWebExtensionWindowIdentifier(*windowId);
++                targetWindow = isValid(windowIdentifier) ? getWindow(*windowIdentifier) : nullptr;
++                if (!targetWindow) {
++                    completion(toWebExtensionError(apiName, "windowId"_s, "window not found"_s));
++                    return;
++                }
++                if (window && targetWindow->isPrivate() != window->isPrivate()) {
++                    completion(toWebExtensionError(apiName, nullString(), "groups cannot move between private and normal windows"_s));
++                    return;
++                }
++                if (window && targetWindow->nativeWindowIdentifier() == window->nativeWindowIdentifier())
++                    targetWindow = nullptr;
++            }
++        }
++        bool complete = window && addCommand(method == "update"_s ? "update"_s : "move"_s, nativeArguments) && addNativeBrowserCommandWindow(message, *window);
++        if (complete && targetWindow) {
++            auto state = registry->window(targetWindow->nativeWindowIdentifier());
++            complete = state && state->messenger.IsValid() && message.AddMessenger("target_window", state->messenger) == B_OK;
++        }
++        if (!complete) {
++            completion(toWebExtensionError(apiName, nullString(), "the group is not available in the browser"_s));
++            return;
++        }
++        sendNativeBrowserQueryHaiku(WTF::move(message), apiName, [identifier, answerWithGroup = WTF::move(answerWithGroup), completion = WTF::move(completion)](std::expected<String, WebExtensionError>&& result) mutable {
++            if (!result) {
++                completion(WTF::move(result));
++                return;
++            }
++            answerWithGroup(identifier, WTF::move(completion));
++        });
++        return;
++    }
++
++    // tabs.group() and tabs.ungroup(): the tabs, each one an open tab this
++    // extension may see.
++    RefPtr identifiers = object->getArray("tabIds"_s);
++    if (!identifiers)
++        identifiers = JSON::Array::create();
++    Vector<Ref<WebExtensionTab>> tabs;
++    for (auto& value : *identifiers) {
++        auto number = value->asDouble();
++        auto identifier = number ? toWebExtensionTabIdentifier(*number) : std::nullopt;
++        RefPtr tab = isValid(identifier) ? getTab(*identifier) : nullptr;
++        if (!tab || !tab->isOpen() || !tab->extensionHasAccess() || !tab->window()) {
++            completion(makeUnexpected(noTabErrorHaiku(number.value_or(0))));
++            return;
++        }
++        if (!tabs.containsIf([&](auto& existing) { return existing.ptr() == tab.get(); }))
++            tabs.append(tab.releaseNonNull());
++    }
++    if (tabs.isEmpty()) {
++        completion(makeUnexpected(String { "You must specify at least one tab."_s }));
++        return;
++    }
++
++    if (method == "ungroupTabs"_s) {
++        // One command per window, each naming that window's tabs.
++        Vector<std::pair<Ref<WebExtensionWindow>, Vector<Ref<WebExtensionTab>>>> windows;
++        for (auto& tab : tabs) {
++            RefPtr page = tab->nativePage();
++            RefPtr tabWindow = tab->window();
++            if (!page || !tabWindow || registry->groupOf(page->identifier()) == -1)
++                continue;
++            Ref window = tabWindow.releaseNonNull();
++            auto index = windows.findIf([&](auto& entry) { return entry.first.ptr() == window.ptr(); });
++            if (index == notFound) {
++                windows.append({ window, { } });
++                index = windows.size() - 1;
++            }
++            windows[index].second.append(tab);
++        }
++        if (windows.isEmpty()) {
++            completion(String { "null"_s });
++            return;
++        }
++        auto error = Box<String>::create();
++        Ref aggregator = MainRunLoopCallbackAggregator::create([error, completion = WTF::move(completion)]() mutable {
++            if (!error->isNull())
++                completion(makeUnexpected(*error));
++            else
++                completion(String { "null"_s });
++        });
++        for (auto& [window, windowTabs] : windows) {
++            BMessage command(B_WEBKIT_BROWSER_COMMAND);
++            bool complete = command.AddUInt32("command", B_WEBKIT_BROWSER_TAB_GROUPS) == B_OK && command.AddString("method", "ungroup") == B_OK
++                && command.AddString("arguments", "{}") == B_OK && addNativeBrowserCommandWindow(command, window);
++            for (auto& tab : windowTabs)
++                complete = complete && addNativeBrowserCommandTab(command, tab);
++            if (!complete) {
++                *error = toErrorString(apiName, nullString(), "the tab is not available in the browser"_s);
++                continue;
++            }
++            sendNativeBrowserQueryHaiku(WTF::move(command), apiName, [error, aggregator](std::expected<String, WebExtensionError>&& result) {
++                if (!result)
++                    *error = result.error();
++            });
++        }
++        return;
++    }
++
++    // tabs.group(): into the group named, or a new group of the window named
++    // (else of the first tab's window). Tabs of other windows move there first,
++    // as in Chrome.
++    const BrowserTabGroupHaiku* group = nullptr;
++    RefPtr<WebExtensionWindow> window;
++    if (RefPtr groupId = object->getValue("groupId"_s); groupId && groupId->type() != JSON::Value::Type::Null) {
++        group = findGroup(groupId->asDouble());
++        if (!group) {
++            completion(makeUnexpected(noTabGroupErrorHaiku(groupId->asDouble().value_or(0))));
++            return;
++        }
++        window = getOrCreateNativeWindow(group->windowIdentifier);
++    } else if (auto windowId = object->getDouble("windowId"_s)) {
++        auto identifier = toWebExtensionWindowIdentifier(*windowId);
++        window = isValid(identifier) ? getWindow(*identifier) : nullptr;
++        if (!window) {
++            completion(makeUnexpected(makeString("No window with id: "_s, String::number(*windowId), "."_s)));
++            return;
++        }
++    } else
++        window = tabs.first()->window();
++    if (!window) {
++        completion(toWebExtensionError(apiName, nullString(), "window not found"_s));
++        return;
++    }
++    Vector<Ref<WebExtensionTab>> moving;
++    for (auto& tab : tabs) {
++        if (tab->isPrivate() != window->isPrivate()) {
++            completion(toWebExtensionError(apiName, nullString(), "tabs cannot be grouped across private and normal windows"_s));
++            return;
++        }
++        if (RefPtr tabWindow = tab->window(); !tabWindow || tabWindow->nativeWindowIdentifier() != window->nativeWindowIdentifier())
++            moving.append(tab);
++    }
++    std::optional<int32_t> groupIdentifier = group ? std::optional { group->identifier } : std::nullopt;
++    Ref target = window.releaseNonNull();
++    moveTabsIntoWindowHaiku(WTF::move(moving), 0, Ref { target }, [protectedThis = Ref { *this }, tabs = WTF::move(tabs), target, groupIdentifier, apiName, completion = WTF::move(completion)](std::expected<void, WebExtensionError>&& moved) mutable {
++        if (!moved) {
++            completion(makeUnexpected(moved.error()));
++            return;
++        }
++        sendGroupTabsCommandHaiku(protectedThis, WTF::move(tabs), WTF::move(target), groupIdentifier, apiName, WTF::move(completion), 0);
++    });
++}
++
++void WebExtensionContext::nativeTabGroupsDidChangeHaiku(const Vector<BrowserTabGroupHaiku>& before, const Vector<BrowserTabGroupHaiku>& after)
++{
++    if (!isLoaded())
++        return;
++    // tabs.onUpdated {groupId} for every tab that joined or left a group.
++    HashMap<WebPageProxyIdentifier, int32_t> oldGroups, newGroups;
++    for (auto& group : before) {
++        for (auto page : group.pages)
++            oldGroups.set(page, group.identifier);
++    }
++    for (auto& group : after) {
++        for (auto page : group.pages)
++            newGroups.set(page, group.identifier);
++    }
++    auto reportTab = [&](WebPageProxyIdentifier page) {
++        if (RefPtr tab = getTab(page))
++            didChangeTabProperties(*tab, { WebExtensionTab::ChangedProperties::GroupIdentifier });
++    };
++    for (auto& entry : oldGroups) {
++        auto now = newGroups.find(entry.key);
++        if (now == newGroups.end() || now->value != entry.value)
++            reportTab(entry.key);
++    }
++    for (auto& entry : newGroups) {
++        if (!oldGroups.contains(entry.key))
++            reportTab(entry.key);
++    }
++
++    if (!hasPermission("tabGroups"_s))
++        return;
++    auto fire = [&](WebExtensionEventListenerType type, const String& json) {
++        wakeUpBackgroundContentIfNecessaryToFireEvents({ type }, [this, protectedThis = Ref { *this }, type, json] {
++            // tabGroups events travel as the history events do (one JSON argument).
++            sendToProcessesForEvent(type, Messages::WebExtensionContextProxy::DispatchHistoryEventHaiku(type, json));
++        });
++    };
++    auto find = [](const Vector<BrowserTabGroupHaiku>& groups, int32_t identifier) -> const BrowserTabGroupHaiku* {
++        for (auto& group : groups) {
++            if (group.identifier == identifier)
++                return &group;
++        }
++        return nullptr;
++    };
++    // A group that moved to another window was removed from one and created
++    // in the other, as Chrome reports it.
++    for (auto& group : before) {
++        auto* now = find(after, group.identifier);
++        if (now && now->windowIdentifier == group.windowIdentifier)
++            continue;
++        auto cached = m_nativeTabGroupsHaiku.take(group.identifier);
++        if (RefPtr object = tabGroupObjectHaiku(*this, group))
++            cached = object->toJSONString();
++        if (!cached.isNull())
++            fire(WebExtensionEventListenerType::TabGroupsOnRemoved, cached);
++    }
++    for (auto& group : after) {
++        RefPtr object = tabGroupObjectHaiku(*this, group);
++        if (!object) {
++            m_nativeTabGroupsHaiku.remove(group.identifier);
++            continue;
++        }
++        auto json = object->toJSONString();
++        m_nativeTabGroupsHaiku.set(group.identifier, json);
++        auto* old = find(before, group.identifier);
++        if (!old || old->windowIdentifier != group.windowIdentifier) {
++            fire(WebExtensionEventListenerType::TabGroupsOnCreated, json);
++            continue;
++        }
++        if (old->title != group.title || old->color != group.color || old->collapsed != group.collapsed)
++            fire(WebExtensionEventListenerType::TabGroupsOnUpdated, json);
++        // Moved along the window: its first tab is elsewhere among as many
++        // tabs (opening or closing a tab before it is no move).
++        if (old->index != group.index && old->windowTabCount == group.windowTabCount && old->pages == group.pages)
++            fire(WebExtensionEventListenerType::TabGroupsOnMoved, json);
++    }
++}
++
 +// The picture is the frame the tab's view is showing: the page as composited,
 +// in device pixels (twice the CSS size on a 200% screen, as in other browsers).
 +void WebExtensionContext::tabsCaptureVisibleTab(WebPageProxyIdentifier webPageProxyIdentifier, std::optional<WebExtensionWindowIdentifier> windowIdentifier, WebExtensionTab::ImageFormat imageFormat, uint8_t imageQuality, CompletionHandler<void(std::expected<URL, WebExtensionError>&&)>&& completionHandler)
@@ -117201,10 +117762,10 @@ index 0000000000000000000000000000000000000000..99532b95636c27ebefb3884399e8eaff
 +#endif // ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
 diff --git a/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextBrowserCommandsHaiku.cpp b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextBrowserCommandsHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..b0cc5ef225f57a387f41cda3c1ed5b96d0304a0d
+index 0000000000000000000000000000000000000000..19b5e55edccdd9333240c72179afe2488cbd6617
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextBrowserCommandsHaiku.cpp
-@@ -0,0 +1,858 @@
+@@ -0,0 +1,863 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#include "config.h"
@@ -117339,6 +117900,11 @@ index 0000000000000000000000000000000000000000..b0cc5ef225f57a387f41cda3c1ed5b96
 +
 +void WebExtensionContext::sidebarActionHaiku(const String& requestedMethod, const String& argumentsJSON, CompletionHandler<void(std::expected<String, WebExtensionError>&&)>&& completion)
 +{
++    // tabs.group(), tabs.ungroup() and tabGroups share this message (WebExtensionContext.h).
++    if (requestedMethod.startsWith("tabGroups."_s)) {
++        tabGroupsHaiku(requestedMethod.substring(10), argumentsJSON, WTF::move(completion));
++        return;
++    }
 +    // Chrome's sidePanel (sidePanel.METHOD) shows its panel in the same sidebar.
 +    bool sidePanel = requestedMethod.startsWith("sidePanel."_s);
 +    auto method = sidePanel ? requestedMethod.substring(10) : requestedMethod;
@@ -120332,10 +120898,10 @@ index 0000000000000000000000000000000000000000..a5f9aae43990067335545cb019b2e4f0
 +#endif // ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
 diff --git a/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionControllerHaiku.cpp b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionControllerHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..4b70547af826839a0384209881f738b10f37feb0
+index 0000000000000000000000000000000000000000..97eb44d5c6828407ebdccb39608b34d004c06aec
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionControllerHaiku.cpp
-@@ -0,0 +1,126 @@
+@@ -0,0 +1,135 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#include "config.h"
@@ -120402,6 +120968,15 @@ index 0000000000000000000000000000000000000000..4b70547af826839a0384209881f738b1
 +        for (Ref context : controller->extensionContexts()) {
 +            if (RefPtr tab = context->getTab(page))
 +                context->didChangeTabProperties(*tab, { WebExtensionTab::ChangedProperties::Pinned });
++        }
++    });
++    m_nativeBrowserTabs->setGroupObserver([weakThis = WeakPtr { *this }](const auto& before, const auto& after) {
++        RefPtr controller = weakThis.get();
++        if (!controller)
++            return;
++        for (Ref context : controller->extensionContexts()) {
++            if (context->isLoaded() && context->extensionController() == controller.get())
++                context->nativeTabGroupsDidChangeHaiku(before, after);
 +        }
 +    });
 +    m_nativeBrowserTabs->setObserver([weakThis = WeakPtr { *this }](const auto& before, const auto& after) {
@@ -125687,10 +126262,10 @@ index 0000000000000000000000000000000000000000..71c71ec018dcc674c7773e79e8278e1d
 +#endif // ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
 diff --git a/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionTabHaiku.cpp b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionTabHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..7984a723299dc4056d9e556aa1dd3c393a7b9f43
+index 0000000000000000000000000000000000000000..765ae59eebaf8c9b26487fd1fae4d33350698cb2
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionTabHaiku.cpp
-@@ -0,0 +1,289 @@
+@@ -0,0 +1,299 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#include "config.h"
@@ -125915,6 +126490,13 @@ index 0000000000000000000000000000000000000000..7984a723299dc4056d9e556aa1dd3c39
 +    return page && isValid() && controller && controller->nativeBrowserTabs()->isDiscarded(page->identifier());
 +}
 +
++// The browser's tab group of the tab (BWebKitContext::SetBrowserWindowTabGroups), -1 for none.
++static int32_t groupIdentifierHaiku(const WebExtensionContext* context, RefPtr<WebPageProxy>&& page)
++{
++    RefPtr controller = context ? context->extensionController() : nullptr;
++    return page && controller ? controller->nativeBrowserTabs()->groupOf(page->identifier()) : -1;
++}
++
 +WebExtensionTabParameters WebExtensionTab::parameters() const
 +{
 +    WebExtensionTabParameters result;
@@ -125949,6 +126531,7 @@ index 0000000000000000000000000000000000000000..7984a723299dc4056d9e556aa1dd3c39
 +    result.pinned = isPinned();
 +    result.readerModeAvailable = isReaderModeAvailable();
 +    result.showingReaderMode = isReaderModeActive();
++    result.groupIdentifier = groupIdentifierHaiku(m_extensionContext.get(), nativePage());
 +    return result;
 +}
 +
@@ -125974,6 +126557,8 @@ index 0000000000000000000000000000000000000000..7984a723299dc4056d9e556aa1dd3c39
 +        result.readerModeAvailable = isReaderModeAvailable();
 +        result.showingReaderMode = isReaderModeActive();
 +    }
++    if (properties.contains(ChangedProperties::GroupIdentifier))
++        result.groupIdentifier = groupIdentifierHaiku(m_extensionContext.get(), nativePage());
 +    return result;
 +}
 +
@@ -130449,10 +131034,10 @@ index 0000000000000000000000000000000000000000..00672589a5ae1fd82ae159dca56f9a01
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/BrowserTabRegistryHaiku.cpp b/Source/WebKit/UIProcess/haiku/BrowserTabRegistryHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..b0f81b9a731fded3d31dd6912e985e0e5c5635d5
+index 0000000000000000000000000000000000000000..d376e8841b36a471cfed0022806c1de07a1d2ff1
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/BrowserTabRegistryHaiku.cpp
-@@ -0,0 +1,214 @@
+@@ -0,0 +1,293 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#include "config.h"
@@ -130483,6 +131068,85 @@ index 0000000000000000000000000000000000000000..b0f81b9a731fded3d31dd6912e985e0e
 +        Snapshot after { m_windows, m_focusedWindow };
 +        observer(before, after);
 +    }
++    // A closed window or tab can end a group, or move one along its window.
++    publishGroups();
++}
++
++static bool sameGroup(const BrowserTabGroupHaiku& a, const BrowserTabGroupHaiku& b)
++{
++    return a.identifier == b.identifier && a.windowIdentifier == b.windowIdentifier && a.title == b.title && a.color == b.color
++        && a.collapsed == b.collapsed && a.pages == b.pages && a.index == b.index && a.windowTabCount == b.windowTabCount;
++}
++
++void BrowserTabRegistryHaiku::publishGroups()
++{
++    Vector<TabGroup> groups;
++    for (auto& window : m_windows) {
++        for (auto& submitted : m_groups) {
++            if (submitted.windowIdentifier != window.identifier)
++                continue;
++            TabGroup group = submitted;
++            group.pages.removeAllMatching([&](auto page) { return !window.pages.contains(page); });
++            if (group.pages.isEmpty())
++                continue;
++            group.index = window.pages.find(group.pages.first());
++            group.windowTabCount = window.pages.size();
++            groups.append(WTF::move(group));
++        }
++    }
++    bool changed = groups.size() != m_publishedGroups.size();
++    for (size_t i = 0; !changed && i < groups.size(); ++i)
++        changed = !sameGroup(groups[i], m_publishedGroups[i]);
++    if (!changed)
++        return;
++    auto before = std::exchange(m_publishedGroups, WTF::move(groups));
++    if (auto observer = m_groupObserver) {
++        auto after = m_publishedGroups;
++        observer(before, after);
++    }
++}
++
++status_t BrowserTabRegistryHaiku::setWindowGroups(const BMessenger& messenger, Vector<TabGroup>&& groups)
++{
++    ASSERT(isMainThread());
++    auto window = m_windows.findIf([&](auto& candidate) { return candidate.messenger == messenger; });
++    if (window == notFound)
++        return groups.isEmpty() ? B_OK : B_BAD_VALUE;
++    auto identifier = m_windows[window].identifier;
++    HashSet<int32_t> identifiers;
++    for (auto& group : groups) {
++        if (group.identifier < 1 || !identifiers.add(group.identifier).isNewEntry)
++            return B_BAD_VALUE;
++        group.windowIdentifier = identifier;
++    }
++    m_groups.removeAllMatching([&](auto& group) { return group.windowIdentifier == identifier || identifiers.contains(group.identifier); });
++    // Windows that closed take their groups with them.
++    m_groups.removeAllMatching([&](auto& group) {
++        return !m_windows.containsIf([&](auto& candidate) { return candidate.identifier == group.windowIdentifier; });
++    });
++    m_groups.appendVector(WTF::move(groups));
++    publishGroups();
++    return B_OK;
++}
++
++const BrowserTabRegistryHaiku::TabGroup* BrowserTabRegistryHaiku::group(int32_t identifier) const
++{
++    ASSERT(isMainThread());
++    for (auto& group : m_publishedGroups) {
++        if (group.identifier == identifier)
++            return &group;
++    }
++    return nullptr;
++}
++
++int32_t BrowserTabRegistryHaiku::groupOf(WebPageProxyIdentifier page) const
++{
++    ASSERT(isMainThread());
++    for (auto& group : m_publishedGroups) {
++        if (group.pages.contains(page))
++            return group.identifier;
++    }
++    return -1;
 +}
 +
 +std::expected<uint64_t, status_t> BrowserTabRegistryHaiku::update(const BMessenger& messenger, const Vector<WebPageProxyIdentifier>& pages,
@@ -130669,10 +131333,10 @@ index 0000000000000000000000000000000000000000..b0f81b9a731fded3d31dd6912e985e0e
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/BrowserTabRegistryHaiku.h b/Source/WebKit/UIProcess/haiku/BrowserTabRegistryHaiku.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..d822f95988aae563c52ec5fa97c604f432369a88
+index 0000000000000000000000000000000000000000..7f522eebab4c3cfb6e1476eabbe8d0cecd97ce62
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/BrowserTabRegistryHaiku.h
-@@ -0,0 +1,124 @@
+@@ -0,0 +1,164 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#pragma once
@@ -130686,6 +131350,22 @@ index 0000000000000000000000000000000000000000..d822f95988aae563c52ec5fa97c604f4
 +#include <wtf/text/WTFString.h>
 +
 +namespace WebKit {
++
++// A tab group of a browser window (BrowserTabRegistryHaiku::setWindowGroups).
++struct BrowserTabGroupHaiku {
++    int32_t identifier { -1 };
++    uint64_t windowIdentifier { 0 };
++    String title;
++    // Chrome's: grey, blue, red, yellow, green, pink, purple, cyan, orange.
++    String color;
++    bool collapsed { false };
++    // Its tabs, adjacent, in the window's order.
++    Vector<WebPageProxyIdentifier> pages;
++    // Where its first tab is and how many tabs the window has (a group
++    // that moves along its window changes the first, not the second).
++    size_t index { 0 };
++    size_t windowTabCount { 0 };
++};
 +
 +// Main-thread metadata only. The native SDK validates page ownership before
 +// updating this profile's registry; WebKit retains ownership of the pages.
@@ -130771,6 +131451,24 @@ index 0000000000000000000000000000000000000000..d822f95988aae563c52ec5fa97c604f4
 +    void setActionAnchor(const BMessenger& window, const String& extension, BRect button);
 +    std::optional<BRect> actionAnchor(const BMessenger& window, const String& extension) const;
 +
++    // The browser's tab groups (extensions' tabGroups): the host owns them
++    // and submits each window's with BWebKitContext::SetBrowserWindowTabGroups.
++    using TabGroup = BrowserTabGroupHaiku;
++    // Replaces a registered window's groups (B_BAD_VALUE for an unknown
++    // window, an identifier below 1 or used twice). Tabs not in the window
++    // are left out; a group without tabs is gone. An identifier that another
++    // window had moves here.
++    status_t setWindowGroups(const BMessenger& window, Vector<TabGroup>&&);
++    // The groups as last published, windows in the registry's order.
++    const Vector<TabGroup>& groups() const { return m_publishedGroups; }
++    const TabGroup* group(int32_t identifier) const;
++    // The group of a tab, -1 for none.
++    int32_t groupOf(WebPageProxyIdentifier) const;
++    // Hears of every change to the published groups (also when a window or
++    // tab of a group closes), after the tab observer heard of that change.
++    using GroupObserver = std::function<void(const Vector<TabGroup>& before, const Vector<TabGroup>& after)>;
++    void setGroupObserver(GroupObserver observer) { m_groupObserver = WTF::move(observer); }
++
 +    Vector<Window> windows() const;
 +    std::optional<Window> window(uint64_t) const;
 +    std::optional<Tab> tab(WebPageProxyIdentifier) const;
@@ -130778,7 +131476,13 @@ index 0000000000000000000000000000000000000000..d822f95988aae563c52ec5fa97c604f4
 +
 +private:
 +    void publish(Vector<Window>&&, std::optional<uint64_t> focusedWindow);
++    // The submitted groups that still have tabs in their windows.
++    void publishGroups();
 +    Observer m_observer;
++    GroupObserver m_groupObserver;
++    // As the host submitted them, by window.
++    Vector<TabGroup> m_groups;
++    Vector<TabGroup> m_publishedGroups;
 +    PinnedObserver m_pinnedObserver;
 +    Vector<WebPageProxyIdentifier> m_pinnedPages;
 +    HashMap<WebPageProxyIdentifier, DiscardedTab> m_discardedPages;
@@ -153872,10 +154576,10 @@ index 0a8b9bc1de5b329e9fac75e62c3d7b32062941a6..97965880d6e21161b8589b1cd8cb2e1a
      NSArray *getViews(JSContextRef, NSDictionary *filter, NSString **outExceptionString);
 diff --git a/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIHistory.cpp b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIHistory.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..644d601dace85d1fbe973ca393be0b518ec91d3e
+index 0000000000000000000000000000000000000000..43949b4e89d4ec586ffe94b20879473a90785632
 --- /dev/null
 +++ b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIHistory.cpp
-@@ -0,0 +1,164 @@
+@@ -0,0 +1,181 @@
 +/* Copyright (C) 2026 Summit contributors. SPDX-License-Identifier: BSD-2-Clause */
 +#include "config.h"
 +#include "WebExtensionAPIHistory.h"
@@ -154030,6 +154734,23 @@ index 0000000000000000000000000000000000000000..644d601dace85d1fbe973ca393be0b51
 +
 +void WebExtensionContextProxy::dispatchHistoryEventHaiku(WebExtensionEventListenerType type, const String& json)
 +{
++    // tabGroups events travel in this message too (one JSON argument, the group).
++    switch (type) {
++    case WebExtensionEventListenerType::TabGroupsOnCreated:
++    case WebExtensionEventListenerType::TabGroupsOnUpdated:
++    case WebExtensionEventListenerType::TabGroupsOnRemoved:
++    case WebExtensionEventListenerType::TabGroupsOnMoved:
++        enumerateNamespaceObjects([&](auto& namespaceObject) {
++            auto& groups = namespaceObject.tabGroups();
++            auto& event = type == WebExtensionEventListenerType::TabGroupsOnCreated ? groups.onCreated()
++                : type == WebExtensionEventListenerType::TabGroupsOnUpdated ? groups.onUpdated()
++                : type == WebExtensionEventListenerType::TabGroupsOnRemoved ? groups.onRemoved() : groups.onMoved();
++            event.invokeListenersWithJSONArguments({ json });
++        });
++        return;
++    default:
++        break;
++    }
 +    enumerateNamespaceObjects([&](auto& namespaceObject) {
 +        auto& history = namespaceObject.history();
 +        auto& event = type == WebExtensionEventListenerType::HistoryOnVisited ? history.onVisited() : history.onVisitRemoved();
@@ -159026,48 +159747,100 @@ index d7868f1e4addc61cb897e875bab3a9dcf88efd76..641099c3a542b56479e6eecdb50d493c
  } // namespace WebKit
 diff --git a/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPITabGroups.cpp b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPITabGroups.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..3a4d2fe757c1cfcb86308dcea8784914c1bbe40b
+index 0000000000000000000000000000000000000000..8ab5c610745f44a8c70579bbd33bf5ce1a82cd33
 --- /dev/null
 +++ b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPITabGroups.cpp
-@@ -0,0 +1,71 @@
+@@ -0,0 +1,123 @@
 +/* Copyright (C) 2026 Summit contributors. SPDX-License-Identifier: BSD-2-Clause */
 +#include "config.h"
 +#include "WebExtensionAPITabGroups.h"
 +
 +#if ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
 +
++#include "MessageSenderInlines.h"
++#include "WebExtensionContextMessages.h"
++#include "WebExtensionContextProxy.h"
 +#include "WebExtensionEventListenerType.h"
 +#include "WebExtensionUtilities.h"
++#include "WebProcess.h"
 +#include <wtf/text/MakeString.h>
 +
 +namespace WebKit {
 +
-+// Chrome's text for a group that does not exist.
-+static String noGroupError(double groupId)
++// The browser's tab groups (WebExtensionContext::tabGroupsHaiku), asked with
++// the SidebarActionHaiku message as "tabGroups.METHOD". The answer is JSON.
++void sendTabGroupsMessageHaiku(WebExtensionContextIdentifier context, const String& method, Ref<JSON::Object>&& arguments, Ref<WebExtensionCallbackHandler>&& callback)
 +{
-+    return makeString("No group with id: "_s, String::number(groupId), "."_s);
++    WebProcess::singleton().sendWithAsyncReply(Messages::WebExtensionContext::SidebarActionHaiku(makeString("tabGroups."_s, method), arguments->toJSONString()),
++        [callback = WTF::move(callback)](std::expected<String, WebExtensionError>&& result) {
++            if (!result) {
++                callback->reportError(result.error());
++                return;
++            }
++            if (result->isEmpty() || *result == "null"_s) {
++                callback->call();
++                return;
++            }
++            auto context = callback->globalContext();
++            Protected<JSValueRef> value(context, fromJSON(context, JSON::Value::parseJSON(*result)));
++            callback->call(value.get());
++        }, context);
++}
++
++// A details object, or none (undefined or null).
++static RefPtr<JSON::Object> detailsObject(RefPtr<JSON::Value> details, ASCIILiteral name, bool required, String& exception)
++{
++    if (!details || details->type() == JSON::Value::Type::Null) {
++        if (required)
++            exception = toErrorString(nullString(), name, "an object is expected"_s);
++        return required ? nullptr : RefPtr { JSON::Object::create() };
++    }
++    RefPtr object = details->asObject();
++    if (!object)
++        exception = toErrorString(nullString(), name, "an object is expected"_s);
++    return object;
 +}
 +
 +void WebExtensionAPITabGroups::get(double groupId, Ref<WebExtensionCallbackHandler>&& callback)
 +{
-+    callback->reportError(noGroupError(groupId));
++    Ref arguments = JSON::Object::create();
++    arguments->setDouble("groupId"_s, groupId);
++    sendTabGroupsMessageHaiku(extensionContext().identifier(), "get"_s, WTF::move(arguments), WTF::move(callback));
 +}
 +
-+void WebExtensionAPITabGroups::query(RefPtr<JSON::Value>, Ref<WebExtensionCallbackHandler>&& callback)
++void WebExtensionAPITabGroups::query(RefPtr<JSON::Value> queryInfo, Ref<WebExtensionCallbackHandler>&& callback)
 +{
-+    auto context = callback->globalContext();
-+    Protected<JSObjectRef> groups(context, JSObjectMakeArray(context, 0, nullptr, nullptr));
-+    callback->call(groups.get());
++    String exception;
++    RefPtr object = detailsObject(queryInfo, "queryInfo"_s, false, exception);
++    if (!object) {
++        callback->reportError(exception);
++        return;
++    }
++    sendTabGroupsMessageHaiku(extensionContext().identifier(), "query"_s, object.releaseNonNull(), WTF::move(callback));
 +}
 +
-+void WebExtensionAPITabGroups::update(double groupId, RefPtr<JSON::Value>, Ref<WebExtensionCallbackHandler>&& callback)
++void WebExtensionAPITabGroups::update(double groupId, RefPtr<JSON::Value> updateProperties, Ref<WebExtensionCallbackHandler>&& callback)
 +{
-+    callback->reportError(noGroupError(groupId));
++    String exception;
++    RefPtr object = detailsObject(updateProperties, "updateProperties"_s, true, exception);
++    if (!object) {
++        callback->reportError(exception);
++        return;
++    }
++    object->setDouble("groupId"_s, groupId);
++    sendTabGroupsMessageHaiku(extensionContext().identifier(), "update"_s, object.releaseNonNull(), WTF::move(callback));
 +}
 +
-+void WebExtensionAPITabGroups::move(double groupId, RefPtr<JSON::Value>, Ref<WebExtensionCallbackHandler>&& callback)
++void WebExtensionAPITabGroups::move(double groupId, RefPtr<JSON::Value> moveProperties, Ref<WebExtensionCallbackHandler>&& callback)
 +{
-+    callback->reportError(noGroupError(groupId));
++    String exception;
++    RefPtr object = detailsObject(moveProperties, "moveProperties"_s, true, exception);
++    if (!object) {
++        callback->reportError(exception);
++        return;
++    }
++    object->setDouble("groupId"_s, groupId);
++    sendTabGroupsMessageHaiku(extensionContext().identifier(), "move"_s, object.releaseNonNull(), WTF::move(callback));
 +}
 +
 +WebExtensionAPIEvent& WebExtensionAPITabGroups::onCreated()
@@ -159103,10 +159876,10 @@ index 0000000000000000000000000000000000000000..3a4d2fe757c1cfcb86308dcea8784914
 +#endif // ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
 diff --git a/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPITabGroups.h b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPITabGroups.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..53f3d5d0e7d0737a767f292c7972464c183b2622
+index 0000000000000000000000000000000000000000..a2b5016ccb15cc7b15c0aa5c938ca9de7c413a61
 --- /dev/null
 +++ b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPITabGroups.h
-@@ -0,0 +1,44 @@
+@@ -0,0 +1,47 @@
 +/* Copyright (C) 2026 Summit contributors. SPDX-License-Identifier: BSD-2-Clause */
 +#pragma once
 +
@@ -159119,10 +159892,9 @@ index 0000000000000000000000000000000000000000..53f3d5d0e7d0737a767f292c7972464c
 +
 +namespace WebKit {
 +
-+// chrome.tabGroups. Summit has no tab groups, so it answers as Chrome does
-+// for a window without any: no groups, and every tab's groupId is
-+// TAB_GROUP_ID_NONE. Extensions that look for the namespace (Sidebery, Tree
-+// Style Tab) start instead of failing.
++// chrome.tabGroups (and Firefox's): the browser's tab groups, which the
++// browser owns (BWebKitContext::SetBrowserWindowTabGroups). Reads and changes
++// go to WebExtensionContext::tabGroupsHaiku; the events come from there.
 +class WebExtensionAPITabGroups : public WebExtensionAPIObject, public JSWebExtensionWrappable {
 +    WEB_EXTENSION_DECLARE_JS_WRAPPER_CLASS(WebExtensionAPITabGroups, tabGroups, tabGroups);
 +
@@ -159146,6 +159918,10 @@ index 0000000000000000000000000000000000000000..53f3d5d0e7d0737a767f292c7972464c
 +    RefPtr<WebExtensionAPIEvent> m_onMoved;
 +};
 +
++// Sends tabGroups.METHOD (and tabs.group/ungroup, as groupTabs and
++// ungroupTabs) to the UI process; the callback gets the JSON answer.
++void sendTabGroupsMessageHaiku(WebExtensionContextIdentifier, const String& method, Ref<JSON::Object>&& arguments, Ref<WebExtensionCallbackHandler>&&);
++
 +} // namespace WebKit
 +
 +SPECIALIZE_TYPE_TRAITS_WEB_EXTENSION(WebExtensionAPITabGroups, tabGroups);
@@ -159153,10 +159929,10 @@ index 0000000000000000000000000000000000000000..53f3d5d0e7d0737a767f292c7972464c
 +#endif // ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
 diff --git a/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPITabs.cpp b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPITabs.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..aa97ff0b5978a0010af3d367e5c25a801819785e
+index 0000000000000000000000000000000000000000..f0a5c20ff487167ce209e8adaed5fd2d079badf7
 --- /dev/null
 +++ b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPITabs.cpp
-@@ -0,0 +1,1004 @@
+@@ -0,0 +1,1046 @@
 +/*
 + * Copyright (C) 2023 Apple Inc. All rights reserved.
 + *
@@ -159190,6 +159966,7 @@ index 0000000000000000000000000000000000000000..aa97ff0b5978a0010af3d367e5c25a80
 +#include "WebExtensionAPINamespace.h"
 +#include "WebExtensionAPIPort.h"
 +#include "WebExtensionAPIRuntime.h"
++#include "WebExtensionAPITabGroups.h"
 +#include "WebExtensionConstants.h"
 +#include "WebExtensionContextMessages.h"
 +#include "WebExtensionContextProxy.h"
@@ -159260,12 +160037,12 @@ index 0000000000000000000000000000000000000000..aa97ff0b5978a0010af3d367e5c25a80
 +        exception = parameters.error();
 +        return;
 +    }
-+    // No tab is in a tab group (WebExtensionAPITabGroups).
-+    if (RefPtr object = info->asObject(); object && object->getDouble("groupId"_s).value_or(-1) != -1) {
-+        auto context = callback->globalContext();
-+        Protected<JSObjectRef> none(context, JSObjectMakeArray(context, 0, nullptr, nullptr));
-+        callback->call(none.get());
-+        return;
++    // The tabs of a tab group, or with -1 (TAB_GROUP_ID_NONE) those of none
++    // (WebExtensionTabQueryParser checked it).
++    std::optional<int32_t> group;
++    if (RefPtr object = info->asObject()) {
++        if (auto groupId = object->getDouble("groupId"_s))
++            group = *groupId > std::numeric_limits<int32_t>::max() ? std::numeric_limits<int32_t>::max() : static_cast<int32_t>(*groupId);
 +    }
 +    // Firefox's cookieStoreId filter (WebExtensionTabQueryParser checked it).
 +    std::optional<HashSet<String>> cookieStores;
@@ -159280,7 +160057,7 @@ index 0000000000000000000000000000000000000000..aa97ff0b5978a0010af3d367e5c25a80
 +        }
 +    }
 +    WebProcess::singleton().sendWithAsyncReply(Messages::WebExtensionContext::TabsQuery(page, WTF::move(*parameters)),
-+        [protectedThis = Ref { *this }, callback = WTF::move(callback), cookieStores = WTF::move(cookieStores)](std::expected<Vector<WebExtensionTabParameters>, WebExtensionError>&& result) {
++        [protectedThis = Ref { *this }, callback = WTF::move(callback), cookieStores = WTF::move(cookieStores), group](std::expected<Vector<WebExtensionTabParameters>, WebExtensionError>&& result) {
 +            if (!result) {
 +                callback->reportError(result.error());
 +                return;
@@ -159290,6 +160067,8 @@ index 0000000000000000000000000000000000000000..aa97ff0b5978a0010af3d367e5c25a80
 +            Vector<JSValueRef> tabs;
 +            for (auto& tab : *result) {
 +                if (cookieStores && (!tab.cookieStoreIdentifier || !cookieStores->contains(*tab.cookieStoreIdentifier)))
++                    continue;
++                if (group && tab.groupIdentifier.value_or(-1) != *group)
 +                    continue;
 +                protectedTabs.append(Protected<JSValueRef>(context, toWebAPI(context, tab)));
 +                tabs.append(protectedTabs.last().get());
@@ -159372,26 +160151,65 @@ index 0000000000000000000000000000000000000000..aa97ff0b5978a0010af3d367e5c25a80
 +        && !context->supportsManifestVersion(3) && !context->isUnsupportedAPI(propertyPath(), name);
 +}
 +
-+// Summit has no tab groups (WebExtensionAPITabGroups): no tab can be put in
-+// one, and every tab is already out of one.
++// The browser's tab groups (WebExtensionAPITabGroups). options: tabIds (a
++// tab identifier or an array of them), groupId (an existing group) or
++// createProperties.windowId (the new group's window). The answer is the group.
 +void WebExtensionAPITabs::group(RefPtr<JSON::Value> options, Ref<WebExtensionCallbackHandler>&& callback, String& exception)
 +{
-+    if (!options || !options->asObject()) {
++    RefPtr object = options ? options->asObject() : nullptr;
++    if (!object) {
 +        exception = toErrorString(nullString(), "options"_s, "an object is expected"_s);
 +        return;
 +    }
-+    callback->reportError("Summit has no tab groups."_s);
++    RefPtr tabIds = object->getValue("tabIds"_s);
++    auto identifiers = parseWebExtensionTabIdentifiers(tabIds.get());
++    if (!identifiers) {
++        exception = identifiers.error();
++        return;
++    }
++    Ref arguments = JSON::Object::create();
++    Ref list = JSON::Array::create();
++    for (auto identifier : *identifiers)
++        list->pushDouble(toWebAPI(identifier));
++    arguments->setArray("tabIds"_s, WTF::move(list));
++    if (RefPtr groupId = object->getValue("groupId"_s); groupId && groupId->type() != JSON::Value::Type::Null) {
++        if (!groupId->asDouble()) {
++            exception = toErrorString(nullString(), "groupId"_s, "a number is expected"_s);
++            return;
++        }
++        arguments->setDouble("groupId"_s, *groupId->asDouble());
++    }
++    if (RefPtr createProperties = object->getValue("createProperties"_s); createProperties && createProperties->type() != JSON::Value::Type::Null) {
++        RefPtr properties = createProperties->asObject();
++        if (!properties) {
++            exception = toErrorString(nullString(), "createProperties"_s, "an object is expected"_s);
++            return;
++        }
++        if (arguments->getValue("groupId"_s)) {
++            exception = toErrorString(nullString(), "createProperties"_s, "it cannot be used with groupId"_s);
++            return;
++        }
++        if (auto windowId = properties->getDouble("windowId"_s))
++            arguments->setDouble("windowId"_s, *windowId);
++    }
++    sendTabGroupsMessageHaiku(extensionContext().identifier(), "groupTabs"_s, WTF::move(arguments), WTF::move(callback));
 +}
 +
 +void WebExtensionAPITabs::ungroup(JSContextRef context, JSValueRef tabIds, Ref<WebExtensionCallbackHandler>&& callback, String& exception)
 +{
 +    // A tab identifier or an array of them, as tabs.remove takes.
 +    RefPtr values = fromJSValue(context, tabIds);
-+    if (auto identifiers = parseWebExtensionTabIdentifiers(values.get()); !identifiers) {
++    auto identifiers = parseWebExtensionTabIdentifiers(values.get());
++    if (!identifiers) {
 +        exception = identifiers.error();
 +        return;
 +    }
-+    callback->call();
++    Ref arguments = JSON::Object::create();
++    Ref list = JSON::Array::create();
++    for (auto identifier : *identifiers)
++        list->pushDouble(toWebAPI(identifier));
++    arguments->setArray("tabIds"_s, WTF::move(list));
++    sendTabGroupsMessageHaiku(extensionContext().identifier(), "ungroupTabs"_s, WTF::move(arguments), WTF::move(callback));
 +}
 +
 +void WebExtensionAPITabs::getSelected(WebPageProxyIdentifier page, double windowID, Ref<WebExtensionCallbackHandler>&& callback, String& exception)
@@ -164057,10 +164875,10 @@ index 0000000000000000000000000000000000000000..3fccfb9706567fbfb0a94c08e5ee419c
 +#endif // ENABLE(WK_WEB_EXTENSIONS)
 diff --git a/Source/WebKit/WebProcess/Extensions/Bindings/JSWebExtensionTabParameters.cpp b/Source/WebKit/WebProcess/Extensions/Bindings/JSWebExtensionTabParameters.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..84e09641694090e956413700d2c7a8b6296d2d20
+index 0000000000000000000000000000000000000000..2d2822a510d5a02856122c3848a313dada4d2058
 --- /dev/null
 +++ b/Source/WebKit/WebProcess/Extensions/Bindings/JSWebExtensionTabParameters.cpp
-@@ -0,0 +1,106 @@
+@@ -0,0 +1,109 @@
 +/*
 + * Copyright (C) 2023 Apple Inc. All rights reserved.
 + *
@@ -164152,8 +164970,11 @@ index 0000000000000000000000000000000000000000..84e09641694090e956413700d2c7a8b6
 +#if PLATFORM(HAIKU)
 +    if (parameters.cookieStoreIdentifier && !parameters.cookieStoreIdentifier->isEmpty())
 +        set("cookieStoreId"_s, stringValue(*parameters.cookieStoreIdentifier));
-+    // Chrome's tabGroups.TAB_GROUP_ID_NONE: Summit has no tab groups.
-+    if (parameters.identifier)
++    // The tab's group, or tabGroups.TAB_GROUP_ID_NONE (-1) in a whole tab;
++    // in a changeInfo only when it changed.
++    if (parameters.groupIdentifier)
++        set("groupId"_s, JSValueMakeNumber(context, *parameters.groupIdentifier));
++    else if (parameters.identifier)
 +        set("groupId"_s, JSValueMakeNumber(context, -1));
 +#endif
 +    if (parameters.readerModeAvailable)
@@ -166222,17 +167043,16 @@ index 866d70a2cdbbe9cfbd525c7be21d6c21db2dfa1a..090b11c6a852e779e830487dcaed3958
  
 diff --git a/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPITabGroups.idl b/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPITabGroups.idl
 new file mode 100644
-index 0000000000000000000000000000000000000000..4339312630921e576f504561f8cb1c37917ad0c6
+index 0000000000000000000000000000000000000000..6185d30e9c57da8afa735c3c70137a44828f1286
 --- /dev/null
 +++ b/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPITabGroups.idl
-@@ -0,0 +1,28 @@
+@@ -0,0 +1,27 @@
 +/*
 + * Copyright (C) 2026 Summit contributors.
 + * SPDX-License-Identifier: BSD-2-Clause
 + */
 +
-+// chrome.tabGroups (and Firefox's), for a browser without tab groups: there
-+// are none to get, query, update or move, and the events never fire.
++// chrome.tabGroups (and Firefox's): the browser's tab groups.
 +// https://developer.chrome.com/docs/extensions/reference/api/tabGroups
 +[
 +    Conditional=WK_WEB_EXTENSIONS,

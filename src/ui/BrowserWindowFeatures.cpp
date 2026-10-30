@@ -29,6 +29,7 @@
 #include <File.h>
 #include <FilePanel.h>
 #include <LayoutBuilder.h>
+#include <MenuItem.h>
 #include <NodeInfo.h>
 #include <Path.h>
 #include <Roster.h>
@@ -39,6 +40,7 @@
 #include <WebKit/WebKitInfo.h>
 #include <nlohmann/json.hpp>
 #include <algorithm>
+#include <atomic>
 #include <cstring>
 #include <ctime>
 #include <functional>
@@ -248,7 +250,7 @@ void BrowserWindow::PageScriptMessage(BMessage& message)
     if (token) BWebKitView::ReplyToScriptMessage(token, reply.c_str());
 }
 
-void BrowserWindow::MoveTabTo(int64 id, size_t index)
+void BrowserWindow::MoveTabTo(int64 id, size_t index, std::optional<int64> group)
 {
     auto moving = std::find_if(fTabs.begin(), fTabs.end(), [&](const Tab& candidate) { return candidate.id == id; });
     if (moving == fTabs.end()) return;
@@ -258,6 +260,8 @@ void BrowserWindow::MoveTabTo(int64 id, size_t index)
     size_t pinned = 0;
     while (pinned < fTabs.size() && fTabs[pinned].pinned) ++pinned;
     index = moved.pinned ? std::min(index, pinned) : std::clamp(index, pinned, fTabs.size());
+    // Dragged into or out of a group along the strip.
+    if (group && !moved.pinned && (!*group || FindTabGroup(*group))) moved.group = *group;
     fTabs.insert(fTabs.begin() + index, std::move(moved));
     SyncBrowserWindow();
     RefreshChrome();
@@ -269,6 +273,8 @@ void BrowserWindow::SetTabPinned(int64 id, bool pinned)
     auto* tab = FindTabByID(id);
     if (!tab || tab->pinned == pinned) return;
     tab->pinned = pinned;
+    // A pinned tab is in no group.
+    if (pinned) tab->group = 0;
 #if SUMMIT_MODERN_WEBKIT
     // Extensions see it as Tab.pinned.
     fWebKitContext->SetBrowserTabPinned(tab->view, pinned);
@@ -346,6 +352,13 @@ void BrowserWindow::DetachTab(int64 id, const BMessenger& target, int32 index, u
     BMessage adopt(kAdoptTab);
     adopt.AddPointer("tab", moved);
     adopt.AddInt32("index", index);
+    if (fMovingTabGroup && std::find(fMovingTabGroup->second.begin(), fMovingTabGroup->second.end(), id) != fMovingTabGroup->second.end()) {
+        const auto& group = fMovingTabGroup->first;
+        adopt.AddInt64("group", group.id);
+        adopt.AddString("group_title", group.title.c_str());
+        adopt.AddString("group_color", group.color.c_str());
+        adopt.AddBool("group_collapsed", group.collapsed);
+    }
     if (command) adopt.AddUInt64("command", command);
     if (target.SendMessage(&adopt) != B_OK) {
         // The other window went away: keep the tab here.
@@ -384,6 +397,15 @@ void BrowserWindow::AdoptTab(BMessage& message)
         return;
     }
     tab->id = fNextID++;
+    // A tab of a group moved here with its group (tabGroups.move) stays in
+    // it; any other leaves its group behind.
+    tab->group = 0;
+    if (const int64 group = message.GetInt64("group", 0)) {
+        if (!FindTabGroup(group))
+            fTabGroups.push_back({group, message.GetString("group_title", ""), message.GetString("group_color", "grey"),
+                message.GetBool("group_collapsed", false)});
+        tab->group = group;
+    }
     fCards->AddView(tab->view);
     tab->messenger = BMessenger(tab->view);
     tab->view->SetNotificationTarget(BMessenger(this));
@@ -1483,6 +1505,406 @@ void BrowserWindow::ReportBookmarkChanges()
     }
     for (const auto& [event, id, info] : events)
         fWebKitContext->NotifyBookmarksChanged(event, std::to_string(id).c_str(), info.dump().c_str());
+}
+
+
+// Tab groups (#106). Chrome's nine colours, in the order it gives them to new groups.
+namespace {
+struct GroupColor {
+    const char* name;
+    const char* label;
+    rgb_color rgb;
+};
+constexpr GroupColor kGroupColors[] = {
+    {"grey", "Grey", {95, 99, 104, 255}}, {"blue", "Blue", {26, 115, 232, 255}}, {"red", "Red", {217, 48, 37, 255}},
+    {"yellow", "Yellow", {249, 171, 0, 255}}, {"green", "Green", {30, 142, 62, 255}}, {"pink", "Pink", {208, 24, 132, 255}},
+    {"purple", "Purple", {161, 66, 244, 255}}, {"cyan", "Cyan", {0, 123, 131, 255}}, {"orange", "Orange", {250, 144, 62, 255}},
+};
+bool IsGroupColor(const std::string& name)
+{
+    return std::any_of(std::begin(kGroupColors), std::end(kGroupColors), [&](const GroupColor& color) { return name == color.name; });
+}
+// Unique among the windows: extensions name groups by it.
+std::atomic<int64> sNextTabGroup { 1 };
+
+// Asks for a group's title; the answer goes to the browser window as a
+// kTabGroupAction "title".
+class TabGroupNameWindow final : public BWindow {
+public:
+    TabGroupNameWindow(BWindow* owner, int64 group, const std::string& title)
+        : BWindow(BRect(0, 0, 320, 80), "Name Group", B_MODAL_WINDOW_LOOK, B_MODAL_SUBSET_WINDOW_FEEL,
+            B_NOT_RESIZABLE | B_NOT_ZOOMABLE | B_ASYNCHRONOUS_CONTROLS | B_AUTO_UPDATE_SIZE_LIMITS | B_CLOSE_ON_ESCAPE),
+          fOwner(owner), fGroup(group)
+    {
+        AddToSubset(owner);
+        fTitle = new BTextControl("title", "Name:", title.c_str(), nullptr);
+        auto* done = new BButton("done", "Done", new BMessage('done'));
+        BLayoutBuilder::Group<>(this, B_VERTICAL, B_USE_DEFAULT_SPACING)
+            .SetInsets(B_USE_WINDOW_SPACING)
+            .Add(fTitle)
+            .AddGroup(B_HORIZONTAL)
+                .AddGlue()
+                .Add(new BButton("cancel", "Cancel", new BMessage(B_QUIT_REQUESTED)))
+                .Add(done)
+            .End();
+        SetDefaultButton(done);
+        fTitle->MakeFocus();
+        fTitle->TextView()->SelectAll();
+        CenterIn(owner->Frame());
+    }
+    void MessageReceived(BMessage* message) override
+    {
+        if (message->what != 'done') { BWindow::MessageReceived(message); return; }
+        BMessage title(kTabGroupAction);
+        title.AddInt64("group", fGroup);
+        title.AddString("action", "title");
+        title.AddString("title", fTitle->Text());
+        BMessenger(fOwner).SendMessage(&title);
+        Quit();
+    }
+private:
+    BWindow* fOwner;
+    int64 fGroup;
+    BTextControl* fTitle;
+};
+}
+
+rgb_color BrowserWindow::TabGroupColor(const std::string& name)
+{
+    for (const auto& color : kGroupColors) if (name == color.name) return color.rgb;
+    return kGroupColors[0].rgb;
+}
+
+int64 BrowserWindow::NewTabGroupID() { return sNextTabGroup++; }
+
+BrowserWindow::TabGroup* BrowserWindow::FindTabGroup(int64 id)
+{
+    if (!id) return nullptr;
+    for (auto& group : fTabGroups) if (group.id == id) return &group;
+    return nullptr;
+}
+
+bool BrowserWindow::NormalizeTabGroups()
+{
+    // A session being restored assigns the groups once its tabs are there.
+    if (fRestoringSession) return false;
+    bool changed = false;
+    auto clear = [&](Tab& tab) { if (tab.group) { tab.group = 0; changed = true; } };
+    for (auto& tab : fTabs) if (tab.pinned || (tab.group && !FindTabGroup(tab.group))) clear(tab);
+    // A tab put between two tabs of a group (a link opened there) joins it.
+    for (size_t i = 1; i + 1 < fTabs.size(); ++i)
+        if (!fTabs[i].group && !fTabs[i].pinned && fTabs[i - 1].group && fTabs[i - 1].group == fTabs[i + 1].group) {
+            fTabs[i].group = fTabs[i - 1].group;
+            changed = true;
+        }
+    // A group's tabs stay together: its longest run keeps it.
+    for (const auto& group : fTabGroups) {
+        size_t bestStart = 0, bestLength = 0;
+        for (size_t i = 0; i < fTabs.size();) {
+            if (fTabs[i].group != group.id) { ++i; continue; }
+            size_t end = i;
+            while (end < fTabs.size() && fTabs[end].group == group.id) ++end;
+            if (end - i > bestLength) bestStart = i, bestLength = end - i;
+            i = end;
+        }
+        for (size_t i = 0; i < fTabs.size(); ++i)
+            if (fTabs[i].group == group.id && (i < bestStart || i >= bestStart + bestLength)) clear(fTabs[i]);
+    }
+    const size_t before = fTabGroups.size();
+    std::erase_if(fTabGroups, [&](const TabGroup& group) {
+        return std::none_of(fTabs.begin(), fTabs.end(), [&](const Tab& tab) { return tab.group == group.id; })
+            && std::none_of(fRestoredTabGroups.begin(), fRestoredTabGroups.end(), [&](const auto& pending) { return pending.second == group.id; });
+    });
+    return changed || before != fTabGroups.size();
+}
+
+void BrowserWindow::ReportTabGroups()
+{
+    std::vector<BWebKitTabGroup> groups;
+    for (const auto& group : fTabGroups) {
+        BWebKitTabGroup reported;
+        reported.identifier = int32(group.id);
+        reported.title = group.title;
+        reported.color = group.color;
+        reported.collapsed = group.collapsed;
+        for (const auto& tab : fTabs) if (tab.group == group.id) reported.views.push_back(tab.view);
+        groups.push_back(std::move(reported));
+    }
+    // In the order of their tabs.
+    std::sort(groups.begin(), groups.end(), [&](const BWebKitTabGroup& a, const BWebKitTabGroup& b) {
+        auto first = [&](const BWebKitTabGroup& group) {
+            for (size_t i = 0; i < fTabs.size(); ++i) if (!group.views.empty() && fTabs[i].view == group.views.front()) return i;
+            return fTabs.size();
+        };
+        return first(a) < first(b);
+    });
+    fWebKitContext->SetBrowserWindowTabGroups(BMessenger(this), groups);
+}
+
+void BrowserWindow::TabGroupsChanged()
+{
+    NormalizeTabGroups();
+    SyncBrowserWindow();
+    RefreshChrome();
+    SaveSession();
+}
+
+int64 BrowserWindow::GroupTabs(const std::vector<int64>& tabs, int64 group, const std::string& title, const std::string& color)
+{
+    std::vector<int64> ids;
+    for (const int64 id : tabs) if (FindTabByID(id) && std::find(ids.begin(), ids.end(), id) == ids.end()) ids.push_back(id);
+    if (ids.empty() || (group && !FindTabGroup(group))) return 0;
+    // Pinned tabs are unpinned first, as in Chrome.
+    for (const int64 id : ids) {
+        if (auto* tab = FindTabByID(id); tab && tab->pinned) {
+            tab->pinned = false;
+            fWebKitContext->SetBrowserTabPinned(tab->view, false);
+        }
+    }
+    size_t pinned = 0;
+    while (pinned < fTabs.size() && fTabs[pinned].pinned) ++pinned;
+    auto indexOf = [&](int64 id) {
+        for (size_t i = 0; i < fTabs.size(); ++i) if (fTabs[i].id == id) return i;
+        return fTabs.size();
+    };
+    size_t position;
+    if (!group) {
+        // A new group, in the first colour no group of the window has.
+        group = NewTabGroupID();
+        std::string chosen = IsGroupColor(color) ? color : std::string();
+        for (size_t i = 0; chosen.empty() && i < std::size(kGroupColors); ++i)
+            if (std::none_of(fTabGroups.begin(), fTabGroups.end(), [&](const TabGroup& existing) { return existing.color == kGroupColors[i].name; }))
+                chosen = kGroupColors[i].name;
+        if (chosen.empty()) chosen = kGroupColors[fTabGroups.size() % std::size(kGroupColors)].name;
+        fTabGroups.push_back({group, title, chosen, false});
+        // Where the first of the tabs is.
+        position = indexOf(ids.front());
+    } else {
+        // After the group's last tab.
+        position = 0;
+        for (size_t i = 0; i < fTabs.size(); ++i) if (fTabs[i].group == group) position = i + 1;
+    }
+    // The tabs go there one after another, in the order given.
+    std::vector<Tab> moving;
+    for (const int64 id : ids) {
+        const size_t index = indexOf(id);
+        if (index < position) --position;
+        moving.push_back(std::move(fTabs[index]));
+        fTabs.erase(fTabs.begin() + index);
+    }
+    position = std::clamp(position, std::min(pinned, fTabs.size()), fTabs.size());
+    // A new group goes after a group it was in the middle of.
+    if (moving.front().group != group)
+        while (position > pinned && position < fTabs.size() && fTabs[position - 1].group && fTabs[position - 1].group == fTabs[position].group)
+            ++position;
+    for (auto& tab : moving) {
+        tab.group = group;
+        fTabs.insert(fTabs.begin() + position++, std::move(tab));
+    }
+    TabGroupsChanged();
+    return group;
+}
+
+void BrowserWindow::UngroupTabs(const std::vector<int64>& tabs)
+{
+    bool changed = false;
+    for (const int64 id : tabs) {
+        auto* tab = FindTabByID(id);
+        if (!tab || !tab->group) continue;
+        // To the place after its group, so that the group stays together.
+        const int64 group = tab->group;
+        size_t last = 0;
+        for (size_t i = 0; i < fTabs.size(); ++i) if (fTabs[i].group == group) last = i;
+        auto found = std::find_if(fTabs.begin(), fTabs.end(), [&](const Tab& candidate) { return candidate.id == id; });
+        Tab moved = std::move(*found);
+        fTabs.erase(found);
+        moved.group = 0;
+        // The group's last tab is now just before last (or this tab was it).
+        fTabs.insert(fTabs.begin() + std::min(last, fTabs.size()), std::move(moved));
+        changed = true;
+    }
+    if (changed) TabGroupsChanged();
+}
+
+void BrowserWindow::UngroupTabGroup(int64 group)
+{
+    for (auto& tab : fTabs) if (tab.group == group) tab.group = 0;
+    TabGroupsChanged();
+}
+
+void BrowserWindow::CloseTabGroup(int64 group)
+{
+    std::vector<int64> closing;
+    for (const auto& tab : fTabs) if (tab.group == group) closing.push_back(tab.id);
+    for (const int64 id : closing) CloseTab(id);
+}
+
+void BrowserWindow::NewTabInGroup(int64 group)
+{
+    if (!FindTabGroup(group)) return;
+    int32 position = 0;
+    for (size_t i = 0; i < fTabs.size(); ++i) if (fTabs[i].group == group) position = int32(i) + 1;
+    const int64 id = fNextID;
+    CreateTab(NewTabAddress(), true, nullptr, position);
+    if (auto* tab = FindTabByID(id)) tab->group = group;
+    if (auto* found = FindTabGroup(group)) found->collapsed = false;
+    TabGroupsChanged();
+    fAddress->MakeFocus();
+    fAddress->TextView()->SelectAll();
+}
+
+void BrowserWindow::MoveTabGroup(int64 group, int32 index)
+{
+    std::vector<Tab> moving;
+    for (size_t i = 0; i < fTabs.size();) {
+        if (fTabs[i].group == group) { moving.push_back(std::move(fTabs[i])); fTabs.erase(fTabs.begin() + i); }
+        else ++i;
+    }
+    if (moving.empty()) return;
+    size_t pinned = 0;
+    while (pinned < fTabs.size() && fTabs[pinned].pinned) ++pinned;
+    size_t position = index < 0 ? fTabs.size() : std::clamp<size_t>(size_t(index), pinned, fTabs.size());
+    // Not into the middle of another group: after it.
+    while (position > pinned && position < fTabs.size() && fTabs[position - 1].group && fTabs[position - 1].group == fTabs[position].group)
+        ++position;
+    for (auto& tab : moving) fTabs.insert(fTabs.begin() + position++, std::move(tab));
+    TabGroupsChanged();
+}
+
+void BrowserWindow::ShowTabGroupMenu(const BMessage& message)
+{
+    const int64 id = message.GetInt64("group", 0);
+    BPoint where;
+    const auto* group = FindTabGroup(id);
+    if (!group || message.FindPoint("where", &where) != B_OK || IsClosing()) return;
+    auto action = [id](const char* label, const char* name) {
+        auto* invocation = new BMessage(kTabGroupAction);
+        invocation->AddInt64("group", id);
+        invocation->AddString("action", name);
+        return new BMenuItem(label, invocation);
+    };
+    auto* menu = new CancellableMenu("tab-group", fMenusCancelled);
+    menu->AddItem(action("Name Group…", "rename"));
+    auto* colors = new BMenu("Color");
+    for (const auto& color : kGroupColors) {
+        auto* invocation = new BMessage(kTabGroupAction);
+        invocation->AddInt64("group", id);
+        invocation->AddString("action", "color");
+        invocation->AddString("color", color.name);
+        auto* item = NewColorMenuItem(color.label, invocation, color.rgb);
+        item->SetMarked(group->color == color.name);
+        colors->AddItem(item);
+    }
+    colors->SetTargetForItems(this);
+    menu->AddItem(colors);
+    menu->AddItem(action(group->collapsed ? "Expand Group" : "Collapse Group", "collapse"));
+    menu->AddSeparatorItem();
+    menu->AddItem(action("New Tab in Group", "newtab"));
+    menu->AddSeparatorItem();
+    menu->AddItem(action("Ungroup", "ungroup"));
+    menu->AddItem(action("Close Group", "close"));
+    menu->SetTargetForItems(this);
+    menu->SetAsyncAutoDestruct(true);
+    menu->Go(where, true, false, true);
+}
+
+void BrowserWindow::TabGroupMessage(const BMessage& message)
+{
+    if (IsClosing()) return;
+    if (message.what == kAddTabToGroup) {
+        GroupTabs({message.GetInt64("id", 0)}, message.GetInt64("group", 0));
+        return;
+    }
+    if (message.what == kRemoveTabFromGroup) {
+        UngroupTabs({message.GetInt64("id", 0)});
+        return;
+    }
+    const int64 id = message.GetInt64("group", 0);
+    auto* group = FindTabGroup(id);
+    if (!group) return;
+    if (message.what == kToggleTabGroup) {
+        group->collapsed = !group->collapsed;
+        TabGroupsChanged();
+        return;
+    }
+    const std::string action = message.GetString("action", "");
+    if (action == "rename") (new TabGroupNameWindow(this, id, group->title))->Show();
+    else if (action == "title") { group->title = message.GetString("title", ""); TabGroupsChanged(); }
+    else if (action == "color") {
+        const std::string color = message.GetString("color", "");
+        if (IsGroupColor(color)) { group->color = color; TabGroupsChanged(); }
+    } else if (action == "collapse") { group->collapsed = !group->collapsed; TabGroupsChanged(); }
+    else if (action == "newtab") NewTabInGroup(id);
+    else if (action == "ungroup") UngroupTabGroup(id);
+    else if (action == "close") CloseTabGroup(id);
+}
+
+void BrowserWindow::TabGroupsCommand(const BMessage& message, uint64 identifier)
+{
+    auto fail = [&](status_t status, const char* error) { RespondToCommand(identifier, status, { }, error); };
+    if (fClosingWindow) { fail(B_BUSY, "The window is closing."); return; }
+    const std::string method = message.GetString("method", "");
+    const auto arguments = json::parse(message.GetString("arguments", "{}"), nullptr, false);
+    if (!arguments.is_object()) { fail(B_BAD_VALUE, "The arguments are not an object."); return; }
+    std::vector<int64> tabs;
+    BMessenger view;
+    for (int32 i = 0; message.FindMessenger("view", i, &view) == B_OK; ++i) {
+        auto* tab = FindTab(view);
+        if (!tab) { fail(B_ENTRY_NOT_FOUND, "The tab is not open in this window."); return; }
+        tabs.push_back(tab->id);
+    }
+    const int64 groupId = arguments.value("groupId", int64(0));
+    auto* group = FindTabGroup(groupId);
+    if (groupId && !group) {
+        const std::string error = "No group with id: " + std::to_string(groupId) + ".";
+        fail(B_ENTRY_NOT_FOUND, error.c_str());
+        return;
+    }
+    auto answer = [&](const json& value) { fWebKitContext->RespondToBrowserCommandWithData(identifier, B_OK, value.dump().c_str()); };
+    if (method == "group") {
+        if (tabs.empty()) { fail(B_BAD_VALUE, "You must specify at least one tab."); return; }
+        const int64 result = GroupTabs(tabs, groupId);
+        if (!result) { fail(B_ERROR, "The tabs could not be grouped."); return; }
+        answer({{"groupId", result}});
+        return;
+    }
+    if (method == "ungroup") {
+        UngroupTabs(tabs);
+        answer(nullptr);
+        return;
+    }
+    if (!group) { fail(B_BAD_VALUE, "A group is needed."); return; }
+    if (method == "update") {
+        if (auto title = arguments.find("title"); title != arguments.end() && title->is_string()) group->title = title->get<std::string>();
+        if (auto color = arguments.find("color"); color != arguments.end() && color->is_string() && IsGroupColor(color->get<std::string>()))
+            group->color = color->get<std::string>();
+        if (auto collapsed = arguments.find("collapsed"); collapsed != arguments.end() && collapsed->is_boolean()) group->collapsed = collapsed->get<bool>();
+        TabGroupsChanged();
+        answer(nullptr);
+        return;
+    }
+    if (method == "move") {
+        const int32 index = arguments.value("index", int32(-1));
+        BMessenger target;
+        if (message.FindMessenger("target_window", &target) == B_OK && target.IsValid() && target != BMessenger(this)) {
+            // To another window: its tabs go there one by one, in order; the
+            // last one's adoption answers.
+            // The group leaves this window at once (extensions see it removed
+            // here and created there, as in Chrome), its tabs one by one.
+            std::vector<int64> moving;
+            for (auto& tab : fTabs) if (tab.group == groupId) { moving.push_back(tab.id); tab.group = 0; }
+            fMovingTabGroup = std::pair { *group, moving };
+            std::erase_if(fTabGroups, [&](const TabGroup& candidate) { return candidate.id == groupId; });
+            for (size_t i = 0; i < moving.size(); ++i)
+                DetachTab(moving[i], target, index < 0 ? -1 : index + int32(i), i + 1 == moving.size() ? identifier : 0);
+            fMovingTabGroup.reset();
+            return;
+        }
+        MoveTabGroup(groupId, index);
+        answer(nullptr);
+        return;
+    }
+    fail(B_NOT_SUPPORTED, "Unknown tab group request.");
 }
 
 }

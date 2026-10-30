@@ -189,6 +189,22 @@ Profile Profile::Load(const std::filesystem::path& path, std::string& error)
                         if (window.containers.size() >= window.tabs.size()) break;
                         window.containers.push_back(container.is_number_unsigned() ? container.get<uint32_t>() : 0);
                     }
+                if (auto groups = item.find("groups"); groups != item.end() && groups->is_array() && groups->size() <= 512)
+                    for (const auto& group : *groups) {
+                        WindowSession::TabGroup entry;
+                        if (group.is_object()) {
+                            if (auto title = group.find("title"); title != group.end() && title->is_string()) entry.title = title->get<std::string>().substr(0, 1024);
+                            if (auto color = group.find("color"); color != group.end() && color->is_string()) entry.color = color->get<std::string>().substr(0, 16);
+                            if (auto collapsed = group.find("collapsed"); collapsed != group.end() && collapsed->is_boolean()) entry.collapsed = collapsed->get<bool>();
+                        }
+                        window.groups.push_back(std::move(entry));
+                    }
+                if (auto tabGroups = item.find("tabGroups"); tabGroups != item.end() && tabGroups->is_array())
+                    for (const auto& group : *tabGroups) {
+                        if (window.tabGroups.size() >= window.tabs.size()) break;
+                        const uint32_t index = group.is_number_unsigned() ? group.get<uint32_t>() : 0;
+                        window.tabGroups.push_back(index <= window.groups.size() ? index : 0);
+                    }
                 if (auto frame = item.find("frame"); frame != item.end()) {
                     if (!frame->is_array() || frame->size() != 4) throw std::runtime_error("Invalid window frame");
                     for (size_t i = 0; i < 4; ++i) window.frame[i] = (*frame)[i].get<float>();
@@ -506,6 +522,13 @@ bool Profile::Save(const std::filesystem::path& path, std::string& error, int64_
             if (window.pinned) item["pinned"] = window.pinned;
             if (std::any_of(window.containers.begin(), window.containers.end(), [](uint32_t container) { return container != 0; }))
                 item["containers"] = window.containers;
+            if (!window.groups.empty()) {
+                json groups = json::array();
+                for (const auto& group : window.groups)
+                    groups.push_back({{"title", group.title}, {"color", group.color}, {"collapsed", group.collapsed}});
+                item["groups"] = std::move(groups);
+                item["tabGroups"] = window.tabGroups;
+            }
             if (window.HasFrame()) item["frame"] = {window.frame[0], window.frame[1], window.frame[2], window.frame[3]};
             sessions.push_back(std::move(item));
         }

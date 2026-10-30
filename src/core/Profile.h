@@ -24,6 +24,17 @@ struct WindowSession {
     // Each tab's container (Firefox's contextualIdentities), 0 for none;
     // parallel to tabs, possibly shorter (older sessions).
     std::vector<uint32_t> containers;
+    // Tab groups: each tab's group is an index into groups plus one, 0 for
+    // none; parallel to tabs, possibly shorter (older sessions).
+    struct TabGroup {
+        std::string title;
+        std::string color; // grey, blue, red, yellow, green, pink, purple, cyan, orange
+        bool collapsed = false;
+        bool operator==(const TabGroup& other) const { return title == other.title && color == other.color && collapsed == other.collapsed; }
+        bool operator!=(const TabGroup& other) const { return !(*this == other); }
+    };
+    std::vector<TabGroup> groups;
+    std::vector<uint32_t> tabGroups;
     bool HasFrame() const { return frame[2] > frame[0] && frame[3] > frame[1]; }
 };
 // A server certificate the user chose to trust for a host although it failed

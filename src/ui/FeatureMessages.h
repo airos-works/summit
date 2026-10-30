@@ -22,6 +22,14 @@ constexpr uint32 kPinTab = 'tpin';
 constexpr uint32 kMoveTab = 'tmov';
 constexpr uint32 kTabDragOut = 'tdro';
 constexpr uint32 kCloseTabsToRight = 'ctrt';
+// Tab groups. kAddTabToGroup: tab "id" into "group" (0: a new group).
+// kRemoveTabFromGroup: tab "id" out of its group. kTabGroupAction: "group"
+// and "action": "title" (with "title"), "color" (with "color", a Chrome
+// colour name), "rename" (asks for the title), "collapse", "newtab",
+// "ungroup", "close".
+constexpr uint32 kAddTabToGroup = 'tgad';
+constexpr uint32 kRemoveTabFromGroup = 'tgrm';
+constexpr uint32 kTabGroupAction = 'tgac';
 // Moving a live tab to another window. kTransferTab, to the application:
 // "window" (the messenger of the window that has it), "id", and "where" (a
 // screen point: the window under it gets the tab, else a new window there)

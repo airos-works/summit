@@ -1143,13 +1143,26 @@ BrowserWindow::BrowserWindow(std::shared_ptr<SharedProfile> profile, std::string
         else if (!options.session.tabs.empty()) {
 #if SUMMIT_MODERN_WEBKIT
             fRestoringSession = true;
+            // Its tab groups, with new identifiers. Extension pages are made
+            // later (kCreateTabOnApp) at their place; they join theirs then.
+            std::vector<int64> groupIDs;
+            for (const auto& group : options.session.groups) {
+                groupIDs.push_back(NewTabGroupID());
+                fTabGroups.push_back({groupIDs.back(), group.title, group.color.empty() ? "grey" : group.color, group.collapsed});
+            }
             for (size_t i = 0; i < options.session.tabs.size(); ++i) {
                 const auto& page = options.session.tabs[i];
                 fRestoringTitle = page.title;
                 // A tab of a container that is gone opens without one.
                 uint32 container = i < options.session.containers.size() ? options.session.containers[i] : 0;
                 if (container && !summit::Containers::Shared().Context(container)) container = 0;
+                const size_t before = fTabs.size();
+                const uint32 group = i < options.session.tabGroups.size() ? options.session.tabGroups[i] : 0;
                 CreateTab(page.url, false, nullptr, -1, 0, 0, 0, container);
+                if (group && group <= groupIDs.size()) {
+                    if (fTabs.size() > before) fTabs.back().group = groupIDs[group - 1];
+                    else fRestoredTabGroups.push_back({int32(before), groupIDs[group - 1]});
+                }
             }
             fRestoringSession = false;
             fRestoringTitle.clear();
@@ -1157,6 +1170,8 @@ BrowserWindow::BrowserWindow(std::shared_ptr<SharedProfile> profile, std::string
                 fTabs[i].pinned = true;
                 fWebKitContext->SetBrowserTabPinned(fTabs[i].view, true);
             }
+            // A group whose tabs are all extension pages still to come stays until they are.
+            if (fRestoredTabGroups.empty()) NormalizeTabGroups();
 #else
             for (const auto& page : options.session.tabs) CreateTab(page.url, false);
 #endif
@@ -1485,6 +1500,19 @@ void BrowserWindow::CreateTab(const std::string& input, bool select, BWebView* a
     created.pageZoom = fShared->SiteZoom(created.zoomKey, fPrivate);
     if (!IsDefaultZoom(created.pageZoom)) webView->SetZoomFactor(created.pageZoom);
     const int64 createdID = created.id;
+    // A tab opened next to a tab of a group from a page of that group (a
+    // link) joins the group, as in Chrome.
+    if (const auto* opener = ActiveTab(); index >= 0 && opener && opener->group && position > 0
+        && position <= fTabs.size() && fTabs[position - 1].group == opener->group && !fRestoringSession)
+        created.group = opener->group;
+    // A restored extension page, made at its place after the others: its group.
+    if (extensionIdentifier && index >= 0)
+        for (auto entry = fRestoredTabGroups.begin(); entry != fRestoredTabGroups.end(); ++entry)
+            if (entry->first == index) {
+                if (FindTabGroup(entry->second)) created.group = entry->second;
+                fRestoredTabGroups.erase(entry);
+                break;
+            }
     fTabs.insert(fTabs.begin() + position, std::move(created));
     if (select || fSelected == 0) SelectTab(createdID);
     else if (auto* active = ActiveTab()) {
@@ -2443,12 +2471,15 @@ bool BrowserWindow::AddressKey(char key)
 #if SUMMIT_MODERN_WEBKIT
 void BrowserWindow::SyncBrowserWindow()
 {
+    NormalizeTabGroups();
     std::vector<BWebKitView*> views;
     views.reserve(fTabs.size());
     for (auto& tab : fTabs)
         views.push_back(tab.view);
     auto* active = ActiveTab();
     fWebKitContext->SetBrowserWindowTabs(BMessenger(this), views, active ? active->view : nullptr, IsActive());
+    // Its tab groups, after its tabs (extensions' tabGroups).
+    if (!views.empty()) ReportTabGroups();
     // Extensions' Window.left/top/width/height.
     if (!views.empty()) fWebKitContext->SetBrowserWindowFrame(BMessenger(this), Frame());
     // Registration is dispatched to the application looper. A queued window
@@ -2636,6 +2667,7 @@ void BrowserWindow::BrowserCommand(const BMessage& message)
         case B_WEBKIT_BROWSER_BROWSING_DATA: BrowsingDataCommand(message, identifier); return;
         case B_WEBKIT_BROWSER_SESSIONS: SessionsCommand(message, identifier); return;
         case B_WEBKIT_BROWSER_SIDEBAR: SidebarCommand(message, identifier); return;
+        case B_WEBKIT_BROWSER_TAB_GROUPS: TabGroupsCommand(message, identifier); return;
         case B_WEBKIT_BROWSER_DEVTOOLS:
             // An extension's devtools page: its tab's tools answer.
             if (BMessage forward(message); tab && tab->devTools.IsValid() && tab->devTools.SendMessage(&forward) == B_OK) return;
@@ -3137,12 +3169,21 @@ void BrowserWindow::RefreshChrome()
     }
 #endif
     std::vector<TabLabel> labels;
+    std::vector<TabGroupLabel> groupLabels;
+#if SUMMIT_MODERN_WEBKIT
+    if (NormalizeTabGroups()) {
+        SyncBrowserWindow();
+        SaveSession();
+    }
+    for (const auto& group : fTabGroups) groupLabels.push_back({group.id, group.title, TabGroupColor(group.color), group.collapsed});
+#endif
     for (const auto& tab : fTabs) {
         labels.push_back({tab.id, tab.ShownTitle(), tab.loading, tab.errorView ? nullptr : fFavicons->Icon(tab.url),
             tab.capturingCamera || tab.capturingMicrophone || tab.capturingScreen});
         labels.back().url = tab.url;
 #if SUMMIT_MODERN_WEBKIT
         labels.back().pinned = tab.pinned;
+        labels.back().group = tab.group;
         labels.back().audio = tab.audioMuted ? TabAudio::Muted : tab.playingAudio ? TabAudio::Playing : TabAudio::None;
         if (tab.container) {
             if (auto container = summit::Containers::Shared().Find(tab.container)) {
@@ -3153,7 +3194,7 @@ void BrowserWindow::RefreshChrome()
         }
 #endif
     }
-    fTabStrip->SetTabs(std::move(labels), fSelected);
+    fTabStrip->SetTabs(std::move(labels), fSelected, std::move(groupLabels));
     NoteWindowIcon();
     if (auto* tab = ActiveTab()) {
         fBookmarkButton->SetEnabled(Bookmarkable(tab->url));
@@ -3306,6 +3347,23 @@ void BrowserWindow::ShowTabMenu(const BMessage& message)
     auto* pin = item(clicked && clicked->pinned ? "Unpin Tab" : "Pin Tab", kPinTab);
     pin->Message()->AddBool("pinned", !(clicked && clicked->pinned));
     menu->AddItem(pin);
+    // Tab groups: a new one, or one of the window's; pinned tabs are in none.
+    auto* groups = new BMenu("Add Tab to Group");
+    groups->AddItem(item("New Group", kAddTabToGroup));
+    bool separated = false;
+    for (const auto& group : fTabGroups) {
+        if (clicked && clicked->group == group.id) continue;
+        if (!separated) { groups->AddSeparatorItem(); separated = true; }
+        auto* add = new BMessage(kAddTabToGroup);
+        add->AddInt64("id", id);
+        add->AddInt64("group", group.id);
+        groups->AddItem(NewColorMenuItem(group.title.empty() ? "Unnamed group" : group.title.c_str(), add, TabGroupColor(group.color)));
+    }
+    groups->SetTargetForItems(this);
+    auto* addToGroup = new BMenuItem(groups);
+    addToGroup->SetEnabled(clicked && !clicked->pinned);
+    menu->AddItem(addToGroup);
+    if (clicked && clicked->group) menu->AddItem(item("Remove from Group", kRemoveTabFromGroup));
     menu->AddItem(item(clicked && clicked->audioMuted ? "Unmute Tab" : "Mute Tab", kToggleTabMute));
     // Frees what the page holds; it loads again when selected (#116).
     auto* unload = item("Unload Tab", kDiscardTab);
@@ -3343,7 +3401,25 @@ void BrowserWindow::ShowTabListMenu(const BMessage& message)
     // Every tab with its icon and title, the current one marked, as Firefox's
     // List All Tabs: the way to a tab scrolled out of the strip.
     auto* menu = new CancellableMenu("tab-list", fMenusCancelled);
+#if SUMMIT_MODERN_WEBKIT
+    int64 previousGroup = 0;
+#endif
     for (const auto& tab : fTabs) {
+#if SUMMIT_MODERN_WEBKIT
+        // A group's tabs under its name (and colour), indented; a collapsed
+        // group's too, so that they can be reached.
+        if (tab.group != previousGroup) {
+            if (previousGroup || tab.group) menu->AddSeparatorItem();
+            if (const auto* group = FindTabGroup(tab.group)) {
+                std::string name = group->title.empty() ? "Unnamed group" : group->title;
+                if (group->collapsed) name += "  (collapsed)";
+                auto* toggle = new BMessage(kToggleTabGroup);
+                toggle->AddInt64("group", group->id);
+                menu->AddItem(NewColorMenuItem(name.c_str(), toggle, TabGroupColor(group->color)));
+            }
+            previousGroup = tab.group;
+        }
+#endif
         std::string label = tab.ShownTitle();
         if (label.empty()) label = tab.url.empty() ? "New Tab" : tab.url;
         // BMenu does not truncate; cut long titles at a character boundary.
@@ -3358,6 +3434,9 @@ void BrowserWindow::ShowTabListMenu(const BMessage& message)
 #endif
         auto* select = new BMessage(kSelectTab);
         select->AddInt64("id", tab.id);
+#if SUMMIT_MODERN_WEBKIT
+        if (tab.group) label = "    " + label;
+#endif
         auto* item = NewPageMenuItem(label.c_str(), select, tab.errorView ? nullptr : fFavicons->Icon(tab.url));
         item->SetMarked(tab.id == fSelected);
         menu->AddItem(item);
@@ -4206,8 +4285,15 @@ void BrowserWindow::SaveSession()
 #if SUMMIT_MODERN_WEBKIT
         if (fTabs[i].pinned && session.pinned == i) ++session.pinned;
         session.containers.push_back(fTabs[i].container);
+        uint32 group = 0;
+        for (size_t g = 0; g < fTabGroups.size(); ++g) if (fTabGroups[g].id == fTabs[i].group) group = uint32(g) + 1;
+        session.tabGroups.push_back(group);
 #endif
     }
+#if SUMMIT_MODERN_WEBKIT
+    for (const auto& group : fTabGroups) session.groups.push_back({group.title, group.color, group.collapsed});
+    if (session.groups.empty()) session.tabGroups.clear();
+#endif
 #if SUMMIT_MODERN_WEBKIT
     const BRect frame = fFullScreenTab ? fBeforeFullScreen : Frame();
 #else
@@ -4635,7 +4721,12 @@ void BrowserWindow::MessageReceived(BMessage* message)
             if (const auto error = DiscardTab(message->GetInt64("id", 0)); !error.empty()) fStatus->SetText(error.c_str());
             break;
         case kPinTab: SetTabPinned(message->GetInt64("id", fSelected), message->GetBool("pinned", true)); break;
-        case kMoveTab: MoveTabTo(message->GetInt64("id", 0), static_cast<size_t>(std::max<int32>(0, message->GetInt32("index", 0)))); break;
+        case kMoveTab:
+            MoveTabTo(message->GetInt64("id", 0), static_cast<size_t>(std::max<int32>(0, message->GetInt32("index", 0))),
+                message->HasInt64("group") ? std::optional<int64>(message->GetInt64("group", 0)) : std::nullopt);
+            break;
+        case kTabGroupMenu: ShowTabGroupMenu(*message); break;
+        case kToggleTabGroup: case kAddTabToGroup: case kRemoveTabFromGroup: case kTabGroupAction: TabGroupMessage(*message); break;
         case kTabDragOut: {
             BPoint where;
             if (message->FindPoint("where", &where) == B_OK) TabDraggedOut(message->GetInt64("id", 0), where);
