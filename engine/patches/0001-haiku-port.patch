@@ -496,6 +496,158 @@ index 91c28b033f0e6ef3cdb03e24d6ff4626b960f988..5c7f32ee3c1c5a191c6b61b1c46dc27f
              ASSERT_UNUSED(status, U_SUCCESS(status));
          }
          if (U_SUCCESS(status)) {
+diff --git a/Source/JavaScriptCore/runtime/JSModuleLoader.cpp b/Source/JavaScriptCore/runtime/JSModuleLoader.cpp
+index d28d762587ad6b3fd4985365905b87cb781917e4..1517de71a7f7f659b3166e26f290f8980ba280e4 100644
+--- a/Source/JavaScriptCore/runtime/JSModuleLoader.cpp
++++ b/Source/JavaScriptCore/runtime/JSModuleLoader.cpp
+@@ -50,6 +50,12 @@
+ #include "TopExceptionScope.h"
+ #include "VMTrapsInlines.h"
+ #include <wtf/text/MakeString.h>
++#if OS(HAIKU)
++#include <cstdlib>
++#include <cstring>
++#include <wtf/MainThread.h>
++#include <wtf/NeverDestroyed.h>
++#endif
+ 
+ namespace JSC {
+ 
+@@ -1105,6 +1111,105 @@ JSValue JSModuleLoader::ModuleReferrer::toJSValue() const
+     return std::get<JSGlobalObject*>(*this);
+ }
+ 
++#if OS(HAIKU)
++// A module's record (what it imports and exports) comes from parsing its
++// whole source, again for every document that imports it. Extensions' content
++// scripts import the same large module into every frame of every page:
++// 1Password's 449 KB inline/injected.js cost each frame 5 ms of parsing on a
++// laptop before any of it ran. The analysis depends only on the source text,
++// so the main thread keeps the last few large modules' results and builds the
++// record from them when the same text comes again. Workers (their own VMs
++// and identifier tables) always parse. SUMMIT_MODULE_ANALYSIS_CACHE=0 turns
++// it off.
++namespace {
++
++struct ModuleAnalysisHaiku {
++    VM* vm { nullptr };
++    String source;
++    unsigned hash { 0 };
++    CodeFeatures features { NoFeatures };
++    bool hasTLA { false };
++    Vector<AbstractModuleRecord::ModuleRequest> requestedModules;
++    Vector<AbstractModuleRecord::ImportEntry> importEntries;
++    Vector<AbstractModuleRecord::ExportEntry> exportEntries;
++    Vector<AbstractModuleRecord::StarExportEntry> starExportEntries;
++};
++
++constexpr unsigned moduleAnalysisMinimumLengthHaiku = 64 * 1024;
++constexpr size_t moduleAnalysisEntriesHaiku = 6;
++
++bool moduleAnalysisCacheEnabledHaiku(VM&, const SourceCode& sourceCode)
++{
++    static const bool enabled = [] {
++        const char* value = getenv("SUMMIT_MODULE_ANALYSIS_CACHE");
++        return !value || strcmp(value, "0");
++    }();
++    return enabled && isMainThread() && sourceCode.length() >= moduleAnalysisMinimumLengthHaiku
++        && sourceCode.provider()->sourceType() == SourceProviderSourceType::Module;
++}
++
++Vector<ModuleAnalysisHaiku>& moduleAnalysesHaiku()
++{
++    ASSERT(isMainThread());
++    static NeverDestroyed<Vector<ModuleAnalysisHaiku>> analyses;
++    return analyses.get();
++}
++
++JSModuleRecord* cachedModuleRecordHaiku(JSGlobalObject* globalObject, const Identifier& moduleKey, const SourceCode& sourceCode)
++{
++    VM& vm = globalObject->vm();
++    auto view = sourceCode.view();
++    unsigned hash = sourceCode.provider()->hash();
++    auto& analyses = moduleAnalysesHaiku();
++    for (size_t i = 0; i < analyses.size(); ++i) {
++        auto& analysis = analyses[i];
++        if (analysis.vm != &vm || analysis.hash != hash || analysis.source.length() != view.length() || StringView(analysis.source) != view)
++            continue;
++        auto* record = JSModuleRecord::create(globalObject, vm, globalObject->moduleRecordStructure(), moduleKey, sourceCode, analysis.features);
++        for (auto& request : analysis.requestedModules)
++            record->appendRequestedModule(request.m_specifier, RefPtr { request.m_attributes }, request.m_phase);
++        for (auto& entry : analysis.importEntries)
++            record->addImportEntry(entry);
++        for (auto& entry : analysis.exportEntries)
++            record->addExportEntry(entry);
++        for (auto& entry : analysis.starExportEntries)
++            record->addStarExportEntry(Identifier::fromUid(vm, entry.first.get()), entry.second);
++        record->setHasTLA(analysis.hasTLA);
++        // Most recently used first.
++        if (i) {
++            auto used = WTF::move(analyses[i]);
++            analyses.removeAt(i);
++            analyses.insert(0, WTF::move(used));
++        }
++        return record;
++    }
++    return nullptr;
++}
++
++void rememberModuleRecordHaiku(VM& vm, const SourceCode& sourceCode, CodeFeatures features, JSModuleRecord& record)
++{
++    ModuleAnalysisHaiku analysis;
++    analysis.vm = &vm;
++    analysis.source = sourceCode.view().toString();
++    analysis.hash = sourceCode.provider()->hash();
++    analysis.features = features;
++    analysis.hasTLA = record.hasTLA();
++    analysis.requestedModules = record.requestedModules();
++    for (auto& entry : record.importEntries())
++        analysis.importEntries.append(entry.value);
++    for (auto& entry : record.exportEntries())
++        analysis.exportEntries.append(entry.value);
++    for (auto& entry : record.starExportEntries())
++        analysis.starExportEntries.append(entry);
++    auto& analyses = moduleAnalysesHaiku();
++    if (analyses.size() >= moduleAnalysisEntriesHaiku)
++        analyses.removeLast();
++    analyses.insert(0, WTF::move(analysis));
++}
++
++} // namespace
++#endif
++
+ JSPromise* JSModuleLoader::makeModule(JSGlobalObject* globalObject, const Identifier& moduleKey, JSValue moduleData)
+ {
+     VM& vm = globalObject->vm();
+@@ -1152,6 +1257,17 @@ JSPromise* JSModuleLoader::makeModule(JSGlobalObject* globalObject, const Identi
+         break;
+     }
+ 
++#if OS(HAIKU)
++    bool cacheAnalysis = moduleAnalysisCacheEnabledHaiku(vm, sourceCode);
++    if (cacheAnalysis) {
++        if (auto* moduleRecord = cachedModuleRecordHaiku(globalObject, moduleKey, sourceCode)) {
++            RETURN_IF_EXCEPTION(scope, nullptr);
++            promise->fulfill(vm, moduleRecord);
++            RELEASE_AND_RETURN(scope, promise);
++        }
++    }
++#endif
++
+     ParserError error;
+     std::unique_ptr<ModuleProgramNode> moduleProgramNode = parseRootNode<ModuleProgramNode>(
+         vm, sourceCode, ImplementationVisibility::Public, JSParserBuiltinMode::NotBuiltin,
+@@ -1175,6 +1291,10 @@ JSPromise* JSModuleLoader::makeModule(JSGlobalObject* globalObject, const Identi
+         promise->reject(vm, errorInstance);
+         RELEASE_AND_RETURN(scope, promise);
+     }
++#if OS(HAIKU)
++    if (cacheAnalysis)
++        rememberModuleRecordHaiku(vm, sourceCode, moduleProgramNode->features(), *result.value());
++#endif
+ 
+     promise->fulfill(vm, result.value());
+     RELEASE_AND_RETURN(scope, promise);
 diff --git a/Source/JavaScriptCore/runtime/MachineContext.h b/Source/JavaScriptCore/runtime/MachineContext.h
 index 2ac8b24f00e624acb564a0e11fd2437b5f02a99c..94578295634cfe05af20ee169477506c530a3c81 100644
 --- a/Source/JavaScriptCore/runtime/MachineContext.h
@@ -677,6 +829,182 @@ index d2312fb4d921f9ae0532ed47be74f4b1c58fb183..8c4b728f19b6453121d70df873b8830e
  
          Ref handle = adoptRef(*new BufferMemoryHandle(slowMemory, initialBytes, reservedMaximumBytes, initial, maximum, MemorySharingMode::Shared, MemoryMode::BoundsChecking));
          auto span = handle->mutableSpan();
+diff --git a/Source/JavaScriptCore/wasm/WasmStreamingCompiler.cpp b/Source/JavaScriptCore/wasm/WasmStreamingCompiler.cpp
+index 8db75df81e3b7bd105ab26e86cc3a7ba253d1d64..86888fa9c8854e6145265832b9e15f50f7fb38f3 100644
+--- a/Source/JavaScriptCore/wasm/WasmStreamingCompiler.cpp
++++ b/Source/JavaScriptCore/wasm/WasmStreamingCompiler.cpp
+@@ -37,6 +37,10 @@
+ #include "WasmStreamingPlan.h"
+ #include "WasmWorklist.h"
+ #include "WebAssemblyCompileOptions.h"
++#if OS(HAIKU)
++#include <cstdlib>
++#include <cstring>
++#endif
+ 
+ #if ENABLE(WEBASSEMBLY)
+ 
+@@ -77,7 +81,7 @@ Ref<StreamingCompiler> StreamingCompiler::create(VM& vm, CompilerMode compilerMo
+     return adoptRef(*new StreamingCompiler(vm, compilerMode, globalObject, promise, importObject, WTF::move(compileOptions), source, WTF::move(wasmSourceURL), requestIdentifier));
+ }
+ 
+-bool StreamingCompiler::didReceiveFunctionData(FunctionCodeIndex functionIndex, const Wasm::FunctionData&)
++bool StreamingCompiler::didReceiveFunctionData(FunctionCodeIndex functionIndex, [[maybe_unused]] const Wasm::FunctionData& functionData)
+ {
+     if (!m_plan) {
+         m_plan = adoptRef(*new IPIntPlan(m_vm, m_info.copyRef(), m_compilerMode, Plan::dontFinalize()));
+@@ -91,6 +95,32 @@ bool StreamingCompiler::didReceiveFunctionData(FunctionCodeIndex functionIndex,
+     }
+ 
+     if (m_threadedCompilationStarted) {
++#if OS(HAIKU)
++        // A plan per function wakes a worklist thread per function: on Haiku
++        // each wake-up is a system call, and the threads then contend with
++        // this thread for the worklist's lock. 1Password's 16 MB module (tens
++        // of thousands of functions, arriving at once from the extension's
++        // files) held its background page's main thread for 1.2 s on a
++        // 32-thread machine, 150 ms on a laptop. Consecutive functions now go
++        // to the worklist together. SUMMIT_WASM_STREAMING_BATCH=0 restores a
++        // plan per function.
++        static const bool batching = [] {
++            const char* value = getenv("SUMMIT_WASM_STREAMING_BATCH");
++            return !value || strcmp(value, "0");
++        }();
++        if (batching) {
++            static constexpr unsigned maximumFunctions = 256;
++            static constexpr size_t maximumBytes = 256 * KB;
++            if (!m_pendingFunctionCountHaiku)
++                m_pendingFunctionStartHaiku = static_cast<uint32_t>(functionIndex.rawIndex());
++            ASSERT(functionIndex.rawIndex() == m_pendingFunctionStartHaiku + m_pendingFunctionCountHaiku);
++            ++m_pendingFunctionCountHaiku;
++            m_pendingFunctionBytesHaiku += functionData.data.size();
++            if (m_pendingFunctionCountHaiku >= maximumFunctions || m_pendingFunctionBytesHaiku >= maximumBytes)
++                enqueuePendingFunctionsHaiku();
++            return true;
++        }
++#endif
+         Ref<Plan> plan = adoptRef(*new StreamingPlan(m_vm, m_info.copyRef(), *m_plan, functionIndex, createSharedTask<Plan::CallbackType>([compiler = Ref { *this }](Plan& plan) {
+             compiler->didCompileFunction(static_cast<StreamingPlan&>(plan));
+         })));
+@@ -100,13 +130,28 @@ bool StreamingCompiler::didReceiveFunctionData(FunctionCodeIndex functionIndex,
+     return true;
+ }
+ 
++#if OS(HAIKU)
++void StreamingCompiler::enqueuePendingFunctionsHaiku()
++{
++    if (!m_pendingFunctionCountHaiku)
++        return;
++    Ref<Plan> plan = adoptRef(*new StreamingPlan(m_vm, m_info.copyRef(), *m_plan, FunctionCodeIndex(m_pendingFunctionStartHaiku), createSharedTask<Plan::CallbackType>([compiler = Ref { *this }](Plan& plan) {
++        compiler->didCompileFunction(static_cast<StreamingPlan&>(plan));
++    }), m_pendingFunctionCountHaiku));
++    m_pendingFunctionCountHaiku = 0;
++    m_pendingFunctionBytesHaiku = 0;
++    ensureWorklist().enqueue(WTF::move(plan));
++}
++#endif
++
+ void StreamingCompiler::didCompileFunction(StreamingPlan& plan)
+ {
+     Locker locker { m_lock };
+     ASSERT(m_threadedCompilationStarted);
+     if (plan.failed())
+         m_plan->didFailInStreaming(plan.errorMessage());
+-    m_remainingCompilationRequests--;
++    ASSERT(m_remainingCompilationRequests >= plan.functionCount());
++    m_remainingCompilationRequests -= plan.functionCount();
+     if (!m_remainingCompilationRequests)
+         m_plan->didCompileFunctionInStreaming();
+     completeIfNecessary();
+@@ -114,6 +159,10 @@ void StreamingCompiler::didCompileFunction(StreamingPlan& plan)
+ 
+ void StreamingCompiler::didFinishParsing()
+ {
++#if OS(HAIKU)
++    // The last functions of the module, held back for a batch.
++    enqueuePendingFunctionsHaiku();
++#endif
+     if (!m_plan) {
+         // Reaching here means that this WebAssembly module has no functions.
+         ASSERT(!m_info->functions.size());
+diff --git a/Source/JavaScriptCore/wasm/WasmStreamingCompiler.h b/Source/JavaScriptCore/wasm/WasmStreamingCompiler.h
+index 636b86f12d89008653d07bb49e5dc9c515c3d18c..bbde5f761ac61ee4accfaeb9b276ca0a0c44c62c 100644
+--- a/Source/JavaScriptCore/wasm/WasmStreamingCompiler.h
++++ b/Source/JavaScriptCore/wasm/WasmStreamingCompiler.h
+@@ -75,6 +75,9 @@ private:
+ 
+     bool didReceiveFunctionData(FunctionCodeIndex, const FunctionData&) final;
+     void didFinishParsing() final;
++#if OS(HAIKU)
++    void enqueuePendingFunctionsHaiku();
++#endif
+     void didComplete() WTF_REQUIRES_LOCK(m_lock);
+     void completeIfNecessary() WTF_REQUIRES_LOCK(m_lock);
+     RefPtr<DeferredWorkTimer::Ticket> takeTicketIfActive();
+@@ -87,6 +90,12 @@ private:
+     std::optional<WebAssemblyCompileOptions> m_compileOptions WTF_GUARDED_BY_LOCK(m_lock);
+     Lock m_lock;
+     unsigned m_remainingCompilationRequests { 0 };
++#if OS(HAIKU)
++    // Functions received but not yet given to the worklist (see didReceiveFunctionData).
++    uint32_t m_pendingFunctionStartHaiku { 0 };
++    unsigned m_pendingFunctionCountHaiku { 0 };
++    size_t m_pendingFunctionBytesHaiku { 0 };
++#endif
+     ThreadSafeWeakPtr<DeferredWorkTimer::Ticket> m_ticket;
+     const Ref<Wasm::ModuleInformation> m_info;
+     StreamingParser m_parser;
+diff --git a/Source/JavaScriptCore/wasm/WasmStreamingPlan.cpp b/Source/JavaScriptCore/wasm/WasmStreamingPlan.cpp
+index 90a64e8baba2df5fd338eefbaeeea80b391e133c..19d98fc2f656fef83fd1591d66cb70bc01f407c3 100644
+--- a/Source/JavaScriptCore/wasm/WasmStreamingPlan.cpp
++++ b/Source/JavaScriptCore/wasm/WasmStreamingPlan.cpp
+@@ -42,17 +42,19 @@ namespace WasmStreamingPlanInternal {
+ static constexpr bool verbose = false;
+ }
+ 
+-StreamingPlan::StreamingPlan(VM& vm, Ref<ModuleInformation>&& info, Ref<EntryPlan>&& plan, FunctionCodeIndex functionIndex, CompletionTask&& task)
++StreamingPlan::StreamingPlan(VM& vm, Ref<ModuleInformation>&& info, Ref<EntryPlan>&& plan, FunctionCodeIndex functionIndex, CompletionTask&& task, unsigned functionCount)
+     : Base(vm, WTF::move(info), WTF::move(task))
+     , m_plan(WTF::move(plan))
+     , m_functionIndex(functionIndex)
++    , m_functionCount(functionCount)
+ {
+     dataLogLnIf(WasmStreamingPlanInternal::verbose, "Starting Streaming plan for ", functionIndex, " of module info: ", RawPointer(&m_moduleInformation.get()));
+ }
+ 
+ void StreamingPlan::work()
+ {
+-    m_plan->compileFunction(m_functionIndex);
++    for (unsigned i = 0; i < m_functionCount; ++i)
++        m_plan->compileFunction(FunctionCodeIndex(m_functionIndex + i));
+     dataLogLnIf(WasmStreamingPlanInternal::verbose, "Finished Streaming ", m_functionIndex);
+     Locker locker { m_lock };
+     complete();
+diff --git a/Source/JavaScriptCore/wasm/WasmStreamingPlan.h b/Source/JavaScriptCore/wasm/WasmStreamingPlan.h
+index 3a120f02ee6f5a67c6730042ff608a9bca628ac1..c15745a212e00d0e84337a21b704568c6e60313c 100644
+--- a/Source/JavaScriptCore/wasm/WasmStreamingPlan.h
++++ b/Source/JavaScriptCore/wasm/WasmStreamingPlan.h
+@@ -47,9 +47,11 @@ public:
+     void work() final;
+     bool multiThreaded() const final { return false; }
+     FunctionCodeIndex functionIndex() const { return m_functionIndex; }
++    // Consecutive functions compiled by this plan, from functionIndex().
++    unsigned functionCount() const { return m_functionCount; }
+ 
+     // Note: CompletionTask should not hold a reference to the Plan otherwise there will be a reference cycle.
+-    StreamingPlan(VM&, Ref<ModuleInformation>&&, Ref<EntryPlan>&&, FunctionCodeIndex functionIndex, CompletionTask&&);
++    StreamingPlan(VM&, Ref<ModuleInformation>&&, Ref<EntryPlan>&&, FunctionCodeIndex functionIndex, CompletionTask&&, unsigned functionCount = 1);
+ 
+ private:
+     // For some reason friendship doesn't extend to parent classes...
+@@ -64,6 +66,7 @@ private:
+ 
+     const Ref<EntryPlan> m_plan;
+     FunctionCodeIndex m_functionIndex;
++    unsigned m_functionCount { 1 };
+     bool m_completed { false };
+ };
+ 
 diff --git a/Source/ThirdParty/ANGLE/PlatformHaiku.cmake b/Source/ThirdParty/ANGLE/PlatformHaiku.cmake
 new file mode 100644
 index 0000000000000000000000000000000000000000..8047502ad11d1d3147beda2ccfe718428e4e6b7b
@@ -62139,6 +62467,177 @@ index 0000000000000000000000000000000000000000..367942fc4fb15d1a124d3d4d39aa2cec
 +};
 +}
 +#endif
+diff --git a/Source/WebCore/platform/image-decoders/png/PNGImageDecoder.cpp b/Source/WebCore/platform/image-decoders/png/PNGImageDecoder.cpp
+index 7745d0cebc95468d32da32ac3f9653ebf1bd84b2..f12653e2c296f7541b638f73a9556c2a0db32e19 100644
+--- a/Source/WebCore/platform/image-decoders/png/PNGImageDecoder.cpp
++++ b/Source/WebCore/platform/image-decoders/png/PNGImageDecoder.cpp
+@@ -50,9 +50,67 @@
+ #if USE(LCMS)
+ #include "LCMSUniquePtr.h"
+ #endif
++#if USE(LCMS) && PLATFORM(HAIKU)
++#include <cstdlib>
++#include <cstring>
++#include <wtf/Lock.h>
++#include <wtf/NeverDestroyed.h>
++#include <wtf/Vector.h>
++#endif
+ 
+ namespace WebCore {
+ 
++#if USE(LCMS) && PLATFORM(HAIKU)
++// Making a transform from an embedded profile builds its lookup tables, which
++// took 30 ms on the X399 (pow() for every table entry), and every decoder of
++// every PNG with an iCCP chunk made its own: an extension's toolbar icons
++// were decoded, with two new transforms, each time the toolbar asked for
++// them. Most such images carry one of a few profiles (sRGB as exported by
++// image editors), so transforms are kept by profile bytes and shared.
++// SUMMIT_SHARED_ICC_TRANSFORMS=0 makes one per decoder again.
++static RefPtr<SharedLCMSTransformHaiku> sharedICCTransformHaiku(std::span<const uint8_t> profileBytes)
++{
++    static const bool sharing = [] {
++        const char* value = getenv("SUMMIT_SHARED_ICC_TRANSFORMS");
++        return !value || strcmp(value, "0");
++    }();
++    auto create = [&](cmsUInt32Number flags) -> RefPtr<SharedLCMSTransformHaiku> {
++        auto iccProfile = LCMSProfilePtr(cmsOpenProfileFromMem(profileBytes.data(), profileBytes.size()));
++        if (!iccProfile || cmsGetColorSpace(iccProfile.get()) != cmsSigRgbData)
++            return nullptr;
++        auto srgbProfile = LCMSProfilePtr(cmsCreate_sRGBProfile());
++        auto transform = LCMSTransformPtr(cmsCreateTransform(iccProfile.get(), TYPE_BGRA_8, srgbProfile.get(), TYPE_BGRA_8, INTENT_RELATIVE_COLORIMETRIC, flags));
++        if (!transform)
++            return nullptr;
++        return adoptRef(*new SharedLCMSTransformHaiku(WTF::move(transform)));
++    };
++    if (!sharing)
++        return create(0);
++    struct Entry {
++        Vector<uint8_t> profile;
++        RefPtr<SharedLCMSTransformHaiku> transform;
++    };
++    static Lock lock;
++    static NeverDestroyed<Vector<Entry>> entries;
++    {
++        Locker locker { lock };
++        for (size_t i = 0; i < entries->size(); ++i) {
++            if (entries.get()[i].profile.span().size() == profileBytes.size() && equalSpans(entries.get()[i].profile.span(), profileBytes))
++                return entries.get()[i].transform;
++        }
++    }
++    // Profiles that fail are not kept: a broken one is rare and cheap to reject.
++    RefPtr transform = create(cmsFLAGS_NOCACHE);
++    if (!transform || profileBytes.size() > 64 * 1024)
++        return transform;
++    Locker locker { lock };
++    if (entries->size() >= 8)
++        entries->removeAt(0);
++    entries->append({ Vector<uint8_t>(profileBytes), transform });
++    return transform;
++}
++#endif
++
+ // Gamma constants.
+ const double cMaxGamma = 21474.83;
+ const double cDefaultGamma = 2.2;
+@@ -283,8 +341,12 @@ void PNGImageDecoder::clear()
+ {
+     m_reader = nullptr;
+ #if USE(LCMS)
++#if PLATFORM(HAIKU)
++    m_iccTransform = nullptr;
++#else
+     m_iccTransform.reset();
+ #endif
++#endif
+ }
+ 
+ bool PNGImageDecoder::setFailed()
+@@ -408,11 +470,15 @@ void PNGImageDecoder::headerAvailable()
+         png_uint_32 iccProfileDataSize;
+         int compressionType;
+         if (png_get_iCCP(png, info, &iccProfileTitle, &compressionType, &iccProfileData, &iccProfileDataSize)) {
++#if PLATFORM(HAIKU)
++            m_iccTransform = sharedICCTransformHaiku(std::span<const uint8_t> { iccProfileData, iccProfileDataSize });
++#else
+             auto iccProfile = LCMSProfilePtr(cmsOpenProfileFromMem(iccProfileData, iccProfileDataSize));
+             if (iccProfile && cmsGetColorSpace(iccProfile.get()) == cmsSigRgbData) {
+                 auto srgbProfile = LCMSProfilePtr(cmsCreate_sRGBProfile());
+                 m_iccTransform = LCMSTransformPtr(cmsCreateTransform(iccProfile.get(), TYPE_BGRA_8, srgbProfile.get(), TYPE_BGRA_8, INTENT_RELATIVE_COLORIMETRIC, 0));
+             }
++#endif
+         }
+     }
+ #endif
+@@ -553,8 +619,13 @@ WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN
+ WTF_ALLOW_UNSAFE_BUFFER_USAGE_END
+ 
+ #if USE(LCMS)
++#if PLATFORM(HAIKU)
++    if (m_iccTransform)
++        cmsDoTransform(m_iccTransform->get(), destinationRow.data(), destinationRow.data(), width);
++#else
+     if (m_iccTransform)
+         cmsDoTransform(m_iccTransform.get(), destinationRow.data(), destinationRow.data(), width);
++#endif
+ #endif
+ 
+     if (nonTrivialAlphaMask && !buffer.hasAlpha())
+@@ -984,8 +1055,13 @@ void PNGImageDecoder::paintFrame()
+             address = address.subspan(1);
+         }
+ #if USE(LCMS)
++#if PLATFORM(HAIKU)
++        if (m_iccTransform)
++            cmsDoTransform(m_iccTransform->get(), destinationRow.data(), destinationRow.data(), rect.width());
++#else
+         if (m_iccTransform)
+             cmsDoTransform(m_iccTransform.get(), destinationRow.data(), destinationRow.data(), rect.width());
++#endif
+ #endif
+     }
+ 
+diff --git a/Source/WebCore/platform/image-decoders/png/PNGImageDecoder.h b/Source/WebCore/platform/image-decoders/png/PNGImageDecoder.h
+index 77ad6fdc527db22bd3db39cc6f69832c1540e004..2689e667f262d2cda923c11599bf04aabdc5ae6a 100644
+--- a/Source/WebCore/platform/image-decoders/png/PNGImageDecoder.h
++++ b/Source/WebCore/platform/image-decoders/png/PNGImageDecoder.h
+@@ -33,9 +33,25 @@
+ #if USE(LCMS)
+ #include "LCMSUniquePtr.h"
+ #endif
++#if USE(LCMS) && PLATFORM(HAIKU)
++#include <wtf/ThreadSafeRefCounted.h>
++#endif
+ 
+ namespace WebCore {
+ 
++#if USE(LCMS) && PLATFORM(HAIKU)
++// A color transform from an embedded ICC profile to sRGB, made with
++// cmsFLAGS_NOCACHE so that decoders on several threads can use it at once.
++class SharedLCMSTransformHaiku : public ThreadSafeRefCounted<SharedLCMSTransformHaiku> {
++public:
++    explicit SharedLCMSTransformHaiku(LCMSTransformPtr&& transform)
++        : m_transform(WTF::move(transform)) { }
++    void* get() const { return m_transform.get(); }
++private:
++    LCMSTransformPtr m_transform;
++};
++#endif
++
+     class PNGImageReader;
+ 
+     // This class decodes the PNG image format.
+@@ -141,7 +157,10 @@ namespace WebCore {
+         std::array<png_byte, 12 + 13> m_dataIHDR;
+         std::array<png_byte, 12 + 256 * 3> m_dataPLTE;
+         std::array<png_byte, 12 + 256> m_datatRNS;
+-#if USE(LCMS)
++#if USE(LCMS) && PLATFORM(HAIKU)
++    // Shared by every decoder of an image with the same embedded profile.
++    RefPtr<SharedLCMSTransformHaiku> m_iccTransform;
++#elif USE(LCMS)
+     LCMSTransformPtr m_iccTransform;
+ #endif
+ 
 diff --git a/Source/WebCore/platform/mediacapabilities/PlatformMediaEngineConfigurationFactory.cpp b/Source/WebCore/platform/mediacapabilities/PlatformMediaEngineConfigurationFactory.cpp
 index 351b4f92dee11593273912a45deaee716386d699..209ac28509ff44c81686db96243dfba7887bed4d 100644
 --- a/Source/WebCore/platform/mediacapabilities/PlatformMediaEngineConfigurationFactory.cpp
@@ -133271,10 +133770,10 @@ index 0000000000000000000000000000000000000000..f61939d10995397e88877a36905238be
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/ExtensionPackageRegistryHaiku.cpp b/Source/WebKit/UIProcess/haiku/ExtensionPackageRegistryHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..202790729e8bd135caad3fa9b1e232e800b95912
+index 0000000000000000000000000000000000000000..8930cc9a4559f0a013620b7482685fff90ab622d
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/ExtensionPackageRegistryHaiku.cpp
-@@ -0,0 +1,958 @@
+@@ -0,0 +1,1027 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +#include "config.h"
 +#include "ExtensionPackageRegistryHaiku.h"
@@ -133308,7 +133807,11 @@ index 0000000000000000000000000000000000000000..202790729e8bd135caad3fa9b1e232e8
 +#include <WebCore/PixelBuffer.h>
 +#include <algorithm>
 +#include <cstdio>
++#include <cstdlib>
++#include <cstring>
 +#include <limits>
++#include <string>
++#include <vector>
 +#include <utility>
 +#include <wtf/RunLoop.h>
 +#include <wtf/ASCIICType.h>
@@ -133349,6 +133852,64 @@ index 0000000000000000000000000000000000000000..202790729e8bd135caad3fa9b1e232e8
 +    return target.SendMessage(&message, static_cast<BHandler*>(nullptr), 0);
 +}
 +
++// Checking an XPI's signature reads and hashes every file of the package
++// (1Password: 1,000 files, 47 MB; 50 ms on a laptop, 90 ms on the X399), on
++// every launch. A package from the package cache was hashed against its
++// record before this, so the verdict for those exact files is kept beside
++// the record ("xpi-signature", with the fingerprint it was made for) and
++// read back while the fingerprint still matches.
++// SUMMIT_XPI_SIGNATURE_CACHE=0 checks the signature every time.
++static WebExtensionXPISignatureHaiku xpiSignatureOfSnapshotHaiku(const WebExtensionPackageSnapshotHaiku& snapshot)
++{
++    using Status = WebExtensionXPISignatureHaiku::Status;
++    static const bool cacheEnabled = [] {
++        const char* value = std::getenv("SUMMIT_XPI_SIGNATURE_CACHE");
++        return !value || std::strcmp(value, "0");
++    }();
++    auto directory = snapshot.path().utf8().toStdString();
++    if (!cacheEnabled || !snapshot.isPersistent() || snapshot.fingerprint().length() != 64)
++        return verifyWebExtensionXPISignatureHaiku(directory);
++    static constexpr auto header = "Kunanyi-WebExtension-XPISignature-v1";
++    auto fingerprint = snapshot.fingerprint().utf8().toStdString();
++    auto verdictPath = FileSystem::pathByAppendingComponent(FileSystem::parentPath(snapshot.path()), "xpi-signature"_s).utf8().toStdString();
++    if (FILE* input = std::fopen(verdictPath.c_str(), "r")) {
++        std::vector<std::string> lines;
++        char buffer[1024];
++        while (lines.size() < 6 && std::fgets(buffer, sizeof buffer, input)) {
++            std::string line(buffer);
++            if (line.empty() || line.back() != '\n')
++                break;
++            line.pop_back();
++            lines.push_back(std::move(line));
++        }
++        std::fclose(input);
++        if (lines.size() == 5 && lines[0] == header && lines[1] == fingerprint && lines[2].size() == 1 && lines[2][0] >= '0' && lines[2][0] <= '2') {
++            WebExtensionXPISignatureHaiku cached;
++            cached.status = static_cast<Status>(lines[2][0] - '0');
++            cached.signer = lines[3];
++            cached.error = lines[4];
++            SUMMIT_EXTENSION_TIMING("XPI signature of %s from the package cache", directory.c_str());
++            return cached;
++        }
++    }
++    auto result = verifyWebExtensionXPISignatureHaiku(directory);
++    SUMMIT_EXTENSION_TIMING("XPI signature of %s checked", directory.c_str());
++    auto oneLine = [](const std::string& text) { return text.find('\n') == std::string::npos && text.size() < 512; };
++    if (!oneLine(result.signer) || !oneLine(result.error))
++        return result;
++    // Written whole and renamed into place; a reader takes only a complete
++    // file for the same fingerprint, anything else is checked again.
++    auto temporary = verdictPath + ".tmp";
++    if (FILE* output = std::fopen(temporary.c_str(), "w")) {
++        bool written = std::fprintf(output, "%s\n%s\n%c\n%s\n%s\n", header, fingerprint.c_str(),
++            static_cast<char>('0' + static_cast<int>(result.status)), result.signer.c_str(), result.error.c_str()) > 0;
++        written = !std::fclose(output) && written;
++        if (!written || std::rename(temporary.c_str(), verdictPath.c_str()))
++            std::remove(temporary.c_str());
++    }
++    return result;
++}
++
 +void ExtensionPackageRegistryHaiku::prepare(String&& path, const BMessenger& target, uint64_t identifier)
 +{
 +    ASSERT(RunLoop::isMain());
@@ -133372,17 +133933,22 @@ index 0000000000000000000000000000000000000000..202790729e8bd135caad3fa9b1e232e8
 +    m_queue->dispatch([weakThis = weak_from_this(), path = path.isolatedCopy(), identifier, operation] {
 +        auto prepared = prepareWebExtensionPackageHaiku(path);
 +        SUMMIT_EXTENSION_TIMING("prepare %s %s", path.utf8().legacyCStringPointer(), prepared ? "unpacked" : "failed");
++        // Mozilla's signature of a Firefox package, checked over its unpacked
++        // files here rather than on the main loop (it reads every file).
++        WebExtensionXPISignatureHaiku xpiSignature;
++        if (prepared)
++            xpiSignature = xpiSignatureOfSnapshotHaiku(*prepared);
 +        std::expected<WebExtensionPackageSnapshotHaiku, WebExtensionPackageErrorHaiku> isolated = prepared
 +            ? std::expected<WebExtensionPackageSnapshotHaiku, WebExtensionPackageErrorHaiku> { WTF::move(*prepared).isolatedCopy() }
 +            : std::unexpected(prepared.error());
-+        RunLoop::mainSingleton().dispatch([weakThis, identifier, operation, prepared = WTF::move(isolated)]() mutable {
++        RunLoop::mainSingleton().dispatch([weakThis, identifier, operation, prepared = WTF::move(isolated), xpiSignature = WTF::move(xpiSignature)]() mutable {
 +            if (auto registry = weakThis.lock())
-+                registry->complete(identifier, operation, WTF::move(prepared));
++                registry->complete(identifier, operation, WTF::move(prepared), WTF::move(xpiSignature));
 +        });
 +    });
 +}
 +
-+void ExtensionPackageRegistryHaiku::complete(uint64_t identifier, uint64_t operation, std::expected<WebExtensionPackageSnapshotHaiku, WebExtensionPackageErrorHaiku>&& prepared)
++void ExtensionPackageRegistryHaiku::complete(uint64_t identifier, uint64_t operation, std::expected<WebExtensionPackageSnapshotHaiku, WebExtensionPackageErrorHaiku>&& prepared, WebExtensionXPISignatureHaiku&& xpiSignature)
 +{
 +    ASSERT(RunLoop::isMain());
 +    ASSERT(m_inFlight);
@@ -133399,8 +133965,6 @@ index 0000000000000000000000000000000000000000..202790729e8bd135caad3fa9b1e232e8
 +        reply(target, B_WEBKIT_EXTENSION_PACKAGE_PREPARED, identifier, error);
 +        return;
 +    }
-+    // Mozilla's signature of a Firefox package, checked over its unpacked files.
-+    auto xpiSignature = verifyWebExtensionXPISignatureHaiku(prepared->path().utf8().toStdString());
 +    RefPtr<API::Error> parseError;
 +    Ref extension = WebExtension::create(WTF::move(*prepared), parseError);
 +    SUMMIT_EXTENSION_TIMING("prepare parsed manifest of %s", extension->displayName().utf8().legacyCStringPointer());
@@ -133919,6 +134483,8 @@ index 0000000000000000000000000000000000000000..202790729e8bd135caad3fa9b1e232e8
 +    }
 +    BMessage details;
 +    status_t error = B_OK;
++    auto started = system_time();
++    int rendered = 0;
 +    Vector<String> identities;
 +    for (auto& entry : m_loaded)
 +        identities.append(entry.key);
@@ -133974,7 +134540,9 @@ index 0000000000000000000000000000000000000000..202790729e8bd135caad3fa9b1e232e8
 +            error = details.AddMessage("action", &item);
 +        if (error != B_OK)
 +            break;
++        ++rendered;
 +    }
++    SUMMIT_EXTENSION_TIMING("toolbar actions of %d extensions made in %.1f ms", rendered, (system_time() - started) / 1000.0);
 +    reply(target, B_WEBKIT_EXTENSION_ACTIONS, identifier, error, error == B_OK ? &details : nullptr);
 +}
 +
@@ -134235,10 +134803,10 @@ index 0000000000000000000000000000000000000000..202790729e8bd135caad3fa9b1e232e8
 +#endif
 diff --git a/Source/WebKit/UIProcess/haiku/ExtensionPackageRegistryHaiku.h b/Source/WebKit/UIProcess/haiku/ExtensionPackageRegistryHaiku.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..a02f09b1a952f6c4f60f42ac6fd6f095b457e9c6
+index 0000000000000000000000000000000000000000..ddfad428481ebf0189696ba3e6bfa5b95c4871a2
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/ExtensionPackageRegistryHaiku.h
-@@ -0,0 +1,75 @@
+@@ -0,0 +1,77 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +#pragma once
 +
@@ -134256,6 +134824,8 @@ index 0000000000000000000000000000000000000000..a02f09b1a952f6c4f60f42ac6fd6f095
 +struct BWebKitExtensionInstallation;
 +
 +namespace WebKit {
++
++struct WebExtensionXPISignatureHaiku;
 +
 +// Main RunLoop owns requests and prepared WebKit objects. Only filesystem
 +// preparation runs on the serial worker; callbacks retain no native window.
@@ -134296,7 +134866,7 @@ index 0000000000000000000000000000000000000000..a02f09b1a952f6c4f60f42ac6fd6f095
 +
 +private:
 +    ExtensionPackageRegistryHaiku(Ref<WebExtensionController>&&, bool privateBrowsing);
-+    void complete(uint64_t, uint64_t operation, std::expected<WebExtensionPackageSnapshotHaiku, WebExtensionPackageErrorHaiku>&&);
++    void complete(uint64_t, uint64_t operation, std::expected<WebExtensionPackageSnapshotHaiku, WebExtensionPackageErrorHaiku>&&, WebExtensionXPISignatureHaiku&&);
 +    static status_t reply(const BMessenger&, uint32 what, uint64_t, status_t, BMessage* = nullptr);
 +    void actionsDidChange();
 +    Ref<WebExtensionController> m_controller;

@@ -182,3 +182,103 @@ extension startup check. `bundle-b46l7ic6` measures priority 5 for the ordinary
 hidden page and 15 for the extension host; all 18 native checks pass, including
 two background load/storage rounds. Both runs cleanly release their helpers.
 Evidence: `.vm/fixes-2026-10-09/priority-{baseline,final}.log`.
+
+## Start-up, clicks and frames (30 October 2026, #117)
+
+Measured on the laptop (Framework 13) and the X399 with a copy of the owner's
+1Password 8.12.41.1 package in a test profile, not signed in (a signed-out
+1Password still loads its background page and injects its content scripts
+into every frame). `SUMMIT_EXTENSION_TIMING=1` gives the browser's and the
+engine's milestones; a diagnostic copy of the package with a shim in
+`background.html` (wrapping `fetch`, `WebAssembly.*`, `indexedDB.open` and
+`storage.*`, and watching the main thread with a 10 ms timer) showed what
+the background page waits for. The shim copy is for diagnosis only.
+
+**Background page start.** From "browser ready" to "Finished initializing
+1Password", warm caches, three alternated launches each of the engine
+before (`text117-base`, main of the afternoon) and after:
+
+| | before | after |
+| --- | --- | --- |
+| X399 | 2.63-2.92 s | 1.44-1.59 s |
+| laptop | 0.84-1.12 s | 0.78-0.82 s |
+
+Where the X399's time went: `WebAssembly.instantiateStreaming` of
+`op_wasm_b5x_bg.wasm` (16 MB) took 1.31 s, all of it with the background
+page's main thread blocked (1.24 s). The file arrived in 21 ms; the cost was
+JavaScriptCore's streaming compiler giving the worklist one plan per
+function, each waking a compiler thread (a system call on Haiku) and then
+contending with it for the worklist's lock, tens of thousands of times on a
+32-thread machine. Functions now go to the worklist in runs of up to 256 (or
+256 KB) (`WasmStreamingCompiler.cpp`, `WasmStreamingPlan.cpp`,
+`SUMMIT_WASM_STREAMING_BATCH=0` restores a plan per function): "Initializing"
+to "WASM: Initializing" went from 1.40-1.43 s to 0.35-0.38 s. The laptop
+was never bound by it (0.19-0.23 s either way).
+
+The browser also checked the package's Mozilla signature on every launch,
+hashing all 1,000 files on the main loop (50 ms on the laptop, 90-110 ms on
+the X399) right after the work queue had hashed the same files against the
+package cache's record. The verdict is now kept beside that record
+(`ExtensionPackageCache/<key>/xpi-signature`, tied to the fingerprint) and
+the check, when it is needed, runs on the work queue
+(`ExtensionPackageRegistryHaiku.cpp`, `SUMMIT_XPI_SIGNATURE_CACHE=0`).
+"Browser ready" to "background page created": 0.17-0.20 s to 0.12-0.13 s on
+the laptop, 0.25-0.31 to 0.15-0.18 s on the X399 (one run 0.27).
+
+What is left is 1Password's own: compiling the module (0.2-0.35 s), opening
+its IndexedDB databases (90-260 ms, longer the first time, with upgrades)
+and waiting for `https://my.1password.com/api/pre-registration-features`
+(520-650 ms when it is not cached) before it reports itself initialized.
+The first launch after a new Summit build is slower again (1.2-1.7 s to
+`load`): JavaScriptCore's bytecode cache belongs to one build.
+
+**Clicks.** Not reproduced with the package signed out. With a page-side
+harness (event timestamps, the handler, the next animation frame and a task
+after it, Event Timing entries), clicks on buttons, links, a login form's
+fields and a button that inserts 200 small forms took the same time with
+and without 1Password, on a local page and on github.com/login (down to
+click handler 2-3 ms, to the next frame 10-30 ms; the first focus of a
+field 8-13 ms once). YouTube, search results page, click on a thumbnail to
+`playing`: laptop 435-580 ms with 1Password against 480-500 without; X399
+640-790 against 680-730. `runtime.sendMessage` from a content script to a
+background page and back takes under 1 ms (a test extension, with and
+without 1Password loaded, 100 KB messages 1-2 ms), so Summit's message path
+is not the cost. The 0.3-1 s of 3 October was measured signed in, before
+the bytecode cache, the WebAssembly memory fix (#6) and the timer deadlock
+fix; whatever is left needs a signed-in profile to see.
+
+**Every frame.** 1Password's `inject-content-scripts.js` runs in every frame
+and imports `inline/injected.js` (449 KB) as a module into each one. Ten
+same-origin iframes inserted by a click: all loaded after 32 ms without
+1Password and 119 ms with it on the laptop (48 and 179 ms on the X399);
+the injected module's evaluation is 7-9 ms of that per frame. JavaScriptCore
+parsed the whole module again for each document only to find its imports
+and exports. The main thread now keeps that analysis for the last few large
+modules (64 KB and more) and builds the record from it when the same source
+text comes again (`JSModuleLoader.cpp`, `SUMMIT_MODULE_ANALYSIS_CACHE=0`).
+Main-thread CPU for 100 such frames on the laptop went from 3.0 s to 2.4 s
+(two alternated profiles each); the time to the frames' load events did not
+move measurably, and on the X399 the test saturated the main thread both
+ways.
+
+**Toolbar icon.** 1Password sets its toolbar icon with `browserAction.setIcon`
+(PNGs with an embedded ICC profile). The toolbar asks for the 16 and the
+32 pixel icon on every action update (each navigation and tab switch), the
+action keeps one size, so both were decoded again each time, and every PNG
+decoder with an `iCCP` chunk built its own colour transform: 11 ms per
+update on the X399, 4.5 ms on the laptop, on the browser's main thread. PNG
+decoders now share transforms by profile bytes (see performance.md): 0.4-0.9
+ms per update on the X399.
+
+**The first popup pre-load after launch** (the 3.9 s stall of 28 September)
+did not come back in eight launches on the laptop with a test extension that
+has a popup, hovered 0.2-1.2 s after launch, alone and while 1Password was
+starting: the popup page was created within 1 ms of the hover each time.
+The popup document loads in the extension's own web process, so while that
+extension's background page is still busy starting, the document waits for
+it (here up to 400 ms, with a background page that computes for 1.5 s). The
+click on the pre-loaded popup to its first frame was 5-10 ms. A signed-out
+1Password has no popup (its button opens the welcome page), so its own
+popup was not measured. Summit's MCP `click` tool can now hover and click an
+extension's toolbar button (`extension=<identifier>`, kind `move` or
+`click`) without moving the pointer.

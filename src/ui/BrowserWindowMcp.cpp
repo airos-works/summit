@@ -232,6 +232,29 @@ std::string BrowserWindow::McpRequest(const std::string& text)
             Activate(true);
         }
         if (tab->id != fSelected) return fail("the tab is not selected: input goes to the page on screen (pass activate)");
+        if (const std::string extension = request.value("extension", ""); !extension.empty()) {
+            // An extension's toolbar button instead of the page: move (the
+            // pointer reaching it, which pre-loads its popup) or click
+            // (reaching it, then pressing it), without moving the pointer.
+            const std::string name = "extension-action-" + extension;
+            auto found = std::find_if(fExtensionActionButtons.begin(), fExtensionActionButtons.end(),
+                [&](ExtensionActionButton* button) { return name == button->Name(); });
+            if (found == fExtensionActionButtons.end()) return fail("no toolbar button for extension " + extension);
+            ExtensionActionButton* button = *found;
+            if (kind != "move" && kind != "click") return fail("an extension's button takes kind move or click");
+            BMessage moved(B_MOUSE_MOVED);
+            moved.AddInt64("when", system_time());
+            const BPoint screen = button->ConvertToScreen(BPoint(4, 4));
+            moved.AddPoint("screen_where", screen);
+            moved.AddPoint("where", ConvertFromScreen(screen));
+            moved.AddPoint("be:view_where", BPoint(4, 4));
+            moved.AddInt32("buttons", 0);
+            moved.AddInt32("be:transit", B_ENTERED_VIEW);
+            moved.AddInt32("_view_token", _get_object_token_(button));
+            PostMessage(&moved, button);
+            if (kind == "click") button->Invoke();
+            return json{{"tab", tabName(*tab)}, {"sent", kind}, {"extension", extension}}.dump();
+        }
         const BRect bounds = view->Bounds();
         BPoint at(request.value("x", bounds.Width() / 2), request.value("y", bounds.Height() / 2));
         if (!bounds.Contains(at)) return fail("the point is outside the page view (" + std::to_string(int(bounds.Width() + 1))

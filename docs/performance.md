@@ -1,5 +1,45 @@
 # Summit performance: Speedometer 3.1 baseline, where the time goes, stress test
 
+## 30 October 2026: 1Password's start-up and frames, shared colour transforms (#117)
+
+The #117 extension items, measured with a copy of the owner's 1Password
+package (signed out) on the laptop and the X399; details and test setup in
+[webextensions-1password.md](webextensions-1password.md#start-up-clicks-and-frames-30-october-2026-117).
+
+- **Streaming WebAssembly compiled a plan per function.** Each plan woke a
+  compiler thread (a system call on Haiku), which then fought the main
+  thread for the worklist lock. 1Password's 16 MB module held its
+  background page's main thread for 1.24 s on the X399. Plans now cover
+  runs of up to 256 functions or 256 KB (`WasmStreamingCompiler.cpp`,
+  `SUMMIT_WASM_STREAMING_BATCH=0`): "Initializing" to "WASM: Initializing"
+  1.40-1.43 s to 0.35-0.38 s; browser ready to "Finished initializing
+  1Password" 2.63-2.92 s to 1.44-1.59 s. The laptop barely moved (0.20 s
+  either way; browser ready to finished 0.84-1.12 s to 0.78-0.82 s with the
+  next item).
+- **A Firefox package's signature was checked on every launch**, on the main
+  loop, by hashing every file again. The verdict is kept in the package
+  cache beside its record (`SUMMIT_XPI_SIGNATURE_CACHE=0`): 50-110 ms less
+  before the background page is created.
+- **A module imported into many documents was parsed again for each** just
+  to find its imports and exports. The main thread keeps that analysis for
+  the last six modules of 64 KB or more (`JSModuleLoader.cpp`,
+  `SUMMIT_MODULE_ANALYSIS_CACHE=0`). 1Password imports a 449 KB module into
+  every frame: main-thread CPU for 100 frames 3.0 s to 2.4 s on the laptop.
+- **Every PNG with an embedded ICC profile built its own colour transform**
+  (lcms2 builds its tables with `pow()` per entry). Forty 64x64 PNGs with an
+  sRGB profile: 117-124 ms to decode on the laptop against 45-65 ms without
+  the profile, 253-275 against 40-44 ms on the X399. Decoders now share
+  transforms by profile bytes, made with `cmsFLAGS_NOCACHE` so threads can
+  use one at once (`PNGImageDecoder.cpp`, `SUMMIT_SHARED_ICC_TRANSFORMS=0`):
+  52-61 ms and 43-67 ms, the same pixels. This also took the browser's
+  toolbar icon update for 1Password from 11 ms to under 1 ms on the X399.
+  JPEG decoders still make one transform each.
+
+Not changed: 1Password's per-click cost did not show signed out (clicks,
+focus and YouTube's thumbnail click took the same time with and without
+it), and `runtime.sendMessage` round trips take under 1 ms. The 3.9 s stall
+of the first popup pre-load after launch (28 September) did not come back.
+
 ## 30 October 2026: kerned text measured the simple way (#117)
 
 The #117 item "inline text layout measured about 5× slower than Firefox"

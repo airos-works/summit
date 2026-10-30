@@ -356,10 +356,13 @@ void RegisterMcpBrowserTools(mcp::Server& server, const std::shared_ptr<McpConte
         Schema().String("tab", kTabArgument).Number("x", "X in the page view").Number("y", "Y in the page view")
             .Enum("button", "left (default), right or middle", {"left", "right", "middle"}).Integer("clicks", "1-3")
             .Enum("kind", "click (default), down, up or move", {"click", "down", "up", "move"})
-            .StringArray("modifiers", "shift, control, command, option").Boolean("activate", "Select the tab and raise the window first"),
+            .StringArray("modifiers", "shift, control, command, option").Boolean("activate", "Select the tab and raise the window first")
+            .String("extension", "Instead of the page: this extension's toolbar button (identifier from extensions); "
+                "kind move is the pointer reaching it (pre-loads its popup), click opens it"),
         [input](const Json& arguments) {
             Json request = {{"action", "input"}, {"kind", mcp::StringArgument(arguments, "kind", "click")},
                 {"button", mcp::StringArgument(arguments, "button", "left")}, {"clicks", mcp::IntegerArgument(arguments, "clicks", 1, 1, 3)}};
+            if (mcp::HasArgument(arguments, "extension")) request["extension"] = mcp::StringArgument(arguments, "extension");
             if (mcp::HasArgument(arguments, "x")) request["x"] = mcp::NumberArgument(arguments, "x", 0);
             if (mcp::HasArgument(arguments, "y")) request["y"] = mcp::NumberArgument(arguments, "y", 0);
             return input(arguments, request);
