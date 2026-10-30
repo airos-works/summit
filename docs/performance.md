@@ -1,5 +1,167 @@
 # Summit performance: Speedometer 3.1 baseline, where the time goes, stress test
 
+## 31 October 2026: the page's next rendering update no longer waits for the compositor's uploads and present (#117)
+
+The #117 item "overlap the next rendering update with the compositor's tile
+and texture waits". A page that has asked for a composition
+(`LayerTreeHost::requestCompositionForRenderingUpdate()`) starts no other
+rendering update until the compositor says it has composed the update
+(`didComposite`). That came once the composition had taken the layers'
+state, uploaded the update's tiles (waiting for any still being painted),
+drawn the frame, swapped and handed the frame on, only then. An update asked
+for in the meantime (the next animation frame) waited.
+
+### Measured first: what the main thread waited for
+
+A new trace, `SUMMIT_UPDATE_WAIT_TRACE=1`, prints one line per rendering
+update when the compositor lets the page go: how long the update ran until it
+asked for a composition (`update`), how long it then waited (`wait`), split
+into the compositor's frame timer and the tiles it waited to be painted
+(`queue`, `tilesWait`), the composition's setup (`pre`), taking the layers'
+state (`commit`), uploading their tiles (`tileUpdates`), drawing (`paint`),
+swap and present (`present`) and the main thread's turn to hear of it
+(`dispatch`); and `held`, how long an update asked for meanwhile was kept
+waiting.
+
+Medians per update with the old behaviour (`SUMMIT_OVERLAP_RENDERING=0`),
+X399 (GTX 1070, NVK, 200 %), the engine of main with the trace:
+
+| page | update | held | after the commit: tile uploads + paint + present |
+| --- | --- | --- | --- |
+| fixture, 1,600 cells recoloured every frame (`tiles.html#repaint`) | 31 ms | 10 ms | 3.1 + 0.2 + 0.15 ms |
+| fixture, a script scrolls 10 px a frame (`#scroll`) | 35 ms | 12 ms | 2.6 + 0.2 + 0.15 ms |
+| getartcraft.com, wheel bursts | 11 ms | 9-17 ms | 2-3 ms (p90 9-17) |
+| linear.app, wheel bursts while it loads | 3-6 ms | 80-140 ms in the updates that waited | tile uploads p90 86-255 ms (waiting for tiles to be painted) |
+| github.com, wheel bursts; idle pages | 2-7 ms | 0.1-1 ms | under 1 ms |
+
+That is with Summit's Mesa with deferred presents (patch 07), whose present
+returns in 0.15 ms. With a Mesa whose presents wait (the X399's installed
+summit_webkit of 29 October, any board without patch 07) the present was
+7-16 ms of every update composition: held 20-29 ms on the fixtures, 9 ms of
+each frame on linear.app at rest. On the laptop, which reads every frame
+back while its frame buffer is not offered to renderers (haiku#43), the
+present was 12-14 ms and held 13-28 ms per update, 27 ms of each of
+getartcraft.com's animation frames at rest. In all of these the part before
+the commit (the frame timer and the tiles still being painted) is the same
+either way; what follows the commit is what the page need not wait for.
+
+### What changed
+
+`ThreadedCompositor::renderLayerTree()` lets the page go as soon as the
+composition that takes its update has committed the layers' state
+(`CoordinatedSceneState::flushCompositingStateHaiku()` calls back between the
+commit and the tile uploads), instead of after the present. The page's next
+update then runs while the compositor uploads the tiles, draws and presents.
+
+- **Lock order.** Nothing new is held across the hand-over: the callback runs
+  with no scene lock held (`m_stateLock` and `m_pendingLayersLock` are
+  released by then), and from there on the composition takes only each
+  layer's own lock, one at a time, for its tile uploads. Compositions for
+  scrolling have always run like that next to a rendering update (they
+  upload deferred tiles too), so the main thread meets nothing it did not
+  meet before: at worst its commit waits for the layer being uploaded. The
+  14 October deadlock was `m_layersLock` held across layer locks; that stays
+  fixed (flush from a copy).
+- The next update's composition waits for this one to complete, as before
+  (the compositor's state goes to `ScheduledWhileInProgress`); at most one
+  update is ahead.
+- The frame grid the page's updates keep to is stored at the commit (it was
+  stored after the uploads), so an update that starts at once sees this
+  frame's grid.
+- An update with a forced repaint outstanding (`forceRepaint`, snapshots)
+  still waits for the whole frame (`setUpdateWaitsForFrameHaiku()`).
+- The time the page's last frame was finished, which the largest-contentful-
+  paint code keeps (`summitFrameCompositedHaiku`, used with
+  `SUMMIT_LCP_PAINT_TIME=present`), is now taken when the frame is done
+  (`LayerTreeHost::didRenderFrame()`), not when the page is let go.
+- `SUMMIT_OVERLAP_RENDERING=0` waits for the whole composition, as before.
+
+### Before and after
+
+Same build, `SUMMIT_OVERLAP_RENDERING=0` against the default, two runs of
+each, alternated, fresh profiles. Fixture numbers are the page's own
+animation frames a second over 8 s (`requestAnimationFrame`); site numbers
+are rendering updates a second during wheel bursts (MCP `frame_stats`
+`scroll`, down and up, two to four times) and the compositor's frames a
+second over the same bursts.
+
+X399 with deferred presents (Mesa patch 07):
+
+| | off | on |
+| --- | --- | --- |
+| fixture `#repaint` | 23.6, 21.8 | 24.6, 26.1 |
+| fixture `#scroll` | 19.9, 20.1 | 21.7, 20.2 |
+| fixture `#anim,blur` (300 compositor transforms, a backdrop blur) | 18.1, 18.0 | 19.8, 18.7 |
+| fixture all of them, 20 rows | 16.8, 17.1 | 17.6, 16.3 |
+| getartcraft.com bursts: updates/s; compositor fps | 29.2, 28.2; 58.2, 57.2 | 25.3, 32.1; 49.3, 57.3 |
+| linear.app bursts: held per update | 37.8, 28.6 ms | 9.5, 20.4 ms |
+| github.com bursts: compositor fps; gaps over 33 ms | 58.0, 57.8; 5, 4 | 59.2, 59.3; 3, 5 |
+
+X399 with the installed Mesa (presents wait):
+
+| | off | on |
+| --- | --- | --- |
+| fixture `#repaint` | 19.9, 19.7 | 25.7, 25.7 |
+| fixture `#scroll` | 17.6, 15.9 | 21.5, 21.4 |
+| fixture `#anim,blur` | 15.6, 14.5 | 19.4, 19.8 |
+| fixture all of them | 14.7, 14.4 | 17.7, 17.6 |
+| getartcraft.com at rest: rendering updates/s (its animation) | 41.9, 33.7 | 59.8, 58.8 |
+| getartcraft.com bursts (4 each): updates/s; compositor fps | 19.6, 22.2; 57.5, 56.5 | 35.3, 30.4; 56.3, 56.7 |
+| github.com bursts (4 each): updates/s; compositor fps | 48.1, 45.4; 58.9, 59.6 | 50.0, 50.2; 58.8, 59.2 |
+
+Laptop (Framework 13, reads every frame back):
+
+| | off | on |
+| --- | --- | --- |
+| fixture `#repaint` | 29.9, 29.8 | 39.6, 39.6 |
+| fixture `#scroll` | 29.7, 29.7 | 34.5, 34.4 |
+| fixture `#anim,blur` | 29.0, 28.7 | 31.0, 31.1 |
+| fixture all of them | 26.1, 26.0 | 29.7, 29.9 |
+| getartcraft.com at rest: rendering updates/s (its animation) | 30.1, 35.6 | 59.1, 59.3 |
+| getartcraft.com bursts: updates/s; compositor fps | 24.9, 22.7; 57.3, 58.7 | 40.8, 41.7; 59.0, 58.7 |
+| linear.app at rest: rendering updates/s | 29.6, 27.0 | 40.3, 34.3 |
+
+So the gain follows what the compositor did after the commit: small on the
+X399 with deferred presents (the fixtures +4-13 %, about the 3 ms of tile
+uploads a frame), large where the present waits or reads back (fixtures
++13-37 %, getartcraft.com's Lenis animation from 30-42 to 59-60 frames a
+second, the "35-37 a second" of 18 October). The compositor's own frame rate
+is unchanged within the runs' noise (getartcraft.com's 49.3 is one run; its
+long gaps were compositions not requested for 50-300 ms, not long ones, and
+the rerun was 57.3). linear.app's long scroll gaps are the compositor
+waiting 50-450 ms for tiles to be painted (`paintWait` in the timing trace)
+either way; the page no longer waits for them.
+
+**Stress.** With the overlap on: the fixture with everything at once (tile
+repaints, script scrolling, 300 animations, backdrop blurs switched on and
+off every 10 frames, eight layers made and dropped every frame, a third of
+them with `backdrop-filter`, a playing 1080p60 H.264 video, zoom changes),
+YouTube's home page (the 14 October backdrop deadlock's page), getartcraft.com
+and linear.app, each 3-4 minutes of wheel bursts down and up with the window
+resized every second, and a ten-frame `requestAnimationFrame` probe each
+round (a probe that fails twice dumps the web process's stacks):
+
+- X399 (deferred presents), 16 minutes, 517 rounds: every probe answered
+  (ten frames in a median 0.15 s on YouTube, 0.4-1.1 s on the others while
+  the window kept changing size), no stall report in the log.
+- Laptop, three runs (9, 12 and 8 minutes; 997 rounds): every web process
+  kept answering. Five `evaluate` calls got no answer within 30 s, and the
+  probe a second later was normal each time; the control run with
+  `SUMMIT_OVERLAP_RENDERING=0` had one too, so these are the laptop's MCP
+  connection or the fixture, not the overlap. One "page stall" report
+  (2.2 s without an update while YouTube loaded) said "waiting for the
+  compositor no": the main thread was busy with the page's scripts.
+
+Not tested: the Pi and the Cubie (they read back or wait on their GPUs, so
+they should gain as the laptop does).
+
+Test kit (host www `overlap117/`): `tiles.html#repaint|scroll|anim|blur|video|churn|resize[,rows=N,step=N]`
+(`ovReset()`, `ovStats()` for the page's frame gaps), `xrun.sh` (X399 A/B runs with the traces and
+`frame_stats`), `xstress.sh` (stress with a liveness probe). On the X399 the installed summit_webkit's
+Mesa (29 October) has no deferred presents; `__EGL_VENDOR_LIBRARY_FILENAMES` pointing at a vendor file
+for present117's Mesa build (`overlap117/mesa07/50_mesa.json` in `/boot/home/claude-reddit`) uses patch 07.
+
+
 ## 31 October 2026: the 34a25b6 engine measured; the WebProcess cache capped, released under pressure; Speedometer suites (#117, #120, #115)
 
 The full engine rebuild for 34a25b6 (CI run 41051322015) brought
