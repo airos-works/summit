@@ -1,0 +1,129 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Text layout suite</title>
+<!-- Forced relayouts of text-heavy content (#117). #auto[=kind,...] runs each kind
+     three times (20 layouts, median ms) and puts the results in the title;
+     #show=kind leaves one laid out for screenshots. Kinds: plain, paragraphs,
+     spans, inlineblock, table; a "-nk" suffix turns kerning off. -->
+<style>
+body { font: 15px/1.5 sans-serif; margin: 16px; }
+.stage { width: 900px; }
+.ib span { display: inline-block; padding: 1px 4px; margin: 1px; }
+table { border-collapse: collapse; } td { border: 1px solid #ccc; padding: 2px 4px; }
+</style>
+<div id="host"></div>
+<script>
+"use strict";
+// Forced relayout timing: alternate the width of `el` and read offsetHeight.
+window.__relayout = function (el, rounds, w1, w2) {
+    el = el || document.body; rounds = rounds || 30; w1 = w1 || 900; w2 = w2 || 940;
+    const times = [];
+    for (let i = 0; i < rounds + 3; ++i) {
+        const t = performance.now();
+        el.style.width = ((i % 2) ? w2 : w1) + "px";
+        void el.offsetHeight;
+        if (i >= 3) times.push(performance.now() - t);
+    }
+    times.sort((a, b) => a - b);
+    const r = v => Math.round(v * 100) / 100;
+    return {median: r(times[times.length >> 1]), mean: r(times.reduce((a, b) => a + b, 0) / times.length), min: r(times[0]), max: r(times[times.length - 1])};
+};
+// Keep relaying out `el` for `ms` milliseconds in 100 ms slices (for profiling).
+window.__spin = function (el, ms) {
+    el = el || document.body;
+    const end = performance.now() + ms;
+    let i = 0;
+    const slice = () => {
+        const sliceEnd = performance.now() + 100;
+        while (performance.now() < sliceEnd) { el.style.width = ((i++ % 2) ? 940 : 900) + "px"; void el.offsetHeight; }
+        if (performance.now() < end) setTimeout(slice, 0); else window.__spun = i;
+    };
+    slice();
+    return "started";
+};
+</script>
+<script>
+"use strict";
+let seed = 12345;
+const rnd = () => (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
+const WORDS = "the of and to in a is that for it as was with be by on not he this are or his from at which but have an they you were her she there been one all we their its also has had more when who will no two other new into time only these some after first then would can than people about could most out world war history".split(" ");
+const word = () => WORDS[Math.floor(rnd() * WORDS.length)] + (rnd() < 0.1 ? Math.floor(rnd() * 1000) : "");
+const sentence = n => { const a = []; for (let i = 0; i < n; ++i) a.push(word()); return a.join(" "); };
+function build(kind) {
+    seed = 12345;
+    const noKerning = kind.endsWith("-nk");
+    kind = kind.replace(/-nk$/, "");
+    const host = document.getElementById("host");
+    const stage = document.createElement("div"); stage.className = "stage"; stage.id = "stage";
+    let html = "";
+    if (kind === "paragraphs") {
+        for (let p = 0; p < 400; ++p) {
+            let s = "";
+            for (let k = 0; k < 8; ++k) {
+                const t = sentence(10);
+                const r = rnd();
+                s += r < 0.3 ? `<a href="#x${p}">${t}</a>. ` : r < 0.4 ? `<b>${t}</b>. ` : r < 0.5 ? `<i>${t}</i>. ` : t + ". ";
+            }
+            html += `<p>${s}</p>`;
+        }
+    } else if (kind === "spans") {
+        for (let p = 0; p < 200; ++p) {
+            let s = "";
+            for (let k = 0; k < 100; ++k) s += `<span>${word()}</span> `;
+            html += `<p>${s}</p>`;
+        }
+    } else if (kind === "table") {
+        html = "<table>";
+        for (let r = 0; r < 600; ++r) {
+            html += "<tr>";
+            for (let c = 0; c < 6; ++c) html += `<td>${sentence(1 + Math.floor(rnd() * 6))}</td>`;
+            html += "</tr>";
+        }
+        html += "</table>";
+    } else if (kind === "inlineblock") {
+        stage.classList.add("ib");
+        for (let i = 0; i < 2000; ++i) html += `<span>w${i}</span>`;
+    } else if (kind === "plain") {
+        for (let p = 0; p < 400; ++p) html += `<p>${sentence(80)}.</p>`;
+    }
+    if (noKerning) { stage.style.fontKerning = "none"; stage.style.textRendering = "optimizeSpeed"; }
+    stage.innerHTML = html;
+    host.replaceChildren(stage);
+    void stage.offsetHeight;
+    return stage;
+}
+window.__run = function (kinds, rounds) {
+    const out = {};
+    for (const k of (kinds || ["plain", "paragraphs", "spans", "table", "inlineblock"])) {
+        const t0 = performance.now();
+        const stage = build(k);
+        const first = performance.now() - t0;
+        out[k] = Object.assign({firstLayout: Math.round(first)}, __relayout(stage, rounds || 30, 900, 940));
+    }
+    document.getElementById("host").replaceChildren();
+    return out;
+};
+// #show=kind: just lay the kind out and leave it on screen (for screenshots).
+if (location.hash.startsWith("#show="))
+    window.addEventListener("load", () => { build(location.hash.slice(6)); document.title = "shown"; });
+// #auto=kind,kind,...: run each kind three times without the inspector attached; results in the title.
+if (location.hash.startsWith("#auto")) {
+    const kinds = (location.hash.split("=")[1] || "plain,paragraphs,spans,inlineblock,table").split(",");
+    const results = {};
+    let step = 0;
+    const next = () => {
+        if (step >= kinds.length * 3) {
+            document.getElementById("host").replaceChildren();
+            document.title = "done " + JSON.stringify(results);
+            return;
+        }
+        const kind = kinds[step % kinds.length];
+        ++step;
+        const r = __relayout(build(kind), 20, 900, 940);
+        (results[kind] = results[kind] || []).push(r.median);
+        document.title = "running " + step;
+        setTimeout(next, 200);
+    };
+    window.addEventListener("load", () => setTimeout(next, 1500));
+}
+</script>

@@ -1,5 +1,140 @@
 # Summit performance: Speedometer 3.1 baseline, where the time goes, stress test
 
+## 30 October 2026: kerned text measured the simple way (#117)
+
+The #117 item "inline text layout measured about 5× slower than Firefox"
+(September 23, "Focused inline text layout result" below), measured again on
+the X399. Setup: GTX 1070, air/OS hrev60207+2114, one test copy at a time,
+screen blanker stopped, engine from CI's tree at ac00c85 with and without the
+change. Firefox is no longer installed on the X399 or the laptop, so the
+Firefox column is September's.
+
+**What was Haiku's own.** Haiku's Skia build shapes text with HarfBuzz, as
+GTK and WPE do. Unlike them, it does not define
+`USE(FONT_VARIANT_VIA_FEATURES)`. Without it, `FontCascade::codePath()` sends
+every run longer than one character to the complex path whenever kerning is
+on, and `font-kerning: auto` turns it on. So no text on a page qualified for
+WebKit's simplified text measuring. Every line then asked for the fallback
+fonts of each of its characters (`LineBoxBuilder::collectFallbackFonts` ->
+`TextUtil::fallbackFontsForText` -> `glyphDataForCharacter`). The text-only
+line builder (`TextOnlySimpleLineBuilder`) was never used. In a profile of
+plain paragraphs being laid out again and again, this took 19 % of all samples,
+about a quarter of the main thread. Font lookups proper (Fontconfig, typeface
+creation, `FontCache`) were under 1 % in every relayout profile.
+
+This also explains a September result. Its `optimizeSpeed` case also turned
+ligatures off, and `font-variant-ligatures: none` makes `requiresShaping()`
+true. That kept the text on the complex path, which is why the case "did not
+move the result". With only kerning off, plain paragraphs went from 13 to
+9 ms.
+
+**Change** (engine, `#if PLATFORM(HAIKU) && USE(SKIA)`):
+- `FontCascade.cpp`: `summitCodePathForSimplifiedMeasuring()` is
+  `codePath()` without the kerning and shaping test. `RenderText.cpp`
+  (`initiateFontLoadingByAccessingGlyphDataAndComputeCanUseSimplifiedTextMeasuring`)
+  and `TextUtil::canUseSimplifiedTextMeasuring` use it. All the other
+  conditions still apply: glyphs from the primary font only, no letter or
+  word spacing, the same first-line font, and no complex characters.
+- `FontCascade::widthForSimpleTextSlow()`, which fills the simplified width
+  cache, measures with `ComplexTextController` (HarfBuzz) exactly when
+  `codePath()` would have chosen the complex path: more than one character
+  with kerning or shaping. GTK and WPE do the same through
+  `shouldUseComplexTextControllerForSimpleText()`.
+- Drawing, selection and hit testing still follow `codePath()`, so glyphs and
+  widths are what they were. Only layout's bookkeeping takes the fast path.
+- `SUMMIT_SIMPLE_KERNED_TEXT=0` turns this off. Checked: with it set, the
+  numbers below go back to the "before" column.
+
+Defining `USE(FONT_VARIANT_VIA_FEATURES)` for Haiku in `PlatformUse.h` would
+have done the same as GTK in a few lines. That header is under all of WebKit,
+so it means a full rebuild; it would also need the GTK/WPE branches of
+`FontCascade.h` and `SVGTextMetricsBuilder.cpp`. It could go into the next
+full rebuild in place of this change.
+
+**Fixtures.** `tools/bench/pages/text-layout-suite.html` builds the content,
+then alternates its width between 900 and 940 px and reads `offsetHeight`.
+Each case is 20 forced layouts, and the median of each set is reported.
+`#auto` runs every case three times without the inspector attached and puts
+the results in the title. With the inspector attached the numbers were the
+same. The Wikipedia case is a saved copy of "World War II" with its scripts
+removed and a `<base>` to en.wikipedia.org for the style sheets. Its body
+alternates between 900 and 1000 px. Times are milliseconds per forced
+layout; each cell lists the three runs' medians.
+
+| Case | before | after |
+| --- | ---: | ---: |
+| 400 plain paragraphs of 80 words | 12-13 | 8-9 |
+| 400 paragraphs with links, bold and italic | 30-32 | 26 |
+| 200 paragraphs of 100 one-word `<span>`s | 48-49 | 43-44 |
+| 2,000 inline blocks of one word | 28 | 25 |
+| 600×6 table, collapsed borders | 149-150 | 137-138 |
+| Wikipedia, World War II, whole article | 138-140 | 130-131 |
+| plain paragraphs, `font-kerning: none` (already simple) | 9 | 8-9 |
+
+The September probe (`layout-text.html`, ms per layout, mean of 50), on the
+same builds:
+
+| Case | September | before | after | Firefox 155 (September) |
+| --- | ---: | ---: | ---: | ---: |
+| empty, automatic width | 10.80 | 8.72 | 9.02 | 5.90 |
+| repeated text, automatic width | 39.92 | 24.44 | 22.90 | 6.56 |
+| unique text, automatic width | 40.52 | 25.20 | 24.12 | 6.54 |
+| repeated text, fixed width | 33.66 | 20.58 | 20.64 | 6.80 |
+| unique text, fixed width | 34.24 | 21.96 | 24.34 | 6.90 |
+
+So the "5×" is now about 3-3.7×. Most of that gain came between September
+and today, not from this change. This probe is 2,000 inline blocks of one
+short word each, and its cost is per inline block. Each one is laid out as
+its own formatting context: width, intrinsic sizes, a line, display boxes and
+repaint rectangles. Measuring words is a small part of it.
+
+Speedometer 3.1, text-heavy suites only (`?suites=NewsSite-Next,
+NewsSite-Nuxt,TodoMVC-JavaScript-ES5,TodoMVC-Preact-Complex-DOM,
+Editor-TipTap`, local copy, `serve-speedometer.py`, default window). Runs
+alternated before/after; the score is over these five suites only:
+
+| | before | after |
+| --- | --- | --- |
+| 5 iterations | 7.89, 7.83 | 8.18, 8.15 |
+| 10 iterations | 8.09, 7.73, 7.77 | 8.32, 8.00, 8.10 |
+| Editor-TipTap (ms, 10 iterations) | 127, 131, 133 | 114, 115, 125 |
+| TodoMVC-Preact-Complex-DOM (ms, 10 iterations) | 55, 59, 60 | 53, 60, 56 |
+
+NewsSite and TodoMVC-JavaScript-ES5 did not change.
+
+**Rendering unchanged.** The six fixtures were captured with full-page
+`page_render`. So was `tools/bench/pages/text-kerning.html`: kerning pairs,
+ligatures, small caps, letter spacing, `::first-line`, `pre` with tabs,
+`break-all`, justification, Greek, Cyrillic, Hebrew, Arabic, CJK and emoji,
+bold, italic, 9 and 48 px. Every capture is identical pixel for pixel before
+and after. The 21 paragraph widths that page reports agree to three decimals.
+
+**Where the rest of the time goes.** After the change, plain paragraphs spend
+the main thread in the generic text-only line builder. Its top entries
+include one-line functions, such as:
+- `TextOnlySimpleLineBuilder::availableWidth()` (4.4 % of samples)
+- `InlineTextItem::isQuirkNonBreakingSpace()`
+- `Line::Run::isListMarkerOrItsContent()`
+- `InlineTextItem::isZeroWidthSpaceSeparator()`
+- `TextUtil::shouldPreserveSpacesAndTabs()`
+
+Together that is about 9 % of samples. These are defined in `.cpp` files and
+called from the same file, and GCC does not inline them. The Haiku build
+exports every function (no `-fvisibility=hidden`, unlike GTK and WPE), so
+under `-fPIC` GCC assumes each could be interposed. `RenderTableCell::table()`
+(8 % self in the table case) is the same story. That makes
+`-fno-semantic-interposition`, or hidden visibility, the remaining
+Haiku-specific cost in layout. It needs the full rebuild already planned for
+it (3 October, "start-up, process launches and first bytes"). The rest is
+WebKit's own, not Haiku's: collapsed-border bookkeeping in tables, and border
+widths evaluated on every query for borderless inline blocks
+(`snapLengthAsBorderWidth` plus `LineWidth` evaluation, about 9 % of the
+main thread).
+
+Seen on the way, not changed: the Arabic word on the kerning page is drawn in
+a calligraphic (Nastaliq-style) fallback font whose glyphs sit below the
+line, the same before and after.
+
 ## 30 October 2026: opaque layers occlude; backdrop blurs and filters in surfaces cached (#117)
 
 Two parts of the first rendering item of #117. The details of each mechanism
@@ -8083,6 +8218,8 @@ Fixed widths remove about 6 ms from Summit but leave about 24 ms of text work
 above its empty-box case. This rules out the sampled string-width cache and
 advanced shaping features as the main cause; the remaining gap is in repeated
 inline text layout and display-content construction.
+(30 October: the `optimizeSpeed` cases also turned ligatures off, which kept
+them on the complex path; see "kerned text measured the simple way".)
 
 The probe harness can now run Summit under Haiku's inclusive sampling profiler
 with `--haiku-profile`. Its focused profile records 15,323 samples in layout,

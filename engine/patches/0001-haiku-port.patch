@@ -16365,6 +16365,38 @@ index e1a87c9b816ea7528a88fad4010baada131183dc..2113de8d3c4ee98bf10ecc8af2d93a43
              ASSERT(cachedWidth == nonWhitespaceContentWidth(inlineTextBox, startPosition, endPosition, mayHaveGlyphOverflow).width);
              ASSERT(!mayHaveGlyphOverflow);
              return { cachedWidth, { } };
+diff --git a/Source/WebCore/layout/formattingContexts/inline/text/TextUtil.cpp b/Source/WebCore/layout/formattingContexts/inline/text/TextUtil.cpp
+index 3ddfafe7bd2cd8dde2682df00f9c2240fb3d2867..f76efe98e22761e64271c8e071c17096abe17953 100644
+--- a/Source/WebCore/layout/formattingContexts/inline/text/TextUtil.cpp
++++ b/Source/WebCore/layout/formattingContexts/inline/text/TextUtil.cpp
+@@ -51,6 +51,12 @@
+ #include <wtf/text/TextBreakIterator.h>
+ 
+ namespace WebCore {
++
++#if PLATFORM(HAIKU) && USE(SKIA)
++// In FontCascade.cpp.
++FontCascade::CodePath summitCodePathForSimplifiedMeasuring(const FontCascade&, const TextRun&);
++#endif
++
+ namespace Layout {
+ 
+ InlineLayoutUnit TextUtil::singleSpaceWidth(const FontCascade& fontCascade, bool canUseSimplifiedContentMeasuring)
+@@ -790,8 +796,14 @@ bool TextUtil::canUseSimplifiedTextMeasuring(StringView textContent, const FontC
+     // Additional check on the font codepath.
+     auto run = TextRun { textContent };
+     run.setCharacterScanForCodePath(false);
++#if PLATFORM(HAIKU) && USE(SKIA)
++    // Kerning alone does not rule simplified measuring out; see FontCascade.cpp.
++    if (summitCodePathForSimplifiedMeasuring(fontCascade, run) != FontCascade::CodePath::Simple)
++        return false;
++#else
+     if (fontCascade.codePath(run) != FontCascade::CodePath::Simple)
+         return false;
++#endif
+ 
+     if (firstLineStyle && fontCascade != firstLineStyle->fontCascade())
+         return false;
 diff --git a/Source/WebCore/layout/integration/LayoutIntegrationFormattingContextLayout.cpp b/Source/WebCore/layout/integration/LayoutIntegrationFormattingContextLayout.cpp
 index 293a07f27c8ce97a9cb3b372f153f571e848402d..ee2b9d11e12d004c4324b8911a8f51e5a93d4d7c 100644
 --- a/Source/WebCore/layout/integration/LayoutIntegrationFormattingContextLayout.cpp
@@ -25783,6 +25815,87 @@ index 55268404e5cf55f6e69fe7846d941cbef72b5e04..d7d4f2ef1805f1c2a293dd1b9098e216
      SkiaHarfBuzzFontCache m_harfBuzzFontCache;
  #if !OS(ANDROID) && !PLATFORM(WIN)
      SkiaSystemFallbackFontCache m_skiaSystemFallbackFontCache;
+diff --git a/Source/WebCore/platform/graphics/FontCascade.cpp b/Source/WebCore/platform/graphics/FontCascade.cpp
+index 64e2cacf589b2e8b204980d6569a32a6ba9c5fb8..3faf09ab038b5f6dfc7e6c910d139984fd36f375 100644
+--- a/Source/WebCore/platform/graphics/FontCascade.cpp
++++ b/Source/WebCore/platform/graphics/FontCascade.cpp
+@@ -48,6 +48,11 @@
+ #include <wtf/text/StringBuilder.h>
+ #include <wtf/text/TextStream.h>
+ 
++#if PLATFORM(HAIKU) && USE(SKIA)
++#include <cstdlib>
++#include <cstring>
++#endif
++
+ namespace WebCore {
+ 
+ WTF_MAKE_TZONE_ALLOCATED_IMPL(FontCascade);
+@@ -378,12 +383,64 @@ float FontCascade::width(CodePath codePathToUse, const TextRun& run, SingleThrea
+     return it.runWidthSoFar();
+ }
+ 
++#if PLATFORM(HAIKU) && USE(SKIA)
++// Haiku's Skia build shapes text with HarfBuzz, as GTK and WPE do, but it does not
++// define USE(FONT_VARIANT_VIA_FEATURES). So codePath() calls every run longer than
++// one character complex as soon as kerning is on, which it is by default
++// (font-kerning: auto). Layout then never measures text the simplified way: each
++// line asks for the fallback fonts of every character, the text-only line builder
++// is never used, and plain paragraphs lay out about a third slower.
++//
++// GTK and WPE call such text simple and still measure and draw it with
++// ComplexTextController (shouldUseComplexTextControllerForSimpleText()). Layout does
++// the same here: summitCodePathForSimplifiedMeasuring() leaves kerning and shaping
++// out of the decision, and widthForSimpleTextSlow() measures with HarfBuzz exactly
++// when codePath() would have sent the run to the complex path, so widths (and
++// drawing, which still follows codePath()) do not change.
++// SUMMIT_SIMPLE_KERNED_TEXT=0 turns this off.
++bool summitSimplifiedMeasuringOfKernedText();
++FontCascade::CodePath summitCodePathForSimplifiedMeasuring(const FontCascade&, const TextRun&);
++
++bool summitSimplifiedMeasuringOfKernedText()
++{
++    static const bool enabled = [] {
++        const char* value = std::getenv("SUMMIT_SIMPLE_KERNED_TEXT");
++        return !value || std::strcmp(value, "0");
++    }();
++    return enabled;
++}
++
++FontCascade::CodePath summitCodePathForSimplifiedMeasuring(const FontCascade& fontCascade, const TextRun& run)
++{
++    if (!summitSimplifiedMeasuringOfKernedText())
++        return fontCascade.codePath(run);
++    // codePath() without its kerning and shaping test; whole runs only, which
++    // canHandleRunAsSimpleText() always accepts.
++    if (auto forcedCodePath = FontCascade::forcedCodePath())
++        return *forcedCodePath;
++    if (!run.characterScanForCodePath() || run.is8Bit())
++        return FontCascade::CodePath::Simple;
++    return FontCascade::characterRangeCodePath(run.span16());
++}
++#endif
++
+ NEVER_INLINE float FontCascade::widthForSimpleTextSlow(StringView text, TextDirection textDirection, GlyphGeometryCacheEntry* cacheEntry) const
+ {
+ #if PLATFORM(GTK) || PLATFORM(WPE)
+     TextRun run { text, 0, 0, ExpansionBehavior::defaultBehavior(), textDirection, false, false };
+     float result = width(CodePath::Simple, run);
+ #else
++#if PLATFORM(HAIKU) && USE(SKIA)
++    // The test codePath() makes for kerning and shaping (see above): such text is
++    // drawn by ComplexTextController, so measure it with it too.
++    if (text.length() > 1 && (enableKerning() || requiresShaping()) && summitSimplifiedMeasuringOfKernedText()) {
++        TextRun run { text, 0, 0, ExpansionBehavior::defaultBehavior(), textDirection, false, false };
++        float result = width(CodePath::Complex, run);
++        if (cacheEntry)
++            cacheEntry->width = result;
++        return result;
++    }
++#endif
+     GlyphBuffer glyphBuffer;
+     Ref font = primaryFont();
+ 
 diff --git a/Source/WebCore/platform/graphics/FontCascadeCache.cpp b/Source/WebCore/platform/graphics/FontCascadeCache.cpp
 index 51bffcdd7b6ef0b36e466f0dbbe35344306b2d0f..c07538a38c4f36d15f66c2db760d867d4c4c017e 100644
 --- a/Source/WebCore/platform/graphics/FontCascadeCache.cpp
@@ -79759,10 +79872,35 @@ index 5a90dd68672464ece91671bee69e2598510a2ebb..fc069a89103a084e9466658ad1806068
  }
  
 diff --git a/Source/WebCore/rendering/RenderText.cpp b/Source/WebCore/rendering/RenderText.cpp
-index a52a008e494939c3874a83a8ae10bfc16a5b7025..53c7f1a89a1a416c12c91ddd5ac5c43b83149fc7 100644
+index a52a008e494939c3874a83a8ae10bfc16a5b7025..6f95ca9039d04a06c247bdc942c75b037da6ff2e 100644
 --- a/Source/WebCore/rendering/RenderText.cpp
 +++ b/Source/WebCore/rendering/RenderText.cpp
-@@ -2148,7 +2148,7 @@ unsigned RenderText::countRenderedCharacterOffsetsUntil(unsigned offset) const
+@@ -86,6 +86,11 @@
+ 
+ namespace WebCore {
+ 
++#if PLATFORM(HAIKU) && USE(SKIA)
++// In FontCascade.cpp.
++FontCascade::CodePath summitCodePathForSimplifiedMeasuring(const FontCascade&, const TextRun&);
++#endif
++
+ using namespace WTF::Unicode;
+ 
+ WTF_MAKE_TZONE_ALLOCATED_IMPL(RenderText);
+@@ -499,7 +504,12 @@ void RenderText::initiateFontLoadingByAccessingGlyphDataAndComputeCanUseSimplifi
+         // Additional check on the font codepath.
+         auto run = TextRun { textContent };
+         run.setCharacterScanForCodePath(false);
++#if PLATFORM(HAIKU) && USE(SKIA)
++        // Kerning alone does not rule simplified measuring out; see FontCascade.cpp.
++        m_canUseSimplifiedTextMeasuring = summitCodePathForSimplifiedMeasuring(fontCascade, run) == FontCascade::CodePath::Simple;
++#else
+         m_canUseSimplifiedTextMeasuring = fontCascade.codePath(run) == FontCascade::CodePath::Simple;
++#endif
+     }
+ 
+     m_hasPositionDependentContentWidth = false;
+@@ -2148,7 +2158,7 @@ unsigned RenderText::countRenderedCharacterOffsetsUntil(unsigned offset) const
  enum class OffsetType { Character, Caret };
  static bool containsOffset(const RenderText& text, unsigned offset, OffsetType type)
  {
