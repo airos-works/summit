@@ -1,5 +1,168 @@
 # Summit performance: Speedometer 3.1 baseline, where the time goes, stress test
 
+## 30 October 2026: page loads: text in fallback fonts shows a page, largest paints stamped when painted (#117)
+
+The #117 page-load items: the largest paint behind Firefox on Reddit and a
+cold BBC News, YouTube's first paint, and The Guardian's largest paints
+reported late with text waiting for web fonts. Measured on the X399 (GTX
+1070) and the laptop (Framework 13), each load in a test copy started on
+`about:blank` and sent to the page through its MCP server, the page's own
+timings read 4 s after its load event; cold = a new profile, warm = the same
+profile in a new browser, without restored tabs. The browsers' traces
+(`SUMMIT_NAV_TRACE`, `SUMMIT_FIRST_SHOWN_TRACE`, `SUMMIT_LCP_TRACE`) say what
+showed each page and when each candidate was painted. Firefox is no longer
+on the X399, so the comparisons with it are against the 3 October tables
+above.
+
+### What showed each page
+
+WebKit keeps the previous page on screen (the layer tree frozen: nothing
+painted, no paint timing) until the new one is "visually non-empty": more
+than 200 characters, more than 32x32 pixels of pictures, or parsing done
+with no style sheet or font pending, or the load complete.
+`SUMMIT_FIRST_SHOWN_TRACE=1` now says which rule showed the page and how
+much text waited for web fonts:
+
+- **The Guardian:** text, but 7,000-17,700 characters did not count. All 29
+  of its faces are `font-display: swap`, so that text is on the screen in
+  Georgia while the fonts load, but WebKit left out any text whose font was
+  still loading (`RenderTreeBuilder::reportVisuallyNonEmptyContent`, a
+  FIXME). The page was shown once a few hundred characters in other fonts
+  had been laid out.
+- **Reddit:** text (about 1,170 characters). A load without Reddit's
+  cookies (every cold one) first gets a JavaScript challenge page, an 8 KB
+  document that submits a form back with `?solution=...`; the timings the
+  page reports start at the second document.
+- **YouTube:** its first picture (40x40). No text is counted before it: the
+  first screen is grey skeleton boxes, and its text comes from scripts.
+- **BBC News:** text or pictures 90-170 ms in.
+
+### Text in a fallback font counts
+
+Text whose web font is loading now counts towards "visually non-empty" when
+its font is drawn visibly meanwhile: a face with `font-display: swap`, one
+whose short block period (`fallback`, `optional`) has passed, or any face
+that timed out (`FontCascade::primaryFont()` is then an interstitial font
+marked visible). Text in a face still in its block period is invisible and
+still does not count, as in Chrome and Firefox, which paint the rest of the
+page meanwhile. `SUMMIT_FALLBACK_TEXT_SHOWN=0` turns this off.
+
+### Largest contentful paints stamped when painted
+
+WebKit records an LCP candidate while painting and makes the entry in the
+next rendering update, stamped with that update's time. That update waits
+for the compositor to finish the painted frame and then for the main
+thread: from the traces, the next update came a median 80-370 ms after the
+paint that made the final LCP entry (X399; laptop 40-190 ms), up to 0.6 s
+while a page's scripts ran. So the entries were late, not the paints. The
+paint timing spec stamps an entry with its paint's update; Firefox reports
+the paint, Chrome the presentation of that frame. Entries now get the time
+of the first paint that recorded a candidate since the last entries were
+made (an image no earlier than its load), as first contentful paint already
+gets its update's time. `SUMMIT_LCP_PAINT_TIME=present` stamps them with the
+time the compositor finished that frame instead (as Chrome), `=0` with the
+later update as before. `SUMMIT_LCP_TRACE=1` prints each candidate's paint,
+presentation, next update and reported times.
+
+With all three times traced (X399, two rounds of the four pages, cold and
+warm), the compositor finished the frame holding the final candidate a
+median 57-191 ms after its paint (YouTube 57, BBC News 67-76, Reddit
+117-191, The Guardian 173-183) and the next update came 79-393 ms after the
+paint. Stamped at presentation, as Chrome does, the X399's largest paints
+would read 60-190 ms later than the paint stamps in the tables below: the
+time its first frames of a page take to raster, upload and present at
+200 %.
+
+### Rendering updates before the page is shown
+
+While its layer tree was frozen, a page had no rendering updates at all: no
+`requestAnimationFrame` callbacks, no IntersectionObserver or ResizeObserver
+deliveries, so lazily loaded pictures did not start. A page that adds its
+first content in an animation frame, or loads its first pictures when an
+observer says they are in view, waited for something else to show it. Chrome
+and Firefox run those before the first paint. Now the update runs while the
+tree is frozen for the page transition alone
+(`LayerTreeHost::updatesBeforeShownHaiku()`) and commits nothing:
+`Page::finalizeRenderingUpdate()` skips the layer flush, nothing is painted
+or sent to the compositor until the page is shown, and an update that shows
+the page goes on as a normal one. `SUMMIT_UPDATE_BEFORE_SHOWN=0` turns this off.
+
+- A test page whose text is added in an animation frame while a web font
+  loads (2.5 s, then fails): shown at 2,559-2,570 ms before, 60-64 ms after
+  (X399, three loads each). A lazily loaded picture on the same kind of page
+  now starts loading before the page is shown.
+- YouTube, warm, on the laptop: in two of three loads its first picture came
+  at 250 ms and the page showed then (first contentful paint 250-253 ms
+  instead of 832-860; the page used to be shown at 460-490 ms and then wait
+  for its scripts before the first update). The third load, and the X399's
+  loads, showed no change. Cold loads did not change: the picture comes
+  after YouTube's scripts have run.
+
+### Before and after
+
+Medians of three loads per row, ms, with all three changes off / on
+(`SUMMIT_FALLBACK_TEXT_SHOWN=0 SUMMIT_LCP_PAINT_TIME=0
+SUMMIT_UPDATE_BEFORE_SHOWN=0` against none), alternating; "page shown" is
+from the browser's navigation to the first visually non-empty layout
+reaching the browser. The page's own timings start later where the
+navigation went through another document (Reddit's challenge) or moved to
+another web process after the response (YouTube warm: about 0.4 s).
+
+X399:
+
+| page | load | first byte | page shown | first contentful paint | largest contentful paint | largest paint after the first byte |
+| --- | --- | --- | --- | --- | --- | --- |
+| The Guardian | cold | 647 / 643 | 886 / 779 | 981 / 783 | 1179 / 784 | 684 / 345 |
+| The Guardian | warm | 0 / 0 | 147 / 137 | 151 / 140 | 501 / 142 | 501 / 142 |
+| Reddit | cold | 258 / 259 | 891 / 918 | 770 / 780 | 1780 / 1128 | 1529 / 872 |
+| Reddit | warm | 306 / 311 | 839 / 829 | 846 / 835 | 1492 / 1133 | 1186 / 819 |
+| YouTube | cold | 425 / 383 | 1263 / 1212 | 1266 / 1212 | 2763 / 2639 | 2316 / 2261 |
+| YouTube | warm | 0 / 0 | 891 / 888 | 471 / 454 | 1580 / 1495 | 1580 / 1495 |
+| BBC News | cold | 81 / 77 | 164 / 151 | 165 / 150 | 321 / 274 | 231 / 212 |
+| BBC News | warm | 0 / 0 | 95 / 94 | 154 / 154 | 299 / 155 | 299 / 155 |
+
+Laptop (its "on" engine also had a check that showed a page as soon as it
+would paint anything contentful, as Chrome's paint holding does; it never
+decided a load, nothing on YouTube's skeleton was contentful before its
+picture, and it was taken out):
+
+| page | load | first byte | page shown | first contentful paint | largest contentful paint | largest paint after the first byte |
+| --- | --- | --- | --- | --- | --- | --- |
+| The Guardian | cold | 407 / 404 | 559 / 523 | 581 / 538 | 734 / 539 | 314 / 128 |
+| The Guardian | warm | 0 / 0 | 108 / 109 | 110 / 110 | 299 / 111 | 299 / 111 |
+| Reddit | cold | 262 / 263 | 886 / 906 | 798 / 809 | 1234 / 1236 | 957 / 977 |
+| Reddit | warm | 296 / 299 | 822 / 856 | 834 / 865 | 1288 / 971 | 992 / 672 |
+| YouTube | cold | 407 / 430 | 1060 / 1053 | 1060 / 1053 | 1883 / 1862 | 1498 / 1475 |
+| YouTube | warm | 0 / 0 | 903 / 646 | 833 / 253 | 833 / 855 | 833 / 855 |
+| BBC News | cold | 69 / 73 | 130 / 170 | 130 / 182 | 422 / 199 | 340 / 126 |
+| BBC News | warm | 0 / 0 | 110 / 108 | 149 / 145 | 285 / 145 | 285 / 145 |
+
+- The Guardian: its largest paint is now its first paint warm (a headline,
+  142 ms on the X399, 111 on the laptop, against 501 and 299), and cold 345
+  and 128 ms after the first byte instead of 684 and 314. Its first byte
+  varies from 50 to 800 ms (the server's per-User-Agent cache); first paints
+  moved by less than that spread.
+- Reddit: largest paint 1,128-1,133 ms on the X399 instead of 1,492-1,780
+  (Firefox 1,178-1,538 on 3 October); on the laptop warm 971 instead of
+  1,288, cold unchanged.
+- BBC News: largest paint (now a headline) 274 and 155 ms on the X399
+  instead of 321 and 299; on the laptop 199 and 145 instead of 422 and 285.
+  The cold item is closed: Firefox had 872 ms. Its first paint depends on
+  when its first picture arrives (128-200 ms); the laptop's cold medians
+  differ by that, not by the change.
+- YouTube: largest paint (the "Try searching to get started" heading its
+  scripts add) 2.6 s cold on the X399, level with Firefox's 2.6 s; first
+  paint 1.2 s cold against Firefox's 0.95 s on 3 October. Its first paint waits for its
+  scripts to make the first picture (above): JavaScriptCore's work, not the
+  visually non-empty rule. Warm loads: see above.
+- From the first visually non-empty layout to the first frame: 45-190 ms
+  (X399), 30-190 ms (laptop), unchanged; the frame waits for the main thread
+  when the page's scripts run on.
+
+Not done here: text hidden in a face's block period still does not count
+when its font arrives (the FIXME); `WebProcessCache` (compiled out on Haiku)
+is left to the next full rebuild.
+
 ## 30 October 2026: view transitions without a snapshot every frame (#117)
 
 The #117 item "View Transition snapshots are painted on the CPU, with blur

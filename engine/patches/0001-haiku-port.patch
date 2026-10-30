@@ -17921,8 +17921,183 @@ index 4555034d8312449920f8f16e8a9c252277d25003..fc2cb658f2f8ee869eaa6a7750ae834b
      ASSERT(event.type() == eventNames().keydownEvent);
  
      if (event.ctrlKey() || event.metaKey() || event.altKey() || event.shiftKey())
+diff --git a/Source/WebCore/page/LargestContentfulPaintData.cpp b/Source/WebCore/page/LargestContentfulPaintData.cpp
+index bbb54b89194cc6399eba94d1f9ea11ad625d5285..08e92ffa83c9725e66daad755fb153c97ea76453 100644
+--- a/Source/WebCore/page/LargestContentfulPaintData.cpp
++++ b/Source/WebCore/page/LargestContentfulPaintData.cpp
+@@ -54,13 +54,97 @@
+ #include <wtf/Ref.h>
+ #include <wtf/text/TextStream.h>
+ 
++#if PLATFORM(HAIKU)
++#include <cstdlib>
++#include <wtf/HashMap.h>
++#include <wtf/NeverDestroyed.h>
++#include <wtf/SetForScope.h>
++#endif
++
+ namespace WebCore {
+ 
+ WTF_MAKE_STRUCT_TZONE_ALLOCATED_IMPL(ElementLargestContentfulPaintData);
+ WTF_MAKE_TZONE_ALLOCATED_IMPL(LargestContentfulPaintData);
+ 
++#if PLATFORM(HAIKU)
++// WebKit makes an LCP entry in the rendering update after the one whose paint drew the element (painting
++// only records it and asks for another update), and stamped it with that later update's time. That update
++// waits for the compositor to finish the painted frame and then for the main thread: on a page whose
++// scripts keep it busy, hundreds of milliseconds after the paint, so the entry said the element appeared
++// that much later than it did. The paint timing spec stamps it with the time of the update that painted
++// it; Firefox uses that paint's time, Chrome the time the frame was presented. The time of the first paint
++// that recorded a candidate since the last entries were made is kept here (the header is included widely,
++// so not as a member) and becomes the entries' render time, as first contentful paint's is the update's.
++// SUMMIT_LCP_PAINT_TIME=present uses the time the compositor finished that frame instead (as Chrome; the
++// frame goes to the screen as it finishes), =0 the later update's time as before; SUMMIT_LCP_TRACE=1
++// prints each candidate with all three.
++enum class SummitLCPTime : uint8_t { NextUpdate, Paint, Presentation };
++static SummitLCPTime summitLCPTime()
++{
++    static SummitLCPTime mode = [] {
++        const char* value = std::getenv("SUMMIT_LCP_PAINT_TIME");
++        if (value && !strcmp(value, "0"))
++            return SummitLCPTime::NextUpdate;
++        if (value && !strcmp(value, "present"))
++            return SummitLCPTime::Presentation;
++        return SummitLCPTime::Paint;
++    }();
++    return mode;
++}
++
++static bool summitLCPTrace()
++{
++    static bool enabled = [] {
++        const char* value = std::getenv("SUMMIT_LCP_TRACE");
++        return value && value[0] == '1' && !value[1];
++    }();
++    return enabled;
++}
++
++struct SummitFirstPaint {
++    MonotonicTime time;
++    const Page* page { nullptr };
++};
++
++static HashMap<const LargestContentfulPaintData*, SummitFirstPaint>& summitFirstPaints()
++{
++    static NeverDestroyed<HashMap<const LargestContentfulPaintData*, SummitFirstPaint>> paints;
++    return paints;
++}
++
++// When the compositor last finished a frame of each page (WebKit's LayerTreeHost reports it).
++static HashMap<const Page*, MonotonicTime>& summitCompositeTimes()
++{
++    static NeverDestroyed<HashMap<const Page*, MonotonicTime>> times;
++    return times;
++}
++
++void summitFrameCompositedHaiku(const Page&, MonotonicTime);
++void summitFrameCompositedHaiku(const Page& page, MonotonicTime time)
++{
++    summitCompositeTimes().set(&page, time);
++}
++
++static void summitNotePaint(const LargestContentfulPaintData& data, const Element& element)
++{
++    summitFirstPaints().add(&data, SummitFirstPaint { MonotonicTime::now(), element.document().page() });
++}
++
++// Set while generateLargestContentfulPaintEntry() makes entries for the paints of one update: the time
++// they get, and for SUMMIT_LCP_TRACE when they were painted and when that frame was composited.
++static std::optional<MonotonicTime> s_summitBatchPaintTime;
++static std::optional<MonotonicTime> s_summitBatchPaintedAt;
++static std::optional<MonotonicTime> s_summitBatchPresentedAt;
++
++LargestContentfulPaintData::LargestContentfulPaintData() = default;
++LargestContentfulPaintData::~LargestContentfulPaintData()
++{
++    summitFirstPaints().remove(this);
++}
++#else
+ LargestContentfulPaintData::LargestContentfulPaintData() = default;
+ LargestContentfulPaintData::~LargestContentfulPaintData() = default;
++#endif
+ 
+ // https://w3c.github.io/paint-timing/#exposed-for-paint-timing
+ bool LargestContentfulPaintData::isExposedForPaintTiming(const Element& element)
+@@ -190,6 +274,25 @@ void LargestContentfulPaintData::potentiallyAddLargestContentfulPaintEntry(Eleme
+ 
+     m_largestPaintArea = *elementArea;
+ 
++#if PLATFORM(HAIKU)
++    DOMHighResTimeStamp updateTimestamp = paintTimestamp;
++    if (s_summitBatchPaintTime) {
++        // An image is not painted before it loaded.
++        auto paintTime = image ? std::max(*s_summitBatchPaintTime, loadTime) : *s_summitBatchPaintTime;
++        paintTimestamp = std::min(paintTimestamp, protect(window->performance())->relativeTimeFromTimeOriginInReducedResolution(paintTime));
++    }
++    if (summitLCPTrace() && element.document().frame() && element.document().frame()->isMainFrame()) {
++        Ref performance = window->performance();
++        auto at = [&](std::optional<MonotonicTime> time) {
++            return time ? performance->relativeTimeFromTimeOriginInReducedResolution(*time) : -1.0;
++        };
++        WTFLogAlways("Summit LCP: candidate %s size %.0f painted at %.0f ms, presented at %.0f ms, update at %.0f ms, reported %.0f ms%s%s\n",
++            element.tagName().utf8().legacyCStringPointer(), m_largestPaintArea, at(s_summitBatchPaintedAt), at(s_summitBatchPresentedAt),
++            updateTimestamp, paintTimestamp, image ? " image " : "",
++            image ? image->url().string().substring(std::max(image->url().string().length(), 60u) - 60).utf8().legacyCStringPointer() : "");
++    }
++#endif
++
+     Ref pendingEntry = LargestContentfulPaint::create(0);
+     pendingEntry->setElement(&element);
+     pendingEntry->setSize(std::round<unsigned>(m_largestPaintArea));
+@@ -223,6 +326,26 @@ void LargestContentfulPaintData::potentiallyAddLargestContentfulPaintEntry(Eleme
+ RefPtr<LargestContentfulPaint> LargestContentfulPaintData::generateLargestContentfulPaintEntry(DOMHighResTimeStamp paintTimestamp)
+ {
+     std::optional<FloatSize> viewportSize;
++#if PLATFORM(HAIKU)
++    std::optional<MonotonicTime> paintedAt;
++    std::optional<MonotonicTime> presentedAt;
++    if (auto firstPaint = summitFirstPaints().take(this); firstPaint.page) {
++        paintedAt = firstPaint.time;
++        // The update that makes these entries starts only once the compositor has finished the frame
++        // with that paint, so the page's last finished frame is that one if it came after the paint.
++        auto composited = summitCompositeTimes().getOptional(firstPaint.page);
++        if (composited && *composited >= firstPaint.time)
++            presentedAt = *composited;
++    }
++    std::optional<MonotonicTime> stamp;
++    if (summitLCPTime() == SummitLCPTime::Paint)
++        stamp = paintedAt;
++    else if (summitLCPTime() == SummitLCPTime::Presentation)
++        stamp = presentedAt ? presentedAt : paintedAt;
++    SetForScope batchPaintTime(s_summitBatchPaintTime, stamp);
++    SetForScope batchPaintedAt(s_summitBatchPaintedAt, paintedAt);
++    SetForScope batchPresentedAt(s_summitBatchPresentedAt, presentedAt);
++#endif
+ 
+     auto imageRecords = std::exchange(m_pendingImageRecords, { });
+     for (auto [weakElement, imageList] : imageRecords) {
+@@ -393,6 +516,9 @@ void LargestContentfulPaintData::didPaintImage(Element& element, CachedImage* im
+     m_pendingImageRecords.ensure(element, [] {
+         return Vector<WeakPtr<CachedImage>> { };
+     }).iterator->value.append(*image);
++#if PLATFORM(HAIKU)
++    summitNotePaint(*this, element);
++#endif
+ 
+     scheduleRenderingUpdateIfNecessary(element);
+ }
+@@ -435,6 +561,9 @@ void LargestContentfulPaintData::didPaintText(const RenderBlockFlow& formattingC
+     element->ensureLargestContentfulPaintData().accumulatedTextRect.unite(localRect);
+ 
+     m_paintedTextRecords.add(*element);
++#if PLATFORM(HAIKU)
++    summitNotePaint(*this, *element);
++#endif
+ 
+     scheduleRenderingUpdateIfNecessary(*element);
+ }
 diff --git a/Source/WebCore/page/LocalFrameView.cpp b/Source/WebCore/page/LocalFrameView.cpp
-index 2132dee6a2c27be522007bb4df5bc1f5940c1c06..81ca02cf5b7012832784a9c3228eb9d9b30e4576 100644
+index 2132dee6a2c27be522007bb4df5bc1f5940c1c06..d5880d1d4e55f390e5d909151f40723ae3e2ba57 100644
 --- a/Source/WebCore/page/LocalFrameView.cpp
 +++ b/Source/WebCore/page/LocalFrameView.cpp
 @@ -167,8 +167,20 @@
@@ -18112,7 +18287,19 @@ index 2132dee6a2c27be522007bb4df5bc1f5940c1c06..81ca02cf5b7012832784a9c3228eb9d9
  #if ASSERT_ENABLED
      auto needsStyleRecalc = [&] {
          DescendantsDeque deque;
-@@ -6299,6 +6403,21 @@ void LocalFrameView::checkAndDispatchDidReachVisuallyNonEmptyState()
+@@ -6217,6 +6321,11 @@ bool LocalFrameView::qualifiesAsSignificantRenderedText() const
+     return m_hasReachedSignificantRenderedTextThreshold;
+ }
+ 
++#if PLATFORM(HAIKU)
++// RenderTreeBuilder.cpp: text that waited for a web font, for SUMMIT_FIRST_SHOWN_TRACE.
++void summitFallbackTextCounts(const LocalFrameView&, unsigned& counted, unsigned& hidden);
++#endif
++
+ void LocalFrameView::checkAndDispatchDidReachVisuallyNonEmptyState()
+ {
+     auto qualifiesAsVisuallyNonEmpty = [&] {
+@@ -6299,6 +6408,34 @@ void LocalFrameView::checkAndDispatchDidReachVisuallyNonEmptyState()
          return;
  
      m_contentQualifiesAsVisuallyNonEmpty = true;
@@ -18126,9 +18313,22 @@ index 2132dee6a2c27be522007bb4df5bc1f5940c1c06..81ca02cf5b7012832784a9c3228eb9d9
 +        Ref document = *m_frame->document();
 +        RefPtr documentLoader = m_frame->loader().documentLoader();
 +        auto sinceStart = documentLoader ? MonotonicTime::now() - documentLoader->timing().startTime() : 0_s;
-+        WTFLogAlways("Summit first shown: %.0f ms after the navigation began, %u characters, %u pixels, url=%s\n",
-+            sinceStart.milliseconds(), m_visuallyNonEmptyCharacterCount, m_visuallyNonEmptyPixelCount,
-+            document->url().string().utf8().legacyCStringPointer());
++        unsigned fallbackCounted = 0;
++        unsigned fallbackHidden = 0;
++        summitFallbackTextCounts(*this, fallbackCounted, fallbackHidden);
++        const char* reason = "parsed, nothing pending";
++        if (document->hasVisuallyNonEmptyCustomContent())
++            reason = "custom content";
++        else if (m_visuallyNonEmptyCharacterCount > visualCharacterThreshold)
++            reason = "text";
++        else if (m_visuallyNonEmptyPixelCount > visualPixelThreshold)
++            reason = "pictures";
++        else if (m_frame->loader().isComplete())
++            reason = "load complete";
++        WTFLogAlways("Summit first shown: %.0f ms after the navigation began (%s), %u characters, %u pixels, "
++            "%u characters in a visible fallback font, %u hidden in a loading font, url=%s\n",
++            sinceStart.milliseconds(), reason, m_visuallyNonEmptyCharacterCount, m_visuallyNonEmptyPixelCount,
++            fallbackCounted, fallbackHidden, document->url().string().utf8().legacyCStringPointer());
 +    }
 +#endif
      if (m_frame->isRootFrame()) {
@@ -18527,7 +18727,7 @@ index 0000000000000000000000000000000000000000..029cc6d2189f48e938cedd6235ae43a4
 +    [SecureContext] undefined unregisterProtocolHandler(DOMString scheme, USVString url);
 +};
 diff --git a/Source/WebCore/page/Page.cpp b/Source/WebCore/page/Page.cpp
-index 12c38036f87636c92b0cdde24c1ee546f36ac008..800bbdcdf85c4c67ffabcddc9c2d27b5357efe5a 100644
+index 12c38036f87636c92b0cdde24c1ee546f36ac008..dc5f0681ab91675c7d39c5db7582f0ab0a06668f 100644
 --- a/Source/WebCore/page/Page.cpp
 +++ b/Source/WebCore/page/Page.cpp
 @@ -91,6 +91,10 @@
@@ -18837,7 +19037,40 @@ index 12c38036f87636c92b0cdde24c1ee546f36ac008..800bbdcdf85c4c67ffabcddc9c2d27b5
  void Page::isolatedUpdateRendering()
  {
      LOG(EventLoop, "Page %p isolatedUpdateRendering()", this);
-@@ -5213,6 +5346,20 @@ OptionSet<FilterRenderingMode> Page::preferredFilterRenderingModes(const Graphic
+@@ -2771,9 +2904,32 @@ void Page::finalizeRenderingUpdate(OptionSet<FinalizeRenderingUpdateFlags> flags
+     renderingUpdateCompleted();
+ }
+ 
++#if PLATFORM(HAIKU)
++// Set by WebKit's LayerTreeHost for a rendering update that runs while the
++// page's layer tree is frozen before its first showing: the update completes
++// without the layer flush (nothing is painted or committed).
++static bool s_summitSkipLayerFlush;
++void summitSkipLayerFlushHaiku(bool);
++void summitSkipLayerFlushHaiku(bool skip)
++{
++    s_summitSkipLayerFlush = skip;
++}
++#endif
++
+ void Page::finalizeRenderingUpdateForRootFrame(LocalFrame& rootFrame, OptionSet<FinalizeRenderingUpdateFlags> flags)
+ {
+     LOG(EventLoop, "Page %p finalizeRenderingUpdate()", this);
++#if PLATFORM(HAIKU)
++    if (s_summitSkipLayerFlush) {
++        m_renderingUpdateRemainingSteps.last().remove(RenderingUpdateStep::LayerFlush);
++#if ENABLE(ASYNC_SCROLLING)
++        m_renderingUpdateRemainingSteps.last().remove(RenderingUpdateStep::ScrollingTreeUpdate);
++#endif
++        UNUSED_PARAM(rootFrame);
++        UNUSED_PARAM(flags);
++        return;
++    }
++#endif
+ 
+     ASSERT(rootFrame.isRootFrame());
+     ASSERT_WITH_MESSAGE(rootFrame.isMainFrame() || !rootFrame.document() || rootFrame.document()->backForwardCacheState() == Document::NotInBackForwardCache, "A cached local root must not stay in Page::rootFrames()");
+@@ -5213,6 +5369,20 @@ OptionSet<FilterRenderingMode> Page::preferredFilterRenderingModes(const Graphic
          modes.add(FilterRenderingMode::Accelerated);
  #endif
  
@@ -81341,6 +81574,99 @@ index 0000000000000000000000000000000000000000..cff799029b188a06ba83de7d16f2747e
 +} // namespace WebCore
 +
 +#endif // RenderThemeHaiku_h
+diff --git a/Source/WebCore/rendering/updating/RenderTreeBuilder.cpp b/Source/WebCore/rendering/updating/RenderTreeBuilder.cpp
+index fac817a56eee7e32fb0a19148304955c3831795d..1483d6b21c1ed1e6c72d4b803e31285bb07e0e4e 100644
+--- a/Source/WebCore/rendering/updating/RenderTreeBuilder.cpp
++++ b/Source/WebCore/rendering/updating/RenderTreeBuilder.cpp
+@@ -83,6 +83,11 @@
+ #include "StyleComputedStyle+GettersInlines.h"
+ #include <wtf/SetForScope.h>
+ 
++#if PLATFORM(HAIKU)
++#include "FontCascadeInlines.h"
++#include <cstdlib>
++#endif
++
+ namespace WebCore {
+ 
+ RenderTreeBuilder* RenderTreeBuilder::s_current;
+@@ -1110,6 +1115,53 @@ void RenderTreeBuilder::attachToRenderGrid(RenderGrid& parent, RenderPtr<RenderO
+     blockBuilder().attach(parent, WTF::move(child), beforeChild);
+ }
+ 
++#if PLATFORM(HAIKU)
++// Text whose web font is still loading is drawn in a fallback font when the face has no block period
++// (font-display: swap), once a short one has passed (fallback, optional) or once any face's block
++// period has timed out. WebKit counted none of it towards "visually non-empty", so a page set in such
++// faces stayed hidden (its layer tree frozen, nothing painted, no paint timing) until its fonts arrived,
++// other content counted or the load completed: on The Guardian, whose 29 faces all swap, 7,000-17,700
++// characters on screen in Georgia did not count, and the page waited for a few hundred characters in
++// other fonts. Chrome and Firefox paint such text at once. It now counts when the face it waits for is
++// drawn visibly in the meantime; text in a face still in its block period is invisible and is left out
++// as before. SUMMIT_FALLBACK_TEXT_SHOWN=0 turns this off.
++static bool summitCountsVisibleFallbackText()
++{
++    static bool enabled = [] {
++        const char* value = std::getenv("SUMMIT_FALLBACK_TEXT_SHOWN");
++        return !value || strcmp(value, "0");
++    }();
++    return enabled;
++}
++
++// For SUMMIT_FIRST_SHOWN_TRACE: characters of the root frame's text that waited for a web font, counted
++// because their fallback is visible, or left out because it is not (block period). Reset for a new view.
++static const LocalFrameView* s_summitFallbackTextView;
++static unsigned s_summitFallbackTextCounted;
++static unsigned s_summitFallbackTextHidden;
++
++void summitFallbackTextCounts(const LocalFrameView&, unsigned& counted, unsigned& hidden);
++void summitFallbackTextCounts(const LocalFrameView& view, unsigned& counted, unsigned& hidden)
++{
++    bool same = s_summitFallbackTextView == &view;
++    counted = same ? s_summitFallbackTextCounted : 0;
++    hidden = same ? s_summitFallbackTextHidden : 0;
++}
++
++static void summitNoteFallbackText(const LocalFrameView& view, const String& text, bool counted)
++{
++    if (!view.frame().isRootFrame())
++        return;
++    if (s_summitFallbackTextView != &view) {
++        s_summitFallbackTextView = &view;
++        s_summitFallbackTextCounted = 0;
++        s_summitFallbackTextHidden = 0;
++    }
++    unsigned length = text.length();
++    (counted ? s_summitFallbackTextCounted : s_summitFallbackTextHidden) += length;
++}
++#endif
++
+ void RenderTreeBuilder::reportVisuallyNonEmptyContent(const RenderElement& parent, const RenderObject& child)
+ {
+     if (m_view.frameView().hasEnoughContentForVisualMilestones())
+@@ -1117,9 +1169,22 @@ void RenderTreeBuilder::reportVisuallyNonEmptyContent(const RenderElement& paren
+ 
+     if (auto* textRenderer = dynamicDowncast<RenderText>(child)) {
+         auto& style = parent.style();
++#if PLATFORM(HAIKU)
++        if (style.usedVisibility() != Visibility::Visible)
++            return;
++        if (style.fontCascade().isLoadingCustomFonts()) {
++            // FIXME: Text hidden in a face's block period is not counted when the font arrives.
++            bool shown = summitCountsVisibleFallbackText() && style.fontCascade().primaryFont().visibility() == Font::Visibility::Visible;
++            summitNoteFallbackText(m_view.frameView(), textRenderer->text(), shown);
++            if (!shown)
++                return;
++        }
++        m_view.frameView().incrementVisuallyNonEmptyCharacterCount(textRenderer->text());
++#else
+         // FIXME: Find out how to increment the visually non empty character count when the font becomes available.
+         if (style.usedVisibility() == Visibility::Visible && !style.fontCascade().isLoadingCustomFonts())
+             m_view.frameView().incrementVisuallyNonEmptyCharacterCount(textRenderer->text());
++#endif
+         return;
+     }
+     if (isAnyOf<RenderHTMLCanvas, RenderEmbeddedObject>(child)) {
 diff --git a/Source/WebCore/rendering/updating/RenderTreeBuilderList.cpp b/Source/WebCore/rendering/updating/RenderTreeBuilderList.cpp
 index e35e12e8b19d0e6860a928fd325d858402e8e362..e317b971cbf7dbbe7a74378837976afdf850b4a0 100644
 --- a/Source/WebCore/rendering/updating/RenderTreeBuilderList.cpp
@@ -174095,7 +174421,7 @@ index 966a06fa799167a5ffe3eb3a3047fb38fe3ef02b..f8afecce1076792f55b4ddb7b7bd6d33
  #if PLATFORM(GTK)
      bool m_transientZoom { false };
 diff --git a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/FrameRenderer.cpp b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/FrameRenderer.cpp
-index 832cf9654eda96a582713c2bc24b76914546f982..3a3050f921e49ed461a5c98414deace973b69d96 100644
+index 832cf9654eda96a582713c2bc24b76914546f982..d4183a9ff4d530a06a5880cdb09aa8f83879c56a 100644
 --- a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/FrameRenderer.cpp
 +++ b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/FrameRenderer.cpp
 @@ -30,6 +30,10 @@
@@ -174153,8 +174479,22 @@ index 832cf9654eda96a582713c2bc24b76914546f982..3a3050f921e49ed461a5c98414deace9
      m_renderingUpdateRunLoopObserver->schedule();
  }
  
+@@ -76,8 +107,13 @@ void FrameRenderer::renderingUpdateRunLoopObserverFired()
+ 
+     invalidateRenderingUpdateRunLoopObserver();
+ 
++#if PLATFORM(HAIKU)
++    if ((m_layerTreeStateIsFrozen && !updatesWhileFrozenHaiku()) || m_isSuspended)
++        return;
++#else
+     if (m_layerTreeStateIsFrozen || m_isSuspended)
+         return;
++#endif
+ 
+     if (canUpdateRendering())
+         updateRendering();
 diff --git a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/FrameRenderer.h b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/FrameRenderer.h
-index f7a92c96dec16106113dc0ee005ebd40f36a7ffb..a2fe954b61fa4450bcb9abaec2d7155bfeb044c5 100644
+index f7a92c96dec16106113dc0ee005ebd40f36a7ffb..dda1070c132361a92e2d1471427d9824fd3dba1d 100644
 --- a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/FrameRenderer.h
 +++ b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/FrameRenderer.h
 @@ -27,6 +27,9 @@
@@ -174180,7 +174520,19 @@ index f7a92c96dec16106113dc0ee005ebd40f36a7ffb..a2fe954b61fa4450bcb9abaec2d7155b
      void setLayerTreeStateIsFrozen(bool);
      void updateRenderingWithForcedRepaintAsync(CompletionHandler<void()>&&);
  
-@@ -97,6 +106,11 @@ protected:
+@@ -88,6 +97,11 @@ protected:
+ 
+     virtual bool canUpdateRendering() const = 0;
+     virtual void updateRendering() = 0;
++#if PLATFORM(HAIKU)
++    // Whether rendering updates run while the layer tree is frozen (they
++    // then commit nothing): see LayerTreeHost::updatesBeforeShownHaiku().
++    virtual bool updatesWhileFrozenHaiku() const { return false; }
++#endif
+ 
+     virtual void scheduleRenderingUpdateRunLoopObserver();
+     void invalidateRenderingUpdateRunLoopObserver();
+@@ -97,6 +111,11 @@ protected:
      bool m_layerTreeStateIsFrozen { false };
      bool m_isSuspended { false };
      bool m_isUpdatingRendering { false };
@@ -174193,7 +174545,7 @@ index f7a92c96dec16106113dc0ee005ebd40f36a7ffb..a2fe954b61fa4450bcb9abaec2d7155b
  };
  
 diff --git a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/LayerTreeHost.cpp b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/LayerTreeHost.cpp
-index 3d6d03115b4e8f2c5868af50c90f83cccc25bcf7..f0f3c3bb612d33745fedcb6668e2c3279f35ea6d 100644
+index 3d6d03115b4e8f2c5868af50c90f83cccc25bcf7..320169180d8d89fa7329993dfd75ed45f1814d16 100644
 --- a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/LayerTreeHost.cpp
 +++ b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/LayerTreeHost.cpp
 @@ -28,6 +28,7 @@
@@ -174204,7 +174556,7 @@ index 3d6d03115b4e8f2c5868af50c90f83cccc25bcf7..f0f3c3bb612d33745fedcb6668e2c327
  
  #if USE(COORDINATED_GRAPHICS)
  #include "CoordinatedSceneState.h"
-@@ -53,11 +54,20 @@
+@@ -53,11 +54,32 @@
  #include <WebCore/SkiaPaintingEngine.h>
  #include <WebCore/ThreadedScrollingTree.h>
  #include <WebCore/WindowEventLoop.h>
@@ -174222,10 +174574,22 @@ index 3d6d03115b4e8f2c5868af50c90f83cccc25bcf7..f0f3c3bb612d33745fedcb6668e2c327
 +#include <unistd.h>
 +#include <WebCore/RenderingStallHaiku.h>
 +#endif
++
++#if PLATFORM(HAIKU)
++namespace WebCore {
++// Page.cpp: while set, Page::finalizeRenderingUpdate() completes the update
++// without flushing the page's layers (nothing is painted or committed).
++void summitSkipLayerFlushHaiku(bool);
++// LargestContentfulPaintData.cpp: when the compositor finished a frame of
++// the page (SUMMIT_LCP_PAINT_TIME=present).
++class Page;
++void summitFrameCompositedHaiku(const Page&, MonotonicTime);
++}
++#endif
  
  namespace WebKit {
  using namespace WebCore;
-@@ -91,7 +101,18 @@ std::unique_ptr<LayerTreeHost> LayerTreeHost::create(WebPage& webPage)
+@@ -91,7 +113,18 @@ std::unique_ptr<LayerTreeHost> LayerTreeHost::create(WebPage& webPage)
  LayerTreeHost::LayerTreeHost(WebPage& webPage)
      : m_webPage(webPage)
      , m_sceneState(CoordinatedSceneState::create())
@@ -174244,7 +174608,40 @@ index 3d6d03115b4e8f2c5868af50c90f83cccc25bcf7..f0f3c3bb612d33745fedcb6668e2c327
      {
          auto& rootLayer = m_sceneState->rootLayer();
  #if ENABLE(DAMAGE_TRACKING)
-@@ -148,17 +169,129 @@ void LayerTreeHost::scheduleRenderingUpdate()
+@@ -144,21 +177,167 @@ uint64_t LayerTreeHost::surfaceID() const
+     return m_compositor->surfaceID();
+ }
+ 
++#if PLATFORM(HAIKU)
++// A page being navigated away from or to keeps its layer tree frozen from the
++// start of the provisional load until the new document is "visually
++// non-empty" (WebPage::didStartPageTransition(), LocalFrameView::
++// checkAndDispatchDidReachVisuallyNonEmptyState()), so that the old page stays
++// on screen instead of a blank one. Frozen, the page had no rendering updates
++// at all: no requestAnimationFrame callbacks, no IntersectionObserver or
++// ResizeObserver deliveries, so no lazily loaded images started. A page that
++// builds its first screen in animation frames, or whose first pictures load
++// when an observer says they are in view, waited for whatever else made it
++// count (a test page whose text is added in an animation frame while a web
++// font loads: shown after 2.6 s, when the font failed, instead of 60 ms). In
++// Chrome and Firefox those run before the first paint; only what reaches the
++// screen waits. Here the update runs while the tree is frozen for the page
++// transition alone, and commits nothing (no layer flush, no painting, no
++// composition) until the page is shown. SUMMIT_UPDATE_BEFORE_SHOWN=0 turns
++// this off.
++bool LayerTreeHost::updatesBeforeShownHaiku() const
++{
++    static bool enabled = [] {
++        const char* value = std::getenv("SUMMIT_UPDATE_BEFORE_SHOWN");
++        return !value || strcmp(value, "0");
++    }();
++    if (!enabled || !m_layerTreeStateIsFrozen || m_isSuspended)
++        return false;
++    return m_webPage->layerTreeFreezeReasons() == OptionSet<WebPage::LayerTreeFreezeReason> { WebPage::LayerTreeFreezeReason::PageTransition };
++}
++#endif
++
+ void LayerTreeHost::scheduleRenderingUpdate()
  {
      WTFEmitSignpost(this, LayerTreeHostScheduleRenderingUpdate, "isWaitingForRenderer %s", m_isWaitingForRenderer ? "yes" : "no");
  
@@ -174259,8 +174656,13 @@ index 3d6d03115b4e8f2c5868af50c90f83cccc25bcf7..f0f3c3bb612d33745fedcb6668e2c327
 +            m_isWaitingForRenderer, m_scheduledWhileWaitingForRenderer, m_layerTreeStateIsFrozen, m_isSuspended);
 +#endif
 +
++#if PLATFORM(HAIKU)
++    if ((m_layerTreeStateIsFrozen && !updatesBeforeShownHaiku()) || m_isSuspended || m_webPage->size().isEmpty())
++        return;
++#else
      if (m_layerTreeStateIsFrozen || m_isSuspended || m_webPage->size().isEmpty())
          return;
++#endif
  
      if (m_isWaitingForRenderer) {
          m_scheduledWhileWaitingForRenderer = true;
@@ -174374,7 +174776,7 @@ index 3d6d03115b4e8f2c5868af50c90f83cccc25bcf7..f0f3c3bb612d33745fedcb6668e2c327
  void LayerTreeHost::scheduleRenderingUpdateRunLoopObserver()
  {
      FrameRenderer::scheduleRenderingUpdateRunLoopObserver();
-@@ -174,20 +307,72 @@ bool LayerTreeHost::canUpdateRendering() const
+@@ -174,20 +353,99 @@ bool LayerTreeHost::canUpdateRendering() const
  
  void LayerTreeHost::updateRendering()
  {
@@ -174407,8 +174809,17 @@ index 3d6d03115b4e8f2c5868af50c90f83cccc25bcf7..f0f3c3bb612d33745fedcb6668e2c327
      invalidateRenderingUpdateRunLoopObserver();
  
      RELEASE_ASSERT(!m_isUpdatingRendering);
++#if PLATFORM(HAIKU)
++    bool beforeShown = false;
++    if (m_layerTreeStateIsFrozen) {
++        if (!updatesBeforeShownHaiku())
++            return;
++        beforeShown = true;
++    }
++#else
      if (m_layerTreeStateIsFrozen)
          return;
++#endif
 +#if PLATFORM(HAIKU)
 +    m_lastRenderingUpdateHaiku = MonotonicTime::now();
 +    m_reportedLivenessStallHaiku = false;
@@ -174438,6 +174849,24 @@ index 3d6d03115b4e8f2c5868af50c90f83cccc25bcf7..f0f3c3bb612d33745fedcb6668e2c327
 +#if PLATFORM(HAIKU)
 +    if (traceRenderPhases)
 +        afterPageUpdate = MonotonicTime::now();
++    // Still frozen (an update during it may have shown the page, which then
++    // goes on as any other): finish WebCore's update without its layer flush
++    // and send nothing to the compositor.
++    if (beforeShown && m_layerTreeStateIsFrozen) {
++        static bool traceBeforeShown = [] {
++            const char* value = std::getenv("SUMMIT_FIRST_SHOWN_TRACE");
++            return value && value[0] == '1' && !value[1];
++        }();
++        if (traceBeforeShown)
++            std::fprintf(stderr, "Summit first shown: pid=%d rendering update before the page is shown (%.1f ms)\n",
++                static_cast<int>(getpid()), (MonotonicTime::now() - m_lastRenderingUpdateHaiku).milliseconds());
++        page->flushPendingEditorStateUpdate();
++        WebCore::summitSkipLayerFlushHaiku(true);
++        page->finalizeRenderingUpdate({ });
++        WebCore::summitSkipLayerFlushHaiku(false);
++        page->didUpdateRendering({ });
++        return;
++    }
 +#endif
      page->flushPendingEditorStateUpdate();
 +#if PLATFORM(MAC) || PLATFORM(WPE) || PLATFORM(GTK)
@@ -174447,7 +174876,7 @@ index 3d6d03115b4e8f2c5868af50c90f83cccc25bcf7..f0f3c3bb612d33745fedcb6668e2c327
  
      if (m_overlayCompositingLayer)
          m_overlayCompositingLayer->flushCompositingState(visibleContentsRect());
-@@ -200,6 +385,32 @@ void LayerTreeHost::updateRendering()
+@@ -200,6 +458,32 @@ void LayerTreeHost::updateRendering()
      flags.add(FinalizeRenderingUpdateFlags::ApplyScrollingTreeLayerPositions);
  #endif
      page->finalizeRenderingUpdate(flags);
@@ -174480,7 +174909,7 @@ index 3d6d03115b4e8f2c5868af50c90f83cccc25bcf7..f0f3c3bb612d33745fedcb6668e2c327
  
      if (m_pendingResize) {
          m_compositor->setSize(page->size(), page->deviceScaleFactor());
-@@ -219,6 +430,10 @@ void LayerTreeHost::updateRendering()
+@@ -219,6 +503,10 @@ void LayerTreeHost::updateRendering()
          drawingArea->dispatchPendingCallbacksAfterEnsuringDrawing();
  
      bool didChangeSceneState = m_sceneState->flush();
@@ -174491,7 +174920,7 @@ index 3d6d03115b4e8f2c5868af50c90f83cccc25bcf7..f0f3c3bb612d33745fedcb6668e2c327
      if (m_compositionRequired || m_pendingResize || m_forceFrameSync || didChangeSceneState)
          requestCompositionForRenderingUpdate();
  
-@@ -237,6 +452,17 @@ void LayerTreeHost::updateRendering()
+@@ -237,6 +525,17 @@ void LayerTreeHost::updateRendering()
          m_sceneState->waitUntilPaintingComplete();
          m_waitUntilPaintingComplete = false;
      }
@@ -174509,7 +174938,7 @@ index 3d6d03115b4e8f2c5868af50c90f83cccc25bcf7..f0f3c3bb612d33745fedcb6668e2c327
  }
  
  void LayerTreeHost::updateRootLayer()
-@@ -271,6 +497,9 @@ void LayerTreeHost::setViewOverlayRootLayer(GraphicsLayer* graphicsLayer)
+@@ -271,6 +570,9 @@ void LayerTreeHost::setViewOverlayRootLayer(GraphicsLayer* graphicsLayer)
  
  void LayerTreeHost::updateRenderingWithForcedRepaint()
  {
@@ -174519,7 +174948,7 @@ index 3d6d03115b4e8f2c5868af50c90f83cccc25bcf7..f0f3c3bb612d33745fedcb6668e2c327
      if (m_isWaitingForRenderer) {
          if (m_forcedRepaintAsyncCallback)
              m_pendingForceRepaint = true;
-@@ -314,14 +543,122 @@ void LayerTreeHost::sizeDidChange()
+@@ -314,14 +616,122 @@ void LayerTreeHost::sizeDidChange()
          updateRendering();
  }
  
@@ -174642,7 +175071,7 @@ index 3d6d03115b4e8f2c5868af50c90f83cccc25bcf7..f0f3c3bb612d33745fedcb6668e2c327
      m_compositor->resume();
      FrameRenderer::resume();
  }
-@@ -389,6 +726,18 @@ void LayerTreeHost::requestComposition(CompositionReason reason)
+@@ -389,6 +799,18 @@ void LayerTreeHost::requestComposition(CompositionReason reason)
      m_compositor->requestComposition(reason);
  }
  
@@ -174661,7 +175090,7 @@ index 3d6d03115b4e8f2c5868af50c90f83cccc25bcf7..f0f3c3bb612d33745fedcb6668e2c327
  RunLoop* LayerTreeHost::compositingRunLoop() const
  {
      return m_compositor->runLoop();
-@@ -428,14 +777,51 @@ Ref<GraphicsLayer> LayerTreeHost::createGraphicsLayer(GraphicsLayer::Type layerT
+@@ -428,14 +850,51 @@ Ref<GraphicsLayer> LayerTreeHost::createGraphicsLayer(GraphicsLayer::Type layerT
      return adoptRef(*new GraphicsLayerCoordinated(layerType, client, CoordinatedPlatformLayer::create(*this)));
  }
  
@@ -174713,7 +175142,7 @@ index 3d6d03115b4e8f2c5868af50c90f83cccc25bcf7..f0f3c3bb612d33745fedcb6668e2c327
      Ref webPage = m_webPage;
      if (RefPtr drawingArea = webPage->drawingArea())
          drawingArea->didCompleteRenderingUpdateDisplay();
-@@ -447,8 +833,24 @@ void LayerTreeHost::didRenderFrame()
+@@ -447,9 +906,29 @@ void LayerTreeHost::didRenderFrame()
  
  void LayerTreeHost::requestCompositionForRenderingUpdate()
  {
@@ -174736,9 +175165,30 @@ index 3d6d03115b4e8f2c5868af50c90f83cccc25bcf7..f0f3c3bb612d33745fedcb6668e2c327
 +            std::fprintf(stderr, "Summit layer update: did-composite queued=%d\n", m_scheduledWhileWaitingForRenderer);
 +#endif
          WTFBeginSignpost(this, DidComposite);
++#if PLATFORM(HAIKU)
++        if (RefPtr corePage = protect(m_webPage)->corePage())
++            WebCore::summitFrameCompositedHaiku(*corePage, MonotonicTime::now());
++#endif
  
          if (!m_pendingForceRepaint && m_forcedRepaintAsyncCallback)
-@@ -616,6 +1018,13 @@ void LayerTreeHost::fillGLInformation(RenderProcessInfo&& info, CompletionHandle
+             m_forcedRepaintAsyncCallback();
+@@ -461,8 +940,14 @@ void LayerTreeHost::requestCompositionForRenderingUpdate()
+                 updateRenderingWithForcedRepaint();
+             else if (m_forcedRepaintAsyncCallback)
+                 m_forcedRepaintAsyncCallback();
+-        } else if (!m_isSuspended && !m_layerTreeStateIsFrozen && scheduledWhileWaitingForRenderer)
++        }
++#if PLATFORM(HAIKU)
++        else if (!m_isSuspended && (!m_layerTreeStateIsFrozen || updatesBeforeShownHaiku()) && scheduledWhileWaitingForRenderer)
++            scheduleRenderingUpdateRunLoopObserver();
++#else
++        else if (!m_isSuspended && !m_layerTreeStateIsFrozen && scheduledWhileWaitingForRenderer)
+             scheduleRenderingUpdateRunLoopObserver();
++#endif
+ 
+         WTFEndSignpost(this, DidComposite);
+     });
+@@ -616,6 +1101,13 @@ void LayerTreeHost::fillGLInformation(RenderProcessInfo&& info, CompletionHandle
  
  void LayerTreeHost::releaseMemory(WTF::Critical critical)
  {
@@ -174753,7 +175203,7 @@ index 3d6d03115b4e8f2c5868af50c90f83cccc25bcf7..f0f3c3bb612d33745fedcb6668e2c327
      m_compositor->releaseMemory(critical);
  }
 diff --git a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/LayerTreeHost.h b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/LayerTreeHost.h
-index 57163f65873e5a481e5ef5a4ec3beec4b40b7cea..c794adfac01b302829288e03746d1f5de0f3bb58 100644
+index 57163f65873e5a481e5ef5a4ec3beec4b40b7cea..83cf78d87d54f498f716862ba11448f952e9bc33 100644
 --- a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/LayerTreeHost.h
 +++ b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/LayerTreeHost.h
 @@ -75,6 +75,9 @@ public:
@@ -174777,7 +175227,18 @@ index 57163f65873e5a481e5ef5a4ec3beec4b40b7cea..c794adfac01b302829288e03746d1f5d
      RunLoop* compositingRunLoop() const override;
      int maxTextureSize() const override;
      void willPaintTile() override;
-@@ -145,6 +152,29 @@ private:
+@@ -110,6 +117,10 @@ private:
+     void scheduleRenderingUpdateRunLoopObserver() override;
+     bool canUpdateRendering() const override;
+     void updateRendering() override;
++#if PLATFORM(HAIKU)
++    bool updatesWhileFrozenHaiku() const override { return updatesBeforeShownHaiku(); }
++    bool updatesBeforeShownHaiku() const;
++#endif
+     void suspend() override;
+     void resume() override;
+     void sizeDidChange() override;
+@@ -145,6 +156,29 @@ private:
      bool m_waitUntilPaintingComplete { false };
      bool m_isWaitingForRenderer { false };
      bool m_scheduledWhileWaitingForRenderer { false };
