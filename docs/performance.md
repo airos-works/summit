@@ -1,5 +1,122 @@
 # Summit performance: Speedometer 3.1 baseline, where the time goes, stress test
 
+## 30 October 2026: view transitions without a snapshot every frame (#117)
+
+The #117 item "View Transition snapshots are painted on the CPU, with blur
+(about 0.7 s)" (3 October, the YouTube section below). Measured on the X399
+(GTX 1070, air/OS hrev60207+2114, one test copy, screen blanker stopped) and
+the laptop (Framework 13, window active), engine from CI's tree with and
+without the change. Fixtures: `vt117/vt.html` (a same-document
+`document.startViewTransition()` over a page with a YouTube-style ambient
+canvas under `filter: blur(60px)`, 40 cards and a sticky header; 1 s
+animations) and `vt117/x.html` (the same page, cross-document with
+`@view-transition { navigation: auto; }`); YouTube: search results to a
+watch page, with `document.startViewTransition` wrapped to time it.
+
+**Where the time went.** A profile of the laptop's web process during a
+transition: 88 % of the main thread in `ViewTransition::handleTransitionFrame()`
+-> `updatePseudoElementRenderers()` -> `snapshotElementVisualOverflowClippedToViewport()`,
+73 % in the blur (`FEGaussianBlurSkiaApplier`, `SkBitmapDevice`). Three causes:
+
+- `::view-transition-new(root)` was painted again into a new snapshot of the
+  whole page every frame. Upstream (295516@main, May 2025) forces an overflow
+  clip on that pseudo element so the page's layers it hosts stay inside the
+  snapshot containing block, and `RenderViewTransitionCapture::canUseExistingLayers()`
+  is false for every clipped capture, so the root lost its live layers. Each
+  frame was a full page paint with every composited filter flattened and run
+  in software. Every view transition has a root capture.
+- Snapshots are CPU bitmaps in the packaged Summit: Haiku has no Skia GL
+  context unless `SUMMIT_SKIA_GL_CONTEXT=1` (the X399 launcher sets it).
+- With the GL context the snapshot is a GPU surface, but filters painted into
+  it still ran in software (`Page::preferredFilterRenderingModes` adds the
+  accelerated mode only with `HardwareAccelerationEnabled`, which is off on
+  Haiku), and the result was uploaded.
+
+**Changes** (engine):
+
+- `RenderViewTransitionCapture`: when the only clip is the one forced on
+  `::view-transition-new(root)`, the root keeps its live layers. The clip is
+  made by the descendant clipping layer that
+  `RenderLayerCompositor::clipsCompositingDescendants()` already gives a
+  clipped `::view-transition-new`. Author `overflow`/`contain: paint` and
+  `object-view-box` captures still take a snapshot each frame, as upstream.
+  `SUMMIT_VIEW_TRANSITION_LIVE_ROOT=0` restores the snapshot every frame.
+- `TextureMapperLayer::computeOverlapRegions`: a clipping layer counted as one
+  rect, its children not looked at, so a translucent ancestor (the new root
+  fading in) saw no overlap and gave each descendant the opacity separately:
+  the cards showed through the sticky header. Children of a plain clipping
+  layer are now looked at, clipped to it. This applies to every page (a
+  translucent layer over an `overflow: hidden` layer with overlapping
+  composited children was drawn the same wrong way), so such layers may now
+  get an intermediate surface. `SUMMIT_CLIP_LAYER_OVERLAPS=0` turns it off.
+- `GraphicsLayerCoordinated` composites a view transition snapshot directly
+  as the layer's contents (`setContentsToImageBuffer`, as on Cocoa): a GPU
+  snapshot's texture is used as it is, a CPU one is uploaded once, and no
+  tiles are painted for `::view-transition-old`.
+  `SUMMIT_VIEW_TRANSITION_DIRECT_IMAGES=0` paints them into tiles again.
+- `Page::preferredFilterRenderingModes`: filters painted into a GPU context
+  run on the GPU (as with GTK and WPE). Only snapshots and GPU canvases have
+  GPU contexts here; tiles are CPU. `SUMMIT_GPU_CONTEXT_FILTERS=0` turns it off.
+- `SUMMIT_VIEW_TRANSITION_TRACE=1` logs each snapshot: size, CPU or GPU, the
+  element, paint time.
+
+**Results.** Times from `startViewTransition()` (same document) or from the
+click (cross-document) in ms; "frames" are `requestAnimationFrame` intervals
+from `ready` to `finished`.
+
+| | ready | frames during the transition |
+| --- | --- | --- |
+| Laptop, fixture, before | 205-270 | median 134-185 (5-7 fps) |
+| Laptop, fixture, after | 110-221 | median 17; 2nd and 3rd frame 65-84, 28-34 |
+| Laptop, fixture without the blur, before / after | 37-38 / 20-26 | 33-50 / 17 |
+| Laptop, cross-document, before | 272-274 | median 133-210 |
+| Laptop, cross-document, after | 118-204 | median 17 |
+| Laptop, `SUMMIT_SKIA_GL_CONTEXT=1`, fixture, after | 2-3 | median 17; 2nd frame 100-146 (once 781) |
+| X399, fixture, before | 655-668 | 268-433 |
+| X399, fixture, after | 276-435 | median 17; 2nd frame 83-124 |
+| X399, cross-document, before / after | 676-688 / 316-482 | 269-863 / median 17 |
+| X399 with `SUMMIT_SKIA_GL_CONTEXT=1`, fixture, before | 523-841 | 228-420 |
+| X399 with `SUMMIT_SKIA_GL_CONTEXT=1`, fixture, after | 3-21 | median 17; 2nd and 3rd frame 98-137, 22-69 |
+| X399 with `SUMMIT_SKIA_GL_CONTEXT=1`, cross-document, before / after | 535-924 / 14-17 | 224-730 / 78-146 then 17 |
+
+What is left of `ready` without the GL context is the old state's snapshot,
+painted on the CPU once: the fixture's root with its blur took 93-150 ms on
+the laptop and 252-406 ms on the X399 (trace); on the GPU 0.4-1.5 ms to
+record, with the GPU's work showing in the second frame.
+
+YouTube (light theme, so no ambient blur; it names `player-container`,
+`secondary` and `masthead` besides the root; three runs each):
+
+| | ready | frames after ready |
+| --- | --- | --- |
+| Laptop, before | 431-449 | 179-185, 98-111, 97 |
+| Laptop, after | 392-799 | 137-207, 41-79, 33-49 |
+| X399, before | 1197-1198 | 251-291, 164-189 |
+| X399, after | 614-1406 | 177-285, 66-98 |
+| X399 with the GL context, before / after | 1252-1336 / 1019-1680 | 397-481 / 347-387 |
+
+YouTube's `ready` is its own update callback: in a profile of the click on
+the X399 (after, with the GL context) the main thread is in YouTube's
+scripts, rendering updates are 9.5 % of the samples and view transition
+functions do not reach the list. Its four old snapshots take about 90 ms on
+the laptop's CPU (root 57-65 ms) and 1-5 ms to record on the GPU.
+
+Checked in frames from `page_frame` on the laptop (the X399's direct present
+leaves `page_frame` stale): the cross-fade with tiles and with direct
+snapshots look the same, GPU snapshots show the blurred old state, a
+scrolled page keeps its sticky header solid during the fade, and a
+`::view-transition-new(root)` scaled to 50 % and rotated shows only the
+viewport's content.
+
+Not done: in the packaged Summit (no Skia GL context) the old state is still
+painted on the CPU, 0.1-0.4 s for a page with a large blur. A GL context for
+snapshots only would need `PlatformDisplay::skiaGLContext()` to stop being
+one switch for GPU canvases and everything else. The 781 ms second frame on
+the laptop's GPU path happened once and was not looked into. Captures with
+their own overflow clip or `object-view-box` still take a snapshot every
+frame. The intermediate surfaces the overlap change adds on other pages were
+not measured.
+
 ## 30 October 2026: 1Password's start-up and frames, shared colour transforms (#117)
 
 The #117 extension items, measured with a copy of the owner's 1Password
@@ -4241,7 +4358,10 @@ ambient-mode blur, 0.6-0.8 s of main thread per click
 frame when the capture clips its overflow; `ImageBufferSkiaAcceleratedBackend`
 gives GPU buffers to canvases only). Turning view transitions off did not
 bring the first frame sooner (1.39 vs 1.43 s), so it is a smoothness item for
-later, not the start delay.
+later, not the start delay. (30 October: the new state is no longer
+snapshotted every frame, see "view transitions without a snapshot every
+frame". The GPU-buffer remark was wrong: snapshots get GPU buffers whenever
+the Skia GL context is on, which it is not by default.)
 
 Issues #23 (Netflix) and #24 (Disney+) need Encrypted Media Extensions with a
 licensed DRM module; Summit has neither, and Widevine's license does not allow
