@@ -57,6 +57,27 @@ the installed WebPositive's undefined symbols). One source difference:
   `libscintilla` and `liblexilla` (building also `scintilla_devel` and
   `lexilla_devel`).
 
+air/OS CI builds `summit_webkitlegacy` too (airos-ci, 30 October 2026):
+`summit/build-summit.sh` makes it with `summit_webkit` and `summit`, for
+x86_64 and arm64, by `build_summit_webkitlegacy` in
+`apps/build-app-packages.sh`. That cross-compiles `legacy/Makefile` with the
+SDK against the engine just built (its public headers and `libWebKit.so.1`),
+Summit's `src/` and `vendor/` of the same checkout, the SDK sysroot's static
+`libnetservices.a`, `libshared.a` and `libcolumnlistview.a` and private
+headers, and Scintilla and Lexilla from CI's third-party prefix. The package
+has the engine's version (`1.10.1~git<commit time>-<revision>`, newer than
+the hand-made 1.10.0 ones), requires the `summit_webkit` of the same build
+(on x86_64 also `lib:libscintilla` and `lib:liblexilla`; arm64 images carry
+`airos_scintilla` and `airos_lexilla`, which have no `lib:` names), and goes
+into the package pool and every air/OS image (`images/build-image.sh`
+`IMAGE_APPS`). The stock Haiku R1/beta6 builds (`latest-haiku`) leave it out:
+there it would take haikuwebkit's place under the release's WebPositive.
+
+It does not provide what else `haikuwebkit` provides: `lib:libjavascriptcore`
+(HaikuWebKit's `libJavaScriptCore.so.18` in `/boot/system/lib`) and `cmd:jsc`.
+A program that links JavaScriptCore directly still needs HaikuPorts'
+`haikuwebkit`, which conflicts with this package.
+
 ## In the Haiku fork
 
 Commit 3c6c1ce347 on the fork's `x399-workstation` branch: when
@@ -67,9 +88,25 @@ link finds the engine's libraries through `-rpath-link`. Unset, the build is
 as before. `jam -q WebPositive` was built both ways on the x86_64 build; the
 Summit-built binary needs `libWebKitLegacy.so.1` like the other.
 
-Putting the packages into the fork's images (a local package repository for
-the image's dependency resolution) is not done; on a running system they are
-installed with `pkgman install` (below).
+The air/OS images have `summit_webkitlegacy` (above) but no WebPositive: the
+fork stopped building, packaging and adding it on 17 October 2026 (6a10afc026,
+Summit is the browser), and its Haiku repository is left out of release
+images. The image's packages need neither `haikuwebkit` nor
+`lib:libwebkitlegacy`, so only `summit_webkitlegacy` satisfies those names
+there; a program built for HaikuWebKit installed later (pkgman, HaikuDepot)
+runs on the image's engine, and pkgman does not fetch HaikuPorts'
+`haikuwebkit` for it. Checked on the X399 (30 October): with the CI-built
+package installed, `pkgman install` of R1/beta6's `webpositive` package
+(requires `haikuwebkit>=1.10.0`) planned that package alone, and that
+WebPositive (unpacked, not installed) drew https://www.haiku-os.org on the
+installed engine ("finished" in its status line) and quit cleanly. The
+package was built by airos-ci's recipe from Summit 75b323f against the
+image's `summit_webkit-1.10.1~git20261029.1957-1`. Twice, `pkgman uninstall
+summit_webkitlegacy` was followed by the X399 resetting (no log line after
+the command; not explained, see "Not done"). Putting
+WebPositive back into the images would be a change in the fork (its
+profiles, with `HAIKU_SUMMIT_PACKAGES_DIR` naming CI's packages, which the
+`webkit` build feature accepts on x86_64 only).
 
 ## Verified
 
@@ -226,4 +263,9 @@ the menu and left the application running. Opening a second window
   with the engine, as before.
 - Live GitHub/Google sign-in acceptance through a popup. The opener mechanics
   now pass the controlled tests above.
+- Uninstalling `summit_webkitlegacy` on the X399 (30 October, hrev60207+2114,
+  nothing using the library) was followed by a machine reset both times it
+  was tried, with nothing in the syslog after the command. Whether the
+  package's deactivation causes it (packagefs, package_daemon) is not
+  known.
 
