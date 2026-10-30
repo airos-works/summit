@@ -40859,10 +40859,10 @@ index 0000000000000000000000000000000000000000..c87bc8c087edd855e17a9d94d145ab2b
 +} // namespace SummitMPEGTS
 diff --git a/Source/WebCore/platform/graphics/haiku/MediaDecoderSelectionHaiku.cpp b/Source/WebCore/platform/graphics/haiku/MediaDecoderSelectionHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..c670d35de4ede28d254197e75ea8680ec0c60e28
+index 0000000000000000000000000000000000000000..ff8b19fa8400b45daa991f907aa3201e3c6132bb
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/haiku/MediaDecoderSelectionHaiku.cpp
-@@ -0,0 +1,1354 @@
+@@ -0,0 +1,1377 @@
 +/*
 + * Copyright (C) 2026 Haiku, Inc. All rights reserved.
 + *
@@ -41108,6 +41108,10 @@ index 0000000000000000000000000000000000000000..c670d35de4ede28d254197e75ea8680e
 +    bool tenBitNV12 { true };
 +    std::atomic<bool> broken { false };
 +    std::atomic<unsigned> closing { 0 };
++    // Eight-bit VP9 only (profile 0): NVDEC on the GTX 1070's GP104, which
++    // refuses ten-bit streams. One whose codec configuration or codec string
++    // says profile 2 goes to software from the start.
++    bool vp9EightBitOnly { false };
 +};
 +
 +// rpi_mmal of air/OS: the VideoCore firmware's decoder of the Raspberry Pi,
@@ -41152,6 +41156,13 @@ index 0000000000000000000000000000000000000000..c670d35de4ede28d254197e75ea8680e
 +    // media kit's choice, which is NVDEC. Ten-bit pictures come as their top
 +    // eight bits.
 +    { "nvdec", ffmpegCodecHEVC, 8192, 8192, 8192 * 8192, false, 0, false, "/dev/nvidiactl", false, true },
++    // VP9 profile 0 (decoder 2, air/OS with airos-works/haiku#48): up to
++    // 4096x2304 on Pascal, YouTube's codec for 1080p60 and everything above.
++    // The GP104 (GTX 1070, 1080) has no ten-bit VP9; the add-on refuses such
++    // a stream at its first frame and it goes to software. On the X399's
++    // GTX 1070 a 2160p60 frame takes the engine 7.9 ms. An add-on from before
++    // VP9 makes a decoder for any index; see namedAddOnFor().
++    { "nvdec", ffmpegCodecVP9, 4096, 2304, 4096 * 2304, false, 2, false, "/dev/nvidiactl", false, true },
 +#endif
 +#if CPU(ARM64)
 +    // Each of its decoders allocates its pictures as physically contiguous
@@ -41327,7 +41338,11 @@ index 0000000000000000000000000000000000000000..c670d35de4ede28d254197e75ea8680e
 +                    delete decoder;
 +                    return !!decoder;
 +                };
-+                if (!hasDecoder(addOn.decoderIndex)) {
++                // The NVDEC add-on before VP9 made a decoder for every index
++                // (and refused VP9 in Setup()); the one with VP9 knows three.
++                bool olderNVDEC = !std::strcmp(addOn.leafName, "nvdec") && addOn.codec == ffmpegCodecVP9
++                    && hasDecoder(7);
++                if (!hasDecoder(addOn.decoderIndex) || olderNVDEC) {
 +                    addOn.plugin = nullptr;
 +                    delete plugin;
 +                    unload_add_on(image);
@@ -41335,6 +41350,8 @@ index 0000000000000000000000000000000000000000..c670d35de4ede28d254197e75ea8680e
 +                }
 +                if (!std::strcmp(addOn.leafName, "amduvd"))
 +                    addOn.tenBitNV12 = hasDecoder(3);
++                if (!std::strcmp(addOn.leafName, "nvdec"))
++                    addOn.vp9EightBitOnly = true;
 +            }
 +        }
 +        free(found);
@@ -41425,7 +41442,7 @@ index 0000000000000000000000000000000000000000..c670d35de4ede28d254197e75ea8680e
 +    } else if (*codec == ffmpegCodecVP9) {
 +        // Profiles 0 and 2 (4:2:0, 8 and 10 bits), where the record says.
 +        auto profile = vp9ProfileOf(codecConfig);
-+        if (profile && *profile != 0 && *profile != 2)
++        if (profile && *profile != 0 && (*profile != 2 || addOn->vp9EightBitOnly))
 +            return nullptr;
 +    } else if (*codec == ffmpegCodecAV1) {
 +        // av1C (AV1 ISOBMFF binding 2.3; WebM's CodecPrivate is the same):
@@ -41608,7 +41625,13 @@ index 0000000000000000000000000000000000000000..c670d35de4ede28d254197e75ea8680e
 +bool namedHardwareVideoDecoderHaiku(StringView codec, unsigned width, unsigned height)
 +{
 +    auto format = encodedVideoFormatHaiku(codec, width ? width : 1920, height ? height : 1080);
-+    return format && namedAddOnForStream(*format, { }, false);
++    auto* addOn = format ? namedAddOnForStream(*format, { }, false) : nullptr;
++    // "vp09.PP.LL.DD": an add-on of eight-bit VP9 is not one for other
++    // profiles (YouTube's HDR streams are vp09.02).
++    if (addOn && addOn->vp9EightBitOnly && codec.startsWith("vp09."_s) && codec.length() >= 7
++        && codec.substring(5, 2) != "00"_s)
++        return false;
++    return !!addOn;
 +}
 +
 +// A hardware decoder for VP9: a named add-on that lists VP9 among its formats

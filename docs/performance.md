@@ -1502,10 +1502,21 @@ mid-stream (VP9 at chunk 410, AV1 at 242) gives every picture before it, then
 decoding goes on from the key frame; 20 decoders closed or reset with chunks
 in flight leave no threads behind.
 
-The X399 (GTX 1070) has no VP9 path in air/OS's NVDEC add-on: VP9 there
+The X399 (GTX 1070) had no VP9 path in air/OS's NVDEC add-on: VP9 there
 costs 0.55 of a core for 1080p60 and 2.5 cores for 2160p60 in the ffmpeg
 add-on (bench), the fastest software path there is (libavcodec's VP9 with
 frame threads; dav1d for AV1). Issue text for both OS changes is with #115.
+
+31 October: the `nvdec` add-on decodes VP9 profile 0 (airos-works/haiku#48,
+decoder 2), and MediaDecoderSelectionHaiku lists it for VP9. YouTube's
+"Costa Rica 4K60" (LXb3EKWsInQ) in Summit on the X399, web process over two
+10 s samples each: itag 303 (1080p60) 0.22-0.24 core with NVDEC, 0.87-1.0
+in software; itag 315 (2160p60) 0.49-0.57 core with NVDEC, 60 frames a
+second and 10 dropped in 135 s, against 3.8 cores in software, where 926 of
+933 frames in 10 s were dropped (the "Summit MSE video" thread at a full
+core). The engine takes 2.4 ms for a 1080p frame and 7.9 ms for a 2160p
+one; frames are byte for byte libavcodec's. Ten-bit VP9 (profile 2,
+YouTube's HDR) the GP104 does not decode; those streams go to software.
 
 Timestamps: the software H.264 (B-frames), HEVC (8 and 10 bit) and AV1
 decoders were each seen to keep their chunks' times in Summit (MSE trace),

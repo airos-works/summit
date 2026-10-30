@@ -32,7 +32,14 @@ Framework 13's Radeon 760M decodes both), YouTube's VP9 and AV1 go to the GPU
 too, as NV12 for the compositor, with software as the fallback
 ([wx5100-media.md](wx5100-media.md), [performance.md](performance.md), 30
 October). The add-on now on the systems has neither, and those entries stay
-unused. NVDEC on the X399's GTX 1070 has no VP9 path in air/OS's add-on yet.
+unused. NVDEC has VP9 profile 0 from airos-works/haiku#48 (decoder 2 of the
+`nvdec` add-on, up to 4096x2304): on the X399's GTX 1070 YouTube's 1080p60 and
+2160p60 VP9 go to the card, as NV12. The GTX 1070's GP104 has no ten-bit VP9:
+the add-on refuses profile 2 at its first frame and the track resumes in
+software (a codec string or configuration that says profile 2 goes to
+software from the start). An `nvdec` add-on from before VP9 makes a decoder
+for every index, and is not used for VP9 ([performance.md](performance.md),
+31 October).
 
 Software H.264, HEVC and AV1 decoders used to lose or misplace presentation
 timestamps, so their pictures took the container's times in order. air/OS's
