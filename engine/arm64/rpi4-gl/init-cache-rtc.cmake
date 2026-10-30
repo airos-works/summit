@@ -1,4 +1,11 @@
 set(CMAKE_BUILD_TYPE "Release" CACHE STRING "" FORCE)
+# The Haiku build exports nearly every function (no -fvisibility=hidden), and
+# with -fPIC GCC assumes each could be interposed, so it neither inlines nor
+# binds calls between them; -fno-semantic-interposition lifts that, as
+# -Bsymbolic-functions does at link time. (GCC 13 crashed on it only together
+# with -fprofile-use; CI builds without a profile.)
+set(CMAKE_C_FLAGS_RELEASE "-O3 -DNDEBUG -fno-semantic-interposition" CACHE STRING "" FORCE)
+set(CMAKE_CXX_FLAGS_RELEASE "-O3 -DNDEBUG -fno-semantic-interposition" CACHE STRING "" FORCE)
 set(ENABLE_ACCESSIBILITY_ISOLATED_TREE "OFF" CACHE BOOL "" FORCE)
 set(ENABLE_API_TESTS "OFF" CACHE BOOL "" FORCE)
 set(ENABLE_APPLE_PAY "OFF" CACHE BOOL "" FORCE)

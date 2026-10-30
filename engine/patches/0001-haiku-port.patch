@@ -4074,7 +4074,7 @@ index 2937c45683dde863d5608345f399b32a83f6f960..90a7927b7fbe428501086d1ba3ed36ed
      || OS(QNX)                 \
      || OS(WINDOWS)
 diff --git a/Source/WTF/wtf/PlatformEnable.h b/Source/WTF/wtf/PlatformEnable.h
-index 9c73a375b327ba6a86c1454d3a8d7efcbdf92cfe..7f5412e5dcc7121d2ec1bd62cb67e2c9f105743e 100644
+index 9c73a375b327ba6a86c1454d3a8d7efcbdf92cfe..aabc1d87917de049588af107db12d0d7a27bbbb8 100644
 --- a/Source/WTF/wtf/PlatformEnable.h
 +++ b/Source/WTF/wtf/PlatformEnable.h
 @@ -315,6 +315,14 @@
@@ -4122,6 +4122,19 @@ index 9c73a375b327ba6a86c1454d3a8d7efcbdf92cfe..7f5412e5dcc7121d2ec1bd62cb67e2c9
 +
  #if !defined(ENABLE_SCROLLING_THREAD)
  #define ENABLE_SCROLLING_THREAD 0
+ #endif
+@@ -1068,6 +1100,12 @@
+ #error "ENABLE(WEBXR_LAYERS) requires ENABLE(WEBXR)"
+ #endif
+ 
++// Haiku keeps a recently used site's web process for a later navigation
++// back to it (WebViewContextHaiku; SUMMIT_WEBPROCESS_CACHE=0 turns it off).
++#if !defined(ENABLE_WEBPROCESS_CACHE) && PLATFORM(HAIKU)
++#define ENABLE_WEBPROCESS_CACHE 1
++#endif
++
+ #if !defined(ENABLE_WEBPROCESS_CACHE)
+ #define ENABLE_WEBPROCESS_CACHE 0
  #endif
 diff --git a/Source/WTF/wtf/PlatformHaiku.cmake b/Source/WTF/wtf/PlatformHaiku.cmake
 index c466c25cf60489517be9b9bcffe952ae0622261e..7272fa366d9997f36e768021bb073dbc57949f5e 100644
@@ -145275,10 +145288,10 @@ index 0000000000000000000000000000000000000000..3aa1caa19b9bee5347eab913f3fee59f
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/WebViewContextHaiku.cpp b/Source/WebKit/UIProcess/haiku/WebViewContextHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..db1accc1ad13a614f1ed9aabfcbce8c54c310d41
+index 0000000000000000000000000000000000000000..0fe50bb0e39ac058eecbfd9ab3c75d00d96eb779
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/WebViewContextHaiku.cpp
-@@ -0,0 +1,485 @@
+@@ -0,0 +1,498 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#include "config.h"
@@ -145317,12 +145330,25 @@ index 0000000000000000000000000000000000000000..db1accc1ad13a614f1ed9aabfcbce8c5
 +#include <pal/SessionID.h>
 +#include <cstdlib>
 +#include <cstring>
++#include <cstring>
 +#include <wtf/FileSystem.h>
 +#include <wtf/NeverDestroyed.h>
 +#include <wtf/RunLoop.h>
 +#include <wtf/text/MakeString.h>
 +
 +namespace WebKit {
++
++// Web processes of sites navigated away from are kept for a while (up to
++// four per GB of memory, at most 32), so going back to a site needs no new
++// process and finds its caches warm, as in Safari and WebKitGTK.
++// SUMMIT_WEBPROCESS_CACHE=0 turns it off.
++static Ref<API::ProcessPoolConfiguration> processPoolConfigurationHaiku()
++{
++    auto configuration = API::ProcessPoolConfiguration::create();
++    const char* cache = std::getenv("SUMMIT_WEBPROCESS_CACHE");
++    configuration->setUsesWebProcessCache(!cache || std::strcmp(cache, "0"));
++    return configuration;
++}
 +
 +#if ENABLE(WK_WEB_EXTENSIONS)
 +static Ref<WebExtensionController> createNativeExtensionController(WebsiteDataStore& store, const String& storageDirectory)
@@ -145339,7 +145365,7 @@ index 0000000000000000000000000000000000000000..db1accc1ad13a614f1ed9aabfcbce8c5
 +
 +WebViewContextHaiku::WebViewContextHaiku(Ref<WebsiteDataStore>&& dataStore, [[maybe_unused]] String extensionStorageDirectory)
 +    : m_dataStore(WTF::move(dataStore))
-+    , m_processPool(WebProcessPool::create(API::ProcessPoolConfiguration::create()))
++    , m_processPool(WebProcessPool::create(processPoolConfigurationHaiku()))
 +    , m_downloads(DownloadRegistryHaiku::create())
 +#if ENABLE(WK_WEB_EXTENSIONS)
 +    , m_extensionController(createNativeExtensionController(m_dataStore.get(), extensionStorageDirectory))
@@ -145371,7 +145397,7 @@ index 0000000000000000000000000000000000000000..db1accc1ad13a614f1ed9aabfcbce8c5
 +
 +WebViewContextHaiku::WebViewContextHaiku(Ref<WebsiteDataStore>&& dataStore, std::shared_ptr<WebViewContextHaiku> extensionOwner)
 +    : m_dataStore(WTF::move(dataStore))
-+    , m_processPool(WebProcessPool::create(API::ProcessPoolConfiguration::create()))
++    , m_processPool(WebProcessPool::create(processPoolConfigurationHaiku()))
 +    , m_downloads(DownloadRegistryHaiku::create())
 +#if ENABLE(WK_WEB_EXTENSIONS)
 +    , m_extensionController(extensionOwner->m_extensionController.copyRef())
