@@ -1,5 +1,108 @@
 # Summit performance: Speedometer 3.1 baseline, where the time goes, stress test
 
+## 30 October 2026: direct presents no longer wait for their copies (#117)
+
+The #117 item "direct present waits for its app_server copy". #119 had
+found nothing left to do on the OS side: the wait was the direct present's
+own. Every present on the compositing thread did three waits:
+
+- `glFinish()`, until the GPU had drawn the frame, so that the copy into
+  the screen would run when it was submitted;
+- the scan (`ScanTimingHaiku`), until the monitor's scan had left the
+  page's rows. On the X399 that is most frames for a page as tall as the
+  window, 6.5-10 ms on average;
+- the copy itself. Mesa's helper thread was meant to wait for it, but
+  `zink_haiku_present()` flushed with `ctx->base.flush(&fence, 0)`, which
+  waits until the submission is done, and NVK's nvrm back end returns from a
+  submission only once the GPU has run it. So on the X399 the compositing
+  thread also waited for the copies (3-4 ms with app_server's copy, 24 MB
+  over the bus for a 3742x1786 page).
+
+**What changed.** Summit's Mesa takes a deferred present (patch 07,
+`tools/mesa-vm/mesa-25.3.6-summit-07-deferred-present.patch`;
+`summit_haiku_present_version()` returns 2, and `struct
+summit_haiku_present` version 2 has `flags` and `before_copy`):
+
+- The call adds a copy of the frame's changed rectangles into one of four
+  images of Mesa's own in video memory (a blit within video memory)
+  to the frame's work, has that work signal a timeline
+  semaphore, flushes it with `PIPE_FLUSH_ASYNC` and returns. Nothing waits
+  for the GPU there. The page's next frame can be drawn into the same
+  framebuffer object at once, since the copies read Mesa's image.
+- The helper thread waits for the semaphore, calls the engine's
+  `before_copy()` (the scan wait moves there), records the copies into the
+  frame buffer and app_server's copy in a command buffer of its own, takes
+  Zink's queue lock, waits for the queue to go idle (other threads'
+  submissions would otherwise run first and delay the copy past the moment
+  chosen), calls `before_copy()` again, submits, and reports completion.
+  The second call returns at once if the moment still holds (it is less
+  than 0.5 ms later); otherwise it waits again ("waited again" in the
+  trace, 0 in all the runs below).
+- A copy whose target changed meanwhile (the window moved or was covered,
+  app_server drew into the page's place: `generation` differs) is dropped.
+  The UI process then has the page presented again in full anyway, and its
+  wait for copies in flight (`DirectPresentTargetHaiku::update`) ends sooner.
+
+In the engine (`AcceleratedSurface.cpp`, `DirectPresenterHaiku`):
+
+- No `glFinish()` and no scan wait on the compositing thread for deferred
+  presents.
+- The frame's `DirectFrame` goes to the UI process only once its copy is
+  done (`deferDirectFrameHaiku`), so `FrameDone`, and with it the next
+  frame, comes when the frame is on the screen, as a swap with vertical sync
+  would. Without that, the compositor ran ahead until Mesa's limit of two
+  presents in flight and waited there instead, one frame later on screen.
+- A frame that goes through app_server waits for the copies still in flight
+  first, so they cannot cover it.
+- `SUMMIT_DIRECT_PRESENT_ASYNC=0` presents as before. A Mesa without
+  version 2 (the system Mesa, other boards) is used as before. If Mesa
+  cannot make its images (-6), presents go back to waiting.
+- `SUMMIT_DIRECT_PRESENT_TRACE=1` now reports deferred presents too: scan
+  waits and copy times as measured on Mesa's thread, dropped copies, and
+  copies that had to wait again.
+
+**Measured on the X399** (GTX 1070, NVK, 3840x2160 at 200 %; window
+1870x1035, page 3742x1786; one test copy at a time; the same build with
+`SUMMIT_DIRECT_PRESENT_ASYNC=0` as the baseline). Compositing-thread time
+per frame is `recentRenderTimes` of the MCP `graphics` tool (the last 240
+frames) and the `read` part of `SUMMIT_COMPOSITOR_TIMING_TRACE` (the present)
+over the whole run; scrolling is a page script calling `scrollBy(0, 10)`
+every animation frame for 10 s, then a wheel burst (`frame_stats`).
+
+| | waiting (3 runs) | deferred (3 runs) |
+|---|---|---|
+| Simple long page: scroll fps | 57.9, 59.5, 58.0 | 58.0, 58.1, 58.2 |
+| frame time on the compositing thread, median / p95 | 16.3 / 17.6, 13.2 / 13.4, 16.4 / 16.5 ms | 0.25 / 0.53, 0.23 / 0.50, 0.24 / 0.51 ms |
+| present (`read`), p50 / p90 / p99 | 9.1 / 16.2 / 30.9, 12.6 / 15.4 / 29.3, 15.1 / 16.3 / 32.2 ms | 0.1 / 0.1 / 1.7, 0.1 / 0.1 / 1.5 ms (2 runs) |
+| gaps over 33 ms in 5 s | 8, 0, 8 | 8, 7, 6 |
+
+| occl117 `stack.html` (blurs, backdrop filters) | waiting (2 runs) | deferred (3 runs) |
+|---|---|---|
+| script scroll fps | 11.4, 10.0 | 16.9, 15.9, 15.5 |
+| wheel burst fps | 23.3, 8.7 | 35.3, 45.3, 22.7 |
+| present (`read`), p50 / p90 / p99 | 2.0 / 16.1 / 35.8, 0.8 / 16.2 / 33.6 ms | 0.1 / 0.2 / 0.8, 0.1 / 0.2 / 0.7 ms |
+| whole frame, p90 | 16.5, 17.0 ms | 13.3, 9.9 ms |
+
+So the compositing thread no longer waits for the GPU, the scan or the
+copy: about 13-16 ms a frame given back on a page that scrolls at the
+refresh rate, with the same frame rate and the same frame-time pattern. On
+the heavy fixture the page's own scrolling (main thread, which waits for
+the compositor's frames) went from 10-11 to 15.5-17 frames a second. With
+the trace on, deferred presents waited for the scan 5.4-10.9 ms on average
+(the helper's time now), copies took 0.1-4 ms, and copies were dropped
+only while the window was moved or resized. Moving and resizing the window
+while scrolling left nothing behind on the screen (app_server's copy), and
+quitting while scrolling ended every process.
+
+Not measured: tearing on NVIDIA (no scanout CRC tool there; the copies
+start at the moment the scan timing chose, as before, with the GPU queue
+idle). The laptop (amdgpu) cannot present directly at the moment
+(jmgasper/haiku#43, frame buffer not offered to renderers), so it reads
+every frame back and is not a test of this; the build ran there (RADV,
+reading back, 60 fps, 2.0 ms median frames). Killing a web process while it
+presents was not repeated for deferred presents (the imports are the same
+as before; #119 tested that with app_server's copy on).
+
 ## 30 October 2026: Reddit's feed no longer rebuilt for every post added or dropped (#117, layout)
 
 The two #117 layout items: Reddit's `main` laid out up to three times per

@@ -121,6 +121,13 @@ Three pieces, one in each layer:
   version did, and marked recycled batches idle).
   `tools/mesa-vm/scanout-present-probe.cpp` presents 3800 frames/s of
   800x500, 480/s of 3824x2096, and random small damage rectangles.
+  Patch 07 (`mesa-25.3.6-summit-07-deferred-present.patch`, 30 October)
+  adds deferred presents: the frame is copied into an image of Mesa's own
+  as part of its work, and the helper thread makes the copies into the
+  screen once the frame is done, at the moment the engine's `before_copy()`
+  callback picks (the scan timing below). The compositing thread waits
+  for neither (performance.md, "30 October 2026";
+  `SUMMIT_DIRECT_PRESENT_ASYNC=0` waits as before).
 - **The engine and Summit.** `BrowserWindow` is a `BDirectWindow` with the
   flag and hands each `DirectConnected()` to
   `BWebKitView::WindowDirectConnected()`. Each web view works out where its
@@ -159,7 +166,10 @@ scan has left them. The scan's place comes from amdgpu_drm's KMS node
 (`/dev/dri/card0`: each CRTC's place and mode, and the time of its last
 vertical blank). Untimed copies tore most frames there.
 `SUMMIT_DIRECT_PRESENT_SCAN_TIMING=0` turns it off; see performance.md,
-"20 October 2026".
+"20 October 2026". With deferred presents (Mesa patch 07) the frame is not
+finished and the scan not waited for on the compositing thread: Mesa's
+helper thread waits for both and then submits the copy, and the frame is
+reported to the UI process once the copy is done.
 
 **Windows restored at launch keep their connection (#97).** The daemon
 thread of a new direct window clones the frame buffer over the application's
