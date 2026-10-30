@@ -137,19 +137,38 @@ subdomain at any depth, not `example.com` itself, and never anything under a
 public suffix (`"https://*.co.uk"` matches nothing). A `*` anywhere else, or a
 port wildcard, still grants nothing.
 
-A directive may name a reporting endpoint, `encrypted-media=();report-to=main`
-with `Reporting-Endpoints: main="https://…"`. A blocked use then sends a
-`permissions-policy-violation` report (body `featureId`, `disposition`
-`enforce`, `message`) to that endpoint as `application/reports+json`
-(cross-origin endpoints get a CORS preflight). `ReportingObserver` does not
-receive these reports; that needs a report body interface WebKit doesn't
-have.
+Every blocked use of a policy-controlled feature (any feature, whether an
+iframe `allow` attribute or the header blocked it) queues a
+`permissions-policy-violation` report for the document's `ReportingObserver`s
+(31 October). Its body is a `PermissionsPolicyViolationReportBody`, Chrome's
+shape: `featureId` (the policy token, `sync-xhr`, `geolocation`, …),
+`sourceFile`, `lineNumber` and `columnNumber` (the script that asked, null when
+no script did), `disposition` (`enforce`) and `message`. Like WebKit's other
+report bodies it has no global constructor. Checks that only ask whether a
+feature is allowed also report, as before they logged to the console:
+reading `document.fullscreenEnabled` in a frame without fullscreen is one.
+
+A directive may also name a reporting endpoint, `encrypted-media=();report-to=main`
+with `Reporting-Endpoints: main="https://…"`. The same report is then sent
+(body `featureId`, `sourceFile`, `lineNumber`, `columnNumber`, `disposition`,
+`message`) to that endpoint as `application/reports+json` (cross-origin
+endpoints get a CORS preflight).
 
 Checked on the X399 with `bluetooth` (EME is compiled out, see above):
 `Permissions-Policy: bluetooth=("http://*.localhost:8773")` allowed
 `navigator.bluetooth.getDevices()` on `a.localhost` and `b.a.localhost` and
 refused it (`SecurityError`) on `localhost`; `self` and `()` behaved as
 before; with `;report-to=eme` the fixture server received the report.
+
+Checked on the laptop on 31 October: in an iframe with
+`allow="sync-xhr 'none'; geolocation 'none'"` a synchronous XHR (NetworkError)
+and `getCurrentPosition` each gave an observer one report with the right
+`featureId`, line and column; a `buffered: true` observer created later got
+both, a `deprecation` observer none, and the iframe without `allow` none. The
+fixture's `/observer.html?policy=deny&feature=bluetooth&report=1` (served on
+the laptop's 127.0.0.1) showed the observer report and the endpoint received
+the same body; `policy=self` gave neither. (`report` needs a value: the
+fixture's query parsing drops an empty one.)
 
 ## Verification
 

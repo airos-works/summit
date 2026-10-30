@@ -71,6 +71,24 @@ def generate_schemes(directory, packager, source, ffmpeg):
         source.unlink()
 
 
+OBSERVER_PAGE = '''<!doctype html>
+<meta charset="utf-8">
+<pre id="log"></pre>
+<script>
+window.results = { reports: [] };
+const show = () => document.getElementById('log').textContent = JSON.stringify(window.results, null, 1);
+new ReportingObserver((reports) => {
+    for (const report of reports) window.results.reports.push({ type: report.type, url: report.url, body: report.body.toJSON() });
+    show();
+}, { types: ['permissions-policy-violation'] }).observe();
+const feature = new URLSearchParams(location.search).get('feature');
+const use = feature === 'bluetooth' ? () => navigator.bluetooth.getDevices()
+    : () => navigator.requestMediaKeySystemAccess('org.w3.clearkey', [{ videoCapabilities: [{ contentType: 'video/mp4; codecs="avc1.42E01E"' }] }]);
+use().then(() => { window.results.call = 'allowed'; show(); }, (error) => { window.results.call = error.name; show(); });
+</script>
+'''
+
+
 def serve(directory, host, port):
     reports = []
 
@@ -123,6 +141,17 @@ def serve(directory, host, port):
                     self.end_headers()
                     self.wfile.write(data)
                     return
+            if urllib.parse.urlsplit(self.path).path == '/observer.html':
+                # ReportingObserver view of the same violations: load with
+                # ?policy=deny&feature=bluetooth[&report=1]; window.results
+                # holds the bodies (and the outcome of the blocked call).
+                data = OBSERVER_PAGE.encode()
+                self.send_response(200)
+                self.send_header('Content-Type', 'text/html; charset=utf-8')
+                self.send_header('Content-Length', str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+                return
             if urllib.parse.urlsplit(self.path).path == '/cross-clear.mpd':
                 data = (directory / 'clear.mpd').read_bytes()
                 prefix = f'http://localhost:{port}/'.encode()
