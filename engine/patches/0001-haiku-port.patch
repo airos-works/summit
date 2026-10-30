@@ -16571,10 +16571,34 @@ index 2607faee32402d89b9d9ec461b55d70ad2291ce1..b62e3ea0437528d549401e706acf31ab
      State& modifiableState() LIFETIME_BOUND { ASSERT(!m_unrealizedSaveCount || m_stateStack.size() >= MaxSaveCount); return m_stateStack.last(); }
  
 diff --git a/Source/WebCore/html/canvas/WebGLRenderingContextBase.cpp b/Source/WebCore/html/canvas/WebGLRenderingContextBase.cpp
-index b97bb426b97dd304a71a440a86935cebec723ec1..fb28702d73ac98d46356446468f6c9d355d654b3 100644
+index b97bb426b97dd304a71a440a86935cebec723ec1..99001f97cb447a8932bb28dec6ddec2ec58cab32 100644
 --- a/Source/WebCore/html/canvas/WebGLRenderingContextBase.cpp
 +++ b/Source/WebCore/html/canvas/WebGLRenderingContextBase.cpp
-@@ -4364,6 +4364,16 @@ RefPtr<NativeImage> WebGLRenderingContextBase::drawImageIntoBuffer(const SizedIm
+@@ -552,6 +552,7 @@ void WebGLRenderingContextBase::initializeContextState()
+     m_readDisplayBuffer.clear();
+     m_readDrawingBuffer.clear();
+     m_compositingResultsNeedUpdating = false;
++    m_canvasNotifiedOfDrawing = false;
+     m_activeTextureUnit = 0;
+     m_packParameters = { };
+     m_unpackParameters = { };
+@@ -725,11 +726,14 @@ void WebGLRenderingContextBase::willUpdateDrawingBufferContents(WebGLRenderingCo
+     if (m_framebufferBinding)
+         return;
+ 
+-    m_compositingResultsNeedUpdating = true;
+     if (!m_readDrawingBuffer.isEmpty()) {
+         m_readDrawingBuffer.clear();
+         updateMemoryCost();
+     }
++    if (m_compositingResultsNeedUpdating && m_canvasNotifiedOfDrawing)
++        return;
++    m_compositingResultsNeedUpdating = true;
++    m_canvasNotifiedOfDrawing = true;
+     willUpdateCanvasContents();
+ }
+ 
+@@ -4364,6 +4368,16 @@ RefPtr<NativeImage> WebGLRenderingContextBase::drawImageIntoBuffer(const SizedIm
  
  RefPtr<NativeImage> WebGLRenderingContextBase::videoFrameToNativeImage(HTMLVideoElement& video, ASCIILiteral functionName)
  {
@@ -16591,6 +16615,30 @@ index b97bb426b97dd304a71a440a86935cebec723ec1..fb28702d73ac98d46356446468f6c9d3
      RefPtr<ImageBuffer> imageBuffer;
      // FIXME: When texImage2D is passed an HTMLVideoElement, implementations
      // interoperably use the native RGB color values of the video frame (e.g.
+@@ -5896,6 +5910,7 @@ void WebGLRenderingContextBase::prepareForDisplay()
+     m_defaultFramebuffer->markAllUnpreservedBuffersDirty();
+ 
+     m_compositingResultsNeedUpdating = false;
++    m_canvasNotifiedOfDrawing = false;
+     m_readDisplayBuffer.clear();
+     m_readDrawingBuffer.clear();
+     updateMemoryCost();
+diff --git a/Source/WebCore/html/canvas/WebGLRenderingContextBase.h b/Source/WebCore/html/canvas/WebGLRenderingContextBase.h
+index f3dc9ebcfcff29852bb63e4283c9eace10927b9d..d8d781392155f4490d66444fa2a5f0af62ec8ede 100644
+--- a/Source/WebCore/html/canvas/WebGLRenderingContextBase.h
++++ b/Source/WebCore/html/canvas/WebGLRenderingContextBase.h
+@@ -736,6 +736,11 @@ protected:
+     int m_numGLErrorsToConsoleAllowed;
+ 
+     bool m_compositingResultsNeedUpdating { false };
++    // The canvas was told about this frame's drawing already (the first draw
++    // after prepareForDisplay()); later draws in the frame skip
++    // willUpdateCanvasContents(), which cost ~11 % of the main thread in
++    // WebGL Aquarium (#140).
++    bool m_canvasNotifiedOfDrawing { false };
+     bool m_memoryCostUpdateScheduled { false };
+ 
+     // Temporary holder for both ImageBuffer and NativeImage requests.
 diff --git a/Source/WebCore/inspector/CommandLineAPIModule.cpp b/Source/WebCore/inspector/CommandLineAPIModule.cpp
 index dd239696fdd09e20d7a0bc1e20508125552043d4..85702e154d0bd01f2e2d03b4cf81bbc0a441a786 100644
 --- a/Source/WebCore/inspector/CommandLineAPIModule.cpp
@@ -28842,10 +28890,16 @@ index 44e75200a66d6215bcf347014d908eafcd10c313..554c8182a4df91339ef278fc6e4a9d42
          drawCheckbox(graphicsContext, borderRect, deviceScaleFactor, style);
      else
 diff --git a/Source/WebCore/platform/graphics/angle/GraphicsContextGLANGLE.h b/Source/WebCore/platform/graphics/angle/GraphicsContextGLANGLE.h
-index b4fef2439283f4d3c986638ec2e8f3f85bd3d859..878fa143757c2d28a14135f3e448e2703d372a38 100644
+index b4fef2439283f4d3c986638ec2e8f3f85bd3d859..795ccd6e459e677a2d543c66ba5be3b5f2ae6943 100644
 --- a/Source/WebCore/platform/graphics/angle/GraphicsContextGLANGLE.h
 +++ b/Source/WebCore/platform/graphics/angle/GraphicsContextGLANGLE.h
-@@ -37,6 +37,7 @@
+@@ -34,9 +34,13 @@
+ #include <WebCore/GraphicsContextGLState.h>
+ #include <memory>
+ #include <wtf/Function.h>
++#if PLATFORM(HAIKU)
++#include <wtf/MonotonicTime.h>
++#endif
  #include <wtf/TZoneMalloc.h>
  
  namespace WebCore {
@@ -28853,7 +28907,7 @@ index b4fef2439283f4d3c986638ec2e8f3f85bd3d859..878fa143757c2d28a14135f3e448e270
  
  // Base class for GraphicsContextGL contexts that use ANGLE.
  class WEBCORE_EXPORT GraphicsContextGLANGLE : public GraphicsContextGL {
-@@ -427,6 +428,12 @@ protected:
+@@ -427,6 +431,17 @@ protected:
      bool m_failNextRenderbufferAllocation { false };
      GraphicsContextGLState m_state;
  
@@ -28862,6 +28916,11 @@ index b4fef2439283f4d3c986638ec2e8f3f85bd3d859..878fa143757c2d28a14135f3e448e270
 +    // handle alive until the ANGLE contexts have been destroyed.
 +    std::shared_ptr<GLContext> m_nativeSharingContextHaiku;
 +    bool m_destroyingContextHaiku { false };
++    // checkGPUStatus() runs on every draw: which robustness extension the
++    // context has is looked up once (0 unknown, 1 KHR, 2 EXT, 3 none), and
++    // the reset status is asked at most every few milliseconds.
++    uint8_t m_robustnessHaiku { 0 };
++    MonotonicTime m_lastResetStatusCheckHaiku;
 +#endif
      GCGLDisplay m_displayObj { nullptr };
      GCGLContext m_contextObj { nullptr };
@@ -31413,7 +31472,7 @@ index f2e9fcbce80505145e2639e1bb61b4662a2b57a8..dc821ecb4e8018cf21fa510824ad3399
      void serverWait() override;
  
 diff --git a/Source/WebCore/platform/graphics/egl/GraphicsContextGLEGL.cpp b/Source/WebCore/platform/graphics/egl/GraphicsContextGLEGL.cpp
-index 24ac596ad8c9275e9018b351ec61b5fd5037e5ba..bbecd1406b9bc978e02f9aacdee573584f6ab3df 100644
+index 24ac596ad8c9275e9018b351ec61b5fd5037e5ba..9e3503257b0d51e3d0ca030590714f165f48bf50 100644
 --- a/Source/WebCore/platform/graphics/egl/GraphicsContextGLEGL.cpp
 +++ b/Source/WebCore/platform/graphics/egl/GraphicsContextGLEGL.cpp
 @@ -26,6 +26,10 @@
@@ -31489,16 +31548,25 @@ index 24ac596ad8c9275e9018b351ec61b5fd5037e5ba..bbecd1406b9bc978e02f9aacdee57358
      auto* texmapContext = static_cast<GraphicsContextGLEGL*>(this);
      if (texmapContext->isCurrent())
          return true;
-@@ -122,6 +145,22 @@ bool GraphicsContextGLANGLE::makeContextCurrent()
+@@ -122,6 +145,31 @@ bool GraphicsContextGLANGLE::makeContextCurrent()
  
  void GraphicsContextGLANGLE::checkGPUStatus()
  {
 +#if PLATFORM(HAIKU)
++    // Called on every draw and clear: the extension lookup (a string search)
++    // and the reset status (a call through ANGLE into the driver) took 7-8 %
++    // of the main thread in WebGL Aquarium (#140). The robustness extension is
++    // resolved once and the reset status asked at most every 8 ms; a lost
++    // shared native context is still noticed on every call.
 +    GCGLenum resetStatus = GL_NO_ERROR;
-+    if (static_cast<GraphicsContextGLEGL*>(this)->isCurrent()) {
-+        if (isExtensionEnabledImpl("GL_KHR_robustness"_s))
++    auto now = MonotonicTime::now();
++    if (now - m_lastResetStatusCheckHaiku >= 8_ms && static_cast<GraphicsContextGLEGL*>(this)->isCurrent()) {
++        m_lastResetStatusCheckHaiku = now;
++        if (!m_robustnessHaiku)
++            m_robustnessHaiku = isExtensionEnabledImpl("GL_KHR_robustness"_s) ? 1 : isExtensionEnabledImpl("GL_EXT_robustness"_s) ? 2 : 3;
++        if (m_robustnessHaiku == 1)
 +            resetStatus = GL_GetGraphicsResetStatusKHR();
-+        else if (isExtensionEnabledImpl("GL_EXT_robustness"_s))
++        else if (m_robustnessHaiku == 2)
 +            resetStatus = GL_GetGraphicsResetStatusEXT();
 +    }
 +    if (!isContextLost() && ((m_nativeSharingContextHaiku && m_nativeSharingContextHaiku->resourceState().isLost())
@@ -31512,7 +31580,7 @@ index 24ac596ad8c9275e9018b351ec61b5fd5037e5ba..bbecd1406b9bc978e02f9aacdee57358
      if (m_failNextStatusCheck) {
          m_failNextStatusCheck = false;
          forceContextLost();
-@@ -225,6 +264,13 @@ RefPtr<VideoFrame> GraphicsContextGLEGL::surfaceBufferToVideoFrame(SurfaceBuffer
+@@ -225,6 +273,13 @@ RefPtr<VideoFrame> GraphicsContextGLEGL::surfaceBufferToVideoFrame(SurfaceBuffer
          options.isMirrored = true;
          return VideoFrameGStreamer::createFromPixelBuffer(pixelBuffer.releaseNonNull(), { }, 30, options);
      }
@@ -31526,7 +31594,7 @@ index 24ac596ad8c9275e9018b351ec61b5fd5037e5ba..bbecd1406b9bc978e02f9aacdee57358
  #else
      UNUSED_PARAM(buffer);
  #endif
-@@ -263,6 +309,9 @@ bool GraphicsContextGLEGL::platformInitializeContext()
+@@ -263,6 +318,9 @@ bool GraphicsContextGLEGL::platformInitializeContext()
      EGL_ChooseConfig(m_displayObj, configAttributes, &m_configObj, 1, &numberConfigsReturned);
      if (numberConfigsReturned != 1) {
          LOG(WebGL, "EGLConfig Initialization failed.");
@@ -31536,7 +31604,7 @@ index 24ac596ad8c9275e9018b351ec61b5fd5037e5ba..bbecd1406b9bc978e02f9aacdee57358
          return false;
      }
      LOG(WebGL, "Got EGLConfig");
-@@ -296,6 +345,14 @@ bool GraphicsContextGLEGL::platformInitializeContext()
+@@ -296,6 +354,14 @@ bool GraphicsContextGLEGL::platformInitializeContext()
      eglContextAttributes.append(EGL_CONTEXT_WEBGL_COMPATIBILITY_ANGLE);
      eglContextAttributes.append(EGL_TRUE);
      // WebGL requires that all resources are cleared at creation.
@@ -31551,7 +31619,7 @@ index 24ac596ad8c9275e9018b351ec61b5fd5037e5ba..bbecd1406b9bc978e02f9aacdee57358
      eglContextAttributes.append(EGL_ROBUST_RESOURCE_INITIALIZATION_ANGLE);
      eglContextAttributes.append(EGL_TRUE);
      // WebGL doesn't allow client arrays.
-@@ -304,9 +361,26 @@ bool GraphicsContextGLEGL::platformInitializeContext()
+@@ -304,9 +370,26 @@ bool GraphicsContextGLEGL::platformInitializeContext()
      // WebGL doesn't allow implicit creation of objects on bind.
      eglContextAttributes.append(EGL_CONTEXT_BIND_GENERATES_RESOURCE_CHROMIUM);
      eglContextAttributes.append(EGL_FALSE);
@@ -31579,7 +31647,7 @@ index 24ac596ad8c9275e9018b351ec61b5fd5037e5ba..bbecd1406b9bc978e02f9aacdee57358
  #endif
  
      if (WTF::contains(unsafeSpan(displayExtensions), "EGL_ANGLE_power_preference"_span)) {
-@@ -317,23 +391,47 @@ bool GraphicsContextGLEGL::platformInitializeContext()
+@@ -317,23 +400,47 @@ bool GraphicsContextGLEGL::platformInitializeContext()
      }
      eglContextAttributes.append(EGL_NONE);
  
@@ -31629,7 +31697,7 @@ index 24ac596ad8c9275e9018b351ec61b5fd5037e5ba..bbecd1406b9bc978e02f9aacdee57358
          return false;
      }
      LOG(WebGL, "Got EGLContext");
-@@ -407,6 +505,10 @@ GLContextWrapper::Type GraphicsContextGLEGL::type() const
+@@ -407,6 +514,10 @@ GLContextWrapper::Type GraphicsContextGLEGL::type() const
  
  bool GraphicsContextGLEGL::makeCurrentImpl()
  {
