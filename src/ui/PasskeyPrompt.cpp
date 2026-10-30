@@ -108,7 +108,12 @@ PasskeyPrompt::PasskeyPrompt(const Fields& fields, BMessenger target)
     layout.SetInsets(B_USE_WINDOW_SPACING).Add(title);
     // A page on a subdomain may ask for its parent domain's passkey; say
     // which page asks.
-    if (!fields.pageHost.empty() && fields.pageHost != fields.site)
+    // A frame of another site asks: name the page it is in, so that a
+    // passkey is not used for a page the user did not mean.
+    if (!fields.topHost.empty() && fields.topHost != fields.pageHost)
+        layout.Add(Line("page", "Asked by " + PromptDisplayText(fields.pageHost.empty() ? fields.site : fields.pageHost, 120)
+            + ", in a frame of " + PromptDisplayText(fields.topHost, 120)));
+    else if (!fields.pageHost.empty() && fields.pageHost != fields.site)
         layout.Add(Line("page", "Asked by " + PromptDisplayText(fields.pageHost, 120)));
     if (fields.kind == Kind::Create)
         layout.Add(Line("account", "Account: " + PasskeyAccountLabel(fields.userName, fields.displayName)));

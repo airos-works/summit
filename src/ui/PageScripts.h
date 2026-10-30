@@ -18,6 +18,7 @@ extern const char* const kPictureInPictureScript;
 extern const char* const kPasswordScript;
 // Passkey autofill (#111): tells the browser where a sign-in field marked
 // autocomplete="… webauthn" is when the user goes into it, so that the
-// native menu of the site's passkeys opens under it.
+// native menu of the site's passkeys opens under it. Runs in every frame; a
+// frame's field is reported in the page's coordinates.
 extern const char* const kPasskeyFieldScript;
 }

@@ -4792,6 +4792,10 @@ void BrowserWindow::MessageReceived(BMessage* message)
             break;
         case kPasswordChecked: {
             auto* target = FindTabByID(message->GetInt64("tab", 0));
+            // The user signed in with a password saved in Summit: the site may
+            // add a passkey to the account now (conditional create, #111).
+            if (target && message->GetBool("same", false))
+                NotePasswordSignIn(message->GetString("origin", ""), message->GetString("username", ""));
             if (!target || message->GetBool("same", false)) break;
             target->pendingPassword = Tab::PendingPassword { message->GetString("origin", ""), message->GetString("username", ""),
                 message->GetString("password", ""), message->GetBool("update", false) };

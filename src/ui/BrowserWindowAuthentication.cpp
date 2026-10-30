@@ -262,6 +262,10 @@ void BrowserWindow::PasskeyRequested(const BMessage& message)
         return;
     }
     const bool create = message.GetBool("create", false);
+    if (create && message.GetBool("conditional", false)) {
+        ConditionalCreateRequested(*tab, identifier, message);
+        return;
+    }
     if (!create && message.GetBool("conditional", false)) {
         // Offered in the sign-in field's native menu, not a sheet; the page
         // keeps waiting until a passkey is chosen there.
@@ -269,6 +273,7 @@ void BrowserWindow::PasskeyRequested(const BMessage& message)
         request.identifier = identifier;
         request.tab = tab->id;
         request.site = message.GetString("rp_id", "");
+        request.origin = message.GetString("origin", "");
         const char* name = nullptr;
         for (int32 i = 0; message.FindString("account_name", i, &name) == B_OK; ++i)
             request.accounts.emplace_back(name, message.GetString("account_display_name", i, ""));
@@ -297,6 +302,9 @@ void BrowserWindow::ShowPasskeyPrompt()
     fields.site = request.GetString("rp_id", "");
     const std::string origin = request.GetString("origin", "");
     if (const auto scheme = origin.find("://"); scheme != std::string::npos) fields.pageHost = origin.substr(scheme + 3);
+    // A frame of another site than the page asks: the sheet names the page.
+    const std::string topOrigin = request.GetString("top_origin", "");
+    if (const auto scheme = topOrigin.find("://"); scheme != std::string::npos) fields.topHost = topOrigin.substr(scheme + 3);
     fields.privateWindow = fPrivate;
     if (request.GetBool("create", false)) {
         fields.kind = request.GetBool("exists", false) ? PasskeyPrompt::Kind::AlreadySaved : PasskeyPrompt::Kind::Create;
@@ -345,11 +353,16 @@ void BrowserWindow::PasskeyAnswered(const BMessage& message)
 // "webauthn") on a page whose conditional get() waits: its passkeys open in a
 // native menu under the field. The page only says where the field is; the
 // choice is made in the menu, which a page cannot reach.
-void BrowserWindow::PasskeyFieldEntered(Tab& tab, BRect field, double pageWidth)
+void BrowserWindow::PasskeyFieldEntered(Tab& tab, BRect field, double pageWidth, const std::string& origin)
 {
     if (tab.id != fSelected || !tab.view || !field.IsValid() || pageWidth <= 0) return;
+    // Not while the passkey sheet asks (the field gets focus back under it,
+    // for instance when a password manager handed a request to Summit).
+    if (fPasskeyPrompt.IsValid()) return;
+    // The request of the frame whose field it is (by origin): a sign-in
+    // frame of another site offers that site's passkeys, the page its own.
     auto found = std::find_if(fConditionalPasskeys.rbegin(), fConditionalPasskeys.rend(),
-        [&](const ConditionalPasskeys& request) { return request.tab == tab.id; });
+        [&](const ConditionalPasskeys& request) { return request.tab == tab.id && request.origin == origin; });
     if (found == fConditionalPasskeys.rend() || found->accounts.empty()) return;
     // CSS pixels to the view's: page zoom and the display's scale both.
     const float scale = tab.view->Bounds().Width() / pageWidth;
@@ -367,6 +380,66 @@ void BrowserWindow::PasskeyFieldEntered(Tab& tab, BRect field, double pageWidth)
     std::fprintf(stderr, "Summit: passkey autofill for %s with %zu passkey%s (request %llu)\n", found->site.c_str(),
         found->accounts.size(), found->accounts.size() == 1 ? "" : "s", static_cast<unsigned long long>(found->identifier));
     list->Show();
+}
+
+// How long after a password sign-in a site may add a passkey without asking.
+constexpr bigtime_t kPasswordSignInWindow = 5 * 60 * 1000000LL;
+
+void BrowserWindow::NotePasswordSignIn(const std::string& origin, const std::string& username)
+{
+    if (fPrivate || origin.empty() || username.empty()) return;
+    const bigtime_t now = system_time();
+    std::erase_if(fPasswordSignIns, [&](const PasswordSignIn& signIn) {
+        return now - signIn.when > kPasswordSignInWindow || (signIn.origin == origin && signIn.username == username);
+    });
+    fPasswordSignIns.push_back({origin, username, now});
+    if (fPasswordSignIns.size() > 32) fPasswordSignIns.erase(fPasswordSignIns.begin());
+}
+
+// A recent sign-in with a saved password on the site the passkey is for
+// (its host is the RP ID or under it), for the account the site names, or
+// for the page that asks; it is used up.
+bool BrowserWindow::TakePasswordSignIn(const std::string& rpID, const std::string& origin, const std::string& username)
+{
+    auto lower = [](std::string text) {
+        for (auto& character : text) character = static_cast<char>(std::tolower(static_cast<unsigned char>(character)));
+        return text;
+    };
+    const bigtime_t now = system_time();
+    const std::string site = lower(rpID), account = lower(username);
+    auto found = std::find_if(fPasswordSignIns.begin(), fPasswordSignIns.end(), [&](const PasswordSignIn& signIn) {
+        if (now - signIn.when > kPasswordSignInWindow || lower(signIn.username) != account) return false;
+        std::string host = lower(RequestOrigin(signIn.origin));
+        const auto scheme = host.find("://");
+        if (scheme == std::string::npos) return false;
+        host = host.substr(scheme + 3);
+        if (const auto port = host.rfind(':'); port != std::string::npos && host.find(']') == std::string::npos) host.erase(port);
+        return host == site || host.ends_with("." + site) || signIn.origin == origin;
+    });
+    if (found == fPasswordSignIns.end()) return false;
+    fPasswordSignIns.erase(found);
+    return true;
+}
+
+// A page asked to add a passkey without a prompt (create() with mediation
+// "conditional", #111), as sites do right after a password sign-in. It is
+// made only when the user just signed in there with a password saved in
+// Summit, for the same account; otherwise it is declined quietly
+// (NotAllowedError), as other browsers do. The window says when one was made.
+void BrowserWindow::ConditionalCreateRequested(Tab& tab, uint64 identifier, const BMessage& message)
+{
+    const std::string site = message.GetString("rp_id", ""), origin = message.GetString("origin", "");
+    const std::string userName = message.GetString("user_name", "");
+    const bool allowed = !fPrivate && !message.GetBool("exists", false) && !userName.empty()
+        && TakePasswordSignIn(site, origin, userName);
+    std::fprintf(stderr, "Summit: %s asks to add a passkey for %s without a prompt (request %llu): %s\n", origin.c_str(),
+        site.c_str(), static_cast<unsigned long long>(identifier), allowed ? "made, after a password sign-in" : "declined, no recent password sign-in");
+    BWebKitView::AnswerPasskeyRequest(identifier, allowed ? 0 : -1);
+    if (!allowed) return;
+    tab.notice = "Summit saved a passkey for " + site + " (" + PasskeyAccountLabel(userName, message.GetString("user_display_name", ""))
+        + ") after your password sign-in. Preferences › Browsing › Passwords lists it.";
+    tab.noticeUntil = system_time() + 15 * 1000000LL;
+    if (tab.id == fSelected) ShowTabStatus(tab);
 }
 
 void BrowserWindow::ClosePasskeyAutofill()

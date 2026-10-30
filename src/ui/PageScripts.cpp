@@ -353,21 +353,69 @@ document.addEventListener('focusin', (event) => {
 })();)js";
 
 // The page only says where the field is: the passkeys are offered in a native
-// menu, and choosing one is the browser's, never the page's, doing.
+// menu, and choosing one is the browser's, never the page's, doing. In every
+// frame: a frame's field is placed in the page by its ancestors, each of
+// which adds where the frame's element is (window.postMessage up the chain;
+// an embedding page can only misplace the list, not choose in it).
 const char* const kPasskeyFieldScript = R"js((() => {
-if (window.__summitPasskeys || window !== window.top) return;
+if (window.__summitPasskeys) return;
 window.__summitPasskeys = true;
 const handlers = window.webkit && window.webkit.messageHandlers;
 const handler = handlers && handlers.summitPasskeys;
 if (!handler) return;
+const post = (message) => handler.postMessage(JSON.stringify(message)).catch(() => {});
 const isPasskeyField = (field) => field instanceof HTMLInputElement
   && (field.getAttribute('autocomplete') || '').toLowerCase().split(/\s+/).includes('webauthn');
+const tag = '__summitPasskeyFrame';
+// Where a child frame's content starts in this frame's viewport.
+const frameBox = (source) => {
+  for (const element of document.querySelectorAll('iframe, frame')) {
+    if (element.contentWindow !== source) continue;
+    const rect = element.getBoundingClientRect();
+    const style = getComputedStyle(element);
+    return { x: rect.left + element.clientLeft + (parseFloat(style.paddingLeft) || 0),
+      y: rect.top + element.clientTop + (parseFloat(style.paddingTop) || 0) };
+  }
+  return null;
+};
+const waiting = new Map();
+let queries = 0;
+// This frame's place in the page's viewport, and the page's width.
+const placeInPage = () => new Promise((resolve) => {
+  if (window === window.top) { resolve({ x: 0, y: 0, width: window.innerWidth }); return; }
+  const id = String(++queries) + Math.random().toString(36).slice(2);
+  waiting.set(id, resolve);
+  setTimeout(() => { if (waiting.delete(id)) resolve(null); }, 1000);
+  window.parent.postMessage({ [tag]: 'where', id }, '*');
+});
+window.addEventListener('message', (event) => {
+  const data = event.data;
+  if (!data || typeof data !== 'object' || !Object.prototype.hasOwnProperty.call(data, tag)) return;
+  // The browser's own messages: the page's listeners need not see them.
+  event.stopImmediatePropagation();
+  const source = event.source;
+  if (data[tag] === 'where' && source) {
+    const box = frameBox(source);
+    if (!box) return;
+    placeInPage().then((place) => {
+      if (place) source.postMessage({ [tag]: 'here', id: data.id, x: place.x + box.x, y: place.y + box.y, width: place.width }, '*');
+    });
+  } else if (data[tag] === 'here' && source === window.parent) {
+    const resolve = waiting.get(data.id);
+    if (!resolve) return;
+    waiting.delete(data.id);
+    resolve({ x: Number(data.x) || 0, y: Number(data.y) || 0, width: Number(data.width) || 0 });
+  }
+}, true);
 const report = (event) => {
   const field = event.target;
   if (!isPasskeyField(field)) return;
   const rect = field.getBoundingClientRect();
-  handler.postMessage(JSON.stringify({ type: 'field', left: rect.left, top: rect.top, right: rect.right,
-    bottom: rect.bottom, width: window.innerWidth, height: window.innerHeight })).catch(() => {});
+  placeInPage().then((place) => {
+    if (!place || !place.width) return;
+    post({ type: 'field', left: rect.left + place.x, top: rect.top + place.y, right: rect.right + place.x,
+      bottom: rect.bottom + place.y, width: place.width });
+  });
 };
 document.addEventListener('focusin', report, true);
 document.addEventListener('mousedown', report, true);
@@ -375,7 +423,7 @@ document.addEventListener('mousedown', report, true);
 // click in the list does not take the field's focus (the list takes none).
 const leave = (event) => {
   if (event.type === 'focusout' && !isPasskeyField(event.target)) return;
-  handler.postMessage(JSON.stringify({ type: 'leave' })).catch(() => {});
+  post({ type: 'leave' });
 };
 document.addEventListener('focusout', leave, true);
 window.addEventListener('scroll', leave, { capture: true, passive: true });

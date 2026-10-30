@@ -784,13 +784,27 @@ private:
     struct ConditionalPasskeys {
         uint64 identifier = 0;
         int64 tab = 0;
-        std::string site;
+        // The relying party ID, and the origin of the frame that asks.
+        std::string site, origin;
         std::vector<std::pair<std::string, std::string>> accounts;
     };
     std::vector<ConditionalPasskeys> fConditionalPasskeys;
-    // The page reported its passkey field (view coordinates of the page,
-    // and the page's width in its own pixels, to scale them).
-    void PasskeyFieldEntered(Tab& tab, BRect field, double pageWidth);
+    // A frame of the page (origin) reported its passkey field (view
+    // coordinates of the page, and the page's width in its own pixels, to
+    // scale them).
+    void PasskeyFieldEntered(Tab& tab, BRect field, double pageWidth, const std::string& origin);
+    // Conditional create (#111): a page may make a passkey without asking
+    // right after the user signed in to it with a password saved in Summit
+    // (submitted unchanged, or saved from the password bar), within
+    // kPasswordSignInWindow; each sign-in allows one passkey.
+    struct PasswordSignIn {
+        std::string origin, username;
+        bigtime_t when = 0;
+    };
+    void NotePasswordSignIn(const std::string& origin, const std::string& username);
+    bool TakePasswordSignIn(const std::string& rpID, const std::string& origin, const std::string& username);
+    void ConditionalCreateRequested(Tab& tab, uint64 identifier, const BMessage& message);
+    std::vector<PasswordSignIn> fPasswordSignIns;
     void ConditionalPasskeyChosen(const BMessage& message);
     // The list under the field (PasskeyAutofill), when one shows.
     void ClosePasskeyAutofill();

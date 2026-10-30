@@ -96089,10 +96089,10 @@ index 0000000000000000000000000000000000000000..cd4bc7529d812074c6e5915950a4f395
 +}
 diff --git a/Source/WebKit/UIProcess/API/haiku/WebKitView.h b/Source/WebKit/UIProcess/API/haiku/WebKitView.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..d12d1bdaf2123f38f7b2b1c0153dcf4704db1fa4
+index 0000000000000000000000000000000000000000..236b41a57de33ac1855176d37348f7d22ed15402
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/API/haiku/WebKitView.h
-@@ -0,0 +1,494 @@
+@@ -0,0 +1,500 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#pragma once
@@ -96189,7 +96189,9 @@ index 0000000000000000000000000000000000000000..d12d1bdaf2123f38f7b2b1c0153dcf47
 +    // (passkeys in the key store, keyring "Summit passkeys"), sent only to
 +    // views that asked for it (SetPasskeyRequests). Fields: "view",
 +    // "identifier" (uint64), "create" (bool), "rp_id" (the site the passkey
-+    // is for), "origin" (the page's). create(): "user_name" and
++    // is for; another site than the page's when the site lists the page as
++    // a related origin), "origin" (the asking frame's), "top_origin" (the
++    // page's, when a frame of another origin asks). create(): "user_name" and
 +    // "user_display_name" (the site's words), "exists" (bool: a passkey the
 +    // site excludes is saved already: tell the user, then answer; none is
 +    // made) and "replaces" (bool: the account's saved passkey is replaced).
@@ -96199,7 +96201,11 @@ index 0000000000000000000000000000000000000000..d12d1bdaf2123f38f7b2b1c0153dcf47
 +    // sign-in field autofill (mediation "conditional"): offer the passkeys
 +    // when the user is in a field marked autocomplete="… webauthn" and
 +    // answer when one is chosen; it waits without a timeout and needs no
-+    // answer otherwise (none at all when there are no passkeys). Answer with
++    // answer otherwise (none at all when there are no passkeys). A create()
++    // with "conditional" asks to make a passkey without a prompt (after a
++    // password sign-in): answer at once, 0 to make it or negative to decline
++    // (the page learns only NotAllowedError); it is not sent when the
++    // account already has a passkey or the site requires verification. Answer with
 +    // AnswerPasskeyRequest. When the request no longer waits (the page
 +    // aborted it, went to another document or closed, or it timed out), a
 +    // notice with "identifier" and "withdrawn" (true) follows.
@@ -124013,10 +124019,10 @@ index c224bd2e2b3ff4cd1b8907c4a21342d9573812b2..644d6ce48362f21aaeda47d48e24dfe3
      bool hasVideoDevice() const { return !m_eligibleVideoDevices.isEmpty(); }
 diff --git a/Source/WebKit/UIProcess/WebAuthentication/haiku/WebAuthenticatorCoordinatorProxyHaiku.cpp b/Source/WebKit/UIProcess/WebAuthentication/haiku/WebAuthenticatorCoordinatorProxyHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..3203a53576aa5092b4b2fd30c9d3363dfcfb6174
+index 0000000000000000000000000000000000000000..335771f4617c51b045b7f5de31ca7e11c3e980bb
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/WebAuthentication/haiku/WebAuthenticatorCoordinatorProxyHaiku.cpp
-@@ -0,0 +1,1260 @@
+@@ -0,0 +1,1565 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +// The Web Authentication API on KunanyiOS. It is built because password
@@ -124042,6 +124048,14 @@ index 0000000000000000000000000000000000000000..3203a53576aa5092b4b2fd30c9d3363d
 +// also has a PRF secret (the prf extension, as CTAP2's hmac-secret) and may
 +// hold a large blob (largeBlob); relying parties' signals hide, show, rename
 +// or remove the passkeys they no longer accept.
++//
++// Beyond the RP ID rule, a site may name other origins allowed to use its
++// passkeys (related origins, https://<rp id>/.well-known/webauthn); a page may
++// make a passkey without a prompt right after the user signed in with a
++// password saved in Summit (conditional create, which the host decides); and
++// a frame of another origin than the page may sign in with a passkey when the
++// page lets it (permissions policy "publickey-credentials-get", which the web
++// process checked).
 +
 +#include "config.h"
 +#include "WebAuthenticatorCoordinatorProxy.h"
@@ -124070,8 +124084,10 @@ index 0000000000000000000000000000000000000000..3203a53576aa5092b4b2fd30c9d3363d
 +#include <WebCore/SecurityOrigin.h>
 +#include <WebCore/SecurityOriginData.h>
 +#include <WebCore/UnknownCredentialOptions.h>
++#include <WebCore/UserVerificationRequirement.h>
 +#include <WebCore/WebAuthenticationConstants.h>
 +#include <WebCore/WebAuthenticationUtils.h>
++#include <WebCore/WellKnownOriginList.h>
 +#include <wtf/NeverDestroyed.h>
 +#include <wtf/RunLoop.h>
 +#include <wtf/TZoneMallocInlines.h>
@@ -124085,7 +124101,9 @@ index 0000000000000000000000000000000000000000..3203a53576aa5092b4b2fd30c9d3363d
 +#include <OS.h>
 +#include <algorithm>
 +#include <cstdlib>
++#include <cstdio>
 +#include <cstring>
++#include <curl/curl.h>
 +#include <openssl/core_names.h>
 +#include <openssl/crypto.h>
 +#include <openssl/evp.h>
@@ -124124,6 +124142,39 @@ index 0000000000000000000000000000000000000000..3203a53576aa5092b4b2fd30c9d3363d
 +ExceptionData notAllowed(ASCIILiteral message)
 +{
 +    return ExceptionData { ExceptionCode::NotAllowedError, message };
++}
++
++// Each of the newer parts can be turned off on its own, should a site
++// misbehave with it: SUMMIT_RELATED_ORIGINS=0 (only the RP ID rule),
++// SUMMIT_PASSKEY_CONDITIONAL_CREATE=0 (conditional create() is declined),
++// SUMMIT_PASSKEY_FRAMES=0 (frames of another origin are declined).
++bool switchOnHaiku(const char* name)
++{
++    const char* value = std::getenv(name);
++    return !value || std::strcmp(value, "0");
++}
++
++bool relatedOriginsEnabledHaiku()
++{
++    static const bool enabled = switchOnHaiku("SUMMIT_RELATED_ORIGINS");
++    return enabled;
++}
++
++bool conditionalCreateEnabledHaiku()
++{
++    static const bool enabled = switchOnHaiku("SUMMIT_PASSKEY_CONDITIONAL_CREATE");
++    return enabled;
++}
++
++bool crossOriginFramesEnabledHaiku()
++{
++    static const bool enabled = switchOnHaiku("SUMMIT_PASSKEY_FRAMES");
++    return enabled;
++}
++
++ExceptionData relyingPartyMismatch()
++{
++    return ExceptionData { ExceptionCode::SecurityError, "The origin of the document is not authorized for the provided RP ID."_s };
 +}
 +
 +// A request that reaches this coordinator was not taken by an extension (a
@@ -124493,6 +124544,126 @@ index 0000000000000000000000000000000000000000..3203a53576aa5092b4b2fd30c9d3363d
 +    return queue.get();
 +}
 +
++// ---- Related origins -------------------------------------------------------
++// WebAuthn Level 3 §5.11: an RP ID that is not the caller's registrable
++// domain or a suffix of it is allowed when https://<rp id>/.well-known/webauthn
++// lists the caller's origin in "origins" (at most five registrable domains
++// are looked at: WebCore's findOriginInWellKnownList). Upstream fetches the
++// list through the network process (WellKnownResourceFetcher), but the curl
++// network session has no data tasks (NetworkSession::dataTaskWithRequest does
++// nothing there), so it is fetched here with libcurl, off the main thread:
++// https only (redirects too), no cookies or credentials, 10 seconds, 64 KiB.
++
++WorkQueue& relatedOriginsQueueHaiku()
++{
++    static NeverDestroyed<Ref<WorkQueue>> queue = WorkQueue::create("Summit related origins"_s);
++    return queue.get();
++}
++
++struct WellKnownResponseHaiku {
++    long status { 0 };
++    std::string mimeType;
++    std::vector<uint8_t> body;
++    std::string error;
++};
++
++size_t wellKnownWriteHaiku(char* data, size_t size, size_t count, void* context)
++{
++    auto& body = *static_cast<std::vector<uint8_t>*>(context);
++    size_t length = size * count;
++    // Too large: returning less than given stops the transfer.
++    if (body.size() + length > defaultWellKnownMaxResourceSize)
++        return 0;
++    body.insert(body.end(), data, data + length);
++    return length;
++}
++
++// Runs on the related-origins queue.
++WellKnownResponseHaiku fetchWellKnownHaiku(const std::string& url, const std::string& userAgent)
++{
++    WellKnownResponseHaiku response;
++    CURL* handle = curl_easy_init();
++    if (!handle) {
++        response.error = "curl_easy_init failed";
++        return response;
++    }
++    char errorBuffer[CURL_ERROR_SIZE] = { };
++    curl_easy_setopt(handle, CURLOPT_URL, url.c_str());
++    curl_easy_setopt(handle, CURLOPT_PROTOCOLS_STR, "https");
++    curl_easy_setopt(handle, CURLOPT_REDIR_PROTOCOLS_STR, "https");
++    curl_easy_setopt(handle, CURLOPT_FOLLOWLOCATION, 1L);
++    curl_easy_setopt(handle, CURLOPT_MAXREDIRS, 5L);
++    curl_easy_setopt(handle, CURLOPT_TIMEOUT, 10L);
++    curl_easy_setopt(handle, CURLOPT_NOSIGNAL, 1L);
++    curl_easy_setopt(handle, CURLOPT_ACCEPT_ENCODING, "");
++    curl_easy_setopt(handle, CURLOPT_ERRORBUFFER, errorBuffer);
++    curl_easy_setopt(handle, CURLOPT_WRITEFUNCTION, wellKnownWriteHaiku);
++    curl_easy_setopt(handle, CURLOPT_WRITEDATA, &response.body);
++    if (!userAgent.empty())
++        curl_easy_setopt(handle, CURLOPT_USERAGENT, userAgent.c_str());
++    struct curl_slist* headers = curl_slist_append(nullptr, "Accept: application/json");
++    curl_easy_setopt(handle, CURLOPT_HTTPHEADER, headers);
++    CURLcode code = curl_easy_perform(handle);
++    if (code == CURLE_OK) {
++        curl_easy_getinfo(handle, CURLINFO_RESPONSE_CODE, &response.status);
++        char* type = nullptr;
++        if (curl_easy_getinfo(handle, CURLINFO_CONTENT_TYPE, &type) == CURLE_OK && type) {
++            // The MIME type without its parameters ("; charset=utf-8").
++            std::string mimeType(type);
++            mimeType = mimeType.substr(0, mimeType.find(';'));
++            while (!mimeType.empty() && (mimeType.back() == ' ' || mimeType.back() == '\t'))
++                mimeType.pop_back();
++            response.mimeType = WTF::move(mimeType);
++        }
++    } else {
++        response.error = *errorBuffer ? errorBuffer : curl_easy_strerror(code);
++        response.body.clear();
++    }
++    curl_slist_free_all(headers);
++    curl_easy_cleanup(handle);
++    return response;
++}
++
++// Answers whether the caller may use the RP ID: at once when it is the
++// caller's registrable domain or a suffix of it (WebKit's rule), else after
++// the site's related-origins list was fetched. The handler gets an exception,
++// or nothing; main thread.
++void checkRelyingPartyHaiku(const SecurityOriginData& callerOrigin, const String& rpID, const String& userAgent, CompletionHandler<void(std::optional<ExceptionData>&&)>&& handler)
++{
++    Ref origin = callerOrigin.securityOrigin();
++    if (origin->isMatchingRegistrableDomainSuffix(rpID))
++        return handler(std::nullopt);
++    // Only for a secure caller, and an RP ID that is a domain (wellKnownURL
++    // also refuses ports, paths and credentials).
++    if (!relatedOriginsEnabledHaiku() || !origin->isPotentiallyTrustworthy() || callerOrigin.isOpaque() || URL::hostIsIPAddress(rpID))
++        return handler(relyingPartyMismatch());
++    URL url = wellKnownURL(rpID, "/.well-known/webauthn"_s);
++    if (!url.isValid())
++        return handler(relyingPartyMismatch());
++    relatedOriginsQueueHaiku().dispatch([url = utf8Haiku(url.string()), userAgent = utf8Haiku(userAgent), callerOrigin = callerOrigin.isolatedCopy(), rpID = rpID.isolatedCopy(), handler = WTF::move(handler)]() mutable {
++        auto response = fetchWellKnownHaiku(url, userAgent);
++        RunLoop::mainSingleton().dispatch([response = WTF::move(response), callerOrigin = WTF::move(callerOrigin), rpID = WTF::move(rpID), handler = WTF::move(handler)]() mutable {
++            auto caller = utf8Haiku(callerOrigin.toString());
++            auto rp = utf8Haiku(rpID);
++            if (!response.error.empty()) {
++                std::fprintf(stderr, "Summit passkeys: related origins of %s for %s: %s\n", rp.c_str(), caller.c_str(), response.error.c_str());
++                return handler(relyingPartyMismatch());
++            }
++            if (!isWellKnownResponseAcceptable(response.status, String::fromUTF8(response.mimeType.c_str()))) {
++                std::fprintf(stderr, "Summit passkeys: related origins of %s for %s: HTTP %ld, %s\n", rp.c_str(), caller.c_str(),
++                    response.status, response.mimeType.empty() ? "no type" : response.mimeType.c_str());
++                return handler(relyingPartyMismatch());
++            }
++            auto found = findOriginInWellKnownList(callerOrigin, std::span<const uint8_t>(response.body.data(), response.body.size()), "origins"_s);
++            std::fprintf(stderr, "Summit passkeys: related origins of %s for %s: %s\n", rp.c_str(), caller.c_str(),
++                found == WellKnownOriginListResult::Found ? "listed" : found == WellKnownOriginListResult::Malformed ? "malformed list" : "not listed");
++            if (found != WellKnownOriginListResult::Found)
++                return handler(relyingPartyMismatch());
++            handler(std::nullopt);
++        });
++    });
++}
++
 +// ---- Requests waiting for the user ---------------------------------------
 +
 +struct PasskeyRequestHaiku {
@@ -124504,6 +124675,9 @@ index 0000000000000000000000000000000000000000..3203a53576aa5092b4b2fd30c9d3363d
 +    // get() with mediation "conditional": the passkeys are offered in the
 +    // sign-in field's autofill, and the request waits, without a timeout,
 +    // until one is chosen, the page aborts it or the frame goes away.
++    // create() with it: the host makes the passkey without a prompt when the
++    // user just signed in with a saved password, and declines otherwise;
++    // the passkey's flags then claim neither presence nor verification.
 +    bool conditional { false };
 +    // The host was asked (B_WEBKIT_PASSKEY_REQUESTED) and must be told when
 +    // the request goes away without its answer.
@@ -124514,6 +124688,9 @@ index 0000000000000000000000000000000000000000..3203a53576aa5092b4b2fd30c9d3363d
 +    bool working { false };
 +    std::string rpID;
 +    std::string origin;
++    // get() from a frame of another origin than the page: the page's
++    // (top-level) origin, which the host shows and clientDataJSON names.
++    std::string topOrigin;
 +    RefPtr<ArrayBuffer> clientDataJSON;
 +    Vector<uint8_t> clientDataHash;
 +    // create()
@@ -124589,7 +124766,8 @@ index 0000000000000000000000000000000000000000..3203a53576aa5092b4b2fd30c9d3363d
 +}
 +
 +// The host asks the user (B_WEBKIT_PASSKEY_REQUESTED). Fields: "view",
-+// "identifier", "create" (bool), "conditional" (bool), "rp_id", "origin";
++// "identifier", "create" (bool), "conditional" (bool), "rp_id", "origin",
++// "top_origin" (a frame of another origin than the page asks);
 +// for create(), "user_name", "user_display_name" and "exists" (bool: one of
 +// the passkeys the site excludes is saved here, so none is made) and
 +// "replaces" (bool: a passkey of the same account is saved here and the new
@@ -124608,6 +124786,8 @@ index 0000000000000000000000000000000000000000..3203a53576aa5092b4b2fd30c9d3363d
 +    message.AddBool("conditional", request.conditional);
 +    message.AddString("rp_id", request.rpID.c_str());
 +    message.AddString("origin", request.origin.c_str());
++    if (!request.topOrigin.empty())
++        message.AddString("top_origin", request.topOrigin.c_str());
 +    if (request.create) {
 +        message.AddString("user_name", request.userName.c_str());
 +        message.AddString("user_display_name", request.displayName.c_str());
@@ -124678,7 +124858,12 @@ index 0000000000000000000000000000000000000000..3203a53576aa5092b4b2fd30c9d3363d
 +            auto coseKey = encodeES256PublicKeyAsCBOR(vectorHaiku(newKey->x), vectorHaiku(newKey->y));
 +            // No AAGUID: attestation "none" says nothing about the authenticator.
 +            Vector<uint8_t> aaguid(std::span<const uint8_t>(std::array<uint8_t, aaguidLength> { }));
-+            uint8_t flags = WebAuthn::userPresenceFlag | WebAuthn::userVerifiedFlag | WebAuthn::attestedCredentialDataIncludedFlag;
++            // A conditional create() had no gesture or confirmation for this
++            // passkey (the host made it after a password sign-in): UP and UV
++            // stay clear, as the spec has it for conditional creation.
++            uint8_t flags = WebAuthn::attestedCredentialDataIncludedFlag;
++            if (!request->conditional)
++                flags |= WebAuthn::userPresenceFlag | WebAuthn::userVerifiedFlag;
 +            auto authData = buildAuthData(String::fromUTF8(request->rpID.c_str()), flags, 0, buildAttestedCredentialData(aaguid, credential, coseKey));
 +            auto attestationObject = buildAttestationObject(WTF::move(authData), String { emptyString() }, { }, AttestationConveyancePreference::None);
 +
@@ -124789,11 +124974,10 @@ index 0000000000000000000000000000000000000000..3203a53576aa5092b4b2fd30c9d3363d
 +    });
 +}
 +
-+// The checks a request passes before anyone is asked: the frame is the one
-+// the web process names, and the relying party ID is the caller's
-+// registrable domain or a suffix of it. Related origins (.well-known/webauthn)
-+// are not consulted. An exception, or nothing.
-+std::optional<ExceptionData> validateRequestHaiku(IPC::Connection& connection, FrameIdentifier frameID, const FrameInfoData& frameInfo, const String& rpID)
++// The check a request passes before anything else: the frame is the one the
++// web process names. The relying party ID is checked after it
++// (checkRelyingPartyHaiku). An exception, or nothing.
++std::optional<ExceptionData> validateFrameHaiku(IPC::Connection& connection, FrameIdentifier frameID, const FrameInfoData& frameInfo)
 +{
 +    RefPtr frame = WebFrameProxy::webFrame(frameID);
 +    if (!frame)
@@ -124805,9 +124989,37 @@ index 0000000000000000000000000000000000000000..3203a53576aa5092b4b2fd30c9d3363d
 +            return ExceptionData { ExceptionCode::InvalidStateError, { } };
 +        }
 +    }
-+    if (!frameInfo.securityOrigin.securityOrigin()->isMatchingRegistrableDomainSuffix(rpID))
-+        return ExceptionData { ExceptionCode::SecurityError, "The origin of the document is not authorized for the provided RP ID."_s };
 +    return std::nullopt;
++}
++
++// Requests whose relying party is being checked (a fetch of related origins
++// may take seconds), by token: an abort (cancel()) or the coordinator going
++// away ends them at once, and the check's result then finds nothing to do.
++struct RelyingPartyCheckHaiku {
++    const WebAuthenticatorCoordinatorProxy* owner { nullptr };
++    RequestCompletionHandler handler;
++};
++
++std::unordered_map<uint64_t, RelyingPartyCheckHaiku>& relyingPartyChecksHaiku()
++{
++    static NeverDestroyed<std::unordered_map<uint64_t, RelyingPartyCheckHaiku>> checks;
++    return checks.get();
++}
++
++uint64_t addRelyingPartyCheckHaiku(const WebAuthenticatorCoordinatorProxy* owner, RequestCompletionHandler&& handler)
++{
++    static uint64_t lastToken;
++    uint64_t token = ++lastToken;
++    relyingPartyChecksHaiku().emplace(token, RelyingPartyCheckHaiku { owner, WTF::move(handler) });
++    return token;
++}
++
++std::optional<RequestCompletionHandler> takeRelyingPartyCheckHaiku(uint64_t token)
++{
++    auto found = relyingPartyChecksHaiku().extract(token);
++    if (found.empty())
++        return std::nullopt;
++    return WTF::move(found.mapped().handler);
 +}
 +
 +bool takesPasskeyRequestsHaiku(WebPageProxy* page)
@@ -124899,7 +125111,7 @@ index 0000000000000000000000000000000000000000..3203a53576aa5092b4b2fd30c9d3363d
 +        taken->handler({ }, AuthenticatorAttachment::Platform, exception);
 +    };
 +    if (account < 0)
-+        return decline(notAllowed("The user declined."_s));
++        return decline(notAllowed(request.create && request.conditional ? "No passkey was created."_s : "The user declined."_s));
 +    if (request.create) {
 +        // The user agreed before learning the passkey existed; the site
 +        // learns it only now, as the spec asks.
@@ -124954,37 +125166,17 @@ index 0000000000000000000000000000000000000000..3203a53576aa5092b4b2fd30c9d3363d
 +    return webPageProxy ? webPageProxy->legacyMainFrameProcess().sharedPreferencesForWebProcess() : std::nullopt;
 +}
 +
-+void WebAuthenticatorCoordinatorProxy::makeCredential(IPC::Connection& connection, FrameIdentifier frameID, FrameInfoData&& frameInfo, PublicKeyCredentialCreationOptions&& options, MediationRequirement mediation, RequestCompletionHandler&& handler)
++// create() after the relying party was checked.
++static void startCreateHaiku(const WebAuthenticatorCoordinatorProxy* owner, WebPageProxy* page, FrameIdentifier frameID, const FrameInfoData& frameInfo, PublicKeyCredentialCreationOptions&& options, MediationRequirement mediation, RequestCompletionHandler&& handler)
 +{
-+    RefPtr page = m_webPageProxy.get();
-+    // Conditional creation (a passkey made after a password sign-in) needs a
-+    // password manager's say; there is none in the browser.
-+    if (!takesPasskeyRequestsHaiku(page.get()) || mediation == MediationRequirement::Conditional) {
-+        tellWindow(page.get(), mediation, true);
-+        handler({ }, AuthenticatorAttachment::Platform, noAuthenticatorAvailable());
-+        return;
-+    }
-+    if (auto exception = validateRequestHaiku(connection, frameID, frameInfo, options.rp.id))
-+        return handler({ }, AuthenticatorAttachment::Platform, *exception);
-+
-+    // The authenticator makes ES256 keys only.
-+    bool es256 = false;
-+    for (auto& parameters : options.pubKeyCredParams)
-+        es256 |= parameters.type == PublicKeyCredentialType::PublicKey && parameters.alg == COSE::ES256;
-+    if (!es256)
-+        return handler({ }, AuthenticatorAttachment::Platform, ExceptionData { ExceptionCode::NotSupportedError, "Summit's passkeys are ES256 (-7) keys, which the site does not accept."_s });
-+    // A site that asks for a security key (cross-platform) cannot use it.
-+    if (options.authenticatorSelection && options.authenticatorSelection->authenticatorAttachment == AuthenticatorAttachment::CrossPlatform) {
-+        tellWindow(page.get(), mediation, true);
-+        return handler({ }, AuthenticatorAttachment::Platform, noAuthenticatorAvailable());
-+    }
-+
++    bool conditional = mediation == MediationRequirement::Conditional;
 +    PasskeyRequestHaiku request;
-+    request.owner = this;
-+    request.page = page.get();
++    request.owner = owner;
++    request.page = page;
 +    request.frame = frameID;
 +    request.handler = WTF::move(handler);
 +    request.create = true;
++    request.conditional = conditional;
 +    request.rpID = utf8Haiku(options.rp.id);
 +    request.origin = utf8Haiku(frameInfo.securityOrigin.toString());
 +    request.clientDataJSON = buildClientDataJson(ClientDataType::Create, options.challenge, frameInfo.securityOrigin.securityOrigin(), WebAuthn::Scope::SameOrigin);
@@ -125002,7 +125194,7 @@ index 0000000000000000000000000000000000000000..3203a53576aa5092b4b2fd30c9d3363d
 +                request.prfEval = prfValuesHaiku(*extensions->prf->eval);
 +            // Per-credential inputs make no sense for a passkey not made yet.
 +            if (extensions->prf->evalByCredential && !extensions->prf->evalByCredential->isEmpty())
-+                return handler({ }, AuthenticatorAttachment::Platform, ExceptionData { ExceptionCode::NotSupportedError, "prf.evalByCredential is for get()."_s });
++                return request.handler({ }, AuthenticatorAttachment::Platform, ExceptionData { ExceptionCode::NotSupportedError, "prf.evalByCredential is for get()."_s });
 +        }
 +    }
 +    std::vector<std::vector<uint8_t>> excluded;
@@ -125011,11 +125203,12 @@ index 0000000000000000000000000000000000000000..3203a53576aa5092b4b2fd30c9d3363d
 +            excluded.push_back(bytesHaiku(descriptor.id.span()));
 +    }
 +    auto rpID = request.rpID;
++    auto userHandle = request.userHandle;
 +    auto identifier = addPasskeyRequestHaiku(WTF::move(request), passkeyTimeoutHaiku(options.timeout));
-+    passkeyQueueHaiku().dispatch([identifier, rpID = WTF::move(rpID), excluded = WTF::move(excluded)]() mutable {
++    passkeyQueueHaiku().dispatch([identifier, rpID = WTF::move(rpID), excluded = WTF::move(excluded), userHandle = WTF::move(userHandle), conditional]() mutable {
 +        std::vector<StoredPasskeyHaiku> passkeys;
 +        status_t status = storedPasskeysHaiku(rpID, passkeys);
-+        RunLoop::mainSingleton().dispatch([identifier, status, passkeys = WTF::move(passkeys), excluded = WTF::move(excluded)]() mutable {
++        RunLoop::mainSingleton().dispatch([identifier, status, passkeys = WTF::move(passkeys), excluded = WTF::move(excluded), userHandle = WTF::move(userHandle), conditional]() mutable {
 +            if (status != B_OK) {
 +                finishPasskeyRequestHaiku(identifier, notAllowed("Summit may not use the key store."_s));
 +                return;
@@ -125025,9 +125218,18 @@ index 0000000000000000000000000000000000000000..3203a53576aa5092b4b2fd30c9d3363d
 +                return;
 +            // A passkey the site hid (it no longer accepts it) does not
 +            // count as one it excludes.
++            bool accountHasPasskey = false;
 +            for (auto& passkey : passkeys) {
 +                for (auto& id : excluded)
 +                    found->second.excluded |= !passkey.hidden && passkey.credentialID == id;
++                accountHasPasskey |= !passkey.hidden && passkey.userHandle == userHandle;
++            }
++            // Conditional creation adds a passkey to an account that has
++            // none; it never replaces one silently, and tells the site
++            // nothing about the passkeys saved here.
++            if (conditional && (found->second.excluded || accountHasPasskey)) {
++                finishPasskeyRequestHaiku(identifier, notAllowed("No passkey was created."_s));
++                return;
 +            }
 +            found->second.candidates = WTF::move(passkeys);
 +            askHostHaiku(identifier);
@@ -125035,26 +125237,9 @@ index 0000000000000000000000000000000000000000..3203a53576aa5092b4b2fd30c9d3363d
 +    });
 +}
 +
-+void WebAuthenticatorCoordinatorProxy::getAssertion(IPC::Connection& connection, FrameIdentifier frameID, FrameInfoData&& frameInfo, PublicKeyCredentialRequestOptions&& options, MediationRequirement mediation, IPC::Untrusted<std::optional<SecurityOriginData>>&& untrustedParentOrigin, RequestCompletionHandler&& handler)
++// get() after the relying party was checked.
++static void startGetHaiku(const WebAuthenticatorCoordinatorProxy* owner, WebPageProxy* page, FrameIdentifier frameID, const FrameInfoData& frameInfo, PublicKeyCredentialRequestOptions&& options, MediationRequirement mediation, const std::optional<SecurityOriginData>& topOrigin, RequestCompletionHandler&& handler)
 +{
-+    RefPtr page = m_webPageProxy.get();
-+    if (!takesPasskeyRequestsHaiku(page.get())) {
-+        tellWindow(page.get(), mediation, false);
-+        handler({ }, AuthenticatorAttachment::Platform, noAuthenticatorAvailable());
-+        return;
-+    }
-+    if (auto exception = validateRequestHaiku(connection, frameID, frameInfo, options.rpId))
-+        return handler({ }, AuthenticatorAttachment::Platform, *exception);
-+    // A frame of another origin than the page's: the passkey would sign for a
-+    // page the user does not see; as upstream's own authenticators, decline.
-+    auto parentOrigin = WTF::move(untrustedParentOrigin).unsafeExtractWithoutValidation(IPC::UnvalidatedReason::NeedsReview);
-+    if (parentOrigin)
-+        return handler({ }, AuthenticatorAttachment::Platform, notAllowed("The origin of the document is not the same as its ancestors."_s));
-+    if (options.authenticatorAttachment == AuthenticatorAttachment::CrossPlatform) {
-+        tellWindow(page.get(), mediation, false);
-+        return handler({ }, AuthenticatorAttachment::Platform, noAuthenticatorAvailable());
-+    }
-+
 +    std::vector<std::vector<uint8_t>> allowed;
 +    for (auto& descriptor : options.allowCredentials) {
 +        if (descriptor.type == PublicKeyCredentialType::PublicKey)
@@ -125062,15 +125247,21 @@ index 0000000000000000000000000000000000000000..3203a53576aa5092b4b2fd30c9d3363d
 +    }
 +
 +    PasskeyRequestHaiku request;
-+    request.owner = this;
-+    request.page = page.get();
++    request.owner = owner;
++    request.page = page;
 +    request.frame = frameID;
 +    request.handler = WTF::move(handler);
 +    request.create = false;
 +    request.conditional = mediation == MediationRequirement::Conditional;
 +    request.rpID = utf8Haiku(options.rpId);
 +    request.origin = utf8Haiku(frameInfo.securityOrigin.toString());
-+    request.clientDataJSON = buildClientDataJson(ClientDataType::Get, options.challenge, frameInfo.securityOrigin.securityOrigin(), WebAuthn::Scope::SameOrigin);
++    // A frame of another origin: clientDataJSON says so (crossOrigin) and
++    // names the page's origin (topOrigin), for the relying party to check.
++    String topOriginString = topOrigin ? topOrigin->toString() : nullString();
++    if (topOrigin)
++        request.topOrigin = utf8Haiku(topOriginString);
++    request.clientDataJSON = buildClientDataJson(ClientDataType::Get, options.challenge, frameInfo.securityOrigin.securityOrigin(),
++        topOrigin ? WebAuthn::Scope::CrossOrigin : WebAuthn::Scope::SameOrigin, topOriginString);
 +    request.clientDataHash = buildClientDataJsonHash(*request.clientDataJSON);
 +    if (auto& extensions = options.extensions) {
 +        // The client checks of the prf extension
@@ -125129,6 +125320,114 @@ index 0000000000000000000000000000000000000000..3203a53576aa5092b4b2fd30c9d3363d
 +    });
 +}
 +
++void WebAuthenticatorCoordinatorProxy::makeCredential(IPC::Connection& connection, FrameIdentifier frameID, FrameInfoData&& frameInfo, PublicKeyCredentialCreationOptions&& options, MediationRequirement mediation, RequestCompletionHandler&& handler)
++{
++    RefPtr page = m_webPageProxy.get();
++    bool conditional = mediation == MediationRequirement::Conditional;
++    if (!takesPasskeyRequestsHaiku(page.get()) || (conditional && !conditionalCreateEnabledHaiku())) {
++        tellWindow(page.get(), mediation, true);
++        handler({ }, AuthenticatorAttachment::Platform, noAuthenticatorAvailable());
++        return;
++    }
++    if (auto exception = validateFrameHaiku(connection, frameID, frameInfo))
++        return handler({ }, AuthenticatorAttachment::Platform, *exception);
++
++    // The authenticator makes ES256 keys only.
++    bool es256 = false;
++    for (auto& parameters : options.pubKeyCredParams)
++        es256 |= parameters.type == PublicKeyCredentialType::PublicKey && parameters.alg == COSE::ES256;
++    if (!es256)
++        return handler({ }, AuthenticatorAttachment::Platform, ExceptionData { ExceptionCode::NotSupportedError, "Summit's passkeys are ES256 (-7) keys, which the site does not accept."_s });
++    // A site that asks for a security key (cross-platform) cannot use it.
++    if (options.authenticatorSelection && options.authenticatorSelection->authenticatorAttachment == AuthenticatorAttachment::CrossPlatform) {
++        tellWindow(page.get(), mediation, true);
++        return handler({ }, AuthenticatorAttachment::Platform, noAuthenticatorAvailable());
++    }
++    // A passkey made without a prompt is not user-verified; a site that
++    // requires verification gets none made (it may ask again, modally).
++    if (conditional && options.authenticatorSelection && options.authenticatorSelection->userVerification == UserVerificationRequirement::Required)
++        return handler({ }, AuthenticatorAttachment::Platform, notAllowed("No passkey was created."_s));
++
++    String rpID = options.rp.id;
++    // A copy: the handler below takes frameInfo.
++    auto callerOrigin = frameInfo.securityOrigin;
++    auto token = addRelyingPartyCheckHaiku(this, WTF::move(handler));
++    checkRelyingPartyHaiku(callerOrigin, rpID, page->userAgent(), [owner = this, token, page = WeakPtr { *page }, frameID, frameInfo = WTF::move(frameInfo), options = WTF::move(options), mediation](std::optional<ExceptionData>&& exception) mutable {
++        auto handler = takeRelyingPartyCheckHaiku(token);
++        if (!handler)
++            return;
++        if (exception)
++            return (*handler)({ }, AuthenticatorAttachment::Platform, *exception);
++        if (!takesPasskeyRequestsHaiku(page.get()))
++            return (*handler)({ }, AuthenticatorAttachment::Platform, noAuthenticatorAvailable());
++        startCreateHaiku(owner, page.get(), frameID, frameInfo, WTF::move(options), mediation, WTF::move(*handler));
++    });
++}
++
++void WebAuthenticatorCoordinatorProxy::getAssertion(IPC::Connection& connection, FrameIdentifier frameID, FrameInfoData&& frameInfo, PublicKeyCredentialRequestOptions&& options, MediationRequirement mediation, IPC::Untrusted<std::optional<SecurityOriginData>>&& untrustedParentOrigin, RequestCompletionHandler&& handler)
++{
++    RefPtr page = m_webPageProxy.get();
++    if (!takesPasskeyRequestsHaiku(page.get())) {
++        tellWindow(page.get(), mediation, false);
++        handler({ }, AuthenticatorAttachment::Platform, noAuthenticatorAvailable());
++        return;
++    }
++    if (auto exception = validateFrameHaiku(connection, frameID, frameInfo))
++        return handler({ }, AuthenticatorAttachment::Platform, *exception);
++    // A frame of another origin than an ancestor: the web process let it ask
++    // (permissions policy "publickey-credentials-get" allows it there). The
++    // origin it names must be an ancestor's, as upstream checks; the page's
++    // own origin, from the main frame, is what clientDataJSON and the user
++    // see.
++    std::optional<SecurityOriginData> topOrigin;
++    auto parentOrigin = WTF::move(untrustedParentOrigin).unsafeExtractWithoutValidation(IPC::UnvalidatedReason::NeedsReview);
++    if (parentOrigin) {
++        if (!crossOriginFramesEnabledHaiku())
++            return handler({ }, AuthenticatorAttachment::Platform, notAllowed("The origin of the document is not the same as its ancestors."_s));
++        RefPtr frame = WebFrameProxy::webFrame(frameID);
++        bool foundMatchingAncestor = false;
++        bool hasHTTPAncestor = false;
++        for (RefPtr ancestor = frame ? frame->parentFrame() : nullptr; ancestor; ancestor = ancestor->parentFrame()) {
++            if (!ancestor->url().protocolIsInHTTPFamily())
++                continue;
++            hasHTTPAncestor = true;
++            if (*parentOrigin == SecurityOriginData::fromURLWithoutStrictOpaqueness(ancestor->url())) {
++                foundMatchingAncestor = true;
++                break;
++            }
++        }
++        if (hasHTTPAncestor && !foundMatchingAncestor) {
++            IPC::markCurrentlyDispatchedMessageAsInvalid(connection, "Message check failed: the parent origin"_s);
++            return handler({ }, AuthenticatorAttachment::Platform, ExceptionData { ExceptionCode::InvalidStateError, { } });
++        }
++        RefPtr mainFrame = page->mainFrame();
++        if (!mainFrame || !mainFrame->url().protocolIsInHTTPFamily())
++            return handler({ }, AuthenticatorAttachment::Platform, notAllowed("The origin of the document is not the same as its ancestors."_s));
++        topOrigin = SecurityOriginData::fromURLWithoutStrictOpaqueness(mainFrame->url());
++        // The page itself may be the frame's origin again (a.example in
++        // b.example in a.example): clientDataJSON still says crossOrigin.
++    }
++    if (options.authenticatorAttachment == AuthenticatorAttachment::CrossPlatform) {
++        tellWindow(page.get(), mediation, false);
++        return handler({ }, AuthenticatorAttachment::Platform, noAuthenticatorAvailable());
++    }
++
++    String rpID = options.rpId;
++    // A copy: the handler below takes frameInfo.
++    auto callerOrigin = frameInfo.securityOrigin;
++    auto token = addRelyingPartyCheckHaiku(this, WTF::move(handler));
++    checkRelyingPartyHaiku(callerOrigin, rpID, page->userAgent(), [owner = this, token, page = WeakPtr { *page }, frameID, frameInfo = WTF::move(frameInfo), options = WTF::move(options), mediation, topOrigin = WTF::move(topOrigin)](std::optional<ExceptionData>&& exception) mutable {
++        auto handler = takeRelyingPartyCheckHaiku(token);
++        if (!handler)
++            return;
++        if (exception)
++            return (*handler)({ }, AuthenticatorAttachment::Platform, *exception);
++        if (!takesPasskeyRequestsHaiku(page.get()))
++            return (*handler)({ }, AuthenticatorAttachment::Platform, noAuthenticatorAvailable());
++        startGetHaiku(owner, page.get(), frameID, frameInfo, WTF::move(options), mediation, topOrigin, WTF::move(*handler));
++    });
++}
++
 +void WebAuthenticatorCoordinatorProxy::isUserVerifyingPlatformAuthenticatorAvailable(IPC::Untrusted<SecurityOriginData>&&, QueryCompletionHandler&& handler)
 +{
 +    handler(takesPasskeyRequestsHaiku(m_webPageProxy.get()));
@@ -125148,12 +125447,14 @@ index 0000000000000000000000000000000000000000..3203a53576aa5092b4b2fd30c9d3363d
 +    // lacks it from one that has never heard of it.
 +    bool platform = takesPasskeyRequestsHaiku(m_webPageProxy.get());
 +    Vector<KeyValuePair<String, bool>> capabilities {
-+        { "conditionalCreate"_s, false },
++        // Conditional creation is offered after a password sign-in with a
++        // password saved in Summit; the host decides each time.
++        { "conditionalCreate"_s, platform && conditionalCreateEnabledHaiku() },
 +        { "conditionalGet"_s, platform },
 +        { "hybridTransport"_s, false },
 +        { "passkeyPlatformAuthenticator"_s, platform },
 +        { "userVerifyingPlatformAuthenticator"_s, platform },
-+        { "relatedOrigins"_s, false },
++        { "relatedOrigins"_s, platform && relatedOriginsEnabledHaiku() },
 +        { "signalAllAcceptedCredentials"_s, platform },
 +        { "signalCurrentUserDetails"_s, platform },
 +        { "signalUnknownCredential"_s, platform },
@@ -125264,6 +125565,16 @@ index 0000000000000000000000000000000000000000..3203a53576aa5092b4b2fd30c9d3363d
 +// signature) completes.
 +void WebAuthenticatorCoordinatorProxy::cancel(CompletionHandler<void()>&& handler)
 +{
++    // Requests still checking their relying party end now.
++    Vector<uint64_t> checks;
++    for (auto& [token, check] : relyingPartyChecksHaiku()) {
++        if (check.owner == this)
++            checks.append(token);
++    }
++    for (auto token : checks) {
++        if (auto checkHandler = takeRelyingPartyCheckHaiku(token))
++            (*checkHandler)({ }, AuthenticatorAttachment::Platform, ExceptionData { ExceptionCode::AbortError, "The request was aborted."_s });
++    }
 +    Vector<uint64_t> identifiers;
 +    for (auto& [identifier, request] : passkeyRequestsHaiku()) {
 +        if (request.owner == this)

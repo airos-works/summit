@@ -68,19 +68,19 @@ What the authenticator does:
 - **clientDataJSON** is WebKit's `buildClientDataJson` from the frame's
   origin; the RP ID check is WebKit's
   (`SecurityOrigin::isMatchingRegistrableDomainSuffix`, after the web process's
-  own checks: secure context, no IP addresses, `user.id` 1-64 bytes). Related
-  origins (`/.well-known/webauthn`) are not consulted. Frames of another origin
-  than their parents are declined, as upstream's own authenticators do.
+  own checks: secure context, no IP addresses, `user.id` 1-64 bytes), and
+  when that fails, the site's list of related origins (below). A `get()` from
+  a frame of another origin than the page carries `crossOrigin: true` and
+  `topOrigin` (the page's origin) in clientDataJSON (below).
 - **Timeouts and aborts.** The page's `timeout` is honoured between 30 s and
   10 minutes (5 minutes without one); an `AbortSignal` or the timeout closes the
   sheet. A request whose key is already being made or used completes.
 - **Availability.** `PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable()`
   and `isConditionalMediationAvailable()` are `true`, and
   `getClientCapabilities()` reports `passkeyPlatformAuthenticator`,
-  `userVerifyingPlatformAuthenticator`, `conditionalGet`, the three signals and
-  `extension:prf`, `extension:largeBlob` and `extension:credProps`.
-  Conditional creation (a passkey made by itself after a password sign-in) is
-  not offered and is declined quietly.
+  `userVerifyingPlatformAuthenticator`, `conditionalGet`, `conditionalCreate`,
+  `relatedOrigins`, the three signals and `extension:prf`,
+  `extension:largeBlob` and `extension:credProps`.
 - **Extensions** (below): `credProps`, `prf` and `largeBlob`.
 
 ### Passkey autofill (conditional mediation, 30 October 2026)
@@ -109,6 +109,88 @@ passkeys offered in the autofill of its sign-in field, as other browsers do:
 
 For tests, the list takes `hey Summit 'ALTB' of Window N with
 account=int32(K)` (the window titled "Passkeys").
+
+### Related origins (WebAuthn Level 3 §5.11, 30 October 2026)
+
+A page may use an RP ID that is not its registrable domain or a suffix of it
+when the RP ID's site lists the page's origin at
+`https://<rp id>/.well-known/webauthn` (`{"origins": [...]}`): Microsoft's
+`login.microsoft.com` lists `https://login.live.com`, for example. When
+WebKit's RP ID rule fails, the coordinator fetches that list and looks for the
+caller's origin with WebCore's `findOriginInWellKnownList` (upstream's: at most
+five registrable domains, `eTLD+1` labels, are looked at, 100 entries, 64 KiB;
+the response must be `200` with `application/json`). The caller must be a
+secure origin and the RP ID a domain (no IP address, port or path).
+
+Upstream fetches the list through the network process
+(`WellKnownResourceFetcher`), but the curl network session has no data tasks
+(`NetworkSession::dataTaskWithRequest` does nothing there and never answers),
+so the Haiku coordinator fetches it itself with libcurl on a queue of its own:
+https only, redirects too (at most 5), no cookies or credentials, the page's
+user agent, 10 seconds. It does not go through Summit's proxy settings.
+The browser's stderr says what came of it ("Summit passkeys: related origins
+of login.microsoft.com for https://login.live.com: listed", "not listed",
+"HTTP 404, text/html", or curl's error). Not listed or not fetched:
+`SecurityError`, as before. An abort while the list is fetched ends the
+request at once (`AbortError`). The sheet then says which page asks ("Asked
+by login.live.com"). `SUMMIT_RELATED_ORIGINS=0` turns this off (and
+`relatedOrigins` is reported `false`).
+
+### Conditional create: a passkey after a password sign-in (30 October 2026)
+
+`navigator.credentials.create({mediation: "conditional", publicKey})` is how
+a site adds a passkey to an account right after the user signed in with a
+password (Chrome's "automatic passkey upgrade"). Summit makes one without a
+prompt only when all of these hold, and otherwise declines quietly with
+`NotAllowedError` ("No passkey was created."), as the spec asks, so that a page
+learns nothing:
+
+- The user signed in to the site, in this window and within the last 5
+  minutes, with a password Summit's password manager knows: a saved password
+  submitted unchanged (autofilled or typed), or one just saved from the
+  password bar. The sign-in's host must be the RP ID or under it, and its
+  account name the `user.name` of the request (ignoring case). Each sign-in
+  allows one passkey. Private windows neither save nor fill passwords, so
+  they never get one.
+- The account (user handle) has no passkey in Summit yet, and none of the
+  site's `excludeCredentials` is saved here: a conditional create never
+  replaces a passkey.
+- The site does not require user verification (`userVerification:
+  "required"` is declined).
+
+The passkey's authenticator data then has neither UP nor UV set (flags `0x40`:
+AT only), as the spec has it for conditional creation: there was no gesture or
+confirmation for this passkey. The window's status line says what happened
+("Summit saved a passkey for *site* (*account*) after your password sign-in.
+Preferences › Browsing › Passwords lists it."), where it can be removed. The
+engine asks the host (`B_WEBKIT_PASSKEY_REQUESTED` with `create` and
+`conditional`), which answers at once (`BrowserWindow::ConditionalCreateRequested`,
+`TakePasswordSignIn`). `SUMMIT_PASSKEY_CONDITIONAL_CREATE=0` declines them all
+(and `conditionalCreate` is reported `false`).
+
+### Frames of another origin (30 October 2026)
+
+A `get()` from a frame of another origin than its ancestors is allowed when
+the page lets the frame use passkeys (`<iframe allow="publickey-credentials-get">`;
+the web process checks the permissions policy and declines otherwise with
+`NotAllowedError`). The browser checks that the parent origin the web
+process names is one of the frame's ancestors (upstream's check), and builds
+clientDataJSON with `crossOrigin: true` and `topOrigin`, the main frame's
+origin as the browser knows it. The sheet names both ("Asked by
+localhost:8001, in a frame of 127.0.0.1:8000"; `top_origin` in
+`B_WEBKIT_PASSKEY_REQUESTED`). `create()` in such a frame is still declined
+by the web process (WebKit implements Level 2's rule there).
+`SUMMIT_PASSKEY_FRAMES=0` declines frames of another origin again.
+
+Passkey autofill works in frames too: `kPasskeyFieldScript` runs in every
+frame. A frame asks its parent where it is (`window.postMessage` with a
+`__summitPasskeyFrame` member, answered by the same script in the parent,
+which adds the frame element's content box and asks its own parent, up to the
+page), and reports its field in the page's coordinates. The script stops
+those messages from reaching the page's own listeners. The window offers the
+passkeys of the conditional request that the field's frame origin made, so a
+sign-in frame of another site offers that site's passkeys. An embedding page
+could only misplace the list by answering for its frame, never choose in it.
 
 ### Extensions: prf and largeBlob
 
@@ -197,8 +279,29 @@ allowed (in a private window, one installed without private-window access), or
 the extension handed the request back to the browser (1Password's "use another
 device or passkey" path calls the original API). That order needs no
 arbitration in the engine and matches other browsers, where the extension's
-UI comes first and the platform's is the fallback. Not verified with 1Password
-itself (its vault needs the owner).
+UI comes first and the platform's is the fallback.
+
+Checked with 1Password 8.12.41.1 (30 October 2026, laptop, the owner's
+extension package copied into a fresh test profile, never signed in; no
+desktop app, so `NativeHostNotFound`): on https://webauthn.io its page script
+had replaced `navigator.credentials.get`/`create`,
+`isConditionalMediationAvailable` and `getClientCapabilities` (their source is
+1Password's, not `[native code]`; its capabilities say `conditionalCreate:
+false`, `hybridTransport: true`, the signals `false`).
+
+- The page's conditional `get()` at load went to 1Password first
+  ("[Webauthn] Could not complete _handleGetCredential: no-available-accounts")
+  and was then handed to the browser: Summit's autofill offered its passkeys.
+- A modal `get()`: 1Password again found no accounts and handed it on, and
+  only then did Summit's sheet open ("Sign in to webauthn.io with a passkey").
+- A `create()`: 1Password showed its own "Save passkey? Select the 1Password
+  icon in your browser's toolbar to unlock" in the page and Summit showed
+  nothing. Closing 1Password's panel ("_handleCreateCredential while locked:
+  disconnected") handed the request to Summit, whose sheet then opened.
+
+So the two never ask at once: whatever 1Password takes stays with it, and
+Summit's sheet appears only for what it gives back. Signing in with a passkey
+from an unlocked vault still needs the owner.
 
 ### Turning it off and the API
 
@@ -298,6 +401,49 @@ On the laptop, https://webauthn.io, the same profile:
   clicked away kept the window's close lock and quitting hung, so the list is
   a window Summit closes itself.
 
+### Verified (30 October 2026, third round, engine pk111c + app)
+
+On the laptop, with local pages served by `python3 -m http.server` on
+`127.0.0.1:8000` and `:8001` (`http://localhost` and `http://127.0.0.1` are
+secure contexts; the fixtures are a page with a cross-site frame, the frame
+with a `webauthn` field, and a password form):
+
+- **Related origins.** On https://login.live.com the site's own conditional
+  `get()` for RP ID `login.microsoft.com` passed ("related origins of
+  login.microsoft.com for https://login.live.com: listed"); a scripted `get()`
+  opened "No passkey for login.microsoft.com — Asked by login.live.com", and
+  a `create()` "Create a passkey for login.microsoft.com?" (cancelled). From
+  https://example.com the same RP ID gave `SecurityError` after 113 ms ("not
+  listed"); `webauthn.io` (HTTP 404, text/html) after 568 ms; `localhost`
+  after the 10 s timeout, or `AbortError` 1001 ms after the page aborted at
+  1 s.
+- **Frames.** `http://127.0.0.1:8000` embedding `http://localhost:8001` with
+  `allow="publickey-credentials-get"`: the frame's conditional `get()`
+  reached the window, a click in the frame's field opened the list right
+  under that field, and a real click on the passkey signed: flags `0x05`,
+  clientDataJSON `{"origin":"http://localhost:8001","crossOrigin":true,
+  "topOrigin":"http://127.0.0.1:8000"}`. A modal `get()` from the frame showed
+  "Asked by localhost:8001, in a frame of 127.0.0.1:8000". Without `allow`:
+  `NotAllowedError` from the web process.
+- **Conditional create.** Without a sign-in → `NotAllowedError`; after typing
+  a new password and submitting (not yet saved) → `NotAllowedError`; after
+  Save in the password bar → a passkey, flags `0x40`, and the status line
+  notice; again for the same account → `NotAllowedError` (it has one); with
+  `userVerification: "required"` → `NotAllowedError`. Then, with that passkey
+  removed (`signalUnknownCredential`), the saved password autofilled and
+  submitted unchanged → a passkey again.
+- **Regression** on https://webauthn.io: `create()` (flags `0x45`, -7) and a
+  `get()` whose signature WebCrypto verified (`crossOrigin` absent); the
+  main-frame autofill list under the field as before.
+- **Switches.** With `SUMMIT_RELATED_ORIGINS=0 SUMMIT_PASSKEY_CONDITIONAL_CREATE=0
+  SUMMIT_PASSKEY_FRAMES=0`: the frame's `get()` → `NotAllowedError`,
+  capabilities `conditionalCreate`/`relatedOrigins` `false`, login.live.com's
+  related RP ID → `SecurityError` in 1 ms, conditional create →
+  `NotAllowedError`.
+- keystore_server asked for the test binary's access to the "Summit
+  passkeys" keyring (listing, adding, removing) and to "Summit" (passwords),
+  once each. The test passkeys and the test password were removed afterwards.
+
 ## Status (September 20, 2026)
 
 Verified on `bundle-dxx4tx8e`:
@@ -323,7 +469,7 @@ Verified on `bundle-dxx4tx8e`:
 
 | Request | Answer |
 | --- | --- |
-| `create()` / `get()` | Summit's authenticator (above), conditional `get()` through autofill; `NotAllowedError` when it is off or the view did not opt in, for conditional `create()`, and when the site asks for a cross-platform authenticator (a security key) |
+| `create()` / `get()` | Summit's authenticator (above), conditional `get()` through autofill, conditional `create()` after a password sign-in; `NotAllowedError` when it is off or the view did not opt in, and when the site asks for a cross-platform authenticator (a security key) |
 | `isUserVerifyingPlatformAuthenticatorAvailable()` | `true` (`false` when off) |
 | `isConditionalMediationAvailable()` | `true` (`false` when off) |
 | `getClientCapabilities()` | Every known capability; the platform authenticator, `conditionalGet`, the signals and `extension:prf`/`largeBlob`/`credProps` `true` (when on), the rest `false` |
@@ -357,16 +503,54 @@ answers come from Summit's own coordinator when no extension is installed; with
 
 ## Limits
 
-- Security keys over USB or NFC (CTAP2/U2F) are not supported: there is no
-  HID transport yet, and no key was available to test one.
-- No automatic passkey upgrade after a password sign-in (conditional create).
-- Autofill is offered in the main frame only (a sign-in field in an iframe
-  gets no list), and only in fields marked `autocomplete="… webauthn"`; the
+- Security keys over USB or NFC (CTAP2/U2F) are not supported (below).
+- Autofill is offered only in fields marked `autocomplete="… webauthn"`; the
   list is not part of the saved-password list of the same field, which still
   shows its own.
 - Passkeys are not synced and cannot be exported; removing Summit's key store
   data removes them. Hybrid sign-in with a phone (caBLE/QR) is not offered.
-- Related origins and cross-origin iframes (`publickey-credentials-get` in a
-  frame of another origin) are declined.
+- `create()` in a frame of another origin is declined (Level 3's
+  `publickey-credentials-create` policy is not implemented in WebCore).
+- The related-origins list is fetched without Summit's proxy settings, and
+  is not cached (each request that needs it fetches it).
 - Extensions: `credProps`, `prf` and `largeBlob` only. PRF needs a passkey
   made with this build or later (older ones have no secret).
+
+## Security keys (CTAP2 over USB HID): what is missing
+
+Checked 30 October 2026: no FIDO security key is attached to the laptop
+(`listusb`: a Goodix fingerprint reader 27c6:609c, which is not a FIDO
+device, a Realtek dock HID 0bda:1100 with one interrupt-in endpoint and no
+out endpoint, so not CTAPHID, keyboards, a camera, network adapters, a flash
+drive) or to the X399 (flash drive, disk, card reader, keyboard, mouse). A
+transport was therefore not written; it cannot be developed or tested
+without one. What it needs:
+
+- **Finding keys.** HID interfaces whose report descriptor has usage page
+  `0xF1D0`, usage `0x01` (CTAPHID), 64-byte input and output reports. The
+  WebHID broker (`UIProcess/haiku/usb/WebHIDBrokerHaiku`,
+  `HIDDeviceHaiku::Connection`, `HIDReportDescriptorHaiku.h`) already opens
+  raw HID interfaces through usb_raw, reads the descriptor and keeps an
+  interrupt-in transfer pending; a FIDO key would be found the same way,
+  in the browser process, without the WebHID chooser.
+- **The transport.** Upstream's `fido/CtapHidDriver` (CTAPHID framing: INIT
+  with a nonce, channel IDs, CBOR/MSG/CANCEL/KEEPALIVE packets) sits on
+  `HidConnection`, which is IOKit-only (`Cocoa/HidConnection.mm`). A
+  `HidConnectionHaiku` over `HIDDeviceHaiku::Connection` (`sendReport` for
+  output reports, the input handler for input reports) is what is missing;
+  `CtapHidDriver`, `CtapAuthenticator`, `U2fAuthenticator` and the CBOR and
+  FIDO code above it are portable.
+- **The rest of upstream's stack** is excluded from the Haiku build with it
+  (`PlatformHaiku.cmake`: `fido/`, `Authenticator.cpp`,
+  `AuthenticatorTransportService.cpp`, `WebAuthenticationRequestData.cpp`):
+  the Haiku coordinator would drive a `CtapAuthenticator` itself for requests
+  whose `authenticatorAttachment` is `cross-platform` or whose
+  allow list names `usb` transports, and offer "Use a security key" in the
+  sheet.
+- **UI.** Touch prompts ("Touch your security key"), PIN entry and PIN
+  change (clientPIN protocol 1/2, `pinUvAuthToken`), "too many attempts",
+  and choosing among several keys; `credProtect`, `hmac-secret` (prf) and
+  `largeBlob` on the key where it supports them.
+- **The OS.** usb_raw access to the key's interface (the HID driver must
+  leave it alone, as for WebHID), and a key to test with (YubiKey 5 or
+  similar).

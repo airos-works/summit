@@ -162,9 +162,11 @@ void BrowserWindow::AddPageScripts(BWebKitView* view)
         view->AddUserScript(kPasswordScript, true, true);
     }
     // Passkey autofill (#111), in private windows too: passkeys are used
-    // there, only never made without the user's say.
+    // there, only never made without the user's say. In frames as well: a
+    // sign-in frame of another site may offer its passkeys (when the page
+    // allows it publickey-credentials-get).
     view->AddScriptMessageHandler("summitPasskeys", BMessenger(this));
-    view->AddUserScript(kPasskeyFieldScript, true, false);
+    view->AddUserScript(kPasskeyFieldScript, true, true);
 }
 
 void BrowserWindow::PageScriptMessage(BMessage& message)
@@ -182,10 +184,12 @@ void BrowserWindow::PageScriptMessage(BMessage& message)
     } catch (const std::exception&) { }
     if (!body.is_object()) body = json::object();
     auto text = [&](const char* key) { return body.contains(key) && body[key].is_string() ? body[key].get<std::string>() : std::string(); };
-    if (tab && name == "summitPasskeys" && mainFrame) {
+    if (tab && name == "summitPasskeys") {
+        // From any frame: the list offers the passkeys of the request that
+        // frame's origin made.
         auto number = [&](const char* key) { return body.contains(key) && body[key].is_number() ? body[key].get<double>() : 0.0; };
         if (text("type") == "field")
-            PasskeyFieldEntered(*tab, BRect(number("left"), number("top"), number("right"), number("bottom")), number("width"));
+            PasskeyFieldEntered(*tab, BRect(number("left"), number("top"), number("right"), number("bottom")), number("width"), origin);
         else if (text("type") == "leave" && tab->id == fSelected)
             ClosePasskeyAutofill();
     } else if (tab && name == "summitPopups") {
@@ -604,6 +608,7 @@ void BrowserWindow::PasswordBarAnswer(const BMessage& message)
     const auto pending = *std::exchange(tab->pendingPassword, std::nullopt);
     switch (message.GetInt32("which", 2)) {
     case 0:
+        NotePasswordSignIn(pending.origin, pending.username);
         std::thread([window = BMessenger(this), pending] {
             BMessage saved(kPasswordSaved);
             saved.AddString("error", PasswordStore::Save(pending.origin, pending.username, pending.password).c_str());

@@ -36,8 +36,10 @@ public:
         uint64 identifier = 0;
         Kind kind = Kind::SignIn;
         // The relying party ID (the site the passkey is for) and the page's
-        // host, when it is another (a subdomain).
-        std::string site, pageHost;
+        // host, when it is another (a subdomain, or a related origin the
+        // site lists); topHost: the host of the page when a frame of another
+        // origin asks.
+        std::string site, pageHost, topHost;
         // Create: the account the site names (its own words).
         std::string userName, displayName;
         bool replaces = false;
