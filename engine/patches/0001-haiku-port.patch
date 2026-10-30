@@ -51941,7 +51941,7 @@ index 9fd560e16a7e8b8b5cdf0ef54b46ab2dddc32e4f..37b7905e18e26b577ae0ec335352ae63
  
      // Y-axis should be inverted only when painting into the window.
 diff --git a/Source/WebCore/platform/graphics/texmap/TextureMapper.cpp b/Source/WebCore/platform/graphics/texmap/TextureMapper.cpp
-index 1b88532103dfc26c2a90aedce768e19f2e7059e6..33a0267d8a4499508d519939efa8f0e60d666b57 100644
+index 1b88532103dfc26c2a90aedce768e19f2e7059e6..a8d64f2e48640788d9170f3dba079bffbcc85d3f 100644
 --- a/Source/WebCore/platform/graphics/texmap/TextureMapper.cpp
 +++ b/Source/WebCore/platform/graphics/texmap/TextureMapper.cpp
 @@ -41,9 +41,18 @@
@@ -52363,7 +52363,7 @@ index 1b88532103dfc26c2a90aedce768e19f2e7059e6..33a0267d8a4499508d519939efa8f0e6
  }
  
  void TextureMapper::clearColor(const Color& color)
-@@ -877,8 +1139,59 @@ void TextureMapper::drawUnitRect(TextureMapperShaderProgram& program, GLenum dra
+@@ -877,8 +1139,94 @@ void TextureMapper::drawUnitRect(TextureMapperShaderProgram& program, GLenum dra
      glBindBuffer(GL_ARRAY_BUFFER, 0);
  }
  
@@ -52373,6 +52373,9 @@ index 1b88532103dfc26c2a90aedce768e19f2e7059e6..33a0267d8a4499508d519939efa8f0e6
 +// SUMMIT_DRAW_TRACE=N: every draw of every Nth counted composition.
 +static thread_local bool s_tracesDraws;
 +static thread_local unsigned s_countedCompositions;
++static thread_local unsigned s_traceLayerHaiku;
++// The texture the next draw samples, for SUMMIT_DRAW_TRACE.
++static thread_local GLuint s_drawSourceHaiku;
 +
 +void TextureMapper::setCountsDrawsHaiku(bool counts)
 +{
@@ -52389,6 +52392,37 @@ index 1b88532103dfc26c2a90aedce768e19f2e7059e6..33a0267d8a4499508d519939efa8f0e6
 +auto TextureMapper::takeDrawStatsHaiku() -> DrawStatsHaiku
 +{
 +    return std::exchange(s_drawStats, { });
++}
++
++void TextureMapper::noteCulledHaiku(const FloatRect& drawnInTarget)
++{
++    if (!s_countsDraws)
++        return;
++    ++s_drawStats.culled;
++    s_drawStats.culledMegapixels += drawnInTarget.width() * double(drawnInTarget.height()) / 1e6;
++    if (s_tracesDraws)
++        std::fprintf(stderr, "Summit draw trace: culled layer=%u rect=%.0f,%.0f %.0fx%.0f\n", s_traceLayerHaiku,
++            drawnInTarget.x(), drawnInTarget.y(), drawnInTarget.width(), drawnInTarget.height());
++}
++
++void TextureMapper::noteBackdropCacheHaiku(bool hit)
++{
++    if (!s_countsDraws)
++        return;
++    if (hit)
++        ++s_drawStats.backdropCacheHits;
++    else
++        ++s_drawStats.backdropCacheMisses;
++}
++
++void TextureMapper::setTraceLayerHaiku(unsigned id)
++{
++    s_traceLayerHaiku = id;
++}
++
++bool TextureMapper::tracesDrawsHaiku()
++{
++    return s_tracesDraws;
 +}
 +#endif
 +
@@ -52414,16 +52448,28 @@ index 1b88532103dfc26c2a90aedce768e19f2e7059e6..33a0267d8a4499508d519939efa8f0e6
 +            ++s_drawStats.drawsIntoSurfaces;
 +        if (s_tracesDraws) {
 +            FloatRect whole = modelViewMatrix.mapRect(rect);
-+            std::fprintf(stderr, "Summit draw trace: options=%#x rect=%.0f,%.0f %.0fx%.0f clipped=%.0f,%.0f %.0fx%.0f blend=%d mask=%d surface=%d\n",
++            std::fprintf(stderr, "Summit draw trace: options=%#x rect=%.0f,%.0f %.0fx%.0f clipped=%.0f,%.0f %.0fx%.0f blend=%d mask=%d surface=%d layer=%u into=%u from=%u\n",
 +                s_drawProgramOptionsHaiku, whole.x(), whole.y(), whole.width(), whole.height(), drawn.x(), drawn.y(), drawn.width(), drawn.height(),
-+                flags.contains(TextureMapperFlags::ShouldBlend), isInMaskMode(), !!data().currentSurface);
++                flags.contains(TextureMapperFlags::ShouldBlend), isInMaskMode(), !!data().currentSurface, s_traceLayerHaiku,
++                data().currentSurface ? data().currentSurface->id() : 0, std::exchange(s_drawSourceHaiku, 0));
 +        }
 +    }
 +#endif
      TransformationMatrix matrix(modelViewMatrix);
      matrix.multiply(TransformationMatrix::rectToRect(FloatRect(0, 0, 1, 1), rect));
  
-@@ -958,7 +1271,13 @@ void TextureMapper::drawTexturedQuadWithProgram(TextureMapperShaderProgram& prog
+@@ -916,6 +1264,10 @@ void TextureMapper::drawTexturedQuadWithProgram(TextureMapperShaderProgram& prog
+     if (flags.contains(TextureMapperFlags::ShouldUseExternalOESTextureRect))
+         target = GLenum(GL_TEXTURE_EXTERNAL_OES);
+ 
++#if PLATFORM(HAIKU)
++    if (s_tracesDraws && !texturesAndSamplers.isEmpty())
++        s_drawSourceHaiku = texturesAndSamplers[0].first;
++#endif
+     for (unsigned i = 0; i < texturesAndSamplers.size(); ++i) {
+         auto& textureAndSampler = texturesAndSamplers[i];
+ 
+@@ -958,7 +1310,13 @@ void TextureMapper::drawTexturedQuadWithProgram(TextureMapperShaderProgram& prog
  void TextureMapper::drawTextureCopy(const BitmapTexture& sourceTexture, const FloatRect& sourceRect, const FloatRect& targetRect)
  {
      Ref<TextureMapperShaderProgram> program = data().getShaderProgram({ TextureMapperShaderProgram::TextureCopy });
@@ -52437,7 +52483,7 @@ index 1b88532103dfc26c2a90aedce768e19f2e7059e6..33a0267d8a4499508d519939efa8f0e6
  
      glUseProgram(program->programID());
  
-@@ -987,11 +1306,19 @@ void TextureMapper::drawTextureCopy(const BitmapTexture& sourceTexture, const Fl
+@@ -987,11 +1345,19 @@ void TextureMapper::drawTextureCopy(const BitmapTexture& sourceTexture, const Fl
  
  void TextureMapper::drawBlurred(const BitmapTexture& sourceTexture, const FloatRect& rect, float radius, Direction direction, bool alphaBlur)
  {
@@ -52457,7 +52503,7 @@ index 1b88532103dfc26c2a90aedce768e19f2e7059e6..33a0267d8a4499508d519939efa8f0e6
  
      glUseProgram(program->programID());
  
-@@ -1038,7 +1365,13 @@ RefPtr<BitmapTexture> TextureMapper::applyBlurFilter(RefPtr<BitmapTexture>& sour
+@@ -1038,7 +1404,13 @@ RefPtr<BitmapTexture> TextureMapper::applyBlurFilter(RefPtr<BitmapTexture>& sour
      if (radiusX < MinBlurRadius && radiusY < MinBlurRadius)
          return sourceTexture;
  
@@ -52471,7 +52517,7 @@ index 1b88532103dfc26c2a90aedce768e19f2e7059e6..33a0267d8a4499508d519939efa8f0e6
      IntSize currentSize = textureSize;
      IntSize targetSize = currentSize;
      Vector<Direction> blurDirections;
-@@ -1115,8 +1448,16 @@ RefPtr<BitmapTexture> TextureMapper::applyDropShadowFilter(RefPtr<BitmapTexture>
+@@ -1115,8 +1487,16 @@ RefPtr<BitmapTexture> TextureMapper::applyDropShadowFilter(RefPtr<BitmapTexture>
  {
      const auto& textureSize = sourceTexture->size();
      auto& texturePool = BitmapTexturePool::singleton();
@@ -52488,7 +52534,7 @@ index 1b88532103dfc26c2a90aedce768e19f2e7059e6..33a0267d8a4499508d519939efa8f0e6
      IntSize currentSize = textureSize;
      IntSize targetSize = currentSize;
      float radius = float(dropShadowFilter.stdDeviation());
-@@ -1221,7 +1562,14 @@ RefPtr<BitmapTexture> TextureMapper::applyDropShadowFilter(RefPtr<BitmapTexture>
+@@ -1221,7 +1601,14 @@ RefPtr<BitmapTexture> TextureMapper::applyDropShadowFilter(RefPtr<BitmapTexture>
          auto [r, g, b, a] = premultiplied(dropShadowFilter.color().toColorTypeLossy<SRGBA<float>>()).resolved();
          glUniform4f(program->colorLocation(), r, g, b, a);
  
@@ -52503,7 +52549,7 @@ index 1b88532103dfc26c2a90aedce768e19f2e7059e6..33a0267d8a4499508d519939efa8f0e6
  
          glActiveTexture(GL_TEXTURE1);
          glBindTexture(GL_TEXTURE_2D, contentTexture->id());
-@@ -1241,7 +1589,11 @@ RefPtr<BitmapTexture> TextureMapper::applySinglePassFilter(RefPtr<BitmapTexture>
+@@ -1241,7 +1628,11 @@ RefPtr<BitmapTexture> TextureMapper::applySinglePassFilter(RefPtr<BitmapTexture>
          return sourceTexture;
      }
  
@@ -52515,7 +52561,7 @@ index 1b88532103dfc26c2a90aedce768e19f2e7059e6..33a0267d8a4499508d519939efa8f0e6
  
      bindSurface(resultTexture.get());
  
-@@ -1251,6 +1603,13 @@ RefPtr<BitmapTexture> TextureMapper::applySinglePassFilter(RefPtr<BitmapTexture>
+@@ -1251,6 +1642,13 @@ RefPtr<BitmapTexture> TextureMapper::applySinglePassFilter(RefPtr<BitmapTexture>
  
      prepareFilterProgram(program.get(), filter);
      FloatRect targetRect(FloatPoint::zero(), sourceTexture->size());
@@ -52529,7 +52575,7 @@ index 1b88532103dfc26c2a90aedce768e19f2e7059e6..33a0267d8a4499508d519939efa8f0e6
      drawTexturedQuadWithProgram(program.get(), sourceTexture->id(), { }, targetRect, TransformationMatrix(), 1);
  
      return resultTexture;
-@@ -1278,6 +1637,28 @@ RefPtr<BitmapTexture> TextureMapper::applyFilters(RefPtr<BitmapTexture>& sourceT
+@@ -1278,6 +1676,28 @@ RefPtr<BitmapTexture> TextureMapper::applyFilters(RefPtr<BitmapTexture>& sourceT
  
  RefPtr<BitmapTexture> TextureMapper::applyFilter(RefPtr<BitmapTexture>& sourceTexture, const Ref<const FilterOperation>& filter, bool defersLastPass)
  {
@@ -52558,7 +52604,7 @@ index 1b88532103dfc26c2a90aedce768e19f2e7059e6..33a0267d8a4499508d519939efa8f0e6
      switch (filter->type()) {
      case FilterOperation::Type::Grayscale:
      case FilterOperation::Type::Sepia:
-@@ -1330,6 +1711,10 @@ void TextureMapper::bindDefaultSurface()
+@@ -1330,6 +1750,10 @@ void TextureMapper::bindDefaultSurface()
  
  void TextureMapper::bindSurface(BitmapTexture *surface)
  {
@@ -52569,7 +52615,7 @@ index 1b88532103dfc26c2a90aedce768e19f2e7059e6..33a0267d8a4499508d519939efa8f0e6
      if (!surface) {
          bindDefaultSurface();
          return;
-@@ -1385,6 +1770,18 @@ bool TextureMapper::beginRoundedRectClip(const TransformationMatrix& modelViewMa
+@@ -1385,6 +1809,18 @@ bool TextureMapper::beginRoundedRectClip(const TransformationMatrix& modelViewMa
      FloatQuad quad = modelViewMatrix.projectQuad(targetRect.rect());
      IntRect rect = quad.enclosingBoundingBox();
  
@@ -52588,7 +52634,7 @@ index 1b88532103dfc26c2a90aedce768e19f2e7059e6..33a0267d8a4499508d519939efa8f0e6
      clipStack().addRoundedRect(targetRect, modelViewMatrix.inverse().value());
      clipStack().intersect(rect);
      clipStack().applyIfNeeded();
-@@ -1402,6 +1799,10 @@ void TextureMapper::beginClip(const TransformationMatrix& modelViewMatrix, const
+@@ -1402,6 +1838,10 @@ void TextureMapper::beginClip(const TransformationMatrix& modelViewMatrix, const
          return;
  
      data().initializeStencil();
@@ -52600,7 +52646,7 @@ index 1b88532103dfc26c2a90aedce768e19f2e7059e6..33a0267d8a4499508d519939efa8f0e6
      Ref<TextureMapperShaderProgram> program = data().getShaderProgram(TextureMapperShaderProgram::SolidColor);
  
 diff --git a/Source/WebCore/platform/graphics/texmap/TextureMapper.h b/Source/WebCore/platform/graphics/texmap/TextureMapper.h
-index fbe7a8f854a5951881368122c9958ca62cf8617b..4e6cd4a766cbc5815be04589c42f1378c2484224 100644
+index fbe7a8f854a5951881368122c9958ca62cf8617b..a58056f2c82779daedc8a88f5ef7db10e97077a7 100644
 --- a/Source/WebCore/platform/graphics/texmap/TextureMapper.h
 +++ b/Source/WebCore/platform/graphics/texmap/TextureMapper.h
 @@ -31,6 +31,7 @@
@@ -52611,7 +52657,7 @@ index fbe7a8f854a5951881368122c9958ca62cf8617b..4e6cd4a766cbc5815be04589c42f1378
  #include <wtf/OptionSet.h>
  #include <wtf/TZoneMalloc.h>
  #include <wtf/Vector.h>
-@@ -100,6 +101,26 @@ public:
+@@ -100,6 +101,41 @@ public:
      void endClip();
      void endClipWithoutApplying();
      IntRect clipBounds();
@@ -52631,14 +52677,29 @@ index fbe7a8f854a5951881368122c9958ca62cf8617b..4e6cd4a766cbc5815be04589c42f1378
 +        // the stencil (each clears it with a draw over the whole target).
 +        double drawMs { 0 };
 +        unsigned stencilClips { 0 };
++        // Draws left out because what the composition draws later hides
++        // them (TextureMapperLayer's occlusion), and the megapixels of the
++        // target they would have drawn (an intermediate surface's counts
++        // once, for the draw that puts it into the target).
++        unsigned culled { 0 };
++        double culledMegapixels { 0 };
++        // Backdrop filters drawn from TextureMapperLayer's cache, and made.
++        unsigned backdropCacheHits { 0 };
++        unsigned backdropCacheMisses { 0 };
 +    };
 +    WEBCORE_EXPORT static void setCountsDrawsHaiku(bool);
 +    WEBCORE_EXPORT static DrawStatsHaiku takeDrawStatsHaiku();
++    static void noteCulledHaiku(const FloatRect& drawnInTarget);
++    static void noteBackdropCacheHaiku(bool hit);
++    // The layer whose draws follow, for SUMMIT_DRAW_TRACE, and whether the
++    // composition being drawn is one it traces.
++    static void setTraceLayerHaiku(unsigned id);
++    static bool tracesDrawsHaiku();
 +#endif
      IntSize maxTextureSize() const;
      void setDepthRange(double zNear, double zFar);
      std::pair<double, double> depthRange() const;
-@@ -148,6 +169,10 @@ private:
+@@ -148,6 +184,10 @@ private:
      void updateProjectionMatrix();
  
      bool m_isMaskMode { false };
@@ -52650,10 +52711,10 @@ index fbe7a8f854a5951881368122c9958ca62cf8617b..4e6cd4a766cbc5815be04589c42f1378
      WrapMode m_wrapMode { WrapMode::Stretch };
      std::optional<FloatSize> m_uvClampMax;
 diff --git a/Source/WebCore/platform/graphics/texmap/TextureMapperBackingStore.h b/Source/WebCore/platform/graphics/texmap/TextureMapperBackingStore.h
-index b478a0e1d88443132d337f514434eeab7c8df464..69dda7202badacf9739212e7891b70ae0bdc2222 100644
+index b478a0e1d88443132d337f514434eeab7c8df464..c58d7349d0526a40979aab7e6a3e538a5e265513 100644
 --- a/Source/WebCore/platform/graphics/texmap/TextureMapperBackingStore.h
 +++ b/Source/WebCore/platform/graphics/texmap/TextureMapperBackingStore.h
-@@ -33,6 +33,16 @@ public:
+@@ -33,6 +33,20 @@ public:
  
      void paintToTextureMapper(TextureMapper&, const FloatRect&, const TransformationMatrix&, float) override = 0;
      virtual void drawRepaintCounter(TextureMapper&, int, const Color&, const FloatRect&, const TransformationMatrix&) { }
@@ -52666,6 +52727,10 @@ index b478a0e1d88443132d337f514434eeab7c8df464..69dda7202badacf9739212e7891b70ae
 +    // is not known (TextureMapperLayer's filter cache).
 +    virtual uint64_t contentVersionHaiku() const { return 0; }
 +    virtual bool isCompleteHaiku() const { return false; }
++    // Appends the rectangles (in the target's coordinates, through the
++    // arguments paintToTextureMapper() would get) that it would fill with
++    // opaque pixels if drawn now, for occlusion (TextureMapperLayer).
++    virtual void appendOpaqueRectsHaiku(const FloatRect&, const TransformationMatrix&, Vector<FloatRect>&) const { }
 +#endif
  
  protected:
@@ -52736,15 +52801,16 @@ index 57adb06b0d3bf385a76bae2729c5e04dd5e7b268..cf25d7f33b561e652d9d051e47cf9fba
  
      size_t m_size;
 diff --git a/Source/WebCore/platform/graphics/texmap/TextureMapperLayer.cpp b/Source/WebCore/platform/graphics/texmap/TextureMapperLayer.cpp
-index 112d19b1676c297b0168941b1db5b619cd535a29..005751220bfd3c0506daa527adc3e1344ae8a522 100644
+index 112d19b1676c297b0168941b1db5b619cd535a29..ce673df98488651db79bf08a34164710ccd7c4a1 100644
 --- a/Source/WebCore/platform/graphics/texmap/TextureMapperLayer.cpp
 +++ b/Source/WebCore/platform/graphics/texmap/TextureMapperLayer.cpp
-@@ -21,6 +21,16 @@
+@@ -21,6 +21,17 @@
  #include "config.h"
  #include "TextureMapperLayer.h"
  
 +#if PLATFORM(HAIKU)
 +#include "FilterOperation.h"
++#include <algorithm>
 +#include <cmath>
 +#endif
 +
@@ -52756,7 +52822,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..005751220bfd3c0506daa527adc3e134
  #include "BitmapTexturePool.h"
  #include "ClipPath.h"
  #include "FloatQuad.h"
-@@ -32,12 +42,227 @@
+@@ -32,12 +43,508 @@
  #include <wtf/SetForScope.h>
  #include <wtf/TZoneMallocInlines.h>
  
@@ -52789,15 +52855,45 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..005751220bfd3c0506daa527adc3e134
 +// painted, collectOccludersHaiku() notes where such contents go and when in
 +// the paint order; while it is painted, tiles they cover entirely are left
 +// out (CoordinatedBackingStore). SUMMIT_OCCLUSION=0 turns this off.
++//
++// Opaque layers occlude too: a layer's opaque tiles and its opaque
++// background color hide the tiles, background colors and contents of the
++// layers painted before them, and a layer drawn through an intermediate
++// surface (a filter, a mask, group opacity, a backdrop filter) is left out
++// with all it contains when what is drawn after it covers all of that
++// surface. Each composition works this out anew, so layers that move,
++// animate or scroll occlude where they are in it; only what is drawn into
++// the target is left out (tiles are still painted and uploaded), so what a
++// layer uncovers later is drawn from the tiles it has. Only layers drawn
++// straight into the target with an axis-aligned transform and clips occlude.
++// SUMMIT_OPAQUE_OCCLUSION=0 keeps to the contents (videos, solid colors)
++// hiding tiles.
++//
++// Paint stages: a layer draws its background color and tiles (stage
++// 2 * order) before its contents (2 * order + 1), and a layer drawn through
++// a surface draws it at 2 * order + 1; something hides a draw only when it
++// is drawn in a later stage.
 +namespace {
 +struct OccluderHaiku {
-+    unsigned order;
-+    FloatRect rect;
++    unsigned stage;
++    IntRect pixels;
 +};
 +}
 +static thread_local Vector<OccluderHaiku, 4> s_occludersHaiku;
 +// The paint order of the layer whose own contents are being painted.
 +static thread_local unsigned s_paintOrderHaiku;
++// The texture mapper and the surface the composition draws into. Layers are
++// also painted into intermediate surfaces (a backdrop filter paints what is
++// behind it once more), where the occluders' places mean nothing.
++static thread_local TextureMapper* s_textureMapperHaiku;
++static thread_local BitmapTexture* s_targetSurfaceHaiku;
++
++// A name for a layer in SUMMIT_DRAW_TRACE (layers of the compositor's scene
++// have no id of their own).
++static unsigned traceIdHaiku(const void* layer)
++{
++    return static_cast<unsigned>((reinterpret_cast<uintptr_t>(layer) >> 4) & 0xffffff);
++}
 +
 +static bool occlusionEnabledHaiku()
 +{
@@ -52806,6 +52902,162 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..005751220bfd3c0506daa527adc3e134
 +        return !value || std::strcmp(value, "0");
 +    }();
 +    return enabled;
++}
++
++static bool layerOcclusionEnabledHaiku()
++{
++    static const bool enabled = [] {
++        const char* value = std::getenv("SUMMIT_OPAQUE_OCCLUSION");
++        return !value || std::strcmp(value, "0");
++    }();
++    return enabled;
++}
++
++// The pixels whose centers a rectangle in the target holds, which are those a
++// draw of it writes (tiles side by side at a fractional scale share their
++// edge, and both put the same pixel column in one of them). A hundredth of
++// a pixel decides for the occluder where a center falls on an edge: an
++// occluder holds the pixels it surely writes, a draw those it may write.
++static IntRect pixelsOfHaiku(const FloatRect& rect, bool occluder)
++{
++    if (!std::isfinite(rect.x()) || !std::isfinite(rect.y()) || !std::isfinite(rect.maxX()) || !std::isfinite(rect.maxY()))
++        return { };
++    const float margin = occluder ? 0.01f : -0.01f;
++    auto first = [&](float edge) {
++        return static_cast<int>(std::clamp(std::ceil(edge - 0.5f + margin), -1e8f, 1e8f));
++    };
++    auto end = [&](float edge) {
++        return static_cast<int>(std::clamp(std::ceil(edge - 0.5f - margin), -1e8f, 1e8f));
++    };
++    int left = first(rect.x());
++    int top = first(rect.y());
++    int right = end(rect.maxX());
++    int bottom = end(rect.maxY());
++    return IntRect(left, top, std::max(0, right - left), std::max(0, bottom - top));
++}
++
++static void addOccluderHaiku(unsigned stage, const FloatRect& rect)
++{
++    auto pixels = pixelsOfHaiku(rect, true);
++    if (!pixels.isEmpty())
++        s_occludersHaiku.append({ stage, pixels });
++}
++
++// Whether what is drawn at stage into rect (in the target's pixels) is
++// hidden by what is drawn later, by one occluder or by several together.
++static bool isOccludedAtStageHaiku(const FloatRect& rect, unsigned stage)
++{
++    if (s_occludersHaiku.isEmpty() || rect.isEmpty())
++        return false;
++    if (s_textureMapperHaiku && s_textureMapperHaiku->currentSurface() != s_targetSurfaceHaiku)
++        return false;
++    auto pixels = pixelsOfHaiku(rect, false);
++    if (pixels.isEmpty())
++        return false;
++    Vector<IntRect, 8> parts;
++    for (auto& occluder : s_occludersHaiku) {
++        if (occluder.stage <= stage || !occluder.pixels.intersects(pixels))
++            continue;
++        if (occluder.pixels.contains(pixels))
++            return true;
++        parts.append(occluder.pixels);
++    }
++    // Many small ones together (the tiles of a layer) seldom cover what one
++    // of them does not; the region costs more than it saves past a few dozen.
++    if (parts.size() < 2 || parts.size() > 64)
++        return false;
++    Region uncovered(pixels);
++    for (auto& part : parts) {
++        uncovered.subtract(part);
++        if (uncovered.isEmpty())
++            return true;
++    }
++    return false;
++}
++
++// Compositions, for the backdrop cache: their number, and the last one whose
++// damage is not known (collectDamage() did not run, or a late upload made it
++// the whole frame).
++static thread_local uint64_t s_frameSerialHaiku;
++static thread_local uint64_t s_lastUnknownFrameHaiku;
++// The serial when paint() was last called: a composition painted without its
++// damage noted counts as one whose damage is not known.
++static thread_local uint64_t s_frameSerialAtPaintHaiku;
++// While collectDamage() runs: the frame's damage so far, and the backdrop
++// layers whose cache it checked.
++static thread_local Damage* s_frameDamageHaiku;
++// The area collectDamage() clips damage to (the view): changes outside it
++// are not seen.
++static thread_local IntRect s_damageBoundsHaiku;
++static thread_local Vector<TextureMapperLayer*, 4> s_checkedBackdropsHaiku;
++
++void TextureMapperLayer::noteFrameDamageHaiku(const Damage* damage)
++{
++    ++s_frameSerialHaiku;
++    if (!damage || damage->mode() == Damage::Mode::Full)
++        s_lastUnknownFrameHaiku = s_frameSerialHaiku;
++}
++
++static bool damageReachesHaiku(const Damage* damage, const IntRect& area)
++{
++    if (!damage)
++        return false;
++    if (damage->mode() == Damage::Mode::Full)
++        return !damage->isEmpty();
++    for (const auto& rect : *damage) {
++        if (rect.intersects(area))
++            return true;
++    }
++    return false;
++}
++
++// A backdrop filter blurs what lies under it, which the composition paints
++// once more into a surface for it, in every composition that draws it.
++// When nothing under it changed and the filter, its layer and where it is
++// are the same, the result of the last time is drawn again. What changed
++// under it is the damage of the layers painted before its layer: damage is
++// collected in paint order, so when collectDamage() reaches the layer, the
++// frame's damage so far is that (checkBackdropCacheHaiku()); what it adds
++// at the end, for no layer in particular, counts too. A composition that
++// does not check the cache, or whose damage is not known, drops it.
++// SUMMIT_BACKDROP_CACHE=0 turns this off.
++struct TextureMapperLayer::BackdropCacheHaiku {
++    WTF_DEPRECATED_MAKE_FAST_ALLOCATED(BackdropCacheHaiku);
++public:
++    RefPtr<BitmapTexture> texture;
++    IntRect rect;
++    TransformationMatrix transform;
++    FloatSize size;
++    FilterOperations filters;
++    // Made in this composition, and checked against the damage of each one
++    // after it up to this one.
++    uint64_t createdSerial { 0 };
++    uint64_t checkedThrough { 0 };
++    // A rounded backdrop has a mask layer, which paintIntoSurface() applies.
++    TextureMapperBackingStore* maskBackingStore { nullptr };
++    uint64_t maskVersion { 0 };
++    TransformationMatrix maskTransform;
++    FloatSize maskSize;
++};
++
++// Called by collectDamageRecursive() for the layer this backdrop belongs to,
++// before that layer's own damage: damage is the frame's (or, under a filter
++// layer, its subtree's) so far.
++void TextureMapperLayer::checkBackdropCacheHaiku(const Damage& damage)
++{
++    auto& cache = m_backdropCacheHaiku;
++    if (!cache)
++        return;
++    const uint64_t current = s_frameSerialHaiku + 1;
++    if ((cache->checkedThrough != current && cache->checkedThrough + 1 != current)
++        || damageReachesHaiku(s_frameDamageHaiku, cache->rect) || (&damage != s_frameDamageHaiku && damageReachesHaiku(&damage, cache->rect))) {
++        cache = nullptr;
++        return;
++    }
++    if (cache->checkedThrough != current) {
++        cache->checkedThrough = current;
++        s_checkedBackdropsHaiku.append(this);
++    }
 +}
 +
 +// A texture upload in the middle of a composition, after its first draws,
@@ -52865,16 +53117,74 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..005751220bfd3c0506daa527adc3e134
 +        && !(m_state.solidColor.isValid() && m_state.solidColor.isVisible());
 +}
 +
++// For the tiles and background color of the layer being painted.
 +bool TextureMapperLayer::isOccludedHaiku(const FloatRect& rect)
 +{
-+    if (!s_paintOrderHaiku || rect.isEmpty())
++    if (!s_paintOrderHaiku)
 +        return false;
-+    for (auto& occluder : s_occludersHaiku) {
-+        // A layer paints its tiles before its own contents.
-+        if (occluder.order >= s_paintOrderHaiku && occluder.rect.contains(rect))
-+            return true;
++    return isOccludedAtStageHaiku(rect, 2 * s_paintOrderHaiku);
++}
++
++// A structural layer (GraphicsLayer::Type::Structural, which preserves 3D
++// unless told otherwise) that only places one flat child: WebKit wraps every
++// fixed and sticky element's layer in one (RenderLayerBacking's viewport
++// anchor layer). Its 3D rendering context then paints that child, with its
++// own paintRecursive() and the same options, and nothing else, so for
++// occlusion it is a plain 2D parent. Without this, nothing fixed or sticky
++// occluded or was left out.
++bool TextureMapperLayer::isFlatWrapperHaiku() const
++{
++    // An empty one (the viewport anchor is), whose 3D context then has
++    // nothing to split or reorder the child against.
++    if (!layerOcclusionEnabledHaiku() || !preserves3D() || !m_state.size.isEmpty() || m_children.size() != 1 || m_children[0]->preserves3D()
++        || m_children[0]->isFlattened() || isFlattened())
++        return false;
++    if (m_backingStore || m_contentsLayer || m_state.backgroundColor.isValid() || (m_state.solidColor.isValid() && m_state.solidColor.isVisible())
++        || hasFilters() || hasMask() || m_state.replicaLayer || hasBackdrop() || m_currentOpacity < 1)
++        return false;
++    return m_layerTransforms.combined.isAffine() && m_children[0]->m_layerTransforms.combined.isAffine();
++}
++
++// Adds to bounds (in the target's pixels) a rectangle that holds all that
++// this layer and its descendants draw, or says that it cannot.
++bool TextureMapperLayer::addDrawnBoundsHaiku(FloatRect& bounds) const
++{
++    if (!isVisible())
++        return true;
++    if ((preserves3D() && !isFlatWrapperHaiku()) || isFlattened() || m_state.replicaLayer)
++        return false;
++    const auto& transform = m_layerTransforms.combined;
++    if (!transform.isAffine())
++        return false;
++    FloatRect local = layerRect();
++    if (m_contentsLayer || (m_state.solidColor.isValid() && m_state.solidColor.isVisible()))
++        local.unite(m_state.contentsRect);
++    if (m_state.backdropLayer)
++        local.unite(m_state.backdropFiltersRect.rect());
++    FloatRect drawn = transform.mapRect(local);
++    if (!m_children.isEmpty()) {
++        FloatRect children;
++        for (auto* child : m_children) {
++            if (!child->addDrawnBoundsHaiku(children))
++                return false;
++        }
++        if (m_state.masksToBounds) {
++            FloatRect clipRect = layerRect();
++            clipRect.moveBy(m_state.boundsOrigin);
++            children.intersect(transform.mapRect(clipRect));
++        }
++        drawn.unite(children);
 +    }
-+    return false;
++    // A filter reaches past what it filters, by its outsets in the layer's
++    // own units.
++    if (m_currentFilters.hasOutsets()) {
++        auto outsets = m_currentFilters.outsets();
++        float reach = std::max({ outsets.top(), outsets.right(), outsets.bottom(), outsets.left() });
++        float scale = std::sqrt(std::max(transform.a() * transform.a() + transform.b() * transform.b(), transform.c() * transform.c() + transform.d() * transform.d()));
++        drawn.inflate(reach * scale + 1);
++    }
++    bounds.unite(drawn);
++    return true;
 +}
 +
 +// What a rounded rectangle surely covers: the cross of its middle bands (a
@@ -52926,16 +53236,46 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..005751220bfd3c0506daa527adc3e134
 +void TextureMapperLayer::collectOccludersHaiku(unsigned& order, const Vector<FloatRect, 4>& clips, bool painted, bool canOcclude)
 +{
 +    m_paintOrderHaiku = 0;
++    m_surfaceOrderHaiku = 0;
 +    if (!isVisible())
 +        return;
-+    painted = painted && !preserves3D() && !isFlattened() && !shouldBlend() && !hasFilters() && !hasMask()
++    bool drawnIntoTarget = painted;
++    const bool flat3D = preserves3D() && isFlatWrapperHaiku();
++    painted = painted && (!preserves3D() || flat3D) && !isFlattened() && !shouldBlend() && !hasFilters() && !hasMask()
 +        && !m_state.replicaLayer && !hasBackdrop();
 +    canOcclude = canOcclude && painted && !clips.isEmpty();
 +    if (painted)
 +        m_paintOrderHaiku = ++order;
++    else if (drawnIntoTarget && (!preserves3D() || flat3D) && !isFlattened() && layerOcclusionEnabledHaiku()) {
++        // All of it is drawn into the target at once, from its surface
++        // (paintRecursive() leaves it out when what comes later hides it).
++        m_surfaceOrderHaiku = ++order;
++    }
 +    const auto& transform = m_layerTransforms.combined;
 +    bool axisAligned = transform.isAffine() && !transform.b() && !transform.c();
++    const size_t occludersBefore = s_occludersHaiku.size();
 +    if (canOcclude && axisAligned && m_state.visible && m_state.contentsVisible && !layerRect().isEmpty()) {
++        if (layerOcclusionEnabledHaiku()) {
++            // Stage 2 * order: paintSelf() draws an opaque background color
++            // over all of the layer (where its tiles do not hide it all; under
++            // them, the tiles and the color together are opaque), or else its
++            // opaque tiles.
++            auto addLayerRect = [&](const FloatRect& layerPart) {
++                auto inTarget = transform.mapRect(layerPart);
++                for (auto& clip : clips)
++                    addOccluderHaiku(2 * m_paintOrderHaiku, intersection(inTarget, clip));
++            };
++            if (m_state.backgroundColor.isValid() && m_state.backgroundColor.isOpaque())
++                addLayerRect(layerRect());
++            else if (m_backingStore) {
++                Vector<FloatRect> tiles;
++                m_backingStore->appendOpaqueRectsHaiku(layerRect(), transform, tiles);
++                for (auto& tile : tiles) {
++                    for (auto& clip : clips)
++                        addOccluderHaiku(2 * m_paintOrderHaiku, intersection(tile, clip));
++                }
++            }
++        }
 +        bool opaque = false;
 +        if (m_state.solidColor.isValid() && m_state.solidColor.isVisible())
 +            opaque = m_state.solidColor.isOpaque();
@@ -52946,13 +53286,20 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..005751220bfd3c0506daa527adc3e134
 +            for (auto inner : innerRectsHaiku(m_state.contentsClippingRect)) {
 +                inner.intersect(m_state.contentsRect);
 +                inner = transform.mapRect(inner);
-+                for (auto& clip : clips) {
-+                    auto rect = intersection(inner, clip);
-+                    if (!rect.isEmpty())
-+                        s_occludersHaiku.append({ m_paintOrderHaiku, rect });
-+                }
++                for (auto& clip : clips)
++                    addOccluderHaiku(2 * m_paintOrderHaiku + 1, intersection(inner, clip));
 +            }
 +        }
++    }
++
++    if (TextureMapper::tracesDrawsHaiku()) {
++        // SUMMIT_DRAW_TRACE: each layer's place in the occlusion.
++        auto rect = transform.mapRect(layerRect());
++        std::fprintf(stderr, "Summit draw trace: layer %u parent=%u order=%u surfaceOrder=%u rect=%.0f,%.0f %.0fx%.0f occluders=%zu canOcclude=%d axis=%d opacity=%.2f filters=%d mask=%d backdrop=%d isBackdrop=%d 3d=%d flat=%d backing=%d contents=%d solid=%d background=%d children=%zu clips=%zu masks=%d\n",
++            traceIdHaiku(this), traceIdHaiku(m_parent), m_paintOrderHaiku, m_surfaceOrderHaiku, rect.x(), rect.y(), rect.width(), rect.height(),
++            s_occludersHaiku.size() - occludersBefore, canOcclude, axisAligned, m_currentOpacity, hasFilters(), hasMask(), hasBackdrop(), m_isBackdrop,
++            preserves3D(), isFlattened(), !!m_backingStore, !!m_contentsLayer, m_state.solidColor.isValid() && m_state.solidColor.isVisible(),
++            m_state.backgroundColor.isValid() ? (m_state.backgroundColor.isOpaque() ? 2 : 1) : 0, m_children.size(), clips.size(), m_state.masksToBounds);
 +    }
 +
 +    if (m_children.isEmpty())
@@ -52984,7 +53331,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..005751220bfd3c0506daa527adc3e134
  WTF_MAKE_TZONE_ALLOCATED_IMPL(TextureMapperLayer);
  
  static constexpr auto s_opacityVisibilityThreshold = 0.01;
-@@ -55,6 +280,9 @@ public:
+@@ -55,6 +562,9 @@ public:
      IntSize offset;
      TextureMapperLayer* backdropLayer { nullptr };
      TextureMapperLayer* replicaLayer { nullptr };
@@ -52994,7 +53341,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..005751220bfd3c0506daa527adc3e134
  };
  
  struct TextureMapperLayer::ComputeTransformData {
-@@ -363,14 +591,37 @@ void TextureMapperLayer::prepareForPainting(TextureMapper& textureMapper)
+@@ -363,14 +873,44 @@ void TextureMapperLayer::prepareForPainting(TextureMapper& textureMapper)
  
  void TextureMapperLayer::paint(TextureMapper& textureMapper)
  {
@@ -53009,6 +53356,11 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..005751220bfd3c0506daa527adc3e134
      options.surface = textureMapper.currentSurface();
 +#if PLATFORM(HAIKU)
 +    s_occludersHaiku.shrink(0);
++    s_textureMapperHaiku = &textureMapper;
++    s_targetSurfaceHaiku = textureMapper.currentSurface();
++    if (s_frameSerialHaiku == s_frameSerialAtPaintHaiku)
++        noteFrameDamageHaiku(nullptr);
++    s_frameSerialAtPaintHaiku = s_frameSerialHaiku;
 +    if (occlusionEnabledHaiku()) {
 +        unsigned order = 0;
 +        collectOccludersHaiku(order, { FloatRect::infiniteRect() }, true, true);
@@ -53016,6 +53368,8 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..005751220bfd3c0506daa527adc3e134
 +    auto forgetOccluders = makeScopeExit([] {
 +        s_occludersHaiku.shrink(0);
 +        s_paintOrderHaiku = 0;
++        s_textureMapperHaiku = nullptr;
++        s_targetSurfaceHaiku = nullptr;
 +    });
 +#endif
      paintRecursive(options);
@@ -53032,7 +53386,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..005751220bfd3c0506daa527adc3e134
  }
  
  #if ENABLE(DAMAGE_TRACKING)
-@@ -390,24 +641,102 @@ void TextureMapperLayer::setDamage(Damage&& damage)
+@@ -390,24 +930,121 @@ void TextureMapperLayer::setDamage(Damage&& damage)
          m_damageInLayerCoordinateSpace = WTF::move(damage);
  }
  
@@ -53075,6 +53429,13 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..005751220bfd3c0506daa527adc3e134
 +    const bigtime_t damageStartedAt = traceDamageStats ? system_time() : 0;
 +    s_damageLayersHaiku = s_damageFilterLayersHaiku = 0;
 +    s_damageOverlapTimeHaiku = 0;
++    s_frameDamageHaiku = &damage;
++    s_damageBoundsHaiku = textureMapper.clipBounds();
++    s_checkedBackdropsHaiku.shrink(0);
++    auto forgetBackdrops = makeScopeExit([] {
++        s_frameDamageHaiku = nullptr;
++        s_checkedBackdropsHaiku.shrink(0);
++    });
 +#endif
      collectDamageRecursive(options, damage);
 +#if PLATFORM(HAIKU)
@@ -53101,6 +53462,14 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..005751220bfd3c0506daa527adc3e134
 +#endif
      for (const auto& rect : *m_damageInGlobalCoordinateSpace)
          damage.add(intersection(rect, clipBounds));
++#if PLATFORM(HAIKU)
++    // Damage of no layer in particular (a layer removed, resized or moved)
++    // may lie under any backdrop.
++    for (auto* backdrop : s_checkedBackdropsHaiku) {
++        if (backdrop->m_backdropCacheHaiku && damageReachesHaiku(m_damageInGlobalCoordinateSpace.get(), backdrop->m_backdropCacheHaiku->rect))
++            backdrop->m_backdropCacheHaiku = nullptr;
++    }
++#endif
      *m_damageInGlobalCoordinateSpace = Damage(m_state.size);
 +
 +#if PLATFORM(HAIKU)
@@ -53119,6 +53488,10 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..005751220bfd3c0506daa527adc3e134
 +                    std::fprintf(stderr, "Summit damage trace: filter region %.0f,%.0f %.0fx%.0f joins\n", region.x(), region.y(), region.width(), region.height());
 +                damage.add(region);
 +                joined = true;
++                for (auto* backdrop : s_checkedBackdropsHaiku) {
++                    if (backdrop->m_backdropCacheHaiku && enclosingIntRect(region).intersects(backdrop->m_backdropCacheHaiku->rect))
++                        backdrop->m_backdropCacheHaiku = nullptr;
++                }
 +                return true;
 +            }
 +            return false;
@@ -53135,7 +53508,19 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..005751220bfd3c0506daa527adc3e134
      if (!isVisible()) {
          if (m_collectDamageDespiteBeingInvisible)
              m_collectDamageDespiteBeingInvisible = false;
-@@ -490,11 +819,26 @@ void TextureMapperLayer::collectDamageSelf(TextureMapperPaintOptions& options, D
+@@ -415,6 +1052,11 @@ void TextureMapperLayer::collectDamageRecursive(TextureMapperPaintOptions& optio
+             return;
+     }
+ 
++#if PLATFORM(HAIKU)
++    if (m_state.backdropLayer)
++        m_state.backdropLayer->checkBackdropCacheHaiku(damage);
++#endif
++
+     SetForScope scopedOpacity(options.opacity, options.opacity * m_currentOpacity);
+ 
+     if (preserves3D() || isFlattened() || shouldBlend())
+@@ -490,11 +1132,26 @@ void TextureMapperLayer::collectDamageSelf(TextureMapperPaintOptions& options, D
          return;
      }
  
@@ -53162,7 +53547,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..005751220bfd3c0506daa527adc3e134
  
      TransformationMatrix transform;
      transform.translate(options.offset.width(), options.offset.height());
-@@ -507,6 +851,20 @@ void TextureMapperLayer::collectDamageSelf(TextureMapperPaintOptions& options, D
+@@ -507,6 +1164,20 @@ void TextureMapperLayer::collectDamageSelf(TextureMapperPaintOptions& options, D
      // layer-level operations such as resizes, transformations, etc.
      const auto& clipBounds = options.textureMapper.clipBounds();
      if (m_damageInLayerCoordinateSpace) {
@@ -53183,7 +53568,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..005751220bfd3c0506daa527adc3e134
          for (const auto& rect : *m_damageInLayerCoordinateSpace)
              damage.add(intersection(transformRectFromLayerToGlobalCoordinateSpace(rect, transform, options), clipBounds));
      }
-@@ -533,6 +891,28 @@ void TextureMapperLayer::collectDamageSelfChildrenReplicaFilterAndMask(TextureMa
+@@ -533,6 +1204,28 @@ void TextureMapperLayer::collectDamageSelfChildrenReplicaFilterAndMask(TextureMa
  
  void TextureMapperLayer::collectDamageSelfChildrenFilterAndMask(TextureMapperPaintOptions& options, Damage& damage)
  {
@@ -53212,7 +53597,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..005751220bfd3c0506daa527adc3e134
      const IntSize maxTextureSize = options.textureMapper.maxTextureSize();
      for (auto& rect : computeConsolidatedOverlapRegionRects(options)) {
          for (int x = rect.x(); x < rect.maxX(); x += maxTextureSize.width()) {
-@@ -545,8 +925,31 @@ void TextureMapperLayer::collectDamageSelfChildrenFilterAndMask(TextureMapperPai
+@@ -545,8 +1238,31 @@ void TextureMapperLayer::collectDamageSelfChildrenFilterAndMask(TextureMapperPai
          }
      }
  
@@ -53245,7 +53630,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..005751220bfd3c0506daa527adc3e134
  }
  
  void TextureMapperLayer::damageWholeLayer()
-@@ -578,12 +981,38 @@ void TextureMapperLayer::paintSelf(TextureMapperPaintOptions& options)
+@@ -578,12 +1294,39 @@ void TextureMapperLayer::paintSelf(TextureMapperPaintOptions& options)
      auto targetRect = layerRect();
      if (targetRect.isEmpty())
          return;
@@ -53278,13 +53663,14 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..005751220bfd3c0506daa527adc3e134
      transform.multiply(m_layerTransforms.combined);
 +#if PLATFORM(HAIKU)
 +    SetForScope scopedPaintOrder(s_paintOrderHaiku, m_paintOrderHaiku);
++    TextureMapper::setTraceLayerHaiku(traceIdHaiku(this));
 +    if (tracePaint)
 +        contentsPaintedAt = backingPaintedAt = wrappedAt = transformedAt = system_time();
 +#endif
  
      if (isFlattened() && !m_flattenedLayer->needsUpdate()) {
          m_flattenedLayer->paintToTextureMapper(options.textureMapper, m_flattenedLayer->layerRect(), transform, options.opacity);
-@@ -592,6 +1021,26 @@ void TextureMapperLayer::paintSelf(TextureMapperPaintOptions& options)
+@@ -592,6 +1335,26 @@ void TextureMapperLayer::paintSelf(TextureMapperPaintOptions& options)
  
      TextureMapperSolidColorLayer solidColorLayer;
      TextureMapperBackingStore* backingStore = m_backingStore;
@@ -53311,7 +53697,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..005751220bfd3c0506daa527adc3e134
      if (m_state.backgroundColor.isValid()) {
          solidColorLayer.setColor(m_state.backgroundColor);
          backingStore = &solidColorLayer;
-@@ -599,6 +1048,10 @@ void TextureMapperLayer::paintSelf(TextureMapperPaintOptions& options)
+@@ -599,7 +1362,21 @@ void TextureMapperLayer::paintSelf(TextureMapperPaintOptions& options)
  
      options.textureMapper.setWrapMode(TextureMapper::WrapMode::Stretch);
      options.textureMapper.setPatternTransform(TransformationMatrix());
@@ -53320,9 +53706,20 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..005751220bfd3c0506daa527adc3e134
 +        contentsPaintedAt = backingPaintedAt = wrappedAt = system_time();
 +#endif
  
++#if PLATFORM(HAIKU)
++    // A layer's background color alone, hidden by what is drawn later.
++    if (backingStore == &solidColorLayer && layerOcclusionEnabledHaiku()) {
++        auto drawn = intersection(transform.mapRect(targetRect), FloatRect(options.textureMapper.clipBounds()));
++        if (isOccludedHaiku(drawn)) {
++            TextureMapper::noteCulledHaiku(drawn);
++            backingStore = nullptr;
++        }
++    }
++#endif
      if (backingStore) {
          backingStore->paintToTextureMapper(options.textureMapper, targetRect, transform, options.opacity);
-@@ -608,6 +1061,10 @@ void TextureMapperLayer::paintSelf(TextureMapperPaintOptions& options)
+         if (m_state.showDebugBorders)
+@@ -608,6 +1385,10 @@ void TextureMapperLayer::paintSelf(TextureMapperPaintOptions& options)
          if (m_state.showRepaintCounter)
              backingStore->drawRepaintCounter(options.textureMapper, m_state.repaintCount, m_state.debugBorderColor, targetRect, transform);
      }
@@ -53333,7 +53730,26 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..005751220bfd3c0506daa527adc3e134
  
      TextureMapperPlatformLayer* contentsLayer = m_contentsLayer;
      if (m_state.solidColor.isValid() && m_state.solidColor.isVisible()) {
-@@ -638,6 +1095,10 @@ void TextureMapperLayer::paintSelf(TextureMapperPaintOptions& options)
+@@ -617,6 +1398,18 @@ void TextureMapperLayer::paintSelf(TextureMapperPaintOptions& options)
+ 
+     if (!contentsLayer)
+         return;
++#if PLATFORM(HAIKU)
++    // Contents (a picture, a canvas, a solid color) hidden by what later
++    // layers draw.
++    if (m_paintOrderHaiku && layerOcclusionEnabledHaiku() && transform.isAffine()) {
++        FloatRect contents = intersection(m_state.contentsRect, m_state.contentsClippingRect.rect());
++        auto drawn = intersection(transform.mapRect(contents), FloatRect(options.textureMapper.clipBounds()));
++        if (isOccludedAtStageHaiku(drawn, 2 * m_paintOrderHaiku + 1)) {
++            TextureMapper::noteCulledHaiku(drawn);
++            return;
++        }
++    }
++#endif
+ 
+     if (!m_state.contentsTileSize.isEmpty()) {
+         options.textureMapper.setWrapMode(TextureMapper::WrapMode::Repeat);
+@@ -638,6 +1431,10 @@ void TextureMapperLayer::paintSelf(TextureMapperPaintOptions& options)
  
      if (m_state.showDebugBorders)
          contentsLayer->drawBorder(options.textureMapper, m_state.debugBorderColor, m_state.debugBorderWidth, m_state.contentsRect, transform);
@@ -53344,7 +53760,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..005751220bfd3c0506daa527adc3e134
  }
  
  void TextureMapperLayer::paintBackdrop(TextureMapperPaintOptions& options)
-@@ -653,8 +1114,18 @@ void TextureMapperLayer::paintBackdrop(TextureMapperPaintOptions& options)
+@@ -653,8 +1450,18 @@ void TextureMapperLayer::paintBackdrop(TextureMapperPaintOptions& options)
  
  void TextureMapperLayer::paintSelfAndChildren(TextureMapperPaintOptions& options)
  {
@@ -53364,7 +53780,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..005751220bfd3c0506daa527adc3e134
  
      if (m_state.backdropLayer && !options.backdropLayer)
          paintBackdrop(options);
-@@ -687,8 +1158,13 @@ void TextureMapperLayer::paintSelfAndChildren(TextureMapperPaintOptions& options
+@@ -687,8 +1494,13 @@ void TextureMapperLayer::paintSelfAndChildren(TextureMapperPaintOptions& options
      }
  
      if (!isFlattened() || m_flattenedLayer->needsUpdate()) {
@@ -53379,7 +53795,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..005751220bfd3c0506daa527adc3e134
      }
  
      if (shouldClip)
-@@ -1047,6 +1523,54 @@ Vector<IntRect, 1> TextureMapperLayer::computeConsolidatedOverlapRegionRects(Tex
+@@ -1047,6 +1859,54 @@ Vector<IntRect, 1> TextureMapperLayer::computeConsolidatedOverlapRegionRects(Tex
      computeOverlapRegions(data, options.transform, false);
      ASSERT(nonOverlapRegion.isEmpty());
  
@@ -53434,12 +53850,28 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..005751220bfd3c0506daa527adc3e134
      auto rects = overlapRegion.rects();
      static const size_t OverlapRegionConsolidationThreshold = 4;
      if (rects.size() > OverlapRegionConsolidationThreshold) {
-@@ -1057,8 +1581,124 @@ Vector<IntRect, 1> TextureMapperLayer::computeConsolidatedOverlapRegionRects(Tex
+@@ -1057,8 +1917,260 @@ Vector<IntRect, 1> TextureMapperLayer::computeConsolidatedOverlapRegionRects(Tex
      return rects;
  }
  
 +#if PLATFORM(HAIKU)
 +static void commitSurface(TextureMapperPaintOptions&, BitmapTexture&, const IntRect&, float);
++
++// The filtered result depends on the contents, the filters and the scale,
++// which the filter cache compares, not on the opacity it is drawn with: an
++// opacity animation or one that moves the layer does not have to make it
++// again. SUMMIT_FILTER_CACHE_ANIMATED=0 keeps any running animation out of
++// the cache.
++bool TextureMapperLayer::filterCacheBlockedByAnimationsHaiku() const
++{
++    static const bool onlyFilterAnimations = [] {
++        const char* value = std::getenv("SUMMIT_FILTER_CACHE_ANIMATED");
++        return !value || std::strcmp(value, "0");
++    }();
++    if (!onlyFilterAnimations)
++        return m_animations.hasRunningAnimations();
++    return m_animations.hasActiveAnimationsOfType(AnimatedProperty::Filter);
++}
 +
 +bool TextureMapperLayer::paintFilteredFromCacheHaiku(TextureMapperPaintOptions& options)
 +{
@@ -53452,12 +53884,29 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..005751220bfd3c0506daa527adc3e134
 +    // translation, whose filters do not animate, and whose contents are known
 +    // not to have changed.
 +    const auto& transform = m_layerTransforms.combined;
++    // Also inside another layer's surface (group opacity) and in a backdrop
++    // filter's copy of what is behind it, which paint layers with their own
++    // transforms, moved by the surface's offset: getartcraft.com's blurred
++    // glows were filtered again in each frame for the backdrop over them.
++    // SUMMIT_FILTER_CACHE_IN_SURFACES=0 keeps the cache to the target.
++    static const bool inSurfaces = [] {
++        const char* value = std::getenv("SUMMIT_FILTER_CACHE_IN_SURFACES");
++        return !value || std::strcmp(value, "0");
++    }();
 +    bool cachable = enabled && hasFilters() && m_children.isEmpty() && !m_state.maskLayer && !m_state.replicaLayer && !hasBackdrop()
-+        && !isFlattened() && !preserves3D() && !options.replicaLayer && !options.backdropLayer && !m_isBackdrop
-+        && options.offset.isZero() && options.transform.isIdentity() && !m_animations.hasRunningAnimations()
++        && !isFlattened() && !preserves3D() && !options.replicaLayer && !m_isBackdrop
++        && (inSurfaces || (!options.backdropLayer && options.offset.isZero())) && options.transform.isIdentity() && !filterCacheBlockedByAnimationsHaiku()
 +        && transform.isAffine() && !transform.b() && !transform.c()
 +        && (!m_backingStore || (m_backingStore->contentVersionHaiku() && m_backingStore->isCompleteHaiku()))
 +        && (!m_contentsLayer || m_contentsLayer->isImmutableHaiku());
++    if (!cachable && TextureMapper::tracesDrawsHaiku() && hasFilters()) {
++        const char* reason = !enabled ? "off" : !m_children.isEmpty() ? "children" : m_state.maskLayer ? "mask" : hasBackdrop() || m_isBackdrop ? "backdrop"
++            : !inSurfaces && (options.backdropLayer || !options.offset.isZero()) ? "in a surface" : !options.transform.isIdentity() ? "transformed" : filterCacheBlockedByAnimationsHaiku() ? "filter animation"
++            : !transform.isAffine() || transform.b() || transform.c() ? "transform"
++            : m_backingStore && !(m_backingStore->contentVersionHaiku() && m_backingStore->isCompleteHaiku()) ? "tiles incomplete"
++            : m_contentsLayer && !m_contentsLayer->isImmutableHaiku() ? "contents" : "other";
++        std::fprintf(stderr, "Summit draw trace: filter cache layer=%u not=%s\n", traceIdHaiku(this), reason);
++    }
 +    FloatRect local = layerRect();
 +    if (cachable && m_currentFilters.hasOutsets()) {
 +        auto outsets = m_currentFilters.outsets();
@@ -53473,8 +53922,11 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..005751220bfd3c0506daa527adc3e134
 +        return false;
 +    }
 +
-+    // Nothing of it shows in this composition.
-+    if (!whole.intersects(options.textureMapper.clipBounds()))
++    // Nothing of it shows in this composition (the clip is in the pixels of
++    // the surface drawn into).
++    IntRect shown = whole;
++    shown.move(options.offset);
++    if (!shown.intersects(options.textureMapper.clipBounds()))
 +        return true;
 +
 +    auto& cache = m_filterCacheHaiku;
@@ -53488,6 +53940,15 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..005751220bfd3c0506daa527adc3e134
 +    double dy = reusable ? transform.f() - cache->translateY : 0;
 +    if (reusable && (dx != std::round(dx) || dy != std::round(dy)))
 +        reusable = false;
++    if (TextureMapper::tracesDrawsHaiku() && !reusable) {
++        // SUMMIT_DRAW_TRACE: why a filtered layer is filtered again.
++        const char* reason = !cache ? "new" : cache->scaleX != transform.a() || cache->scaleY != transform.d() ? "scale"
++            : cache->backingStore != m_backingStore || (m_backingStore && cache->backingVersion != m_backingStore->contentVersionHaiku()) ? "tiles"
++            : cache->contents != m_contentsLayer ? "contents" : cache->size != m_state.size ? "size" : cache->filters != m_currentFilters ? "filters"
++            : cache->solidColor != m_state.solidColor || cache->backgroundColor != m_state.backgroundColor ? "color"
++            : cache->contentsRect != m_state.contentsRect || cache->contentsClippingRect != m_state.contentsClippingRect ? "contentsRect" : "fraction";
++        std::fprintf(stderr, "Summit draw trace: filter cache layer=%u again=%s move=%.2f,%.2f\n", traceIdHaiku(this), reason, dx, dy);
++    }
 +
 +    IntRect target;
 +    if (reusable) {
@@ -53548,6 +54009,95 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..005751220bfd3c0506daa527adc3e134
 +    commitSurface(options, *cache->texture, IntRect(target.location(), cache->texture->size()), options.opacity);
 +    return true;
 +}
++
++static Ref<BitmapTexture> acquireSurfaceHaiku(const IntSize&);
++
++bool TextureMapperLayer::paintBackdropFromCacheHaiku(TextureMapperPaintOptions& options)
++{
++    static const bool enabled = [] {
++        const char* value = std::getenv("SUMMIT_BACKDROP_CACHE");
++        return !value || std::strcmp(value, "0");
++    }();
++    if (!m_isBackdrop)
++        return false;
++    // Only a backdrop not drawn into another backdrop's copy, with no more
++    // than a scale and a translation, whose filters do not animate. Inside
++    // another layer's surface (a masked or rounded layer that owns the
++    // backdrop: getartcraft.com's panels) the surfaces are only moved, so
++    // its place there is its place in the target moved by their offset.
++    const auto& transform = m_layerTransforms.combined;
++    // A mask counts when its contents are known not to have changed.
++    auto* mask = m_state.maskLayer.get();
++    bool maskCachable = !mask || (mask->m_children.isEmpty() && !mask->m_contentsLayer && !mask->m_state.maskLayer
++        && (!mask->m_backingStore || (mask->m_backingStore->contentVersionHaiku() && mask->m_backingStore->isCompleteHaiku())));
++    bool cachable = enabled && hasFilters() && m_children.isEmpty() && maskCachable && !m_state.replicaLayer
++        && !options.replicaLayer && !options.backdropLayer && options.transform.isIdentity() && !m_animations.hasRunningAnimations()
++        && transform.isAffine() && !transform.b() && !transform.c();
++    if (!cachable) {
++        m_backdropCacheHaiku = nullptr;
++        return false;
++    }
++    // The surface the backdrop is painted into, as paintSelfChildrenFilterAndMask()
++    // makes it: the layer and its filters' reach, in the clip.
++    auto rects = computeConsolidatedOverlapRegionRects(options);
++    IntSize maxTextureSize = options.textureMapper.maxTextureSize();
++    if (rects.size() != 1 || rects[0].isEmpty() || rects[0].width() > maxTextureSize.width() || rects[0].height() > maxTextureSize.height()
++        || double(rects[0].width()) * rects[0].height() > 4e6) {
++        m_backdropCacheHaiku = nullptr;
++        return false;
++    }
++    IntRect rect = rects[0];
++    // Changes are seen in the view only: the layer must be in it (its
++    // filters' reach may go past the view's edge).
++    if (!s_damageBoundsHaiku.contains(enclosingIntRect(transform.mapRect(layerRect())))) {
++        m_backdropCacheHaiku = nullptr;
++        return false;
++    }
++
++    auto& cache = m_backdropCacheHaiku;
++    // A surface made under a smaller clip (a composition that drew only
++    // what changed) holds only that part.
++    bool reusable = cache && cache->texture && cache->rect.contains(rect) && cache->transform == transform
++        && cache->size == m_state.size && cache->filters == m_currentFilters
++        && cache->checkedThrough == s_frameSerialHaiku && s_lastUnknownFrameHaiku <= cache->createdSerial
++        && cache->maskBackingStore == (mask ? mask->m_backingStore : nullptr)
++        && cache->maskVersion == (mask && mask->m_backingStore ? mask->m_backingStore->contentVersionHaiku() : 0)
++        && cache->maskTransform == (mask ? mask->m_layerTransforms.combined : TransformationMatrix())
++        && cache->maskSize == (mask ? mask->m_state.size : FloatSize());
++    TextureMapper::noteBackdropCacheHaiku(reusable);
++    if (TextureMapper::tracesDrawsHaiku() && !reusable) {
++        const char* reason = !cache ? "new or changed under it" : !cache->rect.contains(rect) ? "larger clip" : cache->transform != transform ? "moved"
++            : cache->checkedThrough != s_frameSerialHaiku ? "not checked" : s_lastUnknownFrameHaiku > cache->createdSerial ? "damage unknown" : "layer, filter or mask";
++        std::fprintf(stderr, "Summit draw trace: backdrop cache layer=%u again=%s rect=%d,%d %dx%d\n", traceIdHaiku(this), reason, rect.x(), rect.y(), rect.width(), rect.height());
++    }
++    if (reusable) {
++        commitSurface(options, *cache->texture, cache->rect, options.opacity);
++        return true;
++    }
++
++    auto surface = acquireSurfaceHaiku(rect.size());
++    {
++        SetForScope scopedSurface(options.surface, surface.ptr());
++        SetForScope scopedOffset(options.offset, -toIntSize(rect.location()));
++        SetForScope scopedOpacity(options.opacity, 1);
++        paintIntoSurface(options);
++        surface = Ref { *options.surface };
++    }
++    if (!cache)
++        cache = makeUnique<BackdropCacheHaiku>();
++    cache->texture = surface.ptr();
++    cache->rect = rect;
++    cache->transform = transform;
++    cache->size = m_state.size;
++    cache->filters = m_currentFilters;
++    cache->createdSerial = cache->checkedThrough = s_frameSerialHaiku;
++    cache->maskBackingStore = mask ? mask->m_backingStore : nullptr;
++    cache->maskVersion = mask && mask->m_backingStore ? mask->m_backingStore->contentVersionHaiku() : 0;
++    cache->maskTransform = mask ? mask->m_layerTransforms.combined : TransformationMatrix();
++    cache->maskSize = mask ? mask->m_state.size : FloatSize();
++    commitSurface(options, surface.get(), rect, options.opacity);
++    return true;
++}
 +#endif
 +
  void TextureMapperLayer::paintSelfChildrenFilterAndMask(TextureMapperPaintOptions& options)
@@ -53555,11 +54105,13 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..005751220bfd3c0506daa527adc3e134
 +#if PLATFORM(HAIKU)
 +    if (paintFilteredFromCacheHaiku(options))
 +        return;
++    if (paintBackdropFromCacheHaiku(options))
++        return;
 +#endif
      IntSize maxTextureSize = options.textureMapper.maxTextureSize();
      for (auto& rect : computeConsolidatedOverlapRegionRects(options)) {
          for (int x = rect.x(); x < rect.maxX(); x += maxTextureSize.width()) {
-@@ -1079,6 +1719,33 @@ void TextureMapperLayer::applyMask(TextureMapperPaintOptions& options)
+@@ -1079,6 +2191,33 @@ void TextureMapperLayer::applyMask(TextureMapperPaintOptions& options)
      options.textureMapper.setMaskMode(false);
  }
  
@@ -53593,7 +54145,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..005751220bfd3c0506daa527adc3e134
  void TextureMapperLayer::paintIntoSurface(TextureMapperPaintOptions& options)
  {
      options.textureMapper.bindSurface(options.surface.get());
-@@ -1086,6 +1753,9 @@ void TextureMapperLayer::paintIntoSurface(TextureMapperPaintOptions& options)
+@@ -1086,6 +2225,9 @@ void TextureMapperLayer::paintIntoSurface(TextureMapperPaintOptions& options)
          SetForScope scopedTransform(options.transform, TransformationMatrix());
          SetForScope scopedReplicaLayer(options.replicaLayer, nullptr);
          SetForScope scopedBackdropLayer(options.backdropLayer, this);
@@ -53603,7 +54155,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..005751220bfd3c0506daa527adc3e134
          backdropRootLayer().paintSelfAndChildren(options);
      } else
          paintSelfAndChildren(options);
-@@ -1093,7 +1763,11 @@ void TextureMapperLayer::paintIntoSurface(TextureMapperPaintOptions& options)
+@@ -1093,7 +2235,11 @@ void TextureMapperLayer::paintIntoSurface(TextureMapperPaintOptions& options)
      bool hasMask = !!m_state.maskLayer;
      bool hasReplicaMask = options.replicaLayer == this && m_state.replicaLayer->m_state.maskLayer;
      bool defersLastFilterPass = !hasMask && !hasReplicaMask;
@@ -53615,7 +54167,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..005751220bfd3c0506daa527adc3e134
      options.textureMapper.bindSurface(options.surface.get());
      if (hasMask)
          m_state.maskLayer->applyMask(options);
-@@ -1109,9 +1783,27 @@ static void commitSurface(TextureMapperPaintOptions& options, BitmapTexture& sur
+@@ -1109,9 +2255,27 @@ static void commitSurface(TextureMapperPaintOptions& options, BitmapTexture& sur
      options.textureMapper.drawTexture(surface, targetRect, { }, opacity);
  }
  
@@ -53643,7 +54195,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..005751220bfd3c0506daa527adc3e134
      {
          SetForScope scopedSurface(options.surface, surface.ptr());
          SetForScope scopedOffset(options.offset, -toIntSize(rect.location()));
-@@ -1127,7 +1819,11 @@ void TextureMapperLayer::paintWithIntermediateSurface(TextureMapperPaintOptions&
+@@ -1127,7 +2291,11 @@ void TextureMapperLayer::paintWithIntermediateSurface(TextureMapperPaintOptions&
  
  void TextureMapperLayer::paintSelfAndChildrenWithIntermediateSurface(TextureMapperPaintOptions& options, const IntRect& rect)
  {
@@ -53655,7 +54207,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..005751220bfd3c0506daa527adc3e134
      {
          SetForScope scopedSurface(options.surface, surface.ptr());
          SetForScope scopedOffset(options.offset, -toIntSize(rect.location()));
-@@ -1142,6 +1838,10 @@ void TextureMapperLayer::paintSelfAndChildrenWithIntermediateSurface(TextureMapp
+@@ -1142,6 +2310,10 @@ void TextureMapperLayer::paintSelfAndChildrenWithIntermediateSurface(TextureMapp
  
  void TextureMapperLayer::paintSelfChildrenReplicaFilterAndMask(TextureMapperPaintOptions& options)
  {
@@ -53666,8 +54218,34 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..005751220bfd3c0506daa527adc3e134
      bool hasFilterOrMask = [&] {
          if (hasFilters())
              return true;
-@@ -1165,8 +1865,24 @@ void TextureMapperLayer::paintSelfChildrenReplicaFilterAndMask(TextureMapperPain
+@@ -1163,10 +2335,55 @@ void TextureMapperLayer::paintSelfChildrenReplicaFilterAndMask(TextureMapperPain
+         paintSelfAndChildrenWithReplica(options);
+ }
  
++#if PLATFORM(HAIKU)
++// Whether what this layer, drawn through an intermediate surface, would
++// draw into the target is all hidden by what is drawn after it.
++bool TextureMapperLayer::isSubtreeOccludedHaiku(TextureMapperPaintOptions& options)
++{
++    if (!m_surfaceOrderHaiku || s_occludersHaiku.isEmpty() || !options.offset.isZero() || !options.transform.isIdentity()
++        || options.replicaLayer || options.backdropLayer)
++        return false;
++    // Occluders are noted in paint order.
++    if (s_occludersHaiku.last().stage <= 2 * m_surfaceOrderHaiku + 1)
++        return false;
++    FloatRect drawn;
++    if (!addDrawnBoundsHaiku(drawn))
++        return false;
++    // Surfaces go at whole pixels (rounded out).
++    drawn.inflate(1);
++    drawn.intersect(FloatRect(options.textureMapper.clipBounds()));
++    if (drawn.isEmpty() || !isOccludedAtStageHaiku(drawn, 2 * m_surfaceOrderHaiku + 1))
++        return false;
++    TextureMapper::noteCulledHaiku(drawn);
++    return true;
++}
++#endif
++
  void TextureMapperLayer::paintRecursive(TextureMapperPaintOptions& options)
  {
 +#if PLATFORM(HAIKU)
@@ -53688,10 +54266,15 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..005751220bfd3c0506daa527adc3e134
 +                static_cast<long long>(startedAt), elapsed / 1000.0, m_id, m_children.size(), isFlattened(), shouldBlend());
 +    });
 +#endif
++
++#if PLATFORM(HAIKU)
++    if (m_surfaceOrderHaiku && isSubtreeOccludedHaiku(options))
++        return;
++#endif
  
      SetForScope scopedOpacity(options.opacity, options.opacity * m_currentOpacity);
  
-@@ -1184,8 +1900,12 @@ void TextureMapperLayer::paintFlattened(TextureMapperPaintOptions& options)
+@@ -1184,8 +2401,12 @@ void TextureMapperLayer::paintFlattened(TextureMapperPaintOptions& options)
  {
      // If painting a backdrop for a flattened layer, processing should stop here.
      // Only the elements up to the flattened layer need to be painted into the backdrop buffer.
@@ -53705,7 +54288,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..005751220bfd3c0506daa527adc3e134
  
      if (m_state.backdropLayer && !options.backdropLayer)
          paintBackdrop(options);
-@@ -1495,6 +2215,11 @@ void TextureMapperLayer::setBackgroundColor(const Color& color)
+@@ -1495,6 +2716,11 @@ void TextureMapperLayer::setBackgroundColor(const Color& color)
  void TextureMapperLayer::setFilters(const FilterOperations& filters)
  {
      m_state.filters = filters;
@@ -53718,10 +54301,10 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..005751220bfd3c0506daa527adc3e134
  
  void TextureMapperLayer::setContentsLayer(TextureMapperPlatformLayer* platformLayer)
 diff --git a/Source/WebCore/platform/graphics/texmap/TextureMapperLayer.h b/Source/WebCore/platform/graphics/texmap/TextureMapperLayer.h
-index 385b7808e97fada2a7e26a56172004da71b87c1c..ef8f1b6857401f73dc1411eabe6863f75be7781e 100644
+index 385b7808e97fada2a7e26a56172004da71b87c1c..90729fdf46730fd376b92e8a0fafc266fcbca376 100644
 --- a/Source/WebCore/platform/graphics/texmap/TextureMapperLayer.h
 +++ b/Source/WebCore/platform/graphics/texmap/TextureMapperLayer.h
-@@ -127,6 +127,17 @@ public:
+@@ -127,6 +127,22 @@ public:
  
      FloatRect effectiveLayerRect() const;
  
@@ -53731,6 +54314,11 @@ index 385b7808e97fada2a7e26a56172004da71b87c1c..ef8f1b6857401f73dc1411eabe6863f7
 +    // being painted: its tiles there can be left out.
 +    static bool isOccludedHaiku(const FloatRect&);
 +    bool drawsNothingHaiku() const;
++    // What changed in each composition (the frame's damage, or nothing for
++    // a composition whose damage is not known), noted before it is painted;
++    // the backdrop cache asks it whether what lies under a backdrop filter
++    // changed since it was blurred.
++    WEBCORE_EXPORT static void noteFrameDamageHaiku(const Damage*);
 +    // Has the contents of the layers that paint() will draw upload what they
 +    // need before the composition starts drawing.
 +    WEBCORE_EXPORT void prepareContentsHaiku();
@@ -53739,20 +54327,28 @@ index 385b7808e97fada2a7e26a56172004da71b87c1c..ef8f1b6857401f73dc1411eabe6863f7
  private:
      TextureMapperLayer& backdropRootLayer() const
      {
-@@ -186,6 +197,12 @@ private:
+@@ -186,6 +202,20 @@ private:
      void paintBackdrop(TextureMapperPaintOptions&);
      void applyMask(TextureMapperPaintOptions&);
      void collect3DRenderingContextLayers(Vector<TextureMapperLayer*>&);
 +#if PLATFORM(HAIKU)
 +    void collectOccludersHaiku(unsigned& order, const Vector<FloatRect, 4>& clips, bool painted, bool canOcclude);
 +    bool paintFilteredFromCacheHaiku(TextureMapperPaintOptions&);
++    bool paintBackdropFromCacheHaiku(TextureMapperPaintOptions&);
++    bool isSubtreeOccludedHaiku(TextureMapperPaintOptions&);
++    bool addDrawnBoundsHaiku(FloatRect&) const;
++    bool isFlatWrapperHaiku() const;
++    bool filterCacheBlockedByAnimationsHaiku() const;
++    void checkBackdropCacheHaiku(const Damage&);
 +    struct FilterCacheHaiku;
 +    std::unique_ptr<FilterCacheHaiku> m_filterCacheHaiku;
++    struct BackdropCacheHaiku;
++    std::unique_ptr<BackdropCacheHaiku> m_backdropCacheHaiku;
 +#endif
  
  #if ENABLE(DAMAGE_TRACKING)
      void collectDamageRecursive(TextureMapperPaintOptions&, Damage&);
-@@ -224,6 +241,11 @@ private:
+@@ -224,6 +254,15 @@ private:
      std::unique_ptr<TextureMapperFlattenedLayer> m_flattenedLayer;
      float m_currentOpacity { 1.0 };
      FilterOperations m_currentFilters;
@@ -53760,6 +54356,10 @@ index 385b7808e97fada2a7e26a56172004da71b87c1c..ef8f1b6857401f73dc1411eabe6863f7
 +    // Where this layer's own contents come in the composition's paint order;
 +    // 0 where they are not painted straight into the target.
 +    unsigned m_paintOrderHaiku { 0 };
++    // Where in that order a layer painted through an intermediate surface
++    // (a filter, a mask, group opacity, a backdrop) draws that surface into
++    // the target; 0 for the others.
++    unsigned m_surfaceOrderHaiku { 0 };
 +#endif
  
      struct State {
@@ -53895,7 +54495,7 @@ index f4510ce2501dd8b7577ceb994e9090da9e649dda..874f59b9469cc9b1bf8d1d20a4775e06
  
      GLuint m_vertexShader;
 diff --git a/Source/WebCore/platform/graphics/texmap/coordinated/CoordinatedBackingStore.cpp b/Source/WebCore/platform/graphics/texmap/coordinated/CoordinatedBackingStore.cpp
-index 0badc4492a49e10ae2faa80d59da84a9cea259d6..3dccd0e718b58c30fd2e2b492d1c7181976e09c5 100644
+index 0badc4492a49e10ae2faa80d59da84a9cea259d6..1c7a3fdc764a57e51c1b7fa10078603ea4fb30f4 100644
 --- a/Source/WebCore/platform/graphics/texmap/coordinated/CoordinatedBackingStore.cpp
 +++ b/Source/WebCore/platform/graphics/texmap/coordinated/CoordinatedBackingStore.cpp
 @@ -24,35 +24,176 @@
@@ -54109,7 +54709,7 @@ index 0badc4492a49e10ae2faa80d59da84a9cea259d6..3dccd0e718b58c30fd2e2b492d1c7181
  
  #if ENABLE(DAMAGE_TRACKING)
      const auto& frameDamage = textureMapper.damage();
-@@ -86,8 +247,43 @@ void CoordinatedBackingStore::paintToTextureMapper(TextureMapper& textureMapper,
+@@ -86,8 +247,49 @@ void CoordinatedBackingStore::paintToTextureMapper(TextureMapper& textureMapper,
      }();
  #endif
  
@@ -54146,14 +54746,20 @@ index 0badc4492a49e10ae2faa80d59da84a9cea259d6..3dccd0e718b58c30fd2e2b492d1c7181
 +        // it that changed.
 +        if (cullsTiles && !adjustedTransform.mapRect(tile.rect()).intersects(clip))
 +            continue;
-+        // Under opaque contents painted later (a playing video).
-+        if (cullsTiles && TextureMapperLayer::isOccludedHaiku(intersection(adjustedTransform.mapRect(tile.rect()), clip)))
-+            continue;
++        // Under opaque contents or layers painted later (a playing video, an
++        // opaque section of the page over this one).
++        if (cullsTiles) {
++            auto drawn = intersection(adjustedTransform.mapRect(tile.rect()), clip);
++            if (TextureMapperLayer::isOccludedHaiku(drawn)) {
++                TextureMapper::noteCulledHaiku(drawn);
++                continue;
++            }
++        }
 +#endif
          const auto allEdgesExposed = allTileEdgesExposed(layerRect, tile.rect()) ? TextureMapper::AllEdgesExposed::Yes : TextureMapper::AllEdgesExposed::No;
  
  #if ENABLE(DAMAGE_TRACKING)
-@@ -105,6 +301,93 @@ void CoordinatedBackingStore::paintToTextureMapper(TextureMapper& textureMapper,
+@@ -105,6 +307,112 @@ void CoordinatedBackingStore::paintToTextureMapper(TextureMapper& textureMapper,
      }
  }
  
@@ -54167,6 +54773,25 @@ index 0badc4492a49e10ae2faa80d59da84a9cea259d6..3dccd0e718b58c30fd2e2b492d1c7181
 +            return false;
 +    }
 +    return true;
++}
++
++// The opaque tiles that paintToTextureMapper() would draw: tiles with an
++// opaque texture (a layer whose contents are opaque) that can be painted.
++// A tile it would leave out because something hides it is hidden by
++// something drawn later, so it still counts.
++void CoordinatedBackingStore::appendOpaqueRectsHaiku(const FloatRect& targetRect, const TransformationMatrix& transform, Vector<FloatRect>& rects) const
++{
++    if (m_tiles.isEmpty() || m_size.isZero())
++        return;
++    FloatRect layerRect = { { }, m_size };
++    TransformationMatrix adjustedTransform = transform * TransformationMatrix::rectToRect(layerRect, targetRect);
++    if (!adjustedTransform.isAffine() || adjustedTransform.b() || adjustedTransform.c())
++        return;
++    for (const auto& tile : m_tiles.values()) {
++        if (!tile.canBePainted() || !tile.texture().isOpaque() || tile.texture().filterOperation())
++            continue;
++        rects.append(adjustedTransform.mapRect(tile.rect()));
++    }
 +}
 +
 +bool CoordinatedBackingStore::coversOpaquelyHaiku(TextureMapper& textureMapper, const FloatRect& targetRect, const TransformationMatrix& transform, float opacity) const
@@ -54248,7 +54873,7 @@ index 0badc4492a49e10ae2faa80d59da84a9cea259d6..3dccd0e718b58c30fd2e2b492d1c7181
  {
      ASSERT(!m_size.isZero());
 diff --git a/Source/WebCore/platform/graphics/texmap/coordinated/CoordinatedBackingStore.h b/Source/WebCore/platform/graphics/texmap/coordinated/CoordinatedBackingStore.h
-index 8723b9e2f90788a74d1ddc536a399463921231ec..4039a2586a2832d85258b7dc33b0db504dd239f3 100644
+index 8723b9e2f90788a74d1ddc536a399463921231ec..90b405c4470f80744e0bee6889b650b5ac623c76 100644
 --- a/Source/WebCore/platform/graphics/texmap/coordinated/CoordinatedBackingStore.h
 +++ b/Source/WebCore/platform/graphics/texmap/coordinated/CoordinatedBackingStore.h
 @@ -22,6 +22,8 @@
@@ -54260,7 +54885,7 @@ index 8723b9e2f90788a74d1ddc536a399463921231ec..4039a2586a2832d85258b7dc33b0db50
  #include <wtf/HashMap.h>
  #include <wtf/RefCounted.h>
  
-@@ -47,6 +49,28 @@ public:
+@@ -47,6 +49,29 @@ public:
      bool hasPendingUpdates() const { return m_hasPendingTileUpdates; }
      void processPendingUpdates();
  
@@ -54268,6 +54893,7 @@ index 8723b9e2f90788a74d1ddc536a399463921231ec..4039a2586a2832d85258b7dc33b0db50
 +    bool coversOpaquelyHaiku(TextureMapper&, const FloatRect&, const TransformationMatrix&, float) const override;
 +    uint64_t contentVersionHaiku() const override { return m_contentVersionHaiku; }
 +    bool isCompleteHaiku() const override;
++    void appendOpaqueRectsHaiku(const FloatRect&, const TransformationMatrix&, Vector<FloatRect>&) const override;
 +    // A composition uploads the tiles it is about to show, and of the others
 +    // (a scroll paints tiles ahead of the viewport, a repaint covers the
 +    // tiles kept around it) as many as fit before this time; the rest wait
@@ -54289,7 +54915,7 @@ index 8723b9e2f90788a74d1ddc536a399463921231ec..4039a2586a2832d85258b7dc33b0db50
      void paintToTextureMapper(TextureMapper&, const FloatRect&, const TransformationMatrix&, float) override;
      void drawBorder(TextureMapper&, const Color&, float borderWidth, const FloatRect&, const TransformationMatrix&) override;
      void drawRepaintCounter(TextureMapper&, int repaintCount, const Color&, const FloatRect&, const TransformationMatrix&) override;
-@@ -58,6 +82,14 @@ private:
+@@ -58,6 +83,14 @@ private:
      FloatSize m_size;
      float m_scale { 1. };
      bool m_hasPendingTileUpdates { false };
@@ -171389,7 +172015,7 @@ index 57163f65873e5a481e5ef5a4ec3beec4b40b7cea..c794adfac01b302829288e03746d1f5d
      bool m_compositionRequired { false };
  #if ENABLE(SCROLLING_THREAD)
 diff --git a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/ThreadedCompositor.cpp b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/ThreadedCompositor.cpp
-index c238029ad9c99c5028ea7e456520af85d1d85532..2ee1af28577f1ae2120f5948dfa4e967be925886 100644
+index c238029ad9c99c5028ea7e456520af85d1d85532..70b259bb482f90750ab61142ae965b9caebfdd13 100644
 --- a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/ThreadedCompositor.cpp
 +++ b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/ThreadedCompositor.cpp
 @@ -26,6 +26,11 @@
@@ -171994,13 +172620,16 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..2ee1af28577f1ae2120f5948dfa4e967
      currentRootLayer.prepareForPainting(*m_textureMapper);
      if (m_damage.flags) {
          Damage frameDamage(size, m_damage.flags->contains(DamagePropagationFlags::Unified) ? Damage::Mode::BoundingBox : Damage::Mode::Rectangles);
-@@ -383,7 +870,26 @@ void ThreadedCompositor::paintToTextureMapper(const TransformationMatrix& matrix
+@@ -383,7 +870,29 @@ void ThreadedCompositor::paintToTextureMapper(const TransformationMatrix& matrix
          WTFBeginSignpost(this, CollectDamage);
          currentRootLayer.collectDamage(*m_textureMapper, frameDamage);
          WTFEndSignpost(this, CollectDamage);
 +#if PLATFORM(HAIKU)
 +        if (CoordinatedBackingStore::takeShowsLateUploadHaiku())
 +            frameDamage = Damage(size, Damage::Mode::Full);
++        // What changed, for what TextureMapperLayer keeps across compositions
++        // (the backdrop cache).
++        TextureMapperLayer::noteFrameDamageHaiku(&frameDamage);
 +#endif
  
 +#if PLATFORM(HAIKU)
@@ -172021,7 +172650,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..2ee1af28577f1ae2120f5948dfa4e967
          recordFrameDamage(WTF::move(frameDamage));
  
          if (m_damage.flags->contains(DamagePropagationFlags::UseForCompositing)) {
-@@ -392,23 +898,62 @@ void ThreadedCompositor::paintToTextureMapper(const TransformationMatrix& matrix
+@@ -392,23 +901,62 @@ void ThreadedCompositor::paintToTextureMapper(const TransformationMatrix& matrix
                  m_textureMapper->setDamage(std::nullopt);
              } else {
                  const auto& damageSinceLastSurfaceUse = m_surface->renderTargetDamage();
@@ -172084,7 +172713,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..2ee1af28577f1ae2120f5948dfa4e967
  
  #if ENABLE(DAMAGE_TRACKING)
      if (rectContainingRegionThatActuallyChanged)
-@@ -426,6 +971,21 @@ void ThreadedCompositor::paintToTextureMapper(const TransformationMatrix& matrix
+@@ -426,6 +974,21 @@ void ThreadedCompositor::paintToTextureMapper(const TransformationMatrix& matrix
  
      m_textureMapper->endClip();
      m_textureMapper->endPainting();
@@ -172106,7 +172735,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..2ee1af28577f1ae2120f5948dfa4e967
  
      if (sceneHasRunningAnimations)
          requestComposition(CompositionReason::Animation);
-@@ -525,8 +1085,17 @@ void ThreadedCompositor::recordFrameDamage(Damage&& damage)
+@@ -525,8 +1088,17 @@ void ThreadedCompositor::recordFrameDamage(Damage&& damage)
  
      // Nothing changed this frame: an empty damage contributes nothing to the targets, since Damage::add()
      // ignores empty damage. Skip it rather than replace the recorded frame damage with an empty one.
@@ -172125,7 +172754,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..2ee1af28577f1ae2120f5948dfa4e967
  
      m_surface->setFrameDamage(WTF::move(damage));
  }
-@@ -555,6 +1124,53 @@ void ThreadedCompositor::renderLayerTree()
+@@ -555,6 +1127,53 @@ void ThreadedCompositor::renderLayerTree()
  
      if (m_suspendedCount > 0)
          return;
@@ -172179,7 +172808,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..2ee1af28577f1ae2120f5948dfa4e967
  
      OptionSet<CompositionReason> reasons;
      bool shouldNotifiyDidComposite = false;
-@@ -580,11 +1196,31 @@ void ThreadedCompositor::renderLayerTree()
+@@ -580,11 +1199,31 @@ void ThreadedCompositor::renderLayerTree()
  
          ASSERT(m_state.state == State::Scheduled);
          m_state.state = State::InProgress;
@@ -172212,7 +172841,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..2ee1af28577f1ae2120f5948dfa4e967
  #endif
  
      // Retrieve the scene attributes in a thread-safe manner.
-@@ -599,29 +1235,90 @@ void ThreadedCompositor::renderLayerTree()
+@@ -599,29 +1238,90 @@ void ThreadedCompositor::renderLayerTree()
      if (viewportSize.isEmpty())
          return;
  
@@ -172306,7 +172935,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..2ee1af28577f1ae2120f5948dfa4e967
      WTFEmitSignpost(this, DidRenderFrame, "reasons: %s", reasonsToString(reasons).utf8());
  
  #if USE(TEXTURE_MAPPER)
-@@ -631,8 +1328,69 @@ void ThreadedCompositor::renderLayerTree()
+@@ -631,8 +1331,70 @@ void ThreadedCompositor::renderLayerTree()
      PlatformDisplay::sharedDisplay().skiaGLContext()->swapBuffers();
  #endif
  
@@ -172358,14 +172987,15 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..2ee1af28577f1ae2120f5948dfa4e967
 +#endif
 +#if PLATFORM(HAIKU)
 +    if (traceTiming)
-+        std::fprintf(stderr, "Summit compositor timing: pid=%d at=%lld async=%d update=%d surface=%.1f flush=%.1f paint=%.1f send=%.1f total=%.1f tiles=%u newTextures=%u tileMpx=%.2f paintWait=%.1f texture=%.1f upload=%.1f swap=%.1f read=%.1f ipc=%.1f deferred=%d draws=%u blended=%u intoSurfaces=%u surfaces=%u blurs=%u drawMpx=%.1f blendedMpx=%.1f transparentTiles=%u waitingInView=%u texturelessInView=%u drawCpu=%.1f stencilClips=%u poolNew=%u gpuTextures=%u\n",
++        std::fprintf(stderr, "Summit compositor timing: pid=%d at=%lld async=%d update=%d surface=%.1f flush=%.1f paint=%.1f send=%.1f total=%.1f tiles=%u newTextures=%u tileMpx=%.2f paintWait=%.1f texture=%.1f upload=%.1f swap=%.1f read=%.1f ipc=%.1f deferred=%d draws=%u blended=%u intoSurfaces=%u surfaces=%u blurs=%u drawMpx=%.1f blendedMpx=%.1f transparentTiles=%u waitingInView=%u texturelessInView=%u drawCpu=%.1f stencilClips=%u poolNew=%u gpuTextures=%u culled=%u culledMpx=%.1f backdropHits=%u backdropMisses=%u\n",
 +            static_cast<int>(getpid()), static_cast<long long>(startedAt), reasons.contains(CompositionReason::AsyncScrolling),
 +            reasons.contains(CompositionReason::RenderingUpdate), (surfaceAt - startedAt) / 1000.0,
 +            (flushedAt - surfaceAt) / 1000.0, (paintedAt - flushedAt) / 1000.0,
 +            (system_time() - paintedAt) / 1000.0, (system_time() - startedAt) / 1000.0,
 +            tileUpdates.tiles, tileUpdates.newTextures, tileUpdates.megapixels, tileUpdates.paintWaitMs, tileUpdates.textureMs, tileUpdates.uploadMs,
 +            (swappedAt - paintedAt) / 1000.0, (readAt - swappedAt) / 1000.0, (system_time() - readAt) / 1000.0, deferredUploads,
-+            drawStats.draws, drawStats.blendedDraws, drawStats.drawsIntoSurfaces, drawStats.surfaceBinds, drawStats.blurPasses, drawStats.megapixels, drawStats.blendedMegapixels, tileUpdates.transparentTiles, waitingTiles, texturelessTiles, drawStats.drawMs, drawStats.stencilClips, WebCore::takeCreatedPoolTexturesHaiku(), WebCore::takeTextureAllocationsHaiku());
++            drawStats.draws, drawStats.blendedDraws, drawStats.drawsIntoSurfaces, drawStats.surfaceBinds, drawStats.blurPasses, drawStats.megapixels, drawStats.blendedMegapixels, tileUpdates.transparentTiles, waitingTiles, texturelessTiles, drawStats.drawMs, drawStats.stencilClips, WebCore::takeCreatedPoolTexturesHaiku(), WebCore::takeTextureAllocationsHaiku(),
++            drawStats.culled, drawStats.culledMegapixels, drawStats.backdropCacheHits, drawStats.backdropCacheMisses);
 +    // The tiles that were left over are uploaded by the compositions that
 +    // follow, which this asks for in case nothing else does.
 +    if (deferredUploads)
@@ -172376,7 +173006,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..2ee1af28577f1ae2120f5948dfa4e967
  
      RunLoop::mainSingleton().dispatch([this, protectedThis = Ref { *this }] {
          if (m_layerTreeHost)
-@@ -656,6 +1414,13 @@ void ThreadedCompositor::requestComposition(CompositionReason reason)
+@@ -656,6 +1418,13 @@ void ThreadedCompositor::requestComposition(CompositionReason reason)
  {
      Locker locker { m_state.lock };
      m_state.reasons.add(reason);
@@ -172390,7 +173020,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..2ee1af28577f1ae2120f5948dfa4e967
      scheduleUpdateLocked();
  }
  
-@@ -679,6 +1444,10 @@ ASCIILiteral ThreadedCompositor::stateToString(ThreadedCompositor::State state)
+@@ -679,6 +1448,10 @@ ASCIILiteral ThreadedCompositor::stateToString(ThreadedCompositor::State state)
  void ThreadedCompositor::scheduleUpdateLocked()
  {
      assertIsHeld(m_state.lock);
@@ -172401,7 +173031,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..2ee1af28577f1ae2120f5948dfa4e967
      WTFEmitSignpost(this, ScheduleComposition, "reasons: %s, state: %s, waiting for tiles: %s, render timer active: %s", reasonsToString(m_state.reasons).utf8(), stateToString(m_state.state).characters(), m_state.isWaitingForTiles ? "yes" : "no", m_state.isRenderTimerActive ? "yes" : "no");
  
      switch (m_state.state) {
-@@ -703,6 +1472,10 @@ void ThreadedCompositor::scheduleUpdateLocked()
+@@ -703,6 +1476,10 @@ void ThreadedCompositor::scheduleUpdateLocked()
  void ThreadedCompositor::frameComplete()
  {
      ASSERT(m_workQueue->runLoop().isCurrent());
@@ -172412,7 +173042,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..2ee1af28577f1ae2120f5948dfa4e967
  
      Locker locker { m_state.lock };
      WTFEmitSignpost(this, FrameComplete, "reasons: %s, state: %s, waiting for tiles: %s", reasonsToString(m_state.reasons).utf8(), stateToString(m_state.state).characters(), m_state.isWaitingForTiles ? "yes" : "no");
-@@ -726,6 +1499,112 @@ void ThreadedCompositor::frameComplete()
+@@ -726,6 +1503,112 @@ void ThreadedCompositor::frameComplete()
      }
  }
  
@@ -172525,7 +173155,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..2ee1af28577f1ae2120f5948dfa4e967
  RunLoop* ThreadedCompositor::runLoop()
  {
      return m_surface ? &m_workQueue->runLoop() : nullptr;
-@@ -747,7 +1626,15 @@ void ThreadedCompositor::updateSceneAttributes(const IntSize& size, float device
+@@ -747,7 +1630,15 @@ void ThreadedCompositor::updateSceneAttributes(const IntSize& size, float device
  {
      m_attributes.viewportSize = size;
      m_attributes.deviceScaleFactor = deviceScaleFactor;

@@ -151,6 +151,71 @@ it" cost a full raster of every tile kept. On Haiku:
 
 See `docs/performance.md`, 30 October 2026, for measurements.
 
+## What the compositor leaves out or keeps (Haiku)
+
+The sections above describe the first, main-thread design. Today the web
+process composites on its own thread with the coordinated-graphics
+`TextureMapperLayer` tree. These Haiku additions decide what a composition
+draws, all in `TextureMapperLayer.cpp` and `CoordinatedBackingStore.cpp`.
+
+- **Occlusion.** Before a composition is painted,
+  `collectOccludersHaiku()` walks the layers in paint order and notes what is
+  drawn opaquely straight into the target:
+  - opaque contents (a video frame, an opaque picture, an opaque solid color);
+  - a layer's opaque background color, over all of the layer;
+  - a layer's opaque tiles (tiles of a layer WebKit marked
+    `contentsOpaque`).
+  Only layers with axis-aligned transforms and clips occlude, and only where
+  no surface, filter, mask, group opacity or 3D context stands between them
+  and the target. While the composition is painted, the following are left out
+  when what is drawn after them covers them entirely:
+  - tiles and background colors;
+  - contents;
+  - whole layers drawn through an intermediate surface (a filtered, masked,
+    group-opacity or backdrop-filtered layer, with everything in it).
+  Each composition works this out anew, so layers that move, animate or scroll
+  occlude where they are in that composition. Only drawing is left out: tiles
+  are still painted and uploaded, and what a layer uncovers is drawn from the
+  tiles it has. WebKit wraps every fixed and sticky layer in an empty
+  structural layer that preserves 3D; with one flat child, that wrapper counts
+  as a plain parent.
+  - `SUMMIT_OCCLUSION=0` turns all of this off.
+  - `SUMMIT_OPAQUE_OCCLUSION=0` keeps only the older contents-hide-tiles part.
+- **Filter cache.** A filtered layer of its own (no children, mask or
+  replica) keeps its filtered result while its contents, filters, size and
+  scale stay the same. The result is drawn again moved by whole pixels:
+  - in the target;
+  - inside another layer's surface;
+  - in a backdrop filter's copy of what lies behind it.
+  Opacity and transform animations don't stop it; filter animations do.
+  - `SUMMIT_FILTER_CACHE=0` turns the cache off.
+  - `SUMMIT_FILTER_CACHE_IN_SURFACES=0` keeps it to the target.
+  - `SUMMIT_FILTER_CACHE_ANIMATED=0` keeps it from layers with any running
+    animation.
+- **Backdrop cache.** A `backdrop-filter` re-paints what lies behind it into a
+  surface and blurs it in every composition that draws it. Its result is kept
+  while nothing under it changed. `collectDamage()` checks each kept result
+  when it reaches the backdrop's layer. Damage is collected in paint order, so
+  at that point the frame's damage is that of the layers painted before it.
+  The frame-wide damage added at the end counts too. These drop the result:
+  - a composition that does not check it;
+  - a composition whose damage is not known (no damage collected, or a late
+    tile upload that makes it the whole frame);
+  - a change of the backdrop layer's place, size, filters or mask;
+  - a clip larger than the one it was made under.
+  `SUMMIT_BACKDROP_CACHE=0` turns it off.
+- **Trace.** The compositor timing line (`SUMMIT_COMPOSITOR_TIMING_TRACE=1`)
+  counts what was left out:
+  - `culled` and `culledMpx` (an intermediate surface counts once, for the
+    area it would have covered in the target);
+  - `backdropHits` and `backdropMisses`.
+  `SUMMIT_DRAW_TRACE=N` adds to each traced draw:
+  - the layer and the surfaces drawn into and from;
+  - each layer's place in the occlusion (`layer ... order= surfaceOrder=
+    occluders=`);
+  - what was culled;
+  - why a filter or backdrop result was made again.
+
 ## Not implemented
 
 - Threaded compositing, async scrolling, damage-limited readback (full frame

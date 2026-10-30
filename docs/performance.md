@@ -1,5 +1,143 @@
 # Summit performance: Speedometer 3.1 baseline, where the time goes, stress test
 
+## 30 October 2026: opaque layers occlude; backdrop blurs and filters in surfaces cached (#117)
+
+Two parts of the first rendering item of #117. The details of each mechanism
+and its switches are in `docs/gpu-compositing.md` ("What the compositor
+leaves out or keeps").
+
+- **Opaque layers occlude.** Until now only opaque contents (video frames,
+  opaque solid colors) hid the tiles under them. Opaque tiles and opaque
+  background colors now hide what lies under them too, and so do opaque
+  contents. Covered tiles, background colors and contents are left out. So
+  are whole layers drawn through an intermediate surface (blurred, masked,
+  group-opacity and backdrop-filtered layers, with all they contain) when what
+  comes later covers them. It is worked out again in each composition; only
+  drawing is left out, never painting or uploading tiles. WebKit puts every
+  fixed and sticky layer under an empty structural layer that preserves 3D,
+  which kept all of them out of occlusion; such a wrapper with one flat child
+  now counts as a plain parent. `SUMMIT_OPAQUE_OCCLUSION=0` turns this off.
+- **Backdrop filters cached.** A backdrop filter's result is kept while
+  nothing painted before its layer changed under it. Damage is collected in
+  paint order, so when `collectDamage()` reaches the layer, the damage so far
+  is exactly that. The cache also works when the backdrop is inside its
+  layer's own surface, as with a rounded or masked panel.
+  `SUMMIT_BACKDROP_CACHE=0` turns it off.
+- **The filter cache in surfaces.** Filtered layers are now reused from
+  `SUMMIT_FILTER_CACHE` inside other surfaces and inside a backdrop's copy of
+  what lies behind it. Before, getartcraft.com's glows were blurred again in
+  every frame for the panels over them. Opacity and transform animations no
+  longer keep a layer out of the cache. `SUMMIT_FILTER_CACHE_IN_SURFACES=0` and
+  `SUMMIT_FILTER_CACHE_ANIMATED=0` restore the old limits.
+- **Trace.** The compositor timing line has `culled`, `culledMpx`,
+  `backdropHits` and `backdropMisses`. `SUMMIT_DRAW_TRACE` also names each
+  draw's layer and surfaces, each layer's place in the occlusion, and why a
+  filter or backdrop result was made again.
+
+What getartcraft.com's overdraw is: a `SUMMIT_DRAW_TRACE` of its first scroll
+(laptop, 175 %) has no opaque layer over other content. Its only occluder is
+the page's own background. Replaying every draw against the opaque draws
+after it found 0 megapixels hidden, of 4.3 drawn into the target and 8.6
+into surfaces per composition. The 8-12 times overdraw is translucent:
+- blur and backdrop surfaces, about two thirds of the pixels;
+- page tiles under translucent layers.
+
+Occlusion cannot remove that; caching can. The page has four backdrop
+filters in view, three of them on masked panels. Each re-painted and blurred
+the glows behind it in every frame.
+
+Measured with one engine build, all four switches on against all four off,
+`SUMMIT_COMPOSITOR_TIMING_TRACE=1`, two runs of each in the order on, off,
+off, on, with the screen blanker stopped:
+- **Pages.** The local fixture `stack.html` has eight sticky full-screen
+  sections, each with three blurred, composited 360x260 blobs and a shadowed
+  card. A fixed glass header and a panel with `backdrop-filter` sit over
+  them; `?solid` drops the text and `?tick` updates a counter every 50 ms.
+  getartcraft.com was loaded in a new profile and scrolled for the first
+  time.
+- **Driving.** The Summit MCP's `frame_stats` drove a wheel burst down, then
+  up, then 5 s at rest.
+- **Columns.** Megapixels drawn and blur passes are per composition. "Draw
+  ms" is the compositor's time to issue the draws (`paint=`). Its whole time
+  per composition (`total=`) includes waiting for the present, which settled
+  at about 1-2 ms in some runs and 13-15 ms in others whatever the switches,
+  so it is left out for getartcraft.com. Frames are the presented frames per
+  second and the gaps over 33 ms of each run.
+
+X399 (GTX 1070, direct present, 200 %), scrolling down, on / off:
+
+| | megapixels drawn (mean; p90) | blur passes | surfaces | draw ms | frames/s; gaps > 33 ms |
+|---|---|---|---|---|---|
+| fixture | 6.1-8.2; 27-34 / 21; 89-91 | 4.8-7.0 / 22 | 26-38 / 109-111 | 0.73-0.78 / 1.27-1.38 | 53-58; 7, 3 / 51-52; 4, 6 |
+| fixture `?solid` | 6.6-9.7; 20-35 / 19-20; 77-91 | 5.1-9.6 / 20-21 | 28-51 / 103-106 | 0.62-0.92 / 1.09-1.15 | 56-60; 5, 0 / 49; 8, 6 |
+| fixture `?tick` | 8.3-9.4; 34-35 / 22-23; 80-88 | 7.6-9.1 / 23-24 | 41-49 / 116-120 | 0.75-0.85 / 1.39-1.43 | 58-60; 2, 0 / 51; 6, 4 |
+| getartcraft.com, first scroll | 13.1-13.6; 20-22 / 16.2-16.7; 25-26 | 5.3 / 7.6-8.3 | 44 / 57-59 | 1.83-2.03 / 1.90-1.97 | 52-57; 6, 4 / 55; 3, 3 |
+
+- **Fixture composition time.** Mean 5.3-6.7 ms against 10.2 ms, 90th
+  percentile 16-17 ms against 33 ms.
+- **Culling on the fixture.** On the X399 the sections are opaque: 58-78
+  draws are culled per composition while scrolling down, 6.7-9.7
+  megapixels.
+- **At rest.** The fixture draws 6 surfaces and 1.2 blur passes against 11
+  and 2.4; its backdrops come from the cache in 180 of 181 draws.
+- **getartcraft.com.** The backdrop cache is hit in 23-25 % of first-scroll
+  draws (63-73 of 268-291). At rest the hit rate varied between runs
+  (302 of 1208 draws, then 1 of 1228): the page animates behind most of its
+  panels, so their results keep changing. Its frame rate and gaps did not
+  change measurably; the GPU is not its limit on the X399.
+
+Laptop (Framework 13, 175 %; composite times include the read-back of
+haiku#43), scrolling down, on / off:
+
+| | megapixels drawn (mean; p90) | blur passes | surfaces | frames/s; gaps > 33 ms |
+|---|---|---|---|---|
+| fixture | 18.3-18.7; 62 / 17.4-19.1; 69 | 17.2-17.7 / 23.7-25.8 | 89-91 / 121-131 | 57-58; 3, 2 / 51-52; 4, 6 |
+| fixture `?solid` | 17.3-17.6; 51 / 18.7-19.3; 69 | 20.0-20.4 / 25.2-25.9 | 104-106 / 128-132 | 60; 1, 0 / 55; 2, 2 |
+| fixture `?tick` | 19.4-19.7; 53-62 / 19.6-20.2; 69 | 15.7-17.6 / 26.3-27.0 | 82-91 / 134-138 | 56; 4, 2 / 53-54; 2, 3 |
+| getartcraft.com, first scroll | 10.3-10.5; 16 / 13.4-14.1; 19-21 | 5.6-5.7 / 9.6-9.9 | 46 / 63-64 | 56-58; 2, 2 / 58-59; 1, 1 |
+
+- **Opaque tiles are rarer at 175 %.** WebKit leaves `contentsOpaque` off
+  for layers with subpixel rounding, so the text fixture's sections have
+  translucent tiles and nothing culls. `?solid` (sections as solid colors)
+  culls 15 draws, 3.2-3.4 megapixels, a composition.
+- **Composition time** on the fixtures, 90th percentile: 14-16 ms against
+  29-32 ms.
+- **getartcraft.com:** the backdrop cache is hit in 28-32 % of first-scroll
+  draws and 14 % at rest; the frame rate did not change.
+
+Pixels: the engine's presented frames (`page_frame`, full size) were compared
+with everything on and everything off, at fixed states of the three fixtures:
+- the top of the page and five scroll positions;
+- a covering full-screen layer moved by script to 0 %, 40 % and 100 % of the
+  width and back;
+- a backdrop held in the cache while the counter ticked.
+
+- **Laptop.** Identical outside the counter's text and the overlay scroll
+  bar (which fades on its own). Two backdrop panels differ by at most 2/255.
+- **X399.** Identical except the backdrop panel over the stack, which differs
+  by at most 4/255 (about 3,300-4,500 pixels over 2/255) in some states. The
+  `?tick` fixture is identical in every state.
+
+Not done:
+- **Rasterization is not culled.** Tiles under opaque layers are still
+  painted and uploaded; only drawing them is left out. Leaving painting out
+  would need occlusion on the main thread, or the compositor's answer sent
+  back, and a tile uncovered by a scroll would then be missing for a frame.
+  Tile painting measured at 1.8 ms per tile at the 90th percentile on
+  getartcraft.com (18 October), and is not this page's limit.
+- **Partly covered tiles are drawn whole.** Drawing only their uncovered part
+  was tried for video on 13 October and was slower.
+- **Tiles that are opaque but not marked so are drawn as translucent.**
+  This happens with subpixel rounding at 175 %. Marking them would mean
+  checking what Skia painted.
+- **The backdrop cache counts all earlier damage under a backdrop.** That
+  includes damage hidden by layers between, so the overlay scroll bar's
+  damage, repainted with each rendering update, drops the glass header's
+  result when the composition's clip reaches it.
+- **Areas outside the view.** Changes outside the view are not damage. A
+  backdrop is cached only while its layer is in the view, and its blur's
+  reach past the view's edge may then show what was there a moment before.
+
 ## 30 October 2026: textures in buckets for edge tiles and intermediate surfaces (#117)
 
 An edge tile (the part of a layer left at its right or bottom edge) is as
