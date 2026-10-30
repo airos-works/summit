@@ -3331,6 +3331,45 @@ void BrowserWindow::ShowTabMenu(const BMessage& message)
     menu->Go(where, true, false, true);
 }
 
+void BrowserWindow::ShowTabListMenu(const BMessage& message)
+{
+    BPoint where;
+    if (message.FindPoint("where", &where) != B_OK || IsClosing()) return;
+    // Every tab with its icon and title, the current one marked, as Firefox's
+    // List All Tabs: the way to a tab scrolled out of the strip.
+    auto* menu = new CancellableMenu("tab-list", fMenusCancelled);
+    for (const auto& tab : fTabs) {
+        std::string label = tab.ShownTitle();
+        if (label.empty()) label = tab.url.empty() ? "New Tab" : tab.url;
+        // BMenu does not truncate; cut long titles at a character boundary.
+        if (label.size() > 70) {
+            size_t cut = 70;
+            while (cut && (static_cast<unsigned char>(label[cut]) & 0xC0) == 0x80) --cut;
+            label = label.substr(0, cut) + "…";
+        }
+#if SUMMIT_MODERN_WEBKIT
+        if (tab.audioMuted) label += "  (muted)";
+        else if (tab.playingAudio) label += "  (playing)";
+#endif
+        auto* select = new BMessage(kSelectTab);
+        select->AddInt64("id", tab.id);
+        auto* item = NewPageMenuItem(label.c_str(), select, tab.errorView ? nullptr : fFavicons->Icon(tab.url));
+        item->SetMarked(tab.id == fSelected);
+        menu->AddItem(item);
+    }
+    menu->SetTargetForItems(this);
+    BRect button;
+    if (message.FindRect("button", &button) != B_OK) {
+        menu->Go(where, true, false, true);
+        return;
+    }
+    // Right-aligned with the button, which sits at the window's right edge.
+    float width = 0, height = 0;
+    menu->GetPreferredSize(&width, &height);
+    where.x = std::min(where.x, button.right + 1 - width);
+    menu->Go(where, true, false, button, true);
+}
+
 void BrowserWindow::ApplyInterfaceStyle()
 {
 #if SUMMIT_MODERN_WEBKIT
@@ -4402,6 +4441,7 @@ void BrowserWindow::MessageReceived(BMessage* message)
         case kNewPrivateWindow: RequestNewWindow({ }, true); break;
         case kCloseWindow: PostMessage(B_QUIT_REQUESTED); break;
         case kTabMenu: ShowTabMenu(*message); break;
+        case kTabListMenu: ShowTabListMenu(*message); break;
         case kReloadTab: case kDuplicateTab: case kMoveTabToNewWindow: case kCloseOtherTabs: {
             int64 id;
             if (message->FindInt64("id", &id) != B_OK) id = fSelected;

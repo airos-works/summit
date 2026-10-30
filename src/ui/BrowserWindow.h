@@ -414,6 +414,8 @@ private:
     void ShowZoom();
     void ShowSearchEngine();
     void ShowTabMenu(const BMessage&);
+    // List All Tabs (the tab strip's chevron): every tab of the window.
+    void ShowTabListMenu(const BMessage&);
     void UpdateWindowList();
 #if SUMMIT_MODERN_WEBKIT
     void ShowPageContextMenu(const BMessage&);

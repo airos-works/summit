@@ -48,6 +48,31 @@ A secondary click on a tab offers New Tab, Reload Tab, Duplicate Tab, Move Tab
 to New Window, Close Tab and Close Other Tabs. A double click on the empty
 part of the tab bar opens a tab.
 
+### Many tabs (#135)
+
+The tab bar handles any number of tabs, in both looks, as Firefox does:
+
+- Tabs share the width up to 250 points each and shrink to an icon and a few
+  letters (72 points in the Haiku look, scaled with the plain font; 80 in the
+  Safari-like look). Below 100 points the close box shows only on the
+  selected tab, as in Chrome; a middle click or the tab's menu still closes
+  the others.
+- Beyond that the unpinned tabs scroll; pinned tabs stay at the start. Arrows
+  appear at both ends of the scrolled tabs (faint at an end); a click moves a
+  tab, holding one keeps going. The wheel over the bar scrolls it a tab per
+  notch (a touchpad smoothly). The bar keeps its own place, so the selected
+  tab can be scrolled out of sight.
+- Selecting a tab (a click, Ctrl+Tab, the List All Tabs menu, an extension)
+  brings it wholly into sight. A tab opened behind the current one comes into
+  sight too when both fit; otherwise the arrow on its side lights up (in the
+  highlight colour) until it is seen or another tab is selected.
+- A tab dragged past an end of the scrolled tabs scrolls them while it is
+  held there, and comes wholly into sight where it is dropped.
+- **List All Tabs**, the chevron after the New Tab "+", lists every tab of the
+  window with its icon and title (playing and muted tabs say so), the current
+  one checked; choosing one selects it. The menu lines up with the button's
+  right edge and scrolls when it is taller than the screen.
+
 Links now also behave as in other browsers: `target=_blank` and
 `window.open()` open a tab after the opener (in front); a middle click or
 Command-click opens a background tab (Shift brings it to the front); a
@@ -107,6 +132,16 @@ open windows by themselves. Web app windows can be as small as 320×240.
   answers it, with false, which cancels the shutdown as it should.
 - Each window keeps its own `FaviconCache`; when one stores an icon, the
   others drop their copy and reread it from disk.
+- `TabStrip` (`src/ui/Chrome.cpp`) computes one `Layout` for its width and
+  tab count (scroll area, tab width, arrows, New Tab and List All Tabs
+  buttons) that drawing, hit testing and dragging all use. The scroll offset
+  is kept in tabs rather than pixels, so it stays on a tab boundary when the
+  window or the number of tabs changes the width. `SetTabs` scrolls only when
+  the selection changes or tabs are added, not on the title and progress
+  updates that rebuild the labels all the time; a window still being set up
+  (a restored session, before `Show()`) marks no tab for attention. The List
+  All Tabs button sends `kTabListMenu` to the window, which builds the menu
+  (`ShowTabListMenu`) from its own tabs.
 - An open `BPopUpMenu` holds its window's close lock. The page, tab and
   bookmark menus are `CancellableMenu`s that close as soon as their window
   starts closing (found when quitting with a context menu open hung).
@@ -146,6 +181,10 @@ command now takes any character and `--mod alt/ctrl/shift`):
   tab of a window.
 
 ## Not done
+
+- List All Tabs has no close button per tab and does not scroll itself to the
+  current tab when it is taller than the screen; the tab bar does not animate
+  its scrolling.
 
 - Dragging a tab out to make a window, or between windows; Move Tab to New
   Window reloads the page there (its back list stays behind).

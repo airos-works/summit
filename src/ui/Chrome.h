@@ -26,6 +26,9 @@ void SetInterfaceStyle(bool haiku);
 bool HaikuInterfaceStyle();
 // Sent to the window by a secondary click on a tab: "id" (int64), "where" (screen point).
 constexpr uint32 kTabMenu = 'tbmn';
+// Sent to the window by the tab strip's List All Tabs button: "where" (screen
+// point for the menu's top left corner).
+constexpr uint32 kTabListMenu = 'tblm';
 // Private windows draw their bars in purple, so they cannot be mistaken for
 // ordinary ones. The window registers itself; its views look it up.
 void SetPrivateWindow(const BWindow* window, bool privateBrowsing);
@@ -142,9 +145,15 @@ void DrawSiteIcon(BView* view, const BBitmap* icon, BPoint leftTop);
 // Tabs of a window. A tab can be dragged along the strip to reorder it
 // (kMoveTab) or out of it (kTabDragOut, to another window or a new one).
 // Pinned tabs come first; the window keeps them there.
+// Tabs shrink to a minimum width as more are opened; beyond that the
+// unpinned ones scroll, as in Firefox: the strip keeps its own offset, which
+// the wheel and the arrows at both ends change, and which follows the
+// selected tab. A tab opened out of sight lights the arrow on its side. The
+// List All Tabs button (kTabListMenu) at the end lists every tab.
 class TabStrip : public BView {
 public:
     TabStrip();
+    ~TabStrip() override;
     void SetTabs(std::vector<TabLabel> tabs, int64 selected);
     void Draw(BRect update) override;
     void MouseDown(BPoint where) override;
@@ -156,30 +165,70 @@ public:
     BSize MaxSize() override;
     BSize PreferredSize() override;
 private:
+    // Where everything goes for the current width and number of tabs.
+    struct Layout {
+        BRect area;          // the unpinned tabs are drawn (clipped) here
+        float width = 0;     // of an unpinned tab
+        bool overflow = false;
+        BRect scrollLeft, scrollRight, newTab, list;
+    };
+    Layout ComputeLayout() const;
     void DrawHaiku(BRect update);
     void DrawSafari(BRect update);
     // The speaker of a tab that plays sound or is muted.
     void DrawAudio(BRect rect, TabAudio audio, rgb_color color);
+    // The scroll arrows and the List All Tabs chevron.
+    void DrawButtons(const Layout& layout, rgb_color ink, rgb_color dim, rgb_color attention);
     BRect TabRect(size_t index) const;
     BRect CloseRect(size_t index) const;
     BRect AudioRect(size_t index) const;
     BRect NewTabRect() const;
     float Height() const;
+    // Haiku look: sizes follow the plain font (12 points is 1).
+    float Scale() const;
     size_t PinnedCount() const;
     float PinnedWidth() const;
-    size_t FirstVisible() const;
-    size_t VisibleCount() const;
-    // Every tab drawn: the pinned ones, then the unpinned ones that fit.
+    // Narrow tabs other than the selected one have no close box (a middle
+    // click or the tab's menu still closes them), as in Chrome.
+    bool CloseShown(size_t index) const;
+    // Every tab drawn: the pinned ones, then the unpinned ones in sight.
     std::vector<size_t> VisibleTabs() const;
+    // The tab under a point (the part of it in sight), or -1.
+    int32 TabAt(BPoint where) const;
     int32 IndexOf(int64 id) const;
+    float MaxScroll() const;
+    void ScrollTo(float offset);
+    void ScrollBy(float delta) { ScrollTo(fScroll + delta); }
+    // The offset that shows a tab whole, moving as little as possible.
+    float OffsetShowing(size_t index, float from) const;
+    bool FullyVisible(size_t index, float offset) const;
+    // One step of the arrows (a tab), or of a drag held past an end.
+    void StepScroll(int direction);
+    void StartRepeat(int direction, bigtime_t interval);
+    void StopRepeat();
+    // Moves the dragged tab to the place under the pointer.
+    void DragTo(BPoint where);
+    // Forgets attention marks of tabs that are gone or now in sight.
+    void UpdateAttention();
     std::vector<TabLabel> fTabs;
     int64 fSelected = 0;
     int64 fHoverClose = 0;
-    bool fHoverNewTab = false;
+    bool fHoverNewTab = false, fHoverList = false;
+    int fHoverArrow = 0;
     // A press on a tab that may become a drag.
     int64 fDragTab = 0;
-    BPoint fDragStart;
+    BPoint fDragStart, fDragPoint;
     bool fDragging = false, fDragOutside = false;
+    // How far the unpinned tabs are scrolled, in tabs (so that it keeps
+    // its place when they change width).
+    float fScroll = 0;
+    // An arrow held down, or a drag held past an end: -1 left, 1 right.
+    int fRepeatDirection = 0;
+    bigtime_t fRepeatStarted = 0;
+    std::unique_ptr<BMessageRunner> fRepeat;
+    // Tabs opened out of sight, until they are seen.
+    std::vector<int64> fAttention;
+    bool fHadTabs = false;
 };
 // A bookmark or a folder as the bookmarks bar and the Bookmarks menu show it:
 // a copy of the profile's, which menus read from their own threads.

@@ -18,6 +18,7 @@
 #include <MessageRunner.h>
 #include <Entry.h>
 #include <Path.h>
+#include <Region.h>
 #include <Shape.h>
 #if SUMMIT_MODERN_WEBKIT
 #include "ExtensionInstaller.h"
@@ -550,10 +551,13 @@ void DrawSiteIcon(BView* view, const BBitmap* icon, BPoint leftTop)
     view->PopState();
 }
 
+// The strip's own repeating tick: an arrow held down, or a tab dragged past an end.
+static constexpr uint32 kTabStripRepeat = 'tsrp';
 TabStrip::TabStrip() : BView("tabs", B_WILL_DRAW | B_FRAME_EVENTS)
 {
     SetViewColor(B_TRANSPARENT_COLOR);
 }
+TabStrip::~TabStrip() = default;
 float TabStrip::Height() const
 {
     if (!HaikuInterfaceStyle()) return 36;
@@ -561,13 +565,41 @@ float TabStrip::Height() const
     be_plain_font->GetHeight(&metrics);
     return std::max(26.0f, std::ceil(metrics.ascent + metrics.descent) + 14);
 }
+float TabStrip::Scale() const
+{
+    if (!HaikuInterfaceStyle()) return 1;
+    return std::max(1.0f, be_plain_font->Size() / 12);
+}
 BSize TabStrip::MinSize() { return BSize(200, Height()); }
 BSize TabStrip::MaxSize() { return BSize(B_SIZE_UNLIMITED, Height()); }
 BSize TabStrip::PreferredSize() { return BSize(400, Height()); }
 void TabStrip::SetTabs(std::vector<TabLabel> tabs, int64 selected)
 {
+    // A window being set up (a restored session) opens its tabs before it
+    // shows; only tabs opened later draw attention.
+    const bool shown = Window() && !Window()->IsHidden();
+    std::vector<int64> opened;
+    if (fHadTabs && shown)
+        for (const auto& tab : tabs) if (IndexOf(tab.id) < 0) opened.push_back(tab.id);
+    const bool selectionChanged = !fHadTabs || selected != fSelected;
     fTabs = std::move(tabs); fSelected = selected;
-    if (fDragTab && IndexOf(fDragTab) < 0) fDragTab = 0, fDragging = false;
+    fHadTabs = fHadTabs || !fTabs.empty();
+    if (fDragTab && IndexOf(fDragTab) < 0) fDragTab = 0, fDragging = false, StopRepeat();
+    // The selected tab comes into sight; a tab opened behind it too, when
+    // both fit, or else the arrow on its side lights until it is seen.
+    if (selectionChanged) fAttention.clear();
+    const int32 current = IndexOf(fSelected);
+    float offset = std::clamp(fScroll, 0.0f, MaxScroll());
+    if (selectionChanged && current >= 0) offset = OffsetShowing(current, offset);
+    for (const int64 id : opened) {
+        const int32 index = IndexOf(id);
+        if (id == fSelected || index < 0 || FullyVisible(index, offset)) continue;
+        const float showing = OffsetShowing(index, offset);
+        if (current < 0 || FullyVisible(current, showing)) offset = showing;
+        else fAttention.push_back(id);
+    }
+    fScroll = std::clamp(offset, 0.0f, MaxScroll());
+    UpdateAttention();
     Invalidate();
 }
 int32 TabStrip::IndexOf(int64 id) const
@@ -583,55 +615,158 @@ size_t TabStrip::PinnedCount() const
 }
 // Pinned tabs show only their icon (and the speaker of a tab with sound).
 float TabStrip::PinnedWidth() const { return HaikuInterfaceStyle() ? 44 : 46; }
-size_t TabStrip::VisibleCount() const
+TabStrip::Layout TabStrip::ComputeLayout() const
 {
-    const float reserved = (HaikuInterfaceStyle() ? 36 : 60) + PinnedCount() * PinnedWidth();
-    const size_t unpinned = fTabs.size() - PinnedCount();
-    return std::min(unpinned, std::max(size_t(1), size_t(std::max(100.0f, Bounds().Width() - reserved) / 120)));
-}
-size_t TabStrip::FirstVisible() const
-{
+    Layout layout;
+    const BRect bounds = Bounds();
+    const bool haiku = HaikuInterfaceStyle();
+    const float scale = Scale();
     const size_t pinned = PinnedCount();
-    size_t selected = pinned;
-    for (size_t i = pinned; i < fTabs.size(); ++i) if (fTabs[i].id == fSelected) selected = i;
-    const size_t count = VisibleCount();
-    return selected - pinned >= count ? selected - count + 1 : pinned;
+    const size_t unpinned = fTabs.size() - pinned;
+    // Pinned tabs stay put at the start; the buttons sit at the end: New Tab,
+    // then List All Tabs.
+    float left, right, arrow;
+    if (haiku) {
+        layout.list = BRect(bounds.right - 25, bounds.top + 3, bounds.right - 5, bounds.bottom - 3);
+        layout.newTab = BRect(layout.list.left - 25, bounds.top + 3, layout.list.left - 2, bounds.bottom - 3);
+        left = pinned * PinnedWidth();
+        right = layout.newTab.left - 7;
+        arrow = std::ceil(18 * scale);
+    } else {
+        layout.list = BRect(bounds.right - 32, bounds.top, bounds.right - 4, bounds.bottom);
+        layout.newTab = BRect(layout.list.left - 36, bounds.top, layout.list.left - 1, bounds.bottom);
+        left = 8 + pinned * PinnedWidth();
+        right = layout.newTab.left - 4;
+        arrow = 20;
+    }
+    // Tabs shrink to an icon and a few letters before they scroll.
+    const float minimum = std::ceil((haiku ? 72 : 80) * scale), maximum = 250 * scale;
+    float available = std::max(minimum, right - left);
+    layout.width = unpinned ? std::min(maximum, available / unpinned) : maximum;
+    if (unpinned && layout.width < minimum) {
+        layout.overflow = true;
+        layout.scrollLeft = BRect(left, bounds.top, left + arrow - 1, bounds.bottom);
+        layout.scrollRight = BRect(right - arrow, bounds.top, right - 1, bounds.bottom);
+        left += arrow;
+        right -= arrow;
+        available = std::max(minimum, right - left);
+        // As many whole tabs as fit, so that an arrow steps by whole tabs.
+        layout.width = available / std::max(1.0f, std::floor(available / minimum));
+    }
+    layout.area = BRect(left, bounds.top, left + available - 1, bounds.bottom);
+    return layout;
+}
+bool TabStrip::CloseShown(size_t index) const
+{
+    if (index >= fTabs.size() || fTabs[index].pinned) return false;
+    if (fTabs[index].id == fSelected) return true;
+    return ComputeLayout().width >= 100 * Scale();
 }
 std::vector<size_t> TabStrip::VisibleTabs() const
 {
     std::vector<size_t> tabs;
-    for (size_t i = 0; i < PinnedCount(); ++i) tabs.push_back(i);
-    for (size_t i = FirstVisible(), end = std::min(fTabs.size(), FirstVisible() + VisibleCount()); i < end; ++i) tabs.push_back(i);
+    const size_t pinned = PinnedCount();
+    for (size_t i = 0; i < pinned; ++i) tabs.push_back(i);
+    const Layout layout = ComputeLayout();
+    for (size_t i = pinned; i < fTabs.size(); ++i) {
+        const BRect rect = TabRect(i);
+        if (rect.right < layout.area.left) continue;
+        if (rect.left > layout.area.right) break;
+        tabs.push_back(i);
+    }
     return tabs;
+}
+int32 TabStrip::TabAt(BPoint where) const
+{
+    const Layout layout = ComputeLayout();
+    for (auto i : VisibleTabs()) {
+        if (!TabRect(i).Contains(where)) continue;
+        // The scrolled tabs end at the arrows.
+        if (!fTabs[i].pinned && (where.x < layout.area.left || where.x > layout.area.right)) continue;
+        return int32(i);
+    }
+    return -1;
 }
 BRect TabStrip::TabRect(size_t index) const
 {
     const size_t pinned = PinnedCount();
-    const size_t count = VisibleCount();
     const float pinnedWidth = PinnedWidth();
-    if (HaikuInterfaceStyle()) {
-        // Adjacent tabs, as in BTabView and WebPositive.
-        if (index < pinned) {
+    const bool haiku = HaikuInterfaceStyle();
+    if (index < pinned) {
+        // Haiku look: adjacent tabs, as in BTabView and WebPositive.
+        if (haiku) {
             const float left = index * pinnedWidth;
             return BRect(left, 0, left + pinnedWidth - 1, Bounds().bottom);
         }
-        const float start = pinned * pinnedWidth;
-        const float width = std::floor(std::min(250.0f, (Bounds().Width() - 36 - start) / std::max(size_t(1), count)));
-        const float left = start + (index - FirstVisible()) * width;
-        return BRect(left, 0, left + width - 1, Bounds().bottom);
-    }
-    if (index < pinned) {
         const float left = 8 + index * pinnedWidth;
         return BRect(left, 3, left + pinnedWidth - 3, Bounds().bottom - 3);
     }
-    const float start = 8 + pinned * pinnedWidth;
-    float width = std::min(250.0f, (Bounds().Width() - 52 - start) / std::max(size_t(1), count));
-    const float left = start + (index - FirstVisible()) * width;
-    return BRect(left, 3, left + width - 3, Bounds().bottom - 3);
+    const Layout layout = ComputeLayout();
+    const float position = layout.area.left + (float(index - pinned) - fScroll) * layout.width;
+    const float left = std::floor(position), next = std::floor(position + layout.width);
+    if (haiku) return BRect(left, 0, next - 1, Bounds().bottom);
+    return BRect(left, 3, next - 3, Bounds().bottom - 3);
+}
+float TabStrip::MaxScroll() const
+{
+    const Layout layout = ComputeLayout();
+    if (!layout.overflow) return 0;
+    return std::max(0.0f, float(fTabs.size() - PinnedCount()) - (layout.area.Width() + 1) / layout.width);
+}
+void TabStrip::ScrollTo(float offset)
+{
+    offset = std::clamp(offset, 0.0f, MaxScroll());
+    if (offset == fScroll) return;
+    fScroll = offset;
+    UpdateAttention();
+    Invalidate();
+}
+bool TabStrip::FullyVisible(size_t index, float offset) const
+{
+    const size_t pinned = PinnedCount();
+    if (index < pinned) return true;
+    const Layout layout = ComputeLayout();
+    const float position = float(index - pinned) - offset;
+    return position >= -0.01f && position + 1 <= (layout.area.Width() + 1) / layout.width + 0.01f;
+}
+float TabStrip::OffsetShowing(size_t index, float from) const
+{
+    const size_t pinned = PinnedCount();
+    if (index < pinned) return from;
+    const Layout layout = ComputeLayout();
+    const float position = float(index - pinned);
+    const float visible = (layout.area.Width() + 1) / layout.width;
+    float offset = from;
+    if (position < offset) offset = position;
+    else if (position + 1 > offset + visible) offset = position + 1 - visible;
+    return std::clamp(offset, 0.0f, MaxScroll());
+}
+void TabStrip::StepScroll(int direction)
+{
+    ScrollTo(direction < 0 ? std::ceil(fScroll - 0.01f) - 1 : std::floor(fScroll + 0.01f) + 1);
+}
+void TabStrip::StartRepeat(int direction, bigtime_t interval)
+{
+    fRepeatDirection = direction;
+    fRepeatStarted = system_time();
+    BMessage tick(kTabStripRepeat);
+    fRepeat = std::make_unique<BMessageRunner>(BMessenger(this), &tick, interval);
+}
+void TabStrip::StopRepeat()
+{
+    fRepeat.reset();
+    fRepeatDirection = 0;
+}
+void TabStrip::UpdateAttention()
+{
+    std::erase_if(fAttention, [this](int64 id) {
+        const int32 index = IndexOf(id);
+        return index < 0 || FullyVisible(index, fScroll);
+    });
 }
 BRect TabStrip::CloseRect(size_t index) const
 {
-    if (index < fTabs.size() && fTabs[index].pinned) return BRect();
+    if (!CloseShown(index)) return BRect();
     const BRect tab = TabRect(index);
     if (!HaikuInterfaceStyle()) return BRect(tab.right - 24, tab.top, tab.right, tab.bottom);
     const bool selected = fTabs[index].id == fSelected;
@@ -655,11 +790,56 @@ BRect TabStrip::AudioRect(size_t index) const
     }
     return BRect(left, middle - 7, left + 14, middle + 7);
 }
-BRect TabStrip::NewTabRect() const
+BRect TabStrip::NewTabRect() const { return ComputeLayout().newTab; }
+namespace {
+// A chevron around centre: direction -1 points left, 1 right, 0 down.
+void StrokeChevron(BView* view, BPoint centre, int direction, float size)
 {
-    const BRect bounds = Bounds();
-    if (!HaikuInterfaceStyle()) return BRect(bounds.right - 44, bounds.top, bounds.right, bounds.bottom);
-    return BRect(bounds.right - 29, bounds.top + 3, bounds.right - 5, bounds.bottom - 3);
+    BPoint points[3];
+    if (direction == 0) {
+        points[0] = centre + BPoint(-size, -size / 2);
+        points[1] = centre + BPoint(0, size / 2);
+        points[2] = centre + BPoint(size, -size / 2);
+    } else {
+        const float d = direction;
+        points[0] = centre + BPoint(-d * size / 2, -size);
+        points[1] = centre + BPoint(d * size / 2, 0);
+        points[2] = centre + BPoint(-d * size / 2, size);
+    }
+    view->SetLineMode(B_ROUND_CAP, B_ROUND_JOIN);
+    view->StrokeLine(points[0], points[1]);
+    view->StrokeLine(points[1], points[2]);
+    view->SetLineMode(B_BUTT_CAP, B_MITER_JOIN);
+}
+}
+void TabStrip::DrawButtons(const Layout& layout, rgb_color ink, rgb_color base, rgb_color attention)
+{
+    const float middle = std::floor((layout.list.top + layout.list.bottom) / 2) + 0.5f;
+    auto centre = [middle](BRect rect) { return BPoint(std::floor((rect.left + rect.right) / 2) + 0.5f, middle); };
+    // List All Tabs: a chevron, darker under the pointer, as the "+" is.
+    SetHighColor(fHoverList ? ink : Mix(ink, base, 0.35f));
+    SetPenSize(fHoverList ? 2.0f : 1.6f);
+    StrokeChevron(this, centre(layout.list) + BPoint(0, 1), 0, 4);
+    if (layout.overflow) {
+        // The arrows: faint at an end, lit for a tab opened out of sight.
+        bool attentionLeft = false, attentionRight = false;
+        for (const int64 id : fAttention) {
+            const int32 index = IndexOf(id);
+            if (index < 0) continue;
+            if (TabRect(index).left < layout.area.left) attentionLeft = true;
+            else attentionRight = true;
+        }
+        const float maxScroll = MaxScroll();
+        for (const int direction : { -1, 1 }) {
+            const bool end = direction < 0 ? fScroll <= 0.001f : fScroll >= maxScroll - 0.001f;
+            const bool lit = direction < 0 ? attentionLeft : attentionRight;
+            const bool hover = fHoverArrow == direction && !end;
+            SetHighColor(end ? Mix(ink, base, 0.75f) : lit ? attention : hover ? ink : Mix(ink, base, 0.35f));
+            SetPenSize(hover || lit ? 2.0f : 1.6f);
+            StrokeChevron(this, centre(direction < 0 ? layout.scrollLeft : layout.scrollRight), direction, 4);
+        }
+    }
+    SetPenSize(1);
 }
 void TabStrip::Draw(BRect update)
 {
@@ -706,8 +886,11 @@ void TabStrip::DrawHaiku(BRect update)
     const uint32 borders = BControlLook::B_TOP_BORDER | BControlLook::B_BOTTOM_BORDER;
     BRect frame = Bounds();
     be_control_look->DrawTabFrame(this, frame, update, base, 0, borders, B_NO_BORDER);
+    const Layout layout = ComputeLayout();
     const auto visible = VisibleTabs();
     if (visible.empty()) return;
+    // Scrolled tabs are cut off at the arrows.
+    BRegion scrolled(layout.area);
     const int32 first = int32(visible.front()), last = int32(visible.back());
     int32 selectedIndex = -1;
     for (auto i : visible) if (fTabs[i].id == fSelected) selectedIndex = int32(i);
@@ -722,6 +905,7 @@ void TabStrip::DrawHaiku(BRect update)
         tab.right++;
         tab.bottom++;
         if (position + 1 == visible.size()) tab.right -= 2;
+        ConstrainClippingRegion(pinned ? nullptr : &scrolled);
         if (selected)
             be_control_look->DrawActiveTab(this, tab, update, base, 0, borders, BControlLook::B_TOP_BORDER,
                 int32(i), selectedIndex, first, last);
@@ -737,7 +921,7 @@ void TabStrip::DrawHaiku(BRect update)
         BRect content = rect;
         content.top += selected ? 2 : 4;
         content.left += 8;
-        content.right = pinned ? rect.right - 4 : CloseRect(i).left - 4;
+        content.right = CloseShown(i) ? CloseRect(i).left - 4 : rect.right - 4;
         const float middle = std::floor((content.top + content.bottom) / 2);
         const BPoint icon(content.left, middle - 8);
         if (fTabs[i].loading && !fTabs[i].icon) {
@@ -762,6 +946,7 @@ void TabStrip::DrawHaiku(BRect update)
         SetDrawingMode(B_OP_OVER);
         DrawString(title.String(), BPoint(textLeft, std::floor(middle + (metrics.ascent - metrics.descent) / 2)));
         SetDrawingMode(B_OP_COPY);
+        if (!CloseShown(i)) continue;
         // A small close cross, darker under the pointer (WebPositive's tab close box).
         const BRect close = CloseRect(i);
         const bool hover = fHoverClose == fTabs[i].id;
@@ -776,14 +961,22 @@ void TabStrip::DrawHaiku(BRect update)
         StrokeLine(c + BPoint(3, -3), c + BPoint(-3, 3));
         SetPenSize(1);
     }
+    ConstrainClippingRegion(nullptr);
+    if (layout.overflow) {
+        // Where the scrolled tabs are cut off, a tab's edge between them and the arrows.
+        SetHighColor(tint_color(base, B_DARKEN_2_TINT));
+        for (const float x : { layout.area.left - 1, layout.area.right + 1 })
+            StrokeLine(BPoint(x, frame.top + 5), BPoint(x, frame.bottom - 2));
+    }
     // The new-tab "+" at the end of the tabs: just the sign, darker under the pointer.
-    const BRect plus = NewTabRect();
+    const BRect plus = layout.newTab;
     SetHighColor(fHoverNewTab ? text : Mix(text, base, 0.35f));
     SetPenSize(fHoverNewTab ? 2.0f : 1.6f);
     const BPoint c(std::floor((plus.left + plus.right) / 2) + 0.5f, std::floor((plus.top + plus.bottom) / 2) + 0.5f);
     StrokeLine(c + BPoint(-5, 0), c + BPoint(5, 0));
     StrokeLine(c + BPoint(0, -5), c + BPoint(0, 5));
     SetPenSize(1);
+    DrawButtons(layout, text, base, ui_color(B_CONTROL_HIGHLIGHT_COLOR));
 }
 void TabStrip::DrawSafari(BRect)
 {
@@ -794,10 +987,13 @@ void TabStrip::DrawSafari(BRect)
     const rgb_color selectedText = dark ? colors.controlText : rgb_color{30, 82, 72, 255};
     const rgb_color otherText = dark ? Mix(colors.text, strip, 0.2f) : rgb_color{78, 86, 83, 255};
     SetHighColor(strip); FillRect(Bounds());
+    const Layout layout = ComputeLayout();
+    BRegion scrolled(layout.area);
     for (auto i : VisibleTabs()) {
         BRect rect = TabRect(i);
         const bool selected = fTabs[i].id == fSelected;
         const bool pinned = fTabs[i].pinned;
+        ConstrainClippingRegion(pinned ? nullptr : &scrolled);
         SetHighColor(selected ? selectedTab : strip);
         FillRoundRect(rect, 5, 5);
         if (fTabs[i].container) {
@@ -807,7 +1003,7 @@ void TabStrip::DrawSafari(BRect)
         SetHighColor(selected ? selectedText : otherText);
         const float textLeft = rect.left + 31 + (fTabs[i].audio != TabAudio::None ? 18 : 0);
         BString text(fTabs[i].title.empty() ? "New Tab" : fTabs[i].title.c_str());
-        TruncateString(&text, B_TRUNCATE_END, rect.right - 30 - textLeft);
+        TruncateString(&text, B_TRUNCATE_END, std::max(0.0f, rect.right - (CloseShown(i) ? 30 : 8) - textLeft));
         const BPoint icon(rect.left + 9, rect.top + std::floor((rect.Height() - 15) / 2));
         if (fTabs[i].loading && !fTabs[i].icon) FillEllipse(icon + BPoint(7.5f, 7.5f), 2.5f, 2.5f);
         else DrawSiteIcon(this, fTabs[i].icon, icon);
@@ -827,13 +1023,17 @@ void TabStrip::DrawSafari(BRect)
         SetHighColor(selected ? selectedText : otherText);
         if (pinned) continue;
         DrawString(text, BPoint(textLeft, 22));
+        if (!CloseShown(i)) continue;
         StrokeLine(BPoint(rect.right - 16, 14), BPoint(rect.right - 10, 20));
         StrokeLine(BPoint(rect.right - 10, 14), BPoint(rect.right - 16, 20));
     }
-    SetHighColor(dark ? colors.text : rgb_color{63, 83, 76, 255});
-    const float x = Bounds().right - 24;
+    ConstrainClippingRegion(nullptr);
+    const rgb_color ink = dark ? colors.text : rgb_color{63, 83, 76, 255};
+    SetHighColor(ink);
+    const float x = std::floor((layout.newTab.left + layout.newTab.right) / 2);
     StrokeLine(BPoint(x - 5, 18), BPoint(x + 5, 18));
     StrokeLine(BPoint(x, 13), BPoint(x, 23));
+    DrawButtons(layout, ink, strip, dark ? ui_color(B_CONTROL_HIGHLIGHT_COLOR) : rgb_color{44, 125, 104, 255});
 }
 void TabStrip::MouseDown(BPoint point)
 {
@@ -843,10 +1043,26 @@ void TabStrip::MouseDown(BPoint point)
         message->FindInt32("buttons", reinterpret_cast<int32*>(&buttons));
         message->FindInt32("clicks", &clicks);
     }
-    if (NewTabRect().Contains(point)) { Window()->PostMessage(kNewTab); return; }
-    for (auto i : VisibleTabs()) {
-        const auto rect = TabRect(i);
-        if (!rect.Contains(point)) continue;
+    const Layout layout = ComputeLayout();
+    if (layout.newTab.Contains(point)) { Window()->PostMessage(kNewTab); return; }
+    if (layout.list.Contains(point)) {
+        // The menu opens under the button; a click on the button keeps it open.
+        BMessage list(kTabListMenu);
+        list.AddPoint("where", ConvertToScreen(BPoint(layout.list.left, Bounds().bottom + 1)));
+        list.AddRect("button", ConvertToScreen(layout.list));
+        Window()->PostMessage(&list);
+        return;
+    }
+    if (layout.overflow && (layout.scrollLeft.Contains(point) || layout.scrollRight.Contains(point))) {
+        // A tab per click; held down, the tabs keep going.
+        const int direction = layout.scrollLeft.Contains(point) ? -1 : 1;
+        StepScroll(direction);
+        StartRepeat(direction, 90000);
+        SetMouseEventMask(B_POINTER_EVENTS, B_NO_POINTER_HISTORY);
+        return;
+    }
+    if (const int32 index = TabAt(point); index >= 0) {
+        const size_t i = size_t(index);
         if (buttons & B_SECONDARY_MOUSE_BUTTON) {
             BMessage menu(kTabMenu);
             menu.AddInt64("id", fTabs[i].id);
@@ -869,7 +1085,7 @@ void TabStrip::MouseDown(BPoint point)
             // Follow the pointer anywhere until the button is released: the
             // tab may be dragged along the strip or out of it.
             fDragTab = fTabs[i].id;
-            fDragStart = point;
+            fDragStart = fDragPoint = point;
             fDragging = fDragOutside = false;
             SetMouseEventMask(B_POINTER_EVENTS, B_NO_POINTER_HISTORY);
         }
@@ -880,6 +1096,7 @@ void TabStrip::MouseDown(BPoint point)
 }
 void TabStrip::MouseUp(BPoint where)
 {
+    StopRepeat();
     if (fDragTab && fDragging && fDragOutside) {
         BMessage out(kTabDragOut);
         out.AddInt64("id", fDragTab);
@@ -887,6 +1104,9 @@ void TabStrip::MouseUp(BPoint where)
         Window()->PostMessage(&out);
     }
     if (fDragging) SetViewCursor(B_CURSOR_SYSTEM_DEFAULT);
+    // A tab dropped at an end of the scrolled tabs comes wholly into sight.
+    if (fDragTab && fDragging && !fDragOutside)
+        if (const int32 index = IndexOf(fDragTab); index >= 0) ScrollTo(OffsetShowing(index, fScroll));
     fDragTab = 0;
     fDragging = fDragOutside = false;
 }
@@ -907,13 +1127,11 @@ void TabStrip::MouseMoved(BPoint where, uint32 transit, const BMessage* drag)
     if (drag) {
         // Keep a page drag alive while switching to its destination tab.
         if (transit != B_EXITED_VIEW && transit != B_OUTSIDE_VIEW) {
-            for (auto i : VisibleTabs()) {
-                if (TabRect(i).Contains(where) && fTabs[i].id != fSelected) {
-                    BMessage select(kSelectTab);
-                    select.AddInt64("id", fTabs[i].id);
-                    Window()->PostMessage(&select);
-                    break;
-                }
+            const int32 i = TabAt(where);
+            if (i >= 0 && fTabs[i].id != fSelected) {
+                BMessage select(kSelectTab);
+                select.AddInt64("id", fTabs[i].id);
+                Window()->PostMessage(&select);
             }
         }
         return;
@@ -928,61 +1146,103 @@ void TabStrip::MouseMoved(BPoint where, uint32 transit, const BMessage* drag)
             SetViewCursor(&grab);
         }
         if (!fDragging) return;
-        // Far enough above or below the strip, the tab leaves the window.
-        fDragOutside = where.y < Bounds().top - 24 || where.y > Bounds().bottom + 24
-            || where.x < Bounds().left - 24 || where.x > Bounds().right + 24;
-        const int32 from = IndexOf(fDragTab);
-        if (fDragOutside || from < 0) return;
-        // Along the strip: the tab takes the place of the tab under the
-        // pointer, within its group (pinned or not).
-        const bool pinned = fTabs[from].pinned;
-        const size_t groupStart = pinned ? 0 : PinnedCount(), groupEnd = pinned ? PinnedCount() : fTabs.size();
-        int32 to = from;
-        for (auto i : VisibleTabs()) {
-            if (i < groupStart || i >= groupEnd) continue;
-            const BRect rect = TabRect(i);
-            if (where.x >= rect.left && where.x <= rect.right) { to = int32(i); break; }
-            if (i == groupStart && where.x < rect.left) to = int32(i);
-            if (i + 1 == groupEnd && where.x > rect.right) to = int32(i);
-        }
-        if (to != from) {
-            auto moved = std::move(fTabs[from]);
-            fTabs.erase(fTabs.begin() + from);
-            fTabs.insert(fTabs.begin() + to, std::move(moved));
-            Invalidate();
-            BMessage move(kMoveTab);
-            move.AddInt64("id", fDragTab);
-            move.AddInt32("index", to);
-            Window()->PostMessage(&move);
-        }
+        DragTo(where);
         return;
     }
     int64 hoverClose = 0;
-    bool hoverNewTab = false;
-    if (HaikuInterfaceStyle() && transit != B_EXITED_VIEW && transit != B_OUTSIDE_VIEW) {
-        hoverNewTab = NewTabRect().Contains(where);
-        for (auto i : VisibleTabs())
-            if (CloseRect(i).Contains(where)) hoverClose = fTabs[i].id;
+    bool hoverNewTab = false, hoverList = false;
+    int hoverArrow = 0;
+    if (transit != B_EXITED_VIEW && transit != B_OUTSIDE_VIEW) {
+        const Layout layout = ComputeLayout();
+        hoverList = layout.list.Contains(where);
+        if (layout.overflow) hoverArrow = layout.scrollLeft.Contains(where) ? -1 : layout.scrollRight.Contains(where) ? 1 : 0;
+        if (HaikuInterfaceStyle()) {
+            hoverNewTab = layout.newTab.Contains(where);
+            const int32 i = TabAt(where);
+            if (i >= 0 && CloseRect(i).Contains(where)) hoverClose = fTabs[i].id;
+        }
     }
-    if (hoverClose == fHoverClose && hoverNewTab == fHoverNewTab) return;
+    // An arrow held down stops when the pointer leaves it.
+    if (fRepeatDirection && hoverArrow != fRepeatDirection) StopRepeat();
+    if (hoverClose == fHoverClose && hoverNewTab == fHoverNewTab && hoverList == fHoverList && hoverArrow == fHoverArrow)
+        return;
     fHoverClose = hoverClose;
     fHoverNewTab = hoverNewTab;
+    fHoverList = hoverList;
+    fHoverArrow = hoverArrow;
     Invalidate();
+}
+void TabStrip::DragTo(BPoint where)
+{
+    fDragPoint = where;
+    // Far enough above or below the strip, the tab leaves the window.
+    fDragOutside = where.y < Bounds().top - 24 || where.y > Bounds().bottom + 24
+        || where.x < Bounds().left - 24 || where.x > Bounds().right + 24;
+    const int32 from = IndexOf(fDragTab);
+    if (fDragOutside || from < 0) { StopRepeat(); return; }
+    const bool pinned = fTabs[from].pinned;
+    const Layout layout = ComputeLayout();
+    if (!pinned && layout.overflow) {
+        // Held past an end of the scrolled tabs, they scroll that way, and
+        // the tab goes to the place at that end.
+        const int direction = where.x < layout.area.left ? -1 : where.x > layout.area.right ? 1 : 0;
+        if (direction != fRepeatDirection) {
+            if (direction) StartRepeat(direction, 40000);
+            else StopRepeat();
+        }
+        where.x = std::clamp(where.x, layout.area.left + 1, layout.area.right - 1);
+    }
+    // Along the strip: the tab takes the place of the tab under the
+    // pointer, within its group (pinned or not).
+    const size_t groupStart = pinned ? 0 : PinnedCount(), groupEnd = pinned ? PinnedCount() : fTabs.size();
+    int32 to = from;
+    for (auto i : VisibleTabs()) {
+        if (i < groupStart || i >= groupEnd) continue;
+        const BRect rect = TabRect(i);
+        if (where.x >= rect.left && where.x <= rect.right) { to = int32(i); break; }
+        if (i == groupStart && where.x < rect.left) to = int32(i);
+        if (i + 1 == groupEnd && where.x > rect.right) to = int32(i);
+    }
+    if (to == from) return;
+    auto moved = std::move(fTabs[from]);
+    fTabs.erase(fTabs.begin() + from);
+    fTabs.insert(fTabs.begin() + to, std::move(moved));
+    Invalidate();
+    BMessage move(kMoveTab);
+    move.AddInt64("id", fDragTab);
+    move.AddInt32("index", to);
+    Window()->PostMessage(&move);
 }
 void TabStrip::MessageReceived(BMessage* message)
 {
+    if (message->what == B_MOUSE_WHEEL_CHANGED) {
+        // The wheel (either direction) scrolls the tabs, a tab per notch;
+        // smooth wheels and touchpads send fractions.
+        float x = 0, y = 0;
+        message->FindFloat("be:wheel_delta_x", &x);
+        message->FindFloat("be:wheel_delta_y", &y);
+        const Layout layout = ComputeLayout();
+        if (layout.overflow) ScrollBy(std::fabs(y) >= std::fabs(x) ? y : x);
+        return;
+    }
+    if (message->what == kTabStripRepeat) {
+        if (!fRepeatDirection) return;
+        if (fDragTab && fDragging) {
+            ScrollBy(fRepeatDirection * 0.25f);
+            DragTo(fDragPoint);
+        } else if (system_time() - fRepeatStarted > 350000) StepScroll(fRepeatDirection);
+        return;
+    }
     std::string url, title;
     int64 bookmark = 0;
     if (message->WasDropped() && DraggedPage(message, url, title, bookmark) && !url.empty()) {
         bool newTab = true;
         const BPoint where = ConvertFromScreen(message->DropPoint());
-        for (auto i : VisibleTabs()) {
-            if (!TabRect(i).Contains(where)) continue;
+        if (const int32 i = TabAt(where); i >= 0) {
             BMessage select(kSelectTab);
             select.AddInt64("id", fTabs[i].id);
             Window()->PostMessage(&select);
             newTab = false;
-            break;
         }
         BMessage open(kOpenBookmark);
         open.AddString("url", url.c_str());
@@ -993,7 +1253,15 @@ void TabStrip::MessageReceived(BMessage* message)
     }
     BView::MessageReceived(message);
 }
-void TabStrip::FrameResized(float, float) { Invalidate(); }
+void TabStrip::FrameResized(float, float)
+{
+    // Narrower or wider, the selected tab stays in sight.
+    float offset = std::clamp(fScroll, 0.0f, MaxScroll());
+    if (const int32 current = IndexOf(fSelected); current >= 0) offset = OffsetShowing(current, offset);
+    fScroll = offset;
+    UpdateAttention();
+    Invalidate();
+}
 static constexpr int32 kOverflowItem = -2;
 namespace {
 // Menu labels are cut at a character boundary; BMenu does not truncate.
