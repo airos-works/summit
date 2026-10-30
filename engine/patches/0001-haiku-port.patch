@@ -19815,6 +19815,27 @@ index d65ff90dc36887139a180ecc8d16be88fde5b1a9..1a4a65584f5f7d6a37d58eece820b628
      crypto/openssl/CryptoKeyRSAOpenSSL.cpp
      crypto/openssl/OpenSSLUtilities.cpp
      crypto/openssl/SerializedCryptoKeyWrapOpenSSL.cpp
+diff --git a/Source/WebCore/platform/Pasteboard.cpp b/Source/WebCore/platform/Pasteboard.cpp
+index 6b51554b0bf8a89a518fbcb7a434e8dbde6ab314..750e2061f185df100ad72b77a1868eb55ce5f2c8 100644
+--- a/Source/WebCore/platform/Pasteboard.cpp
++++ b/Source/WebCore/platform/Pasteboard.cpp
+@@ -61,6 +61,8 @@ Vector<String> Pasteboard::readAllStrings(const String& type)
+ 
+ #endif
+ 
++// Haiku reads the system clipboard in the web process (PasteboardHaiku.cpp).
++#if !PLATFORM(HAIKU)
+ std::optional<Vector<PasteboardItemInfo>> Pasteboard::allPasteboardItemInfo() const
+ {
+ #if PLATFORM(COCOA) || PLATFORM(GTK) || PLATFORM(WPE) || PLATFORM(WIN)
+@@ -80,6 +82,7 @@ std::optional<PasteboardItemInfo> Pasteboard::pasteboardItemInfo(size_t index) c
+ #endif
+     return std::nullopt;
+ }
++#endif // !PLATFORM(HAIKU)
+ 
+ String Pasteboard::readString(size_t index, const String& type)
+ {
 diff --git a/Source/WebCore/platform/Pasteboard.h b/Source/WebCore/platform/Pasteboard.h
 index 961f5caacd9cf17b85b5195b7a142bc937a7f7b9..ad7f6f7a0e01238775eee553661c61c8694cabec 100644
 --- a/Source/WebCore/platform/Pasteboard.h
@@ -56183,10 +56204,10 @@ index 0000000000000000000000000000000000000000..de87da3050935c21365e9cf23bf47cf5
 +} // namespace WebCore
 diff --git a/Source/WebCore/platform/haiku/PasteboardHaiku.cpp b/Source/WebCore/platform/haiku/PasteboardHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..44d74da08537fdc403e3b963aa216c80b9ea8d98
+index 0000000000000000000000000000000000000000..b606303606bb233d9adc4ed665a5064065c2e666
 --- /dev/null
 +++ b/Source/WebCore/platform/haiku/PasteboardHaiku.cpp
-@@ -0,0 +1,729 @@
+@@ -0,0 +1,827 @@
 +/*
 + * Copyright (C) 2006 Zack Rusin <zack@kde.org>
 + * Copyright (C) 2007 Ryan Leavengood <leavengood@gmail.com>
@@ -56216,6 +56237,7 @@ index 0000000000000000000000000000000000000000..44d74da08537fdc403e3b963aa216c80
 +
 +#include "config.h"
 +#include "Pasteboard.h"
++#include "PasteboardItemInfo.h"
 +
 +#include "Blob.h"
 +#include "DOMURL.h"
@@ -56308,6 +56330,22 @@ index 0000000000000000000000000000000000000000..44d74da08537fdc403e3b963aa216c80
 +    BClipboard* m_clipboard;
 +    bool m_isLocked;
 +};
++
++// What a page wrote through the clipboard APIs besides the platform types:
++// its origin and its custom types (DataTransfer.setData("application/x-foo")),
++// serialized as GTK and WPE keep them. The name is outside the text/ and
++// application/ namespaces, so pages never see it as a type of its own.
++static constexpr const char* customDataTypeHaiku = "org.webkit.haiku.custom-pasteboard-data";
++
++// Call with the clipboard locked.
++static std::optional<PasteboardCustomData> readClipboardCustomData(BMessage* data)
++{
++    const void* bytes = nullptr;
++    ssize_t length = 0;
++    if (!data || data->FindData(customDataTypeHaiku, B_RAW_TYPE, &bytes, &length) != B_OK || length <= 0)
++        return std::nullopt;
++    return PasteboardCustomData::fromSharedBuffer(SharedBuffer::create(std::span(static_cast<const uint8_t*>(bytes), length)));
++}
 +
 +// Images on the clipboard: PNG or other image data under its MIME type, or a
 +// BBitmap archive under "image/bitmap" (Screenshot, ShowImage) or
@@ -56765,8 +56803,11 @@ index 0000000000000000000000000000000000000000..44d74da08537fdc403e3b963aa216c80
 +{
 +    if (m_forDragAndDrop)
 +        return m_dragData.origin();
-+    notImplemented(); // webkit.org/b/177633: [GTK] Move to new Pasteboard API
-+    return { };
++    AutoClipboardLocker locker(be_clipboard);
++    if (!locker.isLocked())
++        return { };
++    auto customData = readClipboardCustomData(be_clipboard->Data());
++    return customData ? customData->origin() : String { };
 +}
 +
 +String Pasteboard::readString(const String& type)
@@ -56794,6 +56835,15 @@ index 0000000000000000000000000000000000000000..44d74da08537fdc403e3b963aa216c80
 +{
 +    if (m_forDragAndDrop)
 +        return m_dragData.readStringInCustomData(type);
++    {
++        AutoClipboardLocker locker(be_clipboard);
++        if (!locker.isLocked())
++            return { };
++        if (auto customData = readClipboardCustomData(be_clipboard->Data())) {
++            if (auto result = customData->readStringInCustomData(type); !result.isNull())
++                return result;
++        }
++    }
 +    return readString(type);
 +}
 +
@@ -56877,12 +56927,81 @@ index 0000000000000000000000000000000000000000..44d74da08537fdc403e3b963aa216c80
 +        custom.forEachCustomString([&](const String& type, const String& value) { m_dragData.writeStringInCustomData(type, value); });
 +        return;
 +    }
-+    if (!data.isEmpty()) {
-+		const auto& customData = data[0];
-+		customData.forEachPlatformString([this] (auto& type, auto& string) {
-+			writeString(type, string);
-+		});
-+	}
++    if (data.isEmpty())
++        return;
++    AutoClipboardLocker locker(be_clipboard);
++    if (!locker.isLocked())
++        return;
++    // The write replaces the clipboard, as on other platforms: HTML or an
++    // image an earlier copy left must not be pasted along with this text.
++    be_clipboard->Clear();
++    BMessage* message = be_clipboard->Data();
++    if (!message)
++        return;
++    const auto& customData = data[0];
++    bool hasPNG = false;
++    customData.forEachPlatformStringOrBuffer([&](const String& type, const auto& value) {
++        auto typeName = type.utf8();
++        WTF::switchOn(value, [&](const String& text) {
++            auto bytes = text.utf8();
++            message->AddData(typeName.legacyCStringPointer(), B_MIME_TYPE, bytes.data(), bytes.length());
++        }, [&](const Ref<SharedBuffer>& buffer) {
++            message->AddData(typeName.legacyCStringPointer(), B_MIME_TYPE, buffer->span().data(), buffer->size());
++            if (type == "image/png"_s && !hasPNG) {
++                hasPNG = true;
++                // As Copy Image does: Haiku applications paste a BBitmap archive.
++                BMemoryIO input(buffer->span().data(), buffer->size());
++                if (std::unique_ptr<BBitmap> bitmap { BTranslationUtils::GetBitmap(&input) }) {
++                    BMessage archive;
++                    if (bitmap->Archive(&archive) == B_OK)
++                        message->AddMessage("image/bitmap", &archive);
++                }
++            }
++        });
++    });
++    if (!customData.origin().isEmpty() || customData.hasSameOriginCustomData()) {
++        auto serialized = customData.createSharedBuffer();
++        message->AddData(customDataTypeHaiku, B_RAW_TYPE, serialized->span().data(), serialized->size());
++    }
++    be_clipboard->Commit();
++}
++
++// The clipboard as one item for the async clipboard API (navigator.clipboard
++// read() and readText()), with the types a page may read.
++std::optional<Vector<PasteboardItemInfo>> Pasteboard::allPasteboardItemInfo() const
++{
++    if (auto info = pasteboardItemInfo(0))
++        return Vector<PasteboardItemInfo> { WTF::move(*info) };
++    return Vector<PasteboardItemInfo> { };
++}
++
++std::optional<PasteboardItemInfo> Pasteboard::pasteboardItemInfo(size_t index) const
++{
++    if (index || m_forDragAndDrop)
++        return std::nullopt;
++    AutoClipboardLocker locker(be_clipboard);
++    if (!locker.isLocked())
++        return std::nullopt;
++    BMessage* data = be_clipboard->Data();
++    if (!data || data->IsEmpty())
++        return std::nullopt;
++    PasteboardItemInfo info;
++    // Not text/html: reading it needs PasteboardWebContentReader's readHTML(),
++    // which WebCore has only for Cocoa, GTK and WPE.
++    for (const char* type : { "text/plain", "text/uri-list" }) {
++        if (data->HasData(type, B_MIME_TYPE)) {
++            info.platformTypesByFidelity.append(String::fromLatin1(type));
++            info.webSafeTypesByFidelity.append(String::fromLatin1(type));
++        }
++    }
++    if (clipboardHasImage(data)) {
++        info.platformTypesByFidelity.append("image/png"_s);
++        info.webSafeTypesByFidelity.append("image/png"_s);
++        info.isNonTextType = true;
++    }
++    if (info.webSafeTypesByFidelity.isEmpty())
++        return std::nullopt;
++    return info;
 +}
 +
 +// Files for DataTransfer.files: the files of a drop, or the clipboard's
@@ -134732,10 +134851,10 @@ index 0000000000000000000000000000000000000000..c9a119d02f85b7c5ad8fe9153bfc9604
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/WebView.cpp b/Source/WebKit/UIProcess/haiku/WebView.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..66b4a585dab1c93b09ca26769de3ea84b9fd0b39
+index 0000000000000000000000000000000000000000..3aa1caa19b9bee5347eab913f3fee59f6b6e117e
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/WebView.cpp
-@@ -0,0 +1,3275 @@
+@@ -0,0 +1,3339 @@
 +/*
 + * Copyright (C) 2013 Intel Corporation. All rights reserved.
 + *
@@ -134766,6 +134885,11 @@ index 0000000000000000000000000000000000000000..66b4a585dab1c93b09ca26769de3ea84
 +#include "FrameInfoHaiku.h"
 +#include "WebViewPrivate.h"
 +#include <MessageRunner.h>
++#include <Clipboard.h>
++#include <InterfaceDefs.h>
++#include <MenuItem.h>
++#include <PopUpMenu.h>
++#include <thread>
 +
 +#include "APIData.h"
 +#include "APIContentWorld.h"
@@ -134855,6 +134979,8 @@ index 0000000000000000000000000000000000000000..66b4a585dab1c93b09ca26769de3ea84
 +#include <WebCore/PixelBuffer.h>
 +#include <WebCore/WindowFeatures.h>
 +#include <WebCore/DOMPasteAccess.h>
++#include <WebCore/PasteboardCustomData.h>
++#include <WebCore/SharedBuffer.h>
 +#include <WebCore/ResourceError.h>
 +#include <WebCore/ResourceRequest.h>
 +#include <WebCore/FormData.h>
@@ -136505,6 +136631,16 @@ index 0000000000000000000000000000000000000000..66b4a585dab1c93b09ca26769de3ea84
 +    const bool navigationAPIEnabled = !navigationAPI || std::strcmp(navigationAPI, "0");
 +    configuration->preferences().setNavigationAPIEnabled(navigationAPIEnabled);
 +    configuration->preferences().setNavigationAPIPrecommitHandlerEnabled(navigationAPIEnabled);
++    // navigator.clipboard, which every other browser has: copy buttons
++    // (AWS's Cloudscape, GitHub, docs sites) call writeText() and fail
++    // without it (#136). A write needs a click or key press; a read of what
++    // another site or program copied asks with a Paste menu at the element
++    // (requestDOMPasteAccess). SUMMIT_ASYNC_CLIPBOARD=0 turns it off.
++    const char* asyncClipboard = std::getenv("SUMMIT_ASYNC_CLIPBOARD");
++    const bool asyncClipboardEnabled = !asyncClipboard || std::strcmp(asyncClipboard, "0");
++    configuration->preferences().setAsyncClipboardAPIEnabled(asyncClipboardEnabled);
++    configuration->preferences().setAsyncClipboardRichContentEnabled(asyncClipboardEnabled);
++    configuration->preferences().setDOMPasteAccessRequestsEnabled(asyncClipboardEnabled);
 +    // Chrome and Firefox ship requestIdleCallback, and sites and extensions built for
 +    // them call it unconditionally. WebKit's implementation is complete but off by default.
 +    // SUMMIT_REQUEST_IDLE_CALLBACK=0 turns it off, to tell its cost apart.
@@ -137915,9 +138051,56 @@ index 0000000000000000000000000000000000000000..66b4a585dab1c93b09ca26769de3ea84
 +}
 +#endif
 +
-+void WebView::requestDOMPasteAccess(DOMPasteAccessCategory, DOMPasteRequiresInteraction, FrameIdentifier, const IntRect&, const String&, CompletionHandler<void(DOMPasteAccessResponse)>&& callback)
++// A page reading the clipboard (navigator.clipboard.read(), readText(), or
++// execCommand("paste")) gets what it copied itself, as in other browsers.
++// Anything else needs the user's click on a Paste menu at the element, as in
++// Safari: Escape or a click elsewhere denies it.
++void WebView::requestDOMPasteAccess(DOMPasteAccessCategory, DOMPasteRequiresInteraction requiresInteraction, FrameIdentifier, const IntRect& elementRect, const String& originIdentifier, CompletionHandler<void(DOMPasteAccessResponse)>&& callback)
 +{
-+    callback(DOMPasteAccessResponse::DeniedForGesture);
++    if (requiresInteraction == DOMPasteRequiresInteraction::No && be_clipboard && be_clipboard->Lock()) {
++        String origin;
++        const void* bytes = nullptr;
++        ssize_t length = 0;
++        if (BMessage* data = be_clipboard->Data(); data
++            && data->FindData("org.webkit.haiku.custom-pasteboard-data", B_RAW_TYPE, &bytes, &length) == B_OK && length > 0)
++            origin = PasteboardCustomData::fromSharedBuffer(SharedBuffer::create(std::span(static_cast<const uint8_t*>(bytes), length))).origin();
++        be_clipboard->Unlock();
++        if (!origin.isEmpty() && origin == originIdentifier) {
++            callback(DOMPasteAccessResponse::GrantedForGesture);
++            return;
++        }
++    }
++    if (!m_page || m_state->closed) {
++        callback(DOMPasteAccessResponse::DeniedForGesture);
++        return;
++    }
++    // WebCore names the element only on iOS: otherwise the menu opens at the
++    // pointer, where the click that asked for the paste was, or in the
++    // middle of the page for a key press.
++    BPoint where;
++    if (!elementRect.isEmpty()) {
++        auto rect = rootViewToScreen(elementRect);
++        where = BPoint(rect.x(), rect.maxY() + 2);
++    } else {
++        auto view = IntRect(rootViewToScreen(IntPoint()), geometry().size);
++        uint32 buttons = 0;
++        if (get_mouse(&where, &buttons) != B_OK || !view.contains(IntPoint(where.x, where.y)))
++            where = BPoint(view.center().x(), view.center().y());
++    }
++    // BPopUpMenu::Go() blocks while it tracks the pointer: on a thread of its
++    // own, so the browser's other work goes on meanwhile. The page's web
++    // process waits for the answer, as in other WebKit browsers.
++    auto completion = std::make_shared<CompletionHandler<void(DOMPasteAccessResponse)>>(WTF::move(callback));
++    std::thread([completion, where]() mutable {
++        auto* menu = new BPopUpMenu("paste", false, false);
++        menu->AddItem(new BMenuItem("Paste", nullptr));
++        BMenuItem* chosen = menu->Go(where, false, true);
++        const bool granted = chosen;
++        delete menu;
++        RunLoop::mainSingleton().dispatch([completion = WTF::move(completion), granted] {
++            (*completion)(granted ? DOMPasteAccessResponse::GrantedForGesture : DOMPasteAccessResponse::DeniedForGesture);
++        });
++    }).detach();
 +}
 +
 +void WebView::processWillSwap()

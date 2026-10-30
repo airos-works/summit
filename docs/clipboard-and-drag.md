@@ -61,6 +61,45 @@ use the browser’s bookmarks bar and tab strip, described below.
   does) and sends the drop once the grant is in place. Before, the
   navigation was refused ("outside the sandbox") and nothing happened.
 
+## The async clipboard API (#136)
+
+`navigator.clipboard` and `ClipboardItem` were missing: WebKit turns the async
+clipboard on by default only for the Cocoa, GTK, WPE and Windows ports, so copy
+buttons that call `navigator.clipboard.writeText()` failed (AWS's console,
+built with Cloudscape, said the copy failed; GitHub's and most documentation
+sites' copy buttons do the same). `WebView.cpp` now turns on
+`AsyncClipboardAPIEnabled`, `AsyncClipboardRichContentEnabled` and
+`DOMPasteAccessRequestsEnabled`; `SUMMIT_ASYNC_CLIPBOARD=0` turns all three off.
+As in other browsers the API exists only in secure contexts (https, localhost).
+
+- **Writing** (`writeText()`, `write()`) needs a click or key press. It
+  replaces the system clipboard, as a copy does: `writeCustomData()` used to add
+  each type to whatever was there, so an earlier copy's HTML or image stayed
+  and pasted along with the new text. A written PNG also goes on the clipboard
+  as a BBitmap archive, as Copy Image does.
+- **The page's origin and its custom types** (`setData("application/x-foo")` in
+  a `copy` handler) are kept with the copy, serialized as GTK and WPE keep them
+  (`org.webkit.haiku.custom-pasteboard-data`, a name pages never see as a
+  type). `readOrigin()` and `readStringInCustomData()` read them back.
+- **Reading** (`readText()`, `read()`) gets what the same site copied without
+  asking. Anything else, copied by another site or another program, opens a
+  **Paste** menu at the pointer (or in the middle of the page for a key
+  press), as Safari does: choosing it lets the page read the clipboard once,
+  Escape or a click elsewhere refuses (`NotAllowedError`). The page's web
+  process waits for the answer, as in other WebKit browsers.
+- `read()` offers one item with `text/plain`, `text/uri-list` and `image/png`
+  (a BBitmap is converted). Not `text/html`: WebCore reads HTML for the async
+  API only through `PasteboardWebContentReader::readHTML()`, which exists only
+  for Cocoa, GTK and WPE.
+
+Checked on the laptop (air/OS hrev60207+2112) on 30 October 2026, on
+example.com with buttons calling the API: before, `typeof navigator.clipboard`
+was `"undefined"`. After, `writeText()` resolved and `clipboard -p` printed the
+text; `readText()` and `read()` + `getType("text/plain")` returned it without
+a prompt; after `clipboard -c` put another program's text there, `readText()`
+opened the Paste menu in the middle of the page, and Escape gave
+`NotAllowedError` with the page responsive again.
+
 ## Native page drags (#90)
 
 The Haiku drag client now starts a native drag for HTML draggable elements,
@@ -73,8 +112,7 @@ under their MIME types. Custom string data carries its source origin, so pages
 at the same origin can exchange card IDs and other custom formats; a different
 origin receives only the standard public formats. The protected drag store
 exposes types during hover without exposing values or file contents. Incoming
-HTML is sanitized before scripts read it. This does not enable the unfinished
-custom-data API for the system clipboard.
+HTML is sanitized before scripts read it. The system clipboard keeps custom data too, since #136 (see above).
 
 Page images supply PNG bytes. Tracker negotiates a file destination and the
 browser writes the image and its MIME attribute. The export refuses to replace
