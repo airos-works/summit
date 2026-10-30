@@ -4,13 +4,18 @@
 #include "core/DevTools.h"
 #include <Messenger.h>
 #include <Window.h>
+#include <map>
 #include <memory>
+#include <set>
 #include <string>
+#include <vector>
 
 class BMessageRunner;
 class BTabView;
 class BButton;
+class BWebKitContext;
 class BWebKitInspectorSession;
+class BWebKitView;
 
 namespace summit {
 // View › Developer Tools: a tab's page's DOM and styles, what it requests
@@ -25,8 +30,19 @@ namespace summit {
 class DevToolsWindow final : public BWindow, private DevToolsHost {
 public:
     // owner hears kDeveloperToolsClosed ("tab") when the window closes.
-    DevToolsWindow(BMessenger owner, int64 tab, const std::string& pageTitle, BRect browserFrame);
+    // context: the inspected tab's, for extensions' devtools pages.
+    DevToolsWindow(BMessenger owner, int64 tab, const std::string& pageTitle, BRect browserFrame,
+        std::shared_ptr<BWebKitContext> context = nullptr);
     ~DevToolsWindow() override;
+    // Extensions' developer tools (docs/webextensions-devtools.md): the
+    // window's identifier in the engine's DEVTOOLS commands, and its theme
+    // ("light" or "dark", from the system's colours).
+    uint64 ToolsIdentifier() const { return fToolsIdentifier; }
+    static const char* Theme();
+    // On the application thread with this window locked
+    // (kCreateDevToolsPanelOnApp): the page of a panel an extension created,
+    // in a tab of its own; answers the browser command.
+    void AddExtensionPanel(uint64 panel, const std::string& title, uint64 command);
     // Before Show(): the connection to the tab's page, whose messages are
     // announced to this window, and the page's target ("page-N") if it is
     // known, which the engine tells only the page's first connection.
@@ -52,6 +68,46 @@ private:
     void Trace(const devtools::Changes& changes);
     void Command(const BMessage& message, BMessage& reply);
     std::string StateJSON();
+    // An extension devtools page's DEVTOOLS browser command.
+    void ExtensionCommand(const BMessage& message);
+    // Tells extensions what changed: panels shown, navigations, finished
+    // requests, the Elements selection; answers their evaluations.
+    void ExtensionEvents(const devtools::Changes& changes);
+    void ExtensionResults();
+    void ExtensionPanelState(const BMessage& message);
+    std::shared_ptr<BWebKitContext> fContext;
+    uint64 fToolsIdentifier;
+    struct ExtensionPage {
+        BWebKitView* view;
+        std::string extension;
+    };
+    std::vector<ExtensionPage> fExtensionPages;
+    // Tabs after the built-in panels, in order.
+    struct ExtensionPanel {
+        uint64 panel;
+        std::string title;
+        BWebKitView* view;
+        bool loaded = false;
+    };
+    std::vector<ExtensionPanel> fExtensionPanels;
+    BView* fExtensionPageHolder;
+    // The panel extensions were told is shown (0: none).
+    uint64 fShownExtensionPanel = 0;
+    // Evaluations for extensions: the session's serial, the command's identifier.
+    std::map<uint64_t, uint64> fExtensionEvaluations;
+    uint64_t fNavigationsTold = 0;
+    // panels.openResource before the Sources panel has listed the page's
+    // scripts (the debugger starts when it is first shown): tried again as
+    // scripts arrive, for a few seconds.
+    struct PendingResource {
+        uint64 command;
+        std::string url;
+        bigtime_t deadline;
+    };
+    std::vector<PendingResource> fPendingResources;
+    bool OpenResource(const std::string& url, std::string& error);
+    int fSelectionTold = 0;
+    std::set<uint64_t> fRequestsTold;
     BMessenger fOwner;
     int64 fTab;
     devtools::Session fSession;

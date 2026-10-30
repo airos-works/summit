@@ -241,6 +241,17 @@ constexpr uint32 kViewPageSource = 'vpsr';
 // shows, for tests ("action", "argument"; the reply has "json" or "error").
 // Refused unless SUMMIT_ENABLE_INPUT_SYNTHESIS=1; see docs/developer-tools.md.
 constexpr uint32 kDeveloperToolsCommand = 'dvcm';
+// Extensions' developer tools (devtools_page, docs/webextensions-devtools.md).
+// A browser window that opened tools asks the application to make the
+// extensions' devtools pages on WebKit's application thread
+// (kOpenDevToolsExtensionsOnApp: "window", "tab"); the window hands the views
+// to the tools (kDevToolsExtensionPages: "view" pointers and "extension"
+// strings, which the tools own). The tools ask the application for a panel's
+// page (kCreateDevToolsPanelOnApp: "window" the tools, "panel", "title",
+// "command" the browser command to answer).
+constexpr uint32 kOpenDevToolsExtensionsOnApp = 'dvxo';
+constexpr uint32 kDevToolsExtensionPages = 'dvxp';
+constexpr uint32 kCreateDevToolsPanelOnApp = 'dvxc';
 // Benchmark input synthesis, refused unless SUMMIT_ENABLE_INPUT_SYNTHESIS=1.
 constexpr uint32 kSimulateScroll = 'sscr';
 constexpr uint32 kScrollBurstCompleted = 'ssco';

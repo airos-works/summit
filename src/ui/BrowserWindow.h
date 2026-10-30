@@ -99,6 +99,10 @@ public:
     // View › Sidebar: an extension's sidebar page beside the tabs. Called on
     // the application thread with the window locked (kOpenSidebarOnApp).
     void ShowSidebar(const std::string& extension, const std::string& url, const std::string& title);
+    // Extensions' devtools pages for a tab's developer tools, made on the
+    // application thread with the window locked (kOpenDevToolsExtensionsOnApp)
+    // and handed to the tools window.
+    void OpenDevToolsExtensionPages(int64 tab);
 #endif
     // Closing, or quitting with Summit: no new menus.
     bool IsClosing() const
@@ -229,6 +233,8 @@ private:
         // The tab's Developer Tools window, while it is open, and whether it
         // is docked under the page.
         BMessenger devTools { };
+        // The tools' identifier for extensions' devtools pages.
+        uint64 devToolsIdentifier = 0;
         bool devToolsDocked = false;
         // 0 under the page, 1 beside it.
         int32 devToolsDockSide = 0;

@@ -55,8 +55,12 @@ answers `false` for a permission Summit does not have (it asked for
 `tabs.query({windowId: -1})` (`WINDOW_ID_NONE`, from
 `windows.onFocusChanged`) answers no tabs instead of an error.
 
-Not done: Firefox's `firstPartyDomain` (first-party isolation) is not
-supported; cookies with it are neither filtered nor reported. A container is
+Firefox's `firstPartyDomain` behaves as in Firefox with first-party
+isolation off (since 30 October 2026): cookies report `firstPartyDomain: ""`,
+`""` and `null` match every cookie in `get`, `getAll` and `remove`, another
+domain matches none, and `set` refuses one (Firefox would keep such a cookie
+in a jar of its own that no page reads; Summit has no such jar, and the
+shared one would hand it to the site). A container is
 the profile's in everything else: history, bookmarks, permissions,
 certificate exceptions and downloads are shared, as in Firefox.
 

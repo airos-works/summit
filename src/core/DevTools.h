@@ -340,6 +340,16 @@ public:
     void RequestBody(uint64_t serial);
     // Runs an expression in the page, as typed into the console.
     void Evaluate(const std::string& expression);
+    // devtools.inspectedWindow.eval for an extension's devtools page: the
+    // expression runs in the page's main frame (frameURL: else the frame of
+    // that origin, once its script context is known) as the console would
+    // run it ($0 and the console's helpers work), without a console entry.
+    // Its answer comes with TakeExtensionResults(): {"result": value} (none
+    // for undefined) or {"exceptionInfo": {...}}, as extensions are told.
+    uint64_t EvaluateForExtension(const std::string& expression, const std::string& frameURL = { });
+    std::vector<std::pair<uint64_t, std::string>> TakeExtensionResults() { return std::exchange(fExtensionResults, { }); }
+    // Navigations of the main frame so far (devtools.network.onNavigated).
+    uint64_t Navigations() const { return fNavigations; }
     // The debugger, turned on when the Sources panel is first shown
     // (Debugger.enable, in every process of the page).
     void EnableDebugger();
@@ -426,7 +436,7 @@ private:
     friend struct ProtocolReader;
     struct Pending {
         enum Kind { Body, Evaluation, Storage, StorageEdit, Frames, Elements, Properties, OwnProperties, DatabaseNames, Database,
-            ScriptSource, SetBreakpoint, CachePromise, SourceMap, RuntimeEnable, Other };
+            ScriptSource, SetBreakpoint, CachePromise, SourceMap, RuntimeEnable, ExtensionEvaluation, Other };
         Kind kind;
         uint64_t serial;
         // Storage and StorageEdit: the area; Frames: the target asked;
@@ -492,6 +502,8 @@ private:
     std::vector<DOMModel::Command> fHeldDOM;
     std::vector<std::string> fOutgoing;
     Changes fChanges;
+    std::vector<std::pair<uint64_t, std::string>> fExtensionResults;
+    uint64_t fNextExtensionEvaluation = 1, fNavigations = 0;
     // The engine gives every connection of a page every answer: each
     // session numbers its commands apart from the others'.
     static uint64_t FirstCommand();

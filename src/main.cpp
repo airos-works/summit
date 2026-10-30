@@ -1,5 +1,8 @@
 #include "ui/Containers.h"
 #include "ui/BrowserWindow.h"
+#if SUMMIT_MODERN_WEBKIT
+#include "ui/DevToolsWindow.h"
+#endif
 #include "ui/PreferencesWindow.h"
 #include "ui/DefaultBrowser.h"
 #include <thread>
@@ -998,6 +1001,25 @@ public:
         }
 #endif
 #if SUMMIT_MODERN_WEBKIT
+        if (message->what == summit::kOpenDevToolsExtensionsOnApp || message->what == summit::kCreateDevToolsPanelOnApp) {
+            // Extensions' devtools pages and panels: their views are made on
+            // WebKit's application thread, the window they belong to locked.
+            BMessenger target;
+            if (message->FindMessenger("window", &target) != B_OK || !target.LockTarget()) {
+                if (const uint64 command = message->GetUInt64("command", 0); command && fWebKitContext)
+                    fWebKitContext->RespondToBrowserCommandWithData(command, B_ERROR, nullptr, "The developer tools have closed.");
+                return;
+            }
+            BLooper* looper = nullptr;
+            BHandler* handler = target.Target(&looper);
+            if (message->what == summit::kOpenDevToolsExtensionsOnApp) {
+                if (auto* window = dynamic_cast<summit::BrowserWindow*>(handler))
+                    window->OpenDevToolsExtensionPages(message->GetInt64("tab", 0));
+            } else if (auto* tools = dynamic_cast<summit::DevToolsWindow*>(handler))
+                tools->AddExtensionPanel(message->GetUInt64("panel", 0), message->GetString("title", ""), message->GetUInt64("command", 0));
+            if (looper) looper->Unlock();
+            return;
+        }
         if (message->what == summit::kOpenSidebarOnApp) {
             // The extension's view is made on WebKit's application thread, with
             // the window locked, as an extension tab's is.

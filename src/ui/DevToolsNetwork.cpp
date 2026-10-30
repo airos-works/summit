@@ -584,6 +584,11 @@ std::vector<const Request*> NetworkPanel::ShownRequests() const
     return requests;
 }
 
+std::string NetworkPanel::Har(const std::vector<const devtools::Request*>& requests)
+{
+    return HarArchive(requests, ApplicationVersion());
+}
+
 bool NetworkPanel::ExportHar(const std::string& path, std::string& error) const
 {
     std::ofstream file(path, std::ios::binary | std::ios::trunc);

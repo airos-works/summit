@@ -840,6 +840,19 @@ struct ProtocolReader {
             walk(Member(result, "frameTree"));
             session.fMainFrame = Text(Member(Member(Member(result, "frameTree"), "frame"), "id"));
             session.SetOrigins(std::move(origins));
+        } else if (pending.kind == Session::Pending::ExtensionEvaluation) {
+            // Chrome's exceptionInfo: isError for a failure to run, isException
+            // with the thrown value's description.
+            json answer = json::object();
+            if (!error.empty())
+                answer["exceptionInfo"] = {{"isError", true}, {"code", "E_PROTOCOLERROR"}, {"description", error}, {"details", json::array()}};
+            else if (Flag(Member(result, "wasThrown"))) {
+                const auto& thrown = Member(result, "result");
+                const auto description = Text(Member(thrown, "description"));
+                answer["exceptionInfo"] = {{"isException", true}, {"value", description.empty() ? Render(thrown, false) : description}};
+            } else if (const auto& value = Member(Member(result, "result"), "value"); !value.is_null() || Member(Member(result, "result"), "type") == "object")
+                answer["result"] = value;
+            session.fExtensionResults.emplace_back(pending.serial, answer.dump(-1, ' ', false, json::error_handler_t::replace));
         } else if (pending.kind == Session::Pending::Evaluation) {
             if (!error.empty()) {
                 session.AddEntry(EntryKind::Result, Level::Error, error);
@@ -1459,6 +1472,7 @@ void Session::FromTarget(const std::string& target, std::string_view text)
 void Session::Navigated(const std::string& target, const std::string& loader, const std::string& url)
 {
     fPageURL = url;
+    ++fNavigations;
     fGroupDepth = 0;
     if (fPreserveConsole) {
         if (!fEntries.empty()) AddEntry(EntryKind::Navigation, Level::Info, "Navigated to " + url);
@@ -1629,6 +1643,32 @@ void Session::ReleaseBodies()
         request.body = { };
         request.bodyState = BodyState::None;
     }
+}
+
+uint64_t Session::EvaluateForExtension(const std::string& expression, const std::string& frameURL)
+{
+    const auto serial = fNextExtensionEvaluation++;
+    const auto fail = [&](const char* code, const std::string& description) {
+        fExtensionResults.emplace_back(serial, json({{"exceptionInfo", {{"isError", true}, {"code", code}, {"description", description},
+            {"details", json::array()}}}}).dump(-1, ' ', false, json::error_handler_t::replace));
+        return serial;
+    };
+    if (fPageTarget.empty()) return fail("E_NOTFOUND", "The inspected page is not there.");
+    std::string context;
+    if (!frameURL.empty() && frameURL != fPageURL) {
+        // Frames are known by origin; their script context once Runtime is on.
+        const auto scheme = frameURL.find("://");
+        const auto end = scheme == std::string::npos ? std::string::npos : frameURL.find('/', scheme + 3);
+        const auto origin = frameURL.substr(0, end);
+        const auto frame = fFrameOfOrigin.find(origin);
+        const auto found = frame == fFrameOfOrigin.end() ? fContextOfFrame.end() : fContextOfFrame.find(frame->second);
+        if (found == fContextOfFrame.end()) return fail("E_NOTFOUND", "Frame not found: " + frameURL);
+        context = ",\"contextId\":" + std::to_string(found->second);
+    }
+    SendToTarget(fPageTarget, "Runtime.evaluate", "{\"expression\":" + Quoted(expression)
+        + ",\"objectGroup\":\"extension\",\"includeCommandLineAPI\":true,\"returnByValue\":true,"
+          "\"doNotPauseOnExceptionsAndMuteConsole\":true" + context + "}", Pending::ExtensionEvaluation, serial);
+    return serial;
 }
 
 void Session::Evaluate(const std::string& expression)

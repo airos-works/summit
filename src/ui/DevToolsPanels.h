@@ -111,6 +111,9 @@ public:
     // says what was wrong with one that is.
     bool Command(const std::string& action, const std::string& argument, std::string& error);
     std::string StateJSON();
+    // Requests as an HTTP Archive with the browser as its creator
+    // (Export HAR…, and devtools.network for extensions).
+    static std::string Har(const std::vector<const devtools::Request*>& requests);
 
 private:
     class Row;

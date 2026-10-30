@@ -1,8 +1,12 @@
 #if SUMMIT_MODERN_WEBKIT
 #include "DevToolsWindow.h"
 #include "Messages.h"
+#include <WebKit/WebKitContext.h>
 #include <WebKit/WebKitInspector.h>
+#include <WebKit/WebKitView.h>
+#include <Application.h>
 #include <Button.h>
+#include <InterfaceDefs.h>
 #include <LayoutBuilder.h>
 #include <MessageRunner.h>
 #include <Screen.h>
@@ -23,6 +27,8 @@ BRect sLastFrame;
 bool sDocked = false;
 // Where docked tools go: 0 under the page, 1 beside it.
 int32 sDockSide = 0;
+// Tools windows' identifiers for the engine (extensions' DEVTOOLS commands).
+uint64 sNextToolsIdentifier = 0;
 
 BMessage* DockMessage(int32 side)
 {
@@ -48,8 +54,9 @@ BRect FrameBeside(BRect browser)
     return frame;
 }
 
-// The tabs, in their order.
+// The tabs, in their order; extensions' panels follow them.
 const char* const kPanels[] = {"elements", "network", "console", "storage", "sources", "performance"};
+constexpr int32 kBuiltInPanels = static_cast<int32>(std::size(kPanels));
 enum { kElementsPanel, kNetworkPanel, kConsolePanel, kStoragePanel, kSourcesPanel, kPerformancePanel };
 
 int32 PanelIndex(const char* name)
@@ -65,11 +72,14 @@ std::string TitleFor(const std::string& page)
 }
 }
 
-DevToolsWindow::DevToolsWindow(BMessenger owner, int64 tab, const std::string& pageTitle, BRect browserFrame)
+DevToolsWindow::DevToolsWindow(BMessenger owner, int64 tab, const std::string& pageTitle, BRect browserFrame,
+    std::shared_ptr<BWebKitContext> context)
     : BWindow(FrameBeside(browserFrame), TitleFor(pageTitle).c_str(), B_DOCUMENT_WINDOW,
         B_ASYNCHRONOUS_CONTROLS | B_AUTO_UPDATE_SIZE_LIMITS)
     , fOwner(owner)
     , fTab(tab)
+    , fContext(std::move(context))
+    , fToolsIdentifier(++sNextToolsIdentifier)
 {
     const char* trace = std::getenv("SUMMIT_DEVTOOLS_TRACE");
     fTrace = trace && (!std::strcmp(trace, "1") || !std::strcmp(trace, "2"));
@@ -100,6 +110,9 @@ DevToolsWindow::DevToolsWindow(BMessenger owner, int64 tab, const std::string& p
     fUndockButton = new BButton("undock", "Undock", DockMessage(-1));
     fUndockButton->SetToolTip("Show the tools in a window of their own");
     fUndockButton->SetEnabled(false);
+    // Extensions' devtools pages run here unseen, one per extension.
+    fExtensionPageHolder = new BView(BRect(0, 0, 9, 9), "extension-devtools-pages", B_FOLLOW_NONE, 0);
+    fExtensionPageHolder->Hide();
     BLayoutBuilder::Group<>(this, B_VERTICAL, 0)
         // On the left: a narrow dock clips the tools' right side.
         .AddGroup(B_HORIZONTAL, 4).SetInsets(4, 2, 4, 0)
@@ -108,7 +121,8 @@ DevToolsWindow::DevToolsWindow(BMessenger owner, int64 tab, const std::string& p
             .Add(fUndockButton)
             .AddGlue()
         .End()
-        .Add(fTabs);
+        .Add(fTabs)
+        .Add(fExtensionPageHolder);
     SetSizeLimits(560, 10000, 360, 10000);
     // The element picker, as in other browsers; Alt+F finds in the tree.
     AddShortcut('C', B_SHIFT_KEY, new BMessage(kTogglePicker));
@@ -201,6 +215,13 @@ bool DevToolsWindow::QuitRequested()
         fSession.SetThrottling(0, 0);
         for (const auto& message : fSession.TakeOutgoing()) fInspector->Send(message.c_str());
     }
+    // Extensions waiting for an evaluation hear that it will not come.
+    if (fContext) {
+        for (const auto& [serial, command] : std::exchange(fExtensionEvaluations, { }))
+            fContext->RespondToBrowserCommandWithData(command, B_ERROR, nullptr, "The developer tools were closed.");
+        for (const auto& pending : std::exchange(fPendingResources, { }))
+            fContext->RespondToBrowserCommandWithData(pending.command, B_ERROR, nullptr, "The developer tools were closed.");
+    }
     // The page stops reporting when its session ends.
     fInspector.reset();
     BMessage closed(kDeveloperToolsClosed);
@@ -217,6 +238,8 @@ void DevToolsWindow::MessageReceived(BMessage* message)
         case kPulse:
             PanelShown();
             Drain();
+            // Docked tools hidden or shown again: their extensions' panel too.
+            ExtensionEvents({ });
             // Styles the page changed are read again a moment later.
             if (fSession.DOM().StylesWaiting()) Sync();
             break;
@@ -279,6 +302,24 @@ void DevToolsWindow::MessageReceived(BMessage* message)
             message->SendReply(&reply);
             break;
         }
+        case kDevToolsExtensionPages: {
+            // Made on the application thread; owned here from now on.
+            void* pointer = nullptr;
+            for (int32 i = 0; message->FindPointer("view", i, &pointer) == B_OK; ++i) {
+                auto* view = static_cast<BWebKitView*>(pointer);
+                fExtensionPageHolder->AddChild(view);
+                fExtensionPages.push_back({view, message->GetString("extension", i, "")});
+            }
+            fNavigationsTold = fSession.Navigations();
+            fSelectionTold = fSession.DOM().Selected();
+            break;
+        }
+        case B_WEBKIT_BROWSER_COMMAND:
+            if (message->GetUInt32("command", 0) == B_WEBKIT_BROWSER_DEVTOOLS) ExtensionCommand(*message);
+            break;
+        case B_WEBKIT_STATE_CHANGED:
+            ExtensionPanelState(*message);
+            break;
         default: BWindow::MessageReceived(message);
     }
 }
@@ -295,7 +336,11 @@ void DevToolsWindow::Command(const BMessage& message, BMessage& reply)
     std::string error;
     Drain();
     if (action == "panel") {
-        fTabs->Select(PanelIndex(argument.c_str()));
+        // A built-in panel's name, or an extension panel's title.
+        int32 index = PanelIndex(argument.c_str());
+        for (size_t i = 0; i < fExtensionPanels.size(); ++i)
+            if (fExtensionPanels[i].title == argument) index = kBuiltInPanels + static_cast<int32>(i);
+        fTabs->Select(index);
         PanelShown();
     } else if (action == "dock") {
         // "on" (under the page), "right" or "off", as the buttons do (the
@@ -332,7 +377,15 @@ std::string DevToolsWindow::StateJSON()
             {"text", entry.text}, {"place", entry.Location()}, {"repeat", entry.repeat}, {"stack", entry.stack},
             {"source", entry.source}});
     }
-    json state = {{"title", Title()}, {"panel", kPanels[std::clamp<int32>(fTabs->Selection(), 0, std::size(kPanels) - 1)]}, {"page", fSession.PageURL()},
+    json pages = json::array(), panels = json::array();
+    for (const auto& page : fExtensionPages) pages.push_back({{"extension", page.extension}});
+    for (const auto& panel : fExtensionPanels)
+        panels.push_back({{"panel", panel.panel}, {"title", panel.title}, {"loaded", panel.loaded}, {"shown", panel.panel == fShownExtensionPanel}});
+    const int32 selection = fTabs->Selection();
+    const std::string panelName = selection >= kBuiltInPanels && selection - kBuiltInPanels < static_cast<int32>(fExtensionPanels.size())
+        ? fExtensionPanels[selection - kBuiltInPanels].title : kPanels[std::clamp<int32>(selection, 0, kBuiltInPanels - 1)];
+    json state = {{"title", Title()}, {"panel", panelName}, {"page", fSession.PageURL()},
+        {"tools", fToolsIdentifier}, {"theme", Theme()}, {"extensionPages", pages}, {"extensionPanels", panels},
         {"requests", requests}, {"entries", entries}, {"elements", json::parse(fElements->StateJSON())},
         {"network", json::parse(fNetwork->StateJSON())}, {"console", json::parse(fConsole->StateJSON())},
         {"storage", json::parse(fStorage->StateJSON())}, {"sources", json::parse(fSources->StateJSON())},
@@ -351,6 +404,7 @@ void DevToolsWindow::PanelShown()
     fStorage->SetShown(panel == kStoragePanel);
     fElements->SetShown(panel == kElementsPanel);
     fSources->SetShown(panel == kSourcesPanel);
+    ExtensionEvents({ });
 }
 
 void DevToolsWindow::DispatchMessage(BMessage* message, BHandler* handler)
@@ -371,6 +425,7 @@ void DevToolsWindow::DispatchMessage(BMessage* message, BHandler* handler)
 void DevToolsWindow::Drain()
 {
     if (!fInspector) return;
+    ExtensionResults();
     std::vector<std::string> messages;
     if (fInspector->Take(messages)) {
         for (const auto& message : messages) {
@@ -408,8 +463,10 @@ void DevToolsWindow::Sync()
         fStorage->Apply(changes);
         fSources->Apply(changes);
         fPerformance->Apply(changes);
+        ExtensionEvents(changes);
     }
     fSyncing = false;
+    ExtensionResults();
     // An element chosen in the page is shown.
     if (fElements->TakePicked()) {
         fTabs->Select(kElementsPanel);
@@ -449,6 +506,162 @@ void DevToolsWindow::Trace(const Changes& changes)
         std::fprintf(stderr, "Summit devtools: console %s %s [%s]\n", levels[static_cast<int>(entries[i].level)],
             entries[i].text.c_str(), entries[i].Location().c_str());
     fTracedEntries = entries.size();
+}
+
+const char* DevToolsWindow::Theme()
+{
+    // Dark when the system's documents are: extensions draw their panels to match.
+    const rgb_color background = ui_color(B_DOCUMENT_BACKGROUND_COLOR);
+    return background.red * 299 + background.green * 587 + background.blue * 114 < 128000 ? "dark" : "light";
+}
+
+void DevToolsWindow::AddExtensionPanel(uint64 panel, const std::string& title, uint64 command)
+{
+    status_t status = B_NO_INIT;
+    BWebKitView* view = fContext ? fContext->CreateExtensionDevToolsPanel(BRect(0, 0, 399, 299), panel, BMessenger(this), &status) : nullptr;
+    if (!view) {
+        if (fContext)
+            fContext->RespondToBrowserCommandWithData(command, B_ERROR, nullptr, ("The panel could not be made: " + std::string(std::strerror(status))).c_str());
+        return;
+    }
+    auto* tab = new BTab();
+    fTabs->AddTab(view, tab);
+    tab->SetLabel(title.c_str());
+    fExtensionPanels.push_back({panel, title, view});
+    fContext->RespondToBrowserCommandWithData(command, B_OK, "null");
+}
+
+void DevToolsWindow::ExtensionCommand(const BMessage& message)
+{
+    using nlohmann::json;
+    const uint64 identifier = message.GetUInt64("identifier", 0);
+    if (!identifier || !fContext) return;
+    const auto fail = [&](const std::string& error) {
+        fContext->RespondToBrowserCommandWithData(identifier, B_ERROR, nullptr, error.c_str());
+    };
+    if (message.GetUInt64("tools", 0) != fToolsIdentifier) {
+        fail("These developer tools have closed.");
+        return;
+    }
+    const std::string method = message.GetString("method", "");
+    const auto arguments = json::parse(message.GetString("arguments", "{}"), nullptr, false);
+    const auto text = [&](const char* key) {
+        const auto found = arguments.is_object() ? arguments.find(key) : arguments.end();
+        return found != arguments.end() && found->is_string() ? found->get<std::string>() : std::string();
+    };
+    if (method == "panels.create") {
+        // Its view is made on WebKit's application thread, this window locked.
+        BMessage create(kCreateDevToolsPanelOnApp);
+        create.AddMessenger("window", BMessenger(this));
+        create.AddUInt64("panel", message.GetUInt64("panel", 0));
+        create.AddString("title", text("title").c_str());
+        create.AddUInt64("command", identifier);
+        if (be_app->PostMessage(&create) != B_OK) fail("The browser is not available.");
+    } else if (method == "inspectedWindow.eval") {
+        if (arguments.is_object() && arguments.value("useContentScriptContext", false)) {
+            // Chrome evaluates in the extension's content script world; Summit's
+            // inspector session sees only the page's own.
+            fContext->RespondToBrowserCommandWithData(identifier, B_OK, json({{"exceptionInfo", {{"isError", true},
+                {"code", "E_NOTSUPPORTED"}, {"description", "useContentScriptContext is not supported"}, {"details", json::array()}}}}).dump().c_str());
+            return;
+        }
+        fExtensionEvaluations[fSession.EvaluateForExtension(text("expression"), text("frameURL"))] = identifier;
+        Sync();
+    } else if (method == "network.getHAR") {
+        // All requests the tools hold (Chrome's are those since they opened).
+        std::vector<const devtools::Request*> requests;
+        for (const auto& request : fSession.Requests()) requests.push_back(&request);
+        const auto archive = json::parse(NetworkPanel::Har(requests), nullptr, false);
+        const auto log = archive.is_object() && archive.contains("log") ? archive["log"] : json::object();
+        fContext->RespondToBrowserCommandWithData(identifier, B_OK, log.dump(-1, ' ', false, json::error_handler_t::replace).c_str());
+    } else if (method == "panels.openResource") {
+        fTabs->Select(kSourcesPanel);
+        PanelShown();
+        if (IsMinimized()) Minimize(false);
+        Activate(true);
+        std::string error;
+        const auto url = text("url");
+        if (OpenResource(url, error)) fContext->RespondToBrowserCommandWithData(identifier, B_OK, "{}");
+        else if (url.empty()) fail("No address");
+        else fPendingResources.push_back({identifier, url, system_time() + 3000000});
+    } else
+        fContext->RespondToBrowserCommandWithData(identifier, B_NOT_SUPPORTED, nullptr, "Summit's developer tools do not offer this.");
+}
+
+bool DevToolsWindow::OpenResource(const std::string& url, std::string& error)
+{
+    error.clear();
+    return !url.empty() && fSources->Command("sources-open", url, error) && error.empty();
+}
+
+void DevToolsWindow::ExtensionResults()
+{
+    if (!fContext) return;
+    // Resources asked for before the Sources panel listed them.
+    std::erase_if(fPendingResources, [&](const PendingResource& pending) {
+        std::string error;
+        if (OpenResource(pending.url, error)) {
+            fContext->RespondToBrowserCommandWithData(pending.command, B_OK, "{}");
+            return true;
+        }
+        if (system_time() < pending.deadline) return false;
+        const nlohmann::json answer = {{"isError", true}, {"code", "E_NOTFOUND"}, {"description", error + ": " + pending.url},
+            {"details", nlohmann::json::array()}};
+        fContext->RespondToBrowserCommandWithData(pending.command, B_OK, answer.dump().c_str());
+        return true;
+    });
+    for (const auto& [serial, answer] : fSession.TakeExtensionResults()) {
+        const auto found = fExtensionEvaluations.find(serial);
+        if (found == fExtensionEvaluations.end()) continue;
+        fContext->RespondToBrowserCommandWithData(found->second, B_OK, answer.c_str());
+        fExtensionEvaluations.erase(found);
+    }
+}
+
+void DevToolsWindow::ExtensionPanelState(const BMessage& message)
+{
+    // A panel's page has loaded once: its listeners may be told it is shown.
+    BMessenger view;
+    if (message.FindMessenger("view", &view) != B_OK || message.GetBool("loading", true)) return;
+    for (auto& panel : fExtensionPanels) {
+        if (panel.loaded || view != BMessenger(panel.view)) continue;
+        panel.loaded = true;
+        ExtensionEvents({ });
+    }
+}
+
+void DevToolsWindow::ExtensionEvents(const devtools::Changes& changes)
+{
+    if (!fContext || (fExtensionPages.empty() && fExtensionPanels.empty())) return;
+    using nlohmann::json;
+    // The shown panel, once its page is there (onShown hands its window).
+    const int32 selection = fTabs->Selection() - kBuiltInPanels;
+    uint64 shown = 0;
+    if (selection >= 0 && selection < static_cast<int32>(fExtensionPanels.size()) && fExtensionPanels[selection].loaded && !IsHidden())
+        shown = fExtensionPanels[selection].panel;
+    if (shown != fShownExtensionPanel) {
+        if (fShownExtensionPanel) fContext->DevToolsExtensionEvent(fToolsIdentifier, "panel-hidden", nullptr, fShownExtensionPanel);
+        fShownExtensionPanel = shown;
+        if (shown) fContext->DevToolsExtensionEvent(fToolsIdentifier, "panel-shown", nullptr, shown);
+    }
+    if (fSession.Navigations() != fNavigationsTold) {
+        fNavigationsTold = fSession.Navigations();
+        fRequestsTold.clear();
+        fContext->DevToolsExtensionEvent(fToolsIdentifier, "navigated", json(fSession.PageURL()).dump().c_str());
+    }
+    if (fSession.DOM().Selected() != fSelectionTold) {
+        fSelectionTold = fSession.DOM().Selected();
+        if (fSelectionTold) fContext->DevToolsExtensionEvent(fToolsIdentifier, "selection-changed");
+    }
+    for (const auto serial : changes.requests) {
+        const auto* request = fSession.FindRequest(serial);
+        if (!request || request->Pending() || !fRequestsTold.insert(serial).second) continue;
+        // devtools.network.onRequestFinished: the request's HAR entry.
+        auto archive = json::parse(NetworkPanel::Har({request}), nullptr, false);
+        if (!archive.is_object() || !archive["log"]["entries"].is_array() || archive["log"]["entries"].empty()) continue;
+        fContext->DevToolsExtensionEvent(fToolsIdentifier, "request-finished",
+            archive["log"]["entries"][0].dump(-1, ' ', false, json::error_handler_t::replace).c_str());
+    }
 }
 }
 #endif

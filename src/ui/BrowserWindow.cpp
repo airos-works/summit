@@ -2636,6 +2636,11 @@ void BrowserWindow::BrowserCommand(const BMessage& message)
         case B_WEBKIT_BROWSER_BROWSING_DATA: BrowsingDataCommand(message, identifier); return;
         case B_WEBKIT_BROWSER_SESSIONS: SessionsCommand(message, identifier); return;
         case B_WEBKIT_BROWSER_SIDEBAR: SidebarCommand(message, identifier); return;
+        case B_WEBKIT_BROWSER_DEVTOOLS:
+            // An extension's devtools page: its tab's tools answer.
+            if (BMessage forward(message); tab && tab->devTools.IsValid() && tab->devTools.SendMessage(&forward) == B_OK) return;
+            RespondToCommand(identifier, B_NOT_ALLOWED, { }, "The developer tools are not open for this tab.");
+            return;
         case B_WEBKIT_BROWSER_DETECT_LANGUAGE: {
             // i18n.detectLanguage, with the detector page translation uses.
             const auto detected = DetectTextLanguages(message.GetString("text", ""));
@@ -5822,18 +5827,42 @@ void BrowserWindow::ShowDeveloperTools(const char* panel, const BMessage* reques
         tab->devTools.SendMessage(&show);
         return;
     }
-    auto* window = new DevToolsWindow(BMessenger(this), tab->id, tab->title, Frame());
+    auto* window = new DevToolsWindow(BMessenger(this), tab->id, tab->title, Frame(), fWebKitContext);
     // The window hears of the page's messages, so it is made first; it reads
     // them only once it runs.
     window->SetInspector(BWebKitInspectorSession::Create(*tab->view, BMessenger(window), static_cast<uint64>(tab->id)),
         PageTarget(tab->pageIdentifier));
     tab->devTools = BMessenger(window);
+    tab->devToolsIdentifier = window->ToolsIdentifier();
     if (!show.IsEmpty()) window->PostMessage(&show);
     window->Show();
+    // Extensions' devtools_page views, made on WebKit's application thread.
+    BMessage pages(kOpenDevToolsExtensionsOnApp);
+    pages.AddMessenger("window", BMessenger(this));
+    pages.AddInt64("tab", tab->id);
+    be_app->PostMessage(&pages);
     // Docked if the tools were last docked, where they were.
     tab->devToolsDocked = DevToolsWindow::DockedByDefault();
     tab->devToolsDockSide = DevToolsWindow::DockSideByDefault();
     PlaceDockedDeveloperTools();
+}
+
+void BrowserWindow::OpenDevToolsExtensionPages(int64 tabIdentifier)
+{
+    auto* tab = FindTabByID(tabIdentifier);
+    if (!tab || !tab->view || !tab->devTools.IsValid() || !tab->devToolsIdentifier || !fWebKitContext || fClosingWindow) return;
+    std::vector<BWebKitContext::DevToolsPage> pages;
+    if (fWebKitContext->CreateExtensionDevToolsPages(BRect(0, 0, 399, 299), *tab->view, tab->devToolsIdentifier,
+            DevToolsWindow::Theme(), tab->devTools, pages) != B_OK || pages.empty())
+        return;
+    BMessage adopt(kDevToolsExtensionPages);
+    for (const auto& page : pages) {
+        adopt.AddPointer("view", page.view);
+        adopt.AddString("extension", page.extensionIdentifier.c_str());
+    }
+    // The tools may have closed meanwhile: then nobody owns the views.
+    if (tab->devTools.SendMessage(&adopt) != B_OK)
+        for (const auto& page : pages) delete page.view;
 }
 
 void BrowserWindow::ShowPageSource()

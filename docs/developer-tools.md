@@ -428,6 +428,17 @@ not clear a console that is kept.
 The two check boxes are independent, and **Clear** empties its own panel at
 any time.
 
+### Extensions' panels
+
+Extensions with a `devtools_page` (React Developer Tools, Vue.js devtools,
+Redux DevTools) add their panels as tabs after Performance: the extension's
+page loads, unseen, when the tools open for a tab, and its panels show the
+extension's own pages. They evaluate in the page as the Console does (`$0`
+is the Elements selection), read the Network panel's requests as HAR and
+hear navigations; `docs/webextensions-devtools.md` lists what is offered.
+`devtools-do panel TITLE` selects one; `state` lists `extensionPages` and
+`extensionPanels` (with `loaded` and `shown`).
+
 ## How it works
 
 ```

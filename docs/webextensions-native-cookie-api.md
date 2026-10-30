@@ -44,8 +44,16 @@ This remains an incomplete cookie implementation. Native `onChanged` is now
 exposed and connected through typed IPC, database observation and context
 permission checks. Database events, expiry and the production IPC codecs have
 run in native tests. Network-to-UI delivery and extension listeners have not.
-Partition keys and Firefox first-party isolation (`firstPartyDomain`) remain
-unfinished; container stores (`firefox-container-<id>`, the profile's store as
+Partition keys came later (d4fed42, 86b485c). Firefox's `firstPartyDomain`
+is accepted as Firefox treats it with first-party isolation off (30 October
+2026): `firstPartyDomain: ""` on every cookie object and removal result;
+`""` or `null` in `get`/`getAll`/`remove` match every cookie, any other
+domain matches none (`null`/`[]`); `set` takes `""`/`null` and refuses
+another domain, which Firefox keeps in a separate jar Summit lacks;
+anything but a string or `null` is a type error
+(`tests/fixtures/extensions/cookies-first-party`; on the laptop, 30 October:
+all of these as described, `getAll` with `""` or `null` 2 cookies, with
+`example.com` none). Container stores (`firefox-container-<id>`, the profile's store as
 `firefox-default`) work since 30 October 2026, see
 [webextensions-containers.md](webextensions-containers.md). WebCore still folds an omitted SameSite
 attribute into `None`; explicit `unspecified` is rejected. SameSite metadata
