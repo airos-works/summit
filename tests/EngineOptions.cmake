@@ -19,6 +19,7 @@ set(required
     ENABLE_NOTIFICATIONS
     ENABLE_REMOTE_INSPECTOR     # Developer Tools and the MCP page tools
     ENABLE_RESOURCE_USAGE       # Inspector CPU and memory timelines
+    USE_AVIF                    # AVIF images (libavif with dav1d, issue #115)
 )
 if(NOT EXISTS "${INIT_CACHE}")
     message(FATAL_ERROR "no init cache at '${INIT_CACHE}'")
