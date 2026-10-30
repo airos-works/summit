@@ -25,8 +25,31 @@ H.264 selection and software fallback remain enabled. On X399, the additional
 video codecs listed here were tested with software decoding. Since 30 October
 H.265 also goes to NVDEC where it is installed (a named add-on, as for the
 Raspberry Pi), and NVDEC's pictures reach the compositor as NV12
-([performance.md](performance.md), 30 October). HEVC/AV1 presentation timestamps are kept
-from the container because the installed decoders do not preserve them reliably.
+([performance.md](performance.md), 30 October). Where AMD's `amduvd` add-on
+has VP9 and AV1 decoders (decoders 2 and 3: a proposed air/OS change; the
+Framework 13's Radeon 760M decodes both), YouTube's VP9 and AV1 go to the GPU
+too, as NV12 for the compositor, with software as the fallback
+([wx5100-media.md](wx5100-media.md), [performance.md](performance.md), 30
+October). The add-on now on the systems has neither, and those entries stay
+unused. NVDEC on the X399's GTX 1070 has no VP9 path in air/OS's add-on yet.
+
+Software H.264, HEVC and AV1 decoders used to lose or misplace presentation
+timestamps, so their pictures took the container's times in order. air/OS's
+ffmpeg add-on keeps each chunk's time since jmgasper/haiku@5e72aaf0fe
+(21 October; d14bd57365 of 27 October did the same for `BMediaTrack`'s
+reader, which the file player's frame-counter fallback copes with either
+way). Checked on the laptop's hrev60207+2112 with H.264 and HEVC B-frame
+streams, 8- and 10-bit HEVC, AV1 and VP9, through the end of the stream.
+Since 30 October the container's times are used only for a decoder's first
+eight pictures: when the decoder's own times equal them, the container
+timeline is dropped (`SUMMIT_MSE_TRACE=1`: "keeps timestamps: container
+timeline dropped"), and later decoders of that codec in the web process are
+trusted from their first picture; otherwise (an older system) the container
+timeline is kept. Trusting the decoder also fixes a seek to an HEVC CRA
+picture: the decoder rightly drops its leading (RASL) pictures, whose
+container times then labelled the following pictures, 4 frames (67 ms)
+early in the test stream. `SUMMIT_MSE_CONTAINER_TIMESTAMPS=1` always uses the
+container's times, `=0` the decoder's from the first picture.
 
 WebM parsing supports fixed, Xiph and EBML lacing, Opus pre-skip, discard
 padding and audio seek preroll. Fully discarded packets still prime the decoder.

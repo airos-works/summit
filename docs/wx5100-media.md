@@ -6,8 +6,26 @@ reference limits. The add-on performs the complete bitstream/device validation.
 It registers no formats with Media Kit, leaving software decoding available.
 `SUMMIT_HARDWARE_VIDEO=0` disables named hardware selection.
 
-AMD supplies RGB32 using each picture's declared color range and matrix. The
-Raspberry Pi retains its existing I420 path. Timeout and slow-close state is
+AMD supplies RGB32 using each picture's declared color range and matrix, or,
+since 30 October, NV12 for the compositor (air/OS's add-on from
+jmgasper/haiku@b8f1a18638; `SUMMIT_AMD_NV12=0` asks for RGB again):
+converting to RGB is one thread's work in the add-on, and a 2160p60 VP9
+stream came at 61 pictures a second that way, at 137 as NV12. Ten-bit
+pictures come as NV12 only from an add-on that narrows them (one with an AV1
+decoder); an older one is asked for RGB for HEVC Main 10. The
+Raspberry Pi retains its existing I420 path.
+
+VP9 (profiles 0 and 2, decoder 2) and AV1 Main (decoder 3) are listed for
+`amduvd` too, for an add-on that has them: the proposed air/OS change in
+`haiku-amdgpu_va.diff` (libavcodec's VP9 and AV1 VA-API hwaccels in the
+add-on's static libavcodec; VCN 1 and later decode VP9, VCN 3 and later AV1:
+the Framework 13's Radeon 760M both, the WX 5100's UVD 6 neither, where
+the add-on fails the stream and it goes to software). An add-on without
+them (NewDecoder(2) returns NULL) leaves those entries unused.
+`SUMMIT_HARDWARE_VIDEO_ADDONS=DIR` looks for named add-ons in DIR first, to
+try a new one in one copy of Summit before it is installed. Media
+capabilities report `powerEfficient` for VP9/AV1 where such an add-on would
+take them, so YouTube picks them for the sizes only they come in. Timeout and slow-close state is
 tracked independently for each backend. Negotiated dimensions and row sizes are
 checked before allocating the output buffer.
 

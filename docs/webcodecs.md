@@ -58,8 +58,30 @@ decoded through FFmpeg, by the same decoder H.264 uses (named for each;
 neither is offered to WebRTC). WebKit's `WebCodecsAV1Enabled` and
 `WebCodecsHEVCEnabled` are on for Haiku. They are not encoded.
 
+Hardware decoding (30 October, #115): where a named hardware add-on takes
+the stream, as the media players use them (`MediaDecoderSelectionHaiku`:
+AMD's `amduvd` for H.264, HEVC and, where the add-on has them, VP9 and AV1;
+NVDEC for HEVC), `VideoDecoder` decodes on it and gives NV12 frames (I420
+from an add-on without NV12). The add-on pulls its chunks while it decodes,
+so it runs on a thread of its own that waits for the page's chunks:
+`decode()` settles when the add-on has taken the chunk (the page's
+`decodeQueueSize` falls then), `flush()` when every picture is out (the
+add-on is then reset for the next key frame). If the add-on refuses the
+stream (a GPU without the codec) or fails on the way, the chunks since the
+last key frame (up to 600) go to the software decoder, which carries on
+without giving pictures already out again. Needed: `codedWidth` and
+`codedHeight`, and for H.264/HEVC the `avcC`/`hvcC` description (the
+add-ons read length-prefixed units; `annexb` stays in software).
+`hardwareAcceleration: "prefer-software"` and `SUMMIT_WEBCODECS_HARDWARE=0`
+keep everything in software; pictures always come at full size (no
+`SUMMIT_VIDEO_HALF`).
+
+On arm64 (the Raspberry Pi's and the Cubie's add-ons, not tried with it)
+this is off unless `SUMMIT_WEBCODECS_HARDWARE=1`, and an add-on that gives
+only RGB (the Cubie's, by default) is left for software.
+
 Not yet: AV1 and HEVC encoding (the system FFmpeg has no encoder for
-either), and hardware decoders (NVDEC, Cedar).
+either), hardware encoders, and hardware decoding on arm64 by default.
 
 H.264 with B-frames: libavcodec gives pictures in presentation order,
 holding B-frames back until their references are decoded. The decoder used

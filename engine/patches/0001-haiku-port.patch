@@ -37836,10 +37836,10 @@ index 0000000000000000000000000000000000000000..21962ea9d0bd80ba9c260e9ef9ecac36
 +} // namespace SummitMPEGTS
 diff --git a/Source/WebCore/platform/graphics/haiku/MediaDecoderSelectionHaiku.cpp b/Source/WebCore/platform/graphics/haiku/MediaDecoderSelectionHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..4d29237dfe65c91da710da6db22380747511195f
+index 0000000000000000000000000000000000000000..c670d35de4ede28d254197e75ea8680ec0c60e28
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/haiku/MediaDecoderSelectionHaiku.cpp
-@@ -0,0 +1,1223 @@
+@@ -0,0 +1,1354 @@
 +/*
 + * Copyright (C) 2026 Haiku, Inc. All rights reserved.
 + *
@@ -38056,6 +38056,7 @@ index 0000000000000000000000000000000000000000..4d29237dfe65c91da710da6db2238074
 +constexpr uint32 ffmpegCodecH264 = 27;
 +constexpr uint32 ffmpegCodecHEVC = 173;
 +constexpr uint32 ffmpegCodecVP9 = 167;
++constexpr uint32 ffmpegCodecAV1 = 226;
 +
 +// A decoder add-on loaded by name, and what it is known to decode.
 +struct NamedDecoderAddOn {
@@ -38077,6 +38078,11 @@ index 0000000000000000000000000000000000000000..4d29237dfe65c91da710da6db2238074
 +    // add-on converts them itself), as the caller prefers.
 +    bool nv12OrRGB { false };
 +    BPrivate::media::DecoderPlugin* plugin { nullptr };
++    // Whether it gives ten-bit pictures as eight-bit NV12 when asked to.
++    // amduvd before it decoded VP9 and AV1 copied their 16-bit samples into
++    // an NV12 buffer half as large; such an add-on is asked for RGB for
++    // HEVC Main 10 (see namedAddOnFor()).
++    bool tenBitNV12 { true };
 +    std::atomic<bool> broken { false };
 +    std::atomic<unsigned> closing { 0 };
 +};
@@ -38102,8 +38108,20 @@ index 0000000000000000000000000000000000000000..4d29237dfe65c91da710da6db2238074
 +    // amduvd validates the complete SPS/PPS and the device before accepting
 +    // the stream. RGB conversion there honours per-picture VUI range/matrix.
 +#if CPU(X86_64)
-+    { "amduvd", ffmpegCodecH264, 4096, 4096, 4096 * 4096, true, 0, true, nullptr, false },
-+    { "amduvd", ffmpegCodecHEVC, 4096, 4096, 4096 * 4096, true, 1, true, nullptr, false },
++    // Its pictures come as NV12 for the compositor (air/OS's VA-API add-on
++    // from jmgasper/haiku@b8f1a18638) or as RGB it converts itself; see
++    // amdNV12Wanted().
++    { "amduvd", ffmpegCodecH264, 4096, 4096, 4096 * 4096, false, 0, true, nullptr, false, true },
++    { "amduvd", ffmpegCodecHEVC, 4096, 4096, 4096 * 4096, false, 1, true, nullptr, false, true },
++    // VP9 profiles 0 and 2 (decoder 2) and AV1 Main (decoder 3), YouTube's
++    // codecs, where the GPU decodes them (VCN 1 and later VP9, VCN 3 and
++    // later AV1: the Framework 13's Radeon 760M both, the WX 5100's UVD 6
++    // neither); the add-on fails the stream elsewhere and it goes to
++    // software. An add-on from before them has no decoders 2 and 3, and
++    // these entries stay unused (namedAddOnFor()). On the 760M a 2160p60
++    // VP9 stream took 0.26 of a core this way, 1.46 in libavcodec.
++    { "amduvd", ffmpegCodecVP9, 4096, 4096, 4096 * 4096, false, 2, true, nullptr, false, true },
++    { "amduvd", ffmpegCodecAV1, 4096, 4096, 4096 * 4096, false, 3, true, nullptr, false, true },
 +    // NVDEC (GeForce cards with nvidia_rm) decodes H.265 Main and Main 10,
 +    // but offers only H.264 to the media kit (a stream it refused would have
 +    // no other decoder), so the media kit's choice for HEVC is libavcodec.
@@ -38240,10 +38258,17 @@ index 0000000000000000000000000000000000000000..4d29237dfe65c91da710da6db2238074
 +    std::call_once(once, [] {
 +        if (!hardwareVideoAllowed())
 +            return;
-+        char** paths = nullptr;
-+        size_t count = 0;
-+        if (find_paths(B_FIND_PATH_ADD_ONS_DIRECTORY, "media/plugins", &paths, &count) != B_OK)
++        char** found = nullptr;
++        size_t foundCount = 0;
++        if (find_paths(B_FIND_PATH_ADD_ONS_DIRECTORY, "media/plugins", &found, &foundCount) != B_OK)
 +            return;
++        // SUMMIT_HARDWARE_VIDEO_ADDONS=DIR is looked in first: for trying a
++        // new add-on in one copy of Summit before installing it.
++        std::vector<const char*> paths;
++        if (const char* directory = std::getenv("SUMMIT_HARDWARE_VIDEO_ADDONS"); directory && *directory)
++            paths.push_back(directory);
++        paths.insert(paths.end(), found, found + foundCount);
++        const size_t count = paths.size();
 +        for (auto& addOn : s_namedAddOns) {
 +            if (addOn.device && access(addOn.device, F_OK))
 +                continue;
@@ -38272,9 +38297,24 @@ index 0000000000000000000000000000000000000000..4d29237dfe65c91da710da6db2238074
 +                    unload_add_on(image);
 +                    break;
 +                }
++                // An add-on older than a codec it is listed for here has no
++                // decoder for it (amduvd before VP9 and AV1).
++                auto hasDecoder = [&](unsigned index) {
++                    auto* decoder = addOn.plugin->NewDecoder(index);
++                    delete decoder;
++                    return !!decoder;
++                };
++                if (!hasDecoder(addOn.decoderIndex)) {
++                    addOn.plugin = nullptr;
++                    delete plugin;
++                    unload_add_on(image);
++                    break;
++                }
++                if (!std::strcmp(addOn.leafName, "amduvd"))
++                    addOn.tenBitNV12 = hasDecoder(3);
 +            }
 +        }
-+        free(paths);
++        free(found);
 +    });
 +    for (auto& addOn : s_namedAddOns) {
 +        if (addOn.plugin && addOn.codec == codec && !addOnMarkedBroken(addOn))
@@ -38293,9 +38333,25 @@ index 0000000000000000000000000000000000000000..4d29237dfe65c91da710da6db2238074
 +    return description.u.misc.codec;
 +}
 +
++// The VP9 profile its codec configuration names: an MP4 vpcC box (VP codec
++// ISO media file format binding 2.2: version 1, flags, profile) or WebM's
++// CodecPrivate (feature ID 1, length 1, profile, ...), which usually is
++// absent (nullopt).
++std::optional<unsigned> vp9ProfileOf(std::span<const uint8_t> codecConfig)
++{
++    if (codecConfig.size() >= 8 && codecConfig[0] == 1 && !codecConfig[1] && !codecConfig[2] && !codecConfig[3])
++        return codecConfig[4];
++    for (size_t i = 0; i + 2 < codecConfig.size(); i += 2 + codecConfig[i + 1]) {
++        if (codecConfig[i] == 1 && codecConfig[i + 1] == 1)
++            return codecConfig[i + 2];
++    }
++    return std::nullopt;
++}
++
 +// The add-on for this stream, if one is installed and the stream is of the
 +// kind it decodes (progressive 4:2:0 H.264 or HEVC within its size).
-+NamedDecoderAddOn* namedAddOnForStream(const media_format& encoded, std::span<const uint8_t> codecConfig)
++// Without `configKnown` the stream's codec configuration is not checked.
++NamedDecoderAddOn* namedAddOnForStream(const media_format& encoded, std::span<const uint8_t> codecConfig, bool configKnown = true)
 +{
 +    if (encoded.type != B_MEDIA_ENCODED_VIDEO)
 +        return nullptr;
@@ -38325,6 +38381,8 @@ index 0000000000000000000000000000000000000000..4d29237dfe65c91da710da6db2238074
 +    if (!std::strcmp(addOn->leafName, "amduvd") && display.line_width * display.line_count < minimumArea)
 +        return nullptr;
 +#endif
++    if (!configKnown)
++        return addOn;
 +    if (*codec == ffmpegCodecH264) {
 +        auto info = h264SequenceInfo(codecConfig);
 +        if (!info || info->chromaFormat != 1 || info->bitDepthLuma != 8 || info->bitDepthChroma != 8 || !info->frameMbsOnly
@@ -38341,8 +38399,46 @@ index 0000000000000000000000000000000000000000..4d29237dfe65c91da710da6db2238074
 +        if ((profile != 1 && profile != 2) || (depthMinus8 != 0 && depthMinus8 != 2)
 +            || (profile == 1 && depthMinus8))
 +            return nullptr;
++    } else if (*codec == ffmpegCodecVP9) {
++        // Profiles 0 and 2 (4:2:0, 8 and 10 bits), where the record says.
++        auto profile = vp9ProfileOf(codecConfig);
++        if (profile && *profile != 0 && *profile != 2)
++            return nullptr;
++    } else if (*codec == ffmpegCodecAV1) {
++        // av1C (AV1 ISOBMFF binding 2.3; WebM's CodecPrivate is the same):
++        // Main profile, 8 or 10 bits.
++        if (codecConfig.size() >= 3 && (codecConfig[0] != 0x81 || (codecConfig[1] >> 5) || (codecConfig[2] & 0x20)))
++            return nullptr;
 +    }
 +    return addOn;
++}
++
++// Whether the stream's pictures have more than eight bits, as far as its
++// codec configuration says.
++bool tenBitStream(const media_format& encoded, std::span<const uint8_t> codecConfig)
++{
++    auto codec = ffmpegCodecOf(encoded);
++    if (!codec)
++        return false;
++    if (*codec == ffmpegCodecHEVC)
++        return codecConfig.size() >= 23 && (codecConfig[17] & 7);
++    if (*codec == ffmpegCodecAV1)
++        return codecConfig.size() >= 3 && (codecConfig[2] & 0x40);
++    if (*codec == ffmpegCodecVP9)
++        return vp9ProfileOf(codecConfig).value_or(0) >= 2;
++    return false;
++}
++
++// AMD's pictures as NV12 for the compositor: SUMMIT_AMD_NV12=0 asks the
++// add-on for RGB instead (as before 30 October). Converting to RGB there is
++// one thread's work: 2160p60 VP9 came at 61 pictures a second, NV12 at 137.
++bool amdNV12Wanted()
++{
++    static const bool wanted = [] {
++        const char* value = std::getenv("SUMMIT_AMD_NV12");
++        return !value || std::strcmp(value, "0");
++    }();
++    return wanted;
 +}
 +
 +// Not among Haiku's colour spaces: three planes, luma and then Cb and Cr with
@@ -38457,6 +38553,39 @@ index 0000000000000000000000000000000000000000..4d29237dfe65c91da710da6db2238074
 +{
 +    auto info = h264SequenceInfo(avcC);
 +    return info ? std::optional { info->maxReferenceFrames } : std::nullopt;
++}
++
++std::optional<media_format> encodedVideoFormatHaiku(StringView codec, unsigned width, unsigned height)
++{
++    uint32 ffmpegCodec = codec.startsWith("avc1"_s) || codec.startsWith("avc3"_s) ? ffmpegCodecH264
++        : codec.startsWith("hvc1"_s) || codec.startsWith("hev1"_s) ? ffmpegCodecHEVC
++        : codec.startsWith("vp09"_s) ? ffmpegCodecVP9 : codec.startsWith("av01"_s) ? ffmpegCodecAV1 : 0;
++    if (!ffmpegCodec)
++        return std::nullopt;
++    media_format format;
++    media_format_description description;
++    description.family = B_MISC_FORMAT_FAMILY;
++    description.u.misc.file_format = 'ffmp';
++    description.u.misc.codec = ffmpegCodec;
++    BMediaFormats formats;
++    if (formats.InitCheck() != B_OK || formats.GetFormatFor(description, &format) != B_OK)
++        return std::nullopt;
++    format.type = B_MEDIA_ENCODED_VIDEO;
++    format.u.encoded_video.output.display.line_width = width;
++    format.u.encoded_video.output.display.line_count = height;
++    format.u.encoded_video.output.field_rate = 30;
++    format.u.encoded_video.output.pixel_width_aspect = 1;
++    format.u.encoded_video.output.pixel_height_aspect = 1;
++    return format;
++}
++
++// Whether a named add-on would take this codec at this size, without its
++// codec configuration (media capabilities' powerEfficient). A size the
++// caller does not give is taken as 1080p.
++bool namedHardwareVideoDecoderHaiku(StringView codec, unsigned width, unsigned height)
++{
++    auto format = encodedVideoFormatHaiku(codec, width ? width : 1920, height ? height : 1080);
++    return format && namedAddOnForStream(*format, { }, false);
 +}
 +
 +// A hardware decoder for VP9: a named add-on that lists VP9 among its formats
@@ -38605,7 +38734,7 @@ index 0000000000000000000000000000000000000000..4d29237dfe65c91da710da6db2238074
 +    return namedAddOnForStream(encoded, codecConfig);
 +}
 +
-+std::unique_ptr<AddOnVideoDecoderHaiku> AddOnVideoDecoderHaiku::create(const media_format& encoded, std::span<const uint8_t> codecConfig, ChunkSource&& source, bool preferPlanes)
++std::unique_ptr<AddOnVideoDecoderHaiku> AddOnVideoDecoderHaiku::create(const media_format& encoded, std::span<const uint8_t> codecConfig, ChunkSource&& source, bool preferPlanes, bool allowHalfSize)
 +{
 +    auto* addOn = namedAddOnForStream(encoded, codecConfig);
 +    if (!addOn)
@@ -38621,13 +38750,15 @@ index 0000000000000000000000000000000000000000..4d29237dfe65c91da710da6db2238074
 +    if (status == B_OK)
 +        decoder->GetCodecInfo(&result->m_codecInfo);
 +    media_format output { };
-+    const bool nv12 = addOn->nv12OrRGB && preferPlanes && nv12PlanesWantedHaiku();
++    const bool amd = !std::strcmp(addOn->leafName, "amduvd");
++    const bool nv12 = addOn->nv12OrRGB && preferPlanes && nv12PlanesWantedHaiku() && (!amd || amdNV12Wanted())
++        && (addOn->tenBitNV12 || !tenBitStream(encoded, codecConfig));
 +    const auto colorSpace = nv12 ? colorSpaceNV12Haiku : addOn->nativeRGB || addOn->nv12OrRGB ? B_RGB32 : colorSpaceI420;
 +    if (status == B_OK) {
 +        output.type = B_MEDIA_RAW_VIDEO;
 +        output.u.raw_video = media_raw_video_format::wildcard;
 +        output.u.raw_video.display.format = colorSpace;
-+        if (halfSizeVideoHaiku(encoded.u.encoded_video.output.display.line_width, encoded.u.encoded_video.output.display.line_count)) {
++        if (allowHalfSize && halfSizeVideoHaiku(encoded.u.encoded_video.output.display.line_width, encoded.u.encoded_video.output.display.line_count)) {
 +            output.u.raw_video.display.line_width = encoded.u.encoded_video.output.display.line_width / 2;
 +            output.u.raw_video.display.line_count = encoded.u.encoded_video.output.display.line_count / 2;
 +        }
@@ -39065,10 +39196,10 @@ index 0000000000000000000000000000000000000000..4d29237dfe65c91da710da6db2238074
 +} // namespace WebCore
 diff --git a/Source/WebCore/platform/graphics/haiku/MediaDecoderSelectionHaiku.h b/Source/WebCore/platform/graphics/haiku/MediaDecoderSelectionHaiku.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..4ea801e0330075e43363d4a03c0f097597d54a0b
+index 0000000000000000000000000000000000000000..f292128ffb7e634736143b1aa949c4cd66e0649f
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/haiku/MediaDecoderSelectionHaiku.h
-@@ -0,0 +1,239 @@
+@@ -0,0 +1,250 @@
 +/*
 + * Copyright (C) 2026 Haiku, Inc. All rights reserved.
 + *
@@ -39106,6 +39237,7 @@ index 0000000000000000000000000000000000000000..4ea801e0330075e43363d4a03c0f0975
 +#include <wtf/Function.h>
 +#include <wtf/Noncopyable.h>
 +#include <wtf/Vector.h>
++#include <wtf/text/StringView.h>
 +
 +namespace BPrivate {
 +namespace media {
@@ -39129,10 +39261,12 @@ index 0000000000000000000000000000000000000000..4ea801e0330075e43363d4a03c0f0975
 +// stream it refused would then have no other decoder. It is loaded by name,
 +// as the image's player airTime does, for the streams it is known to decode,
 +// and anything it refuses goes to the media kit's choice or libavcodec. Its
-+// pictures come as I420 and are converted to B_RGB32 here. The X399's AMD
-+// amduvd add-on follows the same explicit selection policy and supplies RGB
-+// with the stream's own color range/matrix: decoder 0 for H.264, decoder 1
-+// for HEVC Main/Main 10. Failures are isolated per backend.
++// pictures come as I420 and are converted to B_RGB32 here. AMD's amduvd
++// add-on (VA-API) follows the same explicit selection policy and supplies
++// NV12 for the compositor, or RGB with the stream's own color range/matrix:
++// decoder 0 for H.264, 1 for HEVC Main/Main 10, 2 for VP9 profiles 0/2 and
++// 3 for AV1 Main (the last two where the GPU has them). Failures are
++// isolated per backend.
 +
 +namespace WebCore {
 +
@@ -39158,6 +39292,13 @@ index 0000000000000000000000000000000000000000..4ea801e0330075e43363d4a03c0f0975
 +// SUMMIT_NVDEC_MAX_REFERENCES overrides the 15 reference frames it handles.
 +// Whether VP9 can be decoded in hardware (the Radxa Cubie A7S's video engine).
 +bool hardwareVP9DecoderHaiku();
++// Whether a named hardware add-on would take a stream of this codec ("vp09",
++// "av01", "hvc1"/"hev1", "avc1"/"avc3", as in a codecs parameter) and size,
++// for media capabilities' powerEfficient.
++bool namedHardwareVideoDecoderHaiku(StringView codec, unsigned width, unsigned height);
++// The media kit's encoded format for such a codec at this size, as the
++// named add-ons and libavcodec take it (WebCodecs).
++std::optional<media_format> encodedVideoFormatHaiku(StringView codec, unsigned width, unsigned height);
 +// Whether to ask the decoder for pictures of half the width and height.
 +bool halfSizeVideoHaiku(unsigned width, unsigned height);
 +bool hardwareDecoderCannotDecodeHaiku(const media_codec_info& decoder, std::span<const uint8_t> avcC);
@@ -39181,8 +39322,9 @@ index 0000000000000000000000000000000000000000..4ea801e0330075e43363d4a03c0f0975
 +    // Null unless such an add-on accepts the configuration. Some add-ons
 +    // read chunks from `source` while negotiating the output format.
 +    // An add-on that can give planes or RGB (NVDEC) gives planes when
-+    // `preferPlanes`.
-+    static std::unique_ptr<AddOnVideoDecoderHaiku> create(const media_format& encoded, std::span<const uint8_t> codecConfig, ChunkSource&&, bool preferPlanes = true);
++    // `preferPlanes`. Without `allowHalfSize` pictures come at full size
++    // even where halfSizeVideoHaiku() says (WebCodecs' must).
++    static std::unique_ptr<AddOnVideoDecoderHaiku> create(const media_format& encoded, std::span<const uint8_t> codecConfig, ChunkSource&&, bool preferPlanes = true, bool allowHalfSize = true);
 +    ~AddOnVideoDecoderHaiku();
 +
 +    const media_codec_info& codecInfo() const { return m_codecInfo; }
@@ -41882,10 +42024,10 @@ index 0000000000000000000000000000000000000000..7d7398ed294e485d2708cb41295954d8
 +#endif
 diff --git a/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaikuMSE.cpp b/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaikuMSE.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..2907530799802ddf6305caca0ab22e7a458883bb
+index 0000000000000000000000000000000000000000..77688b3e2063bdfeaac5e9705f5219dd833b2d2d
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaikuMSE.cpp
-@@ -0,0 +1,3252 @@
+@@ -0,0 +1,3311 @@
 +/*
 + * Copyright (C) 2026 Summit contributors.
 + *
@@ -41988,6 +42130,38 @@ index 0000000000000000000000000000000000000000..2907530799802ddf6305caca0ab22e7a
 +static constexpr uint32 ffmpegCodecVP8 = 139;
 +static constexpr uint32 ffmpegCodecVP9 = 167;
 +static constexpr uint32 ffmpegCodecAV1 = 226;
++
++// Where software decoders' picture times come from. The installed decoders
++// keep each chunk's time now (air/OS from 21 October: H.264 with B-frames,
++// HEVC 8 and 10 bits, AV1, through the end of the stream), so by default the
++// container's times are used only until the first pictures show the
++// decoder's are the same, and kept for that decoder where they are not (an
++// older system). Once a codec's decoder has kept them, later decoders of it
++// are trusted from the start: after a seek to an HEVC CRA picture the
++// decoder rightly skips its leading (RASL) pictures, whose container times
++// would otherwise label the pictures that follow, 4 frames early in a test
++// stream. SUMMIT_MSE_CONTAINER_TIMESTAMPS=1 always uses the container's (as
++// before 30 October), =0 trusts the decoder from the first picture.
++enum class ContainerTimestampsHaiku { UntilVerified, Always, Never };
++static constexpr unsigned timelineChecks = 8;
++// The codecs (bits by ffmpegCodecTimestampBit()) whose decoder kept them.
++static std::atomic<unsigned> s_decodersKeepingTimestamps;
++static unsigned ffmpegCodecTimestampBit(uint32 codec)
++{
++    return codec == ffmpegCodecH264 ? 1 : codec == ffmpegCodecHEVC ? 2 : codec == ffmpegCodecAV1 ? 4 : 0;
++}
++static ContainerTimestampsHaiku containerTimestampsModeHaiku()
++{
++    static const ContainerTimestampsHaiku mode = [] {
++        const char* value = getenv("SUMMIT_MSE_CONTAINER_TIMESTAMPS");
++        if (value && !std::strcmp(value, "1"))
++            return ContainerTimestampsHaiku::Always;
++        if (value && !std::strcmp(value, "0"))
++            return ContainerTimestampsHaiku::Never;
++        return ContainerTimestampsHaiku::UntilVerified;
++    }();
++    return mode;
++}
 +static constexpr uint32 ffmpegCodecVorbis = 86021;
 +static constexpr uint32 ffmpegCodecOpus = 86076;
 +
@@ -42693,6 +42867,10 @@ index 0000000000000000000000000000000000000000..2907530799802ddf6305caca0ab22e7a
 +        // Named hardware decoders return the timestamp of the actual picture.
 +        // Software timestamp recovery starts below, after addon negotiation.
 +        bool useInputTimeline = false;
++        // Pictures whose decoder timestamp is still to be compared with the
++        // container's before the container timeline is dropped (see
++        // containerTimestampsModeHaiku()).
++        unsigned timelineChecksLeft = 0;
 +        VideoPresentationTimelineHaiku inputTimeline;
 +        bool invalidTimeline = false;
 +        auto nextChunk = [&](const void** data, size_t* size, media_header* header) -> status_t {
@@ -42813,12 +42991,21 @@ index 0000000000000000000000000000000000000000..2907530799802ddf6305caca0ab22e7a
 +        if (!addOn && (m_queue.aborted() || m_queue.generation() != generation))
 +            return true;
 +
-+        // Media Kit's H.264, HEVC and AV1 software decoders report packet
-+        // timestamps, including invalid timestamps when draining. Their
-+        // output pictures are ordered; retain input presentation times from
-+        // the start of software input, including any replayed setup samples.
++        // Media Kit's H.264, HEVC and AV1 software decoders reported packet
++        // timestamps, including invalid timestamps when draining, before
++        // air/OS's ffmpeg add-on passed each chunk's time on as the packet's
++        // (jmgasper/haiku@5e72aaf0fe). Their output pictures are ordered;
++        // retain input presentation times from the start of software input,
++        // including any replayed setup samples, until the decoder has been
++        // seen to keep them.
++        auto useContainerTimestamps = [&] {
++            auto mode = containerTimestampsModeHaiku();
++            bool verified = mode == ContainerTimestampsHaiku::UntilVerified && (s_decodersKeepingTimestamps & ffmpegCodecTimestampBit(codec));
++            useInputTimeline = mode != ContainerTimestampsHaiku::Never && !verified;
++            timelineChecksLeft = useInputTimeline && mode == ContainerTimestampsHaiku::UntilVerified ? timelineChecks : 0;
++        };
 +        if (!addOn && (codec == ffmpegCodecH264 || codec == ffmpegCodecHEVC || codec == ffmpegCodecAV1))
-+            useInputTimeline = true;
++            useContainerTimestamps();
 +
 +        HaikuChunkDecoder decoder([&](const void** data, size_t* size, media_header* header) {
 +            return nextChunk(data, size, header);
@@ -42992,7 +43179,7 @@ index 0000000000000000000000000000000000000000..2907530799802ddf6305caca0ab22e7a
 +                recoveryLimitReached = false;
 +                taken = WTF::move(recoverySamples);
 +                replayed = 0;
-+                useInputTimeline = true;
++                useContainerTimestamps();
 +                replayingHardwareOutput = true;
 +                inputTimeline.clear();
 +                status = setSoftwareDecoderHaiku(decoder, format, info.codecConfig.data(), info.codecConfig.size(), &codecInfo);
@@ -43030,6 +43217,20 @@ index 0000000000000000000000000000000000000000..2907530799802ddf6305caca0ab22e7a
 +            if (frames != 1)
 +                return false;
 +            std::optional<int64_t> presentationTime = useInputTimeline ? inputTimeline.take() : std::optional<int64_t>(header.start_time);
++            if (useInputTimeline && timelineChecksLeft) {
++                if (presentationTime && *presentationTime == header.start_time) {
++                    if (!--timelineChecksLeft) {
++                        useInputTimeline = false;
++                        inputTimeline.clear();
++                        s_decodersKeepingTimestamps |= ffmpegCodecTimestampBit(codec);
++                        MSE_TRACE("video decoder %s keeps timestamps: container timeline dropped\n", codecInfo.pretty_name);
++                    }
++                } else {
++                    timelineChecksLeft = 0;
++                    MSE_TRACE("video decoder %s gave %lld for %lld: container timeline kept\n", codecInfo.pretty_name,
++                        static_cast<long long>(header.start_time), static_cast<long long>(presentationTime.value_or(-1)));
++                }
++            }
 +            if (!presentationTime || *presentationTime == INT64_MIN || *presentationTime == INT64_MAX)
 +                return false;
 +            int64_t pts = *presentationTime;
@@ -47599,10 +47800,10 @@ index 0000000000000000000000000000000000000000..91156c316dfe74d48aaa0ebbd28332a3
 +#endif // PLATFORM(HAIKU) && USE(TEXTURE_MAPPER)
 diff --git a/Source/WebCore/platform/graphics/haiku/PlatformMediaEngineConfigurationFactoryHaiku.cpp b/Source/WebCore/platform/graphics/haiku/PlatformMediaEngineConfigurationFactoryHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..d40f03a11d40d4a814b0bf793e54764822158e94
+index 0000000000000000000000000000000000000000..9ca0d6f051c8235ca14189a101b875816c8df3d0
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/haiku/PlatformMediaEngineConfigurationFactoryHaiku.cpp
-@@ -0,0 +1,77 @@
+@@ -0,0 +1,83 @@
 +/*
 + * Copyright (C) 2026 Summit contributors.
 + *
@@ -47627,6 +47828,7 @@ index 0000000000000000000000000000000000000000..d40f03a11d40d4a814b0bf793e547648
 +
 +#include "ContentType.h"
 +#include "MediaPlayer.h"
++#include "MediaDecoderSelectionHaiku.h"
 +#include "PlatformMediaCapabilitiesDecodingInfo.h"
 +#include "PlatformMediaDecodingConfiguration.h"
 +#include <wtf/Function.h>
@@ -47657,9 +47859,14 @@ index 0000000000000000000000000000000000000000..d40f03a11d40d4a814b0bf793e547648
 +        if (video->alphaChannel.value_or(false) || video->hdrMetadataType
 +            || (video->transferFunction && *video->transferFunction != PlatformMediaCapabilitiesTransferFunction::SRGB))
 +            supported = false;
-+        // H.264 goes to the NVDEC add-on where one is installed.
++        // H.264 goes to the NVDEC add-on where one is installed (the media
++        // kit's choice, so not known here); the other codecs to hardware
++        // where a named add-on takes them (AMD's VP9 and AV1 since 30
++        // October). Sites that weigh powerEfficient (YouTube) then choose
++        // VP9 or AV1 for the sizes only those come in.
 +        for (auto& codec : ContentType(video->contentType).codecs()) {
-+            if (codec.startsWith("avc1"_s) || codec.startsWith("avc3"_s))
++            if (codec.startsWith("avc1"_s) || codec.startsWith("avc3"_s)
++                || namedHardwareVideoDecoderHaiku(codec, video->width, video->height))
 +                hardware = true;
 +        }
 +    }
@@ -49652,10 +49859,10 @@ index 0000000000000000000000000000000000000000..41999de77e252470c0a8f56b0eda479b
 +#endif // ENABLE(VIDEO) && PLATFORM(HAIKU)
 diff --git a/Source/WebCore/platform/graphics/haiku/VideoPresentationTimelineHaiku.h b/Source/WebCore/platform/graphics/haiku/VideoPresentationTimelineHaiku.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..1d1a9c43b347b1b5f55dcd956c6b6974157fc9b7
+index 0000000000000000000000000000000000000000..28344fa87031dce227821c00dfacb08e4d310276
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/haiku/VideoPresentationTimelineHaiku.h
-@@ -0,0 +1,59 @@
+@@ -0,0 +1,62 @@
 +/*
 + * Copyright (C) 2026 Summit contributors.
 + *
@@ -49683,11 +49890,14 @@ index 0000000000000000000000000000000000000000..1d1a9c43b347b1b5f55dcd956c6b6974
 +
 +namespace WebCore {
 +
-+// Media Kit's dav1d decoder loses the timestamp and its HEVC decoder returns
++// Media Kit's dav1d decoder lost the timestamp and its HEVC decoder returned
 +// the most recently read packet's timestamp, before frame reordering. Its
-+// H.264 software decoder does the same, with invalid timestamps on drain.
-+// These decoders deliver pictures in presentation order. Retain the container's timestamps
-+// for the access units still inside the decoder, including seek preroll.
++// H.264 software decoder did the same, with invalid timestamps on drain
++// (air/OS before jmgasper/haiku@5e72aaf0fe, 21 October 2026). These decoders
++// deliver pictures in presentation order. Retain the container's timestamps
++// for the access units still inside the decoder, including seek preroll,
++// until the decoder is seen to keep them (MediaPlayerPrivateHaikuMSE.cpp,
++// containerTimestampsModeHaiku()).
 +class VideoPresentationTimelineHaiku {
 +public:
 +    bool append(int64_t timestamp)
@@ -67045,10 +67255,10 @@ index 0000000000000000000000000000000000000000..05c75290c9156bc056bd72c22f91991a
 +#endif // USE(LIBWEBRTC) && PLATFORM(HAIKU)
 diff --git a/Source/WebCore/platform/mediastream/libwebrtc/haiku/WebCodecsHaiku.cpp b/Source/WebCore/platform/mediastream/libwebrtc/haiku/WebCodecsHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..9fe32d69e92acc507349770502ad1427acf0190f
+index 0000000000000000000000000000000000000000..081896d9529ff458177b5177f1f5b90f44dcb114
 --- /dev/null
 +++ b/Source/WebCore/platform/mediastream/libwebrtc/haiku/WebCodecsHaiku.cpp
-@@ -0,0 +1,621 @@
+@@ -0,0 +1,1022 @@
 +/*
 + * Copyright (C) 2026 Summit contributors.
 + *
@@ -67074,9 +67284,17 @@ index 0000000000000000000000000000000000000000..9fe32d69e92acc507349770502ad1427
 +#include "LibWebRTCH264DecoderHaiku.h"
 +#include "LibWebRTCHaiku.h"
 +#include "Logging.h"
++#include "MediaDecoderSelectionHaiku.h"
 +#include "VideoFrameHaiku.h"
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include <wtf/Condition.h>
++#include <wtf/Deque.h>
 +#include <wtf/HashMap.h>
 +#include <wtf/Lock.h>
++#include <wtf/Scope.h>
++#include <wtf/Threading.h>
 +#include <wtf/WorkQueue.h>
 +#include <wtf/text/MakeString.h>
 +#include <wtf/text/StringToIntegerConversion.h>
@@ -67288,15 +67506,23 @@ index 0000000000000000000000000000000000000000..9fe32d69e92acc507349770502ad1427
 +
 +    Ref<VideoDecoder::DecodePromise> decode(VideoEncodedData&& frame)
 +    {
++        if (auto error = decodeNow(WTF::move(frame)))
++            return VideoDecoder::DecodePromise::createAndReject(WTF::move(*error));
++        return VideoDecoder::DecodePromise::createAndResolve();
++    }
++
++    // Decodes the chunk on the decoder's queue; the error if it failed.
++    std::optional<String> decodeNow(VideoEncodedData&& frame)
++    {
 +        assertIsCurrent(m_queue.get());
 +        if (m_isClosed)
-+            return VideoDecoder::DecodePromise::createAndReject("The decoder is closed"_s);
++            return "The decoder is closed"_s;
 +        auto data = frame.data->span();
 +        std::optional<Vector<uint8_t>> converted;
 +        if (m_avc) {
 +            converted = annexBFromAVC(data, *m_avc, frame.isKeyFrame);
 +            if (!converted)
-+                return VideoDecoder::DecodePromise::createAndReject("The H.264 chunk is not in the configured length-prefixed format"_s);
++                return "The H.264 chunk is not in the configured length-prefixed format"_s;
 +            data = converted->span();
 +        }
 +        // The RTP timestamp names the chunk, so decoders that hold pictures
@@ -67311,8 +67537,8 @@ index 0000000000000000000000000000000000000000..9fe32d69e92acc507349770502ad1427
 +        image.SetRtpTimestamp(label);
 +        auto error = m_decoder->Decode(image, false, 0);
 +        if (error && (error != WEBRTC_VIDEO_CODEC_NO_OUTPUT || m_treatNoOutputAsError))
-+            return VideoDecoder::DecodePromise::createAndReject(makeString("Decoding failed with error "_s, error));
-+        return VideoDecoder::DecodePromise::createAndResolve();
++            return makeString("Decoding failed with error "_s, error);
++        return std::nullopt;
 +    }
 +
 +    // Pictures a decoder holds back (H.264 B-frames) come out now; decoders
@@ -67395,11 +67621,396 @@ index 0000000000000000000000000000000000000000..9fe32d69e92acc507349770502ad1427
 +    const Ref<InternalDecoderHaiku> m_decoder;
 +};
 +
++// Decoding on the graphics card: a named hardware add-on (AMD's amduvd for
++// H.264, HEVC and, where the add-on has them, VP9 and AV1; NVDEC for HEVC),
++// as the media players use them (MediaDecoderSelectionHaiku.h). Such an
++// add-on pulls its chunks while it decodes, so it runs on a thread of its
++// own that waits for the page's chunks; a decode() is done when the add-on
++// has taken its chunk, a flush() when the add-on has given back every
++// picture. Where the add-on refuses the stream (a GPU without the codec) or
++// fails on the way, the chunks from the last key frame go to the software
++// decoder above and it carries on, without repeating pictures already out.
++// H.264 and HEVC need their avcC/hvcC description (the add-ons read
++// length-prefixed units), and the size must be given; "prefer-software" and
++// SUMMIT_WEBCODECS_HARDWARE=0 keep everything in software. On arm64 (the
++// Raspberry Pi's and the Cubie's add-ons, not tried with it) it is off unless
++// SUMMIT_WEBCODECS_HARDWARE=1; an add-on that gives only RGB (the Cubie's,
++// by default) is left for software.
++class HardwareDecoderHaiku final : public ThreadSafeRefCounted<HardwareDecoderHaiku> {
++public:
++    static RefPtr<HardwareDecoderHaiku> create(const String& codecName, const webrtc::SdpVideoFormat& softwareFormat, const VideoDecoder::Config& config, VideoDecoder::OutputCallback& outputCallback)
++    {
++        static const bool allowed = [] {
++            const char* value = std::getenv("SUMMIT_WEBCODECS_HARDWARE");
++#if CPU(X86_64)
++            return !value || std::strcmp(value, "0");
++#else
++            return value && !std::strcmp(value, "1");
++#endif
++        }();
++        if (!allowed || config.decoding == VideoDecoder::HardwareAcceleration::No || !config.width || !config.height
++            || config.width > 8192 || config.height > 8192)
++            return nullptr;
++        if ((isH264(softwareFormat) || isH265(softwareFormat)) && config.description.isEmpty())
++            return nullptr;
++        auto format = encodedVideoFormatHaiku(codecName, config.width, config.height);
++        if (!format || !AddOnVideoDecoderHaiku::canDecode(*format, config.description.span()))
++            return nullptr;
++        Ref decoder = adoptRef(*new HardwareDecoderHaiku(*format, softwareFormat, config, WTF::move(outputCallback)));
++        decoder->start();
++        return decoder;
++    }
++
++    Ref<VideoDecoder::DecodePromise> decode(VideoEncodedData&& frame)
++    {
++        auto producer = makeUnique<VideoDecoder::DecodePromise::Producer>();
++        Ref<VideoDecoder::DecodePromise> promise = producer->promise();
++        Locker locker { m_lock };
++        if (m_closed) {
++            producer->reject("The decoder is closed"_s);
++            return promise;
++        }
++        m_items.append(Item { WTF::move(frame), WTF::move(producer), nullptr });
++        m_condition.notifyOne();
++        return promise;
++    }
++
++    Ref<GenericPromise> flush()
++    {
++        auto producer = makeUnique<GenericPromise::Producer>();
++        Ref<GenericPromise> promise = producer->promise();
++        Locker locker { m_lock };
++        if (m_closed) {
++            producer->resolve();
++            return promise;
++        }
++        m_items.append(Item { std::nullopt, nullptr, WTF::move(producer) });
++        m_condition.notifyOne();
++        return promise;
++    }
++
++    void close()
++    {
++        m_output->closed = true;
++        Locker locker { m_lock };
++        m_closed = true;
++        m_condition.notifyAll();
++    }
++
++private:
++    struct Item {
++        std::optional<VideoEncodedData> chunk;
++        std::unique_ptr<VideoDecoder::DecodePromise::Producer> decoded;
++        std::unique_ptr<GenericPromise::Producer> flushed;
++    };
++
++    // The page's callback, shared with the software decoder after a fall
++    // back. Pictures up to `skipThrough` were given out by the add-on.
++    struct Output : ThreadSafeRefCounted<Output> {
++        VideoDecoder::OutputCallback callback;
++        // Nothing reaches the page after close() or reset().
++        std::atomic<bool> closed { false };
++        Lock lock;
++        std::optional<int64_t> skipThrough WTF_GUARDED_BY_LOCK(lock);
++        std::optional<int64_t> lastOutput WTF_GUARDED_BY_LOCK(lock);
++
++        void deliver(std::expected<VideoDecoder::DecodedFrame, String>&& result, bool fromSoftware)
++        {
++            if (closed)
++                return;
++            {
++                Locker locker { lock };
++                if (result && fromSoftware && skipThrough) {
++                    if (result->timestamp <= *skipThrough)
++                        return;
++                    skipThrough = std::nullopt;
++                }
++                if (result)
++                    lastOutput = result->timestamp;
++            }
++            callback(WTF::move(result));
++        }
++    };
++
++    HardwareDecoderHaiku(const media_format& format, const webrtc::SdpVideoFormat& softwareFormat, const VideoDecoder::Config& config, VideoDecoder::OutputCallback&& outputCallback)
++        : m_format(format)
++        , m_softwareFormat(softwareFormat)
++        , m_config(config)
++        , m_output(adoptRef(*new Output))
++    {
++        m_output->callback = WTF::move(outputCallback);
++    }
++
++    void start()
++    {
++        Thread::create("WebCodecs hardware video decoder"_s, [protectedThis = Ref { *this }] {
++            protectedThis->run();
++        })->detach();
++    }
++
++    // The add-on's chunk source: the page's next chunk, waited for.
++    status_t nextChunk(const void** data, size_t* size, media_header* header)
++    {
++        // Settled once the lock is given back.
++        std::unique_ptr<VideoDecoder::DecodePromise::Producer> taken;
++        auto settle = makeScopeExit([&] {
++            if (taken)
++                taken->resolve();
++        });
++        Locker locker { m_lock };
++        while (m_items.isEmpty() && !m_closed)
++            m_condition.wait(m_lock);
++        if (m_closed)
++            return B_CANCELED;
++        auto item = m_items.takeFirst();
++        if (item.flushed) {
++            m_flushing = WTF::move(item.flushed);
++            return B_LAST_BUFFER_ERROR;
++        }
++        auto& chunk = *item.chunk;
++        if (chunk.isKeyFrame)
++            m_sinceKeyFrame.clear();
++        if (m_sinceKeyFrame.size() < maximumReplayedChunks)
++            m_sinceKeyFrame.append(VideoEncodedData { chunk.data.copyRef(), chunk.isKeyFrame, chunk.timestamp, chunk.duration });
++        else
++            m_replayIncomplete = true;
++        m_durations.set(chunk.timestamp, chunk.duration);
++        if (m_durations.size() > 256)
++            m_durations.clear();
++        m_current = WTF::move(chunk.data);
++        *data = m_current->span().data();
++        *size = m_current->size();
++        std::memset(header, 0, sizeof(*header));
++        header->type = B_MEDIA_ENCODED_VIDEO;
++        header->start_time = item.chunk->timestamp;
++        header->size_used = *size;
++        taken = WTF::move(item.decoded);
++        return B_OK;
++    }
++
++    void run()
++    {
++        auto addOn = AddOnVideoDecoderHaiku::create(m_format, m_config.description.span(), [this](const void** data, size_t* size, media_header* header) {
++            return nextChunk(data, size, header);
++        }, true, false);
++        if (addOn && addOn->hasPlanes()) {
++            std::fprintf(stderr, "Summit media: WebCodecs decodes on %s\n", addOn->codecInfo().pretty_name);
++            if (decodeWithAddOn(*addOn))
++                return;
++        } else {
++            Locker locker { m_lock };
++            if (m_closed)
++                return;
++        }
++        addOn = nullptr;
++        decodeInSoftware();
++    }
++
++    // Returns false when the add-on failed and software should take over.
++    bool decodeWithAddOn(AddOnVideoDecoderHaiku& addOn)
++    {
++        Vector<uint8_t> planes(addOn.planesSize());
++        const auto layout = addOn.layout();
++        for (;;) {
++            int64 count = 0;
++            media_header header;
++            status_t status = addOn.decodePlanes(planes.mutableSpan().data(), &count, &header);
++            if (status == B_OK && count == 1) {
++                deliver(planes.span(), layout, header.start_time);
++                continue;
++            }
++            if (status == B_OK && !count)
++                continue;
++            if (status == B_LAST_BUFFER_ERROR) {
++                // The flush's chunks are all out; the next chunk is a key frame.
++                std::unique_ptr<GenericPromise::Producer> flushed;
++                {
++                    Locker locker { m_lock };
++                    flushed = WTF::move(m_flushing);
++                    m_sinceKeyFrame.clear();
++                    m_replayIncomplete = false;
++                }
++                if (flushed)
++                    flushed->resolve();
++                if (addOn.seekedTo(0, 0) != B_OK)
++                    return false;
++                continue;
++            }
++            Locker locker { m_lock };
++            if (m_closed || status == B_CANCELED)
++                return true;
++            std::fprintf(stderr, "Summit media: WebCodecs hardware decoding failed (%s); software takes over\n", strerror(status));
++            return false;
++        }
++    }
++
++    void deliver(std::span<const uint8_t> planes, const AddOnVideoDecoderHaiku::I420Layout& layout, int64_t timestamp)
++    {
++        std::optional<uint64_t> duration;
++        {
++            Locker locker { m_lock };
++            duration = m_durations.take(timestamp);
++        }
++        // Without a colour space from the page, as the media players take
++        // pictures that say nothing (I420Layout::bt709()).
++        PlatformVideoColorSpace colorSpace = m_config.colorSpace.value_or(layout.bt709()
++            ? PlatformVideoColorSpace { PlatformVideoColorPrimaries::Bt709, PlatformVideoTransferCharacteristics::Bt709, PlatformVideoMatrixCoefficients::Bt709, false }
++            : rec601ColorSpace());
++        IntSize size(layout.width, layout.height);
++        Ref frame = VideoFrameHaiku::create(layout.nv12 ? VideoFrameHaiku::Format::NV12 : VideoFrameHaiku::Format::I420, size, MediaTime(timestamp, 1000000), false, VideoFrame::Rotation::None, WTF::move(colorSpace));
++        const unsigned chromaRows = (layout.height + 1) / 2;
++        const size_t chromaBytes = layout.nv12 ? (layout.width + 1) / 2 * 2 : (layout.width + 1) / 2;
++        for (unsigned plane = 0; plane < frame->planeCount(); ++plane) {
++            const auto& target = frame->plane(plane);
++            const uint8_t* source = planes.data() + (plane ? layout.chromaOffset(plane) : 0);
++            const size_t sourceStride = plane ? layout.chromaRowBytes() : layout.lumaRowBytes;
++            const unsigned rows = plane ? chromaRows : layout.height;
++            const size_t bytes = std::min(plane ? chromaBytes : size_t(layout.width), target.stride);
++            for (unsigned y = 0; y < rows; ++y)
++                std::memcpy(target.data + y * target.stride, source + y * sourceStride, bytes);
++        }
++        m_output->deliver(VideoDecoder::DecodedFrame { WTF::move(frame), timestamp, duration }, false);
++    }
++
++    // The software decoder from here on: the chunks since the last key frame
++    // first (pictures the add-on gave out are not given again), then the rest.
++    void decodeInSoftware()
++    {
++        Vector<VideoEncodedData> replay;
++        std::unique_ptr<GenericPromise::Producer> flushing;
++        bool replayIncomplete = false;
++        {
++            Locker locker { m_lock };
++            replayIncomplete = m_replayIncomplete;
++            replay = std::exchange(m_sinceKeyFrame, { });
++            flushing = WTF::move(m_flushing);
++        }
++        {
++            Locker locker { m_output->lock };
++            m_output->skipThrough = m_output->lastOutput;
++        }
++        RefPtr software = replayIncomplete ? nullptr : InternalDecoderHaiku::create(m_softwareFormat, m_config, [output = m_output](std::expected<VideoDecoder::DecodedFrame, String>&& result) {
++            output->deliver(WTF::move(result), true);
++        });
++        if (!software) {
++            // Too far from a key frame to carry on, or no software decoder.
++            callOutputError();
++            close();
++            if (flushing)
++                flushing->resolve();
++            rejectRemaining();
++            return;
++        }
++        auto decodeChunk = [this, software](VideoEncodedData&& chunk) {
++            software->queue().dispatch([software, output = m_output, chunk = WTF::move(chunk)] mutable {
++                if (auto error = software->decodeNow(WTF::move(chunk)))
++                    output->deliver(makeUnexpected(WTF::move(*error)), true);
++            });
++        };
++        auto drain = [software](std::unique_ptr<GenericPromise::Producer>&& flushed) {
++            software->queue().dispatch([software, flushed = WTF::move(flushed)] mutable {
++                software->drain();
++                if (flushed)
++                    flushed->resolve();
++            });
++        };
++        for (auto& chunk : replay)
++            decodeChunk(WTF::move(chunk));
++        if (flushing)
++            drain(WTF::move(flushing));
++        for (;;) {
++            std::optional<Item> item;
++            {
++                Locker locker { m_lock };
++                while (m_items.isEmpty() && !m_closed)
++                    m_condition.wait(m_lock);
++                if (m_closed)
++                    break;
++                item.emplace(m_items.takeFirst());
++            }
++            if (item->flushed) {
++                drain(WTF::move(item->flushed));
++                continue;
++            }
++            decodeChunk(WTF::move(*item->chunk));
++            item->decoded->resolve();
++        }
++        software->queue().dispatch([software] {
++            software->close();
++        });
++        rejectRemaining();
++    }
++
++    void callOutputError()
++    {
++        m_output->deliver(makeUnexpected("Decoding failed"_s), false);
++    }
++
++    void rejectRemaining()
++    {
++        Deque<Item> items;
++        {
++            Locker locker { m_lock };
++            items = std::exchange(m_items, { });
++        }
++        for (auto& item : items) {
++            if (item.decoded)
++                item.decoded->reject("The decoder is closed"_s);
++            if (item.flushed)
++                item.flushed->resolve();
++        }
++    }
++
++    // Enough for two seconds of 60 fps between key frames, as a page's
++    // stream normally has; past it a failure is an error instead.
++    static constexpr size_t maximumReplayedChunks = 600;
++
++    const media_format m_format;
++    const webrtc::SdpVideoFormat m_softwareFormat;
++    const VideoDecoder::Config m_config;
++    const Ref<Output> m_output;
++    Lock m_lock;
++    Condition m_condition;
++    Deque<Item> m_items WTF_GUARDED_BY_LOCK(m_lock);
++    bool m_closed WTF_GUARDED_BY_LOCK(m_lock) { false };
++    std::unique_ptr<GenericPromise::Producer> m_flushing WTF_GUARDED_BY_LOCK(m_lock);
++    Vector<VideoEncodedData> m_sinceKeyFrame WTF_GUARDED_BY_LOCK(m_lock);
++    bool m_replayIncomplete WTF_GUARDED_BY_LOCK(m_lock) { false };
++    HashMap<int64_t, std::optional<uint64_t>, WTF::IntHash<int64_t>, WTF::SignedWithZeroKeyHashTraits<int64_t>> m_durations WTF_GUARDED_BY_LOCK(m_lock);
++    // The chunk the add-on has now; it stays until the next is taken.
++    RefPtr<SharedBuffer> m_current;
++};
++
++class HardwareVideoDecoderHaiku final : public VideoDecoder {
++public:
++    static Ref<HardwareVideoDecoderHaiku> create(Ref<HardwareDecoderHaiku>&& decoder) { return adoptRef(*new HardwareVideoDecoderHaiku(WTF::move(decoder))); }
++    ~HardwareVideoDecoderHaiku() { m_decoder->close(); }
++
++private:
++    explicit HardwareVideoDecoderHaiku(Ref<HardwareDecoderHaiku>&& decoder)
++        : m_decoder(WTF::move(decoder))
++    {
++    }
++
++    Ref<DecodePromise> decode(VideoEncodedData&& frame) final { return m_decoder->decode(WTF::move(frame).isolatedCopy()); }
++    Ref<GenericPromise> flush() final { return m_decoder->flush(); }
++    void reset() final { m_decoder->close(); }
++    void close() final { m_decoder->close(); }
++
++    const Ref<HardwareDecoderHaiku> m_decoder;
++};
++
 +} // namespace
 +
 +void createLibWebRTCVideoDecoderHaiku(const String& codecName, const VideoDecoder::Config& config, VideoDecoder::CreateCallback&& callback, VideoDecoder::OutputCallback&& outputCallback)
 +{
 +    auto format = sdpFormatForCodec(codecName);
++    if (format) {
++        if (RefPtr hardware = HardwareDecoderHaiku::create(codecName, *format, config, outputCallback)) {
++            callback(Ref<VideoDecoder> { HardwareVideoDecoderHaiku::create(hardware.releaseNonNull()) });
++            return;
++        }
++    }
 +    RefPtr decoder = format ? InternalDecoderHaiku::create(*format, config, WTF::move(outputCallback)) : nullptr;
 +    if (!decoder) {
 +        callback(makeUnexpected("Not supported"_s));

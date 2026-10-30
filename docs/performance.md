@@ -347,6 +347,58 @@ identical faces would remove most of The Guardian's load-time repaints.
 canvas colour stays the same. Patterns from texture-backed images still
 draw their tile into a new GPU surface per recording.
 
+## 30 October 2026: VP9 and AV1 on AMD's video engine; decoder timestamps trusted (#115)
+
+Measured on the Framework 13 (Radeon 760M, VCN 4; hrev60207+2112) with the
+proposed `amduvd` add-on that has VP9 and AV1 decoders (air/OS issue text and
+patch with #115; loaded from a test directory with
+`SUMMIT_HARDWARE_VIDEO_ADDONS`). Before = the same engine with the installed
+add-on (no VP9/AV1: libavcodec's VP9, dav1d). Summit's web process, 10 s
+windows of 60 fps playback; dropped frames in that window.
+
+| Stream (YouTube) | Before: cores, dropped | After: cores, dropped |
+| --- | --- | --- |
+| VP9 1080p60 (itag 303), MSE test page | 0.72, 2 | 0.38, 1 |
+| VP9 1440p60 (308) | 0.92, 0 | 0.39, 0 |
+| VP9 2160p60 (315) | 2.01, 1 | 0.64, 7 |
+| AV1 1080p60 (399) | 0.92, 0 | 0.39, 7 |
+| AV1 1440p60 (400) | 1.38, 0 | 0.41, 0 |
+| AV1 2160p60 (401) | 3.07, 3 | 0.70, 1 |
+| AV1 10-bit HDR 2160p60 (701) | 4.75, 32 | 0.83, 3 |
+| youtube.com, VP9 1080p60 | 0.76, 4 | 0.45, 1 |
+| youtube.com, VP9 1440p60 | 1.12, 1 | 0.44, 2 |
+| youtube.com, VP9 2160p60 | 2.23, 0 | 0.70, 0 |
+
+(The test page plays YouTube's own DASH files through Media Source; on
+youtube.com the page chose VP9 at each size both ways. Drops of a few
+frames come and go between runs on the shared laptop in both modes.) The
+add-on alone (`amduvd_decode bench`, NV12) decodes VP9 2160p at 124
+pictures a second for 0.61 of a core, AV1 2160p at 142 for 0.68, AV1 10-bit
+2160p at 97 for 0.81; the 60 hashed pictures of each test stream match
+software byte for byte. Its pictures come as NV12 (`SUMMIT_AMD_NV12=0`: RGB
+converted in the add-on, 61 pictures a second for 2160p VP9 instead of 137).
+
+WebCodecs `VideoDecoder` on the same add-on (wc.html in the test kit: IVF
+files of the same streams, 600 chunks paced at 60 a second; web process):
+VP9 1080p 0.26 core (libvpx 0.40), VP9 2160p 0.51 (libvpx 1.83), AV1 1080p
+0.26 (dav1d 0.44), AV1 2160p 0.46 (dav1d 1.47), all 600 pictures, in order,
+NV12; the luma checksums of the first pictures equal software's. Unpaced,
+1080p VP9 comes at 231-239 pictures a second (libvpx 1126). A flush
+mid-stream (VP9 at chunk 410, AV1 at 242) gives every picture before it, then
+decoding goes on from the key frame; 20 decoders closed or reset with chunks
+in flight leave no threads behind.
+
+The X399 (GTX 1070) has no VP9 path in air/OS's NVDEC add-on: VP9 there
+costs 0.55 of a core for 1080p60 and 2.5 cores for 2160p60 in the ffmpeg
+add-on (bench), the fastest software path there is (libavcodec's VP9 with
+frame threads; dav1d for AV1). Issue text for both OS changes is with #115.
+
+Timestamps: the software H.264 (B-frames), HEVC (8 and 10 bit) and AV1
+decoders were each seen to keep their chunks' times in Summit (MSE trace),
+and play and seek as before (four seeks each, first frame within one frame
+of the target, 59-60 frames in the following second); see
+[streaming-media.md](streaming-media.md).
+
 ## 30 October 2026: NVDEC pictures go to the GPU as NV12; H.265 on NVDEC (#115)
 
 The NVDEC add-on converted every picture to RGB32 on the processor (in bands,
