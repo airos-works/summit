@@ -124,11 +124,71 @@ profile:
   (screenshot); on other pages "No store found".
 - Vue.js devtools (Chrome package): the "Vue" panel appears for a page with
   Vue's development build and its page injects `user-app.js` into the page
-  through `inspectedWindow.eval` (the page then has Vue's devtools kit), but
-  the panel stays on its loading logo: its connection through the
-  background (a service worker that injects `proxy.js` with
-  `scripting.executeScript`, which itself works) never completes. Not
-  investigated further. The AMO (Manifest V2) package does not get as far:
-  its content script adds `<script src>` elements for extension files that
-  are not web-accessible, which Firefox allows for content scripts and
-  Summit refuses ("The extension resource is not accessible").
+  through `inspectedWindow.eval`, but the panel stayed on its loading logo,
+  and the AMO (Manifest V2) package did not get as far: its content script
+  adds `<script src>` elements for extension files that are not
+  web-accessible, which Summit refused. Both fixed since (below).
+
+## Vue.js devtools: listeners that are not functions, content-script resources
+
+Two engine changes make both Vue.js devtools 7.7.7 packages work:
+
+- **A listener that is not a function is ignored.** Vue's panel connects
+  with `chrome.runtime.connect()` and adds its port's `onMessage` listener
+  before the handler exists (`port.onMessage.addListener(undefined)`), inside
+  a `try` whose `catch` marks the port disconnected for good. Chrome ignores
+  such a listener (`EventEmitter::AddListener` returns when the argument is
+  not a function); Summit threw "not a function", so the panel never used
+  its port. `addListener`, `removeListener` and `hasListener` of every
+  extension event (`WebExtensionAPIEvent.idl`, now `any` arguments) ignore a
+  non-function (`hasListener` gives `false`). A call with no argument still
+  throws.
+- **An extension's content script can load the extension's own files as
+  page scripts**, as in Firefox: Vue's AMO package (`injection.js`) and its
+  `devtools-overlay.js` add `<script src="moz-extension://…/dist/prepare.js">`
+  (and `detector.js`) to the page, files its manifest does not list as
+  `web_accessible_resources`. Firefox records who set the element's `src`;
+  Summit looks at the realm of the script that is running when the script
+  element starts its load (it is inserted, or its `src` set):
+  `CachedScriptFetcher` (WebCore, Haiku only) takes the lexical global object
+  of the current JavaScript frame, and when its world is an extension's
+  content-script world (`WebExtension-<id>`) it adds a
+  `Sec-Summit-Content-Script-World` header naming that world to the request
+  and keeps the response out of the memory cache.
+  `WebExtensionURLSchemeHandlerHaiku.cpp` then serves a file that is not
+  web-accessible when the header names the content-script world of the
+  extension the file belongs to; any other extension's world, or none, is
+  refused as before. Page script cannot send the header (`Sec-` names are
+  forbidden in `fetch()` and XHR), and the page cannot reuse the response from
+  the cache. Only `no-cors` script loads (no `crossorigin` attribute) are
+  marked. `SUMMIT_CONTENT_SCRIPT_RESOURCES=0` turns this off.
+  A page's CSP still applies to such a script (Firefox exempts it); not
+  changed.
+
+### Verified (laptop, 30 Oct 2026, engine + app devtools106e)
+
+- Fixture extension `csres` (content script inserts a script that is not
+  web-accessible, and again from an event the page dispatches; the page then
+  tries the same URLs): the content script's script loaded and ran, also
+  when inserted inside the page's `dispatchEvent` (`secretRuns` 2); the
+  page's own `<script src>` for that file, with and without a query, failed,
+  as did `fetch()` with a forged `Sec-Summit-Content-Script-World` header and
+  a `no-cors` fetch; a web-accessible file loaded for the page. With
+  `SUMMIT_CONTENT_SCRIPT_RESOURCES=0` the content script's loads failed too.
+- Vue.js devtools 7.7.7, unmodified, on a page with Vue 3's development
+  build: the AMO package (MV2, persistent background,
+  `tabs.executeScript` of `proxy.js`) and the Chrome package (MV3 service
+  worker) each showed the "Vue" panel with the page's component tree (Root,
+  TodoList, three TodoItems; screenshots). With
+  `SUMMIT_CONTENT_SCRIPT_RESOURCES=0` the AMO package's page hook was never
+  installed and no "Vue" panel appeared.
+- In an extension page, `onMessage.addListener(null | undefined | 5 | "x")`
+  no longer throws and `hasListener` of those is `false`; a function is
+  added, found and removed as before.
+- Redux DevTools and the devtools fixture in the first round's profile:
+  the Redux panel listed the test page's actions, the fixture's checks
+  passed as before.
+- Vue's panel appears only if Vue's page hook was installed before the
+  page's Vue app started: on the address Summit opens at startup, the
+  content scripts can come too late (as the React hook does, above); a
+  reload fixes it.

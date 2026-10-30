@@ -11138,6 +11138,57 @@ index 341ea6e69eeb97a36a3894476b45c5c27a089b43..c0041576128e6a86673dfef61ee6936c
      updateAcceleratedActions();
  
  #if ENABLE(THREADED_ANIMATIONS)
+diff --git a/Source/WebCore/bindings/js/CachedScriptFetcher.cpp b/Source/WebCore/bindings/js/CachedScriptFetcher.cpp
+index 2c5123cbfb5f932a5841ee92f0f2a89b8eb54ef6..7b8c8ff1fcb3693b7e54f39f2a358a559a455318 100644
+--- a/Source/WebCore/bindings/js/CachedScriptFetcher.cpp
++++ b/Source/WebCore/bindings/js/CachedScriptFetcher.cpp
+@@ -34,6 +34,11 @@
+ #include "DocumentResourceLoader.h"
+ #include "Settings.h"
+ #include "WorkerOrWorkletGlobalScope.h"
++#if PLATFORM(HAIKU)
++#include "CommonVM.h"
++#include "JSDOMGlobalObject.h"
++#include <JavaScriptCore/CallFrameInlines.h>
++#endif
+ 
+ namespace WebCore {
+ 
+@@ -64,7 +69,34 @@ RefPtr<CachedResource> CachedScriptFetcher::requestResourceWithCache(Document& d
+     options.nonce = m_nonce;
+     options.destination = destination;
+ 
++#if PLATFORM(HAIKU)
++    // Firefox lets an extension's content script put that extension's own
++    // files into the page as scripts even when they are not web-accessible
++    // (Vue.js devtools' Firefox package inserts <script src> for its page
++    // script). The element is inserted, or its src set, by the script running
++    // now: when that script's realm is an extension's content-script world,
++    // the request names the world and the extension's URL scheme handler
++    // serves its own files to it (WebExtensionURLSchemeHandlerHaiku.cpp).
++    // The header has a Sec- prefix so page script cannot add it to a fetch
++    // or XHR, and such a response is not kept in the memory cache, so the
++    // page cannot reuse it either. Only no-cors loads: a crossorigin script
++    // would need the header to pass a CORS check.
++    String contentScriptWorld;
++    if (crossOriginMode.isNull() && (sourceURL.protocolIs("webkit-extension"_s) || sourceURL.protocolIs("chrome-extension"_s))) {
++        auto& vm = commonVM();
++        auto* global = vm.entryScope && vm.topCallFrame ? dynamicDowncast<JSDOMGlobalObject>(vm.topCallFrame->lexicalGlobalObject(vm)) : nullptr;
++        if (global && !global->world().isNormal() && global->world().name().startsWith("WebExtension-"_s)) {
++            contentScriptWorld = global->world().name();
++            options.cachingPolicy = CachingPolicy::DisallowCaching;
++        }
++    }
++#endif
++
+     auto request = createPotentialAccessControlRequest(URL { sourceURL }, WTF::move(options), document, crossOriginMode);
++#if PLATFORM(HAIKU)
++    if (!contentScriptWorld.isEmpty())
++        request.resourceRequest().setHTTPHeaderField(String { "Sec-Summit-Content-Script-World"_s }, contentScriptWorld);
++#endif
+     request.upgradeInsecureRequestIfNeeded(document);
+     request.setCharset(m_charset);
+     request.setPriority(WTF::move(resourceLoadPriority));
 diff --git a/Source/WebCore/bindings/js/CachedScriptSourceProvider.h b/Source/WebCore/bindings/js/CachedScriptSourceProvider.h
 index 6b884b257953dc67da8f86ca346e3b761200754c..f2f875e633370bc3adb81e3e1b51468a5f202381 100644
 --- a/Source/WebCore/bindings/js/CachedScriptSourceProvider.h
@@ -125630,10 +125681,10 @@ index 0000000000000000000000000000000000000000..41c42fb6848b3ce5783ff3102c0f6afc
 +#endif // ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
 diff --git a/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionURLSchemeHandlerHaiku.cpp b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionURLSchemeHandlerHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..77d15ea26e8c53b9f397ed21a956a689b3d2bdd1
+index 0000000000000000000000000000000000000000..54bcf8e63c696f63148ce55e9a3fd7dfe6ff3ec4
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionURLSchemeHandlerHaiku.cpp
-@@ -0,0 +1,175 @@
+@@ -0,0 +1,192 @@
 +/*
 + * Copyright (C) 2022 Apple Inc. All rights reserved.
 + *
@@ -125683,6 +125734,8 @@ index 0000000000000000000000000000000000000000..77d15ea26e8c53b9f397ed21a956a689
 +#include <WebCore/SharedBuffer.h>
 +#include <wtf/RunLoop.h>
 +#include <wtf/text/MakeString.h>
++#include <cstdlib>
++#include <cstring>
 +
 +namespace WebKit {
 +
@@ -125722,6 +125775,21 @@ index 0000000000000000000000000000000000000000..77d15ea26e8c53b9f397ed21a956a689
 +                "The extension resource is not accessible."_s, ResourceError::Type::AccessControl));
 +        };
 +
++        // Firefox lets an extension's content script load the extension's own
++        // files into the page (as <script src>) even when they are not
++        // web-accessible; the web process names the content-script world
++        // that inserted the element (CachedScriptFetcher; page script cannot
++        // set a Sec- header). Only this extension's world counts.
++        // SUMMIT_CONTENT_SCRIPT_RESOURCES=0 turns it off.
++        auto requestedByOwnContentScript = [&](WebExtensionContext& context) {
++            static const bool enabled = [] {
++                const char* value = std::getenv("SUMMIT_CONTENT_SCRIPT_RESOURCES");
++                return !value || std::strcmp(value, "0");
++            }();
++            auto world = task->request().httpHeaderField(StringView { "Sec-Summit-Content-Script-World"_s });
++            return enabled && !world.isEmpty() && world == makeString("WebExtension-"_s, context.uniqueIdentifier());
++        };
++
 +        RefPtr controller = m_webExtensionController.get();
 +        if (!controller) {
 +            denyAccess();
@@ -125741,7 +125809,7 @@ index 0000000000000000000000000000000000000000..77d15ea26e8c53b9f397ed21a956a689
 +        if (!protocolHostAndPortAreEqual(frameDocumentURL, requestURL))
 +#endif
 +        {
-+            if (!extension->isWebAccessibleResource(requestURL, frameDocumentURL)) {
++            if (!extension->isWebAccessibleResource(requestURL, frameDocumentURL) && !requestedByOwnContentScript(*context)) {
 +                denyAccess();
 +                return;
 +            }
@@ -152934,10 +153002,10 @@ index 0000000000000000000000000000000000000000..984ba69a376c8639a149e104158ce0ce
 +#endif
 diff --git a/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIEvent.cpp b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIEvent.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..b4a6d234658215095a32988042d85f840676c887
+index 0000000000000000000000000000000000000000..60a58d590e4a9ef5160d516075c24c8a3270fc76
 --- /dev/null
 +++ b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIEvent.cpp
-@@ -0,0 +1,199 @@
+@@ -0,0 +1,222 @@
 +/*
 + * Copyright (C) 2022 Apple Inc. All rights reserved.
 + *
@@ -153110,6 +153178,29 @@ index 0000000000000000000000000000000000000000..b4a6d234658215095a32988042d85f84
 +    });
 +}
 +
++void WebExtensionAPIEvent::addListenerFromScript(WebCore::FrameIdentifier frameIdentifier, JSContextRef context, JSValueRef listener)
++{
++    // Vue.js devtools' port client adds a null onMessage listener before its
++    // handler exists; an exception there left its port unused for good.
++    if (!listener || !isFunction(context, listener))
++        return;
++    addListener(frameIdentifier, toJSCallbackHandler(context, listener, protect(runtime())));
++}
++
++void WebExtensionAPIEvent::removeListenerFromScript(WebCore::FrameIdentifier frameIdentifier, JSContextRef context, JSValueRef listener)
++{
++    if (!listener || !isFunction(context, listener))
++        return;
++    removeListener(frameIdentifier, toJSCallbackHandler(context, listener, protect(runtime())));
++}
++
++bool WebExtensionAPIEvent::hasListenerFromScript(JSContextRef context, JSValueRef listener)
++{
++    if (!listener || !isFunction(context, listener))
++        return false;
++    return hasListener(toJSCallbackHandler(context, listener, protect(runtime())));
++}
++
 +void WebExtensionAPIEvent::removeAllListeners()
 +{
 +    if (m_listeners.isEmpty())
@@ -153138,7 +153229,7 @@ index 0000000000000000000000000000000000000000..b4a6d234658215095a32988042d85f84
 +
 +#endif // ENABLE(WK_WEB_EXTENSIONS)
 diff --git a/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIEvent.h b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIEvent.h
-index 8e5ecd249ca1330547c03039e959fc77b549f325..9826adea1517e419ad842c2adbb4d22c8116c2b0 100644
+index 8e5ecd249ca1330547c03039e959fc77b549f325..a0af89c0192807d252b312735df7e3641c098ef6 100644
 --- a/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIEvent.h
 +++ b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIEvent.h
 @@ -29,8 +29,10 @@
@@ -153178,7 +153269,7 @@ index 8e5ecd249ca1330547c03039e959fc77b549f325..9826adea1517e419ad842c2adbb4d22c
      void invokeListenersWithJSONArgument(const String& argument1);
      void invokeListenersWithJSONArgument(const String& argument1, const String& argument2);
  
-@@ -66,6 +87,18 @@ public:
+@@ -66,12 +87,30 @@ public:
          }
      }
  
@@ -153197,6 +153288,18 @@ index 8e5ecd249ca1330547c03039e959fc77b549f325..9826adea1517e419ad842c2adbb4d22c
      const ListenerVector& listeners() const LIFETIME_BOUND { return m_listeners; }
  
      void addListener(WebCore::FrameIdentifier, RefPtr<WebExtensionCallbackHandler>);
+     void removeListener(WebCore::FrameIdentifier, RefPtr<WebExtensionCallbackHandler>);
+     bool hasListener(RefPtr<WebExtensionCallbackHandler>);
+ 
++    // From script: as in Chrome (EventEmitter::AddListener), a listener that
++    // is not a function is ignored rather than an error.
++    void addListenerFromScript(WebCore::FrameIdentifier, JSContextRef, JSValueRef listener);
++    void removeListenerFromScript(WebCore::FrameIdentifier, JSContextRef, JSValueRef listener);
++    bool hasListenerFromScript(JSContextRef, JSValueRef listener);
++
+     void removeAllListeners();
+ 
+     virtual ~WebExtensionAPIEvent()
 diff --git a/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIExtension.cpp b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIExtension.cpp
 new file mode 100644
 index 0000000000000000000000000000000000000000..3a3556f46dc6e95781b22899a4242d16b75cd7b3
@@ -165067,17 +165170,26 @@ index 0000000000000000000000000000000000000000..dfdc20bbb1883bb0407539007a90fece
 +    readonly attribute WebExtensionAPIEvent onErased;
 +};
 diff --git a/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPIEvent.idl b/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPIEvent.idl
-index 25491a911534c611ab59ab4725e41bafeb93894d..d1c62c9c4082a2e4856f1861dde93535ceb63f39 100644
+index 25491a911534c611ab59ab4725e41bafeb93894d..a8b1ebaa1db7d052effc2faa044e723a115bedfa 100644
 --- a/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPIEvent.idl
 +++ b/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPIEvent.idl
-@@ -25,6 +25,7 @@
+@@ -25,10 +25,13 @@
  
  [
      Conditional=WK_WEB_EXTENSIONS,
 +    UseCPPAPI,
  ] interface WebExtensionAPIEvent {
  
-     [NeedsFrameIdentifier] void addListener([CallbackHandler] function listener);
+-    [NeedsFrameIdentifier] void addListener([CallbackHandler] function listener);
+-    [NeedsFrameIdentifier] void removeListener([CallbackHandler] function listener);
+-    boolean hasListener([CallbackHandler] function listener);
++    // Chrome ignores a listener that is not a function (EventEmitter::AddListener);
++    // Vue.js devtools adds null to a port's onMessage before its handler exists.
++    [NeedsFrameIdentifier, NeedsScriptContext, ImplementedAs=addListenerFromScript] void addListener([ValuesAllowed] any listener);
++    [NeedsFrameIdentifier, NeedsScriptContext, ImplementedAs=removeListenerFromScript] void removeListener([ValuesAllowed] any listener);
++    [NeedsScriptContext, ImplementedAs=hasListenerFromScript] boolean hasListener([ValuesAllowed] any listener);
+ 
+ };
 diff --git a/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPIExtension.idl b/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPIExtension.idl
 index 7075830d6ebfa91203f5d801b5afd196ec01a2c3..ba9058f1270081510a0e014dec279fdfb60d1d45 100644
 --- a/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPIExtension.idl
