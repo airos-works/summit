@@ -41028,10 +41028,10 @@ index 0000000000000000000000000000000000000000..c87bc8c087edd855e17a9d94d145ab2b
 +} // namespace SummitMPEGTS
 diff --git a/Source/WebCore/platform/graphics/haiku/MediaDecoderSelectionHaiku.cpp b/Source/WebCore/platform/graphics/haiku/MediaDecoderSelectionHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..ff8b19fa8400b45daa991f907aa3201e3c6132bb
+index 0000000000000000000000000000000000000000..bdc745990159f126cd07267b39b825ddca47e266
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/haiku/MediaDecoderSelectionHaiku.cpp
-@@ -0,0 +1,1377 @@
+@@ -0,0 +1,1444 @@
 +/*
 + * Copyright (C) 2026 Haiku, Inc. All rights reserved.
 + *
@@ -41281,6 +41281,9 @@ index 0000000000000000000000000000000000000000..ff8b19fa8400b45daa991f907aa3201e
 +    // refuses ten-bit streams. One whose codec configuration or codec string
 +    // says profile 2 goes to software from the start.
 +    bool vp9EightBitOnly { false };
++    // Its pictures come only as planes: NV12 or I420, and ten-bit ones only
++    // as P010 (rpi_hevc). See AddOnVideoDecoderHaiku::create().
++    bool planesOnly { false };
 +};
 +
 +// rpi_mmal of air/OS: the VideoCore firmware's decoder of the Raspberry Pi,
@@ -41344,6 +41347,19 @@ index 0000000000000000000000000000000000000000..ff8b19fa8400b45daa991f907aa3201e
 +    { "sunxi_cedar", ffmpegCodecVP9, 4096, 4096, 4096 * 2304, !cedarPlanesRequested(), 1, false, "/dev/misc/sunxi_ve", true },
 +#endif
 +    { "rpi_mmal", ffmpegCodecH264, 1920, 1920, 1920 * 1088, false, 0, false, nullptr, false },
++#if CPU(ARM64)
++    // rpi_hevc of air/OS (from jmgasper/haiku@de6fa6c39e): H.265 Main and
++    // Main 10 on the Raspberry Pi 4's own HEVC block, up to 4096x2304 here
++    // (the block's 4Kp60). Like rpi_mmal it registers no format, so the media
++    // kit's choice for HEVC is libavcodec, which on the Pi's A72s plays 1080p
++    // at a few pictures a second. The block writes its column ("SAND")
++    // layout and the add-on converts that on the processor: NV12 is the
++    // cheapest of its outputs (the chroma pairs are copied as they are),
++    // which the compositor takes as two planes; I420 where RGB is wanted (the
++    // conversion to RGB here is vectorised for I420); ten-bit pictures come
++    // only as P010, narrowed here to NV12.
++    { "rpi_hevc", ffmpegCodecHEVC, 4096, 4096, 4096 * 2304, false, 0, false, "/dev/misc/rpi_hevc", false },
++#endif
 +};
 +
 +// What dynamic_cast<void*> does, which the engine (built without RTTI) cannot:
@@ -41521,6 +41537,8 @@ index 0000000000000000000000000000000000000000..ff8b19fa8400b45daa991f907aa3201e
 +                    addOn.tenBitNV12 = hasDecoder(3);
 +                if (!std::strcmp(addOn.leafName, "nvdec"))
 +                    addOn.vp9EightBitOnly = true;
++                if (!std::strcmp(addOn.leafName, "rpi_hevc"))
++                    addOn.planesOnly = true;
 +            }
 +        }
 +        free(found);
@@ -41653,6 +41671,29 @@ index 0000000000000000000000000000000000000000..ff8b19fa8400b45daa991f907aa3201e
 +// Not among Haiku's colour spaces: three planes, luma and then Cb and Cr with
 +// half the rows of half the length (the Raspberry Pi add-on's).
 +constexpr color_space colorSpaceI420 = static_cast<color_space>(0x49343230); // 'I420'
++// NV12 with sixteen-bit samples, the value in their upper ten bits (rpi_hevc's
++// ten-bit pictures).
++constexpr color_space colorSpaceP010 = static_cast<color_space>(0x50303130); // 'P010'
++
++// P010 rows (`sourceRowBytes` apart) to NV12 rows of `layout`: the top eight
++// bits of each sample. The luma rows and then the rows of Cb and Cr pairs
++// follow one another in both.
++void narrowP010ToNV12(const uint8_t* source, size_t sourceRowBytes, uint8_t* target, const AddOnVideoDecoderHaiku::I420Layout& layout)
++{
++    const unsigned rows = layout.height + (layout.height + 1) / 2;
++    const unsigned samples = (layout.width + 1) & ~1u;
++    for (unsigned row = 0; row < rows; ++row) {
++        auto* from = reinterpret_cast<const uint16_t*>(source + row * sourceRowBytes);
++        uint8_t* to = target + row * layout.lumaRowBytes;
++        unsigned x = 0;
++#if CPU(ARM64)
++        for (; x + 16 <= samples; x += 16)
++            vst1q_u8(to + x, vcombine_u8(vshrn_n_u16(vld1q_u16(from + x), 8), vshrn_n_u16(vld1q_u16(from + x + 8), 8)));
++#endif
++        for (; x < samples; ++x)
++            to[x] = from[x] >> 8;
++    }
++}
 +
 +// Limited-range YCbCr to RGB in sixths of 64 (Q6): BT.709 for pictures of
 +// 720 lines and more, BT.601 below, which is what streams that say nothing
@@ -41858,6 +41899,15 @@ index 0000000000000000000000000000000000000000..ff8b19fa8400b45daa991f907aa3201e
 +    return references && *references > hardwareDecoderReferenceLimit();
 +}
 +
++bool videoPlanesWantedHaiku()
++{
++    static const bool wanted = [] {
++        const char* value = std::getenv("SUMMIT_VIDEO_PLANES");
++        return !value || std::strcmp(value, "0");
++    }();
++    return wanted;
++}
++
 +bool nv12PlanesWantedHaiku()
 +{
 +    static const bool wanted = [] {
@@ -41966,9 +42016,13 @@ index 0000000000000000000000000000000000000000..ff8b19fa8400b45daa991f907aa3201e
 +        decoder->GetCodecInfo(&result->m_codecInfo);
 +    media_format output { };
 +    const bool amd = !std::strcmp(addOn->leafName, "amduvd");
-+    const bool nv12 = addOn->nv12OrRGB && preferPlanes && nv12PlanesWantedHaiku() && (!amd || amdNV12Wanted())
-+        && (addOn->tenBitNV12 || !tenBitStream(encoded, codecConfig));
-+    const auto colorSpace = nv12 ? colorSpaceNV12Haiku : addOn->nativeRGB || addOn->nv12OrRGB ? B_RGB32 : colorSpaceI420;
++    // An add-on of planes only gives ten-bit pictures as P010, which become
++    // NV12 here (decodeNative()).
++    const bool p010 = addOn->planesOnly && tenBitStream(encoded, codecConfig);
++    const bool nv12 = (addOn->nv12OrRGB && preferPlanes && nv12PlanesWantedHaiku() && (!amd || amdNV12Wanted())
++        && (addOn->tenBitNV12 || !tenBitStream(encoded, codecConfig)))
++        || (addOn->planesOnly && !p010 && preferPlanes && videoPlanesWantedHaiku());
++    const auto colorSpace = p010 ? colorSpaceP010 : nv12 ? colorSpaceNV12Haiku : addOn->nativeRGB || addOn->nv12OrRGB ? B_RGB32 : colorSpaceI420;
 +    if (status == B_OK) {
 +        output.type = B_MEDIA_RAW_VIDEO;
 +        output.u.raw_video = media_raw_video_format::wildcard;
@@ -41988,7 +42042,8 @@ index 0000000000000000000000000000000000000000..ff8b19fa8400b45daa991f907aa3201e
 +        || uint64_t(display.line_width) * display.line_count > addOn->maxArea
 +        || display.bytes_per_row < display.line_width * (rgb ? 4u : 1u)
 +        || display.bytes_per_row > addOn->maxWidth * 4u || (!rgb && (display.bytes_per_row & 1))
-+        || (!rgb && nv12 && (display.line_width & 1))))
++        || (!rgb && (nv12 || p010) && (display.line_width & 1))
++        || (p010 && (display.bytes_per_row < display.line_width * 2u || (display.bytes_per_row & 3)))))
 +        status = B_MEDIA_BAD_FORMAT;
 +    // The source stopped (a seek): nothing is wrong with the decoder.
 +    if (status == B_CANCELED)
@@ -42002,10 +42057,17 @@ index 0000000000000000000000000000000000000000..ff8b19fa8400b45daa991f907aa3201e
 +    }
 +    result->m_backend = addOn - s_namedAddOns;
 +    result->m_nativeRGB = rgb;
-+    result->m_nv12 = !rgb && nv12;
++    result->m_nv12 = !rgb && (nv12 || p010);
 +    result->m_width = display.line_width;
 +    result->m_height = display.line_count;
 +    result->m_planesRowBytes = display.bytes_per_row;
++    if (p010) {
++        // The add-on writes P010 here; what the caller gets is NV12 with
++        // rows of half the bytes.
++        result->m_p010RowBytes = display.bytes_per_row;
++        result->m_planesRowBytes = display.bytes_per_row / 2;
++        result->m_p010Planes.grow(size_t(display.bytes_per_row) * (display.line_count + (display.line_count + 1) / 2));
++    }
 +    result->m_planes.grow(result->m_nativeRGB ? size_t(display.bytes_per_row) * display.line_count : result->layout().byteSize());
 +    return result;
 +}
@@ -42031,11 +42093,14 @@ index 0000000000000000000000000000000000000000..ff8b19fa8400b45daa991f907aa3201e
 +    if (!m_decoder)
 +        return B_NO_INIT;
 +    *count = 0;
-+    status_t status = m_decoder->Decode(buffer, count, header, info);
++    status_t status = m_decoder->Decode(m_p010RowBytes ? m_p010Planes.mutableSpan().data() : buffer, count, header, info);
 +    if (status == B_TIMED_OUT)
 +        markAddOnBroken(s_namedAddOns[m_backend], "the hardware video decoder did not answer");
 +    if (status != B_OK && status != B_LAST_BUFFER_ERROR && status != B_CANCELED && status != B_INTERRUPTED)
 +        closeFailedDecoder(s_namedAddOns[m_backend], std::exchange(m_decoder, nullptr));
++    // A picture the caller will not show (it is seeking) was not copied.
++    if (m_p010RowBytes && status == B_OK && *count == 1 && !(info && info->time_to_decode < 0 && header->start_time < -info->time_to_decode))
++        narrowP010ToNV12(m_p010Planes.span().data(), m_p010RowBytes, static_cast<uint8_t*>(buffer), layout());
 +    return status;
 +}
 +
@@ -42146,7 +42211,7 @@ index 0000000000000000000000000000000000000000..ff8b19fa8400b45daa991f907aa3201e
 +    return decoder;
 +}
 +
-+std::unique_ptr<SubstituteVideoDecoderHaiku> SubstituteVideoDecoderHaiku::createForTrackWithoutDecoder(BMediaTrack& track, const media_format& decodedFormat)
++std::unique_ptr<SubstituteVideoDecoderHaiku> SubstituteVideoDecoderHaiku::createForTrackWithoutDecoder(BMediaTrack& track, const media_format& decodedFormat, bool acceptPlanes)
 +{
 +    media_format encoded;
 +    if (track.EncodedFormat(&encoded) != B_OK || encoded.type != B_MEDIA_ENCODED_VIDEO)
@@ -42154,7 +42219,7 @@ index 0000000000000000000000000000000000000000..ff8b19fa8400b45daa991f907aa3201e
 +    bigtime_t start = 0;
 +    seekTrackToTimeHaiku(track, &start);
 +    std::unique_ptr<SubstituteVideoDecoderHaiku> decoder(new SubstituteVideoDecoderHaiku(track, encoded));
-+    if (decoder->setUpAddOn(decodedFormat)) {
++    if (decoder->setUpAddOn(decodedFormat, acceptPlanes)) {
 +        std::fprintf(stderr, "Summit media: the decoder the media kit chose failed; video decoded by %s\n", decoder->m_addOn->codecInfo().pretty_name);
 +        return decoder;
 +    }
@@ -42193,6 +42258,7 @@ index 0000000000000000000000000000000000000000..ff8b19fa8400b45daa991f907aa3201e
 +    }, acceptPlanes);
 +    if (!m_addOn)
 +        return false;
++    m_acceptPlanes = acceptPlanes;
 +    media_format output = requested;
 +    auto& raw = output.u.raw_video;
 +    raw.display.format = B_RGB32;
@@ -42283,7 +42349,8 @@ index 0000000000000000000000000000000000000000..ff8b19fa8400b45daa991f907aa3201e
 +
 +std::optional<AddOnVideoDecoderHaiku::I420Layout> SubstituteVideoDecoderHaiku::planesLayout() const
 +{
-+    if (!m_addOn || !m_addOn->hasPlanes() || !m_addOn->layout().nv12)
++    // I420 too (the Raspberry Pi's rpi_mmal), where the caller takes planes.
++    if (!m_acceptPlanes || !m_addOn || !m_addOn->hasPlanes())
 +        return std::nullopt;
 +    return m_addOn->layout();
 +}
@@ -42411,10 +42478,10 @@ index 0000000000000000000000000000000000000000..ff8b19fa8400b45daa991f907aa3201e
 +} // namespace WebCore
 diff --git a/Source/WebCore/platform/graphics/haiku/MediaDecoderSelectionHaiku.h b/Source/WebCore/platform/graphics/haiku/MediaDecoderSelectionHaiku.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..f292128ffb7e634736143b1aa949c4cd66e0649f
+index 0000000000000000000000000000000000000000..ff582f23094174fff0cf70369a24713fd2500924
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/haiku/MediaDecoderSelectionHaiku.h
-@@ -0,0 +1,250 @@
+@@ -0,0 +1,259 @@
 +/*
 + * Copyright (C) 2026 Haiku, Inc. All rights reserved.
 + *
@@ -42592,6 +42659,10 @@ index 0000000000000000000000000000000000000000..f292128ffb7e634736143b1aa949c4cd
 +    media_codec_info m_codecInfo { };
 +    Vector<uint8_t> m_planes;
 +    size_t m_planesRowBytes { 0 };
++    // P010 pictures (rpi_hevc's ten-bit ones) as the add-on writes them,
++    // narrowed to NV12 for the caller; 0 for other add-ons.
++    Vector<uint8_t> m_p010Planes;
++    size_t m_p010RowBytes { 0 };
 +    unsigned m_width { 0 };
 +    unsigned m_height { 0 };
 +};
@@ -42606,6 +42677,9 @@ index 0000000000000000000000000000000000000000..f292128ffb7e634736143b1aa949c4cd
 +// Whether to ask for NV12 where a decoder can give it: SUMMIT_NVDEC_NV12=0
 +// (or SUMMIT_VIDEO_PLANES=0) says no.
 +bool nv12PlanesWantedHaiku();
++// Whether video pictures may go to the compositor as planes at all:
++// SUMMIT_VIDEO_PLANES=0 says no.
++bool videoPlanesWantedHaiku();
 +// The same for `decoder`, the media kit's choice: only the NVDEC add-on.
 +bool nvdecNV12WantedHaiku(const media_codec_info& decoder);
 +// The layout of the pictures a decoder agreed to deliver in `format`, if
@@ -42630,12 +42704,13 @@ index 0000000000000000000000000000000000000000..f292128ffb7e634736143b1aa949c4cd
 +    // images' NVDEC add-on does on a machine without a GeForce). The media
 +    // kit will not move such a track; it is moved through its extractor
 +    // (MediaTrackSeekHaiku.h). Null if no other add-on takes the stream either.
-+    static std::unique_ptr<SubstituteVideoDecoderHaiku> createForTrackWithoutDecoder(BMediaTrack&, const media_format& decodedFormat);
++    static std::unique_ptr<SubstituteVideoDecoderHaiku> createForTrackWithoutDecoder(BMediaTrack&, const media_format& decodedFormat, bool acceptPlanes = false);
 +
 +    // Returns the decoded format, which asks for what `decodedFormat` asked for.
 +    const media_format& decodedFormat() const { return m_decodedFormat; }
 +    status_t readFrame(void* buffer, int64* count, media_header*);
-+    // The layout of the NV12 pictures readPlanes() delivers, while it does.
++    // The layout of the NV12 or I420 pictures readPlanes() delivers, while it
++    // does (only for a caller that accepted planes).
 +    // After the add-on failed, pictures come from software through
 +    // readFrame() instead.
 +    std::optional<AddOnVideoDecoderHaiku::I420Layout> planesLayout() const;
@@ -42662,15 +42737,16 @@ index 0000000000000000000000000000000000000000..f292128ffb7e634736143b1aa949c4cd
 +    int64 m_framesDecoded { 0 };
 +    int64 m_framesToDiscard { 0 };
 +    status_t m_decodeStatus { B_OK };
++    bool m_acceptPlanes { false };
 +};
 +
 +} // namespace WebCore
 diff --git a/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaiku.cpp b/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..59a2ceffa822ff50a6017dc0cf272c76e93525a0
+index 0000000000000000000000000000000000000000..0e7a3b7c9eef918f07ccc15ba57cf3e9b92cd49b
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaiku.cpp
-@@ -0,0 +1,2257 @@
+@@ -0,0 +1,2259 @@
 +/*
 + * Copyright (C) 2014-2016 Haiku, Inc.
 + *
@@ -43277,11 +43353,13 @@ index 0000000000000000000000000000000000000000..59a2ceffa822ff50a6017dc0cf272c76
 +    return track.DecodedFormat(&format);
 +}
 +
-+// Whether a substitute decoder may give NV12 pictures (NVDEC for H.265).
++// Whether a substitute decoder may give planes: NV12 (NVDEC for H.265, the
++// Raspberry Pi's rpi_hevc) or I420 (its rpi_mmal), which the compositor
++// converts as it draws instead of the processor here.
 +static bool substitutePlanesAccepted()
 +{
 +#if USE(COORDINATED_GRAPHICS) && USE(TEXTURE_MAPPER) && USE(SKIA)
-+    return nv12PlanesWantedHaiku();
++    return videoPlanesWantedHaiku();
 +#else
 +    return false;
 +#endif
@@ -43827,7 +43905,7 @@ index 0000000000000000000000000000000000000000..59a2ceffa822ff50a6017dc0cf272c76
 +    std::optional<AddOnVideoDecoderHaiku::I420Layout> planes;
 +    status_t decodeStatus = track ? negotiateVideoFormatHaiku(*track, format, planes) : B_ERROR;
 +    if (track && decodeStatus != B_OK) {
-+        fallbackVideo = SubstituteVideoDecoderHaiku::createForTrackWithoutDecoder(*track, format);
++        fallbackVideo = SubstituteVideoDecoderHaiku::createForTrackWithoutDecoder(*track, format, substitutePlanesAccepted());
 +        if (fallbackVideo) {
 +            format = fallbackVideo->decodedFormat();
 +            decodeStatus = B_OK;
@@ -44647,7 +44725,7 @@ index 0000000000000000000000000000000000000000..59a2ceffa822ff50a6017dc0cf272c76
 +            }
 +            std::unique_ptr<SubstituteVideoDecoderHaiku> fallbackVideo;
 +            if (decodeStatus != B_OK && encodedFormat.type == B_MEDIA_ENCODED_VIDEO && !m_videoTrack) {
-+                fallbackVideo = SubstituteVideoDecoderHaiku::createForTrackWithoutDecoder(*track, format);
++                fallbackVideo = SubstituteVideoDecoderHaiku::createForTrackWithoutDecoder(*track, format, substitutePlanesAccepted());
 +                if (fallbackVideo) {
 +                    format = fallbackVideo->decodedFormat();
 +                    decodeStatus = B_OK;
@@ -44902,7 +44980,7 @@ index 0000000000000000000000000000000000000000..59a2ceffa822ff50a6017dc0cf272c76
 +        object->setString("videoDecoder"_s, String::fromUTF8(m_videoDecoderHaiku.c_str()));
 +        object->setBoolean("substituteDecoder"_s, m_videoDecoderSubstituteHaiku);
 +        if (m_hasVideo)
-+            object->setString("pixelFormat"_s, m_planesLayout ? "NV12"_s : "BGRA"_s);
++            object->setString("pixelFormat"_s, m_planesLayout ? (m_planesLayout->nv12 ? "NV12"_s : "I420"_s) : "BGRA"_s);
 +        if (m_frameBuffer) {
 +            object->setInteger("frameWidth"_s, m_frameBuffer->Bounds().IntegerWidth() + 1);
 +            object->setInteger("frameHeight"_s, m_frameBuffer->Bounds().IntegerHeight() + 1);
@@ -55109,7 +55187,7 @@ index ec1913422db0d8b09376627bf859ea6a40c13ebb..c16f04c3a9a5d873f8fbf3ca7ad5bc2b
      computeHeadroom();
  }
 diff --git a/Source/WebCore/platform/graphics/skia/PlatformDisplaySkia.cpp b/Source/WebCore/platform/graphics/skia/PlatformDisplaySkia.cpp
-index 776466ea87d3d721d32ac4e52db702bb2b544e46..1b6198086a440272d190286940b3e9772feb96df 100644
+index 776466ea87d3d721d32ac4e52db702bb2b544e46..c97dea6bdef5117b4bb18225eb489ea90730717f 100644
 --- a/Source/WebCore/platform/graphics/skia/PlatformDisplaySkia.cpp
 +++ b/Source/WebCore/platform/graphics/skia/PlatformDisplaySkia.cpp
 @@ -29,6 +29,9 @@
@@ -55159,7 +55237,7 @@ index 776466ea87d3d721d32ac4e52db702bb2b544e46..1b6198086a440272d190286940b3e977
          switch (critical) {
          case Critical::No:
              m_skiaGrContext->purgeUnlockedResources(GrPurgeResourceOptions::kScratchResourcesOnly);
-@@ -369,10 +384,53 @@ private:
+@@ -369,10 +384,65 @@ private:
  
  GLContext* PlatformDisplay::skiaGLContext()
  {
@@ -55168,19 +55246,17 @@ index 776466ea87d3d721d32ac4e52db702bb2b544e46..1b6198086a440272d190286940b3e977
 +    // GPU canvases (and GPU snapshots): on by default on x86_64, where they
 +    // made Speedometer's Chart.js 3.6x faster on the X399 (the whole score
 +    // +8 %); SUMMIT_SKIA_GL_CONTEXT=0 turns them off, =1 turns them on
-+    // elsewhere (the arm64 boards are untested). A software GL (llvmpipe:
-+    // stock Haiku, machines without a GPU driver) is slower than Skia's own
-+    // CPU raster, so it is not used unless forced with =1.
++    // whatever the GPU. A software GL (llvmpipe: stock Haiku, machines
++    // without a GPU driver) is slower than Skia's own CPU raster, so it is
++    // not used unless forced with =1. On arm64 only the GPUs below, where
++    // they were measured, have them by default (see armGPUCanvasRenderer()).
 +    static const char* summitSkiaGLSetting = std::getenv("SUMMIT_SKIA_GL_CONTEXT");
 +    static const bool summitSkiaGLForced = summitSkiaGLSetting && !std::strcmp(summitSkiaGLSetting, "1");
 +    static bool summitSkiaGLContextEnabled = [] {
 +        if (summitSkiaGLSetting)
 +            return summitSkiaGLForced;
-+#if CPU(X86_64)
++        // arm64: decided by the renderer when the first context is made.
 +        return true;
-+#else
-+        return false;
-+#endif
 +    }();
 +    static std::atomic<bool> summitSkiaGLSoftwareRefused { false };
 +    if (!summitSkiaGLContextEnabled || summitSkiaGLSoftwareRefused)
@@ -55209,6 +55285,20 @@ index 776466ea87d3d721d32ac4e52db702bb2b544e46..1b6198086a440272d190286940b3e977
 +                s_skiaGLContext = nullptr;
 +                return nullptr;
 +            }
++#if !CPU(X86_64)
++            // The Raspberry Pi 4's V3D: a canvas of 400 shapes, sprites and
++            // texts a frame went from 3.6 to 10.9 frames a second (1600x900,
++            // 3840x2160 desktop), and drew the same pixels.
++            auto armGPUCanvasRenderer = [](const char* renderer) {
++                return renderer && !strncmp(renderer, "V3D ", 4);
++            };
++            if (!summitSkiaGLSetting && !armGPUCanvasRenderer(renderer)) {
++                WTFLogAlways("Summit: GPU canvases are untested on %s; canvases stay on the CPU (SUMMIT_SKIA_GL_CONTEXT=1 forces the GPU path)", renderer ? renderer : "this GPU");
++                summitSkiaGLSoftwareRefused = true;
++                s_skiaGLContext = nullptr;
++                return nullptr;
++            }
++#endif
 +        }
 +#endif
      }
@@ -136621,7 +136711,7 @@ index 0000000000000000000000000000000000000000..e545399afbe8b5539a8026d49532e05a
 +
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/glib/AcceleratedBackingStore.messages.in b/Source/WebKit/UIProcess/glib/AcceleratedBackingStore.messages.in
-index 8ace95c1b44f471e9072adcce4b7875472a98436..177e029c622167f73699813a22b480252b427bc6 100644
+index 8ace95c1b44f471e9072adcce4b7875472a98436..6fc7a4a0abf48a63464a65b0589da9a902a1aec0 100644
 --- a/Source/WebKit/UIProcess/glib/AcceleratedBackingStore.messages.in
 +++ b/Source/WebKit/UIProcess/glib/AcceleratedBackingStore.messages.in
 @@ -26,7 +26,10 @@
@@ -136635,22 +136725,23 @@ index 8ace95c1b44f471e9072adcce4b7875472a98436..177e029c622167f73699813a22b48025
      DidCreateSHMBuffer(uint64_t id, WebCore::ShareableBitmapHandle handle)
  
  #if OS(ANDROID)
-@@ -35,6 +38,9 @@ messages -> AcceleratedBackingStore {
+@@ -35,6 +38,10 @@ messages -> AcceleratedBackingStore {
  
      DidDestroyBuffer(uint64_t id)
      Frame(uint64_t id, Vector<WebCore::IntRect, 1> damage, UnixFileDescriptor syncFD)
 +#if PLATFORM(HAIKU)
 +    DirectFrame(uint64_t id)
++    DidCreateSharedTargetHaiku(uint64_t id, int32_t area, uint32_t offset, WebCore::IntSize size, uint32_t bytesPerRow)
 +#endif
  
  #if ENABLE(WPE_PLATFORM)
      DidChangeBufferConfiguration(uint32_t bufferCount);
 diff --git a/Source/WebKit/UIProcess/haiku/AcceleratedBackingStore.cpp b/Source/WebKit/UIProcess/haiku/AcceleratedBackingStore.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..a0d6269d5bfabb3d4e4d2930311cf327d0b34e34
+index 0000000000000000000000000000000000000000..4bd2cf51bff1b16248fb8203b5595bb23de00dfa
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/AcceleratedBackingStore.cpp
-@@ -0,0 +1,316 @@
+@@ -0,0 +1,355 @@
 +/*
 + * Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause
 + */
@@ -136746,6 +136837,7 @@ index 0000000000000000000000000000000000000000..a0d6269d5bfabb3d4e4d2930311cf327
 +        storesByIdentifier().remove(std::exchange(m_storeIdentifier, 0));
 +        m_buffers.clear();
 +        m_images.clear();
++        m_sharedTargetSizes.clear();
 +        if (RefPtr process = m_legacyMainFrameProcess)
 +            process->removeMessageReceiver(Messages::AcceleratedBackingStore::messageReceiverName(), m_surfaceID);
 +        m_legacyMainFrameProcess = nullptr;
@@ -136851,17 +136943,48 @@ index 0000000000000000000000000000000000000000..a0d6269d5bfabb3d4e4d2930311cf327
 +    m_buffers.add(id, WTF::move(bitmap));
 +}
 +
++void AcceleratedBackingStore::didCreateSharedTargetHaiku(uint64_t id, int32_t area, uint32_t offset, WebCore::IntSize size, uint32_t bytesPerRow)
++{
++    if (size.isEmpty() || bytesPerRow < static_cast<uint32_t>(size.width()) * 4)
++        return;
++    // A BBitmap is made from an area of this team, which app_server clones
++    // in turn; the clone lives as long as the BBitmap (the view may hold the
++    // last frame after the web process let go of the buffer).
++    void* address = nullptr;
++    area_id clone = clone_area("Summit shared frame", &address, B_ANY_ADDRESS, B_READ_AREA | B_WRITE_AREA | B_CLONEABLE_AREA, area);
++    if (clone < 0)
++        return;
++    area_info info;
++    if (get_area_info(clone, &info) != B_OK || offset > info.size
++        || static_cast<uint64_t>(bytesPerRow) * size.height() > info.size - offset) {
++        delete_area(clone);
++        return;
++    }
++    auto* bitmap = new BBitmap(clone, offset, BRect(0, 0, size.width() - 1, size.height() - 1), 0, B_RGBA32, static_cast<int32>(bytesPerRow));
++    if (bitmap->InitCheck() != B_OK) {
++        delete bitmap;
++        delete_area(clone);
++        return;
++    }
++    m_images.set(id, std::shared_ptr<BBitmap>(bitmap, [clone](BBitmap* bitmap) {
++        delete bitmap;
++        delete_area(clone);
++    }));
++    m_sharedTargetSizes.set(id, size);
++}
++
 +void AcceleratedBackingStore::didDestroyBuffer(uint64_t id)
 +{
 +    m_buffers.remove(id);
 +    m_images.remove(id);
++    m_sharedTargetSizes.remove(id);
 +}
 +
 +void AcceleratedBackingStore::releaseSharedBuffer(uint64_t storeIdentifier, uint64_t surfaceID, uint64_t id)
 +{
 +    auto* store = storesByIdentifier().get(storeIdentifier);
 +    // A store that has moved to another surface since does not own the buffer.
-+    bool owned = store && store->m_surfaceID == surfaceID && store->m_buffers.contains(id);
++    bool owned = store && store->m_surfaceID == surfaceID && (store->m_buffers.contains(id) || store->m_sharedTargetSizes.contains(id));
 +    if (swapChainTraceEnabled() && !owned)
 +        std::fprintf(stderr, "Summit backing store: surface=%llu release=%llu dropped (store %p)\n",
 +            static_cast<unsigned long long>(surfaceID), static_cast<unsigned long long>(id), store);
@@ -136885,10 +137008,12 @@ index 0000000000000000000000000000000000000000..a0d6269d5bfabb3d4e4d2930311cf327
 +    // The sync file descriptor orders GPU work between processes. Nothing is
 +    // shared here but memory the web process has finished writing.
 +    RefPtr bitmap = m_buffers.get(id);
++    auto sharedTarget = m_sharedTargetSizes.find(id);
++    const bool isSharedTarget = sharedTarget != m_sharedTargetSizes.end();
 +    RefPtr webPage = m_webPage.get();
 +    RefPtr client = webPage ? webPage->pageClient() : nullptr;
-+    if (!bitmap || !client) {
-+        if (bitmap)
++    if ((!bitmap && !isSharedTarget) || !client) {
++        if (bitmap || isSharedTarget)
 +            releaseBuffer(id);
 +        frameDone();
 +        return;
@@ -136896,7 +137021,7 @@ index 0000000000000000000000000000000000000000..a0d6269d5bfabb3d4e4d2930311cf327
 +
 +    // The buffer is in device pixels; the view wants its logical size back.
 +    float scale = webPage->deviceScaleFactor();
-+    auto size = bitmap->size();
++    auto size = bitmap ? bitmap->size() : sharedTarget->value;
 +    if (scale > 0 && scale != 1)
 +        size = WebCore::IntSize { static_cast<int>(std::lround(size.width() / scale)), static_cast<int>(std::lround(size.height() / scale)) };
 +
@@ -136941,6 +137066,11 @@ index 0000000000000000000000000000000000000000..a0d6269d5bfabb3d4e4d2930311cf327
 +    // a view that draws in response to a frame would then be waiting on itself.
 +    // Waiting is unnecessary anyway -- publish() copies the pixels into a BBitmap
 +    // before it returns, so the buffer is free the moment this call is done.
++    if (!bitmap) {
++        releaseBuffer(id);
++        frameDone();
++        return;
++    }
 +    client->presentBitmapHaiku(bitmap.releaseNonNull(), size, scale, [] { });
 +    releaseBuffer(id);
 +    frameDone();
@@ -136969,10 +137099,10 @@ index 0000000000000000000000000000000000000000..a0d6269d5bfabb3d4e4d2930311cf327
 +#endif // USE(COORDINATED_GRAPHICS)
 diff --git a/Source/WebKit/UIProcess/haiku/AcceleratedBackingStore.h b/Source/WebKit/UIProcess/haiku/AcceleratedBackingStore.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..bb02b56e80f2a4df5762a911a564777cf82ca1d3
+index 0000000000000000000000000000000000000000..8cfbb2ef9ab1590473ee5af50c1bd2eb97daa1ff
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/AcceleratedBackingStore.h
-@@ -0,0 +1,97 @@
+@@ -0,0 +1,103 @@
 +/*
 + * Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause
 + */
@@ -136983,6 +137113,7 @@ index 0000000000000000000000000000000000000000..bb02b56e80f2a4df5762a911a564777c
 +
 +#include "MessageReceiver.h"
 +#include <WebCore/IntRect.h>
++#include <WebCore/IntSizeHash.h>
 +#include <WebCore/ShareableBitmap.h>
 +#include <wtf/HashMap.h>
 +#include <wtf/MonotonicTime.h>
@@ -137038,6 +137169,9 @@ index 0000000000000000000000000000000000000000..bb02b56e80f2a4df5762a911a564777c
 +    void didReceiveMessage(IPC::Connection&, IPC::Decoder&) override;
 +
 +    void didCreateSHMBuffer(uint64_t id, WebCore::ShareableBitmapHandle&&);
++    // A buffer that is a GPU buffer of the web process (Raspberry Pi 4: a
++    // linear V3D buffer the frames are blitted into), by its cloneable area.
++    void didCreateSharedTargetHaiku(uint64_t id, int32_t area, uint32_t offset, WebCore::IntSize, uint32_t bytesPerRow);
 +    void didDestroyBuffer(uint64_t id);
 +    void frame(uint64_t id, Rects&&, WTF::UnixFileDescriptor&&);
 +    // A frame the web process copied into the screen itself.
@@ -137057,6 +137191,8 @@ index 0000000000000000000000000000000000000000..bb02b56e80f2a4df5762a911a564777c
 +    // so a frame is never copied in this process. The view keeps the frame it
 +    // shows; the buffer returns to the web process once a newer one replaces it.
 +    HashMap<uint64_t, std::shared_ptr<BBitmap>> m_images;
++    // The sizes of the buffers that are only in m_images (shared targets).
++    HashMap<uint64_t, WebCore::IntSize> m_sharedTargetSizes;
 +    std::shared_ptr<DirectPresentTargetHaiku> m_directTarget;
 +    // A target sent when the surface is announced can arrive before the web
 +    // process listens: while the surface sends ordinary frames although it
@@ -177193,7 +177329,7 @@ index 0000000000000000000000000000000000000000..abc82f6d26d2b1374740dc304282ae75
 +
 +}
 diff --git a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/AcceleratedSurface.cpp b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/AcceleratedSurface.cpp
-index 8177756a0e14111347846c912b8e3851f2559b4a..4881aba465620c047545aaca236ef1ad3dadf836 100644
+index 8177756a0e14111347846c912b8e3851f2559b4a..6a0da841cc965b089dc48ae4514ddba333f93405 100644
 --- a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/AcceleratedSurface.cpp
 +++ b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/AcceleratedSurface.cpp
 @@ -26,6 +26,30 @@
@@ -178274,7 +178410,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..4881aba465620c047545aaca236ef1ad
 +}
 +
 +void AcceleratedSurface::sendDeferredDirectFrameHaiku()
-+{
+ {
 +    if (!m_deferredDirectFrameHaiku)
 +        return;
 +    WebProcess::singleton().parentProcessConnection()->send(Messages::AcceleratedBackingStore::DirectFrame(std::exchange(m_deferredDirectFrameHaiku, 0)), surfaceID());
@@ -178282,7 +178418,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..4881aba465620c047545aaca236ef1ad
 +}
 +
 +void AcceleratedSurface::redisplayDirect()
- {
++{
 +    if (m_redisplayHandlerHaiku)
 +        m_redisplayHandlerHaiku();
  }
@@ -178422,7 +178558,87 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..4881aba465620c047545aaca236ef1ad
      WebProcess::singleton().parentProcessConnection()->send(Messages::AcceleratedBackingStore::Frame(m_id, WTF::move(damageRects), WTF::move(m_renderingFenceFD)), m_surface->surfaceID());
  }
  
-@@ -418,7 +1538,14 @@ std::unique_ptr<AcceleratedSurface::RenderTarget> AcceleratedSurface::RenderTarg
+@@ -410,15 +1530,94 @@ AcceleratedSurface::RenderTargetEGLImage::~RenderTargetEGLImage()
+ }
+ #endif // USE(GBM) || OS(ANDROID)
+ 
++#if PLATFORM(HAIKU)
++// air/OS's V3D Mesa (Raspberry Pi 4) makes a frame's memory a linear, cached
++// GPU buffer whose area the UI process maps: the V3D blits each frame's
++// changed rectangles there, and the CPU no longer copies the frame out of the
++// driver's readback buffer (Mesa's haiku_mesa_shared_target_*). At 3840x2160
++// that copy was 28 MB a frame, on a memory bus app_server's two copies of
++// each frame and the compositor share: scrolling Wikipedia went from 6.1-6.9
++// to 8.0-9.4 frames a second. Handing a buffer to the CPU costs the cache
++// maintenance of all of it (12 ms at that size), so Mesa copies small damage
++// with the CPU, as a read back did (2.3 ms a frame for a 120x120 animation).
++// SUMMIT_SHARED_TARGETS=0 reads back as before.
++struct HaikuMesaSharedTarget {
++    uint32_t version;
++    int32_t area;
++    uint32_t offset;
++    uint32_t bytesPerRow;
++    void* bits;
++    void* handle;
++};
++struct SharedTargetFunctionsHaiku {
++    int (*create)(unsigned, unsigned, HaikuMesaSharedTarget*) { nullptr };
++    int (*copy)(void*, unsigned, const int32_t*, unsigned) { nullptr };
++    void (*destroy)(void*) { nullptr };
++};
++static const SharedTargetFunctionsHaiku& sharedTargetFunctionsHaiku()
++{
++    static const SharedTargetFunctionsHaiku functions = [] {
++        SharedTargetFunctionsHaiku result;
++        const char* value = getenv("SUMMIT_SHARED_TARGETS");
++        if (value && !strcmp(value, "0"))
++            return result;
++        // The UI process draws such a buffer only in place.
++        value = getenv("SUMMIT_ZERO_COPY_PRESENT");
++        if (value && !strcmp(value, "0"))
++            return result;
++        image_info info;
++        int32 cookie = 0;
++        while (get_next_image_info(B_CURRENT_TEAM, &cookie, &info) == B_OK) {
++            if (!strstr(info.name, "libEGL_mesa"))
++                continue;
++            void* create = nullptr;
++            void* copy = nullptr;
++            void* destroy = nullptr;
++            if (get_image_symbol(info.id, "haiku_mesa_shared_target_create", B_SYMBOL_TYPE_TEXT, &create) == B_OK
++                && get_image_symbol(info.id, "haiku_mesa_shared_target_copy", B_SYMBOL_TYPE_TEXT, &copy) == B_OK
++                && get_image_symbol(info.id, "haiku_mesa_shared_target_destroy", B_SYMBOL_TYPE_TEXT, &destroy) == B_OK) {
++                result.create = reinterpret_cast<int (*)(unsigned, unsigned, HaikuMesaSharedTarget*)>(create);
++                result.copy = reinterpret_cast<int (*)(void*, unsigned, const int32_t*, unsigned)>(copy);
++                result.destroy = reinterpret_cast<void (*)(void*)>(destroy);
++            }
++            break;
++        }
++        return result;
++    }();
++    return functions;
++}
++#endif
++
+ std::unique_ptr<AcceleratedSurface::RenderTarget> AcceleratedSurface::RenderTargetSHMImage::create(AcceleratedSurface& surface, const IntSize& size)
+ {
++#if PLATFORM(HAIKU)
++    // TextureMapper compositing into this process's framebuffer object, which
++    // the context made current for the target's construction can blit from.
++    if (surface.usesGL() && !surface.useSkia() && !surface.shouldPaintMirrored() && sharedTargetFunctionsHaiku().create) {
++        HaikuMesaSharedTarget target { 1, -1, 0, 0, nullptr, nullptr };
++        int status = sharedTargetFunctionsHaiku().create(size.width(), size.height(), &target);
++        static std::once_flag once;
++        std::call_once(once, [status] {
++            std::fprintf(stderr, "Summit readback: %s\n", status ? "no shared GPU targets (Mesa declined); frames are read back" : "frames go into shared GPU targets");
++        });
++        if (!status)
++            return makeUnique<RenderTargetSHMImage>(surface, size, SharedTargetHaiku { target.handle, target.area, target.offset, target.bytesPerRow });
++    }
++#endif
+     RefPtr buffer = ShareableBitmap::create({ size });
+     if (!buffer) {
+         WTFLogAlways("Failed to allocate shared memory buffer of size %dx%d", size.width(), size.height());
          return nullptr;
      }
  
@@ -178437,14 +178653,29 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..4881aba465620c047545aaca236ef1ad
      if (!bufferHandle) {
          WTFLogAlways("Failed to create handle for shared memory buffer");
          return nullptr;
-@@ -439,13 +1566,487 @@ AcceleratedSurface::RenderTargetSHMImage::RenderTargetSHMImage(AcceleratedSurfac
+@@ -439,13 +1638,547 @@ AcceleratedSurface::RenderTargetSHMImage::RenderTargetSHMImage(AcceleratedSurfac
      WebProcess::singleton().parentProcessConnection()->send(Messages::AcceleratedBackingStore::DidCreateSHMBuffer(m_id, WTF::move(bitmapHandle)), m_surface->surfaceID());
  }
  
 +#if PLATFORM(HAIKU)
++AcceleratedSurface::RenderTargetSHMImage::RenderTargetSHMImage(AcceleratedSurface& surface, const IntSize& size, SharedTargetHaiku&& target)
++    : RenderTargetShareableBuffer(surface, size)
++    , m_sharedTargetHaiku(WTF::move(target))
++{
++    initializeColorBuffer();
++    WebProcess::singleton().parentProcessConnection()->send(Messages::AcceleratedBackingStore::DidCreateSharedTargetHaiku(m_id, m_sharedTargetHaiku->area,
++        m_sharedTargetHaiku->offset, size, m_sharedTargetHaiku->bytesPerRow), m_surface->surfaceID());
++}
++#endif
++
++#if PLATFORM(HAIKU)
 +AcceleratedSurface::RenderTargetSHMImage::~RenderTargetSHMImage()
 +{
 +#if PLATFORM(HAIKU)
++    // Mesa lets go of the buffer without a context; the UI process's clone
++    // keeps the memory while it shows the last frame.
++    if (m_sharedTargetHaiku)
++        sharedTargetFunctionsHaiku().destroy(m_sharedTargetHaiku->handle);
 +    if (m_contextState && !m_contextState->canDeleteResources())
 +        return;
 +#endif
@@ -178853,6 +179084,47 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..4881aba465620c047545aaca236ef1ad
 +}
 +#endif
 +
++bool AcceleratedSurface::RenderTargetSHMImage::copyIntoSharedTargetHaiku()
++{
++    // What changed since this target was last shown, as for a read back
++    // (readBackThroughPixelBuffer()).
++    IntRect whole { { }, m_size };
++    Vector<IntRect, 1> rects;
++#if ENABLE(DAMAGE_TRACKING)
++    const std::optional<Damage>& damage = m_bitmapDamageHaiku ? m_bitmapDamageHaiku : m_readbackDamage;
++    if (damage && damage->mode() != Damage::Mode::Full && (m_bitmapDamageHaiku || !m_bitmapStale)) {
++        if (damage->isEmpty())
++            return true;
++        for (auto rect : damage->rects()) {
++            rect.intersect(whole);
++            if (!rect.isEmpty())
++                rects.append(rect);
++        }
++        rects = mergedReadbackRectsHaiku(WTF::move(rects));
++    } else
++#endif
++        rects.append(whole);
++    Vector<int32_t> values;
++    values.reserveInitialCapacity(rects.size() * 4);
++    double pixels = 0;
++    for (auto& rect : rects) {
++        values.appendList({ rect.x(), rect.y(), rect.width(), rect.height() });
++        pixels += rect.width() * double(rect.height());
++    }
++    bigtime_t start = PresentStageStatsHaiku::enabled() ? system_time() : 0;
++    glBindFramebuffer(GL_FRAMEBUFFER, m_fbo);
++    int status = sharedTargetFunctionsHaiku().copy(m_sharedTargetHaiku->handle, m_fbo, values.span().data(), rects.size());
++    if (start) {
++        static NeverDestroyed<PresentStageStatsHaiku> copied("pixels copied into shared targets (web)");
++        copied.get().add(system_time() - start, pixels / 1e6);
++    }
++    if (status) {
++        static std::once_flag once;
++        std::call_once(once, [status] { std::fprintf(stderr, "Summit readback: a copy into a shared GPU target failed (%d)\n", status); });
++    }
++    return !status;
++}
++
 +bool AcceleratedSurface::RenderTargetSHMImage::presentDirectlyHaiku(DirectPresenterHaiku* presenter, const std::optional<Damage>& damage)
 +{
 +    m_presentedDirectly = false;
@@ -178914,6 +179186,10 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..4881aba465620c047545aaca236ef1ad
 +        static std::once_flag once;
 +        std::call_once(once, [this] { std::fprintf(stderr, "Summit readback: %s compositing\n", m_surface->useSkia() ? (m_surface->usesGL() ? "Skia GL" : "Skia CPU") : "TextureMapper GL"); });
 +    }
++    if (m_sharedTargetHaiku) {
++        copyIntoSharedTargetHaiku();
++        return;
++    }
 +#endif
      if (m_surface->useSkia()) {
          if (!m_skiaSurface)
@@ -178925,7 +179201,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..4881aba465620c047545aaca236ef1ad
  
          SkImageInfo info = SkImageInfo::Make(m_bitmap->size().width(), m_bitmap->size().height(), SkColorType::kBGRA_8888_SkColorType, SkAlphaType::kPremul_SkAlphaType);
  
-@@ -457,9 +2058,14 @@ void AcceleratedSurface::RenderTargetSHMImage::didRenderFrame()
+@@ -457,9 +2190,14 @@ void AcceleratedSurface::RenderTargetSHMImage::didRenderFrame()
          return;
      }
  
@@ -178940,7 +179216,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..4881aba465620c047545aaca236ef1ad
  std::unique_ptr<AcceleratedSurface::RenderTarget> AcceleratedSurface::RenderTargetTexture::create(AcceleratedSurface& surface, const IntSize& size)
  {
      auto texture = BitmapTexture::create(size);
-@@ -515,8 +2121,9 @@ AcceleratedSurface::RenderTargetTexture::RenderTargetTexture(AcceleratedSurface&
+@@ -515,8 +2253,9 @@ AcceleratedSurface::RenderTargetTexture::RenderTargetTexture(AcceleratedSurface&
  }
  
  AcceleratedSurface::RenderTargetTexture::~RenderTargetTexture() = default;
@@ -178951,7 +179227,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..4881aba465620c047545aaca236ef1ad
  
  #if USE(WPE_RENDERER)
  std::unique_ptr<AcceleratedSurface::RenderTarget> AcceleratedSurface::RenderTargetWPEBackend::create(AcceleratedSurface& surface, const IntSize& initialSize, UnixFileDescriptor&& hostFD)
-@@ -594,7 +2201,7 @@ void AcceleratedSurface::RenderTargetWPEBackend::didRenderFrame()
+@@ -594,7 +2333,7 @@ void AcceleratedSurface::RenderTargetWPEBackend::didRenderFrame()
  AcceleratedSurface::SwapChain::SwapChain(AcceleratedSurface& surface)
      : m_surface(surface)
  {
@@ -178960,7 +179236,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..4881aba465620c047545aaca236ef1ad
      if (!m_surface->hardwareAccelerationEnabled()) {
          m_type = Type::SharedMemory;
          return;
-@@ -632,7 +2239,7 @@ AcceleratedSurface::SwapChain::SwapChain(AcceleratedSurface& surface)
+@@ -632,7 +2371,7 @@ AcceleratedSurface::SwapChain::SwapChain(AcceleratedSurface& surface)
      case PlatformDisplay::Type::GBM:
  #endif
          break;
@@ -178969,7 +179245,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..4881aba465620c047545aaca236ef1ad
  #if USE(WPE_RENDERER)
      case PlatformDisplay::Type::WPE:
          m_type = Type::WPEBackend;
-@@ -646,11 +2253,19 @@ AcceleratedSurface::SwapChain::SwapChain(AcceleratedSurface& surface)
+@@ -646,11 +2385,19 @@ AcceleratedSurface::SwapChain::SwapChain(AcceleratedSurface& surface)
      case PlatformDisplay::Type::Default:
          break;
  #endif // PLATFORM(GTK)
@@ -178990,7 +179266,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..4881aba465620c047545aaca236ef1ad
  void AcceleratedSurface::SwapChain::setupBufferFormat()
  {
      if (m_type != Type::EGLImage)
-@@ -749,7 +2364,7 @@ bool AcceleratedSurface::SwapChain::resize(const IntSize& size)
+@@ -749,7 +2496,7 @@ bool AcceleratedSurface::SwapChain::resize(const IntSize& size)
  
  bool AcceleratedSurface::SwapChain::handleBufferFormatChangeIfNeeded()
  {
@@ -178999,7 +179275,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..4881aba465620c047545aaca236ef1ad
      if (m_type == Type::EGLImage) {
          Locker locker { m_bufferFormatLock };
          if (m_bufferFormatChanged) {
-@@ -765,7 +2380,7 @@ bool AcceleratedSurface::SwapChain::handleBufferFormatChangeIfNeeded()
+@@ -765,7 +2512,7 @@ bool AcceleratedSurface::SwapChain::handleBufferFormatChangeIfNeeded()
  std::unique_ptr<AcceleratedSurface::RenderTarget> AcceleratedSurface::SwapChain::createTarget() const
  {
      switch (m_type) {
@@ -179008,7 +179284,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..4881aba465620c047545aaca236ef1ad
  #if USE(GBM) || OS(ANDROID)
      case Type::EGLImage: {
          Locker locker { m_bufferFormatLock };
-@@ -773,7 +2388,11 @@ std::unique_ptr<AcceleratedSurface::RenderTarget> AcceleratedSurface::SwapChain:
+@@ -773,7 +2520,11 @@ std::unique_ptr<AcceleratedSurface::RenderTarget> AcceleratedSurface::SwapChain:
      }
  #endif
      case Type::Texture:
@@ -179020,7 +179296,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..4881aba465620c047545aaca236ef1ad
      case Type::SharedMemory:
          return RenderTargetSHMImage::create(m_surface.get(), m_size);
  #endif
-@@ -812,6 +2431,11 @@ AcceleratedSurface::RenderTarget* AcceleratedSurface::SwapChain::nextTarget()
+@@ -812,6 +2563,11 @@ AcceleratedSurface::RenderTarget* AcceleratedSurface::SwapChain::nextTarget()
              if (auto target = createTarget())
                  m_freeTargets.append(WTF::move(target));
          }
@@ -179032,7 +179308,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..4881aba465620c047545aaca236ef1ad
  
  #if ENABLE(WPE_PLATFORM)
          if (m_freeTargets.size() != targetsToCreate)
-@@ -841,6 +2465,12 @@ void AcceleratedSurface::SwapChain::releaseTarget(uint64_t targetID, UnixFileDes
+@@ -841,6 +2597,12 @@ void AcceleratedSurface::SwapChain::releaseTarget(uint64_t targetID, UnixFileDes
          m_freeTargets.insert(0, WTF::move(m_lockedTargets[index]));
          m_lockedTargets.removeAt(index);
      }
@@ -179045,7 +179321,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..4881aba465620c047545aaca236ef1ad
  }
  
  void AcceleratedSurface::SwapChain::reset()
-@@ -859,6 +2489,11 @@ void AcceleratedSurface::SwapChain::releaseUnusedBuffers()
+@@ -859,6 +2621,11 @@ void AcceleratedSurface::SwapChain::releaseUnusedBuffers()
  #if USE(WPE_RENDERER)
      ASSERT(m_type != Type::WPEBackend);
  #endif
@@ -179057,7 +179333,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..4881aba465620c047545aaca236ef1ad
  
  #if ENABLE(WPE_PLATFORM)
      WebProcess::singleton().parentProcessConnection()->send(Messages::AcceleratedBackingStore::DidChangeBufferConfiguration(m_lockedTargets.size()), m_surface->surfaceID());
-@@ -901,6 +2536,17 @@ Vector<IntRect, 1> AcceleratedSurface::SwapChainDamageTracker::takeFrameDamageRe
+@@ -901,6 +2668,17 @@ Vector<IntRect, 1> AcceleratedSurface::SwapChainDamageTracker::takeFrameDamageRe
      if (frameDamage.mode() != Damage::Mode::Rectangles || m_swapChain.size().isEmpty())
          return frameDamage.rects();
  
@@ -179075,7 +179351,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..4881aba465620c047545aaca236ef1ad
      // The frame damage is fine-grained, because the compositing restriction needs it that way, but the
      // platform only wants a bounded number of rects. Merge it down to the threshold here, which is the
      // only thing the threshold bounds.
-@@ -929,7 +2575,7 @@ bool AcceleratedSurface::shouldPaintMirrored() const
+@@ -929,7 +2707,7 @@ bool AcceleratedSurface::shouldPaintMirrored() const
      switch (m_swapChain.type()) {
      case SwapChain::Type::Invalid:
          return false;
@@ -179084,7 +179360,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..4881aba465620c047545aaca236ef1ad
      case SwapChain::Type::Texture:
  #if USE(GBM) || OS(ANDROID)
      case SwapChain::Type::EGLImage:
-@@ -960,6 +2606,10 @@ void AcceleratedSurface::preferredBufferFormatsDidChange()
+@@ -960,6 +2738,10 @@ void AcceleratedSurface::preferredBufferFormatsDidChange()
  
  void AcceleratedSurface::visibilityDidChange(bool isVisible)
  {
@@ -179095,7 +179371,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..4881aba465620c047545aaca236ef1ad
      if (m_isVisible == isVisible)
          return;
  
-@@ -1000,7 +2650,7 @@ void AcceleratedSurface::backgroundColorDidChange()
+@@ -1000,7 +2782,7 @@ void AcceleratedSurface::backgroundColorDidChange()
      if (isOpaque == wasOpaque)
          return;
  
@@ -179104,7 +179380,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..4881aba465620c047545aaca236ef1ad
      m_swapChain.setupBufferFormat();
  #endif
  }
-@@ -1022,7 +2672,7 @@ void AcceleratedSurface::didCreateCompositingRunLoop(RunLoop& runLoop)
+@@ -1022,7 +2804,7 @@ void AcceleratedSurface::didCreateCompositingRunLoop(RunLoop& runLoop)
  #if USE(GLIB_EVENT_LOOP)
      m_releaseUnusedBuffersTimer->setPriority(RunLoopSourcePriority::ReleaseUnusedResourcesTimer);
  #endif
@@ -179113,7 +179389,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..4881aba465620c047545aaca236ef1ad
      WebProcess::singleton().parentProcessConnection()->addMessageReceiver(runLoop, *this, Messages::AcceleratedSurface::messageReceiverName(), m_id);
  #endif
  }
-@@ -1030,6 +2680,10 @@ void AcceleratedSurface::didCreateCompositingRunLoop(RunLoop& runLoop)
+@@ -1030,6 +2812,10 @@ void AcceleratedSurface::didCreateCompositingRunLoop(RunLoop& runLoop)
  void AcceleratedSurface::willDestroyCompositingRunLoop()
  {
      m_frameCompleteHandler = nullptr;
@@ -179124,7 +179400,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..4881aba465620c047545aaca236ef1ad
  
  #if USE(WPE_RENDERER)
      if (m_swapChain.type() == SwapChain::Type::WPEBackend)
-@@ -1043,7 +2697,7 @@ void AcceleratedSurface::willDestroyCompositingRunLoop()
+@@ -1043,7 +2829,7 @@ void AcceleratedSurface::willDestroyCompositingRunLoop()
              protectedThis->m_releaseUnusedBuffersTimer = nullptr;
          });
      }
@@ -179133,7 +179409,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..4881aba465620c047545aaca236ef1ad
      WebProcess::singleton().parentProcessConnection()->removeMessageReceiver(Messages::AcceleratedSurface::messageReceiverName(), m_id);
  #endif
  }
-@@ -1053,6 +2707,14 @@ void AcceleratedSurface::willDestroyGLContext()
+@@ -1053,6 +2839,14 @@ void AcceleratedSurface::willDestroyGLContext()
      m_pendingFrameNotifyTargets.clear();
      m_target = nullptr;
      m_swapChain.reset();
@@ -179148,7 +179424,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..4881aba465620c047545aaca236ef1ad
  }
  
  uint64_t AcceleratedSurface::window()
-@@ -1149,18 +2811,153 @@ void AcceleratedSurface::didRenderFrame(TargetContents targetContents)
+@@ -1149,18 +2943,153 @@ void AcceleratedSurface::didRenderFrame(TargetContents targetContents)
      if (!m_target)
          return;
  
@@ -179302,7 +179578,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..4881aba465620c047545aaca236ef1ad
      m_pendingFrameNotifyTargets.insert(0, { m_target, WTF::move(damageRects) });
      m_target = nullptr;
  }
-@@ -1182,13 +2979,17 @@ const std::optional<Damage>& AcceleratedSurface::renderTargetDamage()
+@@ -1182,13 +3111,17 @@ const std::optional<Damage>& AcceleratedSurface::renderTargetDamage()
  }
  #endif
  
@@ -179322,7 +179598,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..4881aba465620c047545aaca236ef1ad
  #endif
  
 diff --git a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/AcceleratedSurface.h b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/AcceleratedSurface.h
-index 9c24ddab5df0f74f95b87ad7ac594ed2a9c237ab..132b9828c737b655cc86d277ea86d5eaff3b15e4 100644
+index 9c24ddab5df0f74f95b87ad7ac594ed2a9c237ab..1a82250cfa1cd5fb4d611fac802ec7fa1af78654 100644
 --- a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/AcceleratedSurface.h
 +++ b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/AcceleratedSurface.h
 @@ -27,10 +27,15 @@
@@ -179488,12 +179764,31 @@ index 9c24ddab5df0f74f95b87ad7ac594ed2a9c237ab..132b9828c737b655cc86d277ea86d5ea
      class RenderTargetShareableBuffer : public RenderTarget {
          WTF_MAKE_TZONE_ALLOCATED(RenderTargetShareableBuffer);
      public:
-@@ -322,10 +378,34 @@ private:
+@@ -317,15 +373,54 @@ private:
+     public:
+         static std::unique_ptr<RenderTarget> create(AcceleratedSurface&, const WebCore::IntSize&);
+         RenderTargetSHMImage(AcceleratedSurface&, const WebCore::IntSize&, Ref<WebCore::ShareableBitmap>&&, WebCore::ShareableBitmapHandle&&);
++#if PLATFORM(HAIKU)
++        // A buffer of the GPU's that the UI process maps (SharedTargetHaiku).
++        struct SharedTargetHaiku {
++            void* handle { nullptr };
++            int32_t area { -1 };
++            uint32_t offset { 0 };
++            uint32_t bytesPerRow { 0 };
++        };
++        RenderTargetSHMImage(AcceleratedSurface&, const WebCore::IntSize&, SharedTargetHaiku&&);
++#endif
+         ~RenderTargetSHMImage();
+ 
      private:
          bool supportsExplicitSync() const override { return false; }
          void didRenderFrame() override;
 +#if PLATFORM(HAIKU)
 +        bool readBackThroughPixelBuffer();
++        bool copyIntoSharedTargetHaiku();
++        // The frame's memory is a GPU buffer the frames are blitted into,
++        // instead of m_bitmap they are read back into.
++        std::optional<SharedTargetHaiku> m_sharedTargetHaiku;
 +        bool presentDirectlyHaiku(DirectPresenterHaiku*, const std::optional<WebCore::Damage>&) override;
 +        void sendFrame(Vector<WebCore::IntRect, 1>&&) override;
 +        unsigned m_pixelBuffer { 0 };
@@ -179514,7 +179809,9 @@ index 9c24ddab5df0f74f95b87ad7ac594ed2a9c237ab..132b9828c737b655cc86d277ea86d5ea
 +#endif
 +#endif
  
-         const Ref<WebCore::ShareableBitmap> m_bitmap;
+-        const Ref<WebCore::ShareableBitmap> m_bitmap;
++        // Null with a shared target (Haiku).
++        const RefPtr<WebCore::ShareableBitmap> m_bitmap;
      };
  
 +    // Exports the framebuffer as a DMA-BUF, so it stays with the platforms that
@@ -179523,7 +179820,7 @@ index 9c24ddab5df0f74f95b87ad7ac594ed2a9c237ab..132b9828c737b655cc86d277ea86d5ea
      class RenderTargetTexture final : public RenderTargetShareableBuffer {
      public:
          static std::unique_ptr<RenderTarget> create(AcceleratedSurface&, const WebCore::IntSize&);
-@@ -337,7 +417,8 @@ private:
+@@ -337,7 +432,8 @@ private:
  
          const Ref<WebCore::BitmapTexture> m_texture;
      };
@@ -179533,7 +179830,7 @@ index 9c24ddab5df0f74f95b87ad7ac594ed2a9c237ab..132b9828c737b655cc86d277ea86d5ea
  
  #if USE(WPE_RENDERER)
      class RenderTargetWPEBackend final : public RenderTarget {
-@@ -364,7 +445,7 @@ private:
+@@ -364,7 +460,7 @@ private:
  
          enum class Type {
              Invalid,
@@ -179542,7 +179839,7 @@ index 9c24ddab5df0f74f95b87ad7ac594ed2a9c237ab..132b9828c737b655cc86d277ea86d5ea
  #if USE(GBM) || OS(ANDROID)
              EGLImage,
  #endif
-@@ -382,6 +463,10 @@ private:
+@@ -382,6 +478,10 @@ private:
          const WebCore::IntSize& size() const LIFETIME_BOUND { return m_size; }
          RenderTarget* nextTarget();
          void releaseTarget(uint64_t, UnixFileDescriptor&& releaseFence);
@@ -179553,7 +179850,7 @@ index 9c24ddab5df0f74f95b87ad7ac594ed2a9c237ab..132b9828c737b655cc86d277ea86d5ea
          void reset();
          void releaseUnusedBuffers();
  
-@@ -395,7 +480,7 @@ private:
+@@ -395,7 +495,7 @@ private:
          }
  #endif
  
@@ -179562,7 +179859,7 @@ index 9c24ddab5df0f74f95b87ad7ac594ed2a9c237ab..132b9828c737b655cc86d277ea86d5ea
          void setupBufferFormat();
  #endif
  
-@@ -416,7 +501,7 @@ private:
+@@ -416,7 +516,7 @@ private:
          Vector<std::unique_ptr<RenderTarget>, s_maximumBuffers> m_freeTargets;
          Vector<std::unique_ptr<RenderTarget>, s_maximumBuffers> m_lockedTargets;
          bool m_initialTargetsCreated { false };
@@ -179571,7 +179868,7 @@ index 9c24ddab5df0f74f95b87ad7ac594ed2a9c237ab..132b9828c737b655cc86d277ea86d5ea
          mutable Lock m_bufferFormatLock;
          BufferFormat m_bufferFormat WTF_GUARDED_BY_LOCK(m_bufferFormatLock);
          bool m_bufferFormatChanged WTF_GUARDED_BY_LOCK(m_bufferFormatLock) { false };
-@@ -478,10 +563,36 @@ private:
+@@ -478,10 +578,36 @@ private:
  
      const WeakRef<WebPage> m_webPage;
      Function<void()> m_frameCompleteHandler;

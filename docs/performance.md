@@ -1,5 +1,102 @@
 # Summit performance: Speedometer 3.1 baseline, where the time goes, stress test
 
+## 31 October 2026: the Raspberry Pi 4 (#138): frames into shared V3D buffers, the HEVC block, planes in the file player, GPU canvases
+
+Pi 4 (4 GB), air/OS hrev60207+2054 (image of 27-28 October: Mesa from
+mesa-rpi4 93bd58e, with cached textures, GPU readback and the readback
+hint), Summit main cc5b03c (CI's arm64 packages run as a bundle with a
+private libWebKit). Measured at 3840x2160@60 with the desktop at 200 %
+(re-baselined after the monitor changed twice during the session); the
+window maximized, its page 3820x1814 device pixels (6.9 Mpx).
+
+### Presentation is still bound by read-back
+
+The direct present (`summit_haiku_present_framebuffer`) does not exist for
+V3D: the Pi's libEGL_mesa exports only `haiku_mesa_readback_band_bytes`, and
+the log says "libEGL_mesa has no summit_haiku_present_*". Presenting into the
+screen needs the V3D driver to map foreign memory (the frame buffer,
+app_server's back copy) into its MMU, which it cannot; that is OS work
+(kunanyios-platform-issues.md). Wikipedia, wheel bursts (40 notches, 50 ms
+apart), CI cc5b03c: 6.1-6.9 frames a second, with 87-98 ms of every frame
+reading it back. (At 1920x1280 before the monitor changed: 21-25 fps,
+22-28 ms.) In a probe alone, reading a 3820x1814 frame costs 28-41 ms; in
+Summit twice that, as it shares the memory bus with the compositor and
+app_server's two copies of each frame.
+
+### Shared targets: the frame's memory is a V3D buffer
+
+Mesa (mesa-rpi4, two commits handed to airos-ci) now exports
+`haiku_mesa_shared_target_create/copy/destroy`: a linear, cached V3D render
+target whose area is cloneable. Each `RenderTargetSHMImage` is one of them
+where the context can make it (TextureMapper GL compositing, not mirrored):
+the UI process gets `DidCreateSharedTargetHaiku` (area, offset, size, row
+bytes) instead of a shared-memory bitmap, clones the area into the BBitmap
+that app_server draws, and each frame the V3D blits the damaged rectangles
+into it; the CPU no longer copies the frame. Summit finds the functions in
+the loaded libEGL_mesa; `SUMMIT_SHARED_TARGETS=0` reads back as before.
+
+The driver's CPU_PREPARE invalidates the whole buffer however little changed
+(12 ms at this size). A 120x120 animation took 13.8 ms a frame that way
+against 2.2 ms read back, so Mesa copies small damage (under 1/16 of the
+target) on the CPU, which keeps the buffer the CPU's from one such frame to
+the next: 2.3 ms.
+
+| Wikipedia scroll bursts, alternating runs | frames a second | read back / copy, ms a frame |
+| --- | --- | --- |
+| CI cc5b03c, installed Mesa | 6.1, 6.5, 6.4, 6.9 | 87-98 |
+| shared targets (stage + private Mesa) | 8.4, 9.4, 8.4, 8.0 | 57-61 |
+| 120x120 animation, 60 fps either way | | 2.2 / 2.3 |
+
+Checked: the screen after scrolling and after resizing the window four
+times (targets made and dropped). The first Mesa commit makes RGBA
+framebuffers read as BGRA (WebGL's readPixels, other GL programs) go
+through a linear, cached staging texture: 41 -> 28 ms for 3820x1814 in the
+probe. Summit's own frames are BGRA and did not need it.
+
+### HEVC on the Pi's HEVC block, planes in the file player
+
+`rpi_hevc` (H.265 Main and Main 10 on the BCM2711's HEVC block, from
+jmgasper/haiku de6fa6c39e) is in the image but registers no format, so HEVC
+went to libavcodec. It is now loaded by name like `rpi_mmal`
+(MediaDecoderSelectionHaiku.cpp, arm64, `/dev/misc/rpi_hevc` present, up to
+4096x2304), in both players. It converts the block's column layout on the
+CPU; NV12 is its cheapest output and goes to the compositor as two planes.
+Ten-bit pictures come only as P010 and are narrowed to NV12 here (NEON).
+The file player now takes planes from any substitute decoder that gives
+them, I420 too (`rpi_mmal`), instead of converting each picture to RGB;
+`SUMMIT_VIDEO_PLANES=0` still converts. `media` in Summit's MCP reports the
+pixel format (I420 / NV12 / BGRA).
+
+File player, `vplay.html` (640 CSS px wide), 1080p30 clips, web process:
+
+| clip | before | after |
+| --- | --- | --- |
+| HEVC 8-bit | libavcodec, 3.20 cores, 13.8 fps shown | rpi_hevc NV12, 0.98 cores, 30 fps |
+| HEVC 10-bit | libavcodec, 3.30 cores, a quarter of real time | rpi_hevc P010 -> NV12, 1.69 cores, 30 fps |
+| H.264 | rpi_mmal, RGB on the CPU, 2.18 cores, 19.9 fps | rpi_mmal I420 planes, 1.64 cores, 29.2 fps |
+
+MSE, 1080p60 HEVC through `codec115/mse.html`: rpi_hevc NV12 1.26 cores
+against libavcodec's 3.29, but the maximised 4K page shows only about 8-10
+pictures a second either way: presentation, above.
+
+### arm64 checks
+
+- GPU canvases (`SUMMIT_SKIA_GL_CONTEXT=1`) on V3D: a 1600x900 canvas with
+  400 shapes, sprites and texts a frame went from 3.6 to 10.9 fps (40 a
+  frame: 4.6 -> 12.4), and a still frame drew the same pixels (176 of 1.2 M
+  differ by more than 40 levels, antialiasing). PlatformDisplaySkia now
+  turns them on by default on arm64 when GL_RENDERER starts with "V3D ";
+  other arm64 GPUs keep the CPU unless they are added after measuring
+  (`=1` forces, `=0` refuses).
+- AVIF: 8-bit, 10-bit, monochrome and animated files decode; pixels within
+  1-4 levels of the PNG/JPEG originals.
+- Clear Key (needs a secure context; tested through a localhost relay): MSE
+  cenc and cbcs, Chromium's cbcs vectors and DASH cbcs play and decrypt.
+  WebM (VP9) is refused, as the arm64 build declines VP9 in MSE. An
+  encrypted MP4 played without MSE fires no `encrypted` event and shows
+  undecrypted (green) pictures (encrypted progressive MP4 is not done,
+  34a25b6).
+
 ## 31 October 2026: presents not timed to the scan no longer finish the frame first (#138)
 
 The #138 item "3 % of composited frames take 66 ms or more on the Cubie

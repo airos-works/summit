@@ -307,6 +307,25 @@ stays in a kernel wait with that RAM disk; `ls`, `df`, `rm`, `profile -a`
 then hang on it and its memory (2.3 GB of bundles here) is never freed. Only
 a restart clears it.
 
+### V3D cannot present into the screen, and hands buffers to the CPU whole (31 October 2026)
+
+On zink (NVK, radeonsi) Summit's web process copies each frame into the
+frame buffer and app_server's back copy with the GPU
+(`summit_haiku_present_framebuffer`). The Pi's V3D driver cannot: it maps
+only buffers it allocated into the V3D MMU, so neither the frame buffer nor
+app_server's back copy can be a blit's destination, and Summit reads every
+frame back (at 3840x2160, 6.9 Mpx: 57-98 ms a frame, 6-9 fps scrolling).
+Needed: an ioctl that imports an area's pages as a buffer (with cache
+maintenance for cached ones), and a Mesa v3d `summit_haiku_present_*`.
+
+Its `CPU_PREPARE` invalidates (or cleans) the whole buffer: 12 ms for a
+28 MB frame even when a caret changed. A prepare limited to a range would
+make small reads and copies cheap.
+
+**In Summit**: frames go into shared V3D buffers (Mesa
+`haiku_mesa_shared_target_*`) instead of being copied by the CPU; small
+damage is copied by the CPU so the buffer stays the CPU's.
+
 ### Writes to the SD card hold up other processes for seconds
 
 The card is run at 25 MHz default speed and writes at ~1.4 MB/s. While
