@@ -177490,7 +177490,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..6a0da841cc965b089dc48ae4514ddba3
      , m_hardwareAccelerationEnabled(webPage.corePage()->settings().hardwareAccelerationEnabled())
  #endif
      , m_backgroundColor(webPage.backgroundColor())
-@@ -130,11 +173,1036 @@ AcceleratedSurface::AcceleratedSurface(WebPage& webPage, Function<void()>&& fram
+@@ -130,11 +173,1040 @@ AcceleratedSurface::AcceleratedSurface(WebPage& webPage, Function<void()>&& fram
      , m_isVisible(webPage.activityState().contains(ActivityState::IsVisible))
      , m_useExplicitSync(usesGL() && useExplicitSync())
  #if ENABLE(DAMAGE_TRACKING)
@@ -178003,7 +178003,11 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..6a0da841cc965b089dc48ae4514ddba3
 +            return value && !strcmp(value, "1");
 +        }();
 +        bigtime_t scanWait = 0;
-+        if (auto* timing = ScanTimingHaiku::singleton(); timing && !deferred) {
++        // Not after a present Mesa refused for want of the frame buffer (-3:
++        // a driver that cannot hand it out, Zink on the Dragon's Turnip): the
++        // frame would be read back anyway, and this wait and glFinish() were
++        // most of each frame there (summit#139).
++        if (auto* timing = ScanTimingHaiku::singleton(); timing && !deferred && m_lastFailure != -3) {
 +            if (auto bounds = boundsForTiming(damage)) {
 +                if (finishesUntimed || timing->timesScan((*bounds)[0], (*bounds)[1], (*bounds)[2], (*bounds)[3])) {
 +                    glFinish();
@@ -178527,7 +178531,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..6a0da841cc965b089dc48ae4514ddba3
  AcceleratedSurface::~AcceleratedSurface() = default;
  
  WTF_MAKE_TZONE_ALLOCATED_IMPL(AcceleratedSurface::RenderTarget);
-@@ -150,6 +1218,10 @@ AcceleratedSurface::RenderTarget::RenderTarget(AcceleratedSurface& surface, cons
+@@ -150,6 +1222,10 @@ AcceleratedSurface::RenderTarget::RenderTarget(AcceleratedSurface& surface, cons
      , m_surface(surface)
      , m_size(size)
  {
@@ -178538,7 +178542,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..6a0da841cc965b089dc48ae4514ddba3
  }
  
  AcceleratedSurface::RenderTarget::~RenderTarget() = default;
-@@ -176,7 +1248,7 @@ void AcceleratedSurface::RenderTarget::createSkiaSurfaceForFramebuffer(unsigned
+@@ -176,7 +1252,7 @@ void AcceleratedSurface::RenderTarget::createSkiaSurfaceForFramebuffer(unsigned
      m_skiaSurface = SkSurfaces::WrapBackendRenderTarget(display.skiaGrContext(), backendRenderTarget, origin, kRGBA_8888_SkColorType, SkColorSpace::MakeSRGB(), &properties);
  }
  
@@ -178547,7 +178551,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..6a0da841cc965b089dc48ae4514ddba3
  WTF_MAKE_TZONE_ALLOCATED_IMPL(AcceleratedSurface::RenderTargetShareableBuffer);
  
  AcceleratedSurface::RenderTargetShareableBuffer::RenderTargetShareableBuffer(AcceleratedSurface& surface, const IntSize& size)
-@@ -200,14 +1272,22 @@ AcceleratedSurface::RenderTargetShareableBuffer::~RenderTargetShareableBuffer()
+@@ -200,14 +1276,22 @@ AcceleratedSurface::RenderTargetShareableBuffer::~RenderTargetShareableBuffer()
  {
      m_skiaSurface = nullptr;
  
@@ -178578,7 +178582,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..6a0da841cc965b089dc48ae4514ddba3
  
      WebProcess::singleton().parentProcessConnection()->send(Messages::AcceleratedBackingStore::DidDestroyBuffer(m_id), m_surface->surfaceID());
  }
-@@ -218,9 +1298,45 @@ void AcceleratedSurface::RenderTargetShareableBuffer::initializeColorBuffer(EGLI
+@@ -218,9 +1302,45 @@ void AcceleratedSurface::RenderTargetShareableBuffer::initializeColorBuffer(EGLI
      glBindRenderbuffer(GL_RENDERBUFFER, m_colorBuffer);
      if (image)
          glEGLImageTargetRenderbufferStorageOES(GL_RENDERBUFFER, image);
@@ -178625,7 +178629,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..6a0da841cc965b089dc48ae4514ddba3
  
      if (m_surface->useSkia())
          createSkiaSurfaceForFramebuffer(m_fbo);
-@@ -228,6 +1344,10 @@ void AcceleratedSurface::RenderTargetShareableBuffer::initializeColorBuffer(EGLI
+@@ -228,6 +1348,10 @@ void AcceleratedSurface::RenderTargetShareableBuffer::initializeColorBuffer(EGLI
  
  void AcceleratedSurface::RenderTargetShareableBuffer::sendFrame(Vector<WebCore::IntRect, 1>&& damageRects)
  {
@@ -178636,7 +178640,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..6a0da841cc965b089dc48ae4514ddba3
      WebProcess::singleton().parentProcessConnection()->send(Messages::AcceleratedBackingStore::Frame(m_id, WTF::move(damageRects), WTF::move(m_renderingFenceFD)), m_surface->surfaceID());
  }
  
-@@ -410,15 +1530,94 @@ AcceleratedSurface::RenderTargetEGLImage::~RenderTargetEGLImage()
+@@ -410,15 +1534,94 @@ AcceleratedSurface::RenderTargetEGLImage::~RenderTargetEGLImage()
  }
  #endif // USE(GBM) || OS(ANDROID)
  
@@ -178731,7 +178735,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..6a0da841cc965b089dc48ae4514ddba3
      if (!bufferHandle) {
          WTFLogAlways("Failed to create handle for shared memory buffer");
          return nullptr;
-@@ -439,13 +1638,547 @@ AcceleratedSurface::RenderTargetSHMImage::RenderTargetSHMImage(AcceleratedSurfac
+@@ -439,13 +1642,547 @@ AcceleratedSurface::RenderTargetSHMImage::RenderTargetSHMImage(AcceleratedSurfac
      WebProcess::singleton().parentProcessConnection()->send(Messages::AcceleratedBackingStore::DidCreateSHMBuffer(m_id, WTF::move(bitmapHandle)), m_surface->surfaceID());
  }
  
@@ -179279,7 +179283,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..6a0da841cc965b089dc48ae4514ddba3
  
          SkImageInfo info = SkImageInfo::Make(m_bitmap->size().width(), m_bitmap->size().height(), SkColorType::kBGRA_8888_SkColorType, SkAlphaType::kPremul_SkAlphaType);
  
-@@ -457,9 +2190,14 @@ void AcceleratedSurface::RenderTargetSHMImage::didRenderFrame()
+@@ -457,9 +2194,14 @@ void AcceleratedSurface::RenderTargetSHMImage::didRenderFrame()
          return;
      }
  
@@ -179294,7 +179298,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..6a0da841cc965b089dc48ae4514ddba3
  std::unique_ptr<AcceleratedSurface::RenderTarget> AcceleratedSurface::RenderTargetTexture::create(AcceleratedSurface& surface, const IntSize& size)
  {
      auto texture = BitmapTexture::create(size);
-@@ -515,8 +2253,9 @@ AcceleratedSurface::RenderTargetTexture::RenderTargetTexture(AcceleratedSurface&
+@@ -515,8 +2257,9 @@ AcceleratedSurface::RenderTargetTexture::RenderTargetTexture(AcceleratedSurface&
  }
  
  AcceleratedSurface::RenderTargetTexture::~RenderTargetTexture() = default;
@@ -179305,7 +179309,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..6a0da841cc965b089dc48ae4514ddba3
  
  #if USE(WPE_RENDERER)
  std::unique_ptr<AcceleratedSurface::RenderTarget> AcceleratedSurface::RenderTargetWPEBackend::create(AcceleratedSurface& surface, const IntSize& initialSize, UnixFileDescriptor&& hostFD)
-@@ -594,7 +2333,7 @@ void AcceleratedSurface::RenderTargetWPEBackend::didRenderFrame()
+@@ -594,7 +2337,7 @@ void AcceleratedSurface::RenderTargetWPEBackend::didRenderFrame()
  AcceleratedSurface::SwapChain::SwapChain(AcceleratedSurface& surface)
      : m_surface(surface)
  {
@@ -179314,7 +179318,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..6a0da841cc965b089dc48ae4514ddba3
      if (!m_surface->hardwareAccelerationEnabled()) {
          m_type = Type::SharedMemory;
          return;
-@@ -632,7 +2371,7 @@ AcceleratedSurface::SwapChain::SwapChain(AcceleratedSurface& surface)
+@@ -632,7 +2375,7 @@ AcceleratedSurface::SwapChain::SwapChain(AcceleratedSurface& surface)
      case PlatformDisplay::Type::GBM:
  #endif
          break;
@@ -179323,7 +179327,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..6a0da841cc965b089dc48ae4514ddba3
  #if USE(WPE_RENDERER)
      case PlatformDisplay::Type::WPE:
          m_type = Type::WPEBackend;
-@@ -646,11 +2385,19 @@ AcceleratedSurface::SwapChain::SwapChain(AcceleratedSurface& surface)
+@@ -646,11 +2389,19 @@ AcceleratedSurface::SwapChain::SwapChain(AcceleratedSurface& surface)
      case PlatformDisplay::Type::Default:
          break;
  #endif // PLATFORM(GTK)
@@ -179344,7 +179348,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..6a0da841cc965b089dc48ae4514ddba3
  void AcceleratedSurface::SwapChain::setupBufferFormat()
  {
      if (m_type != Type::EGLImage)
-@@ -749,7 +2496,7 @@ bool AcceleratedSurface::SwapChain::resize(const IntSize& size)
+@@ -749,7 +2500,7 @@ bool AcceleratedSurface::SwapChain::resize(const IntSize& size)
  
  bool AcceleratedSurface::SwapChain::handleBufferFormatChangeIfNeeded()
  {
@@ -179353,7 +179357,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..6a0da841cc965b089dc48ae4514ddba3
      if (m_type == Type::EGLImage) {
          Locker locker { m_bufferFormatLock };
          if (m_bufferFormatChanged) {
-@@ -765,7 +2512,7 @@ bool AcceleratedSurface::SwapChain::handleBufferFormatChangeIfNeeded()
+@@ -765,7 +2516,7 @@ bool AcceleratedSurface::SwapChain::handleBufferFormatChangeIfNeeded()
  std::unique_ptr<AcceleratedSurface::RenderTarget> AcceleratedSurface::SwapChain::createTarget() const
  {
      switch (m_type) {
@@ -179362,7 +179366,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..6a0da841cc965b089dc48ae4514ddba3
  #if USE(GBM) || OS(ANDROID)
      case Type::EGLImage: {
          Locker locker { m_bufferFormatLock };
-@@ -773,7 +2520,11 @@ std::unique_ptr<AcceleratedSurface::RenderTarget> AcceleratedSurface::SwapChain:
+@@ -773,7 +2524,11 @@ std::unique_ptr<AcceleratedSurface::RenderTarget> AcceleratedSurface::SwapChain:
      }
  #endif
      case Type::Texture:
@@ -179374,7 +179378,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..6a0da841cc965b089dc48ae4514ddba3
      case Type::SharedMemory:
          return RenderTargetSHMImage::create(m_surface.get(), m_size);
  #endif
-@@ -812,6 +2563,11 @@ AcceleratedSurface::RenderTarget* AcceleratedSurface::SwapChain::nextTarget()
+@@ -812,6 +2567,11 @@ AcceleratedSurface::RenderTarget* AcceleratedSurface::SwapChain::nextTarget()
              if (auto target = createTarget())
                  m_freeTargets.append(WTF::move(target));
          }
@@ -179386,7 +179390,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..6a0da841cc965b089dc48ae4514ddba3
  
  #if ENABLE(WPE_PLATFORM)
          if (m_freeTargets.size() != targetsToCreate)
-@@ -841,6 +2597,12 @@ void AcceleratedSurface::SwapChain::releaseTarget(uint64_t targetID, UnixFileDes
+@@ -841,6 +2601,12 @@ void AcceleratedSurface::SwapChain::releaseTarget(uint64_t targetID, UnixFileDes
          m_freeTargets.insert(0, WTF::move(m_lockedTargets[index]));
          m_lockedTargets.removeAt(index);
      }
@@ -179399,7 +179403,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..6a0da841cc965b089dc48ae4514ddba3
  }
  
  void AcceleratedSurface::SwapChain::reset()
-@@ -859,6 +2621,11 @@ void AcceleratedSurface::SwapChain::releaseUnusedBuffers()
+@@ -859,6 +2625,11 @@ void AcceleratedSurface::SwapChain::releaseUnusedBuffers()
  #if USE(WPE_RENDERER)
      ASSERT(m_type != Type::WPEBackend);
  #endif
@@ -179411,7 +179415,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..6a0da841cc965b089dc48ae4514ddba3
  
  #if ENABLE(WPE_PLATFORM)
      WebProcess::singleton().parentProcessConnection()->send(Messages::AcceleratedBackingStore::DidChangeBufferConfiguration(m_lockedTargets.size()), m_surface->surfaceID());
-@@ -901,6 +2668,17 @@ Vector<IntRect, 1> AcceleratedSurface::SwapChainDamageTracker::takeFrameDamageRe
+@@ -901,6 +2672,17 @@ Vector<IntRect, 1> AcceleratedSurface::SwapChainDamageTracker::takeFrameDamageRe
      if (frameDamage.mode() != Damage::Mode::Rectangles || m_swapChain.size().isEmpty())
          return frameDamage.rects();
  
@@ -179429,7 +179433,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..6a0da841cc965b089dc48ae4514ddba3
      // The frame damage is fine-grained, because the compositing restriction needs it that way, but the
      // platform only wants a bounded number of rects. Merge it down to the threshold here, which is the
      // only thing the threshold bounds.
-@@ -929,7 +2707,7 @@ bool AcceleratedSurface::shouldPaintMirrored() const
+@@ -929,7 +2711,7 @@ bool AcceleratedSurface::shouldPaintMirrored() const
      switch (m_swapChain.type()) {
      case SwapChain::Type::Invalid:
          return false;
@@ -179438,7 +179442,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..6a0da841cc965b089dc48ae4514ddba3
      case SwapChain::Type::Texture:
  #if USE(GBM) || OS(ANDROID)
      case SwapChain::Type::EGLImage:
-@@ -960,6 +2738,10 @@ void AcceleratedSurface::preferredBufferFormatsDidChange()
+@@ -960,6 +2742,10 @@ void AcceleratedSurface::preferredBufferFormatsDidChange()
  
  void AcceleratedSurface::visibilityDidChange(bool isVisible)
  {
@@ -179449,7 +179453,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..6a0da841cc965b089dc48ae4514ddba3
      if (m_isVisible == isVisible)
          return;
  
-@@ -1000,7 +2782,7 @@ void AcceleratedSurface::backgroundColorDidChange()
+@@ -1000,7 +2786,7 @@ void AcceleratedSurface::backgroundColorDidChange()
      if (isOpaque == wasOpaque)
          return;
  
@@ -179458,7 +179462,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..6a0da841cc965b089dc48ae4514ddba3
      m_swapChain.setupBufferFormat();
  #endif
  }
-@@ -1022,7 +2804,7 @@ void AcceleratedSurface::didCreateCompositingRunLoop(RunLoop& runLoop)
+@@ -1022,7 +2808,7 @@ void AcceleratedSurface::didCreateCompositingRunLoop(RunLoop& runLoop)
  #if USE(GLIB_EVENT_LOOP)
      m_releaseUnusedBuffersTimer->setPriority(RunLoopSourcePriority::ReleaseUnusedResourcesTimer);
  #endif
@@ -179467,7 +179471,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..6a0da841cc965b089dc48ae4514ddba3
      WebProcess::singleton().parentProcessConnection()->addMessageReceiver(runLoop, *this, Messages::AcceleratedSurface::messageReceiverName(), m_id);
  #endif
  }
-@@ -1030,6 +2812,10 @@ void AcceleratedSurface::didCreateCompositingRunLoop(RunLoop& runLoop)
+@@ -1030,6 +2816,10 @@ void AcceleratedSurface::didCreateCompositingRunLoop(RunLoop& runLoop)
  void AcceleratedSurface::willDestroyCompositingRunLoop()
  {
      m_frameCompleteHandler = nullptr;
@@ -179478,7 +179482,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..6a0da841cc965b089dc48ae4514ddba3
  
  #if USE(WPE_RENDERER)
      if (m_swapChain.type() == SwapChain::Type::WPEBackend)
-@@ -1043,7 +2829,7 @@ void AcceleratedSurface::willDestroyCompositingRunLoop()
+@@ -1043,7 +2833,7 @@ void AcceleratedSurface::willDestroyCompositingRunLoop()
              protectedThis->m_releaseUnusedBuffersTimer = nullptr;
          });
      }
@@ -179487,7 +179491,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..6a0da841cc965b089dc48ae4514ddba3
      WebProcess::singleton().parentProcessConnection()->removeMessageReceiver(Messages::AcceleratedSurface::messageReceiverName(), m_id);
  #endif
  }
-@@ -1053,6 +2839,14 @@ void AcceleratedSurface::willDestroyGLContext()
+@@ -1053,6 +2843,14 @@ void AcceleratedSurface::willDestroyGLContext()
      m_pendingFrameNotifyTargets.clear();
      m_target = nullptr;
      m_swapChain.reset();
@@ -179502,7 +179506,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..6a0da841cc965b089dc48ae4514ddba3
  }
  
  uint64_t AcceleratedSurface::window()
-@@ -1149,18 +2943,153 @@ void AcceleratedSurface::didRenderFrame(TargetContents targetContents)
+@@ -1149,18 +2947,153 @@ void AcceleratedSurface::didRenderFrame(TargetContents targetContents)
      if (!m_target)
          return;
  
@@ -179656,7 +179660,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..6a0da841cc965b089dc48ae4514ddba3
      m_pendingFrameNotifyTargets.insert(0, { m_target, WTF::move(damageRects) });
      m_target = nullptr;
  }
-@@ -1182,13 +3111,17 @@ const std::optional<Damage>& AcceleratedSurface::renderTargetDamage()
+@@ -1182,13 +3115,17 @@ const std::optional<Damage>& AcceleratedSurface::renderTargetDamage()
  }
  #endif
  
@@ -186266,7 +186270,7 @@ new file mode 100644
 index 0000000000000000000000000000000000000000..cf0cb1265c572f9a4d784598211ec11bf9eb9f3e
 --- /dev/null
 +++ b/Source/WebKit/WebProcess/haiku/WebProcessMainHaiku.cpp
-@@ -0,0 +1,110 @@
+@@ -0,0 +1,117 @@
 +/*
 + * Copyright 2014,2019 Haiku, Inc.
 + *
@@ -186342,6 +186346,13 @@ index 0000000000000000000000000000000000000000..cf0cb1265c572f9a4d784598211ec11b
 +        if (!skiaCPUFeatures || std::strcmp(skiaCPUFeatures, "0"))
 +            SkGraphics::Init();
 +#endif
++
++        // WebGL calls go through Mesa's GL front end on this thread. With
++        // glthread that work runs on a thread of its own (air/OS Mesa:
++        // mesa_glthread=main starts it for the contexts made on a team's main
++        // thread, which are WebGL's; summit#139). Mesa without it ignores the
++        // variable; one set in the environment wins (=false turns it off).
++        setenv("mesa_glthread", "main", 0);
 +
 +        // The one-argument constructor exits with status zero on failure,
 +        // preventing the auxiliary process entry point from reporting it.
