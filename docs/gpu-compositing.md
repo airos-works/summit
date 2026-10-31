@@ -200,6 +200,15 @@ draws, all in `TextureMapperLayer.cpp` and `CoordinatedBackingStore.cpp`.
   - `SUMMIT_FILTER_CACHE_IN_SURFACES=0` keeps it to the target.
   - `SUMMIT_FILTER_CACHE_ANIMATED=0` keeps it from layers with any running
     animation.
+- **Small filters are painted.** A layer whose box is at most 128x128 CSS
+  pixels and whose filters are only blurs and drop shadows of up to 16 px
+  has them painted with its contents, by Skia on the processor
+  (`RenderLayerBacking::updateFilters`), instead of by the compositor. The
+  cache cannot help a layer whose tiles keep changing, and each compositor
+  filter costs a surface (about 10 ms each on the Cubie A7S's GPU). A
+  layer with a filter animation keeps the compositor's filters.
+  `SUMMIT_PAINT_SMALL_FILTERS=0` turns this off;
+  `SUMMIT_PAINT_SMALL_FILTERS_TRACE=1` prints each decision.
 - **Backdrop cache.** A `backdrop-filter` re-paints what lies behind it into a
   surface and blurs it in every composition that draws it. Its result is kept
   while nothing under it changed. `collectDamage()` checks each kept result

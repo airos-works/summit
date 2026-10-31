@@ -83033,14 +83033,15 @@ index e4016aa11263c14ff1ece803b6abdb2d697c2f75..4c4a7d020e2a91fbbe39ab92bc99ae05
      } else if (canCreateIntrinsicLogicalHeightsCacheForRowSizingFirstPass)
          m_intrinsicLogicalHeightsForRowSizingFirstPass.emplace();
 diff --git a/Source/WebCore/rendering/RenderLayerBacking.cpp b/Source/WebCore/rendering/RenderLayerBacking.cpp
-index 95122a10cacc10b498c40d3447599bd2cd4d2795..590181fd245a31b71b8abb071033316d1f198f5b 100644
+index 95122a10cacc10b498c40d3447599bd2cd4d2795..68f56903208f829b1c03138dece2474e656412d4 100644
 --- a/Source/WebCore/rendering/RenderLayerBacking.cpp
 +++ b/Source/WebCore/rendering/RenderLayerBacking.cpp
-@@ -137,6 +137,13 @@
+@@ -137,6 +137,14 @@
  #include "ModelContext.h"
  #endif
  
 +#if PLATFORM(HAIKU)
++#include "KeyframeEffectStack.h"
 +#include <cstdio>
 +#include <cstdlib>
 +#include <cstring>
@@ -83050,7 +83051,84 @@ index 95122a10cacc10b498c40d3447599bd2cd4d2795..590181fd245a31b71b8abb071033316d
  #if USE(SYSTEM_PREVIEW) && ENABLE(MODEL_PROCESS) && ENABLE(INTERACTION_REGIONS_IN_EVENT_REGION)
  #include "ARKitBadgeSystemImage.h"
  #endif
-@@ -1218,6 +1225,10 @@ void RenderLayerBacking::updateAfterLayout(bool needsClippingUpdate, bool needsF
+@@ -910,8 +918,76 @@ void RenderLayerBacking::updateChildrenTransformAndAnchorPoint(const LayoutRect&
+     removeChildrenTransformFromLayers(layerForPerspective);
+ }
+ 
++#if PLATFORM(HAIKU)
++// Small layers (a box of at most 128x128) with only blurs and drop shadows of
++// up to 16 px have their filters painted with their contents instead of by
++// the compositor. The compositor filters each such layer into surfaces of its
++// own, and its filter cache cannot help while the layer's tiles change:
++// YouTube repaints the blur(10px) washes behind a watch page's like, share
++// and save buttons (40x40 to 162x40) in every rendering update for 6-10 s
++// after the load, and on the Cubie A7S's GPU, where each surface switch costs
++// about 10 ms, each of those frames took 90-400 ms (10 blurs into 40
++// surfaces). Painted with the contents, such a blur costs the processor a
++// fraction of a millisecond per repaint. Layers whose filter is animated
++// keep the compositor's filters. SUMMIT_PAINT_SMALL_FILTERS=0 turns this
++// off; SUMMIT_PAINT_SMALL_FILTERS_TRACE=1 prints each decision.
++static bool paintsSmallFiltersHaiku(const FilterOperations& filters, const LayoutSize& size, RenderLayerModelObject& renderer)
++{
++    static const bool enabled = [] {
++        const char* value = getenv("SUMMIT_PAINT_SMALL_FILTERS");
++        return !value || strcmp(value, "0");
++    }();
++    static constexpr float maximumArea = 128 * 128;
++    static constexpr float maximumDeviation = 16;
++    if (!enabled || filters.isEmpty() || size.isEmpty() || size.width().toFloat() * size.height().toFloat() > maximumArea)
++        return false;
++    for (auto& operation : filters) {
++        if (auto* blur = dynamicDowncast<BlurFilterOperation>(operation.get())) {
++            if (blur->stdDeviation() > maximumDeviation)
++                return false;
++        } else if (auto* shadow = dynamicDowncast<DropShadowFilterOperation>(operation.get())) {
++            if (shadow->stdDeviation() > maximumDeviation)
++                return false;
++        } else
++            return false;
++    }
++    if (auto styleable = Styleable::fromRenderer(renderer)) {
++        if (auto* effectsStack = styleable->keyframeEffectStack(); effectsStack && effectsStack->isCurrentlyAffectingProperty(CSSPropertyFilter))
++            return false;
++    }
++    return true;
++}
++#endif
++
+ void RenderLayerBacking::updateFilters(const Style::ComputedStyle& style)
+ {
++#if PLATFORM(HAIKU)
++    if (!style.filter().hasReferenceFilter()) {
++        auto filters = Style::toPlatform(style.filter(), style);
++        const bool wasComposited = m_canCompositeFilters;
++        static const bool traces = getenv("SUMMIT_PAINT_SMALL_FILTERS_TRACE");
++        // The box's own size: the composited bounds take in the filters'
++        // outsets once they are painted, and would turn the decision back.
++        auto* box = dynamicDowncast<RenderBox>(renderer());
++        const LayoutSize size = box ? box->borderBoxRect().size() : compositedBounds().size();
++        bool painted = paintsSmallFiltersHaiku(filters, size, renderer());
++        if (traces && !filters.isEmpty()) {
++            auto styleable = Styleable::fromRenderer(renderer());
++            auto* stack = styleable ? styleable->keyframeEffectStack() : nullptr;
++            fprintf(stderr, "Summit small filters: layer %p %s %.0fx%.0f ops=%zu animated=%d painted=%d was=%d\n", m_graphicsLayer.get(), renderer().renderName().characters(),
++                size.width().toFloat(), size.height().toFloat(), filters.size(), stack && stack->isCurrentlyAffectingProperty(CSSPropertyFilter), painted, m_canCompositeFilters);
++        }
++        if (painted) {
++            m_graphicsLayer->setFilters({ });
++            m_canCompositeFilters = false;
++        } else
++            m_canCompositeFilters = m_graphicsLayer->setFilters(filters);
++        // What was painted so far has the filters in it, or lacks them.
++        if (wasComposited != m_canCompositeFilters && !filters.isEmpty())
++            m_graphicsLayer->setNeedsDisplay();
++        return;
++    }
++#endif
+     m_canCompositeFilters = !style.filter().hasReferenceFilter() && m_graphicsLayer->setFilters(Style::toPlatform(style.filter(), style));
+ }
+ 
+@@ -1218,6 +1294,10 @@ void RenderLayerBacking::updateAfterLayout(bool needsClippingUpdate, bool needsF
          m_owningLayer.setNeedsCompositingGeometryUpdate();
      }
      
@@ -83061,7 +83139,7 @@ index 95122a10cacc10b498c40d3447599bd2cd4d2795..590181fd245a31b71b8abb071033316d
      if (needsFullRepaint && canIssueSetNeedsDisplay())
          setContentsNeedDisplay();
  }
-@@ -1581,6 +1592,44 @@ private:
+@@ -1581,6 +1661,44 @@ private:
  LayoutRect RenderLayerBacking::computePrimaryGraphicsLayerRect(const RenderLayer* compositedAncestor, const LayoutRect& parentGraphicsLayerRect) const
  {
      ComputedOffsets compositedBoundsOffset(m_owningLayer, compositedAncestor, compositedBounds(), parentGraphicsLayerRect, { });
@@ -83106,7 +83184,7 @@ index 95122a10cacc10b498c40d3447599bd2cd4d2795..590181fd245a31b71b8abb071033316d
      return LayoutRect(encloseRectToDevicePixels(LayoutRect(toLayoutPoint(compositedBoundsOffset.fromParentGraphicsLayer()), compositedBounds().size()),
          pixelSnappingScaleFactor()));
  }
-@@ -1935,8 +1984,18 @@ void RenderLayerBacking::updateGeometry(const RenderLayer* compositedAncestor)
+@@ -1935,8 +2053,18 @@ void RenderLayerBacking::updateGeometry(const RenderLayer* compositedAncestor)
  
      positionOverflowControlsLayers();
  
@@ -83126,7 +83204,7 @@ index 95122a10cacc10b498c40d3447599bd2cd4d2795..590181fd245a31b71b8abb071033316d
  
  #if ENABLE(MODEL_ELEMENT)
      if (is<RenderModel>(renderer()))
-@@ -3543,6 +3602,56 @@ void RenderLayerBacking::updateDirectlyCompositedBackgroundColor(PaintedContents
+@@ -3543,6 +3671,56 @@ void RenderLayerBacking::updateDirectlyCompositedBackgroundColor(PaintedContents
      didUpdateContentsRect = true;
  }
  
@@ -83183,7 +83261,7 @@ index 95122a10cacc10b498c40d3447599bd2cd4d2795..590181fd245a31b71b8abb071033316d
  // Only bitmap images are directly composited, so the layer shows the image's current frame at its natural size.
  static RefPtr<NativeImage> nativeImageForDirectlyCompositedImage(Image& image)
  {
-@@ -3585,7 +3694,14 @@ void RenderLayerBacking::updateDirectlyCompositedBackgroundImage(PaintedContents
+@@ -3585,7 +3763,14 @@ void RenderLayerBacking::updateDirectlyCompositedBackgroundImage(PaintedContents
      m_graphicsLayer->setContentsTilePhase(geometry.phase);
      m_graphicsLayer->setContentsRect(geometry.destinationRect);
      m_graphicsLayer->setContentsClippingRect(FloatRoundedRect(geometry.destinationRect));
@@ -83199,7 +83277,7 @@ index 95122a10cacc10b498c40d3447599bd2cd4d2795..590181fd245a31b71b8abb071033316d
          m_graphicsLayer->setContentsToNativeImage(nativeImage.get());
  
      didUpdateContentsRect = true;
-@@ -4093,6 +4209,11 @@ void RenderLayerBacking::updateImageContents(PaintedContentsInfo& contentsInfo)
+@@ -4093,6 +4278,11 @@ void RenderLayerBacking::updateImageContents(PaintedContentsInfo& contentsInfo)
          if (!cachedImage->isLoaded())
              return;
  

@@ -1,5 +1,130 @@
 # Summit performance: Speedometer 3.1 baseline, where the time goes, stress test
 
+## 31 October 2026: the Cubie A7S (#138): YouTube's re-filtered buttons, click to playback, presents, GPU canvases, AVIF, Clear Key
+
+Cubie A7S, air/OS hrev60207+2114 (image of 28 October; Mesa 26.2.4 with
+the Cubie's own patches), Summit from the CI packages of `374e4f6` run from
+an extracted copy (`/boot/home/cubie138`), its engine swapped for test
+builds of CI's arm64 tree at `2f621af`. Default window (1121x538), 1920x1080
+at 60 Hz. The board stayed at 37-43 C throughout (throttle level 0, GPU
+800 MHz); in October it idled at 66-74 C, so earlier numbers here were
+taken on a hotter, slower board.
+
+### YouTube's filtered buttons, filtered again in every frame (fixed)
+
+Reproduced with `374e4f6`, so the filter cache in surfaces and animations
+(`a4e6e5e`) did not fix it. On a watch page, for 6-10 s after the load,
+every rendering update filtered the same layers again: 10 blurs into 39-40
+surfaces per frame, 90-430 ms per frame. `SUMMIT_DRAW_TRACE` gave the reason
+as `again=tiles`: the layers' tiles changed in every update. They are
+YouTube's `contribYtLightShapeStaticWashLight` divs, with `filter: blur(10px)`,
+40x40 to 162x40 pixels, behind the like, share and save buttons. YouTube
+repaints them while its player's controls are updated. The filter cache
+keeps a result only while the tiles stay the same.
+
+**Fix** (`RenderLayerBacking::updateFilters`): a layer whose box is at most
+128x128 CSS pixels and whose filters are only blurs and drop shadows of up
+to 16 px has its filters painted with its contents, by Skia on the
+processor. On a repaint this costs a blur of about 100x100 pixels, which is
+less than one compositor surface. The box's own size decides, not the
+composited bounds: once the filters are painted, the bounds include the
+blur's outsets, and an early build flipped the layers between the two ways
+in every update. A layer with a filter animation keeps the compositor's
+filters. `SUMMIT_PAINT_SMALL_FILTERS=0` turns this off;
+`SUMMIT_PAINT_SMALL_FILTERS_TRACE=1` prints each decision.
+
+40 s on the Big Buck Bunny watch page (not playing: no click), fresh profiles,
+`SUMMIT_COMPOSITOR_TIMING_TRACE`, alternated:
+
+| | painted (3 runs) | off (`=0`, 3 runs) |
+|---|---|---|
+| compositions with blurs | 0, 0, 0 | 23, 24, 25 (2.9-3.7 s of compositing) |
+| compositions over 50 ms | 8, 5, 9 | 28, 28, 30 |
+| mean composition | 15.7, 15.9, 16.8 ms | 28.8, 31.9, 33.1 ms |
+
+X399 (GTX 1070), same page, 2 runs each: 0 and 0 against 15 and 12
+compositions with blurs, mean 7.9 and 8.2 against 7.4 and 8.5 ms. The buttons look the same either way. YouTube served
+two different watch-page layouts during these runs, so the screenshots could
+only be compared by eye.
+
+### Click to playback (better, no change of ours)
+
+Search results for "big buck bunny" load (navigation to idle) in 4.6-5.3 s.
+A real mouse click (Summit MCP `click`) on a result until the video plays
+(in-page clock from the mouse-down):
+
+| | the watch player exists | first data | playing |
+|---|---|---|---|
+| Big Buck Bunny (2 runs) | 123-199 ms | 1,604-1,611 ms | 1,635-1,637 ms |
+| the 4K full-length film | 135 ms | 4,112 ms | 4,186 ms |
+
+On 14 October these took 2.2-2.4 s and 5.8 s. Almost all the time now lies
+between YouTube creating its player and the first media data: YouTube's
+script, its requests, and MSE setup. The compositor is not involved. The
+watch page has 269 composited layers in this window (MCP `layers`); the
+"about 600" of October were on the search results in a maximized window.
+
+### Presents: timed to the scan on this OS, and what that costs
+
+The board's app_server answers `BScreen::GetScanTiming()` with its blanks.
+So presents finish the frame (`glFinish()`) and wait for the scan, and
+`374e4f6`'s skip for untimed outputs does not apply here. The trace never
+prints "not timed". The Cubie's Mesa takes version 1 presents only (no
+`summit_haiku_present_version`), so Mesa patch 07's deferred presents
+cannot be used. `present117/scroll.html`, 10 s script scroll then a wheel
+burst:
+
+| | timed (default) | `SUMMIT_DIRECT_PRESENT_SCAN_TIMING=0` |
+|---|---|---|
+| script scroll, page fps (2 runs each) | 47.1, 46.2 | 59.6, 59.9 |
+| `frame_stats` p95 gap | 30.8-30.9 ms | 21.3-21.7 ms |
+| compositing thread per frame, mean (present, `read`) | 16.6 ms (15.7) | 5.0 ms (4.0) |
+| presents that waited for the scan | 60 %, 5-6 ms on average | none |
+
+Porting patch 07's deferred present into the Cubie's Mesa
+(`cubie/haiku/tools/cubie-a7s/mesa/mesa-haiku-gl.patch`, zink's
+`zink_haiku_present.c`) would move the finish and the scan wait to Mesa's
+helper thread. Scrolling could then gain most of that difference without
+tearing. That is Mesa/OS work and was not done here. Turning the timing
+off for the board would trade it for possible tearing.
+
+**The "3 % of frames take 66 ms or more" item is not reproduced.** A
+1080p30 H.264 file (`bbb-60s-h264.mp4`, cedar) played 40 s at 30.0 fps
+(`frame_stats`), 0 dropped. Of the intervals between presented video frames
+(`requestVideoFrameCallback`), none was 66 ms or more with either setting;
+0.6 % (timed) and 2.7 % (untimed) were 50 ms or more.
+
+### GPU canvases on PowerVR: not turned on
+
+GL_RENDERER is `zink Vulkan 1.2(PowerVR B-Series BXM-4-64 MC1
+(IMAGINATION_OPEN_SOURCE_MESA))`, GL_VERSION `OpenGL ES 3.1 Mesa 26.2.4`.
+With `SUMMIT_SKIA_GL_CONTEXT=1`, against the default CPU canvases:
+
+| | CPU | GPU |
+|---|---|---|
+| 4,000 arcs a frame, ms per frame (mean / median / p95, 3 and 2 runs) | 72.9-73.9 / 73-74 / 76-78 | 60.4-61.2 / 54-56 / 77-80 |
+| Speedometer Charts-chartjs (5 iterations, 2 runs) | 417, 451 ms | 362, 415 ms |
+| Speedometer Perf-Dashboard | 524, 585 ms | 869, 875 ms |
+| the two suites' score | 2.2, 1.9 | 1.8, 1.7 |
+
+On the GPU, Chart.js's tooltip step is twice as fast (109-121 to 56-70 ms),
+its scatter drawing is unchanged, and Perf-Dashboard's Render (95-113 to
+167-169 ms) and SelectingRange (212-224 to 421-430 ms) take twice as long.
+Overall it is slower: this GPU's fill rate is the limit (see 13 October).
+`canvas.html` renders correctly on the GPU: only antialiased edges differ
+(3 % of pixels by more than 16 of 255). PowerVR stays off the arm64
+allowlist (`V3D ` only); `SUMMIT_SKIA_GL_CONTEXT=1` still turns it on.
+
+### AVIF and Clear Key on arm64: working
+
+`avif.html`: all five images decode and show (8-bit, 10-bit, animated,
+`<picture>` with an AVIF source). Clear Key needs a secure context, so the
+pages were served through a localhost proxy on the board (`node`, port
+8773). The packaged fixtures `cenc`, `cbcs` and `cens` (H.264 + AAC, MSE)
+played 15.8 s, 471-472 frames, 4-8 dropped. Encrypted WebM (VP9 + Opus)
+played 12 s, 360 frames, 4 dropped. Chromium's `cbcs`, `cbc1` and WebM
+vectors played to the end. Every license session reported its keys usable.
+
 ## 31 October 2026: the Raspberry Pi 4 (#138): frames into shared V3D buffers, the HEVC block, planes in the file player, GPU canvases
 
 Pi 4 (4 GB), air/OS hrev60207+2054 (image of 27-28 October: Mesa from
