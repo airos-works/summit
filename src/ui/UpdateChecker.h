@@ -49,13 +49,16 @@ public:
     void MessageReceived(BMessage*) override;
     // The MCP server's updates tool: what runs, the last result, the window.
     nlohmann::json State() const;
-    // Presses a button of the update window: "install", "later" or "changes".
+    // Presses a button of the update window: "install", "later" or "changes";
+    // "cancel" is the Cancel of the Checking for updates window.
     bool Answer(const std::string& button);
     struct Job;
     struct WindowState;
 
 private:
     void Finished();
+    // The "Checking for updates…" window of a manual check.
+    void ShowChecking();
     void ShowWindow();
     std::function<Settings()> fSettings;
     std::function<void(int64_t)> fChecked;
@@ -66,5 +69,6 @@ private:
     std::shared_ptr<Job> fLast;
     BMessenger fWindow;
     std::shared_ptr<WindowState> fWindowState;
+    BMessenger fChecking;
 };
 }

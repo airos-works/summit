@@ -5,6 +5,7 @@
 #include <Alert.h>
 #include <Application.h>
 #include <Button.h>
+#include <ControlLook.h>
 #include <FindDirectory.h>
 #include <Invoker.h>
 #include <LayoutBuilder.h>
@@ -12,6 +13,8 @@
 #include <Node.h>
 #include <OS.h>
 #include <Path.h>
+#include <Polygon.h>
+#include <Region.h>
 #include <ScrollView.h>
 #include <StatusBar.h>
 #include <StringView.h>
@@ -49,6 +52,9 @@ constexpr uint32 kCheckDone = 'upcd', kTick = 'uptk', kOpenRelease = 'upal';
 // application's answer when it did not restart.
 constexpr uint32 kInstall = 'upin', kShowChanges = 'upsc', kInstallProgress = 'uppg', kInstallDone = 'updn',
     kRestartCancelled = 'uprc', kActivate = 'upac';
+// The window shown while a manual check runs: closed when the check is done,
+// cancelled by the user, and its bar's animation.
+constexpr uint32 kCheckingClose = 'upcc', kCheckingCancelled = 'upcx', kBusyStep = 'upbs';
 constexpr const char* kRepositoryAPI = "https://api.github.com/repos/airos-works/summit";
 constexpr const char* kDownloadPrefix = "https://github.com/airos-works/summit/releases/download/";
 
@@ -643,6 +649,124 @@ struct UpdateChecker::WindowState {
 };
 
 namespace {
+// Over the browser window in front (as Preferences opens), or in the middle
+// of the screen. The window is locked.
+void PlaceOver(BWindow* window, BRect over)
+{
+    window->UpdateSizeLimits();
+    window->ResizeToPreferred();
+    if (!over.IsValid()) {
+        window->CenterOnScreen();
+        return;
+    }
+    const BRect frame = window->Frame();
+    window->MoveTo(std::round(over.left + (over.Width() - frame.Width()) / 2),
+        std::round(over.top + std::max(0.0f, (over.Height() - frame.Height()) / 3)));
+}
+
+// A progress bar for work of unknown length: BStatusBar's frame, with
+// stripes that move.
+class BusyBar final : public BView {
+public:
+    explicit BusyBar(const char* name)
+        : BView(name, B_WILL_DRAW | B_FULL_UPDATE_ON_RESIZE)
+    {
+        // Draw paints every pixel, so nothing is erased between steps.
+        SetViewColor(B_TRANSPARENT_COLOR);
+        SetExplicitMinSize(BSize(240, 14));
+        SetExplicitPreferredSize(BSize(320, 14));
+        SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, 14));
+    }
+    void AttachedToWindow() override
+    {
+        fRunner = std::make_unique<BMessageRunner>(BMessenger(this), BMessage(kBusyStep), 40000);
+    }
+    void DetachedFromWindow() override { fRunner.reset(); }
+    void MessageReceived(BMessage* message) override
+    {
+        if (message->what != kBusyStep) {
+            BView::MessageReceived(message);
+            return;
+        }
+        fOffset = std::fmod(fOffset + 1, 2 * kStripe);
+        // Only the stripes: the frame stays as it is.
+        Invalidate(fInner.IsValid() ? fInner : Bounds());
+    }
+    void Draw(BRect update) override
+    {
+        const rgb_color bar = ui_color(B_STATUS_BAR_COLOR);
+        if (!fInner.IsValid() || !fInner.Contains(update)) {
+            SetLowUIColor(B_PANEL_BACKGROUND_COLOR);
+            FillRect(Bounds(), B_SOLID_LOW);
+            BRect rect = Bounds();
+            be_control_look->DrawStatusBar(this, rect, update, ui_color(B_PANEL_BACKGROUND_COLOR), bar, rect.right + 1);
+            // Inside the bar's own edge.
+            fInner = rect.InsetByCopy(1, 1);
+        }
+        const BRect inner = fInner;
+        PushState();
+        BRegion clip(inner);
+        ConstrainClippingRegion(&clip);
+        SetHighColor(bar);
+        FillRect(inner);
+        SetHighColor(tint_color(bar, B_LIGHTEN_1_TINT));
+        const float slant = inner.Height() + 1;
+        for (float x = inner.left - slant - 2 * kStripe + fOffset; x <= inner.right; x += 2 * kStripe) {
+            const BPoint stripe[] = {BPoint(x, inner.bottom + 1), BPoint(x + slant, inner.top), BPoint(x + slant + kStripe, inner.top),
+                BPoint(x + kStripe, inner.bottom + 1)};
+            FillPolygon(stripe, 4);
+        }
+        PopState();
+    }
+
+private:
+    static constexpr float kStripe = 8;
+    std::unique_ptr<BMessageRunner> fRunner;
+    float fOffset = 0;
+    BRect fInner;
+};
+
+// Shown at once by File › Check for Updates…, as GitHub can take a while to
+// answer; the checker closes it before it says what it found. Cancel closes
+// it and lets the check finish quietly, as the daily check does (a newer
+// build still opens the update window).
+class CheckingWindow final : public BWindow {
+public:
+    explicit CheckingWindow(BMessenger checker)
+        : BWindow(BRect(0, 0, 360, 100), "Summit Update", B_TITLED_WINDOW_LOOK, B_MODAL_APP_WINDOW_FEEL,
+            B_ASYNCHRONOUS_CONTROLS | B_AUTO_UPDATE_SIZE_LIMITS | B_CLOSE_ON_ESCAPE | B_NOT_ZOOMABLE | B_NOT_MINIMIZABLE
+                | B_NOT_RESIZABLE)
+        , fChecker(checker)
+    {
+        auto* label = new BStringView("update-checking", "Checking for updates…");
+        auto* cancel = new BButton("update-checking-cancel", "Cancel", new BMessage(B_QUIT_REQUESTED));
+        BLayoutBuilder::Group<>(this, B_VERTICAL, 10).SetInsets(16)
+            .Add(label)
+            .Add(new BusyBar("update-checking-progress"))
+            .AddGroup(B_HORIZONTAL)
+                .AddGlue()
+                .Add(cancel)
+            .End();
+    }
+    void MessageReceived(BMessage* message) override
+    {
+        switch (message->what) {
+            case kCheckingClose: Quit(); return;
+            case kActivate: Activate(); return;
+            default: BWindow::MessageReceived(message);
+        }
+    }
+    bool QuitRequested() override
+    {
+        BMessage cancelled(kCheckingCancelled);
+        fChecker.SendMessage(&cancelled, this);
+        return true;
+    }
+
+private:
+    BMessenger fChecker;
+};
+
 class UpdateWindow final : public BWindow {
 public:
     UpdateWindow(Offer offer, std::shared_ptr<UpdateChecker::WindowState> state)
@@ -707,20 +831,6 @@ public:
             .End();
         SetDefaultButton(fInstall);
         Ready();
-    }
-    // Over the browser window in front (as Preferences opens), or in the
-    // middle of the screen.
-    void Place(BRect over)
-    {
-        UpdateSizeLimits();
-        ResizeToPreferred();
-        if (!over.IsValid()) {
-            CenterOnScreen();
-            return;
-        }
-        const BRect frame = Frame();
-        MoveTo(std::round(over.left + (over.Width() - frame.Width()) / 2),
-            std::round(over.top + std::max(0.0f, (over.Height() - frame.Height()) / 3)));
     }
     void MessageReceived(BMessage* message) override
     {
@@ -912,7 +1022,10 @@ void UpdateChecker::Check(bool manual)
 {
     if (fJob) {
         // The check under way says what it finds.
-        if (manual) fJob->manual = true;
+        if (manual) {
+            fJob->manual = true;
+            ShowChecking();
+        }
         return;
     }
     if (fWindow.IsValid()) {
@@ -927,12 +1040,28 @@ void UpdateChecker::Check(bool manual)
     auto job = std::make_shared<Job>();
     job->manual = manual;
     fJob = job;
+    if (manual) ShowChecking();
     const BMessenger target(this);
     std::thread([job, target] {
         RunCheck(*job);
         job->finishedAt = std::time(nullptr);
         target.SendMessage(kCheckDone);
     }).detach();
+}
+
+void UpdateChecker::ShowChecking()
+{
+    if (fChecking.IsValid()) {
+        fChecking.SendMessage(kActivate);
+        return;
+    }
+    auto* window = new CheckingWindow(BMessenger(this));
+    const BRect front = fFrontFrame ? fFrontFrame() : BRect();
+    window->Lock();
+    PlaceOver(window, front);
+    window->Unlock();
+    fChecking = BMessenger(window);
+    window->Show();
 }
 
 void UpdateChecker::RestartCancelled()
@@ -946,6 +1075,9 @@ void UpdateChecker::Finished()
     auto job = std::exchange(fJob, nullptr);
     if (!job) return;
     fLast = job;
+    // Before the answer, which the modal window would otherwise cover.
+    if (fChecking.IsValid()) fChecking.SendMessage(kCheckingClose);
+    fChecking = BMessenger();
     if (job->answered) fChecked(job->finishedAt);
     const bool manual = job->manual;
     const auto& build = job->build;
@@ -1013,7 +1145,7 @@ void UpdateChecker::ShowWindow()
     auto* window = new UpdateWindow(std::move(offer), fWindowState = std::make_shared<WindowState>());
     const BRect front = fFrontFrame ? fFrontFrame() : BRect();
     window->Lock();
-    window->Place(front);
+    PlaceOver(window, front);
     window->Unlock();
     fWindow = BMessenger(window);
     window->Show();
@@ -1024,6 +1156,12 @@ void UpdateChecker::MessageReceived(BMessage* message)
     switch (message->what) {
         case kCheckDone:
             Finished();
+            break;
+        case kCheckingCancelled:
+            // From the window now open (not one the finished check already closed).
+            if (message->ReturnAddress() != fChecking) break;
+            fChecking = BMessenger();
+            if (fJob) fJob->manual = false;
             break;
         case kTick: {
             const auto settings = fSettings();
@@ -1048,7 +1186,8 @@ json UpdateChecker::State() const
     json state = {{"installed", BuildJSON(CurrentBuild())}, {"target", SUMMIT_TARGET_NAME}, {"architecture", PackageArchitecture()},
         {"release", ReleaseTag(SUMMIT_AIROS)}, {"api", ReleaseAPI()}, {"dryRun", DryRun()},
         {"dailyCheck", settings.enabled}, {"lastCheck", settings.lastCheck},
-        {"checkDue", UpdateCheckDue(settings.lastCheck, std::time(nullptr))}, {"checking", bool(fJob)}};
+        {"checkDue", UpdateCheckDue(settings.lastCheck, std::time(nullptr))}, {"checking", bool(fJob)},
+        {"checkingWindow", fChecking.IsValid()}};
     if (fLast) {
         json last = {{"outcome", OutcomeName(fLast->outcome)}, {"manual", bool(fLast->manual)}, {"answered", fLast->answered},
             {"finishedAt", fLast->finishedAt}};
@@ -1073,6 +1212,7 @@ json UpdateChecker::State() const
 
 bool UpdateChecker::Answer(const std::string& button)
 {
+    if (button == "cancel") return fChecking.IsValid() && fChecking.SendMessage(B_QUIT_REQUESTED) == B_OK;
     if (!fWindow.IsValid()) return false;
     if (button == "install") return fWindow.SendMessage(kInstall) == B_OK;
     if (button == "changes") return fWindow.SendMessage(kShowChanges) == B_OK;

@@ -2081,8 +2081,11 @@ private:
             if (!fUpdates) { summit::McpReplyError(message, "the update checker is not running"); return; }
             const std::string what = request.value("do", "status");
             if (what == "check") fUpdates->Check(true);
-            else if (what == "install" || what == "later" || what == "changes") {
-                if (!fUpdates->Answer(what)) { summit::McpReplyError(message, "no update window is open"); return; }
+            else if (what == "install" || what == "later" || what == "changes" || what == "cancel") {
+                if (!fUpdates->Answer(what)) {
+                    summit::McpReplyError(message, what == "cancel" ? "no check is waiting" : "no update window is open");
+                    return;
+                }
             } else if (what != "status") { summit::McpReplyError(message, "unknown updates request \"" + what + "\""); return; }
             summit::McpReply(message, fUpdates->State());
             return;

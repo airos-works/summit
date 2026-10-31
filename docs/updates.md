@@ -8,7 +8,11 @@ to watch the README's build tables and run `pkgman` by hand.
 - **File › Check for Updates…** (under About Summit) asks GitHub at once and
   always answers: the update window when there is a newer build, otherwise
   "Summit is up to date" with the build, "This build of Summit is newer than
-  the latest release", or why it could not check.
+  the latest release", or why it could not check. GitHub can take 10-15 s,
+  so a small modal window, "Checking for updates…" with a moving striped bar,
+  opens at once and closes when the answer comes. Its **Cancel** lets the
+  check finish quietly, as the daily check does: only a newer build then
+  shows anything.
 - **Preferences › General › Updates**: "Check for a new build of Summit once a
   day" (on by default), a **Check Now** button and when GitHub last answered.
   With the box ticked Summit looks half a minute after it starts and then
@@ -127,9 +131,10 @@ without touching the system:
 - `SUMMIT_UPDATE_API` replaces `https://api.github.com/repos/jmgasper/summit`
   (plain HTTP allowed, download addresses not checked), for a stand-in server.
 
-The MCP server's `updates` tool reports what runs, the last check and the
-update window, and with `do` checks (`check`) or presses the window's buttons
-(`install`, `later`, `changes`).
+The MCP server's `updates` tool reports what runs, the last check, whether
+the checking window is open (`checkingWindow`) and the update window, and
+with `do` checks (`check`), presses the update window's buttons (`install`,
+`later`, `changes`) or the checking window's Cancel (`cancel`).
 
 On the X399 (air/OS, x86_64) with a test copy on CI's 0340 engine
 (`claude-s35/bundle-up*`), 19 October 2026:

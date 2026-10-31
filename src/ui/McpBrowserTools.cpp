@@ -481,8 +481,10 @@ void RegisterMcpBrowserTools(mcp::Server& server, const std::shared_ptr<McpConte
         "Summit's own updates (File › Check for Updates…): the build that runs (its summit and summit_webkit "
         "packages and commit, or why it cannot update itself), the release it updates from, the daily check, the "
         "last check's result and the update window (phase, status, progress). do=check checks now as the menu "
-        "does (a newer build opens the update window); install, later and changes press that window's buttons.",
-        Schema().Enum("do", "status (default), check, install, later or changes", {"status", "check", "install", "later", "changes"}),
+        "does (the Checking for updates window, then the update window for a newer build); install, later and "
+        "changes press that window's buttons, cancel the Cancel of the checking window.",
+        Schema().Enum("do", "status (default), check, install, later, changes or cancel",
+            {"status", "check", "install", "later", "changes", "cancel"}),
         [context](const Json& arguments) {
             return ToolResult::Data(McpAsk(context->app, {{"action", "updates"}, {"do", mcp::StringArgument(arguments, "do", "status")}},
                 5000000, "The application thread (WebKit's main loop)"));
