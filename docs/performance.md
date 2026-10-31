@@ -1,5 +1,50 @@
 # Summit performance: Speedometer 3.1 baseline, where the time goes, stress test
 
+## 31 October 2026: presents not timed to the scan no longer finish the frame first (#138)
+
+The #138 item "3 % of composited frames take 66 ms or more on the Cubie
+(direct present waits on frames in flight)". Mesa patch 07's deferred
+presents are only in the x86_64 Mesa. The Cubie's own Mesa (26.2.4,
+`cubie/haiku/tools/cubie-a7s/mesa/mesa-haiku-gl.patch`) takes version 1
+presents only, so the engine presents there the way it did before
+`1fe2f93`: when air/OS's libbe has `BScreen::GetScanTiming()` (every air/OS
+build since 28 October), each present called `glFinish()` on the
+compositing thread before it asked app_server for the scan. The Cubie's
+version-1 present does not need that. It adds its copies to the frame's own
+work, waits only until that work is submitted, and copies into
+app_server's buffer on Mesa's helper thread. Where app_server knows neither
+the scan line nor the blanks of the output, the scan wait returns at once
+anyway. So the `glFinish()` only kept the next frame from overlapping this
+one's drawing, on a board bound by its GPU.
+
+**What changed** (`AcceleratedSurface.cpp`, `ScanTimingHaiku::timesScan()`,
+`DirectPresenterHaiku::present()`): the frame is finished and the scan
+waited for only when app_server's answer for the output has
+`B_SCAN_TIMING_FROM_HARDWARE` or `B_SCAN_TIMING_FROM_BLANK`, or the timing
+comes from the KMS node (amdgpu). The answer is the cached one (half a
+second) that the wait itself then uses, so no extra app_server call is made.
+`SUMMIT_DIRECT_PRESENT_UNTIMED_FINISH=1` finishes the frame as before.
+`SUMMIT_DIRECT_PRESENT_TRACE=1` says once, "the scan is not timed here", when
+the finish is skipped. Deferred presents are unchanged.
+
+**X399 check** (GTX 1070, 200 %, `present117/scroll.html`, one test copy).
+The bundle's Mesa had no `summit_haiku_present_version`, so every run took
+the waiting path that changed. Each run scrolled 10 s by script, then sent
+an 80-event wheel burst.
+
+| | new, default (8 runs) | old (`UNTIMED_FINISH=1`, 3 runs) |
+|---|---|---|
+| script scroll, page fps | 60.0-60.1 | 60.1 |
+| `frame_stats` over the script scroll: fps / p95 / longest gap | 58.8-59.6 / 16.8-17.1 / 17.1-29.4 ms | 59.5-59.6 / 16.8-28.1 / 19.6-32.3 ms |
+| wheel burst fps, gaps over 33 ms | 56.0-58.5, 0 | 57.5-58.0, 0 |
+| presents that waited for the scan (5 s trace windows of 250+ presents) | 68 % (3,801 of 5,609), 6.7 ms on average | 61 % (1,218 of 2,003), 6.1 ms |
+
+The X399's app_server gives the scan's timing, so its presents still finish
+the frame and wait for the scan. The share that waits depends on where the
+page lies against the scan, and it ranged from 0 to 100 % per window in both
+builds. The "not timed" line never appeared on the X399.
+Not yet measured on the Cubie (its MCP server was down on 31 October).
+
 ## 31 October 2026: the page's next rendering update no longer waits for the compositor's uploads and present (#117)
 
 The #117 item "overlap the next rendering update with the compositor's tile

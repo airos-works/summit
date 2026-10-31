@@ -169,7 +169,10 @@ vertical blank). Untimed copies tore most frames there.
 "20 October 2026". With deferred presents (Mesa patch 07) the frame is not
 finished and the scan not waited for on the compositing thread: Mesa's
 helper thread waits for both and then submits the copy, and the frame is
-reported to the UI process once the copy is done.
+reported to the UI process once the copy is done. Where app_server knows neither the
+scan line nor the blanks (the Cubie A7S), a present doesn't finish the
+frame first either; `SUMMIT_DIRECT_PRESENT_UNTIMED_FINISH=1` restores the
+finish (#138).
 
 **Windows restored at launch keep their connection (#97).** The daemon
 thread of a new direct window clones the frame buffer over the application's
