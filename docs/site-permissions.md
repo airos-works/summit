@@ -6,6 +6,11 @@ Added 2 October 2026 for [issue #10](https://github.com/jmgasper/summit/issues/1
 granted notifications would not have shown anyway, `navigator.geolocation`
 did not exist and `navigator.permissions` was missing.
 
+Since 1 November (#141) a cross-site frame's `document.requestStorageAccess()`
+is asked and remembered the same way, for a pair of sites ("storage-access",
+shown as "Cross-site cookies"); see
+[browser-privacy.md](browser-privacy.md#cross-site-tracking-prevention-141-1-november-2026).
+
 ## What the user sees
 
 - **Asking.** A site that asks to show notifications or to know the location

@@ -172,3 +172,78 @@ keystrokes.
   tab's text size (the engine's text zoom, steps of 10%) instead of the page's;
   it is not remembered per site. Actual Size resets both.
 - ~~Private windows cannot allow chosen extensions yet.~~ Done 30 September.
+
+## Cross-site tracking prevention (#141, 1 November 2026)
+
+Safari's protections, using WebKit's own Intelligent Tracking Prevention
+rather than a mechanism of Summit's.
+
+### What the user sees
+
+- **Preferences › Privacy › Prevent cross-site tracking**, on by default (in
+  `profile.json` as `preventCrossSiteTracking`). Content from another site in
+  a page (frames, images, scripts, fetches: "third parties") neither sends nor
+  stores its site's cookies, in normal and private windows and in containers.
+  Partitioned cookies (CHIPS, #121) still work: they belong to the top-level
+  site anyway.
+- A cross-site frame can ask with `document.requestStorageAccess()` after a
+  click in it, for a site the user has visited and clicked in before (WebKit's
+  rule). Summit asks: "Allow comments.example to use cookies and website data
+  while you browse news.example?" (Block, Not Now, Allow). Block and Allow are
+  remembered for that pair of sites and listed under **Site Permissions** as
+  "Cross-site cookies" (*embedded* on *site*), where they can be changed or
+  removed; a removed pair asks again. `document.hasStorageAccess()` reports
+  the grant.
+- **Sites allowed cross-site cookies** (same tab): on these sites' pages,
+  third parties keep their cookies, as without the protection. For a sign-in
+  that breaks (an embedded login of another site). Typed as a host name or an
+  address; kept in `profile.json` as `crossSiteCookieSites`. The engine
+  applies an entry to its registrable domain (teams.microsoft.com covers
+  microsoft.com's pages).
+- **Private windows** remove click-tracking parameters from the addresses
+  they open, as Safari's Link Tracking Protection does: `fbclid`, `gclid`,
+  `dclid`, `gbraid`, `wbraid`, `msclkid`, `mc_eid`, `igshid`, `twclid`,
+  `yclid`, `_hsenc`, `_hsmi`, `oly_enc_id`, `oly_anon_id`, `__s`, `vero_id`,
+  `wickedid`, `ttclid`, `li_fat_id`, `s_cid` and `mkt_tok`. Other parameters
+  stay.
+
+### How it works
+
+- Engine (`WebViewContextHaiku.cpp`): every store of a context (the profile,
+  its containers, private sessions) has WebKit's tracking prevention on
+  (`WebsiteDataStore::setTrackingPreventionEnabled`) with
+  `ThirdPartyCookieBlockingMode::All`, WebKit's default. The host turns it off
+  with `SetSitePermission("cross-site-tracking", "*", 0)`;
+  `SUMMIT_TRACKING_PREVENTION=0` forces it off for testing.
+- That also runs the rest of ITP, as in Safari: its statistics database
+  (`Data/ResourceLoadStatistics/observations.db` under the profile's WebKit
+  folder), the 7-day cap on cookies that scripts set, the removal of the
+  script-written storage (local storage, IndexedDB, service workers; not
+  cookies) of sites the user has not interacted with in the last 30 days of
+  browsing, and the removal of all data of sites it classifies as trackers.
+  Sites that already had data when ITP first ran are grandfathered for a
+  while, and the exception sites below are never cleared.
+- WebKit's decision (`NetworkStorageSession::thirdPartyCookieBlockingDecisionForRequest`)
+  was computed but ignored by the Curl port: `NetworkStorageSessionCurl.cpp`
+  now applies it to `document.cookie` and to raw cookie reads (only
+  partitioned cookies when blocked), and `NetworkDataTaskCurl.cpp` to the
+  `Cookie` header (partitioned only) and to `Set-Cookie` (only `Partitioned`
+  cookies stored when blocked). Web processes leave the decision to the
+  network process (`WebCookieJar.cpp`), which knows partitions and
+  exceptions.
+- Storage access is WebKit's: the network process's ITP store checks the
+  request and asks the UI process (`requestStorageAccessConfirm`), which asks
+  the host through the site permissions (`SitePermissionsHaiku`, kind
+  `storage-access`, the pair "site embedded" as its origin). On Haiku the ITP
+  store asks every time instead of reusing its own record of earlier grants,
+  so the host's saved answer (which it gives without a prompt) decides, and a
+  change in Preferences applies.
+- Exceptions are given to the store as its persisted sites
+  (`setPersistedSiteURLs`, which ITP also keeps from data removal); the
+  network process exempts their pages (`NetworkStorageSession.cpp`, and
+  `ResourceLoadStatisticsStore.cpp` so that `requestStorageAccess()` there
+  resolves without asking).
+- Link tracking protection is WebKit's link decoration filtering hook
+  (`WebPage::applyLinkDecorationFilteringWithResult`, a no-op off Cocoa):
+  for ephemeral sessions it removes the listed parameters from main-resource
+  requests of navigations (typed, clicked, scripted).
