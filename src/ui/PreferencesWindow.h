@@ -71,6 +71,15 @@ private:
     };
     void ShowSitePermissions(const std::vector<SiteEntry>&);
     void ShowProtocolHandlers(const std::vector<std::pair<std::string, std::string>>&);
+    // Preferences › Privacy (#141).
+    void ShowCrossSiteCookieSites(const std::vector<std::string>&);
+    void AddCrossSiteCookieSite();
+    BCheckBox* fPreventTracking = nullptr;
+    BColumnListView* fCookieSites = nullptr;
+    BTextControl* fCookieSiteInput = nullptr;
+    BButton* fCookieSiteAdd = nullptr;
+    BButton* fCookieSiteRemove = nullptr;
+    std::vector<std::string> fCookieSiteEntries;
     void SendMcpPort();
     BCheckBox* fMcpEnabled;
     BCheckBox* fMcpLocalOnly;

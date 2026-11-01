@@ -497,6 +497,17 @@ int main()
     CHECK(profile.SetSitePermission("notifications", "http://old.example", true));
     CHECK(profile.SetSitePermission("notifications", "http://old.example", std::nullopt));
     CHECK(!profile.SetSitePermission("notifications", "http://old.example", std::nullopt));
+    // Storage access is answered for a site pair (#141).
+    CHECK(profile.SetSitePermission("storage-access", "news.example comments.example", true));
+    CHECK(!profile.SetSitePermission("storage-access", "https://news.example", true));
+    CHECK(!profile.SetSitePermission("storage-access", "news.example  comments.example", true));
+    CHECK(!profile.SetSitePermission("notifications", "news.example comments.example", true));
+    CHECK(CrossSiteCookieSite(" https://Login.Microsoftonline.com:443/common?x ") == "login.microsoftonline.com");
+    CHECK(CrossSiteCookieSite("www.example.com") == "example.com" && CrossSiteCookieSite("teams.microsoft.com") == "teams.microsoft.com");
+    CHECK(CrossSiteCookieSite("").empty() && CrossSiteCookieSite("bad host").empty() && CrossSiteCookieSite("a..b").empty());
+    CHECK(profile.preventCrossSiteTracking);
+    profile.preventCrossSiteTracking = false;
+    profile.crossSiteCookieSites.insert("teams.microsoft.com");
     CHECK(profile.SetProtocolHandler("mailto", mail));
     CHECK(!profile.SetProtocolHandler("mailto", mail));
     CHECK(profile.SetProtocolHandler("irc", {"app", "/boot/apps/Vision/Vision", ""}));
@@ -525,7 +536,9 @@ int main()
     CHECK(loaded.bookmarks.Count() == 2 && loaded.bookmarks.Pages()[0].bar && loaded.bookmarks.Pages()[0].url == "https://bar.example/");
     CHECK(loaded.homeURL == "https://home.example/" && !loaded.showBookmarksBar && !loaded.restoreSession);
     CHECK(!loaded.caretBrowsing && loaded.reduceMotion && loaded.increaseContrast && loaded.minimumFontSize == 14 && !loaded.unloadWhenMemoryIsLow);
-    CHECK(loaded.sitePermissions.size() == 4 && loaded.sitePermissions["notifications"].size() == 1
+    CHECK(!loaded.preventCrossSiteTracking && loaded.crossSiteCookieSites == std::set<std::string>({"teams.microsoft.com"})
+        && loaded.sitePermissions.at("storage-access").at("news.example comments.example"));
+    CHECK(loaded.sitePermissions.size() == 5 && loaded.sitePermissions["notifications"].size() == 1
         && loaded.sitePermissions["notifications"]["https://github.com"]
         && !loaded.sitePermissions["geolocation"]["https://maps.example:8443"]
         && loaded.sitePermissions.at("camera").at("https://github.com")

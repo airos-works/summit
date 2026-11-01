@@ -102,7 +102,16 @@ struct Profile {
     // What sites may do, as the user answered when they asked: permission
     // ("notifications", "geolocation") -> origin ("https://host[:port]") ->
     // allowed. Sites not listed ask again.
+    // "storage-access" answers are for a site pair, "top-site embedded-site"
+    // (StorageAccessPair()): whether a frame of the embedded site may have
+    // its cookies on the top site's pages.
     std::map<std::string, std::map<std::string, bool>> sitePermissions;
+    // Preferences › Privacy (#141): cross-site tracking prevention, as in
+    // Safari (third-party cookies are blocked unless a frame is granted
+    // storage access), and the sites whose embedded third parties keep
+    // their cookies anyway (host names, CrossSiteCookieSite()).
+    bool preventCrossSiteTracking = true;
+    std::set<std::string> crossSiteCookieSites;
     std::map<std::string, ProtocolHandler> protocolHandlers;
     // A declined site registration is not prompted again until removed in Preferences.
     std::map<std::string, std::set<std::string>> declinedProtocolHandlers;
@@ -193,4 +202,11 @@ struct ProfileLoad {
 };
 // The permissions sites can ask for, in the order the Preferences list them.
 const std::vector<std::string>& SitePermissionNames();
+// The host name of a site for the cross-site cookie exceptions, from what the
+// user typed ("Teams.Microsoft.com", "https://login.example.com/x"); empty
+// when it is not a usable host name.
+std::string CrossSiteCookieSite(const std::string& input);
+// Whether text is a "storage-access" site pair: two host names (registrable
+// domains or addresses) separated by one space.
+bool StorageAccessPair(const std::string& text);
 }

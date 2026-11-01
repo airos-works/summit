@@ -294,6 +294,14 @@ void SitePermissionService::Ask(const BMessage& request)
         return;
     }
     std::string text = HostOf(origin) + " " + Question(permission);
+    if (permission == "storage-access") {
+        // A frame of another site (a sign-in or comments box) wants the
+        // cookies it has on its own site (#141); as Safari asks.
+        const std::string site = request.GetString("site", ""), embedded = request.GetString("embedded", "");
+        text = "Allow " + embedded + " to use cookies and website data while you browse " + site + "?\n\n"
+            "This lets " + embedded + " recognize you here, for example to keep you signed in, and to see "
+            "your activity on " + site + ".";
+    }
     if (permission == "geolocation" && HasSystemLocationService())
         text += "\n\nSummit asks the system's location service where you are: the place set in its settings, or one "
             "found from the Wi-Fi networks nearby and your network address.";

@@ -255,6 +255,12 @@ Profile Profile::Load(const std::filesystem::path& path, std::string& error)
         if (auto never = j.find("passwordNever"); never != j.end() && never->is_array() && never->size() <= 10000)
             for (const auto& origin : *never) if (origin.is_string()) profile.passwordNever.insert(origin.get<std::string>());
         if (auto spelling = j.find("spellChecking"); spelling != j.end() && spelling->is_boolean()) profile.spellChecking = *spelling;
+        if (auto prevent = j.find("preventCrossSiteTracking"); prevent != j.end() && prevent->is_boolean())
+            profile.preventCrossSiteTracking = *prevent;
+        if (auto sites = j.find("crossSiteCookieSites"); sites != j.end() && sites->is_array() && sites->size() <= 10000)
+            for (const auto& site : *sites)
+                if (site.is_string())
+                    if (auto host = CrossSiteCookieSite(site.get<std::string>()); !host.empty()) profile.crossSiteCookieSites.insert(host);
         if (auto apps = j.find("webApps"); apps != j.end() && apps->is_array() && apps->size() <= 500) {
             for (const auto& item : *apps) {
                 if (!item.is_object()) continue;
@@ -366,18 +372,57 @@ const WebApp* Profile::FindWebApp(const std::string& id) const
 
 const std::vector<std::string>& SitePermissionNames()
 {
-    static const std::vector<std::string> names = {"notifications", "geolocation", "camera", "microphone", "popups", "autoplay"};
+    static const std::vector<std::string> names = {"notifications", "geolocation", "camera", "microphone", "popups", "autoplay",
+        "storage-access"};
     return names;
+}
+
+namespace {
+// A host name or address as WebKit writes sites: lower case letters, digits,
+// dots and hyphens, or an IPv6 address in brackets.
+bool HostName(std::string_view host)
+{
+    if (host.empty() || host.size() > 253) return false;
+    if (host.front() == '[') return host.size() > 2 && host.back() == ']'
+        && host.find_first_not_of("0123456789abcdef:.", 1) == host.size() - 1;
+    return host.find_first_not_of("abcdefghijklmnopqrstuvwxyz0123456789.-_") == std::string_view::npos
+        && host.front() != '.' && host.back() != '.' && host.find("..") == std::string_view::npos;
+}
+}
+
+std::string CrossSiteCookieSite(const std::string& input)
+{
+    std::string text = input;
+    text.erase(0, text.find_first_not_of(" \t\r\n"));
+    text.erase(text.find_last_not_of(" \t\r\n") + 1);
+    if (const size_t scheme = text.find("://"); scheme != std::string::npos) text.erase(0, scheme + 3);
+    text = text.substr(0, text.find_first_of("/?#"));
+    if (const size_t user = text.rfind('@'); user != std::string::npos) text.erase(0, user + 1);
+    // A port does not make another site.
+    if (!text.empty() && text.front() != '[') text = text.substr(0, text.find(':'));
+    else if (const size_t close = text.find(']'); close != std::string::npos) text.erase(close + 1);
+    std::transform(text.begin(), text.end(), text.begin(), [](unsigned char c) { return std::tolower(c); });
+    if (text.rfind("www.", 0) == 0 && text.size() > 4) text.erase(0, 4);
+    return HostName(text) ? text : std::string();
+}
+
+bool StorageAccessPair(const std::string& text)
+{
+    const size_t space = text.find(' ');
+    return space != std::string::npos && text.size() <= 300
+        && HostName(std::string_view(text).substr(0, space)) && HostName(std::string_view(text).substr(space + 1));
 }
 
 bool Profile::SetSitePermission(const std::string& permission, const std::string& origin, std::optional<bool> allowed)
 {
     const auto& names = SitePermissionNames();
     if (std::find(names.begin(), names.end(), permission) == names.end()) return false;
-    // Only web origins: scheme://host[:port], nothing after.
+    // Only web origins: scheme://host[:port], nothing after; storage access
+    // is answered for a pair of sites.
     const bool web = origin.rfind("https://", 0) == 0 || origin.rfind("http://", 0) == 0;
     const size_t host = origin.find("://") + 3;
-    if (!web || origin.size() <= host || origin.size() > 300 || origin.find_first_of(std::string_view("/?#\\ \0", 6), host) != std::string::npos)
+    if (permission == "storage-access" ? !StorageAccessPair(origin)
+        : !web || origin.size() <= host || origin.size() > 300 || origin.find_first_of(std::string_view("/?#\\ \0", 6), host) != std::string::npos)
         return false;
     auto& origins = sitePermissions[permission];
     if (!allowed) {
@@ -550,6 +595,7 @@ bool Profile::Save(const std::filesystem::path& path, std::string& error, int64_
             {"caretBrowsing", caretBrowsing}, {"reduceMotion", reduceMotion}, {"increaseContrast", increaseContrast},
             {"minimumFontSize", minimumFontSize}, {"unloadWhenMemoryIsLow", unloadWhenMemoryIsLow}, {"overrideColors", overrideColors}, {"spellingLanguage", spellingLanguage}, {"restoreSession", restoreSession},
             {"savePasswords", savePasswords}, {"passwordNever", passwordNever}, {"spellChecking", spellChecking},
+            {"preventCrossSiteTracking", preventCrossSiteTracking}, {"crossSiteCookieSites", crossSiteCookieSites},
             {"autoplay", autoplay}, {"userAgent", FindUserAgentPreset(userAgent).id}, {"webApps", [&] {
                 json apps = json::array();
                 for (const auto& app : webApps)

@@ -6,6 +6,7 @@
 #include "Messages.h"
 #include "McpService.h"
 #include "core/Address.h"
+#include "core/Profile.h"
 #include "core/UserAgent.h"
 #if SUMMIT_MODERN_WEBKIT
 #include <WebKit/WebKitEmbedding.h>
@@ -44,7 +45,9 @@ constexpr uint32 homeEdited = 'phed', useStartPage = 'phsp', bookmarksBarToggled
     forgetCertificates = 'pfce', forgetCertificatesConfirmed = 'pfcc', siteSelected = 'psse', siteAllow = 'pssa',
     restoreSessionToggled = 'prss', mcpToggled = 'pmcp', mcpLocalToggled = 'pmcl', mcpPortEdited = 'pmpe',
     mcpCopy = 'pmcc', mcpNewToken = 'pmnt', mcpNewTokenConfirmed = 'pmnc', checkForUpdatesToggled = 'pupd',
-    siteBlock = 'pssb', siteRemove = 'pssr', protocolSelected = 'ppse', protocolRemove = 'pprm';
+    siteBlock = 'pssb', siteRemove = 'pssr', protocolSelected = 'ppse', protocolRemove = 'pprm',
+    preventTrackingToggled = 'pptr', cookieSiteSelected = 'pcss', cookieSiteAdd = 'pcsa', cookieSiteRemove = 'pcsr',
+    cookieSiteEdited = 'pcse';
 enum SiteColumn { kSiteColumn, kPermissionColumn, kSettingColumn };
 
 std::string SizeLabel(uintmax_t bytes)
@@ -352,6 +355,56 @@ PreferencesWindow::PreferencesWindow(BMessenger owner, const PreferencesState& s
         .End()
         .AddGlue();
     fTabs->AddTab(compatibility);
+    // Privacy (#141): Safari's cross-site tracking prevention, and the sites
+    // where it is relaxed so that a sign-in that needs cookies works.
+    fPreventTracking = new BCheckBox("prevent-tracking", "Prevent cross-site tracking", new BMessage(preventTrackingToggled));
+    fPreventTracking->SetValue(B_CONTROL_ON);
+    auto* trackingHint = new BStringView("prevent-tracking-hint", "Content from other sites in a page (ads, buttons, "
+        "embedded frames) gets no cookies, so it cannot follow you from site to site.");
+    trackingHint->SetHighUIColor(B_PANEL_TEXT_COLOR, B_DARKEN_2_TINT);
+    auto* trackingAsk = new BStringView("prevent-tracking-ask", "A frame you click in can ask for its cookies; "
+        "your answers are under Site Permissions.");
+    trackingAsk->SetHighUIColor(B_PANEL_TEXT_COLOR, B_DARKEN_2_TINT);
+    auto* linkHint = new BStringView("link-tracking-hint", "Private windows also remove click-tracking parameters "
+        "(fbclid, gclid, …) from the addresses they open.");
+    linkHint->SetHighUIColor(B_PANEL_TEXT_COLOR, B_DARKEN_2_TINT);
+    fCookieSites = new BColumnListView("cross-site-cookie-sites", B_NAVIGABLE, B_FANCY_BORDER, true);
+    fCookieSites->AddColumn(new BStringColumn("Site", 440, 80, 800, B_TRUNCATE_MIDDLE), 0);
+    fCookieSites->SetSelectionMessage(new BMessage(cookieSiteSelected));
+    fCookieSites->SetSelectionMode(B_SINGLE_SELECTION_LIST);
+    fCookieSites->SetSortingEnabled(false);
+    fCookieSites->SetExplicitMinSize(BSize(470, 110));
+    fCookieSiteInput = new BTextControl("cross-site-cookie-site", "Site:", "", new BMessage(cookieSiteAdd));
+    fCookieSiteInput->SetModificationMessage(new BMessage(cookieSiteEdited));
+    fCookieSiteAdd = new BButton("cross-site-cookie-add", "Add", new BMessage(cookieSiteAdd));
+    fCookieSiteAdd->SetEnabled(false);
+    fCookieSiteRemove = new BButton("cross-site-cookie-remove", "Remove", new BMessage(cookieSiteRemove));
+    fCookieSiteRemove->SetEnabled(false);
+    auto* sitesHint = new BStringView("cross-site-cookie-hint", "On these sites, content from other sites keeps its "
+        "cookies: add a site whose sign-in stops working.");
+    sitesHint->SetHighUIColor(B_PANEL_TEXT_COLOR, B_DARKEN_2_TINT);
+    auto* privacy = new BGroupView("Privacy", B_VERTICAL, 8);
+    BLayoutBuilder::Group<>(privacy).SetInsets(18)
+        .Add(SectionTitle("privacy-title", "Privacy"))
+        .AddGroup(B_VERTICAL, 6).SetInsets(12, 0, 0, 0)
+            .Add(fPreventTracking)
+            .Add(trackingHint)
+            .Add(trackingAsk)
+            .Add(linkHint)
+        .End()
+        .AddStrut(6)
+        .Add(SectionTitle("cross-site-cookie-title", "Sites allowed cross-site cookies"))
+        .AddGroup(B_VERTICAL, 6).SetInsets(12, 0, 0, 0)
+            .Add(fCookieSites)
+            .AddGroup(B_HORIZONTAL, 8)
+                .Add(fCookieSiteInput)
+                .Add(fCookieSiteAdd)
+                .Add(fCookieSiteRemove)
+            .End()
+            .Add(sitesHint)
+        .End()
+        .AddGlue();
+    fTabs->AddTab(privacy);
 #endif
     fTabs->AddTab(data);
     fTabs->AddTab(sites);
@@ -443,15 +496,19 @@ void PreferencesWindow::ShowSitePermissions(const std::vector<SiteEntry>& entrie
     BRow* selected = nullptr;
     for (const auto& entry : fSiteEntries) {
         auto* row = new BRow();
-        // https is the rule and goes without saying; http is shown.
-        const std::string site = entry.origin.rfind("https://", 0) == 0 ? entry.origin.substr(8) : entry.origin;
+        // https is the rule and goes without saying; http is shown. Storage
+        // access is for a frame of one site on the pages of another.
+        std::string site = entry.origin.rfind("https://", 0) == 0 ? entry.origin.substr(8) : entry.origin;
+        if (const size_t space = site.find(' '); entry.permission == "storage-access" && space != std::string::npos)
+            site = site.substr(space + 1) + " on " + site.substr(0, space);
         row->SetField(new BStringField(site.c_str()), kSiteColumn);
         row->SetField(new BStringField(entry.permission == "notifications" ? "Notifications"
             : entry.permission == "geolocation" ? "Location"
             : entry.permission == "camera" ? "Camera"
             : entry.permission == "microphone" ? "Microphone"
             : entry.permission == "popups" ? "Pop-ups"
-            : entry.permission == "autoplay" ? "Autoplay" : entry.permission.c_str()), kPermissionColumn);
+            : entry.permission == "autoplay" ? "Autoplay"
+            : entry.permission == "storage-access" ? "Cross-site cookies" : entry.permission.c_str()), kPermissionColumn);
         row->SetField(new BStringField(entry.allowed ? "Allowed" : "Blocked"), kSettingColumn);
         fSites->AddRow(row);
         if (entry.origin == selectedOrigin && entry.permission == selectedPermission) selected = row;
@@ -461,6 +518,32 @@ void PreferencesWindow::ShowSitePermissions(const std::vector<SiteEntry>& entrie
     fSiteAllow->SetEnabled(hasSelection);
     fSiteBlock->SetEnabled(hasSelection);
     fSiteRemove->SetEnabled(hasSelection);
+}
+
+void PreferencesWindow::ShowCrossSiteCookieSites(const std::vector<std::string>& sites)
+{
+    fCookieSites->Clear();
+    fCookieSiteEntries = sites;
+    std::sort(fCookieSiteEntries.begin(), fCookieSiteEntries.end());
+    for (const auto& site : fCookieSiteEntries) {
+        auto* row = new BRow();
+        row->SetField(new BStringField(site.c_str()), 0);
+        fCookieSites->AddRow(row);
+    }
+    fCookieSiteRemove->SetEnabled(false);
+}
+
+void PreferencesWindow::AddCrossSiteCookieSite()
+{
+    const std::string site = CrossSiteCookieSite(fCookieSiteInput->Text());
+    if (site.empty()) return;
+    BMessage change(kSitePermissionChange);
+    change.AddString("permission", "cross-site-cookies");
+    change.AddString("origin", site.c_str());
+    change.AddInt32("state", 1);
+    fOwner.SendMessage(&change);
+    fCookieSiteInput->SetText("");
+    fCookieSiteAdd->SetEnabled(false);
 }
 
 void PreferencesWindow::ShowProtocolHandlers(const std::vector<std::pair<std::string, std::string>>& entries)
@@ -552,6 +635,32 @@ void PreferencesWindow::MessageReceived(BMessage* message)
             fHome->SetText("");
             PostMessage(homeEdited);
             break;
+        case preventTrackingToggled: {
+            BMessage changed(kPreferencesChanged);
+            changed.AddBool("prevent_cross_site_tracking", fPreventTracking->Value() == B_CONTROL_ON);
+            fOwner.SendMessage(&changed);
+            break;
+        }
+        case cookieSiteEdited:
+            fCookieSiteAdd->SetEnabled(!CrossSiteCookieSite(fCookieSiteInput->Text()).empty());
+            break;
+        case cookieSiteAdd:
+            AddCrossSiteCookieSite();
+            break;
+        case cookieSiteSelected:
+            fCookieSiteRemove->SetEnabled(fCookieSites->CurrentSelection() != nullptr);
+            break;
+        case cookieSiteRemove: {
+            auto* row = fCookieSites->CurrentSelection();
+            const auto index = row ? fCookieSites->IndexOf(row) : -1;
+            if (index < 0 || static_cast<size_t>(index) >= fCookieSiteEntries.size()) break;
+            BMessage change(kSitePermissionChange);
+            change.AddString("permission", "cross-site-cookies");
+            change.AddString("origin", fCookieSiteEntries[index].c_str());
+            change.AddInt32("state", -1);
+            fOwner.SendMessage(&change);
+            break;
+        }
         case restoreSessionToggled: {
             BMessage changed(kPreferencesChanged);
             changed.AddBool("restore_session", fRestoreSession->Value() == B_CONTROL_ON);
@@ -798,6 +907,14 @@ void PreferencesWindow::MessageReceived(BMessage* message)
             int32 count = 0;
             if (message->FindInt32("history_count", &count) == B_OK) ShowHistoryCount(count);
             if (message->FindInt32("trusted_certificates", &count) == B_OK) ShowTrustedCertificates(count);
+            if (bool prevent = true; fPreventTracking && message->FindBool("prevent_cross_site_tracking", &prevent) == B_OK)
+                fPreventTracking->SetValue(prevent ? B_CONTROL_ON : B_CONTROL_OFF);
+            if (fCookieSites && message->GetBool("has_cross_site_cookie_sites", false)) {
+                std::vector<std::string> sites;
+                const char* site = nullptr;
+                for (int32 i = 0; message->FindString("cross_site_cookie_site", i, &site) == B_OK; ++i) sites.emplace_back(site);
+                ShowCrossSiteCookieSites(sites);
+            }
             if (message->GetBool("has_site_permissions", false)) {
                 std::vector<SiteEntry> entries;
                 const char* permission = nullptr;
@@ -835,7 +952,8 @@ void PreferencesWindow::MessageReceived(BMessage* message)
                 const std::string name = tab;
                 const char* label = name == "browsing" ? "Browsing" : name == "data" ? "History and Data"
                     : name == "sites" ? "Site Permissions" : name == "links" ? "Link Handlers"
-                    : name == "developer" ? "Developer" : name == "compatibility" ? "Compatibility" : "General";
+                    : name == "developer" ? "Developer" : name == "compatibility" ? "Compatibility"
+                    : name == "privacy" ? "Privacy" : "General";
                 for (int32 i = 0; i < fTabs->CountTabs(); ++i)
                     if (fTabs->TabAt(i) && fTabs->TabAt(i)->Label() && !std::strcmp(fTabs->TabAt(i)->Label(), label)) fTabs->Select(i);
             }

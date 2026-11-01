@@ -755,6 +755,8 @@ public:
             const bool hasSpellingLanguage = message->FindString("spelling_language", &spellingLanguage) == B_OK && spellingLanguage
                 && std::strlen(spellingLanguage) < 64;
             const bool hasSavePasswords = message->FindBool("save_passwords", &savePasswords) == B_OK;
+            bool preventTracking = true;
+            const bool hasPreventTracking = message->FindBool("prevent_cross_site_tracking", &preventTracking) == B_OK;
             bool checkForUpdates = true;
             const bool hasCheckForUpdates = message->FindBool("check_for_updates", &checkForUpdates) == B_OK;
             // Preferences › Browsing › Accessibility (#118) and Memory (#116).
@@ -806,6 +808,10 @@ public:
                     changed = true;
                 }
                 if (hasSavePasswords && profile.savePasswords != savePasswords) { profile.savePasswords = savePasswords; changed = true; }
+                if (hasPreventTracking && profile.preventCrossSiteTracking != preventTracking) {
+                    profile.preventCrossSiteTracking = preventTracking;
+                    changed = true;
+                }
                 if (hasEngine && profile.searchEngine != engine) {
                     // Set before windows hear of the change, so they see the new engine.
                     summit::SetSearchEngine(engine);
@@ -821,6 +827,9 @@ public:
                     if (context) context->SetSitePermission("autoplay", "*", AutoplayValue(setting));
             }
             if (hasSpelling || hasSpellingLanguage) ApplySpellChecking();
+            if (hasPreventTracking)
+                for (const auto& context : {fWebKitContext, fPrivateContext})
+                    if (context) context->SetSitePermission("cross-site-tracking", "*", preventTracking ? 1 : 0);
 #endif
             return;
         }
@@ -858,6 +867,21 @@ public:
             // From Preferences › Site Permissions: "state" 1 allows, 0 blocks, -1 forgets.
             const std::string permission = message->GetString("permission", ""), origin = message->GetString("origin", "");
             const int32 state = message->GetInt32("state", -1);
+            if (permission == "cross-site-cookies") {
+                // Preferences › Privacy: a site whose third parties keep their
+                // cookies (1) or no longer (-1).
+                const std::string site = summit::CrossSiteCookieSite(origin);
+                if (site.empty()) return;
+                fShared->Change([&](summit::Profile& profile) -> uint32 {
+                    const bool changed = state > 0 ? profile.crossSiteCookieSites.insert(site).second
+                        : profile.crossSiteCookieSites.erase(site) > 0;
+                    return changed ? summit::SharedProfile::kSettingsChanged : 0;
+                });
+                for (const auto& context : {fWebKitContext, fPrivateContext})
+                    if (context) context->SetSitePermission("cross-site-cookies", site.c_str(), state > 0 ? 1 : -1);
+                SendPreferencesState();
+                return;
+            }
             SaveSitePermission(permission, origin, state < 0 ? std::nullopt : std::optional<bool>(state > 0));
             SendPreferencesState();
             return;
@@ -1552,8 +1576,17 @@ private:
                 for (const auto& [origin, allowed] : origins)
                     context.SetSitePermission(permission.c_str(), origin.c_str(), SitePermissionValue(permission, allowed));
             context.SetSitePermission("autoplay", "*", AutoplayValue(profile.autoplay));
+            GiveCrossSiteSettings(context, profile);
             return 0;
         });
+    }
+    // Preferences › Privacy (#141): cross-site tracking prevention and the
+    // sites whose third parties keep their cookies.
+    static void GiveCrossSiteSettings(BWebKitContext& context, const summit::Profile& profile)
+    {
+        context.SetSitePermission("cross-site-tracking", "*", profile.preventCrossSiteTracking ? 1 : 0);
+        for (const auto& site : profile.crossSiteCookieSites)
+            context.SetSitePermission("cross-site-cookies", site.c_str(), 1);
     }
     // A decision from a prompt or from Preferences: saved, and given to the
     // normal and private contexts (a private window's own answers are not).
@@ -1939,6 +1972,9 @@ private:
             state.AddBool("unload_when_memory_is_low", profile.unloadWhenMemoryIsLow);
             state.AddBool("override_colors", profile.overrideColors);
             AddSitePermissions(state, profile);
+            state.AddBool("prevent_cross_site_tracking", profile.preventCrossSiteTracking);
+            state.AddBool("has_cross_site_cookie_sites", true);
+            for (const auto& site : profile.crossSiteCookieSites) state.AddString("cross_site_cookie_site", site.c_str());
             state.AddBool("has_protocol_handlers", true);
             for (const auto& [scheme, handler] : profile.protocolHandlers) {
                 state.AddString("protocol_scheme", scheme.c_str());
@@ -2134,6 +2170,8 @@ private:
                     {"interfaceStyle", profile.interfaceStyle}, {"showBookmarksBar", profile.showBookmarksBar},
                     {"bookmarks", profile.bookmarks.Count()}, {"history", profile.history.size()}, {"siteZoom", profile.siteZoom},
                     {"sitePermissions", sites}, {"protocolHandlers", handlers}, {"trustedCertificates", certificates},
+                    {"privacy", {{"preventCrossSiteTracking", profile.preventCrossSiteTracking},
+                        {"crossSiteCookieSites", profile.crossSiteCookieSites}}},
                     {"mcp", {{"enabled", profile.mcpEnabled}, {"port", profile.mcpPort}, {"localOnly", profile.mcpLocalOnly}}},
                     {"updates", {{"dailyCheck", profile.checkForUpdates}, {"lastCheck", profile.lastUpdateCheck}}}};
             });
