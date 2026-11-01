@@ -131,6 +131,8 @@ struct Profile {
     // storage access), and the sites whose embedded third parties keep
     // their cookies anyway (host names, CrossSiteCookieSite()).
     bool preventCrossSiteTracking = true;
+    // HTTPS-First (#160): http:// pages are tried over https first.
+    bool httpsFirst = true;
     std::set<std::string> crossSiteCookieSites;
     std::map<std::string, ProtocolHandler> protocolHandlers;
     // A declined site registration is not prompted again until removed in Preferences.

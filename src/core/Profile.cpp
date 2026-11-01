@@ -290,6 +290,7 @@ Profile Profile::Load(const std::filesystem::path& path, std::string& error)
             }
         }
         if (auto spelling = j.find("spellChecking"); spelling != j.end() && spelling->is_boolean()) profile.spellChecking = *spelling;
+        if (auto https = j.find("httpsFirst"); https != j.end() && https->is_boolean()) profile.httpsFirst = *https;
         if (auto prevent = j.find("preventCrossSiteTracking"); prevent != j.end() && prevent->is_boolean())
             profile.preventCrossSiteTracking = *prevent;
         if (auto sites = j.find("crossSiteCookieSites"); sites != j.end() && sites->is_array() && sites->size() <= 10000)
@@ -648,6 +649,7 @@ bool Profile::Save(const std::filesystem::path& path, std::string& error, int64_
             {"minimumFontSize", minimumFontSize}, {"unloadWhenMemoryIsLow", unloadWhenMemoryIsLow}, {"overrideColors", overrideColors}, {"spellingLanguage", spellingLanguage}, {"restoreSession", restoreSession},
             {"savePasswords", savePasswords}, {"passwordNever", passwordNever}, {"spellChecking", spellChecking},
             {"preventCrossSiteTracking", preventCrossSiteTracking}, {"crossSiteCookieSites", crossSiteCookieSites},
+            {"httpsFirst", httpsFirst},
             {"autoFill", autoFill}, {"formHistory", formHistory}, {"autoFillAddresses", [&] {
                 json addresses = json::array();
                 for (const auto& address : autoFillAddresses) {

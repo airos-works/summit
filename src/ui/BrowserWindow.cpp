@@ -628,7 +628,7 @@ static BrowserWindow::AccessibilityAids ReadAccessibilityAids(SharedProfile& sha
 {
     return shared.Read([](const Profile& profile) {
         return BrowserWindow::AccessibilityAids { profile.caretBrowsing, profile.reduceMotion, profile.increaseContrast, profile.minimumFontSize,
-            profile.overrideColors };
+            profile.overrideColors, profile.httpsFirst };
     });
 }
 
@@ -651,6 +651,7 @@ static void ApplyAccessibilityAids(BWebKitView* view, const BrowserWindow::Acces
     settings.AddBool("reducedMotion", aids.reduceMotion);
     settings.AddBool("increasedContrast", aids.increaseContrast);
     settings.AddInt32("minimumFontSize", std::clamp(aids.minimumFontSize, 0, 72));
+    settings.AddBool("httpsFirst", aids.httpsFirst);
     view->SetPageSettings(settings);
     view->SetUserStyleSheet(aids.overrideColors ? kOverrideColorsStyle : nullptr);
 }

@@ -78,6 +78,7 @@ private:
     void ShowCrossSiteCookieSites(const std::vector<std::string>&);
     void AddCrossSiteCookieSite();
     BCheckBox* fPreventTracking = nullptr;
+    BCheckBox* fHttpsFirst = nullptr;
     BColumnListView* fCookieSites = nullptr;
     BTextControl* fCookieSiteInput = nullptr;
     BButton* fCookieSiteAdd = nullptr;

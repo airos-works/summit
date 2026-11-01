@@ -73219,6 +73219,20 @@ index 4f56aac50ae6a24ec376d4753db70a00dc2e54f8..4058fc0389076e3737d34ede3eeb952f
      bool m_isMainFrameNavigation { false };
  };
  
+diff --git a/Source/WebCore/platform/network/ResourceRequestBase.cpp b/Source/WebCore/platform/network/ResourceRequestBase.cpp
+index 0c4ea15dc9ecf5cd01a9f87ccd4bef423d8552af..9ff2b3e6bbac7f52c44310c70a8d07a949fb27c3 100644
+--- a/Source/WebCore/platform/network/ResourceRequestBase.cpp
++++ b/Source/WebCore/platform/network/ResourceRequestBase.cpp
+@@ -80,6 +80,9 @@ void ResourceRequestBase::setAsIsolatedCopy(const ResourceRequest& other)
+     if (!other.isSameSiteUnspecified())
+         setIsSameSite(other.isSameSite());
+     setIsTopSite(other.isTopSite());
++    // The curl backend works on isolated copies: an upgraded load must stay
++    // known as one (HTTPS-First fallback, Summit #160).
++    setWasSchemeOptimisticallyUpgraded(other.wasSchemeOptimisticallyUpgraded());
+ 
+     updateResourceRequest();
+     m_requestData.m_httpHeaderFields = other.httpHeaderFields().isolatedCopy();
 diff --git a/Source/WebCore/platform/network/SynchronousLoaderClient.cpp b/Source/WebCore/platform/network/SynchronousLoaderClient.cpp
 index aa3952aea18e5266f91dcc2c2bbf1ca3ccce3fa5..c9d016555031bc07c12351b5afb86f72491bc6e9 100644
 --- a/Source/WebCore/platform/network/SynchronousLoaderClient.cpp
@@ -75706,10 +75720,10 @@ index 0000000000000000000000000000000000000000..da71c185bfa5f93bf68ba7a513f48393
 +
 +#endif
 diff --git a/Source/WebCore/platform/network/curl/CurlRequest.cpp b/Source/WebCore/platform/network/curl/CurlRequest.cpp
-index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..6e5a6e66b1bfe87c68485cf8328ee29f2ae16861 100644
+index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..7039a5943a56efdc88a2fda80abd6c83b8be92a2 100644
 --- a/Source/WebCore/platform/network/curl/CurlRequest.cpp
 +++ b/Source/WebCore/platform/network/curl/CurlRequest.cpp
-@@ -36,19 +36,414 @@
+@@ -36,19 +36,415 @@
  #include "NetworkLoadMetrics.h"
  #include "ResourceError.h"
  #include "SharedBuffer.h"
@@ -75724,6 +75738,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..6e5a6e66b1bfe87c68485cf8328ee29f
 +#if PLATFORM(HAIKU)
 +#include <atomic>
 +#include <cstdio>
++#include <cstdlib>
 +#include <dlfcn.h>
 +#include <openssl/ssl.h>
 +#include <zlib.h>
@@ -76124,7 +76139,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..6e5a6e66b1bfe87c68485cf8328ee29f
      , m_formDataStream(m_request.httpBody())
      , m_captureExtraMetrics(captureExtraMetrics == CaptureNetworkLoadMetrics::Extended)
  {
-@@ -95,7 +490,7 @@ void CurlRequest::setUserPass(const String& user, const String& password)
+@@ -95,7 +491,7 @@ void CurlRequest::setUserPass(const String& user, const String& password)
      m_password = password.isolatedCopy();
  }
  
@@ -76133,7 +76148,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..6e5a6e66b1bfe87c68485cf8328ee29f
  {
      // The pausing of transfer does not work with protocols, like file://.
      // Therefore, PAUSE can not be done in didReceiveData().
-@@ -108,10 +503,16 @@ void CurlRequest::resume()
+@@ -108,10 +504,16 @@ void CurlRequest::resume()
  
      ASSERT(isMainThread());
  
@@ -76153,7 +76168,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..6e5a6e66b1bfe87c68485cf8328ee29f
  
      if (m_request.url().protocolIsFile())
          invokeDidReceiveResponseForFile(m_request.url());
-@@ -122,8 +523,14 @@ void CurlRequest::resume()
+@@ -122,8 +524,14 @@ void CurlRequest::resume()
  void CurlRequest::startWithJobManager()
  {
      ASSERT(isMainThread());
@@ -76169,7 +76184,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..6e5a6e66b1bfe87c68485cf8328ee29f
  }
  
  void CurlRequest::cancel()
-@@ -137,6 +544,10 @@ void CurlRequest::cancel()
+@@ -137,6 +545,10 @@ void CurlRequest::cancel()
  
          m_cancelled = true;
      }
@@ -76180,7 +76195,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..6e5a6e66b1bfe87c68485cf8328ee29f
  
      auto& scheduler = CurlContext::singleton().scheduler();
  
-@@ -144,7 +555,7 @@ void CurlRequest::cancel()
+@@ -144,7 +556,7 @@ void CurlRequest::cancel()
          runOnWorkerThreadIfRequired([this, protectedThis = Ref { *this }]() {
              didCancelTransfer();
          });
@@ -76189,7 +76204,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..6e5a6e66b1bfe87c68485cf8328ee29f
          scheduler.cancel(this);
  
      invalidateClient();
-@@ -162,6 +573,41 @@ bool CurlRequest::isCompletedOrCancelled()
+@@ -162,6 +574,41 @@ bool CurlRequest::isCompletedOrCancelled()
      return m_completed || m_cancelled;
  }
  
@@ -76231,7 +76246,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..6e5a6e66b1bfe87c68485cf8328ee29f
  /* `this` is protected inside this method. */
  void CurlRequest::callClient(Function<void(CurlRequest&, CurlRequestClient&)>&& task)
  {
-@@ -173,13 +619,28 @@ void CurlRequest::callClient(Function<void(CurlRequest&, CurlRequestClient&)>&&
+@@ -173,13 +620,28 @@ void CurlRequest::callClient(Function<void(CurlRequest&, CurlRequestClient&)>&&
  
  void CurlRequest::runOnMainThread(Function<void()>&& task)
  {
@@ -76262,7 +76277,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..6e5a6e66b1bfe87c68485cf8328ee29f
      else
          task();
  }
-@@ -190,6 +651,17 @@ CURL* CurlRequest::setupTransfer()
+@@ -190,6 +652,17 @@ CURL* CurlRequest::setupTransfer()
      appendAcceptLanguageHeaderIfNeeded(httpHeaderFields);
  
      m_curlHandle = makeUnique<CurlHandle>();
@@ -76280,7 +76295,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..6e5a6e66b1bfe87c68485cf8328ee29f
  
      m_curlHandle->setURL(m_request.url(), m_localhostAlias);
  
-@@ -209,8 +681,9 @@ CURL* CurlRequest::setupTransfer()
+@@ -209,8 +682,9 @@ CURL* CurlRequest::setupTransfer()
          setupPUT();
      }
  
@@ -76291,7 +76306,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..6e5a6e66b1bfe87c68485cf8328ee29f
  
      if (m_shouldDisableServerTrustEvaluation)
          m_curlHandle->disableServerTrustEvaluation();
-@@ -218,7 +691,35 @@ CURL* CurlRequest::setupTransfer()
+@@ -218,9 +692,52 @@ CURL* CurlRequest::setupTransfer()
      m_curlHandle->setHeaderCallbackFunction(didReceiveHeaderCallback, this);
      m_curlHandle->setWriteCallbackFunction(didReceiveDataCallback, this);
      m_curlHandle->setDebugCallbackFunction(didReceiveDebugInfoCallback, this);
@@ -76326,8 +76341,25 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..6e5a6e66b1bfe87c68485cf8328ee29f
 +#endif
      m_curlHandle->setTimeout(timeoutInterval());
  
++#if PLATFORM(HAIKU)
++    // HTTPS-First (#160): an upgraded load gets its short timeout for the
++    // TCP and TLS handshakes too; the idle timeout above starts only with
++    // the transfer, so a host that never answers the TLS handshake would hang
++    // the navigation instead of falling back to http.
++    // SUMMIT_HTTPS_FIRST_TRACE=1 logs requests with their upgrade state.
++    if (const char* trace = std::getenv("SUMMIT_HTTPS_FIRST_TRACE"); trace && *trace == '1')
++        std::fprintf(stderr, "Summit HTTPS-First: %s upgraded=%d timeout=%.1f\n", m_request.url().string().utf8().data(),
++            m_request.wasSchemeOptimisticallyUpgraded(), m_request.timeoutInterval());
++    // A request with a timeout of its own (fetch with a signal timeout, XHR
++    // timeout, an upgraded navigation) gets it for the handshakes as well.
++    if (m_request.timeoutInterval() > 0)
++        curl_easy_setopt(m_curlHandle->handle(), CURLOPT_CONNECTTIMEOUT_MS, static_cast<long>(std::ceil(m_request.timeoutInterval() * 1000)));
++#endif
++
      m_performStartTime = MonotonicTime::now();
-@@ -270,6 +771,27 @@ size_t CurlRequest::willSendData(char* buffer, size_t blockSize, size_t numberOf
+ 
+     return m_curlHandle->handle();
+@@ -270,6 +787,27 @@ size_t CurlRequest::willSendData(char* buffer, size_t blockSize, size_t numberOf
      return *sendBytes;
  }
  
@@ -76355,7 +76387,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..6e5a6e66b1bfe87c68485cf8328ee29f
  // This is being called for each HTTP header in the response. This includes '\r\n'
  // for the last line of the header.
  
-@@ -294,12 +816,19 @@ size_t CurlRequest::didReceiveHeader(String&& header)
+@@ -294,12 +832,19 @@ size_t CurlRequest::didReceiveHeader(String&& header)
          m_didReceiveResponse = false;
          m_response = CurlResponse { };
          m_multipartHandle = nullptr;
@@ -76375,7 +76407,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..6e5a6e66b1bfe87c68485cf8328ee29f
          m_response.headers.append(WTF::move(header));
          return receiveBytes;
      }
-@@ -343,6 +872,26 @@ size_t CurlRequest::didReceiveHeader(String&& header)
+@@ -343,6 +888,26 @@ size_t CurlRequest::didReceiveHeader(String&& header)
  
      m_multipartHandle = CurlMultipartHandle::createIfNeeded(*this, m_response);
  
@@ -76402,7 +76434,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..6e5a6e66b1bfe87c68485cf8328ee29f
      // Response will send at didReceiveData() or didCompleteTransfer()
      // to receive continueDidRceiveResponse() for asynchronously.
  
-@@ -375,8 +924,24 @@ size_t CurlRequest::didReceiveData(std::span<const uint8_t> receivedData)
+@@ -375,8 +940,24 @@ size_t CurlRequest::didReceiveData(std::span<const uint8_t> receivedData)
          return CURL_WRITEFUNC_PAUSE;
      }
  
@@ -76427,7 +76459,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..6e5a6e66b1bfe87c68485cf8328ee29f
      if (receivedData.size()) {
          if (m_multipartHandle) {
              m_multipartHandle->didReceiveMessage(receivedData);
-@@ -393,7 +958,7 @@ size_t CurlRequest::didReceiveData(std::span<const uint8_t> receivedData)
+@@ -393,7 +974,7 @@ size_t CurlRequest::didReceiveData(std::span<const uint8_t> receivedData)
          }
      }
  
@@ -76436,7 +76468,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..6e5a6e66b1bfe87c68485cf8328ee29f
  }
  
  void CurlRequest::didReceiveHeaderFromMultipart(Vector<String>&& headers)
-@@ -446,6 +1011,31 @@ void CurlRequest::didCompleteTransfer(CURLcode result)
+@@ -446,6 +1027,31 @@ void CurlRequest::didCompleteTransfer(CURLcode result)
          return;
      }
  
@@ -76468,7 +76500,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..6e5a6e66b1bfe87c68485cf8328ee29f
      // Newer versions of curl/OpenSSL report CURLE_RECV_ERROR or CURLE_PARTIAL_FILE
      // when a server closes the connection to signal end-of-body on responses with
      // no Content-Length and no chunked encoding. This is valid HTTP/1.1 behavior,
-@@ -475,6 +1065,19 @@ void CurlRequest::didCompleteTransfer(CURLcode result)
+@@ -475,6 +1081,19 @@ void CurlRequest::didCompleteTransfer(CURLcode result)
          }
  
          auto metrics = networkLoadMetrics();
@@ -76488,7 +76520,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..6e5a6e66b1bfe87c68485cf8328ee29f
  
          finalizeTransfer();
          callClient([networkLoadMetrics = WTF::move(metrics)](CurlRequest& request, CurlRequestClient& client) mutable {
-@@ -484,8 +1087,28 @@ void CurlRequest::didCompleteTransfer(CURLcode result)
+@@ -484,8 +1103,28 @@ void CurlRequest::didCompleteTransfer(CURLcode result)
              client.curlDidComplete(request, WTF::move(networkLoadMetrics));
          });
      } else {
@@ -76517,7 +76549,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..6e5a6e66b1bfe87c68485cf8328ee29f
  
          CertificateInfo certificateInfo;
          if (auto info = m_curlHandle->certificateInfo())
-@@ -503,13 +1126,83 @@ void CurlRequest::didCompleteTransfer(CURLcode result)
+@@ -503,13 +1142,83 @@ void CurlRequest::didCompleteTransfer(CURLcode result)
      }
  }
  
@@ -76601,7 +76633,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..6e5a6e66b1bfe87c68485cf8328ee29f
      m_formDataStream.clean();
      m_multipartHandle = nullptr;
      m_curlHandle = nullptr;
-@@ -632,6 +1325,88 @@ void CurlRequest::completeDidReceiveResponse()
+@@ -632,6 +1341,88 @@ void CurlRequest::completeDidReceiveResponse()
          responseCompletionHandler();
  }
  
@@ -76690,7 +76722,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..6e5a6e66b1bfe87c68485cf8328ee29f
  NetworkLoadMetrics CurlRequest::networkLoadMetrics()
  {
      ASSERT(m_curlHandle);
-@@ -653,6 +1428,57 @@ NetworkLoadMetrics CurlRequest::networkLoadMetrics()
+@@ -653,6 +1444,57 @@ NetworkLoadMetrics CurlRequest::networkLoadMetrics()
      return WTF::move(*networkLoadMetrics);
  }
  
@@ -78017,6 +78049,59 @@ index 4cfe46eed7ca84223c22c0d5f467692fad5c7d09..f42a21b34de0cf59318bf1c27897cf4c
              if (!dnsName.isNull())
                  dnsNames.append(WTF::move(dnsName));
          } else if (value->type == GEN_IPADD) {
+diff --git a/Source/WebCore/platform/network/curl/ResourceError.h b/Source/WebCore/platform/network/curl/ResourceError.h
+index ace8e48724354162cc202326ce1e8ea301e5d3db..20f9dea60e3d4834c4fab0ec739b1bbfaf481e4a 100644
+--- a/Source/WebCore/platform/network/curl/ResourceError.h
++++ b/Source/WebCore/platform/network/curl/ResourceError.h
+@@ -57,7 +57,7 @@ public:
+ 
+     WEBCORE_EXPORT bool isCertificationVerificationError() const;
+ 
+-    ErrorRecoveryMethod errorRecoveryMethod() const { return ErrorRecoveryMethod::NoRecovery; }
++    WEBCORE_EXPORT ErrorRecoveryMethod errorRecoveryMethod() const;
+ 
+     static bool platformCompare(const ResourceError& a, const ResourceError& b);
+ 
+diff --git a/Source/WebCore/platform/network/curl/ResourceErrorCurl.cpp b/Source/WebCore/platform/network/curl/ResourceErrorCurl.cpp
+index 58ed88ac89507470c94ade2ef6bfd87e3074940e..beadf893687165da34c217412137382717889921 100644
+--- a/Source/WebCore/platform/network/curl/ResourceErrorCurl.cpp
++++ b/Source/WebCore/platform/network/curl/ResourceErrorCurl.cpp
+@@ -78,6 +78,35 @@ bool ResourceError::isCertificationVerificationError() const
+     return domain() == curlErrorDomain() && errorCode() == CURLE_PEER_FAILED_VERIFICATION;
+ }
+ 
++// HTTPS-First (Summit #160): whether a load that WebKit upgraded from http
++// may go back to http. Only failures that say the host has no usable HTTPS:
++// nothing listens (refused, reset, no reply), it took too long (the upgrade's
++// 3 s timeout), the port speaks plain HTTP (the TLS handshake fails), or its
++// certificate is not for this host. FrameLoader asks only for upgraded loads.
++auto ResourceError::errorRecoveryMethod() const -> ErrorRecoveryMethod
++{
++    bool recoverable = false;
++    if (domain() == curlErrorDomain()) {
++        switch (errorCode()) {
++        case CURLE_COULDNT_CONNECT:
++        case CURLE_OPERATION_TIMEDOUT:
++        case CURLE_SSL_CONNECT_ERROR:
++        case CURLE_PEER_FAILED_VERIFICATION:
++        case CURLE_GOT_NOTHING:
++        case CURLE_RECV_ERROR:
++        case CURLE_SEND_ERROR:
++            recoverable = true;
++            break;
++        default:
++            break;
++        }
++    } else if (domain() == errorDomainWebKitNetwork)
++        recoverable = errorCode() == errorCodeHTTPSUpgradeRedirectLoop;
++    if (type() == Type::Timeout)
++        recoverable = true;
++    return recoverable ? ErrorRecoveryMethod::HTTPFallback : ErrorRecoveryMethod::NoRecovery;
++}
++
+ void ResourceError::doPlatformIsolatedCopy(const ResourceError&)
+ {
+ }
 diff --git a/Source/WebCore/platform/network/curl/ResourceHandleCurl.cpp b/Source/WebCore/platform/network/curl/ResourceHandleCurl.cpp
 new file mode 100644
 index 0000000000000000000000000000000000000000..ea6ccd3b7184c5fad315f84f4e9bd42862d9bf44
@@ -87819,7 +87904,7 @@ index be40151510176ea4e881fd41af8f79ab6ab6a306..b5fdd6e41375e8108fb406089992f8e5
      if (metaData.headerHash != computeSHA1(headerData, salt)) {
          LOG(NetworkCacheStorage, "(NetworkProcess) header checksum mismatch");
 diff --git a/Source/WebKit/NetworkProcess/curl/NetworkDataTaskCurl.cpp b/Source/WebKit/NetworkProcess/curl/NetworkDataTaskCurl.cpp
-index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..8e200e038a9cc985417a036601ca31ff83b22274 100644
+index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..58a61d5c4af652a12189031a2181c8a6aa22a41e 100644
 --- a/Source/WebKit/NetworkProcess/curl/NetworkDataTaskCurl.cpp
 +++ b/Source/WebKit/NetworkProcess/curl/NetworkDataTaskCurl.cpp
 @@ -36,11 +36,14 @@
@@ -87963,7 +88048,7 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..8e200e038a9cc985417a036601ca31ff
          willPerformHTTPRedirection();
          return;
      }
-@@ -236,13 +299,22 @@ void NetworkDataTaskCurl::curlDidFailWithError(CurlRequest& request, ResourceErr
+@@ -236,13 +299,32 @@ void NetworkDataTaskCurl::curlDidFailWithError(CurlRequest& request, ResourceErr
      if (state() == State::Canceling || state() == State::Completed || (!m_client && !isDownload()))
          return;
  
@@ -87973,6 +88058,16 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..8e200e038a9cc985417a036601ca31ff
 +    preconnectOnly = m_preconnectOnlyHaiku;
 +#endif
 +    // A preconnect asks nobody about a certificate: the load that follows will.
++#if PLATFORM(HAIKU)
++    // HTTPS-First (#160): a certificate that doesn't fit an address the user
++    // asked for over http is no reason to warn; the load goes back to http.
++    if (resourceError.isCertificationVerificationError() && !preconnectOnly
++        && request.resourceRequest().wasSchemeOptimisticallyUpgraded()) {
++        if (m_client)
++            m_client->didCompleteWithError(resourceError);
++        return;
++    }
++#endif
 +    if (resourceError.isCertificationVerificationError() && !preconnectOnly) {
          tryServerTrustEvaluation(AuthenticationChallenge(request.resourceRequest().url(), certificateInfo, resourceError));
          return;
@@ -87987,7 +88082,7 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..8e200e038a9cc985417a036601ca31ff
          if (m_client)
              m_client->didCompleteWithError(resourceError);
          else {
-@@ -256,22 +328,6 @@ void NetworkDataTaskCurl::curlDidFailWithError(CurlRequest& request, ResourceErr
+@@ -256,22 +338,6 @@ void NetworkDataTaskCurl::curlDidFailWithError(CurlRequest& request, ResourceErr
      m_client->didCompleteWithError(resourceError);
  }
  
@@ -88010,7 +88105,7 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..8e200e038a9cc985417a036601ca31ff
  bool NetworkDataTaskCurl::shouldRedirectAsGET(const ResourceRequest& request, bool crossOrigin)
  {
      if (request.httpMethod() == "GET"_s || request.httpMethod() == "HEAD"_s)
-@@ -307,6 +363,30 @@ void NetworkDataTaskCurl::invokeDidReceiveResponse()
+@@ -307,6 +373,30 @@ void NetworkDataTaskCurl::invokeDidReceiveResponse()
              invalidateAndCancel();
              break;
          case PolicyAction::Download: {
@@ -88041,7 +88136,7 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..8e200e038a9cc985417a036601ca31ff
              m_downloadDestinationFile = FileSystem::openFile(m_pendingDownloadLocation, FileSystem::FileOpenMode::Truncate, FileSystem::FileAccessPermission::All, { }, !m_allowOverwriteDownload);
              if (!m_downloadDestinationFile) {
                  if (m_client)
-@@ -319,6 +399,18 @@ void NetworkDataTaskCurl::invokeDidReceiveResponse()
+@@ -319,6 +409,18 @@ void NetworkDataTaskCurl::invokeDidReceiveResponse()
              Ref download = Download::create(downloadManager, *m_pendingDownloadID, *this, *m_session, suggestedFilename());
              downloadManager.dataTaskBecameDownloadTask(*m_pendingDownloadID, download.copyRef());
              download->didCreateDestination(m_pendingDownloadLocation);
@@ -88060,7 +88155,7 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..8e200e038a9cc985417a036601ca31ff
              if (m_curlRequest)
                  m_curlRequest->completeDidReceiveResponse();
              break;
-@@ -409,6 +501,7 @@ void NetworkDataTaskCurl::willPerformHTTPRedirection()
+@@ -409,6 +511,7 @@ void NetworkDataTaskCurl::willPerformHTTPRedirection()
              m_curlRequest->setUserPass(m_initialCredential.user(), m_initialCredential.password());
              m_curlRequest->setAuthenticationScheme(ProtectionSpace::AuthenticationScheme::HTTPBasic);
          }
@@ -88068,7 +88163,7 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..8e200e038a9cc985417a036601ca31ff
  
          if (m_state != State::Suspended) {
              m_state = State::Suspended;
-@@ -531,6 +624,7 @@ void NetworkDataTaskCurl::restartWithCredential(const ProtectionSpace& protectio
+@@ -531,6 +634,7 @@ void NetworkDataTaskCurl::restartWithCredential(const ProtectionSpace& protectio
      m_curlRequest->setUserPass(credential.user(), credential.password());
      if (shouldDisableServerTrustEvaluation)
          m_curlRequest->disableServerTrustEvaluation();
@@ -88076,7 +88171,7 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..8e200e038a9cc985417a036601ca31ff
  
      if (m_state != State::Suspended) {
          m_state = State::Suspended;
-@@ -538,11 +632,37 @@ void NetworkDataTaskCurl::restartWithCredential(const ProtectionSpace& protectio
+@@ -538,11 +642,37 @@ void NetworkDataTaskCurl::restartWithCredential(const ProtectionSpace& protectio
      }
  }
  
@@ -88115,7 +88210,7 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..8e200e038a9cc985417a036601ca31ff
          if (!cookieHeaderField.isEmpty())
              request.addHTTPHeaderField(HTTPHeaderName::Cookie, cookieHeaderField);
      }
-@@ -552,10 +672,33 @@ void NetworkDataTaskCurl::handleCookieHeaders(const WebCore::ResourceRequest& re
+@@ -552,10 +682,33 @@ void NetworkDataTaskCurl::handleCookieHeaders(const WebCore::ResourceRequest& re
  {
      static constexpr auto setCookieHeader = "set-cookie: "_s;
  
@@ -104112,10 +104207,10 @@ index 0000000000000000000000000000000000000000..8d0b27d88ddad6b68ad36a7eb450b332
 +}
 diff --git a/Source/WebKit/UIProcess/API/haiku/WebKitView.h b/Source/WebKit/UIProcess/API/haiku/WebKitView.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..084aba7af7a76f9c49fd5e69bba525bede11d66a
+index 0000000000000000000000000000000000000000..aee77f2c6658840c248fbbb7023d4dcafb1e1ac9
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/API/haiku/WebKitView.h
-@@ -0,0 +1,592 @@
+@@ -0,0 +1,593 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#pragma once
@@ -104588,7 +104683,8 @@ index 0000000000000000000000000000000000000000..084aba7af7a76f9c49fd5e69bba525be
 +    // caretBrowsing (bool: a movable caret in page text), reducedMotion and
 +    // increasedContrast (bool: pages match prefers-reduced-motion: reduce and
 +    // prefers-contrast: more; false leaves the system's answer, none on
-+    // Haiku). Unknown fields, wrong types and invalid values reject
++    // Haiku), httpsFirst (bool: http:// pages are tried over https first and
++    // fall back to http, on by default). Unknown fields, wrong types and invalid values reject
 +    // the whole update. B_OK means queued; a closed view ignores it. Any thread.
 +    // Disabling JavaScript affects page scripts; host inspection remains available.
 +    status_t SetPageSettings(const BMessage&);
@@ -104710,10 +104806,10 @@ index 0000000000000000000000000000000000000000..084aba7af7a76f9c49fd5e69bba525be
 +};
 diff --git a/Source/WebKit/UIProcess/API/haiku/WebKitViewEmbedding.cpp b/Source/WebKit/UIProcess/API/haiku/WebKitViewEmbedding.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..b3ad250c161c530bfd1315df657faaafd105a0c4
+index 0000000000000000000000000000000000000000..5cdc55f075430a80d2f8ba658b9b3f2686bda5b7
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/API/haiku/WebKitViewEmbedding.cpp
-@@ -0,0 +1,1374 @@
+@@ -0,0 +1,1382 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +// BWebKitView's embedding interfaces (WebKitEmbedding.h): user scripts,
@@ -104778,6 +104874,8 @@ index 0000000000000000000000000000000000000000..b3ad250c161c530bfd1315df657faaaf
 +#include <string>
 +#include <utility>
 +#include <vector>
++#include <cstdlib>
++#include <cstring>
 +#include <wtf/HashMap.h>
 +#include <wtf/JSONValues.h>
 +#include <wtf/NeverDestroyed.h>
@@ -105566,7 +105664,8 @@ index 0000000000000000000000000000000000000000..b3ad250c161c530bfd1315df657faaaf
 +        { "standardFontSize", B_INT32_TYPE }, { "fixedFontSize", B_INT32_TYPE },
 +        { "javascriptEnabled", B_BOOL_TYPE }, { "userAgent", B_STRING_TYPE },
 +        { "minimumFontSize", B_INT32_TYPE }, { "caretBrowsing", B_BOOL_TYPE },
-+        { "reducedMotion", B_BOOL_TYPE }, { "increasedContrast", B_BOOL_TYPE }
++        { "reducedMotion", B_BOOL_TYPE }, { "increasedContrast", B_BOOL_TYPE },
++        { "httpsFirst", B_BOOL_TYPE }
 +    };
 +    int32 supplied = 0;
 +    for (const auto& field : fields) {
@@ -105626,6 +105725,11 @@ index 0000000000000000000000000000000000000000..b3ad250c161c530bfd1315df657faaaf
 +        preferences->setForcedPrefersReducedMotionAccessibilityValue(forced(enabled));
 +    if (settings.FindBool("increasedContrast", &enabled) == B_OK)
 +        preferences->setForcedPrefersContrastAccessibilityValue(forced(enabled));
++    // HTTPS-First (#160); SUMMIT_HTTPS_FIRST=0 keeps it off.
++    if (settings.FindBool("httpsFirst", &enabled) == B_OK) {
++        const char* environment = std::getenv("SUMMIT_HTTPS_FIRST");
++        preferences->setHTTPSByDefaultEnabled(enabled && !(environment && !std::strcmp(environment, "0")));
++    }
 +    page.setPreferences(preferences);
 +    if (settings.FindString("userAgent", &value) == B_OK)
 +        page.setCustomUserAgent(String::fromUTF8(value));
@@ -147533,10 +147637,10 @@ index 0000000000000000000000000000000000000000..c9a119d02f85b7c5ad8fe9153bfc9604
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/WebView.cpp b/Source/WebKit/UIProcess/haiku/WebView.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..d6049474901c39461533cd0a5d5d27a902e821e1
+index 0000000000000000000000000000000000000000..16c8cbfafc4516c751aa73f5589f217b9f3bc33b
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/WebView.cpp
-@@ -0,0 +1,3538 @@
+@@ -0,0 +1,3545 @@
 +/*
 + * Copyright (C) 2013 Intel Corporation. All rights reserved.
 + *
@@ -149525,6 +149629,13 @@ index 0000000000000000000000000000000000000000..d6049474901c39461533cd0a5d5d27a9
 +    configuration->preferences().setScopedCustomElementRegistryEnabled(true);
 +    configuration->preferences().setEnableElementCurrentCSSZoom(true);
 +    configuration->preferences().setCSSFontVariantEmojiEnabled(true);
++    // HTTPS-First (#160), as Chrome, Firefox and Safari do: http:// pages are
++    // tried over https first and loaded over http when the host has no
++    // usable HTTPS (ResourceErrorCurl.cpp). IP addresses and localhost are
++    // never upgraded. Off with SUMMIT_HTTPS_FIRST=0 or the host's page
++    // setting httpsFirst (BWebKitView::SetPageSettings).
++    if (const char* httpsFirst = std::getenv("SUMMIT_HTTPS_FIRST"); !httpsFirst || std::strcmp(httpsFirst, "0"))
++        configuration->preferences().setHTTPSByDefaultEnabled(true);
 +    // cookieStore (get, set, delete; Safari 18.4), on the curl cookie jar
 +    // (NetworkStorageSessionCurl.cpp). No change events yet: they need the
 +    // cookie change listener API (HAVE_COOKIE_CHANGE_LISTENER_API).

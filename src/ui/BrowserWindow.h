@@ -871,6 +871,8 @@ public:
         bool caretBrowsing = false, reduceMotion = false, increaseContrast = false;
         int minimumFontSize = 0;
         bool overrideColors = false;
+        // Not an aid, but a page setting from Preferences too: HTTPS-First (#160).
+        bool httpsFirst = true;
         bool operator==(const AccessibilityAids&) const = default;
     };
 private:

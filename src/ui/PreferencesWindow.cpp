@@ -51,7 +51,7 @@ constexpr uint32 homeEdited = 'phed', useStartPage = 'phsp', bookmarksBarToggled
     restoreSessionToggled = 'prss', mcpToggled = 'pmcp', mcpLocalToggled = 'pmcl', mcpPortEdited = 'pmpe',
     mcpCopy = 'pmcc', mcpNewToken = 'pmnt', mcpNewTokenConfirmed = 'pmnc', checkForUpdatesToggled = 'pupd',
     siteBlock = 'pssb', siteRemove = 'pssr', protocolSelected = 'ppse', protocolRemove = 'pprm',
-    preventTrackingToggled = 'pptr', cookieSiteSelected = 'pcss', cookieSiteAdd = 'pcsa', cookieSiteRemove = 'pcsr',
+    preventTrackingToggled = 'pptr', httpsFirstToggled = 'phtf', cookieSiteSelected = 'pcss', cookieSiteAdd = 'pcsa', cookieSiteRemove = 'pcsr',
     cookieSiteEdited = 'pcse';
 enum SiteColumn { kSiteColumn, kPermissionColumn, kSettingColumn };
 
@@ -374,6 +374,11 @@ PreferencesWindow::PreferencesWindow(BMessenger owner, const PreferencesState& s
     auto* trackingAsk = new BStringView("prevent-tracking-ask", "A frame you click in can ask for its cookies; "
         "your answers are under Site Permissions.");
     trackingAsk->SetHighUIColor(B_PANEL_TEXT_COLOR, B_DARKEN_2_TINT);
+    fHttpsFirst = new BCheckBox("https-first", "Load pages over HTTPS when the site supports it", new BMessage(httpsFirstToggled));
+    fHttpsFirst->SetValue(B_CONTROL_ON);
+    auto* httpsHint = new BStringView("https-first-hint", "http:// addresses are tried over https first; a site without "
+        "HTTPS loads as before (#160).");
+    httpsHint->SetHighUIColor(B_PANEL_TEXT_COLOR, B_DARKEN_2_TINT);
     auto* linkHint = new BStringView("link-tracking-hint", "Private windows also remove click-tracking parameters "
         "(fbclid, gclid, …) from the addresses they open.");
     linkHint->SetHighUIColor(B_PANEL_TEXT_COLOR, B_DARKEN_2_TINT);
@@ -400,6 +405,8 @@ PreferencesWindow::PreferencesWindow(BMessenger owner, const PreferencesState& s
             .Add(trackingHint)
             .Add(trackingAsk)
             .Add(linkHint)
+            .Add(fHttpsFirst)
+            .Add(httpsHint)
         .End()
         .AddStrut(6)
         .Add(SectionTitle("cross-site-cookie-title", "Sites allowed cross-site cookies"))
@@ -646,6 +653,12 @@ void PreferencesWindow::MessageReceived(BMessage* message)
             fHome->SetText("");
             PostMessage(homeEdited);
             break;
+        case httpsFirstToggled: {
+            BMessage changed(kPreferencesChanged);
+            changed.AddBool("https_first", fHttpsFirst->Value() == B_CONTROL_ON);
+            fOwner.SendMessage(&changed);
+            break;
+        }
         case preventTrackingToggled: {
             BMessage changed(kPreferencesChanged);
             changed.AddBool("prevent_cross_site_tracking", fPreventTracking->Value() == B_CONTROL_ON);
@@ -920,6 +933,8 @@ void PreferencesWindow::MessageReceived(BMessage* message)
             int32 count = 0;
             if (message->FindInt32("history_count", &count) == B_OK) ShowHistoryCount(count);
             if (message->FindInt32("trusted_certificates", &count) == B_OK) ShowTrustedCertificates(count);
+            if (bool https = true; fHttpsFirst && message->FindBool("https_first", &https) == B_OK)
+                fHttpsFirst->SetValue(https ? B_CONTROL_ON : B_CONTROL_OFF);
             if (bool prevent = true; fPreventTracking && message->FindBool("prevent_cross_site_tracking", &prevent) == B_OK)
                 fPreventTracking->SetValue(prevent ? B_CONTROL_ON : B_CONTROL_OFF);
             if (fCookieSites && message->GetBool("has_cross_site_cookie_sites", false)) {

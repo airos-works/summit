@@ -102,3 +102,20 @@ the curl cookie jar (`NetworkStorageSessionCurl.cpp`) with the same rules as
 cookies can't be read or replaced, and Safari's cap on script cookies'
 lifetime. `change` events don't fire yet (they need WebKit's cookie change
 listener API for this port). `SUMMIT_COOKIE_STORE=0` hides it.
+
+## HTTPS-First (#160)
+
+`http://` pages are tried over https first, as Chrome, Firefox and Safari do,
+with WebKit's own mechanism (`HTTPSByDefaultEnabled`: main-frame navigations
+only, never IP addresses or localhost, a 3 s timeout for the upgraded load).
+On curl, `ResourceError::errorRecoveryMethod()` now tells WebKit which
+failures mean "no usable HTTPS here" so it reloads over http: connection
+refused or reset, no reply, a timeout (the TCP and TLS handshakes included:
+`CURLOPT_CONNECTTIMEOUT_MS`), a TLS handshake with a plain-HTTP port
+(`http://host:8080`), and a certificate that doesn't fit the host. The
+upgraded load never asks about its certificate; a site that redirects to
+https itself still gets the usual certificate error.
+`ResourceRequestBase::setAsIsolatedCopy` now keeps the "upgraded" flag (the
+curl backend copies every request). Preferences › Privacy has the switch
+(page setting `httpsFirst`); `SUMMIT_HTTPS_FIRST=0` keeps it off;
+`SUMMIT_HTTPS_FIRST_TRACE=1` logs requests with their upgrade state.

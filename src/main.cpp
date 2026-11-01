@@ -820,6 +820,8 @@ public:
             const bool hasSavePasswords = message->FindBool("save_passwords", &savePasswords) == B_OK;
             bool preventTracking = true;
             const bool hasPreventTracking = message->FindBool("prevent_cross_site_tracking", &preventTracking) == B_OK;
+            bool httpsFirst = true;
+            const bool hasHttpsFirst = message->FindBool("https_first", &httpsFirst) == B_OK;
             bool checkForUpdates = true;
             const bool hasCheckForUpdates = message->FindBool("check_for_updates", &checkForUpdates) == B_OK;
             // Preferences › Browsing › Accessibility (#118) and Memory (#116).
@@ -875,6 +877,7 @@ public:
                     profile.preventCrossSiteTracking = preventTracking;
                     changed = true;
                 }
+                if (hasHttpsFirst && profile.httpsFirst != httpsFirst) { profile.httpsFirst = httpsFirst; changed = true; }
                 if (hasEngine && profile.searchEngine != engine) {
                     // Set before windows hear of the change, so they see the new engine.
                     summit::SetSearchEngine(engine);
@@ -2053,6 +2056,7 @@ private:
             state.AddBool("override_colors", profile.overrideColors);
             AddSitePermissions(state, profile);
             state.AddBool("prevent_cross_site_tracking", profile.preventCrossSiteTracking);
+            state.AddBool("https_first", profile.httpsFirst);
             state.AddBool("has_cross_site_cookie_sites", true);
             for (const auto& site : profile.crossSiteCookieSites) state.AddString("cross_site_cookie_site", site.c_str());
             state.AddBool("has_protocol_handlers", true);
