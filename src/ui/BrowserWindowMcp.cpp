@@ -6,6 +6,7 @@
 #include "FrameHistory.h"
 #include "McpService.h"
 #include "Messages.h"
+#include "NoticeBar.h"
 #include "core/Address.h"
 #include <WebKit/WebKitView.h>
 #include <InterfaceDefs.h>
@@ -164,6 +165,9 @@ std::string BrowserWindow::McpRequest(const std::string& text)
             {"workspaces", Workspaces()}, {"address", fAddress->Text()}, {"status", fStatus->Text()},
             {"downloads", fDownloads.size()}, {"closing", fClosingWindow}, {"tabs", tabs},
             {"softwareRenderingNoticePending", fSoftwareRenderingNoticePending}};
+        // The bar above the page (save a password or an AutoFill entry, a
+        // blocked pop-up...), when it shows.
+        if (fNoticeBar && !fNoticeBar->IsHidden(fNoticeBar) && !fNoticeBar->Text().empty()) window["noticeBar"] = fNoticeBar->Text();
         return window.dump();
     }
     if (action == "open") {

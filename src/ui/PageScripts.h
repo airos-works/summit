@@ -21,4 +21,16 @@ extern const char* const kPasswordScript;
 // native menu of the site's passkeys opens under it. Runs in every frame; a
 // frame's field is reported in the page's coordinates.
 extern const char* const kPasskeyFieldScript;
+// AutoFill (#149), in every frame, through summitAutoFill:
+//   {type: "field", kind: "address"|"card", field, keys, left, top, right,
+//    bottom, width} when the user goes into a field it recognises (by its
+//    autocomplete token, else its name, id, label or placeholder), with the
+//    keys the form has and the field's place in the page (as
+//    kPasskeyFieldScript reports it). The reply comes when the user chooses
+//    in the browser's list: the entry's values as JSON (AutoFillAddressFields
+//    names, or ccName, ccNumber, ccMonth, ccYear), with which the page fills
+//    the form; empty when the list closed without a choice.
+//   {type: "leave"} when the field is left, typed in or scrolled away.
+//   {type: "submit", address, card} when a form with any is sent.
+extern const char* const kAutoFillScript;
 }

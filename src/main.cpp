@@ -1897,6 +1897,7 @@ private:
                 profile.lastUpdateCheck, profile.autoplay, profile.spellChecking, profile.savePasswords };
         });
         state.webKitDirectory = fProfile / "WebKit";
+        state.profile = fShared;
         state.userAgent = fShared->Read([](const summit::Profile& profile) { return profile.userAgent; });
         state.spellingLanguage = fShared->Read([](const summit::Profile& profile) { return profile.spellingLanguage; });
         state.aids = fShared->Read([](const summit::Profile& profile) {

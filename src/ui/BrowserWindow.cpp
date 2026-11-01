@@ -1216,6 +1216,7 @@ BrowserWindow::~BrowserWindow()
     if (fAuthenticationPrompt.IsValid()) fAuthenticationPrompt.SendMessage(B_QUIT_REQUESTED);
     if (fPasskeyPrompt.IsValid()) fPasskeyPrompt.SendMessage(B_QUIT_REQUESTED);
     if (fPasskeyAutofill.IsValid()) fPasskeyAutofill.SendMessage(B_QUIT_REQUESTED);
+    CloseAutoFill();
     BWebKitView::WindowDirectConnected(this, nullptr);
     // Without its daemon thread ~BDirectWindow would wait for ever.
     if (DirectDaemonLost()) {
@@ -1772,6 +1773,7 @@ void BrowserWindow::SelectTab(int64 id, bool forClose)
         ShowAuthenticationPrompt();
         ShowPasskeyPrompt();
         ClosePasskeyAutofill();
+        CloseAutoFill();
         ProbeReader(fTabs[i]);
         ProbeTranslation(fTabs[i]);
 #endif
@@ -2265,6 +2267,7 @@ void BrowserWindow::FrameMoved(BPoint where)
     HideSuggestions();
 #if SUMMIT_MODERN_WEBKIT
     PlaceDockedDeveloperTools();
+    CloseAutoFill();
     fWebKitContext->SetBrowserWindowFrame(BMessenger(this), Frame());
     ReportExtensionAnchors();
 #endif
@@ -2276,6 +2279,7 @@ void BrowserWindow::FrameResized(float width, float height)
     HideSuggestions();
 #if SUMMIT_MODERN_WEBKIT
     PlaceDockedDeveloperTools();
+    CloseAutoFill();
     fWebKitContext->SetBrowserWindowFrame(BMessenger(this), Frame());
     ReportExtensionAnchors();
 #endif
@@ -2938,6 +2942,8 @@ void BrowserWindow::DispatchMessage(BMessage* message, BHandler* handler)
     summit::StallScope scope("window", message ? message->what : 0);
 #if SUMMIT_MODERN_WEBKIT
     if (message && message->what == B_KEY_DOWN && RunExtensionShortcut(*message)) return;
+    // The AutoFill list's keys (#149), while the page's field has the focus.
+    if (message && message->what == B_KEY_DOWN && fAutoFill && !dynamic_cast<BTextView*>(handler) && AutoFillKey(*message)) return;
     if (message && message->what == B_MOUSE_DOWN) {
         fLastMouseDown = system_time();
         fMouseButtons = message->GetInt32("buttons", 0);
@@ -5152,6 +5158,19 @@ void BrowserWindow::MessageReceived(BMessage* message)
             const std::string error = message->GetString("error", "");
             if (!error.empty()) ShowError("Could not save the password: " + error);
             else fStatus->SetText("The password was saved.");
+            break;
+        }
+        // AutoFill (#149, BrowserWindowAutoFill.cpp).
+        case kAutoFillCardsRead: ShowAutoFillList(*message); break;
+        case kAutoFillChosen:
+            if (fAutoFill && fAutoFill->serial == message->GetUInt64("serial", 0)) AutoFillChosen(message->GetInt32("index", -1));
+            break;
+        case kAutoFillCardChecked: AutoFillCardChecked(*message); break;
+        case kAutoFillBarAnswer: AutoFillBarAnswer(*message); break;
+        case kAutoFillSaved: {
+            const std::string error = message->GetString("error", "");
+            if (!error.empty()) ShowError("Could not save the card: " + error);
+            else fStatus->SetText("The card was saved for AutoFill.");
             break;
         }
         case B_WEBKIT_URL_SCHEME_REQUEST: ReaderResource(*message); break;

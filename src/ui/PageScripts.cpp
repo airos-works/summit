@@ -429,4 +429,373 @@ document.addEventListener('focusout', leave, true);
 window.addEventListener('scroll', leave, { capture: true, passive: true });
 window.addEventListener('resize', leave, { passive: true });
 })();)js";
+
+// AutoFill (#149). The page only says which kind of field the user went
+// into and where it is; the saved entries are shown in a native list, and
+// only the one the user chooses there comes back to the page, which fills
+// the form with it. Card numbers never reach a page the user did not
+// choose a card on.
+const char* const kAutoFillScript = R"js((() => {
+if (window.__summitAutoFill) return;
+window.__summitAutoFill = true;
+const handlers = window.webkit && window.webkit.messageHandlers;
+const handler = handlers && handlers.summitAutoFill;
+if (!handler) return;
+const post = (message) => handler.postMessage(JSON.stringify(message));
+// autocomplete's field names (its last token) to the browser's keys.
+const tokens = {
+  'name': 'name', 'given-name': 'givenName', 'family-name': 'familyName', 'organization': 'organization',
+  'street-address': 'street', 'address-line1': 'line1', 'address-line2': 'line2', 'address-line3': 'line3',
+  'address-level1': 'region', 'address-level2': 'city', 'postal-code': 'postalCode', 'country': 'country',
+  'country-name': 'country', 'email': 'email', 'tel': 'tel', 'tel-national': 'tel',
+  'cc-name': 'ccName', 'cc-given-name': 'ccGivenName', 'cc-family-name': 'ccFamilyName', 'cc-number': 'ccNumber',
+  'cc-exp': 'ccExp', 'cc-exp-month': 'ccMonth', 'cc-exp-year': 'ccYear'
+};
+// Field names autocomplete knows that AutoFill leaves alone (a security
+// code is never stored or filled).
+const ignored = new Set(['additional-name', 'honorific-prefix', 'honorific-suffix', 'nickname', 'address-level3',
+  'address-level4', 'cc-csc', 'cc-type', 'cc-additional-name', 'username', 'current-password', 'new-password',
+  'one-time-code', 'bday', 'bday-day', 'bday-month', 'bday-year', 'sex', 'url', 'photo', 'language',
+  'organization-title', 'transaction-amount', 'transaction-currency', 'tel-country-code', 'tel-area-code',
+  'tel-local', 'tel-local-prefix', 'tel-local-suffix', 'tel-extension', 'impp', 'off']);
+const cardKeys = new Set(['ccName', 'ccGivenName', 'ccFamilyName', 'ccNumber', 'ccExp', 'ccMonth', 'ccYear']);
+// Without autocomplete: the field's name, id, label and placeholder, in
+// English and a few common languages. The first rule that matches wins;
+// "card" rules count only in a form that has a card number.
+const rules = [
+  ['skip', /\b(cvc|cvv2?|csc|cid|security code|card verification|verification code|captcha|coupon|promo|voucher|gift|search|username|user name|login|password|passwort|subject|message|comment)\b/],
+  ['ccNumber', /\b(card ?number|card ?no|card ?num|cc ?num(ber)?|ccnum|credit ?card|debit ?card|kartennummer|n[uú]mero de (la )?tarjeta|num[ée]ro de (la )?carte)\b/],
+  ['ccName', /\b(name on (the )?card|card ?holder|holder name|cc ?name|nameoncard|karteninhaber|titular|titulaire)\b/],
+  // Month and year in one field ("MM/YY"), then each on its own ("Expiry
+  // month"), then any other expiry field.
+  ['ccExp', /\b(mm ?(yy|yyyy|jj|aa)|exp ?date|expiration date|expiry date)\b/, true],
+  ['ccMonth', /\b(exp\w* ?month|cc ?month|card ?month|month|mm|monat|mes|mois)\b/, true],
+  ['ccYear', /\b(exp\w* ?year|cc ?year|card ?year|year|yy|yyyy|jahr|a[nñ]o|ann[ée]e)\b/, true],
+  ['ccExp', /\b(expir(y|ation|es)?|valid (thru|through|until)|ablaufdatum|g[uü]ltig bis|caducidad|vencimiento|date d.expiration)\b/, true],
+  ['email', /\b(e ?mail|courriel|correo)\b/],
+  ['tel', /\b(phone|tel|telephone|mobile|cell|telefon|t[ée]l[ée]phone|tel[ée]fono|handy)\b/],
+  ['organization', /\b(company|organi[sz]ation|business|firm|firma|unternehmen|empresa|entreprise|soci[ée]t[ée])\b/],
+  ['line2', /\b(address ?(line ?)?2|addr ?2|line ?2|street ?2|apartment|apt|suite|unit|flat|building|adresszusatz|apartamento|appartement|compl[ée]ment)\b/],
+  ['line3', /\b(address ?(line ?)?3|addr ?3|line ?3)\b/],
+  ['postalCode', /\b(zip( ?code)?|postal ?code|post ?code|postcode|plz|postleitzahl|c[oó]digo postal|code postal)\b/],
+  ['city', /\b(city|town|locality|suburb|ort|stadt|ciudad|ville|localit[ée]|municipality)\b/],
+  ['region', /\b(state|province|region|county|prefecture|bundesland|provincia|estado|r[ée]gion|d[ée]partement)\b/],
+  ['country', /\b(country|nation|land|pa[ií]s|pays)\b/],
+  ['givenName', /\b(first ?name|given ?name|fname|forename|vorname|nombre|pr[ée]nom)\b/],
+  ['familyName', /\b(last ?name|family ?name|surname|lname|nachname|apellidos?|nom de famille)\b/],
+  ['line1', /\b(address ?(line ?)?1|addr ?1|line ?1|street|address|addr|stra(ss|ß)e|anschrift|direcci[oó]n|calle|adresse)\b/],
+  ['name', /\b(full ?name|your ?name|name|contact name|nom|nombre completo)\b/]
+];
+const shown = (field) => !!(field && (field.offsetWidth || field.offsetHeight || field.getClientRects().length))
+  && getComputedStyle(field).visibility !== 'hidden';
+const textTypes = ['text', 'email', 'tel', 'number'];
+const eligible = (field) => (field instanceof HTMLInputElement && textTypes.includes(field.type))
+  || field instanceof HTMLSelectElement || field instanceof HTMLTextAreaElement;
+// Text of a label, without the field (or a list's options) inside it.
+const textOf = (node, field, depth) => {
+  let text = '';
+  for (const child of node.childNodes) {
+    if (child === field || /^(SELECT|OPTION|SCRIPT|STYLE|TEXTAREA)$/.test(child.nodeName)) continue;
+    if (child.nodeType === 3) text += child.textContent;
+    else if (child.nodeType === 1 && depth < 4) text += ' ' + textOf(child, field, depth + 1);
+  }
+  return text.slice(0, 200);
+};
+const describe = (field) => {
+  let text = [field.name, field.id, field.getAttribute('placeholder'), field.getAttribute('aria-label'),
+    field.getAttribute('title')].join(' ');
+  let labelled = false;
+  try {
+    for (const label of field.labels || []) { text += ' ' + textOf(label, field, 0); labelled = true; }
+  } catch (error) { }
+  const by = field.getAttribute('aria-labelledby');
+  if (by) for (const id of by.split(/\s+/)) {
+    const element = id && document.getElementById(id);
+    if (element) { text += ' ' + textOf(element, field, 0); labelled = true; }
+  }
+  // A caption just before the field that is not tied to it.
+  if (!labelled && field.previousElementSibling) text += ' ' + textOf(field.previousElementSibling, field, 0);
+  return ' ' + text.replace(/([a-z])([A-Z])/g, '$1 $2').toLowerCase().replace(/[_\-.\[\]:*()\/#,]+/g, ' ').replace(/\s+/g, ' ') + ' ';
+};
+const keyOf = (field) => {
+  if (!eligible(field)) return null;
+  const words = (field.getAttribute('autocomplete') || '').toLowerCase().trim().split(/\s+/);
+  if (words.includes('webauthn')) return null;
+  for (let i = words.length - 1; i >= 0; --i) {
+    if (tokens[words[i]]) return { key: tokens[words[i]], explicit: true };
+    if (ignored.has(words[i]) && words[i] !== 'off') return null;
+  }
+  if (field instanceof HTMLInputElement && field.type === 'email') return { key: 'email', explicit: true };
+  const text = describe(field);
+  for (const [key, pattern, card] of rules)
+    if (pattern.test(text)) {
+      if (key === 'skip') return null;
+      // A street field of several lines takes the whole street.
+      return { key: key === 'line1' && field instanceof HTMLTextAreaElement ? 'street' : key, explicit: false, card: !!card };
+    }
+  if (field instanceof HTMLInputElement && field.type === 'tel') return { key: 'tel', explicit: false };
+  return null;
+};
+// The recognised fields of a form (or of the page, for fields in none).
+const classify = (scope) => {
+  const found = [];
+  for (const field of Array.from(scope.querySelectorAll('input, select, textarea')).slice(0, 300)) {
+    if (scope === document && field.form) continue;
+    const result = keyOf(field);
+    if (result) found.push(Object.assign({ field }, result));
+  }
+  const number = found.some((item) => item.key === 'ccNumber');
+  return found.filter((item) => item.explicit || !item.card || number);
+};
+const scopeOf = (field) => field.form || document;
+const hasPassword = (scope) => scope !== document && !!scope.querySelector('input[type=password]');
+const tag = '__summitAutoFillFrame';
+// Where a child frame's content starts in this frame's viewport.
+const frameBox = (source) => {
+  for (const element of document.querySelectorAll('iframe, frame')) {
+    if (element.contentWindow !== source) continue;
+    const rect = element.getBoundingClientRect();
+    const style = getComputedStyle(element);
+    return { x: rect.left + element.clientLeft + (parseFloat(style.paddingLeft) || 0),
+      y: rect.top + element.clientTop + (parseFloat(style.paddingTop) || 0) };
+  }
+  return null;
+};
+const waiting = new Map();
+let queries = 0;
+// This frame's place in the page's viewport, and the page's width.
+const placeInPage = () => new Promise((resolve) => {
+  if (window === window.top) { resolve({ x: 0, y: 0, width: window.innerWidth }); return; }
+  const id = String(++queries) + Math.random().toString(36).slice(2);
+  waiting.set(id, resolve);
+  setTimeout(() => { if (waiting.delete(id)) resolve(null); }, 1000);
+  window.parent.postMessage({ [tag]: 'where', id }, '*');
+});
+window.addEventListener('message', (event) => {
+  const data = event.data;
+  if (!data || typeof data !== 'object' || !Object.prototype.hasOwnProperty.call(data, tag)) return;
+  event.stopImmediatePropagation();
+  const source = event.source;
+  if (data[tag] === 'where' && source) {
+    const box = frameBox(source);
+    if (!box) return;
+    placeInPage().then((place) => {
+      if (place) source.postMessage({ [tag]: 'here', id: data.id, x: place.x + box.x, y: place.y + box.y, width: place.width }, '*');
+    });
+  } else if (data[tag] === 'here' && source === window.parent) {
+    const resolve = waiting.get(data.id);
+    if (!resolve) return;
+    waiting.delete(data.id);
+    resolve({ x: Number(data.x) || 0, y: Number(data.y) || 0, width: Number(data.width) || 0 });
+  }
+}, true);
+const two = (number) => String(number).padStart(2, '0');
+const norm = (text) => String(text == null ? '' : text).trim().toLowerCase().replace(/\s+/g, ' ');
+const regionNames = (code) => {
+  const names = [];
+  for (const language of ['en', navigator.language]) {
+    try { names.push(new Intl.DisplayNames([language], { type: 'region' }).of(code)); } catch (error) { }
+  }
+  return names;
+};
+// As the user's typing does: frameworks listen for input and change.
+const dispatch = (field) => {
+  field.dispatchEvent(new Event('input', { bubbles: true }));
+  field.dispatchEvent(new Event('change', { bubbles: true }));
+};
+const setValue = (field, value) => {
+  const prototype = field instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+  Object.getOwnPropertyDescriptor(prototype, 'value').set.call(field, value);
+  dispatch(field);
+  return true;
+};
+const setSelect = (select, key, value) => {
+  const options = Array.from(select.options);
+  let match = null;
+  if (key === 'ccMonth') {
+    match = options.find((option) => parseInt(option.value, 10) === value)
+      || options.find((option) => parseInt(option.textContent, 10) === value);
+  } else if (key === 'ccYear') {
+    const names = [String(value), two(value % 100)];
+    match = options.find((option) => names.includes(option.value.trim())) || options.find((option) => names.includes(option.textContent.trim()));
+  } else {
+    const wanted = new Set([norm(value)]);
+    if (key === 'country') {
+      if (/^[a-z]{2}$/i.test(value)) for (const name of regionNames(String(value).toUpperCase())) wanted.add(norm(name));
+      for (const option of options) {
+        const code = option.value.trim();
+        if (/^[a-z]{2}$/i.test(code) && regionNames(code.toUpperCase()).some((name) => norm(name) === norm(value))) wanted.add(norm(code));
+      }
+    }
+    match = options.find((option) => wanted.has(norm(option.value)) || wanted.has(norm(option.textContent)));
+  }
+  if (!match || match.disabled) return false;
+  if (select.value !== match.value) {
+    Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set.call(select, match.value);
+    dispatch(select);
+  }
+  return true;
+};
+// Fields AutoFill filled, which choosing another entry may change again;
+// what the user typed stays.
+const filled = new WeakSet();
+const fill = (focused, group, values) => {
+  const name = [values.givenName, values.familyName].filter(Boolean).join(' ');
+  const lines = String(values.street || '').split('\n').map((line) => line.trim()).filter(Boolean);
+  const cardName = String(values.ccName || '').trim();
+  const cardWords = cardName ? cardName.split(/\s+/) : [];
+  const month = Number(values.ccMonth) || 0, year = Number(values.ccYear) || 0;
+  const third = group.some((item) => item.key === 'line3');
+  let count = 0;
+  for (const { field, key } of group) {
+    if (field.disabled || field.readOnly || !shown(field)) continue;
+    const select = field instanceof HTMLSelectElement;
+    if (!select && field !== focused && field.value && !filled.has(field)) continue;
+    let value;
+    switch (key) {
+    case 'name': value = name; break;
+    case 'street': value = field instanceof HTMLTextAreaElement ? lines.join('\n') : lines.join(', '); break;
+    case 'line1': value = lines[0]; break;
+    case 'line2': value = lines.slice(1, third ? 2 : undefined).join(', '); break;
+    case 'line3': value = lines.slice(2).join(', '); break;
+    case 'ccGivenName': value = cardWords.length > 1 ? cardWords.slice(0, -1).join(' ') : cardName; break;
+    case 'ccFamilyName': value = cardWords.length > 1 ? cardWords[cardWords.length - 1] : ''; break;
+    case 'ccMonth': value = month ? (select ? month : two(month)) : ''; break;
+    case 'ccYear':
+      value = !year ? '' : select ? year
+        : (field.maxLength === 2 || /^\s*yy\s*$/i.test(field.placeholder || '')) ? two(year % 100) : String(year);
+      break;
+    case 'ccExp': {
+      const long = /yyyy/i.test(field.placeholder || '') || field.maxLength >= 7;
+      value = month && year ? two(month) + '/' + (long ? String(year) : two(year % 100)) : '';
+      break;
+    }
+    default: value = values[key];
+    }
+    if (value === undefined || value === null || value === '') continue;
+    if (select ? setSelect(field, key, value) : setValue(field, String(value))) { filled.add(field); ++count; }
+  }
+  return count;
+};
+let offered = null, offers = 0, offeredAt = 0;
+const leave = () => {
+  if (!offered) return;
+  offered = null;
+  ++offers;
+  post({ type: 'leave' }).catch(() => {});
+};
+const offer = (field) => {
+  const own = keyOf(field);
+  if (!own || field.disabled || field.readOnly || !shown(field)) return;
+  const scope = scopeOf(field);
+  if (hasPassword(scope)) return;
+  const all = classify(scope);
+  const mine = all.find((item) => item.field === field);
+  if (!mine) return;
+  const card = cardKeys.has(mine.key);
+  const group = all.filter((item) => cardKeys.has(item.key) === card);
+  const keys = Array.from(new Set(group.map((item) => item.key)));
+  // A lone field that only looks like a name or a city is not a form to fill.
+  if (!mine.explicit && (card ? !keys.includes('ccNumber') : keys.length < 2)) return;
+  const serial = ++offers;
+  offered = field;
+  offeredAt = Date.now();
+  const rect = field.getBoundingClientRect();
+  placeInPage().then((place) => {
+    if (!place || !place.width || serial !== offers) return '';
+    return post({ type: 'field', kind: card ? 'card' : 'address', field: mine.key, keys,
+      left: rect.left + place.x, top: rect.top + place.y, right: rect.right + place.x, bottom: rect.bottom + place.y,
+      width: place.width });
+  }).then((reply) => {
+    if (!reply || serial !== offers) return;
+    let values = null;
+    try { values = JSON.parse(reply); } catch (error) { return; }
+    offered = null;
+    if (values && typeof values === 'object') fill(field, group, values);
+  }).catch(() => {});
+};
+document.addEventListener('focusin', (event) => { if (event.target !== offered) offer(event.target); }, true);
+// Back into a field that has the focus already: the list again.
+document.addEventListener('mousedown', (event) => {
+  if (event.target === document.activeElement && !offered) offer(event.target);
+}, true);
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'ArrowDown' && !offered && event.target === document.activeElement && !event.altKey && !event.ctrlKey)
+    offer(event.target);
+}, true);
+document.addEventListener('focusout', (event) => { if (event.target === offered) leave(); }, true);
+document.addEventListener('input', (event) => { if (event.isTrusted && event.target === offered) leave(); }, true);
+// A field the page scrolls into view as it gets the focus keeps its list.
+window.addEventListener('scroll', () => { if (Date.now() - offeredAt > 400) leave(); }, { capture: true, passive: true });
+window.addEventListener('resize', leave, { passive: true });
+window.addEventListener('pagehide', leave);
+window.addEventListener('blur', (event) => { if (event.target === window) leave(); });
+// A submitted form with an address or a card the browser may offer to save.
+const luhn = (digits) => {
+  let sum = 0;
+  for (let i = 0; i < digits.length; ++i) {
+    let digit = digits.charCodeAt(digits.length - 1 - i) - 48;
+    if (i % 2) { digit *= 2; if (digit > 9) digit -= 9; }
+    sum += digit;
+  }
+  return sum % 10 === 0;
+};
+let lastSent = '';
+const capture = (scope) => {
+  if (!scope || !scope.querySelectorAll || hasPassword(scope)) return;
+  const raw = {};
+  for (const { field, key } of classify(scope)) {
+    if (!shown(field) || raw[key]) continue;
+    let value = '';
+    if (field instanceof HTMLSelectElement) {
+      const option = field.selectedOptions[0];
+      if (!option || !option.value) continue;
+      // A list's value when it is a code or a name ("IL", "United States"),
+      // its text when the value is a number only the site knows.
+      value = (key === 'country' || key === 'region') && !/^[a-z][a-z .'-]{0,40}$/i.test(option.value.trim())
+        ? (option.textContent.trim() || option.value) : option.value.trim();
+    } else value = String(field.value || '').trim();
+    if (value && value.length <= 500) raw[key] = value;
+  }
+  const address = {};
+  if (raw.givenName || raw.familyName) {
+    address.givenName = raw.givenName || '';
+    address.familyName = raw.familyName || '';
+  } else if (raw.name) {
+    const words = raw.name.split(/\s+/);
+    address.givenName = words.length > 1 ? words.slice(0, -1).join(' ') : raw.name;
+    address.familyName = words.length > 1 ? words[words.length - 1] : '';
+  }
+  const lines = raw.street ? raw.street.split(/\r?\n/) : [raw.line1, raw.line2, raw.line3];
+  address.street = lines.map((line) => String(line || '').trim()).filter(Boolean).join('\n');
+  for (const key of ['organization', 'city', 'region', 'postalCode', 'country', 'email', 'tel']) if (raw[key]) address[key] = raw[key];
+  let card = null;
+  const digits = String(raw.ccNumber || '').replace(/[\s-]/g, '');
+  if (/^\d{12,19}$/.test(digits) && luhn(digits)) {
+    card = { number: digits, name: raw.ccName || [raw.ccGivenName, raw.ccFamilyName].filter(Boolean).join(' ') };
+    let month = parseInt(raw.ccMonth, 10) || 0, year = parseInt(raw.ccYear, 10) || 0;
+    const expiry = /^\s*(\d{1,2})\s*[\/\-. ]\s*(\d{4}|\d{2})\s*$/.exec(raw.ccExp || '');
+    if (expiry) { month = parseInt(expiry[1], 10); year = parseInt(expiry[2], 10); }
+    if (year > 0 && year < 100) year += 2000;
+    if (month >= 1 && month <= 12) card.month = month;
+    if (year >= 2000 && year < 2100) card.year = year;
+  }
+  const hasAddress = Object.keys(address).some((key) => address[key]);
+  if (!hasAddress && !card) return;
+  const message = { type: 'submit', address: hasAddress ? address : null, card };
+  const key = JSON.stringify(message);
+  if (key === lastSent) return;
+  lastSent = key;
+  post(message).catch(() => {});
+};
+document.addEventListener('submit', (event) => capture(event.target), true);
+// Pages that send their forms with script: a click on a button, or Enter.
+document.addEventListener('click', (event) => {
+  const button = event.target && event.target.closest && event.target.closest('button, input[type=submit], input[type=button], [role=button]');
+  if (button) setTimeout(() => capture(button.form || document), 0);
+}, true);
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Enter' && event.target instanceof HTMLInputElement) capture(event.target.form || document);
+}, true);
+})();)js";
 }

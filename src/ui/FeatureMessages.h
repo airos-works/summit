@@ -139,3 +139,19 @@ namespace summit {
 // The tab menu's Bookmark All Tabs: a new folder in Other Bookmarks.
 constexpr uint32 kBookmarkAllTabs = 'bkat';
 }
+namespace summit {
+// AutoFill (#149, BrowserWindowAutoFill.cpp). kAutoFillCardsRead: the key
+// store's cards for the list a field asked for ("serial", rows as "label",
+// "detail" and "values", "field" BRect, "width"). kAutoFillChosen: the list
+// to its window, row "index" of offer "serial" was clicked. kAutoFillSelect:
+// the window to its list, highlight row "index" (the arrow keys).
+// kAutoFillCardChecked: a sent card is new or changed ("tab", "id", "name",
+// "number", "month", "year", "update"). kAutoFillBarAnswer: the save bar's
+// "tab" and "which" (0 save, 1 not now). kAutoFillSaved: "error", or none.
+constexpr uint32 kAutoFillCardsRead = 'afcr';
+constexpr uint32 kAutoFillChosen = 'afch';
+constexpr uint32 kAutoFillSelect = 'afsl';
+constexpr uint32 kAutoFillCardChecked = 'afck';
+constexpr uint32 kAutoFillBarAnswer = 'afba';
+constexpr uint32 kAutoFillSaved = 'afsv';
+}

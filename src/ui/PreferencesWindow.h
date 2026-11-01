@@ -19,6 +19,7 @@ class BStringView;
 class BTextControl;
 
 namespace summit {
+class SharedProfile;
 // What the Preferences window starts with.
 struct PreferencesState {
     std::string homeURL;
@@ -50,6 +51,8 @@ struct PreferencesState {
     std::string userAgent = "default";
     // Preferences › Browsing › Accessibility and Memory.
     BrowsingAids aids;
+    // Preferences › AutoFill (#149) reads and changes the saved addresses.
+    std::shared_ptr<SharedProfile> profile;
 };
 // Edit › Preferences…. One window for the application; changes apply to every
 // browser window as they are made and are saved in the profile.

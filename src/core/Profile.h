@@ -53,6 +53,22 @@ struct WebApp {
     std::string scope;    // pages under this address belong to the app
     std::string launcher; // the launcher file (Deskbar and Tracker open it)
 };
+// A contact card or postal address for AutoFill (#149). Kept in the profile,
+// as Firefox keeps its addresses in a plain file: it is what the user types
+// into forms anyway, and the suggestion list reads it on the window's thread
+// without the key store's prompts. Payment cards are secrets and live in the
+// key store (AutoFillStore.h).
+struct AutoFillAddress {
+    std::string id; // letters and digits, unique
+    std::string givenName, familyName, organization;
+    std::string street; // lines separated by '\n'
+    std::string city, region, postalCode, country, email, tel;
+    int64_t added = 0; // seconds since the epoch
+    bool operator==(const AutoFillAddress&) const = default;
+};
+// Its fields with their names in profile.json (and in the AutoFill page
+// script's messages), in the order forms usually have them.
+const std::vector<std::pair<const char*, std::string AutoFillAddress::*>>& AutoFillAddressFields();
 struct ProfileLoad;
 struct Profile {
     // Open windows, front to back as they were created. Older builds only
@@ -126,6 +142,10 @@ struct Profile {
     // Summit offers to save them, and sites it never offers for.
     bool savePasswords = true;
     std::set<std::string> passwordNever;
+    // AutoFill (#149): whether forms are filled from, and offer to save to,
+    // the addresses here and the payment cards in the key store.
+    bool autoFill = true;
+    std::vector<AutoFillAddress> autoFillAddresses;
     // Spelling is checked while typing in pages (#66).
     bool spellChecking = true;
     // Media that start by themselves (#70): "allow", "block-audio" (only

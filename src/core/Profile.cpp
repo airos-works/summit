@@ -254,6 +254,23 @@ Profile Profile::Load(const std::filesystem::path& path, std::string& error)
         if (auto save = j.find("savePasswords"); save != j.end() && save->is_boolean()) profile.savePasswords = *save;
         if (auto never = j.find("passwordNever"); never != j.end() && never->is_array() && never->size() <= 10000)
             for (const auto& origin : *never) if (origin.is_string()) profile.passwordNever.insert(origin.get<std::string>());
+        if (auto fill = j.find("autoFill"); fill != j.end() && fill->is_boolean()) profile.autoFill = *fill;
+        if (auto addresses = j.find("autoFillAddresses"); addresses != j.end() && addresses->is_array() && addresses->size() <= 1000) {
+            for (const auto& item : *addresses) {
+                if (!item.is_object()) continue;
+                AutoFillAddress address;
+                if (auto id = item.find("id"); id != item.end() && id->is_string()) address.id = id->get<std::string>();
+                for (const auto& [name, field] : AutoFillAddressFields())
+                    if (auto value = item.find(name); value != item.end() && value->is_string() && value->get<std::string>().size() <= 1024)
+                        address.*field = value->get<std::string>();
+                if (auto added = item.find("added"); added != item.end() && added->is_number_integer()) address.added = added->get<int64_t>();
+                const bool valid = !address.id.empty() && address.id.size() <= 64
+                    && std::all_of(address.id.begin(), address.id.end(), [](char c) { return std::isalnum(static_cast<unsigned char>(c)); })
+                    && std::none_of(profile.autoFillAddresses.begin(), profile.autoFillAddresses.end(),
+                        [&](const AutoFillAddress& other) { return other.id == address.id; });
+                if (valid) profile.autoFillAddresses.push_back(std::move(address));
+            }
+        }
         if (auto spelling = j.find("spellChecking"); spelling != j.end() && spelling->is_boolean()) profile.spellChecking = *spelling;
         if (auto prevent = j.find("preventCrossSiteTracking"); prevent != j.end() && prevent->is_boolean())
             profile.preventCrossSiteTracking = *prevent;
@@ -362,6 +379,16 @@ Profile Profile::Load(const std::filesystem::path& path, std::string& error)
         }
     } catch (const std::exception& e) { error = e.what(); return {}; }
     return profile;
+}
+
+const std::vector<std::pair<const char*, std::string AutoFillAddress::*>>& AutoFillAddressFields()
+{
+    static const std::vector<std::pair<const char*, std::string AutoFillAddress::*>> fields = {
+        {"givenName", &AutoFillAddress::givenName}, {"familyName", &AutoFillAddress::familyName},
+        {"organization", &AutoFillAddress::organization}, {"street", &AutoFillAddress::street},
+        {"city", &AutoFillAddress::city}, {"region", &AutoFillAddress::region}, {"postalCode", &AutoFillAddress::postalCode},
+        {"country", &AutoFillAddress::country}, {"email", &AutoFillAddress::email}, {"tel", &AutoFillAddress::tel}};
+    return fields;
 }
 
 const WebApp* Profile::FindWebApp(const std::string& id) const
@@ -596,6 +623,16 @@ bool Profile::Save(const std::filesystem::path& path, std::string& error, int64_
             {"minimumFontSize", minimumFontSize}, {"unloadWhenMemoryIsLow", unloadWhenMemoryIsLow}, {"overrideColors", overrideColors}, {"spellingLanguage", spellingLanguage}, {"restoreSession", restoreSession},
             {"savePasswords", savePasswords}, {"passwordNever", passwordNever}, {"spellChecking", spellChecking},
             {"preventCrossSiteTracking", preventCrossSiteTracking}, {"crossSiteCookieSites", crossSiteCookieSites},
+            {"autoFill", autoFill}, {"autoFillAddresses", [&] {
+                json addresses = json::array();
+                for (const auto& address : autoFillAddresses) {
+                    json item = {{"id", address.id}, {"added", address.added}};
+                    for (const auto& [name, field] : AutoFillAddressFields())
+                        if (!(address.*field).empty()) item[name] = address.*field;
+                    addresses.push_back(std::move(item));
+                }
+                return addresses;
+            }()},
             {"autoplay", autoplay}, {"userAgent", FindUserAgentPreset(userAgent).id}, {"webApps", [&] {
                 json apps = json::array();
                 for (const auto& app : webApps)

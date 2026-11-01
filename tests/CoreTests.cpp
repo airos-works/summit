@@ -565,6 +565,20 @@ int main()
     CHECK(profile.Save(path, error));
     loaded = Profile::Load(path, error);
     CHECK(loaded.windows.size() == 1 && loaded.windows[0].tabs[0].title == "Replacement" && loaded.windows[0].selected == 0);
+    // AutoFill (#149): addresses keep their fields; damaged or duplicate entries are dropped.
+    CHECK(loaded.autoFill && loaded.autoFillAddresses.empty());
+    profile.autoFill = false;
+    profile.autoFillAddresses = {{"a1", "Jane", "Doe", "Example Ltd", "1 Main Street\nUnit 4", "Springfield", "IL", "62701",
+        "US", "jane@example.com", "+1 555 0100", 1700000000}, {"a2", "", "", "", "", "", "", "", "", "max@example.com", "", 0}};
+    CHECK(profile.Save(path, error));
+    loaded = Profile::Load(path, error);
+    CHECK(error.empty() && !loaded.autoFill && loaded.autoFillAddresses == profile.autoFillAddresses);
+    { std::ofstream out(path); out << R"({"version":1,"tabs":[],"selected":0,"bookmarks":[],"history":[],"autoFillAddresses":[)"
+        R"({"id":"x1","city":"Berlin"},{"id":"x1","city":"Paris"},{"id":"bad id","city":"Rome"},{"city":"Oslo"},7]})"; }
+    loaded = Profile::Load(path, error);
+    CHECK(error.empty() && loaded.autoFillAddresses.size() == 1 && loaded.autoFillAddresses[0].city == "Berlin");
+    profile.autoFill = true;
+    profile.autoFillAddresses.clear();
     // A profile written by a build without windows restores as one window.
     { std::ofstream out(path); out << R"({"version":1,"tabs":[{"url":"https://old.example/","title":"Old"}],"selected":0,)"
         R"("bookmarks":[],"history":[],"interfaceStyle":"nonsense"})"; }

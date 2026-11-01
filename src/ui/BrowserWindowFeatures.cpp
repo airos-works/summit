@@ -170,6 +170,12 @@ void BrowserWindow::AddPageScripts(BWebKitView* view)
     // allows it publickey-credentials-get).
     view->AddScriptMessageHandler("summitPasskeys", BMessenger(this));
     view->AddUserScript(kPasskeyFieldScript, true, true);
+    // AutoFill (#149): private windows fill from what was saved, but never
+    // save (BrowserWindowAutoFill.cpp).
+    if (fShared->Read([](const Profile& profile) { return profile.autoFill; })) {
+        view->AddScriptMessageHandler("summitAutoFill", BMessenger(this));
+        view->AddUserScript(kAutoFillScript, true, true);
+    }
 }
 
 void BrowserWindow::PageScriptMessage(BMessage& message)
@@ -179,6 +185,12 @@ void BrowserWindow::PageScriptMessage(BMessage& message)
     BMessenger messenger;
     auto* tab = message.FindMessenger("view", &messenger) == B_OK ? FindTab(messenger) : nullptr;
     const std::string name = message.GetString("name", "");
+    if (name == "summitAutoFill") {
+        // It answers the page itself, perhaps only when the user chooses.
+        if (tab) AutoFillScriptMessage(*tab, message);
+        else if (token) BWebKitView::ReplyToScriptMessage(token, "");
+        return;
+    }
     const std::string origin = message.GetString("origin", "");
     const bool mainFrame = message.GetBool("main_frame", false);
     json body = json::object();
@@ -530,6 +542,8 @@ void BrowserWindow::RefreshNoticeBar()
         fNoticeBar->SetNotice(text, {{pending.update ? "Update" : "Save", answer(0)}, {"Never for This Site", answer(1)}, {"Not Now", answer(2)}});
         return;
     }
+    // A sent address or card to save (#149).
+    if (AutoFillNotice(*tab)) return;
     if (!tab->blockedPopup.empty()) {
         const std::string text = "Summit blocked " + std::string(tab->blockedPopups > 1
             ? std::to_string(tab->blockedPopups) + " pop-ups" : "a pop-up") + " from " + HostOf(tab->url) + ".";

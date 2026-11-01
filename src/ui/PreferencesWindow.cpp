@@ -2,6 +2,8 @@
 #if SUMMIT_MODERN_WEBKIT
 #include "BrowsingPreferences.h"
 #include "Location.h"
+// Preferences › AutoFill (#149).
+#include "AutoFillPreferences.h"
 #endif
 #include "Messages.h"
 #include "McpService.h"
@@ -332,6 +334,8 @@ PreferencesWindow::PreferencesWindow(BMessenger owner, const PreferencesState& s
 #if SUMMIT_MODERN_WEBKIT
     fTabs->AddTab(new BrowsingPreferences(fOwner, state.autoplay, state.spellChecking, state.spellingLanguage, state.dictionaries,
         state.savePasswords, state.webApps, state.aids));
+    // Preferences › AutoFill (#149).
+    fTabs->AddTab(new AutoFillPreferences(state.profile));
     auto* compatibility = new BGroupView("Compatibility", B_VERTICAL, 10);
     auto* agents = new BPopUpMenu("user-agents");
     for (const auto& preset : UserAgentPresets()) {
@@ -953,7 +957,7 @@ void PreferencesWindow::MessageReceived(BMessage* message)
                 const char* label = name == "browsing" ? "Browsing" : name == "data" ? "History and Data"
                     : name == "sites" ? "Site Permissions" : name == "links" ? "Link Handlers"
                     : name == "developer" ? "Developer" : name == "compatibility" ? "Compatibility"
-                    : name == "privacy" ? "Privacy" : "General";
+                    : name == "privacy" ? "Privacy" : name == "autofill" ? "AutoFill" : "General";
                 for (int32 i = 0; i < fTabs->CountTabs(); ++i)
                     if (fTabs->TabAt(i) && fTabs->TabAt(i)->Label() && !std::strcmp(fTabs->TabAt(i)->Label(), label)) fTabs->Select(i);
             }

@@ -3,6 +3,7 @@
 #include "core/Suggest.h"
 #if SUMMIT_MODERN_WEBKIT
 #include <WebKit/WebKitView.h>
+#include "AutoFillStore.h"
 #include "Containers.h"
 #include <DirectWindow.h>
 #include <Window.h>
@@ -308,6 +309,14 @@ private:
         // A sign-in the page just submitted, waiting for Save or Never (#67).
         struct PendingPassword { std::string origin, username, password; bool update = false; };
         std::optional<PendingPassword> pendingPassword;
+        // An address or card a form just sent that AutoFill has not saved,
+        // waiting for Save or Not Now (#149).
+        struct PendingAutoFill {
+            std::optional<AutoFillAddress> address;
+            std::optional<AutoFillCard> card;
+            bool cardUpdate = false;
+        };
+        std::optional<PendingAutoFill> pendingAutoFill;
         // The video a context menu or the page chose for Picture in Picture (#74).
         std::string pipToken;
         // Firefox's container the page is in (Containers.h), 0 for none.
@@ -887,6 +896,31 @@ private:
     BMessenger fPasskeyAutofill;
     // A site's signal changed its passkeys (B_WEBKIT_PASSKEYS_CHANGED).
     void PasskeysChanged(const BMessage& message);
+    // AutoFill (#149, BrowserWindowAutoFill.cpp): the page script's messages
+    // (kAutoFillScript), the native list of saved addresses or cards under
+    // the field, and the offer to save what a form sent.
+    void AutoFillScriptMessage(Tab& tab, const BMessage& message);
+    void ShowAutoFillList(const BMessage& entries);
+    void AutoFillChosen(int32 index);
+    // Up, Down, Return and Escape while the list shows (DispatchMessage).
+    bool AutoFillKey(const BMessage& message);
+    // Answers the page (an empty reply when nothing was chosen) and closes
+    // the list.
+    void CloseAutoFill();
+    void AutoFillCardChecked(const BMessage& message);
+    bool AutoFillNotice(const Tab& tab);
+    void AutoFillBarAnswer(const BMessage& message);
+    struct AutoFillOffer {
+        uint64 serial = 0, token = 0;
+        int64 tab = 0;
+        // The entries' rows and the values each fills in (JSON).
+        std::vector<std::pair<std::string, std::string>> rows;
+        std::vector<std::string> values;
+        int32 selected = -1;
+        BMessenger list;
+    };
+    std::optional<AutoFillOffer> fAutoFill;
+    uint64 fAutoFillSerial = 0;
     // A web app's window (#75): no tabs, toolbar or bookmarks bar.
     std::string fWebApp;
     std::string fWebAppScope, fWebAppName;

@@ -1,0 +1,492 @@
+#if SUMMIT_MODERN_WEBKIT
+// AutoFill for contact info, addresses and payment cards (#149). The page
+// script (kAutoFillScript) recognises the fields; the saved entries are
+// offered in a native list under the field, which a page cannot read or
+// click; the chosen entry goes back to the page that asked, which fills its
+// form. A form sent with a new address or card offers to save it, except in
+// private windows. Addresses are in the profile, cards in the key store
+// (AutoFillStore.h), which is only ever asked on threads of its own.
+#include "BrowserWindow.h"
+#include "FeatureMessages.h"
+#include "Messages.h"
+#include "NoticeBar.h"
+#include "SharedProfile.h"
+#include <Application.h>
+#include <ListView.h>
+#include <Screen.h>
+#include <StringView.h>
+#include <TextView.h>
+#include <nlohmann/json.hpp>
+#include <algorithm>
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <ctime>
+#include <thread>
+
+namespace summit {
+namespace {
+using nlohmann::json;
+constexpr uint32 kListClicked = 'aflc';
+// Scripting, for tests ('ALTB' with "index" as int32), as PasskeyAutofill.
+constexpr uint32 kScriptedChoice = 'ALTB';
+constexpr const char* kSettingsRow = "AutoFill Settings…";
+
+// Cards are filled only into pages whose connection is private: https, the
+// computer itself, or a file. SUMMIT_AUTOFILL_INSECURE_CARDS=1 allows any
+// page, for tests over plain http.
+bool SecureForCards(const std::string& origin)
+{
+    static const bool any = [] {
+        const char* value = std::getenv("SUMMIT_AUTOFILL_INSECURE_CARDS");
+        return value && *value == '1';
+    }();
+    if (any || origin.starts_with("https://") || origin.starts_with("file://")) return true;
+    for (const char* local : {"http://localhost", "http://127.0.0.1", "http://[::1]"})
+        if (origin == local || origin.starts_with(std::string(local) + ":")) return true;
+    return false;
+}
+
+std::string Text(const json& object, const char* key)
+{
+    auto found = object.find(key);
+    return found != object.end() && found->is_string() ? found->get<std::string>().substr(0, 1024) : std::string();
+}
+
+AutoFillAddress AddressFromJSON(const json& object)
+{
+    AutoFillAddress address;
+    if (!object.is_object()) return address;
+    for (const auto& [name, field] : AutoFillAddressFields()) address.*field = Text(object, name);
+    return address;
+}
+
+json AddressValues(const AutoFillAddress& address)
+{
+    json values = json::object();
+    for (const auto& [name, field] : AutoFillAddressFields()) values[name] = address.*field;
+    return values;
+}
+
+// The saved field a form's key fills from.
+std::string AddressValueFor(const AutoFillAddress& address, const std::string& key)
+{
+    if (key == "name") {
+        std::string name = address.givenName;
+        if (!address.familyName.empty()) name += (name.empty() ? "" : " ") + address.familyName;
+        return name;
+    }
+    if (key == "street" || key == "line1" || key == "line2" || key == "line3") {
+        const auto end = address.street.find('\n');
+        return key == "line1" || key == "street" ? address.street.substr(0, end) : end == std::string::npos ? std::string() : address.street.substr(end + 1);
+    }
+    for (const auto& [name, field] : AutoFillAddressFields())
+        if (key == name) return address.*field;
+    return {};
+}
+
+// One entry of the list: what it is, and a line below it.
+class AutoFillItem final : public BListItem {
+public:
+    AutoFillItem(const std::string& label, const std::string& detail) : fLabel(label), fDetail(detail) { }
+    void DrawItem(BView* owner, BRect frame, bool) override
+    {
+        const rgb_color background = ui_color(IsSelected() ? B_LIST_SELECTED_BACKGROUND_COLOR : B_LIST_BACKGROUND_COLOR);
+        owner->SetLowColor(background);
+        owner->FillRect(frame, B_SOLID_LOW);
+        font_height height;
+        owner->GetFontHeight(&height);
+        const float line = ceilf(height.ascent + height.descent + height.leading);
+        const rgb_color text = ui_color(IsSelected() ? B_LIST_SELECTED_ITEM_TEXT_COLOR : B_LIST_ITEM_TEXT_COLOR);
+        owner->SetHighColor(text);
+        owner->DrawString(fLabel.c_str(), BPoint(frame.left + 8, frame.top + 4 + height.ascent));
+        if (fDetail.empty()) return;
+        owner->SetHighColor(IsSelected() ? text : tint_color(ui_color(B_LIST_ITEM_TEXT_COLOR), B_LIGHTEN_1_TINT));
+        owner->DrawString(fDetail.c_str(), BPoint(frame.left + 8, frame.top + 4 + line + height.ascent));
+    }
+    void Update(BView* owner, const BFont* font) override
+    {
+        BListItem::Update(owner, font);
+        font_height height;
+        font->GetHeight(&height);
+        const float line = ceilf(height.ascent + height.descent + height.leading);
+        SetHeight(line * (fDetail.empty() ? 1 : 2) + 8);
+        SetWidth(std::max(font->StringWidth(fLabel.c_str()), font->StringWidth(fDetail.c_str())) + 16);
+    }
+
+private:
+    std::string fLabel, fDetail;
+};
+
+// Rows are chosen by a click on them, not by a selection message: the
+// highlight that the arrow keys move selects rows too.
+class AutoFillListView final : public BListView {
+public:
+    AutoFillListView(BRect frame) : BListView(frame, "entries", B_SINGLE_SELECTION_LIST, B_FOLLOW_ALL) { }
+    void MouseDown(BPoint where) override
+    {
+        BListView::MouseDown(where);
+        const int32 index = IndexOf(where);
+        if (index < 0 || !Window()) return;
+        BMessage clicked(kListClicked);
+        clicked.AddInt32("index", index);
+        Window()->PostMessage(&clicked);
+    }
+};
+
+// The list under the field. Like PasskeyAutofill it takes no focus: the
+// field keeps it, the window's arrow keys move the highlight here
+// (kAutoFillSelect), and a click sends kAutoFillChosen.
+class AutoFillList final : public BWindow {
+public:
+    AutoFillList(BRect field, uint64 serial, const std::vector<std::pair<std::string, std::string>>& rows, BMessenger target)
+        : BWindow(BRect(field.LeftBottom(), field.LeftBottom() + BPoint(200, 40)), "AutoFill", B_BORDERED_WINDOW_LOOK,
+            B_FLOATING_SUBSET_WINDOW_FEEL, B_AVOID_FOCUS | B_NOT_MOVABLE | B_NOT_RESIZABLE | B_NOT_ZOOMABLE
+            | B_NOT_MINIMIZABLE | B_NOT_CLOSABLE | B_ASYNCHRONOUS_CONTROLS),
+          fSerial(serial), fTarget(target)
+    {
+        fList = new AutoFillListView(Bounds());
+        for (const auto& [label, detail] : rows) fList->AddItem(new AutoFillItem(label, detail));
+        fList->AddItem(new AutoFillItem(kSettingsRow, {}));
+        AddChild(fList);
+        float width = std::max(260.0f, field.Width()), height = 0;
+        for (int32 i = 0; i < fList->CountItems(); ++i) {
+            width = std::max(width, fList->ItemAt(i)->Width());
+            height += fList->ItemAt(i)->Height() + 1;
+        }
+        // Below the field, or above it when the screen ends first.
+        const BRect screen = BScreen(this).Frame();
+        width = std::min(width, screen.Width() / 2);
+        height = std::min(height, screen.Height() / 3);
+        ResizeTo(width, height);
+        float top = field.bottom + 2;
+        if (top + height > screen.bottom && field.top - height - 2 >= screen.top) top = field.top - height - 2;
+        MoveTo(std::clamp(field.left, screen.left, screen.right - width), std::clamp(top, screen.top, screen.bottom - height));
+    }
+    void MessageReceived(BMessage* message) override
+    {
+        switch (message->what) {
+        case kListClicked:
+            // A page can open the list where the user is about to click
+            // (it says where its field is): a click that lands as the list
+            // appears was meant for the page, not for an entry.
+            if (system_time() - fShown < 500000) return;
+            Choose(message->GetInt32("index", -1));
+            return;
+        case kAutoFillSelect: {
+            const int32 index = message->GetInt32("index", -1);
+            if (index >= 0) {
+                fList->Select(index);
+                fList->ScrollToSelection();
+            } else fList->DeselectAll();
+            return;
+        }
+        case kScriptedChoice:
+            Choose(message->GetInt32("index", message->GetInt32("account", 0)));
+            return;
+        default:
+            BWindow::MessageReceived(message);
+        }
+    }
+
+private:
+    void Choose(int32 index)
+    {
+        if (fChosen || index < 0 || index >= fList->CountItems()) return;
+        fChosen = true;
+        BMessage chosen(kAutoFillChosen);
+        chosen.AddUInt64("serial", fSerial);
+        chosen.AddInt32("index", index);
+        fTarget.SendMessage(&chosen, static_cast<BHandler*>(nullptr), 0);
+    }
+    BListView* fList = nullptr;
+    uint64 fSerial;
+    BMessenger fTarget;
+    bool fChosen = false;
+    const bigtime_t fShown = system_time();
+};
+}
+
+void BrowserWindow::AutoFillScriptMessage(Tab& tab, const BMessage& message)
+{
+    const uint64 token = message.GetUInt64("reply_token", 0);
+    const std::string origin = message.GetString("origin", "");
+    json body = json::object();
+    try {
+        body = json::parse(message.GetString("body", "{}"));
+    } catch (const std::exception&) { }
+    if (!body.is_object()) body = json::object();
+    const std::string type = Text(body, "type");
+    if (type == "leave") {
+        if (token) BWebKitView::ReplyToScriptMessage(token, "");
+        if (fAutoFill && fAutoFill->tab == tab.id) CloseAutoFill();
+        return;
+    }
+    if (type == "field") {
+        // The list of another field (or of the same one again) goes first.
+        CloseAutoFill();
+        auto number = [&](const char* key) {
+            auto found = body.find(key);
+            return found != body.end() && found->is_number() ? found->get<double>() : 0.0;
+        };
+        const BRect field(number("left"), number("top"), number("right"), number("bottom"));
+        const double width = number("width");
+        const std::string kind = Text(body, "kind"), focused = Text(body, "field");
+        std::vector<std::string> keys;
+        if (auto found = body.find("keys"); found != body.end() && found->is_array())
+            for (const auto& key : *found) if (key.is_string() && keys.size() < 40) keys.push_back(key.get<std::string>());
+        if (!token || tab.id != fSelected || !field.IsValid() || width <= 0 || !tab.view) {
+            if (token) BWebKitView::ReplyToScriptMessage(token, "");
+            return;
+        }
+        fAutoFill = AutoFillOffer { ++fAutoFillSerial, token, tab.id, {}, {}, -1, {} };
+        BMessage entries(kAutoFillCardsRead);
+        entries.AddUInt64("serial", fAutoFill->serial);
+        entries.AddRect("field", field);
+        entries.AddDouble("width", width);
+        if (kind == "card") {
+            if (!SecureForCards(origin)) {
+                CloseAutoFill();
+                tab.notice = "Summit fills in payment cards only on secure (https) pages.";
+                tab.noticeUntil = system_time() + 8 * 1000000LL;
+                if (tab.id == fSelected) ShowTabStatus(tab);
+                return;
+            }
+            // The key store may wait for the user: read it on a thread.
+            std::thread([window = BMessenger(this), entries]() mutable {
+                for (const auto& card : CardStore::Cards()) {
+                    entries.AddString("label", MaskedCard(card).c_str());
+                    std::string detail = card.name;
+                    if (const auto expiry = CardExpiry(card); !expiry.empty())
+                        detail += (detail.empty() ? "Expires " : ", expires ") + expiry;
+                    entries.AddString("detail", detail.c_str());
+                    char month[8];
+                    std::snprintf(month, sizeof(month), "%02d", card.month);
+                    entries.AddString("values", json { {"ccName", card.name}, {"ccNumber", card.number},
+                        {"ccMonth", card.month ? month : ""}, {"ccYear", card.year ? std::to_string(card.year) : ""} }.dump().c_str());
+                }
+                window.SendMessage(&entries);
+            }).detach();
+            return;
+        }
+        // Addresses that have something for this form, most recent first.
+        const auto addresses = fShared->Read([](const Profile& profile) { return profile.autoFillAddresses; });
+        for (auto address = addresses.rbegin(); address != addresses.rend(); ++address) {
+            if (!std::any_of(keys.begin(), keys.end(), [&](const std::string& key) { return !AddressValueFor(*address, key).empty(); }))
+                continue;
+            std::string label = AddressValueFor(*address, focused), detail;
+            const std::string name = AddressName(*address), summary = AddressSummary(*address);
+            if (label.empty()) label = name.empty() ? summary : name;
+            // Under a name, the address; under anything else, whose it is.
+            const bool nameField = focused == "name" || focused == "givenName" || focused == "familyName" || focused == "organization";
+            detail = nameField || label == name || name.empty() ? summary : name;
+            if (detail == label) detail.clear();
+            entries.AddString("label", label.c_str());
+            entries.AddString("detail", detail.c_str());
+            entries.AddString("values", AddressValues(*address).dump().c_str());
+        }
+        ShowAutoFillList(entries);
+        return;
+    }
+    if (token) BWebKitView::ReplyToScriptMessage(token, "");
+    if (type != "submit" || fPrivate) return;
+    // Private windows never save; nor do pages other than web pages and files.
+    if (!origin.starts_with("https://") && !origin.starts_with("http://") && !origin.starts_with("file://")) return;
+    if (!fShared->Read([](const Profile& profile) { return profile.autoFill; })) return;
+    if (auto found = body.find("address"); found != body.end() && found->is_object()) {
+        const auto address = AddressFromJSON(*found);
+        const bool known = fShared->Read([&](const Profile& profile) {
+            return std::any_of(profile.autoFillAddresses.begin(), profile.autoFillAddresses.end(),
+                [&](const AutoFillAddress& saved) { return AddressCovers(saved, address); });
+        });
+        if (AddressWorthSaving(address) && !known) {
+            if (!tab.pendingAutoFill) tab.pendingAutoFill.emplace();
+            tab.pendingAutoFill->address = address;
+            RefreshNoticeBar();
+        }
+    }
+    if (auto found = body.find("card"); found != body.end() && found->is_object() && SecureForCards(origin)) {
+        AutoFillCard card { {}, Text(*found, "name"), CardNumberDigits(Text(*found, "number")), 0, 0 };
+        if (auto month = found->find("month"); month != found->end() && month->is_number_integer()) card.month = std::clamp(month->get<int>(), 0, 12);
+        if (auto year = found->find("year"); year != found->end() && year->is_number_integer()) card.year = std::clamp(year->get<int>(), 0, 2100);
+        if (card.number.empty()) return;
+        // Is it saved already? The key store answers on a thread of its own.
+        std::thread([window = BMessenger(this), id = tab.id, card]() mutable {
+            bool update = false;
+            for (const auto& saved : CardStore::Cards()) {
+                if (saved.number != card.number) continue;
+                if (saved.name == card.name && (!card.month || saved.month == card.month) && (!card.year || saved.year == card.year)) return;
+                // The same card with a new expiry or name: it replaces the old one.
+                update = true;
+                card.id = saved.id;
+                if (card.name.empty()) card.name = saved.name;
+                if (!card.month) card.month = saved.month;
+                if (!card.year) card.year = saved.year;
+            }
+            BMessage checked(kAutoFillCardChecked);
+            checked.AddInt64("tab", id);
+            checked.AddString("id", card.id.c_str());
+            checked.AddString("name", card.name.c_str());
+            checked.AddString("number", card.number.c_str());
+            checked.AddInt32("month", card.month);
+            checked.AddInt32("year", card.year);
+            checked.AddBool("update", update);
+            window.SendMessage(&checked);
+        }).detach();
+    }
+}
+
+void BrowserWindow::ShowAutoFillList(const BMessage& entries)
+{
+    // An offer that was closed (or replaced) while the key store was read.
+    if (!fAutoFill || fAutoFill->serial != entries.GetUInt64("serial", 0)) return;
+    const char* label = nullptr;
+    for (int32 i = 0; entries.FindString("label", i, &label) == B_OK; ++i) {
+        fAutoFill->rows.emplace_back(label, entries.GetString("detail", i, ""));
+        fAutoFill->values.emplace_back(entries.GetString("values", i, ""));
+    }
+    auto* tab = FindTabByID(fAutoFill->tab);
+    if (fAutoFill->rows.empty() || !tab || tab->id != fSelected || !tab->view) {
+        CloseAutoFill();
+        return;
+    }
+    // CSS pixels to the view's: page zoom and the display's scale both.
+    BRect field = entries.FindRect("field");
+    const float scale = tab->view->Bounds().Width() / entries.GetDouble("width", 1);
+    field = BRect(field.left * scale, field.top * scale, field.right * scale, field.bottom * scale);
+    const BRect bounds = tab->view->Bounds();
+    field.left = std::clamp(field.left, 0.0f, bounds.right);
+    field.right = std::clamp(field.right, field.left, bounds.right);
+    field.top = std::clamp(field.top, 0.0f, bounds.bottom);
+    field.bottom = std::clamp(field.bottom, field.top, bounds.bottom);
+    field = tab->view->ConvertToScreen(field);
+    auto* list = new AutoFillList(field, fAutoFill->serial, fAutoFill->rows, BMessenger(this));
+    if (list->AddToSubset(this) != B_OK) {
+        list->Quit();
+        CloseAutoFill();
+        return;
+    }
+    fAutoFill->list = BMessenger(list);
+    std::fprintf(stderr, "Summit: AutoFill offers %zu entr%s\n", fAutoFill->rows.size(), fAutoFill->rows.size() == 1 ? "y" : "ies");
+    list->Show();
+}
+
+void BrowserWindow::AutoFillChosen(int32 index)
+{
+    if (!fAutoFill || index < 0) return;
+    if (static_cast<size_t>(index) >= fAutoFill->values.size()) {
+        // The last row: Preferences › AutoFill.
+        CloseAutoFill();
+        BMessage show(kShowPreferences);
+        show.AddString("tab", "autofill");
+        be_app->PostMessage(&show);
+        return;
+    }
+    std::fprintf(stderr, "Summit: AutoFill entry %d chosen\n", static_cast<int>(index));
+    BWebKitView::ReplyToScriptMessage(fAutoFill->token, fAutoFill->values[index].c_str());
+    CloseAutoFill();
+}
+
+bool BrowserWindow::AutoFillKey(const BMessage& message)
+{
+    if (!fAutoFill || !fAutoFill->list.IsValid()) return false;
+    if (message.GetInt32("modifiers", 0) & (B_COMMAND_KEY | B_CONTROL_KEY | B_OPTION_KEY)) return false;
+    const int32 count = static_cast<int32>(fAutoFill->rows.size()) + 1;
+    auto select = [&](int32 index) {
+        fAutoFill->selected = index;
+        BMessage selected(kAutoFillSelect);
+        selected.AddInt32("index", index);
+        fAutoFill->list.SendMessage(&selected);
+    };
+    switch (message.GetString("bytes", "")[0]) {
+    case B_DOWN_ARROW: select((fAutoFill->selected + 1) % count); return true;
+    case B_UP_ARROW: select(fAutoFill->selected <= 0 ? count - 1 : fAutoFill->selected - 1); return true;
+    case B_ENTER:
+        if (fAutoFill->selected >= 0) {
+            AutoFillChosen(fAutoFill->selected);
+            return true;
+        }
+        // Nothing highlighted: Return is the page's (it may send the form).
+        CloseAutoFill();
+        return false;
+    case B_ESCAPE: CloseAutoFill(); return true;
+    case B_TAB: CloseAutoFill(); return false;
+    default: return false;
+    }
+}
+
+void BrowserWindow::CloseAutoFill()
+{
+    if (!fAutoFill) return;
+    // Unknown and answered tokens are ignored: a chosen entry was answered.
+    BWebKitView::ReplyToScriptMessage(fAutoFill->token, "");
+    if (fAutoFill->list.IsValid()) fAutoFill->list.SendMessage(B_QUIT_REQUESTED);
+    // The values may hold a card number: they go now, not with the next offer.
+    for (auto& values : fAutoFill->values) std::fill(values.begin(), values.end(), '\0');
+    fAutoFill.reset();
+}
+
+void BrowserWindow::AutoFillCardChecked(const BMessage& message)
+{
+    auto* tab = FindTabByID(message.GetInt64("tab", 0));
+    if (!tab) return;
+    if (!tab->pendingAutoFill) tab->pendingAutoFill.emplace();
+    tab->pendingAutoFill->card = AutoFillCard { message.GetString("id", ""), message.GetString("name", ""),
+        message.GetString("number", ""), static_cast<int>(message.GetInt32("month", 0)), static_cast<int>(message.GetInt32("year", 0)) };
+    tab->pendingAutoFill->cardUpdate = message.GetBool("update", false);
+    RefreshNoticeBar();
+}
+
+bool BrowserWindow::AutoFillNotice(const Tab& tab)
+{
+    if (!tab.pendingAutoFill || (!tab.pendingAutoFill->address && !tab.pendingAutoFill->card)) return false;
+    const auto& pending = *tab.pendingAutoFill;
+    std::string text;
+    if (pending.address) {
+        const std::string name = AddressName(*pending.address), summary = AddressSummary(*pending.address);
+        const std::string what = name.empty() ? summary : summary.empty() ? name : name + ", " + summary;
+        text = pending.card ? "Save this address (" + what + ") and the card " + MaskedCard(*pending.card) + " for AutoFill?"
+            : "Save this address for AutoFill? " + what;
+    } else
+        text = (pending.cardUpdate ? "Update the saved card " : "Save the card ") + MaskedCard(*pending.card) + " for AutoFill?";
+    if (pending.card) text += " Summit keeps cards in the Haiku key store, without the security code.";
+    auto answer = [&](int32 which) {
+        auto* message = new BMessage(kAutoFillBarAnswer);
+        message->AddInt64("tab", tab.id);
+        message->AddInt32("which", which);
+        return message;
+    };
+    fNoticeBar->SetNotice(text, {{!pending.address && pending.cardUpdate ? "Update" : "Save", answer(0)}, {"Not Now", answer(1)}});
+    return true;
+}
+
+void BrowserWindow::AutoFillBarAnswer(const BMessage& message)
+{
+    // Without "tab", the selected one's: scripting for tests ('afba' with
+    // which=int32(N), as hey sends it).
+    auto* tab = message.HasInt64("tab") ? FindTabByID(message.GetInt64("tab", 0)) : ActiveTab();
+    if (!tab || !tab->pendingAutoFill) return;
+    auto pending = *std::exchange(tab->pendingAutoFill, std::nullopt);
+    if (message.GetInt32("which", 1) == 0 && !fPrivate) {
+        if (pending.address) {
+            pending.address->id = NewAutoFillID();
+            pending.address->added = std::time(nullptr);
+            fShared->Change([&](Profile& profile) -> uint32 {
+                if (profile.autoFillAddresses.size() >= 1000) return 0;
+                profile.autoFillAddresses.push_back(*pending.address);
+                return SharedProfile::kSettingsChanged;
+            }, BMessenger(this));
+            fStatus->SetText("The address was saved for AutoFill.");
+        }
+        if (pending.card) {
+            std::thread([window = BMessenger(this), card = *pending.card]() mutable {
+                BMessage saved(kAutoFillSaved);
+                saved.AddString("error", CardStore::Save(card).c_str());
+                window.SendMessage(&saved);
+            }).detach();
+        }
+    }
+    RefreshNoticeBar();
+}
+}
+#endif
