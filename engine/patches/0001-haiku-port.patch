@@ -13493,10 +13493,10 @@ index 0000000000000000000000000000000000000000..b6065c4fc8c51c594bde92ba41dd7146
 +
 +} // namespace WebCore
 diff --git a/Source/WebCore/css/CSSFontFaceSet.cpp b/Source/WebCore/css/CSSFontFaceSet.cpp
-index c8beb723de96daab7179cd34b3a122c185c48625..d611fe77cebe61de0a9ebe9571474058a48c9671 100644
+index c8beb723de96daab7179cd34b3a122c185c48625..3420f5876c5114106b435330d40ed354d2b8e65c 100644
 --- a/Source/WebCore/css/CSSFontFaceSet.cpp
 +++ b/Source/WebCore/css/CSSFontFaceSet.cpp
-@@ -46,6 +46,12 @@
+@@ -46,6 +46,13 @@
  
  namespace WebCore {
  
@@ -13504,17 +13504,18 @@ index c8beb723de96daab7179cd34b3a122c185c48625..d611fe77cebe61de0a9ebe9571474058
 +// In CSSFontSelector.cpp: which family the face being added or removed is for,
 +// while the observers run.
 +void summitNoteModifiedFontFamilyHaiku(const AtomString*);
++AtomString summitFontFaceFamilyNameHaiku(const CSSFontFace&);
 +#endif
 +
  CSSFontFaceSet::CSSFontFaceSet(CSSFontSelector* owningFontSelector)
      : m_owningFontSelector(owningFontSelector)
  {
-@@ -204,9 +210,16 @@ void CSSFontFaceSet::add(CSSFontFace& face)
+@@ -204,9 +211,16 @@ void CSSFontFaceSet::add(CSSFontFace& face)
  {
      ASSERT(!hasFace(face));
  
 +#if PLATFORM(HAIKU)
-+    auto addedFamily = face.family();
++    auto addedFamily = summitFontFaceFamilyNameHaiku(face);
 +    summitNoteModifiedFontFamilyHaiku(&addedFamily);
 +#endif
      m_fontModifiedObservers.forEach([] (auto& observer) {
@@ -13526,12 +13527,12 @@ index c8beb723de96daab7179cd34b3a122c185c48625..d611fe77cebe61de0a9ebe9571474058
  
      face.addClient(*this);
      m_cache.clear();
-@@ -259,9 +272,16 @@ void CSSFontFaceSet::remove(const CSSFontFace& face)
+@@ -259,9 +273,16 @@ void CSSFontFaceSet::remove(const CSSFontFace& face)
  
      m_cache.clear();
  
 +#if PLATFORM(HAIKU)
-+    auto removedFamily = face.family();
++    auto removedFamily = summitFontFaceFamilyNameHaiku(face);
 +    summitNoteModifiedFontFamilyHaiku(&removedFamily);
 +#endif
      m_fontModifiedObservers.forEach([](auto& observer) {
@@ -13544,14 +13545,15 @@ index c8beb723de96daab7179cd34b3a122c185c48625..d611fe77cebe61de0a9ebe9571474058
      if (auto family = face.familyCSSValue())
          removeFromFacesLookupTable(face, *family);
 diff --git a/Source/WebCore/css/CSSFontSelector.cpp b/Source/WebCore/css/CSSFontSelector.cpp
-index c0e79d205b34ca017d69dd11e47fc353b313e940..046589ec8194c6c9aa9cf4deabca5043aa973d9a 100644
+index c0e79d205b34ca017d69dd11e47fc353b313e940..660b4095d4a014466616ecacca3b2554977421b3 100644
 --- a/Source/WebCore/css/CSSFontSelector.cpp
 +++ b/Source/WebCore/css/CSSFontSelector.cpp
-@@ -55,11 +55,184 @@
+@@ -55,11 +55,199 @@
  #include <wtf/Ref.h>
  #include <wtf/SetForScope.h>
  #include <wtf/text/AtomString.h>
 +#if PLATFORM(HAIKU)
++#include "CSSFontFamilyNameValue.h"
 +#include "CSSSerializationContext.h"
 +#include <wtf/WeakHashMap.h>
 +#endif
@@ -13584,6 +13586,20 @@ index c0e79d205b34ca017d69dd11e47fc353b313e940..046589ec8194c6c9aa9cf4deabca5043
 +}
 +
 +static const AtomString* s_modifiedFontFamilyHaiku;
++
++// The family a face is for, as descriptions name it. CSSFontFace::family() is
++// the name serialized as CSS, which quotes any name that is not all plain
++// identifiers ("Font Awesome 6 Free", with the quotes: "6" is not one), so it
++// never equalled a description's family and loads of such faces renewed no
++// fonts: Font Awesome icons stayed invisible (drawn while the face was in its
++// block period) until something else changed their style. Null when the face
++// has no single family name, which records nothing and so renews all fonts.
++AtomString summitFontFaceFamilyNameHaiku(const CSSFontFace& face)
++{
++    if (RefPtr value = dynamicDowncast<CSSFontFamilyNameValue>(face.familyCSSValue()))
++        return value->fontFamilyName().value;
++    return nullAtom();
++}
 +
 +void summitNoteModifiedFontFamilyHaiku(const AtomString* family)
 +{
@@ -13732,7 +13748,7 @@ index c0e79d205b34ca017d69dd11e47fc353b313e940..046589ec8194c6c9aa9cf4deabca5043
  static unsigned fontSelectorId;
  
  Ref<CSSFontSelector> CSSFontSelector::create(ScriptExecutionContext& context)
-@@ -101,6 +274,13 @@ CSSFontSelector::~CSSFontSelector()
+@@ -101,6 +289,13 @@ CSSFontSelector::~CSSFontSelector()
  
      clearFonts();
  
@@ -13746,7 +13762,7 @@ index c0e79d205b34ca017d69dd11e47fc353b313e940..046589ec8194c6c9aa9cf4deabca5043
      if (CheckedPtr fontCache = FontCache::forCurrentThreadIfNotDestroyed())
          fontCache->removeClient(*this);
  }
-@@ -133,8 +313,17 @@ void CSSFontSelector::emptyCaches()
+@@ -133,8 +328,17 @@ void CSSFontSelector::emptyCaches()
  void CSSFontSelector::buildStarted()
  {
      m_buildIsUnderway = true;
@@ -13764,7 +13780,7 @@ index c0e79d205b34ca017d69dd11e47fc353b313e940..046589ec8194c6c9aa9cf4deabca5043
  
      ASSERT(m_cssConnectionsPossiblyToRemove.isEmpty());
      ASSERT(m_cssConnectionsEncounteredDuringBuild.isEmpty());
-@@ -155,12 +344,32 @@ void CSSFontSelector::buildCompleted()
+@@ -155,12 +359,32 @@ void CSSFontSelector::buildCompleted()
  
      m_buildIsUnderway = false;
  
@@ -13798,7 +13814,7 @@ index c0e79d205b34ca017d69dd11e47fc353b313e940..046589ec8194c6c9aa9cf4deabca5043
      }
  
      for (auto& item : m_stagingArea)
-@@ -168,6 +377,18 @@ void CSSFontSelector::buildCompleted()
+@@ -168,6 +392,18 @@ void CSSFontSelector::buildCompleted()
      m_cssConnectionsEncounteredDuringBuild.clear();
      m_stagingArea.clear();
      m_cssConnectionsPossiblyToRemove.clear();
@@ -13817,7 +13833,7 @@ index c0e79d205b34ca017d69dd11e47fc353b313e940..046589ec8194c6c9aa9cf4deabca5043
  }
  
  void CSSFontSelector::addFontFaceRule(StyleRuleFontFace& fontFaceRule, bool isInitiatingElementInUserAgentShadowTree)
-@@ -198,8 +419,36 @@ void CSSFontSelector::addFontFaceRule(StyleRuleFontFace& fontFaceRule, bool isIn
+@@ -198,8 +434,36 @@ void CSSFontSelector::addFontFaceRule(StyleRuleFontFace& fontFaceRule, bool isIn
      if (!srcList->length())
          return;
  
@@ -13854,7 +13870,7 @@ index c0e79d205b34ca017d69dd11e47fc353b313e940..046589ec8194c6c9aa9cf4deabca5043
  
      fontFace->setFamily(*fontFamily);
      if (fontStyle)
-@@ -313,15 +562,48 @@ void CSSFontSelector::opportunisticallyStartFontDataURLLoading(const FontCascade
+@@ -313,15 +577,48 @@ void CSSFontSelector::opportunisticallyStartFontDataURLLoading(const FontCascade
          face->opportunisticallyStartFontDataURLLoading(trustedType);
  }
  
@@ -13884,7 +13900,7 @@ index c0e79d205b34ca017d69dd11e47fc353b313e940..046589ec8194c6c9aa9cf4deabca5043
 +void CSSFontSelector::fontLoaded(CSSFontFace& face)
 +{
 +#if PLATFORM(HAIKU)
-+    recordFamilyVersionHaiku(m_context.get(), m_uniqueId, m_version + 1, face.family(), "load"_s);
++    recordFamilyVersionHaiku(m_context.get(), m_uniqueId, m_version + 1, summitFontFaceFamilyNameHaiku(face), "load"_s);
 +#else
 +    UNUSED_PARAM(face);
 +#endif
