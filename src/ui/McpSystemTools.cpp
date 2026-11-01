@@ -201,7 +201,11 @@ Json SystemMemory()
     if (get_system_info(&system) != B_OK) return Json::object();
     return {{"totalMiB", MiB(uint64(system.max_pages) * B_PAGE_SIZE)}, {"usedMiB", MiB(uint64(system.used_pages) * B_PAGE_SIZE)},
         {"cachedMiB", MiB(uint64(system.cached_pages) * B_PAGE_SIZE)}, {"blockCacheMiB", MiB(uint64(system.block_cache_pages) * B_PAGE_SIZE)},
-        {"neededMiB", MiB(system.needed_memory)}, {"freeMiB", MiB(system.free_memory)},
+        {"neededMiB", MiB(system.needed_memory)},
+        // freeMiB is the kernel's free_memory, which counts the swap file;
+        // availableMiB is what the RAM has left (free and file cache pages).
+        {"freeMiB", MiB(system.free_memory)},
+        {"availableMiB", MiB(uint64(system.max_pages - std::min(system.used_pages, system.max_pages)) * B_PAGE_SIZE)},
         {"swapTotalMiB", MiB(uint64(system.max_swap_pages) * B_PAGE_SIZE)}, {"swapFreeMiB", MiB(uint64(system.free_swap_pages) * B_PAGE_SIZE)},
         {"pageFaults", system.page_faults}, {"usedThreads", system.used_threads}, {"usedTeams", system.used_teams},
         {"usedSemaphores", system.used_sems}, {"usedPorts", system.used_ports}};

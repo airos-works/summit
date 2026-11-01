@@ -78,7 +78,10 @@ Some ways to use them:
   `set_environment SUMMIT_MEDIA_PLAYBACK_TRACE=1` or `SUMMIT_MSE_TRACE=1`,
   `restart_process` and `logs`.
 - **Memory grows.** `processes`, `memory` with `all=true`, `engine_report`
-  topic memory, `resource_usage` with `cpu=false`, `heap` (and
+  topic memory (`memory.mimalloc`: what mimalloc has committed, the bytes in
+  use, the pages' capacity, abandoned pages, by block size; compare with
+  `javaScriptHeap.capacityMiB`), `system.availableMiB` (RAM left; `freeMiB`
+  counts swap), `resource_usage` with `cpu=false`, `heap` (and
   `heap action=gc`, then again), `memory_action`.
 - **CPU is busy.** `cpu` (which team), `threads` (which thread), `profile`
   (which functions, self and inclusive).

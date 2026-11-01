@@ -189669,16 +189669,17 @@ index 0000000000000000000000000000000000000000..21f278735563ccf7fba622283107cf94
 +
 +} // namespace WebKit
 diff --git a/Source/WebKit/WebProcess/WebProcess.cpp b/Source/WebKit/WebProcess/WebProcess.cpp
-index 413f8bc09ce0a2d3591b203f12addc32584b9f6e..b472684795bce3f7c6e8e93a1e8f358a27541c92 100644
+index 413f8bc09ce0a2d3591b203f12addc32584b9f6e..3ee3e5bd885d2fb40a92e58e8f4244953e21ad1c 100644
 --- a/Source/WebKit/WebProcess/WebProcess.cpp
 +++ b/Source/WebKit/WebProcess/WebProcess.cpp
-@@ -300,6 +300,36 @@ static const Seconds nonVisibleProcessEarlyMemoryCleanupDelay { 10_s };
+@@ -300,6 +300,37 @@ static const Seconds nonVisibleProcessEarlyMemoryCleanupDelay { 10_s };
  static const Seconds nonVisibleProcessMemoryCleanupDelay { 120_s };
  #endif
  
 +
 +#if OS(HAIKU)
 +#include <WebCore/ContentSecurityPolicy.h>
++#include <wtf/haiku/CurrentProcessMemoryStatus.h>
 +#include <wtf/haiku/ProcessPriorityHaiku.h>
 +#if ENABLE(MEDIA_STREAM)
 +#include <WebCore/HaikuCaptureNode.h>
@@ -189709,7 +189710,7 @@ index 413f8bc09ce0a2d3591b203f12addc32584b9f6e..b472684795bce3f7c6e8e93a1e8f358a
  namespace WebKit {
  using namespace WebCore;
  
-@@ -308,6 +338,11 @@ WTF_MAKE_TZONE_ALLOCATED_IMPL(WebProcess);
+@@ -308,10 +339,93 @@ WTF_MAKE_TZONE_ALLOCATED_IMPL(WebProcess);
  #if !PLATFORM(GTK) && !PLATFORM(WPE)
  [[noreturn]] static void callExit(IPC::Connection*)
  {
@@ -189721,7 +189722,89 @@ index 413f8bc09ce0a2d3591b203f12addc32584b9f6e..b472684795bce3f7c6e8e93a1e8f358a
      terminateProcess(EXIT_SUCCESS);
  }
  #endif
-@@ -397,7 +432,7 @@ WebProcess::WebProcess()
+ 
++#if OS(HAIKU)
++// Hidden tabs stay in their window on Haiku (the browser's card layout only
++// hides their views), so pageWillLeaveWindow() and the cleanup WebKit gives a
++// process with nothing on screen never ran for them. A process none of whose
++// pages has been visible for two minutes now releases memory as a suspended
++// one does (WebProcess::releaseMemory: a full collection, JIT code, caches,
++// every thread's free malloc pages), and again every ten minutes while it
++// stays hidden; not while a page plays sound or captures.
++// SUMMIT_HIDDEN_PROCESS_RELEASE_S sets the first delay (0 turns this off);
++// SUMMIT_HIDDEN_PROCESS_TRACE=1 logs each release.
++static void hiddenProcessReleaseFiredHaiku();
++
++static RunLoop::Timer& hiddenProcessReleaseTimerHaiku()
++{
++    static NeverDestroyed<RunLoop::Timer> timer(RunLoop::mainSingleton(), "WebProcess::HiddenProcessReleaseHaiku"_s, hiddenProcessReleaseFiredHaiku);
++    return timer;
++}
++
++static Seconds hiddenProcessReleaseDelayHaiku()
++{
++    static const Seconds delay = [] {
++        const char* value = getenv("SUMMIT_HIDDEN_PROCESS_RELEASE_S");
++        return Seconds(value && *value ? std::max(0.0, atof(value)) : 120.0);
++    }();
++    return delay;
++}
++
++static void updateHiddenProcessReleaseHaiku(bool hidden)
++{
++    if (!hiddenProcessReleaseDelayHaiku())
++        return;
++    auto& timer = hiddenProcessReleaseTimerHaiku();
++    if (!hidden)
++        timer.stop();
++    else if (!timer.isActive())
++        timer.startOneShot(hiddenProcessReleaseDelayHaiku());
++}
++
++static void hiddenProcessReleaseFiredHaiku()
++{
++    bool hasPage = false;
++    bool shown = false;
++    bool busy = false;
++    WebCore::Page::forEachPage([&](WebCore::Page& page) {
++        RefPtr webPage = WebPage::fromCorePage(page);
++        if (!webPage)
++            return;
++        hasPage = true;
++        shown = shown || page.isVisible();
++        // Playing sound or capturing (music, a call): try again later.
++        busy = busy || webPage->activityState().containsAny({ WebCore::ActivityState::IsAudible, WebCore::ActivityState::IsCapturingMedia });
++    });
++    if (!hasPage || shown)
++        return;
++    if (busy) {
++        hiddenProcessReleaseTimerHaiku().startOneShot(600_s);
++        return;
++    }
++    static const bool trace = [] {
++        const char* value = getenv("SUMMIT_HIDDEN_PROCESS_TRACE");
++        return value && !strcmp(value, "1");
++    }();
++    ProcessMemoryStatus before;
++    if (trace)
++        currentProcessMemoryStatus(before);
++    auto started = MonotonicTime::now();
++    WebProcess::singleton().releaseMemory([trace, before, started] {
++        if (!trace)
++            return;
++        ProcessMemoryStatus after;
++        currentProcessMemoryStatus(after);
++        fprintf(stderr, "Summit hidden process %d: released memory in %.0f ms, resident %.1f -> %.1f MiB\n", getpid(),
++            (MonotonicTime::now() - started).milliseconds(), before.resident / 1048576.0, after.resident / 1048576.0);
++    });
++    hiddenProcessReleaseTimerHaiku().startOneShot(600_s);
++}
++#endif
++
+ #if PLATFORM(GTK) || PLATFORM(WPE)
+ static void crashAfter10Seconds(IPC::Connection*)
+ {
+@@ -397,7 +511,7 @@ WebProcess::WebProcess()
      addSupplement<WebMediaKeyStorageManager>();
  #endif
  
@@ -189730,7 +189813,20 @@ index 413f8bc09ce0a2d3591b203f12addc32584b9f6e..b472684795bce3f7c6e8e93a1e8f358a
      addSupplementWithoutRefCountedCheck<UserMediaCaptureManager>();
  #endif
  
-@@ -732,7 +767,8 @@ void WebProcess::initializeWebProcess(WebProcessCreationParameters&& parameters,
+@@ -530,7 +644,12 @@ void WebProcess::initializeWebProcess(WebProcessCreationParameters&& parameters,
+             // If this process contains only non-visible content (e.g. only contains background
+             // tabs), then treat the memory warning as if it was a critical warning to maximize the
+             // amount of memory released for foreground apps to use.
++            // (On Haiku hidden tabs stay in their windows: count what is shown.)
++#if OS(HAIKU)
++            if (!hasVisibleWebPage() && critical == Critical::No)
++#else
+             if (m_pagesInWindows.isEmpty() && critical == Critical::No)
++#endif
+                 critical = Critical::Yes;
+ 
+             if (JSC::Options::dumpHeapOnLowMemory()) [[unlikely]]
+@@ -732,7 +851,8 @@ void WebProcess::initializeWebProcess(WebProcessCreationParameters&& parameters,
  #define WEBKIT_APPLY_JSC_OPTION_FROM_SHARED_PREFERENCE(jscOption, preferenceField) JSC::Options::jscOption() = jscOptions.preferenceField;
          FOR_EACH_JSC_OPTION_SHARED_PREFERENCE(WEBKIT_APPLY_JSC_OPTION_FROM_SHARED_PREFERENCE)
  #undef WEBKIT_APPLY_JSC_OPTION_FROM_SHARED_PREFERENCE
@@ -189740,25 +189836,27 @@ index 413f8bc09ce0a2d3591b203f12addc32584b9f6e..b472684795bce3f7c6e8e93a1e8f358a
          if (parameters.crossOriginMode == WebCore::CrossOriginMode::Isolated)
              JSC::Options::useSharedArrayBuffer() = true;
  #endif
-@@ -1112,6 +1148,8 @@ void WebProcess::createWebPage(PageIdentifier pageID, WebPageCreationParameters&
+@@ -1112,6 +1232,9 @@ void WebProcess::createWebPage(PageIdentifier pageID, WebPageCreationParameters&
  
  #if OS(LINUX)
          HighPriorityThreads::singleton().setEnabled(hasVisibleWebPage());
 +#elif OS(HAIKU)
 +        updateProcessPriorityHaiku(m_pageMap);
++        updateHiddenProcessReleaseHaiku(!hasVisibleWebPage());
  #endif
      } else
          page->reinitializeWebPage(WTF::move(parameters));
-@@ -1145,6 +1183,8 @@ void WebProcess::removeWebPage(PageIdentifier pageID)
+@@ -1145,6 +1268,9 @@ void WebProcess::removeWebPage(PageIdentifier pageID)
  
  #if OS(LINUX)
      HighPriorityThreads::singleton().setEnabled(hasVisibleWebPage());
 +#elif OS(HAIKU)
 +    updateProcessPriorityHaiku(m_pageMap);
++    updateHiddenProcessReleaseHaiku(!m_pageMap.isEmpty() && !hasVisibleWebPage());
  #endif
  }
  
-@@ -1861,6 +1901,11 @@ void WebProcess::pageActivityStateDidChange(PageIdentifier, OptionSet<WebCore::A
+@@ -1861,6 +1987,13 @@ void WebProcess::pageActivityStateDidChange(PageIdentifier, OptionSet<WebCore::A
          HighPriorityThreads::singleton().setEnabled(hasVisibleWebPage());
  #endif
      }
@@ -189766,6 +189864,8 @@ index 413f8bc09ce0a2d3591b203f12addc32584b9f6e..b472684795bce3f7c6e8e93a1e8f358a
 +    // A hidden tab that starts playing sound gets its priority back too.
 +    if (changed.containsAny({ WebCore::ActivityState::IsVisible, WebCore::ActivityState::IsAudible, WebCore::ActivityState::IsCapturingMedia }))
 +        updateProcessPriorityHaiku(m_pageMap);
++    if (changed & WebCore::ActivityState::IsVisible)
++        updateHiddenProcessReleaseHaiku(!hasVisibleWebPage());
 +#endif
  }
  
@@ -189806,10 +189906,10 @@ index 0000000000000000000000000000000000000000..6549d7f5c9eac54d993817a051d3965d
 +resource app_flags B_MULTIPLE_LAUNCH | B_BACKGROUND_APP;
 diff --git a/Source/WebKit/WebProcess/haiku/WebProcessDiagnosticsHaiku.cpp b/Source/WebKit/WebProcess/haiku/WebProcessDiagnosticsHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..769f19d229abd191145dd9e7cf3e64e6319f05f4
+index 0000000000000000000000000000000000000000..5a17b6812a01fdb20c4239c36035bc0e6573677f
 --- /dev/null
 +++ b/Source/WebKit/WebProcess/haiku/WebProcessDiagnosticsHaiku.cpp
-@@ -0,0 +1,222 @@
+@@ -0,0 +1,251 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +// What a web process tells the browser's debugging tools about itself
@@ -189839,6 +189939,11 @@ index 0000000000000000000000000000000000000000..769f19d229abd191145dd9e7cf3e64e6
 +#include <WebCore/TimeRanges.h>
 +#include <wtf/MemoryPressureHandler.h>
 +#include <wtf/text/MakeString.h>
++
++#if USE(MIMALLOC)
++// bmalloc.cpp (Haiku): what mimalloc holds; see there for the values.
++extern "C" size_t summitMimallocUsageHaiku(size_t* values, size_t count);
++#endif
 +
 +namespace WebKit {
 +using namespace WebCore;
@@ -189916,6 +190021,30 @@ index 0000000000000000000000000000000000000000..769f19d229abd191145dd9e7cf3e64e6
 +    report->setInteger("fonts"_s, static_cast<int>(fonts.fontCount()));
 +    report->setInteger("inactiveFonts"_s, static_cast<int>(fonts.inactiveFontCount()));
 +    report->setInteger("documents"_s, Document::allDocumentsMap().size());
++#if USE(MIMALLOC)
++    {
++        size_t values[14] { };
++        if (summitMimallocUsageHaiku(values, 14) == 14) {
++            auto mimalloc = JSON::Object::create();
++            mimalloc->setDouble("committedMiB"_s, megabytes(values[0]));
++            mimalloc->setDouble("inUseMiB"_s, megabytes(values[1]));
++            mimalloc->setDouble("pagesMiB"_s, megabytes(values[2]));
++            mimalloc->setInteger("pages"_s, static_cast<int>(values[3]));
++            mimalloc->setInteger("abandonedPages"_s, static_cast<int>(values[4]));
++            mimalloc->setDouble("abandonedInUseMiB"_s, megabytes(values[5]));
++            static constexpr ASCIILiteral classes[] = { "upTo1KiB"_s, "upTo16KiB"_s, "upTo512KiB"_s, "larger"_s };
++            auto byBlockSize = JSON::Object::create();
++            for (unsigned i = 0; i < 4; ++i) {
++                auto entry = JSON::Object::create();
++                entry->setDouble("inUseMiB"_s, megabytes(values[6 + i * 2]));
++                entry->setDouble("pagesMiB"_s, megabytes(values[7 + i * 2]));
++                byBlockSize->setObject(classes[i], WTF::move(entry));
++            }
++            mimalloc->setObject("byBlockSize"_s, WTF::move(byBlockSize));
++            report->setObject("mimalloc"_s, WTF::move(mimalloc));
++        }
++    }
++#endif
 +    auto& pressure = MemoryPressureHandler::singleton();
 +    report->setString("memoryPressure"_s, pressure.isUnderMemoryPressure() ? "critical"_s : pressure.isUnderMemoryWarning() ? "warning"_s : "normal"_s);
 +    return report;
@@ -206042,6 +206171,69 @@ index 036636ceec155bc89a6fbba9f3f22169faa01186..7e1c0c03d6e3733cf422fec239136d5a
  #else
      SYSCALL(madvise(p, vmSize, MADV_NORMAL));
  #if BOS(LINUX)
+diff --git a/Source/bmalloc/bmalloc/bmalloc.cpp b/Source/bmalloc/bmalloc/bmalloc.cpp
+index e94c8915098a5caa9582fb0c6bb0e5ead4845199..795d6312783ee1b5c9679347737b6e7f3d39c1b6 100644
+--- a/Source/bmalloc/bmalloc/bmalloc.cpp
++++ b/Source/bmalloc/bmalloc/bmalloc.cpp
+@@ -243,3 +243,58 @@ void forceEnablePGM(uint16_t guardMallocRate)
+ 
+ } } // namespace bmalloc::api
+ 
++
++#if BUSE(MIMALLOC) && defined(__HAIKU__)
++// Haiku: what mimalloc holds, for the browser's diagnostics
++// (WebProcessDiagnosticsHaiku.cpp declares it; no header, so that adding it
++// does not rebuild everything). Fills up to count values, in bytes unless
++// noted: 0 committed by mimalloc (OS level), 1 bytes in blocks in use,
++// 2 bytes the pages hold (their capacity), 3 pages, 4 abandoned pages (count),
++// 5 bytes in use in abandoned pages, then pairs (in use, page capacity) for
++// blocks of up to 1 KiB, up to 16 KiB, up to 512 KiB and larger (6-13).
++// Reading the pages races with other threads' allocations, so the numbers
++// are approximate.
++namespace {
++struct MimallocUsageHaiku {
++    size_t values[14];
++};
++bool visitMimallocAreaHaiku(const mi_heap_t*, const mi_heap_area_t* area, void*, size_t, void* argument)
++{
++    if (!area)
++        return true;
++    auto& usage = *static_cast<MimallocUsageHaiku*>(argument);
++    const size_t used = area->used * area->full_block_size;
++    usage.values[1] += used;
++    usage.values[2] += area->committed;
++    usage.values[3] += 1;
++    const size_t size = area->block_size;
++    const unsigned bucket = size <= 1024 ? 0 : size <= 16384 ? 1 : size <= 524288 ? 2 : 3;
++    usage.values[6 + bucket * 2] += used;
++    usage.values[7 + bucket * 2] += area->committed;
++    return true;
++}
++bool visitAbandonedMimallocAreaHaiku(const mi_heap_t*, const mi_heap_area_t* area, void*, size_t, void* argument)
++{
++    if (!area)
++        return true;
++    auto& usage = *static_cast<MimallocUsageHaiku*>(argument);
++    usage.values[4] += 1;
++    usage.values[5] += area->used * area->full_block_size;
++    return true;
++}
++}
++
++extern "C" __attribute__((visibility("default"))) size_t summitMimallocUsageHaiku(size_t* values, size_t count)
++{
++    MimallocUsageHaiku usage { };
++    size_t elapsed, user, system, rss, peakRSS, commit = 0, peakCommit, faults;
++    mi_process_info(&elapsed, &user, &system, &rss, &peakRSS, &commit, &peakCommit, &faults);
++    usage.values[0] = commit;
++    mi_heap_visit_blocks(mi_heap_main(), false, visitMimallocAreaHaiku, &usage);
++    mi_heap_visit_abandoned_blocks(mi_heap_main(), false, visitAbandonedMimallocAreaHaiku, &usage);
++    const size_t filled = count < 14 ? count : 14;
++    for (size_t i = 0; i < filled; ++i)
++        values[i] = usage.values[i];
++    return filled;
++}
++#endif
 diff --git a/Source/bmalloc/libpas/src/libpas/pas_lock.h b/Source/bmalloc/libpas/src/libpas/pas_lock.h
 index 5499c71f949145c7744caa18336ecba6c62b10d2..3cefee25a6bda88418d1bbedeea4888ba3a0d318 100644
 --- a/Source/bmalloc/libpas/src/libpas/pas_lock.h
@@ -206202,7 +206394,7 @@ index 3161450fdfdcf8229a8d3aa0eb6cd0604c5ac3e1..b1f97596bc3ef001413aa4f489bd3f69
      _mi_tls_keys_init();
      if (_mi_theap_default_key!=0) pthread_setspecific(_mi_theap_default_key, theap);
 diff --git a/Source/bmalloc/mimalloc/mimalloc/src/prim/unix/prim.c b/Source/bmalloc/mimalloc/mimalloc/src/prim/unix/prim.c
-index ba8dfb1f87d7e2a7b90fe9061793f703c6ccd5b3..163707e713185ebbac1801e7c1e58780d0fee231 100644
+index ba8dfb1f87d7e2a7b90fe9061793f703c6ccd5b3..dcb3e645b8f7c9093ab7e68c3422b9bad30760d9 100644
 --- a/Source/bmalloc/mimalloc/mimalloc/src/prim/unix/prim.c
 +++ b/Source/bmalloc/mimalloc/mimalloc/src/prim/unix/prim.c
 @@ -496,6 +496,10 @@ int _mi_prim_decommit(void* start, size_t size, bool* needs_recommit) {
@@ -206216,6 +206408,15 @@ index ba8dfb1f87d7e2a7b90fe9061793f703c6ccd5b3..163707e713185ebbac1801e7c1e58780
    #else
      // decommit: use MADV_DONTNEED as it decreases rss immediately (unlike MADV_FREE)
      err = unix_madvise(start, size, MADV_DONTNEED);
+@@ -751,7 +755,7 @@ void _mi_prim_process_info(mi_process_info_t* pinfo)
+   // get these stats per process
+   thread_info tid;
+   area_info mem;
+-  ssize_t c;
++  ssize_t c = 0;  // the area cookie starts at 0 (Summit: was uninitialized)
+   get_thread_info(find_thread(0), &tid);
+   while (get_next_area_info(tid.team, &c, &mem) == B_OK) {
+     pinfo->peak_rss += mem.ram_size;
 diff --git a/Source/cmake/OptionsCommon.cmake b/Source/cmake/OptionsCommon.cmake
 index 359c3765d3a41ba1c6cfdb6b44fa292cc7811a0d..18a4d1524bbb7a68b2bec420d013fd89d65eb1de 100644
 --- a/Source/cmake/OptionsCommon.cmake

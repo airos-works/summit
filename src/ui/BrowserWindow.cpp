@@ -1763,7 +1763,7 @@ void BrowserWindow::UnloadTabsIfMemoryIsLow()
     // Low: less than a tenth of the memory, and at least 512 MiB, is left.
     // SUMMIT_UNLOAD_BELOW_MIB and SUMMIT_UNLOAD_AFTER_S change the limit and
     // how long a tab must have been behind (default five minutes); 0 for
-    // either turns this off.
+    // either turns this off. Below half the limit, a minute behind will do.
     auto setting = [](const char* name, int64 fallback) {
         const char* value = std::getenv(name);
         return value && *value ? std::strtoll(value, nullptr, 10) : fallback;
@@ -1771,9 +1771,15 @@ void BrowserWindow::UnloadTabsIfMemoryIsLow()
     system_info info;
     if (get_system_info(&info) != B_OK) return;
     const int64 total = static_cast<int64>(info.max_pages) * B_PAGE_SIZE;
+    // What is left of the RAM: free pages and the file cache's, which the
+    // kernel gives up when something needs them. Not info.free_memory: that
+    // counts the swap file too, so with swap on it stayed far above the
+    // limit while the RAM filled and the machine paged.
+    const int64 available = static_cast<int64>(info.max_pages - std::min(info.used_pages, info.max_pages)) * B_PAGE_SIZE;
     const int64 below = setting("SUMMIT_UNLOAD_BELOW_MIB", std::max<int64>(512, total / 10 / (1024 * 1024))) * 1024 * 1024;
-    const int64 after = setting("SUMMIT_UNLOAD_AFTER_S", 300) * 1000000;
-    if (below <= 0 || after <= 0 || static_cast<int64>(info.free_memory) >= below) return;
+    int64 after = setting("SUMMIT_UNLOAD_AFTER_S", 300) * 1000000;
+    if (below <= 0 || after <= 0 || available >= below) return;
+    if (available < below / 2) after = std::min<int64>(after, 60 * 1000000);
     // One tab a check, the longest unseen first, as long as memory stays low.
     std::vector<Tab*> candidates;
     for (auto& tab : fTabs)

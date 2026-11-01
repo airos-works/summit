@@ -1,5 +1,43 @@
 # Summit performance: Speedometer 3.1 baseline, where the time goes, stress test
 
+## 2 November 2026: memory with 8-10 tabs on the 16 GB laptop (#163, #164, #165)
+
+The owner's laptop (Ryzen AI 5 340, Radeon 840M, 16 GB) slowed down with 8-10
+tabs. With 7 tabs (5 Jira issues, Proton Mail, YouTube) and three extensions
+it had 1.3 GB of RAM free: Summit's processes held about 7.3 GB resident
+(the 82 MiB "direct present back buffer" each web process maps is app_server's
+screen buffer, shared, counted once here) and the GPU about 2.7 GB of GTT,
+which on this APU is system RAM. Each Jira tab's process held 700-1,270 MiB,
+almost all of it mimalloc/JavaScriptCore memory, while its live JavaScript
+heap was 104-127 MiB.
+
+- **Low-memory unloading never ran (#163).** It compared
+  `system_info.free_memory`, which on Haiku counts the swap file, against
+  the limit: 14.3 GB "free" while the RAM was 92% used. It now uses
+  `max_pages - used_pages` (free plus file cache) and lets a tab go after a
+  minute in the background once less than half the limit is left. Checked on
+  the X399 with a forced limit: the background tabs went one per check, the
+  home page and the shown tab stayed.
+- **Hidden processes never released memory (#164).** WebKit's cleanup for a
+  process with nothing on screen keys on pages leaving their window, which
+  Summit's hidden tabs never do. Now a process none of whose pages has been
+  visible for 2 minutes runs `WebProcess::releaseMemory()` (as a suspended
+  process does) and repeats it every 10 minutes while hidden; the low-memory
+  handler treats hidden-only processes as critical, as upstream intends.
+  X399, 8 sites, 60 s delay: the 8 hidden processes gave back 362 MiB
+  (Reddit 535 -> 411, CNN 747 -> 645, Guardian 601 -> 551 MiB) in 9-269 ms
+  each; switching back repainted at once (60 fps scrolling).
+  `SUMMIT_HIDDEN_PROCESS_RELEASE_S` (120; 0 off), `SUMMIT_HIDDEN_PROCESS_TRACE=1`.
+- **What fills a page's process.** `engine_report` now has
+  `memory.mimalloc`. CNN on the X399: 524 MiB committed by mimalloc, 376 MiB
+  in use, of which the JavaScript heap is 102 MiB: most of a page is live
+  DOM, style, layout, script source and strings, and about 30% is free
+  space in partly used mimalloc pages. `MIMALLOC_PAGE_RECLAIM_ON_FREE=1` and
+  `MIMALLOC_PURGE_DELAY=0` did no better than the run-to-run spread of the
+  same 8 sites (3.5-4.2 GiB), so mimalloc is left as it is.
+- **Idle network processes (#165, open).** Four network processes on the
+  laptop started together and never ran a request (55 MiB, 44 threads).
+
 ## 31 October 2026: the Cubie A7S (#138): YouTube's re-filtered buttons, click to playback, presents, GPU canvases, AVIF, Clear Key
 
 Cubie A7S, air/OS hrev60207+2114 (image of 28 October; Mesa 26.2.4 with
