@@ -6825,6 +6825,43 @@ index 5b9626762cfaab44c439d060e2c5e1b0931b8032..0e461e222cf6ec0f3ef34648ad3a5996
      });
      return visibleTypes->contains(type);
  }
+diff --git a/Source/WebCore/Modules/streams/ReadableStreamDefaultReader.cpp b/Source/WebCore/Modules/streams/ReadableStreamDefaultReader.cpp
+index 25851ad8c4fa3e72ef708266fe0a2b68bf22f095..ae976c94aa2a37d64d4cee8be72580a94b9207af 100644
+--- a/Source/WebCore/Modules/streams/ReadableStreamDefaultReader.cpp
++++ b/Source/WebCore/Modules/streams/ReadableStreamDefaultReader.cpp
+@@ -170,15 +170,26 @@ ExceptionOr<void> ReadableStreamDefaultReader::releaseLock(JSDOMGlobalObject& gl
+         Locker locker { m_streamLock };
+         if (!m_stream)
+             return { };
++    }
+ 
+-        if (RefPtr internalReader = this->internalDefaultReader()) {
+-            auto result = internalReader->releaseLock();
+-            if (!result.hasException()) {
+-                RefPtr stream = std::exchange(m_stream, nullptr);
+-                stream->setDefaultReader(nullptr);
++    // Summit: m_streamLock must not be held while internalReader->releaseLock() runs JavaScript.
++    // That JavaScript allocates (TypeErrors for the closed promise and pending reads), so a garbage
++    // collection can start inside it, and marking this reader takes m_streamLock: on a heap helper
++    // thread the collection waits for, or on this thread (WTF::Lock is not recursive). Either way the
++    // process deadlocks (https://bugs.webkit.org/show_bug.cgi?id=326046, a regression from 314030@main).
++    // m_stream still changes only under the lock, so that commit's use-after-free fix stays intact.
++    if (RefPtr internalReader = this->internalDefaultReader()) {
++        auto result = internalReader->releaseLock();
++        if (!result.hasException()) {
++            RefPtr<ReadableStream> stream;
++            {
++                Locker locker { m_streamLock };
++                stream = std::exchange(m_stream, nullptr);
+             }
+-            return result;
++            if (stream)
++                stream->setDefaultReader(nullptr);
+         }
++        return result;
+     }
+ 
+     genericRelease(globalObject);
 diff --git a/Source/WebCore/Modules/webaudio/MediaStreamAudioSource.cpp b/Source/WebCore/Modules/webaudio/MediaStreamAudioSource.cpp
 index 75c1c3a44c13404d144e2e1ef184529b2ed77939..f6c8ec9615c4545e846af0da40318ea94dbef5ef 100644
 --- a/Source/WebCore/Modules/webaudio/MediaStreamAudioSource.cpp
