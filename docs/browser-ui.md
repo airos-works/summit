@@ -247,3 +247,44 @@ The engine sends `B_WEBKIT_SHARE_REQUESTED` (title, text, url, and each file's
 name, type and bytes) to views that asked for it
 (`BWebKitView::SetShareRequests`); the host answers with
 `BWebKitView::AnswerShareRequest`. Other embedders get AbortError at once.
+
+## Reading List (#156)
+
+Pages to read later, as in Safari, each with an offline copy.
+
+- **Adding.** Bookmarks › Add to Reading List (Command-Option-D: Safari's
+  Command-Shift-D is Add to Bookmarks Bar here) and the page menu's Add to
+  Reading List add the current page; a link's menu has Add Link to Reading
+  List. Only http and https pages; not from private windows. Adding a page
+  again moves it to the top, unread.
+- **Viewing.** Bookmarks › Reading List lists the unread pages (30, then
+  "All N Unread Pages…") and Show Reading List opens `summit:reading-list`, a
+  built-in page like History and Bookmarks: Unread and Read sections, a
+  search field, and per item Mark as Read / Mark as Unread, Saved Copy and
+  Remove, plus Clear Read Items. Its links are `summit-reading-list:` requests
+  carrying the run's secret, as the Bookmarks page's are.
+- **Read state.** Opening an item from the page or the menu marks it read.
+- **Offline copy.** A page added from its tab is saved at once as a web
+  archive (`GetPageContents(B_WEBKIT_PAGE_ARCHIVE)`, as Save Page As) in the
+  profile's `ReadingList/<id>.mhtml` (a page still loading is saved when it
+  has loaded). A link added from its menu is not fetched in the background:
+  its copy is saved the first time it is opened from the Reading List. An
+  item opened while the computer has no network shows its copy; and any load
+  of an item's page that fails (no network, the server down or refusing, a
+  host not found; not certificate errors) shows the copy instead of the
+  error page. A notice above a copy says when it was saved, with Load Live
+  Page and Show Reading List.
+
+The list is `readingList` in profile.json, beside the bookmarks: id (hex,
+also the copy's name), url, title, and added, read and archived times
+(seconds; 0 for unread or no copy). Removing an item deletes its copy. The
+windows hear of changes through `SharedProfile::kReadingListChanged`. Code:
+`src/core/ReadingList.{h,cpp}` (the list), `RenderReadingListPage` and
+`ParseReadingListPageLink` in `src/core/InternalPages.cpp`, and
+`src/ui/BrowserWindowReadingList.cpp`.
+
+Not done: link items are not archived in the background (that needs a page
+loaded out of sight); copies are not refreshed when a page changes (adding
+it again saves a new one); SVG images in a copy stay pending when opened
+offline (the engine's archive loading, the same archives Save Page As
+writes; PNG images and style sheets load from the archive).

@@ -2,6 +2,7 @@
 #include "Bookmarks.h"
 #include "PageRecord.h"
 #include "Protocol.h"
+#include "ReadingList.h"
 #include <cstdint>
 #include <ctime>
 #include <filesystem>
@@ -79,6 +80,9 @@ struct Profile {
     // flat list older builds read (they ignore the folders).
     Bookmarks bookmarks;
     std::vector<PageRecord> history;
+    // Reading List (#156): pages to read later, newest first ("readingList"
+    // beside the bookmarks in profile.json; offline copies in ReadingList/).
+    std::vector<ReadingListItem> readingList;
     // Where the Home button goes; empty means the built-in start page.
     std::string homeURL;
     bool showBookmarksBar = true;

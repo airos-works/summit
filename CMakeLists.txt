@@ -11,7 +11,7 @@ add_library(summit_core src/core/Address.cpp src/core/Protocol.cpp src/core/Hist
     src/core/ExtensionShortcut.cpp src/core/ExtensionUpdate.cpp src/core/UserAgent.cpp
     src/core/ExtensionPackage.cpp src/core/StoreOffer.cpp src/core/DownloadText.cpp src/core/DownloadHistory.cpp src/core/Favicon.cpp src/core/InternalPages.cpp src/core/Zoom.cpp src/core/Suggest.cpp src/core/DevTools.cpp src/core/DevToolsFormat.cpp src/core/DevToolsElements.cpp src/core/PageSource.cpp
     src/core/Mcp.cpp src/core/McpHttp.cpp src/core/McpInspector.cpp src/core/WebAppManifest.cpp src/core/UpdateCheck.cpp src/core/Spelling.cpp src/core/PageLanguage.cpp src/core/TranslationModels.cpp src/core/LoadError.cpp src/core/ProfileLock.cpp src/core/BrowserProfiles.cpp
-    src/core/SafeBrowsing.cpp)
+    src/core/SafeBrowsing.cpp src/core/ReadingList.cpp)
 target_link_libraries(summit_core PUBLIC OpenSSL::Crypto ${CMAKE_DL_LIBS})
 target_link_libraries(summit_core PRIVATE summit_cld2)
 target_include_directories(summit_core PUBLIC src vendor)
@@ -130,7 +130,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Haiku")
         src/ui/McpPageTools.cpp src/ui/McpEngineTools.cpp src/ui/McpDebugHelper.cpp src/ui/UpdateChecker.cpp
         src/ui/SafeBrowsingService.cpp src/ui/BrowserWindowSafeBrowsing.cpp
         src/ui/ResponsiveDesign.cpp src/ui/BrowserWindowResponsive.cpp
-        src/ui/Profiles.cpp src/ui/BrowserWindowProfiles.cpp)
+        src/ui/Profiles.cpp src/ui/BrowserWindowProfiles.cpp src/ui/BrowserWindowReadingList.cpp)
     target_include_directories(Summit PRIVATE ${SUMMIT_WEBKIT_INCLUDE_DIR} /boot/system/develop/headers/private/netservices)
     target_compile_options(Summit PRIVATE -Wno-multichar)
     target_compile_definitions(Summit PRIVATE SUMMIT_MODERN_WEBKIT=$<BOOL:${SUMMIT_MODERN_WEBKIT}>)

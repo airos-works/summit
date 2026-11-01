@@ -553,6 +553,8 @@ void BrowserWindow::RefreshNoticeBar()
             {"Always Allow", with(kAllowSitePopups, tab->id)}, {"Close", dismiss}});
         return;
     }
+    // An offline copy from the Reading List (#156).
+    if (ReadingListNotice(*tab)) return;
     // A notice for the whole window (#93), when its tab has none.
     if (TranslationNotice(*tab)) return;
     if (!fWindowNotice.empty()) {

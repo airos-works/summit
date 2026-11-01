@@ -37,6 +37,8 @@ public:
         // When Summit last asked GitHub for a new build (Profile::lastUpdateCheck);
         // nothing to show again.
         kUpdateCheckChanged = 1 << 9,
+        // Reading List (#156): an item added, removed, read or saved offline.
+        kReadingListChanged = 1 << 10,
     };
     // An extension in the Extensions window, for the cards on store pages.
     struct InstalledExtensionInfo {

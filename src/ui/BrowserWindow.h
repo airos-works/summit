@@ -1123,6 +1123,46 @@ private:
     ProgressLine* fProgress;
     std::unique_ptr<BFilePanel> fOpenPanel;
     std::unique_ptr<BMessageRunner> fSaveTimer;
+#if SUMMIT_MODERN_WEBKIT
+    // Reading List (#156, BrowserWindowReadingList.cpp).
+    void ReadingListCommand(const BMessage& message);
+    // A summit-reading-list: link of the Reading List page (true when url was one).
+    bool ReadingListPageRequest(Tab& tab, const std::string& source, const std::string& url);
+    void AddToReadingList(const std::string& url, const std::string& title, Tab* archiveFrom);
+    void OpenReadingListItem(const std::string& id, bool offline);
+    // Whether tab is going from the Reading List page to an item's page.
+    bool ReadingListPageLeaving(const Tab& tab) const;
+    // Asks tab's page for its web archive, to keep as item id's offline copy.
+    void ArchiveForReadingList(Tab& tab, const std::string& id);
+    // B_WEBKIT_PAGE_CONTENTS for an offline copy; false when it was another's.
+    bool ReadingListArchiveReceived(const BMessage& message);
+    void RefreshReadingListMenu();
+    // After each state report: saves the copy of an item opened without one,
+    // and shows or hides the offline copy's notice.
+    void ReadingListTabUpdated(Tab& tab);
+    // A failed load of an item's page shows its offline copy instead of the
+    // error page; true when it did.
+    bool ShowReadingListCopy(Tab& tab);
+    // The notice above an offline copy (RefreshNoticeBar); true when shown.
+    bool ReadingListNotice(Tab& tab);
+    // The item whose offline copy url is, or empty.
+    std::string ReadingListCopyItem(const std::string& url) const;
+    std::filesystem::path ReadingListDirectory() const;
+    // The summit:reading-list page (WriteInternalPage).
+    std::string ReadingListPageHTML();
+    // BrowserWindowLoadErrors.cpp: whether the computer is on a network.
+    static bool NetworkAvailable();
+    BMenu* fReadingListMenu = nullptr;
+    int32 fReadingListMenuFixed = 0;
+    // Archive requests waiting for the page's contents: item ids.
+    std::map<uint64, std::string> fReadingListArchives;
+    // Items opened from the list (or added while loading), by tab, with the
+    // first load generation that is their page: a copy is saved once it has
+    // loaded when the item has none, and shown when it fails.
+    std::map<int64, std::pair<std::string, uint64>> fReadingListOpened;
+    // Tabs showing an offline copy, with its item.
+    std::map<int64, std::string> fReadingListCopyTabs;
+#endif
 #if !SUMMIT_MODERN_WEBKIT
     std::vector<BWebDownload*> fDownloads;
 #endif

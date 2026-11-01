@@ -163,3 +163,18 @@ constexpr uint32 kAutoFillCardChecked = 'afck';
 constexpr uint32 kAutoFillBarAnswer = 'afba';
 constexpr uint32 kAutoFillSaved = 'afsv';
 }
+namespace summit {
+// Reading List (#156, BrowserWindowReadingList.cpp). kAddToReadingList: the
+// current page, or "url" (with "title") from a link's menu.
+// kOpenReadingListItem: item "id" in the current tab (marked read; its saved
+// copy when offline, or with "offline" true). kMarkReadingListItem: "id",
+// "read" (bool). kRemoveReadingListItem: "id". kShowReadingList: the
+// summit:reading-list page. kLoadLivePage: the page whose offline copy tab
+// "tab" shows.
+constexpr uint32 kAddToReadingList = 'rlad';
+constexpr uint32 kOpenReadingListItem = 'rlop';
+constexpr uint32 kMarkReadingListItem = 'rlmk';
+constexpr uint32 kRemoveReadingListItem = 'rlrm';
+constexpr uint32 kShowReadingList = 'rlsh';
+constexpr uint32 kLoadLivePage = 'rllv';
+}

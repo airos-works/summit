@@ -736,6 +736,39 @@ int main()
     CHECK(DescribeLoadFailure(LoadFailure::HostNotFound, "https://nowhere.invalid/x", "").title == "Can't find nowhere.invalid");
     CHECK(DescribeLoadFailure(LoadFailure::Offline, "https://a.example/", "").title == "You're offline");
     CHECK(DescribeLoadFailure(LoadFailure::Other, "file:///x", "File does not exist").explanation == "File does not exist");
+    {
+        // Reading List (#156).
+        std::vector<ReadingListItem> list;
+        CHECK(AddToReadingList(list, "javascript:alert(1)", "x", 1).empty() && list.empty());
+        const auto first = AddToReadingList(list, "https://a.example/one#top", "One", 10);
+        const auto second = AddToReadingList(list, "https://a.example/two", "Two", 20);
+        CHECK(IsReadingListID(first) && IsReadingListID(second) && first != second && list.size() == 2 && list[0].id == second);
+        list[1].read = 30;
+        list[1].archived = 30;
+        // Again: to the top, unread, the same id and copy.
+        CHECK(AddToReadingList(list, "https://a.example/one", "", 40) == first);
+        CHECK(list.size() == 2 && list[0].id == first && list[0].read == 0 && list[0].archived == 30 && list[0].title == "One");
+        CHECK(FindReadingListURL(list, "https://a.example/two#x") && !FindReadingListURL(list, "https://a.example/three"));
+        CHECK(CountUnread(list) == 2 && ReadingListArchiveName(first) == first + ".mhtml");
+        CHECK(!IsReadingListID("../x") && !IsReadingListID("") && !IsReadingListID("ABC"));
+        Profile saved;
+        saved.readingList = list;
+        const auto file = std::filesystem::path(created) / "reading.json";
+        std::string error;
+        CHECK(saved.Save(file, error));
+        const auto loaded = Profile::Load(file, error);
+        CHECK(loaded.readingList == list);
+        const auto link = ParseReadingListPageLink("summit-reading-list:remove?token=ab12&id=" + first);
+        CHECK(link && link->action == "remove" && link->id == first && link->token == "ab12");
+        CHECK(!ParseReadingListPageLink("summit-reading-list:remove?token=ab12&id=../x"));
+        CHECK(!ParseReadingListPageLink("summit-reading-list:remove?token=ab12"));
+        CHECK(!ParseReadingListPageLink("summit-reading-list:delete-all?token=ab12"));
+        CHECK(ParseReadingListPageLink("summit-reading-list:clear-read?token=ab12"));
+        const auto page = RenderReadingListPage(list, 50, {}, "ab12");
+        CHECK(page.find("summit-reading-list:open?token=ab12&amp;id=" + first) != std::string::npos);
+        CHECK(page.find("Saved Copy") != std::string::npos && page.find("2 unread") != std::string::npos);
+        CHECK(ResolveAddress("summit:reading-list").url == "summit:reading-list");
+    }
     std::filesystem::remove_all(created);
     std::cout << checks << " checks, " << failures << " failures\n";
     return failures ? 1 : 0;

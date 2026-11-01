@@ -1,5 +1,6 @@
 #pragma once
 #include "Profile.h"
+#include "ReadingList.h"
 #include <functional>
 #include <optional>
 #include <string>
@@ -62,6 +63,22 @@ struct BookmarkPageLink {
 std::optional<BookmarkPageLink> ParseBookmarkPageLink(std::string_view url);
 // The token as the page carries it: lower-case hex digits, at most 64.
 std::string BookmarkPageToken(const std::string& token);
+// Reading List (#156): every item, unread ones marked, to open, mark as read
+// or unread, open as saved offline or remove. Its changes are
+// summit-reading-list: links carrying token (ParseReadingListPageLink); opening
+// an item is one too, so that the browser marks it read and can show its
+// offline copy.
+constexpr const char* kReadingListPage = "summit:reading-list";
+constexpr const char* kReadingListPageScheme = "summit-reading-list";
+std::string RenderReadingListPage(const std::vector<ReadingListItem>& list, int64_t now, const IconSource& icons,
+    const std::string& token);
+struct ReadingListPageLink {
+    // open, offline, read, unread, remove or clear-read
+    std::string action;
+    std::string token;
+    std::string id;
+};
+std::optional<ReadingListPageLink> ParseReadingListPageLink(std::string_view url);
 // What a private window's new tabs show: what private browsing keeps and
 // forgets, and a search field for the chosen engine (SearchEngines()).
 std::string RenderPrivateStartPage(const std::string& searchEngineName, const std::string& searchPrefix);

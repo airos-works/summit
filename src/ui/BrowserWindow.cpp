@@ -945,6 +945,16 @@ BrowserWindow::BrowserWindow(std::shared_ptr<SharedProfile> profile, std::string
     fBookmarksMenu->AddSeparatorItem();
     AddItem(fBookmarksMenu, "New Folder…", kNewBookmarkFolder);
     AddItem(fBookmarksMenu, "Show All Bookmarks", kShowBookmarks, 'B');
+#if SUMMIT_MODERN_WEBKIT
+    // Reading List (#156). Safari's Command-Shift-D is Add to Bookmarks Bar
+    // here, so Command-Option-D.
+    fBookmarksMenu->AddSeparatorItem();
+    AddItem(fBookmarksMenu, "Add to Reading List", kAddToReadingList, 'D', B_OPTION_KEY);
+    fReadingListMenu = new BMenu("Reading List");
+    fReadingListMenu->AddItem(new BMenuItem("Show Reading List", new BMessage(kShowReadingList)));
+    fReadingListMenuFixed = fReadingListMenu->CountItems();
+    fBookmarksMenu->AddItem(fReadingListMenu);
+#endif
     fBookmarksMenuFixed = fBookmarksMenu->CountItems();
     menu->AddItem(fBookmarksMenu);
     fWindowMenu = new BMenu("Window");
@@ -1428,7 +1438,7 @@ std::string BrowserWindow::StoredURL(const BString& url) const
     };
     if (matches(fStartURL)) return "summit:home";
     if (fPrivate && matches(FileURL((fShared->Path().parent_path() / "Pages" / "private.html").string()))) return "summit:home";
-    for (const char* page : {kHistoryPage, kBookmarksPage})
+    for (const char* page : {kHistoryPage, kBookmarksPage, kReadingListPage})
         if (matches(FileURL(InternalPagePath(page).string()))) return page;
     if (BookmarkQueryForURL(url)) return kBookmarksPage;
     return value;
@@ -1540,7 +1550,7 @@ void BrowserWindow::CreateTab(const std::string& input, bool select, BWebView* a
     created.view = webView;
     created.url = address.url;
     created.title = address.url == "summit:home" ? "Start Page" : address.url == kHistoryPage ? "History"
-        : address.url == kBookmarksPage ? "Bookmarks" : "Loading…";
+        : address.url == kBookmarksPage ? "Bookmarks" : address.url == kReadingListPage ? "Reading List" : "Loading…";
     created.pageRevision = fPagesRevision;
     created.lastSelected = system_time();
     created.container = container;
@@ -3388,6 +3398,13 @@ void BrowserWindow::ProfileChanged(const BMessage& message)
         RefreshChrome();
         if (auto* tab = ActiveTab(); tab && tab->url == kBookmarksPage) RefreshInternalPage(*tab);
     }
+    if (changes & SharedProfile::kReadingListChanged) {
+        // Reading List (#156): its page shows the change (the menu is made when opened).
+        PagesChanged();
+        // Not while it is going to an item: writing it again would stop that.
+        if (auto* tab = ActiveTab(); tab && tab->url == kReadingListPage && !tab->loading && !ReadingListPageLeaving(*tab))
+            RefreshInternalPage(*tab);
+    }
     if (changes & SharedProfile::kSettingsChanged) {
         ShowSearchEngine();
 #if SUMMIT_MODERN_WEBKIT
@@ -4010,6 +4027,7 @@ void BrowserWindow::UpdateBookmarkQueryLocation(Tab& tab, const BString& url)
 std::filesystem::path BrowserWindow::InternalPagePath(const std::string& url, int64 bookmarkQuery, unsigned section) const
 {
     return fShared->Path().parent_path() / "Pages" / (url == kHistoryPage ? "history.html"
+        : url == kReadingListPage ? "reading-list.html"
         : bookmarkQuery ? BookmarkQueryPageName(bookmarkQuery, section) : "bookmarks.html");
 }
 bool BrowserWindow::WriteInternalPage(const std::string& url, int64 bookmarkQuery, unsigned section)
@@ -4019,6 +4037,10 @@ bool BrowserWindow::WriteInternalPage(const std::string& url, int64 bookmarkQuer
     if (url == kHistoryPage) {
         const auto pages = fShared->Read([](const Profile& profile) { return profile.history; });
         html = RenderHistoryPage(pages, std::time(nullptr), icons);
+#if SUMMIT_MODERN_WEBKIT
+    } else if (url == kReadingListPage) {
+        html = ReadingListPageHTML();
+#endif
     } else {
         const auto snapshot = fShared->Read([](const Profile& profile) { return std::pair{profile.bookmarks, profile.history}; });
         html = bookmarkQuery ? RenderBookmarkQueryPage(snapshot.first, snapshot.second, bookmarkQuery, icons, BookmarkPageSecret(), section)
@@ -4035,7 +4057,8 @@ bool BrowserWindow::WriteInternalPage(const std::string& url, int64 bookmarkQuer
     }
     if (error || std::rename(temporary.c_str(), path.c_str()) != 0) {
         std::remove(temporary.c_str());
-        fStatus->SetText(url == kHistoryPage ? "Could not write the History page." : "Could not write the Bookmarks page.");
+        fStatus->SetText(url == kHistoryPage ? "Could not write the History page."
+            : url == kReadingListPage ? "Could not write the Reading List page." : "Could not write the Bookmarks page.");
         return false;
     }
     return true;
@@ -4058,7 +4081,7 @@ std::string BrowserWindow::LoadableURL(const std::string& url)
         std::remove(temporary.c_str());
     }
     if (url == "summit:home") return fStartURL;
-    if (url == kHistoryPage || url == kBookmarksPage) {
+    if (url == kHistoryPage || url == kBookmarksPage || url == kReadingListPage) {
         WriteInternalPage(url);
         return FileURL(InternalPagePath(url).string());
     }
@@ -4086,7 +4109,7 @@ void BrowserWindow::ShowBookmarkQuery(int64 id, unsigned section)
 }
 void BrowserWindow::RefreshInternalPage(Tab& tab, bool force, bool navigate)
 {
-    if (tab.url != kHistoryPage && tab.url != kBookmarksPage) return;
+    if (tab.url != kHistoryPage && tab.url != kBookmarksPage && tab.url != kReadingListPage) return;
     if (!force && tab.pageRevision == fPagesRevision) return;
 #if SUMMIT_MODERN_WEBKIT
     if (!PrepareTabNavigation(tab)) return;
@@ -4163,6 +4186,9 @@ void BrowserWindow::RebuildDynamicMenus()
     if (auto* item = fBookmarksMenu->FindItem(kAddToBookmarksBar)) item->SetEnabled(bookmarkable);
     fRemoveBookmarkItem->SetEnabled(bookmarkable && bookmarked);
     fEditBookmarkItem->SetEnabled(bookmarkable && bookmarked);
+#if SUMMIT_MODERN_WEBKIT
+    RefreshReadingListMenu();
+#endif
     auto clear = [](BMenu* menu, int32 fixed) {
         while (menu->CountItems() > fixed) delete menu->RemoveItem(fixed);
     };
@@ -5056,7 +5082,14 @@ void BrowserWindow::MessageReceived(BMessage* message)
         case B_WEBKIT_SHARE_REQUESTED: ShareRequested(*message); break;
         case kSavePageFormat: SavePageFormatChosen(message->GetUInt32("format", 0)); break;
         case kSavePageChosen: SavePageChosen(*message); break;
-        case B_WEBKIT_PAGE_CONTENTS: PageContentsReceived(*message); break;
+        case B_WEBKIT_PAGE_CONTENTS:
+            if (!ReadingListArchiveReceived(*message)) PageContentsReceived(*message);
+            break;
+        // Reading List (#156).
+        case kAddToReadingList: case kOpenReadingListItem: case kMarkReadingListItem:
+        case kRemoveReadingListItem: case kShowReadingList: case kLoadLivePage:
+            ReadingListCommand(*message);
+            break;
         case kPrintPagesRequest: {
             BMessenger reply;
             auto* target = FindTabByID(message->GetInt64("tab", 0));
@@ -5723,6 +5756,9 @@ void BrowserWindow::MessageReceived(BMessage* message)
             if (message->what == B_WEBKIT_SCHEME_OPEN_REQUESTED && message->GetBool("main_frame", true)
                 && BookmarkPageRequest(*tab, source, message->GetString("url", "")))
                 break;
+            if (message->what == B_WEBKIT_SCHEME_OPEN_REQUESTED && message->GetBool("main_frame", true)
+                && ReadingListPageRequest(*tab, source, message->GetString("url", "")))
+                break;
             // An app link's own checks are in SchemeOpenRequested: a redirect
             // reports the page it left as committed_url.
             if (source != tab->url && message->what != B_WEBKIT_SCHEME_OPEN_REQUESTED) break;
@@ -6135,6 +6171,12 @@ void BrowserWindow::ShowPageContextMenu(const BMessage& message)
             bookmark->AddString("title", ShortLabel(message.GetString("link_label", ""), 200).c_str());
             menu->AddItem(new BMenuItem("Bookmark Link", bookmark));
         }
+        if (!fPrivate && IsReadingListURL(link)) {
+            // Reading List (#156): its offline copy is saved when it is first opened.
+            auto* later = withURL(kAddToReadingList, link);
+            later->AddString("title", ShortLabel(message.GetString("link_label", ""), 200).c_str());
+            menu->AddItem(new BMenuItem("Add Link to Reading List", later));
+        }
     }
     if (!image.empty()) {
         separate();
@@ -6198,6 +6240,9 @@ void BrowserWindow::ShowPageContextMenu(const BMessage& message)
         auto* bookmark = new BMenuItem("Bookmark This Page", new BMessage(kBookmark));
         bookmark->SetEnabled(Bookmarkable(tab->url));
         menu->AddItem(bookmark);
+        auto* later = new BMenuItem("Add to Reading List", new BMessage(kAddToReadingList));
+        later->SetEnabled(!fPrivate && IsReadingListURL(tab->url));
+        menu->AddItem(later);
         auto* copyAddress = new BMenuItem("Copy Page Address", copy(tab->url));
         copyAddress->SetEnabled(!DisplayURL(tab->url).empty());
         menu->AddItem(copyAddress);
@@ -6783,7 +6828,7 @@ void BrowserWindow::WebKitStateChanged(const BMessage& message)
             const uint32 transition = std::exchange(tab->nextTransition, 0);
             if (!fPrivate && tab->readerURL != successURL)
                 RecordVisit(visit, transition ? transition : 1);
-            internalPageLoaded = stored == kHistoryPage || stored == kBookmarksPage;
+            internalPageLoaded = stored == kHistoryPage || stored == kBookmarksPage || stored == kReadingListPage;
         }
     }
     const char* successfulURL = nullptr;
@@ -6806,6 +6851,7 @@ void BrowserWindow::WebKitStateChanged(const BMessage& message)
         tab->view->GetBackForwardList(BMessenger(this), static_cast<uint64>(tab->id));
     }
     UpdateLoadErrorView(*tab);
+    ReadingListTabUpdated(*tab);
     UpdateSafetyWarning(*tab);
     if (tab->id == fSelected) {
         if (!fAddress->TextView()->IsFocus()) fAddress->SetText(DisplayURL(tab->ShownURL()).c_str());

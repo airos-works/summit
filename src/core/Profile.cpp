@@ -233,6 +233,23 @@ Profile Profile::Load(const std::filesystem::path& path, std::string& error)
             profile.bookmarks.Assign(std::move(bar), std::move(other));
         } else profile.bookmarks.AssignPages(pages);
         profile.history = Decode(j.at("history"), 2000);
+        // Reading List (#156).
+        if (auto list = j.find("readingList"); list != j.end() && list->is_array()) {
+            for (const auto& entry : *list) {
+                if (!entry.is_object() || profile.readingList.size() >= kMaxReadingListItems) continue;
+                ReadingListItem item;
+                for (auto [name, field] : { std::pair { "id", &item.id }, std::pair { "url", &item.url },
+                        std::pair { "title", &item.title } })
+                    if (auto value = entry.find(name); value != entry.end() && value->is_string()) *field = value->get<std::string>();
+                for (auto [name, field] : { std::pair { "added", &item.added }, std::pair { "read", &item.read },
+                        std::pair { "archived", &item.archived } })
+                    if (auto value = entry.find(name); value != entry.end() && value->is_number_integer())
+                        *field = std::max(int64_t(0), value->get<int64_t>());
+                if (IsReadingListID(item.id) && IsReadingListURL(item.url) && item.title.size() <= 1024
+                    && !FindReadingListItem(profile.readingList, item.id))
+                    profile.readingList.push_back(std::move(item));
+            }
+        }
         if (auto home = j.find("homeURL"); home != j.end()) {
             profile.homeURL = home->get<std::string>();
             if (profile.homeURL.size() > 65536 || profile.homeURL.find('\0') != std::string::npos)
@@ -618,6 +635,13 @@ bool Profile::Save(const std::filesystem::path& path, std::string& error, int64_
             {"bookmarkTree", {{"bar", EncodeBookmarks(bookmarks.Bar().children)}, {"other", EncodeBookmarks(bookmarks.Other().children)},
                 {"barModified", bookmarks.Bar().modified}, {"otherModified", bookmarks.Other().modified}}},
             {"history", Encode(history)},
+            {"readingList", [&] {
+                json list = json::array();
+                for (const auto& item : readingList)
+                    list.push_back({{"id", item.id}, {"url", item.url}, {"title", item.title}, {"added", item.added},
+                        {"read", item.read}, {"archived", item.archived}});
+                return list;
+            }()},
             {"homeURL", homeURL}, {"showBookmarksBar", showBookmarksBar}, {"zoomTextOnly", zoomTextOnly},
             {"caretBrowsing", caretBrowsing}, {"reduceMotion", reduceMotion}, {"increaseContrast", increaseContrast},
             {"minimumFontSize", minimumFontSize}, {"unloadWhenMemoryIsLow", unloadWhenMemoryIsLow}, {"overrideColors", overrideColors}, {"spellingLanguage", spellingLanguage}, {"restoreSession", restoreSession},

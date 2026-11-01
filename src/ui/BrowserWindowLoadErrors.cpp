@@ -170,6 +170,11 @@ LoadFailure FailureOf(const std::string& domain, int32 code, bool offline)
 }
 }
 
+bool BrowserWindow::NetworkAvailable()
+{
+    return NetworkIsUp();
+}
+
 void BrowserWindow::UpdateLoadErrorView(Tab& tab)
 {
     const auto failure = tab.loadError.empty() || !tab.loadErrorProvisional ? LoadFailure::None
@@ -195,6 +200,8 @@ void BrowserWindow::UpdateLoadErrorView(Tab& tab)
         tab.errorURL = tab.loadErrorURL.empty() ? tab.url : tab.loadErrorURL;
         tab.errorOffline = tab.loadErrorDomain == "CurlErrorDomain" && failure != LoadFailure::Secure
             && !IsLocalHost(LoadFailureHost(tab.errorURL)) && !NetworkIsUp();
+        // A Reading List page that cannot be loaded: its offline copy (#156).
+        if (failure != LoadFailure::Secure && !tab.errorView && ShowReadingListCopy(tab)) return;
         ShowLoadErrorView(tab);
         return;
     }

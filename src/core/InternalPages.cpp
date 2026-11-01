@@ -721,6 +721,122 @@ std::string RenderBookmarkQueryPage(const Bookmarks& bookmarks, const std::vecto
     return page + "</main></html>\n";
 }
 
+namespace {
+const char* kReadingListStyle = R"(<style>
+nav.actions{display:flex;gap:8px;align-items:center;margin:-8px 0 20px;color:#63766b;font-size:13px}
+.button{font:inherit;font-size:13px;color:#243f36;text-decoration:none;padding:5px 12px;border:1px solid #d5e0d6;border-radius:7px;background:white;cursor:pointer}
+.button:hover{background:#eef5ed}.hint{color:#7b897f;font-size:12px;margin-left:auto}
+.row{padding:0 8px 0 12px}.row:hover{background:#eef5ed}
+.link{flex:1;min-width:0;display:flex;align-items:center;gap:12px;padding:8px 0;color:inherit;text-decoration:none}
+.dot{flex:none;width:8px;height:8px;border-radius:50%;background:#2c7d68}.read .dot{background:none}
+.read .title{color:#5d7166}
+.badge{flex:none;font-size:11px;color:#456c51;background:#dfeade;border-radius:4px;padding:1px 6px}
+.tools{flex:none;display:flex;gap:2px;opacity:.55}.row:hover .tools{opacity:1}
+.tool{font-size:12px;color:#456c51;text-decoration:none;padding:3px 7px;border-radius:5px}
+.tool:hover{background:#dfeade}
+</style>
+)";
+
+std::string ShortDate(int64_t seconds, int64_t now)
+{
+    if (seconds <= 0) return {};
+    static const char* months[] = { "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
+    const std::tm time = LocalTime(seconds), today = LocalTime(now);
+    char text[32];
+    if (DayKey(time) == DayKey(today)) std::snprintf(text, sizeof text, "%02d:%02d", time.tm_hour, time.tm_min);
+    else if (time.tm_year == today.tm_year) std::snprintf(text, sizeof text, "%d %s", time.tm_mday, months[time.tm_mon % 12]);
+    else std::snprintf(text, sizeof text, "%d %s %d", time.tm_mday, months[time.tm_mon % 12], time.tm_year + 1900);
+    return text;
+}
+}
+
+std::string RenderReadingListPage(const std::vector<ReadingListItem>& list, int64_t now, const IconSource& icons,
+    const std::string& pageToken)
+{
+    const auto token = BookmarkPageToken(pageToken);
+    PageWriter writer(icons);
+    auto link = [&](const char* action, const std::string& id) {
+        return EscapeHTML(std::string(kReadingListPageScheme) + ":" + action + "?token=" + token + (id.empty() ? "" : "&id=" + id));
+    };
+    size_t read = 0;
+    for (bool unread : { true, false }) {
+        bool any = false;
+        for (const auto& item : list) {
+            if ((item.read == 0) != unread) continue;
+            if (!any) writer.Raw(std::string("<section><h2>") + (unread ? "Unread" : "Read") + "</h2><div class=\"list\">\n");
+            any = true;
+            if (!unread) ++read;
+            auto shown = item.url;
+            if (auto scheme = shown.find("://"); scheme != std::string::npos) shown.erase(0, scheme + 3);
+            // Opening goes through the browser (summit-reading-list:open), which
+            // marks the item read; the row's title shows the address.
+            writer.Raw("<div class=\"row" + std::string(unread ? "" : " read") + "\" title=\"" + EscapeHTML(item.url) + "\">"
+                + "<a class=\"link\" href=\"" + link("open", item.id) + "\"><span class=\"dot\"></span>" + writer.Icon(item.url)
+                + "<span class=\"text\"><span class=\"title\">" + EscapeHTML(item.title.empty() ? item.url : item.title)
+                + "</span><span class=\"url\">" + EscapeHTML(shown) + "</span></span>"
+                + (item.archived ? "<span class=\"badge\" title=\"Saved for reading offline\">Offline</span>" : "")
+                + "<span class=\"time\">" + EscapeHTML(ShortDate(item.added, now)) + "</span></a><span class=\"tools\">"
+                + "<a class=\"tool\" href=\"" + link(unread ? "read" : "unread", item.id) + "\">"
+                + (unread ? "Mark as Read" : "Mark as Unread") + "</a>"
+                + (item.archived ? "<a class=\"tool\" href=\"" + link("offline", item.id) + "\">Saved Copy</a>" : "")
+                + "<a class=\"tool\" href=\"" + link("remove", item.id) + "\">Remove</a></span></div>\n");
+        }
+        if (any) writer.Raw("</div></section>\n");
+    }
+    const bool empty = list.empty();
+    std::string page = "<!doctype html>\n<html lang=\"en\">\n<meta charset=\"utf-8\">\n<title>Reading List</title>\n";
+    page += kStyle;
+    page += kReadingListStyle;
+    if (!writer.IconStyles().empty()) page += "<style>\n" + writer.IconStyles() + "</style>\n";
+    page += "<main>\n<header><h1>Reading List</h1>";
+    if (!empty) page += "<input id=\"filter\" type=\"search\" placeholder=\"Search Reading List\" autofocus>";
+    page += "</header>\n";
+    if (empty)
+        page += "<p class=\"empty\">Pages you add to your Reading List are kept here to read later, with a copy saved for "
+            "reading offline. Use Bookmarks › Add to Reading List, or right-click a link.</p>\n";
+    else {
+        page += "<nav class=\"actions\"><span>" + std::to_string(list.size() - read) + " unread</span>";
+        if (read) page += "<a class=\"button\" href=\"" + link("clear-read", "") + "\">Clear Read Items</a>";
+        page += "<span class=\"hint\">Opening a page marks it read.</span></nav>\n";
+        page += writer.Body();
+        page += "<p class=\"empty\" id=\"none\" hidden>Nothing matches your search.</p>\n";
+    }
+    page += "</main>\n";
+    if (!empty) page += kFilterScript;
+    page += "</html>\n";
+    return page;
+}
+
+std::optional<ReadingListPageLink> ParseReadingListPageLink(std::string_view url)
+{
+    const std::string prefix = std::string(kReadingListPageScheme) + ":";
+    if (url.size() > 4096 || url.size() < prefix.size()) return std::nullopt;
+    for (size_t i = 0; i < prefix.size(); ++i)
+        if (std::tolower(static_cast<unsigned char>(url[i])) != prefix[i]) return std::nullopt;
+    url.remove_prefix(prefix.size());
+    ReadingListPageLink link;
+    const size_t query = url.find('?');
+    link.action = std::string(url.substr(0, query));
+    static const char* actions[] = { "open", "offline", "read", "unread", "remove", "clear-read" };
+    if (std::none_of(std::begin(actions), std::end(actions), [&](const char* known) { return link.action == known; }))
+        return std::nullopt;
+    std::string_view rest = query == std::string_view::npos ? std::string_view() : url.substr(query + 1);
+    while (!rest.empty()) {
+        const size_t end = rest.find('&');
+        const auto field = rest.substr(0, end);
+        rest = end == std::string_view::npos ? std::string_view() : rest.substr(end + 1);
+        const size_t equals = field.find('=');
+        if (equals == std::string_view::npos) continue;
+        const auto name = field.substr(0, equals), value = field.substr(equals + 1);
+        if (name == "token") link.token = std::string(value);
+        else if (name == "id") link.id = std::string(value);
+    }
+    if (link.token.empty() || link.token != BookmarkPageToken(link.token)) return std::nullopt;
+    if ((link.action == "clear-read") != link.id.empty() || (!link.id.empty() && !IsReadingListID(link.id)))
+        return std::nullopt;
+    return link;
+}
+
 std::string RenderPrivateStartPage(const std::string& searchEngineName, const std::string& searchPrefix)
 {
     // Every engine takes the query as "q"; the form goes to the address before it.

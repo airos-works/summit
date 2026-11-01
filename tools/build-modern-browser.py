@@ -404,6 +404,7 @@ def main():
                    'src/ui/ResponsiveDesign.cpp', 'src/ui/BrowserWindowResponsive.cpp',
                    # Browser profiles (#157).
                    'src/core/BrowserProfiles.cpp', 'src/ui/Profiles.cpp', 'src/ui/BrowserWindowProfiles.cpp',
+                   'src/core/ReadingList.cpp', 'src/ui/BrowserWindowReadingList.cpp',
                    # Keep these entries equal to vendor/cld2/sources.list.
                    # Release CI parses this literal list without running Python.
                    'vendor/cld2/internal/cldutil.cc',

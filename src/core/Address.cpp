@@ -107,7 +107,8 @@ Address ResolveAddress(std::string_view input)
         if (scheme == "summit") {
             auto page = text;
             std::transform(page.begin(), page.end(), page.begin(), [](unsigned char c) { return std::tolower(c); });
-            if (page == "summit:home" || page == "summit:history" || page == "summit:bookmarks") return {page, {}, false};
+            if (page == "summit:home" || page == "summit:history" || page == "summit:bookmarks" || page == "summit:reading-list")
+                return {page, {}, false};
             return {{}, "There is no Summit page called " + text.substr(colon + 1) + ".", false};
         }
         if (IsExternalScheme(scheme)) return {scheme + text.substr(colon), {}, false};
