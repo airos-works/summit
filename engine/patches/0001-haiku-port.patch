@@ -148989,10 +148989,10 @@ index 0000000000000000000000000000000000000000..c9a119d02f85b7c5ad8fe9153bfc9604
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/WebView.cpp b/Source/WebKit/UIProcess/haiku/WebView.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..d52513754fe7dd44d671a678ae3b9c69bd16fd86
+index 0000000000000000000000000000000000000000..2ed39a0cccd7373b0337a7675b24ac8aed9c146f
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/WebView.cpp
-@@ -0,0 +1,3566 @@
+@@ -0,0 +1,3578 @@
 +/*
 + * Copyright (C) 2013 Intel Corporation. All rights reserved.
 + *
@@ -149141,6 +149141,7 @@ index 0000000000000000000000000000000000000000..d52513754fe7dd44d671a678ae3b9c69
 +#include <cstdio>
 +#include <wtf/MemoryPressureHandler.h>
 +#include <wtf/NeverDestroyed.h>
++#include <string>
 +#include <wtf/RunLoop.h>
 +#include <wtf/TZoneMallocInlines.h>
 +#include <wtf/text/CString.h>
@@ -150819,6 +150820,17 @@ index 0000000000000000000000000000000000000000..d52513754fe7dd44d671a678ae3b9c69
 +}
 +#endif
 +
++// SUMMIT_PREF_OFF=name,name...: turn single Safari-gap preferences (#147)
++// off again, for comparing their cost.
++static bool summitPreferenceOffHaiku(const char* name)
++{
++    const char* list = std::getenv("SUMMIT_PREF_OFF");
++    if (!list)
++        return false;
++    std::string names = std::string(",") + list + ",";
++    return names.find(std::string(",") + name + ",") != std::string::npos;
++}
++
 +// Every WebView, for focusedWebPageForInputHaiku (main thread only).
 +static Vector<WebView*>& liveWebViewsHaiku()
 +{
@@ -150996,12 +151008,12 @@ index 0000000000000000000000000000000000000000..d52513754fe7dd44d671a678ae3b9c69
 +    // Features Safari ships whose defaults name only Cocoa or GTK/WPE
 +    // (Summit #147): scoped custom element registries, element.currentCSSZoom,
 +    // font-variant-emoji and ManagedMediaSource.
-+    configuration->preferences().setScopedCustomElementRegistryEnabled(true);
-+    configuration->preferences().setEnableElementCurrentCSSZoom(true);
-+    configuration->preferences().setCSSFontVariantEmojiEnabled(true);
++    configuration->preferences().setScopedCustomElementRegistryEnabled(!summitPreferenceOffHaiku("scoped"));
++    configuration->preferences().setEnableElementCurrentCSSZoom(!summitPreferenceOffHaiku("zoom"));
++    configuration->preferences().setCSSFontVariantEmojiEnabled(!summitPreferenceOffHaiku("emoji"));
 +    // <input type=checkbox switch> (Safari 17.4), drawn by the Adwaita
 +    // toggle button control (ToggleButtonAdwaita::drawSwitch).
-+    configuration->preferences().setSwitchControlEnabled(true);
++    configuration->preferences().setSwitchControlEnabled(!summitPreferenceOffHaiku("switch"));
 +    // HTTPS-First (#160), as Chrome, Firefox and Safari do: http:// pages are
 +    // tried over https first and loaded over http when the host has no
 +    // usable HTTPS (ResourceErrorCurl.cpp). IP addresses and localhost are
@@ -151016,7 +151028,7 @@ index 0000000000000000000000000000000000000000..d52513754fe7dd44d671a678ae3b9c69
 +    if (const char* cookieStore = std::getenv("SUMMIT_COOKIE_STORE"); !cookieStore || std::strcmp(cookieStore, "0"))
 +        configuration->preferences().setCookieStoreAPIEnabled(true);
 +#if ENABLE(MEDIA_SOURCE)
-+    configuration->preferences().setManagedMediaSourceEnabled(true);
++    configuration->preferences().setManagedMediaSourceEnabled(!summitPreferenceOffHaiku("mms"));
 +#endif
 +    // DataTransfer.items, on by default for the other ports: editors (GitHub's
 +    // among them) take pasted and dropped images from it.
@@ -151073,7 +151085,7 @@ index 0000000000000000000000000000000000000000..d52513754fe7dd44d671a678ae3b9c69
 +    configuration->preferences().setPeerConnectionEnabled(true);
 +    // RTCRtpScriptTransform (end-to-end encrypted calls), Cocoa-only by
 +    // default (Summit #147).
-+    configuration->preferences().setWebRTCEncodedTransformEnabled(true);
++    configuration->preferences().setWebRTCEncodedTransformEnabled(!summitPreferenceOffHaiku("rtc"));
 +    // Host candidates hidden behind random .local names need an mDNS
 +    // responder to answer for them. air/OS has one (mdns_server); stock Haiku
 +    // has none, so neither this machine nor the other peer could resolve

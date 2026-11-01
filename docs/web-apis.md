@@ -91,7 +91,8 @@ kept in the profile's website data (`generalStorageDirectory`), counted by
 
 ## Smaller features (#147)
 
-Turned on in `UIProcess/haiku/WebView.cpp`: scoped custom element registries
+Turned on in `UIProcess/haiku/WebView.cpp` (`SUMMIT_PREF_OFF=scoped,zoom,emoji,switch,mms,rtc`
+turns single ones off again, for measuring their cost): scoped custom element registries
 (`new CustomElementRegistry()`), `element.currentCSSZoom`, `font-variant-emoji`,
 `ManagedMediaSource`, WebRTC encoded transforms (`RTCRtpScriptTransform`).
 `canPlayType("audio/flac")` now answers like `audio/x-flac`.
