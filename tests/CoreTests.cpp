@@ -10,6 +10,7 @@
 #include "core/DownloadHistory.h"
 #include "core/LoadError.h"
 #include "core/ProfileLock.h"
+#include "core/BrowserProfiles.h"
 #include <set>
 #include <cstdlib>
 #include <ctime>
@@ -685,6 +686,38 @@ int main()
         CHECK(second.Take(folder, 99, holder, error) == ProfileLock::Result::Taken && second.Holds());
         CHECK(first.Take(folder, 1234, holder, error) == ProfileLock::Result::Held && holder == 99);
         CHECK(first.Take(folder / "missing", 1, holder, error) == ProfileLock::Result::Unsupported && !error.empty());
+    }
+    // #157: browser profiles, each a profile folder; the default is the folder itself.
+    {
+        const auto base = std::filesystem::path(created) / "profiles";
+        std::filesystem::create_directories(base);
+        auto profiles = BrowserProfiles::Load(base);
+        CHECK(profiles.entries.size() == 1 && profiles.entries[0].id == "default" && profiles.entries[0].name == "Personal");
+        CHECK(BrowserProfiles::Update(base, [](BrowserProfiles& list) {
+            list.Add("  Work Stuff ", list.UnusedColor());
+            list.Add("work stuff", "nonsense");
+            list.Add("Ünïcode!", "red");
+            return true;
+        }, error));
+        profiles = BrowserProfiles::Load(base);
+        CHECK(profiles.entries.size() == 4 && profiles.entries[1].id == "workstuff" && profiles.entries[1].name == "Work Stuff");
+        CHECK(profiles.entries[1].color == "red" && profiles.entries[2].id == "workstuff2" && profiles.entries[2].color == "blue");
+        CHECK(profiles.entries[3].id == "ncode" && profiles.entries[3].name == "Ünïcode!");
+        CHECK(BrowserProfiles::Directory(base, "default") == base && BrowserProfiles::Directory(base, "ncode") == base / "Profiles/ncode");
+        CHECK(BrowserProfiles::Locate(base / "Profiles/ncode") == std::make_pair(base, std::string("ncode")));
+        CHECK(BrowserProfiles::Locate(base / "Profiles/ncode/").first == base);
+        CHECK(BrowserProfiles::Locate(base / "Profiles/Bad Name") == std::make_pair(base / "Profiles/Bad Name", std::string("default")));
+        CHECK(BrowserProfiles::Locate(base) == std::make_pair(base, std::string("default")));
+        CHECK(BrowserProfiles::CleanName(std::string(39, 'a') + "\xc3\xa9x") == std::string(39, 'a'));
+        CHECK(BrowserProfiles::CleanName(" \t ").empty());
+        CHECK(!profiles.Remove("default") && profiles.Remove("workstuff2") && !profiles.Find("workstuff2"));
+        // The default profile is always first, never reopened, and a damaged file gives it alone.
+        { std::ofstream out(base / "profiles.json"); out << R"({"profiles":[{"id":"a","name":"A","reopen":true},{"id":"default","name":"Me","reopen":true},{"id":"A!"}]})"; }
+        profiles = BrowserProfiles::Load(base);
+        CHECK(profiles.entries.size() == 2 && profiles.entries[0].id == "default" && profiles.entries[0].name == "Me"
+            && !profiles.entries[0].reopen && profiles.entries[1].reopen && profiles.entries[1].color == "blue");
+        { std::ofstream out(base / "profiles.json"); out << "{"; }
+        CHECK(BrowserProfiles::Load(base).entries.size() == 1);
     }
     // #89, #95: what the error page says, and what is no error.
     CHECK(ClassifyLoadFailure("CurlErrorDomain", 6) == LoadFailure::HostNotFound);

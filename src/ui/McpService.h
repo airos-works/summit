@@ -64,6 +64,9 @@ void Start();
 // Points stderr back where it went before Start(), for a Summit started as
 // this one ends (the capture's pipe has no reader once it is gone).
 void RestoreStderr();
+// Where stderr went before Start() (-1 when not capturing), for another
+// Summit started while this one goes on (a profile's, Profiles.h).
+int OriginalStderr();
 bool Capturing();
 bigtime_t Since();
 struct Line {

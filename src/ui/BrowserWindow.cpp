@@ -74,6 +74,7 @@
 #include "NoticeBar.h"
 #include "PrintJob.h"
 #include "WebApps.h"
+#include "Profiles.h"
 #include "core/Bookmarks.h"
 #include "core/BookmarkQueries.h"
 #include "CertificateInfoWindow.h"
@@ -800,6 +801,10 @@ BrowserWindow::BrowserWindow(std::shared_ptr<SharedProfile> profile, std::string
     auto* file = new BMenu("File");
     AddItem(file, "New Window", kNewWindow, 'N');
     AddItem(file, "New Private Window", kNewPrivateWindow, 'N', B_SHIFT_KEY);
+#if SUMMIT_MODERN_WEBKIT
+    // Browser profiles (#157).
+    if (fWebApp.empty()) AddProfileMenu(file);
+#endif
     AddItem(file, "New Tab", kNewTab, 'T');
 #if SUMMIT_MODERN_WEBKIT
     // Firefox's containers: filled with them when the menus open.
@@ -1111,6 +1116,14 @@ BrowserWindow::BrowserWindow(std::shared_ptr<SharedProfile> profile, std::string
     fExtensionActions->Hide();
 #endif
     fZoomButton->Hide();
+#if SUMMIT_MODERN_WEBKIT
+    // Browser profiles (#157): the window's profile, while there are several.
+    if (!fPrivate && fWebApp.empty()) {
+        fProfileBadge = new ProfileBadge;
+        BLayoutBuilder::Group<>(fToolbar).Add(fProfileBadge);
+    }
+    ShowProfile();
+#endif
     if (fPrivate) {
         BLayoutBuilder::Group<>(fToolbar).Add(new PrivateBadge);
         // Views that Summit does not draw itself take the private colours too.
@@ -3290,7 +3303,11 @@ void BrowserWindow::RefreshChrome()
         fBookmarkButton->SetIcon(bookmarked ? Icon::BookmarkFilled : Icon::Bookmark);
         const std::string& shown = tab->ShownTitle();
         const std::string title = !fWebApp.empty() ? (shown.empty() || shown == fWebAppName ? fWebAppName
-            : shown + " — " + fWebAppName) : shown + (fPrivate ? " — Summit Private Browsing" : " — Summit");
+            : shown + " — " + fWebAppName) : shown + (fPrivate ? " — Summit Private Browsing" : " — Summit")
+#if SUMMIT_MODERN_WEBKIT
+            + fProfileTitle // Browser profiles (#157).
+#endif
+            ;
         if (title != Title()) {
             SetTitle(title.c_str());
             std::lock_guard lock(sWindowListLock);
@@ -4698,6 +4715,8 @@ void BrowserWindow::MessageReceived(BMessage* message)
     // Fraudulent and malicious website warnings (#150).
     if (SafeBrowsingMessage(*message)) return;
     if (ResponsiveMessage(*message)) return;
+    // Browser profiles (#157).
+    if (ProfileMessage(*message)) return;
 #endif
     auto* tab = ActiveTab();
     switch (message->what) {

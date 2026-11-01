@@ -2,6 +2,7 @@
 #include "FaviconCache.h"
 #include "Location.h"
 #include "Messages.h"
+#include "Profiles.h"
 #include <WebKit/WebKitContext.h>
 #include <Alert.h>
 #include <AppFileInfo.h>
@@ -442,6 +443,10 @@ void SitePermissionService::ShowNotification(const BMessage& message)
         notification.AddOnClickArg(kNotificationClickArgument);
         notification.AddOnClickArg(fPrivate ? "private" : "normal");
         notification.AddOnClickArg(std::to_string(identifier).c_str());
+        // Browser profiles (#157): the click starts a Summit, which hands
+        // it to the Summit of this profile.
+        notification.AddOnClickArg("--profile");
+        notification.AddOnClickArg(ProfileDirectory(CurrentProfileID()).c_str());
     }
     BMessenger view;
     message.FindMessenger("view", &view);

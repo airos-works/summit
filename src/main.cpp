@@ -30,6 +30,8 @@
 #include "ui/UpdateChecker.h"
 #include "ui/PageTranslation.h"
 #include "ui/SafeBrowsingService.h"
+// Browser profiles (#157).
+#include "ui/Profiles.h"
 #include <Mime.h>
 #include <nlohmann/json.hpp>
 #endif
@@ -104,6 +106,11 @@ public:
             QuitForShutdown(DetachCurrentMessage());
             return;
         }
+        // Browser profiles (#157): File › Quit quits every profile's
+        // Summit; closing the last window, only this one (ProfilesQuit).
+        if (message && message->what == B_QUIT_REQUESTED && !fQuitting && !fDownloadPromptPending)
+            fQuitScope = message->GetBool("summit:last_window", false) ? QuitScope::LastWindow
+                : message->GetBool("summit:profiles", false) ? QuitScope::OtherProfile : QuitScope::User;
 #endif
         BApplication::DispatchMessage(message, handler);
     }
@@ -116,7 +123,18 @@ public:
                 std::fprintf(stderr, "Summit permissions: click arguments argc=%d %s %s\n", static_cast<int>(argc),
                     argc > 2 ? argv[2] : "", argc > 3 ? argv[3] : "");
         }
-        if (argc == 4 && !std::strcmp(argv[1], summit::kNotificationClickArgument)) {
+        // Browser profiles (#157): Summit is B_MULTIPLE_LAUNCH, so a click
+        // on a notification starts a Summit, which hands it to the one that
+        // has the notification's profile (LockProfile; "--profile DIR" ends
+        // the arguments of Summit's own notifications).
+        if (!fShared && argc >= 2 && (!std::strcmp(argv[1], summit::kNotificationClickArgument)
+                || !std::strcmp(argv[1], kExtensionNotificationClickArgument))) {
+            if (argc >= 6 && !std::strcmp(argv[argc - 2], "--profile")) fProfile = argv[argc - 1];
+            fForwardedStarts.emplace_back(argv, argv + argc);
+            return;
+        }
+        if ((argc == 4 || (argc == 6 && !std::strcmp(argv[4], "--profile")))
+            && !std::strcmp(argv[1], summit::kNotificationClickArgument)) {
             const bool privateContext = !std::strcmp(argv[2], "private");
             auto& service = privateContext ? fPrivateSitePermissions : fSitePermissions;
             if (service) service->NotificationClicked(std::strtoull(argv[3], nullptr, 10));
@@ -138,8 +156,24 @@ public:
         }
         for (int32 i = 1; i < argc; ++i) {
             std::string argument = argv[i];
-            if (argument == "--profile" && i + 1 < argc) { fProfile = argv[++i]; continue; }
+            // Only the start's own: a running Summit keeps its profile.
+            if (argument == "--profile" && i + 1 < argc) {
+                ++i;
+                if (!fShared) fProfile = argv[i];
+                continue;
+            }
 #if SUMMIT_MODERN_WEBKIT
+            // Browser profiles (#157): File › New Window in Profile of a
+            // profile whose Summit runs.
+            if (argument == summit::kNewWindowArgument) {
+                if (fWindows.empty()) fNewWindowRequested = true;
+                else {
+                    summit::BrowserWindowOptions options;
+                    options.frame = CascadedFrame();
+                    OpenWindow(options);
+                }
+                continue;
+            }
             if (argument == "--app" && i + 1 < argc) {
                 if (!fWindows.empty()) OpenWebApp(argv[++i]);
                 else fPendingWebApps.push_back(argv[++i]);
@@ -232,6 +266,15 @@ public:
             return;
         }
         if (!LockProfile()) return;
+#if SUMMIT_MODERN_WEBKIT
+        // Browser profiles (#157): which one this is, of which default
+        // profile; it runs now, so the default one need not reopen it.
+        {
+            const auto [base, id] = summit::BrowserProfiles::Locate(fProfile);
+            summit::SetCurrentProfile(base, id);
+            summit::SetReopenProfile(false);
+        }
+#endif
         fShared = std::make_shared<summit::SharedProfile>(fProfile / "profile.json");
         fShared->AddListener(BMessenger(this));
 #if SUMMIT_MODERN_WEBKIT
@@ -346,6 +389,11 @@ public:
             // the last one restored; the session keeps its tabs.
             for (const auto& url : fURLs) OpenInNormalWindow(url);
         }
+#if SUMMIT_MODERN_WEBKIT
+        // Browser profiles (#157): the default profile reopens the others
+        // whose windows were open when Summit quit.
+        if (restore && summit::CurrentProfileID() == summit::BrowserProfiles::kDefaultID) ReopenProfiles();
+#endif
         // A damaged profile is said in the window, not in an alert that
         // holds every click until it is answered (#93).
         if (const auto notice = ProfileNotice(); !notice.empty()) {
@@ -377,9 +425,10 @@ public:
         }
         // File › Check for Updates… and the daily check (Preferences › General).
         fUpdates = std::make_unique<summit::UpdateChecker>(
-            [shared = fShared] {
-                return shared->Read([](const summit::Profile& profile) {
-                    return summit::UpdateChecker::Settings { profile.checkForUpdates, profile.lastUpdateCheck };
+            [shared = fShared, daily = summit::CurrentProfileID() == summit::BrowserProfiles::kDefaultID] {
+                // Browser profiles (#157): one Summit of several looks daily.
+                return shared->Read([daily](const summit::Profile& profile) {
+                    return summit::UpdateChecker::Settings { daily && profile.checkForUpdates, profile.lastUpdateCheck };
                 });
             },
             [shared = fShared](int64_t when) {
@@ -404,6 +453,7 @@ public:
     {
 #if SUMMIT_MODERN_WEBKIT
         if (summit::HandleTranslationContextMessage(message)) return;
+        if (ProfilesMessage(message)) return;
         if (message->what == kReleaseDownloadContexts) {
             ReleaseRetiredPrivateContexts();
             return;
@@ -605,7 +655,10 @@ public:
             fDownloadPromptPending = false;
             if (message->GetInt32("which", 0) == 1) {
                 fDownloadQuitApproved = true;
-                PostMessage(B_QUIT_REQUESTED);
+                BMessage quit(B_QUIT_REQUESTED);
+                quit.AddBool("summit:last_window", fQuitScope == QuitScope::LastWindow);
+                quit.AddBool("summit:profiles", fQuitScope == QuitScope::OtherProfile);
+                PostMessage(&quit);
             } else if (std::exchange(fUpdateRestart, false) && fUpdates) fUpdates->RestartCancelled();
             return;
         }
@@ -669,8 +722,14 @@ public:
         if (message->what == summit::kCloseWindowRequest) {
             BMessenger sender;
             if (fQuitting || message->FindMessenger("window", &sender) != B_OK) return;
-            // Closing the last window quits, which keeps its tabs for next time.
-            if (fWindows.size() <= 1) { PostMessage(B_QUIT_REQUESTED); return; }
+            // Closing the last window quits, which keeps its tabs for next
+            // time; not other profiles' Summits (#157).
+            if (fWindows.size() <= 1) {
+                BMessage quit(B_QUIT_REQUESTED);
+                quit.AddBool("summit:last_window", true);
+                PostMessage(&quit);
+                return;
+            }
             BMessage request(summit::kRequestWindowClose);
             request.AddBool("quitting", false);
             sender.SendMessage(&request);
@@ -1163,6 +1222,7 @@ public:
                 prompt->Go(new BInvoker(new BMessage(summit::kDownloadQuitReply), this));
                 return false;
             }
+            ProfilesQuit();
             // Windows close one at a time, so pages can ask about unsaved work.
             fQuitting = true;
             fClosedWhileQuitting.clear();
@@ -1272,6 +1332,7 @@ public:
     std::shared_ptr<summit::SharedProfile> Profile() const { return fShared; }
     // Held until the profile's last save, after the application is gone.
     std::unique_ptr<summit::ProfileLock> TakeProfileLock() { return std::move(fProfileLock); }
+    const std::filesystem::path& ProfileFolder() const { return fProfile; }
     // Whether Summit was started again while it quit, and with what.
     bool TakeRelaunch(std::vector<std::string>& arguments)
     {
@@ -1283,6 +1344,9 @@ public:
             fRelaunch = false;
             return true;
         }
+        // Browser profiles (#157): what was started while this profile's
+        // Summit quit opens in this profile again.
+        if (fRelaunch && !fProfile.empty()) arguments.insert(arguments.begin(), {"--profile", fProfile.string()});
 #endif
         return std::exchange(fRelaunch, false);
     }
@@ -2463,6 +2527,17 @@ private:
         std::vector<std::string> arguments { "Summit" };
         for (const auto& app : fPendingWebApps) arguments.insert(arguments.end(), {"--app", app});
         arguments.insert(arguments.end(), fURLs.begin(), fURLs.end());
+#if SUMMIT_MODERN_WEBKIT
+        // Browser profiles (#157).
+        if (fNewWindowRequested) arguments.push_back(summit::kNewWindowArgument);
+        for (const auto& forwarded : fForwardedStarts) {
+            BMessage click(B_ARGV_RECEIVED);
+            click.AddInt32("argc", static_cast<int32>(forwarded.size()));
+            for (const auto& argument : forwarded) click.AddString("argv", argument.c_str());
+            if (const status_t sent = running.SendMessage(&click, static_cast<BHandler*>(nullptr), 2000000); sent != B_OK) return sent;
+        }
+        if (arguments.size() == 1 && !fForwardedStarts.empty()) return B_OK;
+#endif
         if (arguments.size() == 1) start.what = B_SILENT_RELAUNCH;
         else {
             start.AddInt32("argc", static_cast<int32>(arguments.size()));
@@ -2536,6 +2611,65 @@ private:
     bool fWaitingForNativeUI = false;
     bool fNativeUIExitReady = false;
     bool fCancellingDownloads = false;
+    // Browser profiles (#157, Profiles.h).
+    enum class QuitScope { User, LastWindow, OtherProfile };
+    // What started the quit under way: File › Quit (or Deskbar's, or an
+    // update) quits every profile's Summit; closing the last window, or a
+    // quit that another profile's Summit asked for, only this one.
+    QuitScope fQuitScope = QuitScope::User;
+    // A start that only asked for a new window (kNewWindowArgument), and
+    // notification clicks, for the Summit that has the profile.
+    bool fNewWindowRequested = false;
+    std::vector<std::vector<std::string>> fForwardedStarts;
+    bool ProfilesMessage(BMessage* message)
+    {
+        switch (message->what) {
+            case summit::kProfilesChanged:
+                summit::ReloadProfiles();
+                for (const auto& window : fWindows) window.messenger.SendMessage(summit::kProfilesChanged);
+                return true;
+            case summit::kOpenProfileWindow: {
+                const std::string id = message->GetString("id", "");
+                if (fQuitting || id.empty()) return true;
+                if (id == summit::CurrentProfileID()) {
+                    summit::BrowserWindowOptions options;
+                    options.frame = CascadedFrame();
+                    OpenWindow(options);
+                    return true;
+                }
+                std::string error;
+                if (summit::StartProfile(id, true, error) != B_OK) {
+                    std::fprintf(stderr, "Summit: could not open profile %s: %s\n", id.c_str(), error.c_str());
+                    (new BAlert("Summit", ("Could not open the profile: " + error).c_str(), "OK"))->Go(nullptr);
+                }
+                return true;
+            }
+            case summit::kQuitWithOtherProfiles: {
+                if (fQuitting) return true;
+                BMessage quit(B_QUIT_REQUESTED);
+                quit.AddBool("summit:profiles", true);
+                PostMessage(&quit);
+                return true;
+            }
+        }
+        return false;
+    }
+    // As the quit starts, with windows open.
+    void ProfilesQuit()
+    {
+        if (fQuitScope == QuitScope::User && !fShutdownRequest) summit::QuitOtherProfiles();
+        // Its windows open again with the default profile's next time.
+        if (fQuitScope != QuitScope::LastWindow) summit::SetReopenProfile(true);
+    }
+    void ReopenProfiles()
+    {
+        for (const auto& entry : summit::KnownProfiles().entries) {
+            if (!entry.reopen || entry.id == summit::CurrentProfileID() || summit::RunningProfileTeam(entry.id) >= 0) continue;
+            std::string error;
+            if (summit::StartProfile(entry.id, false, error) != B_OK)
+                std::fprintf(stderr, "Summit: could not reopen profile %s: %s\n", entry.id.c_str(), error.c_str());
+        }
+    }
 #endif
     bool fWebKitInitialized = false;
     int fExitStatus = 0;
@@ -2549,7 +2683,7 @@ private:
     bool fRestoreAfterUpdate = false;
 };
 
-// The executable this instance runs: Summit is single-launch per executable.
+// The executable this instance runs.
 static std::string ExecutablePath()
 {
     int32 cookie = 0;
@@ -2562,19 +2696,48 @@ static std::string ExecutablePath()
 
 // A quitting instance keeps a port of this name from the moment it leaves the
 // registrar until its profile is written.
-static std::string ExitingPortName()
+// Browser profiles (#157): one per profile folder, as several profiles'
+// Summits run the same executable at once.
+static std::string ExitingPortName(const std::filesystem::path& profile)
 {
     char name[B_OS_NAME_LENGTH];
-    std::snprintf(name, sizeof(name), "Summit exits %016zx", std::hash<std::string>()(ExecutablePath()));
+    std::snprintf(name, sizeof(name), "Summit exits %016zx", std::hash<std::string>()(ExecutablePath() + "\n" + profile.string()));
     return name;
+}
+
+// The profile folder Summit uses without --profile.
+static std::filesystem::path DefaultProfileFolder()
+{
+    BPath path;
+    if (find_directory(B_USER_SETTINGS_DIRECTORY, &path) != B_OK || path.Append(
+#if SUMMIT_MODERN_WEBKIT
+            "SummitModern"
+#else
+            "Summit"
+#endif
+        ) != B_OK)
+        return { };
+    return path.Path();
+}
+
+// The profile folder a start names (its last --profile), as ReadyToRun
+// resolves it.
+static std::filesystem::path StartProfileFolder(int argc, char** argv)
+{
+    std::filesystem::path folder;
+    for (int i = 1; i + 1 < argc; ++i) if (!std::strcmp(argv[i], "--profile")) folder = argv[++i];
+    if (folder.empty()) return DefaultProfileFolder();
+    std::error_code error;
+    auto absolute = std::filesystem::absolute(folder, error);
+    return error ? folder : absolute;
 }
 
 // A start of the same Summit just after it quit would read the profile while
 // that instance still writes it (seconds, on a Raspberry Pi's SD card): wait
 // for it, up to 20 s.
-static void WaitForExitingInstance()
+static void WaitForExitingInstance(const std::filesystem::path& profile)
 {
-    const std::string name = ExitingPortName();
+    const std::string name = ExitingPortName(profile);
     if (find_port(name.c_str()) < 0) return;
     const bigtime_t deadline = system_time() + 20000000;
     while (find_port(name.c_str()) >= 0 && system_time() < deadline) snooze(50000);
@@ -2627,7 +2790,7 @@ static int RunApplication()
         profile = app.Profile();
         lock = app.TakeProfileLock();
         relaunch = app.TakeRelaunch(relaunchArguments);
-        if (profile) exiting = create_port(1, ExitingPortName().c_str());
+        if (profile) exiting = create_port(1, ExitingPortName(app.ProfileFolder()).c_str());
     }
     // The application has left the registrar: a new start makes a new
     // instance, which waits for the port. The profile's last write (the
@@ -2690,7 +2853,7 @@ int main(int argc, char** argv)
     // browser), not by its launcher: take the launcher's environment.
     summit::ApplyLaunchEnvironment();
     PrepareResolver();
-    WaitForExitingInstance();
+    WaitForExitingInstance(StartProfileFolder(argc, argv));
     // Pages get 10 frames in error.stack, as in Chrome, not JavaScriptCore's
     // 100: every error walks the stack that far when it is made. One of
     // uBlock Origin's YouTube filters traps JSON.stringify and, for a value

@@ -4,6 +4,8 @@
 #include "Location.h"
 // Preferences › AutoFill (#149).
 #include "AutoFillPreferences.h"
+// Preferences › Profiles (#157).
+#include "Profiles.h"
 #endif
 #include "Messages.h"
 #include "McpService.h"
@@ -333,6 +335,8 @@ PreferencesWindow::PreferencesWindow(BMessenger owner, const PreferencesState& s
     fTabs = new BTabView("preferences-tabs", B_WIDTH_FROM_LABEL);
     fTabs->AddTab(general);
 #if SUMMIT_MODERN_WEBKIT
+    // Preferences › Profiles (#157).
+    fTabs->AddTab(new ProfilesPreferences());
     fTabs->AddTab(new BrowsingPreferences(fOwner, state.autoplay, state.spellChecking, state.spellingLanguage, state.dictionaries,
         state.savePasswords, state.webApps, state.aids));
     // Preferences › AutoFill (#149).
@@ -961,7 +965,7 @@ void PreferencesWindow::MessageReceived(BMessage* message)
                     : name == "sites" ? "Site Permissions" : name == "links" ? "Link Handlers"
                     : name == "developer" ? "Developer" : name == "compatibility" ? "Compatibility"
                     : name == "privacy" ? "Privacy" : name == "autofill" ? "AutoFill"
-                    : name == "security" ? "Security" : "General";
+                    : name == "security" ? "Security" : name == "profiles" ? "Profiles" : "General";
                 for (int32 i = 0; i < fTabs->CountTabs(); ++i)
                     if (fTabs->TabAt(i) && fTabs->TabAt(i)->Label() && !std::strcmp(fTabs->TabAt(i)->Label(), label)) fTabs->Select(i);
             }

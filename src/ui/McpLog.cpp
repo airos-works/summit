@@ -117,6 +117,11 @@ void RestoreStderr()
     if (const int original = sOriginal; original >= 0) dup2(original, STDERR_FILENO);
 }
 
+int OriginalStderr()
+{
+    return sCapturing ? sOriginal.load() : -1;
+}
+
 bool Capturing()
 {
     return sCapturing;

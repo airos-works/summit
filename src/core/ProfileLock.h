@@ -5,8 +5,9 @@
 
 namespace summit {
 // The lock a running Summit holds on its profile folder (#93), so that a
-// second copy (another build or package: B_SINGLE_LAUNCH only covers one
-// executable) does not open the same profile. It is an flock() of the
+// second copy (another build or package, or since browser profiles (#157)
+// made Summit B_MULTIPLE_LAUNCH, the same one) does not open the same
+// profile: it hands its start to the first. It is an flock() of the
 // folder's "lock" file, which the system drops when the process ends; the
 // file names the team that holds it.
 class ProfileLock {

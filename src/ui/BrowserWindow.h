@@ -807,6 +807,18 @@ private:
     // BrowserWindowSafeBrowsing.cpp). The engine's B_WEBKIT_NAVIGATION_BLOCKED
     // and the warning's buttons; false for other messages.
     bool SafeBrowsingMessage(BMessage& message);
+    // Browser profiles (#157, BrowserWindowProfiles.cpp): File › New Window
+    // in Profile, and the profile's name in the title and its badge in the
+    // toolbar (while there are several). kProfilesChanged; false for other
+    // messages.
+    bool ProfileMessage(BMessage& message);
+    void AddProfileMenu(BMenu* file);
+    void RefreshProfileMenu();
+    void ShowProfile();
+    BMenu* fProfileMenu = nullptr;
+    class ProfileBadge* fProfileBadge = nullptr;
+    // " (Work)" after "— Summit" in the title; empty with one profile.
+    std::string fProfileTitle;
     // After each state notification: with engines that do not check
     // navigations, a listed page is stopped as it starts; the warning goes
     // when another page shows.
