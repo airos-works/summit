@@ -273,6 +273,9 @@ private:
         // A small tab at the start of the strip (#68), whether the page plays
         // sound and whether it is muted (#70).
         bool pinned = false, playingAudio = false, audioMuted = false;
+        // navigator.mediaSession.metadata of a tab that plays sound (#144):
+        // "Title — Artist", for the tab menu's media controls.
+        std::string nowPlaying;
         // The tab group it is in (TabGroup::id), 0 for none.
         int64 group = 0;
         bool softwareRendering = false;

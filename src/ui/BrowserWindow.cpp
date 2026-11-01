@@ -123,6 +123,9 @@ static constexpr uint64 kPictureInPictureQuery = uint64(1) << 61;
 // The page script of Install as App… (#75).
 static constexpr uint64 kWebAppQuery = (uint64(1) << 61) + 1;
 static constexpr uint64 kBookmarkletQuery = (uint64(1) << 61) + 2;
+// What a tab playing sound says it plays (navigator.mediaSession.metadata).
+static constexpr uint64 kNowPlayingQuery = (uint64(1) << 61) + 3;
+static std::string ShortLabel(const std::string& text, size_t limit);
 // Every 20 seconds while the current tab asks for the screen to stay on.
 static constexpr uint32 kKeepScreenAwake = 'kawk';
 static constexpr bigtime_t kKeepScreenAwakeInterval = 20000000;
@@ -3432,6 +3435,25 @@ void BrowserWindow::ShowTabMenu(const BMessage& message)
     menu->AddItem(addToGroup);
     if (clicked && clicked->group) menu->AddItem(item("Remove from Group", kRemoveTabFromGroup));
     menu->AddItem(item(clicked && clicked->audioMuted ? "Unmute Tab" : "Mute Tab", kToggleTabMute));
+    // Media controls for a tab playing sound (#144), through the page's Media
+    // Session action handlers, as the media keys do.
+    if (clicked && (clicked->playingAudio || !clicked->nowPlaying.empty())) {
+        menu->AddSeparatorItem();
+        if (!clicked->nowPlaying.empty()) {
+            auto* playing = new BMenuItem(ShortLabel(clicked->nowPlaying, 60).c_str(), nullptr);
+            playing->SetEnabled(false);
+            menu->AddItem(playing);
+        }
+        auto media = [&](const char* label, const char* command) {
+            auto* invocation = item(label, kTabMediaCommand);
+            invocation->Message()->AddString("command", command);
+            menu->AddItem(invocation);
+        };
+        media(clicked->playingAudio ? "Pause" : "Play", clicked->playingAudio ? "pause" : "play");
+        media("Previous Track", "previous");
+        media("Next Track", "next");
+        menu->AddSeparatorItem();
+    }
     // Frees what the page holds; it loads again when selected (#116).
     auto* unload = item("Unload Tab", kDiscardTab);
     unload->SetEnabled(clicked && id != fSelected && clicked->deferredURL.empty());
@@ -4949,6 +4971,16 @@ void BrowserWindow::MessageReceived(BMessage* message)
                 InstallWebAppResult(*message);
                 break;
             }
+            if (message->GetUInt64("identifier", 0) == kNowPlayingQuery) {
+                BMessenger view;
+                if (message->FindMessenger("view", &view) == B_OK) {
+                    for (auto& candidate : fTabs) {
+                        if (candidate.view && BMessenger(candidate.view) == view)
+                            candidate.nowPlaying = message->GetString("result", "");
+                    }
+                }
+                break;
+            }
             if (message->GetUInt64("identifier", 0) == kPictureInPictureQuery) {
                 // window.__summitPipLargest(): the page's largest video.
                 const char* token = nullptr;
@@ -5015,6 +5047,11 @@ void BrowserWindow::MessageReceived(BMessage* message)
         }
         case kPictureInPictureCommand: PictureInPictureCommand(*message); break;
         case kToggleTabMute: ToggleTabMute(message->GetInt64("id", fSelected)); break;
+        case kTabMediaCommand: {
+            Tab* target = FindTabByID(message->GetInt64("id", fSelected));
+            if (target && target->view) target->view->SendMediaCommand(message->GetString("command", "toggle"));
+            break;
+        }
         case kCheckMemory: UnloadTabsIfMemoryIsLow(); break;
         case kDiscardTab:
             if (const auto error = DiscardTab(message->GetInt64("id", 0)); !error.empty()) fStatus->SetText(error.c_str());
@@ -6518,6 +6555,7 @@ void BrowserWindow::WebKitStateChanged(const BMessage& message)
     if (message.FindMessenger("view", &sender) != B_OK) return;
     auto* tab = FindTab(sender);
     if (!tab) return;
+    const std::string titleBefore = tab->title;
     if (message.what == B_WEBKIT_PROCESS_EXITED && message.HasString("reason")) {
         // The engine's second notice says why the process ended.
         ProcessExitReason(*tab, message.GetString("reason", ""));
@@ -6654,7 +6692,14 @@ void BrowserWindow::WebKitStateChanged(const BMessage& message)
     message.FindBool("capturingCamera", &tab->capturingCamera);
     message.FindBool("capturingMicrophone", &tab->capturingMicrophone);
     message.FindBool("capturingScreen", &tab->capturingScreen);
+    const bool wasPlaying = tab->playingAudio;
     message.FindBool("playingAudio", &tab->playingAudio);
+    // What it plays, for the tab menu (#144): asked again when it starts
+    // playing or its title changes (the next track of a playlist).
+    if (tab->view && tab->playingAudio && (!wasPlaying || tab->title != titleBefore))
+        tab->view->EvaluateJavaScriptIsolated("(() => { const m = navigator.mediaSession && navigator.mediaSession.metadata;"
+            " if (!m || !m.title) return ''; return m.artist ? m.title + ' — ' + m.artist : m.title; })()",
+            BMessenger(this), kNowPlayingQuery, tab->loadGeneration);
     message.FindBool("audioMuted", &tab->audioMuted);
     message.FindBool("softwareRendering", &tab->softwareRendering);
     if (tab->softwareRendering && !fSoftwareRenderingNoticeShown) {

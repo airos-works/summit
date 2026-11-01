@@ -11,6 +11,9 @@ namespace summit {
 // along the strip). kTabDragOut: tab "id" was dropped at "where" (a screen
 // point) outside the strip.
 constexpr uint32 kToggleTabMute = 'tmut';
+// The tab menu's media controls (#144): "id", "command" (as
+// BWebKitView::SendMediaCommand takes it).
+constexpr uint32 kTabMediaCommand = 'tmed';
 // Unload tab "id" until it is selected again (#116).
 constexpr uint32 kDiscardTab = 'tdsc';
 // Every 30 s: unload a long-unseen tab when memory is low (#116).

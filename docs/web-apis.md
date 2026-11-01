@@ -50,6 +50,11 @@ media session manager as remote control commands, so the page's action
 handlers run (next/previous track on YouTube playlists, for example), else its
 media element plays or pauses.
 
+The tab menu of a tab playing sound shows what it plays (the page's Media
+Session metadata, "Title — Artist", read in an isolated world when the tab
+starts playing or its title changes) with Pause/Play, Previous Track and Next
+Track, which go the same way as the media keys.
+
 Media keys work while a Summit window is active. System-wide media keys and a
 "now playing" display need an OS service: airos-works/haiku#55.
 
