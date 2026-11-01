@@ -96,6 +96,11 @@ Turned on in `UIProcess/haiku/WebView.cpp`: scoped custom element registries
 `ManagedMediaSource`, WebRTC encoded transforms (`RTCRtpScriptTransform`).
 `canPlayType("audio/flac")` now answers like `audio/x-flac`.
 
+`<input type=checkbox switch>` (Safari 17.4) draws as a switch: the
+Adwaita toggle button control paints a rounded track (the accent colour when
+on) with a white thumb (`ToggleButtonAdwaita::drawSwitch`), 22×12 CSS px by
+default.
+
 The Cookie Store API (`cookieStore.get`, `getAll`, `set`, `delete`) works on
 the curl cookie jar (`NetworkStorageSessionCurl.cpp`) with the same rules as
 `document.cookie`: SameSite, cross-site tracking prevention (#141), HttpOnly

@@ -28861,6 +28861,32 @@ index 66a20213ebdf576b14def9aedd5d1b4e879f8f2e..a4f6aff2ecd7fc24d9ab6844a581f23f
      drawButton(graphicsContext, borderRect, deviceScaleFactor, style);
  }
  
+diff --git a/Source/WebCore/platform/graphics/adwaita/ControlFactoryAdwaita.cpp b/Source/WebCore/platform/graphics/adwaita/ControlFactoryAdwaita.cpp
+index fdbb9e332ccc5104a6f0ba7d108aeb923c18d7c2..64bef10a71a7f58fc622a0ee093df5d59be971e6 100644
+--- a/Source/WebCore/platform/graphics/adwaita/ControlFactoryAdwaita.cpp
++++ b/Source/WebCore/platform/graphics/adwaita/ControlFactoryAdwaita.cpp
+@@ -43,6 +43,7 @@
+ #include "TextAreaPart.h"
+ #include "TextFieldAdwaita.h"
+ #include "TextFieldPart.h"
++#include "SwitchPart.h"
+ #include "ToggleButtonAdwaita.h"
+ #include "ToggleButtonPart.h"
+ 
+@@ -141,10 +142,10 @@ std::unique_ptr<PlatformControl> ControlFactoryAdwaita::createPlatformSliderTrac
+     return makeUnique<SliderTrackAdwaita>(part, *this);
+ }
+ 
+-std::unique_ptr<PlatformControl> ControlFactoryAdwaita::createPlatformSwitch(SwitchPart&)
++std::unique_ptr<PlatformControl> ControlFactoryAdwaita::createPlatformSwitch(SwitchPart& part)
+ {
+-    notImplemented();
+-    return nullptr;
++    // Drawn by the toggle button control (ToggleButtonAdwaita::drawSwitch).
++    return makeUnique<ToggleButtonAdwaita>(part, *this);
+ }
+ 
+ std::unique_ptr<PlatformControl> ControlFactoryAdwaita::createPlatformTextArea(TextAreaPart& part)
 diff --git a/Source/WebCore/platform/graphics/adwaita/MenuListAdwaita.cpp b/Source/WebCore/platform/graphics/adwaita/MenuListAdwaita.cpp
 index bd5f330af7837b3052f6fd3e805b24eab39b6b60..10ae377bab047c4421581e485027703db1090ccf 100644
 --- a/Source/WebCore/platform/graphics/adwaita/MenuListAdwaita.cpp
@@ -29025,7 +29051,7 @@ index eb9985b0665cc16c151639780a1cfb71cc318d3d..013ac68508a1da168de44fff0a3e6c7e
  
      SRGBA<uint8_t> textFieldBackgroundColor;
 diff --git a/Source/WebCore/platform/graphics/adwaita/ToggleButtonAdwaita.cpp b/Source/WebCore/platform/graphics/adwaita/ToggleButtonAdwaita.cpp
-index 44e75200a66d6215bcf347014d908eafcd10c313..554c8182a4df91339ef278fc6e4a9d42c17a5641 100644
+index 44e75200a66d6215bcf347014d908eafcd10c313..9443cbe23399a973f22e37656d08e1009d0c6ee9 100644
 --- a/Source/WebCore/platform/graphics/adwaita/ToggleButtonAdwaita.cpp
 +++ b/Source/WebCore/platform/graphics/adwaita/ToggleButtonAdwaita.cpp
 @@ -28,6 +28,10 @@
@@ -29039,10 +29065,14 @@ index 44e75200a66d6215bcf347014d908eafcd10c313..554c8182a4df91339ef278fc6e4a9d42
  #if USE(THEME_ADWAITA)
  
  #include "ColorBlending.h"
-@@ -43,6 +47,12 @@ ToggleButtonAdwaita::ToggleButtonAdwaita(ControlPart& part, ControlFactoryAdwait
+@@ -43,6 +47,16 @@ ToggleButtonAdwaita::ToggleButtonAdwaita(ControlPart& part, ControlFactoryAdwait
  
  void ToggleButtonAdwaita::draw(GraphicsContext& graphicsContext, const FloatRoundedRect& borderRect, float deviceScaleFactor, const ControlStyle& style)
  {
++    if (m_owningPart.get()->type() == StyleAppearance::Switch) {
++        drawSwitch(graphicsContext, borderRect, deviceScaleFactor, style);
++        return;
++    }
 +#if PLATFORM(HAIKU) && USE(SKIA)
 +    // As Haiku applications draw them (#114).
 +    if (paintControlLookHaiku(graphicsContext, m_owningPart.get()->type() == StyleAppearance::Checkbox ? ControlLookPartHaiku::Checkbox : ControlLookPartHaiku::Radio,
@@ -29052,6 +29082,77 @@ index 44e75200a66d6215bcf347014d908eafcd10c313..554c8182a4df91339ef278fc6e4a9d42
      if (m_owningPart.get()->type() == StyleAppearance::Checkbox)
          drawCheckbox(graphicsContext, borderRect, deviceScaleFactor, style);
      else
+@@ -212,6 +226,58 @@ void ToggleButtonAdwaita::drawRadio(GraphicsContext& graphicsContext, const Floa
+         graphicsContext.endTransparencyLayer();
+ }
+ 
++// <input type=checkbox switch> (Summit #147): a rounded track, in the accent
++// colour when on, with a round white thumb at its end; as Safari draws it.
++void ToggleButtonAdwaita::drawSwitch(GraphicsContext& graphicsContext, const FloatRoundedRect& borderRect, float /*deviceScaleFactor*/, const ControlStyle& style)
++{
++    GraphicsContextStateSaver stateSaver(graphicsContext);
++    FloatRect track = borderRect.rect();
++    if (track.width() < track.height() * 1.5f) {
++        float height = track.width() / 1.8f;
++        track.move(0, (track.height() - height) / 2);
++        track.setHeight(height);
++    }
++    bool dark = style.states.contains(ControlStyle::State::DarkAppearance);
++    bool on = style.states.contains(ControlStyle::State::Checked);
++    bool enabled = style.states.contains(ControlStyle::State::Enabled);
++    if (!enabled)
++        graphicsContext.beginTransparencyLayer(disabledOpacity);
++
++    float radius = track.height() / 2;
++    Color accentColor = this->accentColor(style);
++    Color offColor = dark ? Color(SRGBA<uint8_t> { 255, 255, 255, 38 }) : Color(SRGBA<uint8_t> { 0, 0, 0, 38 });
++    Color trackColor = on ? accentColor : offColor;
++    if (style.states.contains(ControlStyle::State::Hovered) && enabled)
++        trackColor = blendSourceOver(trackColor, Color(dark ? Color::white : Color::black).colorWithAlphaMultipliedBy(0.08));
++    Path path;
++    path.addRoundedRect(track, FloatSize(radius, radius));
++    graphicsContext.setFillRule(WindRule::NonZero);
++    graphicsContext.setFillColor(trackColor);
++    graphicsContext.fillPath(path);
++
++    float inset = std::max(1.0f, track.height() * 0.1f);
++    float thumbSize = track.height() - 2 * inset;
++    FloatRect thumb(track.x() + inset, track.y() + inset, thumbSize, thumbSize);
++    bool leftToRight = !style.states.contains(ControlStyle::State::InlineFlippedWritingMode);
++    if (on == leftToRight)
++        thumb.setX(track.maxX() - inset - thumbSize);
++    path.clear();
++    path.addEllipseInRect(thumb);
++    graphicsContext.setFillColor(Color(SRGBA<uint8_t> { 0, 0, 0, 40 }));
++    graphicsContext.save();
++    graphicsContext.translate(0, std::max(0.5f, thumbSize * 0.04f));
++    graphicsContext.fillPath(path);
++    graphicsContext.restore();
++    graphicsContext.setFillColor(Color::white);
++    graphicsContext.fillPath(path);
++
++    if (style.states.contains(ControlStyle::State::Focused))
++        Adwaita::paintFocus(graphicsContext, track, toggleFocusOffset, focusColor(accentColor));
++
++    if (!enabled)
++        graphicsContext.endTransparencyLayer();
++}
++
+ } // namespace WebCore
+ 
+ #endif // USE(THEME_ADWAITA)
+diff --git a/Source/WebCore/platform/graphics/adwaita/ToggleButtonAdwaita.h b/Source/WebCore/platform/graphics/adwaita/ToggleButtonAdwaita.h
+index 5481e91ada645efde7dc6b2c4b5664964232d114..323171c5e5d8f80ce1e852b406b1c41c815f5eb1 100644
+--- a/Source/WebCore/platform/graphics/adwaita/ToggleButtonAdwaita.h
++++ b/Source/WebCore/platform/graphics/adwaita/ToggleButtonAdwaita.h
+@@ -40,6 +40,7 @@ public:
+ private:
+     void drawCheckbox(GraphicsContext&, const FloatRoundedRect& borderRect, float deviceScaleFactor, const ControlStyle&);
+     void drawRadio(GraphicsContext&, const FloatRoundedRect& borderRect, float deviceScaleFactor, const ControlStyle&);
++    void drawSwitch(GraphicsContext&, const FloatRoundedRect& borderRect, float deviceScaleFactor, const ControlStyle&);
+ };
+ 
+ } // namespace WebCore
 diff --git a/Source/WebCore/platform/graphics/angle/GraphicsContextGLANGLE.h b/Source/WebCore/platform/graphics/angle/GraphicsContextGLANGLE.h
 index b4fef2439283f4d3c986638ec2e8f3f85bd3d859..795ccd6e459e677a2d543c66ba5be3b5f2ae6943 100644
 --- a/Source/WebCore/platform/graphics/angle/GraphicsContextGLANGLE.h
@@ -84701,7 +84802,7 @@ index d17ab1befcb9f1ca511c15904a588f864906d28e..246eeb3a4d62cca04eddcccc141d685e
  
  } // namespace WebCore
 diff --git a/Source/WebCore/rendering/adwaita/RenderThemeAdwaita.cpp b/Source/WebCore/rendering/adwaita/RenderThemeAdwaita.cpp
-index a6fb2e3ceb842891f2529697f12dd0d6780f3bdb..bc0da7c7402a1db43bb2cd87b1125e7119bdb236 100644
+index a6fb2e3ceb842891f2529697f12dd0d6780f3bdb..f98847b989dfac85057c8d7edf5b4ec2a3cf6ef6 100644
 --- a/Source/WebCore/rendering/adwaita/RenderThemeAdwaita.cpp
 +++ b/Source/WebCore/rendering/adwaita/RenderThemeAdwaita.cpp
 @@ -64,6 +64,12 @@
@@ -84717,7 +84818,15 @@ index a6fb2e3ceb842891f2529697f12dd0d6780f3bdb..bc0da7c7402a1db43bb2cd87b1125e71
  namespace WebCore {
  using namespace CSS::Literals;
  using namespace WebCore::Adwaita;
-@@ -237,6 +243,11 @@ RefPtr<FragmentedSharedBuffer> RenderThemeAdwaita::mediaControlsImageDataForIcon
+@@ -94,6 +100,7 @@ bool RenderThemeAdwaita::canCreateControlPartForRenderer(const RenderElement& re
+     case StyleAppearance::SliderHorizontal:
+     case StyleAppearance::SliderVertical:
+     case StyleAppearance::SquareButton:
++    case StyleAppearance::Switch: // ToggleButtonAdwaita::drawSwitch (Summit #147)
+         return true;
+     default:
+         break;
+@@ -237,6 +244,11 @@ RefPtr<FragmentedSharedBuffer> RenderThemeAdwaita::mediaControlsImageDataForIcon
      if (!data)
          return nullptr;
      return SharedBuffer::create(WTF::move(*data));
@@ -84729,7 +84838,7 @@ index a6fb2e3ceb842891f2529697f12dd0d6780f3bdb..bc0da7c7402a1db43bb2cd87b1125e71
  #else
      return nullptr;
  #endif
-@@ -256,6 +267,11 @@ String RenderThemeAdwaita::mediaControlsBase64StringForIconNameAndType(const Str
+@@ -256,6 +268,11 @@ String RenderThemeAdwaita::mediaControlsBase64StringForIconNameAndType(const Str
      if (!data)
          return { };
      return base64EncodeToString(data->span());
@@ -84741,7 +84850,7 @@ index a6fb2e3ceb842891f2529697f12dd0d6780f3bdb..bc0da7c7402a1db43bb2cd87b1125e71
  #else
      return { };
  #endif
-@@ -263,8 +279,35 @@ String RenderThemeAdwaita::mediaControlsBase64StringForIconNameAndType(const Str
+@@ -263,8 +280,35 @@ String RenderThemeAdwaita::mediaControlsBase64StringForIconNameAndType(const Str
  
  String RenderThemeAdwaita::mediaControlsFormattedStringForDuration(double durationInSeconds)
  {
@@ -84777,6 +84886,24 @@ index a6fb2e3ceb842891f2529697f12dd0d6780f3bdb..bc0da7c7402a1db43bb2cd87b1125e71
  }
  #endif // ENABLE(VIDEO)
  
+@@ -421,6 +465,17 @@ Style::PreferredSizePair RenderThemeAdwaita::controlSize(StyleAppearance appeara
+             buttonSizeHeight = 12_css_px * zoomFactor;
+         return { WTF::move(buttonSizeWidth), WTF::move(buttonSizeHeight) };
+     }
++    case StyleAppearance::Switch: {
++        // <input type=checkbox switch> (Summit #147): a track twice as wide
++        // as it is high, as Safari draws it.
++        auto switchWidth = zoomedSize.width();
++        auto switchHeight = zoomedSize.height();
++        if (switchWidth.isSizingKeywordOrAuto())
++            switchWidth = 22_css_px * zoomFactor;
++        if (switchHeight.isSizingKeywordOrAuto())
++            switchHeight = 12_css_px * zoomFactor;
++        return { WTF::move(switchWidth), WTF::move(switchHeight) };
++    }
+     case StyleAppearance::InnerSpinButton: {
+         auto spinButtonSizeWidth = zoomedSize.width();
+         auto spinButtonSizeHeight = zoomedSize.height();
 diff --git a/Source/WebCore/rendering/haiku/RenderThemeHaiku.cpp b/Source/WebCore/rendering/haiku/RenderThemeHaiku.cpp
 new file mode 100644
 index 0000000000000000000000000000000000000000..92d20a3ff6fd83acdf255b10fa5b68cdfff528ae
@@ -148862,10 +148989,10 @@ index 0000000000000000000000000000000000000000..c9a119d02f85b7c5ad8fe9153bfc9604
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/WebView.cpp b/Source/WebKit/UIProcess/haiku/WebView.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..b78381915339a4dfe1aace7296ae04a57289812f
+index 0000000000000000000000000000000000000000..d52513754fe7dd44d671a678ae3b9c69bd16fd86
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/WebView.cpp
-@@ -0,0 +1,3563 @@
+@@ -0,0 +1,3566 @@
 +/*
 + * Copyright (C) 2013 Intel Corporation. All rights reserved.
 + *
@@ -150872,6 +150999,9 @@ index 0000000000000000000000000000000000000000..b78381915339a4dfe1aace7296ae04a5
 +    configuration->preferences().setScopedCustomElementRegistryEnabled(true);
 +    configuration->preferences().setEnableElementCurrentCSSZoom(true);
 +    configuration->preferences().setCSSFontVariantEmojiEnabled(true);
++    // <input type=checkbox switch> (Safari 17.4), drawn by the Adwaita
++    // toggle button control (ToggleButtonAdwaita::drawSwitch).
++    configuration->preferences().setSwitchControlEnabled(true);
 +    // HTTPS-First (#160), as Chrome, Firefox and Safari do: http:// pages are
 +    // tried over https first and loaded over http when the host has no
 +    // usable HTTPS (ResourceErrorCurl.cpp). IP addresses and localhost are
