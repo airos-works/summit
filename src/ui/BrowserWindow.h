@@ -434,6 +434,17 @@ private:
     // nearest first (kBackForwardMenu), and the same entries for a menu.
     void ShowBackForwardMenu(const BMessage&);
     void AddBackForwardItems(BMenu* menu, const Tab& tab, bool forward);
+    // Web Share (#153): a menu at the pointer for what a page shares with
+    // navigator.share() (B_WEBKIT_SHARE_REQUESTED, answered when the menu
+    // closes) or for the current page (kSharePage): copy the link or the
+    // text, e-mail them, save shared files to Downloads.
+    void ShareRequested(const BMessage& message);
+    void SharePage();
+    void ShowShareMenu(BMessage share);
+    void ShareChosen(const BMessage& message);
+    bool SaveSharedFiles(const BMessage& share);
+    std::map<uint64, BMessage> fShares;
+    uint64 fShareSerial = 0;
 #endif
     void UpdateWindowList();
 #if SUMMIT_MODERN_WEBKIT

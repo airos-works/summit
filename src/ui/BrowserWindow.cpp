@@ -811,6 +811,7 @@ BrowserWindow::BrowserWindow(std::shared_ptr<SharedProfile> profile, std::string
     if (fWebApp.empty()) AddItem(file, "Install as App…", kInstallWebApp);
     else AddItem(file, "Open in Summit", kOpenInBrowser);
     AddItem(file, "Save Page As…", kSavePage, 'S');
+    AddItem(file, "Share…", kSharePage);
     AddItem(file, "Save as PDF…", kSaveAsPDF, 'S', B_SHIFT_KEY);
     AddItem(file, "Page Setup…", kPageSetup);
     AddItem(file, "Print…", kPrint, 'P');
@@ -1579,6 +1580,8 @@ void BrowserWindow::AttachPageView(Tab& tab, BWebKitView* webView, bool extensio
     // Summit's own passkeys (#111): a page's WebAuthn request that no
     // extension takes asks the user (PasskeyPrompt).
     if (!extensionPage) webView->SetPasskeyRequests(true);
+    // navigator.share() shows the share menu (#153).
+    if (!extensionPage) webView->SetShareRequests(true);
     webView->SetCustomUserAgent(fShared->Read([](const Profile& profile) {
         return FindUserAgentPreset(profile.userAgent).agent;
     }));
@@ -3517,6 +3520,154 @@ void BrowserWindow::ShowBackForwardMenu(const BMessage& message)
 }
 #endif
 
+#if SUMMIT_MODERN_WEBKIT
+namespace {
+// RFC 6068: everything but unreserved characters escaped, lines as CRLF.
+std::string MailtoEncode(const std::string& text)
+{
+    static constexpr char hex[] = "0123456789ABCDEF";
+    std::string encoded;
+    for (size_t index = 0; index < text.size(); ++index) {
+        const unsigned char character = text[index];
+        if (character == '\n' && (!index || text[index - 1] != '\r')) { encoded += "%0D%0A"; continue; }
+        if (std::isalnum(character) || std::strchr("-._~", character)) encoded += static_cast<char>(character);
+        else { encoded += '%'; encoded += hex[character >> 4]; encoded += hex[character & 15]; }
+    }
+    return encoded;
+}
+// A shared file's name as a name in the Downloads folder.
+std::string SharedFileName(std::string name)
+{
+    for (auto& character : name)
+        if (character == '/' || static_cast<unsigned char>(character) < 0x20) character = '-';
+    if (name.empty() || name == "." || name == "..") name = "shared file";
+    if (name.size() > 200) name.resize(200);
+    return name;
+}
+}
+
+void BrowserWindow::ShareRequested(const BMessage& message)
+{
+    BMessenger view;
+    const uint64 identifier = message.GetUInt64("identifier", 0);
+    auto* tab = message.FindMessenger("view", &view) == B_OK ? FindTab(view) : nullptr;
+    if (!tab || tab->id != fSelected || IsClosing()) {
+        BWebKitView::AnswerShareRequest(identifier, false);
+        return;
+    }
+    BMessage share(message);
+    share.AddInt64("tab", tab->id);
+    ShowShareMenu(std::move(share));
+}
+
+void BrowserWindow::SharePage()
+{
+    auto* tab = ActiveTab();
+    if (!tab || !(tab->url.starts_with("https://") || tab->url.starts_with("http://"))) return;
+    BMessage share;
+    share.AddString("title", tab->title.c_str());
+    share.AddString("url", tab->url.c_str());
+    share.AddInt64("tab", tab->id);
+    ShowShareMenu(std::move(share));
+}
+
+void BrowserWindow::ShowShareMenu(BMessage share)
+{
+    const uint64 identifier = share.GetUInt64("identifier", 0);
+    const std::string url = share.GetString("url", ""), text = share.GetString("text", "");
+    int32 files = 0;
+    share.GetInfo("file", nullptr, &files);
+    auto* menu = new CancellableMenu("share", fMenusCancelled);
+    auto add = [menu](const std::string& label, const char* action) {
+        auto* choice = new BMessage(kShareChosen);
+        choice->AddString("action", action);
+        menu->AddItem(new BMenuItem(label.c_str(), choice));
+    };
+    if (!url.empty()) add("Copy Link", "link");
+    if (!text.empty()) add("Copy Text", "text");
+    if (!url.empty() || !text.empty()) add("E-mail…", "email");
+    if (files) add(files == 1 ? std::string("Save File to Downloads") : "Save " + std::to_string(files) + " Files to Downloads", "files");
+    if (!menu->CountItems()) {
+        delete menu;
+        if (identifier) BWebKitView::AnswerShareRequest(identifier, false);
+        return;
+    }
+    const uint64 serial = ++fShareSerial;
+    fShares[serial] = std::move(share);
+    // At the pointer: the page's Share button was just clicked, or the menu
+    // that asked for it was there.
+    BPoint where;
+    uint32 buttons = 0;
+    fPages->GetMouse(&where, &buttons, false);
+    where = fPages->ConvertToScreen(where);
+    // Go() waits on a thread of its own, so that a menu dismissed without a
+    // choice is told apart from a choice (the page is answered either way).
+    std::thread([menu, where, serial, identifier, window = BMessenger(this)] {
+        BMenuItem* item = menu->Go(where, false, false, false);
+        BMessage chosen(kShareChosen);
+        chosen.AddUInt64("serial", serial);
+        if (item && item->Message()) chosen.AddString("action", item->Message()->GetString("action", ""));
+        delete menu;
+        if (window.SendMessage(&chosen) != B_OK && identifier) BWebKitView::AnswerShareRequest(identifier, false);
+    }).detach();
+}
+
+void BrowserWindow::ShareChosen(const BMessage& message)
+{
+    auto found = fShares.find(message.GetUInt64("serial", 0));
+    if (found == fShares.end()) return;
+    const BMessage share = std::move(found->second);
+    fShares.erase(found);
+    const uint64 identifier = share.GetUInt64("identifier", 0);
+    const std::string action = message.GetString("action", "");
+    const std::string url = share.GetString("url", ""), text = share.GetString("text", ""), title = share.GetString("title", "");
+    bool shared = !action.empty();
+    if (action == "link") CopyToClipboard(url);
+    else if (action == "text") CopyToClipboard(text);
+    else if (action == "email") {
+        // A new message with the title as its subject: the system's e-mail
+        // application, or the site that handles mailto: links.
+        std::string body = text;
+        if (!url.empty()) body += (body.empty() ? "" : "\n\n") + url;
+        const std::string mailto = "mailto:?subject=" + MailtoEncode(title) + "&body=" + MailtoEncode(body);
+        if (auto* tab = FindTabByID(share.GetInt64("tab", 0)); tab && tab->id == fSelected)
+            fProtocolHandlers->Open(mailto, tab->id, tab->url);
+        else shared = false;
+    } else if (action == "files") shared = SaveSharedFiles(share);
+    if (identifier) BWebKitView::AnswerShareRequest(identifier, shared);
+}
+
+bool BrowserWindow::SaveSharedFiles(const BMessage& share)
+{
+    BPath downloads;
+    std::string error;
+    if (!FindDownloads(downloads, error)) { ShowError(error); return false; }
+    BMessage file;
+    int32 saved = 0;
+    for (int32 index = 0; share.FindMessage("file", index, &file) == B_OK; ++index) {
+        const void* data = nullptr;
+        ssize_t size = 0;
+        if (file.FindData("data", B_RAW_TYPE, &data, &size) != B_OK) continue;
+        // Never over a file that is there: "name 2.ext".
+        const std::filesystem::path name = SharedFileName(file.GetString("name", ""));
+        std::filesystem::path path = std::filesystem::path(downloads.Path()) / name;
+        for (int copy = 2; std::filesystem::exists(path) && copy < 1000; ++copy)
+            path = std::filesystem::path(downloads.Path()) / (name.stem().string() + " " + std::to_string(copy) + name.extension().string());
+        BFile output(path.c_str(), B_WRITE_ONLY | B_CREATE_FILE | B_FAIL_IF_EXISTS);
+        if (output.InitCheck() != B_OK || (size > 0 && output.Write(data, size) != size)) {
+            ShowError("Could not write " + path.string() + ".");
+            return saved > 0;
+        }
+        if (const char* type = file.GetString("type", ""); *type) BNodeInfo(&output).SetType(type);
+        else update_mime_info(path.c_str(), false, true, false);
+        ++saved;
+    }
+    fStatus->SetText(saved == 1 ? std::string("Saved the shared file to Downloads").c_str()
+        : ("Saved " + std::to_string(saved) + " shared files to Downloads").c_str());
+    return saved > 0;
+}
+#endif
+
 void BrowserWindow::ApplyInterfaceStyle()
 {
 #if SUMMIT_MODERN_WEBKIT
@@ -4772,6 +4923,9 @@ void BrowserWindow::MessageReceived(BMessage* message)
         case kSaveAsPDF: SaveAsPDF(); break;
         case kSaveAsPDFChosen: SaveAsPDFChosen(*message); break;
         case kSavePage: SavePageAs(); break;
+        case kSharePage: SharePage(); break;
+        case kShareChosen: ShareChosen(*message); break;
+        case B_WEBKIT_SHARE_REQUESTED: ShareRequested(*message); break;
         case kSavePageFormat: SavePageFormatChosen(message->GetUInt32("format", 0)); break;
         case kSavePageChosen: SavePageChosen(*message); break;
         case B_WEBKIT_PAGE_CONTENTS: PageContentsReceived(*message); break;
@@ -5874,6 +6028,9 @@ void BrowserWindow::ShowPageContextMenu(const BMessage& message)
         auto* copyAddress = new BMenuItem("Copy Page Address", copy(tab->url));
         copyAddress->SetEnabled(!DisplayURL(tab->url).empty());
         menu->AddItem(copyAddress);
+        auto* share = new BMenuItem("Share…", new BMessage(kSharePage));
+        share->SetEnabled(tab->url.starts_with("https://") || tab->url.starts_with("http://"));
+        menu->AddItem(share);
         edit("Select All", B_SELECT_ALL);
         menu->AddSeparatorItem();
         menu->AddItem(new BMenuItem("Print…", new BMessage(kPrint)));

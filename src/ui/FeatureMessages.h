@@ -51,6 +51,11 @@ constexpr uint32 kPageSetup = 'pstp';
 constexpr uint32 kSavePage = 'svpg';
 constexpr uint32 kSavePageFormat = 'svpf';
 constexpr uint32 kSavePageChosen = 'svpc';
+// Web Share (#153): File › Share… and the page menu's Share… for the
+// current page, and what was chosen from a share menu ("serial", "action":
+// "link", "text", "email", "files"; none when it was dismissed).
+constexpr uint32 kSharePage = 'shpg';
+constexpr uint32 kShareChosen = 'shch';
 // Picture in Picture of the current tab's video ("token" when the page or a
 // context menu chose one; otherwise the largest playing video).
 constexpr uint32 kPictureInPicture = 'pipt';

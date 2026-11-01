@@ -230,3 +230,20 @@ The engine call is `BWebKitView::GetPageContents(format, reply, identifier)`
 answered with `B_WEBKIT_PAGE_CONTENTS`. An archive holds the document as it
 is shown (WebCore serializes the current DOM), and an opened archive loads
 nothing from the network.
+
+## Web Share (#153)
+
+`navigator.share()` and `navigator.canShare()`, with files, as in Safari
+(`WebShareEnabled`, `WebShareFileAPIEnabled`; `SUMMIT_WEB_SHARE=0` hides
+them). WebCore asks only after a click or key press and only in secure pages
+(https, localhost, file:). Summit shows a menu at the pointer: Copy Link, Copy
+Text, E-mail… (a `mailto:` with the title as subject and the text and link as
+body, opened as a mailto: link would be) and Save File(s) to Downloads. A
+choice resolves the page's promise; closing the menu rejects it with
+AbortError. File › Share… and the page menu's Share… show the same menu for
+the current page.
+
+The engine sends `B_WEBKIT_SHARE_REQUESTED` (title, text, url, and each file's
+name, type and bytes) to views that asked for it
+(`BWebKitView::SetShareRequests`); the host answers with
+`BWebKitView::AnswerShareRequest`. Other embedders get AbortError at once.
