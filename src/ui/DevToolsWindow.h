@@ -124,6 +124,7 @@ private:
     BButton* fDockButton;
     BButton* fDockRightButton;
     BButton* fUndockButton;
+    BButton* fResponsiveButton;
     bool fDocked = false;
     BWindow* fDockOwner = nullptr;
     BRect fUndockedFrame;

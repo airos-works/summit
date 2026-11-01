@@ -37,6 +37,44 @@ the browser window or the selected tab changes (`kDeveloperToolsDock`).
 Another tab's docked tools are hidden until their tab is selected. Test
 action: `dock on|right|off`; the state has `docked`, `hidden` and `frame`.
 
+### Responsive Design Mode
+
+**Responsive Design Mode** (the tools' button, **View › Enter Responsive
+Design Mode**, Option+Alt+R as Safari's Command-Option-R, or Shift+Alt+M as
+in Chrome and Firefox; #155) shows the selected tab's page at a device's size
+inside the window, centred over a grey background, with a bar above it:
+**Device** (iPhone 15 393×852, iPad 820×1180, Pixel 8 412×915, Desktop
+1280×800, Custom), the width and height in CSS pixels (typed sizes become
+Custom unless they are the device's either way up), **Rotate**, **User
+agent** (the device's own browser, Summit's normal one, Safari on an iPhone,
+Safari on an iPad, which sends the Mac's agent as iPadOS does, or Chrome on
+Android) and **Exit**. The window keeps its size. The page's `innerWidth`,
+`innerHeight` and media queries are the device's; a changed user agent loads
+the page again, as in Safari, so `navigator.userAgent` and the server see it.
+Leaving restores the full page area and the normal agent (loading again if it
+had changed). The mode is the tab's own: other tabs are not affected, and a
+tab put in the mode starts with the window's last choices.
+
+It is the browser's alone (`ResponsiveDesign.cpp`,
+`BrowserWindowResponsive.cpp`): the window's page cards (`PageCards`) lay the
+page view out at the chosen size. Two limits follow from the engine:
+
+- **Device pixel ratio** stays the display's (the bar says `@2×` on a 200%
+  screen): `BWebKitView` has no device scale override, and page zoom would
+  change the viewport's CSS size instead.
+- **A window smaller than the size** shows the page at the room there is
+  in that direction, and the bar says *Window too small: W × H* (the page's
+  viewport is then that size too). The view is never made bigger than its
+  area: pages put straight into the screen (direct present) are clipped to
+  the window and the view's frame, not to the views around it, so a taller
+  page would cover the status line. An engine change that clipped
+  `updateDirectTargetHaiku()`'s rectangles to the view's ancestors would let
+  the page keep the device's size there, scrolled or clipped.
+
+Touch events are not emulated (the Haiku build has none). The bar's
+controls are cut off at the right in windows narrower than it, rather than
+making the window wider.
+
 ### View Page Source
 
 **View › View Page Source** (Alt+U, or *View Page Source* in a page's context

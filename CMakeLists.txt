@@ -128,7 +128,8 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Haiku")
         src/ui/SourceView.cpp src/ui/DevToolsWindow.cpp src/ui/DevToolsNetwork.cpp src/ui/DevToolsConsole.cpp src/ui/DevToolsStorage.cpp src/ui/DevToolsElements.cpp src/ui/DevToolsSources.cpp src/ui/DevToolsPerformance.cpp src/ui/PageSourceWindow.cpp
         src/ui/BrowserWindowMcp.cpp src/ui/McpService.cpp src/ui/McpLog.cpp src/ui/McpBrowserTools.cpp src/ui/McpSystemTools.cpp
         src/ui/McpPageTools.cpp src/ui/McpEngineTools.cpp src/ui/McpDebugHelper.cpp src/ui/UpdateChecker.cpp
-        src/ui/SafeBrowsingService.cpp src/ui/BrowserWindowSafeBrowsing.cpp)
+        src/ui/SafeBrowsingService.cpp src/ui/BrowserWindowSafeBrowsing.cpp
+        src/ui/ResponsiveDesign.cpp src/ui/BrowserWindowResponsive.cpp)
     target_include_directories(Summit PRIVATE ${SUMMIT_WEBKIT_INCLUDE_DIR} /boot/system/develop/headers/private/netservices)
     target_compile_options(Summit PRIVATE -Wno-multichar)
     target_compile_definitions(Summit PRIVATE SUMMIT_MODERN_WEBKIT=$<BOOL:${SUMMIT_MODERN_WEBKIT}>)

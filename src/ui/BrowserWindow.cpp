@@ -904,6 +904,10 @@ BrowserWindow::BrowserWindow(std::shared_ptr<SharedProfile> profile, std::string
     pick->AddString("panel", "elements");
     pick->AddBool("pick", true);
     view->AddItem(new BMenuItem("Select Element in Page", pick, 'C', B_SHIFT_KEY));
+    // Safari's Command-Option-R; Command-Shift-M is Chrome's and Firefox's.
+    fResponsiveItem = new BMenuItem("Enter Responsive Design Mode", new BMessage(kResponsiveDesign), 'R', B_OPTION_KEY);
+    view->AddItem(fResponsiveItem);
+    AddShortcut('M', B_SHIFT_KEY, new BMessage(kResponsiveDesign));
 #endif
     menu->AddItem(view);
     fHistoryMenu = new BMenu("History");
@@ -990,7 +994,18 @@ BrowserWindow::BrowserWindow(std::shared_ptr<SharedProfile> profile, std::string
     fBookmarksBar = new BookmarksBar();
     fBookmarksBar->SetMenusCancelled(&fMenusCancelled);
     fPages = new BView("pages", 0);
+#if SUMMIT_MODERN_WEBKIT
+    // Pages in Responsive Design Mode are laid out at their device's size (#155).
+    fCards = new PageCards([this](BView* view) { return ResponsivePageSize(view); }, [this](BSize shown) {
+        // Said by the bar after this layout pass.
+        BMessage message(kResponsiveShown);
+        message.AddFloat("width", shown.width);
+        message.AddFloat("height", shown.height);
+        PostMessage(&message);
+    });
+#else
     fCards = new BCardLayout();
+#endif
     fPages->SetLayout(fCards);
     fPages->SetExplicitMinSize(fPopup ? BSize(160, 100) : BSize(320, 200));
     fFindBar = new BGroupView(B_HORIZONTAL, 6);
@@ -1014,6 +1029,8 @@ BrowserWindow::BrowserWindow(std::shared_ptr<SharedProfile> profile, std::string
     fStatusProgress->Hide();
 #if SUMMIT_MODERN_WEBKIT
     fNoticeBar = new NoticeBar();
+    fResponsiveBar = new ResponsiveBar();
+    fResponsiveBar->Hide();
     // The sidebar: its title and a close button over the extension's page.
     fSidebar = new BGroupView("sidebar", B_VERTICAL, 0);
     fSidebarTitle = new BStringView("sidebar-title", "");
@@ -1032,7 +1049,7 @@ BrowserWindow::BrowserWindow(std::shared_ptr<SharedProfile> profile, std::string
     BLayoutBuilder::Group<>(this, B_VERTICAL, 0)
         .Add(menu).Add(fToolbar).Add(fBookmarksBar).Add(fTabStrip).Add(fProgress)
 #if SUMMIT_MODERN_WEBKIT
-        .Add(fNoticeBar)
+        .Add(fNoticeBar).Add(fResponsiveBar)
 #endif
 #if SUMMIT_MODERN_WEBKIT
         .AddSplit(B_HORIZONTAL, 0, 1.0f).GetSplitView(&fContentSplit)
@@ -1794,6 +1811,7 @@ void BrowserWindow::SelectTab(int64 id, bool forClose)
 #if SUMMIT_MODERN_WEBKIT
         // The dock shows this tab's tools, if they are docked.
         PlaceDockedDeveloperTools();
+        ShowResponsiveDesign();
         SyncBrowserWindow();
         RefreshNoticeBar();
         UpdateKeepScreenAwake();
@@ -3367,7 +3385,9 @@ void BrowserWindow::ProfileChanged(const BMessage& message)
 #endif
 #if SUMMIT_MODERN_WEBKIT
         const char* agent = fShared->Read([](const Profile& profile) { return FindUserAgentPreset(profile.userAgent).agent; });
-        for (auto& tab : fTabs) tab.view->SetCustomUserAgent(agent);
+        // Tabs in Responsive Design Mode keep their device's agent.
+        for (auto& tab : fTabs)
+            if (!ResponsiveUserAgent(tab.responsive)) tab.view->SetCustomUserAgent(agent);
 #endif
         const auto [bar, style] = fShared->Read([](const Profile& profile) {
             return std::make_pair(profile.showBookmarksBar, profile.interfaceStyle);
@@ -4677,6 +4697,7 @@ void BrowserWindow::MessageReceived(BMessage* message)
 #if SUMMIT_MODERN_WEBKIT
     // Fraudulent and malicious website warnings (#150).
     if (SafeBrowsingMessage(*message)) return;
+    if (ResponsiveMessage(*message)) return;
 #endif
     auto* tab = ActiveTab();
     switch (message->what) {
@@ -6305,6 +6326,10 @@ void BrowserWindow::ShowDeveloperTools(const char* panel, const BMessage* reques
         PageTarget(tab->pageIdentifier));
     tab->devTools = BMessenger(window);
     tab->devToolsIdentifier = window->ToolsIdentifier();
+    // Its Responsive Design Mode button shows the tab's mode.
+    BMessage responsive(kResponsiveDesignState);
+    responsive.AddBool("active", tab->responsive.active);
+    window->PostMessage(&responsive);
     if (!show.IsEmpty()) window->PostMessage(&show);
     window->Show();
     // Extensions' devtools_page views, made on WebKit's application thread.

@@ -5,6 +5,7 @@
 #include <WebKit/WebKitView.h>
 #include "AutoFillStore.h"
 #include "Containers.h"
+#include "ResponsiveDesign.h"
 #include <DirectWindow.h>
 #include <Window.h>
 #else
@@ -341,6 +342,10 @@ private:
         // title, loading or Back and Forward change (backForwardKey).
         BMessage backForward;
         std::string backForwardKey;
+        // Responsive Design Mode (#155, BrowserWindowResponsive.cpp), and the
+        // user agent it last gave the page (empty: the normal one).
+        ResponsiveState responsive;
+        std::string responsiveAgent;
 #endif
     };
 #if SUMMIT_MODERN_WEBKIT
@@ -812,6 +817,23 @@ private:
     void ShowSafetyWarningCard(Tab& tab);
     // Go Back: the page before, or the home page when there was none.
     void LeaveSafetyWarning(Tab& tab);
+    // Responsive Design Mode (#155, BrowserWindowResponsive.cpp): its
+    // messages (ResponsiveDesign.h); false for others.
+    bool ResponsiveMessage(BMessage& message);
+    // Enters or leaves it for a tab; the window's last choice of device is
+    // where a tab starts.
+    void SetResponsiveDesign(Tab& tab, bool active);
+    // After a tab's state changed: its user agent (reloading the page when
+    // that changed), its page's size and the bar.
+    void ApplyResponsiveDesign(Tab& tab);
+    // The bar, the menu item and the pages' background for the selected tab.
+    void ShowResponsiveDesign();
+    // The size a page view is laid out at (PageCards), when its tab is in the mode.
+    std::optional<BSize> ResponsivePageSize(BView* view);
+    ResponsiveBar* fResponsiveBar = nullptr;
+    BMenuItem* fResponsiveItem = nullptr;
+    ResponsiveState fResponsiveLast;
+    std::optional<rgb_color> fPagesColor;
     // A notice for the whole window (a damaged profile was restored, #93),
     // shown in the notice bar until dismissed.
     std::string fWindowNotice;

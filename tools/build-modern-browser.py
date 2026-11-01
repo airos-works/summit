@@ -401,6 +401,7 @@ def main():
                    'src/ui/ExtensionShortcutsWindow.cpp', 'src/ui/ExtensionUpdater.cpp', 'src/core/PageLanguage.cpp',
                    'src/core/TranslationModels.cpp', 'src/ui/PageTranslation.cpp', 'src/ui/BrowserWindowTranslation.cpp',
                    'src/core/SafeBrowsing.cpp', 'src/ui/SafeBrowsingService.cpp', 'src/ui/BrowserWindowSafeBrowsing.cpp',
+                   'src/ui/ResponsiveDesign.cpp', 'src/ui/BrowserWindowResponsive.cpp',
                    # Keep these entries equal to vendor/cld2/sources.list.
                    # Release CI parses this literal list without running Python.
                    'vendor/cld2/internal/cldutil.cc',

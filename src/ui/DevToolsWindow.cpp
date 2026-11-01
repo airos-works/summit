@@ -1,6 +1,7 @@
 #if SUMMIT_MODERN_WEBKIT
 #include "DevToolsWindow.h"
 #include "Messages.h"
+#include "ResponsiveDesign.h"
 #include <WebKit/WebKitContext.h>
 #include <WebKit/WebKitInspector.h>
 #include <WebKit/WebKitView.h>
@@ -110,6 +111,11 @@ DevToolsWindow::DevToolsWindow(BMessenger owner, int64 tab, const std::string& p
     fUndockButton = new BButton("undock", "Undock", DockMessage(-1));
     fUndockButton->SetToolTip("Show the tools in a window of their own");
     fUndockButton->SetEnabled(false);
+    // The page at a phone's or tablet's size in its browser window (#155);
+    // pressed while the tab is in the mode.
+    fResponsiveButton = new BButton("responsive", "Responsive Design Mode", new BMessage(kResponsiveDesign));
+    fResponsiveButton->SetBehavior(BButton::B_TOGGLE_BEHAVIOR);
+    fResponsiveButton->SetToolTip("Show the page at a phone's, tablet's or chosen size");
     // Extensions' devtools pages run here unseen, one per extension.
     fExtensionPageHolder = new BView(BRect(0, 0, 9, 9), "extension-devtools-pages", B_FOLLOW_NONE, 0);
     fExtensionPageHolder->Hide();
@@ -119,6 +125,8 @@ DevToolsWindow::DevToolsWindow(BMessenger owner, int64 tab, const std::string& p
             .Add(fDockButton)
             .Add(fDockRightButton)
             .Add(fUndockButton)
+            .AddStrut(8)
+            .Add(fResponsiveButton)
             .AddGlue()
         .End()
         .Add(fTabs)
@@ -129,6 +137,9 @@ DevToolsWindow::DevToolsWindow(BMessenger owner, int64 tab, const std::string& p
     AddShortcut('F', 0, new BMessage(kFocusSearch));
     // Docks or undocks, as the button does.
     AddShortcut('D', B_SHIFT_KEY, new BMessage(kToggleDock));
+    // The browser window's shortcuts for Responsive Design Mode.
+    AddShortcut('R', B_OPTION_KEY, new BMessage(kResponsiveDesign));
+    AddShortcut('M', B_SHIFT_KEY, new BMessage(kResponsiveDesign));
 }
 
 DevToolsWindow::~DevToolsWindow() = default;
@@ -242,6 +253,16 @@ void DevToolsWindow::MessageReceived(BMessage* message)
             ExtensionEvents({ });
             // Styles the page changed are read again a moment later.
             if (fSession.DOM().StylesWaiting()) Sync();
+            break;
+        case kResponsiveDesign: {
+            // The browser window decides, and says what it did.
+            BMessage toggle(kResponsiveDesign);
+            toggle.AddInt64("tab", fTab);
+            fOwner.SendMessage(&toggle);
+            break;
+        }
+        case kResponsiveDesignState:
+            fResponsiveButton->SetValue(message->GetBool("active", false) ? B_CONTROL_ON : B_CONTROL_OFF);
             break;
         case kToggleDock:
         case kDockTo: {
