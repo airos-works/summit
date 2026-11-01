@@ -25,6 +25,7 @@ set(required
     ENABLE_POINTER_LOCK         # Element.requestPointerLock (issue #143)
     ENABLE_MEDIA_SESSION        # navigator.mediaSession, media keys (issue #144)
     ENABLE_SPEECH_SYNTHESIS     # speechSynthesis through eSpeak (issue #145)
+    ENABLE_WEBDRIVER            # WebKitWebDriver / summitdriver (issue #159)
 )
 if(NOT EXISTS "${INIT_CACHE}")
     message(FATAL_ERROR "no init cache at '${INIT_CACHE}'")

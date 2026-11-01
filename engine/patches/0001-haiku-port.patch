@@ -116,6 +116,111 @@ index 623cbf26b183ffd2cc05484f8a89b06cc9ff3d1e..013697ef81211d3b254c3fb5a0ae44f2
  #if USE(GLIB)
  #include <wtf/glib/GRefPtr.h>
  #include <wtf/glib/SocketConnection.h>
+diff --git a/Source/JavaScriptCore/inspector/remote/socket/RemoteInspectorConnectionClient.cpp b/Source/JavaScriptCore/inspector/remote/socket/RemoteInspectorConnectionClient.cpp
+index bd6c6dbcbeee1d413f8c880e56fb7e74c78749f8..8a559ca7ad8b75cf12a8ba7065b66d1d3987cdee 100644
+--- a/Source/JavaScriptCore/inspector/remote/socket/RemoteInspectorConnectionClient.cpp
++++ b/Source/JavaScriptCore/inspector/remote/socket/RemoteInspectorConnectionClient.cpp
+@@ -30,14 +30,37 @@
+ 
+ #include "RemoteInspectorSocketEndpoint.h"
+ #include <wtf/JSONValues.h>
++#include <wtf/HashSet.h>
++#include <wtf/Lock.h>
++#include <wtf/NeverDestroyed.h>
+ #include <wtf/RunLoop.h>
+ 
+ namespace Inspector {
+ 
++// Received events reach the client on the main run loop, after the socket
++// thread queued them. A client destroyed in between (WebDriver's SessionHost
++// when its session is deleted while the browser still talks) must not get
++// them: the clients that may still receive events are kept here.
++static Lock liveClientsLock;
++static HashSet<const RemoteInspectorConnectionClient*>& liveClients() WTF_REQUIRES_LOCK(liveClientsLock)
++{
++    static NeverDestroyed<HashSet<const RemoteInspectorConnectionClient*>> clients;
++    return clients;
++}
++
++static bool isLiveClient(const RemoteInspectorConnectionClient* client)
++{
++    Locker locker { liveClientsLock };
++    return liveClients().contains(client);
++}
++
+ RemoteInspectorConnectionClient::~RemoteInspectorConnectionClient()
+ {
++    // No more data reaches this client after invalidateClient().
+     auto& endpoint = Inspector::RemoteInspectorSocketEndpoint::singleton();
+     endpoint.invalidateClient(*this);
++    Locker locker { liveClientsLock };
++    liveClients().remove(this);
+ }
+ 
+ std::optional<ConnectionID> RemoteInspectorConnectionClient::connectInet(UTF8CStringView serverAddr, uint16_t serverPort)
+@@ -66,11 +89,17 @@ void RemoteInspectorConnectionClient::didReceive(RemoteInspectorSocketEndpoint&,
+ {
+     ASSERT(!isMainThread());
+ 
++    {
++        Locker locker { liveClientsLock };
++        liveClients().add(this);
++    }
+     Locker locker { m_parsersLock };
+     auto result = m_parsers.ensure(clientID, [this, clientID] {
+         return MessageParser([this, clientID](Vector<uint8_t>&& data) {
+             if (auto event = RemoteInspectorConnectionClient::extractEvent(clientID, WTF::move(data))) {
+                 RunLoop::mainSingleton().dispatch([this, event = WTF::move(*event)] {
++                    if (!isLiveClient(this))
++                        return;
+                     const auto& methodName = event.methodName;
+                     auto& methods = dispatchMap();
+                     if (methods.contains(methodName)) {
+diff --git a/Source/JavaScriptCore/inspector/remote/socket/posix/RemoteInspectorSocketPOSIX.cpp b/Source/JavaScriptCore/inspector/remote/socket/posix/RemoteInspectorSocketPOSIX.cpp
+index ef01a259256ac7d938105ec678c4f93ad18d376b..0d4e6f31c7b8c3c591e43ccd5d026ed17643f54f 100644
+--- a/Source/JavaScriptCore/inspector/remote/socket/posix/RemoteInspectorSocketPOSIX.cpp
++++ b/Source/JavaScriptCore/inspector/remote/socket/posix/RemoteInspectorSocketPOSIX.cpp
+@@ -87,6 +87,11 @@ std::optional<PlatformSocketType> listen(UTF8CStringView addressStr, uint16_t po
+     }
+ 
+     error = setsockopt(fdListen, SOL_SOCKET, SO_REUSEPORT, &enabled, sizeof(enabled));
++#if OS(HAIKU)
++    // Haiku's sockets may refuse SO_REUSEPORT; SO_REUSEADDR is enough for
++    // WebDriver's one listener and the browser's automation socket.
++    error = 0;
++#endif
+     if (error < 0) {
+         LOG_ERROR("setsockopt() SO_REUSEPORT, errno = %d", errno);
+         ::close(fdListen);
+@@ -160,12 +165,14 @@ bool setup(PlatformSocketType socket)
+         return false;
+     }
+ 
+-    if (setsockopt(socket, SOL_SOCKET, SO_RCVBUF, &BufferSize, sizeof(BufferSize))) {
++    // An int, as POSIX has it: Haiku refuses the size_t constant's 8 bytes.
++    const int bufferSize = BufferSize;
++    if (setsockopt(socket, SOL_SOCKET, SO_RCVBUF, &bufferSize, sizeof(bufferSize))) {
+         LOG_ERROR("setsockopt(SO_RCVBUF) error (errno = %d)", errno);
+         return false;
+     }
+ 
+-    if (setsockopt(socket, SOL_SOCKET, SO_SNDBUF, &BufferSize, sizeof(BufferSize))) {
++    if (setsockopt(socket, SOL_SOCKET, SO_SNDBUF, &bufferSize, sizeof(bufferSize))) {
+         LOG_ERROR("setsockopt(SO_SNDBUF) error (errno = %d)", errno);
+         return false;
+     }
+@@ -180,6 +187,11 @@ bool isValid(PlatformSocketType socket)
+ 
+ bool isListening(PlatformSocketType socket)
+ {
++#if OS(HAIKU)
++    // Haiku's getsockopt() accepts SO_ACCEPTCONN without filling it in, and
++    // only sockets made by listen() are asked.
++    return isValid(socket);
++#endif
+     int out;
+     socklen_t outSize = sizeof(out);
+     if (getsockopt(socket, SOL_SOCKET, SO_ACCEPTCONN, &out, &outSize) != -1)
 diff --git a/Source/JavaScriptCore/inspector/scripts/codegen/preprocess.pl b/Source/JavaScriptCore/inspector/scripts/codegen/preprocess.pl
 index 630f6c989889b00e6c8817a819df1d9eed083d95..90dfd0dbc79faf617f61332f5248966addffc795 100644
 --- a/Source/JavaScriptCore/inspector/scripts/codegen/preprocess.pl
@@ -86333,6 +86438,418 @@ index 65ab11f1136e96a9892fa84f393b078cc4272bcb..bf49e7910d1bca339c223dce72d258c9
              RefPtr protectedThis = weakThis.get();
              if (!protectedThis)
                  return;
+diff --git a/Source/WebDriver/Capabilities.h b/Source/WebDriver/Capabilities.h
+index 7be5dbe1b6b03197a0b8ebedca09899c39beb8b7..05168df4fd63902478ee36a197ddf0fdc573f8bb 100644
+--- a/Source/WebDriver/Capabilities.h
++++ b/Source/WebDriver/Capabilities.h
+@@ -78,9 +78,11 @@ struct Capabilities {
+     std::optional<String> targetAddr;
+     std::optional<int> targetPort;
+     std::optional<uint64_t> processID;
+-#if PLATFORM(GTK) || PLATFORM(WPE)
++#if PLATFORM(GTK) || PLATFORM(WPE) || PLATFORM(HAIKU)
+     std::optional<String> browserBinary;
+     std::optional<Vector<String>> browserArguments;
++#endif
++#if PLATFORM(GTK) || PLATFORM(WPE)
+     std::optional<Vector<std::pair<String, String>>> certificates;
+ #endif
+ #if PLATFORM(GTK)
+diff --git a/Source/WebDriver/PlatformHaiku.cmake b/Source/WebDriver/PlatformHaiku.cmake
+new file mode 100644
+index 0000000000000000000000000000000000000000..f32a1c303300b70614a2b227d27dc96edf89f51a
+--- /dev/null
++++ b/Source/WebDriver/PlatformHaiku.cmake
+@@ -0,0 +1,29 @@
++# The Haiku port's driver talks to the browser through the socket remote
++# inspector (USE_INSPECTOR_SOCKET_SERVER), as the Windows and PlayStation
++# ports do, and starts the browser itself when no target is given.
++set(WebDriver_OUTPUT_NAME WebKitWebDriver)
++
++list(APPEND WebDriver_SOURCES
++    haiku/WebDriverServiceHaiku.cpp
++
++    socket/CapabilitiesSocket.cpp
++    socket/HTTPParser.cpp
++    socket/HTTPServerSocket.cpp
++    socket/SessionHostSocket.cpp
++
++    unix/LoggingUnix.cpp
++)
++
++list(APPEND WebDriver_PRIVATE_INCLUDE_DIRECTORIES
++    "${WEBDRIVER_DIR}/socket"
++)
++
++list(APPEND WebDriver_FRAMEWORKS
++    JavaScriptCore
++)
++
++# BMessenger: asking a browser the driver started to quit.
++list(APPEND WebDriver_LIBRARIES
++    be
++    network
++)
+diff --git a/Source/WebDriver/SessionHost.h b/Source/WebDriver/SessionHost.h
+index 464e50d5a70645d78b8316b42cc37c4a0e84dc50..96f7dfadb76922b64235c7db6e2065d133e2a40f 100644
+--- a/Source/WebDriver/SessionHost.h
++++ b/Source/WebDriver/SessionHost.h
+@@ -43,6 +43,9 @@ typedef struct _GSubprocess GSubprocess;
+ #if PLATFORM(WIN)
+ #include <wtf/win/Win32Handle.h>
+ #endif
++#if PLATFORM(HAIKU)
++#include <OS.h>
++#endif
+ #endif
+ 
+ namespace WebDriver {
+@@ -145,6 +148,10 @@ private:
+     void receivedSetTargetList(const struct Event&);
+     void receivedSendMessageToFrontend(const struct Event&);
+     void receivedStartAutomationSessionReturn(const struct Event&);
++#if PLATFORM(HAIKU)
++    void connectToLaunchedBrowser(String&& address, uint16_t port, unsigned attempt, Function<void(std::optional<String> error)>&&);
++    void quitLaunchedBrowser();
++#endif
+ 
+     std::optional<Vector<Target>> parseTargetList(const struct Event&);
+     void setTargetList(uint64_t connectionID, Vector<Target>&&);
+@@ -177,6 +184,11 @@ private:
+ #if PLATFORM(WIN)
+     WTF::Win32Handle m_browserHandle;
+ #endif
++#if PLATFORM(HAIKU)
++    // The browser this driver started for the session (-1: none, or a start
++    // that was handed to an already running copy, which is not ours to quit).
++    team_id m_browserTeam { -1 };
++#endif
+ #endif
+ };
+ 
+diff --git a/Source/WebDriver/haiku/WebDriverServiceHaiku.cpp b/Source/WebDriver/haiku/WebDriverServiceHaiku.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..a76bf51c195cde1e861efeaad8c358cf7e21bfad
+--- /dev/null
++++ b/Source/WebDriver/haiku/WebDriverServiceHaiku.cpp
+@@ -0,0 +1,106 @@
++/*
++ * Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause
++ */
++
++#include "config.h"
++#include "WebDriverService.h"
++
++#include "Capabilities.h"
++#include "CapabilitiesSocket.h"
++#include <wtf/JSONValues.h>
++
++namespace WebDriver {
++
++void WebDriverService::platformInit()
++{
++}
++
++Capabilities WebDriverService::platformCapabilities()
++{
++    Capabilities capabilities;
++    capabilities.platformName = String("haiku"_s);
++    capabilities.setWindowRect = true;
++    return capabilities;
++}
++
++bool WebDriverService::platformCompareBrowserVersions(const String&, const String&)
++{
++    return true;
++}
++
++// "summit:browserOptions": {"binary": path, "args": [strings]}, as
++// webkitgtk:browserOptions. Without it the driver starts the installed
++// Summit (SUMMIT_WEBDRIVER_BROWSER names another).
++bool WebDriverService::platformValidateCapability(const String& name, const Ref<JSON::Value>& value) const
++{
++    if (name != "summit:browserOptions"_s)
++        return true;
++
++    auto browserOptions = value->asObject();
++    if (!browserOptions)
++        return false;
++
++    if (browserOptions->isNull())
++        return true;
++
++    if (auto binaryValue = browserOptions->getValue("binary"_s)) {
++        if (!binaryValue->asString())
++            return false;
++    }
++
++    if (auto browserArgumentsValue = browserOptions->getValue("args"_s)) {
++        auto browserArguments = browserArgumentsValue->asArray();
++        if (!browserArguments)
++            return false;
++
++        unsigned browserArgumentsLength = browserArguments->length();
++        for (unsigned i = 0; i < browserArgumentsLength; ++i) {
++            if (!browserArguments->get(i)->asString())
++                return false;
++        }
++    }
++
++    return true;
++}
++
++bool WebDriverService::platformMatchCapability(const String&, const Ref<JSON::Value>&) const
++{
++    return true;
++}
++
++void WebDriverService::platformParseCapabilities(const JSON::Object& matchedCapabilities, Capabilities& capabilities) const
++{
++    CapabilitiesSocket::parseCapabilities(matchedCapabilities, capabilities);
++
++    auto browserOptions = matchedCapabilities.getObject("summit:browserOptions"_s);
++    if (!browserOptions)
++        return;
++
++    auto binary = browserOptions->getString("binary"_s);
++    if (!binary.isNull())
++        capabilities.browserBinary = binary;
++
++    if (auto browserArguments = browserOptions->getArray("args"_s)) {
++        unsigned browserArgumentsLength = browserArguments->length();
++        Vector<String> arguments;
++        arguments.reserveInitialCapacity(browserArgumentsLength);
++        for (unsigned i = 0; i < browserArgumentsLength; ++i) {
++            auto argument = browserArguments->get(i)->asString();
++            if (!argument.isNull())
++                arguments.append(WTF::move(argument));
++        }
++        capabilities.browserArguments = WTF::move(arguments);
++    }
++}
++
++bool WebDriverService::platformSupportProxyType(const String&) const
++{
++    return false;
++}
++
++bool WebDriverService::platformSupportBidi() const
++{
++    return false;
++}
++
++} // namespace WebDriver
+diff --git a/Source/WebDriver/socket/SessionHostSocket.cpp b/Source/WebDriver/socket/SessionHostSocket.cpp
+index 169e503e5d426ce24125f743d85f104ae345341f..32d973315891708e55acebd1f9f9d3e12c21befe 100644
+--- a/Source/WebDriver/socket/SessionHostSocket.cpp
++++ b/Source/WebDriver/socket/SessionHostSocket.cpp
+@@ -35,6 +35,21 @@
+ #include <ws2tcpip.h>
+ #endif
+ 
++#if PLATFORM(HAIKU)
++#include <AppDefs.h>
++#include <Messenger.h>
++#include <image.h>
++#include <netinet/in.h>
++#include <sys/socket.h>
++#include <thread>
++#include <unistd.h>
++#include <wtf/RunLoop.h>
++#include <string>
++#include <vector>
++
++extern char** environ;
++#endif
++
+ namespace WebDriver {
+ 
+ SessionHost::~SessionHost()
+@@ -45,6 +60,9 @@ SessionHost::~SessionHost()
+         m_browserHandle = { };
+     }
+ #endif
++#if PLATFORM(HAIKU)
++    quitLaunchedBrowser();
++#endif
+ }
+ 
+ HashMap<String, Inspector::RemoteInspectorConnectionClient::CallHandler>& SessionHost::dispatchMap()
+@@ -129,6 +147,113 @@ static WTF::Win32Handle launchBrowser()
+ }
+ #endif
+ 
++#if PLATFORM(HAIKU)
++// Binds port 0 and returns the port the system chose. Another program may
++// take it before the browser listens on it; the session then fails to start.
++static std::optional<uint16_t> getFreePort()
++{
++    int sock = socket(AF_INET, SOCK_STREAM, 0);
++    if (sock < 0)
++        return std::nullopt;
++
++    sockaddr_in address = { };
++    address.sin_family = AF_INET;
++    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
++    address.sin_port = 0;
++    socklen_t length = sizeof(address);
++    if (bind(sock, reinterpret_cast<sockaddr*>(&address), sizeof(address)) < 0
++        || getsockname(sock, reinterpret_cast<sockaddr*>(&address), &length) < 0) {
++        close(sock);
++        return std::nullopt;
++    }
++    close(sock);
++    return ntohs(address.sin_port);
++}
++
++// The browser: the session's "summit:browserOptions" binary, else
++// SUMMIT_WEBDRIVER_BROWSER, else the installed Summit. It is started with
++// the session's arguments and --automation ADDRESS:PORT, where it opens the
++// remote automation socket (BWebKitContext::EnableRemoteAutomation).
++static team_id launchBrowser(const Capabilities& capabilities, const String& address, uint16_t port)
++{
++    String binary;
++    if (capabilities.browserBinary && !capabilities.browserBinary->isEmpty())
++        binary = *capabilities.browserBinary;
++    else if (const char* path = getenv("SUMMIT_WEBDRIVER_BROWSER"); path && *path)
++        binary = String::fromUTF8(path);
++    else
++        binary = "/boot/system/apps/Summit"_s;
++
++    std::vector<std::string> arguments;
++    arguments.push_back(binary.utf8().toStdString());
++    if (capabilities.browserArguments) {
++        for (auto& argument : *capabilities.browserArguments)
++            arguments.push_back(argument.utf8().toStdString());
++    }
++    arguments.push_back("--automation");
++    arguments.push_back(makeString(address, ':', port).utf8().toStdString());
++
++    std::vector<const char*> argv;
++    for (auto& argument : arguments)
++        argv.push_back(argument.c_str());
++    argv.push_back(nullptr);
++
++    thread_id thread = load_image(static_cast<int32>(arguments.size()), argv.data(), const_cast<const char**>(environ));
++    if (thread < 0)
++        return thread;
++    resume_thread(thread);
++    // A team's main thread has the team's identifier.
++    return thread;
++}
++
++void SessionHost::connectToLaunchedBrowser(String&& address, uint16_t port, unsigned attempt, Function<void(std::optional<String> error)>&& completionHandler)
++{
++    m_clientID = connectInet(address.utf8(), port);
++    if (m_clientID) {
++        completionHandler(std::nullopt);
++        return;
++    }
++
++    // A start handed to a copy that was already running ends at once; that
++    // copy opens the socket, and is not ours to quit.
++    team_info info;
++    if (m_browserTeam >= 0 && get_team_info(m_browserTeam, &info) != B_OK)
++        m_browserTeam = -1;
++
++    // The browser takes a few seconds to start (longer on a cold disk).
++    static constexpr unsigned maximumAttempts = 120;
++    if (attempt >= maximumAttempts) {
++        quitLaunchedBrowser();
++        completionHandler(makeString("The browser did not open its automation socket at "_s, address, ':', port, '.'));
++        return;
++    }
++    RunLoop::mainSingleton().dispatchAfter(250_ms, [this, protectedThis = Ref { *this }, address = WTF::move(address), port, attempt, completionHandler = WTF::move(completionHandler)]() mutable {
++        connectToLaunchedBrowser(WTF::move(address), port, attempt + 1, WTF::move(completionHandler));
++    });
++}
++
++void SessionHost::quitLaunchedBrowser()
++{
++    team_id team = std::exchange(m_browserTeam, -1);
++    if (team < 0)
++        return;
++    status_t status;
++    BMessenger browser(nullptr, team, &status);
++    if (status == B_OK)
++        browser.SendMessage(B_QUIT_REQUESTED);
++    // A browser that does not quit within ten seconds is killed.
++    std::thread([team] {
++        team_info info;
++        for (int i = 0; i < 100; ++i) {
++            if (get_team_info(team, &info) != B_OK)
++                return;
++            usleep(100000);
++        }
++        kill_team(team);
++    }).detach();
++}
++#endif
++
+ void SessionHost::connectToBrowser(Function<void (std::optional<String> error)>&& completionHandler)
+ {
+     if (m_clientID) {
+@@ -148,7 +273,22 @@ void SessionHost::connectToBrowser(Function<void (std::optional<String> error)>&
+     }
+ 
+     if (targetIp.isEmpty() || !targetPort) {
+-#if !PLATFORM(WIN)
++#if PLATFORM(HAIKU)
++        auto freePort = getFreePort();
++        if (!freePort) {
++            completionHandler("Failed to find a free port for the browser."_s);
++            return;
++        }
++        m_browserTeam = launchBrowser(m_capabilities, "127.0.0.1"_s, *freePort);
++        if (m_browserTeam < 0) {
++            m_browserTeam = -1;
++            completionHandler("Failed to start the browser."_s);
++            return;
++        }
++        m_isRemoteBrowser = false;
++        connectToLaunchedBrowser("127.0.0.1"_s, *freePort, 0, WTF::move(completionHandler));
++        return;
++#elif !PLATFORM(WIN)
+         completionHandler(makeString("Target IP/port is invalid, or not specified."_s));
+         return;
+ #else
+@@ -191,6 +331,10 @@ void SessionHost::didClose(Inspector::RemoteInspectorSocketEndpoint&, Inspector:
+ {
+     inspectorDisconnected();
+ 
++#if PLATFORM(HAIKU)
++    quitLaunchedBrowser();
++#endif
++
+ #if PLATFORM(WIN)
+     if (m_browserHandle) {
+         ::TerminateProcess(m_browserHandle.get(), 0);
+@@ -249,10 +393,24 @@ void SessionHost::receivedSendMessageToFrontend(const struct Event& event)
+     dispatchMessage(event.message.value());
+ }
+ 
+-void SessionHost::receivedStartAutomationSessionReturn(const struct Event&)
++void SessionHost::receivedStartAutomationSessionReturn([[maybe_unused]] const struct Event& event)
+ {
+     ASSERT(isMainThread());
+ 
++#if PLATFORM(HAIKU)
++    // The browser names itself (RemoteInspector::Client::browserName).
++    if (event.message) {
++        if (auto value = JSON::Value::parseJSON(*event.message)) {
++            if (auto object = value->asObject()) {
++                if (auto name = object->getString("browserName"_s); !name.isEmpty())
++                    m_capabilities.browserName = name;
++                if (auto version = object->getString("browserVersion"_s); !version.isEmpty())
++                    m_capabilities.browserVersion = version;
++                return;
++            }
++        }
++    }
++#endif
+     m_capabilities.browserName = String::fromUTF8("TODO/browserName");
+     m_capabilities.browserVersion = String::fromUTF8("TODO/browserVersion");
+ }
 diff --git a/Source/WebInspectorUI/UserInterface/Models/CookieStorageObject.js b/Source/WebInspectorUI/UserInterface/Models/CookieStorageObject.js
 index 02a8ac8d66a39a7bff0c763cd949c6117d1fc06d..f8797faf845920f113421854b78c5e3bb002dd6c 100644
 --- a/Source/WebInspectorUI/UserInterface/Models/CookieStorageObject.js
@@ -91253,10 +91770,10 @@ index 0000000000000000000000000000000000000000..abdba4dff009ff314eecd9f825a128aa
 +} // namespace WebKit
 diff --git a/Source/WebKit/PlatformHaiku.cmake b/Source/WebKit/PlatformHaiku.cmake
 new file mode 100644
-index 0000000000000000000000000000000000000000..566aad0cdb3e9092bbe0f8d6658439245ae5b114
+index 0000000000000000000000000000000000000000..881d2efd03844ed4ab30cb51c1f1fe1dd19d8231
 --- /dev/null
 +++ b/Source/WebKit/PlatformHaiku.cmake
-@@ -0,0 +1,574 @@
+@@ -0,0 +1,577 @@
 +include(Headers.cmake)
 +include(Platform/Curl.cmake)
 +
@@ -91398,6 +91915,9 @@ index 0000000000000000000000000000000000000000..566aad0cdb3e9092bbe0f8d665843924
 +    UIProcess/haiku/OpenPanelHaiku.cpp
 +    UIProcess/haiku/BrowserTabRegistryHaiku.cpp
 +    UIProcess/haiku/BrowserCommandBrokerHaiku.cpp
++    # WebDriver: the automation client and simulated input.
++    UIProcess/haiku/AutomationClientHaiku.cpp
++    UIProcess/Automation/haiku/WebAutomationSessionHaiku.cpp
 +    UIProcess/haiku/WebViewContextHaiku.cpp
 +    UIProcess/haiku/ContextualIdentitiesHaiku.cpp
 +    UIProcess/haiku/SitePermissionsHaiku.cpp
@@ -99639,10 +100159,10 @@ index 0000000000000000000000000000000000000000..574ed16658f0c14b1aa2e63208e990b8
 +#define WEBKIT_ENGINE_VERSION_HAIKU "@WebKit_HAIKU_MAJOR_VERSION@.@WebKit_HAIKU_MINOR_VERSION@.@WebKit_HAIKU_TINY_VERSION@"
 diff --git a/Source/WebKit/UIProcess/API/haiku/WebKitContext.cpp b/Source/WebKit/UIProcess/API/haiku/WebKitContext.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..34314854df2ee31941777965d9ccfcb97d40057e
+index 0000000000000000000000000000000000000000..2c76fff10685c456df0dc5e232403eb6d0ef51a5
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/API/haiku/WebKitContext.cpp
-@@ -0,0 +1,1435 @@
+@@ -0,0 +1,1449 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#include "config.h"
@@ -100834,6 +101354,20 @@ index 0000000000000000000000000000000000000000..34314854df2ee31941777965d9ccfcb9
 +    });
 +}
 +
++status_t BWebKitContext::EnableRemoteAutomation(const char* address, uint16 port, const char* browserName, const char* browserVersion)
++{
++    if (m_status != B_OK)
++        return m_status;
++    if (!be_app || be_app->Thread() != find_thread(nullptr))
++        return B_BAD_THREAD_ID;
++    if (m_private || m_container)
++        return B_NOT_ALLOWED;
++    if (!address || !*address || !port)
++        return B_BAD_VALUE;
++    return m_context->enableRemoteAutomation(String::fromUTF8(address), port,
++        String::fromUTF8(browserName ? browserName : ""), String::fromUTF8(browserVersion ? browserVersion : ""));
++}
++
 +// B_WEBKIT_DATA_* as WebKit's types.
 +static OptionSet<WebKit::WebsiteDataType> websiteDataTypesHaiku(uint32 types)
 +{
@@ -101080,10 +101614,10 @@ index 0000000000000000000000000000000000000000..34314854df2ee31941777965d9ccfcb9
 +}
 diff --git a/Source/WebKit/UIProcess/API/haiku/WebKitContext.h b/Source/WebKit/UIProcess/API/haiku/WebKitContext.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..a90e24ef17041e6a364f28d823d2c4c2075bc180
+index 0000000000000000000000000000000000000000..bb1430a480b7c60f9d5d91f3f988cc6841c59b49
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/API/haiku/WebKitContext.h
-@@ -0,0 +1,743 @@
+@@ -0,0 +1,758 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#pragma once
@@ -101817,6 +102351,21 @@ index 0000000000000000000000000000000000000000..a90e24ef17041e6a364f28d823d2c4c2
 +    // (seconds since the epoch). Any thread.
 +    void SetGeolocationPosition(double latitude, double longitude, double accuracy, double timestamp);
 +    void GeolocationUnavailable(const char* message);
++
++    // WebDriver (WebKitWebDriver, a "summitdriver"): opens the remote
++    // automation socket on address:port ("127.0.0.1" keeps it local) for this
++    // profile, once per application. A driver connected there starts an
++    // automation session, and asks for its browsing contexts with
++    // B_WEBKIT_BROWSER_COMMAND OPEN_WINDOW (or OPEN_TAB) carrying
++    // automation (bool) true: the host opens them, marks them as automated
++    // (Safari's orange address field) and answers as for an extension. Their
++    // pages are then driven: navigated, scripted, clicked and typed into,
++    // and photographed. browserName/browserVersion answer the session's
++    // capabilities. Application thread; B_NOT_ALLOWED for a private context
++    // or a container, B_BUSY once another context opened it, B_ERROR when
++    // the socket cannot be opened, B_NOT_SUPPORTED without WebDriver support.
++    status_t EnableRemoteAutomation(const char* address, uint16 port,
++        const char* browserName, const char* browserVersion);
 +
 +private:
 +    friend class BWebKitView;
@@ -106326,6 +106875,368 @@ index 599cc694a716da0c05e7104be0ec919146f99913..4bdb146fab5870fe86c0923f207efad0
      auto page = webPageProxyForHandle(browsingContextHandle);
      SYNC_FAIL_WITH_PREDEFINED_ERROR_IF(!page, WindowNotFound);
  
+diff --git a/Source/WebKit/UIProcess/Automation/haiku/WebAutomationSessionHaiku.cpp b/Source/WebKit/UIProcess/Automation/haiku/WebAutomationSessionHaiku.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..ec23cbdbeae6ba51815f76459aac129e1af872b6
+--- /dev/null
++++ b/Source/WebKit/UIProcess/Automation/haiku/WebAutomationSessionHaiku.cpp
+@@ -0,0 +1,356 @@
++/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
++
++#include "config.h"
++#include "WebAutomationSession.h"
++
++#include "NativeWebKeyboardEvent.h"
++#include "NativeWebMouseEvent.h"
++#include "WebPageProxy.h"
++#include <InterfaceDefs.h>
++#include <View.h>
++#include <Message.h>
++#include <OS.h>
++#include <wtf/HashMap.h>
++#include <wtf/NeverDestroyed.h>
++#include <string>
++
++// WebDriver's simulated input as the BMessages a BWebKitView passes on
++// (viewInputHaiku): the same NativeWebMouseEvent / NativeWebKeyboardEvent
++// conversions as real input, without a native window in between.
++
++namespace WebKit {
++using namespace WebCore;
++
++#if ENABLE(WEBDRIVER_MOUSE_INTERACTIONS)
++
++static uint32 nativeModifiersHaiku(OptionSet<WebEventModifier> modifiers)
++{
++    // As NativeWebEventsHaiku.cpp maps them: the native Command key gives web
++    // Control, the native Control key web Alt, Option web Meta.
++    uint32 native = 0;
++    if (modifiers.contains(WebEventModifier::ShiftKey))
++        native |= B_SHIFT_KEY | B_LEFT_SHIFT_KEY;
++    if (modifiers.contains(WebEventModifier::ControlKey))
++        native |= B_COMMAND_KEY | B_LEFT_COMMAND_KEY;
++    if (modifiers.contains(WebEventModifier::AltKey))
++        native |= B_CONTROL_KEY | B_LEFT_CONTROL_KEY;
++    if (modifiers.contains(WebEventModifier::MetaKey))
++        native |= B_OPTION_KEY | B_LEFT_OPTION_KEY;
++    return native;
++}
++
++static uint32 nativeButtonHaiku(MouseButton button)
++{
++    switch (button) {
++    case MouseButton::Left:
++        return B_PRIMARY_MOUSE_BUTTON;
++    case MouseButton::Right:
++        return B_SECONDARY_MOUSE_BUTTON;
++    case MouseButton::Middle:
++        return B_TERTIARY_MOUSE_BUTTON;
++    case MouseButton::Back:
++        return 8;
++    case MouseButton::Forward:
++        return 16;
++    case MouseButton::None:
++        break;
++    }
++    return 0;
++}
++
++// The buttons each page's simulated pointer holds down.
++static HashMap<WebPageProxyIdentifier, uint32>& pressedButtonsHaiku()
++{
++    static NeverDestroyed<HashMap<WebPageProxyIdentifier, uint32>> buttons;
++    return buttons;
++}
++
++static void sendMouseEventHaiku(WebPageProxy& page, uint32 what, uint32 buttons, uint32 previousButtons, int32 clicks, const IntPoint& location, uint32 modifiers)
++{
++    BMessage message(what);
++    message.AddInt64("when", system_time());
++    message.AddPoint("where", BPoint(location.x(), location.y()));
++    message.AddInt32("buttons", static_cast<int32>(buttons));
++    message.AddInt32("modifiers", static_cast<int32>(modifiers));
++    if (what != B_MOUSE_MOVED)
++        message.AddInt32("clicks", clicks);
++    BPoint position(location.x(), location.y());
++    if (auto event = NativeWebMouseEvent::create(message, position, position, previousButtons, BPoint()))
++        page.handleMouseEvent(event.releaseNonNull());
++}
++
++void WebAutomationSession::platformSimulateMouseInteraction(WebPageProxy& page, MouseInteraction interaction, MouseButton button, const IntPoint& locationInView, OptionSet<WebEventModifier> keyModifiers, const String&)
++{
++    auto modifiers = nativeModifiersHaiku(keyModifiers);
++    auto mask = nativeButtonHaiku(button);
++    auto& pressed = pressedButtonsHaiku().add(page.identifier(), 0).iterator->value;
++    int32 clicks = std::max(1u, m_clickCount);
++
++    auto down = [&](int32 count) {
++        uint32 previous = pressed;
++        pressed |= mask;
++        sendMouseEventHaiku(page, B_MOUSE_DOWN, pressed, previous, count, locationInView, modifiers);
++    };
++    auto up = [&](int32 count) {
++        uint32 previous = pressed;
++        pressed &= ~mask;
++        sendMouseEventHaiku(page, B_MOUSE_UP, pressed, previous, count, locationInView, modifiers);
++    };
++
++    switch (interaction) {
++    case MouseInteraction::Move:
++        sendMouseEventHaiku(page, B_MOUSE_MOVED, pressed, pressed, 0, locationInView, modifiers);
++        break;
++    case MouseInteraction::Down:
++        down(clicks);
++        break;
++    case MouseInteraction::Up:
++        up(clicks);
++        break;
++    case MouseInteraction::SingleClick:
++        down(1);
++        up(1);
++        break;
++    case MouseInteraction::DoubleClick:
++        down(1);
++        up(1);
++        down(2);
++        up(2);
++        break;
++    }
++}
++
++#endif // ENABLE(WEBDRIVER_MOUSE_INTERACTIONS)
++
++#if ENABLE(WEBDRIVER_MOUSE_INTERACTIONS)
++// m_currentModifiers holds native Haiku modifier bits.
++OptionSet<WebEventModifier> WebAutomationSession::platformWebModifiersFromRaw(WebPageProxy&, unsigned modifiers)
++{
++    OptionSet<WebEventModifier> webModifiers;
++    if (modifiers & B_SHIFT_KEY)
++        webModifiers.add(WebEventModifier::ShiftKey);
++    if (modifiers & B_COMMAND_KEY)
++        webModifiers.add(WebEventModifier::ControlKey);
++    if (modifiers & B_CONTROL_KEY)
++        webModifiers.add(WebEventModifier::AltKey);
++    if (modifiers & B_OPTION_KEY)
++        webModifiers.add(WebEventModifier::MetaKey);
++    return webModifiers;
++}
++#endif
++
++#if ENABLE(WEBDRIVER_KEYBOARD_INTERACTIONS)
++
++struct NativeKeyHaiku {
++    // The raw key of a PC keyboard (0: none), the bytes it types and the
++    // modifier bits it holds while down.
++    int32 key { 0 };
++    std::string bytes;
++    uint32 modifier { 0 };
++};
++
++static NativeKeyHaiku nativeKeyHaiku(VirtualKey key)
++{
++    auto typed = [](int32 raw, char byte) {
++        char bytes[2] = { byte, 0 };
++        return NativeKeyHaiku { raw, std::string(bytes), 0 };
++    };
++    auto function = [](int32 raw) {
++        char bytes[2] = { B_FUNCTION_KEY, 0 };
++        return NativeKeyHaiku { raw, std::string(bytes), 0 };
++    };
++    switch (key) {
++    case VirtualKey::Shift:
++        return { 0x4b, std::string(), static_cast<uint32>(B_SHIFT_KEY | B_LEFT_SHIFT_KEY) };
++    case VirtualKey::ShiftRight:
++        return { 0x56, std::string(), static_cast<uint32>(B_SHIFT_KEY | B_RIGHT_SHIFT_KEY) };
++    // The key in the Alt position is Haiku's Command key: web Control.
++    case VirtualKey::Control:
++    case VirtualKey::Command:
++        return { 0x5d, std::string(), static_cast<uint32>(B_COMMAND_KEY | B_LEFT_COMMAND_KEY) };
++    case VirtualKey::ControlRight:
++    case VirtualKey::CommandRight:
++        return { 0x5f, std::string(), static_cast<uint32>(B_COMMAND_KEY | B_RIGHT_COMMAND_KEY) };
++    case VirtualKey::Alternate:
++        return { 0x5c, std::string(), static_cast<uint32>(B_CONTROL_KEY | B_LEFT_CONTROL_KEY) };
++    case VirtualKey::AlternateRight:
++        return { 0x60, std::string(), static_cast<uint32>(B_CONTROL_KEY | B_RIGHT_CONTROL_KEY) };
++    case VirtualKey::Meta:
++        return { 0x66, std::string(), static_cast<uint32>(B_OPTION_KEY | B_LEFT_OPTION_KEY) };
++    case VirtualKey::MetaRight:
++        return { 0x67, std::string(), static_cast<uint32>(B_OPTION_KEY | B_RIGHT_OPTION_KEY) };
++    case VirtualKey::Backspace:
++        return typed(0x1e, B_BACKSPACE);
++    case VirtualKey::Tab:
++        return typed(0x26, B_TAB);
++    case VirtualKey::Enter:
++    case VirtualKey::Return:
++        return typed(0x47, B_ENTER);
++    case VirtualKey::Escape:
++    case VirtualKey::Cancel:
++        return typed(0x01, B_ESCAPE);
++    case VirtualKey::Space:
++        return typed(0x5e, ' ');
++    case VirtualKey::PageUp:
++    case VirtualKey::PageUpRight:
++        return typed(0x21, B_PAGE_UP);
++    case VirtualKey::PageDown:
++    case VirtualKey::PageDownRight:
++        return typed(0x36, B_PAGE_DOWN);
++    case VirtualKey::End:
++    case VirtualKey::EndRight:
++        return typed(0x35, B_END);
++    case VirtualKey::Home:
++    case VirtualKey::HomeRight:
++        return typed(0x20, B_HOME);
++    case VirtualKey::LeftArrow:
++    case VirtualKey::LeftArrowRight:
++        return typed(0x61, B_LEFT_ARROW);
++    case VirtualKey::UpArrow:
++    case VirtualKey::UpArrowRight:
++        return typed(0x57, B_UP_ARROW);
++    case VirtualKey::RightArrow:
++    case VirtualKey::RightArrowRight:
++        return typed(0x63, B_RIGHT_ARROW);
++    case VirtualKey::DownArrow:
++    case VirtualKey::DownArrowRight:
++        return typed(0x62, B_DOWN_ARROW);
++    case VirtualKey::Insert:
++    case VirtualKey::InsertRight:
++        return typed(0x1f, B_INSERT);
++    case VirtualKey::Delete:
++    case VirtualKey::DeleteRight:
++        return typed(0x34, B_DELETE);
++    case VirtualKey::Semicolon:
++        return typed(0x41, ';');
++    case VirtualKey::Equals:
++        return typed(0x1d, '=');
++    case VirtualKey::NumberPad0:
++        return typed(0x64, '0');
++    case VirtualKey::NumberPad1:
++        return typed(0x58, '1');
++    case VirtualKey::NumberPad2:
++        return typed(0x59, '2');
++    case VirtualKey::NumberPad3:
++        return typed(0x5a, '3');
++    case VirtualKey::NumberPad4:
++        return typed(0x48, '4');
++    case VirtualKey::NumberPad5:
++        return typed(0x49, '5');
++    case VirtualKey::NumberPad6:
++        return typed(0x4a, '6');
++    case VirtualKey::NumberPad7:
++        return typed(0x37, '7');
++    case VirtualKey::NumberPad8:
++        return typed(0x38, '8');
++    case VirtualKey::NumberPad9:
++        return typed(0x39, '9');
++    case VirtualKey::NumberPadMultiply:
++        return typed(0x24, '*');
++    case VirtualKey::NumberPadAdd:
++        return typed(0x3a, '+');
++    case VirtualKey::NumberPadSubtract:
++        return typed(0x25, '-');
++    case VirtualKey::NumberPadSeparator:
++    case VirtualKey::NumberPadDecimal:
++        return typed(0x65, '.');
++    case VirtualKey::NumberPadDivide:
++        return typed(0x23, '/');
++    case VirtualKey::Function1:
++        return function(B_F1_KEY);
++    case VirtualKey::Function2:
++        return function(B_F2_KEY);
++    case VirtualKey::Function3:
++        return function(B_F3_KEY);
++    case VirtualKey::Function4:
++        return function(B_F4_KEY);
++    case VirtualKey::Function5:
++        return function(B_F5_KEY);
++    case VirtualKey::Function6:
++        return function(B_F6_KEY);
++    case VirtualKey::Function7:
++        return function(B_F7_KEY);
++    case VirtualKey::Function8:
++        return function(B_F8_KEY);
++    case VirtualKey::Function9:
++        return function(B_F9_KEY);
++    case VirtualKey::Function10:
++        return function(B_F10_KEY);
++    case VirtualKey::Function11:
++        return function(B_F11_KEY);
++    case VirtualKey::Function12:
++        return function(B_F12_KEY);
++    case VirtualKey::Help:
++    case VirtualKey::Clear:
++    case VirtualKey::Pause:
++        break;
++    }
++    return NativeKeyHaiku { };
++}
++
++static void sendKeyEventHaiku(WebPageProxy& page, bool down, int32 key, const std::string& bytes, uint32 modifiers)
++{
++    BMessage message(down ? B_KEY_DOWN : B_KEY_UP);
++    message.AddInt64("when", system_time());
++    message.AddInt32("key", key);
++    message.AddInt32("modifiers", static_cast<int32>(modifiers));
++    message.AddString("bytes", bytes.c_str());
++    if (bytes.length()) {
++        message.AddInt8("byte", bytes.data()[0]);
++        message.AddInt32("raw_char", static_cast<uint8_t>(bytes.data()[0]));
++    }
++    if (auto event = NativeWebKeyboardEvent::create(message))
++        page.handleKeyboardEvent(event.releaseNonNull());
++}
++
++static std::string bytesForCharacterHaiku(char32_t character, bool shifted)
++{
++    if (shifted && character >= 'a' && character <= 'z')
++        character -= 'a' - 'A';
++    return String::fromCodePoint(character).utf8().toStdString();
++}
++
++void WebAutomationSession::platformSimulateKeyboardInteraction(WebPageProxy& page, KeyboardInteraction interaction, Variant<VirtualKey, CharKey>&& key)
++{
++    NativeKeyHaiku native;
++    WTF::switchOn(key,
++        [&](VirtualKey virtualKey) {
++            native = nativeKeyHaiku(virtualKey);
++        },
++        [&](CharKey charKey) {
++#if ENABLE(WEBDRIVER_KEYBOARD_GRAPHEME_CLUSTERS)
++            native.bytes = charKey.utf8().toStdString();
++#else
++            native.bytes = bytesForCharacterHaiku(charKey, m_currentModifiers & B_SHIFT_KEY);
++#endif
++        });
++
++    switch (interaction) {
++    case KeyboardInteraction::KeyPress:
++        m_currentModifiers |= native.modifier;
++        sendKeyEventHaiku(page, true, native.key, native.bytes, m_currentModifiers);
++        break;
++    case KeyboardInteraction::KeyRelease:
++        m_currentModifiers &= ~native.modifier;
++        sendKeyEventHaiku(page, false, native.key, native.bytes, m_currentModifiers);
++        break;
++    case KeyboardInteraction::InsertByKey:
++        sendKeyEventHaiku(page, true, native.key, native.bytes, m_currentModifiers | native.modifier);
++        sendKeyEventHaiku(page, false, native.key, native.bytes, m_currentModifiers);
++        break;
++    }
++}
++
++void WebAutomationSession::platformSimulateKeySequence(WebPageProxy& page, const String& keySequence)
++{
++    // Element Send Keys: each character typed as a key down and up.
++    for (char32_t character : StringView(keySequence).codePoints()) {
++        auto bytes = bytesForCharacterHaiku(character, m_currentModifiers & B_SHIFT_KEY);
++        sendKeyEventHaiku(page, true, 0, bytes, m_currentModifiers);
++        sendKeyEventHaiku(page, false, 0, bytes, m_currentModifiers);
++    }
++}
++
++#endif // ENABLE(WEBDRIVER_KEYBOARD_INTERACTIONS)
++
++} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/DrawingAreaProxy.h b/Source/WebKit/UIProcess/DrawingAreaProxy.h
 index 848fb013c996d9c41a576ccb8dc759bb61e31031..5c456460f4a04589047d3637bd319359f3f33423 100644
 --- a/Source/WebKit/UIProcess/DrawingAreaProxy.h
@@ -139319,6 +140230,303 @@ index 0000000000000000000000000000000000000000..8cfbb2ef9ab1590473ee5af50c1bd2eb
 +} // namespace WebKit
 +
 +#endif // USE(COORDINATED_GRAPHICS)
+diff --git a/Source/WebKit/UIProcess/haiku/AutomationClientHaiku.cpp b/Source/WebKit/UIProcess/haiku/AutomationClientHaiku.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..e67f965d7a4b02ed577b8e05f3ff20c726b0db61
+--- /dev/null
++++ b/Source/WebKit/UIProcess/haiku/AutomationClientHaiku.cpp
+@@ -0,0 +1,238 @@
++/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
++
++#include "config.h"
++#include "AutomationClientHaiku.h"
++
++#if ENABLE(REMOTE_INSPECTOR)
++
++#include "APIAutomationSessionClient.h"
++#include "BrowserCommandBrokerHaiku.h"
++#include "BrowserTabRegistryHaiku.h"
++#include "WebAutomationSession.h"
++#include "WebKitContext.h"
++#include "WebPageProxy.h"
++#include "WebProcessPool.h"
++#include "WebProcessProxy.h"
++#include "WebViewPrivate.h"
++#include <Message.h>
++#include <limits>
++#include <wtf/RunLoop.h>
++
++namespace WebKit {
++
++// The broker's owner of automation requests; extensions use their load's.
++static constexpr uint64_t automationCommandOwnerHaiku = std::numeric_limits<uint64_t>::max();
++
++// When the session ends its pages are ordinary tabs again.
++static void releasePagesFromAutomationHaiku(WebProcessPool& processPool)
++{
++    for (auto& process : processPool.processes()) {
++        for (auto& page : process->pages())
++            page->setControlledByAutomation(false);
++    }
++}
++
++static BMessenger nativeViewOfPageHaiku(WebPageProxy& page)
++{
++    // Pages of the host's tabs always have a native BWebKitView bridge.
++    auto* client = static_cast<WebView*>(page.pageClient());
++    if (!client || client->page() != &page)
++        return { };
++    return client->nativeView();
++}
++
++class AutomationSessionClientHaiku final : public API::AutomationSessionClient {
++public:
++    AutomationSessionClientHaiku(const String& sessionIdentifier, std::weak_ptr<BrowserCommandBrokerHaiku> commands, std::weak_ptr<BrowserTabRegistryHaiku> tabs)
++        : m_sessionIdentifier(sessionIdentifier)
++        , m_commands(WTF::move(commands))
++        , m_tabs(WTF::move(tabs))
++    {
++    }
++
++    String sessionIdentifier() const override { return m_sessionIdentifier; }
++
++    // A new window for the session's first browsing context (and whenever
++    // the driver asks for a window); a tab of the session's window when it
++    // prefers one. The host marks both as automated.
++    void requestNewPageWithOptions(WebAutomationSession& session, API::AutomationSessionBrowsingContextOptions options, CompletionHandler<void(WebPageProxy*)>&& completionHandler) override
++    {
++        auto window = (options & API::AutomationSessionBrowsingContextOptionsPreferNewTab) ? automationWindow(session) : std::nullopt;
++        BMessage message(B_WEBKIT_BROWSER_COMMAND);
++        bool complete = message.AddUInt32("command", window ? B_WEBKIT_BROWSER_OPEN_TAB : B_WEBKIT_BROWSER_OPEN_WINDOW) == B_OK
++            && message.AddString("url", "about:blank") == B_OK
++            && message.AddBool("automation", true) == B_OK;
++        if (complete && window) {
++            complete = message.AddBool("active", true) == B_OK
++                && message.AddInt32("index", -1) == B_OK
++                && message.AddMessenger("window", window->messenger) == B_OK
++                && message.AddUInt64("window_identifier", window->identifier) == B_OK;
++        } else if (complete)
++            complete = message.AddBool("focused", true) == B_OK && message.AddString("type", "normal") == B_OK;
++        if (!complete) {
++            completionHandler(nullptr);
++            return;
++        }
++        send(WTF::move(message), [completionHandler = WTF::move(completionHandler)](BrowserCommandBrokerHaiku::Result&& result) mutable {
++            RefPtr page = result.status == B_OK && !result.createdPages.isEmpty() ? WebProcessProxy::webPage(result.createdPages.first()) : nullptr;
++            if (!page) {
++                completionHandler(nullptr);
++                return;
++            }
++            page->setControlledByAutomation(true);
++            completionHandler(page.get());
++        });
++    }
++
++    void requestSwitchToPage(WebAutomationSession&, WebPageProxy& page, CompletionHandler<void()>&& completionHandler) override
++    {
++        auto window = windowOfPage(page);
++        auto view = nativeViewOfPageHaiku(page);
++        if (!window || !view.IsValid()) {
++            completionHandler();
++            return;
++        }
++        BMessage message(B_WEBKIT_BROWSER_COMMAND);
++        message.AddUInt32("command", B_WEBKIT_BROWSER_ACTIVATE_TAB);
++        message.AddMessenger("view", view);
++        message.AddUInt64("page_identifier", page.identifier().toUInt64());
++        message.AddMessenger("window", window->messenger);
++        message.AddUInt64("window_identifier", window->identifier);
++        send(WTF::move(message), [completionHandler = WTF::move(completionHandler)](BrowserCommandBrokerHaiku::Result&&) mutable {
++            completionHandler();
++        });
++    }
++
++    void requestMaximizeWindowOfPage(WebAutomationSession&, WebPageProxy& page, CompletionHandler<void()>&& completionHandler) override
++    {
++        setWindowState(page, "maximized", WTF::move(completionHandler));
++    }
++
++    void requestHideWindowOfPage(WebAutomationSession&, WebPageProxy& page, CompletionHandler<void()>&& completionHandler) override
++    {
++        setWindowState(page, "minimized", WTF::move(completionHandler));
++    }
++
++    void requestRestoreWindowOfPage(WebAutomationSession&, WebPageProxy& page, CompletionHandler<void()>&& completionHandler) override
++    {
++        setWindowState(page, "normal", WTF::move(completionHandler));
++    }
++
++    BrowsingContextPresentation currentPresentationOfPage(WebAutomationSession&, WebPageProxy& page) override
++    {
++        auto window = windowOfPage(page);
++        return window && window->pages.size() > 1 ? BrowsingContextPresentation::Tab : BrowsingContextPresentation::Window;
++    }
++
++    void didDisconnectFromRemote(WebAutomationSession& session) override
++    {
++        session.setClient(nullptr);
++        RunLoop::mainSingleton().dispatch([session = Ref { session }] {
++            if (RefPtr processPool = session->processPool()) {
++                processPool->setAutomationSession(nullptr);
++                releasePagesFromAutomationHaiku(*processPool);
++            }
++        });
++    }
++
++private:
++    void send(BMessage&& message, BrowserCommandBrokerHaiku::Completion&& completion)
++    {
++        auto commands = m_commands.lock();
++        if (!commands) {
++            completion({ B_NO_INIT, { }, { } });
++            return;
++        }
++        commands->request(automationCommandOwnerHaiku, WTF::move(message), WTF::move(completion));
++    }
++
++    std::optional<BrowserTabRegistryHaiku::Window> windowOfPage(WebPageProxy& page) const
++    {
++        auto tabs = m_tabs.lock();
++        if (!tabs)
++            return std::nullopt;
++        auto tab = tabs->tab(page.identifier());
++        return tab ? tabs->window(tab->windowIdentifier) : std::nullopt;
++    }
++
++    // A window showing one of the session's pages.
++    std::optional<BrowserTabRegistryHaiku::Window> automationWindow(WebAutomationSession& session) const
++    {
++        RefPtr processPool = session.processPool();
++        if (!processPool)
++            return std::nullopt;
++        for (auto& process : processPool->processes()) {
++            for (auto& page : process->pages()) {
++                if (!page->isControlledByAutomation())
++                    continue;
++                if (auto window = windowOfPage(page.get()); window && window->messenger.IsValid())
++                    return window;
++            }
++        }
++        return std::nullopt;
++    }
++
++    void setWindowState(WebPageProxy& page, const char* state, CompletionHandler<void()>&& completionHandler)
++    {
++        auto window = windowOfPage(page);
++        if (!window) {
++            completionHandler();
++            return;
++        }
++        BMessage message(B_WEBKIT_BROWSER_COMMAND);
++        message.AddUInt32("command", B_WEBKIT_BROWSER_SET_WINDOW_STATE);
++        message.AddMessenger("window", window->messenger);
++        message.AddUInt64("window_identifier", window->identifier);
++        message.AddString("state", state);
++        send(WTF::move(message), [completionHandler = WTF::move(completionHandler)](BrowserCommandBrokerHaiku::Result&&) mutable {
++            completionHandler();
++        });
++    }
++
++    String m_sessionIdentifier;
++    std::weak_ptr<BrowserCommandBrokerHaiku> m_commands;
++    std::weak_ptr<BrowserTabRegistryHaiku> m_tabs;
++};
++
++AutomationClientHaiku::AutomationClientHaiku(WebProcessPool& processPool, std::shared_ptr<BrowserCommandBrokerHaiku> commands, std::shared_ptr<BrowserTabRegistryHaiku> tabs, const String& browserName, const String& browserVersion)
++    : m_processPool(processPool)
++    , m_commands(WTF::move(commands))
++    , m_tabs(WTF::move(tabs))
++    , m_browserName(browserName.isEmpty() ? "Summit"_s : browserName)
++    , m_browserVersion(browserVersion)
++{
++    Inspector::RemoteInspector::singleton().setClient(this);
++}
++
++AutomationClientHaiku::~AutomationClientHaiku()
++{
++    Inspector::RemoteInspector::singleton().setClient(nullptr);
++}
++
++void AutomationClientHaiku::requestAutomationSession(const String& sessionIdentifier, const Inspector::RemoteInspector::Client::SessionCapabilities&)
++{
++    ASSERT(isMainRunLoop());
++    RefPtr processPool = m_processPool.get();
++    if (!processPool)
++        return;
++    auto session = adoptRef(new WebAutomationSession());
++    session->setSessionIdentifier(sessionIdentifier);
++    session->setClient(makeUnique<AutomationSessionClientHaiku>(sessionIdentifier, m_commands, m_tabs));
++    processPool->setAutomationSession(WTF::move(session));
++}
++
++void AutomationClientHaiku::closeAutomationSession()
++{
++    RunLoop::mainSingleton().dispatch([processPool = m_processPool] {
++        RefPtr pool = processPool.get();
++        if (!pool || !pool->automationSession())
++            return;
++        pool->automationSession()->setClient(nullptr);
++        pool->setAutomationSession(nullptr);
++        releasePagesFromAutomationHaiku(*pool);
++    });
++}
++
++} // namespace WebKit
++
++#endif // ENABLE(REMOTE_INSPECTOR)
+diff --git a/Source/WebKit/UIProcess/haiku/AutomationClientHaiku.h b/Source/WebKit/UIProcess/haiku/AutomationClientHaiku.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..9a330c5537b7892ac6061c0001b641403f68e9eb
+--- /dev/null
++++ b/Source/WebKit/UIProcess/haiku/AutomationClientHaiku.h
+@@ -0,0 +1,47 @@
++/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
++
++#pragma once
++
++#if ENABLE(REMOTE_INSPECTOR)
++
++#include "APIAutomationClient.h"
++#include <JavaScriptCore/RemoteInspector.h>
++#include <memory>
++#include <wtf/WeakPtr.h>
++#include <wtf/text/WTFString.h>
++
++namespace WebKit {
++
++class BrowserCommandBrokerHaiku;
++class BrowserTabRegistryHaiku;
++class WebProcessPool;
++
++// WebDriver's way in (BWebKitContext::EnableRemoteAutomation): the remote
++// inspector's client for one profile's process pool. A driver connected to
++// the inspector socket starts a WebAutomationSession here; the session's
++// browsing contexts are tabs the host browser opens when asked through the
++// profile's browser command broker (OPEN_WINDOW / OPEN_TAB with automation),
++// as it opens extensions' tabs. Main RunLoop only.
++class AutomationClientHaiku final : public API::AutomationClient, Inspector::RemoteInspector::Client {
++public:
++    AutomationClientHaiku(WebProcessPool&, std::shared_ptr<BrowserCommandBrokerHaiku>, std::shared_ptr<BrowserTabRegistryHaiku>, const String& browserName, const String& browserVersion);
++    ~AutomationClientHaiku();
++
++private:
++    // RemoteInspector::Client
++    bool remoteAutomationAllowed() const override { return true; }
++    String browserName() const override { return m_browserName; }
++    String browserVersion() const override { return m_browserVersion; }
++    void requestAutomationSession(const String&, const Inspector::RemoteInspector::Client::SessionCapabilities&) override;
++    void closeAutomationSession() override;
++
++    WeakPtr<WebProcessPool> m_processPool;
++    std::weak_ptr<BrowserCommandBrokerHaiku> m_commands;
++    std::weak_ptr<BrowserTabRegistryHaiku> m_tabs;
++    String m_browserName;
++    String m_browserVersion;
++};
++
++} // namespace WebKit
++
++#endif // ENABLE(REMOTE_INSPECTOR)
 diff --git a/Source/WebKit/UIProcess/haiku/BrowserCommandBrokerHaiku.cpp b/Source/WebKit/UIProcess/haiku/BrowserCommandBrokerHaiku.cpp
 new file mode 100644
 index 0000000000000000000000000000000000000000..3729997f4f73be1848b88479b281354c88a91af0
@@ -147637,10 +148845,10 @@ index 0000000000000000000000000000000000000000..c9a119d02f85b7c5ad8fe9153bfc9604
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/WebView.cpp b/Source/WebKit/UIProcess/haiku/WebView.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..16c8cbfafc4516c751aa73f5589f217b9f3bc33b
+index 0000000000000000000000000000000000000000..b78381915339a4dfe1aace7296ae04a57289812f
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/WebView.cpp
-@@ -0,0 +1,3545 @@
+@@ -0,0 +1,3563 @@
 +/*
 + * Copyright (C) 2013 Intel Corporation. All rights reserved.
 + *
@@ -149023,6 +150231,24 @@ index 0000000000000000000000000000000000000000..16c8cbfafc4516c751aa73f5589f217b
 +            sendToHostHaiku(state, message);
 +        }
 +        completion();
++    }
++
++    // WebDriver (WebAutomationSession) checks pointer positions against the
++    // window's size and answers Get Window Rect with it. Other pages keep
++    // their frame in the web process (SetWindowFrameHaiku).
++    void windowFrame(WebPageProxy& page, Function<void(std::optional<FloatRect>)>&& completion) override
++    {
++        auto state = m_state.lock();
++        if (!page.isControlledByAutomation() || !state || state->closed) {
++            completion(std::nullopt);
++            return;
++        }
++        WebCore::IntRect frame;
++        {
++            std::lock_guard guard(state->mutex);
++            frame = state->geometry.windowFrame;
++        }
++        completion(FloatRect(frame));
 +    }
 +
 +    void createNewPage(WebPageProxy&, Ref<API::PageConfiguration>&& configuration, Ref<API::NavigationAction>&& action, CompletionHandler<void(RefPtr<WebPageProxy>&&)>&& completion) override
@@ -151188,10 +152414,10 @@ index 0000000000000000000000000000000000000000..16c8cbfafc4516c751aa73f5589f217b
 +}
 diff --git a/Source/WebKit/UIProcess/haiku/WebViewContextHaiku.cpp b/Source/WebKit/UIProcess/haiku/WebViewContextHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..922dbcea8ef4ac690096be2147918afe8d560141
+index 0000000000000000000000000000000000000000..1a43669a7086bdff449f85e4d649dafeb64ffcca
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/WebViewContextHaiku.cpp
-@@ -0,0 +1,552 @@
+@@ -0,0 +1,583 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#include "config.h"
@@ -151225,6 +152451,10 @@ index 0000000000000000000000000000000000000000..922dbcea8ef4ac690096be2147918afe
 +#include "WebExtensionCookieStoreIdentifier.h"
 +#endif
 +#include "WebProcessPool.h"
++#if ENABLE(REMOTE_INSPECTOR)
++#include "AutomationClientHaiku.h"
++#include <JavaScriptCore/RemoteInspectorServer.h>
++#endif
 +#include <WebCore/HTTPHeaderNames.h>
 +#include <WebCore/ResourceRequest.h>
 +#include <pal/SessionID.h>
@@ -151490,6 +152720,33 @@ index 0000000000000000000000000000000000000000..922dbcea8ef4ac690096be2147918afe
 +    return m_dataStore.get();
 +}
 +
++status_t WebViewContextHaiku::enableRemoteAutomation(const String& address, uint16_t port, const String& browserName, const String& browserVersion)
++{
++    ASSERT(RunLoop::isMain());
++#if ENABLE(REMOTE_INSPECTOR) && ENABLE(WEBDRIVER_MOUSE_INTERACTIONS) && ENABLE(WK_WEB_EXTENSIONS)
++    // Only a profile's own context: its browsing contexts open as its tabs.
++    if (m_extensionOwner)
++        return B_NOT_ALLOWED;
++    auto commands = browserCommands();
++    if (!commands)
++        return B_NOT_SUPPORTED;
++    // The socket server takes one client, served by one process pool.
++    if (Inspector::RemoteInspector::singleton().client())
++        return B_BUSY;
++    if (!Inspector::RemoteInspectorServer::singleton().isRunning()
++        && !Inspector::RemoteInspectorServer::singleton().start(address.utf8(), port))
++        return B_ERROR;
++    m_processPool->setAutomationClient(makeUnique<AutomationClientHaiku>(m_processPool.get(), commands, m_browserTabs, browserName, browserVersion));
++    return B_OK;
++#else
++    UNUSED_PARAM(address);
++    UNUSED_PARAM(port);
++    UNUSED_PARAM(browserName);
++    UNUSED_PARAM(browserVersion);
++    return B_NOT_SUPPORTED;
++#endif
++}
++
 +std::shared_ptr<BrowserCommandBrokerHaiku> WebViewContextHaiku::browserCommands() const
 +{
 +    ASSERT(RunLoop::isMain());
@@ -151746,10 +153003,10 @@ index 0000000000000000000000000000000000000000..922dbcea8ef4ac690096be2147918afe
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/WebViewContextHaiku.h b/Source/WebKit/UIProcess/haiku/WebViewContextHaiku.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..1fec47d2a254d8f58365601ebe05851b74a52249
+index 0000000000000000000000000000000000000000..f712608b72b963631ade0ec62755598af7ff5d91
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/WebViewContextHaiku.h
-@@ -0,0 +1,131 @@
+@@ -0,0 +1,133 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#pragma once
@@ -151849,6 +153106,8 @@ index 0000000000000000000000000000000000000000..1fec47d2a254d8f58365601ebe05851b
 +    // navigations from then on. Application thread only.
 +    void setSitePolicy(const String& policy, const String& origin, int32_t value);
 +    std::optional<int32_t> sitePolicy(const String& policy, const String& origin) const;
++    // BWebKitContext::EnableRemoteAutomation. Application thread.
++    status_t enableRemoteAutomation(const String& address, uint16_t port, const String& browserName, const String& browserVersion);
 +
 +private:
 +    explicit WebViewContextHaiku(Ref<WebsiteDataStore>&&, String extensionStorageDirectory);
@@ -204744,10 +206003,10 @@ index 359c3765d3a41ba1c6cfdb6b44fa292cc7811a0d..18a4d1524bbb7a68b2bec420d013fd89
  endif ()
 diff --git a/Source/cmake/OptionsHaiku.cmake b/Source/cmake/OptionsHaiku.cmake
 new file mode 100644
-index 0000000000000000000000000000000000000000..c2a6b2c86b3c75ca881301e21cf0fda072ff8a3c
+index 0000000000000000000000000000000000000000..95bb2baffafb32af87e361985c9ccb7394a35954
 --- /dev/null
 +++ b/Source/cmake/OptionsHaiku.cmake
-@@ -0,0 +1,392 @@
+@@ -0,0 +1,400 @@
 +include(GNUInstallDirs)
 +include(VersioningUtils)
 +
@@ -204988,6 +206247,14 @@ index 0000000000000000000000000000000000000000..c2a6b2c86b3c75ca881301e21cf0fda0
 +endif ()
 +
 +SET_AND_EXPOSE_TO_BUILD(USE_INSPECTOR_SOCKET_SERVER ${ENABLE_REMOTE_INSPECTOR})
++
++# WebDriver (WebKitWebDriver, Summit's summitdriver) drives pages through the
++# socket remote inspector and simulates input with Haiku BMessages
++# (UIProcess/Automation/haiku).
++if (ENABLE_WEBDRIVER)
++    SET_AND_EXPOSE_TO_BUILD(ENABLE_WEBDRIVER_KEYBOARD_INTERACTIONS ON)
++    SET_AND_EXPOSE_TO_BUILD(ENABLE_WEBDRIVER_MOUSE_INTERACTIONS ON)
++endif ()
 +
 +find_package(OpenSSL REQUIRED)
 +SET_AND_EXPOSE_TO_BUILD(USE_OPENSSL ON)
