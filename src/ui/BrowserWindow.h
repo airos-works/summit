@@ -734,6 +734,11 @@ private:
     void SaveAsPDF();
     void SaveAsPDFChosen(const BMessage& message);
     void PrintPagesReceived(BMessage& message);
+    // Save Page As… (#152): a web archive (MHTML), the page's source or its text.
+    void SavePageAs();
+    void SavePageFormatChosen(uint32 format);
+    void SavePageChosen(const BMessage& message);
+    void PageContentsReceived(const BMessage& message);
     void StartPictureInPicture(const std::string& token);
     void PictureInPictureCommand(const BMessage& message);
     void SpellingCommand(const BMessage& message);
@@ -790,6 +795,11 @@ private:
     // Save as PDF: the chosen file, waiting for the pages.
     std::unique_ptr<BFilePanel> fPDFPanel;
     std::map<uint64, std::string> fPDFTargets;
+    // Save Page As: the panel, the format its menu has chosen, and the files
+    // waiting for the page's contents (by request), with their formats.
+    std::unique_ptr<BFilePanel> fSavePagePanel;
+    uint32 fSavePageFormat = 0;
+    std::map<uint64, std::pair<std::string, uint32>> fSavePageTargets;
     uint64 fPrintRequest = 0;
     BMessenger fPictureInPicture;
     int64 fPictureInPictureTab = 0;

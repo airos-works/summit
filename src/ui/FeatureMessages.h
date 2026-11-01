@@ -45,6 +45,12 @@ constexpr uint32 kPrint = 'prnt';
 constexpr uint32 kSaveAsPDF = 'spdf';
 constexpr uint32 kSaveAsPDFChosen = 'spdc';
 constexpr uint32 kPageSetup = 'pstp';
+// File › Save Page As… (#152): the panel's Format menu ("format", a
+// B_WEBKIT_PAGE_* value) and the file chosen ("tab"); the engine answers
+// with B_WEBKIT_PAGE_CONTENTS.
+constexpr uint32 kSavePage = 'svpg';
+constexpr uint32 kSavePageFormat = 'svpf';
+constexpr uint32 kSavePageChosen = 'svpc';
 // Picture in Picture of the current tab's video ("token" when the page or a
 // context menu chose one; otherwise the largest playing video).
 constexpr uint32 kPictureInPicture = 'pipt';

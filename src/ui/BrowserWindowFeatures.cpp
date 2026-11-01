@@ -29,6 +29,7 @@
 #include <File.h>
 #include <FilePanel.h>
 #include <LayoutBuilder.h>
+#include <MenuBar.h>
 #include <MenuItem.h>
 #include <NodeInfo.h>
 #include <Path.h>
@@ -710,6 +711,118 @@ void BrowserWindow::PrintPagesReceived(BMessage& message)
     BNodeInfo(&file).SetType("application/pdf");
     const int32 pages = message.GetInt32("pageCount", 0);
     fStatus->SetText(("Saved " + std::to_string(pages) + (pages == 1 ? " page" : " pages") + " as " + path).c_str());
+}
+
+namespace {
+// Save Page As's formats, as the engine numbers them (B_WEBKIT_PAGE_*).
+struct SavePageFormat { uint32 format; const char* label; const char* extension; };
+constexpr SavePageFormat kSavePageFormats[] = {
+    { B_WEBKIT_PAGE_ARCHIVE, "Web Archive (one file)", ".mhtml" },
+    { B_WEBKIT_PAGE_SOURCE, "Page Source", ".html" },
+    { B_WEBKIT_PAGE_TEXT, "Text", ".txt" },
+};
+const SavePageFormat& SavePageFormatOf(uint32 format)
+{
+    for (const auto& known : kSavePageFormats) if (known.format == format) return known;
+    return kSavePageFormats[0];
+}
+// The file name without an extension the formats give it.
+std::string WithoutSaveExtension(std::string name)
+{
+    for (const char* extension : { ".mhtml", ".mht", ".html", ".htm", ".txt" }) {
+        const size_t length = std::strlen(extension);
+        if (name.size() > length && strcasecmp(name.c_str() + name.size() - length, extension) == 0)
+            return name.substr(0, name.size() - length);
+    }
+    return name;
+}
+}
+
+void BrowserWindow::SavePageAs()
+{
+    auto* tab = ActiveTab();
+    if (!tab || tab->processExited || tab->errorView) return;
+    BMessenger target(this);
+    BMessage chosen(kSavePageChosen);
+    chosen.AddInt64("tab", tab->id);
+    fSavePagePanel = std::make_unique<BFilePanel>(B_SAVE_PANEL, &target, nullptr, 0, false, &chosen);
+    // The format, in the panel's menu bar as StyledEdit offers encodings;
+    // choosing one changes the name's extension.
+    if (fSavePagePanel->Window()->Lock()) {
+        if (auto* bar = dynamic_cast<BMenuBar*>(fSavePagePanel->Window()->FindView("MenuBar"))) {
+            auto* formats = new BMenu("Format");
+            formats->SetRadioMode(true);
+            for (const auto& format : kSavePageFormats) {
+                auto* choose = new BMessage(kSavePageFormat);
+                choose->AddUInt32("format", format.format);
+                auto* item = new BMenuItem(format.label, choose);
+                item->SetTarget(this);
+                item->SetMarked(format.format == fSavePageFormat);
+                formats->AddItem(item);
+            }
+            bar->AddItem(formats);
+        }
+        fSavePagePanel->Window()->SetTitle("Save Page As — Summit");
+        fSavePagePanel->Window()->Unlock();
+    }
+    std::string name = tab->title.empty() ? "page" : tab->title;
+    for (auto& character : name) if (character == '/' || character == ':') character = '-';
+    if (name.size() > 120) name.resize(120);
+    fSavePagePanel->SetSaveText((name + SavePageFormatOf(fSavePageFormat).extension).c_str());
+    fSavePagePanel->Show();
+}
+
+void BrowserWindow::SavePageFormatChosen(uint32 format)
+{
+    fSavePageFormat = SavePageFormatOf(format).format;
+    if (!fSavePagePanel || !fSavePagePanel->Window()->Lock()) return;
+    if (auto* field = dynamic_cast<BTextControl*>(fSavePagePanel->Window()->FindView("text view"))) {
+        const std::string name = WithoutSaveExtension(field->Text());
+        fSavePagePanel->SetSaveText((name + SavePageFormatOf(fSavePageFormat).extension).c_str());
+    }
+    fSavePagePanel->Window()->Unlock();
+}
+
+void BrowserWindow::SavePageChosen(const BMessage& message)
+{
+    auto* tab = FindTabByID(message.GetInt64("tab", 0));
+    entry_ref directory;
+    const char* name = nullptr;
+    if (!tab || message.FindRef("directory", &directory) != B_OK || message.FindString("name", &name) != B_OK || !name) return;
+    BPath path(&directory);
+    if (path.InitCheck() != B_OK || path.Append(name) != B_OK) return;
+    const uint64 request = ++fPrintRequest | (uint64(1) << 61);
+    fSavePageTargets[request] = { path.Path(), fSavePageFormat };
+    tab->view->GetPageContents(fSavePageFormat, BMessenger(this), request);
+    fStatus->SetText("Saving the page…");
+}
+
+void BrowserWindow::PageContentsReceived(const BMessage& message)
+{
+    auto target = fSavePageTargets.find(message.GetUInt64("identifier", 0));
+    if (target == fSavePageTargets.end()) return;
+    const auto [path, format] = target->second;
+    fSavePageTargets.erase(target);
+    const void* data = nullptr;
+    ssize_t size = 0;
+    if (message.HasString("error") || message.FindData("data", B_RAW_TYPE, &data, &size) != B_OK) {
+        const std::string error = message.GetString("error", "");
+        ShowError("Could not save the page: " + (error.empty() ? std::string("the page gave nothing to save.") : error + "."));
+        return;
+    }
+    BFile file(path.c_str(), B_WRITE_ONLY | B_CREATE_FILE | B_ERASE_FILE);
+    if (file.InitCheck() != B_OK || (size > 0 && file.Write(data, size) != size)) {
+        ShowError("Could not write " + path + ".");
+        return;
+    }
+    // Text as UTF-8 and source as the server's type; archives as MHTML,
+    // which Summit opens (Resources: file_types).
+    std::string type = message.GetString("mime_type", "");
+    if (format == B_WEBKIT_PAGE_TEXT) type = "text/plain";
+    else if (format == B_WEBKIT_PAGE_ARCHIVE) type = "multipart/related";
+    else if (type.empty()) type = "text/html";
+    BNodeInfo(&file).SetType(type.c_str());
+    fStatus->SetText(("Saved the page as " + path).c_str());
 }
 
 void BrowserWindow::InstallWebAppResult(const BMessage& message)

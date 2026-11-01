@@ -209,3 +209,24 @@ menus open at once. An entry is chosen by its identifier
 when it gets there, so a list that changed in between goes nowhere rather
 than somewhere else. `ToolButton::SetMenuMessage` gives any toolbar button
 such a menu.
+
+## Save Page As (#152)
+
+File › Save Page As… (Command-S) saves the current page in one of three
+formats, chosen in the save panel's Format menu (which also changes the
+name's extension):
+
+- **Web Archive (one file)**, `.mhtml`: the page with its images, style
+  sheets and frames as MHTML (`multipart/related`), made by WebCore's
+  `MHTMLArchive`. Opening it (File › Open File…, or Tracker: Summit lists
+  `multipart/related` among its file types) shows the page offline; the
+  engine maps `.mhtml` and `.mht` to that type, the only one that loads as an
+  archive.
+- **Page Source**, `.html`: the main document as the server sent it.
+- **Text**, `.txt`: the page's text, frames included.
+
+The engine call is `BWebKitView::GetPageContents(format, reply, identifier)`
+(`B_WEBKIT_PAGE_ARCHIVE`, `B_WEBKIT_PAGE_SOURCE`, `B_WEBKIT_PAGE_TEXT`),
+answered with `B_WEBKIT_PAGE_CONTENTS`. An archive holds the document as it
+is shown (WebCore serializes the current DOM), and an opened archive loads
+nothing from the network.

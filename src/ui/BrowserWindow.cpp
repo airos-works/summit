@@ -810,6 +810,7 @@ BrowserWindow::BrowserWindow(std::shared_ptr<SharedProfile> profile, std::string
     file->AddSeparatorItem();
     if (fWebApp.empty()) AddItem(file, "Install as App…", kInstallWebApp);
     else AddItem(file, "Open in Summit", kOpenInBrowser);
+    AddItem(file, "Save Page As…", kSavePage, 'S');
     AddItem(file, "Save as PDF…", kSaveAsPDF, 'S', B_SHIFT_KEY);
     AddItem(file, "Page Setup…", kPageSetup);
     AddItem(file, "Print…", kPrint, 'P');
@@ -4770,6 +4771,10 @@ void BrowserWindow::MessageReceived(BMessage* message)
         case kPageSetup: PrintJob::ConfigurePage(); break;
         case kSaveAsPDF: SaveAsPDF(); break;
         case kSaveAsPDFChosen: SaveAsPDFChosen(*message); break;
+        case kSavePage: SavePageAs(); break;
+        case kSavePageFormat: SavePageFormatChosen(message->GetUInt32("format", 0)); break;
+        case kSavePageChosen: SavePageChosen(*message); break;
+        case B_WEBKIT_PAGE_CONTENTS: PageContentsReceived(*message); break;
         case kPrintPagesRequest: {
             BMessenger reply;
             auto* target = FindTabByID(message->GetInt64("tab", 0));
