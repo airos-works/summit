@@ -898,8 +898,19 @@ BrowserWindow::BrowserWindow(std::shared_ptr<SharedProfile> profile, std::string
 #endif
     menu->AddItem(view);
     fHistoryMenu = new BMenu("History");
+#if SUMMIT_MODERN_WEBKIT
+    // The tab's earlier and later pages, as the toolbar buttons' menus show
+    // them (#151); Command-[ and Command-] still go one page.
+    fBackMenu = new BMenu("Back");
+    fForwardMenu = new BMenu("Forward");
+    fHistoryMenu->AddItem(fBackMenu);
+    fHistoryMenu->AddItem(fForwardMenu);
+    AddShortcut('[', 0, new BMessage(kBack));
+    AddShortcut(']', 0, new BMessage(kForward));
+#else
     AddItem(fHistoryMenu, "Back", kBack, '[');
     AddItem(fHistoryMenu, "Forward", kForward, ']');
+#endif
     AddItem(fHistoryMenu, "Home", kHome);
     fHistoryMenu->AddSeparatorItem();
     AddItem(fHistoryMenu, "Show History", kShowHistory, 'Y');
@@ -941,6 +952,14 @@ BrowserWindow::BrowserWindow(std::shared_ptr<SharedProfile> profile, std::string
     auto* homeButton = new ToolButton("home", "Home", Icon::Home, kHome);
     fBack = new ToolButton("back", "Back", Icon::Back, kBack);
     fForward = new ToolButton("forward", "Forward", Icon::Forward, kForward);
+#if SUMMIT_MODERN_WEBKIT
+    // A secondary click or a long press lists the tab's history (#151).
+    BMessage backMenu(kBackForwardMenu), forwardMenu(kBackForwardMenu);
+    backMenu.AddBool("forward", false);
+    forwardMenu.AddBool("forward", true);
+    fBack->SetMenuMessage(backMenu);
+    fForward->SetMenuMessage(forwardMenu);
+#endif
     fReload = new ToolButton("reload", "Reload / stop", Icon::Reload, kReload);
     fAddress = new AddressControl;
     fAddress->SetExplicitMinSize(BSize(fPopup ? 120 : 240, 30));
@@ -3454,6 +3473,49 @@ void BrowserWindow::ShowTabListMenu(const BMessage& message)
     menu->Go(where, true, false, button, true);
 }
 
+#if SUMMIT_MODERN_WEBKIT
+void BrowserWindow::AddBackForwardItems(BMenu* menu, const Tab& tab, bool forward)
+{
+    // On an error page the page under it, still the tab's current one, is
+    // the first step back.
+    if (!forward && tab.errorView && tab.errorBack) {
+        auto* back = NewPageMenuItem(MenuLabel({DisplayURL(tab.url), tab.title}).c_str(), new BMessage(kBack),
+            fFavicons->Icon(tab.url));
+        back->SetTarget(this);
+        menu->AddItem(back);
+    }
+    BMessage entry;
+    for (int32 index = 0; tab.backForward.FindMessage(forward ? "forward" : "back", index, &entry) == B_OK; ++index) {
+        const std::string url = StoredURL(entry.GetString("url", ""));
+        auto* go = new BMessage(kGoToHistoryItem);
+        go->AddInt64("tab", tab.id);
+        go->AddUInt64("item", entry.GetUInt64("item", 0));
+        auto* item = NewPageMenuItem(MenuLabel({DisplayURL(url), entry.GetString("title", "")}).c_str(), go,
+            fFavicons->Icon(url));
+        item->SetTarget(this);
+        menu->AddItem(item);
+    }
+}
+
+void BrowserWindow::ShowBackForwardMenu(const BMessage& message)
+{
+    auto* tab = ActiveTab();
+    BPoint where;
+    if (!tab || IsClosing() || message.FindPoint("where", &where) != B_OK) return;
+    auto* menu = new CancellableMenu("back-forward", fMenusCancelled);
+    AddBackForwardItems(menu, *tab, message.GetBool("forward", false));
+    if (!menu->CountItems()) {
+        delete menu;
+        return;
+    }
+    menu->SetAsyncAutoDestruct(true);
+    // Released over the button, the menu stays open for a click.
+    BRect button;
+    if (message.FindRect("button", &button) == B_OK) menu->Go(where, true, false, button, true);
+    else menu->Go(where, true, false, true);
+}
+#endif
+
 void BrowserWindow::ApplyInterfaceStyle()
 {
 #if SUMMIT_MODERN_WEBKIT
@@ -3871,6 +3933,14 @@ void BrowserWindow::RebuildDynamicMenus()
         }
     };
     addIcons(*roots);
+#if SUMMIT_MODERN_WEBKIT
+    for (auto* list : {fBackMenu, fForwardMenu}) {
+        if (!list) continue;
+        clear(list, 0);
+        if (tab) AddBackForwardItems(list, *tab, list == fForwardMenu);
+        list->SetEnabled(list->CountItems() > 0);
+    }
+#endif
     // Recently visited pages, then every bookmark, as in Safari's menus.
     clear(fHistoryMenu, fHistoryMenuFixed);
     if (!history.empty()) fHistoryMenu->AddSeparatorItem();
@@ -4533,6 +4603,20 @@ void BrowserWindow::MessageReceived(BMessage* message)
         case kCloseWindow: PostMessage(B_QUIT_REQUESTED); break;
         case kTabMenu: ShowTabMenu(*message); break;
         case kTabListMenu: ShowTabListMenu(*message); break;
+#if SUMMIT_MODERN_WEBKIT
+        case kBackForwardMenu: ShowBackForwardMenu(*message); break;
+        case kGoToHistoryItem: {
+            auto* target = FindTabByID(message->GetInt64("tab", 0));
+            if (!target || !PrepareTabNavigation(*target)) break;
+            LeaveLoadErrorView(*target);
+            target->view->GoToBackForwardItem(message->GetUInt64("item", 0));
+            break;
+        }
+        case B_WEBKIT_BACK_FORWARD_LIST:
+            if (auto* target = FindTabByID(static_cast<int64>(message->GetUInt64("identifier", 0))))
+                target->backForward = *message;
+            break;
+#endif
         case kReloadTab: case kDuplicateTab: case kMoveTabToNewWindow: case kCloseOtherTabs: {
             int64 id;
             if (message->FindInt64("id", &id) != B_OK) id = fSelected;
@@ -6366,6 +6450,13 @@ void BrowserWindow::WebKitStateChanged(const BMessage& message)
                 if (page.url == url && page.title != title) { page.title = title; changes = SharedProfile::kHistoryChanged; }
             return changes;
         }, BMessenger(this), false);
+    }
+    // The Back and Forward menus' entries, when what they list may have changed.
+    std::string backForwardKey = tab->url + '\n' + tab->title + (tab->back ? "\nb" : "\n") + (tab->forward ? "f" : "")
+        + (tab->loading ? "l" : "");
+    if (backForwardKey != tab->backForwardKey) {
+        tab->backForwardKey = std::move(backForwardKey);
+        tab->view->GetBackForwardList(BMessenger(this), static_cast<uint64>(tab->id));
     }
     UpdateLoadErrorView(*tab);
     if (tab->id == fSelected) {

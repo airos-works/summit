@@ -190,3 +190,22 @@ caches it as usual. SVGs over 256 KiB are not drawn, and nanosvg does not
 read CSS `<style>` sheets, so an icon drawn only through one (GitHub's dark
 mode icon) stays the default; 15,000 damaged copies of five real favicons
 went through it under AddressSanitizer without a fault.
+
+## Back and Forward history menus (#151)
+
+A secondary click on the Back or Forward button, or holding the primary button
+on it for half a second, opens a menu of the tab's earlier (or later) pages,
+nearest first, each with its site icon and title; choosing one goes straight
+there. History › Back and History › Forward are submenus with the same
+entries (Command-[ and Command-] still go one page). On an error page the
+page under it heads the Back menu.
+
+The window keeps each tab's list (`Tab::backForward`): it asks the engine
+again (`BWebKitView::GetBackForwardList`, answered with
+`B_WEBKIT_BACK_FORWARD_LIST`, at most 25 entries each way) whenever the tab's
+address, title, loading state or Back/Forward availability changes, so the
+menus open at once. An entry is chosen by its identifier
+(`BWebKitView::GoToBackForwardItem`), which the engine looks up in the list
+when it gets there, so a list that changed in between goes nowhere rather
+than somewhere else. `ToolButton::SetMenuMessage` gives any toolbar button
+such a menu.

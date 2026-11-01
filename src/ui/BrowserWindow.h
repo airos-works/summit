@@ -312,6 +312,11 @@ private:
         std::string pipToken;
         // Firefox's container the page is in (Containers.h), 0 for none.
         uint32 container = 0;
+        // The tab's history for the Back and Forward menus (#151): the last
+        // B_WEBKIT_BACK_FORWARD_LIST, asked for again whenever the address,
+        // title, loading or Back and Forward change (backForwardKey).
+        BMessage backForward;
+        std::string backForwardKey;
 #endif
     };
 #if SUMMIT_MODERN_WEBKIT
@@ -424,6 +429,12 @@ private:
     void ShowTabMenu(const BMessage&);
     // List All Tabs (the tab strip's chevron): every tab of the window.
     void ShowTabListMenu(const BMessage&);
+#if SUMMIT_MODERN_WEBKIT
+    // The Back or Forward button's menu of the tab's earlier or later pages,
+    // nearest first (kBackForwardMenu), and the same entries for a menu.
+    void ShowBackForwardMenu(const BMessage&);
+    void AddBackForwardItems(BMenu* menu, const Tab& tab, bool forward);
+#endif
     void UpdateWindowList();
 #if SUMMIT_MODERN_WEBKIT
     void ShowPageContextMenu(const BMessage&);
@@ -963,6 +974,9 @@ private:
     BCardLayout* fCards;
     BView* fPages;
     BMenu* fHistoryMenu;
+    // History › Back and Forward: the tab's history (#151).
+    BMenu* fBackMenu = nullptr;
+    BMenu* fForwardMenu = nullptr;
     BMenu* fBookmarksMenu;
     int32 fHistoryMenuFixed = 0, fBookmarksMenuFixed = 0;
     BMenuItem* fBookmarksBarItem;

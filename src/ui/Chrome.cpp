@@ -94,6 +94,53 @@ ToolButton::ToolButton(const char* name, const char* tooltip, Icon icon, uint32 
 BSize ToolButton::MinSize() { return ToolButtonSize(); }
 BSize ToolButton::MaxSize() { return ToolButtonSize(); }
 BSize ToolButton::PreferredSize() { return ToolButtonSize(); }
+static constexpr uint32 kToolButtonHeld = 'tbhd';
+void ToolButton::MouseDown(BPoint where)
+{
+    fHoldTimer.reset();
+    if (fMenuMessage.what && IsEnabled()) {
+        int32 buttons = 0;
+        if (Window() && Window()->CurrentMessage()) Window()->CurrentMessage()->FindInt32("buttons", &buttons);
+        if (buttons & B_SECONDARY_MOUSE_BUTTON) {
+            ShowMenu();
+            return;
+        }
+        BMessage held(kToolButtonHeld);
+        fHoldTimer = std::make_unique<BMessageRunner>(BMessenger(this), &held, 500000, 1);
+    }
+    BButton::MouseDown(where);
+}
+void ToolButton::MouseUp(BPoint where)
+{
+    fHoldTimer.reset();
+    BButton::MouseUp(where);
+}
+void ToolButton::MessageReceived(BMessage* message)
+{
+    if (message->what != kToolButtonHeld) {
+        BButton::MessageReceived(message);
+        return;
+    }
+    fHoldTimer.reset();
+    BPoint where;
+    uint32 buttons = 0;
+    GetMouse(&where, &buttons, false);
+    // Still pressed: the menu takes over the press, which no longer clicks.
+    if (!IsTracking() || !(buttons & B_PRIMARY_MOUSE_BUTTON)) return;
+    SetTracking(false);
+    SetValue(B_CONTROL_OFF);
+    ShowMenu();
+}
+void ToolButton::ShowMenu()
+{
+    if (!Window()) return;
+    // The tooltip would cover the menu's first entry.
+    HideToolTip();
+    BMessage menu(fMenuMessage);
+    menu.AddPoint("where", ConvertToScreen(BPoint(Bounds().left, Bounds().bottom + 1)));
+    menu.AddRect("button", ConvertToScreen(Bounds()));
+    Window()->PostMessage(&menu);
+}
 void ToolButton::MouseMoved(BPoint where, uint32 transit, const BMessage* drag)
 {
     const bool hover = transit == B_ENTERED_VIEW || transit == B_INSIDE_VIEW;

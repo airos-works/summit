@@ -10,6 +10,11 @@ constexpr uint32 kWindowReadyToClose = 'wrcl';
 constexpr uint32 kSelectTab = 'stab';
 constexpr uint32 kBack = 'back';
 constexpr uint32 kForward = 'frwd';
+// The Back or Forward button's menu of the tab's history ("forward" bool,
+// "where" screen point), and an entry chosen from it or from the History
+// menu ("tab" int64, "item" uint64: BWebKitView::GoToBackForwardItem).
+constexpr uint32 kBackForwardMenu = 'bfmn';
+constexpr uint32 kGoToHistoryItem = 'gthi';
 constexpr uint32 kReload = 'reld';
 constexpr uint32 kHome = 'home';
 constexpr uint32 kFocusAddress = 'fadr';

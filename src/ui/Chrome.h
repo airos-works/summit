@@ -1,5 +1,6 @@
 #pragma once
 #include <Button.h>
+#include <Message.h>
 #include <Messenger.h>
 #include <PopUpMenu.h>
 #include <View.h>
@@ -55,8 +56,19 @@ public:
     BSize MaxSize() override;
     BSize PreferredSize() override;
     void SetIcon(Icon icon) { if (fIcon != icon) { fIcon = icon; Invalidate(); } }
+    // A secondary click, or the primary button held for half a second, sends
+    // message (with "where", the screen point under the button's left edge
+    // where its menu goes, and "button", the button's screen frame) to the
+    // window instead of clicking: the Back and Forward buttons' history menus.
+    void SetMenuMessage(const BMessage& message) { fMenuMessage = message; }
+    void MouseDown(BPoint where) override;
+    void MouseUp(BPoint where) override;
+    void MessageReceived(BMessage* message) override;
 private:
+    void ShowMenu();
     void UpdateIconBitmap(rgb_color ink);
+    BMessage fMenuMessage;
+    std::unique_ptr<BMessageRunner> fHoldTimer;
     std::unique_ptr<BBitmap> fBitmap;
     rgb_color fBitmapInk { 0, 0, 0, 0 };
     int fBitmapSize = 0;
