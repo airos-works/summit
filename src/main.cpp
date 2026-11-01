@@ -42,6 +42,7 @@
 #include <Alert.h>
 #include <Application.h>
 #include <Entry.h>
+#include <AppFileInfo.h>
 #include <File.h>
 #include <Resources.h>
 #include <Invoker.h>
@@ -172,6 +173,13 @@ public:
                     options.frame = CascadedFrame();
                     OpenWindow(options);
                 }
+                continue;
+            }
+            // WebDriver (summitdriver) starts Summit, or hands this to the
+            // copy already running, with the socket to open for it.
+            if (argument == "--automation" && i + 1 < argc) {
+                fAutomation = argv[++i];
+                if (fWebKitContext) StartAutomation();
                 continue;
             }
             if (argument == "--app" && i + 1 < argc) {
@@ -339,6 +347,8 @@ public:
                 return;
             }
         }
+        // WebDriver's browsing contexts are opened as browser commands too.
+        if (!fAutomation.empty()) StartAutomation();
 #else
         setenv("CURL_COOKIE_JAR_PATH", (fProfile / "cookies.sqlite").c_str(), 1);
         BWebPage::InitializeOnce();
@@ -2531,6 +2541,34 @@ private:
             + "\n\nQuit it first, or start this one with --profile and another folder.");
         return false;
     }
+#if SUMMIT_MODERN_WEBKIT
+    // --automation ADDRESS:PORT: WebDriver's remote automation socket
+    // (docs/webdriver.md). Its sessions open windows of their own, marked
+    // as automated (BrowserWindow::MarkAutomated).
+    void StartAutomation()
+    {
+        const auto colon = fAutomation.rfind(':');
+        const long port = colon == std::string::npos ? 0 : std::strtol(fAutomation.c_str() + colon + 1, nullptr, 10);
+        if (colon == std::string::npos || colon == 0 || port <= 0 || port > 65535) {
+            std::fprintf(stderr, "Summit: --automation needs ADDRESS:PORT, not \"%s\"\n", fAutomation.c_str());
+            return;
+        }
+        std::string version;
+        app_info info;
+        BFile file;
+        BAppFileInfo appInfo;
+        version_info versionInfo;
+        if (GetAppInfo(&info) == B_OK && file.SetTo(&info.ref, B_READ_ONLY) == B_OK && appInfo.SetTo(&file) == B_OK
+            && appInfo.GetVersionInfo(&versionInfo, B_APP_VERSION_KIND) == B_OK)
+            version = std::to_string(versionInfo.major) + "." + std::to_string(versionInfo.middle) + "." + std::to_string(versionInfo.minor);
+        const std::string address = fAutomation.substr(0, colon);
+        const status_t status = fWebKitContext->EnableRemoteAutomation(address.c_str(), static_cast<uint16>(port), "Summit", version.c_str());
+        if (status != B_OK)
+            std::fprintf(stderr, "Summit: could not open the automation socket at %s: %s\n", fAutomation.c_str(), std::strerror(status));
+        else
+            std::fprintf(stderr, "Summit: remote automation on %s\n", fAutomation.c_str());
+    }
+#endif
     // B_BAD_TEAM_ID or B_BAD_PORT_ID: that copy is gone.
     status_t HandToRunningCopy(team_id team)
     {
@@ -2540,6 +2578,9 @@ private:
         BMessage start(B_ARGV_RECEIVED);
         std::vector<std::string> arguments { "Summit" };
         for (const auto& app : fPendingWebApps) arguments.insert(arguments.end(), {"--app", app});
+#if SUMMIT_MODERN_WEBKIT
+        if (!fAutomation.empty()) arguments.insert(arguments.end(), {"--automation", fAutomation});
+#endif
         arguments.insert(arguments.end(), fURLs.begin(), fURLs.end());
 #if SUMMIT_MODERN_WEBKIT
         // Browser profiles (#157).
@@ -2689,6 +2730,8 @@ private:
     int fExitStatus = 0;
     std::filesystem::path fProfile;
     std::vector<std::string> fURLs;
+    // --automation ADDRESS:PORT (StartAutomation), empty without it.
+    std::string fAutomation;
     // Web apps asked for before the first window opened (#75).
     std::vector<std::string> fPendingWebApps;
     std::unique_ptr<summit::ProfileLock> fProfileLock;

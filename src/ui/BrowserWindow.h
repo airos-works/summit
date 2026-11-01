@@ -646,6 +646,9 @@ private:
     };
     void BrowserCommand(const BMessage&);
     void OpenTabsForCommand(const BMessage&, uint64 identifier, bool window);
+    // A window a WebDriver session drives (--automation): Safari's orange
+    // address field and "(Automated)" in the title.
+    void MarkAutomated();
     void CloseTabsForCommand(uint64 identifier, const std::vector<int64>&);
     void TabOpenedForCommand(uint64 command, Tab*, const std::string& error);
     void TabCloseSettled(int64 id, bool closed);
@@ -1076,6 +1079,7 @@ private:
     std::unique_ptr<ProtocolHandlers> fProtocolHandlers;
     uint64 fKey = 0;
     bool fPrivate = false;
+    bool fAutomated = false;
     ZoomButton* fZoomButton = nullptr;
     std::string fStartURL;
     bool fBookmarksBarVisible = true;

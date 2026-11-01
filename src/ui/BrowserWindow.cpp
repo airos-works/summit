@@ -2655,6 +2655,8 @@ void BrowserWindow::ApplyCommandFrame(const BMessage& message)
 
 void BrowserWindow::OpenTabsForCommand(const BMessage& message, uint64 identifier, bool window)
 {
+    // WebDriver's browsing contexts (BWebKitContext::EnableRemoteAutomation).
+    if (message.GetBool("automation", false)) MarkAutomated();
     OpenCommand command;
     command.identifier = identifier;
     command.window = window;
@@ -2688,6 +2690,25 @@ void BrowserWindow::OpenTabsForCommand(const BMessage& message, uint64 identifie
         CreateTab(address, select, nullptr, index, identifier, 0, 0, message.GetUInt32("container", 0));
         select = false;
     }
+}
+
+void BrowserWindow::MarkAutomated()
+{
+    if (fAutomated) return;
+    fAutomated = true;
+    // Safari's colour for a window under remote control, on the field that
+    // otherwise shows the address; the page title says it too.
+    static constexpr rgb_color orange = {255, 159, 10, 255};
+    static constexpr rgb_color ink = {30, 30, 30, 255};
+    BTextView* text = fAddress->TextView();
+    text->SetViewColor(orange);
+    text->SetLowColor(orange);
+    BFont font;
+    text->GetFont(&font);
+    text->SetFontAndColor(&font, B_FONT_ALL, &ink);
+    text->Invalidate();
+    fAddress->Invalidate();
+    RefreshChrome();
 }
 
 void BrowserWindow::BrowserCommand(const BMessage& message)
@@ -3314,7 +3335,7 @@ void BrowserWindow::RefreshChrome()
         fBookmarkButton->SetIcon(bookmarked ? Icon::BookmarkFilled : Icon::Bookmark);
         const std::string& shown = tab->ShownTitle();
         const std::string title = !fWebApp.empty() ? (shown.empty() || shown == fWebAppName ? fWebAppName
-            : shown + " — " + fWebAppName) : shown + (fPrivate ? " — Summit Private Browsing" : " — Summit")
+            : shown + " — " + fWebAppName) : shown + (fPrivate ? " — Summit Private Browsing" : fAutomated ? " — Summit (Automated)" : " — Summit")
 #if SUMMIT_MODERN_WEBKIT
             + fProfileTitle // Browser profiles (#157).
 #endif
