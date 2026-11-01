@@ -139602,7 +139602,7 @@ index d9243a6e70f5b6759cb9d98941df81778c31e1c9..b6200d627dc4b62319ecef47a1e93385
          }
      }
 diff --git a/Source/WebKit/UIProcess/WebProcessPool.cpp b/Source/WebKit/UIProcess/WebProcessPool.cpp
-index cf634997b899951b6afccf716c62137a21a66d6a..838b682ec2471b6372de278c24e55e0dfa807d94 100644
+index cf634997b899951b6afccf716c62137a21a66d6a..50e830f4b12347eb1318e4998fe8ce7c2181009d 100644
 --- a/Source/WebKit/UIProcess/WebProcessPool.cpp
 +++ b/Source/WebKit/UIProcess/WebProcessPool.cpp
 @@ -144,6 +144,8 @@
@@ -139632,6 +139632,94 @@ index cf634997b899951b6afccf716c62137a21a66d6a..838b682ec2471b6372de278c24e55e0d
  void WebProcessPool::sendMemoryPressureEvent(bool isCritical)
  {
      sendToAllProcesses(Messages::AuxiliaryProcess::DidReceiveMemoryPressureEvent(isCritical));
+@@ -2411,6 +2413,55 @@ void WebProcessPool::prepareProcessForNavigation(Ref<WebProcessProxy>&& process,
+     });
+ }
+ 
++#if OS(HAIKU)
++// Every tab normally gets a web process of its own, and each one costs its
++// fixed share (code, heaps, a GPU context) plus its own copy of the site's
++// scripts and caches: five tabs of one web app are five copies. Once less than
++// 30% of the RAM is left (free and file cache pages), a tab's main frame going
++// to a site that a running process already shows joins that process, up to
++// four pages a process. SUMMIT_SHARE_SITE_PROCESSES_BELOW_PERCENT changes the
++// 30 (0 never shares, 100 always does).
++static RefPtr<WebProcessProxy> sameSiteProcessWhenMemoryIsLowHaiku(const Vector<Ref<WebProcessProxy>>& processes, const WebProcessProxy& source, const URL& url,
++    WebsiteDataStore& dataStore, WebProcessProxy::LockdownMode lockdownMode, EnhancedSecurity enhancedSecurity, CrossOriginMode crossOriginMode, const API::PageConfiguration& pageConfiguration)
++{
++    static const int belowPercent = [] {
++        const char* value = getenv("SUMMIT_SHARE_SITE_PROCESSES_BELOW_PERCENT");
++        return value && *value ? std::clamp(atoi(value), 0, 100) : 30;
++    }();
++    if (!belowPercent || crossOriginMode != CrossOriginMode::Shared || !url.protocolIsInHTTPFamily())
++        return nullptr;
++    if (belowPercent < 100) {
++        system_info info;
++        if (get_system_info(&info) != B_OK || !info.max_pages)
++            return nullptr;
++        uint64_t available = info.max_pages - std::min<uint64_t>(info.used_pages, info.max_pages);
++        if (available * 100 >= static_cast<uint64_t>(belowPercent) * info.max_pages)
++            return nullptr;
++    }
++    WebCore::Site site { url };
++    if (site.isEmpty())
++        return nullptr;
++    RefPtr<WebProcessProxy> chosen;
++    for (Ref process : processes) {
++        if (process.ptr() == &source || process->isPrewarmed() || process->isDummyProcessProxy() || process->isInProcessCache())
++            continue;
++        if (process->state() != AuxiliaryProcessProxy::State::Running || !process->isResponsive())
++            continue;
++        if (!process->pageCount() || process->pageCount() >= 4 || !process->site() || *process->site() != site)
++            continue;
++        if (process->websiteDataStore() != &dataStore || process->lockdownMode() != lockdownMode
++            || !enhancedSecurityStatesAreConsistent(process->enhancedSecurity(), enhancedSecurity)
++            || process->crossOriginMode() != CrossOriginMode::Shared || !process->hasSameGPUAndNetworkProcessPreferencesAs(pageConfiguration))
++            continue;
++        if (!chosen || process->pageCount() < chosen->pageCount())
++            chosen = process.ptr();
++    }
++    if (chosen)
++        fprintf(stderr, "Summit: a tab of %s joins web process %d (%u pages) while memory is low\n", site.domain().string().utf8().data(), chosen->processID(), chosen->pageCount());
++    return chosen;
++}
++#endif
++
+ std::tuple<Ref<WebProcessProxy>, RefPtr<SuspendedPageProxy>, ASCIILiteral> WebProcessPool::processForNavigationInternal(WebPageProxy& page, WebFrameProxy& frame, const API::Navigation& navigation, const URL& pageSourceURL, BrowsingContextGroup& browsingContextGroup, WebProcessProxy::IsolatedProcessType isolatedProcessType, const Site& mainFrameSite, ProcessSwapRequestedByClient processSwapRequestedByClient, WebProcessProxy::LockdownMode lockdownMode, EnhancedSecurity enhancedSecurity, const FrameInfoData& frameInfo, Ref<WebsiteDataStore>&& dataStore)
+ {
+     auto& targetURL = navigation.currentRequest().url();
+@@ -2465,7 +2516,20 @@ std::tuple<Ref<WebProcessProxy>, RefPtr<SuspendedPageProxy>, ASCIILiteral> WebPr
+     }
+ 
+     bool isProcessInUseBySingleFrame = !siteIsolationEnabled || (sourceProcess->frameProcessCount() == 1 && frame.frameProcess().frameCount() <= 1);
++#if OS(HAIKU)
++    // A new tab's first load, or a cross-site navigation below: join a
++    // running process of the target site when memory is low.
++    auto sameSiteProcessHaiku = [&]() -> RefPtr<WebProcessProxy> {
++        if (siteIsolationEnabled || !frame.isMainFrame() || pageConfiguration->relatedPage() || page.openedByDOM())
++            return nullptr;
++        return sameSiteProcessWhenMemoryIsLowHaiku(m_processes, sourceProcess, targetURL, dataStore, lockdownMode, enhancedSecurity, crossOriginMode, pageConfiguration);
++    };
++#endif
+     if (!sourceProcess->hasCommittedAnyProvisionalLoads() && isProcessInUseBySingleFrame) {
++#if OS(HAIKU)
++        if (RefPtr shared = sameSiteProcessHaiku())
++            return { shared.releaseNonNull(), nullptr, "Sharing a same-site process while memory is low"_s };
++#endif
+         tryPrewarmWithDomainInformation(sourceProcess, targetSite.domain());
+         return { WTF::move(sourceProcess), nullptr, "Process has not yet committed any provisional loads"_s };
+     }
+@@ -2608,6 +2672,10 @@ std::tuple<Ref<WebProcessProxy>, RefPtr<SuspendedPageProxy>, ASCIILiteral> WebPr
+         }
+     }
+ 
++#if OS(HAIKU)
++    if (RefPtr shared = sameSiteProcessHaiku())
++        return { shared.releaseNonNull(), nullptr, "Sharing a same-site process while memory is low"_s };
++#endif
+     return { createNewProcess(), nullptr, reason };
+ }
+ 
 diff --git a/Source/WebKit/UIProcess/WebProcessPool.h b/Source/WebKit/UIProcess/WebProcessPool.h
 index d4afb10866fa73ce4047d470aba3e73b7e4e35e2..b48831fab560fb51546c7fe9c6300eb8a5211a5f 100644
 --- a/Source/WebKit/UIProcess/WebProcessPool.h

@@ -1,6 +1,6 @@
 # Summit performance: Speedometer 3.1 baseline, where the time goes, stress test
 
-## 2 November 2026: memory with 8-10 tabs on the 16 GB laptop (#163, #164, #165)
+## 2 November 2026: memory with 8-10 tabs on the 16 GB laptop (#163-#166)
 
 The owner's laptop (Ryzen AI 5 340, Radeon 840M, 16 GB) slowed down with 8-10
 tabs. With 7 tabs (5 Jira issues, Proton Mail, YouTube) and three extensions
@@ -35,6 +35,15 @@ heap was 104-127 MiB.
   space in partly used mimalloc pages. `MIMALLOC_PAGE_RECLAIM_ON_FREE=1` and
   `MIMALLOC_PURGE_DELAY=0` did no better than the run-to-run spread of the
   same 8 sites (3.5-4.2 GiB), so mimalloc is left as it is.
+- **Same-site tabs share a process when memory is low (#166).** Below 30%
+  of the RAM left, a tab's main-frame load joins a running, responsive
+  process already showing that site (fewer than four pages; same data store,
+  lockdown, cross-origin mode), for a new tab's first load and for
+  cross-site navigations; popups and pages opened by script keep WebKit's
+  rules. X399, 4 Wikipedia + 4 GitHub tabs: 10 processes / 2,224 MiB
+  (repeat 1,962) without, 4 / 1,398 MiB with; the tabs rendered and
+  scrolled the same. Tabs of one site then share a main thread.
+  `SUMMIT_SHARE_SITE_PROCESSES_BELOW_PERCENT` (30; 0 never, 100 always).
 - **Idle network processes (#165, open).** Four network processes on the
   laptop started together and never ran a request (55 MiB, 44 threads).
 
