@@ -77,6 +77,22 @@ curl -s -XDELETE localhost:4444/session/$S
 - The engine needs `ENABLE_WEBDRIVER=ON`, which also turns on WebDriver's
   mouse and keyboard interactions (Source/cmake/OptionsHaiku.cmake).
 
+- On Haiku the socket inspector needed three fixes (JavaScriptCore's
+  `RemoteInspectorSocketPOSIX.cpp`, `RemoteInspectorConnectionClient.cpp`):
+  `SO_REUSEPORT` is refused, `SO_ACCEPTCONN` is not filled in, socket buffer
+  sizes must be passed as `int`; and events queued for a client that was
+  destroyed (a deleted session whose browser still talks) are dropped instead
+  of crashing the driver on its next session.
+
+## Testing
+
+Verified on the X399 (1 Nov 2026): three sessions in a row through one
+driver, each creating a session (Summit started with `--automation`),
+navigating, finding `#go`, reading its text, clicking it (the page's handler
+ran), typing into an input (`input` events fired), running a script, taking a
+2242x1076 PNG screenshot and deleting the session (the window closed and
+Summit quit); new tab, new window, window handles and window rect work too.
+
 ## Limits
 
 - No WebDriver BiDi, no touch or wheel actions, no proxy capabilities.
