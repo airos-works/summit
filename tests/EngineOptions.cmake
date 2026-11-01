@@ -21,6 +21,10 @@ set(required
     ENABLE_RESOURCE_USAGE       # Inspector CPU and memory timelines
     USE_AVIF                    # AVIF images (libavif with dav1d, issue #115)
     ENABLE_ENCRYPTED_MEDIA      # Clear Key EME (issue #115; was off by accident since 5 Oct)
+    ENABLE_GAMEPAD              # navigator.getGamepads (issue #142)
+    ENABLE_POINTER_LOCK         # Element.requestPointerLock (issue #143)
+    ENABLE_MEDIA_SESSION        # navigator.mediaSession, media keys (issue #144)
+    ENABLE_SPEECH_SYNTHESIS     # speechSynthesis through eSpeak (issue #145)
 )
 if(NOT EXISTS "${INIT_CACHE}")
     message(FATAL_ERROR "no init cache at '${INIT_CACHE}'")

@@ -2965,6 +2965,38 @@ void BrowserWindow::DispatchMessage(BMessage* message, BHandler* handler)
         PostMessage(kToggleCaretBrowsing);
         return;
     }
+    // Media keys (#144): input_server sends a keyboard's consumer-page keys
+    // as unmapped keys, (page 0x0c << 16) | usage. They go to the tab that is
+    // playing sound (the selected one first), else to the selected tab: its
+    // Media Session action handlers or its media element (play/pause, next,
+    // previous, stop). Only while a Summit window is active: system-wide
+    // media keys need the OS (airos-works/haiku#55).
+    if (message && (message->what == B_UNMAPPED_KEY_DOWN || message->what == B_KEY_DOWN)
+        && message->GetInt32("be:key_repeat", 0) == 0) {
+        const char* command = nullptr;
+        switch (message->GetInt32("key", 0)) {
+        case 0x0c00cd: command = "toggle"; break; // Play/Pause
+        case 0x0c00b0: command = "play"; break;
+        case 0x0c00b1: command = "pause"; break;
+        case 0x0c00b5: command = "next"; break; // Scan Next Track
+        case 0x0c00b6: command = "previous"; break; // Scan Previous Track
+        case 0x0c00b7: command = "stop"; break;
+        case 0x0c00b3: command = "forward"; break; // Fast Forward
+        case 0x0c00b4: command = "backward"; break; // Rewind
+        }
+        if (command) {
+            Tab* target = nullptr;
+            if (Tab* selected = FindTabByID(fSelected); selected && selected->playingAudio) target = selected;
+            for (auto& tab : fTabs) {
+                if (!target && tab.playingAudio && tab.view) target = &tab;
+            }
+            if (!target) target = FindTabByID(fSelected);
+            if (target && target->view) target->view->SendMediaCommand(command);
+            if (const char* trace = std::getenv("SUMMIT_MEDIA_KEY_TRACE"); trace && !std::strcmp(trace, "1"))
+                std::fprintf(stderr, "Summit media key: %s to tab %lld\n", command, target ? (long long)target->id : -1LL);
+            return;
+        }
+    }
     if (fFullScreenTab && message && message->what == B_KEY_DOWN
         && message->GetString("bytes", "")[0] == B_ESCAPE) {
         ExitPageFullScreen();
@@ -4924,6 +4956,13 @@ void BrowserWindow::MessageReceived(BMessage* message)
             break;
         case B_WEBKIT_SCRIPT_MESSAGE: PageScriptMessage(*message); break;
         case B_WEBKIT_RESPONSIVENESS_CHANGED: ResponsivenessChanged(*message); break;
+        case B_WEBKIT_POINTER_LOCK_CHANGED: {
+            // A game or 3D view took the mouse (#143): say how to get it back.
+            BMessenger view;
+            if (message->FindMessenger("view", &view) == B_OK && FindTab(view) == ActiveTab())
+                fStatus->SetText(message->GetBool("locked", false) ? "Press Esc to show your mouse pointer." : "");
+            break;
+        }
         case B_WEBKIT_PRINT_REQUESTED: {
             BMessenger view;
             if (message->FindMessenger("view", &view) == B_OK && FindTab(view) == ActiveTab())

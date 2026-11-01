@@ -10709,10 +10709,10 @@ index 0000000000000000000000000000000000000000..48e19a5957df4c1ae60378dd9a84cbe4
 +/* Copyright (C) 2026 Summit contributors. SPDX-License-Identifier: BSD-2-Clause */
 +enum USBTransferStatus { "ok", "stall", "babble" };
 diff --git a/Source/WebCore/PlatformHaiku.cmake b/Source/WebCore/PlatformHaiku.cmake
-index 16a88804a1baa39ccdd9fc2870b6e2524d941298..c3e134a4747592575c095fb2d0eb824241dba86a 100644
+index 16a88804a1baa39ccdd9fc2870b6e2524d941298..3e50b832efa9b2cb3312426834e5d4a991da5abd 100644
 --- a/Source/WebCore/PlatformHaiku.cmake
 +++ b/Source/WebCore/PlatformHaiku.cmake
-@@ -1,52 +1,374 @@
+@@ -1,52 +1,375 @@
 +include(platform/Haiku.cmake)
  include(platform/ImageDecoders.cmake)
  include(platform/OpenSSL.cmake)
@@ -10853,6 +10853,7 @@ index 16a88804a1baa39ccdd9fc2870b6e2524d941298..c3e134a4747592575c095fb2d0eb8242
 +  platform/haiku/PlatformKeyboardEventHaiku.cpp
 +  platform/haiku/PlatformMouseEventHaiku.cpp
 +  platform/haiku/PlatformScreenHaiku.cpp
++  platform/haiku/PlatformSpeechSynthesizerHaiku.cpp
 +  platform/haiku/PopupMenuHaiku.cpp
 +  platform/haiku/SearchPopupMenuHaiku.cpp
 +  platform/haiku/SharedMemoryHaiku.cpp
@@ -11093,7 +11094,7 @@ index 16a88804a1baa39ccdd9fc2870b6e2524d941298..c3e134a4747592575c095fb2d0eb8242
    textencoding
    translation
    ${WEBP_LIBRARIES}
-@@ -61,6 +383,244 @@ list(APPEND WebCore_SYSTEM_INCLUDE_DIRECTORIES
+@@ -61,6 +384,244 @@ list(APPEND WebCore_SYSTEM_INCLUDE_DIRECTORIES
    ${SQLITE_INCLUDE_DIR}
    ${WEBP_INCLUDE_DIRS}
    ${ZLIB_INCLUDE_DIRS}
@@ -21741,6 +21742,30 @@ index 7b737a373363845d9a421303fa2dfc45334ebe06..227aa2786b0a15464e60c06a670f70f1
 +
  #if PLATFORM(GTK)
      enum class IsTouch : bool { No, Yes };
+ 
+diff --git a/Source/WebCore/platform/PlatformSpeechSynthesizer.h b/Source/WebCore/platform/PlatformSpeechSynthesizer.h
+index bcb9ed9de7654fe6beb7a8fbc6eaa84e6c542585..fa13748ab6c245b8c34a45e6bc746d8374a27309 100644
+--- a/Source/WebCore/platform/PlatformSpeechSynthesizer.h
++++ b/Source/WebCore/platform/PlatformSpeechSynthesizer.h
+@@ -48,6 +48,10 @@ namespace WebCore {
+ class SpielSpeechWrapper;
+ #endif
+ 
++#if PLATFORM(HAIKU)
++class HaikuSpeechWrapper;
++#endif
++
+ enum class SpeechBoundary : uint8_t {
+     SpeechWordBoundary,
+     SpeechSentenceBoundary
+@@ -111,6 +115,8 @@ private:
+     const std::unique_ptr<GstSpeechSynthesisWrapper> m_platformSpeechWrapper;
+ #elif USE(SPIEL)
+     const std::unique_ptr<SpielSpeechWrapper> m_platformSpeechWrapper;
++#elif PLATFORM(HAIKU)
++    const std::unique_ptr<HaikuSpeechWrapper> m_platformSpeechWrapper;
+ #endif
+ };
  
 diff --git a/Source/WebCore/platform/RunLoopObserver.cpp b/Source/WebCore/platform/RunLoopObserver.cpp
 index 7896afc9dadf5595dc274c19b102d9957c69f4f3..e5573f5ab8efeb4cdcdfe950fb85967ca014f5c5 100644
@@ -42759,10 +42784,10 @@ index 0000000000000000000000000000000000000000..ff582f23094174fff0cf70369a24713f
 +} // namespace WebCore
 diff --git a/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaiku.cpp b/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..0e7a3b7c9eef918f07ccc15ba57cf3e9b92cd49b
+index 0000000000000000000000000000000000000000..5c09ae10482c8758bc031c6676ee5d5b06f5bde1
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaiku.cpp
-@@ -0,0 +1,2259 @@
+@@ -0,0 +1,2263 @@
 +/*
 + * Copyright (C) 2014-2016 Haiku, Inc.
 + *
@@ -44915,6 +44940,10 @@ index 0000000000000000000000000000000000000000..0e7a3b7c9eef918f07ccc15ba57cf3e9
 +            cache.get().add("audio/m4a"_s);
 +            cache.get().add("audio/x-m4a"_s);
 +        }
++        // The FLAC reader advertises audio/x-flac; pages ask for the
++        // registered audio/flac (Summit #147).
++        if (cache.get().contains("audio/x-flac"_s))
++            cache.get().add("audio/flac"_s);
 +
 +        // The finite byte-range HLS path is handled before Media Kit sees the
 +        // completed MP4 files, so its playlist MIME types are not advertised by
@@ -60418,10 +60447,10 @@ index 0000000000000000000000000000000000000000..12f46a7fe47902618d9b7dcb76104adc
 +#endif // !LOG_DISABLED
 diff --git a/Source/WebCore/platform/haiku/MIMETypeRegistryHaiku.cpp b/Source/WebCore/platform/haiku/MIMETypeRegistryHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..5ade2f7451884658ccb5d78fb655bb6049676e71
+index 0000000000000000000000000000000000000000..76beca7c9790992432d83d9d4932517f26e5c3ff
 --- /dev/null
 +++ b/Source/WebCore/platform/haiku/MIMETypeRegistryHaiku.cpp
-@@ -0,0 +1,128 @@
+@@ -0,0 +1,131 @@
 +/*
 + * Copyright (C) 2006 Zack Rusin <zack@kde.org>
 + * Copyright (C) 2006 Apple Computer, Inc.  All rights reserved.
@@ -60481,6 +60510,9 @@ index 0000000000000000000000000000000000000000..5ade2f7451884658ccb5d78fb655bb60
 +    { "jpg", "image/jpeg" },
 +    { "js", "text/javascript" },
 +    { "json", "application/json" },
++    // Web archives (Save Page As): only this type loads them as pages.
++    { "mht", "multipart/related" },
++    { "mhtml", "multipart/related" },
 +    { "mjs", "text/javascript" },
 +    { "mpd", "application/dash+xml" },
 +    { "otf", "font/otf" },
@@ -62825,6 +62857,619 @@ index 0000000000000000000000000000000000000000..f4b1c7d8cda1a42b6f3bf81b69bab9b3
 +}
 +
 +} // namespace WebCore
+diff --git a/Source/WebCore/platform/haiku/PlatformSpeechSynthesizerHaiku.cpp b/Source/WebCore/platform/haiku/PlatformSpeechSynthesizerHaiku.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..3a872923bb06b7887fa73e9b51a33bc66a4dc753
+--- /dev/null
++++ b/Source/WebCore/platform/haiku/PlatformSpeechSynthesizerHaiku.cpp
+@@ -0,0 +1,607 @@
++/*
++ * Copyright (C) 2026 Haiku, Inc.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE AUTHORS ``AS IS'' AND ANY EXPRESS OR
++ * IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
++ * OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
++ */
++
++// speechSynthesis on Haiku (Summit #145): eSpeak NG (or classic eSpeak),
++// loaded at run time so that it is not a build or package dependency, speaks
++// into a buffer on a worker thread; a BSoundPlayer plays the buffer and
++// reports start, word/sentence boundaries, pause/resume and the end on the
++// main run loop as the audio reaches them. Without the library getVoices()
++// is empty and speak() fails with an error event.
++//
++// SUMMIT_SPEECH_LIBRARY names another library file; SUMMIT_SPEECH_TRACE=1
++// logs to stderr.
++
++#include "config.h"
++#include "PlatformSpeechSynthesizer.h"
++
++#if ENABLE(SPEECH_SYNTHESIS) && PLATFORM(HAIKU)
++
++#include "PlatformSpeechSynthesisUtterance.h"
++#include "PlatformSpeechSynthesisVoice.h"
++#include <SoundPlayer.h>
++#include <algorithm>
++#include <atomic>
++#include <cmath>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include <dlfcn.h>
++#include <mutex>
++#include <thread>
++#include <unicode/utf16.h>
++#include <wtf/HashMap.h>
++#include <wtf/RunLoop.h>
++#include <wtf/TZoneMallocInlines.h>
++#include <string>
++#include <wtf/text/CString.h>
++#include <wtf/text/MakeString.h>
++#include <wtf/text/StringHash.h>
++#include <wtf/text/WTFString.h>
++
++namespace WebCore {
++
++namespace {
++
++// The few declarations of eSpeak's speak_lib.h that are needed (the same in
++// eSpeak 1.48 and eSpeak NG).
++enum { EspeakOutputSynchronous = 2 };
++enum { EspeakEventListTerminated = 0, EspeakEventWord = 1, EspeakEventSentence = 2, EspeakEventEnd = 5, EspeakEventMessageTerminated = 6 };
++enum { EspeakRate = 1, EspeakVolume = 2, EspeakPitch = 3 };
++enum { EspeakCharsUtf8 = 1, EspeakSsml = 0x10 };
++enum { EspeakPositionCharacter = 1 };
++
++struct EspeakEvent {
++    int type;
++    unsigned uniqueIdentifier;
++    int textPosition;
++    int length;
++    int audioPosition;
++    int sample;
++    void* userData;
++    union {
++        int number;
++        const char* name;
++        char string[8];
++    } id;
++};
++
++struct EspeakVoice {
++    const char* name;
++    const char* languages;
++    const char* identifier;
++    unsigned char gender;
++    unsigned char age;
++    unsigned char variant;
++    unsigned char xx1;
++    int score;
++    void* spare;
++};
++
++using EspeakCallback = int (*)(short*, int, EspeakEvent*);
++
++struct Espeak {
++    int (*initialize)(int output, int bufferLength, const char* path, int options) { nullptr };
++    void (*setSynthCallback)(EspeakCallback) { nullptr };
++    int (*synth)(const void* text, size_t size, unsigned position, int positionType, unsigned endPosition, unsigned flags, unsigned* uniqueIdentifier, void* userData) { nullptr };
++    int (*setParameter)(int parameter, int value, int relative) { nullptr };
++    int (*setVoiceByName)(const char* name) { nullptr };
++    const EspeakVoice** (*listVoices)(EspeakVoice*) { nullptr };
++    int sampleRate { 0 };
++};
++
++bool traceEnabled()
++{
++    static const bool enabled = [] {
++        const char* value = std::getenv("SUMMIT_SPEECH_TRACE");
++        return value && !std::strcmp(value, "1");
++    }();
++    return enabled;
++}
++
++#define SPEECH_TRACE(...) do { if (traceEnabled()) { std::fprintf(stderr, "Summit speech: " __VA_ARGS__); std::fputc('\n', stderr); } } while (0)
++
++// eSpeak keeps global state: one engine for the process, used by one
++// utterance at a time (the worker holds this lock while it synthesizes).
++std::mutex& engineLock()
++{
++    static std::mutex lock;
++    return lock;
++}
++
++const Espeak* loadEspeak()
++{
++    static Espeak* engine = [] () -> Espeak* {
++        Vector<const char*> names;
++        if (const char* chosen = std::getenv("SUMMIT_SPEECH_LIBRARY"); chosen && *chosen)
++            names.append(chosen);
++        names.appendList({ "libespeak-ng.so.1", "libespeak-ng.so", "libespeak.so.1", "libespeak.so" });
++        void* library = nullptr;
++        for (auto* name : names) {
++            if ((library = dlopen(name, RTLD_NOW | RTLD_LOCAL))) {
++                SPEECH_TRACE("loaded %s", name);
++                break;
++            }
++        }
++        if (!library) {
++            SPEECH_TRACE("no speech engine (eSpeak NG or eSpeak) is installed");
++            return nullptr;
++        }
++        auto* espeak = new Espeak;
++        espeak->initialize = reinterpret_cast<decltype(espeak->initialize)>(dlsym(library, "espeak_Initialize"));
++        espeak->setSynthCallback = reinterpret_cast<decltype(espeak->setSynthCallback)>(dlsym(library, "espeak_SetSynthCallback"));
++        espeak->synth = reinterpret_cast<decltype(espeak->synth)>(dlsym(library, "espeak_Synth"));
++        espeak->setParameter = reinterpret_cast<decltype(espeak->setParameter)>(dlsym(library, "espeak_SetParameter"));
++        espeak->setVoiceByName = reinterpret_cast<decltype(espeak->setVoiceByName)>(dlsym(library, "espeak_SetVoiceByName"));
++        espeak->listVoices = reinterpret_cast<decltype(espeak->listVoices)>(dlsym(library, "espeak_ListVoices"));
++        if (!espeak->initialize || !espeak->setSynthCallback || !espeak->synth || !espeak->setParameter || !espeak->setVoiceByName || !espeak->listVoices) {
++            SPEECH_TRACE("the speech library lacks eSpeak's functions");
++            delete espeak;
++            return nullptr;
++        }
++        espeak->sampleRate = espeak->initialize(EspeakOutputSynchronous, 500, nullptr, 0);
++        if (espeak->sampleRate <= 0) {
++            SPEECH_TRACE("espeak_Initialize failed (%d): no voice data?", espeak->sampleRate);
++            delete espeak;
++            return nullptr;
++        }
++        SPEECH_TRACE("engine ready, %d Hz", espeak->sampleRate);
++        return espeak;
++    }();
++    return engine;
++}
++
++constexpr auto uriPrefix = "urn:summit-tts:espeak:"_s;
++
++// What one utterance produced and how far playback has got. The worker
++// appends; the sound player's thread reads. Shared by both, so refcounted.
++struct SpeechRun : public ThreadSafeRefCounted<SpeechRun> {
++    struct Boundary {
++        size_t sample;
++        SpeechBoundary kind;
++        unsigned charIndex;
++        unsigned charLength;
++    };
++
++    std::mutex lock;
++    Vector<int16_t> samples;
++    Vector<Boundary> boundaries;
++    size_t played { 0 };
++    size_t nextBoundary { 0 };
++    bool synthesisDone { false };
++    bool failed { false };
++    std::atomic<bool> cancelled { false };
++    std::atomic<bool> paused { false };
++    bool startReported { false };
++    bool endReported { false };
++    int sampleRate { 22050 };
++    // UTF-8 byte offset -> UTF-16 index of the utterance text, for boundary
++    // events (eSpeak counts characters of its UTF-8 input from 1).
++    Vector<unsigned> utf16IndexOfCharacter;
++};
++
++thread_local SpeechRun* currentRun;
++
++int synthCallback(short* wave, int count, EspeakEvent* events)
++{
++    SpeechRun* run = currentRun;
++    if (!run)
++        return 1;
++    if (run->cancelled)
++        return 1;
++    std::lock_guard lock(run->lock);
++    for (auto* event = events; event && event->type != EspeakEventListTerminated; ++event) {
++        if (event->type != EspeakEventWord && event->type != EspeakEventSentence)
++            continue;
++        unsigned position = event->textPosition > 0 ? event->textPosition - 1 : 0;
++        unsigned length = event->length > 0 ? event->length : 0;
++        auto toUTF16 = [&](unsigned character) -> unsigned {
++            if (run->utf16IndexOfCharacter.isEmpty())
++                return character;
++            return run->utf16IndexOfCharacter[std::min<size_t>(character, run->utf16IndexOfCharacter.size() - 1)];
++        };
++        unsigned start = toUTF16(position);
++        unsigned end = toUTF16(position + length);
++        // audio_position: milliseconds into this utterance's audio.
++        size_t sample = static_cast<size_t>(std::max(event->audioPosition, 0)) * run->sampleRate / 1000;
++        run->boundaries.append({ sample,
++            event->type == EspeakEventWord ? SpeechBoundary::SpeechWordBoundary : SpeechBoundary::SpeechSentenceBoundary,
++            start, end > start ? end - start : 0 });
++    }
++    if (wave && count > 0)
++        run->samples.append(std::span<const int16_t>(wave, count));
++    return 0;
++}
++
++} // namespace
++
++class HaikuSpeechWrapper {
++    WTF_MAKE_TZONE_ALLOCATED_INLINE(HaikuSpeechWrapper);
++    WTF_MAKE_NONCOPYABLE(HaikuSpeechWrapper);
++public:
++    explicit HaikuSpeechWrapper(PlatformSpeechSynthesizer& synthesizer)
++        : m_synthesizer(synthesizer)
++    {
++    }
++
++    ~HaikuSpeechWrapper()
++    {
++        stop(false);
++    }
++
++    Vector<Ref<PlatformSpeechSynthesisVoice>> voices();
++    void speak(RefPtr<PlatformSpeechSynthesisUtterance>&&);
++    void pause();
++    void resume();
++    void cancel();
++
++private:
++    static void playBuffer(void* cookie, void* buffer, size_t size, const media_raw_audio_format&);
++    void pump();
++    void stop(bool reportEnd);
++    void finish(bool error);
++
++    PlatformSpeechSynthesizer& m_synthesizer;
++    HashMap<String, std::string> m_voiceNames;
++    RefPtr<PlatformSpeechSynthesisUtterance> m_utterance;
++    RefPtr<SpeechRun> m_run;
++    std::unique_ptr<BSoundPlayer> m_player;
++    std::unique_ptr<RunLoop::Timer> m_timer;
++    bool m_reportedPause { false };
++};
++
++Vector<Ref<PlatformSpeechSynthesisVoice>> HaikuSpeechWrapper::voices()
++{
++    Vector<Ref<PlatformSpeechSynthesisVoice>> result;
++    auto* espeak = loadEspeak();
++    if (!espeak)
++        return result;
++    std::lock_guard lock(engineLock());
++    const EspeakVoice** list = espeak->listVoices(nullptr);
++    if (!list)
++        return result;
++    // The default voice is the first one of the user's language (the
++    // locale's language part), else English.
++    String preferred = "en"_s;
++    if (const char* language = std::getenv("LANG"); language && *language && std::strcmp(language, "C")) {
++        String locale = String::fromUTF8(language);
++        size_t end = locale.find(+[](char16_t c) -> bool { return c == '.' || c == '@'; });
++        if (end != notFound)
++            locale = locale.left(end);
++        preferred = makeStringByReplacingAll(locale, '_', '-');
++    }
++    bool defaultChosen = false;
++    m_voiceNames.clear();
++    for (size_t index = 0; list[index]; ++index) {
++        const EspeakVoice* voice = list[index];
++        if (!voice->name || !voice->languages)
++            continue;
++        // languages: a priority byte, then a NUL-terminated name; repeated,
++        // ended by a zero priority byte.
++        const char* entry = voice->languages;
++        String language;
++        if (*entry) {
++            ++entry;
++            language = String::fromUTF8(entry);
++        }
++        if (language.isEmpty())
++            continue;
++        // eSpeak writes "en-gb", "en-us"; BCP 47 wants the region upper case.
++        size_t dash = language.find('-');
++        if (dash != notFound && language.length() - dash - 1 == 2)
++            language = makeString(language.left(dash + 1), language.substring(dash + 1).convertToASCIIUppercase());
++        // Variants that only change the accent of another language
++        // ("mb/mb-en1" MBROLA voices without their data) are skipped.
++        String identifier = String::fromUTF8(voice->identifier ? voice->identifier : voice->name);
++        if (identifier.startsWith("mb/"_s))
++            continue;
++        String name = String::fromUTF8(voice->name);
++        String uri = makeString(uriPrefix, identifier);
++        if (m_voiceNames.contains(uri))
++            continue;
++        bool isDefault = false;
++        if (!defaultChosen && (equalIgnoringASCIICase(language, preferred) || language.startsWithIgnoringASCIICase(makeString(preferred, '-'))
++            || equalIgnoringASCIICase(preferred.left(preferred.find('-')), language.left(language.find('-'))))) {
++            isDefault = true;
++            defaultChosen = true;
++        }
++        m_voiceNames.add(uri, std::string(voice->identifier ? voice->identifier : voice->name));
++        result.append(PlatformSpeechSynthesisVoice::create(uri, makeString("eSpeak "_s, name), language, true, isDefault));
++    }
++    if (!defaultChosen && !result.isEmpty()) {
++        for (auto& voice : result) {
++            if (voice->lang().startsWithIgnoringASCIICase("en"_s)) {
++                voice->setIsDefault(true);
++                defaultChosen = true;
++                break;
++            }
++        }
++    }
++    SPEECH_TRACE("%zu voices", result.size());
++    return result;
++}
++
++void HaikuSpeechWrapper::speak(RefPtr<PlatformSpeechSynthesisUtterance>&& utterance)
++{
++    if (!utterance)
++        return;
++    stop(true);
++    m_utterance = WTF::move(utterance);
++    auto* espeak = loadEspeak();
++    if (!espeak) {
++        finish(true);
++        return;
++    }
++
++    Ref run = adoptRef(*new SpeechRun);
++    run->sampleRate = espeak->sampleRate;
++    m_run = run.copyRef();
++    m_reportedPause = false;
++
++    String text = m_utterance->text();
++    auto textUTF8 = text.utf8();
++    std::string utf8(textUTF8.legacyCStringPointer(), textUTF8.length());
++    // Map eSpeak's character positions (code points) to UTF-16 indexes.
++    {
++        unsigned utf16 = 0;
++        for (size_t i = 0; i < text.length();) {
++            run->utf16IndexOfCharacter.append(utf16);
++            char32_t c = text[i];
++            unsigned width = (U16_IS_LEAD(c) && i + 1 < text.length() && U16_IS_TRAIL(text[i + 1])) ? 2 : 1;
++            i += width;
++            utf16 += width;
++        }
++        run->utf16IndexOfCharacter.append(utf16);
++    }
++
++    std::string voiceName;
++    if (auto voice = m_utterance->voice()) {
++        auto it = m_voiceNames.find(voice->voiceURI());
++        if (it != m_voiceNames.end())
++            voiceName = it->value;
++    }
++    if (voiceName.empty() && !m_utterance->lang().isEmpty()) {
++        auto language = m_utterance->lang().convertToASCIILowercase().utf8();
++        voiceName.assign(language.legacyCStringPointer(), language.length());
++    }
++
++    // Web rate 1 = eSpeak's normal 175 words a minute (range 80-450);
++    // pitch 0..2 -> 0..100 (50 normal); volume 0..1 -> 0..100.
++    int rate = std::clamp(static_cast<int>(std::lround(175 * m_utterance->rate())), 80, 450);
++    int pitch = std::clamp(static_cast<int>(std::lround(50 * m_utterance->pitch())), 0, 100);
++    int volume = std::clamp(static_cast<int>(std::lround(100 * m_utterance->volume())), 0, 200);
++    bool ssml = text.trim(isASCIIWhitespace<char16_t>).startsWith("<speak"_s);
++
++    SPEECH_TRACE("speak %zu bytes, voice '%s', rate %d pitch %d volume %d%s", utf8.length(), voiceName.c_str(), rate, pitch, volume, ssml ? " (SSML)" : "");
++
++    std::thread([run, espeak, utf8 = WTF::move(utf8), voiceName = WTF::move(voiceName), rate, pitch, volume, ssml] {
++        int status = 0;
++        {
++            std::lock_guard lock(engineLock());
++            if (!run->cancelled) {
++                espeak->setSynthCallback(synthCallback);
++                if (!voiceName.empty() && espeak->setVoiceByName(voiceName.c_str()))
++                    espeak->setVoiceByName("en");
++                espeak->setParameter(EspeakRate, rate, 0);
++                espeak->setParameter(EspeakPitch, pitch, 0);
++                espeak->setParameter(EspeakVolume, volume, 0);
++                currentRun = run.ptr();
++                status = espeak->synth(utf8.data(), utf8.length() + 1, 0, EspeakPositionCharacter, 0,
++                    EspeakCharsUtf8 | (ssml ? EspeakSsml : 0), nullptr, nullptr);
++                currentRun = nullptr;
++            }
++        }
++        std::lock_guard lock(run->lock);
++        run->synthesisDone = true;
++        if (status && !run->cancelled)
++            run->failed = true;
++    }).detach();
++
++    media_raw_audio_format format = media_raw_audio_format::wildcard;
++    format.frame_rate = espeak->sampleRate;
++    format.channel_count = 1;
++    format.format = media_raw_audio_format::B_AUDIO_SHORT;
++    format.byte_order = B_MEDIA_HOST_ENDIAN;
++    format.buffer_size = 1024;
++    std::unique_ptr<BSoundPlayer> player(new BSoundPlayer(&format, "Summit speech", playBuffer, nullptr, this));
++    if (player->InitCheck() != B_OK) {
++        SPEECH_TRACE("no sound output");
++        run->cancelled = true;
++        finish(true);
++        return;
++    }
++    m_player = WTF::move(player);
++    m_player->Start();
++    m_player->SetHasData(true);
++
++    // Events are reported from the main run loop: the sound player's thread
++    // only advances run->played.
++    if (!m_timer)
++        m_timer = makeUnique<RunLoop::Timer>(RunLoop::mainSingleton(), "SummitSpeech"_s, [this] { pump(); });
++    m_timer->startRepeating(20_ms);
++}
++
++void HaikuSpeechWrapper::playBuffer(void* cookie, void* buffer, size_t size, const media_raw_audio_format&)
++{
++    auto* self = static_cast<HaikuSpeechWrapper*>(cookie);
++    auto* output = static_cast<int16_t*>(buffer);
++    size_t wanted = size / sizeof(int16_t);
++    RefPtr run = self->m_run;
++    size_t copied = 0;
++    if (run && !run->paused && !run->cancelled) {
++        std::lock_guard lock(run->lock);
++        size_t available = run->samples.size() > run->played ? run->samples.size() - run->played : 0;
++        copied = std::min(available, wanted);
++        if (copied)
++            std::memcpy(output, run->samples.span().subspan(run->played).data(), copied * sizeof(int16_t));
++        run->played += copied;
++    }
++    if (copied < wanted)
++        std::memset(output + copied, 0, (wanted - copied) * sizeof(int16_t));
++}
++
++void HaikuSpeechWrapper::pump()
++{
++    RefPtr run = m_run;
++    if (!run || !m_utterance) {
++        if (m_timer)
++            m_timer->stop();
++        return;
++    }
++    Vector<SpeechRun::Boundary> reached;
++    bool done = false;
++    bool failed = false;
++    bool started = false;
++    {
++        std::lock_guard lock(run->lock);
++        if (!run->startReported && (run->played > 0 || (run->synthesisDone && run->samples.isEmpty()))) {
++            run->startReported = true;
++            started = true;
++        }
++        while (run->nextBoundary < run->boundaries.size() && run->boundaries[run->nextBoundary].sample <= run->played)
++            reached.append(run->boundaries[run->nextBoundary++]);
++        failed = run->failed;
++        done = run->synthesisDone && run->played >= run->samples.size();
++    }
++    RefPtr client = m_synthesizer.client();
++    Ref utterance = *m_utterance;
++    if (started && client)
++        client->didStartSpeaking(utterance);
++    for (auto& boundary : reached) {
++        if (client)
++            client->boundaryEventOccurred(utterance, boundary.kind, boundary.charIndex, boundary.charLength);
++    }
++    if (failed) {
++        finish(true);
++        return;
++    }
++    if (done)
++        finish(false);
++}
++
++void HaikuSpeechWrapper::finish(bool error)
++{
++    RefPtr utterance = WTF::move(m_utterance);
++    if (m_timer)
++        m_timer->stop();
++    if (m_player) {
++        m_player->SetHasData(false);
++        m_player->Stop();
++        m_player = nullptr;
++    }
++    if (m_run)
++        m_run->cancelled = true;
++    m_run = nullptr;
++    if (!utterance)
++        return;
++    RefPtr client = m_synthesizer.client();
++    if (!client)
++        return;
++    if (error)
++        client->speakingErrorOccurred(*utterance);
++    else
++        client->didFinishSpeaking(*utterance);
++}
++
++void HaikuSpeechWrapper::stop(bool reportEnd)
++{
++    if (!m_utterance && !m_run)
++        return;
++    if (m_run)
++        m_run->cancelled = true;
++    if (reportEnd)
++        finish(false);
++    else {
++        if (m_timer)
++            m_timer->stop();
++        if (m_player) {
++            m_player->Stop();
++            m_player = nullptr;
++        }
++        m_run = nullptr;
++        m_utterance = nullptr;
++    }
++}
++
++void HaikuSpeechWrapper::pause()
++{
++    if (!m_run || !m_utterance || m_run->paused)
++        return;
++    m_run->paused = true;
++    if (RefPtr client = m_synthesizer.client())
++        client->didPauseSpeaking(*m_utterance);
++}
++
++void HaikuSpeechWrapper::resume()
++{
++    if (!m_run || !m_utterance || !m_run->paused)
++        return;
++    m_run->paused = false;
++    if (RefPtr client = m_synthesizer.client())
++        client->didResumeSpeaking(*m_utterance);
++}
++
++void HaikuSpeechWrapper::cancel()
++{
++    stop(true);
++}
++
++Ref<PlatformSpeechSynthesizer> PlatformSpeechSynthesizer::create(PlatformSpeechSynthesizerClient& client)
++{
++    return adoptRef(*new PlatformSpeechSynthesizer(client));
++}
++
++PlatformSpeechSynthesizer::PlatformSpeechSynthesizer(PlatformSpeechSynthesizerClient& client)
++    : m_speechSynthesizerClient(client)
++    , m_platformSpeechWrapper(makeUnique<HaikuSpeechWrapper>(*this))
++{
++}
++
++PlatformSpeechSynthesizer::~PlatformSpeechSynthesizer() = default;
++
++void PlatformSpeechSynthesizer::initializeVoiceList()
++{
++    m_voiceList = m_platformSpeechWrapper->voices();
++}
++
++void PlatformSpeechSynthesizer::pause()
++{
++    m_platformSpeechWrapper->pause();
++}
++
++void PlatformSpeechSynthesizer::resume()
++{
++    m_platformSpeechWrapper->resume();
++}
++
++void PlatformSpeechSynthesizer::speak(RefPtr<PlatformSpeechSynthesisUtterance>&& utterance)
++{
++    m_platformSpeechWrapper->speak(WTF::move(utterance));
++}
++
++void PlatformSpeechSynthesizer::cancel()
++{
++    m_platformSpeechWrapper->cancel();
++}
++
++void PlatformSpeechSynthesizer::resetState()
++{
++    m_platformSpeechWrapper->cancel();
++}
++
++} // namespace WebCore
++
++#endif // ENABLE(SPEECH_SYNTHESIS) && PLATFORM(HAIKU)
 diff --git a/Source/WebCore/platform/haiku/PlatformWheelEventHaiku.cpp b/Source/WebCore/platform/haiku/PlatformWheelEventHaiku.cpp
 new file mode 100644
 index 0000000000000000000000000000000000000000..382e2cf6418190ef3bfec83a8aca4f4f68795259
@@ -85722,6 +86367,49 @@ index 159256d830bfd5d06017abe3c75957b3d929cbd1..cf6e69ef25d971dd60f401b821b7ef19
      WebExtensionAPIRuntime \
      WebExtensionAPITest \
  	WebExtensionAPIWebPageNamespace \
+diff --git a/Source/WebKit/NetworkProcess/Classifier/ResourceLoadStatisticsStore.cpp b/Source/WebKit/NetworkProcess/Classifier/ResourceLoadStatisticsStore.cpp
+index 328df5b3b8c51e3c68ebe75ff11556bede0d7e7c..8aff59754b58527f8ca1a27c0224fd5634844173 100644
+--- a/Source/WebKit/NetworkProcess/Classifier/ResourceLoadStatisticsStore.cpp
++++ b/Source/WebKit/NetworkProcess/Classifier/ResourceLoadStatisticsStore.cpp
+@@ -65,6 +65,11 @@
+ namespace WebKit {
+ using namespace WebCore;
+ 
++#if PLATFORM(HAIKU)
++// NetworkStorageSession.cpp (Summit #141).
++bool hasCrossSiteCookieExceptionHaiku(PAL::SessionID, const RegistrableDomain& topFrameDomain);
++#endif
++
+ #define ITP_DEBUG_MODE_RELEASE_LOG(fmt, ...) RELEASE_LOG_INFO(ITPDebug, "ResourceLoadStatisticsStore: " fmt, ##__VA_ARGS__)
+ #define ITP_RELEASE_LOG_ERROR(fmt, ...) RELEASE_LOG_ERROR(ResourceLoadStatistics, "%p - [sessionID=%" PRIu64 "] - ResourceLoadStatisticsStore::" fmt, this, m_sessionID.toUInt64(), ##__VA_ARGS__)
+ #define ITP_RELEASE_LOG_DATABASE_ERROR(fmt, ...) RELEASE_LOG_ERROR(ResourceLoadStatistics, "%p - [sessionID=%" PRIu64 ", error=%d, message=%" PRIVATE_LOG_STRING "] - ResourceLoadStatisticsStore::" fmt, this, m_sessionID.toUInt64(), m_database->lastError(), m_database->lastErrorMsg(), ##__VA_ARGS__)
+@@ -1744,6 +1749,12 @@ void ResourceLoadStatisticsStore::requestStorageAccess(SubFrameDomain&& subFrame
+     }
+ 
+     auto userWasPromptedEarlier = hasUserGrantedStorageAccessThroughPrompt(*subFrameStatus.second, topFrameDomain);
++#if PLATFORM(HAIKU)
++    // The host keeps the user's answer for each site pair and gives it back
++    // without asking again (SitePermissionsHaiku, Summit #141); asking it
++    // every time lets a change made in its preferences apply.
++    userWasPromptedEarlier = StorageAccessPromptWasShown::No;
++#endif
+     if (userWasPromptedEarlier == StorageAccessPromptWasShown::No) {
+         if (debugLoggingEnabled()) [[unlikely]] {
+             ITP_DEBUG_MODE_RELEASE_LOG("About to ask the user whether they want to grant storage access to %" PRIVATE_LOG_STRING " under %" PRIVATE_LOG_STRING " or not.", subFrameDomain.string().utf8(), topFrameDomain.string().utf8());
+@@ -2611,6 +2622,13 @@ void ResourceLoadStatisticsStore::clear(CompletionHandler<void()>&& completionHa
+ 
+ bool ResourceLoadStatisticsStore::areAllUnpartitionedThirdPartyCookiesBlockedUnder(const TopFrameDomain& topFrameDomain)
+ {
++#if PLATFORM(HAIKU)
++    // A site where the user allows cross-site cookies: its third parties
++    // have their cookies without asking (requestStorageAccess() resolves,
++    // hasStorageAccess() is true).
++    if (hasCrossSiteCookieExceptionHaiku(m_sessionID, topFrameDomain))
++        return false;
++#endif
+ #if ENABLE(OPT_IN_PARTITIONED_COOKIES)
+     if (thirdPartyCookieBlockingMode() == ThirdPartyCookieBlockingMode::All || thirdPartyCookieBlockingMode() == ThirdPartyCookieBlockingMode::AllExceptPartitioned)
+ #else
 diff --git a/Source/WebKit/NetworkProcess/Cookies/CookieStorage.h b/Source/WebKit/NetworkProcess/Cookies/CookieStorage.h
 index 3498558f5a876ac4be33c33cc434d1cac17f8f71..86b79f1bf4491ad67cff700c55c7168bbc2c620e 100644
 --- a/Source/WebKit/NetworkProcess/Cookies/CookieStorage.h
@@ -86716,6 +87404,54 @@ index 867bf9c5ec02bd497e31cbd97fc869fcd5933434..101bce06886cc474b12531cca0c318fc
      std::unique_ptr<NetworkCache::Entry> m_cacheEntryWaitingForContinueDidReceiveResponse;
      const RefPtr<NetworkLoadChecker> m_networkLoadChecker;
      bool m_shouldRestartLoad { false };
+diff --git a/Source/WebKit/NetworkProcess/NetworkSession.cpp b/Source/WebKit/NetworkProcess/NetworkSession.cpp
+index 7e2ac1cc53c0433da0931d4cb7ca298b3758fbe5..97daf0fd0fcfaab3ee3a587819a5b0777f7a208b 100644
+--- a/Source/WebKit/NetworkProcess/NetworkSession.cpp
++++ b/Source/WebKit/NetworkProcess/NetworkSession.cpp
+@@ -88,6 +88,12 @@
+ namespace WebKit {
+ using namespace WebCore;
+ 
++#if PLATFORM(HAIKU)
++// NetworkStorageSession.cpp: the sites whose pages may give cross-site
++// cookies to the third parties they embed (Summit #141).
++void setCrossSiteCookieExceptionsHaiku(PAL::SessionID, const HashSet<RegistrableDomain>&);
++#endif
++
+ constexpr Seconds cachedNetworkResourceLoaderLifetime { 30_s };
+ 
+ WTF_MAKE_TZONE_ALLOCATED_IMPL(NetworkSession);
+@@ -230,6 +236,10 @@ NetworkSession::NetworkSession(NetworkProcess& networkProcess, const NetworkSess
+ 
+     m_isStaleWhileRevalidateEnabled = parameters.staleWhileRevalidateEnabled;
+ 
++#if PLATFORM(HAIKU)
++    // The host's persisted sites are its cross-site cookie exceptions.
++    setCrossSiteCookieExceptionsHaiku(m_sessionID, m_persistedDomains);
++#endif
+     setTrackingPreventionEnabled(parameters.resourceLoadStatisticsParameters.enabled);
+ 
+     setShouldSendPrivateTokenIPCForTesting(parameters.shouldSendPrivateTokenIPCForTesting);
+@@ -254,6 +264,9 @@ NetworkSession::NetworkSession(NetworkProcess& networkProcess, const NetworkSess
+ NetworkSession::~NetworkSession()
+ {
+     destroyResourceLoadStatistics([] { });
++#if PLATFORM(HAIKU)
++    setCrossSiteCookieExceptionsHaiku(m_sessionID, { });
++#endif
+     for (auto& loader : std::exchange(m_keptAliveLoads, { }))
+         loader->abort();
+ }
+@@ -1114,6 +1127,9 @@ void NetworkSession::setInspectionForServiceWorkersAllowed(bool inspectable)
+ void NetworkSession::setPersistedDomains(HashSet<WebCore::RegistrableDomain>&& domains)
+ {
+     m_persistedDomains = WTF::move(domains);
++#if PLATFORM(HAIKU)
++    setCrossSiteCookieExceptionsHaiku(m_sessionID, m_persistedDomains);
++#endif
+ 
+     if (RefPtr resourceLoadStatistics = m_resourceLoadStatistics)
+         resourceLoadStatistics->setPersistedDomains(m_persistedDomains);
 diff --git a/Source/WebKit/NetworkProcess/PreconnectTask.cpp b/Source/WebKit/NetworkProcess/PreconnectTask.cpp
 index 23da0a031fa268f92f2665603428bcc902914a6b..4ae2dc32db609459daeef3cf8f2d2d217449b11c 100644
 --- a/Source/WebKit/NetworkProcess/PreconnectTask.cpp
@@ -87078,7 +87814,7 @@ index be40151510176ea4e881fd41af8f79ab6ab6a306..b5fdd6e41375e8108fb406089992f8e5
      if (metaData.headerHash != computeSHA1(headerData, salt)) {
          LOG(NetworkCacheStorage, "(NetworkProcess) header checksum mismatch");
 diff --git a/Source/WebKit/NetworkProcess/curl/NetworkDataTaskCurl.cpp b/Source/WebKit/NetworkProcess/curl/NetworkDataTaskCurl.cpp
-index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..67a8790711b5f41e73e75aefd6216e607bd53e28 100644
+index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..8e200e038a9cc985417a036601ca31ff83b22274 100644
 --- a/Source/WebKit/NetworkProcess/curl/NetworkDataTaskCurl.cpp
 +++ b/Source/WebKit/NetworkProcess/curl/NetworkDataTaskCurl.cpp
 @@ -36,11 +36,14 @@
@@ -87182,7 +87918,7 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..67a8790711b5f41e73e75aefd6216e60
  }
  
  void NetworkDataTaskCurl::invalidateAndCancel()
-@@ -132,7 +180,12 @@ NetworkDataTask::State NetworkDataTaskCurl::state() const
+@@ -132,7 +180,18 @@ NetworkDataTask::State NetworkDataTaskCurl::state() const
  
  Ref<CurlRequest> NetworkDataTaskCurl::createCurlRequest(ResourceRequest&& request, RequestStatus status)
  {
@@ -87192,11 +87928,17 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..67a8790711b5f41e73e75aefd6216e60
 +    preconnectOnly = m_preconnectOnlyHaiku;
 +#endif
 +    // A preconnect sends no request: it needs no cookies.
-+    if (status == RequestStatus::NewRequest && !m_blockingCookies && !preconnectOnly)
++    bool mayHaveCookies = !m_blockingCookies;
++#if PLATFORM(HAIKU)
++    // A cross-site request whose cookies tracking prevention blocks still
++    // sends its partitioned (CHIPS) cookies (appendCookieHeader).
++    mayHaveCookies = m_storedCredentialsPolicy != WebCore::StoredCredentialsPolicy::EphemeralStateless;
++#endif
++    if (status == RequestStatus::NewRequest && mayHaveCookies && !preconnectOnly)
          appendCookieHeader(request);
  
      // Creates a CurlRequest in suspended state.
-@@ -142,6 +195,10 @@ Ref<CurlRequest> NetworkDataTaskCurl::createCurlRequest(ResourceRequest&& reques
+@@ -142,6 +201,10 @@ Ref<CurlRequest> NetworkDataTaskCurl::createCurlRequest(ResourceRequest&& reques
  
      if (m_session->networkProcess().localhostAliasesForTesting().contains<StringViewHashTranslator>(curlRequest->resourceRequest().url().host()))
          curlRequest->enableLocalhostAlias();
@@ -87207,7 +87949,7 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..67a8790711b5f41e73e75aefd6216e60
  
      return curlRequest;
  }
-@@ -168,7 +225,7 @@ void NetworkDataTaskCurl::curlDidReceiveResponse(CurlRequest& request, CurlRespo
+@@ -168,7 +231,7 @@ void NetworkDataTaskCurl::curlDidReceiveResponse(CurlRequest& request, CurlRespo
  
      handleCookieHeaders(request.resourceRequest(), receivedResponse);
  
@@ -87216,7 +87958,7 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..67a8790711b5f41e73e75aefd6216e60
          willPerformHTTPRedirection();
          return;
      }
-@@ -236,13 +293,22 @@ void NetworkDataTaskCurl::curlDidFailWithError(CurlRequest& request, ResourceErr
+@@ -236,13 +299,22 @@ void NetworkDataTaskCurl::curlDidFailWithError(CurlRequest& request, ResourceErr
      if (state() == State::Canceling || state() == State::Completed || (!m_client && !isDownload()))
          return;
  
@@ -87240,7 +87982,7 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..67a8790711b5f41e73e75aefd6216e60
          if (m_client)
              m_client->didCompleteWithError(resourceError);
          else {
-@@ -256,22 +322,6 @@ void NetworkDataTaskCurl::curlDidFailWithError(CurlRequest& request, ResourceErr
+@@ -256,22 +328,6 @@ void NetworkDataTaskCurl::curlDidFailWithError(CurlRequest& request, ResourceErr
      m_client->didCompleteWithError(resourceError);
  }
  
@@ -87263,7 +88005,7 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..67a8790711b5f41e73e75aefd6216e60
  bool NetworkDataTaskCurl::shouldRedirectAsGET(const ResourceRequest& request, bool crossOrigin)
  {
      if (request.httpMethod() == "GET"_s || request.httpMethod() == "HEAD"_s)
-@@ -307,6 +357,30 @@ void NetworkDataTaskCurl::invokeDidReceiveResponse()
+@@ -307,6 +363,30 @@ void NetworkDataTaskCurl::invokeDidReceiveResponse()
              invalidateAndCancel();
              break;
          case PolicyAction::Download: {
@@ -87294,7 +88036,7 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..67a8790711b5f41e73e75aefd6216e60
              m_downloadDestinationFile = FileSystem::openFile(m_pendingDownloadLocation, FileSystem::FileOpenMode::Truncate, FileSystem::FileAccessPermission::All, { }, !m_allowOverwriteDownload);
              if (!m_downloadDestinationFile) {
                  if (m_client)
-@@ -319,6 +393,18 @@ void NetworkDataTaskCurl::invokeDidReceiveResponse()
+@@ -319,6 +399,18 @@ void NetworkDataTaskCurl::invokeDidReceiveResponse()
              Ref download = Download::create(downloadManager, *m_pendingDownloadID, *this, *m_session, suggestedFilename());
              downloadManager.dataTaskBecameDownloadTask(*m_pendingDownloadID, download.copyRef());
              download->didCreateDestination(m_pendingDownloadLocation);
@@ -87313,7 +88055,7 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..67a8790711b5f41e73e75aefd6216e60
              if (m_curlRequest)
                  m_curlRequest->completeDidReceiveResponse();
              break;
-@@ -409,6 +495,7 @@ void NetworkDataTaskCurl::willPerformHTTPRedirection()
+@@ -409,6 +501,7 @@ void NetworkDataTaskCurl::willPerformHTTPRedirection()
              m_curlRequest->setUserPass(m_initialCredential.user(), m_initialCredential.password());
              m_curlRequest->setAuthenticationScheme(ProtectionSpace::AuthenticationScheme::HTTPBasic);
          }
@@ -87321,7 +88063,7 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..67a8790711b5f41e73e75aefd6216e60
  
          if (m_state != State::Suspended) {
              m_state = State::Suspended;
-@@ -531,6 +618,7 @@ void NetworkDataTaskCurl::restartWithCredential(const ProtectionSpace& protectio
+@@ -531,6 +624,7 @@ void NetworkDataTaskCurl::restartWithCredential(const ProtectionSpace& protectio
      m_curlRequest->setUserPass(credential.user(), credential.password());
      if (shouldDisableServerTrustEvaluation)
          m_curlRequest->disableServerTrustEvaluation();
@@ -87329,7 +88071,7 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..67a8790711b5f41e73e75aefd6216e60
  
      if (m_state != State::Suspended) {
          m_state = State::Suspended;
-@@ -538,11 +626,30 @@ void NetworkDataTaskCurl::restartWithCredential(const ProtectionSpace& protectio
+@@ -538,11 +632,37 @@ void NetworkDataTaskCurl::restartWithCredential(const ProtectionSpace& protectio
      }
  }
  
@@ -87357,11 +88099,18 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..67a8790711b5f41e73e75aefd6216e60
      if (CheckedPtr storageSession = m_session->networkStorageSession()) {
          auto includeSecureCookies = request.url().protocolIs("https"_s) ? IncludeSecureCookies::Yes : IncludeSecureCookies::No;
 -        auto cookieHeaderField = storageSession->cookieRequestHeaderFieldValue(request.firstPartyForCookies(), WebCore::SameSiteInfo::create(request), request.url(), std::nullopt, std::nullopt, includeSecureCookies, ApplyTrackingPrevention::Yes, WebCore::ShouldRelaxThirdPartyCookieBlocking::No, WebCore::IsKnownCrossSiteTracker::No).first;
++#if PLATFORM(HAIKU)
++        // Blocked (shouldBlockCookies): the storage session sends only the
++        // partitioned cookies, deciding with this frame's storage access.
++        auto applyTrackingPrevention = m_blockingCookies ? ApplyTrackingPrevention::Yes : ApplyTrackingPrevention::No;
++        auto cookieHeaderField = storageSession->cookieRequestHeaderFieldValue(request.firstPartyForCookies(), sameSiteInfoForCookies(request), request.url(), m_frameID, m_webPageProxyID, includeSecureCookies, applyTrackingPrevention, m_session->networkProcess().shouldRelaxThirdPartyCookieBlockingForPage(m_webPageProxyID), WebCore::IsKnownCrossSiteTracker::No).first;
++#else
 +        auto cookieHeaderField = storageSession->cookieRequestHeaderFieldValue(request.firstPartyForCookies(), sameSiteInfoForCookies(request), request.url(), std::nullopt, std::nullopt, includeSecureCookies, ApplyTrackingPrevention::Yes, WebCore::ShouldRelaxThirdPartyCookieBlocking::No, WebCore::IsKnownCrossSiteTracker::No).first;
++#endif
          if (!cookieHeaderField.isEmpty())
              request.addHTTPHeaderField(HTTPHeaderName::Cookie, cookieHeaderField);
      }
-@@ -552,10 +659,24 @@ void NetworkDataTaskCurl::handleCookieHeaders(const WebCore::ResourceRequest& re
+@@ -552,10 +672,33 @@ void NetworkDataTaskCurl::handleCookieHeaders(const WebCore::ResourceRequest& re
  {
      static constexpr auto setCookieHeader = "set-cookie: "_s;
  
@@ -87371,6 +88120,10 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..67a8790711b5f41e73e75aefd6216e60
 +    // fetch or frame cannot.
 +    auto sameSiteInfo = sameSiteInfoForCookies(request);
 +    bool maySetSameSiteCookies = sameSiteInfo.isSameSite || sameSiteInfo.isTopSite;
++    // Tracking prevention (shouldBlockCookies): a blocked cross-site
++    // response stores only partitioned cookies; a stateless one none.
++    if (m_blockingCookies && m_storedCredentialsPolicy == WebCore::StoredCredentialsPolicy::EphemeralStateless)
++        return;
 +#endif
      if (auto* storageSession = m_session->networkStorageSession()) {
          for (auto header : response.headers) {
@@ -87380,6 +88133,11 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..67a8790711b5f41e73e75aefd6216e60
 +                if (!maySetSameSiteCookies) {
 +                    auto cookie = CookieUtil::parseCookieHeader(setCookieString);
 +                    if (cookie && cookie->sameSite != Cookie::SameSitePolicy::None)
++                        continue;
++                }
++                if (m_blockingCookies) {
++                    bool partitioned = false;
++                    if (!CookieUtil::parseCookieHeader(setCookieString, &partitioned) || !partitioned)
 +                        continue;
 +                }
 +#endif
@@ -87475,7 +88233,7 @@ index 7c9075474552a6beaffbeffe6838dd4e5b24b0d0..74fe55e1e669a9abf183be97b68e71ef
  
  } // namespace WebKit
 diff --git a/Source/WebKit/NetworkProcess/curl/NetworkStorageSessionCurl.cpp b/Source/WebKit/NetworkProcess/curl/NetworkStorageSessionCurl.cpp
-index 20aff066ab01aa0fa12c7bf47741b0109d927eea..c55e4a46d67600e197f2cbc18dbd3c27eaeb280b 100644
+index 20aff066ab01aa0fa12c7bf47741b0109d927eea..58ef7e8a37abb64ff6237d34452041a9992279af 100644
 --- a/Source/WebKit/NetworkProcess/curl/NetworkStorageSessionCurl.cpp
 +++ b/Source/WebKit/NetworkProcess/curl/NetworkStorageSessionCurl.cpp
 @@ -31,6 +31,7 @@
@@ -87486,7 +88244,7 @@ index 20aff066ab01aa0fa12c7bf47741b0109d927eea..c55e4a46d67600e197f2cbc18dbd3c27
  #include <WebCore/CurlContext.h>
  #include <WebCore/HTTPCookieAcceptPolicy.h>
  #include <optional>
-@@ -65,7 +66,38 @@ static String alternativeServicesStorageFile(const String& alternativeServicesDi
+@@ -65,7 +66,50 @@ static String alternativeServicesStorageFile(const String& alternativeServicesDi
      return FileSystem::pathByAppendingComponent(alternativeServicesDirectory, defaultFileName);
  }
  
@@ -87520,26 +88278,41 @@ index 20aff066ab01aa0fa12c7bf47741b0109d927eea..c55e4a46d67600e197f2cbc18dbd3c27
 +    auto cookie = CookieUtil::parseCookieHeader(cookieString);
 +    return !cookie || cookie->sameSite == Cookie::SameSitePolicy::None;
 +}
++
++// Tracking prevention (Summit #141): WebKit's third-party cookie policy, as
++// Safari applies it. A blocked cross-site request or frame neither sends nor
++// stores its site's ordinary cookies; its partitioned (CHIPS) cookies, kept
++// for this top-level site only, still work. Storage access grants and the
++// host's exceptions lift the block (thirdPartyCookieBlockingDecisionForRequest).
++static bool onlyPartitionedCookies(const NetworkStorageSession& session, const URL& firstParty, const URL& url, std::optional<FrameIdentifier> frameID, std::optional<WebPageProxyIdentifier> webPageProxyID, ApplyTrackingPrevention applyTrackingPrevention, ShouldRelaxThirdPartyCookieBlocking shouldRelaxThirdPartyCookieBlocking, IsKnownCrossSiteTracker isKnownCrossSiteTracker)
++{
++    if (applyTrackingPrevention == ApplyTrackingPrevention::No)
++        return false;
++    return NetworkStorageSession::shouldBlockCookies(session.thirdPartyCookieBlockingDecisionForRequest(firstParty, url, frameID, webPageProxyID, shouldRelaxThirdPartyCookieBlocking, isKnownCrossSiteTracker));
++}
 +#endif
 +
-+static std::pair<String, bool> cookiesForSession(const NetworkStorageSession& session, const URL& firstParty, const SameSiteInfo& sameSiteInfo, const URL& url, bool forHTTPHeader, IncludeSecureCookies includeSecureCookies)
++static std::pair<String, bool> cookiesForSession(const NetworkStorageSession& session, const URL& firstParty, const SameSiteInfo& sameSiteInfo, const URL& url, bool forHTTPHeader, IncludeSecureCookies includeSecureCookies, bool partitionedOnly = false)
  {
      StringBuilder cookies;
      bool didAccessSecureCookies = false;
-@@ -74,6 +106,12 @@ static std::pair<String, bool> cookiesForSession(const NetworkStorageSession& se
+@@ -74,6 +118,15 @@ static std::pair<String, bool> cookiesForSession(const NetworkStorageSession& se
  
      if (auto result = session.cookieDatabase().searchCookies(firstParty, url, searchHTTPOnly, secure, std::nullopt)) {
          for (const auto& cookie : *result) {
 +#if PLATFORM(HAIKU)
 +            if (!sameSiteAllowsCookie(cookie, sameSiteInfo))
 +                continue;
++            if (partitionedOnly && cookie.partitionKey.isEmpty())
++                continue;
 +#else
 +            UNUSED_PARAM(sameSiteInfo);
++            UNUSED_PARAM(partitionedOnly);
 +#endif
              if (!cookies.isEmpty())
                  cookies.append("; "_s);
              if (!cookie.name.isEmpty())
-@@ -105,7 +143,16 @@ NetworkStorageSession::~NetworkStorageSession()
+@@ -105,7 +158,16 @@ NetworkStorageSession::~NetworkStorageSession()
  
  void NetworkStorageSession::setCookieDatabase(UniqueRef<CookieJarDB>&& cookieDatabase)
  {
@@ -87556,35 +88329,45 @@ index 20aff066ab01aa0fa12c7bf47741b0109d927eea..c55e4a46d67600e197f2cbc18dbd3c27
  }
  
  CookieJarDB& NetworkStorageSession::cookieDatabase() const
-@@ -114,8 +161,14 @@ CookieJarDB& NetworkStorageSession::cookieDatabase() const
+@@ -114,8 +176,19 @@ CookieJarDB& NetworkStorageSession::cookieDatabase() const
      return m_cookieDatabase;
  }
  
 -void NetworkStorageSession::setCookiesFromDOM(const URL& firstParty, const SameSiteInfo&, const URL& url, std::optional<FrameIdentifier>, std::optional<WebPageProxyIdentifier> webPageProxyID, ApplyTrackingPrevention, RequiresScriptTrackingPrivacy requiresScriptTrackingPrivacy, const String& value, ShouldRelaxThirdPartyCookieBlocking, IsKnownCrossSiteTracker) const
-+void NetworkStorageSession::setCookiesFromDOM(const URL& firstParty, const SameSiteInfo& sameSiteInfo, const URL& url, std::optional<FrameIdentifier>, std::optional<WebPageProxyIdentifier> webPageProxyID, ApplyTrackingPrevention, RequiresScriptTrackingPrivacy requiresScriptTrackingPrivacy, const String& value, ShouldRelaxThirdPartyCookieBlocking, IsKnownCrossSiteTracker) const
++void NetworkStorageSession::setCookiesFromDOM(const URL& firstParty, const SameSiteInfo& sameSiteInfo, const URL& url, [[maybe_unused]] std::optional<FrameIdentifier> frameID, std::optional<WebPageProxyIdentifier> webPageProxyID, [[maybe_unused]] ApplyTrackingPrevention applyTrackingPrevention, RequiresScriptTrackingPrivacy requiresScriptTrackingPrivacy, const String& value, [[maybe_unused]] ShouldRelaxThirdPartyCookieBlocking shouldRelaxThirdPartyCookieBlocking, [[maybe_unused]] IsKnownCrossSiteTracker isKnownCrossSiteTracker) const
  {
 +#if PLATFORM(HAIKU)
 +    if (!scriptMaySetCookie(value, sameSiteInfo))
 +        return;
++    if (onlyPartitionedCookies(*this, firstParty, url, frameID, webPageProxyID, applyTrackingPrevention, shouldRelaxThirdPartyCookieBlocking, isKnownCrossSiteTracker)) {
++        bool partitioned = false;
++        if (!CookieUtil::parseCookieHeader(value, &partitioned) || !partitioned)
++            return;
++    }
 +#else
 +    UNUSED_PARAM(sameSiteInfo);
 +#endif
      auto cappedLifetime = clientSideCookieCap(RegistrableDomain { firstParty }, requiresScriptTrackingPrivacy, webPageProxyID);
      cookieDatabase().setCookie(firstParty, url, value, CookieJarDB::Source::Script, cappedLifetime);
  }
-@@ -153,9 +206,9 @@ HTTPCookieAcceptPolicy NetworkStorageSession::cookieAcceptPolicy() const
+@@ -153,9 +226,14 @@ HTTPCookieAcceptPolicy NetworkStorageSession::cookieAcceptPolicy() const
      return HTTPCookieAcceptPolicy::OnlyFromMainDocumentDomain;
  }
  
 -std::pair<String, bool> NetworkStorageSession::cookiesForDOM(const URL& firstParty, const SameSiteInfo&, const URL& url, std::optional<FrameIdentifier>, std::optional<WebPageProxyIdentifier>, IncludeSecureCookies includeSecureCookies, ApplyTrackingPrevention, ShouldRelaxThirdPartyCookieBlocking, IsKnownCrossSiteTracker) const
-+std::pair<String, bool> NetworkStorageSession::cookiesForDOM(const URL& firstParty, const SameSiteInfo& sameSiteInfo, const URL& url, std::optional<FrameIdentifier>, std::optional<WebPageProxyIdentifier>, IncludeSecureCookies includeSecureCookies, ApplyTrackingPrevention, ShouldRelaxThirdPartyCookieBlocking, IsKnownCrossSiteTracker) const
++std::pair<String, bool> NetworkStorageSession::cookiesForDOM(const URL& firstParty, const SameSiteInfo& sameSiteInfo, const URL& url, [[maybe_unused]] std::optional<FrameIdentifier> frameID, [[maybe_unused]] std::optional<WebPageProxyIdentifier> webPageProxyID, IncludeSecureCookies includeSecureCookies, [[maybe_unused]] ApplyTrackingPrevention applyTrackingPrevention, [[maybe_unused]] ShouldRelaxThirdPartyCookieBlocking shouldRelaxThirdPartyCookieBlocking, [[maybe_unused]] IsKnownCrossSiteTracker isKnownCrossSiteTracker) const
  {
 -    return cookiesForSession(*this, firstParty, url, false, includeSecureCookies);
++#if PLATFORM(HAIKU)
++    bool partitionedOnly = onlyPartitionedCookies(*this, firstParty, url, frameID, webPageProxyID, applyTrackingPrevention, shouldRelaxThirdPartyCookieBlocking, isKnownCrossSiteTracker);
++    return cookiesForSession(*this, firstParty, sameSiteInfo, url, false, includeSecureCookies, partitionedOnly);
++#else
 +    return cookiesForSession(*this, firstParty, sameSiteInfo, url, false, includeSecureCookies);
++#endif
  }
  
  std::optional<Vector<Cookie>> NetworkStorageSession::cookiesForDOMAsVector(const URL&, const SameSiteInfo&, const URL&, std::optional<FrameIdentifier>, std::optional<WebPageProxyIdentifier>, IncludeSecureCookies, ApplyTrackingPrevention, ShouldRelaxThirdPartyCookieBlocking, IsKnownCrossSiteTracker, CookieStoreGetOptions&&) const
-@@ -182,8 +235,7 @@ void NetworkStorageSession::setCookie(const Cookie& cookie, const URL&, const UR
+@@ -182,8 +260,7 @@ void NetworkStorageSession::setCookie(const Cookie& cookie, const URL&, const UR
  
  void NetworkStorageSession::deleteCookie(const Cookie& cookie, CompletionHandler<void()>&& completionHandler)
  {
@@ -87594,7 +88377,7 @@ index 20aff066ab01aa0fa12c7bf47741b0109d927eea..c55e4a46d67600e197f2cbc18dbd3c27
      completionHandler();
  }
  
-@@ -199,9 +251,9 @@ void NetworkStorageSession::deleteAllCookies(CompletionHandler<void()>&& complet
+@@ -199,9 +276,9 @@ void NetworkStorageSession::deleteAllCookies(CompletionHandler<void()>&& complet
      completionHandler();
  }
  
@@ -87606,7 +88389,7 @@ index 20aff066ab01aa0fa12c7bf47741b0109d927eea..c55e4a46d67600e197f2cbc18dbd3c27
      completionHandler();
  }
  
-@@ -222,10 +274,13 @@ void NetworkStorageSession::getHostnamesWithCookies(HashSet<String>& hostnames)
+@@ -222,31 +299,59 @@ void NetworkStorageSession::getHostnamesWithCookies(HashSet<String>& hostnames)
      hostnames = cookieDatabase().allDomains();
  }
  
@@ -87622,21 +88405,36 @@ index 20aff066ab01aa0fa12c7bf47741b0109d927eea..c55e4a46d67600e197f2cbc18dbd3c27
 +    return cookies ? WTF::move(*cookies) : Vector<Cookie> { };
  }
  
- void NetworkStorageSession::hasCookies(const RegistrableDomain&, CompletionHandler<void(bool)>&& completionHandler) const
-@@ -234,19 +289,26 @@ void NetworkStorageSession::hasCookies(const RegistrableDomain&, CompletionHandl
+-void NetworkStorageSession::hasCookies(const RegistrableDomain&, CompletionHandler<void(bool)>&& completionHandler) const
++void NetworkStorageSession::hasCookies([[maybe_unused]] const RegistrableDomain& domain, CompletionHandler<void(bool)>&& completionHandler) const
+ {
++#if PLATFORM(HAIKU)
++    // document.hasStorageAccess() of a frame whose cookies are not blocked
++    // (a site the user made an exception for, Summit #141) is whether its
++    // site has any.
++    for (auto& host : cookieDatabase().allDomains()) {
++        if (domain.matches(URL { makeString("https://"_s, host.startsWith('.') ? host.substring(1) : host, '/') })) {
++            completionHandler(true);
++            return;
++        }
++    }
++#else
+     // FIXME: Implement.
++#endif
      completionHandler(false);
  }
  
 -bool NetworkStorageSession::getRawCookies(const URL& firstParty, const SameSiteInfo&, const URL& url, std::optional<FrameIdentifier>, std::optional<WebPageProxyIdentifier>, ApplyTrackingPrevention, ShouldRelaxThirdPartyCookieBlocking, Vector<Cookie>& rawCookies) const
-+bool NetworkStorageSession::getRawCookies(const URL& firstParty, const SameSiteInfo& sameSiteInfo, const URL& url, std::optional<FrameIdentifier>, std::optional<WebPageProxyIdentifier>, ApplyTrackingPrevention, ShouldRelaxThirdPartyCookieBlocking, Vector<Cookie>& rawCookies) const
++bool NetworkStorageSession::getRawCookies(const URL& firstParty, const SameSiteInfo& sameSiteInfo, const URL& url, [[maybe_unused]] std::optional<FrameIdentifier> frameID, [[maybe_unused]] std::optional<WebPageProxyIdentifier> webPageProxyID, [[maybe_unused]] ApplyTrackingPrevention applyTrackingPrevention, [[maybe_unused]] ShouldRelaxThirdPartyCookieBlocking shouldRelaxThirdPartyCookieBlocking, Vector<Cookie>& rawCookies) const
  {
      auto cookies = cookieDatabase().searchCookies(firstParty, url, std::nullopt, std::nullopt, std::nullopt);
      if (!cookies)
          return false;
  
 +#if PLATFORM(HAIKU)
++    bool partitionedOnly = onlyPartitionedCookies(*this, firstParty, url, frameID, webPageProxyID, applyTrackingPrevention, shouldRelaxThirdPartyCookieBlocking, IsKnownCrossSiteTracker::No);
 +    cookies->removeAllMatching([&](auto& cookie) {
-+        return !sameSiteAllowsCookie(cookie, sameSiteInfo);
++        return !sameSiteAllowsCookie(cookie, sameSiteInfo) || (partitionedOnly && cookie.partitionKey.isEmpty());
 +    });
 +#else
 +    UNUSED_PARAM(sameSiteInfo);
@@ -87646,10 +88444,15 @@ index 20aff066ab01aa0fa12c7bf47741b0109d927eea..c55e4a46d67600e197f2cbc18dbd3c27
  }
  
 -std::pair<String, bool> NetworkStorageSession::cookieRequestHeaderFieldValue(const URL& firstParty, const SameSiteInfo&, const URL& url, std::optional<FrameIdentifier>, std::optional<WebPageProxyIdentifier>, IncludeSecureCookies includeSecureCookies, ApplyTrackingPrevention, ShouldRelaxThirdPartyCookieBlocking, IsKnownCrossSiteTracker) const
-+std::pair<String, bool> NetworkStorageSession::cookieRequestHeaderFieldValue(const URL& firstParty, const SameSiteInfo& sameSiteInfo, const URL& url, std::optional<FrameIdentifier>, std::optional<WebPageProxyIdentifier>, IncludeSecureCookies includeSecureCookies, ApplyTrackingPrevention, ShouldRelaxThirdPartyCookieBlocking, IsKnownCrossSiteTracker) const
++std::pair<String, bool> NetworkStorageSession::cookieRequestHeaderFieldValue(const URL& firstParty, const SameSiteInfo& sameSiteInfo, const URL& url, [[maybe_unused]] std::optional<FrameIdentifier> frameID, [[maybe_unused]] std::optional<WebPageProxyIdentifier> webPageProxyID, IncludeSecureCookies includeSecureCookies, [[maybe_unused]] ApplyTrackingPrevention applyTrackingPrevention, [[maybe_unused]] ShouldRelaxThirdPartyCookieBlocking shouldRelaxThirdPartyCookieBlocking, [[maybe_unused]] IsKnownCrossSiteTracker isKnownCrossSiteTracker) const
  {
 -    return cookiesForSession(*this, firstParty, url, true, includeSecureCookies);
++#if PLATFORM(HAIKU)
++    bool partitionedOnly = onlyPartitionedCookies(*this, firstParty, url, frameID, webPageProxyID, applyTrackingPrevention, shouldRelaxThirdPartyCookieBlocking, isKnownCrossSiteTracker);
++    return cookiesForSession(*this, firstParty, sameSiteInfo, url, true, includeSecureCookies, partitionedOnly);
++#else
 +    return cookiesForSession(*this, firstParty, sameSiteInfo, url, true, includeSecureCookies);
++#endif
  }
  
  void NetworkStorageSession::setProxySettings(const CurlProxySettings& proxySettings)
@@ -90264,10 +91067,10 @@ index 0000000000000000000000000000000000000000..abdba4dff009ff314eecd9f825a128aa
 +} // namespace WebKit
 diff --git a/Source/WebKit/PlatformHaiku.cmake b/Source/WebKit/PlatformHaiku.cmake
 new file mode 100644
-index 0000000000000000000000000000000000000000..1b0e9852e2c8680e90bb46ad02981abf9ddce13c
+index 0000000000000000000000000000000000000000..566aad0cdb3e9092bbe0f8d6658439245ae5b114
 --- /dev/null
 +++ b/Source/WebKit/PlatformHaiku.cmake
-@@ -0,0 +1,567 @@
+@@ -0,0 +1,574 @@
 +include(Headers.cmake)
 +include(Platform/Curl.cmake)
 +
@@ -90403,6 +91206,9 @@ index 0000000000000000000000000000000000000000..1b0e9852e2c8680e90bb46ad02981abf
 +    UIProcess/haiku/WebPopupMenuProxyHaiku.cpp
 +    UIProcess/haiku/WebProcessPoolHaiku.cpp
 +    UIProcess/haiku/WebView.cpp
++    UIProcess/Gamepad/haiku/UIGamepadProviderHaiku.cpp
++    # The speech synthesizer's client (not GStreamer-specific).
++    UIProcess/gstreamer/WebPageProxyGStreamer.cpp
 +    UIProcess/haiku/OpenPanelHaiku.cpp
 +    UIProcess/haiku/BrowserTabRegistryHaiku.cpp
 +    UIProcess/haiku/BrowserCommandBrokerHaiku.cpp
@@ -90589,6 +91395,10 @@ index 0000000000000000000000000000000000000000..1b0e9852e2c8680e90bb46ad02981abf
 +    ${CMAKE_DL_LIBS}
 +    # BFilePanel, for <input type=file> (OpenPanelHaiku.cpp).
 +    tracker
++    # BJoystick, for gamepads (UIGamepadProviderHaiku.cpp), and
++    # set_mouse_position, for pointer lock (WebKitView.cpp).
++    device
++    game
 +    ${FONTCONFIG_LIBRARIES}
 +    ${FREETYPE2_LIBRARIES}
 +    ${JPEG_LIBRARIES}
@@ -95773,7 +96583,7 @@ index 40707c511afe0a9c48673c3c90ff12aee8130161..23b88de3bc84a5ae46ae9ad11abace0c
      NativeWebKeyboardEvent(WebKeyboardEventInit&&, ::WebEvent *);
  
 diff --git a/Source/WebKit/Shared/NativeWebMouseEvent.h b/Source/WebKit/Shared/NativeWebMouseEvent.h
-index a28ff8993b4e31c62e9612c7689f47cde7118eb8..3b3da07f057ab884348af702a60ea83d5f449b01 100644
+index a28ff8993b4e31c62e9612c7689f47cde7118eb8..7bff9b519e02447391ed1a8ac2569baf37d3e61a 100644
 --- a/Source/WebKit/Shared/NativeWebMouseEvent.h
 +++ b/Source/WebKit/Shared/NativeWebMouseEvent.h
 @@ -26,6 +26,11 @@
@@ -95788,16 +96598,18 @@ index a28ff8993b4e31c62e9612c7689f47cde7118eb8..3b3da07f057ab884348af702a60ea83d
  #include <WebCore/PointerID.h>
  
  #if USE(APPKIT)
-@@ -90,6 +95,8 @@ public:
+@@ -90,6 +95,10 @@ public:
      static Ref<NativeWebMouseEvent> create(struct wpe_input_pointer_event*, float deviceScaleFactor, WebMouseEventSyntheticClickType = WebMouseEventSyntheticClickType::NoTap);
  #elif PLATFORM(WIN)
      static Ref<NativeWebMouseEvent> create(HWND, UINT message, WPARAM, LPARAM, bool, float deviceScaleFactor);
 +#elif PLATFORM(HAIKU)
-+    static RefPtr<NativeWebMouseEvent> create(const BMessage&, BPoint viewPosition, BPoint screenPosition, uint32_t previousButtons);
++    // movement: the pointer's move since the last event (movementX/Y), in
++    // logical pixels.
++    static RefPtr<NativeWebMouseEvent> create(const BMessage&, BPoint viewPosition, BPoint screenPosition, uint32_t previousButtons, BPoint movement = { });
  #endif
  
  #if USE(APPKIT)
-@@ -100,6 +107,8 @@ public:
+@@ -100,6 +109,8 @@ public:
      ::WebEvent* nativeEvent() const { return m_nativeEvent.get(); }
  #elif PLATFORM(WIN)
      const MSG* nativeEvent() const LIFETIME_BOUND { return &m_nativeEvent; }
@@ -95806,7 +96618,7 @@ index a28ff8993b4e31c62e9612c7689f47cde7118eb8..3b3da07f057ab884348af702a60ea83d
  #else
      const void* nativeEvent() const { return nullptr; }
  #endif
-@@ -125,6 +134,9 @@ private:
+@@ -125,6 +136,9 @@ private:
      NativeWebMouseEvent(WebMouseEventInit&&, const MSG&);
  
      MSG m_nativeEvent;
@@ -95859,6 +96671,79 @@ index 6dd22f73b283ae494612fc5c2d6a1cbe65e352d8..767947d096ab130663bbb201765cb84d
  #elif PLATFORM(WIN)
      NativeWebWheelEvent(WebWheelEventInit&&, const MSG&);
  
+diff --git a/Source/WebKit/Shared/NetworkStorageSession.cpp b/Source/WebKit/Shared/NetworkStorageSession.cpp
+index 93795a9a7c59feb8b5fcccdbb0f79c4f722057fc..f19c98f29bb5248399327be62e660987b5f4844c 100644
+--- a/Source/WebKit/Shared/NetworkStorageSession.cpp
++++ b/Source/WebKit/Shared/NetworkStorageSession.cpp
+@@ -40,11 +40,56 @@
+ #include <wtf/RuntimeApplicationChecks.h>
+ #include <wtf/TZoneMallocInlines.h>
+ 
++#if PLATFORM(HAIKU)
++#include <wtf/Lock.h>
++#include <wtf/NeverDestroyed.h>
++#endif
++
+ namespace WebKit {
+ using namespace WebCore;
+ 
+ WTF_MAKE_TZONE_ALLOCATED_IMPL(NetworkStorageSession);
+ 
++#if PLATFORM(HAIKU)
++// Sites where the user allows cross-site cookies (Summit #141): third parties
++// embedded in their pages keep their cookies, as if tracking prevention were
++// off there. They are the data store's persisted sites
++// (WebsiteDataStore::setPersistedSiteURLs, which also keeps their data from
++// tracking prevention's website data removal), given per session by
++// NetworkSession. Read on the network process's main thread and on the
++// statistics queue (ResourceLoadStatisticsStore), hence the lock.
++static Lock crossSiteCookieExceptionsLock;
++
++static HashMap<PAL::SessionID, HashSet<RegistrableDomain>>& crossSiteCookieExceptions()
++{
++    static NeverDestroyed<HashMap<PAL::SessionID, HashSet<RegistrableDomain>>> exceptions;
++    return exceptions;
++}
++
++void setCrossSiteCookieExceptionsHaiku(PAL::SessionID sessionID, const HashSet<RegistrableDomain>& domains)
++{
++    HashSet<RegistrableDomain> copy;
++    for (auto& domain : domains) {
++        if (!domain.isEmpty())
++            copy.add(domain.isolatedCopy());
++    }
++    Locker locker { crossSiteCookieExceptionsLock };
++    if (copy.isEmpty())
++        crossSiteCookieExceptions().remove(sessionID);
++    else
++        crossSiteCookieExceptions().set(sessionID, WTF::move(copy));
++}
++
++bool hasCrossSiteCookieExceptionHaiku(PAL::SessionID sessionID, const RegistrableDomain& topFrameDomain)
++{
++    if (topFrameDomain.isEmpty())
++        return false;
++    Locker locker { crossSiteCookieExceptionsLock };
++    auto exceptions = crossSiteCookieExceptions().find(sessionID);
++    return exceptions != crossSiteCookieExceptions().end() && exceptions->value.contains(topFrameDomain);
++}
++#endif
++
+ #if !PLATFORM(COCOA) && !USE(SOUP)
+ Vector<Cookie> NetworkStorageSession::domCookiesForHost(const URL&)
+ {
+@@ -156,6 +201,11 @@ ThirdPartyCookieBlockingDecision NetworkStorageSession::thirdPartyCookieBlocking
+     if (hasStorageAccess(resourceDomain, firstPartyDomain, grantFrameID, webPageProxyID) && !isInitiatedByDedicatedWorker)
+         return ThirdPartyCookieBlockingDecision::None;
+ 
++#if PLATFORM(HAIKU)
++    if (hasCrossSiteCookieExceptionHaiku(sessionID(), firstPartyDomain))
++        return ThirdPartyCookieBlockingDecision::None;
++#endif
++
+ #if ENABLE(OPT_IN_PARTITIONED_COOKIES)
+     const auto decideThirdPartyCookieBlocking = [isOptInCookiePartitioningEnabled = isOptInCookiePartitioningEnabled()] (bool shouldAllowUnpartitionedCookies) {
+         if (shouldAllowUnpartitionedCookies)
 diff --git a/Source/WebKit/Shared/NetworkStorageSession.h b/Source/WebKit/Shared/NetworkStorageSession.h
 index 04bfb854a2dae611ac4afa90715c69dafcea9def..2fecf75852ff63db9504d0330b5bc3c0fa4ade16 100644
 --- a/Source/WebKit/Shared/NetworkStorageSession.h
@@ -96482,10 +97367,10 @@ index 0000000000000000000000000000000000000000..daa3355f836f4975b9d3ee80b65ecf4e
 +#endif // PLATFORM(HAIKU)
 diff --git a/Source/WebKit/Shared/haiku/NativeWebEventsHaiku.cpp b/Source/WebKit/Shared/haiku/NativeWebEventsHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..97a69d3caec442fc8bc56499d2807a60437ac28e
+index 0000000000000000000000000000000000000000..6289df88ab146ff395cac4d34d37543514b4a95d
 --- /dev/null
 +++ b/Source/WebKit/Shared/haiku/NativeWebEventsHaiku.cpp
-@@ -0,0 +1,210 @@
+@@ -0,0 +1,216 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#include "config.h"
@@ -96600,7 +97485,7 @@ index 0000000000000000000000000000000000000000..97a69d3caec442fc8bc56499d2807a60
 +    return WebMouseEventButton::None;
 +}
 +
-+RefPtr<NativeWebMouseEvent> NativeWebMouseEvent::create(const BMessage& message, BPoint viewPosition, BPoint screenPosition, uint32_t previousButtons)
++RefPtr<NativeWebMouseEvent> NativeWebMouseEvent::create(const BMessage& message, BPoint viewPosition, BPoint screenPosition, uint32_t previousButtons, BPoint movement)
 +{
 +    if ((message.what != B_MOUSE_DOWN && message.what != B_MOUSE_UP && message.what != B_MOUSE_MOVED)
 +        || !validPosition(viewPosition) || !validPosition(screenPosition))
@@ -96619,6 +97504,12 @@ index 0000000000000000000000000000000000000000..97a69d3caec442fc8bc56499d2807a60
 +    mouse.position = { viewPosition.x, viewPosition.y };
 +    mouse.globalPosition = { screenPosition.x, screenPosition.y };
 +    mouse.clickCount = type == WebEventType::MouseMove ? 0 : std::max(0, message.FindInt32("clicks"));
++    // movementX/Y (and pointer lock's only input): WebCore reads deltaX/Y.
++    if (std::isfinite(movement.x) && std::isfinite(movement.y) && std::abs(movement.x) < 1e5f && std::abs(movement.y) < 1e5f) {
++        mouse.deltaX = movement.x;
++        mouse.deltaY = movement.y;
++        mouse.unadjustedMovementDelta = { movement.x, movement.y };
++    }
 +    return adoptRef(*new NativeWebMouseEvent({ makeEventDataHaiku(message, type), WTF::move(mouse) }, message));
 +}
 +
@@ -98562,10 +99453,10 @@ index 0000000000000000000000000000000000000000..574ed16658f0c14b1aa2e63208e990b8
 +#define WEBKIT_ENGINE_VERSION_HAIKU "@WebKit_HAIKU_MAJOR_VERSION@.@WebKit_HAIKU_MINOR_VERSION@.@WebKit_HAIKU_TINY_VERSION@"
 diff --git a/Source/WebKit/UIProcess/API/haiku/WebKitContext.cpp b/Source/WebKit/UIProcess/API/haiku/WebKitContext.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..ac7db6cd29b0722649189a5d3fe09b5d8e56183e
+index 0000000000000000000000000000000000000000..34314854df2ee31941777965d9ccfcb97d40057e
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/API/haiku/WebKitContext.cpp
-@@ -0,0 +1,1434 @@
+@@ -0,0 +1,1435 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#include "config.h"
@@ -99698,7 +100589,8 @@ index 0000000000000000000000000000000000000000..ac7db6cd29b0722649189a5d3fe09b5d
 +{
 +    if (m_status != B_OK || !permission || !origin || !*origin)
 +        return;
-+    if (!std::strcmp(permission, "autoplay") || !std::strcmp(permission, "popups")) {
++    if (!std::strcmp(permission, "autoplay") || !std::strcmp(permission, "popups")
++        || !std::strcmp(permission, "cross-site-tracking") || !std::strcmp(permission, "cross-site-cookies")) {
 +        auto operation = [context = m_context, policy = String::fromUTF8(permission).isolatedCopy(),
 +            origin = String::fromUTF8(origin).isolatedCopy(), state] {
 +            context->setSitePolicy(policy, origin, state);
@@ -100002,10 +100894,10 @@ index 0000000000000000000000000000000000000000..ac7db6cd29b0722649189a5d3fe09b5d
 +}
 diff --git a/Source/WebKit/UIProcess/API/haiku/WebKitContext.h b/Source/WebKit/UIProcess/API/haiku/WebKitContext.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..fb8eb598c855482f31a36417c66446fa992a6ca3
+index 0000000000000000000000000000000000000000..a90e24ef17041e6a364f28d823d2c4c2075bc180
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/API/haiku/WebKitContext.h
-@@ -0,0 +1,724 @@
+@@ -0,0 +1,743 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#pragma once
@@ -100259,6 +101151,13 @@ index 0000000000000000000000000000000000000000..fb8eb598c855482f31a36417c66446fa
 +//                  whether the sound goes with it.
 +//                  "usb" and "bluetooth" also carry device_id/device_label
 +//                  choices; their grants last only for this browsing context.
++//                  "storage-access": a frame of another site asks for its
++//                  cookies under this page's site (requestStorageAccess(),
++//                  after a click in it). Its origin is the site pair, "site
++//                  embedded" (registrable domains, e.g. "news.example
++//                  comments.example"), with "site" and "embedded" strings too.
++//                  Saved like the others (SetSitePermission), the frame is
++//                  answered without asking the next time it asks.
 +//   PERMISSION_CANCELLED identifier (uint64): close this request's prompt;
 +//                  its document was closed. Ignore any later answer.
 +//   NOTIFICATION_SHOW  identifier (uint64), title, body, tag, icon_url, lang,
@@ -100713,6 +101612,18 @@ index 0000000000000000000000000000000000000000..fb8eb598c855482f31a36417c66446fa
 +    //   "autoplay": 0 media may play by itself, 1 only without sound,
 +    //               2 not before the user interacts with the page.
 +    //   "popups":   1 the page opens windows without a click, 0 only with.
++    // Cross-site tracking prevention (WebKit's, as in Safari) is on unless
++    // turned off: third parties (cross-site frames and requests) have only
++    // their partitioned cookies, unless the user grants a frame its cookies
++    // when it asks (document.requestStorageAccess(), a "storage-access"
++    // PERMISSION_REQUESTED). It applies to every store of this context
++    // (containers too) at once:
++    //   "cross-site-tracking" for "*": 1 prevent (the default), 0 allow.
++    //   "cross-site-cookies" for a site ("example.com" or an origin): 1 its
++    //               pages' third parties keep their cookies (an exception,
++    //               for a sign-in that needs them), -1 removes it.
++    //   "storage-access" for a site pair, origin as in its request: a saved
++    //               answer to that question (1 allow, 0 deny, -1 ask again).
 +    void SetSitePermission(const char* permission, const char* origin, int32 state);
 +    void NotificationClicked(uint64 identifier);
 +    void NotificationClosed(uint64 identifier);
@@ -101552,10 +102463,10 @@ index 0000000000000000000000000000000000000000..d28a6cad6339adf79b155cf974e85bfd
 +
 diff --git a/Source/WebKit/UIProcess/API/haiku/WebKitView.cpp b/Source/WebKit/UIProcess/API/haiku/WebKitView.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..cd4bc7529d812074c6e5915950a4f39551b5fe06
+index 0000000000000000000000000000000000000000..8d0b27d88ddad6b68ad36a7eb450b332b2a269b5
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/API/haiku/WebKitView.cpp
-@@ -0,0 +1,1467 @@
+@@ -0,0 +1,1552 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#include "config.h"
@@ -101591,6 +102502,7 @@ index 0000000000000000000000000000000000000000..cd4bc7529d812074c6e5915950a4f395
 +#include <Region.h>
 +#include <Screen.h>
 +#include <Window.h>
++#include <WindowScreen.h>
 +#include <algorithm>
 +#include <chrono>
 +#include <mutex>
@@ -102360,9 +103272,17 @@ index 0000000000000000000000000000000000000000..cd4bc7529d812074c6e5915950a4f395
 +    UpdateGeometry();
 +}
 +
++static void givePointerBackHaiku(const std::shared_ptr<WebKit::WebViewStateHaiku>&);
++
 +void BWebKitView::DetachedFromWindow()
 +{
 +    ++m_state->nativeDropRequest;
++    if (m_state->pointerLocked) {
++        // The page can't have the pointer without the view: show it again.
++        givePointerBackHaiku(m_state);
++        m_state->pointerLocked = false;
++        be_app->ShowCursor();
++    }
 +    FinishDrag(0, ConvertToScreen(BPoint()));
 +    m_state->sourceDragData = nullptr;
 +    if (auto* filter = std::exchange(m_state->windowFilter, nullptr)) {
@@ -102386,8 +103306,21 @@ index 0000000000000000000000000000000000000000..cd4bc7529d812074c6e5915950a4f395
 +
 +void BWebKitView::FrameResized(float width, float height) { BView::FrameResized(width, height); UpdateGeometry(); }
 +void BWebKitView::FrameMoved(BPoint point) { BView::FrameMoved(point); UpdateGeometry(); }
-+void BWebKitView::WindowActivated(bool active) { BView::WindowActivated(active); UpdateGeometry(); }
-+void BWebKitView::MakeFocus(bool focused) { BView::MakeFocus(focused); UpdateGeometry(); }
++void BWebKitView::WindowActivated(bool active)
++{
++    BView::WindowActivated(active);
++    if (!active)
++        givePointerBackHaiku(m_state);
++    UpdateGeometry();
++}
++
++void BWebKitView::MakeFocus(bool focused)
++{
++    BView::MakeFocus(focused);
++    if (!focused)
++        givePointerBackHaiku(m_state);
++    UpdateGeometry();
++}
 +void BWebKitView::Show() { BView::Show(); UpdateGeometry(); }
 +void BWebKitView::Hide() { BView::Hide(); UpdateGeometry(); }
 +
@@ -102519,12 +103452,59 @@ index 0000000000000000000000000000000000000000..cd4bc7529d812074c6e5915950a4f395
 +        native.AddInt32("modifiers", modifiers());
 +    message.AddMessage("event", &native);
 +    message.AddPoint("local", position);
-+    message.AddPoint("screen", ConvertToScreen(position));
++    BPoint screen = ConvertToScreen(position);
++    message.AddPoint("screen", screen);
++    if (event.what == B_MOUSE_MOVED || event.what == B_MOUSE_DOWN || event.what == B_MOUSE_UP) {
++        // movementX/Y: the pointer's move since the last event; while the
++        // pointer is locked, MouseMoved gives it (summit:movement).
++        BPoint movement;
++        if (event.FindPoint("summit:movement", &movement) != B_OK) {
++            movement = m_state->hasLastPointer ? screen - m_state->lastPointerScreen : BPoint();
++            m_state->lastPointerScreen = screen;
++            m_state->hasLastPointer = true;
++        }
++        message.AddPoint("movement", movement);
++    }
 +    dispatchViewMessageHaiku(m_state, std::move(message));
++}
++
++// Pointer lock (Summit #143), window thread. While locked the pointer is
++// hidden and set back to the middle of the view after every move, so that it
++// never reaches a screen edge; the page gets the moves as movementX/Y.
++static void setPointerLockedHaiku(BWebKitView& view, WebKit::WebViewStateHaiku& state, bool locked)
++{
++    if (locked == state.pointerLocked)
++        return;
++    state.pointerLocked = locked;
++    if (locked) {
++        BRect bounds = view.Bounds();
++        state.pointerLockLocal = BPoint(std::floor((bounds.left + bounds.right) / 2), std::floor((bounds.top + bounds.bottom) / 2));
++        state.pointerLockScreen = view.ConvertToScreen(state.pointerLockLocal);
++        view.SetEventMask(B_POINTER_EVENTS, B_NO_POINTER_HISTORY);
++        be_app->HideCursor();
++        set_mouse_position(static_cast<int32>(state.pointerLockScreen.x), static_cast<int32>(state.pointerLockScreen.y));
++        state.lastPointerScreen = state.pointerLockScreen;
++    } else {
++        view.SetEventMask(0, 0);
++        be_app->ShowCursor();
++    }
++}
++
++static void givePointerBackHaiku(const std::shared_ptr<WebKit::WebViewStateHaiku>& state)
++{
++    if (!state->pointerLocked)
++        return;
++    BMessage message(WebKit::viewPointerUnlockHaiku);
++    dispatchViewMessageHaiku(state, std::move(message));
 +}
 +
 +void BWebKitView::KeyDown(const char* bytes, int32 length)
 +{
++    // Escape always gives a locked pointer back, as in other browsers.
++    if (m_state->pointerLocked && length == 1 && bytes[0] == B_ESCAPE) {
++        givePointerBackHaiku(m_state);
++        return;
++    }
 +    if (Window() && Window()->CurrentMessage())
 +        SendInput(*Window()->CurrentMessage());
 +    else
@@ -102701,6 +103681,19 @@ index 0000000000000000000000000000000000000000..cd4bc7529d812074c6e5915950a4f395
 +    }
 +    if (m_state->dragActive)
 +        SendDrag(BMessage(), point, "exited");
++    if (m_state->pointerLocked) {
++        if (!Window() || !Window()->CurrentMessage())
++            return;
++        BPoint movement = ConvertToScreen(point) - m_state->pointerLockScreen;
++        // The move that setting the pointer back makes.
++        if (std::abs(movement.x) < 0.5f && std::abs(movement.y) < 0.5f)
++            return;
++        BMessage event(*Window()->CurrentMessage());
++        event.AddPoint("summit:movement", movement);
++        SendInput(event, m_state->pointerLockLocal);
++        set_mouse_position(static_cast<int32>(m_state->pointerLockScreen.x), static_cast<int32>(m_state->pointerLockScreen.y));
++        return;
++    }
 +    if (!m_state->sourceDragActive && Window() && Window()->CurrentMessage())
 +        SendInput(*Window()->CurrentMessage(), point);
 +}
@@ -102973,6 +103966,9 @@ index 0000000000000000000000000000000000000000..cd4bc7529d812074c6e5915950a4f395
 +    case viewTooltipHaiku:
 +        SetToolTip(message->FindString("text"));
 +        return;
++    case WebKit::viewPointerLockHaiku:
++        setPointerLockedHaiku(*this, *m_state, message->GetBool("locked", false));
++        return;
 +    case viewCursorHaiku: {
 +        auto type = static_cast<WebCore::Cursor::Type>(message->GetUInt32("cursor_type", 0));
 +        std::unique_ptr<BCursor> cursor;
@@ -103025,10 +104021,10 @@ index 0000000000000000000000000000000000000000..cd4bc7529d812074c6e5915950a4f395
 +}
 diff --git a/Source/WebKit/UIProcess/API/haiku/WebKitView.h b/Source/WebKit/UIProcess/API/haiku/WebKitView.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..883c48537d6340d1053fb4674158fd0e71294b8e
+index 0000000000000000000000000000000000000000..084aba7af7a76f9c49fd5e69bba525bede11d66a
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/API/haiku/WebKitView.h
-@@ -0,0 +1,522 @@
+@@ -0,0 +1,592 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#pragma once
@@ -103077,6 +104073,24 @@ index 0000000000000000000000000000000000000000..883c48537d6340d1053fb4674158fd0e
 +WK_EXPORT void BWebKitSetSpellChecking(bool enabled, const char* languages, const char* dictionaryDirectory, const char* wordListPath, bool usePageLanguage);
 +// The fallback dictionary ("" when none was found or checking is off).
 +WK_EXPORT const char* BWebKitSpellCheckingLanguage();
++// Fraudulent and malicious website warnings (Summit #150). Every main-frame
++// navigation to an http or https address, and each of its redirects, is
++// shown to check before its request is made. check runs on the engine's
++// thread, so it must be quick and thread-safe and must never wait for a
++// window. It returns null (or "") to let the navigation go, or a reason that
++// stays valid ("phishing", "malware") to stop it: the request is not made, the
++// page stays as it was, and the view's target gets B_WEBKIT_NAVIGATION_BLOCKED.
++// A null check removes it. Any thread; applies to every context.
++#define B_WEBKIT_HAS_NAVIGATION_CHECK 1
++typedef const char* (*BWebKitNavigationCheck)(const char* url, void* cookie);
++WK_EXPORT void BWebKitSetNavigationCheck(BWebKitNavigationCheck check, void* cookie);
++enum : uint32 {
++    // A navigation BWebKitSetNavigationCheck stopped: "view", "url" (without
++    // credentials), "reason" (the check's), "source_url" (the address the
++    // page had, may be empty) and "redirect" (bool: a server redirect led
++    // there).
++    B_WEBKIT_NAVIGATION_BLOCKED = 'wnbk'
++};
 +
 +enum : uint32 {
 +    B_WEBKIT_SPELLING_REPLACE = 0,
@@ -103267,7 +104281,38 @@ index 0000000000000000000000000000000000000000..883c48537d6340d1053fb4674158fd0e
 +    // When the video went away (removed, or the page closed or navigated)
 +    // or was not found, "page" only.
 +    B_WEBKIT_PICTURE_IN_PICTURE_FRAME = 'wpif',
-+    B_WEBKIT_PICTURE_IN_PICTURE_ENDED = 'wpie'
++    B_WEBKIT_PICTURE_IN_PICTURE_ENDED = 'wpie',
++    // The page locked the pointer (Element.requestPointerLock) or gave it
++    // back: "locked" (bool). Escape or leaving the window gives it back; the
++    // host should say so while it is locked.
++    B_WEBKIT_POINTER_LOCK_CHANGED = 'wplc',
++    // The answer to GetBackForwardList: "identifier" (uint64), "current"
++    // and repeated "back" and "forward" messages, nearest first, each with
++    // "item" (uint64, for GoToBackForwardItem), "url" and "title".
++    B_WEBKIT_BACK_FORWARD_LIST = 'wbfl',
++    // The answer to GetPageContents: "identifier" (uint64), "format"
++    // (uint32), "url" (the page's), and "data" (B_RAW_TYPE) with
++    // "mime_type", or "error" (string) when the page could not give it.
++    B_WEBKIT_PAGE_CONTENTS = 'wpgc',
++    // navigator.share() (Web Share), sent only to views that asked for it
++    // (SetShareRequests), after a click or key press in the page. Fields:
++    // "view", "identifier" (uint64), "origin" (the page's), and what the
++    // page shares, each only when given: "title", "text", "url" (http(s) or
++    // data:) and repeated "file" messages with "name", "type" (may be
++    // empty) and "data" (B_RAW_TYPE). Answer with AnswerShareRequest.
++    B_WEBKIT_SHARE_REQUESTED = 'wshr'
++};
++
++// GetPageContents formats.
++enum : uint32 {
++    // The page and its resources (images, style sheets, frames) as one
++    // MHTML file (multipart/related), which LoadURL of a file: URL ending
++    // in .mhtml or .mht shows again.
++    B_WEBKIT_PAGE_ARCHIVE = 0,
++    // The main frame's document as the server sent it.
++    B_WEBKIT_PAGE_SOURCE = 1,
++    // The page's text (UTF-8), as copying all of it would give.
++    B_WEBKIT_PAGE_TEXT = 2
 +};
 +
 +// Navigation and input are queued to the application thread. Notifications are
@@ -103391,10 +104436,24 @@ index 0000000000000000000000000000000000000000..883c48537d6340d1053fb4674158fd0e
 +    void SetPictureInPictureSize(BSize size);
 +    void PictureInPictureCommand(const char* command);
 +    void ExitPictureInPicture();
++    // A media key or a media control for the page (navigator.mediaSession,
++    // Summit #144): "play", "pause", "toggle", "stop", "next", "previous",
++    // "forward", "backward" (10 s). The page's Media Session action handlers
++    // get it, else its media element plays or pauses. Others are ignored.
++    void SendMediaCommand(const char* command);
 +    // Ends the page's web process, for a page that stopped responding. The
 +    // view then gets B_WEBKIT_PROCESS_EXITED with reason "stopped"; Reload
 +    // starts a new process.
 +    void TerminateWebProcess();
++    // The tab's history: answers B_WEBKIT_BACK_FORWARD_LIST to reply with at
++    // most limit entries each way. Any thread.
++    void GetBackForwardList(BMessenger reply, uint64 identifier, uint32 limit = 25);
++    // Goes to an entry of the last B_WEBKIT_BACK_FORWARD_LIST ("item"), as
++    // Back and Forward do; nothing when it is no longer in the list.
++    void GoToBackForwardItem(uint64 item);
++    // The page as a file to save (B_WEBKIT_PAGE_*); answers
++    // B_WEBKIT_PAGE_CONTENTS to reply. Any thread.
++    void GetPageContents(uint32 format, BMessenger reply, uint64 identifier);
 +
 +    // Embedding: see WebKitEmbedding.h. Scripts run in the pages' own world.
 +    void AddUserScript(const char* source, bool atDocumentStart = true, bool allFrames = true);
@@ -103479,6 +104538,13 @@ index 0000000000000000000000000000000000000000..883c48537d6340d1053fb4674158fd0e
 +    // key; AnswerPasskeyRequest(identifier, -1) declines the whole request.
 +    // Any thread.
 +    static void AnswerSecurityKey(uint64 identifier, const char* pin, int32 account = -1);
++    // Sends B_WEBKIT_SHARE_REQUESTED for the page's navigator.share() calls.
++    // Off by default: navigator.share() then fails with AbortError.
++    void SetShareRequests(bool enabled);
++    // Answers B_WEBKIT_SHARE_REQUESTED: shared (the user chose what to do
++    // with it: the page's promise resolves) or not (it was dismissed:
++    // AbortError). Any thread; unknown and answered identifiers are ignored.
++    static void AnswerShareRequest(uint64 identifier, bool shared);
 +    // How a beforeunload handler that asks to stay is answered; notifications
 +    // (B_WEBKIT_BEFORE_UNLOAD_PREVENTED) go to target.
 +    void SetBeforeUnloadBehavior(uint32 behavior, BMessenger target = BMessenger());
@@ -103553,10 +104619,10 @@ index 0000000000000000000000000000000000000000..883c48537d6340d1053fb4674158fd0e
 +};
 diff --git a/Source/WebKit/UIProcess/API/haiku/WebKitViewEmbedding.cpp b/Source/WebKit/UIProcess/API/haiku/WebKitViewEmbedding.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..4f69fc2f3140efbf819981fd565e2269a21a09df
+index 0000000000000000000000000000000000000000..b3ad250c161c530bfd1315df657faaafd105a0c4
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/API/haiku/WebKitViewEmbedding.cpp
-@@ -0,0 +1,1150 @@
+@@ -0,0 +1,1374 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +// BWebKitView's embedding interfaces (WebKitEmbedding.h): user scripts,
@@ -103567,6 +104633,7 @@ index 0000000000000000000000000000000000000000..4f69fc2f3140efbf819981fd565e2269
 +#include "WebKitView.h"
 +
 +#include "APIArray.h"
++#include "APIData.h"
 +#include "APIContentWorld.h"
 +#include "APIDictionary.h"
 +#include "APIFrameInfo.h"
@@ -103576,10 +104643,13 @@ index 0000000000000000000000000000000000000000..4f69fc2f3140efbf819981fd565e2269
 +#include "APIString.h"
 +#include "APIUserScript.h"
 +#include "APIUserStyleSheet.h"
++#include "ContentAsStringIncludesChildFrames.h"
 +#include "FrameInfoData.h"
 +#include "InjectUserScriptImmediately.h"
 +#include "JavaScriptEvaluationResult.h"
++#include "PageLoadState.h"
 +#include "RunJavaScriptParameters.h"
++#include "WebBackForwardList.h"
 +#include "WebPageProxy.h"
 +#include "WebPreferences.h"
 +#include "WebProcessPool.h"
@@ -103608,6 +104678,8 @@ index 0000000000000000000000000000000000000000..4f69fc2f3140efbf819981fd565e2269
 +#include <WebCore/ResourceError.h>
 +#include <WebCore/ResourceResponse.h>
 +#include <WebCore/RunJavaScriptParameters.h>
++#include <WebCore/SecurityOrigin.h>
++#include <WebCore/ShareData.h>
 +#include <WebCore/SharedBuffer.h>
 +#include <WebCore/UserScript.h>
 +#include <cmath>
@@ -104045,6 +105117,16 @@ index 0000000000000000000000000000000000000000..4f69fc2f3140efbf819981fd565e2269
 +    WTF::RunLoop::mainSingleton().dispatch([state = m_state, command = copyTextHaiku(command)] {
 +        if (auto* page = pageHaiku(state); page && page->hasRunningProcess())
 +            protect(page->legacyMainFrameProcess())->send(Messages::WebPage::PictureInPictureCommandHaiku(stringHaiku(command)), page->webPageIDInMainFrameProcess());
++    });
++}
++
++void BWebKitView::SendMediaCommand(const char* command)
++{
++    if (m_status != B_OK || !command)
++        return;
++    WTF::RunLoop::mainSingleton().dispatch([state = m_state, command = copyTextHaiku(command)] {
++        if (auto* page = pageHaiku(state); page && page->hasRunningProcess())
++            protect(page->legacyMainFrameProcess())->send(Messages::WebPage::MediaRemoteCommandHaiku(stringHaiku(command)), page->webPageIDInMainFrameProcess());
 +    });
 +}
 +
@@ -104707,6 +105789,214 @@ index 0000000000000000000000000000000000000000..4f69fc2f3140efbf819981fd565e2269
 +        });
 +    });
 +}
++
++namespace {
++
++void addBackForwardItemHaiku(BMessage& message, const char* name, WebBackForwardListItem& item)
++{
++    BMessage entry;
++    entry.AddUInt64("item", item.identifier().object().toUInt64());
++    addStringHaiku(entry, "url", item.url());
++    addStringHaiku(entry, "title", item.title());
++    message.AddMessage(name, &entry);
++}
++
++void replyPageContentsHaiku(BMessenger reply, uint64 identifier, uint32 format, const String& url,
++    std::span<const uint8_t> data, const String& mimeType, const char* error)
++{
++    BMessage message(B_WEBKIT_PAGE_CONTENTS);
++    message.AddUInt64("identifier", identifier);
++    message.AddUInt32("format", format);
++    addStringHaiku(message, "url", url);
++    if (error)
++        message.AddString("error", error);
++    else {
++        message.AddData("data", B_RAW_TYPE, data.data(), data.size(), false);
++        addStringHaiku(message, "mime_type", mimeType);
++    }
++    reply.SendMessage(&message, static_cast<BHandler*>(nullptr), 0);
++}
++
++// Views whose host shows a share menu (SetShareRequests). Main thread only.
++// The weak pointer tells a view that is gone from a later one at its address.
++HashMap<const WebViewStateHaiku*, std::weak_ptr<WebViewStateHaiku>>& shareRequestViewsHaiku()
++{
++    static NeverDestroyed<HashMap<const WebViewStateHaiku*, std::weak_ptr<WebViewStateHaiku>>> views;
++    return views.get();
++}
++
++bool takesShareRequestsHaiku(const WebViewStateHaiku& state)
++{
++    auto entry = shareRequestViewsHaiku().find(&state);
++    if (entry == shareRequestViewsHaiku().end())
++        return false;
++    auto live = entry->value.lock();
++    return live.get() == &state && !state.closed;
++}
++
++// Pages waiting for the share menu, by identifier. Main thread only.
++HashMap<uint64_t, CompletionHandler<void(bool)>>& pendingSharesHaiku()
++{
++    static NeverDestroyed<HashMap<uint64_t, CompletionHandler<void(bool)>>> shares;
++    return shares.get();
++}
++
++} // namespace
++
++RefPtr<WebBackForwardListItem> WebKit::backForwardItemHaiku(WebPageProxy& page, uint64_t item)
++{
++    if (!item)
++        return nullptr;
++    auto& list = page.backForwardList();
++    for (Ref entries : { list.backList(), list.forwardList() }) {
++        for (size_t index = 0; index < entries->size(); ++index) {
++            RefPtr entry = entries->at<WebBackForwardListItem>(index);
++            if (entry && entry->identifier().object().toUInt64() == item)
++                return entry;
++        }
++    }
++    return nullptr;
++}
++
++void BWebKitView::GetBackForwardList(BMessenger reply, uint64 identifier, uint32 limit)
++{
++    if (m_status != B_OK)
++        return;
++    WTF::RunLoop::mainSingleton().dispatch([state = m_state, reply, identifier, limit]() mutable {
++        BMessage message(B_WEBKIT_BACK_FORWARD_LIST);
++        message.AddUInt64("identifier", identifier);
++        if (auto* page = pageHaiku(state)) {
++            auto& list = page->backForwardList();
++            if (RefPtr current = list.currentItem())
++                addBackForwardItemHaiku(message, "current", *current);
++            // The back list comes oldest first.
++            Ref back = list.backListAsAPIArrayWithLimit(limit);
++            for (size_t index = back->size(); index--;) {
++                if (RefPtr item = back->at<WebBackForwardListItem>(index))
++                    addBackForwardItemHaiku(message, "back", *item);
++            }
++            Ref forward = list.forwardListAsAPIArrayWithLimit(limit);
++            for (size_t index = 0; index < forward->size(); ++index) {
++                if (RefPtr item = forward->at<WebBackForwardListItem>(index))
++                    addBackForwardItemHaiku(message, "forward", *item);
++            }
++        }
++        reply.SendMessage(&message, static_cast<BHandler*>(nullptr), 0);
++    });
++}
++
++void BWebKitView::GoToBackForwardItem(uint64 item)
++{
++    if (m_status != B_OK || !item)
++        return;
++    ++m_state->findRequestIdentifier;
++    ++m_state->nativeDropRequest;
++    BMessage message(viewBackHaiku);
++    message.AddUInt64("item", item);
++    dispatchViewMessageHaiku(m_state, std::move(message));
++}
++
++void BWebKitView::GetPageContents(uint32 format, BMessenger reply, uint64 identifier)
++{
++    if (m_status != B_OK || format > B_WEBKIT_PAGE_TEXT) {
++        replyPageContentsHaiku(reply, identifier, format, { }, { }, { }, "The page cannot be saved");
++        return;
++    }
++    WTF::RunLoop::mainSingleton().dispatch([state = m_state, format, reply, identifier] {
++        auto* page = pageHaiku(state);
++        RefPtr frame = page ? page->mainFrame() : nullptr;
++        if (!page || !frame || !page->hasRunningProcess()) {
++            replyPageContentsHaiku(reply, identifier, format, { }, { }, { }, "The page cannot be saved");
++            return;
++        }
++        String url = page->pageLoadState().url().string();
++        auto dataReply = [reply, identifier, format, url](String mimeType) {
++            return [reply, identifier, format, url, mimeType = WTF::move(mimeType)](API::Data* data) {
++                if (!data)
++                    replyPageContentsHaiku(reply, identifier, format, url, { }, { }, "The page gave nothing to save");
++                else
++                    replyPageContentsHaiku(reply, identifier, format, url, data->span(), mimeType, nullptr);
++            };
++        };
++        switch (format) {
++        case B_WEBKIT_PAGE_ARCHIVE:
++#if ENABLE(MHTML)
++            page->getContentsAsMHTMLData(dataReply("multipart/related"_s));
++#else
++            replyPageContentsHaiku(reply, identifier, format, url, { }, { }, "Web archives are not supported");
++#endif
++            break;
++        case B_WEBKIT_PAGE_SOURCE:
++            page->getMainResourceDataOfFrame(frame.get(), dataReply(frame->mimeType()));
++            break;
++        case B_WEBKIT_PAGE_TEXT:
++            page->getContentsAsString(ContentAsStringIncludesChildFrames::Yes, [reply, identifier, format, url](const String& text) {
++                auto utf8 = text.utf8();
++                replyPageContentsHaiku(reply, identifier, format, url, byteCast<uint8_t>(utf8.span()), "text/plain"_s, nullptr);
++            });
++            break;
++        }
++    });
++}
++
++void BWebKitView::SetShareRequests(bool enabled)
++{
++    if (m_status != B_OK)
++        return;
++    WTF::RunLoop::mainSingleton().dispatch([state = m_state, enabled] {
++        if (enabled)
++            shareRequestViewsHaiku().set(state.get(), state);
++        else
++            shareRequestViewsHaiku().remove(state.get());
++    });
++}
++
++void BWebKitView::AnswerShareRequest(uint64 identifier, bool shared)
++{
++    WTF::RunLoop::mainSingleton().dispatch([identifier, shared] {
++        if (auto completion = pendingSharesHaiku().take(identifier))
++            completion(shared);
++    });
++}
++
++namespace WebKit {
++
++bool WebView::showShareSheet(ShareDataWithParsedURL&& share, CompletionHandler<void(bool)>&& completion)
++{
++    if (!m_page || !takesShareRequestsHaiku(*m_state)) {
++        completion(false);
++        return true;
++    }
++    static uint64_t lastShare;
++    const uint64_t identifier = ++lastShare;
++    BMessage message(B_WEBKIT_SHARE_REQUESTED);
++    message.AddMessenger("view", nativeView());
++    message.AddUInt64("identifier", identifier);
++    addStringHaiku(message, "origin", SecurityOrigin::create(m_page->pageLoadState().url())->toString());
++    if (!share.shareData.title.isNull())
++        addStringHaiku(message, "title", share.shareData.title);
++    if (!share.shareData.text.isNull())
++        addStringHaiku(message, "text", share.shareData.text);
++    if (share.url)
++        addStringHaiku(message, "url", share.url->string());
++    for (size_t index = 0; index < share.files.size(); ++index) {
++        auto& file = share.files[index];
++        BMessage entry;
++        addStringHaiku(entry, "name", file.fileName);
++        addStringHaiku(entry, "type", index < share.shareData.files.size() ? share.shareData.files[index]->type() : String());
++        auto bytes = file.fileData ? file.fileData->span() : std::span<const uint8_t> { };
++        entry.AddData("data", B_RAW_TYPE, bytes.data(), bytes.size(), false);
++        message.AddMessage("file", &entry);
++    }
++    pendingSharesHaiku().set(identifier, WTF::move(completion));
++    if (m_state->target.SendMessage(&message, static_cast<BHandler*>(nullptr), 0) != B_OK) {
++        if (auto pending = pendingSharesHaiku().take(identifier))
++            pending(false);
++    }
++    return true;
++}
++
++} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/API/haiku/WebView.cpp b/Source/WebKit/UIProcess/API/haiku/WebView.cpp
 new file mode 100644
 index 0000000000000000000000000000000000000000..b73a05ac7b911ad19905209832a02a8983a2ffca
@@ -131192,6 +132482,458 @@ index 0000000000000000000000000000000000000000..8da1b845da1300f7c38906d661aa9fb1
 +} // namespace WebKit
 +
 +#endif // ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
+diff --git a/Source/WebKit/UIProcess/Gamepad/UIGamepadProvider.cpp b/Source/WebKit/UIProcess/Gamepad/UIGamepadProvider.cpp
+index e3ade8843975adf85b92287882013a6884a0fa4d..5ce01b59a92f1f461587586136454070a08f625d 100644
+--- a/Source/WebKit/UIProcess/Gamepad/UIGamepadProvider.cpp
++++ b/Source/WebKit/UIProcess/Gamepad/UIGamepadProvider.cpp
+@@ -249,7 +249,7 @@ Vector<std::optional<GamepadData>> UIGamepadProvider::snapshotGamepads()
+     });
+ }
+ 
+-#if !PLATFORM(COCOA) && !(USE(MANETTE) && OS(LINUX)) && !USE(LIBWPE) && !ENABLE(WPE_PLATFORM)
++#if !PLATFORM(COCOA) && !(USE(MANETTE) && OS(LINUX)) && !USE(LIBWPE) && !ENABLE(WPE_PLATFORM) && !PLATFORM(HAIKU)
+ 
+ void UIGamepadProvider::platformSetDefaultGamepadProvider()
+ {
+@@ -270,7 +270,7 @@ void UIGamepadProvider::platformStartMonitoringInput()
+ {
+ }
+ 
+-#endif // !PLATFORM(COCOA) && !(USE(MANETTE) && OS(LINUX)) && !USE(LIBWPE) && !ENABLE(WPE_PLATFORM)
++#endif // !PLATFORM(COCOA) && !(USE(MANETTE) && OS(LINUX)) && !USE(LIBWPE) && !ENABLE(WPE_PLATFORM) && !PLATFORM(HAIKU)
+ 
+ }
+ 
+diff --git a/Source/WebKit/UIProcess/Gamepad/haiku/UIGamepadProviderHaiku.cpp b/Source/WebKit/UIProcess/Gamepad/haiku/UIGamepadProviderHaiku.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..eebe91726e4df704167ae0f347e3c5e0d6b1085c
+--- /dev/null
++++ b/Source/WebKit/UIProcess/Gamepad/haiku/UIGamepadProviderHaiku.cpp
+@@ -0,0 +1,424 @@
++/*
++ * Copyright (C) 2026 Haiku, Inc.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE AUTHORS ``AS IS'' AND ANY EXPRESS OR
++ * IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
++ * OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
++ */
++
++// The Gamepad API on Haiku (Summit #142). Game controllers are read with
++// BJoystick (/dev/joystick/...) on a polling thread in the UI process, which
++// hands the values to the main run loop; UIGamepadProvider sends them to the
++// focused page. A pad becomes visible to pages after a button press, as in
++// other browsers.
++//
++// Controllers keep Haiku's axis and button order ("" mapping), except those
++// with a known layout, which get the "standard" mapping.
++//
++// SUMMIT_GAMEPAD_MOCK=1 adds a pretend standard pad that moves its sticks and
++// presses buttons in a loop, for testing without hardware.
++// SUMMIT_GAMEPAD_TRACE=1 logs devices to stderr. SUMMIT_GAMEPAD=0 turns the
++// provider off (navigator.getGamepads() stays empty).
++
++#include "config.h"
++#include "UIGamepadProvider.h"
++
++#if ENABLE(GAMEPAD) && PLATFORM(HAIKU)
++
++#include "WebPageProxy.h"
++#include "WebViewPrivate.h"
++#include <Joystick.h>
++#include <OS.h>
++#include <String.h>
++#include <WebCore/GamepadProvider.h>
++#include <WebCore/GamepadProviderClient.h>
++#include <WebCore/PlatformGamepad.h>
++#include <WebCore/SharedGamepadValue.h>
++#include <atomic>
++#include <cmath>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include <mutex>
++#include <thread>
++#include <vector>
++#include <wtf/MonotonicTime.h>
++#include <wtf/NeverDestroyed.h>
++#include <wtf/RunLoop.h>
++#include <wtf/TZoneMallocInlines.h>
++#include <wtf/Vector.h>
++#include <wtf/text/MakeString.h>
++
++namespace WebKit {
++using namespace WebCore;
++
++namespace {
++
++bool envIs(const char* name, const char* value)
++{
++    const char* set = std::getenv(name);
++    return set && !std::strcmp(set, value);
++}
++
++#define GAMEPAD_TRACE(...) do { if (envIs("SUMMIT_GAMEPAD_TRACE", "1")) { std::fprintf(stderr, "Summit gamepad: " __VA_ARGS__); std::fputc('\n', stderr); } } while (0)
++
++// One controller as the polling thread last read it.
++struct PadState {
++    String key; // device path, or "mock"
++    String name;
++    bool standard { false };
++    Vector<double> axes;
++    Vector<double> buttons;
++};
++
++// Buttons of a hat, as the d-pad of the standard mapping (up, down, left,
++// right), from Haiku's hat value (0 centred, 1 up, then clockwise to 8).
++void hatToDirections(uint8 hat, bool& up, bool& down, bool& left, bool& right)
++{
++    up = hat == 1 || hat == 2 || hat == 8;
++    right = hat >= 2 && hat <= 4;
++    down = hat >= 4 && hat <= 6;
++    left = hat >= 6 && hat <= 8;
++}
++
++class HaikuGamepad final : public PlatformGamepad {
++    WTF_MAKE_TZONE_ALLOCATED_INLINE(HaikuGamepad);
++public:
++    HaikuGamepad(unsigned index, const PadState& state)
++        : PlatformGamepad(index)
++        , m_key(state.key)
++    {
++        m_id = state.name;
++        m_mapping = state.standard ? "standard"_s : String(emptyString());
++        m_connectTime = m_lastUpdateTime = MonotonicTime::now();
++        m_axes.reserveInitialCapacity(state.axes.size());
++        for (double value : state.axes)
++            m_axes.append(SharedGamepadValue(value));
++        m_buttons.reserveInitialCapacity(state.buttons.size());
++        for (double value : state.buttons)
++            m_buttons.append(SharedGamepadValue(value));
++    }
++
++    const String& key() const { return m_key; }
++    const Vector<SharedGamepadValue>& axisValues() const final { return m_axes; }
++    const Vector<SharedGamepadValue>& buttonValues() const final { return m_buttons; }
++    ASCIILiteral source() const final { return "Haiku"_s; }
++
++    // Returns whether a button went down (which makes pads visible).
++    bool update(const PadState& state)
++    {
++        bool pressed = false;
++        for (size_t i = 0; i < m_axes.size() && i < state.axes.size(); ++i)
++            m_axes[i].setValue(state.axes[i]);
++        for (size_t i = 0; i < m_buttons.size() && i < state.buttons.size(); ++i) {
++            if (state.buttons[i] > 0.5 && m_buttons[i].value() <= 0.5)
++                pressed = true;
++            m_buttons[i].setValue(state.buttons[i]);
++        }
++        m_lastUpdateTime = MonotonicTime::now();
++        return pressed;
++    }
++
++private:
++    String m_key;
++    Vector<SharedGamepadValue> m_axes;
++    Vector<SharedGamepadValue> m_buttons;
++};
++
++// Polls the controllers and posts what changed to the main run loop.
++class GamepadProviderHaiku final : public GamepadProvider {
++public:
++    static GamepadProviderHaiku& singleton()
++    {
++        static NeverDestroyed<GamepadProviderHaiku> provider;
++        return provider;
++    }
++
++    void startMonitoringGamepads(GamepadProviderClient& client) final
++    {
++        bool first = m_clients.isEmptyIgnoringNullReferences();
++        m_clients.add(client);
++        GAMEPAD_TRACE("monitoring starts%s", first ? "" : " (again)");
++        if (first)
++            startPolling();
++    }
++
++    void stopMonitoringGamepads(GamepadProviderClient& client) final
++    {
++        if (m_clients.remove(client) && m_clients.isEmptyIgnoringNullReferences()) {
++            stopPolling();
++            m_gamepads.clear();
++            m_gamepadVector.clear();
++        }
++    }
++
++    const Vector<WeakPtr<PlatformGamepad>>& platformGamepads() final { return m_gamepadVector; }
++
++    void playEffect(unsigned, const String&, GamepadHapticEffectType, const GamepadEffectParameters&, CompletionHandler<void(bool)>&& completion) final
++    {
++        // BJoystick has no output path (rumble): airos-works/haiku#53.
++        completion(false);
++    }
++
++    void stopEffects(unsigned, const String&, CompletionHandler<void()>&& completion) final { completion(); }
++
++private:
++    friend class NeverDestroyed<GamepadProviderHaiku>;
++    GamepadProviderHaiku() = default;
++
++    struct Shared : ThreadSafeRefCounted<Shared> {
++        std::atomic<bool> running { true };
++        std::mutex lock;
++        Vector<PadState> pads;
++        bool posted { false };
++    };
++
++    void startPolling()
++    {
++        if (envIs("SUMMIT_GAMEPAD", "0"))
++            return;
++        m_shared = adoptRef(*new Shared);
++        std::thread(pollThread, Ref { *m_shared }).detach();
++    }
++
++    void stopPolling()
++    {
++        if (m_shared)
++            m_shared->running = false;
++        m_shared = nullptr;
++    }
++
++    static void readMock(PadState& pad, double seconds)
++    {
++        pad.key = "mock"_s;
++        pad.name = "Summit Mock Gamepad (STANDARD GAMEPAD Vendor: 0000 Product: 0000)"_s;
++        pad.standard = true;
++        pad.axes = { std::sin(seconds), std::cos(seconds), std::sin(seconds / 2), 0 };
++        pad.buttons.fill(0, 17);
++        // Button 0 (A) is down for the first half of every second second.
++        double phase = std::fmod(seconds, 2.0);
++        pad.buttons[0] = phase < 0.5 ? 1 : 0;
++        pad.buttons[7] = std::fabs(std::sin(seconds)); // right trigger, analog
++    }
++
++    struct OpenDevice {
++        String key;
++        std::unique_ptr<BJoystick> joystick;
++        String name;
++        int32 axes { 0 };
++        int32 hats { 0 };
++        int32 buttons { 0 };
++        bool standard { false };
++    };
++
++    static bool readDevice(OpenDevice& device, PadState& pad)
++    {
++        if (device.joystick->Update() != B_OK)
++            return false;
++        pad.key = device.key;
++        pad.name = device.name;
++        pad.standard = device.standard;
++        std::vector<int16> axes(std::max<int32>(device.axes, 1), 0);
++        std::vector<uint8> hats(std::max<int32>(device.hats, 1), 0);
++        std::unique_ptr<bool[]> buttons(new bool[std::max<int32>(device.buttons, 1)]());
++        if (device.axes)
++            device.joystick->GetAxisValues(axes.data());
++        if (device.hats)
++            device.joystick->GetHatValues(hats.data());
++        if (device.buttons)
++            device.joystick->GetButtonValues(buttons.get());
++        pad.axes.clear();
++        pad.buttons.clear();
++        for (int32 i = 0; i < device.axes; ++i)
++            pad.axes.append(std::clamp(axes[i] / 32767.0, -1.0, 1.0));
++        for (int32 i = 0; i < device.buttons; ++i)
++            pad.buttons.append(buttons[i] ? 1 : 0);
++        // Hats: as two more axes ("" mapping), or the d-pad buttons 12-15 of
++        // the standard mapping.
++        for (int32 i = 0; i < device.hats; ++i) {
++            bool up, down, left, right;
++            hatToDirections(hats[i], up, down, left, right);
++            if (device.standard && !i) {
++                while (pad.buttons.size() < 16)
++                    pad.buttons.append(0);
++                pad.buttons[12] = up; pad.buttons[13] = down; pad.buttons[14] = left; pad.buttons[15] = right;
++            } else {
++                pad.axes.append(right ? 1 : left ? -1 : 0);
++                pad.axes.append(down ? 1 : up ? -1 : 0);
++            }
++        }
++        return true;
++    }
++
++    // Known layouts that Haiku reports in the standard order: the Xbox 360
++    // controller (usb_hid builds its report descriptor, QuirkyDevices.cpp)
++    // has A, B, X, Y, LB, RB, Back, Start, LS, RS, Guide and the left/right
++    // sticks then the triggers as axes.
++    static bool isStandardLayout(const BString& name)
++    {
++        return name.IFindFirst("xbox 360") >= 0 || name.IFindFirst("x-box 360") >= 0;
++    }
++
++    static void pollThread(Ref<Shared> shared)
++    {
++        Vector<OpenDevice> devices;
++        bool mock = envIs("SUMMIT_GAMEPAD_MOCK", "1");
++        bigtime_t nextScan = 0;
++        auto start = MonotonicTime::now();
++        while (shared->running) {
++            bigtime_t now = system_time();
++            if (now >= nextScan) {
++                nextScan = now + 2000000;
++                BJoystick scanner;
++                int32 count = scanner.CountDevices();
++                for (int32 i = 0; i < count; ++i) {
++                    char name[B_OS_NAME_LENGTH];
++                    if (scanner.GetDeviceName(i, name, sizeof(name)) != B_OK)
++                        continue;
++                    String key = String::fromUTF8(name);
++                    if (devices.containsIf([&](auto& device) { return device.key == key; }))
++                        continue;
++                    auto joystick = std::make_unique<BJoystick>();
++                    if (joystick->Open(name, true) < B_OK)
++                        continue;
++                    OpenDevice device;
++                    BString controller;
++                    joystick->GetControllerName(&controller);
++                    device.standard = isStandardLayout(controller);
++                    device.axes = std::max<int32>(0, joystick->CountAxes());
++                    device.hats = std::max<int32>(0, joystick->CountHats());
++                    device.buttons = std::max<int32>(0, joystick->CountButtons());
++                    String label = controller.Length() ? String::fromUTF8(controller.String()) : key;
++                    device.name = device.standard ? makeString(label, " (STANDARD GAMEPAD)"_s) : label;
++                    device.key = key;
++                    device.joystick = WTF::move(joystick);
++                    GAMEPAD_TRACE("%s: '%s', %d axes, %d hats, %d buttons%s", name, controller.String(),
++                        static_cast<int>(device.axes), static_cast<int>(device.hats), static_cast<int>(device.buttons), device.standard ? ", standard" : "");
++                    devices.append(WTF::move(device));
++                }
++            }
++            Vector<PadState> pads;
++            for (size_t i = 0; i < devices.size();) {
++                PadState pad;
++                if (readDevice(devices[i], pad)) {
++                    pads.append(WTF::move(pad));
++                    ++i;
++                } else {
++                    GAMEPAD_TRACE("%s is gone", devices[i].key.utf8().data());
++                    devices.removeAt(i);
++                }
++            }
++            if (mock) {
++                PadState pad;
++                readMock(pad, (MonotonicTime::now() - start).seconds());
++                pads.append(WTF::move(pad));
++            }
++            bool post = false;
++            {
++                std::lock_guard lock(shared->lock);
++                bool changed = pads.size() != shared->pads.size();
++                for (size_t i = 0; !changed && i < pads.size(); ++i)
++                    changed = pads[i].key != shared->pads[i].key || pads[i].axes != shared->pads[i].axes || pads[i].buttons != shared->pads[i].buttons;
++                if (changed) {
++                    shared->pads = WTF::move(pads);
++                    if (!shared->posted)
++                        post = shared->posted = true;
++                }
++            }
++            if (post) {
++                RunLoop::mainSingleton().dispatch([shared] {
++                    if (shared->running)
++                        singleton().apply(shared.get());
++                });
++            }
++            snooze(8000);
++        }
++    }
++
++    void apply(Shared& shared)
++    {
++        Vector<PadState> pads;
++        {
++            std::lock_guard lock(shared.lock);
++            pads = shared.pads;
++            shared.posted = false;
++        }
++        // Gone pads.
++        for (size_t i = 0; i < m_gamepads.size();) {
++            auto& gamepad = m_gamepads[i];
++            if (pads.containsIf([&](auto& pad) { return pad.key == gamepad->key(); })) {
++                ++i;
++                continue;
++            }
++            std::unique_ptr<HaikuGamepad> removed = WTF::move(gamepad);
++            m_gamepads.removeAt(i);
++            if (removed->index() < m_gamepadVector.size())
++                m_gamepadVector[removed->index()] = nullptr;
++            for (Ref client : m_clients)
++                client->platformGamepadDisconnected(*removed);
++        }
++        bool input = false;
++        bool pressed = false;
++        for (auto& pad : pads) {
++            auto found = m_gamepads.findIf([&](auto& gamepad) { return gamepad->key() == pad.key; });
++            if (found != notFound) {
++                pressed |= m_gamepads[found]->update(pad);
++                input = true;
++                continue;
++            }
++            unsigned index = 0;
++            while (index < m_gamepadVector.size() && m_gamepadVector[index])
++                ++index;
++            auto gamepad = makeUnique<HaikuGamepad>(index, pad);
++            if (m_gamepadVector.size() <= index)
++                m_gamepadVector.grow(index + 1);
++            m_gamepadVector[index] = gamepad.get();
++            HaikuGamepad& added = *gamepad;
++            m_gamepads.append(WTF::move(gamepad));
++            for (Ref client : m_clients)
++                client->platformGamepadConnected(added, EventMakesGamepadsVisible::No);
++        }
++        if (input) {
++            if (pressed)
++                setShouldMakeGamepadsVisibile();
++            dispatchPlatformGamepadInputActivity();
++        }
++    }
++
++    Vector<std::unique_ptr<HaikuGamepad>> m_gamepads;
++    Vector<WeakPtr<PlatformGamepad>> m_gamepadVector;
++    RefPtr<Shared> m_shared;
++};
++
++} // namespace
++
++void UIGamepadProvider::platformSetDefaultGamepadProvider()
++{
++    GamepadProvider::setSharedProvider(GamepadProviderHaiku::singleton());
++}
++
++WebPageProxy* UIGamepadProvider::platformWebPageProxyForGamepadInput()
++{
++    return focusedWebPageForInputHaiku();
++}
++
++void UIGamepadProvider::platformStopMonitoringInput()
++{
++}
++
++void UIGamepadProvider::platformStartMonitoringInput()
++{
++}
++
++} // namespace WebKit
++
++#endif // ENABLE(GAMEPAD) && PLATFORM(HAIKU)
 diff --git a/Source/WebKit/UIProcess/Inspector/WebPageInspectorController.cpp b/Source/WebKit/UIProcess/Inspector/WebPageInspectorController.cpp
 index ca6f795f93a1d362e913da3b489a7aa0477b3f18..324c7859f3e8e09290177174dccdc4793cdbe82e 100644
 --- a/Source/WebKit/UIProcess/Inspector/WebPageInspectorController.cpp
@@ -136893,6 +138635,25 @@ index 8ace95c1b44f471e9072adcce4b7875472a98436..6fc7a4a0abf48a63464a65b0589da9a9
  
  #if ENABLE(WPE_PLATFORM)
      DidChangeBufferConfiguration(uint32_t bufferCount);
+diff --git a/Source/WebKit/UIProcess/gstreamer/WebPageProxyGStreamer.cpp b/Source/WebKit/UIProcess/gstreamer/WebPageProxyGStreamer.cpp
+index 6922c7669b35670c0ce6cb4584c0233722e5421f..47a6e364d8b37086f746deffe0f1c9f32e22308a 100644
+--- a/Source/WebKit/UIProcess/gstreamer/WebPageProxyGStreamer.cpp
++++ b/Source/WebKit/UIProcess/gstreamer/WebPageProxyGStreamer.cpp
+@@ -26,7 +26,7 @@
+ #include "config.h"
+ #include "WebPageProxy.h"
+ 
+-#if ENABLE(VIDEO) && USE(GSTREAMER) && ENABLE(SPEECH_SYNTHESIS)
++#if ENABLE(VIDEO) && (USE(GSTREAMER) || PLATFORM(HAIKU)) && ENABLE(SPEECH_SYNTHESIS)
+ 
+ #include "MessageSenderInlines.h"
+ #include "WebPageMessages.h"
+@@ -79,4 +79,4 @@ void WebPageProxy::Internals::voicesDidChange()
+ 
+ } // namespace WebKit
+ 
+-#endif // ENABLE(VIDEO) && USE(GSTREAMER) && ENABLE(SPEECH_SYNTHESIS)
++#endif // ENABLE(VIDEO) && (USE(GSTREAMER) || PLATFORM(HAIKU)) && ENABLE(SPEECH_SYNTHESIS)
 diff --git a/Source/WebKit/UIProcess/haiku/AcceleratedBackingStore.cpp b/Source/WebKit/UIProcess/haiku/AcceleratedBackingStore.cpp
 new file mode 100644
 index 0000000000000000000000000000000000000000..4bd2cf51bff1b16248fb8203b5595bb23de00dfa
@@ -139855,15 +141616,17 @@ index 0000000000000000000000000000000000000000..0bee5b6e8a1234d768064bc9f9802ecd
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/EmbeddingHaiku.h b/Source/WebKit/UIProcess/haiku/EmbeddingHaiku.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..f61939d10995397e88877a36905238bef2a25139
+index 0000000000000000000000000000000000000000..790cb1763b562cb3a9465fe1ade786e5bd1984f9
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/EmbeddingHaiku.h
-@@ -0,0 +1,15 @@
+@@ -0,0 +1,21 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#pragma once
 +
++#include "WebBackForwardListItem.h"
 +#include <wtf/Function.h>
++#include <wtf/RefPtr.h>
 +
 +namespace WebKit {
 +
@@ -139872,6 +141635,10 @@ index 0000000000000000000000000000000000000000..f61939d10995397e88877a36905238be
 +// Answers a beforeunload panel by the view's SetBeforeUnloadBehavior(), and
 +// returns true, unless the view asks the user (returns false). Main thread.
 +bool answerBeforeUnloadHaiku(WebPageProxy&, Function<void(bool)>& completion);
++
++// The page's back or forward entry that BWebKitView::GetBackForwardList
++// called item, or null when it is no longer there. Main thread.
++RefPtr<WebBackForwardListItem> backForwardItemHaiku(WebPageProxy&, uint64_t item);
 +
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/ExtensionPackageRegistryHaiku.cpp b/Source/WebKit/UIProcess/haiku/ExtensionPackageRegistryHaiku.cpp
@@ -143308,10 +145075,10 @@ index 0000000000000000000000000000000000000000..a1df802a24259059253fe0d7e648aee7
 +};
 diff --git a/Source/WebKit/UIProcess/haiku/SitePermissionsHaiku.cpp b/Source/WebKit/UIProcess/haiku/SitePermissionsHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..52dabc013111ac0017c58a09b1ca593478fcf633
+index 0000000000000000000000000000000000000000..578101acce272cccf5200ac7f6dc29e16da041fb
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/SitePermissionsHaiku.cpp
-@@ -0,0 +1,516 @@
+@@ -0,0 +1,540 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#include "config.h"
@@ -143335,6 +145102,7 @@ index 0000000000000000000000000000000000000000..52dabc013111ac0017c58a09b1ca5934
 +#include <WebCore/NotificationDirection.h>
 +#include <WebCore/SecurityOrigin.h>
 +#include <wtf/RunLoop.h>
++#include <wtf/text/MakeString.h>
 +
 +namespace WebKit {
 +
@@ -143460,6 +145228,8 @@ index 0000000000000000000000000000000000000000..52dabc013111ac0017c58a09b1ca5934
 +        return Kind::Camera;
 +    if (name == "microphone"_s)
 +        return Kind::Microphone;
++    if (name == "storage-access"_s)
++        return Kind::StorageAccess;
 +    return std::nullopt;
 +}
 +
@@ -143474,6 +145244,8 @@ index 0000000000000000000000000000000000000000..52dabc013111ac0017c58a09b1ca5934
 +        return "camera"_s;
 +    case Kind::Microphone:
 +        return "microphone"_s;
++    case Kind::StorageAccess:
++        return "storage-access"_s;
 +    }
 +    return "notifications"_s;
 +}
@@ -143548,6 +145320,23 @@ index 0000000000000000000000000000000000000000..52dabc013111ac0017c58a09b1ca5934
 +
 +void SitePermissionsHaiku::request(Kind kind, const String& origin, const BMessenger& view, CompletionHandler<void(bool)>&& completion)
 +{
++    ask(kind, origin, view, WTF::move(completion), { });
++}
++
++void SitePermissionsHaiku::requestStorageAccess(const String& topSite, const String& embeddedSite, const BMessenger& view, CompletionHandler<void(bool)>&& completion)
++{
++    if (topSite.isEmpty() || embeddedSite.isEmpty()) {
++        completion(false);
++        return;
++    }
++    ask(Kind::StorageAccess, makeString(topSite, ' ', embeddedSite), view, WTF::move(completion), [&](BMessage& message) {
++        message.AddString("site", topSite.utf8().legacyCStringPointer());
++        message.AddString("embedded", embeddedSite.utf8().legacyCStringPointer());
++    });
++}
++
++void SitePermissionsHaiku::ask(Kind kind, const String& origin, const BMessenger& view, CompletionHandler<void(bool)>&& completion, const Function<void(BMessage&)>& describe)
++{
 +    ASSERT(RunLoop::isMain());
 +    if (auto saved = decision(kind, origin)) {
 +        completion(*saved);
@@ -143565,6 +145354,8 @@ index 0000000000000000000000000000000000000000..52dabc013111ac0017c58a09b1ca5934
 +    message.AddBool("private", m_private);
 +    if (view.IsValid())
 +        message.AddMessenger("view", view);
++    if (describe)
++        describe(message);
 +    m_pending.add(identifier, Pending { kind, origin, WTF::move(completion) });
 +    if (!post(message)) {
 +        if (auto request = m_pending.take(identifier); request.completion)
@@ -143830,10 +145621,10 @@ index 0000000000000000000000000000000000000000..52dabc013111ac0017c58a09b1ca5934
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/SitePermissionsHaiku.h b/Source/WebKit/UIProcess/haiku/SitePermissionsHaiku.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..ba178c48466cf19c4483c5913dee766164148262
+index 0000000000000000000000000000000000000000..78e76132f56811d0d532da26a819b8599b5c1ad9
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/SitePermissionsHaiku.h
-@@ -0,0 +1,118 @@
+@@ -0,0 +1,126 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#pragma once
@@ -143845,6 +145636,7 @@ index 0000000000000000000000000000000000000000..ba178c48466cf19c4483c5913dee7661
 +#include <memory>
 +#include <optional>
 +#include <wtf/CompletionHandler.h>
++#include <wtf/Function.h>
 +#include <wtf/HashMap.h>
 +#include <wtf/text/StringHash.h>
 +#include <wtf/text/WTFString.h>
@@ -143864,9 +145656,12 @@ index 0000000000000000000000000000000000000000..ba178c48466cf19c4483c5913dee7661
 +class SitePermissionsHaiku final : public std::enable_shared_from_this<SitePermissionsHaiku> {
 +public:
 +    // Camera and microphone decisions are saved like the others; sharing a
-+    // screen is asked every time (requestMedia()).
-+    enum class Kind : uint8_t { Notifications, Geolocation, Camera, Microphone };
-+    static constexpr size_t kindCount = 4;
++    // screen is asked every time (requestMedia()). StorageAccess decisions
++    // are for a site pair, "top-site embedded-site" (registrable domains):
++    // whether a frame of the embedded site may have its cookies under the
++    // top site when it asks (document.requestStorageAccess(), Summit #141).
++    enum class Kind : uint8_t { Notifications, Geolocation, Camera, Microphone, StorageAccess };
++    static constexpr size_t kindCount = 5;
 +    static std::shared_ptr<SitePermissionsHaiku> create(WebProcessPool&, bool privateBrowsing);
 +    ~SitePermissionsHaiku();
 +
@@ -143883,6 +145678,9 @@ index 0000000000000000000000000000000000000000..ba178c48466cf19c4483c5913dee7661
 +    // A page asks: answered from a saved decision, or by the host, or denied
 +    // when there is no host. view is the asking page's BWebKitView.
 +    void request(Kind, const String& origin, const BMessenger& view, CompletionHandler<void(bool)>&&);
++    // document.requestStorageAccess(): may a frame of embeddedSite have its
++    // cookies under topSite? From the pair's saved decision or the host.
++    void requestStorageAccess(const String& topSite, const String& embeddedSite, const BMessenger& view, CompletionHandler<void(bool)>&&);
 +    // shareAudio: the person shares the computer's sound with the screen.
 +    void respond(uint64_t identifier, bool allowed, const String& deviceId = { }, bool shareAudio = false);
 +
@@ -143928,6 +145726,7 @@ index 0000000000000000000000000000000000000000..ba178c48466cf19c4483c5913dee7661
 +    SitePermissionsHaiku(WebProcessPool&, bool privateBrowsing);
 +    void install();
 +    bool post(BMessage&) const;
++    void ask(Kind, const String& origin, const BMessenger& view, CompletionHandler<void(bool)>&&, const Function<void(BMessage&)>& describe);
 +    void updateWebProcesses(Kind, const String& origin, std::optional<bool> allowed);
 +
 +    WebProcessPool& m_processPool;
@@ -145643,10 +147442,10 @@ index 0000000000000000000000000000000000000000..c9a119d02f85b7c5ad8fe9153bfc9604
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/WebView.cpp b/Source/WebKit/UIProcess/haiku/WebView.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..3aa1caa19b9bee5347eab913f3fee59f6b6e117e
+index 0000000000000000000000000000000000000000..ec4790f55ee1f6677a01b68a7e8bc78641e51215
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/WebView.cpp
-@@ -0,0 +1,3339 @@
+@@ -0,0 +1,3532 @@
 +/*
 + * Copyright (C) 2013 Intel Corporation. All rights reserved.
 + *
@@ -145753,6 +147552,7 @@ index 0000000000000000000000000000000000000000..3aa1caa19b9bee5347eab913f3fee59f
 +#include <map>
 +#endif
 +#include <WebCore/PermissionState.h>
++#include <WebCore/RegistrableDomain.h>
 +#include <WebCore/DragData.h>
 +#include <WebCore/SleepDisablerClient.h>
 +#include "WebHitTestResultData.h"
@@ -146201,6 +148001,32 @@ index 0000000000000000000000000000000000000000..3aa1caa19b9bee5347eab913f3fee59f
 +    notifyLoadStateHaiku(state);
 +}
 +
++// The host's check of main-frame navigations (BWebKitSetNavigationCheck,
++// Summit #150): held for the whole call, so that a check removed is never
++// called after BWebKitSetNavigationCheck returns.
++struct NavigationCheckHaiku {
++    std::mutex mutex;
++    BWebKitNavigationCheck check { nullptr };
++    void* cookie { nullptr };
++};
++
++static NavigationCheckHaiku& navigationCheckHaiku()
++{
++    static NeverDestroyed<NavigationCheckHaiku> check;
++    return check.get();
++}
++
++// Why the host stops a navigation to url ("phishing", "malware"), or empty.
++static std::string blockedNavigationReasonHaiku(const URL& url)
++{
++    auto& holder = navigationCheckHaiku();
++    std::lock_guard guard(holder.mutex);
++    if (!holder.check)
++        return { };
++    const char* reason = holder.check(url.string().utf8().legacyCStringPointer(), holder.cookie);
++    return reason ? reason : "";
++}
++
 +// Sends a notification about this view to its host, naming the view.
 +static status_t sendToHostHaiku(const std::shared_ptr<WebViewStateHaiku>& state, BMessage& message)
 +{
@@ -146499,6 +148325,28 @@ index 0000000000000000000000000000000000000000..3aa1caa19b9bee5347eab913f3fee59f
 +                    listener->ignore();
 +                    return;
 +                }
++            }
++        }
++        if (action->targetFrame() && action->targetFrame()->isMainFrame() && url.protocolIsInHTTPFamily()) {
++            // A site on the host's list of fraudulent and malicious sites
++            // (Summit #150): its request is never made, and the host shows a
++            // warning where the page would be. Like an external scheme, the
++            // navigation is not tracked as a load.
++            if (auto reason = blockedNavigationReasonHaiku(url); !reason.empty()) {
++                if (traceMainFrame)
++                    SUMMIT_NAV_TRACE("navigation blocked by the host (%s)", reason.c_str());
++                if (auto state = m_state.lock(); state && !state->closed) {
++                    BMessage message(B_WEBKIT_NAVIGATION_BLOCKED);
++                    auto cleanURL = url;
++                    cleanURL.removeCredentials();
++                    message.AddString("url", cleanURL.string().utf8().legacyCStringPointer());
++                    message.AddString("reason", reason.c_str());
++                    message.AddString("source_url", page.pageLoadState().activeURL().string().utf8().legacyCStringPointer());
++                    message.AddBool("redirect", action->isRedirect());
++                    sendToHostHaiku(state, message);
++                }
++                listener->ignore();
++                return;
 +            }
 +        }
 +        if (auto state = m_state.lock(); state && action->targetFrame() && action->targetFrame()->isMainFrame()) {
@@ -146924,6 +148772,50 @@ index 0000000000000000000000000000000000000000..3aa1caa19b9bee5347eab913f3fee59f
 +    JavaScriptUIClientHaiku(std::weak_ptr<WebViewStateHaiku> state, bool hostsNewPages, Function<void(const URL&)>&& openInTab = { })
 +        : m_state(std::move(state)), m_hostsNewPages(hostsNewPages), m_openInTab(WTF::move(openInTab)) { }
 +
++#if ENABLE(POINTER_LOCK)
++    // Element.requestPointerLock() (Summit #143). WebCore asks only from a
++    // user gesture in a focused, visible page; the view hides the pointer,
++    // keeps it in place and sends movement (BWebKitView::MouseMoved). Escape
++    // or the window losing focus ends it (viewPointerUnlockHaiku).
++    void requestPointerLock(WebPageProxy* page, CompletionHandler<void(bool)>&& completion) override
++    {
++        auto state = m_state.lock();
++        if (!page || !state || state->closed || !page->isViewFocused()) {
++            completion(false);
++            return;
++        }
++        BMessage message(viewPointerLockHaiku);
++        message.AddBool("locked", true);
++        sendPointerLockHaiku(state, message);
++        BMessage notice(B_WEBKIT_POINTER_LOCK_CHANGED);
++        notice.AddBool("locked", true);
++        sendToHostHaiku(state, notice);
++        completion(true);
++    }
++
++    void didLosePointerLock(WebPageProxy*) override
++    {
++        if (auto state = m_state.lock()) {
++            BMessage message(viewPointerLockHaiku);
++            message.AddBool("locked", false);
++            sendPointerLockHaiku(state, message);
++            BMessage notice(B_WEBKIT_POINTER_LOCK_CHANGED);
++            notice.AddBool("locked", false);
++            sendToHostHaiku(state, notice);
++        }
++    }
++
++    static void sendPointerLockHaiku(const std::shared_ptr<WebViewStateHaiku>& state, BMessage& message)
++    {
++        BMessenger view;
++        {
++            std::lock_guard guard(state->mutex);
++            view = state->view;
++        }
++        view.SendMessage(&message, static_cast<BHandler*>(nullptr), 0);
++    }
++#endif
++
 +    // window.print(): the host shows its print dialog
 +    // (BWebKitView::DrawPagesForPrinting). The page's script goes on at once.
 +    void printFrame(WebPageProxy&, WebFrameProxy& frame, const FloatSize&, CompletionHandler<void()>&& completion) override
@@ -147122,6 +149014,25 @@ index 0000000000000000000000000000000000000000..3aa1caa19b9bee5347eab913f3fee59f
 +            view = state->view;
 +        }
 +        state->context->sitePermissions()->request(SitePermissionsHaiku::Kind::Notifications, origin.securityOrigin().toString(), view, WTF::move(completion));
++    }
++
++    // document.requestStorageAccess() from a cross-site frame that tracking
++    // prevention keeps from its cookies (Summit #141): WebKit asks only after
++    // a click in the frame, for a site the user has visited. The host asks
++    // the user, or answers from its saved decision for the site pair.
++    void requestStorageAccessConfirm(WebPageProxy&, WebFrameProxy*, const WebCore::RegistrableDomain& requestingDomain, const WebCore::RegistrableDomain& currentDomain, std::optional<WebCore::OrganizationStorageAccessPromptQuirk>&&, CompletionHandler<void(bool)>&& completion) override
++    {
++        auto state = m_state.lock();
++        if (!m_hostsNewPages || !state || state->closed || !state->context || !state->context->sitePermissions()) {
++            completion(false);
++            return;
++        }
++        BMessenger view;
++        {
++            std::lock_guard guard(state->mutex);
++            view = state->view;
++        }
++        state->context->sitePermissions()->requestStorageAccess(currentDomain.string(), requestingDomain.string(), view, WTF::move(completion));
 +    }
 +
 +#if ENABLE(GEOLOCATION)
@@ -147343,9 +149254,30 @@ index 0000000000000000000000000000000000000000..3aa1caa19b9bee5347eab913f3fee59f
 +}
 +#endif
 +
++// Every WebView, for focusedWebPageForInputHaiku (main thread only).
++static Vector<WebView*>& liveWebViewsHaiku()
++{
++    static NeverDestroyed<Vector<WebView*>> views;
++    return views;
++}
++
++WebPageProxy* focusedWebPageForInputHaiku()
++{
++    ASSERT(RunLoop::isMain());
++    for (auto* view : liveWebViewsHaiku()) {
++        PageClient& client = *view;
++        if (client.isViewFocused() && client.isViewWindowActive() && client.isActiveViewVisible()) {
++            if (auto* page = view->page())
++                return page;
++        }
++    }
++    return nullptr;
++}
++
 +WebView::WebView(std::shared_ptr<WebViewStateHaiku> state)
 +    : m_state(std::move(state))
 +{
++    liveWebViewsHaiku().append(this);
 +    // Before any page exists: a request made without the client could not
 +    // be ended once it is there (SleepDisabler has no identifier then).
 +    ScreenAwakeRequestsHaiku::singleton();
@@ -147433,6 +149365,14 @@ index 0000000000000000000000000000000000000000..3aa1caa19b9bee5347eab913f3fee59f
 +    configuration->preferences().setAsyncClipboardAPIEnabled(asyncClipboardEnabled);
 +    configuration->preferences().setAsyncClipboardRichContentEnabled(asyncClipboardEnabled);
 +    configuration->preferences().setDOMPasteAccessRequestsEnabled(asyncClipboardEnabled);
++    // navigator.share() and canShare(), with files, as in Safari (Summit
++    // #153): sites show their own Share buttons only when it is there. The
++    // host shows the share menu (BWebKitView::SetShareRequests).
++    // SUMMIT_WEB_SHARE=0 hides it.
++    const char* webShare = std::getenv("SUMMIT_WEB_SHARE");
++    const bool webShareEnabled = !webShare || std::strcmp(webShare, "0");
++    configuration->preferences().setWebShareEnabled(webShareEnabled);
++    configuration->preferences().setWebShareFileAPIEnabled(webShareEnabled);
 +    // Chrome and Firefox ship requestIdleCallback, and sites and extensions built for
 +    // them call it unconditionally. WebKit's implementation is complete but off by default.
 +    // SUMMIT_REQUEST_IDLE_CALLBACK=0 turns it off, to tell its cost apart.
@@ -147477,6 +149417,26 @@ index 0000000000000000000000000000000000000000..3aa1caa19b9bee5347eab913f3fee59f
 +    // web apps and extensions (OneTab) call it unguarded.
 +    configuration->preferences().setStorageAPIEnabled(true);
 +    configuration->preferences().setStorageAPIEstimateEnabled(true);
++    // Origin private file system (navigator.storage.getDirectory, sync access
++    // handles in workers, createWritable), on by default for Cocoa, GTK and
++    // WPE (Summit #146): SQLite-in-WebAssembly apps and web editors keep
++    // their data there. Stored with the site's data in the network process.
++    // SUMMIT_OPFS=0 hides it.
++    if (const char* opfs = std::getenv("SUMMIT_OPFS"); !opfs || std::strcmp(opfs, "0")) {
++        configuration->preferences().setFileSystemEnabled(true);
++        configuration->preferences().setAccessHandleEnabled(true);
++        configuration->preferences().setFileSystemWritableStreamEnabled(true);
++        configuration->preferences().setFileSystemHandleSerializationEnabled(true);
++    }
++    // Features Safari ships whose defaults name only Cocoa or GTK/WPE
++    // (Summit #147): scoped custom element registries, element.currentCSSZoom,
++    // font-variant-emoji and ManagedMediaSource.
++    configuration->preferences().setScopedCustomElementRegistryEnabled(true);
++    configuration->preferences().setEnableElementCurrentCSSZoom(true);
++    configuration->preferences().setCSSFontVariantEmojiEnabled(true);
++#if ENABLE(MEDIA_SOURCE)
++    configuration->preferences().setManagedMediaSourceEnabled(true);
++#endif
 +    // DataTransfer.items, on by default for the other ports: editors (GitHub's
 +    // among them) take pasted and dropped images from it.
 +    configuration->preferences().setDataTransferItemsEnabled(true);
@@ -147530,6 +149490,9 @@ index 0000000000000000000000000000000000000000..3aa1caa19b9bee5347eab913f3fee59f
 +    configuration->preferences().setScreenCaptureEnabled(true);
 +#if USE(LIBWEBRTC)
 +    configuration->preferences().setPeerConnectionEnabled(true);
++    // RTCRtpScriptTransform (end-to-end encrypted calls), Cocoa-only by
++    // default (Summit #147).
++    configuration->preferences().setWebRTCEncodedTransformEnabled(true);
 +    // Host candidates hidden behind random .local names need an mDNS
 +    // responder to answer for them. air/OS has one (mdns_server); stock Haiku
 +    // has none, so neither this machine nor the other peer could resolve
@@ -147581,6 +149544,7 @@ index 0000000000000000000000000000000000000000..3aa1caa19b9bee5347eab913f3fee59f
 +WebView::~WebView()
 +{
 +    ASSERT(RunLoop::isMain());
++    liveWebViewsHaiku().removeFirst(this);
 +    ASSERT(!m_page);
 +    if (m_presentationCallback)
 +        std::exchange(m_presentationCallback, { })();
@@ -147965,7 +149929,27 @@ index 0000000000000000000000000000000000000000..3aa1caa19b9bee5347eab913f3fee59f
 +        }
 +        break;
 +    }
++#if ENABLE(POINTER_LOCK)
++    case viewPointerUnlockHaiku:
++        // The view gave the pointer back (Escape, focus lost).
++        if (m_page)
++            m_page->resetPointerLockState();
++        break;
++#endif
 +    case viewBackHaiku:
++        // An entry further along, from the Back and Forward buttons' menus
++        // (BWebKitView::GoToBackForwardItem).
++        if (message.HasUInt64("item")) {
++            if (RefPtr item = backForwardItemHaiku(*m_page, message.GetUInt64("item", 0))) {
++                navigationChangedHaiku(m_state);
++                beginUnidentifiedLoadHaiku(m_state);
++                RefPtr navigation = m_page->goToBackForwardItem(*item);
++                trackLoadHaiku(m_state, navigation.get());
++                rememberNativeNavigationHaiku(*m_state, WTF::move(navigation));
++                notifyState();
++            }
++            break;
++        }
 +        if (m_page->pageLoadState().canGoBack()) {
 +            navigationChangedHaiku(m_state);
 +            beginUnidentifiedLoadHaiku(m_state);
@@ -148213,7 +150197,7 @@ index 0000000000000000000000000000000000000000..3aa1caa19b9bee5347eab913f3fee59f
 +            m_page->handleKeyboardEvent(key.releaseNonNull());
 +        else if (auto wheel = NativeWebWheelEvent::create(native, local, screen))
 +            m_page->handleNativeWheelEvent(wheel.releaseNonNull());
-+        else if (auto mouse = NativeWebMouseEvent::create(native, local, screen, m_buttons)) {
++        else if (auto mouse = NativeWebMouseEvent::create(native, local, screen, m_buttons, message.FindPoint("movement"))) {
 +            if (native.what == B_MOUSE_DOWN) {
 +                if (RefPtr picker = m_dataListSuggestions.get()) picker->close();
 +            }
@@ -148986,12 +150970,20 @@ index 0000000000000000000000000000000000000000..3aa1caa19b9bee5347eab913f3fee59f
 +#endif
 +
 +} // namespace WebKit
++
++void BWebKitSetNavigationCheck(BWebKitNavigationCheck check, void* cookie)
++{
++    auto& holder = WebKit::navigationCheckHaiku();
++    std::lock_guard guard(holder.mutex);
++    holder.check = check;
++    holder.cookie = cookie;
++}
 diff --git a/Source/WebKit/UIProcess/haiku/WebViewContextHaiku.cpp b/Source/WebKit/UIProcess/haiku/WebViewContextHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..0fe50bb0e39ac058eecbfd9ab3c75d00d96eb779
+index 0000000000000000000000000000000000000000..922dbcea8ef4ac690096be2147918afe8d560141
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/WebViewContextHaiku.cpp
-@@ -0,0 +1,498 @@
+@@ -0,0 +1,552 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#include "config.h"
@@ -149062,6 +151054,39 @@ index 0000000000000000000000000000000000000000..0fe50bb0e39ac058eecbfd9ab3c75d00
 +    return WebExtensionController::create(WTF::move(configuration));
 +}
 +#endif
++
++// Safari's tracking prevention (Summit #141), which is WebKit's own:
++// Intelligent Tracking Prevention's statistics and its third-party cookie
++// blocking (ThirdPartyCookieBlockingMode::All: a cross-site frame or request
++// has only its partitioned cookies unless the user grants it storage access
++// when it asks, document.requestStorageAccess()). On unless the host turns
++// it off ("cross-site-tracking" 0 for "*"; SUMMIT_TRACKING_PREVENTION=0 for
++// testing). The host's "cross-site-cookies" sites are exceptions, given as
++// the store's persisted sites: their pages' third parties keep their cookies
++// and tracking prevention leaves their website data alone (the network
++// process, NetworkStorageSession.cpp).
++static void applyTrackingPreventionHaiku(WebsiteDataStore& store, const HashMap<String, HashMap<String, int32_t>>& policies)
++{
++    bool enabled = true;
++    if (auto policy = policies.find("cross-site-tracking"_s); policy != policies.end()) {
++        if (auto value = policy->value.find("*"_s); value != policy->value.end())
++            enabled = value->value;
++    }
++    if (const char* setting = getenv("SUMMIT_TRACKING_PREVENTION"); setting && *setting)
++        enabled = strcmp(setting, "0");
++    HashSet<URL> sites;
++    if (auto policy = policies.find("cross-site-cookies"_s); policy != policies.end()) {
++        for (auto& [site, value] : policy->value) {
++            if (value <= 0 || site == "*"_s)
++                continue;
++            URL url { site.contains("://"_s) ? site : makeString("https://"_s, site) };
++            if (url.isValid() && url.protocolIsInHTTPFamily() && !url.host().isEmpty())
++                sites.add(WTF::move(url));
++        }
++    }
++    store.setTrackingPreventionEnabled(enabled);
++    store.setPersistedSiteURLs(WTF::move(sites));
++}
 +
 +WebViewContextHaiku::WebViewContextHaiku(Ref<WebsiteDataStore>&& dataStore, [[maybe_unused]] String extensionStorageDirectory)
 +    : m_dataStore(WTF::move(dataStore))
@@ -149226,6 +151251,15 @@ index 0000000000000000000000000000000000000000..0fe50bb0e39ac058eecbfd9ab3c75d00
 +        origins.remove(origin.convertToASCIILowercase());
 +    else
 +        origins.set(origin.convertToASCIILowercase(), value);
++    if (policy == "cross-site-tracking"_s || policy == "cross-site-cookies"_s) {
++        applyTrackingPreventionHaiku(m_dataStore.get(), m_sitePolicies);
++        if (m_containers) {
++            for (auto& identity : m_containers->identities()) {
++                if (auto* store = m_containers->existingDataStore(identity.identifier))
++                    applyTrackingPreventionHaiku(*store, m_sitePolicies);
++            }
++        }
++    }
 +}
 +
 +std::optional<int32_t> WebViewContextHaiku::sitePolicy(const String& policy, const String& origin) const
@@ -149298,7 +151332,9 @@ index 0000000000000000000000000000000000000000..0fe50bb0e39ac058eecbfd9ab3c75d00
 +    ASSERT(RunLoop::isMain());
 +    if (!extensionOwner || !extensionOwner->m_dataStore->isPersistent())
 +        return nullptr;
-+    return adopt(new WebViewContextHaiku(WebsiteDataStore::createNonPersistent(), WTF::move(extensionOwner)));
++    Ref store = WebsiteDataStore::createNonPersistent();
++    applyTrackingPreventionHaiku(store.get(), { });
++    return adopt(new WebViewContextHaiku(WTF::move(store), WTF::move(extensionOwner)));
 +}
 +
 +std::shared_ptr<WebViewContextHaiku> WebViewContextHaiku::createContainer(std::shared_ptr<WebViewContextHaiku> owner, uint32_t container)
@@ -149376,8 +151412,11 @@ index 0000000000000000000000000000000000000000..0fe50bb0e39ac058eecbfd9ab3c75d00
 +{
 +    ASSERT(RunLoop::isMain());
 +    status = B_OK;
-+    if (privateBrowsing)
-+        return adopt(WebsiteDataStore::createNonPersistent());
++    if (privateBrowsing) {
++        Ref store = WebsiteDataStore::createNonPersistent();
++        applyTrackingPreventionHaiku(store.get(), { });
++        return adopt(WTF::move(store));
++    }
 +
 +    String requestedPath = String::fromUTF8(profilePath);
 +    if (profilePath && (requestedPath.isEmpty() || !requestedPath.startsWith('/'))) {
@@ -149392,6 +151431,7 @@ index 0000000000000000000000000000000000000000..0fe50bb0e39ac058eecbfd9ab3c75d00
 +    RefPtr store = createPersistentDataStoreHaiku(profile, PAL::SessionID::generatePersistentSessionID(), status);
 +    if (!store)
 +        return nullptr;
++    applyTrackingPreventionHaiku(*store, { });
 +    // JavaScriptConfiguration is a Cocoa-only configuration input. Its common
 +    // Haiku default stays empty instead of enabling an unrelated configuration.
 +    String extensionStorageDirectory;
@@ -149410,7 +151450,7 @@ index 0000000000000000000000000000000000000000..0fe50bb0e39ac058eecbfd9ab3c75d00
 +    // Firefox's containers (contextualIdentities), each a store of its own
 +    // under Containers/. SUMMIT_CONTAINERS=0 leaves the profile without them.
 +    if (const char* setting = getenv("SUMMIT_CONTAINERS"); !setting || strcmp(setting, "0")) {
-+        context->m_containers = ContextualIdentitiesHaiku::create(profile, [](const String& directory, uint32_t container) -> RefPtr<WebsiteDataStore> {
++        context->m_containers = ContextualIdentitiesHaiku::create(profile, [weakContext = std::weak_ptr<WebViewContextHaiku>(context)](const String& directory, uint32_t container) -> RefPtr<WebsiteDataStore> {
 +#if ENABLE(WK_WEB_EXTENSIONS)
 +            auto session = webExtensionContainerSessionID(container);
 +#else
@@ -149418,7 +151458,13 @@ index 0000000000000000000000000000000000000000..0fe50bb0e39ac058eecbfd9ab3c75d00
 +            auto session = PAL::SessionID::generatePersistentSessionID();
 +#endif
 +            status_t status;
-+            return createPersistentDataStoreHaiku(directory, session, status);
++            RefPtr store = createPersistentDataStoreHaiku(directory, session, status);
++            // A container's pages are protected as the profile's are.
++            if (store) {
++                auto context = weakContext.lock();
++                applyTrackingPreventionHaiku(*store, context ? context->m_sitePolicies : HashMap<String, HashMap<String, int32_t>> { });
++            }
++            return store;
 +        });
 +#if ENABLE(WK_WEB_EXTENSIONS)
 +        if (context->m_containers)
@@ -149629,10 +151675,10 @@ index 0000000000000000000000000000000000000000..1fec47d2a254d8f58365601ebe05851b
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/WebViewPrivate.h b/Source/WebKit/UIProcess/haiku/WebViewPrivate.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..3d03048e2ef4f1f8a33fabb5c9ab3083d5705757
+index 0000000000000000000000000000000000000000..ce268ebf7fccd352776e1647095fee4ab0d037e2
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/WebViewPrivate.h
-@@ -0,0 +1,229 @@
+@@ -0,0 +1,235 @@
 +/*
 +   Copyright (C) 2014 Haiku, inc.
 +
@@ -149817,6 +151863,8 @@ index 0000000000000000000000000000000000000000..3d03048e2ef4f1f8a33fabb5c9ab3083
 +    void derefView() override { deref(); }
 +    void didRestoreScrollPosition() override { }
 +    WebCore::UserInterfaceLayoutDirection userInterfaceLayoutDirection() override { return WebCore::UserInterfaceLayoutDirection::LTR; }
++    // navigator.share(): B_WEBKIT_SHARE_REQUESTED (WebKitViewEmbedding.cpp).
++    bool showShareSheet(WebCore::ShareDataWithParsedURL&&, CompletionHandler<void(bool)>&&) override;
 +    void requestDOMPasteAccess(WebCore::DOMPasteAccessCategory, WebCore::DOMPasteRequiresInteraction, WebCore::FrameIdentifier, const WebCore::IntRect&, const String&, CompletionHandler<void(WebCore::DOMPasteAccessResponse)>&&) override;
 +    void processWillSwap() override;
 +
@@ -149861,13 +151909,17 @@ index 0000000000000000000000000000000000000000..3d03048e2ef4f1f8a33fabb5c9ab3083
 +#endif
 +};
 +
++// The page of the focused view in the active window, if any (gamepad
++// input goes there). Main thread.
++WebPageProxy* focusedWebPageForInputHaiku();
++
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/WebViewStateHaiku.h b/Source/WebKit/UIProcess/haiku/WebViewStateHaiku.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..c70ad24f774b84a8cba7b09ff0e30da59525f5b5
+index 0000000000000000000000000000000000000000..182d4fa0ed0deb30a56196eb6e8096e2d4983d3c
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/WebViewStateHaiku.h
-@@ -0,0 +1,246 @@
+@@ -0,0 +1,257 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#pragma once
@@ -149926,7 +151978,10 @@ index 0000000000000000000000000000000000000000..c70ad24f774b84a8cba7b09ff0e30da5
 +    // page again in full.
 +    viewDirectExposedHaiku = 'wvde',
 +    viewPreconnectHaiku = 'wvpc',
-+    viewFullScreenResultHaiku = 'wvfa', viewExitFullScreenHaiku = 'wvfx'
++    viewFullScreenResultHaiku = 'wvfa', viewExitFullScreenHaiku = 'wvfx',
++    // Pointer lock (Element.requestPointerLock): to the view, "locked"; to the
++    // page, the view gives the pointer back (Escape, focus lost).
++    viewPointerLockHaiku = 'wvpl', viewPointerUnlockHaiku = 'wvpu'
 +};
 +
 +struct WebViewGeometryHaiku {
@@ -149956,6 +152011,14 @@ index 0000000000000000000000000000000000000000..c70ad24f774b84a8cba7b09ff0e30da5
 +    std::atomic<bool> closed { false };
 +    // A file drag from another application is over the view (window thread).
 +    bool dragActive { false };
++    // Window thread: the page has locked the pointer. It is hidden and put
++    // back at pointerLockScreen after every move; moves go to the page as
++    // movement only. lastPointerScreen gives movementX/Y otherwise.
++    bool pointerLocked { false };
++    BPoint pointerLockScreen;
++    BPoint pointerLockLocal;
++    BPoint lastPointerScreen;
++    bool hasLastPointer { false };
 +    // Invalidated by navigation, another drop, a click, or detaching the view.
 +    std::atomic<uint64_t> nativeDropRequest { 0 };
 +    // Source session: only the native window thread touches these fields.
@@ -183322,8 +185385,27 @@ index ef7265c051a15504903ee0421ca40f29d7b47b9c..a8aeff45e3fcdd7b4142cf5751ed95f0
  #endif
      const std::unique_ptr<WebCore::WheelEventDeltaFilter> m_recentWheelEventDeltaFilter;
  #if ENABLE(IOS_TOUCH_EVENTS)
+diff --git a/Source/WebKit/WebProcess/WebPage/WebCookieJar.cpp b/Source/WebKit/WebProcess/WebPage/WebCookieJar.cpp
+index 79d0d01bad64d238a36b8159489bb510891fc025..14ee124a340455b53b33b67501df01a880a15f48 100644
+--- a/Source/WebKit/WebProcess/WebPage/WebCookieJar.cpp
++++ b/Source/WebKit/WebProcess/WebPage/WebCookieJar.cpp
+@@ -98,7 +98,14 @@ static BlockCookies shouldBlockCookies(WebFrame* frame, const URL& firstPartyFor
+     if (WebProcess::singleton().thirdPartyCookieBlockingMode() != ThirdPartyCookieBlockingMode::All)
+         return BlockCookies::WillDecideInNetworkProcess;
+ 
++#if PLATFORM(HAIKU)
++    // The network process also keeps a blocked frame's partitioned (CHIPS)
++    // cookies and knows the sites where the user allows cross-site cookies
++    // (Summit #141): it decides.
++    return BlockCookies::WillDecideInNetworkProcess;
++#else
+     return BlockCookies::Yes;
++#endif
+ }
+ 
+ bool WebCookieJar::isEligibleForCache(WebFrame& frame, const URL& firstPartyForCookies, const URL& resourceURL) const
 diff --git a/Source/WebKit/WebProcess/WebPage/WebPage.cpp b/Source/WebKit/WebProcess/WebPage/WebPage.cpp
-index 11766a98414863026a09ccea0dbbdd432db4444f..f2fff14291a8a863f62408d7515d45b21fcf4a38 100644
+index 11766a98414863026a09ccea0dbbdd432db4444f..df425d8965cea1d8cb8f2ca9e38c7d407aad6458 100644
 --- a/Source/WebKit/WebProcess/WebPage/WebPage.cpp
 +++ b/Source/WebKit/WebProcess/WebPage/WebPage.cpp
 @@ -505,7 +505,7 @@
@@ -183365,7 +185447,36 @@ index 11766a98414863026a09ccea0dbbdd432db4444f..f2fff14291a8a863f62408d7515d45b2
      if (parameters.webExtensionControllerParameters)
          lazyInitialize(m_webExtensionController, WebExtensionControllerProxy::getOrCreate(parameters.webExtensionControllerParameters.value(), this));
  #endif
-@@ -2454,6 +2461,9 @@ void WebPage::tryClose(CompletionHandler<void(bool)>&& completionHandler)
+@@ -2059,8 +2066,26 @@ void WebPage::platformDidSelectAll()
+ #endif // !PLATFORM(IOS_FAMILY)
+ 
+ #if !PLATFORM(COCOA)
+-std::pair<URL, WebCore::DidFilterLinkDecoration> WebPage::applyLinkDecorationFilteringWithResult(const URL& url, WebCore::LinkDecorationFilteringTrigger)
+-{
++std::pair<URL, WebCore::DidFilterLinkDecoration> WebPage::applyLinkDecorationFilteringWithResult(const URL& url, [[maybe_unused]] WebCore::LinkDecorationFilteringTrigger trigger)
++{
++#if PLATFORM(HAIKU)
++    // Link tracking protection (Summit #141), as Safari's in private windows:
++    // navigations of private pages lose the click identifiers that ad and
++    // mail services add to links to follow a person from site to site.
++    // FrameLoader asks for every frame's main resource; the list is small
++    // and only of parameters that identify a click, never ones a site needs.
++    if (trigger == WebCore::LinkDecorationFilteringTrigger::Navigation && sessionID().isEphemeral()
++        && url.protocolIsInHTTPFamily() && url.hasQuery()) {
++        static NeverDestroyed<HashSet<String>> trackingParameters(std::initializer_list<String> {
++            "fbclid"_s, "gclid"_s, "dclid"_s, "gbraid"_s, "wbraid"_s, "msclkid"_s, "mc_eid"_s, "igshid"_s,
++            "twclid"_s, "yclid"_s, "_hsenc"_s, "_hsmi"_s, "oly_enc_id"_s, "oly_anon_id"_s, "__s"_s,
++            "vero_id"_s, "wickedid"_s, "ttclid"_s, "li_fat_id"_s, "s_cid"_s, "mkt_tok"_s,
++        });
++        auto filtered = url;
++        if (!removeQueryParameters(filtered, trackingParameters.get()).isEmpty())
++            return { WTF::move(filtered), WebCore::DidFilterLinkDecoration::Yes };
++    }
++#endif
+     return { url, WebCore::DidFilterLinkDecoration::No };
+ }
+ 
+@@ -2454,6 +2479,9 @@ void WebPage::tryClose(CompletionHandler<void(bool)>&& completionHandler)
          completionHandler(false);
          return;
      }
@@ -183375,7 +185486,7 @@ index 11766a98414863026a09ccea0dbbdd432db4444f..f2fff14291a8a863f62408d7515d45b2
      completionHandler(coreFrame->loader().shouldClose());
  }
  
-@@ -2937,6 +2947,15 @@ void WebPage::drawRect(GraphicsContext& graphicsContext, const IntRect& rect)
+@@ -2937,6 +2965,15 @@ void WebPage::drawRect(GraphicsContext& graphicsContext, const IntRect& rect)
  
      protect(m_mainFrame->coreLocalFrame()->view())->paint(graphicsContext, rect);
  
@@ -183391,7 +185502,7 @@ index 11766a98414863026a09ccea0dbbdd432db4444f..f2fff14291a8a863f62408d7515d45b2
  #if PLATFORM(GTK) || PLATFORM(WIN) || PLATFORM(PLAYSTATION) || PLATFORM(WPE)
      if (!m_page->settings().acceleratedCompositingEnabled() && m_page->inspectorController().enabled() && m_page->inspectorController().shouldShowOverlay()) {
          graphicsContext.beginTransparencyLayer(1);
-@@ -4997,7 +5016,17 @@ void WebPage::setUserAgent(String&& userAgent)
+@@ -4997,7 +5034,17 @@ void WebPage::setUserAgent(String&& userAgent)
  
  void WebPage::setHasCustomUserAgent(bool hasCustomUserAgent)
  {
@@ -183409,7 +185520,7 @@ index 11766a98414863026a09ccea0dbbdd432db4444f..f2fff14291a8a863f62408d7515d45b2
  }
  
  void WebPage::suspendActiveDOMObjectsAndAnimations()
-@@ -5461,7 +5490,7 @@ void WebPage::updatePreferences(const WebPreferencesStore& store)
+@@ -5461,7 +5508,7 @@ void WebPage::updatePreferences(const WebPreferencesStore& store)
  
      updateSettingsGenerated(store, settings);
  
@@ -183418,7 +185529,7 @@ index 11766a98414863026a09ccea0dbbdd432db4444f..f2fff14291a8a863f62408d7515d45b2
      if (!settings.acceleratedCompositingEnabled()) {
          WEBPAGE_RELEASE_LOG(Layers, "updatePreferences: acceleratedCompositingEnabled setting was false. WebKit cannot function in this mode; changing setting to true");
          settings.setAcceleratedCompositingEnabled(true);
-@@ -8450,6 +8479,13 @@ void WebPage::didCommitLoad(WebFrame* frame)
+@@ -8450,6 +8497,13 @@ void WebPage::didCommitLoad(WebFrame* frame)
      dismissVolumetricScenesForDetachedElements();
  #endif
  
@@ -183433,7 +185544,7 @@ index 11766a98414863026a09ccea0dbbdd432db4444f..f2fff14291a8a863f62408d7515d45b2
          m_textManipulationIncludesSubframes = false;
      else if (m_textManipulationIncludesSubframes)
 diff --git a/Source/WebKit/WebProcess/WebPage/WebPage.h b/Source/WebKit/WebProcess/WebPage/WebPage.h
-index 5dfb080fb516a2c8bd2ec72245babd8c28d926bf..836e271cc822bd48fcb67aeb6bc46e47b095eed6 100644
+index 5dfb080fb516a2c8bd2ec72245babd8c28d926bf..b6e783c680bb7e15b33eac8288e76ba8c38ff3cd 100644
 --- a/Source/WebKit/WebProcess/WebPage/WebPage.h
 +++ b/Source/WebKit/WebProcess/WebPage/WebPage.h
 @@ -25,6 +25,10 @@
@@ -183447,7 +185558,7 @@ index 5dfb080fb516a2c8bd2ec72245babd8c28d926bf..836e271cc822bd48fcb67aeb6bc46e47
  #include "APIObject.h"
  #include "MessageReceiver.h"
  #include "MessageSender.h"
-@@ -925,6 +929,24 @@ public:
+@@ -925,6 +929,25 @@ public:
      bool suspendForProcessSwap();
  
      void sendSetWindowFrame(const WebCore::FloatRect&);
@@ -183466,13 +185577,14 @@ index 5dfb080fb516a2c8bd2ec72245babd8c28d926bf..836e271cc822bd48fcb67aeb6bc46e47
 +    void enterPictureInPictureHaiku(String&& token, String&& target, WebCore::IntSize);
 +    void setPictureInPictureSizeHaiku(WebCore::IntSize);
 +    void pictureInPictureCommandHaiku(String&& command);
++    void mediaRemoteCommandHaiku(String&& command);
 +    void exitPictureInPictureHaiku();
 +    void runBookmarkletHaiku(URL&&, WebCore::ScriptExecutionContextIdentifier, CompletionHandler<void(String&&)>&&);
 +#endif
  
      double textZoomFactor() const;
      void didSetTextZoomFactor(double);
-@@ -1906,7 +1928,7 @@ public:
+@@ -1906,7 +1929,7 @@ public:
  #if ENABLE(WK_WEB_EXTENSIONS)
      WebExtensionControllerProxy* webExtensionControllerProxy() const
      {
@@ -183481,7 +185593,7 @@ index 5dfb080fb516a2c8bd2ec72245babd8c28d926bf..836e271cc822bd48fcb67aeb6bc46e47
          return m_webExtensionController.get();
  #else
          return nullptr;
-@@ -2534,6 +2556,13 @@ private:
+@@ -2534,6 +2557,13 @@ private:
      void runJavaScript(WebFrame*, RunJavaScriptParameters&&, ContentWorldIdentifier, bool, CompletionHandler<void(RunJavaScriptResult&&)>&&);
      void runJavaScriptInFrameInScriptWorld(RunJavaScriptParameters&&, std::optional<WebCore::FrameIdentifier>, const ContentWorldData&, bool, CompletionHandler<void(RunJavaScriptResult&&)>&&);
      void clearContentWorld(ContentWorldIdentifier, CompletionHandler<void()>&&);
@@ -183495,7 +185607,7 @@ index 5dfb080fb516a2c8bd2ec72245babd8c28d926bf..836e271cc822bd48fcb67aeb6bc46e47
      void getAccessibilityTreeData(CompletionHandler<void(const std::optional<IPC::SharedBufferReference>&)>&&);
      void updateRenderingWithForcedRepaint(CompletionHandler<void()>&&);
      void takeSnapshot(WebCore::IntRect snapshotRect, WebCore::IntSize bitmapSize, SnapshotOptions, CompletionHandler<void(std::optional<ImageBufferBackendHandle>&&, WebCore::Headroom)>&&);
-@@ -3087,8 +3116,12 @@ private:
+@@ -3087,8 +3117,12 @@ private:
  
      const Ref<WebUserContentController> m_userContentController;
  
@@ -183511,7 +185623,7 @@ index 5dfb080fb516a2c8bd2ec72245babd8c28d926bf..836e271cc822bd48fcb67aeb6bc46e47
  
      const UniqueRef<WebScreenOrientationManager> m_screenOrientationManager;
 diff --git a/Source/WebKit/WebProcess/WebPage/WebPage.messages.in b/Source/WebKit/WebProcess/WebPage/WebPage.messages.in
-index 483df2ae00809b454f95152d8d8bb462a150fe22..b1c1237262a266c5121094a24242981148e0f813 100644
+index 483df2ae00809b454f95152d8d8bb462a150fe22..88a8b18062e685eeffb96fc658d6a87d8c4078b9 100644
 --- a/Source/WebKit/WebProcess/WebPage/WebPage.messages.in
 +++ b/Source/WebKit/WebProcess/WebPage/WebPage.messages.in
 @@ -288,6 +288,11 @@ messages -> WebPage WantsAsyncDispatchMessage {
@@ -183526,7 +185638,7 @@ index 483df2ae00809b454f95152d8d8bb462a150fe22..b1c1237262a266c5121094a242429811
  
      ClearContentWorld(WebKit::ContentWorldIdentifier worldIdentifier) -> ()
  
-@@ -549,6 +554,14 @@ messages -> WebPage WantsAsyncDispatchMessage {
+@@ -549,6 +554,15 @@ messages -> WebPage WantsAsyncDispatchMessage {
  #endif
      DrawToPDF(std::optional<WebCore::FloatRect> rect, bool allowTransparentBackground) -> (RefPtr<WebCore::SharedBuffer> data)
  #endif
@@ -183535,13 +185647,14 @@ index 483df2ae00809b454f95152d8d8bb462a150fe22..b1c1237262a266c5121094a242429811
 +    EnterPictureInPictureHaiku(String token, String target, WebCore::IntSize size)
 +    SetPictureInPictureSizeHaiku(WebCore::IntSize size)
 +    PictureInPictureCommandHaiku(String command)
++    MediaRemoteCommandHaiku(String command)
 +    ExitPictureInPictureHaiku()
 +    DrawPagesForPrintingHaiku(WebCore::FrameIdentifier frameID, struct WebKit::PrintInfo printInfo, uint32_t first, uint32_t count, float rasterScale, bool printBackgrounds) -> (std::optional<WebCore::SharedMemory::Handle> data, uint32_t pageCount, WebCore::IntSize pageSize)
 +#endif
  #if PLATFORM(GTK)
      DrawPagesForPrinting(WebCore::FrameIdentifier frameID, struct WebKit::PrintInfo printInfo) -> (std::optional<WebCore::SharedMemory::Handle> data, WebCore::ResourceError error)
      DrawPagesForPrintingDuringDOMPrintOperation(WebCore::FrameIdentifier frameID, struct WebKit::PrintInfo printInfo) -> (std::optional<WebCore::SharedMemory::Handle> data, WebCore::ResourceError error) AllowedWhenWaitingForSyncReplyDuringUnboundedIPC
-@@ -631,6 +644,9 @@ messages -> WebPage WantsAsyncDispatchMessage {
+@@ -631,6 +645,9 @@ messages -> WebPage WantsAsyncDispatchMessage {
      SetWritingSuggestion(String text, struct WebKit::EditingRange selectionRange)
      ConfirmCompositionAsync()
  #endif
@@ -185257,10 +187370,10 @@ index 0000000000000000000000000000000000000000..7459ce25f180160a1c12431c73926a1f
 +
 diff --git a/Source/WebKit/WebProcess/WebPage/haiku/WebPageHaiku.cpp b/Source/WebKit/WebProcess/WebPage/haiku/WebPageHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..637470ce160054f77c68542075ff8d03e4888fb5
+index 0000000000000000000000000000000000000000..21f278735563ccf7fba622283107cf94e3a1079e
 --- /dev/null
 +++ b/Source/WebKit/WebProcess/WebPage/haiku/WebPageHaiku.cpp
-@@ -0,0 +1,552 @@
+@@ -0,0 +1,593 @@
 +/*
 + * Copyright (C) 2014 Haiku, inc.
 + *
@@ -185321,6 +187434,8 @@ index 0000000000000000000000000000000000000000..637470ce160054f77c68542075ff8d03
 +#include <WebCore/EventNames.h>
 +#include <WebCore/FrameTree.h>
 +#include <WebCore/HTMLVideoElement.h>
++#include <WebCore/MediaSessionManagerInterface.h>
++#include <WebCore/PlatformMediaSessionTypes.h>
 +#include <WebCore/NativeImage.h>
 +#include <WebCore/TimeRanges.h>
 +#include <Message.h>
@@ -185337,6 +187452,9 @@ index 0000000000000000000000000000000000000000..637470ce160054f77c68542075ff8d03
 +#include <skia/core/SkStream.h>
 +#include <skia/core/SkSurface.h>
 +#include <skia/docs/SkPDFDocument.h>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
 +#include <skia/docs/SkPDFJpegHelpers.h>
 +#include <ctime>
 +
@@ -185549,6 +187667,42 @@ index 0000000000000000000000000000000000000000..637470ce160054f77c68542075ff8d03
 +        found->value->lastVideoSize = { };
 +        found->value->lastTime = -1;
 +    }
++}
++
++// A media key or the tab's sound menu (Summit #144): the page's Media Session
++// action handlers get it (next/previous track, seeking), else its most recent
++// media element plays or pauses, as remote commands do on macOS.
++void WebPage::mediaRemoteCommandHaiku(String&& command)
++{
++    RefPtr page = corePage();
++    if (!page)
++        return;
++    using Command = PlatformMediaSessionRemoteControlCommandType;
++    static constexpr std::pair<ASCIILiteral, Command> commands[] = {
++        { "play"_s, Command::PlayCommand }, { "pause"_s, Command::PauseCommand },
++        { "toggle"_s, Command::TogglePlayPauseCommand }, { "stop"_s, Command::StopCommand },
++        { "next"_s, Command::NextTrackCommand }, { "previous"_s, Command::PreviousTrackCommand },
++        { "forward"_s, Command::SkipForwardCommand }, { "backward"_s, Command::SkipBackwardCommand },
++    };
++    std::optional<Command> type;
++    for (auto& [name, value] : commands) {
++        if (command == name)
++            type = value;
++    }
++    if (!type)
++        return;
++    RefPtr manager = page->mediaSessionManager();
++    if (!manager)
++        return;
++    RefPtr document = page->localTopDocument();
++    UserGestureIndicator gesture(IsProcessingUserGesture::Yes, document.get());
++    PlatformMediaSessionRemoteCommandArgument argument;
++    if (*type == Command::SkipForwardCommand || *type == Command::SkipBackwardCommand)
++        argument.time = 10;
++    bool handled = manager->processDidReceiveRemoteControlCommand(*type, argument);
++    // SUMMIT_MEDIA_KEY_TRACE=1: whether a media element took the command.
++    if (const char* trace = std::getenv("SUMMIT_MEDIA_KEY_TRACE"); trace && !std::strcmp(trace, "1"))
++        std::fprintf(stderr, "Summit media key: %s %s\n", command.utf8().legacyCStringPointer(), handled ? "handled" : "no media session");
 +}
 +
 +void WebPage::pictureInPictureCommandHaiku(String&& command)
@@ -202382,10 +204536,10 @@ index 359c3765d3a41ba1c6cfdb6b44fa292cc7811a0d..18a4d1524bbb7a68b2bec420d013fd89
  endif ()
 diff --git a/Source/cmake/OptionsHaiku.cmake b/Source/cmake/OptionsHaiku.cmake
 new file mode 100644
-index 0000000000000000000000000000000000000000..c9b6ef81637833de2854c327ae711ddf8710402f
+index 0000000000000000000000000000000000000000..c2a6b2c86b3c75ca881301e21cf0fda072ff8a3c
 --- /dev/null
 +++ b/Source/cmake/OptionsHaiku.cmake
-@@ -0,0 +1,383 @@
+@@ -0,0 +1,392 @@
 +include(GNUInstallDirs)
 +include(VersioningUtils)
 +
@@ -202458,7 +204612,8 @@ index 0000000000000000000000000000000000000000..c9b6ef81637833de2854c327ae711ddf
 +WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_DRAG_SUPPORT PUBLIC ON)
 +WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_ENCRYPTED_MEDIA PUBLIC ON)
 +WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_FULLSCREEN_API PUBLIC ${ENABLE_WEBKIT})
-+WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_GAMEPAD PUBLIC OFF)
++# Game controllers through BJoystick (UIProcess/Gamepad/haiku).
++WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_GAMEPAD PUBLIC ON)
 +# The host finds the position (Summit: Wi-Fi networks and BeaconDB); see
 +# UIProcess/haiku/SitePermissionsHaiku.cpp.
 +WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_GEOLOCATION PUBLIC ON)
@@ -202474,6 +204629,9 @@ index 0000000000000000000000000000000000000000..c9b6ef81637833de2854c327ae711ddf
 +# WebCodecs (VideoDecoder, VideoEncoder, VideoFrame...) on WebRTC's codecs
 +# (platform/mediastream/libwebrtc/haiku/WebCodecsHaiku.cpp); no audio codecs yet.
 +WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_WEB_CODECS PRIVATE ON)
++# navigator.mediaSession: metadata and actions for media keys and the tab's
++# sound menu (Summit).
++WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_MEDIA_SESSION PRIVATE ON)
 +WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_MEMORY_SAMPLER PUBLIC ON)
 +WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_MHTML PRIVATE ON)
 +# OffscreenCanvas, as on GTK and WPE: pages use it for off-thread drawing and
@@ -202482,9 +204640,14 @@ index 0000000000000000000000000000000000000000..c9b6ef81637833de2854c327ae711ddf
 +WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_OFFSCREEN_CANVAS_IN_WORKERS PRIVATE ON)
 +WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_MOUSE_CURSOR_SCALE PUBLIC ON)
 +WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_NOTIFICATIONS PUBLIC ON)
++# Element.requestPointerLock: the view hides and recentres the pointer and
++# sends relative movement (UIProcess/haiku/WebView.cpp).
++WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_POINTER_LOCK PRIVATE ON)
 +WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_RESOURCE_USAGE PRIVATE ON)
 +WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_SAMPLING_PROFILER PUBLIC OFF)
-+WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_SPEECH_SYNTHESIS PUBLIC OFF)
++# speechSynthesis through eSpeak NG or eSpeak, loaded at run time
++# (platform/haiku/PlatformSpeechSynthesizerHaiku.cpp).
++WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_SPEECH_SYNTHESIS PUBLIC ON)
 +WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_SPELLCHECK PUBLIC OFF)
 +WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_VARIATION_FONTS PRIVATE ON)
 +WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_TOUCH_EVENTS PUBLIC OFF)
