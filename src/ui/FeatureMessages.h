@@ -74,6 +74,11 @@ constexpr uint32 kStopPage = 'stpg';
 // "word"; and Check Spelling While Typing.
 constexpr uint32 kSpellingCommand = 'splc';
 constexpr uint32 kToggleSpellChecking = 'spck';
+// Edit › Speech › Start Speaking / Stop Speaking, and the context menu's
+// Speak: read the selection (or the page's article) aloud with the page's
+// speechSynthesis (eSpeak, #145), as Safari's Edit › Speech does.
+constexpr uint32 kStartSpeaking = 'spkS';
+constexpr uint32 kStopSpeaking = 'spkX';
 // View › Zoom Text Only (Profile::zoomTextOnly).
 constexpr uint32 kToggleZoomTextOnly = 'ztxt';
 // View › Caret Browsing (F7), Reduce Motion and Increase Contrast: the

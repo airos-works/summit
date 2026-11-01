@@ -64,6 +64,12 @@ boundaries, pause, resume and the end are reported from the main run loop as
 the sound reaches them. Rate 1 is eSpeak's 175 words a minute, pitch 1 its 50,
 volume 1 its 100. Text that starts with `<speak` is read as SSML.
 
+Edit › Speech › Start Speaking (and Speak in the context menu of selected
+text) reads the selection, or else the page's article or body, aloud in the
+page's language, as Safari's Edit › Speech does; Stop Speaking ends it. It runs
+in an isolated world, so the page's scripts don't see it. A language eSpeak has
+no voice for falls back to its language without the region, then English.
+
 Without eSpeak installed `getVoices()` is empty and `speak()` ends with an
 error event. air/OS images don't ship an engine yet: airos-works/haiku#52
 (`pkgman install espeak` adds one). `SUMMIT_SPEECH_LIBRARY` names another

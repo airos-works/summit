@@ -847,6 +847,10 @@ BrowserWindow::BrowserWindow(std::shared_ptr<SharedProfile> profile, std::string
     edit->AddSeparatorItem();
     fSpellingItem = new BMenuItem("Check Spelling While Typing", new BMessage(kToggleSpellChecking));
     edit->AddItem(fSpellingItem);
+    auto* speech = new BMenu("Speech");
+    AddItem(speech, "Start Speaking", kStartSpeaking);
+    AddItem(speech, "Stop Speaking", kStopSpeaking);
+    edit->AddItem(speech);
 #endif
     edit->AddSeparatorItem();
     AddItem(edit, "Preferences…", kShowPreferences, ',');
@@ -5125,6 +5129,30 @@ void BrowserWindow::MessageReceived(BMessage* message)
                 return SharedProfile::kSettingsChanged;
             }, BMessenger(this));
             break;
+        case kStartSpeaking:
+        case kStopSpeaking: {
+            // In an isolated world: the page's own scripts can't see or
+            // stop it, and its speechSynthesis is the same engine.
+            if (!tab || !tab->view || tab->processExited) break;
+            static const char* kStart = R"JS((() => {
+                const synth = window.speechSynthesis;
+                if (!synth) return 'unavailable';
+                synth.cancel();
+                let text = String(window.getSelection ? window.getSelection() : '').trim();
+                if (!text) {
+                    const article = document.querySelector('article, main, [role=main]') || document.body;
+                    text = article ? article.innerText.trim() : '';
+                }
+                if (!text) return 'empty';
+                const utterance = new SpeechSynthesisUtterance(text.slice(0, 100000));
+                utterance.lang = document.documentElement.lang || navigator.language;
+                synth.speak(utterance);
+                return 'speaking';
+            })())JS";
+            static const char* kStop = "window.speechSynthesis && window.speechSynthesis.cancel(), 'stopped'";
+            tab->view->EvaluateJavaScriptIsolated(message->what == kStartSpeaking ? kStart : kStop, BMessenger(), 0, tab->loadGeneration);
+            break;
+        }
         case kToggleSpellChecking: {
             const bool enabled = !fShared->Read([](const Profile& profile) { return profile.spellChecking; });
             BMessage changed(kPreferencesChanged);
@@ -6073,6 +6101,9 @@ void BrowserWindow::ShowPageContextMenu(const BMessage& message)
         separate();
         menu->AddItem(new BMenuItem("Copy", copy(selection)));
     }
+#if SUMMIT_MODERN_WEBKIT
+    if (!selection.empty()) menu->AddItem(new BMenuItem("Speak", new BMessage(kStartSpeaking)));
+#endif
     if (!selection.empty()) {
         const std::string label = std::string("Search ") + CurrentSearchEngine().name + " for “" + ShortLabel(selection) + "”";
         menu->AddItem(new BMenuItem(label.c_str(), withURL(kSearchFor, ShortLabel(selection, 400))));
