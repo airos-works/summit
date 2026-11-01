@@ -88233,10 +88233,10 @@ index 7c9075474552a6beaffbeffe6838dd4e5b24b0d0..74fe55e1e669a9abf183be97b68e71ef
  
  } // namespace WebKit
 diff --git a/Source/WebKit/NetworkProcess/curl/NetworkStorageSessionCurl.cpp b/Source/WebKit/NetworkProcess/curl/NetworkStorageSessionCurl.cpp
-index 20aff066ab01aa0fa12c7bf47741b0109d927eea..58ef7e8a37abb64ff6237d34452041a9992279af 100644
+index 20aff066ab01aa0fa12c7bf47741b0109d927eea..6f25341b0382b3f9c79fed53f2fb6e7438c42974 100644
 --- a/Source/WebKit/NetworkProcess/curl/NetworkStorageSessionCurl.cpp
 +++ b/Source/WebKit/NetworkProcess/curl/NetworkStorageSessionCurl.cpp
-@@ -31,6 +31,7 @@
+@@ -31,12 +31,14 @@
  #include <WebCore/Cookie.h>
  #include <WebCore/CookieJarDB.h>
  #include <WebCore/CookieStoreGetOptions.h>
@@ -88244,7 +88244,14 @@ index 20aff066ab01aa0fa12c7bf47741b0109d927eea..58ef7e8a37abb64ff6237d34452041a9
  #include <WebCore/CurlContext.h>
  #include <WebCore/HTTPCookieAcceptPolicy.h>
  #include <optional>
-@@ -65,7 +66,50 @@ static String alternativeServicesStorageFile(const String& alternativeServicesDi
+ #include <wtf/FileSystem.h>
+ #include <wtf/URL.h>
+ #include <wtf/Vector.h>
++#include <wtf/WallTime.h>
+ #include <wtf/text/MakeString.h>
+ #include <wtf/text/StringBuilder.h>
+ 
+@@ -65,7 +67,50 @@ static String alternativeServicesStorageFile(const String& alternativeServicesDi
      return FileSystem::pathByAppendingComponent(alternativeServicesDirectory, defaultFileName);
  }
  
@@ -88296,7 +88303,7 @@ index 20aff066ab01aa0fa12c7bf47741b0109d927eea..58ef7e8a37abb64ff6237d34452041a9
  {
      StringBuilder cookies;
      bool didAccessSecureCookies = false;
-@@ -74,6 +118,15 @@ static std::pair<String, bool> cookiesForSession(const NetworkStorageSession& se
+@@ -74,6 +119,15 @@ static std::pair<String, bool> cookiesForSession(const NetworkStorageSession& se
  
      if (auto result = session.cookieDatabase().searchCookies(firstParty, url, searchHTTPOnly, secure, std::nullopt)) {
          for (const auto& cookie : *result) {
@@ -88312,7 +88319,7 @@ index 20aff066ab01aa0fa12c7bf47741b0109d927eea..58ef7e8a37abb64ff6237d34452041a9
              if (!cookies.isEmpty())
                  cookies.append("; "_s);
              if (!cookie.name.isEmpty())
-@@ -105,7 +158,16 @@ NetworkStorageSession::~NetworkStorageSession()
+@@ -105,7 +159,16 @@ NetworkStorageSession::~NetworkStorageSession()
  
  void NetworkStorageSession::setCookieDatabase(UniqueRef<CookieJarDB>&& cookieDatabase)
  {
@@ -88329,7 +88336,7 @@ index 20aff066ab01aa0fa12c7bf47741b0109d927eea..58ef7e8a37abb64ff6237d34452041a9
  }
  
  CookieJarDB& NetworkStorageSession::cookieDatabase() const
-@@ -114,8 +176,19 @@ CookieJarDB& NetworkStorageSession::cookieDatabase() const
+@@ -114,16 +177,63 @@ CookieJarDB& NetworkStorageSession::cookieDatabase() const
      return m_cookieDatabase;
  }
  
@@ -88350,7 +88357,53 @@ index 20aff066ab01aa0fa12c7bf47741b0109d927eea..58ef7e8a37abb64ff6237d34452041a9
      auto cappedLifetime = clientSideCookieCap(RegistrableDomain { firstParty }, requiresScriptTrackingPrivacy, webPageProxyID);
      cookieDatabase().setCookie(firstParty, url, value, CookieJarDB::Source::Script, cappedLifetime);
  }
-@@ -153,9 +226,14 @@ HTTPCookieAcceptPolicy NetworkStorageSession::cookieAcceptPolicy() const
+ 
+-bool NetworkStorageSession::setCookieFromDOM(const URL&, const SameSiteInfo&, const URL&, std::optional<FrameIdentifier>, std::optional<WebPageProxyIdentifier>, ApplyTrackingPrevention, RequiresScriptTrackingPrivacy, const Cookie&, ShouldRelaxThirdPartyCookieBlocking, IsKnownCrossSiteTracker) const
++// The Cookie Store API (cookieStore.set and delete, Summit #147): the same
++// rules as document.cookie. WebCore has checked the name, domain and path
++// against the document's URL.
++bool NetworkStorageSession::setCookieFromDOM(const URL& firstParty, const SameSiteInfo& sameSiteInfo, const URL& url, [[maybe_unused]] std::optional<FrameIdentifier> frameID, std::optional<WebPageProxyIdentifier> webPageProxyID, [[maybe_unused]] ApplyTrackingPrevention applyTrackingPrevention, RequiresScriptTrackingPrivacy requiresScriptTrackingPrivacy, const Cookie& cookie, [[maybe_unused]] ShouldRelaxThirdPartyCookieBlocking shouldRelaxThirdPartyCookieBlocking, [[maybe_unused]] IsKnownCrossSiteTracker isKnownCrossSiteTracker) const
+ {
+-    // FIXME: Implement for the Cookie Store API.
++#if PLATFORM(HAIKU)
++    if (cookie.httpOnly)
++        return false;
++    if (!sameSiteInfo.isSameSite && cookie.sameSite != Cookie::SameSitePolicy::None)
++        return false;
++    if (cookie.partitionKey.isEmpty() && onlyPartitionedCookies(*this, firstParty, url, frameID, webPageProxyID, applyTrackingPrevention, shouldRelaxThirdPartyCookieBlocking, isKnownCrossSiteTracker))
++        return false;
++    // A script may not replace an HttpOnly cookie of the same name and path.
++    if (auto existing = cookieDatabase().searchCookies(firstParty, url, std::optional<bool> { true }, std::nullopt, std::nullopt)) {
++        for (const auto& other : *existing) {
++            if (other.name == cookie.name && other.path == cookie.path)
++                return false;
++        }
++    }
++    Cookie stored = cookie;
++    // Safari's cap on the lifetime of cookies that scripts set.
++    if (auto cappedLifetime = clientSideCookieCap(RegistrableDomain { firstParty }, requiresScriptTrackingPrivacy, webPageProxyID)) {
++        double cap = (WallTime::now() + *cappedLifetime).secondsSinceEpoch().milliseconds();
++        if (!stored.expires || *stored.expires > cap) {
++            stored.expires = cap;
++            stored.session = false;
++        }
++    }
++    if (stored.created <= 0)
++        stored.created = WallTime::now().secondsSinceEpoch().milliseconds();
++    return cookieDatabase().setCookie(stored);
++#else
++    UNUSED_PARAM(firstParty);
++    UNUSED_PARAM(sameSiteInfo);
++    UNUSED_PARAM(url);
++    UNUSED_PARAM(webPageProxyID);
++    UNUSED_PARAM(requiresScriptTrackingPrivacy);
++    UNUSED_PARAM(cookie);
+     return false;
++#endif
+ }
+ 
+ void NetworkStorageSession::setCookiesFromHTTPResponse(const URL& firstParty, const URL& url, const String& value) const
+@@ -153,15 +263,45 @@ HTTPCookieAcceptPolicy NetworkStorageSession::cookieAcceptPolicy() const
      return HTTPCookieAcceptPolicy::OnlyFromMainDocumentDomain;
  }
  
@@ -88366,8 +88419,41 @@ index 20aff066ab01aa0fa12c7bf47741b0109d927eea..58ef7e8a37abb64ff6237d34452041a9
 +#endif
  }
  
- std::optional<Vector<Cookie>> NetworkStorageSession::cookiesForDOMAsVector(const URL&, const SameSiteInfo&, const URL&, std::optional<FrameIdentifier>, std::optional<WebPageProxyIdentifier>, IncludeSecureCookies, ApplyTrackingPrevention, ShouldRelaxThirdPartyCookieBlocking, IsKnownCrossSiteTracker, CookieStoreGetOptions&&) const
-@@ -182,8 +260,7 @@ void NetworkStorageSession::setCookie(const Cookie& cookie, const URL&, const UR
+-std::optional<Vector<Cookie>> NetworkStorageSession::cookiesForDOMAsVector(const URL&, const SameSiteInfo&, const URL&, std::optional<FrameIdentifier>, std::optional<WebPageProxyIdentifier>, IncludeSecureCookies, ApplyTrackingPrevention, ShouldRelaxThirdPartyCookieBlocking, IsKnownCrossSiteTracker, CookieStoreGetOptions&&) const
++// cookieStore.get and getAll (Summit #147): what document.cookie would give,
++// as Cookie records.
++std::optional<Vector<Cookie>> NetworkStorageSession::cookiesForDOMAsVector(const URL& firstParty, const SameSiteInfo& sameSiteInfo, const URL& url, [[maybe_unused]] std::optional<FrameIdentifier> frameID, [[maybe_unused]] std::optional<WebPageProxyIdentifier> webPageProxyID, IncludeSecureCookies includeSecureCookies, [[maybe_unused]] ApplyTrackingPrevention applyTrackingPrevention, [[maybe_unused]] ShouldRelaxThirdPartyCookieBlocking shouldRelaxThirdPartyCookieBlocking, [[maybe_unused]] IsKnownCrossSiteTracker isKnownCrossSiteTracker, CookieStoreGetOptions&& options) const
+ {
+-    // FIXME: Implement for the Cookie Store API.
++#if PLATFORM(HAIKU)
++    bool partitionedOnly = onlyPartitionedCookies(*this, firstParty, url, frameID, webPageProxyID, applyTrackingPrevention, shouldRelaxThirdPartyCookieBlocking, isKnownCrossSiteTracker);
++    auto secure = includeSecureCookies == IncludeSecureCookies::Yes ? std::nullopt : std::optional<bool> { false };
++    auto found = cookieDatabase().searchCookies(firstParty, url, std::optional<bool> { false }, secure, std::nullopt);
++    Vector<Cookie> cookies;
++    if (!found)
++        return cookies;
++    for (auto& cookie : *found) {
++        if (!sameSiteAllowsCookie(cookie, sameSiteInfo))
++            continue;
++        if (partitionedOnly && cookie.partitionKey.isEmpty())
++            continue;
++        if (!options.name.isNull() && options.name != cookie.name)
++            continue;
++        cookies.append(WTF::move(cookie));
++    }
++    return cookies;
++#else
++    UNUSED_PARAM(firstParty);
++    UNUSED_PARAM(sameSiteInfo);
++    UNUSED_PARAM(url);
++    UNUSED_PARAM(includeSecureCookies);
++    UNUSED_PARAM(options);
+     return std::nullopt;
++#endif
+ }
+ 
+ void NetworkStorageSession::setCookies(const Vector<Cookie>& cookies, const URL&, const URL& /* mainDocumentURL */)
+@@ -182,8 +322,7 @@ void NetworkStorageSession::setCookie(const Cookie& cookie, const URL&, const UR
  
  void NetworkStorageSession::deleteCookie(const Cookie& cookie, CompletionHandler<void()>&& completionHandler)
  {
@@ -88377,7 +88463,7 @@ index 20aff066ab01aa0fa12c7bf47741b0109d927eea..58ef7e8a37abb64ff6237d34452041a9
      completionHandler();
  }
  
-@@ -199,9 +276,9 @@ void NetworkStorageSession::deleteAllCookies(CompletionHandler<void()>&& complet
+@@ -199,9 +338,9 @@ void NetworkStorageSession::deleteAllCookies(CompletionHandler<void()>&& complet
      completionHandler();
  }
  
@@ -88389,7 +88475,7 @@ index 20aff066ab01aa0fa12c7bf47741b0109d927eea..58ef7e8a37abb64ff6237d34452041a9
      completionHandler();
  }
  
-@@ -222,31 +299,59 @@ void NetworkStorageSession::getHostnamesWithCookies(HashSet<String>& hostnames)
+@@ -222,31 +361,59 @@ void NetworkStorageSession::getHostnamesWithCookies(HashSet<String>& hostnames)
      hostnames = cookieDatabase().allDomains();
  }
  
@@ -147442,10 +147528,10 @@ index 0000000000000000000000000000000000000000..c9a119d02f85b7c5ad8fe9153bfc9604
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/WebView.cpp b/Source/WebKit/UIProcess/haiku/WebView.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..ec4790f55ee1f6677a01b68a7e8bc78641e51215
+index 0000000000000000000000000000000000000000..d6049474901c39461533cd0a5d5d27a902e821e1
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/WebView.cpp
-@@ -0,0 +1,3532 @@
+@@ -0,0 +1,3538 @@
 +/*
 + * Copyright (C) 2013 Intel Corporation. All rights reserved.
 + *
@@ -149434,6 +149520,12 @@ index 0000000000000000000000000000000000000000..ec4790f55ee1f6677a01b68a7e8bc786
 +    configuration->preferences().setScopedCustomElementRegistryEnabled(true);
 +    configuration->preferences().setEnableElementCurrentCSSZoom(true);
 +    configuration->preferences().setCSSFontVariantEmojiEnabled(true);
++    // cookieStore (get, set, delete; Safari 18.4), on the curl cookie jar
++    // (NetworkStorageSessionCurl.cpp). No change events yet: they need the
++    // cookie change listener API (HAVE_COOKIE_CHANGE_LISTENER_API).
++    // SUMMIT_COOKIE_STORE=0 hides it.
++    if (const char* cookieStore = std::getenv("SUMMIT_COOKIE_STORE"); !cookieStore || std::strcmp(cookieStore, "0"))
++        configuration->preferences().setCookieStoreAPIEnabled(true);
 +#if ENABLE(MEDIA_SOURCE)
 +    configuration->preferences().setManagedMediaSourceEnabled(true);
 +#endif

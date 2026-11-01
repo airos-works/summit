@@ -84,3 +84,10 @@ Turned on in `UIProcess/haiku/WebView.cpp`: scoped custom element registries
 (`new CustomElementRegistry()`), `element.currentCSSZoom`, `font-variant-emoji`,
 `ManagedMediaSource`, WebRTC encoded transforms (`RTCRtpScriptTransform`).
 `canPlayType("audio/flac")` now answers like `audio/x-flac`.
+
+The Cookie Store API (`cookieStore.get`, `getAll`, `set`, `delete`) works on
+the curl cookie jar (`NetworkStorageSessionCurl.cpp`) with the same rules as
+`document.cookie`: SameSite, cross-site tracking prevention (#141), HttpOnly
+cookies can't be read or replaced, and Safari's cap on script cookies'
+lifetime. `change` events don't fire yet (they need WebKit's cookie change
+listener API for this port). `SUMMIT_COOKIE_STORE=0` hides it.
