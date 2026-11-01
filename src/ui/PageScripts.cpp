@@ -434,7 +434,10 @@ window.addEventListener('resize', leave, { passive: true });
 // into and where it is; the saved entries are shown in a native list, and
 // only the one the user chooses there comes back to the page, which fills
 // the form with it. Card numbers never reach a page the user did not
-// choose a card on.
+// choose a card on. Other text fields offer their form history the same
+// way (a chosen value fills that field only), and what the user typed into
+// a sent form's text fields is reported for it; typing in the field tells
+// the browser what to filter the list by.
 const char* const kAutoFillScript = R"js((() => {
 if (window.__summitAutoFill) return;
 window.__summitAutoFill = true;
@@ -549,6 +552,33 @@ const classify = (scope) => {
 };
 const scopeOf = (field) => field.form || document;
 const hasPassword = (scope) => scope !== document && !!scope.querySelector('input[type=password]');
+// Form history: what the user typed into a form's ordinary text fields,
+// remembered under the field's name (or id) and offered again under fields
+// of that name. Never a sign-in form's fields (passwords are the password
+// manager's), a field or form with autocomplete=off, card or one-time-code
+// fields, or fields that look like they take a secret.
+const historyTypes = ['text', 'search', 'email', 'tel', 'url', 'number'];
+const historyNever = /\b(cvc|cvv2?|csc|cid|security code|card verification|verification code|captcha|otp|one time (code|password)|pin|tan|password|passwort|passcode|passphrase|secret|ssn|social security)\b/;
+const formlessPassword = () => Array.from(document.querySelectorAll('input[type=password]')).some((field) => !field.form);
+// The name a field's values are kept under, or null. cards: the scope's
+// card fields (classify), which never count.
+const historyName = (field, cards) => {
+  if (!(field instanceof HTMLInputElement) || !historyTypes.includes(field.type)) return null;
+  const own = (field.getAttribute('autocomplete') || '').toLowerCase().trim();
+  if (own.split(/\s+/).some((word) => word === 'off' || word.startsWith('cc-') || word === 'one-time-code'
+    || word.endsWith('-password') || word === 'webauthn')) return null;
+  // The form's autocomplete=off covers its fields that say nothing.
+  if (!own && field.form && (field.form.getAttribute('autocomplete') || '').toLowerCase().trim() === 'off') return null;
+  const name = String(field.name || field.id || '').trim();
+  if (!name || name.length > 100) return null;
+  if (field.form ? hasPassword(field.form) : formlessPassword()) return null;
+  if (cards && cards.has(field)) return null;
+  if (historyNever.test(describe(field))) return null;
+  return name;
+};
+// Fields the user typed in (a page's own values are not the user's), and
+// those filled from the form history.
+const typed = new WeakSet();
 const tag = '__summitAutoFillFrame';
 // Where a child frame's content starts in this frame's viewport.
 const frameBox = (source) => {
@@ -685,25 +715,33 @@ const leave = () => {
   post({ type: 'leave' }).catch(() => {});
 };
 const offer = (field) => {
-  const own = keyOf(field);
-  if (!own || field.disabled || field.readOnly || !shown(field)) return;
+  if (!(eligible(field) || (field instanceof HTMLInputElement && historyTypes.includes(field.type)))) return;
+  if (field.disabled || field.readOnly || !shown(field)) return;
   const scope = scopeOf(field);
-  if (hasPassword(scope)) return;
-  const all = classify(scope);
-  const mine = all.find((item) => item.field === field);
-  if (!mine) return;
-  const card = cardKeys.has(mine.key);
-  const group = all.filter((item) => cardKeys.has(item.key) === card);
-  const keys = Array.from(new Set(group.map((item) => item.key)));
-  // A lone field that only looks like a name or a city is not a form to fill.
-  if (!mine.explicit && (card ? !keys.includes('ccNumber') : keys.length < 2)) return;
+  // An address or card form's field offers its entries; any other text
+  // field (and one of those, when nothing saved fits) its form history.
+  let kind = null, mine = null, group = [], keys = [], card = false;
+  if (keyOf(field) && !hasPassword(scope)) {
+    const all = classify(scope);
+    mine = all.find((item) => item.field === field);
+    if (mine) {
+      card = cardKeys.has(mine.key);
+      group = all.filter((item) => cardKeys.has(item.key) === card);
+      keys = Array.from(new Set(group.map((item) => item.key)));
+      // A lone field that only looks like a name or a city is not a form to fill.
+      if (mine.explicit || (card ? keys.includes('ccNumber') : keys.length >= 2)) kind = card ? 'card' : 'address';
+    }
+  }
+  const history = card ? null : historyName(field, null);
+  if (!kind && !history) return;
   const serial = ++offers;
   offered = field;
   offeredAt = Date.now();
   const rect = field.getBoundingClientRect();
   placeInPage().then((place) => {
     if (!place || !place.width || serial !== offers) return '';
-    return post({ type: 'field', kind: card ? 'card' : 'address', field: mine.key, keys,
+    return post({ type: 'field', kind: kind || 'history', field: mine ? mine.key : '', keys, history: history || '',
+      text: String(field.value || '').slice(0, 200),
       left: rect.left + place.x, top: rect.top + place.y, right: rect.right + place.x, bottom: rect.bottom + place.y,
       width: place.width });
   }).then((reply) => {
@@ -711,7 +749,11 @@ const offer = (field) => {
     let values = null;
     try { values = JSON.parse(reply); } catch (error) { return; }
     offered = null;
-    if (values && typeof values === 'object') fill(field, group, values);
+    if (!values || typeof values !== 'object') return;
+    // A remembered value: this field only.
+    if (typeof values.historyValue === 'string') {
+      if (setValue(field, values.historyValue)) typed.add(field);
+    } else fill(field, group, values);
   }).catch(() => {});
 };
 document.addEventListener('focusin', (event) => { if (event.target !== offered) offer(event.target); }, true);
@@ -724,7 +766,12 @@ document.addEventListener('keydown', (event) => {
     offer(event.target);
 }, true);
 document.addEventListener('focusout', (event) => { if (event.target === offered) leave(); }, true);
-document.addEventListener('input', (event) => { if (event.isTrusted && event.target === offered) leave(); }, true);
+// Typing filters the list, which stays open.
+document.addEventListener('input', (event) => {
+  if (!event.isTrusted || !event.target) return;
+  typed.add(event.target);
+  if (event.target === offered) post({ type: 'filter', text: String(offered.value || '').slice(0, 200) }).catch(() => {});
+}, true);
 // A field the page scrolls into view as it gets the focus keeps its list.
 window.addEventListener('scroll', () => { if (Date.now() - offeredAt > 400) leave(); }, { capture: true, passive: true });
 window.addEventListener('resize', leave, { passive: true });
@@ -744,7 +791,22 @@ let lastSent = '';
 const capture = (scope) => {
   if (!scope || !scope.querySelectorAll || hasPassword(scope)) return;
   const raw = {};
-  for (const { field, key } of classify(scope)) {
+  const recognised = classify(scope);
+  // What the user typed into the scope's other text fields, for the form
+  // history: only values they changed; the browser keeps none longer than
+  // 200 characters or that look like a card number either.
+  const history = [];
+  const cards = new Set(recognised.filter((item) => cardKeys.has(item.key)).map((item) => item.field));
+  for (const field of Array.from(scope.querySelectorAll('input')).slice(0, 300)) {
+    if ((scope === document && field.form) || !typed.has(field) || !shown(field)) continue;
+    const value = String(field.value || '').trim();
+    if (!value || value.length > 200 || value === String(field.defaultValue || '').trim()) continue;
+    const digits = value.replace(/[\s-]/g, '');
+    if (/^\d{12,19}$/.test(digits) && luhn(digits)) continue;
+    const name = historyName(field, cards);
+    if (name && history.length < 50) history.push([name, value]);
+  }
+  for (const { field, key } of recognised) {
     if (!shown(field) || raw[key]) continue;
     let value = '';
     if (field instanceof HTMLSelectElement) {
@@ -781,8 +843,8 @@ const capture = (scope) => {
     if (year >= 2000 && year < 2100) card.year = year;
   }
   const hasAddress = Object.keys(address).some((key) => address[key]);
-  if (!hasAddress && !card) return;
-  const message = { type: 'submit', address: hasAddress ? address : null, card };
+  if (!hasAddress && !card && !history.length) return;
+  const message = { type: 'submit', address: hasAddress ? address : null, card, history };
   const key = JSON.stringify(message);
   if (key === lastSent) return;
   lastSent = key;

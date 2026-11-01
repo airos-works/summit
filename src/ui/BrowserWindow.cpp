@@ -5529,7 +5529,8 @@ void BrowserWindow::MessageReceived(BMessage* message)
         case kExportBookmarks: ExportBookmarks(); break;
         case kExportBookmarksChosen: ExportBookmarksTo(*message); break;
         case kClearHistory: {
-            auto* alert = new BAlert("Clear History", "Remove every page from your history?\n\nBookmarks and open tabs are kept.",
+            auto* alert = new BAlert("Clear History", "Remove every page from your history, and what you typed in forms?\n\n"
+                "Bookmarks and open tabs are kept.",
                 "Cancel", "Clear History", nullptr, B_WIDTH_AS_USUAL, B_WARNING_ALERT);
             alert->SetShortcut(0, B_ESCAPE);
             alert->Go(new BInvoker(new BMessage(kClearHistoryReply), this));
@@ -5540,6 +5541,8 @@ void BrowserWindow::MessageReceived(BMessage* message)
 #endif
         case kClearHistoryReply:
             if (message->GetInt32("which", 0) != 1) break;
+            // Form history goes with it (#149), as Firefox's and Safari's do.
+            fShared->Forms().Clear(0);
             fShared->ClearHistory(BMessenger(this));
             fStatus->SetText("History cleared");
             break;

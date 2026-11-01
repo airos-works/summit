@@ -952,7 +952,11 @@ public:
 #endif
         if (message->what == summit::kClearHistoryRequest) {
             // A time range (Preferences › History and Data) forgets only its visits.
-            if (const int64 since = message->GetInt64("since", 0); since > 0) fShared->ForgetHistorySince(since, BMessenger());
+            const int64 since = message->GetInt64("since", 0);
+            // And what was typed in forms then (#149), first: the change
+            // announced below shows it in Preferences.
+            fShared->Forms().Clear(since);
+            if (since > 0) fShared->ForgetHistorySince(since, BMessenger());
             else fShared->ClearHistory(BMessenger());
             BMessage cleared(summit::kDataCleared);
             cleared.AddInt32("kind", summit::kClearHistoryRequest);
@@ -1011,6 +1015,12 @@ public:
             const char* site = nullptr;
             for (int32 i = 0; message->FindString("site", i, &site) == B_OK; ++i) sites.push_back(site);
             const int64 since = message->GetInt64("since", 0);
+            // Form history is site data too (#149): the chosen sites' values,
+            // or those typed in the time range.
+            if (message->what == summit::kClearSiteDataRequest) {
+                if (!sites.empty()) fShared->Forms().ForgetSites(sites);
+                else fShared->Forms().Clear(since);
+            }
             std::vector<std::string> visited;
             if (since > 0) {
                 const auto hosts = fShared->HostsVisitedSince(since);

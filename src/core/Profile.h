@@ -150,6 +150,10 @@ struct Profile {
     // the addresses here and the payment cards in the key store.
     bool autoFill = true;
     std::vector<AutoFillAddress> autoFillAddresses;
+    // Form history (#149): whether what the user types in forms' ordinary
+    // text fields is remembered and offered again (the values are kept in
+    // form-history.json beside this profile: FormHistory.h).
+    bool formHistory = true;
     // Spelling is checked while typing in pages (#66).
     bool spellChecking = true;
     // Media that start by themselves (#70): "allow", "block-audio" (only

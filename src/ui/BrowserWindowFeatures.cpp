@@ -171,8 +171,9 @@ void BrowserWindow::AddPageScripts(BWebKitView* view)
     view->AddScriptMessageHandler("summitPasskeys", BMessenger(this));
     view->AddUserScript(kPasskeyFieldScript, true, true);
     // AutoFill (#149): private windows fill from what was saved, but never
-    // save (BrowserWindowAutoFill.cpp).
-    if (fShared->Read([](const Profile& profile) { return profile.autoFill; })) {
+    // save (BrowserWindowAutoFill.cpp). The same script remembers and offers
+    // form history; each is turned off on its own there.
+    if (fShared->Read([](const Profile& profile) { return profile.autoFill || profile.formHistory; })) {
         view->AddScriptMessageHandler("summitAutoFill", BMessenger(this));
         view->AddUserScript(kAutoFillScript, true, true);
     }
@@ -1310,7 +1311,8 @@ void BrowserWindow::BrowsingDataCommand(const BMessage& message, uint64 identifi
         {"serviceWorkers", B_WEBKIT_DATA_SERVICE_WORKERS}, {"cacheStorage", B_WEBKIT_DATA_SERVICE_WORKERS},
     };
     if (method == "settings") {
-        // Summit keeps no form data; passwords are removed in Passwords only.
+        // Form data is the form history (#149); passwords are removed in
+        // Passwords only.
         nlohmann::json removable = nlohmann::json::object(), none = nlohmann::json::object();
         for (const char* type : {"appcache", "cache", "cacheStorage", "cookies", "downloads", "fileSystems", "formData", "history",
                  "indexedDB", "localStorage", "passwords", "pluginData", "serviceWorkers", "webSQL"}) {
@@ -1323,20 +1325,21 @@ void BrowserWindow::BrowsingDataCommand(const BMessage& message, uint64 identifi
     }
     if (method != "remove") { RespondToCommand(identifier, B_NOT_SUPPORTED); return; }
     BrowsingDataRequest request { identifier };
-    bool history = false, downloads = false;
+    bool history = false, downloads = false, formData = false;
     for (const auto& type : arguments.value("types", nlohmann::json::array())) {
         const std::string name = type.is_string() ? type.get<std::string>() : std::string();
         if (name == "passwords") { fail("Removing passwords is not supported; use Summit's Passwords."); return; }
         if (auto found = kSiteData.find(name); found != kSiteData.end()) request.types |= found->second;
         history |= name == "history";
         downloads |= name == "downloads";
+        formData |= name == "formData";
     }
     for (const auto& host : arguments.value("hosts", nlohmann::json::array()))
         if (host.is_string()) request.hosts.push_back(host);
     for (const auto& host : arguments.value("excludeHosts", nlohmann::json::array()))
         if (host.is_string()) request.excludeHosts.push_back(host);
     const bool filtered = !request.hosts.empty() || !request.excludeHosts.empty();
-    if (filtered && (history || downloads)) { fail("Origin filters only apply to cookies, caches and site storage."); return; }
+    if (filtered && (history || downloads || formData)) { fail("Origin filters only apply to cookies, caches and site storage."); return; }
     const int64 since = static_cast<int64>(arguments.value("since", 0.0) / 1000);
     // Storage keeps no times: what changed since then is that of the sites
     // visited since, so read them before the history goes.
@@ -1350,6 +1353,7 @@ void BrowserWindow::BrowsingDataCommand(const BMessage& message, uint64 identifi
         }
     }
     if (downloads) DownloadList::Default().ClearFinished(false);
+    if (formData) fShared->Forms().Clear(since);
     if (!request.types) { fWebKitContext->RespondToBrowserCommandWithData(identifier, B_OK, "null"); return; }
     const uint64 id = ++fNextBrowsingDataRequest;
     const uint32 types = request.types;

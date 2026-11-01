@@ -34,6 +34,7 @@ SharedProfile::SharedProfile(std::filesystem::path path) : fPath(std::move(path)
     if (!fLoadError.empty() && fWritable) ++fRevision;
     fSavedWindows = std::move(fProfile.windows);
     fProfile.windows.clear();
+    fForms = std::make_unique<FormHistory>(fPath.parent_path() / "form-history.json", fWritable);
 }
 
 SharedProfile::~SharedProfile()

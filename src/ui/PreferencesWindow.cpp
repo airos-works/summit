@@ -787,8 +787,9 @@ void PreferencesWindow::MessageReceived(BMessage* message)
             break;
         case clearHistory: {
             const std::string text = ClearSince() ? "Clear your history of " + ClearRangeText() + "?\n\nThe pages you visited "
-                "then are forgotten. Bookmarks and open tabs are kept." : std::string("Clear your history?\n\nEvery page you "
-                "have visited is forgotten, with the icons of sites you have not bookmarked. Bookmarks and open tabs are kept.");
+                "then are forgotten, and what you typed in forms then. Bookmarks and open tabs are kept." : std::string("Clear your "
+                "history?\n\nEvery page you have visited is forgotten, with the icons of sites you have not bookmarked and what "
+                "you typed in forms. Bookmarks and open tabs are kept.");
             auto* alert = new BAlert("Clear History", text.c_str(),
                 "Cancel", "Clear History", nullptr, B_WIDTH_AS_USUAL, B_WARNING_ALERT);
             alert->SetShortcut(0, B_ESCAPE);
@@ -813,9 +814,10 @@ void PreferencesWindow::MessageReceived(BMessage* message)
         }
         case clearSiteData: {
             const std::string text = ClearSince() ? "Clear the cookies and site data of " + ClearRangeText() + "?\n\nCookies "
-                "set then are deleted, and the data of the sites you visited then. You may be signed out of them. Extensions "
-                "keep their own data." : std::string("Clear cookies and site data?\n\nYou will be signed out of websites, and "
-                "the data they keep on this computer is deleted. Extensions keep their own data.");
+                "set then are deleted, the data of the sites you visited then, and what you typed in forms then. You may be signed "
+                "out of them. Extensions keep their own data." : std::string("Clear cookies and site data?\n\nYou will be signed "
+                "out of websites, and the data they keep on this computer is deleted, with what you typed in forms. Extensions "
+                "keep their own data.");
             auto* alert = new BAlert("Clear Cookies and Site Data", text.c_str(),
                 "Cancel", "Clear", nullptr, B_WIDTH_AS_USUAL, B_WARNING_ALERT);
             alert->SetShortcut(0, B_ESCAPE);

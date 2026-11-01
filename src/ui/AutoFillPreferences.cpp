@@ -2,6 +2,7 @@
 #include "AutoFillStore.h"
 #include "Messages.h"
 #include "SharedProfile.h"
+#include <Alert.h>
 #include <Button.h>
 #include <CheckBox.h>
 #include <interface/ColumnListView.h>
@@ -22,7 +23,8 @@ namespace summit {
 namespace {
 constexpr uint32 enabledToggled = 'afen', addressSelected = 'afas', addAddress = 'afaa', editAddress = 'afea',
     removeAddress = 'afra', cardSelected = 'afcs', addCard = 'afac', editCard = 'afec', removeCard = 'afrc',
-    cardsRead = 'afrd', cardsChanged = 'afcg', editorSaved = 'afes';
+    cardsRead = 'afrd', cardsChanged = 'afcg', editorSaved = 'afes', formHistoryToggled = 'afht',
+    clearFormHistory = 'afhc', clearFormHistoryConfirmed = 'afhy';
 
 BStringView* Title(const char* name, const char* text)
 {
@@ -146,6 +148,10 @@ AutoFillPreferences::AutoFillPreferences(std::shared_ptr<SharedProfile> profile)
     fEditCard = new BButton("edit-card", "Edit…", new BMessage(editCard));
     fRemoveCard = new BButton("remove-card", "Remove", new BMessage(removeCard));
     fCardStatus = Hint("cards-status", "");
+    fFormHistory = new BCheckBox("form-history-enabled", "Remember what I type in forms", new BMessage(formHistoryToggled));
+    fFormHistory->SetValue(fProfile && fProfile->Read([](const Profile& p) { return p.formHistory; }) ? B_CONTROL_ON : B_CONTROL_OFF);
+    fClearFormHistory = new BButton("clear-form-history", "Clear Form History…", new BMessage(clearFormHistory));
+    fFormHistoryStatus = Hint("form-history-status", "");
     BLayoutBuilder::Group<>(this)
         .SetInsets(18)
         .Add(Title("autofill-title", "AutoFill"))
@@ -178,6 +184,20 @@ AutoFillPreferences::AutoFillPreferences(std::shared_ptr<SharedProfile> profile)
                 .Add(fRemoveCard)
             .End()
         .End()
+        .AddStrut(6)
+        .Add(Title("form-history-title", "Form history"))
+        .AddGroup(B_VERTICAL, 6).SetInsets(12, 0, 0, 0)
+            .Add(fFormHistory)
+            .Add(Hint("form-history-hint", "Search boxes, names and other text fields of forms you send are offered again "
+                "under fields of the same name."))
+            .Add(Hint("form-history-hint2", "Never passwords, card numbers, fields that ask not to be, or anything in "
+                "private windows. Shift+Delete removes a suggestion."))
+            .AddGroup(B_HORIZONTAL, 8)
+                .Add(fClearFormHistory)
+                .Add(fFormHistoryStatus)
+                .AddGlue()
+            .End()
+        .End()
         .AddGlue();
 }
 
@@ -185,7 +205,8 @@ void AutoFillPreferences::AttachedToWindow()
 {
     BGroupView::AttachedToWindow();
     // The controls talk to this tab, not to the window.
-    for (const char* name : {"autofill-enabled", "edit-address", "remove-address", "add-address", "edit-card", "remove-card", "add-card"})
+    for (const char* name : {"autofill-enabled", "edit-address", "remove-address", "add-address", "edit-card", "remove-card", "add-card",
+             "form-history-enabled", "clear-form-history"})
         if (auto* control = dynamic_cast<BControl*>(FindView(name))) control->SetTarget(this);
     fAddresses->SetTarget(this);
     fCards->SetTarget(this);
@@ -193,6 +214,22 @@ void AutoFillPreferences::AttachedToWindow()
     if (fProfile) fProfile->AddListener(BMessenger(this));
     ShowAddresses();
     ShowCards();
+    ShowFormHistoryCount();
+}
+
+void AutoFillPreferences::ShowFormHistoryCount()
+{
+    // Read on first use: a file of at most a few hundred kilobytes.
+    const size_t count = fProfile ? fProfile->Forms().Count() : 0;
+    fFormHistoryStatus->SetText(count == 0 ? "Nothing remembered." : count == 1 ? "1 value remembered."
+        : (std::to_string(count) + " values remembered.").c_str());
+    fClearFormHistory->SetEnabled(count > 0);
+}
+
+void AutoFillPreferences::WindowActivated(bool active)
+{
+    BGroupView::WindowActivated(active);
+    if (active) ShowFormHistoryCount();
 }
 
 void AutoFillPreferences::DetachedFromWindow()
@@ -298,8 +335,33 @@ void AutoFillPreferences::MessageReceived(BMessage* message)
         });
         return;
     }
+    case formHistoryToggled: {
+        const bool enabled = fFormHistory->Value() == B_CONTROL_ON;
+        if (fProfile) fProfile->Change([&](Profile& profile) -> uint32 {
+            if (profile.formHistory == enabled) return 0;
+            profile.formHistory = enabled;
+            return SharedProfile::kSettingsChanged;
+        });
+        return;
+    }
+    case clearFormHistory: {
+        auto* alert = new BAlert("Clear Form History", "Clear your form history?\n\nWhat you typed in search boxes and "
+            "other fields of forms is forgotten. Saved addresses and cards are kept.", "Cancel", "Clear", nullptr,
+            B_WIDTH_AS_USUAL, B_WARNING_ALERT);
+        alert->SetShortcut(0, B_ESCAPE);
+        alert->Go(new BInvoker(new BMessage(clearFormHistoryConfirmed), this));
+        return;
+    }
+    case clearFormHistoryConfirmed:
+        if (message->GetInt32("which", 0) != 1 || !fProfile) return;
+        fProfile->Forms().Clear(0);
+        ShowFormHistoryCount();
+        fFormHistoryStatus->SetText("Form history cleared.");
+        return;
     case kProfileChanged:
         if (message->GetUInt32("changes", 0) & SharedProfile::kSettingsChanged) ShowAddresses();
+        // History cleared elsewhere (Clear History… clears the form history).
+        if (message->GetUInt32("changes", 0) & SharedProfile::kHistoryCleared) ShowFormHistoryCount();
         return;
     case addressSelected:
         fEditAddress->SetEnabled(!selectedAddress().empty());

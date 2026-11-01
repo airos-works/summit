@@ -1,10 +1,12 @@
 #pragma once
+#include "core/FormHistory.h"
 #include "core/Profile.h"
 #include <Messenger.h>
 #include <condition_variable>
 #include <filesystem>
 #include <functional>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <set>
 #include <string>
@@ -92,6 +94,9 @@ public:
     void ForgetHistorySince(int64_t since, const BMessenger& sender);
     // The hosts of the pages visited from since on.
     std::set<std::string> HostsVisitedSince(int64_t since) const;
+    // What was typed in forms (#149), in form-history.json beside the
+    // profile; it has its own lock and is saved on its own.
+    FormHistory& Forms() const { return *fForms; }
 
     // Each window publishes its tabs under its own key; windows are saved in
     // key order. A window closed while Summit keeps running is removed.
@@ -183,6 +188,7 @@ private:
     std::map<std::string, InstalledExtensionInfo> fInstalledExtensions;
     std::map<std::string, double> fPrivateZoom;
     bool fWritable = true;
+    std::unique_ptr<FormHistory> fForms;
     std::map<uint64, WindowSession> fSessions;
     std::vector<BMessenger> fListeners;
     uint64 fRevision = 1, fSavedRevision = 0;

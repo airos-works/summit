@@ -84,8 +84,11 @@ X399 because its window was not active there, with Adwaita's controls too
   that have something for that form: addresses as the focused field's value
   with the address or name below, cards as "Visa •••• 4242" with the name and
   expiry. The last row opens Preferences › AutoFill. A click, or Down/Up and
-  Return, fills the whole form; Escape closes the list, and typing in the
-  field closes it too. The list takes no focus: the field keeps it.
+  Return, fills the whole form; Escape closes the list. Typing in the field
+  filters the list to the entries whose value for that field starts with
+  what is typed (a card number without its spaces); it hides while nothing
+  fits and comes back as the typing is deleted. The list takes no focus: the
+  field keeps it.
 - After a form with a new address or card is sent, the notice bar offers to
   save it ("Save this address for AutoFill?", "Save the card Visa •••• 4242
   for AutoFill?", or Update for a known card with a new expiry or name).
@@ -149,8 +152,94 @@ without the switch the card list did not open. Preferences listed both kinds
 
 ### Not done
 
-- The list is not filtered by what is typed (typing closes it).
-- No previously typed values for other fields (Chrome's and Firefox's
-  per-field history).
 - Payment forms split over several frames (each card field in its own
   frame) are filled one frame at a time.
+
+## Form history (#149)
+
+Safari's "Other forms", Chrome's and Firefox's remembered entries.
+
+### What the user sees
+
+- Going into a text field (text, search, e-mail, telephone, URL or number)
+  that is not part of an address or card form lists, under it, what was
+  typed into fields of the same name in forms sent before: up to ten values,
+  those last used on this site first, then the most recently used. Typing
+  filters them (values that start with what is typed; one the field already
+  holds is left out), and the list hides while nothing fits. A click, or
+  Down/Up and Return, fills that field only. Shift+Delete on the highlighted
+  row forgets that value. An address field with no saved address that fits
+  offers its form history instead.
+- Never remembered: password fields and every field of a form with one (and
+  formless fields on a page with a formless password field), fields or forms
+  with `autocomplete=off`, card fields and `cc-*`, `one-time-code` and
+  `*-password` tokens, fields whose name, label or placeholder speaks of a
+  security code, PIN, password, passcode or similar, values longer than 200
+  characters or of several lines, anything that looks like a card number
+  (12-19 digits passing the Luhn check), values the user did not type (the
+  page's own, or unchanged defaults), and anything in private windows
+  (which still offer what was remembered, as they do saved addresses).
+- Preferences › AutoFill › Form history: "Remember what I type in forms"
+  (on by default; off stops both remembering and offering), how many values
+  are remembered, and Clear Form History…. Clear History… (History menu, or
+  Preferences › History and Data with a time range) also clears the form
+  history (of that range), and so does Clear Cookies and Site Data… (of the
+  range; removing chosen sites in the Site data list forgets the values last
+  used on them). An extension's `browsingData.remove` with `formData`
+  clears it too.
+
+### How it works
+
+- Keyed by field name across sites, as Chrome and Firefox do (the field's
+  `name`, else its `id`, trimmed and in lower case): a search box called `q`
+  or a field called `email` means the same on most sites, and the list is the
+  browser's own window, which a page cannot read; only the value chosen
+  reaches the page. The host each value was last used on is kept, to rank
+  that site's values first and to forget a site's values with its data.
+- `kAutoFillScript` (the same page script as AutoFill) marks the fields the
+  user typed in (trusted `input` events) and, when a form is sent (submit, a
+  click on a button, Return in a field), reports the eligible fields'
+  changed values with the address or card. The browser window
+  (`BrowserWindowAutoFill.cpp`) gives them, outside private windows, to
+  `FormHistory` (`src/core/FormHistory.cpp`), which checks the values again.
+- Focusing a field sends `kind: "history"` with the field's name (or the
+  address kind with it); typing sends `filter` messages with the field's
+  value and the window filters and updates the list in place (`afrw` to the
+  list window). The script's choice answer is `{"historyValue": ...}`, which
+  it sets into that field with `input` and `change` events.
+- Stored in the profile directory as `form-history.json`
+  (`{"version":1,"entries":[{field, value, host, first, last, uses}]}`), not
+  in profile.json. At most 50 values per field and 5000 in all; the least
+  recently used go first. Read on first use, written atomically on a thread
+  of its own half a second after a change, and when Summit quits.
+- The MCP `tabs` tool shows the open list as `autoFill` on the window:
+  `kind` (address, card or history), the `rows` shown, `selected`, what was
+  `typed`, and whether it `shown`.
+
+### Checked
+
+On the X399 (1 November 2026, a test page with a search form, a
+comment form with a name, a lone city and an `autocomplete=off` note, a form
+with `autocomplete=off`, a sign-in form, a payment-like form and an address
+form), driven by MCP click, `type_text` and `press_key`: sent forms
+remembered `q`, `author`, `city` and the gift message, but not the
+`autocomplete=off` field, the field of the `autocomplete=off` form, the
+sign-in form's user name or the card-number-like reference. After a reload
+(and after a restart) focusing the search field listed both remembered
+values; typing `k`, `itc`, `z` and Backspace showed 2, 1, none (hidden) and 1
+again; Down and Return filled only that field (one untrusted `input` event).
+Shift+Delete removed the highlighted value from the list and the file. The
+lone city field offered its value; the note, nick and user fields offered
+nothing. A private window offered the remembered values but sent forms
+there added nothing. With two saved addresses, typing `Ja`, then `x`, then
+Backspace in the first-name field showed Jane only, nothing, and Jane again,
+and Return filled the address form. Clear Cookies and Site Data with a time
+range removed only the values used in it, Clear History removed all (the
+Preferences count followed), the checkbox off stopped remembering, and
+Clear Form History… (after its alert) emptied the file.
+
+### Not done
+
+- Values are matched from their start only (Firefox also matches word
+  starts inside values).
+- Textareas are not remembered (neither browser does).

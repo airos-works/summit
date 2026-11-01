@@ -5,7 +5,10 @@
 // click; the chosen entry goes back to the page that asked, which fills its
 // form. A form sent with a new address or card offers to save it, except in
 // private windows. Addresses are in the profile, cards in the key store
-// (AutoFillStore.h), which is only ever asked on threads of its own.
+// (AutoFillStore.h), which is only ever asked on threads of its own. Other
+// text fields offer what was typed into fields of their name before (the
+// form history, FormHistory.h), which sent forms add to. Typing filters the
+// list instead of closing it.
 #include "BrowserWindow.h"
 #include "FeatureMessages.h"
 #include "Messages.h"
@@ -45,6 +48,26 @@ bool SecureForCards(const std::string& origin)
     for (const char* local : {"http://localhost", "http://127.0.0.1", "http://[::1]"})
         if (origin == local || origin.starts_with(std::string(local) + ":")) return true;
     return false;
+}
+
+// The host of an origin ("https://example.com:8443": example.com), which the
+// form history ranks and forgets values by.
+std::string HostOf(const std::string& origin)
+{
+    auto start = origin.find("://");
+    if (start == std::string::npos) return {};
+    std::string host = origin.substr(start + 3);
+    if (host.starts_with("[")) host = host.substr(0, host.find(']') + 1);
+    else host = host.substr(0, host.find_first_of(":/"));
+    std::transform(host.begin(), host.end(), host.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return host;
+}
+
+// For comparing what is typed with an entry: ASCII letters in lower case.
+std::string Folded(std::string text)
+{
+    std::transform(text.begin(), text.end(), text.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return text;
 }
 
 std::string Text(const json& object, const char* key)
@@ -136,36 +159,26 @@ public:
 
 // The list under the field. Like PasskeyAutofill it takes no focus: the
 // field keeps it, the window's arrow keys move the highlight here
-// (kAutoFillSelect), and a click sends kAutoFillChosen.
+// (kAutoFillSelect), typing replaces its rows (kAutoFillRows), and a click
+// sends kAutoFillChosen.
 class AutoFillList final : public BWindow {
 public:
-    AutoFillList(BRect field, uint64 serial, const std::vector<std::pair<std::string, std::string>>& rows, BMessenger target)
+    AutoFillList(BRect field, uint64 serial, const BMessage& rows, BMessenger target)
         : BWindow(BRect(field.LeftBottom(), field.LeftBottom() + BPoint(200, 40)), "AutoFill", B_BORDERED_WINDOW_LOOK,
             B_FLOATING_SUBSET_WINDOW_FEEL, B_AVOID_FOCUS | B_NOT_MOVABLE | B_NOT_RESIZABLE | B_NOT_ZOOMABLE
             | B_NOT_MINIMIZABLE | B_NOT_CLOSABLE | B_ASYNCHRONOUS_CONTROLS),
-          fSerial(serial), fTarget(target)
+          fField(field), fSerial(serial), fTarget(target)
     {
         fList = new AutoFillListView(Bounds());
-        for (const auto& [label, detail] : rows) fList->AddItem(new AutoFillItem(label, detail));
-        fList->AddItem(new AutoFillItem(kSettingsRow, {}));
         AddChild(fList);
-        float width = std::max(260.0f, field.Width()), height = 0;
-        for (int32 i = 0; i < fList->CountItems(); ++i) {
-            width = std::max(width, fList->ItemAt(i)->Width());
-            height += fList->ItemAt(i)->Height() + 1;
-        }
-        // Below the field, or above it when the screen ends first.
-        const BRect screen = BScreen(this).Frame();
-        width = std::min(width, screen.Width() / 2);
-        height = std::min(height, screen.Height() / 3);
-        ResizeTo(width, height);
-        float top = field.bottom + 2;
-        if (top + height > screen.bottom && field.top - height - 2 >= screen.top) top = field.top - height - 2;
-        MoveTo(std::clamp(field.left, screen.left, screen.right - width), std::clamp(top, screen.top, screen.bottom - height));
+        SetRows(rows);
     }
     void MessageReceived(BMessage* message) override
     {
         switch (message->what) {
+        case kAutoFillRows:
+            SetRows(*message);
+            return;
         case kListClicked:
             // A page can open the list where the user is about to click
             // (it says where its field is): a click that lands as the list
@@ -190,6 +203,27 @@ public:
     }
 
 private:
+    void SetRows(const BMessage& rows)
+    {
+        fList->DeselectAll();
+        for (int32 i = fList->CountItems() - 1; i >= 0; --i) delete fList->RemoveItem(i);
+        const char* label = nullptr;
+        for (int32 i = 0; rows.FindString("label", i, &label) == B_OK; ++i)
+            fList->AddItem(new AutoFillItem(label, rows.GetString("detail", i, "")));
+        float width = std::max(260.0f, fField.Width()), height = 0;
+        for (int32 i = 0; i < fList->CountItems(); ++i) {
+            width = std::max(width, fList->ItemAt(i)->Width());
+            height += fList->ItemAt(i)->Height() + 1;
+        }
+        // Below the field, or above it when the screen ends first.
+        const BRect screen = BScreen(this).Frame();
+        width = std::min(width, screen.Width() / 2);
+        height = std::min(height, screen.Height() / 3);
+        ResizeTo(width, height);
+        float top = fField.bottom + 2;
+        if (top + height > screen.bottom && fField.top - height - 2 >= screen.top) top = fField.top - height - 2;
+        MoveTo(std::clamp(fField.left, screen.left, screen.right - width), std::clamp(top, screen.top, screen.bottom - height));
+    }
     void Choose(int32 index)
     {
         if (fChosen || index < 0 || index >= fList->CountItems()) return;
@@ -199,6 +233,7 @@ private:
         chosen.AddInt32("index", index);
         fTarget.SendMessage(&chosen, static_cast<BHandler*>(nullptr), 0);
     }
+    BRect fField;
     BListView* fList = nullptr;
     uint64 fSerial;
     BMessenger fTarget;
@@ -222,6 +257,14 @@ void BrowserWindow::AutoFillScriptMessage(Tab& tab, const BMessage& message)
         if (fAutoFill && fAutoFill->tab == tab.id) CloseAutoFill();
         return;
     }
+    if (type == "filter") {
+        // Typing in the field: the list shows what still fits.
+        if (token) BWebKitView::ReplyToScriptMessage(token, "");
+        if (!fAutoFill || fAutoFill->tab != tab.id) return;
+        fAutoFill->text = Text(body, "text").substr(0, 200);
+        RefreshAutoFillList();
+        return;
+    }
     if (type == "field") {
         // The list of another field (or of the same one again) goes first.
         CloseAutoFill();
@@ -231,7 +274,7 @@ void BrowserWindow::AutoFillScriptMessage(Tab& tab, const BMessage& message)
         };
         const BRect field(number("left"), number("top"), number("right"), number("bottom"));
         const double width = number("width");
-        const std::string kind = Text(body, "kind"), focused = Text(body, "field");
+        const std::string kind = Text(body, "kind"), focused = Text(body, "field"), historyName = Text(body, "history");
         std::vector<std::string> keys;
         if (auto found = body.find("keys"); found != body.end() && found->is_array())
             for (const auto& key : *found) if (key.is_string() && keys.size() < 40) keys.push_back(key.get<std::string>());
@@ -239,12 +282,27 @@ void BrowserWindow::AutoFillScriptMessage(Tab& tab, const BMessage& message)
             if (token) BWebKitView::ReplyToScriptMessage(token, "");
             return;
         }
-        fAutoFill = AutoFillOffer { ++fAutoFillSerial, token, tab.id, {}, {}, -1, {} };
+        // Each is turned off on its own (Preferences › AutoFill); the page
+        // script runs while either is on.
+        const auto [autoFill, formHistory] = fShared->Read([](const Profile& profile) {
+            return std::pair(profile.autoFill, profile.formHistory);
+        });
+        fAutoFill.emplace();
+        fAutoFill->serial = ++fAutoFillSerial;
+        fAutoFill->token = token;
+        fAutoFill->tab = tab.id;
+        fAutoFill->field = field;
+        fAutoFill->width = width;
+        fAutoFill->text = Text(body, "text").substr(0, 200);
+        fAutoFill->kind = kind;
+        fAutoFill->cardNumber = kind == "card" && focused == "ccNumber";
         BMessage entries(kAutoFillCardsRead);
         entries.AddUInt64("serial", fAutoFill->serial);
-        entries.AddRect("field", field);
-        entries.AddDouble("width", width);
         if (kind == "card") {
+            if (!autoFill) {
+                CloseAutoFill();
+                return;
+            }
             if (!SecureForCards(origin)) {
                 CloseAutoFill();
                 tab.notice = "Summit fills in payment cards only on secure (https) pages.";
@@ -253,9 +311,13 @@ void BrowserWindow::AutoFillScriptMessage(Tab& tab, const BMessage& message)
                 return;
             }
             // The key store may wait for the user: read it on a thread.
-            std::thread([window = BMessenger(this), entries]() mutable {
+            std::thread([window = BMessenger(this), entries, focused]() mutable {
                 for (const auto& card : CardStore::Cards()) {
                     entries.AddString("label", MaskedCard(card).c_str());
+                    // Typing a name or number filters by it; other fields
+                    // (the expiry) show the cards only while empty.
+                    entries.AddString("match", focused == "ccNumber" ? card.number.c_str()
+                        : focused == "ccName" ? card.name.c_str() : "");
                     std::string detail = card.name;
                     if (const auto expiry = CardExpiry(card); !expiry.empty())
                         detail += (detail.empty() ? "Expires " : ", expires ") + expiry;
@@ -270,7 +332,8 @@ void BrowserWindow::AutoFillScriptMessage(Tab& tab, const BMessage& message)
             return;
         }
         // Addresses that have something for this form, most recent first.
-        const auto addresses = fShared->Read([](const Profile& profile) { return profile.autoFillAddresses; });
+        const auto addresses = kind == "address" && autoFill
+            ? fShared->Read([](const Profile& profile) { return profile.autoFillAddresses; }) : std::vector<AutoFillAddress>();
         for (auto address = addresses.rbegin(); address != addresses.rend(); ++address) {
             if (!std::any_of(keys.begin(), keys.end(), [&](const std::string& key) { return !AddressValueFor(*address, key).empty(); }))
                 continue;
@@ -284,6 +347,21 @@ void BrowserWindow::AutoFillScriptMessage(Tab& tab, const BMessage& message)
             entries.AddString("label", label.c_str());
             entries.AddString("detail", detail.c_str());
             entries.AddString("values", AddressValues(*address).dump().c_str());
+            entries.AddString("match", AddressValueFor(*address, focused).c_str());
+        }
+        // The values typed into fields of this name before (FormHistory.h):
+        // for any other text field, and for an address field when no saved
+        // address has anything for it. Private windows offer them too, as
+        // they do saved addresses; they only never add to them.
+        if (!entries.HasString("label") && !historyName.empty() && formHistory) {
+            for (const auto& value : fShared->Forms().Values(historyName, HostOf(origin))) {
+                entries.AddString("label", value.c_str());
+                entries.AddString("detail", "");
+                entries.AddString("values", json { {"historyValue", value} }.dump().c_str());
+                entries.AddString("match", value.c_str());
+            }
+            entries.AddString("history", historyName.c_str());
+            fAutoFill->kind = "history";
         }
         ShowAutoFillList(entries);
         return;
@@ -292,7 +370,25 @@ void BrowserWindow::AutoFillScriptMessage(Tab& tab, const BMessage& message)
     if (type != "submit" || fPrivate) return;
     // Private windows never save; nor do pages other than web pages and files.
     if (!origin.starts_with("https://") && !origin.starts_with("http://") && !origin.starts_with("file://")) return;
-    if (!fShared->Read([](const Profile& profile) { return profile.autoFill; })) return;
+    const auto [autoFill, formHistory] = fShared->Read([](const Profile& profile) {
+        return std::pair(profile.autoFill, profile.formHistory);
+    });
+    // What the user typed into the form's other text fields (the script
+    // leaves out passwords, autocomplete=off and card fields; FormHistory
+    // checks the values again).
+    if (auto found = body.find("history"); formHistory && found != body.end() && found->is_array()) {
+        std::vector<std::pair<std::string, std::string>> values;
+        for (const auto& pair : *found) {
+            if (!pair.is_array() || pair.size() != 2 || !pair[0].is_string() || !pair[1].is_string()) continue;
+            values.emplace_back(pair[0].get<std::string>().substr(0, 256), pair[1].get<std::string>().substr(0, 1024));
+            if (values.size() >= 50) break;
+        }
+        if (!values.empty()) {
+            fShared->Forms().Remember(HostOf(origin), values, std::time(nullptr));
+            std::fprintf(stderr, "Summit: form history noted %zu value%s\n", values.size(), values.size() == 1 ? "" : "s");
+        }
+    }
+    if (!autoFill) return;
     if (auto found = body.find("address"); found != body.end() && found->is_object()) {
         const auto address = AddressFromJSON(*found);
         const bool known = fShared->Read([&](const Profile& profile) {
@@ -341,18 +437,61 @@ void BrowserWindow::ShowAutoFillList(const BMessage& entries)
     // An offer that was closed (or replaced) while the key store was read.
     if (!fAutoFill || fAutoFill->serial != entries.GetUInt64("serial", 0)) return;
     const char* label = nullptr;
-    for (int32 i = 0; entries.FindString("label", i, &label) == B_OK; ++i) {
-        fAutoFill->rows.emplace_back(label, entries.GetString("detail", i, ""));
-        fAutoFill->values.emplace_back(entries.GetString("values", i, ""));
-    }
-    auto* tab = FindTabByID(fAutoFill->tab);
-    if (fAutoFill->rows.empty() || !tab || tab->id != fSelected || !tab->view) {
+    for (int32 i = 0; entries.FindString("label", i, &label) == B_OK; ++i)
+        fAutoFill->entries.push_back({label, entries.GetString("detail", i, ""), entries.GetString("values", i, ""),
+            entries.GetString("match", i, "")});
+    fAutoFill->history = entries.GetString("history", "");
+    // Nothing to offer, however the field is typed in.
+    if (fAutoFill->entries.empty()) {
         CloseAutoFill();
         return;
     }
+    RefreshAutoFillList();
+}
+
+void BrowserWindow::RefreshAutoFillList()
+{
+    if (!fAutoFill) return;
+    auto& offer = *fAutoFill;
+    std::string typed = offer.text;
+    if (offer.cardNumber) std::erase_if(typed, [](char c) { return c == ' ' || c == '-'; });
+    typed = Folded(typed);
+    // Entries that start with what the field holds, as Chrome and Firefox
+    // filter them. A remembered value the field already holds adds nothing;
+    // an entry with nothing for this field shows only while it is empty.
+    offer.shown.clear();
+    for (size_t i = 0; i < offer.entries.size(); ++i) {
+        const auto& entry = offer.entries[i];
+        if (!typed.empty() && !Folded(entry.match).starts_with(typed)) continue;
+        if (!offer.history.empty() && entry.match == offer.text) continue;
+        offer.shown.push_back(i);
+        // A short list: what is typed narrows it to the rest.
+        if (!offer.history.empty() && offer.shown.size() >= 10) break;
+    }
+    offer.selected = -1;
+    auto* tab = FindTabByID(offer.tab);
+    if (offer.shown.empty() || !tab || tab->id != fSelected || !tab->view) {
+        // Hidden while nothing fits; deleting what was typed brings it back.
+        if (offer.list.IsValid()) offer.list.SendMessage(B_QUIT_REQUESTED);
+        offer.list = BMessenger();
+        return;
+    }
+    BMessage rows(kAutoFillRows);
+    for (size_t index : offer.shown) {
+        rows.AddString("label", offer.entries[index].label.c_str());
+        rows.AddString("detail", offer.entries[index].detail.c_str());
+    }
+    if (offer.history.empty()) {
+        rows.AddString("label", kSettingsRow);
+        rows.AddString("detail", "");
+    }
+    if (offer.list.IsValid()) {
+        offer.list.SendMessage(&rows);
+        return;
+    }
     // CSS pixels to the view's: page zoom and the display's scale both.
-    BRect field = entries.FindRect("field");
-    const float scale = tab->view->Bounds().Width() / entries.GetDouble("width", 1);
+    BRect field = offer.field;
+    const float scale = tab->view->Bounds().Width() / offer.width;
     field = BRect(field.left * scale, field.top * scale, field.right * scale, field.bottom * scale);
     const BRect bounds = tab->view->Bounds();
     field.left = std::clamp(field.left, 0.0f, bounds.right);
@@ -360,21 +499,22 @@ void BrowserWindow::ShowAutoFillList(const BMessage& entries)
     field.top = std::clamp(field.top, 0.0f, bounds.bottom);
     field.bottom = std::clamp(field.bottom, field.top, bounds.bottom);
     field = tab->view->ConvertToScreen(field);
-    auto* list = new AutoFillList(field, fAutoFill->serial, fAutoFill->rows, BMessenger(this));
+    auto* list = new AutoFillList(field, offer.serial, rows, BMessenger(this));
     if (list->AddToSubset(this) != B_OK) {
         list->Quit();
         CloseAutoFill();
         return;
     }
-    fAutoFill->list = BMessenger(list);
-    std::fprintf(stderr, "Summit: AutoFill offers %zu entr%s\n", fAutoFill->rows.size(), fAutoFill->rows.size() == 1 ? "y" : "ies");
+    offer.list = BMessenger(list);
+    std::fprintf(stderr, "Summit: AutoFill offers %zu %s entr%s\n", offer.shown.size(), offer.kind.c_str(),
+        offer.shown.size() == 1 ? "y" : "ies");
     list->Show();
 }
 
 void BrowserWindow::AutoFillChosen(int32 index)
 {
     if (!fAutoFill || index < 0) return;
-    if (static_cast<size_t>(index) >= fAutoFill->values.size()) {
+    if (static_cast<size_t>(index) >= fAutoFill->shown.size()) {
         // The last row: Preferences › AutoFill.
         CloseAutoFill();
         BMessage show(kShowPreferences);
@@ -382,16 +522,17 @@ void BrowserWindow::AutoFillChosen(int32 index)
         be_app->PostMessage(&show);
         return;
     }
-    std::fprintf(stderr, "Summit: AutoFill entry %d chosen\n", static_cast<int>(index));
-    BWebKitView::ReplyToScriptMessage(fAutoFill->token, fAutoFill->values[index].c_str());
+    std::fprintf(stderr, "Summit: AutoFill %s entry %d chosen\n", fAutoFill->kind.c_str(), static_cast<int>(index));
+    BWebKitView::ReplyToScriptMessage(fAutoFill->token, fAutoFill->entries[fAutoFill->shown[index]].values.c_str());
     CloseAutoFill();
 }
 
 bool BrowserWindow::AutoFillKey(const BMessage& message)
 {
     if (!fAutoFill || !fAutoFill->list.IsValid()) return false;
-    if (message.GetInt32("modifiers", 0) & (B_COMMAND_KEY | B_CONTROL_KEY | B_OPTION_KEY)) return false;
-    const int32 count = static_cast<int32>(fAutoFill->rows.size()) + 1;
+    const int32 modifiers = message.GetInt32("modifiers", 0);
+    if (modifiers & (B_COMMAND_KEY | B_CONTROL_KEY | B_OPTION_KEY)) return false;
+    const int32 count = static_cast<int32>(fAutoFill->shown.size()) + (fAutoFill->history.empty() ? 1 : 0);
     auto select = [&](int32 index) {
         fAutoFill->selected = index;
         BMessage selected(kAutoFillSelect);
@@ -401,6 +542,22 @@ bool BrowserWindow::AutoFillKey(const BMessage& message)
     switch (message.GetString("bytes", "")[0]) {
     case B_DOWN_ARROW: select((fAutoFill->selected + 1) % count); return true;
     case B_UP_ARROW: select(fAutoFill->selected <= 0 ? count - 1 : fAutoFill->selected - 1); return true;
+    case B_DELETE: {
+        // Shift+Delete forgets the highlighted remembered value, as in
+        // Firefox and Chrome; otherwise Delete is the page's.
+        const int32 row = fAutoFill->selected;
+        if (!(modifiers & B_SHIFT_KEY) || fAutoFill->history.empty() || row < 0 || row >= static_cast<int32>(fAutoFill->shown.size()))
+            return false;
+        const size_t index = fAutoFill->shown[row];
+        fShared->Forms().Remove(fAutoFill->history, fAutoFill->entries[index].match);
+        std::fprintf(stderr, "Summit: form history value removed\n");
+        fAutoFill->entries.erase(fAutoFill->entries.begin() + index);
+        RefreshAutoFillList();
+        // The highlight stays on the row that took its place.
+        if (fAutoFill && fAutoFill->list.IsValid() && !fAutoFill->shown.empty())
+            select(std::min(row, static_cast<int32>(fAutoFill->shown.size()) - 1));
+        return true;
+    }
     case B_ENTER:
         if (fAutoFill->selected >= 0) {
             AutoFillChosen(fAutoFill->selected);
@@ -422,7 +579,10 @@ void BrowserWindow::CloseAutoFill()
     BWebKitView::ReplyToScriptMessage(fAutoFill->token, "");
     if (fAutoFill->list.IsValid()) fAutoFill->list.SendMessage(B_QUIT_REQUESTED);
     // The values may hold a card number: they go now, not with the next offer.
-    for (auto& values : fAutoFill->values) std::fill(values.begin(), values.end(), '\0');
+    for (auto& entry : fAutoFill->entries) {
+        std::fill(entry.values.begin(), entry.values.end(), '\0');
+        std::fill(entry.match.begin(), entry.match.end(), '\0');
+    }
     fAutoFill.reset();
 }
 

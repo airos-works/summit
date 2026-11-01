@@ -168,6 +168,15 @@ std::string BrowserWindow::McpRequest(const std::string& text)
         // The bar above the page (save a password or an AutoFill entry, a
         // blocked pop-up...), when it shows.
         if (fNoticeBar && !fNoticeBar->IsHidden(fNoticeBar) && !fNoticeBar->Text().empty()) window["noticeBar"] = fNoticeBar->Text();
+        // The AutoFill list under a field (#149): its kind and the rows it
+        // shows (cards masked), or none while typing has filtered them all.
+        if (fAutoFill) {
+            json rows = json::array();
+            if (fAutoFill->list.IsValid())
+                for (size_t index : fAutoFill->shown) rows.push_back(fAutoFill->entries[index].label);
+            window["autoFill"] = {{"kind", fAutoFill->kind}, {"rows", rows}, {"selected", fAutoFill->selected},
+                {"typed", fAutoFill->text}, {"shown", fAutoFill->list.IsValid()}};
+        }
         return window.dump();
     }
     if (action == "open") {

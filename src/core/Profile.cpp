@@ -272,6 +272,7 @@ Profile Profile::Load(const std::filesystem::path& path, std::string& error)
         if (auto never = j.find("passwordNever"); never != j.end() && never->is_array() && never->size() <= 10000)
             for (const auto& origin : *never) if (origin.is_string()) profile.passwordNever.insert(origin.get<std::string>());
         if (auto fill = j.find("autoFill"); fill != j.end() && fill->is_boolean()) profile.autoFill = *fill;
+        if (auto forms = j.find("formHistory"); forms != j.end() && forms->is_boolean()) profile.formHistory = *forms;
         if (auto addresses = j.find("autoFillAddresses"); addresses != j.end() && addresses->is_array() && addresses->size() <= 1000) {
             for (const auto& item : *addresses) {
                 if (!item.is_object()) continue;
@@ -647,7 +648,7 @@ bool Profile::Save(const std::filesystem::path& path, std::string& error, int64_
             {"minimumFontSize", minimumFontSize}, {"unloadWhenMemoryIsLow", unloadWhenMemoryIsLow}, {"overrideColors", overrideColors}, {"spellingLanguage", spellingLanguage}, {"restoreSession", restoreSession},
             {"savePasswords", savePasswords}, {"passwordNever", passwordNever}, {"spellChecking", spellChecking},
             {"preventCrossSiteTracking", preventCrossSiteTracking}, {"crossSiteCookieSites", crossSiteCookieSites},
-            {"autoFill", autoFill}, {"autoFillAddresses", [&] {
+            {"autoFill", autoFill}, {"formHistory", formHistory}, {"autoFillAddresses", [&] {
                 json addresses = json::array();
                 for (const auto& address : autoFillAddresses) {
                     json item = {{"id", address.id}, {"added", address.added}};

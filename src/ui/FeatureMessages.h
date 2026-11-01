@@ -162,6 +162,9 @@ constexpr uint32 kAutoFillSelect = 'afsl';
 constexpr uint32 kAutoFillCardChecked = 'afck';
 constexpr uint32 kAutoFillBarAnswer = 'afba';
 constexpr uint32 kAutoFillSaved = 'afsv';
+// To the list window: its rows now ("label" and "detail", repeated), as
+// typing filters them.
+constexpr uint32 kAutoFillRows = 'afrw';
 }
 namespace summit {
 // Reading List (#156, BrowserWindowReadingList.cpp). kAddToReadingList: the

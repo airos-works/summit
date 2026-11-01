@@ -8,6 +8,7 @@
 #include "core/Suggest.h"
 #include "core/DownloadText.h"
 #include "core/DownloadHistory.h"
+#include "core/FormHistory.h"
 #include "core/LoadError.h"
 #include "core/ProfileLock.h"
 #include "core/BrowserProfiles.h"
@@ -768,6 +769,34 @@ int main()
         CHECK(page.find("summit-reading-list:open?token=ab12&amp;id=" + first) != std::string::npos);
         CHECK(page.find("Saved Copy") != std::string::npos && page.find("2 unread") != std::string::npos);
         CHECK(ResolveAddress("summit:reading-list").url == "summit:reading-list");
+        }
+        {
+        // Form history (#149): what is kept, ranking, limits, removal, the file.
+        const auto file = std::filesystem::path(created) / "form-history.json";
+        {
+            FormHistory forms(file, true);
+            forms.Remember("a.example", {{"Q", " cats "}, {"cc", "4242 4242 4242 4242"}, {"long", std::string(201, 'x')},
+                {"", "x"}, {"lines", "a\nb"}}, 100);
+            CHECK(forms.Count() == 1);
+            forms.Remember("b.example", {{"q", "birds"}}, 200);
+            CHECK(forms.Values("q", "a.example") == std::vector<std::string>({"cats", "birds"}));
+            CHECK(forms.Values("q", "c.example") == std::vector<std::string>({"birds", "cats"}));
+            for (int i = 0; i < 60; ++i) forms.Remember("x.example", {{"f", "v" + std::to_string(i)}}, 300 + i);
+            const auto values = forms.Values("f", "");
+            CHECK(values.size() == FormHistory::kPerField && values.front() == "v59" && values.back() == "v10");
+            CHECK(forms.Remove("f", "v59") && !forms.Remove("f", "v59"));
+            CHECK(forms.ForgetSites({"other.example"}) == 0 && forms.ForgetSites({"b.example"}) == 1);
+            CHECK(forms.Clear(350) == 9);
+        }
+        {
+            FormHistory forms(file, true);
+            CHECK(forms.Count() == 41);
+            CHECK(forms.Clear(0) == 41);
+        }
+        FormHistory forms(file, true);
+        CHECK(forms.Count() == 0);
+        for (int i = 0; i < 5100; ++i) forms.Remember("x", {{"f" + std::to_string(i), "v"}}, i);
+        CHECK(forms.Count() == FormHistory::kTotal && forms.Values("f0", "").empty() && forms.Values("f5099", "").size() == 1);
     }
     std::filesystem::remove_all(created);
     std::cout << checks << " checks, " << failures << " failures\n";

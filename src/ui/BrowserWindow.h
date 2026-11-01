@@ -960,12 +960,17 @@ private:
     // A site's signal changed its passkeys (B_WEBKIT_PASSKEYS_CHANGED).
     void PasskeysChanged(const BMessage& message);
     // AutoFill (#149, BrowserWindowAutoFill.cpp): the page script's messages
-    // (kAutoFillScript), the native list of saved addresses or cards under
-    // the field, and the offer to save what a form sent.
+    // (kAutoFillScript), the native list of saved addresses or cards, or of
+    // the field's form history, under the field, filtered as the user types,
+    // and the offer to save what a form sent.
     void AutoFillScriptMessage(Tab& tab, const BMessage& message);
     void ShowAutoFillList(const BMessage& entries);
+    // Shows the entries that start with what the field holds (or hides the
+    // list when none does), opening the list or updating the one showing.
+    void RefreshAutoFillList();
     void AutoFillChosen(int32 index);
-    // Up, Down, Return and Escape while the list shows (DispatchMessage).
+    // Up, Down, Return and Escape while the list shows, and Shift+Delete on
+    // a remembered value (DispatchMessage).
     bool AutoFillKey(const BMessage& message);
     // Answers the page (an empty reply when nothing was chosen) and closes
     // the list.
@@ -976,11 +981,28 @@ private:
     struct AutoFillOffer {
         uint64 serial = 0, token = 0;
         int64 tab = 0;
-        // The entries' rows and the values each fills in (JSON).
-        std::vector<std::pair<std::string, std::string>> rows;
-        std::vector<std::string> values;
+        // Every entry the field may take: its row (label and detail), the
+        // values it fills in (JSON), and what typing filters it by (the
+        // focused field's value in it).
+        struct Entry {
+            std::string label, detail, values, match;
+        };
+        std::vector<Entry> entries;
+        // The entries the list shows, as typing filters them (indexes into
+        // entries), and the highlighted row.
+        std::vector<size_t> shown;
         int32 selected = -1;
         BMessenger list;
+        // The field in the page's CSS pixels and the page's width, to place
+        // the list; what it holds; "address", "card" or "history".
+        BRect field;
+        double width = 0;
+        std::string text, kind;
+        // The field's name when the entries are its form history (the list
+        // then has no AutoFill Settings row).
+        std::string history;
+        // Typing in a card number field: spaces and dashes do not count.
+        bool cardNumber = false;
     };
     std::optional<AutoFillOffer> fAutoFill;
     uint64 fAutoFillSerial = 0;
