@@ -579,6 +579,12 @@ const historyName = (field, cards) => {
 // Fields the user typed in (a page's own values are not the user's), and
 // those filled from the form history.
 const typed = new WeakSet();
+// Something typed since the last capture, and when the user last pressed a
+// key or the pointer: the script does its work only after the user's own
+// input, never for events a page or a benchmark dispatches (Speedometer's
+// TodoMVCs ran 2-3x slower while every Enter and click scanned the page).
+let typedSinceCapture = false;
+let userInputAt = 0;
 const tag = '__summitAutoFillFrame';
 // Where a child frame's content starts in this frame's viewport.
 const frameBox = (source) => {
@@ -715,6 +721,7 @@ const leave = () => {
   post({ type: 'leave' }).catch(() => {});
 };
 const offer = (field) => {
+  if (Date.now() - userInputAt > 1000) return;
   if (!(eligible(field) || (field instanceof HTMLInputElement && historyTypes.includes(field.type)))) return;
   if (field.disabled || field.readOnly || !shown(field)) return;
   const scope = scopeOf(field);
@@ -752,10 +759,14 @@ const offer = (field) => {
     if (!values || typeof values !== 'object') return;
     // A remembered value: this field only.
     if (typeof values.historyValue === 'string') {
-      if (setValue(field, values.historyValue)) typed.add(field);
+      if (setValue(field, values.historyValue)) { typed.add(field); typedSinceCapture = true; }
     } else fill(field, group, values);
   }).catch(() => {});
 };
+const noteUserInput = (event) => { if (event.isTrusted) userInputAt = Date.now(); };
+document.addEventListener('pointerdown', noteUserInput, true);
+document.addEventListener('mousedown', noteUserInput, true);
+document.addEventListener('keydown', noteUserInput, true);
 document.addEventListener('focusin', (event) => { if (event.target !== offered) offer(event.target); }, true);
 // Back into a field that has the focus already: the list again.
 document.addEventListener('mousedown', (event) => {
@@ -770,6 +781,7 @@ document.addEventListener('focusout', (event) => { if (event.target === offered)
 document.addEventListener('input', (event) => {
   if (!event.isTrusted || !event.target) return;
   typed.add(event.target);
+  typedSinceCapture = true;
   if (event.target === offered) post({ type: 'filter', text: String(offered.value || '').slice(0, 200) }).catch(() => {});
 }, true);
 // A field the page scrolls into view as it gets the focus keeps its list.
@@ -789,7 +801,9 @@ const luhn = (digits) => {
 };
 let lastSent = '';
 const capture = (scope) => {
+  if (!typedSinceCapture) return;
   if (!scope || !scope.querySelectorAll || hasPassword(scope)) return;
+  typedSinceCapture = false;
   const raw = {};
   const recognised = classify(scope);
   // What the user typed into the scope's other text fields, for the form
@@ -853,11 +867,12 @@ const capture = (scope) => {
 document.addEventListener('submit', (event) => capture(event.target), true);
 // Pages that send their forms with script: a click on a button, or Enter.
 document.addEventListener('click', (event) => {
+  if (!event.isTrusted || !typedSinceCapture) return;
   const button = event.target && event.target.closest && event.target.closest('button, input[type=submit], input[type=button], [role=button]');
   if (button) setTimeout(() => capture(button.form || document), 0);
 }, true);
 document.addEventListener('keydown', (event) => {
-  if (event.key === 'Enter' && event.target instanceof HTMLInputElement) capture(event.target.form || document);
+  if (event.isTrusted && typedSinceCapture && event.key === 'Enter' && event.target instanceof HTMLInputElement) capture(event.target.form || document);
 }, true);
 })();)js";
 }
