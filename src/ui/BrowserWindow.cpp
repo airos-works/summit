@@ -1781,6 +1781,7 @@ void BrowserWindow::SelectTab(int64 id, bool forClose)
         fAddress->SetText(DisplayURL(fTabs[i].ShownURL()).c_str());
 #if SUMMIT_MODERN_WEBKIT
         if (fTabs[i].errorView) ShowLoadErrorView(fTabs[i]);
+        ShowSafetyWarningCard(fTabs[i]);
 #endif
         RefreshInternalPage(fTabs[i]);
 #if SUMMIT_MODERN_WEBKIT
@@ -2162,6 +2163,7 @@ void BrowserWindow::FinishCloseTab(int64 id)
         CloseDeveloperTools(fTabs[i]);
         RemoveCrashView(fTabs[i]);
         RemoveLoadErrorView(fTabs[i], false);
+        RemoveSafetyWarning(fTabs[i], false);
         if (fPictureInPictureTab == id && fPictureInPicture.IsValid()) fPictureInPicture.SendMessage(B_QUIT_REQUESTED);
         delete webView;
 #else
@@ -3237,7 +3239,7 @@ void BrowserWindow::RefreshChrome()
             std::lock_guard lock(sWindowListLock);
             for (auto& entry : sWindowList) if (entry.key == fKey) entry.title = fPrivate ? tab->title + " (Private)" : tab->title;
         }
-        fBack->SetEnabled(tab->back || (tab->errorView && tab->errorBack)); fForward->SetEnabled(tab->forward);
+        fBack->SetEnabled(tab->back || (tab->errorView && tab->errorBack) || tab->safetyView); fForward->SetEnabled(tab->forward);
         fReload->SetIcon(tab->loading ? Icon::Stop : Icon::Reload);
         fProgress->SetProgress(tab->loading ? std::max(0.03f, tab->progress) : 0);
         // The Haiku look shows progress in the status bar, like WebPositive.
@@ -4614,6 +4616,10 @@ void BrowserWindow::NoteWindowIcon()
 
 void BrowserWindow::MessageReceived(BMessage* message)
 {
+#if SUMMIT_MODERN_WEBKIT
+    // Fraudulent and malicious website warnings (#150).
+    if (SafeBrowsingMessage(*message)) return;
+#endif
     auto* tab = ActiveTab();
     switch (message->what) {
         case B_GET_PROPERTY: {
@@ -4827,6 +4833,7 @@ void BrowserWindow::MessageReceived(BMessage* message)
 #if SUMMIT_MODERN_WEBKIT
             // From an error page to the page before it, which is still there.
             if (tab && tab->errorView && LeaveLoadErrorView(*tab)) break;
+            if (tab && tab->safetyView) { LeaveSafetyWarning(*tab); break; }
             if (!tab || !tab->back || !PrepareNavigation()) break;
 #endif
             if (tab) tab->view->GoBack();
@@ -6640,6 +6647,7 @@ void BrowserWindow::WebKitStateChanged(const BMessage& message)
         tab->view->GetBackForwardList(BMessenger(this), static_cast<uint64>(tab->id));
     }
     UpdateLoadErrorView(*tab);
+    UpdateSafetyWarning(*tab);
     if (tab->id == fSelected) {
         if (!fAddress->TextView()->IsFocus()) fAddress->SetText(DisplayURL(tab->ShownURL()).c_str());
         ShowTabStatus(*tab);

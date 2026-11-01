@@ -298,10 +298,22 @@ private:
         bool errorBack = false, errorOffline = false;
         // The load whose media document took over (#95), recorded in history once.
         uint64 mediaGeneration = 0;
+        // The warning shown in place of a page on a block list (#150,
+        // BrowserWindowSafeBrowsing.cpp): the view, the listed address, the
+        // list ("phishing", "malware"), its title, the load it is for and
+        // whether a page is behind it.
+        BView* safetyView = nullptr;
+        std::string safetyURL, safetyReason, safetyTitle;
+        uint64 safetyGeneration = 0;
+        bool safetyBack = false;
         // The address field shows the address that failed, except while
         // another load is on its way.
-        const std::string& ShownURL() const { return errorView && (errorGeneration == loadGeneration || !loading) ? errorURL : url; }
-        const std::string& ShownTitle() const { return errorView ? errorTitle : title; }
+        const std::string& ShownURL() const
+        {
+            if (safetyView) return safetyURL;
+            return errorView && (errorGeneration == loadGeneration || !loading) ? errorURL : url;
+        }
+        const std::string& ShownTitle() const { return safetyView ? safetyTitle : errorView ? errorTitle : title; }
         // The last pop-up the page tried to open without a click, and how
         // many (#73).
         std::string blockedPopup;
@@ -783,6 +795,20 @@ private:
     bool MediaTookOverLoad(Tab& tab, const BMessage& message, uint64 generation);
     std::unique_ptr<BMessageRunner> fNetworkCheck;
     bool fNetworkWasUp = false;
+    // Fraudulent and malicious website warnings (#150,
+    // BrowserWindowSafeBrowsing.cpp). The engine's B_WEBKIT_NAVIGATION_BLOCKED
+    // and the warning's buttons; false for other messages.
+    bool SafeBrowsingMessage(BMessage& message);
+    // After each state notification: with engines that do not check
+    // navigations, a listed page is stopped as it starts; the warning goes
+    // when another page shows.
+    void UpdateSafetyWarning(Tab& tab);
+    void ShowSafetyWarning(Tab& tab, const std::string& url, const std::string& reason);
+    void RemoveSafetyWarning(Tab& tab, bool focus = true);
+    // The tab's warning in front when the tab is selected.
+    void ShowSafetyWarningCard(Tab& tab);
+    // Go Back: the page before, or the home page when there was none.
+    void LeaveSafetyWarning(Tab& tab);
     // A notice for the whole window (a damaged profile was restored, #93),
     // shown in the notice bar until dismissed.
     std::string fWindowNotice;

@@ -7,6 +7,7 @@
 #endif
 #include "Messages.h"
 #include "McpService.h"
+#include "SafeBrowsingService.h"
 #include "core/Address.h"
 #include "core/Profile.h"
 #include "core/UserAgent.h"
@@ -409,6 +410,8 @@ PreferencesWindow::PreferencesWindow(BMessenger owner, const PreferencesState& s
         .End()
         .AddGlue();
     fTabs->AddTab(privacy);
+    // Fraudulent and malicious website warnings (#150).
+    fTabs->AddTab(new SecurityPreferences());
 #endif
     fTabs->AddTab(data);
     fTabs->AddTab(sites);
@@ -957,7 +960,8 @@ void PreferencesWindow::MessageReceived(BMessage* message)
                 const char* label = name == "browsing" ? "Browsing" : name == "data" ? "History and Data"
                     : name == "sites" ? "Site Permissions" : name == "links" ? "Link Handlers"
                     : name == "developer" ? "Developer" : name == "compatibility" ? "Compatibility"
-                    : name == "privacy" ? "Privacy" : name == "autofill" ? "AutoFill" : "General";
+                    : name == "privacy" ? "Privacy" : name == "autofill" ? "AutoFill"
+                    : name == "security" ? "Security" : "General";
                 for (int32 i = 0; i < fTabs->CountTabs(); ++i)
                     if (fTabs->TabAt(i) && fTabs->TabAt(i)->Label() && !std::strcmp(fTabs->TabAt(i)->Label(), label)) fTabs->Select(i);
             }

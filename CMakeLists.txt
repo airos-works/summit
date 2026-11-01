@@ -10,7 +10,8 @@ add_library(summit_cld2 STATIC ${SUMMIT_CLD2_SOURCES})
 add_library(summit_core src/core/Address.cpp src/core/Protocol.cpp src/core/HistoryVisits.cpp src/core/Profile.cpp src/core/Bookmarks.cpp src/core/BookmarkIO.cpp src/core/BookmarkKeywords.cpp src/core/BookmarkQueries.cpp src/core/ExtensionCatalog.cpp src/core/ExtensionIdentity.cpp src/core/ExtensionStore.cpp
     src/core/ExtensionShortcut.cpp src/core/ExtensionUpdate.cpp src/core/UserAgent.cpp
     src/core/ExtensionPackage.cpp src/core/StoreOffer.cpp src/core/DownloadText.cpp src/core/DownloadHistory.cpp src/core/Favicon.cpp src/core/InternalPages.cpp src/core/Zoom.cpp src/core/Suggest.cpp src/core/DevTools.cpp src/core/DevToolsFormat.cpp src/core/DevToolsElements.cpp src/core/PageSource.cpp
-    src/core/Mcp.cpp src/core/McpHttp.cpp src/core/McpInspector.cpp src/core/WebAppManifest.cpp src/core/UpdateCheck.cpp src/core/Spelling.cpp src/core/PageLanguage.cpp src/core/TranslationModels.cpp src/core/LoadError.cpp src/core/ProfileLock.cpp)
+    src/core/Mcp.cpp src/core/McpHttp.cpp src/core/McpInspector.cpp src/core/WebAppManifest.cpp src/core/UpdateCheck.cpp src/core/Spelling.cpp src/core/PageLanguage.cpp src/core/TranslationModels.cpp src/core/LoadError.cpp src/core/ProfileLock.cpp
+    src/core/SafeBrowsing.cpp)
 target_link_libraries(summit_core PUBLIC OpenSSL::Crypto ${CMAKE_DL_LIBS})
 target_link_libraries(summit_core PRIVATE summit_cld2)
 target_include_directories(summit_core PUBLIC src vendor)
@@ -71,6 +72,9 @@ find_package(Threads REQUIRED)
 add_executable(summit_mcp_tests tests/McpTests.cpp)
 target_link_libraries(summit_mcp_tests PRIVATE summit_core Threads::Threads)
 add_test(NAME summit_mcp COMMAND summit_mcp_tests)
+add_executable(summit_safe_browsing_tests tests/SafeBrowsingTests.cpp)
+target_link_libraries(summit_safe_browsing_tests PRIVATE summit_core)
+add_test(NAME summit_safe_browsing COMMAND summit_safe_browsing_tests)
 add_executable(summit_update_tests tests/UpdateCheckTests.cpp)
 target_link_libraries(summit_update_tests PRIVATE summit_core)
 add_test(NAME summit_update COMMAND summit_update_tests)
@@ -123,7 +127,8 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Haiku")
         src/ui/AddressSuggestions.cpp src/ui/SitePermissions.cpp src/ui/Location.cpp
         src/ui/SourceView.cpp src/ui/DevToolsWindow.cpp src/ui/DevToolsNetwork.cpp src/ui/DevToolsConsole.cpp src/ui/DevToolsStorage.cpp src/ui/DevToolsElements.cpp src/ui/DevToolsSources.cpp src/ui/DevToolsPerformance.cpp src/ui/PageSourceWindow.cpp
         src/ui/BrowserWindowMcp.cpp src/ui/McpService.cpp src/ui/McpLog.cpp src/ui/McpBrowserTools.cpp src/ui/McpSystemTools.cpp
-        src/ui/McpPageTools.cpp src/ui/McpEngineTools.cpp src/ui/McpDebugHelper.cpp src/ui/UpdateChecker.cpp)
+        src/ui/McpPageTools.cpp src/ui/McpEngineTools.cpp src/ui/McpDebugHelper.cpp src/ui/UpdateChecker.cpp
+        src/ui/SafeBrowsingService.cpp src/ui/BrowserWindowSafeBrowsing.cpp)
     target_include_directories(Summit PRIVATE ${SUMMIT_WEBKIT_INCLUDE_DIR} /boot/system/develop/headers/private/netservices)
     target_compile_options(Summit PRIVATE -Wno-multichar)
     target_compile_definitions(Summit PRIVATE SUMMIT_MODERN_WEBKIT=$<BOOL:${SUMMIT_MODERN_WEBKIT}>)

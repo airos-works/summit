@@ -29,6 +29,7 @@
 #include "ui/BookmarkImport.h"
 #include "ui/UpdateChecker.h"
 #include "ui/PageTranslation.h"
+#include "ui/SafeBrowsingService.h"
 #include <Mime.h>
 #include <nlohmann/json.hpp>
 #endif
@@ -250,6 +251,9 @@ public:
             StartupError("Could not open the WebKit profile: " + std::string(std::strerror(fWebKitContext->InitCheck())));
             return;
         }
+        // Fraudulent and malicious website warnings (#150): the block lists
+        // check navigations from the first page on.
+        summit::SafeBrowsingService::Shared().Start(fProfile / "SafeBrowsing");
         initialization = ListenForDownloads(fWebKitContext, false);
         if (initialization != B_OK) {
             StartupError("Could not initialize downloads: " + std::string(std::strerror(initialization)));
@@ -1216,6 +1220,7 @@ public:
                 SetPulseRate(100000);
                 return false;
             }
+            summit::SafeBrowsingService::Shared().Stop();
             SUMMIT_QUIT_TRACE("releasing the engine");
             fWebKitContext->SetContainerListener({});
             summit::Containers::Shared().Sync(nullptr);
