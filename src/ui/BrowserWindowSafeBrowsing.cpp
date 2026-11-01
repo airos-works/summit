@@ -230,7 +230,7 @@ void BrowserWindow::ShowSafetyWarning(Tab& tab, const std::string& url, const st
     tab.notice = text.title;
     tab.noticeUntil = B_INFINITE_TIMEOUT;
     if (tab.id == fSelected) {
-        fCards->SetVisibleItem(fCards->IndexOfView(view));
+        ShowCard(view);
         // Go Back has the focus (Return), unless the user is elsewhere; the
         // address entered stays in the field, to correct.
         if (hadFocus || !CurrentFocus() || CurrentFocus() == tab.view || CurrentFocus() == fAddress->TextView())
@@ -246,7 +246,7 @@ void BrowserWindow::RemoveSafetyWarning(Tab& tab, bool focus)
     if (!tab.safetyView) return;
     auto* view = static_cast<SafetyWarningView*>(tab.safetyView);
     if (tab.id == fSelected) {
-        fCards->SetVisibleItem(fCards->IndexOfView(tab.crashView ? tab.crashView : tab.errorView ? tab.errorView : tab.view));
+        ShowCard(tab.crashView ? tab.crashView : tab.errorView ? tab.errorView : tab.view);
         if (focus || view->HasFocus(CurrentFocus())) tab.view->MakeFocus();
     }
     tab.safetyView = nullptr;
@@ -264,7 +264,7 @@ void BrowserWindow::RemoveSafetyWarning(Tab& tab, bool focus)
 
 void BrowserWindow::ShowSafetyWarningCard(Tab& tab)
 {
-    if (tab.safetyView && tab.id == fSelected) fCards->SetVisibleItem(fCards->IndexOfView(tab.safetyView));
+    if (tab.safetyView && tab.id == fSelected) ShowCard(tab.safetyView);
 }
 
 void BrowserWindow::LeaveSafetyWarning(Tab& tab)

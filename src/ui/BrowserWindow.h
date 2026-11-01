@@ -540,6 +540,14 @@ private:
     bool fScrollBurstCompletionFrameStatsAvailable = false;
 #endif
     static status_t RunScrollBurst(void* burst);
+    // The frame the page area gives a card (a tab's page, its error or crash
+    // page), at least the page view's smallest size.
+    BRect PageCardFrame();
+    // Shows a card already at that frame. BCardLayout shows a card where it
+    // was last laid out and lays it out afterwards, and a tab that was never
+    // shown (unloaded, restored, opened behind) had its page drawn at 320x200
+    // in the window's corner first.
+    void ShowCard(BView* view);
     void SelectTab(int64 id, bool forClose = false);
     void CloseTab(int64 id);
 #if SUMMIT_MODERN_WEBKIT

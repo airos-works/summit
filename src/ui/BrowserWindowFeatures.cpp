@@ -452,13 +452,13 @@ void BrowserWindow::ShowCrashView(Tab& tab)
     if (tab.crashView) return;
     tab.crashView = new CrashView(tab.id, CrashTitle(tab.exitReason), DisplayURL(tab.url), tab.exitReason);
     fCards->AddView(tab.crashView);
-    if (tab.id == fSelected) fCards->SetVisibleItem(fCards->IndexOfView(tab.crashView));
+    if (tab.id == fSelected) ShowCard(tab.crashView);
 }
 
 void BrowserWindow::RemoveCrashView(Tab& tab)
 {
     if (!tab.crashView) return;
-    if (tab.id == fSelected) fCards->SetVisibleItem(fCards->IndexOfView(tab.view));
+    if (tab.id == fSelected) ShowCard(tab.view);
     tab.crashView->RemoveSelf();
     delete std::exchange(tab.crashView, nullptr);
 }

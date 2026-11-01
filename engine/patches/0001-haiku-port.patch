@@ -181212,7 +181212,7 @@ index 0000000000000000000000000000000000000000..abc82f6d26d2b1374740dc304282ae75
 +
 +}
 diff --git a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/AcceleratedSurface.cpp b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/AcceleratedSurface.cpp
-index 8177756a0e14111347846c912b8e3851f2559b4a..93b4b0ad208ff108f6484c6cb932e948c06202ef 100644
+index 8177756a0e14111347846c912b8e3851f2559b4a..48c2c741a3d028d337a0662ef408e35fb7b268e2 100644
 --- a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/AcceleratedSurface.cpp
 +++ b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/AcceleratedSurface.cpp
 @@ -26,6 +26,30 @@
@@ -182297,7 +182297,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..93b4b0ad208ff108f6484c6cb932e948
 +}
 +
 +void AcceleratedSurface::sendDeferredDirectFrameHaiku()
- {
++{
 +    if (!m_deferredDirectFrameHaiku)
 +        return;
 +    WebProcess::singleton().parentProcessConnection()->send(Messages::AcceleratedBackingStore::DirectFrame(std::exchange(m_deferredDirectFrameHaiku, 0)), surfaceID());
@@ -182305,7 +182305,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..93b4b0ad208ff108f6484c6cb932e948
 +}
 +
 +void AcceleratedSurface::redisplayDirect()
-+{
+ {
 +    if (m_redisplayHandlerHaiku)
 +        m_redisplayHandlerHaiku();
  }
@@ -183311,11 +183311,44 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..93b4b0ad208ff108f6484c6cb932e948
  }
  
  uint64_t AcceleratedSurface::window()
-@@ -1149,18 +2947,153 @@ void AcceleratedSurface::didRenderFrame(TargetContents targetContents)
+@@ -1116,6 +2914,16 @@ std::optional<SkColor> AcceleratedSurface::skiaClearColor(const OptionSet<WebCor
+     if (reasons.contains(CompositionReason::AsyncScrolling))
+         return backgroundColor ? SkColor(*backgroundColor) : SK_ColorWHITE;
+ 
++#if PLATFORM(HAIKU)
++    // The page's layers are drawn over the whole target, but until the page
++    // has painted (a tab that loads when it is selected, a new window) they
++    // leave parts of it out, and a new target's pixels are zero: the screen
++    // showed a black box there until the page painted, up to a second later.
++    // Fill a new target with the page's background first.
++    if (m_target && !m_target->hasContentsHaiku())
++        return backgroundColor ? SkColor(*backgroundColor) : SK_ColorWHITE;
++#endif
++
+     return std::nullopt;
+ }
+ 
+@@ -1129,7 +2937,12 @@ void AcceleratedSurface::clear(const OptionSet<WebCore::CompositionReason>& reas
+         return;
+     }
+ 
+-    if (reasons.contains(CompositionReason::AsyncScrolling)) {
++    bool clears = reasons.contains(CompositionReason::AsyncScrolling);
++#if PLATFORM(HAIKU)
++    // A new target's pixels are zero (black): see skiaClearColor().
++    clears = clears || (m_target && !m_target->hasContentsHaiku());
++#endif
++    if (clears) {
+         if (backgroundColor) {
+             auto [r, g, b, a] = backgroundColor->toResolvedColorComponentsInColorSpace(WebCore::ColorSpaceName::SRGB);
+             glClearColor(r, g, b, a);
+@@ -1149,18 +2962,155 @@ void AcceleratedSurface::didRenderFrame(TargetContents targetContents)
      if (!m_target)
          return;
  
 +#if PLATFORM(HAIKU)
++    if (targetContents == TargetContents::Valid)
++        m_target->setHasContentsHaiku();
 +    bigtime_t renderStart = PresentStageStatsHaiku::enabled() ? system_time() : 0;
 +    // Taken before didPresent() starts the target's next record. Only a frame
 +    // that recorded damage keeps the targets' records current: with damage
@@ -183465,7 +183498,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..93b4b0ad208ff108f6484c6cb932e948
      m_pendingFrameNotifyTargets.insert(0, { m_target, WTF::move(damageRects) });
      m_target = nullptr;
  }
-@@ -1182,13 +3115,17 @@ const std::optional<Damage>& AcceleratedSurface::renderTargetDamage()
+@@ -1182,13 +3132,17 @@ const std::optional<Damage>& AcceleratedSurface::renderTargetDamage()
  }
  #endif
  
@@ -183485,7 +183518,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..93b4b0ad208ff108f6484c6cb932e948
  #endif
  
 diff --git a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/AcceleratedSurface.h b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/AcceleratedSurface.h
-index 9c24ddab5df0f74f95b87ad7ac594ed2a9c237ab..1a82250cfa1cd5fb4d611fac802ec7fa1af78654 100644
+index 9c24ddab5df0f74f95b87ad7ac594ed2a9c237ab..9ec8b5a1efa5c7ca49ef24bd206ed55a4c996e1a 100644
 --- a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/AcceleratedSurface.h
 +++ b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/AcceleratedSurface.h
 @@ -27,10 +27,15 @@
@@ -183617,7 +183650,7 @@ index 9c24ddab5df0f74f95b87ad7ac594ed2a9c237ab..1a82250cfa1cd5fb4d611fac802ec7fa
  #endif
      void frameDone();
      void releaseUnusedBuffersTimerFired();
-@@ -195,6 +235,19 @@ private:
+@@ -195,6 +235,23 @@ private:
  
          virtual void sync(bool) { }
          virtual void setReleaseFenceFD(UnixFileDescriptor&&) { }
@@ -183633,16 +183666,21 @@ index 9c24ddab5df0f74f95b87ad7ac594ed2a9c237ab..1a82250cfa1cd5fb4d611fac802ec7fa
 +        // Copies the frame straight into the screen when the UI process has
 +        // given it a place there; true if it went, and then nothing is read back.
 +        virtual bool presentDirectlyHaiku(DirectPresenterHaiku*, const std::optional<WebCore::Damage>&) { return false; }
++        // False until a frame has been drawn into the target. Until then its
++        // pixels are zero, which the screen shows as black.
++        bool hasContentsHaiku() const { return m_hasContentsHaiku; }
++        void setHasContentsHaiku() { m_hasContentsHaiku = true; }
 +#endif
  
          SkSurface* skiaSurface() const { return m_skiaSurface.get(); }
  
-@@ -224,9 +277,12 @@ private:
+@@ -224,9 +281,13 @@ private:
          const CheckedRef<AcceleratedSurface> m_surface;
          WebCore::IntSize m_size;
          sk_sp<SkSurface> m_skiaSurface;
 +#if PLATFORM(HAIKU)
 +        RefPtr<WebCore::GLContextState> m_contextState;
++        bool m_hasContentsHaiku { false };
 +#endif
      };
  
@@ -183651,7 +183689,7 @@ index 9c24ddab5df0f74f95b87ad7ac594ed2a9c237ab..1a82250cfa1cd5fb4d611fac802ec7fa
      class RenderTargetShareableBuffer : public RenderTarget {
          WTF_MAKE_TZONE_ALLOCATED(RenderTargetShareableBuffer);
      public:
-@@ -317,15 +373,54 @@ private:
+@@ -317,15 +378,54 @@ private:
      public:
          static std::unique_ptr<RenderTarget> create(AcceleratedSurface&, const WebCore::IntSize&);
          RenderTargetSHMImage(AcceleratedSurface&, const WebCore::IntSize&, Ref<WebCore::ShareableBitmap>&&, WebCore::ShareableBitmapHandle&&);
@@ -183707,7 +183745,7 @@ index 9c24ddab5df0f74f95b87ad7ac594ed2a9c237ab..1a82250cfa1cd5fb4d611fac802ec7fa
      class RenderTargetTexture final : public RenderTargetShareableBuffer {
      public:
          static std::unique_ptr<RenderTarget> create(AcceleratedSurface&, const WebCore::IntSize&);
-@@ -337,7 +432,8 @@ private:
+@@ -337,7 +437,8 @@ private:
  
          const Ref<WebCore::BitmapTexture> m_texture;
      };
@@ -183717,7 +183755,7 @@ index 9c24ddab5df0f74f95b87ad7ac594ed2a9c237ab..1a82250cfa1cd5fb4d611fac802ec7fa
  
  #if USE(WPE_RENDERER)
      class RenderTargetWPEBackend final : public RenderTarget {
-@@ -364,7 +460,7 @@ private:
+@@ -364,7 +465,7 @@ private:
  
          enum class Type {
              Invalid,
@@ -183726,7 +183764,7 @@ index 9c24ddab5df0f74f95b87ad7ac594ed2a9c237ab..1a82250cfa1cd5fb4d611fac802ec7fa
  #if USE(GBM) || OS(ANDROID)
              EGLImage,
  #endif
-@@ -382,6 +478,10 @@ private:
+@@ -382,6 +483,10 @@ private:
          const WebCore::IntSize& size() const LIFETIME_BOUND { return m_size; }
          RenderTarget* nextTarget();
          void releaseTarget(uint64_t, UnixFileDescriptor&& releaseFence);
@@ -183737,7 +183775,7 @@ index 9c24ddab5df0f74f95b87ad7ac594ed2a9c237ab..1a82250cfa1cd5fb4d611fac802ec7fa
          void reset();
          void releaseUnusedBuffers();
  
-@@ -395,7 +495,7 @@ private:
+@@ -395,7 +500,7 @@ private:
          }
  #endif
  
@@ -183746,7 +183784,7 @@ index 9c24ddab5df0f74f95b87ad7ac594ed2a9c237ab..1a82250cfa1cd5fb4d611fac802ec7fa
          void setupBufferFormat();
  #endif
  
-@@ -416,7 +516,7 @@ private:
+@@ -416,7 +521,7 @@ private:
          Vector<std::unique_ptr<RenderTarget>, s_maximumBuffers> m_freeTargets;
          Vector<std::unique_ptr<RenderTarget>, s_maximumBuffers> m_lockedTargets;
          bool m_initialTargetsCreated { false };
@@ -183755,7 +183793,7 @@ index 9c24ddab5df0f74f95b87ad7ac594ed2a9c237ab..1a82250cfa1cd5fb4d611fac802ec7fa
          mutable Lock m_bufferFormatLock;
          BufferFormat m_bufferFormat WTF_GUARDED_BY_LOCK(m_bufferFormatLock);
          bool m_bufferFormatChanged WTF_GUARDED_BY_LOCK(m_bufferFormatLock) { false };
-@@ -478,10 +578,36 @@ private:
+@@ -478,10 +583,36 @@ private:
  
      const WeakRef<WebPage> m_webPage;
      Function<void()> m_frameCompleteHandler;

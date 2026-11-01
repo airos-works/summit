@@ -246,7 +246,7 @@ void BrowserWindow::ShowLoadErrorView(Tab& tab)
     }
     view->SetLoading(tab.loading);
     if (tab.id == fSelected) {
-        fCards->SetVisibleItem(fCards->IndexOfView(tab.errorView));
+        ShowCard(tab.errorView);
         // The address stays in the field, to correct or enter again.
         if (!fAddress->TextView()->IsFocus()) fAddress->SetText(DisplayURL(tab.ShownURL()).c_str());
         // Return now means Try Again, where it meant the page.
@@ -264,7 +264,7 @@ void BrowserWindow::RemoveLoadErrorView(Tab& tab, bool focus)
     if (!tab.errorView) return;
     auto* view = static_cast<LoadErrorView*>(tab.errorView);
     if (tab.id == fSelected) {
-        fCards->SetVisibleItem(fCards->IndexOfView(tab.crashView ? tab.crashView : tab.view));
+        ShowCard(tab.crashView ? tab.crashView : tab.view);
         if (focus || view->HasFocus(CurrentFocus())) tab.view->MakeFocus();
         if (!fAddress->TextView()->IsFocus()) fAddress->SetText(DisplayURL(tab.url).c_str());
     }

@@ -1518,16 +1518,16 @@ void BrowserWindow::CreateTab(const std::string& input, bool select, BWebView* a
     if (extensionPage) {
         if (!*extensionIdentifier) { fail("This extension is not available."); return; }
         status_t status;
-        webView = fWebKitContext->CreateExtensionView(BRect(0, 0, 319, 199), "web-page", extensionIdentifier, BMessenger(this), &status);
+        webView = fWebKitContext->CreateExtensionView(PageCardFrame(), "web-page", extensionIdentifier, BMessenger(this), &status);
         if (!webView) { fail("Could not open the extension page: " + std::string(std::strerror(status))); return; }
     } else {
         const char* frameStats = std::getenv("SUMMIT_UI_FRAME_STATS");
         if (newPage)
-            webView = new BWebKitView(BRect(0, 0, 319, 199), "web-page", BMessenger(this), newPage, B_FOLLOW_ALL, context);
+            webView = new BWebKitView(PageCardFrame(), "web-page", BMessenger(this), newPage, B_FOLLOW_ALL, context);
         else if (frameStats && (std::strcmp(frameStats, "1") == 0 || std::strcmp(frameStats, "2") == 0))
-            webView = new FrameStatsWebKitView(BRect(0, 0, 319, 199), "web-page", BMessenger(this), B_FOLLOW_ALL, context);
+            webView = new FrameStatsWebKitView(PageCardFrame(), "web-page", BMessenger(this), B_FOLLOW_ALL, context);
         else
-            webView = new BWebKitView(BRect(0, 0, 319, 199), "web-page", BMessenger(this), B_FOLLOW_ALL, context);
+            webView = new BWebKitView(PageCardFrame(), "web-page", BMessenger(this), B_FOLLOW_ALL, context);
     }
     if (webView->InitCheck() != B_OK) {
         const status_t status = webView->InitCheck();
@@ -1588,7 +1588,7 @@ void BrowserWindow::CreateTab(const std::string& input, bool select, BWebView* a
     else if (auto* active = ActiveTab()) {
         // Inserting before the visible card shifts its index.
         for (size_t i = 0; i < fTabs.size(); ++i)
-            if (fTabs[i].id == active->id) fCards->SetVisibleItem(fCards->IndexOfView(fTabs[i].view));
+            if (fTabs[i].id == active->id) ShowCard(fTabs[i].view);
     }
 #else
     fCards->AddView(webView);
@@ -1615,6 +1615,31 @@ void BrowserWindow::CreateTab(const std::string& input, bool select, BWebView* a
     }
 #endif
 }
+BRect BrowserWindow::PageCardFrame()
+{
+    const BSize smallest = fPopup ? BSize(160, 100) : BSize(320, 200);
+    BRect frame = fCards->LayoutArea();
+    if (!frame.IsValid()) frame = BRect(0, 0, 0, 0);
+    frame.right = std::max(frame.right, frame.left + smallest.width - 1);
+    frame.bottom = std::max(frame.bottom, frame.top + smallest.height - 1);
+    return frame;
+}
+
+void BrowserWindow::ShowCard(BView* view)
+{
+    const int32 index = view ? fCards->IndexOfView(view) : -1;
+    if (index < 0) return;
+    if (fCards->ItemAt(index) != fCards->VisibleItem()) {
+        // Moved and sized while still hidden, the page has its size before
+        // the engine learns that it is shown. The layout that follows keeps
+        // it (or makes it the responsive design size).
+        const BRect frame = PageCardFrame();
+        if (view->Frame().LeftTop() != frame.LeftTop()) view->MoveTo(frame.LeftTop());
+        if (view->Frame().Size() != frame.Size()) view->ResizeTo(frame.Size());
+    }
+    fCards->SetVisibleItem(index);
+}
+
 #if SUMMIT_MODERN_WEBKIT
 void BrowserWindow::AttachPageView(Tab& tab, BWebKitView* webView, bool extensionPage)
 {
@@ -1685,7 +1710,7 @@ std::string BrowserWindow::DiscardTab(int64 id)
         return "The tab is busy.";
     auto context = ContainerContext(tab->container);
     if (!context) return "The tab's container is gone.";
-    auto* webView = new BWebKitView(BRect(0, 0, 319, 199), "web-page", BMessenger(this), B_FOLLOW_ALL, context);
+    auto* webView = new BWebKitView(PageCardFrame(), "web-page", BMessenger(this), B_FOLLOW_ALL, context);
     if (webView->InitCheck() != B_OK) {
         delete webView;
         return "Could not create the unloaded page.";
@@ -1715,7 +1740,7 @@ std::string BrowserWindow::DiscardTab(int64 id)
     tab->connectionCertificate.MakeEmpty();
     tab->softwareRendering = false;
     fWebKitContext->SetBrowserTabDiscarded(webView, true, tab->url.c_str(), tab->title.c_str());
-    if (auto* active = ActiveTab()) fCards->SetVisibleItem(fCards->IndexOfView(active->view));
+    if (auto* active = ActiveTab()) ShowCard(active->view);
     SyncBrowserWindow();
     RefreshChrome();
     return { };
@@ -1799,12 +1824,12 @@ void BrowserWindow::SelectTab(int64 id, bool forClose)
         fSelected = id;
         // Tabs can be reordered (tabs.move) without moving their views, so
         // find the tab's own card rather than assuming the same position.
-        fCards->SetVisibleItem(fCards->IndexOfView(fTabs[i].view));
+        ShowCard(fTabs[i].view);
 #if SUMMIT_MODERN_WEBKIT
         // A page whose process ended while the tab was behind loads again;
         // the one that ended in front says what happened.
         if (fTabs[i].processExited && fTabs[i].exitedInBackground && !fRestoringSession) ReloadCrashedTab(fTabs[i]);
-        else if (fTabs[i].crashView) fCards->SetVisibleItem(fCards->IndexOfView(fTabs[i].crashView));
+        else if (fTabs[i].crashView) ShowCard(fTabs[i].crashView);
 #endif
 #if !SUMMIT_MODERN_WEBKIT
         SetCurrentWebView(fTabs[i].view);
