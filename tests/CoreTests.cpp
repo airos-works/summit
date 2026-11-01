@@ -55,6 +55,9 @@ int main()
     CHECK(FormatTimeLeft(7200) == "2 hours left");
     CHECK(FormatTimeLeft(-1).empty());
     CHECK(DownloadFraction(5, 10) == 0.5 && DownloadFraction(5, -1) == -1 && DownloadFraction(20, 10) == 1);
+    CHECK(IsConnectionFailure("CurlErrorDomain", 28) && IsConnectionFailure("CurlErrorDomain", 56) && IsConnectionFailure("CurlErrorDomain", 7));
+    CHECK(!IsConnectionFailure("CurlErrorDomain", 23) && !IsConnectionFailure("CurlErrorDomain", 22) && !IsConnectionFailure("HaikuDownload", 28));
+    CHECK(DownloadRetryDelay(0) == 2 && DownloadRetryDelay(6) == 120 && DownloadRetryDelay(7) == -1);
     {
         DownloadStatus status;
         CHECK(DownloadStatusText(status) == "Starting…");
@@ -72,6 +75,10 @@ int main()
         status.state = DownloadStatus::State::Failed;
         status.error = "Connection reset";
         CHECK(DownloadStatusText(status) == "Failed — Connection reset");
+        status.reconnecting = true;
+        status.expected = 15 * 1024 * 1024;
+        CHECK(DownloadStatusText(status) == "Connection lost, reconnecting — 3.0 of 15.0 MiB");
+        status.reconnecting = false;
         status.state = DownloadStatus::State::Cancelled;
         CHECK(DownloadStatusText(status) == "Cancelled");
         status = DownloadStatus();

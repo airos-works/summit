@@ -64,6 +64,7 @@ DownloadStatus DownloadList::Entry::Status() const
     status.interrupted = interrupted;
     status.resumable = CanResume() || !received;
     status.restarted = restarted;
+    status.reconnecting = reconnecting && state == DownloadStatus::State::Failed;
     return status;
 }
 
@@ -123,7 +124,7 @@ std::optional<DownloadList::HistoryChange> DownloadList::Update(const BMessage& 
                 entry->engine = engine;
                 entry->state = DownloadStatus::State::Active;
                 entry->error.clear();
-                entry->interrupted = entry->partial = entry->restarted = entry->unseen = false;
+                entry->interrupted = entry->partial = entry->restarted = entry->unseen = entry->reconnecting = false;
                 entry->rate = 0;
                 entry->sampleTime = 0;
                 entry->finished = 0;
@@ -179,7 +180,9 @@ std::optional<DownloadList::HistoryChange> DownloadList::Update(const BMessage& 
         if (message.GetBool("restarted", false)) entry->restarted = true;
         const bigtime_t now = system_time();
         const uint64 received = message.GetUInt64("current_size", entry->received);
-        entry->expected = message.GetInt64("expected_size", entry->expected);
+        // A try to continue it that got no answer does not know the size
+        // (-1); the one known so far stays.
+        if (const int64 expected = message.GetInt64("expected_size", -1); expected >= 0 || !entry->received) entry->expected = expected;
         if (!entry->sampleTime || received < entry->sampleBytes) {
             entry->sampleTime = now;
             entry->sampleBytes = received;
@@ -203,6 +206,7 @@ std::optional<DownloadList::HistoryChange> DownloadList::Update(const BMessage& 
                 unlink(entry->path.c_str());
                 entry->partial = false;
             }
+            entry->reconnecting = false;
             entry->lastEngine = std::exchange(entry->engine, 0);
             entry->finished = std::time(nullptr);
             entry->rate = 0;
@@ -238,6 +242,32 @@ std::optional<DownloadList::Entry> DownloadList::Find(uint64 identifier) const
     return std::nullopt;
 }
 
+std::optional<DownloadList::Entry> DownloadList::FindByEngine(uint64 engine) const
+{
+    std::lock_guard lock(fMutex);
+    if (!engine) return std::nullopt;
+    for (const auto& entry : fEntries)
+        if (entry.engine == engine || (!entry.engine && entry.lastEngine == engine)) return entry;
+    return std::nullopt;
+}
+
+void DownloadList::SetReconnecting(uint64 identifier, bool reconnecting)
+{
+    bool changed = false;
+    {
+        std::lock_guard lock(fMutex);
+        for (auto& entry : fEntries) {
+            if (entry.identifier != identifier || entry.state != DownloadStatus::State::Failed || entry.reconnecting == reconnecting) continue;
+            entry.reconnecting = reconnecting;
+            // A failure the browser gets over by itself is no news; one it
+            // gave up on is.
+            entry.unseen = !reconnecting;
+            changed = true;
+        }
+    }
+    if (changed) Announce();
+}
+
 DownloadList::Summary DownloadList::Summarize(bool privateBrowsing) const
 {
     std::lock_guard lock(fMutex);
@@ -246,7 +276,8 @@ DownloadList::Summary DownloadList::Summarize(bool privateBrowsing) const
     bool sized = true;
     for (const auto& entry : fEntries) {
         if (entry.privateBrowsing != privateBrowsing) continue;
-        if (entry.state == DownloadStatus::State::Active) {
+        // One that lost its connection still counts: it goes on shortly.
+        if (entry.state == DownloadStatus::State::Active || (entry.state == DownloadStatus::State::Failed && entry.reconnecting)) {
             ++summary.active;
             received += entry.received;
             if (entry.expected > 0) expected += uint64(entry.expected);
@@ -270,7 +301,7 @@ void DownloadList::Resumed(uint64 identifier, uint64 engine)
             entry.engine = engine;
             entry.state = DownloadStatus::State::Active;
             entry.error.clear();
-            entry.interrupted = entry.partial = entry.restarted = entry.unseen = false;
+            entry.interrupted = entry.partial = entry.restarted = entry.unseen = entry.reconnecting = false;
             entry.rate = 0;
             entry.sampleTime = 0;
             entry.finished = 0;
@@ -290,7 +321,7 @@ void DownloadList::ResumeFailed(uint64 identifier, const std::string& error)
             if (entry.identifier != identifier || entry.state == DownloadStatus::State::Active) continue;
             entry.state = DownloadStatus::State::Failed;
             entry.error = error;
-            entry.interrupted = false;
+            entry.interrupted = entry.reconnecting = false;
             save = !entry.privateBrowsing;
         }
     }

@@ -42,6 +42,7 @@
 #include <File.h>
 #include <Resources.h>
 #include <Invoker.h>
+#include <MessageRunner.h>
 #include <FindDirectory.h>
 #include <Path.h>
 #include <Roster.h>
@@ -83,6 +84,8 @@ static constexpr const char* kRestoreSessionArgument = "--restore-session";
 static constexpr const char* kExtensionNotificationClickArgument = "--summit-extension-notification-click";
 static constexpr uint32 kExtensionNotificationChoice = 'senc';
 static constexpr uint32 kReleaseDownloadContexts = 'srdc';
+// A download that lost its connection is continued (DownloadRetry).
+static constexpr uint32 kRetryDownload = 'srdr';
 
 class SummitApp : public BApplication {
 public:
@@ -399,6 +402,17 @@ public:
         if (summit::HandleTranslationContextMessage(message)) return;
         if (message->what == kReleaseDownloadContexts) {
             ReleaseRetiredPrivateContexts();
+            return;
+        }
+        if (message->what == kRetryDownload) {
+            const uint64 identifier = message->GetUInt64("identifier", 0);
+            const auto entry = summit::DownloadList::Default().Find(identifier);
+            // Unless it was resumed, paused, cancelled or removed meanwhile.
+            if (entry && entry->state == summit::DownloadStatus::State::Failed && entry->reconnecting) {
+                fprintf(stderr, "Summit: continuing download %llu (%s) from %llu bytes, try %u\n", (unsigned long long)identifier,
+                    entry->filename.c_str(), (unsigned long long)entry->received, fDownloadRetries[identifier].attempts);
+                ResumeDownload(identifier, FrontWindow());
+            }
             return;
         }
 #endif
@@ -1263,6 +1277,15 @@ private:
     std::vector<std::string> fRelaunchArguments;
     std::vector<uint64> fClosedWhileQuitting;
     std::map<uint64, BMessenger> fDownloads;
+    // Downloads of the list that lost their connection and are continued by
+    // themselves (DownloadLostConnection): tries without new data so far,
+    // the bytes there were at the last one, and the timer of the next.
+    struct DownloadRetry {
+        unsigned attempts = 0;
+        uint64 received = 0;
+        std::unique_ptr<BMessageRunner> timer;
+    };
+    std::map<uint64, DownloadRetry> fDownloadRetries;
     bool fDownloadQuitApproved = false;
     bool fDownloadPromptPending = false;
     // The registrar's quit request of a system shutdown, until Summit quits
@@ -1339,8 +1362,10 @@ private:
             && message.GetUInt32("result", B_WEBKIT_DOWNLOAD_FAILED) == B_WEBKIT_DOWNLOAD_SUCCEEDED)
             if (const char* path = message.GetString("path", nullptr); path && *path)
                 update_mime_info(path, false, false, B_UPDATE_MIME_INFO_NO_FORCE);
-        if (message.what == B_WEBKIT_DOWNLOAD_FINISHED) fDownloads.erase(identifier);
-        else fDownloads[identifier] = target;
+        if (message.what == B_WEBKIT_DOWNLOAD_FINISHED) {
+            fDownloads.erase(identifier);
+            DownloadLostConnection(message);
+        } else fDownloads[identifier] = target;
         if (target.IsValid()) {
             BMessage forwarded(message);
             target.SendMessage(&forwarded);
@@ -1593,6 +1618,44 @@ private:
                     "pauses them, but they will have to start over.";
         }
         return text + "\n\nQuit anyway?";
+    }
+    // Downloads go on whatever happens to the page or tab they came from;
+    // one whose connection went dead or broke (the engine fails a download
+    // that gets no data for a while) is continued by itself, after a short
+    // wait that grows with each try that brings nothing new: from where it
+    // stopped, or from the start when its server cannot send the rest (the
+    // engine then writes the whole file over the partial one). After the
+    // last try it stays failed, to be retried from the panel.
+    void DownloadLostConnection(const BMessage& finished)
+    {
+        const auto entry = summit::DownloadList::Default().FindByEngine(finished.GetUInt64("identifier", 0));
+        if (!entry) return;
+        const bool lost = entry->state == summit::DownloadStatus::State::Failed
+            && summit::IsConnectionFailure(finished.GetString("error_domain", ""), finished.GetInt32("error", 0));
+        if (!lost) {
+            fDownloadRetries.erase(entry->identifier);
+            return;
+        }
+        auto& retry = fDownloadRetries[entry->identifier];
+        if (entry->received > retry.received || !retry.attempts) {
+            retry.attempts = 0;
+            retry.received = entry->received;
+        }
+        const double delay = summit::DownloadRetryDelay(retry.attempts);
+        if (delay < 0) {
+            fprintf(stderr, "Summit: download %llu (%s) lost its connection %u times without getting further; it stays failed\n",
+                (unsigned long long)entry->identifier, entry->filename.c_str(), retry.attempts);
+            fDownloadRetries.erase(entry->identifier);
+            return;
+        }
+        ++retry.attempts;
+        fprintf(stderr, "Summit: download %llu (%s) lost its connection at %llu bytes (%s); continuing it in %.0f s\n",
+            (unsigned long long)entry->identifier, entry->filename.c_str(), (unsigned long long)entry->received,
+            finished.GetString("error_description", ""), delay);
+        BMessage tick(kRetryDownload);
+        tick.AddUInt64("identifier", entry->identifier);
+        retry.timer = std::make_unique<BMessageRunner>(BMessenger(this), &tick, bigtime_t(delay * 1e6), 1);
+        summit::DownloadList::Default().SetReconnecting(entry->identifier, true);
     }
     // Continues a paused or failed download of the list in its partial file
     // (or afresh), in the context it belongs to.
@@ -1976,7 +2039,7 @@ private:
                     json record = {{"id", item.identifier}, {"engine", item.engine}, {"state", states[int(item.state)]},
                         {"url", item.url}, {"requestURL", item.requestURL}, {"path", item.path}, {"filename", item.filename},
                         {"received", item.received}, {"expected", item.expected}, {"partial", item.partial},
-                        {"interrupted", item.interrupted}, {"restarted", item.restarted}, {"validator", item.validator},
+                        {"interrupted", item.interrupted}, {"restarted", item.restarted}, {"reconnecting", item.reconnecting}, {"validator", item.validator},
                         {"acceptsRanges", item.acceptsRanges}, {"canResume", item.CanResume()}, {"private", privateBrowsing},
                         {"status", summit::DownloadStatusText(item.Status())}};
                     if (!item.error.empty()) record["error"] = item.error;

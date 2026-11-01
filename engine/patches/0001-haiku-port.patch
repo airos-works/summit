@@ -75040,10 +75040,10 @@ index 0000000000000000000000000000000000000000..da71c185bfa5f93bf68ba7a513f48393
 +
 +#endif
 diff --git a/Source/WebCore/platform/network/curl/CurlRequest.cpp b/Source/WebCore/platform/network/curl/CurlRequest.cpp
-index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..5a2f97d9fbc2b13dd5c566409cc0fdd0cb1af5fb 100644
+index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..6e5a6e66b1bfe87c68485cf8328ee29f2ae16861 100644
 --- a/Source/WebCore/platform/network/curl/CurlRequest.cpp
 +++ b/Source/WebCore/platform/network/curl/CurlRequest.cpp
-@@ -36,19 +36,411 @@
+@@ -36,19 +36,414 @@
  #include "NetworkLoadMetrics.h"
  #include "ResourceError.h"
  #include "SharedBuffer.h"
@@ -75392,6 +75392,9 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..5a2f97d9fbc2b13dd5c566409cc0fdd0
 +#if PLATFORM(HAIKU)
 +// When the network went away (NetworkStateNotifierHaiku.cpp), 0 while it is there.
 +extern std::atomic<double> networkLostAtHaiku;
++// From NetworkStateNotifierHaiku.cpp and CurlContext.cpp.
++bool isGoneLocalAddressHaiku(const String&);
++bool closeConnectionFromHaiku(const String& address, int port);
 +
 +// How long a response the page set no timeout for may take to start.
 +static constexpr Seconds responseStartTimeoutHaiku { 300_s };
@@ -75455,7 +75458,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..5a2f97d9fbc2b13dd5c566409cc0fdd0
      , m_formDataStream(m_request.httpBody())
      , m_captureExtraMetrics(captureExtraMetrics == CaptureNetworkLoadMetrics::Extended)
  {
-@@ -95,7 +487,7 @@ void CurlRequest::setUserPass(const String& user, const String& password)
+@@ -95,7 +490,7 @@ void CurlRequest::setUserPass(const String& user, const String& password)
      m_password = password.isolatedCopy();
  }
  
@@ -75464,7 +75467,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..5a2f97d9fbc2b13dd5c566409cc0fdd0
  {
      // The pausing of transfer does not work with protocols, like file://.
      // Therefore, PAUSE can not be done in didReceiveData().
-@@ -108,10 +500,16 @@ void CurlRequest::resume()
+@@ -108,10 +503,16 @@ void CurlRequest::resume()
  
      ASSERT(isMainThread());
  
@@ -75484,7 +75487,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..5a2f97d9fbc2b13dd5c566409cc0fdd0
  
      if (m_request.url().protocolIsFile())
          invokeDidReceiveResponseForFile(m_request.url());
-@@ -122,8 +520,14 @@ void CurlRequest::resume()
+@@ -122,8 +523,14 @@ void CurlRequest::resume()
  void CurlRequest::startWithJobManager()
  {
      ASSERT(isMainThread());
@@ -75500,7 +75503,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..5a2f97d9fbc2b13dd5c566409cc0fdd0
  }
  
  void CurlRequest::cancel()
-@@ -137,6 +541,10 @@ void CurlRequest::cancel()
+@@ -137,6 +544,10 @@ void CurlRequest::cancel()
  
          m_cancelled = true;
      }
@@ -75511,7 +75514,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..5a2f97d9fbc2b13dd5c566409cc0fdd0
  
      auto& scheduler = CurlContext::singleton().scheduler();
  
-@@ -144,7 +552,7 @@ void CurlRequest::cancel()
+@@ -144,7 +555,7 @@ void CurlRequest::cancel()
          runOnWorkerThreadIfRequired([this, protectedThis = Ref { *this }]() {
              didCancelTransfer();
          });
@@ -75520,7 +75523,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..5a2f97d9fbc2b13dd5c566409cc0fdd0
          scheduler.cancel(this);
  
      invalidateClient();
-@@ -162,6 +570,41 @@ bool CurlRequest::isCompletedOrCancelled()
+@@ -162,6 +573,41 @@ bool CurlRequest::isCompletedOrCancelled()
      return m_completed || m_cancelled;
  }
  
@@ -75562,7 +75565,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..5a2f97d9fbc2b13dd5c566409cc0fdd0
  /* `this` is protected inside this method. */
  void CurlRequest::callClient(Function<void(CurlRequest&, CurlRequestClient&)>&& task)
  {
-@@ -173,13 +616,13 @@ void CurlRequest::callClient(Function<void(CurlRequest&, CurlRequestClient&)>&&
+@@ -173,13 +619,28 @@ void CurlRequest::callClient(Function<void(CurlRequest&, CurlRequestClient&)>&&
  
  void CurlRequest::runOnMainThread(Function<void()>&& task)
  {
@@ -75570,6 +75573,21 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..5a2f97d9fbc2b13dd5c566409cc0fdd0
 +    ensureOnMainThread(std::move(task));
  }
  
++#if PLATFORM(HAIKU)
++void CurlRequest::watchDownloadStallsHaiku(Seconds stallTimeout)
++{
++    m_downloadStallTimeoutHaiku.store(stallTimeout.milliseconds(), std::memory_order_relaxed);
++    // libcurl's low-speed limit: it keeps a timer while the transfer is
++    // slower than a byte a second, so it notices a connection that has gone
++    // completely silent (a paused transfer is not checked), and fails it
++    // with CURLE_OPERATION_TIMEDOUT.
++    runOnWorkerThreadIfRequired([this, protectedThis = Ref { *this }, stallTimeout] {
++        if (!isCompletedOrCancelled() && m_curlHandle)
++            m_curlHandle->setTimeout(stallTimeout);
++    });
++}
++#endif
++
  void CurlRequest::runOnWorkerThreadIfRequired(Function<void()>&& task)
  {
      if (isMainThread())
@@ -75578,7 +75596,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..5a2f97d9fbc2b13dd5c566409cc0fdd0
      else
          task();
  }
-@@ -190,6 +633,17 @@ CURL* CurlRequest::setupTransfer()
+@@ -190,6 +651,17 @@ CURL* CurlRequest::setupTransfer()
      appendAcceptLanguageHeaderIfNeeded(httpHeaderFields);
  
      m_curlHandle = makeUnique<CurlHandle>();
@@ -75596,7 +75614,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..5a2f97d9fbc2b13dd5c566409cc0fdd0
  
      m_curlHandle->setURL(m_request.url(), m_localhostAlias);
  
-@@ -209,8 +663,9 @@ CURL* CurlRequest::setupTransfer()
+@@ -209,8 +681,9 @@ CURL* CurlRequest::setupTransfer()
          setupPUT();
      }
  
@@ -75607,7 +75625,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..5a2f97d9fbc2b13dd5c566409cc0fdd0
  
      if (m_shouldDisableServerTrustEvaluation)
          m_curlHandle->disableServerTrustEvaluation();
-@@ -218,7 +673,35 @@ CURL* CurlRequest::setupTransfer()
+@@ -218,7 +691,35 @@ CURL* CurlRequest::setupTransfer()
      m_curlHandle->setHeaderCallbackFunction(didReceiveHeaderCallback, this);
      m_curlHandle->setWriteCallbackFunction(didReceiveDataCallback, this);
      m_curlHandle->setDebugCallbackFunction(didReceiveDebugInfoCallback, this);
@@ -75643,7 +75661,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..5a2f97d9fbc2b13dd5c566409cc0fdd0
      m_curlHandle->setTimeout(timeoutInterval());
  
      m_performStartTime = MonotonicTime::now();
-@@ -270,6 +753,27 @@ size_t CurlRequest::willSendData(char* buffer, size_t blockSize, size_t numberOf
+@@ -270,6 +771,27 @@ size_t CurlRequest::willSendData(char* buffer, size_t blockSize, size_t numberOf
      return *sendBytes;
  }
  
@@ -75671,7 +75689,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..5a2f97d9fbc2b13dd5c566409cc0fdd0
  // This is being called for each HTTP header in the response. This includes '\r\n'
  // for the last line of the header.
  
-@@ -294,12 +798,19 @@ size_t CurlRequest::didReceiveHeader(String&& header)
+@@ -294,12 +816,19 @@ size_t CurlRequest::didReceiveHeader(String&& header)
          m_didReceiveResponse = false;
          m_response = CurlResponse { };
          m_multipartHandle = nullptr;
@@ -75691,7 +75709,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..5a2f97d9fbc2b13dd5c566409cc0fdd0
          m_response.headers.append(WTF::move(header));
          return receiveBytes;
      }
-@@ -343,6 +854,26 @@ size_t CurlRequest::didReceiveHeader(String&& header)
+@@ -343,6 +872,26 @@ size_t CurlRequest::didReceiveHeader(String&& header)
  
      m_multipartHandle = CurlMultipartHandle::createIfNeeded(*this, m_response);
  
@@ -75718,7 +75736,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..5a2f97d9fbc2b13dd5c566409cc0fdd0
      // Response will send at didReceiveData() or didCompleteTransfer()
      // to receive continueDidRceiveResponse() for asynchronously.
  
-@@ -375,8 +906,24 @@ size_t CurlRequest::didReceiveData(std::span<const uint8_t> receivedData)
+@@ -375,8 +924,24 @@ size_t CurlRequest::didReceiveData(std::span<const uint8_t> receivedData)
          return CURL_WRITEFUNC_PAUSE;
      }
  
@@ -75743,7 +75761,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..5a2f97d9fbc2b13dd5c566409cc0fdd0
      if (receivedData.size()) {
          if (m_multipartHandle) {
              m_multipartHandle->didReceiveMessage(receivedData);
-@@ -393,7 +940,7 @@ size_t CurlRequest::didReceiveData(std::span<const uint8_t> receivedData)
+@@ -393,7 +958,7 @@ size_t CurlRequest::didReceiveData(std::span<const uint8_t> receivedData)
          }
      }
  
@@ -75752,7 +75770,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..5a2f97d9fbc2b13dd5c566409cc0fdd0
  }
  
  void CurlRequest::didReceiveHeaderFromMultipart(Vector<String>&& headers)
-@@ -446,6 +993,31 @@ void CurlRequest::didCompleteTransfer(CURLcode result)
+@@ -446,6 +1011,31 @@ void CurlRequest::didCompleteTransfer(CURLcode result)
          return;
      }
  
@@ -75784,7 +75802,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..5a2f97d9fbc2b13dd5c566409cc0fdd0
      // Newer versions of curl/OpenSSL report CURLE_RECV_ERROR or CURLE_PARTIAL_FILE
      // when a server closes the connection to signal end-of-body on responses with
      // no Content-Length and no chunked encoding. This is valid HTTP/1.1 behavior,
-@@ -475,6 +1047,19 @@ void CurlRequest::didCompleteTransfer(CURLcode result)
+@@ -475,6 +1065,19 @@ void CurlRequest::didCompleteTransfer(CURLcode result)
          }
  
          auto metrics = networkLoadMetrics();
@@ -75804,8 +75822,25 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..5a2f97d9fbc2b13dd5c566409cc0fdd0
  
          finalizeTransfer();
          callClient([networkLoadMetrics = WTF::move(metrics)](CurlRequest& request, CurlRequestClient& client) mutable {
-@@ -486,6 +1071,11 @@ void CurlRequest::didCompleteTransfer(CURLcode result)
+@@ -484,8 +1087,28 @@ void CurlRequest::didCompleteTransfer(CURLcode result)
+             client.curlDidComplete(request, WTF::move(networkLoadMetrics));
+         });
      } else {
++#if PLATFORM(HAIKU)
++        if (double stallTimeout = m_downloadStallTimeoutHaiku.load(std::memory_order_relaxed); stallTimeout && result == CURLE_OPERATION_TIMEDOUT) {
++            // A download that stalled (watchDownloadStallsHaiku). Its
++            // connection is closed: libcurl would keep an HTTP/2 one for the
++            // next request to the server (resuming the download), which
++            // would wait on it as well.
++            char* localAddress = nullptr;
++            long localPort = 0;
++            curl_easy_getinfo(m_curlHandle->handle(), CURLINFO_LOCAL_IP, &localAddress);
++            curl_easy_getinfo(m_curlHandle->handle(), CURLINFO_LOCAL_PORT, &localPort);
++            bool closed = localAddress && *localAddress && closeConnectionFromHaiku(String::fromLatin1(localAddress), static_cast<int>(localPort));
++            fprintf(stderr, "Summit net: a download got no data for %.0f s (%zu bytes so far); %sits connection is taken as dead: %s\n",
++                stallTimeout / 1000, m_totalReceivedSize, closed ? "closed it, " : "", netTraceURLHaiku(m_request.url()).legacyCStringPointer());
++        }
++#endif
          auto type = (result == CURLE_OPERATION_TIMEDOUT && timeoutInterval()) ? ResourceError::Type::Timeout : ResourceError::Type::General;
          auto resourceError = ResourceError(result, m_request.url(), type);
 +#if PLATFORM(HAIKU)
@@ -75816,14 +75851,11 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..5a2f97d9fbc2b13dd5c566409cc0fdd0
  
          CertificateInfo certificateInfo;
          if (auto info = m_curlHandle->certificateInfo())
-@@ -503,13 +1093,86 @@ void CurlRequest::didCompleteTransfer(CURLcode result)
+@@ -503,13 +1126,83 @@ void CurlRequest::didCompleteTransfer(CURLcode result)
      }
  }
  
 +#if PLATFORM(HAIKU)
-+// From NetworkStateNotifierHaiku.cpp and CurlContext.cpp.
-+bool isGoneLocalAddressHaiku(const String&);
-+bool closeConnectionFromHaiku(const String& address, int port);
 +
 +// A request that failed before any of its response came is sent again
 +// without telling the page, as other browsers do, when it failed:
@@ -75903,7 +75935,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..5a2f97d9fbc2b13dd5c566409cc0fdd0
      m_formDataStream.clean();
      m_multipartHandle = nullptr;
      m_curlHandle = nullptr;
-@@ -632,6 +1295,88 @@ void CurlRequest::completeDidReceiveResponse()
+@@ -632,6 +1325,88 @@ void CurlRequest::completeDidReceiveResponse()
          responseCompletionHandler();
  }
  
@@ -75992,7 +76024,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..5a2f97d9fbc2b13dd5c566409cc0fdd0
  NetworkLoadMetrics CurlRequest::networkLoadMetrics()
  {
      ASSERT(m_curlHandle);
-@@ -653,6 +1398,57 @@ NetworkLoadMetrics CurlRequest::networkLoadMetrics()
+@@ -653,6 +1428,57 @@ NetworkLoadMetrics CurlRequest::networkLoadMetrics()
      return WTF::move(*networkLoadMetrics);
  }
  
@@ -76051,15 +76083,18 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..5a2f97d9fbc2b13dd5c566409cc0fdd0
  {
      for (const auto& header : m_response.headers) {
 diff --git a/Source/WebCore/platform/network/curl/CurlRequest.h b/Source/WebCore/platform/network/curl/CurlRequest.h
-index 3b060605bbff32f845804a848610eca23dea834c..e5947fa61a2354f149d3901db669dcdddb6b7d26 100644
+index 3b060605bbff32f845804a848610eca23dea834c..7c3702387b1b6b5214a60c4de6faec9b48eb017c 100644
 --- a/Source/WebCore/platform/network/curl/CurlRequest.h
 +++ b/Source/WebCore/platform/network/curl/CurlRequest.h
-@@ -32,16 +32,21 @@
+@@ -32,16 +32,24 @@
  #include "CurlResponse.h"
  #include "ProtectionSpace.h"
  #include "ResourceRequest.h"
 +
 +#include <wtf/FileSystem.h>
++#if PLATFORM(HAIKU)
++#include <atomic>
++#endif
  #include <wtf/MonotonicTime.h>
  #include <wtf/Noncopyable.h>
  #include <wtf/TZoneMalloc.h>
@@ -76077,7 +76112,7 @@ index 3b060605bbff32f845804a848610eca23dea834c..e5947fa61a2354f149d3901db669dcdd
  
  class CurlRequest final : public ThreadSafeRefCounted<CurlRequest>, public CurlRequestSchedulerClient, public CurlMultipartHandleClient, public CanMakeThreadSafeCheckedPtr<CurlRequest> {
      WTF_MAKE_TZONE_ALLOCATED(CurlRequest);
-@@ -58,7 +63,7 @@ public:
+@@ -58,7 +66,7 @@ public:
          return adoptRef(*new CurlRequest(request, &client, captureMetrics));
      }
  
@@ -76086,7 +76121,7 @@ index 3b060605bbff32f845804a848610eca23dea834c..e5947fa61a2354f149d3901db669dcdd
  
      WEBCORE_EXPORT void invalidateClient();
      WEBCORE_EXPORT void setAuthenticationScheme(ProtectionSpace::AuthenticationScheme);
-@@ -67,8 +72,10 @@ public:
+@@ -67,8 +75,10 @@ public:
      void disableServerTrustEvaluation() { m_shouldDisableServerTrustEvaluation = true; }
      void enableLocalhostAlias() { m_localhostAlias = CurlHandle::LocalhostAlias::Enable; }
  
@@ -76098,7 +76133,7 @@ index 3b060605bbff32f845804a848610eca23dea834c..e5947fa61a2354f149d3901db669dcdd
  
      const ResourceRequest& resourceRequest() const LIFETIME_BOUND { return m_request; }
      bool isCancelled();
-@@ -81,6 +88,23 @@ public:
+@@ -81,6 +91,30 @@ public:
      // Processing for DidReceiveResponse
      WEBCORE_EXPORT void completeDidReceiveResponse();
  
@@ -76112,6 +76147,13 @@ index 3b060605bbff32f845804a848610eca23dea834c..e5947fa61a2354f149d3901db669dcdd
 +    // transfer that stops before its request leaves libcurl no choice but to
 +    // close those).
 +    WEBCORE_EXPORT static bool canPreconnectHaiku(const URL&);
++    // The transfer became a download: it fails (a timeout) once no data has
++    // come for stallTimeout while it is not paused, and its connection is
++    // closed, so that resuming it does not wait on a dead connection too.
++    // A page's load may wait on its server for as long as it likes; a
++    // download that has stopped would otherwise sit "active" for ever,
++    // because Haiku's TCP never gives up on a dead connection.
++    void watchDownloadStallsHaiku(Seconds stallTimeout);
 +#endif
 +
 +    // Download
@@ -76122,7 +76164,7 @@ index 3b060605bbff32f845804a848610eca23dea834c..e5947fa61a2354f149d3901db669dcdd
  private:
      WEBCORE_EXPORT CurlRequest(const ResourceRequest&, CurlRequestClient*, CaptureNetworkLoadMetrics);
  
-@@ -113,6 +137,7 @@ private:
+@@ -113,6 +147,7 @@ private:
      void didCompleteTransfer(CURLcode) override;
      void didCancelTransfer() override;
      void finalizeTransfer();
@@ -76130,7 +76172,7 @@ index 3b060605bbff32f845804a848610eca23dea834c..e5947fa61a2354f149d3901db669dcdd
  
      int didReceiveDebugInfo(curl_infotype, std::span<const char>);
  
-@@ -126,15 +151,31 @@ private:
+@@ -126,15 +161,31 @@ private:
      bool needToInvokeDidCancelTransfer() const { return m_didNotifyResponse && !m_didReturnFromNotify && m_mustInvokeCancelTransfer; }
      void invokeDidReceiveResponseForFile(const URL&);
      void invokeDidReceiveResponse(const CurlResponse&, Function<void()>&& completionHandler = { });
@@ -76162,7 +76204,7 @@ index 3b060605bbff32f845804a848610eca23dea834c..e5947fa61a2354f149d3901db669dcdd
  
  
      CurlRequestClient* m_client { };
-@@ -149,23 +190,65 @@ private:
+@@ -149,23 +200,67 @@ private:
      bool m_shouldDisableServerTrustEvaluation { false };
      CurlHandle::LocalhostAlias m_localhostAlias { CurlHandle::LocalhostAlias::Disable };
  
@@ -76225,6 +76267,8 @@ index 3b060605bbff32f845804a848610eca23dea834c..e5947fa61a2354f149d3901db669dcdd
 +    bool m_usesDefaultTimeoutHaiku { false };
 +    curl_off_t m_progressBytesHaiku { -1 };
 +    MonotonicTime m_lastProgressHaiku;
++    // watchDownloadStallsHaiku, in milliseconds (0: not a download).
++    std::atomic<double> m_downloadStallTimeoutHaiku { 0 };
 +#endif
  };
  
@@ -87018,7 +87062,7 @@ index be40151510176ea4e881fd41af8f79ab6ab6a306..b5fdd6e41375e8108fb406089992f8e5
      if (metaData.headerHash != computeSHA1(headerData, salt)) {
          LOG(NetworkCacheStorage, "(NetworkProcess) header checksum mismatch");
 diff --git a/Source/WebKit/NetworkProcess/curl/NetworkDataTaskCurl.cpp b/Source/WebKit/NetworkProcess/curl/NetworkDataTaskCurl.cpp
-index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..425134836eae767ff481c5400b33eaf8d61b5a7d 100644
+index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..67a8790711b5f41e73e75aefd6216e607bd53e28 100644
 --- a/Source/WebKit/NetworkProcess/curl/NetworkDataTaskCurl.cpp
 +++ b/Source/WebKit/NetworkProcess/curl/NetworkDataTaskCurl.cpp
 @@ -36,11 +36,14 @@
@@ -87234,7 +87278,26 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..425134836eae767ff481c5400b33eaf8
              m_downloadDestinationFile = FileSystem::openFile(m_pendingDownloadLocation, FileSystem::FileOpenMode::Truncate, FileSystem::FileAccessPermission::All, { }, !m_allowOverwriteDownload);
              if (!m_downloadDestinationFile) {
                  if (m_client)
-@@ -409,6 +483,7 @@ void NetworkDataTaskCurl::willPerformHTTPRedirection()
+@@ -319,6 +393,18 @@ void NetworkDataTaskCurl::invokeDidReceiveResponse()
+             Ref download = Download::create(downloadManager, *m_pendingDownloadID, *this, *m_session, suggestedFilename());
+             downloadManager.dataTaskBecameDownloadTask(*m_pendingDownloadID, download.copyRef());
+             download->didCreateDestination(m_pendingDownloadLocation);
++#if PLATFORM(HAIKU)
++            // A download that stops getting data fails, to be resumed
++            // (the browser does so by itself) instead of waiting for ever
++            // on a dead connection. One its server cannot resume would
++            // start over, so it is given longer.
++            if (m_curlRequest) {
++                bool resumable = m_response.httpStatusCode() == 206;
++                for (auto unit : m_response.httpHeaderField(HTTPHeaderName::AcceptRanges).split(','))
++                    resumable = resumable || equalLettersIgnoringASCIICase(unit.trim(isASCIIWhitespace<char16_t>), "bytes"_s);
++                m_curlRequest->watchDownloadStallsHaiku(resumable ? 30_s : 120_s);
++            }
++#endif
+             if (m_curlRequest)
+                 m_curlRequest->completeDidReceiveResponse();
+             break;
+@@ -409,6 +495,7 @@ void NetworkDataTaskCurl::willPerformHTTPRedirection()
              m_curlRequest->setUserPass(m_initialCredential.user(), m_initialCredential.password());
              m_curlRequest->setAuthenticationScheme(ProtectionSpace::AuthenticationScheme::HTTPBasic);
          }
@@ -87242,7 +87305,7 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..425134836eae767ff481c5400b33eaf8
  
          if (m_state != State::Suspended) {
              m_state = State::Suspended;
-@@ -531,6 +606,7 @@ void NetworkDataTaskCurl::restartWithCredential(const ProtectionSpace& protectio
+@@ -531,6 +618,7 @@ void NetworkDataTaskCurl::restartWithCredential(const ProtectionSpace& protectio
      m_curlRequest->setUserPass(credential.user(), credential.password());
      if (shouldDisableServerTrustEvaluation)
          m_curlRequest->disableServerTrustEvaluation();
@@ -87250,7 +87313,7 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..425134836eae767ff481c5400b33eaf8
  
      if (m_state != State::Suspended) {
          m_state = State::Suspended;
-@@ -538,11 +614,30 @@ void NetworkDataTaskCurl::restartWithCredential(const ProtectionSpace& protectio
+@@ -538,11 +626,30 @@ void NetworkDataTaskCurl::restartWithCredential(const ProtectionSpace& protectio
      }
  }
  
@@ -87282,7 +87345,7 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..425134836eae767ff481c5400b33eaf8
          if (!cookieHeaderField.isEmpty())
              request.addHTTPHeaderField(HTTPHeaderName::Cookie, cookieHeaderField);
      }
-@@ -552,10 +647,24 @@ void NetworkDataTaskCurl::handleCookieHeaders(const WebCore::ResourceRequest& re
+@@ -552,10 +659,24 @@ void NetworkDataTaskCurl::handleCookieHeaders(const WebCore::ResourceRequest& re
  {
      static constexpr auto setCookieHeader = "set-cookie: "_s;
  
@@ -177407,7 +177470,7 @@ index 0000000000000000000000000000000000000000..abc82f6d26d2b1374740dc304282ae75
 +
 +}
 diff --git a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/AcceleratedSurface.cpp b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/AcceleratedSurface.cpp
-index 8177756a0e14111347846c912b8e3851f2559b4a..6a0da841cc965b089dc48ae4514ddba333f93405 100644
+index 8177756a0e14111347846c912b8e3851f2559b4a..93b4b0ad208ff108f6484c6cb932e948c06202ef 100644
 --- a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/AcceleratedSurface.cpp
 +++ b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/AcceleratedSurface.cpp
 @@ -26,6 +26,30 @@
@@ -186267,7 +186330,7 @@ index 0000000000000000000000000000000000000000..681beff21b945e596a3df462c5bbc6c6
 +} // namespace WebKit
 diff --git a/Source/WebKit/WebProcess/haiku/WebProcessMainHaiku.cpp b/Source/WebKit/WebProcess/haiku/WebProcessMainHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..cf0cb1265c572f9a4d784598211ec11bf9eb9f3e
+index 0000000000000000000000000000000000000000..559cc75cda995bc42192b111d1b9dc064b655998
 --- /dev/null
 +++ b/Source/WebKit/WebProcess/haiku/WebProcessMainHaiku.cpp
 @@ -0,0 +1,117 @@

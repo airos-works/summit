@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <iterator>
 
 namespace summit {
 namespace {
@@ -93,10 +94,43 @@ std::string DownloadStatusText(const DownloadStatus& status)
         if (status.missing) return "File moved or missing";
         return FormatByteSize(status.received) + (status.host.empty() ? "" : " — " + status.host);
     case DownloadStatus::State::Failed:
+        if (status.reconnecting)
+            return "Connection lost, reconnecting — " + (status.expected > 0 && uint64_t(status.expected) >= status.received
+                ? FormatByteProgress(status.received, uint64_t(status.expected)) : FormatByteSize(status.received));
         return status.error.empty() ? "Failed" : "Failed — " + status.error;
     case DownloadStatus::State::Cancelled:
         return "Cancelled";
     }
     return {};
+}
+
+bool IsConnectionFailure(const std::string& domain, int32_t code)
+{
+    if (domain != "CurlErrorDomain") return false;
+    switch (code) {
+    case 6: // CURLE_COULDNT_RESOLVE_HOST (the network is away)
+    case 7: // CURLE_COULDNT_CONNECT
+    case 16: // CURLE_HTTP2
+    case 18: // CURLE_PARTIAL_FILE: the connection closed early
+    case 28: // CURLE_OPERATION_TIMEDOUT: also a download that stalled
+    case 35: // CURLE_SSL_CONNECT_ERROR
+    case 52: // CURLE_GOT_NOTHING
+    case 55: // CURLE_SEND_ERROR
+    case 56: // CURLE_RECV_ERROR
+    case 92: // CURLE_HTTP2_STREAM
+    case 95: // CURLE_HTTP3
+    case 96: // CURLE_QUIC_CONNECT_ERROR
+        return true;
+    default:
+        return false;
+    }
+}
+
+double DownloadRetryDelay(unsigned attempt)
+{
+    // About five minutes in all: a router restarting, a laptop moving to
+    // another network.
+    static constexpr double delays[] = {2, 5, 15, 30, 60, 90, 120};
+    return attempt < std::size(delays) ? delays[attempt] : -1;
 }
 }

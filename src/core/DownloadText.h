@@ -24,6 +24,9 @@ struct DownloadStatus {
     // or has to start over. Active: it started over, because the server sent
     // the whole file again.
     bool interrupted = false, resumable = true, restarted = false;
+    // Failed: the connection was lost, and the browser continues it by
+    // itself shortly (DownloadRetryDelay).
+    bool reconnecting = false;
 };
 // "512 bytes", "12.4 KiB", "3.1 MiB", "1.25 GiB".
 std::string FormatByteSize(uint64_t bytes);
@@ -34,4 +37,15 @@ std::string FormatTimeLeft(double seconds);
 std::string DownloadStatusText(const DownloadStatus&);
 // How much of the download has arrived, 0 to 1; -1 when the size is unknown.
 double DownloadFraction(uint64_t received, int64_t expected);
+// Whether a download that failed with the engine's error (its domain and
+// code) failed for want of a working connection: one that went dead or was
+// reset, a timeout, a server that could not be reached. The browser then
+// continues it by itself, as other browsers do, instead of leaving it to be
+// started again; other failures (a full disk, a file the server no longer
+// has) stay failed.
+bool IsConnectionFailure(const std::string& domain, int32_t code);
+// Seconds before automatic try number attempt (0 the first) to continue a
+// download that lost its connection; -1 once it has been tried enough, and it
+// stays failed. Each try that brought data starts the count again.
+double DownloadRetryDelay(unsigned attempt);
 }

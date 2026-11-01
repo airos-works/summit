@@ -38,6 +38,8 @@ public:
         bool unseen = false;
         // It started over: the server sent the whole file again.
         bool restarted = false;
+        // Failed for want of a connection: the browser continues it shortly.
+        bool reconnecting = false;
         // Bytes a second, smoothed over the last updates.
         double rate = 0;
         bigtime_t sampleTime = 0;
@@ -72,6 +74,11 @@ public:
     std::optional<HistoryChange> Update(const BMessage& notification, bool privateBrowsing);
     std::vector<Entry> Entries(bool privateBrowsing) const;
     std::optional<Entry> Find(uint64 identifier) const;
+    // The entry the engine's download is (or, once it stopped, was) for.
+    std::optional<Entry> FindByEngine(uint64 engine) const;
+    // A failed entry is to be continued shortly by itself (or no longer is):
+    // the panel says so, and the downloads button shows no failure for it.
+    void SetReconnecting(uint64 identifier, bool);
     Summary Summarize(bool privateBrowsing) const;
     // The engine continues the entry as download engine (ResumeDownload).
     void Resumed(uint64 identifier, uint64 engine);
