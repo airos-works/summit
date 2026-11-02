@@ -35,6 +35,9 @@ heap was 104-127 MiB.
   (Reddit 535 -> 411, CNN 747 -> 645, Guardian 601 -> 551 MiB) in 9-269 ms
   each; switching back repainted at once (60 fps scrolling).
   `SUMMIT_HIDDEN_PROCESS_RELEASE_S` (120; 0 off), `SUMMIT_HIDDEN_PROCESS_TRACE=1`.
+  Processes without pages count as hidden too: the laptop's Slack
+  service-worker process held 347 MiB and was never released (a release took
+  it to 316 MiB); the timer now starts when a process starts.
 - **What fills a page's process.** `engine_report` now has
   `memory.mimalloc`. CNN on the X399: 524 MiB committed by mimalloc, 376 MiB
   in use, of which the JavaScript heap is 102 MiB: most of a page is live

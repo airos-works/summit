@@ -189859,7 +189859,7 @@ index 0000000000000000000000000000000000000000..21f278735563ccf7fba622283107cf94
 +
 +} // namespace WebKit
 diff --git a/Source/WebKit/WebProcess/WebProcess.cpp b/Source/WebKit/WebProcess/WebProcess.cpp
-index 413f8bc09ce0a2d3591b203f12addc32584b9f6e..c6ff86a269b9634fec3712812ed4a361e83ed41b 100644
+index 413f8bc09ce0a2d3591b203f12addc32584b9f6e..2f36e1c28421965d4528588a294e8c2527566d0a 100644
 --- a/Source/WebKit/WebProcess/WebProcess.cpp
 +++ b/Source/WebKit/WebProcess/WebProcess.cpp
 @@ -300,6 +300,37 @@ static const Seconds nonVisibleProcessEarlyMemoryCleanupDelay { 10_s };
@@ -189986,19 +189986,19 @@ index 413f8bc09ce0a2d3591b203f12addc32584b9f6e..c6ff86a269b9634fec3712812ed4a361
 +
 +static void hiddenProcessReleaseFiredHaiku()
 +{
-+    bool hasPage = false;
++    // A process without pages counts too: a service worker's process (Slack's
++    // held 347 MiB on the laptop) or one kept for later.
 +    bool shown = false;
 +    bool busy = false;
 +    WebCore::Page::forEachPage([&](WebCore::Page& page) {
 +        RefPtr webPage = WebPage::fromCorePage(page);
 +        if (!webPage)
 +            return;
-+        hasPage = true;
 +        shown = shown || page.isVisible();
 +        // Playing sound or capturing (music, a call): try again later.
 +        busy = busy || webPage->activityState().containsAny({ WebCore::ActivityState::IsAudible, WebCore::ActivityState::IsCapturingMedia });
 +    });
-+    if (!hasPage || shown)
++    if (shown)
 +        return;
 +    if (busy) {
 +        hiddenProcessReleaseTimerHaiku().startOneShot(600_s);
@@ -190040,7 +190040,20 @@ index 413f8bc09ce0a2d3591b203f12addc32584b9f6e..c6ff86a269b9634fec3712812ed4a361
      addSupplementWithoutRefCountedCheck<UserMediaCaptureManager>();
  #endif
  
-@@ -530,7 +681,12 @@ void WebProcess::initializeWebProcess(WebProcessCreationParameters&& parameters,
+@@ -523,6 +674,12 @@ void WebProcess::initializeWebProcess(WebProcessCreationParameters&& parameters,
+     // Match the QoS of the UIProcess and the scrolling thread but use a slightly lower priority.
+     WTF::Thread::setCurrentThreadIsUserInteractive(-1);
+ 
++#if OS(HAIKU)
++    // No page is shown yet: a process that never shows one (a service
++    // worker's, a spare) is released like a hidden tab's.
++    updateHiddenProcessReleaseHaiku(!hasVisibleWebPage());
++#endif
++
+     m_suppressMemoryPressureHandler = parameters.shouldSuppressMemoryPressureHandler;
+     if (!m_suppressMemoryPressureHandler) {
+         auto& memoryPressureHandler = MemoryPressureHandler::singleton();
+@@ -530,7 +687,12 @@ void WebProcess::initializeWebProcess(WebProcessCreationParameters&& parameters,
              // If this process contains only non-visible content (e.g. only contains background
              // tabs), then treat the memory warning as if it was a critical warning to maximize the
              // amount of memory released for foreground apps to use.
@@ -190053,7 +190066,7 @@ index 413f8bc09ce0a2d3591b203f12addc32584b9f6e..c6ff86a269b9634fec3712812ed4a361
                  critical = Critical::Yes;
  
              if (JSC::Options::dumpHeapOnLowMemory()) [[unlikely]]
-@@ -732,7 +888,8 @@ void WebProcess::initializeWebProcess(WebProcessCreationParameters&& parameters,
+@@ -732,7 +894,8 @@ void WebProcess::initializeWebProcess(WebProcessCreationParameters&& parameters,
  #define WEBKIT_APPLY_JSC_OPTION_FROM_SHARED_PREFERENCE(jscOption, preferenceField) JSC::Options::jscOption() = jscOptions.preferenceField;
          FOR_EACH_JSC_OPTION_SHARED_PREFERENCE(WEBKIT_APPLY_JSC_OPTION_FROM_SHARED_PREFERENCE)
  #undef WEBKIT_APPLY_JSC_OPTION_FROM_SHARED_PREFERENCE
@@ -190063,7 +190076,7 @@ index 413f8bc09ce0a2d3591b203f12addc32584b9f6e..c6ff86a269b9634fec3712812ed4a361
          if (parameters.crossOriginMode == WebCore::CrossOriginMode::Isolated)
              JSC::Options::useSharedArrayBuffer() = true;
  #endif
-@@ -1112,6 +1269,9 @@ void WebProcess::createWebPage(PageIdentifier pageID, WebPageCreationParameters&
+@@ -1112,6 +1275,9 @@ void WebProcess::createWebPage(PageIdentifier pageID, WebPageCreationParameters&
  
  #if OS(LINUX)
          HighPriorityThreads::singleton().setEnabled(hasVisibleWebPage());
@@ -190073,17 +190086,17 @@ index 413f8bc09ce0a2d3591b203f12addc32584b9f6e..c6ff86a269b9634fec3712812ed4a361
  #endif
      } else
          page->reinitializeWebPage(WTF::move(parameters));
-@@ -1145,6 +1305,9 @@ void WebProcess::removeWebPage(PageIdentifier pageID)
+@@ -1145,6 +1311,9 @@ void WebProcess::removeWebPage(PageIdentifier pageID)
  
  #if OS(LINUX)
      HighPriorityThreads::singleton().setEnabled(hasVisibleWebPage());
 +#elif OS(HAIKU)
 +    updateProcessPriorityHaiku(m_pageMap);
-+    updateHiddenProcessReleaseHaiku(!m_pageMap.isEmpty() && !hasVisibleWebPage());
++    updateHiddenProcessReleaseHaiku(!hasVisibleWebPage());
  #endif
  }
  
-@@ -1861,6 +2024,13 @@ void WebProcess::pageActivityStateDidChange(PageIdentifier, OptionSet<WebCore::A
+@@ -1861,6 +2030,13 @@ void WebProcess::pageActivityStateDidChange(PageIdentifier, OptionSet<WebCore::A
          HighPriorityThreads::singleton().setEnabled(hasVisibleWebPage());
  #endif
      }
