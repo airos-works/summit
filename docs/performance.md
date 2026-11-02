@@ -23,7 +23,14 @@ heap was 104-127 MiB.
   Summit's hidden tabs never do. Now a process none of whose pages has been
   visible for 2 minutes runs `WebProcess::releaseMemory()` (as a suspended
   process does) and repeats it every 10 minutes while hidden; the low-memory
-  handler treats hidden-only processes as critical, as upstream intends.
+  handler treats hidden-only processes as critical, as upstream intends, but
+  at most once every ten minutes per process: the laptop sits above the 90%
+  warning level for long stretches, and the monitor's warnings reach every
+  process every few seconds (held off 5-30 s each), so unthrottled this would
+  have been a full collection and lost JIT code every few seconds in every
+  hidden tab. Checked with `SUMMIT_MEMORY_PRESSURE_PERCENT=3` on the X399:
+  each hidden process promoted one warning in 2.5 minutes of constant
+  warnings, and the timed release then waited its ten minutes.
   X399, 8 sites, 60 s delay: the 8 hidden processes gave back 362 MiB
   (Reddit 535 -> 411, CNN 747 -> 645, Guardian 601 -> 551 MiB) in 9-269 ms
   each; switching back repainted at once (60 fps scrolling).

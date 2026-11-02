@@ -189820,7 +189820,7 @@ index 0000000000000000000000000000000000000000..21f278735563ccf7fba622283107cf94
 +
 +} // namespace WebKit
 diff --git a/Source/WebKit/WebProcess/WebProcess.cpp b/Source/WebKit/WebProcess/WebProcess.cpp
-index 413f8bc09ce0a2d3591b203f12addc32584b9f6e..3ee3e5bd885d2fb40a92e58e8f4244953e21ad1c 100644
+index 413f8bc09ce0a2d3591b203f12addc32584b9f6e..c6ff86a269b9634fec3712812ed4a361e83ed41b 100644
 --- a/Source/WebKit/WebProcess/WebProcess.cpp
 +++ b/Source/WebKit/WebProcess/WebProcess.cpp
 @@ -300,6 +300,37 @@ static const Seconds nonVisibleProcessEarlyMemoryCleanupDelay { 10_s };
@@ -189861,7 +189861,7 @@ index 413f8bc09ce0a2d3591b203f12addc32584b9f6e..3ee3e5bd885d2fb40a92e58e8f424495
  namespace WebKit {
  using namespace WebCore;
  
-@@ -308,10 +339,93 @@ WTF_MAKE_TZONE_ALLOCATED_IMPL(WebProcess);
+@@ -308,10 +339,130 @@ WTF_MAKE_TZONE_ALLOCATED_IMPL(WebProcess);
  #if !PLATFORM(GTK) && !PLATFORM(WPE)
  [[noreturn]] static void callExit(IPC::Connection*)
  {
@@ -189885,6 +189885,39 @@ index 413f8bc09ce0a2d3591b203f12addc32584b9f6e..3ee3e5bd885d2fb40a92e58e8f424495
 +// SUMMIT_HIDDEN_PROCESS_RELEASE_S sets the first delay (0 turns this off);
 +// SUMMIT_HIDDEN_PROCESS_TRACE=1 logs each release.
 +static void hiddenProcessReleaseFiredHaiku();
++
++// When this process last released memory for being hidden (the timer below,
++// or a memory warning promoted to critical in the low-memory handler).
++static MonotonicTime& lastHiddenProcessReleaseHaiku()
++{
++    static MonotonicTime time;
++    return time;
++}
++
++static bool hiddenProcessTraceHaiku()
++{
++    static const bool trace = [] {
++        const char* value = getenv("SUMMIT_HIDDEN_PROCESS_TRACE");
++        return value && !strcmp(value, "1");
++    }();
++    return trace;
++}
++
++// A memory warning (90% of the RAM in use) reaches every process every few
++// seconds while memory stays that full, and a critical release is a full
++// collection and the JIT code thrown away: a hidden-only process treats a
++// warning as critical at most once every ten minutes.
++static bool shouldPromoteMemoryWarningHaiku()
++{
++    auto now = MonotonicTime::now();
++    auto& last = lastHiddenProcessReleaseHaiku();
++    if (last && now - last < 600_s)
++        return false;
++    last = now;
++    if (hiddenProcessTraceHaiku())
++        fprintf(stderr, "Summit hidden process %d: memory warning released as critical\n", getpid());
++    return true;
++}
 +
 +static RunLoop::Timer& hiddenProcessReleaseTimerHaiku()
 +{
@@ -189932,10 +189965,14 @@ index 413f8bc09ce0a2d3591b203f12addc32584b9f6e..3ee3e5bd885d2fb40a92e58e8f424495
 +        hiddenProcessReleaseTimerHaiku().startOneShot(600_s);
 +        return;
 +    }
-+    static const bool trace = [] {
-+        const char* value = getenv("SUMMIT_HIDDEN_PROCESS_TRACE");
-+        return value && !strcmp(value, "1");
-+    }();
++    // A memory warning released it lately.
++    auto sinceLast = MonotonicTime::now() - lastHiddenProcessReleaseHaiku();
++    if (lastHiddenProcessReleaseHaiku() && sinceLast < 600_s) {
++        hiddenProcessReleaseTimerHaiku().startOneShot(600_s - sinceLast);
++        return;
++    }
++    const bool trace = hiddenProcessTraceHaiku();
++    lastHiddenProcessReleaseHaiku() = MonotonicTime::now();
 +    ProcessMemoryStatus before;
 +    if (trace)
 +        currentProcessMemoryStatus(before);
@@ -189955,7 +189992,7 @@ index 413f8bc09ce0a2d3591b203f12addc32584b9f6e..3ee3e5bd885d2fb40a92e58e8f424495
  #if PLATFORM(GTK) || PLATFORM(WPE)
  static void crashAfter10Seconds(IPC::Connection*)
  {
-@@ -397,7 +511,7 @@ WebProcess::WebProcess()
+@@ -397,7 +548,7 @@ WebProcess::WebProcess()
      addSupplement<WebMediaKeyStorageManager>();
  #endif
  
@@ -189964,20 +190001,20 @@ index 413f8bc09ce0a2d3591b203f12addc32584b9f6e..3ee3e5bd885d2fb40a92e58e8f424495
      addSupplementWithoutRefCountedCheck<UserMediaCaptureManager>();
  #endif
  
-@@ -530,7 +644,12 @@ void WebProcess::initializeWebProcess(WebProcessCreationParameters&& parameters,
+@@ -530,7 +681,12 @@ void WebProcess::initializeWebProcess(WebProcessCreationParameters&& parameters,
              // If this process contains only non-visible content (e.g. only contains background
              // tabs), then treat the memory warning as if it was a critical warning to maximize the
              // amount of memory released for foreground apps to use.
 +            // (On Haiku hidden tabs stay in their windows: count what is shown.)
 +#if OS(HAIKU)
-+            if (!hasVisibleWebPage() && critical == Critical::No)
++            if (!hasVisibleWebPage() && critical == Critical::No && shouldPromoteMemoryWarningHaiku())
 +#else
              if (m_pagesInWindows.isEmpty() && critical == Critical::No)
 +#endif
                  critical = Critical::Yes;
  
              if (JSC::Options::dumpHeapOnLowMemory()) [[unlikely]]
-@@ -732,7 +851,8 @@ void WebProcess::initializeWebProcess(WebProcessCreationParameters&& parameters,
+@@ -732,7 +888,8 @@ void WebProcess::initializeWebProcess(WebProcessCreationParameters&& parameters,
  #define WEBKIT_APPLY_JSC_OPTION_FROM_SHARED_PREFERENCE(jscOption, preferenceField) JSC::Options::jscOption() = jscOptions.preferenceField;
          FOR_EACH_JSC_OPTION_SHARED_PREFERENCE(WEBKIT_APPLY_JSC_OPTION_FROM_SHARED_PREFERENCE)
  #undef WEBKIT_APPLY_JSC_OPTION_FROM_SHARED_PREFERENCE
@@ -189987,7 +190024,7 @@ index 413f8bc09ce0a2d3591b203f12addc32584b9f6e..3ee3e5bd885d2fb40a92e58e8f424495
          if (parameters.crossOriginMode == WebCore::CrossOriginMode::Isolated)
              JSC::Options::useSharedArrayBuffer() = true;
  #endif
-@@ -1112,6 +1232,9 @@ void WebProcess::createWebPage(PageIdentifier pageID, WebPageCreationParameters&
+@@ -1112,6 +1269,9 @@ void WebProcess::createWebPage(PageIdentifier pageID, WebPageCreationParameters&
  
  #if OS(LINUX)
          HighPriorityThreads::singleton().setEnabled(hasVisibleWebPage());
@@ -189997,7 +190034,7 @@ index 413f8bc09ce0a2d3591b203f12addc32584b9f6e..3ee3e5bd885d2fb40a92e58e8f424495
  #endif
      } else
          page->reinitializeWebPage(WTF::move(parameters));
-@@ -1145,6 +1268,9 @@ void WebProcess::removeWebPage(PageIdentifier pageID)
+@@ -1145,6 +1305,9 @@ void WebProcess::removeWebPage(PageIdentifier pageID)
  
  #if OS(LINUX)
      HighPriorityThreads::singleton().setEnabled(hasVisibleWebPage());
@@ -190007,7 +190044,7 @@ index 413f8bc09ce0a2d3591b203f12addc32584b9f6e..3ee3e5bd885d2fb40a92e58e8f424495
  #endif
  }
  
-@@ -1861,6 +1987,13 @@ void WebProcess::pageActivityStateDidChange(PageIdentifier, OptionSet<WebCore::A
+@@ -1861,6 +2024,13 @@ void WebProcess::pageActivityStateDidChange(PageIdentifier, OptionSet<WebCore::A
          HighPriorityThreads::singleton().setEnabled(hasVisibleWebPage());
  #endif
      }
