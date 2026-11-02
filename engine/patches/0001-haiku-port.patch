@@ -100340,10 +100340,10 @@ index 0000000000000000000000000000000000000000..574ed16658f0c14b1aa2e63208e990b8
 +#define WEBKIT_ENGINE_VERSION_HAIKU "@WebKit_HAIKU_MAJOR_VERSION@.@WebKit_HAIKU_MINOR_VERSION@.@WebKit_HAIKU_TINY_VERSION@"
 diff --git a/Source/WebKit/UIProcess/API/haiku/WebKitContext.cpp b/Source/WebKit/UIProcess/API/haiku/WebKitContext.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..2c76fff10685c456df0dc5e232403eb6d0ef51a5
+index 0000000000000000000000000000000000000000..d39ae74acfadd72b9517497ffdaa16af9fa33512
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/API/haiku/WebKitContext.cpp
-@@ -0,0 +1,1449 @@
+@@ -0,0 +1,1512 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#include "config.h"
@@ -100377,6 +100377,8 @@ index 0000000000000000000000000000000000000000..2c76fff10685c456df0dc5e232403eb6
 +#include <wtf/RunLoop.h>
 +#include <wtf/Threading.h>
 +#include "WebViewContextHaiku.h"
++#include "WebProcessPool.h"
++#include "WebProcessProxy.h"
 +#include "SitePermissionsHaiku.h"
 +
 +BWebKitContext::BWebKitContext(const char* profilePath, bool privateBrowsing)
@@ -101576,6 +101578,54 @@ index 0000000000000000000000000000000000000000..2c76fff10685c456df0dc5e232403eb6
 +    return !record.origins.isEmpty() || !record.cookieHostNames.isEmpty();
 +}
 +
++// Every store has a network process of its own on Haiku (WebsiteDataStore's
++// networkProcessForSession), and the browser asks every container's store
++// for its data sizes or clears them all (Preferences, Clear Browsing Data,
++// browsingData). That started a network process for each container, which
++// then stayed until Summit quit (four on the laptop, never used again). Once
++// a container's data operations are done and, 30 s later, none of its pages
++// is open, no other operation runs and nothing downloads, its network
++// process ends; the next use starts it again.
++static HashMap<WebKit::WebsiteDataStore*, unsigned>& containerDataOperationsHaiku()
++{
++    static NeverDestroyed<HashMap<WebKit::WebsiteDataStore*, unsigned>> operations;
++    return operations;
++}
++
++static void beginContainerDataOperationHaiku(const std::shared_ptr<WebKit::WebViewContextHaiku>& context)
++{
++    if (context->container())
++        ++containerDataOperationsHaiku().add(&context->dataStore(), 0).iterator->value;
++}
++
++static void endContainerDataOperationHaiku(const std::shared_ptr<WebKit::WebViewContextHaiku>& context)
++{
++    if (!context->container())
++        return;
++    auto& operations = containerDataOperationsHaiku();
++    Ref store = context->dataStore();
++    auto found = operations.find(store.ptr());
++    if (found != operations.end() && !--found->value)
++        operations.remove(found);
++    RunLoop::mainSingleton().dispatchAfter(30_s, [weakContext = std::weak_ptr<WebKit::WebViewContextHaiku>(context)] {
++        auto context = weakContext.lock();
++        if (!context)
++            return;
++        Ref store = context->dataStore();
++        if (!store->networkProcessIfExists() || containerDataOperationsHaiku().contains(store.ptr()))
++            return;
++        if (context->downloads() && context->downloads()->hasPendingDownloads())
++            return;
++        for (auto& pool : WebKit::WebProcessPool::allProcessPools()) {
++            for (auto& process : pool->processes()) {
++                if (process->websiteDataStore() == store.ptr())
++                    return;
++            }
++        }
++        store->terminateNetworkProcess();
++    });
++}
++
 +void BWebKitContext::FetchWebsiteDataSizes(uint32 types, const BMessenger& reply, uint64 identifier)
 +{
 +    if (m_status != B_OK) {
@@ -101587,8 +101637,10 @@ index 0000000000000000000000000000000000000000..2c76fff10685c456df0dc5e232403eb6
 +    }
 +    auto operation = [context = m_context, types, reply, identifier] {
 +        Ref store = context->dataStore();
++        beginContainerDataOperationHaiku(context);
 +        store->fetchData(websiteDataTypesHaiku(types), WebKit::WebsiteDataFetchOption::ComputeSizes,
-+            [reply, identifier](Vector<WebKit::WebsiteDataRecord> records) mutable {
++            [context, reply, identifier](Vector<WebKit::WebsiteDataRecord> records) mutable {
++                endContainerDataOperationHaiku(context);
 +                BMessage message(B_WEBKIT_WEBSITE_DATA_SIZES);
 +                message.AddUInt64("identifier", identifier);
 +                for (auto& record : records) {
@@ -101627,17 +101679,22 @@ index 0000000000000000000000000000000000000000..2c76fff10685c456df0dc5e232403eb6
 +    auto operation = [context = m_context, types, names = WTF::move(names), respond] {
 +        Ref store = context->dataStore();
 +        const auto dataTypes = websiteDataTypesHaiku(types);
-+        store->fetchData(dataTypes, { }, [store, dataTypes, names, respond](Vector<WebKit::WebsiteDataRecord> records) mutable {
++        beginContainerDataOperationHaiku(context);
++        store->fetchData(dataTypes, { }, [context, store, dataTypes, names, respond](Vector<WebKit::WebsiteDataRecord> records) mutable {
 +            Vector<WebKit::WebsiteDataRecord> removable;
 +            for (auto& record : records) {
 +                if (names.contains(record.displayName) && websiteRecordWithoutExtensionsHaiku(record))
 +                    removable.append(WTF::move(record));
 +            }
 +            if (removable.isEmpty()) {
++                endContainerDataOperationHaiku(context);
 +                respond(nullptr);
 +                return;
 +            }
-+            store->removeData(dataTypes, removable, [respond] { respond(nullptr); });
++            store->removeData(dataTypes, removable, [context, respond] {
++                endContainerDataOperationHaiku(context);
++                respond(nullptr);
++            });
 +        });
 +    };
 +    if (RunLoop::isMain())
@@ -101682,9 +101739,12 @@ index 0000000000000000000000000000000000000000..2c76fff10685c456df0dc5e232403eb6
 +            bySite.add({ WebsiteDataType::ServiceWorkerRegistrations, WebsiteDataType::DOMCache });
 +        Ref store = context->dataStore();
 +        auto pending = std::make_shared<unsigned>(2);
-+        auto finished = [pending, respond] {
-+            if (!--*pending)
++        beginContainerDataOperationHaiku(context);
++        auto finished = [pending, respond, context] {
++            if (!--*pending) {
++                endContainerDataOperationHaiku(context);
 +                respond(nullptr);
++            }
 +        };
 +        if (timed)
 +            store->removeData(timed, WallTime::fromRawSeconds(std::max<int64>(since, 0)), [finished] { finished(); });
@@ -101760,9 +101820,12 @@ index 0000000000000000000000000000000000000000..2c76fff10685c456df0dc5e232403eb6
 +        }
 +        Ref store = context->dataStore();
 +        auto pending = std::make_shared<unsigned>(2);
-+        auto finished = [pending, respond] {
-+            if (!--*pending)
++        beginContainerDataOperationHaiku(context);
++        auto finished = [pending, respond, context] {
++            if (!--*pending) {
++                endContainerDataOperationHaiku(context);
 +                respond(nullptr);
++            }
 +        };
 +        if (whole)
 +            store->removeData(whole, WallTime::fromRawSeconds(0), [finished] { finished(); });

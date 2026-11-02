@@ -44,8 +44,15 @@ heap was 104-127 MiB.
   (repeat 1,962) without, 4 / 1,398 MiB with; the tabs rendered and
   scrolled the same. Tabs of one site then share a main thread.
   `SUMMIT_SHARE_SITE_PROCESSES_BELOW_PERCENT` (30; 0 never, 100 always).
-- **Idle network processes (#165, open).** Four network processes on the
-  laptop started together and never ran a request (55 MiB, 44 threads).
+- **Idle network processes (#165).** Four network processes on the laptop
+  started together and never ran a request (55 MiB, 44 threads): the
+  profile's four containers. Every store has its own network process on
+  Haiku, and the site-data sizes and clearing go to every container's store,
+  which started theirs for good. A container's network process now ends 30 s
+  after its data operations finish if none of its pages is open, nothing else
+  runs on it and nothing downloads. X399 test profile with the same four
+  containers: Clear Cache took it from 1 network process to 5, then back to 1
+  half a minute later, twice; pages kept loading.
 
 ## 31 October 2026: the Cubie A7S (#138): YouTube's re-filtered buttons, click to playback, presents, GPU canvases, AVIF, Clear Key
 
