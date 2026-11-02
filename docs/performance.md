@@ -1,6 +1,6 @@
 # Summit performance: Speedometer 3.1 baseline, where the time goes, stress test
 
-## 2 November 2026: memory with 8-10 tabs on the 16 GB laptop (#163-#171)
+## 2 November 2026: memory with 8-10 tabs on the 16 GB laptop (#163-#172)
 
 The owner's laptop (Ryzen AI 5 340, Radeon 840M, 16 GB) slowed down with 8-10
 tabs. With 7 tabs (5 Jira issues, Proton Mail, YouTube) and three extensions
@@ -70,6 +70,11 @@ heap was 104-127 MiB.
   Removing a content world now destroys its proxies in every frame. X399,
   4 rounds of 7 GitHub navigations in one tab: globals 96 -> 276 before,
   a flat 18 after; after release-memory 188 -> 12 globals, heap 42 MiB.
+- **Bloated background tabs (#172).** Below a quarter of the RAM left, a
+  tab unseen for 30 minutes whose process passed 1 GiB is unloaded, the
+  biggest first (the laptop's Jira tabs reached 0.7-2 GiB in the
+  background). X399 with scaled-down limits: CNN (761 MB), then the Guardian
+  (447 MB) went; smaller tabs stayed.
 - **Hidden tabs' last frames (#171).** The browser kept every tab's last
   frame (one window-sized buffer, about 20 MiB on the laptop at 175%) for as
   long as the tab existed. A view hidden for 10 minutes now drops it and is

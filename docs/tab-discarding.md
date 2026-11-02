@@ -40,6 +40,13 @@ command answered with the new view.
   never fired while the RAM filled. `SUMMIT_UNLOAD_BELOW_MIB` and `SUMMIT_UNLOAD_AFTER_S` change
   the limit and the five minutes; 0 for either turns it off.
 
+- **By itself when memory is getting tight (#172):** below a quarter of
+  the RAM left, a background tab unseen for 30 minutes whose web process has
+  grown past 1 GiB (resident, without app_server's shared screen buffer) is
+  unloaded, the biggest first, one a check; pinned tabs and tabs sharing
+  their process with another tab stay. `SUMMIT_UNLOAD_TIGHT_PERCENT` (25),
+  `SUMMIT_UNLOAD_IDLE_S` (1800), `SUMMIT_UNLOAD_IDLE_MIB` (1024); 0 turns it off.
+
 Preferences › Browsing › Memory has a switch for it ("Unload tabs left in
 the background for 5 minutes when memory runs low", on by default; the
 profile's `unloadWhenMemoryIsLow`); the environment variables still

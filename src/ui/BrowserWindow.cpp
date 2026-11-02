@@ -1778,7 +1778,11 @@ void BrowserWindow::UnloadTabsIfMemoryIsLow()
     const int64 available = static_cast<int64>(info.max_pages - std::min(info.used_pages, info.max_pages)) * B_PAGE_SIZE;
     const int64 below = setting("SUMMIT_UNLOAD_BELOW_MIB", std::max<int64>(512, total / 10 / (1024 * 1024))) * 1024 * 1024;
     int64 after = setting("SUMMIT_UNLOAD_AFTER_S", 300) * 1000000;
-    if (below <= 0 || after <= 0 || available >= below) return;
+    if (below <= 0 || after <= 0) return;
+    if (available >= below) {
+        UnloadBloatedTabsIfMemoryIsTight(available, total, setting);
+        return;
+    }
     if (available < below / 2) after = std::min<int64>(after, 60 * 1000000);
     // One tab a check, the longest unseen first, as long as memory stays low.
     std::vector<Tab*> candidates;
@@ -1789,6 +1793,52 @@ void BrowserWindow::UnloadTabsIfMemoryIsLow()
         const std::string title = tab->title;
         if (DiscardTab(tab->id).empty()) {
             fStatus->SetText(("Unloaded “" + title + "” to free memory; it loads again when you select it.").c_str());
+            return;
+        }
+    }
+}
+
+// Resident memory of a web process, without the screen buffer every one of
+// them maps from app_server (shared, "direct present back buffer").
+static int64 WebProcessResidentBytes(team_id team)
+{
+    int64 bytes = 0;
+    area_info area;
+    ssize_t cookie = 0;
+    while (get_next_area_info(team, &cookie, &area) == B_OK)
+        if (std::strcmp(area.name, "direct present back buffer")) bytes += area.ram_size;
+    return bytes;
+}
+
+// Before memory is low: once less than a quarter of the RAM is left, a tab
+// unseen for half an hour whose web process has grown past 1 GiB is unloaded,
+// the biggest first, one a check. Long-running web apps grow to 1-2 GiB in the
+// background (the laptop's Jira tabs 0.7-2 GiB, Todoist 1.1 GiB on 2 Nov) and
+// little of it comes back without a reload. Pinned tabs and tabs sharing their
+// process with another tab of this window stay. SUMMIT_UNLOAD_TIGHT_PERCENT
+// (25), SUMMIT_UNLOAD_IDLE_S (1800) and SUMMIT_UNLOAD_IDLE_MIB (1024) change
+// the limits; 0 for any turns this off.
+void BrowserWindow::UnloadBloatedTabsIfMemoryIsTight(int64 available, int64 total, const std::function<int64(const char*, int64)>& setting)
+{
+    const int64 percent = setting("SUMMIT_UNLOAD_TIGHT_PERCENT", 25);
+    const int64 idle = setting("SUMMIT_UNLOAD_IDLE_S", 1800) * 1000000;
+    const int64 minimum = setting("SUMMIT_UNLOAD_IDLE_MIB", 1024) * 1024 * 1024;
+    if (percent <= 0 || idle <= 0 || minimum <= 0 || available * 100 >= total * percent) return;
+    std::map<int32, int> tabsPerProcess;
+    for (const auto& tab : fTabs) if (tab.processID > 0) ++tabsPerProcess[tab.processID];
+    std::vector<std::pair<int64, Tab*>> candidates;
+    for (auto& tab : fTabs) {
+        if (tab.id == fSelected || tab.pinned || !tab.deferredURL.empty() || tab.processID <= 0
+            || tabsPerProcess[tab.processID] > 1 || system_time() - tab.lastSelected < idle) continue;
+        const int64 size = WebProcessResidentBytes(tab.processID);
+        if (size >= minimum) candidates.emplace_back(size, &tab);
+    }
+    std::sort(candidates.begin(), candidates.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+    for (auto& [size, tab] : candidates) {
+        const std::string title = tab->title;
+        if (DiscardTab(tab->id).empty()) {
+            fStatus->SetText(("Unloaded “" + title + "” (" + std::to_string(size / (1024 * 1024))
+                + " MB, unused for a while) to free memory; it loads again when you select it.").c_str());
             return;
         }
     }
