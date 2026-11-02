@@ -4179,10 +4179,23 @@ index 2937c45683dde863d5608345f399b32a83f6f960..90a7927b7fbe428501086d1ba3ed36ed
      || OS(QNX)                 \
      || OS(WINDOWS)
 diff --git a/Source/WTF/wtf/PlatformEnable.h b/Source/WTF/wtf/PlatformEnable.h
-index 9c73a375b327ba6a86c1454d3a8d7efcbdf92cfe..aabc1d87917de049588af107db12d0d7a27bbbb8 100644
+index 9c73a375b327ba6a86c1454d3a8d7efcbdf92cfe..e255539c60a40cdaf5cd73c76674a6d6a28873b7 100644
 --- a/Source/WTF/wtf/PlatformEnable.h
 +++ b/Source/WTF/wtf/PlatformEnable.h
-@@ -315,6 +315,14 @@
+@@ -220,6 +220,12 @@
+ #define ENABLE_DEVICE_ORIENTATION 0
+ #endif
+ 
++/* Skia draws Display P3 (canvas colorSpace "display-p3", P3 images) as on
++   GTK and WPE. */
++#if !defined(ENABLE_DESTINATION_COLOR_SPACE_DISPLAY_P3) && PLATFORM(HAIKU) && USE(SKIA)
++#define ENABLE_DESTINATION_COLOR_SPACE_DISPLAY_P3 1
++#endif
++
+ #if !defined(ENABLE_DESTINATION_COLOR_SPACE_DISPLAY_P3)
+ #define ENABLE_DESTINATION_COLOR_SPACE_DISPLAY_P3 0
+ #endif
+@@ -315,6 +321,14 @@
  #define ENABLE_INSPECTOR_TELEMETRY 0
  #endif
  
@@ -4197,7 +4210,7 @@ index 9c73a375b327ba6a86c1454d3a8d7efcbdf92cfe..aabc1d87917de049588af107db12d0d7
  #if !defined(ENABLE_KINETIC_SCROLLING)
  #define ENABLE_KINETIC_SCROLLING 0
  #endif
-@@ -522,6 +530,30 @@
+@@ -522,6 +536,30 @@
  #define ENABLE_RESOURCE_USAGE 0
  #endif
  
@@ -4228,7 +4241,7 @@ index 9c73a375b327ba6a86c1454d3a8d7efcbdf92cfe..aabc1d87917de049588af107db12d0d7
  #if !defined(ENABLE_SCROLLING_THREAD)
  #define ENABLE_SCROLLING_THREAD 0
  #endif
-@@ -1068,6 +1100,12 @@
+@@ -1068,6 +1106,12 @@
  #error "ENABLE(WEBXR_LAYERS) requires ENABLE(WEBXR)"
  #endif
  
@@ -4270,6 +4283,19 @@ index c466c25cf60489517be9b9bcffe952ae0622261e..7272fa366d9997f36e768021bb073dbc
  
  add_definitions(-D_DEFAULT_SOURCE)
 -
+diff --git a/Source/WTF/wtf/PlatformHave.h b/Source/WTF/wtf/PlatformHave.h
+index b9db4bb269e902e0c3064143aa3ed1ad361ecff6..0d3f033e859ea4c1d5242809ec85738e7e3df81b 100644
+--- a/Source/WTF/wtf/PlatformHave.h
++++ b/Source/WTF/wtf/PlatformHave.h
+@@ -575,7 +575,7 @@
+ #define HAVE_APP_SSO 1
+ #endif
+ 
+-#if PLATFORM(COCOA) || PLATFORM(GTK) || PLATFORM(WPE)
++#if PLATFORM(COCOA) || PLATFORM(GTK) || PLATFORM(WPE) || PLATFORM(HAIKU)
+ #define HAVE_COOKIE_CHANGE_LISTENER_API 1
+ #endif
+ 
 diff --git a/Source/WTF/wtf/PlatformRegisters.h b/Source/WTF/wtf/PlatformRegisters.h
 index 37efb86df101ead42bb909421bfce1c9a47e683a..b3df25d8c5dcaa68426dd7122657c0e0fd3739ca 100644
 --- a/Source/WTF/wtf/PlatformRegisters.h
@@ -89552,25 +89578,27 @@ index 7c9075474552a6beaffbeffe6838dd4e5b24b0d0..74fe55e1e669a9abf183be97b68e71ef
  
  } // namespace WebKit
 diff --git a/Source/WebKit/NetworkProcess/curl/NetworkStorageSessionCurl.cpp b/Source/WebKit/NetworkProcess/curl/NetworkStorageSessionCurl.cpp
-index 20aff066ab01aa0fa12c7bf47741b0109d927eea..6f25341b0382b3f9c79fed53f2fb6e7438c42974 100644
+index 20aff066ab01aa0fa12c7bf47741b0109d927eea..2d2302f5fdbdc9695bfb7730eba100bdc871a743 100644
 --- a/Source/WebKit/NetworkProcess/curl/NetworkStorageSessionCurl.cpp
 +++ b/Source/WebKit/NetworkProcess/curl/NetworkStorageSessionCurl.cpp
-@@ -31,12 +31,14 @@
+@@ -31,12 +31,16 @@
  #include <WebCore/Cookie.h>
  #include <WebCore/CookieJarDB.h>
  #include <WebCore/CookieStoreGetOptions.h>
 +#include <WebCore/CookieUtil.h>
  #include <WebCore/CurlContext.h>
++#include <WebCore/Site.h>
  #include <WebCore/HTTPCookieAcceptPolicy.h>
  #include <optional>
  #include <wtf/FileSystem.h>
++#include <wtf/SharedTask.h>
  #include <wtf/URL.h>
  #include <wtf/Vector.h>
 +#include <wtf/WallTime.h>
  #include <wtf/text/MakeString.h>
  #include <wtf/text/StringBuilder.h>
  
-@@ -65,7 +67,50 @@ static String alternativeServicesStorageFile(const String& alternativeServicesDi
+@@ -65,7 +69,50 @@ static String alternativeServicesStorageFile(const String& alternativeServicesDi
      return FileSystem::pathByAppendingComponent(alternativeServicesDirectory, defaultFileName);
  }
  
@@ -89622,7 +89650,7 @@ index 20aff066ab01aa0fa12c7bf47741b0109d927eea..6f25341b0382b3f9c79fed53f2fb6e74
  {
      StringBuilder cookies;
      bool didAccessSecureCookies = false;
-@@ -74,6 +119,15 @@ static std::pair<String, bool> cookiesForSession(const NetworkStorageSession& se
+@@ -74,6 +121,15 @@ static std::pair<String, bool> cookiesForSession(const NetworkStorageSession& se
  
      if (auto result = session.cookieDatabase().searchCookies(firstParty, url, searchHTTPOnly, secure, std::nullopt)) {
          for (const auto& cookie : *result) {
@@ -89638,24 +89666,140 @@ index 20aff066ab01aa0fa12c7bf47741b0109d927eea..6f25341b0382b3f9c79fed53f2fb6e74
              if (!cookies.isEmpty())
                  cookies.append("; "_s);
              if (!cookie.name.isEmpty())
-@@ -105,7 +159,16 @@ NetworkStorageSession::~NetworkStorageSession()
+@@ -100,30 +156,196 @@ NetworkStorageSession::NetworkStorageSession(PAL::SessionID sessionID, const Str
+ 
+ NetworkStorageSession::~NetworkStorageSession()
+ {
++    m_cookieDatabase->setCookieChangeHandler(nullptr);
+     clearCookiesVersionChangeCallbacks();
+ }
  
  void NetworkStorageSession::setCookieDatabase(UniqueRef<CookieJarDB>&& cookieDatabase)
  {
 +    m_cookieDatabase->setCookieChangeHandler(nullptr);
      m_cookieDatabase = WTF::move(cookieDatabase);
-+    if (m_cookieChangeHandler)
-+        this->cookieDatabase().setCookieChangeHandler(m_cookieChangeHandler.copyRef());
-+}
-+
++    if (m_cookieDatabaseChangeHandler)
++        this->cookieDatabase().setCookieChangeHandler(m_cookieDatabaseChangeHandler.copyRef());
+ }
+ 
 +void NetworkStorageSession::setCookieChangeHandler(RefPtr<CookieJarDB::ChangeHandler>&& handler)
 +{
 +    m_cookieChangeHandler = WTF::move(handler);
-+    cookieDatabase().setCookieChangeHandler(m_cookieChangeHandler.copyRef());
- }
- 
++    updateCookieDatabaseChangeHandler();
++}
++
++void NetworkStorageSession::updateCookieDatabaseChangeHandler()
++{
++    // The jar keeps an expiry timer while it has a handler: install one only
++    // while someone listens.
++#if HAVE(COOKIE_CHANGE_LISTENER_API)
++    bool wanted = m_cookieChangeHandler || !m_cookieChangeObservers.isEmpty();
++#else
++    bool wanted = !!m_cookieChangeHandler;
++#endif
++    if (wanted == !!m_cookieDatabaseChangeHandler)
++        return;
++    if (wanted) {
++        m_cookieDatabaseChangeHandler = createSharedTask<void(Vector<CookieChange>&&)>([this](Vector<CookieChange>&& changes) {
++            cookieDatabaseDidChange(WTF::move(changes));
++        });
++    } else
++        m_cookieDatabaseChangeHandler = nullptr;
++    cookieDatabase().setCookieChangeHandler(m_cookieDatabaseChangeHandler.copyRef());
++}
++
++#if HAVE(COOKIE_CHANGE_LISTENER_API)
++static bool isSameCookieRow(const Cookie& a, const Cookie& b)
++{
++    return a.name == b.name && a.domain == b.domain && a.path == b.path && a.partitionKey == b.partitionKey;
++}
++
++#endif
++
++void NetworkStorageSession::cookieDatabaseDidChange(Vector<CookieChange>&& changes)
++{
++#if HAVE(COOKIE_CHANGE_LISTENER_API)
++    // cookieStore change listeners (Summit #147), by host, as the soup port
++    // reports them: a cookie that replaces another is one change, not a
++    // deletion and an addition; HttpOnly cookies are never reported. A
++    // partitioned cookie goes only to the host whose own site partitions it.
++    if (!m_cookieChangeObservers.isEmpty()) {
++        for (auto& host : copyToVector(m_cookieChangeObservers.keys())) {
++            Vector<Cookie> added;
++            Vector<Cookie> deleted;
++            String hostSite;
++            for (auto& change : changes) {
++                auto& cookie = change.cookie;
++                if (cookie.httpOnly || !CookieUtil::domainMatch(cookie.domain.convertToASCIILowercase(), host))
++                    continue;
++                if (!cookie.partitionKey.isEmpty()) {
++                    if (hostSite.isNull())
++                        hostSite = Site { URL { makeString("https://"_s, host, '/') } }.toString();
++                    if (cookie.partitionKey != hostSite)
++                        continue;
++                }
++                if (!change.removed) {
++                    added.append(cookie);
++                    continue;
++                }
++                bool replaced = changes.containsIf([&](auto& other) {
++                    return !other.removed && isSameCookieRow(other.cookie, cookie);
++                });
++                if (!replaced)
++                    deleted.append(cookie);
++            }
++            if (added.isEmpty() && deleted.isEmpty())
++                continue;
++            auto observers = m_cookieChangeObservers.getOptional(host);
++            if (!observers)
++                continue;
++            for (auto& observer : *observers) {
++                if (!deleted.isEmpty())
++                    observer.cookiesDeleted(host, deleted);
++                if (!added.isEmpty())
++                    observer.cookiesAdded(host, added);
++            }
++        }
++    }
++#endif
++
++    if (RefPtr handler = m_cookieChangeHandler)
++        handler->run(WTF::move(changes));
++}
++
++#if HAVE(COOKIE_CHANGE_LISTENER_API)
++bool NetworkStorageSession::startListeningForCookieChangeNotifications(CookieChangeObserver& observer, const URL& url, const URL& firstParty, FrameIdentifier frameID, WebPageProxyIdentifier webPageProxyID, ShouldRelaxThirdPartyCookieBlocking shouldRelaxThirdPartyCookieBlocking, IsKnownCrossSiteTracker isKnownCrossSiteTracker)
++{
++    if (shouldBlockCookies(firstParty, url, frameID, webPageProxyID, shouldRelaxThirdPartyCookieBlocking, isKnownCrossSiteTracker))
++        return false;
++
++    auto host = url.host().convertToASCIILowercase();
++    if (host.isEmpty())
++        return false;
++    m_cookieChangeObservers.ensure(host, [] {
++        return WeakHashSet<CookieChangeObserver> { };
++    }).iterator->value.add(observer);
++    updateCookieDatabaseChangeHandler();
++    return true;
++}
++
++void NetworkStorageSession::stopListeningForCookieChangeNotifications(CookieChangeObserver& observer, const HashSet<String>& hosts)
++{
++    for (auto& host : hosts) {
++        auto it = m_cookieChangeObservers.find(host.convertToASCIILowercase());
++        if (it == m_cookieChangeObservers.end())
++            continue;
++        it->value.remove(observer);
++        if (it->value.isEmptyIgnoringNullReferences())
++            m_cookieChangeObservers.remove(it);
++    }
++    updateCookieDatabaseChangeHandler();
++}
++#endif
++
  CookieJarDB& NetworkStorageSession::cookieDatabase() const
-@@ -114,16 +177,63 @@ CookieJarDB& NetworkStorageSession::cookieDatabase() const
+ {
+     m_cookieDatabase->open();
      return m_cookieDatabase;
  }
  
@@ -89722,7 +89866,7 @@ index 20aff066ab01aa0fa12c7bf47741b0109d927eea..6f25341b0382b3f9c79fed53f2fb6e74
  }
  
  void NetworkStorageSession::setCookiesFromHTTPResponse(const URL& firstParty, const URL& url, const String& value) const
-@@ -153,15 +263,45 @@ HTTPCookieAcceptPolicy NetworkStorageSession::cookieAcceptPolicy() const
+@@ -153,15 +375,45 @@ HTTPCookieAcceptPolicy NetworkStorageSession::cookieAcceptPolicy() const
      return HTTPCookieAcceptPolicy::OnlyFromMainDocumentDomain;
  }
  
@@ -89772,7 +89916,7 @@ index 20aff066ab01aa0fa12c7bf47741b0109d927eea..6f25341b0382b3f9c79fed53f2fb6e74
  }
  
  void NetworkStorageSession::setCookies(const Vector<Cookie>& cookies, const URL&, const URL& /* mainDocumentURL */)
-@@ -182,8 +322,7 @@ void NetworkStorageSession::setCookie(const Cookie& cookie, const URL&, const UR
+@@ -182,8 +434,7 @@ void NetworkStorageSession::setCookie(const Cookie& cookie, const URL&, const UR
  
  void NetworkStorageSession::deleteCookie(const Cookie& cookie, CompletionHandler<void()>&& completionHandler)
  {
@@ -89782,7 +89926,7 @@ index 20aff066ab01aa0fa12c7bf47741b0109d927eea..6f25341b0382b3f9c79fed53f2fb6e74
      completionHandler();
  }
  
-@@ -199,9 +338,9 @@ void NetworkStorageSession::deleteAllCookies(CompletionHandler<void()>&& complet
+@@ -199,9 +450,9 @@ void NetworkStorageSession::deleteAllCookies(CompletionHandler<void()>&& complet
      completionHandler();
  }
  
@@ -89794,7 +89938,7 @@ index 20aff066ab01aa0fa12c7bf47741b0109d927eea..6f25341b0382b3f9c79fed53f2fb6e74
      completionHandler();
  }
  
-@@ -222,31 +361,59 @@ void NetworkStorageSession::getHostnamesWithCookies(HashSet<String>& hostnames)
+@@ -222,31 +473,59 @@ void NetworkStorageSession::getHostnamesWithCookies(HashSet<String>& hostnames)
      hostnames = cookieDatabase().allDomains();
  }
  
@@ -98163,7 +98307,7 @@ index 93795a9a7c59feb8b5fcccdbb0f79c4f722057fc..f19c98f29bb5248399327be62e660987
      const auto decideThirdPartyCookieBlocking = [isOptInCookiePartitioningEnabled = isOptInCookiePartitioningEnabled()] (bool shouldAllowUnpartitionedCookies) {
          if (shouldAllowUnpartitionedCookies)
 diff --git a/Source/WebKit/Shared/NetworkStorageSession.h b/Source/WebKit/Shared/NetworkStorageSession.h
-index 04bfb854a2dae611ac4afa90715c69dafcea9def..2fecf75852ff63db9504d0330b5bc3c0fa4ade16 100644
+index 04bfb854a2dae611ac4afa90715c69dafcea9def..910a59257c6867b235e36676033d28aaae85bf29 100644
 --- a/Source/WebKit/Shared/NetworkStorageSession.h
 +++ b/Source/WebKit/Shared/NetworkStorageSession.h
 @@ -135,6 +135,7 @@ public:
@@ -98174,11 +98318,18 @@ index 04bfb854a2dae611ac4afa90715c69dafcea9def..2fecf75852ff63db9504d0330b5bc3c0
      void setCookiesFromHTTPResponse(const URL& firstParty, const URL&, const String&) const;
      void setCookieAcceptPolicy(WebCore::CookieAcceptPolicy) const;
      void setProxySettings(const WebCore::CurlProxySettings&);
-@@ -268,6 +269,7 @@ private:
+@@ -267,7 +268,14 @@ private:
+     GRefPtr<SoupCookieJar> m_cookieStorage;
      Function<void ()> m_cookieObserverHandler;
  #elif USE(CURL)
++    // The jar has one change handler: it serves both the cookie observer
++    // (setCookieChangeHandler) and the cookieStore change listeners.
++    void updateCookieDatabaseChangeHandler();
++    void cookieDatabaseDidChange(Vector<WebCore::CookieChange>&&);
++
      mutable UniqueRef<WebCore::CookieJarDB> m_cookieDatabase;
 +    RefPtr<WebCore::CookieJarDB::ChangeHandler> m_cookieChangeHandler;
++    RefPtr<WebCore::CookieJarDB::ChangeHandler> m_cookieDatabaseChangeHandler;
  #endif
  
  #if HAVE(COOKIE_CHANGE_LISTENER_API)
@@ -149839,10 +149990,10 @@ index 0000000000000000000000000000000000000000..c9a119d02f85b7c5ad8fe9153bfc9604
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/WebView.cpp b/Source/WebKit/UIProcess/haiku/WebView.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..d92cdfcef9e82d1f9e83fe27cc3c3656aff8a3dd
+index 0000000000000000000000000000000000000000..68ab4c113ab2730c4fcad3287cde254660e2c0fb
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/WebView.cpp
-@@ -0,0 +1,3610 @@
+@@ -0,0 +1,3614 @@
 +/*
 + * Copyright (C) 2013 Intel Corporation. All rights reserved.
 + *
@@ -151869,6 +152020,11 @@ index 0000000000000000000000000000000000000000..d92cdfcef9e82d1f9e83fe27cc3c3656
 +    configuration->preferences().setScopedCustomElementRegistryEnabled(!summitPreferenceOffHaiku("scoped"));
 +    configuration->preferences().setEnableElementCurrentCSSZoom(!summitPreferenceOffHaiku("zoom"));
 +    configuration->preferences().setCSSFontVariantEmojiEnabled(!summitPreferenceOffHaiku("emoji"));
++#if ENABLE(PREDEFINED_COLOR_SPACE_DISPLAY_P3)
++    // Canvas and ImageData colorSpace "display-p3" (Safari 15.2), drawn by
++    // Skia; the screen is still treated as sRGB.
++    configuration->preferences().setCanvasColorSpaceEnabled(!summitPreferenceOffHaiku("p3"));
++#endif
 +    // <input type=checkbox switch> (Safari 17.4), drawn by the Adwaita
 +    // toggle button control (ToggleButtonAdwaita::drawSwitch).
 +    configuration->preferences().setSwitchControlEnabled(!summitPreferenceOffHaiku("switch"));
@@ -151879,9 +152035,8 @@ index 0000000000000000000000000000000000000000..d92cdfcef9e82d1f9e83fe27cc3c3656
 +    // setting httpsFirst (BWebKitView::SetPageSettings).
 +    if (const char* httpsFirst = std::getenv("SUMMIT_HTTPS_FIRST"); !httpsFirst || std::strcmp(httpsFirst, "0"))
 +        configuration->preferences().setHTTPSByDefaultEnabled(true);
-+    // cookieStore (get, set, delete; Safari 18.4), on the curl cookie jar
-+    // (NetworkStorageSessionCurl.cpp). No change events yet: they need the
-+    // cookie change listener API (HAVE_COOKIE_CHANGE_LISTENER_API).
++    // cookieStore (get, set, delete and change events; Safari 18.4), on the
++    // curl cookie jar (NetworkStorageSessionCurl.cpp reports its changes).
 +    // SUMMIT_COOKIE_STORE=0 hides it.
 +    if (const char* cookieStore = std::getenv("SUMMIT_COOKIE_STORE"); !cookieStore || std::strcmp(cookieStore, "0"))
 +        configuration->preferences().setCookieStoreAPIEnabled(true);
@@ -187998,6 +188153,19 @@ index ef7265c051a15504903ee0421ca40f29d7b47b9c..a8aeff45e3fcdd7b4142cf5751ed95f0
  #endif
      const std::unique_ptr<WebCore::WheelEventDeltaFilter> m_recentWheelEventDeltaFilter;
  #if ENABLE(IOS_TOUCH_EVENTS)
+diff --git a/Source/WebKit/WebProcess/WebPage/WebCookieCache.cpp b/Source/WebKit/WebProcess/WebPage/WebCookieCache.cpp
+index f324721687b09bd595afac6a2125075b3d5f0d5d..93434044baaaf0ef869153f5b8b737521c82ee25 100644
+--- a/Source/WebKit/WebProcess/WebPage/WebCookieCache.cpp
++++ b/Source/WebKit/WebProcess/WebPage/WebCookieCache.cpp
+@@ -41,7 +41,7 @@ WebCookieCache::~WebCookieCache() = default;
+ 
+ bool WebCookieCache::isSupported()
+ {
+-#if HAVE(COOKIE_CHANGE_LISTENER_API)
++#if HAVE(COOKIE_CHANGE_LISTENER_API) && !USE(CURL)
+     return true;
+ #else
+     return false;
 diff --git a/Source/WebKit/WebProcess/WebPage/WebCookieJar.cpp b/Source/WebKit/WebProcess/WebPage/WebCookieJar.cpp
 index 79d0d01bad64d238a36b8159489bb510891fc025..14ee124a340455b53b33b67501df01a880a15f48 100644
 --- a/Source/WebKit/WebProcess/WebPage/WebCookieJar.cpp
@@ -207448,10 +207616,10 @@ index 359c3765d3a41ba1c6cfdb6b44fa292cc7811a0d..18a4d1524bbb7a68b2bec420d013fd89
  endif ()
 diff --git a/Source/cmake/OptionsHaiku.cmake b/Source/cmake/OptionsHaiku.cmake
 new file mode 100644
-index 0000000000000000000000000000000000000000..95bb2baffafb32af87e361985c9ccb7394a35954
+index 0000000000000000000000000000000000000000..70a9bbfce8feba3d307a3ef92c2bc8cc64c26753
 --- /dev/null
 +++ b/Source/cmake/OptionsHaiku.cmake
-@@ -0,0 +1,400 @@
+@@ -0,0 +1,404 @@
 +include(GNUInstallDirs)
 +include(VersioningUtils)
 +
@@ -207610,6 +207778,10 @@ index 0000000000000000000000000000000000000000..95bb2baffafb32af87e361985c9ccb73
 +
 +# Canvas hit regions use exact Skia path intersection/subtraction.
 +WEBKIT_OPTION_DEPEND(ENABLE_CANVAS_HIT_REGIONS USE_SKIA)
++# Canvas colorSpace "display-p3" (Safari's CanvasColorSpaceEnabled): Skia
++# draws in Display P3 (ENABLE_DESTINATION_COLOR_SPACE_DISPLAY_P3 in WTF).
++WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_PREDEFINED_COLOR_SPACE_DISPLAY_P3 PRIVATE ON)
++WEBKIT_OPTION_DEPEND(ENABLE_PREDEFINED_COLOR_SPACE_DISPLAY_P3 USE_SKIA)
 +WEBKIT_OPTION_END()
 +
 +# Skia needs HarfBuzz for shaping; the ICU component provides the Unicode
