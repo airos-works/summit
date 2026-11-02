@@ -1,6 +1,6 @@
 # Summit performance: Speedometer 3.1 baseline, where the time goes, stress test
 
-## 2 November 2026: memory with 8-10 tabs on the 16 GB laptop (#163-#166)
+## 2 November 2026: memory with 8-10 tabs on the 16 GB laptop (#163-#167)
 
 The owner's laptop (Ryzen AI 5 340, Radeon 840M, 16 GB) slowed down with 8-10
 tabs. With 7 tabs (5 Jira issues, Proton Mail, YouTube) and three extensions
@@ -51,6 +51,14 @@ heap was 104-127 MiB.
   (repeat 1,962) without, 4 / 1,398 MiB with; the tabs rendered and
   scrolled the same. Tabs of one site then share a main thread.
   `SUMMIT_SHARE_SITE_PROCESSES_BELOW_PERCENT` (30; 0 never, 100 always).
+- **Global objects collected per page probe (#167).** The browser's page
+  probes (reader, language, forms) each run in a nameless content world; a
+  frame's `WindowProxy` kept a JS window proxy for every world that ever ran
+  in it and gave each a new global object on every navigation. The laptop's
+  GitHub tab held 249 global objects for 28 documents (410 MiB live heap).
+  Removing a content world now destroys its proxies in every frame. X399,
+  4 rounds of 7 GitHub navigations in one tab: globals 96 -> 276 before,
+  a flat 18 after; after release-memory 188 -> 12 globals, heap 42 MiB.
 - **Idle network processes (#165).** Four network processes on the laptop
   started together and never ran a request (55 MiB, 44 threads): the
   profile's four containers. Every store has its own network process on

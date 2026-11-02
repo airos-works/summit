@@ -180669,10 +180669,49 @@ index 063e6a1b0f47203ce11412d537ad0f39a276109e..2ae7ee4b92d808161e008bdffe703d9f
  using LibWebRTCProviderBase = WebCore::LibWebRTCProvider;
  #endif
 diff --git a/Source/WebKit/WebProcess/UserContent/WebUserContentController.cpp b/Source/WebKit/WebProcess/UserContent/WebUserContentController.cpp
-index 0bee0bf3b5ae9763dfb432633b8be87047ebe269..47185559e3e7abdf60fe7a0f85fc6ac526f4ac4f 100644
+index 0bee0bf3b5ae9763dfb432633b8be87047ebe269..212abb6a1855b0d7fc0e1388d1fce44f9d325bc6 100644
 --- a/Source/WebKit/WebProcess/UserContent/WebUserContentController.cpp
 +++ b/Source/WebKit/WebProcess/UserContent/WebUserContentController.cpp
-@@ -247,6 +247,9 @@ void WebUserContentController::removeAllUserScripts(const Vector<ContentWorldIde
+@@ -46,7 +46,9 @@
+ #include <JavaScriptCore/JSContextRef.h>
+ #include <JavaScriptCore/JSLock.h>
+ #include <JavaScriptCore/JSRetainPtr.h>
++#include <WebCore/CommonVM.h>
+ #include <WebCore/DOMWrapperWorld.h>
++#include <WebCore/WindowProxy.h>
+ #include <WebCore/Document.h>
+ #include <WebCore/FrameDestructionObserverInlines.h>
+ #include <WebCore/FrameLoader.h>
+@@ -203,6 +205,28 @@ void WebUserContentController::removeContentWorld(ContentWorldIdentifier worldId
+         return;
+     }
+ 
++#if PLATFORM(HAIKU)
++    // A frame's WindowProxy keeps a JS window proxy for every world that ever
++    // ran in it, and each navigation gives every one of them a new global
++    // object for the new document (WindowProxy::setDOMWindow). The browser
++    // runs its page probes (reader, language, forms) each in a world of its
++    // own, so a long-lived tab collected one more world per probe: on the
++    // laptop a GitHub tab held 249 global objects for 28 documents, and every
++    // navigation re-created all of them. When the world goes, so do its
++    // proxies.
++    {
++        Ref coreWorld = it->value->coreWorld();
++        JSC::JSLockHolder lock(WebCore::commonVM());
++        Page::forEachPage([&](Page& page) {
++            for (RefPtr<Frame> frame = &page.mainFrame(); frame; frame = frame->tree().traverseNext()) {
++                Ref windowProxy = frame->windowProxy();
++                if (windowProxy->existingJSWindowProxy(coreWorld))
++                    windowProxy->destroyJSWindowProxy(coreWorld);
++            }
++        });
++    }
++#endif
++
+     worldMap().remove(it);
+ }
+ 
+@@ -247,6 +271,9 @@ void WebUserContentController::removeAllUserScripts(const Vector<ContentWorldIde
  
  void WebUserContentController::addUserStyleSheets(Vector<WebUserStyleSheetData>&& userStyleSheets)
  {
@@ -180682,7 +180721,7 @@ index 0bee0bf3b5ae9763dfb432633b8be87047ebe269..47185559e3e7abdf60fe7a0f85fc6ac5
      for (auto& userStyleSheetData : userStyleSheets) {
          addContentWorldIfNecessary(userStyleSheetData.worldData);
          RefPtr world = worldMap().get(userStyleSheetData.worldData.identifier);
-@@ -256,9 +259,21 @@ void WebUserContentController::addUserStyleSheets(Vector<WebUserStyleSheetData>&
+@@ -256,9 +283,21 @@ void WebUserContentController::addUserStyleSheets(Vector<WebUserStyleSheetData>&
          }
          
          UserStyleSheet sheet = userStyleSheetFromData(WTF::move(userStyleSheetData.userStyleSheet));
