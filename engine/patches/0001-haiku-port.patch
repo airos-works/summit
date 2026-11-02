@@ -149187,10 +149187,10 @@ index 0000000000000000000000000000000000000000..c9a119d02f85b7c5ad8fe9153bfc9604
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/WebView.cpp b/Source/WebKit/UIProcess/haiku/WebView.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..dba85e9eca87f6a2eadbd656d7fb1006a0aba33e
+index 0000000000000000000000000000000000000000..d92cdfcef9e82d1f9e83fe27cc3c3656aff8a3dd
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/WebView.cpp
-@@ -0,0 +1,3600 @@
+@@ -0,0 +1,3610 @@
 +/*
 + * Copyright (C) 2013 Intel Corporation. All rights reserved.
 + *
@@ -151087,6 +151087,14 @@ index 0000000000000000000000000000000000000000..dba85e9eca87f6a2eadbd656d7fb1006
 +    // non-composited renderer, which paints the page on one thread.
 +    configuration->preferences().setAcceleratedCompositingEnabled(true);
 +    configuration->preferences().setForceCompositingMode(true);
++    // A hidden page's timer chains (nested five deep, such as polling loops)
++    // fire at most once a second, as on Cocoa and GTK (WebCore's hidden page
++    // DOM timer throttling; the preference is off on other ports). It does
++    // not reach timers started from animation frames or message events, such
++    // as Jira's render loop (#173). SUMMIT_HIDDEN_TIMER_THROTTLING=0 turns it
++    // off.
++    if (const char* throttling = std::getenv("SUMMIT_HIDDEN_TIMER_THROTTLING"); !throttling || std::strcmp(throttling, "0"))
++        configuration->preferences().setHiddenPageDOMTimerThrottlingEnabled(true);
 +    configuration->preferences().setThreadedScrollingEnabled(true);
 +#if ENABLE(DAMAGE_TRACKING)
 +    // Frames carry what changed, so the readback and app_server copy only
@@ -152023,8 +152031,10 @@ index 0000000000000000000000000000000000000000..dba85e9eca87f6a2eadbd656d7fb1006
 +        m_page->setIntrinsicDeviceScaleFactor(current.scale);
 +    if (auto* drawingArea = m_page->drawingArea())
 +        drawingArea->setSize(current.size);
++    // IsVisuallyIdle (not shown) is what lets WebCore throttle a hidden
++    // page's timers (Page::updateTimerThrottlingState).
 +    m_page->activityStateDidChange({ ActivityState::IsFocused, ActivityState::WindowIsActive,
-+        ActivityState::IsVisible, ActivityState::IsInWindow });
++        ActivityState::IsVisible, ActivityState::IsInWindow, ActivityState::IsVisuallyIdle });
 +    if (!current.visible && m_presentationCallback)
 +        std::exchange(m_presentationCallback, { })();
 +    // A view hidden for ten minutes lets go of the frame it keeps for being
