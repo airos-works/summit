@@ -11,6 +11,14 @@ which on this APU is system RAM. Each Jira tab's process held 700-1,270 MiB,
 almost all of it mimalloc/JavaScriptCore memory, while its live JavaScript
 heap was 104-127 MiB.
 
+- **Together** (X399, 10 tabs: two Wikipedia, two GitHub, YouTube, Reddit,
+  CNN, Guardian, MDN, Stack Overflow; one shown; all Summit processes 4
+  minutes after loading, two runs each in alternating order): with the
+  hidden-process release, same-site sharing (forced, as when memory is low)
+  and the hidden-frame release switched off, 4,443 and 4,968 MiB in 15 web
+  processes; with them on (timers shortened to 60/120 s), 3,625 and 3,940 MiB
+  in 13. About 920 MiB (20%) less, before #167 (not switchable) and before
+  unloading, which only acts when memory is low.
 - **Low-memory unloading never ran (#163).** It compared
   `system_info.free_memory`, which on Haiku counts the swap file, against
   the limit: 14.3 GB "free" while the RAM was 92% used. It now uses
