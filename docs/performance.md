@@ -1,6 +1,6 @@
 # Summit performance: Speedometer 3.1 baseline, where the time goes, stress test
 
-## 2 November 2026: memory with 8-10 tabs on the 16 GB laptop (#163-#167)
+## 2 November 2026: memory with 8-10 tabs on the 16 GB laptop (#163-#171)
 
 The owner's laptop (Ryzen AI 5 340, Radeon 840M, 16 GB) slowed down with 8-10
 tabs. With 7 tabs (5 Jira issues, Proton Mail, YouTube) and three extensions
@@ -62,6 +62,12 @@ heap was 104-127 MiB.
   Removing a content world now destroys its proxies in every frame. X399,
   4 rounds of 7 GitHub navigations in one tab: globals 96 -> 276 before,
   a flat 18 after; after release-memory 188 -> 12 globals, heap 42 MiB.
+- **Hidden tabs' last frames (#171).** The browser kept every tab's last
+  frame (one window-sized buffer, about 20 MiB on the laptop at 175%) for as
+  long as the tab existed. A view hidden for 10 minutes now drops it and is
+  white until its next frame (40-140 ms after #116's release).
+  `SUMMIT_HIDDEN_FRAME_RELEASE_S` (600; 0 keeps it). X399, 6 tabs: 64 -> 18
+  MiB of frame areas.
 - **Idle network processes (#165).** Four network processes on the laptop
   started together and never ran a request (55 MiB, 44 threads): the
   profile's four containers. Every store has its own network process on

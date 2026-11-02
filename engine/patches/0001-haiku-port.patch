@@ -91233,10 +91233,10 @@ index 0000000000000000000000000000000000000000..e6506c4d667ca790af6832a314af9b12
 +} // namespace WebKit
 diff --git a/Source/WebKit/Platform/haiku/BitmapPresenterHaiku.h b/Source/WebKit/Platform/haiku/BitmapPresenterHaiku.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..eba572444054ecdcb02e9f0bf4366a2f5373f319
+index 0000000000000000000000000000000000000000..b3895a99f98fd58446749b6ff066bbbe3dae2c58
 --- /dev/null
 +++ b/Source/WebKit/Platform/haiku/BitmapPresenterHaiku.h
-@@ -0,0 +1,188 @@
+@@ -0,0 +1,198 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#pragma once
@@ -91404,6 +91404,16 @@ index 0000000000000000000000000000000000000000..eba572444054ecdcb02e9f0bf4366a2f
 +    {
 +        std::lock_guard guard(m_mutex);
 +        return m_frame;
++    }
++
++    // Lets go of the frame shown without closing: the view draws its base
++    // colour until the next frame (a tab hidden for a long time, whose web
++    // process has already let go of its own buffers).
++    void dropFrame()
++    {
++        std::shared_ptr<const Frame> previous;
++        std::lock_guard guard(m_mutex);
++        previous = std::exchange(m_frame, nullptr);
 +    }
 +
 +    void close()
@@ -149177,10 +149187,10 @@ index 0000000000000000000000000000000000000000..c9a119d02f85b7c5ad8fe9153bfc9604
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/WebView.cpp b/Source/WebKit/UIProcess/haiku/WebView.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..2ed39a0cccd7373b0337a7675b24ac8aed9c146f
+index 0000000000000000000000000000000000000000..dba85e9eca87f6a2eadbd656d7fb1006a0aba33e
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/WebView.cpp
-@@ -0,0 +1,3578 @@
+@@ -0,0 +1,3600 @@
 +/*
 + * Copyright (C) 2013 Intel Corporation. All rights reserved.
 + *
@@ -152017,6 +152027,28 @@ index 0000000000000000000000000000000000000000..2ed39a0cccd7373b0337a7675b24ac8a
 +        ActivityState::IsVisible, ActivityState::IsInWindow });
 +    if (!current.visible && m_presentationCallback)
 +        std::exchange(m_presentationCallback, { })();
++    // A view hidden for ten minutes lets go of the frame it keeps for being
++    // shown again at once (one buffer of the window's size: 9-20 MiB a tab).
++    // Its web process released its own buffers long before (the compositor's
++    // hidden release, after 30 s); shown again, the view is white for the
++    // 40-140 ms its first new frame takes. SUMMIT_HIDDEN_FRAME_RELEASE_S
++    // changes the delay (0 keeps the frame).
++    if (current.visible != m_state->lastGeometryVisible) {
++        m_state->lastGeometryVisible = current.visible;
++        auto generation = ++m_state->hiddenFrameGeneration;
++        static const double delay = [] {
++            const char* value = getenv("SUMMIT_HIDDEN_FRAME_RELEASE_S");
++            return value && *value ? std::max(0.0, atof(value)) : 600.0;
++        }();
++        if (!current.visible && delay > 0) {
++            RunLoop::mainSingleton().dispatchAfter(Seconds(delay), [weakState = std::weak_ptr<WebViewStateHaiku>(m_state), generation] {
++                auto state = weakState.lock();
++                if (!state || state->hiddenFrameGeneration != generation || state->lastGeometryVisible)
++                    return;
++                state->presenter.dropFrame();
++            });
++        }
++    }
 +    if (!current.visible) {
 +        m_page->endColorPicker();
 +        if (RefPtr picker = m_dateTimePicker.get())
@@ -153730,10 +153762,10 @@ index 0000000000000000000000000000000000000000..ce268ebf7fccd352776e1647095fee4a
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/WebViewStateHaiku.h b/Source/WebKit/UIProcess/haiku/WebViewStateHaiku.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..182d4fa0ed0deb30a56196eb6e8096e2d4983d3c
+index 0000000000000000000000000000000000000000..06c3016a6c4559b47a99d3e0ce38bf8a26f607a9
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/WebViewStateHaiku.h
-@@ -0,0 +1,257 @@
+@@ -0,0 +1,262 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#pragma once
@@ -153823,6 +153855,11 @@ index 0000000000000000000000000000000000000000..182d4fa0ed0deb30a56196eb6e8096e2
 +    BMessenger target;
 +    BitmapPresenterHaiku presenter;
 +    std::atomic<bool> closed { false };
++    // WebKit main thread: whether the view was visible at the last geometry
++    // update, and a count that cancels a pending hidden-frame release
++    // (WebView::updateGeometry).
++    bool lastGeometryVisible { true };
++    uint64_t hiddenFrameGeneration { 0 };
 +    // A file drag from another application is over the view (window thread).
 +    bool dragActive { false };
 +    // Window thread: the page has locked the pointer. It is hidden and put
