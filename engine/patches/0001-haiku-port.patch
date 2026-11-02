@@ -66507,10 +66507,10 @@ index 351b4f92dee11593273912a45deaee716386d699..209ac28509ff44c81686db96243dfba7
  }
 diff --git a/Source/WebCore/platform/mediarecorder/MediaRecorderPrivateHaiku.cpp b/Source/WebCore/platform/mediarecorder/MediaRecorderPrivateHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..33462d50724e254168f063788ec7dea8bb171250
+index 0000000000000000000000000000000000000000..f22f27f1a5e5b89bbe68a18bafe5cf36dff7fb2b
 --- /dev/null
 +++ b/Source/WebCore/platform/mediarecorder/MediaRecorderPrivateHaiku.cpp
-@@ -0,0 +1,648 @@
+@@ -0,0 +1,1163 @@
 +/*
 + * Copyright (C) 2026 Summit contributors.
 + *
@@ -66552,7 +66552,14 @@ index 0000000000000000000000000000000000000000..33462d50724e254168f063788ec7dea8
 +#include <opus.h>
 +#include <vpx/vp8cx.h>
 +#include <vpx/vpx_encoder.h>
++#include <third_party/openh264/src/codec/api/wels/codec_api.h>
 +WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_END
++
++namespace webrtc {
++// libopenh264.so.7 loads, and is the version this was built against
++// (h264_encoder_haiku.cc, which also defines WelsCreateSVCEncoder).
++bool IsOpenH264EncoderAvailableHaiku();
++}
 +
 +namespace WebCore {
 +
@@ -66563,7 +66570,54 @@ index 0000000000000000000000000000000000000000..33462d50724e254168f063788ec7dea8
 +// Video frames waiting for the encoder beyond this are dropped.
 +static constexpr unsigned maximumQueuedVideoFrames = 4;
 +
-+enum class VideoCodec : uint8_t { None, VP8, VP9 };
++enum class VideoCodec : uint8_t { None, VP8, VP9, H264 };
++// WebM (VP8/VP9, Opus) or fragmented MP4 (H.264, Opus), Safari's default.
++enum class Container : uint8_t { WebM, MP4 };
++
++// ISO base media file boxes, big-endian.
++class BoxWriter {
++public:
++    void u8(uint8_t value) { m_data.append(value); }
++    void u16(uint16_t value) { u8(value >> 8); u8(value); }
++    void u24(uint32_t value) { u8(value >> 16); u16(value); }
++    void u32(uint32_t value) { u16(value >> 16); u16(value); }
++    void u64(uint64_t value) { u32(value >> 32); u32(value); }
++    void bytes(std::span<const uint8_t> data) { m_data.append(data); }
++    void zeros(size_t count)
++    {
++        for (size_t index = 0; index < count; ++index)
++            m_data.append(0);
++    }
++    void fourcc(const char* code) { bytes({ reinterpret_cast<const uint8_t*>(code), 4 }); }
++    // Starts a box; end() writes its size.
++    size_t begin(const char* type)
++    {
++        size_t start = m_data.size();
++        u32(0);
++        fourcc(type);
++        return start;
++    }
++    size_t beginFull(const char* type, uint8_t version, uint32_t flags)
++    {
++        size_t start = begin(type);
++        u8(version);
++        u24(flags);
++        return start;
++    }
++    void end(size_t start) { patch32(start, m_data.size() - start); }
++    void patch32(size_t at, uint32_t value)
++    {
++        m_data[at] = value >> 24;
++        m_data[at + 1] = value >> 16;
++        m_data[at + 2] = value >> 8;
++        m_data[at + 3] = value;
++    }
++    size_t size() const { return m_data.size(); }
++    Vector<uint8_t> take() { return std::exchange(m_data, { }); }
++
++private:
++    Vector<uint8_t> m_data;
++};
 +
 +// libwebm writes into memory; fetchData() takes what is there.
 +class WebMWriter final : public mkvmuxer::IMkvWriter {
@@ -66588,15 +66642,19 @@ index 0000000000000000000000000000000000000000..33462d50724e254168f063788ec7dea8
 +
 +class HaikuWebMRecorder final : public ThreadSafeRefCounted<HaikuWebMRecorder, WTF::DestructionThread::Main> {
 +public:
-+    static Ref<HaikuWebMRecorder> create(VideoCodec codec, bool hasAudio, unsigned videoBitRate, unsigned audioBitRate, double videoFrameRate)
++    static Ref<HaikuWebMRecorder> create(Container container, VideoCodec codec, bool hasAudio, unsigned videoBitRate, unsigned audioBitRate, double videoFrameRate)
 +    {
-+        return adoptRef(*new HaikuWebMRecorder(codec, hasAudio, videoBitRate, audioBitRate, videoFrameRate));
++        return adoptRef(*new HaikuWebMRecorder(container, codec, hasAudio, videoBitRate, audioBitRate, videoFrameRate));
 +    }
 +
 +    ~HaikuWebMRecorder()
 +    {
 +        if (m_vpxReady)
 +            vpx_codec_destroy(&m_vpx);
++        if (m_h264) {
++            m_h264->Uninitialize();
++            WelsDestroySVCEncoder(m_h264);
++        }
 +        if (m_opus)
 +            opus_encoder_destroy(m_opus);
 +    }
@@ -66671,7 +66729,9 @@ index 0000000000000000000000000000000000000000..33462d50724e254168f063788ec7dea8
 +    void fetch(CompletionHandler<void(Ref<FragmentedSharedBuffer>&&, double)>&& completionHandler)
 +    {
 +        m_queue->dispatch([protectedThis = Ref { *this }, completionHandler = WTF::move(completionHandler)]() mutable {
-+            auto data = protectedThis->m_writer.take();
++            if (protectedThis->m_container == Container::MP4)
++                protectedThis->writeFragment(false);
++            auto data = protectedThis->m_container == Container::MP4 ? protectedThis->m_mp4.take() : protectedThis->m_writer.take();
 +            double timecode = protectedThis->m_lastFetchTime;
 +            protectedThis->m_lastFetchTime = protectedThis->m_latestTime.milliseconds();
 +            callOnMainThread([completionHandler = WTF::move(completionHandler), data = WTF::move(data), timecode]() mutable {
@@ -66681,8 +66741,9 @@ index 0000000000000000000000000000000000000000..33462d50724e254168f063788ec7dea8
 +    }
 +
 +private:
-+    HaikuWebMRecorder(VideoCodec codec, bool hasAudio, unsigned videoBitRate, unsigned audioBitRate, double videoFrameRate)
++    HaikuWebMRecorder(Container container, VideoCodec codec, bool hasAudio, unsigned videoBitRate, unsigned audioBitRate, double videoFrameRate)
 +        : m_queue(WorkQueue::create("Summit MediaRecorder"_s))
++        , m_container(container)
 +        , m_videoCodec(codec)
 +        , m_hasAudio(hasAudio)
 +        , m_videoBitRate(videoBitRate)
@@ -66708,6 +66769,17 @@ index 0000000000000000000000000000000000000000..33462d50724e254168f063788ec7dea8
 +            return true;
 +        if (m_videoCodec != VideoCodec::None && m_videoSize.isEmpty())
 +            return false;
++        if (m_container == Container::MP4) {
++            // Track 1 is the video when there is one. The boxes describing
++            // the tracks wait for the first fragment (writeFragment()): the
++            // H.264 parameter sets come with the first key frame.
++            if (m_videoCodec != VideoCodec::None)
++                m_videoTrack = 1;
++            if (m_hasAudio && ensureOpus())
++                m_audioTrack = m_videoTrack + 1;
++            m_segmentStarted = true;
++            return true;
++        }
 +        if (!m_segment.Init(&m_writer))
 +            return false;
 +        m_segment.set_mode(mkvmuxer::Segment::kLive);
@@ -66800,7 +66872,11 @@ index 0000000000000000000000000000000000000000..33462d50724e254168f063788ec7dea8
 +            if (frame->rotation() == VideoFrame::Rotation::Left || frame->rotation() == VideoFrame::Rotation::Right)
 +                m_videoSize = m_videoSize.transposedSize();
 +        }
-+        if (m_videoSize.isEmpty() || !ensureVPX(m_videoSize) || !startSegment())
++        if (m_videoCodec == VideoCodec::H264) {
++            // Even sizes: I420 chroma planes and the encoder want them.
++            m_videoSize = { m_videoSize.width() & ~1, m_videoSize.height() & ~1 };
++        }
++        if (m_videoSize.isEmpty() || !(m_videoCodec == VideoCodec::H264 ? ensureH264(m_videoSize) : ensureVPX(m_videoSize)) || !startSegment())
 +            return;
 +
 +        RefPtr<VideoFrameHaiku> picture = frame.ptr();
@@ -66822,6 +66898,11 @@ index 0000000000000000000000000000000000000000..33462d50724e254168f063788ec7dea8
 +            picture = WTF::move(blackPicture);
 +        }
 +
++        if (m_videoCodec == VideoCodec::H264) {
++            encodeH264(*picture, time);
++            return;
++        }
++
 +        vpx_image_t image;
 +        vpx_img_wrap(&image, VPX_IMG_FMT_I420, m_videoSize.width(), m_videoSize.height(), 1, picture->plane(0).data);
 +        for (unsigned plane = 0; plane < 3; ++plane) {
@@ -66837,6 +66918,108 @@ index 0000000000000000000000000000000000000000..33462d50724e254168f063788ec7dea8
 +        if (vpx_codec_encode(&m_vpx, &image, pts, duration, 0, VPX_DL_REALTIME))
 +            return;
 +        collectVideoPackets();
++    }
++
++    bool ensureH264(IntSize size)
++    {
++        if (m_h264)
++            return true;
++        if (m_h264Failed || !webrtc::IsOpenH264EncoderAvailableHaiku() || WelsCreateSVCEncoder(&m_h264) || !m_h264) {
++            m_h264 = nullptr;
++            m_h264Failed = true;
++            return false;
++        }
++        SEncParamExt parameters;
++        m_h264->GetDefaultParams(&parameters);
++        parameters.iUsageType = CAMERA_VIDEO_REAL_TIME;
++        parameters.iPicWidth = size.width();
++        parameters.iPicHeight = size.height();
++        parameters.iTargetBitrate = std::max(m_videoBitRate, 100000u);
++        parameters.iMaxBitrate = UNSPECIFIED_BIT_RATE;
++        parameters.iRCMode = RC_BITRATE_MODE;
++        parameters.fMaxFrameRate = m_videoFrameRate;
++        parameters.bEnableFrameSkip = false;
++        // A key frame every two seconds: fragments and seeking start there.
++        parameters.uiIntraPeriod = std::max(static_cast<unsigned>(m_videoFrameRate * 2), 1u);
++        parameters.eSpsPpsIdStrategy = CONSTANT_ID;
++        parameters.bPrefixNalAddingCtrl = false;
++        parameters.iEntropyCodingModeFlag = 0;
++        parameters.iMultipleThreadIdc = std::clamp(WTF::numberOfProcessorCores() / 2, 1, 4);
++        parameters.iSpatialLayerNum = 1;
++        auto& layer = parameters.sSpatialLayers[0];
++        layer.iVideoWidth = size.width();
++        layer.iVideoHeight = size.height();
++        layer.fFrameRate = m_videoFrameRate;
++        layer.iSpatialBitrate = parameters.iTargetBitrate;
++        layer.iMaxSpatialBitrate = UNSPECIFIED_BIT_RATE;
++        layer.uiProfileIdc = PRO_BASELINE;
++        layer.sSliceArgument.uiSliceMode = parameters.iMultipleThreadIdc > 1 ? SM_FIXEDSLCNUM_SLICE : SM_SINGLE_SLICE;
++        layer.sSliceArgument.uiSliceNum = parameters.iMultipleThreadIdc > 1 ? parameters.iMultipleThreadIdc : 1;
++        int format = videoFormatI420;
++        if (m_h264->InitializeExt(&parameters) || m_h264->SetOption(ENCODER_OPTION_DATAFORMAT, &format)) {
++            WelsDestroySVCEncoder(m_h264);
++            m_h264 = nullptr;
++            m_h264Failed = true;
++            return false;
++        }
++        return true;
++    }
++
++    // One picture to H.264: the NAL units of a frame, each behind its length
++    // (the MP4 form); the parameter sets go to the track description.
++    void encodeH264(VideoFrameHaiku& picture, Seconds time)
++    {
++        int64_t pts = time.milliseconds();
++        if (pts <= m_lastVideoPts)
++            pts = m_lastVideoPts + 1;
++        m_lastVideoPts = pts;
++        SSourcePicture source { };
++        source.iColorFormat = videoFormatI420;
++        source.iPicWidth = m_videoSize.width();
++        source.iPicHeight = m_videoSize.height();
++        source.uiTimeStamp = pts;
++        for (unsigned plane = 0; plane < 3; ++plane) {
++            source.iStride[plane] = picture.plane(plane).stride;
++            source.pData[plane] = picture.plane(plane).data;
++        }
++        SFrameBSInfo info { };
++        if (m_h264->EncodeFrame(&source, &info) != cmResultSuccess || info.eFrameType == videoFrameTypeSkip || info.eFrameType == videoFrameTypeInvalid)
++            return;
++        Vector<uint8_t> sample;
++        for (int index = 0; index < info.iLayerNum; ++index) {
++            const SLayerBSInfo& layer = info.sLayerInfo[index];
++            const uint8_t* data = layer.pBsBuf;
++            for (int nal = 0; nal < layer.iNalCount; ++nal) {
++                size_t length = layer.pNalLengthInByte[nal];
++                std::span<const uint8_t> unit(data, length);
++                data += length;
++                // Each unit starts with a 3- or 4-byte start code.
++                size_t skip = length >= 4 && !unit[0] && !unit[1] && !unit[2] && unit[3] == 1 ? 4
++                    : length >= 3 && !unit[0] && !unit[1] && unit[2] == 1 ? 3 : 0;
++                unit = unit.subspan(skip);
++                if (unit.empty())
++                    continue;
++                uint8_t type = unit[0] & 0x1f;
++                if (type == 7) {
++                    m_sps = Vector<uint8_t>(unit);
++                    continue;
++                }
++                if (type == 8) {
++                    m_pps = Vector<uint8_t>(unit);
++                    continue;
++                }
++                uint32_t size = unit.size();
++                uint8_t prefix[4] = { uint8_t(size >> 24), uint8_t(size >> 16), uint8_t(size >> 8), uint8_t(size) };
++                sample.append(std::span<const uint8_t>(prefix, 4));
++                sample.append(unit);
++            }
++        }
++        if (sample.isEmpty())
++            return;
++        uint64_t timestamp = uint64_t(pts) * 1000000ull;
++        m_lastVideoTimestamp = timestamp;
++        m_videoPackets.append({ m_videoTrack, timestamp, info.eFrameType == videoFrameTypeIDR, WTF::move(sample) });
++        writePackets(false);
 +    }
 +
 +    void collectVideoPackets()
@@ -66959,8 +67142,305 @@ index 0000000000000000000000000000000000000000..33462d50724e254168f063788ec7dea8
 +                m_wroteVideoKey = true;
 +            uint64_t timestamp = std::max(packet.timestamp, m_lastWrittenTimestamp);
 +            m_lastWrittenTimestamp = timestamp;
-+            m_segment.AddFrame(packet.data.span().data(), packet.data.size(), packet.track, timestamp, packet.isKey);
++            if (m_container == Container::MP4)
++                (packet.track == m_videoTrack ? m_mp4VideoSamples : m_mp4AudioSamples).append({ timestamp, packet.isKey, WTF::move(packet.data) });
++            else
++                m_segment.AddFrame(packet.data.span().data(), packet.data.size(), packet.track, timestamp, packet.isKey);
 +            m_latestTime = Seconds::fromNanoseconds(timestamp);
++        }
++    }
++
++    static constexpr uint32_t mp4VideoTimescale = 90000;
++
++    static uint64_t toTimescale(uint64_t nanoseconds, uint32_t timescale)
++    {
++        return static_cast<uint64_t>((static_cast<__uint128_t>(nanoseconds) * timescale) / 1000000000ull);
++    }
++
++    static void writeMatrix(BoxWriter& box)
++    {
++        for (uint32_t value : { 0x00010000u, 0u, 0u, 0u, 0x00010000u, 0u, 0u, 0u, 0x40000000u })
++            box.u32(value);
++    }
++
++    // ftyp and moov: the tracks, their codecs, no samples (they come in
++    // fragments, as Safari and Chrome write a recording).
++    void writeInitSegment()
++    {
++        BoxWriter& box = m_mp4;
++        size_t ftyp = box.begin("ftyp");
++        box.fourcc("isom");
++        box.u32(0x200);
++        box.fourcc("isom");
++        box.fourcc("iso6");
++        box.fourcc("iso2");
++        if (m_videoTrack)
++            box.fourcc("avc1");
++        box.fourcc("mp41");
++        box.end(ftyp);
++
++        size_t moov = box.begin("moov");
++        size_t mvhd = box.beginFull("mvhd", 0, 0);
++        box.u32(0);
++        box.u32(0);
++        box.u32(1000);
++        box.u32(0);
++        box.u32(0x00010000);
++        box.u16(0x0100);
++        box.zeros(10);
++        writeMatrix(box);
++        box.zeros(24);
++        box.u32(std::max(m_videoTrack, m_audioTrack) + 1);
++        box.end(mvhd);
++
++        auto writeTrack = [&](bool video) {
++            uint32_t track = video ? m_videoTrack : m_audioTrack;
++            size_t trak = box.begin("trak");
++            size_t tkhd = box.beginFull("tkhd", 0, 3);
++            box.u32(0);
++            box.u32(0);
++            box.u32(track);
++            box.u32(0);
++            box.u32(0);
++            box.zeros(8);
++            box.u16(0);
++            box.u16(0);
++            box.u16(video ? 0 : 0x0100);
++            box.u16(0);
++            writeMatrix(box);
++            box.u32(video ? uint32_t(m_videoSize.width()) << 16 : 0);
++            box.u32(video ? uint32_t(m_videoSize.height()) << 16 : 0);
++            box.end(tkhd);
++
++            size_t mdia = box.begin("mdia");
++            size_t mdhd = box.beginFull("mdhd", 0, 0);
++            box.u32(0);
++            box.u32(0);
++            box.u32(video ? mp4VideoTimescale : opusRate);
++            box.u32(0);
++            box.u16(0x55c4); // "und"
++            box.u16(0);
++            box.end(mdhd);
++            size_t hdlr = box.beginFull("hdlr", 0, 0);
++            box.u32(0);
++            box.fourcc(video ? "vide" : "soun");
++            box.zeros(12);
++            const char* name = video ? "VideoHandler" : "SoundHandler";
++            box.bytes({ reinterpret_cast<const uint8_t*>(name), strlen(name) + 1 });
++            box.end(hdlr);
++
++            size_t minf = box.begin("minf");
++            if (video) {
++                size_t vmhd = box.beginFull("vmhd", 0, 1);
++                box.zeros(8);
++                box.end(vmhd);
++            } else {
++                size_t smhd = box.beginFull("smhd", 0, 0);
++                box.zeros(4);
++                box.end(smhd);
++            }
++            size_t dinf = box.begin("dinf");
++            size_t dref = box.beginFull("dref", 0, 0);
++            box.u32(1);
++            size_t url = box.beginFull("url ", 0, 1);
++            box.end(url);
++            box.end(dref);
++            box.end(dinf);
++
++            size_t stbl = box.begin("stbl");
++            size_t stsd = box.beginFull("stsd", 0, 0);
++            box.u32(1);
++            if (video) {
++                size_t avc1 = box.begin("avc1");
++                box.zeros(6);
++                box.u16(1);
++                box.zeros(16);
++                box.u16(m_videoSize.width());
++                box.u16(m_videoSize.height());
++                box.u32(0x00480000);
++                box.u32(0x00480000);
++                box.u32(0);
++                box.u16(1);
++                box.zeros(32);
++                box.u16(0x0018);
++                box.u16(0xffff);
++                size_t avcC = box.begin("avcC");
++                box.u8(1);
++                box.u8(m_sps.size() > 1 ? m_sps[1] : 66);
++                box.u8(m_sps.size() > 2 ? m_sps[2] : 0);
++                box.u8(m_sps.size() > 3 ? m_sps[3] : 31);
++                box.u8(0xff); // 4-byte lengths
++                box.u8(0xe1); // one SPS
++                box.u16(m_sps.size());
++                box.bytes(m_sps.span());
++                box.u8(1);
++                box.u16(m_pps.size());
++                box.bytes(m_pps.span());
++                box.end(avcC);
++                box.end(avc1);
++            } else {
++                // Opus in ISO BMFF (opus-codec.org/docs/opus_in_isobmff.html).
++                size_t opus = box.begin("Opus");
++                box.zeros(6);
++                box.u16(1);
++                box.zeros(8);
++                box.u16(opusChannels);
++                box.u16(16);
++                box.u16(0);
++                box.u16(0);
++                box.u32(opusRate << 16);
++                size_t dOps = box.begin("dOps");
++                box.u8(0);
++                box.u8(opusChannels);
++                box.u16(m_opusPreSkip);
++                box.u32(opusRate);
++                box.u16(0);
++                box.u8(0);
++                box.end(dOps);
++                box.end(opus);
++            }
++            box.end(stsd);
++            for (const char* empty : { "stts", "stsc", "stco" }) {
++                size_t table = box.beginFull(empty, 0, 0);
++                box.u32(0);
++                box.end(table);
++            }
++            size_t stsz = box.beginFull("stsz", 0, 0);
++            box.u32(0);
++            box.u32(0);
++            box.end(stsz);
++            box.end(stbl);
++            box.end(minf);
++            box.end(mdia);
++            box.end(trak);
++        };
++        if (m_videoTrack)
++            writeTrack(true);
++        if (m_audioTrack)
++            writeTrack(false);
++
++        size_t mvex = box.begin("mvex");
++        for (uint32_t track : { uint32_t(m_videoTrack), uint32_t(m_audioTrack) }) {
++            if (!track)
++                continue;
++            size_t trex = box.beginFull("trex", 0, 0);
++            box.u32(track);
++            box.u32(1);
++            box.u32(0);
++            box.u32(0);
++            box.u32(0);
++            box.end(trex);
++        }
++        box.end(mvex);
++        box.end(moov);
++    }
++
++    // The samples so far as one fragment (moof + mdat). The last sample of a
++    // track waits for the next fragment, which tells its duration, unless
++    // this is the end.
++    void writeFragment(bool final)
++    {
++        if (!m_segmentStarted || (m_videoTrack && (m_sps.isEmpty() || m_pps.isEmpty())))
++            return;
++        size_t videoCount = final ? m_mp4VideoSamples.size() : (m_mp4VideoSamples.isEmpty() ? 0 : m_mp4VideoSamples.size() - 1);
++        size_t audioCount = final ? m_mp4AudioSamples.size() : (m_mp4AudioSamples.isEmpty() ? 0 : m_mp4AudioSamples.size() - 1);
++        if (!videoCount && !audioCount)
++            return;
++        if (!std::exchange(m_mp4InitWritten, true))
++            writeInitSegment();
++
++        struct Run {
++            uint32_t track { 0 };
++            uint64_t decodeTime { 0 };
++            Vector<uint32_t> durations;
++            Vector<Sample> samples;
++            size_t dataOffsetAt { 0 };
++            size_t bytes { 0 };
++        };
++        Vector<Run> runs;
++        if (videoCount) {
++            Run run;
++            run.track = m_videoTrack;
++            if (!std::exchange(m_mp4VideoTimeStarted, true))
++                m_mp4VideoDecodeTime = toTimescale(m_mp4VideoSamples[0].timestamp, mp4VideoTimescale);
++            run.decodeTime = m_mp4VideoDecodeTime;
++            uint32_t fallback = m_mp4LastVideoDuration ? m_mp4LastVideoDuration : static_cast<uint32_t>(mp4VideoTimescale / m_videoFrameRate);
++            for (size_t index = 0; index < videoCount; ++index) {
++                uint32_t duration = fallback;
++                if (index + 1 < m_mp4VideoSamples.size()) {
++                    uint64_t next = toTimescale(m_mp4VideoSamples[index + 1].timestamp, mp4VideoTimescale);
++                    uint64_t current = m_mp4VideoDecodeTime;
++                    duration = next > current ? static_cast<uint32_t>(std::min<uint64_t>(next - current, mp4VideoTimescale * 10)) : 1;
++                }
++                m_mp4LastVideoDuration = duration;
++                m_mp4VideoDecodeTime += duration;
++                run.durations.append(duration);
++            }
++            for (size_t index = 0; index < videoCount; ++index)
++                run.samples.append(WTF::move(m_mp4VideoSamples[index]));
++            m_mp4VideoSamples.removeAt(0, videoCount);
++            runs.append(WTF::move(run));
++        }
++        if (audioCount) {
++            Run run;
++            run.track = m_audioTrack;
++            if (!std::exchange(m_mp4AudioTimeStarted, true))
++                m_mp4AudioDecodeTime = toTimescale(m_mp4AudioSamples[0].timestamp, opusRate);
++            run.decodeTime = m_mp4AudioDecodeTime;
++            for (size_t index = 0; index < audioCount; ++index)
++                run.durations.append(opusFrame);
++            m_mp4AudioDecodeTime += uint64_t(opusFrame) * audioCount;
++            for (size_t index = 0; index < audioCount; ++index)
++                run.samples.append(WTF::move(m_mp4AudioSamples[index]));
++            m_mp4AudioSamples.removeAt(0, audioCount);
++            runs.append(WTF::move(run));
++        }
++
++        BoxWriter& box = m_mp4;
++        size_t moof = box.begin("moof");
++        size_t mfhd = box.beginFull("mfhd", 0, 0);
++        box.u32(++m_mp4Sequence);
++        box.end(mfhd);
++        for (auto& run : runs) {
++            size_t traf = box.begin("traf");
++            size_t tfhd = box.beginFull("tfhd", 0, 0x020000); // default-base-is-moof
++            box.u32(run.track);
++            box.end(tfhd);
++            size_t tfdt = box.beginFull("tfdt", 1, 0);
++            box.u64(run.decodeTime);
++            box.end(tfdt);
++            // Data offset, and each sample's duration, size and flags.
++            size_t trun = box.beginFull("trun", 0, 0x000001 | 0x000100 | 0x000200 | 0x000400);
++            box.u32(run.samples.size());
++            run.dataOffsetAt = box.size();
++            box.u32(0);
++            for (size_t index = 0; index < run.samples.size(); ++index) {
++                auto& sample = run.samples[index];
++                box.u32(run.durations[index]);
++                box.u32(sample.data.size());
++                // A key frame depends on nothing; other video frames are not
++                // sync samples. Every Opus packet stands alone.
++                bool sync = run.track == m_audioTrack || sample.isKey;
++                box.u32(sync ? 0x02000000 : 0x01010000);
++                run.bytes += sample.data.size();
++            }
++            box.end(trun);
++            box.end(traf);
++        }
++        box.end(moof);
++        size_t moofSize = box.size() - moof;
++        size_t offset = moofSize + 8;
++        size_t mdatSize = 8;
++        for (auto& run : runs) {
++            box.patch32(run.dataOffsetAt, offset);
++            offset += run.bytes;
++            mdatSize += run.bytes;
++        }
++        box.u32(mdatSize);
++        box.fourcc("mdat");
++        for (auto& run : runs) {
++            for (auto& sample : run.samples)
++                box.bytes(sample.data.span());
 +        }
 +    }
 +
@@ -66978,11 +67458,14 @@ index 0000000000000000000000000000000000000000..33462d50724e254168f063788ec7dea8
 +        if (!m_segmentStarted && m_videoCodec == VideoCodec::None && m_hasAudio)
 +            startSegment();
 +        writePackets(true);
-+        if (m_segmentStarted)
++        if (m_container == Container::MP4)
++            writeFragment(true);
++        else if (m_segmentStarted)
 +            m_segment.Finalize();
 +    }
 +
 +    const Ref<WorkQueue> m_queue;
++    const Container m_container;
 +    const VideoCodec m_videoCodec;
 +    const bool m_hasAudio;
 +    const unsigned m_videoBitRate;
@@ -67006,6 +67489,26 @@ index 0000000000000000000000000000000000000000..33462d50724e254168f063788ec7dea8
 +    IntSize m_videoSize;
 +    vpx_codec_ctx_t m_vpx { };
 +    bool m_vpxReady { false };
++    ISVCEncoder* m_h264 { nullptr };
++    bool m_h264Failed { false };
++    Vector<uint8_t> m_sps;
++    Vector<uint8_t> m_pps;
++    // MP4: samples written into the next fragment.
++    struct Sample {
++        uint64_t timestamp { 0 };
++        bool isKey { false };
++        Vector<uint8_t> data;
++    };
++    Vector<Sample> m_mp4VideoSamples;
++    Vector<Sample> m_mp4AudioSamples;
++    BoxWriter m_mp4;
++    bool m_mp4InitWritten { false };
++    uint32_t m_mp4Sequence { 0 };
++    uint64_t m_mp4VideoDecodeTime { 0 };
++    uint64_t m_mp4AudioDecodeTime { 0 };
++    bool m_mp4VideoTimeStarted { false };
++    bool m_mp4AudioTimeStarted { false };
++    uint32_t m_mp4LastVideoDuration { 0 };
 +    int64_t m_lastVideoPts { -1 };
 +    OpusEncoder* m_opus { nullptr };
 +    unsigned m_opusPreSkip { 0 };
@@ -67027,6 +67530,7 @@ index 0000000000000000000000000000000000000000..33462d50724e254168f063788ec7dea8
 +WTF_MAKE_TZONE_ALLOCATED_IMPL(MediaRecorderPrivateHaiku);
 +
 +struct RecorderConfiguration {
++    Container container { Container::WebM };
 +    VideoCodec videoCodec { VideoCodec::None };
 +    bool hasAudio { false };
 +    String mimeType;
@@ -67035,21 +67539,29 @@ index 0000000000000000000000000000000000000000..33462d50724e254168f063788ec7dea8
 +static std::optional<RecorderConfiguration> configurationFor(const ContentType& contentType, bool hasVideo, bool hasAudio)
 +{
 +    auto container = contentType.containerType().convertToASCIILowercase();
-+    if (!container.isEmpty() && container != "video/webm"_s && container != "audio/webm"_s)
++    if (!container.isEmpty() && container != "video/webm"_s && container != "audio/webm"_s && container != "video/mp4"_s && container != "audio/mp4"_s)
 +        return std::nullopt;
-+    if (container == "audio/webm"_s)
++    if (container == "audio/webm"_s || container == "audio/mp4"_s)
 +        hasVideo = false;
++    bool mp4 = container.endsWith("/mp4"_s);
++    // MP4 video is H.264 from OpenH264, which air/OS ships; without it
++    // there is no MP4 video.
++    if (mp4 && hasVideo && !webrtc::IsOpenH264EncoderAvailableHaiku())
++        return std::nullopt;
 +
 +    RecorderConfiguration configuration;
-+    configuration.videoCodec = hasVideo ? VideoCodec::VP8 : VideoCodec::None;
++    configuration.container = mp4 ? Container::MP4 : Container::WebM;
++    configuration.videoCodec = hasVideo ? (mp4 ? VideoCodec::H264 : VideoCodec::VP8) : VideoCodec::None;
 +    configuration.hasAudio = hasAudio;
 +    bool askedForAudio = false;
 +    for (auto& codec : contentType.codecs()) {
 +        auto name = codec.convertToASCIILowercase();
-+        if (name == "vp8"_s || name == "vp8.0"_s)
++        if (!mp4 && (name == "vp8"_s || name == "vp8.0"_s))
 +            configuration.videoCodec = hasVideo ? VideoCodec::VP8 : VideoCodec::None;
-+        else if (name == "vp9"_s || name.startsWith("vp09"_s) || name == "vp9.0"_s)
++        else if (!mp4 && (name == "vp9"_s || name.startsWith("vp09"_s) || name == "vp9.0"_s))
 +            configuration.videoCodec = hasVideo ? VideoCodec::VP9 : VideoCodec::None;
++        else if (mp4 && (name.startsWith("avc1"_s) || name == "h264"_s))
++            configuration.videoCodec = hasVideo ? VideoCodec::H264 : VideoCodec::None;
 +        else if (name == "opus"_s)
 +            askedForAudio = true;
 +        else
@@ -67062,9 +67574,12 @@ index 0000000000000000000000000000000000000000..33462d50724e254168f063788ec7dea8
 +        codecs.append("vp8"_s);
 +    else if (configuration.videoCodec == VideoCodec::VP9)
 +        codecs.append("vp9"_s);
++    else if (configuration.videoCodec == VideoCodec::H264)
++        codecs.append("avc1.42E01F"_s); // Constrained Baseline
 +    if (configuration.hasAudio)
 +        codecs.append(codecs.isEmpty() ? ""_s : ","_s, "opus"_s);
-+    configuration.mimeType = makeString(configuration.videoCodec != VideoCodec::None ? "video/webm"_s : "audio/webm"_s, codecs.isEmpty() ? ""_s : "; codecs="_s, codecs.toString());
++    auto type = configuration.videoCodec != VideoCodec::None ? (mp4 ? "video/mp4"_s : "video/webm"_s) : (mp4 ? "audio/mp4"_s : "audio/webm"_s);
++    configuration.mimeType = makeString(type, codecs.isEmpty() ? ""_s : "; codecs="_s, codecs.toString());
 +    return configuration;
 +}
 +
@@ -67083,7 +67598,7 @@ index 0000000000000000000000000000000000000000..33462d50724e254168f063788ec7dea8
 +    double frameRate = 0;
 +    if (RefPtr videoTrack = tracks.videoTrack.get())
 +        frameRate = videoTrack->settings().frameRate();
-+    auto recorder = HaikuWebMRecorder::create(configuration->videoCodec, configuration->hasAudio, bitRates.video, bitRates.audio, frameRate);
++    auto recorder = HaikuWebMRecorder::create(configuration->container, configuration->videoCodec, configuration->hasAudio, bitRates.video, bitRates.audio, frameRate);
 +    auto result = makeUnique<MediaRecorderPrivateHaiku>(stream, options, WTF::move(recorder));
 +    result->m_mimeType = configuration->mimeType;
 +    return result;
