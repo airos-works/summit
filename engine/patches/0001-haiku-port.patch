@@ -138862,7 +138862,7 @@ index f0a894576a62be24a8e7e5b8009d63128b210aa7..85264fa2c360e44d115c8604754c9e0c
  #if ENABLE(WEBDRIVER_BIDI)
          if (RefPtr page = m_page.get()) {
 diff --git a/Source/WebKit/UIProcess/WebPageProxy.cpp b/Source/WebKit/UIProcess/WebPageProxy.cpp
-index abc66b25d5be6d2b961364268f19eb3762ab2c3a..8b89b6b2817856440f125de086e69fd7c88bbe7d 100644
+index abc66b25d5be6d2b961364268f19eb3762ab2c3a..789fc5547a6c30bb0c0df27056aafdb26399f813 100644
 --- a/Source/WebKit/UIProcess/WebPageProxy.cpp
 +++ b/Source/WebKit/UIProcess/WebPageProxy.cpp
 @@ -65,7 +65,9 @@
@@ -138901,7 +138901,16 @@ index abc66b25d5be6d2b961364268f19eb3762ab2c3a..8b89b6b2817856440f125de086e69fd7
  #endif
  
  #if ENABLE(WK_WEB_EXTENSIONS) && ENABLE(CONTENT_EXTENSIONS)
-@@ -556,7 +567,17 @@ using namespace WebCore;
+@@ -552,11 +563,26 @@
+ 
+ namespace WebKit {
+ 
++#if OS(HAIKU)
++// A web process left for its size (WebProcessPool.cpp, #168).
++bool isBloatedProcessHaiku(const WebProcessProxy&);
++#endif
++
+ using namespace WebCore;
  
  static constexpr Seconds resetRecentCrashCountDelay = 30_s;
  static constexpr unsigned maximumWebProcessRelaunchAttempts = 1;
@@ -138919,7 +138928,7 @@ index abc66b25d5be6d2b961364268f19eb3762ab2c3a..8b89b6b2817856440f125de086e69fd7
  
  static WeakListHashSet<WebPageProxy>& NODELETE leastRecentlyVisiblePages()
  {
-@@ -973,7 +994,7 @@ WebPageProxy::WebPageProxy(PageClient& pageClient, WebProcessProxy& process, Ref
+@@ -973,7 +999,7 @@ WebPageProxy::WebPageProxy(PageClient& pageClient, WebProcessProxy& process, Ref
      , m_pageGroup(*configuration->pageGroup())
      , m_preferences(configuration->preferences())
      , m_userContentController(configuration->userContentController())
@@ -138928,7 +138937,7 @@ index abc66b25d5be6d2b961364268f19eb3762ab2c3a..8b89b6b2817856440f125de086e69fd7
      , m_webExtensionController(configuration->webExtensionController())
      , m_weakWebExtensionController(configuration->weakWebExtensionController())
  #endif
-@@ -1035,7 +1056,7 @@ WebPageProxy::WebPageProxy(PageClient& pageClient, WebProcessProxy& process, Ref
+@@ -1035,7 +1061,7 @@ WebPageProxy::WebPageProxy(PageClient& pageClient, WebProcessProxy& process, Ref
  
      protect(preferences())->addPage(*this);
  
@@ -138937,7 +138946,7 @@ index abc66b25d5be6d2b961364268f19eb3762ab2c3a..8b89b6b2817856440f125de086e69fd7
      if (RefPtr webExtensionController = this->webExtensionController())
          webExtensionController->addPage(*this);
  #endif
-@@ -1206,7 +1227,7 @@ bool WebPageProxy::modelElementEnabled()
+@@ -1206,7 +1232,7 @@ bool WebPageProxy::modelElementEnabled()
      return protect(preferences())->modelElementEnabled();
  }
  
@@ -138946,7 +138955,32 @@ index abc66b25d5be6d2b961364268f19eb3762ab2c3a..8b89b6b2817856440f125de086e69fd7
  WebExtensionController* WebPageProxy::webExtensionController()
  {
      return m_webExtensionController.get() ?: m_weakWebExtensionController.get();
-@@ -1964,6 +1985,12 @@ void WebPageProxy::initializeWebPage(const Site& site, WebCore::SandboxFlags eff
+@@ -1576,7 +1602,14 @@ bool WebPageProxy::suspendCurrentPageIfPossible(API::Navigation& navigation, con
+     }
+ 
+     bool needsSuspendedPageToPreventFlashing = shouldDelayClosingUntilFirstLayerFlush == ShouldDelayClosingUntilFirstLayerFlush::Yes;
+-    if (!needsSuspendedPageToPreventFlashing && (!fromItem || !shouldUseBackForwardCache())) {
++#if OS(HAIKU)
++    // A process left for its size (#168) is not kept for back/forward: it
++    // is to end and give its memory back.
++    bool useBackForwardCache = shouldUseBackForwardCache() && !isBloatedProcessHaiku(m_legacyMainFrameProcess.get());
++#else
++    bool useBackForwardCache = shouldUseBackForwardCache();
++#endif
++    if (!needsSuspendedPageToPreventFlashing && (!fromItem || !useBackForwardCache)) {
+         if (!fromItem)
+             WEBPAGEPROXY_RELEASE_LOG(ProcessSwapping, "suspendCurrentPageIfPossible: Not suspending current page for process pid %i there is no associated WebBackForwardListItem", m_legacyMainFrameProcess->processID());
+         else
+@@ -1603,7 +1636,7 @@ bool WebPageProxy::suspendCurrentPageIfPossible(API::Navigation& navigation, con
+ 
+     m_lastSuspendedPage = suspendedPage.get();
+ 
+-    if (fromItem && shouldUseBackForwardCache())
++    if (fromItem && useBackForwardCache)
+         protect(backForwardCache())->addEntry(*fromItem, WTF::move(suspendedPage));
+     else {
+         ASSERT(needsSuspendedPageToPreventFlashing);
+@@ -1964,6 +1997,12 @@ void WebPageProxy::initializeWebPage(const Site& site, WebCore::SandboxFlags eff
      if (preferences->siteIsolationEnabled())
          browsingContextGroup->addPage(*this);
      process->send(Messages::WebProcess::CreateWebPage(m_webPageID, creationParameters(process, *protect(drawingArea()), m_mainFrame->frameID(), std::nullopt)), 0);
@@ -138959,7 +138993,7 @@ index abc66b25d5be6d2b961364268f19eb3762ab2c3a..8b89b6b2817856440f125de086e69fd7
  
      process->addVisitedLinkStoreUser(m_visitedLinkStore, identifier());
  
-@@ -2015,9 +2042,9 @@ void WebPageProxy::close()
+@@ -2015,9 +2054,9 @@ void WebPageProxy::close()
          dismissImmersiveElement([] { });
  #endif
  
@@ -138972,7 +139006,7 @@ index abc66b25d5be6d2b961364268f19eb3762ab2c3a..8b89b6b2817856440f125de086e69fd7
      if (RefPtr webExtensionController = m_weakWebExtensionController.get())
          webExtensionController->removePage(*this);
  #endif
-@@ -2127,15 +2154,35 @@ bool WebPageProxy::tryClose()
+@@ -2127,15 +2166,35 @@ bool WebPageProxy::tryClose()
  
      // Close without delay if the process allows it. Our goal is to terminate
      // the process, so we check a per-process status bit.
@@ -139009,7 +139043,7 @@ index abc66b25d5be6d2b961364268f19eb3762ab2c3a..8b89b6b2817856440f125de086e69fd7
          // If we timed out, don't ask the client to close again.
          if (!protectedThis->internals().tryCloseTimeoutTimer.isActive())
              return;
-@@ -2143,12 +2190,19 @@ bool WebPageProxy::tryClose()
+@@ -2143,12 +2202,19 @@ bool WebPageProxy::tryClose()
          protectedThis->internals().tryCloseTimeoutTimer.stop();
          if (shouldClose)
              protectedThis->closePage();
@@ -139029,7 +139063,7 @@ index abc66b25d5be6d2b961364268f19eb3762ab2c3a..8b89b6b2817856440f125de086e69fd7
      WEBPAGEPROXY_RELEASE_LOG_ERROR(Process, "tryCloseTimedOut: Timed out waiting for the process to respond to the WebPage::TryClose IPC, closing the page now");
      closePage();
  }
-@@ -4525,6 +4579,24 @@ void WebPageProxy::performDragOperation(DragData& dragData, const String& dragSt
+@@ -4525,6 +4591,24 @@ void WebPageProxy::performDragOperation(DragData& dragData, const String& dragSt
      if (!m_mainFrame)
          return;
  
@@ -139054,7 +139088,7 @@ index abc66b25d5be6d2b961364268f19eb3762ab2c3a..8b89b6b2817856440f125de086e69fd7
      sendWithAsyncReplyToProcessContainingFrame(m_mainFrame->frameID(), Messages::WebPage::PerformDragOperation(m_mainFrame->frameID(), WTF::move(dragData), WTF::move(sandboxExtensionHandle), WTF::move(sandboxExtensionsForUpload)), [protectedThis = Ref { *this }, frameID = m_mainFrame->frameID()] (DragOperationResult dragOperationResult) mutable {
          protect(protectedThis->pageClient())->didPerformDragOperation(std::holds_alternative<bool>(dragOperationResult) ? std::get<bool>(dragOperationResult) : false);
      });
-@@ -5382,9 +5454,42 @@ bool WebPageProxy::handleKeyboardEvent(Ref<NativeWebKeyboardEvent>&& event)
+@@ -5382,9 +5466,42 @@ bool WebPageProxy::handleKeyboardEvent(Ref<NativeWebKeyboardEvent>&& event)
  
  const WebPreferencesStore& WebPageProxy::preferencesStore() const
  {
@@ -139097,7 +139131,7 @@ index abc66b25d5be6d2b961364268f19eb3762ab2c3a..8b89b6b2817856440f125de086e69fd7
  #if ENABLE(TOUCH_EVENTS)
  
  static TrackingType mergeTrackingTypes(TrackingType a, TrackingType b)
-@@ -6934,8 +7039,16 @@ bool WebPageProxy::isPageOpenedByDOMShowingInitialEmptyDocument() const
+@@ -6934,8 +7051,16 @@ bool WebPageProxy::isPageOpenedByDOMShowingInitialEmptyDocument() const
  
  void WebPageProxy::setUserAgent(String&& userAgent, IsCustomUserAgent isCustomUserAgent)
  {
@@ -139115,7 +139149,7 @@ index abc66b25d5be6d2b961364268f19eb3762ab2c3a..8b89b6b2817856440f125de086e69fd7
      m_userAgent = WTF::move(userAgent);
  
      // We update the service worker there at the moment to be sure we use values used by actual web pages.
-@@ -6974,8 +7087,13 @@ void WebPageProxy::setCustomUserAgent(String&& customUserAgent)
+@@ -6974,8 +7099,13 @@ void WebPageProxy::setCustomUserAgent(String&& customUserAgent)
          return;
      }
  
@@ -139129,7 +139163,7 @@ index abc66b25d5be6d2b961364268f19eb3762ab2c3a..8b89b6b2817856440f125de086e69fd7
  }
  
  void WebPageProxy::resumeActiveDOMObjectsAndAnimations()
-@@ -7152,6 +7270,10 @@ void WebPageProxy::setPageZoomFactor(double zoomFactor)
+@@ -7152,6 +7282,10 @@ void WebPageProxy::setPageZoomFactor(double zoomFactor)
  
      closeOverlayedViews();
  
@@ -139140,7 +139174,7 @@ index abc66b25d5be6d2b961364268f19eb3762ab2c3a..8b89b6b2817856440f125de086e69fd7
      m_pageZoomFactor = zoomFactor;
  
      if (!hasRunningProcess())
-@@ -8333,6 +8455,13 @@ void WebPageProxy::setDevicePostureType(WebCore::DevicePostureType type)
+@@ -8333,6 +8467,13 @@ void WebPageProxy::setDevicePostureType(WebCore::DevicePostureType type)
  
  void WebPageProxy::preferencesDidChange()
  {
@@ -139154,7 +139188,7 @@ index abc66b25d5be6d2b961364268f19eb3762ab2c3a..8b89b6b2817856440f125de086e69fd7
      if (!hasRunningProcess())
          return;
  
-@@ -8372,7 +8501,7 @@ void WebPageProxy::didCreateSubframe(FrameIdentifier parentID, FrameIdentifier n
+@@ -8372,7 +8513,7 @@ void WebPageProxy::didCreateSubframe(FrameIdentifier parentID, FrameIdentifier n
  
  void WebPageProxy::didDestroyFrame(IPC::Connection& connection, FrameIdentifier frameID)
  {
@@ -139163,7 +139197,7 @@ index abc66b25d5be6d2b961364268f19eb3762ab2c3a..8b89b6b2817856440f125de086e69fd7
      protect(protect(websiteDataStore())->authenticatorManager())->cancelRequest(webPageIDInMainFrameProcess(), frameID);
  #endif
      if (RefPtr automationSession = m_configuration->processPool().automationSession())
-@@ -8831,7 +8960,7 @@ void WebPageProxy::didStartProvisionalLoadForFrameShared(Ref<WebProcessProxy>&&
+@@ -8831,7 +8972,7 @@ void WebPageProxy::didStartProvisionalLoadForFrameShared(Ref<WebProcessProxy>&&
          m_navigationClient->didStartProvisionalLoadForFrame(*this, WTF::move(request), WTF::move(frameInfo));
      }
  
@@ -139172,7 +139206,7 @@ index abc66b25d5be6d2b961364268f19eb3762ab2c3a..8b89b6b2817856440f125de086e69fd7
      protect(protect(websiteDataStore())->authenticatorManager())->cancelRequest(m_webPageID, frameID);
  #endif
  }
-@@ -8862,6 +8991,10 @@ void WebPageProxy::didExplicitOpenForFrame(IPC::Connection& connection, FrameIde
+@@ -8862,6 +9003,10 @@ void WebPageProxy::didExplicitOpenForFrame(IPC::Connection& connection, FrameIde
          process->didCommitMeaningfulProvisionalLoad();
  
      pageLoadState->commitChanges();
@@ -139183,7 +139217,7 @@ index abc66b25d5be6d2b961364268f19eb3762ab2c3a..8b89b6b2817856440f125de086e69fd7
  }
  
  void WebPageProxy::didReceiveServerRedirectForProvisionalLoadForFrame(IPC::Connection& connection, FrameIdentifier frameID, std::optional<WebCore::NavigationIdentifier> navigationID, ResourceRequest&& request, const UserData& userData)
-@@ -9899,6 +10032,44 @@ void WebPageProxy::didFailLoadForFrame(IPC::Connection& connection, FrameIdentif
+@@ -9899,6 +10044,44 @@ void WebPageProxy::didFailLoadForFrame(IPC::Connection& connection, FrameIdentif
      }
  }
  
@@ -139228,7 +139262,7 @@ index abc66b25d5be6d2b961364268f19eb3762ab2c3a..8b89b6b2817856440f125de086e69fd7
  void WebPageProxy::didSameDocumentNavigationForFrame(IPC::Connection& connection, FrameIdentifier frameID, std::optional<WebCore::NavigationIdentifier> navigationID, SameDocumentNavigationType navigationType, URL&& url, const UserData& userData)
  {
      RefPtr protectedPageClient { pageClient() };
-@@ -9939,6 +10110,9 @@ void WebPageProxy::didSameDocumentNavigationForFrame(IPC::Connection& connection
+@@ -9939,6 +10122,9 @@ void WebPageProxy::didSameDocumentNavigationForFrame(IPC::Connection& connection
      }
  
      protectedPageLoadState->clearPendingAPIRequest(transaction);
@@ -139238,7 +139272,7 @@ index abc66b25d5be6d2b961364268f19eb3762ab2c3a..8b89b6b2817856440f125de086e69fd7
      frame->didSameDocumentNavigation(WTF::move(url));
  
      protectedPageLoadState->commitChanges();
-@@ -9994,6 +10168,9 @@ void WebPageProxy::didSameDocumentNavigationForFrameViaJS(IPC::Connection& conne
+@@ -9994,6 +10180,9 @@ void WebPageProxy::didSameDocumentNavigationForFrameViaJS(IPC::Connection& conne
      }
  
      protectedPageLoadState->clearPendingAPIRequest(transaction);
@@ -139248,7 +139282,7 @@ index abc66b25d5be6d2b961364268f19eb3762ab2c3a..8b89b6b2817856440f125de086e69fd7
      frame->didSameDocumentNavigation(WTF::move(url));
  
      protectedPageLoadState->commitChanges();
-@@ -10142,6 +10319,10 @@ void WebPageProxy::didReceiveTitleForFrame(IPC::Connection& connection, FrameIde
+@@ -10142,6 +10331,10 @@ void WebPageProxy::didReceiveTitleForFrame(IPC::Connection& connection, FrameIde
  
      if (frame->isMainFrame()) {
          protectedPageLoadState->setTitle(transaction, String { title });
@@ -139259,7 +139293,7 @@ index abc66b25d5be6d2b961364268f19eb3762ab2c3a..8b89b6b2817856440f125de086e69fd7
          // FIXME: Ideally we'd enable this on iPhone as well but this currently regresses PLT.
          bool deviceClassIsSmallScreen = false;
  #if PLATFORM(IOS_FAMILY)
-@@ -11301,6 +11482,10 @@ void WebPageProxy::contentRuleListNotification(URL&& url, ContentRuleListResults
+@@ -11301,6 +11494,10 @@ void WebPageProxy::contentRuleListNotification(URL&& url, ContentRuleListResults
  
  void WebPageProxy::contentRuleListMatchedRule(WebCore::ContentRuleListMatchedRule&& matchedRule)
  {
@@ -139270,7 +139304,7 @@ index abc66b25d5be6d2b961364268f19eb3762ab2c3a..8b89b6b2817856440f125de086e69fd7
      m_navigationClient->contentRuleListMatchedRule(*this, WTF::move(matchedRule));
  }
  #endif
-@@ -11308,7 +11493,7 @@ void WebPageProxy::contentRuleListMatchedRule(WebCore::ContentRuleListMatchedRul
+@@ -11308,7 +11505,7 @@ void WebPageProxy::contentRuleListMatchedRule(WebCore::ContentRuleListMatchedRul
  #if ENABLE(WK_WEB_EXTENSIONS) && ENABLE(CONTENT_EXTENSIONS)
  void WebPageProxy::contentRuleListDidBlockLoad(WebExtensionContentRuleListBlockedLoadInfo&& info)
  {
@@ -139279,7 +139313,7 @@ index abc66b25d5be6d2b961364268f19eb3762ab2c3a..8b89b6b2817856440f125de086e69fd7
      if (RefPtr webExtensionController = this->webExtensionController())
          webExtensionController->resourceLoadWasBlockedByContentRuleList(identifier(), WTF::move(info));
  #endif
-@@ -11497,6 +11682,9 @@ void WebPageProxy::createNewPage(IPC::Connection& connection, WindowFeatures&& w
+@@ -11497,6 +11694,9 @@ void WebPageProxy::createNewPage(IPC::Connection& connection, WindowFeatures&& w
          shouldOpenExternalURLsPolicy = navigationActionData.shouldOpenExternalURLsPolicy,
          openedBlobURL,
          wantsNoOpener = windowFeatures.wantsNoOpener()
@@ -139289,7 +139323,7 @@ index abc66b25d5be6d2b961364268f19eb3762ab2c3a..8b89b6b2817856440f125de086e69fd7
      ] (RefPtr<WebPageProxy> newPage) mutable {
  
  #if PLATFORM(MAC)
-@@ -11515,6 +11703,17 @@ void WebPageProxy::createNewPage(IPC::Connection& connection, WindowFeatures&& w
+@@ -11515,6 +11715,17 @@ void WebPageProxy::createNewPage(IPC::Connection& connection, WindowFeatures&& w
              pageClient->dismissAnyOpenPicker();
  
          newPage->setOpenedByDOM();
@@ -139307,7 +139341,7 @@ index abc66b25d5be6d2b961364268f19eb3762ab2c3a..8b89b6b2817856440f125de086e69fd7
  
          if (openerAppInitiatedState)
              newPage->m_lastNavigationWasAppInitiated = *openerAppInitiatedState;
-@@ -11757,8 +11956,12 @@ void WebPageProxy::closePage()
+@@ -11757,8 +11968,12 @@ void WebPageProxy::closePage()
          return;
  
      WEBPAGEPROXY_RELEASE_LOG(Process, "closePage:");
@@ -139320,7 +139354,7 @@ index abc66b25d5be6d2b961364268f19eb3762ab2c3a..8b89b6b2817856440f125de086e69fd7
      m_uiClient->close(this);
  }
  
-@@ -12762,6 +12965,9 @@ void WebPageProxy::didChangeIntrinsicContentSize(const IntSize& intrinsicContent
+@@ -12762,6 +12977,9 @@ void WebPageProxy::didChangeIntrinsicContentSize(const IntSize& intrinsicContent
  #if USE(APPKIT)
      if (RefPtr pageClient = this->pageClient())
          pageClient->intrinsicContentSizeDidChange(intrinsicContentSize);
@@ -139330,7 +139364,7 @@ index abc66b25d5be6d2b961364268f19eb3762ab2c3a..8b89b6b2817856440f125de086e69fd7
  #endif
  }
  
-@@ -12936,7 +13142,7 @@ WebInspectorUIProxy* WebPageProxy::inspector() const
+@@ -12936,7 +13154,7 @@ WebInspectorUIProxy* WebPageProxy::inspector() const
      return m_inspector.get();
  }
  
@@ -139339,7 +139373,7 @@ index abc66b25d5be6d2b961364268f19eb3762ab2c3a..8b89b6b2817856440f125de086e69fd7
  static bool isParentFrameMainFrame(const ResourceLoadInfo& loadInfo, WebFrameProxy* mainFrame)
  {
      return loadInfo.parentFrameID && mainFrame && *loadInfo.parentFrameID == mainFrame->frameID();
-@@ -12945,7 +13151,7 @@ static bool isParentFrameMainFrame(const ResourceLoadInfo& loadInfo, WebFramePro
+@@ -12945,7 +13163,7 @@ static bool isParentFrameMainFrame(const ResourceLoadInfo& loadInfo, WebFramePro
  
  void WebPageProxy::resourceLoadDidSendRequest(ResourceLoadInfo&& loadInfo, WebCore::ResourceRequest&& request)
  {
@@ -139348,7 +139382,7 @@ index abc66b25d5be6d2b961364268f19eb3762ab2c3a..8b89b6b2817856440f125de086e69fd7
      if (RefPtr webExtensionController = this->webExtensionController()) {
          loadInfo.parentFrameIsMainFrame = isParentFrameMainFrame(loadInfo, mainFrame());
          webExtensionController->resourceLoadDidSendRequest(identifier(), loadInfo, request);
-@@ -12958,7 +13164,7 @@ void WebPageProxy::resourceLoadDidSendRequest(ResourceLoadInfo&& loadInfo, WebCo
+@@ -12958,7 +13176,7 @@ void WebPageProxy::resourceLoadDidSendRequest(ResourceLoadInfo&& loadInfo, WebCo
  
  void WebPageProxy::resourceLoadDidPerformHTTPRedirection(ResourceLoadInfo&& loadInfo, WebCore::ResourceResponse&& response, WebCore::ResourceRequest&& request)
  {
@@ -139357,7 +139391,7 @@ index abc66b25d5be6d2b961364268f19eb3762ab2c3a..8b89b6b2817856440f125de086e69fd7
      if (RefPtr webExtensionController = this->webExtensionController()) {
          loadInfo.parentFrameIsMainFrame = isParentFrameMainFrame(loadInfo, mainFrame());
          webExtensionController->resourceLoadDidPerformHTTPRedirection(identifier(), loadInfo, response, request);
-@@ -12971,7 +13177,7 @@ void WebPageProxy::resourceLoadDidPerformHTTPRedirection(ResourceLoadInfo&& load
+@@ -12971,7 +13189,7 @@ void WebPageProxy::resourceLoadDidPerformHTTPRedirection(ResourceLoadInfo&& load
  
  void WebPageProxy::resourceLoadDidReceiveChallenge(ResourceLoadInfo&& loadInfo, WebCore::AuthenticationChallenge&& challenge)
  {
@@ -139366,7 +139400,7 @@ index abc66b25d5be6d2b961364268f19eb3762ab2c3a..8b89b6b2817856440f125de086e69fd7
      if (RefPtr webExtensionController = this->webExtensionController()) {
          loadInfo.parentFrameIsMainFrame = isParentFrameMainFrame(loadInfo, mainFrame());
          webExtensionController->resourceLoadDidReceiveChallenge(identifier(), loadInfo, challenge);
-@@ -12984,7 +13190,7 @@ void WebPageProxy::resourceLoadDidReceiveChallenge(ResourceLoadInfo&& loadInfo,
+@@ -12984,7 +13202,7 @@ void WebPageProxy::resourceLoadDidReceiveChallenge(ResourceLoadInfo&& loadInfo,
  
  void WebPageProxy::resourceLoadDidReceiveResponse(ResourceLoadInfo&& loadInfo, WebCore::ResourceResponse&& response)
  {
@@ -139375,7 +139409,7 @@ index abc66b25d5be6d2b961364268f19eb3762ab2c3a..8b89b6b2817856440f125de086e69fd7
      if (RefPtr webExtensionController = this->webExtensionController()) {
          loadInfo.parentFrameIsMainFrame = isParentFrameMainFrame(loadInfo, mainFrame());
          webExtensionController->resourceLoadDidReceiveResponse(identifier(), loadInfo, response);
-@@ -12997,7 +13203,7 @@ void WebPageProxy::resourceLoadDidReceiveResponse(ResourceLoadInfo&& loadInfo, W
+@@ -12997,7 +13215,7 @@ void WebPageProxy::resourceLoadDidReceiveResponse(ResourceLoadInfo&& loadInfo, W
  
  void WebPageProxy::resourceLoadDidCompleteWithError(ResourceLoadInfo&& loadInfo, WebCore::ResourceResponse&& response, WebCore::ResourceError&& error)
  {
@@ -139384,7 +139418,7 @@ index abc66b25d5be6d2b961364268f19eb3762ab2c3a..8b89b6b2817856440f125de086e69fd7
      if (RefPtr webExtensionController = this->webExtensionController()) {
          loadInfo.parentFrameIsMainFrame = isParentFrameMainFrame(loadInfo, mainFrame());
          webExtensionController->resourceLoadDidCompleteWithError(identifier(), loadInfo, response, error);
-@@ -13976,6 +14182,20 @@ void WebPageProxy::checkSpellingOfString(const String& text, CompletionHandler<v
+@@ -13976,6 +14194,20 @@ void WebPageProxy::checkSpellingOfString(const String& text, CompletionHandler<v
      completionHandler(misspellingLocation, misspellingLength);
  }
  
@@ -139405,7 +139439,7 @@ index abc66b25d5be6d2b961364268f19eb3762ab2c3a..8b89b6b2817856440f125de086e69fd7
  void WebPageProxy::checkGrammarOfString(const String& text, CompletionHandler<void(Vector<WebCore::GrammarDetail>&&, int32_t badGrammarLocation, int32_t badGrammarLength)>&& completionHandler)
  {
      Vector<GrammarDetail> grammarDetails;
-@@ -14815,7 +15035,7 @@ void WebPageProxy::resetState(ResetStateReason resetStateReason)
+@@ -14815,7 +15047,7 @@ void WebPageProxy::resetState(ResetStateReason resetStateReason)
      resetSpeechSynthesizer();
  #endif
  
@@ -139414,7 +139448,7 @@ index abc66b25d5be6d2b961364268f19eb3762ab2c3a..8b89b6b2817856440f125de086e69fd7
      protect(protect(websiteDataStore())->authenticatorManager())->cancelRequest(m_webPageID, std::nullopt);
  #endif
  
-@@ -14868,6 +15088,13 @@ void WebPageProxy::resetStateAfterProcessExited(ProcessTerminationReason termina
+@@ -14868,6 +15100,13 @@ void WebPageProxy::resetStateAfterProcessExited(ProcessTerminationReason termina
  {
      RefPtr protectedPageClient { pageClient() };
  
@@ -139428,7 +139462,7 @@ index abc66b25d5be6d2b961364268f19eb3762ab2c3a..8b89b6b2817856440f125de086e69fd7
  #if ASSERT_ENABLED
      // FIXME: It's weird that resetStateAfterProcessExited() is called even though the process is launching.
      if (terminationReason != ProcessTerminationReason::NavigationSwap)
-@@ -15092,6 +15319,9 @@ WebPageCreationParameters WebPageProxy::creationParameters(WebProcessProxy& proc
+@@ -15092,6 +15331,9 @@ WebPageCreationParameters WebPageProxy::creationParameters(WebProcessProxy& proc
      parameters.pageLength = m_pageLength;
      parameters.gapBetweenPages = m_gapBetweenPages;
      parameters.userAgent = userAgent();
@@ -139438,7 +139472,7 @@ index abc66b25d5be6d2b961364268f19eb3762ab2c3a..8b89b6b2817856440f125de086e69fd7
      parameters.canRunBeforeUnloadConfirmPanel = m_uiClient->canRunBeforeUnloadConfirmPanel();
      parameters.canRunModal = m_canRunModal;
      parameters.deviceScaleFactor = deviceScaleFactor();
-@@ -15270,9 +15500,9 @@ WebPageCreationParameters WebPageProxy::creationParameters(WebProcessProxy& proc
+@@ -15270,9 +15512,9 @@ WebPageCreationParameters WebPageProxy::creationParameters(WebProcessProxy& proc
      parameters.hasResourceLoadClient = !!m_resourceLoadClient;
      parameters.portsForUpgradingInsecureSchemeForTesting = m_configuration->portsForUpgradingInsecureSchemeForTesting();
  
@@ -139451,7 +139485,7 @@ index abc66b25d5be6d2b961364268f19eb3762ab2c3a..8b89b6b2817856440f125de086e69fd7
  
      if (RefPtr weakWebExtensionController = m_weakWebExtensionController.get())
          parameters.webExtensionControllerParameters = weakWebExtensionController->parameters(m_configuration, process);
-@@ -19004,7 +19234,13 @@ void WebPageProxy::decidePolicyForSOAuthorizationLoad(const String& extension, C
+@@ -19004,7 +19246,13 @@ void WebPageProxy::decidePolicyForSOAuthorizationLoad(const String& extension, C
  #if ENABLE(WEB_AUTHN)
  void WebPageProxy::setMockWebAuthenticationConfiguration(MockWebAuthenticationConfiguration&& configuration)
  {
@@ -139603,10 +139637,10 @@ index 41190ed770ac926edc65b498d52879ee7dc0eca6..90bd49e69683c16e1731252157f8edd1
      WebCore::Color underlayColor;
      RunLoop::Timer updateReportedMediaCaptureStateTimer;
 diff --git a/Source/WebKit/UIProcess/WebProcessCache.cpp b/Source/WebKit/UIProcess/WebProcessCache.cpp
-index d9243a6e70f5b6759cb9d98941df81778c31e1c9..b6200d627dc4b62319ecef47a1e93385d9589f94 100644
+index d9243a6e70f5b6759cb9d98941df81778c31e1c9..ee34b87b3c382ca8171fe8c2dff2d6d065ed8b5e 100644
 --- a/Source/WebKit/UIProcess/WebProcessCache.cpp
 +++ b/Source/WebKit/UIProcess/WebProcessCache.cpp
-@@ -36,6 +36,12 @@
+@@ -36,11 +36,22 @@
  #include <wtf/StdLibExtras.h>
  #include <wtf/TZoneMallocInlines.h>
  
@@ -139619,7 +139653,17 @@ index d9243a6e70f5b6759cb9d98941df81778c31e1c9..b6200d627dc4b62319ecef47a1e93385
  #define WEBPROCESSCACHE_RELEASE_LOG(fmt, ...) RELEASE_LOG(ProcessSwapping, "%p - [PID=%d] WebProcessCache::" fmt, this, ##__VA_ARGS__)
  #define WEBPROCESSCACHE_RELEASE_LOG_ERROR(fmt, ...) RELEASE_LOG_ERROR(ProcessSwapping, "%p - [PID=%d] WebProcessCache::" fmt, this, ##__VA_ARGS__)
  
-@@ -55,6 +61,32 @@ Seconds WebProcessCache::clearingDelayAfterApplicationResignsActive = cachedProc
+ namespace WebKit {
+ 
++#if OS(HAIKU)
++// A web process left for its size (WebProcessPool.cpp, #168).
++bool isBloatedProcessHaiku(const WebProcessProxy&);
++#endif
++
+ WTF_MAKE_TZONE_ALLOCATED_IMPL(WebProcessCache);
+ WTF_MAKE_TZONE_ALLOCATED_IMPL(WebProcessCache::CachedProcess);
+ 
+@@ -55,6 +66,32 @@ Seconds WebProcessCache::clearingDelayAfterApplicationResignsActive = cachedProc
  int WebProcessCache::capacityOverride { -1 };
  static Seconds cachedProcessSuspensionDelay { 30_s };
  
@@ -139652,7 +139696,20 @@ index d9243a6e70f5b6759cb9d98941df81778c31e1c9..b6200d627dc4b62319ecef47a1e93385
  void WebProcessCache::setCachedProcessSuspensionDelayForTesting(Seconds delay)
  {
      cachedProcessSuspensionDelay = delay;
-@@ -175,6 +207,8 @@ bool WebProcessCache::addProcess(Ref<CachedProcess>&& cachedProcess)
+@@ -92,6 +129,12 @@ void WebProcessCache::deref() const
+ 
+ bool WebProcessCache::canCacheProcess(WebProcessProxy& process) const
+ {
++#if OS(HAIKU)
++    if (isBloatedProcessHaiku(process)) {
++        WEBPROCESSCACHE_RELEASE_LOG("canCacheProcess: Not caching process because it was left for its size", process.processID());
++        return false;
++    }
++#endif
+     if (!process.isEligibleForWebProcessCache()) {
+         WEBPROCESSCACHE_RELEASE_LOG("canCacheProcess: Not caching process because WebProcessProxy does not allow it", process.processID());
+         return false;
+@@ -175,6 +218,8 @@ bool WebProcessCache::addProcess(Ref<CachedProcess>&& cachedProcess)
  
  #if PLATFORM(COCOA) || PLATFORM(GTK) || PLATFORM(WPE)
          cachedProcess->startSuspensionTimer();
@@ -139661,7 +139718,7 @@ index d9243a6e70f5b6759cb9d98941df81778c31e1c9..b6200d627dc4b62319ecef47a1e93385
  #endif
  
      if (auto& origin = process->coopCacheOrigin()) {
-@@ -421,6 +455,25 @@ void WebProcessCache::updateCapacity(WebProcessPool& processPool)
+@@ -421,6 +466,25 @@ void WebProcessCache::updateCapacity(WebProcessPool& processPool)
          m_capacity = capacityOverride;
      } else {
          unsigned maxProcesses = 32;
@@ -139687,7 +139744,7 @@ index d9243a6e70f5b6759cb9d98941df81778c31e1c9..b6200d627dc4b62319ecef47a1e93385
  #if PLATFORM(IOS_FAMILY)
          if (!processPool.hasUsedSiteIsolation())
              maxProcesses = 10;
-@@ -434,7 +487,7 @@ void WebProcessCache::updateCapacity(WebProcessPool& processPool)
+@@ -434,7 +498,7 @@ void WebProcessCache::updateCapacity(WebProcessPool& processPool)
              WEBPROCESSCACHE_RELEASE_LOG("updateCapacity: Cache is disabled because device does not have enough RAM", 0);
          } else {
              // Allow 4 processes in the cache per GB of RAM, up to maxProcesses.
@@ -139697,7 +139754,7 @@ index d9243a6e70f5b6759cb9d98941df81778c31e1c9..b6200d627dc4b62319ecef47a1e93385
          }
      }
 diff --git a/Source/WebKit/UIProcess/WebProcessPool.cpp b/Source/WebKit/UIProcess/WebProcessPool.cpp
-index cf634997b899951b6afccf716c62137a21a66d6a..50e830f4b12347eb1318e4998fe8ce7c2181009d 100644
+index cf634997b899951b6afccf716c62137a21a66d6a..383266349c7bf812325fb50d41f77f441d85022b 100644
 --- a/Source/WebKit/UIProcess/WebProcessPool.cpp
 +++ b/Source/WebKit/UIProcess/WebProcessPool.cpp
 @@ -144,6 +144,8 @@
@@ -139727,7 +139784,7 @@ index cf634997b899951b6afccf716c62137a21a66d6a..50e830f4b12347eb1318e4998fe8ce7c
  void WebProcessPool::sendMemoryPressureEvent(bool isCritical)
  {
      sendToAllProcesses(Messages::AuxiliaryProcess::DidReceiveMemoryPressureEvent(isCritical));
-@@ -2411,6 +2413,55 @@ void WebProcessPool::prepareProcessForNavigation(Ref<WebProcessProxy>&& process,
+@@ -2411,6 +2413,101 @@ void WebProcessPool::prepareProcessForNavigation(Ref<WebProcessProxy>&& process,
      });
  }
  
@@ -139780,10 +139837,56 @@ index cf634997b899951b6afccf716c62137a21a66d6a..50e830f4b12347eb1318e4998fe8ce7c
 +}
 +#endif
 +
++#if OS(HAIKU)
++// A web process that a tab keeps for many navigations grows and does not give
++// it back: mimalloc keeps the pages its freed blocks sit in (680 MiB of pages
++// for 290 MiB in use after 28 GitHub navigations, #168), and nothing compacts
++// them. A main-frame navigation within the site of such a process, the only
++// page in it, gets a fresh process instead (the spare one, as a cross-site
++// one does), and the old process is neither kept for back/forward nor cached
++// (isBloatedProcessHaiku below), so it ends and its memory goes back.
++// SUMMIT_FRESH_PROCESS_MIB (768) is the size, without the screen buffer that
++// every web process maps from app_server; 0 turns this off.
++bool isBloatedProcessHaiku(const WebProcessProxy&);
++
++static HashSet<WebCore::ProcessIdentifier>& bloatedProcessesHaiku()
++{
++    static NeverDestroyed<HashSet<WebCore::ProcessIdentifier>> processes;
++    return processes;
++}
++
++bool isBloatedProcessHaiku(const WebProcessProxy& process)
++{
++    return bloatedProcessesHaiku().contains(process.coreProcessIdentifier());
++}
++
++static bool shouldLeaveBloatedProcessHaiku(const WebProcessProxy& process)
++{
++    static const uint64_t limit = [] {
++        const char* value = getenv("SUMMIT_FRESH_PROCESS_MIB");
++        return static_cast<uint64_t>(value && *value ? std::max(atoll(value), 0LL) : 768) * 1024 * 1024;
++    }();
++    if (!limit || process.pageCount() != 1 || process.isRunningWorkers() || process.processID() <= 0)
++        return false;
++    uint64_t resident = 0;
++    area_info area;
++    ssize_t cookie = 0;
++    while (get_next_area_info(process.processID(), &cookie, &area) == B_OK) {
++        if (strcmp(area.name, "direct present back buffer"))
++            resident += area.ram_size;
++    }
++    if (resident <= limit)
++        return false;
++    bloatedProcessesHaiku().add(process.coreProcessIdentifier());
++    fprintf(stderr, "Summit: web process %d holds %llu MiB; its tab's next page gets a fresh process\n", process.processID(), static_cast<unsigned long long>(resident / (1024 * 1024)));
++    return true;
++}
++#endif
++
  std::tuple<Ref<WebProcessProxy>, RefPtr<SuspendedPageProxy>, ASCIILiteral> WebProcessPool::processForNavigationInternal(WebPageProxy& page, WebFrameProxy& frame, const API::Navigation& navigation, const URL& pageSourceURL, BrowsingContextGroup& browsingContextGroup, WebProcessProxy::IsolatedProcessType isolatedProcessType, const Site& mainFrameSite, ProcessSwapRequestedByClient processSwapRequestedByClient, WebProcessProxy::LockdownMode lockdownMode, EnhancedSecurity enhancedSecurity, const FrameInfoData& frameInfo, Ref<WebsiteDataStore>&& dataStore)
  {
      auto& targetURL = navigation.currentRequest().url();
-@@ -2465,7 +2516,20 @@ std::tuple<Ref<WebProcessProxy>, RefPtr<SuspendedPageProxy>, ASCIILiteral> WebPr
+@@ -2465,7 +2562,20 @@ std::tuple<Ref<WebProcessProxy>, RefPtr<SuspendedPageProxy>, ASCIILiteral> WebPr
      }
  
      bool isProcessInUseBySingleFrame = !siteIsolationEnabled || (sourceProcess->frameProcessCount() == 1 && frame.frameProcess().frameCount() <= 1);
@@ -139804,7 +139907,19 @@ index cf634997b899951b6afccf716c62137a21a66d6a..50e830f4b12347eb1318e4998fe8ce7c
          tryPrewarmWithDomainInformation(sourceProcess, targetSite.domain());
          return { WTF::move(sourceProcess), nullptr, "Process has not yet committed any provisional loads"_s };
      }
-@@ -2608,6 +2672,10 @@ std::tuple<Ref<WebProcessProxy>, RefPtr<SuspendedPageProxy>, ASCIILiteral> WebPr
+@@ -2562,6 +2672,11 @@ std::tuple<Ref<WebProcessProxy>, RefPtr<SuspendedPageProxy>, ASCIILiteral> WebPr
+         return { WTF::move(sourceProcess), nullptr, "Navigation within the same non-HTTP(s) protocol"_s };
+ 
+     bool sourceURLIsInvalid = !sourceURL.isValid() || sourceURL.isEmpty();
++#if OS(HAIKU)
++    if (!siteIsolationEnabled && frame.isMainFrame() && !sourceURLIsInvalid && targetURL.isValid() && targetURL.protocolIsInHTTPFamily()
++        && targetSite.domain().matches(sourceURL) && shouldLeaveBloatedProcessHaiku(sourceProcess))
++        return { createNewProcess(), nullptr, "Same-site navigation leaves a bloated process"_s };
++#endif
+     if (!siteIsolationEnabled && (sourceURLIsInvalid || !targetURL.isValid() || targetSite.domain().matches(sourceURL)))
+         return { WTF::move(sourceProcess), nullptr, "Navigation is same-site"_s };
+ 
+@@ -2608,6 +2723,10 @@ std::tuple<Ref<WebProcessProxy>, RefPtr<SuspendedPageProxy>, ASCIILiteral> WebPr
          }
      }
  
