@@ -87688,7 +87688,7 @@ index 5a8bebfa4fb03b8ed66afe52ec6ea95d97a987ac..7595c5866ece87286d0992e64c684ede
 +#endif
  }
 diff --git a/Source/WebKit/NetworkProcess/NetworkResourceLoader.cpp b/Source/WebKit/NetworkProcess/NetworkResourceLoader.cpp
-index 0ecf172b29e1ba69a2573c3de5351f86e5a4ef0e..147cd3ec5dd899801109fbbc99e4142788d1bfd4 100644
+index 0ecf172b29e1ba69a2573c3de5351f86e5a4ef0e..4cfa854549bf717e53f3700a235a5d1a7bb53b12 100644
 --- a/Source/WebKit/NetworkProcess/NetworkResourceLoader.cpp
 +++ b/Source/WebKit/NetworkProcess/NetworkResourceLoader.cpp
 @@ -115,6 +115,14 @@
@@ -87742,7 +87742,7 @@ index 0ecf172b29e1ba69a2573c3de5351f86e5a4ef0e..147cd3ec5dd899801109fbbc99e41427
  
          if (!entry) {
              protectedThis->startNetworkLoad(WTF::move(request), FirstLoad::Yes);
-@@ -571,6 +594,199 @@ void NetworkResourceLoader::continueStartNetworkLoad(ResourceRequest&& request,
+@@ -571,6 +594,205 @@ void NetworkResourceLoader::continueStartNetworkLoad(ResourceRequest&& request,
          LOADER_RELEASE_LOG("startNetworkLoad: Going to the network (description=%" PUBLIC_LOG_STRING ")", networkLoad->description().utf8());
  }
  
@@ -87753,6 +87753,12 @@ index 0ecf172b29e1ba69a2573c3de5351f86e5a4ef0e..147cd3ec5dd899801109fbbc99e41427
 +    // currently has a blocking listener for this phase. Synchronous loads are
 +    // never held: their WebProcess is blocked and may host the listener.
 +    if (!m_parameters.pageHasLoadedWebExtensions || isSynchronous())
++        return false;
++    // Listeners see http(s) loads only, as in Chrome and Firefox (WebSockets
++    // have their own gate). A blob: or data: load must start at once: pages
++    // revoke a blob URL right after send(), and waiting for the UI process
++    // let the revocation win, so the load failed (Zoom's media workers, #174).
++    if (!originalRequest().url().protocolIsInHTTPFamily())
 +        return false;
 +    return m_connection->networkProcess().webRequestBlockingPhasesHaiku() & webExtensionWebRequestPhaseBitHaiku(phase);
 +}
@@ -87942,7 +87948,7 @@ index 0ecf172b29e1ba69a2573c3de5351f86e5a4ef0e..147cd3ec5dd899801109fbbc99e41427
  ResourceLoadInfo NetworkResourceLoader::resourceLoadInfo()
  {
      auto loadedFromCache = [] (const ResourceResponse& response) {
-@@ -1277,7 +1493,7 @@ ResourceRequest NetworkResourceLoader::constructPreconnectRequest(const Resource
+@@ -1277,7 +1499,7 @@ ResourceRequest NetworkResourceLoader::constructPreconnectRequest(const Resource
  
  void NetworkResourceLoader::startPreconnectTask(const URL& baseURL, const LinkHeader& header, const ContentSecurityPolicy& contentSecurityPolicy)
  {
@@ -87951,7 +87957,7 @@ index 0ecf172b29e1ba69a2573c3de5351f86e5a4ef0e..147cd3ec5dd899801109fbbc99e41427
      if (!parameters().linkPreconnectEarlyHintsEnabled)
          return;
  
-@@ -1316,6 +1532,46 @@ void NetworkResourceLoader::startPreconnectTask(const URL& baseURL, const LinkHe
+@@ -1316,6 +1538,46 @@ void NetworkResourceLoader::startPreconnectTask(const URL& baseURL, const LinkHe
  
  void NetworkResourceLoader::didReceiveResponse(ResourceResponse&& receivedResponse, PrivateRelayed privateRelayed, ResponseCompletionHandler&& completionHandler)
  {
@@ -87998,7 +88004,7 @@ index 0ecf172b29e1ba69a2573c3de5351f86e5a4ef0e..147cd3ec5dd899801109fbbc99e41427
  #if HAVE(BROKEN_MULTIPART_RESPONSE_FLOW_CONTROL)
      if (m_isProcessingResponse) {
          m_deferredMessages.append(DeferredResponse { WTF::move(receivedResponse), privateRelayed, WTF::move(completionHandler) });
-@@ -1797,6 +2053,32 @@ void NetworkResourceLoader::didReceiveChallenge(const AuthenticationChallenge& c
+@@ -1797,6 +2059,32 @@ void NetworkResourceLoader::didReceiveChallenge(const AuthenticationChallenge& c
          protect(connectionToWebProcess().networkProcess())->parentProcessConnection()->send(Messages::NetworkProcessProxy::ResourceLoadDidReceiveChallenge(webPageProxyID(), resourceLoadInfo(), challenge), 0);
  }
  
@@ -88031,7 +88037,7 @@ index 0ecf172b29e1ba69a2573c3de5351f86e5a4ef0e..147cd3ec5dd899801109fbbc99e41427
  std::optional<Seconds> NetworkResourceLoader::validateCacheEntryForMaxAgeCapValidation(const ResourceRequest& request, const ResourceRequest& redirectRequest, const ResourceResponse& redirectResponse)
  {
      bool existingCacheEntryMatchesNewResponse = false;
-@@ -1856,7 +2138,11 @@ void NetworkResourceLoader::continueWillSendRedirectedRequestAfterContentFilteri
+@@ -1856,7 +2144,11 @@ void NetworkResourceLoader::continueWillSendRedirectedRequestAfterContentFilteri
  {
      // A redirect never reaches didReceiveResponse, so this hop needs its own check, judged against the
      // connection that served the 302 rather than the one the request started on.
@@ -88044,7 +88050,7 @@ index 0ecf172b29e1ba69a2573c3de5351f86e5a4ef0e..147cd3ec5dd899801109fbbc99e41427
          if (localNetworkAccessError) {
              LOADER_RELEASE_LOG_ERROR("willSendRedirectedRequest: Blocked by Local Network Access check");
              didFailLoading(*localNetworkAccessError);
-@@ -2057,6 +2343,15 @@ void NetworkResourceLoader::restartNetworkLoad(WebCore::ResourceRequest&& newReq
+@@ -2057,6 +2349,15 @@ void NetworkResourceLoader::restartNetworkLoad(WebCore::ResourceRequest&& newReq
  
      completionHandler({ });
  
@@ -88060,7 +88066,7 @@ index 0ecf172b29e1ba69a2573c3de5351f86e5a4ef0e..147cd3ec5dd899801109fbbc99e41427
      if (!newRequest.isEmpty())
          startNetworkLoad(WTF::move(newRequest), FirstLoad::No);
  }
-@@ -2146,6 +2441,18 @@ void NetworkResourceLoader::continueWillSendRequest(ResourceRequest&& newRequest
+@@ -2146,6 +2447,18 @@ void NetworkResourceLoader::continueWillSendRequest(ResourceRequest&& newRequest
          LOG(NetworkCache, "(NetworkProcess) Retrieving cached redirect");
          LOADER_RELEASE_LOG("continueWillSendRequest: m_isWaitingContinueWillSendRequestForCachedRedirect was set");
  
@@ -88079,7 +88085,7 @@ index 0ecf172b29e1ba69a2573c3de5351f86e5a4ef0e..147cd3ec5dd899801109fbbc99e41427
          if (canUseCachedRedirect(newRequest))
              retrieveCacheEntry(newRequest);
          else
-@@ -2156,6 +2463,27 @@ void NetworkResourceLoader::continueWillSendRequest(ResourceRequest&& newRequest
+@@ -2156,6 +2469,27 @@ void NetworkResourceLoader::continueWillSendRequest(ResourceRequest&& newRequest
      if (m_networkLoad) {
          LOADER_RELEASE_LOG("continueWillSendRequest: Telling NetworkLoad to proceed with the redirect");
  
@@ -88107,7 +88113,7 @@ index 0ecf172b29e1ba69a2573c3de5351f86e5a4ef0e..147cd3ec5dd899801109fbbc99e41427
          if (shouldSendResourceLoadMessages() && !newRequest.isNull())
              protect(connectionToWebProcess().networkProcess())->parentProcessConnection()->send(Messages::NetworkProcessProxy::ResourceLoadDidPerformHTTPRedirection(webPageProxyID(), resourceLoadInfo(), m_redirectResponse, newRequest), 0);
  
-@@ -2334,6 +2662,14 @@ void NetworkResourceLoader::sendBuffer(const FragmentedSharedBuffer& buffer)
+@@ -2334,6 +2668,14 @@ void NetworkResourceLoader::sendBuffer(const FragmentedSharedBuffer& buffer)
  
  void NetworkResourceLoader::tryStoreAsCacheEntry()
  {
@@ -88122,7 +88128,7 @@ index 0ecf172b29e1ba69a2573c3de5351f86e5a4ef0e..147cd3ec5dd899801109fbbc99e41427
      if (!canUseCache(m_networkLoad->currentRequest())) {
          LOADER_RELEASE_LOG("tryStoreAsCacheEntry: Not storing cache entry because request is not eligible");
          return;
-@@ -2344,6 +2680,12 @@ void NetworkResourceLoader::tryStoreAsCacheEntry()
+@@ -2344,6 +2686,12 @@ void NetworkResourceLoader::tryStoreAsCacheEntry()
      }
  
      if (isCrossOriginPrefetch()) {

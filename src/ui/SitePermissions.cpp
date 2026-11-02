@@ -322,6 +322,9 @@ void SitePermissionService::Ask(const BMessage& request)
             const BRect frame = window->Frame();
             window->Unlock();
             alert->Lock();
+            // Its real size: before Go() an alert is a 100-pixel placeholder,
+            // which left the question off-centre.
+            alert->ResizeToPreferred();
             const BRect size = alert->Frame();
             alert->MoveTo(frame.left + (frame.Width() - size.Width()) / 2, frame.top + 90);
             alert->Unlock();
