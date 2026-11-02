@@ -99581,7 +99581,7 @@ index 0000000000000000000000000000000000000000..964df248231137e87da9c37afbb37b84
 +}
 +#endif
 diff --git a/Source/WebKit/Shared/unix/AuxiliaryProcessMain.cpp b/Source/WebKit/Shared/unix/AuxiliaryProcessMain.cpp
-index bdd839107c6fb8eb0c40b5f0680356209cbefdb2..a921e3ecbfa0b27c77190176e0cd9fac21e93d85 100644
+index bdd839107c6fb8eb0c40b5f0680356209cbefdb2..83750016d3c049fa894128448747717879a46bc8 100644
 --- a/Source/WebKit/Shared/unix/AuxiliaryProcessMain.cpp
 +++ b/Source/WebKit/Shared/unix/AuxiliaryProcessMain.cpp
 @@ -24,6 +24,11 @@
@@ -99596,7 +99596,7 @@ index bdd839107c6fb8eb0c40b5f0680356209cbefdb2..a921e3ecbfa0b27c77190176e0cd9fac
  #include "AuxiliaryProcessMain.h"
  
  #include <JavaScriptCore/Options.h>
-@@ -83,6 +88,24 @@ bool AuxiliaryProcessMainCommon::parseCommandLine(int argc, char** argv)
+@@ -83,6 +88,33 @@ bool AuxiliaryProcessMainCommon::parseCommandLine(int argc, char** argv)
      if (!m_parameters.processIdentifier->toUInt64() || m_parameters.connectionIdentifier.handle.value() <= 0)
          return false;
  
@@ -99615,6 +99615,15 @@ index bdd839107c6fb8eb0c40b5f0680356209cbefdb2..a921e3ecbfa0b27c77190176e0cd9fac
 +                close(descriptor);
 +        }
 +        fcntl(connection, F_SETFD, FD_CLOEXEC);
++    }
++#endif
++
++#if PLATFORM(HAIKU)
++    // The spare (prewarmed) web process (ProcessLauncherHaiku.cpp); the Cocoa
++    // ports hand the same key over through XPC.
++    for (auto& arg : argvSpan.subspan(argIndex)) {
++        if (UTF8CStringView::unsafeFromUTF8(arg) == "--prewarmed"_s)
++            m_parameters.extraInitializationData.set("is-prewarmed"_s, "1"_s);
 +    }
 +#endif
 +
@@ -134479,10 +134488,10 @@ index 0000000000000000000000000000000000000000..8e3594f13706deab22502e0d02692457
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/Launcher/haiku/ProcessLauncherHaiku.cpp b/Source/WebKit/UIProcess/Launcher/haiku/ProcessLauncherHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..3c998940e35f7fc93650844cc07553dfae952ee0
+index 0000000000000000000000000000000000000000..b4499b6c2b0516b29186c4eabea737ccb26adf5a
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Launcher/haiku/ProcessLauncherHaiku.cpp
-@@ -0,0 +1,262 @@
+@@ -0,0 +1,269 @@
 +/*
 + *  Copyright (C) 2019 Haiku, Inc.
 + *
@@ -134518,6 +134527,7 @@ index 0000000000000000000000000000000000000000..3c998940e35f7fc93650844cc07553df
 +#include <OS.h>
 +#include <algorithm>
 +#include <cstdio>
++#include <cstring>
 +#include <mutex>
 +#include <signal.h>
 +#include <image.h>
@@ -134698,6 +134708,12 @@ index 0000000000000000000000000000000000000000..3c998940e35f7fc93650844cc07553df
 +    std::vector<std::string> arguments;
 +    if (m_client && m_client->shouldConfigureJSCForTesting())
 +        arguments.emplace_back("--configure-jsc-for-testing");
++    // The spare web process makes its GPU display at once; others wait for
++    // their first page (WebProcessHaiku.cpp, #170).
++    if (m_launchOptions.extraInitializationData.get<HashTranslatorASCIILiteral>("is-prewarmed"_s) == "1"_s)
++        arguments.emplace_back("--prewarmed");
++    if (const char* trace = getenv("SUMMIT_GPU_DISPLAY_TRACE"); trace && !strcmp(trace, "1") && m_launchOptions.processType == ProcessType::Web)
++        fprintf(stderr, "Summit GPU display: launching a web process%s (%u keys)\n", arguments.size() && arguments.back() == "--prewarmed" ? " as the spare" : "", m_launchOptions.extraInitializationData.size());
 +    // load_image() returns once the new team has loaded its libraries, a
 +    // third of a second for a web process: not on the main thread, and not
 +    // one launch after another.
@@ -180811,7 +180827,7 @@ index 8677b9d9f5c1e61cbe8b0a184b669022d8db3eed..3ef5c5295f89885202331129b3eb86ac
  #include "MessageSenderInlines.h"
  #include "WebAuthenticatorCoordinatorProxyMessages.h"
 diff --git a/Source/WebKit/WebProcess/WebCoreSupport/WebChromeClient.cpp b/Source/WebKit/WebProcess/WebCoreSupport/WebChromeClient.cpp
-index 5d337c36f13b7536068905f99d062affc54900c0..6277b2d66a3adc5f6c555424002c764661a6e5fa 100644
+index 5d337c36f13b7536068905f99d062affc54900c0..04c9069558d3fa3150c2a7e14517c15f7f67a419 100644
 --- a/Source/WebKit/WebProcess/WebCoreSupport/WebChromeClient.cpp
 +++ b/Source/WebKit/WebProcess/WebCoreSupport/WebChromeClient.cpp
 @@ -122,6 +122,9 @@
@@ -180824,7 +180840,19 @@ index 5d337c36f13b7536068905f99d062affc54900c0..6277b2d66a3adc5f6c555424002c7646
  #include <WebCore/PopupMenuClient.h>
  #include <WebCore/RegistrableDomain.h>
  #include <WebCore/RemoteFrame.h>
-@@ -271,6 +274,8 @@ FloatRect WebChromeClient::windowRect() const
+@@ -220,6 +223,11 @@
+ #endif
+ 
+ namespace WebKit {
++
++#if PLATFORM(HAIKU)
++// Makes the process's GPU display on first need (WebProcessHaiku.cpp, #170).
++void initializePlatformDisplayIfNeededHaiku();
++#endif
+ using namespace WebCore;
+ using namespace HTMLNames;
+ 
+@@ -271,6 +279,8 @@ FloatRect WebChromeClient::windowRect() const
  #if PLATFORM(MAC)
      if (page->hasCachedWindowFrame())
          return page->windowFrameInUnflippedScreenCoordinates();
@@ -180833,7 +180861,7 @@ index 5d337c36f13b7536068905f99d062affc54900c0..6277b2d66a3adc5f6c555424002c7646
  #endif
  
      auto sendResult = protect(WebProcess::singleton().parentProcessConnection())->sendSync(Messages::WebPageProxy::GetWindowFrame(), page->identifier());
-@@ -1063,7 +1068,7 @@ RefPtr<DataListSuggestionPicker> WebChromeClient::createDataListSuggestionPicker
+@@ -1063,7 +1073,7 @@ RefPtr<DataListSuggestionPicker> WebChromeClient::createDataListSuggestionPicker
  
  bool WebChromeClient::canShowDataListSuggestionLabels() const
  {
@@ -180842,7 +180870,7 @@ index 5d337c36f13b7536068905f99d062affc54900c0..6277b2d66a3adc5f6c555424002c7646
      return true;
  #else
      return false;
-@@ -1103,6 +1108,43 @@ void WebChromeClient::transcodeChosenFiles(Vector<String>&& transcodingPaths, St
+@@ -1103,6 +1113,43 @@ void WebChromeClient::transcodeChosenFiles(Vector<String>&& transcodingPaths, St
      page->sendWithAsyncReply(Messages::WebPageProxy::TranscodeChosenFiles(transcodingPaths, destinationUTI, destinationExtension), WTF::move(completion));
  }
      
@@ -180886,11 +180914,12 @@ index 5d337c36f13b7536068905f99d062affc54900c0..6277b2d66a3adc5f6c555424002c7646
  void WebChromeClient::showShareSheet(ShareDataWithParsedURL&& shareData, CompletionHandler<void(bool)>&& callback)
  {
      if (RefPtr page = m_page.get())
-@@ -1275,6 +1317,12 @@ RefPtr<GraphicsContextGL> WebChromeClient::createGraphicsContextGL(const Graphic
+@@ -1275,6 +1322,13 @@ RefPtr<GraphicsContextGL> WebChromeClient::createGraphicsContextGL(const Graphic
      WebProcess::singleton().initializePlatformDisplayIfNeeded();
      WebProcess::singleton().initializeVulkanIfNeeded();
  #endif
 +#if PLATFORM(HAIKU)
++    initializePlatformDisplayIfNeededHaiku();
 +    // Without an EGL display (no GL driver) there is no WebGL: getContext()
 +    // returns null rather than the shared display asserting.
 +    if (!WebCore::PlatformDisplay::sharedDisplayIfExists())
@@ -180899,7 +180928,7 @@ index 5d337c36f13b7536068905f99d062affc54900c0..6277b2d66a3adc5f6c555424002c7646
  #if ENABLE(GPU_PROCESS)
      if (WebProcess::singleton().shouldUseRemoteRenderingForWebGL()) {
          RefPtr page = m_page.get();
-@@ -1433,6 +1481,18 @@ void WebChromeClient::renderingUpdateFramesPerSecondChanged()
+@@ -1433,6 +1487,18 @@ void WebChromeClient::renderingUpdateFramesPerSecondChanged()
          drawingArea->renderingUpdateFramesPerSecondChanged();
  }
  
@@ -180918,7 +180947,7 @@ index 5d337c36f13b7536068905f99d062affc54900c0..6277b2d66a3adc5f6c555424002c7646
  unsigned WebChromeClient::remoteImagesCountForTesting() const
  {
      RefPtr page = m_page.get();
-@@ -2351,7 +2411,7 @@ void WebChromeClient::setMockWebAuthenticationConfiguration(const MockWebAuthent
+@@ -2351,7 +2417,7 @@ void WebChromeClient::setMockWebAuthenticationConfiguration(const MockWebAuthent
  }
  #endif
  
@@ -184335,10 +184364,10 @@ index efd16800da06dcf0fb4248500b730c89d92388fe..1ee9ed77ed614b0c96726c0d36bbb3ea
  #include "UpdateInfo.h"
  #include "WebDisplayRefreshMonitor.h"
 diff --git a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/DrawingAreaCoordinatedGraphicsGLib.cpp b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/DrawingAreaCoordinatedGraphicsGLib.cpp
-index f188f71c7802934b0e1f335c11fb85ab6b000d95..8d89c165aa7593e8e52e19eed4f19b0bc9530162 100644
+index f188f71c7802934b0e1f335c11fb85ab6b000d95..8038a6add9acab04f20c7fee3ab757a0df8500b9 100644
 --- a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/DrawingAreaCoordinatedGraphicsGLib.cpp
 +++ b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/DrawingAreaCoordinatedGraphicsGLib.cpp
-@@ -49,6 +49,10 @@
+@@ -49,8 +49,17 @@
  #include <WebCore/WindowEventLoop.h>
  #include <wtf/SetForScope.h>
  #include <wtf/SystemTracing.h>
@@ -184348,12 +184377,22 @@ index f188f71c7802934b0e1f335c11fb85ab6b000d95..8d89c165aa7593e8e52e19eed4f19b0b
 +#endif
  
  namespace WebKit {
++
++#if PLATFORM(HAIKU)
++// Makes the process's GPU display on first need (WebProcessHaiku.cpp, #170).
++void initializePlatformDisplayIfNeededHaiku();
++#endif
  using namespace WebCore;
-@@ -121,6 +125,29 @@ void DrawingAreaCoordinatedGraphics::updatePreferences(const WebPreferencesStore
+ 
+ DrawingAreaCoordinatedGraphics::DrawingAreaCoordinatedGraphics(WebPage& webPage, const WebPageCreationParameters& parameters)
+@@ -121,6 +130,32 @@ void DrawingAreaCoordinatedGraphics::updatePreferences(const WebPreferencesStore
      }
  #endif
      settings.setForceCompositingMode(store.getBoolValueForKey(WebPreferencesKey::forceCompositingModeKey()));
 +#if PLATFORM(HAIKU)
++    // Made here for the process's first page unless it was made at launch
++    // (the spare process, #170).
++    initializePlatformDisplayIfNeededHaiku();
 +    if (!PlatformDisplay::sharedDisplayIfExists()) {
 +        // Apply after every preference update: a later change must not turn
 +        // GPU features back on while this process has no display. Disabling
@@ -184379,7 +184418,7 @@ index f188f71c7802934b0e1f335c11fb85ab6b000d95..8d89c165aa7593e8e52e19eed4f19b0b
      // Fixed position elements need to be composited and create stacking contexts
      // in order to be scrolled by the ScrollingCoordinator.
      settings.setAcceleratedCompositingForFixedPositionEnabled(settings.acceleratedCompositingEnabled());
-@@ -133,6 +160,17 @@ void DrawingAreaCoordinatedGraphics::updatePreferences(const WebPreferencesStore
+@@ -133,6 +168,17 @@ void DrawingAreaCoordinatedGraphics::updatePreferences(const WebPreferencesStore
              m_supportsAsyncScrolling = false;
      }
  #endif
@@ -184397,7 +184436,7 @@ index f188f71c7802934b0e1f335c11fb85ab6b000d95..8d89c165aa7593e8e52e19eed4f19b0b
  
      // If async scrolling is disabled, we have to force-disable async frame and overflow scrolling
      // to keep the non-async scrolling on those elements working.
-@@ -145,10 +183,22 @@ void DrawingAreaCoordinatedGraphics::updatePreferences(const WebPreferencesStore
+@@ -145,10 +191,22 @@ void DrawingAreaCoordinatedGraphics::updatePreferences(const WebPreferencesStore
  bool DrawingAreaCoordinatedGraphics::enterAcceleratedCompositingModeIfNeeded()
  {
      Ref webPage = m_webPage;
@@ -184421,7 +184460,7 @@ index f188f71c7802934b0e1f335c11fb85ab6b000d95..8d89c165aa7593e8e52e19eed4f19b0b
  
      if (m_renderer) {
          if (m_layerTreeStateIsFrozen)
-@@ -236,10 +286,19 @@ void DrawingAreaCoordinatedGraphics::triggerRenderingUpdate()
+@@ -236,10 +294,19 @@ void DrawingAreaCoordinatedGraphics::triggerRenderingUpdate()
      m_renderer->scheduleRenderingUpdate();
  }
  
@@ -190475,10 +190514,10 @@ index 0000000000000000000000000000000000000000..a150bd67553ae6f1864c655cd04be661
 +} // namespace WebKit
 diff --git a/Source/WebKit/WebProcess/haiku/WebProcessHaiku.cpp b/Source/WebKit/WebProcess/haiku/WebProcessHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..681beff21b945e596a3df462c5bbc6c6db3ce343
+index 0000000000000000000000000000000000000000..8e6627597a7b4cc9be3dd313306cc7b0eed4f25f
 --- /dev/null
 +++ b/Source/WebKit/WebProcess/haiku/WebProcessHaiku.cpp
-@@ -0,0 +1,144 @@
+@@ -0,0 +1,190 @@
 +/*
 + * Copyright (C) 2014,2019 Haiku, Inc.
 + *
@@ -190517,6 +190556,11 @@ index 0000000000000000000000000000000000000000..681beff21b945e596a3df462c5bbc6c6
 +#include "StartupTraceHaiku.h"
 +#endif
 +#include <wtf/Assertions.h>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include <unistd.h>
++#include <utility>
 +
 +#if ENABLE(VIDEO)
 +namespace WebCore {
@@ -190533,8 +190577,25 @@ index 0000000000000000000000000000000000000000..681beff21b945e596a3df462c5bbc6c6
 +#error Haiku needs native registry and sandbox hook implementations before enabling these features.
 +#endif
 +
-+void WebProcess::platformInitializeProcess(const AuxiliaryProcessInitializationParameters&)
++void initializePlatformDisplayIfNeededHaiku();
++
++// SUMMIT_GPU_DISPLAY_TRACE=1: when a web process makes its GPU display.
++static bool gpuDisplayTraceHaiku()
 +{
++    static const bool enabled = [] {
++        const char* value = getenv("SUMMIT_GPU_DISPLAY_TRACE");
++        return value && !strcmp(value, "1");
++    }();
++    return enabled;
++}
++
++// The UI process made this process as the spare (prewarmed) one: the
++// launcher passes --prewarmed (ProcessLauncherHaiku.cpp).
++static bool s_isPrewarmedHaiku;
++
++void WebProcess::platformInitializeProcess(const AuxiliaryProcessInitializationParameters& parameters)
++{
++    s_isPrewarmedHaiku = parameters.extraInitializationData.get<HashTranslatorASCIILiteral>("is-prewarmed"_s) == "1"_s;
 +    // WebProcessMainHaiku establishes this connection before WebKit starts.
 +    // Native fonts, bitmaps and the main RunLoop require a valid BApplication
 +    // owned by this thread; continuing without it cannot render a page.
@@ -190554,22 +190615,20 @@ index 0000000000000000000000000000000000000000..681beff21b945e596a3df462c5bbc6c6
 +    WebCore::prepareMediaEngineTypesHaiku();
 +#endif
 +#if USE(COORDINATED_GRAPHICS)
-+    // The coordinated drawing area asks for the shared display as soon as a page
-+    // is created, and sharedDisplay() asserts rather than making one. The GLib
-+    // and PlayStation ports set theirs here too. LayerTreeHostHaiku used to
-+    // create it on the way into GL compositing, and it is not built any more.
-+    if (!WebCore::PlatformDisplay::sharedDisplayIfExists()) {
-+        auto display = WebCore::PlatformDisplayHaiku::create();
-+        if (!display) {
-+            // The drawing area disables GPU features and selects the CPU
-+            // renderer before constructing a surface. Do not install a dummy
-+            // display: WebGL and accelerated image buffers must fail cleanly.
-+            WTFLogAlways("Summit: EGL is unavailable; rendering pages in software.");
-+        }
-+        if (display)
-+            WebCore::PlatformDisplay::setSharedDisplay(WTF::move(display));
-+        SUMMIT_STARTUP_TRACE("graphics display initialization finished");
-+    }
++    // The GPU display (EGL, zink, the Vulkan device and its queue threads)
++    // costs a process 35-40 MiB of RAM (#170). Processes that never draw
++    // (service workers' own processes) do not need it: the drawing area
++    // makes it for the first page, as on GTK and WPE. The spare process
++    // makes it now, so that the first load in a new tab does not wait for
++    // it (#81). SUMMIT_EAGER_GPU_DISPLAY=1: every process makes it now.
++    static const bool eager = [] {
++        const char* value = getenv("SUMMIT_EAGER_GPU_DISPLAY");
++        return value && !strcmp(value, "1");
++    }();
++    if (gpuDisplayTraceHaiku())
++        fprintf(stderr, "Summit GPU display: web process %d starts%s\n", getpid(), s_isPrewarmedHaiku ? " as the spare" : "");
++    if (s_isPrewarmedHaiku || eager)
++        initializePlatformDisplayIfNeededHaiku();
 +#endif
 +    // The browser's debugging tools (BWebKitProcessDiagnostics) ask a thread
 +    // of this process about its pages, memory, media and compositors.
@@ -190579,6 +190638,32 @@ index 0000000000000000000000000000000000000000..681beff21b945e596a3df462c5bbc6c6
 +    // Cocoa, and the browser keeps the screen on while it shows the page
 +    // (ScreenAwakeRequestsHaiku in UIProcess/haiku/WebView.cpp).
 +    WebCore::sleepDisablerClient() = makeUnique<WebSleepDisablerClient>();
++}
++
++// The GPU display, made on first need (#170). Declared where it is used:
++// the coordinated drawing area and WebChromeClient (WebGL).
++void initializePlatformDisplayIfNeededHaiku()
++{
++#if USE(COORDINATED_GRAPHICS)
++    // The coordinated drawing area and WebGL ask for the shared display, and
++    // sharedDisplay() asserts rather than making one; the GLib and
++    // PlayStation ports make theirs on the way too.
++    RELEASE_ASSERT(isMainThread());
++    static bool tried;
++    if (WebCore::PlatformDisplay::sharedDisplayIfExists() || std::exchange(tried, true))
++        return;
++    auto display = WebCore::PlatformDisplayHaiku::create();
++    if (!display) {
++        // The drawing area disables GPU features and selects the CPU
++        // renderer before constructing a surface. Do not install a dummy
++        // display: WebGL and accelerated image buffers must fail cleanly.
++        WTFLogAlways("Summit: EGL is unavailable; rendering pages in software.");
++    } else
++        WebCore::PlatformDisplay::setSharedDisplay(WTF::move(display));
++    SUMMIT_STARTUP_TRACE("graphics display initialization finished");
++    if (gpuDisplayTraceHaiku())
++        fprintf(stderr, "Summit GPU display: web process %d made its display\n", getpid());
++#endif
 +}
 +
 +void WebProcess::platformSetWebsiteDataStoreParameters(WebProcessDataStoreParameters&& parameters)
