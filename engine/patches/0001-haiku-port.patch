@@ -90641,6 +90641,2519 @@ index cd9a3c646e7a418562830f66d1c5117190fa29a1..9d9492e6a7aabbd85c7aa01abc9096a3
              ipAddresses.append(rtcMonitor->ipv6());
          protect(this->connection())->send(Messages::WebRTCResolver::SetResolvedAddress(ipAddresses), identifier);
          return;
+diff --git a/Source/WebKit/NetworkProcess/webtransport/NetworkTransportSession.cpp b/Source/WebKit/NetworkProcess/webtransport/NetworkTransportSession.cpp
+index 7561cff6b58a8ca4bd2bfab302b5c66617b4f216..7bb570fe69f5cb1ccdf6fc7f0e376b864fd6757e 100644
+--- a/Source/WebKit/NetworkProcess/webtransport/NetworkTransportSession.cpp
++++ b/Source/WebKit/NetworkProcess/webtransport/NetworkTransportSession.cpp
+@@ -29,6 +29,9 @@
+ #include "MessageSenderInlines.h"
+ #include "NetworkConnectionToWebProcess.h"
+ #include "NetworkTransportStream.h"
++#if PLATFORM(HAIKU)
++#include "haiku/WebTransportQuicConnectionHaiku.h"
++#endif
+ #include "WebTransportSessionMessages.h"
+ #include <WebCore/Exception.h>
+ #include <WebCore/ExceptionCode.h>
+@@ -44,6 +47,10 @@ WTF_MAKE_TZONE_ALLOCATED_IMPL(NetworkTransportSession);
+ 
+ NetworkTransportSession::~NetworkTransportSession()
+ {
++#if PLATFORM(HAIKU)
++    if (m_quicConnection)
++        m_quicConnection->shutdown();
++#endif
+     for (auto&& statsRequest : std::exchange(m_statsRequestsBeforeInitialization, { }))
+         statsRequest(std::nullopt);
+     for (auto&& streamRequest : std::exchange(m_streamRequestsBeforeInitialization, { }))
+@@ -221,7 +228,7 @@ void NetworkTransportSession::completeRequestsAfterInitialization(std::optional<
+         createStream(streamRequest.streamType, WTF::move(streamRequest.completionHandler));
+ }
+ 
+-#if !HAVE(WEBTRANSPORT)
++#if !HAVE(WEBTRANSPORT) && !PLATFORM(HAIKU)
+ RefPtr<NetworkTransportSession> NetworkTransportSession::create(NetworkConnectionToWebProcess&, WebTransportSessionIdentifier, URL&&, WebCore::WebTransportOptions&&, Vector<KeyValuePair<String, String>>&&, WebKit::WebPageProxyIdentifier&&, WebCore::ClientOrigin&&)
+ {
+     return nullptr;
+diff --git a/Source/WebKit/NetworkProcess/webtransport/NetworkTransportSession.h b/Source/WebKit/NetworkProcess/webtransport/NetworkTransportSession.h
+index 29518e800d9ab2f356c148bcbb8e5ba61169476a..57e70ecae6b87e5de153dbdc146e8570045989fa 100644
+--- a/Source/WebKit/NetworkProcess/webtransport/NetworkTransportSession.h
++++ b/Source/WebKit/NetworkProcess/webtransport/NetworkTransportSession.h
+@@ -40,7 +40,14 @@
+ #include <wtf/RetainPtr.h>
+ #endif
+ 
++#if PLATFORM(HAIKU)
++#include <WebCore/ClientOrigin.h>
++#include <wtf/MonotonicTime.h>
++#include <wtf/URL.h>
++#endif
++
+ namespace WebCore {
++class CertificateInfo;
+ class Exception;
+ struct ClientOrigin;
+ struct WebTransportConnectionInfo;
+@@ -59,6 +66,7 @@ namespace WebKit {
+ 
+ class NetworkConnectionToWebProcess;
+ class NetworkTransportStream;
++class WebTransportQuicConnectionHaiku;
+ enum class NetworkTransportStreamType : uint8_t;
+ 
+ struct SharedPreferencesForWebProcess;
+@@ -109,11 +117,28 @@ public:
+     void didReceiveMessage(IPC::Connection&, IPC::Decoder&) final;
+     std::optional<SharedPreferencesForWebProcess> NODELETE sharedPreferencesForWebProcess() const;
+     bool isSessionClosed() const;
++
++#if PLATFORM(HAIKU)
++    // Events of the QUIC connection (WebTransportQuicConnectionHaiku), on the main thread.
++    void quicDidConnectHaiku(Vector<KeyValuePair<String, String>>&& responseHeaders);
++    void quicDidFailToConnectHaiku();
++    void quicNeedsServerTrustHaiku(WebCore::CertificateInfo&&, CompletionHandler<void(bool)>&&);
++    void quicDidReceiveDatagramHaiku(Vector<uint8_t>&&);
++    void quicDidOpenIncomingStreamHaiku(int64_t quicStreamID, bool bidirectional);
++    void quicDidReceiveStreamDataHaiku(int64_t quicStreamID, Vector<uint8_t>&&, bool fin);
++    void quicDidResetStreamHaiku(int64_t quicStreamID, uint64_t errorCode);
++    void quicDidStopSendingHaiku(int64_t quicStreamID, uint64_t errorCode);
++    void quicDidCloseSessionHaiku(std::optional<uint32_t> code, String&& reason);
++    void quicDidDrainHaiku();
++    WebTransportQuicConnectionHaiku* quicConnectionHaiku() const { return m_quicConnection.get(); }
++#endif
+ private:
+ #if PLATFORM(COCOA) && HAVE(WEBTRANSPORT)
+     static Ref<NetworkTransportSession> create(NetworkConnectionToWebProcess&, WebTransportSessionIdentifier, WebCore::WebTransportOptions&&, nw_connection_group_t, nw_endpoint_t);
+     NetworkTransportSession(NetworkConnectionToWebProcess&, WebTransportSessionIdentifier, WebCore::WebTransportOptions&&, nw_connection_group_t, nw_endpoint_t);
+     RetainPtr<sec_protocol_metadata_t> securityMetadata() const;
++#elif PLATFORM(HAIKU)
++    NetworkTransportSession(NetworkConnectionToWebProcess&, WebTransportSessionIdentifier, WebCore::WebTransportOptions&&, Ref<WebTransportQuicConnectionHaiku>&&, URL&&, WebKit::WebPageProxyIdentifier, WebCore::ClientOrigin&&);
+ #else
+     NetworkTransportSession();
+ #endif
+@@ -148,6 +173,17 @@ private:
+         Failed
+     } m_initializationState { InitializationState::Waiting };
+ 
++#if PLATFORM(HAIKU)
++    RefPtr<WebTransportQuicConnectionHaiku> m_quicConnection;
++    HashMap<int64_t, WebCore::WebTransportStreamIdentifier> m_streamsByQuicID;
++    CompletionHandler<void(std::optional<WebCore::WebTransportConnectionInfo>&&)> m_initializationCompletion;
++    MonotonicTime m_initializationStartTime;
++    URL m_url;
++    std::optional<WebKit::WebPageProxyIdentifier> m_pageID;
++    WebCore::ClientOrigin m_clientOrigin;
++    bool m_sessionClosed { false };
++#endif
++
+ #if PLATFORM(COCOA)
+     const RetainPtr<nw_connection_group_t> m_connectionGroup;
+     const RetainPtr<nw_endpoint_t> m_endpoint;
+diff --git a/Source/WebKit/NetworkProcess/webtransport/NetworkTransportStream.cpp b/Source/WebKit/NetworkProcess/webtransport/NetworkTransportStream.cpp
+index 0aed16603e2cc54fadbed161b64942a2400928c9..1a8199ea084425b9403faea24303023d4a3ca4ca 100644
+--- a/Source/WebKit/NetworkProcess/webtransport/NetworkTransportStream.cpp
++++ b/Source/WebKit/NetworkProcess/webtransport/NetworkTransportStream.cpp
+@@ -36,7 +36,7 @@ namespace WebKit {
+ 
+ WTF_MAKE_TZONE_ALLOCATED_IMPL(NetworkTransportStream);
+ 
+-#if !HAVE(WEBTRANSPORT)
++#if !HAVE(WEBTRANSPORT) && !PLATFORM(HAIKU)
+ NetworkTransportStream::NetworkTransportStream()
+     : m_identifier(WebCore::WebTransportStreamIdentifier::generate())
+     , m_streamType(NetworkTransportStreamType::Bidirectional)
+diff --git a/Source/WebKit/NetworkProcess/webtransport/NetworkTransportStream.h b/Source/WebKit/NetworkProcess/webtransport/NetworkTransportStream.h
+index 0e23d58911ee6928aec25357dae022a60835c7fb..65466e2d79d3ec3684dff4e2966ade06a79065b3 100644
+--- a/Source/WebKit/NetworkProcess/webtransport/NetworkTransportStream.h
++++ b/Source/WebKit/NetworkProcess/webtransport/NetworkTransportStream.h
+@@ -30,6 +30,7 @@
+ #include <wtf/ObjectIdentifier.h>
+ #include <wtf/RefCounted.h>
+ #include <wtf/TZoneMalloc.h>
++#include <wtf/Vector.h>
+ #include <wtf/WeakPtr.h>
+ 
+ #if PLATFORM(COCOA)
+@@ -80,6 +81,15 @@ private:
+ #if PLATFORM(COCOA) && HAVE(WEBTRANSPORT)
+     NetworkTransportStream(NetworkTransportSession&, nw_connection_t);
+     void initializeReadyConnection();
++#elif PLATFORM(HAIKU)
++    NetworkTransportStream(NetworkTransportSession&, int64_t quicStreamID, NetworkTransportStreamType);
++public:
++    int64_t quicStreamIDHaiku() const { return m_quicStreamID; }
++    void didReceiveBytesHaiku(Vector<uint8_t>&&, bool fin);
++    void didReceiveResetHaiku(uint64_t errorCode);
++    void didReceiveStopSendingHaiku(uint64_t errorCode);
++private:
++    int64_t m_quicStreamID { -1 };
+ #else
+     NetworkTransportStream();
+ #endif
+diff --git a/Source/WebKit/NetworkProcess/webtransport/haiku/NetworkTransportSessionHaiku.cpp b/Source/WebKit/NetworkProcess/webtransport/haiku/NetworkTransportSessionHaiku.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..27fc1472929d8924aba5cd02c9c2ced818f495f0
+--- /dev/null
++++ b/Source/WebKit/NetworkProcess/webtransport/haiku/NetworkTransportSessionHaiku.cpp
+@@ -0,0 +1,282 @@
++/*
++ * Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause
++ */
++
++#include "config.h"
++#include "NetworkTransportSession.h"
++
++#include "AuthenticationChallengeDisposition.h"
++#include "AuthenticationManager.h"
++#include "MessageSenderInlines.h"
++#include "NetworkConnectionToWebProcess.h"
++#include "NetworkProcess.h"
++#include "NetworkTransportStream.h"
++#include "WebTransportQuicConnectionHaiku.h"
++#include "WebTransportSessionMessages.h"
++#include <WebCore/AuthenticationChallenge.h>
++#include <WebCore/CertificateInfo.h>
++#include <WebCore/ClientOrigin.h>
++#include <WebCore/Credential.h>
++#include <WebCore/Exception.h>
++#include <WebCore/ExceptionCode.h>
++#include <WebCore/HTTPParsers.h>
++#include <WebCore/RFC8941.h>
++#include <WebCore/ResourceError.h>
++#include <WebCore/WebTransportConnectionInfo.h>
++#include <curl/curl.h>
++
++namespace WebKit {
++
++// The QUIC side only reports what the server sent; what a session may
++// expose and in which order is decided here, as NetworkTransportSessionCocoa
++// does with Network.framework.
++
++RefPtr<NetworkTransportSession> NetworkTransportSession::create(NetworkConnectionToWebProcess& connectionToWebProcess, WebTransportSessionIdentifier identifier, URL&& url, WebCore::WebTransportOptions&& options, Vector<KeyValuePair<String, String>>&& additionalHeaders, WebKit::WebPageProxyIdentifier&& pageID, WebCore::ClientOrigin&& clientOrigin)
++{
++    if (!url.protocolIs("https"_s) || url.host().isEmpty())
++        return nullptr;
++
++    WebTransportQuicConnectionHaiku::Configuration configuration;
++    auto host = url.host().toString();
++    if (host.startsWith('[') && host.endsWith(']'))
++        host = host.substring(1, host.length() - 2);
++    configuration.host = host.utf8();
++    configuration.port = url.port().value_or(443);
++    auto authority = url.hostAndPort();
++    configuration.authority = authority.utf8();
++    auto path = url.path().toString();
++    if (path.isEmpty())
++        path = "/"_s;
++    if (url.hasQuery())
++        path = makeString(path, '?', url.query());
++    configuration.path = path.utf8();
++
++    configuration.headers.append({ String { "origin"_s }.utf8(), clientOrigin.clientOrigin.toString().utf8() });
++    if (!options.protocols.isEmpty()) {
++        StringBuilder protocols;
++        for (size_t i = 0; i < options.protocols.size(); ++i) {
++            if (i)
++                protocols.append(", "_s);
++            protocols.append('"', options.protocols[i], '"');
++        }
++        configuration.headers.append({ String { "wt-available-protocols"_s }.utf8(), protocols.toString().utf8() });
++    }
++    for (auto& header : additionalHeaders)
++        configuration.headers.append({ header.key.convertToASCIILowercase().utf8(), header.value.utf8() });
++
++    for (auto& hash : options.serverCertificateHashes) {
++        if (hash.algorithm == "sha-256"_s)
++            configuration.certificateHashes.append(Vector<uint8_t>(hash.value.span()));
++    }
++    configuration.maxIncomingBidirectionalStreams = options.anticipatedConcurrentIncomingBidirectionalStreams.value_or(100);
++    configuration.maxIncomingUnidirectionalStreams = options.anticipatedConcurrentIncomingUnidirectionalStreams.value_or(100);
++
++    RefPtr quicConnection = WebTransportQuicConnectionHaiku::create(WTF::move(configuration));
++    if (!quicConnection)
++        return nullptr;
++    return adoptRef(*new NetworkTransportSession(connectionToWebProcess, identifier, WTF::move(options), quicConnection.releaseNonNull(), WTF::move(url), pageID, WTF::move(clientOrigin)));
++}
++
++NetworkTransportSession::NetworkTransportSession(NetworkConnectionToWebProcess& connection, WebTransportSessionIdentifier identifier, WebCore::WebTransportOptions&& options, Ref<WebTransportQuicConnectionHaiku>&& quicConnection, URL&& url, WebKit::WebPageProxyIdentifier pageID, WebCore::ClientOrigin&& clientOrigin)
++    : m_connectionToWebProcess(connection)
++    , m_identifier(identifier)
++    , m_options(WTF::move(options))
++    , m_quicConnection(WTF::move(quicConnection))
++    , m_url(WTF::move(url))
++    , m_pageID(pageID)
++    , m_clientOrigin(WTF::move(clientOrigin))
++{
++}
++
++void NetworkTransportSession::initialize(CompletionHandler<void(std::optional<WebCore::WebTransportConnectionInfo>&&)>&& completionHandler)
++{
++    m_initializationCompletion = WTF::move(completionHandler);
++    m_initializationStartTime = MonotonicTime::now();
++    m_quicConnection->start(*this);
++}
++
++void NetworkTransportSession::quicDidConnectHaiku(Vector<KeyValuePair<String, String>>&& responseHeaders)
++{
++    String protocol;
++    Vector<KeyValuePair<String, String>> exposedHeaders;
++    for (auto& header : responseHeaders) {
++        auto name = header.key.convertToASCIILowercase();
++        if (name == "wt-protocol"_s) {
++            if (auto item = RFC8941::parseItemStructuredFieldValue(header.value)) {
++                if (auto* value = std::get_if<String>(&item->first); value && m_options.protocols.contains(*value))
++                    protocol = *value;
++            }
++            continue;
++        }
++        // Forbidden response header names must never reach WebContent.
++        if (!WebCore::isForbiddenResponseHeaderName(name))
++            exposedHeaders.append({ WTF::move(name), WTF::move(header.value) });
++    }
++    completeRequestsAfterInitialization(MonotonicTime::now() - m_initializationStartTime);
++    if (auto completion = std::exchange(m_initializationCompletion, { }))
++        completion(WebCore::WebTransportConnectionInfo { WTF::move(protocol), WebCore::WebTransportReliabilityMode::SupportsUnreliable, WTF::move(exposedHeaders) });
++}
++
++void NetworkTransportSession::quicDidFailToConnectHaiku()
++{
++    m_sessionClosed = true;
++    if (m_initializationState == InitializationState::Waiting)
++        completeRequestsAfterInitialization(std::nullopt);
++    if (auto completion = std::exchange(m_initializationCompletion, { }))
++        completion(std::nullopt);
++}
++
++// A certificate OpenSSL could not verify may be one the user trusts for this
++// host (Summit's certificate warnings): ask as page loads do.
++void NetworkTransportSession::quicNeedsServerTrustHaiku(WebCore::CertificateInfo&& certificateInfo, CompletionHandler<void(bool)>&& completionHandler)
++{
++    RefPtr connection = m_connectionToWebProcess.get();
++    if (!connection)
++        return completionHandler(false);
++    WebCore::ResourceError error(CURLE_PEER_FAILED_VERIFICATION, m_url);
++    WebCore::AuthenticationChallenge challenge(m_url, certificateInfo, error);
++    protect(connection->networkProcess().authenticationManager())->didReceiveAuthenticationChallenge(connection->sessionID(), m_pageID, &m_clientOrigin.topOrigin, challenge, NegotiatedLegacyTLS::No, [completionHandler = WTF::move(completionHandler)](AuthenticationChallengeDisposition disposition, const WebCore::Credential& credential) mutable {
++        completionHandler(disposition == AuthenticationChallengeDisposition::UseCredential && !credential.isEmpty());
++    });
++}
++
++void NetworkTransportSession::quicDidReceiveDatagramHaiku(Vector<uint8_t>&& datagram)
++{
++    if (m_sessionClosed)
++        return;
++    receiveDatagram(datagram.span(), false, std::nullopt);
++}
++
++void NetworkTransportSession::quicDidOpenIncomingStreamHaiku(int64_t quicStreamID, bool bidirectional)
++{
++    if (m_sessionClosed || !quicStreamID || m_streamsByQuicID.contains(quicStreamID))
++        return;
++    auto type = bidirectional ? NetworkTransportStreamType::Bidirectional : NetworkTransportStreamType::IncomingUnidirectional;
++    Ref stream = NetworkTransportStream::create(*this, quicStreamID, type);
++    auto identifier = stream->identifier();
++    m_streams.set(identifier, stream.copyRef());
++    m_streamsByQuicID.set(quicStreamID, identifier);
++    if (bidirectional)
++        receiveBidirectionalStream(identifier);
++    else
++        receiveIncomingUnidirectionalStream(identifier);
++}
++
++void NetworkTransportSession::quicDidReceiveStreamDataHaiku(int64_t quicStreamID, Vector<uint8_t>&& bytes, bool fin)
++{
++    if (!quicStreamID)
++        return;
++    auto identifier = m_streamsByQuicID.getOptional(quicStreamID);
++    if (!identifier)
++        return;
++    if (RefPtr stream = m_streams.get(*identifier))
++        stream->didReceiveBytesHaiku(WTF::move(bytes), fin);
++}
++
++void NetworkTransportSession::quicDidResetStreamHaiku(int64_t quicStreamID, uint64_t errorCode)
++{
++    if (!quicStreamID || m_sessionClosed)
++        return;
++    if (auto identifier = m_streamsByQuicID.getOptional(quicStreamID)) {
++        if (RefPtr stream = m_streams.get(*identifier))
++            stream->didReceiveResetHaiku(errorCode);
++    }
++}
++
++void NetworkTransportSession::quicDidStopSendingHaiku(int64_t quicStreamID, uint64_t errorCode)
++{
++    if (!quicStreamID || m_sessionClosed)
++        return;
++    if (auto identifier = m_streamsByQuicID.getOptional(quicStreamID)) {
++        if (RefPtr stream = m_streams.get(*identifier))
++            stream->didReceiveStopSendingHaiku(errorCode);
++    }
++}
++
++void NetworkTransportSession::quicDidCloseSessionHaiku(std::optional<uint32_t> code, String&& reason)
++{
++    if (m_sessionClosed)
++        return;
++    m_sessionClosed = true;
++    send(Messages::WebTransportSession::DidFail(WTF::move(code), WTF::move(reason)));
++}
++
++void NetworkTransportSession::quicDidDrainHaiku()
++{
++    if (!m_sessionClosed)
++        send(Messages::WebTransportSession::DidDrain());
++}
++
++void NetworkTransportSession::sendDatagram(std::optional<WebCore::WebTransportSendGroupIdentifier> identifier, std::span<const uint8_t> data, CompletionHandler<void(std::optional<WebCore::Exception>&&)>&& completionHandler)
++{
++    if (identifier) {
++        m_datagramBytesSent.ensure(*identifier, [] {
++            return uint64_t { };
++        }).iterator->value += data.size();
++    }
++    m_quicConnection->sendDatagram(Vector<uint8_t>(data), [completionHandler = WTF::move(completionHandler)](bool) mutable {
++        completionHandler(std::nullopt);
++    });
++}
++
++void NetworkTransportSession::createOutgoingUnidirectionalStream(CompletionHandler<void(std::optional<WebCore::WebTransportStreamIdentifier>)>&& completionHandler)
++{
++    createStream(NetworkTransportStreamType::OutgoingUnidirectional, WTF::move(completionHandler));
++}
++
++void NetworkTransportSession::createBidirectionalStream(CompletionHandler<void(std::optional<WebCore::WebTransportStreamIdentifier>)>&& completionHandler)
++{
++    createStream(NetworkTransportStreamType::Bidirectional, WTF::move(completionHandler));
++}
++
++void NetworkTransportSession::createStream(NetworkTransportStreamType streamType, CompletionHandler<void(std::optional<WebCore::WebTransportStreamIdentifier>)>&& completionHandler)
++{
++    switch (m_initializationState) {
++    case InitializationState::Waiting:
++        m_streamRequestsBeforeInitialization.append({ streamType, WTF::move(completionHandler) });
++        return;
++    case InitializationState::Failed:
++        return completionHandler(std::nullopt);
++    case InitializationState::Succeeded:
++        break;
++    }
++    if (m_sessionClosed)
++        return completionHandler(std::nullopt);
++    bool bidirectional = streamType == NetworkTransportStreamType::Bidirectional;
++    m_quicConnection->openStream(bidirectional, [weakThis = WeakPtr { *this }, streamType, completionHandler = WTF::move(completionHandler)](std::optional<int64_t> quicStreamID) mutable {
++        RefPtr protectedThis = weakThis.get();
++        if (!protectedThis || !quicStreamID || !*quicStreamID || protectedThis->m_sessionClosed)
++            return completionHandler(std::nullopt);
++        Ref stream = NetworkTransportStream::create(*protectedThis, *quicStreamID, streamType);
++        auto identifier = stream->identifier();
++        protectedThis->m_streams.set(identifier, stream.copyRef());
++        protectedThis->m_streamsByQuicID.set(*quicStreamID, identifier);
++        completionHandler(identifier);
++    });
++}
++
++void NetworkTransportSession::terminate(WebCore::WebTransportSessionErrorCode code, UTF8CString&& reason)
++{
++    m_sessionClosed = true;
++    auto streams = std::exchange(m_streams, { });
++    m_streamsByQuicID.clear();
++    for (auto& stream : streams.values()) {
++        m_bytesSentOnClosedStreams += stream->bytesSent();
++        m_bytesReceivedOnClosedStreams += stream->bytesReceived();
++    }
++    m_quicConnection->closeSession(code, WTF::move(reason));
++}
++
++bool NetworkTransportSession::isSessionClosed() const
++{
++    return m_sessionClosed;
++}
++
++void NetworkTransportSession::exportKeyingMaterial(std::span<const uint8_t> label, std::span<const uint8_t> context, uint32_t outputLength, CompletionHandler<void(std::optional<Vector<uint8_t>>)>&& completionHandler)
++{
++    m_quicConnection->exportKeyingMaterial(Vector<uint8_t>(label), Vector<uint8_t>(context), outputLength, [completionHandler = WTF::move(completionHandler)](std::optional<Vector<uint8_t>>&& keyingMaterial) mutable {
++        completionHandler(WTF::move(keyingMaterial));
++    });
++}
++
++} // namespace WebKit
+diff --git a/Source/WebKit/NetworkProcess/webtransport/haiku/NetworkTransportStreamHaiku.cpp b/Source/WebKit/NetworkProcess/webtransport/haiku/NetworkTransportStreamHaiku.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..0ffc6490863eae088199d9c0467b1182eb2312e4
+--- /dev/null
++++ b/Source/WebKit/NetworkProcess/webtransport/haiku/NetworkTransportStreamHaiku.cpp
+@@ -0,0 +1,207 @@
++/*
++ * Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause
++ */
++
++#include "config.h"
++#include "NetworkTransportStream.h"
++
++#include "NetworkTransportSession.h"
++#include "WebTransportQuicConnectionHaiku.h"
++#include <WebCore/Exception.h>
++#include <WebCore/ExceptionCode.h>
++#include <WebCore/WebTransportReceiveStreamStats.h>
++#include <WebCore/WebTransportSendStreamStats.h>
++#include <wtf/CompletionHandler.h>
++
++namespace WebKit {
++
++// The states and the errors reported follow NetworkTransportStreamCocoa.
++
++NetworkTransportStream::NetworkTransportStream(NetworkTransportSession& session, int64_t quicStreamID, NetworkTransportStreamType streamType)
++    : m_identifier(WebCore::WebTransportStreamIdentifier::generate())
++    , m_session(session)
++    , m_streamType(streamType)
++    , m_quicStreamID(quicStreamID)
++{
++    switch (streamType) {
++    case NetworkTransportStreamType::Bidirectional:
++        m_streamState = NetworkTransportStreamState::Ready;
++        break;
++    case NetworkTransportStreamType::IncomingUnidirectional:
++        m_streamState = NetworkTransportStreamState::WriteClosed;
++        break;
++    case NetworkTransportStreamType::OutgoingUnidirectional:
++        m_streamState = NetworkTransportStreamState::ReadClosed;
++        break;
++    }
++}
++
++void NetworkTransportStream::start(NetworkTransportStreamReadyHandler&& readyHandler)
++{
++    readyHandler(m_streamType);
++}
++
++static WebTransportQuicConnectionHaiku* quicConnection(const WeakPtr<NetworkTransportSession>& session)
++{
++    RefPtr protectedSession = session.get();
++    return protectedSession ? protectedSession->quicConnectionHaiku() : nullptr;
++}
++
++void NetworkTransportStream::sendBytes(std::span<const uint8_t> data, bool withFin, CompletionHandler<void(std::optional<WebCore::Exception>&&)>&& completionHandler)
++{
++    if (m_streamState == NetworkTransportStreamState::WriteClosed || m_streamState == NetworkTransportStreamState::Complete) {
++        completionHandler(WebCore::Exception(WebCore::ExceptionCode::InvalidStateError));
++        return;
++    }
++    auto* connection = quicConnection(m_session);
++    if (!connection) {
++        completionHandler(std::nullopt);
++        return;
++    }
++    connection->sendStreamData(m_quicStreamID, Vector<uint8_t>(data), withFin, [weakThis = WeakPtr { *this }, withFin, bytesSent = data.size(), completionHandler = WTF::move(completionHandler)](bool sent) mutable {
++        // A send stream errors only on STOP_SENDING or a session error, which
++        // arrive by themselves.
++        RefPtr protectedThis = weakThis.get();
++        if (!protectedThis || !sent)
++            return completionHandler(std::nullopt);
++        protectedThis->m_bytesSent += bytesSent;
++        if (withFin) {
++            switch (protectedThis->m_streamState) {
++            case NetworkTransportStreamState::Ready:
++                protectedThis->m_streamState = NetworkTransportStreamState::WriteClosed;
++                break;
++            case NetworkTransportStreamState::ReadClosed:
++                protectedThis->m_streamState = NetworkTransportStreamState::Complete;
++                break;
++            case NetworkTransportStreamState::WriteClosed:
++            case NetworkTransportStreamState::Complete:
++                break;
++            }
++        }
++        completionHandler(std::nullopt);
++    });
++}
++
++void NetworkTransportStream::didReceiveBytesHaiku(Vector<uint8_t>&& bytes, bool fin)
++{
++    if (m_streamState == NetworkTransportStreamState::ReadClosed || m_streamState == NetworkTransportStreamState::Complete)
++        return;
++    RefPtr session = m_session.get();
++    if (!session)
++        return;
++    m_bytesReceived += bytes.size();
++    session->streamReceiveBytes(m_identifier, bytes.span(), fin, std::nullopt);
++    if (!fin)
++        return;
++    switch (m_streamState) {
++    case NetworkTransportStreamState::Ready:
++        m_streamState = NetworkTransportStreamState::ReadClosed;
++        break;
++    case NetworkTransportStreamState::WriteClosed:
++        m_streamState = NetworkTransportStreamState::Complete;
++        break;
++    case NetworkTransportStreamState::ReadClosed:
++    case NetworkTransportStreamState::Complete:
++        break;
++    }
++}
++
++// The server reset its side: our receiving side errors.
++void NetworkTransportStream::didReceiveResetHaiku(uint64_t errorCode)
++{
++    switch (m_streamState) {
++    case NetworkTransportStreamState::Ready:
++        m_streamState = NetworkTransportStreamState::ReadClosed;
++        break;
++    case NetworkTransportStreamState::WriteClosed:
++        m_streamState = NetworkTransportStreamState::Complete;
++        break;
++    case NetworkTransportStreamState::ReadClosed:
++    case NetworkTransportStreamState::Complete:
++        return;
++    }
++    RefPtr session = m_session.get();
++    if (!session || session->isSessionClosed())
++        return;
++    session->streamReceiveError(m_identifier, errorCode);
++}
++
++// The server stopped reading: our sending side errors.
++void NetworkTransportStream::didReceiveStopSendingHaiku(uint64_t errorCode)
++{
++    switch (m_streamState) {
++    case NetworkTransportStreamState::Ready:
++        m_streamState = NetworkTransportStreamState::WriteClosed;
++        break;
++    case NetworkTransportStreamState::ReadClosed:
++        m_streamState = NetworkTransportStreamState::Complete;
++        break;
++    case NetworkTransportStreamState::WriteClosed:
++    case NetworkTransportStreamState::Complete:
++        return;
++    }
++    RefPtr session = m_session.get();
++    if (!session || session->isSessionClosed())
++        return;
++    session->streamSendError(m_identifier, errorCode);
++}
++
++void NetworkTransportStream::cancelReceive(std::optional<WebCore::WebTransportStreamErrorCode> errorCode)
++{
++    switch (m_streamState) {
++    case NetworkTransportStreamState::Ready:
++        m_streamState = NetworkTransportStreamState::ReadClosed;
++        break;
++    case NetworkTransportStreamState::WriteClosed:
++        m_streamState = NetworkTransportStreamState::Complete;
++        break;
++    case NetworkTransportStreamState::ReadClosed:
++    case NetworkTransportStreamState::Complete:
++        return;
++    }
++    if (auto* connection = quicConnection(m_session))
++        connection->stopSending(m_quicStreamID, errorCode.value_or(0));
++}
++
++void NetworkTransportStream::cancelSend(std::optional<WebCore::WebTransportStreamErrorCode> errorCode)
++{
++    switch (m_streamState) {
++    case NetworkTransportStreamState::Ready:
++        m_streamState = NetworkTransportStreamState::WriteClosed;
++        break;
++    case NetworkTransportStreamState::ReadClosed:
++        m_streamState = NetworkTransportStreamState::Complete;
++        break;
++    case NetworkTransportStreamState::WriteClosed:
++    case NetworkTransportStreamState::Complete:
++        return;
++    }
++    if (auto* connection = quicConnection(m_session))
++        connection->resetStream(m_quicStreamID, errorCode.value_or(0));
++}
++
++void NetworkTransportStream::cancel(std::optional<WebCore::WebTransportStreamErrorCode> errorCode)
++{
++    auto* connection = quicConnection(m_session);
++    bool canRead = m_streamState == NetworkTransportStreamState::Ready || m_streamState == NetworkTransportStreamState::WriteClosed;
++    bool canWrite = m_streamState == NetworkTransportStreamState::Ready || m_streamState == NetworkTransportStreamState::ReadClosed;
++    m_streamState = NetworkTransportStreamState::Complete;
++    if (!connection)
++        return;
++    if (canRead)
++        connection->stopSending(m_quicStreamID, errorCode.value_or(0));
++    if (canWrite)
++        connection->resetStream(m_quicStreamID, errorCode.value_or(0));
++}
++
++WebCore::WebTransportSendStreamStats NetworkTransportStream::getSendStreamStats()
++{
++    return { m_bytesSent, m_bytesSent, m_bytesSent };
++}
++
++WebCore::WebTransportReceiveStreamStats NetworkTransportStream::getReceiveStreamStats()
++{
++    return { m_bytesReceived, m_bytesReceived };
++}
++
++} // namespace WebKit
+diff --git a/Source/WebKit/NetworkProcess/webtransport/haiku/WebTransportQuicConnectionHaiku.cpp b/Source/WebKit/NetworkProcess/webtransport/haiku/WebTransportQuicConnectionHaiku.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..8a8e06deb818f2573048ccebce9719e971ee5d73
+--- /dev/null
++++ b/Source/WebKit/NetworkProcess/webtransport/haiku/WebTransportQuicConnectionHaiku.cpp
+@@ -0,0 +1,1764 @@
++/*
++ * Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause
++ */
++
++#include "config.h"
++#include "WebTransportQuicConnectionHaiku.h"
++
++#include "NetworkTransportSession.h"
++#include <wtf/CrossThreadCopier.h>
++#include <wtf/RunLoop.h>
++#include <wtf/StdLibExtras.h>
++#include <wtf/Threading.h>
++#include <wtf/text/StringToIntegerConversion.h>
++
++#if HAVE_HAIKU_WEBTRANSPORT_QUIC
++
++#include <WebCore/CertificateInfo.h>
++#include <WebCore/OpenSSLHelper.h>
++#include <algorithm>
++#include <cerrno>
++#include <cstdarg>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include <deque>
++#include <fcntl.h>
++#include <map>
++#include <memory>
++#include <mutex>
++#include <arpa/inet.h>
++#include <netdb.h>
++#include <netinet/in.h>
++#include <nghttp3/nghttp3.h>
++#include <ngtcp2/ngtcp2.h>
++#include <ngtcp2/ngtcp2_crypto.h>
++#include <ngtcp2/ngtcp2_crypto_ossl.h>
++#include <openssl/err.h>
++#include <openssl/rand.h>
++#include <openssl/sha.h>
++#include <openssl/ssl.h>
++#include <openssl/x509v3.h>
++#include <poll.h>
++#include <string>
++#include <sys/socket.h>
++#include <time.h>
++#include <unistd.h>
++#include <vector>
++
++#endif
++
++namespace WebKit {
++
++// Error codes of WebTransport stream resets, carried in the HTTP/3 error code
++// space with every 0x1f-th value skipped (the reserved "greasing" values).
++static constexpr uint64_t firstWebTransportHTTP3ErrorCode = 0x52e4a40fa8db;
++static constexpr uint64_t lastWebTransportHTTP3ErrorCode = 0x52e5ac983162;
++
++uint64_t WebTransportQuicConnectionHaiku::http3ErrorCode(uint64_t code)
++{
++    return firstWebTransportHTTP3ErrorCode + code + code / 0x1e;
++}
++
++std::optional<uint64_t> WebTransportQuicConnectionHaiku::webTransportErrorCode(uint64_t code)
++{
++    if (code < firstWebTransportHTTP3ErrorCode || code > lastWebTransportHTTP3ErrorCode)
++        return std::nullopt;
++    uint64_t shifted = code - firstWebTransportHTTP3ErrorCode;
++    if (shifted % 0x1f == 0x1e)
++        return std::nullopt;
++    return shifted - shifted / 0x1f;
++}
++
++#if !HAVE_HAIKU_WEBTRANSPORT_QUIC
++
++bool webTransportAvailableHaiku()
++{
++    return false;
++}
++
++RefPtr<WebTransportQuicConnectionHaiku> WebTransportQuicConnectionHaiku::create(Configuration&&)
++{
++    return nullptr;
++}
++
++WebTransportQuicConnectionHaiku::WebTransportQuicConnectionHaiku(Configuration&& configuration)
++    : m_configuration(WTF::move(configuration))
++{
++}
++
++WebTransportQuicConnectionHaiku::~WebTransportQuicConnectionHaiku() = default;
++void WebTransportQuicConnectionHaiku::start(NetworkTransportSession&) { }
++void WebTransportQuicConnectionHaiku::openStream(bool, CompletionHandler<void(std::optional<int64_t>)>&& completion) { completion(std::nullopt); }
++void WebTransportQuicConnectionHaiku::sendStreamData(int64_t, Vector<uint8_t>&&, bool, CompletionHandler<void(bool)>&& completion) { completion(false); }
++void WebTransportQuicConnectionHaiku::sendDatagram(Vector<uint8_t>&&, CompletionHandler<void(bool)>&& completion) { completion(false); }
++void WebTransportQuicConnectionHaiku::resetStream(int64_t, uint64_t) { }
++void WebTransportQuicConnectionHaiku::stopSending(int64_t, uint64_t) { }
++void WebTransportQuicConnectionHaiku::closeSession(uint32_t, UTF8CString&&) { }
++void WebTransportQuicConnectionHaiku::exportKeyingMaterial(Vector<uint8_t>&&, Vector<uint8_t>&&, uint32_t, CompletionHandler<void(std::optional<Vector<uint8_t>>&&)>&& completion) { completion(std::nullopt); }
++void WebTransportQuicConnectionHaiku::shutdown() { }
++
++#else
++
++bool webTransportAvailableHaiku()
++{
++    static const bool available = [] {
++        const char* value = getenv("SUMMIT_WEBTRANSPORT");
++        return !value || strcmp(value, "0");
++    }();
++    return available;
++}
++
++static bool traceEnabled()
++{
++    static const bool enabled = [] {
++        const char* value = getenv("SUMMIT_WEBTRANSPORT_TRACE");
++        return value && *value == '1';
++    }();
++    return enabled;
++}
++
++#define WT_TRACE(...) do { if (traceEnabled()) { fprintf(stderr, "WebTransport: " __VA_ARGS__); fputc('\n', stderr); } } while (0)
++
++namespace {
++
++// HTTP/3 (RFC 9114), HTTP datagrams and capsules (RFC 9297), extended
++// CONNECT (RFC 9220) and WebTransport over HTTP/3.
++constexpr uint64_t http3FrameData = 0x00;
++constexpr uint64_t http3FrameHeaders = 0x01;
++constexpr uint64_t http3FrameSettings = 0x04;
++constexpr uint64_t http3FrameGoAway = 0x07;
++constexpr uint64_t http3StreamControl = 0x00;
++constexpr uint64_t http3StreamPush = 0x01;
++constexpr uint64_t http3StreamQpackEncoder = 0x02;
++constexpr uint64_t http3StreamQpackDecoder = 0x03;
++constexpr uint64_t webTransportUnidirectionalStream = 0x54;
++constexpr uint64_t webTransportBidirectionalSignal = 0x41;
++constexpr uint64_t settingEnableConnectProtocol = 0x08;
++constexpr uint64_t settingH3Datagram = 0x33;
++constexpr uint64_t settingH3DatagramDraft04 = 0xffd277;
++constexpr uint64_t settingEnableWebTransportDraft02 = 0x2b603742;
++constexpr uint64_t settingWebTransportMaxSessionsDraft07 = 0xc671706a;
++constexpr uint64_t capsuleCloseWebTransportSession = 0x2843;
++constexpr uint64_t capsuleDrainWebTransportSession = 0x78ae;
++constexpr uint64_t http3NoError = 0x100;
++constexpr uint64_t http3GeneralProtocolError = 0x101;
++constexpr uint64_t http3StreamCreationError = 0x103;
++constexpr uint64_t http3RequestCancelled = 0x10c;
++
++void appendVarint(std::vector<uint8_t>& out, uint64_t value)
++{
++    if (value < 0x40)
++        out.push_back(static_cast<uint8_t>(value));
++    else if (value < 0x4000) {
++        out.push_back(static_cast<uint8_t>(0x40 | (value >> 8)));
++        out.push_back(static_cast<uint8_t>(value));
++    } else if (value < 0x40000000) {
++        out.push_back(static_cast<uint8_t>(0x80 | (value >> 24)));
++        for (int shift = 16; shift >= 0; shift -= 8)
++            out.push_back(static_cast<uint8_t>(value >> shift));
++    } else {
++        out.push_back(static_cast<uint8_t>(0xc0 | (value >> 56)));
++        for (int shift = 48; shift >= 0; shift -= 8)
++            out.push_back(static_cast<uint8_t>(value >> shift));
++    }
++}
++
++// Reads a QUIC variable-length integer at *offset; nullopt if incomplete.
++std::optional<uint64_t> readVarint(const std::vector<uint8_t>& in, size_t& offset)
++{
++    if (offset >= in.size())
++        return std::nullopt;
++    size_t length = size_t { 1 } << (in[offset] >> 6);
++    if (in.size() - offset < length)
++        return std::nullopt;
++    uint64_t value = in[offset] & 0x3f;
++    for (size_t i = 1; i < length; ++i)
++        value = (value << 8) | in[offset + i];
++    offset += length;
++    return value;
++}
++
++void appendFrame(std::vector<uint8_t>& out, uint64_t type, const std::vector<uint8_t>& payload)
++{
++    appendVarint(out, type);
++    appendVarint(out, payload.size());
++    out.insert(out.end(), payload.begin(), payload.end());
++}
++
++// A QPACK integer with an N-bit prefix (RFC 7541, 5.1).
++void appendPrefixedInteger(std::vector<uint8_t>& out, uint8_t flags, unsigned prefixBits, uint64_t value)
++{
++    uint64_t limit = (uint64_t { 1 } << prefixBits) - 1;
++    if (value < limit) {
++        out.push_back(static_cast<uint8_t>(flags | value));
++        return;
++    }
++    out.push_back(static_cast<uint8_t>(flags | limit));
++    value -= limit;
++    while (value >= 0x80) {
++        out.push_back(static_cast<uint8_t>(0x80 | (value & 0x7f)));
++        value >>= 7;
++    }
++    out.push_back(static_cast<uint8_t>(value));
++}
++
++void appendQpackString(std::vector<uint8_t>& out, uint8_t flags, unsigned prefixBits, const std::string& text)
++{
++    appendPrefixedInteger(out, flags, prefixBits, text.size());
++    out.insert(out.end(), text.begin(), text.end());
++}
++
++// A field section that uses only the static table (no dynamic table, so no
++// encoder stream): RFC 9204, 4.5.
++std::vector<uint8_t> encodeRequestFieldSection(const std::vector<std::pair<std::string, std::string>>& fields)
++{
++    std::vector<uint8_t> out { 0x00, 0x00 }; // Required Insert Count 0, Base 0.
++    for (auto& [name, value] : fields) {
++        if (name == ":method" && value == "CONNECT")
++            appendPrefixedInteger(out, 0xc0, 6, 15); // Indexed, static 15.
++        else if (name == ":scheme" && value == "https")
++            appendPrefixedInteger(out, 0xc0, 6, 23);
++        else if (name == ":authority") {
++            appendPrefixedInteger(out, 0x50, 4, 0); // Literal, static name 0.
++            appendQpackString(out, 0x00, 7, value);
++        } else if (name == ":path") {
++            appendPrefixedInteger(out, 0x50, 4, 1);
++            appendQpackString(out, 0x00, 7, value);
++        } else {
++            appendQpackString(out, 0x20, 3, name); // Literal name, no Huffman.
++            appendQpackString(out, 0x00, 7, value);
++        }
++    }
++    return out;
++}
++
++ngtcp2_tstamp timestamp()
++{
++    struct timespec now;
++    clock_gettime(CLOCK_MONOTONIC, &now);
++    return static_cast<uint64_t>(now.tv_sec) * NGTCP2_SECONDS + static_cast<uint64_t>(now.tv_nsec);
++}
++
++const char* caBundlePath()
++{
++    // OpenSSL's own OPENSSLDIR has no cert.pem on Haiku; libcurl uses this.
++    return "/boot/system/data/ssl/CARootCertificates.pem";
++}
++
++} // namespace
++
++static WTF_ATTRIBUTE_PRINTF(2, 3) void quicLog(void*, const char* format, ...)
++{
++    va_list arguments;
++    va_start(arguments, format);
++    vfprintf(stderr, format, arguments);
++    va_end(arguments);
++    fputc('\n', stderr);
++}
++
++// Everything below runs on the connection's thread.
++struct WebTransportQuicStateHaiku {
++    struct Chunk {
++        std::vector<uint8_t> data;
++        uint64_t offset { 0 };
++    };
++    struct PendingSend {
++        uint64_t endOffset { 0 };
++        bool fin { false };
++        CompletionHandler<void(bool)> completion;
++    };
++    enum class Kind : uint8_t { Unknown, Control, Request, Qpack, WebTransport, Ignored };
++    struct Stream {
++        int64_t id { -1 };
++        Kind kind { Kind::Unknown };
++        bool announced { false };
++        // Receiving.
++        std::vector<uint8_t> receiveBuffer; // Stream header or HTTP/3 frames not yet whole.
++        bool receiveFinished { false };
++        // Sending.
++        std::deque<Chunk> chunks; // Written or not, until acknowledged.
++        size_t chunkIndex { 0 };
++        size_t chunkOffset { 0 };
++        uint64_t queuedOffset { 0 };
++        uint64_t writtenOffset { 0 };
++        bool finQueued { false };
++        bool finSent { false };
++        bool writeClosed { false };
++        bool blocked { false };
++        std::deque<PendingSend> pendingSends;
++
++        bool hasDataToWrite() const { return !writeClosed && !blocked && (writtenOffset < queuedOffset || (finQueued && !finSent)); }
++    };
++    enum class State : uint8_t { Connecting, Verifying, WaitingForSettings, Requesting, Established, Closing, Closed };
++
++    explicit WebTransportQuicStateHaiku(WebTransportQuicConnectionHaiku& owner)
++        : connection(owner)
++        , configuration(owner.m_configuration)
++    {
++    }
++
++    ~WebTransportQuicStateHaiku()
++    {
++        for (auto& [id, stream] : streams)
++            failPendingSends(*stream, true);
++        for (auto& datagram : datagrams)
++            complete(WTF::move(datagram.second), true);
++        for (auto& open : pendingOpens)
++            completeOpen(WTF::move(open.second), std::nullopt);
++        closeTransport();
++        if (qpackDecoder)
++            nghttp3_qpack_decoder_del(qpackDecoder);
++    }
++
++    // --- Main-thread hand-offs ----------------------------------------------
++
++    void toSession(Function<void(NetworkTransportSession&)>&& function)
++    {
++        // Events about the session wait until it is ready, so that WebCore
++        // sees the session before its streams and datagrams.
++        if (state != State::Established && state != State::Closing && state != State::Closed && heldUntilEstablished) {
++            heldEvents.push_back(WTF::move(function));
++            return;
++        }
++        connection.dispatchToSession(WTF::move(function));
++    }
++
++    void complete(CompletionHandler<void(bool)>&& completion, bool result)
++    {
++        if (!completion)
++            return;
++        RunLoop::mainSingleton().dispatch([completion = WTF::move(completion), result] mutable {
++            completion(result);
++        });
++    }
++
++    void completeOpen(CompletionHandler<void(std::optional<int64_t>)>&& completion, std::optional<int64_t> result)
++    {
++        if (!completion)
++            return;
++        RunLoop::mainSingleton().dispatch([completion = WTF::move(completion), result] mutable {
++            completion(result);
++        });
++    }
++
++    // --- Setup ---------------------------------------------------------------
++
++    // Resolves the host, then tries its addresses in the resolver's order:
++    // the next one when sending fails or nothing comes back within a second
++    // (an IPv6 address on a network without IPv6), as curl does.
++    bool connect()
++    {
++        struct addrinfo hints { };
++        hints.ai_family = AF_UNSPEC;
++        hints.ai_socktype = SOCK_DGRAM;
++        char port[8];
++        snprintf(port, sizeof(port), "%u", configuration.port);
++        struct addrinfo* resolved = nullptr;
++        if (int error = getaddrinfo(configuration.host.legacyCStringPointer(), port, &hints, &resolved); error || !resolved) {
++            WT_TRACE("cannot resolve %s: %s", configuration.host.legacyCStringPointer(), gai_strerror(error));
++            return false;
++        }
++        for (auto* address = resolved; address; address = address->ai_next) {
++            if (address->ai_addrlen > sizeof(sockaddr_storage))
++                continue;
++            sockaddr_storage storage { };
++            memcpy(&storage, address->ai_addr, address->ai_addrlen);
++            addresses.emplace_back(storage, address->ai_addrlen);
++        }
++        freeaddrinfo(resolved);
++        return connectToNextAddress();
++    }
++
++    bool connectToNextAddress()
++    {
++        while (nextAddress < addresses.size()) {
++            auto& [address, length] = addresses[nextAddress++];
++            closeTransport();
++            socketFD = socket(address.ss_family, SOCK_DGRAM, 0);
++            if (socketFD < 0)
++                continue;
++            if (::connect(socketFD, reinterpret_cast<const sockaddr*>(&address), length)) {
++                close(socketFD);
++                socketFD = -1;
++                continue;
++            }
++            remoteAddress = address;
++            remoteAddressLength = length;
++            localAddressLength = sizeof(localAddress);
++            if (getsockname(socketFD, reinterpret_cast<sockaddr*>(&localAddress), &localAddressLength)) {
++                close(socketFD);
++                socketFD = -1;
++                continue;
++            }
++            fcntl(socketFD, F_SETFL, fcntl(socketFD, F_GETFL) | O_NONBLOCK);
++            int bufferSize = 2 * 1024 * 1024;
++            setsockopt(socketFD, SOL_SOCKET, SO_RCVBUF, &bufferSize, sizeof(bufferSize));
++            setsockopt(socketFD, SOL_SOCKET, SO_SNDBUF, &bufferSize, sizeof(bufferSize));
++            if (!setUpTLS() || !setUpQUIC())
++                return false;
++            addressStart = timestamp();
++            addressFailed = false;
++            receivedPacket = false;
++            char text[64] = { };
++            if (address.ss_family == AF_INET6)
++                inet_ntop(AF_INET6, &reinterpret_cast<const sockaddr_in6*>(&address)->sin6_addr, text, sizeof(text));
++            else
++                inet_ntop(AF_INET, &reinterpret_cast<const sockaddr_in*>(&address)->sin_addr, text, sizeof(text));
++            WT_TRACE("connecting to %s port %u", text, configuration.port);
++            return true;
++        }
++        WT_TRACE("cannot reach %s:%u", configuration.host.legacyCStringPointer(), configuration.port);
++        return false;
++    }
++
++    bool shouldTryNextAddress(ngtcp2_tstamp now) const
++    {
++        if (handshakeCompleted || nextAddress >= addresses.size())
++            return false;
++        return addressFailed || (!receivedPacket && now - addressStart >= NGTCP2_SECONDS);
++    }
++
++    // Frees what belongs to one address, before the next is tried.
++    void closeTransport()
++    {
++        if (conn) {
++            ngtcp2_conn_del(conn);
++            conn = nullptr;
++        }
++        if (ssl) {
++            SSL_set_app_data(ssl, nullptr);
++            SSL_free(ssl);
++            ssl = nullptr;
++        }
++        if (osslContext) {
++            ngtcp2_crypto_ossl_ctx_del(osslContext);
++            osslContext = nullptr;
++        }
++        if (sslContext) {
++            SSL_CTX_free(sslContext);
++            sslContext = nullptr;
++        }
++        if (socketFD >= 0) {
++            close(socketFD);
++            socketFD = -1;
++        }
++    }
++
++    void sendPacket(const uint8_t* data, size_t length)
++    {
++        if (send(socketFD, data, length, 0) < 0 && !handshakeCompleted) {
++            if (errno == ENETUNREACH || errno == EHOSTUNREACH || errno == EADDRNOTAVAIL || errno == ENETDOWN || errno == EPERM || errno == EACCES)
++                addressFailed = true;
++        }
++    }
++
++    bool setUpTLS()
++    {
++        static std::once_flag once;
++        std::call_once(once, [] { ngtcp2_crypto_ossl_init(); });
++
++        sslContext = SSL_CTX_new(TLS_client_method());
++        if (!sslContext)
++            return false;
++        SSL_CTX_set_min_proto_version(sslContext, TLS1_3_VERSION);
++        SSL_CTX_load_verify_locations(sslContext, caBundlePath(), nullptr);
++        // Verification runs in full, but its result is looked at once the
++        // handshake is done: a failure may still be trusted by the user, as
++        // for page loads, or by serverCertificateHashes.
++        SSL_CTX_set_verify(sslContext, SSL_VERIFY_PEER, [](int, X509_STORE_CTX*) { return 1; });
++
++        if (ngtcp2_crypto_ossl_ctx_new(&osslContext, nullptr))
++            return false;
++        ssl = SSL_new(sslContext);
++        if (!ssl)
++            return false;
++        ngtcp2_crypto_ossl_ctx_set_ssl(osslContext, ssl);
++        if (ngtcp2_crypto_ossl_configure_client_session(ssl))
++            return false;
++        connectionReference.get_conn = [](ngtcp2_crypto_conn_ref* reference) {
++            return static_cast<WebTransportQuicStateHaiku*>(reference->user_data)->conn;
++        };
++        connectionReference.user_data = this;
++        SSL_set_app_data(ssl, &connectionReference);
++        SSL_set_connect_state(ssl);
++        static const uint8_t alpn[] = { 2, 'h', '3' };
++        SSL_set_alpn_protos(ssl, alpn, sizeof(alpn));
++
++        auto* parameters = SSL_get0_param(ssl);
++        if (X509_VERIFY_PARAM_set1_ip_asc(parameters, configuration.host.legacyCStringPointer()) != 1) {
++            SSL_set_tlsext_host_name(ssl, configuration.host.legacyCStringPointer());
++            SSL_set1_host(ssl, configuration.host.legacyCStringPointer());
++        }
++        return true;
++    }
++
++    bool setUpQUIC()
++    {
++        ngtcp2_cid sourceID, destinationID;
++        sourceID.datalen = 17;
++        destinationID.datalen = 18;
++        if (RAND_bytes(sourceID.data, sourceID.datalen) != 1 || RAND_bytes(destinationID.data, destinationID.datalen) != 1)
++            return false;
++
++        ngtcp2_callbacks callbacks { };
++        callbacks.client_initial = ngtcp2_crypto_client_initial_cb;
++        callbacks.recv_crypto_data = ngtcp2_crypto_recv_crypto_data_cb;
++        callbacks.encrypt = ngtcp2_crypto_encrypt_cb;
++        callbacks.decrypt = ngtcp2_crypto_decrypt_cb;
++        callbacks.hp_mask = ngtcp2_crypto_hp_mask_cb;
++        callbacks.recv_retry = ngtcp2_crypto_recv_retry_cb;
++        callbacks.update_key = ngtcp2_crypto_update_key_cb;
++        callbacks.delete_crypto_aead_ctx = ngtcp2_crypto_delete_crypto_aead_ctx_cb;
++        callbacks.delete_crypto_cipher_ctx = ngtcp2_crypto_delete_crypto_cipher_ctx_cb;
++        callbacks.get_path_challenge_data2 = ngtcp2_crypto_get_path_challenge_data2_cb;
++        callbacks.version_negotiation = ngtcp2_crypto_version_negotiation_cb;
++        callbacks.rand = [](uint8_t* destination, size_t length, const ngtcp2_rand_ctx*) {
++            RAND_bytes(destination, static_cast<int>(length));
++        };
++        callbacks.get_new_connection_id2 = [](ngtcp2_conn*, ngtcp2_cid* cid, ngtcp2_stateless_reset_token* token, size_t length, void*) {
++            if (RAND_bytes(cid->data, static_cast<int>(length)) != 1)
++                return NGTCP2_ERR_CALLBACK_FAILURE;
++            cid->datalen = length;
++            if (RAND_bytes(token->data, sizeof(token->data)) != 1)
++                return NGTCP2_ERR_CALLBACK_FAILURE;
++            return 0;
++        };
++        callbacks.handshake_completed = [](ngtcp2_conn*, void* userData) {
++            static_cast<WebTransportQuicStateHaiku*>(userData)->handshakeCompleted = true;
++            return 0;
++        };
++        callbacks.recv_stream_data = [](ngtcp2_conn*, uint32_t flags, int64_t streamID, uint64_t, const uint8_t* data, size_t length, void* userData, void*) {
++            return static_cast<WebTransportQuicStateHaiku*>(userData)->receiveStreamData(streamID, data, length, flags & NGTCP2_STREAM_DATA_FLAG_FIN);
++        };
++        callbacks.acked_stream_data_offset = [](ngtcp2_conn*, int64_t streamID, uint64_t offset, uint64_t length, void* userData, void*) {
++            static_cast<WebTransportQuicStateHaiku*>(userData)->acknowledged(streamID, offset + length);
++            return 0;
++        };
++        callbacks.stream_close2 = [](ngtcp2_conn*, uint32_t, int64_t streamID, uint64_t, uint64_t, void* userData, void*) {
++            static_cast<WebTransportQuicStateHaiku*>(userData)->streamClosed(streamID);
++            return 0;
++        };
++        callbacks.stream_reset = [](ngtcp2_conn*, int64_t streamID, uint64_t, uint64_t errorCode, void* userData, void*) {
++            static_cast<WebTransportQuicStateHaiku*>(userData)->peerResetStream(streamID, errorCode);
++            return 0;
++        };
++        // recv_stop_sending is the server's STOP_SENDING; stream_stop_sending
++        // would be our own.
++        callbacks.recv_stop_sending = [](ngtcp2_conn*, int64_t streamID, uint64_t errorCode, void* userData, void*) {
++            static_cast<WebTransportQuicStateHaiku*>(userData)->peerStoppedSending(streamID, errorCode);
++            return 0;
++        };
++        callbacks.extend_max_local_streams_bidi = [](ngtcp2_conn*, uint64_t, void* userData) {
++            static_cast<WebTransportQuicStateHaiku*>(userData)->openPendingStreams();
++            return 0;
++        };
++        callbacks.extend_max_local_streams_uni = callbacks.extend_max_local_streams_bidi;
++        callbacks.extend_max_stream_data = [](ngtcp2_conn*, int64_t streamID, uint64_t, void* userData, void*) {
++            if (auto* stream = static_cast<WebTransportQuicStateHaiku*>(userData)->find(streamID))
++                stream->blocked = false;
++            return 0;
++        };
++        callbacks.recv_datagram = [](ngtcp2_conn*, uint32_t, const uint8_t* data, size_t length, void* userData) {
++            static_cast<WebTransportQuicStateHaiku*>(userData)->receiveDatagram(data, length);
++            return 0;
++        };
++
++        ngtcp2_settings settings;
++        ngtcp2_settings_default(&settings);
++        settings.initial_ts = timestamp();
++        settings.handshake_timeout = 10 * NGTCP2_SECONDS;
++        if (traceEnabled() && getenv("SUMMIT_WEBTRANSPORT_TRACE_QUIC")) {
++            settings.log_printf = quicLog;
++        }
++
++        ngtcp2_transport_params parameters;
++        ngtcp2_transport_params_default(&parameters);
++        parameters.initial_max_stream_data_bidi_local = 4 * 1024 * 1024;
++        parameters.initial_max_stream_data_bidi_remote = 4 * 1024 * 1024;
++        parameters.initial_max_stream_data_uni = 4 * 1024 * 1024;
++        parameters.initial_max_data = 32 * 1024 * 1024;
++        parameters.initial_max_streams_bidi = configuration.maxIncomingBidirectionalStreams;
++        // The server's control and QPACK streams come first.
++        parameters.initial_max_streams_uni = 3 + configuration.maxIncomingUnidirectionalStreams;
++        parameters.max_idle_timeout = 60 * NGTCP2_SECONDS;
++        parameters.max_datagram_frame_size = 65535;
++        parameters.active_connection_id_limit = 7;
++
++        ngtcp2_path path {
++            { reinterpret_cast<sockaddr*>(&localAddress), localAddressLength },
++            { reinterpret_cast<sockaddr*>(&remoteAddress), remoteAddressLength },
++            nullptr
++        };
++        if (int error = ngtcp2_conn_client_new(&conn, &destinationID, &sourceID, &path, NGTCP2_PROTO_VER_V1, &callbacks, &settings, &parameters, nullptr, this)) {
++            WT_TRACE("ngtcp2_conn_client_new: %s", ngtcp2_strerror(error));
++            return false;
++        }
++        ngtcp2_conn_set_tls_native_handle(conn, osslContext);
++        return true;
++    }
++
++    // --- Streams ---------------------------------------------------------------
++
++    Stream* find(int64_t id)
++    {
++        auto iterator = streams.find(id);
++        return iterator == streams.end() ? nullptr : iterator->second.get();
++    }
++
++    Stream& ensure(int64_t id)
++    {
++        auto& slot = streams[id];
++        if (!slot) {
++            slot = std::make_unique<Stream>();
++            slot->id = id;
++        }
++        return *slot;
++    }
++
++    static bool isLocal(int64_t id) { return !(id & 1); }
++    static bool isBidirectional(int64_t id) { return !(id & 2); }
++
++    void queue(Stream& stream, std::vector<uint8_t>&& data, bool fin, CompletionHandler<void(bool)>&& completion = { })
++    {
++        if (finished || stream.writeClosed || stream.finQueued) {
++            complete(WTF::move(completion), false);
++            return;
++        }
++        if (!data.empty()) {
++            uint64_t offset = stream.queuedOffset;
++            stream.queuedOffset += data.size();
++            stream.chunks.push_back({ WTF::move(data), offset });
++        }
++        if (fin)
++            stream.finQueued = true;
++        if (completion)
++            stream.pendingSends.push_back({ stream.queuedOffset, fin, WTF::move(completion) });
++        else if (stream.queuedOffset == stream.writtenOffset && !fin)
++            return;
++    }
++
++    void advance(Stream& stream, size_t length, bool finWritten)
++    {
++        stream.writtenOffset += length;
++        while (length) {
++            auto& chunk = stream.chunks[stream.chunkIndex];
++            size_t available = chunk.data.size() - stream.chunkOffset;
++            size_t taken = std::min(available, length);
++            stream.chunkOffset += taken;
++            length -= taken;
++            if (stream.chunkOffset == chunk.data.size()) {
++                ++stream.chunkIndex;
++                stream.chunkOffset = 0;
++            }
++        }
++        if (finWritten)
++            stream.finSent = true;
++        while (!stream.pendingSends.empty()) {
++            auto& pending = stream.pendingSends.front();
++            if (pending.endOffset > stream.writtenOffset || (pending.fin && !stream.finSent))
++                break;
++            complete(WTF::move(pending.completion), true);
++            stream.pendingSends.pop_front();
++        }
++    }
++
++    void acknowledged(int64_t id, uint64_t acknowledgedOffset)
++    {
++        auto* stream = find(id);
++        if (!stream)
++            return;
++        while (stream->chunkIndex && !stream->chunks.empty()) {
++            auto& front = stream->chunks.front();
++            if (front.offset + front.data.size() > acknowledgedOffset)
++                break;
++            stream->chunks.pop_front();
++            --stream->chunkIndex;
++        }
++    }
++
++    void failPendingSends(Stream& stream, bool result)
++    {
++        while (!stream.pendingSends.empty()) {
++            complete(WTF::move(stream.pendingSends.front().completion), result);
++            stream.pendingSends.pop_front();
++        }
++    }
++
++    void streamClosed(int64_t id)
++    {
++        auto iterator = streams.find(id);
++        if (iterator == streams.end())
++            return;
++        auto& stream = *iterator->second;
++        // Writes that were not acknowledged in full end with the stream: the
++        // page learns of a reset through stream_stop_sending.
++        failPendingSends(stream, true);
++        if (!isLocal(id)) {
++            if (isBidirectional(id))
++                ngtcp2_conn_extend_max_streams_bidi(conn, 1);
++            else
++                ngtcp2_conn_extend_max_streams_uni(conn, 1);
++        }
++        if (id == requestStreamID && state == State::Established)
++            sessionEnded(std::nullopt, { }, true);
++        streams.erase(iterator);
++    }
++
++    void peerResetStream(int64_t id, uint64_t errorCode)
++    {
++        auto* stream = find(id);
++        if (!stream)
++            return;
++        if (id == requestStreamID) {
++            sessionEnded(std::nullopt, { }, false);
++            return;
++        }
++        if (stream->kind != Kind::WebTransport || !stream->announced)
++            return;
++        if (errorCode == WebTransportQuicConnectionHaiku::sessionGoneErrorCode)
++            return;
++        uint64_t code = WebTransportQuicConnectionHaiku::webTransportErrorCode(errorCode).value_or(0);
++        WT_TRACE("stream %lld reset by the server (%llu)", static_cast<long long>(id), static_cast<unsigned long long>(code));
++        toSession([id, code](NetworkTransportSession& session) {
++            session.quicDidResetStreamHaiku(id, code);
++        });
++    }
++
++    void peerStoppedSending(int64_t id, uint64_t errorCode)
++    {
++        auto* stream = find(id);
++        if (!stream)
++            return;
++        stream->writeClosed = true;
++        failPendingSends(*stream, true);
++        if (stream->kind != Kind::WebTransport || errorCode == WebTransportQuicConnectionHaiku::sessionGoneErrorCode)
++            return;
++        uint64_t code = WebTransportQuicConnectionHaiku::webTransportErrorCode(errorCode).value_or(0);
++        WT_TRACE("stream %lld stopped by the server (%llu)", static_cast<long long>(id), static_cast<unsigned long long>(code));
++        toSession([id, code](NetworkTransportSession& session) {
++            session.quicDidStopSendingHaiku(id, code);
++        });
++    }
++
++    void openPendingStreams()
++    {
++        while (!pendingOpens.empty()) {
++            bool bidirectional = pendingOpens.front().first;
++            int64_t id = -1;
++            int result = bidirectional ? ngtcp2_conn_open_bidi_stream(conn, &id, nullptr) : ngtcp2_conn_open_uni_stream(conn, &id, nullptr);
++            if (result == NGTCP2_ERR_STREAM_ID_BLOCKED)
++                return;
++            auto completion = WTF::move(pendingOpens.front().second);
++            pendingOpens.pop_front();
++            if (result) {
++                completeOpen(WTF::move(completion), std::nullopt);
++                continue;
++            }
++            auto& stream = ensure(id);
++            stream.kind = Kind::WebTransport;
++            stream.announced = true;
++            std::vector<uint8_t> header;
++            appendVarint(header, bidirectional ? webTransportBidirectionalSignal : webTransportUnidirectionalStream);
++            appendVarint(header, requestStreamID);
++            queue(stream, WTF::move(header), false);
++            WT_TRACE("opened %s stream %lld", bidirectional ? "bidirectional" : "unidirectional", static_cast<long long>(id));
++            completeOpen(WTF::move(completion), id);
++        }
++    }
++
++    void openStream(bool bidirectional, CompletionHandler<void(std::optional<int64_t>)>&& completion)
++    {
++        if (state != State::Established) {
++            completeOpen(WTF::move(completion), std::nullopt);
++            return;
++        }
++        pendingOpens.emplace_back(bidirectional, WTF::move(completion));
++        openPendingStreams();
++    }
++
++    // Stream bytes are delivered in order; all of them are consumed at once.
++    int receiveStreamData(int64_t id, const uint8_t* data, size_t length, bool fin)
++    {
++        ngtcp2_conn_extend_max_stream_offset(conn, id, length);
++        ngtcp2_conn_extend_max_offset(conn, length);
++        auto& stream = ensure(id);
++        if (stream.kind == Kind::Unknown) {
++            stream.receiveBuffer.insert(stream.receiveBuffer.end(), data, data + length);
++            if (!classifyIncomingStream(stream))
++                return fin ? ignoreUnclassified(stream) : 0;
++            data = nullptr;
++            length = 0;
++        }
++        switch (stream.kind) {
++        case Kind::Unknown:
++            break;
++        case Kind::Ignored:
++        case Kind::Qpack:
++            break;
++        case Kind::Control:
++        case Kind::Request:
++            stream.receiveBuffer.insert(stream.receiveBuffer.end(), data, data + length);
++            if (!parseFrames(stream))
++                return NGTCP2_ERR_CALLBACK_FAILURE;
++            if (fin && stream.kind == Kind::Request)
++                requestStreamFinished();
++            break;
++        case Kind::WebTransport: {
++            std::vector<uint8_t> bytes;
++            if (!stream.receiveBuffer.empty())
++                bytes.swap(stream.receiveBuffer);
++            if (length)
++                bytes.insert(bytes.end(), data, data + length);
++            if (bytes.empty() && !fin)
++                break;
++            toSession([id, bytes = Vector<uint8_t>(std::span(bytes)), fin](NetworkTransportSession& session) mutable {
++                session.quicDidReceiveStreamDataHaiku(id, WTF::move(bytes), fin);
++            });
++            break;
++        }
++        }
++        return 0;
++    }
++
++    int ignoreUnclassified(Stream& stream)
++    {
++        stream.kind = Kind::Ignored;
++        return 0;
++    }
++
++    // Reads the stream header of a stream the server opened (or picks the
++    // kind of one we opened). Leaves the bytes after the header in
++    // receiveBuffer.
++    bool classifyIncomingStream(Stream& stream)
++    {
++        if (isLocal(stream.id)) {
++            stream.kind = stream.id == requestStreamID ? Kind::Request : Kind::WebTransport;
++            return true;
++        }
++        size_t offset = 0;
++        auto type = readVarint(stream.receiveBuffer, offset);
++        if (!type)
++            return false;
++        if (isBidirectional(stream.id)) {
++            if (*type != webTransportBidirectionalSignal) {
++                rejectStream(stream, http3StreamCreationError);
++                return true;
++            }
++        } else {
++            switch (*type) {
++            case http3StreamControl:
++                stream.kind = Kind::Control;
++                stream.receiveBuffer.erase(stream.receiveBuffer.begin(), stream.receiveBuffer.begin() + offset);
++                return true;
++            case http3StreamQpackEncoder:
++            case http3StreamQpackDecoder:
++                // The dynamic table is off both ways: nothing to read.
++                stream.kind = Kind::Qpack;
++                stream.receiveBuffer.clear();
++                return true;
++            case webTransportUnidirectionalStream:
++                break;
++            case http3StreamPush:
++            default:
++                rejectStream(stream, http3StreamCreationError);
++                return true;
++            }
++        }
++        auto session = readVarint(stream.receiveBuffer, offset);
++        if (!session)
++            return false;
++        stream.receiveBuffer.erase(stream.receiveBuffer.begin(), stream.receiveBuffer.begin() + offset);
++        if (static_cast<int64_t>(*session) != requestStreamID) {
++            rejectStream(stream, http3StreamCreationError);
++            return true;
++        }
++        stream.kind = Kind::WebTransport;
++        stream.announced = true;
++        bool bidirectional = isBidirectional(stream.id);
++        int64_t id = stream.id;
++        WT_TRACE("server opened %s stream %lld", bidirectional ? "bidirectional" : "unidirectional", static_cast<long long>(id));
++        toSession([id, bidirectional](NetworkTransportSession& session) {
++            session.quicDidOpenIncomingStreamHaiku(id, bidirectional);
++        });
++        return true;
++    }
++
++    void rejectStream(Stream& stream, uint64_t errorCode)
++    {
++        stream.kind = Kind::Ignored;
++        stream.receiveBuffer.clear();
++        ngtcp2_conn_shutdown_stream_read(conn, 0, stream.id, errorCode);
++        if (isBidirectional(stream.id))
++            ngtcp2_conn_shutdown_stream_write(conn, 0, stream.id, errorCode);
++    }
++
++    // --- HTTP/3 ------------------------------------------------------------------
++
++    bool parseFrames(Stream& stream)
++    {
++        auto& buffer = stream.receiveBuffer;
++        size_t consumed = 0;
++        for (;;) {
++            size_t offset = consumed;
++            auto type = readVarint(buffer, offset);
++            if (!type)
++                break;
++            auto length = readVarint(buffer, offset);
++            if (!length)
++                break;
++            if (*length > 1024 * 1024 && *type != http3FrameData) {
++                fail("HTTP/3 frame too large");
++                return false;
++            }
++            if (*type == http3FrameData && stream.kind == Kind::Request) {
++                // Capsules may span DATA frames: take what has arrived.
++                size_t available = std::min<uint64_t>(*length, buffer.size() - offset);
++                capsuleBuffer.insert(capsuleBuffer.end(), buffer.begin() + offset, buffer.begin() + offset + available);
++                parseCapsules();
++                if (available < *length) {
++                    // Rewrite the rest of the frame's header for what is left.
++                    std::vector<uint8_t> rest;
++                    appendVarint(rest, http3FrameData);
++                    appendVarint(rest, *length - available);
++                    buffer.erase(buffer.begin(), buffer.begin() + offset + available);
++                    buffer.insert(buffer.begin(), rest.begin(), rest.end());
++                    return true;
++                }
++                consumed = offset + available;
++                continue;
++            }
++            if (buffer.size() - offset < *length)
++                break;
++            std::vector<uint8_t> payload(buffer.begin() + offset, buffer.begin() + offset + *length);
++            consumed = offset + *length;
++            if (!handleFrame(stream, *type, payload))
++                return false;
++        }
++        buffer.erase(buffer.begin(), buffer.begin() + consumed);
++        return true;
++    }
++
++    bool handleFrame(Stream& stream, uint64_t type, const std::vector<uint8_t>& payload)
++    {
++        if (stream.kind == Kind::Control) {
++            if (type == http3FrameSettings) {
++                size_t offset = 0;
++                while (offset < payload.size()) {
++                    auto identifier = readVarint(payload, offset);
++                    auto value = readVarint(payload, offset);
++                    if (!identifier || !value)
++                        break;
++                    serverSettings[*identifier] = *value;
++                }
++                receivedSettings = true;
++                WT_TRACE("server settings: connect protocol %llu, datagrams %llu", static_cast<unsigned long long>(setting(settingEnableConnectProtocol)), static_cast<unsigned long long>(setting(settingH3Datagram) | setting(settingH3DatagramDraft04)));
++                if (state == State::WaitingForSettings)
++                    sendRequest();
++            } else if (type == http3FrameGoAway && state == State::Established) {
++                toSession([](NetworkTransportSession& session) {
++                    session.quicDidDrainHaiku();
++                });
++            }
++            return true;
++        }
++        // The CONNECT stream.
++        if (type == http3FrameHeaders)
++            return handleResponseHeaders(payload);
++        return true; // Unknown frame types are ignored (RFC 9114, 9).
++    }
++
++    uint64_t setting(uint64_t identifier) const
++    {
++        auto iterator = serverSettings.find(identifier);
++        return iterator == serverSettings.end() ? 0 : iterator->second;
++    }
++
++    void startHTTP3()
++    {
++        int64_t controlID = -1;
++        if (ngtcp2_conn_open_uni_stream(conn, &controlID, nullptr)) {
++            fail("cannot open the HTTP/3 control stream");
++            return;
++        }
++        auto& control = ensure(controlID);
++        control.kind = Kind::Control;
++        std::vector<uint8_t> settings;
++        for (auto [identifier, value] : std::initializer_list<std::pair<uint64_t, uint64_t>> {
++            { settingH3Datagram, 1 },
++            { settingH3DatagramDraft04, 1 },
++            { settingEnableWebTransportDraft02, 1 },
++            { settingWebTransportMaxSessionsDraft07, 1 },
++        }) {
++            appendVarint(settings, identifier);
++            appendVarint(settings, value);
++        }
++        std::vector<uint8_t> data;
++        appendVarint(data, http3StreamControl);
++        appendFrame(data, http3FrameSettings, settings);
++        queue(control, WTF::move(data), false);
++
++        if (ngtcp2_conn_open_bidi_stream(conn, &requestStreamID, nullptr)) {
++            fail("cannot open the CONNECT stream");
++            return;
++        }
++        ensure(requestStreamID).kind = Kind::Request;
++        state = State::WaitingForSettings;
++        if (receivedSettings)
++            sendRequest();
++    }
++
++    void sendRequest()
++    {
++        if (!setting(settingEnableConnectProtocol)) {
++            fail("the server does not support extended CONNECT");
++            return;
++        }
++        std::vector<std::pair<std::string, std::string>> fields {
++            { ":method", "CONNECT" },
++            { ":protocol", "webtransport" },
++            { ":scheme", "https" },
++            { ":authority", configuration.authority.legacyCStringPointer() },
++            { ":path", configuration.path.legacyCStringPointer() },
++            { "sec-webtransport-http3-draft02", "1" },
++        };
++        for (auto& [name, value] : configuration.headers)
++            fields.emplace_back(name.legacyCStringPointer(), value.legacyCStringPointer());
++        std::vector<uint8_t> frame;
++        appendFrame(frame, http3FrameHeaders, encodeRequestFieldSection(fields));
++        queue(ensure(requestStreamID), WTF::move(frame), false);
++        state = State::Requesting;
++        WT_TRACE("CONNECT https://%s%s", configuration.authority.legacyCStringPointer(), configuration.path.legacyCStringPointer());
++    }
++
++    bool handleResponseHeaders(const std::vector<uint8_t>& block)
++    {
++        if (state != State::Requesting)
++            return true; // Trailers.
++        if (!qpackDecoder && nghttp3_qpack_decoder_new(&qpackDecoder, 0, 0, nghttp3_mem_default()))
++            return false;
++        nghttp3_qpack_stream_context* context = nullptr;
++        if (nghttp3_qpack_stream_context_new(&context, requestStreamID, nghttp3_mem_default()))
++            return false;
++        Vector<KeyValuePair<String, String>> headers;
++        int status = 0;
++        const uint8_t* source = block.data();
++        size_t remaining = block.size();
++        bool ok = true;
++        for (;;) {
++            nghttp3_qpack_nv field;
++            uint8_t flags = 0;
++            auto read = nghttp3_qpack_decoder_read_request(qpackDecoder, context, &field, &flags, source, remaining, 1);
++            if (read < 0) {
++                ok = false;
++                break;
++            }
++            source += read;
++            remaining -= static_cast<size_t>(read);
++            if (flags & NGHTTP3_QPACK_DECODE_FLAG_EMIT) {
++                auto name = nghttp3_rcbuf_get_buf(field.name);
++                auto value = nghttp3_rcbuf_get_buf(field.value);
++                auto nameString = String::fromLatin1(byteCast<char>(std::span(name.base, name.len)));
++                auto valueString = String::fromUTF8(byteCast<char8_t>(std::span(value.base, value.len)));
++                if (nameString == ":status"_s)
++                    status = parseInteger<int>(valueString).value_or(0);
++                else if (!nameString.startsWith(':'))
++                    headers.append({ WTF::move(nameString), WTF::move(valueString) });
++                nghttp3_rcbuf_decref(field.name);
++                nghttp3_rcbuf_decref(field.value);
++            }
++            if (flags & NGHTTP3_QPACK_DECODE_FLAG_FINAL)
++                break;
++            if ((flags & NGHTTP3_QPACK_DECODE_FLAG_BLOCKED) || (!read && !remaining)) {
++                ok = false;
++                break;
++            }
++        }
++        nghttp3_qpack_stream_context_del(context);
++        if (!ok) {
++            fail("cannot decode the CONNECT response");
++            return false;
++        }
++        if (status >= 100 && status < 200)
++            return true;
++        if (status < 200 || status >= 300) {
++            WT_TRACE("CONNECT answered %d", status);
++            fail("the server refused the session");
++            return true;
++        }
++        WT_TRACE("session %lld established", static_cast<long long>(requestStreamID));
++        state = State::Established;
++        auto isolatedHeaders = WTF::map(headers, [](auto& header) {
++            return KeyValuePair<String, String> { header.key.isolatedCopy(), header.value.isolatedCopy() };
++        });
++        connection.dispatchToSession([headers = WTF::move(isolatedHeaders)](NetworkTransportSession& session) mutable {
++            session.quicDidConnectHaiku(WTF::move(headers));
++        });
++        for (auto& event : heldEvents)
++            connection.dispatchToSession(WTF::move(event));
++        heldEvents.clear();
++        heldUntilEstablished = false;
++        return true;
++    }
++
++    void parseCapsules()
++    {
++        size_t consumed = 0;
++        for (;;) {
++            size_t offset = consumed;
++            auto type = readVarint(capsuleBuffer, offset);
++            if (!type)
++                break;
++            auto length = readVarint(capsuleBuffer, offset);
++            if (!length || capsuleBuffer.size() - offset < *length)
++                break;
++            std::vector<uint8_t> payload(capsuleBuffer.begin() + offset, capsuleBuffer.begin() + offset + *length);
++            consumed = offset + *length;
++            if (*type == capsuleCloseWebTransportSession && payload.size() >= 4) {
++                uint32_t code = (uint32_t { payload[0] } << 24) | (uint32_t { payload[1] } << 16) | (uint32_t { payload[2] } << 8) | payload[3];
++                closeCapsuleCode = code;
++                closeCapsuleReason = String::fromUTF8(byteCast<char8_t>(std::span(payload.data() + 4, payload.size() - 4)));
++                WT_TRACE("server closed the session (%u)", code);
++            } else if (*type == capsuleDrainWebTransportSession && state == State::Established) {
++                toSession([](NetworkTransportSession& session) {
++                    session.quicDidDrainHaiku();
++                });
++            }
++        }
++        capsuleBuffer.erase(capsuleBuffer.begin(), capsuleBuffer.begin() + consumed);
++    }
++
++    void requestStreamFinished()
++    {
++        if (state == State::Established)
++            sessionEnded(closeCapsuleCode.value_or(0), closeCapsuleReason, true);
++        else if (state == State::Closing)
++            closeConnectionSoon(0);
++        else if (state != State::Closed)
++            fail("the server ended the CONNECT stream");
++    }
++
++    // The server closed the session: tell the page, end our side and close.
++    void sessionEnded(std::optional<uint32_t> code, const String& reason, bool clean)
++    {
++        if (state == State::Closed || state == State::Closing)
++            return;
++        state = State::Closing;
++        std::optional<uint32_t> reported = clean ? std::optional<uint32_t>(code.value_or(0)) : std::nullopt;
++        toSession([reported, reason = reason.isolatedCopy()](NetworkTransportSession& session) mutable {
++            session.quicDidCloseSessionHaiku(reported, WTF::move(reason));
++        });
++        if (auto* request = find(requestStreamID))
++            queue(*request, { }, true);
++        closeConnectionSoon(NGTCP2_SECONDS / 2);
++    }
++
++    void closeConnectionSoon(ngtcp2_duration delay)
++    {
++        ngtcp2_tstamp deadline = timestamp() + delay;
++        if (!closeDeadline || deadline < closeDeadline)
++            closeDeadline = deadline;
++    }
++
++    // --- Datagrams ---------------------------------------------------------------
++
++    void receiveDatagram(const uint8_t* data, size_t length)
++    {
++        std::vector<uint8_t> buffer(data, data + length);
++        size_t offset = 0;
++        auto quarterStreamID = readVarint(buffer, offset);
++        if (!quarterStreamID || static_cast<int64_t>(*quarterStreamID * 4) != requestStreamID)
++            return;
++        toSession([bytes = Vector<uint8_t>(std::span(buffer.data() + offset, buffer.size() - offset))](NetworkTransportSession& session) mutable {
++            session.quicDidReceiveDatagramHaiku(WTF::move(bytes));
++        });
++    }
++
++    void sendDatagram(Vector<uint8_t>&& data, CompletionHandler<void(bool)>&& completion)
++    {
++        // Datagrams written before the session is ready wait for it.
++        if (finished || state == State::Closing || state == State::Closed) {
++            complete(WTF::move(completion), false);
++            return;
++        }
++        std::vector<uint8_t> datagram;
++        // The session is the client's first bidirectional stream (ID 0).
++        appendVarint(datagram, 0);
++        datagram.insert(datagram.end(), data.begin(), data.end());
++        // Datagrams are unreliable: drop the oldest when they pile up.
++        if (datagrams.size() >= 1024) {
++            complete(WTF::move(datagrams.front().second), true);
++            datagrams.pop_front();
++        }
++        datagrams.emplace_back(WTF::move(datagram), WTF::move(completion));
++    }
++
++    // --- Certificates ---------------------------------------------------------
++
++    bool certificateHashesMatch()
++    {
++        X509* leaf = SSL_get0_peer_certificate(ssl);
++        if (!leaf)
++            return false;
++        unsigned char* der = nullptr;
++        int derLength = i2d_X509(leaf, &der);
++        if (derLength <= 0)
++            return false;
++        uint8_t digest[SHA256_DIGEST_LENGTH];
++        SHA256(der, derLength, digest);
++        OPENSSL_free(der);
++        bool matches = std::ranges::any_of(configuration.certificateHashes, [&](auto& hash) {
++            return hash.size() == sizeof(digest) && !memcmp(hash.span().data(), digest, sizeof(digest));
++        });
++        if (!matches)
++            return false;
++        // https://www.w3.org/TR/webtransport/#custom-certificate-requirements
++        int days = 0, seconds = 0;
++        if (X509_cmp_current_time(X509_get0_notBefore(leaf)) >= 0 || X509_cmp_current_time(X509_get0_notAfter(leaf)) <= 0)
++            return false;
++        if (!ASN1_TIME_diff(&days, &seconds, X509_get0_notBefore(leaf), X509_get0_notAfter(leaf)))
++            return false;
++        double period = days * 86400.0 + seconds;
++        return period > 0 && period <= 14 * 86400.0;
++    }
++
++    void verifyServer()
++    {
++        state = State::Verifying;
++        if (!configuration.certificateHashes.isEmpty()) {
++            if (certificateHashesMatch())
++                startHTTP3();
++            else
++                fail("the server certificate does not match serverCertificateHashes");
++            return;
++        }
++        long result = SSL_get_verify_result(ssl);
++        if (result == X509_V_OK) {
++            startHTTP3();
++            return;
++        }
++        WT_TRACE("certificate of %s not verified (%s): asking", configuration.host.legacyCStringPointer(), X509_verify_cert_error_string(result));
++        auto certificateInfo = OpenSSL::createCertificateInfo(result, ssl);
++        if (!certificateInfo) {
++            fail("no server certificate");
++            return;
++        }
++        Ref protectedConnection = connection;
++        connection.dispatchToSession([certificateInfo = WTF::move(*certificateInfo), protectedConnection](NetworkTransportSession& session) mutable {
++            session.quicNeedsServerTrustHaiku(WTF::move(certificateInfo), [protectedConnection](bool trusted) {
++                protectedConnection->post([trusted](WebTransportQuicStateHaiku& state) {
++                    if (state.state != State::Verifying)
++                        return;
++                    if (trusted)
++                        state.startHTTP3();
++                    else
++                        state.fail("the server certificate is not trusted");
++                });
++            });
++        });
++    }
++
++    // --- Ending ----------------------------------------------------------------
++
++    void fail(const char* reason)
++    {
++        WT_TRACE("%s", reason);
++        if (state == State::Closed)
++            return;
++        bool wasEstablished = state == State::Established || state == State::Closing;
++        state = State::Closed;
++        if (wasEstablished) {
++            toSession([](NetworkTransportSession& session) {
++                session.quicDidCloseSessionHaiku(std::nullopt, { });
++            });
++        } else {
++            heldEvents.clear();
++            connection.dispatchToSession([](NetworkTransportSession& session) {
++                session.quicDidFailToConnectHaiku();
++            });
++        }
++        sendConnectionClose(http3GeneralProtocolError);
++        finished = true;
++    }
++
++    void closeSessionFromPage(uint32_t code, const UTF8CString& reason)
++    {
++        if (state != State::Established) {
++            sendConnectionClose(http3RequestCancelled);
++            state = State::Closed;
++            finished = true;
++            return;
++        }
++        state = State::Closing;
++        std::vector<uint8_t> capsule;
++        std::vector<uint8_t> payload { static_cast<uint8_t>(code >> 24), static_cast<uint8_t>(code >> 16), static_cast<uint8_t>(code >> 8), static_cast<uint8_t>(code) };
++        auto reasonSpan = reason.span();
++        payload.insert(payload.end(), reasonSpan.begin(), reasonSpan.end());
++        appendVarint(capsule, capsuleCloseWebTransportSession);
++        appendVarint(capsule, payload.size());
++        capsule.insert(capsule.end(), payload.begin(), payload.end());
++        std::vector<uint8_t> frame;
++        appendFrame(frame, http3FrameData, capsule);
++        if (auto* request = find(requestStreamID))
++            queue(*request, WTF::move(frame), true);
++        // Give the capsule a moment to get there.
++        closeConnectionSoon(NGTCP2_SECONDS);
++    }
++
++    void sendConnectionClose(uint64_t errorCode)
++    {
++        if (!conn || closeSent || ngtcp2_conn_in_closing_period(conn) || ngtcp2_conn_in_draining_period(conn))
++            return;
++        closeSent = true;
++        ngtcp2_ccerr error;
++        ngtcp2_ccerr_default(&error);
++        ngtcp2_ccerr_set_application_error(&error, errorCode, nullptr, 0);
++        uint8_t packet[1500];
++        ngtcp2_path_storage path;
++        ngtcp2_path_storage_zero(&path);
++        ngtcp2_pkt_info info;
++        auto written = ngtcp2_conn_write_connection_close(conn, &path.path, &info, packet, sizeof(packet), &error, timestamp());
++        if (written > 0)
++            sendPacket(packet, written);
++    }
++
++    // --- The packet loop ---------------------------------------------------------
++
++    bool readPackets()
++    {
++        uint8_t buffer[65536];
++        for (;;) {
++            auto received = recv(socketFD, buffer, sizeof(buffer), 0);
++            if (received < 0) {
++                if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)
++                    return true;
++                if (errno == ECONNREFUSED) {
++                    if (!handshakeCompleted && nextAddress < addresses.size()) {
++                        addressFailed = true;
++                        return true;
++                    }
++                    fail("the server refused the connection");
++                    return false;
++                }
++                return true;
++            }
++            receivedPacket = true;
++            ngtcp2_path path {
++                { reinterpret_cast<sockaddr*>(&localAddress), localAddressLength },
++                { reinterpret_cast<sockaddr*>(&remoteAddress), remoteAddressLength },
++                nullptr
++            };
++            ngtcp2_pkt_info info { };
++            int result = ngtcp2_conn_read_pkt(conn, &path, &info, buffer, received, timestamp());
++            if (result) {
++                if (result == NGTCP2_ERR_DRAINING || result == NGTCP2_ERR_CLOSING) {
++                    if (state == State::Closing)
++                        state = State::Closed;
++                    else
++                        fail("the server closed the connection");
++                    finished = true;
++                    return false;
++                }
++                if (result == NGTCP2_ERR_CRYPTO)
++                    WT_TRACE("TLS alert %u", ngtcp2_conn_get_tls_alert(conn));
++                WT_TRACE("ngtcp2_conn_read_pkt: %s", ngtcp2_strerror(result));
++                fail("QUIC error");
++                return false;
++            }
++            if (handshakeCompleted && state == State::Connecting)
++                verifyServer();
++            if (finished)
++                return false;
++        }
++    }
++
++    Stream* nextStreamToWrite()
++    {
++        if (streams.empty())
++            return nullptr;
++        auto start = streams.upper_bound(lastWrittenStreamID);
++        for (auto iterator = start; iterator != streams.end(); ++iterator) {
++            if (iterator->second->hasDataToWrite())
++                return iterator->second.get();
++        }
++        for (auto iterator = streams.begin(); iterator != start; ++iterator) {
++            if (iterator->second->hasDataToWrite())
++                return iterator->second.get();
++        }
++        return nullptr;
++    }
++
++    void writePackets()
++    {
++        if (!conn || closeSent)
++            return;
++        ngtcp2_tstamp now = timestamp();
++        size_t packetSize = ngtcp2_conn_get_max_tx_udp_payload_size(conn);
++        std::vector<uint8_t> packet(packetSize);
++        ngtcp2_path_storage path;
++        ngtcp2_path_storage_zero(&path);
++        size_t packets = 0;
++        bool datagramsWait = false;
++        for (;;) {
++            ngtcp2_pkt_info info;
++            ngtcp2_ssize written = 0;
++            if (!datagramsWait && !datagrams.empty() && state == State::Established) {
++                int accepted = 0;
++                ngtcp2_vec vector { datagrams.front().first.data(), datagrams.front().first.size() };
++                written = ngtcp2_conn_writev_datagram(conn, &path.path, &info, packet.data(), packet.size(), &accepted, NGTCP2_WRITE_DATAGRAM_FLAG_MORE, nextDatagramID++, &vector, 1, now);
++                if (accepted || (written < 0 && written != NGTCP2_ERR_WRITE_MORE)) {
++                    // A datagram that cannot go (too large, or the server
++                    // takes none) is dropped, as datagrams may be.
++                    complete(WTF::move(datagrams.front().second), true);
++                    datagrams.pop_front();
++                }
++                if (written == NGTCP2_ERR_WRITE_MORE) {
++                    // Not taken but room is left: finish this packet with
++                    // other frames; the datagram goes in the next one.
++                    if (!accepted)
++                        datagramsWait = true;
++                    continue;
++                }
++                if (written < 0)
++                    continue;
++                if (!accepted)
++                    datagramsWait = false;
++            } else {
++                Stream* stream = nextStreamToWrite();
++                std::vector<ngtcp2_vec> vectors;
++                int64_t streamID = -1;
++                uint32_t flags = 0;
++                bool allData = false;
++                if (stream) {
++                    streamID = stream->id;
++                    flags = NGTCP2_WRITE_STREAM_FLAG_MORE;
++                    size_t index = stream->chunkIndex;
++                    size_t offset = stream->chunkOffset;
++                    while (index < stream->chunks.size() && vectors.size() < 16) {
++                        auto& chunk = stream->chunks[index];
++                        vectors.push_back({ chunk.data.data() + offset, chunk.data.size() - offset });
++                        ++index;
++                        offset = 0;
++                    }
++                    allData = index == stream->chunks.size();
++                    if (allData && stream->finQueued)
++                        flags |= NGTCP2_WRITE_STREAM_FLAG_FIN;
++                }
++                ngtcp2_ssize dataLength = -1;
++                written = ngtcp2_conn_writev_stream(conn, &path.path, &info, packet.data(), packet.size(), &dataLength, flags, streamID, vectors.data(), vectors.size(), now);
++                if (stream && dataLength >= 0) {
++                    size_t total = 0;
++                    for (auto& vector : vectors)
++                        total += vector.len;
++                    advance(*stream, dataLength, (flags & NGTCP2_WRITE_STREAM_FLAG_FIN) && static_cast<size_t>(dataLength) == total);
++                    lastWrittenStreamID = stream->id;
++                }
++                if (written < 0) {
++                    if (written == NGTCP2_ERR_WRITE_MORE)
++                        continue;
++                    if (written == NGTCP2_ERR_STREAM_DATA_BLOCKED && stream) {
++                        stream->blocked = true;
++                        continue;
++                    }
++                    if ((written == NGTCP2_ERR_STREAM_SHUT_WR || written == NGTCP2_ERR_STREAM_NOT_FOUND) && stream) {
++                        stream->writeClosed = true;
++                        failPendingSends(*stream, true);
++                        continue;
++                    }
++                    WT_TRACE("ngtcp2_conn_writev_stream: %s", ngtcp2_strerror(static_cast<int>(written)));
++                    fail("QUIC error");
++                    return;
++                }
++            }
++            if (!written)
++                break;
++            sendPacket(packet.data(), written);
++            if (++packets >= 128)
++                break;
++        }
++        ngtcp2_conn_update_pkt_tx_time(conn, now);
++    }
++
++    WebTransportQuicConnectionHaiku& connection;
++    const WebTransportQuicConnectionHaiku::Configuration& configuration;
++    int socketFD { -1 };
++    std::vector<std::pair<sockaddr_storage, socklen_t>> addresses;
++    size_t nextAddress { 0 };
++    ngtcp2_tstamp addressStart { 0 };
++    bool addressFailed { false };
++    bool receivedPacket { false };
++    sockaddr_storage localAddress { };
++    socklen_t localAddressLength { 0 };
++    sockaddr_storage remoteAddress { };
++    socklen_t remoteAddressLength { 0 };
++    SSL_CTX* sslContext { nullptr };
++    SSL* ssl { nullptr };
++    ngtcp2_crypto_ossl_ctx* osslContext { nullptr };
++    ngtcp2_crypto_conn_ref connectionReference { };
++    ngtcp2_conn* conn { nullptr };
++    nghttp3_qpack_decoder* qpackDecoder { nullptr };
++    bool handshakeCompleted { false };
++    bool receivedSettings { false };
++    bool closeSent { false };
++    bool finished { false };
++    bool heldUntilEstablished { true };
++    State state { State::Connecting };
++    int64_t requestStreamID { -1 };
++    int64_t lastWrittenStreamID { -1 };
++    uint64_t nextDatagramID { 1 };
++    // The session must be up by then: connection, handshake, settings, response.
++    ngtcp2_tstamp connectDeadline { timestamp() + 15 * NGTCP2_SECONDS };
++    ngtcp2_tstamp closeDeadline { 0 };
++    std::map<uint64_t, uint64_t> serverSettings;
++    std::map<int64_t, std::unique_ptr<Stream>> streams;
++    std::deque<std::pair<bool, CompletionHandler<void(std::optional<int64_t>)>>> pendingOpens;
++    std::deque<std::pair<std::vector<uint8_t>, CompletionHandler<void(bool)>>> datagrams;
++    std::vector<uint8_t> capsuleBuffer;
++    std::optional<uint32_t> closeCapsuleCode;
++    String closeCapsuleReason;
++    std::vector<Function<void(NetworkTransportSession&)>> heldEvents;
++};
++
++RefPtr<WebTransportQuicConnectionHaiku> WebTransportQuicConnectionHaiku::create(Configuration&& configuration)
++{
++    if (!webTransportAvailableHaiku())
++        return nullptr;
++    return adoptRef(*new WebTransportQuicConnectionHaiku(WTF::move(configuration)));
++}
++
++WebTransportQuicConnectionHaiku::WebTransportQuicConnectionHaiku(Configuration&& configuration)
++    : m_configuration(WTF::move(configuration))
++{
++    if (pipe(m_wakeFds)) {
++        m_wakeFds[0] = m_wakeFds[1] = -1;
++        return;
++    }
++    fcntl(m_wakeFds[0], F_SETFL, fcntl(m_wakeFds[0], F_GETFL) | O_NONBLOCK);
++    fcntl(m_wakeFds[1], F_SETFL, fcntl(m_wakeFds[1], F_GETFL) | O_NONBLOCK);
++}
++
++WebTransportQuicConnectionHaiku::~WebTransportQuicConnectionHaiku()
++{
++    for (int fd : m_wakeFds) {
++        if (fd >= 0)
++            close(fd);
++    }
++}
++
++void WebTransportQuicConnectionHaiku::dispatchToSession(Function<void(NetworkTransportSession&)>&& function)
++{
++    RunLoop::mainSingleton().dispatch([protectedThis = Ref { *this }, function = WTF::move(function)] mutable {
++        if (RefPtr session = protectedThis->m_session.get())
++            function(*session);
++    });
++}
++
++void WebTransportQuicConnectionHaiku::post(Function<void(WebTransportQuicStateHaiku&)>&& command)
++{
++    {
++        Locker locker { m_commandsLock };
++        if (m_shutdownRequested)
++            return;
++        m_commands.append(WTF::move(command));
++    }
++    if (m_wakeFds[1] >= 0) {
++        char byte = 0;
++        [[maybe_unused]] auto written = write(m_wakeFds[1], &byte, 1);
++    }
++}
++
++void WebTransportQuicConnectionHaiku::start(NetworkTransportSession& session)
++{
++    ASSERT(RunLoop::isMain());
++    if (m_started)
++        return;
++    m_started = true;
++    m_session = session;
++    if (m_wakeFds[0] < 0) {
++        dispatchToSession([](NetworkTransportSession& session) {
++            session.quicDidFailToConnectHaiku();
++        });
++        return;
++    }
++    Thread::create("WebTransport QUIC"_s, [protectedThis = Ref { *this }] {
++        protectedThis->runThread();
++    })->detach();
++}
++
++void WebTransportQuicConnectionHaiku::runThread()
++{
++    WebTransportQuicStateHaiku state(*this);
++    if (!state.connect())
++        state.fail("cannot connect");
++    else
++        state.writePackets();
++
++    // Once the connection has ended (state.finished), the thread stays until
++    // the session lets it go, answering calls that still come in.
++    for (;;) {
++        Vector<Function<void(WebTransportQuicStateHaiku&)>> commands;
++        bool shutdownRequested;
++        {
++            Locker locker { m_commandsLock };
++            commands = std::exchange(m_commands, { });
++            shutdownRequested = m_shutdownRequested;
++        }
++        for (auto& command : commands)
++            command(state);
++        if (shutdownRequested) {
++            if (!state.finished)
++                state.sendConnectionClose(http3NoError);
++            return;
++        }
++
++        if (state.finished) {
++            struct pollfd wake { m_wakeFds[0], POLLIN, 0 };
++            poll(&wake, 1, -1);
++            char drain[64];
++            while (read(m_wakeFds[0], drain, sizeof(drain)) > 0) { }
++            continue;
++        }
++
++        ngtcp2_tstamp now = timestamp();
++        if (state.closeDeadline && now >= state.closeDeadline) {
++            state.sendConnectionClose(http3NoError);
++            state.state = WebTransportQuicStateHaiku::State::Closed;
++            state.finished = true;
++            continue;
++        }
++        if (state.state < WebTransportQuicStateHaiku::State::Established && now >= state.connectDeadline) {
++            state.fail(state.state == WebTransportQuicStateHaiku::State::WaitingForSettings ? "no HTTP/3 settings from the server" : "the session was not set up in time");
++            continue;
++        }
++
++        if (state.shouldTryNextAddress(now)) {
++            if (!state.connectToNextAddress()) {
++                state.fail("cannot connect");
++                continue;
++            }
++        }
++
++        state.writePackets();
++        if (state.finished)
++            continue;
++
++        ngtcp2_tstamp expiry = ngtcp2_conn_get_expiry(state.conn);
++        if (!state.handshakeCompleted && state.nextAddress < state.addresses.size())
++            expiry = std::min(expiry, state.addressStart + NGTCP2_SECONDS);
++        if (state.closeDeadline)
++            expiry = std::min(expiry, state.closeDeadline);
++        if (state.state < WebTransportQuicStateHaiku::State::Established)
++            expiry = std::min(expiry, state.connectDeadline);
++        now = timestamp();
++        int timeout = expiry <= now ? 0 : static_cast<int>(std::min<uint64_t>((expiry - now + NGTCP2_MILLISECONDS - 1) / NGTCP2_MILLISECONDS, 1000));
++
++        struct pollfd descriptors[2] = {
++            { state.socketFD, POLLIN, 0 },
++            { m_wakeFds[0], POLLIN, 0 },
++        };
++        poll(descriptors, 2, timeout);
++        if (descriptors[1].revents & POLLIN) {
++            char drain[64];
++            while (read(m_wakeFds[0], drain, sizeof(drain)) > 0) { }
++        }
++        if ((descriptors[0].revents & (POLLIN | POLLERR)) && !state.readPackets())
++            continue;
++        now = timestamp();
++        if (!state.finished && ngtcp2_conn_get_expiry(state.conn) <= now) {
++            if (int result = ngtcp2_conn_handle_expiry(state.conn, now)) {
++                if (result == NGTCP2_ERR_IDLE_CLOSE)
++                    state.fail("the connection went idle");
++                else {
++                    WT_TRACE("ngtcp2_conn_handle_expiry: %s", ngtcp2_strerror(result));
++                    state.fail("QUIC error");
++                }
++            }
++        }
++    }
++}
++
++void WebTransportQuicConnectionHaiku::openStream(bool bidirectional, CompletionHandler<void(std::optional<int64_t>)>&& completion)
++{
++    post([bidirectional, completion = WTF::move(completion)](WebTransportQuicStateHaiku& state) mutable {
++        state.openStream(bidirectional, WTF::move(completion));
++    });
++}
++
++void WebTransportQuicConnectionHaiku::sendStreamData(int64_t streamID, Vector<uint8_t>&& data, bool fin, CompletionHandler<void(bool)>&& completion)
++{
++    post([streamID, data = WTF::move(data), fin, completion = WTF::move(completion)](WebTransportQuicStateHaiku& state) mutable {
++        auto* stream = state.find(streamID);
++        if (!stream || stream->kind != WebTransportQuicStateHaiku::Kind::WebTransport) {
++            state.complete(WTF::move(completion), false);
++            return;
++        }
++        state.queue(*stream, std::vector<uint8_t>(data.begin(), data.end()), fin, WTF::move(completion));
++    });
++}
++
++void WebTransportQuicConnectionHaiku::sendDatagram(Vector<uint8_t>&& data, CompletionHandler<void(bool)>&& completion)
++{
++    post([data = WTF::move(data), completion = WTF::move(completion)](WebTransportQuicStateHaiku& state) mutable {
++        state.sendDatagram(WTF::move(data), WTF::move(completion));
++    });
++}
++
++void WebTransportQuicConnectionHaiku::resetStream(int64_t streamID, uint64_t code)
++{
++    post([streamID, code](WebTransportQuicStateHaiku& state) {
++        auto* stream = state.find(streamID);
++        if (!stream || stream->writeClosed)
++            return;
++        stream->writeClosed = true;
++        state.failPendingSends(*stream, true);
++        ngtcp2_conn_shutdown_stream_write(state.conn, 0, streamID, http3ErrorCode(code));
++    });
++}
++
++void WebTransportQuicConnectionHaiku::stopSending(int64_t streamID, uint64_t code)
++{
++    post([streamID, code](WebTransportQuicStateHaiku& state) {
++        if (state.find(streamID))
++            ngtcp2_conn_shutdown_stream_read(state.conn, 0, streamID, http3ErrorCode(code));
++    });
++}
++
++void WebTransportQuicConnectionHaiku::closeSession(uint32_t code, UTF8CString&& reason)
++{
++    post([code, reason = WTF::move(reason)](WebTransportQuicStateHaiku& state) {
++        state.closeSessionFromPage(code, reason);
++    });
++}
++
++void WebTransportQuicConnectionHaiku::exportKeyingMaterial(Vector<uint8_t>&& label, Vector<uint8_t>&& context, uint32_t length, CompletionHandler<void(std::optional<Vector<uint8_t>>&&)>&& completion)
++{
++    post([label = WTF::move(label), context = WTF::move(context), length, completion = WTF::move(completion)](WebTransportQuicStateHaiku& state) mutable {
++        std::optional<Vector<uint8_t>> result;
++        if (state.ssl && SSL_is_init_finished(state.ssl) && length && length <= 65536) {
++            Vector<uint8_t> output(length);
++            std::string labelString(label.begin(), label.end());
++            if (SSL_export_keying_material(state.ssl, output.mutableSpan().data(), length, labelString.c_str(), labelString.size(), context.span().data(), context.size(), 1) == 1)
++                result = WTF::move(output);
++        }
++        RunLoop::mainSingleton().dispatch([completion = WTF::move(completion), result = WTF::move(result)] mutable {
++            completion(WTF::move(result));
++        });
++    });
++}
++
++void WebTransportQuicConnectionHaiku::shutdown()
++{
++    {
++        Locker locker { m_commandsLock };
++        m_shutdownRequested = true;
++    }
++    if (m_wakeFds[1] >= 0) {
++        char byte = 0;
++        [[maybe_unused]] auto written = write(m_wakeFds[1], &byte, 1);
++    }
++    m_session = nullptr;
++}
++
++#endif // HAVE_HAIKU_WEBTRANSPORT_QUIC
++
++} // namespace WebKit
+diff --git a/Source/WebKit/NetworkProcess/webtransport/haiku/WebTransportQuicConnectionHaiku.h b/Source/WebKit/NetworkProcess/webtransport/haiku/WebTransportQuicConnectionHaiku.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..d2640b7950a2af1597437e623eba1e44f069da59
+--- /dev/null
++++ b/Source/WebKit/NetworkProcess/webtransport/haiku/WebTransportQuicConnectionHaiku.h
+@@ -0,0 +1,87 @@
++/*
++ * Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause
++ */
++
++#pragma once
++
++#include <optional>
++#include <span>
++#include <wtf/CompletionHandler.h>
++#include <wtf/Function.h>
++#include <wtf/KeyValuePair.h>
++#include <wtf/Lock.h>
++#include <wtf/ThreadSafeRefCounted.h>
++#include <wtf/Vector.h>
++#include <wtf/WeakPtr.h>
++#include <wtf/Forward.h>
++#include <wtf/text/CString.h>
++#include <wtf/text/WTFString.h>
++
++namespace WebKit {
++
++class NetworkTransportSession;
++struct WebTransportQuicStateHaiku;
++
++// Whether this build can do WebTransport (it was built with ngtcp2 and
++// nghttp3) and SUMMIT_WEBTRANSPORT=0 does not turn it off.
++bool webTransportAvailableHaiku();
++
++// One WebTransport session over HTTP/3 (draft-ietf-webtrans-http3, as Safari
++// and Chrome speak it): a QUIC connection of its own (ngtcp2, TLS from
++// OpenSSL 3.5), HTTP/3 framing and an extended CONNECT (RFC 9220) whose
++// stream is the session, WebTransport streams and HTTP datagrams (RFC 9297).
++//
++// QUIC runs on a thread of the connection's own; every call below may be made
++// on the main thread, and every event reaches the NetworkTransportSession on
++// the main thread. Stream IDs are QUIC stream IDs.
++class WebTransportQuicConnectionHaiku final : public ThreadSafeRefCounted<WebTransportQuicConnectionHaiku> {
++public:
++    struct Configuration {
++        UTF8CString host; // As DNS and TLS see it (IDNA, no brackets).
++        uint16_t port { 443 };
++        UTF8CString authority;
++        UTF8CString path; // Path and query.
++        Vector<std::pair<UTF8CString, UTF8CString>> headers; // Besides the pseudo-headers; lower-case names.
++        Vector<Vector<uint8_t>> certificateHashes; // SHA-256 values of serverCertificateHashes.
++        uint64_t maxIncomingBidirectionalStreams { 100 };
++        uint64_t maxIncomingUnidirectionalStreams { 100 };
++    };
++
++    static RefPtr<WebTransportQuicConnectionHaiku> create(Configuration&&);
++    ~WebTransportQuicConnectionHaiku();
++
++    void start(NetworkTransportSession&);
++    void openStream(bool bidirectional, CompletionHandler<void(std::optional<int64_t>)>&&);
++    void sendStreamData(int64_t streamID, Vector<uint8_t>&&, bool fin, CompletionHandler<void(bool)>&&);
++    void sendDatagram(Vector<uint8_t>&&, CompletionHandler<void(bool)>&&);
++    void resetStream(int64_t streamID, uint64_t webTransportErrorCode);
++    void stopSending(int64_t streamID, uint64_t webTransportErrorCode);
++    void closeSession(uint32_t code, UTF8CString&& reason);
++    void exportKeyingMaterial(Vector<uint8_t>&& label, Vector<uint8_t>&& context, uint32_t length, CompletionHandler<void(std::optional<Vector<uint8_t>>&&)>&&);
++    // Ends the connection at once (the session is going away).
++    void shutdown();
++
++    // HTTP/3 error codes of WebTransport stream errors (draft-ietf-webtrans-http3, 4.3).
++    static uint64_t http3ErrorCode(uint64_t webTransportErrorCode);
++    static std::optional<uint64_t> webTransportErrorCode(uint64_t http3ErrorCode);
++    static constexpr uint64_t sessionGoneErrorCode = 0x170d7b68;
++
++private:
++    explicit WebTransportQuicConnectionHaiku(Configuration&&);
++
++    friend struct WebTransportQuicStateHaiku;
++    void post(Function<void(WebTransportQuicStateHaiku&)>&&);
++    void runThread();
++    void dispatchToSession(Function<void(NetworkTransportSession&)>&&);
++
++    Configuration m_configuration;
++    WeakPtr<NetworkTransportSession> m_session; // Main thread only.
++
++    Lock m_commandsLock;
++    Vector<Function<void(WebTransportQuicStateHaiku&)>> m_commands WTF_GUARDED_BY_LOCK(m_commandsLock);
++    bool m_shutdownRequested WTF_GUARDED_BY_LOCK(m_commandsLock) { false };
++    int m_wakeFds[2] { -1, -1 };
++    bool m_started { false };
++};
++
++} // namespace WebKit
 diff --git a/Source/WebKit/Platform/IPC/ArgumentCoders.h b/Source/WebKit/Platform/IPC/ArgumentCoders.h
 index a3668ff9135fd5779ff38f61604f8336fa5e78ce..7d9c39addac9404e6e52868530aa852748443dd9 100644
 --- a/Source/WebKit/Platform/IPC/ArgumentCoders.h
@@ -92935,10 +95448,10 @@ index 0000000000000000000000000000000000000000..abdba4dff009ff314eecd9f825a128aa
 +} // namespace WebKit
 diff --git a/Source/WebKit/PlatformHaiku.cmake b/Source/WebKit/PlatformHaiku.cmake
 new file mode 100644
-index 0000000000000000000000000000000000000000..881d2efd03844ed4ab30cb51c1f1fe1dd19d8231
+index 0000000000000000000000000000000000000000..51c9790758bade32ed4f0c9092ca844b78f36ca2
 --- /dev/null
 +++ b/Source/WebKit/PlatformHaiku.cmake
-@@ -0,0 +1,577 @@
+@@ -0,0 +1,609 @@
 +include(Headers.cmake)
 +include(Platform/Curl.cmake)
 +
@@ -93515,6 +96028,38 @@ index 0000000000000000000000000000000000000000..881d2efd03844ed4ab30cb51c1f1fe1d
 +    list(APPEND WebKit_PRIVATE_INCLUDE_DIRECTORIES "${WEBKIT_DIR}/UIProcess/haiku/bluetooth" "${WEBCORE_DIR}/platform/bluetooth/haiku")
 +    # Native kit headers are isolated from WebKit's precompiled header.
 +    set_source_files_properties(UIProcess/haiku/bluetooth/BluetoothSessionHaiku.cpp PROPERTIES SKIP_PRECOMPILE_HEADERS ON)
++endif ()
++
++# WebTransport over HTTP/3 (Summit #176): QUIC from ngtcp2 on OpenSSL 3.5's
++# QUIC TLS interface, QPACK from nghttp3; the session and stream protocol
++# are the port's own (NetworkProcess/webtransport/haiku). Without the
++# libraries (stock Haiku) the files build without QUIC and WebTransport stays
++# off. HAIKU_QUIC_ROOT points at a tree with develop/headers and develop/lib
++# when the libraries are not in the sysroot.
++list(APPEND WebKit_SOURCES
++    NetworkProcess/webtransport/haiku/NetworkTransportSessionHaiku.cpp
++    NetworkProcess/webtransport/haiku/NetworkTransportStreamHaiku.cpp
++    NetworkProcess/webtransport/haiku/WebTransportQuicConnectionHaiku.cpp
++)
++if (HAIKU_QUIC_ROOT)
++    set(_haiku_quic_find_options PATHS "${HAIKU_QUIC_ROOT}/develop/headers" "${HAIKU_QUIC_ROOT}/develop/lib" NO_CMAKE_FIND_ROOT_PATH)
++endif ()
++find_path(HAIKU_NGTCP2_INCLUDE_DIR ngtcp2/ngtcp2_crypto_ossl.h ${_haiku_quic_find_options})
++find_path(HAIKU_NGHTTP3_INCLUDE_DIR nghttp3/nghttp3.h ${_haiku_quic_find_options})
++find_library(HAIKU_NGTCP2_LIBRARY ngtcp2 ${_haiku_quic_find_options})
++find_library(HAIKU_NGTCP2_CRYPTO_OSSL_LIBRARY ngtcp2_crypto_ossl ${_haiku_quic_find_options})
++find_library(HAIKU_NGHTTP3_LIBRARY nghttp3 ${_haiku_quic_find_options})
++if (HAIKU_NGTCP2_INCLUDE_DIR AND HAIKU_NGHTTP3_INCLUDE_DIR AND HAIKU_NGTCP2_LIBRARY AND HAIKU_NGTCP2_CRYPTO_OSSL_LIBRARY AND HAIKU_NGHTTP3_LIBRARY)
++    message(STATUS "WebTransport: ngtcp2 ${HAIKU_NGTCP2_LIBRARY}, nghttp3 ${HAIKU_NGHTTP3_LIBRARY}")
++    set_source_files_properties(NetworkProcess/webtransport/haiku/WebTransportQuicConnectionHaiku.cpp PROPERTIES
++        SKIP_PRECOMPILE_HEADERS ON
++        COMPILE_DEFINITIONS HAVE_HAIKU_WEBTRANSPORT_QUIC=1
++        INCLUDE_DIRECTORIES "${HAIKU_NGTCP2_INCLUDE_DIR};${HAIKU_NGHTTP3_INCLUDE_DIR}"
++    )
++    list(APPEND WebKit_LIBRARIES ${HAIKU_NGTCP2_CRYPTO_OSSL_LIBRARY} ${HAIKU_NGTCP2_LIBRARY} ${HAIKU_NGHTTP3_LIBRARY} OpenSSL::SSL OpenSSL::Crypto)
++else ()
++    message(STATUS "WebTransport: off (ngtcp2, ngtcp2_crypto_ossl or nghttp3 not found)")
++    set_source_files_properties(NetworkProcess/webtransport/haiku/WebTransportQuicConnectionHaiku.cpp PROPERTIES SKIP_PRECOMPILE_HEADERS ON)
 +endif ()
 diff --git a/Source/WebKit/Scripts/generate-message-receiver.py b/Source/WebKit/Scripts/generate-message-receiver.py
 index ed16efeb37c68e50e33b63f5b5d6aecadd2234bc..f2cdd8327d4997c05249ac62b5ae4c04f5e9cb91 100644
@@ -98881,7 +101426,7 @@ index 63aa4825aacb23bcb61131e3081df19200c63c10..04ce0baa5449834fd58e85c2d8bb4399
      WebKit::VisitedLinkTableIdentifier visitedLinkTableID;
      bool canRunBeforeUnloadConfirmPanel;
 diff --git a/Source/WebKit/Shared/WebPreferencesDefaultValues.cpp b/Source/WebKit/Shared/WebPreferencesDefaultValues.cpp
-index dd691ecc11afdf832b4771945c0a2ca533dac351..cc957af3864de73308f9c89afff1d95cd99ae8ee 100644
+index dd691ecc11afdf832b4771945c0a2ca533dac351..4d5f6d57c994dcb72e8c0d1e19ca067ab4e57075 100644
 --- a/Source/WebKit/Shared/WebPreferencesDefaultValues.cpp
 +++ b/Source/WebKit/Shared/WebPreferencesDefaultValues.cpp
 @@ -279,6 +279,10 @@ SUPPRESS_NODELETE bool defaultShouldEnableScreenOrientationAPI()
@@ -98892,6 +101437,28 @@ index dd691ecc11afdf832b4771945c0a2ca533dac351..cc957af3864de73308f9c89afff1d95c
 +    // A desktop reports landscape-primary, as on the Mac. Zoom's web client
 +    // reads screen.orientation.type when it starts the camera (#127).
 +    return true;
+ #else
+     return false;
+ #endif
+@@ -548,6 +552,10 @@ bool defaultShouldEnableScreenCapture()
+ }
+ #endif
+ 
++#if PLATFORM(HAIKU)
++bool webTransportAvailableHaiku();
++#endif
++
+ bool defaultWebTransportEnabled()
+ {
+ #if HAVE(WEBTRANSPORT_WITHOUT_SOFT_LINKING)
+@@ -583,6 +591,10 @@ bool defaultWebTransportEnabled()
+         && canLoad_Network_nw_connection_abort_writes()
+         && canLoad_Network_nw_http_fields_access_value_by_name();
+     return hasEverythingNeeded;
++#elif PLATFORM(HAIKU)
++    // WebTransport over HTTP/3 on ngtcp2 (NetworkProcess/webtransport/haiku),
++    // when the engine was built with it (Summit #176).
++    return webTransportAvailableHaiku();
  #else
      return false;
  #endif
