@@ -2,9 +2,11 @@
 
 Websites see the system's appearance: with air/OS's **Dark mode** on
 (Screen preferences, or `screenmode --dark-mode on`), Summit reports
-`prefers-color-scheme: dark`, so sites that have a dark version serve it, and
-form controls, scroll bars and default page colors are drawn dark. Switching
-it takes effect at once in open tabs, without reloading.
+`prefers-color-scheme: dark`, so sites that have a dark version serve it;
+pages that declare `color-scheme: dark` also get dark form controls and scroll
+bars, as in other browsers. Switching takes effect at once in open tabs,
+without reloading (verified 2026-11-03 on air/OS in QEMU with the CI build of
+4b20da2: a test page went DARK → LIGHT → DARK live).
 
 ## How it works
 

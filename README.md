@@ -76,8 +76,8 @@ For a stock Haiku installation, not air/OS. Install the packages together with `
   Chrome, Firefox, Safari and Edge identities for sites that reject Summit.
 - [Bundled emoji fonts](docs/emoji.md), including color, skin tones, flags and joined sequences.
 - [Dark mode](docs/dark-mode.md): with air/OS's dark mode on (Screen
-  preferences), websites get `prefers-color-scheme: dark` and dark form
-  controls, switching live in open tabs.
+  preferences), websites get `prefers-color-scheme: dark`, switching live in
+  open tabs.
 - [Reader mode](docs/reader-mode.md) for articles, with a book button in the
   address field, sanitized content, and the original page's URL retained in history.
 - A bundled [PDF viewer](docs/pdf-viewer.md) with navigation, search, zoom,
