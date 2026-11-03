@@ -8,6 +8,7 @@
 # WPT_SERVER_HOST   this host's address on the test machine's network
 #                   (default 192.168.1.200); wpt's host names resolve to it
 #                   there (see the README)
+# SUMMIT_REMOTE_BUILD  folder of the Summit to test on the test machine (default xh)
 # SUMMIT_SCREEN_SHOTS=1  take reftest screenshots from the screen through
 #                   Summit's MCP server instead of WebDriver (see the README)
 KIT=$(cd "$(dirname "$0")" && pwd)
@@ -17,7 +18,7 @@ LIST=$(realpath "$1"); OUT=$2; shift 2
 mkdir -p "$ROOT/results"
 cd "$ROOT/wpt" || exit 1
 export WPT_SERVER_HOST=${WPT_SERVER_HOST:-192.168.1.200}
-export SUMMIT_REMOTE_BINARY=$DIR/xh/apps/Summit SUMMIT_SHIM=$KIT/summitdriver-shim INTEROP_KIT=$KIT
+export SUMMIT_REMOTE_BINARY=$DIR/${SUMMIT_REMOTE_BUILD:-xh}/apps/Summit SUMMIT_SHIM=$KIT/summitdriver-shim INTEROP_KIT=$KIT
 # wptrunner wants a local binary path; the real one is SUMMIT_REMOTE_BINARY.
 exec ./wpt run webkit --webkit-port=summit \
   --binary="$KIT/summitdriver-shim" \

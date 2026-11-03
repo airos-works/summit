@@ -71,7 +71,11 @@ python3 gaps.py full screen
 
 `WPT_SERVER_HOST` is the build host's address as the test machine sees it
 (default 192.168.1.200), `SUMMIT_SSH` the ssh command reaching the test
-machine (default the X399's lab config).
+machine (default the X399's lab config), `SUMMIT_REMOTE_BUILD` the folder
+of the Summit to test in `SUMMIT_REMOTE_DIR` (default `xh`; e.g. a copy
+with a test engine's libraries in `lib/summit-webkit/lib`) and
+`SUMMIT_REMOTE_ENV` extra `NAME=VALUE` settings for it (its stderr lands in
+the wpt log).
 
 ## What the wpt patch changes, and why
 
@@ -94,6 +98,9 @@ machine (default the X399's lab config).
 
 - Pop-ups are blocked in automation sessions (#187): the profile allows them
   per origin on the fixed ports only (8000, 8001, 8443, 8444, 9000).
+- The wpt host names must be in the test machine's hosts file for every
+  run; without them each testharness test ends in
+  `__wptrunner_process_next_event is not a function`.
 - `pkill -f PATTERN` matches the shell running it when the command line
   contains PATTERN: stop shims and servers in a separate command.
 - An orphaned `wpt serve` keeps ports 8000/8443/9000; `ss -ltnp` shows it.
