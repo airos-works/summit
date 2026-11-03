@@ -1,5 +1,41 @@
 # Summit performance: Speedometer 3.1 baseline, where the time goes, stress test
 
+## 3 November 2026: Instagram's grid icons held a core (filter bounds)
+
+A logged-in Instagram profile kept its web process's main thread at a full
+core for 18-25 s after every load and while more posts loaded, so the page
+stopped answering for seconds at a time on the laptop (175%). The time was
+in `drop-shadow(rgba(12,16,20,.7) 0 0 1px)` on the 36x36 carousel/reel icons
+in the post grid, painted (not composited) into the page's tiles on the
+main thread when they are recorded.
+
+Each icon's filter region was the whole 1100x1100 grid. The icon has a
+`position: relative` `<div>` and `<svg>` inside it, and
+`RenderLayer::calculateLayerBounds()` gives a descendant layer the clip
+from the painting root (`UseLocalClipRectIfPossible`, the default for
+descendants), which for an element inside Instagram's `overflow: hidden`
+grid is the grid itself. So every icon blurred a 1922x1924 buffer, 0.42-0.88 s
+each. While `RenderLayer::setupFilters()` measures a filtered layer,
+descendants now take their clips from that layer down
+(`SUMMIT_FILTER_BOUNDS_FROM_LAYER=0` restores the old bounds). The icon's
+region is 43x42 and a shadow costs 1.7 ms.
+
+Laptop, test copies of the owner's profile (logged in) with the release
+engine and with the fix, same app:
+
+| | before | after |
+|---|---|---|
+| reload, main-thread CPU in 28 s | 19.3 / 24.9 core-s | 12.2 / 5.7 core-s |
+| drop-shadow share of reload profile | 85% | 0% |
+| 10 wheel notches while loading | stuck at y=614 | y=4614, 51 icons loaded |
+
+The icons look the same (screenshots identical where the picture behind them
+is not a playing reel), and a page of filter cases (blur with a child spilling
+out of a clipped parent, an `overflow: hidden` filtered element, rotated
+children, a scrolled container, nested filters) renders pixel-identical
+before and after. The logged-out page on the X399 did not show it (its icons
+already had 84x84 regions), so the check has to be the logged-in page.
+
 ## 2 November 2026: memory with 8-10 tabs on the 16 GB laptop (#163-#172)
 
 The owner's laptop (Ryzen AI 5 340, Radeon 840M, 16 GB) slowed down with 8-10

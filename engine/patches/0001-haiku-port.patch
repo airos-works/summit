@@ -84628,6 +84628,70 @@ index e4016aa11263c14ff1ece803b6abdb2d697c2f75..4c4a7d020e2a91fbbe39ab92bc99ae05
          }
      } else if (canCreateIntrinsicLogicalHeightsCacheForRowSizingFirstPass)
          m_intrinsicLogicalHeightsForRowSizingFirstPass.emplace();
+diff --git a/Source/WebCore/rendering/RenderLayer.cpp b/Source/WebCore/rendering/RenderLayer.cpp
+index 4bd303aa17e5da8a780da294d7a1337b8978d6ea..f725a2e04a1a94b4af059db4abc884a6fc5758bc 100644
+--- a/Source/WebCore/rendering/RenderLayer.cpp
++++ b/Source/WebCore/rendering/RenderLayer.cpp
+@@ -173,6 +173,9 @@
+ #include <wtf/HexNumber.h>
+ #include <wtf/MonotonicTime.h>
+ #include <wtf/StdLibExtras.h>
++#include <cstdlib>
++#include <cstring>
++#include <wtf/SetForScope.h>
+ #include <wtf/TZoneMallocInlines.h>
+ #include <wtf/text/CString.h>
+ #include <wtf/text/MakeString.h>
+@@ -3570,6 +3573,20 @@ RenderLayerFilters* RenderLayer::filtersForPainting(GraphicsContext& context, Op
+     return &ensureLayerFilters();
+ }
+ 
++#if PLATFORM(HAIKU)
++// The filtered layer setupFilters() is measuring. A descendant layer's bounds
++// (with UseLocalClipRectIfPossible, the default for descendants) are its clip
++// relative to the painting root, which, for a small filtered element inside an
++// overflow: hidden container, is that whole container: each of Instagram's
++// 36x36 grid icons with drop-shadow(... 1px) has a positioned <div> and <svg>
++// in it, so its filter region became the 1100x1100 grid and every icon blurred
++// a 1922x1924 buffer on the main thread (0.4-0.9 s each, 20 s of a core per
++// load). Clips are taken from the filtered layer down instead, which bounds a
++// descendant only by what the filtered element itself clips.
++// SUMMIT_FILTER_BOUNDS_FROM_LAYER=0 turns this off.
++static thread_local const RenderLayer* filterBoundsRootHaiku;
++#endif
++
+ GraphicsContext* RenderLayer::setupFilters(GraphicsContext& destinationContext, LayerPaintingInfo& paintingInfo, OptionSet<PaintLayerFlag>& paintFlags, const LayoutSize& offsetFromRoot, const ClipRect& backgroundRect)
+ {
+     auto* paintingFilters = filtersForPainting(destinationContext, paintFlags, paintingInfo.paintBehavior);
+@@ -3579,6 +3596,13 @@ GraphicsContext* RenderLayer::setupFilters(GraphicsContext& destinationContext,
+     LayoutRect filterRepaintRect = paintingFilters->dirtySourceRect();
+     filterRepaintRect.move(offsetFromRoot);
+ 
++#if PLATFORM(HAIKU)
++    static const bool filterBoundsFromLayer = [] {
++        const char* value = getenv("SUMMIT_FILTER_BOUNDS_FROM_LAYER");
++        return !value || strcmp(value, "0");
++    }();
++    SetForScope filterBoundsRoot(filterBoundsRootHaiku, filterBoundsFromLayer ? this : nullptr);
++#endif
+     auto rootRelativeBounds = calculateLayerBounds(paintingInfo.rootLayer, offsetFromRoot, { });
+ 
+     // When the filter is applied via a transparency layer directly on the destination context (e.g. CG drop-shadow),
+@@ -5752,6 +5776,14 @@ LayoutRect RenderLayer::calculateLayerBounds(const RenderLayer* ancestorLayer, c
+         // FIXME: border-radius not accounted for.
+         // FIXME: Regions not accounted for.
+         const RenderLayer* clippingRootLayer = flags & UseLocalClipRectExcludingCompositingIfPossible ? this : clippingRootForPainting();
++#if PLATFORM(HAIKU)
++        // While setupFilters() measures a filtered layer, its descendants take
++        // their clips from that layer, not from the painting root above it:
++        // see filterBoundsRootHaiku.
++        if (auto* filterRoot = filterBoundsRootHaiku; filterRoot && clippingRootLayer && filterRoot != this && isDescendantOf(*filterRoot)
++            && (clippingRootLayer == filterRoot || filterRoot->isDescendantOf(*clippingRootLayer)))
++            clippingRootLayer = filterRoot;
++#endif
+         LayoutSize offsetFromRoot = offsetFromAncestor(clippingRootLayer);
+         LayoutRect clipRect = clipRectRelativeToAncestor(clippingRootLayer, offsetFromRoot, infiniteRect);
+         if (clipRect.isInfinite())
 diff --git a/Source/WebCore/rendering/RenderLayerBacking.cpp b/Source/WebCore/rendering/RenderLayerBacking.cpp
 index 95122a10cacc10b498c40d3447599bd2cd4d2795..68f56903208f829b1c03138dece2474e656412d4 100644
 --- a/Source/WebCore/rendering/RenderLayerBacking.cpp
