@@ -104197,10 +104197,10 @@ index 0000000000000000000000000000000000000000..d28a6cad6339adf79b155cf974e85bfd
 +
 diff --git a/Source/WebKit/UIProcess/API/haiku/WebKitView.cpp b/Source/WebKit/UIProcess/API/haiku/WebKitView.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..8d0b27d88ddad6b68ad36a7eb450b332b2a269b5
+index 0000000000000000000000000000000000000000..412057c8f0576affb75663dcd1db6b745d5bdeb9
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/API/haiku/WebKitView.cpp
-@@ -0,0 +1,1552 @@
+@@ -0,0 +1,1557 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#include "config.h"
@@ -105639,6 +105639,11 @@ index 0000000000000000000000000000000000000000..8d0b27d88ddad6b68ad36a7eb450b332
 +        return;
 +    case viewDismissDataListHaiku:
 +        SendCommand(viewDismissDataListHaiku);
++        return;
++    case B_COLORS_UPDATED:
++        // Perhaps the light or dark appearance was switched: tell the pages.
++        SendCommand(viewAppearanceHaiku);
++        BView::MessageReceived(message);
 +        return;
 +    case viewWindowVisibilityHaiku:
 +        if (Window())
@@ -150054,10 +150059,10 @@ index 0000000000000000000000000000000000000000..c9a119d02f85b7c5ad8fe9153bfc9604
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/WebView.cpp b/Source/WebKit/UIProcess/haiku/WebView.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..68ab4c113ab2730c4fcad3287cde254660e2c0fb
+index 0000000000000000000000000000000000000000..41d3312ecab3d3f1ef034d065e1a024b66be65f0
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/WebView.cpp
-@@ -0,0 +1,3614 @@
+@@ -0,0 +1,3636 @@
 +/*
 + * Copyright (C) 2013 Intel Corporation. All rights reserved.
 + *
@@ -150090,6 +150095,7 @@ index 0000000000000000000000000000000000000000..68ab4c113ab2730c4fcad3287cde2546
 +#include <MessageRunner.h>
 +#include <Clipboard.h>
 +#include <InterfaceDefs.h>
++#include <dlfcn.h>
 +#include <MenuItem.h>
 +#include <PopUpMenu.h>
 +#include <thread>
@@ -150339,6 +150345,26 @@ index 0000000000000000000000000000000000000000..68ab4c113ab2730c4fcad3287cde2546
 +        return;
 +    }
 +    completion(result == B_OK);
++}
++
++/* Whether the system has the dark appearance. air/OS has a dark mode switch
++ * (Screen preferences; ui_dark_mode() in libbe), found at run time so that
++ * the same engine runs on Haiku without it. Otherwise, and when it is off,
++ * dark document colors chosen in Appearance count, as in the legacy BWebView.
++ */
++static bool systemAppearanceIsDarkHaiku()
++{
++    using DarkModeFunction = bool (*)();
++    static DarkModeFunction darkMode = reinterpret_cast<DarkModeFunction>(
++        dlsym(RTLD_DEFAULT, "_Z12ui_dark_modev"));
++    if (darkMode && darkMode())
++        return true;
++    return ui_color(B_DOCUMENT_BACKGROUND_COLOR).Brightness() < 127;
++}
++
++bool WebView::effectiveAppearanceIsDark() const
++{
++    return systemAppearanceIsDarkHaiku();
 +}
 +
 +static void navigationChangedHaiku(const std::shared_ptr<WebViewStateHaiku>& state)
@@ -152754,6 +152780,7 @@ index 0000000000000000000000000000000000000000..68ab4c113ab2730c4fcad3287cde2546
 +        break;
 +    }
 +    case viewGeometryHaiku: updateGeometry(); break;
++    case viewAppearanceHaiku: m_page->effectiveAppearanceDidChange(); break;
 +    case viewDismissDataListHaiku:
 +        if (RefPtr picker = m_dataListSuggestions.get()) picker->close();
 +        break;
@@ -154402,10 +154429,10 @@ index 0000000000000000000000000000000000000000..f712608b72b963631ade0ec62755598a
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/WebViewPrivate.h b/Source/WebKit/UIProcess/haiku/WebViewPrivate.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..ce268ebf7fccd352776e1647095fee4ab0d037e2
+index 0000000000000000000000000000000000000000..6d1a23ed2d68bb9ea34ceb84a8d6e01c3a3e1b94
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/WebViewPrivate.h
-@@ -0,0 +1,235 @@
+@@ -0,0 +1,238 @@
 +/*
 +   Copyright (C) 2014 Haiku, inc.
 +
@@ -154590,6 +154617,9 @@ index 0000000000000000000000000000000000000000..ce268ebf7fccd352776e1647095fee4a
 +    void derefView() override { deref(); }
 +    void didRestoreScrollPosition() override { }
 +    WebCore::UserInterfaceLayoutDirection userInterfaceLayoutDirection() override { return WebCore::UserInterfaceLayoutDirection::LTR; }
++    // Pages get prefers-color-scheme: dark and dark form controls when the
++    // system has the dark appearance; see systemAppearanceIsDarkHaiku().
++    bool effectiveAppearanceIsDark() const override;
 +    // navigator.share(): B_WEBKIT_SHARE_REQUESTED (WebKitViewEmbedding.cpp).
 +    bool showShareSheet(WebCore::ShareDataWithParsedURL&&, CompletionHandler<void(bool)>&&) override;
 +    void requestDOMPasteAccess(WebCore::DOMPasteAccessCategory, WebCore::DOMPasteRequiresInteraction, WebCore::FrameIdentifier, const WebCore::IntRect&, const String&, CompletionHandler<void(WebCore::DOMPasteAccessResponse)>&&) override;
@@ -154643,10 +154673,10 @@ index 0000000000000000000000000000000000000000..ce268ebf7fccd352776e1647095fee4a
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/WebViewStateHaiku.h b/Source/WebKit/UIProcess/haiku/WebViewStateHaiku.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..06c3016a6c4559b47a99d3e0ce38bf8a26f607a9
+index 0000000000000000000000000000000000000000..c6425698bedd9a81875ce5d29ef97cc4046461fd
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/WebViewStateHaiku.h
-@@ -0,0 +1,262 @@
+@@ -0,0 +1,265 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#pragma once
@@ -154708,7 +154738,10 @@ index 0000000000000000000000000000000000000000..06c3016a6c4559b47a99d3e0ce38bf8a
 +    viewFullScreenResultHaiku = 'wvfa', viewExitFullScreenHaiku = 'wvfx',
 +    // Pointer lock (Element.requestPointerLock): to the view, "locked"; to the
 +    // page, the view gives the pointer back (Escape, focus lost).
-+    viewPointerLockHaiku = 'wvpl', viewPointerUnlockHaiku = 'wvpu'
++    viewPointerLockHaiku = 'wvpl', viewPointerUnlockHaiku = 'wvpu',
++    // The system's colors changed (B_COLORS_UPDATED), perhaps between the
++    // light and the dark appearance: pages are told what to use now.
++    viewAppearanceHaiku = 'wvap'
 +};
 +
 +struct WebViewGeometryHaiku {
