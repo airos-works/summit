@@ -1,0 +1,114 @@
+diff --git a/tools/wpt/run.py b/tools/wpt/run.py
+index 1b15ab15c..b8f3e205a 100644
+--- a/tools/wpt/run.py
++++ b/tools/wpt/run.py
+@@ -114,7 +114,7 @@ def check_environ(product):
+     builtin_skip = {
+         "android_webview", "chrome", "chrome_android", "chrome_ios",
+         "edge", "firefox", "firefox_android", "headless_shell",
+-        "ladybird", "servo", "wktr"
++        "ladybird", "servo", "wktr", "webkit"
+     }
+ 
+     if product not in builtin_skip:
+diff --git a/tools/wptrunner/wptrunner/browsers/webkit.py b/tools/wptrunner/wptrunner/browsers/webkit.py
+index 66c675188..caec917fc 100644
+--- a/tools/wptrunner/wptrunner/browsers/webkit.py
++++ b/tools/wptrunner/wptrunner/browsers/webkit.py
+@@ -54,6 +54,14 @@ def capabilities_for_port(server_config, **kwargs):
+                 "args": kwargs.get("binary_args", []),
+                 "certificates": certificate_domain_list(server_config.domains_set, kwargs["host_cert_path"])}}
+ 
++    if port_name == "summit":
++        import os
++        return {
++            "acceptInsecureCerts": True,
++            "summit:browserOptions": {
++                "binary": os.environ.get("SUMMIT_REMOTE_BINARY", kwargs["binary"]),
++                "args": kwargs.get("binary_args", [])}}
++
+     return {}
+ 
+ 
+@@ -71,6 +79,10 @@ def env_extras(**kwargs):
+ 
+ 
+ def env_options():
++    import os
++    if os.environ.get("WPT_SERVER_HOST"):
++        # Summit on another machine: serve on this host's LAN address.
++        return {"server_host": os.environ["WPT_SERVER_HOST"], "bind_address": True}
+     return {}
+ 
+ 
+diff --git a/tools/wptrunner/wptrunner/executors/executorwebdriver.py b/tools/wptrunner/wptrunner/executors/executorwebdriver.py
+index 203fcb6bf..16a0c2e2c 100644
+--- a/tools/wptrunner/wptrunner/executors/executorwebdriver.py
++++ b/tools/wptrunner/wptrunner/executors/executorwebdriver.py
+@@ -515,6 +515,14 @@ class WebDriverTestharnessProtocolPart(TestharnessProtocolPart):
+             try:
+                 self.webdriver.window_handle = window_handle
+                 remaining_windows = self.webdriver.window.close()
++                # Summit answers Close Window before the window has gone:
++                # give it a moment (local workaround, summit issue).
++                import time
++                for _ in range(40):
++                    if window_handle not in remaining_windows:
++                        break
++                    time.sleep(0.05)
++                    remaining_windows = self.webdriver.handles
+                 if window_handle in remaining_windows:
+                     raise Exception("the window remained open after sending the window close command")
+             except webdriver_error.NoSuchWindowException:
+@@ -1185,6 +1193,19 @@ class WebDriverProtocol(Protocol):
+ 
+     def after_connect(self):
+         self.testharness.load_runner(self.executor.last_environment["protocol"])
++        import os
++        if os.environ.get("SUMMIT_REMOTE_BINARY"):
++            # Summit opens maximised and ignores Set Window Rect: give the
++            # automated window an 800x600 viewport through Haiku scripting,
++            # then reload the runner so it sees the new size.
++            import subprocess
++            ssh = os.environ.get("SUMMIT_SSH", "ssh -F /mnt/HaikuWork/x399/ssh/config ws-haiku").split()
++            r = subprocess.run(ssh + [os.environ.get("SUMMIT_REMOTE_DIR", "/boot/home/interop") + "/size.sh"],
++                               capture_output=True, text=True, timeout=60)
++            self.testharness.load_runner(self.executor.last_environment["protocol"])
++            size = self.webdriver.execute_script("return [innerWidth, innerHeight]")
++            if size != [800, 600]:
++                self.logger.warning(f"Summit viewport is {size} after sizing ({r.stdout.strip()} {r.stderr.strip()})")
+ 
+ 
+ class WebDriverBidiProtocol(WebDriverProtocol):
+@@ -1454,6 +1475,31 @@ class WebDriverRefTestExecutor(RefTestExecutor):
+         # return value.
+         protocol.testdriver.run(url, self.wait_script)
+ 
++        import os
++        if os.environ.get("SUMMIT_SCREEN_SHOTS") == "1":
++            # Summit's WebDriver screenshot is painted in the web process and
++            # misses composited content (view transitions): take the page as
++            # the screen shows it, from Summit's MCP server, instead.
++            import sys
++            sys.path.insert(0, os.environ.get("INTEROP_KIT", os.path.dirname(os.environ["SUMMIT_SHIM"]) if os.environ.get("SUMMIT_SHIM") else "."))
++            import mcp as summit_mcp
++            self.protocol.webdriver.execute_async_script(
++                "const done = arguments[arguments.length - 1];"
++                "requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(done, 50)));")
++            if getattr(self, "_summit_mcp", None) is None:
++                self._summit_mcp = summit_mcp.Client(os.environ.get("SUMMIT_MCP_URL", "http://192.168.1.247:7841/mcp"),
++                                                     os.environ.get("SUMMIT_MCP_TOKEN", "interop26")).init()
++            try:
++                result = self._summit_mcp.call("screenshot", {"target": "page", "max_width": 0}, timeout=60)
++            except Exception:
++                self._summit_mcp = summit_mcp.Client(os.environ.get("SUMMIT_MCP_URL", "http://192.168.1.247:7841/mcp"),
++                                                     os.environ.get("SUMMIT_MCP_TOKEN", "interop26")).init()
++                result = self._summit_mcp.call("screenshot", {"target": "page", "max_width": 0}, timeout=60)
++            for item in result.get("content", []):
++                if item.get("type") == "image":
++                    return item["data"]
++            raise ValueError("Summit MCP screenshot returned no image")
++
+         screenshot = self.protocol.webdriver.screenshot()
+         if screenshot is None:
+             raise ValueError('screenshot is None')

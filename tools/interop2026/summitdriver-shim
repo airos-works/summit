@@ -1,0 +1,22 @@
+#!/bin/bash
+# The "WebDriver binary" wptrunner starts: runs summitdriver on the test
+# machine over SSH and forwards 127.0.0.1:PORT here to it.
+#
+# Each start kills what an earlier run left (driver, test Summit, its engine
+# processes) and gives the test profile a fresh copy of the seed profile.
+#
+# SUMMIT_SSH         ssh command reaching the test machine
+#                    (default: ssh -F /mnt/HaikuWork/x399/ssh/config ws-haiku)
+# SUMMIT_REMOTE_DIR  folder there (default /boot/home/interop): xh/ holds the
+#                    extracted Summit packages, profile.json.seed the profile
+port=4444
+for a in "$@"; do case $a in --port=*) port=${a#--port=};; esac; done
+SSH=${SUMMIT_SSH:-ssh -F /mnt/HaikuWork/x399/ssh/config ws-haiku}
+SSH="$SSH -o ConnectTimeout=10 -o ServerAliveInterval=15"
+DIR=${SUMMIT_REMOTE_DIR:-/boot/home/interop}
+X=$DIR/xh
+# Haiku's ps: the team id is the fourth column from the end.
+$SSH "kill \$(ps | grep -E 'WebKitWebDriver|$X/apps/Summit|summit-webkit/(WebProcess|NetworkProcess)' | grep '$DIR' | grep -v grep | awk '{print \$(NF-3)}') 2>/dev/null; true" </dev/null
+$SSH "rm -rf $DIR/profile; mkdir -p $DIR/profile; cp $DIR/profile.json.seed $DIR/profile/profile.json" </dev/null
+exec $SSH -o ExitOnForwardFailure=yes -L 127.0.0.1:$port:127.0.0.1:4444 \
+  "cd $X && exec env WEBKIT_EXEC_PATH=$X/lib/summit-webkit SUMMIT_WEBDRIVER_BROWSER=$X/apps/Summit $X/lib/summit-webkit/WebKitWebDriver --port=4444 --host=127.0.0.1" </dev/null
