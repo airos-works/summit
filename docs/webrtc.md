@@ -118,7 +118,31 @@ the GLib files, which are portable).
 - Echo cancellation, noise suppression and gain control for the microphone
   (`HaikuVoiceProcessing`): libwebrtc's audio processing module (AEC3),
   with what the page plays (streams and Web Audio) as the echo reference.
-  `SUMMIT_VOICE_PROCESSING=0` turns it off.
+  `SUMMIT_VOICE_PROCESSING=0` turns it off; `SUMMIT_VOICE_TRACE=1` prints
+  every ten seconds the 10 ms chunks processed each way, the outputs mixed
+  and AEC3's delay estimate and echo return loss enhancement.
+- The echo reference is one stream in one format, 48 kHz mono. Every output
+  of the web process (each played stream's sound player, each Web Audio
+  context) is mixed down to mono, resampled to 48 kHz and added onto a
+  timeline that follows the clock (frames since the clock's origin), where
+  the system mixer would mix them for the speakers; the timeline goes to
+  the module 15 ms behind "now", in 10 ms chunks, so the other outputs'
+  buffers for the same moment have landed. Silent buffers add nothing. The
+  outputs hand on what they play only while a microphone was processed in
+  the last second, so pages that only play sound do no work for it.
+  The module rebuilds all of its parts (high-pass filter, echo canceller,
+  noise suppressor, gain control) whenever the reference's format changes.
+  The outputs used to hand it their own buffers in their own formats, taking
+  turns: in a call, the far end's stream at 48 kHz and the page's Web Audio
+  context at the mixer's rate (192 kHz on the laptop) alternated at every
+  buffer, the processing never got past its first milliseconds, and the
+  microphone went out crackling and pumping (Teams, 3 November 2026). In a
+  loopback with a played stream and a running context, about 9 % of the web
+  process's samples were in sine and cosine (the parts' tables built again
+  and again), and the noise the microphone sent in a quiet room was 13 dB
+  louder than without the stream; now the two outputs are mixed at 100
+  chunks a second, AEC3's delay estimate holds still and the noise is as
+  low as with no output at all.
 - Cameras and microphones coming and going: the Media Kit announces them
   as `B_MEDIA_FLAVORS_CHANGED` (air/OS and Haiku since October 2026), which
   the device lists watch (`MediaDeviceWatcherHaiku`); they are taken again
@@ -237,7 +261,17 @@ takes the timestamps' unit (a thousand a second) as the rate.
   Kit (`AudioFileReaderHaiku`).
 - PannerNode's HRTF responses are built into the library.
 - `MediaStreamAudioSourceNode` and `MediaStreamAudioDestinationNode` work
-  with streams (`MediaStreamTrackAudioSourceProviderHaiku`).
+  with streams (`MediaStreamTrackAudioSourceProviderHaiku`). The source
+  node reads from a short FIFO the stream fills. A sound card's input
+  delivers 2048 frames at a time (43 ms at 48 kHz) while the audio thread
+  pulls a few milliseconds at a time, so reading starts, and starts again
+  after running dry, only once the largest delivery seen and 15 ms more are
+  waiting; reading as samples trickled in played a gap before deliveries.
+  The audio thread waits for the FIFO's lock (the capture thread holds it
+  for one copy) rather than playing a quantum of silence.
+- Web Audio runs at the system mixer's rate, 192 kHz on the laptop: four
+  times the work per second of 48 kHz for every node, and 2.7 ms sound
+  player buffers.
 
 ## Permissions (engine and Summit)
 

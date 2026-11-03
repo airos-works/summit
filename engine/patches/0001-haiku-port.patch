@@ -22959,10 +22959,10 @@ index 0000000000000000000000000000000000000000..eb1a0e5adf95cb4d23f35b1ea7ebf290
 +#endif // ENABLE(WEB_AUDIO)
 diff --git a/Source/WebCore/platform/audio/haiku/AudioDestinationHaiku.cpp b/Source/WebCore/platform/audio/haiku/AudioDestinationHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..b17331f9f3e1c68e08e59dda65ef262559cce71e
+index 0000000000000000000000000000000000000000..4768b78375d4cf6e45170d7f6eccd8d3650fe039
 --- /dev/null
 +++ b/Source/WebCore/platform/audio/haiku/AudioDestinationHaiku.cpp
-@@ -0,0 +1,177 @@
+@@ -0,0 +1,182 @@
 +/*
 + * Copyright (C) 2026 Summit contributors.
 + *
@@ -23046,6 +23046,11 @@ index 0000000000000000000000000000000000000000..b17331f9f3e1c68e08e59dda65ef2625
 +        m_output->Stop();
 +        delete m_output;
 +    }
++#if ENABLE(MEDIA_STREAM) && USE(LIBWEBRTC)
++    // Only while it mixes; otherwise it forgets the output by itself.
++    if (HaikuVoiceProcessing::isListening())
++        HaikuVoiceProcessing::singleton().renderEnded(this);
++#endif
 +}
 +
 +void AudioDestinationHaiku::startRendering(CompletionHandler<void(bool)>&& completionHandler)
@@ -23132,8 +23137,8 @@ index 0000000000000000000000000000000000000000..b17331f9f3e1c68e08e59dda65ef2625
 +#if ENABLE(MEDIA_STREAM) && USE(LIBWEBRTC)
 +    // A call page may play its sound through Web Audio: the microphone's echo
 +    // cancellation hears it too.
-+    if (framesToRender && HaikuVoiceProcessing::isAvailable())
-+        HaikuVoiceProcessing::singleton().analyzeRender(std::span<const float>(output, frames * channels), channels, static_cast<unsigned>(sampleRate()));
++    if (framesToRender && HaikuVoiceProcessing::isListening())
++        HaikuVoiceProcessing::singleton().analyzeRender(this, std::span<const float>(output, frames * channels), channels, static_cast<unsigned>(sampleRate()));
 +#endif
 +}
 +
@@ -67938,10 +67943,10 @@ index d4ed58f6e04d7f58667397d81db0675b6ce7f131..b95528567332612653af59bf8dbca81b
  #include <wtf/JSONValues.h>
 diff --git a/Source/WebCore/platform/mediastream/haiku/AudioMediaStreamTrackRendererHaiku.cpp b/Source/WebCore/platform/mediastream/haiku/AudioMediaStreamTrackRendererHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..ab0855a4c2cc66d05378da50ed6d9210ee979f16
+index 0000000000000000000000000000000000000000..6d0be8bdc91560a27e677ae42c070400775c5888
 --- /dev/null
 +++ b/Source/WebCore/platform/mediastream/haiku/AudioMediaStreamTrackRendererHaiku.cpp
-@@ -0,0 +1,227 @@
+@@ -0,0 +1,232 @@
 +/*
 + * Copyright (C) 2026 Summit contributors.
 + *
@@ -68108,6 +68113,11 @@ index 0000000000000000000000000000000000000000..ab0855a4c2cc66d05378da50ed6d9210
 +    m_output->Stop();
 +    delete m_output;
 +    m_output = nullptr;
++#if USE(LIBWEBRTC)
++    // Only while it mixes; otherwise it forgets the output by itself.
++    if (HaikuVoiceProcessing::isListening())
++        HaikuVoiceProcessing::singleton().renderEnded(this);
++#endif
 +}
 +
 +void AudioMediaStreamTrackRendererHaiku::playBuffer(void* cookie, void* buffer, size_t size, const media_raw_audio_format& format)
@@ -68152,7 +68162,7 @@ index 0000000000000000000000000000000000000000..ab0855a4c2cc66d05378da50ed6d9210
 +
 +#if USE(LIBWEBRTC)
 +    // What the speakers play is the echo the microphone's processing removes.
-+    if (copied && HaikuVoiceProcessing::isAvailable()) {
++    if (copied && HaikuVoiceProcessing::isListening()) {
 +        unsigned channels;
 +        double rate;
 +        {
@@ -68161,7 +68171,7 @@ index 0000000000000000000000000000000000000000..ab0855a4c2cc66d05378da50ed6d9210
 +            rate = m_sampleRate;
 +        }
 +        if (channels && rate > 0)
-+            HaikuVoiceProcessing::singleton().analyzeRender(std::span<const float>(output, count), channels, static_cast<unsigned>(rate));
++            HaikuVoiceProcessing::singleton().analyzeRender(this, std::span<const float>(output, count), channels, static_cast<unsigned>(rate));
 +    }
 +#endif
 +}
@@ -71056,10 +71066,10 @@ index 0000000000000000000000000000000000000000..db5a33a3ddcb4c345cc44a87fe35c22d
 +#endif // ENABLE(MEDIA_STREAM) && PLATFORM(HAIKU)
 diff --git a/Source/WebCore/platform/mediastream/haiku/HaikuVoiceProcessing.cpp b/Source/WebCore/platform/mediastream/haiku/HaikuVoiceProcessing.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..a3a56ca8271ef0190ed4728a9d1490b5a192c01d
+index 0000000000000000000000000000000000000000..7070b788ec8939c4e2e53495a86342d25fe7176b
 --- /dev/null
 +++ b/Source/WebCore/platform/mediastream/haiku/HaikuVoiceProcessing.cpp
-@@ -0,0 +1,149 @@
+@@ -0,0 +1,330 @@
 +/*
 + * Copyright (C) 2026 Summit contributors.
 + *
@@ -71083,6 +71093,8 @@ index 0000000000000000000000000000000000000000..a3a56ca8271ef0190ed4728a9d1490b5
 +#if ENABLE(MEDIA_STREAM) && PLATFORM(HAIKU) && USE(LIBWEBRTC)
 +
 +#include "LibWebRTCMacros.h"
++#include <cmath>
++#include <cstdio>
 +#include <cstdlib>
 +#include <cstring>
 +#include <wtf/MonotonicTime.h>
@@ -71092,6 +71104,7 @@ index 0000000000000000000000000000000000000000..a3a56ca8271ef0190ed4728a9d1490b5
 +#include <webrtc/api/audio/audio_processing.h>
 +#include <webrtc/api/audio/builtin_audio_processing_builder.h>
 +#include <webrtc/api/environment/environment_factory.h>
++#include <webrtc/common_audio/resampler/include/push_resampler.h>
 +WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_END
 +
 +namespace WebCore {
@@ -71099,6 +71112,66 @@ index 0000000000000000000000000000000000000000..a3a56ca8271ef0190ed4728a9d1490b5
 +// From a sample reaching the sound player to it leaving the speakers, plus
 +// the microphone's buffer: a starting point AEC3 refines.
 +static constexpr int initialStreamDelayMs = 60;
++
++// The echo reference: one format whatever the outputs play.
++static constexpr unsigned referenceRate = 48000;
++static constexpr size_t referenceChunk = referenceRate / 100;
++// The timeline's ring: half a second.
++static constexpr size_t mixFrames = referenceRate / 2;
++// The reference goes to the processing this long after "now", so the other
++// outputs' buffers for the same moment have landed (a stream's output hands
++// on 10 ms at a time, Web Audio's less).
++static constexpr int64_t flushMargin = referenceRate * 15 / 1000;
++// An output whose samples drift further than this from the clock is placed
++// at "now" again.
++static constexpr int64_t resyncDistance = referenceRate * 40 / 1000;
++// An output that hands on nothing for this long is forgotten.
++static constexpr double outputTimeout = 0.5;
++// The reference is mixed only while a microphone was processed this recently.
++static constexpr double captureTimeout = 1;
++
++struct HaikuVoiceProcessing::RenderOutput {
++    WTF_DEPRECATED_MAKE_FAST_ALLOCATED(RenderOutput);
++public:
++    unsigned channels { 0 };
++    unsigned rate { 0 };
++    // Interleaved samples waiting for a whole 10 ms at the output's rate.
++    Vector<float> pending;
++    Vector<float> mono;
++    Vector<float> resampled;
++    std::unique_ptr<webrtc::PushResampler<float>> resampler;
++    // Where the next 10 ms go on the timeline.
++    int64_t cursor { 0 };
++    bool placed { false };
++    double lastPush { 0 };
++};
++
++static bool voiceTraceEnabled()
++{
++    static bool enabled = [] {
++        const char* value = getenv("SUMMIT_VOICE_TRACE");
++        return value && *value && strcmp(value, "0");
++    }();
++    return enabled;
++}
++
++static double nowSeconds()
++{
++    return MonotonicTime::now().secondsSinceEpoch().value();
++}
++
++static int64_t timelinePosition(double seconds)
++{
++    return static_cast<int64_t>(seconds * referenceRate);
++}
++
++// When a microphone was last processed (MonotonicTime seconds).
++static std::atomic<double> lastCapture { 0 };
++
++bool HaikuVoiceProcessing::isListening()
++{
++    return isAvailable() && nowSeconds() - lastCapture.load(std::memory_order_relaxed) <= captureTimeout;
++}
 +
 +bool HaikuVoiceProcessing::isAvailable()
 +{
@@ -71149,6 +71222,8 @@ index 0000000000000000000000000000000000000000..a3a56ca8271ef0190ed4728a9d1490b5
 +    if (!echoCancellation && !noiseSuppression && !autoGainControl)
 +        return;
 +    configure(echoCancellation, noiseSuppression, autoGainControl);
++    lastCapture.store(nowSeconds(), std::memory_order_relaxed);
++    ++m_captureChunks;
 +
 +    size_t frames = sampleRate / 100;
 +    m_capturePlanes.resize(frames * channels);
@@ -71170,40 +71245,156 @@ index 0000000000000000000000000000000000000000..a3a56ca8271ef0190ed4728a9d1490b5
 +        for (size_t frame = 0; frame < frames; ++frame)
 +            samples[frame * channels + channel] = plane[frame];
 +    }
++    traceIfDue();
 +}
 +
-+void HaikuVoiceProcessing::analyzeRender(std::span<const float> samples, unsigned channels, unsigned sampleRate)
++void HaikuVoiceProcessing::analyzeRender(const void* output, std::span<const float> samples, unsigned channels, unsigned sampleRate)
 +{
-+    if (!m_processing || !channels || !sampleRate || samples.empty())
++    if (!m_processing || !output || !channels || !sampleRate || samples.empty())
 +        return;
-+    m_lastRender = MonotonicTime::now().secondsSinceEpoch().value();
++    double now = nowSeconds();
++    if (now - lastCapture.load(std::memory_order_relaxed) > captureTimeout) {
++        // Nobody listens: no reference (and no work for pages that only play).
++        Locker locker { m_renderLock };
++        if (m_mixing) {
++            m_renderOutputs.clear();
++            m_mixing = false;
++        }
++        return;
++    }
++    // 10 ms chunks: rates in hundreds of samples a second.
++    if (sampleRate % 100)
++        return;
 +
 +    Locker locker { m_renderLock };
-+    if (channels != m_renderChannels || sampleRate != m_renderRate) {
-+        m_renderChannels = channels;
-+        m_renderRate = sampleRate;
-+        m_renderPending.clear();
++    int64_t nowPosition = timelinePosition(now);
++    if (!m_mixing) {
++        m_mixing = true;
++        m_mix.fill(0, mixFrames);
++        m_flushed = nowPosition - flushMargin;
 +    }
-+    m_renderPending.append(samples);
 +
-+    size_t frames = sampleRate / 100;
-+    size_t chunk = frames * channels;
++    auto& entry = m_renderOutputs.ensure(output, [] {
++        return makeUnique<RenderOutput>();
++    }).iterator->value;
++    auto& source = *entry;
++    if (source.channels != channels || source.rate != sampleRate) {
++        source.channels = channels;
++        source.rate = sampleRate;
++        source.pending.clear();
++        source.placed = false;
++        source.resampler = nullptr;
++        if (sampleRate != referenceRate)
++            source.resampler = std::make_unique<webrtc::PushResampler<float>>(sampleRate / 100, referenceChunk, 1);
++    }
++    source.lastPush = now;
++    source.pending.append(samples);
++
++    // The first of these 10 ms belong at "now" give or take the output's
++    // buffering; later ones follow on without a gap.
++    if (!source.placed || source.cursor < m_flushed || std::abs(source.cursor - nowPosition) > resyncDistance) {
++        if (source.placed)
++            ++m_outputResyncs;
++        source.cursor = std::max(nowPosition, m_flushed);
++        source.placed = true;
++    }
++
++    size_t chunkFrames = sampleRate / 100;
++    size_t chunkSamples = chunkFrames * channels;
 +    size_t offset = 0;
-+    m_renderPlanes.resize(chunk);
-+    Vector<float*, 8> planes;
-+    for (unsigned channel = 0; channel < channels; ++channel)
-+        planes.append(m_renderPlanes.mutableSpan().subspan(channel * frames).data());
-+    webrtc::StreamConfig config(sampleRate, channels);
-+    while (m_renderPending.size() - offset >= chunk) {
-+        for (unsigned channel = 0; channel < channels; ++channel) {
-+            for (size_t frame = 0; frame < frames; ++frame)
-+                planes[channel][frame] = m_renderPending[offset + frame * channels + channel];
++    while (source.pending.size() - offset >= chunkSamples) {
++        auto chunk = source.pending.span().subspan(offset, chunkSamples);
++        offset += chunkSamples;
++        if (source.cursor + static_cast<int64_t>(referenceChunk) > m_flushed + static_cast<int64_t>(mixFrames))
++            break; // Far ahead of the clock: dropped; placed again next time.
++
++        bool silent = true;
++        source.mono.resize(chunkFrames);
++        for (size_t frame = 0; frame < chunkFrames; ++frame) {
++            float sum = 0;
++            for (unsigned channel = 0; channel < channels; ++channel)
++                sum += chunk[frame * channels + channel];
++            source.mono[frame] = sum / channels;
++            silent = silent && !sum;
 +        }
-+        m_processing->ProcessReverseStream(planes.span().data(), config, config, planes.span().data());
-+        offset += chunk;
++        // Silence adds nothing (a Web Audio context that plays nothing).
++        if (!silent) {
++            std::span<const float> mono = source.mono.span();
++            if (source.resampler) {
++                source.resampled.resize(referenceChunk);
++                source.resampler->Resample(webrtc::MonoView<const float>(source.mono.span()), webrtc::MonoView<float>(source.resampled.mutableSpan()));
++                mono = source.resampled.span();
++            }
++            for (size_t frame = 0; frame < referenceChunk; ++frame)
++                m_mix[(source.cursor + frame) % mixFrames] += mono[frame];
++        }
++        source.cursor += referenceChunk;
 +    }
 +    if (offset)
-+        m_renderPending.removeAt(0, offset);
++        source.pending.removeAt(0, offset);
++
++    flushRenderLocked(nowPosition);
++}
++
++void HaikuVoiceProcessing::flushRenderLocked(int64_t nowPosition)
++{
++    double now = nowSeconds();
++    m_renderOutputs.removeIf([&](auto& entry) {
++        return now - entry.value->lastPush > outputTimeout;
++    });
++    if (m_renderOutputs.isEmpty()) {
++        m_mixing = false;
++        return;
++    }
++
++    int64_t until = nowPosition - flushMargin;
++    if (until - m_flushed > static_cast<int64_t>(mixFrames)) {
++        // Nothing was handed on for longer than the ring holds.
++        m_mix.fill(0);
++        m_flushed = until;
++        return;
++    }
++    m_renderPlane.resize(referenceChunk);
++    float* planes[1] = { m_renderPlane.mutableSpan().data() };
++    webrtc::StreamConfig config(referenceRate, 1);
++    while (m_flushed + static_cast<int64_t>(referenceChunk) <= until) {
++        for (size_t frame = 0; frame < referenceChunk; ++frame) {
++            float& sample = m_mix[(m_flushed + frame) % mixFrames];
++            m_renderPlane[frame] = sample;
++            sample = 0;
++        }
++        m_processing->ProcessReverseStream(planes, config, config, planes);
++        m_flushed += referenceChunk;
++        ++m_referenceChunks;
++    }
++}
++
++void HaikuVoiceProcessing::renderEnded(const void* output)
++{
++    Locker locker { m_renderLock };
++    m_renderOutputs.remove(output);
++}
++
++void HaikuVoiceProcessing::traceIfDue()
++{
++    if (!voiceTraceEnabled())
++        return;
++    double now = nowSeconds();
++    double last = m_lastTrace;
++    if (last && now - last < 10)
++        return;
++    m_lastTrace = now;
++    if (!last)
++        return;
++    unsigned outputs;
++    {
++        Locker locker { m_renderLock };
++        outputs = m_renderOutputs.size();
++    }
++    auto stats = m_processing->GetStatistics();
++    fprintf(stderr, "Summit voice: %.1f s: capture %.1f/s, reference %.1f/s from %u output(s), %llu resync(s); delay %d ms, ERLE %.1f dB\n",
++        now - last, m_captureChunks.exchange(0) / (now - last), m_referenceChunks.exchange(0) / (now - last), outputs,
++        static_cast<unsigned long long>(m_outputResyncs.exchange(0)), stats.delay_ms.value_or(-1), stats.echo_return_loss_enhancement.value_or(NAN));
 +}
 +
 +} // namespace WebCore
@@ -71211,10 +71402,10 @@ index 0000000000000000000000000000000000000000..a3a56ca8271ef0190ed4728a9d1490b5
 +#endif
 diff --git a/Source/WebCore/platform/mediastream/haiku/HaikuVoiceProcessing.h b/Source/WebCore/platform/mediastream/haiku/HaikuVoiceProcessing.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..f818c63fdeee09b6db257e7447f68e679678bdc0
+index 0000000000000000000000000000000000000000..657da536c048d6387c05a48fc03b157880c3d417
 --- /dev/null
 +++ b/Source/WebCore/platform/mediastream/haiku/HaikuVoiceProcessing.h
-@@ -0,0 +1,80 @@
+@@ -0,0 +1,109 @@
 +/*
 + * Copyright (C) 2026 Summit contributors.
 + *
@@ -71236,7 +71427,9 @@ index 0000000000000000000000000000000000000000..f818c63fdeee09b6db257e7447f68e67
 +
 +#if ENABLE(MEDIA_STREAM) && PLATFORM(HAIKU) && USE(LIBWEBRTC)
 +
++#include <memory>
 +#include <span>
++#include <wtf/HashMap.h>
 +#include <wtf/Lock.h>
 +#include <wtf/Vector.h>
 +
@@ -71251,26 +71444,46 @@ index 0000000000000000000000000000000000000000..f818c63fdeee09b6db257e7447f68e67
 +// (libwebrtc's audio processing module, AEC3), as the other browsers do for
 +// calls: what the page plays (streams and Web Audio) is the echo to remove
 +// from what the microphone hears. One per web process.
++//
++// The echo reference is one stream in one format (48 kHz mono): every output
++// of the process is mixed into it on a timeline that follows the clock, as
++// the system mixer mixes them for the speakers. The audio processing module
++// rebuilds all of its parts (echo canceller, noise suppressor, gain control)
++// whenever the reference's format changes, so the outputs cannot take turns
++// handing it their own: a stream played at 48 kHz and a Web Audio context at
++// the mixer's 192 kHz did that at every buffer, and the microphone's sound
++// went out crackling (laptop, Teams, 3 November 2026).
 +class HaikuVoiceProcessing {
 +    WTF_MAKE_NONCOPYABLE(HaikuVoiceProcessing);
 +public:
 +    static HaikuVoiceProcessing& singleton();
 +    // SUMMIT_VOICE_PROCESSING=0 turns it off.
 +    static bool isAvailable();
++    // Whether a microphone was processed in the last second: outputs hand
++    // on what they play only then.
++    static bool isListening();
 +
 +    // The microphone's samples, interleaved, exactly 10 ms of them; processed
 +    // in place. Called on the capture thread.
 +    void processCapture(std::span<float>, unsigned channels, unsigned sampleRate, bool echoCancellation, bool noiseSuppression, bool autoGainControl);
 +
-+    // What goes to the speakers, interleaved, any length; any thread.
-+    void analyzeRender(std::span<const float>, unsigned channels, unsigned sampleRate);
++    // What one output (identified by the pointer) sends to the speakers,
++    // interleaved, any length, as it hands it on; any thread. Ignored unless
++    // a microphone is being processed.
++    void analyzeRender(const void* output, std::span<const float>, unsigned channels, unsigned sampleRate);
++    // The output stopped or went away.
++    void renderEnded(const void* output);
 +
 +private:
 +    friend class NeverDestroyed<HaikuVoiceProcessing>;
 +    HaikuVoiceProcessing();
 +    ~HaikuVoiceProcessing() = delete;
 +
++    struct RenderOutput;
++
 +    void configure(bool echoCancellation, bool noiseSuppression, bool autoGainControl);
++    void flushRenderLocked(int64_t now) WTF_REQUIRES_LOCK(m_renderLock);
++    void traceIfDue();
 +
 +    webrtc::AudioProcessing* m_processing { nullptr };
 +    Lock m_configurationLock;
@@ -71281,15 +71494,22 @@ index 0000000000000000000000000000000000000000..f818c63fdeee09b6db257e7447f68e67
 +
 +    // Capture side: planes for the float interface.
 +    Vector<float> m_capturePlanes;
-+
-+    // Render side: samples wait for a whole 10 ms chunk.
++    // Render side: the outputs and the reference they are mixed into, a
++    // ring of frames indexed by their position on the timeline (frames at
++    // 48 kHz since the clock's origin).
 +    Lock m_renderLock;
-+    Vector<float> m_renderPending WTF_GUARDED_BY_LOCK(m_renderLock);
-+    Vector<float> m_renderPlanes WTF_GUARDED_BY_LOCK(m_renderLock);
-+    unsigned m_renderChannels WTF_GUARDED_BY_LOCK(m_renderLock) { 0 };
-+    unsigned m_renderRate WTF_GUARDED_BY_LOCK(m_renderLock) { 0 };
-+    // When the page last played something (MonotonicTime seconds).
-+    std::atomic<double> m_lastRender { 0 };
++    HashMap<const void*, std::unique_ptr<RenderOutput>> m_renderOutputs WTF_GUARDED_BY_LOCK(m_renderLock);
++    Vector<float> m_mix WTF_GUARDED_BY_LOCK(m_renderLock);
++    Vector<float> m_renderPlane WTF_GUARDED_BY_LOCK(m_renderLock);
++    // Up to here the reference went to the audio processing module.
++    int64_t m_flushed WTF_GUARDED_BY_LOCK(m_renderLock) { 0 };
++    bool m_mixing WTF_GUARDED_BY_LOCK(m_renderLock) { false };
++
++    // SUMMIT_VOICE_TRACE=1: counts, printed every ten seconds.
++    std::atomic<uint64_t> m_captureChunks { 0 };
++    std::atomic<uint64_t> m_referenceChunks { 0 };
++    std::atomic<uint64_t> m_outputResyncs { 0 };
++    std::atomic<double> m_lastTrace { 0 };
 +};
 +
 +} // namespace WebCore
@@ -71297,10 +71517,10 @@ index 0000000000000000000000000000000000000000..f818c63fdeee09b6db257e7447f68e67
 +#endif
 diff --git a/Source/WebCore/platform/mediastream/haiku/MediaStreamTrackAudioSourceProviderHaiku.cpp b/Source/WebCore/platform/mediastream/haiku/MediaStreamTrackAudioSourceProviderHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..7a57f6b8bcf80d9c363c3c1fb474436c2b8273d0
+index 0000000000000000000000000000000000000000..17b6d857867ab75d0f6a5df3e0a890d9eab3fd85
 --- /dev/null
 +++ b/Source/WebCore/platform/mediastream/haiku/MediaStreamTrackAudioSourceProviderHaiku.cpp
-@@ -0,0 +1,155 @@
+@@ -0,0 +1,175 @@
 +/*
 + * Copyright (C) 2026 Summit contributors.
 + *
@@ -71334,6 +71554,9 @@ index 0000000000000000000000000000000000000000..7a57f6b8bcf80d9c363c3c1fb474436c
 +
 +// A live source: what does not fit is dropped from the old end.
 +static constexpr double fifoDuration = 0.2;
++// Beyond one delivery, what reading waits for: the deliveries' jitter and
++// the audio thread pulling a buffer's worth at once.
++static constexpr double startMargin = 0.015;
 +
 +WTF_MAKE_TZONE_ALLOCATED_IMPL(MediaStreamTrackAudioSourceProviderHaiku);
 +
@@ -71397,8 +71620,11 @@ index 0000000000000000000000000000000000000000..7a57f6b8bcf80d9c363c3c1fb474436c
 +            m_fifo.fill(0, static_cast<size_t>(rate * fifoDuration) * channels);
 +            m_readIndex = 0;
 +            m_available = 0;
++            m_largestDelivery = 0;
++            m_waitingForData = true;
 +            formatChanged = true;
 +        }
++        m_largestDelivery = std::max(m_largestDelivery, frameCount);
 +        size_t capacity = m_fifo.size();
 +        if (samples.size() > capacity)
 +            samples = samples.last(capacity - capacity % channels);
@@ -71428,18 +71654,32 @@ index 0000000000000000000000000000000000000000..7a57f6b8bcf80d9c363c3c1fb474436c
 +
 +void MediaStreamTrackAudioSourceProviderHaiku::provideInput(AudioBus& bus, size_t framesToProcess)
 +{
-+    if (m_ended || !m_enabled || !m_lock.tryLock()) {
++    if (m_ended || !m_enabled) {
 +        bus.zero();
 +        return;
 +    }
-+    Locker locker { AdoptLock, m_lock };
++    // The capture thread holds the lock only to copy a delivery in; giving
++    // up on it instead would play a quantum of silence, a click.
++    Locker locker { m_lock };
 +    unsigned channels = m_channelCount;
 +    size_t capacity = m_fifo.size();
 +    if (!channels || !capacity || bus.numberOfChannels() != channels) {
 +        bus.zero();
 +        return;
 +    }
++    // Reading as samples trickle in plays them with a gap before every
++    // delivery: wait for a delivery and a margin, then read steadily.
++    if (m_waitingForData) {
++        size_t start = std::min(m_largestDelivery + static_cast<size_t>(m_sampleRate * startMargin), capacity / channels / 2);
++        if (m_available / channels < start) {
++            bus.zero();
++            return;
++        }
++        m_waitingForData = false;
++    }
 +    size_t frames = std::min(framesToProcess, m_available / channels);
++    if (frames < framesToProcess)
++        m_waitingForData = true;
 +    for (size_t frame = 0; frame < frames; ++frame) {
 +        for (unsigned channel = 0; channel < channels; ++channel)
 +            bus.channel(channel)->mutableSpan()[frame] = m_fifo[(m_readIndex + channel) % capacity];
@@ -71458,10 +71698,10 @@ index 0000000000000000000000000000000000000000..7a57f6b8bcf80d9c363c3c1fb474436c
 +#endif
 diff --git a/Source/WebCore/platform/mediastream/haiku/MediaStreamTrackAudioSourceProviderHaiku.h b/Source/WebCore/platform/mediastream/haiku/MediaStreamTrackAudioSourceProviderHaiku.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..873c9f72583dcd3f0d9de5d72f91e3c4a72b41a6
+index 0000000000000000000000000000000000000000..b391a82343d60fbca362c2f1705b0a2130b317ab
 --- /dev/null
 +++ b/Source/WebCore/platform/mediastream/haiku/MediaStreamTrackAudioSourceProviderHaiku.h
-@@ -0,0 +1,90 @@
+@@ -0,0 +1,95 @@
 +/*
 + * Copyright (C) 2026 Summit contributors.
 + *
@@ -71547,6 +71787,11 @@ index 0000000000000000000000000000000000000000..873c9f72583dcd3f0d9de5d72f91e3c4
 +    size_t m_available WTF_GUARDED_BY_LOCK(m_lock) { 0 };
 +    unsigned m_channelCount WTF_GUARDED_BY_LOCK(m_lock) { 0 };
 +    double m_sampleRate WTF_GUARDED_BY_LOCK(m_lock) { 0 };
++    // The most frames one delivery brought (a sound card's input hands on
++    // 2048 at a time, 43 ms at 48 kHz): reading starts, and starts again
++    // after running dry, once a delivery and a margin are waiting.
++    size_t m_largestDelivery WTF_GUARDED_BY_LOCK(m_lock) { 0 };
++    bool m_waitingForData WTF_GUARDED_BY_LOCK(m_lock) { true };
 +};
 +
 +} // namespace WebCore
