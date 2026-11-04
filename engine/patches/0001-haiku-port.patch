@@ -15481,6 +15481,95 @@ index fdc5b8fc0424fc394e954fa583f40e825727dc47..ee9ab0719ef8e6050eeaf97b29649a4d
  }
  
  } // namespace WebCore
+diff --git a/Source/WebCore/history/BackForwardCache.cpp b/Source/WebCore/history/BackForwardCache.cpp
+index bd348e24c4b963fefd9984b627641d86ed8b2abb..ae275edbdb9f8ca4052b9c2eabe9b9d1e7a40049 100644
+--- a/Source/WebCore/history/BackForwardCache.cpp
++++ b/Source/WebCore/history/BackForwardCache.cpp
+@@ -717,6 +717,20 @@ void BackForwardCache::remove(BackForwardFrameItemIdentifier frameItemID, Should
+     RELEASE_LOG(BackForwardCache, "BackForwardCache::remove item: %s, size: %u / %u", frameItemID.toString().utf8(), pageCount(), maxSize());
+ }
+ 
++#if PLATFORM(HAIKU)
++void BackForwardCache::removePageHoldingDocumentHaiku(const Document& document)
++{
++    for (auto& [frameItemID, entry] : m_cachedPageMap) {
++        auto* cachedPage = std::get_if<UniqueRef<CachedPage>>(&entry);
++        if (!cachedPage || !(*cachedPage)->cachedMainFrame() || !(*cachedPage)->cachedMainFrame()->holdsDocumentHaiku(document))
++            continue;
++        RELEASE_LOG(BackForwardCache, "BackForwardCache::removePageHoldingDocumentHaiku: a worker of the page keeps running");
++        remove(frameItemID);
++        return;
++    }
++}
++#endif
++
+ void BackForwardCache::remove(HistoryItem& item)
+ {
+     remove(item.frameItemID());
+diff --git a/Source/WebCore/history/BackForwardCache.h b/Source/WebCore/history/BackForwardCache.h
+index 3264427adebda9ece2ea81db130fa45f82e8dbbb..a2071ba222a7fc65ce2f2fb7a3703936e184993f 100644
+--- a/Source/WebCore/history/BackForwardCache.h
++++ b/Source/WebCore/history/BackForwardCache.h
+@@ -69,6 +69,11 @@ public:
+     WEBCORE_EXPORT std::unique_ptr<CachedPage> take(BackForwardFrameItemIdentifier, Page*);
+ 
+     WEBCORE_EXPORT void removeAllItemsForPage(Page&);
++#if PLATFORM(HAIKU)
++    // Evicts the cached page that holds this document (its main frame's or a
++    // subframe's), if any.
++    void removePageHoldingDocumentHaiku(const Document&);
++#endif
+ 
+     WEBCORE_EXPORT void clearEntriesForOrigins(const HashSet<Ref<SecurityOrigin>>&);
+ 
+diff --git a/Source/WebCore/history/CachedFrame.cpp b/Source/WebCore/history/CachedFrame.cpp
+index 180c1edc1fd43398a6f01a7f3ba320143e209d19..45c47688a088950eb175253a3866f71627182d6a 100644
+--- a/Source/WebCore/history/CachedFrame.cpp
++++ b/Source/WebCore/history/CachedFrame.cpp
+@@ -96,6 +96,19 @@ void CachedFrameBase::pruneDetachedChildFrames()
+     });
+ }
+ 
++#if PLATFORM(HAIKU)
++bool CachedFrameBase::holdsDocumentHaiku(const Document& document) const
++{
++    if (m_document.get() == &document)
++        return true;
++    for (auto& child : m_childFrames) {
++        if (child->holdsDocumentHaiku(document))
++            return true;
++    }
++    return false;
++}
++#endif
++
+ void CachedFrameBase::restore()
+ {
+     RefPtr view = m_view;
+diff --git a/Source/WebCore/history/CachedFrame.h b/Source/WebCore/history/CachedFrame.h
+index 205fd8d4e80e6c9bfe0e2374676062012d50281c..e96d43642c5b5ff55754b96bcc6cbad21459f4ca 100644
+--- a/Source/WebCore/history/CachedFrame.h
++++ b/Source/WebCore/history/CachedFrame.h
+@@ -53,6 +53,9 @@ public:
+     FrameView* view() const { return m_view.get(); }
+     const URL& url() const LIFETIME_BOUND { return m_url; }
+     bool isMainFrame() { return m_isMainFrame; }
++#if PLATFORM(HAIKU)
++    bool holdsDocumentHaiku(const Document&) const;
++#endif
+ 
+ protected:
+     CachedFrameBase(Frame&);
+@@ -91,6 +94,9 @@ public:
+     WasPrivateRelayed NODELETE wasPrivateRelayed() const;
+ 
+     using CachedFrameBase::document;
++#if PLATFORM(HAIKU)
++    using CachedFrameBase::holdsDocumentHaiku;
++#endif
+     using CachedFrameBase::view;
+     using CachedFrameBase::url;
+     DocumentLoader* documentLoader() const { return m_documentLoader.get(); }
 diff --git a/Source/WebCore/html/HTMLCanvasElement.cpp b/Source/WebCore/html/HTMLCanvasElement.cpp
 index 9ca0df74c9d224f9cde8226eda2e99798d08dd72..31e0ca8c242fb7d8d7fd589c4749505b3275fa48 100644
 --- a/Source/WebCore/html/HTMLCanvasElement.cpp
@@ -88005,6 +88094,85 @@ index b130dc66c27654dca57ad9079f68ced99236463f..36ca34b34ab50465b5699b2b5659ab15
          eventLoop->run(context.vm());
      }, WorkerEventLoop::taskMode());
  }
+diff --git a/Source/WebCore/workers/WorkerMessagingProxy.cpp b/Source/WebCore/workers/WorkerMessagingProxy.cpp
+index 66be84dff1715112b8ab0b6eacb4bf78592bb26c..262746585420df16bb3c0cb2c6e582860f69f418 100644
+--- a/Source/WebCore/workers/WorkerMessagingProxy.cpp
++++ b/Source/WebCore/workers/WorkerMessagingProxy.cpp
+@@ -28,6 +28,7 @@
+ #include "config.h"
+ #include "WorkerMessagingProxy.h"
+ 
++#include "BackForwardCache.h"
+ #include "BadgeClient.h"
+ #include "CacheStorageProvider.h"
+ #include "Chrome.h"
+@@ -291,9 +292,27 @@ void WorkerMessagingProxy::postTaskToWorkerGlobalScope(Function<void(ScriptExecu
+ 
+ void WorkerMessagingProxy::suspendForBackForwardCache()
+ {
+-    if (RefPtr workerThread = m_workerThread)
++    if (RefPtr workerThread = m_workerThread) {
+         workerThread->suspend();
+-    else
++#if PLATFORM(HAIKU)
++        // A worker suspends between tasks, so one whose script never returns
++        // (a busy loop) kept running, at full speed, for as long as its page
++        // stayed in the back/forward cache: three visits to a page with 16
++        // such workers left 48 threads spinning (#193). If the worker has not
++        // reached its suspension point after a while, the page leaves the
++        // cache; its document is destroyed, which terminates the worker
++        // through the VM's traps, as closing the tab does.
++        RefPtr document = dynamicDowncast<Document>(m_scriptExecutionContext.get());
++        if (document) {
++            RunLoop::mainSingleton().dispatchAfter(2_s, [workerThread, weakDocument = WeakPtr<Document, WeakPtrImplWithEventTargetData> { *document }] {
++                RefPtr document = weakDocument.get();
++                if (!document || document->backForwardCacheState() != Document::InBackForwardCache || !workerThread->isStillRunningWhileSuspendedHaiku())
++                    return;
++                BackForwardCache::singleton().removePageHoldingDocumentHaiku(*document);
++            });
++        }
++#endif
++    } else
+         m_askedToSuspend = true;
+ }
+ 
+diff --git a/Source/WebCore/workers/WorkerOrWorkletThread.cpp b/Source/WebCore/workers/WorkerOrWorkletThread.cpp
+index 1bfded838be2c26dec022354aa7f9ccb7b4292db..3e17088a2eff62ff1468af9b1d83bbe2ece3be98 100644
+--- a/Source/WebCore/workers/WorkerOrWorkletThread.cpp
++++ b/Source/WebCore/workers/WorkerOrWorkletThread.cpp
+@@ -317,7 +317,13 @@ void WorkerOrWorkletThread::suspend()
+     if (is<WorkerMainRunLoop>(m_runLoop.get()))
+         return;
+ 
++#if PLATFORM(HAIKU)
++    m_reachedSuspensionHaiku = false;
++#endif
+     m_runLoop->postTask([protectedThis = Ref { *this }](ScriptExecutionContext&) {
++#if PLATFORM(HAIKU)
++        protectedThis->m_reachedSuspensionHaiku = true;
++#endif
+         if (RefPtr globalScope = protectedThis->m_globalScope)
+             globalScope->suspend();
+ 
+diff --git a/Source/WebCore/workers/WorkerOrWorkletThread.h b/Source/WebCore/workers/WorkerOrWorkletThread.h
+index ee4a7dc68cb7424ed9529cd47dc95a136cd2f7d9..66ca13e15fe407c553e49029123401d8f68e9592 100644
+--- a/Source/WebCore/workers/WorkerOrWorkletThread.h
++++ b/Source/WebCore/workers/WorkerOrWorkletThread.h
+@@ -113,6 +113,14 @@ private:
+     ThreadSafeWeakHashSet<WorkerOrWorkletThread> m_childThreads;
+     Function<void()> m_runWhenLastChildThreadIsGone;
+     bool m_isSuspended { false };
++#if PLATFORM(HAIKU)
++    std::atomic<bool> m_reachedSuspensionHaiku { false };
++public:
++    // Suspended, but its script has not yet given the thread back to reach
++    // the suspension task (a busy loop never does).
++    bool isStillRunningWhileSuspendedHaiku() const { return m_isSuspended && !m_reachedSuspensionHaiku; }
++private:
++#endif
+     bool m_pausedForDebugger { false };
+ };
+ 
 diff --git a/Source/WebCore/workers/WorkerRunLoop.cpp b/Source/WebCore/workers/WorkerRunLoop.cpp
 index 9a6c5c95b12253c3aa3ff94b63b71153ed2742b3..b2926db31e84022eb9d21dc8b4215e4d9e6236b8 100644
 --- a/Source/WebCore/workers/WorkerRunLoop.cpp
