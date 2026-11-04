@@ -53,7 +53,8 @@ const char* kPackageInfo = "package-attributes:\n"
     "\tarchitecture: x86_64\n"
     "\tversion: 0.1.0~git20261019.0340-1\n"
     "\tprovides: summit = 0.1.0~git20261019.0340\n"
-    "\trequires: summit_webkit>=1.10.1~git20261019.0340\n";
+    "\trequires: summit_webkit>=1.10.1~git20261019.0340\n"
+    "\trequires: haiku>=r1~beta6_hrev60207_2460\n";
 }
 
 int main()
@@ -199,6 +200,30 @@ int main()
     haiku.description = "Summit. The Haiku R1/beta6 build, made by air/OS CI from Summit 15fce3d.";
     check(CheckDownloadedPackage(haiku, build->summit, "x86_64", false).empty()
         && !CheckDownloadedPackage(haiku, build->summit, "x86_64", true).empty(), "Haiku build");
+    // The OS the packages ask for (#192): the laptop's air/OS of 31 October is
+    // older than the SDK the 4 November build was made with.
+    check(info.requirements.size() == 2, "requirements parsed");
+    const auto required = RequiredHaikuVersion(info);
+    check(required && required->ToString() == "r1~beta6_hrev60207_2460", "required OS version");
+    const auto laptop = PackageVersion::Parse("r1~beta6_hrev60207_2112-1");
+    const auto current = PackageVersion::Parse("r1~beta6_hrev60207_2460-1");
+    const auto later = PackageVersion::Parse("r1~beta6_hrev60300_12-1");
+    check(OSTooOldFor(info, laptop), "older OS is too old");
+    check(!OSTooOldFor(info, current) && !OSTooOldFor(info, later), "same or newer OS is enough");
+    check(!OSTooOldFor(info, std::nullopt), "unknown OS: pkgman decides");
+    auto spaced = info;
+    spaced.requirements = {"summit_webkit>=1", "haiku >= r1~beta6_hrev60207_2460"};
+    check(OSTooOldFor(spaced, laptop), "spaced requirement");
+    auto noOS = info;
+    noOS.requirements = {"summit_webkit>=1"};
+    check(!RequiredHaikuVersion(noOS) && !OSTooOldFor(noOS, laptop), "no OS requirement");
+    // pkgman's refusal on the laptop, 5 November.
+    check(IsMissingOSRequirement("Encountered problems:\nproblem 1: nothing provides haiku>=r1~beta6_hrev60207_2460 needed by "
+        "summit_webkit-1.10.1~git20261104.2024-1\n"), "pkgman OS refusal");
+    check(!IsMissingOSRequirement("problem 1: nothing provides lib:libopenh264>=2 needed by summit_webkit"), "other refusal");
+    check(OSTooOldMessage(true) == "Your OS version isn't new enough to support the latest Summit version. Please update via the "
+        "System Updater app.", "air/OS message");
+    check(OSTooOldMessage(false).find("SoftwareUpdater app.") != std::string::npos, "Haiku message");
     auto older = info;
     older.version = "0.1.0~git20261019.0305-1";
     check(CheckDownloadedPackage(older, build->summit, "x86_64", true).find("has version") != std::string::npos, "wrong version");

@@ -14,6 +14,7 @@
 #include <OS.h>
 #include <Path.h>
 #include <Polygon.h>
+#include <Roster.h>
 #include <Region.h>
 #include <ScrollView.h>
 #include <StatusBar.h>
@@ -51,7 +52,13 @@ constexpr uint32 kCheckDone = 'upcd', kTick = 'uptk', kOpenRelease = 'upal';
 // The update window: its buttons, the install thread's reports, and the
 // application's answer when it did not restart.
 constexpr uint32 kInstall = 'upin', kShowChanges = 'upsc', kInstallProgress = 'uppg', kInstallDone = 'updn',
-    kRestartCancelled = 'uprc', kActivate = 'upac';
+    kRestartCancelled = 'uprc', kActivate = 'upac', kOpenOSUpdater = 'upos';
+
+// The app that updates the OS: air/OS's System Updater, Haiku's SoftwareUpdater.
+const char* OSUpdaterSignature()
+{
+    return SUMMIT_AIROS ? "application/x-vnd.airos-SystemUpdater" : "application/x-vnd.haiku-softwareupdater";
+}
 // The window shown while a manual check runs: closed when the check is done,
 // cancelled by the user, and its bar's animation.
 constexpr uint32 kCheckingClose = 'upcc', kCheckingCancelled = 'upcx', kBusyStep = 'upbs';
@@ -538,11 +545,34 @@ void Report(const BMessenger& window, const std::string& text, float fraction)
     window.SendMessage(&progress);
 }
 
+// The packages need a newer OS than the one installed (#192): the window
+// says so and offers the OS's updater instead of pkgman's refusal.
+struct OSTooOldError : std::runtime_error {
+    using std::runtime_error::runtime_error;
+};
+
+// The installed OS: the haiku package that libbe comes from
+// ("haiku-r1~beta6_hrev60207_2460-1"). SUMMIT_UPDATE_HAIKU_VERSION pretends
+// another one, to try the refusal on an up-to-date system.
+std::optional<PackageVersion> InstalledHaikuVersion()
+{
+    if (const char* forced = std::getenv("SUMMIT_UPDATE_HAIKU_VERSION"); forced && *forced)
+        return PackageVersion::Parse(forced);
+    BPath library;
+    if (find_directory(B_SYSTEM_LIB_DIRECTORY, &library) != B_OK || library.Append("libbe.so") != B_OK)
+        return std::nullopt;
+    const auto package = ParseVersionedPackage(Attribute(library.Path(), "SYS:PACKAGE"));
+    if (!package || package->name != "haiku") return std::nullopt;
+    return package->version;
+}
+
 // Downloads, checks and installs the two packages, then tells the window
-// (kInstallDone: "error", or "detail" of a test run).
+// (kInstallDone: "error", or "detail" of a test run; "osTooOld" when the
+// packages need a newer OS).
 void InstallBuild(Offer offer, BMessenger window, std::shared_ptr<std::atomic<bool>> cancelled)
 {
     std::string error, detail;
+    bool osTooOld = false;
     // pkgman finished its transaction: from here a failure leaves the system changed.
     bool changed = false;
     try {
@@ -584,15 +614,20 @@ void InstallBuild(Offer offer, BMessenger window, std::shared_ptr<std::atomic<bo
             files.push_back(path);
         }
         if (*cancelled) throw std::runtime_error("cancelled");
-        // What each package says it is.
+        // What each package says it is, and the OS it needs.
         Report(window, "Checking the packages…", 1);
+        const auto installedHaiku = InstalledHaikuVersion();
         size_t index = 0;
         for (const auto* package : {&build.webkit, &build.summit}) {
             int status = 0;
             const auto output = RunShell("package list -i " + ShellQuote(files[index++].string()), 60000000, status);
             if (status != 0) throw std::runtime_error(package->fileName + " is not a package that can be read:\n" + Tail(output, 600));
-            const auto problem = CheckDownloadedPackage(ParsePackageInfo(output), *package, PackageArchitecture(), SUMMIT_AIROS);
+            const auto info = ParsePackageInfo(output);
+            const auto problem = CheckDownloadedPackage(info, *package, PackageArchitecture(), SUMMIT_AIROS);
             if (!problem.empty()) throw std::runtime_error(problem);
+            if (OSTooOldFor(info, installedHaiku))
+                throw OSTooOldError(package->fileName + " needs haiku " + RequiredHaikuVersion(info)->ToString()
+                    + " or later; this system has " + installedHaiku->ToString() + ".");
         }
         if (*cancelled) throw std::runtime_error("cancelled");
         // Both in one transaction: never one without the other.
@@ -619,6 +654,8 @@ void InstallBuild(Offer offer, BMessenger window, std::shared_ptr<std::atomic<bo
             int status = 0;
             const auto output = RunShell(install, 20 * 60 * 1000000LL, status);
             std::fprintf(stderr, "Summit update: %s (status %d)\n%s\n", install.c_str(), status, Tail(output, 4000).c_str());
+            if (status != 0 && IsMissingOSRequirement(output))
+                throw OSTooOldError("pkgman: " + Tail(output, 900));
             if (status != 0)
                 throw std::runtime_error("pkgman could not install the packages" + std::string(status < 0 ? " in time" : "")
                     + ":\n" + Tail(output, 900));
@@ -631,11 +668,15 @@ void InstallBuild(Offer offer, BMessenger window, std::shared_ptr<std::atomic<bo
             detail = "Installed with: " + install;
         }
         std::fprintf(stderr, "Summit update: %s\n", detail.c_str());
+    } catch (const OSTooOldError& exception) {
+        error = exception.what();
+        osTooOld = true;
     } catch (const std::exception& exception) {
         error = exception.what();
     }
     BMessage finished(kInstallDone);
     if (!error.empty()) finished.AddString("error", error.c_str());
+    finished.AddBool("osTooOld", osTooOld);
     finished.AddString("detail", detail.c_str());
     finished.AddBool("changed", changed);
     window.SendMessage(&finished);
@@ -837,6 +878,11 @@ public:
         switch (message->what) {
             case kInstall:
                 if (fPhase != Phase::Ready && fPhase != Phase::Failed) break;
+                if (fPhase == Phase::Failed && fNeedsNewerOS) {
+                    // Trying again cannot help until the OS is updated.
+                    LaunchOSUpdater();
+                    break;
+                }
                 fCancelled = std::make_shared<std::atomic<bool>>(false);
                 SetPhase(Phase::Downloading, "Starting the download…");
                 fProgress->Show();
@@ -881,6 +927,19 @@ public:
                         std::lock_guard lock(fState->mutex);
                         fState->detail = error;
                     }
+                    if (message->GetBool("osTooOld", false)) {
+                        // Nothing was installed; the OS has to be updated first (#192).
+                        // The window's line is short; the alert says it in full.
+                        const std::string text = OSTooOldMessage(SUMMIT_AIROS);
+                        fNeedsNewerOS = true;
+                        SetPhase(Phase::Failed, "Your OS isn't new enough for this Summit. Update it with "
+                            + OSUpdaterName(SUMMIT_AIROS) + " first.", 0);
+                        auto* prompt = new BAlert("Summit Update", text.c_str(), ("Open " + OSUpdaterName(SUMMIT_AIROS)).c_str(),
+                            "OK", nullptr, B_WIDTH_AS_USUAL, B_INFO_ALERT);
+                        prompt->SetShortcut(1, B_ESCAPE);
+                        prompt->Go(new BInvoker(new BMessage(kOpenOSUpdater), this));
+                        break;
+                    }
                     const std::string summary = message->GetBool("changed", false)
                         ? "pkgman installed the packages, but the new build is not in place."
                         : "The update did not complete. Summit is as it was.";
@@ -901,6 +960,10 @@ public:
             }
             case kActivate:
                 Activate();
+                break;
+            case kOpenOSUpdater:
+                // The alert's first button (which == 0).
+                if (message->GetInt32("which", 1) == 0) LaunchOSUpdater();
                 break;
             case kRestartCancelled:
                 if (fPhase == Phase::Restarting)
@@ -948,6 +1011,16 @@ private:
                 : "Installs both packages (" + FormatByteSize(size) + "), then Summit restarts with its windows and tabs.";
         SetPhase(Phase::Ready, text, 0);
     }
+    // Opens (or brings forward) the app that updates the OS.
+    static void LaunchOSUpdater()
+    {
+        const status_t status = be_roster->Launch(OSUpdaterSignature());
+        if (status == B_ALREADY_RUNNING) {
+            app_info info;
+            if (be_roster->GetAppInfo(OSUpdaterSignature(), &info) == B_OK) be_roster->ActivateApp(info.team);
+        } else if (status != B_OK)
+            std::fprintf(stderr, "Summit update: could not open %s: %s\n", OSUpdaterSignature(), strerror(status));
+    }
     void SetPhase(Phase phase, const std::string& text, float fraction = 0)
     {
         fPhase = phase;
@@ -955,7 +1028,9 @@ private:
         fStatus->SetToolTip(text.c_str());
         fStatus->SetHighUIColor(phase == Phase::Failed ? B_FAILURE_COLOR : B_PANEL_TEXT_COLOR);
         const bool busy = phase == Phase::Downloading || phase == Phase::Installing || phase == Phase::Restarting;
-        fInstall->SetLabel(phase == Phase::Failed ? "Try Again" : "Install and Restart");
+        const std::string label = phase != Phase::Failed ? std::string("Install and Restart")
+            : fNeedsNewerOS ? "Open " + OSUpdaterName(SUMMIT_AIROS) : std::string("Try Again");
+        fInstall->SetLabel(label.c_str());
         fInstall->SetEnabled(!busy && phase != Phase::Installed);
         fLater->SetLabel(phase == Phase::Downloading ? "Cancel" : phase == Phase::Ready ? "Later" : "Close");
         fLater->SetEnabled(phase != Phase::Installing && phase != Phase::Restarting);
@@ -970,6 +1045,8 @@ private:
     std::shared_ptr<std::atomic<bool>> fCancelled;
     Phase fPhase = Phase::Ready;
     bool fClosing = false;
+    // The last attempt found the OS too old for the new build.
+    bool fNeedsNewerOS = false;
     BTextView* fChanges;
     BStringView* fStatus;
     BStatusBar* fProgress;

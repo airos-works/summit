@@ -490,6 +490,10 @@ PackageFileInfo ParsePackageInfo(std::string_view text)
         if (colon == std::string_view::npos) continue;
         const auto key = line.substr(0, colon);
         const auto value = std::string(Trim(line.substr(colon + 2)));
+        if (key == "requires") {
+            info.requirements.push_back(value);
+            continue;
+        }
         std::string* field = key == "name" ? &info.name : key == "version" ? &info.version
             : key == "architecture" ? &info.architecture : key == "description" ? &info.description : nullptr;
         if (field && field->empty()) *field = value;
@@ -519,6 +523,47 @@ std::string CheckDownloadedPackage(const PackageFileInfo& info, const ReleasePac
         }
     }
     return { };
+}
+
+std::optional<PackageVersion> RequiredHaikuVersion(const PackageFileInfo& info)
+{
+    for (const auto& requirement : info.requirements) {
+        std::string_view text = Trim(requirement);
+        if (!StartsWith(text, "haiku")) continue;
+        text.remove_prefix(5);
+        text = Trim(text);
+        if (!StartsWith(text, ">=")) continue;
+        text.remove_prefix(2);
+        if (auto version = PackageVersion::Parse(Trim(text))) return version;
+    }
+    return std::nullopt;
+}
+
+bool OSTooOldFor(const PackageFileInfo& info, const std::optional<PackageVersion>& installedHaiku)
+{
+    const auto required = RequiredHaikuVersion(info);
+    return required && installedHaiku && ComparePackageVersions(*installedHaiku, *required) < 0;
+}
+
+bool IsMissingOSRequirement(std::string_view output)
+{
+    for (size_t at = output.find("nothing provides"); at != std::string_view::npos; at = output.find("nothing provides", at + 1)) {
+        auto rest = Trim(output.substr(at + 16));
+        if (StartsWith(rest, "haiku>") || StartsWith(rest, "haiku >") || StartsWith(rest, "haiku="))
+            return true;
+    }
+    return false;
+}
+
+std::string OSUpdaterName(bool airos)
+{
+    return airos ? "System Updater" : "SoftwareUpdater";
+}
+
+std::string OSTooOldMessage(bool airos)
+{
+    return "Your OS version isn't new enough to support the latest Summit version. Please update via the "
+        + OSUpdaterName(airos) + " app.";
 }
 
 bool UpdateCheckDue(int64_t lastCheck, int64_t now)

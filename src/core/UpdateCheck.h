@@ -146,12 +146,28 @@ std::string FormatChanges(const Comparison&, size_t limit = 60);
 // What `package list -i FILE` says about a package file.
 struct PackageFileInfo {
     std::string name, version, architecture, description;
+    // Each "requires:" line, as written ("haiku>=r1~beta6_hrev60207_2460").
+    std::vector<std::string> requirements;
 };
 PackageFileInfo ParsePackageInfo(std::string_view text);
 // Checks a downloaded package against what the release said it is: its name,
 // version, architecture and (from its description) the system it is for.
 // Empty when it matches, otherwise why not.
 std::string CheckDownloadedPackage(const PackageFileInfo&, const ReleasePackage&, std::string_view architecture, bool airos);
+
+// The oldest haiku package (the OS) a package asks for ("haiku>=VERSION" or
+// "haiku >= VERSION" among its requires); nothing when it names none.
+std::optional<PackageVersion> RequiredHaikuVersion(const PackageFileInfo&);
+// The installed OS is older than a package asks for. False when either
+// version is unknown: pkgman decides then.
+bool OSTooOldFor(const PackageFileInfo&, const std::optional<PackageVersion>& installedHaiku);
+// pkgman refused the packages because nothing provides the haiku version
+// they ask for ("nothing provides haiku>=... needed by ...").
+bool IsMissingOSRequirement(std::string_view pkgmanOutput);
+// What the update window says when the OS is too old for the latest Summit,
+// and the app that updates it (air/OS: System Updater; Haiku: SoftwareUpdater).
+std::string OSTooOldMessage(bool airos);
+std::string OSUpdaterName(bool airos);
 
 // The automatic check runs at most once a day: when the last one was a day
 // ago, never happened, or is in the future (the clock went back).

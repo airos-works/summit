@@ -34,6 +34,13 @@ to watch the README's build tables and run `pkgman` by hand.
   starts the next time Summit starts. When something fails, a message gives
   the reason (pkgman's own output if it was pkgman), Summit is as it was, and
   the button becomes **Try Again**.
+- When the new build needs a newer OS than the installed one (#192: the air/OS
+  packages require the air/OS revision they were built against), nothing is
+  installed and an alert says "Your OS version isn't new enough to support
+  the latest Summit version. Please update via the System Updater app." with
+  an **Open System Updater** button (on stock Haiku: SoftwareUpdater); the
+  window's button becomes the same. Before, pkgman's "nothing provides
+  haiku>=…" was all there was.
 - **About Summit** shows the packages that run: "Summit
   0.1.0~git20261019.0340-1 (15fce3d)" and "Summit WebKit
   1.10.1~git20261019.0340-1", or "Not installed from a package".
@@ -84,7 +91,9 @@ nor Haiku, tested on the host in `summit_update_tests`;
   one, a `SHA256SUMS` file; these must agree with each other. Then `package
   list -i` must name the right package, version and architecture, and the
   system its description names ("The air/OS build", "The Haiku R1/beta6
-  build") must be this one. Both are installed in one transaction, `pkgman
+  build") must be this one, and a `haiku>=` among its requires must not be
+  newer than the installed haiku package (libbe's `SYS:PACKAGE`); pkgman's
+  "nothing provides haiku…" counts as the same refusal. Both are installed in one transaction, `pkgman
   install -y [-H] summit_webkit-….hpkg summit-….hpkg`, so one is never
   installed without the other; afterwards the executable's `SYS:PACKAGE`
   must name the new version. Commands run through `/bin/sh` without the
@@ -123,6 +132,8 @@ without touching the system:
 - `SUMMIT_UPDATE_INSTALLED="summit-0.1.0~git20261017.1829-1
   summit_webkit-1.10.1~git20261017.1829-1 56fb359"` pretends those packages
   (and commit) are installed. A pretended build always runs as a test.
+- `SUMMIT_UPDATE_HAIKU_VERSION=r1~beta6_hrev59000_1-1` pretends that OS
+  version is installed, to see the refusal on an up-to-date system.
 - `SUMMIT_UPDATE_DRY_RUN=1` replaces the pkgman transaction: both packages
   are downloaded and checked as for a real update, then unpacked with
   `package extract` into a scratch folder, which must hold `apps/Summit` and
