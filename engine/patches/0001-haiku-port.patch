@@ -18271,6 +18271,29 @@ index 3027c7ce0a06c8fe0d068392b52c16900e0e8d38..cbab75a06194251308afa5aab5cd2169
          return;
  
      if (!url.isValid())
+diff --git a/Source/WebCore/loader/FrameLoader.cpp b/Source/WebCore/loader/FrameLoader.cpp
+index 42a7f00120c30c5cce73f62511a5cd1ce5c3df27..ee470ad26b8109d5206b389bb58a2b12c7f3fac6 100644
+--- a/Source/WebCore/loader/FrameLoader.cpp
++++ b/Source/WebCore/loader/FrameLoader.cpp
+@@ -4383,8 +4383,17 @@ void FrameLoader::continueLoadAfterNavigationPolicy(const ResourceRequest& reque
+     }
+ 
+     if (auto pendingDispatchNavigateEvent = m_policyDocumentLoader ? m_policyDocumentLoader->triggeringAction().takePendingDispatchNavigateEvent() : NavigationAction::DispatchNavigateEventFunction { }) {
+-        if (pendingDispatchNavigateEvent().isNotCompleted())
++        if (pendingDispatchNavigateEvent().isNotCompleted()) {
++            // The navigate event cancelled or intercepted this load. Drop its policy loader (unless the
++            // event started a newer navigation) and let the frame's and its parents' loads complete:
++            // a subframe navigation cancelled from the parent's load event otherwise left the page
++            // loading for good (and WebDriver waiting for it).
++            if (m_policyDocumentLoader == policyDocumentLoader)
++                setPolicyDocumentLoader(nullptr);
++            checkCompleted();
++            checkLoadComplete();
+             return;
++        }
+     }
+ 
+     FrameLoadType type = policyChecker().loadType();
 diff --git a/Source/WebCore/loader/FrameLoaderClient.h b/Source/WebCore/loader/FrameLoaderClient.h
 index ec1359b858b9ef76a4fe13140ee42d9b30234a0b..e44f80a3bb2f41df9581a6f40bf5153d8ff79f0e 100644
 --- a/Source/WebCore/loader/FrameLoaderClient.h
@@ -22438,10 +22461,29 @@ index a160424a2cbed2d1562892b8500407c8f2d342e1..4d8c15c1c51fa90a6c143eacebc77883
  WTF_MAKE_TZONE_ALLOCATED_IMPL(ScrollbarsController);
  
 diff --git a/Source/WebCore/platform/ScrollingEffectsController.cpp b/Source/WebCore/platform/ScrollingEffectsController.cpp
-index b52b305554da70194cd0751572f755112834ff02..c37ecd7657dff41567b872adefbb691f5db22033 100644
+index b52b305554da70194cd0751572f755112834ff02..7e385564853946c65019b59ec02faee584cb4fe7 100644
 --- a/Source/WebCore/platform/ScrollingEffectsController.cpp
 +++ b/Source/WebCore/platform/ScrollingEffectsController.cpp
-@@ -428,6 +428,23 @@ bool ScrollingEffectsController::handleWheelEvent(const PlatformWheelEvent& whee
+@@ -363,10 +363,15 @@ void ScrollingEffectsController::adjustDeltaForSnappingIfNeeded(float& deltaX, f
+         auto extents = m_client.scrollExtents();
+ 
+         auto originalOffset = LayoutPoint(scrollOffset.x() / scale, scrollOffset.y() / scale);
+-        auto newOffset = LayoutPoint((scrollOffset.x() + deltaX) / scale, (scrollOffset.y() + deltaY) / scale);
++        // A wheel step past the end lands at the end: snapping the unclamped destination missed a
++        // snap area that covers the snapport there and snapped back (#180, overscroll-snap).
++        auto maximumOffset = extents.maximumScrollOffset();
++        auto newOffset = LayoutPoint(std::clamp(scrollOffset.x() + deltaX, 0.0f, maximumOffset.x()) / scale, std::clamp(scrollOffset.y() + deltaY, 0.0f, maximumOffset.y()) / scale);
+ 
+-        auto offsetX = snapOffsetsInfo()->closestSnapOffset(ScrollEventAxis::Horizontal, LayoutSize(extents.contentsSize), newOffset, deltaX, originalOffset.x()).first;
+-        auto offsetY = snapOffsetsInfo()->closestSnapOffset(ScrollEventAxis::Vertical, LayoutSize(extents.contentsSize), newOffset, deltaY, originalOffset.y()).first;
++        // The snapport, not the contents: with the contents' size, a snap area larger than the
++        // snapport never "covers" it, and a wheel scroll inside such an area snapped back (#180).
++        auto offsetX = snapOffsetsInfo()->closestSnapOffset(ScrollEventAxis::Horizontal, LayoutSize(extents.snapportSize), newOffset, deltaX, originalOffset.x()).first;
++        auto offsetY = snapOffsetsInfo()->closestSnapOffset(ScrollEventAxis::Vertical, LayoutSize(extents.snapportSize), newOffset, deltaY, originalOffset.y()).first;
+ 
+         deltaX = (offsetX - originalOffset.x()) * scale;
+         deltaY = (offsetY - originalOffset.y()) * scale;
+@@ -428,6 +433,23 @@ bool ScrollingEffectsController::handleWheelEvent(const PlatformWheelEvent& whee
          return false;
  
  #if ENABLE(SMOOTH_SCROLLING)
@@ -22824,6 +22866,22 @@ index ce4e0d940167703a010a3d14f8a51ee98b93fc47..194ed6288d965f9734f7d39afbc80efd
      IntRect m_frame; // Not used when a native widget exists.
  };
  
+diff --git a/Source/WebCore/platform/adwaita/ScrollbarThemeAdwaita.h b/Source/WebCore/platform/adwaita/ScrollbarThemeAdwaita.h
+index fea966a8bfaea4858264833bf1c29028d56d8658..9be25c0a8c7fbc18552d571ffb0da4a5adbd904c 100644
+--- a/Source/WebCore/platform/adwaita/ScrollbarThemeAdwaita.h
++++ b/Source/WebCore/platform/adwaita/ScrollbarThemeAdwaita.h
+@@ -52,6 +52,11 @@ protected:
+ 
+     int scrollbarThickness(ScrollbarWidth, OverlayScrollbarSizeRelevancy = OverlayScrollbarSizeRelevancy::IncludeOverlayScrollbarSize) override;
+     int minimumThumbLength(Scrollbar&) override;
++#if PLATFORM(HAIKU)
++    // Space and Page Down page by the view less 40 px, as Safari does (not 80% of it): with
++    // mandatory scroll snapping, a page then reaches the snap position Safari reaches (#181).
++    int maxOverlapBetweenPages() override { return 40; }
++#endif
+ 
+     bool hasButtons(Scrollbar&) override;
+     bool hasThumb(Scrollbar&) override;
 diff --git a/Source/WebCore/platform/audio/AudioStreamDescription.h b/Source/WebCore/platform/audio/AudioStreamDescription.h
 index 42b0060c8d236db653290378a12633923b3315a8..2d78b7da58d4443ca52d4e9c04a3eb8c1650dc41 100644
 --- a/Source/WebCore/platform/audio/AudioStreamDescription.h
@@ -29460,7 +29518,7 @@ index 160ba4f2623722caaf670da2b6eb3f4b1d3f2f5f..7aea0867b4ac36a7f4a52ccbe24b102b
      keepRect.unite(coverRect);
      keepRect.inflateX(m_tileSize.width() / 2);
 diff --git a/Source/WebCore/platform/graphics/coordinated/CoordinatedPlatformLayer.cpp b/Source/WebCore/platform/graphics/coordinated/CoordinatedPlatformLayer.cpp
-index 63ec41fac1fe1f6d4b7606555093bc4bed44d365..d687d1aba7c7e404d1de332bef700328047e2c7f 100644
+index 63ec41fac1fe1f6d4b7606555093bc4bed44d365..bbce43a53aaac3cf27697187d1061d59e4d4f8b3 100644
 --- a/Source/WebCore/platform/graphics/coordinated/CoordinatedPlatformLayer.cpp
 +++ b/Source/WebCore/platform/graphics/coordinated/CoordinatedPlatformLayer.cpp
 @@ -166,6 +166,52 @@ void CoordinatedPlatformLayer::invalidateTarget()
@@ -29605,7 +29663,19 @@ index 63ec41fac1fe1f6d4b7606555093bc4bed44d365..d687d1aba7c7e404d1de332bef700328
              layer.setBackgroundColor(m_backgroundColor);
              m_pendingChanges.remove(Change::BackgroundColor);
          }
-@@ -1167,7 +1272,9 @@ void CoordinatedPlatformLayer::flushCompositingStateOnTarget(const OptionSet<Com
+@@ -1162,12 +1267,21 @@ void CoordinatedPlatformLayer::flushCompositingStateOnTarget(const OptionSet<Com
+             m_pendingChanges.remove(Change::Opacity);
+         }
+ 
++#if PLATFORM(HAIKU)
++        if (m_pendingChanges.contains(Change::BlendMode)) {
++            layer.setBlendMode(m_blendMode);
++            m_pendingChanges.remove(Change::BlendMode);
++        }
++#endif
++
+         if (m_pendingChanges.contains(Change::BackingStore)) {
+             if (m_backingStoreProxy) {
                  if (!m_backingStore)
                      m_backingStore = CoordinatedBackingStore::create();
                  layer.setBackingStore(m_backingStore.get());
@@ -29615,7 +29685,7 @@ index 63ec41fac1fe1f6d4b7606555093bc4bed44d365..d687d1aba7c7e404d1de332bef700328
  
                  if (auto* animatedBackingStoreClient = m_backingStoreProxy->animatedBackingStoreClient())
                      layer.setAnimatedBackingStoreClient(animatedBackingStoreClient);
-@@ -1175,6 +1282,10 @@ void CoordinatedPlatformLayer::flushCompositingStateOnTarget(const OptionSet<Com
+@@ -1175,6 +1289,10 @@ void CoordinatedPlatformLayer::flushCompositingStateOnTarget(const OptionSet<Com
                  layer.setBackingStore(nullptr);
                  layer.setAnimatedBackingStoreClient(nullptr);
                  m_backingStore = nullptr;
@@ -29626,7 +29696,7 @@ index 63ec41fac1fe1f6d4b7606555093bc4bed44d365..d687d1aba7c7e404d1de332bef700328
              }
              m_pendingChanges.remove(Change::BackingStore);
          }
-@@ -1290,6 +1401,18 @@ void CoordinatedPlatformLayer::flushCompositingStateOnTarget(const OptionSet<Com
+@@ -1290,6 +1408,18 @@ void CoordinatedPlatformLayer::flushCompositingStateOnTarget(const OptionSet<Com
              m_contentsBuffer.committed = WTF::move(m_contentsBuffer.pending);
              m_contentsBuffer.hasCommitted = !!m_contentsBuffer.committed;
              m_pendingChanges.remove(Change::ContentsBuffer);
@@ -43075,10 +43145,10 @@ index 0000000000000000000000000000000000000000..ff582f23094174fff0cf70369a24713f
 +} // namespace WebCore
 diff --git a/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaiku.cpp b/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..5c09ae10482c8758bc031c6676ee5d5b06f5bde1
+index 0000000000000000000000000000000000000000..5c4c369de995ba8c0441708d2760c18c0eb0203c
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaiku.cpp
-@@ -0,0 +1,2263 @@
+@@ -0,0 +1,2260 @@
 +/*
 + * Copyright (C) 2014-2016 Haiku, Inc.
 + *
@@ -43234,8 +43304,7 @@ index 0000000000000000000000000000000000000000..5c09ae10482c8758bc031c6676ee5d5b
 +}
 +
 +MediaPlayerPrivate::MediaPlayerPrivate(MediaPlayer& player)
-+    : m_didReceiveData(false)
-+    , m_mediaFile(nullptr)
++    : m_mediaFile(nullptr)
 +    , m_audioTrack(nullptr)
 +    , m_videoTrack(nullptr)
 +    , m_soundPlayer(nullptr)
@@ -44513,9 +44582,7 @@ index 0000000000000000000000000000000000000000..5c09ae10482c8758bc031c6676ee5d5b
 +
 +bool MediaPlayerPrivate::didLoadingProgress() const
 +{
-+    bool progress = m_didReceiveData;
-+    m_didReceiveData = false;
-+    return progress;
++    return m_didReceiveData.exchange(false);
 +}
 +
 +bool MediaPlayerPrivate::didPassCORSAccessCheck() const
@@ -44987,7 +45054,7 @@ index 0000000000000000000000000000000000000000..5c09ae10482c8758bc031c6676ee5d5b
 +        if (isHLSPlaylistURL(mediaURL)) {
 +            if (!downloadHLSByteRangeMedia(mediaURL, cancellation, context, m_downloadPath, m_secondaryDownloadPath))
 +                return;
-+        } else if (auto stream = mediaStreamingEnabled() ? StreamingMediaIO::open(mediaURL.UrlString().String(), m_abort, m_userAgent, m_referrer, context) : nullptr)
++        } else if (auto stream = mediaStreamingEnabled() ? StreamingMediaIO::open(mediaURL.UrlString().String(), m_abort, m_userAgent, m_referrer, context, &m_didReceiveData) : nullptr)
 +            m_downloadFile = stream.release();
 +        else if (m_abort || !downloadMediaFile(mediaURL, cancellation, context, m_downloadPath))
 +            return;
@@ -45344,7 +45411,7 @@ index 0000000000000000000000000000000000000000..5c09ae10482c8758bc031c6676ee5d5b
 +#endif
 diff --git a/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaiku.h b/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaiku.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..7d7398ed294e485d2708cb41295954d8eca3d608
+index 0000000000000000000000000000000000000000..697a5429ec08d45368e96da133c8a0ae6c6fe63a
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaiku.h
 @@ -0,0 +1,313 @@
@@ -45567,7 +45634,7 @@ index 0000000000000000000000000000000000000000..7d7398ed294e485d2708cb41295954d8
 +        static void getSupportedTypes(WTF::HashSet<WTF::String>&);
 +        static MediaPlayer::SupportsType supportsType(const MediaEngineSupportParameters&);
 +
-+        mutable bool m_didReceiveData;
++        mutable std::atomic<bool> m_didReceiveData { false }; // Set by StreamingMediaIO's thread.
 +        BMediaFile* m_mediaFile;
 +        BMediaFile* m_secondaryMediaFile { nullptr };
 +        // A downloaded file, or a StreamingMediaIO that fetches as it is read.
@@ -51999,10 +52066,10 @@ index 0000000000000000000000000000000000000000..ca4c2bcb3955d009cccdd88bc4fbcfaa
 +} // namespace WebCore
 diff --git a/Source/WebCore/platform/graphics/haiku/StreamingMediaIOHaiku.h b/Source/WebCore/platform/graphics/haiku/StreamingMediaIOHaiku.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..342ac91f95b58630b3659f0f8090ff75b3ad38c5
+index 0000000000000000000000000000000000000000..22c6bf63b4ee2e9665a6955c64587182e849e49b
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/haiku/StreamingMediaIOHaiku.h
-@@ -0,0 +1,527 @@
+@@ -0,0 +1,573 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#pragma once
@@ -52176,12 +52243,15 @@ index 0000000000000000000000000000000000000000..342ac91f95b58630b3659f0f8090ff75
 +    bool m_crossOrigin { false };
 +};
 +
-+// The Origin header of a request made for a MediaRequestContext, or null.
++// The headers of a request made for a MediaRequestContext: the Origin when
++// CORS applies, and Accept-Encoding: identity, as for every range request of
++// a media element (Fetch, #179); media bytes are never decoded here.
 +inline curl_slist* mediaRequestHeaders(const MediaRequestContext& context)
 +{
-+    if (!context.corsRequired())
-+        return nullptr;
-+    return curl_slist_append(nullptr, ("Origin: " + context.corsOrigin).c_str());
++    curl_slist* list = curl_slist_append(nullptr, "Accept-Encoding: identity");
++    if (context.corsRequired())
++        list = curl_slist_append(list, ("Origin: " + context.corsOrigin).c_str());
++    return list;
 +}
 +
 +// Media Kit reads a file through BPositionIO. Downloading the whole file
@@ -52202,10 +52272,14 @@ index 0000000000000000000000000000000000000000..342ac91f95b58630b3659f0f8090ff75
 +    // the page under context's CORS check.
 +    // Requests carry the page's user agent and referrer: some media hosts
 +    // refuse anything else.
++    // progress, when given, is set whenever bytes arrive (the element's
++    // 'progress' events).
 +    static std::unique_ptr<StreamingMediaIO> open(const char* url, std::atomic<bool>& abort,
-+        const std::string& userAgent = { }, const std::string& referrer = { }, const MediaRequestContext& context = { })
++        const std::string& userAgent = { }, const std::string& referrer = { }, const MediaRequestContext& context = { },
++        std::atomic<bool>* progress = nullptr)
 +    {
 +        std::unique_ptr<StreamingMediaIO> io(new StreamingMediaIO(url, abort));
++        io->m_progress = progress;
 +        io->m_userAgent = userAgent;
 +        io->m_referrer = referrer;
 +        io->m_context = context;
@@ -52242,8 +52316,10 @@ index 0000000000000000000000000000000000000000..342ac91f95b58630b3659f0f8090ff75
 +        size_t last = (position + size - 1) / chunkSize;
 +        std::unique_lock lock(m_lock);
 +        while (true) {
++            // Only the bytes this read wants: the 44-byte header of a WAV
++            // that trickles in must not wait for a whole chunk.
 +            size_t missing = first;
-+            while (missing <= last && complete(missing))
++            while (missing <= last && covered(missing, std::min<off_t>(chunkSize, position + size - off_t(missing) * chunkSize)))
 +                ++missing;
 +            if (missing > last)
 +                break;
@@ -52251,7 +52327,7 @@ index 0000000000000000000000000000000000000000..342ac91f95b58630b3659f0f8090ff75
 +                return B_INTERRUPTED;
 +            if (m_failed)
 +                return B_IO_ERROR;
-+            off_t wanted = off_t(missing) * chunkSize;
++            off_t wanted = off_t(missing) * chunkSize + m_fill[missing];
 +            // The running request gets there soon enough; otherwise ask for it.
 +            if (m_acceptsRanges && (wanted < m_streamStart || wanted > m_head + reachAhead) && m_wanted != wanted) {
 +                m_wanted = wanted;
@@ -52297,6 +52373,12 @@ index 0000000000000000000000000000000000000000..342ac91f95b58630b3659f0f8090ff75
 +    {
 +    }
 +
++    // Whether chunk index holds its bytes up to end (from the chunk's start).
++    bool covered(size_t index, off_t end) const
++    {
++        return index < m_fill.size() && m_fill[index] >= end;
++    }
++
 +    bool complete(size_t index) const
 +    {
 +        if (index >= m_fill.size())
@@ -52309,9 +52391,11 @@ index 0000000000000000000000000000000000000000..342ac91f95b58630b3659f0f8090ff75
 +    {
 +        if (m_wanted)
 +            return std::exchange(m_wanted, std::nullopt);
++        // From the first missing byte: a server that answers a range with
++        // fewer bytes than asked must not get the same request forever.
 +        for (size_t index = 0; index < m_fill.size(); ++index) {
 +            if (!complete(index))
-+                return off_t(index) * chunkSize;
++                return off_t(index) * chunkSize + m_fill[index];
 +        }
 +        return std::nullopt;
 +    }
@@ -52356,6 +52440,8 @@ index 0000000000000000000000000000000000000000..342ac91f95b58630b3659f0f8090ff75
 +            long status { 0 };
 +            off_t total { -1 };
 +            off_t length { -1 };
++            off_t rangeStart { -1 };
++            off_t skip { 0 };
 +            bool delivered { false };
 +        } transfer { *this, start, start, nullptr, MediaResponseCheck { m_context } };
 +
@@ -52391,11 +52477,16 @@ index 0000000000000000000000000000000000000000..342ac91f95b58630b3659f0f8090ff75
 +            if (line.starts_with("HTTP/")) {
 +                auto space = line.find(' ');
 +                transfer.status = space == std::string_view::npos ? 0 : std::strtol(line.data() + space + 1, nullptr, 10);
-+                transfer.total = transfer.length = -1;
++                transfer.total = transfer.length = transfer.rangeStart = -1;
++                transfer.skip = 0;
 +            } else if (line.size() > 15 && !strncasecmp(line.data(), "content-range:", 14)) {
 +                auto slash = line.find('/');
 +                if (slash != std::string_view::npos && line[slash + 1] != '*')
 +                    transfer.total = std::strtoll(line.data() + slash + 1, nullptr, 10);
++                // "bytes A-B/T": where the bytes start.
++                auto digit = line.find_first_of("0123456789", 14);
++                if (digit != std::string_view::npos && (slash == std::string_view::npos || digit < slash))
++                    transfer.rangeStart = std::strtoll(line.data() + digit, nullptr, 10);
 +            } else if (line.size() > 16 && !strncasecmp(line.data(), "content-length:", 15))
 +                transfer.length = std::strtoll(line.data() + 15, nullptr, 10);
 +            else if (line == "\r\n" || line == "\n") {
@@ -52405,6 +52496,14 @@ index 0000000000000000000000000000000000000000..342ac91f95b58630b3659f0f8090ff75
 +                    std::fprintf(stderr, "Summit media: %s does not allow %s to read it (CORS)\n",
 +                        url ? mediaURLOrigin(url).c_str() : "?", transfer.io.m_context.corsOrigin.c_str());
 +                    return 0;
++                }
++                // A 206 may start before the asked offset (Fetch's range
++                // rewrites): the bytes before it are already here and are
++                // dropped. One that starts after it cannot fill the gap.
++                if (transfer.status == 206 && transfer.rangeStart >= 0) {
++                    if (transfer.rangeStart > transfer.start)
++                        return 0;
++                    transfer.skip = transfer.start - transfer.rangeStart;
 +                }
 +                if (transfer.status == 200 || transfer.status == 206)
 +                    transfer.io.didReceiveHeaders(transfer.status, transfer.status == 206 ? transfer.total : transfer.length);
@@ -52420,6 +52519,17 @@ index 0000000000000000000000000000000000000000..342ac91f95b58630b3659f0f8090ff75
 +                transfer.offset = 0;
 +            if (transfer.status != 200 && transfer.status != 206)
 +                return 0;
++            if (transfer.skip) {
++                size_t dropped = std::min<off_t>(transfer.skip, length);
++                transfer.skip -= dropped;
++                if (dropped == length)
++                    return length;
++                if (!transfer.io.store(transfer.offset, bytes + dropped, length - dropped))
++                    return 0;
++                transfer.offset += length - dropped;
++                transfer.delivered = true;
++                return length;
++            }
 +            if (!transfer.io.store(transfer.offset, bytes, length))
 +                return 0;
 +            transfer.offset += length;
@@ -52502,6 +52612,8 @@ index 0000000000000000000000000000000000000000..342ac91f95b58630b3659f0f8090ff75
 +            written += part;
 +        }
 +        m_head = offset + length;
++        if (m_progress)
++            m_progress->store(true);
 +        m_changed.notify_all();
 +        return true;
 +    }
@@ -52511,6 +52623,7 @@ index 0000000000000000000000000000000000000000..342ac91f95b58630b3659f0f8090ff75
 +    std::string m_referrer;
 +    MediaRequestContext m_context;
 +    std::atomic<bool>& m_abort;
++    std::atomic<bool>* m_progress { nullptr };
 +    off_t m_position { 0 };
 +    std::thread m_thread;
 +
@@ -56022,7 +56135,7 @@ index 9fd560e16a7e8b8b5cdf0ef54b46ab2dddc32e4f..37b7905e18e26b577ae0ec335352ae63
  
      // Y-axis should be inverted only when painting into the window.
 diff --git a/Source/WebCore/platform/graphics/texmap/TextureMapper.cpp b/Source/WebCore/platform/graphics/texmap/TextureMapper.cpp
-index 1b88532103dfc26c2a90aedce768e19f2e7059e6..a8d64f2e48640788d9170f3dba079bffbcc85d3f 100644
+index 1b88532103dfc26c2a90aedce768e19f2e7059e6..f7d88330c9732e991e5fc604172a35ab3a74bc75 100644
 --- a/Source/WebCore/platform/graphics/texmap/TextureMapper.cpp
 +++ b/Source/WebCore/platform/graphics/texmap/TextureMapper.cpp
 @@ -41,9 +41,18 @@
@@ -56539,7 +56652,21 @@ index 1b88532103dfc26c2a90aedce768e19f2e7059e6..a8d64f2e48640788d9170f3dba079bff
      TransformationMatrix matrix(modelViewMatrix);
      matrix.multiply(TransformationMatrix::rectToRect(FloatRect(0, 0, 1, 1), rect));
  
-@@ -916,6 +1264,10 @@ void TextureMapper::drawTexturedQuadWithProgram(TextureMapperShaderProgram& prog
+@@ -889,6 +1237,13 @@ void TextureMapper::draw(const FloatRect& rect, const TransformationMatrix& mode
+     if (isInMaskMode()) {
+         glBlendFunc(GL_ZERO, GL_SRC_ALPHA);
+         glEnable(GL_BLEND);
++#if PLATFORM(HAIKU)
++    } else if (m_additiveBlendingHaiku) {
++        // plus-lighter on premultiplied colors: source + destination, clamped
++        // by the 8-bit target.
++        glBlendFunc(GL_ONE, GL_ONE);
++        glEnable(GL_BLEND);
++#endif
+     } else {
+         if (flags.contains(TextureMapperFlags::ShouldBlend)) {
+             glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+@@ -916,6 +1271,10 @@ void TextureMapper::drawTexturedQuadWithProgram(TextureMapperShaderProgram& prog
      if (flags.contains(TextureMapperFlags::ShouldUseExternalOESTextureRect))
          target = GLenum(GL_TEXTURE_EXTERNAL_OES);
  
@@ -56550,7 +56677,7 @@ index 1b88532103dfc26c2a90aedce768e19f2e7059e6..a8d64f2e48640788d9170f3dba079bff
      for (unsigned i = 0; i < texturesAndSamplers.size(); ++i) {
          auto& textureAndSampler = texturesAndSamplers[i];
  
-@@ -958,7 +1310,13 @@ void TextureMapper::drawTexturedQuadWithProgram(TextureMapperShaderProgram& prog
+@@ -958,7 +1317,13 @@ void TextureMapper::drawTexturedQuadWithProgram(TextureMapperShaderProgram& prog
  void TextureMapper::drawTextureCopy(const BitmapTexture& sourceTexture, const FloatRect& sourceRect, const FloatRect& targetRect)
  {
      Ref<TextureMapperShaderProgram> program = data().getShaderProgram({ TextureMapperShaderProgram::TextureCopy });
@@ -56564,7 +56691,7 @@ index 1b88532103dfc26c2a90aedce768e19f2e7059e6..a8d64f2e48640788d9170f3dba079bff
  
      glUseProgram(program->programID());
  
-@@ -987,11 +1345,19 @@ void TextureMapper::drawTextureCopy(const BitmapTexture& sourceTexture, const Fl
+@@ -987,11 +1352,19 @@ void TextureMapper::drawTextureCopy(const BitmapTexture& sourceTexture, const Fl
  
  void TextureMapper::drawBlurred(const BitmapTexture& sourceTexture, const FloatRect& rect, float radius, Direction direction, bool alphaBlur)
  {
@@ -56584,7 +56711,7 @@ index 1b88532103dfc26c2a90aedce768e19f2e7059e6..a8d64f2e48640788d9170f3dba079bff
  
      glUseProgram(program->programID());
  
-@@ -1038,7 +1404,13 @@ RefPtr<BitmapTexture> TextureMapper::applyBlurFilter(RefPtr<BitmapTexture>& sour
+@@ -1038,7 +1411,13 @@ RefPtr<BitmapTexture> TextureMapper::applyBlurFilter(RefPtr<BitmapTexture>& sour
      if (radiusX < MinBlurRadius && radiusY < MinBlurRadius)
          return sourceTexture;
  
@@ -56598,7 +56725,7 @@ index 1b88532103dfc26c2a90aedce768e19f2e7059e6..a8d64f2e48640788d9170f3dba079bff
      IntSize currentSize = textureSize;
      IntSize targetSize = currentSize;
      Vector<Direction> blurDirections;
-@@ -1115,8 +1487,16 @@ RefPtr<BitmapTexture> TextureMapper::applyDropShadowFilter(RefPtr<BitmapTexture>
+@@ -1115,8 +1494,16 @@ RefPtr<BitmapTexture> TextureMapper::applyDropShadowFilter(RefPtr<BitmapTexture>
  {
      const auto& textureSize = sourceTexture->size();
      auto& texturePool = BitmapTexturePool::singleton();
@@ -56615,7 +56742,7 @@ index 1b88532103dfc26c2a90aedce768e19f2e7059e6..a8d64f2e48640788d9170f3dba079bff
      IntSize currentSize = textureSize;
      IntSize targetSize = currentSize;
      float radius = float(dropShadowFilter.stdDeviation());
-@@ -1221,7 +1601,14 @@ RefPtr<BitmapTexture> TextureMapper::applyDropShadowFilter(RefPtr<BitmapTexture>
+@@ -1221,7 +1608,14 @@ RefPtr<BitmapTexture> TextureMapper::applyDropShadowFilter(RefPtr<BitmapTexture>
          auto [r, g, b, a] = premultiplied(dropShadowFilter.color().toColorTypeLossy<SRGBA<float>>()).resolved();
          glUniform4f(program->colorLocation(), r, g, b, a);
  
@@ -56630,7 +56757,7 @@ index 1b88532103dfc26c2a90aedce768e19f2e7059e6..a8d64f2e48640788d9170f3dba079bff
  
          glActiveTexture(GL_TEXTURE1);
          glBindTexture(GL_TEXTURE_2D, contentTexture->id());
-@@ -1241,7 +1628,11 @@ RefPtr<BitmapTexture> TextureMapper::applySinglePassFilter(RefPtr<BitmapTexture>
+@@ -1241,7 +1635,11 @@ RefPtr<BitmapTexture> TextureMapper::applySinglePassFilter(RefPtr<BitmapTexture>
          return sourceTexture;
      }
  
@@ -56642,7 +56769,7 @@ index 1b88532103dfc26c2a90aedce768e19f2e7059e6..a8d64f2e48640788d9170f3dba079bff
  
      bindSurface(resultTexture.get());
  
-@@ -1251,6 +1642,13 @@ RefPtr<BitmapTexture> TextureMapper::applySinglePassFilter(RefPtr<BitmapTexture>
+@@ -1251,6 +1649,13 @@ RefPtr<BitmapTexture> TextureMapper::applySinglePassFilter(RefPtr<BitmapTexture>
  
      prepareFilterProgram(program.get(), filter);
      FloatRect targetRect(FloatPoint::zero(), sourceTexture->size());
@@ -56656,7 +56783,7 @@ index 1b88532103dfc26c2a90aedce768e19f2e7059e6..a8d64f2e48640788d9170f3dba079bff
      drawTexturedQuadWithProgram(program.get(), sourceTexture->id(), { }, targetRect, TransformationMatrix(), 1);
  
      return resultTexture;
-@@ -1278,6 +1676,28 @@ RefPtr<BitmapTexture> TextureMapper::applyFilters(RefPtr<BitmapTexture>& sourceT
+@@ -1278,6 +1683,28 @@ RefPtr<BitmapTexture> TextureMapper::applyFilters(RefPtr<BitmapTexture>& sourceT
  
  RefPtr<BitmapTexture> TextureMapper::applyFilter(RefPtr<BitmapTexture>& sourceTexture, const Ref<const FilterOperation>& filter, bool defersLastPass)
  {
@@ -56685,7 +56812,7 @@ index 1b88532103dfc26c2a90aedce768e19f2e7059e6..a8d64f2e48640788d9170f3dba079bff
      switch (filter->type()) {
      case FilterOperation::Type::Grayscale:
      case FilterOperation::Type::Sepia:
-@@ -1330,6 +1750,10 @@ void TextureMapper::bindDefaultSurface()
+@@ -1330,6 +1757,10 @@ void TextureMapper::bindDefaultSurface()
  
  void TextureMapper::bindSurface(BitmapTexture *surface)
  {
@@ -56696,7 +56823,7 @@ index 1b88532103dfc26c2a90aedce768e19f2e7059e6..a8d64f2e48640788d9170f3dba079bff
      if (!surface) {
          bindDefaultSurface();
          return;
-@@ -1385,6 +1809,18 @@ bool TextureMapper::beginRoundedRectClip(const TransformationMatrix& modelViewMa
+@@ -1385,6 +1816,18 @@ bool TextureMapper::beginRoundedRectClip(const TransformationMatrix& modelViewMa
      FloatQuad quad = modelViewMatrix.projectQuad(targetRect.rect());
      IntRect rect = quad.enclosingBoundingBox();
  
@@ -56715,7 +56842,7 @@ index 1b88532103dfc26c2a90aedce768e19f2e7059e6..a8d64f2e48640788d9170f3dba079bff
      clipStack().addRoundedRect(targetRect, modelViewMatrix.inverse().value());
      clipStack().intersect(rect);
      clipStack().applyIfNeeded();
-@@ -1402,6 +1838,10 @@ void TextureMapper::beginClip(const TransformationMatrix& modelViewMatrix, const
+@@ -1402,6 +1845,10 @@ void TextureMapper::beginClip(const TransformationMatrix& modelViewMatrix, const
          return;
  
      data().initializeStencil();
@@ -56727,7 +56854,7 @@ index 1b88532103dfc26c2a90aedce768e19f2e7059e6..a8d64f2e48640788d9170f3dba079bff
      Ref<TextureMapperShaderProgram> program = data().getShaderProgram(TextureMapperShaderProgram::SolidColor);
  
 diff --git a/Source/WebCore/platform/graphics/texmap/TextureMapper.h b/Source/WebCore/platform/graphics/texmap/TextureMapper.h
-index fbe7a8f854a5951881368122c9958ca62cf8617b..a58056f2c82779daedc8a88f5ef7db10e97077a7 100644
+index fbe7a8f854a5951881368122c9958ca62cf8617b..7595e372848b47d0bfc0a3de1b452d0520245b42 100644
 --- a/Source/WebCore/platform/graphics/texmap/TextureMapper.h
 +++ b/Source/WebCore/platform/graphics/texmap/TextureMapper.h
 @@ -31,6 +31,7 @@
@@ -56738,12 +56865,14 @@ index fbe7a8f854a5951881368122c9958ca62cf8617b..a58056f2c82779daedc8a88f5ef7db10
  #include <wtf/OptionSet.h>
  #include <wtf/TZoneMalloc.h>
  #include <wtf/Vector.h>
-@@ -100,6 +101,41 @@ public:
+@@ -100,6 +101,43 @@ public:
      void endClip();
      void endClipWithoutApplying();
      IntRect clipBounds();
 +#if PLATFORM(HAIKU)
 +    WEBCORE_EXPORT void warmShaderProgramsHaiku();
++    // Draws add to what is there (mix-blend-mode: plus-lighter) while set.
++    void setAdditiveBlendingHaiku(bool additive) { m_additiveBlendingHaiku = additive; }
 +    // What one composition drew, counted on the compositor thread while
 +    // SUMMIT_COMPOSITOR_TIMING_TRACE asks for it.
 +    struct DrawStatsHaiku {
@@ -56780,13 +56909,14 @@ index fbe7a8f854a5951881368122c9958ca62cf8617b..a58056f2c82779daedc8a88f5ef7db10
      IntSize maxTextureSize() const;
      void setDepthRange(double zNear, double zFar);
      std::pair<double, double> depthRange() const;
-@@ -148,6 +184,10 @@ private:
+@@ -148,6 +186,11 @@ private:
      void updateProjectionMatrix();
  
      bool m_isMaskMode { false };
 +#if PLATFORM(HAIKU)
 +    bool drawSplittingRoundedClipHaiku(const FloatRect& drawnBounds, const Function<void()>& drawPart);
 +    bool m_splittingRoundedClipHaiku { false };
++    bool m_additiveBlendingHaiku { false };
 +#endif
      TransformationMatrix m_patternTransform;
      WrapMode m_wrapMode { WrapMode::Stretch };
@@ -56882,7 +57012,7 @@ index 57adb06b0d3bf385a76bae2729c5e04dd5e7b268..cf25d7f33b561e652d9d051e47cf9fba
  
      size_t m_size;
 diff --git a/Source/WebCore/platform/graphics/texmap/TextureMapperLayer.cpp b/Source/WebCore/platform/graphics/texmap/TextureMapperLayer.cpp
-index 112d19b1676c297b0168941b1db5b619cd535a29..fbeaf14125155f1de1deecb843d9cf74c94aa222 100644
+index 112d19b1676c297b0168941b1db5b619cd535a29..c77741411dfbbb4ee7464a7bc3330deecd42666e 100644
 --- a/Source/WebCore/platform/graphics/texmap/TextureMapperLayer.cpp
 +++ b/Source/WebCore/platform/graphics/texmap/TextureMapperLayer.cpp
 @@ -21,6 +21,17 @@
@@ -57711,7 +57841,27 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..fbeaf14125155f1de1deecb843d9cf74
  }
  
  void TextureMapperLayer::damageWholeLayer()
-@@ -578,12 +1294,39 @@ void TextureMapperLayer::paintSelf(TextureMapperPaintOptions& options)
+@@ -557,6 +1273,19 @@ void TextureMapperLayer::damageWholeLayer()
+     ensureDamageInLayerCoordinateSpace().makeFull();
+ }
+ 
++#if PLATFORM(HAIKU)
++// The layer and all it contains. A layer that draws nothing itself (such as a
++// view transition's ::view-transition-new() holding the element's own layer)
++// drops its own damage in collectDamageSelf(), so a change of its opacity has
++// to damage what it contains.
++void TextureMapperLayer::damageWholeSubtreeHaiku()
++{
++    damageWholeLayer();
++    for (auto* child : m_children)
++        child->damageWholeSubtreeHaiku();
++}
++#endif
++
+ void TextureMapperLayer::damageWholeLayerIncludingItsRectFromPreviousFrame()
+ {
+     damageWholeLayer();
+@@ -578,12 +1307,39 @@ void TextureMapperLayer::paintSelf(TextureMapperPaintOptions& options)
      auto targetRect = layerRect();
      if (targetRect.isEmpty())
          return;
@@ -57751,7 +57901,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..fbeaf14125155f1de1deecb843d9cf74
  
      if (isFlattened() && !m_flattenedLayer->needsUpdate()) {
          m_flattenedLayer->paintToTextureMapper(options.textureMapper, m_flattenedLayer->layerRect(), transform, options.opacity);
-@@ -592,6 +1335,26 @@ void TextureMapperLayer::paintSelf(TextureMapperPaintOptions& options)
+@@ -592,6 +1348,26 @@ void TextureMapperLayer::paintSelf(TextureMapperPaintOptions& options)
  
      TextureMapperSolidColorLayer solidColorLayer;
      TextureMapperBackingStore* backingStore = m_backingStore;
@@ -57778,7 +57928,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..fbeaf14125155f1de1deecb843d9cf74
      if (m_state.backgroundColor.isValid()) {
          solidColorLayer.setColor(m_state.backgroundColor);
          backingStore = &solidColorLayer;
-@@ -599,7 +1362,21 @@ void TextureMapperLayer::paintSelf(TextureMapperPaintOptions& options)
+@@ -599,7 +1375,21 @@ void TextureMapperLayer::paintSelf(TextureMapperPaintOptions& options)
  
      options.textureMapper.setWrapMode(TextureMapper::WrapMode::Stretch);
      options.textureMapper.setPatternTransform(TransformationMatrix());
@@ -57800,7 +57950,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..fbeaf14125155f1de1deecb843d9cf74
      if (backingStore) {
          backingStore->paintToTextureMapper(options.textureMapper, targetRect, transform, options.opacity);
          if (m_state.showDebugBorders)
-@@ -608,6 +1385,10 @@ void TextureMapperLayer::paintSelf(TextureMapperPaintOptions& options)
+@@ -608,6 +1398,10 @@ void TextureMapperLayer::paintSelf(TextureMapperPaintOptions& options)
          if (m_state.showRepaintCounter)
              backingStore->drawRepaintCounter(options.textureMapper, m_state.repaintCount, m_state.debugBorderColor, targetRect, transform);
      }
@@ -57811,7 +57961,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..fbeaf14125155f1de1deecb843d9cf74
  
      TextureMapperPlatformLayer* contentsLayer = m_contentsLayer;
      if (m_state.solidColor.isValid() && m_state.solidColor.isVisible()) {
-@@ -617,6 +1398,18 @@ void TextureMapperLayer::paintSelf(TextureMapperPaintOptions& options)
+@@ -617,6 +1411,18 @@ void TextureMapperLayer::paintSelf(TextureMapperPaintOptions& options)
  
      if (!contentsLayer)
          return;
@@ -57830,7 +57980,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..fbeaf14125155f1de1deecb843d9cf74
  
      if (!m_state.contentsTileSize.isEmpty()) {
          options.textureMapper.setWrapMode(TextureMapper::WrapMode::Repeat);
-@@ -638,6 +1431,10 @@ void TextureMapperLayer::paintSelf(TextureMapperPaintOptions& options)
+@@ -638,6 +1444,10 @@ void TextureMapperLayer::paintSelf(TextureMapperPaintOptions& options)
  
      if (m_state.showDebugBorders)
          contentsLayer->drawBorder(options.textureMapper, m_state.debugBorderColor, m_state.debugBorderWidth, m_state.contentsRect, transform);
@@ -57841,7 +57991,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..fbeaf14125155f1de1deecb843d9cf74
  }
  
  void TextureMapperLayer::paintBackdrop(TextureMapperPaintOptions& options)
-@@ -653,8 +1450,18 @@ void TextureMapperLayer::paintBackdrop(TextureMapperPaintOptions& options)
+@@ -653,8 +1463,18 @@ void TextureMapperLayer::paintBackdrop(TextureMapperPaintOptions& options)
  
  void TextureMapperLayer::paintSelfAndChildren(TextureMapperPaintOptions& options)
  {
@@ -57861,7 +58011,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..fbeaf14125155f1de1deecb843d9cf74
  
      if (m_state.backdropLayer && !options.backdropLayer)
          paintBackdrop(options);
-@@ -687,8 +1494,13 @@ void TextureMapperLayer::paintSelfAndChildren(TextureMapperPaintOptions& options
+@@ -687,8 +1507,13 @@ void TextureMapperLayer::paintSelfAndChildren(TextureMapperPaintOptions& options
      }
  
      if (!isFlattened() || m_flattenedLayer->needsUpdate()) {
@@ -57876,7 +58026,24 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..fbeaf14125155f1de1deecb843d9cf74
      }
  
      if (shouldClip)
-@@ -930,14 +1742,44 @@ IntRect transformedBoundingBox(const TransformationMatrix& transform, FloatRect
+@@ -700,6 +1525,16 @@ bool TextureMapperLayer::shouldBlend() const
+     if (m_state.preserves3D)
+         return false;
+ 
++#if PLATFORM(HAIKU)
++    // mix-blend-mode: plus-lighter (a view transition's cross-fade of
++    // ::view-transition-old/new): the layer is painted into a surface that
++    // is added to what is under it, and the layer that holds such layers is
++    // painted into a surface of its own, so that they add up to each other
++    // and not to what is behind (the isolation the image pair asks for).
++    // Other blend modes are drawn normally, as before.
++    if (involvesPlusLighterHaiku())
++        return true;
++#endif
+     return m_currentOpacity < 1;
+ }
+ 
+@@ -930,14 +1765,44 @@ IntRect transformedBoundingBox(const TransformationMatrix& transform, FloatRect
      return { };
  }
  
@@ -57921,7 +58088,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..fbeaf14125155f1de1deecb843d9cf74
      else if (m_backingStore || m_state.masksToBounds || m_state.maskLayer || hasFilters() || hasBackdrop())
          localBoundingRect = layerRect();
      else if (m_contentsLayer || m_state.solidColor.isVisible())
-@@ -970,6 +1812,17 @@ void TextureMapperLayer::computeOverlapRegions(ComputeOverlapRegionData& data, c
+@@ -970,14 +1835,56 @@ void TextureMapperLayer::computeOverlapRegions(ComputeOverlapRegionData& data, c
          computeOverlapRegions(data, newReplicaTransform, false);
      }
  
@@ -57939,7 +58106,46 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..fbeaf14125155f1de1deecb843d9cf74
      if (!m_state.masksToBounds && data.mode != ComputeOverlapRegionMode::Mask && !isFlattened()) {
          for (auto* child : m_children)
              child->computeOverlapRegions(data, accumulatedReplicaTransform);
-@@ -1047,6 +1900,54 @@ Vector<IntRect, 1> TextureMapperLayer::computeConsolidatedOverlapRegionRects(Tex
+     }
+ }
+ 
++#if PLATFORM(HAIKU)
++bool TextureMapperLayer::involvesPlusLighterHaiku() const
++{
++    if (isPlusLighterHaiku())
++        return true;
++    for (auto* child : m_children) {
++        if (child->isPlusLighterHaiku())
++            return true;
++    }
++    return false;
++}
++#endif
++
+ void TextureMapperLayer::paintUsingOverlapRegions(TextureMapperPaintOptions& options)
+ {
++#if PLATFORM(HAIKU)
++    // A plus-lighter layer, or one holding such layers, is all painted
++    // through its surface (see shouldBlend()): parts without overlaps cannot
++    // be drawn straight to the target as an opacity group's can.
++    if (involvesPlusLighterHaiku()) {
++        IntSize maxTextureSize = options.textureMapper.maxTextureSize();
++        for (auto& rect : computeConsolidatedOverlapRegionRects(options)) {
++            for (int x = rect.x(); x < rect.maxX(); x += maxTextureSize.width()) {
++                for (int y = rect.y(); y < rect.maxY(); y += maxTextureSize.height()) {
++                    IntRect tileRect(IntPoint(x, y), maxTextureSize);
++                    tileRect.intersect(rect);
++                    paintWithIntermediateSurface(options, tileRect);
++                }
++            }
++        }
++        return;
++    }
++#endif
+     Region overlapRegion;
+     Region nonOverlapRegion;
+     auto mode = ComputeOverlapRegionMode::Intersection;
+@@ -1047,6 +1954,54 @@ Vector<IntRect, 1> TextureMapperLayer::computeConsolidatedOverlapRegionRects(Tex
      computeOverlapRegions(data, options.transform, false);
      ASSERT(nonOverlapRegion.isEmpty());
  
@@ -57994,12 +58200,17 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..fbeaf14125155f1de1deecb843d9cf74
      auto rects = overlapRegion.rects();
      static const size_t OverlapRegionConsolidationThreshold = 4;
      if (rects.size() > OverlapRegionConsolidationThreshold) {
-@@ -1057,8 +1958,260 @@ Vector<IntRect, 1> TextureMapperLayer::computeConsolidatedOverlapRegionRects(Tex
+@@ -1057,8 +2012,265 @@ Vector<IntRect, 1> TextureMapperLayer::computeConsolidatedOverlapRegionRects(Tex
      return rects;
  }
  
 +#if PLATFORM(HAIKU)
-+static void commitSurface(TextureMapperPaintOptions&, BitmapTexture&, const IntRect&, float);
++static void commitSurface(TextureMapperPaintOptions&, BitmapTexture&, const IntRect&, float, bool additive = false);
++#if PLATFORM(HAIKU)
++#define PLUS_LIGHTER_HAIKU isPlusLighterHaiku()
++#else
++#define PLUS_LIGHTER_HAIKU false
++#endif
 +
 +// The filtered result depends on the contents, the filters and the scale,
 +// which the filter cache compares, not on the opacity it is drawn with: an
@@ -58150,7 +58361,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..fbeaf14125155f1de1deecb843d9cf74
 +    }
 +    // The texture may be larger than the layer's rectangle (see above): it
 +    // is drawn at its own size from the rectangle's corner.
-+    commitSurface(options, *cache->texture, IntRect(target.location(), cache->texture->size()), options.opacity);
++    commitSurface(options, *cache->texture, IntRect(target.location(), cache->texture->size()), options.opacity, PLUS_LIGHTER_HAIKU);
 +    return true;
 +}
 +
@@ -58215,7 +58426,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..fbeaf14125155f1de1deecb843d9cf74
 +        std::fprintf(stderr, "Summit draw trace: backdrop cache layer=%u again=%s rect=%d,%d %dx%d\n", traceIdHaiku(this), reason, rect.x(), rect.y(), rect.width(), rect.height());
 +    }
 +    if (reusable) {
-+        commitSurface(options, *cache->texture, cache->rect, options.opacity);
++        commitSurface(options, *cache->texture, cache->rect, options.opacity, PLUS_LIGHTER_HAIKU);
 +        return true;
 +    }
 +
@@ -58239,7 +58450,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..fbeaf14125155f1de1deecb843d9cf74
 +    cache->maskVersion = mask && mask->m_backingStore ? mask->m_backingStore->contentVersionHaiku() : 0;
 +    cache->maskTransform = mask ? mask->m_layerTransforms.combined : TransformationMatrix();
 +    cache->maskSize = mask ? mask->m_state.size : FloatSize();
-+    commitSurface(options, surface.get(), rect, options.opacity);
++    commitSurface(options, surface.get(), rect, options.opacity, PLUS_LIGHTER_HAIKU);
 +    return true;
 +}
 +#endif
@@ -58255,7 +58466,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..fbeaf14125155f1de1deecb843d9cf74
      IntSize maxTextureSize = options.textureMapper.maxTextureSize();
      for (auto& rect : computeConsolidatedOverlapRegionRects(options)) {
          for (int x = rect.x(); x < rect.maxX(); x += maxTextureSize.width()) {
-@@ -1079,6 +2232,33 @@ void TextureMapperLayer::applyMask(TextureMapperPaintOptions& options)
+@@ -1079,6 +2291,33 @@ void TextureMapperLayer::applyMask(TextureMapperPaintOptions& options)
      options.textureMapper.setMaskMode(false);
  }
  
@@ -58289,7 +58500,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..fbeaf14125155f1de1deecb843d9cf74
  void TextureMapperLayer::paintIntoSurface(TextureMapperPaintOptions& options)
  {
      options.textureMapper.bindSurface(options.surface.get());
-@@ -1086,6 +2266,9 @@ void TextureMapperLayer::paintIntoSurface(TextureMapperPaintOptions& options)
+@@ -1086,6 +2325,9 @@ void TextureMapperLayer::paintIntoSurface(TextureMapperPaintOptions& options)
          SetForScope scopedTransform(options.transform, TransformationMatrix());
          SetForScope scopedReplicaLayer(options.replicaLayer, nullptr);
          SetForScope scopedBackdropLayer(options.backdropLayer, this);
@@ -58299,7 +58510,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..fbeaf14125155f1de1deecb843d9cf74
          backdropRootLayer().paintSelfAndChildren(options);
      } else
          paintSelfAndChildren(options);
-@@ -1093,7 +2276,11 @@ void TextureMapperLayer::paintIntoSurface(TextureMapperPaintOptions& options)
+@@ -1093,7 +2335,11 @@ void TextureMapperLayer::paintIntoSurface(TextureMapperPaintOptions& options)
      bool hasMask = !!m_state.maskLayer;
      bool hasReplicaMask = options.replicaLayer == this && m_state.replicaLayer->m_state.maskLayer;
      bool defersLastFilterPass = !hasMask && !hasReplicaMask;
@@ -58311,8 +58522,24 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..fbeaf14125155f1de1deecb843d9cf74
      options.textureMapper.bindSurface(options.surface.get());
      if (hasMask)
          m_state.maskLayer->applyMask(options);
-@@ -1109,9 +2296,27 @@ static void commitSurface(TextureMapperPaintOptions& options, BitmapTexture& sur
+@@ -1101,17 +2347,42 @@ void TextureMapperLayer::paintIntoSurface(TextureMapperPaintOptions& options)
+         m_state.replicaLayer->m_state.maskLayer->applyMask(options);
+ }
+ 
+-static void commitSurface(TextureMapperPaintOptions& options, BitmapTexture& surface, const IntRect& rect, float opacity)
++static void commitSurface(TextureMapperPaintOptions& options, BitmapTexture& surface, const IntRect& rect, float opacity, bool additive)
+ {
+     IntRect targetRect(rect);
+     targetRect.move(options.offset);
+     options.textureMapper.bindSurface(options.surface.get());
++#if PLATFORM(HAIKU)
++    options.textureMapper.setAdditiveBlendingHaiku(additive);
      options.textureMapper.drawTexture(surface, targetRect, { }, opacity);
++    options.textureMapper.setAdditiveBlendingHaiku(false);
++#else
++    UNUSED_PARAM(additive);
++    options.textureMapper.drawTexture(surface, targetRect, { }, opacity);
++#endif
  }
  
 +#if PLATFORM(HAIKU)
@@ -58339,7 +58566,13 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..fbeaf14125155f1de1deecb843d9cf74
      {
          SetForScope scopedSurface(options.surface, surface.ptr());
          SetForScope scopedOffset(options.offset, -toIntSize(rect.location()));
-@@ -1127,7 +2332,11 @@ void TextureMapperLayer::paintWithIntermediateSurface(TextureMapperPaintOptions&
+@@ -1122,12 +2393,16 @@ void TextureMapperLayer::paintWithIntermediateSurface(TextureMapperPaintOptions&
+         paintSelfChildrenReplicaFilterAndMask(options);
+     }
+ 
+-    commitSurface(options, surface.get(), rect, options.opacity);
++    commitSurface(options, surface.get(), rect, options.opacity, PLUS_LIGHTER_HAIKU);
+ }
  
  void TextureMapperLayer::paintSelfAndChildrenWithIntermediateSurface(TextureMapperPaintOptions& options, const IntRect& rect)
  {
@@ -58351,7 +58584,13 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..fbeaf14125155f1de1deecb843d9cf74
      {
          SetForScope scopedSurface(options.surface, surface.ptr());
          SetForScope scopedOffset(options.offset, -toIntSize(rect.location()));
-@@ -1142,6 +2351,10 @@ void TextureMapperLayer::paintSelfAndChildrenWithIntermediateSurface(TextureMapp
+@@ -1137,11 +2412,15 @@ void TextureMapperLayer::paintSelfAndChildrenWithIntermediateSurface(TextureMapp
+         surface = Ref { *options.surface };
+     }
+ 
+-    commitSurface(options, surface.get(), rect, options.opacity);
++    commitSurface(options, surface.get(), rect, options.opacity, PLUS_LIGHTER_HAIKU);
+ }
  
  void TextureMapperLayer::paintSelfChildrenReplicaFilterAndMask(TextureMapperPaintOptions& options)
  {
@@ -58362,7 +58601,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..fbeaf14125155f1de1deecb843d9cf74
      bool hasFilterOrMask = [&] {
          if (hasFilters())
              return true;
-@@ -1163,10 +2376,55 @@ void TextureMapperLayer::paintSelfChildrenReplicaFilterAndMask(TextureMapperPain
+@@ -1163,10 +2442,55 @@ void TextureMapperLayer::paintSelfChildrenReplicaFilterAndMask(TextureMapperPain
          paintSelfAndChildrenWithReplica(options);
  }
  
@@ -58418,7 +58657,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..fbeaf14125155f1de1deecb843d9cf74
  
      SetForScope scopedOpacity(options.opacity, options.opacity * m_currentOpacity);
  
-@@ -1184,8 +2442,12 @@ void TextureMapperLayer::paintFlattened(TextureMapperPaintOptions& options)
+@@ -1184,8 +2508,12 @@ void TextureMapperLayer::paintFlattened(TextureMapperPaintOptions& options)
  {
      // If painting a backdrop for a flattened layer, processing should stop here.
      // Only the elements up to the flattened layer need to be painted into the backdrop buffer.
@@ -58432,7 +58671,65 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..fbeaf14125155f1de1deecb843d9cf74
  
      if (m_state.backdropLayer && !options.backdropLayer)
          paintBackdrop(options);
-@@ -1495,6 +2757,11 @@ void TextureMapperLayer::setBackgroundColor(const Color& color)
+@@ -1247,9 +2575,27 @@ void TextureMapperLayer::collect3DRenderingContextLayers(Vector<TextureMapperLay
+ 
+ void TextureMapperLayer::setChildren(const Vector<TextureMapperLayer*>& newChildren)
+ {
++#if PLATFORM(HAIKU) && ENABLE(DAMAGE_TRACKING)
++    // A layer that comes in under this one (new, or moved from elsewhere, as
++    // a view transition moves an element's layer under its
++    // ::view-transition-new() when that is created again) is damaged where it
++    // now is: nothing else damages it, so it stayed off screen until
++    // something else changed there (pseudo-rendering-invalidation, #182).
++    Vector<TextureMapperLayer*> arriving;
++    if (m_damagePropagationEnabled) {
++        for (auto* child : newChildren) {
++            if (child->m_parent != this)
++                arriving.append(child);
++        }
++    }
++#endif
+     removeAllChildren();
+     for (auto* child : newChildren)
+         addChild(child);
++#if PLATFORM(HAIKU) && ENABLE(DAMAGE_TRACKING)
++    for (auto* child : arriving)
++        child->damageWholeSubtreeHaiku();
++#endif
+ }
+ 
+ void TextureMapperLayer::addChild(TextureMapperLayer* childLayer)
+@@ -1427,12 +2773,28 @@ void TextureMapperLayer::setBackfaceVisibility(bool backfaceVisibility)
+ void TextureMapperLayer::setOpacity(float opacity)
+ {
+ #if ENABLE(DAMAGE_TRACKING)
+-    if (m_damagePropagationEnabled && m_state.opacity != opacity)
++    if (m_damagePropagationEnabled && m_state.opacity != opacity) {
++#if PLATFORM(HAIKU)
++        damageWholeSubtreeHaiku();
++#else
+         damageWholeLayer();
++#endif
++    }
+ #endif
+     m_state.opacity = opacity;
+ }
+ 
++#if PLATFORM(HAIKU)
++void TextureMapperLayer::setBlendMode(BlendMode blendMode)
++{
++#if ENABLE(DAMAGE_TRACKING)
++    if (m_damagePropagationEnabled && m_state.blendMode != blendMode)
++        damageWholeSubtreeHaiku();
++#endif
++    m_state.blendMode = blendMode;
++}
++#endif
++
+ void TextureMapperLayer::setShowDebugBorder(bool showDebugBorder)
+ {
+ #if ENABLE(DAMAGE_TRACKING)
+@@ -1495,6 +2857,11 @@ void TextureMapperLayer::setBackgroundColor(const Color& color)
  void TextureMapperLayer::setFilters(const FilterOperations& filters)
  {
      m_state.filters = filters;
@@ -58444,11 +58741,41 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..fbeaf14125155f1de1deecb843d9cf74
  }
  
  void TextureMapperLayer::setContentsLayer(TextureMapperPlatformLayer* platformLayer)
+@@ -1550,7 +2917,11 @@ bool TextureMapperLayer::syncAnimations(MonotonicTime time)
+     m_layerTransforms.localTransform = applicationResults.transform.value_or(m_state.transform);
+ #if ENABLE(DAMAGE_TRACKING)
+     if (m_damagePropagationEnabled && m_currentOpacity != applicationResults.opacity.value_or(m_state.opacity)) {
++#if PLATFORM(HAIKU)
++        damageWholeSubtreeHaiku();
++#else
+         damageWholeLayer();
++#endif
+         if (m_currentOpacity >= s_opacityVisibilityThreshold && applicationResults.opacity.value_or(m_state.opacity) < s_opacityVisibilityThreshold)
+             m_collectDamageDespiteBeingInvisible = true;
+     }
 diff --git a/Source/WebCore/platform/graphics/texmap/TextureMapperLayer.h b/Source/WebCore/platform/graphics/texmap/TextureMapperLayer.h
-index 385b7808e97fada2a7e26a56172004da71b87c1c..90729fdf46730fd376b92e8a0fafc266fcbca376 100644
+index 385b7808e97fada2a7e26a56172004da71b87c1c..c3be0eef6cfe99870173151f709585e9a8673266 100644
 --- a/Source/WebCore/platform/graphics/texmap/TextureMapperLayer.h
 +++ b/Source/WebCore/platform/graphics/texmap/TextureMapperLayer.h
-@@ -127,6 +127,22 @@ public:
+@@ -21,6 +21,7 @@
+ 
+ #include "Damage.h"
+ #include "FilterOperations.h"
++#include "GraphicsTypes.h"
+ #include "TextureMapperAnimation.h"
+ #include "TextureMapperSolidColorLayer.h"
+ #include <wtf/TZoneMalloc.h>
+@@ -82,6 +83,9 @@ public:
+     WEBCORE_EXPORT void setContentsOpaque(bool);
+     WEBCORE_EXPORT void setBackfaceVisibility(bool);
+     WEBCORE_EXPORT void setOpacity(float);
++#if PLATFORM(HAIKU)
++    void setBlendMode(BlendMode);
++#endif
+     WEBCORE_EXPORT void setSolidColor(const Color&);
+     WEBCORE_EXPORT void setBackgroundColor(const Color&);
+     WEBCORE_EXPORT void setContentsTileSize(const FloatSize&);
+@@ -127,6 +131,22 @@ public:
  
      FloatRect effectiveLayerRect() const;
  
@@ -58471,7 +58798,7 @@ index 385b7808e97fada2a7e26a56172004da71b87c1c..90729fdf46730fd376b92e8a0fafc266
  private:
      TextureMapperLayer& backdropRootLayer() const
      {
-@@ -186,6 +202,20 @@ private:
+@@ -186,6 +206,20 @@ private:
      void paintBackdrop(TextureMapperPaintOptions&);
      void applyMask(TextureMapperPaintOptions&);
      void collect3DRenderingContextLayers(Vector<TextureMapperLayer*>&);
@@ -58492,7 +58819,24 @@ index 385b7808e97fada2a7e26a56172004da71b87c1c..90729fdf46730fd376b92e8a0fafc266
  
  #if ENABLE(DAMAGE_TRACKING)
      void collectDamageRecursive(TextureMapperPaintOptions&, Damage&);
-@@ -224,6 +254,15 @@ private:
+@@ -197,9 +231,16 @@ private:
+     ALWAYS_INLINE Damage& NODELETE ensureDamageInLayerCoordinateSpace();
+     inline void damageWholeLayer();
+     void damageWholeLayerIncludingItsRectFromPreviousFrame();
++#if PLATFORM(HAIKU)
++    void damageWholeSubtreeHaiku();
++#endif
+ #endif
+ 
+     bool isVisible() const;
++#if PLATFORM(HAIKU)
++    bool isPlusLighterHaiku() const { return m_state.blendMode == BlendMode::PlusLighter; }
++    bool involvesPlusLighterHaiku() const;
++#endif
+ 
+     bool shouldBlend() const;
+ 
+@@ -224,6 +265,15 @@ private:
      std::unique_ptr<TextureMapperFlattenedLayer> m_flattenedLayer;
      float m_currentOpacity { 1.0 };
      FilterOperations m_currentFilters;
@@ -58508,6 +58852,16 @@ index 385b7808e97fada2a7e26a56172004da71b87c1c..90729fdf46730fd376b92e8a0fafc266
  
      struct State {
          FloatPoint pos;
+@@ -244,6 +294,9 @@ private:
+         Color solidColor;
+         Color backgroundColor;
+         FilterOperations filters;
++#if PLATFORM(HAIKU)
++        BlendMode blendMode { BlendMode::Normal };
++#endif
+         Color debugBorderColor;
+         float debugBorderWidth;
+         int repaintCount;
 diff --git a/Source/WebCore/platform/graphics/texmap/TextureMapperPlatformLayer.h b/Source/WebCore/platform/graphics/texmap/TextureMapperPlatformLayer.h
 index 271b076b101e307f8e4dc09ec7450da3c7bc898e..456d4f10287f138ba068510b504fcb6d566f20e7 100644
 --- a/Source/WebCore/platform/graphics/texmap/TextureMapperPlatformLayer.h
@@ -76765,11 +77119,107 @@ index 0000000000000000000000000000000000000000..da71c185bfa5f93bf68ba7a513f48393
 +} // namespace WebCore
 +
 +#endif
+diff --git a/Source/WebCore/platform/network/curl/CurlFormDataStream.cpp b/Source/WebCore/platform/network/curl/CurlFormDataStream.cpp
+index af5d3258c41b738fbff6743deeb3c92c3938b1e3..f3878af6eda9f2174e796b051ac91c4cebee5d50 100644
+--- a/Source/WebCore/platform/network/curl/CurlFormDataStream.cpp
++++ b/Source/WebCore/platform/network/curl/CurlFormDataStream.cpp
+@@ -38,6 +38,7 @@
+ 
+ #include "BlobRegistry.h"
+ #include "Logging.h"
++#include "PendingStreamState.h"
+ #include <wtf/MainThread.h>
+ 
+ namespace WebCore {
+@@ -90,8 +91,14 @@ unsigned long long CurlFormDataStream::totalSize()
+     return m_totalSize;
+ }
+ 
++PendingStreamState* CurlFormDataStream::pendingStream() const
++{
++    return m_formData ? m_formData->pendingStreamState() : nullptr;
++}
++
+ std::optional<size_t> CurlFormDataStream::read(char* buffer, size_t size)
+ {
++    m_wouldBlock = false;
+     if (!m_formData)
+         return std::nullopt;
+ 
+@@ -115,9 +122,21 @@ std::optional<size_t> CurlFormDataStream::read(char* buffer, size_t size)
+             }, [] (const FormDataElement::EncodedBlobData&) -> std::optional<size_t> {
+                 ASSERT_NOT_REACHED();
+                 return std::nullopt;
+-            }, [] (const FormDataElement::PendingStreamData&) -> std::optional<size_t> {
+-                ASSERT_NOT_REACHED();
+-                return std::nullopt;
++            }, [&] (const FormDataElement::PendingStreamData&) -> std::optional<size_t> {
++                RefPtr stream = m_formData->pendingStreamState();
++                if (!stream)
++                    return std::nullopt;
++                auto result = stream->readInto(std::span { reinterpret_cast<uint8_t*>(bufferPosition), bufferSize });
++                // The page's stream errored (a chunk that is not a
++                // Uint8Array, a reader that gave up): the request fails.
++                if (!result)
++                    return std::nullopt;
++                auto [bytes, ended] = *result;
++                if (ended)
++                    ++m_elementPosition;
++                else if (!bytes)
++                    m_wouldBlock = true;
++                return bytes;
+             }
+         );
+ 
+@@ -125,6 +144,9 @@ std::optional<size_t> CurlFormDataStream::read(char* buffer, size_t size)
+             return std::nullopt;
+ 
+         totalReadBytes += *readBytes;
++        // A stream gives what it has: the rest comes when the page sends it.
++        if (std::holds_alternative<FormDataElement::PendingStreamData>(element.data))
++            break;
+     }
+ 
+     m_totalReadSize += totalReadBytes;
+diff --git a/Source/WebCore/platform/network/curl/CurlFormDataStream.h b/Source/WebCore/platform/network/curl/CurlFormDataStream.h
+index 2290fd7b85a5bdb4e711c36dc8a61d5f55073f75..accebc382c7680b5f1b1404c77abb7ee738019b8 100644
+--- a/Source/WebCore/platform/network/curl/CurlFormDataStream.h
++++ b/Source/WebCore/platform/network/curl/CurlFormDataStream.h
+@@ -45,6 +45,13 @@ public:
+     std::optional<size_t> read(char*, size_t);
+     unsigned long long totalReadSize() { return m_totalReadSize; }
+ 
++    // A body that is a ReadableStream (fetch upload streaming, #178): it has
++    // no known length, and a read can find no bytes yet (wouldBlock) before
++    // the page sends more.
++    WEBCORE_EXPORT PendingStreamState* pendingStream() const;
++    bool isPendingStream() const { return pendingStream(); }
++    bool wouldBlock() const { return m_wouldBlock; }
++
+ private:
+     std::optional<size_t> readFromFile(const FormDataElement::EncodedFileData&, char*, size_t);
+     std::optional<size_t> readFromData(const Vector<uint8_t>&, char*, size_t);
+@@ -60,6 +67,7 @@ private:
+ 
+     FileSystem::FileHandle m_fileHandle;
+     size_t m_dataOffset { 0 };
++    bool m_wouldBlock { false };
+ };
+ 
+ } // namespace WebCore
 diff --git a/Source/WebCore/platform/network/curl/CurlRequest.cpp b/Source/WebCore/platform/network/curl/CurlRequest.cpp
-index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..7039a5943a56efdc88a2fda80abd6c83b8be92a2 100644
+index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..f8ed5a469df5f89a48e6446f8c6c17fa60d897b4 100644
 --- a/Source/WebCore/platform/network/curl/CurlRequest.cpp
 +++ b/Source/WebCore/platform/network/curl/CurlRequest.cpp
-@@ -36,19 +36,415 @@
+@@ -25,6 +25,7 @@
+ 
+ #include "config.h"
+ #include "CurlRequest.h"
++#include "PendingStreamState.h"
+ 
+ #if USE(CURL)
+ 
+@@ -36,19 +37,415 @@
  #include "NetworkLoadMetrics.h"
  #include "ResourceError.h"
  #include "SharedBuffer.h"
@@ -77185,7 +77635,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..7039a5943a56efdc88a2fda80abd6c83
      , m_formDataStream(m_request.httpBody())
      , m_captureExtraMetrics(captureExtraMetrics == CaptureNetworkLoadMetrics::Extended)
  {
-@@ -95,7 +491,7 @@ void CurlRequest::setUserPass(const String& user, const String& password)
+@@ -95,7 +492,7 @@ void CurlRequest::setUserPass(const String& user, const String& password)
      m_password = password.isolatedCopy();
  }
  
@@ -77194,7 +77644,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..7039a5943a56efdc88a2fda80abd6c83
  {
      // The pausing of transfer does not work with protocols, like file://.
      // Therefore, PAUSE can not be done in didReceiveData().
-@@ -108,10 +504,16 @@ void CurlRequest::resume()
+@@ -108,10 +505,26 @@ void CurlRequest::resume()
  
      ASSERT(isMainThread());
  
@@ -77205,16 +77655,46 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..7039a5943a56efdc88a2fda80abd6c83
 +        [[fallthrough]];
 +    case StartState::StartSuspended:
          return;
--
--    m_didStartTransfer = true;
 +    case StartState::WaitingForStart:
 +        m_startState = StartState::DidStart;
 +        break;
 +    }
  
+-    m_didStartTransfer = true;
++    // A streamed body is sent as the page provides it: each chunk that
++    // arrives lets a paused send go on (resumeStreamBody).
++    if (RefPtr stream = m_formDataStream.pendingStream()) {
++        stream->setDataAvailableHandler([this, protectedThis = Ref { *this }] {
++            runOnWorkerThreadIfRequired([this, protectedThis] {
++                resumeStreamBody();
++            });
++        });
++    }
+ 
      if (m_request.url().protocolIsFile())
          invokeDidReceiveResponseForFile(m_request.url());
-@@ -122,8 +524,14 @@ void CurlRequest::resume()
+@@ -119,11 +532,35 @@ void CurlRequest::resume()
+         startWithJobManager();
+ }
+ 
++void CurlRequest::resumeStreamBody()
++{
++    ASSERT(!isMainThread());
++    if (isCompletedOrCancelled() || !m_curlHandle || !m_streamBodyPaused)
++        return;
++    m_streamBodyPaused = false;
++    // Resume sending only: a receive pause (the response waiting for the
++    // client, or a paused request) stays.
++    bool receivePaused = m_receivePausedForResponse || isHandlePaused();
++    m_curlHandle->pause(receivePaused ? CURLPAUSE_RECV : CURLPAUSE_CONT);
++}
++
++void CurlRequest::stopWatchingStreamBody()
++{
++    if (RefPtr stream = m_formDataStream.pendingStream())
++        stream->clearDataAvailableHandler();
++}
++
  void CurlRequest::startWithJobManager()
  {
      ASSERT(isMainThread());
@@ -77230,10 +77710,11 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..7039a5943a56efdc88a2fda80abd6c83
  }
  
  void CurlRequest::cancel()
-@@ -137,6 +545,10 @@ void CurlRequest::cancel()
+@@ -137,6 +574,11 @@ void CurlRequest::cancel()
  
          m_cancelled = true;
      }
++    stopWatchingStreamBody();
 +#if PLATFORM(HAIKU)
 +    if (netTraceHaiku() && m_netTraceQueuedAtHaiku)
 +        fprintf(stderr, "Summit net: cancel id=%p after=%.0f %s\n", this, netTraceMsHaiku(m_netTraceQueuedAtHaiku, MonotonicTime::now()), netTraceURLHaiku(m_request.url()).legacyCStringPointer());
@@ -77241,7 +77722,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..7039a5943a56efdc88a2fda80abd6c83
  
      auto& scheduler = CurlContext::singleton().scheduler();
  
-@@ -144,7 +556,7 @@ void CurlRequest::cancel()
+@@ -144,7 +586,7 @@ void CurlRequest::cancel()
          runOnWorkerThreadIfRequired([this, protectedThis = Ref { *this }]() {
              didCancelTransfer();
          });
@@ -77250,7 +77731,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..7039a5943a56efdc88a2fda80abd6c83
          scheduler.cancel(this);
  
      invalidateClient();
-@@ -162,6 +574,41 @@ bool CurlRequest::isCompletedOrCancelled()
+@@ -162,6 +604,41 @@ bool CurlRequest::isCompletedOrCancelled()
      return m_completed || m_cancelled;
  }
  
@@ -77292,14 +77773,14 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..7039a5943a56efdc88a2fda80abd6c83
  /* `this` is protected inside this method. */
  void CurlRequest::callClient(Function<void(CurlRequest&, CurlRequestClient&)>&& task)
  {
-@@ -173,13 +620,28 @@ void CurlRequest::callClient(Function<void(CurlRequest&, CurlRequestClient&)>&&
+@@ -173,13 +650,28 @@ void CurlRequest::callClient(Function<void(CurlRequest&, CurlRequestClient&)>&&
  
  void CurlRequest::runOnMainThread(Function<void()>&& task)
  {
 -    ensureOnMainThread(WTF::move(task));
 +    ensureOnMainThread(std::move(task));
- }
- 
++}
++
 +#if PLATFORM(HAIKU)
 +void CurlRequest::watchDownloadStallsHaiku(Seconds stallTimeout)
 +{
@@ -77312,9 +77793,9 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..7039a5943a56efdc88a2fda80abd6c83
 +        if (!isCompletedOrCancelled() && m_curlHandle)
 +            m_curlHandle->setTimeout(stallTimeout);
 +    });
-+}
+ }
 +#endif
-+
+ 
  void CurlRequest::runOnWorkerThreadIfRequired(Function<void()>&& task)
  {
      if (isMainThread())
@@ -77323,7 +77804,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..7039a5943a56efdc88a2fda80abd6c83
      else
          task();
  }
-@@ -190,6 +652,17 @@ CURL* CurlRequest::setupTransfer()
+@@ -190,6 +682,17 @@ CURL* CurlRequest::setupTransfer()
      appendAcceptLanguageHeaderIfNeeded(httpHeaderFields);
  
      m_curlHandle = makeUnique<CurlHandle>();
@@ -77341,7 +77822,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..7039a5943a56efdc88a2fda80abd6c83
  
      m_curlHandle->setURL(m_request.url(), m_localhostAlias);
  
-@@ -209,8 +682,9 @@ CURL* CurlRequest::setupTransfer()
+@@ -209,8 +712,9 @@ CURL* CurlRequest::setupTransfer()
          setupPUT();
      }
  
@@ -77352,7 +77833,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..7039a5943a56efdc88a2fda80abd6c83
  
      if (m_shouldDisableServerTrustEvaluation)
          m_curlHandle->disableServerTrustEvaluation();
-@@ -218,9 +692,52 @@ CURL* CurlRequest::setupTransfer()
+@@ -218,9 +722,52 @@ CURL* CurlRequest::setupTransfer()
      m_curlHandle->setHeaderCallbackFunction(didReceiveHeaderCallback, this);
      m_curlHandle->setWriteCallbackFunction(didReceiveDataCallback, this);
      m_curlHandle->setDebugCallbackFunction(didReceiveDebugInfoCallback, this);
@@ -77405,7 +77886,18 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..7039a5943a56efdc88a2fda80abd6c83
      m_performStartTime = MonotonicTime::now();
  
      return m_curlHandle->handle();
-@@ -270,6 +787,27 @@ size_t CurlRequest::willSendData(char* buffer, size_t blockSize, size_t numberOf
+@@ -262,6 +809,10 @@ size_t CurlRequest::willSendData(char* buffer, size_t blockSize, size_t numberOf
+         // Something went wrong so error the job.
+         return CURL_READFUNC_ABORT;
+     }
++    if (!*sendBytes && m_formDataStream.wouldBlock()) {
++        m_streamBodyPaused = true;
++        return CURL_READFUNC_PAUSE;
++    }
+ 
+     callClient([totalReadSize = m_formDataStream.totalReadSize(), totalSize = m_formDataStream.totalSize()](CurlRequest& request, CurlRequestClient& client) {
+         client.curlDidSendData(request, totalReadSize, totalSize);
+@@ -270,6 +821,27 @@ size_t CurlRequest::willSendData(char* buffer, size_t blockSize, size_t numberOf
      return *sendBytes;
  }
  
@@ -77433,7 +77925,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..7039a5943a56efdc88a2fda80abd6c83
  // This is being called for each HTTP header in the response. This includes '\r\n'
  // for the last line of the header.
  
-@@ -294,12 +832,19 @@ size_t CurlRequest::didReceiveHeader(String&& header)
+@@ -294,12 +866,19 @@ size_t CurlRequest::didReceiveHeader(String&& header)
          m_didReceiveResponse = false;
          m_response = CurlResponse { };
          m_multipartHandle = nullptr;
@@ -77453,7 +77945,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..7039a5943a56efdc88a2fda80abd6c83
          m_response.headers.append(WTF::move(header));
          return receiveBytes;
      }
-@@ -343,6 +888,26 @@ size_t CurlRequest::didReceiveHeader(String&& header)
+@@ -343,6 +922,26 @@ size_t CurlRequest::didReceiveHeader(String&& header)
  
      m_multipartHandle = CurlMultipartHandle::createIfNeeded(*this, m_response);
  
@@ -77480,7 +77972,16 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..7039a5943a56efdc88a2fda80abd6c83
      // Response will send at didReceiveData() or didCompleteTransfer()
      // to receive continueDidRceiveResponse() for asynchronously.
  
-@@ -375,8 +940,24 @@ size_t CurlRequest::didReceiveData(std::span<const uint8_t> receivedData)
+@@ -368,15 +967,33 @@ size_t CurlRequest::didReceiveData(std::span<const uint8_t> receivedData)
+                     return;
+ 
+                 // Unpause a connection
++                m_receivePausedForResponse = false;
+                 m_curlHandle->pause(CURLPAUSE_CONT);
+             });
+         });
+ 
++        m_receivePausedForResponse = true;
          return CURL_WRITEFUNC_PAUSE;
      }
  
@@ -77505,7 +78006,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..7039a5943a56efdc88a2fda80abd6c83
      if (receivedData.size()) {
          if (m_multipartHandle) {
              m_multipartHandle->didReceiveMessage(receivedData);
-@@ -393,7 +974,7 @@ size_t CurlRequest::didReceiveData(std::span<const uint8_t> receivedData)
+@@ -393,7 +1010,7 @@ size_t CurlRequest::didReceiveData(std::span<const uint8_t> receivedData)
          }
      }
  
@@ -77514,7 +78015,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..7039a5943a56efdc88a2fda80abd6c83
  }
  
  void CurlRequest::didReceiveHeaderFromMultipart(Vector<String>&& headers)
-@@ -446,6 +1027,31 @@ void CurlRequest::didCompleteTransfer(CURLcode result)
+@@ -446,6 +1063,31 @@ void CurlRequest::didCompleteTransfer(CURLcode result)
          return;
      }
  
@@ -77546,7 +78047,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..7039a5943a56efdc88a2fda80abd6c83
      // Newer versions of curl/OpenSSL report CURLE_RECV_ERROR or CURLE_PARTIAL_FILE
      // when a server closes the connection to signal end-of-body on responses with
      // no Content-Length and no chunked encoding. This is valid HTTP/1.1 behavior,
-@@ -475,6 +1081,19 @@ void CurlRequest::didCompleteTransfer(CURLcode result)
+@@ -475,6 +1117,19 @@ void CurlRequest::didCompleteTransfer(CURLcode result)
          }
  
          auto metrics = networkLoadMetrics();
@@ -77566,7 +78067,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..7039a5943a56efdc88a2fda80abd6c83
  
          finalizeTransfer();
          callClient([networkLoadMetrics = WTF::move(metrics)](CurlRequest& request, CurlRequestClient& client) mutable {
-@@ -484,8 +1103,28 @@ void CurlRequest::didCompleteTransfer(CURLcode result)
+@@ -484,8 +1139,28 @@ void CurlRequest::didCompleteTransfer(CURLcode result)
              client.curlDidComplete(request, WTF::move(networkLoadMetrics));
          });
      } else {
@@ -77595,7 +78096,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..7039a5943a56efdc88a2fda80abd6c83
  
          CertificateInfo certificateInfo;
          if (auto info = m_curlHandle->certificateInfo())
-@@ -503,13 +1142,83 @@ void CurlRequest::didCompleteTransfer(CURLcode result)
+@@ -503,13 +1178,84 @@ void CurlRequest::didCompleteTransfer(CURLcode result)
      }
  }
  
@@ -77676,10 +78177,31 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..7039a5943a56efdc88a2fda80abd6c83
  void CurlRequest::finalizeTransfer()
  {
 +    closeDownloadFile();
++    stopWatchingStreamBody();
      m_formDataStream.clean();
      m_multipartHandle = nullptr;
      m_curlHandle = nullptr;
-@@ -632,6 +1341,88 @@ void CurlRequest::completeDidReceiveResponse()
+@@ -553,7 +1299,9 @@ void CurlRequest::appendAcceptLanguageHeaderIfNeeded(HTTPHeaderMap& header)
+ 
+ void CurlRequest::setupPUT()
+ {
+-    curl_off_t totalSize = m_formDataStream.totalSize();
++    // A streamed body has no known length (-1): HTTP/2 DATA frames until it
++    // ends, chunked on HTTP/1.1.
++    curl_off_t totalSize = m_formDataStream.isPendingStream() ? -1 : static_cast<curl_off_t>(m_formDataStream.totalSize());
+ 
+     m_curlHandle->enableHttpPutRequest(totalSize);
+     m_curlHandle->setReadCallbackFunction(willSendDataCallback, this);
+@@ -564,7 +1312,7 @@ void CurlRequest::setupPUT()
+ 
+ void CurlRequest::setupPOST()
+ {
+-    curl_off_t totalSize = m_formDataStream.totalSize();
++    curl_off_t totalSize = m_formDataStream.isPendingStream() ? -1 : static_cast<curl_off_t>(m_formDataStream.totalSize());
+ 
+     m_curlHandle->enableHttpPostRequest(totalSize);
+     m_curlHandle->setReadCallbackFunction(willSendDataCallback, this);
+@@ -632,6 +1380,88 @@ void CurlRequest::completeDidReceiveResponse()
          responseCompletionHandler();
  }
  
@@ -77768,7 +78290,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..7039a5943a56efdc88a2fda80abd6c83
  NetworkLoadMetrics CurlRequest::networkLoadMetrics()
  {
      ASSERT(m_curlHandle);
-@@ -653,6 +1444,57 @@ NetworkLoadMetrics CurlRequest::networkLoadMetrics()
+@@ -653,6 +1483,57 @@ NetworkLoadMetrics CurlRequest::networkLoadMetrics()
      return WTF::move(*networkLoadMetrics);
  }
  
@@ -77827,7 +78349,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..7039a5943a56efdc88a2fda80abd6c83
  {
      for (const auto& header : m_response.headers) {
 diff --git a/Source/WebCore/platform/network/curl/CurlRequest.h b/Source/WebCore/platform/network/curl/CurlRequest.h
-index 3b060605bbff32f845804a848610eca23dea834c..7c3702387b1b6b5214a60c4de6faec9b48eb017c 100644
+index 3b060605bbff32f845804a848610eca23dea834c..75ccb1ce361778903d3bb434142a7c90ee98052a 100644
 --- a/Source/WebCore/platform/network/curl/CurlRequest.h
 +++ b/Source/WebCore/platform/network/curl/CurlRequest.h
 @@ -32,16 +32,24 @@
@@ -77916,13 +78438,15 @@ index 3b060605bbff32f845804a848610eca23dea834c..7c3702387b1b6b5214a60c4de6faec9b
  
      int didReceiveDebugInfo(curl_infotype, std::span<const char>);
  
-@@ -126,15 +161,31 @@ private:
+@@ -126,15 +161,33 @@ private:
      bool needToInvokeDidCancelTransfer() const { return m_didNotifyResponse && !m_didReturnFromNotify && m_mustInvokeCancelTransfer; }
      void invokeDidReceiveResponseForFile(const URL&);
      void invokeDidReceiveResponse(const CurlResponse&, Function<void()>&& completionHandler = { });
 +    void setRequestPaused(bool);
 +    void setCallbackPaused(bool);
 +    void pausedStatusChanged();
++    void resumeStreamBody();
++    void stopWatchingStreamBody();
 +    bool shouldBePaused() const { return m_isPausedOfRequest || m_isPausedOfCallback; };
 +    void updateHandlePauseState(bool);
 +    bool isHandlePaused() const;
@@ -77948,7 +78472,7 @@ index 3b060605bbff32f845804a848610eca23dea834c..7c3702387b1b6b5214a60c4de6faec9b
  
  
      CurlRequestClient* m_client { };
-@@ -149,23 +200,67 @@ private:
+@@ -149,23 +202,71 @@ private:
      bool m_shouldDisableServerTrustEvaluation { false };
      CurlHandle::LocalhostAlias m_localhostAlias { CurlHandle::LocalhostAlias::Disable };
  
@@ -77979,6 +78503,10 @@ index 3b060605bbff32f845804a848610eca23dea834c..7c3702387b1b6b5214a60c4de6faec9b
 +    // [TODO] When libcurl is updated to fetch paused state, remove this state variable and
 +    // setter/getter above.
 +    bool m_isHandlePaused { false };
++    // A streamed request body (#178): sending waits for the page's next
++    // chunk; receiving may be paused at the same time for the response.
++    bool m_streamBodyPaused { false };
++    bool m_receivePausedForResponse { false };
 +
 +    Lock m_downloadMutex;
 +    bool m_isEnabledDownloadToFile { false };
@@ -89458,10 +89986,10 @@ index be40151510176ea4e881fd41af8f79ab6ab6a306..b5fdd6e41375e8108fb406089992f8e5
      if (metaData.headerHash != computeSHA1(headerData, salt)) {
          LOG(NetworkCacheStorage, "(NetworkProcess) header checksum mismatch");
 diff --git a/Source/WebKit/NetworkProcess/curl/NetworkDataTaskCurl.cpp b/Source/WebKit/NetworkProcess/curl/NetworkDataTaskCurl.cpp
-index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..58a61d5c4af652a12189031a2181c8a6aa22a41e 100644
+index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..b4676405d3b6bf4e62d2d74d329da0992e3abef5 100644
 --- a/Source/WebKit/NetworkProcess/curl/NetworkDataTaskCurl.cpp
 +++ b/Source/WebKit/NetworkProcess/curl/NetworkDataTaskCurl.cpp
-@@ -36,11 +36,14 @@
+@@ -36,11 +36,17 @@
  #include "PrivateRelayed.h"
  #include "WebErrors.h"
  #include <WebCore/AuthenticationChallenge.h>
@@ -89469,6 +89997,9 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..58a61d5c4af652a12189031a2181c8a6
  #include <WebCore/CookieJar.h>
 +#include <WebCore/CookieUtil.h>
  #include <WebCore/CurlRequest.h>
++#if PLATFORM(HAIKU)
++#include <WebCore/MIMESniffer.h>
++#endif
  #include <WebCore/NetworkLoadMetrics.h>
  #include <WebCore/NotImplemented.h>
  #include <WebCore/OriginAccessPatterns.h>
@@ -89476,7 +90007,7 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..58a61d5c4af652a12189031a2181c8a6
  #include <WebCore/ResourceError.h>
  #include <WebCore/SameSiteInfo.h>
  #include <WebCore/SharedBuffer.h>
-@@ -48,11 +51,25 @@
+@@ -48,11 +54,25 @@
  #include <WebCore/TimingAllowOrigin.h>
  #include <pal/text/TextEncoding.h>
  #include <wtf/FileSystem.h>
@@ -89502,7 +90033,7 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..58a61d5c4af652a12189031a2181c8a6
  NetworkDataTaskCurl::NetworkDataTaskCurl(NetworkSession& session, NetworkDataTaskClient& client, const NetworkLoadParameters& parameters)
      : NetworkDataTask(session, client, parameters.request, parameters.storedCredentialsPolicy, parameters.shouldClearReferrerOnHTTPSToHTTPRedirect, parameters.isMainFrameNavigation, parameters.isInitiatedByDedicatedWorker)
      , m_frameID(parameters.webFrameID)
-@@ -79,11 +96,26 @@ NetworkDataTaskCurl::NetworkDataTaskCurl(NetworkSession& session, NetworkDataTas
+@@ -79,11 +99,26 @@ NetworkDataTaskCurl::NetworkDataTaskCurl(NetworkSession& session, NetworkDataTas
          blockCookies();
      restrictRequestReferrerToOriginIfNeeded(request);
  
@@ -89529,7 +90060,7 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..58a61d5c4af652a12189031a2181c8a6
  }
  
  NetworkDataTaskCurl::~NetworkDataTaskCurl()
-@@ -101,6 +133,15 @@ void NetworkDataTaskCurl::resume()
+@@ -101,6 +136,15 @@ void NetworkDataTaskCurl::resume()
  
      if (m_curlRequest)
          m_curlRequest->resume();
@@ -89545,7 +90076,7 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..58a61d5c4af652a12189031a2181c8a6
  }
  
  void NetworkDataTaskCurl::cancel()
-@@ -113,8 +154,15 @@ void NetworkDataTaskCurl::cancel()
+@@ -113,8 +157,15 @@ void NetworkDataTaskCurl::cancel()
      if (m_curlRequest)
          m_curlRequest->cancel();
  
@@ -89562,7 +90093,7 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..58a61d5c4af652a12189031a2181c8a6
  }
  
  void NetworkDataTaskCurl::invalidateAndCancel()
-@@ -132,7 +180,18 @@ NetworkDataTask::State NetworkDataTaskCurl::state() const
+@@ -132,7 +183,18 @@ NetworkDataTask::State NetworkDataTaskCurl::state() const
  
  Ref<CurlRequest> NetworkDataTaskCurl::createCurlRequest(ResourceRequest&& request, RequestStatus status)
  {
@@ -89582,7 +90113,7 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..58a61d5c4af652a12189031a2181c8a6
          appendCookieHeader(request);
  
      // Creates a CurlRequest in suspended state.
-@@ -142,6 +201,10 @@ Ref<CurlRequest> NetworkDataTaskCurl::createCurlRequest(ResourceRequest&& reques
+@@ -142,6 +204,10 @@ Ref<CurlRequest> NetworkDataTaskCurl::createCurlRequest(ResourceRequest&& reques
  
      if (m_session->networkProcess().localhostAliasesForTesting().contains<StringViewHashTranslator>(curlRequest->resourceRequest().url().host()))
          curlRequest->enableLocalhostAlias();
@@ -89593,7 +90124,7 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..58a61d5c4af652a12189031a2181c8a6
  
      return curlRequest;
  }
-@@ -168,7 +231,7 @@ void NetworkDataTaskCurl::curlDidReceiveResponse(CurlRequest& request, CurlRespo
+@@ -168,11 +234,20 @@ void NetworkDataTaskCurl::curlDidReceiveResponse(CurlRequest& request, CurlRespo
  
      handleCookieHeaders(request.resourceRequest(), receivedResponse);
  
@@ -89602,7 +90133,68 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..58a61d5c4af652a12189031a2181c8a6
          willPerformHTTPRedirection();
          return;
      }
-@@ -236,13 +299,32 @@ void NetworkDataTaskCurl::curlDidFailWithError(CurlRequest& request, ResourceErr
+ 
++    // A streamed request body (fetch with a ReadableStream) has gone and cannot
++    // be sent again with credentials: fail, as the Cocoa port does (#178).
++    if (hasPendingStreamBody() && (m_response.isUnauthorized() || m_response.isProxyAuthenticationRequired())) {
++        cancel();
++        if (m_client)
++            m_client->didCompleteWithError(ResourceError { errorDomainWebKitInternal, 0, firstRequest().url(), "Fetch upload streams cannot handle 401"_s, ResourceError::Type::Cancellation });
++        return;
++    }
++
+     if (m_response.isUnauthorized() && receivedResponse.availableHttpAuth) {
+         tryHttpAuthentication(AuthenticationChallenge(receivedResponse, m_authFailureCount, m_response));
+         m_authFailureCount++;
+@@ -184,6 +259,15 @@ void NetworkDataTaskCurl::curlDidReceiveResponse(CurlRequest& request, CurlRespo
+         return;
+     }
+ 
++#if PLATFORM(HAIKU)
++    if (shouldSniffHaiku()) {
++        // Let the data come (CurlRequest holds it until the response is answered).
++        m_sniffStateHaiku = SniffStateHaiku::Buffering;
++        if (m_curlRequest)
++            m_curlRequest->completeDidReceiveResponse();
++        return;
++    }
++#endif
+     invokeDidReceiveResponse();
+ }
+ 
+@@ -193,6 +277,15 @@ void NetworkDataTaskCurl::curlDidReceiveData(CurlRequest&, Ref<SharedBuffer>&& b
+     if (state() == State::Canceling || state() == State::Completed || (!m_client && !isDownload()))
+         return;
+ 
++#if PLATFORM(HAIKU)
++    if (m_sniffStateHaiku != SniffStateHaiku::None) {
++        m_sniffBufferHaiku.append(buffer.get());
++        if (m_sniffStateHaiku == SniffStateHaiku::Buffering && m_sniffBufferHaiku.size() >= 1445)
++            finishSniffingHaiku();
++        return;
++    }
++#endif
++
+     if (isDownload()) {
+         auto* download = m_session->networkProcess().downloadManager().download(*m_pendingDownloadID);
+         RELEASE_ASSERT(download);
+@@ -218,6 +311,15 @@ void NetworkDataTaskCurl::curlDidComplete(CurlRequest&, NetworkLoadMetrics&& net
+     if (state() == State::Canceling || state() == State::Completed || (!m_client && !isDownload()))
+         return;
+ 
++#if PLATFORM(HAIKU)
++    if (m_sniffStateHaiku != SniffStateHaiku::None) {
++        m_sniffCompletionHaiku = WTF::move(networkLoadMetrics);
++        if (m_sniffStateHaiku == SniffStateHaiku::Buffering)
++            finishSniffingHaiku();
++        return;
++    }
++#endif
++
+     if (isDownload()) {
+         auto* download = m_session->networkProcess().downloadManager().download(*m_pendingDownloadID);
+         RELEASE_ASSERT(download);
+@@ -236,13 +338,32 @@ void NetworkDataTaskCurl::curlDidFailWithError(CurlRequest& request, ResourceErr
      if (state() == State::Canceling || state() == State::Completed || (!m_client && !isDownload()))
          return;
  
@@ -89636,7 +90228,7 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..58a61d5c4af652a12189031a2181c8a6
          if (m_client)
              m_client->didCompleteWithError(resourceError);
          else {
-@@ -256,22 +338,6 @@ void NetworkDataTaskCurl::curlDidFailWithError(CurlRequest& request, ResourceErr
+@@ -256,22 +377,6 @@ void NetworkDataTaskCurl::curlDidFailWithError(CurlRequest& request, ResourceErr
      m_client->didCompleteWithError(resourceError);
  }
  
@@ -89659,7 +90251,20 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..58a61d5c4af652a12189031a2181c8a6
  bool NetworkDataTaskCurl::shouldRedirectAsGET(const ResourceRequest& request, bool crossOrigin)
  {
      if (request.httpMethod() == "GET"_s || request.httpMethod() == "HEAD"_s)
-@@ -307,6 +373,30 @@ void NetworkDataTaskCurl::invokeDidReceiveResponse()
+@@ -300,6 +405,12 @@ void NetworkDataTaskCurl::invokeDidReceiveResponse()
+ 
+         switch (policyAction) {
+         case PolicyAction::Use:
++#if PLATFORM(HAIKU)
++            if (m_sniffStateHaiku != SniffStateHaiku::None) {
++                replaySniffedHaiku();
++                break;
++            }
++#endif
+             if (m_curlRequest)
+                 m_curlRequest->completeDidReceiveResponse();
+             break;
+@@ -307,6 +418,30 @@ void NetworkDataTaskCurl::invokeDidReceiveResponse()
              invalidateAndCancel();
              break;
          case PolicyAction::Download: {
@@ -89690,7 +90295,7 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..58a61d5c4af652a12189031a2181c8a6
              m_downloadDestinationFile = FileSystem::openFile(m_pendingDownloadLocation, FileSystem::FileOpenMode::Truncate, FileSystem::FileAccessPermission::All, { }, !m_allowOverwriteDownload);
              if (!m_downloadDestinationFile) {
                  if (m_client)
-@@ -319,6 +409,18 @@ void NetworkDataTaskCurl::invokeDidReceiveResponse()
+@@ -319,6 +454,23 @@ void NetworkDataTaskCurl::invokeDidReceiveResponse()
              Ref download = Download::create(downloadManager, *m_pendingDownloadID, *this, *m_session, suggestedFilename());
              downloadManager.dataTaskBecameDownloadTask(*m_pendingDownloadID, download.copyRef());
              download->didCreateDestination(m_pendingDownloadLocation);
@@ -89705,11 +90310,135 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..58a61d5c4af652a12189031a2181c8a6
 +                    resumable = resumable || equalLettersIgnoringASCIICase(unit.trim(isASCIIWhitespace<char16_t>), "bytes"_s);
 +                m_curlRequest->watchDownloadStallsHaiku(resumable ? 30_s : 120_s);
 +            }
++            // Data held to type the response goes into the file first.
++            if (m_sniffStateHaiku != SniffStateHaiku::None) {
++                replaySniffedHaiku();
++                break;
++            }
 +#endif
              if (m_curlRequest)
                  m_curlRequest->completeDidReceiveResponse();
              break;
-@@ -409,6 +511,7 @@ void NetworkDataTaskCurl::willPerformHTTPRedirection()
+@@ -330,6 +482,118 @@ void NetworkDataTaskCurl::invokeDidReceiveResponse()
+     });
+ }
+ 
++#if PLATFORM(HAIKU)
++// MIME Sniffing's rules for identifying an unknown MIME type
++// (https://mimesniff.spec.whatwg.org/#rules-for-identifying-an-unknown-mime-type).
++static String sniffedMIMETypeHaiku(std::span<const uint8_t> data, bool sniffScriptable)
++{
++    auto startsWith = [&](std::span<const uint8_t> bytes, std::span<const uint8_t> pattern, bool ignoringCase) {
++        if (bytes.size() < pattern.size())
++            return false;
++        for (size_t i = 0; i < pattern.size(); ++i) {
++            if (ignoringCase ? toASCIIUpper(bytes[i]) != pattern[i] : bytes[i] != pattern[i])
++                return false;
++        }
++        return true;
++    };
++    auto bytes = [](const char* literal, size_t length) {
++        return std::span<const uint8_t> { reinterpret_cast<const uint8_t*>(literal), length };
++    };
++#define SNIFF_PATTERN(literal) bytes(literal, sizeof(literal) - 1)
++
++    if (sniffScriptable) {
++        size_t start = 0;
++        while (start < data.size() && (data[start] == 0x09 || data[start] == 0x0A || data[start] == 0x0C || data[start] == 0x0D || data[start] == 0x20))
++            ++start;
++        auto rest = data.subspan(start);
++        static const char* const tags[] = { "<!DOCTYPE HTML", "<HTML", "<HEAD", "<SCRIPT", "<IFRAME", "<H1", "<DIV", "<FONT", "<TABLE", "<A", "<STYLE", "<TITLE", "<B", "<BODY", "<BR", "<P", "<!--" };
++        for (auto* tag : tags) {
++            auto pattern = bytes(tag, strlen(tag));
++            if (rest.size() > pattern.size() && startsWith(rest, pattern, true) && (rest[pattern.size()] == 0x20 || rest[pattern.size()] == 0x3E))
++                return "text/html"_s;
++        }
++        if (startsWith(rest, SNIFF_PATTERN("<?xml"), false))
++            return "text/xml"_s;
++        if (startsWith(data, SNIFF_PATTERN("%PDF-"), false))
++            return "application/pdf"_s;
++    }
++    if (startsWith(data, SNIFF_PATTERN("%!PS-Adobe-"), false))
++        return "application/postscript"_s;
++    if (startsWith(data, SNIFF_PATTERN("\xFE\xFF"), false) || startsWith(data, SNIFF_PATTERN("\xFF\xFE"), false) || startsWith(data, SNIFF_PATTERN("\xEF\xBB\xBF"), false))
++        return "text/plain"_s;
++
++    if (startsWith(data, SNIFF_PATTERN("GIF87a"), false) || startsWith(data, SNIFF_PATTERN("GIF89a"), false))
++        return "image/gif"_s;
++    if (startsWith(data, SNIFF_PATTERN("\x89PNG\r\n\x1A\n"), false))
++        return "image/png"_s;
++    if (startsWith(data, SNIFF_PATTERN("\xFF\xD8\xFF"), false))
++        return "image/jpeg"_s;
++    if (startsWith(data, SNIFF_PATTERN("BM"), false))
++        return "image/bmp"_s;
++    if (data.size() >= 14 && startsWith(data, SNIFF_PATTERN("RIFF"), false) && startsWith(data.subspan(8), SNIFF_PATTERN("WEBPVP"), false))
++        return "image/webp"_s;
++    if (startsWith(data, SNIFF_PATTERN("\x00\x00\x01\x00"), false) || startsWith(data, SNIFF_PATTERN("\x00\x00\x02\x00"), false))
++        return "image/x-icon"_s;
++    if (auto media = MIMESniffer::getMIMETypeFromContent(data); !media.isEmpty())
++        return media;
++    if (startsWith(data, SNIFF_PATTERN("\x1F\x8B\x08"), false))
++        return "application/x-gzip"_s;
++    if (startsWith(data, SNIFF_PATTERN("PK\x03\x04"), false))
++        return "application/zip"_s;
++    if (startsWith(data, SNIFF_PATTERN("Rar!\x1A\x07\x00"), false))
++        return "application/x-rar-compressed"_s;
++#undef SNIFF_PATTERN
++
++    for (auto byte : data) {
++        if (byte <= 0x08 || byte == 0x0B || (byte >= 0x0E && byte <= 0x1A) || (byte >= 0x1C && byte <= 0x1F))
++            return "application/octet-stream"_s;
++    }
++    return "text/plain"_s;
++}
++
++bool NetworkDataTaskCurl::shouldSniffHaiku() const
++{
++    if (!m_response.mimeType().isEmpty() || !m_response.httpHeaderField(HTTPHeaderName::ContentType).isEmpty())
++        return false;
++    if (firstRequest().requester() != ResourceRequestRequester::Main || isDownload() || !m_response.url().protocolIsInHTTPFamily())
++        return false;
++    if (equalLettersIgnoringASCIICase(firstRequest().httpMethod(), "head"_s))
++        return false;
++    auto status = m_response.httpStatusCode();
++    return status != 204 && status != 205 && status != 304;
++}
++
++void NetworkDataTaskCurl::finishSniffingHaiku()
++{
++    m_sniffStateHaiku = SniffStateHaiku::AwaitingPolicy;
++    auto data = m_sniffBufferHaiku.copyBuffer()->makeContiguous();
++    auto span = data->span();
++    bool noSniff = equalLettersIgnoringASCIICase(m_response.httpHeaderField(HTTPHeaderName::XContentTypeOptions).trim(isASCIIWhitespace<char16_t>), "nosniff"_s);
++    m_response.setMimeType(sniffedMIMETypeHaiku(span.first(std::min<size_t>(span.size(), 1445)), !noSniff));
++    // More data waits in curl until the client has answered.
++    if (!m_sniffCompletionHaiku && m_curlRequest)
++        m_curlRequest->suspend();
++    invokeDidReceiveResponse();
++}
++
++void NetworkDataTaskCurl::replaySniffedHaiku()
++{
++    Ref protectedThis { *this };
++    bool wasSuspended = !m_sniffCompletionHaiku;
++    m_sniffStateHaiku = SniffStateHaiku::None;
++    auto completion = std::exchange(m_sniffCompletionHaiku, std::nullopt);
++    RefPtr request = m_curlRequest;
++    if (!request)
++        return;
++    if (!m_sniffBufferHaiku.isEmpty())
++        curlDidReceiveData(*request, m_sniffBufferHaiku.takeBufferAsContiguous());
++    if (completion)
++        curlDidComplete(*request, WTF::move(*completion));
++    else if (wasSuspended && state() != State::Canceling && state() != State::Completed)
++        request->resume();
++}
++#endif
++
+ void NetworkDataTaskCurl::willPerformHTTPRedirection()
+ {
+     static const int maxRedirects = 20;
+@@ -409,6 +673,7 @@ void NetworkDataTaskCurl::willPerformHTTPRedirection()
              m_curlRequest->setUserPass(m_initialCredential.user(), m_initialCredential.password());
              m_curlRequest->setAuthenticationScheme(ProtectionSpace::AuthenticationScheme::HTTPBasic);
          }
@@ -89717,7 +90446,7 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..58a61d5c4af652a12189031a2181c8a6
  
          if (m_state != State::Suspended) {
              m_state = State::Suspended;
-@@ -531,6 +634,7 @@ void NetworkDataTaskCurl::restartWithCredential(const ProtectionSpace& protectio
+@@ -531,6 +796,7 @@ void NetworkDataTaskCurl::restartWithCredential(const ProtectionSpace& protectio
      m_curlRequest->setUserPass(credential.user(), credential.password());
      if (shouldDisableServerTrustEvaluation)
          m_curlRequest->disableServerTrustEvaluation();
@@ -89725,7 +90454,7 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..58a61d5c4af652a12189031a2181c8a6
  
      if (m_state != State::Suspended) {
          m_state = State::Suspended;
-@@ -538,11 +642,37 @@ void NetworkDataTaskCurl::restartWithCredential(const ProtectionSpace& protectio
+@@ -538,11 +804,37 @@ void NetworkDataTaskCurl::restartWithCredential(const ProtectionSpace& protectio
      }
  }
  
@@ -89764,7 +90493,7 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..58a61d5c4af652a12189031a2181c8a6
          if (!cookieHeaderField.isEmpty())
              request.addHTTPHeaderField(HTTPHeaderName::Cookie, cookieHeaderField);
      }
-@@ -552,10 +682,33 @@ void NetworkDataTaskCurl::handleCookieHeaders(const WebCore::ResourceRequest& re
+@@ -552,10 +844,33 @@ void NetworkDataTaskCurl::handleCookieHeaders(const WebCore::ResourceRequest& re
  {
      static constexpr auto setCookieHeader = "set-cookie: "_s;
  
@@ -89799,10 +90528,21 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..58a61d5c4af652a12189031a2181c8a6
              }
          }
 diff --git a/Source/WebKit/NetworkProcess/curl/NetworkDataTaskCurl.h b/Source/WebKit/NetworkProcess/curl/NetworkDataTaskCurl.h
-index 34a4d1cd69624e0f86025f8ee86667dffd0646dc..cafb51726fa2e5e5b257bacbfa86e952a2d99207 100644
+index 34a4d1cd69624e0f86025f8ee86667dffd0646dc..6c2b3805d9b1834906e8ac2bf8e3961b8e041778 100644
 --- a/Source/WebKit/NetworkProcess/curl/NetworkDataTaskCurl.h
 +++ b/Source/WebKit/NetworkProcess/curl/NetworkDataTaskCurl.h
-@@ -77,7 +77,6 @@ private:
+@@ -32,6 +32,10 @@
+ #include <WebCore/ProtectionSpace.h>
+ #include <WebCore/ResourceResponse.h>
+ #include <WebCore/ShouldRelaxThirdPartyCookieBlocking.h>
++#if PLATFORM(HAIKU)
++#include <WebCore/NetworkLoadMetrics.h>
++#include <WebCore/SharedBuffer.h>
++#endif
+ #include <wtf/FileHandle.h>
+ #include <wtf/MonotonicTime.h>
+ 
+@@ -77,7 +81,6 @@ private:
  
      void invokeDidReceiveResponse();
  
@@ -89810,13 +90550,25 @@ index 34a4d1cd69624e0f86025f8ee86667dffd0646dc..cafb51726fa2e5e5b257bacbfa86e952
      bool shouldRedirectAsGET(const WebCore::ResourceRequest&, bool crossOrigin);
      void willPerformHTTPRedirection();
  
-@@ -115,6 +114,10 @@ private:
+@@ -115,6 +118,22 @@ private:
      FileSystem::FileHandle m_downloadDestinationFile;
  
      bool m_blockingCookies { false };
 +#if PLATFORM(HAIKU)
 +    // A preconnect (PreconnectTask): connect and stop before the request.
 +    bool m_preconnectOnlyHaiku { false };
++
++    // A navigation's response without a Content-Type is typed from its first
++    // bytes (MIME Sniffing, "rules for identifying an unknown MIME type"), as
++    // CFNetwork and libsoup do: its data is held until then, and while the
++    // client decides what to do with it.
++    enum class SniffStateHaiku : uint8_t { None, Buffering, AwaitingPolicy };
++    bool shouldSniffHaiku() const;
++    void finishSniffingHaiku();
++    void replaySniffedHaiku();
++    SniffStateHaiku m_sniffStateHaiku { SniffStateHaiku::None };
++    WebCore::SharedBufferBuilder m_sniffBufferHaiku;
++    std::optional<WebCore::NetworkLoadMetrics> m_sniffCompletionHaiku;
 +#endif
  
      MonotonicTime m_startTime;
@@ -110693,10 +111445,10 @@ index 599cc694a716da0c05e7104be0ec919146f99913..4bdb146fab5870fe86c0923f207efad0
  
 diff --git a/Source/WebKit/UIProcess/Automation/haiku/WebAutomationSessionHaiku.cpp b/Source/WebKit/UIProcess/Automation/haiku/WebAutomationSessionHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..875c329b51e5f910c608f6cd67ef5c7d85b6b518
+index 0000000000000000000000000000000000000000..4da27de3df395f02f04d19726691a73ef3489c80
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Automation/haiku/WebAutomationSessionHaiku.cpp
-@@ -0,0 +1,381 @@
+@@ -0,0 +1,410 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#include "config.h"
@@ -110704,13 +111456,16 @@ index 0000000000000000000000000000000000000000..875c329b51e5f910c608f6cd67ef5c7d
 +
 +#include "NativeWebKeyboardEvent.h"
 +#include "NativeWebMouseEvent.h"
++#include "NativeWebWheelEvent.h"
 +#include "WebPageProxy.h"
 +#include <InterfaceDefs.h>
 +#include <View.h>
 +#include <Message.h>
 +#include <OS.h>
++#include <WebCore/Scrollbar.h>
 +#include <wtf/HashMap.h>
 +#include <wtf/NeverDestroyed.h>
++#include <cstdlib>
 +#include <string>
 +
 +// WebDriver's simulated input as the BMessages a BWebKitView passes on
@@ -110845,6 +111600,32 @@ index 0000000000000000000000000000000000000000..875c329b51e5f910c608f6cd67ef5c7d
 +}
 +
 +#endif // ENABLE(WEBDRIVER_MOUSE_INTERACTIONS)
++
++#if ENABLE(WEBDRIVER_WHEEL_INTERACTIONS)
++// A wheel action (#180) is the B_MOUSE_WHEEL_CHANGED a mouse wheel sends, its
++// pixels turned into notches with the scale NativeWebWheelEvent::create
++// applies (NativeWebEventsHaiku.cpp, SUMMIT_WHEEL_PIXELS_PER_NOTCH), so the
++// page scrolls by the action's delta, as a wheel scrolls it.
++void WebAutomationSession::platformSimulateWheelInteraction(WebPageProxy& page, const IntPoint& locationInViewport, const IntSize& delta)
++{
++    static float pixelsPerNotch = [] {
++        if (const char* value = std::getenv("SUMMIT_WHEEL_PIXELS_PER_NOTCH")) {
++            float requested = std::strtof(value, nullptr);
++            if (requested >= 10 && requested <= 400)
++                return requested;
++        }
++        return 2.5f * Scrollbar::pixelsPerLineStep();
++    }();
++    BMessage message(B_MOUSE_WHEEL_CHANGED);
++    message.AddInt64("when", system_time());
++    message.AddFloat("be:wheel_delta_x", delta.width() / pixelsPerNotch);
++    message.AddFloat("be:wheel_delta_y", delta.height() / pixelsPerNotch);
++    message.AddInt32("modifiers", static_cast<int32>(modifiers()));
++    BPoint position(locationInViewport.x(), locationInViewport.y());
++    if (auto event = NativeWebWheelEvent::create(message, position, position))
++        page.handleNativeWheelEvent(event.releaseNonNull());
++}
++#endif // ENABLE(WEBDRIVER_WHEEL_INTERACTIONS)
 +
 +#if ENABLE(WEBDRIVER_MOUSE_INTERACTIONS)
 +// m_currentModifiers holds native Haiku modifier bits.
@@ -152896,10 +153677,10 @@ index 0000000000000000000000000000000000000000..c9a119d02f85b7c5ad8fe9153bfc9604
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/WebView.cpp b/Source/WebKit/UIProcess/haiku/WebView.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..41d3312ecab3d3f1ef034d065e1a024b66be65f0
+index 0000000000000000000000000000000000000000..b3abb368a56581ad5124a58d1c1e3afbca25422d
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/WebView.cpp
-@@ -0,0 +1,3636 @@
+@@ -0,0 +1,3646 @@
 +/*
 + * Copyright (C) 2013 Intel Corporation. All rights reserved.
 + *
@@ -153906,10 +154687,15 @@ index 0000000000000000000000000000000000000000..41d3312ecab3d3f1ef034d065e1a024b
 +        // hidden frames from user-sync addresses that answer with an empty
 +        // body of no known type, and every one of them became an empty file
 +        // in Downloads (for example on xbitlabs.com).
++        // An empty one is dropped, not shown: an attachment never becomes
++        // the frame's document (#191: committing it blanked the frame, and
++        // the Navigation API saw the download as a navigation).
 +        const bool mainFrame = navigation->frame().isMainFrame();
-+        const bool attachment = response.isAttachment() && (mainFrame || response.expectedContentLength());
++        const bool attachment = response.isAttachment();
 +        if (response.httpStatusCode() == 204 || response.httpStatusCode() == 205)
 +            listener->use();
++        else if (attachment && !mainFrame && !response.expectedContentLength())
++            listener->ignore();
 +        else if (navigation->request().url().protocolIsInHTTPFamily()
 +            && (attachment || (mainFrame && !navigation->canShowMIMEType())))
 +            listener->download();
@@ -154955,6 +155741,11 @@ index 0000000000000000000000000000000000000000..41d3312ecab3d3f1ef034d065e1a024b
 +    // <input type=checkbox switch> (Safari 17.4), drawn by the Adwaita
 +    // toggle button control (ToggleButtonAdwaita::drawSwitch).
 +    configuration->preferences().setSwitchControlEnabled(!summitPreferenceOffHaiku("switch"));
++    // Keyboard scrolling (arrows, Page Up/Down, Space) through WebCore's
++    // KeyboardScrollingAnimator, as on the Mac: it animates the scroll and
++    // pages to snap positions past the view in scroll-snap containers
++    // (#181; the old path stopped short of Safari's position).
++    configuration->preferences().setEventHandlerDrivenSmoothKeyboardScrollingEnabled(!summitPreferenceOffHaiku("keyscroll"));
 +    // HTTPS-First (#160), as Chrome, Firefox and Safari do: http:// pages are
 +    // tried over https first and loaded over http when the host has no
 +    // usable HTTPS (ResourceErrorCurl.cpp). IP addresses and localhost are
@@ -210550,10 +211341,10 @@ index 359c3765d3a41ba1c6cfdb6b44fa292cc7811a0d..18a4d1524bbb7a68b2bec420d013fd89
  endif ()
 diff --git a/Source/cmake/OptionsHaiku.cmake b/Source/cmake/OptionsHaiku.cmake
 new file mode 100644
-index 0000000000000000000000000000000000000000..70a9bbfce8feba3d307a3ef92c2bc8cc64c26753
+index 0000000000000000000000000000000000000000..db6ab5380782b1a811f75a4914ccc655603b996d
 --- /dev/null
 +++ b/Source/cmake/OptionsHaiku.cmake
-@@ -0,0 +1,404 @@
+@@ -0,0 +1,406 @@
 +include(GNUInstallDirs)
 +include(VersioningUtils)
 +
@@ -210805,6 +211596,8 @@ index 0000000000000000000000000000000000000000..70a9bbfce8feba3d307a3ef92c2bc8cc
 +if (ENABLE_WEBDRIVER)
 +    SET_AND_EXPOSE_TO_BUILD(ENABLE_WEBDRIVER_KEYBOARD_INTERACTIONS ON)
 +    SET_AND_EXPOSE_TO_BUILD(ENABLE_WEBDRIVER_MOUSE_INTERACTIONS ON)
++    # Wheel actions (#180), as the GTK and WPE ports have them.
++    SET_AND_EXPOSE_TO_BUILD(ENABLE_WEBDRIVER_WHEEL_INTERACTIONS ON)
 +endif ()
 +
 +find_package(OpenSSL REQUIRED)

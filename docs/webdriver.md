@@ -77,10 +77,13 @@ curl -s -XDELETE localhost:4444/session/$S
   and lets go of what the pointer holds, and presses count clicks with
   Haiku's double-click speed, so two quick clicks are a double click
   (#177; before, the release let go of nothing and pages saw no `pointerup`
-  and no `click`). Screenshots are taken in the web process and
-  encoded with Skia.
+  and no `click`). Wheel actions (#180) are `B_MOUSE_WHEEL_CHANGED`
+  messages of `delta / pixelsPerNotch` notches at the action's point, so a
+  page scrolls by the pixels the action asked for (one notch is 2.5 lines;
+  `SUMMIT_WHEEL_PIXELS_PER_NOTCH` overrides it). Screenshots are taken in the
+  web process and encoded with Skia.
 - The engine needs `ENABLE_WEBDRIVER=ON`, which also turns on WebDriver's
-  mouse and keyboard interactions (Source/cmake/OptionsHaiku.cmake).
+  mouse, keyboard and wheel interactions (Source/cmake/OptionsHaiku.cmake).
 
 - On Haiku the socket inspector needed three fixes (JavaScriptCore's
   `RemoteInspectorSocketPOSIX.cpp`, `RemoteInspectorConnectionClient.cpp`):
@@ -100,7 +103,7 @@ Summit quit); new tab, new window, window handles and window rect work too.
 
 ## Limits
 
-- No WebDriver BiDi, no touch or wheel actions, no proxy capabilities.
+- No WebDriver BiDi, no touch actions, no proxy capabilities.
 - JavaScript dialogs (alert, confirm, prompt) are Summit's own windows: the
   driver cannot read, accept or dismiss them yet.
 - One automation socket per Summit instance, one session at a time.
