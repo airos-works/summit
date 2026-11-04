@@ -72,7 +72,12 @@ curl -s -XDELETE localhost:4444/session/$S
   `windows.create()` and marks the window (`BrowserWindow::MarkAutomated`).
 - Clicks and keys are the BMessages a `BWebKitView` would pass on, turned into
   `NativeWebMouseEvent` / `NativeWebKeyboardEvent` as real input is
-  (UIProcess/Automation/haiku). Screenshots are taken in the web process and
+  (UIProcess/Automation/haiku). Pointer actions press and release
+  separately: a release names no button (WebDriver has dropped it by then)
+  and lets go of what the pointer holds, and presses count clicks with
+  Haiku's double-click speed, so two quick clicks are a double click
+  (#177; before, the release let go of nothing and pages saw no `pointerup`
+  and no `click`). Screenshots are taken in the web process and
   encoded with Skia.
 - The engine needs `ENABLE_WEBDRIVER=ON`, which also turns on WebDriver's
   mouse and keyboard interactions (Source/cmake/OptionsHaiku.cmake).

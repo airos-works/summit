@@ -110693,10 +110693,10 @@ index 599cc694a716da0c05e7104be0ec919146f99913..4bdb146fab5870fe86c0923f207efad0
  
 diff --git a/Source/WebKit/UIProcess/Automation/haiku/WebAutomationSessionHaiku.cpp b/Source/WebKit/UIProcess/Automation/haiku/WebAutomationSessionHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..ec23cbdbeae6ba51815f76459aac129e1af872b6
+index 0000000000000000000000000000000000000000..875c329b51e5f910c608f6cd67ef5c7d85b6b518
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Automation/haiku/WebAutomationSessionHaiku.cpp
-@@ -0,0 +1,356 @@
+@@ -0,0 +1,381 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#include "config.h"
@@ -110778,12 +110778,21 @@ index 0000000000000000000000000000000000000000..ec23cbdbeae6ba51815f76459aac129e
 +        page.handleMouseEvent(event.releaseNonNull());
 +}
 +
++// Haiku's double-click interval (Mouse preferences), for the click count of
++// pointer actions; WebCore selects a word on a press with a count of 2.
++static Seconds doubleClickIntervalHaiku()
++{
++    bigtime_t speed = 500000;
++    if (get_click_speed(&speed) != B_OK || speed <= 0)
++        speed = 500000;
++    return Seconds::fromMicroseconds(speed);
++}
++
 +void WebAutomationSession::platformSimulateMouseInteraction(WebPageProxy& page, MouseInteraction interaction, MouseButton button, const IntPoint& locationInView, OptionSet<WebEventModifier> keyModifiers, const String&)
 +{
 +    auto modifiers = nativeModifiersHaiku(keyModifiers);
 +    auto mask = nativeButtonHaiku(button);
 +    auto& pressed = pressedButtonsHaiku().add(page.identifier(), 0).iterator->value;
-+    int32 clicks = std::max(1u, m_clickCount);
 +
 +    auto down = [&](int32 count) {
 +        uint32 previous = pressed;
@@ -110801,16 +110810,32 @@ index 0000000000000000000000000000000000000000..ec23cbdbeae6ba51815f76459aac129e
 +        sendMouseEventHaiku(page, B_MOUSE_MOVED, pressed, pressed, 0, locationInView, modifiers);
 +        break;
 +    case MouseInteraction::Down:
-+        down(clicks);
++        // A press with no button is the primary one, as in the GTK port.
++        if (!mask)
++            mask = B_PRIMARY_MOUSE_BUTTON;
++        // Pointer actions press and release separately: count the clicks
++        // here, so that two quick presses make a double click.
++        updateClickCount(button == MouseButton::None ? MouseButton::Left : button, locationInView, doubleClickIntervalHaiku(), 16);
++        down(std::max(1u, m_clickCount));
 +        break;
 +    case MouseInteraction::Up:
-+        up(clicks);
++        // WebDriver's pointerUp action names no button (its pressed button is
++        // gone by then): release what this pointer holds. Releasing nothing
++        // gave the page a mouseup without a released button, so no pointerup
++        // and no click followed (#177).
++        if (!mask)
++            mask = pressed ? pressed : B_PRIMARY_MOUSE_BUTTON;
++        up(std::max(1u, m_clickCount));
 +        break;
 +    case MouseInteraction::SingleClick:
++        if (!mask)
++            mask = B_PRIMARY_MOUSE_BUTTON;
 +        down(1);
 +        up(1);
 +        break;
 +    case MouseInteraction::DoubleClick:
++        if (!mask)
++            mask = B_PRIMARY_MOUSE_BUTTON;
 +        down(1);
 +        up(1);
 +        down(2);
