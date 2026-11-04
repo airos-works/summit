@@ -15242,7 +15242,7 @@ index b7cc6b07caf172c2c167a081bd963c0c0a894842..1303442c7820d596d0253cd46eba6b70
  }
  
 diff --git a/Source/WebCore/dom/ViewTransition.cpp b/Source/WebCore/dom/ViewTransition.cpp
-index 0d080489846058c7981fd45c760edca8e7fb4880..f435dd1f146550104aa7c9c1c3f5473a3c7c4ebe 100644
+index 0d080489846058c7981fd45c760edca8e7fb4880..061d3eebea9061e5c6c9a45278ae770059d5c864 100644
 --- a/Source/WebCore/dom/ViewTransition.cpp
 +++ b/Source/WebCore/dom/ViewTransition.cpp
 @@ -72,6 +72,13 @@
@@ -15284,7 +15284,30 @@ index 0d080489846058c7981fd45c760edca8e7fb4880..f435dd1f146550104aa7c9c1c3f5473a
      ASSERT(renderer.hasLayer());
      CheckedRef layerRenderer = renderer;
  
-@@ -512,6 +535,14 @@ static RefPtr<ImageBuffer> snapshotElementVisualOverflowClippedToViewport(LocalF
+@@ -496,7 +519,21 @@ static RefPtr<ImageBuffer> snapshotElementVisualOverflowClippedToViewport(LocalF
+     colorSpace = ColorSpace::SRGB(); // FIXME: We should use the screen colorspace on iOS too, but that has blending issues: webkit.org/b/318764.
+ #endif
+ 
+-    auto buffer = ImageBuffer::create(paintRect.size(), RenderingMode::Accelerated, RenderingPurpose::Snapshot, scaleFactor, colorSpace, PixelFormat::BGRA8, hostWindow);
++#if PLATFORM(HAIKU)
++    // Painted with the CPU, as the page's tiles are: a GPU snapshot rounded
++    // antialiased edges and text one unit away from the tiles they stand in
++    // for (old-content-object-fit-none, #182), and Skia on the GPU through
++    // zink paints no faster than on the CPU here.
++    // SUMMIT_VIEW_TRANSITION_GPU_SNAPSHOTS=1 paints them on the GPU again.
++    static const bool gpuSnapshots = [] {
++        const char* value = getenv("SUMMIT_VIEW_TRANSITION_GPU_SNAPSHOTS");
++        return value && !strcmp(value, "1");
++    }();
++    auto renderingMode = gpuSnapshots ? RenderingMode::Accelerated : RenderingMode::Unaccelerated;
++#else
++    auto renderingMode = RenderingMode::Accelerated;
++#endif
++    auto buffer = ImageBuffer::create(paintRect.size(), renderingMode, RenderingPurpose::Snapshot, scaleFactor, colorSpace, PixelFormat::BGRA8, hostWindow);
+     if (!buffer)
+         return nullptr;
+ 
+@@ -512,6 +549,14 @@ static RefPtr<ImageBuffer> snapshotElementVisualOverflowClippedToViewport(LocalF
      layerRenderer->layer()->paint(buffer->context(), paintRect, subpixelOffset, frameView->paintBehavior(), nullptr, paintFlags);
  
      frameView->setPaintBehavior(oldPaintBehavior);
@@ -30241,7 +30264,7 @@ index 2b1b31403c0b4c1f894c374d576ee2e79ddcd751..da0b36c0555a007ed33f74c6d8a7dace
  
      enum class PaintingState {
 diff --git a/Source/WebCore/platform/graphics/coordinated/GraphicsLayerCoordinated.cpp b/Source/WebCore/platform/graphics/coordinated/GraphicsLayerCoordinated.cpp
-index be3145e2dc5a248c932f24023c37029290825571..658a09cce02ad910b25d5fa338c2233620c9e613 100644
+index be3145e2dc5a248c932f24023c37029290825571..800638bbf3f12474b1fd23e687d3feca2cb28186 100644
 --- a/Source/WebCore/platform/graphics/coordinated/GraphicsLayerCoordinated.cpp
 +++ b/Source/WebCore/platform/graphics/coordinated/GraphicsLayerCoordinated.cpp
 @@ -43,6 +43,11 @@
@@ -30379,6 +30402,14 @@ index be3145e2dc5a248c932f24023c37029290825571..658a09cce02ad910b25d5fa338c22336
  void GraphicsLayerCoordinated::setContentsToSolidColor(const Color& color)
  {
      if (m_contentsColor == color)
+@@ -1276,6 +1361,7 @@ void GraphicsLayerCoordinated::recursiveCommitChanges(CommitState& commitState,
+     if (!needsCommit(commitState))
+         return;
+ 
++
+     CommitState childCommitState = commitState;
+     if (!childCommitState.ancestorHadChanges)
+         childCommitState.ancestorHadChanges = !m_pendingChanges.isEmpty();
 diff --git a/Source/WebCore/platform/graphics/coordinated/GraphicsLayerCoordinated.h b/Source/WebCore/platform/graphics/coordinated/GraphicsLayerCoordinated.h
 index 139bcc9a9cbfae7dcf875231044d69c23dab9dca..ccc63fafbd79b0d7d59d3b4aeb2131675adb9d53 100644
 --- a/Source/WebCore/platform/graphics/coordinated/GraphicsLayerCoordinated.h
@@ -57012,7 +57043,7 @@ index 57adb06b0d3bf385a76bae2729c5e04dd5e7b268..cf25d7f33b561e652d9d051e47cf9fba
  
      size_t m_size;
 diff --git a/Source/WebCore/platform/graphics/texmap/TextureMapperLayer.cpp b/Source/WebCore/platform/graphics/texmap/TextureMapperLayer.cpp
-index 112d19b1676c297b0168941b1db5b619cd535a29..c77741411dfbbb4ee7464a7bc3330deecd42666e 100644
+index 112d19b1676c297b0168941b1db5b619cd535a29..9a4c1e6c225f6f1a2e81fa6faaa5d73027b452e0 100644
 --- a/Source/WebCore/platform/graphics/texmap/TextureMapperLayer.cpp
 +++ b/Source/WebCore/platform/graphics/texmap/TextureMapperLayer.cpp
 @@ -21,6 +21,17 @@
@@ -57998,7 +58029,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..c77741411dfbbb4ee7464a7bc3330dee
 -    if (m_state.backdropLayer && m_state.backdropLayer == options.backdropLayer)
 +#if PLATFORM(HAIKU)
 +    if (options.reachedBackdropTarget)
-+        return;
+         return;
 +#endif
 +    if (m_state.backdropLayer && m_state.backdropLayer == options.backdropLayer) {
 +#if PLATFORM(HAIKU)
@@ -58006,7 +58037,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..c77741411dfbbb4ee7464a7bc3330dee
 +        // from this branch lets later siblings leak into the backdrop image.
 +        options.reachedBackdropTarget = true;
 +#endif
-         return;
++        return;
 +    }
  
      if (m_state.backdropLayer && !options.backdropLayer)
@@ -58088,7 +58119,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..c77741411dfbbb4ee7464a7bc3330dee
      else if (m_backingStore || m_state.masksToBounds || m_state.maskLayer || hasFilters() || hasBackdrop())
          localBoundingRect = layerRect();
      else if (m_contentsLayer || m_state.solidColor.isVisible())
-@@ -970,14 +1835,56 @@ void TextureMapperLayer::computeOverlapRegions(ComputeOverlapRegionData& data, c
+@@ -970,14 +1835,77 @@ void TextureMapperLayer::computeOverlapRegions(ComputeOverlapRegionData& data, c
          computeOverlapRegions(data, newReplicaTransform, false);
      }
  
@@ -58110,15 +58141,36 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..c77741411dfbbb4ee7464a7bc3330dee
  }
  
 +#if PLATFORM(HAIKU)
++// Whether this layer holds plus-lighter layers that add to something else it
++// shows. One alone added to the transparent surface of its
++// group and then drawn over the backdrop is the same as drawing it normally,
++// without the extra 8-bit pass that put text edges one unit off (a view
++// transition's start and end, where one of old and new has opacity 0;
++// table-caption, #182).
++bool TextureMapperLayer::isPlusLighterGroupHaiku() const
++{
++    // Anything else the group shows (its own content, other children) is
++    // what a plus-lighter child adds to.
++    bool hasPlusLighter = false;
++    unsigned shown = m_backingStore || m_contentsLayer || m_state.backgroundColor.isVisible() || m_state.solidColor.isVisible();
++    for (auto* child : m_children) {
++        if (!child->m_state.visible || child->m_currentOpacity < s_opacityVisibilityThreshold)
++            continue;
++        ++shown;
++        hasPlusLighter |= child->m_state.blendMode == BlendMode::PlusLighter;
++    }
++    return hasPlusLighter && shown > 1;
++}
++
++// Drawn added to what is under it: plus-lighter, in a group where it adds up.
++bool TextureMapperLayer::isPlusLighterHaiku() const
++{
++    return m_state.blendMode == BlendMode::PlusLighter && m_parent && m_parent->isPlusLighterGroupHaiku();
++}
++
 +bool TextureMapperLayer::involvesPlusLighterHaiku() const
 +{
-+    if (isPlusLighterHaiku())
-+        return true;
-+    for (auto* child : m_children) {
-+        if (child->isPlusLighterHaiku())
-+            return true;
-+    }
-+    return false;
++    return isPlusLighterHaiku() || isPlusLighterGroupHaiku();
 +}
 +#endif
 +
@@ -58145,7 +58197,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..c77741411dfbbb4ee7464a7bc3330dee
      Region overlapRegion;
      Region nonOverlapRegion;
      auto mode = ComputeOverlapRegionMode::Intersection;
-@@ -1047,6 +1954,54 @@ Vector<IntRect, 1> TextureMapperLayer::computeConsolidatedOverlapRegionRects(Tex
+@@ -1047,6 +1975,54 @@ Vector<IntRect, 1> TextureMapperLayer::computeConsolidatedOverlapRegionRects(Tex
      computeOverlapRegions(data, options.transform, false);
      ASSERT(nonOverlapRegion.isEmpty());
  
@@ -58200,7 +58252,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..c77741411dfbbb4ee7464a7bc3330dee
      auto rects = overlapRegion.rects();
      static const size_t OverlapRegionConsolidationThreshold = 4;
      if (rects.size() > OverlapRegionConsolidationThreshold) {
-@@ -1057,8 +2012,265 @@ Vector<IntRect, 1> TextureMapperLayer::computeConsolidatedOverlapRegionRects(Tex
+@@ -1057,8 +2033,265 @@ Vector<IntRect, 1> TextureMapperLayer::computeConsolidatedOverlapRegionRects(Tex
      return rects;
  }
  
@@ -58466,7 +58518,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..c77741411dfbbb4ee7464a7bc3330dee
      IntSize maxTextureSize = options.textureMapper.maxTextureSize();
      for (auto& rect : computeConsolidatedOverlapRegionRects(options)) {
          for (int x = rect.x(); x < rect.maxX(); x += maxTextureSize.width()) {
-@@ -1079,6 +2291,33 @@ void TextureMapperLayer::applyMask(TextureMapperPaintOptions& options)
+@@ -1079,6 +2312,33 @@ void TextureMapperLayer::applyMask(TextureMapperPaintOptions& options)
      options.textureMapper.setMaskMode(false);
  }
  
@@ -58500,7 +58552,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..c77741411dfbbb4ee7464a7bc3330dee
  void TextureMapperLayer::paintIntoSurface(TextureMapperPaintOptions& options)
  {
      options.textureMapper.bindSurface(options.surface.get());
-@@ -1086,6 +2325,9 @@ void TextureMapperLayer::paintIntoSurface(TextureMapperPaintOptions& options)
+@@ -1086,6 +2346,9 @@ void TextureMapperLayer::paintIntoSurface(TextureMapperPaintOptions& options)
          SetForScope scopedTransform(options.transform, TransformationMatrix());
          SetForScope scopedReplicaLayer(options.replicaLayer, nullptr);
          SetForScope scopedBackdropLayer(options.backdropLayer, this);
@@ -58510,7 +58562,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..c77741411dfbbb4ee7464a7bc3330dee
          backdropRootLayer().paintSelfAndChildren(options);
      } else
          paintSelfAndChildren(options);
-@@ -1093,7 +2335,11 @@ void TextureMapperLayer::paintIntoSurface(TextureMapperPaintOptions& options)
+@@ -1093,7 +2356,11 @@ void TextureMapperLayer::paintIntoSurface(TextureMapperPaintOptions& options)
      bool hasMask = !!m_state.maskLayer;
      bool hasReplicaMask = options.replicaLayer == this && m_state.replicaLayer->m_state.maskLayer;
      bool defersLastFilterPass = !hasMask && !hasReplicaMask;
@@ -58522,7 +58574,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..c77741411dfbbb4ee7464a7bc3330dee
      options.textureMapper.bindSurface(options.surface.get());
      if (hasMask)
          m_state.maskLayer->applyMask(options);
-@@ -1101,17 +2347,42 @@ void TextureMapperLayer::paintIntoSurface(TextureMapperPaintOptions& options)
+@@ -1101,17 +2368,42 @@ void TextureMapperLayer::paintIntoSurface(TextureMapperPaintOptions& options)
          m_state.replicaLayer->m_state.maskLayer->applyMask(options);
  }
  
@@ -58534,14 +58586,14 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..c77741411dfbbb4ee7464a7bc3330dee
      options.textureMapper.bindSurface(options.surface.get());
 +#if PLATFORM(HAIKU)
 +    options.textureMapper.setAdditiveBlendingHaiku(additive);
-     options.textureMapper.drawTexture(surface, targetRect, { }, opacity);
++    options.textureMapper.drawTexture(surface, targetRect, { }, opacity);
 +    options.textureMapper.setAdditiveBlendingHaiku(false);
 +#else
 +    UNUSED_PARAM(additive);
-+    options.textureMapper.drawTexture(surface, targetRect, { }, opacity);
+     options.textureMapper.drawTexture(surface, targetRect, { }, opacity);
 +#endif
- }
- 
++}
++
 +#if PLATFORM(HAIKU)
 +// Intermediate surfaces are drawn at whole pixels (commitSurface()) with
 +// TextureMapper::drawTexture(), which samples only their size's part of a
@@ -58553,9 +58605,9 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..c77741411dfbbb4ee7464a7bc3330dee
 +static Ref<BitmapTexture> acquireSurfaceHaiku(const IntSize& size)
 +{
 +    return BitmapTexturePool::singleton().acquireBucketedTextureHaiku(size, { BitmapTexture::Flags::SupportsAlpha });
-+}
+ }
 +#endif
-+
+ 
  void TextureMapperLayer::paintWithIntermediateSurface(TextureMapperPaintOptions& options, const IntRect& rect)
  {
 +#if PLATFORM(HAIKU)
@@ -58566,7 +58618,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..c77741411dfbbb4ee7464a7bc3330dee
      {
          SetForScope scopedSurface(options.surface, surface.ptr());
          SetForScope scopedOffset(options.offset, -toIntSize(rect.location()));
-@@ -1122,12 +2393,16 @@ void TextureMapperLayer::paintWithIntermediateSurface(TextureMapperPaintOptions&
+@@ -1122,12 +2414,16 @@ void TextureMapperLayer::paintWithIntermediateSurface(TextureMapperPaintOptions&
          paintSelfChildrenReplicaFilterAndMask(options);
      }
  
@@ -58584,7 +58636,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..c77741411dfbbb4ee7464a7bc3330dee
      {
          SetForScope scopedSurface(options.surface, surface.ptr());
          SetForScope scopedOffset(options.offset, -toIntSize(rect.location()));
-@@ -1137,11 +2412,15 @@ void TextureMapperLayer::paintSelfAndChildrenWithIntermediateSurface(TextureMapp
+@@ -1137,11 +2433,15 @@ void TextureMapperLayer::paintSelfAndChildrenWithIntermediateSurface(TextureMapp
          surface = Ref { *options.surface };
      }
  
@@ -58601,7 +58653,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..c77741411dfbbb4ee7464a7bc3330dee
      bool hasFilterOrMask = [&] {
          if (hasFilters())
              return true;
-@@ -1163,10 +2442,55 @@ void TextureMapperLayer::paintSelfChildrenReplicaFilterAndMask(TextureMapperPain
+@@ -1163,10 +2463,55 @@ void TextureMapperLayer::paintSelfChildrenReplicaFilterAndMask(TextureMapperPain
          paintSelfAndChildrenWithReplica(options);
  }
  
@@ -58657,7 +58709,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..c77741411dfbbb4ee7464a7bc3330dee
  
      SetForScope scopedOpacity(options.opacity, options.opacity * m_currentOpacity);
  
-@@ -1184,8 +2508,12 @@ void TextureMapperLayer::paintFlattened(TextureMapperPaintOptions& options)
+@@ -1184,8 +2529,12 @@ void TextureMapperLayer::paintFlattened(TextureMapperPaintOptions& options)
  {
      // If painting a backdrop for a flattened layer, processing should stop here.
      // Only the elements up to the flattened layer need to be painted into the backdrop buffer.
@@ -58671,7 +58723,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..c77741411dfbbb4ee7464a7bc3330dee
  
      if (m_state.backdropLayer && !options.backdropLayer)
          paintBackdrop(options);
-@@ -1247,9 +2575,27 @@ void TextureMapperLayer::collect3DRenderingContextLayers(Vector<TextureMapperLay
+@@ -1247,9 +2596,27 @@ void TextureMapperLayer::collect3DRenderingContextLayers(Vector<TextureMapperLay
  
  void TextureMapperLayer::setChildren(const Vector<TextureMapperLayer*>& newChildren)
  {
@@ -58699,7 +58751,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..c77741411dfbbb4ee7464a7bc3330dee
  }
  
  void TextureMapperLayer::addChild(TextureMapperLayer* childLayer)
-@@ -1427,12 +2773,28 @@ void TextureMapperLayer::setBackfaceVisibility(bool backfaceVisibility)
+@@ -1427,12 +2794,28 @@ void TextureMapperLayer::setBackfaceVisibility(bool backfaceVisibility)
  void TextureMapperLayer::setOpacity(float opacity)
  {
  #if ENABLE(DAMAGE_TRACKING)
@@ -58729,7 +58781,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..c77741411dfbbb4ee7464a7bc3330dee
  void TextureMapperLayer::setShowDebugBorder(bool showDebugBorder)
  {
  #if ENABLE(DAMAGE_TRACKING)
-@@ -1495,6 +2857,11 @@ void TextureMapperLayer::setBackgroundColor(const Color& color)
+@@ -1495,6 +2878,11 @@ void TextureMapperLayer::setBackgroundColor(const Color& color)
  void TextureMapperLayer::setFilters(const FilterOperations& filters)
  {
      m_state.filters = filters;
@@ -58741,7 +58793,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..c77741411dfbbb4ee7464a7bc3330dee
  }
  
  void TextureMapperLayer::setContentsLayer(TextureMapperPlatformLayer* platformLayer)
-@@ -1550,7 +2917,11 @@ bool TextureMapperLayer::syncAnimations(MonotonicTime time)
+@@ -1550,7 +2938,11 @@ bool TextureMapperLayer::syncAnimations(MonotonicTime time)
      m_layerTransforms.localTransform = applicationResults.transform.value_or(m_state.transform);
  #if ENABLE(DAMAGE_TRACKING)
      if (m_damagePropagationEnabled && m_currentOpacity != applicationResults.opacity.value_or(m_state.opacity)) {
@@ -58754,7 +58806,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..c77741411dfbbb4ee7464a7bc3330dee
              m_collectDamageDespiteBeingInvisible = true;
      }
 diff --git a/Source/WebCore/platform/graphics/texmap/TextureMapperLayer.h b/Source/WebCore/platform/graphics/texmap/TextureMapperLayer.h
-index 385b7808e97fada2a7e26a56172004da71b87c1c..c3be0eef6cfe99870173151f709585e9a8673266 100644
+index 385b7808e97fada2a7e26a56172004da71b87c1c..5aac595f64f97c2a22c0a1de28619b54e94fd853 100644
 --- a/Source/WebCore/platform/graphics/texmap/TextureMapperLayer.h
 +++ b/Source/WebCore/platform/graphics/texmap/TextureMapperLayer.h
 @@ -21,6 +21,7 @@
@@ -58819,7 +58871,7 @@ index 385b7808e97fada2a7e26a56172004da71b87c1c..c3be0eef6cfe99870173151f709585e9
  
  #if ENABLE(DAMAGE_TRACKING)
      void collectDamageRecursive(TextureMapperPaintOptions&, Damage&);
-@@ -197,9 +231,16 @@ private:
+@@ -197,9 +231,17 @@ private:
      ALWAYS_INLINE Damage& NODELETE ensureDamageInLayerCoordinateSpace();
      inline void damageWholeLayer();
      void damageWholeLayerIncludingItsRectFromPreviousFrame();
@@ -58830,13 +58882,14 @@ index 385b7808e97fada2a7e26a56172004da71b87c1c..c3be0eef6cfe99870173151f709585e9
  
      bool isVisible() const;
 +#if PLATFORM(HAIKU)
-+    bool isPlusLighterHaiku() const { return m_state.blendMode == BlendMode::PlusLighter; }
++    bool isPlusLighterHaiku() const;
++    bool isPlusLighterGroupHaiku() const;
 +    bool involvesPlusLighterHaiku() const;
 +#endif
  
      bool shouldBlend() const;
  
-@@ -224,6 +265,15 @@ private:
+@@ -224,6 +266,15 @@ private:
      std::unique_ptr<TextureMapperFlattenedLayer> m_flattenedLayer;
      float m_currentOpacity { 1.0 };
      FilterOperations m_currentFilters;
@@ -58852,7 +58905,7 @@ index 385b7808e97fada2a7e26a56172004da71b87c1c..c3be0eef6cfe99870173151f709585e9
  
      struct State {
          FloatPoint pos;
-@@ -244,6 +294,9 @@ private:
+@@ -244,6 +295,9 @@ private:
          Color solidColor;
          Color backgroundColor;
          FilterOperations filters;
@@ -191911,7 +191964,7 @@ index 79d0d01bad64d238a36b8159489bb510891fc025..14ee124a340455b53b33b67501df01a8
  
  bool WebCookieJar::isEligibleForCache(WebFrame& frame, const URL& firstPartyForCookies, const URL& resourceURL) const
 diff --git a/Source/WebKit/WebProcess/WebPage/WebPage.cpp b/Source/WebKit/WebProcess/WebPage/WebPage.cpp
-index 11766a98414863026a09ccea0dbbdd432db4444f..df425d8965cea1d8cb8f2ca9e38c7d407aad6458 100644
+index 11766a98414863026a09ccea0dbbdd432db4444f..31cea0f74e46fc00342783a9d669b3fb99de7e92 100644
 --- a/Source/WebKit/WebProcess/WebPage/WebPage.cpp
 +++ b/Source/WebKit/WebProcess/WebPage/WebPage.cpp
 @@ -505,7 +505,7 @@
@@ -192035,7 +192088,23 @@ index 11766a98414863026a09ccea0dbbdd432db4444f..df425d8965cea1d8cb8f2ca9e38c7d40
      if (!settings.acceleratedCompositingEnabled()) {
          WEBPAGE_RELEASE_LOG(Layers, "updatePreferences: acceleratedCompositingEnabled setting was false. WebKit cannot function in this mode; changing setting to true");
          settings.setAcceleratedCompositingEnabled(true);
-@@ -8450,6 +8497,13 @@ void WebPage::didCommitLoad(WebFrame* frame)
+@@ -5719,10 +5766,11 @@ void WebPage::didUpdateRendering(OptionSet<DidUpdateRenderingFlags> flags)
+ #endif
+     }
+ 
+-    if (flags & DidUpdateRenderingFlags::NotifyUIProcess) {
+-        if (m_didUpdateRenderingAfterCommittingLoad)
+-            return;
+-
++    // Only the notification is once per load: returning here skipped
++    // Page::didUpdateRendering() after the first update of every load, so a
++    // same-document view transition never suppressed rendering during its
++    // update callback (paint-holding-in-iframe, #182).
++    if ((flags & DidUpdateRenderingFlags::NotifyUIProcess) && !m_didUpdateRenderingAfterCommittingLoad) {
+         m_didUpdateRenderingAfterCommittingLoad = true;
+         send(Messages::WebPageProxy::DidUpdateRenderingAfterCommittingLoad());
+     }
+@@ -8450,6 +8498,13 @@ void WebPage::didCommitLoad(WebFrame* frame)
      dismissVolumetricScenesForDetachedElements();
  #endif
  
