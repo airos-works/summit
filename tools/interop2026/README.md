@@ -23,6 +23,7 @@ suite (1714 tests) takes about 30 minutes.
 | `mcp.py` | Small MCP client (Summit's MCP server, for on-screen screenshots) |
 | `x399/size.sh` | Gives the automated window an 800x600 viewport with `hey` (Set Window Rect does nothing, #187) |
 | `x399/noblank.sh` | Keeps screen_blanker away while tests run |
+| `sp3.sh BUILD RUNS` | Speedometer 3.1 (browserbench.org) in a test copy, each run in a fresh Summit and profile, scores read over MCP; `SP3_ENV` adds settings, `SP3_PROFILE=SECONDS` takes a system profile 40 s in |
 
 ## Setting up
 
