@@ -1,5 +1,75 @@
 # Summit performance: Speedometer 3.1 baseline, where the time goes, stress test
 
+## 6 November 2026: rockstargames.com/VI/launch-gallery (fixed layers, blurred placeholders)
+
+Scrolling the GTA VI launch gallery on the laptop (175 %) ran at 3-8 fps for
+the first wheel bursts, with 300-700 ms between frames. The page scrolls with
+Lenis (a `scrollTo` per animation frame), has a fixed 1682x1682 radial-gradient
+"glow" behind everything (`will-change: opacity, transform`, recoloured from
+script at each section and faded between opacity 0.5 and 1), and Next.js
+`<img placeholder="blur">` pictures whose background, until they load, is an
+SVG ending in `feGaussianBlur stdDeviation=20`. Four engine changes:
+
+- **Fixed layers have no tiles ahead of the scroll**
+  (`CoordinatedBackingStoreProxy::computeCoverAndKeepRect`; set from
+  `RenderLayerBacking::updateGeometry` for layers that behave as fixed in the
+  main frame). A dirty tile is painted wherever it is, so each recolour of the
+  glow painted all 36 of its 512-px tiles, 12 of them on screen. Now 12.
+  `SUMMIT_FIXED_LAYER_TILES_AHEAD=1` restores the old cover.
+- **A scroll no longer lays out fixed boxes in full**
+  (`LocalFrameView::setBaseLayoutViewportOrigin`). Moving the layout viewport
+  called `setNeedsLayout()` on every fixed object, which marks its layer for a
+  full repaint, so every script-driven scroll step repainted every composited
+  fixed layer whole (40 of 40 `scrollBy` calls repainted the glow). Fixed boxes
+  now get a movement-only layout, after which a composited layer is only
+  recomposited (`RenderLayer::shouldRepaintAfterLayout`); sticky boxes keep the
+  full layout. `SUMMIT_FIXED_MOVEMENT_LAYOUT=0` restores it.
+- **Opacity to or from 1 with `will-change: opacity` is not a layout**
+  (`Style::DifferenceResult`, `miscDataChangeRequiresLayout`). The layout is
+  there because a layer and stacking context may come or go, which they can't
+  when `will-change: opacity` holds in both styles; the layout only repainted
+  the element whole. `SUMMIT_OPACITY_KEEPS_LAYER=0` restores it.
+- **SVG pictures whose filter ends in a wide blur are filtered on a coarser
+  grid** (`LegacyRenderSVGResourceFilter::applyResource`). The placeholder
+  covering a 1121x631 picture was filtered at 1962x1104 px with a deviation of
+  ~120 px on the main thread while the picture's layer was recorded:
+  100-360 ms per picture coming into view. When the last primitive is an
+  `feGaussianBlur` (user-space units) wider than 8 device px, in an SVG drawn
+  as a picture (background, `<img>`), the filter scale is lowered until the
+  blur is 8 px (at most 16x) and the result is drawn scaled up. Inline SVG is
+  unchanged. A page of filter cases (goo, small blur, bounding-box units,
+  inline and image wide blurs) is pixel-identical except faint noise inside
+  the wide blurs of SVG pictures and their clipped region edges; the
+  placeholder used as a CSS background, which the old engine drew blank on
+  that page, now shows. `SUMMIT_SVG_BLUR_FILTER_SCALE=0` restores full size.
+
+Laptop, test copies with the release engine (a1c1162) and with all four
+changes, same app, two wheel bursts from the top with the main thread's
+timeline recording, alternating runs:
+
+| | release | changed |
+|---|---|---|
+| first / second burst | 3.3 / 4.0-6.7 fps | 14.0-15.3 / 26.0-31.3 fps |
+| longest gap in the bursts | 287-502 ms | 148-300 ms |
+| main-thread painting (recording) | 1.57-1.64 s, longest 257-416 ms | 0.60-0.69 s, longest 119-136 ms |
+| main thread busy in 3.5 s | 4.77-4.80 s | 2.56-2.73 s |
+
+Each step separately: the glow's tile paints in a 8-burst scroll went from
+360-612 tiles (2.9-3.9 s of painting) to 96-240 (1.1-2.4 s) with the first two
+changes; whole-layer invalidations of the glow from 14 to 6 with the second
+and third; removing the placeholders from the page by CSS made the same
+difference to main-thread painting as the fourth change (2.1 -> 0.3-0.4 s).
+A fixed-layer page (a 3000-px fixed layer moved by a transition, a fixed
+header, `top: auto` fixed box, sticky box, fixed layer in an iframe; script
+smooth scroll) is pixel-identical to the release engine at every step.
+
+What is left on this page: the page tweens the glow's colour per frame at
+each section, so now that frames come faster it is recoloured 2-3x as often,
+and each recolour is 12 tiles of CPU radial gradient (about 4 ms a tile idle,
+10-14 ms while the gallery's pictures decode). The CPU clock readings on the
+laptop (`sysinfo` 1406/2013 MHz) are static, not a throttle: a Python loop runs
+1.9x faster there than on the 2.9 GHz Xeon build host.
+
 ## 3 November 2026: Instagram's grid icons held a core (filter bounds)
 
 A logged-in Instagram profile kept its web process's main thread at a full

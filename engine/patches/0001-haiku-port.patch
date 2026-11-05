@@ -19128,7 +19128,7 @@ index bbb54b89194cc6399eba94d1f9ea11ad625d5285..08e92ffa83c9725e66daad755fb153c9
      scheduleRenderingUpdateIfNecessary(*element);
  }
 diff --git a/Source/WebCore/page/LocalFrameView.cpp b/Source/WebCore/page/LocalFrameView.cpp
-index 2132dee6a2c27be522007bb4df5bc1f5940c1c06..d5880d1d4e55f390e5d909151f40723ae3e2ba57 100644
+index 2132dee6a2c27be522007bb4df5bc1f5940c1c06..f11f7c790e38d3d0fca5837cf441c436da83b368 100644
 --- a/Source/WebCore/page/LocalFrameView.cpp
 +++ b/Source/WebCore/page/LocalFrameView.cpp
 @@ -167,8 +167,20 @@
@@ -19152,7 +19152,39 @@ index 2132dee6a2c27be522007bb4df5bc1f5940c1c06..d5880d1d4e55f390e5d909151f40723a
  using namespace HTMLNames;
  
  WTF_MAKE_TZONE_ALLOCATED_IMPL(LocalFrameView);
-@@ -2969,6 +2981,10 @@ void LocalFrameView::viewportContentsChanged()
+@@ -1956,6 +1968,31 @@ void LocalFrameView::setBaseLayoutViewportOrigin(LayoutPoint origin, TriggerLayo
+         return;
+ 
+     m_layoutViewportOrigin = origin;
++#if PLATFORM(HAIKU)
++    // The layout viewport moved, not changed its size: a fixed box keeps its
++    // size and only moves with it. A full layout of each such box made its
++    // layer be painted again whole at every scroll step the page made from
++    // script (Lenis, GSAP's ScrollSmoother: each animation frame), while a
++    // movement-only layout leaves a composited layer as it is painted
++    // (RenderLayer::shouldRepaintAfterLayout()). rockstargames.com/VI repainted
++    // its fixed 1682x1682 glow, 12 tiles of radial gradient at 175 %, on every
++    // frame of a scroll. Sticky boxes are in flow and still get a layout.
++    // SUMMIT_FIXED_MOVEMENT_LAYOUT=0 lays them all out again as before.
++    static const bool fixedMovementLayout = [] {
++        const char* value = getenv("SUMMIT_FIXED_MOVEMENT_LAYOUT");
++        return !value || value[0] != '0' || value[1];
++    }();
++    if (layoutTriggering == TriggerLayoutOrNot::Yes && fixedMovementLayout && hasViewportConstrainedObjects()) {
++        for (CheckedRef renderer : *m_viewportConstrainedObjects) {
++            if (renderer->isFixedPositioned())
++                renderer->setNeedsOutOfFlowMovementLayout(nullptr);
++            else
++                renderer->setNeedsLayout();
++            if (renderer->hasLayer())
++                downcast<RenderBoxModelObject>(renderer).layer()->setNeedsCompositingGeometryUpdate();
++        }
++    } else
++#endif
+     if (layoutTriggering == TriggerLayoutOrNot::Yes)
+         setViewportConstrainedObjectsNeedLayout();
+     
+@@ -2969,6 +3006,10 @@ void LocalFrameView::viewportContentsChanged()
  
          if (CheckedPtr renderView = frameView.m_frame->contentRenderer())
              renderView->updateVisibleViewportRect(visibleRect);
@@ -19163,7 +19195,7 @@ index 2132dee6a2c27be522007bb4df5bc1f5940c1c06..d5880d1d4e55f390e5d909151f40723a
      });
  }
  
-@@ -4939,10 +4955,30 @@ void LocalFrameView::flushAnyPendingPostLayoutTasks()
+@@ -4939,10 +4980,30 @@ void LocalFrameView::flushAnyPendingPostLayoutTasks()
  void LocalFrameView::performPostLayoutTasks()
  {
      ScriptDisallowedScope::InMainThread scriptDisallowedScope;
@@ -19194,7 +19226,7 @@ index 2132dee6a2c27be522007bb4df5bc1f5940c1c06..d5880d1d4e55f390e5d909151f40723a
  
      if (!layoutContext().isLayoutNested() && m_frame->document()->documentElement())
          fireLayoutRelatedMilestonesIfNeeded();
-@@ -4952,6 +4988,10 @@ void LocalFrameView::performPostLayoutTasks()
+@@ -4952,6 +5013,10 @@ void LocalFrameView::performPostLayoutTasks()
          renderView->adjustAXCustomColorModeAfterLayout();
  #endif
  
@@ -19205,7 +19237,7 @@ index 2132dee6a2c27be522007bb4df5bc1f5940c1c06..d5880d1d4e55f390e5d909151f40723a
  #if PLATFORM(IOS_FAMILY)
      // Only send layout-related delegate callbacks synchronously for the main frame to
      // avoid re-entering layout for the main frame while delivering a layout-related delegate
-@@ -4965,32 +5005,56 @@ void LocalFrameView::performPostLayoutTasks()
+@@ -4965,32 +5030,56 @@ void LocalFrameView::performPostLayoutTasks()
      // FIXME: We should consider adding DidLayout as a LayoutMilestone. That would let us merge this
      // with didLayout(LayoutMilestones).
      m_frame->loader().client().dispatchDidLayout();
@@ -19262,7 +19294,7 @@ index 2132dee6a2c27be522007bb4df5bc1f5940c1c06..d5880d1d4e55f390e5d909151f40723a
  
      protect(m_frame->document())->scheduleDeferredAXObjectCacheUpdate();
  
-@@ -6094,8 +6158,31 @@ void LocalFrameView::paintOverhangAreas(GraphicsContext& context, const IntRect&
+@@ -6094,8 +6183,31 @@ void LocalFrameView::paintOverhangAreas(GraphicsContext& context, const IntRect&
      ScrollView::paintOverhangAreas(context, horizontalOverhangArea, verticalOverhangArea, dirtyRect);
  }
  
@@ -19294,7 +19326,7 @@ index 2132dee6a2c27be522007bb4df5bc1f5940c1c06..d5880d1d4e55f390e5d909151f40723a
      // Style updating, render tree creation, and layout needs to be done multiple times
      // for more than one reason. But one reason is that when an <object> element determines
      // what it needs to load a subframe, a second pass is needed. That requires update
-@@ -6142,6 +6229,23 @@ void LocalFrameView::updateLayoutAndStyleIfNeededRecursive(OptionSet<LayoutOptio
+@@ -6142,6 +6254,23 @@ void LocalFrameView::updateLayoutAndStyleIfNeededRecursive(OptionSet<LayoutOptio
              break;
      }
  
@@ -19318,7 +19350,7 @@ index 2132dee6a2c27be522007bb4df5bc1f5940c1c06..d5880d1d4e55f390e5d909151f40723a
  #if ASSERT_ENABLED
      auto needsStyleRecalc = [&] {
          DescendantsDeque deque;
-@@ -6217,6 +6321,11 @@ bool LocalFrameView::qualifiesAsSignificantRenderedText() const
+@@ -6217,6 +6346,11 @@ bool LocalFrameView::qualifiesAsSignificantRenderedText() const
      return m_hasReachedSignificantRenderedTextThreshold;
  }
  
@@ -19330,7 +19362,7 @@ index 2132dee6a2c27be522007bb4df5bc1f5940c1c06..d5880d1d4e55f390e5d909151f40723a
  void LocalFrameView::checkAndDispatchDidReachVisuallyNonEmptyState()
  {
      auto qualifiesAsVisuallyNonEmpty = [&] {
-@@ -6299,6 +6408,34 @@ void LocalFrameView::checkAndDispatchDidReachVisuallyNonEmptyState()
+@@ -6299,6 +6433,34 @@ void LocalFrameView::checkAndDispatchDidReachVisuallyNonEmptyState()
          return;
  
      m_contentQualifiesAsVisuallyNonEmpty = true;
@@ -29565,7 +29597,7 @@ index 100e61c99fcc079ca9b363aab12482437ef928c7..c4a67dde3a5846b566a25d6d109e452a
  }
  
 diff --git a/Source/WebCore/platform/graphics/coordinated/CoordinatedBackingStoreProxy.cpp b/Source/WebCore/platform/graphics/coordinated/CoordinatedBackingStoreProxy.cpp
-index 160ba4f2623722caaf670da2b6eb3f4b1d3f2f5f..7aea0867b4ac36a7f4a52ccbe24b102b5e5a5d4e 100644
+index 160ba4f2623722caaf670da2b6eb3f4b1d3f2f5f..f327d85c3bb8d00fa46c44bb4d6222a9a75dde97 100644
 --- a/Source/WebCore/platform/graphics/coordinated/CoordinatedBackingStoreProxy.cpp
 +++ b/Source/WebCore/platform/graphics/coordinated/CoordinatedBackingStoreProxy.cpp
 @@ -33,6 +33,10 @@
@@ -29622,7 +29654,27 @@ index 160ba4f2623722caaf670da2b6eb3f4b1d3f2f5f..7aea0867b4ac36a7f4a52ccbe24b102b
              auto buffer = paintingEngine.replay(*layer.owner(), recording.copyRef(), tile.rect, tile.dirtyRect);
  #else
              FloatRect scaledDirtyRect(tile.dirtyRect);
-@@ -407,11 +438,14 @@ IntSize CoordinatedBackingStoreProxy::computeTileSize(const IntSize& viewportSiz
+@@ -247,6 +278,9 @@ void CoordinatedBackingStoreProxy::createOrDestroyTiles(const IntRect& unscaledV
+     IntRect visibleRect = mapFromContents(unscaledVisibleRect);
+     bool contentsRectChanged = contentsScaleChanged || m_contentsRect != contentsRect;
+     bool geometryChanged = contentsRectChanged || m_visibleRect != visibleRect || m_coverAreaMultiplier != coverAreaMultiplier;
++#if PLATFORM(HAIKU)
++    geometryChanged |= m_coverStaysInViewportHaiku != m_staysInViewportHaiku;
++#endif
+     if (!geometryChanged && !m_pendingTileCreation)
+         return;
+ 
+@@ -254,6 +288,9 @@ void CoordinatedBackingStoreProxy::createOrDestroyTiles(const IntRect& unscaledV
+         m_contentsRect = contentsRect;
+         m_visibleRect = visibleRect;
+         m_coverAreaMultiplier = coverAreaMultiplier;
++#if PLATFORM(HAIKU)
++        m_coverStaysInViewportHaiku = m_staysInViewportHaiku;
++#endif
+ 
+         bool tileSizeChanged = false;
+         if (!m_contentsRect.isEmpty()) {
+@@ -407,11 +444,14 @@ IntSize CoordinatedBackingStoreProxy::computeTileSize(const IntSize& viewportSiz
          return overridenTileSize;
  
      IntSize tileSize;
@@ -29640,7 +29692,7 @@ index 160ba4f2623722caaf670da2b6eb3f4b1d3f2f5f..7aea0867b4ac36a7f4a52ccbe24b102b
          static constexpr int minGPUTileHeight = 256;
  
          auto gpuTileSize = [&](const IntSize& baseSize) -> IntSize {
-@@ -434,9 +468,25 @@ IntSize CoordinatedBackingStoreProxy::computeTileSize(const IntSize& viewportSiz
+@@ -434,9 +474,25 @@ IntSize CoordinatedBackingStoreProxy::computeTileSize(const IntSize& viewportSiz
              tileSize = gpuTileSize(baseSize);
          }
      } else {
@@ -29666,7 +29718,38 @@ index 160ba4f2623722caaf670da2b6eb3f4b1d3f2f5f..7aea0867b4ac36a7f4a52ccbe24b102b
          // If the contents width is small, increase tile size vertically.
          if (m_contentsRect.width() < tileSize.width())
              tileSize.setHeight(maxUntiledContentSize);
-@@ -513,6 +563,31 @@ std::pair<IntRect, IntRect> CoordinatedBackingStoreProxy::computeCoverAndKeepRec
+@@ -499,6 +555,30 @@ void CoordinatedBackingStoreProxy::adjustForContentsRect(IntRect& rect) const
+ 
+ std::pair<IntRect, IntRect> CoordinatedBackingStoreProxy::computeCoverAndKeepRect() const
+ {
++#if PLATFORM(HAIKU)
++    // A layer that stays where it is in the viewport (fixed, and what moves
++    // with it) shows the same part of itself however the page scrolls, so
++    // tiles ahead of the scroll are never shown: they were only painted. A
++    // dirty tile is painted again wherever it is, and at 175 % the
++    // 1682x1682 radial-gradient glow behind rockstargames.com/VI's gallery,
++    // recoloured from script at each section of the page, painted all 36 of
++    // its tiles each time, 12 of them on the screen (78 % of the painting of
++    // a scroll). Such a layer has tiles for what shows and a margin of an
++    // eighth of a tile, which a layer that is moved now and then (by script,
++    // a transition) gets new tiles beyond. SUMMIT_FIXED_LAYER_TILES_AHEAD=1
++    // gives it tiles ahead of the scroll as before.
++    static const bool fixedLayerTilesAhead = [] {
++        const char* value = getenv("SUMMIT_FIXED_LAYER_TILES_AHEAD");
++        return value && value[0] == '1' && !value[1];
++    }();
++    if (m_coverStaysInViewportHaiku && !fixedLayerTilesAhead) {
++        IntRect coverRect = m_visibleRect;
++        coverRect.inflateX(m_tileSize.width() / 8);
++        coverRect.inflateY(m_tileSize.height() / 8);
++        coverRect.intersect(m_contentsRect);
++        return { coverRect, coverRect };
++    }
++#endif
+     IntRect coverRect = m_visibleRect;
+     IntRect keepRect = m_visibleRect;
+ 
+@@ -513,6 +593,31 @@ std::pair<IntRect, IntRect> CoordinatedBackingStoreProxy::computeCoverAndKeepRec
  
      adjustForContentsRect(coverRect);
  
@@ -29698,8 +29781,33 @@ index 160ba4f2623722caaf670da2b6eb3f4b1d3f2f5f..7aea0867b4ac36a7f4a52ccbe24b102b
      // The keep rect is an inflated version of the cover rect, inflated in tile dimensions.
      keepRect.unite(coverRect);
      keepRect.inflateX(m_tileSize.width() / 2);
+diff --git a/Source/WebCore/platform/graphics/coordinated/CoordinatedBackingStoreProxy.h b/Source/WebCore/platform/graphics/coordinated/CoordinatedBackingStoreProxy.h
+index a743e3db140fdd0202145f0c59c13379044127a1..271da6770116cab538ed77f62a91f04a04fead5b 100644
+--- a/Source/WebCore/platform/graphics/coordinated/CoordinatedBackingStoreProxy.h
++++ b/Source/WebCore/platform/graphics/coordinated/CoordinatedBackingStoreProxy.h
+@@ -87,6 +87,9 @@ public:
+     };
+     OptionSet<UpdateResult> updateIfNeeded(const IntRect& unscaledVisibleRect, const FloatSize& unscaledSize, const FloatRect& unscaledViewportRect, float contentsScale, bool contentsOpaque, bool shouldCreateAndDestroyTiles, const Vector<IntRect, 1>&, Damage&, CoordinatedPlatformLayer&);
+     Update takePendingUpdate();
++#if PLATFORM(HAIKU)
++    void setStaysInViewportHaiku(bool staysInViewport) { m_staysInViewportHaiku = staysInViewport; }
++#endif
+ 
+     void waitUntilPaintingComplete();
+ 
+@@ -150,6 +153,10 @@ private:
+     IntSize m_tileSize;
+     float m_coverAreaMultiplier { 2 };
+     bool m_pendingTileCreation { false };
++#if PLATFORM(HAIKU)
++    bool m_staysInViewportHaiku { false };
++    bool m_coverStaysInViewportHaiku { false };
++#endif
+     IntRect m_contentsRect;
+     IntRect m_visibleRect;
+     IntRect m_coverRect;
 diff --git a/Source/WebCore/platform/graphics/coordinated/CoordinatedPlatformLayer.cpp b/Source/WebCore/platform/graphics/coordinated/CoordinatedPlatformLayer.cpp
-index 63ec41fac1fe1f6d4b7606555093bc4bed44d365..bbce43a53aaac3cf27697187d1061d59e4d4f8b3 100644
+index 63ec41fac1fe1f6d4b7606555093bc4bed44d365..14e605ae006f6c825653f8a4ced67faf60247b95 100644
 --- a/Source/WebCore/platform/graphics/coordinated/CoordinatedPlatformLayer.cpp
 +++ b/Source/WebCore/platform/graphics/coordinated/CoordinatedPlatformLayer.cpp
 @@ -166,6 +166,52 @@ void CoordinatedPlatformLayer::invalidateTarget()
@@ -29755,7 +29863,27 @@ index 63ec41fac1fe1f6d4b7606555093bc4bed44d365..bbce43a53aaac3cf27697187d1061d59
  void CoordinatedPlatformLayer::invalidateClient()
  {
      ASSERT(isMainThread());
-@@ -533,8 +579,15 @@ void CoordinatedPlatformLayer::setContentsBuffer(std::unique_ptr<CoordinatedPlat
+@@ -331,6 +377,19 @@ void CoordinatedPlatformLayer::setTransformedVisibleRect(IntRect&& transformedVi
+     m_needsTilesUpdate = true;
+ }
+ 
++#if PLATFORM(HAIKU)
++bool CoordinatedPlatformLayer::setStaysInViewportHaiku(bool staysInViewport)
++{
++    assertIsMainThread();
++    if (m_staysInViewportHaiku == staysInViewport)
++        return false;
++
++    m_staysInViewportHaiku = staysInViewport;
++    m_needsTilesUpdate = true;
++    return true;
++}
++#endif
++
+ #if ENABLE(SCROLLING_THREAD)
+ void CoordinatedPlatformLayer::setScrollingNodeID(std::optional<ScrollingNodeID> nodeID)
+ {
+@@ -533,8 +592,15 @@ void CoordinatedPlatformLayer::setContentsBuffer(std::unique_ptr<CoordinatedPlat
  #if ENABLE(DAMAGE_TRACKING)
      if (dirtyRegion)
          addDamage(WTF::move(*dirtyRegion));
@@ -29771,7 +29899,7 @@ index 63ec41fac1fe1f6d4b7606555093bc4bed44d365..bbce43a53aaac3cf27697187d1061d59
  #else
      UNUSED_PARAM(dirtyRegion);
  #endif
-@@ -652,6 +705,40 @@ void CoordinatedPlatformLayer::addDamage(Damage&& damage)
+@@ -652,6 +718,40 @@ void CoordinatedPlatformLayer::addDamage(Damage&& damage)
  }
  #endif
  
@@ -29812,7 +29940,7 @@ index 63ec41fac1fe1f6d4b7606555093bc4bed44d365..bbce43a53aaac3cf27697187d1061d59
  void CoordinatedPlatformLayer::damageWholeLayer()
  {
  #if ENABLE(DAMAGE_TRACKING)
-@@ -910,6 +997,22 @@ void CoordinatedPlatformLayer::updateBackingStore()
+@@ -910,7 +1010,26 @@ void CoordinatedPlatformLayer::updateBackingStore()
          backingStoreProxy = m_backingStoreProxy;
      }
  
@@ -29833,9 +29961,13 @@ index 63ec41fac1fe1f6d4b7606555093bc4bed44d365..bbce43a53aaac3cf27697187d1061d59
 +    }
 +#endif
      Damage damage(size, Damage::Mode::Rectangles);
++#if PLATFORM(HAIKU)
++    backingStoreProxy->setStaysInViewportHaiku(m_staysInViewportHaiku);
++#endif
      auto updateResult = backingStoreProxy->updateIfNeeded(m_transformedVisibleRect, size, m_visibleRect, contentsScale, contentsOpaque, m_pendingTilesCreation || m_needsTilesUpdate, m_dirtyRegion, damage, *this);
      m_dirtyRegion.clear();
-@@ -1153,6 +1256,8 @@ void CoordinatedPlatformLayer::flushCompositingStateOnTarget(const OptionSet<Com
+     m_needsTilesUpdate = false;
+@@ -1153,6 +1272,8 @@ void CoordinatedPlatformLayer::flushCompositingStateOnTarget(const OptionSet<Com
          }
  
          if (m_pendingChanges.contains(Change::BackgroundColor)) {
@@ -29844,7 +29976,7 @@ index 63ec41fac1fe1f6d4b7606555093bc4bed44d365..bbce43a53aaac3cf27697187d1061d59
              layer.setBackgroundColor(m_backgroundColor);
              m_pendingChanges.remove(Change::BackgroundColor);
          }
-@@ -1162,12 +1267,21 @@ void CoordinatedPlatformLayer::flushCompositingStateOnTarget(const OptionSet<Com
+@@ -1162,12 +1283,21 @@ void CoordinatedPlatformLayer::flushCompositingStateOnTarget(const OptionSet<Com
              m_pendingChanges.remove(Change::Opacity);
          }
  
@@ -29866,7 +29998,7 @@ index 63ec41fac1fe1f6d4b7606555093bc4bed44d365..bbce43a53aaac3cf27697187d1061d59
  
                  if (auto* animatedBackingStoreClient = m_backingStoreProxy->animatedBackingStoreClient())
                      layer.setAnimatedBackingStoreClient(animatedBackingStoreClient);
-@@ -1175,6 +1289,10 @@ void CoordinatedPlatformLayer::flushCompositingStateOnTarget(const OptionSet<Com
+@@ -1175,6 +1305,10 @@ void CoordinatedPlatformLayer::flushCompositingStateOnTarget(const OptionSet<Com
                  layer.setBackingStore(nullptr);
                  layer.setAnimatedBackingStoreClient(nullptr);
                  m_backingStore = nullptr;
@@ -29877,7 +30009,7 @@ index 63ec41fac1fe1f6d4b7606555093bc4bed44d365..bbce43a53aaac3cf27697187d1061d59
              }
              m_pendingChanges.remove(Change::BackingStore);
          }
-@@ -1290,6 +1408,18 @@ void CoordinatedPlatformLayer::flushCompositingStateOnTarget(const OptionSet<Com
+@@ -1290,6 +1424,18 @@ void CoordinatedPlatformLayer::flushCompositingStateOnTarget(const OptionSet<Com
              m_contentsBuffer.committed = WTF::move(m_contentsBuffer.pending);
              m_contentsBuffer.hasCommitted = !!m_contentsBuffer.committed;
              m_pendingChanges.remove(Change::ContentsBuffer);
@@ -29897,7 +30029,7 @@ index 63ec41fac1fe1f6d4b7606555093bc4bed44d365..bbce43a53aaac3cf27697187d1061d59
  
          if (m_contentsBuffer.committed)
 diff --git a/Source/WebCore/platform/graphics/coordinated/CoordinatedPlatformLayer.h b/Source/WebCore/platform/graphics/coordinated/CoordinatedPlatformLayer.h
-index dc4108941486e941ebe3b62eb9a1612941385fa2..ccc86791f181911b66422eebdb6fa6709f514aee 100644
+index dc4108941486e941ebe3b62eb9a1612941385fa2..c50757273a667345b90a11c5fdb5a2f272495588 100644
 --- a/Source/WebCore/platform/graphics/coordinated/CoordinatedPlatformLayer.h
 +++ b/Source/WebCore/platform/graphics/coordinated/CoordinatedPlatformLayer.h
 @@ -36,6 +36,7 @@
@@ -29936,11 +30068,14 @@ index dc4108941486e941ebe3b62eb9a1612941385fa2..ccc86791f181911b66422eebdb6fa670
  
      Client& client() const { ASSERT(m_client); return *m_client; }
      void invalidateClient();
-@@ -116,6 +131,15 @@ public:
+@@ -116,6 +131,18 @@ public:
      sk_sp<GrContextThreadSafeProxy> threadSafeGrContext() const { return m_threadSafeGrContext; }
  #endif
      void invalidateTarget();
 +#if PLATFORM(HAIKU)
++    // Whether the layer stays where it is in the viewport while the page
++    // scrolls: it then gets no tiles ahead of the scroll.
++    bool setStaysInViewportHaiku(bool);
 +    void resetBackingStoreAfterContextLossHaiku();
 +    // A page hidden for a while gives back its GPU memory (LayerTreeHost):
 +    // the compositor drops the layer's target and tiles like
@@ -29952,7 +30087,7 @@ index dc4108941486e941ebe3b62eb9a1612941385fa2..ccc86791f181911b66422eebdb6fa670
  
  #if ENABLE(DAMAGE_TRACKING)
      void setDamagePropagationEnabled(bool enabled) { m_damagePropagationEnabled = enabled; }
-@@ -220,6 +244,9 @@ public:
+@@ -220,6 +247,9 @@ public:
      void processPendingBackingStoreTileUpdates();
      bool isCompositionRequiredOrOngoing() const;
      void requestComposition(CompositionReason);
@@ -29962,7 +30097,7 @@ index dc4108941486e941ebe3b62eb9a1612941385fa2..ccc86791f181911b66422eebdb6fa670
      RunLoop* compositingRunLoop() const;
      int maxTextureSize() const;
  
-@@ -241,6 +268,9 @@ private:
+@@ -241,6 +271,9 @@ private:
      void addDamage(Damage&&) WTF_REQUIRES_LOCK(m_lock);
  #endif
      void damageWholeLayer() WTF_REQUIRES_LOCK(m_lock);
@@ -29972,7 +30107,17 @@ index dc4108941486e941ebe3b62eb9a1612941385fa2..ccc86791f181911b66422eebdb6fa670
  
  #if USE(TEXTURE_MAPPER)
      void flushCompositingStateOnTarget(const OptionSet<CompositionReason>&, TextureMapperLayer&);
-@@ -330,6 +360,9 @@ private:
+@@ -305,6 +338,9 @@ private:
+     bool m_drawsContent WTF_GUARDED_BY_CAPABILITY(mainThread) { false };
+     bool m_pendingTilesCreation WTF_GUARDED_BY_CAPABILITY(mainThread) { false };
+     bool m_needsTilesUpdate WTF_GUARDED_BY_CAPABILITY(mainThread) { false };
++#if PLATFORM(HAIKU)
++    bool m_staysInViewportHaiku WTF_GUARDED_BY_CAPABILITY(mainThread) { false };
++#endif
+     FloatRect m_visibleRect WTF_GUARDED_BY_CAPABILITY(mainThread);
+     IntRect m_transformedVisibleRect WTF_GUARDED_BY_CAPABILITY(mainThread);
+     Vector<IntRect, 1> m_dirtyRegion WTF_GUARDED_BY_CAPABILITY(mainThread);
+@@ -330,6 +366,9 @@ private:
      bool m_contentsVisible WTF_GUARDED_BY_LOCK(m_lock) { true };
      bool m_contentsOpaque WTF_GUARDED_BY_LOCK(m_lock) { false };
      FloatRect m_contentsRect WTF_GUARDED_BY_LOCK(m_lock);
@@ -30422,7 +30567,7 @@ index 2b1b31403c0b4c1f894c374d576ee2e79ddcd751..da0b36c0555a007ed33f74c6d8a7dace
  
      enum class PaintingState {
 diff --git a/Source/WebCore/platform/graphics/coordinated/GraphicsLayerCoordinated.cpp b/Source/WebCore/platform/graphics/coordinated/GraphicsLayerCoordinated.cpp
-index be3145e2dc5a248c932f24023c37029290825571..800638bbf3f12474b1fd23e687d3feca2cb28186 100644
+index be3145e2dc5a248c932f24023c37029290825571..d10398e2e9ae6d73ac259786b0c8a4c148a76fe9 100644
 --- a/Source/WebCore/platform/graphics/coordinated/GraphicsLayerCoordinated.cpp
 +++ b/Source/WebCore/platform/graphics/coordinated/GraphicsLayerCoordinated.cpp
 @@ -43,6 +43,11 @@
@@ -30451,7 +30596,7 @@ index be3145e2dc5a248c932f24023c37029290825571..800638bbf3f12474b1fd23e687d3feca
      m_platformLayer->setOwner(nullptr);
      if (m_parent)
          downcast<GraphicsLayerCoordinated>(*m_parent).noteLayerPropertyChanged(Change::Children, ScheduleFlush::Yes);
-@@ -102,10 +112,50 @@ std::optional<PlatformLayerIdentifier> GraphicsLayerCoordinated::primaryLayerID(
+@@ -102,10 +112,56 @@ std::optional<PlatformLayerIdentifier> GraphicsLayerCoordinated::primaryLayerID(
      return m_platformLayer->id();
  }
  
@@ -30472,6 +30617,12 @@ index be3145e2dc5a248c932f24023c37029290825571..800638bbf3f12474b1fd23e687d3feca
 +#endif
 +
 +#if PLATFORM(HAIKU)
++void GraphicsLayerCoordinated::setStaysInViewportHaiku(bool staysInViewport)
++{
++    if (m_platformLayer->setStaysInViewportHaiku(staysInViewport))
++        noteLayerPropertyChanged(Change::TileCoverage, ScheduleFlush::Yes);
++}
++
 +bool GraphicsLayerCoordinated::shouldRepaintOnSizeChange() const
 +{
 +    // A layer that changes its size was painted again whole. A page that
@@ -30502,7 +30653,7 @@ index be3145e2dc5a248c932f24023c37029290825571..800638bbf3f12474b1fd23e687d3feca
  
      if (m_dirtyRegion) {
          if (m_dirtyRegion->mode() == Damage::Mode::Full)
-@@ -133,6 +183,10 @@ void GraphicsLayerCoordinated::setNeedsDisplayInRect(const FloatRect& initialRec
+@@ -133,6 +189,10 @@ void GraphicsLayerCoordinated::setNeedsDisplayInRect(const FloatRect& initialRec
  
      if (rect.isEmpty())
          return;
@@ -30513,7 +30664,7 @@ index be3145e2dc5a248c932f24023c37029290825571..800638bbf3f12474b1fd23e687d3feca
  
      addRepaintRect(rect);
  
-@@ -403,7 +457,7 @@ void GraphicsLayerCoordinated::setContentsNeedsDisplayInRect(const FloatRect& re
+@@ -403,7 +463,7 @@ void GraphicsLayerCoordinated::setContentsNeedsDisplayInRect(const FloatRect& re
      noteLayerPropertyChanged(Change::ContentsBufferNeedsDisplay, ScheduleFlush::Yes);
  }
  
@@ -30522,7 +30673,7 @@ index be3145e2dc5a248c932f24023c37029290825571..800638bbf3f12474b1fd23e687d3feca
  void GraphicsLayerCoordinated::setContentsToMediaPlayer(MediaPlayer* player, ContentsLayerPurpose)
  {
      // Never try to get or set the proxy on a player that doesn't support accelerated rendering (null media player).
-@@ -480,6 +534,37 @@ void GraphicsLayerCoordinated::setContentsToNativeImage(NativeImage* image)
+@@ -480,6 +540,37 @@ void GraphicsLayerCoordinated::setContentsToNativeImage(NativeImage* image)
      noteLayerPropertyChanged(Change::ContentsImage, ScheduleFlush::Yes);
  }
  
@@ -30560,7 +30711,7 @@ index be3145e2dc5a248c932f24023c37029290825571..800638bbf3f12474b1fd23e687d3feca
  void GraphicsLayerCoordinated::setContentsToSolidColor(const Color& color)
  {
      if (m_contentsColor == color)
-@@ -1276,6 +1361,7 @@ void GraphicsLayerCoordinated::recursiveCommitChanges(CommitState& commitState,
+@@ -1276,6 +1367,7 @@ void GraphicsLayerCoordinated::recursiveCommitChanges(CommitState& commitState,
      if (!needsCommit(commitState))
          return;
  
@@ -30569,10 +30720,22 @@ index be3145e2dc5a248c932f24023c37029290825571..800638bbf3f12474b1fd23e687d3feca
      if (!childCommitState.ancestorHadChanges)
          childCommitState.ancestorHadChanges = !m_pendingChanges.isEmpty();
 diff --git a/Source/WebCore/platform/graphics/coordinated/GraphicsLayerCoordinated.h b/Source/WebCore/platform/graphics/coordinated/GraphicsLayerCoordinated.h
-index 139bcc9a9cbfae7dcf875231044d69c23dab9dca..ccc63fafbd79b0d7d59d3b4aeb2131675adb9d53 100644
+index 139bcc9a9cbfae7dcf875231044d69c23dab9dca..83bebe446b32c94926a858bbfae751541f9e75c0 100644
 --- a/Source/WebCore/platform/graphics/coordinated/GraphicsLayerCoordinated.h
 +++ b/Source/WebCore/platform/graphics/coordinated/GraphicsLayerCoordinated.h
-@@ -89,12 +89,16 @@ private:
+@@ -53,6 +53,11 @@ public:
+ 
+     static void clampToSizeIfRectIsInfinite(FloatRect&, const FloatSize&);
+ 
++#if PLATFORM(HAIKU)
++    // Fixed (and what moves with it): RenderLayerBacking::updateGeometry().
++    void setStaysInViewportHaiku(bool);
++#endif
++
+ private:
+     bool isGraphicsLayerCoordinated() const override { return true; }
+ 
+@@ -89,12 +94,16 @@ private:
      void setContentsClipShapePath(const Path&) override;
      void setContentsNeedsDisplay() override;
      void setContentsNeedsDisplayInRect(const FloatRect&) override;
@@ -30590,7 +30753,7 @@ index 139bcc9a9cbfae7dcf875231044d69c23dab9dca..ccc63fafbd79b0d7d59d3b4aeb213167
      void setContentsToSolidColor(const Color&) override;
      bool usesContentsLayer() const override;
  
-@@ -132,6 +136,9 @@ private:
+@@ -132,6 +141,9 @@ private:
      Vector<GraphicsLayer::AcceleratedAnimationForTesting> acceleratedAnimationsForTesting() const override;
  
      void setNeedsDisplay() override;
@@ -86065,14 +86228,15 @@ index 4bd303aa17e5da8a780da294d7a1337b8978d6ea..f725a2e04a1a94b4af059db4abc884a6
          LayoutRect clipRect = clipRectRelativeToAncestor(clippingRootLayer, offsetFromRoot, infiniteRect);
          if (clipRect.isInfinite())
 diff --git a/Source/WebCore/rendering/RenderLayerBacking.cpp b/Source/WebCore/rendering/RenderLayerBacking.cpp
-index 95122a10cacc10b498c40d3447599bd2cd4d2795..eb6aa87c1d8ee8f6fb380994cbb58df8ec6226f0 100644
+index 95122a10cacc10b498c40d3447599bd2cd4d2795..6c05ae6ea64ea1cb7fd790f15fe697c2a56b5730 100644
 --- a/Source/WebCore/rendering/RenderLayerBacking.cpp
 +++ b/Source/WebCore/rendering/RenderLayerBacking.cpp
-@@ -137,6 +137,14 @@
+@@ -137,6 +137,15 @@
  #include "ModelContext.h"
  #endif
  
 +#if PLATFORM(HAIKU)
++#include "GraphicsLayerCoordinated.h"
 +#include "KeyframeEffectStack.h"
 +#include <cstdio>
 +#include <cstdlib>
@@ -86083,7 +86247,7 @@ index 95122a10cacc10b498c40d3447599bd2cd4d2795..eb6aa87c1d8ee8f6fb380994cbb58df8
  #if USE(SYSTEM_PREVIEW) && ENABLE(MODEL_PROCESS) && ENABLE(INTERACTION_REGIONS_IN_EVENT_REGION)
  #include "ARKitBadgeSystemImage.h"
  #endif
-@@ -910,8 +918,76 @@ void RenderLayerBacking::updateChildrenTransformAndAnchorPoint(const LayoutRect&
+@@ -910,8 +919,76 @@ void RenderLayerBacking::updateChildrenTransformAndAnchorPoint(const LayoutRect&
      removeChildrenTransformFromLayers(layerForPerspective);
  }
  
@@ -86160,7 +86324,7 @@ index 95122a10cacc10b498c40d3447599bd2cd4d2795..eb6aa87c1d8ee8f6fb380994cbb58df8
      m_canCompositeFilters = !style.filter().hasReferenceFilter() && m_graphicsLayer->setFilters(Style::toPlatform(style.filter(), style));
  }
  
-@@ -1218,6 +1294,10 @@ void RenderLayerBacking::updateAfterLayout(bool needsClippingUpdate, bool needsF
+@@ -1218,6 +1295,10 @@ void RenderLayerBacking::updateAfterLayout(bool needsClippingUpdate, bool needsF
          m_owningLayer.setNeedsCompositingGeometryUpdate();
      }
      
@@ -86171,7 +86335,7 @@ index 95122a10cacc10b498c40d3447599bd2cd4d2795..eb6aa87c1d8ee8f6fb380994cbb58df8
      if (needsFullRepaint && canIssueSetNeedsDisplay())
          setContentsNeedDisplay();
  }
-@@ -1581,6 +1661,44 @@ private:
+@@ -1581,6 +1662,44 @@ private:
  LayoutRect RenderLayerBacking::computePrimaryGraphicsLayerRect(const RenderLayer* compositedAncestor, const LayoutRect& parentGraphicsLayerRect) const
  {
      ComputedOffsets compositedBoundsOffset(m_owningLayer, compositedAncestor, compositedBounds(), parentGraphicsLayerRect, { });
@@ -86216,7 +86380,22 @@ index 95122a10cacc10b498c40d3447599bd2cd4d2795..eb6aa87c1d8ee8f6fb380994cbb58df8
      return LayoutRect(encloseRectToDevicePixels(LayoutRect(toLayoutPoint(compositedBoundsOffset.fromParentGraphicsLayer()), compositedBounds().size()),
          pixelSnappingScaleFactor()));
  }
-@@ -1935,8 +2053,18 @@ void RenderLayerBacking::updateGeometry(const RenderLayer* compositedAncestor)
+@@ -1678,6 +1797,14 @@ void RenderLayerBacking::updateGeometry(const RenderLayer* compositedAncestor)
+     updateBackdropRoot();
+     updateBlendMode(style);
+     updateContentsScalingFilters(style);
++#if PLATFORM(HAIKU)
++    // A layer that stays where it is in the viewport while the page scrolls
++    // gets no tiles ahead of the scroll (CoordinatedBackingStoreProxy): only
++    // what shows is ever painted. Not in a subframe, which the page around it
++    // scrolls.
++    if (auto* coordinatedLayer = dynamicDowncast<GraphicsLayerCoordinated>(m_graphicsLayer.get()))
++        coordinatedLayer->setStaysInViewportHaiku(m_owningLayer.behavesAsFixed() && renderer().frame().isMainFrame());
++#endif
+ 
+ #if ENABLE(VIDEO)
+     updateVideoGravity(style);
+@@ -1935,8 +2062,18 @@ void RenderLayerBacking::updateGeometry(const RenderLayer* compositedAncestor)
  
      positionOverflowControlsLayers();
  
@@ -86236,7 +86415,7 @@ index 95122a10cacc10b498c40d3447599bd2cd4d2795..eb6aa87c1d8ee8f6fb380994cbb58df8
  
  #if ENABLE(MODEL_ELEMENT)
      if (is<RenderModel>(renderer()))
-@@ -3543,6 +3671,56 @@ void RenderLayerBacking::updateDirectlyCompositedBackgroundColor(PaintedContents
+@@ -3543,6 +3680,56 @@ void RenderLayerBacking::updateDirectlyCompositedBackgroundColor(PaintedContents
      didUpdateContentsRect = true;
  }
  
@@ -86293,7 +86472,7 @@ index 95122a10cacc10b498c40d3447599bd2cd4d2795..eb6aa87c1d8ee8f6fb380994cbb58df8
  // Only bitmap images are directly composited, so the layer shows the image's current frame at its natural size.
  static RefPtr<NativeImage> nativeImageForDirectlyCompositedImage(Image& image)
  {
-@@ -3585,7 +3763,14 @@ void RenderLayerBacking::updateDirectlyCompositedBackgroundImage(PaintedContents
+@@ -3585,7 +3772,14 @@ void RenderLayerBacking::updateDirectlyCompositedBackgroundImage(PaintedContents
      m_graphicsLayer->setContentsTilePhase(geometry.phase);
      m_graphicsLayer->setContentsRect(geometry.destinationRect);
      m_graphicsLayer->setContentsClippingRect(FloatRoundedRect(geometry.destinationRect));
@@ -86309,7 +86488,7 @@ index 95122a10cacc10b498c40d3447599bd2cd4d2795..eb6aa87c1d8ee8f6fb380994cbb58df8
          m_graphicsLayer->setContentsToNativeImage(nativeImage.get());
  
      didUpdateContentsRect = true;
-@@ -4093,6 +4278,11 @@ void RenderLayerBacking::updateImageContents(PaintedContentsInfo& contentsInfo)
+@@ -4093,6 +4287,11 @@ void RenderLayerBacking::updateImageContents(PaintedContentsInfo& contentsInfo)
          if (!cachedImage->isLoaded())
              return;
  
@@ -86321,7 +86500,7 @@ index 95122a10cacc10b498c40d3447599bd2cd4d2795..eb6aa87c1d8ee8f6fb380994cbb58df8
          if (RefPtr nativeImage = nativeImageForDirectlyCompositedImage(*image))
              m_graphicsLayer->setContentsToNativeImage(nativeImage.get());
  
-@@ -4133,7 +4323,11 @@ LayoutRect RenderLayerBacking::contentsBox() const
+@@ -4133,7 +4332,11 @@ LayoutRect RenderLayerBacking::contentsBox() const
  #endif
  
      if (CheckedPtr renderViewTransitionCapture = dynamicDowncast<RenderViewTransitionCapture>(*renderBox))
@@ -87515,6 +87694,69 @@ index 0000000000000000000000000000000000000000..cff799029b188a06ba83de7d16f2747e
 +} // namespace WebCore
 +
 +#endif // RenderThemeHaiku_h
+diff --git a/Source/WebCore/rendering/svg/legacy/LegacyRenderSVGResourceFilter.cpp b/Source/WebCore/rendering/svg/legacy/LegacyRenderSVGResourceFilter.cpp
+index 5d115e1865defb80d01742e7880b3ba5e71e494e..eb656e0c7fec6aae3778297e4914ab5598b92b66 100644
+--- a/Source/WebCore/rendering/svg/legacy/LegacyRenderSVGResourceFilter.cpp
++++ b/Source/WebCore/rendering/svg/legacy/LegacyRenderSVGResourceFilter.cpp
+@@ -39,6 +39,17 @@
+ #include "Settings.h"
+ #include <wtf/TZoneMallocInlines.h>
+ #include <wtf/text/TextStream.h>
++#if PLATFORM(HAIKU)
++#include "SVGFEGaussianBlurElement.h"
++#include "SVGFilterPrimitiveStandardAttributes.h"
++#include "Chrome.h"
++#include "ChromeClient.h"
++#include "ElementChildIteratorInlines.h"
++#include "Page.h"
++#include <algorithm>
++#include <cmath>
++#include <cstdlib>
++#endif
+ 
+ namespace WebCore {
+ 
+@@ -126,6 +137,40 @@ auto LegacyRenderSVGResourceFilter::applyResource(RenderElement& renderer, const
+     // Determine scale factor for filter. The size of intermediate ImageBuffers shouldn't be bigger than kMaxFilterSize.
+     ImageBuffer::sizeNeedsClamping(filterData->sourceImageRect.size(), filterScale);
+ 
++#if PLATFORM(HAIKU)
++    // A filter whose result is a wide Gaussian blur is smooth however fine
++    // the grid it is worked out on, so it is worked out on one where the
++    // blur is 8 pixels and drawn scaled up. Next.js's blurred picture
++    // placeholder (a 320x200 SVG ending in feGaussianBlur stdDeviation=20,
++    // the background of every <img placeholder="blur">) covering a 1121x631
++    // picture at 175 % blurred 1962x1104 pixels with a deviation of 120 on
++    // the main thread when the picture's tile was recorded: 100-360 ms for
++    // each picture of rockstargames.com/VI's gallery that came into view.
++    // SUMMIT_SVG_BLUR_FILTER_SCALE=0 works every filter out at full size.
++    static const bool reducesBlurredFilters = [] {
++        const char* value = getenv("SUMMIT_SVG_BLUR_FILTER_SCALE");
++        return !value || value[0] != '0' || value[1];
++    }();
++    // Only in an SVG document drawn as a picture (a background, an <img>):
++    // there the result is scaled like any picture, while the edges of a
++    // filter region in a page's own SVG could move by a pixel.
++    RefPtr page = renderer.document().page();
++    if (reducesBlurredFilters && page && page->chrome().client().isSVGImageChromeClient()
++        && filterElement->primitiveUnits() == SVGUnitTypes::SVG_UNIT_TYPE_USERSPACEONUSE) {
++        RefPtr<SVGFilterPrimitiveStandardAttributes> lastPrimitive;
++        for (Ref primitive : childrenOfType<SVGFilterPrimitiveStandardAttributes>(filterElement.get()))
++            lastPrimitive = WTF::move(primitive);
++        if (RefPtr blur = dynamicDowncast<SVGFEGaussianBlurElement>(lastPrimitive)) {
++            float deviationX = blur->stdDeviationX() * filterScale.width();
++            float deviationY = blur->stdDeviationY() * filterScale.height();
++            constexpr float smoothDeviation = 8;
++            float deviation = std::min(deviationX, deviationY);
++            if (std::isfinite(deviation) && deviation > smoothDeviation)
++                filterScale.scale(std::max(smoothDeviation / deviation, 1.0f / 16));
++        }
++    }
++#endif
++
+     auto preferredFilterModes = protect(renderer.page())->preferredFilterRenderingModes(*context);
+     auto renderingOptions(protect(renderer.settings())->showDebugBorders() ? std::make_optional(FilterRenderingOption::ShowDebugOverlay) : std::nullopt);
+ 
 diff --git a/Source/WebCore/rendering/updating/RenderTreeBuilder.cpp b/Source/WebCore/rendering/updating/RenderTreeBuilder.cpp
 index fac817a56eee7e32fb0a19148304955c3831795d..1483d6b21c1ed1e6c72d4b803e31285bb07e0e4e 100644
 --- a/Source/WebCore/rendering/updating/RenderTreeBuilder.cpp
@@ -87834,6 +88076,69 @@ index 22d96170539d88e1dec6f45bd98c269eb1b526e3..d637fa7e85d0d5a09667eaedff83359b
  
      CascadeLayerName m_resolvedCascadeLayerName;
      HashMap<CascadeLayerName, RuleSet::CascadeLayerIdentifier> m_cascadeLayerIdentifierMap;
+diff --git a/Source/WebCore/style/StyleDifference.cpp b/Source/WebCore/style/StyleDifference.cpp
+index 3e48388cf2c59e21ffb1a3cbef6f7bfb41fe6c37..d8836ff456f6ef7e7e95882728efd472719bd1cd 100644
+--- a/Source/WebCore/style/StyleDifference.cpp
++++ b/Source/WebCore/style/StyleDifference.cpp
+@@ -30,6 +30,9 @@
+ #include "RenderStyleConstants.h"
+ #include "StyleComputedStyle+GettersInlines.h"
+ #include "StyleExtractor.h"
++#if PLATFORM(HAIKU)
++#include <cstdlib>
++#endif
+ 
+ namespace WebCore {
+ namespace Style {
+@@ -176,7 +179,7 @@ public:
+         return false;
+     }
+ 
+-    static bool miscDataChangeRequiresLayout(const NonInheritedMiscData& a, const NonInheritedMiscData& b, OptionSet<DifferenceContextSensitiveProperty>& changedContextSensitiveProperties)
++    static bool miscDataChangeRequiresLayout(const NonInheritedMiscData& a, const NonInheritedMiscData& b, OptionSet<DifferenceContextSensitiveProperty>& changedContextSensitiveProperties, bool opacityKeepsLayer = false)
+     {
+         ASSERT(&a != &b);
+ 
+@@ -211,7 +214,7 @@ public:
+             }
+         }
+ 
+-        if (a.opacity.isOpaque() != b.opacity.isOpaque()) {
++        if (a.opacity.isOpaque() != b.opacity.isOpaque() && !opacityKeepsLayer) {
+             // FIXME: We would like to use SimplifiedLayout here, but we can't quite do that yet.
+             // We need to make sure SimplifiedLayout can operate correctly on RenderInlines (we will need
+             // to add a selfNeedsSimplifiedLayout bit in order to not get confused and taint every line).
+@@ -460,8 +463,29 @@ public:
+         }
+ 
+         if (&a.nonInheritedData() != &b.nonInheritedData()) {
++#if PLATFORM(HAIKU)
++            // An opacity that goes to or from 1 asks for a layout because the
++            // element may get or lose its layer and stacking context. With
++            // will-change: opacity before and after, it has both either way,
++            // and the layout only painted the element again whole: the
++            // gallery of rockstargames.com/VI fades a fixed 1682x1682 glow
++            // between 0.5 and 1 at each section, and each fade repainted it
++            // (2-3 times per section, ~100 ms of painting each at 175 %).
++            // The change is then an opacity change like any other (the
++            // compositor's, for a composited layer). SUMMIT_OPACITY_KEEPS_LAYER=0
++            // lays out again as before.
++            static const bool opacityKeepsLayerEnabled = [] {
++                const char* value = getenv("SUMMIT_OPACITY_KEEPS_LAYER");
++                return !value || value[0] != '0' || value[1];
++            }();
++            const bool opacityKeepsLayer = opacityKeepsLayerEnabled
++                && a.nonInheritedData().rareData->willChange.containsProperty(CSSPropertyOpacity)
++                && b.nonInheritedData().rareData->willChange.containsProperty(CSSPropertyOpacity);
++#else
++            const bool opacityKeepsLayer = false;
++#endif
+             SUPPRESS_UNCOUNTED_ARG if (a.nonInheritedData().miscData.ptr() != b.nonInheritedData().miscData.ptr()
+-                && miscDataChangeRequiresLayout(*a.nonInheritedData().miscData, *b.nonInheritedData().miscData, changedContextSensitiveProperties))
++                && miscDataChangeRequiresLayout(*a.nonInheritedData().miscData, *b.nonInheritedData().miscData, changedContextSensitiveProperties, opacityKeepsLayer))
+                 return true;
+ 
+             SUPPRESS_UNCOUNTED_ARG if (a.nonInheritedData().rareData.ptr() != b.nonInheritedData().rareData.ptr()
 diff --git a/Source/WebCore/style/StyleDocumentScope.cpp b/Source/WebCore/style/StyleDocumentScope.cpp
 index 34e45677f81e31be7b713eacb9e58dbcf88459a2..21d146d1be109c27b78accf39995403b99cfcedb 100644
 --- a/Source/WebCore/style/StyleDocumentScope.cpp
