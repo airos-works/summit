@@ -13193,3 +13193,28 @@ sites, same session, mimalloc in use and the process's resident memory (MiB):
 | Reddit | 214 | 192 | 368 | 373 |
 
 Blocks of 16-512 KiB fell to about 55 MiB in each of the three large tabs.
+
+### Together: 45 minutes with five heavy tabs
+
+The same soak as above (SMH, Reddit, The Verge, CNN and a playing YouTube
+video; every five minutes each tab is selected and scrolled), before these
+changes (bbaf738) and with 99ab23d + a1c1162, on the laptop:
+
+| After 45 min | before | after |
+| --- | ---: | ---: |
+| System memory in use, growth | +1636 MiB | +615 MiB |
+| GPU memory (VRAM + GTT), growth | +963 MiB | -98 MiB |
+| YouTube tab | 1033 MiB | 958 MiB |
+
+What still grows is the pages' own JavaScript (Reddit's tab grew 355 -> 680
+MiB in both runs). Speedometer 3.1 on the X399 did not change: 8.44 before
+(five runs) and 8.40 after (eight), within the machine's spread.
+
+### Still open: periodic readbacks on AMD
+
+Since Haiku 3def2dfdc5 (3 November) app_server's back buffer is a GTT buffer
+object, so the host-pointer import of it fails (`app_server's copy could not
+be imported (-4)`) and, while a page keeps changing, a frame goes through
+app_server every 250 ms with a blocking read of the changed area: 2-3 a
+second while scrolling The Verge, 2.2-6.6 ms on average and up to 11 ms.
+Importing the buffer object itself is airos-works/haiku#67.
