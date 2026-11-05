@@ -13118,3 +13118,56 @@ not reached in this test, which peaked at 63%).
 The network process stays about 110 MiB larger after heavy browsing (113 MiB
 of it in libroot's malloc, which curl and OpenSSL use and which rarely
 returns memory). Not changed.
+
+### GPU memory that hidden tabs never gave back
+
+Over 45 minutes with five heavy tabs (YouTube playing, the others selected and
+scrolled every five minutes), the processes' own memory levelled off but GPU
+memory (VRAM + GTT, which on the laptop's APU is system RAM) grew from 1.5 to
+2.5 GB, and all of it came back on quitting. YouTube alone kept GPU memory
+flat for 12 minutes, and switching tabs without the hidden-tab release (30 s
+hidden, see above) levelled off. It was the release: every time a hidden tab
+let go of its graphics and was shown again, part of what it let go of stayed
+allocated. Counting the textures that were destroyed without their GL objects
+being deleted showed two leaks (`BitmapTexture`):
+
+- A texture drawn into as a render target has a framebuffer object. Since the
+  21 October context-loss guards, that object was deleted only with the
+  context that made it current. The texture pool's timer deletes textures on
+  the main thread with the sharing context, and after a release the
+  compositor's context is gone, so the framebuffer was never deleted. Mesa,
+  Haiku's only GL, keeps framebuffer objects in the share group (the GL
+  specification has them per context), and one left behind keeps its
+  texture's storage: 31 framebuffers holding 214 MiB in one Reddit process
+  after four releases, and growing. They are now deleted from any context of
+  the group.
+- The pool's timer used whatever context was current on the main thread and
+  made the sharing one current only when none was. On Reddit an EGL context
+  of another kind was current there, so 86 tile textures (90 MiB) were
+  dropped undeleted. The timer now makes the sharing context current unless
+  the current one is of the same group, and a texture destroyed on the main
+  thread with such a context current is deleted with the sharing context.
+
+Three heavy tabs (SMH, Reddit, CNN) shown, scrolled and hidden again until
+released, six times, default settings; GPU memory over idle and system memory
+in use (MiB):
+
+| After cycle | 1 | 2 | 3 | 4 | 5 | 6 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| GPU, before | 712 | 984 | 943 | 1079 | 1381 | 1390 |
+| GPU, after | 496 | 694 | 779 | 827 | 708 | 673 |
+| RAM in use, before | 4760 | 5264 | 5338 | 5498 | 5848 | 5861 |
+| RAM in use, after | 4617 | 4980 | 5194 | 5343 | 5196 | 5180 |
+
+With the release every 5 s instead of 30 (`SUMMIT_HIDDEN_GPU_RELEASE_S=5`),
+GPU memory went from 647 to 1630 MiB over eight cycles before and stayed at
+616-776 MiB over six after.
+
+### Media buffers
+
+In the 45-minute run the YouTube tab grew 160 MiB in its first ten minutes.
+WebKit lets each `SourceBuffer` hold 304 MiB, about five minutes of 1080p
+video; on Haiku it is now 160 MiB, close to Chrome's 150 MB for video and
+12 MB for audio (`SettingsBase`), so a tab playing long video holds less.
+Players evict what was played when they reach the quota. YouTube on its own
+kept 5-6 minutes buffered at 720p and stayed under both limits.

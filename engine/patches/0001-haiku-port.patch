@@ -20422,10 +20422,28 @@ index a1341edd695bb0feafe9275570e26768556af24a..2f2fdb0cd8aca9b04cae0230976d2dbc
    type: uint32_t
    refinedType: ForcedAccessibilityValue
 diff --git a/Source/WebCore/page/SettingsBase.cpp b/Source/WebCore/page/SettingsBase.cpp
-index 40d7620f55755a09785c2a94482f17dd58ac906b..6e64e3d6788261877546867faa6b1db932e1d7ca 100644
+index 40d7620f55755a09785c2a94482f17dd58ac906b..8f6ebbf82171cbe90ad5a84a16e93788091f94b2 100644
 --- a/Source/WebCore/page/SettingsBase.cpp
 +++ b/Source/WebCore/page/SettingsBase.cpp
-@@ -529,6 +529,13 @@ void SettingsBase::useSystemAppearanceChanged()
+@@ -93,9 +93,17 @@ bool SettingsBase::platformDefaultMediaSourceEnabled()
+ 
+ uint64_t SettingsBase::defaultMaximumSourceBufferSize()
+ {
++#if PLATFORM(HAIKU)
++    // 160 MiB per SourceBuffer, near Chrome's 150 MB for video and 12 MB for
++    // audio, rather than 304 MiB (five minutes of 1080p): a tab playing long
++    // video holds less of it. WebCore evicts what was played first, and
++    // players remove behind the playhead on QuotaExceededError.
++    return 160 * 1024 * 1024;
++#else
+     // Allow SourceBuffers to store up to 304MB each, enough for approximately five minutes
+     // of 1080p video and stereo audio.
+     return 318767104;
++#endif
+ }
+ #endif
+ 
+@@ -529,6 +537,13 @@ void SettingsBase::useSystemAppearanceChanged()
          protect(m_page)->useSystemAppearanceChanged();
  }
  
@@ -30583,11 +30601,14 @@ index 139bcc9a9cbfae7dcf875231044d69c23dab9dca..ccc63fafbd79b0d7d59d3b4aeb213167
  
      FloatSize pixelAlignmentOffset() const override { return m_pixelAlignmentOffset; }
 diff --git a/Source/WebCore/platform/graphics/egl/BitmapTexture.cpp b/Source/WebCore/platform/graphics/egl/BitmapTexture.cpp
-index 6b3597b50ca897e12bbe8c0de4cf44860c3ab692..9517fba9a215a39b818e760b37382a2a80da6e66 100644
+index 6b3597b50ca897e12bbe8c0de4cf44860c3ab692..3dc1138a2f4e6f8eae929b39f37fc7d36a2599eb 100644
 --- a/Source/WebCore/platform/graphics/egl/BitmapTexture.cpp
 +++ b/Source/WebCore/platform/graphics/egl/BitmapTexture.cpp
-@@ -29,6 +29,13 @@
+@@ -27,8 +27,16 @@
+ #include <wtf/HashMap.h>
+ #include <wtf/RefCounted.h>
  #include <wtf/RefPtr.h>
++#include <wtf/RunLoop.h>
  #include <wtf/StdLibExtras.h>
  
 +#if PLATFORM(HAIKU)
@@ -30600,7 +30621,7 @@ index 6b3597b50ca897e12bbe8c0de4cf44860c3ab692..9517fba9a215a39b818e760b37382a2a
  #if USE(TEXTURE_MAPPER)
  #include "GraphicsContext.h"
  #include "GraphicsLayer.h"
-@@ -92,6 +99,15 @@ static const GLenum s_pixelDataType = GL_UNSIGNED_BYTE;
+@@ -92,6 +100,15 @@ static const GLenum s_pixelDataType = GL_UNSIGNED_BYTE;
  #ifndef GL_DEPTH24_STENCIL8
  #define GL_DEPTH24_STENCIL8 0x88F0
  #endif
@@ -30616,7 +30637,7 @@ index 6b3597b50ca897e12bbe8c0de4cf44860c3ab692..9517fba9a215a39b818e760b37382a2a
  
  namespace WebCore {
  
-@@ -109,14 +125,39 @@ void BitmapTexture::determineRenderTargetAndBinding()
+@@ -109,14 +126,39 @@ void BitmapTexture::determineRenderTargetAndBinding()
  
  unsigned BitmapTexture::textureFormat() const
  {
@@ -30656,7 +30677,7 @@ index 6b3597b50ca897e12bbe8c0de4cf44860c3ab692..9517fba9a215a39b818e760b37382a2a
      determineRenderTargetAndBinding();
  
      GLint boundTexture = 0;
-@@ -159,6 +200,64 @@ BitmapTexture::BitmapTexture(const IntSize& size, OptionSet<Flags> flags)
+@@ -159,6 +201,64 @@ BitmapTexture::BitmapTexture(const IntSize& size, OptionSet<Flags> flags)
      glBindTexture(m_renderTarget, boundTexture);
  }
  
@@ -30721,7 +30742,7 @@ index 6b3597b50ca897e12bbe8c0de4cf44860c3ab692..9517fba9a215a39b818e760b37382a2a
  void BitmapTexture::createTexture()
  {
      ASSERT(!m_id);
-@@ -177,7 +276,18 @@ void BitmapTexture::allocateTexture()
+@@ -177,7 +277,18 @@ void BitmapTexture::allocateTexture()
      createTexture();
      // EXT_texture_format_BGRA8888 mandates internalFormat == format.
      // https://registry.khronos.org/OpenGL/extensions/EXT/EXT_texture_format_BGRA8888.txt
@@ -30740,7 +30761,7 @@ index 6b3597b50ca897e12bbe8c0de4cf44860c3ab692..9517fba9a215a39b818e760b37382a2a
  }
  
  size_t BitmapTexture::sizeInBytes() const
-@@ -186,7 +296,11 @@ size_t BitmapTexture::sizeInBytes() const
+@@ -186,7 +297,11 @@ size_t BitmapTexture::sizeInBytes() const
      if (size.isEmpty())
          return 0;
  
@@ -30752,12 +30773,20 @@ index 6b3597b50ca897e12bbe8c0de4cf44860c3ab692..9517fba9a215a39b818e760b37382a2a
      return CheckedUint32(size.height()) * bytesPerRow;
  }
  
-@@ -234,18 +348,45 @@ BitmapTexture::BitmapTexture(EGLImage image, const IntSize& size, OptionSet<Flag
+@@ -234,18 +349,59 @@ BitmapTexture::BitmapTexture(EGLImage image, const IntSize& size, OptionSet<Flag
  
  BitmapTexture::~BitmapTexture()
  {
 -    glDeleteTextures(1, &m_id);
 +#if PLATFORM(HAIKU)
++    // Destroyed on the main thread with a context of another group current
++    // (a canvas's or WebGL's): deleted with the sharing context, which is of
++    // the compositor's group, rather than left with its GPU memory.
++    std::optional<GLContext::ScopedGLContextCurrent> sharingCurrent;
++    if (m_contextState && !m_contextState->isLost() && RunLoop::isMain() && !m_contextState->canDeleteResources()) {
++        if (auto sharing = PlatformDisplay::sharedDisplay().sharingGLContext(); sharing && m_contextState->sharesObjectsWith(sharing->resourceState()))
++            sharingCurrent.emplace(*sharing);
++    }
 +    if (!m_contextState || m_contextState->canDeleteResources())
 +#endif
 +    {
@@ -30770,7 +30799,13 @@ index 6b3597b50ca897e12bbe8c0de4cf44860c3ab692..9517fba9a215a39b818e760b37382a2a
  
  #if USE(TEXTURE_MAPPER)
 +#if PLATFORM(HAIKU)
-+    if (m_contextState && !m_contextState->canDeleteResources(true))
++    // Mesa (Haiku's only GL) keeps framebuffer objects in the share group,
++    // not per context as the GL specification has them: one left behind by
++    // the context that made it, because the pool's timer deletes textures
++    // with the sharing context current or the compositor's context is gone,
++    // kept its texture's storage forever (hundreds of MiB of GTT after a
++    // few hidden-tab releases). Deleted from any context of the group.
++    if (m_contextState && !m_contextState->canDeleteResources())
 +        return;
 +#endif
      if (m_fbo)
@@ -30802,7 +30837,7 @@ index 6b3597b50ca897e12bbe8c0de4cf44860c3ab692..9517fba9a215a39b818e760b37382a2a
  {
  #if USE(GBM)
      // We don't support switching from dmabuf backing to regular textures -- there is no use-case for that scenario.
-@@ -273,9 +414,19 @@ void BitmapTexture::reset(const IntSize& size, OptionSet<Flags> flags)
+@@ -273,9 +429,19 @@ void BitmapTexture::reset(const IntSize& size, OptionSet<Flags> flags)
      m_clipStack = { };
  #endif
  
@@ -30822,7 +30857,7 @@ index 6b3597b50ca897e12bbe8c0de4cf44860c3ab692..9517fba9a215a39b818e760b37382a2a
  
      determineRenderTargetAndBinding();
  
-@@ -301,7 +452,14 @@ void BitmapTexture::reset(const IntSize& size, OptionSet<Flags> flags)
+@@ -301,7 +467,14 @@ void BitmapTexture::reset(const IntSize& size, OptionSet<Flags> flags)
  #endif
  
      glBindTexture(m_renderTarget, m_id);
@@ -30837,7 +30872,7 @@ index 6b3597b50ca897e12bbe8c0de4cf44860c3ab692..9517fba9a215a39b818e760b37382a2a
      glBindTexture(m_renderTarget, boundTexture);
  }
  
-@@ -328,7 +486,12 @@ void BitmapTexture::updateContents(const void* srcData, const IntRect& targetRec
+@@ -328,7 +501,12 @@ void BitmapTexture::updateContents(const void* srcData, const IntRect& targetRec
      }
  #endif
  
@@ -30850,7 +30885,7 @@ index 6b3597b50ca897e12bbe8c0de4cf44860c3ab692..9517fba9a215a39b818e760b37382a2a
      auto data = static_cast<const uint8_t*>(srcData);
      Vector<uint8_t> temporaryData;
      IntPoint adjustedSourceOffset = sourceOffset;
-@@ -367,7 +530,16 @@ void BitmapTexture::updateContents(const void* srcData, const IntRect& targetRec
+@@ -367,7 +545,16 @@ void BitmapTexture::updateContents(const void* srcData, const IntRect& targetRec
          glPixelStorei(GL_UNPACK_SKIP_PIXELS, adjustedSourceOffset.x());
      }
  
@@ -30867,7 +30902,7 @@ index 6b3597b50ca897e12bbe8c0de4cf44860c3ab692..9517fba9a215a39b818e760b37382a2a
  
      if (supportsUnpackSubimage) {
          glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
-@@ -394,6 +566,57 @@ void BitmapTexture::updateContents(NativeImage* frameImage, const IntRect& targe
+@@ -394,6 +581,57 @@ void BitmapTexture::updateContents(NativeImage* frameImage, const IntRect& targe
      SkPixmap pixmap;
      if (surface->peekPixels(&pixmap))
          updateContents(pixmap.addr(), targetRect, offset, pixmap.rowBytes(), PixelFormat::BGRA8);
@@ -30925,7 +30960,7 @@ index 6b3597b50ca897e12bbe8c0de4cf44860c3ab692..9517fba9a215a39b818e760b37382a2a
  #else
      UNUSED_PARAM(targetRect);
      UNUSED_PARAM(offset);
-@@ -477,6 +700,20 @@ void BitmapTexture::copyFromExternalTexture(GLuint sourceTextureID, const IntRec
+@@ -477,6 +715,20 @@ void BitmapTexture::copyFromExternalTexture(GLuint sourceTextureID, const IntRec
  }
  
  #if USE(TEXTURE_MAPPER)
@@ -30946,7 +30981,7 @@ index 6b3597b50ca897e12bbe8c0de4cf44860c3ab692..9517fba9a215a39b818e760b37382a2a
  void BitmapTexture::swapTexture(BitmapTexture& other)
  {
      RELEASE_ASSERT(m_size == other.m_size);
-@@ -486,6 +723,9 @@ void BitmapTexture::swapTexture(BitmapTexture& other)
+@@ -486,6 +738,9 @@ void BitmapTexture::swapTexture(BitmapTexture& other)
  #endif
      std::swap(m_flags, other.m_flags);
      std::swap(m_id, other.m_id);
@@ -30956,7 +30991,7 @@ index 6b3597b50ca897e12bbe8c0de4cf44860c3ab692..9517fba9a215a39b818e760b37382a2a
  
      determineRenderTargetAndBinding();
      other.determineRenderTargetAndBinding();
-@@ -503,11 +743,26 @@ void BitmapTexture::initializeStencil()
+@@ -503,11 +758,26 @@ void BitmapTexture::initializeStencil()
  
      glGenRenderbuffers(1, &m_stencilBufferObject);
      glBindRenderbuffer(GL_RENDERBUFFER, m_stencilBufferObject);
@@ -31108,14 +31143,19 @@ index 25a33139079a55094a25c97216a9575a59224292..4c9bc88e38f2d16d7fb005f0e9351577
      unsigned m_renderTarget { 0 };
      unsigned m_binding { 0 };
 diff --git a/Source/WebCore/platform/graphics/egl/BitmapTexturePool.cpp b/Source/WebCore/platform/graphics/egl/BitmapTexturePool.cpp
-index 36206e6f966e88e056cf20705257fddb8b14d601..b968cdd825f2dd4f39a75609ec21839ab111d02d 100644
+index 36206e6f966e88e056cf20705257fddb8b14d601..3aaf326536717fa9cb89fb5cd15b620fb3c4170e 100644
 --- a/Source/WebCore/platform/graphics/egl/BitmapTexturePool.cpp
 +++ b/Source/WebCore/platform/graphics/egl/BitmapTexturePool.cpp
-@@ -27,6 +27,19 @@
+@@ -27,6 +27,24 @@
  #include "config.h"
  #include "BitmapTexturePool.h"
  
 +#if PLATFORM(HAIKU)
++#if USE(LIBEPOXY)
++#include <epoxy/egl.h>
++#else
++#include <EGL/egl.h>
++#endif
 +#include <atomic>
 +#include <cstdio>
 +#include <cstdlib>
@@ -31131,7 +31171,7 @@ index 36206e6f966e88e056cf20705257fddb8b14d601..b968cdd825f2dd4f39a75609ec21839a
  #include "GLContext.h"
  #include "GLContextWrapper.h"
  #include "PlatformDisplay.h"
-@@ -47,6 +60,24 @@ static constexpr size_t s_poolSizeLimitInBytes = std::numeric_limits<size_t>::ma
+@@ -47,6 +65,24 @@ static constexpr size_t s_poolSizeLimitInBytes = std::numeric_limits<size_t>::ma
  #endif
  
  static constexpr Seconds s_releaseUnusedSecondsTolerance { 3_s };
@@ -31156,7 +31196,7 @@ index 36206e6f966e88e056cf20705257fddb8b14d601..b968cdd825f2dd4f39a75609ec21839a
  static constexpr Seconds s_releaseUnusedTexturesTimerInterval { 500_ms };
  static constexpr Seconds s_releaseUnusedSecondsToleranceOnLimitExceeded { 50_ms };
  static constexpr Seconds s_releaseUnusedTexturesTimerIntervalOnLimitExceeded { 200_ms };
-@@ -59,7 +90,7 @@ BitmapTexturePool& BitmapTexturePool::singleton()
+@@ -59,7 +95,7 @@ BitmapTexturePool& BitmapTexturePool::singleton()
  
  BitmapTexturePool::BitmapTexturePool()
      : m_releaseUnusedTexturesTimer(RunLoop::mainSingleton(), "BitmapTexturePool::ReleaseUnusedTexturesTimer"_s, this, &BitmapTexturePool::releaseUnusedTexturesTimerFired)
@@ -31165,7 +31205,7 @@ index 36206e6f966e88e056cf20705257fddb8b14d601..b968cdd825f2dd4f39a75609ec21839a
      , m_releaseUnusedTexturesTimerInterval(s_releaseUnusedTexturesTimerInterval)
  {
  #if USE(GLIB)
-@@ -67,29 +98,165 @@ BitmapTexturePool::BitmapTexturePool()
+@@ -67,29 +103,165 @@ BitmapTexturePool::BitmapTexturePool()
  #endif
  }
  
@@ -31333,14 +31373,15 @@ index 36206e6f966e88e056cf20705257fddb8b14d601..b968cdd825f2dd4f39a75609ec21839a
      }
  
      enterLimitExceededModeIfNeeded();
-@@ -115,15 +282,35 @@ Ref<BitmapTexture> BitmapTexturePool::createTextureForImage(EGLImage image, cons
+@@ -115,15 +287,35 @@ Ref<BitmapTexture> BitmapTexturePool::createTextureForImage(EGLImage image, cons
  void BitmapTexturePool::scheduleReleaseUnusedTextures()
  {
      assertIsHeld(m_lock);
 -    if (m_releaseUnusedTexturesTimer.isActive())
 +    if (m_releaseTimerActive && !m_releaseTimerImmediate)
-+        return;
-+
+         return;
+ 
+-    m_releaseUnusedTexturesTimer.startOneShot(m_releaseUnusedTexturesTimerInterval);
 +    // A worker may hold m_lock while the timer fires on the main thread. The
 +    // timer's Haiku RunLoop operations take the main BLooper lock, so doing
 +    // them here from that worker deadlocks against the timer callback waiting
@@ -31354,10 +31395,9 @@ index 36206e6f966e88e056cf20705257fddb8b14d601..b968cdd825f2dd4f39a75609ec21839a
 +            m_releaseTimerSchedulePending = false;
 +            scheduleReleaseUnusedTextures();
 +        });
-         return;
++        return;
 +    }
- 
--    m_releaseUnusedTexturesTimer.startOneShot(m_releaseUnusedTexturesTimerInterval);
++
 +    bool immediate = m_releaseTimerImmediate;
 +    m_releaseTimerImmediate = false;
 +    m_releaseTimerActive = true;
@@ -31371,7 +31411,7 @@ index 36206e6f966e88e056cf20705257fddb8b14d601..b968cdd825f2dd4f39a75609ec21839a
  
      auto hasTextures = [this] -> bool {
          assertIsHeld(m_lock);
-@@ -139,12 +326,28 @@ void BitmapTexturePool::releaseUnusedTexturesTimerFired()
+@@ -139,12 +331,28 @@ void BitmapTexturePool::releaseUnusedTexturesTimerFired()
      if (!hasTextures())
          return;
  
@@ -31402,7 +31442,25 @@ index 36206e6f966e88e056cf20705257fddb8b14d601..b968cdd825f2dd4f39a75609ec21839a
              auto matchCount = m_textures.removeAllMatching([this, &minUsedTime](const Entry& entry) {
                  assertIsHeld(m_lock);
                  if (entry.canBeReleased(minUsedTime)) {
-@@ -170,7 +373,7 @@ void BitmapTexturePool::releaseUnusedTexturesTimerFired()
+@@ -167,13 +375,29 @@ void BitmapTexturePool::releaseUnusedTexturesTimerFired()
+ #endif
+     };
+ 
++#if PLATFORM(HAIKU)
++    // The textures belong to the sharing context's group. Another context
++    // current here (a canvas's or WebGL's, which is no GLContext) cannot
++    // delete them: they were dropped undeleted and their GPU memory leaked.
++    auto sharing = PlatformDisplay::sharedDisplay().sharingGLContext();
++    auto* current = GLContext::current();
++    bool currentCanDelete = current && current->platformContext() == eglGetCurrentContext()
++        && (!sharing || current->resourceState().sharesObjectsWith(sharing->resourceState()));
++    if (currentCanDelete)
++        releaseTexturesIfNeeded();
++    else if (sharing) {
++        GLContext::ScopedGLContextCurrent scopedCurrent(*sharing);
++        releaseTexturesIfNeeded();
++    }
++#else
      if (GLContextWrapper::currentContext())
          releaseTexturesIfNeeded();
  #if !PLATFORM(WIN)
@@ -31411,7 +31469,11 @@ index 36206e6f966e88e056cf20705257fddb8b14d601..b968cdd825f2dd4f39a75609ec21839a
          GLContext::ScopedGLContextCurrent scopedCurrent(*context);
          releaseTexturesIfNeeded();
      }
-@@ -194,7 +397,7 @@ void BitmapTexturePool::enterLimitExceededModeIfNeeded()
++#endif
+ #endif
+ 
+     if (hasTextures())
+@@ -194,7 +418,7 @@ void BitmapTexturePool::enterLimitExceededModeIfNeeded()
          m_onLimitExceededMode = true;
          m_releaseUnusedSecondsTolerance = s_releaseUnusedSecondsToleranceOnLimitExceeded;
          m_releaseUnusedTexturesTimerInterval = s_releaseUnusedTexturesTimerIntervalOnLimitExceeded;
@@ -31420,7 +31482,7 @@ index 36206e6f966e88e056cf20705257fddb8b14d601..b968cdd825f2dd4f39a75609ec21839a
      }
  }
  
-@@ -208,7 +411,7 @@ void BitmapTexturePool::exitLimitExceededModeIfNeeded()
+@@ -208,7 +432,7 @@ void BitmapTexturePool::exitLimitExceededModeIfNeeded()
      // exit the limit exceeded mode and set the default values for interval and tolerance again.
      if (m_poolSizeInBytes <= s_poolSizeLimitInBytes) {
          m_onLimitExceededMode = false;
@@ -187174,7 +187236,7 @@ index 0000000000000000000000000000000000000000..abc82f6d26d2b1374740dc304282ae75
 +
 +}
 diff --git a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/AcceleratedSurface.cpp b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/AcceleratedSurface.cpp
-index 8177756a0e14111347846c912b8e3851f2559b4a..48c2c741a3d028d337a0662ef408e35fb7b268e2 100644
+index 8177756a0e14111347846c912b8e3851f2559b4a..e4f0b58148fc3a2e9d27b32d69326a28322c16fe 100644
 --- a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/AcceleratedSurface.cpp
 +++ b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/AcceleratedSurface.cpp
 @@ -26,6 +26,30 @@
@@ -188318,7 +188380,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..48c2c741a3d028d337a0662ef408e35f
  WTF_MAKE_TZONE_ALLOCATED_IMPL(AcceleratedSurface::RenderTargetShareableBuffer);
  
  AcceleratedSurface::RenderTargetShareableBuffer::RenderTargetShareableBuffer(AcceleratedSurface& surface, const IntSize& size)
-@@ -200,14 +1276,22 @@ AcceleratedSurface::RenderTargetShareableBuffer::~RenderTargetShareableBuffer()
+@@ -200,14 +1276,23 @@ AcceleratedSurface::RenderTargetShareableBuffer::~RenderTargetShareableBuffer()
  {
      m_skiaSurface = nullptr;
  
@@ -188331,7 +188393,8 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..48c2c741a3d028d337a0662ef408e35f
 -    if (m_colorBuffer)
 -        glDeleteRenderbuffers(1, &m_colorBuffer);
 +#if PLATFORM(HAIKU)
-+    if (!m_contextState || m_contextState->canDeleteResources(true))
++    // Mesa's framebuffer objects belong to the share group (BitmapTexture).
++    if (!m_contextState || m_contextState->canDeleteResources())
 +#endif
 +    {
 +        if (m_fbo)
@@ -188349,7 +188412,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..48c2c741a3d028d337a0662ef408e35f
  
      WebProcess::singleton().parentProcessConnection()->send(Messages::AcceleratedBackingStore::DidDestroyBuffer(m_id), m_surface->surfaceID());
  }
-@@ -218,9 +1302,45 @@ void AcceleratedSurface::RenderTargetShareableBuffer::initializeColorBuffer(EGLI
+@@ -218,9 +1303,45 @@ void AcceleratedSurface::RenderTargetShareableBuffer::initializeColorBuffer(EGLI
      glBindRenderbuffer(GL_RENDERBUFFER, m_colorBuffer);
      if (image)
          glEGLImageTargetRenderbufferStorageOES(GL_RENDERBUFFER, image);
@@ -188396,7 +188459,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..48c2c741a3d028d337a0662ef408e35f
  
      if (m_surface->useSkia())
          createSkiaSurfaceForFramebuffer(m_fbo);
-@@ -228,6 +1348,10 @@ void AcceleratedSurface::RenderTargetShareableBuffer::initializeColorBuffer(EGLI
+@@ -228,6 +1349,10 @@ void AcceleratedSurface::RenderTargetShareableBuffer::initializeColorBuffer(EGLI
  
  void AcceleratedSurface::RenderTargetShareableBuffer::sendFrame(Vector<WebCore::IntRect, 1>&& damageRects)
  {
@@ -188407,7 +188470,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..48c2c741a3d028d337a0662ef408e35f
      WebProcess::singleton().parentProcessConnection()->send(Messages::AcceleratedBackingStore::Frame(m_id, WTF::move(damageRects), WTF::move(m_renderingFenceFD)), m_surface->surfaceID());
  }
  
-@@ -410,15 +1534,94 @@ AcceleratedSurface::RenderTargetEGLImage::~RenderTargetEGLImage()
+@@ -410,15 +1535,94 @@ AcceleratedSurface::RenderTargetEGLImage::~RenderTargetEGLImage()
  }
  #endif // USE(GBM) || OS(ANDROID)
  
@@ -188502,7 +188565,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..48c2c741a3d028d337a0662ef408e35f
      if (!bufferHandle) {
          WTFLogAlways("Failed to create handle for shared memory buffer");
          return nullptr;
-@@ -439,13 +1642,547 @@ AcceleratedSurface::RenderTargetSHMImage::RenderTargetSHMImage(AcceleratedSurfac
+@@ -439,13 +1643,547 @@ AcceleratedSurface::RenderTargetSHMImage::RenderTargetSHMImage(AcceleratedSurfac
      WebProcess::singleton().parentProcessConnection()->send(Messages::AcceleratedBackingStore::DidCreateSHMBuffer(m_id, WTF::move(bitmapHandle)), m_surface->surfaceID());
  }
  
@@ -189050,7 +189113,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..48c2c741a3d028d337a0662ef408e35f
  
          SkImageInfo info = SkImageInfo::Make(m_bitmap->size().width(), m_bitmap->size().height(), SkColorType::kBGRA_8888_SkColorType, SkAlphaType::kPremul_SkAlphaType);
  
-@@ -457,9 +2194,14 @@ void AcceleratedSurface::RenderTargetSHMImage::didRenderFrame()
+@@ -457,9 +2195,14 @@ void AcceleratedSurface::RenderTargetSHMImage::didRenderFrame()
          return;
      }
  
@@ -189065,7 +189128,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..48c2c741a3d028d337a0662ef408e35f
  std::unique_ptr<AcceleratedSurface::RenderTarget> AcceleratedSurface::RenderTargetTexture::create(AcceleratedSurface& surface, const IntSize& size)
  {
      auto texture = BitmapTexture::create(size);
-@@ -515,8 +2257,9 @@ AcceleratedSurface::RenderTargetTexture::RenderTargetTexture(AcceleratedSurface&
+@@ -515,8 +2258,9 @@ AcceleratedSurface::RenderTargetTexture::RenderTargetTexture(AcceleratedSurface&
  }
  
  AcceleratedSurface::RenderTargetTexture::~RenderTargetTexture() = default;
@@ -189076,7 +189139,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..48c2c741a3d028d337a0662ef408e35f
  
  #if USE(WPE_RENDERER)
  std::unique_ptr<AcceleratedSurface::RenderTarget> AcceleratedSurface::RenderTargetWPEBackend::create(AcceleratedSurface& surface, const IntSize& initialSize, UnixFileDescriptor&& hostFD)
-@@ -594,7 +2337,7 @@ void AcceleratedSurface::RenderTargetWPEBackend::didRenderFrame()
+@@ -594,7 +2338,7 @@ void AcceleratedSurface::RenderTargetWPEBackend::didRenderFrame()
  AcceleratedSurface::SwapChain::SwapChain(AcceleratedSurface& surface)
      : m_surface(surface)
  {
@@ -189085,7 +189148,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..48c2c741a3d028d337a0662ef408e35f
      if (!m_surface->hardwareAccelerationEnabled()) {
          m_type = Type::SharedMemory;
          return;
-@@ -632,7 +2375,7 @@ AcceleratedSurface::SwapChain::SwapChain(AcceleratedSurface& surface)
+@@ -632,7 +2376,7 @@ AcceleratedSurface::SwapChain::SwapChain(AcceleratedSurface& surface)
      case PlatformDisplay::Type::GBM:
  #endif
          break;
@@ -189094,7 +189157,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..48c2c741a3d028d337a0662ef408e35f
  #if USE(WPE_RENDERER)
      case PlatformDisplay::Type::WPE:
          m_type = Type::WPEBackend;
-@@ -646,11 +2389,19 @@ AcceleratedSurface::SwapChain::SwapChain(AcceleratedSurface& surface)
+@@ -646,11 +2390,19 @@ AcceleratedSurface::SwapChain::SwapChain(AcceleratedSurface& surface)
      case PlatformDisplay::Type::Default:
          break;
  #endif // PLATFORM(GTK)
@@ -189115,7 +189178,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..48c2c741a3d028d337a0662ef408e35f
  void AcceleratedSurface::SwapChain::setupBufferFormat()
  {
      if (m_type != Type::EGLImage)
-@@ -749,7 +2500,7 @@ bool AcceleratedSurface::SwapChain::resize(const IntSize& size)
+@@ -749,7 +2501,7 @@ bool AcceleratedSurface::SwapChain::resize(const IntSize& size)
  
  bool AcceleratedSurface::SwapChain::handleBufferFormatChangeIfNeeded()
  {
@@ -189124,7 +189187,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..48c2c741a3d028d337a0662ef408e35f
      if (m_type == Type::EGLImage) {
          Locker locker { m_bufferFormatLock };
          if (m_bufferFormatChanged) {
-@@ -765,7 +2516,7 @@ bool AcceleratedSurface::SwapChain::handleBufferFormatChangeIfNeeded()
+@@ -765,7 +2517,7 @@ bool AcceleratedSurface::SwapChain::handleBufferFormatChangeIfNeeded()
  std::unique_ptr<AcceleratedSurface::RenderTarget> AcceleratedSurface::SwapChain::createTarget() const
  {
      switch (m_type) {
@@ -189133,7 +189196,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..48c2c741a3d028d337a0662ef408e35f
  #if USE(GBM) || OS(ANDROID)
      case Type::EGLImage: {
          Locker locker { m_bufferFormatLock };
-@@ -773,7 +2524,11 @@ std::unique_ptr<AcceleratedSurface::RenderTarget> AcceleratedSurface::SwapChain:
+@@ -773,7 +2525,11 @@ std::unique_ptr<AcceleratedSurface::RenderTarget> AcceleratedSurface::SwapChain:
      }
  #endif
      case Type::Texture:
@@ -189145,7 +189208,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..48c2c741a3d028d337a0662ef408e35f
      case Type::SharedMemory:
          return RenderTargetSHMImage::create(m_surface.get(), m_size);
  #endif
-@@ -812,6 +2567,11 @@ AcceleratedSurface::RenderTarget* AcceleratedSurface::SwapChain::nextTarget()
+@@ -812,6 +2568,11 @@ AcceleratedSurface::RenderTarget* AcceleratedSurface::SwapChain::nextTarget()
              if (auto target = createTarget())
                  m_freeTargets.append(WTF::move(target));
          }
@@ -189157,7 +189220,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..48c2c741a3d028d337a0662ef408e35f
  
  #if ENABLE(WPE_PLATFORM)
          if (m_freeTargets.size() != targetsToCreate)
-@@ -841,6 +2601,12 @@ void AcceleratedSurface::SwapChain::releaseTarget(uint64_t targetID, UnixFileDes
+@@ -841,6 +2602,12 @@ void AcceleratedSurface::SwapChain::releaseTarget(uint64_t targetID, UnixFileDes
          m_freeTargets.insert(0, WTF::move(m_lockedTargets[index]));
          m_lockedTargets.removeAt(index);
      }
@@ -189170,7 +189233,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..48c2c741a3d028d337a0662ef408e35f
  }
  
  void AcceleratedSurface::SwapChain::reset()
-@@ -859,6 +2625,11 @@ void AcceleratedSurface::SwapChain::releaseUnusedBuffers()
+@@ -859,6 +2626,11 @@ void AcceleratedSurface::SwapChain::releaseUnusedBuffers()
  #if USE(WPE_RENDERER)
      ASSERT(m_type != Type::WPEBackend);
  #endif
@@ -189182,7 +189245,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..48c2c741a3d028d337a0662ef408e35f
  
  #if ENABLE(WPE_PLATFORM)
      WebProcess::singleton().parentProcessConnection()->send(Messages::AcceleratedBackingStore::DidChangeBufferConfiguration(m_lockedTargets.size()), m_surface->surfaceID());
-@@ -901,6 +2672,17 @@ Vector<IntRect, 1> AcceleratedSurface::SwapChainDamageTracker::takeFrameDamageRe
+@@ -901,6 +2673,17 @@ Vector<IntRect, 1> AcceleratedSurface::SwapChainDamageTracker::takeFrameDamageRe
      if (frameDamage.mode() != Damage::Mode::Rectangles || m_swapChain.size().isEmpty())
          return frameDamage.rects();
  
@@ -189200,7 +189263,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..48c2c741a3d028d337a0662ef408e35f
      // The frame damage is fine-grained, because the compositing restriction needs it that way, but the
      // platform only wants a bounded number of rects. Merge it down to the threshold here, which is the
      // only thing the threshold bounds.
-@@ -929,7 +2711,7 @@ bool AcceleratedSurface::shouldPaintMirrored() const
+@@ -929,7 +2712,7 @@ bool AcceleratedSurface::shouldPaintMirrored() const
      switch (m_swapChain.type()) {
      case SwapChain::Type::Invalid:
          return false;
@@ -189209,7 +189272,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..48c2c741a3d028d337a0662ef408e35f
      case SwapChain::Type::Texture:
  #if USE(GBM) || OS(ANDROID)
      case SwapChain::Type::EGLImage:
-@@ -960,6 +2742,10 @@ void AcceleratedSurface::preferredBufferFormatsDidChange()
+@@ -960,6 +2743,10 @@ void AcceleratedSurface::preferredBufferFormatsDidChange()
  
  void AcceleratedSurface::visibilityDidChange(bool isVisible)
  {
@@ -189220,7 +189283,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..48c2c741a3d028d337a0662ef408e35f
      if (m_isVisible == isVisible)
          return;
  
-@@ -1000,7 +2786,7 @@ void AcceleratedSurface::backgroundColorDidChange()
+@@ -1000,7 +2787,7 @@ void AcceleratedSurface::backgroundColorDidChange()
      if (isOpaque == wasOpaque)
          return;
  
@@ -189229,7 +189292,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..48c2c741a3d028d337a0662ef408e35f
      m_swapChain.setupBufferFormat();
  #endif
  }
-@@ -1022,7 +2808,7 @@ void AcceleratedSurface::didCreateCompositingRunLoop(RunLoop& runLoop)
+@@ -1022,7 +2809,7 @@ void AcceleratedSurface::didCreateCompositingRunLoop(RunLoop& runLoop)
  #if USE(GLIB_EVENT_LOOP)
      m_releaseUnusedBuffersTimer->setPriority(RunLoopSourcePriority::ReleaseUnusedResourcesTimer);
  #endif
@@ -189238,7 +189301,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..48c2c741a3d028d337a0662ef408e35f
      WebProcess::singleton().parentProcessConnection()->addMessageReceiver(runLoop, *this, Messages::AcceleratedSurface::messageReceiverName(), m_id);
  #endif
  }
-@@ -1030,6 +2816,10 @@ void AcceleratedSurface::didCreateCompositingRunLoop(RunLoop& runLoop)
+@@ -1030,6 +2817,10 @@ void AcceleratedSurface::didCreateCompositingRunLoop(RunLoop& runLoop)
  void AcceleratedSurface::willDestroyCompositingRunLoop()
  {
      m_frameCompleteHandler = nullptr;
@@ -189249,7 +189312,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..48c2c741a3d028d337a0662ef408e35f
  
  #if USE(WPE_RENDERER)
      if (m_swapChain.type() == SwapChain::Type::WPEBackend)
-@@ -1043,7 +2833,7 @@ void AcceleratedSurface::willDestroyCompositingRunLoop()
+@@ -1043,7 +2834,7 @@ void AcceleratedSurface::willDestroyCompositingRunLoop()
              protectedThis->m_releaseUnusedBuffersTimer = nullptr;
          });
      }
@@ -189258,7 +189321,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..48c2c741a3d028d337a0662ef408e35f
      WebProcess::singleton().parentProcessConnection()->removeMessageReceiver(Messages::AcceleratedSurface::messageReceiverName(), m_id);
  #endif
  }
-@@ -1053,6 +2843,14 @@ void AcceleratedSurface::willDestroyGLContext()
+@@ -1053,6 +2844,14 @@ void AcceleratedSurface::willDestroyGLContext()
      m_pendingFrameNotifyTargets.clear();
      m_target = nullptr;
      m_swapChain.reset();
@@ -189273,7 +189336,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..48c2c741a3d028d337a0662ef408e35f
  }
  
  uint64_t AcceleratedSurface::window()
-@@ -1116,6 +2914,16 @@ std::optional<SkColor> AcceleratedSurface::skiaClearColor(const OptionSet<WebCor
+@@ -1116,6 +2915,16 @@ std::optional<SkColor> AcceleratedSurface::skiaClearColor(const OptionSet<WebCor
      if (reasons.contains(CompositionReason::AsyncScrolling))
          return backgroundColor ? SkColor(*backgroundColor) : SK_ColorWHITE;
  
@@ -189290,7 +189353,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..48c2c741a3d028d337a0662ef408e35f
      return std::nullopt;
  }
  
-@@ -1129,7 +2937,12 @@ void AcceleratedSurface::clear(const OptionSet<WebCore::CompositionReason>& reas
+@@ -1129,7 +2938,12 @@ void AcceleratedSurface::clear(const OptionSet<WebCore::CompositionReason>& reas
          return;
      }
  
@@ -189304,7 +189367,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..48c2c741a3d028d337a0662ef408e35f
          if (backgroundColor) {
              auto [r, g, b, a] = backgroundColor->toResolvedColorComponentsInColorSpace(WebCore::ColorSpaceName::SRGB);
              glClearColor(r, g, b, a);
-@@ -1149,18 +2962,155 @@ void AcceleratedSurface::didRenderFrame(TargetContents targetContents)
+@@ -1149,18 +2963,155 @@ void AcceleratedSurface::didRenderFrame(TargetContents targetContents)
      if (!m_target)
          return;
  
@@ -189460,7 +189523,7 @@ index 8177756a0e14111347846c912b8e3851f2559b4a..48c2c741a3d028d337a0662ef408e35f
      m_pendingFrameNotifyTargets.insert(0, { m_target, WTF::move(damageRects) });
      m_target = nullptr;
  }
-@@ -1182,13 +3132,17 @@ const std::optional<Damage>& AcceleratedSurface::renderTargetDamage()
+@@ -1182,13 +3133,17 @@ const std::optional<Damage>& AcceleratedSurface::renderTargetDamage()
  }
  #endif
  
