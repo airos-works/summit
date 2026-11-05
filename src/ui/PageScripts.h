@@ -14,6 +14,12 @@ namespace summit {
 //                    {type: "query"} when the user starts on a sign-in form
 //                    (the reply lists the site's saved accounts as JSON).
 extern const char* const kPopupScript;
+// DRM-protected media (#194): where the engine has no Encrypted Media
+// Extensions, navigator.requestMediaKeySystemAccess() is answered as a browser
+// without the key system answers (NotSupportedError), and summitDrm hears
+// {keySystem} once per page for a key system other than Clear Key, so that
+// the browser can say why the site's protected video does not play.
+extern const char* const kDrmScript;
 extern const char* const kPictureInPictureScript;
 extern const char* const kPasswordScript;
 // Passkey autofill (#111): tells the browser where a sign-in field marked

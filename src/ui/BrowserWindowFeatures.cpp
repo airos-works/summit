@@ -157,6 +157,8 @@ void BrowserWindow::AddPageScripts(BWebKitView* view)
 {
     view->AddScriptMessageHandler("summitPopups", BMessenger(this));
     view->AddUserScript(kPopupScript, true, true);
+    view->AddScriptMessageHandler("summitDrm", BMessenger(this));
+    view->AddUserScript(kDrmScript, true, true);
     view->AddScriptMessageHandler("summitPip", BMessenger(this));
     view->AddUserScript(kPictureInPictureScript, true, true);
     // Private windows neither save nor fill passwords.
@@ -213,6 +215,13 @@ void BrowserWindow::PageScriptMessage(BMessage& message)
         if (!url.empty() && url.size() < 8192) {
             tab->blockedPopup = url;
             ++tab->blockedPopups;
+            RefreshNoticeBar();
+        }
+    } else if (tab && name == "summitDrm") {
+        const auto keySystem = text("keySystem");
+        if (!keySystem.empty() && keySystem.size() < 200 && tab->drmKeySystem.empty()) {
+            tab->drmKeySystem = keySystem;
+            if (std::getenv("SUMMIT_DRM_TRACE")) std::fprintf(stderr, "Summit: %s asked for DRM %s\n", tab->url.c_str(), keySystem.c_str());
             RefreshNoticeBar();
         }
     } else if (tab && name == "summitPip") {
@@ -552,6 +561,19 @@ void BrowserWindow::RefreshNoticeBar()
         dismiss->AddBool("dismiss", true);
         fNoticeBar->SetNotice(text, {{"Open Pop-up", with(kOpenBlockedPopup, tab->id)},
             {"Always Allow", with(kAllowSitePopups, tab->id)}, {"Close", dismiss}});
+        return;
+    }
+    // Protected video (#194): Summit has no DRM system a streaming service
+    // accepts (Widevine, FairPlay, PlayReady), so say so instead of leaving
+    // the site's "format not supported".
+    if (!tab->drmKeySystem.empty() && tab->drmKeySystem != "-") {
+        const auto& key = tab->drmKeySystem;
+        const std::string system = key.rfind("com.widevine", 0) == 0 ? "Widevine"
+            : key.rfind("com.apple.fps", 0) == 0 ? "FairPlay"
+            : key.rfind("com.microsoft.playready", 0) == 0 || key.rfind("com.youtube.playready", 0) == 0 ? "PlayReady" : key;
+        fNoticeBar->SetNotice(HostOf(tab->url) + " wants to play protected video (" + system
+            + " DRM). Summit can't play DRM-protected video, so it won't play here.",
+            {{"Close", with(kDismissDrmNotice, tab->id)}});
         return;
     }
     // An offline copy from the Reading List (#156).

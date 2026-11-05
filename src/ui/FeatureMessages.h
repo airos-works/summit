@@ -69,6 +69,8 @@ constexpr uint32 kPictureInPictureCommand = 'pipc';
 // Pop-ups the current page tried to open: open the last one ("tab"), or
 // always allow the page's site.
 constexpr uint32 kOpenBlockedPopup = 'pbop';
+// The notice that the page wants DRM-protected media (#194) is closed.
+constexpr uint32 kDismissDrmNotice = 'drmx';
 constexpr uint32 kAllowSitePopups = 'pbal';
 // A page that stopped responding: wait, or end its process ("tab").
 constexpr uint32 kWaitForPage = 'wtpg';

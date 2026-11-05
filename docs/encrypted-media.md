@@ -25,6 +25,20 @@ The parsers and the decrypter are portable and tested on the host (below);
 the code under `ENABLE(ENCRYPTED_MEDIA)` was compiled with the option on, but
 the 30 October changes were not run in Summit.
 
+**Protected streaming video (#194).** Streaming services (YouTube TV's
+live and recorded programmes, Netflix, Disney+ and the like) need Widevine,
+FairPlay or PlayReady, which only browsers with a license from Google, Apple
+or Microsoft get; Clear Key does not do. Their unprotected parts (YouTube
+TV's channel previews, trailers) play. Without EME the sites say "This video
+format is not supported" or similar, so Summit tells the user why: where
+the engine has no `navigator.requestMediaKeySystemAccess`, a page script
+(`kDrmScript`) provides one that rejects with `NotSupportedError`, as a
+browser without the key system does, and reports the first key system other
+than Clear Key a page asks for; the window's notice bar then says that the
+site wants protected video (Widevine, FairPlay or PlayReady DRM) and that
+Summit can't play it. Ordinary YouTube videos ask for none.
+`SUMMIT_DRM_TRACE=1` prints each page's request.
+
 Direct DASH tracks every media response's origin and CORS result. Cross-origin
 media without CORS permission exposes an empty encrypted event and taints
 canvas, even when the manifest itself is same-origin. Set the media element's

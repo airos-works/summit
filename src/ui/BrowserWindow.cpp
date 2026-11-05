@@ -5262,6 +5262,13 @@ void BrowserWindow::MessageReceived(BMessage* message)
             for (auto close : right) CloseTab(close);
             break;
         }
+        case kDismissDrmNotice: {
+            if (auto* target = FindTabByID(message->GetInt64("tab", 0))) {
+                target->drmKeySystem = "-";
+                RefreshNoticeBar();
+            }
+            break;
+        }
         case kOpenBlockedPopup: {
             auto* target = FindTabByID(message->GetInt64("tab", 0));
             if (!target) break;
@@ -6792,6 +6799,7 @@ void BrowserWindow::WebKitStateChanged(const BMessage& message)
             // A new page: the last one's blocked pop-ups and its video are gone.
             tab->blockedPopup.clear();
             tab->blockedPopups = 0;
+            tab->drmKeySystem.clear();
             tab->pipToken.clear();
             if (tab->id == fSelected) RefreshNoticeBar();
         }

@@ -24,6 +24,23 @@ window.open = function (url, target, features) {
 };
 })();)js";
 
+const char* const kDrmScript = R"js((() => {
+if (window.__summitDrm || navigator.requestMediaKeySystemAccess) return;
+window.__summitDrm = true;
+const handlers = window.webkit && window.webkit.messageHandlers;
+const handler = handlers && handlers.summitDrm;
+let told = false;
+const request = function requestMediaKeySystemAccess(keySystem, configurations) {
+  const name = String(keySystem);
+  if (handler && !told && name !== 'org.w3.clearkey') {
+    told = true;
+    handler.postMessage(JSON.stringify({ keySystem: name })).catch(() => {});
+  }
+  return Promise.reject(new DOMException('Unsupported keySystem or supportedConfigurations.', 'NotSupportedError'));
+};
+Object.defineProperty(Navigator.prototype, 'requestMediaKeySystemAccess', { value: request, writable: true, configurable: true });
+})();)js";
+
 const char* const kPictureInPictureScript = R"js((() => {
 if (window.__summitPip) return;
 window.__summitPip = true;

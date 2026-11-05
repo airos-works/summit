@@ -322,6 +322,8 @@ private:
         // many (#73).
         std::string blockedPopup;
         int32 blockedPopups = 0;
+        // The page asked for a DRM key system Summit cannot use (#194).
+        std::string drmKeySystem;
         // A sign-in the page just submitted, waiting for Save or Never (#67).
         struct PendingPassword { std::string origin, username, password; bool update = false; };
         std::optional<PendingPassword> pendingPassword;
