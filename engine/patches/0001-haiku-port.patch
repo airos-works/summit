@@ -107982,10 +107982,10 @@ index 0000000000000000000000000000000000000000..d28a6cad6339adf79b155cf974e85bfd
 +
 diff --git a/Source/WebKit/UIProcess/API/haiku/WebKitView.cpp b/Source/WebKit/UIProcess/API/haiku/WebKitView.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..412057c8f0576affb75663dcd1db6b745d5bdeb9
+index 0000000000000000000000000000000000000000..644e5ae9fa00cd4fb73c8a7deef44b106416d484
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/API/haiku/WebKitView.cpp
-@@ -0,0 +1,1557 @@
+@@ -0,0 +1,1559 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#include "config.h"
@@ -108401,7 +108401,9 @@ index 0000000000000000000000000000000000000000..412057c8f0576affb75663dcd1db6b74
 +// Window thread: the view's frame and visibility as the direct window needs them.
 +static void noteDirectViewHaiku(BWebKitView& view, const std::shared_ptr<WebKit::WebViewStateHaiku>& state, bool attached)
 +{
-+    if (!directPresentEnabledHaiku())
++    // A WebDriver-controlled page presents through the view, which keeps its
++    // last frame: WebDriver's screenshots are that frame (#186).
++    if (!directPresentEnabledHaiku() || state->automated)
 +        return;
 +    BWindow* window = attached ? view.Window() : nullptr;
 +    BRect frame;
@@ -111625,7 +111627,7 @@ index 0000000000000000000000000000000000000000..76c801492fff9daa106e386dcfeb1ae1
 +};
 +
 diff --git a/Source/WebKit/UIProcess/Automation/WebAutomationSession.cpp b/Source/WebKit/UIProcess/Automation/WebAutomationSession.cpp
-index 599cc694a716da0c05e7104be0ec919146f99913..4bdb146fab5870fe86c0923f207efad0670dbb7b 100644
+index 599cc694a716da0c05e7104be0ec919146f99913..a6421ce0d20f4da796c5fba4f68bcd88ebf19ec8 100644
 --- a/Source/WebKit/UIProcess/Automation/WebAutomationSession.cpp
 +++ b/Source/WebKit/UIProcess/Automation/WebAutomationSession.cpp
 @@ -68,7 +68,7 @@
@@ -111664,12 +111666,44 @@ index 599cc694a716da0c05e7104be0ec919146f99913..4bdb146fab5870fe86c0923f207efad0
      auto page = webPageProxyForHandle(browsingContextHandle);
      SYNC_FAIL_WITH_PREDEFINED_ERROR_IF(!page, WindowNotFound);
  
+@@ -3131,6 +3131,10 @@ void WebAutomationSession::cancelInteractionSequence(const Inspector::Protocol::
+ #endif // ENABLE(WEBDRIVER_ACTIONS_API)
+ }
+ 
++#if PLATFORM(HAIKU)
++void presentedFrameScreenshotHaiku(WebPageProxy&, CompletionHandler<void(std::optional<String>&&)>&&);
++#endif
++
+ void WebAutomationSession::takeScreenshot(const Inspector::Protocol::Automation::BrowsingContextHandle& handle, const Inspector::Protocol::Automation::FrameHandle& frameHandle, const Inspector::Protocol::Automation::NodeHandle& nodeHandle, std::optional<bool>&& optionalScrollIntoViewIfNeeded, std::optional<bool>&& optionalClipToViewport, CommandCallback<String>&& callback)
+ {
+     auto page = webPageProxyForHandle(handle);
+@@ -3156,6 +3160,20 @@ void WebAutomationSession::takeScreenshot(const Inspector::Protocol::Automation:
+         } };
+     };
+ #endif
++#if PLATFORM(HAIKU)
++    // The viewport as presented, composited layers included (#186); an element
++    // or the whole page, which can reach past the viewport, are painted in the
++    // web process as before, as on Cocoa.
++    if (nodeHandle.isEmpty() && clipToViewport) {
++        presentedFrameScreenshotHaiku(*page, [page = protect(*page), frameID, scrollIntoViewIfNeeded, clipToViewport, callback = WTF::move(callback), ipcCompletionHandler](std::optional<String>&& png) mutable {
++            if (png)
++                return callback(WTF::move(*png));
++            // No frame presented to the view yet.
++            page->sendWithAsyncReplyToProcessContainingFrameWithoutDestinationIdentifier(frameID, Messages::WebAutomationSessionProxy::TakeScreenshot(page->webPageIDInProcessForFrame(frameID), frameID, String { }, scrollIntoViewIfNeeded, clipToViewport), ipcCompletionHandler(WTF::move(callback)));
++        });
++        return;
++    }
++#endif
+ #if PLATFORM(COCOA)
+     // We can only get viewport-bounded snapshots from the UIProcess (the on-screen window capture is physically clipped
+     // to the visible viewport), so fall back to taking the snapshot in the WebProcess whenever we need pixels outside the
 diff --git a/Source/WebKit/UIProcess/Automation/haiku/WebAutomationSessionHaiku.cpp b/Source/WebKit/UIProcess/Automation/haiku/WebAutomationSessionHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..4da27de3df395f02f04d19726691a73ef3489c80
+index 0000000000000000000000000000000000000000..ca450efb5765ec5b8a0a17fa1f2acf0ef99dfef2
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Automation/haiku/WebAutomationSessionHaiku.cpp
-@@ -0,0 +1,410 @@
+@@ -0,0 +1,474 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#include "config.h"
@@ -111679,6 +111713,8 @@ index 0000000000000000000000000000000000000000..4da27de3df395f02f04d19726691a73e
 +#include "NativeWebMouseEvent.h"
 +#include "NativeWebWheelEvent.h"
 +#include "WebPageProxy.h"
++#include "WebViewPrivate.h"
++#include <Bitmap.h>
 +#include <InterfaceDefs.h>
 +#include <View.h>
 +#include <Message.h>
@@ -111686,6 +111722,14 @@ index 0000000000000000000000000000000000000000..4da27de3df395f02f04d19726691a73e
 +#include <WebCore/Scrollbar.h>
 +#include <wtf/HashMap.h>
 +#include <wtf/NeverDestroyed.h>
++#include <wtf/RunLoop.h>
++#include <wtf/text/Base64.h>
++WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_BEGIN
++#include <skia/core/SkData.h>
++#include <skia/core/SkImage.h>
++#include <skia/core/SkPixmap.h>
++#include <skia/encode/SkPngEncoder.h>
++WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_END
 +#include <cstdlib>
 +#include <string>
 +
@@ -111695,6 +111739,60 @@ index 0000000000000000000000000000000000000000..4da27de3df395f02f04d19726691a73e
 +
 +namespace WebKit {
 +using namespace WebCore;
++
++// WebDriver's Take Screenshot (#186): the frame presented to the page's view,
++// composited layers included (view transition snapshots, video, canvas, 3D
++// transforms), as Cocoa, GTK and WPE take it from what is on screen. Painting
++// the page again in the web process (the default) left them out.
++static std::optional<String> base64PNGOfFrameHaiku(const BitmapPresenterHaiku::Frame& frame)
++{
++    const BBitmap& bitmap = *frame.image;
++    const BRect bounds = bitmap.Bounds();
++    const int width = bounds.IntegerWidth() + 1;
++    const int height = bounds.IntegerHeight() + 1;
++    if (width <= 0 || height <= 0 || (bitmap.ColorSpace() != B_RGB32 && bitmap.ColorSpace() != B_RGBA32))
++        return std::nullopt;
++    // The frame is opaque: B_RGB32's fourth byte is not alpha.
++    const SkPixmap pixels(SkImageInfo::Make(width, height, kBGRA_8888_SkColorType, kOpaque_SkAlphaType), bitmap.Bits(), bitmap.BytesPerRow());
++    auto data = SkPngEncoder::Encode(pixels, { });
++    if (!data)
++        return std::nullopt;
++    return base64EncodeToString(data->byteSpan());
++}
++
++// After the next presentation update, the frame the view settles on: a
++// presentation update is reported before its frame reaches the view, and one
++// update can bring more than one frame (a view transition's first frames), so
++// the frame is taken once no newer one has come for 45 ms (at most 400 ms in
++// all; an animated page never settles). A page that did not change presents
++// nothing new: its frame is taken after 150 ms. Null when the view has no
++// frame at all.
++static void awaitPresentedFrameHaiku(WeakPtr<WebPageProxy> weakPage, uint64_t shown, uint64_t last, unsigned stable, unsigned attempt, CompletionHandler<void(std::optional<String>&&)>&& completion)
++{
++    constexpr auto interval = 15_ms;
++    constexpr unsigned settled = 3, unchanged = 10, limit = 27;
++    RefPtr page = weakPage.get();
++    auto frame = page ? presentedFrameForPageHaiku(*page) : nullptr;
++    const uint64_t current = frame ? frame->identifier : 0;
++    stable = current == last ? stable + 1 : 0;
++    const bool done = !frame || attempt >= limit || (current != shown ? stable >= settled : attempt >= unchanged);
++    if (!done) {
++        RunLoop::mainSingleton().dispatchAfter(interval, [weakPage = WTF::move(weakPage), shown, current, stable, attempt, completion = WTF::move(completion)]() mutable {
++            awaitPresentedFrameHaiku(WTF::move(weakPage), shown, current, stable, attempt + 1, WTF::move(completion));
++        });
++        return;
++    }
++    completion(frame && frame->image ? base64PNGOfFrameHaiku(*frame) : std::nullopt);
++}
++
++void presentedFrameScreenshotHaiku(WebPageProxy& page, CompletionHandler<void(std::optional<String>&&)>&& completion)
++{
++    auto before = presentedFrameForPageHaiku(page);
++    const uint64_t shown = before ? before->identifier : 0;
++    page.callAfterNextPresentationUpdate([weakPage = WeakPtr { page }, shown, completion = WTF::move(completion)]() mutable {
++        awaitPresentedFrameHaiku(WTF::move(weakPage), shown, shown, 0, 0, WTF::move(completion));
++    });
++}
 +
 +#if ENABLE(WEBDRIVER_MOUSE_INTERACTIONS)
 +
@@ -153898,10 +153996,10 @@ index 0000000000000000000000000000000000000000..c9a119d02f85b7c5ad8fe9153bfc9604
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/WebView.cpp b/Source/WebKit/UIProcess/haiku/WebView.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..b3abb368a56581ad5124a58d1c1e3afbca25422d
+index 0000000000000000000000000000000000000000..efe3d0c03cee8d19632ee5cb21935d8304876be0
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/WebView.cpp
-@@ -0,0 +1,3646 @@
+@@ -0,0 +1,3657 @@
 +/*
 + * Copyright (C) 2013 Intel Corporation. All rights reserved.
 + *
@@ -155786,6 +155884,16 @@ index 0000000000000000000000000000000000000000..b3abb368a56581ad5124a58d1c1e3afb
 +    return nullptr;
 +}
 +
++std::shared_ptr<const BitmapPresenterHaiku::Frame> presentedFrameForPageHaiku(const WebPageProxy& page)
++{
++    ASSERT(RunLoop::isMain());
++    for (auto* view : liveWebViewsHaiku()) {
++        if (view->page() == &page)
++            return view->presentedFrameHaiku();
++    }
++    return nullptr;
++}
++
 +WebView::WebView(std::shared_ptr<WebViewStateHaiku> state)
 +    : m_state(std::move(state))
 +{
@@ -156062,6 +156170,7 @@ index 0000000000000000000000000000000000000000..b3abb368a56581ad5124a58d1c1e3afb
 +    }
 +    auto& pool = configuration->processPool();
 +    m_page = pool.createWebPage(*this, configuration.releaseNonNull());
++    m_state->automated = m_page->isControlledByAutomation();
 +    if (initialSettings)
 +        applyPageSettingsHaiku(*m_page, *initialSettings);
 +    m_page->setUIClient(makeUnique<JavaScriptUIClientHaiku>(m_state, true));
@@ -158278,10 +158387,10 @@ index 0000000000000000000000000000000000000000..f712608b72b963631ade0ec62755598a
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/WebViewPrivate.h b/Source/WebKit/UIProcess/haiku/WebViewPrivate.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..6d1a23ed2d68bb9ea34ceb84a8d6e01c3a3e1b94
+index 0000000000000000000000000000000000000000..6101fe65901016e63a97b1c8252920211369b7ac
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/WebViewPrivate.h
-@@ -0,0 +1,238 @@
+@@ -0,0 +1,242 @@
 +/*
 +   Copyright (C) 2014 Haiku, inc.
 +
@@ -158519,13 +158628,17 @@ index 0000000000000000000000000000000000000000..6d1a23ed2d68bb9ea34ceb84a8d6e01c
 +// input goes there). Main thread.
 +WebPageProxy* focusedWebPageForInputHaiku();
 +
++// The last frame presented to the page's view (device pixels, composited
++// layers included), or null. Main thread.
++std::shared_ptr<const BitmapPresenterHaiku::Frame> presentedFrameForPageHaiku(const WebPageProxy&);
++
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/WebViewStateHaiku.h b/Source/WebKit/UIProcess/haiku/WebViewStateHaiku.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..c6425698bedd9a81875ce5d29ef97cc4046461fd
+index 0000000000000000000000000000000000000000..a8774d7dd5978555186402705e8bf349aa35f02a
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/WebViewStateHaiku.h
-@@ -0,0 +1,265 @@
+@@ -0,0 +1,268 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#pragma once
@@ -158618,6 +158731,9 @@ index 0000000000000000000000000000000000000000..c6425698bedd9a81875ce5d29ef97cc4
 +    BMessenger target;
 +    BitmapPresenterHaiku presenter;
 +    std::atomic<bool> closed { false };
++    // The page is driven by WebDriver: its frames are not put straight into
++    // the screen, so the view keeps the last one for screenshots (#186).
++    std::atomic<bool> automated { false };
 +    // WebKit main thread: whether the view was visible at the last geometry
 +    // update, and a count that cancels a pending hidden-frame release
 +    // (WebView::updateGeometry).

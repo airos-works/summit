@@ -80,8 +80,18 @@ curl -s -XDELETE localhost:4444/session/$S
   and no `click`). Wheel actions (#180) are `B_MOUSE_WHEEL_CHANGED`
   messages of `delta / pixelsPerNotch` notches at the action's point, so a
   page scrolls by the pixels the action asked for (one notch is 2.5 lines;
-  `SUMMIT_WHEEL_PIXELS_PER_NOTCH` overrides it). Screenshots are taken in the
-  web process and encoded with Skia.
+  `SUMMIT_WHEEL_PIXELS_PER_NOTCH` overrides it).
+- Take Screenshot (#186) is the frame presented to the page's view, in
+  device pixels, composited layers included (view transition snapshots,
+  video, canvas, transforms), as Cocoa, GTK and WPE take it: after the next
+  presentation update, once frames stop arriving for 45 ms (at most 400 ms;
+  150 ms when nothing new is presented). A WebDriver-controlled page does not
+  present straight into the screen, so its view always keeps that frame.
+  Element and full-page screenshots, which can reach past the viewport, are
+  still painted in the web process (as on Cocoa); so is a viewport one when
+  nothing has been presented yet. Before, every screenshot was painted again
+  in the web process, without composited layers: 126 view-transition
+  reftests failed for that alone.
 - The engine needs `ENABLE_WEBDRIVER=ON`, which also turns on WebDriver's
   mouse, keyboard and wheel interactions (Source/cmake/OptionsHaiku.cmake).
 
