@@ -115,6 +115,21 @@ the GLib files, which are portable).
 - Window: the same, cropped to one window's frame, which is followed as the
   window moves (the private `get_window_info`); the stream ends when the
   window closes. Windows are listed as `Window: <title>` after the screens.
+  Haiku's app_server keeps no picture of a window's covered parts, so the
+  screen under the window shared whatever covered it: in a call, usually
+  the browser, which looked like the whole screen (#196). On air/OS
+  (fork 0fec0a7d2b) the source asks app_server for the window's content
+  with `BPrivate::read_window_bitmap()`, looked up with `dlsym` so stock
+  Haiku keeps the screen read: when something covers the window,
+  app_server has it draw its whole content into an offscreen bitmap (a
+  "capture update"; about 1-2 ms for a Terminal) and then draw its visible
+  part on screen again. A window nothing covers, and one that draws into
+  the frame buffer itself (a `BDirectWindow`, such as Summit's own windows),
+  is still read from the screen, so a covered Summit window is shared with
+  what covers it. While a window is shared its tab and buttons are green
+  (`do_window_action()` with the private `kWindowActionCaptureStart` and
+  `kWindowActionCaptureStop`), until the track stops or the web process
+  ends; the picker says so on air/OS.
 - Echo cancellation, noise suppression and gain control for the microphone
   (`HaikuVoiceProcessing`): libwebrtc's audio processing module (AEC3),
   with what the page plays (streams and Web Audio) as the echo reference.

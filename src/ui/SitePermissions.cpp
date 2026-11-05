@@ -27,6 +27,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <dlfcn.h>
 
 namespace summit {
 namespace {
@@ -82,6 +83,15 @@ BBitmap* PromptIcon(const std::string& permission)
     return icon.release();
 }
 
+// air/OS draws a shared window whole, without the windows that cover it
+// (the engine's HaikuDisplayCaptureSource uses BPrivate::read_window_bitmap()
+// when libbe has it); elsewhere the screen under the window is shared.
+static bool SharesCoveredWindows()
+{
+    static const bool shares = dlsym(RTLD_DEFAULT, "_ZN8BPrivate18read_window_bitmapEiP7BBitmaplPb") != nullptr;
+    return shares;
+}
+
 // Permissions answered by choosing a device, for this browsing session only.
 bool DeviceChooser(const std::string& permission)
 {
@@ -107,7 +117,9 @@ public:
         auto* text = new BStringView("question", question.c_str());
         auto* note = new BStringView("note", DeviceChooser(fPermission)
             ? "Access lasts for this browsing session."
-            : "The page sees everything in it while you share. A window is shared with whatever covers it.");
+            : SharesCoveredWindows()
+                ? "The page sees everything in it while you share. A shared window's tab turns green."
+                : "The page sees everything in it while you share. A window is shared with whatever covers it.");
         BFont small(be_plain_font);
         small.SetSize(small.Size() * 0.9f);
         note->SetFont(&small);

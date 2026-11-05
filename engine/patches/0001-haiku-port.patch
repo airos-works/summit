@@ -69544,10 +69544,10 @@ index 0000000000000000000000000000000000000000..baf606eb8a43e053820e4a472dc51c40
 +#endif // ENABLE(MEDIA_STREAM) && PLATFORM(HAIKU)
 diff --git a/Source/WebCore/platform/mediastream/haiku/HaikuCaptureSources.cpp b/Source/WebCore/platform/mediastream/haiku/HaikuCaptureSources.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..25724e9c4cd67eb0565f5dcf537063a24d1c4331
+index 0000000000000000000000000000000000000000..8c1945d699a005644350d6b61034ef38085e4018
 --- /dev/null
 +++ b/Source/WebCore/platform/mediastream/haiku/HaikuCaptureSources.cpp
-@@ -0,0 +1,1804 @@
+@@ -0,0 +1,1866 @@
 +/*
 + * Copyright (C) 2026 Summit contributors.
 + *
@@ -69586,6 +69586,7 @@ index 0000000000000000000000000000000000000000..25724e9c4cd67eb0565f5dcf537063a2
 +#include <cmath>
 +#include <cstdlib>
 +#include <cstring>
++#include <dlfcn.h>
 +#include <interface/Screen.h>
 +#include <private/interface/WindowInfo.h>
 +#include <wtf/HashMap.h>
@@ -69601,6 +69602,26 @@ index 0000000000000000000000000000000000000000..25724e9c4cd67eb0565f5dcf537063a2
 +WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_END
 +
 +namespace WebCore {
++
++// air/OS: app_server draws a covered window's whole content for a capture
++// (BPrivate::read_window_bitmap(), absent on other systems), and shows on the
++// window's tab that it is shared (do_window_action() with these actions;
++// other systems ignore them).
++using ReadWindowBitmapFunction = status_t (*)(int32, BBitmap*, bigtime_t, bool*);
++static ReadWindowBitmapFunction readWindowBitmapFunction()
++{
++    static ReadWindowBitmapFunction function = [] {
++        void* symbol = dlsym(RTLD_DEFAULT, "_ZN8BPrivate18read_window_bitmapEiP7BBitmaplPb");
++        if (!symbol) {
++            if (void* libbe = dlopen("libbe.so", RTLD_LAZY))
++                symbol = dlsym(libbe, "_ZN8BPrivate18read_window_bitmapEiP7BBitmaplPb");
++        }
++        return reinterpret_cast<ReadWindowBitmapFunction>(symbol);
++    }();
++    return function;
++}
++static constexpr int32 windowActionCaptureStart = 'wcap';
++static constexpr int32 windowActionCaptureStop = 'wcp0';
 +
 +static MediaTime currentMediaTime()
 +{
@@ -70626,6 +70647,10 @@ index 0000000000000000000000000000000000000000..25724e9c4cd67eb0565f5dcf537063a2
 +    auto outputSize = size();
 +    m_outputWidth = outputSize.width();
 +    m_outputHeight = outputSize.height();
++    if (m_windowToken >= 0 && !m_windowMarked) {
++        do_window_action(m_windowToken, windowActionCaptureStart, BRect(), false);
++        m_windowMarked = true;
++    }
 +    m_thread = Thread::create("Summit screen capture"_s, [protectedThis = Ref { *this }] {
 +        protectedThis->captureLoop();
 +    });
@@ -70644,6 +70669,10 @@ index 0000000000000000000000000000000000000000..25724e9c4cd67eb0565f5dcf537063a2
 +        if (&Thread::currentSingleton() != m_thread.get())
 +            m_thread->waitForCompletion();
 +        m_thread = nullptr;
++    }
++    if (m_windowMarked) {
++        do_window_action(m_windowToken, windowActionCaptureStop, BRect(), false);
++        m_windowMarked = false;
 +    }
 +}
 +
@@ -70672,6 +70701,8 @@ index 0000000000000000000000000000000000000000..25724e9c4cd67eb0565f5dcf537063a2
 +// Rows read at a time (even, see captureLoop()).
 +static constexpr int screenBandRows = 128;
 +
++
++
 +void HaikuDisplayCaptureSource::captureLoop()
 +{
 +    BScreen screen(screen_id { m_screenId });
@@ -70684,6 +70715,8 @@ index 0000000000000000000000000000000000000000..25724e9c4cd67eb0565f5dcf537063a2
 +
 +    // A whole band and the last one, kept between pictures.
 +    std::unique_ptr<BBitmap> bandBitmaps[2];
++    // The window drawn whole by app_server (readWindowBitmapFunction()).
++    std::unique_ptr<BBitmap> windowBitmap;
 +    IntSize lastSize = m_screenSize;
 +    auto next = MonotonicTime::now();
 +    while (true) {
@@ -70703,6 +70736,7 @@ index 0000000000000000000000000000000000000000..25724e9c4cd67eb0565f5dcf537063a2
 +            continue;
 +
 +        BRect area = screen.Frame();
++        BRect windowFrame;
 +        if (m_windowToken >= 0) {
 +            client_window_info* info = get_window_info(m_windowToken);
 +            if (!info) {
@@ -70713,16 +70747,44 @@ index 0000000000000000000000000000000000000000..25724e9c4cd67eb0565f5dcf537063a2
 +                break;
 +            }
 +            bool visible = !info->is_mini && info->show_hide_level <= 0 && (info->workspaces & (1u << current_workspace()));
-+            area = BRect(info->window_left, info->window_top, info->window_right, info->window_bottom) & screen.Frame();
++            windowFrame = BRect(info->window_left, info->window_top, info->window_right, info->window_bottom);
++            area = windowFrame & screen.Frame();
 +            free(info);
 +            // Hidden or on another workspace: the last picture stays.
 +            if (!visible || !area.IsValid())
 +                continue;
 +        }
 +
-+        int width = area.IntegerWidth() + 1;
-+        int height = area.IntegerHeight() + 1;
-+        auto picture = VideoFrameHaiku::create(VideoFrameHaiku::Format::I420, { width, height }, currentMediaTime());
++        // A window others cover: app_server has it draw its whole content
++        // for us. Nothing covers it (drawn is false), or the system cannot:
++        // the screen under it is read below.
++        RefPtr<VideoFrameHaiku> drawnPicture;
++        if (m_windowToken >= 0 && windowFrame.IsValid()) {
++            if (auto readWindow = readWindowBitmapFunction()) {
++                int drawnWidth = windowFrame.IntegerWidth() + 1;
++                int drawnHeight = windowFrame.IntegerHeight() + 1;
++                if (!windowBitmap || windowBitmap->Bounds().IntegerWidth() + 1 != drawnWidth || windowBitmap->Bounds().IntegerHeight() + 1 != drawnHeight) {
++                    windowBitmap = std::make_unique<BBitmap>(BRect(0, 0, drawnWidth - 1, drawnHeight - 1), B_RGB32);
++                    if (windowBitmap->InitCheck() != B_OK)
++                        windowBitmap = nullptr;
++                }
++                bool drawn = false;
++                if (windowBitmap && readWindow(m_windowToken, windowBitmap.get(), 300000, &drawn) == B_OK && drawn) {
++                    auto picture = VideoFrameHaiku::create(VideoFrameHaiku::Format::I420, { drawnWidth, drawnHeight }, currentMediaTime());
++                    auto& y = picture->plane(0);
++                    auto& u = picture->plane(1);
++                    auto& v = picture->plane(2);
++                    if (!libyuv::ARGBToI420(static_cast<const uint8_t*>(windowBitmap->Bits()), windowBitmap->BytesPerRow(),
++                        y.data, y.stride, u.data, u.stride, v.data, v.stride, drawnWidth, drawnHeight))
++                        drawnPicture = WTF::move(picture);
++                }
++            }
++        }
++
++        const bool drawnByWindow = !!drawnPicture;
++        int width = drawnPicture ? drawnPicture->size().width() : area.IntegerWidth() + 1;
++        int height = drawnPicture ? drawnPicture->size().height() : area.IntegerHeight() + 1;
++        auto picture = drawnPicture ? drawnPicture.releaseNonNull() : VideoFrameHaiku::create(VideoFrameHaiku::Format::I420, { width, height }, currentMediaTime());
 +        auto& y = picture->plane(0);
 +        auto& u = picture->plane(1);
 +        auto& v = picture->plane(2);
@@ -70735,7 +70797,7 @@ index 0000000000000000000000000000000000000000..25724e9c4cd67eb0565f5dcf537063a2
 +        // desktop keeps two thirds of app_server's time whatever the rate
 +        // asked for, and no wait is longer than one band.
 +        bool complete = true;
-+        for (int top = 0; top < height && complete; top += screenBandRows) {
++        for (int top = 0; top < height && complete && !drawnByWindow; top += screenBandRows) {
 +            int rows = std::min(screenBandRows, height - top);
 +            auto& bitmap = bandBitmaps[rows == screenBandRows ? 0 : 1];
 +            if (!bitmap || bitmap->Bounds().IntegerWidth() + 1 != width || bitmap->Bounds().IntegerHeight() + 1 != rows) {
@@ -71354,10 +71416,10 @@ index 0000000000000000000000000000000000000000..25724e9c4cd67eb0565f5dcf537063a2
 +#endif // ENABLE(MEDIA_STREAM) && PLATFORM(HAIKU)
 diff --git a/Source/WebCore/platform/mediastream/haiku/HaikuCaptureSources.h b/Source/WebCore/platform/mediastream/haiku/HaikuCaptureSources.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..526d2085681881b666869044e5c3ed73efd9f1c8
+index 0000000000000000000000000000000000000000..c30c671ef478071a728916fc07d5826314fd3948
 --- /dev/null
 +++ b/Source/WebCore/platform/mediastream/haiku/HaikuCaptureSources.h
-@@ -0,0 +1,310 @@
+@@ -0,0 +1,314 @@
 +/*
 + * Copyright (C) 2026 Summit contributors.
 + *
@@ -71489,10 +71551,12 @@ index 0000000000000000000000000000000000000000..526d2085681881b666869044e5c3ed73
 +    MonotonicTime m_lastPicture;
 +};
 +
-+// A screen, or a window's part of it, read from app_server
-+// (BScreen::ReadBitmap) on a thread of its own at the frame rate asked for. A
-+// window is followed as it moves and resizes; what covers it is captured
-+// with it (app_server keeps no picture of a window's hidden parts).
++// A screen, or a window, read from app_server on a thread of its own at the
++// frame rate asked for. A window is followed as it moves and resizes. Where
++// app_server can draw a covered window's content for us (air/OS:
++// BPrivate::read_window_bitmap()), the window is shared without what covers
++// it, and its tab is green while it is shared; elsewhere the screen under the
++// window is read, with what covers it (BScreen::ReadBitmap).
 +class HaikuDisplayCaptureSource final : public RealtimeVideoCaptureSource {
 +public:
 +    static CaptureSourceOrError create(const CaptureDevice&, MediaDeviceHashSalts&&, const MediaConstraints*, std::optional<PageIdentifier>);
@@ -71519,6 +71583,8 @@ index 0000000000000000000000000000000000000000..526d2085681881b666869044e5c3ed73
 +    // The window's app_server token, or -1 for the whole screen.
 +    const int32_t m_windowToken;
 +    const IntSize m_screenSize;
++    // The window's tab shows it is shared (kWindowActionCaptureStart sent).
++    bool m_windowMarked { false };
 +    RefPtr<Thread> m_thread;
 +    Lock m_lock;
 +    Condition m_condition;
