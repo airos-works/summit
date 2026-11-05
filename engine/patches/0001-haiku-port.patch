@@ -212498,6 +212498,24 @@ index 75ad758e83d93a07013280ac20632463a5b2ec30..805103060cfc6ac67a843409a6c31010
  #elif MI_TLS_MODEL_DYNAMIC_PTHREADS
  // Dynamic pthread slot on less common platforms. This is not too bad. (default on OpenBSD)
  #define MI_THEAP_INITASNULL  1
+diff --git a/Source/bmalloc/mimalloc/mimalloc/include/mimalloc/types.h b/Source/bmalloc/mimalloc/mimalloc/include/mimalloc/types.h
+index 52cb3fcc59010fe40cdafa7c456491741498d9c8..8f448d6ecf0e94b1bab74aa63118906e010a93f5 100644
+--- a/Source/bmalloc/mimalloc/mimalloc/include/mimalloc/types.h
++++ b/Source/bmalloc/mimalloc/mimalloc/include/mimalloc/types.h
+@@ -388,7 +388,12 @@ typedef struct mi_page_s {
+ 
+ #define MI_PAGE_ALIGN                     MI_ARENA_SLICE_ALIGN      // pages must be aligned on this for the page map.
+ #define MI_PAGE_MIN_START_BLOCK_ALIGN     MI_MAX_ALIGN_SIZE         // minimal block alignment for the first block in a page (16b)
+-#define MI_PAGE_MAX_START_BLOCK_ALIGN2    (4*MI_KiB)                // maximal block alignment for "power of 2"-sized blocks (such that we guarantee natural alignment)
++// Summit: 16 KiB, not 4: JavaScriptCore's 16 KiB MarkedBlocks are allocated
++// 16 KiB-aligned (fastAlignedMalloc), and without natural alignment each was
++// over-allocated into a 32 KiB block, so the JavaScript heap cost twice its
++// size. Pages hold as many power-of-2 blocks either way (the start padding
++// is less than one block).
++#define MI_PAGE_MAX_START_BLOCK_ALIGN2    (16*MI_KiB)               // maximal block alignment for "power of 2"-sized blocks (such that we guarantee natural alignment)
+ #define MI_PAGE_OSPAGE_BLOCK_ALIGN2       (4*MI_KiB)                // also aligns any multiple of this size to avoid TLB misses.
+ #define MI_PAGE_MAX_OVERALLOC_ALIGN       MI_ARENA_SLICE_SIZE       // (64 KiB) limit for which we overallocate in arena pages, beyond this use OS allocation
+ 
 diff --git a/Source/bmalloc/mimalloc/mimalloc/src/init.c b/Source/bmalloc/mimalloc/mimalloc/src/init.c
 index 3161450fdfdcf8229a8d3aa0eb6cd0604c5ac3e1..b1f97596bc3ef001413aa4f489bd3f6954efa46e 100644
 --- a/Source/bmalloc/mimalloc/mimalloc/src/init.c

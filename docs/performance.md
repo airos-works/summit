@@ -13171,3 +13171,25 @@ video; on Haiku it is now 160 MiB, close to Chrome's 150 MB for video and
 12 MB for audio (`SettingsBase`), so a tab playing long video holds less.
 Players evict what was played when they reach the quota. YouTube on its own
 kept 5-6 minutes buffered at 720p and stayed under both limits.
+
+### The JavaScript heap cost twice its size
+
+In heavy tabs most of the web process is mimalloc (WTF's allocator): 440-470
+MiB in use on CNN, SMH and The Verge, against JavaScript heaps of 108-160 MiB.
+The largest part, 226-258 MiB, was in blocks of 16-512 KiB. JavaScriptCore
+allocates its 16 KiB `MarkedBlock`s 16 KiB-aligned, and mimalloc 3.2.8 makes
+only power-of-two blocks up to 4 KiB naturally aligned; anything else asked for
+aligned is over-allocated (size + alignment - 1), so every 16 KiB block took a
+32 KiB one. `MI_PAGE_MAX_START_BLOCK_ALIGN2` is now 16 KiB: pages of 16 KiB
+blocks start their blocks on a 16 KiB boundary (pages hold as many blocks as
+before) and the aligned allocation takes a plain 16 KiB block. Four heavy
+sites, same session, mimalloc in use and the process's resident memory (MiB):
+
+| Site | in use before | after | resident before | after |
+| --- | ---: | ---: | ---: | ---: |
+| CNN | 471 | 373 | 772 | 687 |
+| SMH | 446 | 336 | 585 | 529 |
+| The Verge | 442 | 349 | 612 | 588 |
+| Reddit | 214 | 192 | 368 | 373 |
+
+Blocks of 16-512 KiB fell to about 55 MiB in each of the three large tabs.
