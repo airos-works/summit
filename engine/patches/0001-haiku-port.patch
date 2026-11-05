@@ -144935,15 +144935,16 @@ index 41190ed770ac926edc65b498d52879ee7dc0eca6..90bd49e69683c16e1731252157f8edd1
      WebCore::Color underlayColor;
      RunLoop::Timer updateReportedMediaCaptureStateTimer;
 diff --git a/Source/WebKit/UIProcess/WebProcessCache.cpp b/Source/WebKit/UIProcess/WebProcessCache.cpp
-index d9243a6e70f5b6759cb9d98941df81778c31e1c9..ee34b87b3c382ca8171fe8c2dff2d6d065ed8b5e 100644
+index d9243a6e70f5b6759cb9d98941df81778c31e1c9..43fbd7c6716da249ae7c929d4321aa421b2ae056 100644
 --- a/Source/WebKit/UIProcess/WebProcessCache.cpp
 +++ b/Source/WebKit/UIProcess/WebProcessCache.cpp
-@@ -36,11 +36,22 @@
+@@ -36,17 +36,35 @@
  #include <wtf/StdLibExtras.h>
  #include <wtf/TZoneMallocInlines.h>
  
 +#if PLATFORM(HAIKU)
 +#include "AuxiliaryProcessMessages.h"
++#include "MemoryPressureMonitorHaiku.h"
 +#include <cstdlib>
 +#include <cstring>
 +#endif
@@ -144961,7 +144962,19 @@ index d9243a6e70f5b6759cb9d98941df81778c31e1c9..ee34b87b3c382ca8171fe8c2dff2d6d0
  WTF_MAKE_TZONE_ALLOCATED_IMPL(WebProcessCache);
  WTF_MAKE_TZONE_ALLOCATED_IMPL(WebProcessCache::CachedProcess);
  
-@@ -55,6 +66,32 @@ Seconds WebProcessCache::clearingDelayAfterApplicationResignsActive = cachedProc
+ #if PLATFORM(COCOA)
+ Seconds WebProcessCache::cachedProcessLifetime { 30_min };
+ Seconds WebProcessCache::clearingDelayAfterApplicationResignsActive { 5_min };
++#elif PLATFORM(HAIKU)
++// Haiku can neither suspend a cached process nor compress what it holds, so
++// it is kept two minutes, not five: most sites come back within seconds, and
++// the 150-400 MiB a process keeps went to no one the other three minutes.
++Seconds WebProcessCache::cachedProcessLifetime { 2_min };
++Seconds WebProcessCache::clearingDelayAfterApplicationResignsActive = cachedProcessLifetime;
+ #else
+ Seconds WebProcessCache::cachedProcessLifetime { 5_min };
+ Seconds WebProcessCache::clearingDelayAfterApplicationResignsActive = cachedProcessLifetime;
+@@ -55,6 +73,32 @@ Seconds WebProcessCache::clearingDelayAfterApplicationResignsActive = cachedProc
  int WebProcessCache::capacityOverride { -1 };
  static Seconds cachedProcessSuspensionDelay { 30_s };
  
@@ -144994,11 +145007,15 @@ index d9243a6e70f5b6759cb9d98941df81778c31e1c9..ee34b87b3c382ca8171fe8c2dff2d6d0
  void WebProcessCache::setCachedProcessSuspensionDelayForTesting(Seconds delay)
  {
      cachedProcessSuspensionDelay = delay;
-@@ -92,6 +129,12 @@ void WebProcessCache::deref() const
+@@ -92,6 +136,16 @@ void WebProcessCache::deref() const
  
  bool WebProcessCache::canCacheProcess(WebProcessProxy& process) const
  {
 +#if OS(HAIKU)
++    if (MemoryPressureMonitor::isMemoryTight()) {
++        WEBPROCESSCACHE_RELEASE_LOG("canCacheProcess: Not caching process because memory is tight", process.processID());
++        return false;
++    }
 +    if (isBloatedProcessHaiku(process)) {
 +        WEBPROCESSCACHE_RELEASE_LOG("canCacheProcess: Not caching process because it was left for its size", process.processID());
 +        return false;
@@ -145007,7 +145024,7 @@ index d9243a6e70f5b6759cb9d98941df81778c31e1c9..ee34b87b3c382ca8171fe8c2dff2d6d0
      if (!process.isEligibleForWebProcessCache()) {
          WEBPROCESSCACHE_RELEASE_LOG("canCacheProcess: Not caching process because WebProcessProxy does not allow it", process.processID());
          return false;
-@@ -175,6 +218,8 @@ bool WebProcessCache::addProcess(Ref<CachedProcess>&& cachedProcess)
+@@ -175,6 +229,8 @@ bool WebProcessCache::addProcess(Ref<CachedProcess>&& cachedProcess)
  
  #if PLATFORM(COCOA) || PLATFORM(GTK) || PLATFORM(WPE)
          cachedProcess->startSuspensionTimer();
@@ -145016,7 +145033,7 @@ index d9243a6e70f5b6759cb9d98941df81778c31e1c9..ee34b87b3c382ca8171fe8c2dff2d6d0
  #endif
  
      if (auto& origin = process->coopCacheOrigin()) {
-@@ -421,6 +466,25 @@ void WebProcessCache::updateCapacity(WebProcessPool& processPool)
+@@ -421,6 +477,25 @@ void WebProcessCache::updateCapacity(WebProcessPool& processPool)
          m_capacity = capacityOverride;
      } else {
          unsigned maxProcesses = 32;
@@ -145042,7 +145059,7 @@ index d9243a6e70f5b6759cb9d98941df81778c31e1c9..ee34b87b3c382ca8171fe8c2dff2d6d0
  #if PLATFORM(IOS_FAMILY)
          if (!processPool.hasUsedSiteIsolation())
              maxProcesses = 10;
-@@ -434,7 +498,7 @@ void WebProcessCache::updateCapacity(WebProcessPool& processPool)
+@@ -434,7 +509,7 @@ void WebProcessCache::updateCapacity(WebProcessPool& processPool)
              WEBPROCESSCACHE_RELEASE_LOG("updateCapacity: Cache is disabled because device does not have enough RAM", 0);
          } else {
              // Allow 4 processes in the cache per GB of RAM, up to maxProcesses.
@@ -150678,10 +150695,10 @@ index 0000000000000000000000000000000000000000..fb3e33f0bce8a0e7a7f240e8f7308550
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/MemoryPressureMonitorHaiku.cpp b/Source/WebKit/UIProcess/haiku/MemoryPressureMonitorHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..1e61e7a125d4984880932744c0985a1075955acd
+index 0000000000000000000000000000000000000000..e90e2238519fd64431bdb3c552d059f057be66d4
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/MemoryPressureMonitorHaiku.cpp
-@@ -0,0 +1,143 @@
+@@ -0,0 +1,186 @@
 +/*
 + * Copyright (C) 2026 Haiku, Inc.
 + *
@@ -150710,9 +150727,12 @@ index 0000000000000000000000000000000000000000..1e61e7a125d4984880932744c0985a10
 +#include "config.h"
 +#include "MemoryPressureMonitorHaiku.h"
 +
++#include "WebBackForwardCache.h"
++#include "WebProcessCache.h"
 +#include "WebProcessPool.h"
 +#include <OS.h>
 +#include <algorithm>
++#include <atomic>
 +#include <cstdio>
 +#include <cstdlib>
 +#include <cstring>
@@ -150730,6 +150750,31 @@ index 0000000000000000000000000000000000000000..1e61e7a125d4984880932744c0985a10
 +static const Seconds s_maxPollingInterval { 5_s };
 +static const double s_minUsedMemoryPercentageForPolling = 50;
 +static const double s_maxUsedMemoryPercentageForPolling = 85;
++
++// Before memory pressure: once SUMMIT_MEMORY_TIGHT_PERCENT (70) of the memory
++// is in use, the web process cache's processes and the back/forward cache's
++// pages end, and none are kept while it stays so. Haiku can neither suspend
++// nor compress them, and each held 150-400 MiB for up to five minutes: after
++// closing 12 of 14 heavy tabs on the laptop, 1.5-2.5 GB stayed in use for
++// minutes. 0 turns this off.
++static int tightThreshold()
++{
++    static int threshold = [] {
++        const char* value = getenv("SUMMIT_MEMORY_TIGHT_PERCENT");
++        if (!value)
++            return 70;
++        int parsed = atoi(value);
++        return parsed >= 0 && parsed <= 100 ? parsed : 70;
++    }();
++    return threshold;
++}
++
++static std::atomic<bool> s_memoryIsTight { false };
++
++bool MemoryPressureMonitor::isMemoryTight()
++{
++    return s_memoryIsTight.load(std::memory_order_relaxed);
++}
 +
 +static int pressureThreshold()
 +{
@@ -150785,6 +150830,21 @@ index 0000000000000000000000000000000000000000..1e61e7a125d4984880932744c0985a10
 +            }
 +            int threshold = pressureThreshold();
 +            int level = usedPercentage >= std::min(threshold + 5, 100) ? 2 : usedPercentage >= threshold ? 1 : 0;
++            bool tight = tightThreshold() > 0 && usedPercentage >= tightThreshold();
++            if (tight != s_memoryIsTight.exchange(tight)) {
++                std::fprintf(stderr, "Summit memory: %d%% of memory in use, %s\n", usedPercentage,
++                    tight ? "ending the processes kept for later" : "keeping processes for later again");
++            }
++            if (tight && !level) {
++                // What is kept only for later goes (each poll: what was added
++                // since); the spare process stays, it is small.
++                RunLoop::mainSingleton().dispatch([] {
++                    for (auto& processPool : WebProcessPool::allProcessPools()) {
++                        processPool->backForwardCache().clear();
++                        processPool->webProcessCache().clear();
++                    }
++                });
++            }
 +            if (level != reportedLevel) {
 +                std::fprintf(stderr, "Summit memory pressure: %d%% of memory in use, %s\n", usedPercentage,
 +                    level == 2 ? "critical" : level == 1 ? "releasing memory" : "normal");
@@ -150827,10 +150887,10 @@ index 0000000000000000000000000000000000000000..1e61e7a125d4984880932744c0985a10
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/MemoryPressureMonitorHaiku.h b/Source/WebKit/UIProcess/haiku/MemoryPressureMonitorHaiku.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..e74064b7ebc8e652df29d285e62b91ef45dd988f
+index 0000000000000000000000000000000000000000..03156381aff2f10563fb2dca763f496b4e821a16
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/MemoryPressureMonitorHaiku.h
-@@ -0,0 +1,54 @@
+@@ -0,0 +1,58 @@
 +/*
 + * Copyright (C) 2026 Haiku, Inc.
 + *
@@ -150876,6 +150936,10 @@ index 0000000000000000000000000000000000000000..e74064b7ebc8e652df29d285e62b91ef
 +    static MemoryPressureMonitor& singleton();
 +    void start();
 +    static bool disabled();
++    // Memory is getting tight (70% of it in use by default): the processes
++    // kept only for later are let go, and no more are kept. Live tabs are
++    // left alone until memory pressure (90%).
++    static bool isMemoryTight();
 +
 +private:
 +    MemoryPressureMonitor() = default;
@@ -154656,10 +154720,10 @@ index 0000000000000000000000000000000000000000..c9a119d02f85b7c5ad8fe9153bfc9604
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/WebView.cpp b/Source/WebKit/UIProcess/haiku/WebView.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..c6141afb236c8b0b6b5be77830a52216b019e992
+index 0000000000000000000000000000000000000000..2b3aa7b9ed8f5fcf38bf588e806ea2e0e5d5ba4f
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/WebView.cpp
-@@ -0,0 +1,3748 @@
+@@ -0,0 +1,3757 @@
 +/*
 + * Copyright (C) 2013 Intel Corporation. All rights reserved.
 + *
@@ -157741,7 +157805,7 @@ index 0000000000000000000000000000000000000000..c6141afb236c8b0b6b5be77830a52216
 +{
 +    if (m_presentationCallback)
 +        std::exchange(m_presentationCallback, { })();
-+    m_state->presentedDirectly = false;
++    bool wasPresentingDirectly = m_state->presentedDirectly.exchange(false);
 +    auto current = geometry();
 +    auto identifier = ++m_presentationIdentifier;
 +    if (m_state->closed || !current.visible || !m_state->presenter.publishShared(identifier, WTF::move(image), size, scale)) {
@@ -157750,7 +157814,16 @@ index 0000000000000000000000000000000000000000..c6141afb236c8b0b6b5be77830a52216
 +            drawn();
 +        return;
 +    }
-+    if (drawn) {
++    if (drawn && wasPresentingDirectly) {
++        // A page that puts its frames into the screen itself sends one
++        // through app_server now and then, for app_server's own copy. Its view
++        // does not draw then (on the laptop not once in thousands of such
++        // frames), so holding the web process until it did, or for the 100 ms
++        // below, stopped the page that long three or four times a second while
++        // it scrolled or animated. The swap chain's other buffer takes the next
++        // frame, so this one is not drawn into while the view might draw it.
++        RunLoop::mainSingleton().dispatch([drawn = WTF::move(drawn)]() mutable { drawn(); });
++    } else if (drawn) {
 +        m_presentationCallback = WTF::move(drawn);
 +        RunLoop::mainSingleton().dispatchAfter(100_ms, [protectedThis = Ref { *this }, identifier] {
 +            if (protectedThis->m_presentationIdentifier == identifier && protectedThis->m_presentationCallback)

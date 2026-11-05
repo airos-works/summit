@@ -13062,3 +13062,59 @@ same. Two causes:
   that update. On the laptop at 175 %, 0 of 6 such moves left a stale tile,
   against 8 of 9 before. `SUMMIT_UPLOAD_TRACE=1` lists the tiles left for
   later, `SUMMIT_EMPTY_TILE_TRACE=1` the tiles whose paint came out empty.
+
+## Heavy sites on the laptop: scroll stalls and memory after closing tabs (5 November 2026)
+
+Measured on the Framework 13 (Radeon 840M APU, 16 GB) with a test copy
+(fresh profile, `claude-summit/cl.sh`, MCP `frame_stats`/`processes`).
+
+### 100 ms stalls while scrolling or animating
+
+Every page, Wikipedia as much as The Verge, scrolled at 44-48 fps with three
+or four gaps of 101-104 ms in each second of a wheel burst. A page presenting
+straight into the screen still sends a frame through app_server about every
+250 ms while it keeps changing, for app_server's own copy of the window,
+because the laptop's amdgpu could not import that copy for the direct
+presents (`app_server's copy could not be imported (-4)`). The UI process
+held the web process until the view had drawn such a frame, with a 100 ms
+fallback. With the window presenting directly, the view never drew them (no
+`Draw()` in thousands of frames, not even when an uncovered part was exposed),
+so every one of those frames stopped the page for the whole 100 ms.
+`WebView::presentSharedFrameHaiku()` now lets the web process go on at once
+when the page was presenting directly (the swap chain's other buffer takes the
+next frame). Three bursts per site, before and after:
+
+| Site | Before | After |
+|---|---|---|
+| Wikipedia | 45-48 fps, 3-4 gaps of ~102 ms | 59 fps, at most one gap over 33 ms |
+| The Verge | 27-43 fps | 37-53 fps |
+| SMH | 38-48 fps | 41-53 fps |
+| Reddit | 35-44 fps | 39-55 fps |
+
+What is left on the heavy sites (gaps of 140-290 ms in some bursts) is the
+page's own work: JavaScript garbage collection (about a fifth of the
+samples), CPU tile painting and tile uploads.
+
+### Memory after closing many tabs
+
+Opening 14 heavy sites and closing 12 of them left 11 web processes and
+1.5-2.5 GB more in use for five minutes, back to the two-tab level only after
+seven: closed tabs' processes stay in the web process cache (one per 2 GB of
+RAM, at most 8, five minutes), and each kept 150-400 MiB (mostly mimalloc
+pages that come back slowly after the 30-second release) plus its GPU
+memory. Haiku can neither suspend nor compress them. Now:
+
+- cached processes are kept two minutes, not five (`WebProcessCache`);
+- once `SUMMIT_MEMORY_TIGHT_PERCENT` (70) of the RAM is in use, the web
+  process cache and the back/forward cache are emptied and nothing new is
+  kept while it stays so (`MemoryPressureMonitorHaiku`); live tabs are left
+  alone until memory pressure at 90% as before. 0 turns it off.
+
+Same test, before and after (system memory in use, YouTube + SMH baseline
+3.3-3.4 GB): three minutes after closing the 12 tabs, 4.59 GB before and
+3.27 GB after; before, it took seven minutes to get there (the 70% limit was
+not reached in this test, which peaked at 63%).
+
+The network process stays about 110 MiB larger after heavy browsing (113 MiB
+of it in libroot's malloc, which curl and OpenSSL use and which rarely
+returns memory). Not changed.
