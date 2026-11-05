@@ -86,11 +86,11 @@ the wpt log).
 - `--webkit-port=summit` sends `summit:browserOptions` (binary, args) and
   `acceptInsecureCerts`.
 - After connecting, the window is sized with `x399/size.sh` (Set Window Rect
-  is ignored, #187) and the runner reloaded so the viewport is 800x600 CSS
+  was ignored before the #187 fixes) and the runner reloaded so the viewport is 800x600 CSS
   pixels. The X399 runs at 2x, so WebDriver screenshots are 1600x1200; test
   and reference are taken the same way.
-- Closing a window waits up to 2 s for its handle to go (Close Window answers
-  early, #187).
+- Closing a window waits up to 2 s for its handle to go (Close Window answered
+  early before the #187 fixes). Both workarounds are kept for older builds.
 - `SUMMIT_SCREEN_SHOTS=1`: reftest pictures come from Summit's MCP
   `screenshot` (what the screen shows) instead of WebDriver, whose pictures
   leave out composited content (#186). Neither is perfect: compare both runs.

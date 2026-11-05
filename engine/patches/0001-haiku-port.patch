@@ -10877,10 +10877,10 @@ index 0000000000000000000000000000000000000000..48e19a5957df4c1ae60378dd9a84cbe4
 +/* Copyright (C) 2026 Summit contributors. SPDX-License-Identifier: BSD-2-Clause */
 +enum USBTransferStatus { "ok", "stall", "babble" };
 diff --git a/Source/WebCore/PlatformHaiku.cmake b/Source/WebCore/PlatformHaiku.cmake
-index 16a88804a1baa39ccdd9fc2870b6e2524d941298..3e50b832efa9b2cb3312426834e5d4a991da5abd 100644
+index 16a88804a1baa39ccdd9fc2870b6e2524d941298..9ba01693f7560d3533a6c42cdc6c9f84c01fc646 100644
 --- a/Source/WebCore/PlatformHaiku.cmake
 +++ b/Source/WebCore/PlatformHaiku.cmake
-@@ -1,52 +1,375 @@
+@@ -1,52 +1,376 @@
 +include(platform/Haiku.cmake)
  include(platform/ImageDecoders.cmake)
  include(platform/OpenSSL.cmake)
@@ -11170,6 +11170,7 @@ index 16a88804a1baa39ccdd9fc2870b6e2524d941298..3e50b832efa9b2cb3312426834e5d4a9
 +        platform/mediastream/haiku/HaikuCaptureNode.cpp
 +        platform/mediastream/haiku/HaikuCaptureSources.cpp
 +        platform/mediastream/haiku/MediaStreamTrackAudioSourceProviderHaiku.cpp
++        platform/mediastream/haiku/MockRealtimeSourcesHaiku.cpp
 +    )
 +    list(APPEND WebCore_PRIVATE_INCLUDE_DIRECTORIES
 +        "${WEBCORE_DIR}/platform/mediastream/haiku"
@@ -11262,7 +11263,7 @@ index 16a88804a1baa39ccdd9fc2870b6e2524d941298..3e50b832efa9b2cb3312426834e5d4a9
    textencoding
    translation
    ${WEBP_LIBRARIES}
-@@ -61,6 +384,244 @@ list(APPEND WebCore_SYSTEM_INCLUDE_DIRECTORIES
+@@ -61,6 +385,244 @@ list(APPEND WebCore_SYSTEM_INCLUDE_DIRECTORIES
    ${SQLITE_INCLUDE_DIR}
    ${WEBP_INCLUDE_DIRS}
    ${ZLIB_INCLUDE_DIRS}
@@ -54991,6 +54992,21 @@ index 74cfeb60ac3daa537785693be3917358aa26a2b5..88ff5686da7145336f8b00b868fb5b61
  }
  
  void FontCache::platformPurgeInactiveFontData()
+diff --git a/Source/WebCore/platform/graphics/skia/FontSkia.cpp b/Source/WebCore/platform/graphics/skia/FontSkia.cpp
+index a322e5f3f28177dbb62613a726a819d673e0927f..a52ace46086178dc8139ef569d9fd0687227101d 100644
+--- a/Source/WebCore/platform/graphics/skia/FontSkia.cpp
++++ b/Source/WebCore/platform/graphics/skia/FontSkia.cpp
+@@ -92,6 +92,10 @@ float Font::platformWidthForGlyph(Glyph glyph) const
+ 
+     if (!font.isSubpixel())
+         width = SkScalarRoundToInt(width);
++#if PLATFORM(HAIKU)
++    else if (auto* harfBuzzFont = m_platformData.skiaHarfBuzzFont())
++        width = harfBuzzFont->exactWidthHaiku(font, glyph, width);
++#endif
+ 
+     return SkScalarToFloat(width);
+ }
 diff --git a/Source/WebCore/platform/graphics/skia/GraphicsContextSkia.cpp b/Source/WebCore/platform/graphics/skia/GraphicsContextSkia.cpp
 index a3cb981bd76fc7f7946862f8f7be53fe133bae79..fbbeaba32188687e7a0dd06ec8401279e98cc7c7 100644
 --- a/Source/WebCore/platform/graphics/skia/GraphicsContextSkia.cpp
@@ -55873,6 +55889,88 @@ index 776466ea87d3d721d32ac4e52db702bb2b544e46..c97dea6bdef5117b4bb18225eb489ea9
      }
      return s_skiaGLContext->skiaGLContext();
  #else
+diff --git a/Source/WebCore/platform/graphics/skia/SkiaHarfBuzzFont.cpp b/Source/WebCore/platform/graphics/skia/SkiaHarfBuzzFont.cpp
+index daeed3e5dc0bf77c433fb0df23a09ecf4a677d10..b82600ddb9fc56c5f5a24efe5048378fed16107a 100644
+--- a/Source/WebCore/platform/graphics/skia/SkiaHarfBuzzFont.cpp
++++ b/Source/WebCore/platform/graphics/skia/SkiaHarfBuzzFont.cpp
+@@ -33,6 +33,7 @@
+ #include "NotImplemented.h"
+ #include "SkiaHarfBuzzFontCache.h"
+ #include <wtf/unicode/CharacterNames.h>
++#include <cmath>
+ 
+ WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_BEGIN
+ #include <skia/core/SkStream.h>
+@@ -194,11 +195,40 @@ std::optional<hb_codepoint_t> SkiaHarfBuzzFont::glyph(hb_codepoint_t unicode, st
+     return std::nullopt;
+ }
+ 
++#if PLATFORM(HAIKU)
++// FreeType scales design units by a 16.16 factor, rounded: Ahem (1000 units
++// to the em) at 10px comes out 9.99998px wide instead of 10, so four glyphs
++// end a LayoutUnit short of 40px and a box anchored to them lands on 39 (#190,
++// WebKitGTK too; CoreText's widths are exact). The parent font holds the
++// face at its own scale, with the typeface's variations, so its advance is
++// the design one. Only rounding noise is replaced: hinted widths and synthetic
++// bold keep Skia's.
++SkScalar SkiaHarfBuzzFont::exactWidthHaiku(const SkFont& font, hb_codepoint_t glyph, SkScalar width) const
++{
++    if (!font.isLinearMetrics() || font.isEmbolden())
++        return width;
++    auto* parent = hb_font_get_parent(m_font.get());
++    int xScale = 0;
++    int yScale = 0;
++    hb_font_get_scale(parent, &xScale, &yScale);
++    if (xScale <= 0)
++        return width;
++    double exact = static_cast<double>(hb_font_get_glyph_h_advance(parent, glyph)) * font.getSize() * font.getScaleX() / xScale;
++    if (std::abs(exact - width) > 1e-4 * (std::abs(width) + 1))
++        return width;
++    return static_cast<SkScalar>(exact);
++}
++#endif
++
+ hb_position_t SkiaHarfBuzzFont::glyphWidth(hb_codepoint_t glyph)
+ {
+     SkScalar width = m_scaledFont.getWidth(glyph);
+     if (!m_scaledFont.isSubpixel())
+         width = SkScalarRoundToInt(width);
++#if PLATFORM(HAIKU)
++    else
++        width = exactWidthHaiku(m_scaledFont, glyph, width);
++#endif
+     return skScalarToHarfBuzzPosition(width);
+ }
+ 
+@@ -218,6 +248,12 @@ void SkiaHarfBuzzFont::glyphWidths(unsigned count, const hb_codepoint_t* glyphs,
+         for (unsigned i = 0; i < count; ++i)
+             widths[i] = SkScalarRoundToInt(widths[i]);
+     }
++#if PLATFORM(HAIKU)
++    else {
++        for (unsigned i = 0; i < count; ++i)
++            widths[i] = exactWidthHaiku(m_scaledFont, skGlyphs[i], widths[i]);
++    }
++#endif
+ 
+     for (unsigned i = 0; i < count; ++i) {
+         *advances = skScalarToHarfBuzzPosition(widths[i]);
+diff --git a/Source/WebCore/platform/graphics/skia/SkiaHarfBuzzFont.h b/Source/WebCore/platform/graphics/skia/SkiaHarfBuzzFont.h
+index c2d6ac748ed19ad7daf8887b9678a32eef10e3f5..e1edefcf3bb920ab49e1bd244577ff75e1c288ac 100644
+--- a/Source/WebCore/platform/graphics/skia/SkiaHarfBuzzFont.h
++++ b/Source/WebCore/platform/graphics/skia/SkiaHarfBuzzFont.h
+@@ -49,6 +49,11 @@ public:
+     hb_position_t glyphWidth(hb_codepoint_t);
+     void glyphWidths(unsigned count, const hb_codepoint_t* glyphs, unsigned glyphStride, hb_position_t* advances, unsigned advanceStride);
+     void glyphExtents(hb_codepoint_t, hb_glyph_extents_t*);
++#if PLATFORM(HAIKU)
++    // A subpixel font's glyph width, Skia's width without FreeType's scale
++    // rounding.
++    SkScalar exactWidthHaiku(const SkFont&, hb_codepoint_t, SkScalar width) const;
++#endif
+ 
+     bool isColorBitmapFont() const { return m_isColorBitmapFont; }
+ 
 diff --git a/Source/WebCore/platform/graphics/skia/SkiaPaintingEngine.cpp b/Source/WebCore/platform/graphics/skia/SkiaPaintingEngine.cpp
 index ffcff7e0b02bdf8599d7b8f245f3323f2f2743cd..ac94d218d9aa37dab4cea78e179a276c62e7dea8 100644
 --- a/Source/WebCore/platform/graphics/skia/SkiaPaintingEngine.cpp
@@ -72293,6 +72391,199 @@ index 0000000000000000000000000000000000000000..b391a82343d60fbca362c2f1705b0a21
 +} // namespace WebCore
 +
 +#endif
+diff --git a/Source/WebCore/platform/mediastream/haiku/MockRealtimeSourcesHaiku.cpp b/Source/WebCore/platform/mediastream/haiku/MockRealtimeSourcesHaiku.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..bbe07a4df44dd918d4542c9d556f730f85997acd
+--- /dev/null
++++ b/Source/WebCore/platform/mediastream/haiku/MockRealtimeSourcesHaiku.cpp
+@@ -0,0 +1,187 @@
++/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
++
++// WebKit's mock camera and microphone for Haiku: the shared mock sources draw
++// their picture and timing, these hand it on as Haiku video frames and
++// interleaved float samples. WebDriver sessions capture from them (the
++// MockCaptureDevicesEnabled preference), so capture tests do not depend on
++// the machine's devices (#188).
++
++#include "config.h"
++
++#if ENABLE(MEDIA_STREAM) && PLATFORM(HAIKU)
++
++#include "HaikuAudioData.h"
++#include "ImageBuffer.h"
++#include "MediaConstraints.h"
++#include "MockRealtimeAudioSource.h"
++#include "MockRealtimeMediaSourceCenter.h"
++#include "MockRealtimeVideoSource.h"
++#include "PixelBuffer.h"
++#include "VideoFrameHaiku.h"
++#include <cmath>
++#include <numbers>
++#include <wtf/MonotonicTime.h>
++
++WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_BEGIN
++#include <libyuv.h>
++WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_END
++
++namespace WebCore {
++
++class MockRealtimeVideoSourceHaiku final : public MockRealtimeVideoSource {
++public:
++    static Ref<MockRealtimeVideoSourceHaiku> create(String&& deviceID, AtomString&& name, MediaDeviceHashSalts&& hashSalts, std::optional<PageIdentifier> pageIdentifier)
++    {
++        return adoptRef(*new MockRealtimeVideoSourceHaiku(WTF::move(deviceID), WTF::move(name), WTF::move(hashSalts), pageIdentifier));
++    }
++
++private:
++    MockRealtimeVideoSourceHaiku(String&& deviceID, AtomString&& name, MediaDeviceHashSalts&& hashSalts, std::optional<PageIdentifier> pageIdentifier)
++        : MockRealtimeVideoSource(WTF::move(deviceID), WTF::move(name), WTF::move(hashSalts), pageIdentifier)
++    {
++    }
++
++    // On the source's frame thread, with the picture just drawn.
++    void updateSampleBuffer() final
++    {
++        RefPtr imageBuffer = imageBufferInternal();
++        if (!imageBuffer)
++            return;
++        auto size = imageBuffer->truncatedLogicalSize();
++        if (size.isEmpty())
++            return;
++        auto pixels = imageBuffer->getPixelBuffer({ AlphaPremultiplication::Premultiplied, PixelFormat::BGRA8, ColorSpace::SRGB() }, { { }, size });
++        if (!pixels)
++            return;
++
++        auto time = MediaTime::createWithDouble(MonotonicTime::now().secondsSinceEpoch().value());
++        auto frame = VideoFrameHaiku::create(VideoFrameHaiku::Format::I420, size, time, false, videoFrameRotation());
++        auto& y = frame->plane(0);
++        auto& u = frame->plane(1);
++        auto& v = frame->plane(2);
++        // libyuv's ARGB is B, G, R, A in memory.
++        if (libyuv::ARGBToI420(pixels->bytes().data(), 4 * size.width(), y.data, y.stride, u.data, u.stride, v.data, v.stride, size.width(), size.height()))
++            return;
++        dispatchVideoFrameToObservers(frame.get(), { });
++    }
++};
++
++CaptureSourceOrError MockRealtimeVideoSource::create(String&& deviceID, AtomString&& name, MediaDeviceHashSalts&& hashSalts, const MediaConstraints* constraints, std::optional<PageIdentifier> pageIdentifier)
++{
++    if (!MockRealtimeMediaSourceCenter::mockDeviceWithPersistentID(deviceID))
++        return CaptureSourceOrError({ "No mock camera device"_s, MediaAccessDenialReason::PermissionDenied });
++
++    Ref<RealtimeMediaSource> source = MockRealtimeVideoSourceHaiku::create(WTF::move(deviceID), WTF::move(name), WTF::move(hashSalts), pageIdentifier);
++    if (constraints) {
++        if (auto error = source->applyConstraints(*constraints))
++            return CaptureSourceOrError(CaptureSourceError { error->invalidConstraint });
++    }
++    return source;
++}
++
++// A bip and a bop a second apart over a quiet hum, as the other ports' mock
++// microphones play, mono.
++class MockRealtimeAudioSourceHaiku final : public MockRealtimeAudioSource {
++public:
++    static Ref<MockRealtimeAudioSourceHaiku> create(String&& deviceID, AtomString&& name, MediaDeviceHashSalts&& hashSalts, std::optional<PageIdentifier> pageIdentifier)
++    {
++        return adoptRef(*new MockRealtimeAudioSourceHaiku(WTF::move(deviceID), WTF::move(name), WTF::move(hashSalts), pageIdentifier));
++    }
++
++private:
++    MockRealtimeAudioSourceHaiku(String&& deviceID, AtomString&& name, MediaDeviceHashSalts&& hashSalts, std::optional<PageIdentifier> pageIdentifier)
++        : MockRealtimeAudioSource(WTF::move(deviceID), WTF::move(name), WTF::move(hashSalts), pageIdentifier)
++    {
++    }
++
++    static constexpr double bipBopDuration = 0.07;
++    static constexpr double bipBopVolume = 0.5;
++    static constexpr double bipFrequency = 1500;
++    static constexpr double bopFrequency = 500;
++    static constexpr double humFrequency = 150;
++    static constexpr double humVolume = 0.1;
++    static constexpr double noiseFrequency = 3000;
++    static constexpr double noiseVolume = 0.05;
++
++    static void addTone(double amplitude, double frequency, double rate, uint64_t start, std::span<float> destination)
++    {
++        double step = 2 * std::numbers::pi * frequency / rate;
++        for (size_t i = 0; i < destination.size(); ++i)
++            destination[i] += amplitude * std::sin((start + i) * step);
++    }
++
++    void settingsDidChange(OptionSet<RealtimeMediaSourceSettings::Flag> flags) final
++    {
++        MockRealtimeAudioSource::settingsDidChange(flags);
++        reconfigure();
++    }
++
++    void reconfigure()
++    {
++        double rate = sampleRate();
++        if (rate <= 0)
++            return;
++        m_rate = rate;
++        size_t count = 2 * rate;
++        m_bipBop.fill(0, count);
++        size_t toneCount = std::min<size_t>(std::ceil(bipBopDuration * rate), static_cast<size_t>(rate));
++        addTone(bipBopVolume, bipFrequency, rate, 0, m_bipBop.mutableSpan().first(toneCount));
++        addTone(bipBopVolume, bopFrequency, rate, 0, m_bipBop.mutableSpan().subspan(static_cast<size_t>(rate), toneCount));
++        if (!echoCancellation())
++            addTone(noiseVolume, noiseFrequency, rate, 0, m_bipBop.mutableSpan());
++    }
++
++    // On the main thread, every renderInterval().
++    void render(Seconds delta) final
++    {
++        if (m_bipBop.isEmpty() || m_rate != sampleRate())
++            reconfigure();
++        if (m_bipBop.isEmpty() || !isProducingData())
++            return;
++
++        size_t frames = std::lround(delta.seconds() * m_rate);
++        if (!frames)
++            return;
++        m_samples.resize(frames * m_channelCount);
++        m_mono.fill(0.f, frames);
++        auto mono = m_mono.mutableSpan();
++        if (!muted()) {
++            for (size_t i = 0; i < frames; ++i)
++                mono[i] = m_bipBop[(m_framesRendered + i) % m_bipBop.size()];
++            addTone(humVolume, humFrequency, m_rate, m_framesRendered, mono);
++        }
++        for (size_t i = 0; i < frames; ++i) {
++            for (unsigned channel = 0; channel < m_channelCount; ++channel)
++                m_samples[i * m_channelCount + channel] = mono[i];
++        }
++
++        auto time = MediaTime(m_framesRendered * 1000000 / uint64_t(m_rate), 1000000);
++        m_framesRendered += frames;
++        HaikuAudioData data(m_samples.span(), m_channelCount);
++        HaikuAudioStreamDescription description(m_rate, m_channelCount);
++        audioSamplesAvailable(time, data, description, frames);
++    }
++
++    Vector<float> m_bipBop;
++    Vector<float> m_samples;
++    Vector<float> m_mono;
++    double m_rate { 0 };
++    uint64_t m_framesRendered { 0 };
++};
++
++CaptureSourceOrError MockRealtimeAudioSource::create(String&& deviceID, AtomString&& name, MediaDeviceHashSalts&& hashSalts, const MediaConstraints* constraints, std::optional<PageIdentifier> pageIdentifier)
++{
++    if (!MockRealtimeMediaSourceCenter::mockDeviceWithPersistentID(deviceID))
++        return CaptureSourceOrError({ "No mock microphone device"_s, MediaAccessDenialReason::PermissionDenied });
++
++    Ref<RealtimeMediaSource> source = MockRealtimeAudioSourceHaiku::create(WTF::move(deviceID), WTF::move(name), WTF::move(hashSalts), pageIdentifier);
++    if (constraints) {
++        if (auto error = source->applyConstraints(*constraints))
++            return CaptureSourceOrError(CaptureSourceError { error->invalidConstraint });
++    }
++    return source;
++}
++
++} // namespace WebCore
++
++#endif // ENABLE(MEDIA_STREAM) && PLATFORM(HAIKU)
 diff --git a/Source/WebCore/platform/mediastream/libwebrtc/haiku/LibWebRTCH264DecoderHaiku.cpp b/Source/WebCore/platform/mediastream/libwebrtc/haiku/LibWebRTCH264DecoderHaiku.cpp
 new file mode 100644
 index 0000000000000000000000000000000000000000..d437b70841446770f6e9c8a35fc339b0ee9075cd
@@ -74302,40 +74593,28 @@ index 0000000000000000000000000000000000000000..9fb270264e381a79396b53a577bdfa1f
 +
 +#endif // ENABLE(WEB_CODECS) && USE(LIBWEBRTC) && PLATFORM(HAIKU)
 diff --git a/Source/WebCore/platform/mock/MockRealtimeAudioSource.cpp b/Source/WebCore/platform/mock/MockRealtimeAudioSource.cpp
-index cca01352478b8a8c8469c3894f53f1d6dc44982f..c9dcb540876c4f5f6e6e96ae60a7bb5e7141d9ea 100644
+index cca01352478b8a8c8469c3894f53f1d6dc44982f..b6065f5179f10824ba41585cbea999c7db4d08db 100644
 --- a/Source/WebCore/platform/mock/MockRealtimeAudioSource.cpp
 +++ b/Source/WebCore/platform/mock/MockRealtimeAudioSource.cpp
-@@ -52,7 +52,13 @@
+@@ -52,7 +52,7 @@
  
  namespace WebCore {
  
 -#if !PLATFORM(MAC) && !PLATFORM(IOS_FAMILY) && !USE(GSTREAMER)
-+#if PLATFORM(HAIKU)
-+// The mock sources render per platform; Haiku has none.
-+CaptureSourceOrError MockRealtimeAudioSource::create(String&&, AtomString&&, MediaDeviceHashSalts&&, const MediaConstraints*, std::optional<PageIdentifier>)
-+{
-+    return CaptureSourceOrError({ "Mock capture is not available"_s, MediaAccessDenialReason::HardwareError });
-+}
-+#elif !PLATFORM(MAC) && !PLATFORM(IOS_FAMILY) && !USE(GSTREAMER)
++#if !PLATFORM(MAC) && !PLATFORM(IOS_FAMILY) && !USE(GSTREAMER) && !PLATFORM(HAIKU)
  CaptureSourceOrError MockRealtimeAudioSource::create(String&& deviceID, String&& name, MediaDeviceHashSalts&& hashSalts, const MediaConstraints* constraints, std::optional<PageIdentifier>)
  {
  #ifndef NDEBUG
 diff --git a/Source/WebCore/platform/mock/MockRealtimeVideoSource.cpp b/Source/WebCore/platform/mock/MockRealtimeVideoSource.cpp
-index e0f2bdb231dafa06f6794fc560386e6ae440766f..a83cec33717df8e90159333df206ea27b28cdf80 100644
+index e0f2bdb231dafa06f6794fc560386e6ae440766f..f231cee21e2e5f14512f5d7227112ec1a97d577c 100644
 --- a/Source/WebCore/platform/mock/MockRealtimeVideoSource.cpp
 +++ b/Source/WebCore/platform/mock/MockRealtimeVideoSource.cpp
-@@ -60,7 +60,13 @@
+@@ -60,7 +60,7 @@
  
  namespace WebCore {
  
 -#if !PLATFORM(MAC) && !PLATFORM(IOS_FAMILY) && !USE(GSTREAMER)
-+#if PLATFORM(HAIKU)
-+// The mock sources render per platform; Haiku has none.
-+CaptureSourceOrError MockRealtimeVideoSource::create(String&&, AtomString&&, MediaDeviceHashSalts&&, const MediaConstraints*, std::optional<PageIdentifier>)
-+{
-+    return CaptureSourceOrError({ "Mock capture is not available"_s, MediaAccessDenialReason::HardwareError });
-+}
-+#elif !PLATFORM(MAC) && !PLATFORM(IOS_FAMILY) && !USE(GSTREAMER)
++#if !PLATFORM(MAC) && !PLATFORM(IOS_FAMILY) && !USE(GSTREAMER) && !PLATFORM(HAIKU)
  CaptureSourceOrError MockRealtimeVideoSource::create(String&& deviceID, AtomString&& name, MediaDeviceHashSalts&& hashSalts, const MediaConstraints* constraints, std::optional<PageIdentifier> pageIdentifier)
  {
  #ifndef NDEBUG
@@ -88270,6 +88549,26 @@ index 0000000000000000000000000000000000000000..f32a1c303300b70614a2b227d27dc96e
 +    be
 +    network
 +)
+diff --git a/Source/WebDriver/Session.cpp b/Source/WebDriver/Session.cpp
+index 950353c0d08c2b76cd70b754e719d8c4b8009d28..1de9292e41ea4d30ae5fe51b31c82ac92a026d55 100644
+--- a/Source/WebDriver/Session.cpp
++++ b/Source/WebDriver/Session.cpp
+@@ -2400,6 +2400,15 @@ void Session::elementSendKeys(const String& elementID, const String& text, Funct
+                     "function focus(element) {"
+                     "    let doc = element.ownerDocument || element;"
+                     "    let prevActiveElement = doc.activeElement;"
++#if PLATFORM(HAIKU)
++                    // Keys sent to the body go to the element that has focus,
++                    // as in Safari: test_driver.send_keys(document.body, Tab)
++                    // tabs on from the focused button (Summit #187). Keys sent
++                    // to the root element still blur it first (dialog
++                    // close-request tests rely on that).
++                    "    if (element === doc.body && prevActiveElement && prevActiveElement !== doc.body)"
++                    "        return;"
++#endif
+                     "    let elementRootNode = element.getRootNode();"
+                     "    if (elementRootNode.activeElement !== element && prevActiveElement)"
+                     "        prevActiveElement.blur();"
 diff --git a/Source/WebDriver/SessionHost.h b/Source/WebDriver/SessionHost.h
 index 464e50d5a70645d78b8316b42cc37c4a0e84dc50..96f7dfadb76922b64235c7db6e2065d133e2a40f 100644
 --- a/Source/WebDriver/SessionHost.h
@@ -88419,6 +88718,42 @@ index 0000000000000000000000000000000000000000..a76bf51c195cde1e861efeaad8c358cf
 +}
 +
 +} // namespace WebDriver
+diff --git a/Source/WebDriver/socket/HTTPServerSocket.cpp b/Source/WebDriver/socket/HTTPServerSocket.cpp
+index 72eb32d94bbde5141f4fa532ddd9dd10762c3f3a..a6dd2b11d95161205e5e1772bda761a46687dcd4 100644
+--- a/Source/WebDriver/socket/HTTPServerSocket.cpp
++++ b/Source/WebDriver/socket/HTTPServerSocket.cpp
+@@ -106,8 +106,15 @@ void HTTPRequestHandler::didReceive(RemoteInspectorSocketEndpoint&, ConnectionID
+ 
+ void HTTPRequestHandler::sendResponse(HTTPRequestHandler::Response&& response)
+ {
++    // The client may have closed its connection before the answer was ready
++    // (a harness that gave up on a command): drop the answer instead of
++    // aborting on the empty optional, which took the whole driver down.
++    if (!m_client) {
++        reset();
++        return;
++    }
+     auto& endpoint = RemoteInspectorSocketEndpoint::singleton();
+-    endpoint.send(m_client.value(), byteCast<uint8_t>(packHTTPMessage(WTF::move(response)).utf8().span()));
++    endpoint.send(*m_client, byteCast<uint8_t>(packHTTPMessage(WTF::move(response)).utf8().span()));
+     reset();
+ }
+ 
+@@ -132,8 +139,13 @@ String HTTPRequestHandler::packHTTPMessage(HTTPRequestHandler::Response&& respon
+     return builder.toString();
+ }
+ 
+-void HTTPRequestHandler::didClose(RemoteInspectorSocketEndpoint&, ConnectionID)
++void HTTPRequestHandler::didClose(RemoteInspectorSocketEndpoint&, ConnectionID id)
+ {
++    // Each answer closes its connection (HTTP/1.0), and that close can come
++    // in after the next request's connection was accepted: only forget the
++    // client the close is about, or the next answer has nowhere to go.
++    if (m_client != id)
++        return;
+     m_client = std::nullopt;
+     reset();
+ }
 diff --git a/Source/WebDriver/socket/SessionHostSocket.cpp b/Source/WebDriver/socket/SessionHostSocket.cpp
 index 169e503e5d426ce24125f743d85f104ae345341f..32d973315891708e55acebd1f9f9d3e12c21befe 100644
 --- a/Source/WebDriver/socket/SessionHostSocket.cpp
@@ -107982,10 +108317,10 @@ index 0000000000000000000000000000000000000000..d28a6cad6339adf79b155cf974e85bfd
 +
 diff --git a/Source/WebKit/UIProcess/API/haiku/WebKitView.cpp b/Source/WebKit/UIProcess/API/haiku/WebKitView.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..644e5ae9fa00cd4fb73c8a7deef44b106416d484
+index 0000000000000000000000000000000000000000..aa0155a5c0c287bf80126c896553222515d058e8
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/API/haiku/WebKitView.cpp
-@@ -0,0 +1,1559 @@
+@@ -0,0 +1,1573 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#include "config.h"
@@ -108401,11 +108736,13 @@ index 0000000000000000000000000000000000000000..644e5ae9fa00cd4fb73c8a7deef44b10
 +// Window thread: the view's frame and visibility as the direct window needs them.
 +static void noteDirectViewHaiku(BWebKitView& view, const std::shared_ptr<WebKit::WebViewStateHaiku>& state, bool attached)
 +{
-+    // A WebDriver-controlled page presents through the view, which keeps its
-+    // last frame: WebDriver's screenshots are that frame (#186).
-+    if (!directPresentEnabledHaiku() || state->automated)
++    if (!directPresentEnabledHaiku())
 +        return;
-+    BWindow* window = attached ? view.Window() : nullptr;
++    // A WebDriver-controlled page presents through the view, which keeps its
++    // last frame: WebDriver's screenshots are that frame (#186). A view that
++    // presented directly before its page became controlled stops, as if
++    // detached.
++    BWindow* window = attached && !state->automated ? view.Window() : nullptr;
 +    BRect frame;
 +    bool visible = false;
 +    if (window) {
@@ -109455,6 +109792,18 @@ index 0000000000000000000000000000000000000000..644e5ae9fa00cd4fb73c8a7deef44b10
 +    case B_CUT: case B_COPY: case B_PASTE: case B_SELECT_ALL: case B_UNDO: case B_REDO:
 +        ExecuteEditCommand(message->what);
 +        return;
++    case WebKit::viewAutomatedHaiku:
++        UpdateGeometry();
++        return;
++    case WebKit::viewSetWindowFrameHaiku: {
++        BRect frame;
++        if (auto* window = Window(); window && message->FindRect("frame", &frame) == B_OK && frame.IsValid()) {
++            window->MoveTo(frame.LeftTop());
++            window->ResizeTo(frame.Width(), frame.Height());
++            UpdateGeometry();
++        }
++        return;
++    }
 +    case WebKit::viewDirectExposedHaiku: {
 +        m_state->directExposurePending = false;
 +        // app_server handles the end of the update before this.
@@ -111627,7 +111976,7 @@ index 0000000000000000000000000000000000000000..76c801492fff9daa106e386dcfeb1ae1
 +};
 +
 diff --git a/Source/WebKit/UIProcess/Automation/WebAutomationSession.cpp b/Source/WebKit/UIProcess/Automation/WebAutomationSession.cpp
-index 599cc694a716da0c05e7104be0ec919146f99913..a6421ce0d20f4da796c5fba4f68bcd88ebf19ec8 100644
+index 599cc694a716da0c05e7104be0ec919146f99913..2bf6d2fbb383673a8c2e10bb3fe3e2bbc2fa6ff2 100644
 --- a/Source/WebKit/UIProcess/Automation/WebAutomationSession.cpp
 +++ b/Source/WebKit/UIProcess/Automation/WebAutomationSession.cpp
 @@ -68,7 +68,7 @@
@@ -111639,7 +111988,74 @@ index 599cc694a716da0c05e7104be0ec919146f99913..a6421ce0d20f4da796c5fba4f68bcd88
  #include "VirtualAuthenticatorManager.h"
  #include <WebCore/AuthenticatorTransport.h>
  #endif
-@@ -2204,7 +2204,7 @@ CommandResult<void> WebAutomationSession::setSessionPermissions(Ref<JSON::Array>
+@@ -584,6 +584,23 @@ void WebAutomationSession::createBrowsingContext(std::optional<Inspector::Protoc
+     });
+ }
+ 
++#if PLATFORM(HAIKU)
++// The browser closes a window when its page asks to close, a moment after
++// closePage(): answer Close Window once the page is gone (or after two
++// seconds), so the handles the driver asks for next leave it out (#187).
++template<typename Callback>
++static void answerWhenPageClosedHaiku(WeakPtr<WebPageProxy> page, unsigned attempts, Callback&& callback)
++{
++    if (!page || page->isClosed() || !attempts) {
++        callback({ });
++        return;
++    }
++    RunLoop::mainSingleton().dispatchAfter(10_ms, [page = WTF::move(page), attempts, callback = WTF::move(callback)]() mutable {
++        answerWhenPageClosedHaiku(WTF::move(page), attempts - 1, WTF::move(callback));
++    });
++}
++#endif
++
+ void WebAutomationSession::closeBrowsingContext(const Inspector::Protocol::Automation::BrowsingContextHandle& handle, CommandCallback<void>&& callback)
+ {
+     auto page = webPageProxyForHandle(handle);
+@@ -591,9 +608,15 @@ void WebAutomationSession::closeBrowsingContext(const Inspector::Protocol::Autom
+ 
+     page->closePage();
+ 
++#if PLATFORM(HAIKU)
++    RunLoop::mainSingleton().dispatch([page = WeakPtr { *page }, callback = WTF::move(callback)]() mutable {
++        answerWhenPageClosedHaiku(WTF::move(page), 200, WTF::move(callback));
++    });
++#else
+     RunLoop::mainSingleton().dispatch([callback = WTF::move(callback)] {
+         callback({ });
+     });
++#endif
+ }
+ 
+ CommandResult<void> WebAutomationSession::deleteSession()
+@@ -649,6 +672,10 @@ void WebAutomationSession::switchToBrowsingContext(const Inspector::Protocol::Au
+     });
+ }
+ 
++#if PLATFORM(HAIKU)
++void setAutomationWindowFrameHaiku(WebPageProxy&, const WebCore::FloatRect&);
++#endif
++
+ void WebAutomationSession::setWindowFrameOfBrowsingContext(const Inspector::Protocol::Automation::BrowsingContextHandle& handle, RefPtr<JSON::Object>&& origin, RefPtr<JSON::Object>&& size, CommandCallback<void>&& callback)
+ {
+     std::optional<double> x;
+@@ -680,8 +707,14 @@ void WebAutomationSession::setWindowFrameOfBrowsingContext(const Inspector::Prot
+             auto& webPage = *page;
+             webPage.getWindowFrameWithCallback([callback = WTF::move(callback), page = protect(page), width, height, x, y](WebCore::FloatRect originalFrame) mutable {
+                 WebCore::FloatRect newFrame = WebCore::FloatRect(WebCore::FloatPoint(x.value_or(originalFrame.location().x()), y.value_or(originalFrame.location().y())), WebCore::FloatSize(width.value_or(originalFrame.size().width()), height.value_or(originalFrame.size().height())));
+-                if (newFrame != originalFrame)
++                if (newFrame != originalFrame) {
++#if PLATFORM(HAIKU)
++                    // Only WebDriver's own request moves the window (#187).
++                    setAutomationWindowFrameHaiku(*page, newFrame);
++#else
+                     page->setWindowFrame(newFrame);
++#endif
++                }
+ 
+                 callback({ });
+             });
+@@ -2204,7 +2237,7 @@ CommandResult<void> WebAutomationSession::setSessionPermissions(Ref<JSON::Array>
      return { };
  }
  
@@ -111648,7 +112064,7 @@ index 599cc694a716da0c05e7104be0ec919146f99913..a6421ce0d20f4da796c5fba4f68bcd88
  static WebCore::AuthenticatorTransport NODELETE toAuthenticatorTransport(Inspector::Protocol::Automation::AuthenticatorTransport transport)
  {
      switch (transport) {
-@@ -2225,7 +2225,7 @@ static WebCore::AuthenticatorTransport NODELETE toAuthenticatorTransport(Inspect
+@@ -2225,7 +2258,7 @@ static WebCore::AuthenticatorTransport NODELETE toAuthenticatorTransport(Inspect
  
  CommandResult<String /* authenticatorId */> WebAutomationSession::addVirtualAuthenticator(const String& browsingContextHandle, Ref<JSON::Object>&& authenticator)
  {
@@ -111657,7 +112073,7 @@ index 599cc694a716da0c05e7104be0ec919146f99913..a6421ce0d20f4da796c5fba4f68bcd88
      auto protocol = authenticator->getString("protocol"_s);
      SYNC_FAIL_WITH_PREDEFINED_ERROR_AND_DETAILS_IF(!protocol, InvalidParameter, "The parameter 'protocol' is missing or invalid."_s);
  
-@@ -2264,7 +2264,7 @@ CommandResult<String /* authenticatorId */> WebAutomationSession::addVirtualAuth
+@@ -2264,7 +2297,7 @@ CommandResult<String /* authenticatorId */> WebAutomationSession::addVirtualAuth
  
  CommandResult<void> WebAutomationSession::removeVirtualAuthenticator(const String& browsingContextHandle, const String& authenticatorId)
  {
@@ -111666,7 +112082,7 @@ index 599cc694a716da0c05e7104be0ec919146f99913..a6421ce0d20f4da796c5fba4f68bcd88
      auto page = webPageProxyForHandle(browsingContextHandle);
      SYNC_FAIL_WITH_PREDEFINED_ERROR_IF(!page, WindowNotFound);
  
-@@ -3131,6 +3131,10 @@ void WebAutomationSession::cancelInteractionSequence(const Inspector::Protocol::
+@@ -3131,6 +3164,10 @@ void WebAutomationSession::cancelInteractionSequence(const Inspector::Protocol::
  #endif // ENABLE(WEBDRIVER_ACTIONS_API)
  }
  
@@ -111677,7 +112093,7 @@ index 599cc694a716da0c05e7104be0ec919146f99913..a6421ce0d20f4da796c5fba4f68bcd88
  void WebAutomationSession::takeScreenshot(const Inspector::Protocol::Automation::BrowsingContextHandle& handle, const Inspector::Protocol::Automation::FrameHandle& frameHandle, const Inspector::Protocol::Automation::NodeHandle& nodeHandle, std::optional<bool>&& optionalScrollIntoViewIfNeeded, std::optional<bool>&& optionalClipToViewport, CommandCallback<String>&& callback)
  {
      auto page = webPageProxyForHandle(handle);
-@@ -3156,6 +3160,20 @@ void WebAutomationSession::takeScreenshot(const Inspector::Protocol::Automation:
+@@ -3156,6 +3193,20 @@ void WebAutomationSession::takeScreenshot(const Inspector::Protocol::Automation:
          } };
      };
  #endif
@@ -139647,7 +140063,7 @@ index 8842bc89df532e17b4b33db802e2ea5b6d2035ea..951e5f12d016232449caf48d42c936d2
      static bool spellingUIIsShowing();
      static void toggleSpellingUIIsShowing();
 diff --git a/Source/WebKit/UIProcess/UserMediaPermissionRequestManagerProxy.cpp b/Source/WebKit/UIProcess/UserMediaPermissionRequestManagerProxy.cpp
-index ed75cd4b36d92c580f0ad731f77ff6db6efebcef..2bb2c9b70ef9131558bdfb3b35b891eae1db3b95 100644
+index ed75cd4b36d92c580f0ad731f77ff6db6efebcef..23bcac32f305bfa7c78d2b044874870db8079176 100644
 --- a/Source/WebKit/UIProcess/UserMediaPermissionRequestManagerProxy.cpp
 +++ b/Source/WebKit/UIProcess/UserMediaPermissionRequestManagerProxy.cpp
 @@ -710,7 +710,7 @@ void UserMediaPermissionRequestManagerProxy::processUserMediaPermissionRequest()
@@ -139659,7 +140075,24 @@ index ed75cd4b36d92c580f0ad731f77ff6db6efebcef..2bb2c9b70ef9131558bdfb3b35b891ea
  void UserMediaPermissionRequestManagerProxy::validateUserMediaRequestConstraints(WebCore::RealtimeMediaSourceCenter::ValidateHandler&& validateHandler, MediaDeviceHashSalts&& deviceIDHashSalts)
  {
      RealtimeMediaSourceCenter::singleton().validateRequestConstraints(WTF::move(validateHandler), m_currentUserMediaRequest->userRequest(), WTF::move(deviceIDHashSalts));
-@@ -966,7 +966,7 @@ bool UserMediaPermissionRequestManagerProxy::wasGrantedVideoAccess(FrameIdentifi
+@@ -722,6 +722,16 @@ void UserMediaPermissionRequestManagerProxy::processUserMediaPermissionInvalidRe
+     ALWAYS_LOG(LOGIDENTIFIER, m_currentUserMediaRequest->userMediaID() ? m_currentUserMediaRequest->userMediaID()->toUInt64() : 0);
+     bool filterConstraint = !m_currentUserMediaRequest->hasPersistentAccess() && !wasGrantedVideoOrAudioAccess(m_currentUserMediaRequest->frameID());
+ 
++#if PLATFORM(HAIKU)
++    // No constraint failed: there is no device of the kind asked for, which is
++    // a NotFoundError (getUserMedia, "no sources"), not an OverconstrainedError
++    // naming no constraint (getUserMedia({video: true}) on a computer without
++    // a camera, #188).
++    if (invalidConstraint == MediaConstraintType::Unknown) {
++        denyRequest(protect(*m_currentUserMediaRequest), UserMediaPermissionRequestProxy::UserMediaAccessDenialReason::NoCaptureDevices, { });
++        return;
++    }
++#endif
+     denyRequest(protect(*m_currentUserMediaRequest), filterConstraint ? MediaConstraintType::Unknown : invalidConstraint);
+ }
+ 
+@@ -966,7 +976,7 @@ bool UserMediaPermissionRequestManagerProxy::wasGrantedVideoAccess(FrameIdentifi
      return m_grantedVideoFrames.contains(frameID);
  }
  
@@ -145383,10 +145816,10 @@ index 0000000000000000000000000000000000000000..8cfbb2ef9ab1590473ee5af50c1bd2eb
 +#endif // USE(COORDINATED_GRAPHICS)
 diff --git a/Source/WebKit/UIProcess/haiku/AutomationClientHaiku.cpp b/Source/WebKit/UIProcess/haiku/AutomationClientHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..e67f965d7a4b02ed577b8e05f3ff20c726b0db61
+index 0000000000000000000000000000000000000000..23549671bb87b2af4f1bb468da22f6196dcf8dc6
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/AutomationClientHaiku.cpp
-@@ -0,0 +1,238 @@
+@@ -0,0 +1,253 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#include "config.h"
@@ -145412,12 +145845,24 @@ index 0000000000000000000000000000000000000000..e67f965d7a4b02ed577b8e05f3ff20c7
 +// The broker's owner of automation requests; extensions use their load's.
 +static constexpr uint64_t automationCommandOwnerHaiku = std::numeric_limits<uint64_t>::max();
 +
++static bool s_acceptInsecureCertsHaiku;
++
++bool automationAcceptsInsecureCertsHaiku()
++{
++    ASSERT(isMainRunLoop());
++    return s_acceptInsecureCertsHaiku;
++}
++
 +// When the session ends its pages are ordinary tabs again.
 +static void releasePagesFromAutomationHaiku(WebProcessPool& processPool)
 +{
 +    for (auto& process : processPool.processes()) {
-+        for (auto& page : process->pages())
++        for (auto& page : process->pages()) {
++            if (!page->isControlledByAutomation())
++                continue;
 +            page->setControlledByAutomation(false);
++            markPageAutomatedHaiku(page.get(), false);
++        }
 +    }
 +}
 +
@@ -145469,6 +145914,7 @@ index 0000000000000000000000000000000000000000..e67f965d7a4b02ed577b8e05f3ff20c7
 +                return;
 +            }
 +            page->setControlledByAutomation(true);
++            markPageAutomatedHaiku(*page, true);
 +            completionHandler(page.get());
 +        });
 +    }
@@ -145598,12 +146044,13 @@ index 0000000000000000000000000000000000000000..e67f965d7a4b02ed577b8e05f3ff20c7
 +    Inspector::RemoteInspector::singleton().setClient(nullptr);
 +}
 +
-+void AutomationClientHaiku::requestAutomationSession(const String& sessionIdentifier, const Inspector::RemoteInspector::Client::SessionCapabilities&)
++void AutomationClientHaiku::requestAutomationSession(const String& sessionIdentifier, const Inspector::RemoteInspector::Client::SessionCapabilities& capabilities)
 +{
 +    ASSERT(isMainRunLoop());
 +    RefPtr processPool = m_processPool.get();
 +    if (!processPool)
 +        return;
++    s_acceptInsecureCertsHaiku = capabilities.acceptInsecureCertificates;
 +    auto session = adoptRef(new WebAutomationSession());
 +    session->setSessionIdentifier(sessionIdentifier);
 +    session->setClient(makeUnique<AutomationSessionClientHaiku>(sessionIdentifier, m_commands, m_tabs));
@@ -145618,6 +146065,7 @@ index 0000000000000000000000000000000000000000..e67f965d7a4b02ed577b8e05f3ff20c7
 +            return;
 +        pool->automationSession()->setClient(nullptr);
 +        pool->setAutomationSession(nullptr);
++        s_acceptInsecureCertsHaiku = false;
 +        releasePagesFromAutomationHaiku(*pool);
 +    });
 +}
@@ -153996,10 +154444,10 @@ index 0000000000000000000000000000000000000000..c9a119d02f85b7c5ad8fe9153bfc9604
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/WebView.cpp b/Source/WebKit/UIProcess/haiku/WebView.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..efe3d0c03cee8d19632ee5cb21935d8304876be0
+index 0000000000000000000000000000000000000000..60f3f82cac98299d461ec97217008ef78621a96f
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/WebView.cpp
-@@ -0,0 +1,3657 @@
+@@ -0,0 +1,3729 @@
 +/*
 + * Copyright (C) 2013 Intel Corporation. All rights reserved.
 + *
@@ -154797,7 +155245,7 @@ index 0000000000000000000000000000000000000000..efe3d0c03cee8d19632ee5cb21935d83
 +    // certificate it was. A server asking for a name and password asks the
 +    // host when it wants that (B_WEBKIT_AUTHENTICATION_REQUESTED). Every
 +    // other challenge keeps the default handling.
-+    void didReceiveAuthenticationChallenge(WebPageProxy&, AuthenticationChallengeProxy& challenge) override
++    void didReceiveAuthenticationChallenge(WebPageProxy& page, AuthenticationChallengeProxy& challenge) override
 +    {
 +        const auto& protectionSpace = challenge.core().protectionSpace();
 +        if (protectionSpace.authenticationScheme() != ProtectionSpace::AuthenticationScheme::ServerTrustEvaluationRequested) {
@@ -154807,8 +155255,15 @@ index 0000000000000000000000000000000000000000..efe3d0c03cee8d19632ee5cb21935d83
 +        }
 +        auto state = m_state.lock();
 +        auto certificate = describeCertificateHaiku(protectionSpace.host(), protectionSpace.certificateInfo());
-+        if (state && certificate && state->context
-+            && state->context->allowsServerCertificate(certificate->host, certificate->sha256)) {
++        // WebDriver's acceptInsecureCerts covers the session's pages (#187).
++#if ENABLE(REMOTE_INSPECTOR)
++        bool automationAccepts = page.isControlledByAutomation() && automationAcceptsInsecureCertsHaiku();
++#else
++        bool automationAccepts = false;
++        UNUSED_PARAM(page);
++#endif
++        if (automationAccepts || (state && certificate && state->context
++            && state->context->allowsServerCertificate(certificate->host, certificate->sha256))) {
 +            // The curl task restarts the request without verification when
 +            // given any non-empty credential for a server trust challenge.
 +            challenge.listener().completeChallenge(AuthenticationChallengeDisposition::UseCredential,
@@ -154970,6 +155425,10 @@ index 0000000000000000000000000000000000000000..efe3d0c03cee8d19632ee5cb21935d83
 +            if (auto value = state->context->sitePolicy("popups"_s, origin))
 +                popUps = *value > 0 ? WebsitePopUpPolicy::Allow : WebsitePopUpPolicy::Default;
 +        }
++        // WebDriver sessions' pages open pop-ups without a click, as Safari's
++        // do, so harnesses and tests that open windows do not stall (#187).
++        if (page.isControlledByAutomation() && action->targetFrame() && action->targetFrame()->isMainFrame())
++            popUps = WebsitePopUpPolicy::Allow;
 +        RefPtr<API::WebsitePolicies> policies;
 +        if (autoplay || popUps) {
 +            policies = page.configuration().defaultWebsitePolicies().copy();
@@ -155429,7 +155888,7 @@ index 0000000000000000000000000000000000000000..efe3d0c03cee8d19632ee5cb21935d83
 +        completion(FloatRect(frame));
 +    }
 +
-+    void createNewPage(WebPageProxy&, Ref<API::PageConfiguration>&& configuration, Ref<API::NavigationAction>&& action, CompletionHandler<void(RefPtr<WebPageProxy>&&)>&& completion) override
++    void createNewPage(WebPageProxy& page, Ref<API::PageConfiguration>&& configuration, Ref<API::NavigationAction>&& action, CompletionHandler<void(RefPtr<WebPageProxy>&&)>&& completion) override
 +    {
 +        auto state = m_state.lock();
 +        if (!m_hostsNewPages || !state || state->closed) {
@@ -155438,6 +155897,10 @@ index 0000000000000000000000000000000000000000..efe3d0c03cee8d19632ee5cb21935d83
 +            completion(nullptr);
 +            return;
 +        }
++        // A WebDriver-controlled page's pop-ups are the session's too, as the
++        // GTK port's related views are (#187).
++        if (page.isControlledByAutomation())
++            configuration->setControlledByAutomation(true);
 +        static uint64_t lastIdentifier;
 +        const uint64_t identifier = ++lastIdentifier;
 +        BMessage message(B_WEBKIT_NEW_PAGE_REQUESTED);
@@ -155884,6 +156347,59 @@ index 0000000000000000000000000000000000000000..efe3d0c03cee8d19632ee5cb21935d83
 +    return nullptr;
 +}
 +
++void markPageAutomatedHaiku(WebPageProxy& page, bool automated)
++{
++    ASSERT(RunLoop::isMain());
++#if ENABLE(MEDIA_STREAM)
++    // WebDriver sessions capture from WebKit's mock camera and microphone
++    // without asking, as Safari's and the GTK/WPE MiniBrowser's do, so capture
++    // tests do not depend on the machine's devices or a prompt (#188).
++    // Pages may share their configuration's preferences: change this one's.
++    if (page.preferences().mockCaptureDevicesEnabled() != automated) {
++        Ref preferences = page.preferences().copy();
++        preferences->setMockCaptureDevicesEnabled(automated);
++        preferences->setMockCaptureDevicesPromptEnabled(!automated);
++        page.setPreferences(preferences);
++    }
++#endif
++    for (auto* view : liveWebViewsHaiku()) {
++        if (view->page() != &page)
++            continue;
++        auto& state = view->stateHaiku();
++        if (state->automated.exchange(automated) == automated)
++            continue;
++        view->nativeView().SendMessage(viewAutomatedHaiku);
++    }
++}
++
++// WebDriver's Set Window Rect (#187), from WebAutomationSession only: a
++// page's own requests (window.resizeTo(), a new window's rect from
++// createWindow) keep their frame in the web process, as before. The frame is
++// the one the UI client's windowFrame() answers (the window's Frame(), a
++// pixel wider and taller since BRects are inclusive). It is answered at once;
++// the window follows.
++void setAutomationWindowFrameHaiku(WebPageProxy& page, const FloatRect& frame)
++{
++    ASSERT(RunLoop::isMain());
++    auto rect = roundedIntRect(frame);
++    if (rect.width() < 1 || rect.height() < 1)
++        return;
++    for (auto* view : liveWebViewsHaiku()) {
++        if (view->page() != &page)
++            continue;
++        auto& state = view->stateHaiku();
++        if (state->closed)
++            continue;
++        {
++            std::lock_guard guard(state->mutex);
++            state->geometry.windowFrame = rect;
++        }
++        BMessage message(viewSetWindowFrameHaiku);
++        message.AddRect("frame", BRect(rect.x(), rect.y(), rect.maxX() - 1, rect.maxY() - 1));
++        view->nativeView().SendMessage(&message, static_cast<BHandler*>(nullptr), 0);
++    }
++}
++
 +std::shared_ptr<const BitmapPresenterHaiku::Frame> presentedFrameForPageHaiku(const WebPageProxy& page)
 +{
 +    ASSERT(RunLoop::isMain());
@@ -156170,7 +156686,11 @@ index 0000000000000000000000000000000000000000..efe3d0c03cee8d19632ee5cb21935d83
 +    }
 +    auto& pool = configuration->processPool();
 +    m_page = pool.createWebPage(*this, configuration.releaseNonNull());
-+    m_state->automated = m_page->isControlledByAutomation();
++    // A WebDriver session's pop-up (createNewPage): automated from the start.
++    if (m_page->isControlledByAutomation()) {
++        m_state->automated = true;
++        markPageAutomatedHaiku(*m_page, true);
++    }
 +    if (initialSettings)
 +        applyPageSettingsHaiku(*m_page, *initialSettings);
 +    m_page->setUIClient(makeUnique<JavaScriptUIClientHaiku>(m_state, true));
@@ -158387,10 +158907,10 @@ index 0000000000000000000000000000000000000000..f712608b72b963631ade0ec62755598a
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/WebViewPrivate.h b/Source/WebKit/UIProcess/haiku/WebViewPrivate.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..6101fe65901016e63a97b1c8252920211369b7ac
+index 0000000000000000000000000000000000000000..430fec59d4c15986eb59b0843accbaacefad5983
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/WebViewPrivate.h
-@@ -0,0 +1,242 @@
+@@ -0,0 +1,250 @@
 +/*
 +   Copyright (C) 2014 Haiku, inc.
 +
@@ -158486,6 +159006,7 @@ index 0000000000000000000000000000000000000000..6101fe65901016e63a97b1c825292021
 +#endif
 +    // The frame the view shows now (device pixels), or null.
 +    std::shared_ptr<const BitmapPresenterHaiku::Frame> presentedFrameHaiku() const { return m_state->presenter.snapshot(); }
++    const std::shared_ptr<WebViewStateHaiku>& stateHaiku() const { return m_state; }
 +    // A frame the view draws straight from the web process's shared memory.
 +    // drawn, if given, runs once the view has drawn the frame (or could not,
 +    // or after a tenth of a second).
@@ -158631,14 +159152,21 @@ index 0000000000000000000000000000000000000000..6101fe65901016e63a97b1c825292021
 +// The last frame presented to the page's view (device pixels, composited
 +// layers included), or null. Main thread.
 +std::shared_ptr<const BitmapPresenterHaiku::Frame> presentedFrameForPageHaiku(const WebPageProxy&);
++// The page became (or stopped being) WebDriver-controlled
++// (AutomationClientHaiku): while it is, its view keeps its frames for
++// screenshots and it captures from mock devices. Main thread.
++void markPageAutomatedHaiku(WebPageProxy&, bool automated);
++// The WebDriver session asked for acceptInsecureCerts: its pages load from
++// servers whose certificates fail verification (#187). Main thread.
++bool automationAcceptsInsecureCertsHaiku();
 +
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/WebViewStateHaiku.h b/Source/WebKit/UIProcess/haiku/WebViewStateHaiku.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..a8774d7dd5978555186402705e8bf349aa35f02a
+index 0000000000000000000000000000000000000000..2401b519f23a4e001635f91e081e9a00bf213119
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/WebViewStateHaiku.h
-@@ -0,0 +1,268 @@
+@@ -0,0 +1,274 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#pragma once
@@ -158696,6 +159224,12 @@ index 0000000000000000000000000000000000000000..a8774d7dd5978555186402705e8bf349
 +    // over part of the page (BWebKitView::Draw); once it is done, present the
 +    // page again in full.
 +    viewDirectExposedHaiku = 'wvde',
++    // To the view itself: its page became WebDriver-controlled; look at its
++    // geometry again (which also takes it out of direct presenting).
++    viewAutomatedHaiku = 'wvau',
++    // To the view itself: move and resize its window to "frame" (a BRect in
++    // screen coordinates), for WebDriver's Set Window Rect (#187).
++    viewSetWindowFrameHaiku = 'wvsw',
 +    viewPreconnectHaiku = 'wvpc',
 +    viewFullScreenResultHaiku = 'wvfa', viewExitFullScreenHaiku = 'wvfx',
 +    // Pointer lock (Element.requestPointerLock): to the view, "locked"; to the

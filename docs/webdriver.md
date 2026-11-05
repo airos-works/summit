@@ -92,6 +92,45 @@ curl -s -XDELETE localhost:4444/session/$S
   nothing has been presented yet. Before, every screenshot was painted again
   in the web process, without composited layers: 126 view-transition
   reftests failed for that alone.
+- Camera and microphone (#188): a WebDriver-controlled page captures from
+  WebKit's mock devices without a prompt (`MockCaptureDevicesEnabled`, as
+  Safari's and the GTK/WPE MiniBrowser's sessions do), so capture tests do
+  not depend on the machine's devices. Haiku's mock camera draws the
+  standard mock picture into I420 frames and its mock microphone plays the
+  bip-bop (`MockRealtimeSourcesHaiku.cpp`); before, there were none, so
+  `getUserMedia` failed on a machine without a camera. When the session ends
+  its pages go back to real devices and direct presenting. The page is marked
+  after it is created (`markPageAutomatedHaiku`), since the browser makes it
+  through an ordinary new-window command. A request no device can satisfy
+  with no constraint at fault is now a `NotFoundError`, not an
+  `OverconstrainedError` naming no constraint.
+- Windows and pop-ups (#187):
+  - Set Window Rect moves and resizes the session's window
+    (`setAutomationWindowFrameHaiku`, the inverse of the UI client's
+    `windowFrame`: the window's `Frame()`, one pixel wider and taller). It
+    answers at once with the new rect, and the window follows. Only the
+    driver's command does this: the UI client still ignores `setWindowFrame`,
+    because WebCore's `createWindow` sets every new window's rect through it,
+    and a session's pop-ups were shrunk to 455x201 when it was honoured.
+  - Close Window answers once the page has closed (at most 2 s), because the
+    browser closes the window a moment after `closePage()`. Before, the
+    handles it returned still listed the closed window.
+  - Session pages open pop-ups without a click (the pop-up policy is Allow),
+    as Safari's do. A session page's pop-ups belong to the session: their
+    configuration is marked automated, as the GTK port's related views are.
+  - `acceptInsecureCerts` lets the session's pages accept server
+    certificates that fail verification.
+  - Summit started with `--automation` opens no window of its own; the session
+    opens them.
+  - The driver's HTTP server forgot its client when the previous
+    request's connection closed late (each answer closes its connection), so
+    the next answer aborted `WebKitWebDriver` on an empty optional (up to
+    three times in a full Interop run, each a CRASH result). It now forgets
+    only the connection that closed, and drops answers with no client.
+  - Element Send Keys to `<body>` keeps focus where it is when another
+    element has it, as Safari does (a Haiku change in
+    `Source/WebDriver/Session.cpp`). Keys sent to the root element still blur
+    the focused element first, which dialog close-request tests rely on.
 - The engine needs `ENABLE_WEBDRIVER=ON`, which also turns on WebDriver's
   mouse, keyboard and wheel interactions (Source/cmake/OptionsHaiku.cmake).
 

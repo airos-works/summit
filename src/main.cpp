@@ -376,8 +376,11 @@ public:
         // Reopen every window of the last session unless Preferences say to
         // start afresh; pages named at the start open beside them (#94).
         const auto saved = fShared->SavedWindows();
-        const bool restore = fRestoreAfterUpdate || fShared->Read([](const summit::Profile& profile) { return profile.restoreSession; });
-        if (!fPendingWebApps.empty() && fURLs.empty() && !fRestoreAfterUpdate) {
+        const bool restore = fAutomation.empty() && (fRestoreAfterUpdate || fShared->Read([](const summit::Profile& profile) { return profile.restoreSession; }));
+        if (!fAutomation.empty()) {
+            // Started by WebDriver: the session opens its own windows, as
+            // Safari's do; a Start Page beside them could take focus (#187).
+        } else if (!fPendingWebApps.empty() && fURLs.empty() && !fRestoreAfterUpdate) {
             // Started from a web app's launcher: just the app.
             for (const auto& app : std::exchange(fPendingWebApps, {})) OpenWebApp(app);
             if (fWindows.empty()) {
