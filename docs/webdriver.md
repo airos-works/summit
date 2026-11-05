@@ -120,6 +120,12 @@ curl -s -XDELETE localhost:4444/session/$S
     configuration is marked automated, as the GTK port's related views are.
   - `acceptInsecureCerts` lets the session's pages accept server
     certificates that fail verification.
+  - Minimize and restore (Set Window Rect restores first) answer once the
+    page has seen its visibility change, at most a second later (#183).
+  - Pop-up windows (`window.open()` with size features) may move and
+    resize themselves (`resizeTo()` and friends) through the UI client's
+    `setWindowFrame`, after WebCore has applied the features at creation;
+    tabs never can (#183).
   - Summit started with `--automation` opens no window of its own; the session
     opens them.
   - The driver's HTTP server forgot its client when the previous

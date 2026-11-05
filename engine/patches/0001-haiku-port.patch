@@ -15243,7 +15243,7 @@ index b7cc6b07caf172c2c167a081bd963c0c0a894842..1303442c7820d596d0253cd46eba6b70
  }
  
 diff --git a/Source/WebCore/dom/ViewTransition.cpp b/Source/WebCore/dom/ViewTransition.cpp
-index 0d080489846058c7981fd45c760edca8e7fb4880..061d3eebea9061e5c6c9a45278ae770059d5c864 100644
+index 0d080489846058c7981fd45c760edca8e7fb4880..002aec79d2731940a7b79516e6257d1b170cdb12 100644
 --- a/Source/WebCore/dom/ViewTransition.cpp
 +++ b/Source/WebCore/dom/ViewTransition.cpp
 @@ -72,6 +72,13 @@
@@ -15323,6 +15323,26 @@ index 0d080489846058c7981fd45c760edca8e7fb4880..061d3eebea9061e5c6c9a45278ae7700
      return buffer;
  }
  
+@@ -1118,8 +1163,19 @@ void ViewTransition::visibilityStateChanged()
+ 
+     Ref document = *this->document();
+     if (document->hidden()) {
++#if PLATFORM(HAIKU)
++        // The page-visibility steps fire visibilitychange before they skip
++        // the transition; Document queues that event as a task, so skip in
++        // the task after it (transition-in-hidden-page, #183).
++        document->eventLoop().queueTask(TaskSource::UserInteraction, [protectedThis = Ref { *this }] {
++            RefPtr document = protectedThis->document();
++            if (document && document->hidden() && document->activeViewTransition() == protectedThis.ptr())
++                protectedThis->skipViewTransition(Exception { ExceptionCode::InvalidStateError, "Skipping view transition because document visibility state has become hidden."_s });
++        });
++#else
+         if (document->activeViewTransition() == this)
+             skipViewTransition(Exception { ExceptionCode::InvalidStateError, "Skipping view transition because document visibility state has become hidden."_s });
++#endif
+     } else
+         ASSERT(!document->activeViewTransition());
+ }
 diff --git a/Source/WebCore/dom/make_names.pl b/Source/WebCore/dom/make_names.pl
 index 7f18cb986d1972948b04893b511de16598d7f103..68525703b1263997f5100c89a1c31dd939c8245f 100755
 --- a/Source/WebCore/dom/make_names.pl
@@ -18361,6 +18381,26 @@ index 7a100df953c393486f1ca28b3da8507ab505cf08..5ed82dff72b910fa49f63baadf18d590
  
  String CookieJar::cookies(Document& document, const URL& url) const
  {
+diff --git a/Source/WebCore/loader/DocumentLoader.cpp b/Source/WebCore/loader/DocumentLoader.cpp
+index 50f8f610e6235a2a32433752e016f06b904a86e6..6b3914664f0a2cb3c045ea8fdc2cf125e5737b62 100644
+--- a/Source/WebCore/loader/DocumentLoader.cpp
++++ b/Source/WebCore/loader/DocumentLoader.cpp
+@@ -689,6 +689,15 @@ void DocumentLoader::willSendRequest(ResourceRequest&& newRequest, const Resourc
+         DOCUMENTLOADER_RELEASE_LOG("willSendRequest: With no provisional document loader");
+ 
+     bool didReceiveRedirectResponse = !redirectResponse.isNull();
++#if PLATFORM(HAIKU)
++    // A redirect between origins makes the navigation ineligible for a
++    // cross-document view transition. Upstream learns it from the main
++    // response's load metrics, which the curl backend only has once the load
++    // finishes, so a same-origin page reached through a cross-origin redirect
++    // got a ViewTransition (#183).
++    if (didReceiveRedirectResponse && !SecurityOrigin::create(redirectResponse.url())->isSameOriginAs(SecurityOrigin::create(newRequest.url())))
++        m_hasCrossOriginRedirect = true;
++#endif
+     if (!protect(frameLoader())->checkIfFormActionAllowedByCSP(newRequest.url(), didReceiveRedirectResponse, redirectResponse.url())) {
+         DOCUMENTLOADER_RELEASE_LOG("willSendRequest: canceling - form action not allowed by CSP");
+         cancelMainResourceLoad(protect(frameLoader())->cancelledError(newRequest));
 diff --git a/Source/WebCore/loader/DocumentPrefetcher.cpp b/Source/WebCore/loader/DocumentPrefetcher.cpp
 index 3027c7ce0a06c8fe0d068392b52c16900e0e8d38..cbab75a06194251308afa5aab5cd21693a1ec132 100644
 --- a/Source/WebCore/loader/DocumentPrefetcher.cpp
@@ -19718,7 +19758,7 @@ index 0000000000000000000000000000000000000000..029cc6d2189f48e938cedd6235ae43a4
 +    [SecureContext] undefined unregisterProtocolHandler(DOMString scheme, USVString url);
 +};
 diff --git a/Source/WebCore/page/Page.cpp b/Source/WebCore/page/Page.cpp
-index 12c38036f87636c92b0cdde24c1ee546f36ac008..dc5f0681ab91675c7d39c5db7582f0ab0a06668f 100644
+index 12c38036f87636c92b0cdde24c1ee546f36ac008..7dbc2ddc2fc32c946b8dc365cdb6f886eb24a477 100644
 --- a/Source/WebCore/page/Page.cpp
 +++ b/Source/WebCore/page/Page.cpp
 @@ -91,6 +91,10 @@
@@ -19872,13 +19912,23 @@ index 12c38036f87636c92b0cdde24c1ee546f36ac008..dc5f0681ab91675c7d39c5db7582f0ab
  
  #if ENABLE(ASYNC_SCROLLING)
      if (RefPtr scrollingCoordinator = this->scrollingCoordinator())
-@@ -2492,37 +2595,45 @@ void Page::updateRendering()
+@@ -2492,37 +2595,55 @@ void Page::updateRendering()
          protect(document.window())->freezeNowTimestamp();
          initialDocuments.append(document);
      });
 +    SUMMIT_PAGE_UPDATE_TRACE_MARK(Prepare);
  
      runProcessingStep(RenderingUpdateStep::Reveal, [] (Document& document) {
++#if PLATFORM(HAIKU)
++        // An HTML document still parsing its head is render-blocked (it
++        // "allows adding render-blocking elements"), so it is not revealed
++        // yet: after a parser-blocking script in the head ran, the parser can
++        // yield before the next inline script sets onpagereveal, and a
++        // rendering update then fired pagereveal to no one (cross-document
++        // view-transition tests that load testharness.js first, #183).
++        if (document.parsing() && document.allowsAddingRenderBlockedElements())
++            return;
++#endif
          // FIXME: Bug 278193 - Hidden docs should already be excluded.
          if (document.visibilityState() != VisibilityState::Hidden)
              document.reveal();
@@ -19918,7 +19968,7 @@ index 12c38036f87636c92b0cdde24c1ee546f36ac008..dc5f0681ab91675c7d39c5db7582f0ab
  
  #if ENABLE(FULLSCREEN_API)
      runProcessingStep(RenderingUpdateStep::Fullscreen, [] (Document& document) {
-@@ -2531,35 +2642,42 @@ void Page::updateRendering()
+@@ -2531,35 +2652,42 @@ void Page::updateRendering()
  #else
      m_renderingUpdateRemainingSteps.last().remove(RenderingUpdateStep::Fullscreen);
  #endif
@@ -19962,7 +20012,7 @@ index 12c38036f87636c92b0cdde24c1ee546f36ac008..dc5f0681ab91675c7d39c5db7582f0ab
  
      runProcessingStep(RenderingUpdateStep::FocusFixup, [&] (Document& document) {
          if (RefPtr focusedElement = document.focusedElement()) {
-@@ -2569,18 +2687,22 @@ void Page::updateRendering()
+@@ -2569,18 +2697,22 @@ void Page::updateRendering()
              }
          }
      });
@@ -19985,7 +20035,7 @@ index 12c38036f87636c92b0cdde24c1ee546f36ac008..dc5f0681ab91675c7d39c5db7582f0ab
  
      runProcessingStep(RenderingUpdateStep::CanvasPaintEvent, [] (Document& document) {
          document.serviceCanvasPaintEvents();
-@@ -2592,16 +2714,19 @@ void Page::updateRendering()
+@@ -2592,16 +2724,19 @@ void Page::updateRendering()
                  page->isolatedUpdateRendering();
          }
      });
@@ -20005,7 +20055,7 @@ index 12c38036f87636c92b0cdde24c1ee546f36ac008..dc5f0681ab91675c7d39c5db7582f0ab
  
      for (auto& document : initialDocuments) {
          if (document && document->window())
-@@ -2615,14 +2740,22 @@ void Page::updateRendering()
+@@ -2615,14 +2750,22 @@ void Page::updateRendering()
  
      if (m_isTrackingRenderingUpdates)
          ++m_renderingUpdateCount;
@@ -20028,7 +20078,7 @@ index 12c38036f87636c92b0cdde24c1ee546f36ac008..dc5f0681ab91675c7d39c5db7582f0ab
  void Page::isolatedUpdateRendering()
  {
      LOG(EventLoop, "Page %p isolatedUpdateRendering()", this);
-@@ -2771,9 +2904,32 @@ void Page::finalizeRenderingUpdate(OptionSet<FinalizeRenderingUpdateFlags> flags
+@@ -2771,9 +2914,32 @@ void Page::finalizeRenderingUpdate(OptionSet<FinalizeRenderingUpdateFlags> flags
      renderingUpdateCompleted();
  }
  
@@ -20061,7 +20111,7 @@ index 12c38036f87636c92b0cdde24c1ee546f36ac008..dc5f0681ab91675c7d39c5db7582f0ab
  
      ASSERT(rootFrame.isRootFrame());
      ASSERT_WITH_MESSAGE(rootFrame.isMainFrame() || !rootFrame.document() || rootFrame.document()->backForwardCacheState() == Document::NotInBackForwardCache, "A cached local root must not stay in Page::rootFrames()");
-@@ -5213,6 +5369,20 @@ OptionSet<FilterRenderingMode> Page::preferredFilterRenderingModes(const Graphic
+@@ -5213,6 +5379,20 @@ OptionSet<FilterRenderingMode> Page::preferredFilterRenderingModes(const Graphic
          modes.add(FilterRenderingMode::Accelerated);
  #endif
  
@@ -85887,7 +85937,7 @@ index 4bd303aa17e5da8a780da294d7a1337b8978d6ea..f725a2e04a1a94b4af059db4abc884a6
          LayoutRect clipRect = clipRectRelativeToAncestor(clippingRootLayer, offsetFromRoot, infiniteRect);
          if (clipRect.isInfinite())
 diff --git a/Source/WebCore/rendering/RenderLayerBacking.cpp b/Source/WebCore/rendering/RenderLayerBacking.cpp
-index 95122a10cacc10b498c40d3447599bd2cd4d2795..68f56903208f829b1c03138dece2474e656412d4 100644
+index 95122a10cacc10b498c40d3447599bd2cd4d2795..eb6aa87c1d8ee8f6fb380994cbb58df8ec6226f0 100644
 --- a/Source/WebCore/rendering/RenderLayerBacking.cpp
 +++ b/Source/WebCore/rendering/RenderLayerBacking.cpp
 @@ -137,6 +137,14 @@
@@ -86143,6 +86193,18 @@ index 95122a10cacc10b498c40d3447599bd2cd4d2795..68f56903208f829b1c03138dece2474e
          if (RefPtr nativeImage = nativeImageForDirectlyCompositedImage(*image))
              m_graphicsLayer->setContentsToNativeImage(nativeImage.get());
  
+@@ -4133,7 +4323,11 @@ LayoutRect RenderLayerBacking::contentsBox() const
+ #endif
+ 
+     if (CheckedPtr renderViewTransitionCapture = dynamicDowncast<RenderViewTransitionCapture>(*renderBox))
++#if PLATFORM(HAIKU)
++        contentsRect = LayoutRect(renderViewTransitionCapture->snapshotImageRectHaiku()); // #195
++#else
+         contentsRect = renderViewTransitionCapture->captureLocalOverflowRect();
++#endif
+     else if (CheckedPtr renderReplaced = dynamicDowncast<RenderReplaced>(*renderBox); renderReplaced && !is<RenderWidget>(*renderReplaced))
+         contentsRect = renderReplaced->replacedContentRect();
+     else
 diff --git a/Source/WebCore/rendering/RenderLayerCompositor.cpp b/Source/WebCore/rendering/RenderLayerCompositor.cpp
 index 4bf8021fddeb356aa2f416e2b5c07aae6136387b..2d3bb774ef11e3a05725494bd7c4724911cabffd 100644
 --- a/Source/WebCore/rendering/RenderLayerCompositor.cpp
@@ -86543,7 +86605,7 @@ index 2b5c9f572f37b8ab7c61f5524e4a49d4a57976e4..402dd047e253d82dd66b0159c02c1ada
      // If the root is not composited, repainting this RenderView should repaint it and
      // its background. But if it's composited, then the background doesn't get repainted
 diff --git a/Source/WebCore/rendering/RenderViewTransitionCapture.cpp b/Source/WebCore/rendering/RenderViewTransitionCapture.cpp
-index c035714ac1ddea20f9ad5a61f12bf601a87c15ca..e74fe469cdb114ef08d60adcb533fa1aa4fef742 100644
+index c035714ac1ddea20f9ad5a61f12bf601a87c15ca..07b65ddef2739b7bd05b3d9595afa51d11afa7e2 100644
 --- a/Source/WebCore/rendering/RenderViewTransitionCapture.cpp
 +++ b/Source/WebCore/rendering/RenderViewTransitionCapture.cpp
 @@ -35,6 +35,10 @@
@@ -86590,7 +86652,48 @@ index c035714ac1ddea20f9ad5a61f12bf601a87c15ca..e74fe469cdb114ef08d60adcb533fa1a
      return !hasNonVisibleOverflow() && style().objectViewBox().isNone();
  }
  
-@@ -159,10 +187,14 @@ void RenderViewTransitionCapture::updateFromStyle()
+@@ -90,6 +118,26 @@ void RenderViewTransitionCapture::intrinsicSizeChanged()
+     setNeedsLayout();
+ }
+ 
++#if PLATFORM(HAIKU)
++FloatRect RenderViewTransitionCapture::snapshotImageRectHaiku() const
++{
++    FloatRect rect = m_localOverflowRect;
++    RefPtr image = m_oldImage;
++    if (!image)
++        return rect;
++    // The snapshot painted enclosingIntRect(overflow rect): its origin is the
++    // overflow rect's, floored, and its size whole CSS pixels.
++    FloatRect overflow = m_overflowRect;
++    FloatSize inset { overflow.x() - std::floor(overflow.x()), overflow.y() - std::floor(overflow.y()) };
++    inset.scale(m_scale.width(), m_scale.height());
++    FloatSize size = image->logicalSize();
++    size.scale(m_scale.width(), m_scale.height());
++    rect.move(-inset);
++    rect.setSize(size);
++    return rect;
++}
++#endif
++
+ void RenderViewTransitionCapture::paintReplaced(PaintInfo& paintInfo, const LayoutPoint& paintOffset)
+ {
+     auto& context = paintInfo.context();
+@@ -107,7 +155,13 @@ void RenderViewTransitionCapture::paintReplaced(PaintInfo& paintInfo, const Layo
+ 
+     // dstRect: where to draw on screen.
+     // srcRect: which portion of the snapshot to draw (defaults to the full image).
++#if PLATFORM(HAIKU)
++    // The whole image where it belongs, not squeezed into the overflow rect
++    // (half a CSS pixel narrower at 2x: a 200 px box came out 199, #195).
++    FloatRect dstRect = snapshotImageRectHaiku();
++#else
+     FloatRect dstRect = m_localOverflowRect;
++#endif
+     FloatRect srcRect = FloatRect { { }, FloatSize(oldImage->logicalSize()) };
+ 
+     if (viewBox) {
+@@ -159,10 +213,14 @@ void RenderViewTransitionCapture::updateFromStyle()
      // effectiveOverflowX/Y checks paintContainmentApplies(), which requires element() != null and
      // therefore always returns false for pseudo-elements. Check usedContain() directly so that
      // contain: paint on ::view-transition-old/new correctly triggers overflow clipping.
@@ -86609,10 +86712,10 @@ index c035714ac1ddea20f9ad5a61f12bf601a87c15ca..e74fe469cdb114ef08d60adcb533fa1a
  
  void RenderViewTransitionCapture::styleDidChange(Style::Difference diff, const Style::ComputedStyle* oldStyle)
 diff --git a/Source/WebCore/rendering/RenderViewTransitionCapture.h b/Source/WebCore/rendering/RenderViewTransitionCapture.h
-index d17ab1befcb9f1ca511c15904a588f864906d28e..246eeb3a4d62cca04eddcccc141d685e684eed9c 100644
+index d17ab1befcb9f1ca511c15904a588f864906d28e..980c3baa180d3b9f9ef766d91185a187ccd5b9d0 100644
 --- a/Source/WebCore/rendering/RenderViewTransitionCapture.h
 +++ b/Source/WebCore/rendering/RenderViewTransitionCapture.h
-@@ -63,6 +63,14 @@ public:
+@@ -63,6 +63,19 @@ public:
  
      bool isRootElementCapture() const { return m_isRootElementCapture; }
  
@@ -86622,12 +86725,17 @@ index d17ab1befcb9f1ca511c15904a588f864906d28e..246eeb3a4d62cca04eddcccc141d685e
 +    // (RenderLayerCompositor::clipsCompositingDescendants), instead of a new
 +    // snapshot each frame.
 +    bool hostsClippedRootLayersHaiku() const { return m_hostsClippedRootLayersHaiku; }
++    // Where the whole old snapshot image goes, in the coordinates of
++    // captureLocalOverflowRect(): the image is the overflow rect's enclosing
++    // CSS-pixel rect, wider than the overflow rect when that is enclosed to
++    // half pixels at 2x (#195).
++    FloatRect snapshotImageRectHaiku() const;
 +#endif
 +
      RefPtr<ImageBuffer> image();
  
  private:
-@@ -88,6 +96,9 @@ private:
+@@ -88,6 +101,9 @@ private:
      // Scale factor between the intrinsic size and the replaced content rect size.
      FloatSize m_scale;
      bool m_isRootElementCapture;
@@ -86637,6 +86745,25 @@ index d17ab1befcb9f1ca511c15904a588f864906d28e..246eeb3a4d62cca04eddcccc141d685e
  };
  
  } // namespace WebCore
+diff --git a/Source/WebCore/rendering/TextBoxPainter.cpp b/Source/WebCore/rendering/TextBoxPainter.cpp
+index 646d58b5af8331ab3b7eedba6ab713a536467c16..691b277b5732479f3a5a02472d0101758e02a020 100644
+--- a/Source/WebCore/rendering/TextBoxPainter.cpp
++++ b/Source/WebCore/rendering/TextBoxPainter.cpp
+@@ -657,6 +657,14 @@ void TextBoxPainter::paintBackgroundFillForRange(unsigned startOffset, unsigned
+         // FIXME: We should reconsider re-measuring the content when non-whitespace runs are joined together (see webkit.org/b/251318).
+         auto unAdjustedSelectionRectMaxX = LayoutUnit { m_paintRect.x() + m_logicalRect.width() };
+         auto visualRight = std::max(selectionRect.maxX(), unAdjustedSelectionRectMaxX);
++#if PLATFORM(HAIKU)
++        // Measuring rounds the run's width up to a LayoutUnit while the box's
++        // edge rounds down: within that noise (two LayoutUnits) a background
++        // over the whole text box ends where the box does, as a span's
++        // background would, instead of a device pixel past it at 2x (#189).
++        if (visualRight - unAdjustedSelectionRectMaxX <= LayoutUnit::fromRawValue(2))
++            visualRight = unAdjustedSelectionRectMaxX;
++#endif
+         selectionRect.shiftMaxXEdgeTo(visualRight);
+     }
+ 
 diff --git a/Source/WebCore/rendering/adwaita/RenderThemeAdwaita.cpp b/Source/WebCore/rendering/adwaita/RenderThemeAdwaita.cpp
 index a6fb2e3ceb842891f2529697f12dd0d6780f3bdb..f98847b989dfac85057c8d7edf5b4ec2a3cf6ef6 100644
 --- a/Source/WebCore/rendering/adwaita/RenderThemeAdwaita.cpp
@@ -145816,10 +145943,10 @@ index 0000000000000000000000000000000000000000..8cfbb2ef9ab1590473ee5af50c1bd2eb
 +#endif // USE(COORDINATED_GRAPHICS)
 diff --git a/Source/WebKit/UIProcess/haiku/AutomationClientHaiku.cpp b/Source/WebKit/UIProcess/haiku/AutomationClientHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..23549671bb87b2af4f1bb468da22f6196dcf8dc6
+index 0000000000000000000000000000000000000000..9160a8717135ec9a603f12cf8d5c2e5adda40f19
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/AutomationClientHaiku.cpp
-@@ -0,0 +1,253 @@
+@@ -0,0 +1,272 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#include "config.h"
@@ -145943,14 +146070,33 @@ index 0000000000000000000000000000000000000000..23549671bb87b2af4f1bb468da22f619
 +        setWindowState(page, "maximized", WTF::move(completionHandler));
 +    }
 +
++    // Minimize and restore answer once the page has seen its visibility
++    // change (at most a second later), as other drivers' do: a test that
++    // restores the window and then checks document.hidden saw it still
++    // hidden (transition-in-hidden-page, #183).
 +    void requestHideWindowOfPage(WebAutomationSession&, WebPageProxy& page, CompletionHandler<void()>&& completionHandler) override
 +    {
-+        setWindowState(page, "minimized", WTF::move(completionHandler));
++        setWindowState(page, "minimized", [page = WeakPtr { page }, completionHandler = WTF::move(completionHandler)]() mutable {
++            answerWhenVisibilityIs(WTF::move(page), false, 100, WTF::move(completionHandler));
++        });
 +    }
 +
 +    void requestRestoreWindowOfPage(WebAutomationSession&, WebPageProxy& page, CompletionHandler<void()>&& completionHandler) override
 +    {
-+        setWindowState(page, "normal", WTF::move(completionHandler));
++        setWindowState(page, "normal", [page = WeakPtr { page }, completionHandler = WTF::move(completionHandler)]() mutable {
++            answerWhenVisibilityIs(WTF::move(page), true, 100, WTF::move(completionHandler));
++        });
++    }
++
++    static void answerWhenVisibilityIs(WeakPtr<WebPageProxy> page, bool visible, unsigned attempts, CompletionHandler<void()>&& completionHandler)
++    {
++        if (!page || page->isClosed() || page->isViewVisible() == visible || !attempts) {
++            completionHandler();
++            return;
++        }
++        RunLoop::mainSingleton().dispatchAfter(10_ms, [page = WTF::move(page), visible, attempts, completionHandler = WTF::move(completionHandler)]() mutable {
++            answerWhenVisibilityIs(WTF::move(page), visible, attempts - 1, WTF::move(completionHandler));
++        });
 +    }
 +
 +    BrowsingContextPresentation currentPresentationOfPage(WebAutomationSession&, WebPageProxy& page) override
@@ -154444,10 +154590,10 @@ index 0000000000000000000000000000000000000000..c9a119d02f85b7c5ad8fe9153bfc9604
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/WebView.cpp b/Source/WebKit/UIProcess/haiku/WebView.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..60f3f82cac98299d461ec97217008ef78621a96f
+index 0000000000000000000000000000000000000000..c6141afb236c8b0b6b5be77830a52216b019e992
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/WebView.cpp
-@@ -0,0 +1,3729 @@
+@@ -0,0 +1,3748 @@
 +/*
 + * Copyright (C) 2013 Intel Corporation. All rights reserved.
 + *
@@ -155802,6 +155948,25 @@ index 0000000000000000000000000000000000000000..60f3f82cac98299d461ec97217008ef7
 +    URL m_pageURL;
 +};
 +
++// Moves and resizes the view's window to frame (the UI client's
++// windowFrame(): the window's Frame(), a pixel wider and taller since BRects
++// are inclusive). The new frame is answered at once; the window follows.
++static void setWindowFrameOfViewHaiku(const std::shared_ptr<WebViewStateHaiku>& state, const FloatRect& frame)
++{
++    auto rect = roundedIntRect(frame);
++    if (!state || state->closed || rect.width() < 1 || rect.height() < 1)
++        return;
++    BMessenger view;
++    {
++        std::lock_guard guard(state->mutex);
++        state->geometry.windowFrame = rect;
++        view = state->view;
++    }
++    BMessage message(viewSetWindowFrameHaiku);
++    message.AddRect("frame", BRect(rect.x(), rect.y(), rect.maxX() - 1, rect.maxY() - 1));
++    view.SendMessage(&message, static_cast<BHandler*>(nullptr), 0);
++}
++
 +class JavaScriptUIClientHaiku final : public API::UIClient {
 +    WTF_MAKE_TZONE_ALLOCATED_INLINE(JavaScriptUIClientHaiku);
 +public:
@@ -155886,6 +156051,20 @@ index 0000000000000000000000000000000000000000..60f3f82cac98299d461ec97217008ef7
 +            frame = state->geometry.windowFrame;
 +        }
 +        completion(FloatRect(frame));
++    }
++
++    // window.resizeTo() and friends move only a pop-up window's (#183), as
++    // in other browsers: never a tab's window. The first request is WebCore
++    // applying the window features at creation, which the host already did
++    // with the new page's window.
++    void setWindowFrame(WebPageProxy&, const FloatRect& frame) override
++    {
++        auto state = m_state.lock();
++        if (!state || state->closed || !state->scriptSizedWindow)
++            return;
++        if (!std::exchange(state->windowFeaturesApplied, true))
++            return;
++        setWindowFrameOfViewHaiku(state, frame);
 +    }
 +
 +    void createNewPage(WebPageProxy& page, Ref<API::PageConfiguration>&& configuration, Ref<API::NavigationAction>&& action, CompletionHandler<void(RefPtr<WebPageProxy>&&)>&& completion) override
@@ -156372,31 +156551,15 @@ index 0000000000000000000000000000000000000000..60f3f82cac98299d461ec97217008ef7
 +    }
 +}
 +
-+// WebDriver's Set Window Rect (#187), from WebAutomationSession only: a
-+// page's own requests (window.resizeTo(), a new window's rect from
-+// createWindow) keep their frame in the web process, as before. The frame is
-+// the one the UI client's windowFrame() answers (the window's Frame(), a
-+// pixel wider and taller since BRects are inclusive). It is answered at once;
-+// the window follows.
++// WebDriver's Set Window Rect (#187), from WebAutomationSession: any of the
++// session's windows. A page's own requests go through the UI client's
++// setWindowFrame, which moves only pop-up windows.
 +void setAutomationWindowFrameHaiku(WebPageProxy& page, const FloatRect& frame)
 +{
 +    ASSERT(RunLoop::isMain());
-+    auto rect = roundedIntRect(frame);
-+    if (rect.width() < 1 || rect.height() < 1)
-+        return;
 +    for (auto* view : liveWebViewsHaiku()) {
-+        if (view->page() != &page)
-+            continue;
-+        auto& state = view->stateHaiku();
-+        if (state->closed)
-+            continue;
-+        {
-+            std::lock_guard guard(state->mutex);
-+            state->geometry.windowFrame = rect;
-+        }
-+        BMessage message(viewSetWindowFrameHaiku);
-+        message.AddRect("frame", BRect(rect.x(), rect.y(), rect.maxX() - 1, rect.maxY() - 1));
-+        view->nativeView().SendMessage(&message, static_cast<BHandler*>(nullptr), 0);
++        if (view->page() == &page)
++            setWindowFrameOfViewHaiku(view->stateHaiku(), frame);
 +    }
 +}
 +
@@ -156685,6 +156848,8 @@ index 0000000000000000000000000000000000000000..60f3f82cac98299d461ec97217008ef7
 +        configuration->preferences().setCompositingRepaintCountersVisible(true);
 +    }
 +    auto& pool = configuration->processPool();
++    const auto& features = configuration->windowFeatures();
++    m_state->scriptSizedWindow = features && features->wantsPopup();
 +    m_page = pool.createWebPage(*this, configuration.releaseNonNull());
 +    // A WebDriver session's pop-up (createNewPage): automated from the start.
 +    if (m_page->isControlledByAutomation()) {
@@ -159163,10 +159328,10 @@ index 0000000000000000000000000000000000000000..430fec59d4c15986eb59b0843accbaac
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/WebViewStateHaiku.h b/Source/WebKit/UIProcess/haiku/WebViewStateHaiku.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..2401b519f23a4e001635f91e081e9a00bf213119
+index 0000000000000000000000000000000000000000..8b087d1bbd5595517788e23c09fdf78088a1a703
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/WebViewStateHaiku.h
-@@ -0,0 +1,274 @@
+@@ -0,0 +1,279 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#pragma once
@@ -159268,6 +159433,11 @@ index 0000000000000000000000000000000000000000..2401b519f23a4e001635f91e081e9a00
 +    // The page is driven by WebDriver: its frames are not put straight into
 +    // the screen, so the view keeps the last one for screenshots (#186).
 +    std::atomic<bool> automated { false };
++    // Opened by window.open() as a pop-up window (size features): its page
++    // may move and resize its window (resizeTo() and friends), once WebCore
++    // has applied the features at creation (#183). Main thread.
++    bool scriptSizedWindow { false };
++    bool windowFeaturesApplied { false };
 +    // WebKit main thread: whether the view was visible at the last geometry
 +    // update, and a count that cancels a pending hidden-frame release
 +    // (WebView::updateGeometry).
