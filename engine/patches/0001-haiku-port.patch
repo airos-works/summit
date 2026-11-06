@@ -506,6 +506,71 @@ index 3523abbd5568813fb7319e8d23dfdd2d8830856b..5dec8f7945b7ae700cf2d647cf8b6928
  
      static void* nullBasePointer();
  
+diff --git a/Source/JavaScriptCore/runtime/CachedTypes.cpp b/Source/JavaScriptCore/runtime/CachedTypes.cpp
+index 4568d4def1a18aa09d89e0aaec72a60e41567adc..8dfb5b54bbdba5d6961ab927831ac50fd9b32623 100644
+--- a/Source/JavaScriptCore/runtime/CachedTypes.cpp
++++ b/Source/JavaScriptCore/runtime/CachedTypes.cpp
+@@ -44,6 +44,7 @@
+ #include "UnlinkedModuleProgramCodeBlock.h"
+ #include "UnlinkedProgramCodeBlock.h"
+ #include "VariableEnvironmentInlines.h"
++#include <map>
+ #include <wtf/FileHandle.h>
+ #include <wtf/InlineMap.h>
+ #include <wtf/MallocSpan.h>
+@@ -127,12 +128,30 @@ public:
+     ptrdiff_t offsetOf(const void* address)
+     {
+         ptrdiff_t offset;
++#if OS(HAIKU)
++        // The encoder asks for the offset of nearly every pointer it writes,
++        // and a page is pageSize() long: searching every page from the first
++        // made encoding a big script's bytecode quadratic (GitHub's: 60 % of
++        // the main thread while the page loaded, Summit's bytecode cache).
++        // Most addresses are in the page being filled; the others are found
++        // by address.
++        if (m_currentPage && m_currentPage->getOffset(address, offset))
++            return m_baseOffset + offset;
++        auto* addr = static_cast<const uint8_t*>(address);
++        auto it = m_pageByStartHaiku.upper_bound(addr);
++        if (it != m_pageByStartHaiku.begin()) {
++            --it;
++            if (m_pages[it->second].getOffset(address, offset))
++                return m_pageBaseOffsetsHaiku[it->second] + offset;
++        }
++#else
+         ptrdiff_t baseOffset = 0;
+         for (const auto& page : m_pages) {
+             if (page.getOffset(address, offset))
+                 return baseOffset + offset;
+             baseOffset += page.size();
+         }
++#endif
+         RELEASE_ASSERT_NOT_REACHED();
+         return 0;
+     }
+@@ -273,6 +292,10 @@ private:
+             size = roundUpToMultipleOf(minPageSize, size);
+         m_pages.append(Page { size });
+         m_currentPage = &m_pages.last();
++#if OS(HAIKU)
++        m_pageBaseOffsetsHaiku.append(m_baseOffset);
++        m_pageByStartHaiku.emplace(m_currentPage->buffer(), m_pages.size() - 1);
++#endif
+     }
+ 
+     VM& m_vm;
+@@ -280,6 +303,10 @@ private:
+     ptrdiff_t m_baseOffset;
+     Page* m_currentPage;
+     Vector<Page> m_pages;
++#if OS(HAIKU)
++    Vector<ptrdiff_t> m_pageBaseOffsetsHaiku;
++    std::map<const uint8_t*, size_t> m_pageByStartHaiku;
++#endif
+     UncheckedKeyHashMap<const void*, ptrdiff_t> m_ptrToOffsetMap;
+     LeafExecutableMap m_leafExecutables;
+ };
 diff --git a/Source/JavaScriptCore/runtime/Exception.cpp b/Source/JavaScriptCore/runtime/Exception.cpp
 index dcb5b60fde3d0c9fa524712c5b6b3e68ccc8064a..260e6c459b7fe0a5ddbf289b27fdf3fc8241b296 100644
 --- a/Source/JavaScriptCore/runtime/Exception.cpp
