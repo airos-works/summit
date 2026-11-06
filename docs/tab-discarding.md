@@ -30,15 +30,29 @@ engine's tab registry (`BrowserTabRegistryHaiku::setDiscarded`), which
 `TabsDiscardHaiku`, forwarded as a `B_WEBKIT_BROWSER_DISCARD_TAB` browser
 command answered with the new view.
 
-- **By itself when memory is low:** every 30 s each window checks what the
-  RAM has left (free pages and the file cache: `max_pages - used_pages`);
-  below a tenth of the total (and at least 512 MiB) it unloads its
-  background tab unseen the longest, if that has been at least five minutes
-  (one minute below half the limit), one tab a check while memory stays low,
-  and says so in the status line. Until #163 this read
-  `system_info.free_memory`, which counts the swap file, so with swap on it
-  never fired while the RAM filled. `SUMMIT_UNLOAD_BELOW_MIB` and `SUMMIT_UNLOAD_AFTER_S` change
-  the limit and the five minutes; 0 for either turns it off.
+- **By itself when memory is low:** every 5 s (30 s until 6 November)
+  each window checks what the RAM has left (free pages and the file cache:
+  `max_pages - used_pages`); below a tenth of the total (and at least 512
+  MiB) it unloads its background tab unseen the longest, if that has been
+  at least five minutes, one tab a check while memory stays low, and says
+  so in the status line. Until #163 this read `system_info.free_memory`,
+  which counts the swap file, so with swap on it never fired while the RAM
+  filled. `SUMMIT_UNLOAD_BELOW_MIB` and `SUMMIT_UNLOAD_AFTER_S` change the
+  limit and the five minutes; 0 for either turns it off.
+
+- **Before memory runs out:** below half that limit (about 780 MiB on a
+  16 GB machine) the longest-unseen background tabs go however
+  recently they were looked at, as long as each has been behind for 10 s
+  (`SUMMIT_UNLOAD_CRITICAL_AFTER_S`), until their processes' memory covers
+  what is missing to the limit, at most four a check and then none for
+  10 s while those processes end. Haiku has no out-of-memory killer: on
+  6 November the 16 GB laptop froze (it still answered ping,
+  but nothing in user land replied) with ten tabs (six of manage.auth0.com at about
+  490 MiB of process and 150-250 MiB of GPU memory each, AWS, Proton Mail,
+  Confluence) and a few application pages more opened at once. All of
+  them had been looked at in the last minutes, so the five-minute (then
+  one-minute) rule unloaded nothing, and the 30 s check came too late
+  anyway: six new tabs of a heavy site took 4 GB in under 10 s.
 
 - **By itself when memory is getting tight (#172):** below a quarter of
   the RAM left, a background tab unseen for 30 minutes whose web process has
@@ -74,3 +88,14 @@ Unloading by itself was checked on the X399 (24 Oct, au116 build) with
 `SUMMIT_UNLOAD_BELOW_MIB=10000000 SUMMIT_UNLOAD_AFTER_S=20`: three
 background tabs were unloaded within 95 s, one a check, the shown tab kept
 its page and the unloaded ones their titles.
+
+The step before memory runs out was checked on the laptop (6 November,
+Summit 98f7978 + this change on engine git20261105.1055) with
+`SUMMIT_UNLOAD_BELOW_MIB=12000`, so that it acts below 6,000 MiB left: the
+owner's ten tabs selected one after the other, 10 s apart. After the
+fourth and again after the sixth was selected, the machine went below
+6,000 MiB left between two samples and four background tabs were unloaded
+each time (the shown one stayed); no 10 s sample saw less than 6,241 MiB
+left, and the unloaded tabs loaded again when selected. A first build with
+no pause between checks unloaded seven tabs in two checks 5 s apart, as the
+first four processes had not ended yet.

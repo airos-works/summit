@@ -790,7 +790,10 @@ BrowserWindow::BrowserWindow(std::shared_ptr<SharedProfile> profile, std::string
     ReportBookmarkChanges();
     {
         BMessage check(kCheckMemory);
-        fMemoryCheck = std::make_unique<BMessageRunner>(BMessenger(this), &check, 30000000);
+        // Every 5 s: on the 16 GB laptop six new tabs of a heavy site took
+        // 4 GB in under 10 s, and a check every 30 s came after the machine
+        // had run out (6 November). A check is one get_system_info().
+        fMemoryCheck = std::make_unique<BMessageRunner>(BMessenger(this), &check, 5000000);
     }
 #endif
     std::tie(fBookmarksBarVisible, fInterfaceStyle) = fShared->Read([](const Profile& profile) {
@@ -1763,7 +1766,8 @@ void BrowserWindow::UnloadTabsIfMemoryIsLow()
     // Low: less than a tenth of the memory, and at least 512 MiB, is left.
     // SUMMIT_UNLOAD_BELOW_MIB and SUMMIT_UNLOAD_AFTER_S change the limit and
     // how long a tab must have been behind (default five minutes); 0 for
-    // either turns this off. Below half the limit, a minute behind will do.
+    // either turns this off. Below half the limit the machine is seconds from
+    // running out: see UnloadTabsBeforeMemoryRunsOut().
     auto setting = [](const char* name, int64 fallback) {
         const char* value = std::getenv(name);
         return value && *value ? std::strtoll(value, nullptr, 10) : fallback;
@@ -1777,13 +1781,20 @@ void BrowserWindow::UnloadTabsIfMemoryIsLow()
     // limit while the RAM filled and the machine paged.
     const int64 available = static_cast<int64>(info.max_pages - std::min(info.used_pages, info.max_pages)) * B_PAGE_SIZE;
     const int64 below = setting("SUMMIT_UNLOAD_BELOW_MIB", std::max<int64>(512, total / 10 / (1024 * 1024))) * 1024 * 1024;
-    int64 after = setting("SUMMIT_UNLOAD_AFTER_S", 300) * 1000000;
+    const int64 after = setting("SUMMIT_UNLOAD_AFTER_S", 300) * 1000000;
     if (below <= 0 || after <= 0) return;
     if (available >= below) {
-        UnloadBloatedTabsIfMemoryIsTight(available, total, setting);
+        // This one reads every candidate process's areas: every 30 s will do.
+        if (system_time() - fLastBloatedTabCheck >= 30000000) {
+            fLastBloatedTabCheck = system_time();
+            UnloadBloatedTabsIfMemoryIsTight(available, total, setting);
+        }
         return;
     }
-    if (available < below / 2) after = std::min<int64>(after, 60 * 1000000);
+    if (available < below / 2) {
+        UnloadTabsBeforeMemoryRunsOut(below - available, setting);
+        return;
+    }
     // One tab a check, the longest unseen first, as long as memory stays low.
     std::vector<Tab*> candidates;
     for (auto& tab : fTabs)
@@ -1842,6 +1853,51 @@ void BrowserWindow::UnloadBloatedTabsIfMemoryIsTight(int64 available, int64 tota
             return;
         }
     }
+}
+
+// Less than half the low-memory limit left (about 780 MiB on the 16 GB
+// laptop): Haiku has no out-of-memory killer, and past this point it pages
+// until the whole machine stops answering, as the laptop did on 6 November
+// with ten tabs (six of manage.auth0.com, 490 MiB of process and up to
+// 250 MiB of GPU memory each) and a few more opened at once. Waiting for a
+// tab to be five minutes, or one minute, behind came too late: every tab
+// had been looked at in the last minutes. So the longest unseen background
+// tabs go now, as long as each has been behind for 10 s
+// (SUMMIT_UNLOAD_CRITICAL_AFTER_S; a tab just switched away from, or just
+// opened in the background, stays), until their processes' memory covers
+// what is missing, at most four a check. The next ones go 10 s later at the
+// earliest: a process takes a few seconds to end and give its memory back,
+// and a check 5 s later still saw the memory short and unloaded four more.
+void BrowserWindow::UnloadTabsBeforeMemoryRunsOut(int64 missing, const std::function<int64(const char*, int64)>& setting)
+{
+    if (fLastCriticalUnload && system_time() - fLastCriticalUnload < 10000000) return;
+    const int64 after = std::max<int64>(0, setting("SUMMIT_UNLOAD_CRITICAL_AFTER_S", 10)) * 1000000;
+    std::map<int32, int> tabsPerProcess;
+    for (const auto& tab : fTabs) if (tab.processID > 0) ++tabsPerProcess[tab.processID];
+    std::vector<Tab*> candidates;
+    for (auto& tab : fTabs)
+        if (tab.id != fSelected && tab.deferredURL.empty() && system_time() - tab.lastSelected >= after) candidates.push_back(&tab);
+    std::sort(candidates.begin(), candidates.end(), [](const Tab* a, const Tab* b) { return a->lastSelected < b->lastSelected; });
+    int64 freed = 0;
+    int unloaded = 0;
+    std::string first;
+    for (auto* tab : candidates) {
+        if (unloaded == 4 || freed >= missing) break;
+        const std::string title = tab->title;
+        // Only a process no other tab of this window keeps goes with the tab.
+        const int32 process = tab->processID;
+        const int64 size = process > 0 && tabsPerProcess[process] == 1 ? WebProcessResidentBytes(process) : 0;
+        if (!DiscardTab(tab->id).empty()) continue;
+        if (process > 0) --tabsPerProcess[process];
+        freed += size;
+        if (!unloaded++) first = title;
+    }
+    if (unloaded) fLastCriticalUnload = system_time();
+    if (unloaded == 1)
+        fStatus->SetText(("Memory is almost gone: unloaded “" + first + "”; it loads again when you select it.").c_str());
+    else if (unloaded > 1)
+        fStatus->SetText(("Memory is almost gone: unloaded “" + first + "” and " + std::to_string(unloaded - 1)
+            + " more tab" + (unloaded > 2 ? "s" : "") + "; they load again when you select them.").c_str());
 }
 
 void BrowserWindow::ReplaceTabView(const Tab& tab, const std::string& url)

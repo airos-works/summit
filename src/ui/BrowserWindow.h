@@ -595,6 +595,8 @@ private:
     // Unloads the longest-unseen background tab when the system is short of memory.
     void UnloadTabsIfMemoryIsLow();
     void UnloadBloatedTabsIfMemoryIsTight(int64 available, int64 total, const std::function<int64(const char*, int64)>& setting);
+    void UnloadTabsBeforeMemoryRunsOut(int64 missing, const std::function<int64(const char*, int64)>& setting);
+    bigtime_t fLastBloatedTabCheck = 0, fLastCriticalUnload = 0;
 #endif
     void Navigate(const std::string& text);
     void RunBookmarklet(const std::string& url);
