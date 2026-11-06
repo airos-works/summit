@@ -20,6 +20,7 @@ set(required
     ENABLE_REMOTE_INSPECTOR     # Developer Tools and the MCP page tools
     ENABLE_RESOURCE_USAGE       # Inspector CPU and memory timelines
     USE_AVIF                    # AVIF images (libavif with dav1d, issue #115)
+    USE_JPEGXL                  # JPEG XL images (libjxl with highway, issue #154)
     ENABLE_ENCRYPTED_MEDIA      # Clear Key EME (issue #115; was off by accident since 5 Oct)
     ENABLE_GAMEPAD              # navigator.getGamepads (issue #142)
     ENABLE_POINTER_LOCK         # Element.requestPointerLock (issue #143)
