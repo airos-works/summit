@@ -1181,7 +1181,17 @@ BrowserWindow::BrowserWindow(std::shared_ptr<SharedProfile> profile, std::string
 #endif
     // Pop-ups as small as pages make them (sign-in and share dialogs), web
     // apps as their pages need (#95); the rest room for the whole toolbar.
-    if (fPopup) SetSizeLimits(200, 10000, 150, 10000);
+    // A pop-up's menu bar, toolbar and status line are clipped rather than
+    // keeping it wider: their items alone need about 335 pixels (the status
+    // line 288 while a page loads), and a page that asks for a 200-pixel
+    // window (window.open features, resizeTo) has to get it (#183: a pop-up
+    // resized to 200 pixels while its next page loads waits for outerWidth
+    // to follow).
+    if (fPopup) {
+        for (BView* view : std::initializer_list<BView*>{menu, fToolbar, statusLine})
+            view->SetExplicitMinSize(BSize(0, B_SIZE_UNSET));
+        SetSizeLimits(200, 10000, 150, 10000);
+    }
     else if (!fWebApp.empty()) SetSizeLimits(320, 10000, 240, 10000);
     else SetSizeLimits(760, 10000, 450, 10000);
 #if SUMMIT_MODERN_WEBKIT
