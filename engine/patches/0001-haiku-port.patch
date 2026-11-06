@@ -56561,10 +56561,43 @@ index 6600c24f0265dfae370e5c195967424f74f1ceae..db4ff38f7f75579460ddde62c84ed8bf
      const RefPtr<WorkQueue> m_uploadWorkQueue;
      unsigned m_cachedImageFingerprint { 0 };
 diff --git a/Source/WebCore/platform/graphics/skia/SkiaSystemFallbackFontCache.cpp b/Source/WebCore/platform/graphics/skia/SkiaSystemFallbackFontCache.cpp
-index 224f9c34c485e2b28bde8d457d9ef1938e6f1669..564a4102447fd6248eec3c40b428588e6affc9b1 100644
+index 224f9c34c485e2b28bde8d457d9ef1938e6f1669..9c91aede57afccf6efb0cdd54471af94c46d17a2 100644
 --- a/Source/WebCore/platform/graphics/skia/SkiaSystemFallbackFontCache.cpp
 +++ b/Source/WebCore/platform/graphics/skia/SkiaSystemFallbackFontCache.cpp
-@@ -69,21 +69,23 @@ public:
+@@ -31,8 +31,11 @@
+ #include <fontconfig/fontconfig.h>
+ #include <wtf/FileSystem.h>
+ #include <wtf/HashTraits.h>
++#include <wtf/Lock.h>
++#include <wtf/NeverDestroyed.h>
+ #include <wtf/Hasher.h>
+ #include <wtf/text/CharacterProperties.h>
++#include <wtf/text/MakeString.h>
+ 
+ namespace WebCore {
+ 
+@@ -49,6 +52,20 @@ static String filePathFromPattern(FcPattern* pattern)
+     return FileSystem::pathByAppendingComponent(String::fromUTF8(sysroot), String::fromUTF8(reinterpret_cast<const char*>(filename)));
+ }
+ 
++#if PLATFORM(HAIKU)
++// Whether a font file fontconfig lists is there, asked once per file: a set
++// of fallback fonts is made for every locale a page uses, and Wikipedia's
++// links to its other languages (about 200 lang attributes) checked every
++// system font file again for each, 11 % of the main thread while it loaded.
++static bool fontFileExistsHaiku(const String& path)
++{
++    static Lock lock;
++    static NeverDestroyed<HashMap<String, bool>> known;
++    Locker locker { lock };
++    return known->ensure(path, [&] { return FileSystem::fileExists(path); }).iterator->value;
++}
++#endif
++
+ class FontSetCache {
+     WTF_DEPRECATED_MAKE_FAST_ALLOCATED(FontSetCache);
+     WTF_MAKE_NONCOPYABLE(FontSetCache);
+@@ -69,21 +86,23 @@ public:
      }
  
      struct Font {
@@ -56591,7 +56624,19 @@ index 224f9c34c485e2b28bde8d457d9ef1938e6f1669..564a4102447fd6248eec3c40b428588e
      }
  
  private:
-@@ -137,7 +139,11 @@ private:
+@@ -130,14 +149,23 @@ private:
+                     continue;
+ 
+                 auto filepath = filePathFromPattern(pattern);
++#if PLATFORM(HAIKU)
++                if (filepath.isEmpty() || !fontFileExistsHaiku(filepath))
++                    continue;
++#else
+                 if (filepath.isEmpty() || !FileSystem::fileExists(filepath))
+                     continue;
++#endif
+ 
+                 int ttcIndex;
                  if (FcPatternGetInteger(pattern, FC_INDEX, 0, &ttcIndex) != FcResultMatch)
                      ttcIndex = 0;
  
@@ -56604,7 +56649,7 @@ index 224f9c34c485e2b28bde8d457d9ef1938e6f1669..564a4102447fd6248eec3c40b428588e
              }
          }
  
-@@ -146,7 +152,7 @@ private:
+@@ -146,7 +174,7 @@ private:
              FcFontSetDestroy(m_fontSet);
          }
  
@@ -56613,7 +56658,7 @@ index 224f9c34c485e2b28bde8d457d9ef1938e6f1669..564a4102447fd6248eec3c40b428588e
          {
              if (m_fallbackList.isEmpty())
                  return nullptr;
-@@ -155,6 +161,16 @@ private:
+@@ -155,6 +183,16 @@ private:
              int minScore = std::numeric_limits<int>::max();
              for (const auto& font : m_fallbackList) {
                  int score = FcCharSetSubtractCount(charSet, font.charSet);
@@ -56630,8 +56675,30 @@ index 224f9c34c485e2b28bde8d457d9ef1938e6f1669..564a4102447fd6248eec3c40b428588e
                  if (!score) {
                      bestFont = &font;
                      break;
-@@ -185,7 +201,15 @@ sk_sp<SkTypeface> SkiaSystemFallbackFontCache::fontForCharacterCluster(const Str
+@@ -183,9 +221,37 @@ SkiaSystemFallbackFontCache::~SkiaSystemFallbackFontCache() = default;
+ 
+ sk_sp<SkTypeface> SkiaSystemFallbackFontCache::fontForCharacterCluster(const String& locale, StringView stringView)
  {
++#if PLATFORM(HAIKU)
++    static const bool clusterCache = !getenv("SUMMIT_FALLBACK_CLUSTER_CACHE") || strcmp(getenv("SUMMIT_FALLBACK_CLUSTER_CACHE"), "0");
++    String clusterKey;
++    if (clusterCache) {
++        clusterKey = makeString(locale.isNull() ? emptyString() : locale, '\x1f', stringView);
++        if (auto it = m_clusterCacheHaiku.find(clusterKey); it != m_clusterCacheHaiku.end())
++            return it->value;
++        // Pages with many scripts stay well below this; a runaway one does
++        // not grow it for ever.
++        if (m_clusterCacheHaiku.size() >= 8192)
++            m_clusterCacheHaiku.clear();
++    }
++    auto remember = [&](sk_sp<SkTypeface> typeface) {
++        if (clusterCache)
++            m_clusterCacheHaiku.set(clusterKey, typeface);
++        return typeface;
++    };
++#else
++    auto remember = [](sk_sp<SkTypeface> typeface) { return typeface; };
++#endif
      FcCharSet* charSet = FcCharSetCreate();
      bool hasNonIgnorableCharacters = false;
 +    // Emoji presentation (the emoji locale, U+FE0F, or a character shown as
@@ -56646,7 +56713,16 @@ index 224f9c34c485e2b28bde8d457d9ef1938e6f1669..564a4102447fd6248eec3c40b428588e
          if (!isDefaultIgnorableCodePoint(character)) {
              FcCharSetAddChar(charSet, character);
              hasNonIgnorableCharacters = true;
-@@ -204,10 +228,14 @@ sk_sp<SkTypeface> SkiaSystemFallbackFontCache::fontForCharacterCluster(const Str
+@@ -194,7 +260,7 @@ sk_sp<SkTypeface> SkiaSystemFallbackFontCache::fontForCharacterCluster(const Str
+ 
+     if (!hasNonIgnorableCharacters) {
+         FcCharSetDestroy(charSet);
+-        return nullptr;
++        return remember(nullptr);
+     }
+ 
+     auto& fontSetCache = m_cache.ensure(locale.isNull() ? emptyString() : locale, [&] {
+@@ -204,20 +270,27 @@ sk_sp<SkTypeface> SkiaSystemFallbackFontCache::fontForCharacterCluster(const Str
      if (!fontSetCache)
          return nullptr;
  
@@ -56654,14 +56730,48 @@ index 224f9c34c485e2b28bde8d457d9ef1938e6f1669..564a4102447fd6248eec3c40b428588e
 +    const auto* font = fontSetCache->fontForCharacterCluster(charSet, preferColor && !requireText);
      FcCharSetDestroy(charSet);
      if (!font)
-         return nullptr;
+-        return nullptr;
++        return remember(nullptr);
 +#if PLATFORM(HAIKU)
 +    if (getenv("SUMMIT_FALLBACK_TRACE"))
 +        fprintf(stderr, "Summit fonts: fallback for U+%04X (%u code units, %s%s) -> %s #%d\n", unsigned(*stringView.codePoints().begin()), stringView.length(), locale.utf8().legacyCStringPointer(), preferColor && !requireText ? ", color" : "", font->path.utf8().legacyCStringPointer(), font->ttcIndex);
 +#endif
  
-     return m_typefaceCache.ensure({ font->path, font->ttcIndex }, [font] -> sk_sp<SkTypeface> {
+-    return m_typefaceCache.ensure({ font->path, font->ttcIndex }, [font] -> sk_sp<SkTypeface> {
++    return remember(m_typefaceCache.ensure({ font->path, font->ttcIndex }, [font] -> sk_sp<SkTypeface> {
          return FontCache::forCurrentThread().fontManager().makeFromFile(font->path.utf8().legacyCStringPointer(), font->ttcIndex);
+-    }).iterator->value;
++    }).iterator->value);
+ }
+ 
+ void SkiaSystemFallbackFontCache::clear()
+ {
+     m_cache.clear();
+     m_typefaceCache.clear();
++#if PLATFORM(HAIKU)
++    m_clusterCacheHaiku.clear();
++#endif
+ }
+ 
+ } // namepsace WebCore
+diff --git a/Source/WebCore/platform/graphics/skia/SkiaSystemFallbackFontCache.h b/Source/WebCore/platform/graphics/skia/SkiaSystemFallbackFontCache.h
+index 606676840002bacc6453c3148fd9956cab218e6b..0ac538ca1d627484e3296c10f1f4b9a7921a17ab 100644
+--- a/Source/WebCore/platform/graphics/skia/SkiaSystemFallbackFontCache.h
++++ b/Source/WebCore/platform/graphics/skia/SkiaSystemFallbackFontCache.h
+@@ -47,6 +47,13 @@ public:
+ private:
+     HashMap<String, std::unique_ptr<FontSetCache>> m_cache;
+     HashMap<std::pair<String, int>, sk_sp<SkTypeface>> m_typefaceCache;
++#if PLATFORM(HAIKU)
++    // The answer for a cluster in a locale, whatever font asked (null when
++    // no font has it): SystemFallbackFontCache keeps one map per Font, so
++    // every size and weight of a family looked up the same character again,
++    // each time comparing it with the character set of every system font.
++    HashMap<String, sk_sp<SkTypeface>> m_clusterCacheHaiku;
++#endif
+ };
+ 
+ } // namespace WebCore
 diff --git a/Source/WebCore/platform/graphics/texmap/ClipStack.h b/Source/WebCore/platform/graphics/texmap/ClipStack.h
 index 9fd560e16a7e8b8b5cdf0ef54b46ab2dddc32e4f..37b7905e18e26b577ae0ec335352ae63b2423295 100644
 --- a/Source/WebCore/platform/graphics/texmap/ClipStack.h
