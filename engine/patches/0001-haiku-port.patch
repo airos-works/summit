@@ -27736,10 +27736,10 @@ index 2132dee6a2c27be522007bb4df5bc1f5940c1c06..f11f7c790e38d3d0fca5837cf441c436
  #if ENABLE(AX_CUSTOM_COLOR_MODE)
          if (RefPtr page = m_frame->page())
 diff --git a/Source/WebCore/page/LocalFrameViewLayoutContext.cpp b/Source/WebCore/page/LocalFrameViewLayoutContext.cpp
-index db1d2f70cc288d3aeb23ed983ef66d1e40bd7925..2f67a74ae3c418ad0933a09431cb193c4914120f 100644
+index db1d2f70cc288d3aeb23ed983ef66d1e40bd7925..e60f68f36d12d9efe14d20eb3fa7825d56587385 100644
 --- a/Source/WebCore/page/LocalFrameViewLayoutContext.cpp
 +++ b/Source/WebCore/page/LocalFrameViewLayoutContext.cpp
-@@ -61,9 +61,11 @@
+@@ -61,13 +61,24 @@
  #include "Settings.h"
  #include "StyleComputedStyle+GettersInlines.h"
  #include "StyleDocumentScope.h"
@@ -27751,7 +27751,20 @@ index db1d2f70cc288d3aeb23ed983ef66d1e40bd7925..2f67a74ae3c418ad0933a09431cb193c
  #include <wtf/text/TextStream.h>
  
  namespace WebCore {
-@@ -167,16 +169,49 @@ UpdateScrollInfoAfterLayoutTransaction& LocalFrameViewLayoutContext::updateScrol
+ 
++#if PLATFORM(HAIKU)
++// Asked on every repaint: getenv() searches the whole environment.
++static bool fullRepaintTraceLayoutContextHaiku()
++{
++    static const bool enabled = getenv("SUMMIT_FULL_REPAINT_TRACE");
++    return enabled;
++}
++#endif
++
+ WTF_MAKE_TZONE_ALLOCATED_IMPL(LocalFrameViewLayoutContext);
+ 
+ UpdateScrollInfoAfterLayoutTransaction::UpdateScrollInfoAfterLayoutTransaction() = default;
+@@ -167,16 +178,49 @@ UpdateScrollInfoAfterLayoutTransaction& LocalFrameViewLayoutContext::updateScrol
      return *m_updateScrollInfoAfterLayoutTransaction;
  }
  
@@ -27802,7 +27815,7 @@ index db1d2f70cc288d3aeb23ed983ef66d1e40bd7925..2f67a74ae3c418ad0933a09431cb193c
  
      Style::DocumentScope::LayoutDependencyUpdateContext layoutDependencyUpdateContext;
      while (document() && document()->styleScope().invalidateForLayoutDependencies(layoutDependencyUpdateContext)) {
-@@ -186,10 +221,20 @@ void LocalFrameViewLayoutContext::layout(bool canDeferUpdateLayerPositions)
+@@ -186,10 +230,20 @@ void LocalFrameViewLayoutContext::layout(bool canDeferUpdateLayerPositions)
              break;
  
          performLayout(canDeferUpdateLayerPositions);
@@ -27824,7 +27837,7 @@ index db1d2f70cc288d3aeb23ed983ef66d1e40bd7925..2f67a74ae3c418ad0933a09431cb193c
  }
  
  void LocalFrameViewLayoutContext::interleavedLayout()
-@@ -219,6 +264,27 @@ void LocalFrameViewLayoutContext::performLayout(bool canDeferUpdateLayerPosition
+@@ -219,6 +273,27 @@ void LocalFrameViewLayoutContext::performLayout(bool canDeferUpdateLayerPosition
          return;
      }
  
@@ -27852,7 +27865,7 @@ index db1d2f70cc288d3aeb23ed983ef66d1e40bd7925..2f67a74ae3c418ad0933a09431cb193c
      LayoutFrameScope layoutFrameScope(*this);
      TraceScope tracingScope(PerformLayoutStart, PerformLayoutEnd);
      ScriptDisallowedScope::InMainThread scriptDisallowedScope;
-@@ -262,6 +328,9 @@ void LocalFrameViewLayoutContext::performLayout(bool canDeferUpdateLayerPosition
+@@ -262,6 +337,9 @@ void LocalFrameViewLayoutContext::performLayout(bool canDeferUpdateLayerPosition
          protect(view())->willDoLayout(layoutRoot);
          m_firstLayout = false;
      }
@@ -27862,7 +27875,7 @@ index db1d2f70cc288d3aeb23ed983ef66d1e40bd7925..2f67a74ae3c418ad0933a09431cb193c
  
      Vector<FloatQuad> layoutAreas;
      {
-@@ -272,8 +341,18 @@ void LocalFrameViewLayoutContext::performLayout(bool canDeferUpdateLayerPosition
+@@ -272,8 +350,18 @@ void LocalFrameViewLayoutContext::performLayout(bool canDeferUpdateLayerPosition
          RenderView::RepaintRegionAccumulator repaintRegionAccumulator(renderView());
  #ifndef NDEBUG
          RenderTreeNeedsLayoutChecker checker(*renderView());
@@ -27881,7 +27894,7 @@ index db1d2f70cc288d3aeb23ed983ef66d1e40bd7925..2f67a74ae3c418ad0933a09431cb193c
          {
              CheckedPtr renderView = this->renderView();
              auto state = renderView ? renderView->textAutosizingState() : RenderView::TextAutosizingState::Normal;
-@@ -311,6 +390,9 @@ void LocalFrameViewLayoutContext::performLayout(bool canDeferUpdateLayerPosition
+@@ -311,6 +399,9 @@ void LocalFrameViewLayoutContext::performLayout(bool canDeferUpdateLayerPosition
              showRenderTree(renderView());
  #endif
      }
@@ -27891,7 +27904,7 @@ index db1d2f70cc288d3aeb23ed983ef66d1e40bd7925..2f67a74ae3c418ad0933a09431cb193c
      {
          SetForScope layoutPhase(m_layoutPhase, LayoutPhase::InViewSizeAdjust);
          ScriptDisallowedScope::InMainThread scriptDisallowedScope;
-@@ -324,16 +406,45 @@ void LocalFrameViewLayoutContext::performLayout(bool canDeferUpdateLayerPosition
+@@ -324,16 +415,45 @@ void LocalFrameViewLayoutContext::performLayout(bool canDeferUpdateLayerPosition
                  return;
          }
      }
@@ -27903,7 +27916,7 @@ index db1d2f70cc288d3aeb23ed983ef66d1e40bd7925..2f67a74ae3c418ad0933a09431cb193c
      {
          SetForScope layoutPhase(m_layoutPhase, LayoutPhase::InPostLayout);
 +#if PLATFORM(HAIKU)
-+        if (m_needsFullRepaint && getenv("SUMMIT_FULL_REPAINT_TRACE"))
++        if (m_needsFullRepaint && fullRepaintTraceLayoutContextHaiku())
 +            fprintf(stderr, "Summit full repaint: the layout asked for one\n");
 +#endif
          if (m_needsFullRepaint)
@@ -94003,10 +94016,10 @@ index 820170c9ccbad7e487a557bcd6549aaeaeb0d9b0..9ca651ae05bd9dc1fe0b62827e652bb9
  }
  
 diff --git a/Source/WebCore/rendering/RenderBox.cpp b/Source/WebCore/rendering/RenderBox.cpp
-index b69c7bf9751cc17db10467583c079ebdedd9f1ae..e8b28714b57ba9e95fa5129153aea82800262c92 100644
+index b69c7bf9751cc17db10467583c079ebdedd9f1ae..e85d7df59745b36ff2cad87e71e6fade62e82a9c 100644
 --- a/Source/WebCore/rendering/RenderBox.cpp
 +++ b/Source/WebCore/rendering/RenderBox.cpp
-@@ -132,6 +132,15 @@
+@@ -132,6 +132,24 @@
  #include <WebKitAdditions/RenderBoxAdditions.cpp>
  #endif
  
@@ -94014,6 +94027,15 @@ index b69c7bf9751cc17db10467583c079ebdedd9f1ae..e8b28714b57ba9e95fa5129153aea828
 +#include <wtf/text/StringBuilder.h>
 +
 +namespace WebCore {
++
++#if PLATFORM(HAIKU)
++// Asked on every repaint: getenv() searches the whole environment.
++static bool fullRepaintTraceRenderBoxHaiku()
++{
++    static const bool enabled = getenv("SUMMIT_FULL_REPAINT_TRACE");
++    return enabled;
++}
++#endif
 +// Layout reuse for flex and grid items lives in RenderBlock.cpp.
 +void summitSetNeedsLayoutByContainer(RenderBox&);
 +}
@@ -94022,7 +94044,7 @@ index b69c7bf9751cc17db10467583c079ebdedd9f1ae..e8b28714b57ba9e95fa5129153aea828
  namespace WebCore {
  
  WTF_MAKE_TZONE_ALLOCATED_IMPL(RenderBox);
-@@ -296,6 +305,127 @@ void RenderBox::removeFloatingOrOutOfFlowChildFromBlockLists()
+@@ -296,6 +314,127 @@ void RenderBox::removeFloatingOrOutOfFlowChildFromBlockLists()
      ASSERT_NOT_REACHED();
  }
  
@@ -94150,7 +94172,7 @@ index b69c7bf9751cc17db10467583c079ebdedd9f1ae..e8b28714b57ba9e95fa5129153aea828
  void RenderBox::styleWillChange(Style::Difference diff, const Style::ComputedStyle& newStyle)
  {
      s_hadNonVisibleOverflow = hasNonVisibleOverflow();
-@@ -304,7 +434,18 @@ void RenderBox::styleWillChange(Style::Difference diff, const Style::ComputedSty
+@@ -304,7 +443,18 @@ void RenderBox::styleWillChange(Style::Difference diff, const Style::ComputedSty
      if (oldStyle) {
          // The background of the root element or the body element could propagate up to
          // the canvas. Issue full repaint, when our style changes substantially.
@@ -94158,7 +94180,7 @@ index b69c7bf9751cc17db10467583c079ebdedd9f1ae..e8b28714b57ba9e95fa5129153aea828
 +        bool repaintsRoot = diff >= Style::DifferenceResult::Repaint && (isDocumentElementRenderer() || isBody());
 +        if (repaintsRoot) {
 +            bool mayChange = rootStyleRepaintsAllHaiku() || summitRootBackgroundMayChangeHaiku(diff, *oldStyle, newStyle);
-+            if (getenv("SUMMIT_FULL_REPAINT_TRACE"))
++            if (fullRepaintTraceRenderBoxHaiku())
 +                traceRootStyleChangeHaiku(*this, diff, *oldStyle, newStyle, mayChange);
 +            repaintsRoot = mayChange;
 +        }
@@ -94169,7 +94191,7 @@ index b69c7bf9751cc17db10467583c079ebdedd9f1ae..e8b28714b57ba9e95fa5129153aea828
              view().repaintRootContents();
              if (Style::hasEntirelyFixedBackground(oldStyle->backgroundLayers()) != Style::hasEntirelyFixedBackground(newStyle.backgroundLayers()))
                  view().compositor().rootLayerConfigurationChanged();
-@@ -3559,7 +3700,11 @@ LayoutUnit RenderBox::computeIntrinsicLogicalHeight()
+@@ -3559,7 +3709,11 @@ LayoutUnit RenderBox::computeIntrinsicLogicalHeight()
      // height. A descendant that does not resolve against this box's logical height is unaffected and need not lay out again.
      layoutIfNeeded();
      auto blockSize = logicalHeight();
@@ -94242,7 +94264,7 @@ index 71b979677ed9ea5b375f374fdb66f824f3074ba6..6e12a53e3b504aac91236cc6cf058ae0
  
      // Choose a decodingMode such that the image does not flicker.
 diff --git a/Source/WebCore/rendering/RenderElement.cpp b/Source/WebCore/rendering/RenderElement.cpp
-index c30408dbc98900cac30cc19b6a52ac5e1b698120..607ec6ccfe6b9cd342fe437f95e25ebc90b22217 100644
+index c30408dbc98900cac30cc19b6a52ac5e1b698120..99122be590285832d919a055302fa42508139e13 100644
 --- a/Source/WebCore/rendering/RenderElement.cpp
 +++ b/Source/WebCore/rendering/RenderElement.cpp
 @@ -43,6 +43,9 @@
@@ -94271,7 +94293,23 @@ index c30408dbc98900cac30cc19b6a52ac5e1b698120..607ec6ccfe6b9cd342fe437f95e25ebc
  
  #if ENABLE(CONTENT_CHANGE_OBSERVER)
  #include "ContentChangeObserver.h"
-@@ -612,6 +620,180 @@ static void logStyleDifference(const RenderElement& renderer, const Style::Compu
+@@ -124,6 +132,15 @@
+ 
+ namespace WebCore {
+ 
++#if PLATFORM(HAIKU)
++// Asked on every repaint: getenv() searches the whole environment.
++static bool fullRepaintTraceRenderElementHaiku()
++{
++    static const bool enabled = getenv("SUMMIT_FULL_REPAINT_TRACE");
++    return enabled;
++}
++#endif
++
+ WTF_MAKE_TZONE_ALLOCATED_IMPL(RenderElement);
+ 
+ struct SameSizeAsRenderElement : public RenderObject {
+@@ -612,6 +629,180 @@ static void logStyleDifference(const RenderElement& renderer, const Style::Compu
  }
  #endif
  
@@ -94303,7 +94341,7 @@ index c30408dbc98900cac30cc19b6a52ac5e1b698120..607ec6ccfe6b9cd342fe437f95e25ebc
 +    auto styleWithOldColorScheme = Style::ComputedStyle::clone(newStyle);
 +    styleWithOldColorScheme.setColorScheme(Style::ColorScheme { oldStyle.colorScheme() });
 +    auto adjusted = Style::difference(oldStyle, styleWithOldColorScheme);
-+    if ((renderer.isDocumentElementRenderer() || renderer.isBody()) && getenv("SUMMIT_FULL_REPAINT_TRACE"))
++    if ((renderer.isDocumentElementRenderer() || renderer.isBody()) && fullRepaintTraceRenderElementHaiku())
 +        fprintf(stderr, "Summit root style: %s color-scheme change, same appearance: difference %u -> %u\n", renderer.isBody() ? "body" : "html",
 +            static_cast<unsigned>(diff.result), static_cast<unsigned>(adjusted.result));
 +    return adjusted;
@@ -94452,7 +94490,7 @@ index c30408dbc98900cac30cc19b6a52ac5e1b698120..607ec6ccfe6b9cd342fe437f95e25ebc
  void RenderElement::setStyle(Style::ComputedStyle&& style, Style::DifferenceResult minimalStyleDifference)
  {
      // FIXME: Should change RenderView so it can use initializeStyle too.
-@@ -622,6 +804,9 @@ void RenderElement::setStyle(Style::ComputedStyle&& style, Style::DifferenceResu
+@@ -622,6 +813,9 @@ void RenderElement::setStyle(Style::ComputedStyle&& style, Style::DifferenceResu
      auto diff = Style::Difference { };
      if (m_hasInitializedStyle) {
          diff = Style::difference(m_style, style);
@@ -94462,7 +94500,7 @@ index c30408dbc98900cac30cc19b6a52ac5e1b698120..607ec6ccfe6b9cd342fe437f95e25ebc
  #if !LOG_DISABLED
          logStyleDifference(*this, m_style, style, diff);
  #endif
-@@ -632,7 +817,20 @@ void RenderElement::setStyle(Style::ComputedStyle&& style, Style::DifferenceResu
+@@ -632,7 +826,20 @@ void RenderElement::setStyle(Style::ComputedStyle&& style, Style::DifferenceResu
  
      Style::loadPendingResources(style, protect(document()), protect(element()).get());
  
@@ -94472,7 +94510,7 @@ index c30408dbc98900cac30cc19b6a52ac5e1b698120..607ec6ccfe6b9cd342fe437f95e25ebc
 +    if ((isDocumentElementRenderer() || isBody()) && m_hasInitializedStyle && diff >= Style::DifferenceResult::LayoutOutOfFlowMovementOnly) {
 +        auto repaintsOwnReason = rootRendererLayoutRepaintsOwnHaiku(*this, diff, m_style, style);
 +        noteRootLayoutWithoutOwnRepaintHaiku(*this, repaintsOwnReason.isNull());
-+        if (getenv("SUMMIT_FULL_REPAINT_TRACE"))
++        if (fullRepaintTraceRenderElementHaiku())
 +            fprintf(stderr, "Summit root style: %s layout %s%s\n", isBody() ? "body" : "html", repaintsOwnReason.isNull() ? "compares bounds only" : "repaints all it holds: ",
 +                repaintsOwnReason.isNull() ? "" : repaintsOwnReason.characters());
 +    }
@@ -94483,7 +94521,7 @@ index c30408dbc98900cac30cc19b6a52ac5e1b698120..607ec6ccfe6b9cd342fe437f95e25ebc
      styleWillChange(diff, style);
      auto oldStyle = m_style.replace(WTF::move(style));
      bool detachedFromParent = !parent();
-@@ -659,7 +857,20 @@ void RenderElement::setStyle(Style::ComputedStyle&& style, Style::DifferenceResu
+@@ -659,7 +866,20 @@ void RenderElement::setStyle(Style::ComputedStyle&& style, Style::DifferenceResu
      if (diff <= Style::DifferenceResult::LayoutOutOfFlowMovementOnly)
          setNeedsLayoutForStyleDifference(updatedDiff, &oldStyle);
  
@@ -94492,10 +94530,10 @@ index c30408dbc98900cac30cc19b6a52ac5e1b698120..607ec6ccfe6b9cd342fe437f95e25ebc
 +#if PLATFORM(HAIKU)
 +    if (repaintsNothingOfItsOwn && updatedDiff == diff)
 +        repaintsAfter = false;
-+    if (repaintsNothingOfItsOwn && getenv("SUMMIT_FULL_REPAINT_TRACE"))
++    if (repaintsNothingOfItsOwn && fullRepaintTraceRenderElementHaiku())
 +        fprintf(stderr, "Summit root style: %s repaints nothing of its own\n", isBody() ? "body" : "html");
 +    // SUMMIT_FULL_REPAINT_TRACE=1: how much of the page <html> or <body> repaints for its own style change.
-+    if ((didRepaint || repaintsAfter) && (isDocumentElementRenderer() || isBody()) && getenv("SUMMIT_FULL_REPAINT_TRACE")) {
++    if ((didRepaint || repaintsAfter) && (isDocumentElementRenderer() || isBody()) && fullRepaintTraceRenderElementHaiku()) {
 +        auto rect = clippedOverflowRectForRepaint(containerForRepaint().renderer.get());
 +        fprintf(stderr, "Summit root style: %s repaints itself %s, %.0fx%.0f\n", isBody() ? "body" : "html", didRepaint ? "before" : "after",
 +            rect.width().toFloat(), rect.height().toFloat());
@@ -94505,21 +94543,21 @@ index c30408dbc98900cac30cc19b6a52ac5e1b698120..607ec6ccfe6b9cd342fe437f95e25ebc
          // Do a repaint with the new style now, e.g., for example if we go from
          // not having an outline to having an outline.
          repaint();
-@@ -1547,6 +1758,13 @@ bool RenderElement::repaintAfterLayoutIfNeeded(SingleThreadWeakPtr<const RenderL
+@@ -1547,6 +1767,13 @@ bool RenderElement::repaintAfterLayoutIfNeeded(SingleThreadWeakPtr<const RenderL
      if (view().printing())
          return false; // Don't repaint if we're printing.
  
 +#if PLATFORM(HAIKU)
 +    if (requiresFullRepaint == RequiresFullRepaint::Yes && (isDocumentElementRenderer() || isBody()) && summitRootLayoutComparesBoundsOnlyHaiku(*this)) {
 +        requiresFullRepaint = RequiresFullRepaint::No;
-+        if (getenv("SUMMIT_FULL_REPAINT_TRACE"))
++        if (fullRepaintTraceRenderElementHaiku())
 +            fprintf(stderr, "Summit root style: %s compares bounds after layout\n", isBody() ? "body" : "html");
 +    }
 +#endif
      auto oldClippedOverflowRect = oldRects.clippedOverflowRect;
      auto newClippedOverflowRect = newRects.clippedOverflowRect;
      bool haveOutlinesBoundsRects = oldRects.outlineBoundsRect && newRects.outlineBoundsRect;
-@@ -1585,30 +1803,60 @@ bool RenderElement::repaintAfterLayoutIfNeeded(SingleThreadWeakPtr<const RenderL
+@@ -1585,30 +1812,60 @@ bool RenderElement::repaintAfterLayoutIfNeeded(SingleThreadWeakPtr<const RenderL
          return false;
      };
  
@@ -94571,7 +94609,7 @@ index c30408dbc98900cac30cc19b6a52ac5e1b698120..607ec6ccfe6b9cd342fe437f95e25ebc
 +#undef SUMMIT_REPAINT_REASON
 +#if PLATFORM(HAIKU)
 +    // SUMMIT_FULL_REPAINT_TRACE=1: a renderer of a megapixel and more that is painted again whole.
-+    if (fullRepaint && getenv("SUMMIT_FULL_REPAINT_TRACE")) {
++    if (fullRepaint && fullRepaintTraceRenderElementHaiku()) {
 +        auto larger = unionRect(oldClippedOverflowRect, newClippedOverflowRect);
 +        if (larger.width().toFloat() * larger.height().toFloat() >= 1e6f) {
 +            auto name = renderName();
@@ -94585,7 +94623,7 @@ index c30408dbc98900cac30cc19b6a52ac5e1b698120..607ec6ccfe6b9cd342fe437f95e25ebc
  
      if (!repaintContainer)
          repaintContainer = &view();
-@@ -2917,7 +3165,21 @@ void RenderElement::layoutIfNeeded()
+@@ -2917,7 +3174,21 @@ void RenderElement::layoutIfNeeded()
          clearNeedsLayoutForSkippedContent();
          return;
      }
@@ -94824,7 +94862,7 @@ index 1e30286a668e800d272ca12deeadb625631465ec..0d6a6e3058c34cecaeb18e90134d79da
      bool hitTest(const HitTestRequest&, const HitTestLocation&, HitTestResult&);
  
 diff --git a/Source/WebCore/rendering/RenderLayerBacking.cpp b/Source/WebCore/rendering/RenderLayerBacking.cpp
-index 95122a10cacc10b498c40d3447599bd2cd4d2795..707bcce8d8ad1ca8819f2cd9c5007694562810ad 100644
+index 95122a10cacc10b498c40d3447599bd2cd4d2795..73157e160f6799e243fadb62c992ebd45d306602 100644
 --- a/Source/WebCore/rendering/RenderLayerBacking.cpp
 +++ b/Source/WebCore/rendering/RenderLayerBacking.cpp
 @@ -137,6 +137,15 @@
@@ -94843,7 +94881,23 @@ index 95122a10cacc10b498c40d3447599bd2cd4d2795..707bcce8d8ad1ca8819f2cd9c5007694
  #if USE(SYSTEM_PREVIEW) && ENABLE(MODEL_PROCESS) && ENABLE(INTERACTION_REGIONS_IN_EVENT_REGION)
  #include "ARKitBadgeSystemImage.h"
  #endif
-@@ -910,8 +919,76 @@ void RenderLayerBacking::updateChildrenTransformAndAnchorPoint(const LayoutRect&
+@@ -151,6 +160,15 @@
+ 
+ namespace WebCore {
+ 
++#if PLATFORM(HAIKU)
++// Asked on every repaint: getenv() searches the whole environment.
++static bool fullRepaintTraceRenderLayerBackingHaiku()
++{
++    static const bool enabled = getenv("SUMMIT_FULL_REPAINT_TRACE");
++    return enabled;
++}
++#endif
++
+ WTF_MAKE_TZONE_ALLOCATED_IMPL(RenderLayerBacking);
+ 
+ using namespace HTMLNames;
+@@ -910,8 +928,76 @@ void RenderLayerBacking::updateChildrenTransformAndAnchorPoint(const LayoutRect&
      removeChildrenTransformFromLayers(layerForPerspective);
  }
  
@@ -94920,18 +94974,18 @@ index 95122a10cacc10b498c40d3447599bd2cd4d2795..707bcce8d8ad1ca8819f2cd9c5007694
      m_canCompositeFilters = !style.filter().hasReferenceFilter() && m_graphicsLayer->setFilters(Style::toPlatform(style.filter(), style));
  }
  
-@@ -1218,6 +1295,10 @@ void RenderLayerBacking::updateAfterLayout(bool needsClippingUpdate, bool needsF
+@@ -1218,6 +1304,10 @@ void RenderLayerBacking::updateAfterLayout(bool needsClippingUpdate, bool needsF
          m_owningLayer.setNeedsCompositingGeometryUpdate();
      }
      
 +#if PLATFORM(HAIKU)
-+    if (needsFullRepaint && canIssueSetNeedsDisplay() && getenv("SUMMIT_FULL_REPAINT_TRACE"))
++    if (needsFullRepaint && canIssueSetNeedsDisplay() && fullRepaintTraceRenderLayerBackingHaiku())
 +        fprintf(stderr, "Summit full repaint: RenderLayerBacking::updateAfterLayout of %s\n", m_owningLayer.name().utf8().data() ? reinterpret_cast<const char*>(m_owningLayer.name().utf8().data()) : "");
 +#endif
      if (needsFullRepaint && canIssueSetNeedsDisplay())
          setContentsNeedDisplay();
  }
-@@ -1581,6 +1662,44 @@ private:
+@@ -1581,6 +1671,44 @@ private:
  LayoutRect RenderLayerBacking::computePrimaryGraphicsLayerRect(const RenderLayer* compositedAncestor, const LayoutRect& parentGraphicsLayerRect) const
  {
      ComputedOffsets compositedBoundsOffset(m_owningLayer, compositedAncestor, compositedBounds(), parentGraphicsLayerRect, { });
@@ -94976,7 +95030,7 @@ index 95122a10cacc10b498c40d3447599bd2cd4d2795..707bcce8d8ad1ca8819f2cd9c5007694
      return LayoutRect(encloseRectToDevicePixels(LayoutRect(toLayoutPoint(compositedBoundsOffset.fromParentGraphicsLayer()), compositedBounds().size()),
          pixelSnappingScaleFactor()));
  }
-@@ -1678,6 +1797,22 @@ void RenderLayerBacking::updateGeometry(const RenderLayer* compositedAncestor)
+@@ -1678,6 +1806,22 @@ void RenderLayerBacking::updateGeometry(const RenderLayer* compositedAncestor)
      updateBackdropRoot();
      updateBlendMode(style);
      updateContentsScalingFilters(style);
@@ -94999,14 +95053,14 @@ index 95122a10cacc10b498c40d3447599bd2cd4d2795..707bcce8d8ad1ca8819f2cd9c5007694
  
  #if ENABLE(VIDEO)
      updateVideoGravity(style);
-@@ -1935,8 +2070,18 @@ void RenderLayerBacking::updateGeometry(const RenderLayer* compositedAncestor)
+@@ -1935,8 +2079,18 @@ void RenderLayerBacking::updateGeometry(const RenderLayer* compositedAncestor)
  
      positionOverflowControlsLayers();
  
 -    if (subpixelOffsetFromRendererChanged(oldSubpixelOffsetFromRenderer, m_subpixelOffsetFromRenderer, pixelSnappingScaleFactor) && canIssueSetNeedsDisplay())
 +    if (subpixelOffsetFromRendererChanged(oldSubpixelOffsetFromRenderer, m_subpixelOffsetFromRenderer, pixelSnappingScaleFactor) && canIssueSetNeedsDisplay()) {
 +#if PLATFORM(HAIKU)
-+        if (getenv("SUMMIT_FULL_REPAINT_TRACE")) {
++        if (fullRepaintTraceRenderLayerBackingHaiku()) {
 +            auto name = m_owningLayer.name().utf8();
 +            fprintf(stderr, "Summit full repaint: subpixel offset of %s changed from %.4f,%.4f to %.4f,%.4f (layer %.0fx%.0f)\n", name.data() ? reinterpret_cast<const char*>(name.data()) : "",
 +                oldSubpixelOffsetFromRenderer.width().toFloat(), oldSubpixelOffsetFromRenderer.height().toFloat(),
@@ -95019,7 +95073,7 @@ index 95122a10cacc10b498c40d3447599bd2cd4d2795..707bcce8d8ad1ca8819f2cd9c5007694
  
  #if ENABLE(MODEL_ELEMENT)
      if (is<RenderModel>(renderer()))
-@@ -3543,6 +3688,56 @@ void RenderLayerBacking::updateDirectlyCompositedBackgroundColor(PaintedContents
+@@ -3543,6 +3697,56 @@ void RenderLayerBacking::updateDirectlyCompositedBackgroundColor(PaintedContents
      didUpdateContentsRect = true;
  }
  
@@ -95076,7 +95130,7 @@ index 95122a10cacc10b498c40d3447599bd2cd4d2795..707bcce8d8ad1ca8819f2cd9c5007694
  // Only bitmap images are directly composited, so the layer shows the image's current frame at its natural size.
  static RefPtr<NativeImage> nativeImageForDirectlyCompositedImage(Image& image)
  {
-@@ -3585,7 +3780,14 @@ void RenderLayerBacking::updateDirectlyCompositedBackgroundImage(PaintedContents
+@@ -3585,7 +3789,14 @@ void RenderLayerBacking::updateDirectlyCompositedBackgroundImage(PaintedContents
      m_graphicsLayer->setContentsTilePhase(geometry.phase);
      m_graphicsLayer->setContentsRect(geometry.destinationRect);
      m_graphicsLayer->setContentsClippingRect(FloatRoundedRect(geometry.destinationRect));
@@ -95092,7 +95146,7 @@ index 95122a10cacc10b498c40d3447599bd2cd4d2795..707bcce8d8ad1ca8819f2cd9c5007694
          m_graphicsLayer->setContentsToNativeImage(nativeImage.get());
  
      didUpdateContentsRect = true;
-@@ -4093,6 +4295,11 @@ void RenderLayerBacking::updateImageContents(PaintedContentsInfo& contentsInfo)
+@@ -4093,6 +4304,11 @@ void RenderLayerBacking::updateImageContents(PaintedContentsInfo& contentsInfo)
          if (!cachedImage->isLoaded())
              return;
  
@@ -95104,7 +95158,7 @@ index 95122a10cacc10b498c40d3447599bd2cd4d2795..707bcce8d8ad1ca8819f2cd9c5007694
          if (RefPtr nativeImage = nativeImageForDirectlyCompositedImage(*image))
              m_graphicsLayer->setContentsToNativeImage(nativeImage.get());
  
-@@ -4133,7 +4340,11 @@ LayoutRect RenderLayerBacking::contentsBox() const
+@@ -4133,7 +4349,11 @@ LayoutRect RenderLayerBacking::contentsBox() const
  #endif
  
      if (CheckedPtr renderViewTransitionCapture = dynamicDowncast<RenderViewTransitionCapture>(*renderBox))

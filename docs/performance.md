@@ -1,5 +1,47 @@
 # Summit performance: Speedometer 3.1 baseline, where the time goes, stress test
 
+## 6-7 November 2026: profile-guided optimization in CI, fallback fonts, tile painters, GPU tiles measured
+
+Measured on the X399 (Threadripper 1950X, GTX 1070 with NVK/Zink, 3840x2160
+at 200 %) right after a power cycle (#197: after many launches its GPU
+allocations fail and Speedometer stalls), Speedometer 3.1 from browserbench.org
+in a fresh Summit and profile per run (`tools/interop2026/sp3.sh`).
+
+**Profile-guided optimization (CI, `engine/pgo.json`).** The engine is
+instrumented with `SUMMIT_PROFILE_GENERATE` (OptionsHaiku.cmake;
+`-fprofile-generate` with `-fprofile-prefix-path`, so each counter file is
+named by its object's path relative to the build directory, all in one
+directory), trained on the X399 (Speedometer twice, 14 sites loaded and
+scrolled; 4,225 files, 15 MB compressed) and published as a release asset.
+airos-ci's `summit/build-engine.sh` builds with `-DSUMMIT_PROFILE_USE`. Same
+engine sources, three runs against two:
+
+| | Speedometer 3.1 |
+| --- | --- |
+| without profile | 8.62 (8.63, 8.60) |
+| with profile | **10.23** (10.2, 10.2, 10.3), +18.7 % |
+
+Functions changed after the training lose their profile and are compiled as
+without one, so the profile is to be retrained now and then (and trained on
+the ROCK 5 for arm64).
+
+**Fallback fonts (0df519e).** A page in many languages made fontconfig
+build a fallback font set per locale, checking every system font file with
+`stat` each time (Wikipedia's 200 language links: 11 % of the main thread).
+Last byte of the HTML to first paint on the Mount Everest article: 860 ->
+627 ms.
+
+**Tile painting threads (fb03de0).** Four instead of two on machines with 16
+or more logical cores. MotionMark 1.3.1: 344 -> 371 (Design and Leaves are
+bound by tile painting on the CPU); Speedometer level.
+
+**GPU tile painting, measured, still off (`SUMMIT_GPU_TILES=1`).** MotionMark
+444 against 397 with CPU tiles (Leaves 244 -> 440, Suits 233 -> 402, Design
+11.8 -> 18.6; Images 110 -> 74). Speedometer within noise. Not yet checked:
+rendering correctness (reftests), memory, the AMD laptop.
+
+Baselines on the ROCK 5: Speedometer 3.1 4.72 (release 20261106).
+
 ## 6 November 2026: rockstargames.com/VI/launch-gallery (fixed layers, blurred placeholders)
 
 Scrolling the GTA VI launch gallery on the laptop (175 %) ran at 3-8 fps for
