@@ -22,8 +22,31 @@ engine sources, three runs against two:
 | with profile | **10.23** (10.2, 10.2, 10.3), +18.7 % |
 
 Functions changed after the training lose their profile and are compiled as
-without one, so the profile is to be retrained now and then (and trained on
-the ROCK 5 for arm64).
+without one, so the profile is to be retrained now and then. The CI build of
+3a09b4f confirmed it: 10.00 (9.93-10.1, nine runs) against 8.59 for the
+release.
+
+**arm64 profile (7 Nov).** Trained the same way on the ROCK 5 ITX (the
+training copy needs the bundled libjxl/libjxl_cms/libhwy/libbrotlienc with an
+`$ORIGIN` RPATH: `~/summit-test/pgo/build-arm64.sh gen|use`, `train.py` with
+`TRAIN_SSH`/`TRAIN_HOST`). Same CI packages, only the engine swapped, runs
+alternated:
+
+| ROCK 5 | Speedometer 3.1 |
+| --- | --- |
+| CI engine (3a09b4f) | 4.83 (4.89, 4.78, 4.82) |
+| with the arm64 profile | **5.89** (5.83, 5.94, 5.89), +22 % |
+
+**ROCK 5 GPU uploads (airos-works/mesa d0db8fe, airos-ci 053cf57).** On the
+ROCK 5 every tile upload (`glTexSubImage2D`) into an AFBC texture took a
+staging buffer, a GPU blit and a flush: about 2,700 tiny batches a second in
+MotionMark's Multiply. They overflowed mali_csf's 64-job queue, and Mesa
+dropped the batches the driver turned away with `B_BUSY`. Mesa now waits for
+room, and textures the CPU keeps writing move from AFBC to u-interleaved
+tiling after four writes. MotionMark 1.3.1: 115-150 -> 255-270 (Multiply 28
+-> 248, Images 14 -> 134); turning AFBC off altogether gave 225 and slower
+canvas tests. Frames there are still read back from the GPU (no direct
+present for Panfrost: airos-works/haiku#71).
 
 **Fallback fonts (0df519e).** A page in many languages made fontconfig
 build a fallback font set per locale, checking every system font file with
